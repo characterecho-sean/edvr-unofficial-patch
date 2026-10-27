@@ -342,16 +342,20 @@ inline void seatedFromBody(const double body[3], double psi, double out[3]) noex
     out[1] = -r[1];
     out[2] = r[2];
 }
-// F74: eye alignment translates the seated origin directly in natural LOCAL, so the camera moves opposite the requested local HMD-right vector.
+// F74: eye alignment translates the seated origin, so the camera moves opposite the requested local HMD-right vector.
 // `rightM` is a signed distance in metres; exact zero writes exact zeros without requiring a valid basis.
-inline bool weaponViewOffsetSeated(double rightM, const double localRight[3], double out[3]) noexcept {
+// F134: the runtime's eye alignment is a SEATED-axes vector (it turns it into LOCAL by the seat's heading before it moves the origin), so the LOCAL translation
+// -rightM * localRight is carried back into the seat's axes by the seat's heading `seatYawRad` (the seat convention, yaw + left: LOCAL = Ry(seatYaw) seated). Before F134
+// this returned the LOCAL vector itself, which the runtime added to the LOCAL position unturned.
+inline bool weaponViewOffsetSeated(double rightM, const double localRight[3], double seatYawRad, double out[3]) noexcept {
     if (!std::isfinite(rightM)) return false;
     if (rightM == 0.0) { out[0] = out[1] = out[2] = 0.0; return true; }
+    if (!std::isfinite(seatYawRad)) return false;
     const double n2 = localRight[0] * localRight[0] + localRight[1] * localRight[1] + localRight[2] * localRight[2];
     if (!(n2 > 1e-12) || !std::isfinite(n2)) return false;
     const double inv = 1.0 / std::sqrt(n2);
-    const double r[3] = {localRight[0] * inv, localRight[1] * inv, localRight[2] * inv};
-    for (int i = 0; i < 3; ++i) out[i] = -rightM * r[i];
+    const double local[3] = {-rightM * localRight[0] * inv, -rightM * localRight[1] * inv, -rightM * localRight[2] * inv};
+    ryApply(-seatYawRad, local, out);
     return true;
 }
 inline bool weaponViewOffsetActive(bool bodyPinScope, bool equipped, double rightM) noexcept {
@@ -2835,13 +2839,15 @@ constexpr double kAdsSightClampM = 0.40;   // F70: was 0.12; the target eye poin
 constexpr double kAdsSightIpdFallbackM = 0.063;   // metres, the left eye to the right when the per-eye offsets are not known
 constexpr double kAdsSightIpdMinM = 0.04, kAdsSightIpdMaxM = 0.09;
 // The IPD from the eyes' head-space x offsets (right less left, as a distance: the model's direction is R^); *measured false on the fallback.
-inline double adsSightIpd(bool haveLeft, double leftEyeX, bool haveRight, double rightEyeX, bool* measured) noexcept {
+// eyeScale is Elite's eye pair against the headset's (world scale, common/world_scale.h worldScaleEyeFactor of the percent the runtime was told; 1 at 100): the
+// offsets are the pair Elite is given, so the 4..9 cm window and the 6.3 cm fallback are those of that pair.
+inline double adsSightIpd(bool haveLeft, double leftEyeX, bool haveRight, double rightEyeX, bool* measured, double eyeScale = 1.0) noexcept {
     double ipd = -1.0;
     if (haveLeft && haveRight && std::isfinite(leftEyeX) && std::isfinite(rightEyeX)) ipd = std::fabs(rightEyeX - leftEyeX);
     else if (haveRight && std::isfinite(rightEyeX)) ipd = 2.0 * std::fabs(rightEyeX);
-    const bool ok = ipd >= kAdsSightIpdMinM && ipd <= kAdsSightIpdMaxM;
+    const bool ok = ipd >= kAdsSightIpdMinM * eyeScale && ipd <= kAdsSightIpdMaxM * eyeScale;
     if (measured) *measured = ok;
-    return ok ? ipd : kAdsSightIpdFallbackM;
+    return ok ? ipd : kAdsSightIpdFallbackM * eyeScale;
 }
 // Where the model put the right eye: the job camera (the left eye) or the solved left eye (its rows this frame's, the right's not), each plus the IPD along R^.
 enum AdsModelSource : uint8_t { kAdsModelFromCamera = 0, kAdsModelFromLeftEye = 1, kAdsModelSources = 2 };
@@ -4951,6 +4957,10 @@ inline bool aimTrigger(double rateDps, bool armed) noexcept { return armed && st
 // was the previous frame's: the hands solved exactly onto a grip off the drawn weapon by body speed x one frame (4.4 cm at 4 m/s, 90 Hz), switching
 // frame to frame between 0 and 1 frame: the arm stutter. The fix: each call takes the game-frame index (a call of a kind already seen this frame
 // opens the next frame) and G is built by whichever of the two comes second in a frame, from the two halves of the SAME index, once.
+// F132 (the Frontier SRV flight edvr_gfx_20261027_064839 from 07:03:13, after a new avatar was created, and flight 182525 on rc.1-27): on() assumes the calls come in
+// a fixed order and never re-synchronises. Started on an FP call while the game's order is 3P then FP, it paired FP(n) with 3P(n+1), about 11 ms apart, so take()
+// refused every frame for good (6927 of 7351 frames), G froze for up to 1 s and the arm IK pulled the hands onto a stale grip. Now a pair refused as far apart
+// re-seeds the phase: the refused call (the second of the pair) becomes the FIRST call of a new frame, and the next call of the other kind pairs with it.
 constexpr double kP1PairMaxGapMs = 10.0;   // a pair whose two calls are further apart than this is not one frame's (an index shifted by a missing call)
 struct P1FramePairing {
     uint32_t frame = 1;                       // the current game frame's index
@@ -4960,6 +4970,13 @@ struct P1FramePairing {
     uint32_t pairedFrame = 0;                 // the last frame G was built for
     // Counters for the second's line (the caller reads and clears them).
     uint64_t frames = 0, pairs = 0, noPair = 0, tpFirst = 0, fpFirst = 0, farApart = 0;
+    // F132: pairs refused as far apart that re-seeded the phase, the gap of the refused pairs (ms), and which call was first in them.
+    uint64_t reseeds = 0, farFpFirst = 0, farTpFirst = 0;
+    double farGapMinMs = 0.0, farGapMaxMs = 0.0, farGapSumMs = 0.0;
+    void clearSecond() noexcept {
+        frames = pairs = noPair = tpFirst = fpFirst = farApart = reseeds = farFpFirst = farTpFirst = 0;
+        farGapMinMs = farGapMaxMs = farGapSumMs = 0.0;
+    }
     // A call of `kind` (0 FP, 1 3P): its game-frame index. A kind already seen this frame opens the next frame.
     uint32_t on(int kind) noexcept {
         const int k = kind ? 1 : 0;
@@ -4982,17 +4999,44 @@ struct P1FramePairing {
     }
     // The second caller: may G be built from the FP half (frame fpFrame, QPC fpQpc) and the 3P half (frame tpFrame, QPC tpQpc)? Once per frame, same
     // index, and the two calls near each other (ticks: QPC ticks, freq: per second).
-    bool take(bool fpHave, uint32_t fpFrame, uint64_t fpQpc, bool tpHave, uint32_t tpFrame, uint64_t tpQpc, uint64_t freq) noexcept {
+    // F132: callerKind (0 FP, 1 3P; the default -1 keeps the old rule) is the call that asks, the second call of the pair. When the pair is refused as far apart the
+    // phase is re-seeded: that call becomes the first call of a new frame, whose index is returned in *callerFrame (the caller stores it with its half, so the next call
+    // of the other kind, which gets the same index from on(), finds it).
+    bool take(bool fpHave, uint32_t fpFrame, uint64_t fpQpc, bool tpHave, uint32_t tpFrame, uint64_t tpQpc, uint64_t freq, int callerKind = -1,
+              uint32_t* callerFrame = nullptr) noexcept {
         if (!fpHave || !tpHave || fpFrame != tpFrame || fpFrame == pairedFrame) return false;
         const uint64_t gap = fpQpc > tpQpc ? fpQpc - tpQpc : tpQpc - fpQpc;
-        if (freq > 0 && static_cast<double>(gap) * 1000.0 / static_cast<double>(freq) > kP1PairMaxGapMs) {
+        const double gapMs = freq > 0 ? static_cast<double>(gap) * 1000.0 / static_cast<double>(freq) : 0.0;
+        if (freq > 0 && gapMs > kP1PairMaxGapMs) {
             ++farApart;
+            if (farApart == 1 || gapMs < farGapMinMs) farGapMinMs = gapMs;
+            if (gapMs > farGapMaxMs) farGapMaxMs = gapMs;
+            farGapSumMs += gapMs;
+            if (firstKind == 0) ++farFpFirst;
+            else if (firstKind == 1) ++farTpFirst;
+            if (callerKind == 0 || callerKind == 1) {
+                const uint32_t f = reseed(callerKind);
+                if (callerFrame) *callerFrame = f;
+            }
             return false;
         }
         pairedFrame = fpFrame;
         published = true;
         ++pairs;
         return true;
+    }
+    // F132: the refused call of `kind` opens the next frame as its first call: the other kind's next call is its second.
+    uint32_t reseed(int kind) noexcept {
+        const int k = kind ? 1 : 0;
+        if (!published) ++noPair;   // the refused frame never built G
+        ++reseeds;
+        ++frame;
+        ++frames;
+        seen[0] = seen[1] = false;
+        seen[k] = true;
+        firstKind = k;
+        published = false;
+        return frame;
     }
 };
 

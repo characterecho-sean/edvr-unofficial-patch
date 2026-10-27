@@ -33,6 +33,14 @@
 #include "f101_checks.h"    // F101: the frame ABI against the released one (v0.21.1)
 #include "f107_checks.h"    // F107: the game's camera away from the commander (a terminal's or a screen's own camera)
 #include "f109_checks.h"    // F109: look to aim on foot, the exact split (the player's own turn in ADS), snap or smooth turning
+#include "f129_checks.h"    // F129: look to aim reads its turn from the player's own look processor (the call classes, the gate, the episodes, the zero-sum probes)
+#include "f130_checks.h"    // F130: one disagreeing scene mesh no longer switches the eye rows' sources off (the marks, the source draw, the SRV flight replayed)
+#include "f131_checks.h"    // F131: look to aim holds while a panel or a menu is open, and while the game runs no look
+#include "f132_checks.h"    // F132: the G frame pairing re-seeds its phase after a far-apart refusal (either true order, a missing call, a real gap)
+#include "f133_checks.h"    // F133: head steps judged by rate (a stall is not a recentre); the follower re-centres on a standing yaw offset
+#include "f135_checks.h"    // F135: the on-foot menu probe's pure parts (counters, the distinct objects of a second, the edges, the key edges, the line gate)
+#include "f137_checks.h"    // F137: a virtual neck under mouse look (the offset, the seated vector, the weight, the pose's history, the head offset it cancels from)
+#include "f138_checks.h"    // F138: the view holds its height over the neck while the look is pitched (the weight, the sink, the reference, the return edge, the reasons, the bins)
 #include "f110_checks.h"    // F110: the ADS sight lock's model right eye (the left-eye job camera plus the IPD)
 #include "f111_checks.h"    // F111: the panel pointer instrument's statistics and verdict
 #include "f113_checks.h"    // F113: each eye's scene rows whenever the world is drawn (the depth prepass and the terrain as sources)
@@ -3183,8 +3191,8 @@ int wmain(int argc, wchar_t** argv) {
                 // F74: LOCAL eye transport, current-view world right, and inverse-AMC model transport are separate bases.
                 const double zeroAxis[3] = {}, localYawRight[3] = {0.0, 0.0, -1.0}, viewRight[3] = {1.0, 0.0, 0.0};
                 double seatZero[3], seatYaw[3], worldRight[3], modelRight[3];
-                const bool zeroOffset = nf::weaponViewOffsetSeated(0.0, zeroAxis, seatZero);
-                const bool seatedYawOk = nf::weaponViewOffsetSeated(0.05, localYawRight, seatYaw);
+                const bool zeroOffset = nf::weaponViewOffsetSeated(0.0, zeroAxis, 0.0, seatZero);
+                const bool seatedYawOk = nf::weaponViewOffsetSeated(0.05, localYawRight, 0.0, seatYaw);   // F134: a seat of heading 0 is the LOCAL vector itself
                 const bool worldRightOk = nf::weaponViewOffsetWorld(0.05, viewRight, worldRight);
                 const float invAmcYaw[16] = {0, 0, 1, 0, 0, 1, 0, 0, -1, 0, 0, 0, 10, -4, 7, 1};
                 nf::ikVectorXform(worldRight, invAmcYaw, modelRight);
@@ -3196,6 +3204,19 @@ int wmain(int argc, wchar_t** argv) {
                                              std::fabs(modelRight[0]) < 1e-12 && std::fabs(modelRight[1]) < 1e-12 && std::fabs(modelRight[2] - 0.05) < 1e-12 &&
                                              std::fabs(targetFromHead[0] - 0.10) < 1e-12 && std::fabs(targetFromHead[2] + 0.15) < 1e-12;
                 check(separateBasisOk, "F74: positive view offset uses LOCAL head-right for eye-origin motion, current stereo scene-right for world shift, and the inverse AMC's linear part for body axes; AMC translation is ignored");
+                {   // F134: the offset is a SEATED vector: the runtime turns it into LOCAL by the seat's heading, so building it from the LOCAL head-right undoes that turn
+                    const double lr[3] = {0.6, 0.0, 0.8}, psi = 0.61;
+                    double seatedAt[3], backLocal[3], atZero[3];
+                    const bool built = nf::weaponViewOffsetSeated(0.05, lr, psi, seatedAt) && nf::weaponViewOffsetSeated(0.05, lr, 0.0, atZero);
+                    nf::ryApply(psi, seatedAt, backLocal);   // the runtime's eyePoll: LOCAL = Ry(seat yaw) . seated
+                    const double wantLocal[3] = {-0.05 * 0.6, 0.0, -0.05 * 0.8};
+                    const bool refusedNaN = !nf::weaponViewOffsetSeated(0.05, lr, std::nan(""), seatedAt);
+                    double zeroAt[3];
+                    check(built && std::fabs(backLocal[0] - wantLocal[0]) < 1e-12 && std::fabs(backLocal[1]) < 1e-12 && std::fabs(backLocal[2] - wantLocal[2]) < 1e-12 &&
+                              std::fabs(nf::ikLen(seatedAt) - 0.05) < 1e-12 && std::fabs(seatedAt[0] - atZero[0]) > 1e-3 && refusedNaN && nf::weaponViewOffsetSeated(0.0, lr, std::nan(""), zeroAt),
+                          "F134: weaponViewOffsetSeated builds a vector in the seat's axes: the runtime's turn by the seat's heading (0.61 rad) returns the LOCAL -right translation "
+                          "exactly, a seat heading of 0 is the old vector, an unknown heading is refused, and no offset needs none");
+                }
                 const double opticP14[3] = {0.20, 0.0, 2.0}, sightForward[3] = {0.0, 0.0, 1.0};
                 const double localRight[3] = {0.6, 0.0, 0.8}, sceneRight[3] = {0.8, 0.2, -0.56};
                 const double yaw = 0.61, cy = std::cos(yaw), sy = std::sin(yaw);
@@ -3212,7 +3233,7 @@ int wmain(int argc, wchar_t** argv) {
                 bool adsActualP14Ok = true, adsBodyBiasOk = true;
                 for (double offsetM : offsetCasesM) {
                     double seatedBias[3], worldBias[3];
-                    adsActualP14Ok = adsActualP14Ok && nf::weaponViewOffsetSeated(offsetM, localRight, seatedBias) &&
+                    adsActualP14Ok = adsActualP14Ok && nf::weaponViewOffsetSeated(offsetM, localRight, 0.0, seatedBias) &&
                                      nf::weaponViewOffsetWorld(offsetM, sceneRight, worldBias);
                     const double biasNorm = nf::ikLen(worldBias);
                     adsActualP14Ok = adsActualP14Ok && std::fabs(biasNorm - std::fabs(offsetM)) < 1e-12 &&
@@ -6256,16 +6277,80 @@ int wmain(int argc, wchar_t** argv) {
         EdvrNativeFrameOutput odd2Out = edvr::nativeFrameAsk(EDVR_NATIVE_FRAME_VERSION_5);
         check(wordsOk && table.beginFrame(table.context, &odd, &oddOut) == E_INVALIDARG && table.beginFrame(table.context, &odd2, &odd2Out) == E_INVALIDARG,
               "F101: F31 to F100's version 1 input (84 bytes, the words alone) is still accepted; a version 1 input of 80 or 96 bytes is refused");
-        // This runtime's every step (10 down to 1, the shapes native_frame.h gives the client) is taken by this provider in the shape asked.
+        // This runtime's every step (11 down to 1, the shapes native_frame.h gives the client) is taken by this provider in the shape asked.
         bool newOk = true;
-        for (uint32_t v = EDVR_NATIVE_FRAME_VERSION_10; v >= EDVR_NATIVE_FRAME_VERSION_1; --v) {
+        for (uint32_t v = EDVR_NATIVE_FRAME_VERSION_11; v >= EDVR_NATIVE_FRAME_VERSION_1; --v) {
             EdvrNativeFrameInput f = input(41, 7, ++seq);
             edvr::nativeFrameInputShape(v, f);
             EdvrNativeFrameOutput o = edvr::nativeFrameAsk(v);
             const EdvrNativeFrameOutput asked = o;
             newOk = newOk && table.beginFrame(table.context, &f, &o) == S_OK && o.version == asked.version && o.size == asked.size;
         }
-        check(newOk, "F101: this runtime's every ladder step (10 to 1) is accepted by this provider and answered in the shape asked");
+        check(newOk, "F101: this runtime's every ladder step (11 to 1) is accepted by this provider and answered in the shape asked");
+    }
+
+    // ---- World scale (visual.world_scale): version 11 ----------------------------------------------------------------------------------------------------------
+    // Version 11 is the version 10 shape (input version 3) and its answer carries worldScalePercent, read from the key and held to 50..200; the version 10 words
+    // ride beside it; a version 10 answer and every older one leave the word alone, and the gates on Elite's eye pair see 100 (nativeFrameWorldScale).
+    {
+        auto& cfg = edvr::Config::get();
+        const auto v3Input = [](uint64_t sequence, float tx) {
+            EdvrNativeFrameInput f = input(41, 7, sequence);
+            f.version = EDVR_NATIVE_FRAME_INPUT_VERSION_3;
+            const float local[12] = {1, 0, 0, tx, 0, 1, 0, 1.6f, 0, 0, 1, -0.2f};
+            std::memcpy(f.localHead, local, sizeof(local));
+            f.localValid = 1;
+            return f;
+        };
+        struct Case { const char* key; uint32_t want; };
+        bool keyed = true;
+        uint64_t seq = 1000;
+        for (const Case& c : {Case{"130", 130u}, Case{"80", 80u}, Case{"100", 100u}, Case{"50", 50u}, Case{"200", 200u}, Case{"10", 50u}, Case{"999", 200u},
+                              Case{"-5", 50u}, Case{"", 100u}, Case{"banana", 100u}}) {
+            cfg.set("visual.world_scale", c.key);
+            EdvrNativeFrameOutput v11{sizeof(v11), EDVR_NATIVE_FRAME_VERSION_11};
+            EdvrNativeFrameInput v11Frame = v3Input(++seq, 0.1f);
+            keyed = keyed && table.beginFrame(table.context, &v11Frame, &v11) == S_OK && v11.version == EDVR_NATIVE_FRAME_VERSION_11 && v11.size == sizeof(v11) &&
+                    v11.worldScalePercent == c.want && edvr::nativeFrameWorldScale() == c.want;
+        }
+        check(keyed, "world scale: a version 11 answer carries the key (130, 80, 100, 50, 200), held to 50..200 (10 reads 50, 999 reads 200) and 100 for an empty or non-number "
+                     "value; nativeFrameWorldScale is what the answer carried");
+        cfg.set("visual.world_scale", "130");
+        EdvrNativeFrameOutput v11{sizeof(v11), EDVR_NATIVE_FRAME_VERSION_11};
+        EdvrNativeFrameInput v11Frame = v3Input(++seq, 0.1f);
+        edvr::nativeFrameSetAdsPitch(0.25f);
+        edvr::nativeFrameSetPositionRecentre(9u);
+        edvr::eyeshare::publish(0.6f, GetTickCount64());
+        const bool beside = table.beginFrame(table.context, &v11Frame, &v11) == S_OK && v11.worldScalePercent == 130u && v11.reservedYaw == 0.25f &&
+                            v11.positionRecentre == 9u && edvr::eyeshare::fromBits(v11.leftEyeShare) == 0.6f;
+        edvr::nativeFrameSetAdsPitch(0.0f);
+        edvr::nativeFrameSetPositionRecentre(0u);
+        edvr::eyeshare::clear();
+        check(beside, "world scale: the version 10 words (the ADS pitch, the position recentre, the left eye share) ride a version 11 answer unchanged beside the percent");
+        EdvrNativeFrameOutput v10Scale{sizeof(v10Scale), EDVR_NATIVE_FRAME_VERSION_10};
+        v10Scale.worldScalePercent = 0xA5A5A5A5u;
+        EdvrNativeFrameInput v10ScaleFrame = v3Input(++seq, 0.1f);
+        const bool v10Leaves = table.beginFrame(table.context, &v10ScaleFrame, &v10Scale) == S_OK && v10Scale.version == EDVR_NATIVE_FRAME_VERSION_10 &&
+                               v10Scale.worldScalePercent == 0u && edvr::nativeFrameWorldScale() == 100u;
+        EdvrNativeFrameOutput v9Scale{sizeof(v9Scale), EDVR_NATIVE_FRAME_VERSION_9};
+        v9Scale.worldScalePercent = 0xA5A5A5A5u;
+        EdvrNativeFrameInput v9ScaleFrame = input(41, 7, ++seq);
+        v9ScaleFrame.version = EDVR_NATIVE_FRAME_INPUT_VERSION_2;
+        v9ScaleFrame.size = EDVR_NATIVE_FRAME_INPUT_SIZE_2;
+        const bool v9Leaves = table.beginFrame(table.context, &v9ScaleFrame, &v9Scale) == S_OK && v9Scale.worldScalePercent == 0u &&
+                              edvr::nativeFrameWorldScale() == 100u;
+        check(v10Leaves && v9Leaves, "world scale: a version 10 or 9 answer leaves the word 0 (it is not the percent there, whatever the caller put in it), and the gates on Elite's eye pair see 100 "
+                                     "while the runtime was not told one");
+        EdvrNativeFrameOutput v11Short{sizeof(v11Short), EDVR_NATIVE_FRAME_VERSION_11};
+        EdvrNativeFrameInput v11OldInput = input(41, 7, ++seq);
+        v11OldInput.version = EDVR_NATIVE_FRAME_INPUT_VERSION_2;
+        v11OldInput.size = EDVR_NATIVE_FRAME_INPUT_SIZE_2;
+        check(table.beginFrame(table.context, &v11OldInput, &v11Short) == E_INVALIDARG,
+              "world scale: a version 11 ask rides input version 3 like a version 10 one: with a version 2 input it is refused, and the runtime steps down");
+        check(sizeof(EdvrNativeFrameOutput) == 184 && offsetof(EdvrNativeFrameOutput, worldScalePercent) == offsetof(EdvrNativeFrameOutput, sceneReady) - 4u &&
+                  offsetof(EdvrNativeFrameOutput, positionRecentre) == offsetof(EdvrNativeFrameOutput, reservedTerrainGuard) - 4u,
+              "world scale: the percent is the last of the retired guard's 21 words (the struct is 184 bytes, as it was)");
+        cfg.set("visual.world_scale", "");
     }
 
     check(table.close(table.context) == S_OK && !edvr::glitchConsumerPresent(),
@@ -7391,6 +7476,29 @@ int wmain(int argc, wchar_t** argv) {
     // F109: look to aim on foot: the exact split (a stick's turn with the head aim writing is the player's), the drop by style, the snap and flick detectors, the
     // snap's fade, the smoothing, the follower against the real map, the per-second check.
     f109test::run109(check);
+    // F129: the processor's calls told apart (path A, B, SKIP by a sentinel in the stored pair; only the player's own component takes the ask; the fallback), the
+    // look path instrument (the ring, the counters, the episodes, the event budget), and the zero-sum probes.
+    f129test::run129(check);
+    // F130: a scene mesh whose rows disagree with a source's is marked (its shaders, cb1 and first constant) and refused, the sources are never latched off, and a source that
+    // draws after a mesh compares and replaces; the SRV flight (every check agreed until one mesh differed by 0.239) replayed.
+    f130test::run130(check);
+    // F131: look to aim holds (no asks, no probes, no snaps) while an on-foot panel is open, a menu or map holds the 2D screen, or the look processor has not run; 200 ms to leave.
+    f131test::run131(check);
+    // F132: G's frame pairing started on the wrong call of the game's order re-seeds after one refusal and pairs from the next frame; a missing call, either order and a
+    // gap that is real on every frame (refused every time, reseeds counted, no runaway).
+    f132test::run132(check);
+    // F133: a 41 deg head step over a 3 s stall is motion and over 11 ms a discontinuity (a 25 deg step over 11 ms too, which the 30 deg size rule took as motion); the
+    // re-centre on a standing yaw offset fires once after 2 s still, not at 2 deg, not while the head turns, not twice within 2 s.
+    f133test::run133(check);
+    // F135 (measure only): the menu probe's counters, objects, 0.5 s edges, key edges and line gate.
+    f135test::run135(check);
+    // F137: the virtual neck d = R(h + a) v - R(h) v (0 at a = 0; +8.9 cm forward and -15.5 cm up at h = 0, a = -60 deg; capped at 25 cm; F138: nose up each turn stops at
+    // 30.14 deg, so +65 deg is -9.0 cm forward and +2.4 cm up), its seated vector, the pin taking the whole vector out of the camera by the pose's serial, the 0.15 s weight
+    // (0 under look to aim, times 1 - the ADS weight), the head offset it cancels from.
+    f137test::run137(check);
+    // F138: the pitched look's weight smoothstep(10, 20 deg), the settle's refusal at 10 deg, G and the clamped sink, the reference and the added target, the return edge,
+    // every refusal's reason, the window's means and 10 deg bins.
+    f138test::run138(check);
     // F110: the ADS sight lock's model right eye from the left-eye job camera and from a solved left eye, the fallback, the IPD's sign.
     f110test::run110(check);
     // F111: the panel pointer instrument names the stage that turns a move the other way (K1 to K5, one at a time), the camera getters' decoding.

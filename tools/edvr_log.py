@@ -278,6 +278,9 @@ present. Then it lists the build-tagged lines, `(F85b)`, `(F87h, TEMPORARY)`, `(
 tags that have no rule (--health-all lists every tag), so a feature added with no rule here still shows. --since and --until (HH:MM[:SS], the log's own clock,
 across midnight when since is after until) cut the log to a window. Exit 0 when no family is NEVER APPLIED or UNPARSED, 3 when one is NEVER APPLIED (a script can
 gate on it), 4 when a rule is UNPARSED and none is NEVER APPLIED, 2 for a wrong --expect-build. The rules are the rows of HEALTH_RULES; a new feature adds a row.
+The one rule that is not read from the graphics log is world scale (visual.world_scale): its lines are the runtime's, so --health also reads the paired runtime log
+(the one --runtime-file names, else the edvr_openxr_*.log that opened nearest) for it, whole: --since and --until do not cut it. It says OK when the runtime latched a
+value and Elite read its eye transform at that value afterwards, NEVER APPLIED when it did not (a change that needs a restart), and nothing at all when the value stayed 100.
 
 Exit 0 when a log was read, 1 when none was found (or --camera-census found no
 census line, or --vscreen-fit no auto-fit line, or --flat-upscale no flat line, or
@@ -10345,11 +10348,16 @@ H_F89_ADS = "ads transition (F89)"
 H_F106 = "ADS sight in both eyes (F106)"
 H_ANCHOR = "prompt anchor (F87p)"
 H_F125 = "log diet (F125)"
+H_WORLD = "world scale"
+H_WORLD_LABEL = "world_scale:"
+# The runtime's two lines (src\common\world_scale.h worldScaleChangeLine, worldScaleReadLine): a latched value with the two eye separations, and Elite's first read at one.
+H_WORLD_CHANGE = r"world_scale: (?P<pct>\d+)% located_icd=(?P<located>[\d.]+)mm elite_icd=(?P<elite>[\d.]+)mm$"
+H_WORLD_READ = r"world_scale: elite read eye transform at (?P<pct>\d+)% \(geometry sequence (?P<seq>\d+)\)$"
 H_F125_LABEL = "native on foot log (F125)"
 H_F125_RE = re.compile(r"native on foot log \(F125\): detail (?P<detail>on|off), summary window (?P<wl>\d+) s")
 # Rules whose absence says nothing about a feature, so a log without their lines does not list them as not present: every log written before F125 has no F125
 # line, and its report stays as it was.
-HEALTH_QUIET_WHEN_ABSENT = frozenset((H_F125,))
+HEALTH_QUIET_WHEN_ABSENT = frozenset((H_F125, H_WORLD))   # world scale writes nothing while the value stays 100
 
 # ---- F125: summary windows (the on-foot log diet) ----
 # By default an on-foot summary line covers a window of 10 s, 1 s with log.on_foot_detail = on, and 1 to 10 s when a window is flushed early (a held-item change,
@@ -10682,8 +10690,20 @@ def _hj_f113_rows(rows, ctx):
     checked = sum(int(r["checked"]) for r in sec)
     diffs = [float(r["diff"]) for r in sec if int(r["checked"])]
     text = "%d s: %s; checked against a scene mesh %d (max diff %.2e)" % (_hsecs(sec), "; ".join(parts), checked, max(diffs) if diffs else 0.0)
+    # F130: a mesh whose rows differ from a source's is marked and refused, a source is never latched off. The marked meshes are reported, not judged.
+    f130 = [r for r in sec if r.get("repl") is not None]
+    marked, full = rows.get("marked", []), rows.get("full", [])
+    if f130 or marked:
+        text += "; F130: mesh rows replaced by a source %d, marked meshes %d (refused draws %d)" % (
+            sum(int(r["repl"]) for r in f130), max([int(r["marked"]) for r in f130] + [len(marked)]), sum(int(r["refused"]) for r in f130))
+        if marked:
+            text += "; marked: " + ", ".join("vs %s ps %s eye %s (diff %s against the %s)" % (r["vs"], r["ps"], r["eye"], r["diff"], r["src"]) for r in marked[:3])
+            if len(marked) > 3:
+                text += " and %d more" % (len(marked) - 3)
+        if full:
+            text += "; the table of 32 marked meshes was full"
     if any(r["lat"] for r in sec):
-        return ("PARTIAL", text + "; LATCHED OFF: a source's rows differed from a scene mesh's")
+        return ("PARTIAL", text + "; LATCHED OFF: a source's rows differed from a scene mesh's (a build before F130)")
     if none_total and not src_total:
         return ("NEVER APPLIED", text + "; frames without rows and no source ever gave any")
     if short:
@@ -11951,6 +11971,9 @@ def _hj_f94a_neck(rows, ctx):
         if un:
             view, keycm, tgt, incam = mean("view", un), float(un[-1]["key"]), mean("tgt", un), mean("incam", un)
             text += "; unarmed %d s: the view over the neck %+.1f cm (key %.1f), the raise's target %+.1f cm, in the drawn camera %+.1f cm" % (_hsecs(un), view, keycm, tgt, incam)
+            vn = [r for r in un if r.get("vnu") is not None]
+            if vn and any(abs(float(r["vnu"])) >= 0.05 or abs(float(r["vnf"])) >= 0.05 for r in vn):   # F137: the view as drawn carries the virtual neck
+                text += "; virtual neck %+.1f cm up, %+.1f cm forward in it" % (mean("vnu", vn), mean("vnf", vn))
             if abs(tgt) > 1.0 and all(abs(float(r["incam"])) < 0.05 for r in un):
                 never.append(item)
             elif abs(view - keycm) > 1.5:
@@ -12107,6 +12130,7 @@ def _hj_f109_look(rows, ctx):
     (it is dropped in both turn styles), and calls split by the old ratio (no gain yet) are PARTIAL. F109b: the guard's holds (the game moved the view past what the
     head aim asked), its new bases for the player's own turn, its growth restarts after a rows gap and the re-arms after a trip are reported, not judged."""
     sec, eng, trips, nots, stops, held, rearm = (rows.get(k, []) for k in ("sec", "engaged", "trip", "not", "stops", "held", "rearm"))
+    recentred, bigstep = rows.get("recentred", []), rows.get("bigstep", [])
     if not sec and not eng and not trips and not nots and not stops:
         return None
     if not eng:
@@ -12144,6 +12168,15 @@ def _hj_f109_look(rows, ctx):
     if c109:
         text += ("; F109c: foreign calls %d (the gain's ends %s %s), the aim's pitch apart from the carried by 5 deg or more in %d of %d read seconds (largest %.1f)") % (
             sum(int(r["foreign"]) for r in c109), c109[-1]["glo"], c109[-1]["ghi"], sum(1 for d in drift if d >= 5.0), len(drift), max(drift) if drift else 0.0)
+    # F133: the follower's re-centres on a standing yaw offset (a head step lost to a stall) and the large head steps taken as motion (a turn across a stall): counts, not judged
+    rc133 = sum(int(r["recentre"]) for r in sec if r.get("recentre") is not None)
+    if rc133 or recentred or bigstep:
+        text += "; F133: re-centred %d" % max(rc133, len(recentred))
+        if recentred:
+            text += " (the standing yaw offset up to %.1f deg)" % max(abs(float(r["off"])) for r in recentred)
+        if bigstep:
+            text += ", large head steps taken as motion %d (largest %.1f deg over %d ms)" % (max(int(r["n"]) for r in bigstep), max(float(r["deg"]) for r in bigstep),
+                                                                                         max(int(r["lms"]) for r in bigstep))
     if head >= 5.0 and applied < 0.1 * head:
         return ("NEVER APPLIED", text + "; the game took none of the head's turn")
     notes = []
@@ -12160,6 +12193,215 @@ def _hj_f109_look(rows, ctx):
     if unsplit * 20 > max(clean + dirty, 1):
         notes.append("calls split by the old ratio (no gain measured)")
     return ("PARTIAL", text + "; " + "; ".join(notes)) if notes else ("OK", text)
+
+
+def _hj_f129_paths(rows, ctx):
+    """F129: the look processor's calls told apart, and what became of look to aim's asks. An instrument (it measures, it does not apply anything), so it is never NEVER
+    APPLIED. OK while every ask was taken by the player's own processor call and went down path B (no unconsumed ask, no ask that met a local path A or SKIP call, no
+    fallback to the first call after the update); PARTIAL otherwise, with the counts. Reported, not judged: the asks the first-call rule would have given to another
+    comp (the bug F129 fixed: its signature, counted whether or not the fix is in), the sink's outcome, the order check, the episodes, the components."""
+    sec, began, ended, comps, fb, rearm = (rows.get(k, []) for k in ("sec", "began", "ended", "comps", "fb", "rearm"))
+    if not (sec or began or ended or comps or fb or rearm):
+        return None
+    t = lambda k: _hsum(sec, k)
+    unc, ask_as, taken, fnl = t("unc"), t("as"), t("takenb"), t("fnl")
+    text = ("%d s on foot: %d update(s), %d ask(s): %d taken by a local path B call, %d met a local path A or SKIP call, %d taken by no local call; the first-call "
+            "rule would have given %d ask(s) to another comp; local calls %d (path B %d, A %d, SKIP %d, unknown %d), other comps' calls %d (at most %d between two "
+            "updates), up to %d comp(s) in 10 s; the update's sink: reached %d, zeroed %d, altered %d; order ok %d, flipped %d; fallback entered %d, left %d; "
+            "sentinel: partial %d, restored %d, restore failed %d; episodes %d began, %d ended") % (
+        t("wl"), t("upd"), t("asks"), taken, ask_as, unc, fnl, t("local"), t("lb"), t("la"), t("ls"), t("lu"), t("other"),
+        max([int(r["omax"]) for r in sec] or [0]), max([int(r["c10"]) for r in sec] or [0]), t("rch"), t("zer"), t("alt"), t("ook"), t("ofl"), t("fbe"), t("fbl"),
+        t("part"), t("rest"), t("rfail"), len(began), len(ended))
+    if sec:
+        text += "; the last local call: path %s, bytes A %s O %s D %s M %s" % (sec[-1]["lp"], sec[-1]["A"], sec[-1]["O"], sec[-1]["D"], sec[-1]["M"])
+    notes = []
+    if unc:
+        notes.append("%d ask(s) were taken by no local call before the next update (filed as blocked)" % unc)
+    if ask_as:
+        notes.append("%d ask(s) met a local path A or SKIP call (the game did not read the mouse in that call; filed as blocked)" % ask_as)
+    if fb:
+        notes.append("the local comp key did not match %d time(s) (%s): the first call after the update took the ask" % (len(fb), fb[-1]["why"][:80]))
+    if began:
+        notes.append("%d episode(s): %s" % (len(began), began[-1]["why"][:100]))
+    return ("PARTIAL", text + "; " + "; ".join(notes)) if (unc or ask_as or fb) else ("OK", text + ("; " + notes[-1] if notes else ""))
+
+
+def _hj_f131_hold(rows, ctx):
+    """F131: look to aim holds (the follower asks nothing, the game's own look runs, the aim stays) while an on-foot panel is open, a menu or map holds the 2D screen, or
+    the game's look processor has not run for 150 ms. The episodes are listed with their reasons and lengths: OK. IDLE when look to aim ran and never held. The 1 s
+    lines of F109 carry the ticks held, so a log whose begin and end lines were held back (6 a minute) still counts them."""
+    held, resumed = rows.get("held", []), rows.get("resumed", [])
+    f109 = [r for r in ctx.get("look to aim (F109)", {}).get("sec", [])]
+    ticks = sum(int(r["f131n"]) for r in f109 if r.get("f131n"))
+    if not held and not resumed and not ticks:
+        return ("IDLE", "look to aim ran %d s and was never held by a panel, a menu or a stopped look processor" % len(f109)) if f109 else None
+    secs = sum(float(r["s"]) for r in resumed)
+    why = collections.Counter()
+    for r in held:
+        for part in r["why"].split(" + "):
+            why[part] += 1
+    text = "%d hold(s) began, %d resumed (%.1f s held in the resumed ones); held ticks on the 1 s lines %d%s" % (
+        len(held), len(resumed), secs, ticks, ("; reasons: " + ", ".join("%s %d" % (k, v) for k, v in why.most_common())) if why else "")
+    if len(held) > len(resumed) + 1:
+        text += "; %d hold(s) without a resume line (held back, or look to aim stopped inside them)" % (len(held) - len(resumed))
+    return ("OK", text)
+
+
+def _hj_f68c_pairing(rows, ctx):
+    """F68c / F132: how G was built, from the FP AMC's and the local 3P AMC's P1 calls of one game frame. The per-second line (the detail log's) says how many pairs were
+    refused as far apart (over 10 ms): OK under 1% of the game frames, PARTIAL otherwise. F132 re-seeds the phase after such a refusal, so a refused run is one reseed;
+    the F132 event lines (the summary log's, 6 a minute) count the reseeds of a second and are the only evidence when the detail log is off: PARTIAL only when a tenth
+    of those seconds' frames were reseeded (the gap is real, every frame). A build before F132 has no reseed field and refuses forever from the first shifted frame."""
+    sec, ev = rows.get("sec", []), rows.get("reseed", [])
+    if not sec and not ev:
+        return None
+    parts = []
+    bad = False
+    if sec:
+        frames, far, pairs, nopair = (sum(int(r[k]) for r in sec) for k in ("frames", "far", "pairs", "nopair"))
+        tpf, fpf = sum(int(r["tpf"]) for r in sec), sum(int(r["fpf"]) for r in sec)
+        new = [r for r in sec if r.get("reseeds") is not None]
+        reseeds = sum(int(r["reseeds"]) for r in new)
+        refused = [r for r in new if int(r["far"])]
+        text = ("%d s: %d game frames, G built from a pair %d times (%.1f%%), frames without a pair %d, pairs refused as far apart %d (%.2f%%); the 3P call first in %d frames, "
+                "the FP call first in %d") % (len(sec), frames, pairs, 100.0 * pairs / frames if frames else 0.0, nopair, far, 100.0 * far / frames if frames else 0.0, tpf, fpf)
+        if new:
+            text += "; reseeds %d" % reseeds
+        if refused:
+            lo, hi = min(float(r["gmin"]) for r in refused), max(float(r["gmax"]) for r in refused)
+            mean = sum(float(r["gmean"]) * int(r["far"]) for r in refused) / max(1, sum(int(r["far"]) for r in refused))
+            text += "; refused pairs: gap min %.1f mean %.1f max %.1f ms, the FP call first in %d and the 3P call first in %d" % (
+                lo, mean, hi, sum(int(r["ffp"]) for r in refused), sum(int(r["ftp"]) for r in refused))
+        if frames and far * 100 >= frames:
+            bad = True
+            text += "; %.1f%% of the frames were refused as far apart%s" % (100.0 * far / frames, "" if new else " (a build before F132: the pairing never re-seeds)")
+        parts.append(text)
+    if ev:
+        n = sum(int(r["n"]) for r in ev)
+        fr = sum(int(r["frames"]) for r in ev)
+        text = "%s%d reseed second(s) in the event lines: %d reseeds in %d game frames; largest gap %.1f ms" % ("" if not sec else "and ", len(ev), n, fr, max(float(r["gmax"]) for r in ev))
+        if not sec and fr and n * 10 >= fr:
+            bad = True
+            text += "; a tenth or more of those frames were refused as far apart: the gap is real, every frame"
+        parts.append(text)
+    return ("PARTIAL" if bad else "OK", "; ".join(parts))
+
+
+def _hj_f137_neck(rows, ctx):
+    """F137: the virtual neck under mouse look: the neck translation the game's aim pitch would have made, added to the eye alignment while look to aim is not driving the
+    aim, and taken out of the pin's camera again by the serial the pose carried. The 1 s lines (printed each second the weight was up) give the aim pitch, the head's, the
+    offset applied and how many pin camera calls removed it, by the pose's serial or not. OK with seconds applied. IDLE when look to aim drove the aim all flight, or the
+    weight was up but the aim never pitched (the offset stayed under 0.5 cm). PARTIAL when the offset reached the view and the pin removed it in no call (the body would
+    follow the view), or in a tenth or more of the calls not by the pose's serial. NEVER APPLIED when the only lines say the aim pitch or the head pose was missing."""
+    sec, wait = rows.get("sec", []), rows.get("wait", [])
+    if not sec:
+        whys = collections.Counter(r["why"] for r in wait)
+        missing = [w for w in ("no fresh aim pitch from the pin hook", "no head pose from the runtime") if whys.get(w)]
+        if missing:
+            return ("NEVER APPLIED", "not applied: %s (%s); no second with the weight up" % (
+                ", ".join("%s %d time(s)" % (w, whys[w]) for w in missing), "the pin was in scope and look to aim was not driving the aim"))
+        if wait:
+            return ("IDLE", "not applied: %s" % ", ".join("%s %d time(s)" % (k, v) for k, v in whys.most_common()))
+        return ("IDLE", "no second with the weight up: look to aim drove the aim all flight, or a build before F137") if ctx.get("look to aim (F109)", {}).get("sec") else None
+    n = len(sec)
+    top = max(float(r["max"]) for r in sec)
+    fwd = [float(r["fwd"]) for r in sec]
+    up = [float(r["up"]) for r in sec]
+    aim = [float(r["aim"]) for r in sec]
+    removed, serial, last, missed = (sum(int(r[k]) for r in sec) for k in ("removed", "serial", "last", "missed"))
+    text = ("%d s with the weight up (mean %.2f); aim pitch %+.1f..%+.1f deg; offset up to %.1f cm (forward %+.1f..%+.1f, up %+.1f..%+.1f); removed in the pin's camera "
+            "%d calls (found by the alignment serial %d, the last published %d, serial not found %d)") % (
+        n, sum(float(r["wmean"]) for r in sec) / n, min(aim), max(aim), top, min(fwd), max(fwd), min(up), max(up), removed, serial, last, missed)
+    if top < 0.5:
+        return ("IDLE", text + "; the aim never pitched: the offset stayed under 0.5 cm")
+    notes = []
+    if removed == 0:
+        notes.append("the pin removed it in no call: the body follows the view")
+    elif (last + missed) * 10 >= removed:
+        notes.append("%d of %d removals were not by the pose's serial" % (last + missed, removed))
+    return ("PARTIAL", text + "; " + "; ".join(notes)) if notes else ("OK", text)
+
+
+def _hj_f138_pitched(rows, ctx):
+    """F138: the view holds its height over the neck while the look is pitched. The pin hook adds the camera's sink against the stance (the game's camera over the animated
+    neck, the headset's own height out) to the raise's target while the aim is pitched 10 deg or more, unarmed (up in both modes, down under mouse look only: a look down
+    under look to aim stays as flown and has no line); the end of an episode it published in gives the stance's target back once, else "not needed"; the 1 s lines (a second with a call at that pitch)
+    say how many calls added it, which were measured only (an item drawn) and the reasons for every other (no reference, the LOCAL pose's generation changed, the stance
+    changed, ADS, the camera away, ...), INSIDE on the drawn eye, and the settle's refusals. OK when it was added in at least one second and INSIDE (F97a's test on the drawn
+    eye) is under 10% of the calls of the applied seconds with the aim up. PARTIAL when INSIDE is 10% or more of those calls, or when it was added in no second and a pitched
+    second had an empty hand (the leading reason is named). IDLE when no pitched second had an empty hand (an item drawn: measured only), or when look to aim ran and no
+    second was pitched. The 10 s bin lines are read for presence only."""
+    sec, bins = rows.get("sec", []), rows.get("bins", [])
+    if not sec:
+        if bins:
+            return ("IDLE", "%d bin line(s) and no 1 s line" % len(bins))
+        return ("IDLE", "no second with a call at 10 deg of aim pitch or more: the look stayed level, or a build before F138") if ctx.get("look to aim (F109)", {}).get("sec") else None
+    n = len(sec)
+    calls = sum(int(r["ncalls"]) for r in sec)
+    applied = [r for r in sec if int(r["napplied"]) > 0]
+    added = sum(int(r["napplied"]) for r in sec)
+    measured = sum(int(r["nmeasured"]) for r in sec)
+    refused, lta = sum(int(r["refused"]) for r in sec), sum(int(r["lta"]) for r in sec)
+    returned, retrefused, notneeded = (sum(int(r[k]) for r in sec) for k in ("returned", "retrefused", "notneeded"))
+    empty = [r for r in sec if r["item"] == "none"]
+    whys = collections.Counter()
+    for r in empty:
+        for name, count in re.findall(r"([^,]+?) (\d+)(?:, |$)", r["why"]):
+            whys[name.strip()] += int(count)
+    modes = sorted(set(r["mode"] for r in sec))
+    text = ("%d pitched s (%d calls; %s), aim %+.0f..%+.0f deg; the camera sank up to %.1f cm against the stance; added in %d s (%d calls, up to %.1f cm), measured only %d calls; "
+            "the settle refused for the aim's pitch %d calls (look to aim's gate %d); returned to the stance's raise %d times (refused %d, not needed %d)") % (
+        n, calls, " and ".join(modes), min(float(r["amin"]) for r in sec), max(float(r["amax"]) for r in sec), max(float(r["smax"]) for r in sec), len(applied), added,
+        max([float(r["amaxadd"]) for r in applied] or [0.0]), measured, refused, lta, returned, retrefused, notneeded)
+    if applied:
+        up = [r for r in applied if float(r["aim"]) > 0.0]
+        inside, of = sum(int(r["inside"]) for r in up), sum(int(r["insideof"]) for r in up)
+        if not of:
+            return ("OK", text + "; INSIDE not measured in the applied seconds with the aim up (%d of them)" % len(up))
+        text += "; INSIDE %d of %d calls in the %d applied second(s) with the aim up" % (inside, of, len(up))
+        if inside * 10 >= of:
+            return ("PARTIAL", text + " (%d%%; the proof is under 10%%): the view is still in the torso with the sink added" % round(100.0 * inside / of))
+        return ("OK", text)
+    if empty:
+        lead = whys.most_common(1)
+        reason = "%s (%d calls)" % lead[0] if lead else "none counted"
+        return ("PARTIAL", text + "; never added with an empty hand in %d pitched second(s); leading reason: %s" % (len(empty), reason))
+    return ("IDLE", text + "; an item was drawn in every pitched second: measured only")
+
+
+def _hj_f135_menu(rows, ctx):
+    """F135 (MEASURE ONLY): which panel hook, or field, is active exactly while the on-foot Esc menu or a panel is up. For each Escape (or pad Start or Back) down edge, the
+    counters that rose within 0.5 s after it, those that were already non-zero before it, and those that stayed 0, from the probe's rise and fall event lines; the 1 s lines'
+    totals beside them. It only reports: IDLE when the log has no probe line (a build before F135)."""
+    sec, key, edge = rows.get("sec", []), rows.get("key", []), rows.get("edge", [])
+    if not sec and not key and not edge:
+        # IDLE while look to aim ran (native stereo was on foot, so a build with the probe would have said something only if a panel moved or a key was pressed); absent otherwise
+        return ("IDLE", "no menu probe line in the window (nothing moved and no key was pressed, or a build before F135)") if ctx.get("look to aim (F109)", {}).get("sec") else None
+    names = ("update", "placement", "ray", "cursor window", "owner transform", "panel submit", "inst submit", "bridge update", "bridge placement")
+    parts = []
+    for d in [r for r in key if r["dir"] == "down"]:
+        t = d.get("_t")
+        if t is None:
+            continue
+        rose, before, zero = [], [], []
+        for n in names:
+            ev = [e for e in edge if e["name"] == n and e.get("_t") is not None]
+            prior = [e for e in ev if e["_t"] < t]
+            if prior and prior[-1]["what"] == "rose":
+                before.append(n)
+            elif any(t <= e["_t"] <= t + 0.5 and e["what"] == "rose" for e in ev):
+                rose.append(n)
+            else:
+                zero.append(n)
+        parts.append("%s down at %s: rose within 0.5 s: %s; already non-zero: %s; stayed 0: %s" % (
+            d["src"], _hclock(t), ", ".join(rose) or "none", ", ".join(before) or "none", ", ".join(zero) or "none"))
+    tot = {k: sum(int(r[k]) for r in sec) for k in ("upd", "place", "ray", "win", "own", "ps", "is", "bu", "bp")} if sec else {}
+    text = "%d probe second(s), %d key edge(s), %d counter edge(s)" % (len(sec), len(key), len(edge))
+    if sec:
+        text += "; totals over those seconds: update %d, placement %d, ray %d, cursor window %d, owner transform %d, panel submit %d, inst submit %d, bridge %d/%d" % (
+            tot["upd"], tot["place"], tot["ray"], tot["win"], tot["own"], tot["ps"], tot["is"], tot["bu"], tot["bp"])
+        text += "; GuiFocus seen: %s" % ", ".join(sorted({r["gui"] for r in sec}))
+    return ("OK", text + ("; " + " | ".join(parts) if parts else "; no Escape, Start or Back press in the window"))
 
 
 def _hj_f109_snap(rows, ctx):
@@ -12682,6 +12924,26 @@ def _hj_f125_diet(rows, ctx):
     return ("OK", "detail changed %d time(s) in the window, %s at its end: the detail-only lines are in the log only where it was on" % (changes, seq[-1]["detail"]))
 
 
+def _hj_world_scale(rows, ctx):
+    """World scale (src\\common\\world_scale.h): ran is a change line (the runtime latched a value: its located eye separation and the one Elite is told), applied is an
+    eye-transform line (Elite's first read of the eye transform at a value the last read did not carry) AFTER that change line, at the same value. NEVER APPLIED when
+    a latched value was never read afterwards: Elite took the transform once, or from a cache, and the setting needs a restart. No line at all is the value staying
+    at 100, which is nothing to judge (None); a read with no change line before it means the runtime log lost the change line (PARTIAL)."""
+    changes, reads = rows.get("change", []), rows.get("read", [])
+    if not changes and not reads:
+        return None
+    steps = " -> ".join("%s%%" % r["pct"] for r in changes)
+    if not changes:
+        return ("PARTIAL", "Elite read its eye transform at %s but the runtime log has no latch line (a log cut short?)" % ", ".join("%s%%" % r["pct"] for r in reads))
+    last = changes[-1]
+    unread = [c["pct"] for c in changes if not any(r["pct"] == c["pct"] and r["_order"] > c["_order"] for r in reads)]
+    text = "latched %s; at %s%% the headset's eyes are %s mm apart and Elite's %s mm" % (steps, last["pct"], last["located"], last["elite"])
+    if unread:
+        return ("NEVER APPLIED", text + "; Elite never read its eye transform at %s after the runtime latched it (it took the transform once, or from a cache: the "
+                                        "setting needs a restart)" % ", ".join("%s%%" % p for p in unread))
+    return ("OK", text + "; Elite read its eye transform at each value (%d read line(s), the last at geometry sequence %s)" % (len(reads), reads[-1]["seq"]))
+
+
 def _hrule(name, tags, labels, kinds, judge, needs_detail=False):
     return HealthRule(name, tuple(tags), tuple(labels), tuple((k, re.compile(rx)) for k, rx in kinds), judge, needs_detail)
 
@@ -12803,11 +13065,16 @@ HEALTH_RULES = (
                 r"(?:, steady eye (?P<steady>on|off|mixed) \(\d+ of \d+ frames\), eye hold (?P<hold>on|off|mixed) \(\d+ of \d+ frames\))?)?"
                 r"(?:; verdict: (?P<verdict>.+?)(?:; r: .*)?$|.*; verdict: (?P<vend>.+)$|.*(?P<cut> \.\.\.\[truncated\])$)"),
     ), _hj_f91_fit, needs_detail=True),   # F125: a press is fitted only when the detail log was on at its edge
-    _hrule("eye rows (F113)", ("F113",), ("native on foot eye rows (F113)",), (
+    _hrule("eye rows (F113)", ("F113", "F130"), ("native on foot eye rows (F113)", "native on foot eye rows (F130)"), (
         ("sec", r"native on foot eye rows \(F113\) " + H_WL + r": eye 0 (?P<f0>\d+) frames: the scene meshes (?P<m0>\d+), the depth prepass (?P<p0>\d+), the terrain (?P<t0>\d+), "
                 r"none (?P<n0>\d+); eye 1 (?P<f1>\d+) frames: the scene meshes (?P<m1>\d+), the depth prepass (?P<p1>\d+), the terrain (?P<t1>\d+), none (?P<n1>\d+); "
                 r"checked against a scene mesh (?P<checked>\d+) \(max diff (?P<diff>\S+)\); source draws with no scene depth eye (?P<noeye>\d+), no b1 shadow "
-                r"(?P<norows>\d+), latched (?P<latched>\d+)(?P<lat> -- LATCHED OFF.*)?$"),
+                r"(?P<norows>\d+)(?:, latched (?P<latched>\d+)(?P<lat> -- LATCHED OFF.*)?|; mesh rows replaced by a source (?P<repl>\d+), marked meshes (?P<marked>\d+) "
+                r"\(refused draws (?P<refused>\d+)\))$"),
+        ("marked", r"native on foot eye rows \(F130\): a scene mesh with other rows: vs (?P<vs>[0-9A-F]{16}) ps (?P<ps>[0-9A-F]{16}) cb1 (?P<cb1>\S+) \+(?P<first>\d+), "
+                   r"eye (?P<eye>\d) frame (?P<frame>\d+), diff (?P<diff>\S+) \(rows (?P<rows>\S+), origin (?P<origin>\S+)\) against the (?P<src>.+?): it gives no "
+                   r"rows from here"),
+        ("full", r"native on foot eye rows \(F130\): (?P<n>\d+) scene meshes are marked \(the most kept\)"),
     ), _hj_f113_rows),
     _hrule("ADS model eye (F110)", ("F110", "F66e"), ("ADS sight check (F66e/F79)",), (
         ("sec", r"native on foot ADS sight check \(F66e/F79\): eye rows " + H_WL_THIS + r": both eyes (?P<both>\d+), one eye (?P<one>\d+), none/implausible (?P<none>\d+) "
@@ -13004,7 +13271,8 @@ HEALTH_RULES = (
                 r"neck reference weight (?P<weight>[\d.]+), raise (?P<raise>%s) cm, applied (?P<applied>%s) cm, target frozen (?P<frozen>\d+), stale (?P<stale>\d+), "
                 r"clamped (?P<clamped>\d+); the rest target asked (?P<asked>%s) cm, the lowering written mean (?P<low>%s) cm max \|(?P<lowmax>[\d.]+)\|; legs hip to foot "
                 r"over the leg: animated (?P<la>[\d.]+), written mean (?P<lw>[\d.]+) min (?P<lmin>[\d.]+) \((?P<solves>\d+) solves\)"
-                r"(?:; camera 3 m away (?P<remote>\d+) s \(max (?P<remote_max>[\d.]+) cm\))?" % ((_HN,) * 12)),
+                r"(?:; camera 3 m away (?P<remote>\d+) s \(max (?P<remote_max>[\d.]+) cm\))?"
+                r"(?:; virtual neck (?P<vnu>%s) cm up, (?P<vnf>%s) cm forward)?" % ((_HN,) * 14)),
         ("key", r"native on foot eye height \(F94a\): fix\.native_on_foot_eye_height_cm = (?P<key>[\d.]+) cm"),
     ), _hj_f94a_neck),
     _hrule("camera away (F107)", ("F107",), ("native on foot camera away (F107)",), (
@@ -13032,7 +13300,7 @@ HEALTH_RULES = (
         ("false", r"boarding reset \(F115\): a false start: the cockpit's own panels drew with native stereo on foot and stopped"),
         ("_", r"boarding reset \(F115\): native stereo on foot began: the on-foot camera changes publish again"),
     ), _hj_f115_boarding),
-    _hrule("look to aim (F109)", ("F109", "F109b"), ("native on foot look to aim (F109)", "native on foot look to aim (F109b)"), (
+    _hrule("look to aim (F109)", ("F109", "F109b", "F133"), ("native on foot look to aim (F109)", "native on foot look to aim (F109b)", "native on foot look to aim (F133)"), (
         ("sec", r"native on foot look to aim \(F109\) 1 s: (?P<state>following|blocked), item weight (?P<w>[\d.]+), smoothing (?P<tau>\d+) ms; head yaw (?P<hy>%s) "
                 r"pitch (?P<hp>%s) deg, asked (?P<ky>%s) (?P<kp>%s), applied (?P<ay>%s) (?P<ap>%s), the player's own (?P<uy>%s) (?P<up>%s); the reported head from the aim "
                 r"yaw (?P<oy>%s) pitch (?P<op>%s) deg now \(largest (?P<omax>[\d.]+), (?:read|not read)\); seated yaw (?P<sy>%s) pitch (?P<sp>%s) deg carried; the "
@@ -13043,9 +13311,12 @@ HEALTH_RULES = (
                 r"pitched 10 deg or more\); centred (?P<centred>\d+)(?:; F109b's guard: held (?P<gheld>\d+) \(the view moved past the asks\), re-based "
                 r"(?P<guser>\d+) \(the player's own turn\), growth restarted (?P<ggap>\d+) \(a rows gap\), trips (?P<gtrips>\d+), re-armed (?P<grearm>\d+))?"
                 r"(?:; F109c: the gain's ends (?P<glo>%s) (?P<ghi>%s), foreign calls (?P<foreign>\d+) \(no gain taken\); the aim's pitch \(the FP root\) apart from the "
-                r"carried by (?P<drift>%s) deg more than at the engage \(largest (?P<dmax>[\d.]+) this second, (?P<dread>read|not read)\))?"
+                r"carried by (?P<drift>%s) deg more than at the engage \(largest (?P<dmax>[\d.]+) this second, (?P<dread>read|not read)\))?(?:; held by F131 (?P<f131n>\d+) ticks \((?P<f131why>[^)]*)\))?(?:; re-centred (?P<recentre>\d+))?"
                 % ((_HN,) * 19)),
         ("engaged", r"native on foot look to aim \(F109\): engaged: "),
+        ("recentred", r"native on foot look to aim \(F133\): re-centred: the reported head stood (?P<off>[+-][\d.]+) deg off the aim in yaw for (?P<s>[\d.]+) s with the head still"),
+        ("bigstep", r"native on foot look to aim \(F133\): a head step of (?P<yaw>[+-][\d.]+) deg yaw (?P<pitch>[+-][\d.]+) deg pitch over (?P<ms>\d+) ms \((?P<dps>\d+) deg/s\) was "
+                    r"taken as motion, not a recentre; large steps taken as motion (?P<n>\d+) \(largest (?P<deg>[\d.]+) deg over (?P<lms>\d+) ms\)"),
         ("trip", r"native on foot look to aim \(F109\): GUARD TRIPPED \((?P<why>.+?)\): stopped(?P<latched> until)?"),
         ("held", r"native on foot look to aim \(F109b\): the guard held \((?P<mode>look to aim|an ADS press)\): the view parted from the head by yaw (?P<ry>%s) "
                  r"pitch (?P<rp>%s) deg, past what the head aim asked since the base \(yaw (?P<ky>%s) pitch (?P<kp>%s) deg" % ((_HN,) * 4)),
@@ -13055,6 +13326,62 @@ HEALTH_RULES = (
         ("_", r"native on foot look to aim \(F109\): (?:keys: |centred: |the game's look is |the guard is cleared |an ADS press: |the ADS press ended |turned off |"
               r"unwound after )"),
     ), _hj_f109_look),
+    _hrule("look paths (F129)", ("F129",), ("native on foot look paths (F129)",), (
+        ("sec", r"native on foot look paths \(F129\) (?P<wl>\d+) s: updates (?P<upd>\d+), asks (?P<asks>\d+); processor calls: local (?P<local>\d+) \(path B (?P<lb>\d+), "
+                r"A (?P<la>\d+), SKIP (?P<ls>\d+), unknown (?P<lu>\d+)\), other (?P<other>\d+) \(at most (?P<omax>\d+) between two updates\); comps (?P<c1>\d+) in 1 s, "
+                r"(?P<c10>\d+) in 10 s; the first call after the update is ours in (?P<fx>\d+) of the last (?P<fy>\d+) updates; asks: taken by a local path B call "
+                r"(?P<takenb>\d+), met a local path A or SKIP call (?P<as>\d+), taken by no local call (?P<unc>\d+), given to another comp by the first-call rule "
+                r"(?P<fnl>\d+); the update's sink: reached (?P<rch>\d+), zeroed (?P<zer>\d+), altered (?P<alt>\d+); order: ok (?P<ook>\d+), flipped (?P<ofl>\d+); "
+                r"fallback (?P<fbstate>\S+), entered (?P<fbe>\d+), left (?P<fbl>\d+); sentinel: partial (?P<part>\d+), restored (?P<rest>\d+), restore failed "
+                r"(?P<rfail>\d+); episodes (?P<eps>\d+); last local call: path (?P<lp>\S+) A (?P<A>\d+) O (?P<O>\d+) D (?P<D>\d+) M (?P<M>\d+)"),
+        ("began", r"native on foot look paths \(F129\): episode began: (?P<why>.+?); comps now (?P<comps>\d+); at the start: unconsumed (?P<unc>\d+), local path A or "
+                  r"SKIP (?P<as>\d+), first call not ours (?P<fn>\d+); the last (?P<n>\d+) records: "),
+        ("ended", r"native on foot look paths \(F129\): episode ended after (?P<len>[\d.]+) s \((?P<why>.+?)\): unconsumed (?P<unc>\d+), local path A or SKIP asks "
+                  r"(?P<as>\d+), updates whose first call was not ours (?P<fn>\d+), asks (?P<asks>\d+) in it; comps now (?P<comps>\d+)"),
+        ("comps", r"native on foot look paths \(F129\): comps now (?P<now>\d+) \(was (?P<was>\d+)\); the first call after the update is ours in (?P<x>\d+) of the last "
+                  r"(?P<y>\d+) updates"),
+        ("fb", r"native on foot look paths \(F129\): the local comp key did not match \((?P<why>.+?)\): the first call after the update takes the ask, as before F129"),
+        ("rearm", r"native on foot look paths \(F129\): the local comp key matched again "),
+    ), _hj_f129_paths),
+    _hrule("look to aim hold (F131)", ("F131",), ("native on foot look to aim (F131)",), (
+        ("held", r"native on foot look to aim \(F131\): held \((?P<why>.+?)\); the aim stays where it is, the game's own look runs"),
+        ("resumed", r"native on foot look to aim \(F131\): resumed after (?P<s>[\d.]+) s \((?P<why>.+?) cleared\): centred again"),
+    ), _hj_f131_hold),
+    _hrule("G pairing (F68c)", ("F68c", "F132"), ("native on foot G pairing (F68c)", "native on foot G pairing (F132)"), (
+        ("sec", r"native on foot G pairing \(F68c\): (?P<frames>\d+) game frames; G built from one frame's pair (?P<pairs>\d+) times \(F_root - M3P frame difference: 0 in "
+                r"(?P<zero>\d+), any other 0 by construction\); frames without a pair (?P<nopair>\d+); pairs refused as far apart \(over (?P<maxgap>\d+) ms\) (?P<far>\d+); "
+                r"the 3P call came first in (?P<tpf>\d+) frames \(the F67 rule built G from the previous frame's root on those\) and the FP call first in (?P<fpf>\d+); "
+                r"3P AMC speed mean (?P<smean>\S+) max (?P<smax>\S+) m/s over (?P<sn>\d+) frames(?:; reseeds (?P<reseeds>\d+); refused pairs: gap min (?P<gmin>\S+) mean "
+                r"(?P<gmean>\S+) max (?P<gmax>\S+) ms, the FP call first in (?P<ffp>\d+) and the 3P call first in (?P<ftp>\d+))?"),
+        ("reseed", r"native on foot G pairing \(F132\): reseeded (?P<n>\d+) time\(s\) in the last second after pairs refused as far apart \(gap min (?P<gmin>\S+) mean "
+                   r"(?P<gmean>\S+) max (?P<gmax>\S+) ms; the FP call first in (?P<ffp>\d+) of them, the 3P call first in (?P<ftp>\d+)\); G built from a pair (?P<pairs>\d+) "
+                   r"times in (?P<frames>\d+) game frames"),
+    ), _hj_f68c_pairing),
+    _hrule("virtual neck (F137)", ("F137",), ("native on foot virtual neck (F137)",), (
+        ("sec", r"native on foot virtual neck \(F137\) 1 s: aim pitch (?P<aim>%s) deg, head pitch (?P<head>%s) deg, offset forward (?P<fwd>%s) up (?P<up>%s) cm "
+                r"\(max (?P<max>[\d.]+)\), w (?P<wmean>[\d.]+)/(?P<wmax>[\d.]+), removed in the pin's camera (?P<removed>\d+) calls \(found by the alignment serial "
+                r"(?P<serial>\d+), the last published (?P<last>\d+), serial not found (?P<missed>\d+)\)" % ((_HN,) * 4)),
+        ("wait", r"native on foot virtual neck \(F137\): not applied: (?P<why>.+)$"),
+    ), _hj_f137_neck),
+    _hrule("pitched view (F138)", ("F138",), ("native on foot pitched view (F138)",), (
+        ("sec", r"native on foot pitched view \(F138\) 1 s: mode (?P<mode>.+?), item (?P<item>.+?), aim pitch (?P<aim>%s) deg \(min (?P<amin>%s) max (?P<amax>%s)\), "
+                r"head pitch (?P<head>%s) deg; the camera's sink against the stance (?P<sink>%s) cm \(max (?P<smax>%s)\), the head's own height since the stance "
+                r"(?P<hrise>%s) cm; w (?P<wmean>[\d.]+)/(?P<wmax>[\d.]+); added (?P<added>%s) cm \(max (?P<amaxadd>%s)\) in (?P<napplied>\d+) of (?P<ncalls>\d+) pitched "
+                r"calls \| measured only: an item drawn (?P<nmeasured>\d+) calls \| not applied: (?P<why>.+?); EDVR carried up (?P<up>%s) forward (?P<fwd>%s) cm "
+                r"\(the raise, F137\); the view over the neck (?P<view>%s) cm; INSIDE (?P<inside>\d+) of (?P<insideof>\d+); the settle refused for the aim's pitch "
+                r"(?P<refused>\d+) calls \(look to aim's gate (?P<lta>\d+)\); returned to the stance's raise (?P<returned>\d+) times \(refused (?P<retrefused>\d+), not needed (?P<notneeded>\d+)\)" % ((_HN,) * 12)),
+        ("bins", r"native on foot pitched view \(F138\) 10 s bins \(per 10 deg of aim pitch: calls, the camera's sink, EDVR carried up, forward, the head's own height since "
+                 r"the stance; cm\): (?P<mode>mouse look|look to aim), item (?P<item>.+?): (?=\[)(?P<body>.+)$"),
+    ), _hj_f138_pitched),
+    _hrule("menu probe (F135)", ("F135",), ("native on foot menu probe (F135)",), (
+        ("sec", r"native on foot menu probe \(F135\) 1 s: update (?P<upd>\d+) \(objs (?P<updo>.*?)\), placement (?P<place>\d+) \(objs (?P<placeo>.*?)\), ray (?P<ray>\d+), "
+                r"cursor window (?P<win>\d+), owner transform (?P<own>\d+), panel submit (?P<ps>\d+), inst submit (?P<is>\d+), bridge update (?P<bu>\d+) placement "
+                r"(?P<bp>\d+); GuiFocus (?P<gui>\S+); look to aim (?P<lta>.+?); processor (?P<proc>[a-z ]+); look block (?P<block>.+)$"),
+        ("key", r"native on foot menu probe \(F135\): (?P<src>key Escape|pad Start|pad Back) (?P<dir>down|up)"),
+        ("edge", r"native on foot menu probe \(F135\): (?P<name>update|placement|ray|cursor window|owner transform|panel submit|inst submit|bridge update|bridge placement) "
+                 r"(?P<what>rose|fell)"),
+        ("_", r"native on foot menu probe \(F135\): armed "),
+    ), _hj_f135_menu),
     _hrule("snap turn (F109)", ("F109",), ("native on foot snap turn (F109)",), (
         ("snap", r"native on foot snap turn \(F109\): snap (?P<n>\d+) by (?P<src>the stick|a mouse flick), (?P<dir>right|left) (?P<step>\d+) deg(?P<ads> in ADS)?: "
                  r"input (?P<input>%s) \(gain (?P<gain>%s), (?P<gsrc>.+?)\); the game applied (?P<applied>%s) deg in (?P<calls>\d+) call\(s\) \(the player's turn over "
@@ -13170,7 +13497,12 @@ HEALTH_RULES = (
         ("verified", r"HUD hide \(F116\): the game's hide counters are read \(logged only\)"),
         ("notread", r"HUD hide \(F116\): the game's hide counters are NOT read -- (?P<why>.*?) \(the hide on the terminal footprint is unaffected\)"),
         ("refread", r"HUD hide \(F116\): a counter read refused -- (?P<why>.*?) \(said once per reason\)"),
-    ), _hj_f116_hud_hide),)
+    ), _hj_f116_hud_hide),
+    # World scale: lines of the runtime log, which carry no build tag (health_scan_runtime reads them); no graphics-log tag dispatches to this rule.
+    _hrule(H_WORLD, (), (H_WORLD_LABEL,), (
+        ("change", H_WORLD_CHANGE),
+        ("read", H_WORLD_READ),
+    ), _hj_world_scale),)
 HEALTH_BY_TAG = {}
 for _rule in HEALTH_RULES:
     for _tag in _rule.tags:
@@ -13282,6 +13614,39 @@ def health_scan(text, since=None, until=None):
     return {"census": census, "rows": rows, "unparsed": unparsed, "tagged": tagged, "first": first, "last": last}
 
 
+def health_scan_runtime(scan, text):
+    """The world scale rule's rows from the runtime log's text, into health_scan's result: its two lines are written by the runtime (edvr_openxr_*.log), whose
+    lines carry no build tag and a UTC clock, so the graphics log's scan does not see them and the window of --since/--until does not cut them. A line that carries the
+    label and matches neither pattern is counted as unparsed, as health_scan counts the graphics log's."""
+    rule = next(r for r in HEALTH_RULES if r.name == H_WORLD)
+    rows = scan["rows"][H_WORLD]
+    for order, raw in enumerate(text.splitlines()):
+        if H_WORLD_LABEL not in raw:
+            continue
+        for kind, rx in rule.kinds:
+            g = rx.search(raw)
+            if g:
+                rows.setdefault(kind, []).append(dict(g.groupdict(), _order=order, _t=None))
+                break
+        else:
+            u = scan["unparsed"][H_WORLD]
+            u[0] += 1
+            u[1] = u[1] or raw.strip()[:160]
+
+
+def health_runtime_text(gfx_path, native_dirs, runtime_file):
+    """(text, exit code) for the runtime log the world scale rule reads: --runtime-file's, else the one that opened nearest the graphics log, read without a word when it
+    is found and when it is not (a flight with no runtime log has no world scale lines to judge). The exit code is 1 only for a --runtime-file that is not there."""
+    if runtime_file:
+        rt_path = os.path.abspath(runtime_file)
+        if not os.path.isfile(rt_path):
+            print("[edvr] no such runtime log: %s" % rt_path)
+            return None, 1
+    else:
+        rt_path, _ = pair_runtime_log(gfx_path, native_dirs)
+    return (read_text(rt_path) if rt_path else None), None
+
+
 def health_verdicts(scan, rules=None):
     """[(rule, status, detail)] in table order for the rules with lines in the window, the names of the rules with none, and (F125) the names of the rules not
     judged because they read only the detailed on-foot log's lines and the log says it was off. rules: HEALTH_RULES unless given (the self-test's variants)."""
@@ -13339,8 +13704,8 @@ def health_report(scan, window="", rules=None):
     return lines, (3 if bad else 4 if drift else 0)
 
 
-def print_health(text, args):
-    """The --health report. Returns the process exit code."""
+def print_health(text, args, runtime_text=None):
+    """The --health report. runtime_text: the paired runtime log, for the world scale rule. Returns the process exit code."""
     try:
         since = parse_health_time(args.since) if args.since else None
         until = parse_health_time(args.until, end=True) if args.until else None
@@ -13348,6 +13713,8 @@ def print_health(text, args):
         print("[edvr] bad --since/--until time %s (use HH:MM or HH:MM:SS)" % e)
         return 1
     scan = health_scan(text, since, until)
+    if runtime_text:
+        health_scan_runtime(scan, runtime_text)
     scan["all"] = bool(args.health_all)
     window = ""
     if args.since or args.until:
@@ -13499,7 +13866,7 @@ def main(argv=None):
                     help="post-flight feature health: one line per build-tagged feature family (weapon readout size and pistol "
                          "readout F90, weapon readout part roles, ADS press fit and ADS item gate F91, rifle ADS readout F92, readout swap F93a, weapon UI pin F85b, reticle "
                          "depth F85c, view height hold F87h, weapon eye offset F88, ADS transition F89, ADS sight in both eyes F106, marker fix, "
-                         "prompt anchor and label F87p, the label's designed offset F93c and its own-anchor move F94b, the head in the shadows F95c, the marker tee and the pose hook's CPU F100, the in-world screens' coverage F105, the terminal hold F108, the HUD hide F116) saying OK, "
+                         "prompt anchor and label F87p, the label's designed offset F93c and its own-anchor move F94b, the head in the shadows F95c, the marker tee and the pose hook's CPU F100, the in-world screens' coverage F105, the terminal hold F108, the HUD hide F116, and world scale, read from the paired runtime log) saying OK, "
                          "PARTIAL, NEVER APPLIED "
                          "(its own lines show it did nothing), IDLE or UNPARSED with the counters that decide it, then a census of "
                          "every `(F<n>...)` tagged line (count, first and last time, leading label) for the features with no rule. "
@@ -13517,7 +13884,7 @@ def main(argv=None):
     ap.add_argument("--runtime-file", default=None,
                     help="with --tally periodic or --freezes, read exactly this "
                          "runtime (edvr_openxr_*.log) log instead of pairing the "
-                         "one that opened nearest the graphics log")
+                         "one that opened nearest the graphics log; --health reads it too, for its world scale rule")
     ap.add_argument("--infer-runs", action="store_true",
                     help="with --tally periodic, also place the runs nobody "
                          "logged where a fixed cadence says they ran (only for "
@@ -13629,7 +13996,10 @@ def main(argv=None):
         return 0
 
     if args.health:
-        return print_health(text, args)
+        runtime_text, rc = health_runtime_text(path, native_dirs, args.runtime_file)
+        if rc is not None:
+            return rc
+        return print_health(text, args, runtime_text)
     if args.vscreen_fit:
         return print_vscreen_fit(text)
     if args.flat_upscale:
@@ -14529,14 +14899,29 @@ def self_test_health():
         # ---- eye rows (F113): each eye's scene rows and their source ----
         F113 = "eye rows (F113)"
 
-        def rows113(m=(10, 10), p=(80, 80), t=(0, 0), n=(0, 0), checked=2, diff=0.0, latched=False, wl=1):
+        def rows113(m=(10, 10), p=(80, 80), t=(0, 0), n=(0, 0), checked=2, diff=0.0, latched=False, wl=1, repl=0, marked=0, refused=0):
             f = tuple(m[e] + p[e] + t[e] + n[e] for e in (0, 1))
-            return R("native on foot eye rows (F113) %u s: eye 0", wl, f[0], m[0], p[0], t[0], n[0], f[1], m[1], p[1], t[1], n[1], checked, diff, 0, 0, 0,
-                     " -- LATCHED OFF (a mismatch over 1e-5): the scene meshes alone" if latched else "")
+            line = R("native on foot eye rows (F113) %u s: eye 0", wl, f[0], m[0], p[0], t[0], n[0], f[1], m[1], p[1], t[1], n[1], checked, diff, 0, 0, repl, marked, refused)
+            if latched:   # a build before F130: its tail was ", latched N" and the LATCHED OFF note
+                line = line.split("; mesh rows replaced by a source")[0] + ", latched 0 -- LATCHED OFF (a mismatch over 1e-5): the scene meshes alone"
+            return line
 
         check("F113 rows: bare ground, the prepass gives the rows", [rows113()] * 3, 0, [("OK", F113)],
               has=["eye 0 270 frames: the scene meshes 11%, the depth prepass 89%, the terrain 0%, none 0.0%"], lacks=["UNPARSED"])
-        check("F113 rows: a source latched off", [rows113(), rows113(diff=2e-3, latched=True)], 0, [("PARTIAL", F113)], has=["LATCHED OFF"])
+        check("F113 rows: a source latched off (a build before F130)", [rows113(), rows113(diff=2e-3, latched=True)], 0, [("PARTIAL", F113)], has=["LATCHED OFF", "a build before F130"])
+        # F130: the SRV flight (edvr_gfx_20261027_064839): one mesh disagreed by 0.239 at 06:54:46; it is marked and the sources go on (no latch, no PARTIAL for the mark)
+        MARK130 = R("native on foot eye rows (F130): a scene mesh with other rows: vs %016llX ps %016llX cb1", 0xA1B2C3D4E5F60718, 0x1122334455667788, 96, 0, 32288, 2.393e-1,
+                    2.393e-1, 0.0, "terrain")
+        check("F130 rows: a mesh with other rows is marked, the sources stay on", [rows113(checked=3), MARK130, rows113(diff=2.393e-1, checked=1, repl=0, marked=1, refused=40)], 0,
+              [("OK", F113)], has=["F130: mesh rows replaced by a source 0, marked meshes 1 (refused draws 40)", "marked: vs A1B2C3D4E5F60718 ps 1122334455667788 eye 0 (diff 2.393e-01 against the terrain)"],
+              lacks=["LATCHED OFF", "UNPARSED"])
+        check("F130 rows: a source replaced a mesh's rows (the mesh drew first)", [rows113(repl=3, marked=2, checked=3, diff=0.3), MARK130, MARK130], 0, [("OK", F113)],
+              has=["mesh rows replaced by a source 3, marked meshes 2", "marked: vs A1B2C3D4E5F60718"], lacks=["UNPARSED"])
+        FULL130 = R("native on foot eye rows (F130): %zu scene meshes are marked", 32)
+        check("F130 rows: the table of marked meshes full", [rows113(marked=32, refused=900), FULL130], 0, [("OK", F113)], has=["the table of 32 marked meshes was full"],
+              lacks=["UNPARSED"])
+        check("F130 rows: frames without rows while no source ever gave any are still NEVER APPLIED", [rows113(m=(30, 30), p=(0, 0), n=(60, 60), checked=0, marked=1, refused=50)] * 2,
+              3, [("NEVER APPLIED", F113)], has=["no source ever gave any", "marked meshes 1"])
         check("F113 rows: the sources never ran (the 07:10 flight's bare ground)", [rows113(m=(30, 30), p=(0, 0), n=(60, 60), checked=0)] * 2, 3,
               [("NEVER APPLIED", F113)], has=["none 66.7%", "no source ever gave any"])
         ROWS113_OLD = ("native on foot eye rows (F113) 1 s: eye 0 90 frames: the scene meshes 10, the depth prepass 80, the terrain 0, none 0; eye 1 90 frames: "
@@ -15069,9 +15454,9 @@ def self_test_health():
         FISTS, RIFLE = "$humanoid_fists_name;", "$wpn_m_assaultrifle_laser_fauto_name;"
 
         def neck(item=FISTS, bin_="standing", view=15.5, tgt=11.6, incam=11.6, matched=90, legacy=0, missed=0, weight=1.0, lowmax=0.0, la=0.996, lw=0.996, key=15.5,
-                 anim="+15.6 cm", game=3.9, wl=1, remote=None, remote_max=0.0, n=90, solves=90):
+                 anim="+15.6 cm", game=3.9, wl=1, remote=None, remote_max=0.0, n=90, solves=90, vn=None):
             line = R("native on foot neck height (F94a) %u s: item %s", wl, item, bin_, n, 1.543, 1.540, 1.546, key, view, view - 0.3, view + 0.3, game, anim, tgt, tgt - 0.2,
-                     tgt + 0.2, incam, matched, legacy, missed, 90, weight, tgt, incam * weight, 0 if weight >= 1.0 else 90, 0, 0, -11.6, 0.0, lowmax, la, lw, lw - 0.003, solves, remote or 0, remote_max)
+                     tgt + 0.2, incam, matched, legacy, missed, 90, weight, tgt, incam * weight, 0 if weight >= 1.0 else 90, 0, 0, -11.6, 0.0, lowmax, la, lw, lw - 0.003, solves, remote or 0, remote_max, *(vn or (0.0, 0.0)))
             return line if remote is not None else line.split("; camera 3 m away")[0]
 
         def eye_key(cm=15.5):
@@ -15080,6 +15465,9 @@ def self_test_health():
         check("F94a neck: fists standing, the eye 15.5 cm over the neck", [eye_key()] + [neck()] * 3, 0, [("OK", F94)],
               has=[FISTS + " 3 s: neck 1.543 m, lowering max 0.00 cm, legs 0.996 -> 0.996; unarmed 3 s: the view over the neck +15.5 cm (key 15.5), the raise's "
                    "target +11.6 cm, in the drawn camera +11.6 cm", "the raise found by the alignment serial in 270 of 270 calls (not found 0)"], lacks=["UNPARSED"])
+        check("F94a neck: the view as drawn carries the virtual neck (F137), the line names it", [neck(remote=0, vn=(-15.4, 8.9))] * 2, 0, [("OK", F94)],
+              has=["virtual neck -15.4 cm up, +8.9 cm forward in it"], lacks=["UNPARSED"])
+        check("F94a neck: a line without the virtual neck's tail (a build before F137) still reads", [neck(remote=0)] * 2, 0, [("OK", F94)], lacks=["UNPARSED", "cm forward in it"])
         check("F94a neck: the view off the key", [neck(view=12.0)] * 2, 0, [("PARTIAL", F94)], has=["the view is off the key by more than 1.5 cm with " + FISTS])
         check("F94a neck: the raise never reached the drawn camera", [neck(view=3.9, incam=0.0)] * 2, 3, [("NEVER APPLIED", F94)],
               has=["the raise never reached the drawn camera with " + FISTS])
@@ -15310,10 +15698,10 @@ def self_test_health():
         L109, S109, M109, A109 = "look to aim (F109)", "snap turn (F109)", "smooth turn (F109)", "ADS player turn (F109)"
 
         def look109(state="following", hy=12.0, hp=-3.0, ay=None, ap=None, uy=0.0, up=0.0, oy=0.2, op=-0.1, res=0.3, bmax=12.0, ds=0, dm=0, dp=0, clean=80,
-                    dirty=2, unsplit=0, blocked=0, spring=0, gated=0, gheld=0, guser=0, ggap=0, gtrips=0, grearm=0, foreign=0, drift=0.0, dread="read"):
+                    dirty=2, unsplit=0, blocked=0, spring=0, gated=0, gheld=0, guser=0, ggap=0, gtrips=0, grearm=0, foreign=0, drift=0.0, dread="read", f131n=0, f131why="none", recentre=0):
             return R("native on foot look to aim (F109) 1 s:", state, 0.0, 150, hy, hp, hy, hp, hy if ay is None else ay, hp if ap is None else ap, uy, up, oy, op,
                      0.5, "read", 30.0, -5.0, res, 0, 2.0, bmax, 88, 90, ds, dm, dp, clean, dirty, unsplit, 0.85, 0.85, blocked, "not holding", 0, spring, 0.0,
-                     gated, 1, gheld, guser, ggap, gtrips, grearm, 1.0, 0.85335, foreign, drift, abs(drift), dread)
+                     gated, 1, gheld, guser, ggap, gtrips, grearm, 1.0, 0.85335, foreign, drift, abs(drift), dread, f131n, f131why, recentre)
 
         KEYS109 = R("native on foot look to aim (F109): keys: %s, smoothing", "on", 150, "snap", 45)
         ENG109 = R("native on foot look to aim (F109): engaged:", "snap", 45, 150, ", their yaw turns the player in snaps", "")
@@ -15350,6 +15738,193 @@ def self_test_health():
                                                               "the aim's pitch parted from the carried pitch"], lacks=["UNPARSED"])
         check("F109c look: a second's glance off the aim is not a hold", [ENG109] + [look109()] * 2 + [look109(op=15.0)] + [look109()] * 2, 0, [("OK", L109)],
               has=["F109c: foreign calls 0", "in 0 of 5 read seconds"], lacks=["UNPARSED", "off the head for"])
+
+        # ---- F129: the look processor's calls told apart, the asks' fate (an instrument: OK or PARTIAL, never NEVER APPLIED) ----
+        P129 = "look paths (F129)"
+
+        def paths129(wl=10, upd=900, asks=450, lb=900, la=0, ls=0, lu=0, other=1800, omax=2, c1=3, c10=3, fx=32, fy=32, takenb=450, aas=0, unc=0, fnl=0, rch=450, zer=0,
+                     alt=0, ook=450, ofl=0, fb="off", fbe=0, fbl=0, part=0, rest=0, rfail=0, eps=0, lp="B", A=0, O=0, D=0, M=1):
+            return R("native on foot look paths (F129) %u s: updates", wl, upd, asks, lb + la + ls + lu, lb, la, ls, lu, other, omax, c1, c10, fx, fy, takenb, aas, unc, fnl,
+                     rch, zer, alt, ook, ofl, fb, fbe, fbl, part, rest, rfail, eps, lp, A, O, D, M)
+
+        BEGAN129 = R("native on foot look paths (F129): episode began: %s; comps now", "3 asks in a row that no local call took", 3, 3, 0, 0, 8,
+                     "P1 00A1B2C3 o B A0 O0 D0 M1 +0.000/+0.000 1st")
+        ENDED129 = R("native on foot look paths (F129): episode ended after %.1f s", 2.4, "3 asks in a row that no local call took", 7, 0, 0, 7, 3)
+        COMPS129 = R("native on foot look paths (F129): comps now %d (was %d)", 3, 1, 30, 32)
+        FB129 = R("native on foot look paths (F129): the local comp key did not match (%s)", "no call of the player's comp in 120 updates that had processor calls; 2 comps live")
+        REARM129 = R("native on foot look paths (F129): the local comp key matched again")
+        check("F129 paths: every ask taken by the player's own call down path B", [paths129(), paths129()], 0, [("OK", P129)],
+              has=["20 s on foot: 1800 update(s), 900 ask(s): 900 taken by a local path B call, 0 met a local path A or SKIP call, 0 taken by no local call",
+                   "the first-call rule would have given 0 ask(s) to another comp", "local calls 1800 (path B 1800, A 0, SKIP 0, unknown 0)", "the last local call: path B, bytes A 0 O 0 D 0 M 1"],
+              lacks=["UNPARSED", "NEVER APPLIED"])
+        check("F129 paths: the lift's signature, asks the first-call rule gave another comp, are reported, not judged", [paths129(fnl=300, fx=2, fy=32, c10=3), COMPS129], 0,
+              [("OK", P129)], has=["the first-call rule would have given 300 ask(s) to another comp", "up to 3 comp(s) in 10 s"], lacks=["UNPARSED", "PARTIAL"])
+        check("F129 paths: asks taken by no local call, an episode and the fallback", [paths129(unc=7, takenb=443, rch=450, fbe=1), BEGAN129, ENDED129, FB129], 0, [("PARTIAL", P129)],
+              has=["7 ask(s) were taken by no local call before the next update (filed as blocked)", "the local comp key did not match 1 time(s) (no call of the player's comp in 120 updates",
+                   "1 episode(s): 3 asks in a row that no local call took", "episodes 1 began, 1 ended"], lacks=["UNPARSED", "NEVER APPLIED"])
+        check("F129 paths: asks that met a local path A or SKIP call, the pair of the lift", [paths129(la=40, ls=5, aas=45, takenb=405, zer=45, rch=405, lp="SKIP", A=1, O=0, D=1, M=0)],
+              0, [("PARTIAL", P129)],
+              has=["45 ask(s) met a local path A or SKIP call (the game did not read the mouse in that call; filed as blocked)", "zeroed 45", "path B 900, A 40, SKIP 5",
+                   "the last local call: path SKIP, bytes A 1 O 0 D 1 M 0"], lacks=["UNPARSED"])
+        check("F129 paths: the key matched again, and a second of the sink zeroing the asks", [FB129, REARM129, paths129(fbe=1, fbl=1, zer=3, ofl=2, ook=100)], 0, [("PARTIAL", P129)],
+              has=["fallback entered 1, left 1", "order ok 100, flipped 2"], lacks=["UNPARSED"])
+        check("F129 paths: a comps line alone is reported", [COMPS129], 0, [("OK", P129)], has=["0 s on foot"], lacks=["UNPARSED"])
+
+        # ---- G pairing (F68c / F132): the frame pairing of the FP and 3P P1 calls, and its re-seed after a refusal ----
+        G68 = "G pairing (F68c)"
+
+        def pair68(frames=90, pairs=90, nopair=0, far=0, tpf=90, fpf=0, reseeds=0, gmin=0.0, gmean=0.0, gmax=0.0, ffp=0, ftp=0, legacy=False):
+            line = R("native on foot G pairing (F68c): %llu game frames; G built from one frame's pair", frames, pairs, pairs, nopair, 10.0, far, tpf, fpf, 1.5, 3.0, frames,
+                     reseeds, gmin, gmean, gmax, ffp, ftp)
+            return line.split("; reseeds")[0] if legacy else line
+
+        def reseed132(n=3, gmin=10.4, gmean=11.1, gmax=11.9, ffp=0, ftp=3, pairs=87, frames=90):
+            return R("native on foot G pairing (F132): reseeded %llu time(s) in the last second", n, gmin, gmean, gmax, ffp, ftp, pairs, frames)
+
+        check("F132 pairing: every frame paired", [pair68(), pair68()], 0, [("OK", G68)],
+              has=["2 s: 180 game frames, G built from a pair 180 times (100.0%)", "pairs refused as far apart 0 (0.00%)", "reseeds 0"], lacks=["UNPARSED"])
+        check("F132 pairing: one reseed after a missing call is healthy", [pair68(), pair68(pairs=89, nopair=1, far=1, reseeds=1, gmin=11.1, gmean=11.1, gmax=11.1, ftp=1), pair68()], 0,
+              [("OK", G68)], has=["pairs refused as far apart 1 (0.37%)", "reseeds 1", "refused pairs: gap min 11.1 mean 11.1 max 11.1 ms, the FP call first in 0 and the 3P call first in 1"],
+              lacks=["UNPARSED"])
+        check("F132 pairing: the flight (6927 refused of 7351 frames) is PARTIAL, a build before F132 says it never re-seeds", [pair68(frames=90, pairs=6, far=84, legacy=True)], 0,
+              [("PARTIAL", G68)], has=["93.3% of the frames were refused as far apart (a build before F132: the pairing never re-seeds)"], lacks=["UNPARSED"])
+        check("F132 pairing: a real gap every frame, re-seeded each time, is PARTIAL with the gap named", [pair68(frames=90, pairs=0, nopair=90, far=90, reseeds=90, gmin=12.0, gmean=15.2,
+              gmax=19.0, ffp=90)], 0, [("PARTIAL", G68)],
+              has=["reseeds 90", "gap min 12.0 mean 15.2 max 19.0 ms, the FP call first in 90", "100.0% of the frames were refused as far apart"], lacks=["UNPARSED"])
+        check("F132 pairing: the summary log's reseed line alone", [reseed132(), reseed132(n=1)], 0, [("OK", G68)],
+              has=["2 reseed second(s) in the event lines: 4 reseeds in 180 game frames; largest gap 11.9 ms"], lacks=["UNPARSED", "a tenth or more"])
+        check("F132 pairing: reseeds in a tenth of the frames in the summary log", [reseed132(n=60, frames=90)], 0, [("PARTIAL", G68)], has=["a tenth or more of those frames were refused"],
+              lacks=["UNPARSED"])
+
+        # ---- F137: the virtual neck under mouse look ----
+        V137 = "virtual neck (F137)"
+
+        def vn137(aim=-58.0, head=0.0, fwd=8.9, up=-15.4, mx=17.8, wmean=0.97, wmax=1.0, removed=58, serial=58, last=0, missed=0):
+            return R("native on foot virtual neck (F137) 1 s: aim pitch", aim, head, fwd, up, mx, wmean, wmax, removed, serial, last, missed)
+
+        def wait137(why):
+            return R("native on foot virtual neck (F137): not applied: %s", why)
+
+        check("F137 neck: look to aim drove the aim all flight, no virtual neck line", [ENG109, look109(), look109()], 0, [("IDLE", V137)],
+              has=["look to aim drove the aim all flight, or a build before F137"], lacks=["UNPARSED"])
+        check("F137 neck: seconds with the weight up, the pin removed it by the pose's serial", [vn137(), vn137(aim=-30.0, fwd=4.7, up=-8.0, mx=9.3, wmean=0.9, removed=60, serial=60)], 0,
+              [("OK", V137)], has=["2 s with the weight up (mean 0.94)", "aim pitch -58.0..-30.0 deg", "offset up to 17.8 cm", "removed in the pin's camera 118 calls (found by the alignment serial 118"],
+              lacks=["UNPARSED"])
+        check("F137 neck: the weight was up but the aim never pitched", [vn137(aim=0.0, fwd=0.0, up=0.0, mx=0.0), vn137(aim=0.5, fwd=0.1, up=-0.1, mx=0.2)], 0, [("IDLE", V137)],
+              has=["the aim never pitched: the offset stayed under 0.5 cm"], lacks=["UNPARSED"])
+        check("F137 neck: the pin removed it in no call (the body would follow the view)", [vn137(removed=0, serial=0), vn137(removed=0, serial=0)], 0, [("PARTIAL", V137)],
+              has=["the pin removed it in no call: the body follows the view"], lacks=["UNPARSED"])
+        check("F137 neck: the pose's serial was not found for a tenth of the removals", [vn137(removed=60, serial=40, last=0, missed=20)], 0, [("PARTIAL", V137)],
+              has=["20 of 60 removals were not by the pose's serial"], lacks=["UNPARSED"])
+        check("F137 neck: no fresh aim pitch from the pin hook and no second applied", [wait137("no fresh aim pitch from the pin hook")], 3, [("NEVER APPLIED", V137)],
+              has=["no fresh aim pitch from the pin hook 1 time(s)"], lacks=["UNPARSED"])
+        check("F137 neck: look to aim drives the aim, said once", [wait137("look to aim drives the aim")], 0, [("IDLE", V137)], has=["not applied: look to aim drives the aim 1 time(s)"],
+              lacks=["UNPARSED"])
+        check("F137 neck: a wait that came before seconds applied is not judged", [wait137("no fresh aim pitch from the pin hook"), vn137()], 0, [("OK", V137)], lacks=["UNPARSED", "NEVER APPLIED"])
+
+        # ---- F138: the view holds its height over the neck while the look is pitched ----
+        P138 = "pitched view (F138)"
+        ITEM138 = "$wpn_m_assaultrifle_laser_fauto_name;"
+
+        def pv138(mode="mouse look", item="none", aim=40.0, amin=30.0, amax=50.0, head=0.0, sink=14.0, smax=18.0, hrise=0.5, wmean=0.98, wmax=1.0, added=13.0, amaxadd=18.0,
+                  applied=58, calls=60, measured=0, why="none", up=-12.0, fwd=-2.0, view=2.5, inside=0, insideof=60, refused=40, lta=0, returned=1, retrefused=0, notneeded=0):
+            return R("native on foot pitched view (F138) 1 s: mode", mode, item, aim, amin, amax, head, sink, smax, hrise, wmean, wmax, added, amaxadd, applied, calls, measured, why,
+                     up, fwd, view, inside, insideof, refused, lta, returned, retrefused, notneeded)
+
+        def bins138(mode="mouse look", item="none", body="[30,40) 12 +9.0 -10.0 -1.0 +0.5; [40,50) 48 +14.0 -12.0 -2.0 +0.5"):
+            return R("native on foot pitched view (F138) 10 s bins", mode, item, body)
+
+        check("F138 pitched view: no pitched second while look to aim ran", [ENG109, look109(), look109()], 0, [("IDLE", P138)],
+              has=["no second with a call at 10 deg of aim pitch or more"], lacks=["UNPARSED"])
+        check("F138 pitched view: the sink added in pitched seconds of both modes, INSIDE none", [pv138(), pv138(mode="look to aim", aim=38.0)], 0, [("OK", P138)],
+              has=["2 pitched s (120 calls; look to aim and mouse look), aim +30..+50 deg", "added in 2 s (116 calls, up to 18.0 cm), measured only 0 calls",
+                   "the settle refused for the aim's pitch 80 calls (look to aim's gate 0); returned to the stance's raise 2 times (refused 0, not needed 0)",
+                   "INSIDE 0 of 120 calls in the 2 applied second(s) with the aim up"], lacks=["UNPARSED"])
+        check("F138 pitched view: an armed episode gave nothing back (not needed), the line says so", [pv138(item=ITEM138, applied=0, added=0.0, amaxadd=0.0, measured=60, returned=0, notneeded=1)], 0,
+              [("IDLE", P138)], has=["returned to the stance's raise 0 times (refused 0, not needed 1)"], lacks=["UNPARSED"])
+        check("F138 pitched view: INSIDE in a third of the calls with the sink added", [pv138(inside=20, insideof=60)], 0, [("PARTIAL", P138)],
+              has=["INSIDE 20 of 60 calls", "(33%; the proof is under 10%)"], lacks=["UNPARSED"])
+        check("F138 pitched view: INSIDE in a tenth of the calls is not under 10%", [pv138(inside=6, insideof=60)], 0, [("PARTIAL", P138)], has=["INSIDE 6 of 60 calls"])
+        check("F138 pitched view: INSIDE in 5% of the calls", [pv138(inside=3, insideof=60)], 0, [("OK", P138)], has=["INSIDE 3 of 60 calls"], lacks=["UNPARSED"])
+        check("F138 pitched view: the sink never added with an empty hand, the leading reason named",
+              [pv138(applied=0, added=0.0, amaxadd=0.0, sink=0.0, smax=0.0, why="no reference 58, stance changed 2"), pv138(applied=0, added=0.0, amaxadd=0.0, why="no reference 60")], 0,
+              [("PARTIAL", P138)], has=["never added with an empty hand in 2 pitched second(s); leading reason: no reference (118 calls)", "added in 0 s (0 calls, up to 0.0 cm)"],
+              lacks=["UNPARSED"])
+        check("F138 pitched view: an empty-hand second that added nothing beside one that did is judged on the one that did",
+              [pv138(), pv138(applied=0, added=0.0, amaxadd=0.0, why="LOCAL pose generation changed 60")], 0, [("OK", P138)], lacks=["UNPARSED", "leading reason"])
+        check("F138 pitched view: an item drawn in every pitched second is measured only", [pv138(item=ITEM138, applied=0, added=0.0, amaxadd=0.0, measured=60)], 0, [("IDLE", P138)],
+              has=["measured only 60 calls", "an item was drawn in every pitched second: measured only"], lacks=["UNPARSED"])
+        check("F138 pitched view: a second with an item for some of its calls reads (item and count)", [pv138(item=ITEM138 + " in 12 of 60 calls", applied=48, measured=12)], 0, [("OK", P138)],
+              has=["added in 1 s (48 calls", "measured only 12 calls"], lacks=["UNPARSED"])
+        check("F138 pitched view: looking down only, INSIDE is not measured with the aim up", [pv138(aim=-40.0, amin=-50.0, amax=-30.0)], 0, [("OK", P138)],
+              has=["INSIDE not measured in the applied seconds with the aim up (0 of them)"], lacks=["UNPARSED"])
+        check("F138 pitched view: the 10 s bin lines are read", [pv138(), bins138(), bins138(mode="look to aim", item=ITEM138)], 0, [("OK", P138)], lacks=["UNPARSED"])
+        check("F138 pitched view: bin lines alone", [bins138()], 0, [("IDLE", P138)], has=["1 bin line(s) and no 1 s line"], lacks=["UNPARSED"])
+        check("F138 pitched view: a drifted line is unparsed", ["native on foot pitched view (F138) 1 s: something else"], 4, [("UNPARSED", P138)])
+
+        # ---- F135: the on-foot menu probe (MEASURE ONLY) ----
+        M135 = "menu probe (F135)"
+
+        def probe135(upd=90, place=0, ray=0, win=0, own=0, ps=0, isub=90, gui="0", lta="following", proc="ran", block="unknown (no ask)", updo="0x1F40A010/+0x4DC1B50",
+                     placeo="none"):
+            return R("native on foot menu probe (F135) 1 s: update %u (objs %s)", upd, updo, place, placeo, ray, win, own, ps, isub, 0, 0, gui, lta, proc, block)
+
+        def key135(src="key Escape", d="down"):
+            return R("native on foot menu probe (F135): %s %s", src, d)
+
+        def edge135(name, what="rose"):
+            return R("native on foot menu probe (F135): %s %s%s", name, what, "")
+
+        check("F135 probe: no probe line (a build before F135, or nothing moved)", [ENG109, look109()], 0, [("IDLE", M135)], has=["no menu probe line in the window"], lacks=["UNPARSED"])
+        def at135(entries):
+            """A log whose lines carry their own times (seconds after 10:00:00, fractions allowed): the key and rise lines are judged by their gaps."""
+            out = header
+            for t, m in entries:
+                whole = int(t)
+                out += "[%02d:%02d:%02d.%03d] %s\n" % (10 + whole // 3600, whole // 60 % 60, whole % 60, int(round((t - whole) * 1000)), m)
+            return out
+
+        check("F135 probe: the Esc menu with the mouse still: the placement and the owner transform never moved, the panel submit rose",
+              at135([(1.0, edge135("update")), (1.0, edge135("inst submit")), (2.0, probe135()), (5.0, key135()), (5.2, edge135("panel submit")), (6.0, probe135(ps=40)),
+                     (7.0, probe135(ps=90)), (9.0, key135("key Escape", "up")), (9.6, edge135("panel submit", "fell (0 for 0.5 s)"))]), 0, [("OK", M135)],
+              has=["key Escape down at 10:00:05", "rose within 0.5 s: panel submit", "already non-zero: update, inst submit",
+                   "stayed 0: placement, ray, cursor window, owner transform, bridge update, bridge placement", "3 probe second(s), 2 key edge(s)", "GuiFocus seen: 0"],
+              lacks=["UNPARSED"])
+        check("F135 probe: an inventory panel: the placement, ray and cursor window rose with the mouse over it, a rise after the 0.5 s is not counted",
+              at135([(1.0, edge135("update")), (4.0, key135("pad Start")), (4.1, edge135("placement")), (4.1, edge135("ray")), (4.2, edge135("cursor window")), (4.9, edge135("owner transform")),
+                     (5.0, probe135(place=60, ray=60, win=60, placeo="0x2A0B1C40/+0x5120A80", gui="3", lta="held (panel)"))]), 0, [("OK", M135)],
+              has=["pad Start down at 10:00:04", "rose within 0.5 s: placement, ray, cursor window; already non-zero: update; stayed 0: owner transform", "GuiFocus seen: 3"],
+              lacks=["UNPARSED"])
+        check("F135 probe: probe seconds with no key press", [probe135(place=5), probe135(proc="stalled", block="yes", lta="off", gui="unknown")], 0, [("OK", M135)],
+              has=["no Escape, Start or Back press in the window", "placement 5"], lacks=["UNPARSED"])
+
+        # ---- F133: head steps judged by rate; the follower re-centres on a standing yaw offset ----
+        RC133 = R("native on foot look to aim (F133): re-centred: the reported head stood %+.1f deg off the aim in yaw for %.1f s", -39.3, 2.0)
+        BIG133 = R("native on foot look to aim (F133): a head step of %+.1f deg yaw %+.1f deg pitch over %.0f ms (%.0f deg/s)", -41.1, 0.4, 3000, 14, 1, 41.1, 3000)
+        check("F133 look: a re-centre and a large step across a stall are counted, not judged", [ENG109, look109(), BIG133, RC133, look109(recentre=1)], 0, [("OK", L109)],
+              has=["F133: re-centred 1 (the standing yaw offset up to 39.3 deg), large head steps taken as motion 1 (largest 41.1 deg over 3000 ms)"], lacks=["UNPARSED"])
+        check("F133 look: a build before F133 (no re-centre tail) still reads", [ENG109, look109()], 0, [("OK", L109)], lacks=["UNPARSED", "F133"])
+        check("F133 look: the 1 s line's re-centres without event lines", [ENG109, look109(recentre=2), look109(recentre=0)], 0, [("OK", L109)], has=["F133: re-centred 2"],
+              lacks=["UNPARSED"])
+
+        # ---- F131: look to aim holds while a panel or a menu is open, and while the game runs no look ----
+        H131 = "look to aim hold (F131)"
+
+        def held131(why):
+            return R("native on foot look to aim (F131): held (%s); the aim stays", why)
+
+        def resumed131(s, why):
+            return R("native on foot look to aim (F131): resumed after %.1f s (%s cleared)", s, why)
+
+        check("F131 hold: no hold, look to aim ran", [ENG109, look109(), look109()], 0, [("IDLE", H131)], has=["look to aim ran 2 s and was never held"])
+        check("F131 hold: a panel held it, then a menu", [ENG109, look109(), held131("an on-foot panel is open"), look109(), resumed131(2.4, "an on-foot panel is open"),
+              held131("a menu or map holds the 2D screen + the game's look processor has not run for 150 ms"), resumed131(61.5, "a menu or map holds the 2D screen")], 0,
+              [("OK", H131)], has=["2 hold(s) began, 2 resumed (63.9 s held in the resumed ones)", "reasons: an on-foot panel is open 1, a menu or map holds the 2D screen 1, "
+                                   "the game's look processor has not run for 150 ms 1"], lacks=["UNPARSED"])
+        check("F131 hold: the 1 s lines count the ticks when the event lines were held back", [ENG109, look109(f131n=40, f131why="panel+menu"), look109(f131n=12, f131why="no look")],
+              0, [("OK", H131)], has=["held ticks on the 1 s lines 52"], lacks=["UNPARSED"])
+        check("F131 hold: a begin line with no resume (look to aim stopped inside it)", [ENG109, held131("an on-foot panel is open"), look109()], 0, [("OK", H131)],
+              has=["1 hold(s) began, 0 resumed"], lacks=["UNPARSED"])
 
         def snap109(n, src="the stick", d="right", ads="", applied=45.0, calls=1):
             return R("native on foot snap turn (F109): snap %u by", n, src, d, 45, ads, 52.91, 0.01485, "measured", applied, calls, applied, 52)
@@ -16186,6 +16761,62 @@ def self_test_health():
         help_text = " ".join(out.getvalue().split())
         if "--health" not in help_text or "NEVER APPLIED" not in help_text or "--health-all" not in help_text or "--health" not in (__doc__ or ""):
             print("health: --help or the module text does not describe --health")
+            ok = False
+
+        # ---- world scale: the runtime's two lines (src\common\world_scale.h), read from the paired runtime log ----
+        # The lines are rendered from the header's own format literals, so a format that drifts from the rule fails here. The runtime log carries a UTC clock and no tag.
+        wssrc = read_text(os.path.join(repo_root(), "src", "common", "world_scale.h"))
+
+        def RW(needle, *vals):
+            key = "ws:" + needle
+            if key not in fmts:
+                fmts[key] = health_c_format(wssrc, needle)
+            if fmts[key] is None:
+                raise AssertionError("world_scale.h has no format holding %r: the --health rule that reads it is out of date" % needle)
+            return health_render(fmts[key], vals)
+
+        def ws_change(pct, located=63.4, elite=48.8):
+            return RW("located_icd=", pct, located, elite)
+
+        def ws_read(pct, seq=1200):
+            return RW("elite read eye transform", pct, seq)
+
+        def runtime(lines, name=None):
+            counter[0] += 1
+            path = os.path.join(tmp, name or "runtime_%03d.log" % counter[0])
+            with open(path, "w", encoding="utf-8", newline="") as f:
+                f.write("".join("2026-10-27 12:00:%02d.000 UTC pid=4242 tid=7 %s\r\n" % (i, m) for i, m in enumerate(lines)))
+            return path
+
+        WS, ws_ok = H_WORLD, [f90_part()] * 2
+        check("world scale: the value stayed 100, no line, nothing said", ws_ok, 0, [("OK", F90S)], lacks=["world scale", "NEVER APPLIED"],
+              extra=["--runtime-file", runtime(["native_frame: unrelated runtime line"])])
+        check("world scale: no runtime log at all is not a failure", ws_ok, 0, [("OK", F90S)], lacks=["world scale", "NEVER APPLIED"])
+        check("world scale: latched 130 and Elite read the eye transform at it", ws_ok, 0, [("OK", WS)],
+              has=["latched 130%", "eyes are 63.4 mm apart and Elite's 48.8 mm", "the last at geometry sequence 1200"], extra=["--runtime-file", runtime([ws_change(130), ws_read(130)])])
+        check("world scale: 130, 80 and back to 100, each read after its change", ws_ok, 0, [("OK", WS)], has=["latched 130% -> 80% -> 100%", "3 read line(s)"],
+              extra=["--runtime-file", runtime([ws_change(130), ws_read(130), ws_change(80, 63.4, 79.3), ws_read(80), ws_change(100, 63.4, 63.4), ws_read(100)])])
+        check("world scale: latched and never read is NEVER APPLIED", ws_ok, 3, [("NEVER APPLIED", WS)], has=["never read its eye transform at 130% after the runtime latched it", "exit 3"],
+              extra=["--runtime-file", runtime([ws_change(130)])])
+        check("world scale: a read before the change does not apply it", ws_ok, 3, [("NEVER APPLIED", WS)], has=["never read its eye transform at 130%"],
+              extra=["--runtime-file", runtime([ws_read(130), ws_change(130)])])
+        check("world scale: a value came back and was not read the second time", ws_ok, 3, [("NEVER APPLIED", WS)], has=["never read its eye transform at 130% after"],
+              extra=["--runtime-file", runtime([ws_change(130), ws_read(130), ws_change(80, 63.4, 79.3), ws_read(80), ws_change(130)])])
+        check("world scale: a read with no latch line is PARTIAL", ws_ok, 0, [("PARTIAL", WS)], has=["no latch line"], extra=["--runtime-file", runtime([ws_read(130)])])
+        check("world scale: a labelled line no pattern matches is UNPARSED", ws_ok, 4, [("UNPARSED", WS)], extra=["--runtime-file", runtime(["world_scale: 130 percent"])])
+        check("world scale: --since and --until cut the graphics log and not the runtime log", ws_ok, 0, [("OK", WS)], lacks=[row("OK", F90S)], extra=[
+            "--runtime-file", runtime([ws_change(130), ws_read(130)]), "--since", "23:00:00"])
+        gfx_named = write(body(ws_ok), "edvr_gfx_20261027_120000.log")
+        runtime([ws_change(150, 63.4, 42.3), ws_read(150)], "edvr_openxr_20261027_120000_100_4242.log")
+        checks += 1
+        rc, out = cli(["--file", gfx_named, "--health", "--expect-build", version])
+        if rc != 0 or row("OK", WS) not in out or "latched 150%" not in out:
+            print("health world scale: the runtime log that opened with the graphics log was not paired (rc=%d):\n%s" % (rc, out))
+            ok = False
+        checks += 1
+        rc, out = cli(["--file", write(body(ws_ok)), "--health", "--expect-build", version, "--runtime-file", os.path.join(tmp, "no_such_runtime.log")])
+        if rc != 1 or "no such runtime log" not in out:
+            print("health world scale: a --runtime-file that is not there did not stop (rc=%d):\n%s" % (rc, out))
             ok = False
 
         # ---- the one failure line the rules read that is not in native_on_foot.cpp ----

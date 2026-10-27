@@ -75,6 +75,11 @@ struct FakeSource final : SystemSource {
     std::lock_guard<std::mutex> lock(mutex);if(accepted)++queryAccepted;else ++queryRejected;
   }
   std::atomic<unsigned> unsupportedCalls{0};
+  // The first answer to Elite's eye-transform call at a world scale the last answer did not carry.
+  unsigned worldNotes = 0; uint32_t worldNotedPercent = 0; uint64_t worldNotedSequence = 0;
+  void noteWorldScaleRead(uint32_t percent, uint64_t sequence) noexcept override {
+    std::lock_guard<std::mutex> lock(mutex); ++worldNotes; worldNotedPercent = percent; worldNotedSequence = sequence;
+  }
 
   explicit FakeSource() {
     auto in = geometry();
@@ -580,8 +585,8 @@ int selfTest() {
   auto eye0 = system->GetEyeToHeadTransform(vr::Eye_Left); auto eye1 = system->GetEyeToHeadTransform(vr::Eye_Right);
   check(near(eye0.m[2][3], .06f) && near(eye1.m[2][3], -.06f), "both eye transforms returned by value, in Elite's handedness (this fixture's eyes sit at tz -0.06 and +0.06)");
   {
-    // The answer to the game is S*E*S, S = diag(1,1,-1) (docs\canted-projection.md), and nothing else moves. The located transform the snapshot holds (the
-    // native frame tables and the layer read it there) is never touched, and the IPD property is made from the located one.
+    // The answer to the game is S*E*S, S = diag(1,1,-1) (docs\canted-projection.md), and nothing else moves. The transform the snapshot holds (the pair Elite is
+    // told: the located eyes moved by the world scale, which is none here) is never touched, and the IPD property is made from it.
     const GeometrySnapshot kept = source.state.geometry;
     const SystemRead keptState = source.state;
     vr::ETrackedPropertyError ipdError = vr::TrackedProp_Success;
@@ -592,7 +597,7 @@ int selfTest() {
     check(std::memcmp(&source.state.geometry, &kept, sizeof(kept)) == 0 && std::memcmp(&source.state.optics, &keptState.optics, sizeof(keptState.optics)) == 0,
           "...while the snapshot and the cached optics are bit-identical afterwards (nothing reads the game-facing answer back)");
     check(std::fabs(system->GetFloatTrackedDeviceProperty(0, vr::Prop_UserIpdMeters_Float, &ipdError) - ipd) < 1e-7f && ipd > 0.1f,
-          "...and the IPD property is the same after the calls (made from the located transform)");
+          "...and the IPD property is the same after the calls (made from the snapshot's transform)");
     // A yawed, pitched eye shows the rotation entries: exactly R02, R12, R20, R21 and tz change sign.
     vr::HmdMatrix34_t yawed{};
     const double a = 10.0*3.14159265358979323846/180.0, p = 4.0*3.14159265358979323846/180.0;
@@ -620,6 +625,85 @@ int selfTest() {
     check(cached.m[0][2] == 0.0f - yawed.m[0][2] && cached.m[2][3] == 0.0f - yawed.m[2][3] && cached.m[0][0] == yawed.m[0][0] && cached.m[0][3] == yawed.m[0][3],
           "no live geometry: the cached optics are corrected the same way");
     source.state = keptState;
+  }
+  {
+    // World scale (common/world_scale.h; docs/world-scale.md): a snapshot made at p percent holds the located eyes moved about their midpoint to 100/p of their
+    // distance, rotations untouched; Elite's answer is S*E*S of it as ever, and the IPD property is the separation it is told. 100 is today's answer to the bit.
+    check(source.worldNotes == 0, "at 100 percent the eye-transform answers wrote no world scale note");
+    const double yaw = 10.0*3.14159265358979323846/180.0;
+    GeometryInput canted = geometry();
+    canted.views[0].pose.orientation = {0.0f, float(std::sin(yaw/2)), 0.0f, float(std::cos(yaw/2))};
+    canted.views[1].pose.orientation = {0.0f, float(-std::sin(yaw/2)), 0.0f, float(std::cos(yaw/2))};
+    auto at = [&](uint32_t percent, GeometrySnapshot& out) { GeometryInput in = canted; in.worldScalePercent = percent; return edvr::openxr::makeGeometrySnapshot(in, out); };
+    GeometrySnapshot s100{}, s130{}, s80{}, s50{}, s200{}, untouched{};
+    check(at(100, s100) && at(130, s130) && at(80, s80) && at(50, s50) && at(200, s200) && edvr::openxr::makeGeometrySnapshot(canted, untouched), "snapshots at 50, 80, 100, 130 and 200 percent");
+    check(std::memcmp(&s100.eyeToHead, &untouched.eyeToHead, sizeof(s100.eyeToHead)) == 0 && untouched.native.worldScalePercent == 100,
+          "100 percent is the default and the same pair to the bit");
+    const double was = edvr::openxr::eyeSeparation(s100.eyeToHead);
+    bool aboutMidpoint = true, rotationsKept = true;
+    const struct { const GeometrySnapshot* snap; double percent; } cases[] = {{&s130, 130}, {&s80, 80}, {&s50, 50}, {&s200, 200}};
+    for (const auto& c : cases) {
+      for (int axis = 0; axis < 3; ++axis) {
+        const double mid = 0.5*(double(s100.eyeToHead[0].m[axis][3]) + s100.eyeToHead[1].m[axis][3]);
+        for (int eye = 0; eye < 2; ++eye) {
+          const double want = mid + (double(s100.eyeToHead[eye].m[axis][3]) - mid)*100.0/c.percent;
+          aboutMidpoint = aboutMidpoint && std::fabs(double(c.snap->eyeToHead[eye].m[axis][3]) - want) < 1e-6;
+        }
+      }
+      for (int eye = 0; eye < 2; ++eye) for (int i = 0; i < 3; ++i) for (int j = 0; j < 3; ++j)
+        rotationsKept = rotationsKept && c.snap->eyeToHead[eye].m[i][j] == s100.eyeToHead[eye].m[i][j];
+    }
+    check(aboutMidpoint, "50, 80, 130 and 200 percent move both eye origins about their midpoint by 100 over the percent");
+    check(rotationsKept && s130.eyeToHead[0].m[0][2] != 0.0f, "...and leave every rotation entry alone (a canted panel keeps its yaw)");
+    check(std::fabs(edvr::openxr::eyeSeparation(s130.eyeToHead) - was*100.0/130.0) < 1e-6 && edvr::openxr::eyeSeparation(s130.eyeToHead) < was &&
+              edvr::openxr::eyeSeparation(s80.eyeToHead) > was, "130 percent brings the eyes closer (a bigger world), 80 percent moves them apart");
+    check(std::memcmp(&s130.headToLocal, &s100.headToLocal, sizeof(s100.headToLocal)) == 0 && std::memcmp(s130.raw, s100.raw, sizeof(s100.raw)) == 0 &&
+              std::memcmp(&s130.native.views, &s100.native.views, sizeof(s100.native.views)) == 0 && s130.native.worldScalePercent == 130,
+          "...while the head, the field of view and the located views the snapshot carries are unchanged");
+    GeometrySnapshot refused{};
+    GeometryInput bad = canted;
+    bool refusedAll = true;
+    for (uint32_t percent : {0u, 49u, 201u, 1000u}) { bad.worldScalePercent = percent; refusedAll = refusedAll && !edvr::openxr::makeGeometrySnapshot(bad, refused); }
+    check(refusedAll, "a percent outside 50..200 (0 included) is no geometry");
+
+    // Through the system: S*E*S of the told pair, the IPD property, and one note for each new value (never one per call).
+    const SystemRead keptWorld = source.state;
+    auto serve = [&](const GeometrySnapshot& snap) {
+      source.state.geometry = snap; source.state.geometryValid = true; source.state.optics.generation = snap.native.generation; source.state.optics.sequence = snap.native.sequence;
+      for (int eye = 0; eye < 2; ++eye) source.state.optics.eyeToHead[eye] = snap.eyeToHead[eye];
+      source.state.optics.worldScalePercent = snap.native.worldScalePercent;
+    };
+    serve(s130);
+    vr::ETrackedPropertyError scaledError = vr::TrackedProp_Success;
+    const float scaledIpd = system->GetFloatTrackedDeviceProperty(0, vr::Prop_UserIpdMeters_Float, &scaledError);
+    check(scaledError == vr::TrackedProp_Success && std::fabs(scaledIpd - float(edvr::openxr::eyeSeparation(s130.eyeToHead))) < 1e-7f &&
+              std::fabs(scaledIpd - float(was*100.0/130.0)) < 1e-6f, "the IPD property is the separation Elite is told (130 percent)");
+    bool handed = true;
+    for (int eye = 0; eye < 2; ++eye) {
+      const auto given = system->GetEyeToHeadTransform(eye ? vr::Eye_Right : vr::Eye_Left);
+      const auto& held = s130.eyeToHead[eye];
+      for (int i = 0; i < 3; ++i) for (int j = 0; j < 4; ++j) {
+        const bool flips = (i == 2) != (j == 2);
+        handed = handed && given.m[i][j] == (flips ? 0.0f - held.m[i][j] : held.m[i][j]);
+      }
+    }
+    check(handed, "Elite's answer at 130 percent is S*E*S of the scaled pair, as it is of the located one at 100");
+    for (int again = 0; again < 5; ++again) { system->GetEyeToHeadTransform(vr::Eye_Left); system->GetEyeToHeadTransform(vr::Eye_Right); }
+    { std::lock_guard<std::mutex> lock(source.mutex);
+      check(source.worldNotes == 1 && source.worldNotedPercent == 130 && source.worldNotedSequence == s130.native.sequence,
+            "twelve answers at 130 percent wrote one note, naming 130 and the geometry sequence"); }
+    serve(s100);
+    system->GetEyeToHeadTransform(vr::Eye_Left); system->GetEyeToHeadTransform(vr::Eye_Right);
+    { std::lock_guard<std::mutex> lock(source.mutex);
+      check(source.worldNotes == 2 && source.worldNotedPercent == 100, "going back to 100 percent wrote one more note"); }
+    // No live geometry: the cached optics answer, at the scale they were built with.
+    serve(s80);
+    source.state.geometryValid = false; source.state.geometry = {};
+    const auto cached = system->GetEyeToHeadTransform(vr::Eye_Left);
+    { std::lock_guard<std::mutex> lock(source.mutex);
+      check(cached.m[0][3] == s80.eyeToHead[0].m[0][3] && cached.m[2][3] == 0.0f - s80.eyeToHead[0].m[2][3] && source.worldNotes == 3 && source.worldNotedPercent == 80 &&
+                source.worldNotedSequence == s80.native.sequence, "no live geometry: the cached optics answer at 80 percent, and say so once"); }
+    source.state = keptWorld;
   }
   headPoseTests(system, source, concrete);
   for(const auto e:{vr::Eye_Left,vr::Eye_Right})for (const auto api : {vr::API_DirectX, vr::API_OpenGL}) for (const auto planes : {std::pair<float,float>{.025f,50000.f}, {.1f,1000.f}, {1.f,50000.f}}) {

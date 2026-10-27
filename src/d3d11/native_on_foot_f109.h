@@ -177,9 +177,32 @@ struct Follower {
 };
 // The look blocked by the game: this many processor calls in a row dropped an ask, and the follower holds (one probe of at most kProbeRad every kProbeMs finds
 // the end of it); the follower's target keeps the head's turn, so the aim catches up when the game takes the look again.
+// F129: the probes are zero-sum. An odd probe asks p (at most kProbeRad), the next, kProbeMs later, asks -p, and so on: if the game applies the asks by a path EDVR
+// does not measure (the hangar lift's, where the aim turned one-for-one while the stored pair read 0), the aim moves by p and back instead of walking. kProbeRad was
+// 1 deg, which walked the view past the guard in those lifts.
 constexpr uint32_t kBlockedCalls = 3;
 constexpr uint64_t kProbeMs = 100;
-constexpr double kProbeRad = 1.0 * kDeg;
+constexpr double kProbeRad = 0.25 * kDeg;
+struct ProbePair {
+    bool undo = false;                  // the next probe takes back the last
+    double lastY = 0.0, lastP = 0.0;    // what the last odd probe asked
+    void reset() noexcept { *this = ProbePair{}; }
+    // leftYaw, leftPitch: what is left to ask (the follower's, in-flight account taken off). The ask is the probe's, seat radians.
+    void next(double leftYaw, double leftPitch, double* askYaw, double* askPitch) noexcept {
+        if (!undo) {
+            lastY = clampd(leftYaw, -kProbeRad, kProbeRad);
+            lastP = clampd(leftPitch, -kProbeRad, kProbeRad);
+            *askYaw = lastY;
+            *askPitch = lastP;
+            undo = true;
+        } else {
+            *askYaw = 0.0 - lastY;
+            *askPitch = 0.0 - lastP;
+            undo = false;
+            lastY = lastP = 0.0;
+        }
+    }
+};
 // The centring at an engage: the reported head's offset from the aim (the render head in the seated space: the game composes its camera as the aim turned by the
 // reported head, F61), in the seat convention; an offset under kCentreMinDeg is left alone, one over kCentreMaxDeg (the head turned away) too.
 constexpr double kCentreMinDeg = 0.5, kCentreMaxDeg = 120.0;

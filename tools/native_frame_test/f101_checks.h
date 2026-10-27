@@ -49,6 +49,7 @@ static_assert(EDVR_NATIVE_FRAME_INPUT_SIZE_2 == 664 && EDVR_NATIVE_FRAME_INPUT_S
                   EDVR_NATIVE_FRAME_INPUT_SIZE_2 % alignof(EdvrNativeFrameInput) == 0,
               "the version 2 input is the words through ringCount, already on an 8-byte boundary");
 static_assert(sizeof(EdvrNativeFrameInput) == 720, "the version 3 input is the whole struct");
+static_assert(sizeof(EdvrNativeFrameOutput) == 184, "the whole output is 184 bytes, as it was before world scale took the last of the retired guard's words");
 // The output: every member is four bytes, so each prefix is its version's sizeof; versions 1 to 5 are the released offsets.
 static_assert(EDVR_NATIVE_FRAME_OUTPUT_SIZE_1 == offsetof(ReleasedOutput, trimOuterDeg) &&
                   EDVR_NATIVE_FRAME_OUTPUT_SIZE_2 == offsetof(ReleasedOutput, deferredPacing) &&
@@ -92,7 +93,7 @@ inline EdvrNativeFrameOutput releasedAsk(uint32_t version) {
 // ladder settles on, 0 when every step was refused.
 template <class Accept>
 inline uint32_t ladder(Accept&& accept, bool wordsOnly = false) {
-    for (uint32_t v = EDVR_NATIVE_FRAME_VERSION_10; v >= EDVR_NATIVE_FRAME_VERSION_1; --v) {
+    for (uint32_t v = EDVR_NATIVE_FRAME_VERSION_11; v >= EDVR_NATIVE_FRAME_VERSION_1; --v) {
         EdvrNativeFrameInput in{};
         edvr::nativeFrameInputShape(v, in);
         if (wordsOnly && in.version == EDVR_NATIVE_FRAME_INPUT_VERSION_1) in.size = EDVR_NATIVE_FRAME_INPUT_WORDS_1;
@@ -113,7 +114,7 @@ inline void run101(Check&& check) {
             everyOld = everyOld && releasedAccepts(in, edvr::nativeFrameAsk(v)) && in.size == 88u;
         }
         check(settled == EDVR_NATIVE_FRAME_VERSION_5 && everyOld,
-              "F101: this runtime's ladder settles at version 5 with a released (v0.21.1) provider, and every step below 7 is a shape it takes (input 88 bytes)");
+              "F101: this runtime's ladder settles at version 5 with a released (v0.21.1) provider (refused from 11 to 6), and every step below 7 is a shape it takes (input 88 bytes)");
         const uint32_t before = ladder([](const EdvrNativeFrameInput& in, const EdvrNativeFrameOutput& out) { return releasedAccepts(in, out); }, true);
         check(before == 0, "F101 (control): with F31 to F100's version 1 size (84, the words alone) a released provider refuses every step");
     }

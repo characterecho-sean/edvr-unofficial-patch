@@ -77,6 +77,7 @@
 #include "launch_centre_policy.h"
 #include "seated_space.h"
 #include "seat_memory.h"
+#include "seated_eye_offset.h"   // F134: the look turns the seated origin about the physical head; the eye offsets are seated vectors (pure parts)
 #include "seat_store.h"
 #include "reference_changes.h"
 #include "reset_events.h"
@@ -409,7 +410,9 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   uint64_t seatApplyFeatureMark=~0ull;   // F115: lookRuntimeFrames when the stored seat last landed (seatApplyAhead)
   // F33 (body align): the seated-space translation (metres) the provider wants the seated origin moved by, and what it carries now. A new
   // origin (lookRebase) carries none; the wanted value is applied again by delta on the next poll. currentOrigin and the origin generation never move.
-  double eyeWanted[3]={0,0,0},eyeApplied[3]={0,0,0};uint32_t eyeSerialSeen=0;bool eyeProviderSeen=false;
+  // F134: eyeWanted is a SEATED-axes vector (the origin's translation the provider wants, as it builds it from body axes: -right, -up, +forward); eyeApplied is the LOCAL
+  // translation the origin carries; eyeTarget is eyeWanted turned into LOCAL by the seat's heading (eyeoffset::localTarget), what eyePoll applies.
+  double eyeWanted[3]={0,0,0},eyeApplied[3]={0,0,0},eyeTarget[3]={0,0,0};uint32_t eyeSerialSeen=0;bool eyeProviderSeen=false;
   // F89: the serial of the alignment eyeApplied is (0: none, the origin's own). Told to the provider with each frame's pose (EdvrNativeFrameInput::eyeAlignApplied, serial + 1), so
   // the d3d11 half takes out of the pose exactly the alignment that was applied to it, however late the runtime applied it. Moves only where eyeApplied does.
   uint32_t eyeAppliedSerial=0;
@@ -574,6 +577,22 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     if(edvr::ppn::formatLog(line,sizeof(line),projectionVerdict,systemLabel,runtimeLabel,
          sizes[0].recommendedImageRectWidth,sizes[0].recommendedImageRectHeight,edvr::ppn::viewAngleDegrees(left,right))>0)
       nativeTracePuts(line);
+  }
+  // World scale (visual.world_scale, common/world_scale.h): the percent the last frame latched, 100 until a frame says otherwise. A change is said once, with the located
+  // eye separation and the one Elite is told; the geometry snapshots of that frame are built from the latched value alone. A frame whose eyes did not
+  // locate leaves it where it was, and says nothing, so the line always carries two separations that exist. A run that never leaves 100 writes no line.
+  uint32_t worldScaleLatched=edvr::kWorldScaleDefault;
+  void noteWorldScale(uint32_t percent,const GeometryInput& located,const GeometryInput& told) {
+    if(percent==worldScaleLatched)return;
+    GeometrySnapshot real{},given{};
+    if(!makeGeometrySnapshot(located,real)||!makeGeometrySnapshot(told,given))return;
+    worldScaleLatched=percent;
+    char line[160]{};
+    if(edvr::worldScaleChangeLine(line,sizeof(line),percent,1000.0*eyeSeparation(real.eyeToHead),1000.0*eyeSeparation(given.eyeToHead))>0)nativeTracePuts(line);
+  }
+  void noteWorldScaleRead(uint32_t percent,uint64_t sequence) noexcept override {
+    char line[160]{};
+    if(edvr::worldScaleReadLine(line,sizeof(line),percent,(unsigned long long)sequence)>0)nativeTracePuts(line);
   }
   bool renderSettingsCaptured=false;
   uint64_t renderSizingGeneration=0;
@@ -1557,6 +1576,9 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     GeometrySnapshot temporalGeometry{};
     const bool locatedValid=makeGeometrySnapshot(located,temporalGeometry);
     if(locatedValid)noteProjectionMode(located);
+    // The world scale this frame draws at, latched once from this frame's provider answer (below) and applied to the geometry Elite and the temporal pass are
+    // given and to nothing else: the located views (the layer, the menu, the plugins) keep the headset's own eyes.
+    uint32_t worldScale=edvr::kWorldScaleDefault;
     auto gameGeometry=located;
     // This is the geometry exposed to Elite and the temporal provider. Keep
     // runtime `located` dimensions raw for XR accounting, but make every
@@ -1585,6 +1607,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       }
       if(featureFrameKnown&&next.resubmitEnabled!=featureFrame.resubmitEnabled)previousPairValid=false;
       featureFrame=next;featureFrameKnown=true;
+      worldScale=edvr::worldScaleClamp(featureFrame.worldScalePercent);
       ++lookRuntimeFrames;lookWanted=double(featureFrame.lookYawTotal);lookGameFrame=featureFrame.lookYawGameFrame;   // F22
       // F33: the body-align translation (zero from the ladder unless a version 8 answer carried it).
       eyeProviderSeen=featureFrame.version>=EDVR_NATIVE_FRAME_VERSION_8;
@@ -1662,6 +1685,8 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
         }
       }
     }
+    gameGeometry.worldScalePercent=worldScale;
+    if(locatedValid)noteWorldScale(worldScale,located,gameGeometry);
     if(locatedValid) geometry.recommend(gameGeometry.width,gameGeometry.height);
     // The temporal pass is sized by what the frame it is handed was rendered
     // for, which while a rebuild is awaited is the previous ask and not the
@@ -3346,12 +3371,10 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       if(located!=XR_SUCCESS||!(head.locationFlags&XR_SPACE_LOCATION_POSITION_VALID_BIT)) {
         ++lookRefusals;lookWhy="head position not located";
       } else {
-        // F62b: the pivot is the head less the applied eye offset (eyeApplied), the point the reported head keeps once eyePoll re-applies that
-        // offset in LOCAL after the fold below; with no eye offset (every case before F62b's position lock) it is the head itself, unchanged.
-        const double hx=head.pose.position.x-eyeApplied[0],hz=head.pose.position.z-eyeApplied[2];
-        const double dx=lookSeated.x-hx,dz=lookSeated.z-hz;
-        const double c=std::cos(delta),s=std::sin(delta);
-        const SeatPose next{hx+c*dx+s*dz,lookSeated.y,hz-s*dx+c*dz,lookSeated.yaw+delta};
+        // F134: the origin turns about the PHYSICAL head, with the applied eye offset folded by the same turn (below). F62b pivoted at the head less the applied
+        // offset, which turned the offset-free origin U = O - e about h - e: U' = rot(U) - (I - R) e, hidden while e was applied and left behind when it was
+        // removed (2 sin(dpsi / 2) |e| of the seat: 4.3 cm and 10.4 cm in the 08:03 flight's presses 1 and 3). Pivoted at h, U turns about h exactly.
+        const SeatPose next=eyeoffset::turnAboutHead(lookSeated,head.pose.position.x,head.pose.position.z,delta);
         double yawBefore=0.0;const bool haveBefore=lookSeatedHeadYaw(&yawBefore);
         const XrResult r=seated.replace(seatedPoseFor(next,rotApplied[1],adsApplied));   // F61/F62b: zero pitches (keys off) are xrFromSeatPose(next)
         if(r!=XR_SUCCESS) {
@@ -3361,8 +3384,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
           lookSeated=next;lookComp=target;
           // F33: the applied body-align translation is carried in lookSeated, so the look's rotation about the head turns it too. Rotate the
           // applied value the same way, so eyePoll's delta re-applies the commanded seated offset (the wanted value stays fixed in seated space).
-          {const double ce=std::cos(delta),se=std::sin(delta);const double ex=eyeApplied[0],ez=eyeApplied[2];
-           eyeApplied[0]=ce*ex+se*ez;eyeApplied[2]=-se*ex+ce*ez;}
+          eyeoffset::foldLocal(eyeApplied,delta);
           dropPoseFrame(PoseInvalidation::Other);
           fillPollRing();
           ++lookApplies;lookWindowDeg+=seatRadToDeg(delta);
@@ -3387,11 +3409,15 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   void eyePoll() {
     if(!eyeProviderSeen||!features.acquired()||!seated.space()||!changes.active()) return;
     const uint64_t now=GetTickCount64();
-    double delta[3]={eyeWanted[0]-eyeApplied[0],eyeWanted[1]-eyeApplied[1],eyeWanted[2]-eyeApplied[2]};
+    // F134: eyeWanted is a SEATED vector (the provider builds it in body / seat axes); the origin's LOCAL translation is that vector turned by the seat's heading (before
+    // F134 it was added to the LOCAL position unturned, which landed an offset rotated by the seat's yaw).
+    eyeoffset::localTarget(lookSeated,eyeWanted,eyeTarget);
+    double delta[3]={eyeTarget[0]-eyeApplied[0],eyeTarget[1]-eyeApplied[1],eyeTarget[2]-eyeApplied[2]};
     const double biggest=std::fmax(std::fabs(delta[0]),std::fmax(std::fabs(delta[1]),std::fabs(delta[2])));
     if(biggest>1e-6&&!state.frameOpen()&&!seatApplyAhead()) {   // F115: as lookPoll's restore, after the seat's apply
       if(!lookSeatedKnown) lookRebase();
-      delta[0]=eyeWanted[0]-eyeApplied[0];delta[1]=eyeWanted[1]-eyeApplied[1];delta[2]=eyeWanted[2]-eyeApplied[2];   // lookRebase zeroes eyeApplied
+      eyeoffset::localTarget(lookSeated,eyeWanted,eyeTarget);   // lookRebase zeroes eyeApplied and takes the origin's heading
+      delta[0]=eyeTarget[0]-eyeApplied[0];delta[1]=eyeTarget[1]-eyeApplied[1];delta[2]=eyeTarget[2]-eyeApplied[2];
       SeatPose next=lookSeated;
       next.x+=delta[0];next.y+=delta[1];next.z+=delta[2];
       const XrResult r=seated.replace(seatedPoseFor(next,rotApplied[1],adsApplied));   // F61/F62b: zero pitches (keys off) are xrFromSeatPose(next)
@@ -3407,13 +3433,16 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     }
     // F89: what eyeApplied now is, by serial: the wanted alignment once it is (within a micrometre) the applied one. An apply that was refused, or put off because a frame
     // is open, leaves the serial of the alignment the origin really carries.
-    if(std::fmax(std::fabs(eyeWanted[0]-eyeApplied[0]),std::fmax(std::fabs(eyeWanted[1]-eyeApplied[1]),std::fabs(eyeWanted[2]-eyeApplied[2])))<=1e-6)
+    eyeoffset::localTarget(lookSeated,eyeWanted,eyeTarget);
+    if(std::fmax(std::fabs(eyeTarget[0]-eyeApplied[0]),std::fmax(std::fabs(eyeTarget[1]-eyeApplied[1]),std::fabs(eyeTarget[2]-eyeApplied[2])))<=1e-6)
       eyeAppliedSerial=eyeSerialSeen;
     if(now-eyeLineMs>=5000||eyeLineMs==0) {
       eyeLineMs=now;
-      nativeTracePrintf("eye_align_runtime,wanted_m=(%.4f,%.4f,%.4f),applied_m=(%.4f,%.4f,%.4f),applies=%llu,refusals=%llu,serial=%u,why=%s\n",
+      // F134: wanted_m is the seated offset, target_m that offset turned into LOCAL by the seat's heading (seat_yaw_deg), applied_m what the origin carries (they agree
+      // within a micrometre once applied).
+      nativeTracePrintf("eye_align_runtime,wanted_m=(%.4f,%.4f,%.4f),applied_m=(%.4f,%.4f,%.4f),applies=%llu,refusals=%llu,serial=%u,why=%s,target_m=(%.4f,%.4f,%.4f),seat_yaw_deg=%.3f\n",
           eyeWanted[0],eyeWanted[1],eyeWanted[2],eyeApplied[0],eyeApplied[1],eyeApplied[2],
-          (unsigned long long)eyeApplies,(unsigned long long)eyeRefusals,unsigned(eyeSerialSeen),eyeWhy);
+          (unsigned long long)eyeApplies,(unsigned long long)eyeRefusals,unsigned(eyeSerialSeen),eyeWhy,eyeTarget[0],eyeTarget[1],eyeTarget[2],seatRadToDeg(lookSeated.yaw));
     }
   }
   // F123: WaitGetPoses, no frame open. The position-only recentre the provider asks for (a version 10 answer's positionRecentre: 0, or the request's serial; the head containment's
@@ -3548,8 +3577,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
           ++rotRefusals;rotWhy="seated space replace refused";
         } else {
           lookSeated=next;
-          {const double ce=std::cos(dyaw),se=std::sin(dyaw);const double ex=eyeApplied[0],ez=eyeApplied[2];   // lookPoll's fold
-           eyeApplied[0]=ce*ex+se*ez;eyeApplied[2]=-se*ex+ce*ez;}
+          eyeoffset::foldLocal(eyeApplied,dyaw);   // lookPoll's fold (F134: rotPoll already pivots at the physical head, as lookPoll now does)
           rotApplied[0]=rotWanted[0];rotApplied[1]=rotWanted[1];
           dropPoseFrame(PoseInvalidation::Other);
           fillPollRing();

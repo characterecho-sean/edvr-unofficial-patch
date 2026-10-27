@@ -1,6 +1,7 @@
 #pragma once
 
 #include "projection_math.h"
+#include "../common/world_scale.h"
 #include <openxr/openxr.h>
 #include <cstdint>
 #include <cmath>
@@ -16,6 +17,9 @@ struct GeometryInput {
   XrPosef headPose{};
   XrSpaceLocationFlags headFlags = 0;
   uint32_t width[2]{}, height[2]{};
+  // World scale, percent (common/world_scale.h): 100 is the located eyes. makeGeometrySnapshot moves the two eye origins about their midpoint by 100 over this,
+  // so the snapshot's eyeToHead is the pair Elite is told. Only the caller that builds Elite's geometry sets it; the views stay the located ones.
+  uint32_t worldScalePercent = edvr::kWorldScaleDefault;
 };
 
 struct GeometrySnapshot {
@@ -51,6 +55,17 @@ inline void inverseRigid(const double a[4][4], double out[4][4]) {
 inline void product(const double a[4][4],const double b[4][4],double out[4][4]) {
   for(int i=0;i<4;++i)for(int j=0;j<4;++j){out[i][j]=0;for(int k=0;k<4;++k)out[i][j]+=a[i][k]*b[k][j];}
 }
+// World scale: the two eye origins (the translation column of each eyeToHead) move about their midpoint to 100/percent of their distance. Only the origins
+// move: a canted panel keeps its yaw and pitch, and gameHandedness (canted_display.h) still conjugates the pair afterwards. 100 leaves both untouched.
+inline void scaleEyeOrigins(double left[4][4],double right[4][4],uint32_t percent) {
+  if(percent==edvr::kWorldScaleDefault)return;
+  const double factor=100.0/double(percent);
+  for(int axis=0;axis<3;++axis) {
+    const double middle=0.5*(left[axis][3]+right[axis][3]);
+    left[axis][3]=middle+(left[axis][3]-middle)*factor;
+    right[axis][3]=middle+(right[axis][3]-middle)*factor;
+  }
+}
 inline bool narrow(const double m[3][4], vr::HmdMatrix34_t& out) {
   vr::HmdMatrix34_t c{};
   for(int i=0;i<3;++i)for(int j=0;j<4;++j){if(!std::isfinite(m[i][j])||std::fabs(m[i][j])>(std::numeric_limits<float>::max)())return false;c.m[i][j]=(float)m[i][j];}
@@ -63,13 +78,24 @@ inline bool makeGeometrySnapshot(const GeometryInput& in, GeometrySnapshot& out)
       !(in.viewFlags & XR_VIEW_STATE_ORIENTATION_VALID_BIT) ||
       !(in.viewFlags & XR_VIEW_STATE_POSITION_VALID_BIT) ||
       !(in.headFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT) ||
-      !(in.headFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT) || !detail::poseValid(in.headPose)) return false;
+      !(in.headFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT) || !detail::poseValid(in.headPose) ||
+      !edvr::worldScaleInRange(in.worldScalePercent)) return false;
   for(int i=0;i<2;++i) if(!in.width[i] || !in.height[i] || in.width[i]>0x7fffffffu || in.height[i]>0x7fffffffu ||
       in.views[i].type!=XR_TYPE_VIEW || in.views[i].next || !detail::poseValid(in.views[i].pose)) return false;
   RawFov raw[2]{}; for(int i=0;i<2;++i) if(!fovToRaw(in.views[i].fov,raw[i])) return false;
   double head[4][4], inv[4][4]; detail::rigid(in.headPose,head); detail::inverseRigid(head,inv);
   GeometrySnapshot c{}; c.native=in; if(!detail::narrow(head,c.headToLocal))return false;
-  for(int i=0;i<2;++i){c.raw[i]=raw[i];double eye[4][4],rel[4][4];detail::rigid(in.views[i].pose,eye);detail::product(inv,eye,rel);if(!detail::narrow(rel,c.eyeToHead[i]))return false;}
+  double rel[2][4][4];
+  for(int i=0;i<2;++i){c.raw[i]=raw[i];double eye[4][4];detail::rigid(in.views[i].pose,eye);detail::product(inv,eye,rel[i]);}
+  detail::scaleEyeOrigins(rel[0],rel[1],in.worldScalePercent);
+  for(int i=0;i<2;++i) if(!detail::narrow(rel[i],c.eyeToHead[i]))return false;
   out=c; return true;
+}
+
+// The distance between the two eye origins of an eyeToHead pair, metres: the effective IPD of whoever the pair is told to (Elite's, for a world-scaled snapshot).
+inline double eyeSeparation(const vr::HmdMatrix34_t (&eyes)[2]) {
+  double squared=0;
+  for(unsigned axis=0;axis<3;++axis){const double d=double(eyes[1].m[axis][3])-eyes[0].m[axis][3];squared+=d*d;}
+  return std::sqrt(squared);
 }
 }

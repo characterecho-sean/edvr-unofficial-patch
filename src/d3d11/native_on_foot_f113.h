@@ -14,7 +14,9 @@
 // 53211E8C072CD02E, carried another camera (up to 176 deg off): not a source.
 //
 // So both are row sources: the first of them or of the scene meshes to draw into an eye's scene depth gives the eye's rows. Once a second per eye whose rows
-// came from a source, the first scene mesh draw of that eye checks them against its own; one difference over f87::kFbTolerance latches the sources off.
+// came from a source, the first scene mesh draw of that eye checks them against its own. F113 latched the sources off for the session on one difference over
+// f87::kFbTolerance; a mesh that drew into one eye for 8 frames did that in the SRV flight, and the weapon UI pin lost its rows. F130 (native_on_foot_f130.h) marks the
+// disagreeing MESH instead and never switches a source off.
 #pragma once
 
 #include "native_on_foot_f87.h"   // kFbVs, kFbPs, kFbTolerance, FbGuard

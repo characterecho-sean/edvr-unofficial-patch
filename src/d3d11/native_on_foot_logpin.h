@@ -37,6 +37,8 @@ template<class T> inline void neck(T& d, const T& s) noexcept {
     d.animSum += s.animSum;
     d.tgtSum += s.tgtSum;
     d.camSum += s.camSum;
+    d.vnUpSum += s.vnUpSum;
+    d.vnForwardSum += s.vnForwardSum;
     d.vSum += s.vSum;
     d.askedSum += s.askedSum;
     d.legAnimSum += s.legAnimSum;

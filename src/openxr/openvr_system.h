@@ -67,9 +67,12 @@ class OpenVRSystem final : public vr::IVRSystem {
  private:
   void unavailable(unsigned slot) noexcept;
   void noteProperty(unsigned,TrackedDeviceIndex_t,ETrackedDeviceProperty,ETrackedPropertyError) noexcept;
+  void noteWorldScaleRead(uint32_t percent,uint64_t sequence) noexcept;
   SystemSource& source_;
   ExeModule exe_ = readExeModule();
   std::atomic<uint64_t> unavailable_{0};
+  // The world scale the last eye-transform answer carried (edvr::kWorldScaleDefault until an answer carries another): one relaxed load per call, a note per change.
+  std::atomic<uint32_t> worldScaleRead_{edvr::kWorldScaleDefault};
   struct ProjectionKey { uint64_t clip=0; unsigned eye=0,api=0; bool live=false; };
   ProjectionKey projectionKeys_[2][32]{};
   unsigned projectionReports_[2]{};

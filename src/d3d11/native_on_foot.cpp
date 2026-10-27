@@ -25,6 +25,7 @@
 #include "../common/native_frame.h"   // F22: nativeFrameSetLookYaw, the look-to-aim compensation total the runtime asks for each frame
 #include "../common/log.h"
 #include "../common/runtime_profile.h"
+#include "../common/world_scale.h"   // worldScaleEyeFactor: the gates on Elite's eye pair move with the world scale
 #include "../common/frame_flag.h"     // F115: hmdResetPressState, hmdResetPressTick (the player's recentre presses, for the boarding's seat line)
 #include "../common/seat_context.h"   // F115: decodeHmdPress, hmdPressStatusName
 #include "binding_shadow.h"   // bindingShaderHash: the HUD issuer probe's pixel shader
@@ -50,7 +51,15 @@
 #include "native_on_foot_f99.h"   // F99a: a drawn item's hands from the game's own selection, not from Status.json (pure parts)
 #include "native_on_foot_f107.h"   // F107: the game's camera away from the commander (pure parts)
 #include "native_on_foot_f113.h"   // F113: each eye's scene rows whenever the world is drawn (pure parts)
+#include "native_on_foot_f130.h"   // F130: one disagreeing scene mesh no longer switches the eye rows' sources off (pure parts)
+#include "native_on_foot_f131.h"   // F131: look to aim holds while a panel or a menu is open, and while the game runs no look (pure parts)
+#include "native_on_foot_f133.h"   // F133: head steps judged by rate, not size; the follower re-centres on a standing yaw offset (pure parts)
+#include "native_on_foot_f135.h"   // F135: the on-foot menu probe, measure only (pure parts)
+#include "native_on_foot_f137.h"   // F137: a virtual neck under mouse look (pure parts)
+#include "native_on_foot_f138.h"   // F138: the view holds its height over the neck while the look is pitched (pure parts)
+#include "xinput_watch.h"          // F135: the pad's Start and Back edges, evidence for the menu probe only
 #include "native_on_foot_f109.h"   // F109: look to aim on foot, the player's own turn in ADS, snap or smooth turning (pure parts)
+#include "native_on_foot_f129.h"   // F129: look to aim reads its turn from the player's own look processor; the look path instrument (pure parts)
 #include "../common/comfort_fade.h"   // F109: the snap's short fade (edvr::comfort::publish; the runtime blends it over both eyes)
 #include "native_on_foot_f111.h"   // F111: the panel pointer instrument (pure parts)
 #include "native_on_foot_f116.h"   // F116: the HUD hidden while a terminal fills the view (pure parts)
@@ -254,9 +263,39 @@ struct AdsActionSample { bool valid = false, value = false; uint64_t qpc = 0; ui
 struct F109Pend {
     bool valid = false;
     double inYaw = 0.0, inPitch = 0.0, mouseYaw = 0.0, mousePitch = 0.0, stickYaw = 0.0, stickPitch = 0.0, snapYaw = 0.0;
+    // F129: the update's sink [act+0x88] (kept after the record is taken: the processor's calls are told apart by it), and the sink's mouse fields the update left
+    // (pitch at +0x170, yaw at +0x174; sinkRead: they were read), which the local call reads again before it runs (the order check).
+    uintptr_t sink = 0;
+    bool sinkRead = false;
+    float sinkYaw = 0.0f, sinkPitch = 0.0f;
 };
 F109Pend g_f109Pend;
 nofoot::f109::Split g_f109SplitYaw, g_f109SplitPitch;   // game thread only: the mouse path's gain, from clean calls only
+// F129 (the hooks' side, game thread writes): which processor call takes the ask, the counters and the ring behind the look path lines, the components seen, the
+// episode state. The frame thread reads them (atomics, or the ring's sequence lock) and writes every line: the hooks log nothing.
+nofoot::f129::Gate g_f129Gate;                    // game thread only
+nofoot::f129::Counters g_f129Ctr;
+nofoot::f129::Ring g_f129Ring;
+nofoot::f129::CompTable g_f129Comps;
+nofoot::f129::Episode g_f129Episode;              // game thread only
+uint32_t g_f129UpdSeq = 0;                        // game thread only: the update hook's runs
+std::atomic<bool> g_f129InFallback{false};
+std::atomic<uint32_t> g_f129FallbackWhy{0};       // nofoot::f129::FallbackWhy of the last entry
+// An episode's two edges, published for the frame thread (the lines are its). The freeze is the ring's last eight records at the moment it began.
+std::atomic<uint32_t> g_f129FirstHist{0}, g_f129FirstN{0};   // the gate's first-call history, for the frame thread's lines (the gate itself is the game thread's)
+std::atomic<uint32_t> g_f129EpBegun{0}, g_f129EpEnded{0}, g_f129EpReasons{0};
+std::atomic<uint64_t> g_f129EpBeginMs{0}, g_f129EpEndMs{0};
+std::atomic<uint32_t> g_f129EpCounts[4] = {};     // at its end: unconsumed, path A or SKIP asks, first call not ours, asks
+struct F129Freeze {
+    std::atomic<uint32_t> seq{0};
+    uint32_t n = 0;
+    nofoot::f129::Rec rec[8];
+};
+F129Freeze g_f129Freeze;
+// F135 (MEASURE ONLY): per-call counts of every hook that can see a panel or a menu, and the distinct controllers (update) and panels (placement) seen in the second. The hooks add
+// (relaxed atomics, no logging); the frame thread takes them (f135Tick).
+nofoot::f135::Counters g_f135Ctr;
+nofoot::f135::ObjSet g_f135UpdObjs, g_f135PlaceObjs;
 inline void atomicAddDouble(std::atomic<double>& a, double v) noexcept {
     double cur = a.load(std::memory_order_relaxed);
     while (!a.compare_exchange_weak(cur, cur + v, std::memory_order_relaxed)) {
@@ -2737,6 +2776,7 @@ uint64_t __fastcall f9PanelSubmitHooked(void* set, void* view, uint64_t r8, uint
     void* caller = _ReturnAddress();
     const F9Fn4 original = reinterpret_cast<F9Fn4>(g_f9Probe[0].original);
     if (!original) return 0;
+    g_f135Ctr.add(nofoot::f135::kPanelSubmit);   // F135
     if (!g_f9Stop[0].load(std::memory_order_relaxed)) {
         const uintptr_t c = reinterpret_cast<uintptr_t>(caller);
         const uint32_t rva = f9Rva(c);
@@ -4745,6 +4785,7 @@ uint64_t __fastcall f9HrcSubmitHooked(void* hrc, void* a2, uint64_t a3, uint64_t
 uint64_t __fastcall f9InstSubmitHooked(void* inst, void* view, uint64_t r8, uint64_t r9) {
     const F9Fn4 original = reinterpret_cast<F9Fn4>(g_f9Probe[2].original);
     if (!original) return 0;
+    g_f135Ctr.add(nofoot::f135::kInstSubmit);   // F135
     // F100: the 260-byte sample is saved and restored only when it is valid (its one reader, nativeOnFootWeaponUiCurrentSubmit, reads the flag first).
     const bool previousSubmitValid=g_weaponUiMatchedSubmitTlsValid;
     alignas(WeaponUiPartSample) unsigned char previousSubmit[sizeof(WeaponUiPartSample)];
@@ -4921,7 +4962,7 @@ struct MenuInputScope {
     MenuInputScope(void* ctl,void* panel){
         if(!ctl||!panel||!g_menuInput.active())return;
         if(!g_menuInput.before(row,reinterpret_cast<uintptr_t>(ctl),reinterpret_cast<uintptr_t>(panel),nativeOnFootRenderFrame(),GetCurrentThreadId(),menuInputQpc(),guardedRead))return;
-        outer=t_menuInput;t_menuInput=&row;open=true;
+        outer=t_menuInput;t_menuInput=&row;open=true;g_f135Ctr.add(nofoot::f135::kBridgePlace);
     }
     void finish(){if(!open)return;t_menuInput=outer;open=false;g_menuInput.finish(row,menuInputQpc(),guardedRead);
         nofoot::menu_input::BridgePlacement p;p.generation=row.generation;p.ledgerFrame=row.ledgerFrame;p.renderFrame=row.renderFrame;p.thread=row.thread;p.triangles=row.triCount;p.readFlags=row.reads;p.meshStatus=row.meshStatus;
@@ -4934,7 +4975,7 @@ struct MenuUpdateScope {
     nofoot::menu_input::BridgeUpdate row;nofoot::menu_input::BridgeUpdate* outer=nullptr;bool open=false;
     explicit MenuUpdateScope(void* ctl){if(!ctl||!g_menuInput.active())return;
         if(!g_menuBridge.begin(row,reinterpret_cast<uintptr_t>(ctl),g_menuInput.frame.load(),nativeOnFootRenderFrame(),GetCurrentThreadId(),menuInputQpc(),guardedRead))return;
-        outer=t_menuUpdate;t_menuUpdate=&row;open=true;
+        outer=t_menuUpdate;t_menuUpdate=&row;open=true;g_f135Ctr.add(nofoot::f135::kBridgeUpdate);
     }
     void finish(){if(!open)return;t_menuUpdate=outer;open=false;g_menuBridge.finish(row,nativeOnFootRenderFrame(),menuInputQpc(),guardedRead);}
     ~MenuUpdateScope(){finish();}
@@ -4963,6 +5004,10 @@ uint8_t g_f120PinBytes[16] = {};                    // written before g_f120Pin 
 bool g_f120PinLogged = false;                       // frame thread only
 // F122: this second's panels seen (a placement that set the hit byte), sprites hidden and hides whose write failed (the hook threads add, the frame thread takes).
 std::atomic<uint32_t> g_f122Seen{0}, g_f122Hidden{0}, g_f122Failed{0};
+// F131: panels reached, ever (g_f122Seen is taken to zero by its window): look to aim holds while this moves (the placement hook runs every frame a panel is up).
+std::atomic<uint32_t> g_f131PanelSeq{0};
+// F131c: when (GetTickCount64) the cursor window hook or the owner transform hook last ran: a menu or a panel is up while they run, mouse still or not (the F135 probe).
+std::atomic<uint64_t> g_f131MenuHookMs{0};
 uint64_t g_f122LastMs = 0;                          // frame thread only
 bool g_f122ArmNoted = false;                        // frame thread only
 struct F111Slot {
@@ -5226,8 +5271,16 @@ uint64_t __fastcall f111UpdateLegacyHooked(void* a, void* b, uint64_t c, uint64_
 
 // F122, the key off: after the game's placement on a panel set the hit byte, the controller's sprite goes where it cannot be seen. Only the sprite's position
 // (+0x140) is written; the mouse NDC, the cursor window's output and the uv the movie takes are never touched, so the clicks land where the game's pointer is.
+// F135: the vtable of an object as an exe RVA (0: unreadable or outside the exe), one guarded pair of reads.
+uint32_t f135VtableRva(uintptr_t object) {
+    uintptr_t vt = 0;
+    if (!object || !g_base || !guardedRead(object, &vt, 8) || vt < g_base || vt - g_base > 0x7FFFFFFFull) return 0;
+    return static_cast<uint32_t>(vt - g_base);
+}
 uint64_t __fastcall f111UpdateHooked(void* a,void* b,uint64_t c,uint64_t d) {
     const F9Fn4 original=reinterpret_cast<F9Fn4>(g_f111Probe[0].original);if(!original)return 0;
+    g_f135Ctr.add(nofoot::f135::kUpdate);   // F135: the controller (low 32 bits and its vtable's RVA)
+    g_f135UpdObjs.add(static_cast<uint32_t>(reinterpret_cast<uintptr_t>(a)&0xFFFFFFFFu),f135VtableRva(reinterpret_cast<uintptr_t>(a)));
     MenuUpdateScope observer(a);
     return nofoot::menu_input::dispatchUpdate(g_f111LegacyUpdateEnabled.load(std::memory_order_acquire),
         [&](){const auto result=original(a,b,c,d);observer.row.returned=true;return result;},[&](){observer.finish();},
@@ -5241,7 +5294,10 @@ void panelMouseHide(uintptr_t ctl) {
     const h::Act act = h::decide(false, runtimeFlatProfile(), hit != 0);
     const bool wrote = act != h::Act::kHide || h::writeHidden(ctl, guardedWriteFloat);
     const h::Delta d = h::delta(act, wrote);
-    if (d.seen) g_f122Seen.fetch_add(1, std::memory_order_relaxed);
+    if (d.seen) {
+        g_f122Seen.fetch_add(1, std::memory_order_relaxed);
+        g_f131PanelSeq.fetch_add(1, std::memory_order_relaxed);
+    }
     if (d.hidden) g_f122Hidden.fetch_add(1, std::memory_order_relaxed);
     if (d.failed) g_f122Failed.fetch_add(1, std::memory_order_relaxed);
 }
@@ -5272,6 +5328,7 @@ void panelCursorApply(uintptr_t ctl, uintptr_t panel, float u, float v) {
     float sprite[3] = {};
     if (!guardedRead(ctl + nofoot::f111::kOffHit, &hit, 1) || !hit || !guardedRead(ctl + nofoot::f111::kOffPos, sprite, sizeof(sprite))) return;
     g_f122Seen.fetch_add(1, std::memory_order_relaxed);   // F122: a panel reached (the key on: the game's cursor is drawn, placed below)
+    g_f131PanelSeq.fetch_add(1, std::memory_order_relaxed);
     uintptr_t list = 0, tris = 0;
     uint64_t count = 0;
     const bool listOk = guardedRead(panel + z::kOffList, &list, 8) && list;
@@ -5336,6 +5393,14 @@ void panelCursorApply(uintptr_t ctl, uintptr_t panel, float u, float v) {
 uint64_t __fastcall f111PlaceHooked(void* a, void* b, uint64_t c, uint64_t d) {
     const F9Fn4 original = reinterpret_cast<F9Fn4>(g_f111Probe[1].original);
     if (!original) return 0;
+    g_f135Ctr.add(nofoot::f135::kPlace);   // F135: the panel (low 32 bits) and the vtable of its pick mesh's owner (the panel kind), when readable
+    {
+        uintptr_t list = 0, owner = 0;
+        const uintptr_t panel = reinterpret_cast<uintptr_t>(b);
+        uint32_t ownerRva = 0;
+        if (panel && guardedRead(panel + nofoot::f114b::kOffMeshList, &list, 8) && list && guardedRead(list, &owner, 8) && owner) ownerRva = f135VtableRva(owner);
+        g_f135PlaceObjs.add(static_cast<uint32_t>(panel & 0xFFFFFFFFu), ownerRva);
+    }
     MenuInputScope observer(a,b);
     const auto invoke=[&](){return nofoot::menu_input::afterOriginal([&](){return original(a,b,c,d);},[&](uint64_t){observer.finish();});};
     if (!g_panelMouse.load(std::memory_order_relaxed)) {   // F122: the cursor hidden; the instruments are idle, the one write is the sprite's hide
@@ -5377,6 +5442,7 @@ uint64_t __fastcall f111PlaceHooked(void* a, void* b, uint64_t c, uint64_t d) {
 uint64_t __fastcall f111RayHitHooked(void* panel, void* origin, void* dir, void* u, void* v, void* t, void* axA, void* axB) {
     const F111Fn8 original = reinterpret_cast<F111Fn8>(g_f111Probe[2].original);
     if (!original) return 0;
+    g_f135Ctr.add(nofoot::f135::kRay);   // F135
     const bool outerRay = t_f114bInRay;
     t_f114bInRay = true;
     t_f114bPend = false;
@@ -5416,6 +5482,8 @@ uint64_t __fastcall f111RayHitHooked(void* panel, void* origin, void* dir, void*
 uint64_t __fastcall f111WindowHooked(void* panel, void* out, uint64_t index, uint64_t point) {
     const F9Fn4 original = reinterpret_cast<F9Fn4>(g_f111Probe[3].original);
     if (!original) return 0;
+    g_f135Ctr.add(nofoot::f135::kWindow);   // F135
+    g_f131MenuHookMs.store(GetTickCount64(), std::memory_order_relaxed);   // F131c: a menu or panel is up while this runs
     const uint64_t result = original(panel, out, index, point);
     if(t_menuInput && t_menuInput->panel==reinterpret_cast<uintptr_t>(panel)) {
         nofoot::menu_input::observeWindow(*t_menuInput,reinterpret_cast<uintptr_t>(out),guardedRead);
@@ -5446,6 +5514,8 @@ uint64_t __fastcall f111WindowHooked(void* panel, void* out, uint64_t index, uin
 uint64_t __fastcall f114bOwnerXformHooked(void* owner, void* out, uint64_t c, uint64_t d) {
     const F9Fn4 original = reinterpret_cast<F9Fn4>(g_f114bProbe.original);
     if (!original) return 0;
+    g_f135Ctr.add(nofoot::f135::kOwner);   // F135
+    g_f131MenuHookMs.store(GetTickCount64(), std::memory_order_relaxed);   // F131c
     const uint64_t result = original(owner, out, c, d);
     if(t_menuInput && owner && out) {
         nofoot::menu_input::observeOwner(*t_menuInput,reinterpret_cast<uintptr_t>(owner),reinterpret_cast<uintptr_t>(out),guardedRead);
@@ -5758,14 +5828,18 @@ void f111RefreshGates() {
     const nofoot::f122::Gates gates = nofoot::f122::gates(open, g_panelMouse.load(std::memory_order_relaxed), runtimeFlatProfile());
     g_f111LegacyUpdateEnabled.store(gates.instruments,std::memory_order_release);
     const bool observer=open&&g_menuInput.active();
+    // F135/F131c: every panel hook's relay gate is open while native stereo is on foot (VR): the F135 probe counts their calls, and F131 holds look to aim while the cursor window or
+    // owner transform hook runs (the Esc menu, an inventory panel). With the instruments off (the default) a hook is a pass-through: the update runs the game's own through
+    // observedUpdate, and the ray, window and owner hooks return at once because no placement of ours is running.
+    const bool probe=open&&!runtimeFlatProfile();
     const int gateState = (gates.instruments ? 1 : 0) | (gates.placement ? 2 : 0) | (observer?4:0);
     if (gateState != g_f111GateState) {
         g_f111GateState = gateState;
         std::lock_guard<std::mutex> lock(g_f111Mu);
         for (auto& s : g_f111Slots) s = F111Slot{};   // a cycle across the gate's edge is not one
     }
-    for(size_t i=0;i<kF111Hooks;++i)if(g_f111Armed[i])g_f111Probe[i].gate.store((i==0?(gates.instruments||observer):nofoot::menu_input::hookGate(static_cast<unsigned>(i),gates.instruments,gates.placement,observer))?1u:0u,std::memory_order_seq_cst);
-    if(g_f114bArmed)g_f114bProbe.gate.store(gates.instruments||observer?1u:0u,std::memory_order_seq_cst);
+    for(size_t i=0;i<kF111Hooks;++i)if(g_f111Armed[i])g_f111Probe[i].gate.store((probe||(i==0?(gates.instruments||observer):nofoot::menu_input::hookGate(static_cast<unsigned>(i),gates.instruments,gates.placement,observer)))?1u:0u,std::memory_order_seq_cst);
+    if(g_f114bArmed)g_f114bProbe.gate.store(probe||gates.instruments||observer?1u:0u,std::memory_order_seq_cst);
     if(observer&&g_f111Armed[0])g_menuBridge.gateOpened(g_menuInput.frame.load(),menuInputQpc());
 }
 void f111Tick(uint64_t now) {
@@ -5878,6 +5952,13 @@ constexpr uintptr_t kCompSpringYawRateOff = 0x780, kCompSpringPitchRateOff = 0x7
 // pair is `movsd [rdi+0x5F4], xmm0` in 332841 and `movsd [rdi+0x624], xmm0` in 334473 and 334925.
 constexpr uintptr_t kCompYawDeltaOff = 0x624, kCompBasisOff = 0x5E0, kCompGainLoOff = 0x808, kCompGainHiOff = 0x80C;
 constexpr uintptr_t kCompPitchDeltaOff = 0x628;   // F62b: the processor's pitch delta (F22's capstone read: stored beside the yaw's)
+// F129 (RE analysis\decomp\verify_20261027_onfoot_lift_look.txt, build 334925): the processor has three exits. PATH A (byte comp+0x678 != 0 and byte comp+0x7A9 == 0)
+// does not read the sink and stores (the heading, pitch exactly 0.0f); SKIP (not path A, input disabled, override 0) writes NOTHING, the pair keeps its old value;
+// PATH B reads the sink's mouse terms and stores the remaining pair, the only path that carries an ask. comp+0x7D4 is the input-disabled byte, comp+0x4D8 a byte that
+// is 1 when a non-zero mouse term was read. The processor runs once per component (one per player-controlled humanoid); the player's own is the one whose sink
+// [comp+0x2E0] is the update's sink [act+0x88] (the same dependency on typeId 0x5F541DC), whose mouse fields are pitch +0x170 and yaw +0x174 (floats).
+constexpr uintptr_t kCompPathAOff = 0x678, kCompOverrideOff = 0x7A9, kCompInputOffOff = 0x7D4, kCompMouseTermOff = 0x4D8, kCompSinkOff = 0x2E0;
+constexpr uintptr_t kActSinkOff = 0x88, kSinkMousePitchOff = 0x170, kSinkMouseYawOff = 0x174;
 constexpr uint64_t kLookHeadMaxAgeMs = 500;    // a list-B head sample older than this is not shown (probe B)
 
 F9Probe g_f22LoadWait;   // read only
@@ -6663,6 +6744,113 @@ void lookReadHeadP2(uintptr_t listB) noexcept {
     g_worldCQpc = f30Qpc();
 }
 
+// ---- F129: the look paths, the hooks' side (game thread; no allocation, logging or locks; every read and write is guarded) ----------------------------------
+// The two hooks tell the gate (nofoot::f129::Gate) what the update left pending and which processor call is the player's, record every call in the ring, and count.
+// The frame thread's lines are f129Tick's. See native_on_foot_f129.h for the bug and the rules.
+__declspec(noinline) bool guardedWritePair32(uintptr_t address, uint32_t first, uint32_t second) noexcept {
+    __try {
+        volatile uint32_t* p = reinterpret_cast<volatile uint32_t*>(address);
+        p[0] = first;
+        p[1] = second;
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+inline uint32_t f129Low32(uintptr_t v) noexcept { return static_cast<uint32_t>(v & 0xFFFFFFFFu); }
+// An episode edge (game thread): the gate's runs decide, the frame thread prints. The freeze is the ring's last eight records as the episode began.
+void f129Episode(nofoot::f129::EpEvent e) noexcept {
+    namespace f129 = nofoot::f129;
+    const uint64_t ms = GetTickCount64();
+    const int edge = g_f129Episode.observe(e, ms);
+    if (edge > 0) {
+        f129::Rec last[8];
+        const size_t n = g_f129Ring.readOwn(last, 8);
+        const uint32_t s = g_f129Freeze.seq.load(std::memory_order_relaxed);
+        g_f129Freeze.seq.store(s + 1u, std::memory_order_relaxed);
+        std::atomic_thread_fence(std::memory_order_release);
+        g_f129Freeze.n = static_cast<uint32_t>(n);
+        for (size_t i = 0; i < n; ++i) g_f129Freeze.rec[i] = last[i];
+        std::atomic_thread_fence(std::memory_order_release);
+        g_f129Freeze.seq.store(s + 2u, std::memory_order_release);
+        g_f129EpReasons.store(g_f129Episode.reasons, std::memory_order_relaxed);
+        g_f129EpBeginMs.store(g_f129Episode.beginMs, std::memory_order_relaxed);
+        g_f129EpCounts[0].store(g_f129Episode.unconsumed, std::memory_order_relaxed);   // at the start: the run that opened it
+        g_f129EpCounts[1].store(g_f129Episode.aOrSkip, std::memory_order_relaxed);
+        g_f129EpCounts[2].store(g_f129Episode.firstNot, std::memory_order_relaxed);
+        g_f129EpCounts[3].store(g_f129Episode.asks, std::memory_order_relaxed);
+        g_f129Ctr.add(f129::kEpisodes);
+        g_f129EpBegun.fetch_add(1u, std::memory_order_release);
+    } else if (edge < 0) {
+        g_f129EpReasons.store(g_f129Episode.reasons, std::memory_order_relaxed);
+        g_f129EpEndMs.store(ms, std::memory_order_relaxed);
+        g_f129EpCounts[0].store(g_f129Episode.unconsumed, std::memory_order_relaxed);
+        g_f129EpCounts[1].store(g_f129Episode.aOrSkip, std::memory_order_relaxed);
+        g_f129EpCounts[2].store(g_f129Episode.firstNot, std::memory_order_relaxed);
+        g_f129EpCounts[3].store(g_f129Episode.asks, std::memory_order_relaxed);
+        g_f129EpEnded.fetch_add(1u, std::memory_order_release);
+    }
+}
+void f129FallbackEntered(uint8_t why) noexcept {
+    g_f129InFallback.store(true, std::memory_order_relaxed);
+    g_f129FallbackWhy.store(why, std::memory_order_relaxed);
+    g_f129Ctr.add(nofoot::f129::kFallbackEntered);
+}
+// The start of the update hook: the previous update's ask that no local call took is a blocked call (the follower's hold engages as for the game's own look block).
+void f129UpdateEntry() noexcept {
+    namespace f129 = nofoot::f129;
+    ++g_f129UpdSeq;
+    g_f129Ctr.add(f129::kUpdates);
+    const f129::UpdateEntryOut e = g_f129Gate.updateEntry();
+    if (e.processorRan) g_f129Ctr.maxOther(e.otherCalls);
+    if (e.fallbackEntered) f129FallbackEntered(e.why);
+    if (e.unconsumed) {
+        g_f129Ctr.add(f129::kUnconsumed);
+        g_f109Blocked.fetch_add(1, std::memory_order_relaxed);
+        g_f109BlockedRun.fetch_add(1, std::memory_order_relaxed);
+        f129Episode(f129::kEvUnconsumed);
+    }
+}
+// After the original update (every path, a refused update included): the sink pointer [act+0x88] and its mouse fields, the pending record's sink, the ask's outcome in
+// the sink, the ring. askYaw, askPitch: the head aim's ask as it ran, game input units; wantY, wantP: what was written into the mouse actions.
+void f129UpdateExit(uintptr_t act, bool pendValid, double askYaw, double askPitch, float wantY, float wantP) noexcept {
+    namespace f129 = nofoot::f129;
+    uintptr_t sink = 0;
+    bool sinkOk = guardedRead(act + kActSinkOff, &sink, 8) && sink >= 0x10000 && sink <= UINTPTR_MAX - 0x400;
+    float mouse[2] = {};   // pitch at +0x170, yaw at +0x174
+    const bool mouseOk = sinkOk && guardedRead(sink + kSinkMousePitchOff, mouse, 8);
+    if (!sinkOk) sink = 0;
+    const float sinkYaw = mouse[1], sinkPitch = mouse[0];
+    g_f109Pend.sink = sink;
+    g_f109Pend.sinkRead = mouseOk;
+    g_f109Pend.sinkYaw = sinkYaw;
+    g_f109Pend.sinkPitch = sinkPitch;
+    const bool asked = pendValid && (askYaw != 0.0 || askPitch != 0.0);
+    const f129::UpdateEntryOut e = g_f129Gate.updateEnd(pendValid, asked, sinkOk, sink);
+    if (e.fallbackEntered) f129FallbackEntered(e.why);
+    f129::SinkState state = f129::kSinkNone;
+    if (asked) {
+        g_f129Ctr.add(f129::kAsks);
+        state = f129::sinkOutcome(f129::sinkAxis(askYaw, mouseOk, wantY, sinkYaw), f129::sinkAxis(askPitch, mouseOk, wantP, sinkPitch));
+        if (state == f129::kSinkReached) g_f129Ctr.add(f129::kReached);
+        else if (state == f129::kSinkZeroed) g_f129Ctr.add(f129::kZeroed);
+        else if (state == f129::kSinkAltered) g_f129Ctr.add(f129::kAltered);
+    }
+    const double gy = g_f109SplitYaw.gain != 0.0 ? g_f109SplitYaw.gain : 1.0, gp = g_f109SplitPitch.gain != 0.0 ? g_f109SplitPitch.gain : 1.0;   // degrees: the measured gain, 1.0 with none
+    f129::Rec r;
+    r.kind = f129::kKindUpdate;
+    r.seq = g_f129UpdSeq;
+    r.id = f129Low32(act);
+    r.sink = f129Low32(sink);
+    r.a = static_cast<float>(askYaw * gy / nofoot::f109::kDeg);
+    r.b = static_cast<float>(askPitch * gp / nofoot::f109::kDeg);
+    r.sa = mouseOk ? sinkYaw : 0.0f;
+    r.sb = mouseOk ? sinkPitch : 0.0f;
+    r.sinkState = state;
+    r.flags = asked ? f129::kFlAsked : 0;
+    g_f129Ring.push(r);
+}
+
 using F22UpdateFn = void(__fastcall*)(void*);
 // The look update (game thread), every call. F62b: the head aim's queued yaw and pitch input (game input units; only while the frame thread has the hook on) is
 // written into the mouse's look actions for this call only and restored after it. F109: the right stick's look is its own pair of actions (act+0x180 yaw, +0x188
@@ -6672,6 +6860,7 @@ using F22UpdateFn = void(__fastcall*)(void*);
 // (nofoot::f109::Split): the head aim's share is cancelled, the player's (stick, mouse, snap, the game's springs) turns the view with the body. A refused read
 // leaves the game's values and the queue alone for the call. No allocation, logging or locks; every read and write is guarded.
 void lookUpdateRun(void* act, F22UpdateFn original) noexcept {
+    f129UpdateEntry();   // F129: the previous update's ask that no local processor call took is counted and filed as a blocked call, before the record is dropped
     g_f109Pend.valid = false;
     const uintptr_t a = reinterpret_cast<uintptr_t>(act);
     uintptr_t rotAct = 0, pitchAct = 0, stickYawAct = 0, stickPitchAct = 0;
@@ -6691,6 +6880,7 @@ void lookUpdateRun(void* act, F22UpdateFn original) noexcept {
         g_adsRefusals.fetch_add(1, std::memory_order_relaxed);
         g_adsHookWhy.store(why, std::memory_order_relaxed);
         original(act);
+        f129UpdateExit(a, false, 0.0, 0.0, 0.0f, 0.0f);   // F129: no record is pending; the sink is still read (it tells the processor's calls apart)
         return;
     }
     g_f109Updates.fetch_add(1, std::memory_order_relaxed);
@@ -6744,6 +6934,7 @@ void lookUpdateRun(void* act, F22UpdateFn original) noexcept {
     p.stickPitch = wSP || wantSP == oldSP ? wantSP : oldSP;
     p.snapYaw = ranY ? snap : 0.0;
     g_f109Pend = p;
+    f129UpdateExit(a, true, p.inYaw, p.inPitch, wantY, wantP);   // F129: the sink and its mouse fields into the record, the gate told, the ring
 }
 void adsActionPublish(bool valid, bool value) noexcept {
     uint32_t seq = g_adsActionSeq.load(std::memory_order_relaxed);
@@ -6878,32 +7069,20 @@ void __fastcall lookUpdateHooked(void* act) {
     if (g_adsActionSignatureOk) adsActionSample(act); // F70b: sample HumanoidZoom before this update sends the same bound logical value to its sink
     if (!act) {
         g_f109Pend.valid = false;
+        g_f129Gate.dropPend();   // F129: the gate's record goes with it
         original(act);
         return;
     }
     lookUpdateRun(act, original);   // F62b/F109: the head aim's input, the player's look dropped while look to aim is engaged, what the call ran with
 }
 
-// The processor hook (game thread). Read only: it records comp and, after the original, splits the game's yaw and pitch deltas (comp+0x624 / +0x628) into the
-// head aim's share and the player's. F109 (RE verify_20261025_onfoot_look_input): the delta is c * (dt * rate * stick + g * (mouse + in) + dt * spring), so the
-// head aim's share is g * in with g from clean calls only (no stick, no spring; nofoot::f109::Split), never the mouse ratio of F62b, which counted a stick's turn
-// (and the springs') as the head aim's whenever it wrote: the cancel then held the view while the avatar turned. The totals are cumulative (this thread is their
-// only writer). No allocation, logging or locks; the reads are guarded.
-using F22ProcFn = uint64_t(__fastcall*)(void*, float);
-uint64_t __fastcall lookProcHooked(void* comp, float dt) {
-    const F22ProcFn original = reinterpret_cast<F22ProcFn>(g_f22Proc.original);
-    if (!original) return 0;
-    g_lookComp.store(reinterpret_cast<uintptr_t>(comp), std::memory_order_relaxed);
-    g_lookProcCalls.fetch_add(1, std::memory_order_relaxed);
-    g_lookGameFrame.fetch_add(1, std::memory_order_relaxed);
-    original(comp, dt);
-    if (!g_f109Pend.valid) return 0;
-    const F109Pend p = g_f109Pend;
-    g_f109Pend.valid = false;
-    g_adsProcCalls.fetch_add(1, std::memory_order_relaxed);
-    float dy = 0.0f, dp = 0.0f, vy = 0.0f, vp = 0.0f;
-    const uintptr_t c = reinterpret_cast<uintptr_t>(comp);
-    if (!comp || !guardedRead(c + kCompYawDeltaOff, &dy, 4) || !guardedRead(c + kCompPitchDeltaOff, &dp, 4) || !std::isfinite(dy) || !std::isfinite(dp)) return 0;
+// The split of the player's own processor call (game thread). F109 (RE verify_20261025_onfoot_look_input): the delta is
+// c * (dt * rate * stick + g * (mouse + in) + dt * spring), so the head aim's share is g * in with g from clean calls only (no stick, no spring;
+// nofoot::f109::Split), never the mouse ratio of F62b, which counted a stick's turn (and the springs') as the head aim's whenever it wrote: the cancel then held the
+// view while the avatar turned. F129: it runs on the player's own call that went down path B (the pair holds what the sink carried), and nothing else. dy, dp: the
+// pair after the call (radians, finite). The totals are cumulative (this thread is their only writer). No allocation, logging or locks; the reads are guarded.
+void f109ProcSplit(uintptr_t c, float dt, const F109Pend& p, float dy, float dp) noexcept {
+    float vy = 0.0f, vp = 0.0f;
     if (!guardedRead(c + kCompSpringYawRateOff, &vy, 4) || !guardedRead(c + kCompSpringPitchRateOff, &vp, 4) || !std::isfinite(vy) || !std::isfinite(vp)) vy = vp = 0.0f;
     const double t = std::isfinite(dt) && dt > 0.0f ? static_cast<double>(dt) : 0.0;
     float gLo = 0.0f, gHi = 0.0f;   // F109c: the mouse gain's two ends, the bounds of a measured gain
@@ -6956,6 +7135,146 @@ uint64_t __fastcall lookProcHooked(void* comp, float dt) {
         g_snapCalls.fetch_add(1, std::memory_order_relaxed);
         atomicAddDouble(g_snapApplied, oy.player - sy.springTerm);
     }
+}
+
+// The processor hook (game thread). It runs once per humanoid component, and F129 tells the calls apart before it lets the update's ask meet one:
+//  - what the call is: bytes A (comp+0x678), O (comp+0x7A9), D (comp+0x7D4), M (comp+0x4D8), the component's sink [comp+0x2E0] and the pair (comp+0x624 / +0x628) are
+//    read before the call and a sentinel is written into the pair; the original runs; a pair still holding the sentinel is a SKIP (nothing stored: the old pair is put
+//    back), else path A (A != 0, O == 0 as read before the call) or path B (nofoot::f129::classify). A read or the sentinel write that fails leaves the call UNKNOWN,
+//    which is path B (the behaviour before F129);
+//  - whose call it is: the player's own is the one whose sink is the update's sink; only that call takes the pending ask (nofoot::f129::Gate);
+//  - what it did to the ask: path B runs the split (f109ProcSplit) as before; path A and SKIP did not read the sink, so the pair says nothing of the ask: a blocked
+//    call without a split. Another component's call takes nothing and its pair is ignored.
+// Everything else is the instrument: the ring, the counters, the episode edges (the frame thread prints). The totals are cumulative (this thread is their only
+// writer). No allocation, logging or locks; the reads are guarded.
+using F22ProcFn = uint64_t(__fastcall*)(void*, float);
+uint64_t __fastcall lookProcHooked(void* comp, float dt) {
+    const F22ProcFn original = reinterpret_cast<F22ProcFn>(g_f22Proc.original);
+    if (!original) return 0;
+    namespace f129 = nofoot::f129;
+    const uintptr_t c = reinterpret_cast<uintptr_t>(comp);
+    // What the call is, before it runs.
+    uint8_t pa = 0, po = 0, pd = 0, pm = 0;
+    uint32_t before[2] = {}, after[2] = {};
+    uintptr_t key = 0;
+    bool aOk = false, oOk = false, dOk = false, mOk = false, keyOk = false, beforeOk = false;
+    if (comp) {
+        aOk = guardedRead(c + kCompPathAOff, &pa, 1);
+        oOk = guardedRead(c + kCompOverrideOff, &po, 1);
+        dOk = guardedRead(c + kCompInputOffOff, &pd, 1);
+        mOk = guardedRead(c + kCompMouseTermOff, &pm, 1);
+        keyOk = guardedRead(c + kCompSinkOff, &key, 8) && key != 0;
+        beforeOk = guardedRead(c + kCompYawDeltaOff, before, 8);
+    }
+    const f129::CallOut co = g_f129Gate.call(keyOk ? key : 0);
+    g_f129Ctr.add(f129::kCallsAll);
+    g_f129Comps.touch(c, GetTickCount64());
+    if (co.leftFallback) {
+        g_f129InFallback.store(false, std::memory_order_relaxed);
+        g_f129Ctr.add(f129::kFallbackLeft);
+    }
+    if (co.first && g_f129Gate.sink != 0) {   // the first call after the update: the player's own, or another comp's ahead of it
+        g_f129Ctr.add(co.keyMatch ? f129::kFirstOurs : f129::kFirstNot);
+        g_f129FirstHist.store(g_f129Gate.firstHist, std::memory_order_relaxed);
+        g_f129FirstN.store(g_f129Gate.firstN, std::memory_order_relaxed);
+        f129Episode(co.keyMatch ? f129::kEvFirstOurs : f129::kEvFirstNot);
+    }
+    if (co.firstNotLocalAsk) g_f129Ctr.add(f129::kFirstNotLocalAsk);
+    if (co.local) {   // the player's own call: the component the gain reads and the other probes use, and the processor's frame count
+        g_lookComp.store(c, std::memory_order_relaxed);
+        g_lookProcCalls.fetch_add(1, std::memory_order_relaxed);
+        g_lookGameFrame.fetch_add(1, std::memory_order_relaxed);
+        g_f129Ctr.add(f129::kCallsLocal);
+    } else {
+        g_f129Ctr.add(f129::kCallsOther);
+    }
+    // The order check: the sink's mouse fields before the player's call, against what the update left in them.
+    f129::Order order = f129::kOrderUnknown;
+    if (co.local && co.takes && g_f129Gate.pendAsked && co.keyMatch && g_f109Pend.sinkRead) {
+        float mouse[2] = {};   // pitch at +0x170, yaw at +0x174
+        const bool mouseOk = guardedRead(key + kSinkMousePitchOff, mouse, 8);
+        order = f129::orderCheck(mouseOk, mouse[1], mouse[0], g_f109Pend.sinkYaw, g_f109Pend.sinkPitch);
+    }
+    // The sentinel, the call, the pair after it.
+    f129::ClassIn ci;
+    ci.preOk = aOk && oOk && beforeOk;
+    ci.a = pa;
+    ci.o = po;
+    ci.sentinelOk = ci.preOk && guardedWritePair32(c + kCompYawDeltaOff, f129::kSentinelBits, f129::kSentinelBits);
+    original(comp, dt);
+    const bool afterOk = comp && guardedRead(c + kCompYawDeltaOff, after, 8);
+    ci.afterOk = afterOk;
+    ci.yawBits = after[0];
+    ci.pitchBits = after[1];
+    const f129::ClassOut cl = f129::classify(ci);
+    bool restored = false;
+    if (cl.restoreYaw || cl.restorePitch) {   // SKIP stored nothing: the pair is what it was
+        bool ok = true;
+        if (cl.restoreYaw) ok = guardedWriteDword(c + kCompYawDeltaOff, static_cast<int32_t>(before[0])) && ok;
+        if (cl.restorePitch) ok = guardedWriteDword(c + kCompPitchDeltaOff, static_cast<int32_t>(before[1])) && ok;
+        if (ok) g_f129Ctr.add(f129::kRestores);
+        else g_f129Ctr.add(f129::kRestoreFailed);
+        restored = ok;
+        if (cl.partial) g_f129Ctr.add(f129::kPartial);
+    }
+    if (co.local) {
+        g_f129Ctr.add(cl.path == f129::kPathA ? f129::kLocalA : cl.path == f129::kSkip ? f129::kLocalSkip : cl.path == f129::kUnknown ? f129::kLocalUnknown : f129::kLocalB);
+        g_f129Ctr.lastBytes.store(f129::packBytes(aOk ? pa : 255, oOk ? po : 255, dOk ? pd : 255, mOk ? pm : 255), std::memory_order_relaxed);
+        g_f129Ctr.lastPath.store(cl.path, std::memory_order_relaxed);
+        if (order == f129::kOrderOk) g_f129Ctr.add(f129::kOrderOkN);
+        else if (order == f129::kOrderFlipped) g_f129Ctr.add(f129::kOrderFlippedN);
+    }
+    // The ring record, with whether the call took an ask.
+    f129::Rec rec;
+    rec.kind = f129::kKindProc;
+    rec.seq = g_f129UpdSeq;
+    rec.id = f129Low32(c);
+    rec.sink = f129Low32(keyOk ? key : 0);
+    rec.path = cl.path;
+    rec.A = aOk ? pa : 255;
+    rec.O = oOk ? po : 255;
+    rec.D = dOk ? pd : 255;
+    rec.M = mOk ? pm : 255;
+    {
+        const uint32_t* pair = cl.path == f129::kSkip && beforeOk ? before : after;   // the pair as it stands now
+        const float fy = afterOk || beforeOk ? f129::bitsFloat(pair[0]) : 0.0f, fp = afterOk || beforeOk ? f129::bitsFloat(pair[1]) : 0.0f;
+        rec.a = static_cast<float>(fy / nofoot::f109::kDeg);
+        rec.b = static_cast<float>(fp / nofoot::f109::kDeg);
+    }
+    rec.flags = static_cast<uint8_t>((co.local ? f129::kFlLocal : 0) | (co.first ? f129::kFlFirst : 0) | (co.takes && g_f129Gate.pendAsked ? f129::kFlAsked : 0) |
+                                     (order == f129::kOrderOk ? f129::kFlOrderOk : 0) | (order == f129::kOrderFlipped ? f129::kFlOrderFlipped : 0) |
+                                     (restored ? f129::kFlRestored : 0) | (cl.partial ? f129::kFlPartial : 0));
+    // Which call takes the ask.
+    const f129::Act act = f129::decide(co.takes, cl.path);
+    if (act == f129::kActNone || !g_f109Pend.valid) {
+        g_f129Ring.push(rec);
+        return 0;
+    }
+    const F109Pend p = g_f109Pend;
+    g_f109Pend.valid = false;
+    g_adsProcCalls.fetch_add(1, std::memory_order_relaxed);
+    const bool asked = p.inYaw != 0.0 || p.inPitch != 0.0;
+    if (asked) rec.flags = static_cast<uint8_t>((rec.flags & ~f129::kFlAsked) | f129::kFlTook);
+    g_f129Ring.push(rec);   // before the episode edges: an episode's freeze ends with the call that opened it
+    if (act == f129::kActNoSplit) {   // the local call did not read the sink (path A) or stored nothing (SKIP): a blocked call, and its pair is not a delta
+        if (asked) {
+            g_f109Blocked.fetch_add(1, std::memory_order_relaxed);
+            g_f109BlockedRun.fetch_add(1, std::memory_order_relaxed);
+            g_f129Ctr.add(f129::kAskAorSkip);
+            f129Episode(f129::kEvAorSkip);
+        }
+        return 0;
+    }
+    if (asked) {
+        g_f129Ctr.add(f129::kConsumedB);
+        f129Episode(f129::kEvConsumed);
+    }
+    float dy = 0.0f, dp = 0.0f;
+    if (!afterOk) return 0;
+    std::memcpy(&dy, &after[0], 4);
+    std::memcpy(&dp, &after[1], 4);
+    if (!std::isfinite(dy) || !std::isfinite(dp)) return 0;
+    f109ProcSplit(c, dt, p, dy, dp);
     return 0;
 }
 
@@ -7237,6 +7556,13 @@ void adsIncidentDump(uint64_t now, const char* why) noexcept {
                         static_cast<unsigned long long>(s.rootAgeMs), s.gain[0], s.gain[1], s.gainEnds[0], s.gainEnds[1],
                         s.clean, s.dirty, s.unsplit, s.foreign, s.blocked, s.writes, s.procs, s.refusals);
     }
+    {   // F129: the look update's and the look processor's last records (U: an update's ask and what its sink held after it; P: a processor call, L the player's comp, o another)
+        nofoot::f129::Rec recs[16];
+        const size_t n = g_f129Ring.read(recs, 16);
+        char text[1000];
+        nofoot::f129::formatRing(text, sizeof(text), recs, n, 16);
+        Log::get().note("ADS incident look paths (F129): the last %zu records: %s", n, n ? text : "none (the hooks were not in, or the ring would not hold still)");
+    }
 }
 nofoot::f91::CancelHistory g_f91Cancel;   // the cancel total at every eye alignment serial published (f89AlignPublish)
 nofoot::f91::FitWindow g_f91Fit;          // the press's fit windows (f87EyeLines)
@@ -7261,6 +7587,7 @@ struct LtaState {
     bool centrePending = false;  // the reported head's offset goes into the target at the first render head after an engage
     uint32_t centres = 0;
     bool blocked = false;        // the game's look is blocked (a run of dropped asks): the follower holds, probing
+    nofoot::f109::ProbePair probe;   // F129: the probes while blocked ask +p, then -p (zero-sum); the phase restarts when the blocked state changes
     uint32_t blockedEpisodes = 0;
     uint64_t engageMs = 0, baseMs = 0, probeMs = 0, unwindMs = 0, lineMs = 0;
     // the 1 s line's sums (seat radians unless named)
@@ -7276,6 +7603,28 @@ struct LtaState {
     double springYawSeen = 0.0;
 };
 LtaState g_lta;
+// F131 (frame thread only): look to aim holds while an on-foot panel is open, a menu or map holds the 2D screen, or the game runs no look (nofoot::f131::Hold decides).
+struct F131State {
+    nofoot::f131::Hold hold;
+    bool held = false;            // as the follower, the turns and the map see it this tick
+    bool logged = false;          // this hold's begin line was written (its end line follows)
+    uint32_t episodes = 0;
+    uint32_t ticks = 0;           // held ticks since the F109 1 s line last printed them
+    uint32_t reasonsLast = 0;     // the reasons of the last held tick (the 1 s line)
+    nofoot::f129::RateCap cap;    // the begin and end lines: at most 6 a minute, the rest said in the next
+};
+F131State g_f131;
+// F133 (frame thread only): a head step is a discontinuity by its rate (the time between two head samples is the frame thread's read times), and a standing yaw offset
+// between the reported head and the aim re-centres the follower.
+struct F133State {
+    uint64_t prevQpc = 0;             // the frame thread's QPC when g_adsPrevHead was first read
+    double headYawDeg = 0.0;          // the head's accepted yaw steps summed (the re-centre's stillness window reads it)
+    nofoot::f133::Recentre rc;
+    nofoot::f133::BigSteps big;       // steps over 30 deg taken as motion (the old size rule would have skipped them)
+    uint32_t recentres = 0, recentresSeen = 0;
+    nofoot::f129::RateCap cap;        // its two event lines: 6 a minute at most between them
+};
+F133State g_f133;
 std::atomic<float> g_f109AimPitchAbsDeg{0.0f};   // |the carried pitch| while look to aim is engaged (the Animate post-hook's F98c gate), else 0
 std::atomic<uint32_t> g_f109SettleGated{0};      // settled stances F98c did not take because the aim was pitched 10 deg or more (the hook counts)
 constexpr double kF109SettlePitchDeg = 10.0;
@@ -7383,21 +7732,27 @@ const char* full3PWhy() noexcept {
 bool eyeRowsRead(int e, uint32_t* frame, float rows[16], float o[4], uint64_t* qpc) noexcept;   // below (the eye alignment's block)
 // Engages: the follower starts from the asks still in flight (their turn, when the game applies it, is the target's), the centring waits for the first render head,
 // the guard's base is taken again, the snap detectors start disarmed (a stick already pushed fires only after it came back to the centre).
-void ltaEngage(uint64_t now) noexcept {
-    const bool wasUnwinding = g_lta.unwinding;
-    g_lta.engaged = true;
-    g_lta.unwinding = false;
+// The follower's state at an engage, and when a hold ends (F131): a fresh follower from the asks still in flight, the centring waits for the first render head, the
+// guard's base is taken again, the snap detectors start disarmed. The map (the carried yaw and pitch) is not touched.
+void ltaFreshFollower(uint64_t now) noexcept {
     g_lta.follow.reset();
     g_lta.follow.target[0] = g_adsMap.yawInFlight();
     g_lta.follow.target[1] = g_adsMap.pitchInFlight();
     g_lta.centrePending = true;
     g_lta.blocked = false;
+    g_lta.probe.reset();
     g_lta.engageMs = g_lta.baseMs = now;
     g_lta.rootHave = false;
     g_adsResid.reset();
     g_turn.stick.reset();
     g_turn.flick.reset();
     g_adsAimMode = nofoot::f92::kAimOn;
+}
+void ltaEngage(uint64_t now) noexcept {
+    const bool wasUnwinding = g_lta.unwinding;
+    g_lta.engaged = true;
+    g_lta.unwinding = false;
+    ltaFreshFollower(now);
     const int style = g_ltaStyle.load(std::memory_order_relaxed);
     Log::get().note("native on foot look to aim (F109): engaged: the head is the look on foot, yaw and pitch, armed and unarmed (the follower through the head aim's map; "
                     "the cancel keeps the view the headset's); turn style %s (snap step %d deg), smoothing %d ms with nothing drawn; the mouse's and the stick's pitch "
@@ -7424,6 +7779,19 @@ void ltaDisengage(uint64_t now, const char* why, bool unwind) noexcept {
                     "view stays the headset's); the mouse and the stick look as the game's own",
                     why, g_adsMap.yawCarried / nofoot::kAdsDeg, g_adsMap.pitchSeat / nofoot::kAdsDeg, g_adsMap.relDur);
 }
+// F133: a head step over the old 30 deg size rule that the rate rule took as motion (a turn across a stall). One event line (6 a minute with the re-centre's); the count and
+// the largest are cumulative, so a line held back is still counted in the next.
+void f133NoteBig(uint64_t now, const nofoot::f133::Step& hs, double dtSec) noexcept {
+    const double big = std::max(std::fabs(hs.dYaw), std::fabs(hs.dPitch)) / nofoot::kAdsDeg;
+    g_f133.big.note(big, dtSec * 1000.0);
+    if (!g_f133.cap.allow(now, 6)) return;
+    const uint32_t held = g_f133.cap.takeSuppressed();
+    char heldText[96] = "";
+    if (held) std::snprintf(heldText, sizeof(heldText), " [%u earlier F133 line(s) were not written: at most 6 a minute]", held);
+    Log::get().note("native on foot look to aim (F133): a head step of %+.1f deg yaw %+.1f deg pitch over %.0f ms (%.0f deg/s) was taken as motion, not a recentre; large steps "
+                    "taken as motion %u (largest %.1f deg over %.0f ms)%s",
+                    hs.dYaw / nofoot::kAdsDeg, hs.dPitch / nofoot::kAdsDeg, dtSec * 1000.0, hs.rateDps, g_f133.big.n, g_f133.big.largestDeg, g_f133.big.largestMs, heldText);
+}
 // The follower's ask this tick (seat radians), after this tick's applied turn (aY, aP: the split's share in the seat convention) and the head's step.
 void ltaFollow(uint64_t now, double dt, bool headStep, double dYaw, double dPitch, double aY, double aP, const EdvrNativeNowPose& np, double* askY,
                double* askP) noexcept {
@@ -7449,26 +7817,42 @@ void ltaFollow(uint64_t now, double dt, bool headStep, double dYaw, double dPitc
     const bool blockedNow = g_f109BlockedRun.load(std::memory_order_relaxed) >= f109::kBlockedCalls;
     if (blockedNow != g_lta.blocked) {
         g_lta.blocked = blockedNow;
+        g_lta.probe.reset();   // F129: leaving (or entering) the blocked state restarts the probes' phase
         if (blockedNow) ++g_lta.blockedEpisodes;
         Log::get().note("native on foot look to aim (F109): the game's look is %s (%u blocked calls so far, episode %u); %s",
                         blockedNow ? "blocked (it dropped the asks)" : "back", g_f109Blocked.load(std::memory_order_relaxed), g_lta.blockedEpisodes,
                         blockedNow ? "the follower holds, one probe every 100 ms" : "the follower catches the head up under its rate cap (the view never moved)");
+    }
+    {   // F133: the reported head stands off the aim in yaw while the head is still: the follower integrates head steps and never read the offset, so a head step lost to a
+        // stall (or any other cause) left the body off the head for good. Yaw only: the game clamps the aim's pitch, so a pitch offset can be legitimate (the F109c case) and
+        // a re-centre would fight the clamp. Following only: not blocked, not held (F131), no snap fade running, not in an ADS press, the engage's own centring done.
+        double oy = 0.0, op = 0.0;
+        const bool offValid = np.renderValid && f109::centreOffset(np.render, &oy, &op);
+        const bool following = !g_lta.blocked && !g_f131.held && !g_lta.centrePending && g_turn.run.phase == f109::SnapRun::kIdle && g_adsState == kAdsIdle;
+        const nofoot::f133::Recentre::Out rc = g_f133.rc.step(static_cast<double>(now) / 1000.0, following, offValid, oy / f109::kDeg, g_f133.headYawDeg);
+        if (rc.fire) {
+            g_lta.follow.addHead(oy, 0.0);
+            ++g_f133.recentres;
+            if (g_f133.cap.allow(now, 6)) {
+                const uint32_t held = g_f133.cap.takeSuppressed();
+                char heldText[96] = "";
+                if (held) std::snprintf(heldText, sizeof(heldText), " [%u earlier F133 line(s) were not written: at most 6 a minute]", held);
+                Log::get().note("native on foot look to aim (F133): re-centred: the reported head stood %+.1f deg off the aim in yaw for %.1f s with the head still; the aim turns "
+                                "onto the head%s", rc.offDeg, rc.standSec, heldText);
+            }
+        }
     }
     const double armedW = static_cast<double>(g_f88WPub.load(std::memory_order_relaxed));
     const double tau = f109::followerTau(static_cast<double>(g_lookSmoothMs.load(std::memory_order_relaxed)), armedW, g_adsW);
     g_lta.tauLast = tau;
     g_lta.armedWLast = armedW;
     const double ify = f109::inFlightAfter(g_adsMap.flightYaw, aY), ifp = f109::inFlightAfter(g_adsMap.flightPitch, aP);
-    if (!g_lta.blocked) {
-        g_lta.follow.ask(dt, tau, ify, ifp, askY, askP);
-    } else if (now - g_lta.probeMs >= f109::kProbeMs) {
-        g_lta.probeMs = now;
-        *askY = f109::clampd(g_lta.follow.left(0, ify), -f109::kProbeRad, f109::kProbeRad);
-        *askP = f109::clampd(g_lta.follow.left(1, ifp), -f109::kProbeRad, f109::kProbeRad);
-        ++g_lta.heldTicks;
-    } else {
-        ++g_lta.heldTicks;
-    }
+    // F131: held asks nothing at all (no ask, no probe); blocked probes +p then -p (F129); else the follower's ask (nofoot::f131::followAsk).
+    const nofoot::f131::FollowMode mode = nofoot::f131::followMode(g_f131.held, g_lta.blocked);
+    const bool probeDue = mode == nofoot::f131::kBlocked && now - g_lta.probeMs >= f109::kProbeMs;
+    if (probeDue) g_lta.probeMs = now;
+    nofoot::f131::followAsk(mode, g_lta.follow, g_lta.probe, probeDue, dt, tau, ify, ifp, askY, askP);
+    if (mode == nofoot::f131::kBlocked) ++g_lta.heldTicks;
 }
 // The guard tripped under look to aim: stop it (the seated rotation to zero). F109b: for kRearmMs, then it engages again by itself (a fresh centring); the
 // kLatchTrips-th trip within kLatchWindowMs holds it off until the key toggles or native on foot re-enters (F109 held it off after every trip: the pilot read that
@@ -7507,7 +7891,7 @@ void f109TurnTick(uint64_t now, bool headStep, double dYaw, int ySign) noexcept 
     const uintptr_t comp = g_lookComp.load(std::memory_order_relaxed);
     // ---- the snaps ----
     const double mouseUnits = g_ltaMouseYawSum.exchange(0.0, std::memory_order_relaxed);
-    const bool snapStyle = g_lta.engaged && style == f109::kSnap;
+    const bool snapStyle = g_lta.engaged && style == f109::kSnap && !g_f131.held;   // F131: no snap while look to aim holds
     if (snapStyle || t.run.phase != f109::SnapRun::kIdle) {
         double gain = static_cast<double>(g_adsGainYaw.load(std::memory_order_relaxed));
         const char* gainSrc = "measured";
@@ -7644,6 +8028,303 @@ void f109TurnTick(uint64_t now, bool headStep, double dYaw, int ySign) noexcept 
     t.secMs = now;
 }
 
+// ---- F131: look to aim holds (frame thread) --------------------------------------------------------------------------------------------------------------
+// While an on-foot panel is open (the F122 placement hook seen within 250 ms), a menu or map holds the 2D screen (the maps gate, gate=panel), or the player's look
+// processor has not run for 150 ms, the follower asks nothing (ltaFollow), the map is not asked to inject, the snaps stop (f109TurnTick), the player's look is the
+// game's own (g_ltaDrop false) and the carried seated yaw and pitch stay as they are. It begins at once and ends after 200 ms of all three clear, with the follower
+// fresh and the centring taken again, as at an engage (ltaFreshFollower). nofoot::f131::Hold decides; these are its edges.
+void f131Begin(uint64_t now, uint32_t reasons) noexcept {
+    g_adsInYaw.store(0.0f, std::memory_order_relaxed);   // the queued input never reaches the game; the in-flight account times out
+    g_adsInPitch.store(0.0f, std::memory_order_relaxed);
+    g_snapIn.store(0.0f, std::memory_order_relaxed);
+    g_turn.run = nofoot::f109::SnapRun{};                // a snap in its fade is stopped (f109TurnTick lifts the fade)
+    g_turn.injectMs = 0;
+    ++g_f131.episodes;
+    g_f131.logged = g_f131.cap.allow(now, 6);
+    if (!g_f131.logged) return;
+    char why[200], held[96];
+    const uint32_t suppressed = g_f131.cap.takeSuppressed();
+    if (suppressed) std::snprintf(held, sizeof(held), " [%u earlier hold line(s) were not written: at most 6 a minute]", suppressed);
+    else held[0] = 0;
+    Log::get().note("native on foot look to aim (F131): held (%s); the aim stays where it is, the game's own look runs%s", nofoot::f131::reasonText(reasons, why, sizeof(why)), held);
+}
+void f131End(uint64_t now, const nofoot::f131::Out& o) noexcept {
+    ltaFreshFollower(now);
+    g_f109BlockedRun.store(0, std::memory_order_relaxed);   // the asks that were dropped before the hold are not a block now
+    if (!g_f131.logged) return;
+    char why[200];
+    Log::get().note("native on foot look to aim (F131): resumed after %.1f s (%s cleared): centred again", o.heldSec, nofoot::f131::reasonText(o.seen, why, sizeof(why)));
+}
+// Every frame while look to aim is engaged (active); otherwise the hold is forgotten.
+void f131Step(uint64_t now, bool active) noexcept {
+    nofoot::f131::Sample s;
+    s.nowMs = now;
+    s.active = active;
+    s.panelSeq = g_f131PanelSeq.load(std::memory_order_relaxed);
+    s.menuHookMs = g_f131MenuHookMs.load(std::memory_order_relaxed);   // F131c
+    // F131b: no menu signal is fed. The maps gate is not one in VR: it holds the 2D screen through nearly all VR play, cockpit and on foot (no world camera names its
+    // source), so the flight edvr_gfx_20261027_075042 was held 108 ms after going on foot and never let go: look to aim and the ADS head aim asked nothing.
+    s.menu = false;
+    s.procKnown = g_lookArmed;
+    s.procCalls = g_lookProcCalls.load(std::memory_order_relaxed);
+    const nofoot::f131::Out o = g_f131.hold.step(s);
+    g_f131.held = o.held;
+    if (o.held) {
+        ++g_f131.ticks;
+        if (o.reasons) g_f131.reasonsLast = o.reasons;
+    }
+    if (o.edge > 0) f131Begin(now, o.reasons);
+    else if (o.edge < 0) f131End(now, o);
+}
+
+// ---- F135: the on-foot menu probe (frame thread; MEASURE ONLY) ------------------------------------------------------------------------------------------
+// Which hook, or field, is active exactly while a menu or an on-foot panel is up, mouse still or not (native_on_foot_f135.h). Every panel hook counts its calls (the hooks'
+// side is above); here the counts are taken each frame while native stereo is on foot: a counter's rise from 0 and its fall (0 for 0.5 s) are event lines, the Escape key and
+// the pad's Start and Back are the ground truth (never a signal), and once a second, when a gating counter moved or a key edge came in the last 8 s, one line says everything.
+struct F135State {
+    nofoot::f135::Edges edges;
+    nofoot::f135::KeyEdge esc, start, back;
+    nofoot::f135::Budget budget;
+    uint32_t sum[nofoot::f135::kCount] = {};
+    uint64_t lineMs = 0, lastKeyEdgeMs = 0;
+    bool footLast = false;
+    uint32_t procLast = 0, asksLast = 0, zeroedLast = 0;
+};
+F135State g_f135;
+void f135Tick(uint64_t now, bool onFoot) noexcept {
+    namespace f135 = nofoot::f135;
+    F135State& S = g_f135;
+    uint32_t c[f135::kCount];
+    g_f135Ctr.take(c);
+    if (!onFoot) {   // the counts of the time off foot are dropped
+        S.footLast = false;
+        return;
+    }
+    if (!S.footLast) {
+        S.footLast = true;
+        S.edges.reset();
+        S.esc = S.start = S.back = f135::KeyEdge{};
+        for (int i = 0; i < f135::kCount; ++i) S.sum[i] = 0;
+        S.lineMs = now;
+        S.procLast = g_lookProcCalls.load(std::memory_order_relaxed);
+        S.asksLast = g_f129Ctr.get(nofoot::f129::kAsks);
+        S.zeroedLast = g_f129Ctr.get(nofoot::f129::kZeroed);
+        Log::get().note("native on foot menu probe (F135): armed (measure only): the panel hooks' calls, the Escape key and the pad's Start and Back are counted; lines only when a panel "
+                        "counter moves or a key edge came in the last 8 s");
+    }
+    // the ground truth: the Escape key and the pad's Start and Back, edges only
+    const bool escDown = (GetAsyncKeyState(VK_ESCAPE) & 0x8000) != 0;
+    uint16_t pad = 0;
+    uint8_t trig = 0;
+    xinputSnapshot(&pad, &trig);
+    const struct { f135::KeyEdge* k; bool down; const char* name; } keys[3] = {{&S.esc, escDown, "key Escape"}, {&S.start, (pad & 0x0010u) != 0, "pad Start"},
+                                                                              {&S.back, (pad & 0x0020u) != 0, "pad Back"}};
+    for (const auto& k : keys) {
+        const int e = k.k->step(k.down);
+        if (e == 0) continue;
+        S.lastKeyEdgeMs = now;
+        Log::get().note("native on foot menu probe (F135): %s %s", k.name, e > 0 ? "down" : "up");
+    }
+    // the counters' edges
+    for (int i = 0; i < f135::kCount; ++i) {
+        S.sum[i] += c[i];
+        const f135::EdgeKind e = S.edges.step(i, now, c[i]);
+        if (e == f135::kNoEdge) continue;
+        if (!S.budget.allow(now, 120)) continue;
+        const uint32_t held = S.budget.takeSuppressed();
+        char heldText[80] = "";
+        if (held) std::snprintf(heldText, sizeof(heldText), " [%u earlier edge line(s) were not written: at most 120 a minute]", held);
+        Log::get().note("native on foot menu probe (F135): %s %s%s", f135::counterName(i), e == f135::kRose ? "rose" : "fell (0 for 0.5 s)", heldText);
+    }
+    if (now - S.lineMs < 1000) return;
+    S.lineMs = now;
+    f135::Obj upd[f135::ObjSet::kMax], place[f135::ObjSet::kMax];
+    uint32_t updMore = 0, placeMore = 0;
+    const int nUpd = g_f135UpdObjs.take(upd, &updMore), nPlace = g_f135PlaceObjs.take(place, &placeMore);
+    const uint32_t proc = g_lookProcCalls.load(std::memory_order_relaxed), asks = g_f129Ctr.get(nofoot::f129::kAsks), zeroed = g_f129Ctr.get(nofoot::f129::kZeroed);
+    const uint32_t procRan = proc - S.procLast, asksNow = asks - S.asksLast, zeroedNow = zeroed - S.zeroedLast;
+    S.procLast = proc;
+    S.asksLast = asks;
+    S.zeroedLast = zeroed;
+    uint32_t sum[f135::kCount];
+    for (int i = 0; i < f135::kCount; ++i) {
+        sum[i] = S.sum[i];
+        S.sum[i] = 0;
+    }
+    if (!f135::lineWanted(sum, now, S.lastKeyEdgeMs)) return;
+    char updText[200], placeText[200], gui[24], why[48], lta[80];
+    if (!f135::formatObjs(updText, sizeof(updText), upd, nUpd, updMore)) std::snprintf(updText, sizeof(updText), "none");
+    if (!f135::formatObjs(placeText, sizeof(placeText), place, nPlace, placeMore)) std::snprintf(placeText, sizeof(placeText), "none");
+    const JournalRawStatus raw = journalRawStatus();
+    if (raw.active && raw.guiKnown) std::snprintf(gui, sizeof(gui), "%u", raw.gui);
+    else std::snprintf(gui, sizeof(gui), "unknown");
+    if (!g_lta.engaged) std::snprintf(lta, sizeof(lta), "off");
+    else if (g_f131.held) std::snprintf(lta, sizeof(lta), "held (%s)", nofoot::f131::reasonShort(g_f131.reasonsLast, why, sizeof(why)));
+    else std::snprintf(lta, sizeof(lta), "%s", g_lta.blocked ? "blocked" : "following");
+    Log::get().note("native on foot menu probe (F135) 1 s: update %u (objs %s), placement %u (objs %s), ray %u, cursor window %u, owner transform %u, panel submit %u, inst submit %u, "
+                    "bridge update %u placement %u; GuiFocus %s; look to aim %s; processor %s; look block %s",
+                    sum[f135::kUpdate], updText, sum[f135::kPlace], placeText, sum[f135::kRay], sum[f135::kWindow], sum[f135::kOwner], sum[f135::kPanelSubmit], sum[f135::kInstSubmit],
+                    sum[f135::kBridgeUpdate], sum[f135::kBridgePlace], gui, lta, !g_lookArmed ? "hooks not in" : procRan ? "ran" : "stalled", asksNow == 0 ? "unknown (no ask)" : zeroedNow ? "yes" : "no");
+}
+
+// ---- F129: the look path lines (frame thread) ------------------------------------------------------------------------------------------------------------
+// The hooks count and record (f129UpdateEntry, f129UpdateExit, lookProcHooked); the lines are the frame thread's. A summary every 10 s on foot says what the
+// processor's calls were (the player's own and the others', path A, B or SKIP) and what became of the asks; the events are an episode's two edges, the fallback and
+// its re-arm, and the number of components changing. An event line is 6 a minute at most (the components' 4), and the next one says how many were not written.
+// Nothing is written per frame, and a log with none of these lines means the hooks were not in or no update ran, never a clean bill.
+struct F129Lines {
+    uint64_t winMs = 0, compsMs = 0;
+    uint32_t seen[nofoot::f129::kCtrCount] = {};
+    uint32_t begunSeen = 0, endedSeen = 0, fbEnteredSeen = 0, fbLeftSeen = 0;
+    int compsLast = -1;
+    bool footLast = false;
+    nofoot::f129::RateCap cap;
+};
+F129Lines g_f129Lines;
+
+void f129SeenReset() noexcept {
+    for (int i = 0; i < nofoot::f129::kCtrCount; ++i) g_f129Lines.seen[i] = g_f129Ctr.get(static_cast<nofoot::f129::Ctr>(i));
+    g_f129Ctr.otherPerUpdateMax.store(0, std::memory_order_relaxed);
+}
+// The note appended to an event line once earlier ones were held back; call only for a line that is being written.
+const char* f129Held(char* buf, size_t cap) noexcept {
+    const uint32_t s = g_f129Lines.cap.takeSuppressed();
+    if (s == 0) buf[0] = 0;
+    else std::snprintf(buf, cap, " [%u earlier event line(s) were not written: at most 6 a minute]", s);
+    return buf;
+}
+void f129Summary(uint32_t secs) noexcept {
+    namespace f129 = nofoot::f129;
+    F129Lines& L = g_f129Lines;
+    uint32_t d[f129::kCtrCount];
+    for (int i = 0; i < f129::kCtrCount; ++i) {
+        const uint32_t v = g_f129Ctr.get(static_cast<f129::Ctr>(i));
+        d[i] = v - L.seen[i];
+        L.seen[i] = v;
+    }
+    const uint32_t otherMax = g_f129Ctr.otherPerUpdateMax.exchange(0, std::memory_order_relaxed);
+    if (d[f129::kUpdates] == 0 && d[f129::kCallsAll] == 0) return;   // the hooks are in and nothing ran in the window (a load, a menu)
+    const uint64_t ms = GetTickCount64();
+    uint32_t ofLast = 0;
+    const uint32_t ours = f129::oursOf(g_f129FirstHist.load(std::memory_order_relaxed), g_f129FirstN.load(std::memory_order_relaxed), &ofLast);
+    const uint32_t bytes = g_f129Ctr.lastBytes.load(std::memory_order_relaxed);
+    Log::get().note("native on foot look paths (F129) %u s: updates %u, asks %u; processor calls: local %u (path B %u, A %u, SKIP %u, unknown %u), other %u (at most %u "
+                    "between two updates); comps %u in 1 s, %u in 10 s; the first call after the update is ours in %u of the last %u updates; asks: taken by a local "
+                    "path B call %u, met a local path A or SKIP call %u, taken by no local call %u, given to another comp by the first-call rule %u; the update's sink: "
+                    "reached %u, zeroed %u, altered %u; order: ok %u, flipped %u; fallback %s, entered %u, left %u; sentinel: partial %u, restored %u, restore failed %u; "
+                    "episodes %u; last local call: path %s A %u O %u D %u M %u",
+                    secs, d[f129::kUpdates], d[f129::kAsks], d[f129::kCallsLocal], d[f129::kLocalB], d[f129::kLocalA], d[f129::kLocalSkip], d[f129::kLocalUnknown],
+                    d[f129::kCallsOther], otherMax, g_f129Comps.live(ms, 1000), g_f129Comps.live(ms, 10000), ours, ofLast, d[f129::kConsumedB],
+                    d[f129::kAskAorSkip], d[f129::kUnconsumed], d[f129::kFirstNotLocalAsk], d[f129::kReached], d[f129::kZeroed], d[f129::kAltered],
+                    d[f129::kOrderOkN], d[f129::kOrderFlippedN], g_f129InFallback.load(std::memory_order_relaxed) ? "ON" : "off", d[f129::kFallbackEntered],
+                    d[f129::kFallbackLeft], d[f129::kPartial], d[f129::kRestores], d[f129::kRestoreFailed], d[f129::kEpisodes],
+                    f129::pathName(static_cast<int>(g_f129Ctr.lastPath.load(std::memory_order_relaxed))), bytes & 0xFFu, (bytes >> 8) & 0xFFu, (bytes >> 16) & 0xFFu,
+                    (bytes >> 24) & 0xFFu);
+}
+// The event lines. Frame thread, on foot.
+void f129Events(uint64_t now) noexcept {
+    namespace f129 = nofoot::f129;
+    F129Lines& L = g_f129Lines;
+    char held[96], reasons[256];
+    const uint32_t begun = g_f129EpBegun.load(std::memory_order_acquire), ended = g_f129EpEnded.load(std::memory_order_acquire);
+    if (begun != L.begunSeen) {
+        L.begunSeen = begun;
+        f129::Rec recs[8];
+        size_t n = 0;
+        for (int tries = 0; tries < 3 && n == 0; ++tries) {   // the freeze under its sequence lock
+            const uint32_t a = g_f129Freeze.seq.load(std::memory_order_acquire);
+            if (a & 1u) continue;
+            const size_t k = g_f129Freeze.n < 8 ? g_f129Freeze.n : 8;
+            for (size_t i = 0; i < k; ++i) recs[i] = g_f129Freeze.rec[i];
+            std::atomic_thread_fence(std::memory_order_acquire);
+            if (g_f129Freeze.seq.load(std::memory_order_relaxed) == a) n = k;
+        }
+        if (L.cap.allow(now, 6)) {
+            char text[700];
+            f129::formatRing(text, sizeof(text), recs, n, 8);
+            f129::reasonText(g_f129EpReasons.load(std::memory_order_relaxed), reasons, sizeof(reasons));
+            Log::get().note("native on foot look paths (F129): episode began: %s; comps now %u; at the start: unconsumed %u, local path A or SKIP %u, first call not "
+                            "ours %u; the last %zu records: %s%s",
+                            reasons, g_f129Comps.live(GetTickCount64(), 1000), g_f129EpCounts[0].load(std::memory_order_relaxed),
+                            g_f129EpCounts[1].load(std::memory_order_relaxed), g_f129EpCounts[2].load(std::memory_order_relaxed), n, text, f129Held(held, sizeof(held)));
+        }
+    }
+    if (ended != L.endedSeen) {
+        L.endedSeen = ended;
+        if (L.cap.allow(now, 6)) {
+            const uint64_t b = g_f129EpBeginMs.load(std::memory_order_relaxed), e = g_f129EpEndMs.load(std::memory_order_relaxed);
+            f129::reasonText(g_f129EpReasons.load(std::memory_order_relaxed), reasons, sizeof(reasons));
+            Log::get().note("native on foot look paths (F129): episode ended after %.1f s (%s): unconsumed %u, local path A or SKIP asks %u, updates whose first call was "
+                            "not ours %u, asks %u in it; comps now %u%s",
+                            e >= b ? static_cast<double>(e - b) / 1000.0 : 0.0, reasons, g_f129EpCounts[0].load(std::memory_order_relaxed),
+                            g_f129EpCounts[1].load(std::memory_order_relaxed), g_f129EpCounts[2].load(std::memory_order_relaxed),
+                            g_f129EpCounts[3].load(std::memory_order_relaxed), g_f129Comps.live(GetTickCount64(), 1000), f129Held(held, sizeof(held)));
+        }
+    }
+    const uint32_t fbIn = g_f129Ctr.get(f129::kFallbackEntered), fbOut = g_f129Ctr.get(f129::kFallbackLeft);
+    if (fbIn != L.fbEnteredSeen) {
+        L.fbEnteredSeen = fbIn;
+        if (L.cap.allow(now, 6)) {
+            char why[160];
+            if (g_f129FallbackWhy.load(std::memory_order_relaxed) == f129::kWhyNoSink)
+                std::snprintf(why, sizeof(why), "the update's sink pointer [act+0x88] could not be read");
+            else
+                std::snprintf(why, sizeof(why), "no call of the player's comp in %u updates that had processor calls; %u comps live", f129::kNoLocalUpdatesMax,
+                              g_f129Comps.live(GetTickCount64(), 1000));
+            Log::get().note("native on foot look paths (F129): the local comp key did not match (%s): the first call after the update takes the ask, as before F129%s", why,
+                            f129Held(held, sizeof(held)));
+        }
+    }
+    if (fbOut != L.fbLeftSeen) {
+        L.fbLeftSeen = fbOut;
+        if (L.cap.allow(now, 6))
+            Log::get().note("native on foot look paths (F129): the local comp key matched again (a call of the player's comp was seen): the player's comp takes the ask%s",
+                            f129Held(held, sizeof(held)));
+    }
+    if (L.compsMs == 0 || now - L.compsMs >= 1000) {   // the components seen in the last second, at most once a second
+        L.compsMs = now;
+        const int live = static_cast<int>(g_f129Comps.live(GetTickCount64(), 1000));
+        if (L.compsLast >= 0 && live != L.compsLast && (live > 0 || L.compsLast > 0) && L.cap.allow(now, 4)) {
+            uint32_t of = 0;
+            const uint32_t ours = f129::oursOf(g_f129FirstHist.load(std::memory_order_relaxed), g_f129FirstN.load(std::memory_order_relaxed), &of);
+            Log::get().note("native on foot look paths (F129): comps now %d (was %d); the first call after the update is ours in %u of the last %u updates%s", live, L.compsLast,
+                            ours, of, f129Held(held, sizeof(held)));
+        }
+        L.compsLast = live;
+    }
+}
+// Every frame (adsAimTick): on foot only, and only with the look hooks in.
+void f129Tick(uint64_t now, bool onFoot) noexcept {
+    F129Lines& L = g_f129Lines;
+    if (!g_lookArmed) {
+        L.footLast = false;
+        return;
+    }
+    if (!onFoot) {
+        if (L.footLast) {   // the on-foot exit closes the window
+            const uint32_t secs = nofoot::logwin::flush(L.winMs, now);
+            if (secs) f129Summary(secs);
+            L.compsLast = -1;
+            L.compsMs = 0;
+        }
+        L.footLast = false;
+        return;
+    }
+    if (!L.footLast) {
+        L.footLast = true;
+        L.winMs = 0;
+        L.begunSeen = g_f129EpBegun.load(std::memory_order_relaxed);
+        L.endedSeen = g_f129EpEnded.load(std::memory_order_relaxed);
+        L.fbEnteredSeen = g_f129Ctr.get(nofoot::f129::kFallbackEntered);
+        L.fbLeftSeen = g_f129Ctr.get(nofoot::f129::kFallbackLeft);
+    }
+    f129Events(now);
+    const bool opening = L.winMs == 0;
+    const uint32_t secs = nofoot::logwin::window(L.winMs, now, false);   // 10 s whatever log.on_foot_detail says: a low-volume line
+    if (opening) f129SeenReset();
+    else if (secs) f129Summary(secs);
+}
+
 // Frame thread, every frame, before lookPublishTick (which publishes the yaw) and alignTick (the eye alignment and the body). The state machine, the
 // game's applied deltas and their cancel, the injection of the headset's turn, the position lock. The guard (adsAimStep) reads the right eye's rows and
 // runs in alignTick, after the sight lock.
@@ -7666,6 +8347,8 @@ void adsAimTick(uint64_t now, bool session) noexcept {
     g_adsYSignLast = ySign;
     g_adsPSignLast = pSign;
     g_adsFootLast = onFoot;
+    f135Tick(now, onFoot);   // F135: the on-foot menu probe (measure only): the panel hooks' counts, the Escape key's edges, one line a second when something moved
+    f129Tick(now, onFoot);   // F129: the look path lines (the summary, the episodes, the fallback, the components); every frame, before anything here can return
     static QpcDt adsClock;   // F66b
     const double dt = adsClock.step(0.1);
     g_adsLastMs = now;
@@ -7857,7 +8540,8 @@ void adsAimTick(uint64_t now, bool session) noexcept {
                             off ? off : g_lta.latched ? "the guard tripped three times in a minute (toggle the key or re-enter on foot)"
                                       : g_lta.tripped ? "the guard tripped (it engages again 2 s after)" : "starting");
         }
-        g_ltaDrop.store(g_lta.engaged, std::memory_order_relaxed);
+        f131Step(now, g_lta.engaged);   // F131: a panel, a menu or a stopped look holds look to aim (the player's look is the game's own meanwhile)
+        g_ltaDrop.store(g_lta.engaged && !g_f131.held, std::memory_order_relaxed);
     }
     const bool allowed = g_adsGate.allow(ads);   // a hold-off lasts one press: the flag falling clears it
     if (off || !allowed) {
@@ -8032,10 +8716,18 @@ void adsAimTick(uint64_t now, bool session) noexcept {
     double dYaw = 0.0, dPitch = 0.0;
     bool headStep = false;
     if (haveLocal && np.frameSequence != g_adsHeadSeq) {
+        const uint64_t sampleQpc = f30Qpc();   // F133: when the frame thread first read this head sample
         const double pos[3] = {np.local[3], np.local[7], np.local[11]};
         if (g_adsHavePrev) {
-            headStep = np.referenceGeneration == g_adsPrevGen && nofoot::adsHeadDelta(g_adsPrevHead, np.local, &dYaw, &dPitch);
+            // F133: the step is judged by its rate over the frame thread's read times (a 41 deg turn across a 3 s stall is motion; a recentre is an instant step)
+            const uint64_t freqQ = f66QpcFreq();
+            const double dtSec = g_f133.prevQpc && sampleQpc > g_f133.prevQpc && freqQ ? static_cast<double>(sampleQpc - g_f133.prevQpc) / static_cast<double>(freqQ) : 0.0;
+            const nofoot::f133::Step hs = nofoot::f133::headStep(g_adsPrevHead, np.local, dtSec);
+            headStep = np.referenceGeneration == g_adsPrevGen && hs.ok;
             if (headStep) {
+                dYaw = hs.dYaw;
+                dPitch = hs.dPitch;
+                if (hs.bigAsMotion) f133NoteBig(now, hs, dtSec);
                 ++g_adsSteps;
             } else {
                 ++g_adsSkips;
@@ -8050,6 +8742,7 @@ void adsAimTick(uint64_t now, bool session) noexcept {
             }
         }
         std::memcpy(g_adsPrevHead, np.local, sizeof(g_adsPrevHead));
+        g_f133.prevQpc = sampleQpc;
         g_adsHavePrev = true;
         g_adsPrevGen = np.referenceGeneration;
         g_adsHeadSeq = np.frameSequence;
@@ -8063,6 +8756,7 @@ void adsAimTick(uint64_t now, bool session) noexcept {
     if (headStep) {
         g_adsSumHead[0] += dYaw;
         g_adsSumHead[1] += dPitch;
+        g_f133.headYawDeg += dYaw / nofoot::kAdsDeg;   // F133
     }
     // The map: the cancel of what the game applied for our input (exactly), then the next ask (the head's step, or an unwind: the press's release, or the head aim
     // turned off mid-press). F92b: the published cancel carries this tick's ask (AdsAimMap::aheadYaw). F109: under look to aim the ask is the follower's (weight 1:
@@ -8076,6 +8770,10 @@ void adsAimTick(uint64_t now, bool session) noexcept {
         mapRel = false;
         mapW = 1.0;
         askStep = askY != 0.0 || askP != 0.0;
+        if (g_f131.held) {   // F131: nothing is asked and nothing injected; the map still cancels what the game applies
+            mapEng = false;
+            askStep = false;
+        }
     } else if (g_lta.unwinding) {
         mapEng = false;
         mapRel = true;
@@ -8250,6 +8948,7 @@ void adsAimTick(uint64_t now, bool session) noexcept {
                            foreign = g_f109Foreign.load(std::memory_order_relaxed);
             const double springYaw = g_f109SpringYaw.load(std::memory_order_relaxed);
             const double bodyOff = g_lta.bodyOffN ? g_lta.bodyOffSum / g_lta.bodyOffN : 0.0;
+            char f131Why[48];
             Log::get().note("native on foot look to aim (F109) 1 s: %s, item weight %.2f, smoothing %.0f ms; head yaw %+.2f pitch %+.2f deg, asked %+.2f %+.2f, applied "
                             "%+.2f %+.2f, the player's own %+.2f %+.2f; the reported head from the aim yaw %+.2f pitch %+.2f deg now (largest %.2f, %s); seated yaw "
                             "%+.2f pitch %+.2f deg carried; the guard: residual largest %.2f deg (base re-taken %u); the body's yaw from the aim %+.1f deg mean "
@@ -8257,7 +8956,7 @@ void adsAimTick(uint64_t now, bool session) noexcept {
                             "pitch %.5f; blocked %u (%s, held %u ticks), spring calls %u (%+.2f deg); F98c's settle refused %u calls (the aim pitched 10 deg or "
                             "more); centred %u; F109b's guard: held %u (the view moved past the asks), re-based %u (the player's own turn), growth restarted "
                             "%u (a rows gap), trips %u, re-armed %u; F109c: the gain's ends %.5f %.5f, foreign calls %u (no gain taken); the aim's pitch (the FP "
-                            "root) apart from the carried by %+.1f deg more than at the engage (largest %.1f this second, %s)",
+                            "root) apart from the carried by %+.1f deg more than at the engage (largest %.1f this second, %s); held by F131 %u ticks (%s); re-centred %u",
                             g_lta.blocked ? "blocked" : "following", g_lta.armedWLast, g_lta.tauLast * 1000.0, g_lta.sumHead[0] * kD, g_lta.sumHead[1] * kD,
                             g_lta.sumAsk[0] * kD, g_lta.sumAsk[1] * kD, g_lta.sumApplied[0] * kD, g_lta.sumApplied[1] * kD, g_lta.sumUser[0] * kD,
                             g_lta.sumUser[1] * kD, g_lta.offNow[0], g_lta.offNow[1], g_lta.offMax, g_lta.offHave ? "read" : "not read",
@@ -8269,7 +8968,11 @@ void adsAimTick(uint64_t now, bool session) noexcept {
                             settleGated - g_lta.gatedSeen, g_lta.centres, g_adsResid.holds - g_lta.holdsSeen, g_adsResid.userRebases - g_lta.userRebasesSeen,
                             g_adsResid.gapRestarts - g_lta.gapsSeen, g_lta.trips, g_lta.rearms,
                             static_cast<double>(g_f109GainEndLo.load(std::memory_order_relaxed)), static_cast<double>(g_f109GainEndHi.load(std::memory_order_relaxed)),
-                            foreign - g_lta.foreignSeen, g_lta.driftNow, g_lta.driftMax, g_lta.driftRead ? "read" : "not read");
+                            foreign - g_lta.foreignSeen, g_lta.driftNow, g_lta.driftMax, g_lta.driftRead ? "read" : "not read", g_f131.ticks,
+                            nofoot::f131::reasonShort(g_f131.reasonsLast, f131Why, sizeof(f131Why)), g_f133.recentres - g_f133.recentresSeen);
+            g_f133.recentresSeen = g_f133.recentres;
+            g_f131.ticks = 0;
+            g_f131.reasonsLast = 0;
             g_lta.foreignSeen = foreign;
             g_lta.driftMax = 0.0;
             g_lta.driftRead = false;
@@ -9150,7 +9853,9 @@ void fpRootTrack(void* amcPtr, uint64_t now, bool buildG) noexcept {
         g_fpRoot.renderFrame = g_f44Frame.load(std::memory_order_relaxed);
         f85PostFp(g_fpRoot.frame, g_fpRoot.origin, m);   // F85a; F86a: the whole matrix
         if (buildG) {
-            pair = g_p1Pair.take(true, g_fpRoot.frame, g_fpRoot.qpc, g_p1ThreeP.have, g_p1ThreeP.frame, g_p1ThreeP.qpc, f66QpcFreq());
+            uint32_t frameAfter = g_fpRoot.frame;   // F132: a pair refused as far apart re-seeds the phase: this call opens the next frame, and its half carries that index
+            pair = g_p1Pair.take(true, g_fpRoot.frame, g_fpRoot.qpc, g_p1ThreeP.have, g_p1ThreeP.frame, g_p1ThreeP.qpc, f66QpcFreq(), 0, &frameAfter);
+            g_fpRoot.frame = frameAfter;
             if (pair) {
                 fpCopy = g_fpRoot;
                 tp = g_p1ThreeP;
@@ -9603,6 +10308,8 @@ struct PinIn {
     float localHeadY = 0.0f;   // F86g: the headset's height in natural LOCAL (m), with the pitch's validity
     float f94SeatedY = 0.0f;   // F94a: the neck reference's seated y the camera carried (taken out of cam), and where it came from (nofoot::f94::Source)
     uint8_t f94Source = nofoot::f94::kSrcLegacy;
+    float f137SeatedY = 0.0f, f137SeatedZ = 0.0f;   // F137: the virtual neck's seated y and z the camera carried (taken out of cam), and where they came from
+    uint8_t f137Source = nofoot::f94::kSrcLegacy;
 };
 std::atomic<uint32_t> g_pinInSeq{0};
 PinIn g_pinIn;
@@ -9616,7 +10323,7 @@ bool opticItemRead(uint32_t* serial, char name[64]) noexcept;
 std::atomic<uint8_t> g_supportCupMode{nofoot::kSupportNone};
 std::atomic<bool> g_gameAuthoredLeftArm{false};   // Energy Link and Profile Analyser: preserve the game's relaxed left-arm pose
 void pinInPublish(const float cam[3], const float camRaw[3], const float weaponViewWorld[3], const float m3p[16], uint64_t nowMs, double f94SeatedY,
-                  uint8_t f94Source) noexcept {
+                  uint8_t f94Source, const double f137Seated[3], uint8_t f137Source) noexcept {
     double localPitchRad = 0.0;
     bool localPitchValid = false;
     uint32_t localPoseGeneration = 0;
@@ -9650,6 +10357,9 @@ void pinInPublish(const float cam[3], const float camRaw[3], const float weaponV
     g_pinIn.localHeadY = localHeadY;
     g_pinIn.f94SeatedY = static_cast<float>(f94SeatedY);
     g_pinIn.f94Source = f94Source;
+    g_pinIn.f137SeatedY = static_cast<float>(f137Seated[1]);
+    g_pinIn.f137SeatedZ = static_cast<float>(f137Seated[2]);
+    g_pinIn.f137Source = f137Source;
     g_pinInSeq.fetch_add(1, std::memory_order_release);
 }
 bool pinInRead(PinIn* out) noexcept {
@@ -9727,9 +10437,7 @@ struct F94Second {   // frame thread: f94Tick adds a tick, the pin's 1 s line (f
 F94Second g_f94Sec;
 // The part of the alignment the pose the game drew with carried: by the serial the runtime reported with the pose, else the newest published (a runtime that reports
 // none, or a serial the history no longer holds).
-void f94NeckForPin(double* seatedY, uint8_t* source) noexcept {
-    EdvrNativeNowPose np{};
-    const bool have = nativeFrameNowPose(np);
+void f94NeckForPin(bool have, const EdvrNativeNowPose& np, double* seatedY, uint8_t* source) noexcept {
     const nofoot::f94::SeatedHistory::Found f = g_f94Hist.find(have && np.inputVersion >= 3 ? np.eyeAlignApplied : 0u);
     if (f.matched) {
         *seatedY = f.seatedY;
@@ -9737,6 +10445,25 @@ void f94NeckForPin(double* seatedY, uint8_t* source) noexcept {
         return;
     }
     *seatedY = static_cast<double>(g_f94SeatedPub.load(std::memory_order_acquire));
+    *source = f.reported ? nofoot::f94::kSrcMissed : nofoot::f94::kSrcLegacy;
+}
+// ---- F137: the virtual neck, the pin's half (nofoot::f137, native_on_foot_f137.h) ------------------------------------------------------------------------------
+// The frame thread keeps the virtual neck's part of every eye alignment it publishes by serial (g_f137Hist, lock-free) and the newest one; the P1 hook takes the part the
+// drawn pose carried out of the pin's camera whole (right, up, forward: the same map as the ADS shift), as it does the neck reference's raise, so the body is placed from
+// the game's own camera and never follows the virtual neck, which is the view only.
+nofoot::f137::SeatedHistory g_f137Hist;
+double g_f137Pub[3] = {};   // frame thread: the virtual neck's seated vector in the alignment about to be published (recorded under its serial by f89AlignPublish)
+std::atomic<uint32_t> g_f137Removed[3];   // P1 hook: calls that took a virtual neck out of the camera, by the serial the pose carried, by the newest published, serial not found
+void f137ForPin(bool have, const EdvrNativeNowPose& np, double seated[3], uint8_t* source) noexcept {
+    seated[0] = seated[1] = seated[2] = 0.0;
+    const nofoot::f137::SeatedHistory::Found f = g_f137Hist.find(have && np.inputVersion >= 3 ? np.eyeAlignApplied : 0u);
+    if (f.matched) {
+        seated[1] = f.y;
+        seated[2] = f.z;
+        *source = nofoot::f94::kSrcMatched;
+        return;
+    }
+    g_f137Hist.newest(&seated[1], &seated[2]);
     *source = f.reported ? nofoot::f94::kSrcMissed : nofoot::f94::kSrcLegacy;
 }
 struct F94TargetPub {
@@ -10214,8 +10941,14 @@ WeaponViewBias weaponViewBiasForTick(double rightCm, uint64_t now) noexcept {
     if (frames[0] != frames[1]) { out.state = kWeaponViewNoScene; return out; }
     const double solvedRight[3] = {eyes[1][0] - eyes[0][0], eyes[1][1] - eyes[0][1], eyes[1][2] - eyes[0][2]};
     const double ipd = nofoot::ikLen(solvedRight);
-    if (!(ipd >= 0.05 && ipd <= 0.08)) { out.state = kWeaponViewBadAxes; return out; }
-    if (!nofoot::weaponViewOffsetSeated(rightM, localRight, out.seated) || !nofoot::weaponViewOffsetWorld(rightM, solvedRight, out.world)) {
+    // The rows are Elite's: its eye pair is the headset's moved by the world scale, so the 5 to 8 cm window is that of the pair the runtime was told to draw.
+    const double eyeScale = worldScaleEyeFactor(nativeFrameWorldScale());
+    if (!(ipd >= 0.05 * eyeScale && ipd <= 0.08 * eyeScale)) { out.state = kWeaponViewBadAxes; return out; }
+    // F134: the seat's heading in LOCAL is the head's heading in LOCAL less its heading in the seated space (both from this sample); without both there is no seated vector.
+    double yawLocal = 0.0, pitchLocal = 0.0, yawSeated = 0.0, pitchSeated = 0.0;
+    const bool haveSeatYaw = np.renderValid && nofoot::adsHeadAngles(np.local, &yawLocal, &pitchLocal) && nofoot::adsHeadAngles(np.render, &yawSeated, &pitchSeated);
+    const double seatYaw = haveSeatYaw ? nofoot::adsWrap(yawLocal - yawSeated) : std::numeric_limits<double>::quiet_NaN();
+    if (!nofoot::weaponViewOffsetSeated(rightM, localRight, seatYaw, out.seated) || !nofoot::weaponViewOffsetWorld(rightM, solvedRight, out.world)) {
         out.state = kWeaponViewBadAxes;
         out.seated[0] = out.seated[1] = out.seated[2] = 0.0;
         out.world[0] = out.world[1] = out.world[2] = 0.0;
@@ -10307,15 +11040,25 @@ void ikPublishG(void* amcPtr, void* jobPtr, uint64_t now, uint32_t frame, const 
             // F94a: and less the neck reference's raise this pose carried (by its alignment serial), so the pin and the raise's own target see the game's camera
             double f94SeatedY = 0.0;
             uint8_t f94Source = nofoot::f94::kSrcLegacy;
-            f94NeckForPin(&f94SeatedY, &f94Source);
+            EdvrNativeNowPose carried{};
+            const bool haveCarried = nativeFrameNowPose(carried);
+            f94NeckForPin(haveCarried, carried, &f94SeatedY, &f94Source);
             S[1] += f94SeatedY;
-            if (haveS || f94SeatedY != 0.0) {
+            // F137: and less the virtual neck this pose carried, the whole vector (the body is placed from the game's camera, never from the view's own move)
+            double f137Seated[3] = {};
+            uint8_t f137Source = nofoot::f94::kSrcLegacy;
+            f137ForPin(haveCarried, carried, f137Seated, &f137Source);
+            S[1] += f137Seated[1];
+            S[2] += f137Seated[2];
+            const bool f137Taken = f137Seated[1] != 0.0 || f137Seated[2] != 0.0;
+            if (f137Taken) g_f137Removed[f137Source == nofoot::f94::kSrcMatched ? 0 : f137Source == nofoot::f94::kSrcLegacy ? 1 : 2].fetch_add(1, std::memory_order_relaxed);
+            if (haveS || f94SeatedY != 0.0 || f137Taken) {
                 const float rows[9] = {m3p[0], m3p[1], m3p[2], m3p[4], m3p[5], m3p[6], m3p[8], m3p[9], m3p[10]};
                 nofoot::adsUnlockedCam(cam, S, rows, camU);
             }
             for (int i = 0; i < 3; ++i) camU[i] = static_cast<float>(static_cast<double>(camU[i]) - weaponViewWorld[i]);
             const float weaponWorldFloat[3] = {static_cast<float>(weaponViewWorld[0]), static_cast<float>(weaponViewWorld[1]), static_cast<float>(weaponViewWorld[2])};
-            pinInPublish(camU, cam, weaponWorldFloat, m3p, now, f94SeatedY, f94Source);
+            pinInPublish(camU, cam, weaponWorldFloat, m3p, now, f94SeatedY, f94Source, f137Seated, f137Source);
             for (int i = 0; i < 3; ++i) f85Cam[i] = camU[i];
             f85CamOk = true;
         }
@@ -10349,7 +11092,11 @@ void ikPublishG(void* amcPtr, void* jobPtr, uint64_t now, uint32_t frame, const 
             g_p1SpeedPrevQpc = q;
             g_p1SpeedHave = true;
         }
-        if (m3pOk) pair = g_p1Pair.take(g_fpRoot.ok, g_fpRoot.frame, g_fpRoot.qpc, true, frame, q, f66QpcFreq());
+        if (m3pOk) {
+            uint32_t frameAfter = frame;   // F132: as in fpRootTrack, for the 3P half
+            pair = g_p1Pair.take(g_fpRoot.ok, g_fpRoot.frame, g_fpRoot.qpc, true, frame, q, f66QpcFreq(), 1, &frameAfter);
+            g_p1ThreeP.frame = frameAfter;
+        }
         if (pair) fp = g_fpRoot;
     }
     if (pair) ikPublishPair(fp, m3p, d, now);
@@ -10964,7 +11711,8 @@ void adsSightTick(uint64_t now, double dt, const EyeSample& s) noexcept {
             for (size_t k = 0; k < 9; ++k) rows[k] = static_cast<double>(s.rows[k]);
             float exL = 0.0f, exR = 0.0f;
             const bool haveExL = temporalPassEyeOffsetX(0, &exL), haveExR = temporalPassEyeOffsetX(1, &exR);
-            g_adsSightIpd = nofoot::adsSightIpd(haveExL, static_cast<double>(exL), haveExR, static_cast<double>(exR), &g_adsSightIpdMeasured);
+            g_adsSightIpd = nofoot::adsSightIpd(haveExL, static_cast<double>(exL), haveExR, static_cast<double>(exR), &g_adsSightIpdMeasured,
+                                                worldScaleEyeFactor(nativeFrameWorldScale()));
             double rHat[3] = {};
             bool flipped = false;
             // F66e: the rendered eyes. Each eye's position is solved from its scene rows (clip x, y, w vanish there); when the right eye's rows are
@@ -12081,6 +12829,7 @@ void f65ReachLimit(uint64_t now, double dt, bool full3P, const AlignRun& a, cons
 // ---- F67c: the body pin, the frame thread's half: the scope flag the Animate post-hook reads (the key on, full-3P body mode, the arm IK on,
 // native stereo on foot), the game's armed flag for the hook, and the 1 s line (f67cPinLine, with the hook's statistics, defined after them).
 void f67cPinLine(uint64_t now, bool scope) noexcept;
+void f138Line(uint64_t now) noexcept;   // F138: the pitched view's 1 s and 10 s lines (defined after the pin's statistics, beside f67cPinLine)
 // ---- F65c: the pre-bend neck (the hook publishes, the body align reads) ---------------------------------------------------------------
 // The Animate post-hook publishes the neck 34 and the head 44 (model space = body axes, as the census reads them) as they stand after stage 0
 // and before the bend, the square-up and the arm writes (the freeze's matrix where it wrote), with its sequence and ms; read with two tries.
@@ -12131,6 +12880,7 @@ bool f67cPinTick(uint64_t now, int mode, bool full3P) noexcept {
     g_pinScope.store(scope, std::memory_order_relaxed);
     g_armedNow.store(g_armed && active, std::memory_order_relaxed);
     f67cPinLine(now, scope);
+    f138Line(now);
     return scope;
 }
 
@@ -12573,6 +13323,7 @@ void f89AlignPublish(const float f[3]) noexcept {
     g_f91Cancel.record(serial, g_f91.tick, g_adsMap.yawPublished() / nofoot::kAdsDeg, g_adsMap.pitchPublished() / nofoot::kAdsDeg);
     g_f93Sight.record(serial, g_adsSight.applied);   // F93b: the sight lock's part of this alignment, for its matched input
     g_f94Hist.record(serial, g_f94NeckSeatedPub);    // F94a: the neck reference's part, for the P1 hook (another thread: the history is lock-free)
+    g_f137Hist.record(serial, g_f137Pub[1], g_f137Pub[2]);   // F137: the virtual neck's part, the same way
     g_f94SeatedPub.store(static_cast<float>(g_f94NeckSeatedPub), std::memory_order_release);
     nativeFrameSetEyeAlign(f, serial);
 }
@@ -13019,6 +13770,7 @@ bool f107Tick(uint64_t now) noexcept {
 struct F94Tick {
     nofoot::f94::Out out;
     bool settling = false;
+    bool away = false;   // F107: the game's camera is away from the commander this tick (F137 reads it: no virtual neck there)
 };
 F94Tick f94Tick(uint64_t now, double dt, bool pin, double weaponW) noexcept {
     namespace f94 = nofoot::f94;
@@ -13027,6 +13779,7 @@ F94Tick f94Tick(uint64_t now, double dt, bool pin, double weaponW) noexcept {
     // F107: out of scope while the game's camera is away from the commander: the raise ramps out over 0.5 s, so the view is the game's own camera (a screen's UI
     // at its place), and back in from the next settled stance
     const bool cameraAway = f107Tick(now);
+    t.away = cameraAway;
     in.scope = pin && nativeOnFootActive() && !cameraAway;
     in.dt = dt;
     in.settleS = nofoot::f95::settleS(static_cast<double>(g_f87SettleS.load(std::memory_order_relaxed)));   // F95a: the hold's settle time (the pilot's 0.1 s), 0.1 s at least
@@ -13052,6 +13805,81 @@ F94Tick f94Tick(uint64_t now, double dt, bool pin, double weaponW) noexcept {
     if (!in.targetFresh) ++s.stale;
     if (t.out.clamped) ++s.clamped;
     return t;
+}
+
+// ---- F137: a virtual neck under mouse look, the frame thread's half (nofoot::f137, native_on_foot_f137.h) -----------------------------------------------------
+// Once a tick in alignTick, after the neck reference: the neck translation the game's aim pitch would have made, as a seated eye offset (zero while look to aim drives the aim,
+// outside the body pin's scope, without a fresh aim pitch from the pin hook or a head pose, and in ADS by the lock's weight). alignTick adds it to the eye alignment; the
+// alignment is recorded with it under its serial (g_f137Hist) and the P1 hook takes it out of the pin's camera again (f137ForPin, ikPublishG). The head containment reads
+// the physical head as the pose's render plus the alignment that pose carried (f119::physicalOffset), in which it cancels.
+nofoot::f137::VirtualNeck g_f137;
+struct F137State {
+    nofoot::f137::Second sec;
+    uint64_t lineMs = 0, waitMs = 0;
+    int reasonSaid = -1;
+    void reset() noexcept {
+        sec.clear();
+        lineMs = waitMs = 0;
+        reasonSaid = -1;
+    }
+};
+F137State g_f137State;
+void f137Reset() noexcept {
+    g_f137.reset();
+    g_f137State.reset();
+    g_f137Pub[0] = g_f137Pub[1] = g_f137Pub[2] = 0.0;
+}
+nofoot::f137::Out f137Tick(uint64_t now, double dt, const EdvrNativeNowPose& np, bool haveFrame, bool pin, bool cameraOn, bool cameraAway) noexcept {
+    namespace f137 = nofoot::f137;
+    F137State& st = g_f137State;
+    if (!nativeOnFootActive()) {   // off foot: nothing carried, the next time on foot starts from nothing
+        if (g_f137.ramp > 0.0 || st.sec.any() || st.reasonSaid >= 0) f137Reset();
+        return f137::Out{};
+    }
+    f137::In in;
+    in.dt = dt;
+    in.scope = pin && cameraOn && !cameraAway;
+    in.lookToAim = g_ltaDrop.load(std::memory_order_relaxed);
+    const uint64_t rootMs = g_f109RootMs.load(std::memory_order_acquire);
+    in.aimFresh = rootMs != 0 && now >= rootMs && now - rootMs <= f137::kAimMaxAgeMs;
+    in.aimPitchRad = static_cast<double>(g_f109RootPitch.load(std::memory_order_relaxed)) * nofoot::kAdsDeg;
+    double headRad = 0.0;
+    in.headValid = haveFrame && np.inputVersion >= 3 && np.localValid && nofoot::pinNaturalLocalPitch(np.local, &headRad);
+    in.headPitchRad = headRad;
+    in.adsWeight = g_adsW;
+    const f137::Out out = g_f137.step(in);
+    st.sec.add(out, in.aimPitchRad, in.headPitchRad);
+    // why not, once per change and at most every 5 s; the camera being away from the commander's first-person one (boarding, the suite's camera) is not a reason to say
+    if (out.reason != st.reasonSaid && (cameraOn && !cameraAway) && now - st.waitMs >= 5000) {
+        st.reasonSaid = out.reason;
+        st.waitMs = now;
+        if (out.reason != f137::kOn)
+            Log::get().note("native on foot virtual neck (F137): not applied: %s", f137::reasonName(out.reason));
+    }
+    if (st.lineMs == 0) st.lineMs = now;
+    if (now - st.lineMs >= 1000) {
+        st.lineMs = now;
+        if (st.sec.any()) {
+            const f137::Second& q = st.sec;
+            const uint32_t viaSerial = g_f137Removed[0].exchange(0, std::memory_order_relaxed), viaNewest = g_f137Removed[1].exchange(0, std::memory_order_relaxed),
+                           missed = g_f137Removed[2].exchange(0, std::memory_order_relaxed);
+            Log::get().note("native on foot virtual neck (F137) 1 s: aim pitch %+.1f deg, head pitch %+.1f deg, offset forward %+.1f up %+.1f cm (max %.1f), w %.2f/%.2f, "
+                            "removed in the pin's camera %u calls (found by the alignment serial %u, the last published %u, serial not found %u)",
+                            q.mean(q.aimDegSum), q.mean(q.headDegSum), q.mean(q.forwardCmSum), q.mean(q.upCmSum), q.maxCm, q.mean(q.wSum), q.wMax,
+                            viaSerial + viaNewest + missed, viaSerial, viaNewest, missed);
+            st.sec.clear();
+        }
+    }
+    return out;
+}
+
+// ---- F138: the pitched view, the resets (nofoot::f138, native_on_foot_f138.h; the hook's half and the lines are with the pin's statistics) --------------------------
+// The stance reference and the window belong to the pin hook (one writer) and the line's accumulators to the frame thread: a reset from the frame thread (an edge of the
+// on-foot camera, the shutdown) is a request each side takes at its next call, never a write across threads.
+std::atomic<bool> g_f138HookReset{false}, g_f138LineReset{false};
+void f138Reset() noexcept {
+    g_f138HookReset.store(true, std::memory_order_relaxed);
+    g_f138LineReset.store(true, std::memory_order_relaxed);
 }
 
 // ---- F106: ADS, the sight in both eyes (fix.native_on_foot_ads_sight_both_eyes) ------------------------------------------------------------------------------
@@ -13154,6 +13982,8 @@ void f115TermsZero() noexcept {
     g_f87LastRaise = 0.0;
     g_f94Raise.reset();
     g_f88W.w = 0.0;
+    f137Reset();   // F137
+    f138Reset();   // F138: no stance reference past the edge
 }
 // The camera values as published: the provider's words (what the next beginFrame hands the runtime), the look the runtime still carries, the ADS shift, the share.
 nofoot::f115::Published f115Snapshot(uint64_t now, bool sinceReset) noexcept {
@@ -14099,6 +14929,8 @@ void alignTick(uint64_t now) noexcept {   // F66b: dt from QPC inside (g_alignCl
     adsCentreTick(now);           // F69i: the press's snap (measures once after each engage, reports 0.25 s and 1 s on)
     const F88Tick weaponEye = f88Tick(now, dt, pin, ads);   // F88: the weapon eye offset (exact zeros unless a key is set and a weapon or tool is drawn at the hip)
     const F94Tick neckRef = f94Tick(now, dt, pin, g_f88W.w);   // F94a: the view's height from the animated neck, weighted by 1 - w (exact zeros outside the pin's scope)
+    // F137: the virtual neck under mouse look (exact zeros while look to aim drives the aim, outside the pin's scope, off the commander's first-person camera)
+    const nofoot::f137::Out virtualNeck = f137Tick(now, dt, np, haveFrame, pin, g_f115CameraOn && !nativeOnFootCameraExternal(), neckRef.away);
     f106ShareTick(now);   // F106: the left eye's share of the right eye's image (the ADS lock's weight with the key on and a weapon drawn; 0 otherwise)
     const nofoot::f87::HoldOut hold = f87HoldTick(now, dt, np, haveFrame, ads, weaponEye.settling || neckRef.settling);   // F87h: the standing-height hold (zero outside the pin's scope)
     // The eye align: the view run (g_align: the active run in view and calibrate, decaying to zero in body) plus the ADS locks. One serial,
@@ -14116,6 +14948,7 @@ void alignTick(uint64_t now) noexcept {   // F66b: dt from QPC inside (g_alignCl
             if (i == 1) eye[i] = nofoot::f87::eyeAlignY(g_align.applied[i], g_adsLock[i], g_adsSight.applied[i], weaponView.seated[i], hold.eyeY);   // F87h
             eye[i] += weaponEye.out.seated[i];   // F88: w O, after the hold's term; the hold measured the head's posture without it (devOf), so it never sees it
             if (i == 1) eye[i] += neckRef.out.seatedY;   // F94a/F98c: the neck reference's raise (with and without an item); the P1 hook takes it back out by serial
+            eye[i] += virtualNeck.seated[i];   // F137: the virtual neck (the view only: the P1 hook takes it back out by serial, the physical head offset cancels it)
             if (camExternal) eye[i] = 0.0;
             eye[i] = nofoot::f115::gate(onFoot, eye[i]);
             eyeChange = std::max(eyeChange, std::fabs(eye[i] - g_eyeAlignPub[i]));
@@ -14139,6 +14972,7 @@ void alignTick(uint64_t now) noexcept {   // F66b: dt from QPC inside (g_alignCl
             for (size_t i = 0; i < 3; ++i) g_eyeAlignPub[i] = eye[i];
             const float f[3] = {static_cast<float>(eye[0]), static_cast<float>(eye[1]), static_cast<float>(eye[2])};
             g_f94NeckSeatedPub = camExternal || !onFoot ? 0.0 : neckRef.out.seatedY;   // F94a: the neck reference's part of this alignment, kept under its serial
+            for (size_t i = 0; i < 3; ++i) g_f137Pub[i] = camExternal || !onFoot ? 0.0 : virtualNeck.seated[i];   // F137: the virtual neck's part, kept under the same serial
             f89AlignPublish(f);   // F89: the serial and the y under it are kept for the hold's input
         }
     }
@@ -14959,6 +15793,7 @@ struct IkSideStats {
 struct IkStats {
     uint64_t calls = 0, solved = 0;
     double fpAgeLast = 0.0, fpAgeMax = 0.0, gAgeLast = 0.0, gAgeMax = 0.0;
+    uint64_t gOver100 = 0;   // F132: calls that solved with a G older than 100 ms while armed (kArmedGMaxMs lets it through up to 1000 ms without a refusal)
     IkSideStats side[2];
     // F57: the square-up. theta = yaw(3P shoulder line 36 - 35) - yaw(FP 20 - 19 mapped by G), degrees, before the clamp; the rotation applied
     // (probe and an unwritten on: what would be at the full ramp); clamps at +-50 deg; calls that wrote it.
@@ -15175,6 +16010,7 @@ struct PinStats {
         double neckSum = 0.0, neckMin = 1e9, neckMax = -1e9, viewSum = 0.0, viewMin = 1e9, viewMax = -1e9, gameSum = 0.0, animSum = 0.0;   // F95a: the min/max were 9 in cm
         double tgtSum = 0.0, tgtMin = 1e9, tgtMax = -1e9, camSum = 0.0, vSum = 0.0, vAbsMax = 0.0, askedSum = 0.0;
         double legAnimSum = 0.0, legSum = 0.0, legMin = 9.0;
+        double vnUpSum = 0.0, vnForwardSum = 0.0;   // F137: the virtual neck in the drawn camera (cm), up and forward: the view over the neck above is the view as drawn, it included
     } f94[2];
     // F95a: the settle window's verdicts per pinned call (nofoot::f95::Why), the settled targets' range (cm), and the view's vertical step a game frame with the head still
     // (0 standing, 1 moving).
@@ -15198,6 +16034,21 @@ struct PinStats {
 std::atomic<uint32_t> g_pinStatSeq{0};
 PinStats g_pinStats;
 std::atomic<bool> g_pinStatReset{false};
+// ---- F138: the view holds its height over the neck while the look is pitched (nofoot::f138, native_on_foot_f138.h) ----------------------------------------------
+// The pin hook's half. g_f138 holds the stance reference (taken where the settle publishes an unarmed upright target) and adds the camera's sink to the raise's target
+// while the look is pitched; the window is what the hook saw (written under g_f138Seq by the one writer, taken once a second by f138Line on the frame thread).
+nofoot::f138::Tracker g_f138;
+nofoot::f138::Window g_f138Win;
+std::atomic<uint32_t> g_f138Seq{0};
+std::atomic<bool> g_f138WinReset{false};
+// One write to the window: the hook's, under the sequence counter. A reset the frame thread asked for (it took the window) clears it first.
+template <class Fn>
+void f138WinWrite(Fn&& fn) noexcept {
+    g_f138Seq.fetch_add(1, std::memory_order_acq_rel);
+    if (g_f138WinReset.exchange(false, std::memory_order_relaxed)) g_f138Win.clear();
+    fn(g_f138Win);
+    g_f138Seq.fetch_add(1, std::memory_order_release);
+}
 // The cyclopean offset cache (the hook; one writer under g_pfzBusy): the world offset from the job camera (the left eye) to the midpoint of the eyes,
 // and the eyes' mean forward, from the two eyes' scene rows; the rows are the render thread's (a frame or two old, which moves a 3 cm offset by under
 // a millimetre).
@@ -15216,7 +16067,7 @@ int pinCycloUpdate(uint64_t now) noexcept {
     bool read[2] = {};
     for (int e = 0; e < 2; ++e) read[e] = eyeRowsRead(e, &fr[e], rows[e], o[e]);
     nofoot::f126::Cyclo c;
-    const nofoot::f126::Pair pair = nofoot::f126::cycloFromRows(read, fr, rows, o, g_f44Frame.load(std::memory_order_relaxed), &c);
+    const nofoot::f126::Pair pair = nofoot::f126::cycloFromRows(read, fr, rows, o, g_f44Frame.load(std::memory_order_relaxed), &c, worldScaleEyeFactor(nativeFrameWorldScale()));
     g_f126PairCalls.fetch_add(1, std::memory_order_relaxed);
     if (pair == nofoot::f126::Pair::kUse) {
         for (int i = 0; i < 3; ++i) {
@@ -15252,6 +16103,8 @@ struct PinCall {
     // F94a: the raise's target (m) and whether it was published; the animated neck's height; the view as drawn, the game's camera and the skeleton's own eye over the
     // neck, the head level (m); the raise the drawn pose carried (m, from the P1 hook) and where it came from; the vertical move the rest target asked (now never applied).
     double f94Target = 0.0, f94Neck = 0.0, f94ViewOver = 0.0, f94GameOver = 0.0, f94AnimEyeOver = 0.0, f94InCam = 0.0, f94Asked = 0.0;
+    double f137Up = 0.0, f137Forward = 0.0;   // F137: the virtual neck the camera carried, body axes (m): up + (negative: down), forward +; taken out of the pin's camera
+    bool f138Pitched = false;                 // F138: this call is one of the pitched look's (|aim pitch| 10 deg or more): the close adds its INSIDE test to the window
     bool f94TargetOk = false, f94AnimEyeOk = false;
     uint8_t f94Source = nofoot::f94::kSrcLegacy;
     // F95a: why the stance was or was not settled (nofoot::f95::Why), the body moving, the target published from the settled window (m); the view's vertical step since
@@ -15604,9 +16457,13 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
             g_f119StanceMs.store(GetTickCount64(), std::memory_order_relaxed);
             // F95a: the view's vertical step from the last game frame, the head's own motion out of it (the transient and the pitch's pivot), counted while the head was
             // still: what the view does that the player did not do.
-            const double viewLevel = nofoot::pinEyeHeightNormalized(f94ViewY, localPitchRad, localPitchValid);
+            // F137: the view's steps are what the view does that the player did not do: the virtual neck (a move the mouse makes) is out of them; the figures of the view over
+            // the neck and the eye as drawn keep it
+            pc.f137Up = -static_cast<double>(in.f137SeatedY);
+            pc.f137Forward = static_cast<double>(in.f137SeatedZ);
+            const double viewLevel = nofoot::pinEyeHeightNormalized(f94ViewY - pc.f137Up, localPitchRad, localPitchValid);
             const double localPitchDeg = localPitchRad * 180.0 / nofoot::kIkPi;
-            const double worldLevel = nofoot::pinEyeHeightNormalized(f95WorldY, localPitchRad, localPitchValid);
+            const double worldLevel = nofoot::pinEyeHeightNormalized(f95WorldY - pc.f137Up, localPitchRad, localPitchValid);
             if (freshIn && g_f95View.have && in.p1 == g_f95View.p1 + 1u && localPitchValid && g_f95View.pitchOk && std::isfinite(viewLevel)) {
                 pc.f95HeadStill = nofoot::f95::headStill(static_cast<double>(in.localHeadY) - g_f95View.localY, localPitchDeg - g_f95View.pitchDeg);
                 pc.f95ViewStep = viewLevel - g_f95View.y;
@@ -15670,6 +16527,8 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
         // camera (nofoot::f94::EyeLevel): the eye where it would stand unarmed. Anything else (the walk cycle, a landing, a stance still changing) publishes nothing:
         // the frame thread holds the raise where the last settled stance put it.
         {
+            if (g_f138HookReset.exchange(false, std::memory_order_relaxed)) g_f138.reset();   // F138: an edge of the on-foot camera, the shutdown
+            bool f138Own = false;   // F138: this block published a target (ADS's zero, a settled stance): the added sink has no say this call
             nofoot::f95::SettleIn si;
             // F98c: not while aiming down sights (F73's detach): the sight lock owns the eye there. The stance's raise is published as zero with the detach,
             // so it leaves the view. Publishing nothing held the last stance raise (pistol ADS, 18:50: +11.5 cm, stale every tick, the pistol low). A target
@@ -15681,6 +16540,17 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
                 si.valid = false;
                 g_f109SettleGated.fetch_add(1, std::memory_order_relaxed);
             }
+            // F138: nor with the game's aim pitched under mouse look either (the FP root's pitch, from G above; look to aim's gate has counted its own), with nothing drawn: the
+            // game's camera sinks against the animated neck as the look pitches, and a stance taken there is the sunk camera's (0.3 s into a held look-up the raise settled on
+            // +58.5 cm, and the view stood 55 cm over the neck when the look came level). With an item drawn the settle takes the pitched camera as it did before F138: the armed
+            // target is an absolute height (the unarmed eye of the stance). Counted apart from g_f109SettleGated.
+            const bool f138AimKnown = G != nullptr && std::isfinite(pc.f86AimPitch);
+            const bool f138Item = armed || f97W > 0.0;
+            bool f138SettleRefused = false;
+            if (si.valid && f138AimKnown && nofoot::f138::settleRefused(pc.f86AimPitch, kF109SettlePitchDeg, f138Item)) {
+                si.valid = false;
+                f138SettleRefused = true;
+            }
             si.still = !pc.f95Moving;
             si.tS = static_cast<double>(f30QpcUs(in.qpc)) * 1e-6;
             si.neckY = N0[1] + f97W * std::max(pc.f97RaiseF93, 0.0);
@@ -15690,6 +16560,7 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
             if (pc.detachW > 0.0 && refusal != kPinRefCameraAway) {
                 pc.f95Target = 0.0;
                 f94TargetPublish(0.0, now);
+                f138Own = true;
             } else if (so.settled) {
                 // the stance's class: the pin's crouch weight against its standing calibration, else against the stored standing unarmed camera; neither, not known
                 namespace f94 = nofoot::f94;
@@ -15704,6 +16575,49 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
                 pc.f95Target = g_f98Eye.target(itemDrawn, cls, so.neckY, so.camY, f97H, &pc.f98Src, upright);
                 pc.f98EyeY = so.camY + pc.f95Target;
                 f94TargetPublish(pc.f95Target, now);
+                f138Own = true;
+                // F138: an unarmed upright stance is the reference the pitched look's sink is measured against: the target just published, G of this call, the animated neck, the
+                // headset's LOCAL height and the LOCAL pose's generation (no valid pose, no reference)
+                if (!itemDrawn && upright)
+                    g_f138.noteStance(pc.f95Target, pc.rawEyeY, N0[1], static_cast<double>(in.localHeadY), in.localPoseGeneration, localPitchValid);
+            }
+            // F138: while the look is pitched the raise adds back what the game's camera has sunk against the animated neck since that stance, weighted by the pitch (the FP
+            // root's pitch: up in both modes, down under mouse look only; a look down under look to aim stays as flown). The sink goes into the raise, which the P1 hook takes out of the pin's camera by the alignment serial (f94NeckForPin): E never sees it, so
+            // the next call's G is the game's own camera again and nothing feeds back. The first level call after returns the stance's target once.
+            {
+                namespace f138 = nofoot::f138;
+                f138::In fi;
+                fi.aimPitchDeg = f138AimKnown ? pc.f86AimPitch : std::nan("");
+                fi.settleOwned = f138Own;
+                fi.lookToAim = g_ltaDrop.load(std::memory_order_relaxed);
+                fi.itemDrawn = f138Item;
+                fi.ads = pc.detachW > 0.0;
+                fi.cameraAway = refusal == kPinRefCameraAway;
+                fi.poseValid = localPitchValid;
+                fi.generation = in.localPoseGeneration;
+                fi.rawEyeY = pc.rawEyeY;
+                fi.neckY = N0[1];
+                fi.localHeadY = static_cast<double>(in.localHeadY);
+                const f138::Out fo = g_f138.step(fi);
+                if (fo.publish) f94TargetPublish(fo.publishM, now);
+                if (fo.pitched || fo.returned || fo.returnRefused || fo.notNeeded) {
+                    f138::Call fc;
+                    fc.aimDeg = pc.f86AimPitch;
+                    fc.headValid = localPitchValid;
+                    fc.headDeg = pc.localPitchDeg;
+                    fc.lookToAim = fi.lookToAim;
+                    fc.itemDrawn = fi.itemDrawn;
+                    fc.out = fo;
+                    fc.carriedUpCm = 100.0 * (pc.f94InCam + pc.f137Up);   // EDVR's carried vertical: the neck reference's raise and F137's up, by the alignment serial as F94a's line has it
+                    fc.carriedFwdCm = 100.0 * pc.f137Forward;
+                    fc.viewOverNeckCm = 100.0 * pc.f94ViewOver;
+                    fc.settleRefusedAim = f138SettleRefused;
+                    pc.f138Pitched = fo.pitched;
+                    f138WinWrite([&](nofoot::f138::Window& win) noexcept {
+                        win.add(fc);
+                        win.addReturn(fo);
+                    });
+                }
             }
         }
         // F68e: the animated legs' reach (hip to foot over thigh + calf, mean of both), before anything moves: the crouch test.
@@ -16480,6 +17394,8 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
             e.tgtMin = std::min(e.tgtMin, tgt);
             e.tgtMax = std::max(e.tgtMax, tgt);
             e.camSum += 100.0 * pc.f94InCam;
+            e.vnUpSum += 100.0 * pc.f137Up;
+            e.vnForwardSum += 100.0 * pc.f137Forward;
             ++e.srcN[pc.f94Source < 3 ? pc.f94Source : 1];
             e.askedSum += 100.0 * pc.f94Asked;
             e.vSum += 100.0 * mv.delta;
@@ -16700,6 +17616,11 @@ void pinRecord(const PinCall& pc, const double resFinal[3]) noexcept {
         f.chestMin = std::min(f.chestMin, 100.0 * pc.f97ChestFwd);
     }
     g_pinStatSeq.fetch_add(1, std::memory_order_release);
+    // F138: the pitched look's INSIDE: F97a's test on the drawn eye (under the clavicle line + 8 cm and under 12 cm ahead of the chest), over the pitched calls only
+    if (pc.f138Pitched && pc.f97ClrOk) {
+        const bool inside = pc.f97Inside;
+        f138WinWrite([inside](nofoot::f138::Window& win) noexcept { win.addInside(inside); });
+    }
 }
 
 // ---- F67f: while armed, both hands stay on the grips on every frame -------------------------------------------------------------------------------
@@ -18756,6 +19677,7 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
     st.gAgeLast = static_cast<double>(gAge);
     st.fpAgeMax = std::max(st.fpAgeMax, st.fpAgeLast);
     st.gAgeMax = std::max(st.gAgeMax, st.gAgeLast);
+    if (armedNow && armsOk && gAge > 100) ++st.gOver100;   // F132: a stale G used silently (the armed limit is kArmedGMaxMs, 1000 ms); counted, the limit unchanged
     for (int side = 0; side < 2; ++side) {
         const SideOut& o = so[side];
         if (!o.solved) continue;
@@ -20517,20 +21439,33 @@ void f68cLine(uint64_t now) noexcept {
         speedSum = g_p1SpeedSum;
         speedMax = g_p1SpeedMax;
         speedN = g_p1SpeedN;
-        g_p1Pair.frames = g_p1Pair.pairs = g_p1Pair.noPair = g_p1Pair.tpFirst = g_p1Pair.fpFirst = g_p1Pair.farApart = 0;
+        g_p1Pair.clearSecond();   // F132: the counters of the second, the re-seeds and the refused pairs' gaps with them
         g_p1SpeedSum = g_p1SpeedMax = 0.0;
         g_p1SpeedN = 0;
     }
     if (w.frames == 0 && w.pairs == 0) return;
+    static nofoot::f129::RateCap reseedCap;   // F132: the event line below is 6 a minute at most, in the summary log too
+    if (w.reseeds > 0 && reseedCap.allow(now, 6)) {
+        const uint32_t held = reseedCap.takeSuppressed();
+        char heldText[96] = "";
+        if (held) std::snprintf(heldText, sizeof(heldText), " [%u earlier reseed line(s) were not written: at most 6 a minute]", held);
+        Log::get().note("native on foot G pairing (F132): reseeded %llu time(s) in the last second after pairs refused as far apart (gap min %.1f mean %.1f max %.1f ms; the FP "
+                        "call first in %llu of them, the 3P call first in %llu); G built from a pair %llu times in %llu game frames%s",
+                        static_cast<unsigned long long>(w.reseeds), w.farGapMinMs, w.farApart ? w.farGapSumMs / static_cast<double>(w.farApart) : 0.0, w.farGapMaxMs,
+                        static_cast<unsigned long long>(w.farFpFirst), static_cast<unsigned long long>(w.farTpFirst), static_cast<unsigned long long>(w.pairs),
+                        static_cast<unsigned long long>(w.frames), heldText);
+    }
     if (!nofoot::logwin::detail()) return;   // F125: the detail log's line; the counters were taken and cleared above as before
     Log::get().note("native on foot G pairing (F68c): %llu game frames; G built from one frame's pair %llu times (F_root - M3P frame difference: 0 in %llu, "
                     "any other 0 by construction); frames without a pair %llu; pairs refused as far apart (over %.0f ms) %llu; the 3P call came first in "
                     "%llu frames (the F67 rule built G from the previous frame's root on those) and the FP call first in %llu; 3P AMC speed mean %.2f max "
-                    "%.2f m/s over %llu frames",
+                    "%.2f m/s over %llu frames; reseeds %llu; refused pairs: gap min %.1f mean %.1f max %.1f ms, the FP call first in %llu and the 3P call first in %llu",
                     static_cast<unsigned long long>(w.frames), static_cast<unsigned long long>(w.pairs), static_cast<unsigned long long>(w.pairs),
                     static_cast<unsigned long long>(w.noPair), nofoot::kP1PairMaxGapMs, static_cast<unsigned long long>(w.farApart),
                     static_cast<unsigned long long>(w.tpFirst), static_cast<unsigned long long>(w.fpFirst), speedN ? speedSum / static_cast<double>(speedN) : 0.0,
-                    speedMax, static_cast<unsigned long long>(speedN));
+                    speedMax, static_cast<unsigned long long>(speedN), static_cast<unsigned long long>(w.reseeds), w.farGapMinMs,
+                    w.farApart ? w.farGapSumMs / static_cast<double>(w.farApart) : 0.0, w.farGapMaxMs, static_cast<unsigned long long>(w.farFpFirst),
+                    static_cast<unsigned long long>(w.farTpFirst));
 }
 void f67fLine(uint64_t now) noexcept {
     static uint64_t lineMs = 0;
@@ -20865,12 +21800,13 @@ void armIkTick(uint64_t now) noexcept {
     const uint64_t fpAgeNow = fpMs && now > fpMs ? now - fpMs : 0, gAgeNow = gOk && now > G.ms ? now - G.ms : 0;
     Log::get().note("native on foot arm IK (F56, %s): %llu IK calls in 5 s (%llu measured, %llu arm solves); base weight %.2f; gate: %s; refusals in "
                     "5 s: %s; ages now: FP snapshot %s%llu ms, G %s%llu ms; in the hook: FP last %.0f max %.0f ms, G last %.0f max %.0f ms; G published "
-                    "%llu, refused %llu in 5 s",
+                    "%llu, refused %llu in 5 s; armed G over 100 ms %llu",
                     kModeNames[mode], static_cast<unsigned long long>(calls - g_ikCallsLast), static_cast<unsigned long long>(got ? st.calls : 0),
                     static_cast<unsigned long long>(got ? st.solved : 0), static_cast<double>(g_ikBlend.w), gate ? gate : "holds", refusals,
                     fpMs ? "" : "(none) ", static_cast<unsigned long long>(fpAgeNow), gOk ? "" : "(none) ", static_cast<unsigned long long>(gAgeNow),
                     got ? st.fpAgeLast : -1.0, got ? st.fpAgeMax : -1.0, got ? st.gAgeLast : -1.0, got ? st.gAgeMax : -1.0,
-                    static_cast<unsigned long long>(gPub - g_ikGPubLast), static_cast<unsigned long long>(gRef - g_ikGRefLast));
+                    static_cast<unsigned long long>(gPub - g_ikGPubLast), static_cast<unsigned long long>(gRef - g_ikGRefLast),
+                    static_cast<unsigned long long>(got ? st.gOver100 : 0));
     g_ikCallsLast = calls;
     g_ikGPubLast = gPub;
     g_ikGRefLast = gRef;
@@ -21127,12 +22063,13 @@ void f125PinPrint(const F125PinWindow& w) noexcept {
                             "the neck %+.1f cm (min %+.1f max %+.1f), the game's camera over it %+.1f cm, the skeleton's eye over it %s (head level); the raise's target "
                             "%+.1f cm (min %+.1f max %+.1f), in the drawn camera %+.1f cm (found by the alignment serial %u calls, the last published %u, serial not found %u); "
                             "frame thread %u ticks: neck reference weight %.2f, raise %+.1f cm, applied %+.1f cm, target frozen %u, stale %u, clamped %u; the rest target "
-                            "asked %+.1f cm, the lowering written mean %+.2f cm max |%.2f|; legs hip to foot over the leg: animated %.3f, written mean %.3f min %.3f (%u solves); camera 3 m away %u s (max %.1f cm)",
+                            "asked %+.1f cm, the lowering written mean %+.2f cm max |%.2f|; legs hip to foot over the leg: animated %.3f, written mean %.3f min %.3f (%u solves); camera 3 m away %u s (max %.1f cm); "
+                            "virtual neck %+.1f cm up, %+.1f cm forward",
                             ws, item, b == 0 ? "standing" : "every state", e.n, e.neckSum / n, e.neckMin, e.neckMax,
                             w.eyeKey, e.viewSum / n, e.viewMin, e.viewMax, e.gameSum / n, anim,
                             e.tgtSum / n, e.tgtMin, e.tgtMax, e.camSum / n, e.srcN[nofoot::f94::kSrcMatched], e.srcN[nofoot::f94::kSrcLegacy],
                             e.srcN[nofoot::f94::kSrcMissed], fs.n, fs.wSum / fn, fs.raiseSum / fn, fs.appliedSum / fn, fs.frozen, fs.stale, fs.clamped,
-                            e.askedSum / n, e.vSum / n, e.vAbsMax, e.legAnimSum / gn, e.legSum / gn, e.legsN ? e.legMin : 0.0, e.legsN, w.remote[b], w.remoteMax[b]);
+                            e.askedSum / n, e.vSum / n, e.vAbsMax, e.legAnimSum / gn, e.legSum / gn, e.legsN ? e.legMin : 0.0, e.legsN, w.remote[b], w.remoteMax[b], e.vnUpSum / n, e.vnForwardSum / n);
 
         }
         }
@@ -21439,6 +22376,90 @@ void f67cPinLine(uint64_t now, bool scope) noexcept {
     w.neck.fold(st.f98Have[0], st.f98Neck[0], st.f98Src[nofoot::f94::kEyeStart]);
     ++w.seconds;
     if (mixedRawSecond || nofoot::logwin::due(w.seconds)) f125PinClose();
+}
+
+// ---- F138: the pitched view's lines (frame thread; nofoot::f138, native_on_foot_f138.h) ------------------------------------------------------------------------------
+// Once a second the hook's window is taken. In any second with a call at |aim pitch| of 10 deg or more (and in one where the raise went back to the stance's) one line says
+// what the look was, how far the game's camera sank against the stance, what the raise added back or why it did not, what EDVR carried, where the view stood over the neck, the
+// INSIDE test on the drawn eye and the settle's refusals. Every 10 s with data one line per mode and item class gives the 10 deg bins of the aim's pitch (calls, the camera's
+// sink, what EDVR carried up and forward, the head's own height since the stance): it tells a sink that follows the aim's pitch alone from one that grows with EDVR's carried
+// offsets. An item drawn splits the lines: the bins are by class (item none, or the item), the 1 s line names the item and says how many of the calls had it.
+void f138Line(uint64_t now) noexcept {
+    namespace f138 = nofoot::f138;
+    static uint64_t lineMs = 0, binMs = 0;
+    static uint32_t gateSeen = 0;
+    static f138::Group bins[2][2];   // [look to aim][item drawn], merged each second, printed and cleared every 10 s
+    if (g_f138LineReset.exchange(false, std::memory_order_relaxed)) {
+        lineMs = binMs = 0;
+        for (auto& row : bins)
+            for (f138::Group& g : row) g = f138::Group{};
+    }
+    if (lineMs == 0) {
+        lineMs = binMs = now;
+        gateSeen = g_f109SettleGated.load(std::memory_order_relaxed);
+        return;
+    }
+    if (now - lineMs < 1000) return;
+    f138::Window w;
+    bool got = false;
+    for (int tries = 0; tries < 2 && !got; ++tries) {
+        const uint32_t s1 = g_f138Seq.load(std::memory_order_acquire);
+        if (s1 & 1u) continue;
+        std::memcpy(&w, &g_f138Win, sizeof(w));
+        std::atomic_thread_fence(std::memory_order_acquire);
+        got = g_f138Seq.load(std::memory_order_relaxed) == s1;
+    }
+    if (!got) return;   // torn twice: the next second takes both
+    lineMs = now;
+    g_f138WinReset.store(true, std::memory_order_relaxed);
+    const uint32_t gated = g_f109SettleGated.load(std::memory_order_relaxed);
+    const uint32_t ltaGate = gated - gateSeen;   // look to aim's gate (the hook counts it apart from F138's)
+    gateSeen = gated;
+    for (int m = 0; m < 2; ++m)
+        for (int i = 0; i < 2; ++i) bins[m][i].merge(w.group[m][i]);
+    char itemName[64] = {};
+    const auto nameItem = [&]() noexcept {
+        if (!itemName[0] && (!journalHeldItemName(itemName, sizeof(itemName)) || !itemName[0])) std::snprintf(itemName, sizeof(itemName), "unnamed");
+    };
+    if (w.any()) {
+        char mode[96], why[260], item[128];
+        w.modeText(mode, sizeof(mode));
+        f138::notAppliedText(w.why, why, sizeof(why));
+        if (!w.itemCalls) {
+            std::snprintf(item, sizeof(item), "none");
+        } else {
+            nameItem();
+            if (w.itemCalls == w.calls) std::snprintf(item, sizeof(item), "%s", itemName);
+            else std::snprintf(item, sizeof(item), "%s in %u of %u calls", itemName, w.itemCalls, w.calls);
+        }
+        const auto mean = f138::Window::mean;
+        Log::get().note("native on foot pitched view (F138) 1 s: mode %s, item %s, aim pitch %+.1f deg (min %+.1f max %+.1f), head pitch %+.1f deg; the camera's sink against the "
+                        "stance %+.1f cm (max %+.1f), the head's own height since the stance %+.1f cm; w %.2f/%.2f; added %+.1f cm (max %+.1f) in %u of %u pitched calls | "
+                        "measured only: an item drawn %u calls | not applied: %s; EDVR carried up %+.1f forward %+.1f cm (the raise, F137); the view over the neck %+.1f cm; "
+                        "INSIDE %u of %u; the settle refused for the aim's pitch %u calls (look to aim's gate %u); returned to the stance's raise %u times (refused %u, not needed %u)",
+                        mode, item, mean(w.aimSum, w.calls), w.calls ? w.aimMin : 0.0, w.calls ? w.aimMax : 0.0, mean(w.headSum, w.headN), mean(w.sinkSum, w.sinkN),
+                        w.sinkN ? w.sinkMax : 0.0, mean(w.headRiseSum, w.headRiseN), mean(w.wSum, w.consideredN), w.wMax, mean(w.addedSum, w.appliedN),
+                        w.appliedN ? w.addedMax : 0.0, w.appliedN, w.calls, w.measuredN, why, mean(w.upSum, w.calls), mean(w.fwdSum, w.calls), mean(w.viewSum, w.calls),
+                        w.inside, w.insideOf, w.settleRefusedAim, ltaGate, w.returned, w.returnRefused, w.notNeeded);
+    }
+    if (now - binMs >= 10000) {
+        binMs = now;
+        for (int m = 0; m < 2; ++m) {
+            for (int i = 0; i < 2; ++i) {
+                if (!bins[m][i].any()) continue;
+                char body[760];
+                f138::binsText(bins[m][i], body, sizeof(body));
+                const char* item = "none";
+                if (i) {
+                    nameItem();
+                    item = itemName;
+                }
+                Log::get().note("native on foot pitched view (F138) 10 s bins (per 10 deg of aim pitch: calls, the camera's sink, EDVR carried up, forward, the head's own height "
+                                "since the stance; cm): %s, item %s: %s", m ? "look to aim" : "mouse look", item, body);
+                bins[m][i] = f138::Group{};
+            }
+        }
+    }
 }
 
 void installEyeProbeOnce() {
@@ -24004,6 +25025,16 @@ void worldPut(const WorldView& v) {
     g_worldViews[g_worldViewNext].valid = true;
     g_worldViewNext = (g_worldViewNext + 1) % kWorldViews;
 }
+// F130: a row source's rows replace the scene mesh's in the eye's view of the frame (worldPut keeps the first).
+void worldReplace(const WorldView& v) {
+    for (WorldView& w : g_worldViews)
+        if (w.valid && w.frame == v.frame && w.eye == v.eye) {
+            w = v;
+            w.valid = true;
+            return;
+        }
+    worldPut(v);
+}
 
 // F46: a game target's eye, the UI layer's: its redirect mapping ('L'), else ui depth's frame table, read only ('T'), else the last answer
 // either gave for the same target ('C'); -1 when none has one. Nothing here registers a target or changes what the layer decides.
@@ -24464,15 +25495,24 @@ void v2Report() {
 // prepass and the terrain patch give an eye its rows: they carry the same constants (the F57 census: the main content in every frame both drew) and draw where no
 // mesh does (bare ground, the sky). F87f named the prepass but captured it behind the engine families' filter, so it never ran; its fallback is replaced here.
 // The first of them to draw into an eye's scene depth this frame publishes the rows; once a second per eye whose rows came from a source, that eye's next scene
-// mesh draw checks them, and a difference over f87::kFbTolerance latches the sources off for the session (logged). Render thread.
-nofoot::f87::FbGuard g_rowsGuard;
+// mesh draw checks them (rowsCheck). F113 latched the sources off for the session on one difference; F130 (native_on_foot_f130.h) never does: a mesh whose rows
+// differ from a source's is MARKED by its identity (the shaders, cb1's buffer and first constant) and publishes no rows again this session, and a source that draws
+// after a mesh published the eye's rows for the frame compares them (the check is due once a second per eye, and keeps the tee's slow path open for that frame, as
+// the source-first check does) and replaces the mesh's rows with its own when they differ. Render thread.
 nofoot::f113::CheckClock g_rowsClock;
 uint8_t g_rowsFrom[2] = {nofoot::f113::kFromMeshes, nofoot::f113::kFromMeshes};   // where the eye's rows of g_worldOk[e]'s frame came from
-uint32_t g_rowsCheckFrame[2] = {~0u, ~0u};   // the frame a scene mesh draw of the eye should check the source's rows in
-bool g_rowsLatchNoted = false;
+uint32_t g_rowsCheckFrame[2] = {~0u, ~0u};   // the frame a check of the eye is due in (a scene mesh draw after a source's rows, or a source draw after a mesh's)
+nofoot::f130::MarkTable g_rowsMarked;        // F130: the scene meshes that gave other rows than a source did: they give none from here
+bool g_rowsMarkFullNoted = false;
+struct RowsMesh {   // F130: the scene mesh draw that gave an eye's rows of a frame (cpu: g_cpuWorld holds its rows; false: a staged copy, not comparable on the CPU)
+    uint32_t frame = ~0u;
+    bool cpu = false;
+    nofoot::f130::MeshId id;
+};
+RowsMesh g_rowsMesh[2];
 struct RowsSecond {
     nofoot::f113::EyeSecond eye[2];
-    uint64_t checked = 0, noEye = 0, noRows = 0, latchedDraws = 0;
+    uint64_t checked = 0, noEye = 0, noRows = 0, replaced = 0, refused = 0;
     double maxDiff = 0.0;
 };
 RowsSecond g_rowsSec;
@@ -24484,67 +25524,62 @@ void rowsFrameTurn(uint32_t frame) {
     g_rowsLastFrame = frame;
 }
 bool rowsCheckPending(uint32_t frame) { return g_rowsCheckFrame[0] == frame || g_rowsCheckFrame[1] == frame; }
-// A scene mesh draw of an eye whose rows this frame came from a source: compare its rows with them (once, when the check is due).
-void rowsCheck(ID3D11DeviceContext* ctx, int e, uint32_t frame) {
+// F130: a scene mesh's rows disagreed with a source's: it gives no rows from here (one line per newly marked identity).
+void rowsMarkMesh(const nofoot::f130::MeshId& id, int e, uint32_t frame, const nofoot::f130::RowsDiff& d, uint8_t source) {
+    namespace f130 = nofoot::f130;
+    const f130::MarkResult r = g_rowsMarked.mark(id);
+    if (r == f130::kMarkedNew)
+        Log::get().note("native on foot eye rows (F130): a scene mesh with other rows: vs %016llX ps %016llX cb1 %p +%u, eye %d frame %u, diff %.3e (rows %.3e, origin %.3e) "
+                        "against the %s: it gives no rows from here",
+                        static_cast<unsigned long long>(id.vs), static_cast<unsigned long long>(id.ps), reinterpret_cast<const void*>(static_cast<uintptr_t>(id.cb1)),
+                        id.first, e, frame, d.max(), d.rows, d.origin, f130::sourceNoun(source));
+    else if (r == f130::kMarkTableFull && !g_rowsMarkFullNoted) {
+        g_rowsMarkFullNoted = true;
+        Log::get().note("native on foot eye rows (F130): %zu scene meshes are marked (the most kept); further meshes with other rows are counted, not marked", f130::kMarkMax);
+    }
+}
+// A scene mesh draw (vs, ps) of an eye whose rows this frame came from a source: compare its rows with them (once, when the check is due). A mesh already marked
+// leaves the check to the next mesh draw.
+void rowsCheck(ID3D11DeviceContext* ctx, int e, uint32_t frame, uint64_t vs, uint64_t ps) {
+    namespace f130 = nofoot::f130;
     if (g_rowsCheckFrame[e] != frame) return;
-    g_rowsCheckFrame[e] = ~0u;
     ID3D11Buffer* cb1 = nullptr;
     UINT f1 = 0;
     vsConstants(ctx, 1, &cb1, &f1);
     float shadow[6][4] = {};
     const bool ok = cb1 && f1 == 0 && engineVelocityShadowSceneRows(cb1, shadow);
+    f130::MeshId id;
+    id.vs = vs;
+    id.ps = ps;
+    id.cb1 = reinterpret_cast<uintptr_t>(cb1);
+    id.first = f1;
     if (cb1) cb1->Release();
-    if (!ok) return;
+    if (!ok || g_rowsMarked.isMarked(id)) return;
+    g_rowsCheckFrame[e] = ~0u;
     float a[20], b[20];
     std::memcpy(a, g_cpuWorld[e].rows, 16 * sizeof(float));
     std::memcpy(a + 16, g_cpuWorld[e].o, 4 * sizeof(float));
     std::memcpy(b, shadow, 16 * sizeof(float));
     std::memcpy(b + 16, shadow[5], 4 * sizeof(float));
-    const double diff = nofoot::f87::rowsMaxDiff(a, b);
-    const bool wasOn = !g_rowsGuard.latchedOff;
-    g_rowsGuard.compare(diff);
+    const f130::RowsDiff d = f130::rowsDiff(a, b);
     ++g_rowsSec.checked;
-    g_rowsSec.maxDiff = std::max(g_rowsSec.maxDiff, diff);
-    if (wasOn && g_rowsGuard.latchedOff && !g_rowsLatchNoted) {
-        g_rowsLatchNoted = true;
-        Log::get().note("native on foot eye rows (F113): LATCHED OFF -- eye %d frame %u: %s's rows differ from the scene meshes' by %.3e (over %.0e); the scene meshes alone "
-                        "give the rows from here", e, frame, nofoot::f113::rowSourceName(g_rowsFrom[e]), diff, nofoot::f87::kFbTolerance);
-    }
+    g_rowsSec.maxDiff = std::max(g_rowsSec.maxDiff, d.max());
+    if (f130::disagree(d.max())) rowsMarkMesh(id, e, frame, d, g_rowsFrom[e]);
 }
-// A draw outside the engine families that is a row source (the depth prepass, the terrain patch): the eye's rows from its b1, when the eye has none this frame.
-// The eye is the scene depth view's (eyeOfDraw), so the source must draw into an eye's scene depth.
-void rowSourceDraw(ID3D11DeviceContext* ctx, uint32_t frame, uint8_t source) {
-    if (g_rowsGuard.latchedOff) {
-        ++g_rowsSec.latchedDraws;
-        return;
-    }
-    const int e = eyeOfDraw(frame);
-    if (e != 0 && e != 1) {
-        ++g_rowsSec.noEye;
-        return;
-    }
-    if (g_worldOk[e] == frame) return;
-    ID3D11Buffer* cb1 = nullptr;
-    UINT f1 = 0;
-    vsConstants(ctx, 1, &cb1, &f1);
-    float shadow[6][4] = {};
-    const bool ok = cb1 && f1 == 0 && engineVelocityShadowSceneRows(cb1, shadow);
-    if (!ok) {
-        if (cb1) cb1->Release();
-        ++g_rowsSec.noRows;
-        return;
-    }
+// A source's rows for an eye and frame: into the frame's world views, the CPU's copy, the frame thread's seqlock, the eye's scene target sizes. replace: the eye had
+// a scene mesh's rows this frame (F130), which these replace exactly as if the source had published first.
+void rowsSourcePublish(int e, uint32_t frame, uint8_t source, const float shadow[6][4], ID3D11Buffer* cb1, bool replace) {
     WorldView v;
     v.frame = frame;
     v.eye = e;
     std::memcpy(v.rows, shadow, sizeof(v.rows));
     std::memcpy(v.o, shadow[5], sizeof(v.o));
-    worldPut(v);
+    if (replace) worldReplace(v);
+    else worldPut(v);
     g_cpuWorld[e].frame = frame;
     std::memcpy(g_cpuWorld[e].rows, v.rows, sizeof(v.rows));
     std::memcpy(g_cpuWorld[e].o, v.o, sizeof(v.o));
     g_cpuWorld[e].cb1 = cb1;   // identity only (the b1 Unmap stamp)
-    cb1->Release();
     eyeRowsPublish(e, frame, g_cpuWorld[e].rows, g_cpuWorld[e].o);
     // the eye's scene target for the depth probe's pick: the bound colour target when it is eye-sized (a depth-only pass keeps the last)
     if (void* view = bindingGet(BindSlot::Rtv0)) {
@@ -24556,12 +25591,62 @@ void rowSourceDraw(ID3D11DeviceContext* ctx, uint32_t frame, uint8_t source) {
     }
     g_worldOk[e] = frame;
     g_rowsFrom[e] = source;
-    // the check is scheduled at most once a second per eye (it keeps the tee's slow path open for the rest of that frame, whether a mesh comes or not)
+}
+// The once-a-second check of an eye is due this frame: it keeps the tee's slow path open for the rest of it (whether a mesh or a source comes or not).
+void rowsScheduleCheck(int e, uint32_t frame) {
     const uint64_t nowMs = GetTickCount64();
     if (g_rowsClock.due(e, nowMs)) {
         g_rowsCheckFrame[e] = frame;
         g_rowsClock.done(e, nowMs);
     }
+}
+// A draw outside the engine families that is a row source (the depth prepass, the terrain patch): the eye's rows from its b1, when the eye has none this frame, or
+// (F130, once a second) a comparison with the scene mesh's that gave them. The eye is the scene depth view's (eyeOfDraw), so the source must draw into an eye's scene
+// depth. A source is never switched off.
+void rowSourceDraw(ID3D11DeviceContext* ctx, uint32_t frame, uint8_t source) {
+    namespace f130 = nofoot::f130;
+    const int e = eyeOfDraw(frame);
+    if (e != 0 && e != 1) {
+        ++g_rowsSec.noEye;
+        return;
+    }
+    const bool have = g_worldOk[e] == frame;
+    const bool fromMeshes = have && g_rowsFrom[e] == nofoot::f113::kFromMeshes;
+    const bool meshCpu = fromMeshes && g_rowsMesh[e].frame == frame && g_rowsMesh[e].cpu && g_cpuWorld[e].frame == frame;
+    const f130::SourceAction act = f130::sourceAction(have, fromMeshes, meshCpu, g_rowsCheckFrame[e] == frame);
+    if (act == f130::kSrcSkip) return;
+    ID3D11Buffer* cb1 = nullptr;
+    UINT f1 = 0;
+    vsConstants(ctx, 1, &cb1, &f1);
+    float shadow[6][4] = {};
+    const bool ok = cb1 && f1 == 0 && engineVelocityShadowSceneRows(cb1, shadow);
+    if (!ok) {
+        if (cb1) cb1->Release();
+        ++g_rowsSec.noRows;
+        return;
+    }
+    if (act == f130::kSrcCompare) {   // the scene mesh published first: the source's rows against its
+        g_rowsCheckFrame[e] = ~0u;
+        float a[20], b[20];
+        std::memcpy(a, g_cpuWorld[e].rows, 16 * sizeof(float));
+        std::memcpy(a + 16, g_cpuWorld[e].o, 4 * sizeof(float));
+        std::memcpy(b, shadow, 16 * sizeof(float));
+        std::memcpy(b + 16, shadow[5], 4 * sizeof(float));
+        const f130::RowsDiff d = f130::rowsDiff(a, b);
+        ++g_rowsSec.checked;
+        g_rowsSec.maxDiff = std::max(g_rowsSec.maxDiff, d.max());
+        if (f130::disagree(d.max())) {
+            rowsMarkMesh(g_rowsMesh[e].id, e, frame, d, source);
+            ++g_rowsSec.replaced;
+            rowsSourcePublish(e, frame, source, shadow, cb1, true);
+        }
+        cb1->Release();
+        return;
+    }
+    rowsSourcePublish(e, frame, source, shadow, cb1, false);
+    cb1->Release();
+    // the check is scheduled at most once a second per eye (it keeps the tee's slow path open for the rest of that frame, whether a mesh comes or not)
+    rowsScheduleCheck(e, frame);
 }
 
 // F46: a world pool draw (render thread, the game's bindings): its target's eye (the UI layer's; else ui depth's rule over the frame's
@@ -24645,7 +25730,7 @@ void worldDraw(ID3D11DeviceContext* ctx, uint32_t frame, uint64_t vs, bool censu
     // constant-buffer read and its compare, is the probe key's.
     if (census && nativeOnFootMarkerMeasure()) rowCensusNote(ctx, e, vs, ps, sceneWhy == drawtag::kSceneOk);
     if (g_worldOk[e] == frame) {   // F113: rows already in (a source's, perhaps): the first scene mesh draw checks a source's when the check is due
-        if (sceneWhy == drawtag::kSceneOk && g_rowsFrom[e] != nofoot::f113::kFromMeshes) rowsCheck(ctx, e, frame);
+        if (sceneWhy == drawtag::kSceneOk && g_rowsFrom[e] != nofoot::f113::kFromMeshes) rowsCheck(ctx, e, frame, vs, ps);
         return;
     }
     if (sceneWhy != drawtag::kSceneOk) {
@@ -24663,6 +25748,18 @@ void worldDraw(ID3D11DeviceContext* ctx, uint32_t frame, uint64_t vs, bool censu
     ID3D11Buffer* cb1 = nullptr;
     UINT f1 = 0;
     vsConstants(ctx, 1, &cb1, &f1);
+    nofoot::f130::MeshId meshId;   // F130: this draw's identity (the shaders, cb1's buffer and first constant)
+    meshId.vs = vs;
+    meshId.ps = ps;
+    meshId.cb1 = reinterpret_cast<uintptr_t>(cb1);
+    meshId.first = f1;
+    if (g_rowsMarked.isMarked(meshId)) {   // F130: a mesh whose rows disagreed with a source's gives no rows again; it does not count as a try either
+        if (cb1) cb1->Release();
+        --t->tries;
+        --rn.scene;
+        ++g_rowsSec.refused;
+        return;
+    }
     float shadow[6][4] = {};
     bool ok = false;
     if (cb1 && f1 == 0 && engineVelocityShadowSceneRows(cb1, shadow)) {
@@ -24721,6 +25818,10 @@ void worldDraw(ID3D11DeviceContext* ctx, uint32_t frame, uint64_t vs, bool censu
     if (!ok) return;
     g_worldOk[e] = frame;
     g_rowsFrom[e] = nofoot::f113::kFromMeshes;   // F113
+    g_rowsMesh[e].frame = frame;                 // F130: the mesh that gave the rows (a staged copy is not known on the CPU, so a source cannot compare with it)
+    g_rowsMesh[e].id = meshId;
+    g_rowsMesh[e].cpu = g_cpuWorld[e].frame == frame;
+    if (g_rowsMesh[e].cpu) rowsScheduleCheck(e, frame);   // F130: once a second a source that draws later in the frame compares its rows with this mesh's
     // F52 item A: which draw gave the eye's world rows: its shaders, target, depth view, viewport and b1 (once per eye a frame).
     {
         WorldSrc& ws = g_win.wsrc[e];
@@ -29706,7 +30807,8 @@ void report(uint64_t nowMs) {
                 ss = StreamSecond{};
             }
         // F113, per eye: the frames on foot, where each frame's rows came from (the scene meshes, the depth prepass, the terrain) and the frames with none; the checks
-        // of a source's rows against a scene mesh's that second, their largest difference, and the source draws refused (no scene depth eye, no b1 shadow, latched).
+        // of a source's rows against a scene mesh's that second, their largest difference, the source draws refused (no scene depth eye, no b1 shadow), the scene meshes'
+        // rows a source replaced and the meshes marked (F130: sources are never latched off; a mesh with other rows is marked and refused).
         // A build before F113 has no such line; one whose sources never give rows reads the prepass and the terrain at 0 with frames at none. F125: sums over the
         // window (the max diff its largest), printed with its seconds where the line said "1 s".
         {
@@ -29717,11 +30819,10 @@ void report(uint64_t nowMs) {
                 using nofoot::f113::kFromTerrain;
                 Log::get().note("native on foot eye rows (F113) %u s: eye 0 %u frames: the scene meshes %u, the depth prepass %u, the terrain %u, none %u; eye 1 %u frames: "
                                 "the scene meshes %u, the depth prepass %u, the terrain %u, none %u; checked against a scene mesh %llu (max diff %.2e); source draws "
-                                "with no scene depth eye %llu, no b1 shadow %llu, latched %llu%s",
+                                "with no scene depth eye %llu, no b1 shadow %llu; mesh rows replaced by a source %llu, marked meshes %u (refused draws %llu)",
                                 windowSecs, rs.eye[0].frames, rs.eye[0].from[kFromMeshes], rs.eye[0].from[kFromPrepass], rs.eye[0].from[kFromTerrain], rs.eye[0].none,
                                 rs.eye[1].frames, rs.eye[1].from[kFromMeshes], rs.eye[1].from[kFromPrepass], rs.eye[1].from[kFromTerrain], rs.eye[1].none,
-                                ull(rs.checked), rs.maxDiff, ull(rs.noEye), ull(rs.noRows), ull(rs.latchedDraws),
-                                g_rowsGuard.latchedOff ? " -- LATCHED OFF (a mismatch over 1e-5): the scene meshes alone" : "");
+                                ull(rs.checked), rs.maxDiff, ull(rs.noEye), ull(rs.noRows), ull(rs.replaced), g_rowsMarked.n, ull(rs.refused));
             }
             rs = RowsSecond{};
         }
@@ -30698,6 +31799,8 @@ void nativeOnFootShutdown() {
     g_eyeAlignPub[0] = g_eyeAlignPub[1] = g_eyeAlignPub[2] = 0.0;
     const float zeroEyeAlign[3] = {};
     g_f94NeckSeatedPub = 0.0;   // F94a: the zero alignment carries no neck raise
+    f137Reset();   // F137: ... and no virtual neck
+    f138Reset();   // F138: ... and no stance reference
     f89AlignPublish(zeroEyeAlign);
     eyeshare::publish(0.0f, GetTickCount64());   // F106: no shared left eye past shutdown
     nativeFrameSetPositionRecentre(0);           // F123: no recentre asked past shutdown, and no black left

@@ -179,7 +179,9 @@ template<class Check> void runPositionRecentreCases(Check&& check) {
           h.featureFrame={sizeof(EdvrNativeFrameOutput),EDVR_NATIVE_FRAME_VERSION_10};h.featureFrameKnown=true;
           h.featureFrame.lookYawReset=h.lookResetSeen;h.featureFrame.lookYawTotal=float(base+comp);
           h.eyeProviderSeen=true;h.eyeSerialSeen=h.eyeAppliedSerial=99;
-          for(int i=0;i<3;++i){h.eyeWanted[i]=h.eyeApplied[i]=eye[i];}
+          // F134: eyeWanted is a SEATED vector, eyeApplied the LOCAL translation the origin carries: the seated offset turned by the seat's heading.
+          double eyeLocal[3];eyeoffset::localFromSeated(baselineYaw+comp,eye,eyeLocal);
+          for(int i=0;i<3;++i){h.eyeWanted[i]=eye[i];h.eyeApplied[i]=eyeLocal[i];}
           h.rotWanted[0]=h.rotWanted[1]=h.rotApplied[0]=h.rotApplied[1]=0;
           h.adsWanted=h.adsApplied=pitch;h.adsPivot[0]=5.0;h.adsPivot[1]=double(1.6f);h.adsPivot[2]=-2.0;
           h.seated.replace(h.seatedPoseFor(h.lookSeated,0,pitch));
@@ -187,7 +189,7 @@ template<class Check> void runPositionRecentreCases(Check&& check) {
           const bool applied=h.applyPositionRecentre(100+sign);
           const XrPosef atCall=f.fake.origin;
           XrSpaceLocation headAtCall{XR_TYPE_SPACE_LOCATION};launch_fixture::locate(view(),h.seated.space(),200,&headAtCall);
-          const XrPosef expected=h.seatedPoseFor(SeatPose{5.0+eye[0],double(1.6f)+eye[1],-2.0+eye[2],baselineYaw+comp},0,pitch);
+          const XrPosef expected=h.seatedPoseFor(SeatPose{5.0+eyeLocal[0],double(1.6f)+eyeLocal[1],-2.0+eyeLocal[2],baselineYaw+comp},0,pitch);
           callOnly=applied&&same(atCall,expected)&&std::memcmp(&atCall.orientation,&beforeOrientation,sizeof(beforeOrientation))==0&&
             h.currentOrigin.yaw==baselineYaw&&h.lookBase==base&&h.lookComp==comp&&h.lookWanted==base+comp&&h.eyeAppliedSerial==99&&h.adsApplied==pitch;
           h.lookPoll();h.eyePoll();h.rotPoll();h.adsPoll();
@@ -210,7 +212,8 @@ template<class Check> void runPositionRecentreCases(Check&& check) {
           }
           unwind=std::fabs(h.lookComp)<1e-9&&std::fabs(h.lookSeated.yaw-baselineYaw)<1e-9&&h.currentOrigin.yaw==baselineYaw&&std::fabs(h.adsApplied)<1e-9;
           ++h.featureFrame.lookYawReset;h.lookWanted=base;h.lookPoll();h.eyePoll();h.adsPoll();
-          const SeatPose final{double(f.fake.head.position.x)+eye[0],double(f.fake.head.position.y)+eye[1],double(f.fake.head.position.z)+eye[2],baselineYaw};
+          double eyeFinal[3];eyeoffset::localFromSeated(baselineYaw,eye,eyeFinal);   // F134: at the baseline heading the seated offset is this LOCAL translation
+          const SeatPose final{double(f.fake.head.position.x)+eyeFinal[0],double(f.fake.head.position.y)+eyeFinal[1],double(f.fake.head.position.z)+eyeFinal[2],baselineYaw};
           reset=same(f.fake.origin,xrFromSeatPose(final))&&h.currentOrigin.yaw==baselineYaw&&h.lookComp==0&&h.lookBase==base;
         });
         check(callOnly,"F123 ADS roundtrip: position-only call preserves full live orientation, nonzero yaw base/compensation and eye/pitch overlays (both yaw signs)");
