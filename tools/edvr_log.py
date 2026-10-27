@@ -12284,6 +12284,41 @@ def _hj_f68c_pairing(rows, ctx):
     return ("PARTIAL" if bad else "OK", "; ".join(parts))
 
 
+def _hj_f135_menu(rows, ctx):
+    """F135 (MEASURE ONLY): which panel hook, or field, is active exactly while the on-foot Esc menu or a panel is up. For each Escape (or pad Start or Back) down edge, the
+    counters that rose within 0.5 s after it, those that were already non-zero before it, and those that stayed 0, from the probe's rise and fall event lines; the 1 s lines'
+    totals beside them. It only reports: IDLE when the log has no probe line (a build before F135)."""
+    sec, key, edge = rows.get("sec", []), rows.get("key", []), rows.get("edge", [])
+    if not sec and not key and not edge:
+        # IDLE while look to aim ran (native stereo was on foot, so a build with the probe would have said something only if a panel moved or a key was pressed); absent otherwise
+        return ("IDLE", "no menu probe line in the window (nothing moved and no key was pressed, or a build before F135)") if ctx.get("look to aim (F109)", {}).get("sec") else None
+    names = ("update", "placement", "ray", "cursor window", "owner transform", "panel submit", "inst submit", "bridge update", "bridge placement")
+    parts = []
+    for d in [r for r in key if r["dir"] == "down"]:
+        t = d.get("_t")
+        if t is None:
+            continue
+        rose, before, zero = [], [], []
+        for n in names:
+            ev = [e for e in edge if e["name"] == n and e.get("_t") is not None]
+            prior = [e for e in ev if e["_t"] < t]
+            if prior and prior[-1]["what"] == "rose":
+                before.append(n)
+            elif any(t <= e["_t"] <= t + 0.5 and e["what"] == "rose" for e in ev):
+                rose.append(n)
+            else:
+                zero.append(n)
+        parts.append("%s down at %s: rose within 0.5 s: %s; already non-zero: %s; stayed 0: %s" % (
+            d["src"], _hclock(t), ", ".join(rose) or "none", ", ".join(before) or "none", ", ".join(zero) or "none"))
+    tot = {k: sum(int(r[k]) for r in sec) for k in ("upd", "place", "ray", "win", "own", "ps", "is", "bu", "bp")} if sec else {}
+    text = "%d probe second(s), %d key edge(s), %d counter edge(s)" % (len(sec), len(key), len(edge))
+    if sec:
+        text += "; totals over those seconds: update %d, placement %d, ray %d, cursor window %d, owner transform %d, panel submit %d, inst submit %d, bridge %d/%d" % (
+            tot["upd"], tot["place"], tot["ray"], tot["win"], tot["own"], tot["ps"], tot["is"], tot["bu"], tot["bp"])
+        text += "; GuiFocus seen: %s" % ", ".join(sorted({r["gui"] for r in sec}))
+    return ("OK", text + ("; " + " | ".join(parts) if parts else "; no Escape, Start or Back press in the window"))
+
+
 def _hj_f109_snap(rows, ctx):
     """F109: the snap turns. Each snap's applied turn against its step (within 10% in at most 2 calls); none applied is NEVER APPLIED, any off or skipped is PARTIAL.
     Whether ADS survived a snap is reported, not judged (the trigger may have been released)."""
@@ -13236,6 +13271,15 @@ HEALTH_RULES = (
                    r"(?P<gmean>\S+) max (?P<gmax>\S+) ms; the FP call first in (?P<ffp>\d+) of them, the 3P call first in (?P<ftp>\d+)\); G built from a pair (?P<pairs>\d+) "
                    r"times in (?P<frames>\d+) game frames"),
     ), _hj_f68c_pairing),
+    _hrule("menu probe (F135)", ("F135",), ("native on foot menu probe (F135)",), (
+        ("sec", r"native on foot menu probe \(F135\) 1 s: update (?P<upd>\d+) \(objs (?P<updo>.*?)\), placement (?P<place>\d+) \(objs (?P<placeo>.*?)\), ray (?P<ray>\d+), "
+                r"cursor window (?P<win>\d+), owner transform (?P<own>\d+), panel submit (?P<ps>\d+), inst submit (?P<is>\d+), bridge update (?P<bu>\d+) placement "
+                r"(?P<bp>\d+); GuiFocus (?P<gui>\S+); look to aim (?P<lta>.+?); processor (?P<proc>[a-z ]+); look block (?P<block>.+)$"),
+        ("key", r"native on foot menu probe \(F135\): (?P<src>key Escape|pad Start|pad Back) (?P<dir>down|up)"),
+        ("edge", r"native on foot menu probe \(F135\): (?P<name>update|placement|ray|cursor window|owner transform|panel submit|inst submit|bridge update|bridge placement) "
+                 r"(?P<what>rose|fell)"),
+        ("_", r"native on foot menu probe \(F135\): armed "),
+    ), _hj_f135_menu),
     _hrule("snap turn (F109)", ("F109",), ("native on foot snap turn (F109)",), (
         ("snap", r"native on foot snap turn \(F109\): snap (?P<n>\d+) by (?P<src>the stick|a mouse flick), (?P<dir>right|left) (?P<step>\d+) deg(?P<ads> in ADS)?: "
                  r"input (?P<input>%s) \(gain (?P<gain>%s), (?P<gsrc>.+?)\); the game applied (?P<applied>%s) deg in (?P<calls>\d+) call\(s\) \(the player's turn over "
@@ -15646,6 +15690,42 @@ def self_test_health():
               has=["2 reseed second(s) in the event lines: 4 reseeds in 180 game frames; largest gap 11.9 ms"], lacks=["UNPARSED", "a tenth or more"])
         check("F132 pairing: reseeds in a tenth of the frames in the summary log", [reseed132(n=60, frames=90)], 0, [("PARTIAL", G68)], has=["a tenth or more of those frames were refused"],
               lacks=["UNPARSED"])
+
+        # ---- F135: the on-foot menu probe (MEASURE ONLY) ----
+        M135 = "menu probe (F135)"
+
+        def probe135(upd=90, place=0, ray=0, win=0, own=0, ps=0, isub=90, gui="0", lta="following", proc="ran", block="unknown (no ask)", updo="0x1F40A010/+0x4DC1B50",
+                     placeo="none"):
+            return R("native on foot menu probe (F135) 1 s: update %u (objs %s)", upd, updo, place, placeo, ray, win, own, ps, isub, 0, 0, gui, lta, proc, block)
+
+        def key135(src="key Escape", d="down"):
+            return R("native on foot menu probe (F135): %s %s", src, d)
+
+        def edge135(name, what="rose"):
+            return R("native on foot menu probe (F135): %s %s%s", name, what, "")
+
+        check("F135 probe: no probe line (a build before F135, or nothing moved)", [ENG109, look109()], 0, [("IDLE", M135)], has=["no menu probe line in the window"], lacks=["UNPARSED"])
+        def at135(entries):
+            """A log whose lines carry their own times (seconds after 10:00:00, fractions allowed): the key and rise lines are judged by their gaps."""
+            out = header
+            for t, m in entries:
+                whole = int(t)
+                out += "[%02d:%02d:%02d.%03d] %s\n" % (10 + whole // 3600, whole // 60 % 60, whole % 60, int(round((t - whole) * 1000)), m)
+            return out
+
+        check("F135 probe: the Esc menu with the mouse still: the placement and the owner transform never moved, the panel submit rose",
+              at135([(1.0, edge135("update")), (1.0, edge135("inst submit")), (2.0, probe135()), (5.0, key135()), (5.2, edge135("panel submit")), (6.0, probe135(ps=40)),
+                     (7.0, probe135(ps=90)), (9.0, key135("key Escape", "up")), (9.6, edge135("panel submit", "fell (0 for 0.5 s)"))]), 0, [("OK", M135)],
+              has=["key Escape down at 10:00:05", "rose within 0.5 s: panel submit", "already non-zero: update, inst submit",
+                   "stayed 0: placement, ray, cursor window, owner transform, bridge update, bridge placement", "3 probe second(s), 2 key edge(s)", "GuiFocus seen: 0"],
+              lacks=["UNPARSED"])
+        check("F135 probe: an inventory panel: the placement, ray and cursor window rose with the mouse over it, a rise after the 0.5 s is not counted",
+              at135([(1.0, edge135("update")), (4.0, key135("pad Start")), (4.1, edge135("placement")), (4.1, edge135("ray")), (4.2, edge135("cursor window")), (4.9, edge135("owner transform")),
+                     (5.0, probe135(place=60, ray=60, win=60, placeo="0x2A0B1C40/+0x5120A80", gui="3", lta="held (panel)"))]), 0, [("OK", M135)],
+              has=["pad Start down at 10:00:04", "rose within 0.5 s: placement, ray, cursor window; already non-zero: update; stayed 0: owner transform", "GuiFocus seen: 3"],
+              lacks=["UNPARSED"])
+        check("F135 probe: probe seconds with no key press", [probe135(place=5), probe135(proc="stalled", block="yes", lta="off", gui="unknown")], 0, [("OK", M135)],
+              has=["no Escape, Start or Back press in the window", "placement 5"], lacks=["UNPARSED"])
 
         # ---- F133: head steps judged by rate; the follower re-centres on a standing yaw offset ----
         RC133 = R("native on foot look to aim (F133): re-centred: the reported head stood %+.1f deg off the aim in yaw for %.1f s", -39.3, 2.0)

@@ -54,6 +54,8 @@
 #include "native_on_foot_f130.h"   // F130: one disagreeing scene mesh no longer switches the eye rows' sources off (pure parts)
 #include "native_on_foot_f131.h"   // F131: look to aim holds while a panel or a menu is open, and while the game runs no look (pure parts)
 #include "native_on_foot_f133.h"   // F133: head steps judged by rate, not size; the follower re-centres on a standing yaw offset (pure parts)
+#include "native_on_foot_f135.h"   // F135: the on-foot menu probe, measure only (pure parts)
+#include "xinput_watch.h"          // F135: the pad's Start and Back edges, evidence for the menu probe only
 #include "native_on_foot_f109.h"   // F109: look to aim on foot, the player's own turn in ADS, snap or smooth turning (pure parts)
 #include "native_on_foot_f129.h"   // F129: look to aim reads its turn from the player's own look processor; the look path instrument (pure parts)
 #include "../common/comfort_fade.h"   // F109: the snap's short fade (edvr::comfort::publish; the runtime blends it over both eyes)
@@ -288,6 +290,10 @@ struct F129Freeze {
     nofoot::f129::Rec rec[8];
 };
 F129Freeze g_f129Freeze;
+// F135 (MEASURE ONLY): per-call counts of every hook that can see a panel or a menu, and the distinct controllers (update) and panels (placement) seen in the second. The hooks add
+// (relaxed atomics, no logging); the frame thread takes them (f135Tick).
+nofoot::f135::Counters g_f135Ctr;
+nofoot::f135::ObjSet g_f135UpdObjs, g_f135PlaceObjs;
 inline void atomicAddDouble(std::atomic<double>& a, double v) noexcept {
     double cur = a.load(std::memory_order_relaxed);
     while (!a.compare_exchange_weak(cur, cur + v, std::memory_order_relaxed)) {
@@ -2768,6 +2774,7 @@ uint64_t __fastcall f9PanelSubmitHooked(void* set, void* view, uint64_t r8, uint
     void* caller = _ReturnAddress();
     const F9Fn4 original = reinterpret_cast<F9Fn4>(g_f9Probe[0].original);
     if (!original) return 0;
+    g_f135Ctr.add(nofoot::f135::kPanelSubmit);   // F135
     if (!g_f9Stop[0].load(std::memory_order_relaxed)) {
         const uintptr_t c = reinterpret_cast<uintptr_t>(caller);
         const uint32_t rva = f9Rva(c);
@@ -4776,6 +4783,7 @@ uint64_t __fastcall f9HrcSubmitHooked(void* hrc, void* a2, uint64_t a3, uint64_t
 uint64_t __fastcall f9InstSubmitHooked(void* inst, void* view, uint64_t r8, uint64_t r9) {
     const F9Fn4 original = reinterpret_cast<F9Fn4>(g_f9Probe[2].original);
     if (!original) return 0;
+    g_f135Ctr.add(nofoot::f135::kInstSubmit);   // F135
     // F100: the 260-byte sample is saved and restored only when it is valid (its one reader, nativeOnFootWeaponUiCurrentSubmit, reads the flag first).
     const bool previousSubmitValid=g_weaponUiMatchedSubmitTlsValid;
     alignas(WeaponUiPartSample) unsigned char previousSubmit[sizeof(WeaponUiPartSample)];
@@ -4952,7 +4960,7 @@ struct MenuInputScope {
     MenuInputScope(void* ctl,void* panel){
         if(!ctl||!panel||!g_menuInput.active())return;
         if(!g_menuInput.before(row,reinterpret_cast<uintptr_t>(ctl),reinterpret_cast<uintptr_t>(panel),nativeOnFootRenderFrame(),GetCurrentThreadId(),menuInputQpc(),guardedRead))return;
-        outer=t_menuInput;t_menuInput=&row;open=true;
+        outer=t_menuInput;t_menuInput=&row;open=true;g_f135Ctr.add(nofoot::f135::kBridgePlace);
     }
     void finish(){if(!open)return;t_menuInput=outer;open=false;g_menuInput.finish(row,menuInputQpc(),guardedRead);
         nofoot::menu_input::BridgePlacement p;p.generation=row.generation;p.ledgerFrame=row.ledgerFrame;p.renderFrame=row.renderFrame;p.thread=row.thread;p.triangles=row.triCount;p.readFlags=row.reads;p.meshStatus=row.meshStatus;
@@ -4965,7 +4973,7 @@ struct MenuUpdateScope {
     nofoot::menu_input::BridgeUpdate row;nofoot::menu_input::BridgeUpdate* outer=nullptr;bool open=false;
     explicit MenuUpdateScope(void* ctl){if(!ctl||!g_menuInput.active())return;
         if(!g_menuBridge.begin(row,reinterpret_cast<uintptr_t>(ctl),g_menuInput.frame.load(),nativeOnFootRenderFrame(),GetCurrentThreadId(),menuInputQpc(),guardedRead))return;
-        outer=t_menuUpdate;t_menuUpdate=&row;open=true;
+        outer=t_menuUpdate;t_menuUpdate=&row;open=true;g_f135Ctr.add(nofoot::f135::kBridgeUpdate);
     }
     void finish(){if(!open)return;t_menuUpdate=outer;open=false;g_menuBridge.finish(row,nativeOnFootRenderFrame(),menuInputQpc(),guardedRead);}
     ~MenuUpdateScope(){finish();}
@@ -5259,8 +5267,16 @@ uint64_t __fastcall f111UpdateLegacyHooked(void* a, void* b, uint64_t c, uint64_
 
 // F122, the key off: after the game's placement on a panel set the hit byte, the controller's sprite goes where it cannot be seen. Only the sprite's position
 // (+0x140) is written; the mouse NDC, the cursor window's output and the uv the movie takes are never touched, so the clicks land where the game's pointer is.
+// F135: the vtable of an object as an exe RVA (0: unreadable or outside the exe), one guarded pair of reads.
+uint32_t f135VtableRva(uintptr_t object) {
+    uintptr_t vt = 0;
+    if (!object || !g_base || !guardedRead(object, &vt, 8) || vt < g_base || vt - g_base > 0x7FFFFFFFull) return 0;
+    return static_cast<uint32_t>(vt - g_base);
+}
 uint64_t __fastcall f111UpdateHooked(void* a,void* b,uint64_t c,uint64_t d) {
     const F9Fn4 original=reinterpret_cast<F9Fn4>(g_f111Probe[0].original);if(!original)return 0;
+    g_f135Ctr.add(nofoot::f135::kUpdate);   // F135: the controller (low 32 bits and its vtable's RVA)
+    g_f135UpdObjs.add(static_cast<uint32_t>(reinterpret_cast<uintptr_t>(a)&0xFFFFFFFFu),f135VtableRva(reinterpret_cast<uintptr_t>(a)));
     MenuUpdateScope observer(a);
     return nofoot::menu_input::dispatchUpdate(g_f111LegacyUpdateEnabled.load(std::memory_order_acquire),
         [&](){const auto result=original(a,b,c,d);observer.row.returned=true;return result;},[&](){observer.finish();},
@@ -5373,6 +5389,14 @@ void panelCursorApply(uintptr_t ctl, uintptr_t panel, float u, float v) {
 uint64_t __fastcall f111PlaceHooked(void* a, void* b, uint64_t c, uint64_t d) {
     const F9Fn4 original = reinterpret_cast<F9Fn4>(g_f111Probe[1].original);
     if (!original) return 0;
+    g_f135Ctr.add(nofoot::f135::kPlace);   // F135: the panel (low 32 bits) and the vtable of its pick mesh's owner (the panel kind), when readable
+    {
+        uintptr_t list = 0, owner = 0;
+        const uintptr_t panel = reinterpret_cast<uintptr_t>(b);
+        uint32_t ownerRva = 0;
+        if (panel && guardedRead(panel + nofoot::f114b::kOffMeshList, &list, 8) && list && guardedRead(list, &owner, 8) && owner) ownerRva = f135VtableRva(owner);
+        g_f135PlaceObjs.add(static_cast<uint32_t>(panel & 0xFFFFFFFFu), ownerRva);
+    }
     MenuInputScope observer(a,b);
     const auto invoke=[&](){return nofoot::menu_input::afterOriginal([&](){return original(a,b,c,d);},[&](uint64_t){observer.finish();});};
     if (!g_panelMouse.load(std::memory_order_relaxed)) {   // F122: the cursor hidden; the instruments are idle, the one write is the sprite's hide
@@ -5414,6 +5438,7 @@ uint64_t __fastcall f111PlaceHooked(void* a, void* b, uint64_t c, uint64_t d) {
 uint64_t __fastcall f111RayHitHooked(void* panel, void* origin, void* dir, void* u, void* v, void* t, void* axA, void* axB) {
     const F111Fn8 original = reinterpret_cast<F111Fn8>(g_f111Probe[2].original);
     if (!original) return 0;
+    g_f135Ctr.add(nofoot::f135::kRay);   // F135
     const bool outerRay = t_f114bInRay;
     t_f114bInRay = true;
     t_f114bPend = false;
@@ -5453,6 +5478,7 @@ uint64_t __fastcall f111RayHitHooked(void* panel, void* origin, void* dir, void*
 uint64_t __fastcall f111WindowHooked(void* panel, void* out, uint64_t index, uint64_t point) {
     const F9Fn4 original = reinterpret_cast<F9Fn4>(g_f111Probe[3].original);
     if (!original) return 0;
+    g_f135Ctr.add(nofoot::f135::kWindow);   // F135
     const uint64_t result = original(panel, out, index, point);
     if(t_menuInput && t_menuInput->panel==reinterpret_cast<uintptr_t>(panel)) {
         nofoot::menu_input::observeWindow(*t_menuInput,reinterpret_cast<uintptr_t>(out),guardedRead);
@@ -5483,6 +5509,7 @@ uint64_t __fastcall f111WindowHooked(void* panel, void* out, uint64_t index, uin
 uint64_t __fastcall f114bOwnerXformHooked(void* owner, void* out, uint64_t c, uint64_t d) {
     const F9Fn4 original = reinterpret_cast<F9Fn4>(g_f114bProbe.original);
     if (!original) return 0;
+    g_f135Ctr.add(nofoot::f135::kOwner);   // F135
     const uint64_t result = original(owner, out, c, d);
     if(t_menuInput && owner && out) {
         nofoot::menu_input::observeOwner(*t_menuInput,reinterpret_cast<uintptr_t>(owner),reinterpret_cast<uintptr_t>(out),guardedRead);
@@ -5795,14 +5822,17 @@ void f111RefreshGates() {
     const nofoot::f122::Gates gates = nofoot::f122::gates(open, g_panelMouse.load(std::memory_order_relaxed), runtimeFlatProfile());
     g_f111LegacyUpdateEnabled.store(gates.instruments,std::memory_order_release);
     const bool observer=open&&g_menuInput.active();
+    // F135 (MEASURE ONLY): the probe counts every panel hook's calls while native stereo is on foot, so their relay gates are open then. With the instruments off (the default) a hook
+    // is a pass-through: the update runs the game's own through observedUpdate, and the ray, window and owner hooks return at once because no placement of ours is running.
+    const bool probe=open&&!runtimeFlatProfile();
     const int gateState = (gates.instruments ? 1 : 0) | (gates.placement ? 2 : 0) | (observer?4:0);
     if (gateState != g_f111GateState) {
         g_f111GateState = gateState;
         std::lock_guard<std::mutex> lock(g_f111Mu);
         for (auto& s : g_f111Slots) s = F111Slot{};   // a cycle across the gate's edge is not one
     }
-    for(size_t i=0;i<kF111Hooks;++i)if(g_f111Armed[i])g_f111Probe[i].gate.store((i==0?(gates.instruments||observer):nofoot::menu_input::hookGate(static_cast<unsigned>(i),gates.instruments,gates.placement,observer))?1u:0u,std::memory_order_seq_cst);
-    if(g_f114bArmed)g_f114bProbe.gate.store(gates.instruments||observer?1u:0u,std::memory_order_seq_cst);
+    for(size_t i=0;i<kF111Hooks;++i)if(g_f111Armed[i])g_f111Probe[i].gate.store((probe||(i==0?(gates.instruments||observer):nofoot::menu_input::hookGate(static_cast<unsigned>(i),gates.instruments,gates.placement,observer)))?1u:0u,std::memory_order_seq_cst);
+    if(g_f114bArmed)g_f114bProbe.gate.store(probe||gates.instruments||observer?1u:0u,std::memory_order_seq_cst);
     if(observer&&g_f111Armed[0])g_menuBridge.gateOpened(g_menuInput.frame.load(),menuInputQpc());
 }
 void f111Tick(uint64_t now) {
@@ -8039,6 +8069,96 @@ void f131Step(uint64_t now, bool active) noexcept {
     else if (o.edge < 0) f131End(now, o);
 }
 
+// ---- F135: the on-foot menu probe (frame thread; MEASURE ONLY) ------------------------------------------------------------------------------------------
+// Which hook, or field, is active exactly while a menu or an on-foot panel is up, mouse still or not (native_on_foot_f135.h). Every panel hook counts its calls (the hooks'
+// side is above); here the counts are taken each frame while native stereo is on foot: a counter's rise from 0 and its fall (0 for 0.5 s) are event lines, the Escape key and
+// the pad's Start and Back are the ground truth (never a signal), and once a second, when a gating counter moved or a key edge came in the last 8 s, one line says everything.
+struct F135State {
+    nofoot::f135::Edges edges;
+    nofoot::f135::KeyEdge esc, start, back;
+    nofoot::f135::Budget budget;
+    uint32_t sum[nofoot::f135::kCount] = {};
+    uint64_t lineMs = 0, lastKeyEdgeMs = 0;
+    bool footLast = false;
+    uint32_t procLast = 0, asksLast = 0, zeroedLast = 0;
+};
+F135State g_f135;
+void f135Tick(uint64_t now, bool onFoot) noexcept {
+    namespace f135 = nofoot::f135;
+    F135State& S = g_f135;
+    uint32_t c[f135::kCount];
+    g_f135Ctr.take(c);
+    if (!onFoot) {   // the counts of the time off foot are dropped
+        S.footLast = false;
+        return;
+    }
+    if (!S.footLast) {
+        S.footLast = true;
+        S.edges.reset();
+        S.esc = S.start = S.back = f135::KeyEdge{};
+        for (int i = 0; i < f135::kCount; ++i) S.sum[i] = 0;
+        S.lineMs = now;
+        S.procLast = g_lookProcCalls.load(std::memory_order_relaxed);
+        S.asksLast = g_f129Ctr.get(nofoot::f129::kAsks);
+        S.zeroedLast = g_f129Ctr.get(nofoot::f129::kZeroed);
+        Log::get().note("native on foot menu probe (F135): armed (measure only): the panel hooks' calls, the Escape key and the pad's Start and Back are counted; lines only when a panel "
+                        "counter moves or a key edge came in the last 8 s");
+    }
+    // the ground truth: the Escape key and the pad's Start and Back, edges only
+    const bool escDown = (GetAsyncKeyState(VK_ESCAPE) & 0x8000) != 0;
+    uint16_t pad = 0;
+    uint8_t trig = 0;
+    xinputSnapshot(&pad, &trig);
+    const struct { f135::KeyEdge* k; bool down; const char* name; } keys[3] = {{&S.esc, escDown, "key Escape"}, {&S.start, (pad & 0x0010u) != 0, "pad Start"},
+                                                                              {&S.back, (pad & 0x0020u) != 0, "pad Back"}};
+    for (const auto& k : keys) {
+        const int e = k.k->step(k.down);
+        if (e == 0) continue;
+        S.lastKeyEdgeMs = now;
+        Log::get().note("native on foot menu probe (F135): %s %s", k.name, e > 0 ? "down" : "up");
+    }
+    // the counters' edges
+    for (int i = 0; i < f135::kCount; ++i) {
+        S.sum[i] += c[i];
+        const f135::EdgeKind e = S.edges.step(i, now, c[i]);
+        if (e == f135::kNoEdge) continue;
+        if (!S.budget.allow(now, 120)) continue;
+        const uint32_t held = S.budget.takeSuppressed();
+        char heldText[80] = "";
+        if (held) std::snprintf(heldText, sizeof(heldText), " [%u earlier edge line(s) were not written: at most 120 a minute]", held);
+        Log::get().note("native on foot menu probe (F135): %s %s%s", f135::counterName(i), e == f135::kRose ? "rose" : "fell (0 for 0.5 s)", heldText);
+    }
+    if (now - S.lineMs < 1000) return;
+    S.lineMs = now;
+    f135::Obj upd[f135::ObjSet::kMax], place[f135::ObjSet::kMax];
+    uint32_t updMore = 0, placeMore = 0;
+    const int nUpd = g_f135UpdObjs.take(upd, &updMore), nPlace = g_f135PlaceObjs.take(place, &placeMore);
+    const uint32_t proc = g_lookProcCalls.load(std::memory_order_relaxed), asks = g_f129Ctr.get(nofoot::f129::kAsks), zeroed = g_f129Ctr.get(nofoot::f129::kZeroed);
+    const uint32_t procRan = proc - S.procLast, asksNow = asks - S.asksLast, zeroedNow = zeroed - S.zeroedLast;
+    S.procLast = proc;
+    S.asksLast = asks;
+    S.zeroedLast = zeroed;
+    uint32_t sum[f135::kCount];
+    for (int i = 0; i < f135::kCount; ++i) {
+        sum[i] = S.sum[i];
+        S.sum[i] = 0;
+    }
+    if (!f135::lineWanted(sum, now, S.lastKeyEdgeMs)) return;
+    char updText[200], placeText[200], gui[24], why[48], lta[80];
+    if (!f135::formatObjs(updText, sizeof(updText), upd, nUpd, updMore)) std::snprintf(updText, sizeof(updText), "none");
+    if (!f135::formatObjs(placeText, sizeof(placeText), place, nPlace, placeMore)) std::snprintf(placeText, sizeof(placeText), "none");
+    const JournalRawStatus raw = journalRawStatus();
+    if (raw.active && raw.guiKnown) std::snprintf(gui, sizeof(gui), "%u", raw.gui);
+    else std::snprintf(gui, sizeof(gui), "unknown");
+    if (!g_lta.engaged) std::snprintf(lta, sizeof(lta), "off");
+    else if (g_f131.held) std::snprintf(lta, sizeof(lta), "held (%s)", nofoot::f131::reasonShort(g_f131.reasonsLast, why, sizeof(why)));
+    else std::snprintf(lta, sizeof(lta), "%s", g_lta.blocked ? "blocked" : "following");
+    Log::get().note("native on foot menu probe (F135) 1 s: update %u (objs %s), placement %u (objs %s), ray %u, cursor window %u, owner transform %u, panel submit %u, inst submit %u, "
+                    "bridge update %u placement %u; GuiFocus %s; look to aim %s; processor %s; look block %s",
+                    sum[f135::kUpdate], updText, sum[f135::kPlace], placeText, sum[f135::kRay], sum[f135::kWindow], sum[f135::kOwner], sum[f135::kPanelSubmit], sum[f135::kInstSubmit],
+                    sum[f135::kBridgeUpdate], sum[f135::kBridgePlace], gui, lta, !g_lookArmed ? "hooks not in" : procRan ? "ran" : "stalled", asksNow == 0 ? "unknown (no ask)" : zeroedNow ? "yes" : "no");
+}
+
 // ---- F129: the look path lines (frame thread) ------------------------------------------------------------------------------------------------------------
 // The hooks count and record (f129UpdateEntry, f129UpdateExit, lookProcHooked); the lines are the frame thread's. A summary every 10 s on foot says what the
 // processor's calls were (the player's own and the others', path A, B or SKIP) and what became of the asks; the events are an episode's two edges, the fallback and
@@ -8219,6 +8339,7 @@ void adsAimTick(uint64_t now, bool session) noexcept {
     g_adsYSignLast = ySign;
     g_adsPSignLast = pSign;
     g_adsFootLast = onFoot;
+    f135Tick(now, onFoot);   // F135: the on-foot menu probe (measure only): the panel hooks' counts, the Escape key's edges, one line a second when something moved
     f129Tick(now, onFoot);   // F129: the look path lines (the summary, the episodes, the fallback, the components); every frame, before anything here can return
     static QpcDt adsClock;   // F66b
     const double dt = adsClock.step(0.1);
