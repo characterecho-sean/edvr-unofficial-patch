@@ -61,7 +61,7 @@ struct Head {
     }
 };
 // The pair the Animate hook reads: eye 0 from frame f0, eye 1 from frame f1, the frame counter at cur.
-inline h::Pair readPair(const Head& head, int f0, int f1, uint32_t cur, uint32_t tag0, uint32_t tag1, h::Cyclo* out) {
+inline h::Pair readPair(const Head& head, int f0, int f1, uint32_t cur, uint32_t tag0, uint32_t tag1, h::Cyclo* out, double eyeScale = 1.0) {
     const double o[3] = {10.0, 2.0, -25.0};
     float rows[2][16], oo[2][4] = {};
     for (int e = 0; e < 2; ++e) {
@@ -72,7 +72,7 @@ inline h::Pair readPair(const Head& head, int f0, int f1, uint32_t cur, uint32_t
     }
     const bool read[2] = {true, true};
     const uint32_t fr[2] = {tag0, tag1};
-    return h::cycloFromRows(read, fr, rows, oo, cur, out);
+    return h::cycloFromRows(read, fr, rows, oo, cur, out, eyeScale);
 }
 
 // ---- 3. the elbow ---------------------------------------------------------------------------------------------------------------------------------
@@ -186,6 +186,24 @@ inline void run126(Check&& check) {
         check(d == h::Pair::kUse && std::fabs(errMixed - 22.2) < 0.2 && std::fabs(along * 1000.0 + 22.2) < 0.2,
               "F126: the reviewer's number: a pair taken from rows one frame apart at 4 m/s and 90 Hz passes the IPD window (78 mm) and puts the midpoint 22 mm behind "
               "where it is, along the head's motion");
+        {   // world scale: Elite's pair is the headset's times 100 over the percent the runtime was told; the 5..8 cm window moves with it (eyeScale)
+            Head at130, at200;
+            at130.ipd = 0.064 * 100.0 / 130.0;   // 49.2 mm
+            at200.ipd = 0.064 * 100.0 / 200.0;   // 32 mm
+            h::Cyclo c130, c200, refused130, refused200;
+            const h::Pair taken130 = readPair(at130, 1, 1, N + 1, N + 1, N + 1, &c130, 100.0 / 130.0);
+            const h::Pair taken200 = readPair(at200, 1, 1, N + 1, N + 1, N + 1, &c200, 100.0 / 200.0);
+            const h::Pair unscaled130 = readPair(at130, 1, 1, N + 1, N + 1, N + 1, &refused130);
+            const h::Pair unscaled200 = readPair(at200, 1, 1, N + 1, N + 1, N + 1, &refused200);
+            const double truth130[3] = {0.5 * at130.ipd * at130.r[0], 0.5 * at130.ipd * at130.r[1], 0.5 * at130.ipd * at130.r[2]};
+            check(taken130 == h::Pair::kUse && taken200 == h::Pair::kUse && distMm(c130.off, truth130) < 0.01 && unscaled130 == h::Pair::kGeometry && unscaled200 == h::Pair::kGeometry,
+                  "F126: world scale: a 130 or 200 percent pair (49 mm, 32 mm) is a pair under the eyeScale that goes with it and is refused as geometry without it");
+            Head at50;
+            at50.ipd = 0.064 * 100.0 / 50.0;   // 128 mm
+            h::Cyclo c50, none50;
+            check(readPair(at50, 1, 1, N + 1, N + 1, N + 1, &c50, 2.0) == h::Pair::kUse && readPair(at50, 1, 1, N + 1, N + 1, N + 1, &none50) == h::Pair::kGeometry,
+                  "F126: world scale: a 50 percent pair (128 mm) is a pair under its eyeScale and not otherwise");
+        }
         h::Cyclo staleOut;
         const h::Pair e = readPair(head, 1, 1, N + 20, N + 1, N + 1, &staleOut);
         check(e == h::Pair::kStale, "F126: rows more than 8 frames behind the counter are stale, as before");

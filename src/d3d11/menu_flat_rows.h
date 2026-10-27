@@ -44,12 +44,15 @@ inline constexpr FlatPageRow kFlatPageRows[] = {
 };
 inline constexpr size_t kFlatPageRowCount = sizeof(kFlatPageRows) / sizeof(kFlatPageRows[0]);
 
-// The Visual tab (2026-10-22): the [visual] options, for every flat user (Fix tier). Both are choices, both live:
+// The Visual tab (2026-10-22): the [visual] options that do something in flat, for every flat user (Fix tier). Both are choices, both live:
 //   intro_video  Intro movie  skip, or the game's own movie (flat, 2026-10-14). On the Performance tab until 2026-10-22, as fix.intro_video.
-//                             Its `menu` token is the bare one, so VR's menu, which has no Visual page, still lists it on the Fixes page.
-//   star_glow    Star glow    100 to 200 percent of the halo the game's own bloom draws around a star; its `menu visual` token is the
-//                             page only this panel builds, as `menu debug` is.
+//                             Its `menu visual` token is the page VR's menu builds too (2026-10-27), so the row is on both Visual pages.
+//   star_glow    Star glow    100 to 200 percent of the halo the game's own bloom draws around a star. Flat only (nothing in VR reads it), so its
+//                             token is `menu flat_visual`, a page VR builds none of, as `menu flat_performance` is for the Performance tab.
+// The other `menu visual` rows (World scale, Intro background picture, Screen curve) are VR's: the flat gate (flat_profile_keys.h) refuses their keys, so a
+// flat row for them would show a value that does nothing. They are not listed here.
 // Order is the tab's: menu.cpp walks the generated schema (edvr.ini order) and keeps the rows named here, whatever page their token names.
+// tools\gen_settings_schema.py fails the build for a row named here that the schema has no row for (no `menu` token, a key the code does not read).
 inline constexpr FlatPageRow kFlatVisualRows[] = {
     {"visual", "intro_video", FlatRowRead::Allowlist},
     {"visual", "star_glow",   FlatRowRead::Allowlist},

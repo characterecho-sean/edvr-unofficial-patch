@@ -226,11 +226,17 @@ HmdMatrix34_t OpenVRSystem::GetEyeToHeadTransform(EVREye e) {
   // it raw, so a canted headset's per-eye yaw and pitch would arrive inverted:
   // the game is given S*E*S, S = diag(1,1,-1), each eye's rotation in its own
   // handedness (canted_display.h, docs/canted-projection.md). On parallel panels
-  // that is the located transform to the bit. The located transform itself stays
-  // what the snapshot holds: the native frame tables and the layer read it there.
-  // Only this answer to the game changes, and nothing reads it back.
-  const HmdMatrix34_t located=liveGeometry?s.geometry.eyeToHead[unsigned(e)]:s.optics.eyeToHead[unsigned(e)];
-  return gameHandedness(located);
+  // that is the snapshot's transform to the bit. The snapshot's transform is the
+  // pair Elite is told, the located eyes moved by the world scale (geometry_snapshot.h);
+  // the layer and EDVR's own drawing read the located views instead. Only this
+  // answer to the game changes, and nothing reads it back.
+  const HmdMatrix34_t told=liveGeometry?s.geometry.eyeToHead[unsigned(e)]:s.optics.eyeToHead[unsigned(e)];
+  noteWorldScaleRead(liveGeometry?s.geometry.native.worldScalePercent:s.optics.worldScalePercent,liveGeometry?s.geometry.native.sequence:s.optics.sequence);
+  return gameHandedness(told);
+}
+void OpenVRSystem::noteWorldScaleRead(uint32_t percent,uint64_t sequence) noexcept {
+  if(percent==worldScaleRead_.load(std::memory_order_relaxed))return;
+  if(worldScaleRead_.exchange(percent,std::memory_order_relaxed)!=percent)source_.noteWorldScaleRead(percent,sequence);
 }
 bool OpenVRSystem::GetTimeSinceLastVsync(float* seconds,uint64_t* frame) {
   NativeCpuTraceSpan trace(EdvrCpuGetTimeSinceLastVsync);
@@ -305,15 +311,11 @@ float OpenVRSystem::GetFloatTrackedDeviceProperty(TrackedDeviceIndex_t i,ETracke
       if(s.displayFrequencyAvailable&&std::isfinite(s.displayFrequency)&&s.displayFrequency>0)value=s.displayFrequency;
       else e=TrackedProp_ValueNotProvidedByDevice;
     } else {
-      // Effective rendering IPD, derived from runtime eye origins. The full
-      // separation handles asymmetric/canted placement and survives recenter.
+      // Effective rendering IPD, derived from the eye origins Elite is told (the
+      // located ones moved by the world scale). The full separation handles
+      // asymmetric/canted placement and survives recenter.
       if(opticsAvailable(s)) {
-        const auto* eyes=geometryValid(s)?s.geometry.eyeToHead:s.optics.eyeToHead;
-        double squared=0;
-        for(unsigned axis=0;axis<3;++axis) {
-          const double d=double(eyes[1].m[axis][3])-eyes[0].m[axis][3];squared+=d*d;
-        }
-        const double ipd=std::sqrt(squared);
+        const double ipd=eyeSeparation(geometryValid(s)?s.geometry.eyeToHead:s.optics.eyeToHead);
         if(std::isfinite(ipd)&&ipd>0&&ipd<=(std::numeric_limits<float>::max)())value=float(ipd);
       }
       if(!(value>0))e=TrackedProp_ValueNotProvidedByDevice;

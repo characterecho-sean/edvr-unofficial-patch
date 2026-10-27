@@ -575,6 +575,22 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
          sizes[0].recommendedImageRectWidth,sizes[0].recommendedImageRectHeight,edvr::ppn::viewAngleDegrees(left,right))>0)
       nativeTracePuts(line);
   }
+  // World scale (visual.world_scale, common/world_scale.h): the percent the last frame latched, 100 until a frame says otherwise. A change is said once, with the located
+  // eye separation and the one Elite is told; the geometry snapshots of that frame are built from the latched value alone. A frame whose eyes did not
+  // locate leaves it where it was, and says nothing, so the line always carries two separations that exist. A run that never leaves 100 writes no line.
+  uint32_t worldScaleLatched=edvr::kWorldScaleDefault;
+  void noteWorldScale(uint32_t percent,const GeometryInput& located,const GeometryInput& told) {
+    if(percent==worldScaleLatched)return;
+    GeometrySnapshot real{},given{};
+    if(!makeGeometrySnapshot(located,real)||!makeGeometrySnapshot(told,given))return;
+    worldScaleLatched=percent;
+    char line[160]{};
+    if(edvr::worldScaleChangeLine(line,sizeof(line),percent,1000.0*eyeSeparation(real.eyeToHead),1000.0*eyeSeparation(given.eyeToHead))>0)nativeTracePuts(line);
+  }
+  void noteWorldScaleRead(uint32_t percent,uint64_t sequence) noexcept override {
+    char line[160]{};
+    if(edvr::worldScaleReadLine(line,sizeof(line),percent,(unsigned long long)sequence)>0)nativeTracePuts(line);
+  }
   bool renderSettingsCaptured=false;
   uint64_t renderSizingGeneration=0;
   EdvrNativeRenderViewBounds renderBounds[2]{};
@@ -1557,6 +1573,9 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     GeometrySnapshot temporalGeometry{};
     const bool locatedValid=makeGeometrySnapshot(located,temporalGeometry);
     if(locatedValid)noteProjectionMode(located);
+    // The world scale this frame draws at, latched once from this frame's provider answer (below) and applied to the geometry Elite and the temporal pass are
+    // given and to nothing else: the located views (the layer, the menu, the plugins) keep the headset's own eyes.
+    uint32_t worldScale=edvr::kWorldScaleDefault;
     auto gameGeometry=located;
     // This is the geometry exposed to Elite and the temporal provider. Keep
     // runtime `located` dimensions raw for XR accounting, but make every
@@ -1585,6 +1604,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       }
       if(featureFrameKnown&&next.resubmitEnabled!=featureFrame.resubmitEnabled)previousPairValid=false;
       featureFrame=next;featureFrameKnown=true;
+      worldScale=edvr::worldScaleClamp(featureFrame.worldScalePercent);
       ++lookRuntimeFrames;lookWanted=double(featureFrame.lookYawTotal);lookGameFrame=featureFrame.lookYawGameFrame;   // F22
       // F33: the body-align translation (zero from the ladder unless a version 8 answer carried it).
       eyeProviderSeen=featureFrame.version>=EDVR_NATIVE_FRAME_VERSION_8;
@@ -1662,6 +1682,8 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
         }
       }
     }
+    gameGeometry.worldScalePercent=worldScale;
+    if(locatedValid)noteWorldScale(worldScale,located,gameGeometry);
     if(locatedValid) geometry.recommend(gameGeometry.width,gameGeometry.height);
     // The temporal pass is sized by what the frame it is handed was rendered
     // for, which while a rebuild is awaited is the previous ask and not the

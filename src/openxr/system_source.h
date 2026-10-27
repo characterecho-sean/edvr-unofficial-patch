@@ -13,6 +13,8 @@ struct SystemOptics {
   uint64_t generation=0, sequence=0;
   RawFov raw[2]{};
   vr::HmdMatrix34_t eyeToHead[2]{};
+  // The world scale (percent) eyeToHead was built with, so an answer from this cache says which scale it carries.
+  uint32_t worldScalePercent=edvr::kWorldScaleDefault;
 };
 // One copied read transaction. No borrowed runtime strings, pointers or handles.
 // A live HMD may have temporarily invalid tracking. geometry is the current
@@ -89,6 +91,9 @@ class SystemSource {
       vr::EGraphicsAPIConvention,bool,const vr::HmdMatrix44_t&,const void*) noexcept {}
   virtual void noteFrequencyQuery(const SystemRead&,vr::TrackedDeviceIndex_t,
       vr::ETrackedPropertyError,float,unsigned) noexcept {}
+  // The first answer to Elite's eye-transform call that carries a world scale (percent) the last answer did not: the sequence is the geometry
+  // frame it was answered from. Said once per change, never per call (the game asks about twelve times a frame).
+  virtual void noteWorldScaleRead(uint32_t percent,uint64_t sequence) noexcept {(void)percent;(void)sequence;}
   virtual void notePropertyQuery(unsigned,vr::TrackedDeviceIndex_t,
       vr::ETrackedDeviceProperty,vr::ETrackedPropertyError) noexcept {}
   virtual void noteHiddenMesh(unsigned,uint64_t,uint32_t,const char*,uint32_t) noexcept {}

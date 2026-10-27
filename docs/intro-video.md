@@ -1628,6 +1628,8 @@ when they were written.
   Performance). VR, unchanged for the player: still the Intro movie row on the Fixes page of the
   F8 menu. The headset's menu builds no Visual page, so the row keeps its bare `menu` token; a
   `menu visual` token would have taken it out of the headset.
+  (2026-10-27: VR's menu has a Visual page now and the row carries `menu visual`, so it is on that
+  page and no longer on Fixes; the flat tab is unchanged. docs/settings-menu.md, "Visual tab".)
 - **An existing file keeps its choice.** edvr.ini and the flat template carry
   `# moved-from: fix.intro_video (default screen)` above the key, beside the three older
   `intro_video_size` / `_lock` / `_upscale` lines that already named it. The runtime reads an old
