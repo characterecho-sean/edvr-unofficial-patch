@@ -12319,6 +12319,23 @@ def _hj_f135_menu(rows, ctx):
     return ("OK", text + ("; " + " | ".join(parts) if parts else "; no Escape, Start or Back press in the window"))
 
 
+def _hj_f136_upright(rows, ctx):
+    """F136: an upright chest under a level head while the aim is pitched down (mouse look). One line a second while the weight was above 0: the aim's pitch, the head's pitch
+    over it, the weight, the chest's lean as animated, as written and at the item's level aim, the joints written. OK with the seconds applied (the largest weight and the
+    lean taken back listed); IDLE when it never applied in a log that has other on-foot lines; absent otherwise. It only reports."""
+    sec = rows.get("sec", [])
+    if not sec:
+        others = bool(ctx.get("eye rows (F113)", {}).get("sec") or ctx.get("look to aim (F109)", {}).get("sec"))   # native stereo was on foot
+        return ("IDLE", "the upright torso never applied (the aim was never pitched down more than 10 deg under a level head, or no item had been seen at a level aim)") if others else None
+    taken = [float(r["anim"]) - float(r["wr"]) for r in sec]
+    text = ("%d s applied; weight up to %.2f (mean of the seconds' means %.2f); aim pitch %.1f deg on average, the head %.1f deg over it; chest lean animated %.1f -> written %.1f deg "
+            "(level %.1f), up to %.1f deg taken back; joints written %s") % (
+        len(sec), max(float(r["wx"]) for r in sec), sum(float(r["wm"]) for r in sec) / len(sec), sum(float(r["aim"]) for r in sec) / len(sec),
+        sum(float(r["gap"]) for r in sec) / len(sec), sum(float(r["anim"]) for r in sec) / len(sec), sum(float(r["wr"]) for r in sec) / len(sec),
+        sum(float(r["lv"]) for r in sec) / len(sec), max(taken), sec[-1]["j"])
+    return ("OK", text)
+
+
 def _hj_f109_snap(rows, ctx):
     """F109: the snap turns. Each snap's applied turn against its step (within 10% in at most 2 calls); none applied is NEVER APPLIED, any off or skipped is PARTIAL.
     Whether ADS survived a snap is reported, not judged (the trigger may have been released)."""
@@ -13280,6 +13297,10 @@ HEALTH_RULES = (
                  r"(?P<what>rose|fell)"),
         ("_", r"native on foot menu probe \(F135\): armed "),
     ), _hj_f135_menu),
+    _hrule("upright torso (F136)", ("F136",), ("native on foot upright torso (F136)",), (
+        ("sec", r"native on foot upright torso \(F136\) 1 s: item (?P<item>.+?), aim pitch (?P<aim>[+-][\d.]+), head over aim (?P<gap>[+-][\d.]+) deg, w mean (?P<wm>[\d.]+) "
+                r"max (?P<wx>[\d.]+), chest lean animated (?P<anim>[+-][\d.]+) -> written (?P<wr>[+-][\d.]+) \(level (?P<lv>[+-][\d.]+)\), joints written (?P<j>\d+)$"),
+    ), _hj_f136_upright),
     _hrule("snap turn (F109)", ("F109",), ("native on foot snap turn (F109)",), (
         ("snap", r"native on foot snap turn \(F109\): snap (?P<n>\d+) by (?P<src>the stick|a mouse flick), (?P<dir>right|left) (?P<step>\d+) deg(?P<ads> in ADS)?: "
                  r"input (?P<input>%s) \(gain (?P<gain>%s), (?P<gsrc>.+?)\); the game applied (?P<applied>%s) deg in (?P<calls>\d+) call\(s\) \(the player's turn over "
@@ -15690,6 +15711,16 @@ def self_test_health():
               has=["2 reseed second(s) in the event lines: 4 reseeds in 180 game frames; largest gap 11.9 ms"], lacks=["UNPARSED", "a tenth or more"])
         check("F132 pairing: reseeds in a tenth of the frames in the summary log", [reseed132(n=60, frames=90)], 0, [("PARTIAL", G68)], has=["a tenth or more of those frames were refused"],
               lacks=["UNPARSED"])
+
+        # ---- F136: an upright chest under a level head while the aim is pitched down ----
+        U136 = "upright torso (F136)"
+
+        def torso136(item="$wpn_m_assaultrifle_laser_fauto_name;", aim=-68.0, gap=68.0, wm=0.93, wx=1.0, anim=59.5, wr=34.0, lv=34.5, j=95):
+            return R("native on foot upright torso (F136) 1 s: item %.63s, aim pitch %+.1f", item, aim, gap, wm, wx, anim, wr, lv, j)
+
+        check("F136 torso: never applied in a log with other on-foot lines", [ENG109, look109()], 0, [("IDLE", U136)], has=["the upright torso never applied"], lacks=["UNPARSED"])
+        check("F136 torso: applied for three seconds, the ramp's and the fall's seconds included", [torso136(wm=0.4, wx=0.9), torso136(), torso136(wm=0.5, wx=0.7, wr=47.0)], 0,
+              [("OK", U136)], has=["3 s applied; weight up to 1.00", "chest lean animated 59.5 -> written", "(level 34.5)", "up to 25.5 deg taken back", "joints written 95"], lacks=["UNPARSED"])
 
         # ---- F135: the on-foot menu probe (MEASURE ONLY) ----
         M135 = "menu probe (F135)"

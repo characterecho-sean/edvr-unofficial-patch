@@ -39,6 +39,7 @@
 #include "f132_checks.h"    // F132: the G frame pairing re-seeds its phase after a far-apart refusal (either true order, a missing call, a real gap)
 #include "f133_checks.h"    // F133: head steps judged by rate (a stall is not a recentre); the follower re-centres on a standing yaw offset
 #include "f135_checks.h"    // F135: the on-foot menu probe's pure parts (counters, the distinct objects of a second, the edges, the key edges, the line gate)
+#include "f136_checks.h"    // F136: the upright torso under a level head while the aim is pitched down (the weight, the ramp, the lean, the turn back, the learned level lean)
 #include "f110_checks.h"    // F110: the ADS sight lock's model right eye (the left-eye job camera plus the IPD)
 #include "f111_checks.h"    // F111: the panel pointer instrument's statistics and verdict
 #include "f113_checks.h"    // F113: each eye's scene rows whenever the world is drawn (the depth prepass and the terrain as sources)
@@ -7490,6 +7491,8 @@ int wmain(int argc, wchar_t** argv) {
     f133test::run133(check);
     // F135 (measure only): the menu probe's counters, objects, 0.5 s edges, key edges and line gate.
     f135test::run135(check);
+    // F136: the weight (the head's pitch above an aim pitched down), its ramp, the chest lean turned back over the spine levels, the stance's level lean learned per item.
+    f136test::run136(check);
     // F110: the ADS sight lock's model right eye from the left-eye job camera and from a solved left eye, the fallback, the IPD's sign.
     f110test::run110(check);
     // F111: the panel pointer instrument names the stage that turns a move the other way (K1 to K5, one at a time), the camera getters' decoding.
