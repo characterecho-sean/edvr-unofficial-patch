@@ -33,6 +33,7 @@
 #include "f101_checks.h"    // F101: the frame ABI against the released one (v0.21.1)
 #include "f107_checks.h"    // F107: the game's camera away from the commander (a terminal's or a screen's own camera)
 #include "f109_checks.h"    // F109: look to aim on foot, the exact split (the player's own turn in ADS), snap or smooth turning
+#include "f129_checks.h"    // F129: look to aim reads its turn from the player's own look processor (the call classes, the gate, the episodes, the zero-sum probes)
 #include "f110_checks.h"    // F110: the ADS sight lock's model right eye (the left-eye job camera plus the IPD)
 #include "f111_checks.h"    // F111: the panel pointer instrument's statistics and verdict
 #include "f113_checks.h"    // F113: each eye's scene rows whenever the world is drawn (the depth prepass and the terrain as sources)
@@ -7391,6 +7392,9 @@ int wmain(int argc, wchar_t** argv) {
     // F109: look to aim on foot: the exact split (a stick's turn with the head aim writing is the player's), the drop by style, the snap and flick detectors, the
     // snap's fade, the smoothing, the follower against the real map, the per-second check.
     f109test::run109(check);
+    // F129: the processor's calls told apart (path A, B, SKIP by a sentinel in the stored pair; only the player's own component takes the ask; the fallback), the
+    // look path instrument (the ring, the counters, the episodes, the event budget), and the zero-sum probes.
+    f129test::run129(check);
     // F110: the ADS sight lock's model right eye from the left-eye job camera and from a solved left eye, the fallback, the IPD's sign.
     f110test::run110(check);
     // F111: the panel pointer instrument names the stage that turns a move the other way (K1 to K5, one at a time), the camera getters' decoding.

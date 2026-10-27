@@ -51,6 +51,7 @@
 #include "native_on_foot_f107.h"   // F107: the game's camera away from the commander (pure parts)
 #include "native_on_foot_f113.h"   // F113: each eye's scene rows whenever the world is drawn (pure parts)
 #include "native_on_foot_f109.h"   // F109: look to aim on foot, the player's own turn in ADS, snap or smooth turning (pure parts)
+#include "native_on_foot_f129.h"   // F129: look to aim reads its turn from the player's own look processor; the look path instrument (pure parts)
 #include "../common/comfort_fade.h"   // F109: the snap's short fade (edvr::comfort::publish; the runtime blends it over both eyes)
 #include "native_on_foot_f111.h"   // F111: the panel pointer instrument (pure parts)
 #include "native_on_foot_f116.h"   // F116: the HUD hidden while a terminal fills the view (pure parts)
@@ -254,9 +255,35 @@ struct AdsActionSample { bool valid = false, value = false; uint64_t qpc = 0; ui
 struct F109Pend {
     bool valid = false;
     double inYaw = 0.0, inPitch = 0.0, mouseYaw = 0.0, mousePitch = 0.0, stickYaw = 0.0, stickPitch = 0.0, snapYaw = 0.0;
+    // F129: the update's sink [act+0x88] (kept after the record is taken: the processor's calls are told apart by it), and the sink's mouse fields the update left
+    // (pitch at +0x170, yaw at +0x174; sinkRead: they were read), which the local call reads again before it runs (the order check).
+    uintptr_t sink = 0;
+    bool sinkRead = false;
+    float sinkYaw = 0.0f, sinkPitch = 0.0f;
 };
 F109Pend g_f109Pend;
 nofoot::f109::Split g_f109SplitYaw, g_f109SplitPitch;   // game thread only: the mouse path's gain, from clean calls only
+// F129 (the hooks' side, game thread writes): which processor call takes the ask, the counters and the ring behind the look path lines, the components seen, the
+// episode state. The frame thread reads them (atomics, or the ring's sequence lock) and writes every line: the hooks log nothing.
+nofoot::f129::Gate g_f129Gate;                    // game thread only
+nofoot::f129::Counters g_f129Ctr;
+nofoot::f129::Ring g_f129Ring;
+nofoot::f129::CompTable g_f129Comps;
+nofoot::f129::Episode g_f129Episode;              // game thread only
+uint32_t g_f129UpdSeq = 0;                        // game thread only: the update hook's runs
+std::atomic<bool> g_f129InFallback{false};
+std::atomic<uint32_t> g_f129FallbackWhy{0};       // nofoot::f129::FallbackWhy of the last entry
+// An episode's two edges, published for the frame thread (the lines are its). The freeze is the ring's last eight records at the moment it began.
+std::atomic<uint32_t> g_f129FirstHist{0}, g_f129FirstN{0};   // the gate's first-call history, for the frame thread's lines (the gate itself is the game thread's)
+std::atomic<uint32_t> g_f129EpBegun{0}, g_f129EpEnded{0}, g_f129EpReasons{0};
+std::atomic<uint64_t> g_f129EpBeginMs{0}, g_f129EpEndMs{0};
+std::atomic<uint32_t> g_f129EpCounts[4] = {};     // at its end: unconsumed, path A or SKIP asks, first call not ours, asks
+struct F129Freeze {
+    std::atomic<uint32_t> seq{0};
+    uint32_t n = 0;
+    nofoot::f129::Rec rec[8];
+};
+F129Freeze g_f129Freeze;
 inline void atomicAddDouble(std::atomic<double>& a, double v) noexcept {
     double cur = a.load(std::memory_order_relaxed);
     while (!a.compare_exchange_weak(cur, cur + v, std::memory_order_relaxed)) {
@@ -5878,6 +5905,13 @@ constexpr uintptr_t kCompSpringYawRateOff = 0x780, kCompSpringPitchRateOff = 0x7
 // pair is `movsd [rdi+0x5F4], xmm0` in 332841 and `movsd [rdi+0x624], xmm0` in 334473 and 334925.
 constexpr uintptr_t kCompYawDeltaOff = 0x624, kCompBasisOff = 0x5E0, kCompGainLoOff = 0x808, kCompGainHiOff = 0x80C;
 constexpr uintptr_t kCompPitchDeltaOff = 0x628;   // F62b: the processor's pitch delta (F22's capstone read: stored beside the yaw's)
+// F129 (RE analysis\decomp\verify_20261027_onfoot_lift_look.txt, build 334925): the processor has three exits. PATH A (byte comp+0x678 != 0 and byte comp+0x7A9 == 0)
+// does not read the sink and stores (the heading, pitch exactly 0.0f); SKIP (not path A, input disabled, override 0) writes NOTHING, the pair keeps its old value;
+// PATH B reads the sink's mouse terms and stores the remaining pair, the only path that carries an ask. comp+0x7D4 is the input-disabled byte, comp+0x4D8 a byte that
+// is 1 when a non-zero mouse term was read. The processor runs once per component (one per player-controlled humanoid); the player's own is the one whose sink
+// [comp+0x2E0] is the update's sink [act+0x88] (the same dependency on typeId 0x5F541DC), whose mouse fields are pitch +0x170 and yaw +0x174 (floats).
+constexpr uintptr_t kCompPathAOff = 0x678, kCompOverrideOff = 0x7A9, kCompInputOffOff = 0x7D4, kCompMouseTermOff = 0x4D8, kCompSinkOff = 0x2E0;
+constexpr uintptr_t kActSinkOff = 0x88, kSinkMousePitchOff = 0x170, kSinkMouseYawOff = 0x174;
 constexpr uint64_t kLookHeadMaxAgeMs = 500;    // a list-B head sample older than this is not shown (probe B)
 
 F9Probe g_f22LoadWait;   // read only
@@ -6663,6 +6697,113 @@ void lookReadHeadP2(uintptr_t listB) noexcept {
     g_worldCQpc = f30Qpc();
 }
 
+// ---- F129: the look paths, the hooks' side (game thread; no allocation, logging or locks; every read and write is guarded) ----------------------------------
+// The two hooks tell the gate (nofoot::f129::Gate) what the update left pending and which processor call is the player's, record every call in the ring, and count.
+// The frame thread's lines are f129Tick's. See native_on_foot_f129.h for the bug and the rules.
+__declspec(noinline) bool guardedWritePair32(uintptr_t address, uint32_t first, uint32_t second) noexcept {
+    __try {
+        volatile uint32_t* p = reinterpret_cast<volatile uint32_t*>(address);
+        p[0] = first;
+        p[1] = second;
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+inline uint32_t f129Low32(uintptr_t v) noexcept { return static_cast<uint32_t>(v & 0xFFFFFFFFu); }
+// An episode edge (game thread): the gate's runs decide, the frame thread prints. The freeze is the ring's last eight records as the episode began.
+void f129Episode(nofoot::f129::EpEvent e) noexcept {
+    namespace f129 = nofoot::f129;
+    const uint64_t ms = GetTickCount64();
+    const int edge = g_f129Episode.observe(e, ms);
+    if (edge > 0) {
+        f129::Rec last[8];
+        const size_t n = g_f129Ring.readOwn(last, 8);
+        const uint32_t s = g_f129Freeze.seq.load(std::memory_order_relaxed);
+        g_f129Freeze.seq.store(s + 1u, std::memory_order_relaxed);
+        std::atomic_thread_fence(std::memory_order_release);
+        g_f129Freeze.n = static_cast<uint32_t>(n);
+        for (size_t i = 0; i < n; ++i) g_f129Freeze.rec[i] = last[i];
+        std::atomic_thread_fence(std::memory_order_release);
+        g_f129Freeze.seq.store(s + 2u, std::memory_order_release);
+        g_f129EpReasons.store(g_f129Episode.reasons, std::memory_order_relaxed);
+        g_f129EpBeginMs.store(g_f129Episode.beginMs, std::memory_order_relaxed);
+        g_f129EpCounts[0].store(g_f129Episode.unconsumed, std::memory_order_relaxed);   // at the start: the run that opened it
+        g_f129EpCounts[1].store(g_f129Episode.aOrSkip, std::memory_order_relaxed);
+        g_f129EpCounts[2].store(g_f129Episode.firstNot, std::memory_order_relaxed);
+        g_f129EpCounts[3].store(g_f129Episode.asks, std::memory_order_relaxed);
+        g_f129Ctr.add(f129::kEpisodes);
+        g_f129EpBegun.fetch_add(1u, std::memory_order_release);
+    } else if (edge < 0) {
+        g_f129EpReasons.store(g_f129Episode.reasons, std::memory_order_relaxed);
+        g_f129EpEndMs.store(ms, std::memory_order_relaxed);
+        g_f129EpCounts[0].store(g_f129Episode.unconsumed, std::memory_order_relaxed);
+        g_f129EpCounts[1].store(g_f129Episode.aOrSkip, std::memory_order_relaxed);
+        g_f129EpCounts[2].store(g_f129Episode.firstNot, std::memory_order_relaxed);
+        g_f129EpCounts[3].store(g_f129Episode.asks, std::memory_order_relaxed);
+        g_f129EpEnded.fetch_add(1u, std::memory_order_release);
+    }
+}
+void f129FallbackEntered(uint8_t why) noexcept {
+    g_f129InFallback.store(true, std::memory_order_relaxed);
+    g_f129FallbackWhy.store(why, std::memory_order_relaxed);
+    g_f129Ctr.add(nofoot::f129::kFallbackEntered);
+}
+// The start of the update hook: the previous update's ask that no local call took is a blocked call (the follower's hold engages as for the game's own look block).
+void f129UpdateEntry() noexcept {
+    namespace f129 = nofoot::f129;
+    ++g_f129UpdSeq;
+    g_f129Ctr.add(f129::kUpdates);
+    const f129::UpdateEntryOut e = g_f129Gate.updateEntry();
+    if (e.processorRan) g_f129Ctr.maxOther(e.otherCalls);
+    if (e.fallbackEntered) f129FallbackEntered(e.why);
+    if (e.unconsumed) {
+        g_f129Ctr.add(f129::kUnconsumed);
+        g_f109Blocked.fetch_add(1, std::memory_order_relaxed);
+        g_f109BlockedRun.fetch_add(1, std::memory_order_relaxed);
+        f129Episode(f129::kEvUnconsumed);
+    }
+}
+// After the original update (every path, a refused update included): the sink pointer [act+0x88] and its mouse fields, the pending record's sink, the ask's outcome in
+// the sink, the ring. askYaw, askPitch: the head aim's ask as it ran, game input units; wantY, wantP: what was written into the mouse actions.
+void f129UpdateExit(uintptr_t act, bool pendValid, double askYaw, double askPitch, float wantY, float wantP) noexcept {
+    namespace f129 = nofoot::f129;
+    uintptr_t sink = 0;
+    bool sinkOk = guardedRead(act + kActSinkOff, &sink, 8) && sink >= 0x10000 && sink <= UINTPTR_MAX - 0x400;
+    float mouse[2] = {};   // pitch at +0x170, yaw at +0x174
+    const bool mouseOk = sinkOk && guardedRead(sink + kSinkMousePitchOff, mouse, 8);
+    if (!sinkOk) sink = 0;
+    const float sinkYaw = mouse[1], sinkPitch = mouse[0];
+    g_f109Pend.sink = sink;
+    g_f109Pend.sinkRead = mouseOk;
+    g_f109Pend.sinkYaw = sinkYaw;
+    g_f109Pend.sinkPitch = sinkPitch;
+    const bool asked = pendValid && (askYaw != 0.0 || askPitch != 0.0);
+    const f129::UpdateEntryOut e = g_f129Gate.updateEnd(pendValid, asked, sinkOk, sink);
+    if (e.fallbackEntered) f129FallbackEntered(e.why);
+    f129::SinkState state = f129::kSinkNone;
+    if (asked) {
+        g_f129Ctr.add(f129::kAsks);
+        state = f129::sinkOutcome(f129::sinkAxis(askYaw, mouseOk, wantY, sinkYaw), f129::sinkAxis(askPitch, mouseOk, wantP, sinkPitch));
+        if (state == f129::kSinkReached) g_f129Ctr.add(f129::kReached);
+        else if (state == f129::kSinkZeroed) g_f129Ctr.add(f129::kZeroed);
+        else if (state == f129::kSinkAltered) g_f129Ctr.add(f129::kAltered);
+    }
+    const double gy = g_f109SplitYaw.gain != 0.0 ? g_f109SplitYaw.gain : 1.0, gp = g_f109SplitPitch.gain != 0.0 ? g_f109SplitPitch.gain : 1.0;   // degrees: the measured gain, 1.0 with none
+    f129::Rec r;
+    r.kind = f129::kKindUpdate;
+    r.seq = g_f129UpdSeq;
+    r.id = f129Low32(act);
+    r.sink = f129Low32(sink);
+    r.a = static_cast<float>(askYaw * gy / nofoot::f109::kDeg);
+    r.b = static_cast<float>(askPitch * gp / nofoot::f109::kDeg);
+    r.sa = mouseOk ? sinkYaw : 0.0f;
+    r.sb = mouseOk ? sinkPitch : 0.0f;
+    r.sinkState = state;
+    r.flags = asked ? f129::kFlAsked : 0;
+    g_f129Ring.push(r);
+}
+
 using F22UpdateFn = void(__fastcall*)(void*);
 // The look update (game thread), every call. F62b: the head aim's queued yaw and pitch input (game input units; only while the frame thread has the hook on) is
 // written into the mouse's look actions for this call only and restored after it. F109: the right stick's look is its own pair of actions (act+0x180 yaw, +0x188
@@ -6672,6 +6813,7 @@ using F22UpdateFn = void(__fastcall*)(void*);
 // (nofoot::f109::Split): the head aim's share is cancelled, the player's (stick, mouse, snap, the game's springs) turns the view with the body. A refused read
 // leaves the game's values and the queue alone for the call. No allocation, logging or locks; every read and write is guarded.
 void lookUpdateRun(void* act, F22UpdateFn original) noexcept {
+    f129UpdateEntry();   // F129: the previous update's ask that no local processor call took is counted and filed as a blocked call, before the record is dropped
     g_f109Pend.valid = false;
     const uintptr_t a = reinterpret_cast<uintptr_t>(act);
     uintptr_t rotAct = 0, pitchAct = 0, stickYawAct = 0, stickPitchAct = 0;
@@ -6691,6 +6833,7 @@ void lookUpdateRun(void* act, F22UpdateFn original) noexcept {
         g_adsRefusals.fetch_add(1, std::memory_order_relaxed);
         g_adsHookWhy.store(why, std::memory_order_relaxed);
         original(act);
+        f129UpdateExit(a, false, 0.0, 0.0, 0.0f, 0.0f);   // F129: no record is pending; the sink is still read (it tells the processor's calls apart)
         return;
     }
     g_f109Updates.fetch_add(1, std::memory_order_relaxed);
@@ -6744,6 +6887,7 @@ void lookUpdateRun(void* act, F22UpdateFn original) noexcept {
     p.stickPitch = wSP || wantSP == oldSP ? wantSP : oldSP;
     p.snapYaw = ranY ? snap : 0.0;
     g_f109Pend = p;
+    f129UpdateExit(a, true, p.inYaw, p.inPitch, wantY, wantP);   // F129: the sink and its mouse fields into the record, the gate told, the ring
 }
 void adsActionPublish(bool valid, bool value) noexcept {
     uint32_t seq = g_adsActionSeq.load(std::memory_order_relaxed);
@@ -6878,32 +7022,20 @@ void __fastcall lookUpdateHooked(void* act) {
     if (g_adsActionSignatureOk) adsActionSample(act); // F70b: sample HumanoidZoom before this update sends the same bound logical value to its sink
     if (!act) {
         g_f109Pend.valid = false;
+        g_f129Gate.dropPend();   // F129: the gate's record goes with it
         original(act);
         return;
     }
     lookUpdateRun(act, original);   // F62b/F109: the head aim's input, the player's look dropped while look to aim is engaged, what the call ran with
 }
 
-// The processor hook (game thread). Read only: it records comp and, after the original, splits the game's yaw and pitch deltas (comp+0x624 / +0x628) into the
-// head aim's share and the player's. F109 (RE verify_20261025_onfoot_look_input): the delta is c * (dt * rate * stick + g * (mouse + in) + dt * spring), so the
-// head aim's share is g * in with g from clean calls only (no stick, no spring; nofoot::f109::Split), never the mouse ratio of F62b, which counted a stick's turn
-// (and the springs') as the head aim's whenever it wrote: the cancel then held the view while the avatar turned. The totals are cumulative (this thread is their
-// only writer). No allocation, logging or locks; the reads are guarded.
-using F22ProcFn = uint64_t(__fastcall*)(void*, float);
-uint64_t __fastcall lookProcHooked(void* comp, float dt) {
-    const F22ProcFn original = reinterpret_cast<F22ProcFn>(g_f22Proc.original);
-    if (!original) return 0;
-    g_lookComp.store(reinterpret_cast<uintptr_t>(comp), std::memory_order_relaxed);
-    g_lookProcCalls.fetch_add(1, std::memory_order_relaxed);
-    g_lookGameFrame.fetch_add(1, std::memory_order_relaxed);
-    original(comp, dt);
-    if (!g_f109Pend.valid) return 0;
-    const F109Pend p = g_f109Pend;
-    g_f109Pend.valid = false;
-    g_adsProcCalls.fetch_add(1, std::memory_order_relaxed);
-    float dy = 0.0f, dp = 0.0f, vy = 0.0f, vp = 0.0f;
-    const uintptr_t c = reinterpret_cast<uintptr_t>(comp);
-    if (!comp || !guardedRead(c + kCompYawDeltaOff, &dy, 4) || !guardedRead(c + kCompPitchDeltaOff, &dp, 4) || !std::isfinite(dy) || !std::isfinite(dp)) return 0;
+// The split of the player's own processor call (game thread). F109 (RE verify_20261025_onfoot_look_input): the delta is
+// c * (dt * rate * stick + g * (mouse + in) + dt * spring), so the head aim's share is g * in with g from clean calls only (no stick, no spring;
+// nofoot::f109::Split), never the mouse ratio of F62b, which counted a stick's turn (and the springs') as the head aim's whenever it wrote: the cancel then held the
+// view while the avatar turned. F129: it runs on the player's own call that went down path B (the pair holds what the sink carried), and nothing else. dy, dp: the
+// pair after the call (radians, finite). The totals are cumulative (this thread is their only writer). No allocation, logging or locks; the reads are guarded.
+void f109ProcSplit(uintptr_t c, float dt, const F109Pend& p, float dy, float dp) noexcept {
+    float vy = 0.0f, vp = 0.0f;
     if (!guardedRead(c + kCompSpringYawRateOff, &vy, 4) || !guardedRead(c + kCompSpringPitchRateOff, &vp, 4) || !std::isfinite(vy) || !std::isfinite(vp)) vy = vp = 0.0f;
     const double t = std::isfinite(dt) && dt > 0.0f ? static_cast<double>(dt) : 0.0;
     float gLo = 0.0f, gHi = 0.0f;   // F109c: the mouse gain's two ends, the bounds of a measured gain
@@ -6956,6 +7088,146 @@ uint64_t __fastcall lookProcHooked(void* comp, float dt) {
         g_snapCalls.fetch_add(1, std::memory_order_relaxed);
         atomicAddDouble(g_snapApplied, oy.player - sy.springTerm);
     }
+}
+
+// The processor hook (game thread). It runs once per humanoid component, and F129 tells the calls apart before it lets the update's ask meet one:
+//  - what the call is: bytes A (comp+0x678), O (comp+0x7A9), D (comp+0x7D4), M (comp+0x4D8), the component's sink [comp+0x2E0] and the pair (comp+0x624 / +0x628) are
+//    read before the call and a sentinel is written into the pair; the original runs; a pair still holding the sentinel is a SKIP (nothing stored: the old pair is put
+//    back), else path A (A != 0, O == 0 as read before the call) or path B (nofoot::f129::classify). A read or the sentinel write that fails leaves the call UNKNOWN,
+//    which is path B (the behaviour before F129);
+//  - whose call it is: the player's own is the one whose sink is the update's sink; only that call takes the pending ask (nofoot::f129::Gate);
+//  - what it did to the ask: path B runs the split (f109ProcSplit) as before; path A and SKIP did not read the sink, so the pair says nothing of the ask: a blocked
+//    call without a split. Another component's call takes nothing and its pair is ignored.
+// Everything else is the instrument: the ring, the counters, the episode edges (the frame thread prints). The totals are cumulative (this thread is their only
+// writer). No allocation, logging or locks; the reads are guarded.
+using F22ProcFn = uint64_t(__fastcall*)(void*, float);
+uint64_t __fastcall lookProcHooked(void* comp, float dt) {
+    const F22ProcFn original = reinterpret_cast<F22ProcFn>(g_f22Proc.original);
+    if (!original) return 0;
+    namespace f129 = nofoot::f129;
+    const uintptr_t c = reinterpret_cast<uintptr_t>(comp);
+    // What the call is, before it runs.
+    uint8_t pa = 0, po = 0, pd = 0, pm = 0;
+    uint32_t before[2] = {}, after[2] = {};
+    uintptr_t key = 0;
+    bool aOk = false, oOk = false, dOk = false, mOk = false, keyOk = false, beforeOk = false;
+    if (comp) {
+        aOk = guardedRead(c + kCompPathAOff, &pa, 1);
+        oOk = guardedRead(c + kCompOverrideOff, &po, 1);
+        dOk = guardedRead(c + kCompInputOffOff, &pd, 1);
+        mOk = guardedRead(c + kCompMouseTermOff, &pm, 1);
+        keyOk = guardedRead(c + kCompSinkOff, &key, 8) && key != 0;
+        beforeOk = guardedRead(c + kCompYawDeltaOff, before, 8);
+    }
+    const f129::CallOut co = g_f129Gate.call(keyOk ? key : 0);
+    g_f129Ctr.add(f129::kCallsAll);
+    g_f129Comps.touch(c, GetTickCount64());
+    if (co.leftFallback) {
+        g_f129InFallback.store(false, std::memory_order_relaxed);
+        g_f129Ctr.add(f129::kFallbackLeft);
+    }
+    if (co.first && g_f129Gate.sink != 0) {   // the first call after the update: the player's own, or another comp's ahead of it
+        g_f129Ctr.add(co.keyMatch ? f129::kFirstOurs : f129::kFirstNot);
+        g_f129FirstHist.store(g_f129Gate.firstHist, std::memory_order_relaxed);
+        g_f129FirstN.store(g_f129Gate.firstN, std::memory_order_relaxed);
+        f129Episode(co.keyMatch ? f129::kEvFirstOurs : f129::kEvFirstNot);
+    }
+    if (co.firstNotLocalAsk) g_f129Ctr.add(f129::kFirstNotLocalAsk);
+    if (co.local) {   // the player's own call: the component the gain reads and the other probes use, and the processor's frame count
+        g_lookComp.store(c, std::memory_order_relaxed);
+        g_lookProcCalls.fetch_add(1, std::memory_order_relaxed);
+        g_lookGameFrame.fetch_add(1, std::memory_order_relaxed);
+        g_f129Ctr.add(f129::kCallsLocal);
+    } else {
+        g_f129Ctr.add(f129::kCallsOther);
+    }
+    // The order check: the sink's mouse fields before the player's call, against what the update left in them.
+    f129::Order order = f129::kOrderUnknown;
+    if (co.local && co.takes && g_f129Gate.pendAsked && co.keyMatch && g_f109Pend.sinkRead) {
+        float mouse[2] = {};   // pitch at +0x170, yaw at +0x174
+        const bool mouseOk = guardedRead(key + kSinkMousePitchOff, mouse, 8);
+        order = f129::orderCheck(mouseOk, mouse[1], mouse[0], g_f109Pend.sinkYaw, g_f109Pend.sinkPitch);
+    }
+    // The sentinel, the call, the pair after it.
+    f129::ClassIn ci;
+    ci.preOk = aOk && oOk && beforeOk;
+    ci.a = pa;
+    ci.o = po;
+    ci.sentinelOk = ci.preOk && guardedWritePair32(c + kCompYawDeltaOff, f129::kSentinelBits, f129::kSentinelBits);
+    original(comp, dt);
+    const bool afterOk = comp && guardedRead(c + kCompYawDeltaOff, after, 8);
+    ci.afterOk = afterOk;
+    ci.yawBits = after[0];
+    ci.pitchBits = after[1];
+    const f129::ClassOut cl = f129::classify(ci);
+    bool restored = false;
+    if (cl.restoreYaw || cl.restorePitch) {   // SKIP stored nothing: the pair is what it was
+        bool ok = true;
+        if (cl.restoreYaw) ok = guardedWriteDword(c + kCompYawDeltaOff, static_cast<int32_t>(before[0])) && ok;
+        if (cl.restorePitch) ok = guardedWriteDword(c + kCompPitchDeltaOff, static_cast<int32_t>(before[1])) && ok;
+        if (ok) g_f129Ctr.add(f129::kRestores);
+        else g_f129Ctr.add(f129::kRestoreFailed);
+        restored = ok;
+        if (cl.partial) g_f129Ctr.add(f129::kPartial);
+    }
+    if (co.local) {
+        g_f129Ctr.add(cl.path == f129::kPathA ? f129::kLocalA : cl.path == f129::kSkip ? f129::kLocalSkip : cl.path == f129::kUnknown ? f129::kLocalUnknown : f129::kLocalB);
+        g_f129Ctr.lastBytes.store(f129::packBytes(aOk ? pa : 255, oOk ? po : 255, dOk ? pd : 255, mOk ? pm : 255), std::memory_order_relaxed);
+        g_f129Ctr.lastPath.store(cl.path, std::memory_order_relaxed);
+        if (order == f129::kOrderOk) g_f129Ctr.add(f129::kOrderOkN);
+        else if (order == f129::kOrderFlipped) g_f129Ctr.add(f129::kOrderFlippedN);
+    }
+    // The ring record, with whether the call took an ask.
+    f129::Rec rec;
+    rec.kind = f129::kKindProc;
+    rec.seq = g_f129UpdSeq;
+    rec.id = f129Low32(c);
+    rec.sink = f129Low32(keyOk ? key : 0);
+    rec.path = cl.path;
+    rec.A = aOk ? pa : 255;
+    rec.O = oOk ? po : 255;
+    rec.D = dOk ? pd : 255;
+    rec.M = mOk ? pm : 255;
+    {
+        const uint32_t* pair = cl.path == f129::kSkip && beforeOk ? before : after;   // the pair as it stands now
+        const float fy = afterOk || beforeOk ? f129::bitsFloat(pair[0]) : 0.0f, fp = afterOk || beforeOk ? f129::bitsFloat(pair[1]) : 0.0f;
+        rec.a = static_cast<float>(fy / nofoot::f109::kDeg);
+        rec.b = static_cast<float>(fp / nofoot::f109::kDeg);
+    }
+    rec.flags = static_cast<uint8_t>((co.local ? f129::kFlLocal : 0) | (co.first ? f129::kFlFirst : 0) | (co.takes && g_f129Gate.pendAsked ? f129::kFlAsked : 0) |
+                                     (order == f129::kOrderOk ? f129::kFlOrderOk : 0) | (order == f129::kOrderFlipped ? f129::kFlOrderFlipped : 0) |
+                                     (restored ? f129::kFlRestored : 0) | (cl.partial ? f129::kFlPartial : 0));
+    // Which call takes the ask.
+    const f129::Act act = f129::decide(co.takes, cl.path);
+    if (act == f129::kActNone || !g_f109Pend.valid) {
+        g_f129Ring.push(rec);
+        return 0;
+    }
+    const F109Pend p = g_f109Pend;
+    g_f109Pend.valid = false;
+    g_adsProcCalls.fetch_add(1, std::memory_order_relaxed);
+    const bool asked = p.inYaw != 0.0 || p.inPitch != 0.0;
+    if (asked) rec.flags = static_cast<uint8_t>((rec.flags & ~f129::kFlAsked) | f129::kFlTook);
+    g_f129Ring.push(rec);   // before the episode edges: an episode's freeze ends with the call that opened it
+    if (act == f129::kActNoSplit) {   // the local call did not read the sink (path A) or stored nothing (SKIP): a blocked call, and its pair is not a delta
+        if (asked) {
+            g_f109Blocked.fetch_add(1, std::memory_order_relaxed);
+            g_f109BlockedRun.fetch_add(1, std::memory_order_relaxed);
+            g_f129Ctr.add(f129::kAskAorSkip);
+            f129Episode(f129::kEvAorSkip);
+        }
+        return 0;
+    }
+    if (asked) {
+        g_f129Ctr.add(f129::kConsumedB);
+        f129Episode(f129::kEvConsumed);
+    }
+    float dy = 0.0f, dp = 0.0f;
+    if (!afterOk) return 0;
+    std::memcpy(&dy, &after[0], 4);
+    std::memcpy(&dp, &after[1], 4);
+    if (!std::isfinite(dy) || !std::isfinite(dp)) return 0;
+    f109ProcSplit(c, dt, p, dy, dp);
     return 0;
 }
 
@@ -7237,6 +7509,13 @@ void adsIncidentDump(uint64_t now, const char* why) noexcept {
                         static_cast<unsigned long long>(s.rootAgeMs), s.gain[0], s.gain[1], s.gainEnds[0], s.gainEnds[1],
                         s.clean, s.dirty, s.unsplit, s.foreign, s.blocked, s.writes, s.procs, s.refusals);
     }
+    {   // F129: the look update's and the look processor's last records (U: an update's ask and what its sink held after it; P: a processor call, L the player's comp, o another)
+        nofoot::f129::Rec recs[16];
+        const size_t n = g_f129Ring.read(recs, 16);
+        char text[1000];
+        nofoot::f129::formatRing(text, sizeof(text), recs, n, 16);
+        Log::get().note("ADS incident look paths (F129): the last %zu records: %s", n, n ? text : "none (the hooks were not in, or the ring would not hold still)");
+    }
 }
 nofoot::f91::CancelHistory g_f91Cancel;   // the cancel total at every eye alignment serial published (f89AlignPublish)
 nofoot::f91::FitWindow g_f91Fit;          // the press's fit windows (f87EyeLines)
@@ -7261,6 +7540,7 @@ struct LtaState {
     bool centrePending = false;  // the reported head's offset goes into the target at the first render head after an engage
     uint32_t centres = 0;
     bool blocked = false;        // the game's look is blocked (a run of dropped asks): the follower holds, probing
+    nofoot::f109::ProbePair probe;   // F129: the probes while blocked ask +p, then -p (zero-sum); the phase restarts when the blocked state changes
     uint32_t blockedEpisodes = 0;
     uint64_t engageMs = 0, baseMs = 0, probeMs = 0, unwindMs = 0, lineMs = 0;
     // the 1 s line's sums (seat radians unless named)
@@ -7392,6 +7672,7 @@ void ltaEngage(uint64_t now) noexcept {
     g_lta.follow.target[1] = g_adsMap.pitchInFlight();
     g_lta.centrePending = true;
     g_lta.blocked = false;
+    g_lta.probe.reset();
     g_lta.engageMs = g_lta.baseMs = now;
     g_lta.rootHave = false;
     g_adsResid.reset();
@@ -7449,6 +7730,7 @@ void ltaFollow(uint64_t now, double dt, bool headStep, double dYaw, double dPitc
     const bool blockedNow = g_f109BlockedRun.load(std::memory_order_relaxed) >= f109::kBlockedCalls;
     if (blockedNow != g_lta.blocked) {
         g_lta.blocked = blockedNow;
+        g_lta.probe.reset();   // F129: leaving (or entering) the blocked state restarts the probes' phase
         if (blockedNow) ++g_lta.blockedEpisodes;
         Log::get().note("native on foot look to aim (F109): the game's look is %s (%u blocked calls so far, episode %u); %s",
                         blockedNow ? "blocked (it dropped the asks)" : "back", g_f109Blocked.load(std::memory_order_relaxed), g_lta.blockedEpisodes,
@@ -7463,8 +7745,7 @@ void ltaFollow(uint64_t now, double dt, bool headStep, double dYaw, double dPitc
         g_lta.follow.ask(dt, tau, ify, ifp, askY, askP);
     } else if (now - g_lta.probeMs >= f109::kProbeMs) {
         g_lta.probeMs = now;
-        *askY = f109::clampd(g_lta.follow.left(0, ify), -f109::kProbeRad, f109::kProbeRad);
-        *askP = f109::clampd(g_lta.follow.left(1, ifp), -f109::kProbeRad, f109::kProbeRad);
+        g_lta.probe.next(g_lta.follow.left(0, ify), g_lta.follow.left(1, ifp), askY, askP);   // F129: +p, then -p, at most kProbeRad (0.25 deg) each
         ++g_lta.heldTicks;
     } else {
         ++g_lta.heldTicks;
@@ -7644,6 +7925,164 @@ void f109TurnTick(uint64_t now, bool headStep, double dYaw, int ySign) noexcept 
     t.secMs = now;
 }
 
+// ---- F129: the look path lines (frame thread) ------------------------------------------------------------------------------------------------------------
+// The hooks count and record (f129UpdateEntry, f129UpdateExit, lookProcHooked); the lines are the frame thread's. A summary every 10 s on foot says what the
+// processor's calls were (the player's own and the others', path A, B or SKIP) and what became of the asks; the events are an episode's two edges, the fallback and
+// its re-arm, and the number of components changing. An event line is 6 a minute at most (the components' 4), and the next one says how many were not written.
+// Nothing is written per frame, and a log with none of these lines means the hooks were not in or no update ran, never a clean bill.
+struct F129Lines {
+    uint64_t winMs = 0, compsMs = 0;
+    uint32_t seen[nofoot::f129::kCtrCount] = {};
+    uint32_t begunSeen = 0, endedSeen = 0, fbEnteredSeen = 0, fbLeftSeen = 0;
+    int compsLast = -1;
+    bool footLast = false;
+    nofoot::f129::RateCap cap;
+};
+F129Lines g_f129Lines;
+
+void f129SeenReset() noexcept {
+    for (int i = 0; i < nofoot::f129::kCtrCount; ++i) g_f129Lines.seen[i] = g_f129Ctr.get(static_cast<nofoot::f129::Ctr>(i));
+    g_f129Ctr.otherPerUpdateMax.store(0, std::memory_order_relaxed);
+}
+// The note appended to an event line once earlier ones were held back; call only for a line that is being written.
+const char* f129Held(char* buf, size_t cap) noexcept {
+    const uint32_t s = g_f129Lines.cap.takeSuppressed();
+    if (s == 0) buf[0] = 0;
+    else std::snprintf(buf, cap, " [%u earlier event line(s) were not written: at most 6 a minute]", s);
+    return buf;
+}
+void f129Summary(uint32_t secs) noexcept {
+    namespace f129 = nofoot::f129;
+    F129Lines& L = g_f129Lines;
+    uint32_t d[f129::kCtrCount];
+    for (int i = 0; i < f129::kCtrCount; ++i) {
+        const uint32_t v = g_f129Ctr.get(static_cast<f129::Ctr>(i));
+        d[i] = v - L.seen[i];
+        L.seen[i] = v;
+    }
+    const uint32_t otherMax = g_f129Ctr.otherPerUpdateMax.exchange(0, std::memory_order_relaxed);
+    if (d[f129::kUpdates] == 0 && d[f129::kCallsAll] == 0) return;   // the hooks are in and nothing ran in the window (a load, a menu)
+    const uint64_t ms = GetTickCount64();
+    uint32_t ofLast = 0;
+    const uint32_t ours = f129::oursOf(g_f129FirstHist.load(std::memory_order_relaxed), g_f129FirstN.load(std::memory_order_relaxed), &ofLast);
+    const uint32_t bytes = g_f129Ctr.lastBytes.load(std::memory_order_relaxed);
+    Log::get().note("native on foot look paths (F129) %u s: updates %u, asks %u; processor calls: local %u (path B %u, A %u, SKIP %u, unknown %u), other %u (at most %u "
+                    "between two updates); comps %u in 1 s, %u in 10 s; the first call after the update is ours in %u of the last %u updates; asks: taken by a local "
+                    "path B call %u, met a local path A or SKIP call %u, taken by no local call %u, given to another comp by the first-call rule %u; the update's sink: "
+                    "reached %u, zeroed %u, altered %u; order: ok %u, flipped %u; fallback %s, entered %u, left %u; sentinel: partial %u, restored %u, restore failed %u; "
+                    "episodes %u; last local call: path %s A %u O %u D %u M %u",
+                    secs, d[f129::kUpdates], d[f129::kAsks], d[f129::kCallsLocal], d[f129::kLocalB], d[f129::kLocalA], d[f129::kLocalSkip], d[f129::kLocalUnknown],
+                    d[f129::kCallsOther], otherMax, g_f129Comps.live(ms, 1000), g_f129Comps.live(ms, 10000), ours, ofLast, d[f129::kConsumedB],
+                    d[f129::kAskAorSkip], d[f129::kUnconsumed], d[f129::kFirstNotLocalAsk], d[f129::kReached], d[f129::kZeroed], d[f129::kAltered],
+                    d[f129::kOrderOkN], d[f129::kOrderFlippedN], g_f129InFallback.load(std::memory_order_relaxed) ? "ON" : "off", d[f129::kFallbackEntered],
+                    d[f129::kFallbackLeft], d[f129::kPartial], d[f129::kRestores], d[f129::kRestoreFailed], d[f129::kEpisodes],
+                    f129::pathName(static_cast<int>(g_f129Ctr.lastPath.load(std::memory_order_relaxed))), bytes & 0xFFu, (bytes >> 8) & 0xFFu, (bytes >> 16) & 0xFFu,
+                    (bytes >> 24) & 0xFFu);
+}
+// The event lines. Frame thread, on foot.
+void f129Events(uint64_t now) noexcept {
+    namespace f129 = nofoot::f129;
+    F129Lines& L = g_f129Lines;
+    char held[96], reasons[256];
+    const uint32_t begun = g_f129EpBegun.load(std::memory_order_acquire), ended = g_f129EpEnded.load(std::memory_order_acquire);
+    if (begun != L.begunSeen) {
+        L.begunSeen = begun;
+        f129::Rec recs[8];
+        size_t n = 0;
+        for (int tries = 0; tries < 3 && n == 0; ++tries) {   // the freeze under its sequence lock
+            const uint32_t a = g_f129Freeze.seq.load(std::memory_order_acquire);
+            if (a & 1u) continue;
+            const size_t k = g_f129Freeze.n < 8 ? g_f129Freeze.n : 8;
+            for (size_t i = 0; i < k; ++i) recs[i] = g_f129Freeze.rec[i];
+            std::atomic_thread_fence(std::memory_order_acquire);
+            if (g_f129Freeze.seq.load(std::memory_order_relaxed) == a) n = k;
+        }
+        if (L.cap.allow(now, 6)) {
+            char text[700];
+            f129::formatRing(text, sizeof(text), recs, n, 8);
+            f129::reasonText(g_f129EpReasons.load(std::memory_order_relaxed), reasons, sizeof(reasons));
+            Log::get().note("native on foot look paths (F129): episode began: %s; comps now %u; at the start: unconsumed %u, local path A or SKIP %u, first call not "
+                            "ours %u; the last %zu records: %s%s",
+                            reasons, g_f129Comps.live(GetTickCount64(), 1000), g_f129EpCounts[0].load(std::memory_order_relaxed),
+                            g_f129EpCounts[1].load(std::memory_order_relaxed), g_f129EpCounts[2].load(std::memory_order_relaxed), n, text, f129Held(held, sizeof(held)));
+        }
+    }
+    if (ended != L.endedSeen) {
+        L.endedSeen = ended;
+        if (L.cap.allow(now, 6)) {
+            const uint64_t b = g_f129EpBeginMs.load(std::memory_order_relaxed), e = g_f129EpEndMs.load(std::memory_order_relaxed);
+            f129::reasonText(g_f129EpReasons.load(std::memory_order_relaxed), reasons, sizeof(reasons));
+            Log::get().note("native on foot look paths (F129): episode ended after %.1f s (%s): unconsumed %u, local path A or SKIP asks %u, updates whose first call was "
+                            "not ours %u, asks %u in it; comps now %u%s",
+                            e >= b ? static_cast<double>(e - b) / 1000.0 : 0.0, reasons, g_f129EpCounts[0].load(std::memory_order_relaxed),
+                            g_f129EpCounts[1].load(std::memory_order_relaxed), g_f129EpCounts[2].load(std::memory_order_relaxed),
+                            g_f129EpCounts[3].load(std::memory_order_relaxed), g_f129Comps.live(GetTickCount64(), 1000), f129Held(held, sizeof(held)));
+        }
+    }
+    const uint32_t fbIn = g_f129Ctr.get(f129::kFallbackEntered), fbOut = g_f129Ctr.get(f129::kFallbackLeft);
+    if (fbIn != L.fbEnteredSeen) {
+        L.fbEnteredSeen = fbIn;
+        if (L.cap.allow(now, 6)) {
+            char why[160];
+            if (g_f129FallbackWhy.load(std::memory_order_relaxed) == f129::kWhyNoSink)
+                std::snprintf(why, sizeof(why), "the update's sink pointer [act+0x88] could not be read");
+            else
+                std::snprintf(why, sizeof(why), "no call of the player's comp in %u updates that had processor calls; %u comps live", f129::kNoLocalUpdatesMax,
+                              g_f129Comps.live(GetTickCount64(), 1000));
+            Log::get().note("native on foot look paths (F129): the local comp key did not match (%s): the first call after the update takes the ask, as before F129%s", why,
+                            f129Held(held, sizeof(held)));
+        }
+    }
+    if (fbOut != L.fbLeftSeen) {
+        L.fbLeftSeen = fbOut;
+        if (L.cap.allow(now, 6))
+            Log::get().note("native on foot look paths (F129): the local comp key matched again (a call of the player's comp was seen): the player's comp takes the ask%s",
+                            f129Held(held, sizeof(held)));
+    }
+    if (L.compsMs == 0 || now - L.compsMs >= 1000) {   // the components seen in the last second, at most once a second
+        L.compsMs = now;
+        const int live = static_cast<int>(g_f129Comps.live(GetTickCount64(), 1000));
+        if (L.compsLast >= 0 && live != L.compsLast && (live > 0 || L.compsLast > 0) && L.cap.allow(now, 4)) {
+            uint32_t of = 0;
+            const uint32_t ours = f129::oursOf(g_f129FirstHist.load(std::memory_order_relaxed), g_f129FirstN.load(std::memory_order_relaxed), &of);
+            Log::get().note("native on foot look paths (F129): comps now %d (was %d); the first call after the update is ours in %u of the last %u updates%s", live, L.compsLast,
+                            ours, of, f129Held(held, sizeof(held)));
+        }
+        L.compsLast = live;
+    }
+}
+// Every frame (adsAimTick): on foot only, and only with the look hooks in.
+void f129Tick(uint64_t now, bool onFoot) noexcept {
+    F129Lines& L = g_f129Lines;
+    if (!g_lookArmed) {
+        L.footLast = false;
+        return;
+    }
+    if (!onFoot) {
+        if (L.footLast) {   // the on-foot exit closes the window
+            const uint32_t secs = nofoot::logwin::flush(L.winMs, now);
+            if (secs) f129Summary(secs);
+            L.compsLast = -1;
+            L.compsMs = 0;
+        }
+        L.footLast = false;
+        return;
+    }
+    if (!L.footLast) {
+        L.footLast = true;
+        L.winMs = 0;
+        L.begunSeen = g_f129EpBegun.load(std::memory_order_relaxed);
+        L.endedSeen = g_f129EpEnded.load(std::memory_order_relaxed);
+        L.fbEnteredSeen = g_f129Ctr.get(nofoot::f129::kFallbackEntered);
+        L.fbLeftSeen = g_f129Ctr.get(nofoot::f129::kFallbackLeft);
+    }
+    f129Events(now);
+    const bool opening = L.winMs == 0;
+    const uint32_t secs = nofoot::logwin::window(L.winMs, now, false);   // 10 s whatever log.on_foot_detail says: a low-volume line
+    if (opening) f129SeenReset();
+    else if (secs) f129Summary(secs);
+}
+
 // Frame thread, every frame, before lookPublishTick (which publishes the yaw) and alignTick (the eye alignment and the body). The state machine, the
 // game's applied deltas and their cancel, the injection of the headset's turn, the position lock. The guard (adsAimStep) reads the right eye's rows and
 // runs in alignTick, after the sight lock.
@@ -7666,6 +8105,7 @@ void adsAimTick(uint64_t now, bool session) noexcept {
     g_adsYSignLast = ySign;
     g_adsPSignLast = pSign;
     g_adsFootLast = onFoot;
+    f129Tick(now, onFoot);   // F129: the look path lines (the summary, the episodes, the fallback, the components); every frame, before anything here can return
     static QpcDt adsClock;   // F66b
     const double dt = adsClock.step(0.1);
     g_adsLastMs = now;

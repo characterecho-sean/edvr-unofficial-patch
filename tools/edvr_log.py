@@ -12162,6 +12162,37 @@ def _hj_f109_look(rows, ctx):
     return ("PARTIAL", text + "; " + "; ".join(notes)) if notes else ("OK", text)
 
 
+def _hj_f129_paths(rows, ctx):
+    """F129: the look processor's calls told apart, and what became of look to aim's asks. An instrument (it measures, it does not apply anything), so it is never NEVER
+    APPLIED. OK while every ask was taken by the player's own processor call and went down path B (no unconsumed ask, no ask that met a local path A or SKIP call, no
+    fallback to the first call after the update); PARTIAL otherwise, with the counts. Reported, not judged: the asks the first-call rule would have given to another
+    comp (the bug F129 fixed: its signature, counted whether or not the fix is in), the sink's outcome, the order check, the episodes, the components."""
+    sec, began, ended, comps, fb, rearm = (rows.get(k, []) for k in ("sec", "began", "ended", "comps", "fb", "rearm"))
+    if not (sec or began or ended or comps or fb or rearm):
+        return None
+    t = lambda k: _hsum(sec, k)
+    unc, ask_as, taken, fnl = t("unc"), t("as"), t("takenb"), t("fnl")
+    text = ("%d s on foot: %d update(s), %d ask(s): %d taken by a local path B call, %d met a local path A or SKIP call, %d taken by no local call; the first-call "
+            "rule would have given %d ask(s) to another comp; local calls %d (path B %d, A %d, SKIP %d, unknown %d), other comps' calls %d (at most %d between two "
+            "updates), up to %d comp(s) in 10 s; the update's sink: reached %d, zeroed %d, altered %d; order ok %d, flipped %d; fallback entered %d, left %d; "
+            "sentinel: partial %d, restored %d, restore failed %d; episodes %d began, %d ended") % (
+        t("wl"), t("upd"), t("asks"), taken, ask_as, unc, fnl, t("local"), t("lb"), t("la"), t("ls"), t("lu"), t("other"),
+        max([int(r["omax"]) for r in sec] or [0]), max([int(r["c10"]) for r in sec] or [0]), t("rch"), t("zer"), t("alt"), t("ook"), t("ofl"), t("fbe"), t("fbl"),
+        t("part"), t("rest"), t("rfail"), len(began), len(ended))
+    if sec:
+        text += "; the last local call: path %s, bytes A %s O %s D %s M %s" % (sec[-1]["lp"], sec[-1]["A"], sec[-1]["O"], sec[-1]["D"], sec[-1]["M"])
+    notes = []
+    if unc:
+        notes.append("%d ask(s) were taken by no local call before the next update (filed as blocked)" % unc)
+    if ask_as:
+        notes.append("%d ask(s) met a local path A or SKIP call (the game did not read the mouse in that call; filed as blocked)" % ask_as)
+    if fb:
+        notes.append("the local comp key did not match %d time(s) (%s): the first call after the update took the ask" % (len(fb), fb[-1]["why"][:80]))
+    if began:
+        notes.append("%d episode(s): %s" % (len(began), began[-1]["why"][:100]))
+    return ("PARTIAL", text + "; " + "; ".join(notes)) if (unc or ask_as or fb) else ("OK", text + ("; " + notes[-1] if notes else ""))
+
+
 def _hj_f109_snap(rows, ctx):
     """F109: the snap turns. Each snap's applied turn against its step (within 10% in at most 2 calls); none applied is NEVER APPLIED, any off or skipped is PARTIAL.
     Whether ADS survived a snap is reported, not judged (the trigger may have been released)."""
@@ -13055,6 +13086,23 @@ HEALTH_RULES = (
         ("_", r"native on foot look to aim \(F109\): (?:keys: |centred: |the game's look is |the guard is cleared |an ADS press: |the ADS press ended |turned off |"
               r"unwound after )"),
     ), _hj_f109_look),
+    _hrule("look paths (F129)", ("F129",), ("native on foot look paths (F129)",), (
+        ("sec", r"native on foot look paths \(F129\) (?P<wl>\d+) s: updates (?P<upd>\d+), asks (?P<asks>\d+); processor calls: local (?P<local>\d+) \(path B (?P<lb>\d+), "
+                r"A (?P<la>\d+), SKIP (?P<ls>\d+), unknown (?P<lu>\d+)\), other (?P<other>\d+) \(at most (?P<omax>\d+) between two updates\); comps (?P<c1>\d+) in 1 s, "
+                r"(?P<c10>\d+) in 10 s; the first call after the update is ours in (?P<fx>\d+) of the last (?P<fy>\d+) updates; asks: taken by a local path B call "
+                r"(?P<takenb>\d+), met a local path A or SKIP call (?P<as>\d+), taken by no local call (?P<unc>\d+), given to another comp by the first-call rule "
+                r"(?P<fnl>\d+); the update's sink: reached (?P<rch>\d+), zeroed (?P<zer>\d+), altered (?P<alt>\d+); order: ok (?P<ook>\d+), flipped (?P<ofl>\d+); "
+                r"fallback (?P<fbstate>\S+), entered (?P<fbe>\d+), left (?P<fbl>\d+); sentinel: partial (?P<part>\d+), restored (?P<rest>\d+), restore failed "
+                r"(?P<rfail>\d+); episodes (?P<eps>\d+); last local call: path (?P<lp>\S+) A (?P<A>\d+) O (?P<O>\d+) D (?P<D>\d+) M (?P<M>\d+)"),
+        ("began", r"native on foot look paths \(F129\): episode began: (?P<why>.+?); comps now (?P<comps>\d+); at the start: unconsumed (?P<unc>\d+), local path A or "
+                  r"SKIP (?P<as>\d+), first call not ours (?P<fn>\d+); the last (?P<n>\d+) records: "),
+        ("ended", r"native on foot look paths \(F129\): episode ended after (?P<len>[\d.]+) s \((?P<why>.+?)\): unconsumed (?P<unc>\d+), local path A or SKIP asks "
+                  r"(?P<as>\d+), updates whose first call was not ours (?P<fn>\d+), asks (?P<asks>\d+) in it; comps now (?P<comps>\d+)"),
+        ("comps", r"native on foot look paths \(F129\): comps now (?P<now>\d+) \(was (?P<was>\d+)\); the first call after the update is ours in (?P<x>\d+) of the last "
+                  r"(?P<y>\d+) updates"),
+        ("fb", r"native on foot look paths \(F129\): the local comp key did not match \((?P<why>.+?)\): the first call after the update takes the ask, as before F129"),
+        ("rearm", r"native on foot look paths \(F129\): the local comp key matched again "),
+    ), _hj_f129_paths),
     _hrule("snap turn (F109)", ("F109",), ("native on foot snap turn (F109)",), (
         ("snap", r"native on foot snap turn \(F109\): snap (?P<n>\d+) by (?P<src>the stick|a mouse flick), (?P<dir>right|left) (?P<step>\d+) deg(?P<ads> in ADS)?: "
                  r"input (?P<input>%s) \(gain (?P<gain>%s), (?P<gsrc>.+?)\); the game applied (?P<applied>%s) deg in (?P<calls>\d+) call\(s\) \(the player's turn over "
@@ -15350,6 +15398,37 @@ def self_test_health():
                                                               "the aim's pitch parted from the carried pitch"], lacks=["UNPARSED"])
         check("F109c look: a second's glance off the aim is not a hold", [ENG109] + [look109()] * 2 + [look109(op=15.0)] + [look109()] * 2, 0, [("OK", L109)],
               has=["F109c: foreign calls 0", "in 0 of 5 read seconds"], lacks=["UNPARSED", "off the head for"])
+
+        # ---- F129: the look processor's calls told apart, the asks' fate (an instrument: OK or PARTIAL, never NEVER APPLIED) ----
+        P129 = "look paths (F129)"
+
+        def paths129(wl=10, upd=900, asks=450, lb=900, la=0, ls=0, lu=0, other=1800, omax=2, c1=3, c10=3, fx=32, fy=32, takenb=450, aas=0, unc=0, fnl=0, rch=450, zer=0,
+                     alt=0, ook=450, ofl=0, fb="off", fbe=0, fbl=0, part=0, rest=0, rfail=0, eps=0, lp="B", A=0, O=0, D=0, M=1):
+            return R("native on foot look paths (F129) %u s: updates", wl, upd, asks, lb + la + ls + lu, lb, la, ls, lu, other, omax, c1, c10, fx, fy, takenb, aas, unc, fnl,
+                     rch, zer, alt, ook, ofl, fb, fbe, fbl, part, rest, rfail, eps, lp, A, O, D, M)
+
+        BEGAN129 = R("native on foot look paths (F129): episode began: %s; comps now", "3 asks in a row that no local call took", 3, 3, 0, 0, 8,
+                     "P1 00A1B2C3 o B A0 O0 D0 M1 +0.000/+0.000 1st")
+        ENDED129 = R("native on foot look paths (F129): episode ended after %.1f s", 2.4, "3 asks in a row that no local call took", 7, 0, 0, 7, 3)
+        COMPS129 = R("native on foot look paths (F129): comps now %d (was %d)", 3, 1, 30, 32)
+        FB129 = R("native on foot look paths (F129): the local comp key did not match (%s)", "no call of the player's comp in 120 updates that had processor calls; 2 comps live")
+        REARM129 = R("native on foot look paths (F129): the local comp key matched again")
+        check("F129 paths: every ask taken by the player's own call down path B", [paths129(), paths129()], 0, [("OK", P129)],
+              has=["20 s on foot: 1800 update(s), 900 ask(s): 900 taken by a local path B call, 0 met a local path A or SKIP call, 0 taken by no local call",
+                   "the first-call rule would have given 0 ask(s) to another comp", "local calls 1800 (path B 1800, A 0, SKIP 0, unknown 0)", "the last local call: path B, bytes A 0 O 0 D 0 M 1"],
+              lacks=["UNPARSED", "NEVER APPLIED"])
+        check("F129 paths: the lift's signature, asks the first-call rule gave another comp, are reported, not judged", [paths129(fnl=300, fx=2, fy=32, c10=3), COMPS129], 0,
+              [("OK", P129)], has=["the first-call rule would have given 300 ask(s) to another comp", "up to 3 comp(s) in 10 s"], lacks=["UNPARSED", "PARTIAL"])
+        check("F129 paths: asks taken by no local call, an episode and the fallback", [paths129(unc=7, takenb=443, rch=450, fbe=1), BEGAN129, ENDED129, FB129], 0, [("PARTIAL", P129)],
+              has=["7 ask(s) were taken by no local call before the next update (filed as blocked)", "the local comp key did not match 1 time(s) (no call of the player's comp in 120 updates",
+                   "1 episode(s): 3 asks in a row that no local call took", "episodes 1 began, 1 ended"], lacks=["UNPARSED", "NEVER APPLIED"])
+        check("F129 paths: asks that met a local path A or SKIP call, the pair of the lift", [paths129(la=40, ls=5, aas=45, takenb=405, zer=45, rch=405, lp="SKIP", A=1, O=0, D=1, M=0)],
+              0, [("PARTIAL", P129)],
+              has=["45 ask(s) met a local path A or SKIP call (the game did not read the mouse in that call; filed as blocked)", "zeroed 45", "path B 900, A 40, SKIP 5",
+                   "the last local call: path SKIP, bytes A 1 O 0 D 1 M 0"], lacks=["UNPARSED"])
+        check("F129 paths: the key matched again, and a second of the sink zeroing the asks", [FB129, REARM129, paths129(fbe=1, fbl=1, zer=3, ofl=2, ook=100)], 0, [("PARTIAL", P129)],
+              has=["fallback entered 1, left 1", "order ok 100, flipped 2"], lacks=["UNPARSED"])
+        check("F129 paths: a comps line alone is reported", [COMPS129], 0, [("OK", P129)], has=["0 s on foot"], lacks=["UNPARSED"])
 
         def snap109(n, src="the stick", d="right", ads="", applied=45.0, calls=1):
             return R("native on foot snap turn (F109): snap %u by", n, src, d, 45, ads, 52.91, 0.01485, "measured", applied, calls, applied, 52)
