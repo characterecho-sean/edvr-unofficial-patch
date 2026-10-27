@@ -1937,7 +1937,7 @@ inline bool drawPathFast(DrawVerdict v) {
 // below is only read. For every owner X draw the thunk asks (before its clock starts) whether the draw WOULD take the fast path; it captures the full
 // path's outcome at three points (right after beginPanelOverride, inside forwardWithVerdict, inside the lambda's owner block); and at the end of the thunk
 // it counts the draw, compares a would-take draw's outcome with the ticket, and writes the next ticket. perf_monitor prints the window at the
-// 1800-frame edge (vScreenDrawFastPathShadowLine). The per-draw cost lands in the step clock's pre, engine-velocity and tail steps and in the notes inside
+// 1800-frame edge (vScreenDrawFastPathShadowLines). The per-draw cost lands in the step clock's pre, engine-velocity and tail steps and in the notes inside
 // the forward scope; that is accepted for Phase 1, whose flight counts and does not time. Removed with the instrument once Phase 2 is decided.
 struct ShadowState {
     fastshadow::Tracker tracker;     // the ticket, the window's counters, the mismatches named so far
@@ -1977,9 +1977,9 @@ inline uint32_t shadowDynamicFlags() {
 }
 
 // The normally-off flags (the design's "G" list): every instrument, probe, census and experimental key the owner X draw's path asks about. The pixel
-// probe, the ledger, the marker probe, the GPU pass profile, the layout sample, the body cull and the seed diagnostics are the thunk's, beginPanelOverride's
-// and forwardWithVerdict's own asks; the rest are the gate's G subscribers (which the certified test also catches, in case one is added to the gate and
-// forgotten here). The camera census is not listed: it runs only while the VR world route's flag is up, a dynamic flag above. The footprint instrument
+// probe, the ledger, the marker probe, the GPU pass profile, the body cull and the seed diagnostics are the thunk's, beginPanelOverride's and
+// forwardWithVerdict's own asks; the rest are the gate's G subscribers (which the certified test also catches, in case one is added to the gate and
+// forgotten here). The depth probe's layout sample is not listed: it is depthProbeNoteDraw's, which the fast path keeps calling. The camera census is not listed: it runs only while the VR world route's flag is up, a dynamic flag above. The footprint instrument
 // is not listed either, because with fix.vscreen_res_width = auto, the shipped default in VR, it is on in an ordinary session; it acts only at the 2D
 // screen's composite, whose vertex shader is one of the specials below. The panel distance and the curved screen are not listed: a player leaves them on,
 // and everything they act on is excluded by the args class (draw_fast_path_shadow.h's certified set says where each gate sits).
@@ -1990,8 +1990,7 @@ inline uint32_t shadowArmedFlags(const State* s) {
            shadowFlag(s->quadSkipArmed || quadProbeWants(), kArmQuad) | shadowFlag(s->censusAutoW != 0, kArmAuto) |
            shadowFlag(pixelProbeWantsDraws(), kArmPixel) | shadowFlag(blendProbeWantsDraws(), kArmBlend) |
            shadowFlag(objectProbeLedgerActive(), kArmLedger) | shadowFlag(nativeOnFootMarkerProbeLive(), kArmMarker) |
-           shadowFlag(gpuPassProfileCapturing(), kArmGpuProfile) |
-           shadowFlag(depthProbeLayoutActive(), kArmLayout) | shadowFlag(fssResActive() || fssPanelWantsDraws(), kArmFss) |
+           shadowFlag(gpuPassProfileCapturing(), kArmGpuProfile) | shadowFlag(fssResActive() || fssPanelWantsDraws(), kArmFss) |
            shadowFlag(spaceDustHidden() || witchspaceStarsHidden(), kArmDust) | shadowFlag(nativeOnFootBodyCullWanted(), kArmBodyCull) |
            shadowFlag(uiLayerSeedDiagnostics(), kArmSeedDiag) |
            shadowFlag(loaderPanelWants() && s->eyeDrawsLastFrame < kSceneEyeDraws, kArmLoaderFrame);
@@ -2053,7 +2052,7 @@ __declspec(noinline) void shadowAfterVerdict(ShadowDraw& d, State* s, DrawVerdic
 // The end of the thunk: count the draw, compare it when it would have taken the fast path, write the next ticket. A mismatch among the session's first
 // five is named, with the shaders and the terms that differ.
 __declspec(noinline) void shadowEnd(ShadowDraw& d, UINT count, UINT instances) {
-    const uint32_t mm = g_shadow.tracker.finish(d.verdict, d.cls, g_shadow.terms, d.argsOk, shadowKeyNow());
+    const uint32_t mm = g_shadow.tracker.finish(d.verdict, d.cls, g_shadow.terms, d.argsOk, shadowKeyNow(), bindingShaderHash(BindSlot::Vs));
     if (!mm || !g_shadow.tracker.takeNameSlot()) return;
     char terms[256];
     fastshadow::formatTerms(terms, sizeof(terms), mm);
@@ -6317,14 +6316,16 @@ size_t vScreenUiFamilyCacheLine(char* out, size_t cap, uint32_t endFrame) {
     return n;
 }
 
-// TEMPORARY (built 2026-10-27, draw_fast_path_shadow.h): the repeat-draw fast path's shadow window for the perf monitor's 1800-frame edge, written
-// every window, quiet or not; then the counters start again. The ticket and the mismatches named so far are the session's and stay.
-size_t vScreenDrawFastPathShadowLine(char* out, size_t cap, uint32_t endFrame) {
+// TEMPORARY (built 2026-10-27, draw_fast_path_shadow.h): the repeat-draw fast path's shadow window for the perf monitor's 1800-frame edge, as two lines
+// (the window's counts, then why draws recorded no ticket), written every window, quiet or not; then the counters start again. Both lines are formatted
+// before the reset. The ticket and the mismatches named so far are the session's and stay.
+void vScreenDrawFastPathShadowLines(char* line, size_t lineCap, char* noTicketLine, size_t noTicketCap, uint32_t endFrame) {
     fastshadow::Tracker& t = g_shadow.tracker;
-    const size_t n = fastshadow::formatLine(out, cap, endFrame, endFrame > t.windowStart ? endFrame - t.windowStart : 0, t.count);
+    const uint32_t frames = endFrame > t.windowStart ? endFrame - t.windowStart : 0;
+    fastshadow::formatLine(line, lineCap, endFrame, frames, t.count);
+    fastshadow::formatNoTicketLine(noTicketLine, noTicketCap, endFrame, frames, t.count);
     t.count.reset();
     t.windowStart = endFrame;
-    return n;
 }
 
 // The one refresh. vScreenRefreshConfig runs it behind the reload's gate; vScreenForceRefreshConfig runs it with the gate taken away.

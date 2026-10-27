@@ -68,7 +68,8 @@ constexpr uint32_t kSubscriberAll = (1u << kSubscriberCount) - 1u;
 //     epoch and the bindings; an ordinary draw's pendings are terms below), the scrim wash (slot 0's view is in the key), particles (the billboard
 //     vertex shaders are specials; the roll-free rebind is a dynamic flag), the wake pulse (a pulse surface keeps its target off the ticket).
 //   - The object probe (its pool checks are a dynamic flag: objectProbeChecksLeft; its ledger is armed below) and the depth probe (its per-draw tallies
-//     are the fast path's own; its layout sample is armed below).
+//     and its layout sample are depthProbeNoteDraw's, which the fast path keeps calling; the layout census's target is set every frame, so it is
+//     not a gate -- flown 2026-10-27, Phase 1).
 //   - The loader dialog's panel fix: it offers a draw only on a loader-shaped frame (the last frame drew fewer than kSceneEyeDraws eye draws), a
 //     fact the key cannot hold across frames but that is constant inside one; the armed test below carries it.
 //   - The footprint instrument (fix.vscreen_res_width = auto, which is the shipped default in VR, so it is wanting in an ordinary session): it acts
@@ -117,7 +118,6 @@ enum Armed : uint32_t {
     kArmLedger,       // objectProbeLedgerActive
     kArmMarker,       // nativeOnFootMarkerProbeLive (and with it the marker fix)
     kArmGpuProfile,   // gpuPassProfileCapturing
-    kArmLayout,       // depthProbeLayoutActive (the layout census's sample)
     kArmFss,          // fssResActive, fssPanelWantsDraws
     kArmDust,         // spaceDustHidden, witchspaceStarsHidden
     kArmBodyCull,     // nativeOnFootBodyCullWanted
@@ -127,7 +127,7 @@ enum Armed : uint32_t {
 };
 inline const char* armedName(unsigned i) {
     static const char* const kNames[kArmCount] = {"census", "skip", "quad", "auto", "pixel", "blend", "ledger", "marker",
-                                                  "gpu profile", "layout", "fss", "dust", "body cull", "seed diag", "loader frame"};
+                                                  "gpu profile", "fss", "dust", "body cull", "seed diag", "loader frame"};
     return i < kArmCount ? kNames[i] : "?";
 }
 
@@ -240,6 +240,67 @@ inline unsigned lowestBit(uint32_t m) {
     return i;
 }
 
+// ---- Why a draw recorded no ticket (Phase 1b, built 2026-10-27) ----------------------------------------------------------------------------------------
+// Phase 1 flew at 0% would-take with about 70% of owner X draws recording no ticket and no way to say which term stopped them: the comparison runs only
+// on would-take draws. This counts, for every owner X draw that does NOT record a ticket, the FIRST reason in a fixed order, by class, and keeps the
+// vertex shaders that reason was counted for. The order: the class unknown; the args class; an off-screen target unsettled; a wake-pulse surface; then
+// the other 23 outcome terms in their own order (verdict first, the special vertex shaders last). A draw with several non-ordinary terms is counted
+// under the first, so a later term is hidden behind an earlier one until that one is dealt with.
+constexpr unsigned kNtClassUnknown = 0, kNtArgsClass = 1, kNtUnsettled = 2, kNtWake = 3, kNtFirstTerm = 4;
+constexpr unsigned kNoTicketReasons = kNtFirstTerm + (static_cast<unsigned>(kTermCount) - 2);
+static_assert(static_cast<unsigned>(kTermUnsettled) == static_cast<unsigned>(kTermCount) - 2 && static_cast<unsigned>(kTermWake) == static_cast<unsigned>(kTermCount) - 1,
+              "the two off-screen terms are the last two, so reason 4 + i is outcome term i for the other 23");
+static_assert(kNoTicketReasons <= 32, "the reasons fit the sketch table");
+inline const char* noTicketName(unsigned r) {
+    return r == kNtClassUnknown ? "class unknown" : r == kNtArgsClass ? "args class" : r == kNtUnsettled ? "unsettled" : r == kNtWake ? "wake surface"
+           : r < kNoTicketReasons ? termName(r - kNtFirstTerm) : "?";
+}
+// The first failing reason of a draw, or -1 when it records a ticket (the same test as ticketValid, with the reason kept).
+inline int noTicketReason(uint32_t terms, bool argsOk, Class cls) {
+    if (cls == Class::kUnresolved) return static_cast<int>(kNtClassUnknown);
+    if (!argsOk) return static_cast<int>(kNtArgsClass);
+    if (terms & termBit(kTermUnsettled)) return static_cast<int>(kNtUnsettled);
+    if (terms & termBit(kTermWake)) return static_cast<int>(kNtWake);
+    const uint32_t rest = terms & kOutcomeMask & ~(termBit(kTermUnsettled) | termBit(kTermWake));
+    if (rest) return static_cast<int>(kNtFirstTerm + lowestBit(rest));
+    return -1;
+}
+
+// A space-saving sketch of the most frequent values of a stream (Metwally et al.): eight slots, each a value and a count; a value in a slot is counted;
+// a value in none takes a free slot, or evicts the slot with the least count and inherits that count plus one. A value seen more than N/8 times in a
+// stream of N is always in a slot, and a slot's count is its value's true count or an over-estimate by at most the count it inherited. A count of 0
+// marks a free slot, so the hash 0 (a vertex shader the shadow does not know) is a value like any other.
+struct VsSketch {
+    static constexpr unsigned kSlots = 8;
+    uint64_t key[kSlots] = {};
+    uint64_t count[kSlots] = {};
+    void add(uint64_t value) {
+        for (unsigned i = 0; i < kSlots; ++i)
+            if (count[i] && key[i] == value) { ++count[i]; return; }
+        unsigned least = kSlots;
+        for (unsigned i = 0; i < kSlots; ++i) {
+            if (!count[i]) { key[i] = value; count[i] = 1; return; }
+            if (least == kSlots || count[i] < count[least]) least = i;
+        }
+        key[least] = value;
+        ++count[least];
+    }
+    // The `n` largest slots, largest count first (ties by slot), as slot indices; returns how many were filled.
+    unsigned top(unsigned n, unsigned* out) const {
+        bool used[kSlots] = {};
+        unsigned got = 0;
+        while (got < n) {
+            unsigned best = kSlots;
+            for (unsigned i = 0; i < kSlots; ++i)
+                if (!used[i] && count[i] && (best == kSlots || count[i] > count[best])) best = i;
+            if (best == kSlots) break;
+            used[best] = true;
+            out[got++] = best;
+        }
+        return got;
+    }
+};
+
 // ---- The window's counters -------------------------------------------------------------------------------------------------------------------------
 struct Counters {
     uint64_t draws[3] = {};                                     // owner X draws by class
@@ -251,6 +312,8 @@ struct Counters {
     uint64_t compared = 0;                                      // would-take draws compared
     uint64_t mismatchDraws = 0;                                 // ...of them with at least one mismatch
     uint64_t mismatch[kMismatchTermCount] = {};                 // by term
+    uint64_t noTicket[3][kNoTicketReasons] = {};                // draws that recorded no ticket: by class, by first failing reason (Phase 1b)
+    VsSketch noTicketVs[kNoTicketReasons];                      // ...and the vertex shaders each reason was counted for
     void reset() { *this = Counters(); }
 };
 
@@ -281,9 +344,10 @@ struct Tracker {
         return v;
     }
 
-    // One owner X draw, finished: the class it landed in, its non-ordinary terms, whether its args were in the class, and the key as it stands after
-    // the draw. Counts it, compares it when it was a would-take draw (returning the mismatch terms, 0 for none), and writes the next ticket.
-    uint32_t finish(const Verdict& v, Class cls, uint32_t terms, bool argsOk, const Key& after) {
+    // One owner X draw, finished: the class it landed in, its non-ordinary terms, whether its args were in the class, the key as it stands after the
+    // draw, and the vertex shader bound for it (bindingShaderHash(Vs); 0 is a value like any other). Counts it, compares it when it was a would-take draw
+    // (returning the mismatch terms, 0 for none), writes the next ticket, and when no ticket results counts the first reason why.
+    uint32_t finish(const Verdict& v, Class cls, uint32_t terms, bool argsOk, const Key& after, uint64_t vs = 0) {
         const size_t c = static_cast<size_t>(cls);
         ++count.draws[c];
         uint32_t mm = 0;
@@ -304,7 +368,15 @@ struct Tracker {
         ticket.key = after;
         ticket.cls = cls;
         ticket.valid = ticketValid(terms, argsOk, cls);
-        if (ticket.valid) ++count.tickets;
+        if (ticket.valid) {
+            ++count.tickets;
+        } else {
+            const int why = noTicketReason(terms, argsOk, cls);
+            if (why >= 0) {
+                ++count.noTicket[c][why];
+                count.noTicketVs[why].add(vs);
+            }
+        }
         return mm;
     }
 
@@ -408,6 +480,74 @@ inline size_t formatLine(char* out, size_t cap, uint32_t endFrame, uint32_t fram
         o.put("%llu draws of %llu compared (", static_cast<unsigned long long>(c.mismatchDraws), static_cast<unsigned long long>(c.compared));
         putTop(o, termName, c.mismatch, kMismatchTermCount, 10);
         o.put(")");
+    }
+    o.put(".");
+    return o.len;
+}
+
+// The indices of the `n` largest non-zero entries of v[0..len), largest first (ties by index); returns how many were found. len is at most 32.
+inline unsigned topIndices(const uint64_t* v, unsigned len, unsigned n, unsigned* out) {
+    bool used[32] = {};
+    unsigned got = 0;
+    while (got < n) {
+        unsigned best = len;
+        for (unsigned i = 0; i < len; ++i)
+            if (!used[i] && v[i] && (best == len || v[i] > v[best])) best = i;
+        if (best == len) break;
+        used[best] = true;
+        out[got++] = best;
+    }
+    return got;
+}
+
+// How many reasons the line lists for each class; the rest are counted as "+k more".
+constexpr unsigned kNoTicketRowReasons = 6;
+
+// The second line of the window (Phase 1b): per class, the reasons owner X draws recorded no ticket, a frame, largest first; then, for the two reasons
+// with the most draws overall, their three most frequent vertex shaders with each one's share of that reason (the sketch's count, an upper bound,
+// capped at 100%). '-' when no draw went without a ticket. Under 1150 characters at its worst (the rig pins it).
+inline size_t formatNoTicketLine(char* out, size_t cap, uint32_t endFrame, uint32_t frames, const Counters& c) {
+    Out o(out, cap);
+    const double f = frames ? static_cast<double>(frames) : 1.0;
+    uint64_t classTotal[3] = {}, reasonTotal[kNoTicketReasons] = {}, all = 0;
+    for (unsigned cl = 0; cl < 3; ++cl)
+        for (unsigned r = 0; r < kNoTicketReasons; ++r) {
+            classTotal[cl] += c.noTicket[cl][r];
+            reasonTotal[r] += c.noTicket[cl][r];
+            all += c.noTicket[cl][r];
+        }
+    o.put("draw fast path (shadow) no ticket: TEMPORARY (built 2026-10-27, Phase 1b), 1800-frame window ending %u, %u frames. Owner X draws a frame that "
+          "recorded no ticket, by first failing reason (class unknown, args class, unsettled, wake surface, then verdict to special vs): ",
+          static_cast<unsigned>(endFrame), static_cast<unsigned>(frames));
+    if (!all) {
+        o.put("-.");
+        return o.len;
+    }
+    for (unsigned cl = 0; cl < 3; ++cl) {
+        if (!classTotal[cl]) continue;
+        unsigned idx[kNoTicketRowReasons];
+        const unsigned shown = topIndices(c.noTicket[cl], kNoTicketReasons, kNoTicketRowReasons, idx);
+        unsigned nonzero = 0;
+        for (unsigned r = 0; r < kNoTicketReasons; ++r) nonzero += c.noTicket[cl][r] != 0;
+        o.put("%s %.1f (", className(static_cast<Class>(cl)), static_cast<double>(classTotal[cl]) / f);
+        for (unsigned j = 0; j < shown; ++j) o.put("%s%s %.1f", j ? ", " : "", noTicketName(idx[j]), static_cast<double>(c.noTicket[cl][idx[j]]) / f);
+        if (nonzero > shown) o.put(", +%u more", nonzero - shown);
+        o.put("); ");
+    }
+    o.put("Most frequent vertex shaders of the two largest reasons: ");
+    unsigned two[2];
+    const unsigned reasons = topIndices(reasonTotal, kNoTicketReasons, 2, two);
+    for (unsigned i = 0; i < reasons; ++i) {
+        const unsigned r = two[i];
+        const VsSketch& sk = c.noTicketVs[r];
+        unsigned slot[3];
+        const unsigned got = sk.top(3, slot);
+        o.put("%s%s (%.1f a frame):", i ? "; " : "", noTicketName(r), static_cast<double>(reasonTotal[r]) / f);
+        for (unsigned j = 0; j < got; ++j) {
+            double share = 100.0 * static_cast<double>(sk.count[slot[j]]) / static_cast<double>(reasonTotal[r]);
+            if (share > 100.0) share = 100.0;
+            o.put("%s VS %016llX %.0f%%", j ? "," : "", static_cast<unsigned long long>(sk.key[slot[j]]), share);
+        }
     }
     o.put(".");
     return o.len;

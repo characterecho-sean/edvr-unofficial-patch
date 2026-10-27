@@ -58,7 +58,7 @@
 
 * **Next (2026-10-27, last entry):** AA on's +1.65 ms is per-draw
   classifiers. ui-depth memo FLOWN: exact, -0.21 ms (shipped, b1561dff).
-  Fast path shadow FLOWN 0%: layout gate wrong, 70% no ticket. Next: 1b.
+  Fast path shadow FLOWN 0%: layout gate wrong, 70% no ticket. 1b BUILT.
 
 ## Frame budget philosophy
 
@@ -4424,6 +4424,28 @@ Next build (Phase 1b):
   failing term, eye and off-screen apart, with the three most frequent
   VS hashes for the top two terms;
 - fly the same leg.
+
+**Phase 1b built (2026-10-27), NOT FLOWN.**
+- **Layout.** It is out of the armed set (14 flags remain), and
+  `depthProbeLayoutActive` is removed, so depth_probe matches 12c230c3.
+- **The no-ticket tally.** Each owner X draw that records no ticket is
+  counted under its first failing reason, in this order:
+  1. unclassed;
+  2. args class;
+  3. off-screen unsettled;
+  4. wake surface;
+  5. then the 23 outcome terms in enum order, from verdict to special VS.
+
+  A draw failing several terms shows only the earliest. The counts are
+  kept for eye and off-screen apart, and the tally plus the tickets
+  equals the owner X draws.
+- **VS hashes.** Each reason keeps an 8-slot space-saving sketch of the
+  VS hashes it counted, with 0 as a value of its own.
+- **The second line.** `draw fast path (shadow) no ticket:` gives, per
+  class, the top six reasons a frame, then the top three VS hashes,
+  with their shares, for the two largest reasons.
+- **Rig:** aa_off_test, 353 checks.
+- **Flight:** the same leg as Phase 1.
 
 **The Phase 2 flight should show:**
 - the `fast` step's calls and cost;

@@ -1687,13 +1687,13 @@ void testShadowText() {
     c.dynBy[fsh::kDynProbeChecks] = 9;
     c.refused[static_cast<size_t>(fsh::Reason::kArmed)] = 7;
     c.armedBy[fsh::kArmDust] = 5;
-    c.armedBy[fsh::kArmLayout] = 2;
+    c.armedBy[fsh::kArmPixel] = 2;
     c.tickets = 123456;
     fsh::formatLine(buf, sizeof(buf), 7200, 1800, c);
     std::string line(buf);
     check(contains(line, "Owner X draws a frame 34800.0 (eye 17800.0, off-screen 17000.0, unclassed 0.0)") && contains(line, "eye 89.9% (16000.0 a frame), off-screen 88.2% (15000.0 a frame)"),
           "shadow text: the draws a frame and the would-take shares, eye and off-screen apart");
-    check(contains(line, "no ticket 3, key moved 2000, dynamic 9 (probe checks 9), armed 7 (dust 5, layout 2)") && !contains(line, "args class") && !contains(line, "not certified"),
+    check(contains(line, "no ticket 3, key moved 2000, dynamic 9 (probe checks 9), armed 7 (dust 5, pixel 2)") && !contains(line, "args class") && !contains(line, "not certified"),
           "shadow text: refusals by reason, the largest first, the detail under dynamic and armed, and a zero reason left out");
     check(contains(line, "Tickets recorded 123456.") && contains(line, "Mismatches: -."), "shadow text: the tickets, and '-' while there is nothing to compare");
     c.compared = 1000000;
@@ -1877,6 +1877,229 @@ void testShadowWiring() {
               contains(code, "if(compositeCounted)shadowNoteX(owner,kind,fastshadow::kTermCompositeCounted);") &&
               contains(code, "if(uiFamily!=UiLayerFamily::kNone)shadowNoteX(owner,kind,fastshadow::kTermFamily);"),
           "shadow wiring: the after-UI stamp, the screen motion, weapon, rigid-draw, census, layered, composite and family notes are where the design reads them");
+    // Phase 1b: the layout census is not a gate, the no-ticket tally is fed the bound vertex shader, and both lines are formatted before the window resets.
+    {
+        const size_t armedAt = vscreen.find("inline uint32_t shadowArmedFlags(const State* s) {");
+        const std::string armedBody = armedAt == std::string::npos ? std::string() : squeezedCode(vscreen.substr(armedAt, vscreen.find("\n}\n", armedAt) - armedAt));
+        bool noLayoutName = true;
+        for (unsigned i = 0; i < fsh::kArmCount; ++i) noLayoutName = noLayoutName && std::string(fsh::armedName(i)) != "layout";
+        check(!armedBody.empty() && !contains(armedBody, "depthProbeLayoutActive") && noLayoutName && fsh::kArmCount == 14 &&
+                  !contains(slurpFile("src/d3d11/depth_probe.h"), "depthProbeLayoutActive") && !contains(slurpFile("src/d3d11/depth_probe.cpp"), "g_depthProbeLayoutTarget"),
+              "shadow wiring: the layout sample is not an armed flag (depthProbeNoteDraw performs it, and the fast path keeps calling it), and its accessor is gone");
+        check(contains(code, "g_shadow.tracker.finish(d.verdict,d.cls,g_shadow.terms,d.argsOk,shadowKeyNow(),bindingShaderHash(BindSlot::Vs));"),
+              "shadow wiring: the end of the thunk hands the tally the bound vertex shader, bindingShaderHash(Vs)");
+        const size_t linesAt = code.find("voidvScreenDrawFastPathShadowLines(");
+        const std::string lines = linesAt == std::string::npos ? std::string() : code.substr(linesAt, code.find("}", linesAt) - linesAt);
+        const size_t f1 = lines.find("fastshadow::formatLine("), f2 = lines.find("fastshadow::formatNoTicketLine("), rs = lines.find("t.count.reset();");
+        check(f1 != std::string::npos && f2 != std::string::npos && rs != std::string::npos && f1 < f2 && f2 < rs,
+              "shadow wiring: the window's two lines are both formatted before its counters are reset");
+        const std::string perf = squeezedCode(slurpFile("src/d3d11/perf_monitor.cpp"));
+        const size_t family = perf.find("vScreenUiFamilyCacheLine(stepLine,sizeof(stepLine),s.frameNo);"),
+                     call = perf.find("vScreenDrawFastPathShadowLines(stepLine,sizeof(stepLine),shadowNoTicketLine,sizeof(shadowNoTicketLine),s.frameNo);"),
+                     first = perf.find("Log::get().note(\"%s\",stepLine);", call == std::string::npos ? 0 : call),
+                     second = perf.find("Log::get().note(\"%s\",shadowNoTicketLine);", call == std::string::npos ? 0 : call);
+        check(family != std::string::npos && call != std::string::npos && family < call && first != std::string::npos && second != std::string::npos && call < first && first < second,
+              "shadow wiring: the perf monitor prints the shadow line and then the no-ticket line, right after the family cache line");
+    }
+}
+
+// ---- Phase 1b: why a draw recorded no ticket ----------------------------------------------------------------------------------------------------
+// The first failing reason by an independent chain: the class unknown, the args class, unsettled, wake surface, then the other 23 terms in their order.
+int expectedNoTicket(uint32_t terms, bool args, fsh::Class cls) {
+    if (cls == fsh::Class::kUnresolved) return 0;
+    if (!args) return 1;
+    if (terms & fsh::termBit(fsh::kTermUnsettled)) return 2;
+    if (terms & fsh::termBit(fsh::kTermWake)) return 3;
+    for (unsigned i = 0; i < 23; ++i)
+        if (terms & (1u << i)) return static_cast<int>(4 + i);
+    return -1;
+}
+
+void testShadowNoTicketOrder() {
+    std::vector<uint32_t> sets = {0u, fsh::kOutcomeMask};
+    for (unsigned i = 0; i < fsh::kTermCount; ++i) {
+        sets.push_back(1u << i);
+        for (unsigned j = i + 1; j < fsh::kTermCount; ++j) sets.push_back((1u << i) | (1u << j));
+    }
+    unsigned wrong = 0, inconsistent = 0, cases = 0;
+    for (int cls = 0; cls < 3; ++cls)
+        for (int args = 0; args < 2; ++args)
+            for (uint32_t terms : sets) {
+                const fsh::Class c = static_cast<fsh::Class>(cls);
+                const int got = fsh::noTicketReason(terms, args != 0, c);
+                wrong += got != expectedNoTicket(terms, args != 0, c);
+                inconsistent += (got < 0) != fsh::ticketValid(terms, args != 0, c);
+                ++cases;
+            }
+    check(wrong == 0 && cases == 6 * (2 + 25 + 300), "no-ticket order: over every class, args class and every one or two outcome terms the first failing reason is the one in the order");
+    check(inconsistent == 0, "no-ticket order: a draw has a failing reason exactly when it records no ticket (the same test as the ticket's)");
+    check(fsh::kNoTicketReasons == 27 && std::string(fsh::noTicketName(0)) == "class unknown" && std::string(fsh::noTicketName(1)) == "args class" &&
+              std::string(fsh::noTicketName(2)) == "unsettled" && std::string(fsh::noTicketName(3)) == "wake surface" && std::string(fsh::noTicketName(4)) == "verdict" &&
+              std::string(fsh::noTicketName(26)) == "special vs" && std::string(fsh::noTicketName(27)) == "?",
+          "no-ticket order: 27 reasons, named in order from the class unknown to the special vertex shaders");
+    const uint32_t all = fsh::kOutcomeMask, bothOff = fsh::termBit(fsh::kTermUnsettled) | fsh::termBit(fsh::kTermWake);
+    check(fsh::noTicketReason(all, false, fsh::Class::kUnresolved) == 0 && fsh::noTicketReason(all, false, fsh::Class::kEye) == 1 &&
+              fsh::noTicketReason(all, true, fsh::Class::kOff) == 2 && fsh::noTicketReason(all & ~fsh::termBit(fsh::kTermUnsettled), true, fsh::Class::kOff) == 3 &&
+              fsh::noTicketReason(all & ~bothOff, true, fsh::Class::kEye) == 4 &&
+              fsh::noTicketReason(fsh::termBit(fsh::kTermSpecialVs) | fsh::termBit(fsh::kTermWeapon) | fsh::termBit(fsh::kTermAfterUi), true, fsh::Class::kEye) == 4 + fsh::kTermAfterUi &&
+              fsh::noTicketReason(fsh::termBit(fsh::kTermSpecialVs), true, fsh::Class::kEye) == 26 && fsh::noTicketReason(0, true, fsh::Class::kOff) == -1,
+          "no-ticket order: everything wrong reads the class, then the args, then unsettled, wake surface, verdict; the special vertex shaders come last; an ordinary draw has none");
+}
+
+void testShadowNoTicketClasses() {
+    fsh::Tracker t;
+    const fsh::Key key = shadowKey(1, 1, 1);
+    const fsh::Verdict full;
+    const unsigned weapon = fsh::kNtFirstTerm + fsh::kTermWeapon;
+    for (int i = 0; i < 5; ++i) t.finish(full, fsh::Class::kEye, fsh::termBit(fsh::kTermWeapon), true, key, 0xAAA);
+    for (int i = 0; i < 2; ++i) t.finish(full, fsh::Class::kOff, fsh::termBit(fsh::kTermSpecialVs) | fsh::termBit(fsh::kTermWeapon), true, key, 0xBBB);
+    t.finish(full, fsh::Class::kOff, fsh::offscreenTerms(fsh::Class::kOff, false, false), true, key, 0xCCC);
+    t.finish(full, fsh::Class::kOff, fsh::offscreenTerms(fsh::Class::kOff, true, true), true, key, 0xCCC);
+    t.finish(full, fsh::Class::kEye, 0, false, key, 0xDDD);
+    t.finish(full, fsh::Class::kUnresolved, 0, true, key, 0);
+    t.finish(full, fsh::Class::kEye, 0, true, key, 0xEEE);   // the one draw that records a ticket
+    const fsh::Counters& c = t.count;
+    check(c.noTicket[0][weapon] == 5 && c.noTicket[1][weapon] == 2 && c.noTicket[1][fsh::kNtUnsettled] == 1 && c.noTicket[1][fsh::kNtWake] == 1 &&
+              c.noTicket[0][fsh::kNtArgsClass] == 1 && c.noTicket[2][fsh::kNtClassUnknown] == 1,
+          "no-ticket tally: eye and off-screen draws are counted apart, each under its first failing reason (a draw with two terms under the earlier one)");
+    uint64_t total = 0;
+    for (int cl = 0; cl < 3; ++cl)
+        for (unsigned r = 0; r < fsh::kNoTicketReasons; ++r) total += c.noTicket[cl][r];
+    check(total == 11 && c.draws[0] + c.draws[1] + c.draws[2] == 12 && c.tickets == 1 && total == c.draws[0] + c.draws[1] + c.draws[2] - c.tickets,
+          "no-ticket tally: every owner X draw that records no ticket is counted once, so the tally and the tickets add up to the draws");
+    check(c.noTicket[0][fsh::kNtClassUnknown] == 0 && c.noTicket[1][fsh::kNtClassUnknown] == 0 && c.noTicket[2][weapon] == 0 && c.noTicket[0][fsh::kNtUnsettled] == 0,
+          "no-ticket tally: an unclassed draw is only ever 'class unknown', and an eye draw never has the two off-screen reasons");
+    const fsh::VsSketch& s = c.noTicketVs[weapon];
+    unsigned slot[3];
+    check(s.top(3, slot) == 2 && s.key[slot[0]] == 0xAAA && s.count[slot[0]] == 5 && s.key[slot[1]] == 0xBBB && s.count[slot[1]] == 2,
+          "no-ticket tally: the vertex shaders are kept per reason, all classes together");
+    check(c.noTicketVs[fsh::kNtClassUnknown].top(3, slot) == 1 && c.noTicketVs[fsh::kNtClassUnknown].key[slot[0]] == 0,
+          "no-ticket tally: the hash 0 (a vertex shader the shadow does not know) is counted as a value of its own");
+}
+
+void testShadowSketch() {
+    // A skewed stream of 10000: three heavy values and 400 light ones, in a fixed shuffled order.
+    std::vector<uint64_t> stream;
+    for (int i = 0; i < 4000; ++i) stream.push_back(0xA000000000000001ull);
+    for (int i = 0; i < 2500; ++i) stream.push_back(0xB000000000000002ull);
+    for (int i = 0; i < 1500; ++i) stream.push_back(0xC000000000000003ull);
+    for (int light = 0; light < 400; ++light)
+        for (int i = 0; i < 5; ++i) stream.push_back(0x1000ull + static_cast<uint64_t>(light));
+    uint64_t seed = 12345;
+    for (size_t i = stream.size() - 1; i > 0; --i) {
+        seed = seed * 6364136223846793005ull + 1442695040888963407ull;
+        std::swap(stream[i], stream[static_cast<size_t>((seed >> 33) % (i + 1))]);
+    }
+    check(stream.size() == 10000, "sketch: the test stream is 10000 values");
+    fsh::VsSketch s;
+    for (uint64_t v : stream) s.add(v);
+    unsigned slot[3];
+    const unsigned got = s.top(3, slot);
+    check(got == 3 && s.key[slot[0]] == 0xA000000000000001ull && s.key[slot[1]] == 0xB000000000000002ull && s.key[slot[2]] == 0xC000000000000003ull,
+          "sketch: the top three of the skewed stream come out in order");
+    const uint64_t truth[3] = {4000, 2500, 1500};
+    bool bounded = true;
+    for (int i = 0; i < 3; ++i) bounded = bounded && s.count[slot[i]] >= truth[i] && s.count[slot[i]] <= truth[i] + stream.size() / fsh::VsSketch::kSlots;
+    check(bounded, "sketch: each count is the true count or an over-estimate by no more than N/8");
+    uint64_t sum = 0;
+    for (unsigned i = 0; i < fsh::VsSketch::kSlots; ++i) sum += s.count[i];
+    check(sum == stream.size(), "sketch: the slots' counts add up to the stream (space-saving keeps the total)");
+    // The hash 0 is a value, and a free slot is not mistaken for it.
+    fsh::VsSketch z;
+    check(z.top(3, slot) == 0, "sketch: an empty sketch has no top");
+    for (int i = 0; i < 10; ++i) z.add(0);
+    z.add(7);
+    check(z.top(3, slot) == 2 && z.key[slot[0]] == 0 && z.count[slot[0]] == 10 && z.key[slot[1]] == 7 && z.count[slot[1]] == 1,
+          "sketch: the hash 0 is counted as its own value");
+    // More distinct values than slots: the least slot is evicted and the newcomer inherits its count plus one.
+    fsh::VsSketch e;
+    for (uint64_t v = 1; v <= 8; ++v) e.add(v);
+    for (int i = 0; i < 4; ++i) e.add(1);
+    e.add(99);
+    bool has99 = false, has1 = false;
+    for (unsigned i = 0; i < 8; ++i) { has99 = has99 || (e.count[i] && e.key[i] == 99 && e.count[i] == 2); has1 = has1 || (e.count[i] == 5 && e.key[i] == 1); }
+    check(has99 && has1, "sketch: a ninth value evicts the least slot and inherits its count plus one; the heavy value stays");
+    // The reset: the window's counters, sketches included, start again; the ticket is the session's.
+    fsh::Tracker t;
+    t.finish(fsh::Verdict(), fsh::Class::kEye, 0, true, shadowKey(2, 2, 2));
+    const fsh::Verdict full;
+    t.finish(full, fsh::Class::kEye, fsh::termBit(fsh::kTermVerdict), true, shadowKey(2, 2, 2), 0x77);
+    check(t.count.noTicket[0][fsh::kNtFirstTerm] == 1 && t.count.noTicketVs[fsh::kNtFirstTerm].count[0] == 1, "sketch: the tally holds the draw before the reset");
+    t.count.reset();
+    bool clear = true;
+    for (unsigned r = 0; r < fsh::kNoTicketReasons; ++r) {
+        for (int cl = 0; cl < 3; ++cl) clear = clear && t.count.noTicket[cl][r] == 0;
+        for (unsigned i = 0; i < fsh::VsSketch::kSlots; ++i) clear = clear && t.count.noTicketVs[r].count[i] == 0 && t.count.noTicketVs[r].key[i] == 0;
+    }
+    check(clear, "sketch: the reset empties every count and every sketch");
+    t.finish(full, fsh::Class::kEye, fsh::termBit(fsh::kTermVerdict), true, shadowKey(2, 2, 2), 0x88);
+    unsigned after[3];
+    check(t.count.noTicketVs[fsh::kNtFirstTerm].top(3, after) == 1 && t.count.noTicketVs[fsh::kNtFirstTerm].key[after[0]] == 0x88,
+          "sketch: after the reset a new window starts from nothing, with none of the old window's values");
+}
+
+void testShadowNoTicketText() {
+    char buf[2048];
+    fsh::Counters none;
+    const size_t emptyLen = fsh::formatNoTicketLine(buf, sizeof(buf), 5400, 1800, none);
+    const std::string empty(buf);
+    check(emptyLen == empty.size() && empty.compare(0, 34, "draw fast path (shadow) no ticket:") == 0 && contains(empty, "1800-frame window ending 5400, 1800 frames") &&
+              contains(empty, "then verdict to special vs): -."),
+          "no-ticket text: the line names itself and the window, and reads '-' when nothing went without a ticket");
+    check(!contains(empty, "Most frequent"), "no-ticket text: nothing counted lists no vertex shaders");
+    // A typical window over ten frames.
+    fsh::Counters c;
+    const unsigned weapon = fsh::kNtFirstTerm + fsh::kTermWeapon, special = fsh::kNtFirstTerm + fsh::kTermSpecialVs;
+    c.noTicket[0][weapon] = 1000;
+    c.noTicket[0][special] = 500;
+    c.noTicket[1][fsh::kNtUnsettled] = 300;
+    c.noTicket[1][weapon] = 200;
+    for (int i = 0; i < 600; ++i) c.noTicketVs[weapon].add(0x1111);
+    for (int i = 0; i < 400; ++i) c.noTicketVs[weapon].add(0x2222);
+    for (int i = 0; i < 200; ++i) c.noTicketVs[weapon].add(0);
+    for (int i = 0; i < 500; ++i) c.noTicketVs[special].add(0x3333);
+    for (int i = 0; i < 300; ++i) c.noTicketVs[fsh::kNtUnsettled].add(0x4444);
+    fsh::formatNoTicketLine(buf, sizeof(buf), 7200, 10, c);
+    const std::string line(buf);
+    check(contains(line, "eye 150.0 (weapon 100.0, special vs 50.0); off-screen 50.0 (unsettled 30.0, weapon 20.0); "),
+          "no-ticket text: per class the reasons with their counts a frame, largest first");
+    check(contains(line, "Most frequent vertex shaders of the two largest reasons: weapon (120.0 a frame): VS 0000000000001111 50%, VS 0000000000002222 33%, VS 0000000000000000 17%; "
+                         "special vs (50.0 a frame): VS 0000000000003333 100%."),
+          "no-ticket text: for the two largest reasons overall their top three vertex shaders with each one's share, the hash 0 among them");
+    check(!contains(line, "unclassed") && !contains(line, "4444"), "no-ticket text: an empty class and the third reason are left out");
+    // More than six reasons in a class: the rest are counted.
+    fsh::Counters many;
+    for (unsigned r = fsh::kNtFirstTerm; r < fsh::kNtFirstTerm + 9; ++r) many.noTicket[0][r] = 100 + r;
+    fsh::formatNoTicketLine(buf, sizeof(buf), 7200, 1, many);
+    check(contains(std::string(buf), ", +3 more)"), "no-ticket text: a class lists six reasons and says how many more");
+    char tiny[60];
+    memset(tiny, 'x', sizeof(tiny));
+    const size_t nt = fsh::formatNoTicketLine(tiny, sizeof(tiny), 7200, 10, c);
+    check(nt < sizeof(tiny) && tiny[nt] == '\0', "no-ticket text: a short buffer is cut and terminated, never overrun");
+    // The worst case the tracker can reach: eye draws with the args class and every outcome term but the two off-screen ones, off-screen draws with every reason,
+    // unclassed draws with the one reason they have; every count four billion over one frame, every sketch full.
+    fsh::Counters w;
+    for (unsigned r = 1; r < fsh::kNoTicketReasons; ++r) {
+        if (r != fsh::kNtUnsettled && r != fsh::kNtWake) w.noTicket[0][r] = 4000000000ull - r;
+        w.noTicket[1][r] = 4000000000ull - r;
+    }
+    w.noTicket[2][fsh::kNtClassUnknown] = 4000000000ull;
+    for (unsigned r = 0; r < fsh::kNoTicketReasons; ++r)
+        for (unsigned i = 0; i < fsh::VsSketch::kSlots; ++i) {
+            w.noTicketVs[r].key[i] = 0xFFFFFFFFFFFFFFF0ull + i;
+            w.noTicketVs[r].count[i] = 4000000000ull - i;
+        }
+    char big[4096];
+    const size_t worst = fsh::formatNoTicketLine(big, sizeof(big), 4000000000u, 1, w);
+    check(worst > 0 && worst < 1150 && std::strlen(big) == worst, "no-ticket text: the line is under 1150 characters at its worst (every reachable reason at four billion, every sketch full)");
+    std::printf("aa_off_test: shadow no-ticket line worst case %zu characters\n", worst);
+    // Counters no tracker can reach (every class with every reason) are still cut at the buffer, never overrun.
+    fsh::Counters silly;
+    for (int cl = 0; cl < 3; ++cl)
+        for (unsigned r = 0; r < fsh::kNoTicketReasons; ++r) silly.noTicket[cl][r] = 4000000000ull - r;
+    char cut[512];
+    const size_t cutLen = fsh::formatNoTicketLine(cut, sizeof(cut), 4000000000u, 1, silly);
+    check(cutLen < sizeof(cut) && std::strlen(cut) == cutLen, "no-ticket text: counters no tracker can reach are cut at the buffer and terminated");
 }
 
 void usage() {
@@ -1930,6 +2153,10 @@ int main(int argc, char** argv) {
     testShadowMismatch();
     testShadowText();
     testShadowWiring();
+    testShadowNoTicketOrder();
+    testShadowNoTicketClasses();
+    testShadowSketch();
+    testShadowNoTicketText();
     std::printf("aa_off_test: the repeat-draw fast path's shadow instrument: %d checks\n", g_checks - checksBeforeShadow);
     std::printf("aa_off_test: %d checks, %d failed\n", g_checks, g_failed);
     return g_failed ? 1 : 0;

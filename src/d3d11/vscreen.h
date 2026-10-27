@@ -126,9 +126,9 @@ bool vScreenAaOffForDraws();
 // TEMPORARY (built 2026-10-27, ui_family_memo.h): the "ui layer family cache:" line for the perf monitor's 1800-frame edge. Writes it into
 // `out` (always, even for a window with no calls), returns its length, and starts the window's counters again.
 size_t vScreenUiFamilyCacheLine(char* out, size_t cap, uint32_t endFrame);
-// TEMPORARY (built 2026-10-27, draw_fast_path_shadow.h): the "draw fast path (shadow):" line for the same edge. Writes it into `out` (always), returns
-// its length, and starts the window's counters again. Under 1150 characters at its worst.
-size_t vScreenDrawFastPathShadowLine(char* out, size_t cap, uint32_t endFrame);
+// TEMPORARY (built 2026-10-27, draw_fast_path_shadow.h): the "draw fast path (shadow):" line and the "draw fast path (shadow) no ticket:" line for the same
+// edge. Writes the two into `line` and `noTicketLine` (always), each under 1150 characters at its worst, and starts the window's counters again.
+void vScreenDrawFastPathShadowLines(char* line, size_t lineCap, char* noTicketLine, size_t noTicketCap, uint32_t endFrame);
 
 // The context's OMSetRenderTargets through the ORIGINAL entry, past the
 // hook and the binding shadow: for a fix that rebinds around one draw and
