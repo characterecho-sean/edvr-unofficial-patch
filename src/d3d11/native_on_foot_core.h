@@ -4951,6 +4951,10 @@ inline bool aimTrigger(double rateDps, bool armed) noexcept { return armed && st
 // was the previous frame's: the hands solved exactly onto a grip off the drawn weapon by body speed x one frame (4.4 cm at 4 m/s, 90 Hz), switching
 // frame to frame between 0 and 1 frame: the arm stutter. The fix: each call takes the game-frame index (a call of a kind already seen this frame
 // opens the next frame) and G is built by whichever of the two comes second in a frame, from the two halves of the SAME index, once.
+// F132 (the Frontier SRV flight edvr_gfx_20261027_064839 from 07:03:13, after a new avatar was created, and flight 182525 on rc.1-27): on() assumes the calls come in
+// a fixed order and never re-synchronises. Started on an FP call while the game's order is 3P then FP, it paired FP(n) with 3P(n+1), about 11 ms apart, so take()
+// refused every frame for good (6927 of 7351 frames), G froze for up to 1 s and the arm IK pulled the hands onto a stale grip. Now a pair refused as far apart
+// re-seeds the phase: the refused call (the second of the pair) becomes the FIRST call of a new frame, and the next call of the other kind pairs with it.
 constexpr double kP1PairMaxGapMs = 10.0;   // a pair whose two calls are further apart than this is not one frame's (an index shifted by a missing call)
 struct P1FramePairing {
     uint32_t frame = 1;                       // the current game frame's index
@@ -4960,6 +4964,13 @@ struct P1FramePairing {
     uint32_t pairedFrame = 0;                 // the last frame G was built for
     // Counters for the second's line (the caller reads and clears them).
     uint64_t frames = 0, pairs = 0, noPair = 0, tpFirst = 0, fpFirst = 0, farApart = 0;
+    // F132: pairs refused as far apart that re-seeded the phase, the gap of the refused pairs (ms), and which call was first in them.
+    uint64_t reseeds = 0, farFpFirst = 0, farTpFirst = 0;
+    double farGapMinMs = 0.0, farGapMaxMs = 0.0, farGapSumMs = 0.0;
+    void clearSecond() noexcept {
+        frames = pairs = noPair = tpFirst = fpFirst = farApart = reseeds = farFpFirst = farTpFirst = 0;
+        farGapMinMs = farGapMaxMs = farGapSumMs = 0.0;
+    }
     // A call of `kind` (0 FP, 1 3P): its game-frame index. A kind already seen this frame opens the next frame.
     uint32_t on(int kind) noexcept {
         const int k = kind ? 1 : 0;
@@ -4982,17 +4993,44 @@ struct P1FramePairing {
     }
     // The second caller: may G be built from the FP half (frame fpFrame, QPC fpQpc) and the 3P half (frame tpFrame, QPC tpQpc)? Once per frame, same
     // index, and the two calls near each other (ticks: QPC ticks, freq: per second).
-    bool take(bool fpHave, uint32_t fpFrame, uint64_t fpQpc, bool tpHave, uint32_t tpFrame, uint64_t tpQpc, uint64_t freq) noexcept {
+    // F132: callerKind (0 FP, 1 3P; the default -1 keeps the old rule) is the call that asks, the second call of the pair. When the pair is refused as far apart the
+    // phase is re-seeded: that call becomes the first call of a new frame, whose index is returned in *callerFrame (the caller stores it with its half, so the next call
+    // of the other kind, which gets the same index from on(), finds it).
+    bool take(bool fpHave, uint32_t fpFrame, uint64_t fpQpc, bool tpHave, uint32_t tpFrame, uint64_t tpQpc, uint64_t freq, int callerKind = -1,
+              uint32_t* callerFrame = nullptr) noexcept {
         if (!fpHave || !tpHave || fpFrame != tpFrame || fpFrame == pairedFrame) return false;
         const uint64_t gap = fpQpc > tpQpc ? fpQpc - tpQpc : tpQpc - fpQpc;
-        if (freq > 0 && static_cast<double>(gap) * 1000.0 / static_cast<double>(freq) > kP1PairMaxGapMs) {
+        const double gapMs = freq > 0 ? static_cast<double>(gap) * 1000.0 / static_cast<double>(freq) : 0.0;
+        if (freq > 0 && gapMs > kP1PairMaxGapMs) {
             ++farApart;
+            if (farApart == 1 || gapMs < farGapMinMs) farGapMinMs = gapMs;
+            if (gapMs > farGapMaxMs) farGapMaxMs = gapMs;
+            farGapSumMs += gapMs;
+            if (firstKind == 0) ++farFpFirst;
+            else if (firstKind == 1) ++farTpFirst;
+            if (callerKind == 0 || callerKind == 1) {
+                const uint32_t f = reseed(callerKind);
+                if (callerFrame) *callerFrame = f;
+            }
             return false;
         }
         pairedFrame = fpFrame;
         published = true;
         ++pairs;
         return true;
+    }
+    // F132: the refused call of `kind` opens the next frame as its first call: the other kind's next call is its second.
+    uint32_t reseed(int kind) noexcept {
+        const int k = kind ? 1 : 0;
+        if (!published) ++noPair;   // the refused frame never built G
+        ++reseeds;
+        ++frame;
+        ++frames;
+        seen[0] = seen[1] = false;
+        seen[k] = true;
+        firstKind = k;
+        published = false;
+        return frame;
     }
 };
 

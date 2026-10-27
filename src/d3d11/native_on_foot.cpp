@@ -9666,7 +9666,9 @@ void fpRootTrack(void* amcPtr, uint64_t now, bool buildG) noexcept {
         g_fpRoot.renderFrame = g_f44Frame.load(std::memory_order_relaxed);
         f85PostFp(g_fpRoot.frame, g_fpRoot.origin, m);   // F85a; F86a: the whole matrix
         if (buildG) {
-            pair = g_p1Pair.take(true, g_fpRoot.frame, g_fpRoot.qpc, g_p1ThreeP.have, g_p1ThreeP.frame, g_p1ThreeP.qpc, f66QpcFreq());
+            uint32_t frameAfter = g_fpRoot.frame;   // F132: a pair refused as far apart re-seeds the phase: this call opens the next frame, and its half carries that index
+            pair = g_p1Pair.take(true, g_fpRoot.frame, g_fpRoot.qpc, g_p1ThreeP.have, g_p1ThreeP.frame, g_p1ThreeP.qpc, f66QpcFreq(), 0, &frameAfter);
+            g_fpRoot.frame = frameAfter;
             if (pair) {
                 fpCopy = g_fpRoot;
                 tp = g_p1ThreeP;
@@ -10865,7 +10867,11 @@ void ikPublishG(void* amcPtr, void* jobPtr, uint64_t now, uint32_t frame, const 
             g_p1SpeedPrevQpc = q;
             g_p1SpeedHave = true;
         }
-        if (m3pOk) pair = g_p1Pair.take(g_fpRoot.ok, g_fpRoot.frame, g_fpRoot.qpc, true, frame, q, f66QpcFreq());
+        if (m3pOk) {
+            uint32_t frameAfter = frame;   // F132: as in fpRootTrack, for the 3P half
+            pair = g_p1Pair.take(g_fpRoot.ok, g_fpRoot.frame, g_fpRoot.qpc, true, frame, q, f66QpcFreq(), 1, &frameAfter);
+            g_p1ThreeP.frame = frameAfter;
+        }
         if (pair) fp = g_fpRoot;
     }
     if (pair) ikPublishPair(fp, m3p, d, now);
@@ -15475,6 +15481,7 @@ struct IkSideStats {
 struct IkStats {
     uint64_t calls = 0, solved = 0;
     double fpAgeLast = 0.0, fpAgeMax = 0.0, gAgeLast = 0.0, gAgeMax = 0.0;
+    uint64_t gOver100 = 0;   // F132: calls that solved with a G older than 100 ms while armed (kArmedGMaxMs lets it through up to 1000 ms without a refusal)
     IkSideStats side[2];
     // F57: the square-up. theta = yaw(3P shoulder line 36 - 35) - yaw(FP 20 - 19 mapped by G), degrees, before the clamp; the rotation applied
     // (probe and an unwritten on: what would be at the full ramp); clamps at +-50 deg; calls that wrote it.
@@ -19272,6 +19279,7 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
     st.gAgeLast = static_cast<double>(gAge);
     st.fpAgeMax = std::max(st.fpAgeMax, st.fpAgeLast);
     st.gAgeMax = std::max(st.gAgeMax, st.gAgeLast);
+    if (armedNow && armsOk && gAge > 100) ++st.gOver100;   // F132: a stale G used silently (the armed limit is kArmedGMaxMs, 1000 ms); counted, the limit unchanged
     for (int side = 0; side < 2; ++side) {
         const SideOut& o = so[side];
         if (!o.solved) continue;
@@ -21033,20 +21041,33 @@ void f68cLine(uint64_t now) noexcept {
         speedSum = g_p1SpeedSum;
         speedMax = g_p1SpeedMax;
         speedN = g_p1SpeedN;
-        g_p1Pair.frames = g_p1Pair.pairs = g_p1Pair.noPair = g_p1Pair.tpFirst = g_p1Pair.fpFirst = g_p1Pair.farApart = 0;
+        g_p1Pair.clearSecond();   // F132: the counters of the second, the re-seeds and the refused pairs' gaps with them
         g_p1SpeedSum = g_p1SpeedMax = 0.0;
         g_p1SpeedN = 0;
     }
     if (w.frames == 0 && w.pairs == 0) return;
+    static nofoot::f129::RateCap reseedCap;   // F132: the event line below is 6 a minute at most, in the summary log too
+    if (w.reseeds > 0 && reseedCap.allow(now, 6)) {
+        const uint32_t held = reseedCap.takeSuppressed();
+        char heldText[96] = "";
+        if (held) std::snprintf(heldText, sizeof(heldText), " [%u earlier reseed line(s) were not written: at most 6 a minute]", held);
+        Log::get().note("native on foot G pairing (F132): reseeded %llu time(s) in the last second after pairs refused as far apart (gap min %.1f mean %.1f max %.1f ms; the FP "
+                        "call first in %llu of them, the 3P call first in %llu); G built from a pair %llu times in %llu game frames%s",
+                        static_cast<unsigned long long>(w.reseeds), w.farGapMinMs, w.farApart ? w.farGapSumMs / static_cast<double>(w.farApart) : 0.0, w.farGapMaxMs,
+                        static_cast<unsigned long long>(w.farFpFirst), static_cast<unsigned long long>(w.farTpFirst), static_cast<unsigned long long>(w.pairs),
+                        static_cast<unsigned long long>(w.frames), heldText);
+    }
     if (!nofoot::logwin::detail()) return;   // F125: the detail log's line; the counters were taken and cleared above as before
     Log::get().note("native on foot G pairing (F68c): %llu game frames; G built from one frame's pair %llu times (F_root - M3P frame difference: 0 in %llu, "
                     "any other 0 by construction); frames without a pair %llu; pairs refused as far apart (over %.0f ms) %llu; the 3P call came first in "
                     "%llu frames (the F67 rule built G from the previous frame's root on those) and the FP call first in %llu; 3P AMC speed mean %.2f max "
-                    "%.2f m/s over %llu frames",
+                    "%.2f m/s over %llu frames; reseeds %llu; refused pairs: gap min %.1f mean %.1f max %.1f ms, the FP call first in %llu and the 3P call first in %llu",
                     static_cast<unsigned long long>(w.frames), static_cast<unsigned long long>(w.pairs), static_cast<unsigned long long>(w.pairs),
                     static_cast<unsigned long long>(w.noPair), nofoot::kP1PairMaxGapMs, static_cast<unsigned long long>(w.farApart),
                     static_cast<unsigned long long>(w.tpFirst), static_cast<unsigned long long>(w.fpFirst), speedN ? speedSum / static_cast<double>(speedN) : 0.0,
-                    speedMax, static_cast<unsigned long long>(speedN));
+                    speedMax, static_cast<unsigned long long>(speedN), static_cast<unsigned long long>(w.reseeds), w.farGapMinMs,
+                    w.farApart ? w.farGapSumMs / static_cast<double>(w.farApart) : 0.0, w.farGapMaxMs, static_cast<unsigned long long>(w.farFpFirst),
+                    static_cast<unsigned long long>(w.farTpFirst));
 }
 void f67fLine(uint64_t now) noexcept {
     static uint64_t lineMs = 0;
@@ -21381,12 +21402,13 @@ void armIkTick(uint64_t now) noexcept {
     const uint64_t fpAgeNow = fpMs && now > fpMs ? now - fpMs : 0, gAgeNow = gOk && now > G.ms ? now - G.ms : 0;
     Log::get().note("native on foot arm IK (F56, %s): %llu IK calls in 5 s (%llu measured, %llu arm solves); base weight %.2f; gate: %s; refusals in "
                     "5 s: %s; ages now: FP snapshot %s%llu ms, G %s%llu ms; in the hook: FP last %.0f max %.0f ms, G last %.0f max %.0f ms; G published "
-                    "%llu, refused %llu in 5 s",
+                    "%llu, refused %llu in 5 s; armed G over 100 ms %llu",
                     kModeNames[mode], static_cast<unsigned long long>(calls - g_ikCallsLast), static_cast<unsigned long long>(got ? st.calls : 0),
                     static_cast<unsigned long long>(got ? st.solved : 0), static_cast<double>(g_ikBlend.w), gate ? gate : "holds", refusals,
                     fpMs ? "" : "(none) ", static_cast<unsigned long long>(fpAgeNow), gOk ? "" : "(none) ", static_cast<unsigned long long>(gAgeNow),
                     got ? st.fpAgeLast : -1.0, got ? st.fpAgeMax : -1.0, got ? st.gAgeLast : -1.0, got ? st.gAgeMax : -1.0,
-                    static_cast<unsigned long long>(gPub - g_ikGPubLast), static_cast<unsigned long long>(gRef - g_ikGRefLast));
+                    static_cast<unsigned long long>(gPub - g_ikGPubLast), static_cast<unsigned long long>(gRef - g_ikGRefLast),
+                    static_cast<unsigned long long>(got ? st.gOver100 : 0));
     g_ikCallsLast = calls;
     g_ikGPubLast = gPub;
     g_ikGRefLast = gRef;

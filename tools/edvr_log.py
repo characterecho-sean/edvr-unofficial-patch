@@ -12226,6 +12226,46 @@ def _hj_f131_hold(rows, ctx):
     return ("OK", text)
 
 
+def _hj_f68c_pairing(rows, ctx):
+    """F68c / F132: how G was built, from the FP AMC's and the local 3P AMC's P1 calls of one game frame. The per-second line (the detail log's) says how many pairs were
+    refused as far apart (over 10 ms): OK under 1% of the game frames, PARTIAL otherwise. F132 re-seeds the phase after such a refusal, so a refused run is one reseed;
+    the F132 event lines (the summary log's, 6 a minute) count the reseeds of a second and are the only evidence when the detail log is off: PARTIAL only when a tenth
+    of those seconds' frames were reseeded (the gap is real, every frame). A build before F132 has no reseed field and refuses forever from the first shifted frame."""
+    sec, ev = rows.get("sec", []), rows.get("reseed", [])
+    if not sec and not ev:
+        return None
+    parts = []
+    bad = False
+    if sec:
+        frames, far, pairs, nopair = (sum(int(r[k]) for r in sec) for k in ("frames", "far", "pairs", "nopair"))
+        tpf, fpf = sum(int(r["tpf"]) for r in sec), sum(int(r["fpf"]) for r in sec)
+        new = [r for r in sec if r.get("reseeds") is not None]
+        reseeds = sum(int(r["reseeds"]) for r in new)
+        refused = [r for r in new if int(r["far"])]
+        text = ("%d s: %d game frames, G built from a pair %d times (%.1f%%), frames without a pair %d, pairs refused as far apart %d (%.2f%%); the 3P call first in %d frames, "
+                "the FP call first in %d") % (len(sec), frames, pairs, 100.0 * pairs / frames if frames else 0.0, nopair, far, 100.0 * far / frames if frames else 0.0, tpf, fpf)
+        if new:
+            text += "; reseeds %d" % reseeds
+        if refused:
+            lo, hi = min(float(r["gmin"]) for r in refused), max(float(r["gmax"]) for r in refused)
+            mean = sum(float(r["gmean"]) * int(r["far"]) for r in refused) / max(1, sum(int(r["far"]) for r in refused))
+            text += "; refused pairs: gap min %.1f mean %.1f max %.1f ms, the FP call first in %d and the 3P call first in %d" % (
+                lo, mean, hi, sum(int(r["ffp"]) for r in refused), sum(int(r["ftp"]) for r in refused))
+        if frames and far * 100 >= frames:
+            bad = True
+            text += "; %.1f%% of the frames were refused as far apart%s" % (100.0 * far / frames, "" if new else " (a build before F132: the pairing never re-seeds)")
+        parts.append(text)
+    if ev:
+        n = sum(int(r["n"]) for r in ev)
+        fr = sum(int(r["frames"]) for r in ev)
+        text = "%s%d reseed second(s) in the event lines: %d reseeds in %d game frames; largest gap %.1f ms" % ("" if not sec else "and ", len(ev), n, fr, max(float(r["gmax"]) for r in ev))
+        if not sec and fr and n * 10 >= fr:
+            bad = True
+            text += "; a tenth or more of those frames were refused as far apart: the gap is real, every frame"
+        parts.append(text)
+    return ("PARTIAL" if bad else "OK", "; ".join(parts))
+
+
 def _hj_f109_snap(rows, ctx):
     """F109: the snap turns. Each snap's applied turn against its step (within 10% in at most 2 calls); none applied is NEVER APPLIED, any off or skipped is PARTIAL.
     Whether ADS survived a snap is reported, not judged (the trigger may have been released)."""
@@ -13145,6 +13185,16 @@ HEALTH_RULES = (
         ("held", r"native on foot look to aim \(F131\): held \((?P<why>.+?)\); the aim stays where it is, the game's own look runs"),
         ("resumed", r"native on foot look to aim \(F131\): resumed after (?P<s>[\d.]+) s \((?P<why>.+?) cleared\): centred again"),
     ), _hj_f131_hold),
+    _hrule("G pairing (F68c)", ("F68c", "F132"), ("native on foot G pairing (F68c)", "native on foot G pairing (F132)"), (
+        ("sec", r"native on foot G pairing \(F68c\): (?P<frames>\d+) game frames; G built from one frame's pair (?P<pairs>\d+) times \(F_root - M3P frame difference: 0 in "
+                r"(?P<zero>\d+), any other 0 by construction\); frames without a pair (?P<nopair>\d+); pairs refused as far apart \(over (?P<maxgap>\d+) ms\) (?P<far>\d+); "
+                r"the 3P call came first in (?P<tpf>\d+) frames \(the F67 rule built G from the previous frame's root on those\) and the FP call first in (?P<fpf>\d+); "
+                r"3P AMC speed mean (?P<smean>\S+) max (?P<smax>\S+) m/s over (?P<sn>\d+) frames(?:; reseeds (?P<reseeds>\d+); refused pairs: gap min (?P<gmin>\S+) mean "
+                r"(?P<gmean>\S+) max (?P<gmax>\S+) ms, the FP call first in (?P<ffp>\d+) and the 3P call first in (?P<ftp>\d+))?"),
+        ("reseed", r"native on foot G pairing \(F132\): reseeded (?P<n>\d+) time\(s\) in the last second after pairs refused as far apart \(gap min (?P<gmin>\S+) mean "
+                   r"(?P<gmean>\S+) max (?P<gmax>\S+) ms; the FP call first in (?P<ffp>\d+) of them, the 3P call first in (?P<ftp>\d+)\); G built from a pair (?P<pairs>\d+) "
+                   r"times in (?P<frames>\d+) game frames"),
+    ), _hj_f68c_pairing),
     _hrule("snap turn (F109)", ("F109",), ("native on foot snap turn (F109)",), (
         ("snap", r"native on foot snap turn \(F109\): snap (?P<n>\d+) by (?P<src>the stick|a mouse flick), (?P<dir>right|left) (?P<step>\d+) deg(?P<ads> in ADS)?: "
                  r"input (?P<input>%s) \(gain (?P<gain>%s), (?P<gsrc>.+?)\); the game applied (?P<applied>%s) deg in (?P<calls>\d+) call\(s\) \(the player's turn over "
@@ -15486,6 +15536,32 @@ def self_test_health():
         check("F129 paths: the key matched again, and a second of the sink zeroing the asks", [FB129, REARM129, paths129(fbe=1, fbl=1, zer=3, ofl=2, ook=100)], 0, [("PARTIAL", P129)],
               has=["fallback entered 1, left 1", "order ok 100, flipped 2"], lacks=["UNPARSED"])
         check("F129 paths: a comps line alone is reported", [COMPS129], 0, [("OK", P129)], has=["0 s on foot"], lacks=["UNPARSED"])
+
+        # ---- G pairing (F68c / F132): the frame pairing of the FP and 3P P1 calls, and its re-seed after a refusal ----
+        G68 = "G pairing (F68c)"
+
+        def pair68(frames=90, pairs=90, nopair=0, far=0, tpf=90, fpf=0, reseeds=0, gmin=0.0, gmean=0.0, gmax=0.0, ffp=0, ftp=0, legacy=False):
+            line = R("native on foot G pairing (F68c): %llu game frames; G built from one frame's pair", frames, pairs, pairs, nopair, 10.0, far, tpf, fpf, 1.5, 3.0, frames,
+                     reseeds, gmin, gmean, gmax, ffp, ftp)
+            return line.split("; reseeds")[0] if legacy else line
+
+        def reseed132(n=3, gmin=10.4, gmean=11.1, gmax=11.9, ffp=0, ftp=3, pairs=87, frames=90):
+            return R("native on foot G pairing (F132): reseeded %llu time(s) in the last second", n, gmin, gmean, gmax, ffp, ftp, pairs, frames)
+
+        check("F132 pairing: every frame paired", [pair68(), pair68()], 0, [("OK", G68)],
+              has=["2 s: 180 game frames, G built from a pair 180 times (100.0%)", "pairs refused as far apart 0 (0.00%)", "reseeds 0"], lacks=["UNPARSED"])
+        check("F132 pairing: one reseed after a missing call is healthy", [pair68(), pair68(pairs=89, nopair=1, far=1, reseeds=1, gmin=11.1, gmean=11.1, gmax=11.1, ftp=1), pair68()], 0,
+              [("OK", G68)], has=["pairs refused as far apart 1 (0.37%)", "reseeds 1", "refused pairs: gap min 11.1 mean 11.1 max 11.1 ms, the FP call first in 0 and the 3P call first in 1"],
+              lacks=["UNPARSED"])
+        check("F132 pairing: the flight (6927 refused of 7351 frames) is PARTIAL, a build before F132 says it never re-seeds", [pair68(frames=90, pairs=6, far=84, legacy=True)], 0,
+              [("PARTIAL", G68)], has=["93.3% of the frames were refused as far apart (a build before F132: the pairing never re-seeds)"], lacks=["UNPARSED"])
+        check("F132 pairing: a real gap every frame, re-seeded each time, is PARTIAL with the gap named", [pair68(frames=90, pairs=0, nopair=90, far=90, reseeds=90, gmin=12.0, gmean=15.2,
+              gmax=19.0, ffp=90)], 0, [("PARTIAL", G68)],
+              has=["reseeds 90", "gap min 12.0 mean 15.2 max 19.0 ms, the FP call first in 90", "100.0% of the frames were refused as far apart"], lacks=["UNPARSED"])
+        check("F132 pairing: the summary log's reseed line alone", [reseed132(), reseed132(n=1)], 0, [("OK", G68)],
+              has=["2 reseed second(s) in the event lines: 4 reseeds in 180 game frames; largest gap 11.9 ms"], lacks=["UNPARSED", "a tenth or more"])
+        check("F132 pairing: reseeds in a tenth of the frames in the summary log", [reseed132(n=60, frames=90)], 0, [("PARTIAL", G68)], has=["a tenth or more of those frames were refused"],
+              lacks=["UNPARSED"])
 
         # ---- F131: look to aim holds while a panel or a menu is open, and while the game runs no look ----
         H131 = "look to aim hold (F131)"

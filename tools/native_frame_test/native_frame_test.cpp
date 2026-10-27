@@ -36,6 +36,7 @@
 #include "f129_checks.h"    // F129: look to aim reads its turn from the player's own look processor (the call classes, the gate, the episodes, the zero-sum probes)
 #include "f130_checks.h"    // F130: one disagreeing scene mesh no longer switches the eye rows' sources off (the marks, the source draw, the SRV flight replayed)
 #include "f131_checks.h"    // F131: look to aim holds while a panel or a menu is open, and while the game runs no look
+#include "f132_checks.h"    // F132: the G frame pairing re-seeds its phase after a far-apart refusal (either true order, a missing call, a real gap)
 #include "f110_checks.h"    // F110: the ADS sight lock's model right eye (the left-eye job camera plus the IPD)
 #include "f111_checks.h"    // F111: the panel pointer instrument's statistics and verdict
 #include "f113_checks.h"    // F113: each eye's scene rows whenever the world is drawn (the depth prepass and the terrain as sources)
@@ -7402,6 +7403,9 @@ int wmain(int argc, wchar_t** argv) {
     f130test::run130(check);
     // F131: look to aim holds (no asks, no probes, no snaps) while an on-foot panel is open, a menu or map holds the 2D screen, or the look processor has not run; 200 ms to leave.
     f131test::run131(check);
+    // F132: G's frame pairing started on the wrong call of the game's order re-seeds after one refusal and pairs from the next frame; a missing call, either order and a
+    // gap that is real on every frame (refused every time, reseeds counted, no runaway).
+    f132test::run132(check);
     // F110: the ADS sight lock's model right eye from the left-eye job camera and from a solved left eye, the fallback, the IPD's sign.
     f110test::run110(check);
     // F111: the panel pointer instrument names the stage that turns a move the other way (K1 to K5, one at a time), the camera getters' decoding.
