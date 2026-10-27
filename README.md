@@ -231,36 +231,30 @@ instead of standing in the world, or sized for a screen you are not looking at.
   a cropped Pimax), EDVR also widens that frustum to what each eye shows, which
   stopped the black flashes at the outer corners over flat ground. There is no
   setting.
-- On foot, the grey surround is made properly black, the screen is moved, bent
-  and raised above its forced 1920x1080, and Explorer Cam gives you a real
-  stereo view from your commander's head in the free camera.
+- On foot, EDVR answers the game's request for its flat on-foot screen with the
+  headset's own stereo, so you see the world in 3D from your commander's eyes.
+  Where the game still shows the flat screen, the grey surround is made properly
+  black and the screen is moved, bent and raised above its forced 1920x1080.
 
 [docs/fixes.md](docs/fixes.md) covers each fix in full: what it costs, what it
 is measured at, and which setting turns it off. The defaults are what most
 people want, and the exceptions are called out there and in the in-headset
 menu.
 
-## Explorer Cam
+## On foot
 
-On foot, Elite renders the world once, flat, and shows that image to both eyes.
-There is no depth because none is drawn. The game's free camera renders in
-proper stereo, and that is where Explorer Cam works. Press F5 on foot: the view
-fades to black, EDVR opens the camera, puts it at your commander's eyes facing
-their way, locks it to them so you walk with it, hides their head and the
-camera's on-screen controls, and fades back in. The view follows your
-commander's head, so it crouches and drops into a weapon stance with you. F5
-again takes you back to first person. While you are in it, the camera's own
-keys do nothing, so it behaves as a mode of its own. The key is on the menu's
-Hotkeys page, and leaving it empty turns Explorer Cam off. **It cannot make
-first person 3D** and does not try; the flat screen stays flat.
+On foot, Elite asks for a flat screen and shows the same image to both eyes.
+With `fix.native_on_foot` on (the default), EDVR answers that request with the
+headset's own stereo while a game session is live, so the world is drawn for
+each eye from your commander's head, and your commander's own head is hidden
+from the inside. The setting and the other on-foot options are on the menu's
+Native on foot page. Everything it changes is on your machine only.
 
-It gives you no capability you do not already have: inside the camera you
-cannot act, and Explorer Cam changes only where the camera is and what you see
-from it. While it is on, it writes the free camera's pose, the camera's own key
-presses, and how your commander's avatar is drawn, on your machine only, and
-gives them back when you leave; it touches nothing shared.
-[docs/explorer-cam.md](docs/explorer-cam.md) covers setting it up and what it
-does under the hood, safeguards included.
+Explorer Cam, the free-camera view that came before it, has been removed. An
+older `edvr.ini` that still carries its settings is read without complaint: the
+settings are ignored, and one that differs from its last default is named once
+in the log. [docs/design-native-onfoot-vr-2026-10-13.md](docs/design-native-onfoot-vr-2026-10-13.md)
+covers how native on foot works.
 
 ## Settings
 
@@ -278,8 +272,8 @@ While the menu is open the game sees no keyboard at all, though your HOTAS and
 mouse still do. Every change is written to `edvr.ini` and applies the way a
 hand edit would, and a row that only takes effect at the next launch says so.
 
-EDVR's own keys have a page of their own, **Hotkeys**: the menu key, Explorer
-Cam's key (clear it and Explorer Cam is off) and the camera-history key. Pick a row, press Enter, then press the key you want, with
+EDVR's own keys have a page of their own, **Hotkeys**: the menu key, the AA
+comparison key and the camera-history key. Pick a row, press Enter, then press the key you want, with
 Ctrl, Shift or Alt for a chord, a gamepad button, or a button or hat on your
 HOTAS. Escape cancels and Delete clears (the menu key can be changed but never
 cleared from the menu). A choice that Elite also binds is flagged "also in

@@ -50,8 +50,8 @@ SPECIAL_DEC = {1791840573: 1792704584, 334473: 334925}
 # comment citations, rig layouts, and the later additions (mem_tick, the CPU
 # profiler's class tables). Tokens there map from map_extra.json.
 EXTRA_FILES = {
-    'src/d3d11/cull_gate_probe.h', 'src/d3d11/engine_velocity_emit.h', 'src/d3d11/explorer_cam.cpp',
-    'src/d3d11/explorer_cam_core.h', 'src/d3d11/kinematic_eval_hook.cpp', 'src/d3d11/kinematic_eval_hook.h',
+    'src/d3d11/cull_gate_probe.h', 'src/d3d11/engine_velocity_emit.h', 'src/d3d11/native_on_foot_hooks.cpp',
+    'src/d3d11/avatar_hooks_core.h', 'src/d3d11/kinematic_eval_hook.cpp', 'src/d3d11/kinematic_eval_hook.h',
     'src/d3d11/kinematic_eval_probe.cpp', 'src/d3d11/light_grid_cache_core.h', 'src/d3d11/mem_tick.cpp',
     'src/d3d11/optimized_station_core.h', 'src/d3d11/skin_ledger.h', 'src/d3d11/terrain_cull_cover_core.h',
     'src/d3d11/ui_sizing_math.h', 'src/d3d11/vertex_resync_core.h', 'src/d3d11/vr_ssaa_hold.cpp',

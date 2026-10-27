@@ -1,9 +1,9 @@
 // Test rig for the optimized station's pure half (src/d3d11/optimized_station_core.h): the seal trigger (the state machine that seals, releases
-// and re-seals the station), the release rules (setting off, undocked, Explorer Cam, the camera leaving the bay, the pad moving against the hangar
+// and re-seals the station), the release rules (setting off, undocked, the camera leaving the bay, the pad moving against the hangar
 // shell, a hangar change, launch), the pad-local frame's round trip and the release's threshold, the parse of the per-size floors, the own-ship
 // prefix and sphere, the bay's volume, and the unreadable rule. No DLL and no game.
 #include "../../src/d3d11/optimized_station_core.h"
-#include "../../src/d3d11/explorer_cam_core.h"
+#include "../../src/d3d11/avatar_hooks_core.h"
 #include "../../src/d3d11/journal_watch.h"   // journalSeatedFromFlags (a constexpr; the rig does not link the watcher)
 #include "../../src/d3d11/station_gather_core.h"
 #include "../../src/d3d11/station_lockfree_core.h"
@@ -336,7 +336,7 @@ int main(int argc, char** argv) {
         const uint8_t outside = static_cast<uint8_t>(se::RigVerdict::kOutside);
         check(se::rigMayVeto(3, 3, true, outside) && !se::rigMayVeto(3, 4, true, outside) && !se::rigMayVeto(4, 4, false, outside),
               "v14.20 rig: an outside bound from the current epoch may veto; an old epoch or an unbounded slot forwards");
-        check(se::viewCentreReady(true, false, false) && !se::viewCentreReady(false, true, false) && se::viewCentreReady(false, true, true),
+        check(se::viewCentreReady(true) && !se::viewCentreReady(false),
               "v14.20 view: the origin is the centre; an eye pose alone is not");
         se::SealState s2;
         check(s2.reseal == 0 && !s2.requested, "v14.23: a fresh trigger holds no re-seal and requests nothing");
@@ -366,13 +366,21 @@ int main(int argc, char** argv) {
         check(fresh.empty && fresh.probes == 1, "v14.20 table: a slot of an earlier epoch is free");
     }
     {
-        // The store hook's identity decision (kept): the PE pair first, then the pin.
+        // The store hook's install decision (issue 124 pilot): the PE header readable, the store's address (the constant on build 334925, the
+        // signature match on an unknown build, 0 when none was found), the prologue read there, and the pin compare (game_build.h).
         const uint8_t pin[16] = {0x40, 0x55, 0x53, 0x56, 0x57, 0x41, 0x56, 0x41, 0x57, 0x48, 0x8D, 0xAC, 0x24, 0x68, 0xFE, 0xFF};
-        const uint32_t wantStamp = edvr::ecm::kExpectedTimestamp, wantSize = edvr::ecm::kExpectedImageSize;
-        check(se::storeInstallDecision(true, wantStamp, wantSize, wantStamp, wantSize, pin, pin, 16) == se::StoreInstall::kInstall,
-              "v14.20 store hook: build 334925's identity and pin install the detour");
-        check(se::storeInstallDecision(true, wantStamp + 1, wantSize, wantStamp, wantSize, pin, pin, 16) == se::StoreInstall::kWrongIdentity,
-              "v14.20 store hook: another stamp is refused");
+        check(std::memcmp(pin, se::kStorePrologue, 16) == 0, "v14.20 store hook: the pin is build 334925's sixteen bytes");
+        check(se::storeInstallDecision(true, 0x4314C60u, pin, true) == se::StoreInstall::kInstall,
+              "v14.20 store hook: build 334925's store with its pin installs the detour");
+        check(se::storeInstallDecision(true, 0x4314D00u, pin, true) == se::StoreInstall::kInstall,
+              "issue 124 store hook: an unknown build's store found by signature, its pin matching, installs the detour");
+        check(se::storeInstallDecision(true, 0, pin, true) == se::StoreInstall::kNotFound,
+              "issue 124 store hook: an unknown build whose store was not found by signature is refused");
+        check(se::storeInstallDecision(false, 0x4314C60u, pin, true) == se::StoreInstall::kUnreadable &&
+              se::storeInstallDecision(true, 0x4314C60u, nullptr, false) == se::StoreInstall::kUnreadable,
+              "v14.20 store hook: an unreadable PE header or prologue is refused");
+        check(se::storeInstallDecision(true, 0x4314C60u, pin, false) == se::StoreInstall::kWrongPrologue,
+              "v14.20 store hook: a prologue that does not match the pin is refused");
     }
     {
         // The shell frame (kept): the pad 3 m along x and 4 m along y from the shell, 45 m below it; forward +y against +x: yaw +90 deg about up.
@@ -2559,7 +2567,7 @@ int main(int argc, char** argv) {
         check(edvr::flatPageHasRow("fix", "optimized_stations"), "v14.34 flat: the F8 flat page has the Optimized station row");
         const edvr::FlatPageRow* refused = edvr::flatPageFirstRefused([](const char* k) { return edvr::flatProfileReadsKey(k); });
         check(refused == nullptr, "v14.34 flat: every row of the flat page, the new one included, passes the flat key list");
-        // the flat camera source: no temporal-pass rows and no explorer cam, so the position is the render context's view 0 origin
+        // the flat camera source: no temporal-pass rows, so the position is the render context's view 0 origin
         edvr::view::Resolved flat;
         flat.originOk = true;
         flat.origin[0] = 120.0f;

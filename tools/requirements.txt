@@ -3,3 +3,5 @@
 # Install them with:  pip install -r tools\requirements.txt
 numpy
 Pillow
+# capstone: tools\hook_signatures.py (generate and its self-test decode x86-64).
+capstone

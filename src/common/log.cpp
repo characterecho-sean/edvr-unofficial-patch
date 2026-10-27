@@ -148,7 +148,12 @@ bool Log::open(const std::wstring& dir, const wchar_t* tag) {
     // One class and one default for both profiles: the flat profile allows the "log." keys and reads this one from edvr-flat.ini
     // first, then edvr.ini. An ini that says max_mb = 4 keeps 4; the shipped edvr.ini only documents the default, commented out.
     // There is no rotation: a log that reaches the cap says so once and stops (below), and the next session opens a new file.
-    const int maxMb = Config::get().getInt("log.max_mb", 16);
+    // F125: the detailed on-foot log (log.on_foot_detail = on) writes about 4 MB a minute on foot, which reaches 16 MB some four minutes after going on foot.
+    // With that key on when the log opens, a cap nobody set is 64 MB. "Nobody set" is exactly when getInt takes its default: no max_mb line, one with no
+    // value, or one that is not a number. Any max_mb written as a number wins, 16 included. Read once, here, as max_mb is: turning the key on later in the session (it is live for the
+    // on-foot lines) leaves the cap the log opened with, and the key's announce line says which that is.
+    const bool onFootDetail = Config::get().getBool("log.on_foot_detail", false);
+    const int maxMb = Config::get().getInt("log.max_mb", onFootDetail ? 64 : 16);
     m_maxBytes = maxMb > 0 ? static_cast<uint64_t>(maxMb) * 1024ull * 1024ull : 0ull;
     // The cap is per file: a reopened log counts from zero. (Only the rigs reopen the singleton; a process opens its log once. Without
     // this, the second open in one process inherited the first one's byte count, and a cap smaller than it stopped the new file at

@@ -334,31 +334,42 @@ void plant(lg::Cache& c, int g, const uint8_t* key, bool populated = true) {
 }
 
 void testIdentityAndPin() {
+    // The install decision (issue 124, the same rule as the store hook): the PE header read, every address the cache binds found (the constants on build 334925, the signature
+    // resolver's answers on an unknown build, 0 for one it found none of), the sixteen bytes read at the builder, and the pin compare (gamePinMatches).
     uint8_t good[16];
     std::memcpy(good, lg::kPrologue, 16);
-    check(lg::installDecision(true, lg::kExpectedTimestamp, lg::kExpectedImageSize, good, 16) == lg::Install::kInstall, "the pinned build and prologue install");
-    check(lg::installDecision(false, lg::kExpectedTimestamp, lg::kExpectedImageSize, good, 16) == lg::Install::kUnreadable, "an unreadable header refuses");
-    check(lg::installDecision(true, lg::kExpectedTimestamp, lg::kExpectedImageSize, nullptr, 16) == lg::Install::kUnreadable, "an unreadable entry refuses");
-    check(lg::installDecision(true, lg::kExpectedTimestamp, lg::kExpectedImageSize, good, 8) == lg::Install::kUnreadable, "a short read of the entry refuses");
-    check(lg::installDecision(true, lg::kExpectedTimestamp + 1, lg::kExpectedImageSize, good, 16) == lg::Install::kWrongIdentity, "another PE stamp refuses");
-    check(lg::installDecision(true, lg::kExpectedTimestamp, lg::kExpectedImageSize + 4096, good, 16) == lg::Install::kWrongIdentity, "another image size refuses");
-    uint8_t moved[16];
-    std::memcpy(moved, good, 16);
-    moved[15] ^= 1;
-    check(lg::installDecision(true, lg::kExpectedTimestamp, lg::kExpectedImageSize, moved, 16) == lg::Install::kWrongPrologue, "one wrong prologue byte refuses");
-    // the identity is judged before the bytes: a wrong build whose bytes also differ is a wrong build
-    check(lg::installDecision(true, 1, 2, moved, 16) == lg::Install::kWrongIdentity, "the identity is judged first");
-    check(lg::kExpectedTimestamp == 1792704584u && lg::kExpectedImageSize == 104906752u && lg::kBuilderRva == 0x58B250u, "the pinned constants are build 334925's");
+    lg::Addresses known;   // build 334925: every address its constant
+    known.builder = lg::kBuilderRva; known.refresh = lg::kRefreshRva; known.copy = lg::kCopyRva; known.overridePath = lg::kOverridePathRva; known.tile = lg::kTileRva;
+    known.slices = lg::kSlicesRva; known.forceRebuild = lg::kForceRebuildRva; known.overrideNear = lg::kOverrideNearRva; known.overrideFar = lg::kOverrideFarRva;
+    check(lg::firstMissing(known) == nullptr && lg::installDecision(true, known, good, true) == lg::Install::kInstall, "build 334925's addresses and the builder's pin install");
+    lg::Addresses moved9;   // an unknown build: every address found, none where it was
+    moved9.builder = 0x59B250u; moved9.refresh = 0x4F40F0u; moved9.copy = 0x57B560u; moved9.overridePath = 0x5E83F7Eu; moved9.tile = 0x5E83F80u; moved9.slices = 0x5E83F90u;
+    moved9.forceRebuild = 0x5F3A652u; moved9.overrideNear = 0x5E83F94u; moved9.overrideFar = 0x5E83F98u;
+    check(lg::installDecision(true, moved9, good, true) == lg::Install::kInstall, "an unknown build with every address found by signature and the pin matching installs");
+    check(lg::installDecision(false, known, good, true) == lg::Install::kUnreadable, "an unreadable header refuses");
+    check(lg::installDecision(true, known, nullptr, false) == lg::Install::kUnreadable, "an unreadable entry refuses");
+    check(lg::installDecision(true, known, good, false) == lg::Install::kWrongPrologue, "one wrong prologue byte refuses");
+    // every address is needed: one the resolver did not find, whichever it is, refuses (and says which), whatever else is right
+    uint8_t refusals = 0;
+    for (int which = 0; which < 9; ++which) {
+        lg::Addresses a = moved9;
+        uintptr_t* fields[9] = {&a.builder, &a.refresh, &a.copy, &a.overridePath, &a.tile, &a.slices, &a.forceRebuild, &a.overrideNear, &a.overrideFar};
+        *fields[which] = 0;
+        if (lg::installDecision(true, a, good, true) == lg::Install::kNotFound && lg::firstMissing(a) != nullptr) ++refusals;
+    }
+    check(refusals == 9, "an unknown build in which any one of the builder, the refresh, the copy constructor or the six globals was not found refuses");
+    check(lg::installDecision(true, lg::Addresses{}, good, true) == lg::Install::kNotFound && lg::installDecision(true, lg::Addresses{}, nullptr, false) == lg::Install::kNotFound,
+          "nothing found: refused as not found, whatever was read");
+    check(lg::installDecision(false, lg::Addresses{}, good, true) == lg::Install::kUnreadable, "the header is judged before the addresses");
+    check(lg::kBuilderRva == 0x58B250u, "the builder's constant is build 334925's");
     const uint8_t pin[16] = {0x48, 0x8B, 0xC4, 0x55, 0x53, 0x56, 0x57, 0x41, 0x54, 0x41, 0x56, 0x41, 0x57, 0x48, 0x8D, 0xA8};
     check(std::memcmp(pin, lg::kPrologue, 16) == 0, "the prologue is the sixteen bytes read from the exe");
     // the view-block refresh the glue may run ahead of the rows is pinned the same way
-    uint8_t refresh[16];
-    std::memcpy(refresh, lg::kRefreshPrologue, 16);
-    check(lg::refreshPinMatches(refresh, 16) && lg::kRefreshRva == 0x4F30F0u, "the refresh function's sixteen bytes match the pin");
-    refresh[7] ^= 1;
-    check(!lg::refreshPinMatches(refresh, 16) && !lg::refreshPinMatches(nullptr, 16) && !lg::refreshPinMatches(refresh, 8), "a changed byte, a null read or a short read does not");
+    check(lg::kRefreshRva == 0x4F30F0u && lg::kCopyRva == 0x57A560u, "the refresh and copy constants are build 334925's");
     const uint8_t refreshPin[16] = {0x48, 0x8B, 0xC4, 0x53, 0x48, 0x81, 0xEC, 0x80, 0x00, 0x00, 0x00, 0x0F, 0x29, 0x70, 0xE8, 0x48};
     check(std::memcmp(refreshPin, lg::kRefreshPrologue, 16) == 0, "the refresh pin is the sixteen bytes read from the exe");
+    const uint8_t copyPin[16] = {0x48, 0x89, 0x5C, 0x24, 0x08, 0x57, 0x48, 0x83, 0xEC, 0x20, 0x0F, 0x10, 0x02, 0x48, 0x8B, 0xF9};
+    check(std::memcmp(copyPin, lg::kCopyPrologue, 16) == 0, "the copy constructor's pin is the sixteen bytes read from the exe");
 }
 
 // The routine at 0x48AD588, transcribed instruction by instruction with the registers as variables (edx, eax, ecx, r8d), as an independent reading to hold the core's gameCeilf to.

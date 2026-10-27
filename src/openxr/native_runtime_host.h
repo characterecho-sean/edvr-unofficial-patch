@@ -27,6 +27,7 @@
 #include <memory>
 #include <mutex>
 #include "../common/comfort_fade.h"
+#include "../common/left_eye_share.h"
 #include "../common/frame_flag.h"
 #include "../common/parallel_projection_notice.h"
 #include "../common/periodic_work.h"
@@ -40,6 +41,7 @@
 #include "device_gpu_timing.h"
 #include "producer_gpu_timing.h"
 #include "submission_stats.h"
+#include "submit_shape.h"   // native on-foot F0: the submit shape line (one a second while frames are submitted)
 #include "frame_cycle_stats.h"
 #include "long_cycle_line.h"
 #include "vendor_events.h"
@@ -56,6 +58,7 @@
 #include "openvr_system.h"
 #include "system_publication.h"
 #include "head_locator.h"
+#include "head_track_probe.h"   // F87h: the headset's tracking, one line a second (read only)
 #include "pose_gap.h"
 #include "runtime_gate.h"
 #include "frame_pacer.h"
@@ -67,6 +70,7 @@
 #include "openvr_compositor.h"
 #include "compositor_publication.h"
 #include "pose_cache.h"
+#include "pose_sample_proof.h"   // F42
 #include "poll_ring.h"
 #include "space_pose.h"
 #include "seated_origin.h"
@@ -179,6 +183,31 @@ inline XrPosef xrFromSeatPose(const SeatPose& s) {
   p.orientation={0.0f,float(std::sin(s.yaw*0.5)),0.0f,float(std::cos(s.yaw*0.5))};
   return p;
 }
+// F61 (TEMPORARY, the rotation calibration): v rotated by the unit quaternion q (x, y, z, w).
+inline void seatQuatApply(const double q[4],const double v[3],double out[3]) {
+  const double t[3]={2*(q[1]*v[2]-q[2]*v[1]),2*(q[2]*v[0]-q[0]*v[2]),2*(q[0]*v[1]-q[1]*v[0])};
+  out[0]=v[0]+q[3]*t[0]+(q[1]*t[2]-q[2]*t[1]);
+  out[1]=v[1]+q[3]*t[1]+(q[2]*t[0]-q[0]*t[2]);
+  out[2]=v[2]+q[3]*t[2]+(q[0]*t[1]-q[1]*t[0]);
+}
+// F61: the pose p (a space's pose in LOCAL) turned by `angle` radians about the unit `axis` through `pivot` (both LOCAL; right-hand rule).
+// A seated space turned so about the head's right axis turns the head's reported pitch by -angle and leaves the head where it was. Zero is p.
+inline XrPosef seatPosePitched(const XrPosef& p,const double pivot[3],const double axis[3],double angle) {
+  if(angle==0.0) return p;
+  XrPosef out=p;
+  const double sh=std::sin(0.5*angle);
+  const double q[4]={axis[0]*sh,axis[1]*sh,axis[2]*sh,std::cos(0.5*angle)};
+  const double v[3]={p.position.x-pivot[0],p.position.y-pivot[1],p.position.z-pivot[2]};
+  double rv[3];seatQuatApply(q,v,rv);
+  out.position={float(pivot[0]+rv[0]),float(pivot[1]+rv[1]),float(pivot[2]+rv[2])};
+  const double b[4]={p.orientation.x,p.orientation.y,p.orientation.z,p.orientation.w};   // q * b
+  out.orientation={float(q[3]*b[0]+q[0]*b[3]+q[1]*b[2]-q[2]*b[1]),float(q[3]*b[1]-q[0]*b[2]+q[1]*b[3]+q[2]*b[0]),
+                   float(q[3]*b[2]+q[0]*b[1]-q[1]*b[0]+q[2]*b[3]),float(q[3]*b[3]-q[0]*b[0]-q[1]*b[1]-q[2]*b[2])};
+  return out;
+}
+// F62b (TEMPORARY, the ADS head-aim): the seat's right axis in LOCAL for a seat yaw (xrFromSeatPose turns +x about +y by the yaw): the axis the
+// ADS pitch overlay turns about, so a pitch composed after any seat yaw stays a pitch of the seat (the aim's pitch axis), never a roll.
+inline void seatRightAxis(double yaw,double out[3]) {out[0]=std::cos(yaw);out[1]=0.0;out[2]=-std::sin(yaw);}
 inline std::string seatUtf8(const std::wstring& w) {
   if(w.empty())return std::string();
   const int n=WideCharToMultiByte(CP_UTF8,0,w.data(),int(w.size()),nullptr,0,nullptr,nullptr);
@@ -251,7 +280,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   uint64_t previousReference=0,withheldPairs=0,replayedPairs=0,emptyWithholds=0;
   NativeFrameClient features;
   NativeFovTrim fovTrim;
-  EdvrNativeFrameOutput featureFrame{sizeof(featureFrame),EDVR_NATIVE_FRAME_VERSION_5};
+  EdvrNativeFrameOutput featureFrame{sizeof(featureFrame),EDVR_NATIVE_FRAME_VERSION_8};
   EdvrNativeFrameDecision featureDecision{sizeof(featureDecision),EDVR_NATIVE_FRAME_VERSION_1};
   bool featureFrameKnown=false;
   uint64_t featureChanges=0;
@@ -366,11 +395,45 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   std::vector<SeatRecord> seatBook;std::wstring seatFile;std::string seatKeyText;
   bool seatLoaded=false,seatRefsTraced=false,seatContextTraced=false;
   SeatPose currentOrigin;                    // the seated origin in natural LOCAL: identity until the first reset
+  // F22 (look to aim): the seated space the game reads is currentOrigin turned about the head by lookComp (radians). currentOrigin itself, the
+  // seat memory's origin, never carries it. lookWanted is the provider's cumulative total; the compensation the origin should carry is
+  // lookWanted - lookBase, where lookBase is the total when the origin was last replaced (the origin is fresh then, so it carries none).
+  SeatPose lookSeated{};bool lookSeatedKnown=false;
+  double lookBase=0,lookComp=0,lookWanted=0,lookWindowDeg=0;
+  uint64_t lookRuntimeFrames=0,lookApplies=0,lookRefusals=0,lookLineMs=0;uint32_t lookGameFrame=0,lookAppliedGameFrame=0;
+  uint64_t lookAppliedFrame=0;const char* lookWhy="";
+  // F25: the reset serial last acted on, the resets taken, and the head's seated yaw (degrees) before and after the last step.
+  uint32_t lookResetSeen=0;uint64_t lookResets=0;double lookYawBeforeDeg=0,lookYawAfterDeg=0;bool lookYawKnown=false;
+  // F109: a reset waiting to return the seated space to its origin itself (a frame was open), and the returns made.
+  bool lookRestorePending=false;uint64_t lookRestores=0;
+  uint64_t seatApplyFeatureMark=~0ull;   // F115: lookRuntimeFrames when the stored seat last landed (seatApplyAhead)
+  // F33 (body align): the seated-space translation (metres) the provider wants the seated origin moved by, and what it carries now. A new
+  // origin (lookRebase) carries none; the wanted value is applied again by delta on the next poll. currentOrigin and the origin generation never move.
+  double eyeWanted[3]={0,0,0},eyeApplied[3]={0,0,0};uint32_t eyeSerialSeen=0;bool eyeProviderSeen=false;
+  // F89: the serial of the alignment eyeApplied is (0: none, the origin's own). Told to the provider with each frame's pose (EdvrNativeFrameInput::eyeAlignApplied, serial + 1), so
+  // the d3d11 half takes out of the pose exactly the alignment that was applied to it, however late the runtime applied it. Moves only where eyeApplied does.
+  uint32_t eyeAppliedSerial=0;
+  uint64_t eyeApplies=0,eyeRefusals=0,eyeLineMs=0;const char* eyeWhy="";bool eyeFirstSeen=false;
+  // F61 (TEMPORARY, the rotation calibration, fix.native_on_foot_rot_calibrate): the seated yaw and pitch (radians) the provider wants the
+  // seated origin turned by about the head (version 9 output's reservedOffset[0..1]), and what it carries now. The yaw turns lookSeated about
+  // the head as lookPoll does (eyeApplied folded the same way). The pitch, which a SeatPose cannot carry, is an overlay about the head's right
+  // axis (rotAxis through rotPivot, both LOCAL, captured when the rotation leaves zero) composed onto lookSeated at every replace
+  // (seatedPoseFor). Both zero (the key off): every replace is exactly xrFromSeatPose(lookSeated), as before F61.
+  double rotWanted[2]={0,0},rotApplied[2]={0,0},rotPivot[3]={0,0,0},rotAxis[3]={1,0,0};
+  uint64_t rotApplies=0,rotRefusals=0,rotLineMs=0;const char* rotWhy="";
+  // F62b (TEMPORARY, the ADS head-aim, fix.native_on_foot_ads_head_aim): the seated pitch (radians, nose up positive) the provider wants (a
+  // version 10 answer's reservedYaw) and what the seated space carries now: an overlay about the seat's right axis (seatRightAxis of the seat's
+  // yaw at each compose) through adsPivot, the head in LOCAL when it was last applied (refreshed while it is non-zero and the head moves). Its
+  // yaw rides the look's total (lookPoll). Zero (the feature off, a version 9 provider): every replace is as before F62b.
+  double adsWanted=0,adsApplied=0,adsPivot[3]={0,0,0};
+  uint64_t adsApplies=0,adsRefusals=0,adsPivotMoves=0,adsLineMs=0;const char* adsWhy="";bool adsLocalSent=false;
   unsigned seatResetCount=0,seatContextLines=0;
   SeatContext lastTracedContext{};
   bool seatRetroPending=false;uint64_t seatRetroAgeMs=0;     // a deferred recentre was just taken back: the apply that follows says so (retro=1)
   const char* seatWhy="";                    // the last transition's reason, for the apply it triggers and the meter it schedules
   uint64_t seatMeterDueAt=0,seatMeterNextPeriodic=0;
+  // F87h (read only): the head in the natural space and where LOCAL sits in it, sampled at each WaitGetPoses once the native frame provider is acquired.
+  headtrack::Probe headProbe;uint64_t headProbeLineMs=0,headProbeLocalMs=0,headProbeEventsAtLine=0;
   const char* seatTraceDecision="head";HeadCall seatTraceCall{};bool seatTraceHasCall=false;
   PressInfo seatTracePress{};bool seatTraceHasPress=false;      // the HMD key press that went with the reset being traced (seat_memory.h PressInfo)
   bool seatPressLogged=false;HmdPressStatus seatPressLoggedStatus=HmdPressStatus::Unpublished;uint32_t seatPressSeq=0;
@@ -469,6 +532,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     XrTime displayTime=0;XrDuration period=0;
     float orientation[4]{0,0,0,1};
     double speedDegPerSec=0;
+    bool latchedKnown=false;vr::TrackedDevicePose_t latched{};   // F42: the render pose WaitGetPoses latched for this frame
   } latestPoseFrame;
   // Every place that drops the frame the game holds also drops the pose publication made from it (pose_cache.h).
   // `why` is only the log's category (pose_cache.h PoseInvalidation); every call withdraws the publication.
@@ -846,6 +910,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       !frameEndOverlapEnabled?"config":!startupOptions.separateDevice?"borrowed_device":"config");
     poseCacheOn.store(startupOptions.poseCache,std::memory_order_release);
     nativeTracePrintf("native_pose_cache_config,enabled=%u,key=pose_cache\n",unsigned(startupOptions.poseCache));
+    nativeTracePrintf("native_now_pose_config,key=fix.now_pose,default=next,live=1 (the d3d11 half sends each frame; logged on change)\n");
     const auto openBegan=StepClock::now();
     if(!open(startupOptions))return vr::VRInitError_Init_Internal;
     const double openMs=stepMs(openBegan);
@@ -1006,11 +1071,13 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     latestPoseFrame.speedDegPerSec=latestPoseFrame.speedKnown?angularSpeedDegrees(angularVelocity.x,angularVelocity.y,angularVelocity.z):0.0;
     poseGap.noteWait();
     poseGap.flushIfDue(nowMs,sink);
+    g_headPoseProof.flushIfDue(nowMs,[](const char* line){nativeTracePuts(line);});   // F42: the per-frame pose proof, once a second, to the trace
   }
   // Owner, after a waitPoses published its frame (publishPoseGap has set latestPoseFrame). Locates the two instants an Elite "now" call can
   // be answered at (pose_cache.h) and publishes them under the keys they were made with. A failure to locate or to read the clock leaves no
   // publication, so every display call takes the hop, which is the answer the cache must equal.
-  void publishPoseCache() {
+  // F101: flatFrame is publishFlatHead's: a flat frame always locates `now` (and `next`), whatever fix.now_pose says; render_locked's latch is a VR frame's.
+  void publishPoseCache(bool flatFrame=false) {
     if(GetCurrentThreadId()!=ownerThread)return;
     // Every failure below invalidates. The previous publication is kept until publish replaces it: its `next` slot is what the in-wait
     // error is measured against.
@@ -1028,9 +1095,16 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     fresh.frameOrientationKnown=latestPoseFrame.orientationKnown;
     for(unsigned i=0;i<4;++i)fresh.frameOrientation[i]=latestPoseFrame.orientation[i];
     fresh.speedKnown=latestPoseFrame.speedKnown;fresh.speedDegPerSec=latestPoseFrame.speedDegPerSec;
-    if(!locatePoseCacheSlot(dispatch,t1,fresh.now)){fail();return;}
+    const bool locked=!flatFrame&&g_nowPoseMode.load(std::memory_order_relaxed)==kNowPoseRenderLocked;
+    if(!locked&&!locatePoseCacheSlot(dispatch,t1,fresh.now)){fail();return;}
+    if(locked) {
+      // F42: the latched render pose of this frame is the one answer a render_locked display call takes (no locate for it).
+      fresh.frame.valid=latestPoseFrame.latchedKnown;fresh.frame.target=display;fresh.frame.pose=latestPoseFrame.latched;
+      for(unsigned i=0;i<4;++i)fresh.frame.orientation[i]=latestPoseFrame.orientation[i];
+      if(!fresh.frame.valid){fail();return;}
+    }
     // The next frame's answer, one period further on. Optional: without it a call made during the next wait takes the hop.
-    if(nextPredictionTime(t1,period,t2)&&!changes.crosses(t1,t2))locatePoseCacheSlot(dispatch,t2,fresh.next);
+    if(!locked&&nextPredictionTime(t1,period,t2)&&!changes.crosses(t1,t2))locatePoseCacheSlot(dispatch,t2,fresh.next);
     poseCache.publish(fresh,poseCache.clockUs());
   }
   // Owner, flat profile: the head at the display time of the empty frame flatClearFrame just waited for, published through publishPoseCache so a
@@ -1044,7 +1118,9 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     if(displayTime<=period||period<=0){poseCache.invalidate();return;}
     latestPoseFrame.valid=true;latestPoseFrame.displayTime=displayTime-period;latestPoseFrame.period=period;
     latestPoseFrame.orientationKnown=false;latestPoseFrame.speedKnown=false;latestPoseFrame.speedDegPerSec=0.0;
-    publishPoseCache();
+    // F101: an empty frame latches no render pose: the last VR frame's latch is not this frame's, and is never published or served from here.
+    latestPoseFrame.latchedKnown=false;latestPoseFrame.latched={};
+    publishPoseCache(true);
   }
   bool locatePoseCacheSlot(const LocatorDispatch& dispatch,XrTime target,PoseCacheSlot& slot) {
     XrSpaceLocation head{XR_TYPE_SPACE_LOCATION};
@@ -1467,7 +1543,10 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       {boundary.clear();return fail(XR_ERROR_POSE_INVALID);}
     render.time=frame.predictedDisplayTime;game.pose=invalidHeadPose(true);
     XrTime gameplayTime=0;
-    if(nextPredictionTime(frame.predictedDisplayTime,frame.predictedDisplayPeriod,gameplayTime)&&
+    if(g_nowPoseMode.load(std::memory_order_relaxed)==kNowPoseRenderLocked) {
+      // F42: the game's pose is the render pose: one latched sample a frame, as the game array, GetLastPoses and GetLastPoseForTrackedDeviceIndex read it.
+      game=render;
+    } else if(nextPredictionTime(frame.predictedDisplayTime,frame.predictedDisplayPeriod,gameplayTime)&&
        !changes.crosses(frame.predictedDisplayTime,gameplayTime)) {
       r=locateHeadAt(api.locateSpace,view,frameSpace,gameplayTime,true,game);
       // A runtime may not locate an additional frame ahead. Leave that
@@ -1488,12 +1567,39 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       gameGeometry.width[eye]=dims.width;gameGeometry.height[eye]=dims.height;
     }
     if(features.acquired()) {
-      EdvrNativeFrameOutput next{sizeof(next),EDVR_NATIVE_FRAME_VERSION_5};
-      if(features.begin(located,poses.read().originGeneration,next)!=S_OK) {
+      EdvrNativeFrameOutput next{sizeof(next),EDVR_NATIVE_FRAME_VERSION_8};
+      // F62b: the head in natural LOCAL at the frame's display time, for a version 10 ask only (input version 3): the headset's own motion,
+      // which none of the seated origin's turns or offsets reach. Not located: the input says so and the frame goes on.
+      float localHead[12];bool haveLocal=false;
+      if(features.askedVersion()>=EDVR_NATIVE_FRAME_VERSION_10&&local) {
+        TimedHeadPose lh{};
+        if(locateHeadAt(api.locateSpace,view,local,frame.predictedDisplayTime,true,lh)==XR_SUCCESS&&lh.pose.bPoseIsValid) {
+          for(int i=0;i<3;++i)for(int j=0;j<4;++j)localHead[4*i+j]=lh.pose.mDeviceToAbsoluteTracking.m[i][j];
+          haveLocal=true;
+        }
+        if(!adsLocalSent){adsLocalSent=true;nativeTracePrintf("ads_head_aim_runtime: first LOCAL head for input version 3: %s\n",haveLocal?"located":"not located");}
+      }
+      // F89: the pose above was located with the alignment of serial eyeAppliedSerial in the seated origin (eyePoll ran before it): said with the pose.
+      if(features.begin(located,poses.read().originGeneration,next,haveLocal?localHead:nullptr,eyeAppliedSerial+1u)!=S_OK) {
         boundary.clear();return fail(XR_ERROR_VALIDATION_FAILURE);
       }
       if(featureFrameKnown&&next.resubmitEnabled!=featureFrame.resubmitEnabled)previousPairValid=false;
       featureFrame=next;featureFrameKnown=true;
+      ++lookRuntimeFrames;lookWanted=double(featureFrame.lookYawTotal);lookGameFrame=featureFrame.lookYawGameFrame;   // F22
+      // F33: the body-align translation (zero from the ladder unless a version 8 answer carried it).
+      eyeProviderSeen=featureFrame.version>=EDVR_NATIVE_FRAME_VERSION_8;
+      for(int i=0;i<3;++i)eyeWanted[i]=double(featureFrame.eyeAlign[i]);
+      eyeSerialSeen=featureFrame.eyeAlignSerial;
+      // F61 (TEMPORARY): the rotation calibration's seated yaw and pitch (a version 9 answer only; anything not finite or over 0.5 rad reads 0).
+      for(int i=0;i<2;++i){const double a=featureFrame.version>=EDVR_NATIVE_FRAME_VERSION_9?double(featureFrame.reservedOffset[i]):0.0;
+        rotWanted[i]=(a==a&&std::fabs(a)<=0.5)?a:0.0;}
+      // F62b (TEMPORARY): the ADS head-aim's seated pitch (a version 10 answer only; the ladder zeroes it otherwise), held to +-60 deg.
+      {const double a=featureFrame.version>=EDVR_NATIVE_FRAME_VERSION_10?double(featureFrame.reservedYaw):0.0;const double lim=1.0471975511965976;
+        adsWanted=a==a?(a>lim?lim:a<-lim?-lim:a):0.0;}
+      if(eyeProviderSeen&&!eyeFirstSeen) {
+        eyeFirstSeen=true;
+        nativeTracePrintf("eye_align_runtime: first version 8 output (wanted_m=(%.4f,%.4f,%.4f), serial %u)\n",eyeWanted[0],eyeWanted[1],eyeWanted[2],unsigned(eyeSerialSeen));
+      }
       if(locatedValid) {
         NativeTrimSettings settings{};
         settings.trimOuterDeg=featureFrame.trimOuterDeg;settings.trimNasalDeg=featureFrame.trimNasalDeg;
@@ -1601,7 +1707,12 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     out=snapshot;lastCompositorResult=XR_SUCCESS;
     publishPoseGap(frame.predictedDisplayTime,frame.predictedDisplayPeriod,located.headPose,render.pose.bPoseIsValid,
       velocity.velocityFlags,velocity.angularVelocity,GetTickCount64(),[](const char* gapLine){nativeTracePuts(gapLine);});
-    if(poseCacheOn.load(std::memory_order_acquire))publishPoseCache();
+    // F42: the frame's latched render pose (the render_locked answers), the frame's proof samples, and the publication for render_locked even with the cache off.
+    latestPoseFrame.latchedKnown=render.pose.bPoseIsValid;latestPoseFrame.latched=render.pose;
+    g_headPoseProof.setFrame(frame.sequence);
+    g_headPoseProof.sample(&render.pose.mDeviceToAbsoluteTracking.m[0][0],render.pose.bPoseIsValid,PoseSamplePath::RenderLatch);
+    g_headPoseProof.sample(&game.pose.mDeviceToAbsoluteTracking.m[0][0],game.pose.bPoseIsValid,PoseSamplePath::GameArray);
+    if(poseCacheOn.load(std::memory_order_acquire)||g_nowPoseMode.load(std::memory_order_relaxed)==kNowPoseRenderLocked)publishPoseCache();
     if(timingFrameActive && FAILED(timing.waitEnd(timingSequence,true,static_cast<int64_t>(frame.predictedDisplayPeriod))))
       timingInvalidate();
     if(timingFrameActive) {
@@ -1626,6 +1737,9 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   vr::EVRCompositorError submitEye(uint64_t generation,vr::EVREye eye,const vr::Texture_t* texture,
       const vr::VRTextureBounds_t* bounds,vr::EVRSubmitFlags flags) override {
     gameFrameCallMs.store(GetTickCount64(),std::memory_order_relaxed); // the game's call, from any thread: flatClearTick's quiet window
+    // Native on-foot F0: the submit shape, one line a second (submit_shape.h). Records what was handed over; changes nothing.
+    submitshape::submitShapeNote(int(eye),texture?texture->handle:nullptr,texture&&texture->eType==vr::API_DirectX,bounds!=nullptr,
+      bounds?bounds->uMin:0.0f,bounds?bounds->vMin:0.0f,bounds?bounds->uMax:0.0f,bounds?bounds->vMax:0.0f,GetTickCount64());
     const auto admission=clearOverlapHandoff();
     return submitEyeAdmitted(generation,eye,texture,bounds,flags,admission);
   }
@@ -2501,12 +2615,22 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
         return XR_ERROR_RUNTIME_FAILURE;
     }
     StereoWallTimes wall{};
-    // Explorer Cam's comfort fade, on a replayed pair as much as a fresh one: the level is told to each draw, so a hitch cannot flash the scene. Only a provider
+    // The comfort fade (comfort_fade.h), on a replayed pair as much as a fresh one: the level is told to each draw, so a hitch cannot flash the scene. Only a provider
     // that is here and answered version 5 has one to give (native_frame_client.h zeroes the rest); the menu quad is another layer and is not touched.
     const float fade=comfortFade();
+    // F106: the left eye's share of the right eye's image (fix.native_on_foot_ads_sight_both_eyes), also on a replayed pair: it is this frame's level, an argument of
+    // each draw, mapped with the views the pair was drawn with. The right eye's hidden area (the visibility mask the game's hidden-area mesh is made from) goes with it
+    // while it is above 0.
+    const float leftShare=leftEyeShare();
+    StereoHiddenArea hidden{};std::shared_ptr<const NativeHiddenMasks> masks;
+    if(leftShare>0.f) {
+      masks=geometry.read().hiddenMasks;
+      if(masks){const auto& m=masks->eyes[1];hidden={m.vertices.data(),uint32_t(m.vertices.size()),m.indices.data(),uint32_t(m.indices.size()),masks->revision};}
+    }
     const auto r=frameWithheld?stereo.renderCaptured(previousViews,previousSpace,previousPair,layer,observer,nullptr,previousPlacement,fade,
-                                                     previousHeadValid?&previousHeadPose:nullptr):
-      stereo.renderCaptured(frameViews,frameSpace,captured,layer,observer,&wall,framePlacement,fade,locatedHeadPose());
+                                                     previousHeadValid?&previousHeadPose:nullptr,leftShare,&hidden):
+      stereo.renderCaptured(frameViews,frameSpace,captured,layer,observer,&wall,framePlacement,fade,locatedHeadPose(),leftShare,&hidden);
+    sharePress(leftShare,r==XR_SUCCESS,frameWithheld);
     submitSample.xrAcquireMs=wall.acquire;submitSample.xrWaitMs=wall.wait;
     submitSample.xrDrawMs=wall.draw;submitSample.xrReleaseMs=wall.release;
     const auto composeClockEnd=QueryPerformanceCounter(&composeEnded);
@@ -2544,6 +2668,58 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   }
   // The level the provider gave this frame, or 0: no provider, no frame read yet, or an answer that carried none.
   float comfortFade() const {return features.acquired()&&featureFrameKnown?comfort::sanitize(featureFrame.fadeAlpha):0.f;}
+  // F106: the LEFT eye's share of the right eye's image (fix.native_on_foot_ads_sight_both_eyes in the d3d11 half): a version 10 answer's leftEyeShare, else 0. A d3d11.dll
+  // from F89 to F105 sends its left eye darkening in the same slot with the same timing (the ADS lock's weight), which this reads as the share. Traced at each edge between
+  // stereo and shared, and once a second while shared.
+  float leftEyeShare() {
+    const float level=features.acquired()&&featureFrameKnown&&featureFrame.version>=EDVR_NATIVE_FRAME_VERSION_10?
+      eyeshare::fromBits(featureFrame.leftEyeShare):0.f;
+    const uint64_t now=GetTickCount64();
+    if((level>0.f)!=leftShareOn||(level>0.f&&now-leftShareLineMs>=1000)) {
+      leftShareOn=level>0.f;leftShareLineMs=now;
+      nativeTracePrintf("left_eye_share,level=%.3f,state=%s,path=left_scene_pass\n",double(level),level>0.f?"shared":"stereo");
+    }
+    return level;
+  }
+  bool leftShareOn=false;uint64_t leftShareLineMs=0;
+  // F106: one press of the sights, from the first frame with a share above 0 to the first back at 0. Counted here; at its end traced (eye_share_press) and told to the
+  // d3d11 half (edvrNoteNativeEyeShare), which writes the graphics log's "ADS sight in both eyes (F106) press" line. A d3d11.dll without the export is not told.
+  struct SharePressState {
+    bool open=false;uint64_t firstUs=0,lastUs=0;float peak=0.f;uint32_t frames=0,full=0,refused=0,replayed=0;StereoShareFacts facts{};
+  } sharePressState;
+  void sharePress(float level,bool rendered,bool replayed) {
+    auto& p=sharePressState;
+    const StereoShareFacts& f=stereo.shareFacts();
+    if(level>0.f) {
+      if(!p.open){p=SharePressState{};p.open=true;p.firstUs=p.lastUs=frameCycleUs();}
+      p.peak=(std::max)(p.peak,level);
+      if(rendered&&f.drawn) {
+        ++p.frames;if(level>=1.f)++p.full;if(replayed)++p.replayed;
+        p.facts=f;p.lastUs=frameCycleUs();
+      } else if(f.refused) ++p.refused;
+      return;
+    }
+    if(!p.open)return;
+    p.open=false;
+    EdvrNativeEyeShareReport report{};report.size=sizeof(report);report.version=EDVR_NATIVE_EYE_SHARE_REPORT_VERSION_1;
+    report.peak=p.peak;report.frames=p.frames;report.framesFull=p.full;report.refused=p.refused;report.replayed=p.replayed;
+    report.seconds=float(double(p.lastUs-p.firstUs)/1e6);
+    for(int k=0;k<3;++k)report.rotationDeg[k]=p.facts.rotationDeg[k];
+    for(int k=0;k<4;++k){report.leftTangents[k]=p.facts.leftTangents[k];report.rightTangents[k]=p.facts.rightTangents[k];}
+    report.coverage=p.facts.coverage;report.coverageWhole=p.facts.coverageWhole;report.hiddenTriangles=p.facts.hiddenTriangles;
+    HRESULT told=S_FALSE;
+    if(graphicsProxy) {
+      const auto note=reinterpret_cast<EdvrNoteNativeEyeShare>(GetProcAddress(graphicsProxy,"edvrNoteNativeEyeShare"));
+      if(note)told=note(&report);
+    }
+    nativeTracePrintf("eye_share_press,peak=%.3f,frames=%u,full=%u,refused=%u,replayed=%u,seconds=%.3f,rotation_deg=%+.3f/%+.3f/%+.3f,"
+                      "left_tan=%.4f/%.4f/%.4f/%.4f,right_tan=%.4f/%.4f/%.4f/%.4f,coverage=%.4f,whole=%.4f,hidden_triangles=%u,told_graphics=%s\n",
+      double(report.peak),report.frames,report.framesFull,report.refused,report.replayed,double(report.seconds),
+      double(report.rotationDeg[0]),double(report.rotationDeg[1]),double(report.rotationDeg[2]),
+      double(report.leftTangents[0]),double(report.leftTangents[1]),double(report.leftTangents[2]),double(report.leftTangents[3]),
+      double(report.rightTangents[0]),double(report.rightTangents[1]),double(report.rightTangents[2]),double(report.rightTangents[3]),
+      double(report.coverage),double(report.coverageWhole),report.hiddenTriangles,told==S_OK?"yes":told==S_FALSE?"no_export":"refused");
+  }
   SystemRead read() const override {return geometry.read();}
   void noteProjection(uint64_t sequence,uint32_t eye,float nearZ,float farZ) noexcept override {
     temporal.noteProjection(sequence,eye,nearZ,farZ); // CPU only; never dispatch/wait on the XR owner
@@ -2557,6 +2733,17 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     poseGap.note(sample);
   }
   bool locateHeadFor(uint64_t generation,vr::ETrackingUniverseOrigin origin,float prediction,const HeadCall& call,vr::TrackedDevicePose_t& out) override {
+    t_nowAnsweredLocked=false;
+    // F42 (now_pose render_locked): a display call is answered with the latched render pose of this frame, before the cache and the owner hop.
+    // A call the latch cannot answer falls through unchanged and is counted.
+    // F101: VR frames only. While flat there is no render latch (publishFlatHead): a flat call takes the flat route below, never a VR frame's latch.
+    if(call.display&&origin==vr::TrackingUniverseSeated&&g_nowPoseMode.load(std::memory_order_relaxed)==kNowPoseRenderLocked&&!flatWaits->flatNow()) {
+      PoseCacheAnswer latched;PoseCacheMiss latchWhy=PoseCacheMiss::Unpublished;
+      if(poseCache.answerFrame(generation,poses.read().originGeneration,latched,latchWhy)) {
+        t_nowAnsweredLocked=true;out=latched.pose;return true;
+      }
+      g_headPoseProof.noteFallback();
+    }
     // A display call under a live publication is answered from it, on this thread, with no owner hop (pose_cache.h). Any other call, and any
     // this cannot answer, takes the hop below unchanged. Not on the owner: the hop re-enters here on the owner thread, and that second
     // pass must locate, not answer from the publication it was sent to replace.
@@ -2580,7 +2767,8 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     }
     if(call.display&&origin==vr::TrackingUniverseSeated&&poseCacheOn.load(std::memory_order_acquire)&&!service.isOwner()) {
       PoseCacheAnswer answer;PoseCacheMiss why=PoseCacheMiss::Unpublished;
-      if(poseCache.answer(generation,poses.read().originGeneration,call.rva,answer,why)) {
+      // F40: with now_pose render the cache's display slots (one period ahead) are not used: every display call takes the owner path.
+      if(g_nowPoseMode.load(std::memory_order_relaxed)==kNowPoseNext&&poseCache.answer(generation,poses.read().originGeneration,call.rva,answer,why)) {
         PoseGapStats::Sample sample{};sample.thread=call.thread;sample.rva=call.rva;sample.predictionSec=prediction;sample.located=true;
         sample.gapKnown=true;sample.gapMs=double(answer.target-answer.display)/1e6;
         if(answer.pose.bPoseIsValid&&answer.frameOrientationKnown){
@@ -2606,6 +2794,12 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   // display time and the target -- and the call is located at now + prediction as it always was.
   bool poseTargetFor(bool display,XrTime now,XrTime& target) {
     if(!display||!latestPoseFrame.valid)return false;
+    // F40 (live now_pose = render): the instant the frame draws at, the WaitGetPoses latch's own time, not one period on.
+    // F101: VR frames only. While flat latestPoseFrame is publishFlatHead's (recorded one period early), so the hop locates where its `now` slot does.
+    if(g_nowPoseMode.load(std::memory_order_relaxed)!=kNowPoseNext&&!flatWaits->flatNow())
+      return answerTime(latestPoseFrame.displayTime,latestPoseFrame.period,now,
+        [](int64_t shown,int64_t,int64_t& out){out=shown;return true;},
+        [&](int64_t from,int64_t to){return changes.crosses(from,to);},&target);
     return answerTime(latestPoseFrame.displayTime,latestPoseFrame.period,now,
       [](int64_t shown,int64_t period,int64_t& out){return nextPredictionTime(shown,period,out);},
       [&](int64_t from,int64_t to){return changes.crosses(from,to);},&target);
@@ -2713,7 +2907,9 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     if(ok) {
       // A player-looking recentre over a stored seat is held for SeatMemory::kRetroMs before the disk hears of it: a transition inside that time
       // takes it back (the ramp's reset lands before the boarding flip is visible).
-      if(seat.noteReset(decision,currentOrigin,now))seatSave(decision==SeatResetDecision::HonourPress?"manual_reset_press":"manual_reset");
+      // F115: the press's place in the store's why (a menu or a load is stored since F115; aboard and on foot as before).
+      if(seat.noteReset(decision,currentOrigin,now))seatSave(decision!=SeatResetDecision::HonourPress?"manual_reset":
+          seat.where()==SeatWhere::Aboard?"manual_reset_press_cockpit":seat.where()==SeatWhere::OnFoot?"manual_reset_press_on_foot":"manual_reset_press_menu");
       else if(decision==SeatResetDecision::HonourStore&&hadSeat)
         nativeTracePrintf("seat_store,action=defer,why=manual_reset,prev=%.3f/%.3f/%.3f/%.1f,new=%.3f/%.3f/%.3f/%.1f,commit_after_ms=%llu\n",
             previousSeat.x,previousSeat.y,previousSeat.z,seatRadToDeg(previousSeat.yaw),currentOrigin.x,currentOrigin.y,currentOrigin.z,
@@ -2746,6 +2942,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     lastResetResult=seated.replace(origin);
     if(lastResetResult!=XR_SUCCESS){geometry.invalidate(geometryGeneration);poses.invalidate(compositorGeneration);dropPoseFrame(poseInvalidationForReason(reason));return false;}
     currentOrigin=seatPoseFromXr(origin);
+    lookRebase();   // F22: the new origin carries no look compensation
     if(!invalidateOrigin(reason)){lastResetResult=XR_ERROR_LIMIT_REACHED;return false;}
     // Verify and attach an event-time sample, not a later cached render pose.
     TimedHeadPose atReset{};
@@ -3018,6 +3215,14 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     XrPosef o{};
     const bool headOk=lastResetResult==XR_SUCCESS&&(head.locationFlags&tracked)==tracked&&seatedOriginFromHead(head.pose,head.locationFlags,o);
     const unsigned long long events=(unsigned long long)(referenceChanges-localHandled);
+    // F115: on foot is no longer a seat, so the runtime's recentre there recentres on foot only (the origin moves, nothing is stored; boarding puts the seat back).
+    if(headOk&&seat.where()==SeatWhere::OnFoot) {
+      seatTraceDecision="pass_through";seatTraceHasCall=false;
+      if(!applySeatedReset(head,"runtime_recentre",true))return;     // retried next poll
+      seat.noteReset(SeatResetDecision::PassThrough,currentOrigin);
+      nativeTracePrintf("seat_local_changed,events=%llu,head=tracked,action=recentre_on_foot,where=on_foot,stored=%u\n",events,unsigned(seat.has()));
+      localHandled=referenceChanges;return;
+    }
     if(headOk) {
       seatTraceDecision="honour_store";seatTraceHasCall=false;
       if(!applySeatedReset(head,"runtime_recentre",true))return;     // retried next poll
@@ -3026,6 +3231,9 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       const SeatPose& s=seat.seat();
       nativeTracePrintf("seat_local_changed,events=%llu,head=tracked,action=store_as_manual,where=%s,window=%u,seat=%.3f/%.3f/%.3f/%.1f\n",
           events,seatWhereName(seat.where()),unsigned(seat.inWindow(GetTickCount64())),s.x,s.y,s.z,seatRadToDeg(s.yaw));
+    } else if(seat.where()==SeatWhere::OnFoot) {
+      // F115: untracked on foot: no seat is made from LOCAL's origin there either (boarding puts the stored one back).
+      nativeTracePrintf("seat_local_changed,events=%llu,head=untracked,action=not_stored_on_foot,where=on_foot\n",events);
     } else {
       SeatPose fallback{};
       if(seated.naturalType()==XR_REFERENCE_SPACE_TYPE_STAGE) {
@@ -3062,12 +3270,383 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     const XrPosef origin=xrFromSeatPose(seat.seat());
     seatTraceDecision=decision;
     const bool ok=applySeatedReset(head,reason,notifyGame,&origin);
-    if(ok){seat.noteOrigin(true);seat.applyDone();}
+    if(ok){seat.noteOrigin(true);seat.applyDone();seatApplyFeatureMark=lookRuntimeFrames;}
     return ok;
+  }
+  // F115: the frame provider's words (the eye alignment, the look's reset, the pitches) wait while a stored seat is due, and after it lands until a frame
+  // answer newer than the apply arrives: the provider's words of the frame before were the on-foot ones, and the seat's new origin has just dropped them
+  // (lookRebase). So a boarding moves the cockpit once, onto the seat, whatever order the seat's word and the provider's zeros reach the runtime in.
+  bool seatApplyAhead() const { return (seat.keep()&&seat.applyPending())||seatApplyFeatureMark==lookRuntimeFrames; }
+  // F22: a new seated origin (applySeatedResetCore) carries no look compensation: the base is the provider's total now.
+  void lookRebase() {
+    lookSeated=currentOrigin;lookSeatedKnown=true;
+    lookBase=featureFrameKnown&&features.acquired()?double(featureFrame.lookYawTotal):0.0;
+    lookWanted=lookBase;lookComp=0;lookRestorePending=false;   // F109: a new origin carries no look turn to return
+    eyeApplied[0]=eyeApplied[1]=eyeApplied[2]=0;   // F33: the new origin carries no body-align translation either
+    eyeAppliedSerial=0;                            // F89: ... which is serial 0, the zero alignment
+    rotApplied[0]=rotApplied[1]=0;                 // F61: nor the calibration rotation (rotPoll applies the wanted value again)
+    adsApplied=0;                                  // F62b: nor the ADS head-aim's pitch (adsPoll applies the wanted value again)
+  }
+  // F61: the seated space's pose for the origin s with the calibration pitch overlay (seatPosePitched about rotAxis through rotPivot). Zero
+  // pitch is exactly xrFromSeatPose(s).
+  // F62b: the ADS head-aim's pitch overlay first (about the seat's right axis for s's yaw, through adsPivot), then F61's. Both zero is exactly
+  // xrFromSeatPose(s), as before.
+  XrPosef seatedPoseFor(const SeatPose& s,double pitch,double adsPitch) const {
+    double adsAxis[3];seatRightAxis(s.yaw,adsAxis);
+    return seatPosePitched(seatPosePitched(xrFromSeatPose(s),adsPivot,adsAxis,adsPitch),rotPivot,rotAxis,pitch);
+  }
+  // F22: WaitGetPoses, no frame open. Turns the seated space about the HEAD by the change in the compensation the origin should carry. The head keeps
+  // its place in the seated space and its reported yaw falls by the body turn the game made for our look input, so the world holds still. Never
+  // gives up the frame. A refusal is traced and the origin is left as it was.
+  // F25: the head's yaw in the SEATED space (the space every pose the game reads is located in), in degrees. False when not located.
+  bool lookSeatedHeadYaw(double* yawDeg) {
+    XrSpaceLocation h{XR_TYPE_SPACE_LOCATION};XrTime t=0;
+    const XrResult r=HeadLocator{}.locate({api.convertTime,api.locateSpace},instance,view,seated.space(),0,h,&t,counterNow,nullptr,boundary.estimateNow());
+    if(r!=XR_SUCCESS||!(h.locationFlags&XR_SPACE_LOCATION_ORIENTATION_VALID_BIT)) return false;
+    *yawDeg=seatRadToDeg(seatPoseYawOf(h.pose).yaw);
+    return true;
+  }
+  void lookPoll() {
+    if(!features.acquired()||!seated.space()||!changes.active()) return;
+    if(!lookSeatedKnown) lookRebase();
+    // F25: the controller disengaged (the key went off, the guard tripped): re-base to where the total is now, so the target is 0 and the origin's
+    // compensation is turned back to 0 at once.
+    if(featureFrameKnown&&featureFrame.lookYawReset!=lookResetSeen) {
+      lookResetSeen=featureFrame.lookYawReset;
+      lookBase=lookWanted;
+      ++lookResets;
+      lookWhy="reset: compensation returned to zero";
+      // F115: always, not only while a compensation is left: turns that came back to a zero total about a head that moved between them leave the seated space
+      // off its origin, and the boarding reset sends this serial to put the cockpit back on the seat exactly.
+      lookRestorePending=true;
+    }
+    const uint64_t now=GetTickCount64();
+    // F109: a reset returns the seated space to its origin itself. Turning it back by the total about the head where it is now (as before) left a translation
+    // whenever the head had moved between the turns: after a look to aim session of a standing player, the cockpit's seat would have moved. The eye alignment's
+    // folded offset goes with it (eyeApplied 0: eyePoll, next in this poll, applies the wanted offset again), as at a new origin (lookRebase).
+    // F115: while the seat memory has a seat to put back (boarding with the origin moved on foot) the restore waits for it: the seat's new origin rebases the
+    // look (lookRebase), so the cockpit moves once, to the seat, and not first to the on-foot origin.
+    if(lookRestorePending&&!state.frameOpen()&&!seatApplyAhead()) {
+      const XrResult r=seated.replace(seatedPoseFor(currentOrigin,rotApplied[1],adsApplied));
+      if(r!=XR_SUCCESS) {
+        ++lookRefusals;lookWhy="seated space replace refused (the reset to the origin)";
+      } else {
+        lookSeated=currentOrigin;lookComp=0;lookRestorePending=false;
+        eyeApplied[0]=eyeApplied[1]=eyeApplied[2]=0;eyeAppliedSerial=0;
+        dropPoseFrame(PoseInvalidation::Other);
+        fillPollRing();
+        ++lookApplies;++lookRestores;lookWhy="reset: back to the seated origin";
+      }
+    }
+    const double target=lookWanted-lookBase;
+    const double delta=target-lookComp;
+    if(!lookRestorePending&&std::fabs(delta)>1e-6&&!state.frameOpen()) {
+      XrSpaceLocation head{XR_TYPE_SPACE_LOCATION};XrTime lookTime=0;
+      const XrResult located=HeadLocator{}.locate({api.convertTime,api.locateSpace},instance,view,local,0,head,&lookTime,counterNow,nullptr,boundary.estimateNow());
+      if(located!=XR_SUCCESS||!(head.locationFlags&XR_SPACE_LOCATION_POSITION_VALID_BIT)) {
+        ++lookRefusals;lookWhy="head position not located";
+      } else {
+        // F62b: the pivot is the head less the applied eye offset (eyeApplied), the point the reported head keeps once eyePoll re-applies that
+        // offset in LOCAL after the fold below; with no eye offset (every case before F62b's position lock) it is the head itself, unchanged.
+        const double hx=head.pose.position.x-eyeApplied[0],hz=head.pose.position.z-eyeApplied[2];
+        const double dx=lookSeated.x-hx,dz=lookSeated.z-hz;
+        const double c=std::cos(delta),s=std::sin(delta);
+        const SeatPose next{hx+c*dx+s*dz,lookSeated.y,hz-s*dx+c*dz,lookSeated.yaw+delta};
+        double yawBefore=0.0;const bool haveBefore=lookSeatedHeadYaw(&yawBefore);
+        const XrResult r=seated.replace(seatedPoseFor(next,rotApplied[1],adsApplied));   // F61/F62b: zero pitches (keys off) are xrFromSeatPose(next)
+        if(r!=XR_SUCCESS) {
+          ++lookRefusals;lookWhy="seated space replace refused";
+        } else {
+          double yawAfter=0.0;const bool haveAfter=lookSeatedHeadYaw(&yawAfter);
+          lookSeated=next;lookComp=target;
+          // F33: the applied body-align translation is carried in lookSeated, so the look's rotation about the head turns it too. Rotate the
+          // applied value the same way, so eyePoll's delta re-applies the commanded seated offset (the wanted value stays fixed in seated space).
+          {const double ce=std::cos(delta),se=std::sin(delta);const double ex=eyeApplied[0],ez=eyeApplied[2];
+           eyeApplied[0]=ce*ex+se*ez;eyeApplied[2]=-se*ex+ce*ez;}
+          dropPoseFrame(PoseInvalidation::Other);
+          fillPollRing();
+          ++lookApplies;lookWindowDeg+=seatRadToDeg(delta);
+          lookAppliedFrame=lookRuntimeFrames;lookAppliedGameFrame=lookGameFrame;lookWhy="";
+          lookYawKnown=haveBefore&&haveAfter;
+          lookYawBeforeDeg=yawBefore;lookYawAfterDeg=yawAfter;
+        }
+      }
+    }
+    if(now-lookLineMs>=5000||lookLineMs==0) {
+      lookLineMs=now;
+      nativeTracePrintf("look_to_aim_runtime,frame=%llu,game_frame=%u,applies=%llu,window_deg=%.3f,comp_deg=%.3f,wanted_deg=%.3f,base_deg=%.3f,refusals=%llu,resets=%llu,"
+          "restores=%llu,head_seated_yaw_before_deg=%.3f,head_seated_yaw_after_deg=%.3f,yaw_known=%u,why=%s\n",
+          (unsigned long long)lookRuntimeFrames,unsigned(lookAppliedGameFrame),(unsigned long long)lookApplies,lookWindowDeg,seatRadToDeg(lookComp),
+          seatRadToDeg(lookWanted),seatRadToDeg(lookBase),(unsigned long long)lookRefusals,(unsigned long long)lookResets,(unsigned long long)lookRestores,
+          lookYawBeforeDeg,lookYawAfterDeg,unsigned(lookYawKnown),lookWhy);
+      lookWindowDeg=0;
+    }
+  }
+  // F33: WaitGetPoses, no frame open. Moves the seated origin by the change in the provider's body-align translation (seated-space metres; yaw
+  // unchanged). The same mechanism as lookPoll: seated.replace on lookSeated, never currentOrigin and never an origin generation bump.
+  void eyePoll() {
+    if(!eyeProviderSeen||!features.acquired()||!seated.space()||!changes.active()) return;
+    const uint64_t now=GetTickCount64();
+    double delta[3]={eyeWanted[0]-eyeApplied[0],eyeWanted[1]-eyeApplied[1],eyeWanted[2]-eyeApplied[2]};
+    const double biggest=std::fmax(std::fabs(delta[0]),std::fmax(std::fabs(delta[1]),std::fabs(delta[2])));
+    if(biggest>1e-6&&!state.frameOpen()&&!seatApplyAhead()) {   // F115: as lookPoll's restore, after the seat's apply
+      if(!lookSeatedKnown) lookRebase();
+      delta[0]=eyeWanted[0]-eyeApplied[0];delta[1]=eyeWanted[1]-eyeApplied[1];delta[2]=eyeWanted[2]-eyeApplied[2];   // lookRebase zeroes eyeApplied
+      SeatPose next=lookSeated;
+      next.x+=delta[0];next.y+=delta[1];next.z+=delta[2];
+      const XrResult r=seated.replace(seatedPoseFor(next,rotApplied[1],adsApplied));   // F61/F62b: zero pitches (keys off) are xrFromSeatPose(next)
+      if(r!=XR_SUCCESS) {
+        ++eyeRefusals;eyeWhy="seated space replace refused";
+      } else {
+        lookSeated=next;
+        for(int i=0;i<3;++i)eyeApplied[i]+=delta[i];
+        dropPoseFrame(PoseInvalidation::Other);
+        fillPollRing();
+        ++eyeApplies;eyeWhy="";
+      }
+    }
+    // F89: what eyeApplied now is, by serial: the wanted alignment once it is (within a micrometre) the applied one. An apply that was refused, or put off because a frame
+    // is open, leaves the serial of the alignment the origin really carries.
+    if(std::fmax(std::fabs(eyeWanted[0]-eyeApplied[0]),std::fmax(std::fabs(eyeWanted[1]-eyeApplied[1]),std::fabs(eyeWanted[2]-eyeApplied[2])))<=1e-6)
+      eyeAppliedSerial=eyeSerialSeen;
+    if(now-eyeLineMs>=5000||eyeLineMs==0) {
+      eyeLineMs=now;
+      nativeTracePrintf("eye_align_runtime,wanted_m=(%.4f,%.4f,%.4f),applied_m=(%.4f,%.4f,%.4f),applies=%llu,refusals=%llu,serial=%u,why=%s\n",
+          eyeWanted[0],eyeWanted[1],eyeWanted[2],eyeApplied[0],eyeApplied[1],eyeApplied[2],
+          (unsigned long long)eyeApplies,(unsigned long long)eyeRefusals,unsigned(eyeSerialSeen),eyeWhy);
+    }
+  }
+  // F123: WaitGetPoses, no frame open. The position-only recentre the provider asks for (a version 10 answer's positionRecentre: 0, or the request's serial; the head containment's
+  // leash and wall contact). The baseline origin goes under the head without changing its yaw or the live look account. The seated space keeps its compensated yaw, applied eye
+  // alignment and ADS pitch at this call and the following polls. Absorbing the look compensation into currentOrigin would make an ADS release leave that yaw behind permanently.
+  // The position is composed through seatedPoseFor, with the ADS pivot at the current head; the existing applied alignment is retained exactly once. The seated space is
+  // replaced in place, as lookPoll and eyePoll do. It is NOT a reset: no origin generation bump, the game is told nothing, the seat memory is not asked and the stored seat never
+  // written (an on-foot origin is never the seat: F115, kOnFootIsSeated). The action succeeds once. A temporarily untracked head is retried for at most 0.5 s while the same ask
+  // stands in the same reference generation; withdrawal, a changed reference, and leaving on foot cancel it. Refused, and said: the seat memory does not place the player on foot, a stored seat
+  // is due (a boarding), the rotation calibration is on (it would be applied twice), the head is not tracked. A frame open leaves the ask pending for the next poll.
+  uint32_t positionRecentreHandled=0;uint64_t positionRecentres=0,positionRecentreRefusals=0;
+  static constexpr uint64_t kPositionRecentreRetryMs=500;
+  uint32_t positionRecentreRetry=0;uint64_t positionRecentreRetryMs=0,positionRecentreRetryOrigin=0,positionRecentreRetryGeometry=0;
+  bool positionRecentreRetryTraced=false;
+  bool positionRecentrePoll() {
+    if(!features.acquired()||!featureFrameKnown||!seated.space()||!changes.active())return false;
+    return positionRecentreDispatch(featureFrame.positionRecentre,GetTickCount64());
+  }
+  // Owner-side delivery, also driven by the rig: a transient locate refusal must not consume a contact latch's only request.
+  bool positionRecentreDispatch(uint32_t ask,uint64_t now) {
+    if(GetCurrentThreadId()!=ownerThread)return false;
+    if(ask==0) {
+      if(positionRecentreRetry)positionRecentreHandled=positionRecentreRetry;
+      positionRecentreRetry=0;
+      return false;
+    }
+    if(ask==positionRecentreHandled)return false;
+    if(ask!=positionRecentreRetry) {
+      positionRecentreRetry=ask;positionRecentreRetryMs=now;positionRecentreRetryOrigin=poses.read().originGeneration;
+      positionRecentreRetryGeometry=geometryGeneration;positionRecentreRetryTraced=false;
+    }
+    const bool expired=now>=positionRecentreRetryMs&&now-positionRecentreRetryMs>=kPositionRecentreRetryMs;
+    if(expired||positionRecentreRetryOrigin!=poses.read().originGeneration||positionRecentreRetryGeometry!=geometryGeneration) {
+      positionRecentreHandled=ask;positionRecentreRetry=0;
+      nativeTracePrintf("position_recentre,serial=%u,ok=0,why=%s\n",unsigned(ask),expired?"tracking retry expired":"reference changed before retry");
+      return false;
+    }
+    if(state.frameOpen())return false;
+    bool retry=false;
+    const bool applied=applyPositionRecentre(ask,&retry);
+    if(applied||!retry){positionRecentreHandled=ask;positionRecentreRetry=0;}
+    return applied;
+  }
+  // The action of an ask (owner thread, no frame open, the seated space there): the rig drives it directly.
+  bool applyPositionRecentre(uint32_t ask,bool* retry=nullptr) {
+    if(retry)*retry=false;
+    const char* why=nullptr;
+    XrSpaceLocation head{XR_TYPE_SPACE_LOCATION};XrTime t=0;
+    if(seat.where()!=SeatWhere::OnFoot)why="the seat memory does not place the player on foot";
+    else if(seatApplyAhead())why="a stored seat is due";
+    else if(std::fabs(rotApplied[0])>1e-6||std::fabs(rotApplied[1])>1e-6||std::fabs(rotWanted[0])>1e-6||std::fabs(rotWanted[1])>1e-6)why="the rotation calibration is on";
+    else {
+      const XrResult r=HeadLocator{}.locate({api.convertTime,api.locateSpace},instance,view,local,0,head,&t,counterNow,nullptr,boundary.estimateNow());
+      constexpr XrSpaceLocationFlags tracked=XR_SPACE_LOCATION_POSITION_TRACKED_BIT|XR_SPACE_LOCATION_ORIENTATION_TRACKED_BIT;
+      if(r!=XR_SUCCESS||(head.locationFlags&tracked)!=tracked){why="the head is not tracked";if(retry)*retry=true;}
+    }
+    if(!why&&!lookSeatedKnown)lookRebase();
+    const SeatPose beforeSeated=lookSeated;
+    const double baselineYaw=currentOrigin.yaw;
+    SeatPose next{};
+    if(!why) {
+      next=SeatPose{head.pose.position.x+eyeApplied[0],head.pose.position.y+eyeApplied[1],head.pose.position.z+eyeApplied[2],lookSeated.yaw};
+      const double oldPivot[3]={adsPivot[0],adsPivot[1],adsPivot[2]};
+      adsPivot[0]=head.pose.position.x;adsPivot[1]=head.pose.position.y;adsPivot[2]=head.pose.position.z;
+      if(seated.replace(seatedPoseFor(next,rotApplied[1],adsApplied))!=XR_SUCCESS) {
+        for(int i=0;i<3;++i)adsPivot[i]=oldPivot[i];
+        why="the seated space replace was refused";
+      }
+    }
+    if(why) {
+      ++positionRecentreRefusals;
+      if(!retry||!*retry||!positionRecentreRetryTraced)
+        nativeTracePrintf("position_recentre,serial=%u,ok=0,why=%s,refusals=%llu\n",unsigned(ask),why,(unsigned long long)positionRecentreRefusals);
+      if(retry&&*retry)positionRecentreRetryTraced=true;
+      return false;
+    }
+    currentOrigin=SeatPose{head.pose.position.x,head.pose.position.y,head.pose.position.z,baselineYaw};
+    lookSeated=next;
+    dropPoseFrame(PoseInvalidation::Other);
+    fillPollRing();
+    ++positionRecentres;
+    nativeTracePrintf("position_recentre,serial=%u,ok=1,n=%llu,from=%.3f/%.3f/%.3f/%.4f,to=%.3f/%.3f/%.3f/%.4f,moved_cm=%.1f,yaw_kept=%u,stored_seat_touched=0,baseline_yaw_deg=%.3f,look_comp_deg=%.3f,look_base_deg=%.3f\n",unsigned(ask),
+        (unsigned long long)positionRecentres,beforeSeated.x,beforeSeated.y,beforeSeated.z,beforeSeated.yaw,next.x,next.y,next.z,next.yaw,
+        seatDistance(beforeSeated,next)*100.0,unsigned(next.yaw==beforeSeated.yaw),seatRadToDeg(baselineYaw),seatRadToDeg(lookComp),seatRadToDeg(lookBase));
+    return true;
+  }
+  // F61: the head's yaw (the seat's sign) and pitch (nose up positive) in the SEATED space, degrees. False when not located.
+  bool rotSeatedHeadYawPitch(double* yawDeg,double* pitchDeg) {
+    XrSpaceLocation h{XR_TYPE_SPACE_LOCATION};XrTime t=0;
+    const XrResult r=HeadLocator{}.locate({api.convertTime,api.locateSpace},instance,view,seated.space(),0,h,&t,counterNow,nullptr,boundary.estimateNow());
+    if(r!=XR_SUCCESS||!(h.locationFlags&XR_SPACE_LOCATION_ORIENTATION_VALID_BIT)) return false;
+    const double q[4]={h.pose.orientation.x,h.pose.orientation.y,h.pose.orientation.z,h.pose.orientation.w},back[3]={0,0,-1};
+    double fwd[3];seatQuatApply(q,back,fwd);
+    *yawDeg=seatRadToDeg(seatPoseYawOf(h.pose).yaw);
+    *pitchDeg=seatRadToDeg(std::asin(std::fmax(-1.0,std::fmin(1.0,fwd[1]))));
+    return true;
+  }
+  // F61 (TEMPORARY): WaitGetPoses, no frame open. Turns the seated origin to the calibration rotation the provider wants: the yaw about the
+  // vertical through the head (lookPoll's turn), the pitch about the head's right axis (the seatedPoseFor overlay). The pivot and the axis are
+  // the head's when the rotation leaves zero, and are kept until it is zero again, so the return is the exact inverse. Each apply is traced
+  // (the rotation applied and the head's seated yaw and pitch before and after); a refusal at most every 5 s. Nothing runs while both the
+  // wanted and the applied rotation are zero (the key off).
+  void rotPoll() {
+    if(!features.acquired()||!seated.space()||!changes.active()) return;
+    const uint64_t now=GetTickCount64();
+    if((std::fabs(rotWanted[0]-rotApplied[0])>1e-6||std::fabs(rotWanted[1]-rotApplied[1])>1e-6)&&!state.frameOpen()&&!seatApplyAhead()) {   // F115
+      if(!lookSeatedKnown) lookRebase();   // lookRebase zeroes rotApplied
+      const double dyaw=rotWanted[0]-rotApplied[0];
+      XrSpaceLocation head{XR_TYPE_SPACE_LOCATION};XrTime rotTime=0;
+      const XrResult located=HeadLocator{}.locate({api.convertTime,api.locateSpace},instance,view,local,0,head,&rotTime,counterNow,nullptr,boundary.estimateNow());
+      if(located!=XR_SUCCESS||!(head.locationFlags&XR_SPACE_LOCATION_POSITION_VALID_BIT)||!(head.locationFlags&XR_SPACE_LOCATION_ORIENTATION_VALID_BIT)) {
+        ++rotRefusals;rotWhy="head pose not located";
+      } else {
+        const bool fromZero=rotApplied[0]==0.0&&rotApplied[1]==0.0;
+        double pivot[3]={rotPivot[0],rotPivot[1],rotPivot[2]},axis[3]={rotAxis[0],rotAxis[1],rotAxis[2]};
+        if(fromZero) {
+          pivot[0]=head.pose.position.x;pivot[1]=head.pose.position.y;pivot[2]=head.pose.position.z;
+          const double q[4]={head.pose.orientation.x,head.pose.orientation.y,head.pose.orientation.z,head.pose.orientation.w},right[3]={1,0,0};
+          seatQuatApply(q,right,axis);
+        }
+        SeatPose next=lookSeated;
+        if(std::fabs(dyaw)>1e-9) {
+          const double c=std::cos(dyaw),s=std::sin(dyaw),dx=lookSeated.x-pivot[0],dz=lookSeated.z-pivot[2];
+          next=SeatPose{pivot[0]+c*dx+s*dz,lookSeated.y,pivot[2]-s*dx+c*dz,lookSeated.yaw+dyaw};
+        }
+        double yawBefore=0.0,pitchBefore=0.0;const bool haveBefore=rotSeatedHeadYawPitch(&yawBefore,&pitchBefore);
+        const double keepPivot[3]={rotPivot[0],rotPivot[1],rotPivot[2]},keepAxis[3]={rotAxis[0],rotAxis[1],rotAxis[2]};
+        for(int i=0;i<3;++i){rotPivot[i]=pivot[i];rotAxis[i]=axis[i];}
+        const XrResult r=seated.replace(seatedPoseFor(next,rotWanted[1],adsApplied));
+        if(r!=XR_SUCCESS) {
+          for(int i=0;i<3;++i){rotPivot[i]=keepPivot[i];rotAxis[i]=keepAxis[i];}
+          ++rotRefusals;rotWhy="seated space replace refused";
+        } else {
+          lookSeated=next;
+          {const double ce=std::cos(dyaw),se=std::sin(dyaw);const double ex=eyeApplied[0],ez=eyeApplied[2];   // lookPoll's fold
+           eyeApplied[0]=ce*ex+se*ez;eyeApplied[2]=-se*ex+ce*ez;}
+          rotApplied[0]=rotWanted[0];rotApplied[1]=rotWanted[1];
+          dropPoseFrame(PoseInvalidation::Other);
+          fillPollRing();
+          ++rotApplies;rotWhy="";
+          double yawAfter=0.0,pitchAfter=0.0;const bool haveAfter=rotSeatedHeadYawPitch(&yawAfter,&pitchAfter);
+          nativeTracePrintf("rot_calibrate_runtime,applied_yaw_deg=%.3f,applied_pitch_deg=%.3f,head_seated_yaw_before_deg=%.3f,head_seated_yaw_after_deg=%.3f,"
+              "head_seated_pitch_before_deg=%.3f,head_seated_pitch_after_deg=%.3f,head_known=%u,pivot=%.3f/%.3f/%.3f,axis=%.3f/%.3f/%.3f,applies=%llu,refusals=%llu\n",
+              seatRadToDeg(rotApplied[0]),seatRadToDeg(rotApplied[1]),yawBefore,yawAfter,pitchBefore,pitchAfter,unsigned(haveBefore&&haveAfter),
+              rotPivot[0],rotPivot[1],rotPivot[2],rotAxis[0],rotAxis[1],rotAxis[2],(unsigned long long)rotApplies,(unsigned long long)rotRefusals);
+        }
+      }
+    }
+    if(rotWhy[0]&&now-rotLineMs>=5000) {
+      rotLineMs=now;
+      nativeTracePrintf("rot_calibrate_runtime,wanted_deg=(%.3f,%.3f),applied_deg=(%.3f,%.3f),applies=%llu,refusals=%llu,why=%s\n",
+          seatRadToDeg(rotWanted[0]),seatRadToDeg(rotWanted[1]),seatRadToDeg(rotApplied[0]),seatRadToDeg(rotApplied[1]),
+          (unsigned long long)rotApplies,(unsigned long long)rotRefusals,rotWhy);
+    }
+  }
+  // F62b (TEMPORARY): WaitGetPoses, no frame open. Turns the seated space to the ADS head-aim's pitch the provider wants: an overlay about the
+  // seat's right axis (for the seat's own yaw, so a yaw before it never makes it a roll) through the head, so the head keeps its place in the
+  // seated space and its reported pitch falls by the pitch the game's aim took. Re-applied when the wanted value changes, and while it is not
+  // zero whenever the head has moved over 5 mm from the overlay's pivot. Nothing runs while both the wanted and the applied pitch are zero.
+  void adsPoll() {
+    if(!features.acquired()||!seated.space()||!changes.active()) return;
+    const uint64_t now=GetTickCount64();
+    const bool change=std::fabs(adsWanted-adsApplied)>1e-6;
+    if((change||adsApplied!=0.0)&&!state.frameOpen()&&!seatApplyAhead()) {   // F115
+      if(!lookSeatedKnown) lookRebase();   // lookRebase zeroes adsApplied
+      XrSpaceLocation head{XR_TYPE_SPACE_LOCATION};XrTime adsTime=0;
+      const XrResult located=HeadLocator{}.locate({api.convertTime,api.locateSpace},instance,view,local,0,head,&adsTime,counterNow,nullptr,boundary.estimateNow());
+      if(located!=XR_SUCCESS||!(head.locationFlags&XR_SPACE_LOCATION_POSITION_VALID_BIT)) {
+        ++adsRefusals;adsWhy="head position not located";
+      } else {
+        const double h[3]={head.pose.position.x,head.pose.position.y,head.pose.position.z};
+        const double mv[3]={h[0]-adsPivot[0],h[1]-adsPivot[1],h[2]-adsPivot[2]};
+        const bool moved=std::sqrt(mv[0]*mv[0]+mv[1]*mv[1]+mv[2]*mv[2])>0.005;
+        if(std::fabs(adsWanted-adsApplied)>1e-6||(adsApplied!=0.0&&moved)) {
+          const double keep[3]={adsPivot[0],adsPivot[1],adsPivot[2]};
+          for(int i=0;i<3;++i)adsPivot[i]=h[i];
+          const XrResult r=seated.replace(seatedPoseFor(lookSeated,rotApplied[1],adsWanted));
+          if(r!=XR_SUCCESS) {
+            for(int i=0;i<3;++i)adsPivot[i]=keep[i];
+            ++adsRefusals;adsWhy="seated space replace refused";
+          } else {
+            if(std::fabs(adsWanted-adsApplied)<=1e-6)++adsPivotMoves;
+            adsApplied=adsWanted;
+            dropPoseFrame(PoseInvalidation::Other);
+            fillPollRing();
+            ++adsApplies;adsWhy="";
+          }
+        }
+      }
+    }
+    if((adsApplied!=0.0||adsWanted!=0.0||adsWhy[0])&&now-adsLineMs>=5000) {
+      adsLineMs=now;
+      nativeTracePrintf("ads_head_aim_runtime,wanted_pitch_deg=%.3f,applied_pitch_deg=%.3f,applies=%llu,pivot_moves=%llu,refusals=%llu,"
+          "look_comp_deg=%.3f,pivot=%.3f/%.3f/%.3f,why=%s\n",seatRadToDeg(adsWanted),seatRadToDeg(adsApplied),(unsigned long long)adsApplies,
+          (unsigned long long)adsPivotMoves,(unsigned long long)adsRefusals,seatRadToDeg(lookComp),adsPivot[0],adsPivot[1],adsPivot[2],adsWhy);
+    }
+  }
+  // F87h (read only): WaitGetPoses, no frame open. The VIEW space in the natural space every poll (its step in y, its tracking flags), LOCAL in the natural space
+  // ten times a second (STAGE natural only: with LOCAL natural the two are the same space), and one line a second. Changes nothing.
+  void headTrackSample() {
+    if(!eyeProviderSeen||!features.acquired()||!session||!local)return;
+    const uint64_t now=GetTickCount64();
+    constexpr XrSpaceLocationFlags posBit=XR_SPACE_LOCATION_POSITION_TRACKED_BIT,oriBit=XR_SPACE_LOCATION_ORIENTATION_TRACKED_BIT;
+    XrSpaceLocation h{XR_TYPE_SPACE_LOCATION};XrTime t=0;
+    if(HeadLocator{}.locate({api.convertTime,api.locateSpace},instance,view,local,0,h,&t,counterNow,nullptr,boundary.estimateNow())==XR_SUCCESS) {
+      const double pos[3]={h.pose.position.x,h.pose.position.y,h.pose.position.z};
+      const double q[4]={h.pose.orientation.x,h.pose.orientation.y,h.pose.orientation.z,h.pose.orientation.w},back[3]={0,0,-1};
+      double fwd[3];seatQuatApply(q,back,fwd);
+      headProbe.noteView((h.locationFlags&posBit)!=0,(h.locationFlags&oriBit)!=0,pos,seatRadToDeg(std::asin(std::fmax(-1.0,std::fmin(1.0,fwd[1])))));
+    }
+    if(seated.naturalType()==XR_REFERENCE_SPACE_TYPE_STAGE&&xrLocal&&now-headProbeLocalMs>=100) {
+      headProbeLocalMs=now;
+      XrSpaceLocation lo{XR_TYPE_SPACE_LOCATION};
+      if(HeadLocator{}.locate({api.convertTime,api.locateSpace},instance,xrLocal,local,0,lo,nullptr,counterNow,nullptr,boundary.estimateNow())==XR_SUCCESS) {
+        const double pos[3]={lo.pose.position.x,lo.pose.position.y,lo.pose.position.z};
+        headProbe.noteLocal(pos,seatRadToDeg(seatPoseYawOf(lo.pose).yaw));
+      }
+    }
+    if(headProbeLineMs==0)headProbeLineMs=now;
+    if(now-headProbeLineMs>=1000) {
+      headProbeLineMs=now;
+      const headtrack::Probe& p=headProbe;
+      nativeTracePrintf("head tracking (F87h, runtime) 1 s: VIEW in STAGE (%.3f %.3f %.3f) pitch %+.1f; LOCAL in STAGE (%.3f %.3f %.3f) yaw %+.2f moved %.1f mm; tracked pos %u/%u orient %u/%u; "
+          "space-change events %u; max |dy| a frame %.1f cm\n",p.view[0],p.view[1],p.view[2],p.pitchDeg,p.local[0],p.local[1],p.local[2],p.localYawDeg,p.localMovedMm(),
+          p.posTracked,p.posN,p.oriTracked,p.oriN,unsigned(referenceChanges-headProbeEventsAtLine),p.maxDy*100.0);
+      headProbeEventsAtLine=referenceChanges;
+      headProbe.lineDone();
+    }
   }
   // WaitGetPoses, no frame open. True when the origin moved (the caller gives up this frame's pose update, as the intro recentre always did).
   bool seatPoll() {
     if(GetCurrentThreadId()!=ownerThread)return false;
+    headTrackSample();   // F87h (read only)
     seatEnsureLoaded();
     const uint64_t now=GetTickCount64();
     if(!seatRefsTraced)seatTraceReferenceSpaces();
@@ -3106,6 +3685,11 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       seatMeterNextPeriodic=now+30000;
       seatMeterLine("periodic");
     }
+    positionRecentrePoll();   // F123: the leash's and the wall contact's position-only recentre, before the polls that apply the look, the alignment and the overlays again
+    lookPoll();   // F22: the look's compensation, applied with no frame open (never gives up the frame)
+    eyePoll();    // F33: the body-align translation, applied the same way
+    rotPoll();    // F61 (TEMPORARY): the rotation calibration, applied the same way (nothing while its key is off)
+    adsPoll();    // F62b (TEMPORARY): the ADS head-aim's pitch, applied the same way (nothing while it is zero)
     return moved;
   }
   enum class SeatIntro {Todays,Applied,Skipped,Sampling,Retry};

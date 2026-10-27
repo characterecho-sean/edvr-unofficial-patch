@@ -125,6 +125,51 @@ template<class Check> void runFlatHeadCacheCases(Check&& check) {
   check(publishFlat(display), "(a flat head frame is published after the switch back)");
   locates = f.fake.locates;
   check(locate(p, 0x4E5555) && f.fake.locates == locates && waits->take().cacheAnswers == 1, "VR to flat: the next locate is answered by the flat route");
+
+  // ---- F101: fix.now_pose = render_locked left set across a VR to flat switch ---------------------------------------------------------------------
+  // The flat publication locates `now` whatever the mode, and a flat call is never answered with the VR frame's render latch (nor sent to the hop for
+  // the want of one); the hop in flat locates at the empty frame's display time, where the `now` slot is. In VR the latch still answers.
+  {
+    g_nowPoseMode.store(kNowPoseRenderLocked);
+    vr::TrackedDevicePose_t latch{};
+    latch.bPoseIsValid = true; latch.bDeviceIsConnected = true;
+    latch.mDeviceToAbsoluteTracking.m[0][0] = latch.mDeviceToAbsoluteTracking.m[1][1] = latch.mDeviceToAbsoluteTracking.m[2][2] = 1.0f;
+    latch.mDeviceToAbsoluteTracking.m[0][3] = 9.0f;   // 9 m to the side: no head the fake locates is there
+    const auto isLatch = [](const vr::TrackedDevicePose_t& q) { return q.mDeviceToAbsoluteTracking.m[0][3] == 9.0f; };
+    const auto isFlatHead = [&](const vr::TrackedDevicePose_t& q) {
+      return q.bPoseIsValid && std::memcmp(&q.mDeviceToAbsoluteTracking, &cached.mDeviceToAbsoluteTracking, sizeof(q.mDeviceToAbsoluteTracking)) == 0;
+    };
+    gFlat = false;
+    check(f.owner.invoke([&] {
+            h.dropPoseFrame();
+            h.publishPoseGap(display, period, XrPosef{{0, 0, 0, 1}, {0, 0, 0}}, true, XR_SPACE_VELOCITY_ANGULAR_VALID_BIT, turn, 1000, [](const char*) {});
+            h.latestPoseFrame.latchedKnown = true; h.latestPoseFrame.latched = latch;
+            h.publishPoseCache();
+          }), "(F101: a VR frame and its render latch are published under render_locked)");
+    waits->take();
+    locates = f.fake.locates;
+    vr::TrackedDevicePose_t vrAnswer{};
+    check(locate(vrAnswer, 0x4E3881) && f.fake.locates == locates && isLatch(vrAnswer), "F101 (control): in VR, render_locked answers a display call with the frame's latch");
+    gFlat = true;
+    check(publishFlat(display), "(F101: a flat head frame is published with render_locked still set)");
+    waits->take();
+    locates = f.fake.locates;
+    vr::TrackedDevicePose_t flatAnswer{};
+    check(locate(flatAnswer, 0x4E5555) && f.fake.locates == locates && !isLatch(flatAnswer) && isFlatHead(flatAnswer) && waits->take().cacheAnswers == 1,
+          "F101: VR to flat with render_locked set: a flat call is answered from the flat publication's now slot (the head at the empty frame's display time), not the VR latch");
+    check(f.owner.invoke([&] { h.latestPoseFrame.latchedKnown = false; h.publishFlatHead(display, period); }),
+          "(F101: a flat head frame is published after a VR frame with no latch)");
+    waits->take();
+    locates = f.fake.locates;
+    check(locate(flatAnswer, 0x4E5555) && f.fake.locates == locates && isFlatHead(flatAnswer) && waits->take().cacheAnswers == 1,
+          "F101: with no VR latch known the flat publication still stands (not withdrawn): the call is answered without a hop");
+    gUs += 1500000;   // older than the cap: the call hops
+    locates = f.fake.locates;
+    check(locate(flatAnswer, 0x4E5555) && f.fake.locates == locates + 1 && f.fake.lastTime == display && !isLatch(flatAnswer),
+          "F101: the hop in flat with render_locked set locates at the empty frame's display time (the now slot's), not a period early, never the latch");
+    waits->take();
+    g_nowPoseMode.store(kNowPoseNext);
+  }
   f.owner.stop();
   gFlat = true;
 }

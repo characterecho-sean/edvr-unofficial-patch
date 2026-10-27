@@ -299,7 +299,7 @@ void noteDrawImpl(ID3D11DeviceContext* ctx) {
                 if (!g_noted[0]) {
                     g_noted[0] = true;
                     Log::get().note("celestial motion: planet patch draws are being read from the CPU shadow (VS b2 %u bytes, VS b0 rows 9-11): "
-                                    "eye %d, frame %u, first patch at %.0f m, body radius %.0f m. A 'celestial motion 5s:' line follows each 5 s.",
+                                    "eye %d, frame %u, first patch at %.0f m, body radius %.0f m. A 'celestial motion 5s:' line follows each 10 s (its historical line name).",
                                     w2->bytes, eye, g_stamp, cel::distanceOf(p), static_cast<double>(p.body[3]));
                 }
             }
@@ -448,9 +448,9 @@ bool recordsImpl(ID3D11DeviceContext* ctx, int eye, const float tanNow[4], int w
 }
 
 // ---------------------------------------------------------------------------------------------------------------
-// The 5 s census
+// The 10 s census (the historical 5s line kinds remain for readers)
 // ---------------------------------------------------------------------------------------------------------------
-void report() {
+void report(double windowSeconds = 10.0) {
     const Counters& c = g_win;
     const double frames = c.frames ? static_cast<double>(c.frames) : 1.0;
     const double eyeFrames = c.eyeFrames ? static_cast<double>(c.eyeFrames) : 1.0;
@@ -465,38 +465,38 @@ void report() {
     // A window the gate held closed throughout has nothing else to say: one short line. A line that never appears means the
     // module never ran; this one says it ran and stood aside (and the transition lines say why).
     if (c.frames > 0 && c.gatedFrames >= c.frames) {
-        Log::get().note("celestial motion 5s: frames=%llu gated-off=%llu (supercruise gate: %s); no planet patch capture, no records, no path-12 pixels this window",
-                        static_cast<ull>(c.frames), static_cast<ull>(c.gatedFrames), gateName(g_gate));
+        Log::get().note("celestial motion 5s: frames=%llu gated-off=%llu (supercruise gate: %s); no planet patch capture, no records, no path-12 pixels this window; window %.1f s",
+                        static_cast<ull>(c.frames), static_cast<ull>(c.gatedFrames), gateName(g_gate), windowSeconds);
         return;
     }
     // Three lines, each well under the 1000-character budget at 20-digit counters (the rig prints and pins the worst): the capture, then
     // the consumer's census, then the records, the tee, the cost and the gate. The first keeps the old key and now carries the gate's count.
     Log::get().note(
         "celestial motion 5s: frames=%llu gated-off=%llu draws=%llu captured=%llu declined[off-eye=%llu unwatched=%llu no-b0=%llu no-b2=%llu size=%llu "
-        "constants=%llu duplicate=%llu cap=%llu]",
+        "constants=%llu duplicate=%llu cap=%llu]; window %.1f s",
         static_cast<ull>(c.frames), static_cast<ull>(c.gatedFrames), static_cast<ull>(c.draws), static_cast<ull>(c.captured),
         static_cast<ull>(c.declined[kDecOffEye]), static_cast<ull>(c.declined[kDecUnwatched]),
         static_cast<ull>(c.declined[kDecNoB0]), static_cast<ull>(c.declined[kDecNoB2]),
         static_cast<ull>(c.declined[kDecSize]), static_cast<ull>(c.declined[kDecConstants]),
-        static_cast<ull>(c.declined[kDecDuplicate]), static_cast<ull>(c.declined[kDecCap]));
+        static_cast<ull>(c.declined[kDecDuplicate]), static_cast<ull>(c.declined[kDecCap]), windowSeconds);
     Log::get().note(
         "celestial motion 5s (2/3): consumer=%llu eye-frames=%llu patches/frame=%.1f bodies/frame=%.1f (behind=%llu off-screen=%llu) "
-        "matched/frame=%.1f unmatched=%llu; fallback[no-previous-frame=%llu no-previous-body=%llu no-match=%llu implausible=%llu disagree=%llu]",
+        "matched/frame=%.1f unmatched=%llu; fallback[no-previous-frame=%llu no-previous-body=%llu no-match=%llu implausible=%llu disagree=%llu]; window %.1f s",
         static_cast<ull>(c.consumerCalls), static_cast<ull>(c.eyeFrames),
         static_cast<double>(c.patches) / eyeFrames, static_cast<double>(c.bodies) / eyeFrames,
         static_cast<ull>(c.behind), static_cast<ull>(c.offscreen),
         static_cast<double>(c.matched) / eyeFrames, static_cast<ull>(c.unmatched),
         static_cast<ull>(c.fallbacks[cel::kFbNoPrevFrame]), static_cast<ull>(c.fallbacks[cel::kFbNoPrevBody]),
         static_cast<ull>(c.fallbacks[cel::kFbNoMatch]), static_cast<ull>(c.fallbacks[cel::kFbImplausible]),
-        static_cast<ull>(c.fallbacks[cel::kFbDisagree]));
+        static_cast<ull>(c.fallbacks[cel::kFbDisagree]), windowSeconds);
     Log::get().note(
         "celestial motion 5s (3/3): records=%llu (%.2f/frame, %llu with a shell) uploads=%llu max|t|=%.1f m/frame pixels=%s; "
         "tee[map=%llu update=%llu invalidated=%llu watched=%u copy=%.2fus]; cpu[capture=%.2fus/draw build=%.1fus/eye-frame total=%.3f ms/frame]; "
-        "gate=%s (%llu of %llu frames gated off)",
+        "gate=%s (%llu of %llu frames gated off); window %.1f s",
         static_cast<ull>(c.records), static_cast<double>(c.records) / eyeFrames, static_cast<ull>(c.shellRecords), static_cast<ull>(c.uploads),
         c.maxDisplacement, pixels,
         static_cast<ull>(c.teeMap), static_cast<ull>(c.teeUpdate), static_cast<ull>(c.teeInvalid),
-        g_watched, teeUs, captureUs, buildUs, totalMs, gateName(g_gate), static_cast<ull>(c.gatedFrames), static_cast<ull>(c.frames));
+        g_watched, teeUs, captureUs, buildUs, totalMs, gateName(g_gate), static_cast<ull>(c.gatedFrames), static_cast<ull>(c.frames), windowSeconds);
 }
 }  // namespace
 
@@ -631,7 +631,7 @@ void celestialMotionNotePixels(uint32_t pixels) {
 }
 
 void celestialMotionFrameBoundary() {
-    // Armed (configured on, not stood down), live or not: a closed gate still counts its frames and keeps the 5 s line alive, so a
+    // Armed (configured on, not stood down), live or not: a closed gate still counts its frames and keeps the 10 s census alive, so a
     // log can tell "the gate held" from "the module never ran".
     if (!g_enabled || g_failed) return;
     ++g_stamp;
@@ -641,9 +641,10 @@ void celestialMotionFrameBoundary() {
     LARGE_INTEGER q{};
     QueryPerformanceFrequency(&q);
     if (!g_lastReport) g_lastReport = now;
-    if (q.QuadPart > 0 && now - g_lastReport >= static_cast<uint64_t>(q.QuadPart) * 5u) {
+    if (q.QuadPart > 0 && now - g_lastReport >= static_cast<uint64_t>(q.QuadPart) * 10u) {
+        const double windowSeconds = static_cast<double>(now - g_lastReport) / static_cast<double>(q.QuadPart);
         g_lastReport = now;
-        guardedBudget(g_budget, [&] { report(); });
+        guardedBudget(g_budget, [&] { report(windowSeconds); });
         g_win = Counters{};
     }
 }

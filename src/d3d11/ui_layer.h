@@ -362,6 +362,9 @@ void uiLayerNoteDepthClear(void* dsv, uint32_t flags, float depth, uint8_t stenc
 // could not be told. Identities only, never dereferenced.
 void uiLayerNoteCopy(const void* destination, const void* source);
 void uiLayerNoteSubmitted(uint64_t sequence, uint32_t eye, const void* submitted);
+// F121c: what the game last submitted for an eye (0 left, 1 right), as uiLayerNoteSubmitted was told; null for none yet or an eye other than 0 or 1. An identity, never
+// dereferenced: remlok_fix.cpp's eye-trust guard asks which eye a visor draw's target was submitted for.
+const void* uiLayerSubmittedTarget(uint32_t eye);
 
 // The door, from the native runtime's submit chain (native_temporal.cpp and
 // native_sharpen.cpp, both on the thread the game submits from):
@@ -413,6 +416,19 @@ bool uiLayerDoorFromPass(uint32_t eye);
 // each tonemap admission: the flat frame's number, the raster phase the draw's camera carries in render pixels (right and
 // down), and the scene's render size R. Read only in the flat profile; cleared at the frame boundary.
 void uiLayerFlatSetDraw(uint64_t frame, float jx, float jy, uint32_t renderW, uint32_t renderH);
+// The flat profile's HUD edge smoothing (fix.hud_antialiasing; ui_layer_smaa.h; docs/design-flat-ui-quality-2026-10-05.md, "2026-10-24: edge smoothing for
+// the HUD layer"): SMAA 1x over the layer's finished 8-bit content before the composite downsamples it, so the HUD gets the edge smoothing the game's own
+// anti-aliasing would have given it. The adapter asks for the NEXT composite only, once a frame, with the key it just read: `on` smooths the layer, false leaves it as
+// it was. uiLayerComposite takes the ask on entry and clears it, so a caller that never asks (the VR profiles) never sees it set. The result is what that
+// composite did: kNone (no layer composite ran), kRaw (it ran on the layer as is, as asked), kSmoothed (it read the SMAA output) or kFault (smoothing was asked
+// for, the SMAA resources could not be had, and it read the raw layer); w x h is the layer's size at that composite.
+enum class UiLayerEdgeSmoothing : uint8_t { kNone = 0, kRaw, kSmoothed, kFault };
+struct UiLayerEdgeSmoothingResult {
+    UiLayerEdgeSmoothing outcome = UiLayerEdgeSmoothing::kNone;
+    uint32_t w = 0, h = 0;
+};
+void uiLayerFlatSetEdgeSmoothing(bool on);
+UiLayerEdgeSmoothingResult uiLayerFlatEdgeSmoothingResult();
 // The flat profile's tonemap admission (2026-10-09): the game's tone pass recognised by its known pair (flat_mono_frame.h
 // toneHdrSlot), whatever its vertex count, reading eye 0's fresh HUD or weapons target -- or `alias`, a plain copy of
 // `aliasSource` this frame (the HDR route's post chain copies H before the tone) -- at `hdrSlot`. 1: armed, re-issue between uiLayerCrispToneBegin/End;
@@ -449,6 +465,9 @@ int uiLayerLastDecision();
 // routing to tell "decided: left, with this reason" from "no decision ran for this draw", which uiLayerLastDecision alone cannot (it
 // keeps the previous draw's value, and 0 is a take).
 uint32_t uiLayerDecisionCount();
+// F46 (TEMPORARY, the native on-foot marker probe): the eye whose layer the game's target `res` was redirected from -- the 8-bit layer's
+// target or the HDR HUD layer's, as each eye's last redirected frame left them -- or -1 when neither eye's layer names it. Read only.
+int uiLayerEyeOfGameTarget(const void* res);
 // A game draw the layer did not take, while watching: a write of the depth-stencil buffer a seed copied makes the seed
 // stale (uiLayerNoteOther's first step, alone -- the flat profile has no after-the-UI take).
 void uiLayerNoteSceneDraw(ID3D11DeviceContext* ctx, uint32_t count, uint32_t instances, char drawKind);

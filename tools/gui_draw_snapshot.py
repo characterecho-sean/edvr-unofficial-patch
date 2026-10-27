@@ -42,12 +42,19 @@ def read(path):
             raise ValueError('GUI metadata must be an object')
         return item
 
-    if take(8) != b'EDVRGUI1' or u32() != 1:
+    if take(8) != b'EDVRGUI1':
+        raise ValueError('Unsupported GUI snapshot')
+    version = u32()
+    if version not in (1, 2):
         raise ValueError('Unsupported GUI snapshot')
     nd, nb, declined, missing_layouts = (u32() for _ in range(4))
+    nroutes = u32() if version == 2 else 0
     if nd > 512 or nb > 8192:
         raise ValueError('GUI capture count exceeds budget')
     draws = [meta() for _ in range(nd)]
+    routes = [meta() for _ in range(nroutes)]
+    if nroutes > 64:
+        raise ValueError('GUI eye-route count exceeds budget')
     blobs, total = [], 0
     for _ in range(nb):
         b = meta()
@@ -84,8 +91,26 @@ def read(path):
                         raise ValueError('Invalid GUI texture reference')
         if len(d['layout']) > 32 or any(len(e) != 22 for e in d['layout']):
             raise ValueError('Invalid GUI input layout')
+    for route in routes:
+        if route.get('route') != 'source_resource_candidate' or route.get('native_part_join') != 'unmatched':
+            raise ValueError('Invalid GUI eye-route evidence')
+        for key in ('vs_constants', 'ps_constants'):
+            if len(route.get(key, [])) != 4:
+                raise ValueError('Invalid GUI eye-route constants')
+            for value in route[key]:
+                index(value)
+        if len(route.get('streams', [])) != 4 or not isinstance(route.get('indices'), dict):
+            raise ValueError('Invalid GUI eye-route geometry')
+        if len(route.get('vs_srvs', [])) != 34:
+            raise ValueError('Invalid GUI eye-route shader resources')
+        for view in route['vs_srvs']:
+            if view is not None:
+                index(view['blob'])
+        for stream in route['streams']:
+            index(stream['blob'])
+        index(route['indices']['blob'])
     return dict(draws=draws, blobs=blobs, declined=declined,
-                missing_layouts=missing_layouts, failures=failures)
+                routes=routes, missing_layouts=missing_layouts, failures=failures)
 
 
 def verify_fixture(c):
@@ -106,10 +131,19 @@ def verify_fixture(c):
 
 def self_test():
     empty = b'EDVRGUI1' + struct.pack('<6I', 1, 0, 0, 0, 0, 0)
+    route = {'route': 'source_resource_candidate', 'native_part_join': 'unmatched',
+             'vs_constants': [-1]*4, 'ps_constants': [-1]*4,
+             'streams': [{'blob': -1} for _ in range(4)], 'indices': {'blob': -1},
+             'vs_srvs': [None]*34}
+    meta = json.dumps(route, separators=(',', ':')).encode()
+    route_only = (b'EDVRGUI1' + struct.pack('<6I', 2, 0, 0, 0, 0, 1) +
+                  struct.pack('<I', len(meta)) + meta + struct.pack('<I', 0))
     with tempfile.TemporaryDirectory() as td:
         p = Path(td) / 'test.bin'
         p.write_bytes(empty)
         assert read(p)['draws'] == []
+        p.write_bytes(route_only)
+        assert len(read(p)['routes']) == 1
         for data in (b'', empty[:-1], empty + b'x', empty[:12] + struct.pack('<I', 513) + empty[16:]):
             p.write_bytes(data)
             try:

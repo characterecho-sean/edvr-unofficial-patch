@@ -192,8 +192,8 @@ python tools\install_edvr.py --target steam --verify-only
 ### Everything except the exposure fix stopped working
 
 Look in `edvr_gfx_*.log` for the periodic `vScreen totals:` line. If **`largest
-eye-draw count`** is `0` and stays `0`, cockpit UI fixes, panel distance, and
-Explorer Cam switch off.
+eye-draw count`** is `0` and stays `0`, cockpit UI fixes, panel distance and
+the transition flash fix switch off.
 
 This happens if your per-eye resolution is below 2048 on both axes (e.g. Quest
 3 at lower render scales) or if your custom resolution matches the on-foot

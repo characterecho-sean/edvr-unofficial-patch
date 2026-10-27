@@ -42,6 +42,7 @@ void breadcrumb(const char*) {} // production guard.cpp's crash-channel dependen
 void temporalPassCaptureFinalEye(uint64_t seq,uint32_t eye,ID3D11Texture2D* texture,const uint32_t region[4],bool composite,bool flipU,bool flipV){
   ++finalCalls;finalSequence=seq;finalEye=eye;finalTexture=texture;std::memcpy(finalRegion,region,sizeof(finalRegion));finalComposite=composite;finalFlipU=flipU;finalFlipV=flipV;
 }
+void temporalPassMarkerPre(uint64_t,uint32_t,ID3D11Texture2D*,const uint32_t[4],bool,bool){} // F59: the waypoint dump's pre-composite crop (copies only)
 void uiLayerDoorSeen(uint64_t seq,uint32_t eye,ID3D11Texture2D*){++doorSeen;doorSeq=seq;doorEye=eye;}
 // The layer's one predicate for a layer-only eye (src/d3d11/ui_layer.h): the VR world route's re-issued world or, with
 // the on-foot maps gate, a map's or menu's 2D screen the layer took. The door cannot tell which, and a stub answers for both.

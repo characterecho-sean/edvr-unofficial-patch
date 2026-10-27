@@ -1,7 +1,8 @@
 #pragma once
-// The comfort fade's signal between EDVR's two halves (Explorer Cam, docs\design-explorer-cam-free-camera-2026-10-07.md, "Comfort fade").
+// The comfort fade's signal between EDVR's two halves (first written for Explorer Cam, docs\design-explorer-cam-free-camera-2026-10-07.md, "Comfort fade";
+// Explorer Cam, its only publisher, was removed in F98, so nothing publishes a level now and every reader reads 0; left_eye_share.h shares the packing).
 //
-// The d3d11 half owns the timeline (src\d3d11\explorer_cam_fade_core.h) and publishes one number a frame: how black the view is, 0 (clear) to 1 (black). The
+// A d3d11 half that owns a timeline publishes one number a frame: how black the view is, 0 (clear) to 1 (black). The
 // OpenXR runtime half blends black over each eye image by that amount when it composes (src\openxr\d3d11_stereo.cpp), and reads the number through
 // EdvrNativeFrameOutput::fadeAlpha (native_frame.h, version 5), which the d3d11 half fills in at beginFrame from here.
 //
@@ -9,7 +10,7 @@
 //   * nothing published yet, or a mismatched DLL pair (the runtime asks version 5 and an older d3d11.dll refuses it, or the other way round: the output
 //     struct then has no fadeAlpha at all, and native_frame_client.h zeroes it);
 //   * a published level that is not a number, or below 0, reads 0; above 1 reads 1;
-//   * a STALE level: the d3d11 half stopped publishing (the game is hung, or Explorer Cam stood down without saying so). Past kStaleHoldMs of silence the
+//   * a STALE level: the d3d11 half stopped publishing (the game is hung, or the publisher stood down without saying so). Past kStaleHoldMs of silence the
 //     level decays to 0 over kStaleDecayMs, so the user is never left in black. The price: a render-thread stall longer than 0.2 s while black lets the
 //     scene show through, because from here a stall and a dead game cannot be told apart.
 // One 64-bit atomic carries the level and the time it was published, so a reader never sees one with the other's age.

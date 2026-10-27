@@ -208,14 +208,16 @@ time and video memory in proportion, and it changes the game's code in
 memory: read [What the fixes touch](#what-the-fixes-touch) first.
 `fix.vscreen_res_width = auto` (default); `1920` turns it off, same as stock.
 
-**On foot not being in 3D — Explorer Cam.** First person on foot is a flat image
-shown to both eyes; the free camera renders real stereo. Press F5 on foot, and
-Explorer Cam puts your viewpoint at your commander's head and
-locks it to them, so the surface, your ship and the room have depth. It cannot
-make first person 3D and does not try, and it gives you no capability you do not
-already have. On by default in VR; the commander's head is still visible from
-inside: [Explorer Cam](explorer-cam.md). `hotkey.explorer_cam` (default `F5`) arms it and clearing it turns it off;
-`fix.explorer_cam_eye_up`, `_eye_forward`, `_eye_right` set the fallback eye.
+**On foot not being in 3D — native on foot.** First person on foot is a flat
+image shown to both eyes. With `fix.native_on_foot` on (the default in VR),
+EDVR answers the game's request for that flat screen with the headset's own
+stereo while a game session is live, so the world is drawn for each eye from
+your commander's head, and your commander's head is hidden from the inside.
+The [design document](design-native-onfoot-vr-2026-10-13.md) covers how it
+works. Explorer Cam, the free-camera view it replaces, has been removed: its
+settings in an old `edvr.ini` (`hotkey.explorer_cam` and the
+`fix.explorer_cam_*` keys) are ignored, and one that differs from its last
+default is named once in the log.
 
 ---
 
@@ -293,9 +295,8 @@ update (build 332753) moved the second of them and left the first alone;
   viewpoint from the same constant buffer the game fills every frame, which
   must be the 5376-byte scene buffer, and checks the settings that describe it
   before it arms.
-- Explorer Cam is built for one game build (332841). On any other build it
-  leaves the game untouched and the log says so;
-  [explorer-cam.md](explorer-cam.md) has the detail.
+- Native on foot is built for one game build (334925). On any other build it
+  leaves the game untouched and the log says so.
 
 The transition flash fix holds exactly the frame the camera driver reads a
 reset camera for: one held frame per transition, logged as
@@ -351,16 +352,16 @@ default; `off` leaves the panels alone) sizes panels inside the game's own
 panel code. `intro_video = skip` answers the
 game's open of the launch movie with "not found" through its import table; the
 default, `screen`, does not. Some advanced settings, all off by default, hook
-the game for diagnosis or experiments, and `edvr.ini` describes each. Explorer
-Cam ([explorer-cam.md](explorer-cam.md)) changes the headset position the game
-is told about, and it reads nothing from the game's memory: it counts your
-camera-key presses. The field-of-view trim
+the game for diagnosis or experiments, and `edvr.ini` describes each. Native on
+foot (`fix.native_on_foot`) changes the game's code in memory, in the one build
+it was verified against: it answers the on-foot request for a flat screen with
+stereo, and changes how your commander's avatar is drawn and posed for the view
+from inside. The field-of-view trim
 (`experimental.fov_trim_*`) changes the field of view the game is told the
 headset shows; the game then draws the narrower view itself, and EDVR places it
 back inside the eye's full field, copied from the game's own frame. The trim
 edits answers, never memory, so the runtime and anything else that asks always
-receive the truth. It does nothing until you configure it. Explorer Cam works
-when you press F5 on foot.
+receive the truth. It does nothing until you configure it.
 
 Two changes are always made, and no setting turns them off. At load EDVR
 redirects two of the game's imports in memory: `LoadLibraryW`, so that Elite's

@@ -25,7 +25,12 @@ session and a log. Everything below exists to spend fewer of them.
 Use the **PowerShell tool**, not Bash. Windows PowerShell 5.1: no `&&` or
 `||` (use `;` and `if ($?)`), no ternary, no `??`. Don't redirect a native
 exe's stderr with `2>&1` — 5.1 wraps each line in an ErrorRecord and sets
-`$?` false on a clean exit.
+`$?` false on a clean exit. Send a file-writing tool's output to `*> $null`
+or a log file and read that: `| Select-Object -First N` stops the pipeline
+and kills the tool mid-write (an install died that way, #100). Pass paths
+to a native exe as arguments: piping strings into one (`$files | git
+checkout --pathspec-from-file=-`) prepends a BOM to the first item, which
+then matches nothing.
 
 `build.bat` must be launched **by absolute path**; a `cmd` invocation that
 never ran the batch still exits 0, which has read as a successful build.
@@ -74,15 +79,19 @@ corrupted. Do not regenerate the one-liner — extend the script.
 |---|---|---|
 | Install a build next to the game | `python tools\install_edvr.py` | `Copy-Item` onto the game directory |
 | Check the install matches the build | `python tools\install_edvr.py --verify-only` | eyeballing timestamps |
-| Find and read a flight log | `python tools\edvr_log.py` (census aggregate: add `--tally vh [--frame N]`) | `Get-Content -Tail` + `Select-String` |
+| Find and read a flight log | `python tools\edvr_log.py` (census aggregate: add `--tally vh [--frame N]`; first command on an on-foot flight: add `--health [--since HH:MM:SS] [--until HH:MM:SS]`, which says which tagged features ran and applied and exits 3 on a NEVER APPLIED one) | `Get-Content -Tail` + `Select-String` |
 | Reflow release notes or docs | `python tools\reflow_notes.py` | reflowing by hand or by regex |
 | Credit contributors in release notes | `python tools\release_credits.py --from <previous-tag> --thanks` | writing the credits from memory or ad-hoc `gh` queries |
 | Make a worktree that can build | `python tools\worktree.py add <path>` | `git worktree add` alone (no deps) |
+| Compile on Linux for a test flight | `python3 tools/linux_toolchain.py build-dlls` | running `build.bat` under Wine by hand |
+| Keep the game exe before Steam updates it (`install_edvr.py` also does it on every install; then docs\game-binary-map.md "Re-deriving after a patch") | `python tools\archive_game_exe.py --target steam` (`--dry-run` first) | `Copy-Item` of the exe, or committing it |
 
 Every release's notes carry a `## Thanks` section built from
 `release_credits.py --thanks` and finished by hand. It names only the authors
-of PRs merged in the release; everyone who opened an issue or sent logs gets
-the tool's one general line and is not named. A person writes each sentence.
+of PRs merged in the release, and anyone the maintainer has approved by name in
+`tools\release_credits_approved.json` for a commit in the release. Everyone
+else who opened an issue or sent logs gets the tool's one general line and is
+not named. Add an entry to that file only on the maintainer's word. A person writes each sentence.
 People known only by an anonymised label ("user 2", "the reporter") are not
 named without the maintainer's consent.
 
@@ -139,70 +148,52 @@ minutes after a flight finally reproduced the effect being chased.
   output. The GitHub workflow is optional there. From Linux or another
   non-native Windows host, use the GitHub Windows workflow below for
   full C++ validation. Wine and Proton do not count as native Windows.
-- From this Linux checkout, the Git-ignored pinned compiler, SDK and
-  Wine prefix are under `.toolchains/windows/`. From a shell, invoke its
-  PowerShell wrapper directly:
-
-  ```text
-  /home/deck/projects/edvr-unofficial-patch/.toolchains/windows/host/powershell/pwsh -Command "python3 .toolchains/windows/toolchain.py doctor"
-  ```
-
-  In PowerShell, from this repository root:
-
-  ```powershell
-  python3 .toolchains/windows/toolchain.py doctor
-  python3 .toolchains/windows/toolchain.py build-dlls
-  ```
-
-  `doctor` checks the pinned setup; `build-dlls` is compile-only: it
-  writes `.toolchains/windows/compile-build/`, skips validation gates
-  and does not create a full-build receipt. Its shared toolchain root is
-  this original checkout; do not pass `--repo` or assume it builds a
-  worktree. For worktrees, use the GitHub full-validation path. The
-  local full `build` command currently fails Wine's process/window test
-  gates; do not bypass those gates or use compile-only outputs as
-  release assets. See `.toolchains/windows/README.md` for setup and
-  limits.
-- **Linux test flight (Steam Deck, Proton): a compile-only build.** For a
-  build Sean will fly, CI first is not required; CI is for a merge or
-  release. Commit to the branch before compiling: a dirty tree compiles as
-  `vX.Y.Z-dirty`, which `edvr_log.py --expect-build HEAD` will not match.
-  Close Elite, then:
+- **Linux: a compile-only build.** `tools/linux_toolchain.py` runs
+  `build.bat --compile-only` under Wine, with the same MSVC and Windows SDK as
+  CI, and writes the production DLLs to `<root>/build/compile-build` for the
+  main checkout or any worktree. It runs none of the gates, so it is not
+  validation and not a release asset; CI stays the validation for a merge or
+  release, and the full `build.bat` currently fails Wine's process/window gates
+  (do not bypass them). Run it with host `python3` from any shell, no wrapper.
+  Once per machine the user installs `wine msitools git` with sudo; then
+  `python3 tools/linux_toolchain.py setup --dry-run`, and
+  `setup --accept-license` only when the user has accepted VS 2022's Build
+  Tools licence (it needs a Visual Studio licence). Microsoft's binaries, the
+  Wine prefix and the SDKs sit in the Git-ignored
+  `<main checkout>/.toolchains/windows/` and are never shared; `doctor` checks
+  them.
+- **Linux test flight (Steam Deck, Proton).** For a build Sean will fly, CI
+  first is not required; CI is for a merge or release. Commit to the branch
+  before compiling: a dirty tree compiles as `vX.Y.Z-dirty`, which
+  `edvr_log.py --expect-build HEAD` will not match. Close Elite, then:
 
   ```bash
-  .toolchains/windows/host/powershell/pwsh -Command "python3 .toolchains/windows/toolchain.py build-dlls"
+  python3 tools/linux_toolchain.py build-dlls
   python3 tools/install_edvr.py --target steam --scope flat --xess --compile-only --dry-run
   python3 tools/install_edvr.py --target steam --scope flat --xess --compile-only
   python3 tools/install_edvr.py --target steam --scope flat --xess --compile-only --verify-only
   python3 tools/edvr_log.py --target steam --expect-build HEAD --version
   ```
 
-  `--target steam` finds the game on Linux (`tools/steam_library.py`:
-  `~/.local/share/Steam`, `~/.steam/steam`, then every library in
-  `libraryfolders.vdf`). `--compile-only` installs from
-  `.toolchains/windows/compile-build/` instead of `build/`, and refuses
-  without that build's `compile_only_receipt.json`, when an output no longer
-  matches it, or when the tree has been edited or committed since (it asks
-  `compile_only.py` for the fingerprint, so the two cannot disagree). It
-  prints that the build is not Windows validated and writes `"build":
-  "compile-only"` into the install receipt; `--verify-only` compares the game
-  directory to that build and only warns about a moved tree. A real install
-  runs under the host `python3`, which checks `/proc` for a running
-  `EliteDangerous6*` (Proton); do not run it through the Wine Python, which
-  cannot see Proton's processes and passes that check vacuously. The toolchain
-  compiles the checkout it lives in; to fly a worktree, compile with
-  `build-dlls --root <worktree>` (output `<worktree>/build/compile-build`)
-  and install with `--root <worktree> --compile-only`. `--root` is a local
-  change to the device-local `compile_only.py`, and a copy without it refuses
-  the flag: test-fly from the main checkout there. `tools/worktree.py` makes
-  junctions and is Windows-only; on Linux symlink the ignored `third_party`
-  folders from the main checkout by hand.
+  To fly a worktree, give `build-dlls` and `install_edvr.py` `--root
+  <worktree>`. `--target steam` finds the game on Linux
+  (`tools/steam_library.py`: `~/.local/share/Steam`, `~/.steam/steam`, then
+  every library in `libraryfolders.vdf`). `--compile-only` installs from
+  `<root>/build/compile-build` instead of `build/`, and refuses without that
+  build's `compile_only_receipt.json`, when an output no longer matches it, or
+  when the tree has been edited or committed since (`tools/compile_only.py`
+  holds the fingerprint, shared with the toolchain). It prints that the build
+  is not Windows validated and writes `"build": "compile-only"` into the
+  install receipt; `--verify-only` compares the game directory to that build
+  and only warns about a moved tree. A real install runs under the host
+  `python3`, which checks `/proc` for a running `EliteDangerous6*` (Proton); do
+  not run it through the Wine Python, which cannot see Proton's processes and
+  passes that check vacuously.
 - For C++ changes on a non-native host, commit and push the candidate
   branch so Actions can validate that exact commit. The `release.yml`
-  workflow is active on `main`; dispatch it with `gh workflow run
-  release.yml --ref <branch>` (a push to `codex/release-*` already
-  triggers the full build and package path, so do not dispatch a
-  duplicate run). Find the branch run with `gh run list --workflow
+  workflow runs the full build and package path on every pull request
+  and every push to `main` or `codex/release-*`; for a branch with none
+  of those, dispatch it with `gh workflow run release.yml --ref <branch>`. Find the branch run with `gh run list --workflow
   release.yml --branch <branch>`, verify its `headSha` matches the
   candidate with `gh run view <run-id> --json headSha`, then require `gh
   run watch <run-id> --exit-status` to pass before merging or releasing.
@@ -304,6 +295,21 @@ minutes after a flight finally reproduced the effect being chased.
 - Do the work asked for. If something adjacent is worth fixing, say so;
   don't fold it in.
 
+## Tracking work
+
+- **Work is tracked in GitHub issues** on
+  `characterecho-sean/edvr-unofficial-patch` (`gh issue list`). A finding
+  to act on later — a review follow-up, a retro item, a bug noticed in
+  passing — becomes an issue. Commits and PRs name it (`(#97)`,
+  `Closes #97`). A plan or task list that only hands one session's work
+  to the next can stay a file; anything meant to outlive the session is
+  an issue.
+- `docs\` holds the evidence: an investigation doc carries an arc's
+  journal, and its `## Status` block links the arc's issues.
+- **Re-fetch a PR's reviews and comments right before posting** replies
+  or a summary to it. A review that landed while you worked otherwise
+  goes unanswered (PR #92, twice).
+
 ## Git
 
 - Solo project: **branch, commit, merge to main, push.** No pull requests.
@@ -382,6 +388,8 @@ the Ghidra scripts, and, kept local and never committed, the game executables fo
 | `src\common\` | config, logging, the crash sentinel |
 | `tools\` | Python tools, each with `--self-test`; C++ test rigs in subdirs |
 | `docs\` | one investigation doc per arc — read its `## Status` block first |
+| `CODING_STANDARDS.md` | review: the judgement rules for every diff, applied by its author before pushing and by its reviewer |
+| `GLOSSARY.md` | the project's terms: game builds, binding, build-map statuses; use them, add a term when one is settled |
 | `.agents\` | agent-only material: handoff prompts, plans; `export-ignore`, never in an archive |
 | `analysis\` | main checkout only: the private `elite-analysis` repository (git-ignored here), see above |
 | `build.bat` | full build, all gates; `--dll-only` is the receipt-guarded promotion path |

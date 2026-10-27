@@ -2,7 +2,7 @@
 //
 // Two readers need the same table: xinput_watch.cpp, which turns a name into
 // the button mask it polls, and hotkey.cpp, which parses a pad hotkey out of
-// edvr.ini ("explorer_cam = GamePad_Back") and writes one back after the
+// edvr.ini ("compare_aa = GamePad_Back") and writes one back after the
 // settings menu captured a button press. The names are Elite's own, as its
 // .binds files spell them, so a hotkey value and a binding of the player's
 // compare as text without a translation table in the middle.

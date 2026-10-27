@@ -1,0 +1,120 @@
+# Build 334925 RVAs added to the signature table (tools\hook_signatures.py generate --rvas, after map_all.json) for issue 124 step 3.
+# They are not hook targets: each is the start of a chained .pdata fragment inside a range a hook hashes whole, so that
+# gamePinProvenByMatch can cover the range on an unknown build (every fragment found, all moved together).
+# Map them with the rest at the next retarget.
+0x42B7098 code   # the outer builder FUN_1442B7040's body hash [0x42B7045, 0x42B7CD6) (kinematic_eval_hook.cpp primarySignature)
+0x42B7C77 code
+0x42B7C7F code
+0x42B7CB9 code
+0x43513BA code   # the list merge FUN_1443513A0's body hash [0x43513A8, 0x4351640) (ensurePoolMerge)
+0x435162A code
+0x4351632 code
+0x368465E code   # the typed clear FUN_143684630's body hash [0x3684635, 0x3684782) (ensurePoolClear)
+0x3684772 code
+#
+# Field witnesses (issue 124, 2026-10-25 round 2; docs\design-game-update-signatures-2026-10-25.md has the table). Each is an
+# instruction whose unmasked bytes carry a struct displacement a hook writes, or reads to decide a write, on the same object. A hook
+# requires its witnesses found (gameRvasFound) before it writes on an unknown build. Those inside a unit already in the table add no unit.
+0x2878D40 code   # VR Supersampling hold: the setter, mov rax,[rcx+0x18] (the render context)
+0x2878D5D code   #   the setter, movss [rax+0x3564],xmm0
+0x285813F code   #   the fxcfg loader, movss [rsi+rcx*4+0x124],xmm0 (entry 2 = +0x13C)
+0x28580F0 code   #   the loader, lea rcx,[rip+d32] naming entry 2
+0x52EEB60 data   #   the string it names (found by content; the hold checks the lea reaches it)
+0x7E9E8D code    # VR window rewrite: the mode request reads +0x20 (kind)
+0x7E9EC4 code    #   +0x08
+0x7E9EDF code    #   +0x10
+0x7E9F1F code    #   +0x18
+0x7E9F6B code    #   +0x24
+0x7E9F72 code    #   +0x25
+0x281E678 code   # the settings copy W: mov rdi,[rcx+0x1180] (the render context)
+0x281E67F code   #   mov rbx,[rdi+0x33C8] (the settings object)
+0x281E68D code   #   mov eax,[rbx+0x30] (the 3D mode)
+0x431DD7D code   # kinematic rig veto: mov rbx,[rdi+0x348] (the collection)
+0x431DE81 code   #   lea rcx,[rbx+0x300]
+0x431DE88 code   #   mov byte [rbx+0x629],r13b
+0x431DE94 code   #   mov rcx,[rbx+0x2E0] (the pipe)
+0x4315A29 code   # engine motion: the producer's frame, lea rbp,[rsp-0xC8]
+0x4315A31 code   #   sub rsp,0x1C8
+0x4315A5C code   #   call the item constructor on the local at rsp+0x60
+0x4315A6D code   #   the record's position, [r12+0x170]
+0x4315A7C code   #   the record's rotation, [r12+0x17C]
+0x4315AA6 code   #   the local item's position, [rsp+0x70] = item+0x10
+0x4315AAC code   #   its second position, [rbp+0x84] = item+0x124
+0x4315AC8 code   #   its rotation, [rsp+0x68] = item+0x08
+0x4315AD4 code   #   its second rotation, [rbp+0x98] = item+0x138
+0x4315CA3 code   #   the record's key, lea rdx,[r12+0x250]
+0x4315CBA code   #   the owner's dictionary, lea rcx,[r13+0x260]
+0x4315CCA code   #   the entry's list, lea rdi,[rax+0x28]
+0x4315CD3 code   #   its tail, mov rdx,[rdi+8] (entry+0x30)
+0x4315CD7 code   #   the node's count, cmp [rdx+0x18],8
+0x4315D14 code   #   imul rax,[rdx+0x18],0x150
+0x4315D22 code   #   lea rcx,[rax+rdx+0x20] (the node's records)
+0x4315D27 code   #   lea rax,[rsp+0x60] (the copy's source)
+0x4315DB5 code   #   inc dword [r13+0x2A4] (the owner's count)
+0x4C86090 code   #   the item constructor FUN_144C86090
+0x4C861D6 code   #   its store of +0x118
+0x4C861F4 code   #   its store of +0x124 (nothing between: the marker's dword +0x120)
+0x522BAB code    # vertex resync: FlushIA, mov rax,[rsi+0x188]
+0x522C1E code    #   mov ebp,[rax+0x60]
+0x522C80 code    #   mov [rbx+rax*8+0x168],r9
+0x522C88 code    #   mov [rbx+rax*4+0x228],r9d
+0x4E9EA2 code    #   SetVertexBuffer, mov [rbx+rdi*4+0xE0],esi
+0x4E9EC0 code    #   SetVertexBuffer, mov rax,[rax+0x140]
+0x58B298 code    # light grid cache: the builder, cmp byte [rcx+0xC0],0
+0x58B3EA code    #   test byte [r9+0x230],4
+0x58B3FC code    #   movups xmm12,[r12+0x1B0]
+0x58B417 code    #   movups xmm10,[r12+0x1E0]
+0x58B420 code    #   movss xmm9,[r12+0x234]
+0x58B42A code    #   movss xmm11,[r12+0x238]
+0x58B4D4 code    #   movups xmm0,[r14] (key row 0)
+0x58B4F2 code    #   movups xmm0,[r14+0x10]
+0x58B503 code    #   movups xmm0,[r14+0x20]
+0x58B515 code    #   movups xmm0,[r14+0x30]
+0x58B527 code    #   movss xmm0,[r14+0x40]
+0x58B535 code    #   movss xmm0,[r14+0x44]
+0x58B543 code    #   cmp [r14+0x48],r15
+0x58B549 code    #   cmp [r14+0x50],rcx
+0x58B54F code    #   cmp [r14+0x58],r10
+0x58B555 code    #   cmp [r14+0x60],rdx
+0x58B55B code    #   cmp [r14+0x68],rdi
+0x58B561 code    #   cmp [r14+0x70],rbx
+0x58B583 code    #   lea rcx,[r14+0x80]
+0x58B596 code    #   lea rcx,[r14+0x110]
+0x58B5AA code    #   lea rcx,[r14+0xA0]
+0x58B6E4 code    #   movss xmm0,[r12+0x234] (the loops' near)
+0x58BB3B code    #   mov [r14+0x140],rsi
+0x58BB78 code    #   mov [r14+0x130],r15
+0x58BBB3 code    #   mov [r14+0x148],r15
+0x58BBEF code    #   mov [r14+0x138],r15
+0x58BE6B code    #   mov [r14+0x48],rax
+0x58BEC7 code    #   mov [r14+0x70],rax
+0x58BECB code    #   movss [r14+0x40],xmm0
+0x5955B0 code    #   the 32-byte resize, mov rcx,[rcx+0x10]
+0x5955CC code    #   add rdx,[rdi+0x18]
+0x5956EA code    #   the 48-byte resize, mov r10,[rcx+0x10]
+0x59571B code    #   add r8,[rcx+0x18]
+0x4314C89 code   # store hook: mov rdi,[rbp+0x1F0] (the record)
+0x4314CBD code   #   mov rax,[rdi+0x18]
+0x4315227 code   #   mov byte [rdi+0x234],r13b
+0x431523D code   #   mov [rdi+0x208],rbx
+0x592344 code    # flat camera inject: the refresh, test byte [r8+0x250],8
+0x59234E code    #   lea rcx,[r8+0x20] (the finalizers' base)
+0x4F312D code    #   the projection builder, mulss xmm7,[rcx+0x234] (near)
+0x4F3135 code    #   mov ecx,[rcx+0x244] (kind)
+0x4F3208 code    #   movss xmm1,[rbx+0x238] (far)
+0x4F3422 code    #   movss xmm9,[rbx+0x260] (fov)
+0x4F343A code    #   movss xmm11,[rbx+0x240] (aspect)
+0x4F3499 code    #   mulss xmm1,[rbx+0x270] (bound y)
+0x4F34A1 code    #   mulss xmm0,[rbx+0x26C] (bound x)
+0x4F3845 code    #   and dword [rbx+0x230],~4 (clears bit 4)
+0x106D8E0 code   # on-foot ship preview: the synchronous manager (native_preview_camera.cpp)
+0x1074140 code   #   the HMD update
+0x1261680 code   #   the CustomisationVisual preview callback
+0x1070980 code   #   the Location finalizer
+0xF81910 code    #   ConstantWeight
+0x283FA20 code   #   the eye-camera producer; its head becomes the kind-5 camera origin
+0x518C920 data   #   HmdIface
+0x518C8B0 data   #   HmdObject
+0x51AA500 data   #   PreviewIface
+0x51AA388 data   #   PreviewObject
+0x55999C0 data   # completed-mission surface model vtable (native_on_foot_menu_surface.h)

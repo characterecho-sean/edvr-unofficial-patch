@@ -379,7 +379,7 @@ void rebuildStatus() {
     g.status.push_back(fixes);
 
     StatusRow vr;
-    vr.label = L"Flash fix, Explorer Cam";
+    vr.label = L"Flash fix, native on foot";
     if (!s.haveOpenvrDir) {
         vr.tone = Tone::Warn;
         vr.value = L"no Openvr folder found under this install";

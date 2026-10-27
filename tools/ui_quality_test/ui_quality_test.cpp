@@ -92,6 +92,13 @@
 #include "../../src/d3d11/ui_layer_shaders.h"
 #include "../../src/d3d11/ui_quality_math.h"
 #include "../../src/d3d11/ui_sizing_math.h"
+#include "../../src/common/game_build_core.h"  // the signature table's types, for its identity of build 334925
+
+// The known build's identity (the installed executable's check below), from the one table that names it.
+namespace uiqsig {
+using namespace edvr::gamesig;
+#include "../../src/common/game_signatures.inc"
+}  // namespace uiqsig
 
 using Microsoft::WRL::ComPtr;
 using namespace edvr;
@@ -1011,9 +1018,11 @@ void testChains() {
     const UiChain initColour = chainOf({0x51AF0B, 0x50EC09, 0x518553, 0x2816E29, 0x28337C3, 0x455471D,
                                         0x4554296, 0x45733A2, 0x456D870, 0x10},
                                        true);
-    check(initColour.n == 10 && initColour.rva[0] == 0x51AF0B && initColour.rva[5] == 0x455471D,
+    check(initColour.n == 10 && initColour.frame[0] == 0x51AF0B && initColour.frame[5] == 0x455471D,
           "a chain keeps the game's frames, innermost first, and skips EDVR's and the runtime's");
-    UiChainVerdict v = uiChainVerdict(initColour);
+    // Build 334925: the DLL's gameRva of each key is the key itself.
+    const uint32_t* known = kUiChainKeys;
+    UiChainVerdict v = uiChainVerdict(initColour, known);
     check(v.kind == UiChainKind::kRtt && v.init && !v.change && v.colour && !v.depth &&
               std::strcmp(uiChainVerdictShort(v), "rtt init colour") == 0,
           "0x455471D and 0x4554296, through 0x45733A2 and 0x2816E29: rtt init colour");
@@ -1030,29 +1039,43 @@ void testChains() {
     const UiChain changeDepth = chainOf({0x51AF0B, 0x50EC09, 0x518553, 0x2816C06, 0x28337F0, 0x455471D,
                                          0x4554296, 0x45704E5},
                                         false);
-    v = uiChainVerdict(changeDepth);
+    v = uiChainVerdict(changeDepth, known);
     check(v.kind == UiChainKind::kRtt && v.change && v.depth &&
               std::strcmp(uiChainVerdictShort(v), "rtt change depth") == 0,
           "through 0x45704E5 and 0x2816C06: rtt change depth");
-    v = uiChainVerdict(chainOf({0x51AF0B, 0x455471D, 0x45733A2}, false));
+    v = uiChainVerdict(chainOf({0x51AF0B, 0x455471D, 0x45733A2}, false), known);
     check(v.kind == UiChainKind::kOther && (v.hits & 1u) && !(v.hits & 2u),
           "0x455471D without 0x4554296 is other (a miss, and it says which)");
-    check(uiChainVerdict(chainOf({0x30C07A, 0x30FCBA, 0x30F9B0}, true)).kind == UiChainKind::kGlyphCache &&
-              uiChainVerdict(chainOf({0x3124F0}, false)).kind == UiChainKind::kGlyphCache,
+    check(uiChainVerdict(chainOf({0x30C07A, 0x30FCBA, 0x30F9B0}, true), known).kind == UiChainKind::kGlyphCache &&
+              uiChainVerdict(chainOf({0x3124F0}, false), known).kind == UiChainKind::kGlyphCache,
           "the raster cache's texture maker, init 0x30FCBA or re-create 0x3124F0: glyph-cache");
+    // Issue 124: an unknown build. Every key found by signature 0x100 further on: a chain through the moved returns is the same
+    // verdict, and one through build 334925's own returns is other. A key not found (0) is never a hit, even for a frame of 0.
+    uint32_t moved[kUiChainKeyCount] = {}, lost[kUiChainKeyCount] = {};
+    for (uint32_t i = 0; i < kUiChainKeyCount; ++i) moved[i] = kUiChainKeys[i] + 0x100;
+    v = uiChainVerdict(chainOf({0x51AF0B, 0x2816E29 + 0x100, 0x455471D + 0x100, 0x4554296 + 0x100, 0x45733A2 + 0x100}, true), moved);
+    check(v.kind == UiChainKind::kRtt && v.init && v.colour && std::strcmp(uiChainVerdictShort(v), "rtt init colour") == 0 &&
+              uiChainVerdict(initColour, moved).kind == UiChainKind::kOther,
+          "issue 124: an unknown build's keys found by signature classify its own chains, not build 334925's");
+    UiChain zero;
+    zero.n = 1;
+    v = uiChainVerdict(initColour, lost);
+    check(v.kind == UiChainKind::kOther && v.hits == 0 && uiChainVerdict(zero, lost).hits == 0 &&
+              uiChainVerdict(initColour, nullptr).hits == 0,
+          "issue 124: keys not found by signature are misses (other), and no keys at all is other");
     const UiChain none = chainOf({0x1000, 0x2000}, true);
-    v = uiChainVerdict(none);
+    v = uiChainVerdict(none, known);
     uiChainVerdictText(v, text, sizeof(text));
     check(v.kind == UiChainKind::kOther && v.hits == 0 &&
               std::strcmp(text, "other (0x455471D no, 0x4554296 no, 0x45733A2 no, 0x45704E5 no, 0x2816E29 no, "
                                 "0x2816C06 no, 0x30FCBA no, 0x3124F0 no)") == 0,
           "neither: other, every key a miss");
     const UiChain deep = chainOf({1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 0x455471D, 0x4554296}, false);
-    check(deep.n == 12 && deep.rva[11] == 12 && uiChainVerdict(deep).kind == UiChainKind::kOther,
+    check(deep.n == 12 && deep.frame[11] == 12 && uiChainVerdict(deep, known).kind == UiChainKind::kOther,
           "twelve game frames kept: keys past the twelfth are not seen");
     UiChain empty;
     uiChainFormat(empty, rvas, sizeof(rvas));
-    check(rvas[0] == '\0' && uiChainVerdict(empty).kind == UiChainKind::kOther, "an empty chain");
+    check(rvas[0] == '\0' && uiChainVerdict(empty, known).kind == UiChainKind::kOther, "an empty chain");
     // k and the implied stage: the menu's 16:9 surface reads 1920x1080 on
     // every frustum it was seen on (the doc's section 6).
     const double kUntrimmed = uiSizingK(uiQualityFovTangent(1.2648f, 1.2648f));
@@ -1233,7 +1256,7 @@ void testPanelScale() {
         std::printf("  (the game executable is not at the usual place: the embedded patterns stand)\n");
         return;
     }
-    if (pe.stamp != kUiPanelStamp || pe.imageSize != kUiPanelImageSize) {
+    if (pe.stamp != uiqsig::kKnownStamp || pe.imageSize != uiqsig::kKnownImageSize) {
         std::printf("  (the installed game is not build 334925 -- stamp %u: the patch stands down on it)\n",
                     pe.stamp);
         return;
@@ -1731,6 +1754,26 @@ void testFlatLayerRules() {
               !flatUiMapFamiliesOpen(false, 9) && !flatUiMapFamiliesOpen(false, 10),
           "map families gate: exactly GuiFocus 6, 7 and 8 while the focus is known (neither the Full System Scanner (9) nor the Detailed "
           "Surface Scanner (10) is one)");
+    // The on-foot maps (2026-10-24): Status.json has no GuiFocus on foot, so the map's own canvas composite stands in for it.
+    {
+        FlatUiMapCanvasLatch latch;
+        check(!latch.open(1) && !latch.open(100), "on-foot map: a latch that never saw the canvas is never a map frame");
+        latch.note(10);
+        latch.note(10);
+        check(latch.draws == 2 && latch.open(11) && latch.open(10 + kFlatUiMapCanvasHoldFrames) &&
+                  !latch.open(10 + kFlatUiMapCanvasHoldFrames + 1) && !latch.open(10) && !latch.open(9),
+              "on-foot map: the frame after a canvas draw is a map frame, and so is each one up to the hold; the same frame asked about "
+              "(the draw is not yet over), an earlier one and a later one are not");
+        latch.note(30);
+        check(latch.open(31) && latch.open(30 + kFlatUiMapCanvasHoldFrames) && !latch.open(30 + kFlatUiMapCanvasHoldFrames + 1),
+              "on-foot map: a fresh canvas draw restarts the hold, so a map that is closed releases within the hold");
+        check(flatUiMapCanvasPair(kFlatUiMapCanvasVs, kFlatUiMapCanvasPs) && !flatUiMapCanvasPair(kFlatUiMapCanvasVs, kFlatUiMapSpritePsA) &&
+                  !flatUiMapCanvasPair(kFlatUiMapSpriteVs, kFlatUiMapCanvasPs) && !flatUiMapCanvasPair(0, 0),
+              "on-foot map: only the canvas pair (both its shaders) is the sign, not either half or a sprite pair");
+        // The inferred answer is a map the way GuiFocus 6 is: temporal AA off and the families open.
+        check(flatUiMapTemporalOff(true, kFlatUiMapCanvasInferredFocus) && flatUiMapFamiliesOpen(true, kFlatUiMapCanvasInferredFocus),
+              "on-foot map: the canvas's inferred focus turns temporal AA off and opens the map families");
+    }
     // The map line's temporal counts: a frame that armed the mechanism and never reached its copy is counted, not silent.
     {
         FlatUiMapAaTally t;
@@ -1941,6 +1984,17 @@ void testFlatLayerRules() {
                                "                flatUiMapTemporalName(mapFocusWatch().offFocus),") != std::string::npos,
               "wiring: the map focus answers temporal AA from flatUiMapTemporalOff and the map families from flatUiMapFamiliesOpen, and "
               "its transition and refusal lines name the screen entered, left or refused on");
+        // The on-foot answer (flat_runtime.cpp): the canvas pair is noted at the draw site before any UI decision, the frame boundary
+        // passes the next frame, GuiFocus present is never overridden, and the inferred branch comes after the watcher's own read.
+        check(!runtime.empty() && runtime.find("void flatRuntimeMapFocusFrame(uint64_t nextFrame) {") != std::string::npos &&
+                  runtime.find("flatRuntimeMapFocusFrame(frame + 1);") != std::string::npos &&
+                  runtime.find("w.inferred = !known && w.canvas.open(nextFrame);") != std::string::npos &&
+                  runtime.find("if (known) { w.focusKnown = true; w.focus = focus; }") < runtime.find("w.inferred = !known && w.canvas.open(nextFrame);") &&
+                  runtime.find("if (flatUiMapCanvasPair(k.vs, k.ps) && !copy) {") != std::string::npos &&
+                  runtime.find("flatRuntimeNoteMapCanvasDraw(s.prefix.frame);") != std::string::npos &&
+                  runtime.find("if (flatUiMapCanvasPair(k.vs, k.ps) && !copy) {") < runtime.find("ui.mapOpen = flatRuntimeMapOpenFrame();"),
+              "wiring: the canvas draw is noted before the UI layer's decision, and an absent GuiFocus is answered from it after the "
+              "watcher's own read");
         const size_t physicalShape = adapter.find("bool sourceTonePhysicalShape(");
         const size_t afterPhysicalShape = adapter.find("uint32_t g_candidateLines", physicalShape);
         const size_t sourceTone = adapter.find("bool flatUiLayerSourceToneCandidate(");
@@ -2372,11 +2426,12 @@ void testSupercruiseLines() {
         const bool expectHdr = fam == UiLayerFamily::kHolo || fam == UiLayerFamily::kFlightHud || fam == UiLayerFamily::kSprite ||
                                fam == UiLayerFamily::kHoloGeneric || fam == UiLayerFamily::kOrbitLines ||
                                fam == UiLayerFamily::kSupercruiseBars || fam == UiLayerFamily::kSpaceDust ||
-                               fam == UiLayerFamily::kMapCanvas || fam == UiLayerFamily::kMapSprite || fam == UiLayerFamily::kWeaponsFire || fam == UiLayerFamily::kShieldRipple;
+                               fam == UiLayerFamily::kMapCanvas || fam == UiLayerFamily::kMapSprite || fam == UiLayerFamily::kOnFootHud ||
+                               fam == UiLayerFamily::kWeaponsFire || fam == UiLayerFamily::kShieldRipple;
         takesHdr = takesHdr && uiLayerFamilyTakesHdr(fam) == expectHdr;
         sceneLines = sceneLines && uiLayerFamilyIsSceneLines(fam) == (fam == UiLayerFamily::kOrbitLines || fam == UiLayerFamily::kSupercruiseBars);
     }
-    check(takesHdr, "SC3a: uiLayerFamilyTakesHdr is exactly the holo panels, flight HUD, sprite, holograms, orbit lines, bars, space dust, the two map families, the weapons fire and the shield ripple");
+    check(takesHdr, "SC3a: uiLayerFamilyTakesHdr is exactly the holo panels, flight HUD, sprite, holograms, orbit lines, bars, space dust, the two map families, the on-foot HUD (F26), the weapons fire and the shield ripple");
     check(sceneLines, "SC3b: uiLayerFamilyIsSceneLines is exactly the orbit lines and the bars (the space dust has no width to give: it is exempt from the density rule)");
     check(uiLayerWiderThanRender(5040, 4873, 2016, 1949) && uiLayerWiderThanRender(4032, 3898, 2016, 1949) &&
               !uiLayerWiderThanRender(2016, 1949, 2016, 1949) && !uiLayerWiderThanRender(4032, 1949, 4032, 1949) &&

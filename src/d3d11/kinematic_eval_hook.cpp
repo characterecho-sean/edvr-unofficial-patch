@@ -4,9 +4,12 @@
 #include "engine_velocity_emit.h"
 #include "engine_motion_cpu.h"   // the CPU instrument: EDVR's own work in every relay below is clocked per call
 #include "../common/code_hook.h"
+#include "../common/game_build.h"   // issue 124: every exe address below through gameRva; the pins through gamePinMatches
+#include "../common/log.h"
 #include <windows.h>
 #include <intrin.h>
 #include <atomic>
+#include <cstdio>
 #include <cstring>
 #include <mutex>
 
@@ -116,6 +119,7 @@ struct HookEntry {
     // patchIsOurs reads this from contexts that do not hold g_installMutex,
     // so a plain bool could observe a half-installed entry (finding 5).
     std::atomic<bool> ready{false};
+    bool noted=false;   // an unknown build: its found / not found line is written (under g_installMutex)
 };
 
 // Job bodies behind the run thunks (recovered from the hash-verified exe,
@@ -395,8 +399,16 @@ __declspec(noinline) uintptr_t __fastcall evalObserved(uintptr_t descriptor,uint
 thread_local uintptr_t t_rigCurrent=0;
 
 using OffScreenCallFn = void (__fastcall*)(uintptr_t);
+// The branch's two callees in the running build, absolute, resolved once by kinematicEvalRigVetoAttach (0 until then, and on an unknown
+// build where the signature resolver did not find them: no emulation). The veto runs per rig evaluation, so nothing is looked up here.
+std::atomic<uintptr_t> g_offScreenOwnerCall{0},g_offScreenPipeCall{0};
+// The off-screen branch's field witnesses (issue 124, docs\design-game-update-signatures-2026-10-25.md, 2026-10-25 round 2), all in the rig
+// eval's matched fragment [0x431DD7D, 0x431DECA): mov rbx,[rdi+0x348] (the collection), lea rcx,[rbx+0x300] (the owner-count call's
+// argument), mov byte [rbx+0x629],r13b (the byte the emulation writes), mov rcx,[rbx+0x2E0] (the pipe). The callees carry their own
+// (0x43509B0: mov dword [rcx+0x2A4],0; 0x42B8380: add rcx,0x78). On an unknown build each must be found before the veto attaches.
+constexpr uint32_t kOffScreenWitnessRvas[4]={0x431DD7Du,0x431DE81u,0x431DE88u,0x431DE94u};
 bool rigOffScreenEmulate(uintptr_t rig) noexcept {
-    const uintptr_t base=reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+    const uintptr_t ownerCall=g_offScreenOwnerCall.load(std::memory_order_acquire),pipeCall=g_offScreenPipeCall.load(std::memory_order_acquire);
     uintptr_t coll=0;
     uintptr_t pipe=0;
     bool ok=false;
@@ -407,7 +419,7 @@ bool rigOffScreenEmulate(uintptr_t rig) noexcept {
     } __except(EXCEPTION_EXECUTE_HANDLER) {
         ok=false;
     }
-    if(!ok||!base) {
+    if(!ok||!ownerCall||!pipeCall) {
         rigEmulateFaults.fetch_add(1,std::memory_order_relaxed);
         return false;
     }
@@ -419,8 +431,8 @@ bool rigOffScreenEmulate(uintptr_t rig) noexcept {
     __try {
         for(int i=0;i<steps;++i) {
             if(kinds[i]==1)      *reinterpret_cast<volatile uint8_t*>(args[i])=0;          // mov byte [rbx+0x629], r13b (0)
-            else if(kinds[i]==2) reinterpret_cast<OffScreenCallFn>(base+0x43509B0)(args[i]);  // lea rcx,[rbx+0x300]; call 0x43509B0
-            else if(kinds[i]==3) reinterpret_cast<OffScreenCallFn>(base+0x42B8380)(args[i]);  // rcx = [rbx+0x2E0]; call 0x42B8380
+            else if(kinds[i]==2) reinterpret_cast<OffScreenCallFn>(ownerCall)(args[i]);  // lea rcx,[rbx+0x300]; call 0x43509B0
+            else if(kinds[i]==3) reinterpret_cast<OffScreenCallFn>(pipeCall)(args[i]);  // rcx = [rbx+0x2E0]; call 0x42B8380
         }
         done=true;
     } __except(EXCEPTION_EXECUTE_HANDLER) {
@@ -878,42 +890,61 @@ bool ensureInstalled(uintptr_t base) noexcept {
     return true;
 }
 
-// The executable check for the shared install: PE timestamp/image size of the
-// hash-verified build plus the evaluator's prologue (or our own patch
-// already there). Mirrors KinematicEvalProbe::validateExecutableLocked
-// without touching probe state -- this file's copy-culture is deliberate.
+// An unknown build only (issue 124): one line per hook entry, once, saying whether the signature resolver found it (at: its RVA in the
+// running build, 0 when not found) and, when found, why it still stands down (refusal, or null). Nothing on build 334925.
+void noteUnknownBuild(HookEntry& entry,uintptr_t at,const char* refusal) noexcept {
+    if(entry.noted || gameBuildKnown() || !gameBuildIdentity(nullptr,nullptr))return;
+    entry.noted=true;
+    if(!at)
+        Log::get().note("kinematic hooks: %s, and %s (0x%llX in build 334925) was not found by signature; it stands down.",
+                        gameBuildText(),entry.name,static_cast<unsigned long long>(entry.rva));
+    else if(refusal)
+        Log::get().note("kinematic hooks: %s (0x%llX in build 334925) was found by signature on %s at 0x%llX, but %s; it stands down.",
+                        entry.name,static_cast<unsigned long long>(entry.rva),gameBuildText(),static_cast<unsigned long long>(at),refusal);
+    else
+        Log::get().note("kinematic hooks: %s (0x%llX in build 334925) was found by signature on %s at 0x%llX.",
+                        entry.name,static_cast<unsigned long long>(entry.rva),gameBuildText(),static_cast<unsigned long long>(at));
+}
+
+// The executable check for the shared install: the evaluator found in the
+// running build (build 334925: its own RVA; an unknown build: by signature)
+// and its prologue (or our own patch already there). Mirrors
+// KinematicEvalProbe::validateExecutableLocked without touching probe
+// state -- this file's copy-culture is deliberate.
 bool targetValid(uintptr_t base) noexcept {
+    const uintptr_t evalRva=gameRva(static_cast<uint32_t>(KinematicEvalProbe::kEvalRva));
+    if(!evalRva){noteUnknownBuild(g_evalEntry,0,nullptr);return false;}
+    bool valid=false;
     __try {
-        uint32_t peOff=0;
-        std::memcpy(&peOff,reinterpret_cast<const void*>(base+0x3C),4);
-        if(peOff>0x1000)return false;
-        uint32_t timestamp=0,imageSize=0;
-        std::memcpy(&timestamp,reinterpret_cast<const void*>(base+peOff+8),4);
-        std::memcpy(&imageSize,reinterpret_cast<const void*>(base+peOff+0x50),4);
-        if(timestamp!=KinematicEvalProbe::kExpectedTimestamp ||
-           imageSize!=KinematicEvalProbe::kExpectedImageSize)return false;
         // push rbx; push rbp; push rsi; push rdi; push r12; r14; r15; sub rsp,0x70
         static const uint8_t kPrologue[14]={0x40,0x53,0x55,0x56,0x57,0x41,0x54,0x41,
                                             0x56,0x41,0x57,0x48,0x83,0xEC};
         uint8_t got[sizeof(kPrologue)]{};
-        std::memcpy(got,reinterpret_cast<const void*>(base+KinematicEvalProbe::kEvalRva),
+        std::memcpy(got,reinterpret_cast<const void*>(base+evalRva),
                     sizeof(got));
-        return std::memcmp(got,kPrologue,sizeof(kPrologue))==0 ||
-               kinematicEvalHooksMatch(base+KinematicEvalProbe::kEvalRva);
+        valid=gamePinMatches(static_cast<uint32_t>(KinematicEvalProbe::kEvalRva),got,kPrologue,sizeof(kPrologue)) ||
+               kinematicEvalHooksMatch(base+evalRva);
     } __except(EXCEPTION_EXECUTE_HANDLER) {return false;}
+    if(!valid)noteUnknownBuild(g_evalEntry,evalRva,"its prologue is not build 334925's outside the masked fields");
+    return valid;
 }
 
 bool installOne(HookEntry& entry,uintptr_t base) noexcept {
-    entry.relay=allocateRelay(base+entry.rva);
-    if(!entry.relay)return false;
+    const uintptr_t rva=gameRva(static_cast<uint32_t>(entry.rva));
+    // An unknown build's line comes after the outcome, so "found" never precedes a refusal (nothing is logged on build 334925).
+    if(!rva){noteUnknownBuild(entry,0,nullptr);return false;}
+    entry.relay=allocateRelay(base+rva);
+    if(!entry.relay){noteUnknownBuild(entry,rva,"no relay page could be reserved near it");return false;}
     buildRelay(entry.relay,entry.gate?entry.gate:static_cast<const void*>(&evalGate),entry.callback);
-    if(!entry.hook.install(reinterpret_cast<void*>(base+entry.rva),entry.relay,nullptr,
+    if(!entry.hook.install(reinterpret_cast<void*>(base+rva),entry.relay,nullptr,
                            entry.name,&prepareRelay,&entry)) {
         VirtualFree(entry.relay,0,MEM_RELEASE);
         entry.relay=nullptr;
+        noteUnknownBuild(entry,rva,"CodeHook refused it (its own line names why)");
         return false;
     }
     entry.ready.store(true,std::memory_order_release);
+    noteUnknownBuild(entry,rva,nullptr);
     return true;
     // Process-lifetime storage: do not free a relay or trampoline which an
     // in-flight call may already be executing. Captures only gate it.
@@ -921,7 +952,9 @@ bool installOne(HookEntry& entry,uintptr_t base) noexcept {
 
 bool patchIsOurs(const HookEntry& entry,uintptr_t base) noexcept {
     if(!entry.ready.load(std::memory_order_acquire) || !entry.relay)return false;
-    const uintptr_t target=base+entry.rva;
+    const uintptr_t at=gameRva(static_cast<uint32_t>(entry.rva));   // ready: installOne found it
+    if(!at)return false;
+    const uintptr_t target=base+at;
     const intptr_t displacement=reinterpret_cast<intptr_t>(entry.relay)-intptr_t(target+5);
     // The evaluator's prologue past the five patch bytes, from the
     // hash-verified exe: 41 54 41 56 41 57 48 83.
@@ -933,40 +966,57 @@ bool patchIsOurs(const HookEntry& entry,uintptr_t base) noexcept {
     return bytes[0]==0xE9 && actual==displacement && std::memcmp(bytes+5,tail,sizeof(tail))==0;
 }
 
+// The n (<= 64) bytes at addr, copied into out for a pin compare by gamePinMatches (an exact compare on build 334925); null when n is
+// too long. No __try and no noexcept of its own: it runs under its caller's __try, which a fault reaches as before.
+const uint8_t* copied(uintptr_t addr,uint8_t (&out)[64],size_t n) {
+    if(n>sizeof(out))return nullptr;
+    std::memcpy(out,reinterpret_cast<const void*>(addr),n);
+    return out;
+}
+
 // FUN_1442B6BE0's build-keyed signature: null when the image is build
-// 334925 and every byte the part observer's frame offsets rest on is in
-// place (the prologue, or our own patch followed by the prologue's rest);
-// otherwise the reason the hook stands down.
+// 334925 (or an unknown build where the signature resolver found it) and
+// every byte the part observer's frame offsets rest on is in place (the
+// prologue, or our own patch followed by the prologue's rest); otherwise
+// the reason the hook stands down.
+
 const char* partTestSignature(uintptr_t base,const HookEntry& entry) noexcept {
+    if(!gameBuildIdentity(nullptr,nullptr))return "not build 334925 (no PE header)";
+    // The part test and the end of the builder's call to it in the running build (an unknown build: by signature, 0 when not found).
+    const uintptr_t testRva=gameRva(static_cast<uint32_t>(kPartTestRva)),callEnd=gameRva(static_cast<uint32_t>(kPartCallReturnRva));
+    if(!testRva||!callEnd)
+        return "an unknown build, and FUN_1442B6BE0 or the builder's call to it (0x42B6BE0, 0x42B77B6 in build 334925) was not found by signature";
     __try {
-        uint32_t peOff=0;
-        std::memcpy(&peOff,reinterpret_cast<const void*>(base+0x3C),4);
-        if(peOff>0x1000)return "not build 334925 (no PE header)";
-        uint32_t timestamp=0,imageSize=0;
-        std::memcpy(&timestamp,reinterpret_cast<const void*>(base+peOff+8),4);
-        std::memcpy(&imageSize,reinterpret_cast<const void*>(base+peOff+0x50),4);
-        if(timestamp!=KinematicEvalProbe::kExpectedTimestamp ||
-           imageSize!=KinematicEvalProbe::kExpectedImageSize)return "not build 334925 (PE timestamp/size)";
         uint8_t got[sizeof(kPartPrologue)]{};
-        std::memcpy(got,reinterpret_cast<const void*>(base+kPartTestRva),sizeof(got));
-        if(std::memcmp(got,kPartPrologue,sizeof(got))!=0) {
+        std::memcpy(got,reinterpret_cast<const void*>(base+testRva),sizeof(got));
+        if(!gamePinMatches(static_cast<uint32_t>(kPartTestRva),got,kPartPrologue,sizeof(got))) {
             // Our own patch from an earlier attach: E9 to our relay, then the rest.
             int32_t actual=0;std::memcpy(&actual,got+1,4);
             const intptr_t displacement=entry.relay
-                ?reinterpret_cast<intptr_t>(entry.relay)-intptr_t(base+kPartTestRva+5):0;
+                ?reinterpret_cast<intptr_t>(entry.relay)-intptr_t(base+testRva+5):0;
             if(!(entry.relay && got[0]==0xE9 && actual==displacement &&
                  std::memcmp(got+5,kPartPrologue+5,sizeof(got)-5)==0))
                 return "prologue mismatch at RVA 0x42B6BE0";
         }
-        for(const CodeBytes& c:kPartFrame)
-            if(std::memcmp(reinterpret_cast<const void*>(base+c.rva),c.b,c.n)!=0)return c.why;
+        uint8_t b[64]{};
+        for(const CodeBytes& c:kPartFrame) {
+            const uintptr_t at=gameRva(static_cast<uint32_t>(c.rva));
+            if(!at)return "an unknown build, and the builder frame (FUN_1442B7040 in build 334925) was not found by signature";
+            if(!gamePinMatches(static_cast<uint32_t>(c.rva),copied(base+at,b,c.n),c.b,c.n))return c.why;
+        }
+        // The call's rel32 reaches the part test: the last pin holds it on build 334925; an unknown build's masked compare skips it.
+        int32_t rel=0;std::memcpy(&rel,reinterpret_cast<const void*>(base+callEnd-4),4);
+        if(base+callEnd+static_cast<intptr_t>(rel)!=base+testRva)
+            return "an unknown build: the builder's call found by signature does not reach FUN_1442B6BE0 found by signature";
         return nullptr;
     } __except(EXCEPTION_EXECUTE_HANDLER) {return "unreadable executable image";}
 }
 
 bool partPatchIsOurs(uintptr_t base) noexcept {
     if(!g_partEntry.ready.load(std::memory_order_acquire) || !g_partEntry.relay)return false;
-    const uintptr_t target=base+kPartTestRva;
+    const uintptr_t at=gameRva(static_cast<uint32_t>(kPartTestRva));   // ready: partTestSignature found it
+    if(!at)return false;
+    const uintptr_t target=base+at;
     const intptr_t displacement=reinterpret_cast<intptr_t>(g_partEntry.relay)-intptr_t(target+5);
     uint8_t bytes[sizeof(kPartPrologue)]{};
     __try {std::memcpy(bytes,reinterpret_cast<const void*>(target),sizeof(bytes));}
@@ -985,32 +1035,48 @@ const char* primarySignature(uintptr_t base) noexcept {
     constexpr uint8_t append[]={0x48,0xFF,0x42,0x18,0xFF,0x86,0xA4,0x02,0x00,0x00};
     constexpr uint8_t key[]={0x4C,0x8D,0x71,0x40}; // lea r14,[rcx+40h]
     constexpr uint8_t owner[]={0x48,0x8B,0x76,0x20}; // mov rsi,[rsi+20h]
+    // Every address below in the running build: build 334925, itself; an unknown build, found by signature (0: not found).
+    const uintptr_t primary=gameRva(0x42B6D50u),primaryEnd=gameRva(0x42B6D55u),caller=gameRva(0x42B7463u),callerEnd=gameRva(0x42B7468u),
+                    appendAt=gameRva(0x42B6FF8u),keyAt=gameRva(0x42B6D7Bu),ownerAt=gameRva(0x42B6EFCu),outerAt=gameRva(0x42B7040u),
+                    outerEnd=gameRva(0x42B7045u);
+    if(!primary||!primaryEnd||!caller||!callerEnd||!appendAt||!keyAt||!ownerAt||!outerAt||!outerEnd)
+        return "an unknown build, and the primary emit or its builder (0x42B6D50, 0x42B7040 in build 334925) was not found by signature";
     __try {
         uint8_t got[sizeof(prologue)]{};
-        std::memcpy(got,reinterpret_cast<const void*>(base+0x42B6D50),sizeof(got));
-        if(g_primaryEntry.ready.load(std::memory_order_acquire) && !std::memcmp(got,prologue,sizeof(got)))
+        std::memcpy(got,reinterpret_cast<const void*>(base+primary),sizeof(got));
+        if(g_primaryEntry.ready.load(std::memory_order_acquire) && gamePinMatches(0x42B6D50u,got,prologue,sizeof(got)))
             return "our primary patch is gone";
-        if(std::memcmp(got,prologue,sizeof(got))) {
+        if(!gamePinMatches(0x42B6D50u,got,prologue,sizeof(got))) {
             int32_t jump=0;std::memcpy(&jump,got+1,4);
-            const intptr_t expected=reinterpret_cast<intptr_t>(g_primaryEntry.relay)-intptr_t(base+0x42B6D55);
+            const intptr_t expected=reinterpret_cast<intptr_t>(g_primaryEntry.relay)-intptr_t(base+primaryEnd);
             if(!g_primaryEntry.relay || got[0]!=0xE9 || jump!=expected ||
                 std::memcmp(got+5,prologue+5,sizeof(got)-5))return "primary prologue mismatch";
         }
-        if(std::memcmp(reinterpret_cast<const void*>(base+0x42B7463),call,sizeof(call)))return "primary caller mismatch";
-        if(std::memcmp(reinterpret_cast<const void*>(base+0x42B6FF8),append,sizeof(append)))return "primary append mismatch";
-        if(std::memcmp(reinterpret_cast<const void*>(base+0x42B6D7B),key,sizeof(key)))return "primary key mismatch";
-        if(std::memcmp(reinterpret_cast<const void*>(base+0x42B6EFC),owner,sizeof(owner)))return "primary owner mismatch";
-        uint64_t primaryHash=0xCBF29CE484222325ull,outerHash=primaryHash;
-        for(uintptr_t i=5;i<0x2DA;++i)primaryHash=(primaryHash^*reinterpret_cast<const uint8_t*>(base+0x42B6D50+i))*0x100000001B3ull;
-        for(uintptr_t i=5;i<0xC96;++i)outerHash=(outerHash^*reinterpret_cast<const uint8_t*>(base+0x42B7040+i))*0x100000001B3ull;
-        if(primaryHash!=0x7C7152F32F46C674ull)return "primary body mismatch";
-        if(outerHash!=0xD7B91C22824F5886ull)return "outer builder body mismatch";
+        uint8_t b[64]{};
+        if(!gamePinMatches(0x42B7463u,copied(base+caller,b,sizeof(call)),call,sizeof(call)))return "primary caller mismatch";
+        // The call's rel32 reaches the primary: the pin holds it on build 334925; an unknown build's masked compare skips it.
+        int32_t rel=0;std::memcpy(&rel,reinterpret_cast<const void*>(base+caller+1),4);
+        if(base+callerEnd+static_cast<intptr_t>(rel)!=base+primary)
+            return "an unknown build: the builder's call found by signature does not reach the primary emit found by signature";
+        if(!gamePinMatches(0x42B6FF8u,copied(base+appendAt,b,sizeof(append)),append,sizeof(append)))return "primary append mismatch";
+        if(!gamePinMatches(0x42B6D7Bu,copied(base+keyAt,b,sizeof(key)),key,sizeof(key)))return "primary key mismatch";
+        if(!gamePinMatches(0x42B6EFCu,copied(base+ownerAt,b,sizeof(owner)),owner,sizeof(owner)))return "primary owner mismatch";
+        if(gameBuildKnown()) {
+            uint64_t primaryHash=0xCBF29CE484222325ull,outerHash=primaryHash;
+            for(uintptr_t i=5;i<0x2DA;++i)primaryHash=(primaryHash^*reinterpret_cast<const uint8_t*>(base+primary+i))*0x100000001B3ull;
+            for(uintptr_t i=5;i<0xC96;++i)outerHash=(outerHash^*reinterpret_cast<const uint8_t*>(base+outerAt+i))*0x100000001B3ull;
+            if(primaryHash!=0x7C7152F32F46C674ull)return "primary body mismatch";
+            if(outerHash!=0xD7B91C22824F5886ull)return "outer builder body mismatch";
+        } else {   // an unknown build: the bodies hold displacements; the whole-function match proves every other byte of them
+            if(!gamePinProvenByMatch(0x42B6D55u,0x2D5))return "an unknown build, and the primary body is not proven by its signature match";
+            if(!gamePinProvenByMatch(0x42B7045u,0xC91))return "an unknown build, and the outer builder body is not proven by its signature match";
+        }
         // The complete outer body certifies six-argument setup and record/
         // context derivation. Its bracket must still be our installed relay.
-        uint8_t outer[5]{};std::memcpy(outer,reinterpret_cast<const void*>(base+0x42B7040),5);
+        uint8_t outer[5]{};std::memcpy(outer,reinterpret_cast<const void*>(base+outerAt),5);
         int32_t jump=0;std::memcpy(&jump,outer+1,4);
         if(!g_bucketEntry.ready.load(std::memory_order_acquire) || !g_bucketEntry.relay || outer[0]!=0xE9 ||
-           jump!=reinterpret_cast<intptr_t>(g_bucketEntry.relay)-intptr_t(base+0x42B7045))return "outer builder patch is not ours";
+           jump!=reinterpret_cast<intptr_t>(g_bucketEntry.relay)-intptr_t(base+outerEnd))return "outer builder patch is not ours";
         return nullptr;
     } __except(EXCEPTION_EXECUTE_HANDLER) {return "primary image unreadable";}
 }
@@ -1018,7 +1084,13 @@ const char* primarySignature(uintptr_t base) noexcept {
 void ensurePrimaryEmit(uintptr_t base) noexcept {
     const char* why=primarySignature(base);
     if(why){g_primaryStatus.store(why,std::memory_order_release);return;}
-    g_primaryReturn.store(base+0x42B7468,std::memory_order_release);
+    const uintptr_t primaryReturn=gameRva(0x42B7468u);   // found: primarySignature checked it
+    if(!primaryReturn){
+        g_primaryStatus.store("an unknown build, and the primary emit's return (0x42B7468 in build 334925) was not found by signature",
+                              std::memory_order_release);
+        return;
+    }
+    g_primaryReturn.store(base+primaryReturn,std::memory_order_release);
     if(!g_primaryEntry.ready.load(std::memory_order_acquire) && !installOne(g_primaryEntry,base)) {
         g_primaryStatus.store("CodeHook refused primary emit",std::memory_order_release);return;
     }
@@ -1031,19 +1103,25 @@ const char* poolCopySignature(uintptr_t base) noexcept {
     constexpr uint8_t layout[]={0x48,0x8B,0x81,0xD0,0x00,0x00,0x00,0x4C,0x8B,0xF9,
         0x48,0x8B,0x59,0x10,0x48,0x8B,0x50,0x10,0x48,0x8B,0x82,0x00,0x01,0x00,0x00,
         0x4C,0x8B,0xB2,0x80,0x01,0x00,0x00,0x8B,0x68,0x10};
+    // In the running build: build 334925, itself; an unknown build, found by signature (0: not found).
+    const uintptr_t copier=gameRva(0x4C846A0u),copierEnd=gameRva(0x4C846A5u),layoutAt=gameRva(0x4C846BCu);
+    if(!copier||!copierEnd||!layoutAt)return "an unknown build, and the pool copier (0x4C846A0 in build 334925) was not found by signature";
     __try {
         uint8_t got[sizeof(prologue)]{};
-        std::memcpy(got,reinterpret_cast<const void*>(base+0x4C846A0),sizeof(got));
-        if(std::memcmp(got,prologue,sizeof(got))) {
+        std::memcpy(got,reinterpret_cast<const void*>(base+copier),sizeof(got));
+        if(!gamePinMatches(0x4C846A0u,got,prologue,sizeof(got))) {
             int32_t actual=0;std::memcpy(&actual,got+1,4);
             if(!g_poolCopyEntry.relay || got[0]!=0xE9 ||
-               actual!=reinterpret_cast<intptr_t>(g_poolCopyEntry.relay)-intptr_t(base+0x4C846A5) ||
+               actual!=reinterpret_cast<intptr_t>(g_poolCopyEntry.relay)-intptr_t(base+copierEnd) ||
                std::memcmp(got+5,prologue+5,sizeof(got)-5))return "pool copier prologue mismatch";
         } else if(g_poolCopyEntry.ready.load(std::memory_order_acquire))return "our pool copier patch is gone";
-        if(std::memcmp(reinterpret_cast<const void*>(base+0x4C846BC),layout,sizeof(layout)))return "pool copier layout mismatch";
-        uint64_t hash=0xCBF29CE484222325ull;
-        for(uintptr_t i=5;i<0x283;++i)hash=(hash^*reinterpret_cast<const uint8_t*>(base+0x4C846A0+i))*0x100000001B3ull;
-        if(hash!=0x9786D5F14E4CCA55ull)return "pool copier body mismatch";
+        uint8_t b[64]{};
+        if(!gamePinMatches(0x4C846BCu,copied(base+layoutAt,b,sizeof(layout)),layout,sizeof(layout)))return "pool copier layout mismatch";
+        if(gameBuildKnown()) {
+            uint64_t hash=0xCBF29CE484222325ull;
+            for(uintptr_t i=5;i<0x283;++i)hash=(hash^*reinterpret_cast<const uint8_t*>(base+copier+i))*0x100000001B3ull;
+            if(hash!=0x9786D5F14E4CCA55ull)return "pool copier body mismatch";
+        } else if(!gamePinProvenByMatch(0x4C846A5u,0x27E))return "an unknown build, and the pool copier body is not proven by its signature match";
         return nullptr;
     } __except(EXCEPTION_EXECUTE_HANDLER) {return "pool copier image unreadable";}
 }
@@ -1058,20 +1136,28 @@ void ensurePoolCopy(uintptr_t base) noexcept {
 
 void ensurePoolMerge(uintptr_t base) noexcept {
     const char* why=nullptr;
+    // In the running build: build 334925, itself; an unknown build, found by signature (0: not found).
+    const uintptr_t merge=gameRva(0x43513A0u),mergeEnd=gameRva(0x43513A5u);
+    if(!merge||!mergeEnd) {
+        g_mergeStatus.store("an unknown build, and the list merge (0x43513A0 in build 334925) was not found by signature",std::memory_order_release);
+        return;
+    }
     __try {
         constexpr uint8_t prologue[]={0x40,0x53,0x41,0x54,0x48,0x83,0xEC,0x28};
-        uint8_t got[sizeof(prologue)]{};std::memcpy(got,reinterpret_cast<const void*>(base+0x43513A0),sizeof(got));
-        if(std::memcmp(got,prologue,sizeof(got))) {
+        uint8_t got[sizeof(prologue)]{};std::memcpy(got,reinterpret_cast<const void*>(base+merge),sizeof(got));
+        if(!gamePinMatches(0x43513A0u,got,prologue,sizeof(got))) {
             int32_t jump=0;std::memcpy(&jump,got+1,4);
             if(!g_poolMergeEntry.relay || got[0]!=0xE9 ||
-               jump!=reinterpret_cast<intptr_t>(g_poolMergeEntry.relay)-intptr_t(base+0x43513A5) ||
+               jump!=reinterpret_cast<intptr_t>(g_poolMergeEntry.relay)-intptr_t(base+mergeEnd) ||
                std::memcmp(got+5,prologue+5,3))why="merge prologue mismatch";
         } else if(g_poolMergeEntry.ready.load(std::memory_order_acquire))why="our merge patch is gone";
         // Entire untouched native body includes full-node splice, partial
         // fill/shift and cold free path, certifying every relocation offset.
-        uint64_t hash=0xCBF29CE484222325ull;
-        for(uintptr_t i=8;i<0x2A0;++i)hash=(hash^*reinterpret_cast<const uint8_t*>(base+0x43513A0+i))*0x100000001B3ull;
-        if(hash!=0x70748E8D5FFA83CCull)why="merge body mismatch";
+        if(gameBuildKnown()) {
+            uint64_t hash=0xCBF29CE484222325ull;
+            for(uintptr_t i=8;i<0x2A0;++i)hash=(hash^*reinterpret_cast<const uint8_t*>(base+merge+i))*0x100000001B3ull;
+            if(hash!=0x70748E8D5FFA83CCull)why="merge body mismatch";
+        } else if(!gamePinProvenByMatch(0x43513A8u,0x298))why="an unknown build, and the merge body is not proven by its signature match";
     } __except(EXCEPTION_EXECUTE_HANDLER){why="merge image unreadable";}
     if(why){g_mergeStatus.store(why,std::memory_order_release);return;}
     if(!g_poolMergeEntry.ready.load(std::memory_order_acquire) && !installOne(g_poolMergeEntry,base)) {
@@ -1084,17 +1170,25 @@ void ensurePoolClear(uintptr_t base) noexcept {
     // specialized 336-byte nodes using DAT_145F00D70. Entire native body
     // [3684635,3684782) FNV below has no PE relocations; own entry separately.
     const char* why=nullptr;
+    // In the running build: build 334925, itself; an unknown build, found by signature (0: not found).
+    const uintptr_t clear=gameRva(0x3684630u),clearEnd=gameRva(0x3684635u);
+    if(!clear||!clearEnd) {
+        g_clearStatus.store("an unknown build, and the typed clear (0x3684630 in build 334925) was not found by signature",std::memory_order_release);
+        return;
+    }
     __try {
         constexpr uint8_t prologue[]={0x48,0x89,0x4C,0x24,0x08};
-        uint8_t got[5]{};std::memcpy(got,reinterpret_cast<const void*>(base+0x3684630),5);
-        if(std::memcmp(got,prologue,5)) {
+        uint8_t got[5]{};std::memcpy(got,reinterpret_cast<const void*>(base+clear),5);
+        if(!gamePinMatches(0x3684630u,got,prologue,5)) {
             int32_t jump=0;std::memcpy(&jump,got+1,4);
             if(!g_poolClearEntry.relay || got[0]!=0xE9 ||
-               jump!=reinterpret_cast<intptr_t>(g_poolClearEntry.relay)-intptr_t(base+0x3684635))why="clear prologue mismatch";
+               jump!=reinterpret_cast<intptr_t>(g_poolClearEntry.relay)-intptr_t(base+clearEnd))why="clear prologue mismatch";
         } else if(g_poolClearEntry.ready.load(std::memory_order_acquire))why="our clear patch is gone";
-        uint64_t hash=0xCBF29CE484222325ull;
-        for(uintptr_t i=5;i<0x152;++i)hash=(hash^*reinterpret_cast<const uint8_t*>(base+0x3684630+i))*0x100000001B3ull;
-        if(hash!=0xEEC934673BEEED00ull)why="typed clear body mismatch";
+        if(gameBuildKnown()) {
+            uint64_t hash=0xCBF29CE484222325ull;
+            for(uintptr_t i=5;i<0x152;++i)hash=(hash^*reinterpret_cast<const uint8_t*>(base+clear+i))*0x100000001B3ull;
+            if(hash!=0xEEC934673BEEED00ull)why="typed clear body mismatch";
+        } else if(!gamePinProvenByMatch(0x3684635u,0x14D))why="an unknown build, and the typed clear body is not proven by its signature match";
     } __except(EXCEPTION_EXECUTE_HANDLER){why="clear image unreadable";}
     if(why){g_clearStatus.store(why,std::memory_order_release);return;}
     if(!g_poolClearEntry.ready.load(std::memory_order_acquire) && !installOne(g_poolClearEntry,base)) {
@@ -1113,7 +1207,13 @@ void ensurePartTest(uintptr_t base) noexcept {
     }
     const char* why=partTestSignature(base,g_partEntry);
     if(why) {g_partStatus.store(why,std::memory_order_release);return;}
-    g_partReturn.store(base+kPartCallReturnRva,std::memory_order_release);
+    const uintptr_t partReturn=gameRva(static_cast<uint32_t>(kPartCallReturnRva));   // found: partTestSignature checked it
+    if(!partReturn){
+        g_partStatus.store("an unknown build, and the part test's call return (in build 334925) was not found by signature",
+                           std::memory_order_release);
+        return;
+    }
+    g_partReturn.store(base+partReturn,std::memory_order_release);
     if(!installOne(g_partEntry,base)) {
         g_partStatus.store("CodeHook refused the patch (its cull-gate-part-test line says why)",
                            std::memory_order_release);
@@ -1146,6 +1246,18 @@ const char* kinematicEvalRigVetoAttach() noexcept {
         if(!patchIsOurs(g_evalEntry,base))return "opcode_mismatch";
         if(!g_rigEvalEntry.ready.load(std::memory_order_acquire))
             return "CodeHook refused kinematic-rig-eval; its own line names why";
+        const uintptr_t ownerCall=gameRva(0x43509B0u),pipeCall=gameRva(0x42B8380u);
+        if(!ownerCall||!pipeCall)
+            return "an unknown build, and the off-screen branch's callees (0x43509B0, 0x42B8380 in build 334925) were not found by signature";
+        uint32_t missing=0;
+        if(!gameRvasFound(kOffScreenWitnessRvas,4,&missing)) {
+            static char why[200];   // under g_installMutex; the same text on every call for one build
+            std::snprintf(why,sizeof(why),"an unknown build, and the off-screen branch's field witness 0x%X (in build 334925) was not found by "
+                          "signature",missing);
+            return why;
+        }
+        g_offScreenOwnerCall.store(base+ownerCall,std::memory_order_release);
+        g_offScreenPipeCall.store(base+pipeCall,std::memory_order_release);
         rigVetoWanted.store(true,std::memory_order_release);
         recomputeGateLocked();
         return "installed";
@@ -1195,7 +1307,8 @@ uintptr_t kinematicEvalCurrentRig() noexcept {
 
 bool kinematicEvalHooksMatch(uintptr_t evalTarget) noexcept {
     const uintptr_t base=reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
-    return base && evalTarget==base+KinematicEvalProbe::kEvalRva && patchIsOurs(g_evalEntry,base);
+    const uintptr_t evalRva=gameRva(static_cast<uint32_t>(KinematicEvalProbe::kEvalRva));
+    return base && evalRva && evalTarget==base+evalRva && patchIsOurs(g_evalEntry,base);
 }
 
 const char* attachKinematicEvalHooks(KinematicEvalProbe* probe) noexcept {

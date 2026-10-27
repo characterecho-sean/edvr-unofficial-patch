@@ -1,5 +1,6 @@
 #include "../../src/d3d11/object_classification_probe.h"
 #include "../../src/d3d11/object_record_writer_hook.h"
+#include "../../src/common/game_build.h"
 #include <d3d11.h>
 #include <wrl/client.h>
 #include <windows.h>
@@ -12,6 +13,24 @@
 #include <vector>
 
 using Microsoft::WRL::ComPtr;
+namespace edvr {
+NativeWeaponUiSubmitIdentity g_testUiSubmit{};
+bool g_testUiSubmitActive=false;
+bool nativeOnFootWeaponUiCurrentSubmit(uintptr_t instance,NativeWeaponUiSubmitIdentity* out) noexcept {
+    if(!out)return false;*out=NativeWeaponUiSubmitIdentity{};
+    if(!g_testUiSubmitActive||instance!=g_testUiSubmit.instance)return false;
+    *out=g_testUiSubmit;return true;
+}
+// The rig links no resolver (src\common\game_build.cpp). These stand in for it as build 334925, the known build, for every probe
+// linked here: each binds its known RVAs unchanged and compares its pins exactly, as it does in the game on that build.
+bool gameBuildIdentity(uint32_t* stamp,uint32_t* size) noexcept {if(stamp)*stamp=1792704584u;if(size)*size=104906752u;return true;}
+bool gameBuildKnown() noexcept {return true;}
+const char* gameBuildText() noexcept {return "build 334925";}
+uintptr_t gameRva(uint32_t knownRva) noexcept {return knownRva;}
+bool gameRvasFound(const uint32_t*,size_t,uint32_t* firstMissing) noexcept {if(firstMissing)*firstMissing=0;return true;}
+bool gamePinMatches(uint32_t,const uint8_t* got,const uint8_t* pin,size_t n) noexcept {return got&&pin&&std::memcmp(got,pin,n)==0;}
+bool gamePinProvenByMatch(uint32_t,size_t) noexcept {return false;}
+}
 namespace {
 unsigned checks=0;
 void check(bool ok,const char* what){++checks;if(!ok){std::printf("FAIL: %s\n",what);std::exit(1);}}
@@ -120,8 +139,31 @@ void recordWriterTests(){
     std::vector<uint8_t> directStack(0x300);fillRecord(directStack.data()+0x60,4);
     auto e=p.beginLookupRvaForTest(0x4315CCA,reinterpret_cast<uintptr_t>(directStack.data()),dictionary,reinterpret_cast<uintptr_t>(keyBytes.data()),c);p.completeLookup(e,reinterpret_cast<uintptr_t>(entry.data()));
     std::vector<uint8_t> helperRecord(0x150);fillRecord(helperRecord.data(),5);c.Rbx=reinterpret_cast<DWORD64>(helperRecord.data());c.Rdi=reinterpret_cast<DWORD64>(object.data());
+    edvr::g_testUiSubmit={};edvr::g_testUiSubmit.renderFrame=99;edvr::g_testUiSubmit.itemSerial=4;edvr::g_testUiSubmit.ordinal=0;
+    edvr::g_testUiSubmit.submitThread=GetCurrentThreadId();edvr::g_testUiSubmit.submitQpc=1;edvr::g_testUiSubmit.instance=reinterpret_cast<uintptr_t>(object.data());
+    edvr::g_testUiSubmit.renderer=0x10000;edvr::g_testUiSubmit.part=0x20000;edvr::g_testUiSubmit.nameId=28879;edvr::g_testUiSubmitActive=true;
     auto f=p.beginLookupRvaForTest(0x434FDA9,0,dictionary,reinterpret_cast<uintptr_t>(keyBytes.data()),c);p.completeLookup(f,reinterpret_cast<uintptr_t>(entry.data()));
+    edvr::g_testUiSubmitActive=false;
+    check(p.recordsForTest().back().uiJoinStatus=="matched_instance_tls"&&p.recordsForTest().back().uiSubmit.ordinal==0&&
+          p.recordsForTest().back().uiSubmit.instance==uintptr_t(c.Rdi)&&p.summary().uiJoinMatched==1,
+          "UI packed-record join retains exact active instance TLS including ordinal zero");
     check(p.recordsForTest().back().objectSnapshot.data.size()==0x1A0&&p.recordsForTest().back().lookupStatus=="complete","helper writer retains bounded input and completed entry");
+    edvr::ObjectRecordWriterProbe reserved;reserved.armForTest(79);reserved.setSyntheticRecordCountForTest(edvr::ObjectRecordWriterProbe::kRecordCap-edvr::ObjectRecordWriterProbe::kUiRecordReserve);
+    reserved.beginLookupRvaForTest(0x369FAF1,reinterpret_cast<uintptr_t>(directStack.data()),dictionary,reinterpret_cast<uintptr_t>(keyBytes.data()),c);
+    check(reserved.recordsForTest().empty()&&reserved.summary().recordOverflow==1,"generic record limit leaves the UI record slots reserved");
+    edvr::g_testUiSubmitActive=true;
+    auto reservedUi=reserved.beginLookupRvaForTest(0x434FDA9,0,dictionary,reinterpret_cast<uintptr_t>(keyBytes.data()),c);
+    check(reservedUi.record!=edvr::ObjectRecordWriterProbe::kNone&&reserved.recordsForTest().back().record.status=="available"&&
+          reserved.summary().uiJoinMatched==1,"exact UI packed record survives generic slot saturation");reserved.finish();
+    edvr::ObjectRecordWriterProbe fullUi;fullUi.armForTest(80);fullUi.setSyntheticRecordCountForTest(edvr::ObjectRecordWriterProbe::kRecordCap);
+    auto overflowUi=fullUi.beginLookupRvaForTest(0x434FDA9,0,dictionary,reinterpret_cast<uintptr_t>(keyBytes.data()),c);
+    check(overflowUi.record==edvr::ObjectRecordWriterProbe::kNone&&fullUi.summary().uiReserveOverflow==1,
+          "exhausted UI reserve is explicit instead of silently dropping a matched record");fullUi.finish();
+    edvr::ObjectRecordWriterProbe byteReserved;byteReserved.armForTest(81);byteReserved.setRetainedBytesForTest(edvr::ObjectRecordWriterProbe::kByteCap);
+    auto byteUi=byteReserved.beginLookupRvaForTest(0x434FDA9,0,dictionary,reinterpret_cast<uintptr_t>(keyBytes.data()),c);
+    check(byteUi.record!=edvr::ObjectRecordWriterProbe::kNone&&byteReserved.recordsForTest().back().record.status=="available"&&
+          byteReserved.summary().byteBudgetDeclines>0,"matched UI packed record uses protected bytes after generic byte budget saturation");byteReserved.finish();
+    edvr::g_testUiSubmitActive=false;
     p.beginLookupRvaForTest(0x4350F76,0,dictionary,reinterpret_cast<uintptr_t>(keyBytes.data()),c);p.beginLookupRvaForTest(0x123456,0,dictionary,reinterpret_cast<uintptr_t>(keyBytes.data()),c);
     std::vector<uint8_t> lateStack(0x200);fillRecord(lateStack.data()+0x50,8);auto late=p.beginLookupRvaForTest(0x369FAF1,reinterpret_cast<uintptr_t>(lateStack.data()),dictionary,reinterpret_cast<uintptr_t>(keyBytes.data()),c);p.completeLookup(late,reinterpret_cast<uintptr_t>(entry.data()));
     const auto s=p.summary();check(s.observed==7&&s.stored==7&&s.completed==7&&s.declinedManagement==1&&s.declinedUnknown==1,"all five writer recipes accepted and management/unknown callers declined");
@@ -135,11 +177,11 @@ void recordWriterTests(){
     kinematicOwnerDirectUnwindStub(reinterpret_cast<uintptr_t>(rig.outer.data()),rig.directDictionary(),rig.directKey(),ownershipRecord.data());
     check(writerUnwindPending.record!=edvr::ObjectRecordWriterProbe::kNone&&ownershipProbe.recordsForTest().back().ownershipStatus=="linked","real nested unwind restores direct ancestor RBX/RDI and links ownership");
     ownershipProbe.completeLookup(writerUnwindPending,reinterpret_cast<uintptr_t>(entry.data()));
-    check(ownershipProbe.ownershipsForTest().back().branch=="direct_43245A0"&&ownershipProbe.ownershipsForTest().back().ancestorReturnRva==0x431DE72,"direct ancestor return identifies 43245A0 branch");
+    check(ownershipProbe.ownershipsForTest().back().branch=="direct_43245A0"&&ownershipProbe.ownershipsForTest().back().ancestorReturnOffset==0x431DE72,"direct ancestor return identifies 43245A0 branch");
     writerOwnershipFixtureReturn=reinterpret_cast<uintptr_t>(&kinematicOwnerVirtualUnwindResume);writerOwnershipGameReturn=0x431DE7F;
     kinematicOwnerVirtualUnwindStub(reinterpret_cast<uintptr_t>(rig.outer.data()),rig.directDictionary(),rig.directKey(),ownershipRecord.data());
     ownershipProbe.completeLookup(writerUnwindPending,reinterpret_cast<uintptr_t>(entry.data()));
-    check(ownershipProbe.ownershipsForTest().back().branch=="virtual_50"&&ownershipProbe.ownershipsForTest().back().ancestorReturnRva==0x431DE7F,"virtual ancestor return identifies slot-50 branch");
+    check(ownershipProbe.ownershipsForTest().back().branch=="virtual_50"&&ownershipProbe.ownershipsForTest().back().ancestorReturnOffset==0x431DE7F,"virtual ancestor return identifies slot-50 branch");
 
     edvr::ObjectRecordWriterProbe refusedProbe;refusedProbe.armForTest(91);refusedProbe.setOwnershipOpcodesValidForTest(false);writerUnwindProbe=&refusedProbe;
     writerOwnershipFixtureReturn=reinterpret_cast<uintptr_t>(&kinematicOwnerDirectUnwindResume);writerOwnershipGameReturn=0x431DE72;
@@ -207,8 +249,9 @@ void captureFixture(const wchar_t* directory){
           "v3 fixture publishes the record writer's linked ownership");
     check(text.find("\"draws\"")==std::string::npos&&text.find("\"source_owner\"")==std::string::npos&&text.find("\"resources\"")==std::string::npos,
           "v3 fixture carries no draw/mesh sections");
-    check(text.find("\"record_writers\":{\"version\":3,")!=std::string::npos&&text.find("\"uploads\"")==std::string::npos,
-          "the record-writer section is version 3, without the upload join");
+    check(text.find("\"record_writers\":{\"version\":4,")!=std::string::npos&&text.find("\"uploads\"")==std::string::npos&&
+          text.find("\"ui_record_reserve\":1024")!=std::string::npos&&text.find("\"ui_byte_reserve\":344064")!=std::string::npos,
+          "the record-writer section carries bounded UI join metadata and byte/slot reserves");
     p.reset();
 }
 }

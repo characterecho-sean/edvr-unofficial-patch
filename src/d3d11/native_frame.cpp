@@ -1,11 +1,13 @@
 #include "../common/native_frame.h"
 
 #include "../common/comfort_fade.h"
+#include "../common/left_eye_share.h"
 #include "../common/config.h"
 #include "../common/frame_flag.h"
 #include "../common/log.h"
 #include "../common/openxr_resolution_entries.h"
 #include "journal_watch.h"
+#include "native_on_foot.h"
 #include "native_render_labels.h"
 
 #include <algorithm>
@@ -42,6 +44,7 @@ struct State {
     bool pacingNoted = false;
     bool weaponStabilityNoted = false;
     bool lastWeaponStability = true;
+    bool lastStepAside = false;   // F36: weapon stability stepped aside (native on foot active), as last logged
     EdvrNativeFrameDecision cachedDecision{};
 };
 
@@ -49,6 +52,33 @@ State g_pool[kPoolSize];
 unsigned g_used = 0;
 State* g_current = nullptr;
 std::mutex g_mutex;
+// F22: the look-to-aim total and the game frame it was taken at, for version 6 (set by nativeFrameSetLookYaw; guarded by g_mutex).
+float g_lookYaw = 0.0f;
+uint32_t g_lookYawFrame = 0;
+uint32_t g_lookReset = 0;   // F25: the reset serial
+// F33: the body-align translation (seated-space metres) and its serial, for version 8 (set by nativeFrameSetEyeAlign; guarded by g_mutex).
+float g_eyeAlign[3] = {};
+uint32_t g_eyeAlignSerial = 0;
+std::atomic<uint32_t> g_nowPoseMode{0};   // F40/F42: fix.now_pose (0 next, 1 render, 2 render_locked), carried in version 9 output
+float g_rotCal[2] = {};   // F61 (TEMPORARY): the rotation calibration's seated yaw and pitch (radians), version 9 output only (guarded by g_mutex)
+float g_adsPitch = 0.0f;  // F62b (TEMPORARY): the ADS head-aim's seated pitch (radians), version 10 output only (guarded by g_mutex)
+uint32_t g_positionRecentre = 0;  // F123: the position-only recentre asked of the runtime (0: none; else the request's serial), version 10 output only (guarded by g_mutex)
+// F62b: the latest version 3 input's head in natural LOCAL (guarded by g_mutex).
+float g_localHead[12] = {};
+bool g_localHeadValid = false;
+uint32_t g_eyeAlignApplied = 0;   // F89: the latest version 3 input's applied-alignment word (0: not reported; guarded by g_mutex)
+// F31: the latest beginFrame's render head and the runtime's "now" head (version 2 input), for the world markers (guarded by g_mutex).
+float g_renderHead[12] = {};
+float g_nowHeadPose[12] = {};
+bool g_renderHeadValid = false, g_nowHeadValid = false, g_haveFrameInput = false;
+uint32_t g_nowHeadSequence = 0;
+uint64_t g_frameSequence = 0;
+uint32_t g_inputVersion = 0;
+// F37: the render head ring and the reference generation, from the last accepted input (guarded by g_mutex).
+float g_ringHead[8][12] = {};
+uint64_t g_ringSequence[8] = {};
+uint64_t g_ringQpc[8] = {};
+uint32_t g_ringNewest = 0, g_ringCount = 0, g_referenceGeneration = 0;
 
 State* identify(void* context) {
     for (unsigned i = 0; i < g_used; ++i) {
@@ -243,47 +273,170 @@ HRESULT WINAPI beginFrame(void* context, const EdvrNativeFrameInput* input,
     // comfort fade (or, earlier, the channel probe, turbo pacing or the
     // field-of-view trim) existed. Each gets exactly the fields it knows
     // about, and whatever it cannot carry stays out of its struct entirely.
-    const bool wantsFade = output &&
-        output->version == EDVR_NATIVE_FRAME_VERSION_5 &&
+    // F22: version 6 is the struct through the look's three words (after the fade); version 5 is the struct through the fade, which a version 5 caller has.
+    // F33: version 8 is the whole struct (the eye alignment after the look); version 6 is now the struct through lookYawReset.
+    // F62b: version 10 is the version 9 shape (a ladder step: input version 3, and the ADS pitch in reservedYaw).
+    const bool wantsEyeAlign = output &&
+        (output->version == EDVR_NATIVE_FRAME_VERSION_8 || output->version == EDVR_NATIVE_FRAME_VERSION_9 ||
+         output->version == EDVR_NATIVE_FRAME_VERSION_10) &&
         output->size == sizeof(*output);
-    const bool wantsChannel = output && !wantsFade &&
+    const bool wantsLook = output && !wantsEyeAlign &&
+        output->version == EDVR_NATIVE_FRAME_VERSION_6 &&
+        output->size == EDVR_NATIVE_FRAME_OUTPUT_SIZE_6;
+    const bool wantsFade = output && !wantsEyeAlign && !wantsLook &&
+        output->version == EDVR_NATIVE_FRAME_VERSION_5 &&
+        output->size == EDVR_NATIVE_FRAME_OUTPUT_SIZE_5;
+    const bool wantsChannel = output && !wantsEyeAlign && !wantsFade && !wantsLook &&
         output->version == EDVR_NATIVE_FRAME_VERSION_4 &&
         output->size == EDVR_NATIVE_FRAME_OUTPUT_SIZE_4;
-    const bool wantsPacing = output && !wantsFade && !wantsChannel &&
+    const bool wantsPacing = output && !wantsEyeAlign && !wantsFade && !wantsChannel && !wantsLook &&
         output->version == EDVR_NATIVE_FRAME_VERSION_3 &&
         output->size == EDVR_NATIVE_FRAME_OUTPUT_SIZE_3;
-    const bool wantsTrim = output && !wantsFade && !wantsChannel && !wantsPacing &&
+    const bool wantsTrim = output && !wantsEyeAlign && !wantsFade && !wantsChannel && !wantsPacing && !wantsLook &&
         output->version == EDVR_NATIVE_FRAME_VERSION_2 &&
         output->size == EDVR_NATIVE_FRAME_OUTPUT_SIZE_2;
-    const bool legacy = output && !wantsFade && !wantsChannel && !wantsPacing && !wantsTrim &&
+    const bool legacy = output && !wantsEyeAlign && !wantsFade && !wantsChannel && !wantsPacing && !wantsTrim && !wantsLook &&
         output->version == EDVR_NATIVE_FRAME_VERSION_1 &&
         output->size == EDVR_NATIVE_FRAME_OUTPUT_SIZE_1;
+    // F31: input version 1 is the words through valid (its size is that prefix; the full size is accepted too, as the rigs send it). Version 2 is
+    // the full struct with the "now" head. Nothing past the version 1 words is read for a version 1 input.
+    // F62b: version 3 is the full struct with the head in LOCAL; version 2 is the struct through ringCount (EDVR_NATIVE_FRAME_INPUT_SIZE_2, what
+    // a version 2 runtime sends). A version 1 or 2 input of a larger size (the rigs send the full struct) is read for its own words only.
+    // F101: version 1's size is the released struct's sizeof (EDVR_NATIVE_FRAME_INPUT_SIZE_1, 88: a released runtime's); the unpadded words
+    // (EDVR_NATIVE_FRAME_INPUT_WORDS_1, 84: this branch's runtimes from F31 to F100) are taken too. Neither is read past valid.
+    const bool inputV1 = input && input->version == EDVR_NATIVE_FRAME_INPUT_VERSION_1 &&
+        (input->size == EDVR_NATIVE_FRAME_INPUT_SIZE_1 || input->size == EDVR_NATIVE_FRAME_INPUT_WORDS_1 ||
+         input->size == EDVR_NATIVE_FRAME_INPUT_SIZE_2 || input->size == sizeof(*input));
+    const bool inputV2 = input && input->version == EDVR_NATIVE_FRAME_INPUT_VERSION_2 &&
+        (input->size == EDVR_NATIVE_FRAME_INPUT_SIZE_2 || input->size == sizeof(*input));
+    const bool inputV3 = input && input->version == EDVR_NATIVE_FRAME_INPUT_VERSION_3 && input->size == sizeof(*input);
+    if (input && input->version == EDVR_NATIVE_FRAME_INPUT_VERSION_2 && !inputV2) {   // F32: the one way a version 2 input is refused
+        static bool noted = false;
+        if (!noted) {
+            noted = true;
+            edvr::Log::get().note("now head: frame input version 2 REFUSED: size %u, this build's version 2 size is %u (the runtime steps down to version 1)",
+                                  static_cast<unsigned>(input->size), static_cast<unsigned>(EDVR_NATIVE_FRAME_INPUT_SIZE_2));
+        }
+    }
+    if (input && input->version == EDVR_NATIVE_FRAME_INPUT_VERSION_3 && !inputV3) {   // F62b: the one way a version 3 input is refused
+        static bool noted = false;
+        if (!noted) {
+            noted = true;
+            edvr::Log::get().note("local head (F62b): frame input version 3 REFUSED: size %u, this build's version 3 size is %u (the runtime steps down)",
+                                  static_cast<unsigned>(input->size), static_cast<unsigned>(sizeof(*input)));
+        }
+    }
+    // F62b: a version 3 input rides only the version 10 ask (and a version 10 ask only a version 3 input), so a mismatched pair is refused and
+    // the runtime steps down to 9 (input version 2).
+    const bool v10Pair = output && output->version == EDVR_NATIVE_FRAME_VERSION_10;
     if (!state || state != g_current || !state->active || !input || !output ||
-        input->size != sizeof(*input) || input->version != EDVR_NATIVE_FRAME_VERSION_1 ||
-        (!wantsFade && !wantsChannel && !wantsPacing && !wantsTrim && !legacy) ||
+        (!inputV1 && !inputV2 && !inputV3) || (v10Pair != inputV3) ||
+        (!wantsEyeAlign && !wantsLook && !wantsFade && !wantsChannel && !wantsPacing && !wantsTrim && !legacy) ||
         input->generation != state->generation || input->referenceGeneration == 0 ||
         input->sequence == 0 || input->sequence <= state->sequenceFloor ||
         input->valid > 1 || (input->valid && !rigidPose(input->physicalHead))) return E_INVALIDARG;
 
     EdvrNativeFrameOutput result{};
-    result.size = wantsFade ? sizeof(result)
+    result.size = wantsEyeAlign ? sizeof(result)
+                 : wantsLook ? EDVR_NATIVE_FRAME_OUTPUT_SIZE_6
+                 : wantsFade ? EDVR_NATIVE_FRAME_OUTPUT_SIZE_5
                  : wantsChannel ? EDVR_NATIVE_FRAME_OUTPUT_SIZE_4
                  : wantsPacing ? EDVR_NATIVE_FRAME_OUTPUT_SIZE_3
                  : wantsTrim  ? EDVR_NATIVE_FRAME_OUTPUT_SIZE_2
                               : EDVR_NATIVE_FRAME_OUTPUT_SIZE_1;
-    result.version = wantsFade ? EDVR_NATIVE_FRAME_VERSION_5
+    result.version = wantsEyeAlign ? (output->version == EDVR_NATIVE_FRAME_VERSION_10 ? EDVR_NATIVE_FRAME_VERSION_10
+                                      : output->version == EDVR_NATIVE_FRAME_VERSION_9 ? EDVR_NATIVE_FRAME_VERSION_9 : EDVR_NATIVE_FRAME_VERSION_8)
+                    : wantsLook ? EDVR_NATIVE_FRAME_VERSION_6
+                    : wantsFade ? EDVR_NATIVE_FRAME_VERSION_5
                     : wantsChannel ? EDVR_NATIVE_FRAME_VERSION_4
                     : wantsPacing ? EDVR_NATIVE_FRAME_VERSION_3
                     : wantsTrim  ? EDVR_NATIVE_FRAME_VERSION_2
                                  : EDVR_NATIVE_FRAME_VERSION_1;
-    // Explorer Cam's comfort fade (comfort_fade.h): how black the view is
+    // The comfort fade (comfort_fade.h; no publisher since F98, so 0): how black the view is
     // this frame, 0 unless the frame thread published a fresh level. Only a
     // version 5 caller has the slot; every older shape never learns of it.
     result.fadeAlpha = edvr::comfort::read(GetTickCount64());
+    // F22: the look-to-aim total (version 6 only; every other shape never learns of it). The frame thread sets it once a frame.
+    if (wantsLook || wantsEyeAlign) {
+        result.lookYawTotal = g_lookYaw;
+        result.lookYawGameFrame = g_lookYawFrame;
+        result.lookYawReset = g_lookReset;
+    }
+    // F33: the body-align translation (version 8 only; every older shape never learns of it).
+    if (wantsEyeAlign) {
+        for (int i = 0; i < 3; ++i) result.eyeAlign[i] = g_eyeAlign[i];
+        result.eyeAlignSerial = g_eyeAlignSerial;
+    }
+    // F40: the now-pose choice (version 9 only; every older shape never learns of it).
+    if (wantsEyeAlign && output->version >= EDVR_NATIVE_FRAME_VERSION_9) {
+        result.nowPoseRender = g_nowPoseMode.load(std::memory_order_relaxed);
+        // F61 (TEMPORARY): the rotation calibration's seated yaw and pitch in the retired offset slots (zero while its key is off).
+        result.reservedOffset[0] = g_rotCal[0];
+        result.reservedOffset[1] = g_rotCal[1];
+        // F62b (TEMPORARY): the ADS head-aim's seated pitch, in a version 10 answer only (zero while the feature is off).
+        if (output->version == EDVR_NATIVE_FRAME_VERSION_10) result.reservedYaw = g_adsPitch;
+        // F123: the position-only recentre asked of the runtime, in a version 10 answer only (0 while none stands).
+        if (output->version == EDVR_NATIVE_FRAME_VERSION_10) result.positionRecentre = g_positionRecentre;
+        // F106: the left eye's share of the right eye's image (fix.native_on_foot_ads_sight_both_eyes), in a version 10 answer only: 0 unless the frame thread
+        // published a fresh level.
+        if (output->version == EDVR_NATIVE_FRAME_VERSION_10)
+            result.leftEyeShare = edvr::eyeshare::toBits(edvr::eyeshare::read(GetTickCount64()));
+    }
     // The old Explorer Cam's headset offset (headOffset, yawRadians,
     // offsetEnabled, offsetGamePoses) is retired: those slots stay zero, so a
     // runtime built before 2026-10-07 reads "no offset" and applies none.
     const bool physicalValid = input->valid != 0;
+    // F31: the frame's heads, kept for the world markers (nativeFrameNowPose). The "now" head only from a version 2 input.
+    g_haveFrameInput = true;
+    g_frameSequence = input->sequence;
+    g_renderHeadValid = physicalValid;
+    if (physicalValid) std::memcpy(g_renderHead, input->physicalHead, sizeof(g_renderHead));
+    // F32: an optional head that is not usable is dropped for this frame, never a refusal of the frame (a refusal steps the runtime's ladder
+    // down for the session). It is logged once.
+    const bool ringInput = inputV2 || inputV3;   // F62b: version 3 carries every version 2 word
+    const bool nowUsable = ringInput && input->nowValid == 1 && rigidPose(input->nowHead);
+    if (ringInput && input->nowValid != 0 && !nowUsable) {
+        static bool noted = false;
+        if (!noted) {
+            noted = true;
+            edvr::Log::get().note("now head: dropped for this frame (nowValid %u, not a rigid transform): the frame goes on without it", static_cast<unsigned>(input->nowValid));
+        }
+    }
+    g_nowHeadValid = nowUsable;
+    g_inputVersion = input->version;
+    g_referenceGeneration = input->referenceGeneration;
+    g_ringCount = 0;
+    // F62b: the head in LOCAL (version 3 only). An unusable one is dropped for this frame, never a refusal (the F32 rule).
+    g_localHeadValid = inputV3 && input->localValid == 1 && rigidPose(input->localHead);
+    if (g_localHeadValid) std::memcpy(g_localHead, input->localHead, sizeof(g_localHead));
+    g_eyeAlignApplied = inputV3 ? input->eyeAlignApplied : 0u;   // F89: the alignment the pose carries, by serial (0: a runtime that does not say)
+    if (inputV3) {
+        static bool accepted = false;
+        if (!accepted) {
+            accepted = true;
+            edvr::Log::get().note("local head (F62b): frame input version 3 accepted (localValid %u, geometry #%llu)", static_cast<unsigned>(input->localValid),
+                                  static_cast<unsigned long long>(input->sequence));
+        }
+    }
+    if (ringInput && input->ringNewest < 8 && input->ringCount <= 8) {
+        std::memcpy(g_ringHead, input->ringHead, sizeof(g_ringHead));
+        std::memcpy(g_ringSequence, input->ringSequence, sizeof(g_ringSequence));
+        std::memcpy(g_ringQpc, input->ringQpc, sizeof(g_ringQpc));
+        g_ringNewest = input->ringNewest;
+        g_ringCount = input->ringCount;
+    }
+    if (inputV2) {
+        static bool accepted = false;
+        if (!accepted) {
+            accepted = true;
+            edvr::Log::get().note("now head: frame input version 2 accepted (nowValid %u, answer #%u, geometry #%llu)", static_cast<unsigned>(input->nowValid),
+                                  static_cast<unsigned>(input->nowSequence), static_cast<unsigned long long>(input->sequence));
+        }
+    }
+    if (g_nowHeadValid) {
+        std::memcpy(g_nowHeadPose, input->nowHead, sizeof(g_nowHeadPose));
+        g_nowHeadSequence = input->nowSequence;
+    }
 
     // The worn headset's entry in each of the three lists, resolved from the
     // last render-settings query's labels and cached between changes.
@@ -307,9 +460,16 @@ HRESULT WINAPI beginFrame(void* context, const EdvrNativeFrameInput* input,
     // with the watcher off, the wait stays in WaitGetPoses.
     const bool weaponStability = edvr::Config::get().getBool(
         "fix.weapon_stability", true);
+    // F36: while native HMD stereo on foot is active, weapon stability steps aside (its pacing and its motion-vector gate); the key is untouched.
+    const bool stepAside = edvr::nativeOnFootActive();
+    if (weaponStability && stepAside != state->lastStepAside) {
+        state->lastStepAside = stepAside;
+        edvr::Log::get().note("weapon stability: %s", stepAside ? "stepped aside (native on foot active)" : "resumed");
+    }
     result.deferredPacing =
-        (weaponStability && edvr::journalOnFootKnown() && edvr::journalOnFoot())
+        (weaponStability && !stepAside && edvr::journalOnFootKnown() && edvr::journalOnFoot())
             ? 1u : 0u;
+    if (result.deferredPacing) edvr::nativeOnFootCountGate(edvr::NativeOnFootGate::DeferredPacing);   // F0 gate counter (log only)
     if (!state->weaponStabilityNoted ||
         state->lastWeaponStability != weaponStability) {
         edvr::Log::get().note(
@@ -453,6 +613,82 @@ void nativeFrameFovTrimDegrees(uint32_t out[3]) {
 }
 
 uint64_t nativeFrameLatchedFrames() { return g_latchedFrames.load(std::memory_order_relaxed); }
+
+// F22: the look-to-aim total the next version 6 beginFrame hands the runtime.
+void nativeFrameSetLookYaw(float total, uint32_t gameFrame, uint32_t resetSerial) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    g_lookYaw = total;
+    g_lookYawFrame = gameFrame;
+    g_lookReset = resetSerial;
+}
+
+// F33: the body-align translation the next version 8 beginFrame hands the runtime.
+// F40/F42: fix.now_pose from the config (readKey): 0 next, 1 render, 2 render_locked. Logged at the first value and at each change.
+void nativeFrameSetNowPose(uint32_t mode) {
+    static bool logged = false;
+    static const char* const kNames[3] = {"next", "render", "render_locked"};
+    if (mode > 2) mode = 0;
+    const uint32_t was = g_nowPoseMode.exchange(mode, std::memory_order_relaxed);
+    if (!logged || was != mode) {
+        logged = true;
+        edvr::Log::get().note("now pose: %s (live, fix.now_pose)", kNames[mode]);
+    }
+}
+void nativeFrameSetEyeAlign(const float o[3], uint32_t serial) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    for (int i = 0; i < 3; ++i) g_eyeAlign[i] = o[i];
+    g_eyeAlignSerial = serial;
+}
+// F61 (TEMPORARY): the rotation calibration's seated yaw and pitch the next version 9 beginFrame hands the runtime.
+void nativeFrameSetRotCalibrate(float yawRad, float pitchRad) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    g_rotCal[0] = yawRad == yawRad ? yawRad : 0.0f;
+    g_rotCal[1] = pitchRad == pitchRad ? pitchRad : 0.0f;
+}
+// F62b (TEMPORARY): the ADS head-aim's seated pitch the next version 10 beginFrame hands the runtime (NaN reads 0).
+void nativeFrameSetAdsPitch(float pitchRad) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    g_adsPitch = pitchRad == pitchRad ? pitchRad : 0.0f;
+}
+// F123: the position-only recentre asked of the runtime (0: none; else the request's serial), version 10 output only.
+void nativeFrameSetPositionRecentre(uint32_t serial) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    g_positionRecentre = serial;
+}
+// F115: the on-foot words as set, for the boarding reset's read-back.
+void nativeFrameOnFootWords(EdvrNativeOnFootWords& out) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    for (int i = 0; i < 3; ++i) out.eyeAlign[i] = g_eyeAlign[i];
+    out.eyeAlignSerial = g_eyeAlignSerial;
+    out.lookYawTotal = g_lookYaw;
+    out.lookYawReset = g_lookReset;
+    out.adsPitch = g_adsPitch;
+    out.rotCal[0] = g_rotCal[0];
+    out.rotCal[1] = g_rotCal[1];
+}
+
+// F31: the latest frame's render head and "now" head (the d3d11 half's world markers).
+bool nativeFrameNowPose(EdvrNativeNowPose& out) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    if (!g_haveFrameInput) return false;
+    std::memcpy(out.render, g_renderHead, sizeof(out.render));
+    std::memcpy(out.now, g_nowHeadPose, sizeof(out.now));
+    out.renderValid = g_renderHeadValid;
+    out.nowValid = g_nowHeadValid;
+    out.nowSequence = g_nowHeadSequence;
+    out.frameSequence = g_frameSequence;
+    out.inputVersion = g_inputVersion;
+    out.referenceGeneration = g_referenceGeneration;
+    std::memcpy(out.ringHead, g_ringHead, sizeof(out.ringHead));
+    std::memcpy(out.ringSequence, g_ringSequence, sizeof(out.ringSequence));
+    std::memcpy(out.ringQpc, g_ringQpc, sizeof(out.ringQpc));
+    out.ringNewest = g_ringNewest;
+    out.ringCount = g_ringCount;
+    std::memcpy(out.local, g_localHead, sizeof(out.local));   // F62b
+    out.localValid = g_localHeadValid;
+    out.eyeAlignApplied = g_eyeAlignApplied;   // F89
+    return true;
+}
 
 }  // namespace edvr
 

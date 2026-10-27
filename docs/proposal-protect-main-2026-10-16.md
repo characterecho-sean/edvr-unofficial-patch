@@ -1,0 +1,100 @@
+# Proposal: protect `main` (2026-10-16)
+
+## Status
+
+- **State**: proposal from the PR #92 retro, for Sean to decide. Nothing is
+  enabled.
+- **Build coverage delivered**: PR #103 added the `release.yml` checks for pull
+  requests and pushes to `main`. The 2026-10-26 review removes the
+  release-branch PR exemption so those PRs also validate their merge result.
+  The protection settings below remain a proposal; no API call was made.
+- **If accepted**: enable the rule below, then update the AGENTS.md Git
+  section, which still says "Solo project: branch, commit, merge to main, push.
+  No pull requests."
+
+## Why
+
+This is the rationale recorded on 2026-10-16, before PR #103 supplied the
+checks.
+
+The project now has two people and several agents committing.
+
+- **Nothing checks `main` or a pull request.** `release.yml` builds only
+  release branches, tags and manual runs. The temporary manual Windows build
+  (c3c5b046, removed in 519ec0bf) never passed in its four runs, and its last
+  failure, a gate that breaks on a Windows CRLF checkout (#94), was already on
+  `main` and stayed there. PR #92 merged with no CI run.
+- **Direct pushes race open PRs.** PR #92 needed two catch-up merges of `main`,
+  and one had a conflict in `menu.cpp`. Both were against work pushed straight
+  to `main` while the PR was under review.
+- **A broken gate reached `main` unnoticed.** After the second merge,
+  `sharp_weapons_test` failed on a Windows checkout with `core.autocrlf=true`
+  (#94). Nothing caught it before it landed.
+
+## The rule
+
+GitHub branch protection, or a ruleset, on `main`:
+
+1. Changes land through a pull request. No direct pushes.
+2. The `changes`, `light-gates` and `build` checks
+   (`.github/workflows/release.yml`, the `Native Windows build` workflow) must
+   pass. Enable this once #93 is green. Each PR runs either `light-gates` (only
+   notes: root `*.md`, `docs\*.md`, `.agents\`, issue templates) or `build`
+   (anything else). A skipped job counts as passing, so neither strands a PR,
+   and both must be required: otherwise a notes-only PR could merge with its
+   light gates failing.
+3. No force-pushes, and the branch can't be deleted.
+4. No required approvals to start with. Sean can merge his own PRs immediately;
+   the rule enforces the gate, not a second reviewer.
+5. Admins may bypass, for emergencies only.
+
+## What it costs
+
+- **Sean's workflow:** push a branch and run `gh pr create --fill`, then `gh pr
+  merge --auto --merge`. The merge happens when CI passes. That's one extra
+  command per change, and the wait is CI's run time.
+- **Agents:** the AGENTS.md Git section changes from "merge to main, push" to
+  "push the branch, open a PR, merge when green". The "task is not done until
+  it is pushed" check becomes "until the PR is merged".
+- **CI time:** a change to code or build inputs waits for a full Windows build.
+  A notes-only PR runs just the two gates that read notes
+  (`check_status_blocks.py`, `check_agent_material.py`), in seconds.
+
+## Enabling it
+
+Once #93 is green, in the repository's Settings → Rules → Rulesets: target
+`main`, then turn on "Require a pull request before merging" (0 approvals),
+"Require status checks to pass" (`changes`, `light-gates` and `build`), "Block
+force pushes" and "Restrict deletions".
+
+Or the classic protection API, using Bash syntax:
+
+```bash
+gh api -X PUT repos/characterecho-sean/edvr-unofficial-patch/branches/main/protection \
+  -F 'required_status_checks[strict]=false' \
+  -f 'required_status_checks[contexts][]=changes' \
+  -f 'required_status_checks[contexts][]=light-gates' \
+  -f 'required_status_checks[contexts][]=build' \
+  -F enforce_admins=false \
+  -F 'required_pull_request_reviews[required_approving_review_count]=0' \
+  -F restrictions=null -F allow_force_pushes=false -F allow_deletions=false
+```
+
+`gh api` nests a field only with brackets (`key[sub]=`); a dotted name is sent
+as a literal key and the API would not get the objects it requires.
+
+## Alternatives
+
+- **CI required, PRs optional:** turn on "Require status checks to pass"
+  without "Require a pull request before merging" (in the API command, pass `-F
+  required_pull_request_reviews=null` instead). Required checks also gate
+  direct pushes: a commit can be pushed straight to `main` once its checks have
+  passed on it
+  ([GitHub](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-protected-branches/about-protected-branches#require-status-checks-before-merging)).
+  Sean keeps pushing to `main`: push the branch, run `gh workflow run
+  release.yml --ref <branch>`, and push to `main` when it is green. This
+  enforces the gate but not the PR, so a change landed this way has no pull
+  request to review or comment on.
+- **Keep pushing to `main` and just watch CI:** better than today, but a check
+  nobody is required to pass gets ignored. The manual workflow's four red runs
+  were never followed up on `main`.

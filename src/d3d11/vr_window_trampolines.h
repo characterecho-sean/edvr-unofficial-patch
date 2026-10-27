@@ -10,8 +10,10 @@
 //
 // The DisplayConfig save (0x7FA000) is NOT held: its object's field layout is not proven (see the doc, "The save corruption").
 //
-// Build-gated: the caller checks the PE stamp and image size first (vrSsaaGateStartup); each target's first bytes must be the ones read
-// from build 334925, and CodeHook refuses any prologue it cannot relocate. A refusal is one line and the entry is not patched.
+// Build-gated: the caller first checks that the PE header reads and that the signature resolver (src\common\game_build.h) finds both
+// entries and the field witnesses of the fields they touch (vrSsaaGateStartup, vrWindowTrampolinesFound): build 334925's own addresses,
+// or an unknown build's found by signature. Each target's first bytes must then be build 334925's (on an unknown build, outside the
+// fields the signature masks), and CodeHook refuses any prologue it cannot relocate. A refusal is one line and the entry is not patched.
 #pragma once
 
 namespace edvr {

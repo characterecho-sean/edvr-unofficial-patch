@@ -123,7 +123,11 @@ static std::vector<LegacyContract> coreLegacyContracts() {
         // target 7 (SourceSkin at t15, engine.w, kind 7 counted as joined and in its own slot, painted as joined). Was 0xAA505601226395B7.
         // Re-pinned 2026-10-15 on purpose: the engine-motion core gained celestialLookup (the planet records' lookup, shared with the VR and flat
         // shaders), and again for a comment in it; nothing in this shader calls it and its DXBC is byte-identical (21040 bytes). Was 0x47B44C452FE3B59B.
-        {"screen motion", "main", "ps_5_0", nullptr, 0x9224DE94476EDB91ull},
+        // Re-pinned 2026-10-24 on purpose: the engine-motion core's stale-stamp window became a closed form (engineStampAge inverts the marker
+        // hash's rounds; engineStaleStampKind compares the recovered stamp's age instead of walking 64 frames). This shader calls it, from
+        // sourceEngine's kind-3 branch, so its code changes too; the kinds are exact (math_tests holds the closed form to the loop on WARP).
+        // Was 0x9224DE94476EDB91.
+        {"screen motion", "main", "ps_5_0", nullptr, 0x2E25008DC3CE207Full},
         {"weapon motion", "main", "vs_5_0", nullptr, 0x7232767DAC4ADBD4ull},
         {"weapon motion", "main", "ps_5_0", nullptr, 0xF948E51A2E036952ull},
         {"weapon identity", "main", "cs_5_0", nullptr, 0x10E05DE79500471Dull},

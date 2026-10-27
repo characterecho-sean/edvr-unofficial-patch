@@ -22,8 +22,6 @@ namespace edvr {
 
 class KinematicEvalProbe {
 public:
-    static constexpr uint32_t kExpectedTimestamp=1792704584u;
-    static constexpr uint32_t kExpectedImageSize=104906752u;
     static constexpr uintptr_t kEvalRva=0x4311C00u;
     static constexpr uint32_t kRecordCap=4096u;
     static constexpr uint32_t kTransitionCap=8192u;

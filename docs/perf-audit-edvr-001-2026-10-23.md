@@ -54,6 +54,9 @@ census design. This doc records what EDVR's review made of it and what was built
   - **Regressions:** the UI layer, holograms, ship trails and DLSS output must look unchanged. A
     regression here means a premise below is wrong; it does not call for tuning.
 - **Open (not built):** see "Measure first" below. Each item has its own gate.
+- **Issue 131 (2026-10-24, RocketsProjects):** a closed form for `engineStaleStampKind`'s 64-round
+  search. Proven exact (each round is a bijection). Built on main, no key. The WARP rig holds it to
+  the loop on 4,704 cases with 0 mismatches. Not flown. See "Issue 131" below.
 
 ## What was built
 
@@ -176,6 +179,74 @@ Bench (RTX 5090, 2016² for one eye, RocketsProjects' method, outputs byte-check
 - **G13, near-light occupancy.** There is no exact change: an all-zero fallback map would read as
   "empty". If the census door "hologram resolve draw" shows ≥0.05 ms an eye, bound the draw and
   dispatch to the elements' screen extent instead.
+
+## Issue 131: closed-form stale-stamp age (2026-10-24)
+
+RocketsProjects asked to replace the 64-round loop in `engineStaleStampKind` with an arithmetic
+inverse that recovers the stamp age directly. They reported deriving and validating one; the issue
+carries no code, so the check below is EDVR's own.
+
+**Where the loop runs.** One HLSL definition, in the shared engine-motion core
+(temporal_shader_source.h, `engineStaleStampKind`). It is reached from the DLSS/FSR motion compose
+(`enginePixelZ`), the on-foot screen source (fixed_shader_source.h, `sourceEngine`) and the flat mono
+prep (flat_mono_shader_source.h). Each calls it only for a pixel whose fresh check read kind 3. Two
+mirrors carry the same loop: emit_tests.h `staleKindOf` and tools\flat_pixels_engine.py
+`stale_stamp_kind`.
+
+**Why a closed form is exact.** A round is `f(s) = xs13((h ^ s) * 0x01000193)`, where `xs13(x) = x ^
+(x >> 13)`. Each step is a bijection on 32-bit values:
+- the XOR with `h`;
+- the multiply by an odd constant mod 2^32 (inverse `0x359C449B`);
+- `xs13` (inverse `y ^ (y >> 13) ^ (y >> 26)`).
+
+So for each tag exactly one stamp `s` matches the marker, and `age = token - s` (mod 2^32) is the
+only candidate. The loop's answer is the tag whose age lies in 1..64, or the smaller age if both do.
+The two ages cannot be equal: one `s` gives one hash, and the tags differ. Two inverse rounds plus
+the comparison give the same kind on every input, valid or garbage. The `token - age` wrap is the
+same mod-2^32 arithmetic in both.
+
+**Checked** (a scratch script, not committed): the loop and the closed form agreed on 611,600 cases.
+- 49 tokens, among them 0, 1, 63, 64, 65, 0x80000000 and 0xFFFFFFFF, each with random seeds.
+- Garbage markers.
+- Real markers of both tags at ages 0, 1, 2, 31, 63, 64, 65, 66, 1000 and 2^32-1, and 200,000
+  masked markers at random ages in the window.
+
+The `xs13` inverse was checked separately, on all 16-bit values and 200,000 random ones.
+
+Not covered by a case: a marker that matches both tags inside the window at once. A random marker
+does that with probability about 2^-52, too rare to construct. The smaller-age rule is checked by
+reading it.
+
+**What it saves.** A kind-3 pixel ("pool surface not a rig record") pays all 64 rounds, because
+garbage never matches; a stale-stamp pixel pays its age. The populations measured so far:
+- 67,923 an eye-frame at a settlement pad (2026-09-23, Pimax, 1597x1835 render, 2.3% of pixels):
+  about 4.3 M rounds an eye-frame, against about 136 k with the closed form;
+- 2,616 at a station (build e1bf2dbd);
+- stale stamp 0 in the 2026-09-26 coriolis flight.
+
+At those counts the loop costs microseconds a frame on the 5090 if the pixels sit in whole waves.
+The cost grows with how much of the screen is a non-rig pool surface, with how scattered those
+pixels are across waves (one such pixel holds its whole wave in the loop), and on GPUs with a slow
+32-bit integer multiply. No measurement prices it yet.
+
+**Built (2026-10-24, no key: it is exact).**
+- The core's `engineStaleStampKind` now calls `engineStampAge` once for each tag. That function undoes
+  one round and returns the age. Only an age of 1..64 counts as inside the window, and the smaller
+  age wins. The false-match note now reads ~128 * 2^-32, for two tags.
+- `emit_tests::staleKindOf` keeps the loop as the oracle. math_tests `staleStampClosedForm` runs the
+  shipped HLSL on WARP over 4,704 cases:
+  - 14 tokens, four of which wrap the window through 0;
+  - both tags at the ages above;
+  - eight kinds of garbage each.
+  The result was kinds 6/2/3 = 840/840/3024, with 0 mismatches against the loop.
+  - The test also checks the edge ages by name: 1 and 64 read 6 or 2; 0 and 65 read 3.
+  - Mutating either window bound in the shader text gave 168 mismatches and a failing rig.
+- The on-foot "screen motion" ps_5_0 source pin moved to 0x2E25008DC3CE207F. That shader calls the
+  function, from `sourceEngine`'s kind-3 branch.
+- flat_pixels_engine.py keeps its loop. It runs offline, and both forms are exact.
+- **Flight check:** the census pixel line's "not a rig record" and "stale stamp" counts, in a scene
+  already measured. They should be unchanged in kind. Only a same-scene A/B of the motion pass, or
+  a rig bench, would show the price.
 
 ## Ruled out (with reasons)
 

@@ -1066,11 +1066,7 @@ void testChecks() {
 }
 
 // ---------------------------------------------------------------------------
-// 6b. What a capture step does to a row, and the Explorer Cam lock
-
-// The session flag the Explorer Cam side will own (explorerCamSessionActive()); a stub here.
-bool g_session = false;
-bool sessionStub() { return g_session; }
+// 6b. What a capture step does to a row
 
 // A step, made by driving the real state machine with one new input.
 CaptureStep stepFor(const CaptureSnapshot& s, bool canClear = true) {
@@ -1114,63 +1110,21 @@ void testDecide() {
         c.uses = uses;
         c.nUses = 3;
         c.scope = scope;
-        c.explorerCamSession = sessionStub();
         return c;
     };
 
-    // Explorer Cam's key while NO session is on: free to change and to clear.
-    g_session = false;
+    // A key row with an on-foot scope (a fixture row: the scope is the decision's input; every EDVR key today works anywhere).
     {
-        const HotkeyRowContext c = ctxFor("explorer_cam", "F5", ClashScope::OnFoot);
-        check(hotkeyCaptureMayBegin(c), "no session: Enter on the Explorer Cam key row starts a capture");
+        const HotkeyRowContext c = ctxFor("on_foot_key", "F5", ClashScope::OnFoot);
         CaptureDecision d = hotkeyDecide(stepFor(pressing(VK_F10)), c);
-        check(d.outcome == CaptureOutcome::Bind && d.binding.vk == VK_F10, "...F10 is written");
+        check(d.outcome == CaptureOutcome::Bind && d.binding.vk == VK_F10, "an on-foot key row: F10 is written");
         d = hotkeyDecide(stepFor(pressing(VK_DELETE)), c);
-        check(d.outcome == CaptureOutcome::Clear, "...Delete clears it (that turns Explorer Cam off)");
+        check(d.outcome == CaptureOutcome::Clear, "...Delete clears it");
         d = hotkeyDecide(stepFor(pressing(VK_F9)), c);
         check(d.outcome == CaptureOutcome::Bind && d.check.clashCount == 1 && strstr(d.check.clashList, "HumanoidJumpButton"),
               "...a key Elite also uses is written, with the warning");
         d = hotkeyDecide(stepFor(pressing(VK_F7)), c);
         check(d.outcome == CaptureOutcome::Bind && d.check.clashCount == 0, "...a ship control on the key is no warning on foot");
-    }
-    // The same row WHILE a session is on: locked -- clear and change both refused, whatever the key.
-    g_session = true;
-    {
-        const HotkeyRowContext c = ctxFor("explorer_cam", "F5", ClashScope::OnFoot);
-        check(!hotkeyCaptureMayBegin(c), "session on: Enter on the Explorer Cam key row starts nothing");
-        check(hotkeyDecide(stepFor(pressing(VK_F10)), c).outcome == CaptureOutcome::Locked, "...a change is refused");
-        check(hotkeyDecide(stepFor(pressing(VK_DELETE)), c).outcome == CaptureOutcome::Locked, "...a clear is refused");
-        check(hotkeyDecide(stepFor(pressing(VK_BACK)), c).outcome == CaptureOutcome::Locked, "...Backspace too");
-        check(hotkeyDecide(stepFor(pressing(VK_F8)), c).outcome == CaptureOutcome::Locked,
-              "...and the lock is the answer even for a key that would also be a duplicate");
-        check(hotkeyDecide(stepFor(pressing(VK_TAB)), c).outcome == CaptureOutcome::Locked,
-              "...or a reserved one");
-        check(hotkeyDecide(stepFor(pressing(VK_ESCAPE)), c).outcome == CaptureOutcome::Cancelled,
-              "...but Esc, which changes nothing, is just a cancel");
-        check(hotkeyDecide(CaptureStep(), c).outcome == CaptureOutcome::Waiting, "...and nothing pressed is nothing");
-        char words[96];
-        hotkeyLockedText("F5", words, sizeof(words));
-        check(strcmp(words, "Leave Explorer Cam (F5) to change its key") == 0, "the words are \"Leave Explorer Cam (F5) to change its key\"");
-        hotkeyLockedText("231D0200:Joy_12", words, sizeof(words));
-        check(strcmp(words, "Leave Explorer Cam (231D0200:Joy_12) to change its key") == 0, "...with the key the row holds, a HOTAS button too");
-        hotkeyLockedText("", words, sizeof(words));
-        check(strcmp(words, "Leave Explorer Cam (its key) to change its key") == 0, "...and a fallback for none");
-        check(hotkeyRowLocked("explorer_cam", true) && !hotkeyRowLocked("explorer_cam", false), "the row is locked only while the session is");
-        // No other hotkey row is ever locked by it.
-        for (const char* other : {"menu", "dump_camera", "dump_draws", "dump_eyes"}) {
-            const HotkeyRowContext oc = ctxFor(other, "", ClashScope::AnyContext);
-            checkf(hotkeyCaptureMayBegin(oc) && !hotkeyRowLocked(other, true), "hotkey.%s is not locked by a session", other);
-        }
-        const HotkeyRowContext toggle = ctxFor("dump_eyes", "SCROLLLOCK", ClashScope::AnyContext);
-        check(hotkeyDecide(stepFor(pressing(VK_F11)), toggle).outcome == CaptureOutcome::Bind,
-              "...so the eye dump key is still written during a session");
-    }
-    // And unlocked again once the session ends: the stub flips, the row follows.
-    g_session = false;
-    {
-        const HotkeyRowContext c = ctxFor("explorer_cam", "F5", ClashScope::OnFoot);
-        check(hotkeyCaptureMayBegin(c) && hotkeyDecide(stepFor(pressing(VK_F10)), c).outcome == CaptureOutcome::Bind,
-              "session over: the row takes a change again");
     }
 
     // The menu key: changed, never cleared.
@@ -1230,20 +1184,19 @@ void testDecide() {
     {
         const HotkeyRowContext c = ctxFor("dump_draws", "", ClashScope::AnyContext);
         check(hotkeyDecide(stepFor(pressing(VK_DELETE)), c).outcome == CaptureOutcome::ClearAlready, "Delete on an empty row: already empty");
-        const HotkeyRowContext spelled = ctxFor("explorer_cam", "f5", ClashScope::OnFoot);
+        const HotkeyRowContext spelled = ctxFor("on_foot_key", "f5", ClashScope::OnFoot);
         check(hotkeyDecide(stepFor(pressing(VK_F5)), spelled).outcome == CaptureOutcome::Unchanged,
               "\"f5\" in the ini and F5 pressed are the same key: unchanged");
     }
-    g_session = false;
 }
 
 // ---------------------------------------------------------------------------
 // 6c. The capture-ending press must not reach a hotkey polled LATER in the same frame
 //
-// The review of 2026-10-08, finding 1. device_hook runs the menu BEFORE vScreenFrameBoundary,
-// which polls Explorer Cam's F5 latch; that latch had not seen the press that ended a capture,
-// and suspension was already lifted, so capturing F5 on another row (refused as a duplicate)
-// entered Explorer Cam. These cells run the REAL Hotkey, the real state machine and the real
+// The review of 2026-10-08, finding 1. device_hook runs the menu BEFORE hotkeys polled later in
+// the frame; such a latch had not seen the press that ended a capture, and suspension was already
+// lifted, so capturing F5 on another row (refused as a duplicate) fired the later key (Explorer
+// Cam's, until F98). These cells run the REAL Hotkey, the real state machine and the real
 // decision in the frame's real order -- earlier poll, menu tick (step, decide, end the capture),
 // later poll -- against a keyboard, a pad and a HOTAS the cell controls.
 
@@ -1312,7 +1265,7 @@ CaptureSnapshot snapshotOfWorld() {
 
 struct LeakCell {
     const char*   name;
-    const char*   explorer;      // hotkey.explorer_cam, as the ini holds it
+    const char*   later;         // hotkey.compare_aa (a key polled after the menu), as the ini holds it
     const char*   rowKey;        // the row being captured
     const char*   rowCurrent;    // ...and what it holds
     HotkeyBinding pressed;       // the input that ends the capture
@@ -1324,18 +1277,18 @@ void runLeakCell(const LeakCell& c) {
     hotkeySetKeyboardReaderForTest(&worldKey);
     hotkeySetNonKeyboardReader(&worldHeld);
     HotkeyBinding e;
-    hotkeyParseBinding(c.explorer, &e, true);
+    hotkeyParseBinding(c.later, &e, true);
 
     Hotkey early;      // a diagnostic key, polled BEFORE the menu in the frame
-    Hotkey explorer;   // Explorer Cam's F5, polled AFTER it (vScreenFrameBoundary)
+    Hotkey later;      // a key polled AFTER it
     early.setGameMirrored(true);
-    explorer.setGameMirrored(true);
-    early.setBinding(c.explorer);
-    explorer.setBinding(c.explorer);
+    later.setGameMirrored(true);
+    early.setBinding(c.later);
+    later.setBinding(c.later);
 
     // Frame 0: the capture begins (Enter on the row).
     early.pressed();
-    explorer.pressed();
+    later.pressed();
     HotkeyCapture capture;
     capture.begin(snapshotOfWorld());
     hotkeysSuspend(true);
@@ -1346,37 +1299,37 @@ void runLeakCell(const LeakCell& c) {
     const CaptureStep step = capture.step(snapshotOfWorld(), strcmp(c.rowKey, "menu") != 0);
     HotkeyOther others[2];
     int nOthers = 0;
-    const bool isExplorerRow = strcmp(c.rowKey, "explorer_cam") == 0;
-    if (!isExplorerRow) others[nOthers++] = HotkeyOther{"hotkey.explorer_cam", e};
+    const bool isLaterRow = strcmp(c.rowKey, "compare_aa") == 0;
+    if (!isLaterRow) others[nOthers++] = HotkeyOther{"hotkey.compare_aa", e};
     HotkeyRowContext ctx;
     ctx.rowKey = c.rowKey;
     ctx.currentText = c.rowCurrent;
     ctx.others = others;
     ctx.nOthers = nOthers;
-    ctx.scope = isExplorerRow ? ClashScope::OnFoot : ClashScope::AnyContext;
+    ctx.scope = ClashScope::AnyContext;
     const CaptureDecision dec = hotkeyDecide(step, ctx);
     capture.end();
     hotkeysSuspend(false);   // endCapture(): the capture is over, EDVR's hotkeys work again
     char what[240];
     snprintf(what, sizeof(what), "%s: the capture ends as expected", c.name);
     check(dec.outcome == c.expect, what);
-    const bool leaked = explorer.pressed();   // the later poll in the same frame
-    snprintf(what, sizeof(what), "%s: the capture-ending press does not fire Explorer Cam's latch in that frame", c.name);
+    const bool leaked = later.pressed();   // the later poll in the same frame
+    snprintf(what, sizeof(what), "%s: the capture-ending press does not fire the later key's latch in that frame", c.name);
     check(!leaked, what);
     snprintf(what, sizeof(what), "%s: ...nor the earlier one's, a frame later", c.name);
     check(!early.pressed(), what);
     // Frame 2 and on, the press still held, then released.
     snprintf(what, sizeof(what), "%s: ...nor while it stays held", c.name);
-    check(!explorer.pressed() && !explorer.pressed() && !early.pressed(), what);
+    check(!later.pressed() && !later.pressed() && !early.pressed(), what);
     setHeld(c.pressed, false);
-    check(!explorer.pressed() && !early.pressed(), "(released: nothing)");
-    // The next fresh press of Explorer Cam's own input still works, once.
+    check(!later.pressed() && !early.pressed(), "(released: nothing)");
+    // The next fresh press of the later key's own input still works, once.
     setHeld(e, true);
     snprintf(what, sizeof(what), "%s: a fresh press afterwards still fires", c.name);
-    check(explorer.pressed() && early.pressed(), what);
-    check(!explorer.pressed() && !early.pressed(), "...once");
+    check(later.pressed() && early.pressed(), what);
+    check(!later.pressed() && !early.pressed(), "...once");
     setHeld(e, false);
-    explorer.pressed();
+    later.pressed();
     early.pressed();
     hotkeySetKeyboardReaderForTest(nullptr);
     hotkeySetNonKeyboardReader(&fakeReader);
@@ -1384,36 +1337,36 @@ void runLeakCell(const LeakCell& c) {
 
 void testCaptureLeak() {
     printf("capture-ending press\n");
-    const char* explorers[3] = {"F5", "GamePad_Back", "231D0200:Joy_12"};
+    const char* laters[3] = {"F5", "GamePad_Back", "231D0200:Joy_12"};
     const char* kinds[3] = {"keyboard", "pad", "HOTAS"};
     for (int k = 0; k < 3; ++k) {
         HotkeyBinding e;
-        hotkeyParseBinding(explorers[k], &e, true);
+        hotkeyParseBinding(laters[k], &e, true);
         char name[96];
-        // The press is the Explorer binding itself, captured on ANOTHER row: refused as a duplicate,
-        // and it must not also be Explorer Cam's key press.
+        // The press is the later key's binding itself, captured on ANOTHER row: refused as a duplicate,
+        // and it must not also be the later key's press.
         snprintf(name, sizeof(name), "Duplicate (%s)", kinds[k]);
-        runLeakCell({name, explorers[k], "dump_eyes", "SCROLLLOCK", e, CaptureOutcome::Duplicate});
-        // ...captured on the Explorer row itself: unchanged.
+        runLeakCell({name, laters[k], "dump_eyes", "SCROLLLOCK", e, CaptureOutcome::Duplicate});
+        // ...captured on the later key's own row: unchanged.
         snprintf(name, sizeof(name), "Unchanged (%s)", kinds[k]);
-        runLeakCell({name, explorers[k], "explorer_cam", explorers[k], e, CaptureOutcome::Unchanged});
-        // Esc cancels. (The cell for a keyboard Explorer key that IS Esc is below.)
+        runLeakCell({name, laters[k], "compare_aa", laters[k], e, CaptureOutcome::Unchanged});
+        // Esc cancels. (The cell for a keyboard later key that IS Esc is below.)
         snprintf(name, sizeof(name), "Cancelled (%s)", kinds[k]);
-        runLeakCell({name, explorers[k], "dump_eyes", "SCROLLLOCK", key(VK_ESCAPE), CaptureOutcome::Cancelled});
+        runLeakCell({name, laters[k], "dump_eyes", "SCROLLLOCK", key(VK_ESCAPE), CaptureOutcome::Cancelled});
     }
-    // A successful Bind that is a different press of the same key: Explorer = F5 is a subset of CTRL+F5.
-    runLeakCell({"Bind (keyboard, CTRL+F5 over an F5 Explorer key)", "F5", "dump_eyes", "SCROLLLOCK", key(VK_F5, kHotkeyCtrl),
+    // A successful Bind that is a different press of the same key: a later key of F5 is a subset of CTRL+F5.
+    runLeakCell({"Bind (keyboard, CTRL+F5 over an F5 later key)", "F5", "dump_eyes", "SCROLLLOCK", key(VK_F5, kHotkeyCtrl),
                  CaptureOutcome::Bind});
-    runLeakCell({"Bind (pad, Start over a Back Explorer key)", "GamePad_Back", "dump_eyes", "SCROLLLOCK", pad(kPadStart),
+    runLeakCell({"Bind (pad, Start over a Back later key)", "GamePad_Back", "dump_eyes", "SCROLLLOCK", pad(kPadStart),
                  CaptureOutcome::Bind});
-    runLeakCell({"Bind (HOTAS, Joy_3 over a Joy_12 Explorer key)", "231D0200:Joy_12", "dump_eyes", "SCROLLLOCK",
+    runLeakCell({"Bind (HOTAS, Joy_3 over a Joy_12 later key)", "231D0200:Joy_12", "dump_eyes", "SCROLLLOCK",
                  joy(kGladiator, 2), CaptureOutcome::Bind});
-    runLeakCell({"Bind (HOTAS, a hat over a Joy_12 Explorer key)", "231D0200:Joy_12", "dump_camera", "PAUSE",
+    runLeakCell({"Bind (HOTAS, a hat over a Joy_12 later key)", "231D0200:Joy_12", "dump_camera", "PAUSE",
                  joy(kGladiator, kJoyPovBase), CaptureOutcome::Bind});
     // The same press ending a capture on the MENU row.
     runLeakCell({"Unchanged (keyboard, menu row)", "F5", "menu", "F8", key(VK_F8), CaptureOutcome::Unchanged});
-    // An Explorer key that is itself the cancelling key (an ini edit): the Esc that cancels is not a press of it.
-    runLeakCell({"Cancelled (keyboard Explorer key IS Esc)", "ESCAPE", "dump_eyes", "SCROLLLOCK", key(VK_ESCAPE),
+    // A later key that is itself the cancelling key (an ini edit): the Esc that cancels is not a press of it.
+    runLeakCell({"Cancelled (keyboard later key IS Esc)", "ESCAPE", "dump_eyes", "SCROLLLOCK", key(VK_ESCAPE),
                  CaptureOutcome::Cancelled});
 
     // The registry behind it: every Hotkey is in it, wherever it lives, and copies and
@@ -1428,7 +1381,7 @@ void testCaptureLeak() {
             check(hotkeysLiveCount() == before + 3, "three live Hotkeys are three registry entries (construct, int, copy)");
         }
         check(hotkeysLiveCount() == before, "...and none is left behind");
-        static Hotkey staticLike;   // a file-scope Hotkey, like Explorer Cam's
+        static Hotkey staticLike;   // a file-scope Hotkey
         check(hotkeysLiveCount() == before + 1, "...a Hotkey with static storage registers itself too");
     }
     // Priming reaches a pad and a HOTAS latch, and a key latch, whichever binding they hold, and
@@ -1557,17 +1510,17 @@ void testCaptureWiringPins(const char* root) {
               "device_hook.cpp: the raw XInput hotkey reader obeys panel ownership");
     }
 
-    // The Explorer Cam page (2026-10-08): built for everyone -- ahead of, and outside, the developer pages -- from the `explorer_cam` rows, and its numbers
-    // are shown and stepped by menu_schema.h's helpers (the ones testExplorerPage holds to "+0.15 m" and 0.01).
+    // Number rows are shown and stepped by menu_schema.h's helpers (the ones testNumberRows holds to "+0.15 m" and 0.01). The Explorer Cam page that
+    // was built for everyone went with Explorer Cam in F98; the native on foot page is built the same way.
     {
         const std::string pages = bodyOf("void buildPages() {");
-        const size_t at = pages.find("p.name = \"Explorer Cam\";");
-        const size_t rows = at == std::string::npos ? at : pages.find("addSettingRows(p, MenuTier::Fix, \"explorer_cam\", false);", at);
+        check(pages.find("p.name = \"Explorer Cam\";") == std::string::npos && pages.find("\"explorer_cam\"") == std::string::npos,
+              "menu.cpp: buildPages makes no Explorer Cam page (retired in F98)");
+        const size_t at = pages.find("p.name = \"Native on foot\";");
+        const size_t rows = at == std::string::npos ? at : pages.find("addSettingRows(p, MenuTier::Fix, \"native_on_foot\", true);", at);
         const size_t developer = pages.find("if (s.developer) {");
-        check(at != std::string::npos && rows != std::string::npos && rows - at < 200,
-              "menu.cpp: buildPages makes a page named Explorer Cam from the Fix-tier rows of the explorer_cam page");
-        check(at != std::string::npos && developer != std::string::npos && at < developer,
-              "...for everyone: it is built before, and outside, the developer-mode pages");
+        check(at != std::string::npos && rows != std::string::npos && rows - at < 300 && developer != std::string::npos && at < developer,
+              "menu.cpp: buildPages makes the Native on foot page from the Fix-tier rows of the native_on_foot page, grouped under the ini's headings (F127), for everyone, before the developer pages");
         check(bodyOf("std::string displayValue(const MenuRowDef& d, const std::string& v) {").find("menuFormatNumber(d, atof(v.c_str()))") !=
                   std::string::npos,
               "menu.cpp: a number row is shown by menuFormatNumber (\"+0.15 m\", \"0 ms (exact)\")");
@@ -1674,7 +1627,7 @@ void testEliteBinds(const char* root) {
     check(count == 9, "nine uses in all (the unknown pad key is left out, its keyboard slot is not)");
     check(find("UnknownPad", key(VK_F6)), "an element with a pad key this build has no name for still reports its keyboard slot");
 
-    // The keyboard-only lookup Explorer Cam's launch check uses is unchanged by all this.
+    // The keyboard-only lookup the AA comparison key's clash check uses is unchanged by all this.
     static EliteKeyboardUse kb[64];
     const int kn = eliteBindsKeyboardUsesDir(dir.c_str(), kb, 64, nullptr, 0);
     bool sawSpace = false, sawCtrlR = false, leaked = false;
@@ -1728,7 +1681,6 @@ void testEliteBinds(const char* root) {
             // For the reader: what the shipped defaults would be told on this machine's bindings.
             struct { const char* what; HotkeyBinding b; ClashScope scope; } defaults[] = {
                 {"menu F8", key(VK_F8), ClashScope::AnyContext},
-                {"explorer_cam F5 (on foot)", key(VK_F5), ClashScope::OnFoot},
                 {"dump_camera PAUSE", key(VK_PAUSE), ClashScope::AnyContext},
             };
             for (const auto& d : defaults) {
@@ -1745,10 +1697,11 @@ void testEliteBinds(const char* root) {
 }
 
 // ---------------------------------------------------------------------------
-// 8b. The Explorer Cam page (2026-10-08): the generated rows, how they step, and what they show
+// 8b. Number rows: how they step and what they show (menu_schema.h's helpers). The Explorer Cam page they were written for (2026-10-08) went
+// with Explorer Cam in F98: no row is generated for it or for any of its keys.
 
-void testExplorerPage() {
-    printf("explorer cam page\n");
+void testNumberRows() {
+    printf("number rows\n");
     constexpr int kCount = static_cast<int>(sizeof(kMenuRows) / sizeof(kMenuRows[0]));
     auto find = [&](const char* section, const char* key) {
         for (int i = 0; i < kCount; ++i) {
@@ -1756,45 +1709,42 @@ void testExplorerPage() {
         }
         return -1;
     };
-    // The page: exactly four rows, in the ini's order, for everyone (the Fix tier), live, numbers.
-    const char* want[4] = {"explorer_cam_eye_trim_up", "explorer_cam_eye_trim_forward", "explorer_cam_eye_trim_right",
-                           "explorer_cam_follow_smoothing_ms"};
-    int onPage[16];
-    int n = 0;
-    for (int i = 0; i < kCount; ++i) {
-        if (strcmp(kMenuRows[i].page, "explorer_cam") == 0 && n < 16) onPage[n++] = i;
+    int onPage = 0;
+    for (int i = 0; i < kCount; ++i) onPage += strcmp(kMenuRows[i].page, "explorer_cam") == 0 ? 1 : 0;
+    check(onPage == 0, "no row is on an Explorer Cam page (retired in F98)");
+    for (const char* retired : {"explorer_cam_eye_up", "explorer_cam_eye_forward", "explorer_cam_eye_right", "explorer_cam_eye_trim_up",
+                                "explorer_cam_eye_trim_forward", "explorer_cam_eye_trim_right", "explorer_cam_follow_smoothing_ms"}) {
+        checkf(find("fix", retired) < 0, "the retired key fix.%s has no menu row", retired);
     }
-    check(n == 4, "the Explorer Cam page has four rows");
-    for (int k = 0; k < 4 && k < n; ++k) {
-        const MenuRowDef& d = kMenuRows[onPage[k]];
-        checkf(strcmp(d.key, want[k]) == 0, "row %s is in the ini's order", want[k]);
-        checkf(strcmp(d.section, "fix") == 0 && d.tier == MenuTier::Fix, "%s is a [fix] row of the Fix tier (everyone, not the developer pages)", want[k]);
-        checkf(d.kind == MenuKind::Number && d.applies == 1, "%s is a LIVE number row", want[k]);
-    }
-    check(n == 4 && strcmp(kMenuRows[onPage[0]].label, "Eye height") == 0 && strcmp(kMenuRows[onPage[1]].label, "Eye forward") == 0 &&
-              strcmp(kMenuRows[onPage[2]].label, "Eye sideways") == 0 && strcmp(kMenuRows[onPage[3]].label, "Head-follow smoothing") == 0,
-          "the labels: Eye height, Eye forward, Eye sideways, Head-follow smoothing");
-    // The absolute fallback keys have no row anywhere, and neither does the Explorer Cam key outside its own page.
-    for (const char* hidden : {"explorer_cam_eye_up", "explorer_cam_eye_forward", "explorer_cam_eye_right"}) {
-        checkf(find("fix", hidden) < 0, "the fallback key fix.%s has no menu row (ini-only)", hidden);
-    }
-    check(find("fix", "explorer_cam") < 0, "no [fix] explorer_cam row (the key is hotkey.explorer_cam)");
-    const int key = find("hotkey", "explorer_cam");
-    check(key >= 0 && strcmp(kMenuRows[key].page, "hotkeys") == 0, "the Explorer Cam KEY stays on the Hotkeys page only (not duplicated on this one)");
+    check(find("hotkey", "explorer_cam") < 0 && find("fix", "explorer_cam") < 0, "...nor the retired key hotkey.explorer_cam (no Hotkeys row)");
 
-    // Shipped values, bounds and steps.
-    if (n == 4) {
-        const MenuRowDef& up = kMenuRows[onPage[0]];
-        const MenuRowDef& fwd = kMenuRows[onPage[1]];
-        const MenuRowDef& right = kMenuRows[onPage[2]];
-        const MenuRowDef& smooth = kMenuRows[onPage[3]];
-        check(atof(up.shipped) == 0.15 && atof(fwd.shipped) == -0.08 && atof(right.shipped) == 0.0 && atof(smooth.shipped) == 0.0,
-              "shipped: 0.15 up, -0.08 forward, 0.0 sideways, smoothing 0 (Sean's tuning)");
-        for (int k = 0; k < 3; ++k) {
-            const MenuRowDef& d = kMenuRows[onPage[k]];
-            checkf(atof(d.lo) == -0.5 && atof(d.hi) == 0.5 && d.precision == 2, "%s is -0.5..0.5 m at two decimals", d.key);
-            checkf(menuStepOf(d) == 0.01, "%s steps by 0.01 m", d.key);
-        }
+    // The helpers on rows shaped by the four tokens: metres to two decimals with a sign, and milliseconds with a word for zero.
+    MenuRowDef up = {};
+    up.kind = MenuKind::Number;
+    up.shipped = "0.15";
+    up.lo = "-0.5";
+    up.hi = "0.5";
+    up.precision = 2;
+    up.step = "0.01";
+    up.unit = "m";
+    up.zero = "";
+    up.showSign = true;
+    MenuRowDef fwd = up;
+    fwd.shipped = "-0.08";
+    MenuRowDef right = up;
+    right.shipped = "0.0";
+    MenuRowDef smooth = {};
+    smooth.kind = MenuKind::Number;
+    smooth.shipped = "0";
+    smooth.lo = "0";
+    smooth.hi = "200";
+    smooth.precision = 0;
+    smooth.step = "10";
+    smooth.unit = "ms";
+    smooth.zero = "exact";
+    smooth.showSign = false;
+    {
+        for (const MenuRowDef* d : {&up, &fwd, &right}) check(menuStepOf(*d) == 0.01, "a metre row with step 0.01 steps by 0.01 m");
         check(atof(smooth.lo) == 0.0 && atof(smooth.hi) == 200.0 && smooth.precision == 0 && menuStepOf(smooth) == 10.0,
               "the smoothing is 0..200 ms, whole numbers, in steps of 10");
         // What the rows show.
@@ -1859,6 +1809,85 @@ void testExplorerPage() {
         check(menuStepOf(ranged) == 0.05, "a 0..1 decimal row steps by a twentieth (the older rule)");
     }
 }
+void testLegacyOnFootRowsStayOutOfMenu() {
+    printf("legacy on-foot rows stay out of the menu\n");
+    constexpr int kCount = static_cast<int>(sizeof(kMenuRows) / sizeof(kMenuRows[0]));
+    const char* const keys[] = {"native_on_foot_hide_fp_body", "native_on_foot_body_unclip", "native_on_foot_body_align",
+                                "native_on_foot_body_mode", "native_on_foot_body_cull", "native_on_foot_body_hybrid",
+                                "native_on_foot_look_to_aim_yaw_sign", "native_on_foot_look_to_aim_comp_delay",
+                                "native_on_foot_look_to_aim_comp_sign", "native_on_foot_body_align_trim_right_cm",
+                                "native_on_foot_body_align_trim_up_cm", "native_on_foot_body_align_trim_forward_cm",
+                                "native_on_foot_weapon_eye_right_cm",
+                                // F127: the 21 rows taken off the page (the keys, their behaviour and their defaults stay: set in edvr.ini or the installer's window), and the
+                                // aim reticle's placement, retired (a hidden retired line; the reticle always sits on the aim axis)
+                                "native_on_foot_world_markers", "native_on_foot_spine_bend_amount", "native_on_foot_weapon_eye_body",
+                                "native_on_foot_pistol_readout_forward_cm", "native_on_foot_pistol_readout_left_cm", "native_on_foot_pistol_readout_up_cm",
+                                "native_on_foot_pistol_readout_toward_eye_cm", "native_on_foot_rifle_ads_readout_forward_cm",
+                                "native_on_foot_rifle_ads_readout_left_cm", "native_on_foot_rifle_ads_readout_up_cm",
+                                "native_on_foot_rifle_ads_readout_toward_eye_cm", "native_on_foot_hud_room", "native_on_foot_hud_left_x",
+                                "native_on_foot_hud_left_y", "native_on_foot_hud_top_x", "native_on_foot_hud_top_y", "native_on_foot_hud_right_x",
+                                "native_on_foot_hud_right_y", "native_on_foot_hud_centre_x", "native_on_foot_hud_centre_y",
+                                "native_on_foot_hud_follow_smoothing_ms", "native_on_foot_reticle_follow", "native_on_foot_visor_axis"};
+    // kMenuRows is generated at build time from repository annotations. A player's older live INI supplies values at runtime,
+    // but cannot add rows back to this compiled table.
+    int nativePageRows = 0;
+    for (int i = 0; i < kCount; ++i)
+        if (strcmp(kMenuRows[i].page, "native_on_foot") == 0) ++nativePageRows;
+    check(nativePageRows == 17, "the Native on foot page has 17 rows (F127: 21 rows went to edvr.ini and the installer's window, and Reticle follows was retired; "
+                                "F128: Visor axis (test) was retired with the correction always on)");
+    // F127: the page's order and its five headings. The switch is always first; look and aim, then aiming down sights, then body and view, the HUD last. kMenuRows is in
+    // edvr.ini order; the group is the ini's heading block above the key, which the page shows as a heading.
+    {
+        struct Want { const char* key; const char* group; };
+        static const Want want[] = {
+            {"native_on_foot", "Native on foot VR"},
+            {"native_on_foot_look_to_aim", "Look and aim"},
+            {"native_on_foot_turn_style", "Look and aim"},
+            {"native_on_foot_snap_turn_deg", "Look and aim"},
+            {"native_on_foot_look_to_aim_smoothing_ms", "Look and aim"},
+            {"native_on_foot_ads_eye_distance_cm", "Aiming down sights"},
+            {"native_on_foot_ads_sight_both_eyes", "Aiming down sights"},
+            {"native_on_foot_ads_head_aim", "Aiming down sights"},
+            {"native_on_foot_eye_height_cm", "Body and view"},
+            {"native_on_foot_weapon_view_offset_cm", "Body and view"},
+            {"native_on_foot_weapon_eye_forward_cm", "Body and view"},
+            {"native_on_foot_breathable_visor", "Body and view"},
+            {"native_on_foot_hud_distance", "HUD"},
+            {"native_on_foot_hud_size", "HUD"},
+            {"native_on_foot_hud_element_scale", "HUD"},
+            {"native_on_foot_hud_spread", "HUD"},
+            {"native_on_foot_hud_follow", "HUD"},
+        };
+        constexpr int kWant = static_cast<int>(sizeof(want) / sizeof(want[0]));
+        int at = 0;
+        bool inOrder = true;
+        for (int i = 0; i < kCount; ++i) {
+            if (strcmp(kMenuRows[i].page, "native_on_foot") != 0) continue;
+            const bool match = at < kWant && strcmp(kMenuRows[i].section, "fix") == 0 && strcmp(kMenuRows[i].key, want[at].key) == 0 &&
+                               strcmp(kMenuRows[i].group, want[at].group) == 0;
+            if (!match) {
+                printf("  page row %d is fix.%s under \"%s\"; wanted %s under \"%s\"\n", at, kMenuRows[i].key, kMenuRows[i].group, at < kWant ? want[at].key : "(none)",
+                       at < kWant ? want[at].group : "");
+                inOrder = false;
+            }
+            ++at;
+        }
+        check(inOrder && at == kWant, "the Native on foot page keeps its order and headings: Native on foot VR first, then Look and aim, Aiming down sights, Body and view, and the HUD last");
+        int firstPageRow = -1;
+        for (int i = 0; i < kCount && firstPageRow < 0; ++i)
+            if (strcmp(kMenuRows[i].page, "native_on_foot") == 0) firstPageRow = i;
+        check(firstPageRow >= 0 && strcmp(kMenuRows[firstPageRow].section, "fix") == 0 && strcmp(kMenuRows[firstPageRow].key, "native_on_foot") == 0 &&
+                  strcmp(kMenuRows[firstPageRow].label, "Native on foot VR") == 0,
+              "the first row of the Native on foot page is the feature switch, labelled Native on foot VR");
+    }
+    for (const char* key : keys) {
+        bool found = false;
+        for (int i = 0; i < kCount; ++i)
+            if (strcmp(kMenuRows[i].section, "fix") == 0 && strcmp(kMenuRows[i].key, key) == 0) found = true;
+        checkf(!found, "%s remains a compatible setting but has no in-headset menu row", key);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // 8. The generated rows: which are on the Hotkeys page, in which tier
 
@@ -1878,7 +1907,7 @@ void testRows() {
         for (int k = 0; k < n; ++k) if (v[k] == i) return true;
         return false;
     };
-    for (const char* key : {"menu", "explorer_cam", "compare_aa", "dump_camera"}) {
+    for (const char* key : {"menu", "compare_aa", "dump_camera"}) {
         const int i = rowIndex(key);
         checkf(i >= 0, "hotkey.%s has a generated row", key);
         checkf(i >= 0 && kMenuRows[i].kind == MenuKind::Hotkey && kMenuRows[i].tier == MenuTier::Fix &&
@@ -1896,7 +1925,7 @@ void testRows() {
         checkf(!contains(all, nEveryone, i), "hotkey.%s is NOT on the page with developer mode off", key);
         checkf(contains(dev, nDev, i), "hotkey.%s is on the page with developer mode on", key);
     }
-    check(nEveryone == 4 && nDev == 6, "four rows for everyone (menu, Explorer Cam, AA comparison, camera history), six in developer mode");
+    check(nEveryone == 3 && nDev == 5, "three rows for everyone (menu, AA comparison, camera history), five in developer mode");
     check(rowIndex("read_game_bindings") < 0, "a plain [hotkey] setting is not a row");
     // Table order is the page's order: the menu key first.
     check(nEveryone > 0 && strcmp(kMenuRows[all[0]].key, "menu") == 0, "the menu key leads the page");
@@ -1937,7 +1966,8 @@ int main(int argc, char** argv) {
     testCaptureWiringPins(argc > 1 ? argv[1] : "");
     testEliteBinds(argc > 1 ? argv[1] : "");
     testRows();
-    testExplorerPage();
+    testNumberRows();
+    testLegacyOnFootRowsStayOutOfMenu();
     if (failures) {
         printf("hotkey_capture_test: %d of %d checks FAILED\n", failures, checks);
         return 1;

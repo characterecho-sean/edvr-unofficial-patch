@@ -1,4 +1,5 @@
 #include "openvr_system.h"
+#include "native_trace.h"
 #include "canted_display.h"
 #include "native_cpu_trace.h"
 #include <algorithm>
@@ -254,6 +255,16 @@ void OpenVRSystem::GetDeviceToAbsoluteTrackingPose(ETrackingUniverseOrigin origi
   if(!originValid(origin)||!std::isfinite(prediction)){source_.noteHeadCallFailed(call,prediction);trace.finishVoid(0);return;}
   TrackedDevicePose_t p=invalidPose(true);
   const bool located=source_.locateHeadFor(s.generation,origin,prediction,call,p);if(located)poses[0]=p;
+  // F42: every display "now" answer is a sample of the frame's head pose (the latched path, or the cache or hop).
+  if(located&&call.display)g_headPoseProof.sample(&p.mDeviceToAbsoluteTracking.m[0][0],p.bPoseIsValid,
+    t_nowAnsweredLocked?PoseSamplePath::NowLocked:PoseSamplePath::NowOther);
+  // F31: Elite's "now" answer, published for the next frame's input (the world markers' head, the d3d11 half).
+  if(located&&call.display&&p.bPoseIsValid) {
+    const uint32_t answer=publishNowHead(&p.mDeviceToAbsoluteTracking.m[0][0]);
+    if(answer==1)nativeTracePrintf("now head: first published: answer #1 to Elite's now call (rva 0x%X, prediction %.4f s, position %.3f %.3f %.3f)\n",
+      static_cast<unsigned>(call.rva),static_cast<double>(prediction),static_cast<double>(p.mDeviceToAbsoluteTracking.m[0][3]),
+      static_cast<double>(p.mDeviceToAbsoluteTracking.m[1][3]),static_cast<double>(p.mDeviceToAbsoluteTracking.m[2][3]));
+  }
   trace.finishVoid(located?1:0);
 }
 void OpenVRSystem::ResetSeatedZeroPose() {

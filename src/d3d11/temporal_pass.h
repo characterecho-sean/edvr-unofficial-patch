@@ -50,6 +50,14 @@ struct ID3D11ShaderResourceView;
 
 namespace edvr {
 
+// Draw-time domain stamps for the bounded EDVR eye-mesh diagnostic. The
+// scheduled capture index and submit sequence may not exist yet at draw time.
+struct TemporalDrawStamp {
+    uint32_t sceneFrame=0,epoch=0,scheduledIndex=UINT32_MAX,scheduledRenderFrame=0;
+    bool sceneFrameValid=false,epochValid=false,scheduledIndexValid=false;
+};
+bool temporalPassDrawStamp(TemporalDrawStamp* out);
+
 class Config;
 
 // Reads fix.temporal_aa (the warm compile and the camera capture want to
@@ -108,6 +116,18 @@ void temporalPassFrameBoundary();
 // the pass is not wanted, or the frame has not treated yet (the choice is made at the first treat) or chose none; `rows` is then untouched. `bound` says the chosen
 // write was the block bound at the scene's first draw. Valid at any boundary that runs before temporalPassFrameBoundary (the census's does); render thread.
 bool temporalPassChosenRows(float rows[12], bool* bound);
+// F52 (TEMPORARY, the native on-foot marker arc; docs\design-native-onfoot-vr-2026-10-13.md): this eye's camera rows as the pass's provenance
+// latched them in its current frame (temporalPassNoteRigidDraw: the scene block's view rows, float 932, view->world [R | c], three float4 rows,
+// in the VS b1 of the eye's first recognised scene draw). False when the pass is not wanted, or the eye has no such draw with valid rows this
+// frame; `resource` (identity only) is that b1, `vsHash` that draw's vertex shader. Side-effect free; render thread.
+bool temporalPassEyeRows(int eye, float rows[12], const void** resource, uint64_t* vsHash);
+// F63 (the native on-foot ADS sight lock): the eye's head-space x offset as native_temporal last noted it before a treat (s->eyes[eye][3];
+// eye 1 is the right eye). False when none was noted (the pass off, or no history yet). Relaxed atomics: any thread.
+bool temporalPassEyeOffsetX(int eye, float* x);
+// F66f (the native on-foot marker's affine patch): the eye's tangents {L, R, D, U} as the runtime last passed them to edvrTemporalAa: the texture's
+// own frustum, unjittered (its optical axis is -(R + L) / (R - L), -(U + D) / (U - D)). False before the first treat. Relaxed atomics: any thread.
+bool temporalPassEyeTan(int eye, float tan[4]);
+void temporalPassNoteEyeTan(int eye, const float* tan);
 
 // hotkey.dump_eyes, and the settings menu's "Dump both eyes as seen": the
 // sixteen paired raw/treated left-eye crops, a whole treated overview,
@@ -119,6 +139,12 @@ void temporalPassArmEyeDump();
 // the runtime's menu. region is the actual returned texture's unflipped bounds.
 void temporalPassCaptureFinalEye(uint64_t sequence, uint32_t eye, ID3D11Texture2D* texture,
                                  const uint32_t region[4], bool composite, bool flipU, bool flipV);
+// F59 (TEMPORARY, the native on-foot marker arc): the waypoint dump. With fix.native_on_foot_marker_probe on, the eye dump key also takes 16
+// consecutive frames of BOTH eyes, a 512x512 crop about the marker's projected position for that frame and eye, of the final eye (above)
+// and of the same frame before the interface layer's composite (this call, from native_sharpen.cpp). Copies only; render thread. F62a: the
+// marker dump series, files eyes\eye_<stamp>_marker_eye<e>_f<kk>.bmp, eye_<stamp>_marker_pre_eye<e>_f<kk>.bmp, eye_<stamp>_marker.csv.
+// F62c: 1024x1024 crops centred on THIS frame's P through the eye's scene rows (age 0); off-screen frames skipped and counted.
+void temporalPassMarkerPre(uint64_t sequence, uint32_t eye, ID3D11Texture2D* texture, const uint32_t region[4], bool flipU, bool flipV);
 
 // The pass wants the scanner-chrome tracker (vscreen.cpp, beginPanelOverride)
 // running whenever it is on: the FSS's interface takes the head's path
@@ -235,6 +261,10 @@ bool temporalPassPriceWindow(double regionMedianMs[3], double* otherMedianMs,
 // composite's depth from the interface projection's encoding into the
 // scene's. False until a treat has run.
 bool temporalPassPlanes(float* nearZ, float* farZ);
+
+// The last trained treat's output size over its input size, per axis (2.0 for a 2x upscale). F108's once-per-surface line turns an
+// in-world screen's render-pixel footprint into output pixels with it. False until a trained treat has run.
+bool temporalPassUpscale(float* x, float* y);
 
 // The depth-buffer value the scene's own projection writes for a surface
 // this many metres away (the scene block's row when it has been read, else

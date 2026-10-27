@@ -1,6 +1,8 @@
 """Fetch and build the community Direct3D 11 port of AMD's FSR 3.1 upscaler.
 
-    python tools/fetch_ffx_dx11.py [--dest DIR] [--commit SHA]
+    python tools/fetch_ffx_dx11.py [--dest DIR] [--commit SHA] [--generator vs|ninja]
+    python tools/fetch_ffx_dx11.py --fetch-only [--dest DIR] [--commit SHA]
+    python tools/fetch_ffx_dx11.py --no-fetch [--dest DIR] [--commit SHA] [--generator vs|ninja]
     python tools/fetch_ffx_dx11.py --verify DIR
     python tools/fetch_ffx_dx11.py --dry-run [--dest DIR]
     python tools/fetch_ffx_dx11.py --self-test
@@ -37,6 +39,19 @@ The static CRT is forced to match EDVR's own /MT, which the fork's CMake does no
 set on its own (CMake's un-forced MSVC default is /MD, which fails EDVR's link
 with LNK2038): -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded
 -DCMAKE_POLICY_DEFAULT_CMP0091=NEW. Only the Release configuration is built.
+
+--generator ninja builds with a single-config generator instead (-G Ninja,
+CMAKE_BUILD_TYPE=Release, the same /MT), for a host with no Visual Studio: MSVC run
+under Wine on Linux, where cl.exe, cmake.exe, ninja.exe and dumpbin.exe are on PATH
+and this tool runs under the Windows Python. Wine has no git, so the checkout is made
+first by the host's own python3 (--fetch-only) and the Windows Python then runs with
+--no-fetch, which only checks that <dest>\\src is at the pin. The default, "vs", is the
+only generator CI runs and its commands are unchanged. Ninja builds whatever cl.exe is
+first on PATH, so it must be the x64 one. Under Wine, FidelityFX_SC.exe must load
+Microsoft's own d3dcompiler_47.dll (installed in the prefix, WINEDLLOVERRIDES=
+d3dcompiler_47=n): Wine's builtin one compiles through vkd3d, did not finish the first
+batch of shaders in eight minutes where Microsoft's builds the whole SDK in half a
+minute, and is not the compiler the blobs in a Windows build come from.
 
 --verify DIR checks an existing build: every staged file exists; dumpbin
 /directives on each library shows the static CRT (LIBCMT, never MSVCRT);
@@ -131,6 +146,26 @@ CMAKE_CONFIGURE_ARGS = [
     "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded", "-DCMAKE_POLICY_DEFAULT_CMP0091=NEW",
 ]
 
+# --generator. "vs" is what CI runs; "ninja" is the single-config path for a host
+# without Visual Studio (see the module docstring). Not NMake Makefiles: under Wine
+# nmake.exe fails with U1038 "internal error : lexer" on the first line of the
+# Makefiles CMake 3.21+ writes (UTF-8 BOM, then a comment, with CRLF line endings).
+GENERATORS = {"vs": "Visual Studio 17 2022", "ninja": "Ninja"}
+
+# What the "vs" generator supplies and a single-config one does not.
+# sdk/CMakeLists.txt picks FFX_PLATFORM_NAME (the _x64 in the library names) from
+# CMAKE_GENERATOR_PLATFORM, which -A x64 sets, or else from CMAKE_EXE_LINKER_FLAGS being
+# exactly /machine:x64 -- read before project(), so it has to come from the command line.
+SINGLE_CONFIG_ARGS = ["-DCMAKE_BUILD_TYPE=Release", "-DCMAKE_EXE_LINKER_FLAGS=/machine:x64"]
+
+# sdk/src/backends/dx11/CMakeLists.txt's compile_shaders() appends to the parameter
+# that holds the NAME of the caller's output list (FSR3UPSCALER_PERMUTATION_OUTPUTS and
+# the like), so that name itself ends up as a dependency of the ffx_shader_permutations_dx11
+# target. The Visual Studio generator ignores a missing file there; Ninja stops with
+# "missing and no known rule to make it". Matches that name, as build.ninja spells it
+# (a path relative to the build directory).
+MISSING_OUTPUT_RE = re.compile(r"(?:[\w.-]+[\\/])*[A-Z0-9]+_PERMUTATION_OUTPUTS\b")
+
 # EDVR IS d3d11.dll: a static lib that imports these BY NAME would bind to itself
 # (system_d3d11.h's lesson from the EDHM redirect fix) or, for d3dcompiler, would
 # mean the SDK compiles shaders at runtime instead of using its precompiled blobs.
@@ -173,7 +208,13 @@ def head_of(src):
         out = subprocess.check_output(["git", "-C", src, "rev-parse", "HEAD"], stderr=subprocess.DEVNULL)
         return out.decode().strip()
     except (subprocess.CalledProcessError, OSError):
-        return ""
+        # No git here (the Windows Python under Wine): fetch() leaves a detached HEAD,
+        # which .git\HEAD holds as the bare SHA.
+        try:
+            head = Path(src, ".git", "HEAD").read_text(encoding="ascii").strip()
+        except (OSError, ValueError):
+            return ""
+        return head if re.fullmatch(r"[0-9a-f]{40}", head) else ""
 
 
 # ---------------------------------------------------------------------------
@@ -288,7 +329,7 @@ def find_dumpbin():
     return shutil.which("dumpbin")
 
 
-def toolset_string(cmake_exe):
+def toolset_string(cmake_exe, generator="vs"):
     parts = []
     try:
         parts.append(run_capture(cmake_exe, "--version").splitlines()[0].strip())
@@ -300,7 +341,15 @@ def toolset_string(cmake_exe):
         if msvc_dirs:
             parts.append("MSVC " + os.path.basename(msvc_dirs[-1]))
         parts.append(os.path.basename(vs.rstrip("\\/")))
-    parts.append('generator "Visual Studio 17 2022" -A x64')
+    else:
+        # No VS install (MSVC under Wine): name the toolset dumpbin.exe was found in.
+        m = re.search(r"MSVC[\\/]([\d.]+)[\\/]", find_dumpbin() or "")
+        if m:
+            parts.append("MSVC " + m.group(1))
+    if generator == "vs":
+        parts.append('generator "Visual Studio 17 2022" -A x64')
+    else:
+        parts.append('generator "%s" (single-config, Release)' % GENERATORS[generator])
     return "; ".join(parts) if parts else "unknown"
 
 
@@ -308,11 +357,31 @@ def toolset_string(cmake_exe):
 # Build -- CMake configure + build, Release only.
 # ---------------------------------------------------------------------------
 
-def build(src, cmake_exe, jobs=None):
+def add_missing_output_placeholders(build_dir):
+    """Empty files for the output-list names MISSING_OUTPUT_RE finds in build.ninja,
+    so a generator that insists every dependency exists can build. They sit in the
+    build directory, not the checkout's sources, and nothing consumes them."""
+    with open(os.path.join(build_dir, "build.ninja"), encoding="utf-8", errors="replace") as f:
+        names = sorted(set(MISSING_OUTPUT_RE.findall(f.read())))
+    for name in names:
+        path = os.path.join(build_dir, *re.split(r"[\\/]", name))
+        if not os.path.exists(path):
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            Path(path).touch()
+    return names
+
+
+def build(src, cmake_exe, jobs=None, generator="vs"):
     sdk = os.path.join(src, "sdk")
     build_dir = os.path.join(sdk, "build_edvr")
-    run(cmake_exe, "-S", sdk, "-B", build_dir, "-G", "Visual Studio 17 2022", "-A", "x64",
-        *CMAKE_CONFIGURE_ARGS)
+    if generator == "vs":
+        run(cmake_exe, "-S", sdk, "-B", build_dir, "-G", "Visual Studio 17 2022", "-A", "x64",
+            *CMAKE_CONFIGURE_ARGS)
+    else:
+        run(cmake_exe, "-S", sdk, "-B", build_dir, "-G", GENERATORS[generator],
+            *SINGLE_CONFIG_ARGS, *CMAKE_CONFIGURE_ARGS)
+        print("fetch_ffx_dx11: placeholders for dependencies the fork's CMake leaves without a rule: %s"
+              % (", ".join(add_missing_output_placeholders(build_dir)) or "none"))
     args = [cmake_exe, "--build", build_dir, "--config", "Release", "--parallel", str(jobs or os.cpu_count() or 4)]
     run(*args)
     return os.path.join(sdk, "bin", "ffx_sdk")
@@ -323,7 +392,7 @@ def build(src, cmake_exe, jobs=None):
 # links against.
 # ---------------------------------------------------------------------------
 
-def stage(src, lib_dir, dest, commit, cmake_exe):
+def stage(src, lib_dir, dest, commit, cmake_exe, generator="vs"):
     include_dest = os.path.join(dest, HEADER_DEST)
     os.makedirs(os.path.join(include_dest, "backends", "dx11"), exist_ok=True)
     for rel in HEADERS:
@@ -365,7 +434,7 @@ def stage(src, lib_dir, dest, commit, cmake_exe):
         "toolset: %s\n"
         "shader compiler (sdk\\tools\\binary_store\\FidelityFX_SC.exe) SHA-256: %s"
         " -- build-time only, never staged or shipped\n"
-        % (commit, FSR_VERSION, crt, toolset_string(cmake_exe), sc_hash)
+        % (commit, FSR_VERSION, crt, toolset_string(cmake_exe, generator), sc_hash)
     )
     with open(os.path.join(dest, VERSION_FILE), "w", encoding="utf-8") as f:
         f.write(version_text)
@@ -533,6 +602,12 @@ def main(argv=None):
     ap.add_argument("--dest", default=None, help="where to fetch/build/stage (default: %%LOCALAPPDATA%%\\EDVR\\ffx-dx11)")
     ap.add_argument("--commit", default=COMMIT, help="override the pinned commit")
     ap.add_argument("--verify", default=None, metavar="DIR", help="verify an existing staged copy and exit")
+    ap.add_argument("--generator", default="vs", choices=sorted(GENERATORS),
+                    help="CMake generator: vs (Visual Studio 17 2022, the default) or ninja (no Visual Studio, e.g. Wine)")
+    fetching = ap.add_mutually_exclusive_group()
+    fetching.add_argument("--fetch-only", action="store_true", help="fetch the pinned checkout, then stop (no build)")
+    fetching.add_argument("--no-fetch", action="store_true",
+                          help="build from the checkout already at <dest>\\src (needs no git), then stage")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--self-test", action="store_true")
     args = ap.parse_args(argv)
@@ -547,20 +622,30 @@ def main(argv=None):
         return 2 if problems else 0
 
     if args.dry_run:
-        print("Would fetch %s at %s into %s" % (URL, args.commit[:12], os.path.join(dest, "src")))
-        print("Would configure+build sdk\\ with CMake + VS2022 (Release, static /MT)")
-        print("Would stage include\\, lib\\, %s and %s under %s" % (LICENCE, VERSION_FILE, dest))
+        if not args.no_fetch:
+            print("Would fetch %s at %s into %s" % (URL, args.commit[:12], os.path.join(dest, "src")))
+        if not args.fetch_only:
+            print("Would configure+build sdk\\ with CMake + %s (Release, static /MT)"
+                  % ("VS2022" if args.generator == "vs" else GENERATORS[args.generator]))
+            print("Would stage include\\, lib\\, %s and %s under %s" % (LICENCE, VERSION_FILE, dest))
         return 0
 
     src = os.path.join(dest, "src")
-    fetch(src, args.commit)
+    if args.no_fetch:
+        if head_of(src) != args.commit:
+            sys.exit("fetch_ffx_dx11: --no-fetch, but %s is not checked out at %s -- run --fetch-only first"
+                     % (src, args.commit))
+    else:
+        fetch(src, args.commit)
+    if args.fetch_only:
+        return 0
     cmake_exe = find_cmake()
     if not cmake_exe:
         sys.exit("fetch_ffx_dx11: no cmake.exe on PATH and none bundled under VS2022 "
                  "(Common7\\IDE\\CommonExtensions\\Microsoft\\CMake\\CMake\\bin) -- "
                  "install the \"C++ CMake tools for Windows\" VS component, or put cmake on PATH")
-    lib_dir = build(src, cmake_exe)
-    stage(src, lib_dir, dest, args.commit, cmake_exe)
+    lib_dir = build(src, cmake_exe, generator=args.generator)
+    stage(src, lib_dir, dest, args.commit, cmake_exe, args.generator)
     problems = verify(dest)
     return 2 if problems else 0
 
@@ -667,6 +752,83 @@ def self_test():
         assert not os.path.exists(dest), "dry-run created %s" % dest
         assert ("d" * 12) in buf.getvalue(), "dry-run did not reflect the --commit override"
         checks += 1
+
+    # --generator, --fetch-only and --no-fetch: the default dry-run still names VS2022, the others
+    # change only what they should, none writes anything, and the two fetch flags exclude each other.
+    with tempfile.TemporaryDirectory(prefix="edvr-ffx-dx11-") as scratch:
+        dest = os.path.join(scratch, "ffx-dx11")
+
+        def dry_run(*flags):
+            buf = io.StringIO()
+            old_stdout = sys.stdout
+            sys.stdout = buf
+            try:
+                rc = main(["--dest", dest, "--dry-run", *flags])
+            finally:
+                sys.stdout = old_stdout
+            assert rc == 0 and not os.path.exists(dest), "dry-run %r wrote or failed" % (flags,)
+            return buf.getvalue()
+
+        out = dry_run()
+        assert "Would fetch" in out and "VS2022" in out and "Ninja" not in out
+        out = dry_run("--generator", "ninja")
+        assert "Would fetch" in out and "Ninja" in out and "VS2022" not in out
+        out = dry_run("--no-fetch")
+        assert "Would fetch" not in out and "Would stage" in out
+        out = dry_run("--fetch-only")
+        assert "Would fetch" in out and "Would configure" not in out and "Would stage" not in out
+        checks += 1
+
+        old_stderr = sys.stderr
+        sys.stderr = io.StringIO()
+        try:
+            try:
+                main(["--dest", dest, "--fetch-only", "--no-fetch"])
+                raise AssertionError("--fetch-only with --no-fetch was accepted")
+            except SystemExit as e:
+                assert e.code == 2, "--fetch-only with --no-fetch did not exit 2"
+        finally:
+            sys.stderr = old_stderr
+        checks += 1
+
+        # --no-fetch needs the pinned checkout, found with or without git: .git\HEAD alone (no
+        # git repository around it) is what the Wine Python sees.
+        try:
+            main(["--dest", dest, "--no-fetch"])
+            raise AssertionError("--no-fetch built from a checkout that is not there")
+        except SystemExit as e:
+            assert "--fetch-only" in str(e.code), "--no-fetch did not say how to get the checkout"
+        assert not os.path.exists(dest), "--no-fetch created %s" % dest
+        fake_src = os.path.join(dest, "src")
+        os.makedirs(os.path.join(fake_src, ".git"))
+        Path(os.path.join(fake_src, ".git", "HEAD")).write_text("ref: refs/heads/main\n", encoding="ascii")
+        assert head_of(fake_src) == "", "a branch HEAD was read as a commit"
+        Path(os.path.join(fake_src, ".git", "HEAD")).write_text(COMMIT + "\n", encoding="ascii")
+        assert head_of(fake_src) == COMMIT, "a detached HEAD was not read back"
+        checks += 1
+
+    # Ninja's missing-dependency placeholders: found in build.ninja's own spelling (backslashes),
+    # made as empty files under the build directory, and nothing else in it matched.
+    with tempfile.TemporaryDirectory(prefix="edvr-ffx-dx11-") as scratch:
+        Path(os.path.join(scratch, "build.ninja")).write_text(
+            "build x: phony src\\backends\\dx11\\FSR1_PERMUTATION_OUTPUTS "
+            "src\\backends\\shaders\\dx11\\ffx_fsr1_pass_permutations.h "
+            "src\\backends\\dx11\\FSR3UPSCALER_PERMUTATION_OUTPUTS\n", encoding="utf-8")
+        names = add_missing_output_placeholders(scratch)
+        for leaf in ("FSR1_PERMUTATION_OUTPUTS", "FSR3UPSCALER_PERMUTATION_OUTPUTS"):
+            made = os.path.join(scratch, "src", "backends", "dx11", leaf)
+            assert os.path.isfile(made) and os.path.getsize(made) == 0, "placeholder %s not made" % leaf
+        assert len(names) == 2 and not any("permutations.h" in n for n in names), names
+        assert add_missing_output_placeholders(scratch) == names, "a second pass did not find the same names"
+        checks += 1
+
+    # VERSION.txt's toolset line names the generator that built the libraries (the cmake path does
+    # not exist, so this reads no real tool).
+    absent = os.path.join(tempfile.gettempdir(), "edvr-ffx-dx11-no-such-cmake.exe")
+    assert 'generator "Visual Studio 17 2022" -A x64' in toolset_string(absent), "default toolset line changed"
+    assert 'generator "Ninja"' in toolset_string(absent, "ninja"), "toolset line does not name Ninja"
+    assert "Visual Studio" not in toolset_string(absent, "ninja").split("generator")[1], "ninja build named VS"
+    checks += 1
 
     ok_dir = lambda p: '/DEFAULTLIB:"LIBCMT"'
     ok_sym = lambda p: "External | __imp_HeapAlloc\n"

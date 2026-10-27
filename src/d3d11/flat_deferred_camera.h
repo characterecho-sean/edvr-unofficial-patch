@@ -67,6 +67,14 @@ inline double flatDeferredFrustumScale(const float rows[][4],unsigned r) {
 }
 // frustumScaleForward: the camera was finalized from the phased frustum and the CB2 from an
 // unphased one (the whole-camera omission), so the forward comparison carries that allowance.
+// The translation sum multiplies the x and y coefficients by the camera's world position. Where the camera and CB2 were finalized
+// separately (the whole-camera omission), those coefficients are certified only to the forward comparison's allowance, 8 ulps of
+// the frustum scale, even after they have cancelled to a small value, and a position metres from the origin carries that
+// uncertainty through the multiply unchanged. This is the same allowance, charged where it is multiplied. Row 3 (w) has no
+// frustum scale and is not given one.
+inline double flatDeferredWorldAllowance(double frustumScale,double worldX,double worldY,double worldZ) {
+    return flatDeferredFloatBound(8,2*frustumScale*(std::abs(worldX)+std::abs(worldY)+std::abs(worldZ)));
+}
 inline FlatDeferredCameraMatch flatMatchDeferredCamera(const unsigned char* cameraBytes,
                                                        const unsigned char* cb2Bytes,
                                                        bool frustumScaleForward=false) {
@@ -91,7 +99,9 @@ inline FlatDeferredCameraMatch flatMatchDeferredCamera(const unsigned char* came
     for(unsigned r:{0u,1u,3u}) {
         double sum=rows[r][3],magnitude=std::abs(sum);
         for(unsigned c=0;c<3;++c){const double term=double(camera[c][r])*camera[5][c];sum+=term;magnitude+=std::abs(term);}
-        if(std::abs(sum)>flatDeferredFloatBound(8,magnitude))return FlatDeferredCameraMatch::Translation;
+        const double allowance=frustumScaleForward&&r<2?
+            flatDeferredWorldAllowance(flatDeferredFrustumScale(rows,r),camera[5][0],camera[5][1],camera[5][2]):0;
+        if(std::abs(sum)>flatDeferredFloatBound(8,magnitude)+allowance)return FlatDeferredCameraMatch::Translation;
     }
     // The exact VS consumes (u,v,1) through b2[14..16].xyw. A maps world rays
     // into clip x/y/w; their product must implement (2u-1,1-2v,1).
@@ -167,7 +177,11 @@ inline bool flatDeferredDephasedOmission(const float camera[6][4],const float ro
             if(r==0)delta+=flatDeferredReverseDelta(camera[c][0],ndcX,camera[c][3])*std::abs(world[c]);
             if(r==1)delta+=flatDeferredReverseDelta(camera[c][1],ndcY,camera[c][3])*std::abs(world[c]);
         }
-        if(!(std::abs(sum)<=flatDeferredFloatBound(8,magnitude)+delta))return false;
+        // The whole-camera omission: the camera and CB2 were finalized apart, so the rows this sum multiplies by the world position
+        // carry the frustum-scale allowance (flatDeferredWorldAllowance).
+        const double allowance=!forwardCarriesPhase&&r<2?
+            flatDeferredWorldAllowance(flatDeferredFrustumScale(rows,r),world[0],world[1],world[2]):0;
+        if(!(std::abs(sum)<=flatDeferredFloatBound(8,magnitude)+delta+allowance))return false;
     }
     const unsigned clipRows[]={0,1,3},rayColumns[]={0,1,3};
     const double expected[3][3]={{2,0,-1},{0,-2,1},{0,0,1}};

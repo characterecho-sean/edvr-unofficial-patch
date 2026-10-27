@@ -2,7 +2,9 @@
 
 ## Status
 
-- **State: SHIPPED -- merged to main 2026-10-09** from
+- **REMOVED in F98 (2026-10-24):** native on foot replaces it; the parts it uses moved to `src\d3d11\native_on_foot_hooks.cpp`, the rest
+  is deleted and the eight keys are retired (docs\design-native-onfoot-vr-2026-10-13.md, F98). This document is the record of the design.
+- **Was: SHIPPED -- merged to main 2026-10-09** from
   `claude/explorer-cam-redesign-86b9b4`; it REPLACES the old route. Flown on
   Frontier F0-F15. F8: "It works so well!" (head-joint eye, isolated suite, F5
   from first person); the comfort fade "looks great"; the Hotkeys page
@@ -52,13 +54,8 @@
   `+0x592200`; the culling view is built upstream (6s.9 saw holes from it).
 - **Flown** on Frontier: F0 172543, F1 194702, F2 211908, F3 94c467d3, F4
   20764688, F5 60dd0eb2, F6 d0707af3, F7 e42e90dd, F8 (Phase 3); below.
-- **Temporary keys:** none. `[advanced] explorer_cam_probe` is REMOVED
-  (2026-10-09, below). The trims and the smoothing are PERMANENT user settings (Sean,
-  2026-10-08), shipped at his tuning: `[fix] explorer_cam_eye_trim_up` 0.15,
-  `_forward` -0.08, `_right` 0.0 (m, commander axes, held to +-0.5, was +-0.3)
-  and `explorer_cam_follow_smoothing_ms` 0, tuned on the F8 menu's Explorer Cam
-  page (flown). `explorer_cam_eye_up/_forward/_right` are FALLBACK
-  only, ini-only. The comfort fade has NO key.
+- **Keys (all retired in F98):** the trims (`[fix] explorer_cam_eye_trim_up` 0.15, `_forward` -0.08, `_right` 0.0) and
+  `explorer_cam_follow_smoothing_ms` 0 were user settings on the Explorer Cam page; `explorer_cam_eye_up/_forward/_right` the fallback eye.
 
 ## Why today's Explorer Cam is half-baked
 

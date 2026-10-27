@@ -132,7 +132,7 @@ bool candidate(Rig& r, Tex& hdr, uint64_t frame) {
 }
 
 void runCase(Rig& r, Tex& hdr, const char* mode, const char* quality, uint64_t frame,
-             bool copyTone = false, Tex* firstDecided = nullptr) {
+             bool copyTone = false, Tex* firstDecided = nullptr, bool expectSmoothed = false) {
     auto& cfg = Config::get();
     cfg.set("fix.ui_quality", quality);
     cfg.set("fix.sharp_weapons", mode);
@@ -214,6 +214,11 @@ void runCase(Rig& r, Tex& hdr, const char* mode, const char* quality, uint64_t f
     ID3D11ShaderResourceView* original = nullptr;
     bool replaced = false;
     flatUiLayerAtCopy(r.ctx.Get(), frame, true, kDoorW, kDoorH, &original, &replaced);
+    // The HUD layer's edge smoothing (fix.hud_antialiasing, off by default): with the key off the adapter asked for the layer as it is and the composite read the
+    // raw layer; with it on the composite read the SMAA output. A key the flat allow-list lacked would read off here and fail the smoothed cases.
+    const UiLayerEdgeSmoothingResult edge = uiLayerFlatEdgeSmoothingResult();
+    check(edge.outcome == (expectSmoothed ? UiLayerEdgeSmoothing::kSmoothed : UiLayerEdgeSmoothing::kRaw) && edge.w && edge.h,
+          expectSmoothed ? "with the key on the flat copy's composite read the SMAA output of the layer" : "with the key off (the shipped state) the flat copy's composite read the raw layer");
     ComPtr<ID3D11ShaderResourceView> composite;
     r.ctx->PSGetShaderResources(0, 1, &composite);
     ComPtr<ID3D11Resource> resource;
@@ -257,9 +262,14 @@ int main(int argc, char** argv) {
     check(flatUiLayerDecide(r.ctx.Get(), weaponFacts(first, hdr)) == FlatUiLayerAsk::kRefused,
           "before a tone proves the HDR target, the weapon stays in the game frame");
     check(!candidate(r, hdr, first), "the proving tone has no captured weapon content to reissue");
-    runCase(r, hdr, "on", "off", first + 1);
-    runCase(r, hdr, "plain", "off", first + 2);
-    runCase(r, hdr, "on", "100", first + 3);
+    // The rig has not set the key: HUD Anti-Aliasing (fix.hud_antialiasing) is off by default, so this first composite reads the raw layer.
+    runCase(r, hdr, "on", "off", first + 1, false, nullptr, false);
+    // The key is live: on, the next frame's composite reads the smoothed layer; off again, the raw one; on once more for the frames below.
+    cfg.set("fix.hud_antialiasing", "on");
+    runCase(r, hdr, "plain", "off", first + 2, false, nullptr, true);
+    cfg.set("fix.hud_antialiasing", "off");
+    runCase(r, hdr, "on", "100", first + 3, false, nullptr, false);
+    cfg.set("fix.hud_antialiasing", "on");
     // Also prove a second physical target for frame N+4. Its first decision
     // in that frame will be abandoned, while the later weapon target is
     // captured and copied into the actual tone input.
@@ -272,7 +282,7 @@ int main(int argc, char** argv) {
               "a new target is still refused until a tone proves it");
         check(!candidate(r, other, first + 3), "the second target is proven without captured content");
         g_stubs.eyeRes[0] = hdr.tex.Get();
-        runCase(r, hdr, "plain", "100", first + 4, true, &other);
+        runCase(r, hdr, "plain", "100", first + 4, true, &other, true);
     }
     // The last captured content is stale in the next frame, even though the
     // same HDR target and tone pair are still bound.

@@ -106,6 +106,14 @@ try:
     from tools import gen_installer_rc
 except ImportError:
     import gen_installer_rc
+try:
+    from tools import compile_only
+except ImportError:
+    import compile_only
+try:
+    from tools import archive_game_exe
+except ImportError:
+    import archive_game_exe
 
 GAME_EXE = "EliteDangerous64.exe"
 
@@ -1106,16 +1114,18 @@ def short_hash(root):
     return "nogit"
 
 
-# A compile-only build is the Linux (Steam Deck, Proton) test-flight path: the
-# Wine toolchain in .toolchains/windows/ compiles the production DLLs without
-# any of build.bat's validation gates (AGENTS.md, "Build and verify before
-# commit"). --compile-only installs from its output directory instead of
-# <root>/build, refuses when the tree has moved since the compile, and marks
-# the install receipt so it is never mistaken for a validated build.
-COMPILE_ONLY_KIND = "local-wine-production-dll-compile-only"
+# A compile-only build is the Linux (Steam Deck, Proton) test-flight path:
+# tools/linux_toolchain.py runs build.bat --compile-only under Wine (its
+# binaries live device-local under the main checkout's .toolchains/windows/)
+# and compiles the production DLLs without any of build.bat's validation gates
+# (AGENTS.md, "Build and verify before commit"). --compile-only installs from
+# <root>/build/compile-build instead of <root>/build, refuses when the tree has
+# moved since the compile, and marks the install receipt so it is never
+# mistaken for a validated build. tools/compile_only.py defines the build's
+# identity and is shared with the toolchain that writes its receipt.
+COMPILE_ONLY_KIND = compile_only.KIND
 COMPILE_ONLY_MARK = "compile-only"
-COMPILE_ONLY_BUILD_CMD = ('.toolchains/windows/host/powershell/pwsh -Command '
-                          '"python3 .toolchains/windows/toolchain.py build-dlls%s"')
+COMPILE_ONLY_BUILD_CMD = "python3 tools/linux_toolchain.py build-dlls%s"
 _BUILD_OVERRIDE = None
 
 
@@ -1130,56 +1140,15 @@ def _set_build_override(path):
 
 
 def compile_build_dir(root):
-    """Where a compile-only build of `root` lands. The main checkout holds the
-    toolchain, so its output is inside it; any other tree (a worktree) keeps
-    its output in its own ignored build/, which a fingerprint never sees."""
-    toolchain = os.path.join(root, ".toolchains", "windows")
-    if os.path.isdir(toolchain):
-        return os.path.join(toolchain, "compile-build")
-    return os.path.join(root, "build", "compile-build")
-
-
-def _toolchain_dir(root):
-    """The Linux toolchain's folder (device-local, not in git), or None."""
-    env = os.environ.get("EDVR_TOOLCHAIN_DIR")
-    if env:
-        return env if os.path.isfile(os.path.join(env, "compile_only.py")) else None
-    bases = [root, repo_root()]
-    try:   # a worktree's toolchain is the main checkout's
-        common = subprocess.run(["git", "-C", root, "rev-parse", "--git-common-dir"],
-                                capture_output=True, text=True, timeout=10).stdout.strip()
-        if common:
-            bases.append(os.path.dirname(os.path.abspath(os.path.join(root, common))))
-    except (OSError, subprocess.SubprocessError):
-        pass
-    for base in bases:
-        d = os.path.join(base, ".toolchains", "windows")
-        if os.path.isfile(os.path.join(d, "compile_only.py")):
-            return d
-    return None
+    """Where a compile-only build of `root` lands: <root>/build/compile-build,
+    for the main checkout and a worktree alike (compile_only.build_dir)."""
+    return str(compile_only.build_dir(root))
 
 
 def compile_only_fingerprint(root):
     """The tree's source fingerprint, computed by compile_only.py itself so the
     receipt and this check can never drift apart."""
-    import importlib.util
-    d = _toolchain_dir(root)
-    if d is None:
-        raise SystemExit("[edvr] --compile-only needs the Linux toolchain's "
-                         ".toolchains/windows/compile_only.py (device-local, not in git).")
-    spec = importlib.util.spec_from_file_location("edvr_compile_only", os.path.join(d, "compile_only.py"))
-    module = importlib.util.module_from_spec(spec)
-    keep = sys.dont_write_bytecode
-    sys.dont_write_bytecode = True
-    sys.path.insert(0, d)
-    try:
-        spec.loader.exec_module(module)
-    finally:
-        sys.path.remove(d)
-        sys.dont_write_bytecode = keep
-    module.ROOT = Path(root)
-    module.SOURCE = module.ROOT / "build.bat"
-    return module.source_fingerprint()
+    return compile_only.source_fingerprint(root)
 
 
 def compile_only_build(root, require_current=True, out=print):
@@ -1192,7 +1161,8 @@ def compile_only_build(root, require_current=True, out=print):
     """
     bdir = compile_build_dir(root)
     receipt_path = os.path.join(bdir, "compile_only_receipt.json")
-    redo = COMPILE_ONLY_BUILD_CMD % ("" if bdir.startswith(os.path.join(root, ".toolchains")) else " --root " + root)
+    redo = COMPILE_ONLY_BUILD_CMD % ("" if os.path.realpath(root) == os.path.realpath(repo_root())
+                                     else " --root " + root)
     if not os.path.isfile(receipt_path):
         raise SystemExit("[edvr] no compile-only receipt at %s\n       compile first: %s" % (receipt_path, redo))
     try:
@@ -1423,6 +1393,20 @@ def frontier_dirs():
     if not local:
         return []
     return _products_under(os.path.join(local, "Frontier_Developments"))
+
+
+def archive_installed_exe(root, target, dry_run=False):
+    """Keep the game exe EDVR is being installed against (archive_game_exe.py).
+
+    The next game update overwrites it in place, and build_diff.py map needs
+    it as the old build. Best effort: a failed or refused archive is reported
+    and never stops the install."""
+    exe = os.path.join(target, GAME_EXE)
+    try:
+        archive_game_exe.archive(exe, archive_game_exe.default_dest(root), dry_run=dry_run,
+                                 out=lambda line: print("[edvr] " + line))
+    except (OSError, ValueError) as exc:
+        print("[edvr] WARNING: could not archive %s (%s); the install continues." % (exe, exc))
 
 
 def resolve_target(spec):
@@ -3135,10 +3119,10 @@ def _main(argv=None):
                          "unless you are installing another worktree's build")
     ap.add_argument("--compile-only", action="store_true",
                     help="install the Linux toolchain's compile-only build "
-                         "(.toolchains/windows/compile-build, or <root>/build/compile-build "
-                         "for a worktree) instead of <root>/build. Refused when its receipt "
-                         "does not match this tree; the build is not Windows validated. "
-                         "Compile with: %s" % (COMPILE_ONLY_BUILD_CMD % ""))
+                         "(<root>/build/compile-build) instead of <root>/build. Refused "
+                         "when its receipt does not match this tree; the build is not "
+                         "Windows validated. Compile with: %s "
+                         "(plus --root <tree> for another tree)" % (COMPILE_ONLY_BUILD_CMD % ""))
     ap.add_argument("--dll", action="store_true",
                     help="compatibility alias: install the complete native package")
     ap.add_argument("--openvr", action="store_true",
@@ -3265,6 +3249,7 @@ def _main(argv=None):
             target = resolve_target(args.target)
             try:
                 if args.verify_only: return native_direct_verify(root, target, args.native_loader, args.native_runtime or "system")
+                archive_installed_exe(root, target, args.dry_run)
                 return native_direct(root, target, args.native_loader, args.native_runtime or "system", args.dry_run)
             except (OSError, ValueError) as exc:
                 print("[edvr] ERROR: direct native operation failed: %s" % exc)
@@ -3287,6 +3272,7 @@ def _main(argv=None):
         root = os.path.abspath(args.root) if args.root else repo_root()
         target = resolve_target(args.target)
         tag = args.tag or short_hash(root)
+        archive_installed_exe(root, target, args.dry_run)
         return native_install(root, target,
                               args.native_receipt,
                               tag, args.dry_run, args.keep_backups)
@@ -3306,6 +3292,8 @@ def _main(argv=None):
     xess_source = os.path.join(build_dir(root), "libxess.dll")
     if args.xess and not os.path.isfile(xess_source):
         ap.error("--xess requested but %s is missing" % xess_source)
+    if not args.verify_only:
+        archive_installed_exe(root, target, args.dry_run)
     return standard_native_install(root, target, tag, args.dry_run,
                                    args.verify_only,
                                    include_dlss=(args.dlss or (args.all and os.path.isfile(dlss_source))),
@@ -3668,38 +3656,21 @@ def _compile_only_self_test():
     tmp = tempfile.mkdtemp(prefix="edvr_compile_only_test_")
     old_validate = globals()["validate_elite_game"]
     old_probe = globals()["strict_game_running"]
-    old_env = os.environ.get("EDVR_TOOLCHAIN_DIR")
     saved_pe = None
     try:
         root, game = Path(tmp, "repo"), Path(tmp, "game")
-        tool = root / ".toolchains" / "windows"
-        cbuild = tool / "compile-build"
-        for d in (tool, cbuild, root / "build", game):
+        cbuild = root / "build" / "compile-build"
+        for d in (cbuild, game):
             d.mkdir(parents=True)
         (root / "build.bat").write_bytes(b"@echo off\r\n")
-        (root / ".gitignore").write_bytes(b"build/\n.toolchains/\n")
-        # The fingerprint comes from compile_only.py itself. Use the host's own
-        # when it has one (so this test notices it changing shape); a host without
-        # the Linux toolchain gets a stand-in with the same two globals and function.
-        real = _toolchain_dir(repo_root())
-        if real:
-            for name in ("compile_only.py", "toolchain.py"):
-                shutil.copy2(os.path.join(real, name), tool / name)
-        else:
-            (tool / "compile_only.py").write_text(
-                "import hashlib, subprocess\nfrom pathlib import Path\n"
-                "ROOT = Path(__file__).resolve().parents[2]\nSOURCE = ROOT / 'build.bat'\n"
-                "def source_fingerprint():\n"
-                "    git = lambda *a: subprocess.check_output(['git', '-C', str(ROOT), *a])\n"
-                "    return hashlib.sha256(git('rev-parse', 'HEAD') + git('diff', '--binary', 'HEAD')).hexdigest()\n")
+        (root / ".gitignore").write_bytes(b"build/\n")
         subprocess.run(["git", "init", "-q", str(root)], check=True, capture_output=True)
         git(root, "add", "-A")
         git(root, "commit", "-q", "-m", "fixture")
-        os.environ.pop("EDVR_TOOLCHAIN_DIR", None)
 
         if compile_build_dir(str(root)) != str(cbuild) or \
                 compile_build_dir(str(game)) != str(game / "build" / "compile-build"):
-            print("compile_build_dir does not follow the toolchain/worktree rule")
+            print("compile_build_dir is not <root>/build/compile-build")
             return False
         products = {"d3d11.dll": b"COMPILE-GRAPHICS", "libxess.dll": b"COMPILE-XESS",
                     "INTEL-XESS-LICENSE.txt": b"LICENSE", "INTEL-XESS-THIRD-PARTY.txt": b"THIRD-PARTY"}
@@ -3815,8 +3786,6 @@ def _compile_only_self_test():
         globals()["strict_game_running"] = old_probe
         if saved_pe:
             openxr_pe.Image, openxr_pe._exports = saved_pe
-        if old_env is not None:
-            os.environ["EDVR_TOOLCHAIN_DIR"] = old_env
         shutil.rmtree(tmp, ignore_errors=True)
 
 
@@ -4232,8 +4201,58 @@ def _run_self_test_labelled():
             sys.stdout, sys.stderr = real_out, real_err
 
 
+def _archive_route_self_test():
+    """Every real install route archives the game exe, a dry run as a dry run;
+    no --verify-only route does. The installs themselves are stubbed out."""
+    ok = True
+    tmp = tempfile.mkdtemp(prefix="edvr_archive_route_test_")
+    names = ("archive_installed_exe", "resolve_target", "standard_native_install",
+             "native_install", "native_direct", "native_direct_verify", "verify_native_receipt")
+    saved = {n: globals()[n] for n in names}
+    archived = []
+    try:
+        loader = os.path.join(tmp, "loader.dll")
+        receipt = os.path.join(tmp, "receipt.json")
+        for path in (loader, receipt):
+            with open(path, "wb") as f:
+                f.write(b"x")
+        globals().update(
+            archive_installed_exe=lambda root, target, dry_run=False: archived.append(dry_run),
+            resolve_target=lambda spec: tmp,
+            standard_native_install=lambda *a, **k: 0,
+            native_install=lambda *a, **k: 0,
+            native_direct=lambda *a, **k: 0,
+            native_direct_verify=lambda *a, **k: 0,
+            verify_native_receipt=lambda *a, **k: {"target": tmp})
+        base = ["--root", tmp, "--target", "steam"]
+        native = base + ["--native-openxr", "--dll", "--scope", "vr"]
+        direct = native + ["--no-backup", "--native-loader", loader]
+        for argv, want, what in (
+                (base, [False], "standard install"),
+                (base + ["--dry-run"], [True], "standard dry run"),
+                (base + ["--verify-only"], [], "standard --verify-only"),
+                (native + ["--native-receipt", receipt], [False], "native install"),
+                (native + ["--native-receipt", receipt, "--verify-only"], [], "native --verify-only"),
+                (direct, [False], "direct native install"),
+                (direct + ["--dry-run"], [True], "direct native dry run"),
+                (direct + ["--verify-only"], [], "direct native --verify-only")):
+            del archived[:]
+            try:
+                rc = main(argv)
+            except SystemExit as exc:
+                rc = exc.code
+            if rc != 0 or archived != want:
+                print("archive route: %s returned %r and archived %r, want 0 and %r" % (what, rc, archived, want))
+                ok = False
+    finally:
+        globals().update(saved)
+        shutil.rmtree(tmp, ignore_errors=True)
+    return ok
+
+
 def self_test():
     ok = True
+    if not _archive_route_self_test(): ok = False
     if not _game_probe_self_test(): ok = False
     if not _xess_opt_in_self_test(): ok = False
     if not _compile_only_self_test(): ok = False

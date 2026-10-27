@@ -2240,7 +2240,7 @@ void resolveTickView() noexcept {
     const uintptr_t ctx = g_passCtx;
     if (ctx == 0) return;   // the pass named no context: nothing to resolve from; the camera is held
     view::resolveView(ctx, &g_view);
-    for (uint32_t t = 1; t < kViewTries && !sealed::viewCentreReady(g_view.originOk, g_view.poseOk, g_view.source == view::Source::kExplorerCam); ++t)
+    for (uint32_t t = 1; t < kViewTries && !sealed::viewCentreReady(g_view.originOk); ++t)
         view::resolveView(ctx, &g_view);
     float cam[3] = {};
     const bool ok = cameraOf(g_view, cam);

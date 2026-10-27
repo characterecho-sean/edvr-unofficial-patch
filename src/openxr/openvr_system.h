@@ -2,6 +2,8 @@
 #include "system_source.h"
 #include "exe_module.h"
 #include "head_pose_time.h"
+#include "pose_sample_proof.h"   // F42: the proof of one head pose per frame
+#include "now_head_publication.h"   // F31: the "now" answer published for the next frame's input
 #include <atomic>
 #include <mutex>
 #include "../common/call_probe_budget.h"

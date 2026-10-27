@@ -18,12 +18,16 @@
 #include <array>
 #include <cmath>
 #include <cstring>
+#include <cstdint>
+#include <cstdio>
 #include <fstream>
+#include <random>
 #include <sstream>
 #include <string>
 #include <vector>
 
 #include "../../src/d3d11/engine_velocity_emit.h"
+#include "emit_tests.h"   // staleKindOf and kindHash: the C++ oracle the stale-stamp closed form is checked against
 
 namespace math_tests {
 using Microsoft::WRL::ComPtr;
@@ -139,6 +143,170 @@ inline std::string engineMotionBlock(const Harness& h) {
     const std::string block = all.substr(begin, end - begin);
     h.check(block.find(")HLSL\"") == std::string::npos, "the block sits inside one literal");
     return block;
+}
+
+// The stale-stamp window, closed form against the loop. engineStaleStampKind
+// no longer walks 64 frames of age: it inverts the marker hash's rounds (the
+// XOR, the odd multiply, the xorshift) to recover each tag's one matching
+// stamp and tests that stamp's age against the window. The loop it replaced
+// is emit_tests::staleKindOf, kept as the oracle. One dispatch of a few
+// thousand cases, the SHIPPED text on WARP: tokens that wrap the window
+// through 0, markers of both tags at ages on either side of both window
+// edges (and far outside it, and the wrap of age itself), and garbage. The
+// per-case token comes from its own buffer (the production caller reads it
+// from EN[276].x, which is one value per dispatch).
+inline void staleStampClosedForm(const Harness& h) {
+    namespace et = emit_tests;
+    using Rec = std::array<uint8_t, 0x150>;
+    const std::string source = engineMotionBlock(h) + R"HLSL(
+StructuredBuffer<uint> Tokens : register(t0);
+RWStructuredBuffer<uint> Out : register(u0);
+[numthreads(64, 1, 1)] void main(uint3 id : SV_DispatchThreadID) {
+    uint n, s; Tokens.GetDimensions(n, s);
+    if (id.x >= n) return;
+    Out[id.x] = engineStaleStampKind(EP[id.x], Tokens[id.x]);
+}
+)HLSL";
+    ComPtr<ID3DBlob> code, errors;
+    const HRESULT chr = D3DCompile(source.data(), source.size(), "engine-stale-stamp", nullptr, nullptr, "main", "cs_5_0",
+                                   D3DCOMPILE_ENABLE_STRICTNESS | D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &code, &errors);
+    if (FAILED(chr) && errors) std::fprintf(stderr, "%s\n", static_cast<const char*>(errors->GetBufferPointer()));
+    h.check(SUCCEEDED(chr), "the shipped stale-stamp HLSL compiles as cs_5_0");
+    ComPtr<ID3D11ComputeShader> cs;
+    h.check(SUCCEEDED(h.device->CreateComputeShader(code->GetBufferPointer(), code->GetBufferSize(), nullptr, &cs)),
+            "stale-stamp compute shader on WARP");
+
+    // One hash round, as the HLSL (and the emit) run it: XOR, multiply, xorshift.
+    auto hashRound = [](uint32_t hash, uint32_t stamp) { uint32_t v = (hash ^ stamp) * 0x01000193u; v ^= v >> 13; return v; };
+    struct Stale { Rec rec; uint32_t token, tag, age; bool real; };
+    std::vector<Stale> cases;
+    std::mt19937 rng(0x57A1E5A9u);   // fixed seed: the same cases every build
+    std::vector<uint32_t> tokens = {0, 1, 2, 63, 64, 65, 0x80000000u, 0xFFFFFFFFu};   // 0, 1, 2 and 63 wrap the window through 0; 64 ends exactly on it
+    for (int i = 0; i < 6; ++i) tokens.push_back(rng());
+    const uint32_t ages[] = {0, 1, 2, 31, 63, 64, 65, 66, 1000, 0xFFFFFFFFu};
+    for (const uint32_t token : tokens) {
+        for (int n = 0; n < 12; ++n) {
+            Rec base{};   // random pose words (and random everything else: only the ten hashed words may matter)
+            for (size_t o = 0; o < base.size(); o += 4) { const uint32_t w = rng(); std::memcpy(base.data() + o, &w, 4); }
+            const uint32_t seed = et::kindHash(et::blockNow(base), et::blockPrev(base));   // the C++ mirror, independent of the shader
+            auto add = [&](uint32_t marker, uint32_t tag, uint32_t age, bool real) {
+                Stale c{base, token, tag, age, real};
+                std::memcpy(c.rec.data() + ev::kItemMarker, &marker, 4);
+                cases.push_back(c);
+            };
+            for (const uint32_t tag : {ev::kJoined, ev::kMasked})
+                for (const uint32_t age : ages) add(tag ^ hashRound(seed, token - age), tag, age, true);
+            for (int g = 0; g < 3; ++g) add(rng(), 0, 0, false);                         // garbage
+            add(ev::kJoined, 0, 0, false);                                               // a bare tag (stack garbage shape)
+            add(ev::kMasked, 0, 0, false);
+            add(ev::kJoined ^ seed, 0, 0, false);                                        // the stamp-free hash alone
+            add((ev::kJoined ^ hashRound(seed, token - 5)) ^ (1u << (rng() % 32)), 0, 0, false);   // a real marker, one bit off
+            add(0x7FC0ED03u ^ hashRound(seed, token - 5), 0, 0, false);                      // a third tag over a real stamp
+        }
+    }
+
+    auto structured = [&](const void* data, UINT stride, UINT count, ID3D11Buffer** buffer, ID3D11ShaderResourceView** srv) {
+        D3D11_BUFFER_DESC d{};
+        d.ByteWidth = stride * count; d.Usage = D3D11_USAGE_DEFAULT; d.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        d.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED; d.StructureByteStride = stride;
+        D3D11_SUBRESOURCE_DATA init{data, 0, 0};
+        h.check(SUCCEEDED(h.device->CreateBuffer(&d, &init, buffer)), "stale-stamp structured buffer");
+        h.check(SUCCEEDED(h.device->CreateShaderResourceView(*buffer, nullptr, srv)), "stale-stamp structured SRV");
+    };
+    std::vector<Rec> records;
+    std::vector<uint32_t> caseTokens;
+    for (const Stale& c : cases) { records.push_back(c.rec); caseTokens.push_back(c.token); }
+    static_assert(sizeof(Rec) == 336, "EnginePoolRecord stride");
+    ComPtr<ID3D11Buffer> recordBuffer, tokenBuffer;
+    ComPtr<ID3D11ShaderResourceView> recordSrv, tokenSrv;
+    structured(records.data(), sizeof(Rec), UINT(records.size()), &recordBuffer, &recordSrv);
+    structured(caseTokens.data(), 4, UINT(caseTokens.size()), &tokenBuffer, &tokenSrv);
+
+    D3D11_BUFFER_DESC od{};
+    od.ByteWidth = UINT(cases.size() * 4); od.Usage = D3D11_USAGE_DEFAULT; od.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
+    od.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED; od.StructureByteStride = 4;
+    ComPtr<ID3D11Buffer> out;
+    h.check(SUCCEEDED(h.device->CreateBuffer(&od, nullptr, &out)), "stale-stamp output buffer");
+    ComPtr<ID3D11UnorderedAccessView> outUav;
+    h.check(SUCCEEDED(h.device->CreateUnorderedAccessView(out.Get(), nullptr, &outUav)), "stale-stamp output UAV");
+    od.Usage = D3D11_USAGE_STAGING; od.BindFlags = 0; od.CPUAccessFlags = D3D11_CPU_ACCESS_READ; od.MiscFlags = 0;
+    ComPtr<ID3D11Buffer> staging;
+    h.check(SUCCEEDED(h.device->CreateBuffer(&od, nullptr, &staging)), "stale-stamp staging buffer");
+
+    auto* ctx = h.context;
+    ctx->CSSetShader(cs.Get(), nullptr, 0);
+    ID3D11ShaderResourceView* t0 = tokenSrv.Get();
+    ID3D11ShaderResourceView* t22 = recordSrv.Get();
+    ctx->CSSetShaderResources(0, 1, &t0);
+    ctx->CSSetShaderResources(22, 1, &t22);
+    ID3D11UnorderedAccessView* u = outUav.Get();
+    ctx->CSSetUnorderedAccessViews(0, 1, &u, nullptr);
+    ctx->Dispatch(UINT((cases.size() + 63) / 64), 1, 1);
+    ctx->CopyResource(staging.Get(), out.Get());
+    D3D11_MAPPED_SUBRESOURCE m{};
+    h.check(SUCCEEDED(ctx->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &m)), "map stale-stamp results");
+    const std::vector<uint32_t> results(static_cast<const uint32_t*>(m.pData), static_cast<const uint32_t*>(m.pData) + cases.size());
+    ctx->Unmap(staging.Get(), 0);
+    ID3D11UnorderedAccessView* noUav = nullptr;
+    ID3D11ShaderResourceView* noSrv = nullptr;
+    ctx->CSSetUnorderedAccessViews(0, 1, &noUav, nullptr);
+    ctx->CSSetShaderResources(0, 1, &noSrv);
+    ctx->CSSetShaderResources(22, 1, &noSrv);
+
+    // Every result against the loop, and against the kind the case was built
+    // to read (from its age alone -- no oracle in that): ages 1..64 of a joined
+    // marker read 6, of a masked marker 2; age 0, past the window and the wrap
+    // of age read 3; garbage reads 3 wherever the loop says 3.
+    size_t mismatches = 0, unexpected = 0, firstMismatch = 0, firstUnexpected = 0;
+    size_t garbage = 0, garbageRead3 = 0;
+    size_t kindCount[8] = {};
+    for (size_t i = 0; i < cases.size(); ++i) {
+        const Stale& c = cases[i];
+        const uint32_t got = results[i], loop = et::staleKindOf(c.rec, c.token);
+        if (got < 8) ++kindCount[got];
+        if (got != loop) { if (!mismatches) firstMismatch = i; ++mismatches; }
+        if (c.real) {
+            const bool inside = c.age >= 1 && c.age <= 64;
+            const uint32_t want = inside ? (c.tag == ev::kJoined ? 6u : 2u) : 3u;
+            if (got != want) { if (!unexpected) firstUnexpected = i; ++unexpected; }
+        } else if (loop == 3) {
+            ++garbage;
+            if (got == 3) ++garbageRead3;
+        }
+    }
+    std::printf("  math: stale-stamp closed form: %zu cases (%zu tokens), kinds 6/2/3 = %zu/%zu/%zu, %zu mismatches against the 64-round loop\n",
+                cases.size(), tokens.size(), kindCount[6], kindCount[2], kindCount[3], mismatches);
+    if (mismatches) {
+        const Stale& c = cases[firstMismatch];
+        std::fprintf(stderr, "  stale-stamp: first mismatch: token %08x, tag %08x, age %u: GPU kind %u vs loop kind %u\n", c.token, c.tag, c.age,
+                     results[firstMismatch], et::staleKindOf(c.rec, c.token));
+    }
+    h.check(mismatches == 0, "the closed-form stale-stamp window reads the same kind as the 64-round search on every case");
+    if (unexpected) {
+        const Stale& c = cases[firstUnexpected];
+        std::fprintf(stderr, "  stale-stamp: first unexpected: token %08x, tag %08x, age %u: GPU kind %u\n", c.token, c.tag, c.age,
+                     results[firstUnexpected]);
+    }
+    h.check(unexpected == 0, "a real marker reads 6 (joined) or 2 (masked) at ages 1..64 and 3 everywhere else");
+
+    // Not vacuous: the cases at the window's two edges, by name.
+    auto allRead = [&](uint32_t tag, uint32_t age, uint32_t kind, const char* why) {
+        size_t n = 0, bad = 0;
+        for (size_t i = 0; i < cases.size(); ++i)
+            if (cases[i].real && cases[i].tag == tag && cases[i].age == age) { ++n; bad += results[i] != kind; }
+        h.check(n > 0 && bad == 0, why);
+    };
+    allRead(ev::kJoined, 1, 6, "a joined marker one frame old reads 6 (stale stamp)");
+    allRead(ev::kJoined, 64, 6, "a joined marker 64 frames old reads 6 (the window's last frame)");
+    allRead(ev::kMasked, 1, 2, "a masked marker one frame old reads 2");
+    allRead(ev::kMasked, 64, 2, "a masked marker 64 frames old reads 2 (the window's last frame)");
+    allRead(ev::kJoined, 0, 3, "a joined marker of this very frame is not a stale stamp (age 0 reads 3)");
+    allRead(ev::kMasked, 0, 3, "a masked marker of this very frame is not a stale stamp (age 0 reads 3)");
+    allRead(ev::kJoined, 65, 3, "a joined marker 65 frames old is past the window and reads 3");
+    allRead(ev::kMasked, 65, 3, "a masked marker 65 frames old is past the window and reads 3");
+    h.check(garbage > 0 && garbageRead3 == garbage, "garbage markers read 3 wherever the loop says 3");
+    h.check(kindCount[2] > 0 && kindCount[3] > 0 && kindCount[6] > 0, "the stale-stamp cases produce each of kinds 2, 3 and 6");
+    h.check(kindCount[2] + kindCount[3] + kindCount[6] == cases.size(), "the stale-stamp shader returns only kinds 2, 3 and 6");
 }
 
 inline void run(const Harness& h) {
@@ -323,6 +491,7 @@ RWStructuredBuffer<float4> Out : register(u0);
     for (size_t i = 0; i < cases.size(); ++i)
         if (expect[i].kind == 1) h.check(declined[i * 4 + 2] == -1.0f, "a projection that is not the pool families' encoding declines");
     std::printf("  math: %zu cases, worst previous-NDC error %.2e (limit 2e-5)\n", cases.size(), worst);
+    staleStampClosedForm(h);
 }
 
 } // namespace math_tests

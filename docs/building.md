@@ -39,8 +39,10 @@ window while it runs. The runner holds every test exe to that and fails the
 build if one shows a window or takes the keyboard focus; see
 `docs\build-focus-steal-2026-09-29.md`.
 
-For a native Windows build from Linux, use the **Native Windows release build**
-workflow (`.github/workflows/release.yml`). It runs on Windows Server 2022 with
+For a native Windows build from Linux, use the **Native Windows build**
+workflow (`.github/workflows/release.yml`). It also runs by itself on every pull
+request and every push to `main` (a `codex/release-*` pull request is left to
+its branch's push run). It runs on Windows Server 2022 with
 Visual Studio 2022, Python 3.12, and all four pinned dependencies. It invokes
 the full `build.bat --wait-lock --jobs 4`, including every test rig and the
 installer gate, then calls `package.bat`. The packages contain the exact
@@ -58,6 +60,41 @@ version. The temporary tag exists only on the runner; either branch result is a
 proof artifact, not a release asset. The branch push trigger works before this
 workflow reaches `main`. GitHub does not offer its manual **Run workflow**
 control for a new workflow until the workflow file is on the default branch.
+
+### Linux: compile-only builds under Wine
+
+For a test flight on a Steam Deck or another Linux machine that runs Elite
+under Proton, `tools/linux_toolchain.py` compiles the production DLLs with
+Microsoft's compiler under Wine. It runs `build.bat --compile-only`, which
+skips every test, rig and installer gate, so the result is not validated and
+not a release asset: a merge or a release still needs CI's full build. Use host
+`python3`, from any shell:
+
+```
+python3 tools/linux_toolchain.py setup --dry-run
+python3 tools/linux_toolchain.py setup --accept-license
+python3 tools/linux_toolchain.py doctor
+python3 tools/linux_toolchain.py build-dlls [--root <worktree>]
+```
+
+`setup` needs the system packages `wine msitools git`, which you install
+yourself (it never runs sudo), and downloads VS 2022's Build Tools, a Windows
+Python and the pinned SDKs. The Build Tools are under Microsoft's licence:
+using them needs a valid Visual Studio licence, and they must never be shared,
+published or committed. `--accept-license` says you have read and accept those
+terms; without it `setup` stops before downloading. Everything lives in the
+Git-ignored `.toolchains/windows/` of the main checkout (`EDVR_TOOLCHAIN_HOME`
+moves it) and serves every worktree. A tree's output, a worktree's included, is
+`build/compile-build` in that tree, with a `compile_only_receipt.json` that
+`install_edvr.py --compile-only` checks (`tools/compile_only.py`).
+
+It differs from CI's build in a few ways: the MSVC (14.44.35207) and Windows
+SDK (10.0.26100) are CI's own; shaders compile with the SDK's own
+`d3dcompiler_47.dll`, not Wine's; the proxy's export list comes from Wine's
+`d3d11.dll`, which lacks some exports Windows has (Elite imports
+`D3D11CreateDevice` alone from it); the FSR 3 DX11 port builds with CMake and
+Ninja (`fetch_ffx_dx11.py --generator ninja`), not the Visual Studio generator;
+and no gates run. The docstring of `tools/linux_toolchain.py` has the details.
 
 ### The caches in CI
 
@@ -172,9 +209,10 @@ try {
 
 Write and review release notes before creating the draft. Generate the Thanks
 section from the previous tag, then write each contributor's sentence by hand.
-Only merged PR authors are named; issue and log reporters get the tool's
-general line. Review the final notes file, then attach the three verified ZIPs
-and `SHA256SUMS` to a draft release:
+Only merged PR authors are named, plus anyone the maintainer approved by name
+in `tools/release_credits_approved.json` for a commit in the release. Issue and
+log reporters get the tool's general line. Review the final notes file, then
+attach the three verified ZIPs and `SHA256SUMS` to a draft release:
 
 ```powershell
 python tools/release_credits.py --from vPREVIOUS --to "v$version" --thanks --out thanks.md

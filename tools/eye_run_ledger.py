@@ -2,7 +2,7 @@
 """The eye run's ledger, read: which records each draw took from the pool, how far each turned
 between consecutive crops, and how the bones moved (object_probe.h, "THE EYE RUN'S LEDGER").
 
-python eye_run_ledger.py <edvr_logs\\pool> <HHMMSS> [--hub-radius 500] [--ring-radius 800]
+python eye_run_ledger.py <edvr_logs\\pool> <capture-stamp> [--hub-radius 500] [--ring-radius 800]
 
 Reads draws_<stamp>.bin (a 160-byte header: magic, version, frames, frame0, the instance
 stream's stride, the palette's stride, the pool's bytes, then 32 crop-to-frame entries; then per
@@ -22,10 +22,103 @@ drawn in each radius band about the station's axis (the axis fitted from the mov
 the median turn of the drawn ones and of the undrawn, the skinned records' turn with their first
 bone composed in, and the big instanced draws that were NOT the pool's, for the next look.
 """
-import argparse, glob, math, os, struct, sys, tempfile
+import argparse, glob, math, os, struct, sys, tempfile, json
 import numpy as np
 
 REC = 336
+WEAPON_UI_PAIRS = {(0x025B4B9FF54622ED,0x46F92DC71BF8DFA5),
+                   (0xB10B032BDFD46700,0xDB899F4BD577F2E5)}
+
+def classify_full_record_join(candidates):
+    """Classify a writer occurrence against its full-record GPU uses."""
+    unique={(c['frame'],c['ordinal'],c['record_index'],c['vs'],c['ps']) for c in candidates}
+    status=('unmatched' if not unique else 'exact' if len(unique)==1 else 'exact_many_draws')
+    return (status,
+            sorted(unique))
+
+def indexed_full_record_matches(row,candidate,pool,stream,inst_stride,record):
+    """Return exact record indices only for the captured pool draw's own index slice."""
+    if inst_stride<=0 or inst_stride%4 or 'ps' not in row.dtype.names:
+        return []
+    if (int(row['pool'])!=1 or int(row['vs'])!=candidate['vs'] or int(row['ps'])!=candidate['ps'] or
+            int(row['kind'])!=candidate['kind'] or int(row['count'])!=candidate['count'] or
+            int(row['inst'])!=candidate['instances'] or int(row['start'])!=candidate['start_instance']):
+        return []
+    stride_u32=inst_stride//4;start=int(row['start']);count=int(row['inst'])
+    if start>len(stream)//stride_u32 or count>(len(stream)//stride_u32)-start:
+        return []
+    selected=stream[start*stride_u32:(start+count)*stride_u32:stride_u32]
+    return [int(index) for index in selected if int(index)<len(pool) and pool[int(index)].tobytes()==record]
+
+def join_ui_record_record(record,native_frame,eye_draws,draws,pools,insts,inst_stride):
+    matches=[]
+    for d in eye_draws:
+        issue=d.get('issue')
+        if (d.get('render_frame')!=native_frame or (d['vs'],d['ps']) not in WEAPON_UI_PAIRS or
+                not issue or issue.get('status')!=2 or (issue.get('actual_vs'),issue.get('actual_ps'))!=(d['vs'],d['ps'])):
+            continue
+        frame,ordinal=d['frame'],d['ordinal'];rows=draws.get(frame);pool=pools.get(frame);stream=insts.get(frame)
+        if rows is None or pool is None or stream is None or not 0<=ordinal<len(rows):continue
+        row=rows[ordinal]
+        if (int(row['vs']),int(row['inst']))!=(d['vs'],d['instances']):continue
+        for index in indexed_full_record_matches(row,d,pool['raw'],stream,inst_stride,record):
+            matches.append(dict(frame=frame,ordinal=ordinal,record_index=index,vs=d['vs'],ps=d['ps'],eye=d['eye'],
+                                b0_payload_status=issue.get('b0_payload_status'),b0_range_known=issue.get('b0_range_known'),
+                                target_identity=issue.get('target_identity'),viewport_count=len(issue.get('viewports',b''))//24))
+    status,unique=classify_full_record_join(matches);candidate_rows=[]
+    for f,o,i,vs,ps in unique:
+        detail=next(c for c in matches if (c['frame'],c['ordinal'],c['record_index'],c['vs'],c['ps'])==(f,o,i,vs,ps))
+        candidate_rows.append(dict(frame=f,ordinal=o,record_index=i,vs='%016X'%vs,ps='%016X'%ps,eye=detail['eye'],
+                                   b0_payload_status=detail['b0_payload_status'],b0_range_known=detail['b0_range_known'],
+                                   target_identity=detail['target_identity'],viewport_count=detail['viewport_count']))
+    return status,candidate_rows
+
+def attach_candidate_issues(eye):
+    """Attach issued-state records to their exact draw indices from the reader."""
+    issues={frame['draw']:frame['issue'] for frame in eye['candidates']['frames']}
+    return [dict(draw,issue=issues.get(index)) for index,draw in enumerate(eye['draws'])]
+
+def join_weapon_ui_records(writer_json,eye_drawstate,draws,pools,insts,inst_stride):
+    import eye_draw_snapshot
+    root=json.loads(open(writer_json,encoding='utf-8').read())
+    section=root.get('record_writers',{})
+    if section.get('version')!=4:
+        raise ValueError('UI writer capture must use record_writers version 4')
+    packed=open(os.path.join(os.path.dirname(writer_json),root['binary']),'rb').read()
+    eye=eye_draw_snapshot.read(eye_drawstate)
+    eye_draws=attach_candidate_issues(eye)
+    records=[]
+    for rec in section.get('records',[]):
+        ui=rec.get('ui_submit',{})
+        if rec.get('ui_join_status')!='matched_instance_tls':
+            continue
+        span=rec.get('record',{})
+        if span.get('status')!='available' or span.get('bytes')!=REC:
+            records.append(dict(writer_id=rec.get('id'),identity=(ui.get('renderer'),ui.get('part'),ui.get('instance')),
+                                frame=None,ordinal=None,instance=ui.get('instance'),
+                                status='unmatched',candidates=[]));continue
+        record=packed[span['offset']:span['offset']+REC]
+        native_frame=ui.get('render_frame',0)
+        if not native_frame:
+            records.append(dict(writer_id=rec.get('id'),identity=(ui.get('renderer'),ui.get('part'),ui.get('instance')),
+                                frame=None,ordinal=None,instance=ui.get('instance'),
+                                status='unmatched',candidates=[]));continue
+        status,candidate_rows=join_ui_record_record(record,native_frame,eye_draws,draws,pools,insts,inst_stride)
+        records.append(dict(writer_id=rec.get('id'),identity=(ui.get('renderer'),ui.get('part'),ui.get('instance')),
+                            frame=(candidate_rows[0]['frame'] if len(candidate_rows)==1 else None),
+                            ordinal=(candidate_rows[0]['ordinal'] if len(candidate_rows)==1 else None),
+                            instance=ui.get('instance'),status=status,candidates=candidate_rows))
+    owners={}
+    for result in records:
+        identity=tuple(result['identity'])
+        for candidate in result['candidates']:
+            key=(candidate['frame'],candidate['ordinal'],candidate['record_index'],candidate['vs'],candidate['ps'])
+            owners.setdefault(key,set()).add(identity)
+    ambiguous={key for key,identities in owners.items() if len(identities)>1}
+    for result in records:
+        if any((c['frame'],c['ordinal'],c['record_index'],c['vs'],c['ps']) in ambiguous for c in result['candidates']):
+            result['status']='ambiguous'
+    return records
 
 # The draws file's two row layouts, kept in step with LedgerDraw in
 # src/d3d11/object_probe.cpp (its static_asserts) and the version field in the
@@ -65,6 +158,85 @@ def load_draws(path):
 def self_test():
     """synthetic v1 and v2 fixtures, written and read back: the version
     dispatch, both row widths, and the ps/rt values v2 added."""
+    sample=dict(frame=12,ordinal=7,record_index=4,vs=0xB10B032BDFD46700,ps=0xDB899F4BD577F2E5)
+    assert classify_full_record_join([])[0]=='unmatched'
+    assert classify_full_record_join([sample])[0]=='exact'
+    assert classify_full_record_join([sample,dict(sample)])[0]=='exact'
+    assert classify_full_record_join([sample,dict(sample,frame=13,ordinal=8)])[0]=='exact_many_draws'
+    assert classify_full_record_join([sample,dict(sample,record_index=5)])[0]=='exact_many_draws'
+    row=np.zeros(1,dtype=ROW_V2)[0]
+    row['pool']=1;row['vs']=sample['vs'];row['ps']=sample['ps'];row['kind']=ord('X')
+    row['count']=6;row['inst']=1;row['start']=2
+    candidate=dict(vs=sample['vs'],ps=sample['ps'],kind=ord('X'),count=6,instances=1,start_instance=2)
+    raw=np.zeros((1,REC),dtype=np.uint8);payload=bytes((i*7+3)&255 for i in range(REC));raw[0]=np.frombuffer(payload,dtype=np.uint8)
+    stream=np.array([91,0,77,0,0,0],dtype=np.uint32)
+    assert indexed_full_record_matches(row,candidate,raw,stream,8,payload)==[0]
+    row['pool']=0
+    assert indexed_full_record_matches(row,candidate,raw,stream,8,payload)==[]
+    row['pool']=1
+    assert indexed_full_record_matches(row,dict(candidate,instances=2),raw,stream,8,payload)==[]
+    assert indexed_full_record_matches(row,candidate,raw,np.array([],dtype=np.uint32),8,payload)==[]
+    assert indexed_full_record_matches(row,candidate,raw,stream,6,payload)==[]
+    issue=dict(status=2,actual_vs=sample['vs'],actual_ps=sample['ps'],b0_payload_status='available',b0_range_known=True,
+               target_identity=0x101,viewports=bytes(24))
+    eye_draw=dict(render_frame=99,vs=sample['vs'],ps=sample['ps'],kind=ord('X'),count=6,instances=1,
+                  start_instance=2,frame=12,ordinal=0,eye=0,issue=issue)
+    row['pool']=1
+    status,candidates=join_ui_record_record(payload,99,[eye_draw],{12:np.array([row])},
+                                             {12:{'raw':raw}},{12:stream},8)
+    assert status=='exact' and candidates[0]['record_index']==0
+    status,_=join_ui_record_record(payload,99,[eye_draw],{12:np.array([row])},
+                                   {12:{'raw':raw}},{12:np.array([],dtype=np.uint32)},8)
+    assert status=='unmatched'
+    row['pool']=0
+    status,_=join_ui_record_record(payload,99,[eye_draw],{12:np.array([row])},
+                                   {12:{'raw':raw}},{12:stream},8)
+    assert status=='unmatched'
+    row['pool']=1
+    second=dict(eye_draw,frame=13,ordinal=0,eye=1)
+    status,_=join_ui_record_record(payload,99,[eye_draw,second],{12:np.array([row]),13:np.array([row])},
+                                   {12:{'raw':raw},13:{'raw':raw}},{12:stream,13:stream},8)
+    assert status=='exact_many_draws'
+    duplicate=np.vstack((raw,raw));two_indices=np.array([0,0,1,0,0,0],dtype=np.uint32)
+    two_row=np.array([row])[0].copy();two_row['inst']=2;two_row['start']=1
+    two_candidate=dict(eye_draw,instances=2,start_instance=1)
+    status,_=join_ui_record_record(payload,99,[two_candidate],{12:np.array([two_row])},
+                                   {12:{'raw':duplicate}},{12:two_indices},8)
+    assert status=='exact_many_draws'
+    # Read the v14 candidate block, then join its issued state through the
+    # exact snapshot draw index. A same-family draw at index 0 must not inherit it.
+    import eye_draw_snapshot
+    b0=bytes(range(16))
+    candidate_blob=struct.pack('<9I',0,0,0,0,0,0,0,0,0xffffffff)
+    candidate_blob+=struct.pack('<48I',*([0]*48))+struct.pack('<48I',*([0]*48))
+    candidate_blob+=struct.pack('<I',1)+struct.pack('<3I',1,12,99)+struct.pack('<i3I',0,1,0,0)
+    candidate_blob+=struct.pack('<I4Q6I',2,sample['vs'],sample['ps'],0x44,0x101,512,512,26,0,1,1)
+    candidate_blob+=struct.pack('<I',0)+struct.pack('<2I',0,0)
+    candidate_blob+=struct.pack('<2I',16,16)+b0
+    candidate_blob+=struct.pack('<I',0)+struct.pack('<I',0)+struct.pack('<I',0)
+    candidate_stream=__import__('io').BytesIO(candidate_blob)
+    def candidate_take(n):
+        value=candidate_stream.read(n)
+        if len(value)!=n:raise ValueError('Truncated draw snapshot')
+        return value
+    def candidate_unpack(fmt):return struct.unpack(fmt,candidate_take(struct.calcsize(fmt)))
+    parsed=eye_draw_snapshot.read_candidates(candidate_unpack,candidate_take,
+        [dict(frame=12,vs=sample['vs'],ps=sample['ps']),dict(frame=12,vs=sample['vs'],ps=sample['ps'])],[],14)
+    eye={'draws':[dict(render_frame=99,vs=sample['vs'],ps=sample['ps'],kind=ord('X'),count=6,instances=1,
+                       start_instance=2,frame=12,ordinal=0,eye=0),
+                  dict(render_frame=99,vs=sample['vs'],ps=sample['ps'],kind=ord('X'),count=6,instances=1,
+                       start_instance=2,frame=12,ordinal=0,eye=0)],'candidates':parsed}
+    integrated=attach_candidate_issues(eye)
+    assert integrated[0]['issue'] is None and integrated[1]['issue']['b0']==b0
+    # Select only index 1's matching record by requiring index 0's frame to differ.
+    integrated[0]['frame']=13
+    status,joined=join_ui_record_record(payload,99,integrated,{12:np.array([row])},
+                                        {12:{'raw':raw}},{12:stream},8)
+    assert status=='exact' and joined[0]['frame']==12 and joined[0]['record_index']==0
+    parsed_frame=dict(parsed['frames'][0],draw=0)
+    parsed['frames']=[parsed_frame]
+    shifted=attach_candidate_issues(eye)
+    assert shifted[0]['issue'] is not None and shifted[1]['issue'] is None
     def write(name, ver, rows):
         p = os.path.join(tmp, name)
         with open(p, 'wb') as f:
@@ -227,11 +399,15 @@ def main():
     ap.add_argument('--pool-vs', help='a file of vertex shader hashes (hex, one a line) that read t33: the pool draws. Without it the '
                                      'ledger flag decides, which only says t33 HELD the pool at the draw -- true of every draw after a '
                                      'pool draw, the game never unbinding it (the run of 2026-09-10 05:37)')
+    ap.add_argument('--weapon-ui-writers', help='record-writer JSON from the same eye run; requires --eye-drawstate')
+    ap.add_argument('--eye-drawstate', help='candidates_<stamp>.eyemesh.bin from the same run; required with --weapon-ui-writers')
     ap.add_argument('--self-test', action='store_true', help='write synthetic version 1 and 2 fixtures to a temp '
                                                            'directory and check the parser against them')
     a = ap.parse_args()
     if a.self_test:
         return self_test()
+    if bool(a.weapon_ui_writers) != bool(a.eye_drawstate):
+        ap.error('--weapon-ui-writers and --eye-drawstate must be supplied together')
     if not a.dir or not a.stamp:
         ap.error('dir and stamp are required (or --self-test)')
     readers = None
@@ -273,6 +449,13 @@ def main():
             for ri in idx:
                 if ri < 2048: out.setdefault(int(ri), []).append(int(r['vs']))
         return out
+
+    if a.weapon_ui_writers:
+        joined=join_weapon_ui_records(a.weapon_ui_writers,a.eye_drawstate,draws,pools,insts,instStride)
+        print(f"weapon UI record→eye draw joins: {len(joined)} records")
+        for item in joined:
+            print("  writer=%s frame=%s ordinal=%s instance=%s status=%s candidates=%s" % (
+                item['writer_id'],item['frame'],item['ordinal'],item['instance'],item['status'],item['candidates']))
 
     seq = [f for k, f in cropFrames]
     seq = sorted(set(seq))

@@ -37,3 +37,7 @@ reviews/
 
 # Per-build scratch under .agents/. Other agent material there stays committed.
 .agents/build-*/
+
+# The Linux toolchain's Microsoft binaries (VS 2022 Build Tools licence: never
+# shared), Wine prefix and SDKs: tools/linux_toolchain.py puts them here.
+.toolchains/
