@@ -56,9 +56,9 @@
   C"); applicationMs as a frame-fit signal, it omits the post-submit
   phase ("Shadow flight 1").
 
-* **Next (2026-10-27, last entry):** no incremental pool upload (0.23
-  ms). AA on adds ~1.8 ms of draw hooks, ~1.4 unattributed: the step
-  clock is BUILT, NOT FLOWN; fly the same pad leg, AA on/off.
+* **Next (2026-10-27, last entry):** step clock FLOWN: AA on's +1.65 ms
+  is spread over per-draw classifiers (ui-depth 0.42, engine-vel 0.32).
+  Next: count binding repeats between draws before a generation cache.
 
 ## Frame budget philosophy
 
@@ -3543,3 +3543,61 @@ What to read:
   increment.
 - The D/I/N against X split says whether it is in the X thunk, which
   has no AA-off fast path, or in the fast-path thunks.
+
+**Step clock flown (2026-10-27, Steam log `edvr_gfx_20261027_101918.log`,
+build af9c429b; same rig: Pimax Crystal Super on Pimax OpenXR, RTX 5090,
+DLSS performance).** Loaded in docked at Cranfield Nutrition Biosphere
+at 10:21:55. F7 turned AA off at 10:23:15 and back on at 10:24:46.
+- Clean windows: AA on at frames 16200, 18000 and 25200; AA off at
+  19800 and 21600.
+- Frame rate: 62 fps with AA on, 48 with AA off.
+- Draws: 34.5k hooked draws a frame. Of those, 33k are X, about 1.4k
+  are D and about 100 are N; 16.8k go into the eyes. Every step ran the
+  same number of times in both modes.
+- Clock floor: about 16 ns a mark, at 23.8 marks per clocked draw.
+  That is a large amount taken off each absolute figure, but it
+  cancels in the on/off difference, which is the quantity read here.
+
+EDVR's step sum is 3.73 ms a frame with AA on (mean of the three
+windows) and 2.07 with AA off: an increment of 1.65 ms. The old line
+reads 3.9-4.2 against 2.6. It sits 0.4-0.6 ms above the step sum
+because it does not take off its own clock reads. The increment is
+nearly all in the X draws (3.28-3.82 ms against 1.84-1.95) and is
+spread across several per-draw classifiers. No one step holds it:
+
+| Step | AA on | AA off | Increment | Calls a frame | Per call |
+|---|---|---|---|---|---|
+| v:ui-depth | 0.470 | 0.046 | +0.42 | 16.8k (eye) | ~25 ns |
+| engine-vel | 0.378 | 0.061 | +0.32 | 34.5k | ~9 ns |
+| f:ui-layer | 0.281 | 0.084 | +0.20 | 34.5k | ~6 ns |
+| v:census | 0.163 | 0.028 | +0.14 | 16.8k (eye) | ~8 ns |
+| p:screen | 0.158 | 0.035 | +0.12 | 33k | ~4 ns |
+| f:layer-end | 0.170 | 0.083 | +0.09 | 34.5k | ~3 ns |
+| v:eye-test | 0.150 | 0.076 | +0.07 | 34.5k | ~2 ns |
+| f:before | 0.178 | 0.108 | +0.07 | 34.5k | ~2 ns |
+| the other 16 steps | | | +0.22 together | | |
+
+- **v:ui-depth.** The largest block is the two ui_depth classifiers,
+  which run on every eye draw with AA on. uiDepthOnEyeDraw resets a
+  dozen globals, reads the depth view, tests four SRV slots against the
+  learned surfaces and hashes the bound VS. uiDepthHologramOnEyeDraw
+  hashes the VS and walks two family lists. For an ordinary scene draw
+  both answer "no", draw after draw.
+- **engine-vel** is the generation-compare gate and the skin-draw note
+  on all 34.5k draws. The engine motion CPU line's "draw side" counts
+  only the 330-400 calls that pass the gate, which is why it read 0.13
+  ms.
+- **f:ui-layer, v:census and p:screen** are the same pattern: a
+  predicate chain asked on every draw, each a few ns.
+
+ruled out: one hot step in the AA-on draw path, because the 1.65 ms
+increment is spread over eight steps at 2-25 ns a call, none above 0.42
+ms (flown 2026-10-27).
+
+Next lever, not yet evidenced: a per-draw early-out keyed on binding
+generations. Most of these classifiers read the same few bindings (VS,
+PS, PS SRVs 0-3, RTV0, DSV0), and Elite's 33k X draws a frame may
+repeat them between consecutive draws. If they do, one generation
+compare can stand for the chain. The repeat rate is the evidence
+needed first: per eye draw, count whether any of those slots' bind
+generations moved since the previous eye draw.
