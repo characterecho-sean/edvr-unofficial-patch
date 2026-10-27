@@ -4769,9 +4769,12 @@ int wmain(int argc, wchar_t** argv) {
                     const auto invalidMatrix = nf::adsRifleOpticOrigin(true, true, rifleP14, badJoint, rifle52, rifleRoot);
                     rifle52[12] += 0.7f;
                     const bool wideSpanStillAccepted = nf::adsRifleOpticOrigin(true, true, rifleP14, rifle51, rifle52, rifleRoot).applied;
+                    const bool frames = nf::adsRifleOpticFramesClose(100, 100) && nf::adsRifleOpticFramesClose(100, 101) &&
+                                        nf::adsRifleOpticFramesClose(101, 100) && !nf::adsRifleOpticFramesClose(100, 103) &&
+                                        !nf::adsRifleOpticFramesClose(0, 1) && !nf::adsRifleOpticFramesClose(5, ~0u);
                     check(rifleNameAndSerial && capturedAnchorMatches && movedAnchor.applied && nf::ikLen(covarianceError) < 2e-5 &&
                               std::fabs(nf::ikDot(originToTarget, rifleForward) - k) < 1e-6 && staleFrame.refusal == nf::kAdsRifleAnchorFrame &&
-                              wrongItem.refusal == nf::kAdsRifleAnchorItem && invalidMatrix.refusal == nf::kAdsRifleAnchorMatrix && wideSpanStillAccepted,
+                              wrongItem.refusal == nf::kAdsRifleAnchorItem && invalidMatrix.refusal == nf::kAdsRifleAnchorMatrix && wideSpanStillAccepted && frames,
                           "F79: coherent laser-rifle identity applies the captured joint-51 anchor immediately, preserves sight depth, is rigid-transform covariant, and fails closed on stale frames or invalid matrices without a narrow span gate");
 
                     const float pistol51[16] = {0.999991655f, 0.00251052529f, 0.00333291292f, 0, -0.00246676058f, 0.999912620f, -0.0130088180f, 0,

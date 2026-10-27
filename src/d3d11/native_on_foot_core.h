@@ -3804,6 +3804,14 @@ inline bool adsRifleOpticItemMatches(const char* name) noexcept { return name &&
 inline bool adsRifleOpticItemSnapshotMatches(bool readOk, uint32_t snapshotSerial, uint32_t currentSerial, const char* name) noexcept {
     return readOk && snapshotSerial == currentSerial && adsRifleOpticItemMatches(name);
 }
+// The joint snapshot and the root are both render-frame stamps, and both reads are already inside the 100 ms freshness window.
+// The 18:34 laser ADS flight (edvr_gfx_20261026_182525) refused every sample because the two stamps were not equal, so the lock used the
+// rifle root. The snap then left the sight 2 deg to the left of the head. A one-frame gap is the same pose.
+inline bool adsRifleOpticFramesClose(uint32_t jointFrame, uint32_t rootFrame) noexcept {
+    if (!jointFrame || jointFrame == ~uint32_t(0) || rootFrame == ~uint32_t(0)) return false;
+    const uint32_t gap = jointFrame > rootFrame ? jointFrame - rootFrame : rootFrame - jointFrame;
+    return gap <= 1u;
+}
 enum AdsRifleAnchorRefusal : uint8_t { kAdsRifleAnchorNone = 0, kAdsRifleAnchorItem, kAdsRifleAnchorFrame, kAdsRifleAnchorMatrix, kAdsRifleAnchorGeometry };
 struct AdsRifleAnchorResult {
     bool applied = false;

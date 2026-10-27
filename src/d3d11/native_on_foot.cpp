@@ -10939,7 +10939,7 @@ void adsSightTick(uint64_t now, double dt, const EyeSample& s) noexcept {
             const bool opticItemSnapshot = opticItemRead(&opticItemSerial, opticItemName);
             const uint32_t currentItemSerial = g_heldItemSerial.load(std::memory_order_acquire);
             const bool rifleItem = nofoot::adsRifleOpticItemSnapshotMatches(opticItemSnapshot, opticItemSerial, currentItemSerial, opticItemName);
-            const bool sameRenderFrame = fpMeta.frame != 0 && fpMeta.frame != ~uint32_t(0) && fpMeta.frame == G.rootReadRenderFrame;
+            const bool sameRenderFrame = nofoot::adsRifleOpticFramesClose(fpMeta.frame, G.rootReadRenderFrame);
             const nofoot::AdsRifleAnchorResult rifleAnchor = nofoot::adsRifleOpticOrigin(rifleItem, sameRenderFrame, pm, m[nofoot::kIkFpSlotAttach[1]],
                                                                                          m[nofoot::kIkFpSlotAttach[0]], G.froot);
             if (rifleAnchor.applied) {
@@ -15671,8 +15671,9 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
         // the frame thread holds the raise where the last settled stance put it.
         {
             nofoot::f95::SettleIn si;
-            // F98c: not while aiming down sights (F73's detach): the sight lock owns the eye there, and the stance's raise is released with the detach, so a
-            // target taken in the sights would lift the view after the release
+            // F98c: not while aiming down sights (F73's detach): the sight lock owns the eye there. The stance's raise is published as zero with the detach,
+            // so it leaves the view. Publishing nothing held the last stance raise (pistol ADS, 18:50: +11.5 cm, stale every tick, the pistol low). A target
+            // taken in the sights would lift the view after the release, so the sights are not stored.
             // F107: nor from a camera away from the commander (the carrier management screen's settled at 174 m up and published -174 m, clamped to -50 cm)
             si.valid = pc.f94TargetOk && std::isfinite(pc.eyeYSelected) && !(pc.detachW > 0.0) && refusal != kPinRefCameraAway;
             // F109: nor with the aim pitched (look to aim turns the game's aim with the head: the animated neck bends with the aim's pitch, which is not the stance)
@@ -15686,7 +15687,10 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
             si.camY = pc.eyeYSelected;
             const nofoot::f95::SettleOut so = g_f95Settle.step(si);
             pc.f95Why = so.why;
-            if (so.settled) {
+            if (pc.detachW > 0.0 && refusal != kPinRefCameraAway) {
+                pc.f95Target = 0.0;
+                f94TargetPublish(0.0, now);
+            } else if (so.settled) {
                 // the stance's class: the pin's crouch weight against its standing calibration, else against the stored standing unarmed camera; neither, not known
                 namespace f94 = nofoot::f94;
                 int cls = f94::kClassUnknown;
