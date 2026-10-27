@@ -5014,39 +5014,6 @@ using DrawClock = drawstep::DrawClockT<DrawClockEnv>;
 static_assert(kPerfMonitorDrawTimeStride >= 2 && kPerfMonitorDrawTimeStride % 2 == 0,
               "the steps clock takes the draws half a stride after the whole clock's");
 
-// The binding-repeat instrument (bind_repeat.h; built 2026-10-27, a temporary instrument for the AA-on draw-hook increment, the same
-// docs entry). On a sampled frame every owner-context draw reads the key of the eight slots at the VR thunk's entry, before its
-// DrawClock is built (so it is outside the whole clock's span, and the game's bindings are certainly still in place), and the thunk
-// classifies the key against the previous draw's once beginPanelOverride has said whether the draw is an eye draw. The classification
-// is the thunks' bind-count step. The flat profile's thunks return before either, and an unsampled frame pays one branch.
-constexpr BindSlot kBindKeySlots[bindrepeat::kSlots] = {BindSlot::Vs,     BindSlot::Ps,     BindSlot::PsSrv0, BindSlot::PsSrv1,
-                                                        BindSlot::PsSrv2, BindSlot::PsSrv3, BindSlot::Rtv0,   BindSlot::Dsv0};
-struct BindShadowReader {
-    uint32_t gen(unsigned i) const { return bindingGeneration(kBindKeySlots[i]); }
-    uintptr_t ptr(unsigned i) const { return reinterpret_cast<uintptr_t>(bindingGet(kBindKeySlots[i])); }
-};
-bindrepeat::Tracker g_bindTracker;   // the owner context's draws only, one thread's; read and reset at the window edge (vScreenBindingRepeatLine)
-bindrepeat::Key     g_bindKey;       // the key of the draw in flight
-
-// The capture, on a sampled frame and for the owner context alone. Returns whether this draw has a key to classify.
-static bool bindKeyCaptureSampled(ID3D11DeviceContext* self) {
-    if (self != g_state->ownerCtx) return false;
-    bindrepeat::capture(g_bindKey, g_state->frameNo, BindShadowReader{});
-    return true;
-}
-inline bool bindKeyCapture(ID3D11DeviceContext* self) { return perfMonitorSampleDraws() && bindKeyCaptureSampled(self); }
-
-// The classification, right after the verdict: this draw's class against the previous owner draw and, for an eye draw (the render
-// target beginPanelOverride just resolved), against the previous eye draw; the tallies; and whether the answers repeated. The answer
-// tuple is what beginPanelOverride decided for this draw: the verdict and the three flags forwardWithVerdict's scope consumes.
-static void bindKeyClassify(DrawClock& clock, DrawVerdict v, char kind, uint32_t count, uint32_t instances, const DrawArgs& args) {
-    const bool eye = g_state->rtv0Eye;
-    const bindrepeat::Answer answer{static_cast<uint8_t>(v), t_uiDepthThisDraw, t_compositeThisDraw, t_holoDepthThisDraw};
-    const bindrepeat::Args drawArgs{kind, count, instances, args.start, args.base, args.startInstance};
-    const bindrepeat::Tracker::Result r = g_bindTracker.note(g_bindKey, eye, answer, drawArgs);
-    clock.setClass(r.any, eye ? r.eye : bindrepeat::kUnclassified, eye);
-}
-
 // The flat profile's draws never reach beginPanelOverride: its thunks take the flat branch first, and the census's per-draw record
 // lives there. So the flat branch records the draw itself, before FlatRuntimeDrawScope substitutes any binding. Every flat draw is
 // recorded as an offscreen (DCO) line: flat has no eye textures to count, and the census arms its offscreen record for flat.
@@ -5142,7 +5109,6 @@ void STDMETHODCALLTYPE hookedDraw(ID3D11DeviceContext* self, UINT count, UINT st
         return;
     }
     if (g_vrWorldInternal) { g_state->realDraw(self, count, start); return; }   // the world route's own draw (vr_world_route.h)
-    const bool bindKey = bindKeyCapture(self);   // the binding-repeat key, before the clock: a sampled frame's owner draw only (bind_repeat.h)
     gpuFrameCommandIfLive(self);
     // F45 (TEMPORARY instrument): a non-instanced draw reads instance stream entry 0 (the marker probe's record match); staging copies only.
     if (nativeOnFootMarkerProbeLive() && self == g_state->ownerCtx) nativeOnFootMarkerTee(self, 1, 0, 'D', count, start, 0);
@@ -5157,8 +5123,6 @@ void STDMETHODCALLTYPE hookedDraw(ID3D11DeviceContext* self, UINT count, UINT st
     clock.mark(drawstep::kPre);   // the step clock's marks (draw_step_clock.h): a branch on a draw that is not clocked in steps mode
     const DrawVerdict v = beginPanelOverride(self, 'D', count, 1, args);
     clock.mark(drawstep::kVRest);
-    if (bindKey) bindKeyClassify(clock, v, 'D', count, 1, args);
-    clock.mark(drawstep::kBindCount);
     const bool fast = drawPathFast(v);   // AA off, unclaimed, no subscriber: no verdict scope, no engine velocity (draw_fast_path.h)
     if (!fast && v == DrawVerdict::kNone && self == g_state->ownerCtx) {
         engineVelocityBeforeDraw(self, g_state->rtv0Eye);
@@ -5233,7 +5197,6 @@ void STDMETHODCALLTYPE hookedDrawIndexed(ID3D11DeviceContext* self, UINT count,
         return;
     }
     if (g_vrWorldInternal) { g_state->realDrawIndexed(self, count, startIndex, baseVertex); return; }
-    const bool bindKey = bindKeyCapture(self);
     gpuFrameCommandIfLive(self);
     // F45 (TEMPORARY instrument): a non-instanced draw reads instance stream entry 0 (the marker probe's record match); staging copies only.
     if (nativeOnFootMarkerProbeLive() && self == g_state->ownerCtx) nativeOnFootMarkerTee(self, 1, 0, 'I', count, startIndex, baseVertex);
@@ -5249,8 +5212,6 @@ void STDMETHODCALLTYPE hookedDrawIndexed(ID3D11DeviceContext* self, UINT count,
     clock.mark(drawstep::kPre);
     const DrawVerdict v = beginPanelOverride(self, 'I', count, 1, args);
     clock.mark(drawstep::kVRest);
-    if (bindKey) bindKeyClassify(clock, v, 'I', count, 1, args);
-    clock.mark(drawstep::kBindCount);
     const bool fast = drawPathFast(v);   // draw_fast_path.h
     if (!fast && v == DrawVerdict::kNone && self == g_state->ownerCtx) {
         engineVelocityBeforeDraw(self, g_state->rtv0Eye);
@@ -5323,7 +5284,6 @@ void STDMETHODCALLTYPE hookedDrawInstanced(ID3D11DeviceContext* self, UINT perIn
         return;
     }
     if (g_vrWorldInternal) { g_state->realDrawInstanced(self, perInstance, instances, startVertex, startInstance); return; }
-    const bool bindKey = bindKeyCapture(self);
     gpuFrameCommandIfLive(self);
     // F44 (TEMPORARY instrument): before the verdict, so the bindings read are the game's; copies into EDVR's staging only.
     if (nativeOnFootMarkerProbeLive() && self == g_state->ownerCtx) nativeOnFootMarkerTee(self, instances, startInstance, 'N', perInstance, startVertex, 0);
@@ -5339,8 +5299,6 @@ void STDMETHODCALLTYPE hookedDrawInstanced(ID3D11DeviceContext* self, UINT perIn
     clock.mark(drawstep::kPre);
     const DrawVerdict v = beginPanelOverride(self, 'N', perInstance, instances, args);
     clock.mark(drawstep::kVRest);
-    if (bindKey) bindKeyClassify(clock, v, 'N', perInstance, instances, args);
-    clock.mark(drawstep::kBindCount);
     const bool fast = drawPathFast(v);   // draw_fast_path.h
     if (!fast && v == DrawVerdict::kNone && self == g_state->ownerCtx) {
         engineVelocityBeforeDraw(self, g_state->rtv0Eye);
@@ -5409,7 +5367,6 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
         return;
     }
     if (g_vrWorldInternal) { g_state->realDrawIndexedInstanced(self, perInstance, instances, startIndex, baseVertex, startInstance); return; }
-    const bool bindKey = bindKeyCapture(self);
     gpuFrameCommandIfLive(self);
     // F44 (TEMPORARY instrument): before the verdict, so the bindings read are the game's; copies into EDVR's staging only.
     if (nativeOnFootMarkerProbeLive() && self == g_state->ownerCtx) nativeOnFootMarkerTee(self, instances, startInstance, 'X', perInstance, startIndex, baseVertex);
@@ -5437,8 +5394,6 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
     clock.mark(drawstep::kPre);
     const DrawVerdict v = beginPanelOverride(self, 'X', perInstance, instances, args);
     clock.mark(drawstep::kVRest);
-    if (bindKey) bindKeyClassify(clock, v, 'X', perInstance, instances, args);
-    clock.mark(drawstep::kBindCount);
     // F18 (TEMPORARY, fix.native_on_foot_body_cull; native_on_foot.h): the local player's third-person torso drawn with the game's
     // rasterizer state cloned at another CullMode, and the game's put back after forwardWithVerdict. A wrapper, not a DrawVerdict: a verdict
     // would take the draw off engine-record velocity's verdict-free path just below and change what this test measures. Matched here, right
@@ -6110,12 +6065,6 @@ uint32_t vScreenEyeDrawsThisFrame() {
 }
 
 bool vScreenAaOffForDraws() { return g_aaOffDraw.load(std::memory_order_relaxed); }
-
-size_t vScreenBindingRepeatLine(char* out, size_t cap, uint32_t endFrame, uint32_t sampledFrames) {
-    const size_t n = bindrepeat::formatBindingsLine(out, cap, g_bindTracker.tally, endFrame, sampledFrames);
-    g_bindTracker.tally.reset();
-    return n;
-}
 
 // The one refresh. vScreenRefreshConfig runs it behind the reload's gate; vScreenForceRefreshConfig runs it with the gate taken away.
 // The configure calls stay in this one body: the reload gate is the only difference between the two.

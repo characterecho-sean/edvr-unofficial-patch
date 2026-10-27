@@ -17,7 +17,6 @@
 // in 29 different places and its shaders are told about it separately.
 #pragma once
 
-#include <cstddef>
 #include <cstdint>
 
 #include "../common/vtable_hook.h"  // HookMode
@@ -123,10 +122,6 @@ uint32_t vScreenEyeDrawsThisFrame();
 // VR's temporal anti-aliasing reads off, as the draw path last took it from the config (the AA-off fast path,
 // draw_fast_path.h). For the draw hook CPU line only.
 bool vScreenAaOffForDraws();
-// Built 2026-10-27, a temporary instrument for the AA-on draw-hook increment (bind_repeat.h): writes the "draw bindings, sampled
-// frames" line for the window's binding-repeat tallies into `out` and zeroes the tallies. Called at the 1800-frame edge that prints
-// the "draw hook CPU" lines; returns the length.
-size_t vScreenBindingRepeatLine(char* out, size_t cap, uint32_t endFrame, uint32_t sampledFrames);
 
 // The context's OMSetRenderTargets through the ORIGINAL entry, past the
 // hook and the binding shadow: for a fix that rebinds around one draw and

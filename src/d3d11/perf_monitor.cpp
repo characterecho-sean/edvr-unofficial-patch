@@ -1223,7 +1223,7 @@ void perfMonitorFrame(ID3D11Device* dev) {
             vScreenAaOffForDraws() ? "off" : "on", vScreenEyeDrawsThisFrame());
         // Built 2026-10-27, a temporary instrument for the AA-on draw-hook increment (docs\engine-render-performance-2026-09-19.md's
         // 2026-10-27 entry): the same window, split by step. The clock floor is measured here, as the window closes, in the CPU state
-        // it just ran in; the report is four lines because one holds about 1170 characters.
+        // it just ran in; the line is two lines because one holds about 1170 characters.
         {
             drawstep::FormatInfo info;
             info.endFrame = s.frameNo;
@@ -1236,12 +1236,6 @@ void perfMonitorFrame(ID3D11Device* dev) {
             drawstep::formatStepsLine(stepLine, sizeof(stepLine), g_drawSteps, info);
             Log::get().note("%s", stepLine);
             drawstep::formatCallsLine(stepLine, sizeof(stepLine), g_drawSteps, info);
-            Log::get().note("%s", stepLine);
-            // The same window by how each draw's bindings stood against the previous draw's (bind_repeat.h), then the binding tallies
-            // themselves, which vscreen owns and zeroes as it formats them.
-            drawstep::formatClassLine(stepLine, sizeof(stepLine), g_drawSteps, info);
-            Log::get().note("%s", stepLine);
-            vScreenBindingRepeatLine(stepLine, sizeof(stepLine), s.frameNo, s.drawWindowSamples);
             Log::get().note("%s", stepLine);
             g_drawSteps.reset();
         }

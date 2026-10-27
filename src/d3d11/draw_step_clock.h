@@ -32,8 +32,6 @@
 //                    v:fixes       the eye recognisers: night vision, RemLok, holo, target indicator, scrim, backdrop, FSS panel, the
 //                                  glare train, the curved screen
 //                    v:rest        everything else in the call (the panel distance fix's tail, a verdict's early return)
-//   bind-count     (added 2026-10-27, the binding-repeat instrument, bind_repeat.h) classifying the draw's bindings against the previous
-//                  draw's and tallying them: the instrument's own cost, in its own step so it can be read off the line
 //   engine-vel     the owner's pre-draw work: the body-cull begin, engineVelocityBeforeDraw, engineVelocityNoteSkinDraw
 //   probes         the pixel probe's before-call, the VR world route's detector, the glare clamp
 //   f:*            forwardWithVerdict up to the game's draw: f:scopes (the entry scopes: the blend probe, the effect capture, the
@@ -65,15 +63,7 @@
 // 64 that is clocked by step pays one plain load per sub-mark and no thread-local read. That includes the whole-clocked draws of
 // a sampled frame, so the sub-marks add next to nothing to the "draw hook CPU" line's own figure.
 //
-// THE STEPS BY BINDING CLASS (added 2026-10-27). A cache keyed on the bindings could skip only the steps that run on a draw whose
-// bindings repeat, so each steps-mode draw also records its two classes against the previous draw (bind_repeat.h: repeat, rebound,
-// changed, first) and the window adds each step's ticks under one of them: the class against the previous owner draw for every step
-// but the eye-only ones (kEyeOnlySteps: they run on eye draws alone, and the question for them is whether this eye draw's bindings
-// repeat the previous EYE draw's), and one bucket past the classes for a draw with none (not the owner context's), counted.
-//
 // Header only and pure (no Windows, no Direct3D), so tools\aa_off_test drives every function here with a fake clock.
-
-#include "bind_repeat.h"
 
 #include <cstdarg>
 #include <cstddef>
@@ -96,7 +86,6 @@ enum Step : uint8_t {
     kVCensus,        // v:census
     kVFixes,         // v:fixes
     kVRest,          // v:rest
-    kBindCount,      // bind-count
     kEngineVelocity, // engine-vel
     kProbes,         // probes
     kFwScopes,       // f:scopes
@@ -116,27 +105,14 @@ enum Step : uint8_t {
     kStepCount
 };
 
-// The names the log line prints. Short because all of them share a line the log truncates near 1170 characters.
+// The names the log line prints. Short because 26 of them share a line the log truncates near 1170 characters.
 inline const char* stepName(unsigned step) {
     static const char* const kNames[kStepCount] = {
         "pre", "v:hud/fss", "v:context", "v:particles", "v:eye-test", "v:offscreen", "v:ui-depth", "v:census", "v:fixes", "v:rest",
-        "bind-count", "engine-vel", "probes", "f:scopes", "f:ui-layer", "f:verdict-begin", "f:before", "GAME", "reissue", "weapon",
+        "engine-vel", "probes", "f:scopes", "f:ui-layer", "f:verdict-begin", "f:before", "GAME", "reissue", "weapon",
         "p:rigid", "p:screen", "p:rest", "f:layer-end", "f:ui-depth", "f:after", "tail"};
     return step < kStepCount ? kNames[step] : "?";
 }
-
-// The steps that only an eye draw runs: the eye branch of beginPanelOverride past the eye test. Their time is split by the class against
-// the previous EYE draw; every other step's by the class against the previous owner draw of any kind.
-constexpr Step kEyeOnlySteps[] = {kVUiDepth, kVCensus, kVFixes};
-inline bool eyeOnlyStep(unsigned step) {
-    for (Step s : kEyeOnlySteps)
-        if (s == step) return true;
-    return false;
-}
-
-// The steps the class split reports (the ones the flight named as spread over per-draw classifiers), in the order printed.
-constexpr Step kSplitSteps[] = {kVEyeTest, kVUiDepth, kVCensus, kEngineVelocity, kFwUiLayer, kFwBefore, kPostScreen, kFwLayerEnd};
-constexpr unsigned kSplitCount = sizeof(kSplitSteps) / sizeof(kSplitSteps[0]);
 
 // ---- the draw kinds ---------------------------------------------------------------
 constexpr unsigned kKinds = 4;   // D, I, N, X: the four VR draw thunks
@@ -166,19 +142,12 @@ inline Mode modeFor(uint32_t ordinal, uint32_t stride) {
 
 // ---- one clocked draw's accumulation -------------------------------------------------------
 // The members are value-initialised so a Run is constant-initialised as a thread_local (no guard on each thread-local read).
-// The draw's binding classes ride with it: anyClass against the previous owner draw, eyeClass against the previous eye draw (an eye draw
-// only), both kUnclassified until the thunk has classified the draw (it never does for a draw that is not the owner context's).
 struct StepAccum {
     int64_t  ticks[kStepCount] = {};
     uint32_t marks[kStepCount] = {};
-    uint8_t  anyClass = bindrepeat::kUnclassified;
-    uint8_t  eyeClass = bindrepeat::kUnclassified;
-    bool     eye = false;
     void clear() {
         std::memset(ticks, 0, sizeof(ticks));
         std::memset(marks, 0, sizeof(marks));
-        anyClass = eyeClass = bindrepeat::kUnclassified;
-        eye = false;
     }
 };
 
@@ -281,13 +250,6 @@ public:
     void markForward() {
         if (mode_ == Mode::kSteps) markRun(*run_, forwarded_ ? kFwAfter : kFwBefore, EnvNow{});
     }
-    // The draw's binding classes (bind_repeat.h), known once its verdict is: kept with the run so the window can split its steps by them.
-    void setClass(uint8_t anyClass, uint8_t eyeClass, bool eye) {
-        if (mode_ != Mode::kSteps) return;
-        run_->acc.anyClass = anyClass;
-        run_->acc.eyeClass = eyeClass;
-        run_->acc.eye = eye;
-    }
 
     ~DrawClockT() {
         if (on) {
@@ -319,45 +281,18 @@ struct Window {
     uint64_t kindDraws[kKinds];
     int64_t  kindTicks[kKinds];        // EDVR's ticks by kind: every step but the game's draw
     uint64_t kindMarks[kKinds];        // ...and the marks that closed them (their floor comes off)
-    // The same steps by binding class (bind_repeat.h), bucket kUnclassified last: each step's ticks and marks under the class of the
-    // draw against the previous owner draw, or against the previous eye draw for an eye-only step (eyeOnlyStep).
-    int64_t  clsTicks[bindrepeat::kBuckets][kStepCount];
-    uint64_t clsMarks[bindrepeat::kBuckets][kStepCount];
-    uint64_t clsDraws[bindrepeat::kBuckets];        // steps-mode draws by class against the previous owner draw
-    int64_t  clsEdvrTicks[bindrepeat::kBuckets];    // EDVR's ticks of those draws (every step but the game's)
-    uint64_t clsEdvrMarks[bindrepeat::kBuckets];
-    uint64_t eyeClocked;                            // steps-mode draws that were eye draws
-    uint64_t eyeClsDraws[bindrepeat::kBuckets];     // ...by class against the previous eye draw
-    int64_t  eyeClsEdvrTicks[bindrepeat::kBuckets];
-    uint64_t eyeClsEdvrMarks[bindrepeat::kBuckets];
 
     void reset() { std::memset(this, 0, sizeof(*this)); }
     void add(char kind, const StepAccum& a) {
         const unsigned k = kindIndex(kind);
-        const unsigned any = a.anyClass < bindrepeat::kBuckets ? a.anyClass : bindrepeat::kUnclassified;
-        const unsigned eyeCls = a.eyeClass < bindrepeat::kBuckets ? a.eyeClass : bindrepeat::kUnclassified;
         for (unsigned i = 0; i < kStepCount; ++i) {
             ticks[i] += a.ticks[i];
             marks[i] += a.marks[i];
-            const unsigned b = eyeOnlyStep(i) ? eyeCls : any;
-            clsTicks[b][i] += a.ticks[i];
-            clsMarks[b][i] += a.marks[i];
         }
         ++clocked;
         ++kindDraws[k];
-        const int64_t edvrT = edvrTicks(a);
-        const uint64_t edvrM = edvrMarks(a);
-        kindTicks[k] += edvrT;
-        kindMarks[k] += edvrM;
-        ++clsDraws[any];
-        clsEdvrTicks[any] += edvrT;
-        clsEdvrMarks[any] += edvrM;
-        if (a.eye) {
-            ++eyeClocked;
-            ++eyeClsDraws[eyeCls];
-            eyeClsEdvrTicks[eyeCls] += edvrT;
-            eyeClsEdvrMarks[eyeCls] += edvrM;
-        }
+        kindTicks[k] += edvrTicks(a);
+        kindMarks[k] += edvrMarks(a);
     }
 };
 
@@ -512,91 +447,6 @@ inline size_t formatCallsLine(char* out, size_t cap, const Window& w, const Form
     }
     o.add("Names: v: is the verdict (beginPanelOverride), f: the forward scope around the game's draw, p: the work after the "
           "game's draw (X draws only); GAME is the game's own draw.");
-    return o.len;
-}
-
-// ---- the steps by binding class -----------------------------------------------------------------
-// The class split's figures, per sampled frame, scaled and net of the floor exactly as Totals is. A cell with no marks (a draw count of 0
-// for the totals) is not seen: printed "-".
-struct ClassTotals {
-    bool   seen[kSplitCount][bindrepeat::kBuckets];
-    double netMs[kSplitCount][bindrepeat::kBuckets];
-    bool   drawsSeen[bindrepeat::kBuckets];       // any-draw class: steps-mode draws in it
-    double edvrMs[bindrepeat::kBuckets];          // EDVR's whole draws by that class
-    double drawsPerFrame[bindrepeat::kBuckets];
-    bool   eyeSeen[bindrepeat::kBuckets];         // eye class: steps-mode eye draws in it
-    double eyeEdvrMs[bindrepeat::kBuckets];
-    double eyeDrawsPerFrame[bindrepeat::kBuckets];
-};
-
-inline bool summariseClasses(const Window& w, const FormatInfo& in, ClassTotals* out) {
-    std::memset(out, 0, sizeof(*out));
-    if (in.sampledFrames == 0 || in.ticksPerSecond <= 0 || in.stride == 0) return false;
-    const double freq = static_cast<double>(in.ticksPerSecond);
-    const double floorTicks = in.floorNs * freq / 1e9;
-    const double toMs = static_cast<double>(in.stride) * 1000.0 / freq / static_cast<double>(in.sampledFrames);
-    const double toPerFrame = static_cast<double>(in.stride) / static_cast<double>(in.sampledFrames);
-    for (unsigned s = 0; s < kSplitCount; ++s) {
-        for (unsigned c = 0; c < bindrepeat::kBuckets; ++c) {
-            const unsigned step = kSplitSteps[s];
-            out->seen[s][c] = w.clsMarks[c][step] != 0;
-            if (out->seen[s][c]) out->netMs[s][c] = netTicks(w.clsTicks[c][step], w.clsMarks[c][step], floorTicks) * toMs;
-        }
-    }
-    for (unsigned c = 0; c < bindrepeat::kBuckets; ++c) {
-        out->drawsSeen[c] = w.clsDraws[c] != 0;
-        if (out->drawsSeen[c]) {
-            out->edvrMs[c] = netTicks(w.clsEdvrTicks[c], w.clsEdvrMarks[c], floorTicks) * toMs;
-            out->drawsPerFrame[c] = static_cast<double>(w.clsDraws[c]) * toPerFrame;
-        }
-        out->eyeSeen[c] = w.eyeClsDraws[c] != 0;
-        if (out->eyeSeen[c]) {
-            out->eyeEdvrMs[c] = netTicks(w.eyeClsEdvrTicks[c], w.eyeClsEdvrMarks[c], floorTicks) * toMs;
-            out->eyeDrawsPerFrame[c] = static_cast<double>(w.eyeClsDraws[c]) * toPerFrame;
-        }
-    }
-    return true;
-}
-
-namespace textutil {
-// "a/b/c": `n` figures, "-" for one not seen. `decimals` 3 for ms, 0 for a draw count.
-inline void slashList(textutil::Out& o, const bool* seen, const double* v, unsigned n, int decimals) {
-    for (unsigned i = 0; i < n; ++i) {
-        if (seen[i]) {
-            const double c = decimals ? clampMs(v[i]) : clampCount(v[i]);
-            o.add(decimals ? "%.3f" : "%.0f", c);
-        } else {
-            o.add("-");
-        }
-        if (i + 1 < n) o.add("/");
-    }
-}
-}  // namespace textutil
-
-// The third line: the eight steps the flight named, each by the class of the draw's bindings against the previous draw's, and EDVR's whole
-// draw by class. Under about 1150 characters at its worst.
-inline size_t formatClassLine(char* out, size_t cap, const Window& w, const FormatInfo& in) {
-    textutil::Out o(out, cap);
-    ClassTotals t;
-    summariseClasses(w, in, &t);   // with no sampled frame every cell is unseen, so every figure prints "-"
-    o.add("draw hook CPU by step, by binding repeat: window ending %u; %u sampled frames. ms per frame, scaled by %u, net of the floor, "
-          "split by how the draw's bindings stood against the previous draw's, repeat / rebound / changed / first (- none). "
-          "v:ui-depth and v:census run on eye draws only and take the previous eye draw, the other steps the previous owner draw: ",
-          in.endFrame, in.sampledFrames, in.stride);
-    for (unsigned s = 0; s < kSplitCount; ++s) {
-        o.add("%s ", stepName(kSplitSteps[s]));
-        textutil::slashList(o, t.seen[s], t.netMs[s], bindrepeat::kClassCount, 3);
-        o.add(", ");
-    }
-    o.add("EDVR total ms by that class, with unclassified (not the owner context's) last: ");
-    textutil::slashList(o, t.drawsSeen, t.edvrMs, bindrepeat::kBuckets, 3);
-    o.add("; draws a frame: ");
-    textutil::slashList(o, t.drawsSeen, t.drawsPerFrame, bindrepeat::kBuckets, 0);
-    o.add("; eye draws by the class against the previous eye draw, ms: ");
-    textutil::slashList(o, t.eyeSeen, t.eyeEdvrMs, bindrepeat::kClassCount, 3);
-    o.add(", draws a frame: ");
-    textutil::slashList(o, t.eyeSeen, t.eyeDrawsPerFrame, bindrepeat::kClassCount, 0);
-    o.add(".");
     return o.len;
 }
 
