@@ -5,8 +5,8 @@
 - **2026-10-17 pre-RC3 R1:** separate add-on save completions; failures retain
   session state and report uncertain persistence. Focused checks 131/0,
   mutation proof 42/42. Full build PASS, 170.6 s; dated entry below.
-
 - **Current code state (2026-10-08; dated notes in Status detail):**
+  - Visual page (2026-10-27, `menu visual`): VR's menu has one now, beside the flat panel's Visual tab; World scale (`fix.world_scale`), the intro settings and the screen curve are on it; BUILT, NOT FLOWN. Sections "What it shows" and "Visual tab" below.
   - Flat F8 panel: a Visual tab between Performance and Debug (2026-10-22, `menu visual`), a flat-only HUD Anti-Aliasing row (2026-10-24, `menu flat_performance`); sections below.
   - Explorer Cam page (2026-10-08): REMOVED with Explorer Cam (F98, 2026-10-24); its keys are retired.
   - Hotkeys page (2026-10-08): key, pad or HOTAS rebinding of the menu, AA
@@ -241,18 +241,27 @@ the three eye trims and the head-follow smoothing. The `ui:` line's `step`,
 Native on foot page uses them). The keys are retired: hidden lines in
 `edvr.ini` at their last values, read only to name a value that differs.
 
-### Visual tab (2026-10-22)
+### Visual tab (2026-10-22) and Visual page (2026-10-27)
 
 BUILT, NOT FLOWN. The flat profile's F8 panel has three tabs, Performance, Visual and Debug, in
-that order. Visual lists the `[visual]` options of edvr.ini (a section of user settings, Fix tier,
-like `[fix]`) for everyone: Intro movie (`visual.intro_video`, formerly `fix.intro_video`, which
-left the Performance tab) and Star glow (`visual.star_glow`, 100 to 200 percent in steps of 25,
-live). The rows are the table `kFlatVisualRows` in `menu_flat_rows.h`, kept in edvr.ini order and
-checked against the flat key gate like the other two tabs. `visual` is a page only the flat
-panel builds, as `debug` is: the headset's menu has no such page, so Intro movie keeps its bare
-`menu` token and stays on the Fixes page in VR, and Star glow (`menu visual`) is flat-only until
-VR has the page. A `[visual]` row with no `menu` token is desktop-only, as a `[fix]` row is; the
-installer's window shows every `[visual]` row (flat view: the two the flat profile reads).
+that order. Visual lists the `[visual]` options of edvr.ini that do something in flat (a section of
+user settings, Fix tier, like `[fix]`) for everyone: Intro movie (`visual.intro_video`, formerly
+`fix.intro_video`, which left the Performance tab) and Star glow (`visual.star_glow`, 100 to 200
+percent in steps of 25, live). The rows are the table `kFlatVisualRows` in `menu_flat_rows.h`,
+kept in edvr.ini order and checked against the flat key gate like the other two tabs.
+
+Since 2026-10-27 VR's menu has a Visual page of the same name (above, "What it shows"), built from
+the rows whose token is `menu visual`; the flat tab is built from the table whatever the token. The
+two lists differ on purpose, and the token says which row is whose: `menu visual` on a row the flat
+table does not list is VR's alone (World scale, Intro background picture, Screen curve: the flat
+gate refuses their keys, so a flat row would show a value that does nothing); `menu flat_visual` is
+the flat tab's own row that VR's page must not show (Star glow: nothing in VR reads it; its
+consumer is `flat_star_glow.cpp`, in `flat_runtime.cpp`); Intro movie is `menu visual` and is on
+both. The generator (`tools/gen_settings_schema.py`) refuses a `flat_visual` row the table does not
+list, and, for both flat tables, a listed row that has no row in the schema (no `menu` token, a hidden
+key, a key the code does not read), so a tab cannot silently lack a row it names. A `[visual]` row
+with no `menu` token is desktop-only, as a `[fix]` row is; the installer's window shows every
+`[visual]` row (flat view: the two the flat profile reads).
 
 ### Flat-only rows on the Performance tab (2026-10-24)
 
@@ -892,9 +901,23 @@ they were there (flown 2026-09-07).
 2. **Fixes.** Every other `[fix]` row tagged `menu`, under the ini's own
    headings ("When the eyes disagree", ...), scrolling. Restart rows are
    shown, badged, and editable: the badge is the point of showing them.
-   Pages in order: Performance, Fixes, Native on foot, Hotkeys, Monitor,
+   Pages in order: Performance, Fixes, Visual, Native on foot, Hotkeys, Monitor,
    Status (and, in developer mode, Advanced, Experimental, Instruments). Pages
    added between Fixes and Monitor, without renumbering this list:
+   - **Visual** (everyone, 2026-10-27): the rows tagged `menu visual`, how the world
+     looks through the headset, in `edvr.ini` order under the ini's headings:
+     **Screen curve (on foot, intro, splash)** and **Intro background picture**
+     (both moved here from the Fixes page), **World scale** (`fix.world_scale`,
+     whole percent 50 to 200, step 1, shipped 100, live: above 100 the world looks
+     bigger, below smaller; the runtime moves the two eye origins the game is told
+     about, about their midpoint, by 100 over the percent, and the layer, the menu
+     and EDVR's own panels keep the located eyes, `docs/world-scale.md`) and
+     **Intro movie** (`visual.intro_video`, moved here from the Fixes page).
+     Star glow is not on it: only the flat profile reads `visual.star_glow`, so its
+     token is `menu flat_visual`. A live `edvr.ini` with no `world_scale` line is
+     not a problem: the row shows the shipped 100, and the first change appends the
+     line to `[fix]`, as for any key the file lacks (`hotkey_capture_test` pins the
+     append and the page's rows).
    - **Native on foot** (everyone, 2026-10-14): the rows tagged
      `menu native_on_foot`. (The Explorer Cam page stood here from 2026-10-08
      until F98.) Since F128 (2026-10-25) the page is 17 rows under five headings,
@@ -1417,7 +1440,7 @@ developer = off
 
 The `[fix]` rows opt in on their existing `ui:` line: `# ui: Sharpening |
 range 0..1 | percent | menu performance` puts a row on the Performance
-page; a bare `| menu` puts it on Fixes. A `[fix]` row with no `menu` token
+page; `| menu visual` puts it on Visual; a bare `| menu` puts it on Fixes. A `[fix]` row with no `menu` token
 stays in the desktop window only.
 
 **The summon default, F8, comes from a measurement** (2026-09-07, all 30

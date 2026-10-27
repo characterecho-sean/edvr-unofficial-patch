@@ -18,7 +18,7 @@ namespace f126 {
 
 // ---- 1. the eye pair ------------------------------------------------------------------------------------------------------------------------------
 constexpr int32_t kEyeRowsMaxAgeFrames = 8;                 // each eye's rows may be this many frames behind the frame counter
-constexpr double kIpdMinM = 0.05, kIpdMaxM = 0.08;          // the distance between the eyes the pair must show
+constexpr double kIpdMinM = 0.05, kIpdMaxM = 0.08;          // the distance between the eyes the pair must show (at 100% world scale: see eyeScale below)
 
 struct Cyclo {
     double off[3] = {};   // the world offset from the left eye to the midpoint of the eyes
@@ -28,8 +28,9 @@ struct Cyclo {
 // Why a pair was or was not taken. Everything but kUse leaves the pin on its last good pair.
 enum class Pair : uint8_t { kUse = 0, kUnread, kStale, kFrames, kGeometry };
 
-// rows[e], o[e] and fr[e] as the seqlock read of eye e returned them (read[e]: the read held); cur: the frame counter now.
-inline Pair cycloFromRows(const bool read[2], const uint32_t fr[2], const float rows[2][16], const float o[2][4], uint32_t cur, Cyclo* out) noexcept {
+// rows[e], o[e] and fr[e] as the seqlock read of eye e returned them (read[e]: the read held); cur: the frame counter now. eyeScale: the pair Elite draws with
+// against the headset's (world scale, common/world_scale.h worldScaleEyeFactor of the percent the runtime was told; 1 at 100), which the IPD window moves with.
+inline Pair cycloFromRows(const bool read[2], const uint32_t fr[2], const float rows[2][16], const float o[2][4], uint32_t cur, Cyclo* out, double eyeScale = 1.0) noexcept {
     double eye[2][3] = {}, up[2][3] = {}, fw[2][3] = {};
     for (int e = 0; e < 2; ++e) {
         if (!read[e]) return Pair::kUnread;
@@ -47,7 +48,7 @@ inline Pair cycloFromRows(const bool read[2], const uint32_t fr[2], const float 
     const double mf[3] = {fw[0][0] + fw[1][0], fw[0][1] + fw[1][1], fw[0][2] + fw[1][2]};
     const double mu[3] = {up[0][0] + up[1][0], up[0][1] + up[1][1], up[0][2] + up[1][2]};
     double uf[3], uu[3];
-    if (!(ipd > kIpdMinM && ipd < kIpdMaxM && ikUnit(mf, uf) && ikUnit(mu, uu))) return Pair::kGeometry;
+    if (!(ipd > kIpdMinM * eyeScale && ipd < kIpdMaxM * eyeScale && ikUnit(mf, uf) && ikUnit(mu, uu))) return Pair::kGeometry;
     for (int i = 0; i < 3; ++i) {
         out->off[i] = 0.5 * d[i];
         out->fwd[i] = uf[i];

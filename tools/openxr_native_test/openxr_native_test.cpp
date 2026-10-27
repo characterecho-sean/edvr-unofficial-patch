@@ -23,6 +23,7 @@
 #include "seat_order_cases.h"
 #include "pose_cache_cases.h"
 #include "pose_cache_invalidation_cases.h"
+#include "world_scale_cases.h"   // world scale: the host latch and the wiring pins
 #include "position_recentre_cases.h"   // F123: the runtime's position-only recentre (the origin under the head, its yaw kept exactly, no reset, the stored seat untouched)
 #include "pose_cache_lock_cases.h"
 #include "rot_calibrate_cases.h"   // F61 (TEMPORARY): the rotation calibration's pitch overlay
@@ -698,6 +699,7 @@ int selfTest() {
   edvr::openxr::test::runComfortFadeCases(check);
   edvr::openxr::test::runCantedDisplayCases(check);
   edvr::openxr::test::runParallelProjectionNoticeCases(check);
+  edvr::openxr::test::runWorldScaleCases(check);
   edvr::openxr::test::runHeadPoseCases(check);
   edvr::openxr::test::runSeatOrderCases(check);
   edvr::openxr::test::runPoseCacheCases(check);

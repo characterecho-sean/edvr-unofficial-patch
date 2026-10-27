@@ -45,6 +45,20 @@ inline void run110(Check&& check) {
                   m2 && wide == nf::kAdsSightIpdFallbackM && !m3,
               "F110: no offsets: the fallback 6.3 cm (twice F63's 3.15); the right eye's offset alone: twice it; out of 4..9 cm: the fallback");
     }
+    {   // world scale: Elite's eye pair is the headset's times 100 over the percent the runtime was told, so the window and the fallback move with it (eyeScale 0.5 at 200 percent)
+        const double at200 = 0.0626 * 100.0 / 200.0;   // 31.3 mm: under the 4 cm floor of the unscaled window
+        bool unscaled = true, scaled = false, fell = true, atDefault = false;
+        const double refused = nf::adsSightIpd(true, -0.5 * at200, true, 0.5 * at200, &unscaled);
+        const double taken = nf::adsSightIpd(true, -0.5 * at200, true, 0.5 * at200, &scaled, 0.5);
+        const double fallback = nf::adsSightIpd(false, 0.0, false, 0.0, &fell, 0.5);
+        const double wideAt50 = nf::adsSightIpd(true, -0.0626, true, 0.0626, &atDefault, 2.0);   // 125.2 mm: a 50 percent pair, inside the scaled 8..18 cm window
+        check(!unscaled && refused == nf::kAdsSightIpdFallbackM && scaled && std::fabs(taken - at200) < 1e-12 && !fell && std::fabs(fallback - 0.5 * nf::kAdsSightIpdFallbackM) < 1e-12 &&
+                  atDefault && std::fabs(wideAt50 - 0.1252) < 1e-12,
+              "F110: world scale: at 200 percent the 31.3 mm pair is inside the window and the fallback is 3.15 cm; at 50 percent a 12.5 cm pair is; unscaled, the same 31.3 mm pair is refused");
+        check(nf::adsSightIpd(true, -0.0313, true, 0.0313, nullptr, 1.0) == nf::adsSightIpd(true, -0.0313, true, 0.0313, nullptr) &&
+                  nf::adsSightIpd(false, 0.0, false, 0.0, nullptr, 1.0) == nf::kAdsSightIpdFallbackM,
+              "F110: world scale: at 100 percent (scale 1) the answer is the unscaled one to the bit");
+    }
     {   // the sign: a runtime whose eyes' x offsets are mirrored still gives the IPD as a distance; the model goes along R^ (the FP right), not the offsets' sign
         const double ipd = nf::adsSightIpd(true, 0.0313, true, -0.0313, nullptr);
         double model[3] = {};

@@ -509,18 +509,23 @@ void panelTable(const std::string& root, const std::string& gen) {
         check(schemaHasRow(schema, r.section, r.key),
               (std::string("the generated schema has the Visual tab's ") + r.section + "." + r.key).c_str());
     }
-    // The Visual rows as generated, Fix tier, each once, in edvr.ini order. Intro movie keeps VR's Fixes page (the headset's menu has no Visual page, so
-    // a `menu visual` token on it would take it out of the headset); Star glow is a choice of five percentages on the page only this panel builds.
+    // The Visual rows as generated, Fix tier, each once, in edvr.ini order. Intro movie is `menu visual`, the page VR's menu builds too (2026-10-27); Star glow is a
+    // choice of five percentages on `flat_visual`, a page only this panel builds (nothing in VR reads the key). The tab is built from the table, whatever the page.
     {
         const std::string movie = schemaRow(schema, "visual", "intro_video");
         const std::string glow = schemaRow(schema, "visual", "star_glow");
         check(movie.find("\"Intro movie\"") != std::string::npos && movie.find("\"screen|stock|skip\"") != std::string::npos &&
-                  movie.find("MenuTier::Fix, \"fixes\",") != std::string::npos,
-              "the generated Intro movie row is a Fix-tier choice (screen, stock, skip) still on VR's Fixes page");
+                  movie.find("MenuTier::Fix, \"visual\",") != std::string::npos,
+              "the generated Intro movie row is a Fix-tier choice (screen, stock, skip) on the Visual page VR's menu builds too");
         check(glow.find("\"Star glow\"") != std::string::npos &&
                   glow.find("MenuKind::Choice, \"100\", \"\", \"\", 2, \"100=100%|125=125%|150=150%|175=175%|200=200%\", false, false, 1,") != std::string::npos &&
-                  glow.find("MenuTier::Fix, \"visual\",") != std::string::npos,
-              "the generated Star glow row is a Fix-tier choice of 100 to 200 percent, shipped 100, live, on the page 'visual'");
+                  glow.find("MenuTier::Fix, \"flat_visual\",") != std::string::npos,
+              "the generated Star glow row is a Fix-tier choice of 100 to 200 percent, shipped 100, live, on the flat-only page 'flat_visual'");
+        // The VR-only rows of VR's Visual page are not rows of the flat tab: the flat gate refuses their keys, so a flat row would show a value that does nothing.
+        check(schemaHasRow(schema, "fix", "world_scale") && !flatVisualHasRow("fix", "world_scale") && !flatVisualHasRow("fix", "intro_backdrop") &&
+                  !flatVisualHasRow("fix", "panel_curvature") && !flatProfileReadsKey("fix.world_scale") && !flatProfileReadsKey("fix.intro_backdrop") &&
+                  !flatProfileReadsKey("fix.panel_curvature"),
+              "World scale, Intro background picture and Screen curve are on VR's Visual page and not on the flat tab (the flat gate refuses their keys)");
         const size_t a = schema.find("{\"visual\", \"intro_video\",");
         const size_t b = schema.find("{\"visual\", \"star_glow\",");
         check(a != std::string::npos && b != std::string::npos && a < b &&

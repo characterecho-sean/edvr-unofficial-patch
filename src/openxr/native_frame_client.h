@@ -1,5 +1,6 @@
 #pragma once
 #include "../common/native_frame.h"
+#include "../common/world_scale.h"
 #include "geometry_snapshot.h"
 #include "now_head_publication.h"   // F31: the "now" head the version 2 input carries
 #include "native_trace.h"
@@ -21,10 +22,10 @@ class NativeFrameClient final {
     if(candidate.size!=sizeof(candidate)||candidate.version!=EDVR_NATIVE_FRAME_VERSION_1||!candidate.context||
        !owned(provider,candidate.beginFrame)||!owned(provider,candidate.latchSubmit)||
        !owned(provider,candidate.invalidate)||!owned(provider,candidate.close))return E_NOINTERFACE;
-    table_=candidate;generation_=generation;providerVersion_=EDVR_NATIVE_FRAME_VERSION_10;return S_OK;
+    table_=candidate;generation_=generation;providerVersion_=EDVR_NATIVE_FRAME_VERSION_11;return S_OK;
   }
   bool acquired()const{return table_.context!=nullptr;}
-  // F62b: the version the client asks first (10 until a provider refuses it): the host locates the LOCAL head only for a version 10 ask.
+  // F62b: the version the client asks first (11 until a provider refuses it): the host locates the LOCAL head only for an ask of 10 or more.
   uint32_t askedVersion()const{return providerVersion_;}
   // F62b: localHead (optional, 12 floats, row-major 3x4 rigid in natural LOCAL) rides the version 3 input of a version 10 ask.
   // F89: eyeApplied is the applied-alignment word (native_frame.h, EdvrNativeFrameInput::eyeAlignApplied): the serial of the eye alignment the pose carries, plus 1.
@@ -106,6 +107,8 @@ class NativeFrameClient final {
     if(r!=S_OK||out.version<EDVR_NATIVE_FRAME_VERSION_10) out.leftEyeShare=0;
     // F123: the position-only recentre ask is none unless a version 10 answer carried it.
     if(r!=S_OK||out.version<EDVR_NATIVE_FRAME_VERSION_10) out.positionRecentre=0;
+    // World scale: Elite's own scale (100) unless a version 11 answer carried a percent; a zero or an out-of-range word is held to the range (common/world_scale.h).
+    out.worldScalePercent=(r==S_OK&&out.version>=EDVR_NATIVE_FRAME_VERSION_11)?edvr::worldScaleClamp(out.worldScalePercent):edvr::kWorldScaleDefault;
     return r;
   }
   HRESULT latch(uint64_t sequence,EdvrNativeFrameDecision& out) {
@@ -113,7 +116,7 @@ class NativeFrameClient final {
     return acquired()?table_.latchSubmit(table_.context,sequence,&out):S_FALSE;
   }
   HRESULT invalidate(){return acquired()?table_.invalidate(table_.context):S_FALSE;}
-  HRESULT close(){if(!acquired())return S_FALSE;const auto r=table_.close(table_.context);if(SUCCEEDED(r)){table_={};providerVersion_=EDVR_NATIVE_FRAME_VERSION_10;}return r;}
+  HRESULT close(){if(!acquired())return S_FALSE;const auto r=table_.close(table_.context);if(SUCCEEDED(r)){table_={};providerVersion_=EDVR_NATIVE_FRAME_VERSION_11;}return r;}
   // F40/F42: the runtime's now-pose mode (0 next, 1 render, 2 render_locked), from the provider's answer; logged at the first value and at each change.
   static void applyNowPose(uint32_t mode) {
     static bool logged = false;
@@ -136,7 +139,7 @@ class NativeFrameClient final {
   EdvrNativeFrameTable table_{};uint64_t generation_=0;
   // The shape (5/4/3/2/1) the provider last accepted; begin() asks this one
   // first, so a provider once found to be older is not re-probed every frame.
-  uint32_t providerVersion_=EDVR_NATIVE_FRAME_VERSION_10;   // F62b: starts at 10 (input version 3, the LOCAL head; F31's input version 2 below it); a refusal steps down
+  uint32_t providerVersion_=EDVR_NATIVE_FRAME_VERSION_11;   // starts at 11 (world scale; F62b's input version 3, the LOCAL head, from 10; F31's input version 2 below it); a refusal steps down
   uint32_t loggedVersion_=0;   // F32: the version last logged as negotiated
   float ring_[8][12]{};uint64_t ringSeq_[8]{},ringQpc_[8]{};uint32_t ringNewest_=0,ringCount_=0;   // F37: the render head ring
 };

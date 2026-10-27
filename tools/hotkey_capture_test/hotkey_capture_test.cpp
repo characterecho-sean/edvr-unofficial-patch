@@ -1889,6 +1889,65 @@ void testLegacyOnFootRowsStayOutOfMenu() {
 }
 
 // ---------------------------------------------------------------------------
+// 7b. The Visual page of VR's menu (2026-10-27): how the world looks, apart from the fixes. World scale is a whole-percent number from 50 to 200, live; the intro settings and the
+// screen curve moved onto it from the Fixes page; Star glow, which only the flat profile reads, is on the flat tab's own page; and a live edvr.ini without the world_scale line takes
+// the first change from the menu as an appended line.
+
+void testVisualPage() {
+    printf("visual page\n");
+    constexpr int kCount = static_cast<int>(sizeof(kMenuRows) / sizeof(kMenuRows[0]));
+    struct Want { const char* section; const char* key; const char* group; };
+    static const Want want[] = {
+        {"fix", "panel_curvature", "The on-foot screen"},
+        {"fix", "intro_backdrop", "The intro"},
+        {"fix", "world_scale", "World scale"},
+        {"visual", "intro_video", "The launch movie"},
+    };
+    constexpr int kWant = static_cast<int>(sizeof(want) / sizeof(want[0]));
+    int at = 0, world = -1;
+    bool inOrder = true;
+    for (int i = 0; i < kCount; ++i) {
+        if (strcmp(kMenuRows[i].page, "visual") != 0) continue;
+        const bool match = at < kWant && strcmp(kMenuRows[i].section, want[at].section) == 0 && strcmp(kMenuRows[i].key, want[at].key) == 0 &&
+                           strcmp(kMenuRows[i].group, want[at].group) == 0 && kMenuRows[i].tier == MenuTier::Fix;
+        if (!match) {
+            printf("  page row %d is %s.%s under \"%s\"; wanted %s.%s under \"%s\"\n", at, kMenuRows[i].section, kMenuRows[i].key, kMenuRows[i].group,
+                   at < kWant ? want[at].section : "(none)", at < kWant ? want[at].key : "", at < kWant ? want[at].group : "");
+            inOrder = false;
+        }
+        if (strcmp(kMenuRows[i].key, "world_scale") == 0) world = i;
+        ++at;
+    }
+    check(inOrder && at == kWant, "VR's Visual page is Screen curve, Intro background picture, World scale and Intro movie, Fix tier, in edvr.ini order under their headings");
+    for (int i = 0; i < kCount; ++i) {
+        const bool moved = strcmp(kMenuRows[i].key, "panel_curvature") == 0 || strcmp(kMenuRows[i].key, "intro_backdrop") == 0 || strcmp(kMenuRows[i].key, "intro_video") == 0;
+        if (moved && strcmp(kMenuRows[i].section, "advanced") != 0) checkf(strcmp(kMenuRows[i].page, "fixes") != 0, "%s.%s is no longer on the Fixes page", kMenuRows[i].section, kMenuRows[i].key);
+        if (strcmp(kMenuRows[i].key, "star_glow") == 0)
+            check(strcmp(kMenuRows[i].page, "flat_visual") == 0, "Star glow is on the flat Visual tab's own page, which VR's menu builds none of (nothing in VR reads it)");
+    }
+    if (world < 0) return;
+    const MenuRowDef& d = kMenuRows[world];
+    check(d.kind == MenuKind::Number && strcmp(d.label, "World scale") == 0, "World scale is a number row, labelled World scale");
+    check(strcmp(d.shipped, "100") == 0 && strcmp(d.lo, "50") == 0 && strcmp(d.hi, "200") == 0 && d.precision == 0 && !d.percent,
+          "it ships at 100 and is a whole percent from 50 to 200 (stored as the percent, not a fraction)");
+    check(strcmp(d.step, "1") == 0 && strcmp(d.unit, "%") == 0 && d.applies == 1, "it steps by 1, reads in %, and is live");
+    check(menuFormatNumber(d, 130.0) == "130 %" && menuFormatNumber(d, 100.0) == "100 %", "the row reads \"130 %\"");
+    check(menuSteppedNumber(d, 100.0, 1, 1) == 101.0 && menuSteppedNumber(d, 100.0, -1, 5) == 95.0 && menuSteppedNumber(d, 200.0, 1, 1) == 200.0 &&
+              menuSteppedNumber(d, 50.0, -1, 5) == 50.0,
+          "a press steps by 1, Shift by 5, and the ends hold at 50 and 200");
+    // The live file of an install from before the key has no line for it. The write the menu makes (menu.cpp, menuIniWrite) is mergeIni with the dotted key
+    // forced: absent, it is appended to the end of its own section (not refused), and nothing else moves.
+    std::string source = "[fix]\n# a setting\ntemporal_aa = dlss\n\n[visual]\nstar_glow = 100\n";
+    MergeReport report;
+    const std::string updated = mergeIni(source, source, &source, {{"fix.world_scale", "130"}}, &report);
+    const size_t line = updated.find("world_scale = 130"), visual = updated.find("[visual]");
+    check(iniValue(updated, "fix.world_scale", "<unset>") == "130" && line != std::string::npos && line < visual,
+          "a live edvr.ini with no world_scale line takes the menu's first write as a line appended inside [fix]");
+    check(iniValue(updated, "fix.temporal_aa", "<unset>") == "dlss" && iniValue(updated, "visual.star_glow", "<unset>") == "100",
+          "...and the neighbouring settings are untouched");
+}
+
+// ---------------------------------------------------------------------------
 // 8. The generated rows: which are on the Hotkeys page, in which tier
 
 void testRows() {
@@ -1968,6 +2027,7 @@ int main(int argc, char** argv) {
     testRows();
     testNumberRows();
     testLegacyOnFootRowsStayOutOfMenu();
+    testVisualPage();
     if (failures) {
         printf("hotkey_capture_test: %d of %d checks FAILED\n", failures, checks);
         return 1;

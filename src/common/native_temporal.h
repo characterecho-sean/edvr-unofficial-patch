@@ -17,7 +17,7 @@ struct EdvrNativeTemporalRequest {
 struct EdvrNativeTemporalFrame {
   uint32_t size, version;
   uint64_t generation, referenceGeneration, sequence;
-  float head[12], eyeToHead[2][12]; // rigid row-major 3x4, exactly as given to Elite
+  float head[12], eyeToHead[2][12]; // rigid row-major 3x4, exactly as given to Elite (the eye origins moved by the world scale, common/world_scale.h)
   float frusta[2][4];             // unjittered signed {left,right,down,up}
   uint32_t recommendedWidth, recommendedHeight;  // what this frame was rendered for
   // What the game is told now, max over eyes: during a FOV-trim

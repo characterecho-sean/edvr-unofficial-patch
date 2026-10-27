@@ -44,6 +44,7 @@ class SystemPublication {
         state_.optics.raw[eye]=candidate.raw[eye];
         state_.optics.eyeToHead[eye]=candidate.eyeToHead[eye];
       }
+      state_.optics.worldScalePercent=candidate.native.worldScalePercent;
       state_.opticsValid=true;
     }
     state_.geometryValid=valid;
