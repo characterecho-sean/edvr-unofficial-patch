@@ -57,8 +57,8 @@
   phase ("Shadow flight 1").
 
 * **Next (2026-10-27, last entry):** AA on's +1.65 ms is per-draw
-  classifiers; 91% of eye draws repeat bindings with 0 answer changes, so
-  a generation memo could save ~0.8 ms. ui-depth memo BUILT, NOT FLOWN.
+  classifiers. ui-depth memo FLOWN: exact (0 of 5M), -0.21 ms. Next:
+  strip its verification and ship; then memo the other steps.
 
 ## Frame budget philosophy
 
@@ -3914,3 +3914,44 @@ Flight: parked at the Cranfield pad, AA on for at least 3 minutes,
 nothing building on the machine. Read the `ui depth memo:` line (hit
 rate, verified hits, mismatches), the step lines (v:ui-depth) and
 ui_depth's own window counts, after `edvr_log.py --expect-build HEAD`.
+
+**Memo flown (2026-10-27, Steam log `edvr_gfx_20261027_122848.log`,
+build 1fc4deb2; same rig).**
+- **The flight.** Loaded in docked at Cranfield at 12:30:49, AA on,
+  parked until 12:32:47. That gives three clean windows (16200, 18000,
+  19800), not the full three minutes. No build ran during the leg: the
+  only build writes were three files at 12:29.
+- **Hits and verification.** Eye draws hit 90.9-91.1% of the time,
+  about 17.3k calls a frame. The hologram hit rate is the same. Misses
+  were almost all a moved generation; "no plain decline stored" was
+  0.01-0.03% and the epoch moved once. About 5.0M hits were verified
+  across the three windows (6.3M with the loading window), with 0
+  mismatches in every output and in the exit, for both classifiers.
+- **Cost.** v:ui-depth is 0.253-0.263 ms a frame, against a mean of
+  0.47 (0.43-0.54) in the step clock flight. That saves 0.21 ms a
+  frame, 45% of the step.
+  - Of the remaining 0.26: about 0.05 is the AA-off baseline of the
+    step's other work.
+  - The rest is the hit path, about 12 ns an eye draw for both
+    calls: two cross-TU calls, the resets and the temporary tallies.
+    That is more than the 3-5 ns estimated.
+  - The other steps are the same within the noise between flights
+    (v:census 0.14-0.15, f:ui-layer 0.27-0.31, p:screen 0.17-0.20).
+    The old line (3.87-4.26) cannot resolve 0.2 ms between flights;
+    the step is the read.
+- **The positive paths are unchanged.** World screens: seen 3600,
+  marked 3600 per window, as in the 10:22 flight. Hologram depth: 7.05-7.16
+  listed draws a frame, two resolved eye-frames a frame, 0 declined, as
+  before (7.07-7.14).
+
+Verdict: the memo is exact, and it saves about 0.2 ms a frame at a
+settlement pad with AA on. To ship it, remove the verification and the
+counters, which are temporary. That also takes their cost off the
+hit path. Moving the hit test inline (ui_depth.h, like
+uiDepthWantsDraws) would save the two calls, but it means exposing the
+memo's state in the header.
+
+The other steps on repeat draws (f:ui-layer, v:census, p:screen,
+engine-vel, v:eye-test; about 0.5 ms together) can key on the same
+aggregate generation. Each needs its own desk read first, as this one
+had.
