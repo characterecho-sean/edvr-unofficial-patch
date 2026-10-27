@@ -58,7 +58,7 @@
 
 * **Next (2026-10-27, last entry):** AA on's +1.65 ms is per-draw
   classifiers; 91% of eye draws repeat bindings with 0 answer changes, so
-  a generation memo could save ~0.8 ms. Design it, ui-depth first.
+  a generation memo could save ~0.8 ms. ui-depth memo DESIGNED, not built.
 
 ## Frame budget philosophy
 
@@ -3719,3 +3719,152 @@ building it:
 
 v:ui-depth is the place to start: it is the largest step at 0.30 ms
 on repeat draws, and it is the one whose answers were compared.
+
+### 2026-10-27 -- Desk design: the ui_depth eye-draw memo (not built)
+
+Read from `ui_depth.cpp` (uiDepthOnEyeDraw at 2620-2865, viewIsSurface
+851, the surface table at 745-790, uiDepthConfigure 2435,
+uiDepthHologramOnEyeDraw 3532) and `binding_shadow.cpp` (the setters
+89-122).
+
+**Where an ordinary scene draw leaves.** uiDepthOnEyeDraw does the
+following, in order:
+1. resets its outputs: `g_uiDepthDrawComposite`, the planet, solar,
+   world-screen and corona pendings, `g_holoDraw = draw`, the mode,
+   `g_wantRebind`, `g_wantMask`, `g_rebindEye`, `g_drawEye`,
+   `g_reissueShader` and `g_reissueMaskSlot`;
+2. tests the on and stood-down flags;
+3. returns if no DSV is bound;
+4. calls viewIsSurface on PS SRV 0-3, a probe of the view memo each;
+5. hashes the VS, and checks the smoke, planet, solar and world-screen
+   pairs;
+6. leaves at the family gate (line 2693: not stellar, not a composite,
+   VS not in `g_families`).
+
+That exit, the plain decline, comes before any counter, log line,
+shader lookup, eye resolve or scene-depth judgment. Every positive path
+(planets, world screens, families, composites) has side effects:
+`++g_wComposite`, `++g_wDirect`, `++g_worldScreenWindow`, noteFamily,
+depthShaderFor and eyeIndexFor.
+
+The memo therefore covers the plain decline only. Any other answer is
+computed in full every time, so the families and composites keep their
+counts and logs exactly.
+
+The hologram classifier is the same shape. Its cheap declines
+(`!h`, excluded, and in neither the marker nor the family list) depend
+only on the VS hash and three lists. Its later declines read
+dsvIsSceneDepth and the eye table, which can change within a frame (the
+depth probe learns the scene depth at its first draw), so only the
+cheap declines are memoised.
+
+**What the plain-decline answer depends on:**
+- bindings: VS, PS (read only for the smoke, planet and world-screen
+  pairs), PS SRV 0-3 and DSV0;
+- ui_depth's state: the on and stood-down flags (tested before the
+  memo), `g_families` and `g_exclude` (set only in uiDepthConfigure),
+  the holo family lists (holoDepthConfigure), and the learned-surface
+  table, read through the per-view memo.
+
+  The table changes in four places: addSurface; surfaceMatches'
+  eviction of a surface whose size or format no longer matches; the
+  chrome tracker's `g_viewMemo.put(view, ..., 1)` (line 2553); and the
+  reset at 4522. The view memo also expires per frame (its entries live
+  a hundred frames).
+
+**The key.**
+- **The bindings: one aggregate generation**, `bindingEyeKeyGeneration()`,
+  in binding_shadow:
+  - bindingSet, bindingInvalidate and bindingSetShader bump it when the
+    slot is one of VS, PS, PS SRV 0-3, RTV0 or DSV0. That is a mask
+    test, as these are the eight slots the counter measured; RTV0 is
+    not read by the decline, but keeping the measured set keeps the
+    flown 90.6%.
+  - bindingForgetAll and bindingFrameBoundary bump it unconditionally.
+  - It is an inline reader, like bindingGeneration. A rig defining
+    EDVR_BINDING_SHADOW_EXTERNAL gets a declaration.
+  - Its value moves exactly when some one of the eight generations
+    moves, so its repeat rate is the measured one.
+- **ui_depth's state: a classifier epoch** in ui_depth.cpp, bumped at:
+  - uiDepthFrameBoundary;
+  - uiDepthConfigure and holoDepthConfigure;
+  - addSurface, and the eviction branch in surfaceMatches;
+  - the put at 2553;
+  - the surface reset and `g_viewMemo.clear()`.
+
+  A view-memo miss that only records what the table already says needs
+  no bump.
+- **The memo** stores both values and which exit was taken: a plain
+  decline, or the hologram's cheap decline. A call hits when both values
+  match and the stored exit was a plain decline.
+
+**What still runs on a hit.**
+- uiDepthOnEyeDraw:
+  - the on and stood-down test;
+  - every output reset, including `g_holoDraw = draw` (the arguments
+    differ per draw);
+  - the two loads and compares;
+  - `return false`. `g_uiDepthDrawComposite` stays false, so
+    vscreen's `t_compositeThisDraw` is unchanged.
+- The hologram classifier: `g_holoEye = -1`, `return false`.
+- Everything else in the eye branch is untouched: the eye-draw count,
+  the depth probe note, the intro panel and curve, the glare camera.
+  The memo lives inside the two functions, so vscreen's call sites do
+  not change.
+
+What a hit skips:
+- four view-memo probes;
+- the VS hash read, or its fallback;
+- the pair compares;
+- the family and exclude list walks.
+
+None of these has a side effect on a hit: a view memo hit writes
+nothing, and a miss would only re-record the table's answer.
+
+**Expected.** v:ui-depth on repeat draws is about 0.30 ms of AA-on
+work. At about 14.7k repeat eye draws a frame, a hit should cost 3-5 ns
+(the call, the resets, two compares), so the saving is about 0.2-0.25
+ms a frame. That is about 15% of the AA-on increment.
+
+The other steps with work on repeat draws (v:census 0.12, p:screen
+0.13, f:ui-layer 0.11, engine-vel 0.09, v:eye-test 0.08) can share the
+aggregate generation later. Each needs its own read like this one
+first.
+
+**Verification, built in, temporary.**
+- On verify frames (frame % 16 == 8, never a draw-sample frame, so the
+  step clock still measures the memo's real cost), a hit ALSO runs the
+  full classifier.
+- It then compares every output listed above, and checks that the full
+  path left at the plain decline. The hologram classifier is checked
+  the same way (`g_holoEye`, the return value).
+- The full path's outputs stand, so verify frames behave exactly as
+  today. Mismatches are counted per output, and the first few are named
+  with the VS hash.
+- A 30 s line gives:
+  - eye draws, hits and the hit rate;
+  - misses by cause: the generation moved, the epoch moved, or the last
+    exit was not a plain decline;
+  - verified hits and their mismatches.
+- The pure memo logic (key, hit, store, invalidate, the verify tally,
+  the line) goes in a small header with rig checks in aa_off_test.
+  binding_shadow's rig gets a check that the aggregate moves with each
+  of the eight slots and with no other.
+
+The binding-repeat counter's question is answered, so it comes out of
+this build (it costs 0.35-0.4 ms on sampled frames). The step clock
+stays.
+
+**The flight should show:**
+1. The memo hit rate on eye draws: about 88-90% (the 90.6% repeat share,
+   less the few repeats whose last exit was not a plain decline).
+2. Verified hits in the millions and mismatches 0. Any mismatch means
+   the key misses an input, and the memo does not ship.
+3. v:ui-depth with AA on falling from 0.43-0.54 ms to about 0.15-0.25,
+   with the other steps unchanged. The old line falls by about the
+   same, once the counter's removal is allowed for.
+4. ui_depth's own window counts (composite, direct, no shader, world
+   screens) the same as before at the same pad, since every positive
+   path still runs in full.
+5. Flown parked at the same pad, AA on for at least 3 minutes, with no
+   build running on the machine. No AA-off leg is needed.
