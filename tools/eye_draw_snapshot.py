@@ -530,6 +530,8 @@ def validate_menu_input(data,selected_frame):
     for mesh in data['meshes']:
         if (mesh.get('ledger_frame')!=data['first_ledger_frame']+1 or mesh.get('space')!='cached_pick_camera_frame' or
                 not 1<=len(mesh.get('triangles',[]))<=256):raise ValueError('Invalid menu input mesh frame/capacity')
+        if 'triangle_address' in mesh and (type(mesh['triangle_address']) is not int or mesh['triangle_address']<=0):
+            raise ValueError('Invalid cached triangle buffer identity')
         for tri in mesh['triangles']:
             if len(tri)!=6 or not all(floats(v,3 if i<3 else 2) for i,v in enumerate(tri)):
                 raise ValueError('Invalid cached input triangle/UV payload')
@@ -541,6 +543,8 @@ def validate_menu_input(data,selected_frame):
                 not isinstance(row.get('before_qpc'),int) or not isinstance(row.get('after_qpc'),int) or row['after_qpc']<row['before_qpc'] or
                 row.get('mesh_status') not in range(1,8) or not isinstance(row.get('triangle_count'),int) or row['triangle_count']<0):
             raise ValueError('Invalid menu input row stamps/status')
+        if 'triangle_address' in row and (type(row['triangle_address']) is not int or row['triangle_address']<0):
+            raise ValueError('Invalid placement triangle buffer identity')
         counts[0 if row['triangle_count']==120 else 1]+=1
         for field,size in (('mouse',2),('other',2),('direction',3),('uv',2),('ray_origin',3),('ray_direction',3),('ray_t',1),('sprite',3),('owner_world',16),('owner_output',16)):
             if not floats(row.get(field),size):raise ValueError('Invalid menu input numeric payload')
@@ -551,6 +555,8 @@ def validate_menu_input(data,selected_frame):
             mesh=data['meshes'][row['mesh']]
             if any(row[k]!=mesh[k] for k in ('panel','list','owner','ledger_frame')) or row['triangle_count']!=len(mesh['triangles']):
                 raise ValueError('Menu input row disagrees with cached mesh provenance')
+            if ('triangle_address' in row)!=('triangle_address' in mesh) or ('triangle_address' in row and row['triangle_address']!=mesh['triangle_address']):
+                raise ValueError('Menu input row disagrees with captured triangle buffer identity')
         elif row.get('mesh')!=0xffffffff:raise ValueError('Unavailable menu input mesh has a live association')
         row['branch']=('ray_and_2d' if row['ray_calls'] and row['window_calls'] else 'ray' if row['ray_calls'] else '2d_window' if row['window_calls'] else 'no_callback')
         row['callback_payload_status']='multiple_calls_last_payload_not_a_unique_geometric_join' if row['ray_calls']+row['window_calls']>1 else 'single_call' if row['ray_calls']+row['window_calls'] else 'absent'
@@ -1653,6 +1659,12 @@ def main():
         assert menu['late_menu']['rows'][1]['input_bridge_summary']['placements_after_draw_marker']==1
         assert not menu['late_menu']['rows'][1]['input_bridge_summary']['gpu_owner_proven']
         assert len(menu['late_menu']['input_observer']['meshes'][0]['triangles'])==120
+        input_capture=menu['late_menu']['input_observer']
+        assert input_capture['rows'][0]['triangle_address']==input_capture['meshes'][0]['triangle_address']
+        changed_identity=copy.deepcopy(input_capture);changed_identity['rows'][0]['triangle_address']+=1
+        try:validate_menu_input(changed_identity,801)
+        except ValueError:pass
+        else:raise AssertionError('Placement linked to a different triangle buffer identity')
         assert menu['draws'][1]['buffers'][1]['data']==bytes([0x35])*4608
         assert menu['draws'][1]['streams'][1]['data']==bytes([0xA7])*160
         t33=[menu['mesh_buffers'][d['mesh'][0]]['data'] for d in menu['draws'] if d['mesh'][0]!=0xffffffff]

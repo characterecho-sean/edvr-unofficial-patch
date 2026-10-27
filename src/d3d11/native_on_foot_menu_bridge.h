@@ -24,6 +24,7 @@ template<class Read> BridgeMode bridgeMode(uintptr_t ctl,Read read) {
     if(m.valueAddress){if(!read(m.valueAddress,&m.value,4))return m;}else m.value=2;
     if(!read(ctl+f114b::kOffMode,&objectAfter,8)||!read(m.object,&vtAfter,8)||!read(m.vtable+f114b::kModeGetter,&fnAfter,8)||
        !read(m.object+0x218,&valueAfter,8)||objectAfter!=m.object||vtAfter!=m.vtable||fnAfter!=m.observedFunctionAddress||valueAfter!=m.valueAddress)return m;
+    if(m.valueAddress){int32_t verifiedValue=0;if(!read(m.valueAddress,&verifiedValue,4)||verifiedValue!=m.value)return m;}
     m.status=3;return m;
 }
 struct BridgeUpdate {

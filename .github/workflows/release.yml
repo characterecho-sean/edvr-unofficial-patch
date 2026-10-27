@@ -28,11 +28,9 @@ jobs:
   #                   gates are check_status_blocks.py (docs\ Status blocks) and
   #                   check_agent_material.py (agent files export-ignore; no zero-width,
   #                   bidi or tag character in any tracked text), seconds instead of the build.
-  # A codex/release-* branch of this repository is already built by its push; its
-  # pull request would build the same commit a second time.
   # A job skipped by its `if` counts as passing, so `light-gates` and `build` can both be
-  # required checks: each pull request runs exactly one of them (or neither, for a
-  # release branch's own pull request).
+  # required checks: each pull request runs exactly one of them. A release
+  # branch's push builds its head, while its pull request tests the merge with main.
   changes:
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -52,8 +50,6 @@ jobs:
         shell: bash
         env:
           EVENT: ${{ github.event_name }}
-          HEAD_REF: ${{ github.head_ref }}
-          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
@@ -61,10 +57,6 @@ jobs:
           if [ "$EVENT" != "pull_request" ]; then
             echo "build=true" >> "$GITHUB_OUTPUT"; echo "light=false" >> "$GITHUB_OUTPUT"
             echo "$EVENT: full build"; exit 0
-          fi
-          if [[ "$HEAD_REF" == codex/release-* && "$HEAD_REPO" == "$GITHUB_REPOSITORY" ]]; then
-            echo "build=false" >> "$GITHUB_OUTPUT"; echo "light=false" >> "$GITHUB_OUTPUT"
-            echo "release branch: its push builds this commit"; exit 0
           fi
           # --no-renames: a rename lists only its destination, so a build input moved to docs/ would skip the build.
           files="$(git diff --no-renames --name-only "$BASE_SHA...$HEAD_SHA")"

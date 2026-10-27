@@ -5,7 +5,9 @@
 static HMODULE fixtureModule=nullptr;
 static HMODULE fixtureGetModule(const wchar_t*) {return fixtureModule;}
 #define GetModuleHandleW fixtureGetModule
+#define EDVR_PREVIEW_TEST_READ_PROBE
 #include "../../src/d3d11/native_preview_camera.cpp"
+#undef EDVR_PREVIEW_TEST_READ_PROBE
 #undef GetModuleHandleW
 #include <cstdio>
 #include <cstdarg>
@@ -26,6 +28,13 @@ bool gamePinMatches(uint32_t,const uint8_t* actual,const uint8_t* expected,size_
 }
 namespace {
 unsigned checks=0,failures=0;
+uintptr_t disableProbePose=0;
+bool advanceAtRead=false;
+void disableAtEyeRead(uintptr_t at,size_t n) noexcept {
+    if(at!=disableProbePose||n!=sizeof(edvr::previewcam::Pose))return;
+    if(advanceAtRead){edvr::g_previewEngine.enter();edvr::g_previewEngine.leave();}
+    else edvr::nativePreviewCameraBoundary(true,false);
+}
 void check(bool value,const char* name){++checks;if(!value){++failures;std::printf("FAIL: %s\n",name);}}
 uint8_t* allocateFar() {
     const auto callback=reinterpret_cast<uintptr_t>(&edvr::previewHmdHook);
@@ -117,16 +126,63 @@ int main(int argc,char** argv) {
                 previewcam::Pose composed=raw;composed.v[12]=103;composed.v[13]=202;composed.v[14]=299;
                 auto* pose=reinterpret_cast<previewcam::Pose*>(memory+0xA000);
                 *pose=raw;
-                g_previewEngine.publishEye(1,composed,raw);
+                g_previewEngine.enter();
+                g_previewEngine.publishEye(g_previewEngine.current(),composed,raw);
+                g_previewEngine.leave();
                 check(callEye(memory,reinterpret_cast<uintptr_t>(pose))==0x12340004,"published head still returns the original eye body");
                 check(reinterpret_cast<uint32_t*>(memory+0x8000)[4]==2,"published head runs the original eye body once more");
                 check(pose->v[12]==composed.v[12]&&pose->v[13]==composed.v[13]&&pose->v[14]==composed.v[14],
                     "shipped eye stub stores the composed pose when a head is published");
+                *pose=raw;
+                disableProbePose=reinterpret_cast<uintptr_t>(pose);
+                advanceAtRead=true;
+                g_previewReadProbe=&disableAtEyeRead;
+                const auto beforeNextEpoch=reinterpret_cast<uint32_t*>(memory+0x8000)[4];
+                check(callEye(memory,reinterpret_cast<uintptr_t>(pose))==0x12340004&&
+                      reinterpret_cast<uint32_t*>(memory+0x8000)[4]==beforeNextEpoch+1,
+                      "eye read crossing the next manager evaluation still forwards once");
+                g_previewReadProbe=nullptr;
+                check(pose->v[12]==raw.v[12]&&pose->v[13]==raw.v[13]&&pose->v[14]==raw.v[14],
+                      "the next manager epoch invalidates a captured eye snapshot before its write");
+                g_previewEngine.enter();
+                g_previewEngine.publishEye(g_previewEngine.current(),composed,raw);
+                g_previewEngine.leave();
+                advanceAtRead=false;
+                g_previewReadProbe=&disableAtEyeRead;
+                const auto beforeReadDisable=reinterpret_cast<uint32_t*>(memory+0x8000)[4];
+                check(callEye(memory,reinterpret_cast<uintptr_t>(pose))==0x12340004&&
+                      reinterpret_cast<uint32_t*>(memory+0x8000)[4]==beforeReadDisable+1,
+                      "eye read that disables preview still forwards its original once");
+                g_previewReadProbe=nullptr;disableProbePose=0;
+                check(pose->v[12]==raw.v[12]&&pose->v[13]==raw.v[13]&&pose->v[14]==raw.v[14],
+                      "disabling after the eye snapshot but before its write leaves the game pose unchanged");
+                nativePreviewCameraBoundary(true,false);
+                *pose=raw;
+                const auto eyeCallsBefore=reinterpret_cast<uint32_t*>(memory+0x8000)[4];
+                check(callEye(memory,reinterpret_cast<uintptr_t>(pose))==0x12340004&&
+                      reinterpret_cast<uint32_t*>(memory+0x8000)[4]==eyeCallsBefore+1,
+                      "inactive eye hook still forwards its original exactly once with a valid pose");
+                check(pose->v[12]==raw.v[12]&&pose->v[13]==raw.v[13]&&pose->v[14]==raw.v[14],
+                      "inactive eye hook leaves a matching raw HMD pose unchanged");
+                void* guarded=VirtualAlloc(nullptr,4096,MEM_RESERVE|MEM_COMMIT,PAGE_READWRITE);
+                check(guarded!=nullptr,"inactive eye probe gets a guard page");
+                if(guarded){
+                    DWORD old=0;check(VirtualProtect(guarded,4096,PAGE_READWRITE|PAGE_GUARD,&old)!=0,
+                        "inactive eye probe arms its guard page");
+                    const auto beforeGuard=reinterpret_cast<uint32_t*>(memory+0x8000)[4];
+                    check(callEye(memory,reinterpret_cast<uintptr_t>(guarded))==0x12340004&&
+                          reinterpret_cast<uint32_t*>(memory+0x8000)[4]==beforeGuard+1,
+                          "inactive guarded eye still forwards original once");
+                    MEMORY_BASIC_INFORMATION state{};
+                    check(VirtualQuery(guarded,&state,sizeof(state))&&bool(state.Protect&PAGE_GUARD),
+                          "inactive eye hook never reads the guarded pose pointer");
+                    VirtualFree(guarded,0,MEM_RELEASE);
+                }
                 g_previewEngine.enter();g_previewEngine.leave();
             }
-            nativePreviewCameraBoundary(true,false);nativePreviewCameraStop();
+            nativePreviewCameraStop();
             for(unsigned i=0;i<5;++i){check(executable(g_previewRelays[i]),"stop retains successful executable relay");
-                const unsigned forwards=i==4?3u:2u;
+                const unsigned forwards=i==4?7u:2u;
                 check(call(memory,i)==0x12340000+i&&reinterpret_cast<uint32_t*>(memory+0x8000)[i]==forwards,"inactive wrapper remains original-once forwarder");}
         }else if(scenario==1){
             check(!g_previewEngine.current()&&g_previewEngine.applied.load()==0,"partial install cannot enable camera writes");
