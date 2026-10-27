@@ -11971,6 +11971,9 @@ def _hj_f94a_neck(rows, ctx):
         if un:
             view, keycm, tgt, incam = mean("view", un), float(un[-1]["key"]), mean("tgt", un), mean("incam", un)
             text += "; unarmed %d s: the view over the neck %+.1f cm (key %.1f), the raise's target %+.1f cm, in the drawn camera %+.1f cm" % (_hsecs(un), view, keycm, tgt, incam)
+            vn = [r for r in un if r.get("vnu") is not None]
+            if vn and any(abs(float(r["vnu"])) >= 0.05 or abs(float(r["vnf"])) >= 0.05 for r in vn):   # F137: the view as drawn carries the virtual neck
+                text += "; virtual neck %+.1f cm up, %+.1f cm forward in it" % (mean("vnu", vn), mean("vnf", vn))
             if abs(tgt) > 1.0 and all(abs(float(r["incam"])) < 0.05 for r in un):
                 never.append(item)
             elif abs(view - keycm) > 1.5:
@@ -12282,6 +12285,41 @@ def _hj_f68c_pairing(rows, ctx):
             text += "; a tenth or more of those frames were refused as far apart: the gap is real, every frame"
         parts.append(text)
     return ("PARTIAL" if bad else "OK", "; ".join(parts))
+
+
+def _hj_f137_neck(rows, ctx):
+    """F137: the virtual neck under mouse look: the neck translation the game's aim pitch would have made, added to the eye alignment while look to aim is not driving the
+    aim, and taken out of the pin's camera again by the serial the pose carried. The 1 s lines (printed each second the weight was up) give the aim pitch, the head's, the
+    offset applied and how many pin camera calls removed it, by the pose's serial or not. OK with seconds applied. IDLE when look to aim drove the aim all flight, or the
+    weight was up but the aim never pitched (the offset stayed under 0.5 cm). PARTIAL when the offset reached the view and the pin removed it in no call (the body would
+    follow the view), or in a tenth or more of the calls not by the pose's serial. NEVER APPLIED when the only lines say the aim pitch or the head pose was missing."""
+    sec, wait = rows.get("sec", []), rows.get("wait", [])
+    if not sec:
+        whys = collections.Counter(r["why"] for r in wait)
+        missing = [w for w in ("no fresh aim pitch from the pin hook", "no head pose from the runtime") if whys.get(w)]
+        if missing:
+            return ("NEVER APPLIED", "not applied: %s (%s); no second with the weight up" % (
+                ", ".join("%s %d time(s)" % (w, whys[w]) for w in missing), "the pin was in scope and look to aim was not driving the aim"))
+        if wait:
+            return ("IDLE", "not applied: %s" % ", ".join("%s %d time(s)" % (k, v) for k, v in whys.most_common()))
+        return ("IDLE", "no second with the weight up: look to aim drove the aim all flight, or a build before F137") if ctx.get("look to aim (F109)", {}).get("sec") else None
+    n = len(sec)
+    top = max(float(r["max"]) for r in sec)
+    fwd = [float(r["fwd"]) for r in sec]
+    up = [float(r["up"]) for r in sec]
+    aim = [float(r["aim"]) for r in sec]
+    removed, serial, last, missed = (sum(int(r[k]) for r in sec) for k in ("removed", "serial", "last", "missed"))
+    text = ("%d s with the weight up (mean %.2f); aim pitch %+.1f..%+.1f deg; offset up to %.1f cm (forward %+.1f..%+.1f, up %+.1f..%+.1f); removed in the pin's camera "
+            "%d calls (found by the alignment serial %d, the last published %d, serial not found %d)") % (
+        n, sum(float(r["wmean"]) for r in sec) / n, min(aim), max(aim), top, min(fwd), max(fwd), min(up), max(up), removed, serial, last, missed)
+    if top < 0.5:
+        return ("IDLE", text + "; the aim never pitched: the offset stayed under 0.5 cm")
+    notes = []
+    if removed == 0:
+        notes.append("the pin removed it in no call: the body follows the view")
+    elif (last + missed) * 10 >= removed:
+        notes.append("%d of %d removals were not by the pose's serial" % (last + missed, removed))
+    return ("PARTIAL", text + "; " + "; ".join(notes)) if notes else ("OK", text)
 
 
 def _hj_f135_menu(rows, ctx):
@@ -13186,7 +13224,8 @@ HEALTH_RULES = (
                 r"neck reference weight (?P<weight>[\d.]+), raise (?P<raise>%s) cm, applied (?P<applied>%s) cm, target frozen (?P<frozen>\d+), stale (?P<stale>\d+), "
                 r"clamped (?P<clamped>\d+); the rest target asked (?P<asked>%s) cm, the lowering written mean (?P<low>%s) cm max \|(?P<lowmax>[\d.]+)\|; legs hip to foot "
                 r"over the leg: animated (?P<la>[\d.]+), written mean (?P<lw>[\d.]+) min (?P<lmin>[\d.]+) \((?P<solves>\d+) solves\)"
-                r"(?:; camera 3 m away (?P<remote>\d+) s \(max (?P<remote_max>[\d.]+) cm\))?" % ((_HN,) * 12)),
+                r"(?:; camera 3 m away (?P<remote>\d+) s \(max (?P<remote_max>[\d.]+) cm\))?"
+                r"(?:; virtual neck (?P<vnu>%s) cm up, (?P<vnf>%s) cm forward)?" % ((_HN,) * 14)),
         ("key", r"native on foot eye height \(F94a\): fix\.native_on_foot_eye_height_cm = (?P<key>[\d.]+) cm"),
     ), _hj_f94a_neck),
     _hrule("camera away (F107)", ("F107",), ("native on foot camera away (F107)",), (
@@ -13271,6 +13310,12 @@ HEALTH_RULES = (
                    r"(?P<gmean>\S+) max (?P<gmax>\S+) ms; the FP call first in (?P<ffp>\d+) of them, the 3P call first in (?P<ftp>\d+)\); G built from a pair (?P<pairs>\d+) "
                    r"times in (?P<frames>\d+) game frames"),
     ), _hj_f68c_pairing),
+    _hrule("virtual neck (F137)", ("F137",), ("native on foot virtual neck (F137)",), (
+        ("sec", r"native on foot virtual neck \(F137\) 1 s: aim pitch (?P<aim>%s) deg, head pitch (?P<head>%s) deg, offset forward (?P<fwd>%s) up (?P<up>%s) cm "
+                r"\(max (?P<max>[\d.]+)\), w (?P<wmean>[\d.]+)/(?P<wmax>[\d.]+), removed in the pin's camera (?P<removed>\d+) calls \(found by the alignment serial "
+                r"(?P<serial>\d+), the last published (?P<last>\d+), serial not found (?P<missed>\d+)\)" % ((_HN,) * 4)),
+        ("wait", r"native on foot virtual neck \(F137\): not applied: (?P<why>.+)$"),
+    ), _hj_f137_neck),
     _hrule("menu probe (F135)", ("F135",), ("native on foot menu probe (F135)",), (
         ("sec", r"native on foot menu probe \(F135\) 1 s: update (?P<upd>\d+) \(objs (?P<updo>.*?)\), placement (?P<place>\d+) \(objs (?P<placeo>.*?)\), ray (?P<ray>\d+), "
                 r"cursor window (?P<win>\d+), owner transform (?P<own>\d+), panel submit (?P<ps>\d+), inst submit (?P<is>\d+), bridge update (?P<bu>\d+) placement "
@@ -15352,9 +15397,9 @@ def self_test_health():
         FISTS, RIFLE = "$humanoid_fists_name;", "$wpn_m_assaultrifle_laser_fauto_name;"
 
         def neck(item=FISTS, bin_="standing", view=15.5, tgt=11.6, incam=11.6, matched=90, legacy=0, missed=0, weight=1.0, lowmax=0.0, la=0.996, lw=0.996, key=15.5,
-                 anim="+15.6 cm", game=3.9, wl=1, remote=None, remote_max=0.0, n=90, solves=90):
+                 anim="+15.6 cm", game=3.9, wl=1, remote=None, remote_max=0.0, n=90, solves=90, vn=None):
             line = R("native on foot neck height (F94a) %u s: item %s", wl, item, bin_, n, 1.543, 1.540, 1.546, key, view, view - 0.3, view + 0.3, game, anim, tgt, tgt - 0.2,
-                     tgt + 0.2, incam, matched, legacy, missed, 90, weight, tgt, incam * weight, 0 if weight >= 1.0 else 90, 0, 0, -11.6, 0.0, lowmax, la, lw, lw - 0.003, solves, remote or 0, remote_max)
+                     tgt + 0.2, incam, matched, legacy, missed, 90, weight, tgt, incam * weight, 0 if weight >= 1.0 else 90, 0, 0, -11.6, 0.0, lowmax, la, lw, lw - 0.003, solves, remote or 0, remote_max, *(vn or (0.0, 0.0)))
             return line if remote is not None else line.split("; camera 3 m away")[0]
 
         def eye_key(cm=15.5):
@@ -15363,6 +15408,9 @@ def self_test_health():
         check("F94a neck: fists standing, the eye 15.5 cm over the neck", [eye_key()] + [neck()] * 3, 0, [("OK", F94)],
               has=[FISTS + " 3 s: neck 1.543 m, lowering max 0.00 cm, legs 0.996 -> 0.996; unarmed 3 s: the view over the neck +15.5 cm (key 15.5), the raise's "
                    "target +11.6 cm, in the drawn camera +11.6 cm", "the raise found by the alignment serial in 270 of 270 calls (not found 0)"], lacks=["UNPARSED"])
+        check("F94a neck: the view as drawn carries the virtual neck (F137), the line names it", [neck(remote=0, vn=(-15.4, 8.9))] * 2, 0, [("OK", F94)],
+              has=["virtual neck -15.4 cm up, +8.9 cm forward in it"], lacks=["UNPARSED"])
+        check("F94a neck: a line without the virtual neck's tail (a build before F137) still reads", [neck(remote=0)] * 2, 0, [("OK", F94)], lacks=["UNPARSED", "cm forward in it"])
         check("F94a neck: the view off the key", [neck(view=12.0)] * 2, 0, [("PARTIAL", F94)], has=["the view is off the key by more than 1.5 cm with " + FISTS])
         check("F94a neck: the raise never reached the drawn camera", [neck(view=3.9, incam=0.0)] * 2, 3, [("NEVER APPLIED", F94)],
               has=["the raise never reached the drawn camera with " + FISTS])
@@ -15690,6 +15738,32 @@ def self_test_health():
               has=["2 reseed second(s) in the event lines: 4 reseeds in 180 game frames; largest gap 11.9 ms"], lacks=["UNPARSED", "a tenth or more"])
         check("F132 pairing: reseeds in a tenth of the frames in the summary log", [reseed132(n=60, frames=90)], 0, [("PARTIAL", G68)], has=["a tenth or more of those frames were refused"],
               lacks=["UNPARSED"])
+
+        # ---- F137: the virtual neck under mouse look ----
+        V137 = "virtual neck (F137)"
+
+        def vn137(aim=-58.0, head=0.0, fwd=8.9, up=-15.4, mx=17.8, wmean=0.97, wmax=1.0, removed=58, serial=58, last=0, missed=0):
+            return R("native on foot virtual neck (F137) 1 s: aim pitch", aim, head, fwd, up, mx, wmean, wmax, removed, serial, last, missed)
+
+        def wait137(why):
+            return R("native on foot virtual neck (F137): not applied: %s", why)
+
+        check("F137 neck: look to aim drove the aim all flight, no virtual neck line", [ENG109, look109(), look109()], 0, [("IDLE", V137)],
+              has=["look to aim drove the aim all flight, or a build before F137"], lacks=["UNPARSED"])
+        check("F137 neck: seconds with the weight up, the pin removed it by the pose's serial", [vn137(), vn137(aim=-30.0, fwd=4.7, up=-8.0, mx=9.3, wmean=0.9, removed=60, serial=60)], 0,
+              [("OK", V137)], has=["2 s with the weight up (mean 0.94)", "aim pitch -58.0..-30.0 deg", "offset up to 17.8 cm", "removed in the pin's camera 118 calls (found by the alignment serial 118"],
+              lacks=["UNPARSED"])
+        check("F137 neck: the weight was up but the aim never pitched", [vn137(aim=0.0, fwd=0.0, up=0.0, mx=0.0), vn137(aim=0.5, fwd=0.1, up=-0.1, mx=0.2)], 0, [("IDLE", V137)],
+              has=["the aim never pitched: the offset stayed under 0.5 cm"], lacks=["UNPARSED"])
+        check("F137 neck: the pin removed it in no call (the body would follow the view)", [vn137(removed=0, serial=0), vn137(removed=0, serial=0)], 0, [("PARTIAL", V137)],
+              has=["the pin removed it in no call: the body follows the view"], lacks=["UNPARSED"])
+        check("F137 neck: the pose's serial was not found for a tenth of the removals", [vn137(removed=60, serial=40, last=0, missed=20)], 0, [("PARTIAL", V137)],
+              has=["20 of 60 removals were not by the pose's serial"], lacks=["UNPARSED"])
+        check("F137 neck: no fresh aim pitch from the pin hook and no second applied", [wait137("no fresh aim pitch from the pin hook")], 3, [("NEVER APPLIED", V137)],
+              has=["no fresh aim pitch from the pin hook 1 time(s)"], lacks=["UNPARSED"])
+        check("F137 neck: look to aim drives the aim, said once", [wait137("look to aim drives the aim")], 0, [("IDLE", V137)], has=["not applied: look to aim drives the aim 1 time(s)"],
+              lacks=["UNPARSED"])
+        check("F137 neck: a wait that came before seconds applied is not judged", [wait137("no fresh aim pitch from the pin hook"), vn137()], 0, [("OK", V137)], lacks=["UNPARSED", "NEVER APPLIED"])
 
         # ---- F135: the on-foot menu probe (MEASURE ONLY) ----
         M135 = "menu probe (F135)"

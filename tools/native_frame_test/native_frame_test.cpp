@@ -39,6 +39,7 @@
 #include "f132_checks.h"    // F132: the G frame pairing re-seeds its phase after a far-apart refusal (either true order, a missing call, a real gap)
 #include "f133_checks.h"    // F133: head steps judged by rate (a stall is not a recentre); the follower re-centres on a standing yaw offset
 #include "f135_checks.h"    // F135: the on-foot menu probe's pure parts (counters, the distinct objects of a second, the edges, the key edges, the line gate)
+#include "f137_checks.h"    // F137: a virtual neck under mouse look (the offset, the seated vector, the weight, the pose's history, the head offset it cancels from)
 #include "f110_checks.h"    // F110: the ADS sight lock's model right eye (the left-eye job camera plus the IPD)
 #include "f111_checks.h"    // F111: the panel pointer instrument's statistics and verdict
 #include "f113_checks.h"    // F113: each eye's scene rows whenever the world is drawn (the depth prepass and the terrain as sources)
@@ -7490,6 +7491,9 @@ int wmain(int argc, wchar_t** argv) {
     f133test::run133(check);
     // F135 (measure only): the menu probe's counters, objects, 0.5 s edges, key edges and line gate.
     f135test::run135(check);
+    // F137: the virtual neck d = R(h + a) v - R(h) v (0 at a = 0; +8.9 cm forward and -15.5 cm up at h = 0, a = -60 deg; capped at 25 cm), its seated vector, the pin taking
+    // the whole vector out of the camera by the pose's serial, the 0.15 s weight (0 under look to aim, times 1 - the ADS weight), the head offset it cancels from.
+    f137test::run137(check);
     // F110: the ADS sight lock's model right eye from the left-eye job camera and from a solved left eye, the fallback, the IPD's sign.
     f110test::run110(check);
     // F111: the panel pointer instrument names the stage that turns a move the other way (K1 to K5, one at a time), the camera getters' decoding.
