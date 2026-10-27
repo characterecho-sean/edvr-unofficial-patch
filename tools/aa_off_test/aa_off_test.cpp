@@ -7,10 +7,14 @@
 //   Cut C: map_wait.h's call counts (exact) and sampled ticks (scaled at take), and map_wait_sample.h's sampler.
 //   Cut D: gpu_frame_timing.h's gpuFrameCommandIfLive, with a counting stub for the out-of-line gpuFrameCommand:
 //          with the instrument off, no call is made; on, every call is made.
+//   Cut E: draw_step_clock.h (built 2026-10-27, the temporary draw hook CPU by step instrument), driven with a scripted
+//          clock: which draws are clocked how, what a mark attributes, the game's draw against reissues, the clock floor,
+//          the window's totals and scaling, and the two log lines' text and worst-case length.
 //
 // Exit codes: 0 pass, 1 a check failed, 2 usage. --dry-run touches nothing.
 #include "../../src/common/gpu_disjoint_clock.h"
 #include "../../src/d3d11/draw_fast_path.h"
+#include "../../src/d3d11/draw_step_clock.h"
 #include "../../src/d3d11/frame_span_tile.h"
 #include "../../src/d3d11/gpu_frame_timing.h"
 #include "../../src/d3d11/map_wait.h"
@@ -302,6 +306,552 @@ void testOverlayLine() {
     check(std::strcmp(field, "frame work span: completed 5400, skipped 3, invalid 2, last 4.257 ms") == 0, "census field: counts and the last pair in ms");
 }
 
+// ---- Cut E: the draw step clock (draw_step_clock.h) -------------------------------------------------------------------
+// The clock's environment, scripted: it reads whatever time the test last set, counts the reads, and keeps what the sinks are given.
+struct FakeEnv {
+    static constexpr uint32_t kStride = 64;
+    static inline bool g_sampled = false;
+    static inline uint32_t g_ordinal = 0;
+    static inline int64_t g_time = 0;
+    static inline unsigned g_reads = 0;
+    static inline edvr::drawstep::Run g_run;
+    static inline edvr::drawstep::Run* g_sub = nullptr;
+    static inline unsigned g_wholeReports = 0;
+    static inline int64_t g_wholeTicks = 0, g_realTicks = 0;
+    static inline unsigned g_stepReports = 0;
+    static inline edvr::drawstep::StepAccum g_lastRun;
+    static inline edvr::drawstep::Window g_window;
+
+    static bool sampled() { return g_sampled; }
+    static uint32_t nextOrdinal() { return ++g_ordinal; }
+    static int64_t now() {
+        ++g_reads;
+        return g_time;
+    }
+    static edvr::drawstep::Run& run() { return g_run; }
+    static edvr::drawstep::Run*& sub() { return g_sub; }
+    static inline int g_live = 0;
+    static void stepsLive(int delta) { g_live += delta; }
+    static void reportWhole(int64_t whole, int64_t real) {
+        ++g_wholeReports;
+        g_wholeTicks = whole;
+        g_realTicks = real;
+    }
+    static void reportSteps(char kind, const edvr::drawstep::StepAccum& a) {
+        ++g_stepReports;
+        g_lastRun = a;
+        g_window.add(kind, a);
+    }
+    static void reset() {
+        g_sampled = false;
+        g_ordinal = 0;
+        g_time = 0;
+        g_reads = 0;
+        g_run = edvr::drawstep::Run();
+        g_sub = nullptr;
+        g_live = 0;
+        g_wholeReports = 0;
+        g_wholeTicks = g_realTicks = 0;
+        g_stepReports = 0;
+        g_lastRun = edvr::drawstep::StepAccum();
+        g_window.reset();
+    }
+};
+using TestClock = edvr::drawstep::DrawClockT<FakeEnv>;
+using edvr::drawstep::Mode;
+
+// The sub-marks' route, as vscreen.cpp's stepMark takes it: the live count, then the thread's pointer, a scripted clock, the same
+// markRun the draw uses.
+struct FakeNow {
+    int64_t operator()() const { return FakeEnv::g_time; }
+};
+void subMark(edvr::drawstep::Step step) {
+    if (FakeEnv::g_live == 0) return;
+    if (edvr::drawstep::Run* r = FakeEnv::g_sub) edvr::drawstep::markRun(*r, step, FakeNow{});
+}
+
+bool closeTo(double a, double b) { return std::fabs(a - b) < 1e-6; }
+
+// Which draws are clocked how: the whole clock's ordinal % 64 == 0 is untouched, the steps mode takes % 64 == 32, the rest are off, and
+// only a sampled frame's draws are counted at all.
+void testStepClockModes() {
+    using namespace edvr::drawstep;
+    unsigned whole = 0, steps = 0, off = 0;
+    bool tableRight = true;
+    for (uint32_t o = 0; o < 256; ++o) {
+        const Mode m = modeFor(o, 64);
+        const Mode want = (o % 64) == 0 ? Mode::kWhole : ((o % 64) == 32 ? Mode::kSteps : Mode::kOff);
+        tableRight = tableRight && m == want;
+        whole += m == Mode::kWhole;
+        steps += m == Mode::kSteps;
+        off += m == Mode::kOff;
+    }
+    check(tableRight, "step clock modes: ordinal 0 mod 64 is whole, 32 mod 64 is steps, every other ordinal is off");
+    check(whole == 4 && steps == 4 && off == 248, "step clock modes: of 256 ordinals, 4 are whole, 4 are steps and 248 are off");
+    check(modeFor(0, 64) == Mode::kWhole && modeFor(32, 64) == Mode::kSteps && modeFor(31, 64) == Mode::kOff &&
+              modeFor(33, 64) == Mode::kOff && modeFor(96, 64) == Mode::kSteps,
+          "step clock modes: ordinals 0 and 64 are whole, 32 and 96 are steps, 31 and 33 are off");
+    check(modeFor(5, 0) == Mode::kOff && modeFor(5, 1) == Mode::kOff, "step clock modes: a stride under 2 clocks nothing");
+
+    // Through the clock itself. An unsampled frame: no ordinal advance, no clock read, no mode.
+    FakeEnv::reset();
+    FakeEnv::g_sampled = false;
+    bool allOff = true;
+    for (int i = 0; i < 200; ++i) {
+        TestClock c('D');
+        allOff = allOff && c.mode() == Mode::kOff && !c.on;
+    }
+    check(allOff && FakeEnv::g_ordinal == 0 && FakeEnv::g_reads == 0,
+          "step clock modes: on an unsampled frame every draw is off, the ordinal does not advance and no clock is read");
+    // A sampled frame: the draw the old clock took (the 64th) is whole, the 32nd and 96th are steps, the rest are off.
+    FakeEnv::reset();
+    FakeEnv::g_sampled = true;
+    bool shape = true;
+    for (uint32_t i = 1; i <= 128; ++i) {
+        TestClock c('D');
+        const Mode want = (i % 64) == 0 ? Mode::kWhole : ((i % 64) == 32 ? Mode::kSteps : Mode::kOff);
+        shape = shape && c.mode() == want && c.on == (want == Mode::kWhole);
+    }
+    check(shape && FakeEnv::g_ordinal == 128, "step clock modes: on a sampled frame the 32nd, 96th are steps, the 64th, 128th are whole, the rest off");
+    check(FakeEnv::g_wholeReports == 2 && FakeEnv::g_stepReports == 2,
+          "step clock modes: 128 sampled draws report two whole and two steps clocks");
+}
+
+// Whole and off modes record nothing through marks: the whole clock reads its clock where it always did, and the marks add no reads.
+void testStepClockOtherModes() {
+    using namespace edvr::drawstep;
+    FakeEnv::reset();
+    FakeEnv::g_sampled = true;
+    FakeEnv::g_ordinal = 63;   // the next draw is the 64th: whole
+    FakeEnv::g_time = 1000;
+    {
+        TestClock c('X');
+        check(c.mode() == Mode::kWhole && c.on, "whole mode: the 64th draw of a sampled frame is clocked whole");
+        FakeEnv::g_time = 1100;
+        c.mark(kPre);
+        c.mark(kVRest);
+        c.markForward();
+        const int64_t r0 = c.on ? FakeEnv::now() : 0;   // the thunk's own read
+        FakeEnv::g_time = 1160;
+        c.stepDraw();
+        c.realCall(r0);
+        FakeEnv::g_time = 1300;
+        c.realCall(1160);   // a reissue's call: not the game's, not counted
+        c.mark(kTail);
+        FakeEnv::g_time = 1400;
+    }
+    check(FakeEnv::g_wholeReports == 1 && FakeEnv::g_wholeTicks == 400 && FakeEnv::g_realTicks == 60,
+          "whole mode: reports the whole draw (400) and the first real call (60), as the old clock did");
+    check(FakeEnv::g_stepReports == 0 && FakeEnv::g_sub == nullptr && FakeEnv::g_window.clocked == 0 && FakeEnv::g_live == 0,
+          "whole mode: marks record nothing and no steps run is parked, counted live or reported");
+    check(FakeEnv::g_reads == 4, "whole mode: the clock is read four times (start, the thunk's r0, the first real call, the end), marks add none");
+    // An off draw: nothing read, nothing reported.
+    FakeEnv::reset();
+    FakeEnv::g_sampled = true;
+    {
+        TestClock c('I');
+        check(c.mode() == Mode::kOff, "off mode: the first draw of a sampled frame is not clocked");
+        c.mark(kPre);
+        c.markForward();
+        c.stepDraw();
+        c.mark(kTail);
+    }
+    check(FakeEnv::g_reads == 0 && FakeEnv::g_wholeReports == 0 && FakeEnv::g_stepReports == 0 && FakeEnv::g_sub == nullptr,
+          "off mode: marks read no clock and report nothing");
+}
+
+// Marks attribute the interval to the step they close, in the thunks' order, with the sub-marks through the thread's pointer.
+void testStepClockMarks() {
+    using namespace edvr::drawstep;
+    FakeEnv::reset();
+    FakeEnv::g_sampled = true;
+    FakeEnv::g_ordinal = 31;   // the next is the 32nd: steps
+    FakeEnv::g_time = 1000;
+    {
+        TestClock c('X');
+        check(c.mode() == Mode::kSteps && !c.on, "step marks: the 32nd draw of a sampled frame is clocked in steps mode, not whole");
+        check(FakeEnv::g_sub == &FakeEnv::g_run, "step marks: a live steps clock parks its run as the thread's sub-mark target");
+        check(FakeEnv::g_live == 1, "step marks: a live steps clock counts itself in the process-wide count the sub-marks test first");
+        FakeEnv::g_time = 1010;
+        c.mark(kPre);                        // pre 10
+        FakeEnv::g_time = 1025;
+        subMark(kVHudFss);                   // 15, inside beginPanelOverride
+        FakeEnv::g_time = 1030;
+        subMark(kVCensus);                   // 5
+        FakeEnv::g_time = 1050;
+        c.mark(kVRest);                      // 20: the rest of the verdict call, after its sub-marks
+        FakeEnv::g_time = 1055;
+        c.mark(kEngineVelocity);             // 5
+        FakeEnv::g_time = 1058;
+        c.mark(kProbes);                     // 3
+        FakeEnv::g_time = 1068;
+        subMark(kFwScopes);                  // 10, inside forwardWithVerdict
+        FakeEnv::g_time = 1100;
+        c.markForward();                     // 32: the lambda's entry before the first real draw
+        FakeEnv::g_time = 1300;
+        c.stepDraw();                        // 200: the game's own draw
+        FakeEnv::g_time = 1340;
+        c.mark(kWeapon);                     // 40
+        FakeEnv::g_time = 1344;
+        c.mark(kPostRest);                   // 4
+        FakeEnv::g_time = 1350;
+        c.mark(kPostRigid);                  // 6
+        FakeEnv::g_time = 1360;
+        c.mark(kPostScreen);                 // 10
+        FakeEnv::g_time = 1375;
+        subMark(kFwLayerEnd);                // 15, after the draw
+        FakeEnv::g_time = 1380;
+        c.markForward();                     // 5: forwardWithVerdict's return, after the draw
+        FakeEnv::g_time = 1400;
+    }                                        // tail 20
+    const StepAccum& a = FakeEnv::g_lastRun;
+    check(FakeEnv::g_stepReports == 1 && FakeEnv::g_window.clocked == 1 && FakeEnv::g_window.kindDraws[3] == 1,
+          "step marks: the run is reported once, as an X draw");
+    check(a.ticks[kPre] == 10 && a.ticks[kVHudFss] == 15 && a.ticks[kVCensus] == 5 && a.ticks[kVRest] == 20,
+          "step marks: each interval goes to the step that ends it (pre, two sub-steps, the verdict's rest)");
+    check(a.ticks[kEngineVelocity] == 5 && a.ticks[kProbes] == 3 && a.ticks[kFwScopes] == 10 && a.ticks[kFwBefore] == 32,
+          "step marks: engine velocity, probes, the forward scope's sub-step and its lambda entry are cut apart");
+    check(a.ticks[kGameDraw] == 200 && a.ticks[kWeapon] == 40 && a.ticks[kReissue] == 0,
+          "step marks: the game's draw (200) and the weapon motion (40) are separate, and nothing is a reissue");
+    check(a.ticks[kPostRest] == 4 && a.ticks[kPostRigid] == 6 && a.ticks[kPostScreen] == 10 && a.ticks[kFwLayerEnd] == 15 &&
+              a.ticks[kFwAfter] == 5 && a.ticks[kTail] == 20,
+          "step marks: the post-draw steps, the forward scope's after-draw sub-step and return, and the tail are cut apart");
+    int64_t total = 0;
+    unsigned marked = 0;
+    for (unsigned i = 0; i < kStepCount; ++i) {
+        total += a.ticks[i];
+        marked += a.marks[i];
+    }
+    check(total == 400 && marked == 16, "step marks: the steps' ticks sum to the whole draw (400) and each mark was counted once (16)");
+    check(a.marks[kGameDraw] == 1 && a.marks[kVHudFss] == 1 && a.marks[kFwUiDepth] == 0,
+          "step marks: a step that was never marked has no marks, so the report prints it '-'");
+    check(FakeEnv::g_sub == nullptr, "step marks: the thread's sub-mark target is put back when the clock ends");
+    check(FakeEnv::g_live == 0, "step marks: ...and the clock leaves the live count as it ends");
+    // A sub-mark with no steps clock alive finds null and does nothing.
+    const int64_t before = FakeEnv::g_run.acc.ticks[kVCensus];
+    FakeEnv::g_time = 5000;
+    subMark(kVCensus);
+    check(before == 5 && FakeEnv::g_run.acc.ticks[kVCensus] == before && FakeEnv::g_run.acc.marks[kVCensus] == 1,
+          "step marks: a sub-mark outside a steps clock adds nothing");
+    // The previous sub-mark target is restored, not cleared.
+    FakeEnv::reset();
+    FakeEnv::g_sampled = true;
+    FakeEnv::g_ordinal = 31;
+    Run outer;
+    FakeEnv::g_sub = &outer;
+    {
+        TestClock c('D');
+        check(FakeEnv::g_sub == &FakeEnv::g_run && FakeEnv::g_run.outer == &outer, "step marks: a clock started under another run remembers it");
+    }
+    check(FakeEnv::g_sub == &outer, "step marks: ...and puts it back at its end");
+    FakeEnv::g_sub = nullptr;   // `outer` is local
+}
+
+// The AA-off fast path's draw (D, I, N): pre, verdict, probes, the game's draw, tail. No forward scope, no engine velocity.
+void testStepClockFastPath() {
+    using namespace edvr::drawstep;
+    FakeEnv::reset();
+    FakeEnv::g_sampled = true;
+    FakeEnv::g_ordinal = 31;
+    FakeEnv::g_time = 100;
+    {
+        TestClock c('N');
+        FakeEnv::g_time = 110;
+        c.mark(kPre);
+        FakeEnv::g_time = 150;
+        subMark(kVContext);
+        FakeEnv::g_time = 160;
+        c.mark(kVRest);
+        FakeEnv::g_time = 165;
+        c.mark(kProbes);
+        FakeEnv::g_time = 265;
+        c.stepDraw();
+        FakeEnv::g_time = 270;
+    }
+    const StepAccum& a = FakeEnv::g_lastRun;
+    check(a.ticks[kPre] == 10 && a.ticks[kVContext] == 40 && a.ticks[kVRest] == 10 && a.ticks[kProbes] == 5 && a.ticks[kGameDraw] == 100 &&
+              a.ticks[kTail] == 5,
+          "fast path: a draw goes pre, verdict (sub-step and rest), probes, the game's draw, tail");
+    check(a.marks[kFwBefore] == 0 && a.marks[kFwAfter] == 0 && a.marks[kEngineVelocity] == 0 && a.marks[kReissue] == 0,
+          "fast path: no forward scope, engine velocity or reissue is marked");
+    check(FakeEnv::g_window.kindDraws[2] == 1 && FakeEnv::g_window.kindTicks[2] == 70 && FakeEnv::g_window.kindMarks[2] == 5,
+          "fast path: the N draw's EDVR ticks are everything but the game's draw (70) and its marks the five that closed them");
+}
+
+// The draw lambda can run more than once; only the first real call is the game's, every later one is a reissue and EDVR's.
+void testStepClockReissue() {
+    using namespace edvr::drawstep;
+    FakeEnv::reset();
+    FakeEnv::g_sampled = true;
+    FakeEnv::g_ordinal = 31;
+    FakeEnv::g_time = 0;
+    {
+        TestClock c('I');
+        FakeEnv::g_time = 50;
+        c.markForward();   // first lambda entry
+        FakeEnv::g_time = 150;
+        c.stepDraw();      // the game's draw: 100
+        FakeEnv::g_time = 160;
+        c.markForward();   // second lambda entry (the splash dim's issue): after the first real call
+        FakeEnv::g_time = 200;
+        c.stepDraw();      // the reissue: 40
+        FakeEnv::g_time = 230;
+        c.stepDraw();      // a third call: 30 more, still a reissue
+        FakeEnv::g_time = 235;
+        c.markForward();   // forwardWithVerdict's return
+        FakeEnv::g_time = 240;
+    }
+    const StepAccum& a = FakeEnv::g_lastRun;
+    check(a.ticks[kGameDraw] == 100 && a.marks[kGameDraw] == 1, "reissue: the first real call is the game's draw, once");
+    check(a.ticks[kReissue] == 70 && a.marks[kReissue] == 2, "reissue: every later real call goes to reissue (40 + 30 over two calls)");
+    check(a.ticks[kFwBefore] == 50 && a.marks[kFwBefore] == 1 && a.ticks[kFwAfter] == 15 && a.marks[kFwAfter] == 2,
+          "reissue: before the first real draw the forward scope is 'before', after it every entry and the return is 'after'");
+    // A draw the forward scope swallows never calls the lambda: its whole stretch is the scope's 'before'.
+    FakeEnv::reset();
+    FakeEnv::g_sampled = true;
+    FakeEnv::g_ordinal = 31;
+    {
+        TestClock c('X');
+        FakeEnv::g_time = 70;
+        c.markForward();   // forwardWithVerdict returned with no draw made
+        FakeEnv::g_time = 75;
+    }
+    check(FakeEnv::g_lastRun.ticks[kFwBefore] == 70 && FakeEnv::g_lastRun.marks[kGameDraw] == 0 && FakeEnv::g_lastRun.marks[kFwAfter] == 0,
+          "reissue: a draw the scope swallowed is all 'before', with no game draw");
+    // EDVR's part of a run: every step but the game's draw.
+    StepAccum e;
+    e.ticks[kPre] = 10;
+    e.marks[kPre] = 1;
+    e.ticks[kGameDraw] = 500;
+    e.marks[kGameDraw] = 1;
+    e.ticks[kReissue] = 7;
+    e.marks[kReissue] = 2;
+    check(edvrTicks(e) == 17 && edvrMarks(e) == 3, "reissue: EDVR's sum is every step but the game's draw (17 ticks, 3 marks)");
+}
+
+// The window: the runs added by kind, EDVR's ticks and marks excluding the game's draw.
+void testStepWindow() {
+    using namespace edvr::drawstep;
+    Window w;
+    w.reset();
+    StepAccum d;
+    d.ticks[kPre] = 100; d.marks[kPre] = 1;
+    d.ticks[kGameDraw] = 900; d.marks[kGameDraw] = 1;
+    d.ticks[kTail] = 50; d.marks[kTail] = 1;
+    StepAccum x;
+    x.ticks[kPre] = 200; x.marks[kPre] = 1;
+    x.ticks[kWeapon] = 70; x.marks[kWeapon] = 1;
+    x.ticks[kGameDraw] = 5; x.marks[kGameDraw] = 1;
+    x.ticks[kTail] = 30; x.marks[kTail] = 1;
+    for (int i = 0; i < 3; ++i) w.add('D', d);
+    w.add('X', x);
+    w.add('I', d);
+    check(w.clocked == 5 && w.kindDraws[0] == 3 && w.kindDraws[1] == 1 && w.kindDraws[2] == 0 && w.kindDraws[3] == 1,
+          "window: five clocked draws by kind (3 D, 1 I, 0 N, 1 X)");
+    check(w.kindTicks[0] == 450 && w.kindMarks[0] == 6 && w.kindTicks[3] == 300 && w.kindMarks[3] == 3,
+          "window: per-kind EDVR ticks and marks leave the game's draw out");
+    check(w.ticks[kGameDraw] == 3 * 900 + 900 + 5 && w.marks[kPre] == 5 && w.ticks[kPre] == 3 * 100 + 200 + 100,
+          "window: the steps' own ticks and marks add up across draws");
+    w.reset();
+    check(w.clocked == 0 && w.ticks[kPre] == 0 && w.kindDraws[3] == 0 && w.kindTicks[3] == 0, "window: reset clears every total");
+}
+
+// The clock floor: net of marks x floor, scaled by the stride over the sampled frames.
+void testStepFloorAndScale() {
+    using namespace edvr::drawstep;
+    Window w;
+    w.reset();
+    w.clocked = 10;
+    w.ticks[kPre] = 10000;       w.marks[kPre] = 500;        // net 10000 - 500 x 10 = 5000 ticks
+    w.ticks[kVRest] = 100;       w.marks[kVRest] = 50;        // under its own floor: 0, not negative
+    w.ticks[kGameDraw] = 40000;  w.marks[kGameDraw] = 500;    // net 35000 ticks
+    w.ticks[kTail] = 3000;       w.marks[kTail] = 100;        // net 2000 ticks
+    w.kindDraws[3] = 10;
+    w.kindTicks[3] = 13000;      w.kindMarks[3] = 650;        // EDVR's: net 13000 - 6500 = 6500
+    FormatInfo in;
+    in.endFrame = 1800;
+    in.sampledFrames = 100;
+    in.stride = 64;
+    in.ticksPerSecond = 10000000;   // 100 ns a tick
+    in.floorNs = 1000.0;            // 10 ticks a mark
+    Totals t;
+    check(summarise(w, in, &t), "floor: a window with sampled frames summarises");
+    // 5000 ticks / 1e7 per second = 0.5 ms; x64 / 100 sampled frames = 0.32 ms.
+    check(closeTo(t.netMs[kPre], 0.32) && t.seen[kPre], "floor: a step's ticks lose marks x floor, then scale by the stride over the sampled frames (0.32 ms)");
+    check(t.seen[kVRest] && t.netMs[kVRest] == 0.0, "floor: a step shorter than its own clock reads is 0.000, not negative");
+    check(!t.seen[kProbes] && t.netMs[kProbes] == 0.0 && t.callsPerFrame[kProbes] == 0.0, "floor: a step with no marks is not seen");
+    check(closeTo(t.netMs[kGameDraw], 35000.0 / 1e7 * 1000.0 * 64.0 / 100.0) && closeTo(t.gameMs, t.netMs[kGameDraw]),
+          "floor: the game's draw has its own figure, net of its marks too");
+    check(closeTo(t.edvrMs, t.netMs[kPre] + t.netMs[kVRest] + t.netMs[kTail]) && closeTo(t.netMs[kTail], 2000.0 / 1e7 * 1000.0 * 64.0 / 100.0),
+          "floor: EDVR's sum is every seen step but the game's draw");
+    check(closeTo(t.callsPerFrame[kPre], 500.0 * 64.0 / 100.0), "floor: calls per frame are the marks scaled by the stride over the sampled frames (320)");
+    check(closeTo(t.marksPerDraw, (500 + 50 + 500 + 100) / 10.0), "floor: marks per clocked draw count every step's marks (115)");
+    check(t.kindSeen[3] && !t.kindSeen[0] && closeTo(t.kindDrawsPerFrame[3], 10.0 * 64.0 / 100.0) &&
+              closeTo(t.kindMs[3], 6500.0 / 1e7 * 1000.0 * 64.0 / 100.0),
+          "floor: a kind's draws per frame and EDVR ms per frame are scaled the same way, net of its marks");
+    in.sampledFrames = 0;
+    check(!summarise(w, in, &t) && !t.seen[kPre] && t.edvrMs == 0.0, "floor: no sampled frame in the window is unavailable, not a zero");
+}
+
+// The floor's calibration: the fastest of the batches, through markRun.
+struct ScriptClock {
+    int64_t* t;
+    int64_t* calls;
+    int64_t  inc;
+    int64_t  spikeEvery;   // every this-many calls one read jumps by 5000 ticks (0: never)
+    int64_t operator()() const {
+        ++*calls;
+        *t += inc;
+        if (spikeEvery && (*calls % spikeEvery) == 0) *t += 5000;
+        return *t;
+    }
+};
+void testStepCalibration() {
+    using namespace edvr::drawstep;
+    int64_t t = 0, calls = 0;
+    ScriptClock clean{&t, &calls, 25, 0};
+    // 25 ticks a clock call at 10 MHz is 2500 ns a mark.
+    check(closeTo(calibrateMarkNs(clean, 10000000), 2500.0), "calibration: a clock that costs 25 ticks a call at 10 MHz is 2500 ns a mark");
+    check(calls == 1 + 64 + 4 * (1 + 512), "calibration: one start read, 64 warming marks, then four batches of 512 marks each timed from its own start read");
+    // One batch with a preemption in it is not the floor: the fastest batch is kept.
+    t = 0;
+    calls = 0;
+    ScriptClock noisy{&t, &calls, 25, 700};   // a spike in some batches, not all
+    check(closeTo(calibrateMarkNs(noisy, 10000000), 2500.0), "calibration: a batch a preemption inflated is not the floor, the clean batch is");
+    t = 0;
+    calls = 0;
+    ScriptClock spiky{&t, &calls, 25, 3};   // every batch spiked: the best is still the least spiked
+    check(calibrateMarkNs(spiky, 10000000) > 2500.0, "calibration: when every batch is spiked the floor reads above the clean figure");
+    check(calibrateMarkNs(clean, 0) == 0.0 && calibrateMarkNs(clean, 10000000, 0, 4) == 0.0 && calibrateMarkNs(clean, 10000000, 512, 0) == 0.0,
+          "calibration: no frequency, no marks or no batches is 0, not a division by zero");
+}
+
+// The two log lines.
+edvr::drawstep::Window sampleWindow() {
+    using namespace edvr::drawstep;
+    Window w;
+    w.reset();
+    w.clocked = 10;
+    w.ticks[kPre] = 10000;      w.marks[kPre] = 500;
+    w.ticks[kVCensus] = 8000;   w.marks[kVCensus] = 400;
+    w.ticks[kGameDraw] = 40000; w.marks[kGameDraw] = 500;
+    w.ticks[kWeapon] = 1500;    w.marks[kWeapon] = 20;
+    w.ticks[kTail] = 3000;      w.marks[kTail] = 100;
+    w.kindDraws[3] = 10;
+    w.kindTicks[3] = 22500;
+    w.kindMarks[3] = 1020;
+    return w;
+}
+void testStepText() {
+    using namespace edvr::drawstep;
+    const Window w = sampleWindow();
+    FormatInfo in;
+    in.endFrame = 5400;
+    in.sampledFrames = 112;
+    in.stride = 64;
+    in.ticksPerSecond = 10000000;
+    in.floorNs = 900.0;
+    in.aaOn = true;
+    char line[1200];
+    const size_t n = formatStepsLine(line, sizeof(line), w, in);
+    check(n == std::strlen(line), "text: the steps line's returned length is its length");
+    static const char kHead[] = "draw hook CPU by step: 1800-frame window ending 5400; 112 sampled frames, 10 draws clocked by step";
+    check(std::strncmp(line, kHead, sizeof(kHead) - 1) == 0,
+          "text: the steps line starts 'draw hook CPU by step:' with the window's end, sampled frames and clocked draws");
+    check(std::strstr(line, "every 64th draw, offset 32 from the line above's") != nullptr,
+          "text: it says the draws are a different set from the line above's (every 64th, offset 32)");
+    check(std::strstr(line, "about 900 ns, 152.0 per clocked draw") != nullptr, "text: the floor in ns a mark and the marks per clocked draw are stated once (900, 152.0)");
+    Totals t;
+    summarise(w, in, &t);
+    char want[64];
+    std::snprintf(want, sizeof(want), "pre %.3f, ", t.netMs[kPre]);
+    check(std::strstr(line, want) != nullptr, "text: a seen step prints its net ms per sampled frame");
+    check(std::strstr(line, "v:hud/fss -, ") != nullptr && std::strstr(line, "f:ui-depth -, ") != nullptr && std::strstr(line, "reissue -, ") != nullptr,
+          "text: a step with no marks prints '-', never 0.000");
+    std::snprintf(want, sizeof(want), "EDVR %.3f ms", t.edvrMs);
+    check(std::strstr(line, want) != nullptr, "text: EDVR's sum is in the line");
+    std::snprintf(want, sizeof(want), "game draw %.3f ms (the game's own)", t.gameMs);
+    check(std::strstr(line, want) != nullptr, "text: the game's draw has its own figure, labelled the game's");
+    check(std::strstr(line, "counts weapon as the game's, so it reads near this less weapon") != nullptr,
+          "text: it says the line above should read near EDVR's sum less weapon motion");
+    check(std::strstr(line, "Temporal AA on.") != nullptr, "text: Temporal AA on");
+    in.aaOn = false;
+    formatStepsLine(line, sizeof(line), w, in);
+    check(std::strstr(line, "Temporal AA off.") != nullptr, "text: Temporal AA off");
+    char calls[1200];
+    const size_t m = formatCallsLine(calls, sizeof(calls), w, in);
+    static const char kCallsHead[] = "draw hook CPU by step, calls and kinds: window ending 5400.";
+    check(m == std::strlen(calls) && std::strncmp(calls, kCallsHead, sizeof(kCallsHead) - 1) == 0,
+          "text: the calls line follows with its own head");
+    std::snprintf(want, sizeof(want), "pre %.0f, ", t.callsPerFrame[kPre]);
+    check(std::strstr(calls, want) != nullptr && std::strstr(calls, "v:hud/fss -, ") != nullptr, "text: the calls line prints each step's calls per frame and '-' for none");
+    std::snprintf(want, sizeof(want), "D -, I -, N -, X %.0f draws ", t.kindDrawsPerFrame[3]);
+    check(std::strstr(calls, want) != nullptr,
+          "text: the kind block gives the X draws per frame and '-' for the kinds never clocked");
+    // A window with no sampled frames: every figure unavailable.
+    in.sampledFrames = 0;
+    formatStepsLine(line, sizeof(line), w, in);
+    check(std::strstr(line, "EDVR -; game draw -") != nullptr && std::strstr(line, "pre -, ") != nullptr && std::strstr(line, "pre 0") == nullptr,
+          "text: no sampled frame prints '-' for every figure");
+}
+
+// Both lines at their widest. Every figure is at its clamp (a net far past 99999.999 ms, calls past 99999999, a floor past 99999999 ns), the frame
+// numbers at their 32-bit maximum, and the clocked-draw count at both ends of its width: 1 puts the marks per clocked draw at its widest, the
+// 64-bit maximum puts the draw count at its widest. The log line holds about 1170 characters; the report stays under 1150 in both lines.
+void testStepTextWorstCase() {
+    using namespace edvr::drawstep;
+    size_t widestA = 0, widestB = 0;
+    bool wholeEnds = true;
+    char a[2000], b[2000];
+    for (int widest = 0; widest < 2; ++widest) {
+        Window w;
+        w.reset();
+        w.clocked = widest ? 18446744073709551615ull : 1ull;
+        for (unsigned i = 0; i < kStepCount; ++i) {
+            w.ticks[i] = 4000000000000000000ll;
+            w.marks[i] = 4000000000ull;
+        }
+        for (unsigned k = 0; k < kKinds; ++k) {
+            w.kindDraws[k] = 4000000000ull;
+            w.kindTicks[k] = 4000000000000000000ll;
+            w.kindMarks[k] = 4000000000ull;
+        }
+        FormatInfo in;
+        in.endFrame = 4294967295u;
+        in.sampledFrames = 1;
+        in.stride = 64;
+        in.ticksPerSecond = 10000000;
+        in.floorNs = 1e8;
+        in.aaOn = false;
+        const size_t na = formatStepsLine(a, sizeof(a), w, in);
+        const size_t nb = formatCallsLine(b, sizeof(b), w, in);
+        widestA = na > widestA ? na : widestA;
+        widestB = nb > widestB ? nb : widestB;
+        wholeEnds = wholeEnds && na == std::strlen(a) && nb == std::strlen(b) && a[na - 1] == '.' && b[nb - 1] == '.';
+        check(std::strstr(a, "99999.999") != nullptr && std::strstr(b, "99999999 draws") != nullptr,
+              "text: out-of-range figures are clamped to their widths, not widened");
+    }
+    std::printf("aa_off_test: step lines at their worst: %zu and %zu characters (limit 1150; the log holds about 1170)\n", widestA, widestB);
+    check(widestA < 1150 && widestB < 1150, "text: each of the two lines at its worst fits the log line (under 1150 characters)");
+    check(wholeEnds, "text: both lines end whole at their worst, not cut");
+    // A plausible window is shorter than the worst case.
+    const Window ordinary = sampleWindow();
+    FormatInfo oi;
+    oi.endFrame = 5400;
+    oi.sampledFrames = 112;
+    oi.ticksPerSecond = 10000000;
+    oi.floorNs = 900.0;
+    check(formatStepsLine(a, sizeof(a), ordinary, oi) < widestA, "text: an ordinary window's line is shorter than the worst case");
+    // A short buffer truncates, never overruns, and stays terminated.
+    Window any = sampleWindow();
+    char tiny[24];
+    std::memset(tiny, 'x', sizeof(tiny));
+    const size_t nt = formatStepsLine(tiny, sizeof(tiny), any, oi);
+    check(nt < sizeof(tiny) && tiny[nt] == '\0', "text: a short buffer is cut and terminated, never overrun");
+    char one[1] = {'x'};
+    check(formatCallsLine(one, 1, any, oi) == 0 && one[0] == '\0', "text: a one-byte buffer holds the terminator alone");
+}
+
 void usage() {
     std::puts("usage: aa_off_test --self-test | --dry-run");
 }
@@ -327,6 +877,16 @@ int main(int argc, char** argv) {
     testGpuTimeTile();
     testFrameWorkSlack();
     testOverlayLine();
+    testStepClockModes();
+    testStepClockOtherModes();
+    testStepClockMarks();
+    testStepClockFastPath();
+    testStepClockReissue();
+    testStepWindow();
+    testStepFloorAndScale();
+    testStepCalibration();
+    testStepText();
+    testStepTextWorstCase();
     std::printf("aa_off_test: %d checks, %d failed\n", g_checks, g_failed);
     return g_failed ? 1 : 0;
 }

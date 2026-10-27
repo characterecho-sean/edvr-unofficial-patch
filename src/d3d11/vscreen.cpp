@@ -41,6 +41,7 @@
 #include "draw_census.h"
 #include "draw_gate.h"    // the sampled subscriber gate the draw path reads
 #include "draw_fast_path.h"   // the AA-off draw path's decisions (2026-10-13)
+#include "draw_step_clock.h"  // the draw thunks' clock, by step (built 2026-10-27, temporary)
 #include "../common/temporal_mode.h"  // temporalModeEnabledFor: the AA-off fast path's switch
 #include "object_probe.h"     // tier 2 stage 1: the instanced-mesh pool, read on two frames
 #include "pixel_probe.h"      // advanced.pixel_probe: who drew this pixel, during an eye dump
@@ -1897,6 +1898,23 @@ void pixelProbeAfterEye(State* s, ID3D11DeviceContext* self, uint32_t count,
     pixelProbeAfterDraw(self, static_cast<ID3D11Resource*>(info->resource), eye, di);
 }
 
+// The draw step clock's sub-marks (draw_step_clock.h; built 2026-10-27, a temporary instrument for the AA-on draw-hook increment,
+// docs\engine-render-performance-2026-09-19.md's 2026-10-27 entry). A draw thunk's clock in steps mode (one draw in 64 of a sampled
+// frame, the ones between the whole-clocked draws) parks its run here while it lives, and the marks inside beginPanelOverride and
+// forwardWithVerdict close their step through it. g_stepRunsLive counts the live ones, process-wide: every other draw, the
+// whole-clocked ones of a sampled frame included, finds it 0 and pays one plain load per sub-mark, no thread-local read. (Another
+// thread's live clock only sends this thread on to its own null pointer.)
+thread_local drawstep::Run* t_stepRun = nullptr;
+std::atomic<int> g_stepRunsLive{0};
+struct StepNow {
+    int64_t operator()() const { return qpcNow(); }
+};
+inline void stepMark(drawstep::Step step) {
+    if (g_stepRunsLive.load(std::memory_order_relaxed) != 0) {
+        if (drawstep::Run* run = t_stepRun) drawstep::markRun(*run, step, StepNow{});
+    }
+}
+
 // kind, count and instances describe the draw for the census and the census
 // probe, and args is the rest of the call's own argument set (start index,
 // base vertex, start instance -- draw_census.h, DrawArgs), passed through
@@ -2015,6 +2033,7 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
         }
     }
 
+    stepMark(drawstep::kVHudFss);   // the draw step clock (draw_step_clock.h): the HUD issuer probe, the roll-free clear, the FSS chrome tracker end here
     s->glareClamp = 0;
     if (foreignContext(self)) {
         noteForeignDraw(self);
@@ -2037,6 +2056,7 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     s->introCurveThisDraw = false;
     t_uiDepthThisDraw = false;
     t_compositeThisDraw = false;
+    stepMark(drawstep::kVContext);   // the glare clamp reset, the foreign-context return, the station sun skip and the per-draw flags end here
     // Counting eye draws is not part of the panel distance fix, even though it
     // happens here.
     //
@@ -2145,6 +2165,7 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
         if (drawCensusArmed()) drawCensusNoteUnseen('d');
         return DrawVerdict::kSkip;
     }
+    stepMark(drawstep::kVParticles);   // the draw gate, the binding audit, the particle billboards, the witchspace stars and the space dust end here
     const uint32_t rtvGen = bindingGeneration(BindSlot::Rtv0);
     if (s->rtv0EyeGen != rtvGen) {
         s->rtv0Cand = -1;
@@ -2182,6 +2203,7 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
         depthProbeNoteDraw(self, bindingGet(BindSlot::Dsv0), s->rtv0Eye,
                            bindingGet(BindSlot::Rtv0) == nullptr);
     }
+    stepMark(drawstep::kVEyeTest);   // the render target's eye test, the quad probe and the depth probe's note end here
     if (!s->rtv0Eye) {
         if (screenMotionLive()) screenMotionSource(self,s->panelW?s->panelW:1920,s->panelH?s->panelH:1080);
         // NOT an eye texture -- but it is still a DRAW, and where the draws
@@ -2407,6 +2429,7 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
                 s->fssBodyFrame = s->frameNo;
             }
         }
+        stepMark(drawstep::kVOffscreen);   // the off-screen branch ends here (its other returns leave their time to v:rest)
         return DrawVerdict::kNone;
     }
     ++s->eyeDrawsThisFrame;
@@ -2483,6 +2506,7 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
         }
     }
 
+    stepMark(drawstep::kVUiDepth);   // the eye branch's depth probe note, the interface and hologram depth, the intro panel and curve, the glare camera end here
     // The census line for this draw, recorded while its bindings are certainly
     // the ones it will run with. Armed is rare and brief; the cost of asking is
     // one call and one bool.
@@ -2579,6 +2603,7 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
         }
     }
 
+    stepMark(drawstep::kVCensus);   // the census, the crisp HUD note, the object probe and the skip probes end here
     // Shape first, inline (night_vision.h): the match is pure, and the call
     // per eye draw failed on this very test.
     if(nightVisionShape(kind,count,instances) && nightVisionMatches(kind,count,instances))
@@ -2694,6 +2719,7 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
         s->curveThisDraw = true;
     }
 
+    stepMark(drawstep::kVFixes);   // the eye recognisers (night vision to the curved screen) end here; the panel distance fix's tail is v:rest
     if (!s->distanceEnabled) return DrawVerdict::kNone;
 
     // An eye-sized target is not enough on its own: in the cockpit hundreds of
@@ -4174,6 +4200,7 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
                                 blendDecisionsBefore);
         return;
     }
+    stepMark(drawstep::kFwScopes);   // the entry scopes (blend probe, effect capture, interface depth, roll-free) and the skip return end here
     // fix.ui_quality, the UI layer (ui_layer.h): decided once for this draw
     // and applied around EVERY issue of it below -- the loader panel's and
     // the curved screen's substitutions draw the composite themselves, so
@@ -4292,6 +4319,7 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
                                      static_cast<int>(compositeFamily));
         }
     }
+    stepMark(drawstep::kFwUiLayer);   // fix.ui_quality's family and after-UI decisions and the composite census end here
     // TEMPORARY, the blend probe: the verdict, the UI layer's decisions (the family's and the after-UI retry's) and the coverage and
     // hologram classifications are all settled here, and the game's bindings are still its own: no verdict's Begin has run.
     if (blendProbing)
@@ -4375,6 +4403,7 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     // layer's bracket below remaps it to the layer's.
     const bool barsDecided = barsFamily && uiLayer;
     if (barsDecided) supercruiseBarsPrepare(self);
+    stepMark(drawstep::kFwVerdict);   // the blend probe's offer, the substitution checks, the verdict's Begin, the orbit lines and the bars' prepare end here
     // The layer's bracket goes innermost: after the verdict's own Begin (a
     // RemLok scissor, a slot swap) so the layer maps the state the draw is
     // actually issued with, and around nothing but the game's own draw.
@@ -4468,6 +4497,7 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
         if (v != DrawVerdict::kNone) forwardVerdictEnd(self, v);
         return;
     }
+    stepMark(drawstep::kFwLayerEnd);   // after the game's draw: the layer's end and second issues, the marker fix, the crisp and world-screen reissues end here
     // The interface's alpha-aware depth pass (ui_depth.h): a composite
     // drawn through the interface projection is drawn once more, depth
     // only, right after its own draw and inside the scope that owns the
@@ -4524,6 +4554,7 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
         GpuCensusScope census(self, GpuCensusSection::FrameUiDepthCoverage);
         pureDrawReissue(self,kind,count,instances,args);uiDepthWorldScreenEnd(self);
     }
+    stepMark(drawstep::kFwUiDepth);   // the interface, hologram, planet and world-screen coverage reissues end here
     if (v != DrawVerdict::kNone) {
         if (v == DrawVerdict::kBackdrop) backdropEnd(self);
         // The splash screen's dim under the loader's dialogs (splash_dim.h):
@@ -4957,27 +4988,31 @@ void STDMETHODCALLTYPE hookedRSSetViewports(ID3D11DeviceContext* self, UINT n,
 // ordinal is per drawing thread (thread_local), so no two threads race on it,
 // and it advances only on sample frames -- an unsampled frame's draw still
 // pays exactly one inline load and no clock read at all.
+//
+// Built 2026-10-27, a temporary instrument for the AA-on draw-hook increment (docs\engine-render-performance-2026-09-19.md's
+// 2026-10-27 entry): the draws of the same sampled frames whose ordinal is 32 mod 64 are clocked in STEPS mode (draw_step_clock.h),
+// the clock marking the end of each step of the thunk instead of the whole. Whole mode is exactly what it was: the same clock reads
+// at the same places, the same report. A draw that is neither pays what it paid, plus one branch at each mark.
 thread_local uint32_t t_drawClockOrdinal = 0;
+// A steps-mode run's storage and its sub-mark target (t_stepRun, above beginPanelOverride) are per drawing thread: a foreign
+// context's thread clocks its own draws and no two threads share a run.
+thread_local drawstep::Run t_stepRunStorage;
 
-struct DrawClock {
-    bool    on;
-    int64_t t0;
-    int64_t real = 0;
-    bool forwarded = false;
-    DrawClock()
-        : on(perfMonitorSampleDraws() &&
-             (++t_drawClockOrdinal % kPerfMonitorDrawTimeStride) == 0),
-          t0(on ? qpcNow() : 0) {}
-    void realCall(int64_t start) {
-        // Only the first call forwards the game's draw. Coverage reissues
-        // are EDVR work; subtracting every call hid their CPU/driver cost.
-        if(!forwarded) real += qpcNow()-start;
-        forwarded=true;
-    }
-    ~DrawClock() {
-        if (on) perfMonitorDrawTicks(qpcNow() - t0, real);
-    }
+// The production binding of draw_step_clock.h's clock: this thread's ordinal and run, the real clock, the perf monitor's two sinks.
+struct DrawClockEnv {
+    static constexpr uint32_t kStride = kPerfMonitorDrawTimeStride;
+    static bool sampled() { return perfMonitorSampleDraws(); }
+    static uint32_t nextOrdinal() { return ++t_drawClockOrdinal; }
+    static int64_t now() { return qpcNow(); }
+    static drawstep::Run& run() { return t_stepRunStorage; }
+    static drawstep::Run*& sub() { return t_stepRun; }
+    static void stepsLive(int delta) { g_stepRunsLive.fetch_add(delta, std::memory_order_relaxed); }
+    static void reportWhole(int64_t whole, int64_t real) { perfMonitorDrawTicks(whole, real); }
+    static void reportSteps(char kind, const drawstep::StepAccum& acc) { perfMonitorDrawSteps(kind, acc); }
 };
+using DrawClock = drawstep::DrawClockT<DrawClockEnv>;
+static_assert(kPerfMonitorDrawTimeStride >= 2 && kPerfMonitorDrawTimeStride % 2 == 0,
+              "the steps clock takes the draws half a stride after the whole clock's");
 
 // The flat profile's draws never reach beginPanelOverride: its thunks take the flat branch first, and the census's per-draw record
 // lives there. So the flat branch records the draw itself, before FlatRuntimeDrawScope substitutes any binding. Every flat draw is
@@ -5078,34 +5113,44 @@ void STDMETHODCALLTYPE hookedDraw(ID3D11DeviceContext* self, UINT count, UINT st
     // F45 (TEMPORARY instrument): a non-instanced draw reads instance stream entry 0 (the marker probe's record match); staging copies only.
     if (nativeOnFootMarkerProbeLive() && self == g_state->ownerCtx) nativeOnFootMarkerTee(self, 1, 0, 'D', count, start, 0);
     if (self == g_state->ownerCtx) { temporalPassCountDraw(); if (temporalPassWantsDraw()) temporalPassNoteDraw(self); }   // tags the camera write before it / counts a mini-render's draws
-    DrawClock clock;
+    DrawClock clock('D');
     ++g_state->thunkHits[kHitDraw];
     noteStaleForward(kSlotDraw, reinterpret_cast<const void*>(g_state->realDraw),
                      "Draw");
     if (quadProbeWants()) g_state->qsBaseVertex = static_cast<INT>(start);
     DrawArgs args;
     args.base = static_cast<int32_t>(start);
+    clock.mark(drawstep::kPre);   // the step clock's marks (draw_step_clock.h): a branch on a draw that is not clocked in steps mode
     const DrawVerdict v = beginPanelOverride(self, 'D', count, 1, args);
+    clock.mark(drawstep::kVRest);
     const bool fast = drawPathFast(v);   // AA off, unclaimed, no subscriber: no verdict scope, no engine velocity (draw_fast_path.h)
-    if (!fast && v == DrawVerdict::kNone && self == g_state->ownerCtx) engineVelocityBeforeDraw(self, g_state->rtv0Eye);
+    if (!fast && v == DrawVerdict::kNone && self == g_state->ownerCtx) {
+        engineVelocityBeforeDraw(self, g_state->rtv0Eye);
+        clock.mark(drawstep::kEngineVelocity);
+    }
     if (self == g_state->ownerCtx) pixelProbeBefore(g_state, self);
     if (g_vrWorldWants && self == g_state->ownerCtx) vrWorldRouteDraw(self);   // the VR world route's detector; at the tone, its resolve
+    clock.mark(drawstep::kProbes);
     if (fast) {
         // forwardWithVerdict's own return for the owner's blocked UI layer is kept; the game's draw otherwise as it is issued there.
         if (!(self == g_state->ownerCtx && uiLayerIssueBlocked())) {
             const int64_t r0 = clock.on ? qpcNow() : 0;
             g_state->realDraw(self, count, start);
+            clock.stepDraw();
             if (clock.on) clock.realCall(r0);
         }
     } else forwardWithVerdict(self, v, 'D', count, 1, args, [&](AlteredDraw altered) {
+        clock.markForward();
         const int64_t r0 = clock.on ? qpcNow() : 0;
         {
             GpuCensusAlteredScope timed(self, altered);   // the game's own draw, and only it (gpu_census.h)
             g_state->realDraw(self, count, start);
         }
+        clock.stepDraw();
         if (clock.on) clock.realCall(r0);
         return true;
     });
+    if (!fast) clock.markForward();   // forwardWithVerdict's return
     if (v == DrawVerdict::kPanel) endPanelOverride(self);
     if (self == g_state->ownerCtx) pixelProbeAfterEye(g_state, self, count, 1, false);
 }
@@ -5156,7 +5201,7 @@ void STDMETHODCALLTYPE hookedDrawIndexed(ID3D11DeviceContext* self, UINT count,
     // F45 (TEMPORARY instrument): a non-instanced draw reads instance stream entry 0 (the marker probe's record match); staging copies only.
     if (nativeOnFootMarkerProbeLive() && self == g_state->ownerCtx) nativeOnFootMarkerTee(self, 1, 0, 'I', count, startIndex, baseVertex);
     if (self == g_state->ownerCtx) { temporalPassCountDraw(); if (temporalPassWantsDraw()) temporalPassNoteDraw(self); }
-    DrawClock clock;
+    DrawClock clock('I');
     ++g_state->thunkHits[kHitDrawIndexed];
     noteStaleForward(kSlotDrawIndexed,
                      reinterpret_cast<const void*>(g_state->realDrawIndexed),
@@ -5164,26 +5209,36 @@ void STDMETHODCALLTYPE hookedDrawIndexed(ID3D11DeviceContext* self, UINT count,
     DrawArgs args;
     args.start = startIndex;
     args.base = baseVertex;
+    clock.mark(drawstep::kPre);
     const DrawVerdict v = beginPanelOverride(self, 'I', count, 1, args);
+    clock.mark(drawstep::kVRest);
     const bool fast = drawPathFast(v);   // draw_fast_path.h
-    if (!fast && v == DrawVerdict::kNone && self == g_state->ownerCtx) engineVelocityBeforeDraw(self, g_state->rtv0Eye);
+    if (!fast && v == DrawVerdict::kNone && self == g_state->ownerCtx) {
+        engineVelocityBeforeDraw(self, g_state->rtv0Eye);
+        clock.mark(drawstep::kEngineVelocity);
+    }
     if (self == g_state->ownerCtx) pixelProbeBefore(g_state, self);
     if (g_vrWorldWants && self == g_state->ownerCtx) vrWorldRouteDraw(self);
+    clock.mark(drawstep::kProbes);
     if (fast) {
         if (!(self == g_state->ownerCtx && uiLayerIssueBlocked())) {
             const int64_t r0 = clock.on ? qpcNow() : 0;
             g_state->realDrawIndexed(self, count, startIndex, baseVertex);
+            clock.stepDraw();
             if (clock.on) clock.realCall(r0);
         }
     } else forwardWithVerdict(self, v, 'I', count, 1, args, [&](AlteredDraw altered) {
+        clock.markForward();
         const int64_t r0 = clock.on ? qpcNow() : 0;
         {
             GpuCensusAlteredScope timed(self, altered);   // the game's own draw, and only it (gpu_census.h)
             g_state->realDrawIndexed(self, count, startIndex, baseVertex);
         }
+        clock.stepDraw();
         if (clock.on) clock.realCall(r0);
         return true;
     });
+    if (!fast) clock.markForward();
     if (v == DrawVerdict::kPanel) endPanelOverride(self);
     if (self == g_state->ownerCtx) pixelProbeAfterEye(g_state, self, count, 1, false);
 }
@@ -5235,17 +5290,20 @@ void STDMETHODCALLTYPE hookedDrawInstanced(ID3D11DeviceContext* self, UINT perIn
     if (self == g_state->ownerCtx) { temporalPassCountDraw(); if (temporalPassWantsDraw()) temporalPassNoteDraw(self); }
     noteStaleForward(kSlotDrawInstanced, reinterpret_cast<const void*>(g_state->realDrawInstanced),
                      "DrawInstanced");
-    DrawClock clock;
+    DrawClock clock('N');
     // See hookedDraw: the start vertex, before the call that reads it.
     if (quadProbeWants()) g_state->qsBaseVertex = static_cast<INT>(startVertex);
     DrawArgs args;
     args.base = static_cast<int32_t>(startVertex);
     args.startInstance = startInstance;
+    clock.mark(drawstep::kPre);
     const DrawVerdict v = beginPanelOverride(self, 'N', perInstance, instances, args);
+    clock.mark(drawstep::kVRest);
     const bool fast = drawPathFast(v);   // draw_fast_path.h
     if (!fast && v == DrawVerdict::kNone && self == g_state->ownerCtx) {
         engineVelocityBeforeDraw(self, g_state->rtv0Eye);
         engineVelocityNoteSkinDraw(self, startInstance, instances);   // F2: a skinned family's draw lists the instance entries it reads
+        clock.mark(drawstep::kEngineVelocity);
     }
     if (self == g_state->ownerCtx) pixelProbeBefore(g_state, self);
     if (g_vrWorldWants && self == g_state->ownerCtx) vrWorldRouteDraw(self);   // the tone is a DrawInstanced triangle: the route's trigger
@@ -5255,22 +5313,27 @@ void STDMETHODCALLTYPE hookedDrawInstanced(ID3D11DeviceContext* self, UINT perIn
     const UINT drawn = g_state->glareClamp && g_state->glareClamp < instances
                            ? g_state->glareClamp
                            : instances;
+    clock.mark(drawstep::kProbes);
     if (fast) {
         if (!(self == g_state->ownerCtx && uiLayerIssueBlocked())) {
             const int64_t r0 = clock.on ? qpcNow() : 0;
             g_state->realDrawInstanced(self, perInstance, drawn, startVertex, startInstance);
+            clock.stepDraw();
             if (clock.on) clock.realCall(r0);
         }
     } else forwardWithVerdict(self, v, 'N', perInstance, drawn, args, [&](AlteredDraw altered) {
+        clock.markForward();
         const int64_t r0 = clock.on ? qpcNow() : 0;
         {
             GpuCensusAlteredScope timed(self, altered);   // the game's own draw, and only it (gpu_census.h)
             g_state->realDrawInstanced(self, perInstance, drawn, startVertex,
                                        startInstance);
         }
+        clock.stepDraw();
         if (clock.on) clock.realCall(r0);
         return true;
     });
+    if (!fast) clock.markForward();
     if (v == DrawVerdict::kPanel) endPanelOverride(self);
     if (self == g_state->ownerCtx) pixelProbeAfterEye(g_state, self, perInstance, drawn, false);
 }
@@ -5310,7 +5373,7 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
     if (self == g_state->ownerCtx) { temporalPassCountDraw(); if (temporalPassWantsDraw()) temporalPassNoteDraw(self); }
     noteStaleForward(kSlotDrawIndexedInstanced, reinterpret_cast<const void*>(g_state->realDrawIndexedInstanced),
                      "DrawIndexedInstanced");
-    DrawClock clock;
+    DrawClock clock('X');
     // The rect deriver's capture runs INSIDE beginPanelOverride (the
     // chrome tracker's matched branch), so its draw-args stash must land
     // before the call.
@@ -5328,7 +5391,9 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
     args.start = startIndex;
     args.base = baseVertex;
     args.startInstance = startInstance;
+    clock.mark(drawstep::kPre);
     const DrawVerdict v = beginPanelOverride(self, 'X', perInstance, instances, args);
+    clock.mark(drawstep::kVRest);
     // F18 (TEMPORARY, fix.native_on_foot_body_cull; native_on_foot.h): the local player's third-person torso drawn with the game's
     // rasterizer state cloned at another CullMode, and the game's put back after forwardWithVerdict. A wrapper, not a DrawVerdict: a verdict
     // would take the draw off engine-record velocity's verdict-free path just below and change what this test measures. Matched here, right
@@ -5344,9 +5409,12 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
         engineVelocityBeforeDraw(self, g_state->rtv0Eye);
         engineVelocityNoteSkinDraw(self, startInstance, instances);   // F2: a skinned family's draw lists the instance entries it reads
     }
+    clock.mark(drawstep::kEngineVelocity);   // the body-cull begin and the engine velocity calls end here (the X thunk has no fast path)
     if (self == g_state->ownerCtx) pixelProbeBefore(g_state, self);
     if (g_vrWorldWants && self == g_state->ownerCtx) vrWorldRouteDraw(self);
+    clock.mark(drawstep::kProbes);
     forwardWithVerdict(self, v, 'X', perInstance, instances, args, [&](AlteredDraw altered) {
+        clock.markForward();
         const int64_t r0 = clock.on ? qpcNow() : 0;
         {
             // The game's own draw, and only it (gpu_census.h): the weapon and screen motion
@@ -5355,6 +5423,7 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
             g_state->realDrawIndexedInstanced(self, perInstance, instances, startIndex,
                                               baseVertex, startInstance);
         }
+        clock.stepDraw();
         // The weapon's temporal-AA motion vectors, from the pool the draw just read.
         if (self == g_state->ownerCtx && !g_state->rtv0Eye &&
             weaponMotionWants(bindingShaderHash(BindSlot::Vs))) {
@@ -5362,6 +5431,9 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
             weaponMotionDraw(self, g_state->realDrawIndexedInstanced, perInstance, instances,
                              startIndex, baseVertex, startInstance);
         }
+        clock.mark(drawstep::kWeapon);
+        // The whole clock's `real` interval spans the game's draw AND the weapon motion pass above (it always has); the steps
+        // mode splits them.
         if (clock.on) clock.realCall(r0);
         if(self==g_state->ownerCtx) {
             // ORDERED BY COST, not by narrative. The common case here is an
@@ -5379,6 +5451,7 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
             const bool eyeGeometry = g_state->rtv0Eye && perInstance && instances;
             const uint64_t sceneVs = eyeGeometry ? bindingShaderHash(BindSlot::Vs) : 0;
             const bool recognisedScene = eyeGeometry && glitchFrameIsSceneDraw(sceneVs);
+            clock.mark(drawstep::kPostRest);   // the predicates end here
             int temporalEye = -1;
             if (recognisedScene && (temporalPassWantsRigidDraw(0) ||
                                     temporalPassWantsRigidDraw(1))) {
@@ -5397,6 +5470,7 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
                 temporalPassNoteRigidDraw(temporalEye, scene, sceneVs);
                 if(scene)scene->Release();
             }
+            clock.mark(drawstep::kPostRigid);   // the rigid-draw query ends here
             // The VR camera census (vr_camera_census.h): at the 2D screen's composite, once an eye. g_vrWorldWants is true
             // whenever the census is wanted, so with the key off this is one load of a false bool.
             if (g_vrWorldWants && vrCameraCensusWanted()) cameraCensusEyeDraw(self);
@@ -5404,6 +5478,7 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
             // profile with the key auto; with the distance override applied to THIS draw its constants carry the scaled distance.
             if (eyeGeometry && vscreenFootprintWanted())
                 footprintEyeDraw(self, v == DrawVerdict::kPanel ? g_state->distanceScale : 1.0f, baseVertex, startInstance);
+            clock.mark(drawstep::kPostRest);   // the camera census and the footprint end here
             // The VR world route re-issues this 2D screen composite into the eye's layer right after the game's
             // own issue (ui_layer.h), and the door runs layer-only for the eye: the per-eye motion reissues below
             // are unused while the route owns it (0.24 ms), so they are skipped -- but the RECOGNITION still runs.
@@ -5423,9 +5498,11 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
                 screenMotionUiDraw(self,g_state->realDrawIndexedInstanced,perInstance,instances,startIndex,baseVertex,startInstance);
                 screenMotionDraw(self,g_state->realDrawIndexedInstanced,perInstance,instances,startIndex,baseVertex,startInstance);
             }
+            clock.mark(drawstep::kPostScreen);   // the screen motion's recognition and passes end here
         }
         return true;  // the original draw was issued
     });
+    clock.markForward();   // forwardWithVerdict's return
     if (bodyCull) nativeOnFootBodyCullEnd(self);   // F18 (TEMPORARY): the game's rasterizer state back
     if (v == DrawVerdict::kPanel) endPanelOverride(self);
     if (v == DrawVerdict::kIntroPanel) introPanelEndDraw(self);

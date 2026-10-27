@@ -1,6 +1,7 @@
 #include "perf_monitor.h"
 #include "config_refresh_line.h"
 #include "cross_profile_cost.h"
+#include "draw_step_clock.h"   // the draw hook CPU by step lines (built 2026-10-27, temporary)
 #include "engine_motion_cpu.h"
 #include "frame_ticks.h"
 #include "gpu_frame_timing.h"
@@ -72,6 +73,8 @@ constexpr uint64_t kSlowEveryMs = 1000;
 constexpr uint64_t kGraceMs = 2000;
 // One frame in sixteen samples the draw hooks.
 constexpr uint32_t kDrawSampleEvery = 16;
+// The steps-mode draws of the window (draw_step_clock.h): written from the drawing thread, read and reset at the 1800-frame edge.
+drawstep::Window g_drawSteps;
 // The drop log line: at most one every five seconds, sixty a session.
 constexpr uint64_t kDropLogEveryMs = 5000;
 constexpr uint32_t kDropLogMax = 60;
@@ -1218,6 +1221,24 @@ void perfMonitorFrame(ID3D11Device* dev) {
             double(s.drawWindowMaxMs), s.drawWindowSamples, unsigned(kDrawSampleEvery),
             unsigned(kPerfMonitorDrawTimeStride), unsigned(kPerfMonitorDrawTimeStride),
             vScreenAaOffForDraws() ? "off" : "on", vScreenEyeDrawsThisFrame());
+        // Built 2026-10-27, a temporary instrument for the AA-on draw-hook increment (docs\engine-render-performance-2026-09-19.md's
+        // 2026-10-27 entry): the same window, split by step. The clock floor is measured here, as the window closes, in the CPU state
+        // it just ran in; the line is two lines because one holds about 1170 characters.
+        {
+            drawstep::FormatInfo info;
+            info.endFrame = s.frameNo;
+            info.sampledFrames = s.drawWindowSamples;
+            info.stride = kPerfMonitorDrawTimeStride;
+            info.ticksPerSecond = qpcFrequency();
+            info.floorNs = drawstep::calibrateMarkNs([] { return qpcNow(); }, info.ticksPerSecond);
+            info.aaOn = !vScreenAaOffForDraws();
+            char stepLine[1200];
+            drawstep::formatStepsLine(stepLine, sizeof(stepLine), g_drawSteps, info);
+            Log::get().note("%s", stepLine);
+            drawstep::formatCallsLine(stepLine, sizeof(stepLine), g_drawSteps, info);
+            Log::get().note("%s", stepLine);
+            g_drawSteps.reset();
+        }
         s.drawWindowMs = 0.0; s.drawWindowMaxMs = 0.0f; s.drawWindowSamples = 0;
         // Written every window, quiet or not, so a window with no refresh in it (all zeros) can be told from a build that does not have this line.
         const uint32_t reloads = s.cfgReloads.exchange(0, std::memory_order_relaxed);
@@ -1311,6 +1332,10 @@ void perfMonitorNotePresentWait(double ms) {
 void perfMonitorDrawTicks(int64_t wholeTicks, int64_t realTicks) {
     if (wholeTicks > 0) g_s.drawWholeTicks += wholeTicks;
     if (realTicks > 0) g_s.drawRealTicks += realTicks;
+}
+
+void perfMonitorDrawSteps(char kind, const drawstep::StepAccum& run) {
+    g_drawSteps.add(kind, run);
 }
 
 void perfMonitorSetActive(bool active) {

@@ -56,9 +56,9 @@
   C"); applicationMs as a frame-fit signal, it omits the post-submit
   phase ("Shadow flight 1").
 
-* **Next (2026-10-27 pad leg, last entry):** pool copy 0.23-0.28 ms, no
-  incremental upload. AA on adds ~1.8 ms of draw-hook CPU at ~22k eye
-  draws, ~1.4 ms unattributed: clock each per-draw step first.
+* **Next (2026-10-27, last entry):** no incremental pool upload (0.23
+  ms). AA on adds ~1.8 ms of draw hooks, ~1.4 unattributed: the step
+  clock is BUILT, NOT FLOWN; fly the same pad leg, AA on/off.
 
 ## Frame budget philosophy
 
@@ -3495,3 +3495,51 @@ Next: attribute the roughly 1.4 ms inside the AA-on draw path before
 any cut is proposed. That means clocking each per-draw step (the X
 thunk's verdict, the binding-generation check, the tees) on the same
 parked leg.
+
+**Step clock built (2026-10-27, same branch), NOT FLOWN.**
+`src\d3d11\draw_step_clock.h` (temporary, no key) clocks the VR draw
+thunks step by step on the draws half a stride from the ones the
+`draw hook CPU:` line clocks, so that line keeps its meaning. On a
+sampled frame the whole clock still takes draw 0 of each 64; the step
+clock takes draw 32.
+
+- **Steps.** Each mark ends a step. There are 26 steps:
+  - pre;
+  - eight verdict sub-steps (`v:hud/fss`, `v:context`, `v:particles`,
+    `v:eye-test`, `v:offscreen`, `v:ui-depth`, `v:census`, `v:fixes`)
+    and `v:rest`;
+  - `engine-vel`, `probes`;
+  - the forward scope before the draw (`f:scopes`, `f:ui-layer`,
+    `f:verdict-begin`, `f:before`);
+  - `GAME` (the game's own draw, excluded), `reissue`, `weapon`;
+  - the X draw's post-draw work (`p:rigid`, `p:screen`, `p:rest`);
+  - the forward scope after the draw (`f:layer-end`, `f:ui-depth`,
+    `f:after`);
+  - tail.
+- **Clock floor.** Each step is printed net of its marks' clock reads.
+  The floor is calibrated as each window closes.
+- **Cost to other draws.** Every other draw pays one branch per thunk
+  mark and one plain load per sub-mark. The sub-marks test a
+  process-wide count of live step clocks before they read the
+  thread-local, so the whole-clocked draws add almost nothing to the
+  old line.
+- **Two new lines** after `draw hook CPU:` in each 1800-frame window:
+  - `draw hook CPU by step:` gives net ms a frame per step, EDVR's sum
+    and the game's draw;
+  - `draw hook CPU by step, calls and kinds:` gives calls a frame per
+    step, and draws and EDVR ms a frame for D, I, N and X.
+- **Cross-check.** The old line should read near EDVR's sum less
+  `weapon`, which the old clock counts with the game's draw. If it does
+  not, the floor correction is off and the split is not trusted.
+- **Rig.** aa_off_test, 129 checks.
+
+Flight: the same leg on Steam. Park at a settlement pad, head still.
+AA on for at least 90 s, F7 for AA off for at least 90 s, F7 for AA on
+for at least 60 s. Read the three lines per window after `edvr_log.py
+--expect-build HEAD`.
+
+What to read:
+- The steps whose net figure moves between AA on and AA off hold the
+  increment.
+- The D/I/N against X split says whether it is in the X thunk, which
+  has no AA-off fast path, or in the fast-path thunks.
