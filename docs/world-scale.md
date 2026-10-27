@@ -2,31 +2,34 @@
 
 ## Status
 
-- **State (2026-10-27):** design only. Nothing is built or flown. No issue
-  yet.
+- **State (2026-10-27):** phase 1 BUILT, NOT FLOWN. Branch
+  `claude/openxr-world-scale-option-b1032a`: 50426f7c (the feature),
+  c023d9d3 (key moved to `[visual]`), full build green. F1 is to be flown
+  on the Epic copy. No issue yet.
 - **What it is:** OpenXR Toolkit's "World scale" changes only the distance
   between the two eye cameras the game renders with, about their midpoint.
   A larger percentage moves the eyes closer together and makes the world
   look bigger. Head movement, orientation and FOV are untouched. The real
   eye poses go to the compositor (see "What OpenXR Toolkit does").
-- **Recommendation:** EDVR offers the same thing natively as one live key,
-  `world_scale` (percent, default 100). Phase 1 scales the eye separation
-  only, matching the Toolkit. It has to be applied in one place, the
-  geometry snapshot, so that Elite's answer and the temporal pass (DLSS,
-  FSR, XeSS motion) agree. Every gate that measures Elite's eye pair in
-  fixed centimetres scales with it. The layer pose stays the located view,
-  so the Toolkit's "restore before xrEndFrame" step comes for free.
+- **What EDVR built:** one live key, `visual.world_scale` (percent, 50..200,
+  default 100), on the Visual page of the in-headset menu. VR only; the
+  flat Visual tab does not list it. Phase 1 scales the eye separation only,
+  matching the Toolkit. It is applied in one place, the geometry snapshot,
+  so Elite's answer and the temporal pass (DLSS, FSR, XeSS motion) agree.
+  The gates on Elite's eye pair scale with it. The layer pose stays the
+  located view, so the Toolkit's "restore before xrEndFrame" step is free.
 - **Why EDVR and not the Toolkit:** the Toolkit was discontinued in 2024.
   It reached Elite only through OpenComposite. It is unverified whether it
   still loads on EDVR's own OpenXR session, or whether SteamVR's per-app
   world scale override reaches Elite now that Elite talks to EDVR.
-- **Decisions for Sean:**
-  - D1: the menu page. The VR menu has `performance`, `fixes`,
-    `native_on_foot` and `hotkeys`. None fits; a new `view` page would be
-    the honest home.
-  - D2: the range. Proposed 50..200 %, step 1. The Toolkit allowed 0.1..1000 %.
-  - D3: whether phase 2 (head translation scaled too) is wanted at all. Its
-    answer comes from flight F1.
+- **Decided (Sean, 2026-10-27):** range 50..200 %, step 1. The menu reuses
+  the Visual category: VR's menu gained a Visual page holding World scale,
+  Intro movie, Intro background picture and Screen curve, which left the
+  Fixes page. Star glow is flat only (`menu flat_visual`).
+- **Open:** D3, whether phase 2 (head translation scaled too) is wanted.
+  F1 answers it. Sean saw Intro movie missing from the flat Visual tab;
+  the code lists it there since 5cde1d76 (10-22), which the Epic build
+  had. Cause not found from the code; needs the install and a look.
 - **Unknowns, answered by F1:**
   - U1: whether Elite re-reads `GetEyeToHeadTransform` every frame on the
     native path. The ~12 calls per frame were measured through the legacy
@@ -36,8 +39,8 @@
     Its effect at a non-100 % value is unknown.
   - U3: whether leaning in the cockpit "swims" at 130 % with head
     translation left at 1:1.
-- **Next:** build phase 1 on `claude/openxr-world-scale-option-b1032a`, then
-  fly F1 below.
+- **Next:** fly F1 below on the Epic install. Expected log lines are in
+  "Instrumentation"; `edvr_log.py --health` has a "world scale" rule.
 
 ## What OpenXR Toolkit does
 
@@ -91,26 +94,28 @@ another.
 
 ### The value
 
-`world_scale = 100`, in percent. Above 100 the world looks bigger, below
-100 smaller. These are the Toolkit's and SteamVR's direction and units, so
-a player's old number carries over. `100` is the game's own scale and
-changes nothing.
+`world_scale = 100` in `[visual]`, in percent. Above 100 the world looks
+bigger, below 100 smaller. These are the Toolkit's and SteamVR's direction
+and units, so a player's old number carries over. `100` is the game's own
+scale and changes nothing.
 
 ```
-# ui: World scale | range 50..200 | step 1 | unit % | recommended 100 | live | menu <D1>
+# ui: World scale | range 50..200 | step 1 | unit % | recommended 100 | live | menu visual
 world_scale = 100
 ```
 
-VR only; it stays off the flat allow-list.
+VR only; it stays off the flat allow-list. A live ini without the line
+shows 100 in the menu, and a change from the menu appends it to `[visual]`.
 
 ### Carrying it to the runtime
 
 `Config` lives in the d3d11 half and reloads live
 (`vscreen.cpp:6002`). The OpenXR half never reads it (its own
 `edvr_openxr.ini` is read once at start). The value therefore travels the
-way `fix.now_pose` does (`native_frame.cpp:627`). It is a new field in
-`EdvrNativeFrameOutput` (`common/native_frame.h:125-195`, with a step on
-its version ladder at `:304-313`). The runtime latches it at
+way `fix.now_pose` does (`native_frame.cpp:627`). It is
+`worldScalePercent` in `EdvrNativeFrameOutput`, the last word of the
+retired terrain guard's, so the struct keeps its size; frame version 11
+carries it, and an older answer reads 100. The runtime latches it at
 `WaitGetPoses` into the geometry publication, next to `tangentShift`
 (`system_publication.h:29,62`, published at `native_runtime_host.h:1698`).
 One frame has one value, however many times Elite asks within it.
@@ -149,11 +154,17 @@ constant:
   a 6.3 cm fallback (`native_on_foot.cpp:10966`,
   `native_on_foot_core.h:2836`). It must use Elite's, or on-foot stereo
   ends up at a different scale from the cockpit.
-- The camera chooser's "eye pair six cm apart" (`common/camera_pose_math.h:21-23`,
-  `camera_nearest.h`).
+- The F126 pin's eye pair, 5..8 cm (`native_on_foot_f126.h`
+  `cycloFromRows`), found during the build.
 
-The jump guard's step thresholds (3 cm, 1 cm, 5 cm veto) measure head
-motion. Phase 1 does not scale head motion, so they stay.
+As built, each window is multiplied by `worldScaleEyeFactor` of
+`nativeFrameWorldScale()` (`common/world_scale.h`), the percent the runtime
+was last told; at 100 the result is bit-identical. At a change the gates
+can be a frame or two out of step: a brief ADS refusal at worst.
+
+The camera chooser's "eye pair six cm apart" turned out to be a comment
+only. The jump guard's step thresholds (3 cm, 1 cm, 5 cm veto) measure
+head motion. Phase 1 does not scale head motion, so they stay.
 
 ### What stays real
 
@@ -172,12 +183,22 @@ Seat memory, recentre and the published physical head also stay real.
 Ask what the log shows if the code never ran: no `world_scale` lines and an
 ICD equal to the located one. The feature applying looks different:
 
-- One line per value change: `world_scale: 130% located_icd=63.4mm elite_icd=48.8mm`.
-- A per-frame count of `GetEyeToHeadTransform` answers, logged once
-  after each change. If Elite cached the transform at start (U1), the log
-  shows zero answers at the new value, and the slider needs a restart to
-  take effect.
-- A `--health` tag, so `edvr_log.py --health` says ran and applied.
+As built, in the runtime log (`nativeTracePrintf`):
+
+- On each change of the latched value:
+  `world_scale: 130% located_icd=63.4mm elite_icd=48.8mm`.
+- On the first answer to `GetEyeToHeadTransform` that carries the new
+  value: `world_scale: elite read eye transform at 130% (geometry sequence N)`.
+  If Elite cached the transform at start (U1), this line never follows the
+  change line, and the slider needs a restart to take effect.
+
+In the graphics log: `world scale: 130% (live, visual.world_scale; 100%
+before)` when the key changes, and `native temporal: history reset, the eye
+separation moved from ...` when the temporal pass drops its history.
+
+`edvr_log.py --health` has a "world scale" rule that reads the runtime
+log: OK when every latched value was followed by a read at that value,
+NEVER APPLIED when one was not, silent when the value never left 100.
 
 ## Not in phase 1: head translation
 
