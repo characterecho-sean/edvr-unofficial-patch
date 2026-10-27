@@ -18,6 +18,7 @@
 #include "../common/runtime_profile.h"
 #include "../common/log.h"
 #include "../common/periodic_work.h"
+#include "journal_loadout_reader.h"   // F140: the suit loadout's weapon slots (their own reader of the current journal; journal_loadout.h parses)
 
 namespace edvr {
 namespace {
@@ -288,6 +289,7 @@ struct Session {
     // few misses in a row.
     uint32_t     statusMisses = 0;
     JournalStatusContentRevision statusContent;
+    loadout::Reader loadoutReader;   // F140: the worker's own
     // The flat profile's GuiFocus note (pollStatus): the last value noted, and how many notes were written (capped).
     bool         guiNoted = false;
     bool         guiNotedPresent = false;
@@ -343,6 +345,7 @@ void closeFile(Session& s) {
     }
     s.offset = 0;
     s.carryLen = 0;
+    s.loadoutReader.close();   // F140
 }
 
 // FILETIME is a 64-bit count in two halves; the decision below wants one
@@ -722,6 +725,9 @@ bool pass(Session& s, char* buf) {
         }
         if (s.handle == INVALID_HANDLE_VALUE) return true;   // nothing yet
     }
+
+    // F140: the suit loadout's weapon slots, from the first byte of this same journal (journal_loadout_reader.h says why it is not the tail below).
+    s.loadoutReader.poll(s.dir, s.file);
 
     // Read whatever has appeared since last time.
     {

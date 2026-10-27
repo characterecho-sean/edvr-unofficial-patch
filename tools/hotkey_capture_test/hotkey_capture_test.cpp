@@ -1833,8 +1833,9 @@ void testLegacyOnFootRowsStayOutOfMenu() {
     int nativePageRows = 0;
     for (int i = 0; i < kCount; ++i)
         if (strcmp(kMenuRows[i].page, "native_on_foot") == 0) ++nativePageRows;
-    check(nativePageRows == 18, "the Native on foot page has 18 rows (F127: 21 rows went to edvr.ini and the installer's window, and Reticle follows was retired; "
-                                "F128: Visor axis (test) was retired with the correction always on; F139: ADS sight height (test) was added under Aiming down sights)");
+    check(nativePageRows == 22, "the Native on foot page has 22 rows (F127: 21 rows went to edvr.ini and the installer's window, and Reticle follows was retired; "
+                                "F128: Visor axis (test) was retired with the correction always on; F139: ADS sight height (test) was added under Aiming down sights; "
+                                "F140: the four Weapon UI trims were added under HUD)");
     // F127: the page's order and its five headings. The switch is always first; look and aim, then aiming down sights, then body and view, the HUD last. kMenuRows is in
     // edvr.ini order; the group is the ini's heading block above the key, which the page shows as a heading.
     {
@@ -1858,6 +1859,10 @@ void testLegacyOnFootRowsStayOutOfMenu() {
             {"native_on_foot_hud_element_scale", "HUD"},
             {"native_on_foot_hud_spread", "HUD"},
             {"native_on_foot_hud_follow", "HUD"},
+            {"native_on_foot_weapon_ui_forward_cm", "HUD"},
+            {"native_on_foot_weapon_ui_left_cm", "HUD"},
+            {"native_on_foot_weapon_ui_up_cm", "HUD"},
+            {"native_on_foot_weapon_ui_toward_eye_cm", "HUD"},
         };
         constexpr int kWant = static_cast<int>(sizeof(want) / sizeof(want[0]));
         int at = 0;

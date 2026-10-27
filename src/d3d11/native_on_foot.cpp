@@ -58,6 +58,7 @@
 #include "native_on_foot_f137.h"   // F137: a virtual neck under mouse look (pure parts)
 #include "native_on_foot_f138.h"   // F138: the view holds its height over the neck while the look is pitched (pure parts)
 #include "native_on_foot_f139.h"   // F139: each weapon's sight on the ADS line (the table, the live trim, the shift; pure parts)
+#include "native_on_foot_f140.h"   // F140: the weapon readout placed per weapon (the table by item and scope, the live trims; pure parts)
 #include "xinput_watch.h"          // F135: the pad's Start and Back edges, evidence for the menu probe only
 #include "native_on_foot_f109.h"   // F109: look to aim on foot, the player's own turn in ADS, snap or smooth turning (pure parts)
 #include "native_on_foot_f129.h"   // F129: look to aim reads its turn from the player's own look processor; the look path instrument (pure parts)
@@ -236,16 +237,10 @@ std::atomic<bool> g_f93SteadyKey{true};
 // F93b (TEMPORARY A/B, live from the next press): fix.native_on_foot_ads_eye_hold. off (the default): in ADS the eye follows the head's own translation and the sight lock
 // keeps it on the sight line; on: F62b's position lock, the head's translation since the press taken out of the eye (through the eye alignment, two frames late).
 std::atomic<bool> g_f93HoldKey{false};
-// F90 (TEMPORARY, live): the pistol's readout in the weapon's frame, fix.native_on_foot_pistol_readout_forward_cm / _left_cm / _up_cm / _toward_eye_cm (read by
-// the render thread's decision at each pistol readout draw).
-std::atomic<float> g_f90ForwardCm{static_cast<float>(nofoot::f90::kForwardDefaultCm)}, g_f90LeftCm{static_cast<float>(nofoot::f90::kLeftDefaultCm)},
-    g_f90UpCm{static_cast<float>(nofoot::f90::kUpDefaultCm)}, g_f90TowardCm{static_cast<float>(nofoot::f90::kTowardDefaultCm)};
-double g_f90KeyLast[4] = {};   // forward, left, up, toward eye: the values last logged (frame thread)
-// F92 (TEMPORARY, live): the rifle's ADS readout in the primary weapon's frame, fix.native_on_foot_rifle_ads_readout_forward_cm / _left_cm / _up_cm /
-// _toward_eye_cm (read by the render thread's decision at each rifle ADS readout draw).
-std::atomic<float> g_f92ForwardCm{static_cast<float>(nofoot::f90::kRifleForwardDefaultCm)}, g_f92LeftCm{static_cast<float>(nofoot::f90::kRifleLeftDefaultCm)},
-    g_f92UpCm{static_cast<float>(nofoot::f90::kRifleUpDefaultCm)}, g_f92TowardCm{static_cast<float>(nofoot::f90::kRifleTowardDefaultCm)};
-double g_f92KeyLast[4] = {};   // forward, left, up, toward eye: the values last logged (frame thread)
+// F140 (TEMPORARY, live): the held weapon's readout trims, fix.native_on_foot_weapon_ui_forward_cm / _left_cm / _up_cm / _toward_eye_cm, added to the weapon's table values
+// (native_on_foot_f140.h; the render thread's decision reads them at each weapon readout draw). They replace F90's four pistol keys and F92's four rifle keys, retired.
+std::atomic<float> g_f140TrimCm[4]{};   // static storage: zero
+double g_f140TrimLast[4] = {};   // forward, left, up, toward eye: the values last logged (frame thread)
 std::atomic<int> g_adsYawSign{1}, g_adsPitchSign{1};          // the sign keys (TEMPORARY): 1, -1 or 0 (that axis off)
 std::atomic<bool> g_adsHookOn{false};                         // the update hook takes the F62b path (the frame thread: engaged or releasing)
 std::atomic<float> g_adsInYaw{0.0f}, g_adsInPitch{0.0f};      // the input queued for the next look update; the update hook takes it whole
@@ -793,6 +788,25 @@ void retiredKeysNote(const Config& cfg, bool first) {
     if (cfg.getString("fix.native_on_foot_visor_axis", "on") != "on")
         Log::get().note("native on foot: fix.native_on_foot_visor_axis is retired (F128): ignored (the visor frame always follows each eye's optical axis in outer mode; "
                         "eye-trust checks and invalid-output protection remain active)");
+    // F140: F90's four pistol readout keys and F92's four rifle ADS readout keys. The weapon readout is placed per weapon from a table (native_on_foot_f140.h) whose seeds are
+    // these keys' built-in values, and fix.native_on_foot_weapon_ui_*_cm trim the held weapon's. The shipping file carries each at its last value (pistol 13, 3.5, -3, 3; rifle
+    // 0, 3.5, 0, 0); a value that differs is named once.
+    {
+        const auto named = [](const char* key, float live, float builtIn) {
+            if (std::fabs(live - builtIn) > 1e-6f)
+                Log::get().note("native on foot: %s is retired (F140): ignored (the weapon readout is placed per weapon from a table; fix.native_on_foot_weapon_ui_forward_cm, "
+                                "_left_cm, _up_cm and _toward_eye_cm trim the held weapon's; the file said %+.1f, the built-in was %+.1f)", key, static_cast<double>(live),
+                                static_cast<double>(builtIn));
+        };
+        named("fix.native_on_foot_pistol_readout_forward_cm", cfg.getFloat("fix.native_on_foot_pistol_readout_forward_cm", 13.0f), 13.0f);
+        named("fix.native_on_foot_pistol_readout_left_cm", cfg.getFloat("fix.native_on_foot_pistol_readout_left_cm", 3.5f), 3.5f);
+        named("fix.native_on_foot_pistol_readout_up_cm", cfg.getFloat("fix.native_on_foot_pistol_readout_up_cm", -3.0f), -3.0f);
+        named("fix.native_on_foot_pistol_readout_toward_eye_cm", cfg.getFloat("fix.native_on_foot_pistol_readout_toward_eye_cm", 3.0f), 3.0f);
+        named("fix.native_on_foot_rifle_ads_readout_forward_cm", cfg.getFloat("fix.native_on_foot_rifle_ads_readout_forward_cm", 0.0f), 0.0f);
+        named("fix.native_on_foot_rifle_ads_readout_left_cm", cfg.getFloat("fix.native_on_foot_rifle_ads_readout_left_cm", 3.5f), 3.5f);
+        named("fix.native_on_foot_rifle_ads_readout_up_cm", cfg.getFloat("fix.native_on_foot_rifle_ads_readout_up_cm", 0.0f), 0.0f);
+        named("fix.native_on_foot_rifle_ads_readout_toward_eye_cm", cfg.getFloat("fix.native_on_foot_rifle_ads_readout_toward_eye_cm", 0.0f), 0.0f);
+    }
 }
 // The key, re-read when the configuration changes (Config::generation()). Read by its literal name (tools/gen_settings_schema.py).
 void readKey() {
@@ -1081,69 +1095,26 @@ void readKey() {
                             : "off -- in ADS the eye follows the head's own translation and the sight lock keeps it on the sight line");
         g_f93HoldKey.store(hold, std::memory_order_relaxed);
     }
-    // F90 (TEMPORARY, live, the Native on foot page's "Pistol readout forward / left / up / toward you"): where the pistol's readout sits, from the game's place
-    // (over the rear sight), in the pistol's own frame: along the barrel, across it to the left, along its up, and toward your eye on the line of sight. 0, 0, 0, 0
-    // leave it where the game puts it. The pilot's values become the behaviour.
+    // F140 (TEMPORARY, live, the Native on foot page's "Weapon UI forward / left / up / toward you"): the held weapon's readout trims, in cm, added to the weapon's table
+    // values (native_on_foot_f140.h) in the weapon's frame: along the barrel, across it to the left, along its up, and toward your eye on the line of sight. 0, 0, 0, 0 leave
+    // the table's placement. They replace F90's four pistol keys and F92's four rifle keys (retiredKeysNote). The pilot's tuned totals go into the table.
     {
-        namespace f90 = nofoot::f90;
-        const double v[4] = {
-            nofoot::f88::clampCm(static_cast<double>(cfg.getFloat("fix.native_on_foot_pistol_readout_forward_cm", static_cast<float>(f90::kForwardDefaultCm))),
-                                 f90::kForwardMinCm, f90::kForwardMaxCm),
-            nofoot::f88::clampCm(static_cast<double>(cfg.getFloat("fix.native_on_foot_pistol_readout_left_cm", static_cast<float>(f90::kLeftDefaultCm))), f90::kLeftMinCm,
-                                 f90::kLeftMaxCm),
-            nofoot::f88::clampCm(static_cast<double>(cfg.getFloat("fix.native_on_foot_pistol_readout_up_cm", static_cast<float>(f90::kUpDefaultCm))), f90::kUpMinCm,
-                                 f90::kUpMaxCm),
-            nofoot::f88::clampCm(static_cast<double>(cfg.getFloat("fix.native_on_foot_pistol_readout_toward_eye_cm", static_cast<float>(f90::kTowardDefaultCm))),
-                                 f90::kTowardMinCm, f90::kTowardMaxCm)};
-        if (first || v[0] != g_f90KeyLast[0])
-            Log::get().note("native on foot pistol readout (F90, TEMPORARY): fix.native_on_foot_pistol_readout_forward_cm = %+.1f cm -- positive moves the pistol's readout "
-                            "toward the muzzle along the barrel, from the game's place over the rear sight (range %.0f..%.0f)", v[0], f90::kForwardMinCm, f90::kForwardMaxCm);
-        if (first || v[1] != g_f90KeyLast[1])
-            Log::get().note("native on foot pistol readout (F90, TEMPORARY): fix.native_on_foot_pistol_readout_left_cm = %+.1f cm -- positive moves the pistol's readout to "
-                            "the left of the barrel, across it (range %.0f..%.0f)", v[1], f90::kLeftMinCm, f90::kLeftMaxCm);
-        if (first || v[2] != g_f90KeyLast[2])
-            Log::get().note("native on foot pistol readout (F90, TEMPORARY): fix.native_on_foot_pistol_readout_up_cm = %+.1f cm -- positive raises the pistol's readout along "
-                            "the pistol's up (range %.0f..%.0f)", v[2], f90::kUpMinCm, f90::kUpMaxCm);
-        if (first || v[3] != g_f90KeyLast[3])
-            Log::get().note("native on foot pistol readout (F90, TEMPORARY): fix.native_on_foot_pistol_readout_toward_eye_cm = %+.1f cm -- positive brings the pistol's "
-                            "readout toward your eye along the line of sight, so only its depth changes (range %.0f..%.0f)", v[3], f90::kTowardMinCm, f90::kTowardMaxCm);
-        std::memcpy(g_f90KeyLast, v, sizeof(v));
-        g_f90ForwardCm.store(static_cast<float>(v[0]), std::memory_order_relaxed);
-        g_f90LeftCm.store(static_cast<float>(v[1]), std::memory_order_relaxed);
-        g_f90UpCm.store(static_cast<float>(v[2]), std::memory_order_relaxed);
-        g_f90TowardCm.store(static_cast<float>(v[3]), std::memory_order_relaxed);
-    }
-    // F92 (TEMPORARY, live, the Native on foot page's "Rifle ADS readout forward / left / up / toward you"): where the rifle's ADS readout sits, from the game's
-    // place (on the receiver behind the sight), in the primary weapon's frame, the pistol readout's four moves. 0, 0, 0, 0 leave it where F91 put it.
-    {
-        namespace f90 = nofoot::f90;
-        const double v[4] = {
-            nofoot::f88::clampCm(static_cast<double>(cfg.getFloat("fix.native_on_foot_rifle_ads_readout_forward_cm", static_cast<float>(f90::kRifleForwardDefaultCm))),
-                                 f90::kForwardMinCm, f90::kForwardMaxCm),
-            nofoot::f88::clampCm(static_cast<double>(cfg.getFloat("fix.native_on_foot_rifle_ads_readout_left_cm", static_cast<float>(f90::kRifleLeftDefaultCm))),
-                                 f90::kLeftMinCm, f90::kLeftMaxCm),
-            nofoot::f88::clampCm(static_cast<double>(cfg.getFloat("fix.native_on_foot_rifle_ads_readout_up_cm", static_cast<float>(f90::kRifleUpDefaultCm))), f90::kUpMinCm,
-                                 f90::kUpMaxCm),
-            nofoot::f88::clampCm(static_cast<double>(cfg.getFloat("fix.native_on_foot_rifle_ads_readout_toward_eye_cm", static_cast<float>(f90::kRifleTowardDefaultCm))),
-                                 f90::kTowardMinCm, f90::kTowardMaxCm)};
-        if (first || v[0] != g_f92KeyLast[0])
-            Log::get().note("native on foot rifle ADS readout (F92, TEMPORARY): fix.native_on_foot_rifle_ads_readout_forward_cm = %+.1f cm -- positive moves the rifle's ADS "
-                            "readout toward the muzzle along the barrel (range %.0f..%.0f)", v[0], f90::kForwardMinCm, f90::kForwardMaxCm);
-        if (first || v[1] != g_f92KeyLast[1])
-            Log::get().note("native on foot rifle ADS readout (F92, TEMPORARY): fix.native_on_foot_rifle_ads_readout_left_cm = %+.1f cm -- positive moves the rifle's ADS "
-                            "readout to the left of the barrel, across it (range %.0f..%.0f)", v[1], f90::kLeftMinCm, f90::kLeftMaxCm);
-        if (first || v[2] != g_f92KeyLast[2])
-            Log::get().note("native on foot rifle ADS readout (F92, TEMPORARY): fix.native_on_foot_rifle_ads_readout_up_cm = %+.1f cm -- positive raises the rifle's ADS "
-                            "readout along the rifle's up (range %.0f..%.0f)", v[2], f90::kUpMinCm, f90::kUpMaxCm);
-        if (first || v[3] != g_f92KeyLast[3])
-            Log::get().note("native on foot rifle ADS readout (F92, TEMPORARY): fix.native_on_foot_rifle_ads_readout_toward_eye_cm = %+.1f cm -- positive brings the "
-                            "rifle's ADS readout toward your eye along the line of sight, so only its depth changes (range %.0f..%.0f)", v[3], f90::kTowardMinCm,
-                            f90::kTowardMaxCm);
-        std::memcpy(g_f92KeyLast, v, sizeof(v));
-        g_f92ForwardCm.store(static_cast<float>(v[0]), std::memory_order_relaxed);
-        g_f92LeftCm.store(static_cast<float>(v[1]), std::memory_order_relaxed);
-        g_f92UpCm.store(static_cast<float>(v[2]), std::memory_order_relaxed);
-        g_f92TowardCm.store(static_cast<float>(v[3]), std::memory_order_relaxed);
+        namespace f140 = nofoot::f140;
+        static const char* const kKey[4] = {"fix.native_on_foot_weapon_ui_forward_cm", "fix.native_on_foot_weapon_ui_left_cm", "fix.native_on_foot_weapon_ui_up_cm",
+                                            "fix.native_on_foot_weapon_ui_toward_eye_cm"};
+        static const char* const kWhat[4] = {"toward the muzzle along the barrel", "to the left of the barrel, across it", "along the weapon's up",
+                                             "toward your eye along the line of sight, so only its depth changes"};
+        const double v[4] = {f140::clampTrim(0, static_cast<double>(cfg.getFloat("fix.native_on_foot_weapon_ui_forward_cm", 0.0f))),
+                             f140::clampTrim(1, static_cast<double>(cfg.getFloat("fix.native_on_foot_weapon_ui_left_cm", 0.0f))),
+                             f140::clampTrim(2, static_cast<double>(cfg.getFloat("fix.native_on_foot_weapon_ui_up_cm", 0.0f))),
+                             f140::clampTrim(3, static_cast<double>(cfg.getFloat("fix.native_on_foot_weapon_ui_toward_eye_cm", 0.0f)))};
+        for (int i = 0; i < 4; ++i) {
+            if (first || v[i] != g_f140TrimLast[i])
+                Log::get().note("native on foot weapon UI trim (F140, TEMPORARY): %s = %+.1f cm -- positive moves the held weapon's readout %s, on top of its table placement "
+                                "(range %.0f..%.0f)", kKey[i], v[i], kWhat[i], f140::kTrimMinCm[i], f140::kTrimMaxCm[i]);
+            g_f140TrimLast[i] = v[i];
+            g_f140TrimCm[i].store(static_cast<float>(v[i]), std::memory_order_relaxed);
+        }
     }
     // F62b (live; F92b: a user key, the Native on foot page's "ADS: aim with head") the ADS head-aim, and its two sign keys (TEMPORARY: 1, -1, or 0 for that axis off;
     // anything else positive reads 1, negative -1).
@@ -11391,7 +11362,8 @@ struct AdsSightWin {
     double rifleAnchorShiftSum[3] = {}, rifleAnchorSpanSum = 0.0, rifleAnchorResidualMaxM = 0.0;
     // F139: the frames of the lock with a shift decided (ADS active, the lock's data fresh), those the shift was applied on or refused past the bound, those with no coherent item,
     // the frames F79's origin stood, the applied up and right summed (cm), and the last coherent item's name, table value and trim.
-    uint32_t f139Frames = 0, f139Applied = 0, f139Refused = 0, f139NoItem = 0, f139F79 = 0;
+    uint32_t f139Frames = 0, f139Applied = 0, f139Refused = 0, f139NoItem = 0, f139F79 = 0, f139ScopeUnknown = 0;
+    int f139Scope = loadout::kScopeUnknown;   // F140: the held weapon's scope state at the last coherent frame (the table row used is the no-scope one when unknown)
     double f139UpSum = 0.0, f139RightSum = 0.0, f139TableUpCm = 0.0, f139TableRightCm = 0.0, f139TrimCm = 0.0;
     char f139Item[64] = {};
     double opticYawSum = 0.0, opticPitchSum = 0.0, opticRootNdcSum[3][2] = {}, opticP14NdcSum[3][2] = {};
@@ -11503,10 +11475,11 @@ void adsSightLog(uint32_t seconds, bool steady, bool hold, bool detailed) noexce
     }
     if (w.f139Frames) {   // F139: the held weapon's sight offset (every ADS window; --health reads it): the per-item totals the tuning flight leaves for the table
         const double fn = static_cast<double>(w.f139Frames);
-        Log::get().note("native on foot ADS sight offset (F139) %u s: item %s, table up %+.1f right %+.1f cm, trim %+.1f cm, applied up %+.2f cm right %+.2f cm (mean of %u frames in "
-                        "the sights; applied on %u), F79 optic origin on %u frames, refused over the %.0f cm bound %u, no coherent item %u",
-                        seconds, w.f139Item[0] ? w.f139Item : "none", w.f139TableUpCm, w.f139TableRightCm, w.f139TrimCm, w.f139UpSum / fn, w.f139RightSum / fn, w.f139Frames,
-                        w.f139Applied, w.f139F79, 100.0 * nofoot::f139::kBoundM, w.f139Refused, w.f139NoItem);
+        Log::get().note("native on foot ADS sight offset (F139) %u s: item %s scope %s, table up %+.1f right %+.1f cm, trim %+.1f cm, applied up %+.2f cm right %+.2f cm (mean of %u "
+                        "frames in the sights; applied on %u), F79 optic origin on %u frames, refused over the %.0f cm bound %u, no coherent item %u, scope unknown on %u frames "
+                        "(the no-scope row)",
+                        seconds, w.f139Item[0] ? w.f139Item : "none", loadout::scopeName(w.f139Scope), w.f139TableUpCm, w.f139TableRightCm, w.f139TrimCm, w.f139UpSum / fn,
+                        w.f139RightSum / fn, w.f139Frames, w.f139Applied, w.f139F79, 100.0 * nofoot::f139::kBoundM, w.f139Refused, w.f139NoItem, w.f139ScopeUnknown);
     }
     if (detailed) {
     // F70/F75: the ADS eye point. The pin input camera is the job camera less the ADS shift and the separate intentional view shift; the 3P root stays put
@@ -11629,6 +11602,7 @@ void adsSightTick(uint64_t now, double dt, const EyeSample& s) noexcept {
     uint64_t context = nofoot::adslog::mix(g_heldItemSerial.load(std::memory_order_relaxed), active ? 1u : 0u);
     context = nofoot::adslog::mix(nofoot::adslog::mix(context, logSteady ? 1u : 0u), g_adsHoldThisPress ? 1u : 0u);
     context = nofoot::adslog::mix(context, g_cfgGeneration);
+    context = nofoot::adslog::mix(context, loadout::publishedGeneration());   // F140: a loadout change (a scope fitted) closes the window: one line, one scope state
     g_adsSightLogWindow.poll(now, nativeOnFootActive() && (engaged || nofoot::ikLen(g_adsSight.applied) >= 1e-5), context,
         []() noexcept {}, [&](uint32_t seconds) noexcept { adsSightLog(seconds, lastSteady, lastHold, g_adsSightLogWindow.detailed); });
     lastSteady = logSteady; lastHold = g_adsHoldThisPress;
@@ -11738,7 +11712,10 @@ void adsSightTick(uint64_t now, double dt, const EyeSample& s) noexcept {
             {
                 namespace f139 = nofoot::f139;
                 const double upRow[3] = {G.froot[4], G.froot[5], G.froot[6]};
-                const f139::Decision d139 = f139::decide(opticItemSnapshot, opticItemSerial, currentItemSerial, opticItemName,
+                // F140: the table is keyed by (item, scope fitted); the scope state comes from the journal's loadout (journal_loadout.h) for the same coherent item
+                const bool itemOk = f139::itemCoherent(opticItemSnapshot, opticItemSerial, currentItemSerial, opticItemName);
+                const int scopeState = itemOk ? loadout::heldScope(opticItemName).state : loadout::kScopeUnknown;
+                const f139::Decision d139 = f139::decide(opticItemSnapshot, opticItemSerial, currentItemSerial, opticItemName, scopeState,
                                                          static_cast<double>(g_adsSightUpCm.load(std::memory_order_relaxed)), upRow, row0, fUnit);
                 ++w.f139Frames;
                 if (d139.coherent) {
@@ -11746,6 +11723,8 @@ void adsSightTick(uint64_t now, double dt, const EyeSample& s) noexcept {
                     w.f139TableUpCm = d139.tableUpCm;
                     w.f139TableRightCm = d139.tableRightCm;
                     w.f139TrimCm = d139.trimUpCm;
+                    w.f139Scope = d139.scope;
+                    if (d139.scopeUnknown) ++w.f139ScopeUnknown;
                 } else {
                     ++w.f139NoItem;
                 }
@@ -28459,7 +28438,17 @@ struct F90Place {   // a placement's second: the pistol's (F90) and the rifle's 
     uint64_t fullAdsMoved = 0;   // F125: per-fold ADS evidence, independent of the reporting window's maximum weight
 };
 F90Place g_f90Pistol, g_f92Rifle;
-int g_f90SlotHip = -1;     // the hip readout's slot (its F86d rays give the surface under the moved readout)
+// F140: the placement a class's part last used in the window (the table's seed or the class's built-in values, the trim, the clamped total), for the F90 and F92 lines and the
+// `weapon UI placement (F140)` line. Render thread only.
+struct F140Seen {
+    bool have = false, table = false;
+    uint64_t placed = 0, scopeUnknown = 0, untrusted = 0;
+    char item[64] = {};
+    int scope = loadout::kScopeUnknown, entryScope = loadout::kScopeNo;
+    double seed[4] = {}, trim[4] = {}, total[4] = {};
+};
+F140Seen g_f140Seen[nofoot::f140::kClasses];
+int g_f90SlotHip = -1;    // the hip readout's slot (its F86d rays give the surface under the moved readout)
 int g_f92SlotRifle = -1;   // F92: the rifle's ADS readout's slot, the same for its line
 nofoot::f90::Latch g_f90Latch;
 // F93a: the class the game is drawing, from each class's own readout part (nofoot::f90::DrawnTracker), how long it has stood and its epoch (the placements'
@@ -28508,13 +28497,30 @@ nofoot::f90::Out f90Decide(uint32_t frame, int e, const Rec& r, const Find* f, u
     }
     const f90::Part* known = f90::partOf(in.meshRead, in.meshExt, in.recScale);   // F91: the part by its mesh and scale (decide looks it up the same way)
     char heldName[64] = {};
-    if (known && (known->role == f90::kRoleHip || known->role == f90::kRolePistolAds || known->role == f90::kRoleRifleAds)) {   // Status.json's class (F93a: the veto only)
+    uint32_t heldSnapSerial = 0;
+    bool heldRead = false;
+    const bool placementPart = known && (known->role == f90::kRoleHip || known->role == f90::kRolePistolAds || known->role == f90::kRoleRifleAds);
+    if (placementPart) {   // Status.json's class (F93a: the veto only)
         uint32_t serial = 0;
         const bool read = opticItemRead(&serial, heldName);
+        heldRead = read;
+        heldSnapSerial = serial;
         const bool pistol = read && nofoot::supportItem(heldName) == nofoot::kSupportPistol;
         const bool primary = read && std::strncmp(heldName, "$wpn_m_", 7) == 0;   // F92: a primary weapon (the rifles' `$wpn_m_` names)
         const bool held = serial == g_heldItemSerial.load(std::memory_order_acquire);
         in.item = !read ? f90::kItemNotHeld : !pistol && !primary ? f90::kItemOther : !held ? f90::kItemNotHeld : pistol ? f90::kItemPistol : f90::kItemPrimary;
+    }
+    // F140: the placement of the held weapon for each class of part, from the table by (item, scope fitted) or the class's built-in values, plus the live trims. The item is the
+    // coherent snapshot F139 uses (read, and its serial the held item's); the scope state is the journal's loadout. Which part is placed, and when, is decided below as before.
+    nofoot::f140::Placement place140[nofoot::f140::kClasses];
+    if (placementPart) {
+        namespace f140 = nofoot::f140;
+        const uint32_t heldNow = g_heldItemSerial.load(std::memory_order_acquire);
+        const bool itemOk = f140::itemCoherent(heldRead, heldSnapSerial, heldNow, heldName);
+        const int scopeState = itemOk ? loadout::heldScope(heldName).state : loadout::kScopeUnknown;
+        double trim[4];
+        for (int i = 0; i < 4; ++i) trim[i] = static_cast<double>(g_f140TrimCm[i].load(std::memory_order_relaxed));
+        for (int c = 0; c < f140::kClasses; ++c) place140[c] = f140::place(heldRead, heldSnapSerial, heldNow, heldName, scopeState, c, trim);
     }
     // F93a: the class the game draws, from the class parts; this draw's own class part counts for itself. A weapon class's part appearing opens a swap.
     const uint64_t nowMs = GetTickCount64();
@@ -28543,14 +28549,12 @@ nofoot::f90::Out f90Decide(uint32_t frame, int e, const Rec& r, const Find* f, u
     in.drawnClass = drawn;
     in.drawnClassAgeS = static_cast<double>(nowMs - g_f93ClassSinceMs) / 1000.0;
     in.itemSerial = g_f93ClassEpoch;
-    in.keys.forwardCm = static_cast<double>(g_f90ForwardCm.load(std::memory_order_relaxed));
-    in.keys.leftCm = static_cast<double>(g_f90LeftCm.load(std::memory_order_relaxed));
-    in.keys.upCm = static_cast<double>(g_f90UpCm.load(std::memory_order_relaxed));
-    in.keys.towardCm = static_cast<double>(g_f90TowardCm.load(std::memory_order_relaxed));
-    in.rifleKeys.forwardCm = static_cast<double>(g_f92ForwardCm.load(std::memory_order_relaxed));
-    in.rifleKeys.leftCm = static_cast<double>(g_f92LeftCm.load(std::memory_order_relaxed));
-    in.rifleKeys.upCm = static_cast<double>(g_f92UpCm.load(std::memory_order_relaxed));
-    in.rifleKeys.towardCm = static_cast<double>(g_f92TowardCm.load(std::memory_order_relaxed));
+    // F140: the pistol parts (the hip readout and the pistol's ADS readout) take the held item's placement with the pistol class's values for a miss, the rifle's ADS readout
+    // with the rifle class's; a table entry is the item's whichever part it draws (the rocket launcher's while it draws the pistol part)
+    if (placementPart) {
+        in.keys = place140[nofoot::f140::kClassPistol].keys();
+        in.rifleKeys = place140[nofoot::f140::kClassRifle].keys();
+    }
     in.adsW = static_cast<double>(g_ikAdsW.load(std::memory_order_relaxed));
     const auto frameFn = []() {   // the FP right attach (joint 51) through F_root, both within kIkFreshMs
         float m[nofoot::kIkFpSlots][16];
@@ -28614,6 +28618,24 @@ nofoot::f90::Out f90Decide(uint32_t frame, int e, const Rec& r, const Find* f, u
     // the placements' figures: the rifle's ADS readout's (F92) apart from the pistol's
     const bool rifle = o.role == f90::kRoleRifleAds;
     F90Place& ps = rifle ? g_f92Rifle : g_f90Pistol;
+    if (placementPart && (o.b == f90::kBMoved || o.b == f90::kBMovedPrevious)) {   // F140: what this class's placement used, for the window's lines
+        const int cls = rifle ? nofoot::f140::kClassRifle : nofoot::f140::kClassPistol;
+        const nofoot::f140::Placement& pl = place140[cls];
+        F140Seen& sn = g_f140Seen[cls];
+        sn.have = true;
+        ++sn.placed;
+        if (pl.coherent && pl.scopeUnknown) ++sn.scopeUnknown;
+        if (!pl.coherent) ++sn.untrusted;
+        std::snprintf(sn.item, sizeof(sn.item), "%s", pl.coherent ? heldName : "none");
+        sn.scope = pl.scope;
+        sn.entryScope = pl.entryScope;
+        sn.table = pl.table;
+        for (int i = 0; i < 4; ++i) {
+            sn.seed[i] = pl.seed[i];
+            sn.trim[i] = pl.trim[i];
+            sn.total[i] = pl.total[i];
+        }
+    }
     if (o.frameComputed) {
         ++ps.frames[o.wf.src >= 0 && o.wf.src < 3 ? o.wf.src : 0];
         if (o.wf.src != f90::kFrameNone) {
@@ -28651,6 +28673,27 @@ nofoot::f90::Out f90Decide(uint32_t frame, int e, const Rec& r, const Find* f, u
     }
     return o;
 }
+// F140: what a class's placement used, as the F90 and F92 lines' parenthesis names it (short: those lines are near the log's size budget; no semicolon: their parsers read to
+// the next one). The seed, the trim and the total are in the `weapon UI placement (F140)` line.
+void f140PlacementText(const F140Seen& s, char* buf, size_t cap) {
+    if (!s.have) {
+        std::snprintf(buf, cap, "class, none placed");
+        return;
+    }
+    std::snprintf(buf, cap, "%s, scope %s", s.table ? "table" : "class", loadout::scopeName(s.scope));
+}
+// F140: the window's `weapon UI placement` line for one class (when it placed at all), then the window starts over. The seed is the table's entry for the item under its scope
+// row, else the class's built-in values; the totals are what the placement used. --health reads these for the figures to bake into the table.
+void f140Report(int cls, uint32_t windowSecs) {
+    F140Seen& s = g_f140Seen[cls];
+    if (s.have)
+        Log::get().note("weapon UI placement (F140) %u s: item %s scope %s, %s class, %s, seed forward %+.1f left %+.1f up %+.1f toward eye %+.1f cm, trim %+.1f %+.1f %+.1f %+.1f cm, "
+                        "total forward %+.1f left %+.1f up %+.1f toward eye %+.1f cm, placed on %llu frames, scope unknown on %llu frames, untrusted item on %llu frames",
+                        windowSecs, s.item[0] ? s.item : "none", loadout::scopeName(s.scope), nofoot::f140::className(cls), s.table ? "table entry" : "class values", s.seed[0],
+                        s.seed[1], s.seed[2], s.seed[3], s.trim[0], s.trim[1], s.trim[2], s.trim[3], s.total[0], s.total[1], s.total[2], s.total[3],
+                        static_cast<unsigned long long>(s.placed), static_cast<unsigned long long>(s.scopeUnknown), static_cast<unsigned long long>(s.untrusted));
+    s = F140Seen{};
+}
 // The 1 s lines: A per decided part with a role other than the hip's (F91: the role, its slot and name), or the idle form naming each decided part's slot,
 // name, mesh and scale when none matched a row; B while a pistol is held.
 void f90Report(bool fold, uint32_t windowSecs, bool onFootWindow) {
@@ -28665,7 +28708,6 @@ void f90Report(bool fold, uint32_t windowSecs, bool onFootWindow) {
         bool pistol = false, primary = false;
         char item[64] = "none";
         uint32_t serial = 0;
-        double pistolKeys[4] = {}, rifleKeys[4] = {};
     };
     static nofoot::logwin::WindowMetadata<Meta> metadataWindow;
     const auto metadata = []() {
@@ -28674,14 +28716,6 @@ void f90Report(bool fold, uint32_t windowSecs, bool onFootWindow) {
         const bool held = read && m.serial == g_heldItemSerial.load(std::memory_order_acquire);
         m.pistol = held && nofoot::supportItem(m.item) == nofoot::kSupportPistol;
         m.primary = held && std::strncmp(m.item, "$wpn_m_", 7) == 0;
-        m.pistolKeys[0] = g_f90ForwardCm.load(std::memory_order_relaxed);
-        m.pistolKeys[1] = g_f90LeftCm.load(std::memory_order_relaxed);
-        m.pistolKeys[2] = g_f90UpCm.load(std::memory_order_relaxed);
-        m.pistolKeys[3] = g_f90TowardCm.load(std::memory_order_relaxed);
-        m.rifleKeys[0] = g_f92ForwardCm.load(std::memory_order_relaxed);
-        m.rifleKeys[1] = g_f92LeftCm.load(std::memory_order_relaxed);
-        m.rifleKeys[2] = g_f92UpCm.load(std::memory_order_relaxed);
-        m.rifleKeys[3] = g_f92TowardCm.load(std::memory_order_relaxed);
         return m;
     };
     const Meta& meta = metadataWindow.prime(metadata());
@@ -28752,12 +28786,16 @@ void f90Report(bool fold, uint32_t windowSecs, bool onFootWindow) {
         double ds = 0.0;
         whyText(ps, why, sizeof(why));
         surfText(ps, g_f90SlotHip, surf, sizeof(surf), &ds);
-        Log::get().note("pistol readout (F90) %u s: item %s serial %u; keys forward %+.1f left %+.1f up %+.1f toward eye %+.1f cm (TEMPORARY); frame: attach 51 %llu, F_root only "
+        const F140Seen& sn = g_f140Seen[nofoot::f140::kClassPistol];
+        const double* pk = sn.have ? sn.total : nofoot::f140::kPistolClass;   // F140: the placement last used (the table's or the class's values, with the trim), else the class's
+        char placementText[200];
+        f140PlacementText(sn, placementText, sizeof(placementText));
+        Log::get().note("pistol readout (F90) %u s: item %s serial %u; keys forward %+.1f left %+.1f up %+.1f toward eye %+.1f cm (%s); frame: attach 51 %llu, F_root only "
                         "%llu, none %llu (barrel vs aim mean %.1f max %.1f deg); target latched %llu frames; moved: hip readout %llu, pistol ADS readout %llu (x%.4f), previous-frame target %llu, "
                         "refused %llu [%s]; content shift mean %.1f cm; content %.3f m from eye 0, nearest surface on its rays %.3f m (%s); moved in %u of %u s",
-                        windowSecs, item[0] ? item : "none", serial, meta.pistolKeys[0],
-                        meta.pistolKeys[1], meta.pistolKeys[2],
-                        meta.pistolKeys[3], ull(ps.frames[f90::kFrameAttach]), ull(ps.frames[f90::kFrameRoot]),
+                        windowSecs, item[0] ? item : "none", serial, pk[0],
+                        pk[1], pk[2],
+                        pk[3], placementText, ull(ps.frames[f90::kFrameAttach]), ull(ps.frames[f90::kFrameRoot]),
                         ull(ps.frames[f90::kFrameNone]), ps.barrelN ? ps.barrelSum / static_cast<double>(ps.barrelN) : 0.0, ps.barrelMax, ull(ps.latched), ull(ps.movedHip),
                         ull(ps.movedAds), f90::sizeFactor(f90::kRolePistolAds), ull(ps.movedPrev), ull(ps.refused), why,
                         ps.latched ? ps.shiftSum / static_cast<double>(ps.latched) * 100.0 : 0.0, ps.haveContent ? ps.contentM : 0.0, ds, surf,
@@ -28765,6 +28803,7 @@ void f90Report(bool fold, uint32_t windowSecs, bool onFootWindow) {
     }
     pistolMoveShare.reset(ps.movedHip + ps.movedAds);
     ps = F90Place{};
+    f140Report(nofoot::f140::kClassPistol, windowSecs);
     // F92: the rifle's ADS readout, while a primary weapon is held on foot (zeros then mean nothing ran) or while any of its counters moved
     F90Place& rs = g_f92Rifle;
     const bool primaryHeld = meta.primary;
@@ -28774,12 +28813,16 @@ void f90Report(bool fold, uint32_t windowSecs, bool onFootWindow) {
         double ds = 0.0;
         whyText(rs, why, sizeof(why));
         surfText(rs, g_f92SlotRifle, surf, sizeof(surf), &ds);
-        Log::get().note("rifle ADS readout placement (F92) %u s: item %s serial %u; keys forward %+.1f left %+.1f up %+.1f toward eye %+.1f cm (TEMPORARY); frame: attach 51 %llu, "
+        const F140Seen& sn = g_f140Seen[nofoot::f140::kClassRifle];
+        const double* rk = sn.have ? sn.total : nofoot::f140::kRifleClass;
+        char placementText[200];
+        f140PlacementText(sn, placementText, sizeof(placementText));
+        Log::get().note("rifle ADS readout placement (F92) %u s: item %s serial %u; keys forward %+.1f left %+.1f up %+.1f toward eye %+.1f cm (%s); frame: attach 51 %llu, "
                         "F_root only %llu, none %llu (barrel vs aim mean %.1f max %.1f deg); target latched %llu frames; moved %llu (ADS weight at the moved draws min %.2f max "
                         "%.2f), refused %llu [%s]; content shift mean %.1f cm; content %.3f m from eye 0, nearest surface on its rays %.3f m (%s); moved in %u of %u s; ADS moved in %u of %u s",
-                        windowSecs, item[0] ? item : "none", serial, meta.rifleKeys[0],
-                        meta.rifleKeys[1], meta.rifleKeys[2],
-                        meta.rifleKeys[3], ull(rs.frames[f90::kFrameAttach]), ull(rs.frames[f90::kFrameRoot]),
+                        windowSecs, item[0] ? item : "none", serial, rk[0],
+                        rk[1], rk[2],
+                        rk[3], placementText, ull(rs.frames[f90::kFrameAttach]), ull(rs.frames[f90::kFrameRoot]),
                         ull(rs.frames[f90::kFrameNone]), rs.barrelN ? rs.barrelSum / static_cast<double>(rs.barrelN) : 0.0, rs.barrelMax, ull(rs.latched), ull(rs.movedAds),
                         rs.haveAds ? rs.adsMin : 0.0, rs.haveAds ? rs.adsMax : 0.0, ull(rs.refused), why,
                         rs.latched ? rs.shiftSum / static_cast<double>(rs.latched) * 100.0 : 0.0, rs.haveContent ? rs.contentM : 0.0, ds, surf,
@@ -28788,6 +28831,7 @@ void f90Report(bool fold, uint32_t windowSecs, bool onFootWindow) {
     moveShare.reset(rs.movedAds);
     adsMoveShare.reset(rs.fullAdsMoved);
     rs = F90Place{};
+    f140Report(nofoot::f140::kClassRifle, windowSecs);
     rifleMoved.clear();
     rifleAds.clear();
     pistolMoved.clear();

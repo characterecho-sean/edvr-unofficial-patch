@@ -12371,13 +12371,14 @@ def _hj_f138_pitched(rows, ctx):
 
 
 def _hj_f139_sight_offset(rows, ctx):
-    """F139: each weapon's sight on the ADS line. While aiming down sights the eye's origin moves, in the FP root's axes, by the held item's table up (an exact item name:
-    the plasma assault rifle, the rocket launcher, the kinetic and laser SMGs; every other item 0) plus the live trim fix.native_on_foot_ads_sight_up_cm (any held weapon),
-    after F79's origin for the laser assault rifle; bounded to 8 cm (past it nothing moves and the refusal is counted). The ADS windows' lines name the item, the table up, the
-    trim and the total up applied: these are the figures a tuning flight leaves for the table, so the report gives, per item, the last window's total up and the seconds in
-    the sights (and the total for each trim tried). OK when every item that was asked an offset had it applied; PARTIAL when an item's offset was refused on some frames
-    (past the 8 cm bound) or the item could not be read on some ADS frames; NEVER APPLIED when an item's offset was refused on every frame, or the trim was set and no ADS
-    second read the held item; IDLE when no ADS second, or no offset was asked for any item (a table miss with the trim at 0)."""
+    """F139: each weapon's sight on the ADS line. While aiming down sights the eye's origin moves, in the FP root's axes, by the held item's table up (an exact item name, under
+    the scope state fitted: F140 keys the table by (item, scope), the journal's loadout says which; an unknown state uses the no-scope row) plus the live trim
+    fix.native_on_foot_ads_sight_up_cm (any held weapon), after F79's origin for the laser assault rifle; bounded to 8 cm (past it nothing moves and the refusal is counted).
+    The ADS windows' lines name the item and its scope state, the table up, the trim and the total up applied: these are the figures a tuning flight leaves for the table, so
+    the report gives, per (item, scope), the last window's total up and the seconds in the sights (and the total for each trim tried). OK when every (item, scope) that was
+    asked an offset had it applied; PARTIAL when an offset was refused on some frames (past the 8 cm bound), the item could not be read on some ADS frames, or the scope state
+    was unknown on more than a tenth of them; NEVER APPLIED when an offset was refused on every frame, or the trim was set and no ADS second read the held item; IDLE when no ADS
+    second, or no offset was asked for any item (a table miss or a scoped row at 0, with the trim at 0)."""
     sec, key = rows.get("sec", []), rows.get("key", [])
     if not sec and not key:
         return None
@@ -12386,20 +12387,23 @@ def _hj_f139_sight_offset(rows, ctx):
         return ("IDLE", "no ADS second with a sight offset line; the trim key was read %d time(s), last %+.1f cm" % (len(key), last_trim))
     items = collections.OrderedDict()
     for r in sec:
-        d = items.setdefault(r["item"], {"s": 0, "frames": 0, "applied": 0, "refused": 0, "noitem": 0, "f79": 0, "asked": False, "by": collections.OrderedDict(), "last": r})
+        d = items.setdefault((r["item"], r.get("scope") or "n/a"), {"s": 0, "frames": 0, "applied": 0, "refused": 0, "noitem": 0, "f79": 0, "unk": 0, "asked": False,
+                                                                     "by": collections.OrderedDict(), "last": r})
         d["s"] += _hwl(r)
         for k in ("frames", "applied", "refused", "noitem", "f79"):
             d[k] += int(r[k])
+        d["unk"] += int(r.get("unk") or 0)
         d["asked"] = d["asked"] or float(r["tup"]) != 0.0 or float(r["trim"]) != 0.0
         d["last"] = r
         by = d["by"].setdefault(float(r["trim"]), [0, 0.0])
         by[0] += _hwl(r)
         by[1] = float(r["up"])
     bad, part, parts = [], [], []
-    for name, d in items.items():
+    for (name, scope), d in items.items():
         last = d["last"]
+        label = name if scope == "n/a" else "%s scope %s" % (name, scope)
         text = "%s: total up %+.2f cm right %+.2f cm (the last window: table %+.1f, trim %+.1f), %d s in the sights, applied on %d of %d frames" % (
-            name, float(last["up"]), float(last["right"]), float(last["tup"]), float(last["trim"]), d["s"], d["applied"], d["frames"])
+            label, float(last["up"]), float(last["right"]), float(last["tup"]), float(last["trim"]), d["s"], d["applied"], d["frames"])
         if d["f79"]:
             text += ", F79 optic origin on %d" % d["f79"]
         if len(d["by"]) > 1:
@@ -12408,6 +12412,8 @@ def _hj_f139_sight_offset(rows, ctx):
             text += "; refused over the bound on %d frames" % d["refused"]
         if d["noitem"]:
             text += "; item not read on %d frames" % d["noitem"]
+        if d["unk"]:
+            text += "; scope unknown on %d frames (the no-scope row)" % d["unk"]
         parts.append(text)
         if name == "none":
             if last_trim:
@@ -12415,9 +12421,11 @@ def _hj_f139_sight_offset(rows, ctx):
             else:
                 part.append("the held item was not read in %d ADS second(s)" % d["s"])
         elif d["refused"] and not d["applied"]:
-            bad.append("%s: the offset was refused over the bound on every frame" % name)
+            bad.append("%s: the offset was refused over the bound on every frame" % label)
         elif d["refused"] or d["noitem"] * 10 > d["frames"]:
-            part.append("%s: refused on %d frames, item not read on %d" % (name, d["refused"], d["noitem"]))
+            part.append("%s: refused on %d frames, item not read on %d" % (label, d["refused"], d["noitem"]))
+        elif d["unk"] * 10 > d["frames"]:
+            part.append("%s: scope unknown on %d of %d frames" % (label, d["unk"], d["frames"]))
     text = "; ".join(parts) + ("; trim key read %d time(s), last %+.1f cm" % (len(key), last_trim) if key else "")
     if bad:
         return ("NEVER APPLIED", text + " [" + "; ".join(bad) + "]")
@@ -12426,6 +12434,62 @@ def _hj_f139_sight_offset(rows, ctx):
     if not any(d["asked"] for d in items.values()):
         return ("IDLE", text + " (no offset was asked: no table hit and the trim at 0)")
     return ("OK", text)
+
+
+def _hj_f140_placement(rows, ctx):
+    """F140: the weapon readout (the ammunition counter drawn on the weapon) placed per weapon. Each placed window's line names the held item and its scope state (the journal's
+    loadout), the class of part placed (pistol: the hip readout and the pistol's ADS readout; rifle: the rifle's ADS readout), whether the table had the item (an entry, under the
+    scope row) or the class's built-in values stood in, the seed, the four live trims (fix.native_on_foot_weapon_ui_*_cm) and the clamped total used. These totals are the figures
+    a tuning flight leaves for the table, so the report gives, per (item, scope, class), the last window's total forward / left / up / toward, the seed and trim, and the
+    seconds placed. The loadout lines (the journal's SuitLoadout, SwitchSuitLoadout and LoadoutEquipModule, one per change) are counted. OK when every group was placed from a table
+    entry with the scope state known and the item trusted; PARTIAL when a group used the class's values (an item the table does not hold), or the scope state was unknown
+    on more than a tenth of its frames, or the item was not trusted on some; IDLE when a loadout was read and nothing was placed."""
+    sec, lo, trims = rows.get("sec", []), rows.get("loadout", []), rows.get("trim", [])
+    if not sec and not lo and not trims:
+        return None
+    lotext = ""
+    if lo:
+        last = lo[-1]
+        lotext = "; journal loadout read %d time(s), the last by %s (\"%s\"): %s" % (len(lo), last["src"], last["name"], last["slots"])
+    if trims:
+        lotext += "; trim key lines %d" % len(trims)
+    if not sec:
+        return ("IDLE", "no weapon readout placed in the window" + lotext)
+    groups = collections.OrderedDict()
+    for r in sec:
+        g = groups.setdefault((r["item"], r["scope"], r["cls"]), {"s": 0, "placed": 0, "unk": 0, "untrusted": 0, "table": False, "klass": False, "by": collections.OrderedDict(), "last": r})
+        g["s"] += _hwl(r)
+        g["placed"] += int(r["placed"])
+        g["unk"] += int(r["unk"])
+        g["untrusted"] += int(r["untrusted"])
+        if r["src"] == "table entry":
+            g["table"] = True
+        else:
+            g["klass"] = True
+        g["last"] = r
+        trim = tuple(float(r[k]) for k in ("tf", "tl", "tu", "tt"))
+        by = g["by"].setdefault(trim, [0, tuple(float(r[k]) for k in ("f", "l", "u", "t"))])
+        by[0] += _hwl(r)
+        by[1] = tuple(float(r[k]) for k in ("f", "l", "u", "t"))
+    part, parts = [], []
+    for (item, scope, cls), g in groups.items():
+        last = g["last"]
+        text = ("%s scope %s (%s class): total forward %s left %s up %s toward %s cm (the last window; seed %s %s %s %s from the %s, trim %s %s %s %s), %d s, placed on %d frames" % (
+            item, scope, cls, last["f"], last["l"], last["u"], last["t"], last["sf"], last["sl"], last["su"], last["st"], last["src"], last["tf"], last["tl"], last["tu"], last["tt"],
+            g["s"], g["placed"]))
+        if len(g["by"]) > 1:
+            text += "; by trim: " + ", ".join("(%s) -> (%s) (%d s)" % (" ".join("%+.1f" % x for x in tr), " ".join("%+.1f" % x for x in v[1]), v[0]) for tr, v in g["by"].items())
+        if g["unk"]:
+            text += "; scope unknown on %d frames (the no-scope row)" % g["unk"]
+        if g["untrusted"]:
+            text += "; item not trusted on %d frames (the class's values, no trim)" % g["untrusted"]
+        parts.append(text)
+        if g["klass"]:
+            part.append("%s: not in the table (the %s class's values)" % (item, cls))
+        elif g["unk"] * 10 > g["placed"] or g["untrusted"]:
+            part.append("%s: scope unknown on %d and item untrusted on %d of %d frames" % (item, g["unk"], g["untrusted"], g["placed"]))
+    text = "; ".join(parts) + lotext
+    return ("PARTIAL" if part else "OK", text + (" [" + "; ".join(part) + "]" if part else ""))
 
 
 def _hj_f135_menu(rows, ctx):
@@ -13433,11 +13497,21 @@ HEALTH_RULES = (
                  r"the stance; cm\): (?P<mode>mouse look|look to aim), item (?P<item>.+?): (?=\[)(?P<body>.+)$"),
     ), _hj_f138_pitched),
     _hrule("ADS sight offset (F139)", ("F139",), ("ADS sight offset (F139)", "ADS sight height (F139"), (
-        ("sec", r"native on foot ADS sight offset \(F139\) " + H_WL + r": item (?P<item>.+?), table up (?P<tup>%s) right (?P<tright>%s) cm, trim (?P<trim>%s) cm, "
-                r"applied up (?P<up>%s) cm right (?P<right>%s) cm \(mean of (?P<frames>\d+) frames in the sights; applied on (?P<applied>\d+)\), F79 optic origin on "
-                r"(?P<f79>\d+) frames, refused over the (?P<bound>\d+) cm bound (?P<refused>\d+), no coherent item (?P<noitem>\d+)" % ((_HN,) * 5)),
+        ("sec", r"native on foot ADS sight offset \(F139\) " + H_WL + r": item (?P<item>.+?)(?: scope (?P<scope>yes|no|unknown))?, table up (?P<tup>%s) right (?P<tright>%s) cm, "
+                r"trim (?P<trim>%s) cm, applied up (?P<up>%s) cm right (?P<right>%s) cm \(mean of (?P<frames>\d+) frames in the sights; applied on (?P<applied>\d+)\), "
+                r"F79 optic origin on (?P<f79>\d+) frames, refused over the (?P<bound>\d+) cm bound (?P<refused>\d+), no coherent item (?P<noitem>\d+)"
+                r"(?:, scope unknown on (?P<unk>\d+) frames)?" % ((_HN,) * 5)),
         ("key", r"native on foot ADS sight height \(F139, TEMPORARY\): fix\.native_on_foot_ads_sight_up_cm = (?P<trim>%s) cm" % _HN),
     ), _hj_f139_sight_offset),
+    _hrule("weapon UI placement (F140)", ("F140",), ("weapon UI placement (F140)", "journal loadout (F140)", "weapon UI trim (F140"), (
+        ("sec", r"weapon UI placement \(F140\) " + H_WL + r": item (?P<item>.+?) scope (?P<scope>yes|no|unknown), (?P<cls>pistol|rifle) class, (?P<src>table entry|class values), "
+                r"seed forward (?P<sf>%s) left (?P<sl>%s) up (?P<su>%s) toward eye (?P<st>%s) cm, trim (?P<tf>%s) (?P<tl>%s) (?P<tu>%s) (?P<tt>%s) cm, "
+                r"total forward (?P<f>%s) left (?P<l>%s) up (?P<u>%s) toward eye (?P<t>%s) cm, placed on (?P<placed>\d+) frames, scope unknown on (?P<unk>\d+) frames, "
+                r"untrusted item on (?P<untrusted>\d+) frames" % ((_HN,) * 12)),
+        ("loadout", r"journal loadout \(F140\): (?P<src>\w+), loadout \"(?P<name>[^\"]*)\" \(id (?P<id>\d+)\): (?P<slots>.+?) \(read from "),
+        ("trim", r"native on foot weapon UI trim \(F140, TEMPORARY\): fix\.native_on_foot_weapon_ui_(?P<axis>forward|left|up|toward_eye)_cm = (?P<v>%s) cm" % _HN),
+        ("_", r"journal loadout \(F140\): could not open "),
+    ), _hj_f140_placement),
     _hrule("menu probe (F135)", ("F135",), ("native on foot menu probe (F135)",), (
         ("sec", r"native on foot menu probe \(F135\) 1 s: update (?P<upd>\d+) \(objs (?P<updo>.*?)\), placement (?P<place>\d+) \(objs (?P<placeo>.*?)\), ray (?P<ray>\d+), "
                 r"cursor window (?P<win>\d+), owner transform (?P<own>\d+), panel submit (?P<ps>\d+), inst submit (?P<is>\d+), bridge update (?P<bu>\d+) placement "
@@ -14470,6 +14544,7 @@ def self_test_health():
     f123_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f123.h")
     f121b_path = os.path.join(repo_root(), "src", "d3d11", "visor_census_core.h")
     f121c_path = os.path.join(repo_root(), "src", "d3d11", "visor_eye_trust.h")
+    f140reader_path = os.path.join(repo_root(), "src", "d3d11", "journal_loadout_reader.h")
     try:
         source, swap, f90src, f91src = read_text(src_path), read_text(swap_path), read_text(f90_path), read_text(f91_path)
         f105src, f105note = read_text(f105_path), read_text(f105_note_path)
@@ -14480,6 +14555,7 @@ def self_test_health():
         f123src = read_text(f123_path)
         f121bsrc = read_text(f121b_path)
         f121csrc = read_text(f121c_path)
+        f140readersrc = read_text(f140reader_path)
     except OSError as e:
         print("health: the DLL source the self-test reads its log formats from is not where it looks (%s)" % e)
         return False
@@ -14572,6 +14648,15 @@ def self_test_health():
             fmts[key] = health_c_format(f121bsrc, needle)
         if fmts[key] is None:
             raise AssertionError("visor_census_core.h has no format holding %r: the --health rule that reads it is out of date" % needle)
+        return health_render(fmts[key], vals)
+
+    def RLoad(needle, *vals):
+        """F140's loadout line (journal_loadout_reader.h writes it, the journal worker's thread), from its own format literal."""
+        key = "f140reader:" + needle
+        if key not in fmts:
+            fmts[key] = health_c_format(f140readersrc, needle)
+        if fmts[key] is None:
+            raise AssertionError("journal_loadout_reader.h has no format holding %r: the --health rule that reads it is out of date" % needle)
         return health_render(fmts[key], vals)
 
     def RHead(needle, *vals):
@@ -14667,7 +14752,7 @@ def self_test_health():
             return R90('%s (x%.4f): %s"', role, k, head)
 
         def rifle(moved=0, amax=0.0, attach=0, latched=0, refused=0, why="none", cm=0.0, ds=0.0, surf="no eye 0 placement this second", wl=1, moved_secs=None, ads_secs=None):
-            return R("rifle ADS readout placement (F92) %u s: item %s", wl, "$wpn_m_assaultrifle_laser_fauto_name;", 8, 0.0, 5.0, 0.0, 0.0, attach, 0, 0, 1.2, 2.0, latched,
+            return R("rifle ADS readout placement (F92) %u s: item %s", wl, "$wpn_m_assaultrifle_laser_fauto_name;", 8, 0.0, 5.0, 0.0, 0.0, "table, scope no", attach, 0, 0, 1.2, 2.0, latched,
                      moved, 0.0, amax, refused, why, 5.0, cm, ds, surf, int(bool(moved)) if moved_secs is None else moved_secs, wl,
                      int(bool(moved) and amax >= 0.99) if ads_secs is None else ads_secs, wl)
 
@@ -14701,7 +14786,7 @@ def self_test_health():
             return R("native on foot ADS input (F70b): source %s; request", "bound HumanoidZoom", "on", "fresh", 12, 800, "off", 3, "clear", 400, 0, ticks, held, state, why, 1)
 
         def pistol(hip=0, ads=0, attach=0, root=0, none=0, refused=0, why="none", wl=1, moved_secs=None):
-            return RWindowTail("pistol readout (F90) %u s: item %s", wl, "$wpn_s_pistol_kinetic_sauto_name;", 3, 13.0, 6.0, -3.0, 2.0, attach, root, none, 0.0, 0.0, hip, hip, ads, 0.5714, 0, refused, why,
+            return RWindowTail("pistol readout (F90) %u s: item %s", wl, "$wpn_s_pistol_kinetic_sauto_name;", 3, 13.0, 6.0, -3.0, 2.0, "table, scope no", attach, root, none, 0.0, 0.0, hip, hip, ads, 0.5714, 0, refused, why,
                       tail=(int(bool(hip + ads)) if moved_secs is None else moved_secs, wl))
 
         def pin_sec(submits=540, path="tag", wl=1, submit_secs=None):
@@ -15927,40 +16012,88 @@ def self_test_health():
         check("F138 pitched view: bin lines alone", [bins138()], 0, [("IDLE", P138)], has=["1 bin line(s) and no 1 s line"], lacks=["UNPARSED"])
         check("F138 pitched view: a drifted line is unparsed", ["native on foot pitched view (F138) 1 s: something else"], 4, [("UNPARSED", P138)])
 
-        # ---- F139: each weapon's sight on the ADS line ----
+        # ---- F139: each weapon's sight on the ADS line (F140: keyed by (item, scope fitted)) ----
         S139 = "ADS sight offset (F139)"
         PLASMA139, KINETIC139, LASERSMG139, PISTOL139 = ("$wpn_m_assaultrifle_plasma_fauto_name;", "$wpn_m_submachinegun_kinetic_fauto_name;",
                                                          "$wpn_m_submachinegun_laser_fauto_name;", "$wpn_s_pistol_kinetic_sauto_name;")
 
-        def so139(item=PLASMA139, tup=1.1, tright=0.0, trim=0.0, up=1.1, right=0.0, frames=480, applied=480, f79=0, refused=0, noitem=0, wl=10):
-            return R("native on foot ADS sight offset (F139) %u s", wl, item, tup, tright, trim, up, right, frames, applied, f79, 8.0, refused, noitem)
+        def so139(item=PLASMA139, scope="no", tup=1.1, tright=0.0, trim=0.0, up=1.1, right=0.0, frames=480, applied=480, f79=0, refused=0, noitem=0, unk=0, wl=10):
+            return R("native on foot ADS sight offset (F139) %u s", wl, item, scope, tup, tright, trim, up, right, frames, applied, f79, 8.0, refused, noitem, unk)
 
         def key139(cm=0.0):
             return R("native on foot ADS sight height (F139, TEMPORARY)", cm, 8.0, 8.0)
 
         check("F139 sight offset: the key read and no ADS second", [key139(1.5)], 0, [("IDLE", S139)], has=["no ADS second with a sight offset line", "read 1 time(s), last +1.5 cm"],
               lacks=["UNPARSED"])
-        check("F139 sight offset: two weapons with their table value applied, per item totals", [key139(), so139(), so139(item=KINETIC139, tup=-2.0, up=-2.0, wl=7)], 0, [("OK", S139)],
-              has=[PLASMA139 + ": total up +1.10 cm right +0.00 cm (the last window: table +1.1, trim +0.0), 10 s in the sights, applied on 480 of 480 frames",
-                   KINETIC139 + ": total up -2.00 cm", "7 s in the sights"], lacks=["UNPARSED"])
+        check("F139 sight offset: two weapons with their table value applied, per (item, scope) totals", [key139(), so139(), so139(item=KINETIC139, tup=-2.0, up=-2.0, wl=7)], 0, [("OK", S139)],
+              has=[PLASMA139 + " scope no: total up +1.10 cm right +0.00 cm (the last window: table +1.1, trim +0.0), 10 s in the sights, applied on 480 of 480 frames",
+                   KINETIC139 + " scope no: total up -2.00 cm", "7 s in the sights"], lacks=["UNPARSED"])
         check("F139 sight offset: a tuning flight leaves the total for each trim tried",
               [key139(), so139(), key139(0.5), so139(trim=0.5, up=1.6), so139(trim=0.5, up=1.6, wl=4), key139(-0.5), so139(trim=-0.5, up=0.6)], 0, [("OK", S139)],
               has=["by trim: +0.0 -> +1.10 cm (10 s), +0.5 -> +1.60 cm (14 s), -0.5 -> +0.60 cm (10 s)", "the last window: table +1.1, trim -0.5", "trim key read 3 time(s), last -0.5 cm"],
               lacks=["UNPARSED"])
+        check("F140 sight offset: the same weapon with and without the scope reports each state's own total",
+              [so139(), so139(scope="yes", tup=0.0, trim=0.8, up=0.8, wl=6)], 0, [("OK", S139)],
+              has=[PLASMA139 + " scope no: total up +1.10 cm", PLASMA139 + " scope yes: total up +0.80 cm right +0.00 cm (the last window: table +0.0, trim +0.8)", "6 s in the sights"],
+              lacks=["UNPARSED"])
+        check("F140 sight offset: a scoped row at 0 with no trim asks nothing", [so139(scope="yes", tup=0.0, up=0.0)], 0, [("IDLE", S139)],
+              has=["no offset was asked: no table hit and the trim at 0"], lacks=["UNPARSED"])
+        check("F140 sight offset: the scope state unknown on most frames is said, and the no-scope row named",
+              [so139(scope="unknown", unk=480)], 0, [("PARTIAL", S139)],
+              has=["scope unknown on 480 frames (the no-scope row)", "scope unknown on 480 of 480 frames"], lacks=["UNPARSED"])
+        check("F140 sight offset: a line from an F139 build (no scope field) still reads", ["native on foot ADS sight offset (F139) 10 s: item %s, table up +1.1 right +0.0 cm, trim +0.0 cm, "
+                                                                                          "applied up +1.10 cm right +0.00 cm (mean of 480 frames in the sights; applied on 480), "
+                                                                                          "F79 optic origin on 0 frames, refused over the 8 cm bound 0, no coherent item 0" % PLASMA139], 0,
+              [("OK", S139)], has=[PLASMA139 + ": total up +1.10 cm"], lacks=["UNPARSED"])
         check("F139 sight offset: the laser assault rifle (F79's) with a trim on top", [so139(item="$wpn_m_assaultrifle_laser_fauto_name;", tup=0.0, trim=1.5, up=1.5, f79=480)], 0,
               [("OK", S139)], has=["total up +1.50 cm", "F79 optic origin on 480"], lacks=["UNPARSED"])
         check("F139 sight offset: an item with no table value and no trim asks nothing", [so139(item=PISTOL139, tup=0.0, up=0.0)], 0, [("IDLE", S139)],
               has=["no offset was asked: no table hit and the trim at 0"], lacks=["UNPARSED"])
-        check("F139 sight offset: refused over the bound on every frame", [so139(item=LASERSMG139, tup=-5.8, trim=-4.0, up=0.0, applied=0, refused=480)], 3, [("NEVER APPLIED", S139)],
-              has=[LASERSMG139 + ": the offset was refused over the bound on every frame", "refused over the bound on 480 frames"], lacks=["UNPARSED"])
-        check("F139 sight offset: refused on some frames", [so139(item=LASERSMG139, tup=-5.8, trim=-2.2, up=-5.0, applied=300, refused=180)], 0, [("PARTIAL", S139)],
+        check("F139 sight offset: refused over the bound on every frame", [so139(item=LASERSMG139, tup=-3.0, trim=-6.0, up=0.0, applied=0, refused=480)], 3, [("NEVER APPLIED", S139)],
+              has=[LASERSMG139 + " scope no: the offset was refused over the bound on every frame", "refused over the bound on 480 frames"], lacks=["UNPARSED"])
+        check("F139 sight offset: refused on some frames", [so139(item=LASERSMG139, tup=-3.0, trim=-5.0, up=-5.0, applied=300, refused=180)], 0, [("PARTIAL", S139)],
               has=["refused on 180 frames, item not read on 0"], lacks=["UNPARSED"])
         check("F139 sight offset: the item unread on a tenth of the frames", [so139(applied=420, noitem=60)], 0, [("PARTIAL", S139)], has=["item not read on 60 frames"], lacks=["UNPARSED"])
-        check("F139 sight offset: the trim is set and no ADS second read the held item", [key139(2.0), so139(item="none", tup=0.0, up=0.0, applied=0, noitem=480)], 3,
+        check("F139 sight offset: the trim is set and no ADS second read the held item", [key139(2.0), so139(item="none", scope="unknown", tup=0.0, up=0.0, applied=0, noitem=480)], 3,
               [("NEVER APPLIED", S139)], has=["the trim is +2.0 cm but no ADS second read the held item"], lacks=["UNPARSED"])
-        check("F139 sight offset: the held item not read, no trim set", [key139(), so139(item="none", tup=0.0, up=0.0, applied=0, noitem=480)], 0, [("PARTIAL", S139)],
+        check("F139 sight offset: the held item not read, no trim set", [key139(), so139(item="none", scope="unknown", tup=0.0, up=0.0, applied=0, noitem=480)], 0, [("PARTIAL", S139)],
               has=["the held item was not read in 10 ADS second(s)"], lacks=["UNPARSED"])
         check("F139 sight offset: a drifted line is unparsed", ["native on foot ADS sight offset (F139) 10 s: something else"], 4, [("UNPARSED", S139)])
+
+        # ---- F140: the weapon readout placed per weapon ----
+        P140 = "weapon UI placement (F140)"
+        RIFLE_AR140 = "$wpn_m_assaultrifle_laser_fauto_name;"
+
+        def wp140(item=RIFLE_AR140, scope="no", cls="rifle", src="table entry", seed=(0.0, 3.5, 0.0, 0.0), trim=(0.0, 0.0, 0.0, 0.0), total=None, placed=1800, unk=0, untrusted=0, wl=10):
+            total = total or tuple(round(s + x, 4) for s, x in zip(seed, trim))
+            return R("weapon UI placement (F140) %u s: item", wl, item, scope, cls, src, *seed, *trim, *total, placed, unk, untrusted)
+
+        def load140(src="SuitLoadout", name="Combat", ident=4293000002,
+                    slots='PrimaryWeapon1 wpn_m_assaultrifle_plasma_fauto scope no [weapon_stability,weapon_handling]; PrimaryWeapon2 empty; SecondaryWeapon wpn_s_pistol_laser_sauto scope no []'):
+            return RLoad("journal loadout (F140): %s (read from", "%s, loadout \"%s\" (id %d): %s" % (src, name, ident, slots), 4000)
+
+        def trim140(axis="forward", v=0.0):
+            return R("native on foot weapon UI trim (F140, TEMPORARY): %s = %+.1f cm", "fix.native_on_foot_weapon_ui_%s_cm" % axis, v, "toward the muzzle", -10.0, 10.0)
+
+        check("F140 placement: a loadout read and nothing placed", [load140()], 0, [("IDLE", P140)], has=["no weapon readout placed in the window", "journal loadout read 1 time(s), the last by SuitLoadout (\"Combat\")",
+                                                                                                     "PrimaryWeapon1 wpn_m_assaultrifle_plasma_fauto scope no [weapon_stability,weapon_handling]"], lacks=["UNPARSED"])
+        check("F140 placement: two weapons placed from the table, per (item, scope, class) totals and seeds", [load140(), wp140(), wp140(item="$wpn_s_pistol_laser_sauto_name;", cls="pistol",
+              seed=(13.0, 3.5, -3.0, 3.0), wl=7)], 0, [("OK", P140)],
+              has=[RIFLE_AR140 + " scope no (rifle class): total forward +0.0 left +3.5 up +0.0 toward +0.0 cm (the last window; seed +0.0 +3.5 +0.0 +0.0 from the table entry, trim +0.0 +0.0 +0.0 +0.0), 10 s, placed on 1800 frames",
+                   "$wpn_s_pistol_laser_sauto_name; scope no (pistol class): total forward +13.0 left +3.5 up -3.0 toward +3.0 cm", "7 s, placed on 1800 frames"], lacks=["UNPARSED"])
+        check("F140 placement: a tuning flight leaves the total for each trim tried",
+              [wp140(), trim140("forward", 1.0), wp140(trim=(1.0, 0.0, 0.0, 0.0), wl=10), wp140(trim=(1.0, -0.5, 0.0, 0.0), wl=4)], 0, [("OK", P140)],
+              has=["by trim: (+0.0 +0.0 +0.0 +0.0) -> (+0.0 +3.5 +0.0 +0.0) (10 s)", "(+1.0 -0.5 +0.0 +0.0) -> (+1.0 +3.0 +0.0 +0.0) (4 s)", "total forward +1.0 left +3.0 up +0.0 toward +0.0 cm",
+                   "trim key lines 1"], lacks=["UNPARSED"])
+        check("F140 placement: the scope states of one weapon are separate groups", [wp140(scope="no"), wp140(scope="yes", trim=(0.0, 1.0, 0.0, 0.0))], 0, [("OK", P140)],
+              has=[RIFLE_AR140 + " scope no (rifle class)", RIFLE_AR140 + " scope yes (rifle class): total forward +0.0 left +4.5"], lacks=["UNPARSED"])
+        check("F140 placement: an item the table does not hold uses its class's values", [wp140(item="$wpn_m_newgun_fauto_name;", src="class values")], 0, [("PARTIAL", P140)],
+              has=["$wpn_m_newgun_fauto_name;: not in the table (the rifle class's values)", "from the class values"], lacks=["UNPARSED"])
+        check("F140 placement: the scope state unknown on most frames, and an untrusted item, are said", [wp140(scope="unknown", unk=1800), wp140(untrusted=30)], 0, [("PARTIAL", P140)],
+              has=["scope unknown on 1800 frames (the no-scope row)", "item not trusted on 30 frames (the class's values, no trim)"], lacks=["UNPARSED"])
+        check("F140 placement: a drifted line is unparsed", ["weapon UI placement (F140) 10 s: something else"], 4, [("UNPARSED", P140)])
+        check("F140 placement: a loadout line that could not open its journal is named, not unparsed", [RLoad("journal loadout (F140): could not open %S", 5)], 0,
+              lacks=["UNPARSED"])
 
         # ---- F135: the on-foot menu probe (MEASURE ONLY) ----
         M135 = "menu probe (F135)"
@@ -16603,8 +16736,8 @@ def self_test_health():
             ("reticle depth (F118) %u s", []),
             ("weapon readout size (F90) %u s", ["pistol ADS readout"]),
             ("weapon readout size (F91) %u s", ["p" * 599]),
-            ("pistol readout (F90) %u s", ["i" * 63, "r" * 359, "s" * 79]),
-            ("rifle ADS readout placement (F92) %u s", ["i" * 63, "r" * 359, "s" * 79]),
+            ("pistol readout (F90) %u s", ["i" * 63, "p" * 24, "r" * 359, "s" * 79]),
+            ("rifle ADS readout placement (F92) %u s", ["i" * 63, "p" * 24, "r" * 359, "s" * 79]),
             ("prompt anchor (F87p) %u s", ["k" * 159, "k" * 159, "focus indicator", "held", "body"]),
             ("prompt label draws (F87p) eye %d %u s", ["i" * 95]),
         )
@@ -16814,7 +16947,7 @@ def self_test_health():
             ("weapon eye offset (F88) %u s", ["follow", ",".join(["1.00"] * 10)]),
             ("ADS sight in both eyes (F106) %u s", ["off", "releasing"]),
             ("native on foot ADS eye chain (F93b) %u s", ["off", "off"]),
-            ("native on foot ADS sight offset (F139) %u s", ["x" * 63]),
+            ("native on foot ADS sight offset (F139) %u s", ["x" * 63, "unknown"]),
             ("ADS sight check (F66e/F79)", ["the eyes' offsets", " (an eye had no NDC: its figures are zero)"]),
             ("native on foot ADS input (F70b): source %s; request", ["bound HumanoidZoom", "off", "absent/invalid", "unknown", "latched", "x" * 63, "refused", "x" * 63]),
         )

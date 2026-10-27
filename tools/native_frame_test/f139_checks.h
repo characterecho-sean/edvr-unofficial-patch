@@ -5,6 +5,7 @@
 #pragma once
 
 #include "../../src/d3d11/native_on_foot_core.h"
+#include "../../src/d3d11/journal_loadout.h"
 #include "../../src/d3d11/native_on_foot_f139.h"
 
 #include <cmath>
@@ -15,6 +16,7 @@ namespace f139test {
 
 namespace nf = edvr::nofoot;
 namespace f139 = edvr::nofoot::f139;
+namespace ls = edvr::loadout;
 
 constexpr const char* kPlasma = "$wpn_m_assaultrifle_plasma_fauto_name;";
 constexpr const char* kRocket = "$wpn_m_launcher_rocket_sauto_name;";
@@ -28,25 +30,25 @@ inline double len3(const double a[3]) { return std::sqrt(dot3(a, a)); }
 inline bool approx(double a, double b, double tol = 1e-9) { return std::fabs(a - b) <= tol; }
 
 // A decision for the held item, coherent unless said otherwise, on a level root (right +x, up +y, forward +z).
-inline f139::Decision level(const char* name, double trimCm = 0.0, bool readOk = true, uint32_t snapshot = 7, uint32_t current = 7) {
+inline f139::Decision level(const char* name, double trimCm = 0.0, bool readOk = true, uint32_t snapshot = 7, uint32_t current = 7, int scope = ls::kScopeNo) {
     const double up[3] = {0, 1, 0}, right[3] = {1, 0, 0}, fwd[3] = {0, 0, 1};
-    return f139::decide(readOk, snapshot, current, name, trimCm, up, right, fwd);
+    return f139::decide(readOk, snapshot, current, name, scope, trimCm, up, right, fwd);
 }
 
 template <class Check>
 inline void run139(Check&& check) {
     {   // the table: exact item names, the four seeds, every other item 0
         double up = 9.0, right = 9.0;
-        check(f139::tableLookup(kPlasma, &up, &right) && up == 1.1 && right == 0.0, "F139: the plasma assault rifle's sight is 1.1 cm over the line");
-        check(f139::tableLookup(kRocket, &up, &right) && up == 1.2 && right == 0.0, "F139: the rocket launcher's is 1.2 cm over");
-        check(f139::tableLookup(kKineticSmg, &up, &right) && up == -2.0 && right == 0.0, "F139: the kinetic SMG's is 2.0 cm under");
-        check(f139::tableLookup(kLaserSmg, &up, &right) && up == -5.8 && right == 0.0, "F139: the laser SMG's is 5.8 cm under");
-        check(!f139::tableLookup(kLaserRifle, &up, &right) && up == 0.0 && right == 0.0, "F139: a miss (the laser assault rifle, F79's) gives 0 and 0");
-        check(!f139::tableLookup(kPistol, &up, &right) && up == 0.0 && !f139::tableLookup("", &up, &right) && !f139::tableLookup(nullptr, &up, &right), "F139: every other item, the empty name and no name: a miss");
-        check(!f139::tableLookup("$wpn_m_assaultrifle_plasma_fauto_name", &up, &right) && !f139::tableLookup("$WPN_M_ASSAULTRIFLE_PLASMA_FAUTO_NAME;", &up, &right) &&
-                  !f139::tableLookup("$wpn_m_assaultrifle_plasma_fauto_name; ", &up, &right) && !f139::tableLookup("$wpn_m_assaultrifle_plasma_fauto", &up, &right),
+        check(f139::tableLookup(kPlasma, ls::kScopeNo, &up, &right) && up == 1.1 && right == 0.0, "F139: the plasma assault rifle's sight is 1.1 cm over the line");
+        check(f139::tableLookup(kRocket, ls::kScopeNo, &up, &right) && up == 1.2 && right == 0.0, "F139: the rocket launcher's is 1.2 cm over");
+        check(f139::tableLookup(kKineticSmg, ls::kScopeNo, &up, &right) && up == -2.0 && right == 0.0, "F139: the kinetic SMG's is 2.0 cm under");
+        check(f139::tableLookup(kLaserSmg, ls::kScopeNo, &up, &right) && up == -3.0 && right == 0.0, "F139: the laser SMG's is 3.0 cm under (F140: the holographic sight panel above the emitter, not the emitter's -5.8)");
+        check(!f139::tableLookup(kLaserRifle, ls::kScopeNo, &up, &right) && up == 0.0 && right == 0.0, "F139: a miss (the laser assault rifle, F79's) gives 0 and 0");
+        check(!f139::tableLookup(kPistol, ls::kScopeNo, &up, &right) && up == 0.0 && !f139::tableLookup("", ls::kScopeNo, &up, &right) && !f139::tableLookup(nullptr, ls::kScopeNo, &up, &right), "F139: every other item, the empty name and no name: a miss");
+        check(!f139::tableLookup("$wpn_m_assaultrifle_plasma_fauto_name", ls::kScopeNo, &up, &right) && !f139::tableLookup("$WPN_M_ASSAULTRIFLE_PLASMA_FAUTO_NAME;", ls::kScopeNo, &up, &right) &&
+                  !f139::tableLookup("$wpn_m_assaultrifle_plasma_fauto_name; ", ls::kScopeNo, &up, &right) && !f139::tableLookup("$wpn_m_assaultrifle_plasma_fauto", ls::kScopeNo, &up, &right),
               "F139: the key is the exact item name: no prefix, no other case, no trailing text");
-        check(f139::kTableCount == 4, "F139: four seeds");
+        check(f139::kTableCount == 8, "F139: four weapons, each under both scope states");
     }
     {   // the shift: the table value along the root's up row, perpendicular to the sight line
         const f139::Decision d = level(kPlasma);
@@ -57,12 +59,12 @@ inline void run139(Check&& check) {
         const f139::Decision under = level(kKineticSmg);
         check(under.applied && approx(under.shift[1], -0.020) && approx(under.appliedUpCm, -2.0), "F139: a sight under the line moves the eye down: -2.0 cm");
         const f139::Decision laser = level(kLaserSmg);
-        check(laser.applied && approx(laser.shift[1], -0.058) && approx(laser.shiftM, 0.058), "F139: the laser SMG: 5.8 cm down");
+        check(laser.applied && approx(laser.shift[1], -0.030) && approx(laser.shiftM, 0.030), "F139: the laser SMG: 3.0 cm down");
         const f139::Decision rocket = level(kRocket);
         check(rocket.applied && approx(rocket.shift[1], 0.012), "F139: the rocket launcher: 1.2 cm up");
         // the right part rides the root's right row (the table's right is 0 for now; the shift function takes both)
         const double up[3] = {0, 1, 0}, right[3] = {1, 0, 0}, fwd[3] = {0, 0, 1};
-        check(approx(f139::decide(true, 1, 1, kPlasma, 0.0, up, right, fwd).shift[0], 0.0), "F139: no right in the table: nothing along the right row");
+        check(approx(f139::decide(true, 1, 1, kPlasma, ls::kScopeNo, 0.0, up, right, fwd).shift[0], 0.0), "F139: no right in the table: nothing along the right row");
     }
     {   // perpendicular to the sight line, whatever the axes: a tilted root, and an up row with a part along the forward
         // a root yawed 35 deg and pitched 25 deg up (rows right, up, forward), orthonormal
@@ -72,20 +74,20 @@ inline void run139(Check&& check) {
         const double up[3] = {fwd[1] * right[2] - fwd[2] * right[1], fwd[2] * right[0] - fwd[0] * right[2], fwd[0] * right[1] - fwd[1] * right[0]};
         const double upSign = up[1] < 0.0 ? -1.0 : 1.0;
         const double upRow[3] = {upSign * up[0], upSign * up[1], upSign * up[2]};
-        const f139::Decision d = f139::decide(true, 3, 3, kLaserSmg, 1.0, upRow, right, fwd);   // -5.8 + 1.0 = -4.8 cm
+        const f139::Decision d = f139::decide(true, 3, 3, kLaserSmg, ls::kScopeNo, -1.8, upRow, right, fwd);   // -3.0 - 1.8 = -4.8 cm
         check(d.applied && approx(d.askedUpCm, -4.8) && approx(d.shiftM, 0.048, 1e-9), "F139: on a tilted orthonormal root the shift is exactly the asked 4.8 cm");
         check(std::fabs(dot3(d.shift, fwd)) < 1e-12, "F139: the shift is perpendicular to the sight line (forward)");
         check(approx(dot3(d.shift, upRow), -0.048, 1e-9) && std::fabs(dot3(d.shift, right)) < 1e-12, "F139: and lies along the up row");
         // an up row that leans into the forward: its part along the sight line is removed
         const double lean[3] = {0.0, 1.0, 0.5};
         const double f0[3] = {0, 0, 1}, r0[3] = {1, 0, 0};
-        const f139::Decision l = f139::decide(true, 3, 3, kPlasma, 0.0, lean, r0, f0);
+        const f139::Decision l = f139::decide(true, 3, 3, kPlasma, ls::kScopeNo, 0.0, lean, r0, f0);
         const double leanLen = std::sqrt(1.0 + 0.25);
         check(l.applied && std::fabs(l.shift[2]) < 1e-12 && approx(l.shift[1], 0.011 * (1.0 / leanLen), 1e-12) && approx(l.shiftM, 0.011 / leanLen, 1e-12),
               "F139: an up row with a part along the forward gives only its transverse part (perpendicular to f)");
         // axes of any length: the cm stay cm
         const double big[3] = {0.0, 3.0, 0.0};
-        check(approx(f139::decide(true, 3, 3, kPlasma, 0.0, big, r0, f0).shift[1], 0.011), "F139: the up row is unitised: 1.1 cm is 1.1 cm");
+        check(approx(f139::decide(true, 3, 3, kPlasma, ls::kScopeNo, 0.0, big, r0, f0).shift[1], 0.011), "F139: the up row is unitised: 1.1 cm is 1.1 cm");
     }
     {   // a miss gives 0
         const f139::Decision d = level(kPistol);
@@ -112,10 +114,10 @@ inline void run139(Check&& check) {
     {   // the bound refuses
         const f139::Decision edge = level(kPistol, 8.0);
         check(edge.applied && !edge.refused && approx(edge.shiftM, 0.08), "F139: 8.0 cm exactly is inside the bound");
-        const f139::Decision both = level(kLaserSmg, -4.0);   // -5.8 - 4.0 = -9.8
-        check(both.refused && !both.applied && both.shiftM == 0.0 && both.shift[1] == 0.0 && both.appliedUpCm == 0.0 && approx(both.askedUpCm, -9.8),
-              "F139: the laser SMG's -5.8 with a trim of -4.0 is 9.8 cm: refused, no shift, counted (refused)");
-        check(level(kLaserSmg, -2.2).applied && level(kLaserSmg, -2.3).refused, "F139: -5.8 - 2.2 = 8.0 applies; -5.8 - 2.3 = 8.1 is refused");
+        const f139::Decision both = level(kLaserSmg, -6.0);   // -3.0 - 6.0 = -9.0
+        check(both.refused && !both.applied && both.shiftM == 0.0 && both.shift[1] == 0.0 && both.appliedUpCm == 0.0 && approx(both.askedUpCm, -9.0),
+              "F139: the laser SMG's -3.0 with a trim of -6.0 is 9.0 cm: refused, no shift, counted (refused)");
+        check(level(kLaserSmg, -5.0).applied && level(kLaserSmg, -5.1).refused, "F139: -3.0 - 5.0 = 8.0 applies; -3.0 - 5.1 = 8.1 is refused");
         check(level(kPlasma, 8.0).refused && level(kPlasma, 7.0).refused && level(kPlasma, 6.9).applied, "F139: 1.1 + 8.0 = 9.1 and 1.1 + 7.0 = 8.1 cm are refused; 1.1 + 6.9 = 8.0 applies");
         check(f139::kBoundM == 0.08, "F139: the bound is 8 cm");
     }
@@ -138,9 +140,9 @@ inline void run139(Check&& check) {
         check(inv && f79.applied, "F139 fixture: F79's measured origin applies on the captured laser rifle frame");
         const double upRow[3] = {rifleRoot[4], rifleRoot[5], rifleRoot[6]}, rightRow[3] = {rifleRoot[0], rifleRoot[1], rifleRoot[2]}, fwd[3] = {rifleRoot[8], rifleRoot[9], rifleRoot[10]};
         // the loop's order: F79's origin first, then F139's shift added to it
-        const f139::Decision untrimmed = f139::decide(true, 5, 5, kLaserRifle, 0.0, upRow, rightRow, fwd);
+        const f139::Decision untrimmed = f139::decide(true, 5, 5, kLaserRifle, ls::kScopeNo, 0.0, upRow, rightRow, fwd);
         double originNoTrim[3], originTrim[3];
-        const f139::Decision trimmed = f139::decide(true, 5, 5, kLaserRifle, 1.5, upRow, rightRow, fwd);
+        const f139::Decision trimmed = f139::decide(true, 5, 5, kLaserRifle, ls::kScopeNo, 1.5, upRow, rightRow, fwd);
         for (int i = 0; i < 3; ++i) {
             originNoTrim[i] = f79.origin[i] + untrimmed.shift[i];
             originTrim[i] = f79.origin[i] + trimmed.shift[i];
@@ -154,7 +156,7 @@ inline void run139(Check&& check) {
         double fromRaw[3] = {originTrim[0] - f79.rawOrigin[0], originTrim[1] - f79.rawOrigin[1], originTrim[2] - f79.rawOrigin[2]};
         check(std::fabs(dot3(fromRaw, fwd)) < 1e-5 && approx(len3(f79.shift), f79.transverseResidualM, 1e-12), "F139: the total offset from raw P14 stays transverse and F79's own shift is untouched");
         // the same trim off the rifle is the same vector: F79 and F139 are independent
-        const f139::Decision pistol = f139::decide(true, 5, 5, kPistol, 1.5, upRow, rightRow, fwd);
+        const f139::Decision pistol = f139::decide(true, 5, 5, kPistol, ls::kScopeNo, 1.5, upRow, rightRow, fwd);
         check(approx(pistol.shift[0], trimmed.shift[0], 1e-15) && approx(pistol.shift[1], trimmed.shift[1], 1e-15) && approx(pistol.shift[2], trimmed.shift[2], 1e-15),
               "F139: the shift does not depend on whether F79 applied");
     }
@@ -171,15 +173,41 @@ inline void run139(Check&& check) {
         const f139::Decision nameless = level("", 3.0);
         check(!nameless.coherent && !nameless.applied, "F139: no item name: nothing");
         const double up[3] = {0, 1, 0}, right[3] = {1, 0, 0}, fwd[3] = {0, 0, 1};
-        check(!f139::decide(true, 1, 1, nullptr, 3.0, up, right, fwd).coherent, "F139: a null name is not coherent");
+        check(!f139::decide(true, 1, 1, nullptr, ls::kScopeNo, 3.0, up, right, fwd).coherent, "F139: a null name is not coherent");
     }
     {   // an axis that cannot be used refuses what was asked, and only that
         const double zero[3] = {0, 0, 0}, right[3] = {1, 0, 0}, fwd[3] = {0, 0, 1}, up[3] = {0, 1, 0}, bad[3] = {std::nan(""), 1, 0};
-        const f139::Decision d = f139::decide(true, 1, 1, kPlasma, 0.0, zero, right, fwd);
+        const f139::Decision d = f139::decide(true, 1, 1, kPlasma, ls::kScopeNo, 0.0, zero, right, fwd);
         check(d.refused && !d.applied && d.shiftM == 0.0, "F139: an up row with no length refuses the shift");
-        check(f139::decide(true, 1, 1, kPlasma, 0.0, up, right, zero).refused && f139::decide(true, 1, 1, kPlasma, 0.0, up, right, bad).refused && f139::decide(true, 1, 1, kPlasma, 0.0, bad, right, fwd).refused,
+        check(f139::decide(true, 1, 1, kPlasma, ls::kScopeNo, 0.0, up, right, zero).refused && f139::decide(true, 1, 1, kPlasma, ls::kScopeNo, 0.0, up, right, bad).refused && f139::decide(true, 1, 1, kPlasma, ls::kScopeNo, 0.0, bad, right, fwd).refused,
               "F139: a forward with no length, a row that is not a number: refused");
-        check(!f139::decide(true, 1, 1, kPistol, 0.0, zero, zero, zero).refused, "F139: with nothing asked the axes are not looked at");
+        check(!f139::decide(true, 1, 1, kPistol, ls::kScopeNo, 0.0, zero, zero, zero).refused, "F139: with nothing asked the axes are not looked at");
+    }
+    {   // F140: the table is keyed by (item, scope fitted)
+        double up = 9.0, right = 9.0;
+        for (const f139::Entry& e : f139::kTable) {
+            const bool hit = f139::tableLookup(e.item, e.scope, &up, &right);
+            check(hit && up == e.upCm && right == e.rightCm, "F140: every row of the sight table is found under its own scope state");
+        }
+        check(f139::tableLookup(kPlasma, ls::kScopeNo, &up, &right) && up == 1.1 && f139::tableLookup(kPlasma, ls::kScopeYes, &up, &right) && up == 0.0,
+              "F140: a table hit for each scope state: the plasma rifle's seed 1.1 cm is the no-scope row, the scoped row starts at 0");
+        for (const char* w : {kPlasma, kRocket, kKineticSmg, kLaserSmg}) {
+            check(f139::tableLookup(w, ls::kScopeYes, &up, &right) && up == 0.0 && right == 0.0, "F140: every weapon's scoped sight row exists and starts at 0 until tuned");
+        }
+        check(f139::tableLookup(kPlasma, ls::kScopeUnknown, &up, &right) && up == 1.1 && f139::tableLookup(kLaserSmg, ls::kScopeUnknown, &up, &right) && up == -3.0,
+              "F140: an unknown scope state uses the no-scope row");
+        const f139::Decision no = level(kPlasma, 0.0, true, 7, 7, ls::kScopeNo), yes = level(kPlasma, 0.0, true, 7, 7, ls::kScopeYes), unk = level(kPlasma, 0.0, true, 7, 7, ls::kScopeUnknown);
+        check(no.table && no.applied && approx(no.askedUpCm, 1.1) && !no.scopeUnknown && no.entryScope == ls::kScopeNo, "F140: a no-scope plasma rifle: the 1.1 cm row, state known");
+        check(yes.table && !yes.applied && yes.askedUpCm == 0.0 && !yes.scopeUnknown && yes.entryScope == ls::kScopeYes && yes.scope == ls::kScopeYes,
+              "F140: a scoped plasma rifle: its own row (0 until tuned), nothing moved");
+        check(unk.table && unk.applied && approx(unk.askedUpCm, 1.1) && unk.scopeUnknown && unk.entryScope == ls::kScopeNo && unk.scope == ls::kScopeUnknown,
+              "F140: an unknown state takes the no-scope row and says it was unknown (counted by the caller)");
+        // the live trim applies whatever the state is
+        check(approx(level(kPlasma, 1.5, true, 7, 7, ls::kScopeYes).askedUpCm, 1.5) && approx(level(kPlasma, 1.5, true, 7, 7, ls::kScopeNo).askedUpCm, 2.6) &&
+                  approx(level(kPlasma, 1.5, true, 7, 7, ls::kScopeUnknown).askedUpCm, 2.6) && level(kPistol, 1.5, true, 7, 7, ls::kScopeYes).applied,
+              "F140: the live trim adds to the scoped row, the no-scope row and an unknown state alike");
+        check(!level(kPlasma, 3.0, false, 7, 7, ls::kScopeYes).coherent && !level(kPlasma, 3.0, true, 7, 8, ls::kScopeYes).coherent,
+              "F140: an incoherent snapshot gives nothing under any scope state");
     }
 }
 
