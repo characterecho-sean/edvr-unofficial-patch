@@ -6268,7 +6268,7 @@ int wmain(int argc, wchar_t** argv) {
         check(newOk, "F101: this runtime's every ladder step (11 to 1) is accepted by this provider and answered in the shape asked");
     }
 
-    // ---- World scale (fix.world_scale): version 11 ----------------------------------------------------------------------------------------------------------
+    // ---- World scale (visual.world_scale): version 11 ----------------------------------------------------------------------------------------------------------
     // Version 11 is the version 10 shape (input version 3) and its answer carries worldScalePercent, read from the key and held to 50..200; the version 10 words
     // ride beside it; a version 10 answer and every older one leave the word alone, and the gates on Elite's eye pair see 100 (nativeFrameWorldScale).
     {
@@ -6286,7 +6286,7 @@ int wmain(int argc, wchar_t** argv) {
         uint64_t seq = 1000;
         for (const Case& c : {Case{"130", 130u}, Case{"80", 80u}, Case{"100", 100u}, Case{"50", 50u}, Case{"200", 200u}, Case{"10", 50u}, Case{"999", 200u},
                               Case{"-5", 50u}, Case{"", 100u}, Case{"banana", 100u}}) {
-            cfg.set("fix.world_scale", c.key);
+            cfg.set("visual.world_scale", c.key);
             EdvrNativeFrameOutput v11{sizeof(v11), EDVR_NATIVE_FRAME_VERSION_11};
             EdvrNativeFrameInput v11Frame = v3Input(++seq, 0.1f);
             keyed = keyed && table.beginFrame(table.context, &v11Frame, &v11) == S_OK && v11.version == EDVR_NATIVE_FRAME_VERSION_11 && v11.size == sizeof(v11) &&
@@ -6294,7 +6294,7 @@ int wmain(int argc, wchar_t** argv) {
         }
         check(keyed, "world scale: a version 11 answer carries the key (130, 80, 100, 50, 200), held to 50..200 (10 reads 50, 999 reads 200) and 100 for an empty or non-number "
                      "value; nativeFrameWorldScale is what the answer carried");
-        cfg.set("fix.world_scale", "130");
+        cfg.set("visual.world_scale", "130");
         EdvrNativeFrameOutput v11{sizeof(v11), EDVR_NATIVE_FRAME_VERSION_11};
         EdvrNativeFrameInput v11Frame = v3Input(++seq, 0.1f);
         edvr::nativeFrameSetAdsPitch(0.25f);
@@ -6329,7 +6329,7 @@ int wmain(int argc, wchar_t** argv) {
         check(sizeof(EdvrNativeFrameOutput) == 184 && offsetof(EdvrNativeFrameOutput, worldScalePercent) == offsetof(EdvrNativeFrameOutput, sceneReady) - 4u &&
                   offsetof(EdvrNativeFrameOutput, positionRecentre) == offsetof(EdvrNativeFrameOutput, reservedTerrainGuard) - 4u,
               "world scale: the percent is the last of the retired guard's 21 words (the struct is 184 bytes, as it was)");
-        cfg.set("fix.world_scale", "");
+        cfg.set("visual.world_scale", "");
     }
 
     check(table.close(table.context) == S_OK && !edvr::glitchConsumerPresent(),

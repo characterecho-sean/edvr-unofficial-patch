@@ -6,7 +6,7 @@
   session state and report uncertain persistence. Focused checks 131/0,
   mutation proof 42/42. Full build PASS, 170.6 s; dated entry below.
 - **Current code state (2026-10-08; dated notes in Status detail):**
-  - Visual page (2026-10-27, `menu visual`): VR's menu has one now, beside the flat panel's Visual tab; World scale (`fix.world_scale`), the intro settings and the screen curve are on it; BUILT, NOT FLOWN. Sections "What it shows" and "Visual tab" below.
+  - Visual page (2026-10-27, `menu visual`): VR's menu has one now, beside the flat panel's Visual tab; World scale (`visual.world_scale`), the intro settings and the screen curve are on it; BUILT, NOT FLOWN. Sections "What it shows" and "Visual tab" below.
   - Flat F8 panel: a Visual tab between Performance and Debug (2026-10-22, `menu visual`), a flat-only HUD Anti-Aliasing row (2026-10-24, `menu flat_performance`); sections below.
   - Explorer Cam page (2026-10-08): REMOVED with Explorer Cam (F98, 2026-10-24); its keys are retired.
   - Hotkeys page (2026-10-08): key, pad or HOTAS rebinding of the menu, AA
@@ -907,7 +907,7 @@ they were there (flown 2026-09-07).
    - **Visual** (everyone, 2026-10-27): the rows tagged `menu visual`, how the world
      looks through the headset, in `edvr.ini` order under the ini's headings:
      **Screen curve (on foot, intro, splash)** and **Intro background picture**
-     (both moved here from the Fixes page), **World scale** (`fix.world_scale`,
+     (both moved here from the Fixes page), **World scale** (`visual.world_scale`,
      whole percent 50 to 200, step 1, shipped 100, live: above 100 the world looks
      bigger, below smaller; the runtime moves the two eye origins the game is told
      about, about their midpoint, by 100 over the percent, and the layer, the menu
@@ -916,7 +916,7 @@ they were there (flown 2026-09-07).
      Star glow is not on it: only the flat profile reads `visual.star_glow`, so its
      token is `menu flat_visual`. A live `edvr.ini` with no `world_scale` line is
      not a problem: the row shows the shipped 100, and the first change appends the
-     line to `[fix]`, as for any key the file lacks (`hotkey_capture_test` pins the
+     line to `[visual]`, as for any key the file lacks (`hotkey_capture_test` pins the
      append and the page's rows).
    - **Native on foot** (everyone, 2026-10-14): the rows tagged
      `menu native_on_foot`. (The Explorer Cam page stood here from 2026-10-08

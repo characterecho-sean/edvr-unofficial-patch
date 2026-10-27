@@ -278,7 +278,7 @@ present. Then it lists the build-tagged lines, `(F85b)`, `(F87h, TEMPORARY)`, `(
 tags that have no rule (--health-all lists every tag), so a feature added with no rule here still shows. --since and --until (HH:MM[:SS], the log's own clock,
 across midnight when since is after until) cut the log to a window. Exit 0 when no family is NEVER APPLIED or UNPARSED, 3 when one is NEVER APPLIED (a script can
 gate on it), 4 when a rule is UNPARSED and none is NEVER APPLIED, 2 for a wrong --expect-build. The rules are the rows of HEALTH_RULES; a new feature adds a row.
-The one rule that is not read from the graphics log is world scale (fix.world_scale): its lines are the runtime's, so --health also reads the paired runtime log
+The one rule that is not read from the graphics log is world scale (visual.world_scale): its lines are the runtime's, so --health also reads the paired runtime log
 (the one --runtime-file names, else the edvr_openxr_*.log that opened nearest) for it, whole: --since and --until do not cut it. It says OK when the runtime latched a
 value and Elite read its eye transform at that value afterwards, NEVER APPLIED when it did not (a change that needs a restart), and nothing at all when the value stayed 100.
 

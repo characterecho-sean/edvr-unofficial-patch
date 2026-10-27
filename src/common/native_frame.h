@@ -42,7 +42,7 @@
 // (the head in natural LOCAL below) with the version 9 output shape, and a version 10 answer carries the ADS head-aim's seated pitch in the
 // retired slot reservedYaw. A provider that refuses 10 steps the runtime down to 9 (input version 2, no ADS pitch). Same hand-copied-DLLs rule.
 #define EDVR_NATIVE_FRAME_VERSION_10 10u
-// Version 11 (world scale, fix.world_scale) is a ladder step like 10: the same shapes (input version 3, the whole output struct), and a version 11 answer carries
+// Version 11 (world scale, visual.world_scale) is a ladder step like 10: the same shapes (input version 3, the whole output struct), and a version 11 answer carries
 // the percent the runtime moves the eyes Elite is told about by, in worldScalePercent (the last of the retired guard's 21 words; layout and size unchanged). A
 // provider that refuses 11 steps the runtime down to 10, which reads 100 (Elite's own scale). Same hand-copied-DLLs rule.
 #define EDVR_NATIVE_FRAME_VERSION_11 11u
@@ -156,7 +156,7 @@ struct EdvrNativeFrameOutput {
     // leaves it zero. Offset, size and type unchanged; the other 20 words are the retired guard's.
     uint32_t positionRecentre;
     uint32_t reservedTerrainGuard[19];
-    // World scale (fix.world_scale, docs\world-scale.md), in a version 11 answer only: the percent the runtime moves the two eye origins Elite is told about by,
+    // World scale (visual.world_scale, docs\world-scale.md), in a version 11 answer only: the percent the runtime moves the two eye origins Elite is told about by,
     // about their midpoint (50 to 200; 100 is Elite's own scale). Taken from the last of the retired guard's 21 words; offset, size and type unchanged. A provider
     // from before it leaves it zero and a runtime from before it never looks, and a zero or an answer older than 11 reads 100 (native_frame_client.h).
     uint32_t worldScalePercent;

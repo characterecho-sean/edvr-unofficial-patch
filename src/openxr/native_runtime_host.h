@@ -575,7 +575,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
          sizes[0].recommendedImageRectWidth,sizes[0].recommendedImageRectHeight,edvr::ppn::viewAngleDegrees(left,right))>0)
       nativeTracePuts(line);
   }
-  // World scale (fix.world_scale, common/world_scale.h): the percent the last frame latched, 100 until a frame says otherwise. A change is said once, with the located
+  // World scale (visual.world_scale, common/world_scale.h): the percent the last frame latched, 100 until a frame says otherwise. A change is said once, with the located
   // eye separation and the one Elite is told; the geometry snapshots of that frame are built from the latched value alone. A frame whose eyes did not
   // locate leaves it where it was, and says nothing, so the line always carries two separations that exist. A run that never leaves 100 writes no line.
   uint32_t worldScaleLatched=edvr::kWorldScaleDefault;

@@ -1900,7 +1900,7 @@ void testVisualPage() {
     static const Want want[] = {
         {"fix", "panel_curvature", "The on-foot screen"},
         {"fix", "intro_backdrop", "The intro"},
-        {"fix", "world_scale", "World scale"},
+        {"visual", "world_scale", "World scale"},
         {"visual", "intro_video", "The launch movie"},
     };
     constexpr int kWant = static_cast<int>(sizeof(want) / sizeof(want[0]));
@@ -1939,10 +1939,10 @@ void testVisualPage() {
     // forced: absent, it is appended to the end of its own section (not refused), and nothing else moves.
     std::string source = "[fix]\n# a setting\ntemporal_aa = dlss\n\n[visual]\nstar_glow = 100\n";
     MergeReport report;
-    const std::string updated = mergeIni(source, source, &source, {{"fix.world_scale", "130"}}, &report);
+    const std::string updated = mergeIni(source, source, &source, {{"visual.world_scale", "130"}}, &report);
     const size_t line = updated.find("world_scale = 130"), visual = updated.find("[visual]");
-    check(iniValue(updated, "fix.world_scale", "<unset>") == "130" && line != std::string::npos && line < visual,
-          "a live edvr.ini with no world_scale line takes the menu's first write as a line appended inside [fix]");
+    check(iniValue(updated, "visual.world_scale", "<unset>") == "130" && line != std::string::npos && line > visual,
+          "a live edvr.ini with no world_scale line takes the menu's first write as a line appended inside [visual]");
     check(iniValue(updated, "fix.temporal_aa", "<unset>") == "dlss" && iniValue(updated, "visual.star_glow", "<unset>") == "100",
           "...and the neighbouring settings are untouched");
 }

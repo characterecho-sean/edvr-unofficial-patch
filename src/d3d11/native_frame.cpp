@@ -64,7 +64,7 @@ std::atomic<uint32_t> g_nowPoseMode{0};   // F40/F42: fix.now_pose (0 next, 1 re
 float g_rotCal[2] = {};   // F61 (TEMPORARY): the rotation calibration's seated yaw and pitch (radians), version 9 output only (guarded by g_mutex)
 float g_adsPitch = 0.0f;  // F62b (TEMPORARY): the ADS head-aim's seated pitch (radians), version 10 output only (guarded by g_mutex)
 uint32_t g_positionRecentre = 0;  // F123: the position-only recentre asked of the runtime (0: none; else the request's serial), version 10 output only (guarded by g_mutex)
-// World scale (fix.world_scale): the key as last read, with the configuration generation it was read under (guarded by g_mutex: every reader is inside beginFrame),
+// World scale (visual.world_scale): the key as last read, with the configuration generation it was read under (guarded by g_mutex: every reader is inside beginFrame),
 // and the percent the last answer handed the runtime, which a version 11 ask carries and anything older cannot (100: nothing applied).
 uint32_t g_worldScaleKey = edvr::kWorldScaleDefault;
 uint32_t g_worldScaleKeyGeneration = 0;
@@ -113,9 +113,9 @@ uint32_t worldScaleKey() {
     const uint32_t was = g_worldScaleKey;
     g_worldScaleKeyRead = true;
     g_worldScaleKeyGeneration = generation;
-    g_worldScaleKey = edvr::worldScaleClamp(static_cast<uint32_t>(cfg.getIntInRange("fix.world_scale", 100, 50, 200)));
+    g_worldScaleKey = edvr::worldScaleClamp(static_cast<uint32_t>(cfg.getIntInRange("visual.world_scale", 100, 50, 200)));
     if (g_worldScaleKey != was)
-        edvr::Log::get().note("world scale: %u%% (live, fix.world_scale; %u%% before)", g_worldScaleKey, was);
+        edvr::Log::get().note("world scale: %u%% (live, visual.world_scale; %u%% before)", g_worldScaleKey, was);
     return g_worldScaleKey;
 }
 
@@ -408,7 +408,7 @@ HRESULT WINAPI beginFrame(void* context, const EdvrNativeFrameInput* input,
         if (output->version >= EDVR_NATIVE_FRAME_VERSION_10)
             result.leftEyeShare = edvr::eyeshare::toBits(edvr::eyeshare::read(GetTickCount64()));
     }
-    // World scale (fix.world_scale), in a version 11 answer only. What the runtime is told is what the gates on Elite's eye pair measure against
+    // World scale (visual.world_scale), in a version 11 answer only. What the runtime is told is what the gates on Elite's eye pair measure against
     // (nativeFrameWorldScale), so a shape that cannot carry it leaves 100: the runtime of that age applies none.
     {
         const bool carried = wantsEyeAlign && output->version == EDVR_NATIVE_FRAME_VERSION_11;

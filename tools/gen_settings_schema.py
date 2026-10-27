@@ -1896,12 +1896,12 @@ def self_test():
     if wrote.count('"native_on_foot"') != 2:
         failures.append('%s: expected exactly two rows on the native_on_foot page, found %d'
                         % (name, wrote.count('"native_on_foot"')))
-    # The Visual page of VR's menu (2026-10-27): `menu visual` puts a [fix] number row on that page for everyone, `unit %` is the text after the number, and a `menu flat_visual`
+    # The Visual page of VR's menu (2026-10-27): `menu visual` puts a [visual] number row on that page for everyone, `unit %` is the text after the number, and a `menu flat_visual`
     # row is on the flat Visual tab and not on that page.
-    visual_page_ini = ('[fix]\n# How big the world looks, in percent. Live.\n'
+    visual_page_ini = ('[visual]\n# How big the world looks, in percent. Live.\n'
                        '# ui: World scale | range 50..200 | step 1 | unit % | recommended 100 | live | menu visual\nworld_scale = 100\n\n'
-                       '[visual]\n# A glow. Live.\n# ui: Glow | choices 100, 125 | live | menu flat_visual\nglow = 100\n')
-    visual_page_reads = {'a.cpp': ('int w = cfg.getIntInRange("fix.world_scale", 100, 50, 200);\n'
+                       '# A glow. Live.\n# ui: Glow | choices 100, 125 | live | menu flat_visual\nglow = 100\n')
+    visual_page_reads = {'a.cpp': ('int w = cfg.getIntInRange("visual.world_scale", 100, 50, 200);\n'
                                    'std::string g = cfg.getString("visual.glow", "100");\n'),
                          'd3d11/menu_flat_rows.h': 'inline constexpr FlatPageRow kFlatVisualRows[] = {\n    {"visual", "glow", FlatRowRead::Allowlist},\n};\n'}
     name = 'visual-page'

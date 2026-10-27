@@ -1,4 +1,4 @@
-// World scale (fix.world_scale, docs\world-scale.md): the one number that moves the two eye origins Elite is told about, about their midpoint.
+// World scale (visual.world_scale, docs\world-scale.md): the one number that moves the two eye origins Elite is told about, about their midpoint.
 //
 // A percent. 100 is Elite's own scale and changes nothing. Above 100 the eyes are closer together and the world looks bigger; below 100 they are
 // further apart and it looks smaller: the direction and the units of OpenXR Toolkit's and SteamVR's world scale. Head movement, orientation and field of

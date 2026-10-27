@@ -522,8 +522,8 @@ void panelTable(const std::string& root, const std::string& gen) {
                   glow.find("MenuTier::Fix, \"flat_visual\",") != std::string::npos,
               "the generated Star glow row is a Fix-tier choice of 100 to 200 percent, shipped 100, live, on the flat-only page 'flat_visual'");
         // The VR-only rows of VR's Visual page are not rows of the flat tab: the flat gate refuses their keys, so a flat row would show a value that does nothing.
-        check(schemaHasRow(schema, "fix", "world_scale") && !flatVisualHasRow("fix", "world_scale") && !flatVisualHasRow("fix", "intro_backdrop") &&
-                  !flatVisualHasRow("fix", "panel_curvature") && !flatProfileReadsKey("fix.world_scale") && !flatProfileReadsKey("fix.intro_backdrop") &&
+        check(schemaHasRow(schema, "visual", "world_scale") && !flatVisualHasRow("visual", "world_scale") && !flatVisualHasRow("fix", "intro_backdrop") &&
+                  !flatVisualHasRow("fix", "panel_curvature") && !flatProfileReadsKey("visual.world_scale") && !flatProfileReadsKey("fix.intro_backdrop") &&
                   !flatProfileReadsKey("fix.panel_curvature"),
               "World scale, Intro background picture and Screen curve are on VR's Visual page and not on the flat tab (the flat gate refuses their keys)");
         const size_t a = schema.find("{\"visual\", \"intro_video\",");
