@@ -104,3 +104,11 @@ FDE0D0    -> FDF1D0    -> FDF170     RELOC / RELOC  rest model matrix leaf
 5F741B8   -> 5F772E3   -> 5F772E3    AMB*  / XREF   visor down byte
 5F741CA   -> 5F77202   -> 5F77202    AMB*  / XREF   HUD layout scale mode byte
 5F7D7F8   -> 5F80938   -> 5F80938    XREF  / XREF   CTSA type key
+# Added after the retarget, build 334925 only (read from EliteDangerous64-334925.exe with capstone; no older build mapped; NEW = not in the 99 above).
+# F141 (2026-10-27, measure only; src/d3d11/native_on_foot_f141.h):
+-         -> -         -> F893D0     NEW           eye interface slot +0x20 target (lea rax,[rcx+0x268]; F141 checks it)
+-         -> -         -> 19079E0    NEW           HumanoidWeaponAiming aim, per frame (F141 hook, read only)
+-         -> -         -> 1908760    NEW           HumanoidWeaponAiming ADS bend, per frame (F141 hook, read only)
+-         -> -         -> 3175A80    NEW           transform handle valid (F141 calls it)
+-         -> -         -> 3176930    NEW           transform handle local position (F141 calls it)
+-         -> -         -> 5200038    NEW           eye interface vtable (HumanoidEyeComponent+0x58; F141 checks it)

@@ -43,6 +43,7 @@
 #include "f138_checks.h"    // F138: the view holds its height over the neck while the look is pitched (the weight, the sink, the reference, the return edge, the reasons, the bins)
 #include "f139_checks.h"    // F139: each weapon's sight on the ADS line (the table, the live trim, the shift, the bound, F79's origin beside it, the item snapshot)
 #include "f140_checks.h"    // F140: the weapon readout placed per weapon (the table by item and scope, the trims, the clamp, an untrusted name); the journal's loadout parser
+#include "f141_checks.h"    // F141 (measure only): the game's ADS sight point (the bend's test, S against P14, the window's sums) and the readout's anchor (U against W and P14)
 #include "f110_checks.h"    // F110: the ADS sight lock's model right eye (the left-eye job camera plus the IPD)
 #include "f111_checks.h"    // F111: the panel pointer instrument's statistics and verdict
 #include "f113_checks.h"    // F113: each eye's scene rows whenever the world is drawn (the depth prepass and the terrain as sources)
@@ -7507,6 +7508,9 @@ int wmain(int argc, wchar_t** argv) {
     // F140: the journal's loadout (the name mapping, SuitLoadout, SwitchSuitLoadout, LoadoutEquipModule, a removal, the unknown and ambiguous cases, chunked reading) and the weapon
     // readout's placement per (item, scope): a table hit, a miss, the trim, the clamp, the rocket launcher's entry while the pistol part is drawn, an untrusted name.
     f140test::run140(check);
+    // F141 (measure only): the bend's own test (w >= 1, the handle valid, the sight ahead), the sight ray in the eye's axes, S against P14's line in the FP root's
+    // axes, the window's sums, a locator name, an activation; U against a moved weapon constant, the spread's mean, largest distance and rotation, a part's basis.
+    f141test::run141(check);
     // F110: the ADS sight lock's model right eye from the left-eye job camera and from a solved left eye, the fallback, the IPD's sign.
     f110test::run110(check);
     // F111: the panel pointer instrument names the stage that turns a move the other way (K1 to K5, one at a time), the camera getters' decoding.

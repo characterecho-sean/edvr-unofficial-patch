@@ -59,6 +59,7 @@
 #include "native_on_foot_f138.h"   // F138: the view holds its height over the neck while the look is pitched (pure parts)
 #include "native_on_foot_f139.h"   // F139: each weapon's sight on the ADS line (the table, the live trim, the shift; pure parts)
 #include "native_on_foot_f140.h"   // F140: the weapon readout placed per weapon (the table by item and scope, the live trims; pure parts)
+#include "native_on_foot_f141.h"   // F141: the game's ADS sight point and the weapon readout's anchor, measure only (the build's addresses; pure parts)
 #include "xinput_watch.h"          // F135: the pad's Start and Back edges, evidence for the menu probe only
 #include "native_on_foot_f109.h"   // F109: look to aim on foot, the player's own turn in ADS, snap or smooth turning (pure parts)
 #include "native_on_foot_f129.h"   // F129: look to aim reads its turn from the player's own look processor; the look path instrument (pure parts)
@@ -2233,6 +2234,9 @@ struct WeaponUiPartSample {
     bool cameraAvailable = false, cameraValid = false, attachmentAvailable = false, attachmentValid = false;
     uint64_t getterQpc = 0;
     float instance[16] = {}, camera[16] = {}, attachment[16] = {};
+    // F141 (measure only): the part record's flags as the getter observation read them (record +0x18, +0x19, +0x28, +0x29, +0xD0, and +0x100's first word set);
+    // 0xFF: not read
+    uint8_t recFlag[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 };
 static_assert(std::is_trivially_copyable<WeaponUiPartSample>::value, "f9InstSubmitHooked saves and restores the sample with memcpy (F100)");
 thread_local WeaponUiPartSample g_weaponUiMatchedSubmitTls{};
@@ -2523,6 +2527,17 @@ void weaponUiGetterObserve(const WeaponUiGetterObservation* observation) noexcep
     sample.cameraPointer = observation->cameraPointer;
     sample.cameraValid = sample.cameraAvailable && nofoot::pfzAffineElementsFinite(sample.camera);
     if (!sample.cameraValid) g_weaponUiGetterMissingCamera.fetch_add(1, std::memory_order_relaxed);
+    {   // F141 (measure only): the record's flags (record = observation->part, read only), for the readout anchor's line
+        uint8_t b[4] = {};
+        int32_t space = 0;
+        uintptr_t handleWord = 0;
+        if (weaponUiReadAt(observation->part, nofoot::f141::kRecWeaponAnchored, &b[0], 1)) sample.recFlag[0] = b[0];
+        if (weaponUiReadAt(observation->part, nofoot::f141::kRecWorldScale, &b[1], 1)) sample.recFlag[1] = b[1];
+        if (weaponUiReadAt(observation->part, nofoot::f141::kRecFacing, &b[2], 1)) sample.recFlag[2] = b[2];
+        if (weaponUiReadAt(observation->part, nofoot::f141::kRecDistanceScale, &b[3], 1)) sample.recFlag[3] = b[3];
+        if (weaponUiReadAt(observation->part, nofoot::f141::kRecSpace, &space, 4)) sample.recFlag[4] = static_cast<uint8_t>(space < 0 ? 0xFD : space > 0xFD ? 0xFD : space);
+        if (weaponUiReadAt(observation->part, nofoot::f141::kRecHandle, &handleWord, 8)) sample.recFlag[5] = handleWord ? 1 : 0;
+    }
     sample.getterQpc = f30Qpc();
     weaponUiGetterTracePost(sample);
     g_weaponUiGetterCaptured.fetch_add(1, std::memory_order_relaxed);
@@ -22518,6 +22533,650 @@ void installEyeProbeOnce() {
     }
 }
 
+// ---- F141 (MEASURE ONLY): the game's ADS sight point, and the weapon readout's anchor -------------------------------------------------------------------
+// native_on_foot_f141.h holds build 334925's addresses and the pure parts. Two hooks, both read only, installed once (VR, behind the identity check): the bend
+// 0x1908760 (HumanoidWeaponAiming's per-frame ADS bend; the detour reads the eye's aim dir, calls the game, then reads what the bend used: the eye matrix from
+// memory where its getter points, and the ADS fraction, the sight handle's validity, its local position and the point transform through the same game calls
+// with the same arguments the bend makes) and the aim 0x19079E0 (the eye's aim dir at the shot, and the shot's world dir after it). Both only forward outside
+// EDVR's ADS state (engaged or releasing, g_f141Want). Every read is guardedRead,
+// every call is under SEH with its target inside the game's image; a fault drops the field and is counted. Nothing is written into the game. The frame thread
+// pairs each local call with the FP snapshot of its render frame and prints the window's line while ADS is active, a line per activation and a one-shot line when
+// ADS runs 3 s with no local call. The readout's anchor needs no hook: the frame thread drains the weapon UI getter observation's trace (F85b).
+using F141Fn1 = uint64_t(__fastcall*)(void*);
+using F141FloatFn = float(__fastcall*)(void*);
+using F141ValidFn = uint8_t(__fastcall*)(void*);
+using F141LocalFn = void*(__fastcall*)(void*, void*);
+using F141XformFn = void*(__fastcall*)(void*, void*, const void*);
+F9Probe g_f141Bend, g_f141Aim;
+bool g_f141Tried = false;                                // frame thread only
+bool g_f141BendArmed = false, g_f141AimArmed = false;    // frame thread only: set once, at the install
+std::atomic<bool> g_f141Stop{false};                     // shutdown: the callbacks forward and read nothing
+uintptr_t g_f141ImageEnd = 0;                            // the game image's end, written before either gate opens
+std::atomic<uint64_t> g_f141Local{0}, g_f141Other{0}, g_f141NotEye{0}, g_f141Faults{0};   // the bend's calls: the local player's, other humanoids', [act+0x98] not an eye, a failed read or call
+std::atomic<uintptr_t> g_f141LocalAct{0};                // the last local call's act: the aim hook's filter
+std::atomic<bool> g_f141Want{false};                     // the frame thread's ADS state (engaged or releasing): outside it both hooks only forward
+std::atomic<uint64_t> g_f141Shots{0}, g_f141ShotChanged{0}, g_f141ShotApplied{0}, g_f141ShotRayMilli{0};   // the aim hook's sums (game thread)
+std::atomic<uint32_t> g_f141ShotChangeMaxMilli{0};       // the largest aim dir change since the bend, millidegrees; zeroed at each window
+
+bool f141InImage(uintptr_t fn) noexcept { return g_base && fn >= g_base && fn < g_f141ImageEnd; }
+// The function at obj's vtable + slot, read under SEH, refused unless it lies inside the game's image.
+bool f141Slot(uintptr_t obj, uint32_t slot, uintptr_t* fn) noexcept {
+    uintptr_t vt = 0;
+    *fn = 0;
+    return obj >= 0x10000 && guardedRead(obj, &vt, 8) && vt >= 0x10000 && guardedRead(vt + slot, fn, 8) && f141InImage(*fn);
+}
+__declspec(noinline) bool f141CallFloat(uintptr_t fn, uintptr_t obj, float* out) noexcept {
+    __try {
+        *out = reinterpret_cast<F141FloatFn>(fn)(reinterpret_cast<void*>(obj));
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+__declspec(noinline) bool f141CallValid(uintptr_t fn, uintptr_t handle, bool* out) noexcept {
+    __try {
+        *out = reinterpret_cast<F141ValidFn>(fn)(reinterpret_cast<void*>(handle)) != 0;
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+__declspec(noinline) bool f141CallLocal(uintptr_t fn, uintptr_t handle, void* tmp, uintptr_t* ret) noexcept {
+    __try {
+        *ret = reinterpret_cast<uintptr_t>(reinterpret_cast<F141LocalFn>(fn)(reinterpret_cast<void*>(handle), tmp));
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+__declspec(noinline) bool f141CallXform(uintptr_t fn, uintptr_t obj, void* out, const void* in) noexcept {
+    __try {
+        reinterpret_cast<F141XformFn>(fn)(reinterpret_cast<void*>(obj), out, in);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+// A locator name: the char* at ptrAt, read a byte at a time (a name near a page's end must not fault the whole read), made printable.
+bool f141ReadName(uintptr_t ptrAt, char out[64]) noexcept {
+    out[0] = 0;
+    uintptr_t p = 0;
+    char raw[64] = {};
+    if (!guardedRead(ptrAt, &p, 8) || p < 0x10000 || !guardedRead(p, &raw[0], 1)) return false;
+    size_t n = raw[0] ? 1 : 0;
+    while (n && n < 63 && guardedRead(p + n, &raw[n], 1) && raw[n]) ++n;
+    nofoot::f141::printableName(raw, n, out);
+    return true;
+}
+
+// One local call, as the bend hook read it after the game's own call. A ring the frame thread drains (one writer at a time: the local player's activity).
+struct F141Sample {
+    uint32_t frame = 0, activation = 0;   // g_f44Frame at the call; the activation count
+    uint8_t adsOn = 0;                    // act data+0x10 (the game skips its bend when 0, and so do the calls here)
+    nofoot::f141::BendIn in;
+};
+static_assert(std::is_trivially_copyable<F141Sample>::value, "the F141 ring copies its samples");
+struct F141Slot { std::atomic<uint32_t> seq{0}; uint32_t ordinal = ~0u; F141Sample s; };
+constexpr uint32_t kF141Ring = 64;
+F141Slot g_f141Ring[kF141Ring];
+std::atomic<uint32_t> g_f141Head{0};
+void f141Post(const F141Sample& s) noexcept {
+    const uint32_t n = g_f141Head.fetch_add(1, std::memory_order_relaxed);
+    F141Slot& slot = g_f141Ring[n % kF141Ring];
+    slot.seq.fetch_add(1, std::memory_order_acq_rel);
+    slot.ordinal = n;
+    slot.s = s;
+    slot.seq.fetch_add(1, std::memory_order_release);
+}
+bool f141Take(uint32_t n, F141Sample* out) noexcept {
+    const F141Slot& slot = g_f141Ring[n % kF141Ring];
+    const uint32_t s1 = slot.seq.load(std::memory_order_acquire);
+    if (!s1 || (s1 & 1u) || slot.ordinal != n) return false;
+    *out = slot.s;
+    std::atomic_thread_fence(std::memory_order_acquire);
+    return slot.seq.load(std::memory_order_relaxed) == s1 && slot.ordinal == n;
+}
+// The last bend's exit, for the aim hook (game threads).
+struct F141LastBend { std::atomic<uint32_t> seq{0}; float aimOut[4] = {}; double ray[3] = {}; bool aimOutOk = false, applied = false; };
+F141LastBend g_f141Last;
+// One activation (the act or its sight handle changed), published to the frame thread's line.
+struct F141ActPub {
+    std::atomic<uint32_t> seq{0};
+    uint32_t count = 0;
+    uintptr_t act = 0;
+    uint8_t sightOk = 0, eyeOk = 0, adsOn = 0, validAtFirst = 0xFF;
+    char sight[64] = {}, eye[64] = {};
+};
+F141ActPub g_f141ActPub;
+nofoot::f141::ActKey g_f141ActKey;   // the local calls only
+uint32_t g_f141ActCount = 0;         // the local calls only
+
+void f141AfterBend(uintptr_t act, uintptr_t ifaceIn, const float aimIn[4], bool aimInOk) noexcept {
+    namespace f = nofoot::f141;
+    uintptr_t iface = 0, ifaceVt = 0, data = 0;
+    if (!guardedRead(act + f::kActEyeIface, &iface, 8) || iface < 0x10000 || !guardedRead(iface, &ifaceVt, 8) ||
+        !guardedRead(act + f::kActData, &data, 8) || data < 0x10000) {
+        g_f141Faults.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+    if (ifaceVt != g_base + f::kEyeIfaceVtRva) {
+        g_f141NotEye.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+    // The local filter: the eye's first-person locator (eye+0x198) is valid only on the local humanoid's eye (its FP avatar resolves it).
+    const uintptr_t eye = iface - f::kIfaceToEye;
+    const uintptr_t validFn = g_base + f::kHandleValidRva;
+    bool eyeValid = false;
+    if (!f141CallValid(validFn, eye + f::kEyeLocator, &eyeValid)) {
+        g_f141Faults.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+    if (!eyeValid) {
+        g_f141Other.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+    g_f141Local.fetch_add(1, std::memory_order_relaxed);
+    g_f141LocalAct.store(act, std::memory_order_relaxed);
+    F141Sample s;
+    s.frame = g_f44Frame.load(std::memory_order_relaxed);
+    uint8_t adsOn = 0;
+    const bool adsRead = guardedRead(data + f::kDataAdsOn, &adsOn, 1);
+    s.adsOn = adsRead && adsOn ? 1 : 0;
+    s.in.aimInOk = aimInOk && ifaceIn == iface;
+    if (s.in.aimInOk) std::memcpy(s.in.aimIn, aimIn, sizeof(s.in.aimIn));
+    s.in.aimOutOk = guardedRead(iface + f::kIfaceAim, s.in.aimOut, sizeof(s.in.aimOut));
+    uintptr_t eFn = 0;   // E: read where the slot's getter points (lea rax,[rcx+0x268]), only while the slot is that getter
+    s.in.eOk = f141Slot(iface, f::kEyeMatrixSlot, &eFn) && eFn == g_base + f::kEyeMatrixFnRva && guardedRead(iface + f::kIfaceMatrix, s.in.E, sizeof(s.in.E));
+    bool fault = !adsRead || !s.in.aimOutOk || !s.in.eOk;
+    if (s.adsOn) {
+        uintptr_t ctl = 0, wFn = 0;
+        s.in.wOk = guardedRead(act + f::kActAdsCtl, &ctl, 8) && f141Slot(ctl, f::kAdsFractionSlot, &wFn) && f141CallFloat(wFn, ctl, &s.in.w);
+        bool ok = false;
+        s.in.okRead = f141CallValid(validFn, act + f::kActSight, &ok);
+        s.in.ok = ok;
+        fault = fault || !s.in.wOk || !s.in.okRead;
+        if (s.in.okRead && ok) {   // S = [act+0x68]->vt+0x38(out, 0x3176930(act+0x198, tmp)), the bend's own sequence; 16-byte aligned as the game's stack slots are
+            alignas(16) float tmp[16] = {};
+            alignas(16) float in4[4] = {};
+            alignas(16) float out[16] = {};
+            uintptr_t ret = 0, xf = 0, xfFn = 0;
+            s.in.sOk = f141CallLocal(g_base + f::kHandleLocalRva, act + f::kActSight, tmp, &ret) && ret >= 0x10000 && guardedRead(ret, in4, sizeof(in4)) &&
+                       guardedRead(act + f::kActXform, &xf, 8) && f141Slot(xf, f::kXformSlot, &xfFn) && f141CallXform(xfFn, xf, out, in4);
+            if (s.in.sOk) std::memcpy(s.in.S, out, sizeof(s.in.S));
+            fault = fault || !s.in.sOk;
+        }
+    }
+    if (fault) g_f141Faults.fetch_add(1, std::memory_order_relaxed);
+    f::ActKey k;
+    k.act = act;
+    if (!guardedRead(act + f::kActSight, &k.h0, 8)) k.h0 = 0;
+    if (!guardedRead(act + f::kActSight + f::kHandleObj, &k.h48, 8)) k.h48 = 0;
+    if (k != g_f141ActKey) {
+        g_f141ActKey = k;
+        ++g_f141ActCount;
+        F141ActPub& a = g_f141ActPub;
+        a.seq.fetch_add(1, std::memory_order_acq_rel);
+        a.count = g_f141ActCount;
+        a.act = act;
+        a.adsOn = s.adsOn;
+        a.validAtFirst = s.in.okRead ? (s.in.ok ? 1 : 0) : 0xFF;
+        a.sightOk = f141ReadName(data + f::kDataSightName, a.sight) ? 1 : 0;
+        uintptr_t eyeData = 0;
+        a.eyeOk = guardedRead(eye + f::kEyeData, &eyeData, 8) && eyeData >= 0x10000 && f141ReadName(eyeData + f::kEyeDataLocName, a.eye) ? 1 : 0;
+        a.seq.fetch_add(1, std::memory_order_release);
+    }
+    s.activation = g_f141ActCount;
+    f141Post(s);
+    const f::BendOut b = f::bend(s.in);
+    F141LastBend& l = g_f141Last;
+    l.seq.fetch_add(1, std::memory_order_acq_rel);
+    std::memcpy(l.aimOut, s.in.aimOut, sizeof(l.aimOut));
+    std::memcpy(l.ray, b.ray, sizeof(l.ray));
+    l.aimOutOk = s.in.aimOutOk;
+    l.applied = b.applied;
+    l.seq.fetch_add(1, std::memory_order_release);
+}
+// The bend's detour: rcx = act. The aim dir is read before the game's call (the entry value), everything else after it.
+uint64_t __fastcall f141BendHooked(void* act) noexcept {
+    const F141Fn1 original = reinterpret_cast<F141Fn1>(g_f141Bend.original);
+    if (!original) return 0;
+    const uintptr_t a = reinterpret_cast<uintptr_t>(act);
+    if (!a || g_f141Stop.load(std::memory_order_relaxed) || !g_f141Want.load(std::memory_order_relaxed) || !nativeOnFootActive()) return original(act);
+    uintptr_t iface = 0;
+    alignas(16) float aimIn[4] = {};
+    const bool aimInOk = guardedRead(a + nofoot::f141::kActEyeIface, &iface, 8) && iface >= 0x10000 &&
+                         guardedRead(iface + nofoot::f141::kIfaceAim, aimIn, sizeof(aimIn));
+    const uint64_t r = original(act);
+    f141AfterBend(a, iface, aimIn, aimInOk);
+    return r;
+}
+void f141AfterAim(uintptr_t act, bool atOk, const float at[4]) noexcept {
+    namespace f = nofoot::f141;
+    g_f141Shots.fetch_add(1, std::memory_order_relaxed);
+    float lastAim[4] = {};
+    double ray[3] = {};
+    bool lastOk = false, applied = false, got = false;
+    for (int tries = 0; tries < 2 && !got; ++tries) {
+        const uint32_t s1 = g_f141Last.seq.load(std::memory_order_acquire);
+        if (!s1 || (s1 & 1u)) continue;
+        std::memcpy(lastAim, g_f141Last.aimOut, sizeof(lastAim));
+        std::memcpy(ray, g_f141Last.ray, sizeof(ray));
+        lastOk = g_f141Last.aimOutOk;
+        applied = g_f141Last.applied;
+        std::atomic_thread_fence(std::memory_order_acquire);
+        got = g_f141Last.seq.load(std::memory_order_relaxed) == s1;
+    }
+    if (!got) return;
+    if (atOk && lastOk && f::finiteAll(at, 3) && f::finiteAll(lastAim, 3)) {
+        const double a[3] = {at[0], at[1], at[2]}, b[3] = {lastAim[0], lastAim[1], lastAim[2]};
+        const double d = f::angleDeg(a, b);
+        if (d > 0.01) {   // the aim dir at the shot is not what the bend left: another writer between them (candidate d)
+            g_f141ShotChanged.fetch_add(1, std::memory_order_relaxed);
+            const uint32_t milli = static_cast<uint32_t>(std::min(d * 1000.0, 4.0e9));
+            uint32_t cur = g_f141ShotChangeMaxMilli.load(std::memory_order_relaxed);
+            while (milli > cur && !g_f141ShotChangeMaxMilli.compare_exchange_weak(cur, milli, std::memory_order_relaxed)) {}
+        }
+    }
+    if (applied) {   // the shot's world dir (the aim record +0x20, written by the game's aim) against the bend's sight ray
+        uintptr_t rec = 0;
+        float dir[4] = {};
+        if (guardedRead(act + f::kActAimRec, &rec, 8) && rec >= 0x10000 && guardedRead(rec + f::kAimRecDir, dir, sizeof(dir)) && f::finiteAll(dir, 3)) {
+            const double d[3] = {dir[0], dir[1], dir[2]};
+            const double ang = f::angleDeg(d, ray);
+            if (ang >= 0.0) {
+                g_f141ShotApplied.fetch_add(1, std::memory_order_relaxed);
+                g_f141ShotRayMilli.fetch_add(static_cast<uint64_t>(std::llround(ang * 1000.0)), std::memory_order_relaxed);
+            }
+        }
+    }
+}
+// The aim's detour: only the local act's call (the bend's filter) is read; the aim dir before the game's call, the shot's dir after it.
+uint64_t __fastcall f141AimHooked(void* act) noexcept {
+    const F141Fn1 original = reinterpret_cast<F141Fn1>(g_f141Aim.original);
+    if (!original) return 0;
+    const uintptr_t a = reinterpret_cast<uintptr_t>(act);
+    if (!a || g_f141Stop.load(std::memory_order_relaxed) || a != g_f141LocalAct.load(std::memory_order_relaxed) || !g_f141Want.load(std::memory_order_relaxed) ||
+        !nativeOnFootActive())
+        return original(act);
+    uintptr_t iface = 0;
+    alignas(16) float at[4] = {};
+    const bool atOk = guardedRead(a + nofoot::f141::kActEyeIface, &iface, 8) && iface >= 0x10000 && guardedRead(iface + nofoot::f141::kIfaceAim, at, sizeof(at));
+    const uint64_t r = original(act);
+    f141AfterAim(a, atOk, at);
+    return r;
+}
+
+void installF141Once() {
+    if (g_f141Tried) return;
+    g_f141Tried = true;
+    if (!runtimeVrProfile()) {
+        Log::get().note("native on foot ADS sight point (F141): not installed (the flat profile)");
+        return;
+    }
+    const uintptr_t base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+    const char* peWhy = nullptr;
+    if (!base || !checkIdentity(base, &peWhy)) {
+        Log::get().note("native on foot ADS sight point (F141): NOT installed -- identity mismatch (%s); the game was not touched.", peWhy ? peWhy : "no module");
+        return;
+    }
+    if (!g_base) g_base = base;
+    uint32_t peOff = 0, imageSize = 0;
+    if (!guardedRead(base + 0x3C, &peOff, 4) || peOff > 0x1000 || !guardedRead(base + peOff + 0x50, &imageSize, 4) || !imageSize) {
+        Log::get().note("native on foot ADS sight point (F141): NOT installed -- the image size could not be read; the game was not touched.");
+        return;
+    }
+    g_f141ImageEnd = base + imageSize;
+    namespace f = nofoot::f141;
+    {
+        const F9ProbeSpec spec{"native-on-foot-ads-bend", f::kBendRva, f::kBendPrologue, sizeof(f::kBendPrologue), f::kBendStolen,
+                               reinterpret_cast<void*>(&f141BendHooked), "F141 ADS bend"};
+        size_t stolen = 0;
+        std::string why;
+        g_f141BendArmed = installF9ProbeInto(g_f141Bend, spec, base, &stolen, &why);
+        if (g_f141BendArmed) {
+            Log::get().note("native on foot ADS sight point (F141): bend hook installed at EliteDangerous64.exe+0x%llX, stolen=%zu bytes, prologue %zu bytes verified "
+                            "(measure only: after the game's own call it reads the eye's aim dir and matrix, and repeats the bend's own calls: the ADS fraction, the sight "
+                            "handle's validity and local position, the point transform)", static_cast<unsigned long long>(f::kBendRva), stolen, sizeof(f::kBendPrologue));
+        } else {
+            Log::get().note("native on foot ADS sight point (F141): bend hook NOT installed at EliteDangerous64.exe+0x%llX -- %s. The game was not touched by it.",
+                            static_cast<unsigned long long>(f::kBendRva), why.c_str());
+            Log::get().note("native on foot ADS sight point (F141): aim hook not installed (the bend hook, which names the local act, is not)");
+            return;
+        }
+    }
+    const F9ProbeSpec spec{"native-on-foot-ads-aim", f::kAimRva, f::kAimPrologue, sizeof(f::kAimPrologue), f::kAimStolen, reinterpret_cast<void*>(&f141AimHooked),
+                           "F141 ADS aim"};
+    size_t stolen = 0;
+    std::string why;
+    g_f141AimArmed = installF9ProbeInto(g_f141Aim, spec, base, &stolen, &why);
+    if (g_f141AimArmed)
+        Log::get().note("native on foot ADS sight point (F141): aim hook installed at EliteDangerous64.exe+0x%llX, stolen=%zu bytes, prologue %zu bytes verified (reads the "
+                        "eye's aim dir at the shot and the shot's dir after it)", static_cast<unsigned long long>(f::kAimRva), stolen, sizeof(f::kAimPrologue));
+    else
+        Log::get().note("native on foot ADS sight point (F141): aim hook NOT installed at EliteDangerous64.exe+0x%llX -- %s. The game was not touched by it.",
+                        static_cast<unsigned long long>(f::kAimRva), why.c_str());
+}
+
+// ---- F141, the frame thread ---------------------------------------------------------------------------------------------------------------------------------
+// The FP snapshots of the last 16 render frames: P14 (slot kIkFpSlotPov) and the weapon (the right attach, joint 51, slot kIkFpSlotAttach[1]) through F_root, as
+// adsSightTick and F79 take them. F_root comes from G with its own render-frame stamp; a frame is kept only with the root within one frame of the joints (F79's
+// rule), and a second read of the same joints' frame with a closer root replaces it.
+struct F141Fp {
+    uint32_t frame = ~0u, rootGap = ~0u;
+    double p14w[3] = {};
+    float froot[16] = {};
+    double W[16] = {}, P[16] = {};
+};
+constexpr uint32_t kF141FpHist = 16;
+F141Fp g_f141Fp[kF141FpHist];
+uint32_t g_f141FpNext = 0;
+void f141FpPush(uint64_t now) noexcept {
+    float m[nofoot::kIkFpSlots][16];
+    uint64_t fpMs = 0;
+    IkFpMeta meta;
+    IkGData G;
+    if (!ikFpRead(m, &fpMs, nullptr, &meta) || (now > fpMs ? now - fpMs : 0) > nofoot::kIkFreshMs || !meta.frame) return;
+    if (!ikGRead(&G) || (now > G.frootMs ? now - G.frootMs : 0) > nofoot::kIkFreshMs || !nofoot::adsRifleOpticFramesClose(meta.frame, G.rootReadRenderFrame)) return;
+    const uint32_t gap = meta.frame > G.rootReadRenderFrame ? meta.frame - G.rootReadRenderFrame : G.rootReadRenderFrame - meta.frame;
+    F141Fp* slot = nullptr;
+    for (F141Fp& e : g_f141Fp)
+        if (e.frame == meta.frame) slot = &e;
+    if (slot && slot->rootGap <= gap) return;
+    if (!slot) slot = &g_f141Fp[g_f141FpNext++ % kF141FpHist];
+    slot->frame = meta.frame;
+    slot->rootGap = gap;
+    const float* pm = m[nofoot::kIkFpSlotPov];
+    const float p14m[3] = {pm[12], pm[13], pm[14]};
+    nofoot::ikXform(p14m, G.froot, slot->p14w);
+    std::memcpy(slot->froot, G.froot, sizeof(slot->froot));
+    nofoot::f141::mul4(m[nofoot::kIkFpSlotAttach[1]], G.froot, slot->W);
+    nofoot::f141::mul4(pm, G.froot, slot->P);
+}
+// The kept frame nearest to `frame` (its gap in *gap), or null when none is kept.
+const F141Fp* f141FpFind(uint32_t frame, uint32_t* gap) noexcept {
+    const F141Fp* best = nullptr;
+    uint32_t bestGap = ~0u;
+    for (const F141Fp& e : g_f141Fp) {
+        if (e.frame == ~0u) continue;
+        const uint32_t d = e.frame > frame ? e.frame - frame : frame - e.frame;
+        if (d < bestGap) { bestGap = d; best = &e; }
+    }
+    *gap = bestGap;
+    return best;
+}
+// The held item as F139 and F140 take it: a coherent Status.json snapshot of the held serial, and the journal's loadout for its scope.
+struct F141Item {
+    uint32_t held = 0;
+    bool coherent = false;
+    int scope = loadout::kScopeUnknown;
+    char name[64] = {};
+};
+F141Item f141Item() noexcept {
+    F141Item it;
+    uint32_t snap = 0;
+    char name[64] = {};
+    const bool read = opticItemRead(&snap, name);
+    it.held = g_heldItemSerial.load(std::memory_order_acquire);
+    it.coherent = nofoot::f139::itemCoherent(read, snap, it.held, name);
+    std::snprintf(it.name, sizeof(it.name), "%s", it.coherent ? name : "none");
+    if (it.coherent) it.scope = loadout::heldScope(name).state;
+    return it;
+}
+
+// The sight point's window, the activation lines and the one-shot (frame thread only, as is everything below).
+nofoot::adslog::Window g_f141Win;
+nofoot::f141::Acc g_f141Acc;
+F141Item g_f141WinItem;
+uint64_t g_f141Base[4] = {}, g_f141ShotBase[4] = {};
+uint32_t g_f141Cursor = 0, g_f141Lost = 0;
+bool g_f141WasLive = false, g_f141NoLocalNoted = false;
+uint32_t g_f141PressSecs = 0;
+uint64_t g_f141PressBase[4] = {};
+uint32_t g_f141ActLogged = 0, g_f141ActLines = 0, g_f141ActSkipped = 0;
+uint64_t g_f141ActWindowMs = 0;
+void f141TakeBases(uint64_t base[4], uint64_t shot[4]) noexcept {
+    base[0] = g_f141Local.load(std::memory_order_relaxed);
+    base[1] = g_f141Other.load(std::memory_order_relaxed);
+    base[2] = g_f141NotEye.load(std::memory_order_relaxed);
+    base[3] = g_f141Faults.load(std::memory_order_relaxed);
+    if (!shot) return;
+    shot[0] = g_f141Shots.load(std::memory_order_relaxed);
+    shot[1] = g_f141ShotChanged.load(std::memory_order_relaxed);
+    shot[2] = g_f141ShotApplied.load(std::memory_order_relaxed);
+    shot[3] = g_f141ShotRayMilli.load(std::memory_order_relaxed);
+    g_f141ShotChangeMaxMilli.store(0, std::memory_order_relaxed);
+}
+void f141AdsLog(uint32_t secs) noexcept {
+    const nofoot::f141::Acc& a = g_f141Acc;
+    uint64_t now[4] = {}, shot[4] = {};
+    f141TakeBases(now, nullptr);
+    shot[0] = g_f141Shots.load(std::memory_order_relaxed) - g_f141ShotBase[0];
+    shot[1] = g_f141ShotChanged.load(std::memory_order_relaxed) - g_f141ShotBase[1];
+    shot[2] = g_f141ShotApplied.load(std::memory_order_relaxed) - g_f141ShotBase[2];
+    shot[3] = g_f141ShotRayMilli.load(std::memory_order_relaxed) - g_f141ShotBase[3];
+    char shotText[200];
+    if (!g_f141AimArmed)
+        std::snprintf(shotText, sizeof(shotText), "the aim hook is not installed");
+    else
+        std::snprintf(shotText, sizeof(shotText), "%llu calls, the aim dir changed since the bend on %llu (max %.3f deg), the shot against the sight ray %.2f deg on %llu applied",
+                      static_cast<unsigned long long>(shot[0]), static_cast<unsigned long long>(shot[1]),
+                      static_cast<double>(g_f141ShotChangeMaxMilli.load(std::memory_order_relaxed)) / 1000.0,
+                      shot[2] ? static_cast<double>(shot[3]) / 1000.0 / static_cast<double>(shot[2]) : 0.0, static_cast<unsigned long long>(shot[2]));
+    using nofoot::f141::Acc;
+    const uint32_t on = a.samples - a.adsOff;
+    Log::get().note("native on foot ADS sight point (F141) %u s: item %s scope %s; calls local %llu, other humanoids %llu, not an eye %llu, faults %llu, ADS handling off %u, "
+                    "ring lost %u; w min %.3f max %.3f over %u, at 1.0 on %u; sight handle valid on %u of %u; bend applied on %u of %u; |S - E| %.1f cm; S from P14's "
+                    "forward line right %+.2f up %+.2f cm, along %+.1f cm (P14 of the same render frame on %u of %u, the nearest otherwise, mean frame gap %.2f; no FP "
+                    "snapshot %u); E - P14 right %+.2f up %+.2f forward %+.2f cm, |E - P14| mean %.2f max %.2f cm; S in the eye's axes right %+.2f up %+.2f cm, the "
+                    "sight ray %.2f deg off E.z; the aim dir off E.z on entry %.2f exit %.2f deg (max %.2f), exit against the sight ray %.2f deg on %u applied; shot: %s",
+                    secs, g_f141WinItem.name, loadout::scopeName(g_f141WinItem.scope), static_cast<unsigned long long>(now[0] - g_f141Base[0]),
+                    static_cast<unsigned long long>(now[1] - g_f141Base[1]), static_cast<unsigned long long>(now[2] - g_f141Base[2]),
+                    static_cast<unsigned long long>(now[3] - g_f141Base[3]), a.adsOff, g_f141Lost, a.wMin, a.wMax, a.wN, a.wFull, a.okN, a.okReadN, a.applied, on,
+                    100.0 * Acc::mean(a.distSum, a.geoN), 100.0 * Acc::mean(a.p14Right, a.p14N), 100.0 * Acc::mean(a.p14Up, a.p14N), 100.0 * Acc::mean(a.p14Along, a.p14N),
+                    a.p14Exact, a.p14N, Acc::mean(a.frameGapSum, a.p14N), a.noFp, 100.0 * Acc::mean(a.eRel[0], a.p14N), 100.0 * Acc::mean(a.eRel[1], a.p14N),
+                    100.0 * Acc::mean(a.eRel[2], a.p14N), 100.0 * Acc::mean(a.eDistSum, a.p14N), 100.0 * a.eDistMax, 100.0 * Acc::mean(a.eyeRightSum, a.geoN),
+                    100.0 * Acc::mean(a.eyeUpSum, a.geoN), Acc::mean(a.rayDegSum, a.geoN), Acc::mean(a.aimInSum, a.aimInN), Acc::mean(a.aimOutSum, a.aimOutN),
+                    a.aimOutMax, Acc::mean(a.rayVsSum, a.rayVsN), a.rayVsN, shotText);
+    g_f141Acc.reset();
+    g_f141Lost = 0;
+    f141TakeBases(g_f141Base, g_f141ShotBase);
+}
+void f141ActivationTick(uint64_t now) noexcept {
+    F141ActPub& p = g_f141ActPub;
+    uint32_t count = 0;
+    uintptr_t act = 0;
+    uint8_t sightOk = 0, eyeOk = 0, adsOn = 0, valid = 0xFF;
+    char sight[64] = {}, eye[64] = {};
+    bool got = false;
+    for (int tries = 0; tries < 2 && !got; ++tries) {
+        const uint32_t s1 = p.seq.load(std::memory_order_acquire);
+        if (!s1 || (s1 & 1u)) continue;
+        count = p.count;
+        act = p.act;
+        sightOk = p.sightOk;
+        eyeOk = p.eyeOk;
+        adsOn = p.adsOn;
+        valid = p.validAtFirst;
+        std::memcpy(sight, p.sight, sizeof(sight));
+        std::memcpy(eye, p.eye, sizeof(eye));
+        std::atomic_thread_fence(std::memory_order_acquire);
+        got = p.seq.load(std::memory_order_relaxed) == s1;
+    }
+    if (now - g_f141ActWindowMs >= 10000) {
+        if (g_f141ActSkipped)
+            Log::get().note("native on foot ADS sight point (F141): %u activation line(s) not written in the last 10 s (at most 8 are)", g_f141ActSkipped);
+        g_f141ActWindowMs = now;
+        g_f141ActLines = 0;
+        g_f141ActSkipped = 0;
+    }
+    if (!got || count == g_f141ActLogged) return;
+    const uint32_t fresh = count - g_f141ActLogged;
+    g_f141ActLogged = count;
+    if (g_f141ActLines >= 8) {
+        g_f141ActSkipped += fresh;
+        return;
+    }
+    ++g_f141ActLines;
+    sight[63] = eye[63] = 0;
+    Log::get().note("native on foot ADS sight point (F141): activation %u: act 0x%llX, sight locator \"%s\" (act data+0x8), eye locator \"%s\" (eye data+0x40), "
+                    "ADS handling %s, sight handle valid at the first ADS call read %s; the Optics attachment not read (finding it takes a game call that hands back a counted "
+                    "reference)", count, static_cast<unsigned long long>(act), sightOk ? sight : "(not read)", eyeOk ? eye : "(not read)", adsOn ? "on" : "off",
+                    valid == 0xFF ? "not read" : valid ? "yes" : "no");
+}
+void f141AdsTick(uint64_t now) noexcept {
+    namespace f = nofoot::f141;
+    const bool live = nativeOnFootActive() && g_adsState == kAdsActive;
+    g_f141Want.store(nativeOnFootActive() && (g_adsState == kAdsActive || g_adsState == kAdsReleasing), std::memory_order_relaxed);
+    const F141Item it = live ? f141Item() : F141Item{};
+    if (live && !g_f141WasLive) {   // a press begins: the window's sums and the one-shot's count start here
+        g_f141Acc.reset();
+        g_f141Lost = 0;
+        f141TakeBases(g_f141Base, g_f141ShotBase);
+        f141TakeBases(g_f141PressBase, nullptr);
+        g_f141PressSecs = 0;
+        g_f141WinItem = it;
+    }
+    uint64_t ctx = nofoot::adslog::mix(it.held, it.coherent ? 1u : 0u);
+    ctx = nofoot::adslog::mix(nofoot::adslog::mix(ctx, static_cast<uint64_t>(it.scope)), loadout::publishedGeneration());
+    g_f141Win.poll(now, live, ctx,
+        [&]() noexcept {   // once a second of ADS: the one-shot (c) line after 3 s with no local call
+            ++g_f141PressSecs;
+            if (!g_f141NoLocalNoted && g_f141PressSecs >= 3 && g_f141Local.load(std::memory_order_relaxed) == g_f141PressBase[0]) {
+                g_f141NoLocalNoted = true;
+                Log::get().note("native on foot ADS sight point (F141): no local call in %u s of ADS (since the press: other humanoids' calls %llu, not an eye %llu, "
+                                "faults %llu): candidate (c), or the local filter (eye+0x198 valid) rejects the player's call", g_f141PressSecs,
+                                static_cast<unsigned long long>(g_f141Other.load(std::memory_order_relaxed) - g_f141PressBase[1]),
+                                static_cast<unsigned long long>(g_f141NotEye.load(std::memory_order_relaxed) - g_f141PressBase[2]),
+                                static_cast<unsigned long long>(g_f141Faults.load(std::memory_order_relaxed) - g_f141PressBase[3]));
+            }
+        },
+        [&](uint32_t seconds) noexcept { f141AdsLog(seconds); });
+    if (live) g_f141WinItem = it;   // a new window (after a held item change) takes the item it describes
+    g_f141WasLive = live;
+    // Drain the ring: every local call since the last tick, paired with the FP snapshot nearest its render frame, while ADS is active.
+    const uint32_t head = g_f141Head.load(std::memory_order_acquire);
+    if (head - g_f141Cursor > kF141Ring) {
+        if (live) g_f141Lost += head - g_f141Cursor - kF141Ring;
+        g_f141Cursor = head - kF141Ring;
+    }
+    for (; g_f141Cursor != head; ++g_f141Cursor) {
+        F141Sample s;
+        if (!f141Take(g_f141Cursor, &s)) {
+            if (live) ++g_f141Lost;
+            continue;
+        }
+        if (!live) continue;
+        const f::BendOut b = f::bend(s.in);
+        uint32_t gap = ~0u;
+        const F141Fp* fp = f141FpFind(s.frame, &gap);
+        f::P14Off p;
+        if (fp) p = f::p14Offset(s.in.S, s.in.E, fp->p14w, fp->froot);
+        g_f141Acc.add(s.adsOn != 0, s.in, b, fp != nullptr, p, gap);
+    }
+}
+
+// The readout's anchor: one window of parts per held item and scope (frame thread only).
+constexpr uint32_t kF141Parts = 12;
+nofoot::f141::Part g_f141Parts[kF141Parts];
+nofoot::f141::PartSets g_f141Sets[kF141Parts];   // 1.3 MB, the windows' samples
+nofoot::f141::RelSample g_f141Scratch[2 * nofoot::f141::kSampleCap];
+struct F141Ro {
+    bool open = false;
+    uint64_t startMs = 0, ctx = 0;
+    F141Item item;
+    uint32_t cursor = 0, otherItem = 0, overCap = 0, lost = 0;
+};
+F141Ro g_f141Ro;
+void f141ReadoutReset() noexcept {
+    for (nofoot::f141::Part& p : g_f141Parts) p = nofoot::f141::Part{};
+    g_f141Ro.otherItem = g_f141Ro.overCap = g_f141Ro.lost = 0;
+}
+void f141ReadoutLog(uint32_t secs) noexcept {
+    namespace f = nofoot::f141;
+    for (uint32_t i = 0; i < kF141Parts; ++i) {
+        const f::Part& p = g_f141Parts[i];
+        if (!p.used || !p.frames) continue;
+        const f::Spread sw = f::partSpread(p, g_f141Sets[i], true, g_f141Scratch);
+        const f::Spread sp = f::partSpread(p, g_f141Sets[i], false, g_f141Scratch);
+        char fb[f::kFlags][8];
+        Log::get().note("native on foot readout anchor (F141) %u s: item %s scope %s: part %u: vs weapon mean (%+.2f %+.2f %+.2f) cm, dev max %.2f mm %.3f deg; vs P14 "
+                        "mean (%+.2f %+.2f %+.2f) cm, dev max %.2f mm %.3f deg; flags +0x18 %s +0x19 %s +0x28 %s +0x29 %s +0xD0 %s +0x100 %s; frames %u, paired %u "
+                        "(the root of the same frame %u, one frame apart %u; stats over %s), unpaired %u; the window's rows of another item %u, parts over the cap %u, "
+                        "rows lost %u",
+                        secs, g_f141Ro.item.name, loadout::scopeName(g_f141Ro.item.scope), static_cast<unsigned>(p.key), 100.0 * sw.mean[0], 100.0 * sw.mean[1],
+                        100.0 * sw.mean[2], 1000.0 * sw.devMaxM, sw.rotDevMaxDeg, 100.0 * sp.mean[0], 100.0 * sp.mean[1], 100.0 * sp.mean[2], 1000.0 * sp.devMaxM,
+                        sp.rotDevMaxDeg, f::flagText(p.flag[0], fb[0]), f::flagText(p.flag[1], fb[1]), f::flagText(p.flag[2], fb[2]), f::flagText(p.flag[3], fb[3]),
+                        f::flagText(p.flag[4], fb[4]), f::flagText(p.flag[5], fb[5]), p.frames, p.paired[0] + p.paired[1], p.paired[0], p.paired[1],
+                        p.exact() ? "the same frame" : "both", p.unpaired, g_f141Ro.otherItem, g_f141Ro.overCap, g_f141Ro.lost);
+    }
+    f141ReadoutReset();
+}
+void f141ReadoutTick(uint64_t now) noexcept {
+    namespace f = nofoot::f141;
+    const bool live = nativeOnFootActive() && g_weaponUiSubmitGate.load(std::memory_order_relaxed);
+    const F141Item it = live ? f141Item() : F141Item{};
+    // Drain the getter trace into the open window: one sample per part and render frame, paired with that frame's FP snapshot (exactly; no nearest frame here).
+    const uint32_t head = g_weaponUiGetterTraceHead.load(std::memory_order_acquire);
+    if (head - g_f141Ro.cursor > kWeaponUiTraceRows) {
+        if (g_f141Ro.open) g_f141Ro.lost += head - g_f141Ro.cursor - kWeaponUiTraceRows;
+        g_f141Ro.cursor = head - kWeaponUiTraceRows;
+    }
+    for (; g_f141Ro.cursor != head; ++g_f141Ro.cursor) {
+        const uint32_t n = g_f141Ro.cursor;
+        const WeaponUiTraceSlot& slot = g_weaponUiGetterTrace[n % kWeaponUiTraceRows];
+        const uint32_t s1 = slot.seq.load(std::memory_order_acquire);
+        if (!s1 || (s1 & 1u) || slot.ordinal != n) { if (g_f141Ro.open) ++g_f141Ro.lost; continue; }
+        const WeaponUiPartSample row = slot.row;
+        std::atomic_thread_fence(std::memory_order_acquire);
+        if (slot.seq.load(std::memory_order_relaxed) != s1 || slot.ordinal != n) { if (g_f141Ro.open) ++g_f141Ro.lost; continue; }
+        if (!g_f141Ro.open || !row.attachmentValid) continue;
+        if (!row.itemRead || row.itemSerial != g_f141Ro.item.held) { ++g_f141Ro.otherItem; continue; }
+        f::Part* part = nullptr;
+        uint32_t idx = 0;
+        for (uint32_t i = 0; i < kF141Parts && !part; ++i)
+            if (g_f141Parts[i].used && g_f141Parts[i].key == row.nameId) { part = &g_f141Parts[i]; idx = i; }
+        for (uint32_t i = 0; i < kF141Parts && !part; ++i)
+            if (!g_f141Parts[i].used) { part = &g_f141Parts[i]; idx = i; part->used = true; part->key = row.nameId; }
+        if (!part) { ++g_f141Ro.overCap; continue; }
+        if (row.renderFrame == part->lastFrame) continue;
+        part->lastFrame = row.renderFrame;
+        ++part->frames;
+        part->noteFlags(row.recFlag);
+        uint32_t gap = ~0u;
+        const F141Fp* fp = f141FpFind(row.renderFrame, &gap);
+        if (!fp || gap != 0) { ++part->unpaired; continue; }
+        part->add(g_f141Sets[idx], fp->rootGap == 0 ? 0 : 1, f::relTo(row.attachment, fp->W), f::relTo(row.attachment, fp->P));
+    }
+    // The window: closed by the held item, its scope or the loadout changing, or by leaving native stereo on foot; otherwise every windowSeconds().
+    uint64_t ctx = nofoot::adslog::mix(it.held, it.coherent ? 1u : 0u);
+    ctx = nofoot::adslog::mix(nofoot::adslog::mix(ctx, static_cast<uint64_t>(it.scope)), loadout::publishedGeneration());
+    if (g_f141Ro.open && (!live || ctx != g_f141Ro.ctx)) {
+        const uint32_t secs = nofoot::logwin::flush(g_f141Ro.startMs, now);
+        if (secs) f141ReadoutLog(secs);
+        f141ReadoutReset();
+        g_f141Ro.open = false;
+    } else if (g_f141Ro.open) {
+        const uint32_t secs = nofoot::logwin::window(g_f141Ro.startMs, now);
+        if (secs) f141ReadoutLog(secs);
+    }
+    if (live && !g_f141Ro.open) {
+        g_f141Ro.open = true;
+        g_f141Ro.startMs = now;
+        g_f141Ro.ctx = ctx;
+        g_f141Ro.item = it;
+        f141ReadoutReset();
+    }
+}
+// Frame thread, once a frame after alignTick (the ADS lock's tick): the FP history, the sight point's window and lines, the readout's anchor.
+void f141Tick(uint64_t now) noexcept {
+    f141FpPush(now);
+    if (g_f141BendArmed) {
+        f141AdsTick(now);
+        f141ActivationTick(now);
+    }
+    f141ReadoutTick(now);
+}
+
 void installF14ProbesOnce() {
     if (g_f14Tried) return;
     g_f14Tried = true;
@@ -31789,6 +32448,7 @@ void nativeOnFootFrameBoundary(uint32_t frameNo) {
     // F14: the layout probe, its lines, the HUD spread, and the reticle probe (temporary).
     installF14ProbesOnce();
     installEyeProbeOnce();   // F18 (TEMPORARY): probe P1, read only
+    installF141Once();       // F141 (measure only): the ADS bend's and the aim's read-only hooks
     installBodyShiftOnce();  // F35 (TEMPORARY): the body shift's post-hook on the submit job (body mode only)
     f54::tick(now);          // F54 (TEMPORARY): the held weapon's MGMC and record-submit hooks (measure always; shift with the FP raise), its lines
     pfzTick(now);            // F49 (TEMPORARY): the pose freeze's Animate post-hook (installed unless the key is off), its gate, blend and lines
@@ -31881,6 +32541,7 @@ void nativeOnFootFrameBoundary(uint32_t frameNo) {
     neckLine(now);
     eyeProbeLine();   // F18 (TEMPORARY): P1's one-a-second line
     alignTick(GetTickCount64());   // F33: the body align (TEMPORARY, live)
+    f141Tick(GetTickCount64());    // F141 (measure only): the game's ADS sight point against P14, the readout's anchor; after the ADS lock's tick, on the same snapshots
     rotCalTick(GetTickCount64());  // F61: the rotation calibration (TEMPORARY, live; publishes zero while its key is off)
     f44::f119Boundary(frameNo, GetTickCount64());   // F119: the head containment instrument's depth grid and its line, after alignTick took the frame's head offset; F123: the leash and the wall contact
     {   // F123: the comfort fade is the max of F109's snap fade and the containment's, sent once a frame
@@ -31921,6 +32582,7 @@ void nativeOnFootShutdown() {
     spreadTick(false, 0.0f, "the game is shutting down");
     elemScaleTick(false, 0.0f, "the game is shutting down");
     g_eyeStop.store(true, std::memory_order_relaxed);          // F18: P1 samples nothing from here
+    g_f141Stop.store(true, std::memory_order_relaxed);         // F141: the bend's and the aim's hooks read nothing from here
     g_elemOverrideOn.store(false, std::memory_order_relaxed);   // F18: the room's state is per session
     g_hudRoomEff.store(1.0f, std::memory_order_relaxed);
     g_sGame.store(0.0f, std::memory_order_relaxed);

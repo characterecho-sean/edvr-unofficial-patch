@@ -12492,6 +12492,155 @@ def _hj_f140_placement(rows, ctx):
     return ("PARTIAL" if part else "OK", text + (" [" + "; ".join(part) + "]" if part else ""))
 
 
+H_F141_SHOT_RE = re.compile(r"(?P<shots>\d+) calls, the aim dir changed since the bend on (?P<changed>\d+) \(max (?P<cmax>%s) deg\), the shot against the sight ray "
+                            r"(?P<sray>%s) deg on (?P<sapplied>\d+) applied" % (_HN, _HN))
+
+
+def _hj_f141_sight_point(rows, ctx):
+    """F141 (measure only): the game's ADS sight point. Flat ADS bends the shot through a locator S on the weapon (or its Optics attachment): HumanoidWeaponAiming's
+    per-frame 0x1908760 sets the eye's aim dir to normalize(S - E.pos) once the ADS fraction w reaches 1.0 and the sight handle (act+0x198) is valid. In VR the shots
+    followed P14's forward. A read-only hook on the bend (and one on the aim, 0x19079E0) logs, per ADS window and held item: the local player's calls apart from other
+    humanoids', w, the handle's validity, the bend the game's own test applied, S's offset from P14's forward line in the FP root's axes (it compares with F139's table),
+    E against P14, the aim dir on entry and exit, and at the shot. The verdict names the candidate the data shows: (c) no local call, (a) w never at 1.0, (b) the handle
+    never valid (or the activity's ADS handling off), (d) the aim dir changed between the bend and the shot, or the shot off the bent ray, (e) E far from P14; or the
+    bend took effect. NEVER APPLIED when the bend hook is not installed; PARTIAL on (c) or calls with faults over a tenth; IDLE with no ADS second or the flat profile."""
+    sec, inst, noinst, flat, aim, act, nolocal = (rows.get(k, []) for k in ("sec", "installed", "noinstall", "flat", "aim", "act", "nolocal"))
+    if not any((sec, inst, noinst, flat, aim, act, nolocal, rows.get("actcap"))):
+        return None
+    if noinst:
+        return ("NEVER APPLIED", "the bend hook is not installed (%s); nothing was measured" % noinst[-1]["why"])
+    if flat and not inst:
+        return ("IDLE", "not installed: the flat profile (the hooks go in on the VR profile only)")
+    aim_state = aim[-1]["state"] if aim else "not logged"
+    tail = "; the aim hook %s" % aim_state
+    if act:
+        a = act[-1]
+        tail += "; %d activation line(s), the last (activation %s): sight locator \"%s\", eye locator \"%s\", ADS handling %s, the sight handle valid at the first ADS call read %s" % (
+            len(act), a["n"], a["sight"], a["eye"], a["ads"], a["valid"])
+    if not sec:
+        if nolocal:
+            n = nolocal[-1]
+            return ("PARTIAL", "(c) no local call in %s s of ADS (other humanoids' calls %s, not an eye %s, faults %s): the bend is not called for the player, or the local "
+                               "filter rejects it%s" % (n["s"], n["other"], n["noteye"], n["faults"], tail))
+        return ("IDLE", "no ADS second%s" % tail)
+    groups = collections.OrderedDict()
+    for r in sec:
+        g = groups.setdefault((r["item"], r["scope"]), collections.defaultdict(float, wmin=None, wmax=None, cmax=0.0, emax=0.0, amax=0.0))
+        g["s"] += _hwl(r)
+        for k in ("local", "other", "noteye", "faults", "adsoff", "lost", "wn", "wfull", "ok", "okof", "applied", "appliedof", "exact", "pairs", "nofp", "avsn"):
+            g[k] += int(r[k])
+        if int(r["wn"]):
+            g["wmin"] = float(r["wmin"]) if g["wmin"] is None else min(g["wmin"], float(r["wmin"]))
+            g["wmax"] = float(r["wmax"]) if g["wmax"] is None else max(g["wmax"], float(r["wmax"]))
+        on = int(r["appliedof"])
+        for k in ("dist", "sr", "su", "ray", "ain", "aout"):
+            g[k + "_w"] += float(r[k]) * on
+        for k in ("right", "up", "along", "er", "eu", "ef", "emean", "gap"):
+            g[k + "_w"] += float(r[k]) * int(r["pairs"])
+        g["avs_w"] += float(r["avs"]) * int(r["avsn"])
+        g["emax"] = max(g["emax"], float(r["emax"]))
+        g["amax"] = max(g["amax"], float(r["amax"]))
+        sm = H_F141_SHOT_RE.match(r["shot"])
+        if sm:
+            g["shots"] += int(sm.group("shots"))
+            g["changed"] += int(sm.group("changed"))
+            g["sapplied"] += int(sm.group("sapplied"))
+            g["sray_w"] += float(sm.group("sray")) * int(sm.group("sapplied"))
+            g["cmax"] = max(g["cmax"], float(sm.group("cmax")))
+            g["shotread"] = 1
+
+    def mean(g, k, n):
+        return g[k + "_w"] / g[n] if g[n] else 0.0
+
+    parts, partial = [], []
+    for (item, scope), g in groups.items():
+        label = "%s scope %s" % (item, scope)
+        local = int(g["local"])
+        if not local:
+            verdict = "(c) no local call (other humanoids' calls %d, not an eye %d)" % (g["other"], g["noteye"])
+            partial.append("%s: (c)" % label)
+        elif g["adsoff"] and not g["appliedof"]:
+            verdict = "(b) the activity's ADS handling is off (data+0x10 = 0) on every call: the bend never runs"
+        elif g["wmax"] is not None and g["wmax"] < 1.0:
+            verdict = "(a) w never reached 1.0 (max %.3f over %d calls)" % (g["wmax"], g["wn"])
+        elif not g["ok"]:
+            verdict = "(b) the sight handle was never valid (w at 1.0 on %d calls)" % g["wfull"]
+        elif not g["applied"]:
+            verdict = "the bend's test never passed: w at 1.0 on %d and the handle valid on %d calls, never with the sight ahead of the eye" % (g["wfull"], g["ok"])
+        elif g.get("shotread") and g["shots"] and g["changed"] * 2 > g["shots"]:
+            verdict = "(d) the aim dir changed between the bend and the shot on %d of %d shots (max %.3f deg)" % (g["changed"], g["shots"], g["cmax"])
+        elif g.get("shotread") and g["sapplied"] and mean(g, "sray", "sapplied") > 0.5:
+            verdict = "(d) the shot left %.2f deg off the bent sight ray on %d applied shots" % (mean(g, "sray", "sapplied"), g["sapplied"])
+        else:
+            verdict = "the bend took effect on %d of %d calls (the exit aim %.2f deg off E.z, %.2f deg from the sight ray)" % (
+                g["applied"], g["appliedof"], mean(g, "aout", "appliedof"), mean(g, "avs", "avsn"))
+        if g["pairs"] and mean(g, "emean", "pairs") > 5.0:
+            verdict += "; (e) E sits %.1f cm from P14 (max %.1f)" % (mean(g, "emean", "pairs"), g["emax"])
+        if local and g["faults"] * 10 > local:
+            partial.append("%s: faults on %d of %d local calls" % (label, g["faults"], local))
+        text = ("%s: S from P14's forward line right %+.2f up %+.2f cm along %+.1f cm (over %d paired calls, %d of the same render frame), |S - E| %.1f cm, S in the eye's "
+                "axes right %+.2f up %+.2f cm (the sight ray %.2f deg off E.z); E - P14 right %+.2f up %+.2f forward %+.2f cm (|E - P14| %.2f, max %.2f); w %s..%s "
+                "(1.0 on %d), the handle valid on %d of %d, the bend applied on %d of %d; the aim dir off E.z on entry %.2f exit %.2f deg (max %.2f); local calls %d, "
+                "other humanoids %d; %d s; %s") % (
+            label, mean(g, "right", "pairs"), mean(g, "up", "pairs"), mean(g, "along", "pairs"), g["pairs"], g["exact"], mean(g, "dist", "appliedof"),
+            mean(g, "sr", "appliedof"), mean(g, "su", "appliedof"), mean(g, "ray", "appliedof"), mean(g, "er", "pairs"), mean(g, "eu", "pairs"), mean(g, "ef", "pairs"),
+            mean(g, "emean", "pairs"), g["emax"], "%.3f" % g["wmin"] if g["wmin"] is not None else "-", "%.3f" % g["wmax"] if g["wmax"] is not None else "-", g["wfull"],
+            g["ok"], g["okof"], g["applied"], g["appliedof"], mean(g, "ain", "appliedof"), mean(g, "aout", "appliedof"), g["amax"], local, g["other"], g["s"], verdict)
+        if g.get("shotread"):
+            text += "; at the shot: %d calls, the aim dir changed since the bend on %d (max %.3f deg)" % (g["shots"], g["changed"], g["cmax"])
+        parts.append(text)
+    text = "; ".join(parts) + tail
+    if nolocal:
+        text += "; the one-shot (c) line: no local call in %s s of ADS" % nolocal[-1]["s"]
+    return ("PARTIAL" if partial else "OK", text + (" [" + "; ".join(partial) + "]" if partial else ""))
+
+
+def _hj_f141_readout_anchor(rows, ctx):
+    """F141 (measure only): the weapon readout's anchor. The 16 floats the weapon UI getter observation reads at 0x1AB1960 are a locator's world matrix U. Per part key,
+    over a held item and its scope, the windows' lines give the spread of U against the held weapon's world W (the FP attach joint 51 through F_root) and against P14's
+    world: the mean translation, the largest distance from it and the largest rotation from the mean rotation, over the frames paired with the FP snapshot of the same
+    render frame. Constant against W to 1 mm and 0.1 deg is weapon- or optics-anchored; constant against P14 is avatar-anchored; both constant is undecided (the weapon
+    did not move against P14); neither is neither. OK when every part is weapon- or avatar-anchored; PARTIAL when one is undecided, neither, or never paired."""
+    lines = rows.get("part", [])
+    if not lines:
+        return None
+    groups = collections.OrderedDict()
+    for r in lines:
+        g = groups.setdefault((r["item"], r["scope"], r["part"]), collections.defaultdict(float, wdev=0.0, wrot=0.0, pdev=0.0, prot=0.0, basis=set()))
+        g["s"] += _hwl(r)
+        for k in ("frames", "paired", "same", "apart", "unpaired"):
+            g[k] += int(r[k])
+        g["flags"] = "+0x18 %s +0x19 %s +0x28 %s +0x29 %s +0xD0 %s +0x100 %s" % (r["f18"], r["f19"], r["f28"], r["f29"], r["fd0"], r["f100"])
+        n = int(r["paired"])
+        if not n:
+            continue
+        g["basis"].add(r["basis"])
+        for k in ("wdev", "wrot", "pdev", "prot"):
+            g[k] = max(g[k], float(r[k]))
+        for k in ("wx", "wy", "wz", "px", "py", "pz"):
+            g[k] += float(r[k]) * n
+    parts, partial = [], []
+    for (item, scope, key), g in groups.items():
+        label = "%s scope %s part %s" % (item, scope, key)
+        n = int(g["paired"])
+        if not n:
+            parts.append("%s: no frame paired with the FP snapshot of its render frame (%d frames, unpaired %d); %s" % (label, g["frames"], g["unpaired"], g["flags"]))
+            partial.append("%s: never paired" % label)
+            continue
+        weapon = g["wdev"] <= 1.0 and g["wrot"] <= 0.1
+        avatar = g["pdev"] <= 1.0 and g["prot"] <= 0.1
+        kind = ("weapon- or optics-anchored" if weapon and not avatar else "avatar-anchored" if avatar and not weapon
+                else "both constant (the weapon did not move against P14: undecided)" if weapon else "neither weapon- nor avatar-anchored")
+        if weapon == avatar:
+            partial.append("%s: %s" % (label, "undecided" if weapon else "neither"))
+        parts.append("%s: %s (vs weapon (%+.2f %+.2f %+.2f) cm, dev max %.2f mm %.3f deg; vs P14 (%+.2f %+.2f %+.2f) cm, dev max %.2f mm %.3f deg); %s; paired %d of %d frames "
+                     "(the root of the same frame %d, one frame apart %d; stats over %s); %d s" % (
+                         label, kind, g["wx"] / n, g["wy"] / n, g["wz"] / n, g["wdev"], g["wrot"], g["px"] / n, g["py"] / n, g["pz"] / n, g["pdev"], g["prot"], g["flags"],
+                         n, g["frames"], g["same"], g["apart"], " and ".join(sorted(g["basis"])), g["s"]))
+    text = "; ".join(parts)
+    return ("PARTIAL" if partial else "OK", text + (" [" + "; ".join(partial) + "]" if partial else ""))
+
+
 def _hj_f135_menu(rows, ctx):
     """F135 (MEASURE ONLY): which panel hook, or field, is active exactly while the on-foot Esc menu or a panel is up. For each Escape (or pad Start or Back) down edge, the
     counters that rose within 0.5 s after it, those that were already non-zero before it, and those that stayed 0, from the probe's rise and fall event lines; the 1 s lines'
@@ -13512,6 +13661,34 @@ HEALTH_RULES = (
         ("trim", r"native on foot weapon UI trim \(F140, TEMPORARY\): fix\.native_on_foot_weapon_ui_(?P<axis>forward|left|up|toward_eye)_cm = (?P<v>%s) cm" % _HN),
         ("_", r"journal loadout \(F140\): could not open "),
     ), _hj_f140_placement),
+    _hrule("ADS sight point (F141)", ("F141",), ("ADS sight point (F141)",), (
+        ("sec", r"native on foot ADS sight point \(F141\) " + H_WL + r": item (?P<item>.+?) scope (?P<scope>yes|no|unknown); calls local (?P<local>\d+), other humanoids "
+                r"(?P<other>\d+), not an eye (?P<noteye>\d+), faults (?P<faults>\d+), ADS handling off (?P<adsoff>\d+), ring lost (?P<lost>\d+); w min (?P<wmin>%s) max "
+                r"(?P<wmax>%s) over (?P<wn>\d+), at 1\.0 on (?P<wfull>\d+); sight handle valid on (?P<ok>\d+) of (?P<okof>\d+); bend applied on (?P<applied>\d+) of "
+                r"(?P<appliedof>\d+); \|S - E\| (?P<dist>%s) cm; S from P14's forward line right (?P<right>%s) up (?P<up>%s) cm, along (?P<along>%s) cm \(P14 of the same "
+                r"render frame on (?P<exact>\d+) of (?P<pairs>\d+), the nearest otherwise, mean frame gap (?P<gap>%s); no FP snapshot (?P<nofp>\d+)\); E - P14 right "
+                r"(?P<er>%s) up (?P<eu>%s) forward (?P<ef>%s) cm, \|E - P14\| mean (?P<emean>%s) max (?P<emax>%s) cm; S in the eye's axes right (?P<sr>%s) up (?P<su>%s) cm, "
+                r"the sight ray (?P<ray>%s) deg off E\.z; the aim dir off E\.z on entry (?P<ain>%s) exit (?P<aout>%s) deg \(max (?P<amax>%s)\), exit against the sight ray "
+                r"(?P<avs>%s) deg on (?P<avsn>\d+) applied; shot: (?P<shot>.+)$" % ((_HN,) * 19)),
+        ("installed", r"native on foot ADS sight point \(F141\): bend hook installed at "),
+        ("noinstall", r"native on foot ADS sight point \(F141\): (?:bend hook )?NOT installed(?: at EliteDangerous64\.exe\+0x[0-9A-Fa-f]+)? -- (?P<why>.+?)"
+                      r"(?:\. The game was not touched by it\.|; the game was not touched\.)$"),
+        ("flat", r"native on foot ADS sight point \(F141\): not installed \(the flat profile\)"),
+        ("aim", r"native on foot ADS sight point \(F141\): aim hook (?P<state>installed|NOT installed|not installed)"),
+        ("act", r"native on foot ADS sight point \(F141\): activation (?P<n>\d+): act 0x[0-9A-Fa-f]+, sight locator \"(?P<sight>[^\"]*)\" \(act data\+0x8\), eye locator "
+                r"\"(?P<eye>[^\"]*)\" \(eye data\+0x40\), ADS handling (?P<ads>on|off), sight handle valid at the first ADS call read (?P<valid>yes|no|not read)"),
+        ("actcap", r"native on foot ADS sight point \(F141\): (?P<n>\d+) activation line\(s\) not written"),
+        ("nolocal", r"native on foot ADS sight point \(F141\): no local call in (?P<s>\d+) s of ADS \(since the press: other humanoids' calls (?P<other>\d+), not an eye "
+                    r"(?P<noteye>\d+), faults (?P<faults>\d+)\)"),
+    ), _hj_f141_sight_point),
+    _hrule("readout anchor (F141)", ("F141",), ("readout anchor (F141)",), (
+        ("part", r"native on foot readout anchor \(F141\) " + H_WL + r": item (?P<item>.+?) scope (?P<scope>yes|no|unknown): part (?P<part>\d+): vs weapon mean "
+                 r"\((?P<wx>%s) (?P<wy>%s) (?P<wz>%s)\) cm, dev max (?P<wdev>%s) mm (?P<wrot>%s) deg; vs P14 mean \((?P<px>%s) (?P<py>%s) (?P<pz>%s)\) cm, dev max "
+                 r"(?P<pdev>%s) mm (?P<prot>%s) deg; flags \+0x18 (?P<f18>\d+|mixed|not read) \+0x19 (?P<f19>\d+|mixed|not read) \+0x28 (?P<f28>\d+|mixed|not read) "
+                 r"\+0x29 (?P<f29>\d+|mixed|not read) \+0xD0 (?P<fd0>\d+|mixed|not read) \+0x100 (?P<f100>\d+|mixed|not read); frames (?P<frames>\d+), paired "
+                 r"(?P<paired>\d+) \(the root of the same frame (?P<same>\d+), one frame apart (?P<apart>\d+); stats over (?P<basis>the same frame|both)\), unpaired "
+                 r"(?P<unpaired>\d+); the window's rows of another item (?P<other>\d+), parts over the cap (?P<cap>\d+), rows lost (?P<lost>\d+)" % ((_HN,) * 10)),
+    ), _hj_f141_readout_anchor),
     _hrule("menu probe (F135)", ("F135",), ("native on foot menu probe (F135)",), (
         ("sec", r"native on foot menu probe \(F135\) 1 s: update (?P<upd>\d+) \(objs (?P<updo>.*?)\), placement (?P<place>\d+) \(objs (?P<placeo>.*?)\), ray (?P<ray>\d+), "
                 r"cursor window (?P<win>\d+), owner transform (?P<own>\d+), panel submit (?P<ps>\d+), inst submit (?P<is>\d+), bridge update (?P<bu>\d+) placement "
@@ -16094,6 +16271,81 @@ def self_test_health():
         check("F140 placement: a drifted line is unparsed", ["weapon UI placement (F140) 10 s: something else"], 4, [("UNPARSED", P140)])
         check("F140 placement: a loadout line that could not open its journal is named, not unparsed", [RLoad("journal loadout (F140): could not open %S", 5)], 0,
               lacks=["UNPARSED"])
+
+        # ---- F141: the game's ADS sight point and the weapon readout's anchor (measure only) ----
+        A141, RO141 = "ADS sight point (F141)", "readout anchor (F141)"
+        PLASMA141 = "$wpn_m_assaultrifle_plasma_fauto_name;"
+        SHOT141 = "600 calls, the aim dir changed since the bend on 0 (max 0.000 deg), the shot against the sight ray 0.02 deg on 420 applied"
+
+        def inst141():
+            return R("native on foot ADS sight point (F141): bend hook installed at", 0x1908760, 11, 22)
+
+        def aim141():
+            return R("native on foot ADS sight point (F141): aim hook installed at", 0x19079E0, 7, 15)
+
+        def sp141(item=PLASMA141, scope="no", local=600, other=1200, noteye=0, faults=0, adsoff=0, lost=0, wmin=0.0, wmax=1.0, wn=600, wfull=420, ok=600, okof=600,
+                  applied=420, appliedof=600, dist=36.0, right=0.0, up=1.1, along=36.0, exact=500, pairs=600, gap=0.2, nofp=0, er=0.0, eu=0.0, ef=0.5, emean=0.6, emax=1.0,
+                  sr=0.0, su=1.1, ray=1.75, ain=0.0, aout=1.75, amax=1.8, avs=0.01, avsn=420, shot=SHOT141, wl=10):
+            return R("native on foot ADS sight point (F141) %u s", wl, item, scope, local, other, noteye, faults, adsoff, lost, wmin, wmax, wn, wfull, ok, okof, applied,
+                     appliedof, dist, right, up, along, exact, pairs, gap, nofp, er, eu, ef, emean, emax, sr, su, ray, ain, aout, amax, avs, avsn, shot)
+
+        def act141(n=1, sight="OpticReticle", eye="def_c_povCamera_joint", ads="on", valid="yes"):
+            return R("native on foot ADS sight point (F141): activation %u", n, 0x1F2E3D4C, sight, eye, ads, valid)
+
+        check("F141 sight point: the hooks in and no ADS second", [inst141(), aim141()], 0, [("IDLE", A141)], has=["no ADS second; the aim hook installed"], lacks=["UNPARSED"])
+        check("F141 sight point: the bend took effect, S against P14's line per item", [inst141(), aim141(), act141(), sp141(), sp141(wl=4)], 0, [("OK", A141)],
+              has=[PLASMA141 + " scope no: S from P14's forward line right +0.00 up +1.10 cm along +36.0 cm (over 1200 paired calls, 1000 of the same render frame)",
+                   "the bend took effect on 840 of 1200 calls (the exit aim 1.75 deg off E.z, 0.01 deg from the sight ray)", "14 s",
+                   "sight locator \"OpticReticle\", eye locator \"def_c_povCamera_joint\", ADS handling on, the sight handle valid at the first ADS call read yes",
+                   "at the shot: 1200 calls, the aim dir changed since the bend on 0"], lacks=["UNPARSED"])
+        check("F141 sight point: (a) w never reaches 1.0", [inst141(), aim141(), sp141(wmax=0.85, wfull=0, applied=0, avsn=0)], 0, [("OK", A141)],
+              has=["(a) w never reached 1.0 (max 0.850 over 600 calls)"], lacks=["UNPARSED", "(b)", "(c)"])
+        check("F141 sight point: (b) the sight handle never valid", [inst141(), aim141(), sp141(ok=0, applied=0, avsn=0)], 0, [("OK", A141)],
+              has=["(b) the sight handle was never valid (w at 1.0 on 420 calls)"], lacks=["UNPARSED"])
+        check("F141 sight point: (b) the activity's ADS handling off", [inst141(), sp141(adsoff=600, wn=0, wfull=0, ok=0, okof=0, applied=0, appliedof=0, avsn=0)], 0,
+              [("OK", A141)], has=["(b) the activity's ADS handling is off (data+0x10 = 0) on every call"], lacks=["UNPARSED"])
+        check("F141 sight point: (c) no local call in the window lines", [inst141(), sp141(local=0, wn=0, wfull=0, ok=0, okof=0, applied=0, appliedof=0, pairs=0, exact=0, avsn=0)],
+              0, [("PARTIAL", A141)], has=["(c) no local call (other humanoids' calls 1200, not an eye 0)", PLASMA141 + " scope no: (c)"], lacks=["UNPARSED"])
+        check("F141 sight point: (c) the one-shot line alone", [inst141(), R("native on foot ADS sight point (F141): no local call in", 3, 900, 0, 0)], 0, [("PARTIAL", A141)],
+              has=["(c) no local call in 3 s of ADS (other humanoids' calls 900, not an eye 0, faults 0)"], lacks=["UNPARSED"])
+        check("F141 sight point: (d) the aim dir changed between the bend and the shot",
+              [inst141(), aim141(), sp141(shot="600 calls, the aim dir changed since the bend on 400 (max 1.700 deg), the shot against the sight ray 1.70 deg on 420 applied")], 0,
+              [("OK", A141)], has=["(d) the aim dir changed between the bend and the shot on 400 of 600 shots (max 1.700 deg)"], lacks=["UNPARSED"])
+        check("F141 sight point: (d) the shot off the bent ray",
+              [inst141(), aim141(), sp141(shot="600 calls, the aim dir changed since the bend on 0 (max 0.000 deg), the shot against the sight ray 1.80 deg on 420 applied")], 0,
+              [("OK", A141)], has=["(d) the shot left 1.80 deg off the bent sight ray on 420 applied shots"], lacks=["UNPARSED"])
+        check("F141 sight point: (e) E far from P14 is named beside the verdict", [inst141(), sp141(emean=12.0, emax=14.0)], 0, [("OK", A141)],
+              has=["; (e) E sits 12.0 cm from P14 (max 14.0)"], lacks=["UNPARSED"])
+        check("F141 sight point: the aim hook not installed reads", [inst141(), sp141(shot="the aim hook is not installed")], 0, [("OK", A141)],
+              has=["the bend took effect on 420 of 600 calls"], lacks=["UNPARSED", "at the shot"])
+        check("F141 sight point: faults on over a tenth of the local calls", [inst141(), sp141(faults=120)], 0, [("PARTIAL", A141)], has=["faults on 120 of 600 local calls"],
+              lacks=["UNPARSED"])
+        check("F141 sight point: the bend hook not installed", [R("native on foot ADS sight point (F141): bend hook NOT installed at", 0x1908760, "the prologue bytes are not build 334925's")],
+              3, [("NEVER APPLIED", A141)], has=["the bend hook is not installed (the prologue bytes are not build 334925's); nothing was measured"], lacks=["UNPARSED"])
+        check("F141 sight point: the identity check refused", [R("native on foot ADS sight point (F141): NOT installed -- identity mismatch", "the PE timestamp or image size is not build 334925's")],
+              3, [("NEVER APPLIED", A141)], has=["identity mismatch (the PE timestamp or image size is not build 334925's)"], lacks=["UNPARSED"])
+        check("F141 sight point: the flat profile", [R("native on foot ADS sight point (F141): not installed (the flat profile)")], 0, [("IDLE", A141)],
+              has=["not installed: the flat profile"], lacks=["UNPARSED"])
+        check("F141 sight point: a drifted line is unparsed", ["native on foot ADS sight point (F141) 10 s: something else"], 4, [("UNPARSED", A141)])
+
+        def ro141(item=PLASMA141, scope="no", part=7, w=(1.2, -3.5, 8.0), wdev=0.3, wrot=0.02, p=(5.0, -20.0, 40.0), pdev=14.0, prot=3.5, flags=("1", "0", "0", "1", "1", "1"),
+                  frames=900, paired=880, same=600, apart=280, basis="the same frame", unpaired=20, other=0, cap=0, lost=0, wl=10):
+            return R("native on foot readout anchor (F141) %u s", wl, item, scope, part, *w, wdev, wrot, *p, pdev, prot, *flags, frames, paired, same, apart, basis, unpaired,
+                     other, cap, lost)
+
+        check("F141 readout anchor: a part constant against the weapon", [ro141(), ro141(wl=6)], 0, [("OK", RO141)],
+              has=[PLASMA141 + " scope no part 7: weapon- or optics-anchored (vs weapon (+1.20 -3.50 +8.00) cm, dev max 0.30 mm 0.020 deg; vs P14 (+5.00 -20.00 +40.00) cm, "
+                   "dev max 14.00 mm 3.500 deg); +0x18 1 +0x19 0 +0x28 0 +0x29 1 +0xD0 1 +0x100 1; paired 1760 of 1800 frames", "16 s"], lacks=["UNPARSED"])
+        check("F141 readout anchor: a part constant against P14, and one scope apart", [ro141(wdev=12.0, wrot=2.0, pdev=0.4, prot=0.03), ro141(scope="yes", part=9)], 0,
+              [("OK", RO141)], has=["scope no part 7: avatar-anchored", "scope yes part 9: weapon- or optics-anchored"], lacks=["UNPARSED"])
+        check("F141 readout anchor: both constant is undecided", [ro141(pdev=0.5, prot=0.05)], 0, [("PARTIAL", RO141)],
+              has=["both constant (the weapon did not move against P14: undecided)", "part 7: undecided"], lacks=["UNPARSED"])
+        check("F141 readout anchor: one window over the bound makes it neither", [ro141(), ro141(wdev=1.5, basis="both")], 0, [("PARTIAL", RO141)],
+              has=["neither weapon- nor avatar-anchored", "dev max 1.50 mm", "stats over both and the same frame"], lacks=["UNPARSED"])
+        check("F141 readout anchor: never paired, flags not read or mixed", [ro141(paired=0, same=0, apart=0, unpaired=900, flags=("not read", "mixed", "0", "0", "1", "not read"))],
+              0, [("PARTIAL", RO141)], has=["no frame paired with the FP snapshot of its render frame (900 frames, unpaired 900); +0x18 not read +0x19 mixed", "part 7: never paired"],
+              lacks=["UNPARSED"])
+        check("F141 readout anchor: a drifted line is unparsed", ["native on foot readout anchor (F141) 10 s: something else"], 4, [("UNPARSED", RO141)])
 
         # ---- F135: the on-foot menu probe (MEASURE ONLY) ----
         M135 = "menu probe (F135)"
