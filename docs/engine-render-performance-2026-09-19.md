@@ -58,7 +58,7 @@
 
 * **Next (2026-10-27, last entry):** AA on's +1.65 ms is per-draw
   classifiers. ui-depth memo FLOWN: exact, -0.21 ms (shipped, b1561dff).
-  Fast path shadow FLOWN 0%: layout gate wrong, 70% no ticket. 1b BUILT.
+  Shadow 1b FLOWN: off-screen 23-40%, 0/35M wrong; eye 0% (census bug).
 
 ## Frame budget philosophy
 
@@ -4446,6 +4446,60 @@ Next build (Phase 1b):
   with their shares, for the two largest reasons.
 - **Rig:** aa_off_test, 353 checks.
 - **Flight:** the same leg as Phase 1.
+
+**Phase 1b flown (2026-10-27, Steam log `edvr_gfx_20261027_165254.log`,
+build 3ef08f21; same rig).** Loaded in docked at Cranfield at 16:55:05.
+AA was on, then F7 off from 16:55:52 to 16:56:57, then on.
+- **Off-screen draws would take the fast path 23-40% of the time.**
+  That is 1.9-5.5k a frame, rising as the scene settled, and 39.9% with
+  AA off. The comparison checked 3.3-10M would-take draws a window, 35M
+  over five windows, with 0 mismatches.
+- **Eye draws: 0%.** Every eye draw recorded no ticket. The first
+  failing reasons were:
+  - args class: 52-54% of eye draws;
+  - census: 45-46%;
+  - after-ui: under 1%;
+  - ui depth, composite, roll-free, verdict: a few a frame.
+- **Off-screen no-ticket** was almost all args class (5.6k a frame),
+  then wake surface (about 10), special VS and unsettled (a few).
+- **The args class is the largest limiter overall.** It failed on
+  10-14k of 22-29k owner X draws a frame (about 47%), eye and
+  off-screen alike. Its top VS hashes were 8BC3FFBCA98BCD4C (31-36%),
+  EB5234DB6ADB491D (26-31%) and 5B4D8E894EEDA8B4 (10-11%): common scene
+  shaders.
+
+Two causes:
+1. **The "census" term is an instrument error.** It was captured as
+   `g_vrWorldWants || (eyeGeometry && vscreenFootprintWanted())`. That
+   is the gate, not the effect. The footprint is on by default
+   (`vscreen_res_width = auto`), so the term was true on every eye
+   geometry draw. But `footprintEyeDraw` (vscreen.cpp:4138) acts only
+   when VS is 5C36AF051B98B9F1 and PS is CFE84157BC76E921, the 2D
+   screen composite, which is already a special. Its top VS
+   (EB5234DB.., 5B4D8E89.., BBE58E40..) are ordinary scene shaders.
+   The term must be what the call does: the world-route census
+   (already a dynamic flag), or the footprint's VS and PS pair.
+2. **The args class excludes about half the scene's draws,** eye and
+   off-screen alike, and the line does not say which bound: count 64
+   or under, over 10000, 240, or instances 0. The suspect is the
+   10000 upper bound. Big settlement meshes are over 10000, and the
+   only test behind that bound is the sun-glare camera nomination.
+   That nomination is pointer-cached (vscreen.cpp ~2498: it resolves
+   only when VsCb0 differs from `sceneCbNominated`), so on a repeat
+   draw with the same VsCb0 it is a no-op. If so, the bound can become
+   "count <= 10000, or VsCb0 already nominated, or the sun-glare world
+   inactive".
+
+Next build (Phase 1c):
+- capture the census and footprint term from the effect, as above;
+- split the args-class reason into its four bounds, eye and off-screen
+  apart, each with its top three VS hashes;
+- for draws over 10000, count how many have
+  `bindingGet(VsCb0) == sceneCbNominated` or the sun-glare world
+  inactive.
+
+Fly the same leg. Expected: eye draws join, and the split shows how
+much of the 47% a widened class would admit.
 
 **The Phase 2 flight should show:**
 - the `fast` step's calls and cost;
