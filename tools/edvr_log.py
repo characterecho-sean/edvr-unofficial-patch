@@ -12324,8 +12324,9 @@ def _hj_f137_neck(rows, ctx):
 
 def _hj_f138_pitched(rows, ctx):
     """F138: the view holds its height over the neck while the look is pitched. The pin hook adds the camera's sink against the stance (the game's camera over the animated
-    neck, the headset's own height out) to the raise's target while the aim is pitched 10 deg or more, unarmed (up in both modes, down under mouse look only: a look down
-    under look to aim stays as flown and has no line); the end of an episode it published in gives the stance's target back once, else "not needed"; the 1 s lines (a second with a call at that pitch)
+    neck, the headset's own height out) to the raise's target while the aim is pitched, unarmed, weighted by smoothstep(20, 30 deg) since F139 (it was 10 to 20; the unarmed
+    settle's refusal for the aim's pitch is from 20 deg too, so the reference is taken at the pilot's resting aim); up in both modes, down under mouse look only: a look down
+    under look to aim stays as flown and has no line. The instrument counts a call from 10 deg. The end of an episode it published in gives the stance's target back once, else "not needed"; the 1 s lines (a second with a call at 10 deg or more)
     say how many calls added it, which were measured only (an item drawn) and the reasons for every other (no reference, the LOCAL pose's generation changed, the stance
     changed, ADS, the camera away, ...), INSIDE on the drawn eye, and the settle's refusals. OK when it was added in at least one second and INSIDE (F97a's test on the drawn
     eye) is under 10% of the calls of the applied seconds with the aim up. PARTIAL when INSIDE is 10% or more of those calls, or when it was added in no second and a pitched
@@ -12367,6 +12368,64 @@ def _hj_f138_pitched(rows, ctx):
         reason = "%s (%d calls)" % lead[0] if lead else "none counted"
         return ("PARTIAL", text + "; never added with an empty hand in %d pitched second(s); leading reason: %s" % (len(empty), reason))
     return ("IDLE", text + "; an item was drawn in every pitched second: measured only")
+
+
+def _hj_f139_sight_offset(rows, ctx):
+    """F139: each weapon's sight on the ADS line. While aiming down sights the eye's origin moves, in the FP root's axes, by the held item's table up (an exact item name:
+    the plasma assault rifle, the rocket launcher, the kinetic and laser SMGs; every other item 0) plus the live trim fix.native_on_foot_ads_sight_up_cm (any held weapon),
+    after F79's origin for the laser assault rifle; bounded to 8 cm (past it nothing moves and the refusal is counted). The ADS windows' lines name the item, the table up, the
+    trim and the total up applied: these are the figures a tuning flight leaves for the table, so the report gives, per item, the last window's total up and the seconds in
+    the sights (and the total for each trim tried). OK when every item that was asked an offset had it applied; PARTIAL when an item's offset was refused on some frames
+    (past the 8 cm bound) or the item could not be read on some ADS frames; NEVER APPLIED when an item's offset was refused on every frame, or the trim was set and no ADS
+    second read the held item; IDLE when no ADS second, or no offset was asked for any item (a table miss with the trim at 0)."""
+    sec, key = rows.get("sec", []), rows.get("key", [])
+    if not sec and not key:
+        return None
+    last_trim = float(key[-1]["trim"]) if key else None
+    if not sec:
+        return ("IDLE", "no ADS second with a sight offset line; the trim key was read %d time(s), last %+.1f cm" % (len(key), last_trim))
+    items = collections.OrderedDict()
+    for r in sec:
+        d = items.setdefault(r["item"], {"s": 0, "frames": 0, "applied": 0, "refused": 0, "noitem": 0, "f79": 0, "asked": False, "by": collections.OrderedDict(), "last": r})
+        d["s"] += _hwl(r)
+        for k in ("frames", "applied", "refused", "noitem", "f79"):
+            d[k] += int(r[k])
+        d["asked"] = d["asked"] or float(r["tup"]) != 0.0 or float(r["trim"]) != 0.0
+        d["last"] = r
+        by = d["by"].setdefault(float(r["trim"]), [0, 0.0])
+        by[0] += _hwl(r)
+        by[1] = float(r["up"])
+    bad, part, parts = [], [], []
+    for name, d in items.items():
+        last = d["last"]
+        text = "%s: total up %+.2f cm right %+.2f cm (the last window: table %+.1f, trim %+.1f), %d s in the sights, applied on %d of %d frames" % (
+            name, float(last["up"]), float(last["right"]), float(last["tup"]), float(last["trim"]), d["s"], d["applied"], d["frames"])
+        if d["f79"]:
+            text += ", F79 optic origin on %d" % d["f79"]
+        if len(d["by"]) > 1:
+            text += "; by trim: " + ", ".join("%+.1f -> %+.2f cm (%d s)" % (t, v[1], v[0]) for t, v in d["by"].items())
+        if d["refused"]:
+            text += "; refused over the bound on %d frames" % d["refused"]
+        if d["noitem"]:
+            text += "; item not read on %d frames" % d["noitem"]
+        parts.append(text)
+        if name == "none":
+            if last_trim:
+                bad.append("the trim is %+.1f cm but no ADS second read the held item" % last_trim)
+            else:
+                part.append("the held item was not read in %d ADS second(s)" % d["s"])
+        elif d["refused"] and not d["applied"]:
+            bad.append("%s: the offset was refused over the bound on every frame" % name)
+        elif d["refused"] or d["noitem"] * 10 > d["frames"]:
+            part.append("%s: refused on %d frames, item not read on %d" % (name, d["refused"], d["noitem"]))
+    text = "; ".join(parts) + ("; trim key read %d time(s), last %+.1f cm" % (len(key), last_trim) if key else "")
+    if bad:
+        return ("NEVER APPLIED", text + " [" + "; ".join(bad) + "]")
+    if part:
+        return ("PARTIAL", text + " [" + "; ".join(part) + "]")
+    if not any(d["asked"] for d in items.values()):
+        return ("IDLE", text + " (no offset was asked: no table hit and the trim at 0)")
+    return ("OK", text)
 
 
 def _hj_f135_menu(rows, ctx):
@@ -13373,6 +13432,12 @@ HEALTH_RULES = (
         ("bins", r"native on foot pitched view \(F138\) 10 s bins \(per 10 deg of aim pitch: calls, the camera's sink, EDVR carried up, forward, the head's own height since "
                  r"the stance; cm\): (?P<mode>mouse look|look to aim), item (?P<item>.+?): (?=\[)(?P<body>.+)$"),
     ), _hj_f138_pitched),
+    _hrule("ADS sight offset (F139)", ("F139",), ("ADS sight offset (F139)", "ADS sight height (F139"), (
+        ("sec", r"native on foot ADS sight offset \(F139\) " + H_WL + r": item (?P<item>.+?), table up (?P<tup>%s) right (?P<tright>%s) cm, trim (?P<trim>%s) cm, "
+                r"applied up (?P<up>%s) cm right (?P<right>%s) cm \(mean of (?P<frames>\d+) frames in the sights; applied on (?P<applied>\d+)\), F79 optic origin on "
+                r"(?P<f79>\d+) frames, refused over the (?P<bound>\d+) cm bound (?P<refused>\d+), no coherent item (?P<noitem>\d+)" % ((_HN,) * 5)),
+        ("key", r"native on foot ADS sight height \(F139, TEMPORARY\): fix\.native_on_foot_ads_sight_up_cm = (?P<trim>%s) cm" % _HN),
+    ), _hj_f139_sight_offset),
     _hrule("menu probe (F135)", ("F135",), ("native on foot menu probe (F135)",), (
         ("sec", r"native on foot menu probe \(F135\) 1 s: update (?P<upd>\d+) \(objs (?P<updo>.*?)\), placement (?P<place>\d+) \(objs (?P<placeo>.*?)\), ray (?P<ray>\d+), "
                 r"cursor window (?P<win>\d+), owner transform (?P<own>\d+), panel submit (?P<ps>\d+), inst submit (?P<is>\d+), bridge update (?P<bu>\d+) placement "
@@ -15862,6 +15927,41 @@ def self_test_health():
         check("F138 pitched view: bin lines alone", [bins138()], 0, [("IDLE", P138)], has=["1 bin line(s) and no 1 s line"], lacks=["UNPARSED"])
         check("F138 pitched view: a drifted line is unparsed", ["native on foot pitched view (F138) 1 s: something else"], 4, [("UNPARSED", P138)])
 
+        # ---- F139: each weapon's sight on the ADS line ----
+        S139 = "ADS sight offset (F139)"
+        PLASMA139, KINETIC139, LASERSMG139, PISTOL139 = ("$wpn_m_assaultrifle_plasma_fauto_name;", "$wpn_m_submachinegun_kinetic_fauto_name;",
+                                                         "$wpn_m_submachinegun_laser_fauto_name;", "$wpn_s_pistol_kinetic_sauto_name;")
+
+        def so139(item=PLASMA139, tup=1.1, tright=0.0, trim=0.0, up=1.1, right=0.0, frames=480, applied=480, f79=0, refused=0, noitem=0, wl=10):
+            return R("native on foot ADS sight offset (F139) %u s", wl, item, tup, tright, trim, up, right, frames, applied, f79, 8.0, refused, noitem)
+
+        def key139(cm=0.0):
+            return R("native on foot ADS sight height (F139, TEMPORARY)", cm, 8.0, 8.0)
+
+        check("F139 sight offset: the key read and no ADS second", [key139(1.5)], 0, [("IDLE", S139)], has=["no ADS second with a sight offset line", "read 1 time(s), last +1.5 cm"],
+              lacks=["UNPARSED"])
+        check("F139 sight offset: two weapons with their table value applied, per item totals", [key139(), so139(), so139(item=KINETIC139, tup=-2.0, up=-2.0, wl=7)], 0, [("OK", S139)],
+              has=[PLASMA139 + ": total up +1.10 cm right +0.00 cm (the last window: table +1.1, trim +0.0), 10 s in the sights, applied on 480 of 480 frames",
+                   KINETIC139 + ": total up -2.00 cm", "7 s in the sights"], lacks=["UNPARSED"])
+        check("F139 sight offset: a tuning flight leaves the total for each trim tried",
+              [key139(), so139(), key139(0.5), so139(trim=0.5, up=1.6), so139(trim=0.5, up=1.6, wl=4), key139(-0.5), so139(trim=-0.5, up=0.6)], 0, [("OK", S139)],
+              has=["by trim: +0.0 -> +1.10 cm (10 s), +0.5 -> +1.60 cm (14 s), -0.5 -> +0.60 cm (10 s)", "the last window: table +1.1, trim -0.5", "trim key read 3 time(s), last -0.5 cm"],
+              lacks=["UNPARSED"])
+        check("F139 sight offset: the laser assault rifle (F79's) with a trim on top", [so139(item="$wpn_m_assaultrifle_laser_fauto_name;", tup=0.0, trim=1.5, up=1.5, f79=480)], 0,
+              [("OK", S139)], has=["total up +1.50 cm", "F79 optic origin on 480"], lacks=["UNPARSED"])
+        check("F139 sight offset: an item with no table value and no trim asks nothing", [so139(item=PISTOL139, tup=0.0, up=0.0)], 0, [("IDLE", S139)],
+              has=["no offset was asked: no table hit and the trim at 0"], lacks=["UNPARSED"])
+        check("F139 sight offset: refused over the bound on every frame", [so139(item=LASERSMG139, tup=-5.8, trim=-4.0, up=0.0, applied=0, refused=480)], 3, [("NEVER APPLIED", S139)],
+              has=[LASERSMG139 + ": the offset was refused over the bound on every frame", "refused over the bound on 480 frames"], lacks=["UNPARSED"])
+        check("F139 sight offset: refused on some frames", [so139(item=LASERSMG139, tup=-5.8, trim=-2.2, up=-5.0, applied=300, refused=180)], 0, [("PARTIAL", S139)],
+              has=["refused on 180 frames, item not read on 0"], lacks=["UNPARSED"])
+        check("F139 sight offset: the item unread on a tenth of the frames", [so139(applied=420, noitem=60)], 0, [("PARTIAL", S139)], has=["item not read on 60 frames"], lacks=["UNPARSED"])
+        check("F139 sight offset: the trim is set and no ADS second read the held item", [key139(2.0), so139(item="none", tup=0.0, up=0.0, applied=0, noitem=480)], 3,
+              [("NEVER APPLIED", S139)], has=["the trim is +2.0 cm but no ADS second read the held item"], lacks=["UNPARSED"])
+        check("F139 sight offset: the held item not read, no trim set", [key139(), so139(item="none", tup=0.0, up=0.0, applied=0, noitem=480)], 0, [("PARTIAL", S139)],
+              has=["the held item was not read in 10 ADS second(s)"], lacks=["UNPARSED"])
+        check("F139 sight offset: a drifted line is unparsed", ["native on foot ADS sight offset (F139) 10 s: something else"], 4, [("UNPARSED", S139)])
+
         # ---- F135: the on-foot menu probe (MEASURE ONLY) ----
         M135 = "menu probe (F135)"
 
@@ -16714,6 +16814,7 @@ def self_test_health():
             ("weapon eye offset (F88) %u s", ["follow", ",".join(["1.00"] * 10)]),
             ("ADS sight in both eyes (F106) %u s", ["off", "releasing"]),
             ("native on foot ADS eye chain (F93b) %u s", ["off", "off"]),
+            ("native on foot ADS sight offset (F139) %u s", ["x" * 63]),
             ("ADS sight check (F66e/F79)", ["the eyes' offsets", " (an eye had no NDC: its figures are zero)"]),
             ("native on foot ADS input (F70b): source %s; request", ["bound HumanoidZoom", "off", "absent/invalid", "unknown", "latched", "x" * 63, "refused", "x" * 63]),
         )

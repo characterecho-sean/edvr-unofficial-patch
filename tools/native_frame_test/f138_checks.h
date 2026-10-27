@@ -1,6 +1,7 @@
 // F138 checks (native on-foot VR): the view holds its height over the neck while the look is pitched. Header only, run by native_frame_test (run138).
 // Convention: G = the game's camera (raw) less the animated neck less the headset's LOCAL height; the sink is the stance's G less this call's, clamped to [-40, +40] cm; the
-// raise's target while pitched is the stance's plus w times the sink, w = smoothstep(10, 20 deg, |aim pitch|), 0 for a look down under look to aim (as flown); the end of
+// raise's target while pitched is the stance's plus w times the sink, w = smoothstep(20, 30 deg, |aim pitch|) since F139 (it was 10 to 20), 0 for a look down under look to aim
+// (as flown); the settle's refusal (so the unarmed reference's gate) is from 20 deg since F139, with nothing drawn; the instrument counts a call from 10 deg. The end of
 // an episode this tracker published in, with nothing drawn, gives the stance's target back once.
 #pragma once
 
@@ -36,26 +37,34 @@ inline f138::In pitchedCall(double aimDeg, double sinkM, double headY = kHead) {
 
 template <class Check>
 inline void run138(Check&& check) {
-    {   // the weight: smoothstep(10, 20 deg) of |pitch|, 0 for a pitch that is not a number
-        check(f138::pitchWeight(0.0) == 0.0 && f138::pitchWeight(9.9) == 0.0 && f138::pitchWeight(10.0) == 0.0, "F138: no weight up to 10 deg");
-        check(std::fabs(f138::pitchWeight(15.0) - 0.5) < 1e-12 && std::fabs(f138::pitchWeight(-15.0) - 0.5) < 1e-12, "F138: half way at 15 deg, up or down (the magnitude)");
-        check(f138::pitchWeight(20.0) == 1.0 && f138::pitchWeight(65.0) == 1.0 && f138::pitchWeight(-70.0) == 1.0, "F138: the full weight from 20 deg");
-        check(f138::pitchWeight(12.0) < f138::pitchWeight(14.0) && f138::pitchWeight(14.0) < f138::pitchWeight(18.0), "F138: the weight rises with the pitch");
+    {   // the weight: smoothstep(20, 30 deg) of |pitch| (F139; it was 10 to 20), 0 for a pitch that is not a number
+        check(f138::kWeightLoDeg == 20.0 && f138::kWeightHiDeg == 30.0 && f138::kSettleGateDeg == 20.0 && f138::kPitchedDeg == 10.0,
+              "F139: the weight runs 20 to 30 deg, the settle's gate is 20 deg, the instrument still counts from 10");
+        check(f138::pitchWeight(0.0) == 0.0 && f138::pitchWeight(10.0) == 0.0 && f138::pitchWeight(-11.5) == 0.0 && f138::pitchWeight(19.9) == 0.0 && f138::pitchWeight(20.0) == 0.0,
+              "F138: no weight up to 20 deg (the pilot's resting mouse aim of -10.5 to -12 deg has none)");
+        check(std::fabs(f138::pitchWeight(25.0) - 0.5) < 1e-12 && std::fabs(f138::pitchWeight(-25.0) - 0.5) < 1e-12, "F138: half way at 25 deg, up or down (the magnitude)");
+        check(f138::pitchWeight(30.0) == 1.0 && f138::pitchWeight(65.0) == 1.0 && f138::pitchWeight(-70.0) == 1.0, "F138: the full weight from 30 deg");
+        check(f138::pitchWeight(22.0) < f138::pitchWeight(24.0) && f138::pitchWeight(24.0) < f138::pitchWeight(28.0), "F138: the weight rises with the pitch");
         check(f138::pitchWeight(std::nan("")) == 0.0 && f138::pitchWeight(INFINITY) == 0.0 && f138::weight(std::nan(""), false) == 0.0 && f138::weight(std::nan(""), true) == 0.0,
               "F138: an aim pitch that is not a number has no weight");
         // the mode: looking up applies in both, looking down under mouse look only (under look to aim the raise stays held, as flown)
         check(f138::weight(-40.0, true) == 0.0 && f138::weight(40.0, true) == 1.0 && f138::weight(-40.0, false) == 1.0 && f138::weight(40.0, false) == 1.0,
               "F138: look to aim at -40 gives w 0, at +40 w 1; mouse look at -40 gives w 1");
-        check(f138::weight(-10.5, true) == 0.0 && std::fabs(f138::weight(15.0, true) - 0.5) < 1e-12 && std::fabs(f138::weight(-15.0, false) - 0.5) < 1e-12 && f138::weight(0.0, true) == 0.0,
+        check(f138::weight(-10.5, true) == 0.0 && std::fabs(f138::weight(25.0, true) - 0.5) < 1e-12 && std::fabs(f138::weight(-25.0, false) - 0.5) < 1e-12 && f138::weight(0.0, true) == 0.0,
               "F138: the smoothstep is the same up in both modes and down under mouse look");
-        // the instrument's size and the settle's refusal are the same 10 deg
+        // the instrument counts from 10 deg; the settle refuses from kSettleGateDeg (F139: 20 deg), the weight starts there too
         check(!f138::pitched(9.99, false) && f138::pitched(10.0, false) && f138::pitched(-10.0, false) && f138::pitched(-62.0, false) && !f138::pitched(std::nan(""), false),
-              "F138: a pitched call is |aim| of 10 deg or more");
+              "F138: a pitched call (the instrument's) is |aim| of 10 deg or more");
         check(f138::pitched(40.0, true) && !f138::pitched(-40.0, true) && f138::pitched(-40.0, false), "F138: a look down under look to aim is not a pitched call (as flown)");
-        check(!f138::settleRefused(9.99, 10.0, false) && f138::settleRefused(10.0, 10.0, false) && f138::settleRefused(-40.0, 10.0, false) && f138::settleRefused(70.0, 10.0, false) &&
-                  !f138::settleRefused(std::nan(""), 10.0, false) && !f138::settleRefused(INFINITY, 10.0, false),
-              "F138: the settle refuses a pitched aim under mouse look too: |pitch| of 10 deg or more, finite");
-        check(!f138::settleRefused(-40.0, 10.0, true) && !f138::settleRefused(70.0, 10.0, true),
+        const double gate = f138::kSettleGateDeg;
+        check(!f138::settleRefused(19.99, gate, false) && f138::settleRefused(20.0, gate, false) && f138::settleRefused(-40.0, gate, false) && f138::settleRefused(70.0, gate, false) &&
+                  !f138::settleRefused(std::nan(""), gate, false) && !f138::settleRefused(INFINITY, gate, false),
+              "F138: the settle refuses a pitched aim under mouse look too: |pitch| of 20 deg or more, finite");
+        check(!f138::settleRefused(-10.5, gate, false) && !f138::settleRefused(-12.0, gate, false) && !f138::settleRefused(-15.0, gate, false) && !f138::settleRefused(10.0, gate, false),
+              "F139: the pilot's resting mouse aim (-10.5 to -12 deg, head level) is not refused: the unarmed settle, and so the reference, is taken there");
+        check(f138::settleRefused(10.0, 10.0, false) && !f138::settleRefused(9.99, 10.0, false),
+              "F138: the gate is the caller's number (look to aim's own F109 gate, 10 deg, lives in the hook and is not this function's)");
+        check(!f138::settleRefused(-40.0, gate, true) && !f138::settleRefused(70.0, gate, true),
               "F138: with an item drawn the settle is as before F138 (the armed target is an absolute height): no refusal");
     }
     {   // G, the sink, the target
@@ -75,9 +84,14 @@ inline void run138(Check&& check) {
         check(o.pitched && o.considered && o.w == 1.0 && o.reason == f138::kApplied && o.sinkValid && std::fabs(o.sinkM - 0.086) < 1e-12 && o.publish &&
                   std::fabs(o.publishM - (kTarget + 0.086)) < 1e-12 && std::fabs(o.addedM - 0.086) < 1e-12,
               "F138: looking up 40 deg with the camera 8.6 cm down: the raise's target is the stance's +8.6 cm");
-        const f138::Out half = t.step(pitchedCall(15.0, 0.10));
+        const f138::Out half = t.step(pitchedCall(25.0, 0.10));
         check(half.reason == f138::kApplied && std::fabs(half.w - 0.5) < 1e-12 && std::fabs(half.publishM - (kTarget + 0.05)) < 1e-12 && std::fabs(half.addedM - 0.05) < 1e-12,
-              "F138: at 15 deg half the sink is added");
+              "F138: at 25 deg half the sink is added");
+        // F139: between 10 and 20 deg the call is the instrument's (pitched) but the weight is 0: considered nowhere, nothing published, no episode begun
+        f138::Tracker lowT = stanced();
+        const f138::Out low = lowT.step(pitchedCall(-11.5, 0.03));
+        check(low.pitched && !low.considered && low.w == 0.0 && !low.publish && !low.sinkValid && !lowT.episode && !lowT.added,
+              "F139: a resting mouse aim of -11.5 deg is a pitched call of the instrument with no weight: nothing is added and no episode begins");
         // unarmed looking down under mouse look (the F137 flight: the camera ROSE 12 to 17 cm over the neck at -37 to -65 deg): the same rule, the sink negative
         const f138::Out down = t.step(pitchedCall(-45.0, -0.14));
         check(down.pitched && down.reason == f138::kApplied && std::fabs(down.sinkM + 0.14) < 1e-12 && std::fabs(down.publishM - (kTarget - 0.14)) < 1e-12,
@@ -124,18 +138,22 @@ inline void run138(Check&& check) {
         check(edge.returned && edge.publish && edge.publishM == kTarget && !edge.considered && !edge.pitched, "F138: back to a level look the first call publishes the stance's target exactly");
         const f138::Out again = t.step(pitchedCall(5.0, 0.0));
         check(!again.returned && !again.publish, "F138: and only once");
-        // the weight reaching 0 at 10 deg is the edge too
+        // the weight reaching 0 at 20 deg is the edge too (F139; it was 10)
         f138::Tracker u = stanced();
-        u.step(pitchedCall(30.0, 0.10));
-        const f138::Out ten = u.step(pitchedCall(10.0, 0.10));
-        check(ten.returned && ten.pitched && ten.publishM == kTarget, "F138: at exactly 10 deg the weight is 0 and the stance's target returns");
+        u.step(pitchedCall(40.0, 0.10));
+        const f138::Out ten = u.step(pitchedCall(20.0, 0.10));
+        check(ten.returned && ten.pitched && ten.publishM == kTarget, "F138: at exactly 20 deg the weight is 0 and the stance's target returns");
+        f138::Tracker u2 = stanced();
+        u2.step(pitchedCall(40.0, 0.10));
+        const f138::Out fifteen = u2.step(pitchedCall(15.0, 0.10));
+        check(fifteen.returned && fifteen.pitched && !fifteen.considered && fifteen.publishM == kTarget, "F139: a look that comes down to 15 deg is below the weight: the stance's target returns");
         // nothing was added: no edge
         f138::Tracker n = stanced();
         const f138::Out none = n.step(pitchedCall(5.0, 0.0));
         check(!none.returned && !none.publish && !none.returnRefused && !none.notNeeded, "F138: a level look with no pitched episode before it publishes nothing and counts nothing");
         // an armed-only episode (an item drawn all through it: measured only, nothing published) gives nothing back at the edge
         f138::Tracker armedOnly = stanced();
-        f138::In armedUp = pitchedCall(20.0, 0.10);
+        f138::In armedUp = pitchedCall(30.0, 0.10);
         armedUp.itemDrawn = true;
         const f138::Out armedPitched = armedOnly.step(armedUp);
         f138::In armedLevel = pitchedCall(5.0, 0.0);
@@ -144,12 +162,12 @@ inline void run138(Check&& check) {
         check(armedPitched.reason == f138::kItemDrawn && !armedPitched.publish && !armedEdge.publish && !armedEdge.returned && !armedEdge.returnRefused && armedEdge.notNeeded &&
                   !armedOnly.step(armedLevel).notNeeded,
               "F138: an episode with an item drawn throughout publishes nothing at the edge: 'not needed', once (the armed target is an absolute height)");
-        // drawing a weapon, aiming 20 deg down and coming level (mouse look) must not overwrite the armed raise with the unarmed stance's
+        // drawing a weapon, aiming 30 deg down and coming level (mouse look) must not overwrite the armed raise with the unarmed stance's
         f138::Tracker draw = stanced();
-        f138::In drawDown = pitchedCall(-20.0, -0.05);
+        f138::In drawDown = pitchedCall(-30.0, -0.05);
         drawDown.itemDrawn = true;
         draw.step(drawDown);
-        check(!draw.step(armedLevel).publish, "F138: weapon drawn, aim 20 deg down, level again: the unarmed stance's target is not published over the armed raise");
+        check(!draw.step(armedLevel).publish, "F138: weapon drawn, aim 30 deg down, level again: the unarmed stance's target is not published over the armed raise");
         // the camera away or the sights: hold, and the edge comes when they are over
         f138::Tracker a = stanced();
         a.step(pitchedCall(40.0, 0.10));
@@ -238,6 +256,9 @@ inline void run138(Check&& check) {
         // a call under 10 deg has no reason to give
         const f138::Out level = reasonOf(have, pitchedCall(7.0, 0.1));
         check(!level.pitched && !level.considered && !level.publish, "F138: a level look is not considered");
+        // F139: from 10 to 20 deg the call is counted by the instrument but has no weight, so no reason either
+        const f138::Out resting = reasonOf(have, pitchedCall(-12.0, 0.03));
+        check(resting.pitched && !resting.considered && !resting.publish && resting.reason == f138::kApplied && resting.w == 0.0, "F139: a pitch of -12 deg is pitched but not considered");
     }
     {   // never shown as added when (b) never ran
         f138::Window w;
@@ -259,7 +280,7 @@ inline void run138(Check&& check) {
     {   // the window: a second of calls, the means, the bins
         f138::Tracker t = stanced();
         f138::Window w;
-        double aims[4] = {25.0, 40.0, 40.0, -20.0};
+        double aims[4] = {25.0, 40.0, 40.0, -25.0};
         double sinks[4] = {0.04, 0.086, 0.10, 0.02};
         for (int i = 0; i < 4; ++i) {
             f138::Call c;
@@ -284,13 +305,13 @@ inline void run138(Check&& check) {
         w.add(item);
         check(w.calls == 5 && w.modeCalls[0] == 4 && w.modeCalls[1] == 1 && w.itemCalls == 1, "F138: five pitched calls, one in look to aim, one with an item");
         check(w.appliedN == 4 && w.measuredN == 1 && w.consideredN == 5 && w.sinkN == 5 && std::fabs(w.sinkMax - 10.0) < 1e-9, "F138: four added, one measured only, the largest sink 10 cm");
-        check(w.aimMin == -20.0 && w.aimMax == 40.0 && w.settleRefusedAim == 3 && w.insideOf == 4 && w.inside == 1, "F138: the aim's range, the settle refusals, INSIDE 1 of 4");
-        // the bins: 40 deg is [40,50), 25 is [20,30), -20 is [-20,-10), 0 is [0,10)
+        check(w.aimMin == -25.0 && w.aimMax == 40.0 && w.settleRefusedAim == 3 && w.insideOf == 4 && w.inside == 1, "F138: the aim's range, the settle refusals, INSIDE 1 of 4");
+        // the bins: 40 deg is [40,50), 25 is [20,30), -25 is [-30,-20), -20 is [-20,-10), 0 is [0,10)
         check(f138::binOf(-90.0) == 0 && f138::binOf(-80.0) == 1 && f138::binOf(-0.1) == 8 && f138::binOf(0.0) == 9 && f138::binOf(10.0) == 10 && f138::binOf(89.9) == 17 &&
                   f138::binOf(90.0) == 17 && f138::binOf(-120.0) == 0 && f138::binOf(40.0) == 13 && f138::binOf(25.0) == 11 && f138::binOf(-20.0) == 7,
               "F138: the bins are 10 deg wide from -90 to +90");
         const f138::Group& g = w.group[0][0];
-        check(g.bin[13].n == 2 && g.bin[11].n == 1 && w.group[0][1].bin[13].n == 1 && w.group[1][0].bin[7].n == 1, "F138: calls land by mode and item class");
+        check(g.bin[13].n == 2 && g.bin[11].n == 1 && w.group[0][1].bin[13].n == 1 && w.group[1][0].bin[6].n == 1, "F138: calls land by mode and item class");
         char text[400];
         const size_t n = f138::binsText(g, text, sizeof(text));
         check(n > 0 && std::string(text).find("[20,30) 1 +4.0 +5.0 -2.0 +5.0") != std::string::npos && std::string(text).find("[40,50) 2 +9.3 +5.0 -2.0 +5.0") != std::string::npos,

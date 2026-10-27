@@ -1833,8 +1833,8 @@ void testLegacyOnFootRowsStayOutOfMenu() {
     int nativePageRows = 0;
     for (int i = 0; i < kCount; ++i)
         if (strcmp(kMenuRows[i].page, "native_on_foot") == 0) ++nativePageRows;
-    check(nativePageRows == 17, "the Native on foot page has 17 rows (F127: 21 rows went to edvr.ini and the installer's window, and Reticle follows was retired; "
-                                "F128: Visor axis (test) was retired with the correction always on)");
+    check(nativePageRows == 18, "the Native on foot page has 18 rows (F127: 21 rows went to edvr.ini and the installer's window, and Reticle follows was retired; "
+                                "F128: Visor axis (test) was retired with the correction always on; F139: ADS sight height (test) was added under Aiming down sights)");
     // F127: the page's order and its five headings. The switch is always first; look and aim, then aiming down sights, then body and view, the HUD last. kMenuRows is in
     // edvr.ini order; the group is the ini's heading block above the key, which the page shows as a heading.
     {
@@ -1848,6 +1848,7 @@ void testLegacyOnFootRowsStayOutOfMenu() {
             {"native_on_foot_ads_eye_distance_cm", "Aiming down sights"},
             {"native_on_foot_ads_sight_both_eyes", "Aiming down sights"},
             {"native_on_foot_ads_head_aim", "Aiming down sights"},
+            {"native_on_foot_ads_sight_up_cm", "Aiming down sights"},
             {"native_on_foot_eye_height_cm", "Body and view"},
             {"native_on_foot_weapon_view_offset_cm", "Body and view"},
             {"native_on_foot_weapon_eye_forward_cm", "Body and view"},

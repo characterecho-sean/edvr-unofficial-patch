@@ -57,6 +57,7 @@
 #include "native_on_foot_f135.h"   // F135: the on-foot menu probe, measure only (pure parts)
 #include "native_on_foot_f137.h"   // F137: a virtual neck under mouse look (pure parts)
 #include "native_on_foot_f138.h"   // F138: the view holds its height over the neck while the look is pitched (pure parts)
+#include "native_on_foot_f139.h"   // F139: each weapon's sight on the ADS line (the table, the live trim, the shift; pure parts)
 #include "xinput_watch.h"          // F135: the pad's Start and Back edges, evidence for the menu probe only
 #include "native_on_foot_f109.h"   // F109: look to aim on foot, the player's own turn in ADS, snap or smooth turning (pure parts)
 #include "native_on_foot_f129.h"   // F129: look to aim reads its turn from the player's own look processor; the look path instrument (pure parts)
@@ -184,6 +185,8 @@ std::atomic<bool> g_adsAimKey{true};                          // the key as the 
 std::atomic<float> g_adsEyeDistM{0.15f};                      // F70: fix.native_on_foot_ads_eye_distance_cm in metres (0..0.30, default 0.15), live
 std::atomic<float> g_weaponViewOffsetCm{static_cast<float>(nofoot::kWeaponViewOffsetDefaultCm)}; // fix.native_on_foot_weapon_view_offset_cm, live
 double g_adsEyeCmLast = -1.0;                                 // the value last logged (frame thread)
+std::atomic<float> g_adsSightUpCm{0.0f};                      // F139 (TEMPORARY): fix.native_on_foot_ads_sight_up_cm, live (the held weapon's trim, cm, -8..8)
+double g_adsSightUpCmLast = -1000.0;                          // the value last logged (frame thread)
 std::atomic<float> g_f87SettleS{static_cast<float>(nofoot::f87::kSettleDefaultS)};   // F87h (TEMPORARY): fix.native_on_foot_standing_height_settle_s, live
 double g_f87SettleLast = -1.0;                                // the value last logged (frame thread)
 std::atomic<float> g_f94EyeHeightCm{static_cast<float>(nofoot::f94::kEyeHeightDefaultCm)};   // F94a: fix.native_on_foot_eye_height_cm, live (the eyes over the neck)
@@ -980,6 +983,17 @@ void readKey() {
                             "%.0f cm in all)", cm, cm, cm, 100.0 * nofoot::kAdsSightClampM);
         g_adsEyeCmLast = cm;
         g_adsEyeDistM.store(static_cast<float>(cm / 100.0), std::memory_order_relaxed);
+    }
+    // F139 (TEMPORARY, live, the Native on foot page's "ADS sight height (test)"): the held weapon's sight height trim, cm up (-8..8, default 0), added to the item's table
+    // value while aiming down sights: the eye moves off the game's aiming line onto the weapon's own sight line. Any held weapon takes it; the tuned totals go into the table.
+    {
+        const double cm = nofoot::f139::clampTrimCm(static_cast<double>(cfg.getFloat("fix.native_on_foot_ads_sight_up_cm", 0.0f)));
+        if (first || cm != g_adsSightUpCmLast)
+            Log::get().note("native on foot ADS sight height (F139, TEMPORARY): fix.native_on_foot_ads_sight_up_cm = %+.1f cm -- while aiming down sights your eye moves this far "
+                            "up (down if negative) off the game's aiming line, on top of the height EDVR holds for the weapon in your hands (the held weapon only: -%.0f..+%.0f cm)",
+                            cm, nofoot::f139::kTrimMaxCm, nofoot::f139::kTrimMaxCm);
+        g_adsSightUpCmLast = cm;
+        g_adsSightUpCm.store(static_cast<float>(cm), std::memory_order_relaxed);
     }
     // F74: the user's live left/right view offset relative to an equipped weapon or tool. The default is 0: no shift (F112; F90 had 2.0 cm right, 2.5 before).
     {
@@ -11375,6 +11389,11 @@ struct AdsSightWin {
     uint32_t opticBasisN = 0, opticEyeN = 0, opticNoEye = 0, opticBadBasis = 0;
     uint32_t rifleAnchorUsed = 0, rifleAnchorItemRefused = 0, rifleAnchorFrameRefused = 0, rifleAnchorGeometryRefused = 0, rifleAnchorMatrixRefused = 0;
     double rifleAnchorShiftSum[3] = {}, rifleAnchorSpanSum = 0.0, rifleAnchorResidualMaxM = 0.0;
+    // F139: the frames of the lock with a shift decided (ADS active, the lock's data fresh), those the shift was applied on or refused past the bound, those with no coherent item,
+    // the frames F79's origin stood, the applied up and right summed (cm), and the last coherent item's name, table value and trim.
+    uint32_t f139Frames = 0, f139Applied = 0, f139Refused = 0, f139NoItem = 0, f139F79 = 0;
+    double f139UpSum = 0.0, f139RightSum = 0.0, f139TableUpCm = 0.0, f139TableRightCm = 0.0, f139TrimCm = 0.0;
+    char f139Item[64] = {};
     double opticYawSum = 0.0, opticPitchSum = 0.0, opticRootNdcSum[3][2] = {}, opticP14NdcSum[3][2] = {};
     uint32_t opticRootNdcN[3] = {}, opticP14NdcN[3] = {};
 };
@@ -11481,6 +11500,13 @@ void adsSightLog(uint32_t seconds, bool steady, bool hold, bool detailed) noexce
                         static_cast<unsigned>(c.lagMax), c.legacy, c.model,
                         c.missed, c.rmsMm(c.shiftSs), c.rmsMm(c.lockSs), c.rmsMm(c.headSs), c.steps, c.alongStepRmsMm(), c.autocorr(1), c.autocorr(2), c.acN);
         c.reset();
+    }
+    if (w.f139Frames) {   // F139: the held weapon's sight offset (every ADS window; --health reads it): the per-item totals the tuning flight leaves for the table
+        const double fn = static_cast<double>(w.f139Frames);
+        Log::get().note("native on foot ADS sight offset (F139) %u s: item %s, table up %+.1f right %+.1f cm, trim %+.1f cm, applied up %+.2f cm right %+.2f cm (mean of %u frames in "
+                        "the sights; applied on %u), F79 optic origin on %u frames, refused over the %.0f cm bound %u, no coherent item %u",
+                        seconds, w.f139Item[0] ? w.f139Item : "none", w.f139TableUpCm, w.f139TableRightCm, w.f139TrimCm, w.f139UpSum / fn, w.f139RightSum / fn, w.f139Frames,
+                        w.f139Applied, w.f139F79, 100.0 * nofoot::f139::kBoundM, w.f139Refused, w.f139NoItem);
     }
     if (detailed) {
     // F70/F75: the ADS eye point. The pin input camera is the job camera less the ADS shift and the separate intentional view shift; the 3P root stays put
@@ -11704,6 +11730,32 @@ void adsSightTick(uint64_t now, double dt, const EyeSample& s) noexcept {
                 case nofoot::kAdsRifleAnchorGeometry: ++w.rifleAnchorGeometryRefused; break;
                 case nofoot::kAdsRifleAnchorMatrix: ++w.rifleAnchorMatrixRefused; break;
                 default: break;
+                }
+            }
+            // F139: the held weapon's own sight line. After F79's decision (the laser assault rifle's origin stands exactly as it was), the eye's origin moves by the item's table
+            // up (plus the live trim, any held weapon) along the FP root's up row, and right along its right row, less the part along the sight line; bounded to 8 cm, past it
+            // nothing is moved and the refusal counted. The clearance cap above stays on P14.
+            {
+                namespace f139 = nofoot::f139;
+                const double upRow[3] = {G.froot[4], G.froot[5], G.froot[6]};
+                const f139::Decision d139 = f139::decide(opticItemSnapshot, opticItemSerial, currentItemSerial, opticItemName,
+                                                         static_cast<double>(g_adsSightUpCm.load(std::memory_order_relaxed)), upRow, row0, fUnit);
+                ++w.f139Frames;
+                if (d139.coherent) {
+                    std::snprintf(w.f139Item, sizeof(w.f139Item), "%s", opticItemName);
+                    w.f139TableUpCm = d139.tableUpCm;
+                    w.f139TableRightCm = d139.tableRightCm;
+                    w.f139TrimCm = d139.trimUpCm;
+                } else {
+                    ++w.f139NoItem;
+                }
+                if (rifleAnchor.applied) ++w.f139F79;
+                if (d139.refused) ++w.f139Refused;
+                if (d139.applied) {
+                    ++w.f139Applied;
+                    w.f139UpSum += d139.appliedUpCm;
+                    w.f139RightSum += d139.appliedRightCm;
+                    for (int axis = 0; axis < 3; ++axis) adsOrigin[axis] += d139.shift[axis];
                 }
             }
             const double pT[3] = {adsOrigin[0] + eyeCap.kM * fUnit[0], adsOrigin[1] + eyeCap.kM * fUnit[1], adsOrigin[2] + eyeCap.kM * fUnit[2]};
@@ -16543,11 +16595,13 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
             // F138: nor with the game's aim pitched under mouse look either (the FP root's pitch, from G above; look to aim's gate has counted its own), with nothing drawn: the
             // game's camera sinks against the animated neck as the look pitches, and a stance taken there is the sunk camera's (0.3 s into a held look-up the raise settled on
             // +58.5 cm, and the view stood 55 cm over the neck when the look came level). With an item drawn the settle takes the pitched camera as it did before F138: the armed
-            // target is an absolute height (the unarmed eye of the stance). Counted apart from g_f109SettleGated.
+            // target is an absolute height (the unarmed eye of the stance). Counted apart from g_f109SettleGated. F139: this gate, which is also the unarmed reference's (noteStance
+            // below runs only on a settle this gate let through), is 20 deg (nofoot::f138::kSettleGateDeg), not look to aim's 10 above: the pilot's resting mouse aim was -10.5 to -12
+            // deg with his head level, and at 10 deg no unarmed settle was ever taken, so F138 never had a reference.
             const bool f138AimKnown = G != nullptr && std::isfinite(pc.f86AimPitch);
             const bool f138Item = armed || f97W > 0.0;
             bool f138SettleRefused = false;
-            if (si.valid && f138AimKnown && nofoot::f138::settleRefused(pc.f86AimPitch, kF109SettlePitchDeg, f138Item)) {
+            if (si.valid && f138AimKnown && nofoot::f138::settleRefused(pc.f86AimPitch, nofoot::f138::kSettleGateDeg, f138Item)) {
                 si.valid = false;
                 f138SettleRefused = true;
             }

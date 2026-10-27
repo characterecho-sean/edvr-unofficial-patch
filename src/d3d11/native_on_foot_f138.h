@@ -10,10 +10,10 @@
 // The reference is taken in the pin hook on every call where the settle publishes an UNARMED target from an upright stance: the published target, G of that call, the
 // animated neck's height, the headset's LOCAL height and the LOCAL pose's generation. G of a call is the game's camera (EDVR's offsets out, not pitch-normalised) less the
 // animated neck less the physical headset's height in LOCAL: what the game's camera does over the neck beyond what the pilot's own head does (his real head motion stays in
-// the view). While the look is pitched (w = smoothstep(10, 20 deg, |aim pitch|), the FP root's pitch) the raise's target is the stance's plus w times the sink (the
+// the view). While the look is pitched (w = smoothstep(20, 30 deg, |aim pitch|) since F139, the FP root's pitch) the raise's target is the stance's plus w times the sink (the
 // reference's G less this call's), clamped to +-40 cm. Looking up applies under mouse look and look to aim; looking down only under mouse look (under look to aim the
-// F109 gate held the raise whatever the pitch, as flown: w is 0 there, and those calls are not the instrument's). The settle's refusal for the aim's pitch applies with
-// nothing drawn only: with an item drawn the settle takes the pitched camera as it did before F138 (the armed target is an absolute height). The end of a pitched episode
+// F109 gate held the raise whatever the pitch, as flown: w is 0 there, and those calls are not the instrument's). The settle's refusal for the aim's pitch (from 20 deg
+// since F139) applies with nothing drawn only: with an item drawn the settle takes the pitched camera as it did before F138 (the armed target is an absolute height). The end of a pitched episode
 // publishes the stance's target once only when this tracker published a target during it and nothing is drawn at the edge; otherwise it publishes nothing ("not needed").
 #pragma once
 
@@ -27,8 +27,12 @@ namespace edvr {
 namespace nofoot {
 namespace f138 {
 
-constexpr double kWeightLoDeg = 10.0, kWeightHiDeg = 20.0;   // w: 0 up to 10 deg of aim pitch, 1 from 20 (smoothstep)
-constexpr double kPitchedDeg = 10.0;                         // a call at this |aim pitch| or more is the instrument's (and the settle's gate: kF109SettlePitchDeg)
+// F139: the pilot's resting mouse aim was -10.5 to -12 deg with his head level, so the 10 deg refusal held every unarmed settle and F138 never had a reference ("no reference"
+// on 2823 calls); the flown bins put the camera's sink at -1 to +3.5 cm at 10 to 20 deg and +5 cm at 20 to 30. The settle's refusal (so the reference's own gate) and the weight
+// start at 20 deg; the instrument (kPitchedDeg) still counts a call from 10.
+constexpr double kWeightLoDeg = 20.0, kWeightHiDeg = 30.0;   // w: 0 up to 20 deg of aim pitch, 1 from 30 (smoothstep)
+constexpr double kSettleGateDeg = 20.0;                      // the settle refuses (nothing drawn) from this |aim pitch|; look to aim's own gate (F109, 10 deg) stays in the hook
+constexpr double kPitchedDeg = 10.0;                         // a call at this |aim pitch| or more is the instrument's
 constexpr double kStanceGuardM = 0.03;                       // the animated neck within this of the reference's: the same stance (a crouch, the fists' hunch move it)
 constexpr double kSinkMinM = -0.40, kSinkMaxM = 0.40;        // the sink added, clamped (looking down unarmed the camera rose 12 to 17 cm over the neck)
 
@@ -45,8 +49,8 @@ inline double pitchWeight(double aimPitchDeg) noexcept {
 inline bool lookToAimDown(double aimPitchDeg, bool lookToAim) noexcept { return lookToAim && aimPitchDeg < 0.0; }
 // The weight of the pitched look: the pitch's, 0 for a look down under look to aim.
 inline double weight(double aimPitchDeg, bool lookToAim) noexcept { return lookToAimDown(aimPitchDeg, lookToAim) ? 0.0 : pitchWeight(aimPitchDeg); }
-// The instrument counts a call at |aim pitch| of kPitchedDeg or more (not a look down under look to aim); the settle refuses at the same size (gateDeg is the hook's
-// kF109SettlePitchDeg), with nothing drawn only.
+// The instrument counts a call at |aim pitch| of kPitchedDeg or more (not a look down under look to aim); the settle refuses from gateDeg (the hook passes kSettleGateDeg, F139:
+// 20 deg), with nothing drawn only.
 inline bool pitched(double aimPitchDeg, bool lookToAim) noexcept {
     return std::isfinite(aimPitchDeg) && std::fabs(aimPitchDeg) >= kPitchedDeg && !lookToAimDown(aimPitchDeg, lookToAim);
 }

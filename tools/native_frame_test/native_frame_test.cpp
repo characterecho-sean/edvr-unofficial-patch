@@ -41,6 +41,7 @@
 #include "f135_checks.h"    // F135: the on-foot menu probe's pure parts (counters, the distinct objects of a second, the edges, the key edges, the line gate)
 #include "f137_checks.h"    // F137: a virtual neck under mouse look (the offset, the seated vector, the weight, the pose's history, the head offset it cancels from)
 #include "f138_checks.h"    // F138: the view holds its height over the neck while the look is pitched (the weight, the sink, the reference, the return edge, the reasons, the bins)
+#include "f139_checks.h"    // F139: each weapon's sight on the ADS line (the table, the live trim, the shift, the bound, F79's origin beside it, the item snapshot)
 #include "f110_checks.h"    // F110: the ADS sight lock's model right eye (the left-eye job camera plus the IPD)
 #include "f111_checks.h"    // F111: the panel pointer instrument's statistics and verdict
 #include "f113_checks.h"    // F113: each eye's scene rows whenever the world is drawn (the depth prepass and the terrain as sources)
@@ -7496,9 +7497,12 @@ int wmain(int argc, wchar_t** argv) {
     // 30.14 deg, so +65 deg is -9.0 cm forward and +2.4 cm up), its seated vector, the pin taking the whole vector out of the camera by the pose's serial, the 0.15 s weight
     // (0 under look to aim, times 1 - the ADS weight), the head offset it cancels from.
     f137test::run137(check);
-    // F138: the pitched look's weight smoothstep(10, 20 deg), the settle's refusal at 10 deg, G and the clamped sink, the reference and the added target, the return edge,
-    // every refusal's reason, the window's means and 10 deg bins.
+    // F138: the pitched look's weight smoothstep(20, 30 deg) (F139; it was 10 to 20), the settle's refusal from 20 deg (F139; it was 10), G and the clamped sink, the reference and
+    // the added target, the return edge, every refusal's reason, the window's means and 10 deg bins.
     f138test::run138(check);
+    // F139: each weapon's sight on the ADS line: the table by exact item name, the live trim, the shift in the FP root's up and right less its part along the sight line, the 8 cm
+    // bound, the laser assault rifle's F79 origin with the trim on top, a stale or incoherent item snapshot.
+    f139test::run139(check);
     // F110: the ADS sight lock's model right eye from the left-eye job camera and from a solved left eye, the fallback, the IPD's sign.
     f110test::run110(check);
     // F111: the panel pointer instrument names the stage that turns a move the other way (K1 to K5, one at a time), the camera getters' decoding.
