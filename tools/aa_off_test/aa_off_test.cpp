@@ -10,9 +10,8 @@
 //   Cut E: draw_step_clock.h (built 2026-10-27, the temporary draw hook CPU by step instrument), driven with a scripted
 //          clock: which draws are clocked how, what a mark attributes, the game's draw against reissues, the clock floor,
 //          the window's totals and scaling, and the two log lines' text and worst-case length.
-//   Cut F: classifier_memo.h (built 2026-10-27, the ui_depth eye-draw memo and its temporary verification): when a call hits, and
-//          why one misses (counted by cause); the verify frame's cadence; the tally of verified hits and mismatches per output; and
-//          the "ui depth memo:" line's text, with its "-" cases and its worst-case length.
+//   Cut F: classifier_memo.h (built 2026-10-27, the ui_depth eye-draw memo): a call hits only when something is stored, both halves
+//          of its key equal the stored key and the stored exit is a plain decline; a moved generation or epoch is a miss.
 //
 // Exit codes: 0 pass, 1 a check failed, 2 usage. --dry-run touches nothing.
 #include "../../src/common/gpu_disjoint_clock.h"
@@ -32,7 +31,6 @@ static_assert(edvr::kFrameSpanSlots * 2u <= edvr::DisjointClock::kLeases,
 #include <cmath>
 #include <cstdio>
 #include <cstring>
-#include <initializer_list>
 
 namespace edvr {
 
@@ -859,243 +857,69 @@ void testStepTextWorstCase() {
 
 // ---- Cut F: classifier_memo.h -------------------------------------------------------------------------------------------------------
 
-// A hit needs both halves of the key equal AND the stored exit to be a plain decline; every other call is a miss with one cause.
+// A hit needs something stored, both halves of the key equal AND the stored exit to be a plain decline; every other call is a miss.
 void testMemoHit() {
     using namespace edvr::classifiermemo;
     Memo m;
     const Key k{5, 7};
-    check(probe(m, k) == Probe::kMissNoPlain, "memo: nothing stored is a miss, counted as no plain decline stored");
+    check(!hit(m, k), "memo: nothing stored is a miss");
+    check(!hit(m, Key{0, 0}), "memo: nothing stored is a miss even for the zero key");
     store(m, k, Exit::kPlainDecline);
-    check(probe(m, k) == Probe::kHit, "memo: both halves equal after a plain decline is a hit");
-    check(probe(m, Key{6, 7}) == Probe::kMissGeneration, "memo: a moved generation is a miss, counted as generation moved");
-    check(probe(m, Key{5, 8}) == Probe::kMissEpoch, "memo: a moved epoch is a miss, counted as epoch moved");
-    check(probe(m, Key{6, 8}) == Probe::kMissGeneration, "memo: both moved is counted once, as the generation");
-    check(probe(m, Key{4, 7}) == Probe::kMissGeneration && probe(m, Key{5, 6}) == Probe::kMissEpoch,
-          "memo: a key that moved backwards is a miss as well, never a hit");
-    check(probe(m, Key{0, 0}) == Probe::kMissGeneration, "memo: the zero key does not match a stored one");
+    check(hit(m, k), "memo: both halves equal after a plain decline is a hit");
+    check(!hit(m, Key{6, 7}), "memo: a moved generation is a miss");
+    check(!hit(m, Key{5, 8}), "memo: a moved epoch is a miss");
+    check(!hit(m, Key{6, 8}), "memo: both moved is a miss");
+    check(!hit(m, Key{4, 7}) && !hit(m, Key{5, 6}), "memo: a key that moved backwards is a miss as well, never a hit");
+    check(!hit(m, Key{0, 0}), "memo: the zero key does not match a stored one");
     // The stored exit decides what an equal key means.
     store(m, k, Exit::kOther);
-    check(probe(m, k) == Probe::kMissNoPlain, "memo: an equal key after an exit that was not a plain decline is a miss (no plain decline stored)");
-    check(probe(m, Key{6, 7}) == Probe::kMissGeneration && probe(m, Key{5, 8}) == Probe::kMissEpoch,
-          "memo: a moved key after a non-plain exit is still counted by what moved");
+    check(!hit(m, k), "memo: an equal key after an exit that was not a plain decline is a miss");
+    check(!hit(m, Key{6, 7}) && !hit(m, Key{5, 8}), "memo: a moved key after a non-plain exit is a miss as well");
     store(m, k, Exit::kPlainDecline);
-    check(probe(m, k) == Probe::kHit, "memo: storing the plain decline again restores the hit");
+    check(hit(m, k), "memo: storing the plain decline again restores the hit");
     store(m, Key{9, 9}, Exit::kPlainDecline);
-    check(probe(m, k) == Probe::kMissGeneration && probe(m, Key{9, 9}) == Probe::kHit, "memo: a later store replaces the earlier key");
+    check(!hit(m, k) && hit(m, Key{9, 9}), "memo: a later store replaces the earlier key");
     invalidate(m);
-    check(probe(m, Key{9, 9}) == Probe::kMissNoPlain && !m.stored, "memo: invalidate forgets the answer, so the same key misses");
+    check(!hit(m, Key{9, 9}) && !m.stored, "memo: invalidate forgets the answer, so the same key misses");
     // Both classifiers keep a memo of their own: storing in one leaves the other alone.
     Memo eye, holo;
     store(eye, k, Exit::kPlainDecline);
-    check(probe(holo, k) == Probe::kMissNoPlain && probe(eye, k) == Probe::kHit, "memo: two memos are independent");
-    // The three causes and the hit exhaust the answers: every call is exactly one of them.
-    unsigned seen[4] = {};
+    check(!hit(holo, k) && hit(eye, k), "memo: two memos are independent");
+    // Over a grid of keys against one stored key, exactly the stored key after a plain decline hits.
+    unsigned hits = 0;
     for (uint32_t g = 3; g < 8; ++g) {
         for (uint32_t e = 3; e < 8; ++e) {
             for (int plain = 0; plain < 2; ++plain) {
                 Memo c;
                 store(c, Key{5, 5}, plain ? Exit::kPlainDecline : Exit::kOther);
-                ++seen[static_cast<unsigned>(probe(c, Key{g, e}))];
+                if (hit(c, Key{g, e})) ++hits;
             }
         }
     }
-    check(seen[0] + seen[1] + seen[2] + seen[3] == 50 && seen[0] == 1, "memo: over a grid of keys exactly one cell is a hit");
+    check(hits == 1, "memo: over a grid of keys and exits exactly one cell is a hit");
 }
 
-// A model of a run of draws through the memo, as uiDepthOnEyeDraw drives it: key, probe, tally, then store the exit the full run took.
+// A model of a run of draws through the memo, as uiDepthOnEyeDraw drives it: key, hit test, and on a miss the full run's exit stored.
 void testMemoRun() {
     using namespace edvr::classifiermemo;
     Memo m;
-    Tally t;
+    unsigned fullRuns = 0;
     const auto call = [&](Key now, Exit exitIfRun) {
-        const Probe p = probe(m, now);
-        t.noteProbe(p);
-        if (p != Probe::kHit) store(m, now, exitIfRun);
-        return p;
+        if (hit(m, now)) return true;
+        ++fullRuns;
+        store(m, now, exitIfRun);
+        return false;
     };
     const Key a{10, 3}, b{11, 3}, c{11, 4};
-    check(call(a, Exit::kPlainDecline) == Probe::kMissNoPlain, "run: the first call finds nothing stored");
-    check(call(a, Exit::kPlainDecline) == Probe::kHit && call(a, Exit::kPlainDecline) == Probe::kHit, "run: the repeats hit");
-    check(call(b, Exit::kOther) == Probe::kMissGeneration, "run: a draw whose bindings moved runs in full, and its exit is not a plain decline");
-    check(call(b, Exit::kOther) == Probe::kMissNoPlain, "run: its repeat finds the key but not a plain decline, so it runs in full again");
-    check(call(a, Exit::kPlainDecline) == Probe::kMissGeneration, "run: back to the plain draw, the generation has moved");
-    check(call(a, Exit::kPlainDecline) == Probe::kHit, "run: ...and it hits again");
-    check(call(c, Exit::kPlainDecline) == Probe::kMissGeneration, "run: a bump of both is counted as the generation");
-    check(call(Key{11, 5}, Exit::kPlainDecline) == Probe::kMissEpoch, "run: an epoch move alone is counted as the epoch");
-    check(t.hits() == 3 && t.missNoPlain() == 2 && t.missGeneration() == 3 && t.missEpoch() == 1 && t.calls() == 9,
-          "run: the window counts 3 hits and 6 misses by cause, and the calls are their sum");
-}
-
-// One verify frame in 16, by the module's own counter: exactly one in each block of 16, and the phase moves so every residue of the
-// sample cadence is reached.
-void testMemoVerifyFrame() {
-    using namespace edvr::classifiermemo;
-    unsigned total = 0;
-    bool oncePerBlock = true;
-    unsigned residues[16] = {};
-    for (uint32_t block = 0; block < 16; ++block) {
-        unsigned inBlock = 0;
-        for (uint32_t i = 0; i < 16; ++i) {
-            const uint32_t n = block * 16 + i;
-            if (!verifyFrame(n)) continue;
-            ++inBlock;
-            ++residues[n % 16];
-        }
-        oncePerBlock = oncePerBlock && inBlock == 1;
-        total += inBlock;
-    }
-    check(total == 16 && oncePerBlock, "verify: 16 verify frames in 256, exactly one in each block of 16");
-    bool every = true;
-    for (unsigned r = 0; r < 16; ++r) every = every && residues[r] == 1;
-    check(every, "verify: across 256 frames every residue mod 16 verifies once, so a fixed draw-sample cadence never blocks them all");
-    check(verifyFrame(8) && !verifyFrame(0) && !verifyFrame(9), "verify: the first block verifies the frame at offset 8");
-    // A draw-sample frame never verifies, whichever way the cadences line up.
-    unsigned sampled[16] = {};
-    for (unsigned align = 0; align < 16; ++align) {
-        for (uint32_t n = 0; n < 4096; ++n) {
-            const bool sampleFrame = ((n + align) % 16) == 0;
-            if (verifyFrame(n) && !sampleFrame) ++sampled[align];
-        }
-    }
-    bool everyAlignVerifies = true;
-    for (unsigned align = 0; align < 16; ++align) everyAlignVerifies = everyAlignVerifies && sampled[align] == 240;
-    check(everyAlignVerifies, "verify: with the sample cadence at any alignment, 240 of the 256 verify frames in 4096 are not sampled ones (16 coincide, none is lost)");
-}
-
-// The tally: calls are hits plus misses, a verified hit counts once, and a mismatch counts once per output that differed.
-void testMemoTally() {
-    using namespace edvr::classifiermemo;
-    Tally t;
-    check(t.calls() == 0 && t.hits() == 0 && t.verified == 0 && t.mismatched == 0, "tally: starts empty");
-    for (int i = 0; i < 7; ++i) t.noteProbe(Probe::kHit);
-    t.noteProbe(Probe::kMissNoPlain);
-    t.noteProbe(Probe::kMissGeneration);
-    t.noteProbe(Probe::kMissGeneration);
-    t.noteProbe(Probe::kMissEpoch);
-    check(t.calls() == 11 && t.hits() == 7 && t.missNoPlain() == 1 && t.missGeneration() == 2 && t.missEpoch() == 1,
-          "tally: calls are the hits and the misses by cause");
-    t.noteVerified(0);
-    t.noteVerified(0);
-    check(t.verified == 2 && t.mismatched == 0, "tally: a verified hit with no difference counts as verified only");
-    t.noteVerified((1u << kEyeComposite) | (1u << kEyeMode) | (1u << kEyeExit));
-    t.noteVerified(1u << kEyeMode);
-    check(t.verified == 4 && t.mismatched == 2, "tally: a mismatched hit counts once however many outputs differed");
-    check(t.byOutput[kEyeComposite] == 1 && t.byOutput[kEyeMode] == 2 && t.byOutput[kEyeExit] == 1 && t.byOutput[kEyeReturn] == 0 &&
-              t.byOutput[kEyeShader] == 0,
-          "tally: each differing output is counted on its own");
-    // Every output's bit lands in its own counter, none in a neighbour's.
-    Tally each;
-    for (unsigned i = 0; i < kEyeOutputCount; ++i) each.noteVerified(1u << i);
-    bool own = each.mismatched == kEyeOutputCount;
-    for (unsigned i = 0; i < kMaxOutputs; ++i) own = own && each.byOutput[i] == (i < kEyeOutputCount ? 1u : 0u);
-    check(own, "tally: each of the eye draw's outputs has its own counter");
-    // The naming budget: the first three of the session, kept across windows, taken only on request.
-    check(t.takeName() && t.takeName() && t.takeName() && !t.takeName() && !t.takeName() && t.named == kMaxNamed,
-          "tally: three mismatches are named, then no more");
-    t.resetWindow();
-    check(t.calls() == 0 && t.verified == 0 && t.mismatched == 0 && t.byOutput[kEyeMode] == 0, "tally: the window's reset clears every count");
-    check(!t.takeName() && t.named == kMaxNamed, "tally: the naming budget is the session's, so the reset keeps it");
-    // The output names: one per output, distinct, and the two classifiers' own.
-    bool distinct = true;
-    for (unsigned i = 0; i < kEyeOutputCount; ++i) {
-        distinct = distinct && eyeOutputName(i)[0] != '?' && eyeOutputName(i)[0] != '\0';
-        for (unsigned j = i + 1; j < kEyeOutputCount; ++j) distinct = distinct && std::strcmp(eyeOutputName(i), eyeOutputName(j)) != 0;
-    }
-    check(distinct && std::strcmp(eyeOutputName(kEyeOutputCount), "?") == 0, "tally: the eye draw's 15 outputs have 15 distinct names");
-    check(kEyeOutputCount == 15 && kHoloOutputCount == 3 && std::strcmp(holoOutputName(kHoloEye), "eye") == 0 &&
-              std::strcmp(holoOutputName(kHoloExit), "exit") == 0 && std::strcmp(holoOutputName(kHoloOutputCount), "?") == 0,
-          "tally: the hologram's three outputs are the return, the eye and the exit");
-}
-
-// The window line: a quiet window prints dashes where a figure would be a lie, a busy one prints every count under its name, and the
-// worst case fits the log line.
-void testMemoText() {
-    using namespace edvr::classifiermemo;
-    char line[1500];
-    // No calls at all (the pass is off): the rate and every mismatch figure are "-", the counts are 0.
-    Tally quietEye, quietHolo;
-    const size_t nq = formatWindowLine(line, sizeof(line), 3600, quietEye, quietHolo);
-    check(std::strncmp(line, "ui depth memo: 1800-frame window ending 3600.", 45) == 0, "text: the line opens with its name and the window's end frame");
-    check(std::strstr(line, "Eye draws: 0 calls past the on test, 0 hits (-)") != nullptr &&
-              std::strstr(line, "hologram draws: 0 calls past the on test, 0 hits (-)") != nullptr,
-          "text: a window with no calls has a dash for the hit rate and zero counts");
-    check(std::strstr(line, "0 hits verified, mismatches - (return -, composite -, planet -, solar planet -, world screen -, corona -, corona motion -, "
-                            "mode -, rebind -, mask -, rebind eye -, draw eye -, shader -, mask slot -, exit -)") != nullptr &&
-              std::strstr(line, "mismatches - (return -, eye -, exit -)") != nullptr,
-          "text: with no verified hit every mismatch figure is a dash, never a zero that reads as clean");
-    check(nq == std::strlen(line) && line[nq - 1] == '.' && std::strstr(line, "nan") == nullptr && std::strstr(line, "inf") == nullptr,
-          "text: a quiet window's line ends whole and holds no nan or inf");
-    // A busy window: 90% hits, a few misses by cause, verified hits, and a mismatch in two outputs.
-    Tally eye, holo;
-    for (int i = 0; i < 900; ++i) eye.noteProbe(Probe::kHit);
-    for (int i = 0; i < 40; ++i) eye.noteProbe(Probe::kMissNoPlain);
-    for (int i = 0; i < 50; ++i) eye.noteProbe(Probe::kMissGeneration);
-    for (int i = 0; i < 10; ++i) eye.noteProbe(Probe::kMissEpoch);
-    for (int i = 0; i < 60; ++i) eye.noteVerified(0);
-    eye.noteVerified((1u << kEyeReturn) | (1u << kEyeShader));
-    for (int i = 0; i < 20; ++i) holo.noteProbe(Probe::kHit);
-    for (int i = 0; i < 5; ++i) holo.noteVerified(0);
-    formatWindowLine(line, sizeof(line), 5400, eye, holo);
-    check(std::strstr(line, "ending 5400.") != nullptr, "text: the window's end frame is printed");
-    check(std::strstr(line, "Eye draws: 1000 calls past the on test, 900 hits (90.0%), misses: no plain decline stored 40, generation moved 50, epoch moved 10; "
-                            "61 hits verified, mismatches 1 (return 1, composite 0,") != nullptr,
-          "text: the busy window prints calls, hits, the rate, the three miss causes, the verified hits and the mismatch total");
-    check(std::strstr(line, "shader 1, mask slot 0, exit 0)") != nullptr, "text: each output's count is printed under its name");
-    check(std::strstr(line, "hologram draws: 20 calls past the on test, 20 hits (100.0%), misses: no plain decline stored 0, generation moved 0, epoch moved 0; "
-                            "5 hits verified, mismatches 0 (return 0, eye 0, exit 0)") != nullptr,
-          "text: a verified classifier with no mismatch prints zeros, and the rate reaches 100.0%");
-    check(std::strstr(line, "one frame in 16") != nullptr && std::strstr(line, "never a draw-sample frame") != nullptr &&
-              std::strstr(line, "a temporary check") != nullptr,
-          "text: the line says the check is temporary and when it runs");
-    // A window one eye hit short of verification: mismatches are a dash for that classifier only.
-    Tally mixed;
-    mixed.noteProbe(Probe::kHit);
-    formatWindowLine(line, sizeof(line), 1800, mixed, holo);
-    check(std::strstr(line, "0 hits verified, mismatches - (return -,") != nullptr && std::strstr(line, "5 hits verified, mismatches 0 (return 0, eye 0") != nullptr,
-          "text: the dash is per classifier: one with no verified hit, one with five");
-    // The mismatch line: which classifier, how many are named, the vertex shader as 16 hex digits, the outputs that differed.
-    char ml[400];
-    const size_t nm = formatMismatchLine(ml, sizeof(ml), "eye draws", 2, 0xB7790CBFC6554097ull, (1u << kEyeMode) | (1u << kEyeExit), kEyeOutputCount, eyeOutputName);
-    check(std::strcmp(ml, "ui depth memo mismatch 2 of 3 named (eye draws): a hit and the full classifier differed for vs B7790CBFC6554097 in: mode, exit. "
-                          "The full classifier's answer stood.") == 0 && nm == std::strlen(ml),
-          "text: a mismatch line names the classifier, the ordinal, the vertex shader and the outputs");
-    formatMismatchLine(ml, sizeof(ml), "hologram draws", 1, 0x0000000000000042ull, 1u << kHoloReturn, kHoloOutputCount, holoOutputName);
-    check(std::strstr(ml, "(hologram draws)") != nullptr && std::strstr(ml, "vs 0000000000000042 in: return.") != nullptr,
-          "text: the hologram's mismatch line zero-pads the hash and names its own outputs");
-    // A mask with no bit inside the classifier's outputs names nothing, and says so.
-    formatMismatchLine(ml, sizeof(ml), "hologram draws", 1, 1ull, 1u << 9, kHoloOutputCount, holoOutputName);
-    check(std::strstr(ml, "in: nothing named.") != nullptr, "text: a difference mask with no named output says so");
-}
-
-// The window line at its widest: every figure at its 32-bit maximum. The log line holds about 1170 characters (Log::note's 1200 less
-// its stamp and truncation mark); the line stays under 1150, and the mismatch line under its own buffer.
-void testMemoTextWorstCase() {
-    using namespace edvr::classifiermemo;
-    Tally eye, holo;
-    for (Tally* t : {&eye, &holo}) {
-        for (unsigned p = 0; p < static_cast<unsigned>(Probe::kCount); ++p) t->probes[p] = 4294967295u;
-        t->verified = 4294967295u;
-        t->mismatched = 4294967295u;
-        for (unsigned i = 0; i < kMaxOutputs; ++i) t->byOutput[i] = 4294967295u;
-    }
-    char line[2000];
-    const size_t n = formatWindowLine(line, sizeof(line), 4294967295u, eye, holo);
-    std::printf("aa_off_test: ui depth memo line at its worst: %zu characters (limit 1150; the log holds about 1170)\n", n);
-    check(n < 1150, "text: the window line at its worst fits the log line (under 1150 characters)");
-    check(n == std::strlen(line) && line[n - 1] == '.', "text: the window line ends whole at its worst, not cut");
-    check(std::strstr(line, "ending 4294967295.") != nullptr && std::strstr(line, "calls past the on test") != nullptr,
-          "text: the widest frame number is printed in full");
-    // Past the u32 sums: calls is four counts that can each reach the maximum, and wraps like the counters themselves; the line still fits.
-    char ml[400];
-    const size_t nm = formatMismatchLine(ml, sizeof(ml), "hologram draws", 3, 0xFFFFFFFFFFFFFFFFull, 0xFFFFFFFFu, kEyeOutputCount, eyeOutputName);
-    check(nm < 399 && nm == std::strlen(ml) && ml[nm - 1] == '.', "text: the mismatch line with every output differing fits and ends whole");
-    // A short buffer is cut and terminated, never overrun.
-    char tiny[30];
-    std::memset(tiny, 'x', sizeof(tiny));
-    const size_t nt = formatWindowLine(tiny, sizeof(tiny), 1, eye, holo);
-    check(nt < sizeof(tiny) && tiny[nt] == '\0', "text: a short buffer is cut and terminated");
-    char one[1] = {'x'};
-    check(formatWindowLine(one, 1, 1, eye, holo) == 0 && one[0] == '\0', "text: a one-byte buffer holds the terminator alone");
+    check(!call(a, Exit::kPlainDecline), "run: the first call finds nothing stored and runs in full");
+    check(call(a, Exit::kPlainDecline) && call(a, Exit::kPlainDecline), "run: the repeats hit");
+    check(!call(b, Exit::kOther), "run: a draw whose bindings moved runs in full, and its exit is not a plain decline");
+    check(!call(b, Exit::kOther), "run: its repeat finds the key but not a plain decline, so it runs in full again");
+    check(!call(a, Exit::kPlainDecline), "run: back to the plain draw, the generation has moved");
+    check(call(a, Exit::kPlainDecline), "run: ...and it hits again");
+    check(!call(c, Exit::kPlainDecline), "run: a bump of both runs in full");
+    check(!call(Key{11, 5}, Exit::kPlainDecline), "run: an epoch move alone runs in full");
+    check(fullRuns == 6, "run: of nine calls three hit and six ran in full");
 }
 
 void usage() {
@@ -1135,10 +959,6 @@ int main(int argc, char** argv) {
     testStepTextWorstCase();
     testMemoHit();
     testMemoRun();
-    testMemoVerifyFrame();
-    testMemoTally();
-    testMemoText();
-    testMemoTextWorstCase();
     std::printf("aa_off_test: %d checks, %d failed\n", g_checks, g_failed);
     return g_failed ? 1 : 0;
 }

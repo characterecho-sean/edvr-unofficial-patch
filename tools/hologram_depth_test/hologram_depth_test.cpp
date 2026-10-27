@@ -42,8 +42,6 @@ std::string g_lastLog;
 // object_probe.h) to gate its per-draw logging; this rig never arms an
 // eye run, so it stays false -- object_probe.cpp itself is not linked in.
 namespace detail { bool g_objectProbeOn = false; bool g_objectProbeLedgerOn = false; }
-// perf_monitor.h's draw-sample flag, which the eye-draw memo's verification reads (inline in the header); this rig never samples.
-namespace detail { bool g_perfMonitorSampleDraws = false; }
 // The GPU census's spans (ui_depth.cpp's hologram sub-sections, 2026-10-13): this rig does not run the census, so they are inert.
 bool gpuCensusBegin(ID3D11DeviceContext*, GpuCensusSection) noexcept { return false; }
 void gpuCensusEnd(ID3D11DeviceContext*, GpuCensusSection) noexcept {}

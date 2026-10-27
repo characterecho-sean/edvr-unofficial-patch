@@ -309,11 +309,6 @@ float uiDepthCoronaHold();
 // Once per frame: the masks cleared, the engage line, the totals every 20 s.
 void uiDepthFrameBoundary(ID3D11DeviceContext* ctx);
 
-// Built 2026-10-27, TEMPORARY (docs\engine-render-performance-2026-09-19.md, "Desk design: the ui_depth eye-draw memo"): writes the
-// "ui depth memo:" line for the window that ends at `endFrame` -- both classifiers' memo hits, misses by cause, verified hits and
-// mismatches -- and resets the window. perf_monitor.cpp calls it at its 1800-frame edge, right after the "draw hook CPU by step" lines.
-void uiDepthLogMemoWindow(uint32_t endFrame);
-
 void uiDepthShutdown();
 
 }  // namespace edvr
