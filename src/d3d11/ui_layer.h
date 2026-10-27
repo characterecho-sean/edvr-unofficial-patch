@@ -310,6 +310,8 @@ inline bool uiLayerLastFrameNamed() { return detail::g_uiLayerGateFrame != 0 && 
 // vscreen.cpp, at a 2D screen composite the layer took while the maps gate is on: screen motion's recognition of that composite
 // matched (it is what keeps naming the world's source for the next frames; a take swallows the per-eye call that used to run it).
 void uiLayerMapsNoteRecognised();
+// F131: the gate is on and holds the 2D screen as a panel (a menu or a map the layer takes): look to aim holds while this is true (native_on_foot_f131.h).
+bool uiLayerMapsPanel();
 // The door runs layer-only for this eye in this sequence: the layer holds the eye's WHOLE picture. Either the VR world route's
 // re-issued world (vrWorldRouteDoorLayerOnly) or, with the maps gate on, a 2D screen the layer TOOK in this sequence while
 // nothing else was drawn into an eye-sized target (ui_maps_math.h uiMapsDoor). Asked by the temporal door and again by the

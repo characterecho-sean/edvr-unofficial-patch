@@ -50,6 +50,8 @@
 #include "native_on_foot_f99.h"   // F99a: a drawn item's hands from the game's own selection, not from Status.json (pure parts)
 #include "native_on_foot_f107.h"   // F107: the game's camera away from the commander (pure parts)
 #include "native_on_foot_f113.h"   // F113: each eye's scene rows whenever the world is drawn (pure parts)
+#include "native_on_foot_f130.h"   // F130: one disagreeing scene mesh no longer switches the eye rows' sources off (pure parts)
+#include "native_on_foot_f131.h"   // F131: look to aim holds while a panel or a menu is open, and while the game runs no look (pure parts)
 #include "native_on_foot_f109.h"   // F109: look to aim on foot, the player's own turn in ADS, snap or smooth turning (pure parts)
 #include "native_on_foot_f129.h"   // F129: look to aim reads its turn from the player's own look processor; the look path instrument (pure parts)
 #include "../common/comfort_fade.h"   // F109: the snap's short fade (edvr::comfort::publish; the runtime blends it over both eyes)
@@ -4990,6 +4992,8 @@ uint8_t g_f120PinBytes[16] = {};                    // written before g_f120Pin 
 bool g_f120PinLogged = false;                       // frame thread only
 // F122: this second's panels seen (a placement that set the hit byte), sprites hidden and hides whose write failed (the hook threads add, the frame thread takes).
 std::atomic<uint32_t> g_f122Seen{0}, g_f122Hidden{0}, g_f122Failed{0};
+// F131: panels reached, ever (g_f122Seen is taken to zero by its window): look to aim holds while this moves (the placement hook runs every frame a panel is up).
+std::atomic<uint32_t> g_f131PanelSeq{0};
 uint64_t g_f122LastMs = 0;                          // frame thread only
 bool g_f122ArmNoted = false;                        // frame thread only
 struct F111Slot {
@@ -5268,7 +5272,10 @@ void panelMouseHide(uintptr_t ctl) {
     const h::Act act = h::decide(false, runtimeFlatProfile(), hit != 0);
     const bool wrote = act != h::Act::kHide || h::writeHidden(ctl, guardedWriteFloat);
     const h::Delta d = h::delta(act, wrote);
-    if (d.seen) g_f122Seen.fetch_add(1, std::memory_order_relaxed);
+    if (d.seen) {
+        g_f122Seen.fetch_add(1, std::memory_order_relaxed);
+        g_f131PanelSeq.fetch_add(1, std::memory_order_relaxed);
+    }
     if (d.hidden) g_f122Hidden.fetch_add(1, std::memory_order_relaxed);
     if (d.failed) g_f122Failed.fetch_add(1, std::memory_order_relaxed);
 }
@@ -5299,6 +5306,7 @@ void panelCursorApply(uintptr_t ctl, uintptr_t panel, float u, float v) {
     float sprite[3] = {};
     if (!guardedRead(ctl + nofoot::f111::kOffHit, &hit, 1) || !hit || !guardedRead(ctl + nofoot::f111::kOffPos, sprite, sizeof(sprite))) return;
     g_f122Seen.fetch_add(1, std::memory_order_relaxed);   // F122: a panel reached (the key on: the game's cursor is drawn, placed below)
+    g_f131PanelSeq.fetch_add(1, std::memory_order_relaxed);
     uintptr_t list = 0, tris = 0;
     uint64_t count = 0;
     const bool listOk = guardedRead(panel + z::kOffList, &list, 8) && list;
@@ -7556,6 +7564,17 @@ struct LtaState {
     double springYawSeen = 0.0;
 };
 LtaState g_lta;
+// F131 (frame thread only): look to aim holds while an on-foot panel is open, a menu or map holds the 2D screen, or the game runs no look (nofoot::f131::Hold decides).
+struct F131State {
+    nofoot::f131::Hold hold;
+    bool held = false;            // as the follower, the turns and the map see it this tick
+    bool logged = false;          // this hold's begin line was written (its end line follows)
+    uint32_t episodes = 0;
+    uint32_t ticks = 0;           // held ticks since the F109 1 s line last printed them
+    uint32_t reasonsLast = 0;     // the reasons of the last held tick (the 1 s line)
+    nofoot::f129::RateCap cap;    // the begin and end lines: at most 6 a minute, the rest said in the next
+};
+F131State g_f131;
 std::atomic<float> g_f109AimPitchAbsDeg{0.0f};   // |the carried pitch| while look to aim is engaged (the Animate post-hook's F98c gate), else 0
 std::atomic<uint32_t> g_f109SettleGated{0};      // settled stances F98c did not take because the aim was pitched 10 deg or more (the hook counts)
 constexpr double kF109SettlePitchDeg = 10.0;
@@ -7663,10 +7682,9 @@ const char* full3PWhy() noexcept {
 bool eyeRowsRead(int e, uint32_t* frame, float rows[16], float o[4], uint64_t* qpc) noexcept;   // below (the eye alignment's block)
 // Engages: the follower starts from the asks still in flight (their turn, when the game applies it, is the target's), the centring waits for the first render head,
 // the guard's base is taken again, the snap detectors start disarmed (a stick already pushed fires only after it came back to the centre).
-void ltaEngage(uint64_t now) noexcept {
-    const bool wasUnwinding = g_lta.unwinding;
-    g_lta.engaged = true;
-    g_lta.unwinding = false;
+// The follower's state at an engage, and when a hold ends (F131): a fresh follower from the asks still in flight, the centring waits for the first render head, the
+// guard's base is taken again, the snap detectors start disarmed. The map (the carried yaw and pitch) is not touched.
+void ltaFreshFollower(uint64_t now) noexcept {
     g_lta.follow.reset();
     g_lta.follow.target[0] = g_adsMap.yawInFlight();
     g_lta.follow.target[1] = g_adsMap.pitchInFlight();
@@ -7679,6 +7697,12 @@ void ltaEngage(uint64_t now) noexcept {
     g_turn.stick.reset();
     g_turn.flick.reset();
     g_adsAimMode = nofoot::f92::kAimOn;
+}
+void ltaEngage(uint64_t now) noexcept {
+    const bool wasUnwinding = g_lta.unwinding;
+    g_lta.engaged = true;
+    g_lta.unwinding = false;
+    ltaFreshFollower(now);
     const int style = g_ltaStyle.load(std::memory_order_relaxed);
     Log::get().note("native on foot look to aim (F109): engaged: the head is the look on foot, yaw and pitch, armed and unarmed (the follower through the head aim's map; "
                     "the cancel keeps the view the headset's); turn style %s (snap step %d deg), smoothing %d ms with nothing drawn; the mouse's and the stick's pitch "
@@ -7741,15 +7765,12 @@ void ltaFollow(uint64_t now, double dt, bool headStep, double dYaw, double dPitc
     g_lta.tauLast = tau;
     g_lta.armedWLast = armedW;
     const double ify = f109::inFlightAfter(g_adsMap.flightYaw, aY), ifp = f109::inFlightAfter(g_adsMap.flightPitch, aP);
-    if (!g_lta.blocked) {
-        g_lta.follow.ask(dt, tau, ify, ifp, askY, askP);
-    } else if (now - g_lta.probeMs >= f109::kProbeMs) {
-        g_lta.probeMs = now;
-        g_lta.probe.next(g_lta.follow.left(0, ify), g_lta.follow.left(1, ifp), askY, askP);   // F129: +p, then -p, at most kProbeRad (0.25 deg) each
-        ++g_lta.heldTicks;
-    } else {
-        ++g_lta.heldTicks;
-    }
+    // F131: held asks nothing at all (no ask, no probe); blocked probes +p then -p (F129); else the follower's ask (nofoot::f131::followAsk).
+    const nofoot::f131::FollowMode mode = nofoot::f131::followMode(g_f131.held, g_lta.blocked);
+    const bool probeDue = mode == nofoot::f131::kBlocked && now - g_lta.probeMs >= f109::kProbeMs;
+    if (probeDue) g_lta.probeMs = now;
+    nofoot::f131::followAsk(mode, g_lta.follow, g_lta.probe, probeDue, dt, tau, ify, ifp, askY, askP);
+    if (mode == nofoot::f131::kBlocked) ++g_lta.heldTicks;
 }
 // The guard tripped under look to aim: stop it (the seated rotation to zero). F109b: for kRearmMs, then it engages again by itself (a fresh centring); the
 // kLatchTrips-th trip within kLatchWindowMs holds it off until the key toggles or native on foot re-enters (F109 held it off after every trip: the pilot read that
@@ -7788,7 +7809,7 @@ void f109TurnTick(uint64_t now, bool headStep, double dYaw, int ySign) noexcept 
     const uintptr_t comp = g_lookComp.load(std::memory_order_relaxed);
     // ---- the snaps ----
     const double mouseUnits = g_ltaMouseYawSum.exchange(0.0, std::memory_order_relaxed);
-    const bool snapStyle = g_lta.engaged && style == f109::kSnap;
+    const bool snapStyle = g_lta.engaged && style == f109::kSnap && !g_f131.held;   // F131: no snap while look to aim holds
     if (snapStyle || t.run.phase != f109::SnapRun::kIdle) {
         double gain = static_cast<double>(g_adsGainYaw.load(std::memory_order_relaxed));
         const char* gainSrc = "measured";
@@ -7923,6 +7944,52 @@ void f109TurnTick(uint64_t now, bool headStep, double dYaw, int ySign) noexcept 
     t.secTicks = t.secAdsTicks = t.secNoView = t.secNoAim = 0;
     t.sec = f109::TurnSecond{};
     t.secMs = now;
+}
+
+// ---- F131: look to aim holds (frame thread) --------------------------------------------------------------------------------------------------------------
+// While an on-foot panel is open (the F122 placement hook seen within 250 ms), a menu or map holds the 2D screen (the maps gate, gate=panel), or the player's look
+// processor has not run for 150 ms, the follower asks nothing (ltaFollow), the map is not asked to inject, the snaps stop (f109TurnTick), the player's look is the
+// game's own (g_ltaDrop false) and the carried seated yaw and pitch stay as they are. It begins at once and ends after 200 ms of all three clear, with the follower
+// fresh and the centring taken again, as at an engage (ltaFreshFollower). nofoot::f131::Hold decides; these are its edges.
+void f131Begin(uint64_t now, uint32_t reasons) noexcept {
+    g_adsInYaw.store(0.0f, std::memory_order_relaxed);   // the queued input never reaches the game; the in-flight account times out
+    g_adsInPitch.store(0.0f, std::memory_order_relaxed);
+    g_snapIn.store(0.0f, std::memory_order_relaxed);
+    g_turn.run = nofoot::f109::SnapRun{};                // a snap in its fade is stopped (f109TurnTick lifts the fade)
+    g_turn.injectMs = 0;
+    ++g_f131.episodes;
+    g_f131.logged = g_f131.cap.allow(now, 6);
+    if (!g_f131.logged) return;
+    char why[200], held[96];
+    const uint32_t suppressed = g_f131.cap.takeSuppressed();
+    if (suppressed) std::snprintf(held, sizeof(held), " [%u earlier hold line(s) were not written: at most 6 a minute]", suppressed);
+    else held[0] = 0;
+    Log::get().note("native on foot look to aim (F131): held (%s); the aim stays where it is, the game's own look runs%s", nofoot::f131::reasonText(reasons, why, sizeof(why)), held);
+}
+void f131End(uint64_t now, const nofoot::f131::Out& o) noexcept {
+    ltaFreshFollower(now);
+    g_f109BlockedRun.store(0, std::memory_order_relaxed);   // the asks that were dropped before the hold are not a block now
+    if (!g_f131.logged) return;
+    char why[200];
+    Log::get().note("native on foot look to aim (F131): resumed after %.1f s (%s cleared): centred again", o.heldSec, nofoot::f131::reasonText(o.seen, why, sizeof(why)));
+}
+// Every frame while look to aim is engaged (active); otherwise the hold is forgotten.
+void f131Step(uint64_t now, bool active) noexcept {
+    nofoot::f131::Sample s;
+    s.nowMs = now;
+    s.active = active;
+    s.panelSeq = g_f131PanelSeq.load(std::memory_order_relaxed);
+    s.menu = uiLayerMapsPanel();
+    s.procKnown = g_lookArmed;
+    s.procCalls = g_lookProcCalls.load(std::memory_order_relaxed);
+    const nofoot::f131::Out o = g_f131.hold.step(s);
+    g_f131.held = o.held;
+    if (o.held) {
+        ++g_f131.ticks;
+        if (o.reasons) g_f131.reasonsLast = o.reasons;
+    }
+    if (o.edge > 0) f131Begin(now, o.reasons);
+    else if (o.edge < 0) f131End(now, o);
 }
 
 // ---- F129: the look path lines (frame thread) ------------------------------------------------------------------------------------------------------------
@@ -8297,7 +8364,8 @@ void adsAimTick(uint64_t now, bool session) noexcept {
                             off ? off : g_lta.latched ? "the guard tripped three times in a minute (toggle the key or re-enter on foot)"
                                       : g_lta.tripped ? "the guard tripped (it engages again 2 s after)" : "starting");
         }
-        g_ltaDrop.store(g_lta.engaged, std::memory_order_relaxed);
+        f131Step(now, g_lta.engaged);   // F131: a panel, a menu or a stopped look holds look to aim (the player's look is the game's own meanwhile)
+        g_ltaDrop.store(g_lta.engaged && !g_f131.held, std::memory_order_relaxed);
     }
     const bool allowed = g_adsGate.allow(ads);   // a hold-off lasts one press: the flag falling clears it
     if (off || !allowed) {
@@ -8516,6 +8584,10 @@ void adsAimTick(uint64_t now, bool session) noexcept {
         mapRel = false;
         mapW = 1.0;
         askStep = askY != 0.0 || askP != 0.0;
+        if (g_f131.held) {   // F131: nothing is asked and nothing injected; the map still cancels what the game applies
+            mapEng = false;
+            askStep = false;
+        }
     } else if (g_lta.unwinding) {
         mapEng = false;
         mapRel = true;
@@ -8690,6 +8762,7 @@ void adsAimTick(uint64_t now, bool session) noexcept {
                            foreign = g_f109Foreign.load(std::memory_order_relaxed);
             const double springYaw = g_f109SpringYaw.load(std::memory_order_relaxed);
             const double bodyOff = g_lta.bodyOffN ? g_lta.bodyOffSum / g_lta.bodyOffN : 0.0;
+            char f131Why[48];
             Log::get().note("native on foot look to aim (F109) 1 s: %s, item weight %.2f, smoothing %.0f ms; head yaw %+.2f pitch %+.2f deg, asked %+.2f %+.2f, applied "
                             "%+.2f %+.2f, the player's own %+.2f %+.2f; the reported head from the aim yaw %+.2f pitch %+.2f deg now (largest %.2f, %s); seated yaw "
                             "%+.2f pitch %+.2f deg carried; the guard: residual largest %.2f deg (base re-taken %u); the body's yaw from the aim %+.1f deg mean "
@@ -8697,7 +8770,7 @@ void adsAimTick(uint64_t now, bool session) noexcept {
                             "pitch %.5f; blocked %u (%s, held %u ticks), spring calls %u (%+.2f deg); F98c's settle refused %u calls (the aim pitched 10 deg or "
                             "more); centred %u; F109b's guard: held %u (the view moved past the asks), re-based %u (the player's own turn), growth restarted "
                             "%u (a rows gap), trips %u, re-armed %u; F109c: the gain's ends %.5f %.5f, foreign calls %u (no gain taken); the aim's pitch (the FP "
-                            "root) apart from the carried by %+.1f deg more than at the engage (largest %.1f this second, %s)",
+                            "root) apart from the carried by %+.1f deg more than at the engage (largest %.1f this second, %s); held by F131 %u ticks (%s)",
                             g_lta.blocked ? "blocked" : "following", g_lta.armedWLast, g_lta.tauLast * 1000.0, g_lta.sumHead[0] * kD, g_lta.sumHead[1] * kD,
                             g_lta.sumAsk[0] * kD, g_lta.sumAsk[1] * kD, g_lta.sumApplied[0] * kD, g_lta.sumApplied[1] * kD, g_lta.sumUser[0] * kD,
                             g_lta.sumUser[1] * kD, g_lta.offNow[0], g_lta.offNow[1], g_lta.offMax, g_lta.offHave ? "read" : "not read",
@@ -8709,7 +8782,10 @@ void adsAimTick(uint64_t now, bool session) noexcept {
                             settleGated - g_lta.gatedSeen, g_lta.centres, g_adsResid.holds - g_lta.holdsSeen, g_adsResid.userRebases - g_lta.userRebasesSeen,
                             g_adsResid.gapRestarts - g_lta.gapsSeen, g_lta.trips, g_lta.rearms,
                             static_cast<double>(g_f109GainEndLo.load(std::memory_order_relaxed)), static_cast<double>(g_f109GainEndHi.load(std::memory_order_relaxed)),
-                            foreign - g_lta.foreignSeen, g_lta.driftNow, g_lta.driftMax, g_lta.driftRead ? "read" : "not read");
+                            foreign - g_lta.foreignSeen, g_lta.driftNow, g_lta.driftMax, g_lta.driftRead ? "read" : "not read", g_f131.ticks,
+                            nofoot::f131::reasonShort(g_f131.reasonsLast, f131Why, sizeof(f131Why)));
+            g_f131.ticks = 0;
+            g_f131.reasonsLast = 0;
             g_lta.foreignSeen = foreign;
             g_lta.driftMax = 0.0;
             g_lta.driftRead = false;
@@ -24444,6 +24520,16 @@ void worldPut(const WorldView& v) {
     g_worldViews[g_worldViewNext].valid = true;
     g_worldViewNext = (g_worldViewNext + 1) % kWorldViews;
 }
+// F130: a row source's rows replace the scene mesh's in the eye's view of the frame (worldPut keeps the first).
+void worldReplace(const WorldView& v) {
+    for (WorldView& w : g_worldViews)
+        if (w.valid && w.frame == v.frame && w.eye == v.eye) {
+            w = v;
+            w.valid = true;
+            return;
+        }
+    worldPut(v);
+}
 
 // F46: a game target's eye, the UI layer's: its redirect mapping ('L'), else ui depth's frame table, read only ('T'), else the last answer
 // either gave for the same target ('C'); -1 when none has one. Nothing here registers a target or changes what the layer decides.
@@ -24904,15 +24990,24 @@ void v2Report() {
 // prepass and the terrain patch give an eye its rows: they carry the same constants (the F57 census: the main content in every frame both drew) and draw where no
 // mesh does (bare ground, the sky). F87f named the prepass but captured it behind the engine families' filter, so it never ran; its fallback is replaced here.
 // The first of them to draw into an eye's scene depth this frame publishes the rows; once a second per eye whose rows came from a source, that eye's next scene
-// mesh draw checks them, and a difference over f87::kFbTolerance latches the sources off for the session (logged). Render thread.
-nofoot::f87::FbGuard g_rowsGuard;
+// mesh draw checks them (rowsCheck). F113 latched the sources off for the session on one difference; F130 (native_on_foot_f130.h) never does: a mesh whose rows
+// differ from a source's is MARKED by its identity (the shaders, cb1's buffer and first constant) and publishes no rows again this session, and a source that draws
+// after a mesh published the eye's rows for the frame compares them (the check is due once a second per eye, and keeps the tee's slow path open for that frame, as
+// the source-first check does) and replaces the mesh's rows with its own when they differ. Render thread.
 nofoot::f113::CheckClock g_rowsClock;
 uint8_t g_rowsFrom[2] = {nofoot::f113::kFromMeshes, nofoot::f113::kFromMeshes};   // where the eye's rows of g_worldOk[e]'s frame came from
-uint32_t g_rowsCheckFrame[2] = {~0u, ~0u};   // the frame a scene mesh draw of the eye should check the source's rows in
-bool g_rowsLatchNoted = false;
+uint32_t g_rowsCheckFrame[2] = {~0u, ~0u};   // the frame a check of the eye is due in (a scene mesh draw after a source's rows, or a source draw after a mesh's)
+nofoot::f130::MarkTable g_rowsMarked;        // F130: the scene meshes that gave other rows than a source did: they give none from here
+bool g_rowsMarkFullNoted = false;
+struct RowsMesh {   // F130: the scene mesh draw that gave an eye's rows of a frame (cpu: g_cpuWorld holds its rows; false: a staged copy, not comparable on the CPU)
+    uint32_t frame = ~0u;
+    bool cpu = false;
+    nofoot::f130::MeshId id;
+};
+RowsMesh g_rowsMesh[2];
 struct RowsSecond {
     nofoot::f113::EyeSecond eye[2];
-    uint64_t checked = 0, noEye = 0, noRows = 0, latchedDraws = 0;
+    uint64_t checked = 0, noEye = 0, noRows = 0, replaced = 0, refused = 0;
     double maxDiff = 0.0;
 };
 RowsSecond g_rowsSec;
@@ -24924,67 +25019,62 @@ void rowsFrameTurn(uint32_t frame) {
     g_rowsLastFrame = frame;
 }
 bool rowsCheckPending(uint32_t frame) { return g_rowsCheckFrame[0] == frame || g_rowsCheckFrame[1] == frame; }
-// A scene mesh draw of an eye whose rows this frame came from a source: compare its rows with them (once, when the check is due).
-void rowsCheck(ID3D11DeviceContext* ctx, int e, uint32_t frame) {
+// F130: a scene mesh's rows disagreed with a source's: it gives no rows from here (one line per newly marked identity).
+void rowsMarkMesh(const nofoot::f130::MeshId& id, int e, uint32_t frame, const nofoot::f130::RowsDiff& d, uint8_t source) {
+    namespace f130 = nofoot::f130;
+    const f130::MarkResult r = g_rowsMarked.mark(id);
+    if (r == f130::kMarkedNew)
+        Log::get().note("native on foot eye rows (F130): a scene mesh with other rows: vs %016llX ps %016llX cb1 %p +%u, eye %d frame %u, diff %.3e (rows %.3e, origin %.3e) "
+                        "against the %s: it gives no rows from here",
+                        static_cast<unsigned long long>(id.vs), static_cast<unsigned long long>(id.ps), reinterpret_cast<const void*>(static_cast<uintptr_t>(id.cb1)),
+                        id.first, e, frame, d.max(), d.rows, d.origin, f130::sourceNoun(source));
+    else if (r == f130::kMarkTableFull && !g_rowsMarkFullNoted) {
+        g_rowsMarkFullNoted = true;
+        Log::get().note("native on foot eye rows (F130): %zu scene meshes are marked (the most kept); further meshes with other rows are counted, not marked", f130::kMarkMax);
+    }
+}
+// A scene mesh draw (vs, ps) of an eye whose rows this frame came from a source: compare its rows with them (once, when the check is due). A mesh already marked
+// leaves the check to the next mesh draw.
+void rowsCheck(ID3D11DeviceContext* ctx, int e, uint32_t frame, uint64_t vs, uint64_t ps) {
+    namespace f130 = nofoot::f130;
     if (g_rowsCheckFrame[e] != frame) return;
-    g_rowsCheckFrame[e] = ~0u;
     ID3D11Buffer* cb1 = nullptr;
     UINT f1 = 0;
     vsConstants(ctx, 1, &cb1, &f1);
     float shadow[6][4] = {};
     const bool ok = cb1 && f1 == 0 && engineVelocityShadowSceneRows(cb1, shadow);
+    f130::MeshId id;
+    id.vs = vs;
+    id.ps = ps;
+    id.cb1 = reinterpret_cast<uintptr_t>(cb1);
+    id.first = f1;
     if (cb1) cb1->Release();
-    if (!ok) return;
+    if (!ok || g_rowsMarked.isMarked(id)) return;
+    g_rowsCheckFrame[e] = ~0u;
     float a[20], b[20];
     std::memcpy(a, g_cpuWorld[e].rows, 16 * sizeof(float));
     std::memcpy(a + 16, g_cpuWorld[e].o, 4 * sizeof(float));
     std::memcpy(b, shadow, 16 * sizeof(float));
     std::memcpy(b + 16, shadow[5], 4 * sizeof(float));
-    const double diff = nofoot::f87::rowsMaxDiff(a, b);
-    const bool wasOn = !g_rowsGuard.latchedOff;
-    g_rowsGuard.compare(diff);
+    const f130::RowsDiff d = f130::rowsDiff(a, b);
     ++g_rowsSec.checked;
-    g_rowsSec.maxDiff = std::max(g_rowsSec.maxDiff, diff);
-    if (wasOn && g_rowsGuard.latchedOff && !g_rowsLatchNoted) {
-        g_rowsLatchNoted = true;
-        Log::get().note("native on foot eye rows (F113): LATCHED OFF -- eye %d frame %u: %s's rows differ from the scene meshes' by %.3e (over %.0e); the scene meshes alone "
-                        "give the rows from here", e, frame, nofoot::f113::rowSourceName(g_rowsFrom[e]), diff, nofoot::f87::kFbTolerance);
-    }
+    g_rowsSec.maxDiff = std::max(g_rowsSec.maxDiff, d.max());
+    if (f130::disagree(d.max())) rowsMarkMesh(id, e, frame, d, g_rowsFrom[e]);
 }
-// A draw outside the engine families that is a row source (the depth prepass, the terrain patch): the eye's rows from its b1, when the eye has none this frame.
-// The eye is the scene depth view's (eyeOfDraw), so the source must draw into an eye's scene depth.
-void rowSourceDraw(ID3D11DeviceContext* ctx, uint32_t frame, uint8_t source) {
-    if (g_rowsGuard.latchedOff) {
-        ++g_rowsSec.latchedDraws;
-        return;
-    }
-    const int e = eyeOfDraw(frame);
-    if (e != 0 && e != 1) {
-        ++g_rowsSec.noEye;
-        return;
-    }
-    if (g_worldOk[e] == frame) return;
-    ID3D11Buffer* cb1 = nullptr;
-    UINT f1 = 0;
-    vsConstants(ctx, 1, &cb1, &f1);
-    float shadow[6][4] = {};
-    const bool ok = cb1 && f1 == 0 && engineVelocityShadowSceneRows(cb1, shadow);
-    if (!ok) {
-        if (cb1) cb1->Release();
-        ++g_rowsSec.noRows;
-        return;
-    }
+// A source's rows for an eye and frame: into the frame's world views, the CPU's copy, the frame thread's seqlock, the eye's scene target sizes. replace: the eye had
+// a scene mesh's rows this frame (F130), which these replace exactly as if the source had published first.
+void rowsSourcePublish(int e, uint32_t frame, uint8_t source, const float shadow[6][4], ID3D11Buffer* cb1, bool replace) {
     WorldView v;
     v.frame = frame;
     v.eye = e;
     std::memcpy(v.rows, shadow, sizeof(v.rows));
     std::memcpy(v.o, shadow[5], sizeof(v.o));
-    worldPut(v);
+    if (replace) worldReplace(v);
+    else worldPut(v);
     g_cpuWorld[e].frame = frame;
     std::memcpy(g_cpuWorld[e].rows, v.rows, sizeof(v.rows));
     std::memcpy(g_cpuWorld[e].o, v.o, sizeof(v.o));
     g_cpuWorld[e].cb1 = cb1;   // identity only (the b1 Unmap stamp)
-    cb1->Release();
     eyeRowsPublish(e, frame, g_cpuWorld[e].rows, g_cpuWorld[e].o);
     // the eye's scene target for the depth probe's pick: the bound colour target when it is eye-sized (a depth-only pass keeps the last)
     if (void* view = bindingGet(BindSlot::Rtv0)) {
@@ -24996,12 +25086,62 @@ void rowSourceDraw(ID3D11DeviceContext* ctx, uint32_t frame, uint8_t source) {
     }
     g_worldOk[e] = frame;
     g_rowsFrom[e] = source;
-    // the check is scheduled at most once a second per eye (it keeps the tee's slow path open for the rest of that frame, whether a mesh comes or not)
+}
+// The once-a-second check of an eye is due this frame: it keeps the tee's slow path open for the rest of it (whether a mesh or a source comes or not).
+void rowsScheduleCheck(int e, uint32_t frame) {
     const uint64_t nowMs = GetTickCount64();
     if (g_rowsClock.due(e, nowMs)) {
         g_rowsCheckFrame[e] = frame;
         g_rowsClock.done(e, nowMs);
     }
+}
+// A draw outside the engine families that is a row source (the depth prepass, the terrain patch): the eye's rows from its b1, when the eye has none this frame, or
+// (F130, once a second) a comparison with the scene mesh's that gave them. The eye is the scene depth view's (eyeOfDraw), so the source must draw into an eye's scene
+// depth. A source is never switched off.
+void rowSourceDraw(ID3D11DeviceContext* ctx, uint32_t frame, uint8_t source) {
+    namespace f130 = nofoot::f130;
+    const int e = eyeOfDraw(frame);
+    if (e != 0 && e != 1) {
+        ++g_rowsSec.noEye;
+        return;
+    }
+    const bool have = g_worldOk[e] == frame;
+    const bool fromMeshes = have && g_rowsFrom[e] == nofoot::f113::kFromMeshes;
+    const bool meshCpu = fromMeshes && g_rowsMesh[e].frame == frame && g_rowsMesh[e].cpu && g_cpuWorld[e].frame == frame;
+    const f130::SourceAction act = f130::sourceAction(have, fromMeshes, meshCpu, g_rowsCheckFrame[e] == frame);
+    if (act == f130::kSrcSkip) return;
+    ID3D11Buffer* cb1 = nullptr;
+    UINT f1 = 0;
+    vsConstants(ctx, 1, &cb1, &f1);
+    float shadow[6][4] = {};
+    const bool ok = cb1 && f1 == 0 && engineVelocityShadowSceneRows(cb1, shadow);
+    if (!ok) {
+        if (cb1) cb1->Release();
+        ++g_rowsSec.noRows;
+        return;
+    }
+    if (act == f130::kSrcCompare) {   // the scene mesh published first: the source's rows against its
+        g_rowsCheckFrame[e] = ~0u;
+        float a[20], b[20];
+        std::memcpy(a, g_cpuWorld[e].rows, 16 * sizeof(float));
+        std::memcpy(a + 16, g_cpuWorld[e].o, 4 * sizeof(float));
+        std::memcpy(b, shadow, 16 * sizeof(float));
+        std::memcpy(b + 16, shadow[5], 4 * sizeof(float));
+        const f130::RowsDiff d = f130::rowsDiff(a, b);
+        ++g_rowsSec.checked;
+        g_rowsSec.maxDiff = std::max(g_rowsSec.maxDiff, d.max());
+        if (f130::disagree(d.max())) {
+            rowsMarkMesh(g_rowsMesh[e].id, e, frame, d, source);
+            ++g_rowsSec.replaced;
+            rowsSourcePublish(e, frame, source, shadow, cb1, true);
+        }
+        cb1->Release();
+        return;
+    }
+    rowsSourcePublish(e, frame, source, shadow, cb1, false);
+    cb1->Release();
+    // the check is scheduled at most once a second per eye (it keeps the tee's slow path open for the rest of that frame, whether a mesh comes or not)
+    rowsScheduleCheck(e, frame);
 }
 
 // F46: a world pool draw (render thread, the game's bindings): its target's eye (the UI layer's; else ui depth's rule over the frame's
@@ -25085,7 +25225,7 @@ void worldDraw(ID3D11DeviceContext* ctx, uint32_t frame, uint64_t vs, bool censu
     // constant-buffer read and its compare, is the probe key's.
     if (census && nativeOnFootMarkerMeasure()) rowCensusNote(ctx, e, vs, ps, sceneWhy == drawtag::kSceneOk);
     if (g_worldOk[e] == frame) {   // F113: rows already in (a source's, perhaps): the first scene mesh draw checks a source's when the check is due
-        if (sceneWhy == drawtag::kSceneOk && g_rowsFrom[e] != nofoot::f113::kFromMeshes) rowsCheck(ctx, e, frame);
+        if (sceneWhy == drawtag::kSceneOk && g_rowsFrom[e] != nofoot::f113::kFromMeshes) rowsCheck(ctx, e, frame, vs, ps);
         return;
     }
     if (sceneWhy != drawtag::kSceneOk) {
@@ -25103,6 +25243,18 @@ void worldDraw(ID3D11DeviceContext* ctx, uint32_t frame, uint64_t vs, bool censu
     ID3D11Buffer* cb1 = nullptr;
     UINT f1 = 0;
     vsConstants(ctx, 1, &cb1, &f1);
+    nofoot::f130::MeshId meshId;   // F130: this draw's identity (the shaders, cb1's buffer and first constant)
+    meshId.vs = vs;
+    meshId.ps = ps;
+    meshId.cb1 = reinterpret_cast<uintptr_t>(cb1);
+    meshId.first = f1;
+    if (g_rowsMarked.isMarked(meshId)) {   // F130: a mesh whose rows disagreed with a source's gives no rows again; it does not count as a try either
+        if (cb1) cb1->Release();
+        --t->tries;
+        --rn.scene;
+        ++g_rowsSec.refused;
+        return;
+    }
     float shadow[6][4] = {};
     bool ok = false;
     if (cb1 && f1 == 0 && engineVelocityShadowSceneRows(cb1, shadow)) {
@@ -25161,6 +25313,10 @@ void worldDraw(ID3D11DeviceContext* ctx, uint32_t frame, uint64_t vs, bool censu
     if (!ok) return;
     g_worldOk[e] = frame;
     g_rowsFrom[e] = nofoot::f113::kFromMeshes;   // F113
+    g_rowsMesh[e].frame = frame;                 // F130: the mesh that gave the rows (a staged copy is not known on the CPU, so a source cannot compare with it)
+    g_rowsMesh[e].id = meshId;
+    g_rowsMesh[e].cpu = g_cpuWorld[e].frame == frame;
+    if (g_rowsMesh[e].cpu) rowsScheduleCheck(e, frame);   // F130: once a second a source that draws later in the frame compares its rows with this mesh's
     // F52 item A: which draw gave the eye's world rows: its shaders, target, depth view, viewport and b1 (once per eye a frame).
     {
         WorldSrc& ws = g_win.wsrc[e];
@@ -30146,7 +30302,8 @@ void report(uint64_t nowMs) {
                 ss = StreamSecond{};
             }
         // F113, per eye: the frames on foot, where each frame's rows came from (the scene meshes, the depth prepass, the terrain) and the frames with none; the checks
-        // of a source's rows against a scene mesh's that second, their largest difference, and the source draws refused (no scene depth eye, no b1 shadow, latched).
+        // of a source's rows against a scene mesh's that second, their largest difference, the source draws refused (no scene depth eye, no b1 shadow), the scene meshes'
+        // rows a source replaced and the meshes marked (F130: sources are never latched off; a mesh with other rows is marked and refused).
         // A build before F113 has no such line; one whose sources never give rows reads the prepass and the terrain at 0 with frames at none. F125: sums over the
         // window (the max diff its largest), printed with its seconds where the line said "1 s".
         {
@@ -30157,11 +30314,10 @@ void report(uint64_t nowMs) {
                 using nofoot::f113::kFromTerrain;
                 Log::get().note("native on foot eye rows (F113) %u s: eye 0 %u frames: the scene meshes %u, the depth prepass %u, the terrain %u, none %u; eye 1 %u frames: "
                                 "the scene meshes %u, the depth prepass %u, the terrain %u, none %u; checked against a scene mesh %llu (max diff %.2e); source draws "
-                                "with no scene depth eye %llu, no b1 shadow %llu, latched %llu%s",
+                                "with no scene depth eye %llu, no b1 shadow %llu; mesh rows replaced by a source %llu, marked meshes %u (refused draws %llu)",
                                 windowSecs, rs.eye[0].frames, rs.eye[0].from[kFromMeshes], rs.eye[0].from[kFromPrepass], rs.eye[0].from[kFromTerrain], rs.eye[0].none,
                                 rs.eye[1].frames, rs.eye[1].from[kFromMeshes], rs.eye[1].from[kFromPrepass], rs.eye[1].from[kFromTerrain], rs.eye[1].none,
-                                ull(rs.checked), rs.maxDiff, ull(rs.noEye), ull(rs.noRows), ull(rs.latchedDraws),
-                                g_rowsGuard.latchedOff ? " -- LATCHED OFF (a mismatch over 1e-5): the scene meshes alone" : "");
+                                ull(rs.checked), rs.maxDiff, ull(rs.noEye), ull(rs.noRows), ull(rs.replaced), g_rowsMarked.n, ull(rs.refused));
             }
             rs = RowsSecond{};
         }

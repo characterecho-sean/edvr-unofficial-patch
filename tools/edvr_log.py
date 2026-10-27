@@ -10682,8 +10682,20 @@ def _hj_f113_rows(rows, ctx):
     checked = sum(int(r["checked"]) for r in sec)
     diffs = [float(r["diff"]) for r in sec if int(r["checked"])]
     text = "%d s: %s; checked against a scene mesh %d (max diff %.2e)" % (_hsecs(sec), "; ".join(parts), checked, max(diffs) if diffs else 0.0)
+    # F130: a mesh whose rows differ from a source's is marked and refused, a source is never latched off. The marked meshes are reported, not judged.
+    f130 = [r for r in sec if r.get("repl") is not None]
+    marked, full = rows.get("marked", []), rows.get("full", [])
+    if f130 or marked:
+        text += "; F130: mesh rows replaced by a source %d, marked meshes %d (refused draws %d)" % (
+            sum(int(r["repl"]) for r in f130), max([int(r["marked"]) for r in f130] + [len(marked)]), sum(int(r["refused"]) for r in f130))
+        if marked:
+            text += "; marked: " + ", ".join("vs %s ps %s eye %s (diff %s against the %s)" % (r["vs"], r["ps"], r["eye"], r["diff"], r["src"]) for r in marked[:3])
+            if len(marked) > 3:
+                text += " and %d more" % (len(marked) - 3)
+        if full:
+            text += "; the table of 32 marked meshes was full"
     if any(r["lat"] for r in sec):
-        return ("PARTIAL", text + "; LATCHED OFF: a source's rows differed from a scene mesh's")
+        return ("PARTIAL", text + "; LATCHED OFF: a source's rows differed from a scene mesh's (a build before F130)")
     if none_total and not src_total:
         return ("NEVER APPLIED", text + "; frames without rows and no source ever gave any")
     if short:
@@ -12193,6 +12205,27 @@ def _hj_f129_paths(rows, ctx):
     return ("PARTIAL", text + "; " + "; ".join(notes)) if (unc or ask_as or fb) else ("OK", text + ("; " + notes[-1] if notes else ""))
 
 
+def _hj_f131_hold(rows, ctx):
+    """F131: look to aim holds (the follower asks nothing, the game's own look runs, the aim stays) while an on-foot panel is open, a menu or map holds the 2D screen, or
+    the game's look processor has not run for 150 ms. The episodes are listed with their reasons and lengths: OK. IDLE when look to aim ran and never held. The 1 s
+    lines of F109 carry the ticks held, so a log whose begin and end lines were held back (6 a minute) still counts them."""
+    held, resumed = rows.get("held", []), rows.get("resumed", [])
+    f109 = [r for r in ctx.get("look to aim (F109)", {}).get("sec", [])]
+    ticks = sum(int(r["f131n"]) for r in f109 if r.get("f131n"))
+    if not held and not resumed and not ticks:
+        return ("IDLE", "look to aim ran %d s and was never held by a panel, a menu or a stopped look processor" % len(f109)) if f109 else None
+    secs = sum(float(r["s"]) for r in resumed)
+    why = collections.Counter()
+    for r in held:
+        for part in r["why"].split(" + "):
+            why[part] += 1
+    text = "%d hold(s) began, %d resumed (%.1f s held in the resumed ones); held ticks on the 1 s lines %d%s" % (
+        len(held), len(resumed), secs, ticks, ("; reasons: " + ", ".join("%s %d" % (k, v) for k, v in why.most_common())) if why else "")
+    if len(held) > len(resumed) + 1:
+        text += "; %d hold(s) without a resume line (held back, or look to aim stopped inside them)" % (len(held) - len(resumed))
+    return ("OK", text)
+
+
 def _hj_f109_snap(rows, ctx):
     """F109: the snap turns. Each snap's applied turn against its step (within 10% in at most 2 calls); none applied is NEVER APPLIED, any off or skipped is PARTIAL.
     Whether ADS survived a snap is reported, not judged (the trigger may have been released)."""
@@ -12834,11 +12867,16 @@ HEALTH_RULES = (
                 r"(?:, steady eye (?P<steady>on|off|mixed) \(\d+ of \d+ frames\), eye hold (?P<hold>on|off|mixed) \(\d+ of \d+ frames\))?)?"
                 r"(?:; verdict: (?P<verdict>.+?)(?:; r: .*)?$|.*; verdict: (?P<vend>.+)$|.*(?P<cut> \.\.\.\[truncated\])$)"),
     ), _hj_f91_fit, needs_detail=True),   # F125: a press is fitted only when the detail log was on at its edge
-    _hrule("eye rows (F113)", ("F113",), ("native on foot eye rows (F113)",), (
+    _hrule("eye rows (F113)", ("F113", "F130"), ("native on foot eye rows (F113)", "native on foot eye rows (F130)"), (
         ("sec", r"native on foot eye rows \(F113\) " + H_WL + r": eye 0 (?P<f0>\d+) frames: the scene meshes (?P<m0>\d+), the depth prepass (?P<p0>\d+), the terrain (?P<t0>\d+), "
                 r"none (?P<n0>\d+); eye 1 (?P<f1>\d+) frames: the scene meshes (?P<m1>\d+), the depth prepass (?P<p1>\d+), the terrain (?P<t1>\d+), none (?P<n1>\d+); "
                 r"checked against a scene mesh (?P<checked>\d+) \(max diff (?P<diff>\S+)\); source draws with no scene depth eye (?P<noeye>\d+), no b1 shadow "
-                r"(?P<norows>\d+), latched (?P<latched>\d+)(?P<lat> -- LATCHED OFF.*)?$"),
+                r"(?P<norows>\d+)(?:, latched (?P<latched>\d+)(?P<lat> -- LATCHED OFF.*)?|; mesh rows replaced by a source (?P<repl>\d+), marked meshes (?P<marked>\d+) "
+                r"\(refused draws (?P<refused>\d+)\))$"),
+        ("marked", r"native on foot eye rows \(F130\): a scene mesh with other rows: vs (?P<vs>[0-9A-F]{16}) ps (?P<ps>[0-9A-F]{16}) cb1 (?P<cb1>\S+) \+(?P<first>\d+), "
+                   r"eye (?P<eye>\d) frame (?P<frame>\d+), diff (?P<diff>\S+) \(rows (?P<rows>\S+), origin (?P<origin>\S+)\) against the (?P<src>.+?): it gives no "
+                   r"rows from here"),
+        ("full", r"native on foot eye rows \(F130\): (?P<n>\d+) scene meshes are marked \(the most kept\)"),
     ), _hj_f113_rows),
     _hrule("ADS model eye (F110)", ("F110", "F66e"), ("ADS sight check (F66e/F79)",), (
         ("sec", r"native on foot ADS sight check \(F66e/F79\): eye rows " + H_WL_THIS + r": both eyes (?P<both>\d+), one eye (?P<one>\d+), none/implausible (?P<none>\d+) "
@@ -13074,7 +13112,7 @@ HEALTH_RULES = (
                 r"pitched 10 deg or more\); centred (?P<centred>\d+)(?:; F109b's guard: held (?P<gheld>\d+) \(the view moved past the asks\), re-based "
                 r"(?P<guser>\d+) \(the player's own turn\), growth restarted (?P<ggap>\d+) \(a rows gap\), trips (?P<gtrips>\d+), re-armed (?P<grearm>\d+))?"
                 r"(?:; F109c: the gain's ends (?P<glo>%s) (?P<ghi>%s), foreign calls (?P<foreign>\d+) \(no gain taken\); the aim's pitch \(the FP root\) apart from the "
-                r"carried by (?P<drift>%s) deg more than at the engage \(largest (?P<dmax>[\d.]+) this second, (?P<dread>read|not read)\))?"
+                r"carried by (?P<drift>%s) deg more than at the engage \(largest (?P<dmax>[\d.]+) this second, (?P<dread>read|not read)\))?(?:; held by F131 (?P<f131n>\d+) ticks \((?P<f131why>[^)]*)\))?"
                 % ((_HN,) * 19)),
         ("engaged", r"native on foot look to aim \(F109\): engaged: "),
         ("trip", r"native on foot look to aim \(F109\): GUARD TRIPPED \((?P<why>.+?)\): stopped(?P<latched> until)?"),
@@ -13103,6 +13141,10 @@ HEALTH_RULES = (
         ("fb", r"native on foot look paths \(F129\): the local comp key did not match \((?P<why>.+?)\): the first call after the update takes the ask, as before F129"),
         ("rearm", r"native on foot look paths \(F129\): the local comp key matched again "),
     ), _hj_f129_paths),
+    _hrule("look to aim hold (F131)", ("F131",), ("native on foot look to aim (F131)",), (
+        ("held", r"native on foot look to aim \(F131\): held \((?P<why>.+?)\); the aim stays where it is, the game's own look runs"),
+        ("resumed", r"native on foot look to aim \(F131\): resumed after (?P<s>[\d.]+) s \((?P<why>.+?) cleared\): centred again"),
+    ), _hj_f131_hold),
     _hrule("snap turn (F109)", ("F109",), ("native on foot snap turn (F109)",), (
         ("snap", r"native on foot snap turn \(F109\): snap (?P<n>\d+) by (?P<src>the stick|a mouse flick), (?P<dir>right|left) (?P<step>\d+) deg(?P<ads> in ADS)?: "
                  r"input (?P<input>%s) \(gain (?P<gain>%s), (?P<gsrc>.+?)\); the game applied (?P<applied>%s) deg in (?P<calls>\d+) call\(s\) \(the player's turn over "
@@ -14577,14 +14619,29 @@ def self_test_health():
         # ---- eye rows (F113): each eye's scene rows and their source ----
         F113 = "eye rows (F113)"
 
-        def rows113(m=(10, 10), p=(80, 80), t=(0, 0), n=(0, 0), checked=2, diff=0.0, latched=False, wl=1):
+        def rows113(m=(10, 10), p=(80, 80), t=(0, 0), n=(0, 0), checked=2, diff=0.0, latched=False, wl=1, repl=0, marked=0, refused=0):
             f = tuple(m[e] + p[e] + t[e] + n[e] for e in (0, 1))
-            return R("native on foot eye rows (F113) %u s: eye 0", wl, f[0], m[0], p[0], t[0], n[0], f[1], m[1], p[1], t[1], n[1], checked, diff, 0, 0, 0,
-                     " -- LATCHED OFF (a mismatch over 1e-5): the scene meshes alone" if latched else "")
+            line = R("native on foot eye rows (F113) %u s: eye 0", wl, f[0], m[0], p[0], t[0], n[0], f[1], m[1], p[1], t[1], n[1], checked, diff, 0, 0, repl, marked, refused)
+            if latched:   # a build before F130: its tail was ", latched N" and the LATCHED OFF note
+                line = line.split("; mesh rows replaced by a source")[0] + ", latched 0 -- LATCHED OFF (a mismatch over 1e-5): the scene meshes alone"
+            return line
 
         check("F113 rows: bare ground, the prepass gives the rows", [rows113()] * 3, 0, [("OK", F113)],
               has=["eye 0 270 frames: the scene meshes 11%, the depth prepass 89%, the terrain 0%, none 0.0%"], lacks=["UNPARSED"])
-        check("F113 rows: a source latched off", [rows113(), rows113(diff=2e-3, latched=True)], 0, [("PARTIAL", F113)], has=["LATCHED OFF"])
+        check("F113 rows: a source latched off (a build before F130)", [rows113(), rows113(diff=2e-3, latched=True)], 0, [("PARTIAL", F113)], has=["LATCHED OFF", "a build before F130"])
+        # F130: the SRV flight (edvr_gfx_20261027_064839): one mesh disagreed by 0.239 at 06:54:46; it is marked and the sources go on (no latch, no PARTIAL for the mark)
+        MARK130 = R("native on foot eye rows (F130): a scene mesh with other rows: vs %016llX ps %016llX cb1", 0xA1B2C3D4E5F60718, 0x1122334455667788, 96, 0, 32288, 2.393e-1,
+                    2.393e-1, 0.0, "terrain")
+        check("F130 rows: a mesh with other rows is marked, the sources stay on", [rows113(checked=3), MARK130, rows113(diff=2.393e-1, checked=1, repl=0, marked=1, refused=40)], 0,
+              [("OK", F113)], has=["F130: mesh rows replaced by a source 0, marked meshes 1 (refused draws 40)", "marked: vs A1B2C3D4E5F60718 ps 1122334455667788 eye 0 (diff 2.393e-01 against the terrain)"],
+              lacks=["LATCHED OFF", "UNPARSED"])
+        check("F130 rows: a source replaced a mesh's rows (the mesh drew first)", [rows113(repl=3, marked=2, checked=3, diff=0.3), MARK130, MARK130], 0, [("OK", F113)],
+              has=["mesh rows replaced by a source 3, marked meshes 2", "marked: vs A1B2C3D4E5F60718"], lacks=["UNPARSED"])
+        FULL130 = R("native on foot eye rows (F130): %zu scene meshes are marked", 32)
+        check("F130 rows: the table of marked meshes full", [rows113(marked=32, refused=900), FULL130], 0, [("OK", F113)], has=["the table of 32 marked meshes was full"],
+              lacks=["UNPARSED"])
+        check("F130 rows: frames without rows while no source ever gave any are still NEVER APPLIED", [rows113(m=(30, 30), p=(0, 0), n=(60, 60), checked=0, marked=1, refused=50)] * 2,
+              3, [("NEVER APPLIED", F113)], has=["no source ever gave any", "marked meshes 1"])
         check("F113 rows: the sources never ran (the 07:10 flight's bare ground)", [rows113(m=(30, 30), p=(0, 0), n=(60, 60), checked=0)] * 2, 3,
               [("NEVER APPLIED", F113)], has=["none 66.7%", "no source ever gave any"])
         ROWS113_OLD = ("native on foot eye rows (F113) 1 s: eye 0 90 frames: the scene meshes 10, the depth prepass 80, the terrain 0, none 0; eye 1 90 frames: "
@@ -15358,10 +15415,10 @@ def self_test_health():
         L109, S109, M109, A109 = "look to aim (F109)", "snap turn (F109)", "smooth turn (F109)", "ADS player turn (F109)"
 
         def look109(state="following", hy=12.0, hp=-3.0, ay=None, ap=None, uy=0.0, up=0.0, oy=0.2, op=-0.1, res=0.3, bmax=12.0, ds=0, dm=0, dp=0, clean=80,
-                    dirty=2, unsplit=0, blocked=0, spring=0, gated=0, gheld=0, guser=0, ggap=0, gtrips=0, grearm=0, foreign=0, drift=0.0, dread="read"):
+                    dirty=2, unsplit=0, blocked=0, spring=0, gated=0, gheld=0, guser=0, ggap=0, gtrips=0, grearm=0, foreign=0, drift=0.0, dread="read", f131n=0, f131why="none"):
             return R("native on foot look to aim (F109) 1 s:", state, 0.0, 150, hy, hp, hy, hp, hy if ay is None else ay, hp if ap is None else ap, uy, up, oy, op,
                      0.5, "read", 30.0, -5.0, res, 0, 2.0, bmax, 88, 90, ds, dm, dp, clean, dirty, unsplit, 0.85, 0.85, blocked, "not holding", 0, spring, 0.0,
-                     gated, 1, gheld, guser, ggap, gtrips, grearm, 1.0, 0.85335, foreign, drift, abs(drift), dread)
+                     gated, 1, gheld, guser, ggap, gtrips, grearm, 1.0, 0.85335, foreign, drift, abs(drift), dread, f131n, f131why)
 
         KEYS109 = R("native on foot look to aim (F109): keys: %s, smoothing", "on", 150, "snap", 45)
         ENG109 = R("native on foot look to aim (F109): engaged:", "snap", 45, 150, ", their yaw turns the player in snaps", "")
@@ -15429,6 +15486,25 @@ def self_test_health():
         check("F129 paths: the key matched again, and a second of the sink zeroing the asks", [FB129, REARM129, paths129(fbe=1, fbl=1, zer=3, ofl=2, ook=100)], 0, [("PARTIAL", P129)],
               has=["fallback entered 1, left 1", "order ok 100, flipped 2"], lacks=["UNPARSED"])
         check("F129 paths: a comps line alone is reported", [COMPS129], 0, [("OK", P129)], has=["0 s on foot"], lacks=["UNPARSED"])
+
+        # ---- F131: look to aim holds while a panel or a menu is open, and while the game runs no look ----
+        H131 = "look to aim hold (F131)"
+
+        def held131(why):
+            return R("native on foot look to aim (F131): held (%s); the aim stays", why)
+
+        def resumed131(s, why):
+            return R("native on foot look to aim (F131): resumed after %.1f s (%s cleared)", s, why)
+
+        check("F131 hold: no hold, look to aim ran", [ENG109, look109(), look109()], 0, [("IDLE", H131)], has=["look to aim ran 2 s and was never held"])
+        check("F131 hold: a panel held it, then a menu", [ENG109, look109(), held131("an on-foot panel is open"), look109(), resumed131(2.4, "an on-foot panel is open"),
+              held131("a menu or map holds the 2D screen + the game's look processor has not run for 150 ms"), resumed131(61.5, "a menu or map holds the 2D screen")], 0,
+              [("OK", H131)], has=["2 hold(s) began, 2 resumed (63.9 s held in the resumed ones)", "reasons: an on-foot panel is open 1, a menu or map holds the 2D screen 1, "
+                                   "the game's look processor has not run for 150 ms 1"], lacks=["UNPARSED"])
+        check("F131 hold: the 1 s lines count the ticks when the event lines were held back", [ENG109, look109(f131n=40, f131why="panel+menu"), look109(f131n=12, f131why="no look")],
+              0, [("OK", H131)], has=["held ticks on the 1 s lines 52"], lacks=["UNPARSED"])
+        check("F131 hold: a begin line with no resume (look to aim stopped inside it)", [ENG109, held131("an on-foot panel is open"), look109()], 0, [("OK", H131)],
+              has=["1 hold(s) began, 0 resumed"], lacks=["UNPARSED"])
 
         def snap109(n, src="the stick", d="right", ads="", applied=45.0, calls=1):
             return R("native on foot snap turn (F109): snap %u by", n, src, d, 45, ads, 52.91, 0.01485, "measured", applied, calls, applied, 52)
