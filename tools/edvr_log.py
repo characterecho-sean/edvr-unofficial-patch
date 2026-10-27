@@ -12324,7 +12324,8 @@ def _hj_f137_neck(rows, ctx):
 
 def _hj_f138_pitched(rows, ctx):
     """F138: the view holds its height over the neck while the look is pitched. The pin hook adds the camera's sink against the stance (the game's camera over the animated
-    neck, the headset's own height out) to the raise's target while the aim is pitched 10 deg or more, both modes, unarmed; the 1 s lines (a second with a call at that pitch)
+    neck, the headset's own height out) to the raise's target while the aim is pitched 10 deg or more, unarmed (up in both modes, down under mouse look only: a look down
+    under look to aim stays as flown and has no line); the end of an episode it published in gives the stance's target back once, else "not needed"; the 1 s lines (a second with a call at that pitch)
     say how many calls added it, which were measured only (an item drawn) and the reasons for every other (no reference, the LOCAL pose's generation changed, the stance
     changed, ADS, the camera away, ...), INSIDE on the drawn eye, and the settle's refusals. OK when it was added in at least one second and INSIDE (F97a's test on the drawn
     eye) is under 10% of the calls of the applied seconds with the aim up. PARTIAL when INSIDE is 10% or more of those calls, or when it was added in no second and a pitched
@@ -12341,7 +12342,7 @@ def _hj_f138_pitched(rows, ctx):
     added = sum(int(r["napplied"]) for r in sec)
     measured = sum(int(r["nmeasured"]) for r in sec)
     refused, lta = sum(int(r["refused"]) for r in sec), sum(int(r["lta"]) for r in sec)
-    returned, retrefused = sum(int(r["returned"]) for r in sec), sum(int(r["retrefused"]) for r in sec)
+    returned, retrefused, notneeded = (sum(int(r[k]) for r in sec) for k in ("returned", "retrefused", "notneeded"))
     empty = [r for r in sec if r["item"] == "none"]
     whys = collections.Counter()
     for r in empty:
@@ -12349,9 +12350,9 @@ def _hj_f138_pitched(rows, ctx):
             whys[name.strip()] += int(count)
     modes = sorted(set(r["mode"] for r in sec))
     text = ("%d pitched s (%d calls; %s), aim %+.0f..%+.0f deg; the camera sank up to %.1f cm against the stance; added in %d s (%d calls, up to %.1f cm), measured only %d calls; "
-            "the settle refused for the aim's pitch %d calls (look to aim's gate %d); returned to the stance's raise %d times (refused %d)") % (
+            "the settle refused for the aim's pitch %d calls (look to aim's gate %d); returned to the stance's raise %d times (refused %d, not needed %d)") % (
         n, calls, " and ".join(modes), min(float(r["amin"]) for r in sec), max(float(r["amax"]) for r in sec), max(float(r["smax"]) for r in sec), len(applied), added,
-        max([float(r["amaxadd"]) for r in applied] or [0.0]), measured, refused, lta, returned, retrefused)
+        max([float(r["amaxadd"]) for r in applied] or [0.0]), measured, refused, lta, returned, retrefused, notneeded)
     if applied:
         up = [r for r in applied if float(r["aim"]) > 0.0]
         inside, of = sum(int(r["inside"]) for r in up), sum(int(r["insideof"]) for r in up)
@@ -13368,7 +13369,7 @@ HEALTH_RULES = (
                 r"(?P<hrise>%s) cm; w (?P<wmean>[\d.]+)/(?P<wmax>[\d.]+); added (?P<added>%s) cm \(max (?P<amaxadd>%s)\) in (?P<napplied>\d+) of (?P<ncalls>\d+) pitched "
                 r"calls \| measured only: an item drawn (?P<nmeasured>\d+) calls \| not applied: (?P<why>.+?); EDVR carried up (?P<up>%s) forward (?P<fwd>%s) cm "
                 r"\(the raise, F137\); the view over the neck (?P<view>%s) cm; INSIDE (?P<inside>\d+) of (?P<insideof>\d+); the settle refused for the aim's pitch "
-                r"(?P<refused>\d+) calls \(look to aim's gate (?P<lta>\d+)\); returned to the stance's raise (?P<returned>\d+) times \(refused (?P<retrefused>\d+)\)" % ((_HN,) * 12)),
+                r"(?P<refused>\d+) calls \(look to aim's gate (?P<lta>\d+)\); returned to the stance's raise (?P<returned>\d+) times \(refused (?P<retrefused>\d+), not needed (?P<notneeded>\d+)\)" % ((_HN,) * 12)),
         ("bins", r"native on foot pitched view \(F138\) 10 s bins \(per 10 deg of aim pitch: calls, the camera's sink, EDVR carried up, forward, the head's own height since "
                  r"the stance; cm\): (?P<mode>mouse look|look to aim), item (?P<item>.+?): (?=\[)(?P<body>.+)$"),
     ), _hj_f138_pitched),
@@ -15826,9 +15827,9 @@ def self_test_health():
         ITEM138 = "$wpn_m_assaultrifle_laser_fauto_name;"
 
         def pv138(mode="mouse look", item="none", aim=40.0, amin=30.0, amax=50.0, head=0.0, sink=14.0, smax=18.0, hrise=0.5, wmean=0.98, wmax=1.0, added=13.0, amaxadd=18.0,
-                  applied=58, calls=60, measured=0, why="none", up=-12.0, fwd=-2.0, view=2.5, inside=0, insideof=60, refused=40, lta=0, returned=1, retrefused=0):
+                  applied=58, calls=60, measured=0, why="none", up=-12.0, fwd=-2.0, view=2.5, inside=0, insideof=60, refused=40, lta=0, returned=1, retrefused=0, notneeded=0):
             return R("native on foot pitched view (F138) 1 s: mode", mode, item, aim, amin, amax, head, sink, smax, hrise, wmean, wmax, added, amaxadd, applied, calls, measured, why,
-                     up, fwd, view, inside, insideof, refused, lta, returned, retrefused)
+                     up, fwd, view, inside, insideof, refused, lta, returned, retrefused, notneeded)
 
         def bins138(mode="mouse look", item="none", body="[30,40) 12 +9.0 -10.0 -1.0 +0.5; [40,50) 48 +14.0 -12.0 -2.0 +0.5"):
             return R("native on foot pitched view (F138) 10 s bins", mode, item, body)
@@ -15837,8 +15838,10 @@ def self_test_health():
               has=["no second with a call at 10 deg of aim pitch or more"], lacks=["UNPARSED"])
         check("F138 pitched view: the sink added in pitched seconds of both modes, INSIDE none", [pv138(), pv138(mode="look to aim", aim=38.0)], 0, [("OK", P138)],
               has=["2 pitched s (120 calls; look to aim and mouse look), aim +30..+50 deg", "added in 2 s (116 calls, up to 18.0 cm), measured only 0 calls",
-                   "the settle refused for the aim's pitch 80 calls (look to aim's gate 0); returned to the stance's raise 2 times (refused 0)",
+                   "the settle refused for the aim's pitch 80 calls (look to aim's gate 0); returned to the stance's raise 2 times (refused 0, not needed 0)",
                    "INSIDE 0 of 120 calls in the 2 applied second(s) with the aim up"], lacks=["UNPARSED"])
+        check("F138 pitched view: an armed episode gave nothing back (not needed), the line says so", [pv138(item=ITEM138, applied=0, added=0.0, amaxadd=0.0, measured=60, returned=0, notneeded=1)], 0,
+              [("IDLE", P138)], has=["returned to the stance's raise 0 times (refused 0, not needed 1)"], lacks=["UNPARSED"])
         check("F138 pitched view: INSIDE in a third of the calls with the sink added", [pv138(inside=20, insideof=60)], 0, [("PARTIAL", P138)],
               has=["INSIDE 20 of 60 calls", "(33%; the proof is under 10%)"], lacks=["UNPARSED"])
         check("F138 pitched view: INSIDE in a tenth of the calls is not under 10%", [pv138(inside=6, insideof=60)], 0, [("PARTIAL", P138)], has=["INSIDE 6 of 60 calls"])

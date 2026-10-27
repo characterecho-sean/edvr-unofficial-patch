@@ -10,8 +10,11 @@
 // The reference is taken in the pin hook on every call where the settle publishes an UNARMED target from an upright stance: the published target, G of that call, the
 // animated neck's height, the headset's LOCAL height and the LOCAL pose's generation. G of a call is the game's camera (EDVR's offsets out, not pitch-normalised) less the
 // animated neck less the physical headset's height in LOCAL: what the game's camera does over the neck beyond what the pilot's own head does (his real head motion stays in
-// the view). While the look is pitched (w = smoothstep(10, 20 deg, |aim pitch|), the FP root's pitch, both modes) the raise's target is the stance's plus w times the
-// sink (the reference's G less this call's), clamped. The first call after w is back to 0 publishes the stance's target once.
+// the view). While the look is pitched (w = smoothstep(10, 20 deg, |aim pitch|), the FP root's pitch) the raise's target is the stance's plus w times the sink (the
+// reference's G less this call's), clamped to +-40 cm. Looking up applies under mouse look and look to aim; looking down only under mouse look (under look to aim the
+// F109 gate held the raise whatever the pitch, as flown: w is 0 there, and those calls are not the instrument's). The settle's refusal for the aim's pitch applies with
+// nothing drawn only: with an item drawn the settle takes the pitched camera as it did before F138 (the armed target is an absolute height). The end of a pitched episode
+// publishes the stance's target once only when this tracker published a target during it and nothing is drawn at the edge; otherwise it publishes nothing ("not needed").
 #pragma once
 
 #include <algorithm>
@@ -27,20 +30,29 @@ namespace f138 {
 constexpr double kWeightLoDeg = 10.0, kWeightHiDeg = 20.0;   // w: 0 up to 10 deg of aim pitch, 1 from 20 (smoothstep)
 constexpr double kPitchedDeg = 10.0;                         // a call at this |aim pitch| or more is the instrument's (and the settle's gate: kF109SettlePitchDeg)
 constexpr double kStanceGuardM = 0.03;                       // the animated neck within this of the reference's: the same stance (a crouch, the fists' hunch move it)
-constexpr double kSinkMinM = -0.10, kSinkMaxM = 0.40;        // the sink added, clamped
+constexpr double kSinkMinM = -0.40, kSinkMaxM = 0.40;        // the sink added, clamped (looking down unarmed the camera rose 12 to 17 cm over the neck)
 
 inline double smoothstep(double lo, double hi, double x) noexcept {
     if (!std::isfinite(x)) return 0.0;
     const double t = std::min(1.0, std::max(0.0, (x - lo) / (hi - lo)));
     return t * t * (3.0 - 2.0 * t);
 }
-// The weight of the pitched look: 0 for an aim pitch that is not a number.
-inline double weight(double aimPitchDeg) noexcept {
+// The pitch's weight, mode aside: 0 for an aim pitch that is not a number.
+inline double pitchWeight(double aimPitchDeg) noexcept {
     return std::isfinite(aimPitchDeg) ? smoothstep(kWeightLoDeg, kWeightHiDeg, std::fabs(aimPitchDeg)) : 0.0;
 }
-// The instrument counts a call at |aim pitch| of kPitchedDeg or more; the settle refuses at the same size (gateDeg is the hook's kF109SettlePitchDeg).
-inline bool pitched(double aimPitchDeg) noexcept { return std::isfinite(aimPitchDeg) && std::fabs(aimPitchDeg) >= kPitchedDeg; }
-inline bool settleRefused(double aimPitchDeg, double gateDeg) noexcept { return std::isfinite(aimPitchDeg) && std::fabs(aimPitchDeg) >= gateDeg; }
+// Looking down under look to aim stays as flown (the F109 gate held the raise whatever the pitch): not F138's.
+inline bool lookToAimDown(double aimPitchDeg, bool lookToAim) noexcept { return lookToAim && aimPitchDeg < 0.0; }
+// The weight of the pitched look: the pitch's, 0 for a look down under look to aim.
+inline double weight(double aimPitchDeg, bool lookToAim) noexcept { return lookToAimDown(aimPitchDeg, lookToAim) ? 0.0 : pitchWeight(aimPitchDeg); }
+// The instrument counts a call at |aim pitch| of kPitchedDeg or more (not a look down under look to aim); the settle refuses at the same size (gateDeg is the hook's
+// kF109SettlePitchDeg), with nothing drawn only.
+inline bool pitched(double aimPitchDeg, bool lookToAim) noexcept {
+    return std::isfinite(aimPitchDeg) && std::fabs(aimPitchDeg) >= kPitchedDeg && !lookToAimDown(aimPitchDeg, lookToAim);
+}
+inline bool settleRefused(double aimPitchDeg, double gateDeg, bool itemDrawn) noexcept {
+    return !itemDrawn && std::isfinite(aimPitchDeg) && std::fabs(aimPitchDeg) >= gateDeg;
+}
 
 // G: the game's camera (E, raw) over the animated neck, less the physical headset's height in LOCAL (all metres).
 inline double gOf(double rawEyeY, double neckY, double localHeadY) noexcept { return rawEyeY - neckY - localHeadY; }
@@ -80,6 +92,7 @@ struct Stance {
 struct In {
     double aimPitchDeg = std::nan("");   // the FP root's pitch, nose up + (not a number: unknown this call)
     bool settleOwned = false;            // the existing code published a target this call (the settle's, or ADS's zero): it owns the raise
+    bool lookToAim = false;              // look to aim drives the aim (engaged and not held): a look down stays as flown
     bool itemDrawn = false;              // armed, or the weapon eye's weight up
     bool ads = false;                    // aiming down sights (the detach weight above 0)
     bool cameraAway = false;
@@ -98,16 +111,19 @@ struct Out {
     bool publish = false;        // the hook publishes publishM as the raise's target
     double publishM = 0.0;
     double addedM = 0.0;         // w times the sink, when applied
-    bool returned = false;       // the first call after w is back to 0: the stance's target, once
+    bool returned = false;       // the end of an episode this tracker published in, nothing drawn: the stance's target, once
     bool returnRefused = false;  // ... the stance changed, or no reference: nothing published
+    bool notNeeded = false;      // the end of an episode in which it published nothing (an item drawn, the settle's target, none added): nothing to give back
 };
 
 struct Tracker {
     Stance ref;
-    bool added = false;   // the last target this tracker published carried the sink: the return edge publishes the stance's
+    bool added = false;     // this tracker published a target (the sink added) during the episode: the end of it gives the stance's back
+    bool episode = false;   // a pitched call (w > 0) since the last edge
     void reset() noexcept {
         ref = Stance{};
         added = false;
+        episode = false;
     }
     // A settled unarmed upright stance was published (the hook calls this beside f94TargetPublish). A pose that is not valid drops the reference: a stale one must not be used.
     void noteStance(double target, double rawEyeY, double neckY, double localHeadY, uint32_t generation, bool poseValid) noexcept {
@@ -121,29 +137,38 @@ struct Tracker {
             s.generation = generation;
         }
         ref = s;
-        added = false;   // the settle published a target of its own
+        added = false;     // the settle published a target of its own
+        episode = false;
     }
     Out step(const In& in) noexcept {
         Out o;
         if (!std::isfinite(in.aimPitchDeg)) return o;   // the aim is unknown this call (G absent): nothing changes, nothing flaps
-        o.pitched = pitched(in.aimPitchDeg);
-        o.w = weight(in.aimPitchDeg);
+        o.pitched = pitched(in.aimPitchDeg, in.lookToAim);
+        o.w = weight(in.aimPitchDeg, in.lookToAim);
         if (in.settleOwned) added = false;               // its publication replaced anything added
         if (!(o.w > 0.0)) {
-            // the look is level again: the first call returns the raise to the stance's, exactly (not while the camera is away or in the sights, nor when the settle just published)
-            if (added && !in.settleOwned && !in.cameraAway && !in.ads) {
-                added = false;
-                if (ref.have && stanceHolds(in.neckY, ref.neckY)) {
-                    o.publish = true;
-                    o.publishM = ref.target;
-                    o.returned = true;
+            // the episode is over (the look came level, or turned down under look to aim): the first call gives the raise back to the stance's, exactly, only when this tracker
+            // published in the episode and nothing is drawn now (an armed target is an absolute height of its own); not while the camera is away or in the sights
+            if (episode && !in.cameraAway && !in.ads) {
+                episode = false;
+                if (added && !in.settleOwned && !in.itemDrawn) {
+                    added = false;
+                    if (ref.have && stanceHolds(in.neckY, ref.neckY)) {
+                        o.publish = true;
+                        o.publishM = ref.target;
+                        o.returned = true;
+                    } else {
+                        o.returnRefused = true;
+                    }
                 } else {
-                    o.returnRefused = true;
+                    added = false;
+                    o.notNeeded = true;
                 }
             }
             return o;
         }
         o.considered = true;
+        episode = true;
         if (in.cameraAway) o.reason = kCameraAway;
         else if (in.ads) o.reason = kAds;
         else if (in.settleOwned) o.reason = kSettleOwned;
@@ -222,7 +247,7 @@ struct Window {
     double upSum = 0.0, fwdSum = 0.0, viewSum = 0.0;
     uint32_t inside = 0, insideOf = 0;
     uint32_t settleRefusedAim = 0;
-    uint32_t returned = 0, returnRefused = 0;
+    uint32_t returned = 0, returnRefused = 0, notNeeded = 0;
     Group group[2][2];   // [look to aim][item drawn]
     void clear() noexcept { *this = Window{}; }
     void add(const Call& c) noexcept {
@@ -280,8 +305,9 @@ struct Window {
     void addReturn(const Out& o) noexcept {
         if (o.returned) ++returned;
         if (o.returnRefused) ++returnRefused;
+        if (o.notNeeded) ++notNeeded;
     }
-    bool any() const noexcept { return calls > 0 || returned > 0 || returnRefused > 0; }
+    bool any() const noexcept { return calls > 0 || returned > 0 || returnRefused > 0 || notNeeded > 0; }
     static double mean(double sum, uint32_t n) noexcept { return n ? sum / static_cast<double>(n) : 0.0; }
     // "mouse look", "look to aim", or both counts
     void modeText(char* buf, size_t cap) const noexcept {

@@ -16540,12 +16540,14 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
                 si.valid = false;
                 g_f109SettleGated.fetch_add(1, std::memory_order_relaxed);
             }
-            // F138: nor with the game's aim pitched under mouse look either (the FP root's pitch, from G above; look to aim's gate has counted its own): the game's camera sinks
-            // against the animated neck as the look pitches, and a stance taken there is the sunk camera's (0.3 s into a held look-up the raise settled on +58.5 cm, and the view
-            // stood 55 cm over the neck when the look came level). Counted apart from g_f109SettleGated.
+            // F138: nor with the game's aim pitched under mouse look either (the FP root's pitch, from G above; look to aim's gate has counted its own), with nothing drawn: the
+            // game's camera sinks against the animated neck as the look pitches, and a stance taken there is the sunk camera's (0.3 s into a held look-up the raise settled on
+            // +58.5 cm, and the view stood 55 cm over the neck when the look came level). With an item drawn the settle takes the pitched camera as it did before F138: the armed
+            // target is an absolute height (the unarmed eye of the stance). Counted apart from g_f109SettleGated.
             const bool f138AimKnown = G != nullptr && std::isfinite(pc.f86AimPitch);
+            const bool f138Item = armed || f97W > 0.0;
             bool f138SettleRefused = false;
-            if (si.valid && f138AimKnown && nofoot::f138::settleRefused(pc.f86AimPitch, kF109SettlePitchDeg)) {
+            if (si.valid && f138AimKnown && nofoot::f138::settleRefused(pc.f86AimPitch, kF109SettlePitchDeg, f138Item)) {
                 si.valid = false;
                 f138SettleRefused = true;
             }
@@ -16579,15 +16581,16 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
                 if (!itemDrawn && upright)
                     g_f138.noteStance(pc.f95Target, pc.rawEyeY, N0[1], static_cast<double>(in.localHeadY), in.localPoseGeneration, localPitchValid);
             }
-            // F138: while the look is pitched the raise adds back what the game's camera has sunk against the animated neck since that stance, weighted by the pitch (both modes:
-            // the FP root's pitch). The sink goes into the raise, which the P1 hook takes out of the pin's camera by the alignment serial (f94NeckForPin): E never sees it, so
+            // F138: while the look is pitched the raise adds back what the game's camera has sunk against the animated neck since that stance, weighted by the pitch (the FP
+            // root's pitch: up in both modes, down under mouse look only; a look down under look to aim stays as flown). The sink goes into the raise, which the P1 hook takes out of the pin's camera by the alignment serial (f94NeckForPin): E never sees it, so
             // the next call's G is the game's own camera again and nothing feeds back. The first level call after returns the stance's target once.
             {
                 namespace f138 = nofoot::f138;
                 f138::In fi;
                 fi.aimPitchDeg = f138AimKnown ? pc.f86AimPitch : std::nan("");
                 fi.settleOwned = f138Own;
-                fi.itemDrawn = armed || f97W > 0.0;
+                fi.lookToAim = g_ltaDrop.load(std::memory_order_relaxed);
+                fi.itemDrawn = f138Item;
                 fi.ads = pc.detachW > 0.0;
                 fi.cameraAway = refusal == kPinRefCameraAway;
                 fi.poseValid = localPitchValid;
@@ -16597,12 +16600,12 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
                 fi.localHeadY = static_cast<double>(in.localHeadY);
                 const f138::Out fo = g_f138.step(fi);
                 if (fo.publish) f94TargetPublish(fo.publishM, now);
-                if (fo.pitched || fo.returned || fo.returnRefused) {
+                if (fo.pitched || fo.returned || fo.returnRefused || fo.notNeeded) {
                     f138::Call fc;
                     fc.aimDeg = pc.f86AimPitch;
                     fc.headValid = localPitchValid;
                     fc.headDeg = pc.localPitchDeg;
-                    fc.lookToAim = g_ltaDrop.load(std::memory_order_relaxed);
+                    fc.lookToAim = fi.lookToAim;
                     fc.itemDrawn = fi.itemDrawn;
                     fc.out = fo;
                     fc.carriedUpCm = 100.0 * (pc.f94InCam + pc.f137Up);   // EDVR's carried vertical: the neck reference's raise and F137's up, by the alignment serial as F94a's line has it
@@ -22433,11 +22436,11 @@ void f138Line(uint64_t now) noexcept {
         Log::get().note("native on foot pitched view (F138) 1 s: mode %s, item %s, aim pitch %+.1f deg (min %+.1f max %+.1f), head pitch %+.1f deg; the camera's sink against the "
                         "stance %+.1f cm (max %+.1f), the head's own height since the stance %+.1f cm; w %.2f/%.2f; added %+.1f cm (max %+.1f) in %u of %u pitched calls | "
                         "measured only: an item drawn %u calls | not applied: %s; EDVR carried up %+.1f forward %+.1f cm (the raise, F137); the view over the neck %+.1f cm; "
-                        "INSIDE %u of %u; the settle refused for the aim's pitch %u calls (look to aim's gate %u); returned to the stance's raise %u times (refused %u)",
+                        "INSIDE %u of %u; the settle refused for the aim's pitch %u calls (look to aim's gate %u); returned to the stance's raise %u times (refused %u, not needed %u)",
                         mode, item, mean(w.aimSum, w.calls), w.calls ? w.aimMin : 0.0, w.calls ? w.aimMax : 0.0, mean(w.headSum, w.headN), mean(w.sinkSum, w.sinkN),
                         w.sinkN ? w.sinkMax : 0.0, mean(w.headRiseSum, w.headRiseN), mean(w.wSum, w.consideredN), w.wMax, mean(w.addedSum, w.appliedN),
                         w.appliedN ? w.addedMax : 0.0, w.appliedN, w.calls, w.measuredN, why, mean(w.upSum, w.calls), mean(w.fwdSum, w.calls), mean(w.viewSum, w.calls),
-                        w.inside, w.insideOf, w.settleRefusedAim, ltaGate, w.returned, w.returnRefused);
+                        w.inside, w.insideOf, w.settleRefusedAim, ltaGate, w.returned, w.returnRefused, w.notNeeded);
     }
     if (now - binMs >= 10000) {
         binMs = now;
