@@ -57,8 +57,8 @@
   phase ("Shadow flight 1").
 
 * **Next (2026-10-27, last entry):** AA on's +1.65 ms is per-draw
-  classifiers. ui-depth memo FLOWN: exact (0 of 5M), -0.21 ms. Next:
-  strip its verification and ship; then memo the other steps.
+  classifiers. ui-depth memo FLOWN: exact, -0.21 ms (shipped, b1561dff).
+  Next: build trims A-F (last entry), ~0.17-0.31 ms.
 
 ## Frame budget philosophy
 
@@ -3955,3 +3955,117 @@ The other steps on repeat draws (f:ui-layer, v:census, p:screen,
 engine-vel, v:eye-test; about 0.5 ms together) can key on the same
 aggregate generation. Each needs its own desk read first, as this one
 had.
+
+The verification and counters were stripped in b1561dff (the memo
+alone). `main` was merged in at 3003f672.
+
+### 2026-10-27 -- Desk design: three more draw-path trims (not built)
+
+There were three reads: v:fixes (the eye recognisers, 0.21 ms in every
+mode), f:ui-layer (+0.20 with AA on) and the engine velocity gate
+(+0.25). None of the three supports another binding-keyed memo. Each
+has a cheaper, exact trim instead.
+
+**Engine velocity** (`engine_velocity.h:163-196`,
+`engine_velocity.cpp:3084-3113`).
+- The gate in front of the slow half is nine tests, not four:
+  - the Vs, Ps, Rtv0, Dsv0 and Blend generations;
+  - the VsSrv33 and VsCb1 pointers;
+  - the eye;
+  - the guarded SRV3.
+
+  It costs about 4 ns a repeat draw, already near its floor.
+- A miss enters `beforeDrawSlow`, which reads `qpcNow()` first even
+  though only the locked path uses it (line 3112). It then scans the
+  14-record family table to find "not a pool family".
+- The flight logged about 1.1k such quick paths a frame (1.96M
+  "lock-free looks" per 1800 frames) and 340 locked slow halves, which
+  is about 0.14 ms of real work.
+- The trims:
+  - **(A)** read the clock after the quick-path return;
+  - **(B)** a one-entry memo of the family lookup, (VS hash, flat) to
+    family. That is a pure function, so it is exact;
+  - **(C)** move the 1-in-64 PS probe and its scans out of the inline
+    gate into an out-of-line function, so the gate is small enough to
+    inline at its six call sites.
+- About 0.06-0.12 ms together.
+- ruled out: keying the gate on bindingEyeKeyGeneration, because it
+  follows SRV 0-2 (moved on 8-10% of draws) and not Blend, which the
+  gate needs.
+
+**v:fixes** (vscreen.cpp, between the v:census and v:fixes marks).
+- Every recogniser but two rejects an ordinary scene draw with inline
+  shape tests.
+- The two that cost are:
+  - `remlokOnFootDiagnose`, a call into another file on every eye draw,
+    for one VS hash;
+  - `scrimOnEyeDraw`. Its wash shape (X, one instance, count of at
+    least 100) is most scene meshes, so the call runs on most eye
+    draws, and its decline comes from a one-entry PsSrv0 metadata
+    cache inside that call.
+- The trims:
+  - **(D)** the visor VS test inline, before the call;
+  - **(E)** the scrim PsSrv0 cache's hit-and-decline test inline in
+    scrim_fix.h, before the call.
+- Both are the same predicate moved, so they are exact. About 0.06-0.09
+  ms together.
+- ruled out: an "all recognisers declined" memo, because the shape tests
+  read count and instances, which change draw to draw, and its epoch
+  would need about 14 inputs in 9 files.
+
+**f:ui-layer** (forwardWithVerdict, `vscreen.cpp:4249-4320`).
+- For an ordinary eye draw the family answer depends only on:
+  - the VS hash;
+  - the PS hash, read only for nine named VSs;
+  - RTV0's target kind, which is cached on RTV0's generation;
+  - the on-foot sharp-HUD flag.
+- It reads no other mutable state, and kind 2 (post-tonemap, a few dozen
+  draws a frame) is the only branch that does more.
+- The trim, **(F)**: a one-entry plain-decline cache in vscreen.cpp,
+  before `uiLayerFamilyOf`.
+  - **Key:** (VS hash, PS hash, RTV0 generation, the on-foot flag), plus
+    a small epoch bumped where ui_layer resets its target-kind cache
+    (ui_layer.cpp:6632, 6659).
+  - **Stored only on:** a proven kNone, at a target kind other than 2,
+    and a VS other than the panel or loader VS (those call the family
+    probe).
+  - It keys on hashes rather than the aggregate generation, because the
+    SRVs the aggregate follows are not inputs here.
+- About 0.05-0.10 ms.
+- The after-UI branch (4289) runs per draw while the layer is
+  "watching", with frame-mutable inputs, and no binding key can skip it.
+  Its share of the block is unknown, so the build splits the step there.
+
+**The build:**
+- trims A-F;
+- the stale "four generation compares" comments corrected;
+- a step-clock sub-mark between the family decision and the after-UI
+  branch;
+- a temporary verification of (F) alone (the only new cache with a
+  hand-derived key), as the ui_depth memo had: on rotating non-sampled
+  frames a hit also runs `uiLayerFamilyOf`, with mismatches counted and
+  named;
+- a rig sweep of every named VS and PS through the cached path. A-E
+  are code moved, not answers cached.
+
+Expected total: 0.17-0.31 ms a frame with AA on, of which 0.06-0.09
+(D, E) also helps with AA off. That is well under the 0.5-0.6 the
+repeat-draw split promised, because most of the remaining cost is the
+call floor and real work on draws whose bindings changed.
+
+**The flight should show** (parked at the Cranfield pad, AA on for at
+least 3 minutes, nothing building), against
+`edvr_gfx_20261027_122848.log`:
+
+| Step | Before | Expected |
+|---|---|---|
+| engine-vel | 0.32 | 0.20-0.26 |
+| v:fixes | 0.21 | 0.12-0.15 |
+| f:ui-layer | 0.28 | 0.18-0.23, with the after-UI share read off its new sub-step |
+
+The other steps should be unchanged, and (F) should show 0 mismatches.
+
+A further candidate, not in this build: inlining the ui_depth memo's
+hit test into ui_depth.h. It would save two calls per eye draw, about
+0.1 ms, but it needs a read of who else writes the outputs a hit
+resets.
