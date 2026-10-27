@@ -58,7 +58,7 @@
 
 * **Next (2026-10-27, last entry):** AA on's +1.65 ms is per-draw
   classifiers. ui-depth memo FLOWN: exact, -0.21 ms (shipped, b1561dff).
-  Trims A-F (last entry, ~0.17-0.31 ms) BUILT, NOT FLOWN.
+  Trims A-F FLOWN: exact, no measurable gain (ruled out, last entry).
 
 ## Frame budget philosophy
 
@@ -4116,3 +4116,58 @@ nothing building.
   `edvr_gfx_20261027_122848.log`.
 - Read the `ui layer family cache:` line: hits, and 0 mismatches.
 - The other steps should be unchanged.
+
+**Trims flown (2026-10-27, Steam log `edvr_gfx_20261027_144901.log`,
+build 036e235f; same rig).** Loaded in docked at Cranfield at 14:54:03,
+AA on, parked to 14:57:27. That gives six clean windows (23400-32400),
+with no build running.
+- **F is exact.** The family memo answered 94.6% of 32.1M owner eye
+  draws a window. On the verify frames, about 1.78M hits a window also
+  ran the full decision, and none named a family.
+- **None of the trims moved its step beyond the window-to-window
+  spread.** The spread inside each flight is about ±0.05 ms on
+  engine-vel and about ±0.2 on EDVR's sum. Means of the six windows
+  against the memo flight's three:
+
+  | Step | Memo flight | Trims flight | Predicted | Result |
+  |---|---|---|---|---|
+  | engine-vel | 0.315 | 0.341 | 0.20-0.26 | no drop |
+  | v:fixes | 0.210 | 0.195 | 0.12-0.15 | about -0.015 |
+  | f:ui-layer + f:after-ui | 0.283 | 0.309 (0.172 + 0.137) | 0.18-0.23 | no drop |
+
+  The engine motion line's quick-path count is the same as before (about
+  1.1k a frame) and so is the slow half (0.13-0.15 ms).
+- **Overall.** EDVR's sum is 3.77, against 3.53. That is within the
+  spread, with about 3% more eye draws (17.8k against 17.3k).
+- **New measurement: the after-UI branch costs 0.106-0.203 ms a frame**
+  (mean 0.137) with AA on. It runs on every draw while the layer is
+  watching. f:ui-layer's family decision and census are 0.172.
+
+ruled out: trimming nanoseconds from per-draw predicate chains (inline
+early-outs, a qpc read moved, the family scan memoised, the gate's probe
+moved out of line, a value-keyed family cache) as a measurable lever.
+Six exact trims predicted to save 0.17-0.31 ms moved nothing beyond
+about 0.015 ms (flown 2026-10-27). The desk estimates were 4-10x too
+high: the predictable branches and calls they removed were already
+overlapped by the CPU. The ui_depth memo paid off because it removed
+real work, four view-memo probes and list walks a draw, not call
+overhead.
+
+What this leaves:
+- About 1.45 ms of the AA-on increment. It is spread at 2-5 ns a draw
+  over a dozen steps, about 35k draws a frame.
+- Desk trims of single steps are now below what a flight can resolve.
+- The only lever left at this scale is structural: one fast path for a
+  repeat draw of an ordinary scene mesh that skips the whole classifier
+  chain, both the verdict and the forward scope. The stability check of
+  2026-10-27 (no change in the verdict or the ui_depth flags over 1.6M
+  repeat eye draws) supports the premise. But every step's per-draw side
+  effects (counts, census, probes, the eye-draw tally) would have to be
+  separated out first. That is a design of its own, not a trim.
+
+Proposed for the code here:
+- **F:** revert it and its verification. It is exact, but it has no
+  measured gain, and it adds an epoch across ui_layer.cpp and vscreen.cpp.
+- **A-E:** keep them. They are exact by construction, simple, and v:fixes
+  shows the small gain they promise at most.
+- **The step clock:** remove it when the arc closes.
