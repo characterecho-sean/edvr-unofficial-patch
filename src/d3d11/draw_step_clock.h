@@ -35,10 +35,11 @@
 //   engine-vel     the owner's pre-draw work: the body-cull begin, engineVelocityBeforeDraw, engineVelocityNoteSkinDraw
 //   probes         the pixel probe's before-call, the VR world route's detector, the glare clamp
 //   f:*            forwardWithVerdict up to the game's draw: f:scopes (the entry scopes: the blend probe, the effect capture, the
-//                  interface depth, the roll-free block, the skip return), f:ui-layer (fix.ui_quality's family and after-UI
-//                  decisions, the composite census), f:verdict-begin (the loader panel, the quad skip and the curve checks, the
-//                  verdict's Begin, the orbit lines, the supercruise bars), f:before (the layer's bracket, the altered-draw class,
-//                  the marker fix, the surface strip: the rest up to the draw lambda's entry)
+//                  interface depth, the roll-free block, the skip return), f:ui-layer (fix.ui_quality's family decision and the
+//                  composite census: it closes twice on a composite draw, so its calls run a little over one a draw), f:after-ui
+//                  (the after-UI branch, which runs per draw while the layer is watching), f:verdict-begin (the loader panel, the quad
+//                  skip and the curve checks, the verdict's Begin, the orbit lines, the supercruise bars), f:before (the layer's
+//                  bracket, the altered-draw class, the marker fix, the surface strip: the rest up to the draw lambda's entry)
 //   GAME           the FIRST real draw call the lambda makes: the game's own, excluded from EDVR's sum
 //   reissue        every later real call the lambda makes (the splash dim's second issue): EDVR's
 //   weapon         the X thunk's weaponMotionDraw (the old whole clock counts it with the game's draw)
@@ -90,6 +91,7 @@ enum Step : uint8_t {
     kProbes,         // probes
     kFwScopes,       // f:scopes
     kFwUiLayer,      // f:ui-layer
+    kFwAfterUi,      // f:after-ui
     kFwVerdict,      // f:verdict-begin
     kFwBefore,       // f:before
     kGameDraw,       // GAME: the game's own first real call, not EDVR's
@@ -105,11 +107,11 @@ enum Step : uint8_t {
     kStepCount
 };
 
-// The names the log line prints. Short because 26 of them share a line the log truncates near 1170 characters.
+// The names the log line prints. Short because 27 of them share a line the log truncates near 1170 characters.
 inline const char* stepName(unsigned step) {
     static const char* const kNames[kStepCount] = {
         "pre", "v:hud/fss", "v:context", "v:particles", "v:eye-test", "v:offscreen", "v:ui-depth", "v:census", "v:fixes", "v:rest",
-        "engine-vel", "probes", "f:scopes", "f:ui-layer", "f:verdict-begin", "f:before", "GAME", "reissue", "weapon",
+        "engine-vel", "probes", "f:scopes", "f:ui-layer", "f:after-ui", "f:verdict-begin", "f:before", "GAME", "reissue", "weapon",
         "p:rigid", "p:screen", "p:rest", "f:layer-end", "f:ui-depth", "f:after", "tail"};
     return step < kStepCount ? kNames[step] : "?";
 }

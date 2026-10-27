@@ -68,6 +68,8 @@
 
 #include <cstdint>
 
+#include "binding_shadow.h"
+
 struct ID3D11DeviceContext;
 
 namespace edvr {
@@ -82,10 +84,29 @@ void scrimConfigure(Config& cfg);
 //
 // Inline: asked per draw, and the build has no /GL to fold a cross-TU
 // getter for one bool load.
+//
+// The wash's PS slot 0 verdict is held here too (g_washMetadata): scrim_fix.cpp's one-entry cache of what the bound slot-0 view is
+// (a 16x16 BC1 or not), valid while the shadow's view pointer and generation are the ones it was made at. scrimWashSrv0Declines is that
+// cache's decline, asked inline so the draw path skips the call it would have answered "no match" from the cache without resolving.
 namespace detail {
 extern bool g_scrimOn;
+struct MetadataCache {
+    void* view = nullptr;
+    uint32_t generation = 0;
+    bool known = false;
+    bool matches = false;
+};
+extern MetadataCache g_washMetadata;   // PS slot 0: is it the wash's 16x16 BC1 (scrim_fix.cpp)
 }  // namespace detail
 inline bool scrimWantsDraws() { return detail::g_scrimOn; }
+// True only when the slot-0 cache holds a SUCCESSFUL resolve of the view bound now, at this binding generation, and that view is not the
+// wash's texture: exactly the state in which scrimOnEyeDraw's first cached test returns false without a resolve and without writing
+// anything. Any other state (empty, a failed resolve, another view or generation, a match) is false here and the call decides.
+inline bool scrimWashSrv0Declines() {
+    const detail::MetadataCache& c = detail::g_washMetadata;
+    return c.known && !c.matches && c.view == bindingGet(BindSlot::PsSrv0) &&
+           c.generation == bindingGeneration(BindSlot::PsSrv0);
+}
 
 // Is this eye draw the loader's UI composite carrying the wash? Matched by
 // what it SAMPLES, not by shader hash: A888D51024D9798E is the engine's

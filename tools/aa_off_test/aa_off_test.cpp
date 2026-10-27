@@ -12,6 +12,12 @@
 //          the window's totals and scaling, and the two log lines' text and worst-case length.
 //   Cut F: classifier_memo.h (built 2026-10-27, the ui_depth eye-draw memo): a call hits only when something is stored, both halves
 //          of its key equal the stored key and the stored exit is a plain decline; a moved generation or epoch is a miss.
+//   Cut G: ui_family_memo.h (built 2026-10-27, trim F, the UI layer's family decision): a hit needs every field of the key equal and a
+//          stored plain decline; the store rule never stores target kind 2, the menu panel's or the loader's vertex shader, a family, or a
+//          run whose on-foot flag moved; a sweep of every named vertex and pixel shader, the flag both ways, through sequences of draws
+//          (with controls: each field dropped from the key, or a forbidden store, makes the sweep fail); the verify frames and the window
+//          line's worst-case length; and the source's wiring (the gather reads nothing but the key's inputs below kind 2, and every reset
+//          of the target-kind cache bumps the epoch). The step clock's f:after-ui split is in Cut E.
 //
 // Exit codes: 0 pass, 1 a check failed, 2 usage. --dry-run touches nothing.
 #include "../../src/common/gpu_disjoint_clock.h"
@@ -21,6 +27,8 @@
 #include "../../src/d3d11/frame_span_tile.h"
 #include "../../src/d3d11/gpu_frame_timing.h"
 #include "../../src/d3d11/map_wait.h"
+#include "../../src/d3d11/ui_family_memo.h"
+#include "../../src/d3d11/ui_layer_math.h"
 
 // The frame span holds at most kFrameSpanSlots pairs of two timestamps each (gpu_census.cpp); every one must fit the
 // clock's per-record lease budget (kLeases, 512), or a pair would be refused rather than held.
@@ -28,9 +36,13 @@ static_assert(edvr::kFrameSpanSlots * 2u <= edvr::DisjointClock::kLeases,
               "the frame span's timestamps fit the disjoint clock's lease budget");
 
 #include <atomic>
+#include <cctype>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <string>
+#include <vector>
 
 namespace edvr {
 
@@ -550,6 +562,64 @@ void testStepClockMarks() {
     FakeEnv::g_sub = nullptr;   // `outer` is local
 }
 
+// 2026-10-27: f:ui-layer is split. forwardWithVerdict marks f:ui-layer where the family decision ends, f:after-ui where the after-UI branch
+// ends, and f:ui-layer once more where the composite census ends (a composite draw only). The new step sits between f:ui-layer and
+// f:verdict-begin in the order a draw meets them, is named, and is cut apart from the decision's time.
+void testStepClockUiLayerSplit() {
+    using namespace edvr::drawstep;
+    check(kFwScopes < kFwUiLayer && kFwUiLayer < kFwAfterUi && kFwAfterUi < kFwVerdict && kFwVerdict < kFwBefore,
+          "ui-layer split: f:after-ui comes after f:ui-layer and before f:verdict-begin, in the order a draw meets them");
+    check(std::strcmp(stepName(kFwAfterUi), "f:after-ui") == 0 && std::strcmp(stepName(kFwUiLayer), "f:ui-layer") == 0,
+          "ui-layer split: the new step is named f:after-ui and f:ui-layer keeps its name");
+    bool unique = true;
+    for (unsigned i = 0; i < kStepCount; ++i)
+        for (unsigned j = i + 1; j < kStepCount; ++j) unique = unique && std::strcmp(stepName(i), stepName(j)) != 0;
+    check(unique && std::strcmp(stepName(kStepCount), "?") == 0, "ui-layer split: every step has its own name");
+    // An ordinary eye draw: scopes, the family decision, the after-UI branch, then on (no composite, so no second f:ui-layer mark).
+    FakeEnv::reset();
+    FakeEnv::g_sampled = true;
+    FakeEnv::g_ordinal = 31;
+    FakeEnv::g_time = 1000;
+    {
+        TestClock c('X');
+        FakeEnv::g_time = 1010;
+        subMark(kFwScopes);      // 10
+        FakeEnv::g_time = 1030;
+        subMark(kFwUiLayer);     // 20: the family decision
+        FakeEnv::g_time = 1037;
+        subMark(kFwAfterUi);     // 7: the after-UI branch
+        FakeEnv::g_time = 1040;
+        subMark(kFwVerdict);     // 3: after the census test, up to the verdict's Begin
+        FakeEnv::g_time = 1050;
+    }
+    const StepAccum& a = FakeEnv::g_lastRun;
+    check(a.ticks[kFwUiLayer] == 20 && a.ticks[kFwAfterUi] == 7 && a.ticks[kFwVerdict] == 3 && a.ticks[kFwScopes] == 10,
+          "ui-layer split: the family decision and the after-UI branch are cut apart, each interval to the step that ends it");
+    check(a.marks[kFwUiLayer] == 1 && a.marks[kFwAfterUi] == 1, "ui-layer split: an ordinary draw closes each once");
+    // A composite draw: the census closes f:ui-layer a second time, after f:after-ui, and its time is f:ui-layer's.
+    FakeEnv::reset();
+    FakeEnv::g_sampled = true;
+    FakeEnv::g_ordinal = 31;
+    FakeEnv::g_time = 2000;
+    {
+        TestClock c('X');
+        FakeEnv::g_time = 2010;
+        subMark(kFwScopes);
+        FakeEnv::g_time = 2030;
+        subMark(kFwUiLayer);     // 20
+        FakeEnv::g_time = 2037;
+        subMark(kFwAfterUi);     // 7
+        FakeEnv::g_time = 2045;
+        subMark(kFwUiLayer);     // 8: the census
+        FakeEnv::g_time = 2048;
+        subMark(kFwVerdict);     // 3
+        FakeEnv::g_time = 2050;
+    }
+    const StepAccum& b = FakeEnv::g_lastRun;
+    check(b.ticks[kFwUiLayer] == 28 && b.marks[kFwUiLayer] == 2 && b.ticks[kFwAfterUi] == 7 && b.marks[kFwAfterUi] == 1,
+          "ui-layer split: a composite draw's census adds its 8 ticks and its mark to f:ui-layer, and f:after-ui keeps its 7");
+}
+
 // The AA-off fast path's draw (D, I, N): pre, verdict, probes, the game's draw, tail. No forward scope, no engine velocity.
 void testStepClockFastPath() {
     using namespace edvr::drawstep;
@@ -771,6 +841,8 @@ void testStepText() {
     check(std::strstr(line, want) != nullptr, "text: a seen step prints its net ms per sampled frame");
     check(std::strstr(line, "v:hud/fss -, ") != nullptr && std::strstr(line, "f:ui-depth -, ") != nullptr && std::strstr(line, "reissue -, ") != nullptr,
           "text: a step with no marks prints '-', never 0.000");
+    check(std::strstr(line, "f:ui-layer -, f:after-ui -, f:verdict-begin -, ") != nullptr,
+          "text: f:after-ui is in the steps line, between f:ui-layer and f:verdict-begin");
     std::snprintf(want, sizeof(want), "EDVR %.3f ms", t.edvrMs);
     check(std::strstr(line, want) != nullptr, "text: EDVR's sum is in the line");
     std::snprintf(want, sizeof(want), "game draw %.3f ms (the game's own)", t.gameMs);
@@ -833,6 +905,8 @@ void testStepTextWorstCase() {
         wholeEnds = wholeEnds && na == std::strlen(a) && nb == std::strlen(b) && a[na - 1] == '.' && b[nb - 1] == '.';
         check(std::strstr(a, "99999.999") != nullptr && std::strstr(b, "99999999 draws") != nullptr,
               "text: out-of-range figures are clamped to their widths, not widened");
+        check(std::strstr(a, "f:after-ui 99999.999, ") != nullptr && std::strstr(b, "f:after-ui 99999999, ") != nullptr,
+              "text: f:after-ui is in both lines at its widest");
     }
     std::printf("aa_off_test: step lines at their worst: %zu and %zu characters (limit 1150; the log holds about 1170)\n", widestA, widestB);
     check(widestA < 1150 && widestB < 1150, "text: each of the two lines at its worst fits the log line (under 1150 characters)");
@@ -922,6 +996,458 @@ void testMemoRun() {
     check(fullRuns == 6, "run: of nine calls three hit and six ran in full");
 }
 
+// ---- Cut G: ui_family_memo.h, the UI layer's family decision (trim F) -----------------------------------------------------------------------
+namespace fm = edvr::uifamilymemo;
+using edvr::UiLayerFamily;
+
+fm::Key keyOf(uint64_t vs, uint64_t ps, uint32_t generation, uint32_t epoch, bool onFoot) {
+    fm::Key k;
+    k.vs = vs;
+    k.ps = ps;
+    k.rtvGeneration = generation;
+    k.epoch = epoch;
+    k.onFoot = onFoot;
+    return k;
+}
+
+// A hit needs something stored, a plain decline stored, and every field of the key the stored one's.
+void testFamilyMemoKey() {
+    fm::Memo m;
+    const fm::Key k = keyOf(0xAAAA, 0xBBBB, 7, 3, false);
+    check(!fm::hit(m, k) && !fm::hit(m, fm::Key()), "family memo: nothing stored is a miss, the zero key included");
+    check(fm::missCause(m) == fm::MissCause::kNothingStored, "family memo: a miss with nothing stored says so");
+    fm::store(m, k, fm::Exit::kPlainDecline);
+    check(fm::hit(m, k), "family memo: the same key after a plain decline is a hit");
+    const fm::Key moved[] = {keyOf(0xAAAB, 0xBBBB, 7, 3, false), keyOf(0xAAAA, 0xBBBC, 7, 3, false), keyOf(0xAAAA, 0xBBBB, 8, 3, false),
+                             keyOf(0xAAAA, 0xBBBB, 7, 4, false), keyOf(0xAAAA, 0xBBBB, 7, 3, true),  keyOf(0xAAAA, 0xBBBB, 6, 3, false),
+                             keyOf(0xAAAA, 0xBBBB, 7, 2, false)};
+    bool allMiss = true, allMoved = true;
+    for (const fm::Key& n : moved) {
+        allMiss = allMiss && !fm::hit(m, n);
+        allMoved = allMoved && fm::missCause(m) == fm::MissCause::kKeyMoved;
+    }
+    check(allMiss, "family memo: any one field moved (either shader hash, Rtv0's generation, the epoch, the on-foot flag, forwards or back) is a miss");
+    check(allMoved, "family memo: a miss with a plain decline standing is 'the key moved'");
+    fm::store(m, k, fm::Exit::kOther);
+    check(!fm::hit(m, k) && fm::missCause(m) == fm::MissCause::kNothingStored,
+          "family memo: the same key after a run that was not a plain decline is a miss, and counts as nothing stored");
+    fm::store(m, keyOf(1, 2, 3, 4, true), fm::Exit::kPlainDecline);
+    check(!fm::hit(m, k) && fm::hit(m, keyOf(1, 2, 3, 4, true)), "family memo: a later store replaces the earlier key");
+    // Over a grid of single-field differences against one stored key, exactly the stored key hits.
+    unsigned hits = 0;
+    for (uint32_t vs = 0; vs < 3; ++vs)
+        for (uint32_t ps = 0; ps < 3; ++ps)
+            for (uint32_t g = 0; g < 3; ++g)
+                for (uint32_t e = 0; e < 3; ++e)
+                    for (int f = 0; f < 2; ++f) {
+                        fm::Memo c;
+                        fm::store(c, keyOf(1, 1, 1, 1, true), fm::Exit::kPlainDecline);
+                        hits += fm::hit(c, keyOf(vs, ps, g, e, f != 0)) ? 1u : 0u;
+                    }
+    check(hits == 1, "family memo: over a grid of 162 keys against one stored key exactly one hits");
+}
+
+// The store rule: a plain decline needs a none answer, a target kind other than 2, a vertex shader that is neither the menu panel's nor the
+// loader's, and the on-foot flag still the key's. Nothing else earns a hit.
+void testFamilyMemoStoreRule() {
+    unsigned plain = 0;
+    bool right = true;
+    for (int none = 0; none < 2; ++none)
+        for (int kind = 0; kind < 3; ++kind)
+            for (int probe = 0; probe < 2; ++probe)
+                for (int still = 0; still < 2; ++still) {
+                    const fm::Exit e = fm::exitOf(none != 0, kind, probe != 0, still != 0);
+                    const bool want = none && kind != 2 && !probe && still;
+                    right = right && (e == fm::Exit::kPlainDecline) == want;
+                    plain += e == fm::Exit::kPlainDecline;
+                }
+    check(right && plain == 2, "family memo store rule: of 24 outcomes exactly the 2 (none, kind 0 or 1, not panel or loader, flag still) are plain declines");
+    check(fm::exitOf(true, 2, false, true) == fm::Exit::kOther, "family memo store rule: the post-tonemap target (kind 2) is never stored");
+    check(fm::exitOf(true, 1, true, true) == fm::Exit::kOther && fm::exitOf(true, 0, true, true) == fm::Exit::kOther,
+          "family memo store rule: the panel's and the loader's vertex shaders are never stored, at any kind");
+    check(fm::exitOf(false, 1, false, true) == fm::Exit::kOther && fm::exitOf(false, 0, false, true) == fm::Exit::kOther,
+          "family memo store rule: a run that named a family is never stored");
+    check(fm::exitOf(true, 1, false, false) == fm::Exit::kOther, "family memo store rule: a run whose on-foot flag moved under it stores nothing a hit can use");
+    check(fm::exitOf(true, 0, false, true) == fm::Exit::kPlainDecline && fm::exitOf(true, 1, false, true) == fm::Exit::kPlainDecline,
+          "family memo store rule: none at kind 0 or kind 1, for another vertex shader, is stored");
+}
+
+// The facts the kind-0 and kind-1 branches of vscreen.cpp's uiLayerFamilyOf gather, as the code reads them (the wiring test pins the
+// transcription against the source): the pixel shader's hash only for the vertex shaders the rule names by a pair.
+UiLayerFamily gatheredFamily(int targetKind, uint64_t vs, uint64_t boundPs, bool onFoot) {
+    edvr::UiFamilyFacts f;
+    f.targetKind = targetKind;
+    f.vs = vs;
+    f.nativeOnFoot = onFoot;
+    if (targetKind == 1 && (vs == edvr::kHoloTargetSphere || vs == edvr::kUiVsOrbitLines || vs == edvr::kUiVsSupercruiseBars || vs == edvr::kUiVsSpaceDust))
+        f.ps = boundPs;
+    else if (targetKind == 1 && onFoot && edvr::uiOnFootHudVs(vs))
+        f.ps = boundPs;
+    else if (targetKind == 1 && (edvr::weaponsFireVs(vs) || edvr::shieldRefractVs(vs)))
+        f.ps = boundPs;
+    return edvr::uiLayerFamilyFor(f);
+}
+
+// One draw as the draw path meets it: the shaders, the on-foot flag, the target's kind (with Rtv0's generation and the layer's epoch, the
+// kind's keys), and the state a kind-2 decision reads that no key holds.
+struct FamilyDraw {
+    uint64_t vs = 0, ps = 0;
+    bool onFoot = false;
+    uint32_t generation = 1, epoch = 0;
+    int kind = 1;
+    bool external = false;
+};
+
+// The uncached decision. A kind-2 answer depends on facts the key cannot hold (the learned surfaces, the exclude list, the panel-size test),
+// modelled as one bit that moves between any two draws.
+UiLayerFamily uncachedFamily(const FamilyDraw& d, unsigned* probeNotes) {
+    if (probeNotes && (d.vs == edvr::kUiVsPanel || d.vs == edvr::kUiVsLoader)) ++*probeNotes;   // uiLayerNoteFamilyProbe counts: a side effect
+    if (d.kind == 2) return d.external ? UiLayerFamily::kScreen : UiLayerFamily::kNone;
+    return gatheredFamily(d.kind, d.vs, d.ps, d.onFoot);
+}
+
+// What a deliberately broken memo does, for the controls: each makes one thing the key or the rule must hold go missing.
+enum class Mutant { kNone, kKeyIgnoresPs, kKeyIgnoresVs, kKeyIgnoresGeneration, kKeyIgnoresEpoch, kKeyIgnoresOnFoot, kStoresKind2, kStoresProbeVs, kStoresFamilies };
+
+struct FamilyRun {
+    unsigned draws = 0, hits = 0, families = 0, mismatches = 0, noteDiff = 0;
+    fm::Counters count;
+};
+
+// The thunk's path (vscreen.cpp uiLayerFamilyMemoised and uiLayerFamilyRun): key, hit test, and on a miss the full run, counted by cause,
+// with its exit stored. The cached answer is compared with the uncached one for every draw.
+struct FamilyModel {
+    fm::Memo memo;
+    Mutant mutant;
+    unsigned notesCached = 0, notesFull = 0;
+    explicit FamilyModel(Mutant m) : mutant(m) {}
+    fm::Key keyFor(const FamilyDraw& d) const {
+        fm::Key k = keyOf(d.vs, d.ps, d.generation, d.epoch, d.onFoot);
+        if (mutant == Mutant::kKeyIgnoresPs) k.ps = 0;
+        if (mutant == Mutant::kKeyIgnoresVs) k.vs = 0;
+        if (mutant == Mutant::kKeyIgnoresGeneration) k.rtvGeneration = 0;
+        if (mutant == Mutant::kKeyIgnoresEpoch) k.epoch = 0;
+        if (mutant == Mutant::kKeyIgnoresOnFoot) k.onFoot = false;
+        return k;
+    }
+    UiLayerFamily draw(const FamilyDraw& d, FamilyRun& run) {
+        ++run.draws;
+        ++run.count.calls;
+        UiLayerFamily answer;
+        const fm::Key key = keyFor(d);
+        if (fm::hit(memo, key)) {
+            ++run.hits;
+            ++run.count.hits;
+            answer = UiLayerFamily::kNone;
+        } else {
+            if (fm::missCause(memo) == fm::MissCause::kKeyMoved) ++run.count.missMoved;
+            else ++run.count.missNothing;
+            answer = uncachedFamily(d, &notesCached);
+            const bool none = answer == UiLayerFamily::kNone;
+            const bool probeVs = d.vs == edvr::kUiVsPanel || d.vs == edvr::kUiVsLoader;
+            fm::Exit exit = fm::exitOf(none, d.kind, probeVs, true);
+            if (mutant == Mutant::kStoresKind2 && none && d.kind == 2) exit = fm::Exit::kPlainDecline;
+            if (mutant == Mutant::kStoresProbeVs && none && probeVs && d.kind != 2) exit = fm::Exit::kPlainDecline;
+            if (mutant == Mutant::kStoresFamilies && !none) exit = fm::Exit::kPlainDecline;
+            fm::store(memo, key, exit);
+        }
+        const UiLayerFamily full = uncachedFamily(d, &notesFull);
+        // The verification the DLL does on a hit: the same comparison, for every draw here.
+        if (answer != full) ++run.mismatches;
+        run.families += full != UiLayerFamily::kNone;
+        return answer;
+    }
+};
+
+// The named shaders. Every vertex shader the family rule or the gather names, the pixel shaders of every pair, and two unnamed of each.
+std::vector<uint64_t> namedVertexShaders() {
+    std::vector<uint64_t> v = {edvr::kUiVsPanel, edvr::kUiVsLoader, edvr::kUiVsHolo, edvr::kUiVsHoloGuiFxOff, edvr::kUiVsFlightHud, edvr::kUiVsSprite,
+                               edvr::kUiVsGuiVector, edvr::kUiVsGuiText, edvr::kUiVsGuiIcons, edvr::kUiVsOrbitLines, edvr::kUiVsSupercruiseBars,
+                               edvr::kUiVsSpaceDust, edvr::kHoloTargetSphere, edvr::kUiVsShieldRefract, edvr::kUiVsOnFootHudA, edvr::kUiVsOnFootHudB,
+                               0x0ull, 0x1234567890ABCDEFull};
+    for (uint64_t h : edvr::kHoloFamiliesTake) v.push_back(h);
+    for (size_t i = 0; i < edvr::kWeaponPairCount; ++i) v.push_back(edvr::kWeaponPairs[i].vs);
+    return v;
+}
+std::vector<uint64_t> namedPixelShaders() {
+    std::vector<uint64_t> v = {edvr::kUiPsOrbitLines, edvr::kUiPsSupercruiseBars, edvr::kUiPsSpaceDust, edvr::kUiPsShieldRefract,
+                               0xEA02FAC2BD6C643Cull, 0xE95634B0F61D218Full,   // the target sphere's two exact pixel shaders
+                               0x067CBE05E7EF7F32ull, 0xCF4ECC0397199145ull, 0xF10792B40AE3ED42ull, 0xAD050E528C0E8B17ull, 0xEFDF9BCB97E166A1ull,   // on-foot HUD
+                               0x0ull, 0xDEADBEEFull};
+    for (size_t i = 0; i < edvr::kWeaponPairCount; ++i) v.push_back(edvr::kWeaponPairs[i].ps);
+    for (uint64_t h : edvr::kUiPanelPs) v.push_back(h);
+    for (uint64_t h : edvr::kUiLoaderPs) v.push_back(h);
+    return v;
+}
+
+// A small deterministic generator: the sweep needs the same sequences on every run.
+struct Lcg {
+    uint64_t s;
+    uint32_t next() {
+        s = s * 6364136223846793005ull + 1442695040888963407ull;
+        return static_cast<uint32_t>(s >> 33);
+    }
+    uint32_t below(uint32_t n) { return next() % n; }
+};
+
+// Every named vertex shader against every named pixel shader, both flags, target kinds 0 and 1 (the kinds the key decides): each draw three
+// times in a row through one memo, so the first runs in full and the repeats hit exactly where the uncached answer is a plain decline.
+FamilyRun sweepAllPairs(Mutant mutant, unsigned* storableRepeatsMissed) {
+    FamilyRun run;
+    FamilyModel model(mutant);
+    const std::vector<uint64_t> vss = namedVertexShaders(), pss = namedPixelShaders();
+    uint32_t generation = 1;
+    for (int kind = 0; kind < 2; ++kind)
+        for (int flag = 0; flag < 2; ++flag)
+            for (uint64_t vs : vss)
+                for (uint64_t ps : pss) {
+                    FamilyDraw d;
+                    d.vs = vs;
+                    d.ps = ps;
+                    d.onFoot = flag != 0;
+                    d.kind = kind;
+                    d.generation = generation + static_cast<uint32_t>(kind);   // a target of another kind is another generation: the kind is a function of it
+                    d.epoch = 0;
+                    const unsigned hitsBefore = run.hits;
+                    model.draw(d, run);
+                    const bool storable = uncachedFamily(d, nullptr) == UiLayerFamily::kNone && vs != edvr::kUiVsPanel && vs != edvr::kUiVsLoader;
+                    model.draw(d, run);   // the repeats: hits exactly when the first run was a plain decline
+                    model.draw(d, run);
+                    if (storableRepeatsMissed && storable && run.hits < hitsBefore + 2) ++*storableRepeatsMissed;
+                }
+    run.noteDiff = model.notesCached == model.notesFull ? 0u : 1u;
+    return run;
+}
+
+// Random sequences of draws with the key's own events: a draw repeats the last one, changes a shader, flips the on-foot flag, moves Rtv0 (a new
+// generation, with a new target kind), or resets the layer's target cache (the epoch, with a new kind); and the state only a kind-2 decision reads
+// moves between any two draws.
+FamilyRun sweepSequences(Mutant mutant, uint32_t seed, unsigned draws) {
+    FamilyRun run;
+    FamilyModel model(mutant);
+    const std::vector<uint64_t> vss = namedVertexShaders(), pss = namedPixelShaders();
+    Lcg rng{seed};
+    FamilyDraw d;
+    d.vs = vss[0];
+    d.ps = pss[0];
+    for (unsigned i = 0; i < draws; ++i) {
+        const uint32_t e = rng.below(100);
+        if (e < 35) {
+            // the same bindings again
+        } else if (e < 55) {
+            d.ps = pss[rng.below(static_cast<uint32_t>(pss.size()))];
+        } else if (e < 75) {
+            d.vs = vss[rng.below(static_cast<uint32_t>(vss.size()))];
+            d.ps = pss[rng.below(static_cast<uint32_t>(pss.size()))];
+        } else if (e < 85) {
+            d.onFoot = !d.onFoot;
+        } else if (e < 95) {
+            ++d.generation;
+            d.kind = static_cast<int>(rng.below(3));
+        } else {
+            ++d.epoch;
+            d.kind = static_cast<int>(rng.below(3));
+        }
+        d.external = rng.below(3) == 0;
+        model.draw(d, run);
+    }
+    run.noteDiff = model.notesCached == model.notesFull ? 0u : 1u;
+    return run;
+}
+
+void testFamilyMemoSweep() {
+    unsigned missed = 0;
+    const FamilyRun all = sweepAllPairs(Mutant::kNone, &missed);
+    check(all.mismatches == 0 && all.noteDiff == 0, "family sweep: every named vertex shader and pixel shader, kinds 0 and 1, the flag both ways: the cached answer is the uncached one");
+    check(missed == 0, "family sweep: every repeat of a plain decline hit, so the memo is not trivially empty");
+    check(all.families > 0 && all.hits * 3 > all.draws, "family sweep: the pairs include family answers (they never hit) and plain declines (their repeats do)");
+    const FamilyRun seq = sweepSequences(Mutant::kNone, 12345, 400000);
+    check(seq.mismatches == 0 && seq.noteDiff == 0, "family sweep: 400000 random draws through generation, epoch, kind, flag and shader changes: cached equals uncached every time");
+    check(seq.hits > 20000 && seq.families > 5000, "family sweep: the random run met both hits and family answers in numbers");
+    check(seq.count.calls == seq.count.hits + seq.count.missNothing + seq.count.missMoved && seq.count.calls == seq.draws &&
+              seq.count.missNothing > 0 && seq.count.missMoved > 0,
+          "family sweep: the counters add up (calls = hits + both kinds of miss), both miss causes occur");
+    std::printf("aa_off_test: family sweep: %u pair draws (%u hits), %u random draws (%u hits, %u of them family answers), 0 mismatches\n",
+                all.draws, all.hits, seq.draws, seq.hits, seq.families);
+    // Controls: each fault makes the sweep fail, so the sweep can fail.
+    const Mutant mutants[] = {Mutant::kKeyIgnoresPs,    Mutant::kKeyIgnoresVs,   Mutant::kKeyIgnoresGeneration, Mutant::kKeyIgnoresEpoch,
+                              Mutant::kKeyIgnoresOnFoot, Mutant::kStoresKind2,    Mutant::kStoresProbeVs,        Mutant::kStoresFamilies};
+    const char* const names[] = {"the shader PS missing from the key", "the VS missing from the key", "Rtv0's generation missing from the key",
+                                 "the epoch missing from the key", "the on-foot flag missing from the key", "kind 2 stored",
+                                 "the panel's and the loader's vertex shaders stored", "a family answer stored"};
+    for (size_t i = 0; i < sizeof(mutants) / sizeof(mutants[0]); ++i) {
+        unsigned ignored = 0;
+        const FamilyRun a = sweepAllPairs(mutants[i], &ignored);
+        const FamilyRun b = sweepSequences(mutants[i], 12345, 400000);
+        char what[160];
+        std::snprintf(what, sizeof(what), "family sweep control: with %s the sweep fails (a wrong family or a missed census note)", names[i]);
+        check(a.mismatches + a.noteDiff + b.mismatches + b.noteDiff > 0, what);
+    }
+}
+
+// The verify frames, and the window line.
+void testFamilyMemoVerification() {
+    unsigned verify = 0, verifyOnSampleCadence = 0, verifyNow = 0;
+    bool phases[16] = {};
+    bool formula = true;
+    for (uint64_t n = 0; n < 256; ++n) {
+        const bool v = fm::verifyFrame(n);
+        formula = formula && v == ((n + n / 16) % 16 == 8);
+        verify += v;
+        if (v) {
+            phases[n % 16] = true;
+            verifyOnSampleCadence += (n % 16) == 0;   // the perf monitor samples draws on frames 0 mod 16
+        }
+        verifyNow += fm::verifyNow(n, (n % 16) == 0);
+    }
+    unsigned distinct = 0;
+    for (bool p : phases) distinct += p;
+    check(formula && verify == 16, "family verification: one frame in sixteen verifies, by (n + n/16) % 16 == 8");
+    check(distinct == 16, "family verification: over 256 frames the verify frames meet every phase of the 16-frame cadence");
+    check(verifyOnSampleCadence == 1 && verifyNow == 15, "family verification: one verify frame in 256 lands on a sampled frame, and a hit there is not verified");
+    check(!fm::verifyNow(8, true) && fm::verifyNow(8, false) && !fm::verifyNow(9, false), "family verification: a sampled frame never verifies; frame 8 does when it is not sampled");
+    check(fm::verifyFrame(8) && !fm::verifyFrame(24) && fm::verifyFrame(23), "family verification: the phase slips by one every 16 frames (8, then 23, ...)");
+    check(fm::verifyFrame(0xFFFFFFFFull + 17) == (((0xFFFFFFFFull + 17) + (0xFFFFFFFFull + 17) / 16) % 16 == 8),
+          "family verification: the frame count is 64 bits wide, so the phase arithmetic does not wrap");
+
+    // The line, at its worst: every counter at the 64-bit maximum, the frame at its 32-bit maximum.
+    fm::Counters worst;
+    worst.calls = worst.hits = worst.missNothing = worst.missMoved = worst.verified = worst.mismatches = 18446744073709551615ull;
+    char line[2000];
+    const size_t n = fm::formatLine(line, sizeof(line), 4294967295u, worst);
+    std::printf("aa_off_test: ui layer family cache line at its worst: %zu characters (limit 1150; the log holds about 1170)\n", n);
+    check(n == std::strlen(line) && n < 1150 && line[n - 1] == '.', "family line: at its worst it fits the log line (under 1150 characters) and ends whole");
+    check(std::strncmp(line, "ui layer family cache: ", 23) == 0, "family line: it starts 'ui layer family cache:'");
+    fm::Counters some;
+    some.calls = 100;
+    some.hits = 60;
+    some.missNothing = 25;
+    some.missMoved = 15;
+    some.verified = 4;
+    some.mismatches = 1;
+    fm::formatLine(line, sizeof(line), 5400, some);
+    check(std::strstr(line, "window ending 5400") != nullptr && std::strstr(line, "decision: 100;") != nullptr &&
+              std::strstr(line, "from the memo: 60;") != nullptr && std::strstr(line, "ran in full: 40 (") != nullptr &&
+              std::strstr(line, "last run was not a plain decline 25, the key moved 15)") != nullptr &&
+              std::strstr(line, "4 hits also ran the full decision, 1 of them named a family") != nullptr,
+          "family line: it says the calls, the hits, the two kinds of miss, the verified hits and the mismatches");
+    fm::formatLine(line, sizeof(line), 5400, fm::Counters());
+    check(std::strstr(line, "decision: 0;") != nullptr && std::strstr(line, "1 of them") == nullptr,
+          "family line: a window with no calls is written, as zeros (the line's absence would mean a build without it)");
+    char tiny[24];
+    std::memset(tiny, 'x', sizeof(tiny));
+    const size_t nt = fm::formatLine(tiny, sizeof(tiny), 5400, some);
+    check(nt < sizeof(tiny) && tiny[nt] == '\0', "family line: a short buffer is cut and terminated, never overrun");
+    char one[1] = {'x'};
+    check(fm::formatLine(one, 1, 5400, some) == 0 && one[0] == '\0', "family line: a one-byte buffer holds the terminator alone");
+}
+
+// The source, read from the repo root: the model above transcribes vscreen.cpp's gather, so this pins the transcription; and the epoch is
+// bumped at every reset of the target-kind cache the key depends on.
+std::string slurpFile(const char* path) {
+    std::string out;
+    if (std::FILE* f = std::fopen(path, "rb")) {
+        char buf[8192];
+        size_t got;
+        while ((got = std::fread(buf, 1, sizeof(buf), f)) > 0) out.append(buf, got);
+        std::fclose(f);
+    }
+    return out;
+}
+// The code only, whitespace gone: // and /* */ comments removed first, so a comment can neither satisfy nor spoil a pin.
+std::string squeezedCode(const std::string& text) {
+    std::string out;
+    for (size_t i = 0; i < text.size();) {
+        if (text.compare(i, 2, "//") == 0) {
+            while (i < text.size() && text[i] != '\n') ++i;
+        } else if (text.compare(i, 2, "/*") == 0) {
+            const size_t end = text.find("*/", i + 2);
+            i = end == std::string::npos ? text.size() : end + 2;
+        } else {
+            if (text[i] != ' ' && text[i] != '\t' && text[i] != '\r' && text[i] != '\n') out.push_back(text[i]);
+            ++i;
+        }
+    }
+    return out;
+}
+size_t countOf(const std::string& s, const std::string& part) {
+    size_t n = 0;
+    for (size_t at = s.find(part); at != std::string::npos; at = s.find(part, at + part.size())) ++n;
+    return n;
+}
+bool contains(const std::string& s, const std::string& part) { return s.find(part) != std::string::npos; }
+
+void testFamilyMemoWiring() {
+    const std::string vscreen = slurpFile("src/d3d11/vscreen.cpp"), layer = slurpFile("src/d3d11/ui_layer.cpp");
+    check(vscreen.size() > 100000 && layer.size() > 100000, "family wiring: vscreen.cpp and ui_layer.cpp are readable from the repo root");
+    const std::string head = "__declspec(noinline) UiLayerFamily uiLayerFamilyOf(State* s, char kind, UINT count) {";
+    const size_t fn = vscreen.find(head);
+    check(fn != std::string::npos, "family wiring: uiLayerFamilyOf is in vscreen.cpp");
+    if (fn == std::string::npos) return;
+    const size_t kind2 = vscreen.find("    if (f.targetKind == 2) {\n", fn);
+    const size_t end = vscreen.find("\n}\n", fn);
+    check(kind2 != std::string::npos && end != std::string::npos && kind2 < end, "family wiring: the kind-2 branch is inside uiLayerFamilyOf");
+    if (kind2 == std::string::npos || end == std::string::npos) return;
+    const std::string below = squeezedCode(vscreen.substr(fn + head.size(), kind2 - fn - head.size()));
+    const std::string kind2Block = squeezedCode(vscreen.substr(kind2, end - kind2));
+    // Below kind 2 the decision reads: the target kind, the quality gate (kind 2's early return), the vertex shader's hash, the on-foot flag, and
+    // the pixel shader's hash only where the rule names a pair -- the three conditions the model transcribes.
+    check(contains(below, "f.targetKind=uiLayerTargetKind();") && contains(below, "if(f.targetKind==2&&!uiLayerQualityLive())returnUiLayerFamily::kNone;") &&
+              contains(below, "f.vs=bindingShaderHash(BindSlot::Vs);") && contains(below, "f.nativeOnFoot=nativeOnFootSharpHudWanted();"),
+          "family wiring: below kind 2 the gather reads the target kind, the vertex shader's hash and the on-foot flag");
+    check(contains(below, "if(f.targetKind==1&&(f.vs==kHoloTargetSphere||f.vs==kUiVsOrbitLines||f.vs==kUiVsSupercruiseBars||f.vs==kUiVsSpaceDust))f.ps=bindingShaderHash(BindSlot::Ps);") &&
+              contains(below, "elseif(f.targetKind==1&&f.nativeOnFoot&&uiOnFootHudVs(f.vs))f.ps=bindingShaderHash(BindSlot::Ps);") &&
+              contains(below, "elseif(f.targetKind==1&&(weaponsFireVs(f.vs)||shieldRefractVs(f.vs)))f.ps=bindingShaderHash(BindSlot::Ps);") &&
+              countOf(below, "bindingShaderHash(BindSlot::Ps)") == 3,
+          "family wiring: the pixel shader's hash is read in exactly the three places the sweep's gather reads it");
+    // Every call below kind 2 is one of those; anything else would be a new input the key does not hold.
+    static const char* const kAllowed[] = {"uiLayerTargetKind", "uiLayerQualityLive", "bindingShaderHash", "nativeOnFootSharpHudWanted", "uiOnFootHudVs",
+                                           "weaponsFireVs", "shieldRefractVs", "if", "elseif"};
+    std::string stray;
+    for (size_t i = 0; i < below.size(); ++i) {
+        if (below[i] != '(') continue;
+        size_t b = i;
+        while (b > 0 && (std::isalnum(static_cast<unsigned char>(below[b - 1])) || below[b - 1] == '_')) --b;
+        const std::string name = below.substr(b, i - b);
+        if (name.empty()) continue;
+        bool known = false;
+        for (const char* a : kAllowed) known = known || name == a;
+        if (!known) stray += name + " ";
+    }
+    check(stray.empty(), "family wiring: below kind 2 the gather calls nothing but the key's inputs (a stray call would be an input the memo's key lacks)");
+    if (!stray.empty()) std::printf("aa_off_test: stray calls below kind 2: %s\n", stray.c_str());
+    // The state a kind-2 decision reads lives in the kind-2 block alone.
+    check(contains(kind2Block, "uiDepthIsExcluded(") && contains(kind2Block, "srv0IsPanelSized(") && contains(kind2Block, "uiDepthSampledSurfaceSlot(") &&
+              !contains(below, "uiDepthIsExcluded(") && !contains(below, "srv0IsPanelSized(") && !contains(below, "uiDepthSampledSurfaceSlot("),
+          "family wiring: ui_depth's exclude list, the panel-size test and the learned surfaces are read in the kind-2 block alone (the memo never stores kind 2)");
+    const std::string whole = squeezedCode(vscreen.substr(fn, end - fn));
+    check(countOf(whole, "uiLayerNoteFamilyProbe(") == 1 && contains(whole, "if(f.vs==kUiVsPanel||f.vs==kUiVsLoader){if(why==UiFamilyWhy::kNoSurface&&!f.ps)f.ps=bindingShaderHash(BindSlot::Ps);uiLayerNoteFamilyProbe("),
+          "family wiring: the family census is fed for the panel's and the loader's vertex shaders alone (the memo never stores those)");
+    // The memo's own wiring in vscreen.cpp.
+    const std::string code = squeezedCode(vscreen);
+    check(countOf(code, "uiLayerFamilyOf(") == 3 &&
+              contains(code, "constUiLayerFamilyfull=uiLayerFamilyOf(s,kind,count);++m.count.verified;") &&
+              contains(code, "constUiLayerFamilyfamily=uiLayerFamilyOf(s,kind,count);constboolnone=family==UiLayerFamily::kNone;") &&
+              contains(code, "constUiLayerFamilyuiFamily=uiLayerFamilyMemoised(g_state,kind,count);"),
+          "family wiring: uiLayerFamilyOf is called from the memo's miss path and its verification alone, and the draw path asks the memo");
+    check(contains(code, "constboolprobeVs=key.vs==kUiVsPanel||key.vs==kUiVsLoader;") && contains(code, "constboolcandidate=none&&!probeVs;") &&
+              contains(code, "constboolflagStill=!candidate||nativeOnFootSharpHudWanted()==key.onFoot;") &&
+              contains(code, "uifamilymemo::store(m.memo,key,uifamilymemo::exitOf(none,targetKind,probeVs,flagStill));") &&
+              contains(code, "constinttargetKind=candidate&&flagStill?uiLayerTargetKind():0;"),
+          "family wiring: the run stores through exitOf, with the panel and loader test, the on-foot flag re-read and the target kind read after the run");
+    check(contains(code, "key.vs=bindingShaderHash(BindSlot::Vs);key.ps=bindingShaderHash(BindSlot::Ps);key.rtvGeneration=bindingGeneration(BindSlot::Rtv0);key.epoch=uiLayerFamilyEpoch();key.onFoot=nativeOnFootSharpHudWanted();"),
+          "family wiring: the key is the two shader hashes, Rtv0's generation, the layer's epoch and the on-foot flag");
+    check(contains(code, "if(m.verifyFrame&&!perfMonitorSampleDraws())returnuiLayerFamilyVerifyHit(s,kind,count,key);") &&
+              contains(code, "++g_uiFamilyMemo.frames;g_uiFamilyMemo.verifyFrame=uifamilymemo::verifyFrame(g_uiFamilyMemo.frames);"),
+          "family wiring: a hit is verified on a verify frame off a sampled frame, and the frame clock advances at the frame boundary");
+    // The epoch: every reset of the target-kind cache but its own refresh is followed by a bump, and the layer's liveness refresh bumps it.
+    const std::string lcode = squeezedCode(layer);
+    check(countOf(lcode, "g_tc=TargetCache{};") == 3 && countOf(lcode, "g_tc=TargetCache{};++detail::g_uiLayerFamilyEpoch;") == 2 &&
+              contains(lcode, "if(gen==g_tc.gen)returng_tc.kind;g_tc=TargetCache{};g_tc.gen=gen;") && countOf(lcode, "++detail::g_uiLayerFamilyEpoch;") == 3 &&
+              contains(lcode, "detail::g_uiLayerCrispOn=detail::g_uiLayerLive&&!g_crispStoodDown;++detail::g_uiLayerFamilyEpoch;}"),
+          "family wiring: ui_layer.cpp resets the target-kind cache in three places, bumps the epoch after the two that are not its own refresh, and in refreshLive");
+}
+
 void usage() {
     std::puts("usage: aa_off_test --self-test | --dry-run");
 }
@@ -950,6 +1476,7 @@ int main(int argc, char** argv) {
     testStepClockModes();
     testStepClockOtherModes();
     testStepClockMarks();
+    testStepClockUiLayerSplit();
     testStepClockFastPath();
     testStepClockReissue();
     testStepWindow();
@@ -959,6 +1486,11 @@ int main(int argc, char** argv) {
     testStepTextWorstCase();
     testMemoHit();
     testMemoRun();
+    testFamilyMemoKey();
+    testFamilyMemoStoreRule();
+    testFamilyMemoSweep();
+    testFamilyMemoVerification();
+    testFamilyMemoWiring();
     std::printf("aa_off_test: %d checks, %d failed\n", g_checks, g_failed);
     return g_failed ? 1 : 0;
 }

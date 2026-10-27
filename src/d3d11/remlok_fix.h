@@ -36,6 +36,8 @@
 
 #include <cstdint>
 
+#include "binding_shadow.h"
+
 struct ID3D11DeviceContext;
 
 namespace edvr {
@@ -66,6 +68,11 @@ extern RemlokMode g_remlokMode;
 }  // namespace detail
 inline bool remlokWantsDraws() { return detail::g_remlokMode != detail::RemlokMode::kStock; }
 // F26: the one-shot diagnostic for the on-foot visor draw (VS B553BB479B7C0B97; read only).
+// remlokOnFootDiagnose returns on its first line unless the bound vertex shader is that one, and does nothing before that line, so the
+// draw path asks remlokOnFootVisorVsBound (inline, one field read) first and makes the call only for the visor's own draws.
+// remlok_fix.cpp's kOnFootVisorVs is this constant, tied to visoraxis::kVisorVsHash by its static_assert.
+constexpr uint64_t kRemlokOnFootVisorVs = 0xB553BB479B7C0B97ull;
+inline bool remlokOnFootVisorVsBound() { return bindingShaderHash(BindSlot::Vs) == kRemlokOnFootVisorVs; }
 void remlokOnFootDiagnose(char kind, uint32_t count, uint32_t instances);
 // F27: keeps the visor pixel shader's bytecode when the device creates it (68ABCB9FEF6CA66C only); the per-eye variants are made from it.
 void remlokRememberVisorPs(uint64_t hash, const void* bytecode, size_t bytes);

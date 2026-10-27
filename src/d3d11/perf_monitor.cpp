@@ -1238,6 +1238,10 @@ void perfMonitorFrame(ID3D11Device* dev) {
             drawstep::formatCallsLine(stepLine, sizeof(stepLine), g_drawSteps, info);
             Log::get().note("%s", stepLine);
             g_drawSteps.reset();
+            // TEMPORARY, built 2026-10-27 (ui_family_memo.h): the UI layer's family-decision memo's window, right after the step lines it
+            // is read beside. Written every window; the call starts the counters again.
+            vScreenUiFamilyCacheLine(stepLine, sizeof(stepLine), s.frameNo);
+            Log::get().note("%s", stepLine);
         }
         s.drawWindowMs = 0.0; s.drawWindowMaxMs = 0.0f; s.drawWindowSamples = 0;
         // Written every window, quiet or not, so a window with no refresh in it (all zeros) can be told from a build that does not have this line.

@@ -88,7 +88,14 @@ extern bool g_uiLayerWorldReissue;
 extern bool g_uiLayerMapsOn;
 extern uint64_t g_uiLayerGateFrame;
 extern uint64_t g_uiLayerNamedAt;
+extern uint32_t g_uiLayerFamilyEpoch;
 }  // namespace detail
+
+// The family decision's epoch (built 2026-10-27, ui_family_memo.h): a counter that only moves forward, bumped wherever the layer
+// resets or rewrites its target-kind cache other than by that cache's own refresh on a new Rtv0 generation (the flat adapter's size
+// change and release, ui_layer.cpp), and wherever the layer's liveness is recomputed (refreshLive). vscreen's memo of the plain
+// decline keys on it beside the bindings, so none of those events can leave a stale decline standing. One load.
+inline uint32_t uiLayerFamilyEpoch() { return detail::g_uiLayerFamilyEpoch; }
 
 // The draw path's one gate: fix.ui_quality is on, a temporal mode is on, and
 // the layer has not stood down. One load.

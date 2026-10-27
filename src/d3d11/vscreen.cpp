@@ -66,6 +66,7 @@
 #include "ui_depth.h"
 #include "ui_layer.h"
 #include "ui_layer_math.h"
+#include "ui_family_memo.h"   // the family decision's memo of its plain decline (built 2026-10-27)
 #include "vr_world_route.h"  // VrWorldInternalScope: the world route's own D3D calls step past these hooks
 #include "ui_surfaces.h"  // uiAtlasNoteWrite: the glyph atlas instrument's write count
 #include "celestial_motion.h"   // the planet patch constants' CPU shadow: the write tees, the draw capture, the boundary tick
@@ -2612,7 +2613,9 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     // The RemLok overlay fix, after the probes so a census taken while it
     // runs still records the draw the game submitted. The shape is asked
     // first, inline (remlok_fix.h): any other shape comes back kNone.
-    remlokOnFootDiagnose(kind, count, instances);   // F26: the on-foot visor diagnostic (read only; VS B553BB479B7C0B97 only)
+    // F26: the on-foot visor diagnostic (read only; VS B553BB479B7C0B97 only). The vertex shader is asked inline first: the call returns
+    // at once for any other, and was made on every eye draw.
+    if (remlokOnFootVisorVsBound()) remlokOnFootDiagnose(kind, count, instances);
     if (remlokWantsDraws() && remlokOverlayShape(kind, count, instances)) {
         const RemlokAction a = remlokOnEyeDraw(kind, count, instances);
         if (a == RemlokAction::kHide) return DrawVerdict::kSkip;
@@ -2635,8 +2638,10 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
 
     // The loader dialog's dimming wash, recognised by what it samples -- and
     // first by its shape, inline (scrim_fix.h), which turns away the quads
-    // and small draws before the call.
-    if (scrimWantsDraws() && scrimWashShape(kind, count, instances) &&
+    // and small draws before the call, and then by its slot-0 cache's decline,
+    // inline too: most meshes bind a texture that cache already knows is not
+    // the wash's, and the call would only have said so.
+    if (scrimWantsDraws() && scrimWashShape(kind, count, instances) && !scrimWashSrv0Declines() &&
         scrimOnEyeDraw(kind, count, instances)) {
         return DrawVerdict::kScrim;
     }
@@ -4095,6 +4100,76 @@ __declspec(noinline) UiLayerFamily uiLayerFamilyOf(State* s, char kind, UINT cou
     return family;
 }
 
+// The family decision's plain decline, remembered (built 2026-10-27, trim F of docs\engine-render-performance-2026-09-19.md's "Desk design:
+// three more draw-path trims"; ui_family_memo.h has the key and the rules). For an ordinary scene draw uiLayerFamilyOf answers none from
+// the two shader hashes, the target kind and the on-foot flag alone; a draw that repeats the key of the last full run, after a run that was
+// a plain decline, is told none without it. A hit goes down the path a none result goes down: the caller's locals are set from the family
+// and nothing here touches them. The memo is behaviour and has no key. The owner context's draw thunks are its only callers.
+struct UiFamilyMemo {
+    uifamilymemo::Memo memo;
+    // TEMPORARY, with the verification below: the window's counters, the frame boundaries seen (the verify phase's clock), whether this
+    // frame verifies, and how many mismatches the log has named.
+    uifamilymemo::Counters count;
+    uint64_t frames = 0;
+    bool verifyFrame = false;
+    uint32_t named = 0;
+};
+UiFamilyMemo g_uiFamilyMemo;
+
+// TEMPORARY, the verification: a hit on a verify frame (ui_family_memo.h verifyFrame) off a sampled frame also runs the full decision, and
+// the full result stands. A hit that the full run names a family for is a mismatch: counted, and the first three of a session named.
+__declspec(noinline) UiLayerFamily uiLayerFamilyVerifyHit(State* s, char kind, UINT count, const uifamilymemo::Key& key) {
+    UiFamilyMemo& m = g_uiFamilyMemo;
+    const UiLayerFamily full = uiLayerFamilyOf(s, kind, count);
+    ++m.count.verified;
+    if (full != UiLayerFamily::kNone) {
+        ++m.count.mismatches;
+        if (m.named < 3) {
+            ++m.named;
+            Log::get().note("ui layer family cache mismatch %u of 3 named (TEMPORARY): the memo said none and the full decision said family %d; "
+                            "VS %016llX PS %016llX, target kind %d, on foot %d, epoch %u, Rtv0 generation %u.",
+                            m.named, static_cast<int>(full), static_cast<unsigned long long>(key.vs), static_cast<unsigned long long>(key.ps),
+                            uiLayerTargetKind(), key.onFoot ? 1 : 0, key.epoch, key.rtvGeneration);
+        }
+    }
+    return full;
+}
+
+// A call the memo did not answer: the full decision, counted by why, and what it earns the memo. The decline is stored only for a run that
+// returned none, at a target kind other than 2, for a vertex shader that is neither the menu panel's nor the loader's (those two feed the
+// family census inside the decision), and with the on-foot flag still the key's after the run; any other exit is stored as not a plain
+// decline, so the next call with this key runs in full too.
+__declspec(noinline) UiLayerFamily uiLayerFamilyRun(State* s, char kind, UINT count, const uifamilymemo::Key& key) {
+    UiFamilyMemo& m = g_uiFamilyMemo;
+    if (uifamilymemo::missCause(m.memo) == uifamilymemo::MissCause::kKeyMoved) ++m.count.missMoved;
+    else ++m.count.missNothing;
+    const UiLayerFamily family = uiLayerFamilyOf(s, kind, count);
+    const bool none = family == UiLayerFamily::kNone;
+    const bool probeVs = key.vs == kUiVsPanel || key.vs == kUiVsLoader;
+    const bool candidate = none && !probeVs;
+    const bool flagStill = !candidate || nativeOnFootSharpHudWanted() == key.onFoot;
+    const int targetKind = candidate && flagStill ? uiLayerTargetKind() : 0;
+    uifamilymemo::store(m.memo, key, uifamilymemo::exitOf(none, targetKind, probeVs, flagStill));
+    return family;
+}
+
+inline UiLayerFamily uiLayerFamilyMemoised(State* s, char kind, UINT count) {
+    UiFamilyMemo& m = g_uiFamilyMemo;
+    uifamilymemo::Key key;
+    key.vs = bindingShaderHash(BindSlot::Vs);
+    key.ps = bindingShaderHash(BindSlot::Ps);
+    key.rtvGeneration = bindingGeneration(BindSlot::Rtv0);
+    key.epoch = uiLayerFamilyEpoch();
+    key.onFoot = nativeOnFootSharpHudWanted();
+    ++m.count.calls;
+    if (uifamilymemo::hit(m.memo, key)) {
+        ++m.count.hits;
+        if (m.verifyFrame && !perfMonitorSampleDraws()) return uiLayerFamilyVerifyHit(s, kind, count, key);
+        return UiLayerFamily::kNone;
+    }
+    return uiLayerFamilyRun(s, kind, count, key);
+}
+
 // The verdicts that forward the game's own draw -- as it is, or wrapped in
 // their own state changes, or (the loader panel, the curved screen) drawn
 // by a substitution the layer brackets too. Everything else swallows it,
@@ -4247,7 +4322,7 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     // private geometry shader (supercruise_bars.h). Set with the family below, read at the layer's bracket.
     bool barsFamily = false;
     if (owner && uiLayerLive() && g_state->rtv0Eye && v != DrawVerdict::kQuadSkip) {
-        const UiLayerFamily uiFamily = uiLayerFamilyOf(g_state, kind, count);
+        const UiLayerFamily uiFamily = uiLayerFamilyMemoised(g_state, kind, count);
         compositeCounted = uiDepthScope.composite;
         compositeFamily = uiFamily;
         barsFamily = uiFamily == UiLayerFamily::kSupercruiseBars;
@@ -4274,6 +4349,7 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
             uiLayerNoteFamilyProbe(vs, 0, 0, static_cast<int>(UiFamilyWhy::kNotEyeTarget));
         }
     }
+    stepMark(drawstep::kFwUiLayer);   // fix.ui_quality's family decision ends here (the memo, the full decision and the not-an-eye-target note)
     // After the UI: a draw that WRITES an eye target the UI was already
     // taken from this frame is taken into the same eye's layer too, after
     // the UI, so it stays over it -- unless it is a post pass (an eye-sized
@@ -4306,6 +4382,7 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
             uiLayerWorldReissueAbandon();
         }
     }
+    stepMark(drawstep::kFwAfterUi);   // the after-UI branch (the retry that takes a later write into the layer) ends here
     // The census of composites left in the scene, settled after BOTH takes (the
     // family's and the after-UI retry's): a composite is counted once, taken
     // into the layer or left in the game's frame, and a left one is named by its
@@ -4318,8 +4395,8 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
             uiLayerNoteCompositeLeft(bindingShaderHash(BindSlot::Vs), bindingShaderHash(BindSlot::Ps),
                                      static_cast<int>(compositeFamily));
         }
+        stepMark(drawstep::kFwUiLayer);   // the census closes the family decision's step again (it runs for a composite draw only)
     }
-    stepMark(drawstep::kFwUiLayer);   // fix.ui_quality's family and after-UI decisions and the composite census end here
     // TEMPORARY, the blend probe: the verdict, the UI layer's decisions (the family's and the after-UI retry's) and the coverage and
     // hologram classifications are all settled here, and the game's bindings are still its own: no verdict's Begin has run.
     if (blendProbing)
@@ -5401,10 +5478,11 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
     // relaxed load of a zero.
     const bool bodyCull = nativeOnFootBodyCullWanted() && self == g_state->ownerCtx &&
                           nativeOnFootBodyCullBegin(self, perInstance, instances);
-    // Engine-record velocity (with fix.temporal_aa): four generation
-    // compares; the pool families' substituted shaders and MRT6 are bound
-    // only when the game has rebound something since the last look. After the
-    // verdict, which refreshes rtv0Eye; a draw a verdict claims is left alone.
+    // Engine-record velocity (with fix.temporal_aa): nine compares (the Vs, Ps,
+    // Rtv0, Dsv0 and Blend generations, the VsSrv33 and VsCb1 pointers, the eye
+    // and the guarded SRV3); the pool families' substituted shaders and MRT6 are
+    // bound only when the game has rebound something since the last look. After
+    // the verdict, which refreshes rtv0Eye; a draw a verdict claims is left alone.
     if (v == DrawVerdict::kNone && self == g_state->ownerCtx) {
         engineVelocityBeforeDraw(self, g_state->rtv0Eye);
         engineVelocityNoteSkinDraw(self, startInstance, instances);   // F2: a skinned family's draw lists the instance entries it reads
@@ -6066,6 +6144,14 @@ uint32_t vScreenEyeDrawsThisFrame() {
 
 bool vScreenAaOffForDraws() { return g_aaOffDraw.load(std::memory_order_relaxed); }
 
+// TEMPORARY (ui_family_memo.h): the family memo's window line for the perf monitor's 1800-frame edge; written every window, quiet or not,
+// then the counters start again (the memo's own entry stays: it is behaviour).
+size_t vScreenUiFamilyCacheLine(char* out, size_t cap, uint32_t endFrame) {
+    const size_t n = uifamilymemo::formatLine(out, cap, endFrame, g_uiFamilyMemo.count);
+    g_uiFamilyMemo.count.reset();
+    return n;
+}
+
 // The one refresh. vScreenRefreshConfig runs it behind the reload's gate; vScreenForceRefreshConfig runs it with the gate taken away.
 // The configure calls stay in this one body: the reload gate is the only difference between the two.
 static void vScreenRefreshConfigBody(bool forced) {
@@ -6326,6 +6412,9 @@ void introCurveNoteRetired() {
 }  // namespace
 
 void vScreenFrameBoundary() {
+    // TEMPORARY (ui_family_memo.h): the family memo's verification clock, advanced once a frame, and the frame's verdict on verifying.
+    ++g_uiFamilyMemo.frames;
+    g_uiFamilyMemo.verifyFrame = uifamilymemo::verifyFrame(g_uiFamilyMemo.frames);
     // The AA-off path's skipped shadows (2026-10-13): once engine velocity is read again, VsSrv33 and Blend hold
     // no binding EDVR knows, so both are invalidated before any draw of this frame can compare against them.
     if (g_shadowsSkipped.load(std::memory_order_relaxed) &&

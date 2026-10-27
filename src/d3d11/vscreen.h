@@ -17,6 +17,7 @@
 // in 29 different places and its shaders are told about it separately.
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 
 #include "../common/vtable_hook.h"  // HookMode
@@ -122,6 +123,9 @@ uint32_t vScreenEyeDrawsThisFrame();
 // VR's temporal anti-aliasing reads off, as the draw path last took it from the config (the AA-off fast path,
 // draw_fast_path.h). For the draw hook CPU line only.
 bool vScreenAaOffForDraws();
+// TEMPORARY (built 2026-10-27, ui_family_memo.h): the "ui layer family cache:" line for the perf monitor's 1800-frame edge. Writes it into
+// `out` (always, even for a window with no calls), returns its length, and starts the window's counters again.
+size_t vScreenUiFamilyCacheLine(char* out, size_t cap, uint32_t endFrame);
 
 // The context's OMSetRenderTargets through the ORIGINAL entry, past the
 // hook and the binding shadow: for a fix that rebinds around one draw and

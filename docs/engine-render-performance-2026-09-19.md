@@ -58,7 +58,7 @@
 
 * **Next (2026-10-27, last entry):** AA on's +1.65 ms is per-draw
   classifiers. ui-depth memo FLOWN: exact, -0.21 ms (shipped, b1561dff).
-  Next: build trims A-F (last entry), ~0.17-0.31 ms.
+  Trims A-F (last entry, ~0.17-0.31 ms) BUILT, NOT FLOWN.
 
 ## Frame budget philosophy
 
@@ -4069,3 +4069,50 @@ A further candidate, not in this build: inlining the ui_depth memo's
 hit test into ui_depth.h. It would save two calls per eye draw, about
 0.1 ms, but it needs a read of who else writes the outputs a hit
 resets.
+
+**Trims A-F built (2026-10-27, same branch), NOT FLOWN.**
+- **A, B, C** (engine_velocity.cpp, engine_velocity.h).
+  - A: `qpcNow()` now comes after the quick-path return.
+  - B: `quickFamilyForProfile` is a one-entry memo of (hash, flat) over
+    the pure family lookup.
+  - C: the 1-in-64 probe's scans moved out of line, into
+    `psShadowProbeSampled`.
+  - The gate's comments now name its nine tests.
+  - A's only reader-side effect: `slowTicks` no longer includes the
+    quick test on locked draws.
+- **D:** `remlokOnFootVisorVsBound()` inline in remlok_fix.h. The
+  diagnostic's first line was that same test.
+- **E:** `scrimWashSrv0Declines()` inline in scrim_fix.h, over the
+  PsSrv0 cache that has moved to `detail`. It is true exactly when
+  `scrimOnEyeDraw` would return false from that cache.
+- **F:** `uiLayerFamilyMemoised` in vscreen.cpp, with the rules in
+  `ui_family_memo.h`.
+  - Key: the VS and PS hashes, Rtv0's generation, the on-foot flag, and
+    `uiLayerFamilyEpoch()`.
+  - The epoch is bumped in refreshLive and at both of ui_layer's
+    target-cache resets.
+  - A decline is stored only for kNone, at a target kind other than 2,
+    for a VS other than the panel or loader VS, and only with the
+    on-foot flag the same after the run as before.
+  - Its TEMPORARY verification runs on rotating frames that the draw
+    clock does not sample, and prints `ui layer family cache:` per
+    window.
+- **Step clock:** a new step, `f:after-ui`, for the after-UI branch.
+  f:ui-layer is now the family decision plus the composite census; its
+  second mark runs on composite draws only.
+- **Rigs:**
+  - aa_off_test, 215 checks, including a sweep of 7,656 named-pair
+    draws and 400,000 random draws, cached against uncached, with 0
+    differences and 8 mutation controls that each fail;
+  - scrim_metadata_test, for E and D;
+  - visor_axis_test V8, a wiring pin for D;
+  - engine_velocity_test, 18,913 checks, with two new lifecycle checks
+    for C;
+  - skin_engine_test, with a mutant re-anchored for B.
+
+Flight: parked at the Cranfield pad, AA on for at least 3 minutes,
+nothing building.
+- Compare engine-vel, v:fixes, f:ui-layer and f:after-ui with
+  `edvr_gfx_20261027_122848.log`.
+- Read the `ui layer family cache:` line: hits, and 0 mismatches.
+- The other steps should be unchanged.

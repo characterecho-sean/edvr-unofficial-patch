@@ -11,6 +11,7 @@
 #include "../../src/common/system_d3d11.h"
 #include "../../src/common/vtable_hook.h"
 #include "../../src/d3d11/binding_shadow.h"
+#include "../../src/d3d11/remlok_fix.h"   // trim D (2026-10-27): the inline visor vertex shader test reads the real binding shadow this rig links
 #include "../../src/d3d11/scrim_fix.h"
 
 using Microsoft::WRL::ComPtr;
@@ -146,12 +147,53 @@ int eyeKeyGenerationChecks() {
     return checks + 5;
 }
 
+// Trim D (2026-10-27): beginPanelOverride asks remlokOnFootVisorVsBound() before it calls remlokOnFootDiagnose, which returns on its first line
+// unless the bound vertex shader is the visor's (B553BB479B7C0B97). The inline test is that comparison on the real binding shadow: true for
+// that hash on the vertex shader slot and for nothing else, a pixel shader of the same hash included, and false again once another shader binds.
+int visorVsChecks() {
+    using edvr::BindSlot;
+    int checks = 0;
+    int stub = 0;
+    void* const p = &stub;
+    edvr::bindingForgetAll();
+    check(!edvr::remlokOnFootVisorVsBound(), "D: nothing bound is not the visor's vertex shader");
+    edvr::bindingSetShader(BindSlot::Vs, p, 0xB553BB479B7C0B97ull);
+    check(edvr::remlokOnFootVisorVsBound(), "D: the visor's vertex shader hash on the vertex shader slot is the inline test's yes");
+    edvr::bindingSetShader(BindSlot::Vs, p, 0xB553BB479B7C0B96ull);
+    check(!edvr::remlokOnFootVisorVsBound(), "D: a hash one apart is a no");
+    edvr::bindingSetShader(BindSlot::Vs, p, 0x68ABCB9FEF6CA66Cull);
+    edvr::bindingSetShader(BindSlot::Ps, p, 0xB553BB479B7C0B97ull);
+    check(!edvr::remlokOnFootVisorVsBound(), "D: the visor's vertex shader hash on the pixel shader slot is a no");
+    edvr::bindingSetShader(BindSlot::Vs, p, 0xB553BB479B7C0B97ull);
+    check(edvr::remlokOnFootVisorVsBound() && edvr::kRemlokOnFootVisorVs == 0xB553BB479B7C0B97ull,
+          "D: the vertex shader slot decides it, with the pixel shader's hash whatever it is");
+    edvr::bindingForgetAll();
+    check(!edvr::remlokOnFootVisorVsBound(), "D: a forget-all unbinds it");
+    checks += 6;
+    return checks;
+}
+
+// Trim E (2026-10-27): the draw path asks scrimWashSrv0Declines() inline, after the shape and before it calls scrimOnEyeDraw. It is the PS
+// slot-0 cache's decline and nothing else: true only where the cache holds a successful resolve of the view bound now, at this generation,
+// and that view is not the wash's texture. Where it is true, scrimOnEyeDraw says no and makes no query; anywhere else it is false and the
+// call decides. `warm` states have just been through the call (so the cache is as the call left it); the others are asked before it.
+void declinesAgrees(bool expectDecline, const char* what) {
+    const bool declines = edvr::scrimWashSrv0Declines();
+    const uint64_t before = edvr::scrimMetadataResolveCallsForTest();
+    check(declines == expectDecline, what);
+    if (declines) {
+        check(!edvr::scrimOnEyeDraw('X', 5760, 1) && edvr::scrimMetadataResolveCallsForTest() == before,
+              "E: where the inline test declines, the call declines too and resolves nothing");
+    }
+}
+
 }  // namespace
 
 int main() {
     try {
         std::printf("scrim_metadata_test: %d eye key generation checks passed (the slot sweep ran per set, rebind, invalidate and shader set)\n",
                     eyeKeyGenerationChecks());
+        std::printf("scrim_metadata_test: %d visor vertex shader checks passed (trim D, the inline test)\n", visorVsChecks());
         const auto createDevice = edvr::systemD3D11CreateDevice();
         check(createDevice != nullptr, "load System32 D3D11CreateDevice");
         ComPtr<ID3D11Device> device;
@@ -207,6 +249,7 @@ int main() {
         check(!edvr::scrimOnEyeDraw('X', 5760, 1),
               "failed non-null resolve declines");
         check(calls() == 1, "failed non-null resolve attempted once");
+        declinesAgrees(false, "E: a failed resolve is unknown, never the cache's decline");
         check(edvr::bindingGeneration(edvr::BindSlot::PsSrv0) == retryGeneration,
               "failed resolve did not change generation");
         check(edvr::scrimOnEyeDraw('X', 5760, 1),
@@ -222,11 +265,14 @@ int main() {
         check(calls() == 1, "slot0 miss resolves once");
         check(!edvr::scrimOnEyeDraw('X', 5760, 1), "cached slot0 miss");
         check(calls() == 1, "cached slot0 miss avoids query");
+        declinesAgrees(true, "E: a known slot0 miss at this generation is the cache's decline, asked inline");
+        check(calls() == 1, "E: the inline test resolves nothing");
 
         // Even the identical pointer is a new binding identity. This is also
         // the pointer-recycling guard: the generation, not the address alone,
         // decides whether immutable metadata can be reused.
         bindSrv(context.Get(), 0, other.Get());
+        declinesAgrees(false, "E: the same pointer rebound is a new generation, not the cache's decline");
         check(!edvr::scrimOnEyeDraw('X', 5760, 1), "same pointer rebound");
         check(calls() == 2, "same pointer rebind invalidates slot0");
 
@@ -236,6 +282,7 @@ int main() {
         check(calls() == 4, "both real SRVs resolved");
         check(edvr::scrimOnEyeDraw('X', 5760, 1), "real scrim cached");
         check(calls() == 4, "recognition cache avoids both queries");
+        declinesAgrees(false, "E: the wash's own texture is cached as a match, never the inline decline");
         // The draw path asks scrimWashShape inline before the call; with the
         // real wash bound, the two must agree shape by shape, and a shape the
         // pre-check turns away must be one the match declines untouched.
@@ -252,6 +299,7 @@ int main() {
         check(calls() == 5, "slot1-only change preserves slot0 cache");
         check(!edvr::scrimOnEyeDraw('X', 5760, 1), "slot1 miss cached");
         check(calls() == 5, "cached slot1 miss avoids query");
+        declinesAgrees(false, "E: a slot1-only miss leaves slot0 a match: the call decides, not the inline test");
         bindSrv(context.Get(), 1, ui.Get());
         check(edvr::scrimOnEyeDraw('X', 5760, 1), "slot1 restored");
         check(calls() == 6, "slot1 restore resolves only slot1");
@@ -264,6 +312,7 @@ int main() {
         check(calls() == 8, "slot0 restore resolves only slot0");
 
         edvr::bindingFrameBoundary();
+        declinesAgrees(false, "E: a frame boundary moves every generation: nothing is the cache's decline");
         check(edvr::scrimOnEyeDraw('X', 5760, 1), "next-frame recognition");
         check(calls() == 10, "frame boundary bounds both cache entries");
 
@@ -328,6 +377,24 @@ int main() {
         edvr::scrimShutdown();
         check(edvr::scrimOnEyeDraw('X', 5760, 1), "post-shutdown metadata recovers");
         check(calls() == 19, "shutdown clears metadata cache");
+        // Trim E, the cache's life events with a decline standing: a frame boundary, a rebind of the same view, a reconfigure and a shutdown
+        // each leave the inline test false (the cache is stale or cleared), and the call resolves again.
+        bindSrv(context.Get(), 0, other.Get());
+        check(!edvr::scrimOnEyeDraw('X', 5760, 1), "E: a slot0 miss is cached for the life-event checks");
+        declinesAgrees(true, "E: ...and is the inline decline");
+        edvr::bindingFrameBoundary();
+        declinesAgrees(false, "E: a frame boundary ends the decline");
+        check(!edvr::scrimOnEyeDraw('X', 5760, 1), "E: the miss is resolved again after the boundary");
+        declinesAgrees(true, "E: ...and is the decline again");
+        config.set("fix.loading_dim", "stock");
+        edvr::scrimConfigure(config);
+        config.set("fix.loading_dim", "screen");
+        edvr::scrimConfigure(config);
+        declinesAgrees(false, "E: a reconfigure that flipped the fix clears the cache, so nothing is declined inline");
+        check(!edvr::scrimOnEyeDraw('X', 5760, 1), "E: the miss is resolved again after the reconfigure");
+        declinesAgrees(true, "E: ...and is the decline once more");
+        edvr::scrimShutdown();
+        declinesAgrees(false, "E: a shutdown clears it");
         edvr::scrimShutdown();
         edvr::bindingForgetAll();
         std::puts("scrim_metadata_test PASS");

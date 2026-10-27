@@ -782,6 +782,26 @@ int main(int argc, char** argv) {
                   countOf(rf, "++g_axisAttempt;") == 1 && countOf(rf, "sl.attempt = g_axisAttempt;") == 1 &&
                   countOf(rf, "g_axisSelfOff.exchange(true") == 1,
               "V8.F128-a-shifted-non-finite-sample-latches-self-off-for-the-session-and-resource-release-fences-old-readbacks");
+        // 2026-10-27, trim D: the draw path asks the visor's vertex shader inline (remlok_fix.h) before it calls the diagnostic. That is the same
+        // predicate moved: the diagnostic's own first line is that test and nothing precedes it, the constant is the one the visor match uses, and the
+        // game's visor vertex shader hash is the constant's.
+        const std::string rh = slurp(root + "\\src\\d3d11\\remlok_fix.h");
+        const std::string vsc = slurp(root + "\\src\\d3d11\\vscreen.cpp");
+        check(!rh.empty() && !vsc.empty(), "V8.trim-D-sources-readable");
+        const size_t diag = rf.find("void remlokOnFootDiagnose(char kind, uint32_t count, uint32_t instances) {\n");
+        check(diag != std::string::npos &&
+                  rf.compare(diag + std::strlen("void remlokOnFootDiagnose(char kind, uint32_t count, uint32_t instances) {\n"),
+                             std::strlen("    if (bindingShaderHash(BindSlot::Vs) != kOnFootVisorVs) return;\n"),
+                             "    if (bindingShaderHash(BindSlot::Vs) != kOnFootVisorVs) return;\n") == 0,
+              "V8.trim-D-the-diagnostic-returns-on-its-first-line-unless-the-bound-vertex-shader-is-the-visor's");
+        check(countOf(rh, "constexpr uint64_t kRemlokOnFootVisorVs = 0xB553BB479B7C0B97ull;") == 1 &&
+                  countOf(rf, "constexpr uint64_t kOnFootVisorVs = kRemlokOnFootVisorVs;") == 1 &&
+                  edvr::visoraxis::kVisorVsHash == 0xB553BB479B7C0B97ull &&
+                  countOf(rh, "inline bool remlokOnFootVisorVsBound() { return bindingShaderHash(BindSlot::Vs) == kRemlokOnFootVisorVs; }") == 1,
+              "V8.trim-D-the-inline-test-reads-the-one-visor-vertex-shader-hash-the-match-and-the-axis-math-name");
+        check(countOf(vsc, "remlokOnFootDiagnose(") == 1 &&
+                  countOf(vsc, "if (remlokOnFootVisorVsBound()) remlokOnFootDiagnose(kind, count, instances);") == 1,
+              "V8.trim-D-the-draw-path-makes-the-one-call-behind-the-inline-test");
     }
 
     // V9: the census shader (F121b), the build's bytecode, against the CPU model and the decode.

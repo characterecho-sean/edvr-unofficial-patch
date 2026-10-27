@@ -3081,9 +3081,24 @@ void noteSkinDrawSlow(ID3D11DeviceContext* ctx, uint32_t startInstance, uint32_t
     c.ranges.push_back(instances);
 }
 
+// The quick path's one table scan, remembered: familyForProfile is a pure function of (hash, flat) and constant tables
+// (engine_velocity_families.h), and about nine draws in ten bind the vertex shader the previous slow-half entry saw. Plain statics:
+// beforeDrawSlow runs only on the owner context's draw thunks (and the sampled probe, which is the same thread).
+static int quickFamilyForProfile(uint64_t hash, bool flat) {
+    static bool known = false;
+    static uint64_t memoHash = 0;
+    static bool memoFlat = false;
+    static int memoFamily = -1;
+    if (known && memoHash == hash && memoFlat == flat) return memoFamily;
+    memoFamily = familyForProfile(hash, flat);
+    memoHash = hash;
+    memoFlat = flat;
+    known = true;
+    return memoFamily;
+}
+
 void beforeDrawSlow(ID3D11DeviceContext* ctx, bool rtv0Eye) {
     if (!ctx) return;
-    const int64_t t0 = qpcNow();
     cache.vs = bindingGeneration(BindSlot::Vs);
     cache.ps = bindingGeneration(BindSlot::Ps);
     cache.rtv = bindingGeneration(BindSlot::Rtv0);
@@ -3096,12 +3111,14 @@ void beforeDrawSlow(ID3D11DeviceContext* ctx, bool rtv0Eye) {
     // The common case -- not a pool family's vertex shader, nothing of ours
     // bound -- costs no lock (terrain, the interface, every other pass).
     if (!g_anyBound.load(std::memory_order_acquire) &&
-        familyForProfile(bindingShaderHash(BindSlot::Vs), runtimeFlatProfile()) < 0) {
+        quickFamilyForProfile(bindingShaderHash(BindSlot::Vs), runtimeFlatProfile()) < 0) {
         cache.family = -1;
         cache.skin = false;
         ++g_draw.quickPaths;
         return;
     }
+    // Read only for the locked path, which is the one that adds it to slowTicks below: the quick path above never uses it.
+    const int64_t t0 = qpcNow();
     // The draw side's CPU time (engine_motion_cpu.h, Part kDraw): the wait for
     // the engine mutex and the slow half, with the pool apply and any lazy
     // shader patch inside it taken out as their own parts. The quick path above
@@ -3259,6 +3276,20 @@ void psShadowProbe(ID3D11DeviceContext* ctx) {
         }
     }
     livePs->Release();
+}
+
+// The header's one-in-64 draw, out of line (the counter is the header's). A pool family's vertex shader or a keyed or self-marking pixel
+// shader bound makes the draw worth the probe; any other draw is left alone.
+void psShadowProbeSampled(ID3D11DeviceContext* ctx) {
+    if (engine_velocity_family::familyOfVs(bindingShaderHash(BindSlot::Vs)) >= 0 ||
+        engine_velocity_family::anyFamilyPs(bindingShaderHash(BindSlot::Ps))) {
+        // A live shader different from the shadow is normally our installed
+        // substitution, so the probe first excludes its owned identity. The
+        // 162120 capture's live/shadow differences all reproduce EDVR patch
+        // hashes; they are not evidence of a real hook bypass. A different
+        // registered game shader heals the shadow and takes the slow half.
+        psShadowProbe(ctx);
+    }
 }
 } // namespace engine_velocity_detail
 
