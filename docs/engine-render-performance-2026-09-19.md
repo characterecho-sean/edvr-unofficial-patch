@@ -56,9 +56,9 @@
   C"); applicationMs as a frame-fit signal, it omits the post-submit
   phase ("Shadow flight 1").
 
-* **Next (2026-10-27, last entry):** step clock FLOWN: AA on's +1.65 ms
-  is spread over per-draw classifiers (ui-depth 0.42, engine-vel 0.32).
-  Binding-repeat counter BUILT, NOT FLOWN: fly the same pad leg.
+* **Next (2026-10-27, last entry):** AA on's +1.65 ms is per-draw
+  classifiers; 91% of eye draws repeat bindings with 0 answer changes, so
+  a generation memo could save ~0.8 ms. Design it, ui-depth first.
 
 ## Frame budget philosophy
 
@@ -3643,3 +3643,79 @@ What to read:
   with the same arguments means the key is not enough.
 - The milliseconds on repeat draws in v:ui-depth, f:ui-layer and
   engine-vel: the most a cache could save.
+
+**Binding-repeat counter flown (2026-10-27, Steam log
+`edvr_gfx_20261027_110149.log`, build 17714416; same rig).** Loaded in
+docked at Cranfield at 11:04:24. F7 turned AA off at 11:05:50 and back
+on at 11:07:21.
+
+Another worktree's full build ran beside the flight. It wrote files
+from 11:05 to 11:09, which covers the AA-off leg and the second AA-on
+leg, so this flight's timings are contaminated. The window ending at
+frame 19800 (11:05:13-11:05:48) is unusable for timing: bind-count
+reads 11.9 ms there against 0.33-0.41 in every other window, which
+looks like render-thread preemption as the build started. The binding
+counts and answer comparisons below do not depend on timing.
+
+- **Repeats.** About 33.4k owner draws a frame. Against the previous
+  owner draw: repeat 94%, rebound 1.3%, changed 4.6%. About 16.2k eye
+  draws a frame. Against the previous eye draw: repeat 90.1-90.9%,
+  rebound 2.2-2.6%, changed 6.9-7.3%. This holds in every window, AA
+  on or off.
+- **Per slot on eye draws** (generation moved / pointer changed):
+
+  | Slot | Generation moved | Pointer changed |
+  |---|---|---|
+  | VS | 5.0% | 5.0% |
+  | PS | 5.4% | 5.4% |
+  | SRV0-3 | 8.4-9.8% | 4.4-6.1% |
+  | RTV0, DSV0 | 0.2% | 0.1% |
+
+  The SRVs account for the rebound share: Elite rebinds the same
+  texture views.
+- **Answer stability.** In each AA-on window, about 1.64-1.65M repeat
+  eye draws and about 40-44k rebound ones were compared with the
+  previous eye draw. Not one differed in the verdict, the interface
+  depth, the composite or the hologram flag. (With AA off the ui_depth
+  flags are not computed, so the AA-off windows prove nothing here.)
+- **Time on repeat draws** (ms a frame, AA on, windows 18000 and
+  28800):
+
+  | Step | On repeat draws |
+  |---|---|
+  | v:ui-depth | 0.33 / 0.32 |
+  | v:census | 0.14 / 0.13 |
+  | p:screen | 0.13 / 0.13 |
+  | f:ui-layer | 0.16 / 0.20 |
+  | engine-vel | 0.12 / 0.14 (its changed draws cost more: 0.28 / 0.20) |
+  | v:eye-test | 0.12 / 0.12 |
+  | f:before | 0.09 / 0.09 |
+  | f:layer-end | 0.07 / 0.10 |
+  | the eight together | 1.15 / 1.25 |
+
+  Less the AA-off leg's repeat figures for the same steps (window
+  23400, contaminated by the build, so these are approximate), the
+  AA-on work on repeat draws is about 0.8 ms a frame.
+- **The instrument's own cost.** bind-count is 0.33-0.41 ms a frame
+  on sampled frames, and the capture comes on top, outside every clock.
+  This build's old line reads 4.4-4.9 ms with AA on, not 3.9-4.2, which
+  is that cost plus the background build.
+
+Conclusion: a cache keyed on these eight slots' generations would have
+given the same answer on every repeat eye draw seen here. It could
+take back up to about 0.8 ms a frame of the 1.65 ms AA-on increment,
+less its own check.
+
+The cheapest check is one load and compare per draw. That needs an
+aggregate generation, bumped by bindingSet for any of the eight slots
+and by the per-frame bump, with each classifier remembering the value
+it last answered at. This is not yet designed in detail. Before
+building it:
+- the memo must replay ALL of a classifier's per-draw outputs.
+  uiDepthOnEyeDraw sets about a dozen globals besides the flags
+  compared here, and counts world-screen draws.
+- the per-draw work that must still run (eye-draw counts, the census
+  when armed) must be separated from what may be skipped.
+
+v:ui-depth is the place to start: it is the largest step at 0.30 ms
+on repeat draws, and it is the one whose answers were compared.
