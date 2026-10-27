@@ -5,7 +5,8 @@
 - **State (2026-10-27):** phase 1 FLOWN OK (F1, Epic copy,
   `edvr_gfx_20261027_074146.log`, v0.22.0-rc.2-6-ge8d54bc5; Sean: "Seems to
   work well"). Branch `claude/openxr-world-scale-option-b1032a`: 50426f7c
-  (the feature), c023d9d3 (key moved to `[visual]`). Not merged. Tester zip
+  (the feature), c023d9d3 (key moved to `[visual]`). ON MAIN 7ae59fcf,
+  not in a release yet. Tester zip
   `dist\edvr-world-scale-e8d54bc5-dlls.zip` (the flown pair). No issue.
 - **What it is:** OpenXR Toolkit's "World scale" changes only the distance
   between the two eye cameras the game renders with, about their midpoint.
@@ -42,7 +43,7 @@
   - U3: whether leaning in the cockpit "swims" at 130 % with head
     translation left at 1:1.
   U2 and U3 drew no complaint in F1 but were not reported on one by one.
-- **Next:** merge to main; tester reports on U2/U3 decide phase 2.
+- **Next:** tester reports on U2/U3 decide phase 2.
 
 ## What OpenXR Toolkit does
 
