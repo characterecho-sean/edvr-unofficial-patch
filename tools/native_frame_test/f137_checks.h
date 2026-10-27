@@ -46,8 +46,33 @@ inline void run137(Check&& check) {
         // the rest vector turned by hand, 60 deg nose down: forward 9 cos60 + 15.5 sin60, up -9 sin60 + 15.5 cos60
         const double f = 0.09 * 0.5 + 0.155 * std::sqrt(3.0) / 2.0, u = -0.09 * std::sqrt(3.0) / 2.0 + 0.155 * 0.5;
         check(std::fabs(down60.forward - (f - 0.09)) < 1e-12 && std::fabs(down60.up - (u - 0.155)) < 1e-12, "F137: d is R(h + a) v - R(h) v, worked by hand");
+        // F138: nose up the turn stops where the rest vector stands straight over the neck joint (atan2(9, 15.5) = 30.14 deg)
+        check(std::fabs(f137::kNeckTipCapRad - std::atan2(nf::kPinRestBackM, nf::kPinRestUpM)) < 1e-15 && std::fabs(f137::kNeckTipCapRad / nf::kAdsDeg - 30.1414) < 1e-3,
+              "F138: the neck's tip cap is atan2(kPinRestBackM, kPinRestUpM), 30.14 deg");
+        double capF, capU;
+        f137::rotateRest(f137::kNeckTipCapRad, &capF, &capU);
+        check(std::fabs(capF) < 1e-15 && std::fabs(capU - std::sqrt(0.09 * 0.09 + 0.155 * 0.155)) < 1e-12, "F138: at the cap the rest vector stands straight over the joint (forward 0, up 17.9 cm)");
         const f137::Offset up60 = f137::offset(0.0, 60.0 * nf::kAdsDeg);
-        check(up60.ok && up60.forward < -0.15 && std::fabs(up60.up) < 0.001, "F137: the aim 60 deg up moves the eye back, as a head tilted back does");
+        check(up60.ok && std::fabs(up60.forward + 0.09) < 1e-12 && std::fabs(up60.up - (std::sqrt(0.09 * 0.09 + 0.155 * 0.155) - 0.155)) < 1e-12,
+              "F138: the aim 60 deg up with the head level: the eye 9.0 cm back and 2.4 cm up (it was 15 cm back), the neck tips no further than the joint");
+        const f137::Offset up65 = f137::offset(0.0, 65.0 * nf::kAdsDeg);
+        check(up65.ok && std::fabs(up65.forward + 0.0900) < 5e-4 && std::fabs(up65.up - 0.0242) < 5e-4 && std::fabs(up65.forward - up60.forward) < 1e-12 && std::fabs(up65.up - up60.up) < 1e-12,
+              "F138: h = 0, a = +65 deg: forward -9.0 cm, up +2.4 cm, the same as at +60 (the cap)");
+        const f137::Offset up20 = f137::offset(0.0, 20.0 * nf::kAdsDeg);
+        double r20f, r20u;
+        f137::rotateRest(20.0 * nf::kAdsDeg, &r20f, &r20u);
+        check(up20.ok && std::fabs(up20.forward - (r20f - 0.09)) < 1e-12 && std::fabs(up20.up - (r20u - 0.155)) < 1e-12,
+              "F138: a = +20 deg (under the cap) is the uncapped value");
+        const f137::Offset down60b = f137::offset(0.0, -60.0 * nf::kAdsDeg);
+        check(std::fabs(down60b.forward - 0.0892) < 0.0005 && std::fabs(down60b.up + 0.1554) < 0.0005, "F138: a = -60 deg is unchanged (+8.9 cm forward, -15.5 cm up)");
+        // the head already tipped back: both rotations are capped, so a head past the cap with a further aim up adds nothing, and one under the cap adds only up to it
+        const f137::Offset headPast = f137::offset(40.0 * nf::kAdsDeg, 10.0 * nf::kAdsDeg);
+        check(headPast.ok && std::fabs(headPast.forward) < 1e-15 && std::fabs(headPast.up) < 1e-15, "F138: a head tipped back past the cap, aim up further: both turns capped, nothing added");
+        const f137::Offset headUnder = f137::offset(20.0 * nf::kAdsDeg, 30.0 * nf::kAdsDeg);
+        double c0f, c0u, c1f, c1u;
+        f137::rotateRest(20.0 * nf::kAdsDeg, &c0f, &c0u);
+        f137::rotateRest(f137::kNeckTipCapRad, &c1f, &c1u);
+        check(std::fabs(headUnder.forward - (c1f - c0f)) < 1e-12 && std::fabs(headUnder.up - (c1u - c0u)) < 1e-12, "F138: the head at +20 deg and the aim +30: h + a is capped at 30.14, the head's own is not");
         // the head's own pitch: the camera's pitch is h + a, the head carries R(h) v already
         const f137::Offset mixed = f137::offset(-20.0 * nf::kAdsDeg, -40.0 * nf::kAdsDeg);
         double f1, u1, f0, u0;

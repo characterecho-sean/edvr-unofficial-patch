@@ -56,6 +56,7 @@
 #include "native_on_foot_f133.h"   // F133: head steps judged by rate, not size; the follower re-centres on a standing yaw offset (pure parts)
 #include "native_on_foot_f135.h"   // F135: the on-foot menu probe, measure only (pure parts)
 #include "native_on_foot_f137.h"   // F137: a virtual neck under mouse look (pure parts)
+#include "native_on_foot_f138.h"   // F138: the view holds its height over the neck while the look is pitched (pure parts)
 #include "xinput_watch.h"          // F135: the pad's Start and Back edges, evidence for the menu probe only
 #include "native_on_foot_f109.h"   // F109: look to aim on foot, the player's own turn in ADS, snap or smooth turning (pure parts)
 #include "native_on_foot_f129.h"   // F129: look to aim reads its turn from the player's own look processor; the look path instrument (pure parts)
@@ -12828,6 +12829,7 @@ void f65ReachLimit(uint64_t now, double dt, bool full3P, const AlignRun& a, cons
 // ---- F67c: the body pin, the frame thread's half: the scope flag the Animate post-hook reads (the key on, full-3P body mode, the arm IK on,
 // native stereo on foot), the game's armed flag for the hook, and the 1 s line (f67cPinLine, with the hook's statistics, defined after them).
 void f67cPinLine(uint64_t now, bool scope) noexcept;
+void f138Line(uint64_t now) noexcept;   // F138: the pitched view's 1 s and 10 s lines (defined after the pin's statistics, beside f67cPinLine)
 // ---- F65c: the pre-bend neck (the hook publishes, the body align reads) ---------------------------------------------------------------
 // The Animate post-hook publishes the neck 34 and the head 44 (model space = body axes, as the census reads them) as they stand after stage 0
 // and before the bend, the square-up and the arm writes (the freeze's matrix where it wrote), with its sequence and ms; read with two tries.
@@ -12878,6 +12880,7 @@ bool f67cPinTick(uint64_t now, int mode, bool full3P) noexcept {
     g_pinScope.store(scope, std::memory_order_relaxed);
     g_armedNow.store(g_armed && active, std::memory_order_relaxed);
     f67cPinLine(now, scope);
+    f138Line(now);
     return scope;
 }
 
@@ -13870,6 +13873,15 @@ nofoot::f137::Out f137Tick(uint64_t now, double dt, const EdvrNativeNowPose& np,
     return out;
 }
 
+// ---- F138: the pitched view, the resets (nofoot::f138, native_on_foot_f138.h; the hook's half and the lines are with the pin's statistics) --------------------------
+// The stance reference and the window belong to the pin hook (one writer) and the line's accumulators to the frame thread: a reset from the frame thread (an edge of the
+// on-foot camera, the shutdown) is a request each side takes at its next call, never a write across threads.
+std::atomic<bool> g_f138HookReset{false}, g_f138LineReset{false};
+void f138Reset() noexcept {
+    g_f138HookReset.store(true, std::memory_order_relaxed);
+    g_f138LineReset.store(true, std::memory_order_relaxed);
+}
+
 // ---- F106: ADS, the sight in both eyes (fix.native_on_foot_ads_sight_both_eyes) ------------------------------------------------------------------------------
 // See nofoot::f106::share (native_on_foot_f106.h). Once per align tick, after the ADS lock's weight is known (adsAimTick): with the key on, in native on foot, a weapon or
 // tool drawn, the share is the ADS lock's weight (0.15 s in, 0.3 s out); anything else is exactly 0, and a nonzero weight with the guard failing is logged. The level goes
@@ -13971,6 +13983,7 @@ void f115TermsZero() noexcept {
     g_f94Raise.reset();
     g_f88W.w = 0.0;
     f137Reset();   // F137
+    f138Reset();   // F138: no stance reference past the edge
 }
 // The camera values as published: the provider's words (what the next beginFrame hands the runtime), the look the runtime still carries, the ADS shift, the share.
 nofoot::f115::Published f115Snapshot(uint64_t now, bool sinceReset) noexcept {
@@ -16021,6 +16034,21 @@ struct PinStats {
 std::atomic<uint32_t> g_pinStatSeq{0};
 PinStats g_pinStats;
 std::atomic<bool> g_pinStatReset{false};
+// ---- F138: the view holds its height over the neck while the look is pitched (nofoot::f138, native_on_foot_f138.h) ----------------------------------------------
+// The pin hook's half. g_f138 holds the stance reference (taken where the settle publishes an unarmed upright target) and adds the camera's sink to the raise's target
+// while the look is pitched; the window is what the hook saw (written under g_f138Seq by the one writer, taken once a second by f138Line on the frame thread).
+nofoot::f138::Tracker g_f138;
+nofoot::f138::Window g_f138Win;
+std::atomic<uint32_t> g_f138Seq{0};
+std::atomic<bool> g_f138WinReset{false};
+// One write to the window: the hook's, under the sequence counter. A reset the frame thread asked for (it took the window) clears it first.
+template <class Fn>
+void f138WinWrite(Fn&& fn) noexcept {
+    g_f138Seq.fetch_add(1, std::memory_order_acq_rel);
+    if (g_f138WinReset.exchange(false, std::memory_order_relaxed)) g_f138Win.clear();
+    fn(g_f138Win);
+    g_f138Seq.fetch_add(1, std::memory_order_release);
+}
 // The cyclopean offset cache (the hook; one writer under g_pfzBusy): the world offset from the job camera (the left eye) to the midpoint of the eyes,
 // and the eyes' mean forward, from the two eyes' scene rows; the rows are the render thread's (a frame or two old, which moves a 3 cm offset by under
 // a millimetre).
@@ -16076,6 +16104,7 @@ struct PinCall {
     // neck, the head level (m); the raise the drawn pose carried (m, from the P1 hook) and where it came from; the vertical move the rest target asked (now never applied).
     double f94Target = 0.0, f94Neck = 0.0, f94ViewOver = 0.0, f94GameOver = 0.0, f94AnimEyeOver = 0.0, f94InCam = 0.0, f94Asked = 0.0;
     double f137Up = 0.0, f137Forward = 0.0;   // F137: the virtual neck the camera carried, body axes (m): up + (negative: down), forward +; taken out of the pin's camera
+    bool f138Pitched = false;                 // F138: this call is one of the pitched look's (|aim pitch| 10 deg or more): the close adds its INSIDE test to the window
     bool f94TargetOk = false, f94AnimEyeOk = false;
     uint8_t f94Source = nofoot::f94::kSrcLegacy;
     // F95a: why the stance was or was not settled (nofoot::f95::Why), the body moving, the target published from the settled window (m); the view's vertical step since
@@ -16498,6 +16527,8 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
         // camera (nofoot::f94::EyeLevel): the eye where it would stand unarmed. Anything else (the walk cycle, a landing, a stance still changing) publishes nothing:
         // the frame thread holds the raise where the last settled stance put it.
         {
+            if (g_f138HookReset.exchange(false, std::memory_order_relaxed)) g_f138.reset();   // F138: an edge of the on-foot camera, the shutdown
+            bool f138Own = false;   // F138: this block published a target (ADS's zero, a settled stance): the added sink has no say this call
             nofoot::f95::SettleIn si;
             // F98c: not while aiming down sights (F73's detach): the sight lock owns the eye there. The stance's raise is published as zero with the detach,
             // so it leaves the view. Publishing nothing held the last stance raise (pistol ADS, 18:50: +11.5 cm, stale every tick, the pistol low). A target
@@ -16509,6 +16540,15 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
                 si.valid = false;
                 g_f109SettleGated.fetch_add(1, std::memory_order_relaxed);
             }
+            // F138: nor with the game's aim pitched under mouse look either (the FP root's pitch, from G above; look to aim's gate has counted its own): the game's camera sinks
+            // against the animated neck as the look pitches, and a stance taken there is the sunk camera's (0.3 s into a held look-up the raise settled on +58.5 cm, and the view
+            // stood 55 cm over the neck when the look came level). Counted apart from g_f109SettleGated.
+            const bool f138AimKnown = G != nullptr && std::isfinite(pc.f86AimPitch);
+            bool f138SettleRefused = false;
+            if (si.valid && f138AimKnown && nofoot::f138::settleRefused(pc.f86AimPitch, kF109SettlePitchDeg)) {
+                si.valid = false;
+                f138SettleRefused = true;
+            }
             si.still = !pc.f95Moving;
             si.tS = static_cast<double>(f30QpcUs(in.qpc)) * 1e-6;
             si.neckY = N0[1] + f97W * std::max(pc.f97RaiseF93, 0.0);
@@ -16518,6 +16558,7 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
             if (pc.detachW > 0.0 && refusal != kPinRefCameraAway) {
                 pc.f95Target = 0.0;
                 f94TargetPublish(0.0, now);
+                f138Own = true;
             } else if (so.settled) {
                 // the stance's class: the pin's crouch weight against its standing calibration, else against the stored standing unarmed camera; neither, not known
                 namespace f94 = nofoot::f94;
@@ -16532,6 +16573,48 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
                 pc.f95Target = g_f98Eye.target(itemDrawn, cls, so.neckY, so.camY, f97H, &pc.f98Src, upright);
                 pc.f98EyeY = so.camY + pc.f95Target;
                 f94TargetPublish(pc.f95Target, now);
+                f138Own = true;
+                // F138: an unarmed upright stance is the reference the pitched look's sink is measured against: the target just published, G of this call, the animated neck, the
+                // headset's LOCAL height and the LOCAL pose's generation (no valid pose, no reference)
+                if (!itemDrawn && upright)
+                    g_f138.noteStance(pc.f95Target, pc.rawEyeY, N0[1], static_cast<double>(in.localHeadY), in.localPoseGeneration, localPitchValid);
+            }
+            // F138: while the look is pitched the raise adds back what the game's camera has sunk against the animated neck since that stance, weighted by the pitch (both modes:
+            // the FP root's pitch). The sink goes into the raise, which the P1 hook takes out of the pin's camera by the alignment serial (f94NeckForPin): E never sees it, so
+            // the next call's G is the game's own camera again and nothing feeds back. The first level call after returns the stance's target once.
+            {
+                namespace f138 = nofoot::f138;
+                f138::In fi;
+                fi.aimPitchDeg = f138AimKnown ? pc.f86AimPitch : std::nan("");
+                fi.settleOwned = f138Own;
+                fi.itemDrawn = armed || f97W > 0.0;
+                fi.ads = pc.detachW > 0.0;
+                fi.cameraAway = refusal == kPinRefCameraAway;
+                fi.poseValid = localPitchValid;
+                fi.generation = in.localPoseGeneration;
+                fi.rawEyeY = pc.rawEyeY;
+                fi.neckY = N0[1];
+                fi.localHeadY = static_cast<double>(in.localHeadY);
+                const f138::Out fo = g_f138.step(fi);
+                if (fo.publish) f94TargetPublish(fo.publishM, now);
+                if (fo.pitched || fo.returned || fo.returnRefused) {
+                    f138::Call fc;
+                    fc.aimDeg = pc.f86AimPitch;
+                    fc.headValid = localPitchValid;
+                    fc.headDeg = pc.localPitchDeg;
+                    fc.lookToAim = g_ltaDrop.load(std::memory_order_relaxed);
+                    fc.itemDrawn = fi.itemDrawn;
+                    fc.out = fo;
+                    fc.carriedUpCm = 100.0 * (pc.f94InCam + pc.f137Up);   // EDVR's carried vertical: the neck reference's raise and F137's up, by the alignment serial as F94a's line has it
+                    fc.carriedFwdCm = 100.0 * pc.f137Forward;
+                    fc.viewOverNeckCm = 100.0 * pc.f94ViewOver;
+                    fc.settleRefusedAim = f138SettleRefused;
+                    pc.f138Pitched = fo.pitched;
+                    f138WinWrite([&](nofoot::f138::Window& win) noexcept {
+                        win.add(fc);
+                        win.addReturn(fo);
+                    });
+                }
             }
         }
         // F68e: the animated legs' reach (hip to foot over thigh + calf, mean of both), before anything moves: the crouch test.
@@ -17530,6 +17613,11 @@ void pinRecord(const PinCall& pc, const double resFinal[3]) noexcept {
         f.chestMin = std::min(f.chestMin, 100.0 * pc.f97ChestFwd);
     }
     g_pinStatSeq.fetch_add(1, std::memory_order_release);
+    // F138: the pitched look's INSIDE: F97a's test on the drawn eye (under the clavicle line + 8 cm and under 12 cm ahead of the chest), over the pitched calls only
+    if (pc.f138Pitched && pc.f97ClrOk) {
+        const bool inside = pc.f97Inside;
+        f138WinWrite([inside](nofoot::f138::Window& win) noexcept { win.addInside(inside); });
+    }
 }
 
 // ---- F67f: while armed, both hands stay on the grips on every frame -------------------------------------------------------------------------------
@@ -22285,6 +22373,90 @@ void f67cPinLine(uint64_t now, bool scope) noexcept {
     w.neck.fold(st.f98Have[0], st.f98Neck[0], st.f98Src[nofoot::f94::kEyeStart]);
     ++w.seconds;
     if (mixedRawSecond || nofoot::logwin::due(w.seconds)) f125PinClose();
+}
+
+// ---- F138: the pitched view's lines (frame thread; nofoot::f138, native_on_foot_f138.h) ------------------------------------------------------------------------------
+// Once a second the hook's window is taken. In any second with a call at |aim pitch| of 10 deg or more (and in one where the raise went back to the stance's) one line says
+// what the look was, how far the game's camera sank against the stance, what the raise added back or why it did not, what EDVR carried, where the view stood over the neck, the
+// INSIDE test on the drawn eye and the settle's refusals. Every 10 s with data one line per mode and item class gives the 10 deg bins of the aim's pitch (calls, the camera's
+// sink, what EDVR carried up and forward, the head's own height since the stance): it tells a sink that follows the aim's pitch alone from one that grows with EDVR's carried
+// offsets. An item drawn splits the lines: the bins are by class (item none, or the item), the 1 s line names the item and says how many of the calls had it.
+void f138Line(uint64_t now) noexcept {
+    namespace f138 = nofoot::f138;
+    static uint64_t lineMs = 0, binMs = 0;
+    static uint32_t gateSeen = 0;
+    static f138::Group bins[2][2];   // [look to aim][item drawn], merged each second, printed and cleared every 10 s
+    if (g_f138LineReset.exchange(false, std::memory_order_relaxed)) {
+        lineMs = binMs = 0;
+        for (auto& row : bins)
+            for (f138::Group& g : row) g = f138::Group{};
+    }
+    if (lineMs == 0) {
+        lineMs = binMs = now;
+        gateSeen = g_f109SettleGated.load(std::memory_order_relaxed);
+        return;
+    }
+    if (now - lineMs < 1000) return;
+    f138::Window w;
+    bool got = false;
+    for (int tries = 0; tries < 2 && !got; ++tries) {
+        const uint32_t s1 = g_f138Seq.load(std::memory_order_acquire);
+        if (s1 & 1u) continue;
+        std::memcpy(&w, &g_f138Win, sizeof(w));
+        std::atomic_thread_fence(std::memory_order_acquire);
+        got = g_f138Seq.load(std::memory_order_relaxed) == s1;
+    }
+    if (!got) return;   // torn twice: the next second takes both
+    lineMs = now;
+    g_f138WinReset.store(true, std::memory_order_relaxed);
+    const uint32_t gated = g_f109SettleGated.load(std::memory_order_relaxed);
+    const uint32_t ltaGate = gated - gateSeen;   // look to aim's gate (the hook counts it apart from F138's)
+    gateSeen = gated;
+    for (int m = 0; m < 2; ++m)
+        for (int i = 0; i < 2; ++i) bins[m][i].merge(w.group[m][i]);
+    char itemName[64] = {};
+    const auto nameItem = [&]() noexcept {
+        if (!itemName[0] && (!journalHeldItemName(itemName, sizeof(itemName)) || !itemName[0])) std::snprintf(itemName, sizeof(itemName), "unnamed");
+    };
+    if (w.any()) {
+        char mode[96], why[260], item[128];
+        w.modeText(mode, sizeof(mode));
+        f138::notAppliedText(w.why, why, sizeof(why));
+        if (!w.itemCalls) {
+            std::snprintf(item, sizeof(item), "none");
+        } else {
+            nameItem();
+            if (w.itemCalls == w.calls) std::snprintf(item, sizeof(item), "%s", itemName);
+            else std::snprintf(item, sizeof(item), "%s in %u of %u calls", itemName, w.itemCalls, w.calls);
+        }
+        const auto mean = f138::Window::mean;
+        Log::get().note("native on foot pitched view (F138) 1 s: mode %s, item %s, aim pitch %+.1f deg (min %+.1f max %+.1f), head pitch %+.1f deg; the camera's sink against the "
+                        "stance %+.1f cm (max %+.1f), the head's own height since the stance %+.1f cm; w %.2f/%.2f; added %+.1f cm (max %+.1f) in %u of %u pitched calls | "
+                        "measured only: an item drawn %u calls | not applied: %s; EDVR carried up %+.1f forward %+.1f cm (the raise, F137); the view over the neck %+.1f cm; "
+                        "INSIDE %u of %u; the settle refused for the aim's pitch %u calls (look to aim's gate %u); returned to the stance's raise %u times (refused %u)",
+                        mode, item, mean(w.aimSum, w.calls), w.calls ? w.aimMin : 0.0, w.calls ? w.aimMax : 0.0, mean(w.headSum, w.headN), mean(w.sinkSum, w.sinkN),
+                        w.sinkN ? w.sinkMax : 0.0, mean(w.headRiseSum, w.headRiseN), mean(w.wSum, w.consideredN), w.wMax, mean(w.addedSum, w.appliedN),
+                        w.appliedN ? w.addedMax : 0.0, w.appliedN, w.calls, w.measuredN, why, mean(w.upSum, w.calls), mean(w.fwdSum, w.calls), mean(w.viewSum, w.calls),
+                        w.inside, w.insideOf, w.settleRefusedAim, ltaGate, w.returned, w.returnRefused);
+    }
+    if (now - binMs >= 10000) {
+        binMs = now;
+        for (int m = 0; m < 2; ++m) {
+            for (int i = 0; i < 2; ++i) {
+                if (!bins[m][i].any()) continue;
+                char body[760];
+                f138::binsText(bins[m][i], body, sizeof(body));
+                const char* item = "none";
+                if (i) {
+                    nameItem();
+                    item = itemName;
+                }
+                Log::get().note("native on foot pitched view (F138) 10 s bins (per 10 deg of aim pitch: calls, the camera's sink, EDVR carried up, forward, the head's own height "
+                                "since the stance; cm): %s, item %s: %s", m ? "look to aim" : "mouse look", item, body);
+                bins[m][i] = f138::Group{};
+            }
+        }
+    }
 }
 
 void installEyeProbeOnce() {
@@ -31625,6 +31797,7 @@ void nativeOnFootShutdown() {
     const float zeroEyeAlign[3] = {};
     g_f94NeckSeatedPub = 0.0;   // F94a: the zero alignment carries no neck raise
     f137Reset();   // F137: ... and no virtual neck
+    f138Reset();   // F138: ... and no stance reference
     f89AlignPublish(zeroEyeAlign);
     eyeshare::publish(0.0f, GetTickCount64());   // F106: no shared left eye past shutdown
     nativeFrameSetPositionRecentre(0);           // F123: no recentre asked past shutdown, and no black left

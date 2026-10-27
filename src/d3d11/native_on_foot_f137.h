@@ -13,6 +13,9 @@
 // and the missing translation, in the body's (forward, up) plane (no sideways part), is
 //     d = R(h + a) v - R(h) v.
 // At a = 0 it is 0. At h = 0, a = -60 deg: forward +8.9 cm, up -15.5 cm (down). Its length is capped at 25 cm.
+// Nose up each rotation is capped at kNeckTipCapRad, atan2(kPinRestBackM, kPinRestUpM) (about 30.1 deg), where the rest vector stands straight over the joint: a neck
+// turned at its base overstates the eye's travel when the head tips back (at +65 deg it put the eye 9.5 cm behind the joint, 15 cm behind the chest's front, inside it),
+// and past the vertical the head tips at the top of the neck. At h = 0, a = +65 deg: forward -9.0 cm, up +2.4 cm. Nose down it is unchanged. (F138)
 //
 // It is published as part of the eye alignment, which is a SEATED vector (seated = D body, D = diag(-1, -1, +1): seatedFromBody), so the view moves down and forward as a
 // head pitched by the aim would; the view's rotation is untouched (it already comes from the game). It is the VIEW only: the body pin takes d out of the game's camera
@@ -37,6 +40,10 @@ constexpr double kRampS = 0.15;                    // the weight's ramp, in and 
 constexpr double kCapM = 0.25;                     // the largest |d|
 constexpr uint64_t kAimMaxAgeMs = 300;             // the pin hook's aim pitch is read while it is no older than this
 
+// Where the rest neck-to-eye vector stands straight over the neck joint (its forward part is 0): the largest nose-up turn of the neck's base (F138). A literal, not
+// std::atan2 (not constexpr); the rig checks it against atan2(kPinRestBackM, kPinRestUpM) = 30.14 deg.
+constexpr double kNeckTipCapRad = 0.5260664189967634;
+
 // The rest neck-to-eye vector turned nose up by pitchRad: its forward and up parts (m).
 inline void rotateRest(double pitchRad, double* forward, double* up) noexcept {
     const double c = std::cos(pitchRad), s = std::sin(pitchRad);
@@ -49,13 +56,13 @@ struct Offset {
     double forward = 0.0, up = 0.0;   // body axes, metres: forward +, up + (down is negative)
     double length() const noexcept { return std::sqrt(forward * forward + up * up); }
 };
-// d = R(h + a) v - R(h) v, its length capped at kCapM. Not ok without two finite pitches.
+// d = R(min(h + a, cap)) v - R(min(h, cap)) v, its length capped at kCapM. Not ok without two finite pitches.
 inline Offset offset(double headPitchRad, double aimPitchRad) noexcept {
     Offset o;
     if (!std::isfinite(headPitchRad) || !std::isfinite(aimPitchRad)) return o;
     double f0 = 0.0, u0 = 0.0, f1 = 0.0, u1 = 0.0;
-    rotateRest(headPitchRad, &f0, &u0);
-    rotateRest(headPitchRad + aimPitchRad, &f1, &u1);
+    rotateRest(std::min(headPitchRad, kNeckTipCapRad), &f0, &u0);
+    rotateRest(std::min(headPitchRad + aimPitchRad, kNeckTipCapRad), &f1, &u1);
     o.forward = f1 - f0;
     o.up = u1 - u0;
     const double len = o.length();

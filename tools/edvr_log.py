@@ -12322,6 +12322,52 @@ def _hj_f137_neck(rows, ctx):
     return ("PARTIAL", text + "; " + "; ".join(notes)) if notes else ("OK", text)
 
 
+def _hj_f138_pitched(rows, ctx):
+    """F138: the view holds its height over the neck while the look is pitched. The pin hook adds the camera's sink against the stance (the game's camera over the animated
+    neck, the headset's own height out) to the raise's target while the aim is pitched 10 deg or more, both modes, unarmed; the 1 s lines (a second with a call at that pitch)
+    say how many calls added it, which were measured only (an item drawn) and the reasons for every other (no reference, the LOCAL pose's generation changed, the stance
+    changed, ADS, the camera away, ...), INSIDE on the drawn eye, and the settle's refusals. OK when it was added in at least one second and INSIDE (F97a's test on the drawn
+    eye) is under 10% of the calls of the applied seconds with the aim up. PARTIAL when INSIDE is 10% or more of those calls, or when it was added in no second and a pitched
+    second had an empty hand (the leading reason is named). IDLE when no pitched second had an empty hand (an item drawn: measured only), or when look to aim ran and no
+    second was pitched. The 10 s bin lines are read for presence only."""
+    sec, bins = rows.get("sec", []), rows.get("bins", [])
+    if not sec:
+        if bins:
+            return ("IDLE", "%d bin line(s) and no 1 s line" % len(bins))
+        return ("IDLE", "no second with a call at 10 deg of aim pitch or more: the look stayed level, or a build before F138") if ctx.get("look to aim (F109)", {}).get("sec") else None
+    n = len(sec)
+    calls = sum(int(r["ncalls"]) for r in sec)
+    applied = [r for r in sec if int(r["napplied"]) > 0]
+    added = sum(int(r["napplied"]) for r in sec)
+    measured = sum(int(r["nmeasured"]) for r in sec)
+    refused, lta = sum(int(r["refused"]) for r in sec), sum(int(r["lta"]) for r in sec)
+    returned, retrefused = sum(int(r["returned"]) for r in sec), sum(int(r["retrefused"]) for r in sec)
+    empty = [r for r in sec if r["item"] == "none"]
+    whys = collections.Counter()
+    for r in empty:
+        for name, count in re.findall(r"([^,]+?) (\d+)(?:, |$)", r["why"]):
+            whys[name.strip()] += int(count)
+    modes = sorted(set(r["mode"] for r in sec))
+    text = ("%d pitched s (%d calls; %s), aim %+.0f..%+.0f deg; the camera sank up to %.1f cm against the stance; added in %d s (%d calls, up to %.1f cm), measured only %d calls; "
+            "the settle refused for the aim's pitch %d calls (look to aim's gate %d); returned to the stance's raise %d times (refused %d)") % (
+        n, calls, " and ".join(modes), min(float(r["amin"]) for r in sec), max(float(r["amax"]) for r in sec), max(float(r["smax"]) for r in sec), len(applied), added,
+        max([float(r["amaxadd"]) for r in applied] or [0.0]), measured, refused, lta, returned, retrefused)
+    if applied:
+        up = [r for r in applied if float(r["aim"]) > 0.0]
+        inside, of = sum(int(r["inside"]) for r in up), sum(int(r["insideof"]) for r in up)
+        if not of:
+            return ("OK", text + "; INSIDE not measured in the applied seconds with the aim up (%d of them)" % len(up))
+        text += "; INSIDE %d of %d calls in the %d applied second(s) with the aim up" % (inside, of, len(up))
+        if inside * 10 >= of:
+            return ("PARTIAL", text + " (%d%%; the proof is under 10%%): the view is still in the torso with the sink added" % round(100.0 * inside / of))
+        return ("OK", text)
+    if empty:
+        lead = whys.most_common(1)
+        reason = "%s (%d calls)" % lead[0] if lead else "none counted"
+        return ("PARTIAL", text + "; never added with an empty hand in %d pitched second(s); leading reason: %s" % (len(empty), reason))
+    return ("IDLE", text + "; an item was drawn in every pitched second: measured only")
+
+
 def _hj_f135_menu(rows, ctx):
     """F135 (MEASURE ONLY): which panel hook, or field, is active exactly while the on-foot Esc menu or a panel is up. For each Escape (or pad Start or Back) down edge, the
     counters that rose within 0.5 s after it, those that were already non-zero before it, and those that stayed 0, from the probe's rise and fall event lines; the 1 s lines'
@@ -13316,6 +13362,16 @@ HEALTH_RULES = (
                 r"(?P<serial>\d+), the last published (?P<last>\d+), serial not found (?P<missed>\d+)\)" % ((_HN,) * 4)),
         ("wait", r"native on foot virtual neck \(F137\): not applied: (?P<why>.+)$"),
     ), _hj_f137_neck),
+    _hrule("pitched view (F138)", ("F138",), ("native on foot pitched view (F138)",), (
+        ("sec", r"native on foot pitched view \(F138\) 1 s: mode (?P<mode>.+?), item (?P<item>.+?), aim pitch (?P<aim>%s) deg \(min (?P<amin>%s) max (?P<amax>%s)\), "
+                r"head pitch (?P<head>%s) deg; the camera's sink against the stance (?P<sink>%s) cm \(max (?P<smax>%s)\), the head's own height since the stance "
+                r"(?P<hrise>%s) cm; w (?P<wmean>[\d.]+)/(?P<wmax>[\d.]+); added (?P<added>%s) cm \(max (?P<amaxadd>%s)\) in (?P<napplied>\d+) of (?P<ncalls>\d+) pitched "
+                r"calls \| measured only: an item drawn (?P<nmeasured>\d+) calls \| not applied: (?P<why>.+?); EDVR carried up (?P<up>%s) forward (?P<fwd>%s) cm "
+                r"\(the raise, F137\); the view over the neck (?P<view>%s) cm; INSIDE (?P<inside>\d+) of (?P<insideof>\d+); the settle refused for the aim's pitch "
+                r"(?P<refused>\d+) calls \(look to aim's gate (?P<lta>\d+)\); returned to the stance's raise (?P<returned>\d+) times \(refused (?P<retrefused>\d+)\)" % ((_HN,) * 12)),
+        ("bins", r"native on foot pitched view \(F138\) 10 s bins \(per 10 deg of aim pitch: calls, the camera's sink, EDVR carried up, forward, the head's own height since "
+                 r"the stance; cm\): (?P<mode>mouse look|look to aim), item (?P<item>.+?): (?=\[)(?P<body>.+)$"),
+    ), _hj_f138_pitched),
     _hrule("menu probe (F135)", ("F135",), ("native on foot menu probe (F135)",), (
         ("sec", r"native on foot menu probe \(F135\) 1 s: update (?P<upd>\d+) \(objs (?P<updo>.*?)\), placement (?P<place>\d+) \(objs (?P<placeo>.*?)\), ray (?P<ray>\d+), "
                 r"cursor window (?P<win>\d+), owner transform (?P<own>\d+), panel submit (?P<ps>\d+), inst submit (?P<is>\d+), bridge update (?P<bu>\d+) placement "
@@ -15764,6 +15820,44 @@ def self_test_health():
         check("F137 neck: look to aim drives the aim, said once", [wait137("look to aim drives the aim")], 0, [("IDLE", V137)], has=["not applied: look to aim drives the aim 1 time(s)"],
               lacks=["UNPARSED"])
         check("F137 neck: a wait that came before seconds applied is not judged", [wait137("no fresh aim pitch from the pin hook"), vn137()], 0, [("OK", V137)], lacks=["UNPARSED", "NEVER APPLIED"])
+
+        # ---- F138: the view holds its height over the neck while the look is pitched ----
+        P138 = "pitched view (F138)"
+        ITEM138 = "$wpn_m_assaultrifle_laser_fauto_name;"
+
+        def pv138(mode="mouse look", item="none", aim=40.0, amin=30.0, amax=50.0, head=0.0, sink=14.0, smax=18.0, hrise=0.5, wmean=0.98, wmax=1.0, added=13.0, amaxadd=18.0,
+                  applied=58, calls=60, measured=0, why="none", up=-12.0, fwd=-2.0, view=2.5, inside=0, insideof=60, refused=40, lta=0, returned=1, retrefused=0):
+            return R("native on foot pitched view (F138) 1 s: mode", mode, item, aim, amin, amax, head, sink, smax, hrise, wmean, wmax, added, amaxadd, applied, calls, measured, why,
+                     up, fwd, view, inside, insideof, refused, lta, returned, retrefused)
+
+        def bins138(mode="mouse look", item="none", body="[30,40) 12 +9.0 -10.0 -1.0 +0.5; [40,50) 48 +14.0 -12.0 -2.0 +0.5"):
+            return R("native on foot pitched view (F138) 10 s bins", mode, item, body)
+
+        check("F138 pitched view: no pitched second while look to aim ran", [ENG109, look109(), look109()], 0, [("IDLE", P138)],
+              has=["no second with a call at 10 deg of aim pitch or more"], lacks=["UNPARSED"])
+        check("F138 pitched view: the sink added in pitched seconds of both modes, INSIDE none", [pv138(), pv138(mode="look to aim", aim=38.0)], 0, [("OK", P138)],
+              has=["2 pitched s (120 calls; look to aim and mouse look), aim +30..+50 deg", "added in 2 s (116 calls, up to 18.0 cm), measured only 0 calls",
+                   "the settle refused for the aim's pitch 80 calls (look to aim's gate 0); returned to the stance's raise 2 times (refused 0)",
+                   "INSIDE 0 of 120 calls in the 2 applied second(s) with the aim up"], lacks=["UNPARSED"])
+        check("F138 pitched view: INSIDE in a third of the calls with the sink added", [pv138(inside=20, insideof=60)], 0, [("PARTIAL", P138)],
+              has=["INSIDE 20 of 60 calls", "(33%; the proof is under 10%)"], lacks=["UNPARSED"])
+        check("F138 pitched view: INSIDE in a tenth of the calls is not under 10%", [pv138(inside=6, insideof=60)], 0, [("PARTIAL", P138)], has=["INSIDE 6 of 60 calls"])
+        check("F138 pitched view: INSIDE in 5% of the calls", [pv138(inside=3, insideof=60)], 0, [("OK", P138)], has=["INSIDE 3 of 60 calls"], lacks=["UNPARSED"])
+        check("F138 pitched view: the sink never added with an empty hand, the leading reason named",
+              [pv138(applied=0, added=0.0, amaxadd=0.0, sink=0.0, smax=0.0, why="no reference 58, stance changed 2"), pv138(applied=0, added=0.0, amaxadd=0.0, why="no reference 60")], 0,
+              [("PARTIAL", P138)], has=["never added with an empty hand in 2 pitched second(s); leading reason: no reference (118 calls)", "added in 0 s (0 calls, up to 0.0 cm)"],
+              lacks=["UNPARSED"])
+        check("F138 pitched view: an empty-hand second that added nothing beside one that did is judged on the one that did",
+              [pv138(), pv138(applied=0, added=0.0, amaxadd=0.0, why="LOCAL pose generation changed 60")], 0, [("OK", P138)], lacks=["UNPARSED", "leading reason"])
+        check("F138 pitched view: an item drawn in every pitched second is measured only", [pv138(item=ITEM138, applied=0, added=0.0, amaxadd=0.0, measured=60)], 0, [("IDLE", P138)],
+              has=["measured only 60 calls", "an item was drawn in every pitched second: measured only"], lacks=["UNPARSED"])
+        check("F138 pitched view: a second with an item for some of its calls reads (item and count)", [pv138(item=ITEM138 + " in 12 of 60 calls", applied=48, measured=12)], 0, [("OK", P138)],
+              has=["added in 1 s (48 calls", "measured only 12 calls"], lacks=["UNPARSED"])
+        check("F138 pitched view: looking down only, INSIDE is not measured with the aim up", [pv138(aim=-40.0, amin=-50.0, amax=-30.0)], 0, [("OK", P138)],
+              has=["INSIDE not measured in the applied seconds with the aim up (0 of them)"], lacks=["UNPARSED"])
+        check("F138 pitched view: the 10 s bin lines are read", [pv138(), bins138(), bins138(mode="look to aim", item=ITEM138)], 0, [("OK", P138)], lacks=["UNPARSED"])
+        check("F138 pitched view: bin lines alone", [bins138()], 0, [("IDLE", P138)], has=["1 bin line(s) and no 1 s line"], lacks=["UNPARSED"])
+        check("F138 pitched view: a drifted line is unparsed", ["native on foot pitched view (F138) 1 s: something else"], 4, [("UNPARSED", P138)])
 
         # ---- F135: the on-foot menu probe (MEASURE ONLY) ----
         M135 = "menu probe (F135)"
