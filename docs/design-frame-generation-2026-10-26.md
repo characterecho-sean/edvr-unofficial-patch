@@ -2,22 +2,20 @@
 
 ## Status
 
-- **State (2026-10-26): DESIGN ONLY.** Nothing is built, keyed, installed or
-  flown. Written from OFXR-Bridge at `d7fcca72` (v0.3.1) and EDVR at
-  `6b8ef374`. No issue is filed yet.
+- **State (2026-10-27): DESIGN ONLY.** Nothing built, keyed or flown. From
+  OFXR-Bridge `d7fcca72` (v0.3.1) and EDVR `6b8ef374`; the 2026-10-27 entry
+  adds AFW and the flat profile. No issue is filed yet.
 - **Recommendation:** take OFXR-Bridge's frame loop, not its synthesizer. Elite
   renders at half the headset rate and EDVR's runtime presents every display
-  period. The frame in between is **extrapolated** from Elite's newest frame.
-  It uses the depth and motion vectors EDVR already makes for DLSS, the game
-  camera, and the head pose predicted for that slot. v1 has no optical flow, no
-  interpolation and no added latency. The frame is made on the game device
-  right after the temporal pass, and the XR owner thread presents it one period
-  later (## Recommendation, ## Design).
-- **Why not a straight port:** OFXR-Bridge has been GPL-3.0 since v0.3.0 and
-  EDVR is MIT, so no code is copied. Its synthesizer is colour-only optical
-  flow, "depth-unaware" for translation, and cannot tell the cockpit from the
-  world. It interpolates, which holds every real frame back at least one
-  display period (## Why not a straight port).
+  period. The frame in between is **extrapolated** from Elite's newest frame,
+  with the depth and motion vectors EDVR makes for DLSS, the game camera and
+  the head pose predicted for that slot: no optical flow, no interpolation, no
+  added latency. It is made on the game device after the temporal pass and
+  presented one period later (## Recommendation, ## Design).
+- **Why not a straight port:** OFXR-Bridge is GPL-3.0 and EDVR is MIT, so no
+  code is copied. Its colour-only optical flow is "depth-unaware" for
+  translation and cannot tell the cockpit from the world, and interpolating
+  holds every real frame back at least one period (## Why not a straight port).
 - **When it runs (`auto`):** only while a measured gate holds. Elite is below
   headset rate, its frame fits in two periods with room for the synthesis, a
   shadow score says the prediction is clean, and there is no cut. v1 admits
@@ -42,17 +40,23 @@
     error after the compositor's own rotation correction.
   - H7: the runtime stays at full rate while EDVR submits every period.
     VDXR's sticky half rate is the risk.
+  - H8: one eye rebuilt from the other at the same moment (AFW's stereo warp)
+    leaves little that neither eye saw, and no HUD doubling off the UI path.
+  - H9: settlements are GPU-limited, and one eye is a large share of the GPU
+    frame. Only then would alternate-eye rendering pay.
 - **Phase 0 (no EDVR code):** fly stock OFXR-Bridge (colour-only route) over
   EDVR at a bright settlement and in space, with each runtime's own smoothing
   off and then on. This is the visual reference to beat.
 - **Next flight: Phase 1, measure only.** It flies the shadow scorer (H2-H4 by
-  pixel class), the surface classifier, the frame GPU span while armed (H1) and
-  the pose prediction error (H6). Nothing shown in the headset changes.
+  pixel class), the stereo score (H8), the surface classifier, the frame GPU
+  span while armed (H1), the per-eye GPU share (H9) and the pose prediction
+  error (H6). Nothing shown in the headset changes.
 - **Temporary key (proposed, not built):** `fix.frame_generation_shadow`
   (off | on), Phase 1 only. The user key `fix.frame_generation` (off | auto)
   comes with Phase 2. Its `on` value (forced, ignoring the gate's performance
   terms) is temporary, for A/B flights.
-- **Declined in design (re-open only on new evidence):** ## Declined.
+- **Declined in design (re-open on new evidence):** ## Declined, including AFW
+  as a replacement and flat-profile frame generation (2026-10-27).
 - **Open:** ## Open questions (canopy depth, early swapchain acquire, vendor
   half-rate stickiness, refresh-rate switching as an alternative).
 
@@ -289,12 +293,21 @@ motion shader's code, not a second copy of it.
 
 ### The synthesis pass
 
-1. **Splat (render size).** Forward-splat B's depth into S's grid using each
-   pixel's class transform. The nearest pixel wins: a UAV atomic max on
-   reversed-Z depth, then a pass that records each winner's source. The result
-   names, for every pixel of S, the pixel of B it came from.
-2. **Holes (render size).** A disocclusion is filled from its farther neighbour
-   (background pull), never from the nearer one.
+1. **Splat (render size).** First dilate B's depth (the nearest depth over a
+   1x3 or 3x3 window), so an object's edge pixels move with the object.
+   OFXR-Bridge adds the same pass to its AFW route to reduce "ghosting, flicker
+   and shimmering", at the cost of less precise silhouettes
+   ([`README.md:98`](https://github.com/tig3rmast3r/OFXR-Bridge/blob/d7fcca72d569ec364281ab63ae29378bbfaf1251/README.md)).
+   Then forward-splat B's depth into S's grid using each pixel's class
+   transform. The nearest pixel wins: a UAV atomic max on reversed-Z depth,
+   then a pass that records each winner's source. The result names, for every
+   pixel of S, the pixel of B it came from.
+2. **Holes (render size).** A disocclusion is filled first from the other eye's
+   real frame B, carried to S by the same class transforms and depth-tested.
+   What the head's sideways motion uncovers behind a cockpit strut is often in
+   the other eye's view. This is AFW's stereo warp (2026-10-27 entry). Only
+   what neither eye saw is filled from its farther neighbour (background pull),
+   never from the nearer one.
 3. **Resample (output size).** Read B's upscaled colour (the DLSS, FSR, XeSS or
    TAA output, before the UI layer) at the mapped positions. S's pixels pass
    through one more resample than B's, so the filter must be sharp enough that
@@ -441,8 +454,9 @@ Space is where flow is worst and geometry is best:
 
 - Static terrain and buildings are exact, except at disocclusions. Low flight
   and the SRV have the most parallax. The background pull covers one period's
-  edge. A second source (A, reprojected) is the upgrade if the disocclusion
-  share dominates Phase 1's residual.
+  edge, after the other eye's frame has filled what it saw. A further source
+  (A, reprojected) is the upgrade if the disocclusion share still dominates
+  Phase 1's residual.
 - Thruster dust and smoke are reactive (the motion shader's smoke term). NPCs
   are movers, and walkers are a known gap in the engine-record motion
   (`kinematic-motion-injection`, "Other open work").
@@ -476,12 +490,12 @@ luma error, against the floor.
 
 | # | Class | Where expected | Signature | Mitigation |
 |---|---|---|---|---|
-| 1 | Disocclusion | cockpit struts under head translation; building edges in low flight, the SRV, on foot | residual concentrated at depth discontinuities; disocclusion share | background pull; second source |
+| 1 | Disocclusion | cockpit struts under head translation; building edges in low flight, the SRV, on foot | residual concentrated at depth discontinuities; disocclusion share | the other eye's frame; background pull; A as a further source |
 | 2 | Unmodelled movers | walkers, some ships, the Coriolis brace | mover/world residual where engine-record motion is absent | the kinematic arc's open items |
 | 3 | Reactive content | lasers, explosions, dust, smoke, shields | residual on reactive-mask pixels | held; accept, or residual flow (Phase 5) |
 | 4 | Transparency and UI | canopy glass, holo panels, target sprite, world-anchored brackets | UI-class residual; far colour behind near depth | head path; the canopy check |
 | 5 | View-dependent shading | specular, sun glare and bloom, lens flares | broad low residual, correlated with the sun in view (`docs/sun-glare.md`) | accept |
-| 6 | Resampling shimmer | stars, thin lines, text | far-class and edge high-pass energy ratio away from 1 | a sharper resample filter |
+| 6 | Resampling shimmer | stars, thin lines, text | far-class and edge high-pass energy ratio away from 1 | a sharper resample filter; depth dilation at silhouettes |
 | 7 | Rig acceleration | boost, collisions, FA-off flips, touchdown, camera shake | far/world residual against the rig's angular acceleration | a higher-order step, or disengage on spikes |
 | 8 | Timing | the GPU saturated, Elite over budget, vendor halving | `late_real`, `late_s`, halved-period counts | the gate |
 | 9 | Stereo mismatch | any class | per-eye residual difference | the same transform for both eyes |
@@ -538,14 +552,20 @@ luma error, against the floor.
    - The frame GPU span while armed, without the per-draw queries.
    - The pose prediction error: S's views at synthesis time against the
      views located for T_S.
+   - The stereo score (H8): every real frame, B's right eye rebuilt from B's
+     left eye with depth, against the real right eye, per class, with the
+     share of pixels neither eye saw. It prices AFW-style reconstruction in
+     Elite, HUD doubling included, without building alternate-eye rendering.
+   - The GPU pass profiler (`hotkey.gpu_pass_profile`, built, not flown) at a
+     settlement, for one eye's share of Elite's GPU frame (H9).
    - A `frame generation (shadow)` line once a second, with an
      `edvr_log.py --health` tag. A run with no such line reads NEVER
      APPLIED, which tells it apart from a clean score.
    - **Flight:** a settlement in a ship, low flight, the SRV, on foot in a
      settlement, supercruise near a planet, a station interior, and a
      combat zone if one is reachable.
-   - **Gate:** H1-H4 and H6 decided per context, and the gate's thresholds
-     set from the floor.
+   - **Gate:** H1-H4, H6, H8 and H9 decided per context, and the gate's
+     thresholds set from the floor.
 3. **Phase 2, Lock on surfaces (`fix.frame_generation = auto | on`).**
    - Build the presenter, the S publication, the ABI extension and the
      gate.
@@ -562,7 +582,8 @@ luma error, against the floor.
    - residual optical flow after the full geometric pre-warp, if classes 3
      or 5 dominate on surfaces (the licence question below comes first);
    - or the `XR_EXT_frame_synthesis` hand-off, once a Windows runtime
-     offers it.
+     offers it;
+   - or an alternate-eye mode in the style of AFW, if H8 and H9 hold.
 
 ## Tests required before a flight
 
@@ -595,6 +616,18 @@ it.
   the gate measures prediction quality directly.
 - **Depth submission to the vendor as the fix:** it was set aside on
   2026-09-24, and the vendor still would not know the ship.
+- **AFW-style alternate-eye rendering as the replacement for Lock:** Elite
+  renders both eyes every frame from one game tick, and EDVR has never dropped
+  one eye's work. Alternate eyes save GPU, not CPU, while settlements need
+  9.5-13.4 ms of CPU against 11.1 ms at 90 Hz. AFW's DLL is D3D12 only, closed
+  and unlicensed. Re-open if H8 and H9 hold. Its stereo hole fill and depth
+  dilation are taken (## The synthesis pass; 2026-10-27 entry).
+- **Frame generation in the flat profile:** no vendor SDK has a D3D11 path,
+  flat's slow cases are mostly EDVR's own render-thread cost, and the users who
+  would want it most are under AMD's 60 fps input floor. Re-open when treated
+  flat frames hold 60 fps or more on 120 Hz or faster displays, with FSR 3
+  frame interpolation from the D3D11 fork EDVR already pins and an EDVR-written
+  presenter (2026-10-27 entry).
 
 ## Open questions
 
@@ -624,8 +657,8 @@ it.
   OpenXR. The game is D3D11 with temporal AA on (DLSS, FSR 3.1, XeSS-SR or
   TAA), because depth and motion exist only then. It works on any GPU vendor,
   since there is no flow.
-- **Does not apply to** the flat profile (Proton, macOS) or Elite's own LibOVR
-  and OpenVR routes, which EDVR's runtime bypasses.
+- **Does not apply to** the flat profile on any platform (## Declined), or
+  Elite's own LibOVR and OpenVR routes, which EDVR's runtime bypasses.
 - **Per-eye sizes on record:** Pimax Crystal Super flown between 2016x2017 and
   2604x2644; SteamVR at 4068x4016; Quest 3 from 1824x1968 base
   (`docs/openxr-resolution-per-headset-2026-09-14.md`) and 1536x1632 on foot
@@ -653,3 +686,111 @@ it.
   that knows the ship's motion, the cockpit, the HUD and the depth, and an
   extrapolator built on those adds no latency.
 - **Next:** Sean's call on Phase 0, and the Phase 1 build.
+
+### 2026-10-27: AFW, and frame generation in the flat profile
+
+**AFW, suggested by a user (relayed by Sean).** The user's report from UEVR: no
+ghosting, but the edges of some objects shimmer in fast movement.
+
+- **What it is.** PureDark's Alternate Frame Warping, on UEVR's `AFW` branch
+  (`fc8de102`). The game renders one eye per frame, alternating, at the full
+  display rate. A closed DLL rebuilds the other eye in one of three modes,
+  `AlternateEyeWarping`, `PreviousFrameWarping` and `CombinedWarping`
+  ([`PDAFWPlugin.h:36-38`](https://github.com/PureDark/UEVR/blob/f49cd54e919c368fdf1b253ac5b1266caf56436a/dependencies/pd-afwmod/include/PDAFWPlugin.h)).
+  Each call takes the rendered eye's colour, depth and motion and "returns
+  reprojected result" (`:287`). OFXR-Bridge's fallback describes the alternate
+  mode as "current source/depth stereo warp, no missing temporal color"
+  ([`luke_afw_continuity.hpp:21`](https://github.com/tig3rmast3r/OFXR-Bridge/blob/d7fcca72d569ec364281ab63ae29378bbfaf1251/include/xrfg/luke_afw_continuity.hpp)).
+  So: the fresh eye warped across with depth, the held eye's own last frame
+  carried forward, or both. No future frame is used, which fits "no ghosting".
+- **Preconditions and licence.**
+  - D3D12 only. UEVR enables it only under DX12
+    ([`VR.hpp:520-523`](https://github.com/PureDark/UEVR/blob/fc8de1026622d42d0d1f76c3e9c8bb0d80b11035/src/mods/VR.hpp)) and otherwise says "AFW only
+    supports DX12, fallback to AFR" ([`VR.cpp:3052`](https://github.com/PureDark/UEVR/blob/fc8de1026622d42d0d1f76c3e9c8bb0d80b11035/src/mods/VR.cpp)).
+  - Its inputs come from hooking DLSS Evaluate.
+  - The repository holds the header and a "dummy implementation of the DLL"
+    ([`dummy/PDAFWPlugin.cpp`](https://github.com/PureDark/UEVR/blob/f49cd54e919c368fdf1b253ac5b1266caf56436a/dependencies/pd-afwmod/dummy/PDAFWPlugin.cpp)). The DLL ships in
+    release archives, and the fork's `LICENSE` reads "All rights reserved".
+  - OFXR-Bridge runs the beta.6 DLL for Luke Ross "Legacy AER" games
+    ([`README.md:85-99`](https://github.com/tig3rmast3r/OFXR-Bridge/blob/d7fcca72d569ec364281ab63ae29378bbfaf1251/README.md)).
+- **Known artifacts.** OFXR-Bridge reports HUD doubling when moving or rotating
+  in five of the seven titles it tested (`README.md:105-120`), likely because a
+  HUD with no depth of its own is warped with the world behind it. It added its
+  own depth-dilation pass
+  ([`luke_depth_convert.hlsl`](https://github.com/tig3rmast3r/OFXR-Bridge/blob/d7fcca72d569ec364281ab63ae29378bbfaf1251/src/d3d12/luke_depth_convert.hlsl))
+  to reduce "ghosting, flicker and shimmering" (`README.md:98`), which matches
+  the user's edge shimmer.
+- **Elite against those preconditions.**
+  - Elite renders each eye as its own pass, left first, both from one game tick
+    (`docs/engine-render-pipeline.md`, the 2026-09-21 known-facts entry).
+    Culling is one traversal with a per-view loop
+    (`docs/stereo-cpu-sharing-2026-10-16.md`). The G-buffer, light grid, post
+    chain, bloom and EDVR's DLSS run per eye.
+  - EDVR has never dropped one eye's scene draws. Doing so needs each draw's
+    eye. That is solid in a cockpit (5068 matched, 0 swapped,
+    `docs/ui-layer-2026-09-23.md`) and about 98% on foot
+    (`docs/design-native-onfoot-vr-2026-10-13.md`, F121), and one on-foot
+    session mislabelled the eyes.
+  - Alternate eyes save GPU, not CPU. Elite still simulates, culls and records
+    both eyes, now every display period. A settlement cockpit measured about
+    9.5 ms of CPU, and the Pimax producer 11.9-13.4 ms, against 11.1 ms at
+    90 Hz (`docs/engine-render-performance-2026-09-19.md`). Lock gives 22.2 ms.
+  - No per-eye split of Elite's GPU frame has been measured. DLSS alone is
+    2.0-2.8 ms an eye on the Pimax (`docs/performance.md`).
+  - DLSS resets an eye's history whenever that eye's frames are not
+    contiguous (`src/d3d11/native_temporal.cpp:505`; `skipEye` at `:556`), so
+    evaluating each eye every other frame needs a two-frame history path.
+- **Decision.**
+  - Not a replacement for Lock (## Declined).
+  - Taken into the design: the other eye's frame as the first disocclusion
+    fill, and depth dilation before the splat (## The synthesis pass).
+  - Added to Phase 1: the stereo score (H8) and the per-eye GPU share (H9). If
+    both hold, an alternate-eye mode becomes a Phase 5 candidate.
+  - Its advantage is real. Every displayed frame carries one fresh eye, and the
+    rebuilt eye borrows from a real image of the same moment. So lasers,
+    explosions and walkers come out right except where only one eye sees,
+    which are the classes extrapolation cannot predict (3 and 2 above).
+
+**Frame generation in the flat profile (Sean's question).**
+
+- **No vendor SDK has a D3D11 path.**
+  - DLSS Frame Generation is D3D12 and Vulkan
+    ([Streamline DLSS-G guide](https://github.com/NVIDIA-RTX/Streamline/blob/main/docs/ProgrammingGuideDLSS_G.md)).
+  - FSR frame generation is D3D12 only in the current FidelityFX SDK, and no
+    tag of it has a DX11 backend
+    ([FidelityFX SDK](https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK)).
+  - XeSS-FG is D3D12 only and requires XeLL
+    ([guide](https://github.com/intel/xess/blob/main/doc/xess_fg_developer_guide_english.md)).
+  - Under Proton, vkd3d-proton (D3D12) added the interop that lets dxvk-nvapi
+    run DLSS frame generation
+    ([changelog](https://github.com/HansKristian-Work/vkd3d-proton/blob/master/CHANGELOG.md)).
+    Nothing equivalent was found for D3D11 under DXVK.
+- **The D3D11 fork EDVR pins for FSR upscaling has half of it.** That fork is
+  optiscaler/FidelityFX-SDK-DX11 at `9b04fa49` (`tools/fetch_ffx_dx11.py`).
+  - It carries FSR 3's frame-interpolation and optical-flow shaders, built for
+    D3D11. EDVR's build turns them off (`-DFFX_FI=OFF`, `-DFFX_OF=OFF`).
+  - It has no presenter. The backend's frame-generation hook is an empty stub
+    ([`ffx_dx11.cpp:157`](https://github.com/optiscaler/FidelityFX-SDK-DX11/blob/9b04fa49abae5aa341c0007af13c8ba1b4ad9913/sdk/src/backends/dx11/ffx_dx11.cpp)).
+    The `FrameInterpolationSwapchain` directory its CMake lists
+    ([`CMakeLists.txt:202-203`](https://github.com/optiscaler/FidelityFX-SDK-DX11/blob/9b04fa49abae5aa341c0007af13c8ba1b4ad9913/sdk/src/backends/dx11/CMakeLists.txt))
+    does not exist.
+  - OptiScaler, which maintains the fork, says its own frame generation
+    supports DX12 only
+    ([README](https://github.com/optiscaler/OptiScaler/blob/master/README.md)).
+- **Flat's slow cases are mostly EDVR's own render-thread cost with AA on.**
+  - An RTX 3050 in an on-foot combat zone ran 21 fps with DLSS and 45-46 fps
+    with AA off (`docs/flat-cz-fps-2026-10-11.md`).
+  - The Panther Lake handheld ran 28.5-37.3 fps (`docs/performance.md`,
+    2026-10-21).
+  - AMD says FSR 3.1 frame generation "is designed for an input framerate of
+    at least 60 FPS"
+    ([doc](https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK/blob/main/Kits/FidelityFX/docs/techniques/frame-interpolation-swap-chain.md)).
+- **Driver-level options already work on D3D11** for users at 60 fps or more.
+  These come from search results, not opened: AMD Fluid Motion Frames 2, NVIDIA
+  Smooth Motion, Lossless Scaling, and lsfg-vk over DXVK on Linux. One user
+  already ran Fluid Motion Frames 2.1 alongside EDVR
+  (`docs/design-flat-temporal-aa-2026-09-23.md`, ruled out as the cause of a
+  drop).
+- **Decision: declined for now** (## Declined). In VR the runtime fills a
+  missed slot anyway, so a better filler is pure gain. In flat a missed frame
+  is only a lower frame rate.
