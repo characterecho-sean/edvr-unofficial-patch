@@ -7,6 +7,7 @@
 #include "../../src/d3d11/fsr3_engine.h"
 #include "../../src/d3d11/engine_velocity_emit.h"
 #include "../../src/d3d11/flat_hdr_crumbs.h"
+#include "../../src/d3d11/flat_capture_directory.h"
 #include "../../src/d3d11/flat_isolation_mode.h"
 #include "../../src/d3d11/flat_context_state.h"
 #include "../hdr_crumb_trail.h"
@@ -21,6 +22,7 @@
 #include <string>
 #include <vector>
 #include <cmath>
+#include <set>
 #include "../../src/common/config.h"
 #include "../../src/common/log.h"
 #include "../../src/common/system_d3d11.h"
@@ -217,7 +219,6 @@ void Log::note(const char* fmt,...) {
 }
 // Stand-in for src\common\proxy.cpp's breadcrumb(): the route's crumbs land here so the rig can read the trail back.
 void breadcrumb(const char* stage) {if(stage)crumbLines.emplace_back(stage);}
-bool flatDrawCaptureNoDirectoryWrites=false;
 bool ensureDirectory(const std::wstring& path) {
     if(flatDrawCaptureNoDirectoryWrites)return true;
     return CreateDirectoryW(path.c_str(),nullptr) || GetLastError()==ERROR_ALREADY_EXISTS;

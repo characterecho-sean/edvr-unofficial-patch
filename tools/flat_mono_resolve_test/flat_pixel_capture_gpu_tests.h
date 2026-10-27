@@ -3,10 +3,24 @@
 #include <filesystem>
 #include <fstream>
 
+// Capture directory names must be unique per arm, whatever the clock granularity: 200 fresh instances armed back to back
+// (#105: a per-instance serial let two instances share <timestamp>_<pid>_1 and mix their frame files).
+inline int flatPixelCaptureDirectoryTests() {
+    edvr::flatDrawCaptureNoDirectoryWrites=true;
+    std::set<std::wstring> seen;int bad=0;
+    for(unsigned i=0;i<200;++i) {
+        edvr::FlatPixelCapture capture;capture.arm(1000+i);
+        if(capture.directory().empty() || !seen.insert(capture.directory()).second)++bad;
+    }
+    edvr::flatDrawCaptureNoDirectoryWrites=false;
+    if(bad)std::printf("FAIL: flat pixel capture: %d of 200 back-to-back arms got an empty or repeated directory\n",bad);
+    return bad?1:0;
+}
+
 inline int flatPixelCaptureGpuTests(ID3D11Device* device,ID3D11DeviceContext* context) {
     namespace fs=std::filesystem;
     using Microsoft::WRL::ComPtr;
-    int captureFailures=0;
+    int captureFailures=flatPixelCaptureDirectoryTests();
     auto check=[&](bool ok,const char* what){if(!ok){std::printf("FAIL: flat pixels GPU %s\n",what);++captureFailures;}};
     const fs::path fixtureRoot=edvr::Config::get().logDir();
     const auto pointer=fixtureRoot/L"current_fixture.txt";

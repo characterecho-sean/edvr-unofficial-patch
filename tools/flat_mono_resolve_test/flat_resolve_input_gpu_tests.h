@@ -5,11 +5,25 @@
 #include <iterator>
 #include <thread>
 
+// Capture directory names must be unique per arm, whatever the clock granularity: 200 fresh instances armed back to back
+// (#105: a per-instance serial let two instances share <tick>_<pid>_1 and mix their frame files).
+inline int flatResolveInputDirectoryTests() {
+    edvr::flatDrawCaptureNoDirectoryWrites=true;
+    std::set<std::wstring> seen;int bad=0;
+    for(unsigned i=0;i<200;++i) {
+        edvr::FlatResolveInputCapture capture;capture.arm(1000+i);
+        if(capture.directory().empty() || !seen.insert(capture.directory()).second)++bad;
+    }
+    edvr::flatDrawCaptureNoDirectoryWrites=false;
+    if(bad)std::printf("FAIL: resolve inputs: %d of 200 back-to-back arms got an empty or repeated directory\n",bad);
+    return bad?1:0;
+}
+
 inline int flatResolveInputGpuTests(ID3D11Device* device,ID3D11DeviceContext* context) {
     namespace fs=std::filesystem;
     using edvr::FlatMonoResolveFrame;
     using edvr::FlatMonoResolveMode;
-    int failed=0;
+    int failed=flatResolveInputDirectoryTests();
     auto expect=[&](bool ok,const char* what) {if(!ok) {std::printf("FAIL: resolve inputs %s\n",what);++failed;}};
     constexpr UINT width=16,height=12;
     std::array<std::vector<uint8_t>,9> bytes;
