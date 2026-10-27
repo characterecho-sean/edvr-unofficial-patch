@@ -58,7 +58,7 @@
 
 * **Next (2026-10-27, last entry):** AA on's +1.65 ms is per-draw
   classifiers. ui-depth memo FLOWN: exact, -0.21 ms (shipped, b1561dff).
-  Shadow 1b: off-screen 23-40%, 0/35M wrong; eye 0% (census bug). 1c BUILT.
+  Shadow 1c FLOWN: 29-30% would take, 0/28M wrong. Next 1d: count bands.
 
 ## Frame budget philosophy
 
@@ -4526,6 +4526,76 @@ much of the 47% a widened class would admit.
   top VS for eye and off-screen, then the over-10000 shares.
 - **Rig:** aa_off_test, 376 checks.
 - **Worst-case lengths:** 1051, 981 and 1144 characters.
+
+**Phase 1c flown (2026-10-27, Steam log `edvr_gfx_20261027_174248.log`,
+build 03335ec3; same rig).** Loaded in docked at Cranfield at 17:44:42.
+AA was on, then F7 off from 17:45:46 to 17:46:47, then on. Two scene
+windows (12600 and 14400) are read below.
+- **Would take:**
+  - eye: 33.2-34.3% (3.5-4.6k a frame);
+  - off-screen: 25.5-26.7% (3.3-4.0k a frame);
+  - all owner X draws: 29-30% (23.6-28.6k a frame).
+- **Mismatches: 0 of 12.3M and 15.6M compared.** The census fix let the
+  eye draws in, and none of them differed from the full path.
+- **What still refuses** (refusals per window, as a share of owner X
+  draws):
+
+  | Reason | Share | Detail |
+  |---|---|---|
+  | count of 64 or under | about 45% (10.4-12.8k a frame) | the largest by far |
+  | dynamic | about 7% | camera watch about 4.5%, object-probe checks about 3% |
+  | key moved | about 3% | |
+  | over 10000 | about 3% (0.8k a frame) | |
+  | count 240 | about 0.2% | |
+
+  On eye draws the outcome terms that block a ticket are now small:
+  after-ui about 85 a frame, special VS about 60, ui depth about 15.
+- **The 64-or-under draws are ordinary scene shaders.** Eye: EB5234DB..
+  51%, 5B4D8E89.. 19%, BBE58E40.. 11%. Off-screen: 8BC3FFBC.. 75%,
+  C2208C16.. 11%. They are small meshes drawn instanced.
+- **The over-10000 sun-glare nomination never acts.**
+
+  | Class | Glare off | No cb | cb already nominated | Acts |
+  |---|---|---|---|---|
+  | Eye | 0% | 21-26% | 74-79% | 0% |
+  | Off-screen | 0% | 38-40% | 60-62% | 0% (it is eye-only) |
+
+Why the lower bound is too cautious. I set it at 64 to cover every
+count test the inventories found:
+- the count 6 quads;
+- the after-UI watch budget, at 6 or under;
+- `srv0IsPanelSized`, at 64 or under: the distance fix, the curve, and
+  the after-UI read test;
+- the crisp tonemap at 3 and the N-only 3 and 4 shapes, which do not
+  apply to X.
+
+Only `srv0IsPanelSized` acts between 7 and 64, and its answer for a
+draw under 64 is a memo keyed on PsSrv0's generation, which the key
+covers. So a repeat in that range gets the same answer, but only if
+the previous draw was in the same range. A draw over 64 never runs the
+test.
+
+Next build (Phase 1d):
+- **The args class becomes a band that the ticket records,** and the
+  next draw must be in the same band:
+  - band A: count 7-64;
+  - band B: count 65-10000, except 240;
+  - band C: count over 10000, admitted only while the nomination is a
+    no-op for this draw: glare off, no VsCb0, or VsCb0 already
+    nominated. That is a per-draw test, because VsCb0 is not in the
+    key.
+- **Kept out:** count 6 or under, 240, and instances 0.
+- **Re-grep before building:** every count test reachable on an owner X
+  draw, to confirm that nothing between 7 and 64 except
+  srv0IsPanelSized depends on count. The shadow comparison catches
+  anything missed, as a mismatch.
+
+Expected: most of the 45% joins. Most draws repeat their key, so the
+would-take share should rise towards 70-80%.
+
+ruled out: the 10000 count bound as needed, because the sun-glare
+nomination did not act on one draw over 10000 in two windows. A
+no-op test per draw replaces it.
 
 **The Phase 2 flight should show:**
 - the `fast` step's calls and cost;
