@@ -27,6 +27,7 @@
 #include "../common/openxr_resolution_entries.h"
 #include "../common/parallel_projection_notice.h"
 #include "../common/proxy.h"
+#include "../common/star_glow.h"        // starGlowPercent: the Star glow row's hint follows the setting
 #include "../common/timing.h"
 #include "../common/temporal_mode.h"
 #include "../common/vr_supersample_notice.h"
@@ -52,6 +53,7 @@
 #include "menu_schema.h"
 #include "perf_monitor.h"
 #include "sharpen_pass.h"
+#include "star_glow_bloom_reader.h"   // Elite's Bloom option, read for the Star glow row's hint (when a menu opens or the setting changes, never per frame)
 #include "temporal_pass.h"
 #include "terrain_checkerboard.h"   // Elite's terrain checkerboard rendering in VR: the worker's tick and the word it publishes
 #include "ui_layer_math.h"  // uiQualityParse: the HUD Anti-Aliasing row dims while fix.ui_quality is off (or the anti-aliasing is), UI quality read as the layer reads it
@@ -229,6 +231,11 @@ struct State {
     int         flatWarnLogged = 0;
     // The graphics-wrapper note (flat_wrapper_note.h): said once in the log when it is first drawn.
     bool        flatWrapperNoteLogged = false;
+    // visual.star_glow's Bloom hint (star_glow_bloom.h): Elite's Bloom option, read when the setting rises above 100, moves while it is there, and when a menu
+    // opens while it is there (star_glow_bloom_reader.h). The config generation last looked at makes the per-frame tick one compare.
+    sgb::Watch  starGlowBloom;
+    uint32_t    starGlowBloomGen = 0;
+    bool        starGlowBloomGenSeen = false;
     // Elite's Supersampling below 1.0 in VR (vr_supersample_notice.h, design section 83): the headset toast is said once a
     // session, the Status line and the settings pages' note whenever vScreen has measured it. Never in a flat session.
     bool        vrSupersamplingToasted = false;
@@ -495,6 +502,15 @@ const char* hudAntiAliasingHint() {
 const char* hudAntiAliasingRefusal() {
     return hudAntiAliasingUiQualityOn() ? "HUD Anti-Aliasing is inactive: turn anti-aliasing on first."
                                         : "HUD Anti-Aliasing is inactive: turn UI quality on above first.";
+}
+
+// visual.star_glow (the Star glow row). It strengthens the halo of Elite's own bloom, so with Elite's Bloom option off it changes nothing, and the
+// menus say so (star_glow_bloom.h: the flat panel's Visual tab as a note under the rows, the VR menu as the hint line while this row is highlighted).
+// The row is never dimmed for it: a dimmed row stops responding, and the setting is still the player's to make. Matched by key, so the hint follows
+// the row wherever it is drawn (today `menu flat_visual`, flat only; VR's Visual page when the row moves to `menu visual`).
+static_assert(sgb::kStockPercent == kStarGlowStock, "the hint's threshold is the setting's stock value");
+bool isStarGlowRow(const MenuRowDef& d) {
+    return strcmp(d.section, "visual") == 0 && strcmp(d.key, "star_glow") == 0;
 }
 
 // The on-foot panel's width: "auto", or a width in pixels -- never a list, so
@@ -1173,6 +1189,35 @@ void flatWarningTick(uint64_t now) {
     }
     if (s.flatWarnLogged == kFlatWarnLogMax)
         Log::get().note("flat settings warning: further changes are not logged this session");
+}
+
+// visual.star_glow's Bloom hint (star_glow_bloom.h, star_glow_bloom_reader.h), in both profiles. Where Elite keeps its graphics files, and the game's folder for the
+// stock presets, are set once with the menu.
+void starGlowBloomConfigure() {
+    g_s.starGlowBloom.configure(flatEliteGraphicsFolder(), executableDirectory());
+}
+
+// One tick: the setting is looked at only when the config's generation moved (a reload or a write), and the files only when it rises above 100 or moves while it is
+// there. Said in the log when the setting rises and when the Bloom state changes.
+void starGlowBloomTick() {
+    State& s = g_s;
+    const uint32_t generation = Config::get().generation();
+    if (s.starGlowBloomGenSeen && generation == s.starGlowBloomGen) return;
+    s.starGlowBloomGenSeen = true;
+    s.starGlowBloomGen = generation;
+    const int percent = starGlowPercent(Config::get());
+    const int before = s.starGlowBloom.percent();
+    std::string line;
+    const bool said = s.starGlowBloom.noteSetting(percent, &line);
+    if (said) Log::get().note("%s", line.c_str());
+    if (said || percent != before) s.contentDirty = true;
+}
+
+// A menu has opened: the files are read again while the setting is above 100 (the player may have changed Elite's Bloom since), and a changed state is said.
+void starGlowBloomMenuOpened() {
+    std::string line;
+    if (g_s.starGlowBloom.noteMenuOpened(&line)) Log::get().note("%s", line.c_str());
+    g_s.contentDirty = true;
 }
 
 // ---------------------------------------------------------------------------
@@ -2457,6 +2502,10 @@ void buildContent(MenuContent& c) {
                 snprintf(c.hint, sizeof(c.hint), "%s",
                          sharpenRow ? "Turn anti-aliasing on to sharpen."
                                     : "Choose DLSS to change its model preset.");
+            // The Star glow row, highlighted, in the VR menu: Elite's Bloom is off, so the setting changes nothing. The row keeps its style (no dim). The flat panel
+            // says it as a note under the Visual tab's rows instead.
+            if (const char* bloomHint = sgb::rowHint(runtimeFlatProfile(), hi && isStarGlowRow(d), s.starGlowBloom.percent(), s.starGlowBloom.state()))
+                snprintf(c.hint, sizeof(c.hint), "%s", bloomHint);
             if (hi && openxrScaleRow) {
                 snprintf(c.hint, sizeof(c.hint), "%s", openxrResolutionHint(res).c_str());
             }
@@ -2579,6 +2628,20 @@ void buildContent(MenuContent& c) {
                 }
                 body += std::string("\n\n") + (d.detail[0] ? d.detail : d.hint);
                 strncpy(c.popup, body.c_str(), sizeof(c.popup) - 1);
+            }
+        }
+        // The Star glow's Bloom note (flat only, on the Visual tab only, and only with the setting above 100 and Elite's Bloom known to be off): a blank
+        // line, then the words wrapped to the note face's width. The row stays live.
+        if (const char* bloomNote = sgb::tabNote(runtimeFlatProfile(), strcmp(p.name, kFlatTabNames[1]) == 0, s.starGlowBloom.percent(),
+                                                 s.starGlowBloom.state())) {
+            FlatWarnRuler ruler{c.capPx * 8 / 7};   // the note face's em (menu_panel.cpp, Font::Hint)
+            FlatSettingsWarning note;
+            flatWrapWarning(bloomNote, c.cardPx - 2 * (c.capPx * 8 / 10), &flatWarnMeasure, &ruler, &note);
+            if (c.lineCount < kMenuMaxLines) c.lines[c.lineCount++].style = kMenuNote;
+            for (int i = 0; i < note.count && c.lineCount < kMenuMaxLines; ++i) {
+                MenuLine& l = c.lines[c.lineCount++];
+                strncpy(l.left, note.line[i], sizeof(l.left) - 1);
+                l.style = kMenuNote;
             }
         }
         // The settings warning (flat only, and only while frames are refused for the shape
@@ -4096,6 +4159,7 @@ void openMenu(uint64_t now) {
         s.flatEscapeDown = rawKeyDown(VK_ESCAPE);
         s.flatNativeScaleShown = flatRuntimeNativeScale();
         s.flatSettingsForce = true;   // Elite's graphics files are looked at when the panel opens
+        starGlowBloomMenuOpened();    // ... and so is the Bloom option, when the Star glow is above 100
         s.alpha = 1.0f;
         s.tooltipUp = false;
         s.contentDirty = true;
@@ -4154,6 +4218,7 @@ void openMenu(uint64_t now) {
     s.toastAlpha = 0.0f;
     s.overlayUp = false;
     s.overlayAlpha = 0.0f;
+    starGlowBloomMenuOpened();   // Elite's Bloom option is read again when the Star glow is above 100, as in the flat panel
     perfMonitorNoteEvent(kEvMenu);
     Log::get().note("menu: open (%s, %.1f m, keys %s).", s.pages[s.page].name,
                     static_cast<double>(s.distance), s.privateWanted ? "private" : "shared");
@@ -4267,6 +4332,7 @@ void menuConfigure(Config& cfg) {
         if (!s.configured) {
             s.configured = true;
             s.flatSettings.setFolder(flatEliteGraphicsFolder());
+            starGlowBloomConfigure();
             initKeys();
             refreshRowValues();
             takeSnapshot();
@@ -4402,6 +4468,7 @@ void menuConfigure(Config& cfg) {
     inputGateConfigure(cfg);
     if (!s.configured) {
         s.configured = true;
+        starGlowBloomConfigure();
         initKeys();
         refreshRowValues();
         takeSnapshot();
@@ -4613,6 +4680,7 @@ void menuTick(ID3D11Device* dev) {
                 s.contentDirty = true;
             }
             flatWarningTick(now);
+            starGlowBloomTick();
             preparePadNavigation(now, drawnFresh && gameHasFocus());
             if (keysReady) handleKeys(now);
             handlePadNavigation(now);
@@ -4687,6 +4755,7 @@ void menuTick(ID3D11Device* dev) {
         tickHeldEdit(now);
         // Writes the worker finished since last frame.
         drainWrites();
+        starGlowBloomTick();
 
         // The Hotkeys page's upkeep. A hotkey rebound anywhere (this page, the ini, a rewrite of
         // the registry by the reload) changes which keys are EDVR's: the panel keys adopted from
