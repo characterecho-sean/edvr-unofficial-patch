@@ -58,7 +58,7 @@
 
 * **Next (2026-10-27, last entry):** AA on's +1.65 ms is per-draw
   classifiers. ui-depth memo FLOWN: exact, -0.21 ms (shipped, b1561dff).
-  Trims A-F FLOWN: exact, no measurable gain (ruled out, last entry).
+  Trims A-F: no gain. Repeat-draw fast path DESIGNED (~0.8-1.6 ms).
 
 ## Frame budget philosophy
 
@@ -4171,3 +4171,179 @@ Proposed for the code here:
 - **A-E:** keep them. They are exact by construction, simple, and v:fixes
   shows the small gain they promise at most.
 - **The step clock:** remove it when the arc closes.
+
+### 2026-10-27 -- Desk design: the repeat-draw fast path (not built)
+
+Three read-only inventories covered the X thunk with its pre-draw and
+post-draw blocks, all of beginPanelOverride, and all of
+forwardWithVerdict. Every statement on the path of an ordinary owner X
+draw (kNone, unclaimed, AA on) was classed as one of:
+- P, a pure decision on listed inputs;
+- S, a per-draw side effect;
+- G, gated by a normally-off flag;
+- L, learning that changes later answers;
+- D, alters the issued draw.
+
+The ruled-out ns trims removed slivers of steps. This removes whole
+steps for the draws that repeat. It is behaviour, with no key.
+
+**Where the draws go.**
+- About 35k hooked draws a frame. 33-35k of them are X; about 17.8k
+  are eye draws and about 17k are off-screen.
+- 94% of owner draws repeat the previous draw's eight-slot key.
+- EDVR's step sum is about 3.6-3.8 ms. Leaving out pre (0.45),
+  engine-vel (0.34), weapon and GAME, about 2.8 ms is the verdict, the
+  forward scope and the post-draw blocks.
+
+**The ticket.** A full-path owner X draw that ends "ordinary" records a
+ticket.
+- The key:
+  - `bindingEyeKeyGeneration()`. It moves on any VS, PS, PS SRV 0-3,
+    RTV0 or DSV0 set, and every frame, so no first-of-frame event (the
+    camera latch, the depth probe's first draw) can be a repeat;
+  - the eye or off-screen class, which follows from RTV0;
+  - `g_classifierEpoch`;
+  - the layer's family epoch (if F is kept) and a new after-UI quiet
+    epoch;
+  - a new fast-path epoch.
+- The next owner X draw takes the fast path when the key is equal and
+  its args class and the dynamic flags pass.
+
+"Ordinary" is the conjunction the full path observed. Each term is a
+deterministic function of the key while the key holds:
+- the verdict was kNone, and every per-draw output was at its reset
+  value. That means t_uiDepth, t_composite and t_holo, curveThisDraw,
+  introCurveThisDraw, glareClamp, the ui_depth pendings, and
+  g_uiLayerCrispPending;
+- the UI family was none, the layer was not engaged, and the after-UI
+  `uiLayerNoteOther` returned with no effect;
+- weapon motion did not want the VS. Screen motion did not match: give
+  screenMotionUiDraw and screenMotionDraw bool returns for this. The
+  rigid-draw query was false: both eyes are already noted this frame,
+  and that latch only goes false to true within a frame;
+- the VS is not one of the Vs-keyed specials:
+  - celestial patch;
+  - orbit lines;
+  - the panel or loader VS;
+  - the HUD issuer probe set;
+  - the sun pair;
+  - a billboard;
+  - the visor.
+- the object probe's `g_checksLeft == 0`;
+- off-screen only: the target is settled for uiDepthNoteOffscreenDraw
+  (known or checks exhausted), and it is not a wake-pulse surface (the
+  1.2224 aspect).
+
+**Args class:**
+- kind 'X';
+- `64 < count <= 10000`;
+- `count != 240`;
+- `instances >= 1`.
+
+This keeps out every count test the inventories found:
+- the count 6 quads: chrome, intro, holo, backdrop, curve;
+- night vision at 240;
+- the sun-glare nomination above 10000, which also reads VsCb0;
+- the panel-size test and the after-UI watch budget, both at 64 or
+  below;
+- wake pulse's 576 and 1728, already outside the class by its surface
+  test.
+
+Every other matcher that reads instances requires exactly 1, so a
+larger value only declines more. D, I and N, about 1.5k draws a frame,
+stay on the full path in this version.
+
+**Dynamic flags tested on every fast-path draw** (plain loads; any
+true value takes the full path):
+- `g_cameraDrawWatch`;
+- `g_uiLayerIssueBlocked`;
+- `g_uiLayerCrispPending`;
+- `g_rollFreePending`;
+- `g_uiLayerWorldReissue`;
+- `g_vrWorldInternal` and `g_vrWorldWants`;
+- the step clock's steps-mode draw. The fast path marks a step of its
+  own instead.
+
+**The fast-path epoch, and the contract.** The inventories found about
+30 normally-off flags: the census and its skips, the quad, pixel,
+blend, object-ledger, marker and footprint probes, the camera census,
+the gpu pass profile, the layout sample, the experimental FSS keys,
+dust and stars hidden, curvature, distance, and others.
+- **The config ones.** One epoch, bumped at vScreenRefreshConfig and
+  at each runtime arm or disarm site, invalidates every ticket.
+- **The contract for future code.** The fast path runs only while
+  every subscriber `drawGateSubscribed()` lists is in a certified set,
+  meaning its behaviour on an ordinary draw is captured by the key or
+  the ticket. A new draw feature added to that list, and not
+  certified, turns the fast path off by itself. Nobody has to remember
+  the contract.
+
+**What the fast path still does,** in this order. Each item is the S or
+D work the inventories required.
+- thunk entry as now: `gpuFrameCommandIfLive`, and
+  `temporalPassCountDraw` (`++g_cameraDrawCount`);
+- the per-draw stores beginPanelOverride makes:
+  - `particleRollFreeClear`;
+  - `glareClamp = 0`;
+  - `curveThisDraw`, `introCurveThisDraw` and the three t_ flags false;
+  - `++bindAuditSeq`, running bindingAudit on its 1024th;
+- `depthProbeNoteDraw`'s per-draw tallies, with its every-1024th layout
+  sample left G;
+- eye only:
+  - `++eyeDrawsThisFrame`;
+  - the crisp reset that `uiLayerCrispNoteEyeDraw` makes;
+  - the ui_depth outputs, which are already at their reset values
+    after the ticket's plain decline. Confirm by grep that nothing
+    else writes them; `g_holoDraw` is read only after a true
+    classification;
+- off-screen only: `++cands[rtv0Cand].thisFrame`;
+- `engineVelocityBeforeDraw` and `NoteSkinDraw`, unchanged. The gate
+  stays the substitution's guard: its nine tests cover Blend, VsSrv33
+  and VsCb1, which the ticket's key does not;
+- the game's draw, under `GpuCensusAlteredScope` with the class from
+  `engineVelocityDrawSubstituted()`. A PoolFamily draw keeps its
+  occurrence count and sampled timer.
+
+What it skips: the rest of beginPanelOverride, all of
+forwardWithVerdict (every scope there is a no-op for kNone), the
+lambda's owner block, and the tail's G checks.
+
+**Expected.**
+- The fast path should cost 20-30 ns a draw.
+- About 75% of the 2.8 ms lands on repeat draws (the 2026-10-27 class
+  split). If 80-90% of owner X draws take the path, the saving is about
+  0.8-1.6 ms a frame, with AA on and off.
+- The trims' estimates were 4-10x high, so this one is checked first by
+  counting, before anything is skipped.
+
+**Phase 1, shadow mode (no behaviour change).**
+- Build the key, the ticket and the eligibility test. Run the full path
+  on every draw.
+- On each draw that WOULD take the fast path, compare the full path's
+  actual outcome with the ticket's: the verdict, every per-draw output,
+  and each ordinary term.
+- Count the would-take draws by class, the mismatches by term (the
+  first few named with the VS, the PS and the count), and the reasons
+  for refusal (key moved, epoch moved, args class, a dynamic flag, the
+  certified-set test).
+- A `draw fast path (shadow):` line per 1800-frame window.
+
+**Phase 2.** Skip, keeping Phase 1's comparison on rotating non-sampled
+frames as the ui_depth memo had. Add the `fast` step to the step clock.
+
+**The Phase 1 flight should show:**
+- the would-take share of owner X draws, eye and off-screen apart;
+- mismatches at 0 over millions. A mismatch names the input the key
+  misses;
+- the refusal reasons, to see what limits the share.
+
+Fly it parked, then looking around the settlement and the cockpit for
+a minute (UI takes, holo, terminals), and include an AA-off leg.
+
+**The Phase 2 flight should show:**
+- the `fast` step's calls and cost;
+- EDVR's sum down by the predicted amount;
+- the other steps' calls down by the same share;
+- ui_depth's world-screen and hologram counts, the engine motion line
+  and the depth-probe tallies unchanged;
+- no visual change: HUD, holo, terminals, weapons, sky.
