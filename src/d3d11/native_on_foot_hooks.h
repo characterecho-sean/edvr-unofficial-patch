@@ -176,6 +176,34 @@ struct NativeOnFootHeadShadowStats {   // cumulative (the frame thread logs the 
 };
 NativeOnFootHeadShadowStats nativeOnFootHeadShadowStats();
 
+// F142 (TEMPORARY A/B, fix.native_on_foot_body_full_outfit; native_on_foot_f142.h). The overcoat: the game gives the coat's part (EVASuit_Gear_Back) the shadow-views-only class
+// in first person, so on EDVR's body the suit shows through. While the key is on, F95c's swap the other way: the same visibility call, for the local third-person AMC while
+// the head hide writes, gives every part the game left in the shadow-views-only class (2) that is not a head part and not the first-person skeleton the every-view class (1)
+// for the length of the call; End puts the game's class back, and a class the game changed in between stands. No mask is written. `on` is set by the frame thread, live.
+namespace nofoot {
+namespace f142 {
+struct OutfitSwap;
+struct Census;
+}  // namespace f142
+}  // namespace nofoot
+void nativeOnFootFullOutfitSet(bool on) noexcept;
+bool nativeOnFootOutfitBegin(void* amc, nofoot::f142::OutfitSwap* s, bool allow) noexcept;
+void nativeOnFootOutfitEnd(nofoot::f142::OutfitSwap* s) noexcept;
+struct NativeOnFootOutfitStats {   // cumulative (the frame thread logs the change)
+    uint64_t calls = 0;        // visibility calls of the local third-person AMC while the key is on and the head hide writes
+    uint64_t swapped = 0;      // ...that ran with at least one part promoted
+    uint64_t promoted = 0;     // parts promoted, summed over the calls
+    uint64_t refused = 0;      // classes the game changed between our read and our write (left alone)
+    uint64_t lost = 0;         // classes the game changed during a call (its value stood)
+    uint64_t part[avh::kPartCount] = {};   // promotions by part index
+    uint32_t faults = 0;
+    bool down = false;         // three faults: the A/B stood down for the session
+};
+NativeOnFootOutfitStats nativeOnFootOutfitStats();
+// The outfit census (F142), taken on the fade hook's thread for the local third-person AMC (about every 100 ms, SEH-guarded) and queued when any part's instances, class, flags
+// or items differ from the last queued one (and once at the first read). The frame thread takes them one at a time; false when none is waiting.
+bool nativeOnFootOutfitCensusTake(nofoot::f142::Census* out) noexcept;
+
 #ifdef EDVR_NATIVE_ON_FOOT_HOOKS_TEST
 // The rig's seam (tools\native_on_foot_hooks_test): the same boundary with a sink of the rig's, synthetic functions in place of the game's,
 // and the shared state to look at.

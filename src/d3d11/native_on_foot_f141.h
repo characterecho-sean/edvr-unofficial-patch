@@ -19,6 +19,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 
 namespace edvr {
@@ -91,6 +92,54 @@ inline bool finiteAll(const float* v, size_t n) noexcept {
 inline void row3(const float m[16], int r, double out[3]) noexcept {
     for (int i = 0; i < 3; ++i) out[i] = static_cast<double>(m[4 * r + i]);
 }
+// F142. The 4x4 a game matrix is read as: rows 0..2 are the axes (x, y, z) and row 3 the position, so the lanes used are x, y, z of each row (0, 1, 2, 4, 5, 6, 8, 9, 10 and
+// 12, 13, 14); lanes 3, 7, 11 and 15 are padding the readers never use. F141's first build tested all 16 floats and rejected every sample of the 2026-10-27 flight, S, E and U
+// all read 0: the hypothesis is a non-finite padding lane. finiteUsed tests the lanes used; finitePad the others. A matrix with a non-finite padding lane and finite used
+// lanes is counted (padNonFinite) and used.
+inline bool finiteUsed(const float m[16]) noexcept {
+    for (int r = 0; r < 4; ++r)
+        for (int c = 0; c < 3; ++c)
+            if (!std::isfinite(m[4 * r + c])) return false;
+    return true;
+}
+inline bool finitePad(const float m[16]) noexcept {
+    return std::isfinite(m[3]) && std::isfinite(m[7]) && std::isfinite(m[11]) && std::isfinite(m[15]);
+}
+// One float for a log line: %.6g, a NaN as "nan" and an infinity as "inf" or "-inf" whatever the C runtime prints for them. Returns the length written.
+inline size_t formatFloat(float v, char* out, size_t cap) noexcept {
+    if (!out || cap < 2) return 0;
+    const int n = std::isnan(v)   ? std::snprintf(out, cap, "nan")
+                  : std::isinf(v) ? std::snprintf(out, cap, "%s", v < 0 ? "-inf" : "inf")
+                                  : std::snprintf(out, cap, "%.6g", static_cast<double>(v));
+    if (n <= 0) return 0;
+    return static_cast<size_t>(n) < cap ? static_cast<size_t>(n) : cap - 1;
+}
+// A 4x4 for a log line, row by row: "[a b c d | e f g h | i j k l | m n o p]". The reader can tell a position in row 3 (m, n, o: lanes 12..14) from one in column 3 (d, h, l:
+// lanes 3, 7, 11), and which lane is not a number.
+inline void formatMat16(const float m[16], char* out, size_t cap) noexcept {
+    if (!out || !cap) return;
+    size_t at = 0;
+    out[at++] = '[';
+    for (int i = 0; i < 16 && at + 20 < cap; ++i) {
+        if (i) {
+            out[at++] = ' ';
+            if (i % 4 == 0) {
+                out[at++] = '|';
+                out[at++] = ' ';
+            }
+        }
+        at += formatFloat(m[i], out + at, cap - at);
+    }
+    if (at + 2 <= cap) out[at++] = ']';
+    out[at < cap ? at : cap - 1] = 0;
+}
+// |E.pos - P14w| of the position read as row 3 (E[12..14], the RE note's reading) and as column 3 (E[3], E[7], E[11]); -1 when that candidate has a lane that is not a number.
+inline double positionDist(const float m[16], bool column, const double p14w[3]) noexcept {
+    const float p[3] = {column ? m[3] : m[12], column ? m[7] : m[13], column ? m[11] : m[14]};
+    if (!std::isfinite(p[0]) || !std::isfinite(p[1]) || !std::isfinite(p[2])) return -1.0;
+    const double d[3] = {p[0] - p14w[0], p[1] - p14w[1], p[2] - p14w[2]};
+    return std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+}
 
 // ---- the bend, one call --------------------------------------------------------------------------------------------------------------------------------------
 // What the hook read for one local call. E: the eye matrix (rows x, y, z = forward, position; world). S: the sight point (world). aimIn/aimOut: eye+0x300 before
@@ -100,9 +149,21 @@ struct BendIn {
     float w = 0.0f;
     float E[16] = {};
     float S[3] = {};
+    float sRaw[16] = {};   // F142: the transform's whole 16-float output (S is its first three), for the raw-float line; valid when sOk
     float aimIn[4] = {}, aimOut[4] = {};
 };
+// F142: why a sample gave no geometry (BendOut::why), counted per window so a run in which every sample is rejected reads as the instrument's, never as a finding about the
+// game. kWhyHandle is not a rejection: the game's sight handle was not valid (candidate b), so S was never asked for.
+enum Why : uint8_t { kWhyOk = 0, kWhyENotRead, kWhyENonFinite, kWhyHandle, kWhySNotRead, kWhySNonFinite, kWhyRow, kWhySOnE, kWhyCount };
+constexpr double kSOnEMetres = 1e-6;   // |S - E| under this has no ray
+inline const char* whyText(unsigned w) noexcept {
+    static const char* const kText[kWhyCount] = {"usable", "E not read", "E non-finite in a used lane", "sight handle not valid (the game's)", "S not read",
+                                                 "S non-finite", "a degenerate row of E", "|S - E| under 1 um"};
+    return w < kWhyCount ? kText[w] : "?";
+}
 struct BendOut {
+    uint8_t why = kWhyOk;          // F142: kWhyOk when geo; else the first reason geo is not set (E before S, reads before values)
+    bool ePad = false;             // F142: E was read and its used lanes are finite, but a padding lane (3, 7, 11, 15) is not a number
     bool geo = false;              // E and S read, S off E's position
     double dist = 0.0;             // |S - E.pos| (m)
     double dotZ = 0.0;             // dot(unit E.z, normalize(S - E.pos)): the game's test is > 0
@@ -124,17 +185,22 @@ inline BendOut bend(const BendIn& in) noexcept {
         const double a[3] = {in.aimOut[0], in.aimOut[1], in.aimOut[2]};
         o.aimOutDeg = angleDeg(a, fwd);
     }
-    if (!in.eOk || !in.sOk || !finiteAll(in.E, 16) || !finiteAll(in.S, 3)) return o;
+    // F142: E's used lanes only (finiteUsed), then S; the first reason is kept (E before S, a read that failed before a value that is not a number)
+    if (!in.eOk) { o.why = kWhyENotRead; return o; }
+    if (!finiteUsed(in.E)) { o.why = kWhyENonFinite; return o; }
+    o.ePad = !finitePad(in.E);
+    if (!in.sOk) { o.why = (in.okRead && !in.ok) ? kWhyHandle : kWhySNotRead; return o; }
+    if (!finiteAll(in.S, 3)) { o.why = kWhySNonFinite; return o; }
     double ex[3], ey[3], ez[3], p[3];
     row3(in.E, 0, ex);
     row3(in.E, 1, ey);
     row3(in.E, 2, ez);
     row3(in.E, 3, p);
     double ux[3], uy[3], uz[3];
-    if (!unit3(ex, ux) || !unit3(ey, uy) || !unit3(ez, uz)) return o;
+    if (!unit3(ex, ux) || !unit3(ey, uy) || !unit3(ez, uz)) { o.why = kWhyRow; return o; }
     const double d[3] = {in.S[0] - p[0], in.S[1] - p[1], in.S[2] - p[2]};
     o.dist = len3(d);
-    if (!unit3(d, o.ray)) return o;
+    if (!(o.dist >= kSOnEMetres) || !unit3(d, o.ray)) { o.why = kWhySOnE; return o; }
     o.geo = true;
     o.dotZ = dot3(uz, o.ray);
     o.eyeRight = dot3(d, ux);
@@ -157,6 +223,7 @@ struct P14Off {
     double right = 0.0, up = 0.0, along = 0.0;     // S - P14w
     double eRel[3] = {};                           // E.pos - P14w: right, up, forward
     double eDist = 0.0;                            // |E.pos - P14w|
+    double rowDist = -1.0, colDist = -1.0;         // F142: |E.pos - P14w| with the position read as row 3 (E[12..14], used) and as column 3 (E[3], E[7], E[11]); -1 not a number
 };
 inline P14Off p14Offset(const float S[3], const float E[16], const double p14w[3], const float froot[16]) noexcept {
     P14Off o;
@@ -164,7 +231,9 @@ inline P14Off p14Offset(const float S[3], const float E[16], const double p14w[3
     row3(froot, 0, r);
     row3(froot, 1, u);
     row3(froot, 2, f);
-    if (!unit3(r, rr) || !unit3(u, uu) || !unit3(f, ff) || !finiteAll(S, 3) || !finiteAll(E, 16)) return o;
+    if (!unit3(r, rr) || !unit3(u, uu) || !unit3(f, ff) || !finiteAll(S, 3) || !finiteUsed(E)) return o;
+    o.rowDist = positionDist(E, false, p14w);
+    o.colDist = positionDist(E, true, p14w);
     const double d[3] = {S[0] - p14w[0], S[1] - p14w[1], S[2] - p14w[2]};
     const double e[3] = {E[12] - p14w[0], E[13] - p14w[1], E[14] - p14w[2]};
     o.right = dot3(d, rr);
@@ -208,13 +277,32 @@ struct Acc {
     double eRel[3] = {}, eDistSum = 0.0, eDistMax = 0.0;
     uint32_t aimInN = 0, aimOutN = 0, rayVsN = 0;
     double aimInSum = 0.0, aimOutSum = 0.0, aimOutMax = 0.0, rayVsSum = 0.0;
+    // F142: the ADS-on samples by reason (why[kWhyOk] = usable), those whose E has a non-finite padding lane (counted whether or not the sample was usable), and, per paired
+    // sample, which candidate position of E lies within 50 cm of P14w (row 3, the one used, and column 3).
+    uint32_t why[kWhyCount] = {};
+    uint32_t ePadN = 0, posPairs = 0, posRowNear = 0, posColNear = 0;
+    static constexpr double kNearM = 0.5;
     void reset() noexcept { *this = Acc{}; }
+    // The samples the instrument rejected (every reason but usable and the game's own invalid handle) of the ADS-on ones.
+    uint32_t rejected() const noexcept {
+        uint32_t n = 0;
+        for (unsigned i = 1; i < kWhyCount; ++i)
+            if (i != kWhyHandle) n += why[i];
+        return n;
+    }
     // One local call: adsOn (data+0x10), the bend's geometry, and S against P14 when an FP snapshot was paired (gap: |sample frame - snapshot frame|).
     void add(bool adsOn, const BendIn& in, const BendOut& b, bool havePair, const P14Off& p, uint32_t gap) noexcept {
         ++samples;
         if (!adsOn) {
             ++adsOff;
             return;
+        }
+        ++why[b.why < kWhyCount ? b.why : kWhySNotRead];
+        if (b.ePad) ++ePadN;
+        if (havePair && p.ok) {
+            ++posPairs;
+            if (p.rowDist >= 0.0 && p.rowDist < kNearM) ++posRowNear;
+            if (p.colDist >= 0.0 && p.colDist < kNearM) ++posColNear;
         }
         if (in.wOk && std::isfinite(in.w)) {
             const double w = static_cast<double>(in.w);
@@ -293,29 +381,73 @@ inline double quatAngleDeg(const double a[4], const double b[4]) noexcept {
 }
 // U against a frame F (row-vector, world): rel = U x F^-1 with F's rows made unit (a rigid frame). t: U's position less F's, in F's unit rows (m); q: U's rows
 // (made unit) in F's unit rows, as a quaternion. False when either matrix is degenerate.
+// F142: why a rel was not made: U's used lanes not numbers, a row of U with no length, or a row of the frame F with none (F is the weapon's or P14's world, not U).
+enum RelWhy : uint8_t { kRelOk = 0, kRelUNonFinite, kRelUDegenerate, kRelFDegenerate, kRelWhyCount };
 struct Rel {
     bool ok = false;
+    uint8_t why = kRelOk;       // F142
+    bool padNonFinite = false;  // F142: U's used lanes are numbers but a padding lane (3, 7, 11, 15) is not
     double t[3] = {};
     double q[4] = {};
 };
 inline Rel relTo(const float U[16], const double F[16]) noexcept {
     Rel r;
-    if (!finiteAll(U, 16)) return r;
+    r.padNonFinite = finiteUsed(U) && !finitePad(U);
+    if (!finiteUsed(U)) {
+        r.why = kRelUNonFinite;
+        return r;
+    }
     double fr[3][3], ur[3][3];
     for (int i = 0; i < 3; ++i) {
         const double a[3] = {F[4 * i], F[4 * i + 1], F[4 * i + 2]};
+        if (!unit3(a, fr[i])) {
+            r.why = kRelFDegenerate;
+            return r;
+        }
+    }
+    for (int i = 0; i < 3; ++i) {
         const double b[3] = {U[4 * i], U[4 * i + 1], U[4 * i + 2]};
-        if (!unit3(a, fr[i]) || !unit3(b, ur[i])) return r;
+        if (!unit3(b, ur[i])) {
+            r.why = kRelUDegenerate;
+            return r;
+        }
     }
     const double d[3] = {U[12] - F[12], U[13] - F[13], U[14] - F[14]};
     for (int i = 0; i < 3; ++i) r.t[i] = dot3(d, fr[i]);
     double R[9];
     for (int i = 0; i < 3; ++i)
         for (int j = 0; j < 3; ++j) R[3 * i + j] = dot3(ur[i], fr[j]);
-    if (!quatOf(R, r.q)) return r;
+    if (!quatOf(R, r.q)) {
+        r.why = kRelUDegenerate;
+        return r;
+    }
     r.ok = std::isfinite(r.t[0]) && std::isfinite(r.t[1]) && std::isfinite(r.t[2]);
+    if (!r.ok) r.why = kRelFDegenerate;   // U's position is a number (used lanes), so F's position is not
     return r;
 }
+// F142: a window's rels by reason, for the readout's instrument line. U's reasons are the same for the weapon's rel and P14's (the same U), so they are counted once per row
+// (from the weapon's); each frame's own failures are counted apart.
+struct RelCounts {
+    uint32_t rows = 0;                 // rows that reached the rel (a held item's, attachment read)
+    uint32_t uNotRead = 0;             // rows whose attachment was not read (counted before the rel)
+    uint32_t usable = 0;               // both rels made
+    uint32_t uNonFinite = 0, uDegenerate = 0, padNonFinite = 0;
+    uint32_t weaponFrame = 0, p14Frame = 0;   // the frame F had a degenerate row, for the weapon's rel and for P14's
+    void reset() noexcept { *this = RelCounts{}; }
+    void note(const Rel& rw, const Rel& rp) noexcept {
+        ++rows;
+        if (rw.padNonFinite) ++padNonFinite;
+        if (rw.ok && rp.ok) {
+            ++usable;
+            return;
+        }
+        if (rw.why == kRelUNonFinite) ++uNonFinite;
+        else if (rw.why == kRelUDegenerate || rp.why == kRelUDegenerate) ++uDegenerate;
+        if (rw.why == kRelFDegenerate) ++weaponFrame;
+        if (rp.why == kRelFDegenerate) ++p14Frame;
+    }
+    uint32_t rejected() const noexcept { return rows - usable; }
+};
 // A window's samples of one rel for one part: the mean translation, the largest distance from it, and the largest rotation from the mean rotation (the mean of
 // the quaternions taken on the first one's side, made unit).
 struct Spread {

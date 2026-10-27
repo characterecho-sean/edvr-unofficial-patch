@@ -60,6 +60,7 @@
 #include "native_on_foot_f139.h"   // F139: each weapon's sight on the ADS line (the table, the live trim, the shift; pure parts)
 #include "native_on_foot_f140.h"   // F140: the weapon readout placed per weapon (the table by item and scope, the live trims; pure parts)
 #include "native_on_foot_f141.h"   // F141: the game's ADS sight point and the weapon readout's anchor, measure only (the build's addresses; pure parts)
+#include "native_on_foot_f142.h"   // F142: the icon mesh table's slot reuse, the full outfit A/B's promotion, the outfit census (pure parts)
 #include "xinput_watch.h"          // F135: the pad's Start and Back edges, evidence for the menu probe only
 #include "native_on_foot_f109.h"   // F109: look to aim on foot, the player's own turn in ADS, snap or smooth turning (pure parts)
 #include "native_on_foot_f129.h"   // F129: look to aim reads its turn from the player's own look processor; the look path instrument (pure parts)
@@ -189,6 +190,10 @@ std::atomic<float> g_weaponViewOffsetCm{static_cast<float>(nofoot::kWeaponViewOf
 double g_adsEyeCmLast = -1.0;                                 // the value last logged (frame thread)
 std::atomic<float> g_adsSightUpCm{0.0f};                      // F139 (TEMPORARY): fix.native_on_foot_ads_sight_up_cm, live (the held weapon's trim, cm, -8..8)
 double g_adsSightUpCmLast = -1000.0;                          // the value last logged (frame thread)
+std::atomic<float> g_adsSightRightCm{0.0f};                   // F142 (TEMPORARY): fix.native_on_foot_ads_sight_right_cm, live (the held weapon's lateral trim, cm, -8..8)
+double g_adsSightRightCmLast = -1000.0;                       // the value last logged (frame thread)
+std::atomic<bool> g_fullOutfitKeyOn{false};                   // F142 (TEMPORARY): fix.native_on_foot_body_full_outfit, as the frame thread last read it
+bool g_fullOutfitKeyLogged = false;                           // the key's value was logged (frame thread)
 std::atomic<float> g_f87SettleS{static_cast<float>(nofoot::f87::kSettleDefaultS)};   // F87h (TEMPORARY): fix.native_on_foot_standing_height_settle_s, live
 double g_f87SettleLast = -1.0;                                // the value last logged (frame thread)
 std::atomic<float> g_f94EyeHeightCm{static_cast<float>(nofoot::f94::kEyeHeightDefaultCm)};   // F94a: fix.native_on_foot_eye_height_cm, live (the eyes over the neck)
@@ -1009,6 +1014,31 @@ void readKey() {
                             cm, nofoot::f139::kTrimMaxCm, nofoot::f139::kTrimMaxCm);
         g_adsSightUpCmLast = cm;
         g_adsSightUpCm.store(static_cast<float>(cm), std::memory_order_relaxed);
+    }
+    // F142 (TEMPORARY, live, "ADS sight right (test)"): the lateral column of the same trim: cm to the right (-8..8, default 0), added to the item's table right (0 for every
+    // weapon until this has measured one) while aiming down sights, for the held weapon only. With the height trim it tests whether the game's sight point predicts both offsets.
+    {
+        const double cm = nofoot::f139::clampTrimCm(static_cast<double>(cfg.getFloat("fix.native_on_foot_ads_sight_right_cm", 0.0f)));
+        if (first || cm != g_adsSightRightCmLast)
+            Log::get().note("native on foot ADS sight right (F139, TEMPORARY): fix.native_on_foot_ads_sight_right_cm = %+.1f cm -- while aiming down sights your eye moves this far "
+                            "to the right (left if negative) off the game's aiming line, beside the height trim (the held weapon only: -%.0f..+%.0f cm)",
+                            cm, nofoot::f139::kTrimMaxCm, nofoot::f139::kTrimMaxCm);
+        g_adsSightRightCmLast = cm;
+        g_adsSightRightCm.store(static_cast<float>(cm), std::memory_order_relaxed);
+    }
+    // F142 (TEMPORARY, live, "Full outfit on body (test)"): the A/B for the overcoat. on: while EDVR's native body is on foot in the game's first-person camera, a part the
+    // game draws into the shadow views only (its class 2) that is not a head part and not the first-person skeleton is drawn in the main views too, for the length of the
+    // avatar's visibility call. off (the default) is the body as it was.
+    {
+        const bool outfitOn = cfg.getString("fix.native_on_foot_body_full_outfit", "off") == "on";
+        if (first || !g_fullOutfitKeyLogged || outfitOn != g_fullOutfitKeyOn.load(std::memory_order_relaxed))
+            Log::get().note("native on foot full outfit (F142, TEMPORARY): fix.native_on_foot_body_full_outfit is %s -- %s", outfitOn ? "on" : "off",
+                            outfitOn ? "a part of the outfit the game draws only into the shadow views is drawn in the main views too on your body (not the head, not the "
+                                       "first-person skeleton)"
+                                     : "the body takes the game's part visibility as it stands");
+        g_fullOutfitKeyLogged = true;
+        g_fullOutfitKeyOn.store(outfitOn, std::memory_order_relaxed);
+        nativeOnFootFullOutfitSet(outfitOn);
     }
     // F74: the user's live left/right view offset relative to an equipped weapon or tool. The default is 0: no shift (F112; F90 had 2.0 cm right, 2.5 before).
     {
@@ -10058,7 +10088,12 @@ uint64_t __fastcall eyeProbeHooked(void* amc, void* job) noexcept {
     // call goes through Begin, which also withdraws the AMC's previous ticket; it writes only for the local third-person AMC while the head hide writes.
     nofoot::f95c::Swap headShadow;
     const bool swapped = amc && nativeOnFootHeadShadowBegin(amc, job, &headShadow, !g_eyeStop.load(std::memory_order_relaxed));
+    // F142 (TEMPORARY A/B, fix.native_on_foot_body_full_outfit): the same call, the other way: a non-head part the game has in the shadow-views-only class is every view for
+    // the call (the coat's part in first person), put back after it. Off (the default) it returns at once and nothing is touched.
+    nofoot::f142::OutfitSwap outfit;
+    const bool outfitSwapped = amc && nativeOnFootOutfitBegin(amc, &outfit, !g_eyeStop.load(std::memory_order_relaxed));
     const uint64_t result = original(amc, job);
+    if (outfitSwapped) nativeOnFootOutfitEnd(&outfit);
     if (swapped) nativeOnFootHeadShadowEnd(&headShadow);
     return result;
 }
@@ -11379,7 +11414,7 @@ struct AdsSightWin {
     // the frames F79's origin stood, the applied up and right summed (cm), and the last coherent item's name, table value and trim.
     uint32_t f139Frames = 0, f139Applied = 0, f139Refused = 0, f139NoItem = 0, f139F79 = 0, f139ScopeUnknown = 0;
     int f139Scope = loadout::kScopeUnknown;   // F140: the held weapon's scope state at the last coherent frame (the table row used is the no-scope one when unknown)
-    double f139UpSum = 0.0, f139RightSum = 0.0, f139TableUpCm = 0.0, f139TableRightCm = 0.0, f139TrimCm = 0.0;
+    double f139UpSum = 0.0, f139RightSum = 0.0, f139TableUpCm = 0.0, f139TableRightCm = 0.0, f139TrimCm = 0.0, f139TrimRightCm = 0.0;   // F142: the right trim beside the up one
     char f139Item[64] = {};
     double opticYawSum = 0.0, opticPitchSum = 0.0, opticRootNdcSum[3][2] = {}, opticP14NdcSum[3][2] = {};
     uint32_t opticRootNdcN[3] = {}, opticP14NdcN[3] = {};
@@ -11490,11 +11525,12 @@ void adsSightLog(uint32_t seconds, bool steady, bool hold, bool detailed) noexce
     }
     if (w.f139Frames) {   // F139: the held weapon's sight offset (every ADS window; --health reads it): the per-item totals the tuning flight leaves for the table
         const double fn = static_cast<double>(w.f139Frames);
-        Log::get().note("native on foot ADS sight offset (F139) %u s: item %s scope %s, table up %+.1f right %+.1f cm, trim %+.1f cm, applied up %+.2f cm right %+.2f cm (mean of %u "
-                        "frames in the sights; applied on %u), F79 optic origin on %u frames, refused over the %.0f cm bound %u, no coherent item %u, scope unknown on %u frames "
-                        "(the no-scope row)",
-                        seconds, w.f139Item[0] ? w.f139Item : "none", loadout::scopeName(w.f139Scope), w.f139TableUpCm, w.f139TableRightCm, w.f139TrimCm, w.f139UpSum / fn,
-                        w.f139RightSum / fn, w.f139Frames, w.f139Applied, w.f139F79, 100.0 * nofoot::f139::kBoundM, w.f139Refused, w.f139NoItem, w.f139ScopeUnknown);
+        Log::get().note("native on foot ADS sight offset (F139) %u s: item %s scope %s, table up %+.1f right %+.1f cm, trim %+.1f cm, trim right %+.1f cm, applied up %+.2f cm "
+                        "right %+.2f cm (mean of %u frames in the sights; applied on %u), F79 optic origin on %u frames, refused over the %.0f cm bound %u, no coherent item %u, "
+                        "scope unknown on %u frames (the no-scope row)",
+                        seconds, w.f139Item[0] ? w.f139Item : "none", loadout::scopeName(w.f139Scope), w.f139TableUpCm, w.f139TableRightCm, w.f139TrimCm, w.f139TrimRightCm,
+                        w.f139UpSum / fn, w.f139RightSum / fn, w.f139Frames, w.f139Applied, w.f139F79, 100.0 * nofoot::f139::kBoundM, w.f139Refused, w.f139NoItem,
+                        w.f139ScopeUnknown);
     }
     if (detailed) {
     // F70/F75: the ADS eye point. The pin input camera is the job camera less the ADS shift and the separate intentional view shift; the 3P root stays put
@@ -11731,13 +11767,15 @@ void adsSightTick(uint64_t now, double dt, const EyeSample& s) noexcept {
                 const bool itemOk = f139::itemCoherent(opticItemSnapshot, opticItemSerial, currentItemSerial, opticItemName);
                 const int scopeState = itemOk ? loadout::heldScope(opticItemName).state : loadout::kScopeUnknown;
                 const f139::Decision d139 = f139::decide(opticItemSnapshot, opticItemSerial, currentItemSerial, opticItemName, scopeState,
-                                                         static_cast<double>(g_adsSightUpCm.load(std::memory_order_relaxed)), upRow, row0, fUnit);
+                                                         static_cast<double>(g_adsSightUpCm.load(std::memory_order_relaxed)),
+                                                         static_cast<double>(g_adsSightRightCm.load(std::memory_order_relaxed)), upRow, row0, fUnit);
                 ++w.f139Frames;
                 if (d139.coherent) {
                     std::snprintf(w.f139Item, sizeof(w.f139Item), "%s", opticItemName);
                     w.f139TableUpCm = d139.tableUpCm;
                     w.f139TableRightCm = d139.tableRightCm;
                     w.f139TrimCm = d139.trimUpCm;
+                    w.f139TrimRightCm = d139.trimRightCm;
                     w.f139Scope = d139.scope;
                     if (d139.scopeUnknown) ++w.f139ScopeUnknown;
                 } else {
@@ -22702,7 +22740,10 @@ void f141AfterBend(uintptr_t act, uintptr_t ifaceIn, const float aimIn[4], bool 
             uintptr_t ret = 0, xf = 0, xfFn = 0;
             s.in.sOk = f141CallLocal(g_base + f::kHandleLocalRva, act + f::kActSight, tmp, &ret) && ret >= 0x10000 && guardedRead(ret, in4, sizeof(in4)) &&
                        guardedRead(act + f::kActXform, &xf, 8) && f141Slot(xf, f::kXformSlot, &xfFn) && f141CallXform(xfFn, xf, out, in4);
-            if (s.in.sOk) std::memcpy(s.in.S, out, sizeof(s.in.S));
+            if (s.in.sOk) {
+                std::memcpy(s.in.S, out, sizeof(s.in.S));
+                std::memcpy(s.in.sRaw, out, sizeof(s.in.sRaw));   // F142: the whole 16-float output, for the raw-float line
+            }
             fault = fault || !s.in.sOk;
         }
     }
@@ -22934,6 +22975,33 @@ uint32_t g_f141PressSecs = 0;
 uint64_t g_f141PressBase[4] = {};
 uint32_t g_f141ActLogged = 0, g_f141ActLines = 0, g_f141ActSkipped = 0;
 uint64_t g_f141ActWindowMs = 0;
+// F142: the raw 16 floats of E (the eye matrix) and of the transform's output (S), once per activation, and of U (the readout's locator matrix) once per part, so the next reader
+// can tell whether E's position is row 3 (E[12..14], the RE note's reading) or column 3 (E[3], E[7], E[11]) and which lane is not a number. %.6g, a NaN as nan. At most
+// kF141RawCap lines of each kind a session (the activations of the 2026-10-27 flight were 10).
+constexpr uint32_t kF141RawCap = 24;
+uint32_t g_f141RawEAct = 0, g_f141RawSAct = 0, g_f141RawELines = 0, g_f141RawSLines = 0;
+void f141RawLog(const F141Sample& s) noexcept {
+    namespace f = nofoot::f141;
+    char text[420];
+    if (s.in.eOk && s.activation && s.activation != g_f141RawEAct) {
+        g_f141RawEAct = s.activation;
+        if (g_f141RawELines < kF141RawCap) {
+            f::formatMat16(s.in.E, text, sizeof(text));
+            Log::get().note("native on foot ADS sight point (F141): raw floats, activation %u (line %u of at most %u): E = %s (the eye matrix at the eye interface+0x268, 16 floats "
+                            "in rows of four; its position is row 3, lanes 12..14, if the RE note is right, or column 3, lanes 3, 7 and 11)",
+                            s.activation, ++g_f141RawELines, kF141RawCap, text);
+        }
+    }
+    if (s.in.sOk && s.activation && s.activation != g_f141RawSAct) {
+        g_f141RawSAct = s.activation;
+        if (g_f141RawSLines < kF141RawCap) {
+            f::formatMat16(s.in.sRaw, text, sizeof(text));
+            Log::get().note("native on foot ADS sight point (F141): raw floats, activation %u (line %u of at most %u): S = %s (the point transform's 16-float output, act+0x68 "
+                            "vt+0x38; S is its first three floats)",
+                            s.activation, ++g_f141RawSLines, kF141RawCap, text);
+        }
+    }
+}
 void f141TakeBases(uint64_t base[4], uint64_t shot[4]) noexcept {
     base[0] = g_f141Local.load(std::memory_order_relaxed);
     base[1] = g_f141Other.load(std::memory_order_relaxed);
@@ -22977,6 +23045,16 @@ void f141AdsLog(uint32_t secs) noexcept {
                     100.0 * Acc::mean(a.eRel[2], a.p14N), 100.0 * Acc::mean(a.eDistSum, a.p14N), 100.0 * a.eDistMax, 100.0 * Acc::mean(a.eyeRightSum, a.geoN),
                     100.0 * Acc::mean(a.eyeUpSum, a.geoN), Acc::mean(a.rayDegSum, a.geoN), Acc::mean(a.aimInSum, a.aimInN), Acc::mean(a.aimOutSum, a.aimOutN),
                     a.aimOutMax, Acc::mean(a.rayVsSum, a.rayVsN), a.rayVsN, shotText);
+    if (on) {   // F142: why samples gave no geometry (a separate line: the one above is near the log's 1200 bytes). A window in which every sample is rejected is the instrument's.
+        namespace f = nofoot::f141;
+        Log::get().note("native on foot ADS sight point (F141) %u s: item %s scope %s: instrument: ADS samples %u, usable %u, sight handle not valid (the game's) %u, rejected %u "
+                        "[E not read %u, E non-finite in a used lane %u, S not read %u, S non-finite %u, |S - E| under 1 um %u, a degenerate row %u]; E with a non-finite "
+                        "padding lane (lanes 3, 7, 11, 15; used all the same) %u; of %u paired samples E's position lies within 50 cm of P14 as row 3 (E[12..14], the one used) on "
+                        "%u, as column 3 (E[3], E[7], E[11]) on %u",
+                        secs, g_f141WinItem.name, loadout::scopeName(g_f141WinItem.scope), on, a.why[f::kWhyOk], a.why[f::kWhyHandle], a.rejected(), a.why[f::kWhyENotRead],
+                        a.why[f::kWhyENonFinite], a.why[f::kWhySNotRead], a.why[f::kWhySNonFinite], a.why[f::kWhySOnE], a.why[f::kWhyRow], a.ePadN, a.posPairs, a.posRowNear,
+                        a.posColNear);
+    }
     g_f141Acc.reset();
     g_f141Lost = 0;
     f141TakeBases(g_f141Base, g_f141ShotBase);
@@ -23065,6 +23143,7 @@ void f141AdsTick(uint64_t now) noexcept {
             if (live) ++g_f141Lost;
             continue;
         }
+        f141RawLog(s);   // F142: E and S as the hook read them, whole, once per activation
         if (!live) continue;
         const f::BendOut b = f::bend(s.in);
         uint32_t gap = ~0u;
@@ -23087,12 +23166,38 @@ struct F141Ro {
     uint32_t cursor = 0, otherItem = 0, overCap = 0, lost = 0;
 };
 F141Ro g_f141Ro;
+nofoot::f141::RelCounts g_f141RoCounts;   // F142: the window's rows by reason (the instrument line)
+// F142: U once per part, the first time a part's row is read (at most kF141RawCap parts a session).
+uint16_t g_f141RawUKeys[kF141RawCap] = {};
+uint32_t g_f141RawULines = 0;
+void f141RawULog(const WeaponUiPartSample& row, const char* item) noexcept {
+    for (uint32_t i = 0; i < g_f141RawULines; ++i)
+        if (g_f141RawUKeys[i] == static_cast<uint16_t>(row.nameId)) return;
+    if (g_f141RawULines >= kF141RawCap) return;
+    g_f141RawUKeys[g_f141RawULines++] = static_cast<uint16_t>(row.nameId);
+    char text[420];
+    nofoot::f141::formatMat16(row.attachment, text, sizeof(text));
+    Log::get().note("native on foot readout anchor (F141): raw floats, part %u (line %u of at most %u), item %s: U = %s (the weapon UI getter's 16 floats at 0x1AB1960, in rows of "
+                    "four; its position is row 3, lanes 12..14, if the RE note is right, or column 3, lanes 3, 7 and 11)",
+                    static_cast<unsigned>(row.nameId), g_f141RawULines, kF141RawCap, item, text);
+}
 void f141ReadoutReset() noexcept {
     for (nofoot::f141::Part& p : g_f141Parts) p = nofoot::f141::Part{};
     g_f141Ro.otherItem = g_f141Ro.overCap = g_f141Ro.lost = 0;
+    g_f141RoCounts.reset();
 }
 void f141ReadoutLog(uint32_t secs) noexcept {
     namespace f = nofoot::f141;
+    {   // F142: why rows made no rel. A window in which every row is rejected is the instrument's, whatever the part lines below say.
+        const f::RelCounts& c = g_f141RoCounts;
+        const uint32_t rows = c.rows + c.uNotRead;
+        if (rows)
+            Log::get().note("native on foot readout anchor (F141) %u s: item %s scope %s: instrument: rows %u, usable %u, rejected %u [U not read %u, U non-finite in a used lane "
+                            "%u, a degenerate U row %u, a degenerate weapon frame %u, a degenerate P14 frame %u]; U with a non-finite padding lane (3, 7, 11, 15; used all the "
+                            "same) %u",
+                            secs, g_f141Ro.item.name, loadout::scopeName(g_f141Ro.item.scope), rows, c.usable, c.rejected() + c.uNotRead, c.uNotRead, c.uNonFinite, c.uDegenerate,
+                            c.weaponFrame, c.p14Frame, c.padNonFinite);
+    }
     for (uint32_t i = 0; i < kF141Parts; ++i) {
         const f::Part& p = g_f141Parts[i];
         if (!p.used || !p.frames) continue;
@@ -23129,8 +23234,13 @@ void f141ReadoutTick(uint64_t now) noexcept {
         const WeaponUiPartSample row = slot.row;
         std::atomic_thread_fence(std::memory_order_acquire);
         if (slot.seq.load(std::memory_order_relaxed) != s1 || slot.ordinal != n) { if (g_f141Ro.open) ++g_f141Ro.lost; continue; }
-        if (!g_f141Ro.open || !row.attachmentValid) continue;
+        if (!g_f141Ro.open) continue;
         if (!row.itemRead || row.itemSerial != g_f141Ro.item.held) { ++g_f141Ro.otherItem; continue; }
+        if (!row.attachmentValid) {   // F142: counted (it was skipped unseen): a row of the held item whose locator matrix was not read
+            ++g_f141RoCounts.uNotRead;
+            continue;
+        }
+        f141RawULog(row, g_f141Ro.item.name);
         f::Part* part = nullptr;
         uint32_t idx = 0;
         for (uint32_t i = 0; i < kF141Parts && !part; ++i)
@@ -23145,7 +23255,9 @@ void f141ReadoutTick(uint64_t now) noexcept {
         uint32_t gap = ~0u;
         const F141Fp* fp = f141FpFind(row.renderFrame, &gap);
         if (!fp || gap != 0) { ++part->unpaired; continue; }
-        part->add(g_f141Sets[idx], fp->rootGap == 0 ? 0 : 1, f::relTo(row.attachment, fp->W), f::relTo(row.attachment, fp->P));
+        const f::Rel rw = f::relTo(row.attachment, fp->W), rp = f::relTo(row.attachment, fp->P);
+        g_f141RoCounts.note(rw, rp);   // F142: usable, or why not
+        part->add(g_f141Sets[idx], fp->rootGap == 0 ? 0 : 1, rw, rp);
     }
     // The window: closed by the held item, its scope or the loadout changing, or by leaving native stereo on foot; otherwise every windowSeconds().
     uint64_t ctx = nofoot::adslog::mix(it.held, it.coherent ? 1u : 0u);
@@ -24244,6 +24356,122 @@ void headShadowTick(uint64_t now) noexcept {
     }
     if (now - s.windowMs >= 1000ull * nofoot::logwin::windowSeconds()) f125ShadowClose(now, c);
     s.last = c;
+}
+
+// ---- F142 (TEMPORARY A/B): the full outfit and the outfit census (native_on_foot_f142.h; native_on_foot_hooks.cpp, nativeOnFootOutfitBegin and End, outfitCensusStep) ------
+// Frame thread, every boundary while native stereo is on foot. The census (about every 100 ms on the fade hook's thread, queued on a change) is written whatever the key says:
+// a header and one line per part that has an instance, for the first 6 changes; later changes write the header and the parts that changed. With fix.native_on_foot_body_full_outfit
+// on, once a window: the visibility calls the A/B covered, the parts it promoted by name, the classes the game changed before the write and during the call.
+struct F142State {
+    NativeOnFootOutfitStats base;
+    uint64_t windowMs = 0;
+    bool detail = false;
+    uint64_t nextMs = 0;
+    bool haveLast = false;
+    uint32_t changes = 0, listings = 0, headers = 0, skipped = 0;
+    bool downSaid = false;
+    nofoot::f142::Census last;
+};
+F142State g_f142;
+const char* f142PartName(uint32_t idx) { return idx < avh::kPartCount ? avh::kPartNames[idx] : "?"; }
+void f142CensusLog(const nofoot::f142::Census& c) noexcept {
+    namespace f = nofoot::f142;
+    F142State& s = g_f142;
+    ++s.changes;
+    uint8_t ch[12] = {};
+    const uint32_t nch = s.haveLast ? f::changedParts(s.last, c, ch, 12) : 0;
+    const bool full = !s.haveLast || s.listings < 6;
+    if (!full && s.headers >= 40) {   // the cap: later changes are counted, not written
+        if (!s.skipped) Log::get().note("native on foot outfit census (F142): later changes are counted, not written (the cap is 40 headers a session after the first 6 listings)");
+        ++s.skipped;
+        s.last = c;
+        return;
+    }
+    ++s.headers;
+    if (full) ++s.listings;
+    char changed[320] = "", gone[200] = "", what[640];
+    size_t cat = 0, gat = 0;
+    for (uint32_t i = 0; i < nch && i < 12; ++i) {
+        const bool present = f::findRow(c, ch[i]) != nullptr;
+        char* buf = present ? changed : gone;
+        size_t& at = present ? cat : gat;
+        const size_t cap = present ? sizeof(changed) : sizeof(gone);
+        if (at + 40 >= cap) continue;
+        const int w = std::snprintf(buf + at, cap - at, "%s%s", at ? ", " : "", f142PartName(ch[i]));
+        if (w > 0) at += static_cast<size_t>(w);
+    }
+    if (!s.haveLast) std::snprintf(what, sizeof(what), "first read");
+    else std::snprintf(what, sizeof(what), "changed: %s%s%s%s", changed[0] ? changed : "none", gone[0] ? ", gone: " : "", gone, nch > 12 ? " (and more)" : "");
+    Log::get().note("native on foot outfit census (F142): change %u of the local third-person avatar AMC 0x%llX: %u of %u parts have instances; %s; %s", s.changes,
+                    static_cast<unsigned long long>(c.amc), c.n, avh::kPartCount, what,
+                    full ? "every part with an instance follows" : "only the parts that changed follow");
+    for (uint32_t i = 0; i < c.n && i < f::kPartCount; ++i) {
+        const f::PartRow& r = c.row[i];
+        bool isChanged = !s.haveLast;
+        for (uint32_t k = 0; k < nch && k < 12; ++k)
+            if (ch[k] == r.idx) isChanged = true;
+        if (!full && !isChanged) continue;
+        char inst[12] = "";
+        size_t iat = 0;
+        for (uint32_t k = 0; k < avh::kPartVariants; ++k)
+            if (r.inst & (1u << k)) iat += static_cast<size_t>(std::snprintf(inst + iat, sizeof(inst) - iat, "%s%u", iat ? "," : "", k));
+        Log::get().note("native on foot outfit part (F142): %s%s instances %s state %d (%s) flags 0x%02X current item %d pending item %d masks 0x%llX,0x%llX,0x%llX,0x%llX%s",
+                        f142PartName(r.idx), avh::isHeadPart(r.idx) ? " (head part)" : "", inst, r.state, f::classText(r.state), r.flags, r.current, r.pending,
+                        static_cast<unsigned long long>(r.masks[0]), static_cast<unsigned long long>(r.masks[1]), static_cast<unsigned long long>(r.masks[2]),
+                        static_cast<unsigned long long>(r.masks[3]), s.haveLast && isChanged ? " [changed]" : "");
+    }
+    s.last = c;
+    s.haveLast = true;
+}
+void f142WindowClose(uint64_t now, const NativeOnFootOutfitStats& c) noexcept {
+    F142State& s = g_f142;
+    if (!s.windowMs) return;
+    const NativeOnFootOutfitStats& p = s.base;
+    char byName[420] = "";
+    size_t at = 0;
+    for (uint32_t i = 0; i < avh::kPartCount; ++i) {
+        const uint64_t n = c.part[i] - p.part[i];
+        if (!n || at + 70 >= sizeof(byName)) continue;
+        const int w = std::snprintf(byName + at, sizeof(byName) - at, "%s%s %llu", at ? ", " : "", f142PartName(i), static_cast<unsigned long long>(n));
+        if (w > 0) at += static_cast<size_t>(w);
+    }
+    Log::get().note("native on foot full outfit (F142) %u s: visibility calls of the local avatar %llu, calls with a part promoted %llu, parts promoted %llu (by name: %s), class "
+                    "changed by the game before the write %llu, during the call %llu, faults %u",
+                    nofoot::logwin::closedSeconds(now - s.windowMs), static_cast<unsigned long long>(c.calls - p.calls), static_cast<unsigned long long>(c.swapped - p.swapped),
+                    static_cast<unsigned long long>(c.promoted - p.promoted), at ? byName : "none", static_cast<unsigned long long>(c.refused - p.refused),
+                    static_cast<unsigned long long>(c.lost - p.lost), c.faults);
+    s.base = c;
+    s.windowMs = now;
+}
+void f142Tick(uint64_t now) noexcept {
+    F142State& s = g_f142;
+    static nofoot::f142::Census taken;   // 3 KB: not on the stack
+    while (nativeOnFootOutfitCensusTake(&taken)) f142CensusLog(taken);
+    const bool want = nativeOnFootActive() && g_fullOutfitKeyOn.load(std::memory_order_relaxed);
+    if (s.windowMs && (!want || s.detail != nofoot::logwin::detail())) {
+        f142WindowClose(now, nativeOnFootOutfitStats());
+        s.detail = nofoot::logwin::detail();
+    }
+    if (!want) {
+        s.windowMs = 0;
+        s.nextMs = 0;
+        return;
+    }
+    if (s.nextMs == 0) {
+        s.base = nativeOnFootOutfitStats();
+        s.windowMs = now;
+        s.detail = nofoot::logwin::detail();
+        s.nextMs = now + 1000;
+        return;
+    }
+    if (now < s.nextMs) return;
+    s.nextMs = now + 1000;
+    const NativeOnFootOutfitStats c = nativeOnFootOutfitStats();
+    if (c.down && !s.downSaid) {
+        s.downSaid = true;
+        Log::get().note("native on foot full outfit (F142): stood down for the session after %u faults: the body takes the game's part visibility as it stands", c.faults);
+    }
+    if (now - s.windowMs >= 1000ull * nofoot::logwin::windowSeconds()) f142WindowClose(now, c);
 }
 
 // ---- F20 (TEMPORARY): the game's own third-person model mode (fix.native_on_foot_body_mode = game | third) ----------------------------
@@ -26925,7 +27153,11 @@ void refTick(int e, uint32_t frame, double W, double H) {
 // logged with its raw words and the reason. The per-frame e is iconEdrawNdc of that vertex through the draw's own rows; the draw falls back to the
 // head-still baseline and then to the constant, so no draw is ever refused for want of an icon. Render thread only.
 constexpr uint32_t kIconIdxBytes = 4096, kIconVtxBytes = 12288, kIconSlotBytes = kIconIdxBytes + kIconVtxBytes, kIconMaxVerts = 256, kIconTries = 2;
-constexpr int kIconMeshes = 6;
+// F142: 32 slots (it was 6, and every distinct draw configuration took one for good, the refused oversize ranges included: the six were gone before the first weapon readout
+// drew in the 2026-10-27 flight, so the readout's mesh was never read and F90, F92 and F140 never applied). A configuration still drawing keeps its slot; a new one takes a free
+// slot, else the slot not seen for the longest and for at least kIconReuseMinAgeFrames (native_on_foot_f142.h iconVictim), never one with a copy in flight, one the staging ring
+// names (g_iconOwner) or one a live record's icon index names. See iconCapture.
+constexpr int kIconMeshes = nofoot::f142::kIconMeshes;
 struct MarkerDrawArgs {
     uint32_t count = 0, start = 0;
     int32_t base = 0;
@@ -26939,6 +27171,7 @@ struct IconMesh {
     int state = 0;              // 0 free, 1 a copy in flight, 2 decoded (disc valid), 3 refused (why)
     const char* why = "not tried";
     uint32_t tries = 0, frame = 0, nIdx = 0, nVerts = 0, maxIdx = 0, posOffset = 0, discIdx = 0xFFFFFFFFu, copiedVtx = 0;
+    uint32_t seen = 0;          // F142: the render frame this configuration was last drawn in (a slot is reusable once it has not been for kIconReuseMinAgeFrames)
     int discMethod = 0;
     double disc[3] = {}, lo[3] = {}, hi[3] = {};
 };
@@ -26947,6 +27180,55 @@ int g_iconOwner[2] = {-1, -1};   // the staging ring's slot -> the mesh being co
 drawtag::StagingRing<2, kIconSlotBytes> g_iconRing;
 uint64_t g_iconLost = 0;
 uint32_t g_iconIndirect = 0, g_iconNoVb = 0, g_iconTableFull = 0;
+uint32_t g_iconReused = 0;       // F142: slots handed to a new configuration after their old one had not been drawn for kIconReuseMinAgeFrames
+int g_iconLastHit = -1;          // F142: the slot that answered the last draw (checked first; it is compared in full, so a reused slot is never wrongly matched)
+uint32_t g_iconFullLines = 0, g_iconReuseLines = 0;   // F142: the event lines written (the table-full line at each doubling, at most 12; the reuse line for the first 8)
+
+// F142: a slot something still points at: a copy in flight (state 1) or the staging ring's owner, or a live record's icon index (the frame slots' record lists of the last
+// 2 x kFrameSlots frames; older lists are never read again: pairMarker returns on a list whose frame is not the one asked for).
+bool iconPinned(int mi, uint32_t frame) {
+    if (g_iconMesh[mi].state == nofoot::f142::kIconInFlight || g_iconOwner[0] == mi || g_iconOwner[1] == mi) return true;
+    for (uint32_t s = 0; s < kFrameSlots; ++s) {
+        if (nofoot::f142::iconAge(frame, g_recFrame[s]) > 2 * kFrameSlots) continue;   // (a list stamped in the future has age 0: scanned)
+        for (const Rec& r : g_recs[s])
+            if (r.icon == mi) return true;
+    }
+    return false;
+}
+// F142: the table's slots for the icon table lines: the counts by state and the longest idle age.
+nofoot::f142::IconCounts iconTableCount(uint32_t frame) {
+    int st[kIconMeshes];
+    uint32_t seen[kIconMeshes];
+    for (int i = 0; i < kIconMeshes; ++i) {
+        st[i] = g_iconMesh[i].state;
+        seen[i] = g_iconMesh[i].seen;
+    }
+    return nofoot::f142::iconCount(st, seen, kIconMeshes, frame);
+}
+// F142: the F67d icon table in a log line (the 1 s F66f line carries only the counts: a line is 1200 bytes). Every used slot: its draw configuration, its state and how long it has been idle.
+void iconTableLog(uint32_t frame) {
+    static const char* const kState[4] = {"free", "copy in flight", "decoded", "refused"};
+    const nofoot::f142::IconCounts c = iconTableCount(frame);
+    char list[760];
+    size_t len = 0;
+    unsigned more = 0;
+    list[0] = '\0';
+    for (int i = 0; i < kIconMeshes; ++i) {
+        const IconMesh& m = g_iconMesh[i];
+        if (m.state == nofoot::f142::kIconFree) continue;
+        if (len + 120 >= sizeof(list)) {
+            ++more;
+            continue;
+        }
+        const int k = std::snprintf(list + len, sizeof(list) - len, "%s[%d] %c %u@%u base %d stride %u: %s, %u vertices, idle %u frames", len ? "; " : "", i, m.kind, m.count,
+                                    m.start, m.base, m.stride, kState[m.state & 3], m.nVerts, nofoot::f142::iconAge(frame, m.seen));
+        if (k > 0) len += static_cast<size_t>(k);
+    }
+    Log::get().note("native on foot icon table (F142): %d slots: free %d, copy in flight %d, decoded %d, refused %d; draws without a slot %u, slots reused %u, oldest idle %u "
+                    "frames; %u indirect draws, %u without a vertex buffer; in use: %s%s",
+                    kIconMeshes, c.free, c.inFlight, c.decoded, c.refused, g_iconTableFull, g_iconReused, c.oldestIdle, g_iconIndirect, g_iconNoVb, len ? list : "none",
+                    more ? " (and more)" : "");
+}
 
 // The mesh (index into g_iconMesh) the draw reads, starting its copy the first time it is seen; -1: indirect draw, no vertex buffer, or no room.
 int iconCapture(ID3D11DeviceContext* ctx, uint32_t frame, ID3D11Buffer* const vbs[8], const UINT strides[8], const UINT offs[8], const MarkerDrawArgs& a, char kind) {
@@ -26967,29 +27249,67 @@ int iconCapture(ID3D11DeviceContext* ctx, uint32_t frame, ID3D11Buffer* const vb
     UINT ibOff = 0;
     if (indexed) ctx->IAGetIndexBuffer(&ib, &fmt, &ibOff);
     int found = -1, freeSlot = -1;
-    for (int i = 0; i < kIconMeshes; ++i) {
-        const IconMesh& m = g_iconMesh[i];
-        if (m.state == 0) {
-            if (freeSlot < 0) freeSlot = i;
-            continue;
-        }
-        if (m.vb == vbs[pick] && m.ib == static_cast<const void*>(ib) && m.stride == strides[pick] && m.vbOffset == offs[pick] && m.ibOffset == ibOff &&
-            m.ibFmt == static_cast<uint32_t>(fmt) && m.count == a.count && m.start == a.start && m.base == a.base && m.kind == kind) {
-            found = i;
-            break;
+    const auto sameConfig = [&](const IconMesh& m) {
+        return m.state != 0 && m.vb == vbs[pick] && m.ib == static_cast<const void*>(ib) && m.stride == strides[pick] && m.vbOffset == offs[pick] && m.ibOffset == ibOff &&
+               m.ibFmt == static_cast<uint32_t>(fmt) && m.count == a.count && m.start == a.start && m.base == a.base && m.kind == kind;
+    };
+    // F142: the table is 32 slots now and a frame draws the same few configurations over and over: the slot that answered the last draw is asked first.
+    if (g_iconLastHit >= 0 && g_iconLastHit < kIconMeshes && sameConfig(g_iconMesh[g_iconLastHit])) {
+        found = g_iconLastHit;
+    } else {
+        for (int i = 0; i < kIconMeshes; ++i) {
+            const IconMesh& m = g_iconMesh[i];
+            if (m.state == 0) {
+                if (freeSlot < 0) freeSlot = i;
+                continue;
+            }
+            if (sameConfig(m)) {
+                found = i;
+                break;
+            }
         }
     }
     if (found >= 0) {
+        g_iconLastHit = found;
+        g_iconMesh[found].seen = frame;   // F142: still drawing: the slot is kept, a refused one included (it is how the draw is not copied again)
         if (ib) ib->Release();
         return found;
     }
     if (freeSlot < 0) {
-        ++g_iconTableFull;
-        if (ib) ib->Release();
-        return -1;
+        // F142: no free slot: reuse the one not seen for the longest, and for at least kIconReuseMinAgeFrames; never one a copy, the staging ring or a record still names.
+        int st[kIconMeshes];
+        uint32_t seenAt[kIconMeshes];
+        for (int i = 0; i < kIconMeshes; ++i) {
+            st[i] = g_iconMesh[i].state;
+            seenAt[i] = g_iconMesh[i].seen;
+        }
+        const int victim = nofoot::f142::iconVictim(st, seenAt, kIconMeshes, frame, nofoot::f142::kIconReuseMinAgeFrames, [&](int i) { return iconPinned(i, frame); });
+        if (victim < 0) {
+            ++g_iconTableFull;
+            if (nofoot::f142::powerOfTwo(g_iconTableFull) && g_iconFullLines < 12) {
+                ++g_iconFullLines;
+                Log::get().note("native on foot icon table (F142): full: no slot for draw %c count %u start %u base %d (every one of the %d slots was drawn in the last %u frames, "
+                                "has a copy in flight or is named by a record); draws without a slot %u, slots reused %u",
+                                kind, a.count, a.start, a.base, kIconMeshes, nofoot::f142::kIconReuseMinAgeFrames, g_iconTableFull, g_iconReused);
+            }
+            if (ib) ib->Release();
+            return -1;
+        }
+        freeSlot = victim;
+        ++g_iconReused;
+        if (g_iconReuseLines < 8) {
+            ++g_iconReuseLines;
+            const IconMesh& old = g_iconMesh[victim];
+            static const char* const kOldState[4] = {"free", "copy in flight", "decoded", "refused"};
+            Log::get().note("native on foot icon table (F142): slot %d reused for draw %c count %u start %u base %d (was draw %c count %u start %u base %d, %s, idle %u frames); "
+                            "draws without a slot %u, slots reused %u",
+                            victim, kind, a.count, a.start, a.base, old.kind, old.count, old.start, old.base, kOldState[old.state & 3],
+                            nofoot::f142::iconAge(frame, old.seen), g_iconTableFull, g_iconReused);
+        }
     }
     IconMesh& m = g_iconMesh[freeSlot];
     m = IconMesh{};
+    m.seen = frame;
     m.vb = vbs[pick];
     m.ib = ib;
     m.stride = strides[pick];
@@ -31456,20 +31776,14 @@ void report(uint64_t nowMs) {
                 // "0 patched draws" (and the F62c line says why); a run with sigma exactly 1 says the decomposition was unusable.
                 {
                     const double an = s.aN ? double(s.aN) : 1.0, rn2 = s.eN ? double(s.eN) : 1.0;
-                    static const char* const kIconState[4] = {"free", "copy in flight", "decoded", "refused"};
-                    char meshes[420];
-                    size_t ml = 0;
-                    meshes[0] = '\0';
-                    for (int i = 0; i < kIconMeshes && ml + 90 < sizeof(meshes); ++i) {
-                        const IconMesh& im = g_iconMesh[i];
-                        if (im.state == 0) continue;
-                        const int k = std::snprintf(meshes + ml, sizeof(meshes) - ml, "%s[%d] %c %u@%u base %d stride %u: %s (%u vertices, disc v%d by method %d)", ml ? "; " : "", i,
-                                                    im.kind, im.count, im.start, im.base, im.stride, kIconState[im.state & 3], im.nVerts,
-                                                    im.discIdx == 0xFFFFFFFFu ? -1 : static_cast<int>(im.discIdx), im.discMethod);
-                        if (k > 0) ml += static_cast<size_t>(k);
-                    }
-                    if (!ml) std::snprintf(meshes, sizeof(meshes), "none seen (%u indirect draws, %u without a vertex buffer, %u over the table)", g_iconIndirect, g_iconNoVb,
-                                           g_iconTableFull);
+                    // F142: the table in the line is its counts, always (a line is 1200 bytes: the slot list was cut at 420 bytes and the table-full count printed only for an
+                    // empty table, which hid the 2026-10-27 flight's full table); the slots themselves are the icon table line, once a window.
+                    const uint32_t iconFrame = g_f44Frame.load(std::memory_order_relaxed);
+                    const nofoot::f142::IconCounts ic = iconTableCount(iconFrame);
+                    char meshes[160];
+                    std::snprintf(meshes, sizeof(meshes), "%d used of %d (decoded %d, refused %d, copying %d), no slot on %u draws, reused %u", kIconMeshes - ic.free, kIconMeshes,
+                                  ic.decoded, ic.refused, ic.inFlight, g_iconTableFull, g_iconReused);
+                    if (e == 0) iconTableLog(iconFrame);
                     Log::get().note("native on foot marker fix (F66f/F67d): eye %d: %llu patched draws; affine rows sigma x %.5f y %.5f (means; sigma - 1 = %+.5f, "
                                     "%+.5f; |sigma - 1| max %.5f; F66 flew 1.00000: candidate B is ruled out), t (the rows' translation) x %+.5f y %+.5f NDC; "
                                     "affine usable in %llu draws (else the plain translation), the texture's axis known in %llu (else the TAA jitter is not "
@@ -32349,6 +32663,7 @@ void nativeOnFootMarkerProbeShutdown() {
     f44::g_labPending = f44::LabPending{};
     for (f44::IconMesh& m : f44::g_iconMesh) m = f44::IconMesh{};   // F67d
     f44::g_iconOwner[0] = f44::g_iconOwner[1] = -1;
+    f44::g_iconLastHit = -1;   // F142
     for (f44::KeyP& kp : f44::g_keyP) kp = f44::KeyP{};
     if (f44::g_privCb) f44::g_privCb->Release();
     if (f44::g_workBuf) f44::g_workBuf->Release();
@@ -32403,6 +32718,7 @@ void nativeOnFootFrameBoundary(uint32_t frameNo) {
     cameraGateTick(now);   // F93d: the game's camera (first person or its third-person suite) gates every body change; its lines
     nativePreviewCameraBoundary(keyOn && session, nativeOnFootActive() && !nativeOnFootCameraExternal());
     headShadowTick(now);   // F95c: the head kept in the shadows; its lines
+    f142Tick(now);         // F142: the outfit census (a change), and the full outfit A/B's window while the key is on
     gateLine(now);
     avatarLine(now);
     avatarCensusLine(now);

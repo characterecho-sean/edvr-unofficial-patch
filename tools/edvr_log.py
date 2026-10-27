@@ -10467,7 +10467,12 @@ def _hj_f91_role(rows, ctx):
     """The role line: one per (held item, slot) and on every change. The last line of each (item serial, slot) decides it: NO TABLE PART there is that item's
     readout never scaled or moved."""
     r = rows.get("role", [])
+    tab = rows.get("tab", [])
+    full = max([int(x["full"]) for x in tab] or [0])        # F142: the icon table's draws without a slot (the counts only grow)
+    reused = max([int(x["reused"]) for x in tab] or [0])
     if not r:
+        if full:
+            return ("IDLE", "no weapon readout part role line; the icon mesh table had no slot for %d draws (slots reused %d)" % (full, reused))
         return None
     last = {}
     for x in r:
@@ -10499,6 +10504,13 @@ def _hj_f91_role(rows, ctx):
     text = "%d role lines over %d items; %s" % (len(r), len(items), "; ".join(named))
     if flipped:
         text += "; %d NO TABLE PART line(s) later matched" % flipped
+    # F142: a part whose mesh read 0.00 x 0.00 never had its mesh read. With the icon table full (draws without a slot) that is why, not a part that is not in F90's table.
+    zero = {(x["serial"], x["slot"]) for x in r if float(x["mx"]) == 0.0 and float(x["mz"]) == 0.0}
+    if zero and full:
+        text += "; icon table full: %d part(s) read mesh 0.00 x 0.00 and the icon mesh table had no slot for %d draws (slots reused %d): the extents were never read, not a part mismatch" % (
+            len(zero), full, reused)
+    elif zero:
+        text += "; %d part(s) read mesh 0.00 x 0.00 (the icon mesh was not read; no icon table line says the table was full)" % len(zero)
     if missed:
         return ("NEVER APPLIED", text + "; NO TABLE PART: " + "; ".join(missed))
     return ("PARTIAL" if flipped else "OK", text)
@@ -12373,18 +12385,22 @@ def _hj_f138_pitched(rows, ctx):
 def _hj_f139_sight_offset(rows, ctx):
     """F139: each weapon's sight on the ADS line. While aiming down sights the eye's origin moves, in the FP root's axes, by the held item's table up (an exact item name, under
     the scope state fitted: F140 keys the table by (item, scope), the journal's loadout says which; an unknown state uses the no-scope row) plus the live trim
-    fix.native_on_foot_ads_sight_up_cm (any held weapon), after F79's origin for the laser assault rifle; bounded to 8 cm (past it nothing moves and the refusal is counted).
+    fix.native_on_foot_ads_sight_up_cm (any held weapon) and, since F142, the table's right plus fix.native_on_foot_ads_sight_right_cm, after F79's origin for the laser assault
+    rifle; bounded to 8 cm (past it nothing moves and the refusal is counted).
     The ADS windows' lines name the item and its scope state, the table up, the trim and the total up applied: these are the figures a tuning flight leaves for the table, so
     the report gives, per (item, scope), the last window's total up and the seconds in the sights (and the total for each trim tried). OK when every (item, scope) that was
     asked an offset had it applied; PARTIAL when an offset was refused on some frames (past the 8 cm bound), the item could not be read on some ADS frames, or the scope state
     was unknown on more than a tenth of them; NEVER APPLIED when an offset was refused on every frame, or the trim was set and no ADS second read the held item; IDLE when no ADS
     second, or no offset was asked for any item (a table miss or a scoped row at 0, with the trim at 0)."""
-    sec, key = rows.get("sec", []), rows.get("key", [])
-    if not sec and not key:
+    sec, key, keyr = rows.get("sec", []), rows.get("key", []), rows.get("keyr", [])
+    if not sec and not key and not keyr:
         return None
     last_trim = float(key[-1]["trim"]) if key else None
+    last_right = float(keyr[-1]["trim"]) if keyr else None
+    keytext = "".join(["; trim key read %d time(s), last %+.1f cm" % (len(key), last_trim) if key else "",
+                       "; right trim key read %d time(s), last %+.1f cm" % (len(keyr), last_right) if keyr else ""])
     if not sec:
-        return ("IDLE", "no ADS second with a sight offset line; the trim key was read %d time(s), last %+.1f cm" % (len(key), last_trim))
+        return ("IDLE", "no ADS second with a sight offset line" + keytext)
     items = collections.OrderedDict()
     for r in sec:
         d = items.setdefault((r["item"], r.get("scope") or "n/a"), {"s": 0, "frames": 0, "applied": 0, "refused": 0, "noitem": 0, "f79": 0, "unk": 0, "asked": False,
@@ -12393,21 +12409,29 @@ def _hj_f139_sight_offset(rows, ctx):
         for k in ("frames", "applied", "refused", "noitem", "f79"):
             d[k] += int(r[k])
         d["unk"] += int(r.get("unk") or 0)
-        d["asked"] = d["asked"] or float(r["tup"]) != 0.0 or float(r["trim"]) != 0.0
+        trimr = float(r.get("trimr") or 0.0)   # F142: a line from before the right trim has none
+        d["asked"] = d["asked"] or float(r["tup"]) != 0.0 or float(r["trim"]) != 0.0 or float(r["tright"]) != 0.0 or trimr != 0.0
         d["last"] = r
-        by = d["by"].setdefault(float(r["trim"]), [0, 0.0])
+        by = d["by"].setdefault((float(r["trim"]), trimr), [0, 0.0, 0.0])
         by[0] += _hwl(r)
         by[1] = float(r["up"])
+        by[2] = float(r["right"])
     bad, part, parts = [], [], []
     for (name, scope), d in items.items():
         last = d["last"]
         label = name if scope == "n/a" else "%s scope %s" % (name, scope)
-        text = "%s: total up %+.2f cm right %+.2f cm (the last window: table %+.1f, trim %+.1f), %d s in the sights, applied on %d of %d frames" % (
-            label, float(last["up"]), float(last["right"]), float(last["tup"]), float(last["trim"]), d["s"], d["applied"], d["frames"])
+        lastr = float(last.get("trimr") or 0.0)
+        # F142: the right column is named only when something is in it (the table's right or the right trim), so a height-only log reads as before
+        righttext = ", table right %+.1f, trim right %+.1f" % (float(last["tright"]), lastr) if float(last["tright"]) or lastr else ""
+        text = "%s: total up %+.2f cm right %+.2f cm (the last window: table %+.1f, trim %+.1f%s), %d s in the sights, applied on %d of %d frames" % (
+            label, float(last["up"]), float(last["right"]), float(last["tup"]), float(last["trim"]), righttext, d["s"], d["applied"], d["frames"])
         if d["f79"]:
             text += ", F79 optic origin on %d" % d["f79"]
         if len(d["by"]) > 1:
-            text += "; by trim: " + ", ".join("%+.1f -> %+.2f cm (%d s)" % (t, v[1], v[0]) for t, v in d["by"].items())
+            if any(t[1] for t in d["by"]):
+                text += "; by trim (up, right): " + ", ".join("(%+.1f, %+.1f) -> up %+.2f right %+.2f cm (%d s)" % (t[0], t[1], v[1], v[2], v[0]) for t, v in d["by"].items())
+            else:
+                text += "; by trim: " + ", ".join("%+.1f -> %+.2f cm (%d s)" % (t[0], v[1], v[0]) for t, v in d["by"].items())
         if d["refused"]:
             text += "; refused over the bound on %d frames" % d["refused"]
         if d["noitem"]:
@@ -12418,6 +12442,8 @@ def _hj_f139_sight_offset(rows, ctx):
         if name == "none":
             if last_trim:
                 bad.append("the trim is %+.1f cm but no ADS second read the held item" % last_trim)
+            elif last_right:
+                bad.append("the right trim is %+.1f cm but no ADS second read the held item" % last_right)
             else:
                 part.append("the held item was not read in %d ADS second(s)" % d["s"])
         elif d["refused"] and not d["applied"]:
@@ -12426,7 +12452,7 @@ def _hj_f139_sight_offset(rows, ctx):
             part.append("%s: refused on %d frames, item not read on %d" % (label, d["refused"], d["noitem"]))
         elif d["unk"] * 10 > d["frames"]:
             part.append("%s: scope unknown on %d of %d frames" % (label, d["unk"], d["frames"]))
-    text = "; ".join(parts) + ("; trim key read %d time(s), last %+.1f cm" % (len(key), last_trim) if key else "")
+    text = "; ".join(parts) + keytext
     if bad:
         return ("NEVER APPLIED", text + " [" + "; ".join(bad) + "]")
     if part:
@@ -12505,7 +12531,8 @@ def _hj_f141_sight_point(rows, ctx):
     never valid (or the activity's ADS handling off), (d) the aim dir changed between the bend and the shot, or the shot off the bent ray, (e) E far from P14; or the
     bend took effect. NEVER APPLIED when the bend hook is not installed; PARTIAL on (c) or calls with faults over a tenth; IDLE with no ADS second or the flat profile."""
     sec, inst, noinst, flat, aim, act, nolocal = (rows.get(k, []) for k in ("sec", "installed", "noinstall", "flat", "aim", "act", "nolocal"))
-    if not any((sec, inst, noinst, flat, aim, act, nolocal, rows.get("actcap"))):
+    ins, raw = rows.get("inst", []), rows.get("raw", [])   # F142: the instrument lines (why samples gave no geometry) and the raw floats
+    if not any((sec, inst, noinst, flat, aim, act, nolocal, rows.get("actcap"), ins, raw)):
         return None
     if noinst:
         return ("NEVER APPLIED", "the bend hook is not installed (%s); nothing was measured" % noinst[-1]["why"])
@@ -12513,6 +12540,11 @@ def _hj_f141_sight_point(rows, ctx):
         return ("IDLE", "not installed: the flat profile (the hooks go in on the VR profile only)")
     aim_state = aim[-1]["state"] if aim else "not logged"
     tail = "; the aim hook %s" % aim_state
+    # F142: the last raw E and S the log carries (which row holds E's position: row 3, lanes 12..14, or column 3, lanes 3, 7, 11, and which lane is not a number)
+    for which, name in (("E", "E"), ("S", "S")):
+        rr = [x for x in raw if x["which"] == which]
+        if rr:
+            tail += "; raw %s (activation %s) = %s" % (name, rr[-1]["n"], rr[-1]["m"])
     if act:
         a = act[-1]
         tail += "; %d activation line(s), the last (activation %s): sight locator \"%s\", eye locator \"%s\", ADS handling %s, the sight handle valid at the first ADS call read %s" % (
@@ -12552,11 +12584,35 @@ def _hj_f141_sight_point(rows, ctx):
     def mean(g, k, n):
         return g[k + "_w"] / g[n] if g[n] else 0.0
 
+    # F142: the instrument lines by (item, scope): ADS samples, usable, rejected and by which reason, the game's invalid handle apart
+    ig = collections.OrderedDict()
+    for r in ins:
+        i = ig.setdefault((r["item"], r["scope"]), collections.Counter())
+        for k in ("on", "usable", "handle", "rej", "enr", "enf", "snr", "snf", "son", "row", "pad", "pairs", "prow", "pcol"):
+            i[k] += int(r[k])
+        i["s"] += _hwl(r)
+
+    def reasons(i):
+        names = (("enr", "E not read"), ("enf", "E non-finite in a used lane"), ("snr", "S not read"), ("snf", "S non-finite"), ("son", "|S - E| under 1 um"), ("row", "a degenerate row"))
+        found = ["%s %d" % (n, i[k]) for k, n in names if i[k]]
+        return ", ".join(found) or "none"
+
     parts, partial = [], []
+    for (item, scope) in ig:
+        if (item, scope) not in groups:   # instrument lines with no sight point line (calls but no local sample): still said
+            i = ig[(item, scope)]
+            parts.append("%s scope %s: instrument: %d ADS samples, %d usable, rejected %d (%s), %d s" % (item, scope, i["on"], i["usable"], i["rej"], reasons(i), i["s"]))
+            if i["rej"] and not i["usable"]:
+                partial.append("%s scope %s: instrument rejected %d of %d samples" % (item, scope, i["rej"], i["on"]))
     for (item, scope), g in groups.items():
         label = "%s scope %s" % (item, scope)
         local = int(g["local"])
-        if not local:
+        ii = ig.get((item, scope))
+        if ii and ii["rej"] and not ii["usable"]:
+            # every sample the instrument could have used was rejected: that is the instrument's, whatever the sight point lines below read (they are all zero)
+            verdict = "instrument rejected %d of %d samples (%s): no finding about the game" % (ii["rej"], ii["on"], reasons(ii))
+            partial.append("%s: instrument rejected %d of %d samples" % (label, ii["rej"], ii["on"]))
+        elif not local:
             verdict = "(c) no local call (other humanoids' calls %d, not an eye %d)" % (g["other"], g["noteye"])
             partial.append("%s: (c)" % label)
         elif g["adsoff"] and not g["appliedof"]:
@@ -12574,7 +12630,7 @@ def _hj_f141_sight_point(rows, ctx):
         else:
             verdict = "the bend took effect on %d of %d calls (the exit aim %.2f deg off E.z, %.2f deg from the sight ray)" % (
                 g["applied"], g["appliedof"], mean(g, "aout", "appliedof"), mean(g, "avs", "avsn"))
-        if g["pairs"] and mean(g, "emean", "pairs") > 5.0:
+        if g["pairs"] and mean(g, "emean", "pairs") > 5.0 and not (ii and ii["rej"] and not ii["usable"]):
             verdict += "; (e) E sits %.1f cm from P14 (max %.1f)" % (mean(g, "emean", "pairs"), g["emax"])
         if local and g["faults"] * 10 > local:
             partial.append("%s: faults on %d of %d local calls" % (label, g["faults"], local))
@@ -12588,6 +12644,12 @@ def _hj_f141_sight_point(rows, ctx):
             g["ok"], g["okof"], g["applied"], g["appliedof"], mean(g, "ain", "appliedof"), mean(g, "aout", "appliedof"), g["amax"], local, g["other"], g["s"], verdict)
         if g.get("shotread"):
             text += "; at the shot: %d calls, the aim dir changed since the bend on %d (max %.3f deg)" % (g["shots"], g["changed"], g["cmax"])
+        if ii:
+            text += ("; instrument: %d ADS samples, %d usable, sight handle not valid %d, rejected %d (%s); E with a non-finite padding lane (used all the same) on %d; of %d paired "
+                     "samples E's position within 50 cm of P14 as row 3 on %d, as column 3 on %d") % (
+                ii["on"], ii["usable"], ii["handle"], ii["rej"], reasons(ii), ii["pad"], ii["pairs"], ii["prow"], ii["pcol"])
+            if ii["rej"] and ii["rej"] * 10 > ii["on"] and ii["usable"]:
+                partial.append("%s: instrument rejected %d of %d samples (%s)" % (label, ii["rej"], ii["on"], reasons(ii)))
         parts.append(text)
     text = "; ".join(parts) + tail
     if nolocal:
@@ -12602,8 +12664,31 @@ def _hj_f141_readout_anchor(rows, ctx):
     render frame. Constant against W to 1 mm and 0.1 deg is weapon- or optics-anchored; constant against P14 is avatar-anchored; both constant is undecided (the weapon
     did not move against P14); neither is neither. OK when every part is weapon- or avatar-anchored; PARTIAL when one is undecided, neither, or never paired."""
     lines = rows.get("part", [])
-    if not lines:
+    ins, raw = rows.get("inst", []), rows.get("raw", [])
+    if not lines and not ins and not raw:
         return None
+    # F142: the instrument lines by (item, scope): rows, usable and rejected by reason. A part never paired because every row was rejected is the instrument's.
+    ig = collections.OrderedDict()
+    for r in ins:
+        i = ig.setdefault((r["item"], r["scope"]), collections.Counter())
+        for k in ("rows", "usable", "rej", "unr", "unf", "ud", "wf", "pf", "pad"):
+            i[k] += int(r[k])
+        i["s"] += _hwl(r)
+
+    def reasons(i):
+        names = (("unr", "U not read"), ("unf", "U non-finite in a used lane"), ("ud", "a degenerate U row"), ("wf", "a degenerate weapon frame"), ("pf", "a degenerate P14 frame"))
+        found = ["%s %d" % (n, i[k]) for k, n in names if i[k]]
+        return ", ".join(found) or "none"
+
+    def instrument_text(i):
+        return "instrument: %d rows, %d usable, rejected %d (%s); U with a non-finite padding lane (used all the same) on %d" % (i["rows"], i["usable"], i["rej"], reasons(i), i["pad"])
+    rawtext = "".join("; raw U (part %s) = %s" % (x["part"], x["m"]) for x in raw[:2])
+    if not lines:
+        text = "; ".join("%s scope %s: %s, %d s" % (k[0], k[1], instrument_text(i), i["s"]) for k, i in ig.items()) + rawtext
+        bad = [k for k, i in ig.items() if i["rej"] and not i["usable"]]
+        if bad:
+            return ("PARTIAL", text + " [" + "; ".join("%s scope %s: instrument rejected %d of %d rows" % (k[0], k[1], ig[k]["rej"], ig[k]["rows"]) for k in bad) + "]")
+        return ("IDLE", text + "; no part line in the window") if ig else ("IDLE", "raw floats only" + rawtext)
     groups = collections.OrderedDict()
     for r in lines:
         g = groups.setdefault((r["item"], r["scope"], r["part"]), collections.defaultdict(float, wdev=0.0, wrot=0.0, pdev=0.0, prot=0.0, basis=set()))
@@ -12623,7 +12708,13 @@ def _hj_f141_readout_anchor(rows, ctx):
     for (item, scope, key), g in groups.items():
         label = "%s scope %s part %s" % (item, scope, key)
         n = int(g["paired"])
+        ii = ig.get((item, scope))
         if not n:
+            if ii and ii["rej"] and not ii["usable"]:
+                parts.append("%s: instrument rejected %d of %d rows (%s): no finding about the weapon's anchor (%d frames, unpaired %d); %s" % (
+                    label, ii["rej"], ii["rows"], reasons(ii), g["frames"], g["unpaired"], g["flags"]))
+                partial.append("%s: instrument rejected %d of %d rows" % (label, ii["rej"], ii["rows"]))
+                continue
             parts.append("%s: no frame paired with the FP snapshot of its render frame (%d frames, unpaired %d); %s" % (label, g["frames"], g["unpaired"], g["flags"]))
             partial.append("%s: never paired" % label)
             continue
@@ -12638,7 +12729,64 @@ def _hj_f141_readout_anchor(rows, ctx):
                          label, kind, g["wx"] / n, g["wy"] / n, g["wz"] / n, g["wdev"], g["wrot"], g["px"] / n, g["py"] / n, g["pz"] / n, g["pdev"], g["prot"], g["flags"],
                          n, g["frames"], g["same"], g["apart"], " and ".join(sorted(g["basis"])), g["s"]))
     text = "; ".join(parts)
+    if ig:
+        text += "; " + "; ".join("%s scope %s %s" % (k[0], k[1], instrument_text(i)) for k, i in ig.items())
+    text += rawtext
     return ("PARTIAL" if partial else "OK", text + (" [" + "; ".join(partial) + "]" if partial else ""))
+
+
+def _hj_f142_outfit(rows, ctx):
+    """F142 (TEMPORARY A/B, fix.native_on_foot_body_full_outfit): the overcoat. The game gives a part of the outfit it wants only in the shadows (the coat's EVASuit_Gear_Back)
+    the shadow-views-only class in first person, so on EDVR's body the suit shows through. With the key on, the avatar's visibility call gives every such part that is not a head
+    part and not the first-person skeleton the every-view class for the length of the call. The window lines count the covered calls, the parts promoted by name, the classes the
+    game changed before our write and during the call. The census lines (written whatever the key says, on every change of a part's instances, class, flags or items) list each
+    part with an instance: its class, flags, items and view masks. IDLE when the key is off (the census still lists), or on with no window line; NEVER APPLIED when the key is on
+    and no part was promoted (the covered calls are said, so a part that was never in the shadow-only class is told from a hook that never saw the avatar); PARTIAL when the game
+    changed a class on a tenth of the promotions or the A/B stood down; OK otherwise."""
+    key, sec, down = rows.get("key", []), rows.get("sec", []), rows.get("down", [])
+    census, part = rows.get("census", []), rows.get("part", [])
+    if not any((key, sec, down, census, part)):
+        return None
+    state = key[-1]["state"] if key else None
+    last = collections.OrderedDict()
+    for x in part:
+        last[x["name"]] = x
+    ctext = ""
+    if census:
+        ctext = "census: %d change(s) written (%s%s)" % (len(census), "; ".join(x["what"] for x in census[:4]), "; ..." if len(census) > 4 else "")
+    if last:
+        shadow = ["%s (masks %s)" % (n, "/".join("0x" + x["m%d" % k] for k in range(4) if int(x["m%d" % k], 16))) if any(int(x["m%d" % k], 16) for k in range(4)) else "%s (no mask)" % n
+                  for n, x in last.items() if x["state"] == "2" and not x["head"]]
+        ctext += ("; " if ctext else "census: ") + "at the last read, parts in the shadow-views-only class that are not head parts: %s" % (", ".join(shadow) or "none")
+    if not sec:
+        if state == "on":
+            return ("IDLE", "the key is on; no window line (native on foot never ran with it, or the window was not written)" + ("; " + ctext if ctext else ""))
+        return ("IDLE", "the key is %s: the body takes the game's part visibility as it stands" % (state or "not logged") + ("; " + ctext if ctext else ""))
+    tot = {k: sum(int(r[k]) for r in sec) for k in ("calls", "swapped", "promoted", "refused", "lost")}
+    faults = max(int(r["faults"]) for r in sec)
+    names = collections.Counter()
+    for r in sec:
+        names += _hpairs(r["names"])
+    text = "%d s: %d visibility calls of the local avatar, %d with a part promoted, %d parts promoted (by name: %s); the game changed a class before our write %d, during the call %d; faults %d" % (
+        _hsecs(sec), tot["calls"], tot["swapped"], tot["promoted"], _htop(names, 6), tot["refused"], tot["lost"], faults)
+    if down:
+        text += "; stood down after %s faults" % down[-1]["faults"]
+    if ctext:
+        text += "; " + ctext
+    if not tot["promoted"]:
+        if not tot["calls"]:
+            return ("NEVER APPLIED", text + "; the visibility hook never covered the local avatar while the body wrote (the key is on)")
+        return ("NEVER APPLIED", text + "; no covered call found a part in the shadow-views-only class that is not a head part or the first-person skeleton")
+    notes = []
+    if tot["refused"] * 10 >= tot["promoted"]:
+        notes.append("the game changed a class before our write on %d of %d promotions" % (tot["refused"], tot["promoted"]))
+    if tot["lost"] * 10 >= tot["promoted"]:
+        notes.append("the game changed a class during the call on %d of %d promotions" % (tot["lost"], tot["promoted"]))
+    if down:
+        notes.append("stood down")
+    if notes:
+        return ("PARTIAL", text + " [" + "; ".join(notes) + "]")
+    return ("OK", text)
 
 
 def _hj_f135_menu(rows, ctx):
@@ -13233,10 +13381,13 @@ HEALTH_RULES = (
                    r"\(eye 0 (?P<e0>\d+), eye 1 (?P<e1>\d+)\), table mismatch (?P<mismatch>\d+)"),
         ("idle90", r"weapon readout size \(F90\) " + H_WL + r": no table part among the decided parts \(names (?P<names>[^)]*)\)"),
     ), _hj_f90_size),
-    _hrule("weapon readout part (F91)", ("F91",), ("weapon readout part (F91)",), (
+    _hrule("weapon readout part (F91)", ("F91", "F142"), ("weapon readout part (F91)",), (
         ("role", r"weapon readout part \(F91\): item (?P<item>\S+) serial (?P<serial>\d+), slot (?P<slot>\d+) name (?P<name>\d+): mesh (?P<mx>[\d.]+) x (?P<mz>[\d.]+), "
                  r"record scale (?P<scale>[\d.]+), layout [\d.]+ x [\d.]+ base [\d.]+ -> (?P<what>.+)$"),
         ("_", r"weapon readout part \(F91\): slot \d+ name \d+: its role changed"),
+        # F142: the icon mesh table's lines (the table-full event, a reuse, and the window's list): each ends in the running counts. A part whose mesh extents read 0.00 x 0.00
+        # was never given a mesh: with the table full that is the table's, not a part mismatch.
+        ("tab", r"native on foot icon table \(F142\): .*?draws without a slot (?P<full>\d+), slots reused (?P<reused>\d+)"),
     ), _hj_f91_role),
     _hrule("pistol readout (F90)", ("F90",), ("pistol readout (F90)",), (
         ("line", r"pistol readout \(F90\) " + H_WL + r": item (?P<item>\S+) serial \d+; keys forward (?P<fwd>%s) left (?P<left>%s) up (?P<up>%s) toward eye (?P<toward>%s) cm[^;]*; "
@@ -13645,12 +13796,13 @@ HEALTH_RULES = (
         ("bins", r"native on foot pitched view \(F138\) 10 s bins \(per 10 deg of aim pitch: calls, the camera's sink, EDVR carried up, forward, the head's own height since "
                  r"the stance; cm\): (?P<mode>mouse look|look to aim), item (?P<item>.+?): (?=\[)(?P<body>.+)$"),
     ), _hj_f138_pitched),
-    _hrule("ADS sight offset (F139)", ("F139",), ("ADS sight offset (F139)", "ADS sight height (F139"), (
+    _hrule("ADS sight offset (F139)", ("F139",), ("ADS sight offset (F139)", "ADS sight height (F139", "ADS sight right (F139"), (
         ("sec", r"native on foot ADS sight offset \(F139\) " + H_WL + r": item (?P<item>.+?)(?: scope (?P<scope>yes|no|unknown))?, table up (?P<tup>%s) right (?P<tright>%s) cm, "
-                r"trim (?P<trim>%s) cm, applied up (?P<up>%s) cm right (?P<right>%s) cm \(mean of (?P<frames>\d+) frames in the sights; applied on (?P<applied>\d+)\), "
+                r"trim (?P<trim>%s) cm,(?: trim right (?P<trimr>%s) cm,)? applied up (?P<up>%s) cm right (?P<right>%s) cm \(mean of (?P<frames>\d+) frames in the sights; applied on (?P<applied>\d+)\), "
                 r"F79 optic origin on (?P<f79>\d+) frames, refused over the (?P<bound>\d+) cm bound (?P<refused>\d+), no coherent item (?P<noitem>\d+)"
-                r"(?:, scope unknown on (?P<unk>\d+) frames)?" % ((_HN,) * 5)),
+                r"(?:, scope unknown on (?P<unk>\d+) frames)?" % ((_HN,) * 6)),
         ("key", r"native on foot ADS sight height \(F139, TEMPORARY\): fix\.native_on_foot_ads_sight_up_cm = (?P<trim>%s) cm" % _HN),
+        ("keyr", r"native on foot ADS sight right \(F139, TEMPORARY\): fix\.native_on_foot_ads_sight_right_cm = (?P<trim>%s) cm" % _HN),
     ), _hj_f139_sight_offset),
     _hrule("weapon UI placement (F140)", ("F140",), ("weapon UI placement (F140)", "journal loadout (F140)", "weapon UI trim (F140"), (
         ("sec", r"weapon UI placement \(F140\) " + H_WL + r": item (?P<item>.+?) scope (?P<scope>yes|no|unknown), (?P<cls>pistol|rifle) class, (?P<src>table entry|class values), "
@@ -13680,6 +13832,13 @@ HEALTH_RULES = (
         ("actcap", r"native on foot ADS sight point \(F141\): (?P<n>\d+) activation line\(s\) not written"),
         ("nolocal", r"native on foot ADS sight point \(F141\): no local call in (?P<s>\d+) s of ADS \(since the press: other humanoids' calls (?P<other>\d+), not an eye "
                     r"(?P<noteye>\d+), faults (?P<faults>\d+)\)"),
+        # F142: why samples gave no geometry (the second line of each window), and the raw 16 floats of E and of the transform's output once per activation
+        ("inst", r"native on foot ADS sight point \(F141\) " + H_WL + r": item (?P<item>.+?) scope (?P<scope>yes|no|unknown): instrument: ADS samples (?P<on>\d+), usable "
+                 r"(?P<usable>\d+), sight handle not valid \(the game's\) (?P<handle>\d+), rejected (?P<rej>\d+) \[E not read (?P<enr>\d+), E non-finite in a used lane "
+                 r"(?P<enf>\d+), S not read (?P<snr>\d+), S non-finite (?P<snf>\d+), \|S - E\| under 1 um (?P<son>\d+), a degenerate row (?P<row>\d+)\]; E with a non-finite "
+                 r"padding lane \(lanes 3, 7, 11, 15; used all the same\) (?P<pad>\d+); of (?P<pairs>\d+) paired samples E's position lies within 50 cm of P14 as row 3 "
+                 r"\(E\[12\.\.14\], the one used\) on (?P<prow>\d+), as column 3 \(E\[3\], E\[7\], E\[11\]\) on (?P<pcol>\d+)$"),
+        ("raw", r"native on foot ADS sight point \(F141\): raw floats, activation (?P<n>\d+) \(line (?P<line>\d+) of at most (?P<cap>\d+)\): (?P<which>[ES]) = (?P<m>\[[^\]]*\])"),
     ), _hj_f141_sight_point),
     _hrule("readout anchor (F141)", ("F141",), ("readout anchor (F141)",), (
         ("part", r"native on foot readout anchor \(F141\) " + H_WL + r": item (?P<item>.+?) scope (?P<scope>yes|no|unknown): part (?P<part>\d+): vs weapon mean "
@@ -13688,7 +13847,25 @@ HEALTH_RULES = (
                  r"\+0x29 (?P<f29>\d+|mixed|not read) \+0xD0 (?P<fd0>\d+|mixed|not read) \+0x100 (?P<f100>\d+|mixed|not read); frames (?P<frames>\d+), paired "
                  r"(?P<paired>\d+) \(the root of the same frame (?P<same>\d+), one frame apart (?P<apart>\d+); stats over (?P<basis>the same frame|both)\), unpaired "
                  r"(?P<unpaired>\d+); the window's rows of another item (?P<other>\d+), parts over the cap (?P<cap>\d+), rows lost (?P<lost>\d+)" % ((_HN,) * 10)),
+        # F142: why rows made no rel (one line a window, before the part lines), and U's raw 16 floats once per part
+        ("inst", r"native on foot readout anchor \(F141\) " + H_WL + r": item (?P<item>.+?) scope (?P<scope>yes|no|unknown): instrument: rows (?P<rows>\d+), usable (?P<usable>\d+), "
+                 r"rejected (?P<rej>\d+) \[U not read (?P<unr>\d+), U non-finite in a used lane (?P<unf>\d+), a degenerate U row (?P<ud>\d+), a degenerate weapon frame "
+                 r"(?P<wf>\d+), a degenerate P14 frame (?P<pf>\d+)\]; U with a non-finite padding lane \(3, 7, 11, 15; used all the same\) (?P<pad>\d+)$"),
+        ("raw", r"native on foot readout anchor \(F141\): raw floats, part (?P<part>\d+) \(line (?P<line>\d+) of at most (?P<cap>\d+)\), item (?P<item>.+?): U = (?P<m>\[[^\]]*\])"),
     ), _hj_f141_readout_anchor),
+    _hrule("full outfit (F142)", ("F142",), ("native on foot full outfit (F142", "native on foot outfit census (F142)", "native on foot outfit part (F142)"), (
+        ("key", r"native on foot full outfit \(F142, TEMPORARY\): fix\.native_on_foot_body_full_outfit is (?P<state>on|off) -- "),
+        ("sec", r"native on foot full outfit \(F142\) " + H_WL + r": visibility calls of the local avatar (?P<calls>\d+), calls with a part promoted (?P<swapped>\d+), parts "
+                r"promoted (?P<promoted>\d+) \(by name: (?P<names>.+?)\), class changed by the game before the write (?P<refused>\d+), during the call (?P<lost>\d+), faults "
+                r"(?P<faults>\d+)$"),
+        ("down", r"native on foot full outfit \(F142\): stood down for the session after (?P<faults>\d+) faults"),
+        ("census", r"native on foot outfit census \(F142\): change (?P<n>\d+) of the local third-person avatar AMC 0x(?P<amc>[0-9A-Fa-f]+): (?P<parts>\d+) of (?P<of>\d+) parts "
+                   r"have instances; (?P<what>first read|changed: .+?); (?P<list>every part with an instance follows|only the parts that changed follow)$"),
+        ("part", r"native on foot outfit part \(F142\): (?P<name>\w+)(?P<head> \(head part\))? instances (?P<inst>[0-3,]+) state (?P<state>-?\d+) \((?P<cls>[^)]*)\) flags "
+                 r"0x(?P<flags>[0-9A-F]{2}) current item (?P<cur>-?\d+) pending item (?P<pend>-?\d+) masks 0x(?P<m0>[0-9A-F]+),0x(?P<m1>[0-9A-F]+),0x(?P<m2>[0-9A-F]+),"
+                 r"0x(?P<m3>[0-9A-F]+)(?P<chg> \[changed\])?$"),
+        ("_", r"native on foot outfit census \(F142\): later changes are counted, not written"),
+    ), _hj_f142_outfit),
     _hrule("menu probe (F135)", ("F135",), ("native on foot menu probe (F135)",), (
         ("sec", r"native on foot menu probe \(F135\) 1 s: update (?P<upd>\d+) \(objs (?P<updo>.*?)\), placement (?P<place>\d+) \(objs (?P<placeo>.*?)\), ray (?P<ray>\d+), "
                 r"cursor window (?P<win>\d+), owner transform (?P<own>\d+), panel submit (?P<ps>\d+), inst submit (?P<is>\d+), bridge update (?P<bu>\d+) placement "
@@ -14182,7 +14359,7 @@ def main(argv=None):
                     help="post-flight feature health: one line per build-tagged feature family (weapon readout size and pistol "
                          "readout F90, weapon readout part roles, ADS press fit and ADS item gate F91, rifle ADS readout F92, readout swap F93a, weapon UI pin F85b, reticle "
                          "depth F85c, view height hold F87h, weapon eye offset F88, ADS transition F89, ADS sight in both eyes F106, marker fix, "
-                         "prompt anchor and label F87p, the label's designed offset F93c and its own-anchor move F94b, the head in the shadows F95c, the marker tee and the pose hook's CPU F100, the in-world screens' coverage F105, the terminal hold F108, the HUD hide F116, and world scale, read from the paired runtime log) saying OK, "
+                         "prompt anchor and label F87p, the label's designed offset F93c and its own-anchor move F94b, the head in the shadows F95c, the full outfit A/B F142, the marker tee and the pose hook's CPU F100, the in-world screens' coverage F105, the terminal hold F108, the HUD hide F116, and world scale, read from the paired runtime log) saying OK, "
                          "PARTIAL, NEVER APPLIED "
                          "(its own lines show it did nothing), IDLE or UNPARSED with the counters that decide it, then a census of "
                          "every `(F<n>...)` tagged line (count, first and last time, leading label) for the features with no rule. "
@@ -16194,11 +16371,14 @@ def self_test_health():
         PLASMA139, KINETIC139, LASERSMG139, PISTOL139 = ("$wpn_m_assaultrifle_plasma_fauto_name;", "$wpn_m_submachinegun_kinetic_fauto_name;",
                                                          "$wpn_m_submachinegun_laser_fauto_name;", "$wpn_s_pistol_kinetic_sauto_name;")
 
-        def so139(item=PLASMA139, scope="no", tup=1.1, tright=0.0, trim=0.0, up=1.1, right=0.0, frames=480, applied=480, f79=0, refused=0, noitem=0, unk=0, wl=10):
-            return R("native on foot ADS sight offset (F139) %u s", wl, item, scope, tup, tright, trim, up, right, frames, applied, f79, 8.0, refused, noitem, unk)
+        def so139(item=PLASMA139, scope="no", tup=1.1, tright=0.0, trim=0.0, up=1.1, right=0.0, frames=480, applied=480, f79=0, refused=0, noitem=0, unk=0, wl=10, trimr=0.0):
+            return R("native on foot ADS sight offset (F139) %u s", wl, item, scope, tup, tright, trim, trimr, up, right, frames, applied, f79, 8.0, refused, noitem, unk)
 
         def key139(cm=0.0):
             return R("native on foot ADS sight height (F139, TEMPORARY)", cm, 8.0, 8.0)
+
+        def key139r(cm=0.0):
+            return R("native on foot ADS sight right (F139, TEMPORARY)", cm, 8.0, 8.0)
 
         check("F139 sight offset: the key read and no ADS second", [key139(1.5)], 0, [("IDLE", S139)], has=["no ADS second with a sight offset line", "read 1 time(s), last +1.5 cm"],
               lacks=["UNPARSED"])
@@ -16236,6 +16416,22 @@ def self_test_health():
         check("F139 sight offset: the held item not read, no trim set", [key139(), so139(item="none", scope="unknown", tup=0.0, up=0.0, applied=0, noitem=480)], 0, [("PARTIAL", S139)],
               has=["the held item was not read in 10 ADS second(s)"], lacks=["UNPARSED"])
         check("F139 sight offset: a drifted line is unparsed", ["native on foot ADS sight offset (F139) 10 s: something else"], 4, [("UNPARSED", S139)])
+        # F142: the lateral trim fix.native_on_foot_ads_sight_right_cm beside the height trim
+        SHOTGUN139 = "$wpn_m_shotgun_plasma_doublebarrel_name;"
+        check("F142 sight offset: the right trim's key line alone", [key139r(1.5)], 0, [("IDLE", S139)],
+              has=["no ADS second with a sight offset line", "right trim key read 1 time(s), last +1.5 cm"], lacks=["UNPARSED"])
+        check("F142 sight offset: the right total and the trims in the window's line", [key139(), key139r(), so139(item=SHOTGUN139, tup=1.4, up=1.4),
+                                                                                      key139r(1.5), so139(item=SHOTGUN139, tup=1.4, trimr=1.5, up=1.4, right=1.5)], 0, [("OK", S139)],
+              has=[SHOTGUN139 + " scope no: total up +1.40 cm right +1.50 cm (the last window: table +1.4, trim +0.0, table right +0.0, trim right +1.5)",
+                   "by trim (up, right): (+0.0, +0.0) -> up +1.40 right +0.00 cm (10 s), (+0.0, +1.5) -> up +1.40 right +1.50 cm (10 s)", "right trim key read 2 time(s), last +1.5 cm"],
+              lacks=["UNPARSED"])
+        check("F142 sight offset: both trims moved in one flight, each pair has its total",
+              [so139(item=LASERSMG139, tup=-3.0, trim=-1.0, up=-4.0), so139(item=LASERSMG139, tup=-3.0, trim=-1.0, trimr=2.0, up=-4.0, right=2.0, wl=6)], 0, [("OK", S139)],
+              has=["by trim (up, right): (-1.0, +0.0) -> up -4.00 right +0.00 cm (10 s), (-1.0, +2.0) -> up -4.00 right +2.00 cm (6 s)"], lacks=["UNPARSED"])
+        check("F142 sight offset: the right trim alone asks an offset (a pistol, no table row)", [so139(item=PISTOL139, tup=0.0, up=0.0, trimr=2.5, right=2.5)], 0, [("OK", S139)],
+              has=[PISTOL139 + " scope no: total up +0.00 cm right +2.50 cm"], lacks=["UNPARSED", "no offset was asked"])
+        check("F142 sight offset: the right trim is set and no ADS second read the held item", [key139r(2.0), so139(item="none", scope="unknown", tup=0.0, up=0.0, applied=0, noitem=480)], 3,
+              [("NEVER APPLIED", S139)], has=["the right trim is +2.0 cm but no ADS second read the held item"], lacks=["UNPARSED"])
 
         # ---- F140: the weapon readout placed per weapon ----
         P140 = "weapon UI placement (F140)"
@@ -16286,7 +16482,7 @@ def self_test_health():
         def sp141(item=PLASMA141, scope="no", local=600, other=1200, noteye=0, faults=0, adsoff=0, lost=0, wmin=0.0, wmax=1.0, wn=600, wfull=420, ok=600, okof=600,
                   applied=420, appliedof=600, dist=36.0, right=0.0, up=1.1, along=36.0, exact=500, pairs=600, gap=0.2, nofp=0, er=0.0, eu=0.0, ef=0.5, emean=0.6, emax=1.0,
                   sr=0.0, su=1.1, ray=1.75, ain=0.0, aout=1.75, amax=1.8, avs=0.01, avsn=420, shot=SHOT141, wl=10):
-            return R("native on foot ADS sight point (F141) %u s", wl, item, scope, local, other, noteye, faults, adsoff, lost, wmin, wmax, wn, wfull, ok, okof, applied,
+            return R("native on foot ADS sight point (F141) %u s: item %s scope %s; calls local", wl, item, scope, local, other, noteye, faults, adsoff, lost, wmin, wmax, wn, wfull, ok, okof, applied,
                      appliedof, dist, right, up, along, exact, pairs, gap, nofp, er, eu, ef, emean, emax, sr, su, ray, ain, aout, amax, avs, avsn, shot)
 
         def act141(n=1, sight="OpticReticle", eye="def_c_povCamera_joint", ads="on", valid="yes"):
@@ -16330,7 +16526,7 @@ def self_test_health():
 
         def ro141(item=PLASMA141, scope="no", part=7, w=(1.2, -3.5, 8.0), wdev=0.3, wrot=0.02, p=(5.0, -20.0, 40.0), pdev=14.0, prot=3.5, flags=("1", "0", "0", "1", "1", "1"),
                   frames=900, paired=880, same=600, apart=280, basis="the same frame", unpaired=20, other=0, cap=0, lost=0, wl=10):
-            return R("native on foot readout anchor (F141) %u s", wl, item, scope, part, *w, wdev, wrot, *p, pdev, prot, *flags, frames, paired, same, apart, basis, unpaired,
+            return R("native on foot readout anchor (F141) %u s: item %s scope %s: part %u", wl, item, scope, part, *w, wdev, wrot, *p, pdev, prot, *flags, frames, paired, same, apart, basis, unpaired,
                      other, cap, lost)
 
         check("F141 readout anchor: a part constant against the weapon", [ro141(), ro141(wl=6)], 0, [("OK", RO141)],
@@ -16346,6 +16542,128 @@ def self_test_health():
               0, [("PARTIAL", RO141)], has=["no frame paired with the FP snapshot of its render frame (900 frames, unpaired 900); +0x18 not read +0x19 mixed", "part 7: never paired"],
               lacks=["UNPARSED"])
         check("F141 readout anchor: a drifted line is unparsed", ["native on foot readout anchor (F141) 10 s: something else"], 4, [("UNPARSED", RO141)])
+
+        # ---- F142: F141's instrument lines (why samples and rows were rejected) and the raw floats ----
+        def ins141(item=PLASMA141, scope="no", on=600, usable=600, handle=0, rej=0, enr=0, enf=0, snr=0, snf=0, son=0, row=0, pad=0, pairs=600, prow=600, pcol=0, wl=10):
+            return R("native on foot ADS sight point (F141) %u s: item %s scope %s: instrument:", wl, item, scope, on, usable, handle, rej, enr, enf, snr, snf, son, row, pad, pairs,
+                     prow, pcol)
+
+        EMAT141 = "[1 0 0 nan | 0 1 0 0 | 0 0 1 0 | 3 1.5 2 1]"
+        SMAT141 = "[0.1 1.71 0.35 1 | 0 0 0 0 | 0 0 0 0 | 0 0 0 0]"
+
+        def rawe141(n=1, line=1, m=EMAT141):
+            return R("native on foot ADS sight point (F141): raw floats, activation %u", n, line, 24, m)
+
+        def raws141(n=1, line=1, m=SMAT141):
+            return R("native on foot ADS sight point (F141): raw floats, activation %u (line %u of at most %u): S", n, line, 24, m)
+
+        # every ADS sample rejected: the sight point lines read all zero, and the verdict says whose that is
+        every = dict(applied=0, appliedof=600, dist=0.0, right=0.0, up=0.0, along=0.0, exact=0, pairs=0, gap=0.0, ef=0.0, emean=0.0, emax=0.0, sr=0.0, su=0.0, ray=0.0, ain=0.0,
+                     aout=0.0, amax=0.0, avs=0.0, avsn=0)
+        check("F141 sight point: every sample rejected is the instrument's, not a finding about the game",
+              [inst141(), aim141(), sp141(**every), ins141(usable=0, rej=600, enf=600, pairs=0, prow=0), rawe141(m="[1 0 0 0 | 0 1 0 0 | 0 0 1 0 | nan nan nan 1]")], 0, [("PARTIAL", A141)],
+              has=["instrument rejected 600 of 600 samples (E non-finite in a used lane 600): no finding about the game",
+                   "[" + PLASMA141 + " scope no: instrument rejected 600 of 600 samples]", "raw E (activation 1) = [1 0 0 0 | 0 1 0 0 | 0 0 1 0 | nan nan nan 1]"],
+              lacks=["UNPARSED", "never with the sight ahead of the eye", "(a)", "(b)"])
+        check("F141 sight point: a padding-lane NaN in E is used and counted (the hypothesis)", [inst141(), aim141(), sp141(), ins141(pad=600, prow=600, pcol=0)], 0, [("OK", A141)],
+              has=["instrument: 600 ADS samples, 600 usable, sight handle not valid 0, rejected 0 (none); E with a non-finite padding lane (used all the same) on 600; of 600 paired "
+                   "samples E's position within 50 cm of P14 as row 3 on 600, as column 3 on 0"], lacks=["UNPARSED", "instrument rejected"])
+        check("F141 sight point: the position is in column 3", [inst141(), sp141(), ins141(prow=0, pcol=600)], 0, [("OK", A141)],
+              has=["as row 3 on 0, as column 3 on 600"], lacks=["UNPARSED"])
+        check("F141 sight point: a tenth of the samples rejected is PARTIAL, with the reasons", [inst141(), sp141(), ins141(usable=300, rej=300, enr=200, snf=100)], 0, [("PARTIAL", A141)],
+              has=["instrument rejected 300 of 600 samples (E not read 200, S non-finite 100)"], lacks=["UNPARSED"])
+        check("F141 sight point: the game's invalid handle is not a rejection", [inst141(), sp141(ok=0, applied=0, avsn=0), ins141(usable=0, handle=600, rej=0)], 0, [("OK", A141)],
+              has=["(b) the sight handle was never valid", "sight handle not valid 600, rejected 0 (none)"], lacks=["UNPARSED", "instrument rejected"])
+        check("F141 sight point: the raw floats of E and S with no ADS second", [inst141(), aim141(), rawe141(), raws141()], 0, [("IDLE", A141)],
+              has=["raw E (activation 1) = " + EMAT141, "raw S (activation 1) = " + SMAT141], lacks=["UNPARSED"])
+        check("F141 sight point: a drifted instrument line is unparsed", ["native on foot ADS sight point (F141) 10 s: item x scope no: instrument: something else"], 4,
+              [("UNPARSED", A141)])
+
+        def roi141(item=PLASMA141, scope="no", rows=900, usable=900, rej=0, unr=0, unf=0, ud=0, wf=0, pf=0, pad=0, wl=10):
+            return R("native on foot readout anchor (F141) %u s: item %s scope %s: instrument:", wl, item, scope, rows, usable, rej, unr, unf, ud, wf, pf, pad)
+
+        UMAT141 = "[0.9 0.1 0 nan | -0.1 0.9 0 0 | 0 0 1 0 | 0.05 0.03 0.12 1]"
+
+        def rawu141(part=7, line=1, item=PLASMA141, m=UMAT141):
+            return R("native on foot readout anchor (F141): raw floats, part %u", part, line, 24, item, m)
+
+        check("F141 readout anchor: every row rejected is the instrument's",
+              [ro141(paired=0, same=0, apart=0, unpaired=0), roi141(usable=0, rej=900, unf=900), rawu141()], 0, [("PARTIAL", RO141)],
+              has=["instrument rejected 900 of 900 rows (U non-finite in a used lane 900): no finding about the weapon's anchor", "part 7: instrument rejected 900 of 900 rows",
+                   "raw U (part 7) = " + UMAT141], lacks=["UNPARSED", "never paired", "no frame paired"])
+        check("F141 readout anchor: U with a padding-lane NaN, used", [ro141(), roi141(pad=900)], 0, [("OK", RO141)],
+              has=["instrument: 900 rows, 900 usable, rejected 0 (none); U with a non-finite padding lane (used all the same) on 900"], lacks=["UNPARSED"])
+        check("F141 readout anchor: rows not read, a weapon frame degenerate", [ro141(), roi141(usable=700, rej=200, unr=150, wf=50)], 0, [("OK", RO141)],
+              has=["rejected 200 (U not read 150, a degenerate weapon frame 50)"], lacks=["UNPARSED"])
+        check("F141 readout anchor: the instrument line alone, all rejected", [roi141(usable=0, rej=900, unr=900)], 0, [("PARTIAL", RO141)],
+              has=["instrument rejected 900 of 900 rows"], lacks=["UNPARSED"])
+        check("F141 readout anchor: the raw U alone", [rawu141()], 0, [("IDLE", RO141)], has=["raw U (part 7) = " + UMAT141], lacks=["UNPARSED"])
+        check("F141 readout anchor: a drifted instrument line is unparsed", ["native on foot readout anchor (F141) 10 s: item x scope no: instrument: something else"], 4,
+              [("UNPARSED", RO141)])
+
+        # ---- F142: the icon mesh table in the weapon readout part rule ----
+        def icon_full(full=5, reused=0):
+            return R("native on foot icon table (F142): full: no slot for draw", "X", 3600, 0, 3244015, 32, 60, full, reused)
+
+        def icon_slots(full=0, reused=2):
+            return R("native on foot icon table (F142): %d slots", 32, 29, 0, 2, 1, full, reused, 4000, 0, 0, "[0] X 3600@0 base 3244015 stride 40: refused, 0 vertices, idle 12 frames", "")
+
+        def icon_reuse(full=0, reused=1):
+            return R("native on foot icon table (F142): slot %d reused for draw", 3, "X", 624, 470320, 3244015, "X", 3600, 0, 3244015, "refused", 300, full, reused)
+
+        check("F142 weapon readout part: mesh 0.00 x 0.00 with the icon table full", [role_line(mesh=(0.0, 0.0), what="NO TABLE PART: not scaled, not moved"), icon_full(5)], 3,
+              [("NEVER APPLIED", F91R)],
+              has=["icon table full: 1 part(s) read mesh 0.00 x 0.00 and the icon mesh table had no slot for 5 draws (slots reused 0): the extents were never read, not a part mismatch"],
+              lacks=["UNPARSED"])
+        check("F142 weapon readout part: the table's window line carries the count too", [role_line(mesh=(0.0, 0.0), what="NO TABLE PART: not scaled, not moved"), icon_slots(full=12)], 3,
+              [("NEVER APPLIED", F91R)], has=["icon table full: 1 part(s) read mesh 0.00 x 0.00 and the icon mesh table had no slot for 12 draws (slots reused 2)"], lacks=["UNPARSED"])
+        check("F142 weapon readout part: mesh 0.00 x 0.00 and no table line", [role_line(mesh=(0.0, 0.0), what="NO TABLE PART: not scaled, not moved")], 3, [("NEVER APPLIED", F91R)],
+              has=["1 part(s) read mesh 0.00 x 0.00 (the icon mesh was not read; no icon table line says the table was full)"], lacks=["icon table full"])
+        check("F142 weapon readout part: a table that never filled says nothing", [role_line(), icon_slots(full=0, reused=0), icon_reuse(full=0, reused=1)], 0, [("OK", F91R)],
+              lacks=["icon table full", "UNPARSED", "mesh 0.00"])
+        check("F142 weapon readout part: the table full and no role line", [icon_full(3)], 0, [("IDLE", F91R)],
+              has=["no weapon readout part role line; the icon mesh table had no slot for 3 draws (slots reused 0)"], lacks=["UNPARSED"])
+
+        # ---- F142: the full outfit A/B (fix.native_on_foot_body_full_outfit, TEMPORARY) and the outfit census ----
+        FO142 = "full outfit (F142)"
+
+        def fo_key(state="on"):
+            return R("native on foot full outfit (F142, TEMPORARY)", state, "x")
+
+        def fo_sec(wl=10, calls=900, swapped=900, promoted=900, names="EVASuit_Gear_Back 900", refused=0, lost=0, faults=0):
+            return R("native on foot full outfit (F142) %u s", wl, calls, swapped, promoted, names, refused, lost, faults)
+
+        def fo_census(n=1, amc=0x28A831A0DD8, parts=24, of=54, what="first read", lst="every part with an instance follows"):
+            return R("native on foot outfit census (F142): change %u", n, amc, parts, of, what, lst)
+
+        def fo_part(name="EVASuit_Gear_Back", head="", inst="0", state=2, cls="shadow views only", flags=5, cur=12, pend=-1, masks=(0x180000000, 0, 0, 0), chg=""):
+            return R("native on foot outfit part (F142): %s%s instances", name, head, inst, state, cls, flags, cur, pend, *masks, chg)
+
+        check("F142 full outfit: the key off", [fo_key("off")], 0, [("IDLE", FO142)], has=["the key is off: the body takes the game's part visibility as it stands"], lacks=["UNPARSED"])
+        check("F142 full outfit: the key off, the census still lists", [fo_key("off"), fo_census(), fo_part(), fo_part(name="EVASuit_Torso", state=1, cls="every view", masks=(0xF, 0, 0, 0)),
+                                                                          fo_part(name="Head", head=" (head part)", state=2, masks=(0, 0, 0, 0))], 0, [("IDLE", FO142)],
+              has=["census: 1 change(s) written (first read)", "parts in the shadow-views-only class that are not head parts: EVASuit_Gear_Back (masks 0x180000000)"],
+              lacks=["UNPARSED", "Head (masks"])
+        check("F142 full outfit: on, the coat's part promoted", [fo_key(), fo_census(), fo_part(), fo_sec(), fo_sec()], 0, [("OK", FO142)],
+              has=["20 s: 1800 visibility calls of the local avatar, 1800 with a part promoted, 1800 parts promoted (by name: EVASuit_Gear_Back 1800)"], lacks=["UNPARSED"])
+        check("F142 full outfit: promoted by name, several parts", [fo_key(), fo_sec(promoted=1800, names="EVASuit_Gear_Back 900, EVASuit_Arms 600, EVASuit_Legs 300")], 0, [("OK", FO142)],
+              has=["(by name: EVASuit_Gear_Back 900, EVASuit_Arms 600, EVASuit_Legs 300)"], lacks=["UNPARSED"])
+        check("F142 full outfit: on, calls covered and nothing to promote", [fo_key(), fo_sec(swapped=0, promoted=0, names="none")], 3, [("NEVER APPLIED", FO142)],
+              has=["no covered call found a part in the shadow-views-only class that is not a head part or the first-person skeleton"], lacks=["UNPARSED"])
+        check("F142 full outfit: on, the hook never covered the avatar", [fo_key(), fo_sec(calls=0, swapped=0, promoted=0, names="none")], 3, [("NEVER APPLIED", FO142)],
+              has=["the visibility hook never covered the local avatar while the body wrote"], lacks=["UNPARSED"])
+        check("F142 full outfit: the game changed a class on a tenth of the promotions", [fo_key(), fo_sec(refused=90, lost=0)], 0, [("PARTIAL", FO142)],
+              has=["the game changed a class before our write on 90 of 900 promotions"], lacks=["UNPARSED"])
+        check("F142 full outfit: stood down", [fo_key(), fo_sec(faults=3), R("native on foot full outfit (F142): stood down for the session", 3)], 0, [("PARTIAL", FO142)],
+              has=["stood down after 3 faults", "faults 3"], lacks=["UNPARSED"])
+        check("F142 full outfit: the key on, no window line", [fo_key()], 0, [("IDLE", FO142)], has=["the key is on; no window line"], lacks=["UNPARSED"])
+        check("F142 full outfit: census changes listed", [fo_key("off"), fo_census(), fo_part(), fo_census(n=2, what="changed: EVASuit_Gear_Back, EVASuit_Arms", lst="only the parts that changed follow"),
+                                                          fo_part(state=1, cls="every view", chg=" [changed]")], 0, [("IDLE", FO142)],
+              has=["census: 2 change(s) written (first read; changed: EVASuit_Gear_Back, EVASuit_Arms)", "parts in the shadow-views-only class that are not head parts: none"],
+              lacks=["UNPARSED"])
+        check("F142 full outfit: a drifted line is unparsed", ["native on foot full outfit (F142) 10 s: something else"], 4, [("UNPARSED", FO142)])
+        check("F142 full outfit: a drifted census line is unparsed", ["native on foot outfit census (F142): something else"], 4, [("UNPARSED", FO142)])
+        check("F142 full outfit: the icon table lines are not its", [icon_full(2), fo_key("off")], 0, [("IDLE", FO142)], lacks=["UNPARSED"])
 
         # ---- F135: the on-foot menu probe (MEASURE ONLY) ----
         M135 = "menu probe (F135)"

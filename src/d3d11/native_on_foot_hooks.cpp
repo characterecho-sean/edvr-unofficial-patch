@@ -21,6 +21,7 @@
 #include "avatar_skeleton_core.h"
 #include "native_on_foot.h"   // nativeOnFootActive, nativeOnFootCameraExternal and the pose freeze's hand-off (pfz)
 #include "native_on_foot_f95c.h"   // F95c: the head's shadow-only class through the visibility call, the fade hook's action
+#include "native_on_foot_f142.h"   // F142: the full outfit A/B's promotion through the same call, and the outfit census
 #include "native_on_foot_logwin.h"   // F125: the detail key's cached value (the 5 s probe lines here are the detail log's)
 
 #include <windows.h>
@@ -99,6 +100,20 @@ std::atomic<uint32_t> g_f95cFaults{0};
 std::atomic<bool> g_f95cDown{false};
 std::mutex g_f95cViewMutex;              // guards g_f95cViews (the hook only try-locks it)
 NativeOnFootHeadShadowViews g_f95cViews;
+// F142 (TEMPORARY A/B): the outfit's non-head shadow-only parts as every-view for the visibility call (native_on_foot_f142.h). The frame thread sets the key's value; the
+// hook counts; the frame thread logs the change. The census (taken in the fade hook's step, the same thread as the head hide) goes to the frame thread by a ring.
+std::atomic<bool> g_f142Want{false};
+std::atomic<uint64_t> g_f142Calls{0}, g_f142Swapped{0}, g_f142Promoted{0}, g_f142Refused{0}, g_f142Lost{0};
+std::atomic<uint64_t> g_f142Part[avh::kPartCount];   // static storage: zero
+std::atomic<uint32_t> g_f142Faults{0};
+std::atomic<bool> g_f142Down{false};
+std::atomic<bool> g_f142CensusDown{false};            // three faults reading the census: it stops (the A/B is unaffected)
+std::atomic<uint32_t> g_f142CensusFaults{0};
+std::atomic<bool> g_f142Busy{false};                  // one thread at a time takes the census
+std::atomic<uint64_t> g_f142CensusMs{0};
+uint64_t g_f142Sig = 0;                               // g_f142Busy: the signature of the last census queued
+bool g_f142HaveSig = false;                           // g_f142Busy: a census was queued
+avh::Ring<nofoot::f142::Census, 4> g_f142CensusRing;
 // F15 (native on foot E1, TEMPORARY): the first-person body hide. The frame thread writes g_fpHideWant and the names (g_fpIdx); the hook thread writes the
 // readback and counts the first-person AMC calls. g_fpBodyMutex guards g_fpIdx and g_fpReadback.
 std::atomic<bool> g_fpHideWant{false};
@@ -543,6 +558,93 @@ __declspec(noinline) bool sehGuardHeadMasks(uint8_t* amc, uint64_t deny, uint32_
 void f95cFault() noexcept {
     if (g_f95cFaults.fetch_add(1, std::memory_order_relaxed) + 1 >= avh::kMaxHideFaults) g_f95cDown.store(true, std::memory_order_release);
 }
+// ---- F142 (TEMPORARY A/B): the outfit through the visibility call, and the outfit census (native_on_foot_f142.h) -------------------------------------------------------------
+namespace f142 = nofoot::f142;
+static_assert(f142::kPartCount == avh::kPartCount, "F142: the swap record and the census hold every part of the avatar's table");
+// The classes of every part for the call: f142::promoteClasses with the game's own volatile reads and compare-exchanges (F95c's swap, the other way). False on a fault; the
+// parts promoted before it are in s.
+__declspec(noinline) bool sehPromoteOutfit(uint8_t* amc, f142::OutfitSwap* s, uint32_t skeletonIdx) noexcept {
+    __try {
+        f142::promoteClasses(
+            *s, skeletonIdx, &avh::isHeadPart,
+            [amc](uint32_t i) { return static_cast<int32_t>(*reinterpret_cast<volatile LONG*>(amc + f95c::kOffPartClass + i * avh::kPartStride)); },
+            [amc](uint32_t i, int32_t desired, int32_t expected) {
+                volatile LONG* p = reinterpret_cast<volatile LONG*>(amc + f95c::kOffPartClass + i * avh::kPartStride);
+                return InterlockedCompareExchange(p, desired, expected) == expected;
+            });
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+// The game's classes put back (f142::restoreClasses): `lost` counts the classes the game changed during the call, which stand. False on a fault.
+__declspec(noinline) bool sehRestoreOutfit(uint8_t* amc, const f142::OutfitSwap* s, uint32_t* lost) noexcept {
+    __try {
+        *lost = f142::restoreClasses(*s, [amc](uint32_t i, int32_t desired, int32_t expected) {
+            volatile LONG* p = reinterpret_cast<volatile LONG*>(amc + f95c::kOffPartClass + i * avh::kPartStride);
+            return InterlockedCompareExchange(p, desired, expected) == expected;
+        });
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+void f142Fault() noexcept {
+    if (g_f142Faults.fetch_add(1, std::memory_order_relaxed) + 1 >= avh::kMaxHideFaults) g_f142Down.store(true, std::memory_order_release);
+}
+// The census of every part with an instance: the instances present, the class, the flags, the current and pending item, the four view masks. Read-only, under SEH.
+__declspec(noinline) bool sehReadOutfitCensus(const uint8_t* amc, f142::Census* c) noexcept {
+    __try {
+        uint32_t n = 0;
+        for (uint32_t idx = 0; idx < avh::kPartCount; ++idx) {
+            const uint32_t at = idx * avh::kPartStride;
+            uint8_t inst = 0;
+            uint64_t masks[avh::kPartVariants] = {};
+            for (uint32_t k = 0; k < avh::kPartVariants; ++k) {
+                uint64_t ptr = 0;
+                std::memcpy(&ptr, amc + avh::kOffAmcInstances + at + 8 * k, 8);
+                std::memcpy(&masks[k], amc + avh::kOffAmcMasks + at + 8 * k, 8);
+                if (ptr != 0) inst = static_cast<uint8_t>(inst | (1u << k));
+            }
+            if (!inst) continue;
+            f142::PartRow& r = c->row[n++];
+            r.idx = static_cast<uint8_t>(idx);
+            r.inst = inst;
+            r.flags = amc[avh::kOffAmcPartFlags + at];
+            std::memcpy(&r.state, amc + avh::kOffAmcPartState + at, 4);
+            std::memcpy(&r.pending, amc + avh::kOffAmcPartPending + at, 4);
+            std::memcpy(&r.current, amc + avh::kOffAmcPartCurrent + at, 4);
+            std::memcpy(r.masks, masks, sizeof(masks));
+        }
+        c->n = n;
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+// The fade hook's step for the local third-person AMC (its caller has identified it): about every 100 ms, the census; queued for the frame thread when it differs from the last
+// one queued (any part's instances, class, flags or items; never the masks), and the first. A full ring leaves the signature, so the next read tries again. Three faults stop it.
+void outfitCensusStep(uint8_t* amc) noexcept {
+    if (g_f142CensusDown.load(std::memory_order_acquire)) return;
+    const uint64_t now = GetTickCount64();
+    if (now - g_f142CensusMs.load(std::memory_order_relaxed) < 100) return;
+    if (g_f142Busy.exchange(true, std::memory_order_acquire)) return;
+    g_f142CensusMs.store(now, std::memory_order_relaxed);
+    f142::Census c;
+    c.amc = reinterpret_cast<uint64_t>(amc);
+    if (!sehReadOutfitCensus(amc, &c)) {
+        if (g_f142CensusFaults.fetch_add(1, std::memory_order_relaxed) + 1 >= avh::kMaxHideFaults) g_f142CensusDown.store(true, std::memory_order_release);
+    } else {
+        const uint64_t sig = f142::censusSig(c);
+        if (!g_f142HaveSig || sig != g_f142Sig) {
+            if (g_f142CensusRing.push(c)) {
+                g_f142Sig = sig;
+                g_f142HaveSig = true;
+            }
+        }
+    }
+    g_f142Busy.store(false, std::memory_order_release);
+}
 __declspec(noinline) bool sehReadCensus(const uint8_t* amc, avh::AmcCensus* c) noexcept {
     __try {
         std::memcpy(&c->viewFilter, amc + avh::kOffAmcViewFilter, 4);
@@ -641,6 +743,7 @@ void headHideStep(void* amcPtr) noexcept {
         }
         g_busyAmc.store(false, std::memory_order_release);
     }
+    outfitCensusStep(amc);   // F142: the per-part census on a change (read only; about every 100 ms)
     if (g_hideDown.load(std::memory_order_acquire)) return;
     // The writes need native stereo's body (F2, nativeOnFootHooksBody). Without it this function only reads (the census above).
     // F93d: native stereo's head hiding is first-person only: in the game's third-person camera (the camera suite) the head is the game's.
@@ -3017,6 +3120,65 @@ NativeOnFootHeadShadowStats nativeOnFootHeadShadowStats() {
     return s;
 }
 
+// F142 (TEMPORARY A/B): native_on_foot_hooks.h says what these do. The hook thread: the same gate as F95c's swap (the head hide capable, not stood down, the local third-person
+// AMC, the head hide writing now), the key on; one compare-exchange per part the game has in the shadow-views-only class. A call nothing was promoted in leaves nothing to
+// restore (Begin returns false and End is not called).
+void nativeOnFootFullOutfitSet(bool on) noexcept {
+    g_f142Want.store(on, std::memory_order_relaxed);
+}
+bool nativeOnFootOutfitBegin(void* amcPtr, nofoot::f142::OutfitSwap* s, bool allow) noexcept {
+    s->armed = false;
+    s->n = 0;
+    s->refused = 0;
+    if (!amcPtr || !allow || !g_f142Want.load(std::memory_order_relaxed)) return false;
+    if (!g_hideOn.load(std::memory_order_acquire) || g_hideDown.load(std::memory_order_acquire) || g_f142Down.load(std::memory_order_acquire)) return false;
+    if (reinterpret_cast<uint64_t>(amcPtr) != g_amcLocal.load(std::memory_order_relaxed) || !headHideWritesNow()) return false;
+    uint8_t* const amc = static_cast<uint8_t*>(amcPtr);
+    AmcIdent id;
+    if (!sehReadAmcIdent(amc, &id) || !avh::isLocalAmc(id.id, id.pose, g_skelIface[0].load(std::memory_order_acquire), id.mode)) return false;
+    g_f142Calls.fetch_add(1, std::memory_order_relaxed);
+    s->amc = amc;
+    static const int skeleton = avh::partIndexByName("FirstPersonSkeleton");
+    if (!sehPromoteOutfit(amc, s, static_cast<uint32_t>(skeleton))) {
+        uint32_t lost = 0;
+        sehRestoreOutfit(amc, s, &lost);   // the parts promoted before the fault go back
+        f142Fault();
+        return false;
+    }
+    if (s->refused) g_f142Refused.fetch_add(s->refused, std::memory_order_relaxed);
+    if (s->n == 0) return false;
+    s->armed = true;
+    g_f142Swapped.fetch_add(1, std::memory_order_relaxed);
+    g_f142Promoted.fetch_add(s->n, std::memory_order_relaxed);
+    for (uint32_t j = 0; j < s->n; ++j) g_f142Part[s->part[j]].fetch_add(1, std::memory_order_relaxed);
+    return true;
+}
+void nativeOnFootOutfitEnd(nofoot::f142::OutfitSwap* s) noexcept {
+    if (!s->armed) return;
+    s->armed = false;
+    uint32_t lost = 0;
+    if (!sehRestoreOutfit(s->amc, s, &lost)) {
+        f142Fault();
+        return;
+    }
+    if (lost) g_f142Lost.fetch_add(lost, std::memory_order_relaxed);
+}
+NativeOnFootOutfitStats nativeOnFootOutfitStats() {
+    NativeOnFootOutfitStats s;
+    s.calls = g_f142Calls.load(std::memory_order_relaxed);
+    s.swapped = g_f142Swapped.load(std::memory_order_relaxed);
+    s.promoted = g_f142Promoted.load(std::memory_order_relaxed);
+    s.refused = g_f142Refused.load(std::memory_order_relaxed);
+    s.lost = g_f142Lost.load(std::memory_order_relaxed);
+    for (uint32_t i = 0; i < avh::kPartCount; ++i) s.part[i] = g_f142Part[i].load(std::memory_order_relaxed);
+    s.faults = g_f142Faults.load(std::memory_order_relaxed);
+    s.down = g_f142Down.load(std::memory_order_acquire);
+    return s;
+}
+bool nativeOnFootOutfitCensusTake(nofoot::f142::Census* out) noexcept {
+    return out && g_f142CensusRing.take(out);
+}
+
 #ifdef EDVR_NATIVE_ON_FOOT_HOOKS_TEST
 namespace nofoothookstest {
 void setTargets(const NativeOnFootHooksTestTargets& t) {
@@ -3101,6 +3263,15 @@ void reset() {
     {
         avh::AmcCensus drop;
         while (g_censusRing.take(&drop)) {}
+    }
+    {   // F142: the A/B and its census start from nothing at the next launch of the hooks
+        g_f142Want.store(false);
+        g_f142Busy.store(false);
+        g_f142HaveSig = false;
+        g_f142Sig = 0;
+        g_f142CensusMs.store(0);
+        static nofoot::f142::Census dropped;   // (3 KB: not on this stack)
+        while (g_f142CensusRing.take(&dropped)) {}
     }
     g_ctlCalls.store(0);
     g_skelTargets = avh::HeadTargets();
