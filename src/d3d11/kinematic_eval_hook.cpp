@@ -711,9 +711,10 @@ __declspec(noinline) void __fastcall poolCopyObserved(uintptr_t task) noexcept {
        ev::read(buffer+0x180,&mapped,8) && mapped && ev::read(buffer+0x100,&descriptor,8) && descriptor &&
        ev::read(descriptor+0x10,&stride,4) && stride==336 && ev::read(task+0xC0,&offset,8);
     bool returned=false;
-    emcpu::pause(engineMotion);
+    // The game's copy itself is priced from the same two readings, into a cell of its own (emcpu::kGameCopy), never the copier part.
+    const int64_t pausedAt=emcpu::pause(engineMotion);
     __try {forward(task);returned=true;}
-    __finally {emcpu::resume(engineMotion);if(observe && (!returned || !metadata))observe(mapped,stride,0,0,UINT32_MAX);}
+    __finally {emcpu::resumeForward(engineMotion,emcpu::kGameCopy,pausedAt);if(observe && (!returned || !metadata))observe(mapped,stride,0,0,UINT32_MAX);}
     if(!observe || !metadata){emcpu::leave(engineMotion);return;}
     for(unsigned group=0;group<8;++group) {
         uint64_t count=0;uintptr_t entries=0;

@@ -56,9 +56,9 @@
   C"); applicationMs as a frame-fit signal, it omits the post-submit
   phase ("Shadow flight 1").
 
-* **Next flight:** a cpu_profile leg at the pad, k 6 (F9/F11), to
-  see what the slow 30% of frames do; the 4b benefit judgement gets
-  a stable-scene-only correction, in build.
+* **Next (2026-10-27 static-geometry RE pass, last entry):** price
+  Elite's per-frame t33 pool rewrite (the one static redundancy found)
+  and the VR AA-on per-draw cost in one parked pad leg.
 
 ## Frame budget philosophy
 
@@ -3332,3 +3332,126 @@ restore in force).
 Next: a cpu_profile leg at the pad at k 6 (F9/F11 hotkeys) to see
 what the slow 30% of frames do; the 4b correction to the benefit
 judgement (stable scene only, tested+passed) is in build.
+
+### 2026-10-27 -- Static-geometry RE pass (desk work, no flight): the motion path already treats static geometry as static; the one sizeable static redundancy is Elite's per-frame pool rewrite, unpriced
+
+Sean's question: settlement buildings, props and terrain do not move,
+so does EDVR or Elite run motion-vector or AA work for them that could
+be skipped? Two read-only passes, one over EDVR's source on main, one
+over the decompile notes. EDVR's RVAs are build 334925; the decompile
+files are 332841, and the render chain is reloc-only between them
+(build-334925.md).
+
+**EDVR's motion path (read in code).**
+- Pool-family substitution is decided by binding generations, never by
+  what the draw's instances hold (engine_velocity.h:163-187). The slow
+  half (patched PS/VS, MRT6, blend) runs only when the game rebinds:
+  0.02-0.06 ms a frame (kinematic-motion-injection-2026-09-19.md,
+  lines ~3977-3979). Unsubstituting static-only draws would add
+  toggles, at 11-13 D3D calls each (engine_velocity.h:245-251). No
+  online signal maps a draw to its records, except for skinned
+  families.
+- The emit resolves and writes the previous pose for every joined item,
+  static or not. `last != pose` only bumps `recordsMoving`
+  (engine_velocity_emit.h:199-213, 502-508). A static skip saves at most
+  the emit bracket, 0.015-0.2 ms a frame of job-thread time, which the
+  2026-09-22 measurement puts off the critical path. It would also move
+  the pixel to the camera term. That path is not bit-identical to the
+  engine path for a static surface: it differs in compose order, the
+  hidden-history test, the celestial check and the stale gate
+  (temporal_shader_source.h ~1002-1037; flat_mono_shader_source.h
+  ~393-410).
+- The per-pixel record fetch for static pixels was already ruled out as
+  a cost (2026-09-23, kinematic doc).
+- Flat: the per-draw shell was cut on 2026-10-18 (geometry issue reuse,
+  early match). At the measured CZ view flat runs at 118 fps, equal to
+  the GPU span (flat-callback-cpu-handoff-2026-10-18.md).
+
+**Elite (decompile, 332841 RVAs).**
+- Every frame, for a static record: FUN_14433DB20 recomposes the world
+  pose from node x parent, packs the quaternion twice, writes
+  +0x170/+0x17C/+0x240, and runs the slot loop (unpack, 4x4 compose,
+  vtable +0x78 per slot) when +0x68 returns nonzero. FUN_144312040
+  composes again, and the builder FUN_1442B4420 writes the 0x150-byte
+  items. The pose outputs are bit-identical for a static record. The
+  per-view LOD, frustum and mask outputs depend on the camera and are
+  not. The camera never enters the pose math. The floating origin
+  enters through the parent translation, so an input-keyed cache would
+  invalidate itself on a rebase.
+- A cache inside the job (survivor (b) of the 09-21 gate) has two
+  pure-function sites. One is FUN_14433DB20's compose, about 1 KB of
+  2,389 B with about 31 float inputs. The other is FUN_144312E00
+  (985 B). The node append and lookup must still run every frame, so
+  the cache saves only arithmetic: an estimated 0.5 ms or less summed
+  over threads, 0.1-0.2 ms on the critical path, against 0.78-0.81 ms
+  for the whole pipeline. Both sites need mid-function patches.
+- The pool copier FUN_144C81BE0 is this pass's one sizeable finding.
+  On 334925 it is 0x4C846A0, already hooked as
+  `engine-primary-pool-copy` (kinematic_eval_hook.cpp:293, 701-716).
+  Each frame it memcpys the items into the WRITE_DISCARD-mapped t33
+  pool: stride 336, 15,360 slots (5.16 MB), about 12.3k records, so
+  about 4.1 MB a frame. A static record's bytes do not change between
+  frames: no builder record's pose changed over 3 frames
+  (design-occlusion-culling §10). The copy is UNPRICED: EDVR's copier
+  clock pauses around the forward (:714-716), so no log line holds it.
+  The "draw-item chain 0x4c81ca0 < 0x4c8227c" in R5c (the "Phase A,
+  valid" entry) is this loop and its call site. R5c's 3.36 ms of
+  running minus the named pipeline parts bounds it at about 1.7 ms or
+  less, by subtraction only. Bandwidth suggests 0.3-0.6 ms for 4.1 MB
+  of write-combined stores (inferred).
+- FUN_14430EFE0's per-view verdict is consumed only by the class-2
+  emit. It runs about 28.9k calls a frame, up to ~23% of them for
+  builder records. That is worker CPU only, and not specific to static
+  geometry.
+- No new static/dynamic flag. rec+0x2B0 is the child count; stage 3's
+  "dirty flag" is bucket+0x2B0, another struct. The class byte
+  (rec+0x2B8 -> +0x160)+0x4B == 2 splits the singleton path from the
+  builder path, and both paths hold statics and movers.
+
+ruled out: unsubstituting static-only pool draws, because substitution
+is keyed on pipeline state at 0.02-0.06 ms a frame and toggling per
+draw costs more than it saves.
+ruled out: skipping the emit's previous-pose write for static records
+as a CPU lever, because it is at most 0.2 ms of job-thread time off the
+critical path, and the camera term it falls to is not bit-identical.
+ruled out: a pose cache inside the job as a wall-time lever, because
+the whole pipeline is 0.78-0.81 ms on the critical path and the cache
+saves only arithmetic (0.1-0.2 ms).
+
+Open, cheapest first; one parked pad leg reads both:
+1. Price the native pool copy. Add a QPC pair around `forward(task)` in
+   `poolCopyObserved`, split by thread class (render, job), on the
+   existing 30 s line. Gate: at 1 ms a frame or more on the caller
+   thread at the pad, design an incremental pool upload, an EDVR-owned
+   buffer fed only the changed ranges. Its failure modes are slot
+   repacking when the visible set churns, and rebases. It helps the
+   mean, not the frame-time tail that refinement 4b found. Under about
+   0.3 ms, close it.
+2. Price the VR AA-on per-draw increment at a settlement on the current
+   build. The last settlement figure is leg C (2026-09-23): 1.55 ms of
+   draw hooks at 18.8k draws, from before engine motion existed. Aboard,
+   AA on costs 0.55-0.60 us a draw against 0.14-0.16 off
+   (stereo-cpu-sharing-2026-10-16.md:23), and the increment is
+   unattributed. Read `draw hook CPU:`, `engine motion CPU` and `perf
+   baseline F5` with AA on and off. This is not specific to static
+   geometry. If the increment is large, the lever is a per-pipeline-state
+   verdict in the X thunk (vscreen.cpp:5307-5349), like flat's 10-18 cut.
+
+**Item 1 built (2026-10-27, branch
+claude/motion-vector-aa-settlements-e8c512), NOT FLOWN.** The copier
+relay hands its own pause and resume readings to
+`emcpu::resumeForward`. That prices the game's copy, less any nested
+EDVR scope, into a cell of its own (`kGameCopy`), with no extra clock
+reading and in no EDVR total. A fifth 30 s line, `engine motion CPU,
+the game's own pool copy`, prints the render thread's mean and
+p50/p95/max per frame, calls a frame and longest call, then the other
+threads' thread-ms per sampled frame. The relay stays installed once AA
+has been on, so the AA-off leg should price the copy too (a
+cross-check). If it does not, that leg prints "-". Rig:
+engine_motion_cpu_test, 160 checks.
+
+Flight: Frontier, parked in the cockpit at a settlement pad, head
+still. AA on for at least 90 s, then F8 AA off for at least 90 s, then
+AA on for at least 60 s. Press F5 once in each leg. Read line 5 per
+window, `draw hook CPU:` and `perf baseline F5`, after `edvr_log.py
+--expect-build HEAD`.

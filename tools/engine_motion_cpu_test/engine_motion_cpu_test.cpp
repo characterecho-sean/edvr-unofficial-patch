@@ -21,8 +21,11 @@
 //     hostile order
 //   - "the code never ran" is "-", never 0.00; a part that ran and rounded to
 //     nothing is 0.00; the unclocked evaluator says it is not clocked
-//   - the report's four lines state the scheme, and at their worst stay under the
+//   - the report's five lines state the scheme, and at their worst stay under the
 //     log line's limit
+//   - the game's pool copy (kGameCopy) is priced from the copier relay's own pause
+//     and resume readings, less any nested EDVR scope, split render / other on the
+//     part's sampling, and held out of every EDVR figure
 //   - the instrument's cost model, weighed by the sampled fraction, reproduces the
 //     flown scheme's 1.17 ms a frame at the carrier's call rates, and comes in
 //     under 0.15 ms sampled one frame in 32
@@ -1024,6 +1027,130 @@ void textTests() {
           "text: the report says the overflow figures are approximate");
 }
 
+// ---- the game's pool copy (kGameCopy) ----------------------------------------------
+// The one game function priced: the copier relay's forward, from the relay's own pause and resume readings, less any
+// EDVR scope nested in it, in a cell that is no part, so no EDVR figure holds it.
+void gameForward() {
+    resetForTest();
+    fake(0);
+    Token k, nested;
+    enter(k, kCopier);
+    rig::t_now = 10;
+    const int64_t at = pause(k);
+    rig::t_now = 20;
+    enter(nested, kClear);   // an EDVR relay the game's code called inside the forward
+    rig::t_now = 40;
+    leave(nested);
+    rig::t_now = 60;
+    const int64_t readsBefore = rig::t_reads;
+    const int64_t back = resumeForward(k, kGameCopy, at);
+    check(back == 60 && rig::t_reads == readsBefore + 1, "game copy: resumeForward takes one reading, as resume does, and returns it");
+    rig::t_now = 75;
+    leave(k);
+    const Slot* s = t_ctx.slot;
+    check(ticksOf(s, kGameCopy) == 30 && callsOf(s, kGameCopy) == 1,
+          "game copy: the forward's 50 ticks less the nested relay's 20, one call");
+    check(ticksOf(s, kCopier) == 25 && ticksOf(s, kClear) == 20,
+          "game copy: the copier part stays EDVR's own 10 + 15, the nested relay its own 20");
+
+    // A scope the gate did not clock: no reading, no copy.
+    resetForTest();
+    fake(0);
+    Token off;
+    enterOn(g_calSkipped, off, kCopier, true);
+    const int64_t offReads = rig::t_reads;
+    const int64_t offAt = pause(off);
+    rig::t_now = 500;
+    resumeForward(off, kGameCopy, offAt);
+    leave(off);
+    check(rig::t_reads == offReads && t_ctx.slot == nullptr,
+          "game copy: a scope the gate did not clock reads no clock, takes no slot and so records no copy");
+    // A resume with no pause before it has no span to price.
+    resetForTest();
+    fake(0);
+    Token unpaused;
+    enter(unpaused, kCopier);
+    rig::t_now = 10;
+    resumeForward(unpaused, kGameCopy, 0);
+    leave(unpaused);
+    check(callsOf(t_ctx.slot, kGameCopy) == 0, "game copy: a resume with no pause before it records no copy");
+
+    // Through the recorder: render thread every frame, a job thread on the sampled frames only, and none of it in
+    // EDVR's figures.
+    resetForTest();
+    fake(0);
+    static Recorder rec;   // its own window: the shared recorder's is spent
+    WindowReport report;
+    unsigned sampledSeen = 0, figuresClean = 0, frames = 0;
+    {
+        Worker worker;
+        worker.run([] { fake(0); });
+        rec.onFrame(kFreq, 1000);
+        bool closed = false;
+        for (uint64_t nowMs = 2000; !closed; nowMs += 1000) {
+            const bool sampledThisFrame = rec.sampledNow();
+            // The render thread: the copier's own work 10 ticks, the game's copy 0.2 ms (0.9 ms on frame 5).
+            {
+                Token r;
+                enter(r, kCopier);
+                rig::t_now += 5;
+                const int64_t p = pause(r);
+                rig::t_now += frames == 5 ? 9000 : 2000;
+                resumeForward(r, kGameCopy, p);
+                rig::t_now += 5;
+                leave(r);
+            }
+            // A job thread: the game's copy 0.05 ms, clocked only when the frame is sampled.
+            worker.run([] {
+                Token o;
+                enter(o, kCopier);
+                rig::t_now += 3;
+                const int64_t p = pause(o);
+                rig::t_now += 500;
+                resumeForward(o, kGameCopy, p);
+                rig::t_now += 2;
+                leave(o);
+            });
+            const Figures f = rec.onFrame(kFreq, nowMs);
+            ++frames;
+            if (sampledThisFrame) ++sampledSeen;
+            figuresClean += (nearly(f.renderMs, 0.001) && nearly(f.otherMs, sampledThisFrame ? 0.0005 : 0.0)) ? 1u : 0u;
+            closed = rec.takeReport(report);
+        }
+    }
+    const PartWindow& g = report.gameCopy;
+    check(report.valid && report.frames == 30 && frames == 30, "game copy: the window closes at its 30th frame of 1 s");
+    check(figuresClean == frames, "game copy: no frame's EDVR figures (the LONG FRAME clause) hold the copy, on either class of thread");
+    check(nearly(report.totalMax, 0.001) && nearly(report.part[kCopier].renderMs, 0.030),
+          "game copy: the render thread's EDVR total and copier part are its 10 ticks a frame, nothing of the copy");
+    check(g.renderCalls == 30 && nearly(g.renderMs, 29 * 0.2 + 0.9) && nearly(g.renderP50, 0.2) && nearly(g.renderMax, 0.9) &&
+              nearly(g.renderCallMaxMs, 0.9),
+          "game copy: the render thread's copy, every frame: 6.7 ms in 30 calls, p50 0.2, max and longest call 0.9");
+    check(g.otherCalls == sampledSeen && nearly(g.otherMs, sampledSeen * 0.05) &&
+              nearly(g.otherCallMaxMs, sampledSeen ? 0.05 : 0.0),
+          "game copy: the job thread's copy is counted on the sampled frames only, 0.05 ms each");
+
+    char line[1400];
+    formatGameCopy(line, sizeof(line), report);
+    const std::string text = line;
+    check(text.find("Elite's work, not EDVR's, in no figure above") != std::string::npos,
+          "game copy text: the line says the copy is the game's work and in no EDVR figure");
+    check(text.find("render thread, every call: mean 0.223 ms per frame, p50/p95/max 0.20/0.20/0.90 (1.0 calls per frame; "
+                    "longest call 0.900 ms)") != std::string::npos,
+          "game copy text: the render thread's mean, p50/p95/max, calls and longest call");
+    check(sampledSeen ? text.find("other threads, the 1 sampled frames only: 0.050 thread-ms per sampled frame (1.0 calls per "
+                                  "sampled frame; longest call 0.050 ms).") != std::string::npos
+                      : text.find("other threads: no sampled frame in this window.") != std::string::npos,
+          "game copy text: the job thread's copy per sampled frame, or no sampled frame said");
+    WindowReport idle = report;
+    idle.gameCopy = PartWindow{};
+    idle.sampledFrames = 3;
+    formatGameCopy(line, sizeof(line), idle);
+    check(std::string(line).find("render thread -; other threads (the 3 sampled frames) -.") != std::string::npos,
+          "game copy text: no copy on a class of thread is -, never 0.00");
+    resetForTest();
+}
+
 void worstCaseLengths() {
     WindowReport r;
     r.valid = true;
@@ -1049,15 +1176,24 @@ void worstCaseLengths() {
         w.renderCallMaxMs = w.otherCallMaxMs = 99999.99;
         w.renderMs = w.otherMs = 99999999.99;
     }
-    char lines[4][2000];
+    PartWindow& g = r.gameCopy;
+    g.renderCalls = g.otherCalls = 99999999999ull;
+    g.renderP50 = g.renderP95 = g.renderMax = 99999.99;
+    g.renderCallMaxMs = g.otherCallMaxMs = 99999.99;
+    g.renderMs = g.otherMs = 99999999.99;
+    char lines[5][2000];
     const size_t a = formatSummary(lines[0], sizeof(lines[0]), r);
     const size_t b = formatClock(lines[1], sizeof(lines[1]), r);
     const size_t c = formatRenderParts(lines[2], sizeof(lines[2]), r);
     const size_t d = formatOtherParts(lines[3], sizeof(lines[3]), r);
-    std::printf("engine_motion_cpu_test: worst-case line lengths: summary %zu, clock %zu, render parts %zu, other parts %zu (limit 1150)\n",
-                a, b, c, d);
-    check(a < 1150 && b < 1150 && c < 1150 && d < 1150, "text: each of the four lines at its worst fits the log line (about 1166 characters)");
+    const size_t e = formatGameCopy(lines[4], sizeof(lines[4]), r);
+    std::printf("engine_motion_cpu_test: worst-case line lengths: summary %zu, clock %zu, render parts %zu, other parts %zu, game copy %zu "
+                "(limit 1150)\n",
+                a, b, c, d, e);
+    check(a < 1150 && b < 1150 && c < 1150 && d < 1150 && e < 1150,
+          "text: each of the five lines at its worst fits the log line (about 1166 characters)");
     check(std::strlen(lines[3]) == d && lines[3][d - 1] == '.', "text: the last line ends whole, not cut");
+    check(std::strlen(lines[4]) == e && lines[4][e - 1] == '.', "text: the game copy line ends whole, not cut");
     char tiny[24];
     check(formatSummary(tiny, sizeof(tiny), r) < sizeof(tiny), "text: a short buffer is cut, never overrun");
 }
@@ -1299,6 +1435,7 @@ int wmain(int argc, wchar_t** argv) {
     recorderStraddle();
     recorderFallback();
     windowFull();
+    gameForward();
     textTests();
     worstCaseLengths();
     costModel();
