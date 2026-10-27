@@ -58,7 +58,7 @@
 
 * **Next (2026-10-27, last entry):** AA on's +1.65 ms is per-draw
   classifiers. ui-depth memo FLOWN: exact, -0.21 ms (shipped, b1561dff).
-  Trims A-F: no gain. Repeat-draw fast path DESIGNED (~0.8-1.6 ms).
+  Trims A-F: no gain. Fast path Phase 1 (shadow) BUILT, NOT FLOWN.
 
 ## Frame budget philosophy
 
@@ -4339,6 +4339,40 @@ frames as the ui_depth memo had. Add the `fast` step to the step clock.
 
 Fly it parked, then looking around the settlement and the cockpit for
 a minute (UI takes, holo, terminals), and include an AA-off leg.
+
+**Phase 1 built (2026-10-27, same branch), NOT FLOWN.**
+- **Code.** `draw_fast_path_shadow.h` holds the key, the args class,
+  the ticket, judge and finish, 25 outcome terms, the counters and the
+  line. `draw_gate_subscribers.h` holds the gate's 28 subscribers as a
+  bit set. The glue is in the X thunk, forwardWithVerdict and the
+  lambda. It is TEMPORARY, and it changes no behaviour: the only new
+  returns are inside its helpers.
+- **Certified subscribers: 18 of 28.** Distance and panel curve are
+  certified, not armed, because they act only on draws of 64 indices
+  or fewer, which the args class excludes. The curve's paths were
+  traced to `srv0IsPanelSized`, `curveThisDraw`, `introCurveThisDraw`
+  and the six-index recognisers. Sean's Steam ini has distance 0.65 and
+  curvature 0.25, so armed would have read 0%.
+- **Defaults the design had wrong.** The footprint is on by default
+  (`vscreen_res_width = auto`), so it is certified, and its 2D-screen
+  composite VS is a special. The loader panel is on by default, so it
+  is armed only on loader-shaped frames.
+- **The after-UI term** is a before/after stamp of ui_layer's effect
+  counters, leaving out the DSV memo's diagnostic hit and miss counts.
+- **Screen motion's** two draw calls now return whether they recognised
+  their pair.
+- **Rig:** aa_off_test, 321 checks.
+- **Cost.** The instrument costs an estimated 40-60 ns an owner X draw,
+  so this flight's timings are not comparable. Its counts are the
+  result.
+
+Flight: parked at the Cranfield pad for at least 2 minutes, then a
+minute looking around the cockpit and settlement (HUD, holo, a
+terminal if one is near), then F7 AA off for 1 minute, then F7 back
+on. Read `draw fast path (shadow):`:
+- the would-take share, eye and off-screen;
+- the refusals by reason;
+- the mismatches, which must be 0.
 
 **The Phase 2 flight should show:**
 - the `fast` step's calls and cost;

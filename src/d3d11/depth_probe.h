@@ -92,6 +92,12 @@ inline bool depthProbeEyeDrawNeedsNote(void* dsv) {
            (!detail::g_depthProbeEyeDrawThisFrame || dsv != detail::g_depthProbeLastDsv);
 }
 
+// TEMPORARY (Phase 1 shadow instrument, built 2026-10-27; draw_fast_path_shadow.h): the layout census is sampling a target this frame, so
+// depthProbeNoteDraw tallies eye draws for it and samples the layout every 1024th draw into that target -- the "layout sample" the repeat-draw
+// fast path leaves to the full path. Normally off. One load.
+namespace detail { extern int g_depthProbeLayoutTarget; }
+inline bool depthProbeLayoutActive() { return detail::g_depthProbeLayoutTarget >= 0; }
+
 // From the render-target hooks, BEFORE the game's rebind is forwarded:
 // is `current` (the view bound until now) a target the eye draws use,
 // about to be replaced by `next`, and due for a sample? When this says

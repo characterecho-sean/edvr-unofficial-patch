@@ -344,15 +344,19 @@ void wakePulseConfigure(Config& cfg) {
     }
 }
 
+// The surface test wakePulseSkips opens with, on its own: a target at least kMinWidth wide whose aspect is the panel's. TEMPORARY split (Phase 1
+// shadow instrument, built 2026-10-27; draw_fast_path_shadow.h asks it for the repeat-draw fast path's "not a wake-pulse surface" term).
+bool wakePulseSurfaceShape(uint32_t targetW, uint32_t targetH) {
+    if (targetW < kMinWidth || targetH == 0) return false;
+    const float aspect = static_cast<float>(targetW) / static_cast<float>(targetH);
+    return !(aspect < kAspect - kAspectTol || aspect > kAspect + kAspectTol);
+}
+
 bool wakePulseSkips(ID3D11DeviceContext* ctx, char kind, uint32_t count,
                     uint32_t targetW, uint32_t targetH, uint32_t startIndex,
                     int baseVertex) {
     if (!detail::g_wakePulseOff) return false;
-    if (targetW < kMinWidth || targetH == 0) return false;
-    const float aspect = static_cast<float>(targetW) / static_cast<float>(targetH);
-    if (aspect < kAspect - kAspectTol || aspect > kAspect + kAspectTol) {
-        return false;
-    }
+    if (!wakePulseSurfaceShape(targetW, targetH)) return false;
     // The panel is here. Remember that separately from whether the flash
     // draw was, so a log can say which half failed.
     ++g_surfaceSeen;

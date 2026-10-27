@@ -27,10 +27,14 @@ inline bool screenMotionLive() {
 }
 
 void screenMotionSource(ID3D11DeviceContext*,unsigned width,unsigned height);
-void screenMotionUiDraw(ID3D11DeviceContext*,PanelCurveDrawFn,unsigned count,unsigned instances,
+// screenMotionUiDraw and screenMotionDraw return true once the draw is one they recognise (the shader pair each names), whatever they then do or
+// decline to do with it, and false for every other draw and for one the UI layer took. TEMPORARY, built 2026-10-27 for the repeat-draw fast path's
+// Phase 1 shadow instrument (draw_fast_path_shadow.h, docs\engine-render-performance-2026-09-19.md "Desk design: the repeat-draw fast path"): an
+// ordinary draw is not recognised, and the draw path only reads the answer.
+bool screenMotionUiDraw(ID3D11DeviceContext*,PanelCurveDrawFn,unsigned count,unsigned instances,
                         unsigned start,int base,unsigned startInstance);
 bool screenMotionRecognize();
-void screenMotionDraw(ID3D11DeviceContext*,PanelCurveDrawFn,unsigned count,unsigned instances,
+bool screenMotionDraw(ID3D11DeviceContext*,PanelCurveDrawFn,unsigned count,unsigned instances,
                       unsigned start,int base,unsigned startInstance,const float* curve=nullptr);
 struct ScreenMotionGpuDiagnostics {
     uint64_t scope=0,sourceFrames=0;

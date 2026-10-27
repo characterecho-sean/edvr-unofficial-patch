@@ -351,6 +351,9 @@ inline bool uiLayerRedirecting() { return detail::g_uiLayerRedirecting; }
 // hand). Every case is counted and each shader pair named once.
 inline bool uiLayerWatching() { return detail::g_uiLayerWatching; }
 inline bool uiLayerSeedDiagnostics() { return detail::g_uiSeedDiagnostics; }
+// TEMPORARY (Phase 1 shadow instrument, built 2026-10-27; draw_fast_path_shadow.h): one number that is the same before and after a call of
+// uiLayerNoteOther exactly when the call changed none of the counters, notes or the watch budget it keeps. Reads only; out of line (ui_layer.cpp).
+uint64_t uiLayerAfterUiStamp();
 bool uiLayerNoteOther(ID3D11DeviceContext* ctx, uint32_t count, bool verdictForwards, bool substituted,
                       bool excluded, bool panelSized, uint32_t instances, uint32_t verdict, char drawKind);
 // Completes CPU-only observation after the forwarding/substitution decision.

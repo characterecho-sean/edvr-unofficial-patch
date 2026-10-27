@@ -236,7 +236,7 @@ bool bindingResolveResource(void* resource, ResourceInfo* out) {
     return true;
 }
 
-void screenMotionDraw(ID3D11DeviceContext*, PanelCurveDrawFn, unsigned, unsigned, unsigned, int, unsigned, const float*) {}
+bool screenMotionDraw(ID3D11DeviceContext*, PanelCurveDrawFn, unsigned, unsigned, unsigned, int, unsigned, const float*) { return false; }
 }  // namespace edvr
 #endif
 

@@ -54,6 +54,10 @@ bool g_uiDepthPlanetPending = false, g_uiDepthPlanetSolarPending = false;
 bool g_uiDepthWorldScreenPending = false;   // F105 (world_screen_coverage.h)
 bool g_holoDepthOn = false;       // the hologram depth pass (on whenever the temporal pass runs)
 bool g_uiDepthDrawComposite = false;  // the last eye draw sampled a learned interface surface (ui_depth.h)
+// The classifier epoch (the comment at g_classifierEpoch below), out here so ui_depth.h's uiDepthClassifierEpoch can read it inline.
+// TEMPORARY (Phase 1 shadow instrument, built 2026-10-27; draw_fast_path_shadow.h, docs\engine-render-performance-2026-09-19.md "Desk design: the
+// repeat-draw fast path"): its second reader is the repeat-draw fast path's key.
+uint32_t g_uiDepthClassifierEpoch = 1;
 }  // namespace detail
 
 namespace {
@@ -339,7 +343,7 @@ bool     g_ringNoted = false;
 // so an answer never lives past its frame either. A view-memo miss that only records what the table already says needs no bump.
 // No config key: a fix that always helps. Each write site carries the bump beside it. Flown 2026-10-27 at a settlement pad: 91% of
 // eye draws hit, and about 5M hits checked against a full run of the classifier never differed (classifier_memo.h).
-uint32_t g_classifierEpoch = 1;
+uint32_t& g_classifierEpoch = detail::g_uiDepthClassifierEpoch;   // bound to the published counter ui_depth.h's uiDepthClassifierEpoch() reads
 
 // The two memos: the key and the exit of the last full run of each classifier (classifier_memo.h), each classifier's own.
 classifiermemo::Memo g_eyeMemo, g_holoMemo;
@@ -2635,6 +2639,16 @@ void uiDepthNoteOffscreenDraw(ID3D11DeviceContext* ctx) {
     } else if (g_rtvChecks >= kChecksPerTarget) {
         noteExhausted(g_rtvRes);
     }
+}
+
+// TEMPORARY (Phase 1 shadow instrument, built 2026-10-27; draw_fast_path_shadow.h, docs\engine-render-performance-2026-09-19.md "Desk design: the
+// repeat-draw fast path"). Read right after uiDepthNoteOffscreenDraw's turn for a draw: true when a further draw into the bound target changes
+// nothing in the learner above (the target is known, has no resource to learn, or has used its checks), or when the pass is off and the learner
+// never runs. False for a target the learner is still asking about, and for one it has not met (its generation is not Rtv0's). Reads only.
+bool uiDepthOffscreenTargetSettled() {
+    if (!detail::g_uiDepthOn || detail::g_uiDepthStoodDown) return true;
+    if (g_rtvGen != bindingGeneration(BindSlot::Rtv0)) return false;
+    return g_rtvKnown || !g_rtvRes || g_rtvChecks >= kChecksPerTarget;
 }
 
 // The eye-draw classifier proper: everything uiDepthOnEyeDraw does after it has reset its outputs and found the pass on. Split out

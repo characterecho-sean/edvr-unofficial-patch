@@ -262,7 +262,7 @@ bool bindingResolveResource(void* resource, ResourceInfo* out) {
 }
 
 // The on-foot screen's per-eye motion pass (screen_motion.cpp), which the substitution issues with the strip still bound: nothing here reaches it.
-void screenMotionDraw(ID3D11DeviceContext*, PanelCurveDrawFn, unsigned, unsigned, unsigned, int, unsigned, const float*) {}
+bool screenMotionDraw(ID3D11DeviceContext*, PanelCurveDrawFn, unsigned, unsigned, unsigned, int, unsigned, const float*) { return false; }
 
 namespace detail {
 BindingSlot g_bindingSlots[static_cast<size_t>(BindSlot::Count)];

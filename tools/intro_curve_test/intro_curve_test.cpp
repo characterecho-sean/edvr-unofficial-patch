@@ -337,7 +337,7 @@ void introUpscaleShutdown() { ++stub::upShutdown; }
 
 // panel_curve.cpp is linked for real (fix.panel_curvature, and whether the surface strip is wanted); its on-foot half calls the screen's motion
 // pass, which nothing here reaches.
-void screenMotionDraw(ID3D11DeviceContext*, PanelCurveDrawFn, unsigned, unsigned, unsigned, int, unsigned, const float*) {}
+bool screenMotionDraw(ID3D11DeviceContext*, PanelCurveDrawFn, unsigned, unsigned, unsigned, int, unsigned, const float*) { return false; }
 
 // The real resolver is binding_shadow.cpp, which carries the whole hook layer. The module reads only a buffer's byte width (info.a).
 bool bindingResolveResource(void* resource, ResourceInfo* out) {

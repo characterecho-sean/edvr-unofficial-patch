@@ -69,7 +69,14 @@ extern bool g_holoDepthOn;
 // loop that finds the surface already runs for every eye draw with a depth
 // target, and a second one in the layer would double its cost.
 extern bool g_uiDepthDrawComposite;
+extern uint32_t g_uiDepthClassifierEpoch;
 }  // namespace detail
+// TEMPORARY (Phase 1 shadow instrument, built 2026-10-27; draw_fast_path_shadow.h): the classifier's epoch, a counter that only moves forward
+// (ui_depth.cpp g_classifierEpoch: every write to the surface table, the lists and the view memo, and every frame boundary). The repeat-draw
+// fast path's key holds it beside the bindings' generation. One load.
+inline uint32_t uiDepthClassifierEpoch() { return detail::g_uiDepthClassifierEpoch; }
+// TEMPORARY (same): true when a further draw into the bound off-screen target changes nothing in uiDepthNoteOffscreenDraw's learner. Reads only.
+bool uiDepthOffscreenTargetSettled();
 inline bool uiDepthWantsDraws() {
     return detail::g_uiDepthOn && !detail::g_uiDepthStoodDown;
 }

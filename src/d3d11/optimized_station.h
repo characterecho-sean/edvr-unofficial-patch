@@ -14,6 +14,8 @@ bool optimizedStationGathers() noexcept;
 bool optimizedStationSealed() noexcept;
 // The draw path asks: true skips the draw (the sun pair, while the sun skip is on).
 bool optimizedStationSkipsDraw(uint64_t vs, uint64_t ps) noexcept;
+// TEMPORARY (Phase 1 shadow instrument, built 2026-10-27; draw_fast_path_shadow.h): is this pair the sun's? Reads only, counts nothing.
+bool optimizedStationIsSunPair(uint64_t vs, uint64_t ps) noexcept;
 // Built 2026-10-21: how the flat draw path carried out a skipped sun draw (the VR path never issues it and does not report). kNotIssued: the real draw call was
 // not made (the flat runtime's scope planned nothing around it). kMasked: the scope had planned work around the issue, so the draw was made with every
 // colour, depth and stencil write off. The flat profile's 30 s line splits `sun draws skipped` by it; a path that never ran reads 0.

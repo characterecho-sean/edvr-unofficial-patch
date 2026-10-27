@@ -310,39 +310,39 @@ void screenMotionSource(ID3D11DeviceContext* ctx,unsigned w,unsigned h) {
     Ptr<ID3D11Buffer> scene;ctx->VSGetConstantBuffers(1,1,&scene);
     engineVelocityNoteSource(tex.Get(),scene.Get(),terrain?EngineVelocitySourceSignal::Terrain:EngineVelocitySourceSignal::ScreenDepth);
 }
-void screenMotionUiDraw(ID3D11DeviceContext* ctx,PanelCurveDrawFn draw,unsigned count,unsigned instances,
+bool screenMotionUiDraw(ID3D11DeviceContext* ctx,PanelCurveDrawFn draw,unsigned count,unsigned instances,
                         unsigned start,int base,unsigned startInstance) {
     // A GUI composite the UI layer took (ui_layer.h) is not in the pass's
     // input and its bound target is the layer: no source-UI mask from it.
-    if(uiLayerRedirecting())return;
+    if(uiLayerRedirecting())return false;
     if(!detail::g_screenMotionEnabled || detail::g_screenMotionFailed || g.sourceFrame!=g.frame || !draw || !ctx ||
-       ctx->GetType()!=D3D11_DEVICE_CONTEXT_IMMEDIATE)return;
+       ctx->GetType()!=D3D11_DEVICE_CONTEXT_IMMEDIATE)return false;
     const uint64_t vs=bindingShaderHash(BindSlot::Vs),ps=bindingShaderHash(BindSlot::Ps);
     // Flight 14:40:54, final LDR draws 932..938. These are GUI composites,
     // not the earlier HDR cockpit/world effects or the GUI atlas builders.
     if(!((vs==0xB10B032BDFD46700ull && ps==0xDB899F4BD577F2E5ull) ||
          (vs==0xC4B4B334B26E81A9ull && ps==0x0146ABCC53240479ull) ||
-         (vs==0xA888D51024D9798Eull && ps==0x015EF9349EC097E8ull)))return;
-    Ptr<ID3D11RenderTargetView> rt;ctx->OMGetRenderTargets(1,&rt,nullptr);if(!rt)return;
-    Ptr<ID3D11Resource> res;rt->GetResource(&res);Ptr<ID3D11Texture2D> tex;if(FAILED(res.As(&tex)))return;
+         (vs==0xA888D51024D9798Eull && ps==0x015EF9349EC097E8ull)))return false;
+    Ptr<ID3D11RenderTargetView> rt;ctx->OMGetRenderTargets(1,&rt,nullptr);if(!rt)return true;
+    Ptr<ID3D11Resource> res;rt->GetResource(&res);Ptr<ID3D11Texture2D> tex;if(FAILED(res.As(&tex)))return true;
     D3D11_TEXTURE2D_DESC td{},depth{};tex->GetDesc(&td);g.depth->GetDesc(&depth);
     D3D11_RENDER_TARGET_VIEW_DESC rd{};rt->GetDesc(&rd);
     if(td.Width!=depth.Width || td.Height!=depth.Height || td.SampleDesc.Count!=1 || td.ArraySize!=1 ||
-       rd.Format!=DXGI_FORMAT_R8G8B8A8_UNORM || rd.ViewDimension!=D3D11_RTV_DIMENSION_TEXTURE2D || rd.Texture2D.MipSlice)return;
-    Ptr<ID3D11BlendState> blend;FLOAT factors[4];UINT mask;ctx->OMGetBlendState(&blend,factors,&mask);if(!blend)return;
+       rd.Format!=DXGI_FORMAT_R8G8B8A8_UNORM || rd.ViewDimension!=D3D11_RTV_DIMENSION_TEXTURE2D || rd.Texture2D.MipSlice)return true;
+    Ptr<ID3D11BlendState> blend;FLOAT factors[4];UINT mask;ctx->OMGetBlendState(&blend,factors,&mask);if(!blend)return true;
     D3D11_BLEND_DESC bd{};blend->GetDesc(&bd);const auto& b=bd.RenderTarget[0];
     if(bd.AlphaToCoverageEnable || !b.BlendEnable || b.BlendOp!=D3D11_BLEND_OP_ADD ||
-       (b.SrcBlend!=D3D11_BLEND_SRC_ALPHA && b.SrcBlend!=D3D11_BLEND_ONE) || b.DestBlend!=D3D11_BLEND_INV_SRC_ALPHA || !(b.RenderTargetWriteMask&7))return;
-    Ptr<ID3D11DepthStencilState> ds;UINT ref;ctx->OMGetDepthStencilState(&ds,&ref);if(!ds)return;
+       (b.SrcBlend!=D3D11_BLEND_SRC_ALPHA && b.SrcBlend!=D3D11_BLEND_ONE) || b.DestBlend!=D3D11_BLEND_INV_SRC_ALPHA || !(b.RenderTargetWriteMask&7))return true;
+    Ptr<ID3D11DepthStencilState> ds;UINT ref;ctx->OMGetDepthStencilState(&ds,&ref);if(!ds)return true;
     D3D11_DEPTH_STENCIL_DESC dd{};ds->GetDesc(&dd);
-    if(dd.DepthEnable || (dd.StencilEnable && (dd.FrontFace.StencilFunc!=D3D11_COMPARISON_ALWAYS || dd.BackFace.StencilFunc!=D3D11_COMPARISON_ALWAYS)))return;
+    if(dd.DepthEnable || (dd.StencilEnable && (dd.FrontFace.StencilFunc!=D3D11_COMPARISON_ALWAYS || dd.BackFace.StencilFunc!=D3D11_COMPARISON_ALWAYS)))return true;
     Ptr<ID3D11Device> dev;ctx->GetDevice(&dev);D3D11_TEXTURE2D_DESC old{};if(g.ui)g.ui->GetDesc(&old);
     if(old.Width!=td.Width || old.Height!=td.Height) {
         g.ui.Reset();g.uiRtv.Reset();g.uiSrv.Reset();g.uiFrame=~0u;
         td.Format=DXGI_FORMAT_R8_UNORM;td.MipLevels=1;td.Usage=D3D11_USAGE_DEFAULT;
         td.BindFlags=D3D11_BIND_RENDER_TARGET|D3D11_BIND_SHADER_RESOURCE;td.CPUAccessFlags=td.MiscFlags=0;
         if(FAILED(dev->CreateTexture2D(&td,nullptr,&g.ui)) || FAILED(dev->CreateRenderTargetView(g.ui.Get(),nullptr,&g.uiRtv)) ||
-           FAILED(dev->CreateShaderResourceView(g.ui.Get(),nullptr,&g.uiSrv))) {g.ui.Reset();return;}
+           FAILED(dev->CreateShaderResourceView(g.ui.Get(),nullptr,&g.uiSrv))) {g.ui.Reset();return true;}
     }
     if(!g.uiBlend) {
         // Original PS, UVs, discard and alpha, including premultiplied UI.
@@ -352,7 +352,7 @@ void screenMotionUiDraw(ID3D11DeviceContext* ctx,PanelCurveDrawFn draw,unsigned 
         r.SrcBlend=D3D11_BLEND_ZERO;r.DestBlend=D3D11_BLEND_INV_SRC_ALPHA;r.BlendOp=D3D11_BLEND_OP_ADD;
         r.SrcBlendAlpha=D3D11_BLEND_ZERO;r.DestBlendAlpha=D3D11_BLEND_ONE;r.BlendOpAlpha=D3D11_BLEND_OP_ADD;r.RenderTargetWriteMask=1;
         D3D11_DEPTH_STENCIL_DESC ud{};ud.DepthFunc=D3D11_COMPARISON_ALWAYS;
-        if(FAILED(dev->CreateBlendState(&ub,&g.uiBlend)) || FAILED(dev->CreateDepthStencilState(&ud,&g.uiDs))) {g.uiBlend.Reset();return;}
+        if(FAILED(dev->CreateBlendState(&ub,&g.uiBlend)) || FAILED(dev->CreateDepthStencilState(&ud,&g.uiDs))) {g.uiBlend.Reset();return true;}
     }
     if(g.uiFrame!=g.frame) {
         const bool timed=g_gpu.phase==GpuDiagnostics::Phase::Collecting&&g_gpu.uiClear.begin(ctx,16,g_gpu.scope,g.frame);
@@ -367,7 +367,7 @@ void screenMotionUiDraw(ID3D11DeviceContext* ctx,PanelCurveDrawFn draw,unsigned 
         if(timed)g_gpu.uiClear.timer.end(ctx);
         g.uiTarget=res;g.uiFrame=g.frame;g.uiDraws=0;
     }
-    if(g.uiTarget.Get()!=res.Get())return;
+    if(g.uiTarget.Get()!=res.Get())return true;
     ID3D11RenderTargetView* saved[8]{};Ptr<ID3D11DepthStencilView> savedDepth;ctx->OMGetRenderTargets(8,saved,&savedDepth);
     vScreenSetRenderTargetsRaw(ctx,1,g.uiRtv.GetAddressOf(),nullptr);ctx->OMSetBlendState(g.uiBlend.Get(),nullptr,mask);ctx->OMSetDepthStencilState(g.uiDs.Get(),0);
     const bool timed=g_gpu.phase==GpuDiagnostics::Phase::Collecting&&g_gpu.uiDraw.begin(ctx,64,g_gpu.scope,g.frame);
@@ -380,28 +380,30 @@ void screenMotionUiDraw(ID3D11DeviceContext* ctx,PanelCurveDrawFn draw,unsigned 
     vScreenSetRenderTargetsRaw(ctx,8,saved,savedDepth.Get());ctx->OMSetBlendState(blend.Get(),factors,mask);ctx->OMSetDepthStencilState(ds.Get(),ref);
     for(auto* p:saved)if(p)p->Release();
     if(!g.uiNoted){g.uiNoted=true;Log::get().note("screen UI: original late GUI draws supply alpha coverage at %ux%u; R8 mask, no source colour copies. ScreenMotion.w=3 identifies current UI.",td.Width,td.Height);}
+    return true;
 }
-void screenMotionDraw(ID3D11DeviceContext* ctx,PanelCurveDrawFn draw,unsigned count,unsigned instances,
+bool screenMotionDraw(ID3D11DeviceContext* ctx,PanelCurveDrawFn draw,unsigned count,unsigned instances,
                       unsigned start,int base,unsigned startInstance,const float* curve) {
     // fix.ui_quality's layer took this composite (ui_layer.h): the screen is
     // drawn after the upscale, not into the pass's input, so the pass needs
     // no motion for it -- and the bound target is the layer, not the eye.
-    if(uiLayerRedirecting())return;
-    if(!screenMotionRecognize() || g.sourceFrame!=g.frame || instances!=1 || !draw || !ctx)return;
-    Ptr<ID3D11RenderTargetView> target;ctx->OMGetRenderTargets(1,&target,nullptr);if(!target)return;
-    Ptr<ID3D11Resource> res;target->GetResource(&res);Ptr<ID3D11Texture2D> texture;if(FAILED(res.As(&texture)))return;
+    if(uiLayerRedirecting())return false;
+    if(!screenMotionRecognize())return false;   // the bool both functions return: the draw is the screen's composite (the pair the recognition names), whatever they then do with it
+    if(g.sourceFrame!=g.frame || instances!=1 || !draw || !ctx)return true;
+    Ptr<ID3D11RenderTargetView> target;ctx->OMGetRenderTargets(1,&target,nullptr);if(!target)return true;
+    Ptr<ID3D11Resource> res;target->GetResource(&res);Ptr<ID3D11Texture2D> texture;if(FAILED(res.As(&texture)))return true;
     D3D11_TEXTURE2D_DESC td{};texture->GetDesc(&td);
     D3D11_VIEWPORT vp{};UINT nv=1;ctx->RSGetViewports(&nv,&vp);
-    if(nv!=1 || vp.TopLeftX!=0 || vp.TopLeftY!=0 || vp.Width!=td.Width || vp.Height!=td.Height || td.SampleDesc.Count!=1 || td.ArraySize!=1)return;
-    Ptr<ID3D11ShaderResourceView> colour;ctx->PSGetShaderResources(0,1,&colour);if(!colour)return;
-    Ptr<ID3D11Resource> cr;colour->GetResource(&cr);Ptr<ID3D11Texture2D> ct;if(FAILED(cr.As(&ct)))return;
+    if(nv!=1 || vp.TopLeftX!=0 || vp.TopLeftY!=0 || vp.Width!=td.Width || vp.Height!=td.Height || td.SampleDesc.Count!=1 || td.ArraySize!=1)return true;
+    Ptr<ID3D11ShaderResourceView> colour;ctx->PSGetShaderResources(0,1,&colour);if(!colour)return true;
+    Ptr<ID3D11Resource> cr;colour->GetResource(&cr);Ptr<ID3D11Texture2D> ct;if(FAILED(cr.As(&ct)))return true;
     D3D11_TEXTURE2D_DESC cd{},dd{};ct->GetDesc(&cd);g.depth->GetDesc(&dd);
-    if(cd.Width!=dd.Width || cd.Height!=dd.Height)return;
+    if(cd.Width!=dd.Width || cd.Height!=dd.Height)return true;
     unsigned eye=0;
-    if(g.eyes[0].frame==g.frame){if(g.eyes[0].target.Get()==res.Get())return;eye=1;}
-    Screen& e=g.eyes[eye];if(e.frame==g.frame)return;
+    if(g.eyes[0].frame==g.frame){if(g.eyes[0].target.Get()==res.Get())return true;eye=1;}
+    Screen& e=g.eyes[eye];if(e.frame==g.frame)return true;
     Ptr<ID3D11Device> dev;ctx->GetDevice(&dev);
-    if(!prepare(ctx,dev.Get(),e,td.Width,td.Height)){detail::g_screenMotionFailed=true;Log::get().note("screen motion: resource creation failed; original temporal inputs retained.");return;}
+    if(!prepare(ctx,dev.Get(),e,td.Width,td.Height)){detail::g_screenMotionFailed=true;Log::get().note("screen motion: resource creation failed; original temporal inputs retained.");return true;}
     unsigned next=1-e.write;
     bool copiedEye=false;
     {
@@ -410,9 +412,9 @@ void screenMotionDraw(ID3D11DeviceContext* ctx,PanelCurveDrawFn draw,unsigned co
         GpuCensusScope census(ctx,GpuCensusSection::FrameScreenMotion);
         copiedEye=copyCb(ctx,dev.Get(),0,e.model[next],12*16) && copyCb(ctx,dev.Get(),1,e.camera[next],274*16);
     }
-    if(!copiedEye)return;
-    Ptr<ID3D11Buffer> vb;UINT stride=0,offset=0;ctx->IAGetVertexBuffers(1,1,&vb,&stride,&offset);if(!vb || stride<8)return;
-    D3D11_BUFFER_DESC vd{};vb->GetDesc(&vd);uint64_t at=uint64_t(offset)+uint64_t(startInstance)*stride;if(at+8>vd.ByteWidth)return;
+    if(!copiedEye)return true;
+    Ptr<ID3D11Buffer> vb;UINT stride=0,offset=0;ctx->IAGetVertexBuffers(1,1,&vb,&stride,&offset);if(!vb || stride<8)return true;
+    D3D11_BUFFER_DESC vd{};vb->GetDesc(&vd);uint64_t at=uint64_t(offset)+uint64_t(startInstance)*stride;if(at+8>vd.ByteWidth)return true;
     D3D11_BOX box{UINT(at),0,0,UINT(at+8),1,1};
     {
         GpuCensusScope census(ctx,GpuCensusSection::FrameScreenMotion);
@@ -504,6 +506,7 @@ void screenMotionDraw(ID3D11DeviceContext* ctx,PanelCurveDrawFn draw,unsigned co
     }
     for(int i=0;i<4;++i)e.shape[i]=curve?curve[i]:0;
     e.frame=g.frame;e.write=next;e.target=res;
+    return true;
 }
 ID3D11ShaderResourceView* screenMotionView(int eye,unsigned w,unsigned h) {
     if(!detail::g_screenMotionEnabled || eye<0 || eye>1)return nullptr;Screen& e=g.eyes[eye];

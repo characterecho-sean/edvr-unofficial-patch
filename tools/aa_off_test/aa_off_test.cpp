@@ -18,11 +18,19 @@
 //          (with controls: each field dropped from the key, or a forbidden store, makes the sweep fail); the verify frames and the window
 //          line's worst-case length; and the source's wiring (the gather reads nothing but the key's inputs below kind 2, and every reset
 //          of the target-kind cache bumps the epoch). The step clock's f:after-ui split is in Cut E.
+//   Cut H: draw_fast_path_shadow.h (built 2026-10-27, TEMPORARY, the repeat-draw fast path's Phase 1 shadow instrument): the args class at its
+//          edges (64, 65, 240, 10000, 10001, instances 0); the refusal order over every combination of the six stages, and that a later
+//          stage's flags are not gathered once an earlier one refuses; the ticket's update rules (a non-ordinary draw invalidates, an
+//          off-screen target unsettled or a wake surface does not record, an unknown class does not record); the mismatch tally per term
+//          and the class change; the first five named; the certified set; the window line's text, its "-" cases and its worst-case length;
+//          and the source's wiring (the gate's list and the subscriber set agree term for term, the shadow sits after the flat and world-route
+//          returns, and adds no return to the draw path).
 //
 // Exit codes: 0 pass, 1 a check failed, 2 usage. --dry-run touches nothing.
 #include "../../src/common/gpu_disjoint_clock.h"
 #include "../../src/d3d11/classifier_memo.h"
 #include "../../src/d3d11/draw_fast_path.h"
+#include "../../src/d3d11/draw_fast_path_shadow.h"
 #include "../../src/d3d11/draw_step_clock.h"
 #include "../../src/d3d11/frame_span_tile.h"
 #include "../../src/d3d11/gpu_frame_timing.h"
@@ -41,6 +49,7 @@ static_assert(edvr::kFrameSpanSlots * 2u <= edvr::DisjointClock::kLeases,
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -1448,6 +1457,428 @@ void testFamilyMemoWiring() {
           "family wiring: ui_layer.cpp resets the target-kind cache in three places, bumps the epoch after the two that are not its own refresh, and in refreshLive");
 }
 
+// ---- Cut H: draw_fast_path_shadow.h, the repeat-draw fast path's Phase 1 shadow instrument (TEMPORARY, built 2026-10-27) --------------------
+namespace fsh = edvr::fastshadow;
+
+fsh::Key shadowKey(uint32_t bind, uint32_t classifier, uint32_t family) {
+    fsh::Key k;
+    k.bind = bind;
+    k.classifier = classifier;
+    k.family = family;
+    return k;
+}
+
+// The class of draw the fast path would take: kind X, a count over 64 and up to 10000 but not 240, at least one instance.
+void testShadowArgsClass() {
+    check(!fsh::argsClass('X', 64, 1) && fsh::argsClass('X', 65, 1), "shadow args class: 64 is out and 65 is in");
+    check(fsh::argsClass('X', 239, 1) && !fsh::argsClass('X', 240, 1) && fsh::argsClass('X', 241, 1), "shadow args class: 240 (night vision) alone is out");
+    check(fsh::argsClass('X', 10000, 1) && !fsh::argsClass('X', 10001, 1), "shadow args class: 10000 is in and 10001 (the sun-glare nomination) is out");
+    check(!fsh::argsClass('X', 500, 0) && fsh::argsClass('X', 500, 1) && fsh::argsClass('X', 500, 64), "shadow args class: no instances is out, one or more is in");
+    check(!fsh::argsClass('N', 500, 1) && !fsh::argsClass('D', 500, 1) && !fsh::argsClass('I', 500, 1) && !fsh::argsClass('Z', 500, 1),
+          "shadow args class: only kind X");
+    check(!fsh::argsClass('X', 0, 1) && !fsh::argsClass('X', 6, 1) && !fsh::argsClass('X', 3, 1), "shadow args class: the quads and the small draws are out");
+    unsigned in = 0;
+    for (uint32_t count = 0; count <= 12000; ++count) in += fsh::argsClass('X', count, 1) ? 1u : 0u;
+    check(in == 9935, "shadow args class: of the counts 0 to 12000 exactly 65 to 10000 except 240 are in");
+}
+
+// What each stage of the eligibility test has gathered.
+struct ShadowCalls {
+    int dyn = 0, armed = 0;
+};
+
+fsh::Verdict shadowJudge(bool ticket, bool keyEqual, bool args, uint32_t dyn, uint32_t armed, uint32_t wanting, ShadowCalls* calls) {
+    fsh::Tracker t;
+    const fsh::Key now = shadowKey(5, 6, 7);
+    t.ticket.valid = ticket;
+    t.ticket.key = keyEqual ? now : shadowKey(5, 6, 8);
+    return t.judge(now, args, wanting, [&] { ++calls->dyn; return dyn; }, [&] { ++calls->armed; return armed; });
+}
+
+// The refusal reason is the first that applies: no ticket, key moved, args class, a dynamic flag, armed, not certified.
+void testShadowRefusalOrder() {
+    unsigned wrong = 0, takes = 0;
+    for (unsigned bits = 0; bits < 64; ++bits) {
+        const bool ticket = (bits & 1) != 0, keyEqual = (bits & 2) != 0, args = (bits & 4) != 0;
+        const uint32_t dyn = (bits & 8) ? 1u << fsh::kDynWorldWants : 0u;
+        const uint32_t armed = (bits & 16) ? 1u << fsh::kArmCensus : 0u;
+        const uint32_t wanting = (bits & 32) ? fsh::kSubCensus : fsh::kSubUiDepth;   // an uncertified subscriber, or a certified one
+        ShadowCalls calls;
+        const fsh::Verdict v = shadowJudge(ticket, keyEqual, args, dyn, armed, wanting, &calls);
+        fsh::Reason want = fsh::Reason::kTake;
+        if (!ticket) want = fsh::Reason::kNoTicket;
+        else if (!keyEqual) want = fsh::Reason::kKeyMoved;
+        else if (!args) want = fsh::Reason::kArgsClass;
+        else if (dyn) want = fsh::Reason::kDynamic;
+        else if (armed) want = fsh::Reason::kArmed;
+        else if (bits & 32) want = fsh::Reason::kNotCertified;
+        wrong += v.reason != want;
+        takes += v.reason == fsh::Reason::kTake;
+    }
+    check(wrong == 0, "shadow refusal order: over all 64 combinations the reason is the first of ticket, key, args class, dynamic flag, armed, certified");
+    check(takes == 1, "shadow refusal order: a draw takes only with the ticket, the key, the args class, no flag, nothing armed and a certified set (1 of 64)");
+    ShadowCalls c;
+    shadowJudge(false, true, true, 1, 1, fsh::kSubCensus, &c);
+    check(c.dyn == 0 && c.armed == 0, "shadow refusal order: no ticket gathers nothing");
+    c = ShadowCalls();
+    shadowJudge(true, false, true, 1, 1, fsh::kSubCensus, &c);
+    check(c.dyn == 0 && c.armed == 0, "shadow refusal order: a moved key gathers nothing");
+    c = ShadowCalls();
+    shadowJudge(true, true, false, 1, 1, fsh::kSubCensus, &c);
+    check(c.dyn == 0 && c.armed == 0, "shadow refusal order: an args class miss gathers nothing");
+    c = ShadowCalls();
+    shadowJudge(true, true, true, 1, 1, fsh::kSubCensus, &c);
+    check(c.dyn == 1 && c.armed == 0, "shadow refusal order: a dynamic flag stops before the armed flags are gathered");
+    c = ShadowCalls();
+    shadowJudge(true, true, true, 0, 1, fsh::kSubCensus, &c);
+    check(c.dyn == 1 && c.armed == 1, "shadow refusal order: an armed flag is gathered after the dynamic ones are clear");
+    // Which flag: the verdict carries the masks, and the counters name the first one set.
+    fsh::Tracker t;
+    t.ticket.valid = true;
+    t.ticket.key = shadowKey(1, 1, 1);
+    ShadowCalls calls;
+    const fsh::Verdict dv = t.judge(shadowKey(1, 1, 1), true, 0, [&] { ++calls.dyn; return (1u << fsh::kDynCrispPending) | (1u << fsh::kDynProbeChecks); },
+                                    [&] { ++calls.armed; return 0u; });
+    t.finish(dv, fsh::Class::kEye, 0, true, shadowKey(1, 1, 1));
+    check(dv.reason == fsh::Reason::kDynamic && t.count.dynBy[fsh::kDynCrispPending] == 1 && t.count.dynBy[fsh::kDynProbeChecks] == 0 &&
+              t.count.refused[static_cast<size_t>(fsh::Reason::kDynamic)] == 1,
+          "shadow refusal order: a dynamic refusal is counted under its first flag");
+    t.ticket.valid = true;
+    t.ticket.key = shadowKey(1, 1, 1);
+    const fsh::Verdict av = t.judge(shadowKey(1, 1, 1), true, 0, [] { return 0u; }, [] { return (1u << fsh::kArmPixel) | (1u << fsh::kArmLoaderFrame); });
+    t.finish(av, fsh::Class::kOff, 0, true, shadowKey(1, 1, 1));
+    check(av.reason == fsh::Reason::kArmed && t.count.armedBy[fsh::kArmPixel] == 1 && t.count.armedBy[fsh::kArmLoaderFrame] == 0,
+          "shadow refusal order: an armed refusal is counted under its first flag");
+}
+
+// The certified set: a wanting subscriber outside it turns the would-take verdict off by itself; one inside it does not.
+void testShadowCertified() {
+    check(fsh::certifiedOk(0), "shadow certified: with nothing wanting, nothing acts");
+    check((fsh::kCertified & ~fsh::kSubscriberAll) == 0 && fsh::kSubscriberAll == (1u << 28) - 1, "shadow certified: the set names only the gate's 28 subscribers");
+    unsigned certified = 0, uncertified = 0;
+    for (unsigned i = 0; i < fsh::kSubscriberCount; ++i) {
+        const uint32_t bit = 1u << i;
+        (fsh::certifiedOk(bit) ? certified : uncertified) += 1;
+        check(fsh::certifiedOk(bit) == ((fsh::kCertified & bit) != 0), "shadow certified: one subscriber is certified exactly when it is in the set");
+    }
+    check(certified == 18 && uncertified == 10, "shadow certified: 18 of the 28 subscribers are certified and 10 are not");
+    check(fsh::certifiedOk(fsh::kSubFootprint) && fsh::certifiedOk(fsh::kSubLoaderPanel) && fsh::certifiedOk(fsh::kSubIntroPanel) && fsh::certifiedOk(fsh::kSubWakePulse),
+          "shadow certified: the subscribers that are wanting in the shipped VR defaults (footprint at 'auto', the loader panel, the intro movie, the wake pulse) are certified");
+    check(fsh::certifiedOk(fsh::kSubDistance) && fsh::certifiedOk(fsh::kSubPanelCurve) && fsh::certifiedOk(fsh::kSubDistance | fsh::kSubPanelCurve | fsh::kSubUiDepth),
+          "shadow certified: the panel distance and the curved screen, which a player leaves on, are certified (the args class excludes everything they act on)");
+    check(fsh::certifiedOk(fsh::kSubUiDepth | fsh::kSubParticles | fsh::kSubScrim | fsh::kSubSunglare | fsh::kSubHolo | fsh::kSubObjectProbe),
+          "shadow certified: the design's own list (interface depth, particles, scrim, sun glare, hologram, the object probe) is certified together");
+    check(!fsh::certifiedOk(fsh::kSubUiDepth | fsh::kSubCensus) && !fsh::certifiedOk(fsh::kSubCensusSkip) && !fsh::certifiedOk(fsh::kSubFssRes) &&
+              !fsh::certifiedOk(fsh::kSubBlendProbe) && !fsh::certifiedOk(fsh::kSubQuadProbe) && !fsh::certifiedOk(fsh::kSubSpaceDust),
+          "shadow certified: one uncertified subscriber among certified ones makes the set uncertified");
+    check(!fsh::certifiedOk(1u << 28) && !fsh::certifiedOk(0x80000000u), "shadow certified: a bit the set has never heard of is not certified (a new subscriber turns the path off by itself)");
+}
+
+// The ticket: written after every owner X draw, valid only for an ordinary draw in the args class that knows its class.
+void testShadowTicketRules() {
+    check(fsh::ticketValid(0, true, fsh::Class::kEye) && fsh::ticketValid(0, true, fsh::Class::kOff), "shadow ticket: an ordinary draw in the class records, eye or off-screen");
+    unsigned invalid = 0;
+    for (unsigned i = 0; i < fsh::kTermCount; ++i) invalid += !fsh::ticketValid(1u << i, true, fsh::Class::kEye) ? 1u : 0u;
+    check(invalid == fsh::kTermCount, "shadow ticket: any one of the 25 outcome terms not ordinary invalidates it");
+    check(!fsh::ticketValid(0, false, fsh::Class::kEye), "shadow ticket: a draw outside the args class does not record");
+    check(!fsh::ticketValid(0, true, fsh::Class::kUnresolved), "shadow ticket: a draw whose class is unknown does not record");
+    check(fsh::offscreenTerms(fsh::Class::kOff, true, false) == 0 && fsh::offscreenTerms(fsh::Class::kOff, false, false) == fsh::termBit(fsh::kTermUnsettled) &&
+              fsh::offscreenTerms(fsh::Class::kOff, true, true) == fsh::termBit(fsh::kTermWake) &&
+              fsh::offscreenTerms(fsh::Class::kOff, false, true) == (fsh::termBit(fsh::kTermUnsettled) | fsh::termBit(fsh::kTermWake)),
+          "shadow ticket: an off-screen draw's two terms are unsettled and wake surface");
+    check(fsh::offscreenTerms(fsh::Class::kEye, false, true) == 0 && fsh::offscreenTerms(fsh::Class::kUnresolved, false, true) == 0,
+          "shadow ticket: an eye draw, or one of unknown class, has neither off-screen term");
+    check(fsh::ticketValid(fsh::offscreenTerms(fsh::Class::kOff, true, false), true, fsh::Class::kOff) &&
+              !fsh::ticketValid(fsh::offscreenTerms(fsh::Class::kOff, false, false), true, fsh::Class::kOff) &&
+              !fsh::ticketValid(fsh::offscreenTerms(fsh::Class::kOff, true, true), true, fsh::Class::kOff) &&
+              fsh::ticketValid(fsh::offscreenTerms(fsh::Class::kEye, false, true), true, fsh::Class::kEye),
+          "shadow ticket: off-screen records only when settled and not a wake surface; an eye draw is not asked");
+    // Through the tracker: the key and class written are the draw's, on a full draw and on a would-take draw alike.
+    fsh::Tracker t;
+    const fsh::Verdict full;   // no ticket yet: a full-path draw
+    t.finish(full, fsh::Class::kEye, 0, true, shadowKey(10, 2, 3));
+    check(t.ticket.valid && t.ticket.cls == fsh::Class::kEye && fsh::sameKey(t.ticket.key, shadowKey(10, 2, 3)) && t.count.tickets == 1 &&
+              t.count.draws[0] == 1 && t.count.refused[static_cast<size_t>(fsh::Reason::kNoTicket)] == 1,
+          "shadow ticket: a full-path ordinary draw records its key and class and is counted as refused for no ticket");
+    fsh::Verdict take = t.judge(shadowKey(10, 2, 3), true, fsh::kSubUiDepth, [&] { return 0u; }, [&] { return 0u; });
+    check(take.reason == fsh::Reason::kTake, "shadow ticket: the next draw with the same key would take");
+    t.finish(take, fsh::Class::kEye, 0, true, shadowKey(10, 2, 3));
+    check(t.ticket.valid && t.count.tickets == 2 && t.count.take[0] == 1 && t.count.compared == 1 && t.count.mismatchDraws == 0,
+          "shadow ticket: a would-take ordinary draw records again, is compared, and matches");
+    take = t.judge(shadowKey(10, 2, 3), true, 0, [] { return 0u; }, [] { return 0u; });
+    t.finish(take, fsh::Class::kEye, fsh::termBit(fsh::kTermFamily), true, shadowKey(10, 2, 3));
+    check(!t.ticket.valid && t.count.tickets == 2, "shadow ticket: a non-ordinary draw invalidates the ticket and records nothing");
+    const fsh::Verdict after = t.judge(shadowKey(10, 2, 3), true, 0, [] { return 0u; }, [] { return 0u; });
+    check(after.reason == fsh::Reason::kNoTicket, "shadow ticket: the draw after a non-ordinary one has no ticket");
+    t.finish(after, fsh::Class::kOff, fsh::offscreenTerms(fsh::Class::kOff, false, false), true, shadowKey(11, 2, 3));
+    check(!t.ticket.valid, "shadow ticket: an off-screen draw whose target is unsettled does not record");
+    t.finish(after, fsh::Class::kOff, fsh::offscreenTerms(fsh::Class::kOff, true, true), true, shadowKey(11, 2, 3));
+    check(!t.ticket.valid, "shadow ticket: an off-screen draw on a wake-pulse surface does not record");
+    t.finish(after, fsh::Class::kOff, fsh::offscreenTerms(fsh::Class::kOff, true, false), true, shadowKey(11, 2, 3));
+    check(t.ticket.valid && t.ticket.cls == fsh::Class::kOff && t.ticket.key.bind == 11, "shadow ticket: a settled off-screen draw that is not a wake surface records, with its class");
+    t.finish(after, fsh::Class::kEye, 0, false, shadowKey(12, 2, 3));
+    check(!t.ticket.valid, "shadow ticket: a draw outside the args class invalidates what was there");
+    t.finish(after, fsh::Class::kUnresolved, 0, true, shadowKey(12, 2, 3));
+    check(!t.ticket.valid && t.count.draws[2] == 1, "shadow ticket: a draw of unknown class does not record, and is counted as unclassed");
+}
+
+// The comparison: on a would-take draw every term not ordinary is a mismatch, counted per term, and a class that changed is one too.
+void testShadowMismatch() {
+    fsh::Tracker t;
+    const fsh::Key key = shadowKey(20, 1, 1);
+    t.finish(fsh::Verdict(), fsh::Class::kEye, 0, true, key);   // a ticket
+    unsigned each = 0;
+    for (unsigned i = 0; i < fsh::kTermCount; ++i) {
+        fsh::Tracker u;
+        u.finish(fsh::Verdict(), fsh::Class::kEye, 0, true, key);
+        const fsh::Verdict v = u.judge(key, true, 0, [] { return 0u; }, [] { return 0u; });
+        const uint32_t mm = u.finish(v, fsh::Class::kEye, 1u << i, true, key);
+        bool only = mm == (1u << i) && u.count.mismatchDraws == 1 && u.count.compared == 1;
+        for (unsigned j = 0; j < fsh::kMismatchTermCount; ++j) only = only && u.count.mismatch[j] == (j == i ? 1u : 0u);
+        each += only ? 1u : 0u;
+    }
+    check(each == fsh::kTermCount, "shadow mismatch: each of the 25 outcome terms, alone, is counted under that term and no other");
+    const fsh::Verdict v = t.judge(key, true, 0, [] { return 0u; }, [] { return 0u; });
+    const uint32_t two = fsh::termBit(fsh::kTermVerdict) | fsh::termBit(fsh::kTermReissue);
+    check(t.finish(v, fsh::Class::kEye, two, true, key) == two && t.count.mismatchDraws == 1 && t.count.mismatch[fsh::kTermVerdict] == 1 &&
+              t.count.mismatch[fsh::kTermReissue] == 1 && t.count.mismatch[fsh::kTermFamily] == 0,
+          "shadow mismatch: a draw with two terms off counts one mismatched draw and both terms");
+    // The ticket the draw above left is invalid, so the next draw is not compared at all even if it is full of terms.
+    const fsh::Verdict none = t.judge(key, true, 0, [] { return 0u; }, [] { return 0u; });
+    check(none.reason == fsh::Reason::kNoTicket, "shadow mismatch: a draw after a non-ordinary one is not a would-take draw");
+    const uint64_t before = t.count.compared;
+    t.finish(none, fsh::Class::kEye, fsh::kOutcomeMask, true, key);
+    check(t.count.compared == before && t.count.mismatchDraws == 1, "shadow mismatch: a refused draw is never compared, whatever its terms");
+    // The class: the ticket's class against the draw's.
+    fsh::Tracker c;
+    c.finish(fsh::Verdict(), fsh::Class::kOff, 0, true, key);
+    const fsh::Verdict cv = c.judge(key, true, 0, [] { return 0u; }, [] { return 0u; });
+    const uint32_t cm = c.finish(cv, fsh::Class::kEye, 0, true, key);
+    check(cm == fsh::termBit(fsh::kTermClass) && c.count.mismatch[fsh::kTermClass] == 1 && c.count.mismatchDraws == 1,
+          "shadow mismatch: a would-take draw whose class differs from the ticket's is a class mismatch");
+    check(fsh::mismatchTerms(0, fsh::Class::kEye, fsh::Class::kEye) == 0 && fsh::mismatchTerms(fsh::termBit(fsh::kTermWake), fsh::Class::kOff, fsh::Class::kOff) == fsh::termBit(fsh::kTermWake),
+          "shadow mismatch: the same class and an ordinary outcome is no mismatch");
+    // The first five are named, once each.
+    unsigned named = 0;
+    fsh::Tracker n;
+    for (int i = 0; i < 9; ++i) named += n.takeNameSlot() ? 1u : 0u;
+    check(named == fsh::kNamedMismatches && fsh::kNamedMismatches == 5 && n.named == 5, "shadow mismatch: the first five mismatches of a session are named, and no more");
+    check(fsh::lowestBit(0) == 32 && fsh::lowestBit(1) == 0 && fsh::lowestBit(0x80) == 7, "shadow mismatch: the first flag of a mask");
+}
+
+// The text.
+void testShadowText() {
+    char buf[2048];
+    fsh::Counters none;
+    const size_t emptyLen = fsh::formatLine(buf, sizeof(buf), 5400, 1800, none);
+    const std::string empty(buf);
+    check(emptyLen == empty.size() && contains(empty, "draw fast path (shadow):") && contains(empty, "TEMPORARY") && contains(empty, "1800-frame window ending 5400, 1800 frames"),
+          "shadow text: the line names itself, the window and its frames");
+    check(contains(empty, "Would take: eye -, off-screen -") && contains(empty, "Refused by first reason (window totals): none.") && contains(empty, "Mismatches: -."),
+          "shadow text: an empty window reads '-' for the shares and the mismatches, and 'none' for refusals");
+    fsh::Counters c;
+    c.draws[0] = 1800 * 17800;
+    c.draws[1] = 1800 * 17000;
+    c.take[0] = 1800 * 16000;
+    c.take[1] = 1800 * 15000;
+    c.refused[static_cast<size_t>(fsh::Reason::kNoTicket)] = 3;
+    c.refused[static_cast<size_t>(fsh::Reason::kKeyMoved)] = 2000;
+    c.refused[static_cast<size_t>(fsh::Reason::kDynamic)] = 9;
+    c.dynBy[fsh::kDynProbeChecks] = 9;
+    c.refused[static_cast<size_t>(fsh::Reason::kArmed)] = 7;
+    c.armedBy[fsh::kArmDust] = 5;
+    c.armedBy[fsh::kArmLayout] = 2;
+    c.tickets = 123456;
+    fsh::formatLine(buf, sizeof(buf), 7200, 1800, c);
+    std::string line(buf);
+    check(contains(line, "Owner X draws a frame 34800.0 (eye 17800.0, off-screen 17000.0, unclassed 0.0)") && contains(line, "eye 89.9% (16000.0 a frame), off-screen 88.2% (15000.0 a frame)"),
+          "shadow text: the draws a frame and the would-take shares, eye and off-screen apart");
+    check(contains(line, "no ticket 3, key moved 2000, dynamic 9 (probe checks 9), armed 7 (dust 5, layout 2)") && !contains(line, "args class") && !contains(line, "not certified"),
+          "shadow text: refusals by reason, the largest first, the detail under dynamic and armed, and a zero reason left out");
+    check(contains(line, "Tickets recorded 123456.") && contains(line, "Mismatches: -."), "shadow text: the tickets, and '-' while there is nothing to compare");
+    c.compared = 1000000;
+    c.mismatchDraws = 0;
+    fsh::formatLine(buf, sizeof(buf), 7200, 1800, c);
+    line = buf;
+    check(contains(line, "Mismatches: 0 draws of 1000000 compared (none).") && !contains(line, "Mismatches: -"), "shadow text: zero mismatches over a million says so");
+    c.mismatchDraws = 3;
+    c.mismatch[fsh::kTermFamily] = 2;
+    c.mismatch[fsh::kTermWake] = 3;
+    fsh::formatLine(buf, sizeof(buf), 7200, 1800, c);
+    line = buf;
+    check(contains(line, "Mismatches: 3 draws of 1000000 compared (wake 3, family 2).") , "shadow text: mismatches by term, the largest first");
+    char terms[128];
+    fsh::formatTerms(terms, sizeof(terms), 0);
+    check(std::string(terms) == "-", "shadow text: no terms reads '-'");
+    fsh::formatTerms(terms, sizeof(terms), fsh::termBit(fsh::kTermUiDepth) | fsh::termBit(fsh::kTermClass));
+    check(std::string(terms) == "ui depth, class", "shadow text: a term mask lists its names in order");
+    // Short buffers are cut and terminated, never overrun.
+    char tiny[40];
+    memset(tiny, 'x', sizeof(tiny));
+    const size_t nt = fsh::formatLine(tiny, sizeof(tiny), 7200, 1800, c);
+    check(nt < sizeof(tiny) && tiny[nt] == '\0', "shadow text: a short buffer is cut and terminated, never overrun");
+    char one[1] = {'x'};
+    check(fsh::formatLine(one, 1, 1, 1, c) == 0 && one[0] == '\0', "shadow text: a one-byte buffer holds the terminator alone");
+    // The worst case: every counter large and every list full. The log note truncates near 1170.
+    fsh::Counters w;
+    for (int i = 0; i < 3; ++i) w.draws[i] = w.take[i] = 4000000000ull;
+    for (size_t r = 1; r < static_cast<size_t>(fsh::Reason::kCount); ++r) w.refused[r] = 4000000000ull - r;
+    for (unsigned i = 0; i < fsh::kDynCount; ++i) w.dynBy[i] = 4000000000ull - i;
+    for (unsigned i = 0; i < fsh::kArmCount; ++i) w.armedBy[i] = 4000000000ull - i;
+    for (unsigned i = 0; i < fsh::kMismatchTermCount; ++i) w.mismatch[i] = 4000000000ull - i;
+    w.tickets = w.compared = w.mismatchDraws = 4000000000ull;
+    char big[4096];
+    const size_t worst = fsh::formatLine(big, sizeof(big), 4000000000u, 4000000000u, w);
+    check(worst > 0 && worst < 1150 && std::strlen(big) == worst, "shadow text: the line is under 1150 characters at its worst (every counter at four billion, every list full)");
+    std::printf("aa_off_test: shadow line worst case %zu characters\n", worst);
+}
+
+// The source: the gate's list and the subscriber set agree term for term, the shadow is wired where it must be, and the draw path gains no return.
+std::set<std::string> callsIn(const std::string& squeezed, const std::set<std::string>& skip) {
+    std::set<std::string> out;
+    for (size_t i = 0; i < squeezed.size(); ++i) {
+        if (squeezed[i] != '(') continue;
+        size_t b = i;
+        while (b > 0 && (std::isalnum(static_cast<unsigned char>(squeezed[b - 1])) || squeezed[b - 1] == '_')) --b;
+        const std::string name = squeezed.substr(b, i - b);
+        if (!name.empty() && !skip.count(name)) out.insert(name);
+    }
+    return out;
+}
+std::set<std::string> membersIn(const std::string& squeezed, const std::string& prefix) {
+    std::set<std::string> out;
+    for (size_t at = squeezed.find(prefix); at != std::string::npos; at = squeezed.find(prefix, at + prefix.size())) {
+        size_t e = at + prefix.size();
+        while (e < squeezed.size() && (std::isalnum(static_cast<unsigned char>(squeezed[e])) || squeezed[e] == '_')) ++e;
+        out.insert(squeezed.substr(at + prefix.size(), e - at - prefix.size()));
+    }
+    return out;
+}
+
+void testShadowWiring() {
+    const std::string vscreen = slurpFile("src/d3d11/vscreen.cpp"), subs = slurpFile("src/d3d11/draw_gate_subscribers.h");
+    check(vscreen.size() > 100000 && subs.size() > 1000, "shadow wiring: vscreen.cpp and draw_gate_subscribers.h are readable from the repo root");
+    // The gate's list and the subscriber set.
+    const std::string gateHead = "bool drawGateSubscribed(State* s) {", listHead = "inline uint32_t drawGateSubscribers(const DrawGateState& st) {";
+    const size_t g0 = vscreen.find(gateHead), l0 = subs.find(listHead);
+    check(g0 != std::string::npos && l0 != std::string::npos, "shadow wiring: drawGateSubscribed and drawGateSubscribers are found");
+    if (g0 == std::string::npos || l0 == std::string::npos) return;
+    const std::string gate = squeezedCode(vscreen.substr(g0, vscreen.find("\n}\n", g0) - g0));
+    const std::string list = squeezedCode(subs.substr(l0, subs.find("\n}\n", l0) - l0));
+    // (The squeezed text keeps the return type against the name: the two function heads are the names to leave out.)
+    const std::set<std::string> gateCalls = callsIn(gate, {"booldrawGateSubscribed"});
+    const std::set<std::string> listCalls = callsIn(list, {"inlineuint32_tdrawGateSubscribers", "if"});
+    check(gateCalls.size() == 24 && gateCalls == listCalls, "shadow wiring: the gate and the subscriber set call the same 24 getters (a subscriber added to one and not the other fails here)");
+    if (gateCalls != listCalls) {
+        for (const std::string& n : gateCalls) if (!listCalls.count(n)) std::printf("aa_off_test: in the gate, not in the set: %s\n", n.c_str());
+        for (const std::string& n : listCalls) if (!gateCalls.count(n)) std::printf("aa_off_test: in the set, not in the gate: %s\n", n.c_str());
+    }
+    const std::string resampleHead = "void drawGateResample(State* s) {";
+    const size_t r0 = vscreen.find(resampleHead);
+    const std::string resample = r0 == std::string::npos ? std::string() : squeezedCode(vscreen.substr(r0, vscreen.find("\n}\n", r0) - r0));
+    const std::set<std::string> fields = membersIn(gate, "s->");
+    bool fieldsRead = fields.size() == 6;
+    for (const std::string& f : fields) fieldsRead = fieldsRead && contains(resample, "s->" + f);
+    check(fieldsRead && contains(resample, "drawGateSet(drawGateSubscribed(s));") && countOf(squeezedCode(vscreen), "drawGateSubscribers(") == 1,
+          "shadow wiring: the six State fields the gate reads are the ones drawGateResample hands the set, which is built nowhere else");
+    // Each of the 28 bits is set by exactly one term.
+    static const struct { const char* name; uint32_t bit; } kBits[] = {
+        {"kSubDistance", fsh::kSubDistance}, {"kSubCensusSkip", fsh::kSubCensusSkip}, {"kSubQuadSkip", fsh::kSubQuadSkip}, {"kSubCensusAuto", fsh::kSubCensusAuto},
+        {"kSubFssRes", fsh::kSubFssRes}, {"kSubFssPanel", fsh::kSubFssPanel}, {"kSubRemlok", fsh::kSubRemlok}, {"kSubHolo", fsh::kSubHolo},
+        {"kSubTargetSharp", fsh::kSubTargetSharp}, {"kSubUiDepth", fsh::kSubUiDepth}, {"kSubSunglare", fsh::kSubSunglare}, {"kSubCensus", fsh::kSubCensus},
+        {"kSubBlendProbe", fsh::kSubBlendProbe}, {"kSubObjectProbe", fsh::kSubObjectProbe}, {"kSubPanelCurve", fsh::kSubPanelCurve},
+        {"kSubParticles", fsh::kSubParticles}, {"kSubBackdrop", fsh::kSubBackdrop}, {"kSubScrim", fsh::kSubScrim}, {"kSubQuadProbe", fsh::kSubQuadProbe},
+        {"kSubLoaderPanel", fsh::kSubLoaderPanel}, {"kSubIntroPanel", fsh::kSubIntroPanel}, {"kSubWakePulse", fsh::kSubWakePulse},
+        {"kSubNightVision", fsh::kSubNightVision}, {"kSubSpaceDust", fsh::kSubSpaceDust}, {"kSubWitchspaceStars", fsh::kSubWitchspaceStars},
+        {"kSubDepthProbe", fsh::kSubDepthProbe}, {"kSubFootprint", fsh::kSubFootprint}, {"kSubIntroCurve", fsh::kSubIntroCurve}};
+    uint32_t all = 0;
+    bool onceEach = true, distinct = true;
+    for (const auto& b : kBits) {
+        onceEach = onceEach && countOf(list, std::string("|=") + b.name + ";") == 1;
+        distinct = distinct && (all & b.bit) == 0 && b.bit != 0;
+        all |= b.bit;
+    }
+    check(onceEach && distinct && all == fsh::kSubscriberAll && countOf(list, "|=kSub") == fsh::kSubscriberCount && sizeof(kBits) / sizeof(kBits[0]) == fsh::kSubscriberCount,
+          "shadow wiring: each of the 28 subscriber bits is distinct and set by exactly one term of the set");
+    // The thunk.
+    const std::string thunkHead = "void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,";
+    const size_t t0 = vscreen.find(thunkHead);
+    const std::string thunk = t0 == std::string::npos ? std::string() : squeezedCode(vscreen.substr(t0, vscreen.find("\n}\n", t0) - t0));
+    const size_t world = thunk.find("if(g_vrWorldInternal){"), begin = thunk.find("if(self==g_state->ownerCtx)shadowBegin(shadow,g_state,perInstance,instances);"),
+                 clock = thunk.find("DrawClockclock('X');"), verdict = thunk.find("constDrawVerdictv=beginPanelOverride(self,'X',perInstance,instances,args);"),
+                 after = thunk.find("if(shadow.live)shadowAfterVerdict(shadow,g_state,v,perInstance,instances);"), pixel = thunk.find("pixelProbeAfterEye(g_state,self,perInstance,instances,false);"),
+                 end = thunk.find("if(shadow.live)shadowEnd(shadow,perInstance,instances);");
+    check(world != std::string::npos && begin != std::string::npos && clock != std::string::npos && verdict != std::string::npos && after != std::string::npos &&
+              pixel != std::string::npos && end != std::string::npos && world < begin && begin < clock && clock < verdict && verdict < after && after < pixel && pixel < end,
+          "shadow wiring: the thunk asks before its clock starts and after the flat and world-route returns, captures right after the verdict, and counts at the end");
+    check(world != std::string::npos && end != std::string::npos && thunk.substr(0, world).find("shadow") == std::string::npos &&
+              thunk.substr(end) == "if(shadow.live)shadowEnd(shadow,perInstance,instances);",
+          "shadow wiring: nothing of the shadow is reached by the flat profile's branch, and the thunk's last statement is the shadow's end");
+    check(clock != std::string::npos && countOf(thunk.substr(clock), "return") == 1 && contains(thunk.substr(clock), "returntrue;"),
+          "shadow wiring: past the clock's start the thunk has one return, the lambda's (the shadow adds no early return to the draw path)");
+    check(countOf(squeezedCode(vscreen), "drawGateResample(s);") == 2 && countOf(squeezedCode(vscreen), "drawGateSet(drawGateSubscribed(s))") == 1,
+          "shadow wiring: the gate and the subscriber set are resampled together at both sites");
+    {
+        // Controls: a getter dropped from the set, a getter added to the gate alone, a return added past the clock, a shadow call moved ahead of the
+        // flat branch, each makes its pin fail.
+        std::string dropped = list;
+        const size_t at = dropped.find("if(introCurveWants())m|=kSubIntroCurve;");
+        if (at != std::string::npos) dropped.erase(at, std::string("if(introCurveWants())m|=kSubIntroCurve;").size());
+        const std::string widened = gate + "||newSubscriberWantsDraws()";
+        check(at != std::string::npos && callsIn(dropped, {"inlineuint32_tdrawGateSubscribers", "if"}) != gateCalls &&
+                  callsIn(widened, {"booldrawGateSubscribed"}) != listCalls,
+              "shadow wiring control: a getter dropped from the set, or added to the gate alone, fails the agreement pin");
+        const std::string extraReturn = thunk.substr(clock) + "return;";
+        const std::string moved = "shadowBegin(shadow,g_state,perInstance,instances);" + thunk;
+        check(clock != std::string::npos && world != std::string::npos && countOf(extraReturn, "return") == 2 &&
+                  moved.substr(0, moved.find("if(g_vrWorldInternal){")).find("shadow") != std::string::npos,
+              "shadow wiring control: a return added past the clock, or a shadow call ahead of the flat branch, changes what the pins read");
+    }
+    // The outcome notes sit where the design reads them.
+    const std::string code = squeezedCode(vscreen);
+    check(contains(code, "constexpruint64_tkShadowScreenCompositeVs=0x5C36AF051B98B9F1ull;") && contains(code, "||vs==kShadowScreenCompositeVs;") &&
+              contains(code, "voidfootprintEyeDraw(ID3D11DeviceContext*self,floatapplied,INTbaseVertex,UINTstartInstance){if(bindingShaderHash(BindSlot::Vs)!=0x5C36AF051B98B9F1ull"),
+          "shadow wiring: the footprint instrument is certified because it acts only at the 2D screen's composite, and that vertex shader is one of the specials");
+    {
+        // The panel distance and the curved screen are certified, not armed, because everything they act on is outside the args class (count over 64): the
+        // gates sit in the source where the certification says.
+        const size_t armedAt = vscreen.find("inline uint32_t shadowArmedFlags(const State* s) {");
+        const std::string armedBody = armedAt == std::string::npos ? std::string() : squeezedCode(vscreen.substr(armedAt, vscreen.find("\n}\n", armedAt) - armedAt));
+        const std::string intro = squeezedCode(slurpFile("src/d3d11/intro_curve.cpp")), panel = squeezedCode(slurpFile("src/d3d11/intro_panel.cpp"));
+        const std::string composite = "if(kind!='X'||count!=6||instances!=1)returnfalse;";
+        check(fsh::kArgsCountOver == 64 && !armedBody.empty() && !contains(armedBody, "panelCurveWants") && !contains(armedBody, "distanceEnabled"),
+              "shadow wiring: the armed flags leave out the panel distance and the curved screen, and the args class starts above the 64 their tests stop at");
+        check(contains(code, "srv0IsPanelSized(State*s,charkind,uint32_tcount){if(count>64)returnfalse;") &&
+                  contains(code, "if(!s->distanceEnabled)returnDrawVerdict::kNone;if(!srv0IsPanelSized(s,kind,count))returnDrawVerdict::kNone;") &&
+                  contains(code, "if(panelCurveWants()&&srv0IsPanelSized(s,kind,count)&&"),
+              "shadow wiring: srv0IsPanelSized answers false above 64 indices before any side effect, and both the distance fix and the curve's recognition sit behind it");
+        check(countOf(code, "panelCurveSubstitute(self,") == 1 && countOf(code, "curvedScreenSwallowed(self,") == 1 &&
+                  code.find("if(g_state->curveThisDraw){") != std::string::npos &&
+                  code.find("if(g_state->curveThisDraw){") < code.find("panelCurveSubstitute(self,") && code.find("panelCurveSubstitute(self,") < code.find("curvedScreenSwallowed(self,") &&
+                  countOf(code, "panelCurveSurfaceDraw(self,") == 2 &&
+                  contains(code, "if((v==DrawVerdict::kIntroPanel||g_state->introCurveThisDraw)&&owner&&panelCurveSurfaceWanted()){") &&
+                  contains(intro, composite) && contains(panel, composite),
+              "shadow wiring: the curve's substitution and its reissue are behind curveThisDraw, its surface strip behind a verdict or introCurveThisDraw, and the intro recognisers need exactly six indices");
+        const std::string layerCode = squeezedCode(slurpFile("src/d3d11/ui_layer.cpp"));
+        const size_t stampAt = layerCode.find("uint64_tuiLayerAfterUiStamp(){");
+        const std::string stamp = stampAt == std::string::npos ? std::string() : layerCode.substr(stampAt, layerCode.find("}", stampAt) - stampAt);
+        bool countersAll = !stamp.empty();
+        for (const char* n : {"w.afterWrites", "w.afterReads", "w.afterFollowed", "w.afterPostPass", "w.afterDeclined", "w.worldLeftDraws", "w.seedStale",
+                              "w.depthOnlySeedPreservedWriters", "g_afterSeenCount", "(kWatchPerFrame-g_watchBudget)"})
+            countersAll = countersAll && contains(stamp, n);
+        check(countersAll && !contains(stamp, "dsvMemo"),
+              "shadow wiring: the after-UI stamp sums the decisions and state changes (writes, reads, follows, post passes, declines, world-route losses, seed invalidations, preserved writers, "
+              "named lines, the watch budget) and not the depth-view memo's lookup counters");
+    }
+    check(contains(code, "constuint64_tafterUiStamp=kind=='X'?uiLayerAfterUiStamp():0;") && contains(code, "if(kind=='X'&&uiLayerAfterUiStamp()!=afterUiStamp)shadowNote(fastshadow::kTermAfterUi);") &&
+              contains(code, "constboolsmUi=screenMotionUiDraw(") && contains(code, "constboolsmDraw=screenMotionDraw(") && contains(code, "if(smUi||smDraw)shadowNote(fastshadow::kTermScreenMotion);") &&
+              contains(code, "shadowNote(fastshadow::kTermWeapon);") && contains(code, "if(temporalWantsScene)shadowNote(fastshadow::kTermRigid);") &&
+              contains(code, "shadowNoteProbes(eyeGeometry);") && contains(code, "if(layered)shadowNoteX(owner,kind,fastshadow::kTermLayered);") &&
+              contains(code, "if(compositeCounted)shadowNoteX(owner,kind,fastshadow::kTermCompositeCounted);") &&
+              contains(code, "if(uiFamily!=UiLayerFamily::kNone)shadowNoteX(owner,kind,fastshadow::kTermFamily);"),
+          "shadow wiring: the after-UI stamp, the screen motion, weapon, rigid-draw, census, layered, composite and family notes are where the design reads them");
+}
+
 void usage() {
     std::puts("usage: aa_off_test --self-test | --dry-run");
 }
@@ -1491,6 +1922,15 @@ int main(int argc, char** argv) {
     testFamilyMemoSweep();
     testFamilyMemoVerification();
     testFamilyMemoWiring();
+    const int checksBeforeShadow = g_checks;
+    testShadowArgsClass();
+    testShadowRefusalOrder();
+    testShadowCertified();
+    testShadowTicketRules();
+    testShadowMismatch();
+    testShadowText();
+    testShadowWiring();
+    std::printf("aa_off_test: the repeat-draw fast path's shadow instrument: %d checks\n", g_checks - checksBeforeShadow);
     std::printf("aa_off_test: %d checks, %d failed\n", g_checks, g_failed);
     return g_failed ? 1 : 0;
 }

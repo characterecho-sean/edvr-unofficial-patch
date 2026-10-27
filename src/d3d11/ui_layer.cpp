@@ -6275,6 +6275,19 @@ bool uiLayerNoteOther(ID3D11DeviceContext* ctx, uint32_t count, bool verdictForw
     return took;
 }
 
+// TEMPORARY (Phase 1 shadow instrument, built 2026-10-27; draw_fast_path_shadow.h, docs\engine-render-performance-2026-09-19.md "Desk design: the
+// repeat-draw fast path"). One number that moves when uiLayerNoteOther does something that is a decision or a change of state: the sum of the
+// counters it and seedWritersCheck bump when they decide (the after-UI writes, reads, follows, post passes, declines, world-route losses, seed
+// invalidations, the writers the seed preserved), the lines it has named, and the watch budget it has spent. Each only moves forward within one call
+// (the budget by what it spends), so the sum before and after a call is equal exactly when the call changed none of them. The depth-view memo's hit and
+// miss counters (dsvMemoHits, dsvMemoMisses) are left out on purpose: they count lookups of a memo that is a function of the Dsv0 binding, a diagnostic
+// that moves on every owner draw once the layer has taken one this frame, and not an effect. Reads only.
+uint64_t uiLayerAfterUiStamp() {
+    const Window& w = g_win;
+    return w.afterWrites + w.afterReads + w.afterFollowed + w.afterPostPass + w.afterDeclined + w.worldLeftDraws + w.seedStale +
+           w.depthOnlySeedPreservedWriters + g_afterSeenCount + (kWatchPerFrame - g_watchBudget);
+}
+
 void uiLayerSeedDrawOutcome(bool forwarded, bool substituted, bool redirected, bool known) {
     if (g_seedCensus.enabled) g_seedCensus.finishDraw(forwarded, substituted, redirected, known);
 }

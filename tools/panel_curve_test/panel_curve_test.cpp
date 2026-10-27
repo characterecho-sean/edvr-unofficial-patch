@@ -316,7 +316,7 @@ bool bindingResolveResource(void* resource, ResourceInfo* out) {
 }
 
 // The screen's per-eye motion pass (screen_motion.cpp), which the substitution issues with the strip still bound: recorded, not run.
-void screenMotionDraw(ID3D11DeviceContext* ctx, PanelCurveDrawFn draw, unsigned count, unsigned instances, unsigned start, int base,
+bool screenMotionDraw(ID3D11DeviceContext* ctx, PanelCurveDrawFn draw, unsigned count, unsigned instances, unsigned start, int base,
                       unsigned startInstance, const float* curve) {
     if (g_motionFaults) *reinterpret_cast<volatile int*>(static_cast<uintptr_t>(0x10)) = 1;   // before anything with a destructor exists
     MotionCall m;
@@ -331,6 +331,7 @@ void screenMotionDraw(ID3D11DeviceContext* ctx, PanelCurveDrawFn draw, unsigned 
     if (curve) std::memcpy(m.curve, curve, sizeof(m.curve));
     m.snap = takeSnapshot(ctx);
     g_motion.push_back(std::move(m));
+    return true;
 }
 
 }  // namespace edvr

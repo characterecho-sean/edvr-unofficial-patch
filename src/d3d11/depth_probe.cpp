@@ -26,6 +26,9 @@ namespace detail {
 bool g_depthProbeWanted = false;
 void* g_depthProbeLastDsv = nullptr;
 bool g_depthProbeEyeDrawThisFrame = false;
+// The layout census's target for the frame (-1 none), out here so depth_probe.h's depthProbeLayoutActive can read it inline. TEMPORARY (Phase 1
+// shadow instrument, built 2026-10-27; draw_fast_path_shadow.h): one of the repeat-draw fast path's armed flags.
+int g_depthProbeLayoutTarget = -1;
 }  // namespace detail
 
 namespace {
@@ -151,7 +154,7 @@ struct LayoutRecord {
     DXGI_FORMAT  colourFmt = DXGI_FORMAT_UNKNOWN;
     bool         colourSeen = false, colourNone = false;
 };
-int          g_layoutTarget = -1;          // the target sampled this frame, -1 none
+int&         g_layoutTarget = detail::g_depthProbeLayoutTarget;   // the target sampled this frame, -1 none (bound to the published copy)
 int          g_layoutRecord = -1;          // its record, -1 none
 LayoutRecord g_layoutRecords[kLayoutRecords];
 uint32_t     g_layoutRecordsFull = 0;      // frames whose target found no record free

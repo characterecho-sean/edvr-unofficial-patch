@@ -47,6 +47,10 @@ namespace edvr {
 namespace detail {
 bool g_objectProbeOn = false;
 bool g_objectProbeLedgerOn = false;
+// The instanced eye draws still to be asked for t33 this frame (refilled at the frame boundary: 0 once the pool is known and not due,
+// else kChecksPerFrame). Out here so object_probe.h's objectProbeChecksLeft can read it inline. TEMPORARY (Phase 1 shadow instrument,
+// built 2026-10-27; draw_fast_path_shadow.h): the repeat-draw fast path's dynamic flag.
+uint32_t g_objectProbeChecksLeft = 0;
 }  // namespace detail
 
 namespace {
@@ -62,7 +66,7 @@ constexpr uint32_t kAbsentFrames = 600;  // frames with the probe on and no pool
 
 bool     g_verbose = false;   // advanced.object_probe: the absent-pool note
 bool     g_wasOn = false;
-uint32_t g_checksLeft = 0;
+uint32_t& g_checksLeft = detail::g_objectProbeChecksLeft;   // bound to the published counter objectProbeChecksLeft() reads
 uint64_t g_checkMs = 0;
 ID3D11Buffer* g_pool = nullptr;      // held (AddRef) while recognised
 uint32_t g_poolBytes = 0;

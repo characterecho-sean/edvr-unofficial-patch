@@ -42,6 +42,7 @@
 #include "draw_gate.h"    // the sampled subscriber gate the draw path reads
 #include "draw_fast_path.h"   // the AA-off draw path's decisions (2026-10-13)
 #include "draw_step_clock.h"  // the draw thunks' clock, by step (built 2026-10-27, temporary)
+#include "draw_fast_path_shadow.h"   // TEMPORARY (built 2026-10-27, Phase 1): the repeat-draw fast path's shadow instrument, pure logic
 #include "../common/temporal_mode.h"  // temporalModeEnabledFor: the AA-off fast path's switch
 #include "object_probe.h"     // tier 2 stage 1: the instanced-mesh pool, read on two frames
 #include "pixel_probe.h"      // advanced.pixel_probe: who drew this pixel, during an eye dump
@@ -97,6 +98,7 @@
 #include "unmap_read_probe.h"   // what the Unmap tee reads from the mapped pointer, counted and timed (log only)
 #include "sunglare_fix.h"
 #include "graphics_bridge.h"
+#include "draw_gate_subscribers.h"   // TEMPORARY (built 2026-10-27, Phase 1): the draw gate's subscriber list as a set, for the fast path's shadow
 #include <intrin.h>
 
 namespace edvr {
@@ -1927,6 +1929,148 @@ inline void stepMark(drawstep::Step step) {
 inline bool drawPathFast(DrawVerdict v) {
     return drawFastPathTaken(DrawPathInputs{g_aaOffDraw.load(std::memory_order_relaxed), drawGateWanted(),
                                             engineVelocityLiveNow(), g_vrWorldWants, v != DrawVerdict::kNone});
+}
+
+// ---- TEMPORARY, the repeat-draw fast path's shadow instrument (Phase 1; built 2026-10-27) ---------------------------------------------------------------
+// docs\engine-render-performance-2026-09-19.md, "Desk design: the repeat-draw fast path"; the logic is draw_fast_path_shadow.h's, this is the glue that
+// gathers its inputs from the draw path. NOTHING HERE CHANGES A DRAW: every owner DrawIndexedInstanced still takes the full path, and each value read
+// below is only read. For every owner X draw the thunk asks (before its clock starts) whether the draw WOULD take the fast path; it captures the full
+// path's outcome at three points (right after beginPanelOverride, inside forwardWithVerdict, inside the lambda's owner block); and at the end of the thunk
+// it counts the draw, compares a would-take draw's outcome with the ticket, and writes the next ticket. perf_monitor prints the window at the
+// 1800-frame edge (vScreenDrawFastPathShadowLine). The per-draw cost lands in the step clock's pre, engine-velocity and tail steps and in the notes inside
+// the forward scope; that is accepted for Phase 1, whose flight counts and does not time. Removed with the instrument once Phase 2 is decided.
+struct ShadowState {
+    fastshadow::Tracker tracker;     // the ticket, the window's counters, the mismatches named so far
+    uint32_t terms = 0;              // the draw in flight's non-ordinary terms, reset at thunk entry (owner context, one thread)
+    std::atomic<uint32_t> wanting{fastshadow::kSubscriberAll};   // the draw gate's wanting set, sampled with the gate; all-ones (nothing certified) until the first sample
+};
+ShadowState g_shadow;
+
+// One draw's shadow, held by the thunk: whether it is an owner X draw, the eligibility verdict taken at entry, the args class and the class it landed in.
+struct ShadowDraw {
+    bool live = false;
+    bool argsOk = false;
+    fastshadow::Class cls = fastshadow::Class::kUnresolved;
+    fastshadow::Verdict verdict;
+};
+
+constexpr uint32_t shadowFlag(bool on, unsigned bit) { return static_cast<uint32_t>(on) << bit; }
+
+inline void shadowNote(fastshadow::Term t) { g_shadow.terms |= fastshadow::termBit(t); }
+// forwardWithVerdict serves all four draw thunks; only the owner context's DrawIndexedInstanced draw is shadowed.
+inline void shadowNoteX(bool owner, char kind, fastshadow::Term t) {
+    if (owner && kind == 'X') g_shadow.terms |= fastshadow::termBit(t);
+}
+// The camera census (vr_camera_census.h) and the footprint instrument (vscreen_footprint.h), the lambda's two probes: the route's flag is up for the
+// census, and the footprint's own flag for the other. Both are armed flags of the eligibility test, so this reads them again where the full path ran.
+inline void shadowNoteProbes(bool eyeGeometry) {
+    if (g_vrWorldWants || (eyeGeometry && vscreenFootprintWanted())) shadowNote(fastshadow::kTermCensus);
+}
+
+// The dynamic flags: plain loads of state the draw path itself raises and lowers, any one of which sends the draw to the full path.
+inline uint32_t shadowDynamicFlags() {
+    using namespace fastshadow;
+    return shadowFlag(temporalPassWantsDraw(), kDynCameraWatch) | shadowFlag(uiLayerIssueBlocked(), kDynIssueBlocked) |
+           shadowFlag(uiLayerCrispPending(), kDynCrispPending) | shadowFlag(detail::g_rollFreePending, kDynRollFree) |
+           shadowFlag(uiLayerWorldReissuePending(), kDynWorldReissue) | shadowFlag(g_vrWorldWants, kDynWorldWants) |
+           shadowFlag(objectProbeChecksLeft() != 0, kDynProbeChecks);
+}
+
+// The normally-off flags (the design's "G" list): every instrument, probe, census and experimental key the owner X draw's path asks about. The pixel
+// probe, the ledger, the marker probe, the GPU pass profile, the layout sample, the body cull and the seed diagnostics are the thunk's, beginPanelOverride's
+// and forwardWithVerdict's own asks; the rest are the gate's G subscribers (which the certified test also catches, in case one is added to the gate and
+// forgotten here). The camera census is not listed: it runs only while the VR world route's flag is up, a dynamic flag above. The footprint instrument
+// is not listed either, because with fix.vscreen_res_width = auto, the shipped default in VR, it is on in an ordinary session; it acts only at the 2D
+// screen's composite, whose vertex shader is one of the specials below. The panel distance and the curved screen are not listed: a player leaves them on,
+// and everything they act on is excluded by the args class (draw_fast_path_shadow.h's certified set says where each gate sits).
+inline uint32_t shadowArmedFlags(const State* s) {
+    using namespace fastshadow;
+    return shadowFlag(drawCensusArmed(), kArmCensus) |
+           shadowFlag(s->censusSkipCount != 0 || s->censusSkipRangeCount != 0 || s->censusSkipOffCount != 0, kArmSkip) |
+           shadowFlag(s->quadSkipArmed || quadProbeWants(), kArmQuad) | shadowFlag(s->censusAutoW != 0, kArmAuto) |
+           shadowFlag(pixelProbeWantsDraws(), kArmPixel) | shadowFlag(blendProbeWantsDraws(), kArmBlend) |
+           shadowFlag(objectProbeLedgerActive(), kArmLedger) | shadowFlag(nativeOnFootMarkerProbeLive(), kArmMarker) |
+           shadowFlag(gpuPassProfileCapturing(), kArmGpuProfile) |
+           shadowFlag(depthProbeLayoutActive(), kArmLayout) | shadowFlag(fssResActive() || fssPanelWantsDraws(), kArmFss) |
+           shadowFlag(spaceDustHidden() || witchspaceStarsHidden(), kArmDust) | shadowFlag(nativeOnFootBodyCullWanted(), kArmBodyCull) |
+           shadowFlag(uiLayerSeedDiagnostics(), kArmSeedDiag) |
+           shadowFlag(loaderPanelWants() && s->eyeDrawsLastFrame < kSceneEyeDraws, kArmLoaderFrame);
+}
+
+// The Vs-keyed specials of the design's ticket list: the celestial patch, the orbit lines, the menu panel's and the loader's composite, the on-foot HUD
+// issuers (and the two cockpit panel shaders the same probe watches), the sun pair, a camera-facing billboard, the on-foot visor; and one more, the 2D
+// screen's composite (the vertex shader of the pair screenMotionRecognize, the camera census and the footprint instrument all name), which the footprint
+// instrument's certification rests on. A vertex shader the shadow does not hold (hash 0) is unknown, and particleOnDrawMayMatch answers true for it, so
+// it counts as a special.
+constexpr uint64_t kShadowScreenCompositeVs = 0x5C36AF051B98B9F1ull;
+inline bool shadowSpecialVs(uint64_t vs, uint64_t ps, UINT count, UINT instances) {
+    return vs == kCelestialPatchVs || vs == orbital_width::kVs || vs == kUiVsPanel || vs == kUiVsLoader || nofoot::hudIssuerIndex(vs) >= 0 ||
+           vs == nofoot::f115::kCockpitPanelVs || vs == nofoot::f115::kCockpitPanelStockVs || optimizedStationIsSunPair(vs, ps) ||
+           particleOnDrawMayMatch('X', count, instances, vs) || vs == kRemlokOnFootVisorVs || vs == kShadowScreenCompositeVs;
+}
+
+inline fastshadow::Key shadowKeyNow() {
+    fastshadow::Key k;
+    k.bind = bindingEyeKeyGeneration();
+    k.classifier = uiDepthClassifierEpoch();
+    k.family = uiLayerFamilyEpoch();
+    return k;
+}
+
+// At thunk entry, for an owner X draw, before the clock starts: would this draw take the fast path?
+__declspec(noinline) void shadowBegin(ShadowDraw& d, const State* s, UINT count, UINT instances) {
+    d.live = true;
+    g_shadow.terms = 0;
+    d.argsOk = fastshadow::argsClass('X', count, instances);
+    d.verdict = g_shadow.tracker.judge(shadowKeyNow(), d.argsOk, g_shadow.wanting.load(std::memory_order_relaxed), [] { return shadowDynamicFlags(); },
+                                       [s] { return shadowArmedFlags(s); });
+}
+
+// Right after beginPanelOverride returned: the verdict, every per-draw output it leaves, the class the draw landed in, the Vs-keyed specials, and the
+// two off-screen terms. The class is the target's own test (rtv0Eye) when that test is current for this binding; beginPanelOverride returns at the draw
+// gate before it reads the target, so with the gate closed the memo may be stale and the draw's class is unknown.
+__declspec(noinline) void shadowAfterVerdict(ShadowDraw& d, State* s, DrawVerdict v, UINT count, UINT instances) {
+    using namespace fastshadow;
+    const uint64_t vs = bindingShaderHash(BindSlot::Vs), ps = bindingShaderHash(BindSlot::Ps);
+    d.cls = s->rtv0EyeGen != bindingGeneration(BindSlot::Rtv0) ? Class::kUnresolved : s->rtv0Eye ? Class::kEye : Class::kOff;
+    uint32_t t = shadowFlag(v != DrawVerdict::kNone, kTermVerdict) | shadowFlag(t_uiDepthThisDraw, kTermUiDepth) | shadowFlag(t_compositeThisDraw, kTermComposite) |
+                 shadowFlag(t_holoDepthThisDraw, kTermHoloDepth) | shadowFlag(s->curveThisDraw, kTermCurve) | shadowFlag(s->introCurveThisDraw, kTermIntroCurve) |
+                 shadowFlag(s->glareClamp != 0, kTermGlareClamp) | shadowFlag(detail::g_uiDepthPlanetPending, kTermPlanet) |
+                 shadowFlag(detail::g_uiDepthPlanetSolarPending, kTermSolar) | shadowFlag(uiDepthWorldScreenPending(), kTermWorldScreen) |
+                 shadowFlag(uiLayerCrispPending(), kTermCrisp) | shadowFlag(detail::g_rollFreePending, kTermRollFree) |
+                 shadowFlag(shadowSpecialVs(vs, ps, count, instances), kTermSpecialVs);
+    if (d.cls == Class::kOff) {
+        bool wake = false;
+        if (wakePulseWantsDraws()) {
+            const ResourceInfo* wp = rtv0Resolved(s);
+            wake = wp && wp->isTexture2D && wakePulseSurfaceShape(wp->a, wp->b);
+        }
+        t |= offscreenTerms(Class::kOff, uiDepthOffscreenTargetSettled(), wake);
+    }
+    g_shadow.terms |= t;
+}
+
+// The end of the thunk: count the draw, compare it when it would have taken the fast path, write the next ticket. A mismatch among the session's first
+// five is named, with the shaders and the terms that differ.
+__declspec(noinline) void shadowEnd(ShadowDraw& d, UINT count, UINT instances) {
+    const uint32_t mm = g_shadow.tracker.finish(d.verdict, d.cls, g_shadow.terms, d.argsOk, shadowKeyNow());
+    if (!mm || !g_shadow.tracker.takeNameSlot()) return;
+    char terms[256];
+    fastshadow::formatTerms(terms, sizeof(terms), mm);
+    Log::get().note("draw fast path (shadow): mismatch %u of %u named. A would-take owner X draw (%s, %u indices, %u instances, vs %016llX, ps %016llX) "
+                    "differed from its ticket in: %s.",
+                    g_shadow.tracker.named, fastshadow::kNamedMismatches, fastshadow::className(d.cls), static_cast<unsigned>(count),
+                    static_cast<unsigned>(instances), static_cast<unsigned long long>(bindingShaderHash(BindSlot::Vs)),
+                    static_cast<unsigned long long>(bindingShaderHash(BindSlot::Ps)), terms);
+}
+
+// The gate's answer, resampled (once a frame and on a live settings change, with drawGateSet): the gate's own bool, and the wanting set beside it.
+void drawGateResample(State* s) {
+    drawGateSet(drawGateSubscribed(s));
+    g_shadow.wanting.store(drawGateSubscribers(DrawGateState{s->distanceEnabled,
+                                                             s->censusSkipCount != 0 || s->censusSkipRangeCount != 0 || s->censusSkipOffCount != 0,
+                                                             s->quadSkipArmed, s->censusAutoW != 0}),
+                           std::memory_order_relaxed);
 }
 
 DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
@@ -4326,6 +4470,7 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
         compositeCounted = uiDepthScope.composite;
         compositeFamily = uiFamily;
         barsFamily = uiFamily == UiLayerFamily::kSupercruiseBars;
+        if (uiFamily != UiLayerFamily::kNone) shadowNoteX(owner, kind, fastshadow::kTermFamily);   // TEMPORARY (the fast path's shadow instrument): the family was not none
         if (uiFamily != UiLayerFamily::kNone) {
             uiLayer = uiLayerDecide(self, static_cast<int>(uiFamily), uiLayerVerdictForwards(v),
                                     g_state->curveThisDraw);
@@ -4373,8 +4518,10 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
         // uiLayerWorldScreenHeld() returns; it is written at the frame boundary only).
         const bool afterExcluded = uiDepthIsExcluded(bindingShaderHash(BindSlot::Vs));
         const bool afterPanelSized = !afterExcluded && uiLayerWorldScreenHeld() && srv0IsPanelSized(g_state, kind, count);
+        const uint64_t afterUiStamp = kind == 'X' ? uiLayerAfterUiStamp() : 0;   // TEMPORARY (shadow instrument): the counters the call keeps, before it
         uiLayer = uiLayerNoteOther(self, count, uiLayerVerdictForwards(v), g_state->curveThisDraw,
                                    afterExcluded, afterPanelSized, instances, static_cast<uint32_t>(v), kind);
+        if (kind == 'X' && uiLayerAfterUiStamp() != afterUiStamp) shadowNote(fastshadow::kTermAfterUi);   // TEMPORARY (shadow instrument): and after it
         // A draw the retry took is the layer's, not the route's to re-issue (the held screen's exclusion never
         // lets it take a 2D screen composite; this keeps "taken AND re-issued" impossible by construction).
         if (uiLayer && worldReissue.on) {
@@ -4388,6 +4535,7 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     // into the layer or left in the game's frame, and a left one is named by its
     // shaders and the family the rule gave it (none when it named nothing -- the
     // case this exists for). The shaders' hashes are read for the left ones only.
+    if (compositeCounted) shadowNoteX(owner, kind, fastshadow::kTermCompositeCounted);   // TEMPORARY (the fast path's shadow instrument): the census runs
     if (compositeCounted) {
         if (uiLayer) {
             uiLayerNoteCompositeTaken();
@@ -4467,6 +4615,7 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     // Planet patch motion (celestial_motion.h): a colour-pass patch draw's constants are read from the CPU shadow here, before the game's
     // own issue -- no GPU copy, no reissue. celestialMotionLive() first, one load; then the VS hash the draw path already holds.
     if (owner && celestialMotionLive() && bindingShaderHash(BindSlot::Vs) == kCelestialPatchVs) celestialMotionNoteDraw(self);
+    if (owner && kind == 'X' && celestialMotionLive() && bindingShaderHash(BindSlot::Vs) == kCelestialPatchVs) shadowNote(fastshadow::kTermCelestialOrbit);   // TEMPORARY (the fast path's shadow instrument): the match above fired
     if (effectCaptureScope.ctx) objectProbePanelDrawBegin(self);
     // The orbit lines (orbital_width.h; fix.ui_quality): the game's own draw of their vertex shader into an eye target is
     // issued with the half-width scaled by the panel patch's factor -- a patched copy of that shader and a private b13
@@ -4475,6 +4624,7 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     // when the factor is below 1; one hash compare for any other draw.
     const bool orbitScaled = owner && g_state->rtv0Eye && bindingShaderHash(BindSlot::Vs) == orbital_width::kVs &&
                              orbitalWidthBegin(self, instances, args.startInstance);
+    if (owner && kind == 'X' && g_state->rtv0Eye && bindingShaderHash(BindSlot::Vs) == orbital_width::kVs) shadowNote(fastshadow::kTermCelestialOrbit);   // TEMPORARY (the fast path's shadow instrument): the orbit lines' match fired
     // The supercruise bars (supercruise_bars.h): the layer decided to take the draw, so its issue will be made through the private
     // geometry shader. The tent is one render pixel of the line the game drew, so the game's own viewport is read here, BEFORE the
     // layer's bracket below remaps it to the layer's.
@@ -4553,6 +4703,11 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     // eye's 8-bit layer, which the door's composite shows. AFTER the game's
     // own issue, so the picture is stock whether or not the re-issue runs;
     // one bool load for the ordinary draw.
+    // TEMPORARY (the fast path's shadow instrument): the layer was engaged for the game's draw (kTermLayered), and a reissue block runs after it -- the
+    // layer's second issues, the crisp tonemap's, the world route's (kTermReissue). The coverage, hologram, planet and world-screen reissues below are each
+    // behind a flag that is its own term (kTermUiDepth, kTermHoloDepth, kTermPlanet, kTermWorldScreen), noted where beginPanelOverride left it.
+    if (layered) shadowNoteX(owner, kind, fastshadow::kTermLayered);
+    if (originalIssued && (layered || uiLayerCrispPending() || worldReissue.on)) shadowNoteX(owner, kind, fastshadow::kTermReissue);
     if (originalIssued && uiLayerCrispPending()) {
         crispHudTonemapReissue(self, kind, count, instances, args);
     }
@@ -5450,6 +5605,10 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
     if (self == g_state->ownerCtx) { temporalPassCountDraw(); if (temporalPassWantsDraw()) temporalPassNoteDraw(self); }
     noteStaleForward(kSlotDrawIndexedInstanced, reinterpret_cast<const void*>(g_state->realDrawIndexedInstanced),
                      "DrawIndexedInstanced");
+    // TEMPORARY (the repeat-draw fast path's shadow instrument, built 2026-10-27; see shadowBegin): would this owner draw take the fast path? Asked before the
+    // clock starts, so the draw hook CPU lines leave it out. Nothing below changes for the answer.
+    ShadowDraw shadow;
+    if (self == g_state->ownerCtx) shadowBegin(shadow, g_state, perInstance, instances);
     DrawClock clock('X');
     // The rect deriver's capture runs INSIDE beginPanelOverride (the
     // chrome tracker's matched branch), so its draw-args stash must land
@@ -5471,6 +5630,7 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
     clock.mark(drawstep::kPre);
     const DrawVerdict v = beginPanelOverride(self, 'X', perInstance, instances, args);
     clock.mark(drawstep::kVRest);
+    if (shadow.live) shadowAfterVerdict(shadow, g_state, v, perInstance, instances);   // TEMPORARY (shadow instrument): the verdict and the per-draw outputs, read only
     // F18 (TEMPORARY, fix.native_on_foot_body_cull; native_on_foot.h): the local player's third-person torso drawn with the game's
     // rasterizer state cloned at another CullMode, and the game's put back after forwardWithVerdict. A wrapper, not a DrawVerdict: a verdict
     // would take the draw off engine-record velocity's verdict-free path just below and change what this test measures. Matched here, right
@@ -5505,6 +5665,7 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
         // The weapon's temporal-AA motion vectors, from the pool the draw just read.
         if (self == g_state->ownerCtx && !g_state->rtv0Eye &&
             weaponMotionWants(bindingShaderHash(BindSlot::Vs))) {
+            shadowNote(fastshadow::kTermWeapon);   // TEMPORARY (shadow instrument): the weapon pass wanted this draw
             GpuCensusScope census(self, GpuCensusSection::FrameWeaponMotion);
             weaponMotionDraw(self, g_state->realDrawIndexedInstanced, perInstance, instances,
                              startIndex, baseVertex, startInstance);
@@ -5540,6 +5701,7 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
             }
             const bool temporalWantsScene = recognisedScene &&
                 temporalPassWantsRigidDraw(temporalEye);
+            if (temporalWantsScene) shadowNote(fastshadow::kTermRigid);   // TEMPORARY (shadow instrument): the rigid-draw query said yes
             // At most one temporal VS-b1 query per identified eye/frame. A null
             // binding is still recorded by the temporal provenance as a seen
             // draw with no mapped write, rather than silently retried later.
@@ -5556,6 +5718,7 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
             // profile with the key auto; with the distance override applied to THIS draw its constants carry the scaled distance.
             if (eyeGeometry && vscreenFootprintWanted())
                 footprintEyeDraw(self, v == DrawVerdict::kPanel ? g_state->distanceScale : 1.0f, baseVertex, startInstance);
+            shadowNoteProbes(eyeGeometry);   // TEMPORARY (shadow instrument): the census or the footprint ran
             clock.mark(drawstep::kPostRest);   // the camera census and the footprint end here
             // The VR world route re-issues this 2D screen composite into the eye's layer right after the game's
             // own issue (ui_layer.h), and the door runs layer-only for the eye: the per-eye motion reissues below
@@ -5573,8 +5736,9 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
                 // work now, not this call site: most calls into either
                 // function return above, at screenMotionLive()'s own flags
                 // or g.sourceFrame!=g.frame, before issuing anything.
-                screenMotionUiDraw(self,g_state->realDrawIndexedInstanced,perInstance,instances,startIndex,baseVertex,startInstance);
-                screenMotionDraw(self,g_state->realDrawIndexedInstanced,perInstance,instances,startIndex,baseVertex,startInstance);
+                const bool smUi = screenMotionUiDraw(self,g_state->realDrawIndexedInstanced,perInstance,instances,startIndex,baseVertex,startInstance);
+                const bool smDraw = screenMotionDraw(self,g_state->realDrawIndexedInstanced,perInstance,instances,startIndex,baseVertex,startInstance);
+                if (smUi || smDraw) shadowNote(fastshadow::kTermScreenMotion);   // TEMPORARY (shadow instrument): the draw is one of the screen motion's
             }
             clock.mark(drawstep::kPostScreen);   // the screen motion's recognition and passes end here
         }
@@ -5591,6 +5755,7 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
         introCurveEndDraw();
     }
     if (self == g_state->ownerCtx) pixelProbeAfterEye(g_state, self, perInstance, instances, false);
+    if (shadow.live) shadowEnd(shadow, perInstance, instances);   // TEMPORARY (shadow instrument): count the draw, compare a would-take draw with its ticket, write the next ticket
 }
 
 // Read panel_distance_index, refusing anything that cannot be a float index.
@@ -6152,6 +6317,16 @@ size_t vScreenUiFamilyCacheLine(char* out, size_t cap, uint32_t endFrame) {
     return n;
 }
 
+// TEMPORARY (built 2026-10-27, draw_fast_path_shadow.h): the repeat-draw fast path's shadow window for the perf monitor's 1800-frame edge, written
+// every window, quiet or not; then the counters start again. The ticket and the mismatches named so far are the session's and stay.
+size_t vScreenDrawFastPathShadowLine(char* out, size_t cap, uint32_t endFrame) {
+    fastshadow::Tracker& t = g_shadow.tracker;
+    const size_t n = fastshadow::formatLine(out, cap, endFrame, endFrame > t.windowStart ? endFrame - t.windowStart : 0, t.count);
+    t.count.reset();
+    t.windowStart = endFrame;
+    return n;
+}
+
 // The one refresh. vScreenRefreshConfig runs it behind the reload's gate; vScreenForceRefreshConfig runs it with the gate taken away.
 // The configure calls stay in this one body: the reload gate is the only difference between the two.
 static void vScreenRefreshConfigBody(bool forced) {
@@ -6241,7 +6416,7 @@ static void vScreenRefreshConfigBody(bool forced) {
     // knowable now, and waiting for the next frame boundary would cost the
     // newly enabled fix its first frame of draws. A refresh runs this only on a change -- the reloadIfChanged early return in
     // vScreenRefreshConfig sees to that. A forced refresh (a profile switch) runs it with no change to wait for.
-    drawGateSet(drawGateSubscribed(s));
+    drawGateResample(s);
     // The AA-off fast path's switch (draw_fast_path.h): the same reading as uiLayerConfigure's VR gate.
     g_aaOffDraw.store(!temporalModeEnabledFor(cfg.getString("fix.temporal_aa", "off"), false), std::memory_order_relaxed);
 }
@@ -7209,7 +7384,7 @@ void vScreenFrameBoundary() {
     // getters once a frame instead of forty per draw; draw_gate.h holds the
     // reasoning, and the arming paths that can fire between two of these
     // raise the gate themselves rather than waiting for the next one.
-    drawGateSet(drawGateSubscribed(s));
+    drawGateResample(s);
 
     // The steady-state breadcrumb. Rate-limits itself to one line every
     // log.breadcrumb_heartbeat_seconds (30 by default, 0 disables it); this
