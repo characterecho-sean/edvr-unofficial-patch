@@ -3,6 +3,7 @@
 #include "../common/comfort_fade.h"
 #include "../common/left_eye_share.h"
 #include "../common/config.h"
+#include "../common/world_scale.h"
 #include "../common/frame_flag.h"
 #include "../common/log.h"
 #include "../common/openxr_resolution_entries.h"
@@ -63,6 +64,12 @@ std::atomic<uint32_t> g_nowPoseMode{0};   // F40/F42: fix.now_pose (0 next, 1 re
 float g_rotCal[2] = {};   // F61 (TEMPORARY): the rotation calibration's seated yaw and pitch (radians), version 9 output only (guarded by g_mutex)
 float g_adsPitch = 0.0f;  // F62b (TEMPORARY): the ADS head-aim's seated pitch (radians), version 10 output only (guarded by g_mutex)
 uint32_t g_positionRecentre = 0;  // F123: the position-only recentre asked of the runtime (0: none; else the request's serial), version 10 output only (guarded by g_mutex)
+// World scale (visual.world_scale): the key as last read, with the configuration generation it was read under (guarded by g_mutex: every reader is inside beginFrame),
+// and the percent the last answer handed the runtime, which a version 11 ask carries and anything older cannot (100: nothing applied).
+uint32_t g_worldScaleKey = edvr::kWorldScaleDefault;
+uint32_t g_worldScaleKeyGeneration = 0;
+bool g_worldScaleKeyRead = false;
+std::atomic<uint32_t> g_worldScaleGiven{edvr::kWorldScaleDefault};
 // F62b: the latest version 3 input's head in natural LOCAL (guarded by g_mutex).
 float g_localHead[12] = {};
 bool g_localHeadValid = false;
@@ -93,6 +100,23 @@ bool finiteValues(const float* values, size_t count) {
         if (!std::isfinite(values[i])) return false;
     }
     return true;
+}
+
+// The key, read when the configuration changes (Config::generation()) and not on every frame. The number is read before the value, so a reload that lands
+// between the two costs one more read and never leaves a stale one. Said in the log when it changes; a run that never leaves 100 says nothing.
+uint32_t worldScaleKey() {
+    static_assert(edvr::kWorldScaleMin == 50 && edvr::kWorldScaleMax == 200 && edvr::kWorldScaleDefault == 100,
+                  "the literals in the read below are these, written as numbers for tools/gen_settings_schema.py");
+    edvr::Config& cfg = edvr::Config::get();
+    const uint32_t generation = cfg.generation();
+    if (g_worldScaleKeyRead && generation == g_worldScaleKeyGeneration) return g_worldScaleKey;
+    const uint32_t was = g_worldScaleKey;
+    g_worldScaleKeyRead = true;
+    g_worldScaleKeyGeneration = generation;
+    g_worldScaleKey = edvr::worldScaleClamp(static_cast<uint32_t>(cfg.getIntInRange("visual.world_scale", 100, 50, 200)));
+    if (g_worldScaleKey != was)
+        edvr::Log::get().note("world scale: %u%% (live, visual.world_scale; %u%% before)", g_worldScaleKey, was);
+    return g_worldScaleKey;
 }
 
 bool sameDevice(ID3D11Device* expected, void* candidate) {
@@ -276,9 +300,10 @@ HRESULT WINAPI beginFrame(void* context, const EdvrNativeFrameInput* input,
     // F22: version 6 is the struct through the look's three words (after the fade); version 5 is the struct through the fade, which a version 5 caller has.
     // F33: version 8 is the whole struct (the eye alignment after the look); version 6 is now the struct through lookYawReset.
     // F62b: version 10 is the version 9 shape (a ladder step: input version 3, and the ADS pitch in reservedYaw).
+    // World scale: version 11 is the version 10 shape (a ladder step: the same input version 3), and its answer carries worldScalePercent.
     const bool wantsEyeAlign = output &&
         (output->version == EDVR_NATIVE_FRAME_VERSION_8 || output->version == EDVR_NATIVE_FRAME_VERSION_9 ||
-         output->version == EDVR_NATIVE_FRAME_VERSION_10) &&
+         output->version == EDVR_NATIVE_FRAME_VERSION_10 || output->version == EDVR_NATIVE_FRAME_VERSION_11) &&
         output->size == sizeof(*output);
     const bool wantsLook = output && !wantsEyeAlign &&
         output->version == EDVR_NATIVE_FRAME_VERSION_6 &&
@@ -326,9 +351,9 @@ HRESULT WINAPI beginFrame(void* context, const EdvrNativeFrameInput* input,
                                   static_cast<unsigned>(input->size), static_cast<unsigned>(sizeof(*input)));
         }
     }
-    // F62b: a version 3 input rides only the version 10 ask (and a version 10 ask only a version 3 input), so a mismatched pair is refused and
-    // the runtime steps down to 9 (input version 2).
-    const bool v10Pair = output && output->version == EDVR_NATIVE_FRAME_VERSION_10;
+    // F62b: a version 3 input rides only the version 10 and 11 asks (and those asks only a version 3 input), so a mismatched pair is refused and
+    // the runtime steps down (to 10 with a version 11 ask, to 9, input version 2, with a version 10 one).
+    const bool v10Pair = output && (output->version == EDVR_NATIVE_FRAME_VERSION_10 || output->version == EDVR_NATIVE_FRAME_VERSION_11);
     if (!state || state != g_current || !state->active || !input || !output ||
         (!inputV1 && !inputV2 && !inputV3) || (v10Pair != inputV3) ||
         (!wantsEyeAlign && !wantsLook && !wantsFade && !wantsChannel && !wantsPacing && !wantsTrim && !legacy) ||
@@ -344,7 +369,8 @@ HRESULT WINAPI beginFrame(void* context, const EdvrNativeFrameInput* input,
                  : wantsPacing ? EDVR_NATIVE_FRAME_OUTPUT_SIZE_3
                  : wantsTrim  ? EDVR_NATIVE_FRAME_OUTPUT_SIZE_2
                               : EDVR_NATIVE_FRAME_OUTPUT_SIZE_1;
-    result.version = wantsEyeAlign ? (output->version == EDVR_NATIVE_FRAME_VERSION_10 ? EDVR_NATIVE_FRAME_VERSION_10
+    result.version = wantsEyeAlign ? (output->version == EDVR_NATIVE_FRAME_VERSION_11 ? EDVR_NATIVE_FRAME_VERSION_11
+                                      : output->version == EDVR_NATIVE_FRAME_VERSION_10 ? EDVR_NATIVE_FRAME_VERSION_10
                                       : output->version == EDVR_NATIVE_FRAME_VERSION_9 ? EDVR_NATIVE_FRAME_VERSION_9 : EDVR_NATIVE_FRAME_VERSION_8)
                     : wantsLook ? EDVR_NATIVE_FRAME_VERSION_6
                     : wantsFade ? EDVR_NATIVE_FRAME_VERSION_5
@@ -373,14 +399,22 @@ HRESULT WINAPI beginFrame(void* context, const EdvrNativeFrameInput* input,
         // F61 (TEMPORARY): the rotation calibration's seated yaw and pitch in the retired offset slots (zero while its key is off).
         result.reservedOffset[0] = g_rotCal[0];
         result.reservedOffset[1] = g_rotCal[1];
-        // F62b (TEMPORARY): the ADS head-aim's seated pitch, in a version 10 answer only (zero while the feature is off).
-        if (output->version == EDVR_NATIVE_FRAME_VERSION_10) result.reservedYaw = g_adsPitch;
-        // F123: the position-only recentre asked of the runtime, in a version 10 answer only (0 while none stands).
-        if (output->version == EDVR_NATIVE_FRAME_VERSION_10) result.positionRecentre = g_positionRecentre;
-        // F106: the left eye's share of the right eye's image (fix.native_on_foot_ads_sight_both_eyes), in a version 10 answer only: 0 unless the frame thread
-        // published a fresh level.
-        if (output->version == EDVR_NATIVE_FRAME_VERSION_10)
+        // F62b (TEMPORARY): the ADS head-aim's seated pitch, in a version 10 and 11 answer only (zero while the feature is off).
+        if (output->version >= EDVR_NATIVE_FRAME_VERSION_10) result.reservedYaw = g_adsPitch;
+        // F123: the position-only recentre asked of the runtime, in a version 10 and 11 answer only (0 while none stands).
+        if (output->version >= EDVR_NATIVE_FRAME_VERSION_10) result.positionRecentre = g_positionRecentre;
+        // F106: the left eye's share of the right eye's image (fix.native_on_foot_ads_sight_both_eyes), in a version 10 and 11 answer only: 0 unless the frame
+        // thread published a fresh level.
+        if (output->version >= EDVR_NATIVE_FRAME_VERSION_10)
             result.leftEyeShare = edvr::eyeshare::toBits(edvr::eyeshare::read(GetTickCount64()));
+    }
+    // World scale (visual.world_scale), in a version 11 answer only. What the runtime is told is what the gates on Elite's eye pair measure against
+    // (nativeFrameWorldScale), so a shape that cannot carry it leaves 100: the runtime of that age applies none.
+    {
+        const bool carried = wantsEyeAlign && output->version == EDVR_NATIVE_FRAME_VERSION_11;
+        const uint32_t percent = carried ? worldScaleKey() : edvr::kWorldScaleDefault;
+        if (carried) result.worldScalePercent = percent;
+        g_worldScaleGiven.store(percent, std::memory_order_relaxed);
     }
     // The old Explorer Cam's headset offset (headOffset, yawRadians,
     // offsetEnabled, offsetGamePoses) is retired: those slots stay zero, so a
@@ -590,6 +624,7 @@ HRESULT WINAPI close(void* context) {
     state->began = false;
     state->latched = false;
     if (g_current == state) g_current = nullptr;
+    g_worldScaleGiven.store(edvr::kWorldScaleDefault, std::memory_order_relaxed);   // no runtime is applying any scale now
     edvr::Log::get().note(
         "native frame: close begins=%u latches=%u invalidations=%u.",
         state->beginCount, state->latchCount, state->invalidationCount);
@@ -655,6 +690,8 @@ void nativeFrameSetPositionRecentre(uint32_t serial) {
     std::lock_guard<std::mutex> lock(g_mutex);
     g_positionRecentre = serial;
 }
+// World scale: the percent the last beginFrame handed the runtime.
+uint32_t nativeFrameWorldScale() { return g_worldScaleGiven.load(std::memory_order_relaxed); }
 // F115: the on-foot words as set, for the boarding reset's read-back.
 void nativeFrameOnFootWords(EdvrNativeOnFootWords& out) {
     std::lock_guard<std::mutex> lock(g_mutex);

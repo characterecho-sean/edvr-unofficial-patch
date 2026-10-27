@@ -1648,9 +1648,9 @@ void buildPages() {
             s.pages.push_back(p);
         }
         {
-            // Visual (2026-10-22): the [visual] options, for everyone. The rows are the table in menu_flat_rows.h, kept in edvr.ini order whatever
-            // page their `menu` token names: Intro movie stays on VR's Fixes page, which has no Visual page, and Star glow's `menu visual` is the
-            // page only this panel builds.
+            // Visual (2026-10-22): the [visual] options that do something in flat, for everyone. The rows are the table in menu_flat_rows.h, kept in edvr.ini
+            // order whatever page their `menu` token names: Intro movie is `menu visual`, which VR's Visual page lists too, and Star glow is `menu flat_visual`, a
+            // page VR builds none of. The generator fails the build for a row the table lists that the schema has no row for.
             Page p;
             p.name = kFlatTabNames[1];
             for (int i = 0; i < kRowDefCount; ++i) {
@@ -1701,6 +1701,16 @@ void buildPages() {
         Page p;
         p.name = "Fixes";
         addSettingRows(p, MenuTier::Fix, "fixes", true);
+        firstSelectable(p);
+        s.pages.push_back(p);
+    }
+    {
+        // Visual (2026-10-27): how the world looks through the headset, apart from the fixes. The rows are the `menu visual` rows of edvr.ini, in file order, under the ini's own
+        // heading blocks (World scale, Intro movie, Intro background picture, Screen curve). The flat panel's Visual tab is the same name and another list (kFlatVisualRows):
+        // a row VR shows and flat does not is `menu visual`, one flat shows and VR does not is `menu flat_visual`.
+        Page p;
+        p.name = "Visual";
+        addSettingRows(p, MenuTier::Fix, "visual", true);
         firstSelectable(p);
         s.pages.push_back(p);
     }

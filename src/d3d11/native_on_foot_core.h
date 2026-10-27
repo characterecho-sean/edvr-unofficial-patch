@@ -2835,13 +2835,15 @@ constexpr double kAdsSightClampM = 0.40;   // F70: was 0.12; the target eye poin
 constexpr double kAdsSightIpdFallbackM = 0.063;   // metres, the left eye to the right when the per-eye offsets are not known
 constexpr double kAdsSightIpdMinM = 0.04, kAdsSightIpdMaxM = 0.09;
 // The IPD from the eyes' head-space x offsets (right less left, as a distance: the model's direction is R^); *measured false on the fallback.
-inline double adsSightIpd(bool haveLeft, double leftEyeX, bool haveRight, double rightEyeX, bool* measured) noexcept {
+// eyeScale is Elite's eye pair against the headset's (world scale, common/world_scale.h worldScaleEyeFactor of the percent the runtime was told; 1 at 100): the
+// offsets are the pair Elite is given, so the 4..9 cm window and the 6.3 cm fallback are those of that pair.
+inline double adsSightIpd(bool haveLeft, double leftEyeX, bool haveRight, double rightEyeX, bool* measured, double eyeScale = 1.0) noexcept {
     double ipd = -1.0;
     if (haveLeft && haveRight && std::isfinite(leftEyeX) && std::isfinite(rightEyeX)) ipd = std::fabs(rightEyeX - leftEyeX);
     else if (haveRight && std::isfinite(rightEyeX)) ipd = 2.0 * std::fabs(rightEyeX);
-    const bool ok = ipd >= kAdsSightIpdMinM && ipd <= kAdsSightIpdMaxM;
+    const bool ok = ipd >= kAdsSightIpdMinM * eyeScale && ipd <= kAdsSightIpdMaxM * eyeScale;
     if (measured) *measured = ok;
-    return ok ? ipd : kAdsSightIpdFallbackM;
+    return ok ? ipd : kAdsSightIpdFallbackM * eyeScale;
 }
 // Where the model put the right eye: the job camera (the left eye) or the solved left eye (its rows this frame's, the right's not), each plus the IPD along R^.
 enum AdsModelSource : uint8_t { kAdsModelFromCamera = 0, kAdsModelFromLeftEye = 1, kAdsModelSources = 2 };

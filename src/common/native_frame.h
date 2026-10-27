@@ -42,6 +42,10 @@
 // (the head in natural LOCAL below) with the version 9 output shape, and a version 10 answer carries the ADS head-aim's seated pitch in the
 // retired slot reservedYaw. A provider that refuses 10 steps the runtime down to 9 (input version 2, no ADS pitch). Same hand-copied-DLLs rule.
 #define EDVR_NATIVE_FRAME_VERSION_10 10u
+// Version 11 (world scale, visual.world_scale) is a ladder step like 10: the same shapes (input version 3, the whole output struct), and a version 11 answer carries
+// the percent the runtime moves the eyes Elite is told about by, in worldScalePercent (the last of the retired guard's 21 words; layout and size unchanged). A
+// provider that refuses 11 steps the runtime down to 10, which reads 100 (Elite's own scale). Same hand-copied-DLLs rule.
+#define EDVR_NATIVE_FRAME_VERSION_11 11u
 #define EDVR_NATIVE_FRAME_INPUT_VERSION_1 1u
 #define EDVR_NATIVE_FRAME_INPUT_VERSION_2 2u
 #define EDVR_NATIVE_FRAME_INPUT_VERSION_3 3u
@@ -151,7 +155,11 @@ struct EdvrNativeFrameOutput {
     // look compensation included) exactly, and never stores it as the seat. A runtime from before F123 reads a word it does not look at; a provider from before it
     // leaves it zero. Offset, size and type unchanged; the other 20 words are the retired guard's.
     uint32_t positionRecentre;
-    uint32_t reservedTerrainGuard[20];
+    uint32_t reservedTerrainGuard[19];
+    // World scale (visual.world_scale, docs\world-scale.md), in a version 11 answer only: the percent the runtime moves the two eye origins Elite is told about by,
+    // about their midpoint (50 to 200; 100 is Elite's own scale). Taken from the last of the retired guard's 21 words; offset, size and type unchanged. A provider
+    // from before it leaves it zero and a runtime from before it never looks, and a zero or an answer older than 11 reads 100 (native_frame_client.h).
+    uint32_t worldScalePercent;
     uint32_t sceneReady;
     uint32_t transitionEnabled;
     uint32_t resubmitEnabled;
@@ -299,11 +307,17 @@ void nativeFrameOnFootWords(EdvrNativeOnFootWords& out);
 // F31: the latest frame's render head and "now" head (false until a beginFrame has been received). Read on the game thread.
 bool nativeFrameNowPose(EdvrNativeNowPose& out);
 
+// World scale: the percent the last beginFrame told the runtime to move the eyes Elite is told about by (50 to 200), or 100 when no beginFrame has answered a
+// version 11 ask (no runtime, or one that asks less, which applies none). What Elite's eye pair measures is the located separation times
+// worldScaleEyeFactor() of this (common/world_scale.h), so every gate on that pair takes its bounds from it. Lock-free.
+uint32_t nativeFrameWorldScale();
+
 // F101: what the runtime sends for each step of its version ladder (native_frame_client.h), here so the provider's rig drives the same shapes.
-// The output a version asks with: the whole struct for 8 to 10, each older version's own prefix below.
+// The output a version asks with: the whole struct for 8 to 11, each older version's own prefix below.
 inline EdvrNativeFrameOutput nativeFrameAsk(uint32_t version) {
     if (version >= EDVR_NATIVE_FRAME_VERSION_8)
-        return EdvrNativeFrameOutput{sizeof(EdvrNativeFrameOutput), version >= EDVR_NATIVE_FRAME_VERSION_10 ? EDVR_NATIVE_FRAME_VERSION_10 :
+        return EdvrNativeFrameOutput{sizeof(EdvrNativeFrameOutput), version >= EDVR_NATIVE_FRAME_VERSION_11 ? EDVR_NATIVE_FRAME_VERSION_11 :
+                                     version >= EDVR_NATIVE_FRAME_VERSION_10 ? EDVR_NATIVE_FRAME_VERSION_10 :
                                      version >= EDVR_NATIVE_FRAME_VERSION_9 ? EDVR_NATIVE_FRAME_VERSION_9 : EDVR_NATIVE_FRAME_VERSION_8};
     if (version >= EDVR_NATIVE_FRAME_VERSION_6) return EdvrNativeFrameOutput{EDVR_NATIVE_FRAME_OUTPUT_SIZE_6, EDVR_NATIVE_FRAME_VERSION_6};
     if (version == EDVR_NATIVE_FRAME_VERSION_5) return EdvrNativeFrameOutput{EDVR_NATIVE_FRAME_OUTPUT_SIZE_5, EDVR_NATIVE_FRAME_VERSION_5};
@@ -312,7 +326,7 @@ inline EdvrNativeFrameOutput nativeFrameAsk(uint32_t version) {
     if (version == EDVR_NATIVE_FRAME_VERSION_2) return EdvrNativeFrameOutput{EDVR_NATIVE_FRAME_OUTPUT_SIZE_2, EDVR_NATIVE_FRAME_VERSION_2};
     return EdvrNativeFrameOutput{EDVR_NATIVE_FRAME_OUTPUT_SIZE_1, EDVR_NATIVE_FRAME_VERSION_1};
 }
-// The input shape that rides an ask of that version: input version 3 (the whole struct) with 10, version 2 (the words through ringCount) with 7 to
+// The input shape that rides an ask of that version: input version 3 (the whole struct) with 10 and 11, version 2 (the words through ringCount) with 7 to
 // 9, version 1 (the words through valid, padded as the released struct is) below 7. Only size and version change: a provider reads no word past
 // the shape it was told.
 inline void nativeFrameInputShape(uint32_t version, EdvrNativeFrameInput& in) {

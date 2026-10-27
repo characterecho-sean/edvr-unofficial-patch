@@ -86,6 +86,7 @@ struct State {
   Settings currentSettings{}, pendingSettings{};
   float renderedJitter[2][2]{},previousJitter[2][2]{};
   uint64_t treatedCount=0,projectionReads=0,missingProjections=0,jitterFrames=0,resets=0;
+  uint32_t separationNotes=0;   // history resets said in the log for a moved eye separation (kSeparationNotes at most)
   bool flippedNoted=false,engagedNoted=false;
   FloorDecision floor[2]{}, floorNoted{};
   uint64_t floorCuts=0;
@@ -153,6 +154,16 @@ void eyeWorld(const float* head,const float* eye,float r[9],float t[3]) {
   for(int i=0;i<3;++i)for(int j=0;j<3;++j){r[i*3+j]=0;for(int k=0;k<3;++k)r[i*3+j]+=head[i*4+k]*eye[k*4+j];}
   for(int i=0;i<3;++i)t[i]=head[i*4+3]+head[i*4]*eye[3]+head[i*4+1]*eye[7]+head[i*4+2]*eye[11];
 }
+// The distance between two eyeToHead origins, metres.
+float eyeSeparationOf(const float* a,const float* b) {
+  const float dx=a[3]-b[3],dy=a[7]-b[7],dz=a[11]-b[11];
+  return std::sqrt(dx*dx+dy*dy+dz*dz);
+}
+// World scale (common/world_scale.h) moves the eye origins Elite is given, so a history made at one scale is not the same view at another: its motion vectors
+// would read the move of the eyes as motion of the scene. A step of the scale's slider is 1% of the separation, 0.6 mm at 63 mm; the tolerance is under that and
+// above the float noise of two locates. A runtime that moves the separation itself (an IPD it tracks) is a break in the same way.
+constexpr float kSeparationToleranceM=1.0e-4f;
+constexpr uint32_t kSeparationNotes=8;
 void eyeDelta(const History& h,const State& s,const float* eyePrev,const float* eyeNow,float d[9],float t[3]) {
   float rp[9],rn[9],tp[3],tn[3],rt[9];eyeWorld(h.head,eyePrev,rp,tp);eyeWorld(s.head,eyeNow,rn,tn);
   edvr::temporalTranspose3(rp,rt);edvr::temporalMul3(rt,rn,d);float dt[3]={tn[0]-tp[0],tn[1]-tp[1],tn[2]-tp[2]};edvr::temporalApply3(rt,dt,t);
@@ -486,9 +497,14 @@ HRESULT WINAPI treat(void* p,uint64_t seq,uint32_t eye,ID3D11Texture2D* source,c
       }
     }
   }
+  const float separationWas=eyeSeparationOf(s->history[eye].eye,s->history[eye].otherEye),separationNow=eyeSeparationOf(s->eyes[eye],s->eyes[1-eye]);
+  const bool separationMoved=s->history[eye].valid&&std::fabs(separationNow-separationWas)>kSeparationToleranceM;
+  if(separationMoved&&eye==0&&s->separationNotes++<kSeparationNotes)
+    edvr::Log::get().note("native temporal: history reset, the eye separation moved from %.1f mm to %.1f mm (the world scale, or an IPD the runtime changed); sequence %llu.",
+        1000.0*separationWas,1000.0*separationNow,(unsigned long long)seq);
   const bool resetHistory=!s->history[eye].valid||s->history[eye].reference!=s->reference||s->continuity[eye]+1!=seq||
       s->history[eye].width!=w||s->history[eye].height!=h||s->history[eye].format!=d.Format||
-      s->history[eye].outputWidth!=outW||s->history[eye].outputHeight!=outH;
+      s->history[eye].outputWidth!=outW||s->history[eye].outputHeight!=outH||separationMoved;
   float delta[9]={1,0,0,0,1,0,0,0,1},trans[3]={},transOther[3]={}; const float* pd=nullptr;const float* pt=nullptr;const float* pto=nullptr;
   float headDegrees=0;
   if(!resetHistory){

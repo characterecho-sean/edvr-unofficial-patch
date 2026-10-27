@@ -25,6 +25,7 @@
 #include "../common/native_frame.h"   // F22: nativeFrameSetLookYaw, the look-to-aim compensation total the runtime asks for each frame
 #include "../common/log.h"
 #include "../common/runtime_profile.h"
+#include "../common/world_scale.h"   // worldScaleEyeFactor: the gates on Elite's eye pair move with the world scale
 #include "../common/frame_flag.h"     // F115: hmdResetPressState, hmdResetPressTick (the player's recentre presses, for the boarding's seat line)
 #include "../common/seat_context.h"   // F115: decodeHmdPress, hmdPressStatusName
 #include "binding_shadow.h"   // bindingShaderHash: the HUD issuer probe's pixel shader
@@ -10214,7 +10215,9 @@ WeaponViewBias weaponViewBiasForTick(double rightCm, uint64_t now) noexcept {
     if (frames[0] != frames[1]) { out.state = kWeaponViewNoScene; return out; }
     const double solvedRight[3] = {eyes[1][0] - eyes[0][0], eyes[1][1] - eyes[0][1], eyes[1][2] - eyes[0][2]};
     const double ipd = nofoot::ikLen(solvedRight);
-    if (!(ipd >= 0.05 && ipd <= 0.08)) { out.state = kWeaponViewBadAxes; return out; }
+    // The rows are Elite's: its eye pair is the headset's moved by the world scale, so the 5 to 8 cm window is that of the pair the runtime was told to draw.
+    const double eyeScale = worldScaleEyeFactor(nativeFrameWorldScale());
+    if (!(ipd >= 0.05 * eyeScale && ipd <= 0.08 * eyeScale)) { out.state = kWeaponViewBadAxes; return out; }
     if (!nofoot::weaponViewOffsetSeated(rightM, localRight, out.seated) || !nofoot::weaponViewOffsetWorld(rightM, solvedRight, out.world)) {
         out.state = kWeaponViewBadAxes;
         out.seated[0] = out.seated[1] = out.seated[2] = 0.0;
@@ -10964,7 +10967,8 @@ void adsSightTick(uint64_t now, double dt, const EyeSample& s) noexcept {
             for (size_t k = 0; k < 9; ++k) rows[k] = static_cast<double>(s.rows[k]);
             float exL = 0.0f, exR = 0.0f;
             const bool haveExL = temporalPassEyeOffsetX(0, &exL), haveExR = temporalPassEyeOffsetX(1, &exR);
-            g_adsSightIpd = nofoot::adsSightIpd(haveExL, static_cast<double>(exL), haveExR, static_cast<double>(exR), &g_adsSightIpdMeasured);
+            g_adsSightIpd = nofoot::adsSightIpd(haveExL, static_cast<double>(exL), haveExR, static_cast<double>(exR), &g_adsSightIpdMeasured,
+                                                worldScaleEyeFactor(nativeFrameWorldScale()));
             double rHat[3] = {};
             bool flipped = false;
             // F66e: the rendered eyes. Each eye's position is solved from its scene rows (clip x, y, w vanish there); when the right eye's rows are
@@ -15216,7 +15220,7 @@ int pinCycloUpdate(uint64_t now) noexcept {
     bool read[2] = {};
     for (int e = 0; e < 2; ++e) read[e] = eyeRowsRead(e, &fr[e], rows[e], o[e]);
     nofoot::f126::Cyclo c;
-    const nofoot::f126::Pair pair = nofoot::f126::cycloFromRows(read, fr, rows, o, g_f44Frame.load(std::memory_order_relaxed), &c);
+    const nofoot::f126::Pair pair = nofoot::f126::cycloFromRows(read, fr, rows, o, g_f44Frame.load(std::memory_order_relaxed), &c, worldScaleEyeFactor(nativeFrameWorldScale()));
     g_f126PairCalls.fetch_add(1, std::memory_order_relaxed);
     if (pair == nofoot::f126::Pair::kUse) {
         for (int i = 0; i < 3; ++i) {

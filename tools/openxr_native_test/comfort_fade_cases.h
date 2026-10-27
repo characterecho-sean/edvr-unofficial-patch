@@ -6,13 +6,14 @@
 #include "../../src/common/left_eye_share.h"
 #include <cmath>
 #include <limits>
+#include <utility>
 
 namespace edvr::openxr::test {
 namespace comfort_fixture {
 // A provider of a given age: it knows the shapes up to maxVersion, refuses any other with E_INVALIDARG and consumes nothing when it does, and writes the fade
 // level only into a struct that has the slot. `scribble` makes it write the slot anyway (a provider that claims less than it writes).
 struct Provider {
-  uint32_t maxVersion=8;float fade=1.0f;unsigned calls=0;bool scribble=false;HRESULT fail=S_OK;
+  uint32_t maxVersion=8;float fade=1.0f;unsigned calls=0;bool scribble=false;HRESULT fail=S_OK;uint32_t worldScale=130;
   HRESULT answer(EdvrNativeFrameOutput& o) {
     ++calls;
     if(fail!=S_OK)return fail;
@@ -26,6 +27,7 @@ struct Provider {
     if(o.version>=8) {o.eyeAlign[0]=0.1f;o.eyeAlign[1]=0.2f;o.eyeAlign[2]=-0.3f;o.eyeAlignSerial=5;}   // F33: the body-align translation rides the version 8 shape only
     if(o.version>=10||scribble)o.reservedYaw=0.4f;   // F62b: the ADS head-aim's pitch rides a version 10 answer only
     if(o.version>=10||scribble)o.leftEyeShare=0x3F19999Au;   // F106: the left eye's share (0.6f's bits; F89's darkening before) rides a version 10 answer only
+    if(o.version>=11||scribble)o.worldScalePercent=worldScale;   // world scale: rides a version 11 answer only
     return S_OK;
   }
 };
@@ -91,7 +93,8 @@ template<class Check> void runComfortFadeCases(Check&& check) {
   {   // F62b: version 10 (input version 3) carries the ADS head-aim's pitch; a version 9 d3d11.dll refuses 10 and the client reads no pitch
     Provider p;p.maxVersion=10;uint32_t v=10;EdvrNativeFrameOutput out{};
     check(ladder(p,v,out)==S_OK&&out.version==10&&v==10&&p.calls==1&&out.reservedYaw==0.4f&&Client::ask(10).version==10&&Client::ask(10).size==sizeof(EdvrNativeFrameOutput)&&
-          Client::ask(11).version==10,"F62b: a version 10 d3d11.dll: one call, the ADS pitch arrives; 10 and above asks 10, the whole struct");
+          Client::ask(10).version==10&&Client::ask(11).version==11&&Client::ask(11).size==sizeof(EdvrNativeFrameOutput)&&Client::ask(12).version==11,
+          "F62b: a version 10 d3d11.dll: one call, the ADS pitch arrives; 10 asks 10, 11 and above asks 11, both the whole struct");
     Provider old;old.maxVersion=9;old.scribble=true;uint32_t v9=10;EdvrNativeFrameOutput out9{};
     check(ladder(old,v9,out9)==S_OK&&out9.version==9&&v9==9&&old.calls==2&&out9.reservedYaw==0.0f&&out9.eyeAlign[0]==0.1f,
           "F62b: a version 9 d3d11.dll: the 10 ask is refused, 9 is answered, and a pitch it scribbles into reservedYaw is not believed");
@@ -102,6 +105,25 @@ template<class Check> void runComfortFadeCases(Check&& check) {
     check(ladder(failing,vf,outf)==E_FAIL&&outf.leftEyeShare==0u,"F106: a provider that fails the frame leaves no left eye share behind");
     check(edvr::eyeshare::fromBits(0x7FC00000u)==0.0f&&edvr::eyeshare::fromBits(0xBF800000u)==0.0f&&edvr::eyeshare::fromBits(0x40000000u)==1.0f,
           "F106: a slot that is NaN or negative reads 0 and one above 1 reads 1: never shared by accident");
+  }
+  {   // World scale: a version 11 answer carries the percent; every older answer, a failed frame and a word out of range read Elite's own scale or the nearest end of the range
+    Provider p;p.maxVersion=11;uint32_t v=11;EdvrNativeFrameOutput out{};
+    check(ladder(p,v,out)==S_OK&&out.version==11&&v==11&&p.calls==1&&out.worldScalePercent==130&&out.reservedYaw==0.4f&&out.leftEyeShare==0x3F19999Au,
+          "world scale: a version 11 d3d11.dll: one call, the percent arrives beside the version 10 words");
+    Provider old;old.maxVersion=10;old.scribble=true;uint32_t v10=11;EdvrNativeFrameOutput out10{};
+    check(ladder(old,v10,out10)==S_OK&&out10.version==10&&v10==10&&old.calls==2&&out10.worldScalePercent==100&&out10.reservedYaw==0.4f,
+          "world scale: a version 10 d3d11.dll refuses the 11 ask, is answered at 10, and a percent it scribbles into the slot is not believed: 100 (Elite's own scale)");
+    Provider older;older.maxVersion=8;older.scribble=true;uint32_t v8=11;EdvrNativeFrameOutput out8{};
+    check(ladder(older,v8,out8)==S_OK&&out8.version==8&&out8.worldScalePercent==100,"...an older d3d11.dll likewise reads 100");
+    Provider failing;failing.fail=E_FAIL;uint32_t vf=11;EdvrNativeFrameOutput outf{};outf.worldScalePercent=130;
+    check(ladder(failing,vf,outf)==E_FAIL&&outf.worldScalePercent==100&&vf==11,"world scale: a provider that fails the frame leaves no percent behind, and is not mistaken for an old one");
+    bool held=true;
+    for(const auto& c:{std::pair<uint32_t,uint32_t>{0,100},{49,50},{50,50},{200,200},{201,200},{4000000000u,200}}) {
+      Provider q;q.maxVersion=11;q.worldScale=c.first;uint32_t vq=11;EdvrNativeFrameOutput outq{};
+      held=held&&ladder(q,vq,outq)==S_OK&&outq.worldScalePercent==c.second;
+    }
+    check(held,"world scale: a version 11 word of 0 reads 100 and one outside 50..200 is held to the nearest end");
+    check(Client::ask(11).worldScalePercent==0,"world scale: a fresh ask carries no percent");
   }
 }
 } // namespace edvr::openxr::test

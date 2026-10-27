@@ -278,6 +278,9 @@ present. Then it lists the build-tagged lines, `(F85b)`, `(F87h, TEMPORARY)`, `(
 tags that have no rule (--health-all lists every tag), so a feature added with no rule here still shows. --since and --until (HH:MM[:SS], the log's own clock,
 across midnight when since is after until) cut the log to a window. Exit 0 when no family is NEVER APPLIED or UNPARSED, 3 when one is NEVER APPLIED (a script can
 gate on it), 4 when a rule is UNPARSED and none is NEVER APPLIED, 2 for a wrong --expect-build. The rules are the rows of HEALTH_RULES; a new feature adds a row.
+The one rule that is not read from the graphics log is world scale (visual.world_scale): its lines are the runtime's, so --health also reads the paired runtime log
+(the one --runtime-file names, else the edvr_openxr_*.log that opened nearest) for it, whole: --since and --until do not cut it. It says OK when the runtime latched a
+value and Elite read its eye transform at that value afterwards, NEVER APPLIED when it did not (a change that needs a restart), and nothing at all when the value stayed 100.
 
 Exit 0 when a log was read, 1 when none was found (or --camera-census found no
 census line, or --vscreen-fit no auto-fit line, or --flat-upscale no flat line, or
@@ -10345,11 +10348,16 @@ H_F89_ADS = "ads transition (F89)"
 H_F106 = "ADS sight in both eyes (F106)"
 H_ANCHOR = "prompt anchor (F87p)"
 H_F125 = "log diet (F125)"
+H_WORLD = "world scale"
+H_WORLD_LABEL = "world_scale:"
+# The runtime's two lines (src\common\world_scale.h worldScaleChangeLine, worldScaleReadLine): a latched value with the two eye separations, and Elite's first read at one.
+H_WORLD_CHANGE = r"world_scale: (?P<pct>\d+)% located_icd=(?P<located>[\d.]+)mm elite_icd=(?P<elite>[\d.]+)mm$"
+H_WORLD_READ = r"world_scale: elite read eye transform at (?P<pct>\d+)% \(geometry sequence (?P<seq>\d+)\)$"
 H_F125_LABEL = "native on foot log (F125)"
 H_F125_RE = re.compile(r"native on foot log \(F125\): detail (?P<detail>on|off), summary window (?P<wl>\d+) s")
 # Rules whose absence says nothing about a feature, so a log without their lines does not list them as not present: every log written before F125 has no F125
 # line, and its report stays as it was.
-HEALTH_QUIET_WHEN_ABSENT = frozenset((H_F125,))
+HEALTH_QUIET_WHEN_ABSENT = frozenset((H_F125, H_WORLD))   # world scale writes nothing while the value stays 100
 
 # ---- F125: summary windows (the on-foot log diet) ----
 # By default an on-foot summary line covers a window of 10 s, 1 s with log.on_foot_detail = on, and 1 to 10 s when a window is flushed early (a held-item change,
@@ -12682,6 +12690,26 @@ def _hj_f125_diet(rows, ctx):
     return ("OK", "detail changed %d time(s) in the window, %s at its end: the detail-only lines are in the log only where it was on" % (changes, seq[-1]["detail"]))
 
 
+def _hj_world_scale(rows, ctx):
+    """World scale (src\\common\\world_scale.h): ran is a change line (the runtime latched a value: its located eye separation and the one Elite is told), applied is an
+    eye-transform line (Elite's first read of the eye transform at a value the last read did not carry) AFTER that change line, at the same value. NEVER APPLIED when
+    a latched value was never read afterwards: Elite took the transform once, or from a cache, and the setting needs a restart. No line at all is the value staying
+    at 100, which is nothing to judge (None); a read with no change line before it means the runtime log lost the change line (PARTIAL)."""
+    changes, reads = rows.get("change", []), rows.get("read", [])
+    if not changes and not reads:
+        return None
+    steps = " -> ".join("%s%%" % r["pct"] for r in changes)
+    if not changes:
+        return ("PARTIAL", "Elite read its eye transform at %s but the runtime log has no latch line (a log cut short?)" % ", ".join("%s%%" % r["pct"] for r in reads))
+    last = changes[-1]
+    unread = [c["pct"] for c in changes if not any(r["pct"] == c["pct"] and r["_order"] > c["_order"] for r in reads)]
+    text = "latched %s; at %s%% the headset's eyes are %s mm apart and Elite's %s mm" % (steps, last["pct"], last["located"], last["elite"])
+    if unread:
+        return ("NEVER APPLIED", text + "; Elite never read its eye transform at %s after the runtime latched it (it took the transform once, or from a cache: the "
+                                        "setting needs a restart)" % ", ".join("%s%%" % p for p in unread))
+    return ("OK", text + "; Elite read its eye transform at each value (%d read line(s), the last at geometry sequence %s)" % (len(reads), reads[-1]["seq"]))
+
+
 def _hrule(name, tags, labels, kinds, judge, needs_detail=False):
     return HealthRule(name, tuple(tags), tuple(labels), tuple((k, re.compile(rx)) for k, rx in kinds), judge, needs_detail)
 
@@ -13170,7 +13198,12 @@ HEALTH_RULES = (
         ("verified", r"HUD hide \(F116\): the game's hide counters are read \(logged only\)"),
         ("notread", r"HUD hide \(F116\): the game's hide counters are NOT read -- (?P<why>.*?) \(the hide on the terminal footprint is unaffected\)"),
         ("refread", r"HUD hide \(F116\): a counter read refused -- (?P<why>.*?) \(said once per reason\)"),
-    ), _hj_f116_hud_hide),)
+    ), _hj_f116_hud_hide),
+    # World scale: lines of the runtime log, which carry no build tag (health_scan_runtime reads them); no graphics-log tag dispatches to this rule.
+    _hrule(H_WORLD, (), (H_WORLD_LABEL,), (
+        ("change", H_WORLD_CHANGE),
+        ("read", H_WORLD_READ),
+    ), _hj_world_scale),)
 HEALTH_BY_TAG = {}
 for _rule in HEALTH_RULES:
     for _tag in _rule.tags:
@@ -13282,6 +13315,39 @@ def health_scan(text, since=None, until=None):
     return {"census": census, "rows": rows, "unparsed": unparsed, "tagged": tagged, "first": first, "last": last}
 
 
+def health_scan_runtime(scan, text):
+    """The world scale rule's rows from the runtime log's text, into health_scan's result: its two lines are written by the runtime (edvr_openxr_*.log), whose
+    lines carry no build tag and a UTC clock, so the graphics log's scan does not see them and the window of --since/--until does not cut them. A line that carries the
+    label and matches neither pattern is counted as unparsed, as health_scan counts the graphics log's."""
+    rule = next(r for r in HEALTH_RULES if r.name == H_WORLD)
+    rows = scan["rows"][H_WORLD]
+    for order, raw in enumerate(text.splitlines()):
+        if H_WORLD_LABEL not in raw:
+            continue
+        for kind, rx in rule.kinds:
+            g = rx.search(raw)
+            if g:
+                rows.setdefault(kind, []).append(dict(g.groupdict(), _order=order, _t=None))
+                break
+        else:
+            u = scan["unparsed"][H_WORLD]
+            u[0] += 1
+            u[1] = u[1] or raw.strip()[:160]
+
+
+def health_runtime_text(gfx_path, native_dirs, runtime_file):
+    """(text, exit code) for the runtime log the world scale rule reads: --runtime-file's, else the one that opened nearest the graphics log, read without a word when it
+    is found and when it is not (a flight with no runtime log has no world scale lines to judge). The exit code is 1 only for a --runtime-file that is not there."""
+    if runtime_file:
+        rt_path = os.path.abspath(runtime_file)
+        if not os.path.isfile(rt_path):
+            print("[edvr] no such runtime log: %s" % rt_path)
+            return None, 1
+    else:
+        rt_path, _ = pair_runtime_log(gfx_path, native_dirs)
+    return (read_text(rt_path) if rt_path else None), None
+
+
 def health_verdicts(scan, rules=None):
     """[(rule, status, detail)] in table order for the rules with lines in the window, the names of the rules with none, and (F125) the names of the rules not
     judged because they read only the detailed on-foot log's lines and the log says it was off. rules: HEALTH_RULES unless given (the self-test's variants)."""
@@ -13339,8 +13405,8 @@ def health_report(scan, window="", rules=None):
     return lines, (3 if bad else 4 if drift else 0)
 
 
-def print_health(text, args):
-    """The --health report. Returns the process exit code."""
+def print_health(text, args, runtime_text=None):
+    """The --health report. runtime_text: the paired runtime log, for the world scale rule. Returns the process exit code."""
     try:
         since = parse_health_time(args.since) if args.since else None
         until = parse_health_time(args.until, end=True) if args.until else None
@@ -13348,6 +13414,8 @@ def print_health(text, args):
         print("[edvr] bad --since/--until time %s (use HH:MM or HH:MM:SS)" % e)
         return 1
     scan = health_scan(text, since, until)
+    if runtime_text:
+        health_scan_runtime(scan, runtime_text)
     scan["all"] = bool(args.health_all)
     window = ""
     if args.since or args.until:
@@ -13499,7 +13567,7 @@ def main(argv=None):
                     help="post-flight feature health: one line per build-tagged feature family (weapon readout size and pistol "
                          "readout F90, weapon readout part roles, ADS press fit and ADS item gate F91, rifle ADS readout F92, readout swap F93a, weapon UI pin F85b, reticle "
                          "depth F85c, view height hold F87h, weapon eye offset F88, ADS transition F89, ADS sight in both eyes F106, marker fix, "
-                         "prompt anchor and label F87p, the label's designed offset F93c and its own-anchor move F94b, the head in the shadows F95c, the marker tee and the pose hook's CPU F100, the in-world screens' coverage F105, the terminal hold F108, the HUD hide F116) saying OK, "
+                         "prompt anchor and label F87p, the label's designed offset F93c and its own-anchor move F94b, the head in the shadows F95c, the marker tee and the pose hook's CPU F100, the in-world screens' coverage F105, the terminal hold F108, the HUD hide F116, and world scale, read from the paired runtime log) saying OK, "
                          "PARTIAL, NEVER APPLIED "
                          "(its own lines show it did nothing), IDLE or UNPARSED with the counters that decide it, then a census of "
                          "every `(F<n>...)` tagged line (count, first and last time, leading label) for the features with no rule. "
@@ -13517,7 +13585,7 @@ def main(argv=None):
     ap.add_argument("--runtime-file", default=None,
                     help="with --tally periodic or --freezes, read exactly this "
                          "runtime (edvr_openxr_*.log) log instead of pairing the "
-                         "one that opened nearest the graphics log")
+                         "one that opened nearest the graphics log; --health reads it too, for its world scale rule")
     ap.add_argument("--infer-runs", action="store_true",
                     help="with --tally periodic, also place the runs nobody "
                          "logged where a fixed cadence says they ran (only for "
@@ -13629,7 +13697,10 @@ def main(argv=None):
         return 0
 
     if args.health:
-        return print_health(text, args)
+        runtime_text, rc = health_runtime_text(path, native_dirs, args.runtime_file)
+        if rc is not None:
+            return rc
+        return print_health(text, args, runtime_text)
     if args.vscreen_fit:
         return print_vscreen_fit(text)
     if args.flat_upscale:
@@ -16186,6 +16257,62 @@ def self_test_health():
         help_text = " ".join(out.getvalue().split())
         if "--health" not in help_text or "NEVER APPLIED" not in help_text or "--health-all" not in help_text or "--health" not in (__doc__ or ""):
             print("health: --help or the module text does not describe --health")
+            ok = False
+
+        # ---- world scale: the runtime's two lines (src\common\world_scale.h), read from the paired runtime log ----
+        # The lines are rendered from the header's own format literals, so a format that drifts from the rule fails here. The runtime log carries a UTC clock and no tag.
+        wssrc = read_text(os.path.join(repo_root(), "src", "common", "world_scale.h"))
+
+        def RW(needle, *vals):
+            key = "ws:" + needle
+            if key not in fmts:
+                fmts[key] = health_c_format(wssrc, needle)
+            if fmts[key] is None:
+                raise AssertionError("world_scale.h has no format holding %r: the --health rule that reads it is out of date" % needle)
+            return health_render(fmts[key], vals)
+
+        def ws_change(pct, located=63.4, elite=48.8):
+            return RW("located_icd=", pct, located, elite)
+
+        def ws_read(pct, seq=1200):
+            return RW("elite read eye transform", pct, seq)
+
+        def runtime(lines, name=None):
+            counter[0] += 1
+            path = os.path.join(tmp, name or "runtime_%03d.log" % counter[0])
+            with open(path, "w", encoding="utf-8", newline="") as f:
+                f.write("".join("2026-10-27 12:00:%02d.000 UTC pid=4242 tid=7 %s\r\n" % (i, m) for i, m in enumerate(lines)))
+            return path
+
+        WS, ws_ok = H_WORLD, [f90_part()] * 2
+        check("world scale: the value stayed 100, no line, nothing said", ws_ok, 0, [("OK", F90S)], lacks=["world scale", "NEVER APPLIED"],
+              extra=["--runtime-file", runtime(["native_frame: unrelated runtime line"])])
+        check("world scale: no runtime log at all is not a failure", ws_ok, 0, [("OK", F90S)], lacks=["world scale", "NEVER APPLIED"])
+        check("world scale: latched 130 and Elite read the eye transform at it", ws_ok, 0, [("OK", WS)],
+              has=["latched 130%", "eyes are 63.4 mm apart and Elite's 48.8 mm", "the last at geometry sequence 1200"], extra=["--runtime-file", runtime([ws_change(130), ws_read(130)])])
+        check("world scale: 130, 80 and back to 100, each read after its change", ws_ok, 0, [("OK", WS)], has=["latched 130% -> 80% -> 100%", "3 read line(s)"],
+              extra=["--runtime-file", runtime([ws_change(130), ws_read(130), ws_change(80, 63.4, 79.3), ws_read(80), ws_change(100, 63.4, 63.4), ws_read(100)])])
+        check("world scale: latched and never read is NEVER APPLIED", ws_ok, 3, [("NEVER APPLIED", WS)], has=["never read its eye transform at 130% after the runtime latched it", "exit 3"],
+              extra=["--runtime-file", runtime([ws_change(130)])])
+        check("world scale: a read before the change does not apply it", ws_ok, 3, [("NEVER APPLIED", WS)], has=["never read its eye transform at 130%"],
+              extra=["--runtime-file", runtime([ws_read(130), ws_change(130)])])
+        check("world scale: a value came back and was not read the second time", ws_ok, 3, [("NEVER APPLIED", WS)], has=["never read its eye transform at 130% after"],
+              extra=["--runtime-file", runtime([ws_change(130), ws_read(130), ws_change(80, 63.4, 79.3), ws_read(80), ws_change(130)])])
+        check("world scale: a read with no latch line is PARTIAL", ws_ok, 0, [("PARTIAL", WS)], has=["no latch line"], extra=["--runtime-file", runtime([ws_read(130)])])
+        check("world scale: a labelled line no pattern matches is UNPARSED", ws_ok, 4, [("UNPARSED", WS)], extra=["--runtime-file", runtime(["world_scale: 130 percent"])])
+        check("world scale: --since and --until cut the graphics log and not the runtime log", ws_ok, 0, [("OK", WS)], lacks=[row("OK", F90S)], extra=[
+            "--runtime-file", runtime([ws_change(130), ws_read(130)]), "--since", "23:00:00"])
+        gfx_named = write(body(ws_ok), "edvr_gfx_20261027_120000.log")
+        runtime([ws_change(150, 63.4, 42.3), ws_read(150)], "edvr_openxr_20261027_120000_100_4242.log")
+        checks += 1
+        rc, out = cli(["--file", gfx_named, "--health", "--expect-build", version])
+        if rc != 0 or row("OK", WS) not in out or "latched 150%" not in out:
+            print("health world scale: the runtime log that opened with the graphics log was not paired (rc=%d):\n%s" % (rc, out))
+            ok = False
+        checks += 1
+        rc, out = cli(["--file", write(body(ws_ok)), "--health", "--expect-build", version, "--runtime-file", os.path.join(tmp, "no_such_runtime.log")])
+        if rc != 1 or "no such runtime log" not in out:
+            print("health world scale: a --runtime-file that is not there did not stop (rc=%d):\n%s" % (rc, out))
             ok = False
 
         # ---- the one failure line the rules read that is not in native_on_foot.cpp ----
