@@ -3188,8 +3188,8 @@ int wmain(int argc, wchar_t** argv) {
                 // F74: LOCAL eye transport, current-view world right, and inverse-AMC model transport are separate bases.
                 const double zeroAxis[3] = {}, localYawRight[3] = {0.0, 0.0, -1.0}, viewRight[3] = {1.0, 0.0, 0.0};
                 double seatZero[3], seatYaw[3], worldRight[3], modelRight[3];
-                const bool zeroOffset = nf::weaponViewOffsetSeated(0.0, zeroAxis, seatZero);
-                const bool seatedYawOk = nf::weaponViewOffsetSeated(0.05, localYawRight, seatYaw);
+                const bool zeroOffset = nf::weaponViewOffsetSeated(0.0, zeroAxis, 0.0, seatZero);
+                const bool seatedYawOk = nf::weaponViewOffsetSeated(0.05, localYawRight, 0.0, seatYaw);   // F134: a seat of heading 0 is the LOCAL vector itself
                 const bool worldRightOk = nf::weaponViewOffsetWorld(0.05, viewRight, worldRight);
                 const float invAmcYaw[16] = {0, 0, 1, 0, 0, 1, 0, 0, -1, 0, 0, 0, 10, -4, 7, 1};
                 nf::ikVectorXform(worldRight, invAmcYaw, modelRight);
@@ -3201,6 +3201,19 @@ int wmain(int argc, wchar_t** argv) {
                                              std::fabs(modelRight[0]) < 1e-12 && std::fabs(modelRight[1]) < 1e-12 && std::fabs(modelRight[2] - 0.05) < 1e-12 &&
                                              std::fabs(targetFromHead[0] - 0.10) < 1e-12 && std::fabs(targetFromHead[2] + 0.15) < 1e-12;
                 check(separateBasisOk, "F74: positive view offset uses LOCAL head-right for eye-origin motion, current stereo scene-right for world shift, and the inverse AMC's linear part for body axes; AMC translation is ignored");
+                {   // F134: the offset is a SEATED vector: the runtime turns it into LOCAL by the seat's heading, so building it from the LOCAL head-right undoes that turn
+                    const double lr[3] = {0.6, 0.0, 0.8}, psi = 0.61;
+                    double seatedAt[3], backLocal[3], atZero[3];
+                    const bool built = nf::weaponViewOffsetSeated(0.05, lr, psi, seatedAt) && nf::weaponViewOffsetSeated(0.05, lr, 0.0, atZero);
+                    nf::ryApply(psi, seatedAt, backLocal);   // the runtime's eyePoll: LOCAL = Ry(seat yaw) . seated
+                    const double wantLocal[3] = {-0.05 * 0.6, 0.0, -0.05 * 0.8};
+                    const bool refusedNaN = !nf::weaponViewOffsetSeated(0.05, lr, std::nan(""), seatedAt);
+                    double zeroAt[3];
+                    check(built && std::fabs(backLocal[0] - wantLocal[0]) < 1e-12 && std::fabs(backLocal[1]) < 1e-12 && std::fabs(backLocal[2] - wantLocal[2]) < 1e-12 &&
+                              std::fabs(nf::ikLen(seatedAt) - 0.05) < 1e-12 && std::fabs(seatedAt[0] - atZero[0]) > 1e-3 && refusedNaN && nf::weaponViewOffsetSeated(0.0, lr, std::nan(""), zeroAt),
+                          "F134: weaponViewOffsetSeated builds a vector in the seat's axes: the runtime's turn by the seat's heading (0.61 rad) returns the LOCAL -right translation "
+                          "exactly, a seat heading of 0 is the old vector, an unknown heading is refused, and no offset needs none");
+                }
                 const double opticP14[3] = {0.20, 0.0, 2.0}, sightForward[3] = {0.0, 0.0, 1.0};
                 const double localRight[3] = {0.6, 0.0, 0.8}, sceneRight[3] = {0.8, 0.2, -0.56};
                 const double yaw = 0.61, cy = std::cos(yaw), sy = std::sin(yaw);
@@ -3217,7 +3230,7 @@ int wmain(int argc, wchar_t** argv) {
                 bool adsActualP14Ok = true, adsBodyBiasOk = true;
                 for (double offsetM : offsetCasesM) {
                     double seatedBias[3], worldBias[3];
-                    adsActualP14Ok = adsActualP14Ok && nf::weaponViewOffsetSeated(offsetM, localRight, seatedBias) &&
+                    adsActualP14Ok = adsActualP14Ok && nf::weaponViewOffsetSeated(offsetM, localRight, 0.0, seatedBias) &&
                                      nf::weaponViewOffsetWorld(offsetM, sceneRight, worldBias);
                     const double biasNorm = nf::ikLen(worldBias);
                     adsActualP14Ok = adsActualP14Ok && std::fabs(biasNorm - std::fabs(offsetM)) < 1e-12 &&

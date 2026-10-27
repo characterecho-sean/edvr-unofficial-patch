@@ -10793,7 +10793,11 @@ WeaponViewBias weaponViewBiasForTick(double rightCm, uint64_t now) noexcept {
     // The rows are Elite's: its eye pair is the headset's moved by the world scale, so the 5 to 8 cm window is that of the pair the runtime was told to draw.
     const double eyeScale = worldScaleEyeFactor(nativeFrameWorldScale());
     if (!(ipd >= 0.05 * eyeScale && ipd <= 0.08 * eyeScale)) { out.state = kWeaponViewBadAxes; return out; }
-    if (!nofoot::weaponViewOffsetSeated(rightM, localRight, out.seated) || !nofoot::weaponViewOffsetWorld(rightM, solvedRight, out.world)) {
+    // F134: the seat's heading in LOCAL is the head's heading in LOCAL less its heading in the seated space (both from this sample); without both there is no seated vector.
+    double yawLocal = 0.0, pitchLocal = 0.0, yawSeated = 0.0, pitchSeated = 0.0;
+    const bool haveSeatYaw = np.renderValid && nofoot::adsHeadAngles(np.local, &yawLocal, &pitchLocal) && nofoot::adsHeadAngles(np.render, &yawSeated, &pitchSeated);
+    const double seatYaw = haveSeatYaw ? nofoot::adsWrap(yawLocal - yawSeated) : std::numeric_limits<double>::quiet_NaN();
+    if (!nofoot::weaponViewOffsetSeated(rightM, localRight, seatYaw, out.seated) || !nofoot::weaponViewOffsetWorld(rightM, solvedRight, out.world)) {
         out.state = kWeaponViewBadAxes;
         out.seated[0] = out.seated[1] = out.seated[2] = 0.0;
         out.world[0] = out.world[1] = out.world[2] = 0.0;

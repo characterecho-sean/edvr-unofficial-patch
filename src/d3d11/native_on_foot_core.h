@@ -342,16 +342,20 @@ inline void seatedFromBody(const double body[3], double psi, double out[3]) noex
     out[1] = -r[1];
     out[2] = r[2];
 }
-// F74: eye alignment translates the seated origin directly in natural LOCAL, so the camera moves opposite the requested local HMD-right vector.
+// F74: eye alignment translates the seated origin, so the camera moves opposite the requested local HMD-right vector.
 // `rightM` is a signed distance in metres; exact zero writes exact zeros without requiring a valid basis.
-inline bool weaponViewOffsetSeated(double rightM, const double localRight[3], double out[3]) noexcept {
+// F134: the runtime's eye alignment is a SEATED-axes vector (it turns it into LOCAL by the seat's heading before it moves the origin), so the LOCAL translation
+// -rightM * localRight is carried back into the seat's axes by the seat's heading `seatYawRad` (the seat convention, yaw + left: LOCAL = Ry(seatYaw) seated). Before F134
+// this returned the LOCAL vector itself, which the runtime added to the LOCAL position unturned.
+inline bool weaponViewOffsetSeated(double rightM, const double localRight[3], double seatYawRad, double out[3]) noexcept {
     if (!std::isfinite(rightM)) return false;
     if (rightM == 0.0) { out[0] = out[1] = out[2] = 0.0; return true; }
+    if (!std::isfinite(seatYawRad)) return false;
     const double n2 = localRight[0] * localRight[0] + localRight[1] * localRight[1] + localRight[2] * localRight[2];
     if (!(n2 > 1e-12) || !std::isfinite(n2)) return false;
     const double inv = 1.0 / std::sqrt(n2);
-    const double r[3] = {localRight[0] * inv, localRight[1] * inv, localRight[2] * inv};
-    for (int i = 0; i < 3; ++i) out[i] = -rightM * r[i];
+    const double local[3] = {-rightM * localRight[0] * inv, -rightM * localRight[1] * inv, -rightM * localRight[2] * inv};
+    ryApply(-seatYawRad, local, out);
     return true;
 }
 inline bool weaponViewOffsetActive(bool bodyPinScope, bool equipped, double rightM) noexcept {
