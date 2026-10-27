@@ -5004,6 +5004,8 @@ bool g_f120PinLogged = false;                       // frame thread only
 std::atomic<uint32_t> g_f122Seen{0}, g_f122Hidden{0}, g_f122Failed{0};
 // F131: panels reached, ever (g_f122Seen is taken to zero by its window): look to aim holds while this moves (the placement hook runs every frame a panel is up).
 std::atomic<uint32_t> g_f131PanelSeq{0};
+// F131c: when (GetTickCount64) the cursor window hook or the owner transform hook last ran: a menu or a panel is up while they run, mouse still or not (the F135 probe).
+std::atomic<uint64_t> g_f131MenuHookMs{0};
 uint64_t g_f122LastMs = 0;                          // frame thread only
 bool g_f122ArmNoted = false;                        // frame thread only
 struct F111Slot {
@@ -5479,6 +5481,7 @@ uint64_t __fastcall f111WindowHooked(void* panel, void* out, uint64_t index, uin
     const F9Fn4 original = reinterpret_cast<F9Fn4>(g_f111Probe[3].original);
     if (!original) return 0;
     g_f135Ctr.add(nofoot::f135::kWindow);   // F135
+    g_f131MenuHookMs.store(GetTickCount64(), std::memory_order_relaxed);   // F131c: a menu or panel is up while this runs
     const uint64_t result = original(panel, out, index, point);
     if(t_menuInput && t_menuInput->panel==reinterpret_cast<uintptr_t>(panel)) {
         nofoot::menu_input::observeWindow(*t_menuInput,reinterpret_cast<uintptr_t>(out),guardedRead);
@@ -5510,6 +5513,7 @@ uint64_t __fastcall f114bOwnerXformHooked(void* owner, void* out, uint64_t c, ui
     const F9Fn4 original = reinterpret_cast<F9Fn4>(g_f114bProbe.original);
     if (!original) return 0;
     g_f135Ctr.add(nofoot::f135::kOwner);   // F135
+    g_f131MenuHookMs.store(GetTickCount64(), std::memory_order_relaxed);   // F131c
     const uint64_t result = original(owner, out, c, d);
     if(t_menuInput && owner && out) {
         nofoot::menu_input::observeOwner(*t_menuInput,reinterpret_cast<uintptr_t>(owner),reinterpret_cast<uintptr_t>(out),guardedRead);
@@ -5822,8 +5826,9 @@ void f111RefreshGates() {
     const nofoot::f122::Gates gates = nofoot::f122::gates(open, g_panelMouse.load(std::memory_order_relaxed), runtimeFlatProfile());
     g_f111LegacyUpdateEnabled.store(gates.instruments,std::memory_order_release);
     const bool observer=open&&g_menuInput.active();
-    // F135 (MEASURE ONLY): the probe counts every panel hook's calls while native stereo is on foot, so their relay gates are open then. With the instruments off (the default) a hook
-    // is a pass-through: the update runs the game's own through observedUpdate, and the ray, window and owner hooks return at once because no placement of ours is running.
+    // F135/F131c: every panel hook's relay gate is open while native stereo is on foot (VR): the F135 probe counts their calls, and F131 holds look to aim while the cursor window or
+    // owner transform hook runs (the Esc menu, an inventory panel). With the instruments off (the default) a hook is a pass-through: the update runs the game's own through
+    // observedUpdate, and the ray, window and owner hooks return at once because no placement of ours is running.
     const bool probe=open&&!runtimeFlatProfile();
     const int gateState = (gates.instruments ? 1 : 0) | (gates.placement ? 2 : 0) | (observer?4:0);
     if (gateState != g_f111GateState) {
@@ -8054,6 +8059,7 @@ void f131Step(uint64_t now, bool active) noexcept {
     s.nowMs = now;
     s.active = active;
     s.panelSeq = g_f131PanelSeq.load(std::memory_order_relaxed);
+    s.menuHookMs = g_f131MenuHookMs.load(std::memory_order_relaxed);   // F131c
     // F131b: no menu signal is fed. The maps gate is not one in VR: it holds the 2D screen through nearly all VR play, cockpit and on foot (no world camera names its
     // source), so the flight edvr_gfx_20261027_075042 was held 108 ms after going on foot and never let go: look to aim and the ADS head aim asked nothing.
     s.menu = false;

@@ -21,6 +21,8 @@ struct Rig {
     uint64_t now = 100000;
     uint32_t panelSeq = 0, procCalls = 0;
     bool menu = false, procRuns = true, panelUp = false, procKnown = true, active = true;
+    bool hookUp = false;      // F131c: the cursor window / owner transform hook runs every frame
+    uint64_t hookMs = 0;      // ... and when it last did
     f131::Out last;
     int begins = 0, ends = 0;
     double lastHeldSec = 0.0;
@@ -35,6 +37,8 @@ struct Rig {
         s.menu = menu;
         s.procKnown = procKnown;
         s.procCalls = procCalls;
+        if (hookUp) hookMs = now;
+        s.menuHookMs = hookMs;
         last = hold.step(s);
         if (last.edge > 0) ++begins;
         if (last.edge < 0) {
@@ -74,6 +78,39 @@ inline void run131(Check&& check) {
         r.run(60);
         check(!r.last.held && r.ends == 1 && r.lastHeldSec > 1.0 && (r.last.seen & f131::kPanelOpen) && r.last.reasons == 0,
               "F131 hold: 200 ms clear ends it, with the seconds held and the reasons it had");
+    }
+    {   // F131c: the menu hooks themselves (the F111 cursor window, the F114b owner transform): held at once while they run, 250 ms after the last call, then the 200 ms leave
+        Rig r;
+        r.run(300);
+        r.hookUp = true;
+        r.frame();
+        check(r.last.held && r.last.edge == +1 && (r.last.reasons & f131::kPanelOpen) && r.begins == 1, "F131c: a menu hook running holds look to aim at once, with no placement count moving");
+        r.run(2000);
+        check(r.last.held && r.begins == 1 && r.ends == 0, "F131c: still held while the hook keeps running (the menu up, the mouse still)");
+        r.hookUp = false;
+        r.run(11 * 20);   // 220 ms since the hook last ran: a hook seen 100 to 250 ms ago still counts
+        check(r.last.held, "F131c: a hook last seen 220 ms ago still holds");
+        r.run(11 * 4);   // past 250 ms; the 200 ms leave starts
+        check(r.last.held && r.ends == 0, "F131c: past 250 ms the reason is gone but the hold waits out the 200 ms");
+        r.run(11 * 25);
+        check(!r.last.held && r.ends == 1 && (r.last.seen & f131::kPanelOpen), "F131c: and ends 200 ms after that");
+        Rig q;   // a hook last seen 100 ms ago holds; 300 ms ago with nothing else does not
+        q.run(300);
+        q.hookMs = q.now - 100;
+        q.frame();
+        const bool nearHeld = q.last.held;
+        Rig z;
+        z.run(300);
+        z.hookMs = z.now - 300;
+        z.frame();
+        check(nearHeld && !z.last.held && z.begins == 0, "F131c: a hook seen 100 ms ago holds; seen 300 ms ago, with nothing else, does not");
+        Rig w;   // the placement count alone still holds (kept), and the hook never having run is no reason
+        w.run(300);
+        w.panelUp = true;
+        w.frame();
+        Rig n;
+        n.run(1000);
+        check(w.last.held && !n.last.held && n.hookMs == 0, "F131c: the placement count still holds on its own, and a hook that never ran is no reason");
     }
     {   // a menu or map: held while the maps gate holds the 2D screen as a panel, 200 ms after it lets go
         Rig r;
@@ -170,7 +207,7 @@ inline void run131(Check&& check) {
         f131::reasonText(f131::kPanelOpen | f131::kNoLook, buf, sizeof(buf));
         f131::reasonShort(f131::kMenuOrMap | f131::kPanelOpen, shortBuf, sizeof(shortBuf));
         const std::string none = f131::reasonShort(0, shortBuf + 30, 20);
-        check(std::string(buf) == "an on-foot panel is open + the game's look processor has not run for 150 ms" && std::string(shortBuf) == "panel+menu" && none == "none",
+        check(std::string(buf) == "an on-foot panel or menu is open + the game's look processor has not run for 150 ms" && std::string(shortBuf) == "panel+menu" && none == "none",
               "F131 lines: the reasons read as text, short for the 1 s line");
     }
 }

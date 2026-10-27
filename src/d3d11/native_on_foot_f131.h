@@ -24,7 +24,7 @@ namespace edvr {
 namespace nofoot {
 namespace f131 {
 
-constexpr uint64_t kPanelSeenMs = 250;    // a panel placement seen within this long: a panel is open
+constexpr uint64_t kPanelSeenMs = 250;    // a panel placement, or one of the menu hooks, seen within this long: a panel or a menu is open
 constexpr uint64_t kProcStallMs = 150;    // the player's look processor has not run for this long (while the look hooks are in)
 constexpr uint64_t kLeaveClearMs = 200;   // all reasons clear this long before the hold ends: no flapping
 
@@ -33,7 +33,7 @@ inline const char* reasonText(uint32_t mask, char* buf, size_t cap) noexcept {
     if (!buf || cap == 0) return "";
     buf[0] = 0;
     size_t used = 0;
-    const struct { uint32_t bit; const char* text; } parts[3] = {{kPanelOpen, "an on-foot panel is open"},
+    const struct { uint32_t bit; const char* text; } parts[3] = {{kPanelOpen, "an on-foot panel or menu is open"},
                                                                    {kMenuOrMap, "a menu or map holds the 2D screen"},
                                                                    {kNoLook, "the game's look processor has not run for 150 ms"}};
     for (const auto& p : parts) {
@@ -67,6 +67,10 @@ struct Sample {
     uint64_t nowMs = 0;
     bool active = false;       // look to aim is engaged on foot (else the hold has nothing to hold)
     uint32_t panelSeq = 0;     // the F122 placement hook's count of panels reached (it only grows)
+    // F131c: when the F111 cursor window hook or the F114b owner transform hook last ran (the same clock as nowMs; 0: never). The flight edvr_gfx_20261027_100213 (the F135
+    // probe) saw both rise within 0.15 s of each Escape press and fall when the menu closed, mouse still or not, while the placement count above moved only once the
+    // pointer was on a panel (11 s after the menu opened in flight 091608).
+    uint64_t menuHookMs = 0;
     bool menu = false;         // the maps gate holds the 2D screen as a panel (a menu or a map), the layer taking it
     bool procKnown = false;    // the look hooks are in: the processor's calls can be judged
     uint32_t procCalls = 0;    // the player's own look processor calls (F129: LOCAL calls only)
@@ -110,7 +114,9 @@ struct Hold {
             procLast = s.procCalls;
             procMs = s.nowMs;
         }
-        const bool panel = panelMs != 0 && s.nowMs >= panelMs && s.nowMs - panelMs <= kPanelSeenMs;
+        const bool placed = panelMs != 0 && s.nowMs >= panelMs && s.nowMs - panelMs <= kPanelSeenMs;
+        const bool hooked = s.menuHookMs != 0 && s.nowMs >= s.menuHookMs && s.nowMs - s.menuHookMs <= kPanelSeenMs;
+        const bool panel = placed || hooked;
         const bool noLook = s.procKnown && s.nowMs >= procMs && s.nowMs - procMs >= kProcStallMs;
         uint32_t r = 0;
         if (panel) r |= kPanelOpen;
