@@ -6014,10 +6014,6 @@ int uiLayerWorldDoorGap(uint64_t sequence, uint32_t eye, ID3D11Texture2D* frame)
 
 void uiLayerMapsNoteRecognised() { ++g_maps.win.recognised; }
 
-// F131: the maps gate is deciding by naming and has the 2D screen as a panel (a menu or a map: no world camera named its source), the layer taking it. Latched at the
-// frame boundary with g_uiLayerMapsOn; a read of two values, any thread.
-bool uiLayerMapsPanel() { return detail::g_uiLayerMapsOn && !g_maps.gate.world; }
-
 // The layer holds the eye's whole picture for this sequence. The route's re-issued world first (unchanged); then, with the key on
 // and the naming deciding the gate, a 2D screen the layer TOOK while nothing else went into an eye-sized target. Asked by the
 // temporal door and again by the sharpen door, so each eye and sequence is counted once.

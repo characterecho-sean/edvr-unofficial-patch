@@ -9,6 +9,9 @@
 //  - from 07:00:55 the game ran no look processor at all (F129: comps now 0) and the follower kept asking (+117 deg asked in one second, 0 applied), queueing a backlog.
 // So while one of the three is true the follower asks nothing (no ask, no probe, no snap), the player's look is the game's own, and the aim stays where it is; when
 // all three have been clear for kLeaveClearMs the follower starts again from a fresh centring, as an engage does.
+// F131b: the menu input is not fed (native_on_foot.cpp, f131Step). The maps gate was not a menu signal: in VR it holds the 2D screen through nearly all play, so the
+// flight edvr_gfx_20261027_075042 was held from 108 ms after going on foot to the end and look to aim asked nothing. The menu's judder is likely the third case (no look
+// processor: each tick's ask published ahead to the view and never applied; not yet confirmed by a flight); a real menu signal can feed Sample::menu when one is found.
 #pragma once
 
 #include "native_on_foot_f109.h"   // Follower, ProbePair

@@ -7979,7 +7979,9 @@ void f131Step(uint64_t now, bool active) noexcept {
     s.nowMs = now;
     s.active = active;
     s.panelSeq = g_f131PanelSeq.load(std::memory_order_relaxed);
-    s.menu = uiLayerMapsPanel();
+    // F131b: no menu signal is fed. The maps gate is not one in VR: it holds the 2D screen through nearly all VR play, cockpit and on foot (no world camera names its
+    // source), so the flight edvr_gfx_20261027_075042 was held 108 ms after going on foot and never let go: look to aim and the ADS head aim asked nothing.
+    s.menu = false;
     s.procKnown = g_lookArmed;
     s.procCalls = g_lookProcCalls.load(std::memory_order_relaxed);
     const nofoot::f131::Out o = g_f131.hold.step(s);
