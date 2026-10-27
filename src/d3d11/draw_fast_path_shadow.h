@@ -139,6 +139,31 @@ inline bool argsClass(char kind, uint32_t count, uint32_t instances) {
     return kind == 'X' && count > kArgsCountOver && count <= kArgsCountMax && count != kArgsNightVisionCount && instances >= 1;
 }
 
+// Which bound of the class an X draw is outside (Phase 1c, built 2026-10-27), the first that applies in this order: count <= 64, count > 10000,
+// count == 240, no instances. Phase 1b flew with the args class failing on about 47% of owner X draws and the line unable to say which bound.
+enum class Bound : uint8_t { kIn = 0, kSmall, kLarge, k240, kNoInstances, kCount };
+inline Bound boundOf(uint32_t count, uint32_t instances) {
+    if (count <= kArgsCountOver) return Bound::kSmall;
+    if (count > kArgsCountMax) return Bound::kLarge;
+    if (count == kArgsNightVisionCount) return Bound::k240;
+    if (instances == 0) return Bound::kNoInstances;
+    return Bound::kIn;
+}
+inline const char* boundName(Bound b) {
+    static const char* const kNames[static_cast<size_t>(Bound::kCount)] = {"in", "count<=64", "count>10000", "count 240", "no instances"};
+    return kNames[static_cast<size_t>(b)];
+}
+// A bound, or "in the class". A bool converts to it (true: in the class; false: outside, read as the first bound) for the callers that only know
+// whether; the draw path passes the real bound.
+struct ArgsBound {
+    Bound b = Bound::kIn;
+    ArgsBound() = default;
+    ArgsBound(bool in) : b(in ? Bound::kIn : Bound::kSmall) {}
+    explicit ArgsBound(Bound x) : b(x) {}
+    bool in() const { return b == Bound::kIn; }
+};
+inline ArgsBound argsBound(uint32_t count, uint32_t instances) { return ArgsBound(boundOf(count, instances)); }
+
 // ---- The key and the ticket -----------------------------------------------------------------------------------------------------------------------
 struct Key {
     uint32_t bind = 0;         // bindingEyeKeyGeneration()
@@ -202,6 +227,11 @@ inline uint32_t offscreenTerms(Class cls, bool settled, bool wake) {
     return (settled ? 0u : termBit(kTermUnsettled)) | (wake ? termBit(kTermWake) : 0u);
 }
 
+// The census term (kTermCensus), by what the two probes DO and not by whether they are switched on (Phase 1c): the world route's camera census when it
+// ran, or the footprint instrument when it is on and the pair bound is the 2D screen's composite, the only draw it acts on. Phase 1b read the footprint's
+// flag alone, which is on by default (fix.vscreen_res_width = auto), so the term was true on every eye geometry draw.
+inline bool censusTerm(bool worldCensusRan, bool footprintOn, bool compositePairBound) { return worldCensusRan || (footprintOn && compositePairBound); }
+
 // Ordinary: every term at its ordinary value.
 inline bool ordinary(uint32_t terms) { return (terms & kOutcomeMask) == 0; }
 
@@ -222,10 +252,16 @@ inline uint32_t mismatchTerms(uint32_t terms, Class cls, Class ticketCls) {
 
 // ---- Eligibility ------------------------------------------------------------------------------------------------------------------------------------
 // The refusal reason of an owner X draw, the first that applies in this order, or kTake.
-enum class Reason : uint8_t { kTake = 0, kNoTicket, kKeyMoved, kArgsClass, kDynamic, kArmed, kNotCertified, kCount };
+// The args class is four reasons, one per bound, the first that applies (Phase 1c).
+enum class Reason : uint8_t { kTake = 0, kNoTicket, kKeyMoved, kArgsSmall, kArgsLarge, kArgs240, kArgsNoInstances, kDynamic, kArmed, kNotCertified, kCount };
 inline const char* reasonName(Reason r) {
-    static const char* const kNames[static_cast<size_t>(Reason::kCount)] = {"take", "no ticket", "key moved", "args class", "dynamic", "armed", "not certified"};
+    static const char* const kNames[static_cast<size_t>(Reason::kCount)] = {"take", "no ticket", "key moved", "args count<=64", "args count>10000", "args count 240",
+                                                                           "args no instances", "dynamic", "armed", "not certified"};
     return kNames[static_cast<size_t>(r)];
+}
+// The refusal reason for a draw outside the class (the bound must not be kIn).
+inline Reason argsReason(Bound b) {
+    return b == Bound::kLarge ? Reason::kArgsLarge : b == Bound::k240 ? Reason::kArgs240 : b == Bound::kNoInstances ? Reason::kArgsNoInstances : Reason::kArgsSmall;
 }
 
 struct Verdict {
@@ -243,22 +279,24 @@ inline unsigned lowestBit(uint32_t m) {
 // ---- Why a draw recorded no ticket (Phase 1b, built 2026-10-27) ----------------------------------------------------------------------------------------
 // Phase 1 flew at 0% would-take with about 70% of owner X draws recording no ticket and no way to say which term stopped them: the comparison runs only
 // on would-take draws. This counts, for every owner X draw that does NOT record a ticket, the FIRST reason in a fixed order, by class, and keeps the
-// vertex shaders that reason was counted for. The order: the class unknown; the args class; an off-screen target unsettled; a wake-pulse surface; then
-// the other 23 outcome terms in their own order (verdict first, the special vertex shaders last). A draw with several non-ordinary terms is counted
-// under the first, so a later term is hidden behind an earlier one until that one is dealt with.
-constexpr unsigned kNtClassUnknown = 0, kNtArgsClass = 1, kNtUnsettled = 2, kNtWake = 3, kNtFirstTerm = 4;
+// vertex shaders that reason was counted for. The order: the class unknown; the four bounds of the args class (Phase 1c: count <= 64, count > 10000,
+// count == 240, no instances; the first that applies); an off-screen target unsettled; a wake-pulse surface; then the other 23 outcome terms in their
+// own order (verdict first, the special vertex shaders last). A draw with several non-ordinary terms is counted under the first, so a later term is
+// hidden behind an earlier one until that one is dealt with.
+constexpr unsigned kNtClassUnknown = 0, kNtBoundSmall = 1, kNtBoundLarge = 2, kNtBound240 = 3, kNtBoundNoInstances = 4, kNtUnsettled = 5, kNtWake = 6,
+                   kNtFirstTerm = 7;
 constexpr unsigned kNoTicketReasons = kNtFirstTerm + (static_cast<unsigned>(kTermCount) - 2);
 static_assert(static_cast<unsigned>(kTermUnsettled) == static_cast<unsigned>(kTermCount) - 2 && static_cast<unsigned>(kTermWake) == static_cast<unsigned>(kTermCount) - 1,
-              "the two off-screen terms are the last two, so reason 4 + i is outcome term i for the other 23");
+              "the two off-screen terms are the last two, so reason 7 + i is outcome term i for the other 23");
 static_assert(kNoTicketReasons <= 32, "the reasons fit the sketch table");
 inline const char* noTicketName(unsigned r) {
-    return r == kNtClassUnknown ? "class unknown" : r == kNtArgsClass ? "args class" : r == kNtUnsettled ? "unsettled" : r == kNtWake ? "wake surface"
-           : r < kNoTicketReasons ? termName(r - kNtFirstTerm) : "?";
+    return r == kNtClassUnknown ? "class unknown" : r >= kNtBoundSmall && r <= kNtBoundNoInstances ? boundName(static_cast<Bound>(r - kNtBoundSmall + 1))
+           : r == kNtUnsettled ? "unsettled" : r == kNtWake ? "wake surface" : r < kNoTicketReasons ? termName(r - kNtFirstTerm) : "?";
 }
 // The first failing reason of a draw, or -1 when it records a ticket (the same test as ticketValid, with the reason kept).
-inline int noTicketReason(uint32_t terms, bool argsOk, Class cls) {
+inline int noTicketReason(uint32_t terms, ArgsBound bound, Class cls) {
     if (cls == Class::kUnresolved) return static_cast<int>(kNtClassUnknown);
-    if (!argsOk) return static_cast<int>(kNtArgsClass);
+    if (!bound.in()) return static_cast<int>(kNtBoundSmall + static_cast<unsigned>(bound.b) - 1);
     if (terms & termBit(kTermUnsettled)) return static_cast<int>(kNtUnsettled);
     if (terms & termBit(kTermWake)) return static_cast<int>(kNtWake);
     const uint32_t rest = terms & kOutcomeMask & ~(termBit(kTermUnsettled) | termBit(kTermWake));
@@ -301,6 +339,24 @@ struct VsSketch {
     }
 };
 
+// ---- What the sun-glare nomination does on a draw over 10000 (Phase 1c) -------------------------------------------------------------------------------
+// beginPanelOverride's eye branch nominates the scene camera from a big draw's VsCb0: `if (sunglareWorldActive() && count > 10000) { cb = VsCb0; if (cb &&
+// cb != sceneCbNominated) { resolve ... } }`. It is a no-op when the glare's world shader is inactive, when there is no VsCb0, or when VsCb0 is the one
+// already nominated, and it only runs for eye draws. The thunk reads those three facts before the draw (the nomination moves sceneCbNominated), and the
+// tally counts them by class so a widened args class can be sized.
+constexpr uint32_t kFactOver = 1, kFactWorldInactive = 2, kFactCbNull = 4, kFactCbNominated = 8;
+enum Over : unsigned { kOverDraws = 0, kOverWorldInactive, kOverCbNull, kOverCbNominated, kOverActs, kOverCount };
+
+// What the draw path hands the tally beside the verdict and the terms: the bound vertex shader (bindingShaderHash(Vs); 0 is a value like any other) and the
+// over-10000 facts above. Converts from the hash alone.
+struct DrawFacts {
+    uint64_t vs = 0;
+    uint32_t over = 0;
+    DrawFacts() = default;
+    DrawFacts(uint64_t hash) : vs(hash) {}
+    DrawFacts(uint64_t hash, uint32_t facts) : vs(hash), over(facts) {}
+};
+
 // ---- The window's counters -------------------------------------------------------------------------------------------------------------------------
 struct Counters {
     uint64_t draws[3] = {};                                     // owner X draws by class
@@ -313,7 +369,9 @@ struct Counters {
     uint64_t mismatchDraws = 0;                                 // ...of them with at least one mismatch
     uint64_t mismatch[kMismatchTermCount] = {};                 // by term
     uint64_t noTicket[3][kNoTicketReasons] = {};                // draws that recorded no ticket: by class, by first failing reason (Phase 1b)
-    VsSketch noTicketVs[kNoTicketReasons];                      // ...and the vertex shaders each reason was counted for
+    VsSketch noTicketVs[kNoTicketReasons];                      // ...and the vertex shaders each reason was counted for, all classes together
+    VsSketch boundVs[3][4];                                     // the four args bounds' vertex shaders by class (Phase 1c; bound b is index b - 1)
+    uint64_t over[3][kOverCount] = {};                          // draws over 10000 by class, and the nomination's no-op cases among them (Phase 1c)
     void reset() { *this = Counters(); }
 };
 
@@ -330,11 +388,11 @@ struct Tracker {
     // The would-take decision for an owner X draw about to be issued. The dynamic and armed gathers are called only when the draw reaches that
     // stage, so a draw refused earlier pays for neither. `wanting` is the draw gate's wanting set (certified or not).
     template <class DynFn, class ArmFn>
-    Verdict judge(const Key& now, bool argsOk, uint32_t wanting, DynFn&& dynFn, ArmFn&& armFn) const {
+    Verdict judge(const Key& now, ArgsBound args, uint32_t wanting, DynFn&& dynFn, ArmFn&& armFn) const {
         Verdict v;
         if (!ticket.valid) { v.reason = Reason::kNoTicket; return v; }
         if (!sameKey(ticket.key, now)) { v.reason = Reason::kKeyMoved; return v; }
-        if (!argsOk) { v.reason = Reason::kArgsClass; return v; }
+        if (!args.in()) { v.reason = argsReason(args.b); return v; }
         v.dynamic = dynFn();
         if (v.dynamic) { v.reason = Reason::kDynamic; return v; }
         v.armed = armFn();
@@ -344,12 +402,21 @@ struct Tracker {
         return v;
     }
 
-    // One owner X draw, finished: the class it landed in, its non-ordinary terms, whether its args were in the class, the key as it stands after the
-    // draw, and the vertex shader bound for it (bindingShaderHash(Vs); 0 is a value like any other). Counts it, compares it when it was a would-take draw
+    // One owner X draw, finished: the class it landed in, its non-ordinary terms, the bound of the args class it is outside (or in), the key as it stands
+    // after the draw, and the facts beside it (the bound vertex shader, the over-10000 facts). Counts it, compares it when it was a would-take draw
     // (returning the mismatch terms, 0 for none), writes the next ticket, and when no ticket results counts the first reason why.
-    uint32_t finish(const Verdict& v, Class cls, uint32_t terms, bool argsOk, const Key& after, uint64_t vs = 0) {
+    uint32_t finish(const Verdict& v, Class cls, uint32_t terms, ArgsBound bound, const Key& after, const DrawFacts& facts = DrawFacts()) {
         const size_t c = static_cast<size_t>(cls);
         ++count.draws[c];
+        if ((facts.over & kFactOver) && c < 2) {
+            uint64_t* o = count.over[c];
+            const bool inactive = (facts.over & kFactWorldInactive) != 0, noCb = (facts.over & kFactCbNull) != 0, nominated = (facts.over & kFactCbNominated) != 0;
+            ++o[kOverDraws];
+            o[kOverWorldInactive] += inactive;
+            o[kOverCbNull] += noCb;
+            o[kOverCbNominated] += nominated;
+            o[kOverActs] += (cls == Class::kEye && !inactive && !noCb && !nominated);   // only an eye draw reaches the nomination, and only these proceed to its resolve
+        }
         uint32_t mm = 0;
         if (v.reason == Reason::kTake) {
             ++count.take[c];
@@ -367,14 +434,16 @@ struct Tracker {
         }
         ticket.key = after;
         ticket.cls = cls;
-        ticket.valid = ticketValid(terms, argsOk, cls);
+        ticket.valid = ticketValid(terms, bound.in(), cls);
         if (ticket.valid) {
             ++count.tickets;
         } else {
-            const int why = noTicketReason(terms, argsOk, cls);
+            const int why = noTicketReason(terms, bound, cls);
             if (why >= 0) {
                 ++count.noTicket[c][why];
-                count.noTicketVs[why].add(vs);
+                count.noTicketVs[why].add(facts.vs);
+                if (why >= static_cast<int>(kNtBoundSmall) && why <= static_cast<int>(kNtBoundNoInstances) && c < 2)
+                    count.boundVs[c][why - static_cast<int>(kNtBoundSmall)].add(facts.vs);
             }
         }
         return mm;
@@ -516,8 +585,8 @@ inline size_t formatNoTicketLine(char* out, size_t cap, uint32_t endFrame, uint3
             reasonTotal[r] += c.noTicket[cl][r];
             all += c.noTicket[cl][r];
         }
-    o.put("draw fast path (shadow) no ticket: TEMPORARY (built 2026-10-27, Phase 1b), 1800-frame window ending %u, %u frames. Owner X draws a frame that "
-          "recorded no ticket, by first failing reason (class unknown, args class, unsettled, wake surface, then verdict to special vs): ",
+    o.put("draw fast path (shadow) no ticket: TEMPORARY (built 2026-10-27, Phase 1c), 1800-frame window ending %u, %u frames. Owner X draws a frame that "
+          "recorded no ticket, by first failing reason (class unknown, the four args bounds, unsettled, wake surface, then verdict to special vs): ",
           static_cast<unsigned>(endFrame), static_cast<unsigned>(frames));
     if (!all) {
         o.put("-.");
@@ -550,6 +619,50 @@ inline size_t formatNoTicketLine(char* out, size_t cap, uint32_t endFrame, uint3
         }
     }
     o.put(".");
+    return o.len;
+}
+
+// The third line of the window (Phase 1c): the draws outside the args class, a frame, by class and by the first bound that applies (count <= 64, count >
+// 10000, count == 240, no instances), each with its three most frequent vertex shaders and each one's share of that bound's draws in that class; then,
+// for the draws over 10000, a frame by class, the shares (glare off / no cb / cb nominated / acts) where the sun-glare nomination is a no-op or would
+// proceed to its resolve. '-' when no classed draw was outside the class. Under 1150 characters at its worst (the rig pins it).
+inline size_t formatArgsLine(char* out, size_t cap, uint32_t endFrame, uint32_t frames, const Counters& c) {
+    Out o(out, cap);
+    const double f = frames ? static_cast<double>(frames) : 1.0;
+    uint64_t any = 0, overAny = 0;
+    for (unsigned cl = 0; cl < 2; ++cl) {
+        for (unsigned b = 0; b < 4; ++b) any += c.noTicket[cl][kNtBoundSmall + b];
+        overAny += c.over[cl][kOverDraws];
+    }
+    o.put("draw fast path (shadow) args: TEMPORARY (Phase 1c), 1800-frame window ending %u, %u frames. Owner X draws a frame outside the "
+          "args class, by first bound, with top vertex shaders and shares:",
+          static_cast<unsigned>(endFrame), static_cast<unsigned>(frames));
+    if (!any) o.put(" -.");
+    for (unsigned cl = 0; cl < 2; ++cl)
+        for (unsigned b = 0; b < 4; ++b) {
+            const uint64_t n = c.noTicket[cl][kNtBoundSmall + b];
+            if (!n) continue;
+            const VsSketch& sk = c.boundVs[cl][b];
+            unsigned slot[3];
+            const unsigned got = sk.top(3, slot);
+            o.put(" %s %s %.1f:", className(static_cast<Class>(cl)), boundName(static_cast<Bound>(b + 1)), static_cast<double>(n) / f);
+            for (unsigned j = 0; j < got; ++j) {
+                double share = 100.0 * static_cast<double>(sk.count[slot[j]]) / static_cast<double>(n);
+                if (share > 100.0) share = 100.0;
+                o.put("%s %016llX %.0f%%", j ? "," : "", static_cast<unsigned long long>(sk.key[slot[j]]), share);
+            }
+            o.put(";");
+        }
+    o.put(" Over 10000 a frame, %% glare off/no cb/cb nominated/acts:");
+    if (!overAny) o.put(" -.");
+    for (unsigned cl = 0; cl < 2; ++cl) {
+        const uint64_t n = c.over[cl][kOverDraws];
+        if (!n) continue;
+        const double d = static_cast<double>(n);
+        o.put(" %s %.1f %.0f/%.0f/%.0f/%.0f%%;", className(static_cast<Class>(cl)), d / f, 100.0 * static_cast<double>(c.over[cl][kOverWorldInactive]) / d,
+              100.0 * static_cast<double>(c.over[cl][kOverCbNull]) / d, 100.0 * static_cast<double>(c.over[cl][kOverCbNominated]) / d,
+              100.0 * static_cast<double>(c.over[cl][kOverActs]) / d);
+    }
     return o.len;
 }
 

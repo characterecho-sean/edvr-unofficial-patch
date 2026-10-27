@@ -58,7 +58,7 @@
 
 * **Next (2026-10-27, last entry):** AA on's +1.65 ms is per-draw
   classifiers. ui-depth memo FLOWN: exact, -0.21 ms (shipped, b1561dff).
-  Shadow 1b FLOWN: off-screen 23-40%, 0/35M wrong; eye 0% (census bug).
+  Shadow 1b: off-screen 23-40%, 0/35M wrong; eye 0% (census bug). 1c BUILT.
 
 ## Frame budget philosophy
 
@@ -4500,6 +4500,32 @@ Next build (Phase 1c):
 
 Fly the same leg. Expected: eye draws join, and the split shows how
 much of the 47% a widened class would admit.
+
+**Phase 1c built (2026-10-27), NOT FLOWN.**
+- **Census term.** It is now `census || (footprintOn && pair)`. Census
+  is `g_vrWorldWants && vrCameraCensusWanted()`; the pair is VS 5C36..
+  and PS CFE8.. (vscreen.cpp ~1973).
+- **The args class** is four reasons, first applying:
+  1. count 64 or under;
+  2. count over 10000;
+  3. count 240;
+  4. no instances.
+
+  They are on the main line and in the no-ticket tally, each with VS
+  sketches for eye and off-screen apart. The no-ticket order is now 30
+  reasons.
+- **Draws over 10000** are counted at thunk entry against the
+  nomination's own gate (vscreen.cpp ~2641-2651), as one of:
+  - glare off;
+  - no cb;
+  - cb nominated;
+  - acts.
+
+  Off-screen draws never reach the nomination.
+- **A third line,** `draw fast path (shadow) args:`, gives each bound's
+  top VS for eye and off-screen, then the over-10000 shares.
+- **Rig:** aa_off_test, 376 checks.
+- **Worst-case lengths:** 1051, 981 and 1144 characters.
 
 **The Phase 2 flight should show:**
 - the `fast` step's calls and cost;

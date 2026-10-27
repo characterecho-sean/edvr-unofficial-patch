@@ -1946,10 +1946,12 @@ struct ShadowState {
 };
 ShadowState g_shadow;
 
-// One draw's shadow, held by the thunk: whether it is an owner X draw, the eligibility verdict taken at entry, the args class and the class it landed in.
+// One draw's shadow, held by the thunk: whether it is an owner X draw, the eligibility verdict taken at entry, the bound of the args class it is outside (or
+// in), the over-10000 facts read before the draw (the nomination moves sceneCbNominated), and the class it landed in.
 struct ShadowDraw {
     bool live = false;
-    bool argsOk = false;
+    fastshadow::ArgsBound bound;
+    uint32_t over = 0;
     fastshadow::Class cls = fastshadow::Class::kUnresolved;
     fastshadow::Verdict verdict;
 };
@@ -1961,10 +1963,18 @@ inline void shadowNote(fastshadow::Term t) { g_shadow.terms |= fastshadow::termB
 inline void shadowNoteX(bool owner, char kind, fastshadow::Term t) {
     if (owner && kind == 'X') g_shadow.terms |= fastshadow::termBit(t);
 }
-// The camera census (vr_camera_census.h) and the footprint instrument (vscreen_footprint.h), the lambda's two probes: the route's flag is up for the
-// census, and the footprint's own flag for the other. Both are armed flags of the eligibility test, so this reads them again where the full path ran.
+// The 2D screen's composite: the vertex shader and pixel shader pair that screenMotionRecognize, cameraCensusEyeDraw and footprintEyeDraw each compare
+// first, and the only draw the footprint instrument acts on. The vertex shader alone is one of the specials (shadowSpecialVs).
+constexpr uint64_t kShadowScreenCompositeVs = 0x5C36AF051B98B9F1ull, kShadowScreenCompositePs = 0xCFE84157BC76E921ull;
+// The camera census (vr_camera_census.h) and the footprint instrument (vscreen_footprint.h), the lambda's two probes, by what they DO and not by whether
+// they are switched on (Phase 1c; Phase 1b flew with the footprint's flag, which is on by default, read as the term on every eye draw): the world route's
+// census when the thunk's own test for it holds, and the footprint when it is on, the draw is eye geometry and the pair bound is the 2D screen's composite.
+// The thunk's calls and their lines are untouched; this reads the same flags again where the full path ran.
 inline void shadowNoteProbes(bool eyeGeometry) {
-    if (g_vrWorldWants || (eyeGeometry && vscreenFootprintWanted())) shadowNote(fastshadow::kTermCensus);
+    const bool census = g_vrWorldWants && vrCameraCensusWanted();
+    const bool footprintOn = eyeGeometry && vscreenFootprintWanted();
+    const bool pair = bindingShaderHash(BindSlot::Vs) == kShadowScreenCompositeVs && bindingShaderHash(BindSlot::Ps) == kShadowScreenCompositePs;
+    if (fastshadow::censusTerm(census, footprintOn, pair)) shadowNote(fastshadow::kTermCensus);
 }
 
 // The dynamic flags: plain loads of state the draw path itself raises and lowers, any one of which sends the draw to the full path.
@@ -2001,7 +2011,6 @@ inline uint32_t shadowArmedFlags(const State* s) {
 // screen's composite (the vertex shader of the pair screenMotionRecognize, the camera census and the footprint instrument all name), which the footprint
 // instrument's certification rests on. A vertex shader the shadow does not hold (hash 0) is unknown, and particleOnDrawMayMatch answers true for it, so
 // it counts as a special.
-constexpr uint64_t kShadowScreenCompositeVs = 0x5C36AF051B98B9F1ull;
 inline bool shadowSpecialVs(uint64_t vs, uint64_t ps, UINT count, UINT instances) {
     return vs == kCelestialPatchVs || vs == orbital_width::kVs || vs == kUiVsPanel || vs == kUiVsLoader || nofoot::hudIssuerIndex(vs) >= 0 ||
            vs == nofoot::f115::kCockpitPanelVs || vs == nofoot::f115::kCockpitPanelStockVs || optimizedStationIsSunPair(vs, ps) ||
@@ -2020,8 +2029,16 @@ inline fastshadow::Key shadowKeyNow() {
 __declspec(noinline) void shadowBegin(ShadowDraw& d, const State* s, UINT count, UINT instances) {
     d.live = true;
     g_shadow.terms = 0;
-    d.argsOk = fastshadow::argsClass('X', count, instances);
-    d.verdict = g_shadow.tracker.judge(shadowKeyNow(), d.argsOk, g_shadow.wanting.load(std::memory_order_relaxed), [] { return shadowDynamicFlags(); },
+    d.bound = fastshadow::argsBound(count, instances);
+    d.over = 0;
+    if (count > fastshadow::kArgsCountMax) {
+        // The sun-glare camera nomination in beginPanelOverride's eye branch (`if (sunglareWorldActive() && count > 10000) { cb = VsCb0; if (cb && cb !=
+        // s->sceneCbNominated) { resolve } }`), as its three no-op cases read before the draw: the glare's world shader inactive, no VsCb0, VsCb0 already nominated.
+        void* const cb = bindingGet(BindSlot::VsCb0);
+        d.over = fastshadow::kFactOver | (sunglareWorldActive() ? 0u : fastshadow::kFactWorldInactive) | (cb ? 0u : fastshadow::kFactCbNull) |
+                 (cb == s->sceneCbNominated ? fastshadow::kFactCbNominated : 0u);
+    }
+    d.verdict = g_shadow.tracker.judge(shadowKeyNow(), d.bound, g_shadow.wanting.load(std::memory_order_relaxed), [] { return shadowDynamicFlags(); },
                                        [s] { return shadowArmedFlags(s); });
 }
 
@@ -2052,7 +2069,8 @@ __declspec(noinline) void shadowAfterVerdict(ShadowDraw& d, State* s, DrawVerdic
 // The end of the thunk: count the draw, compare it when it would have taken the fast path, write the next ticket. A mismatch among the session's first
 // five is named, with the shaders and the terms that differ.
 __declspec(noinline) void shadowEnd(ShadowDraw& d, UINT count, UINT instances) {
-    const uint32_t mm = g_shadow.tracker.finish(d.verdict, d.cls, g_shadow.terms, d.argsOk, shadowKeyNow(), bindingShaderHash(BindSlot::Vs));
+    const uint32_t mm = g_shadow.tracker.finish(d.verdict, d.cls, g_shadow.terms, d.bound, shadowKeyNow(),
+                                                fastshadow::DrawFacts(bindingShaderHash(BindSlot::Vs), d.over));
     if (!mm || !g_shadow.tracker.takeNameSlot()) return;
     char terms[256];
     fastshadow::formatTerms(terms, sizeof(terms), mm);
@@ -6316,14 +6334,15 @@ size_t vScreenUiFamilyCacheLine(char* out, size_t cap, uint32_t endFrame) {
     return n;
 }
 
-// TEMPORARY (built 2026-10-27, draw_fast_path_shadow.h): the repeat-draw fast path's shadow window for the perf monitor's 1800-frame edge, as two lines
-// (the window's counts, then why draws recorded no ticket), written every window, quiet or not; then the counters start again. Both lines are formatted
-// before the reset. The ticket and the mismatches named so far are the session's and stay.
-void vScreenDrawFastPathShadowLines(char* line, size_t lineCap, char* noTicketLine, size_t noTicketCap, uint32_t endFrame) {
+// TEMPORARY (built 2026-10-27, draw_fast_path_shadow.h): the repeat-draw fast path's shadow window for the perf monitor's 1800-frame edge, as three lines
+// (the window's counts, why draws recorded no ticket, and the args class's bounds), written every window, quiet or not; then the counters start again.
+// All three are formatted before the reset. The ticket and the mismatches named so far are the session's and stay.
+void vScreenDrawFastPathShadowLines(char* line, size_t lineCap, char* noTicketLine, size_t noTicketCap, char* argsLine, size_t argsCap, uint32_t endFrame) {
     fastshadow::Tracker& t = g_shadow.tracker;
     const uint32_t frames = endFrame > t.windowStart ? endFrame - t.windowStart : 0;
     fastshadow::formatLine(line, lineCap, endFrame, frames, t.count);
     fastshadow::formatNoTicketLine(noTicketLine, noTicketCap, endFrame, frames, t.count);
+    fastshadow::formatArgsLine(argsLine, argsCap, endFrame, frames, t.count);
     t.count.reset();
     t.windowStart = endFrame;
 }

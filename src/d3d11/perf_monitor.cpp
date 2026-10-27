@@ -1242,12 +1242,14 @@ void perfMonitorFrame(ID3D11Device* dev) {
             // is read beside. Written every window; the call starts the counters again.
             vScreenUiFamilyCacheLine(stepLine, sizeof(stepLine), s.frameNo);
             Log::get().note("%s", stepLine);
-            // TEMPORARY, built 2026-10-27 (draw_fast_path_shadow.h): the repeat-draw fast path's shadow window, right after the family cache line, as two
-            // lines (the counts, then why draws recorded no ticket). Written every window; the call starts the counters again.
-            char shadowNoTicketLine[1200];
-            vScreenDrawFastPathShadowLines(stepLine, sizeof(stepLine), shadowNoTicketLine, sizeof(shadowNoTicketLine), s.frameNo);
+            // TEMPORARY, built 2026-10-27 (draw_fast_path_shadow.h): the repeat-draw fast path's shadow window, right after the family cache line, as three
+            // lines (the counts, why draws recorded no ticket, the args class's bounds). Written every window; the call starts the counters again.
+            char shadowNoTicketLine[1200], shadowArgsLine[1200];
+            vScreenDrawFastPathShadowLines(stepLine, sizeof(stepLine), shadowNoTicketLine, sizeof(shadowNoTicketLine), shadowArgsLine, sizeof(shadowArgsLine),
+                                           s.frameNo);
             Log::get().note("%s", stepLine);
             Log::get().note("%s", shadowNoTicketLine);
+            Log::get().note("%s", shadowArgsLine);
         }
         s.drawWindowMs = 0.0; s.drawWindowMaxMs = 0.0f; s.drawWindowSamples = 0;
         // Written every window, quiet or not, so a window with no refresh in it (all zeros) can be told from a build that does not have this line.
