@@ -4,9 +4,9 @@
 //     100  the game as it ships (the default); nothing runs
 //     125 .. 200  a stronger halo, the same strength for every star in this version
 //
-// Flat only for now (flat_profile_keys.h lists the key; in VR nothing acts on it). This header is the key's reader and nothing else:
-// the mechanism that draws the stronger halo is built apart from it. The key is live, so a consumer reads it again at each
-// configure sweep.
+// Both profiles read it (flat_profile_keys.h lists the key for the flat one). This header is the key's reader and nothing else:
+// the mechanisms that draw the stronger halo are built apart from it (src/d3d11/flat_star_glow.h, src/d3d11/vr_star_glow.h). The key
+// is live, so a consumer reads it again at each configure sweep.
 //
 // Exact text, as every choice key is read (ui_layer_math.h: uiQualityParse): "125" is a choice; "125.0", "1.25" and "125%" are not.
 // An unrecognised value is the STOCK 100 with *recognised = false for the caller's one-time note -- a typo must not strengthen the

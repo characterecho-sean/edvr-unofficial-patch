@@ -30,6 +30,7 @@
 #pragma once
 
 #include "../../include/edvr_plugin_api.h"
+#include "../common/star_glow_bloom.h"   // sgb::Bloom: menuStarGlowBloom
 #include <cstdint>
 
 struct ID3D11Device;
@@ -63,6 +64,9 @@ void menuFlatResize();
 void menuProfileSwitch();
 // Whether the menu has run its configure block for the profile now active (tools\profile_switch_test reads it).
 bool menuIsConfigured();
+// Elite's Bloom option as the Star glow hint's reader (sgb::Watch, star_glow_bloom_reader.h) last found it: unknown until the setting has been above 100 and the
+// files were read. The headset's star glow (vr_star_glow.h) pauses on the same answer the hint is shown for. Frame thread, after menuTick has refreshed it.
+sgb::Bloom menuStarGlowBloom();
 
 // Raw pad hotkeys are read independently of Elite's XInput door. While the
 // drawn flat panel owns navigation, suppress conflicting existing ini bindings.

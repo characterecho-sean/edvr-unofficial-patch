@@ -30,6 +30,10 @@
 // Unknown (kUnknownReads); a read that is a known state is believed at once (the tag is early in the file, and the new value is
 // written in order).
 //
+// THE FILE HALF IS SHARED. readPresetTag finds the active preset's file (Custom or stock, above) and the text of ONE tag in it; the terrain
+// toggle reads TerrainCheckerboardRenderingEnabled through it, and src/d3d11/star_glow_bloom_reader.h reads BloomQuality through it, so
+// there is one parser of the stock presets and one of the Custom pick.
+//
 // Header-only: the code here is what src/d3d11/terrain_checkerboard.cpp runs on its worker thread, and tools\terrain_checkerboard_test
 // drives it on fixture folders. It reads files and never writes one; no Elite process state, no config key.
 #pragma once
@@ -112,24 +116,26 @@ inline void setReason(Reading* r, const char* fmt, ...) {
 }
 
 // ---- the read --------------------------------------------------------------------------------------------------------------
-// One read of the active preset's toggle. `folder` is Elite's Options\Graphics folder, `gameDir` the folder of the game's exe.
-inline Reading readTerrainCheckerboard(const std::wstring& folder, const std::wstring& gameDir) {
-    Reading r;
+// The file half of a read of the active preset: the text of `tag` in the active preset's file, into *out (preset, source, value; the
+// reason when it could not be read, with the state left Unknown). True when the tag's text is in out->value. `folder` is Elite's
+// Options\Graphics folder, `gameDir` the folder of the game's exe. The caller says what the text means.
+inline bool readPresetTag(const std::wstring& folder, const std::wstring& gameDir, const char* tag, Reading* out) {
+    Reading& r = *out;
     const EliteFolderListing listing = flatListEliteGraphics(folder);
     if (!listing.folder) {
         setReason(&r, "no Elite graphics settings folder was found at Frontier Developments\\Elite Dangerous\\Options\\Graphics under LocalAppData");
-        return r;
+        return false;
     }
     std::string settings;
     if (!listing.settings || !flatReadSmallFile(folder + L"\\Settings.xml", &settings)) {
         setReason(&r, "Settings.xml is missing or unreadable, so the active preset is not known");
-        return r;
+        return false;
     }
     // Settings.xml is asked for the preset's name and nothing else: its own tag of the same name is not the toggle.
     std::string preset;
     if (!flatXmlText(stripXmlComments(settings), "PresetName", &preset) || preset.empty()) {
         setReason(&r, "Settings.xml names no PresetName, so the active preset is not known");
-        return r;
+        return false;
     }
     readerCopy(r.preset, sizeof(r.preset), preset);
 
@@ -146,33 +152,41 @@ inline Reading readTerrainCheckerboard(const std::wstring& folder, const std::ws
         const int pick = flatPickCustomFxcfg(versioned);
         if (pick < 0) {
             setReason(&r, "preset Custom but the folder has no Custom.<major>.<minor>.fxcfg");
-            return r;
+            return false;
         }
         const std::string& name = versioned[static_cast<size_t>(pick)].name;
         readerCopy(r.source, sizeof(r.source), name);
         if (!flatReadSmallFile(folder + L"\\" + std::wstring(name.begin(), name.end()), &xml)) {
             setReason(&r, "preset Custom but %s could not be read", r.source);
-            return r;
+            return false;
         }
     } else {
         if (!plausibleStockPreset(preset)) {
             setReason(&r, "preset %s is not Custom or a stock preset, so no file is read for it", r.preset);
-            return r;
+            return false;
         }
         readerCopy(r.source, sizeof(r.source), "OptionDefaults\\" + preset + ".fxcfg");
         if (gameDir.empty() ||
             !flatReadSmallFile(gameDir + L"\\OptionDefaults\\" + std::wstring(preset.begin(), preset.end()) + L".fxcfg", &xml)) {
             setReason(&r, "preset %s has no readable %s beside the game, so it is not a stock preset Elite ships", r.preset, r.source);
-            return r;
+            return false;
         }
     }
 
     std::string text;
-    if (!flatXmlText(stripXmlComments(xml), kTag, &text)) {
-        setReason(&r, "%s has no %s", r.source, kTag);
-        return r;
+    if (!flatXmlText(stripXmlComments(xml), tag, &text)) {
+        setReason(&r, "%s has no %s", r.source, tag);
+        return false;
     }
     readerCopy(r.value, sizeof(r.value), text);
+    return true;
+}
+
+// One read of the active preset's toggle.
+inline Reading readTerrainCheckerboard(const std::wstring& folder, const std::wstring& gameDir) {
+    Reading r;
+    if (!readPresetTag(folder, gameDir, kTag, &r)) return r;
+    const std::string text = r.value;
     if (_stricmp(text.c_str(), "true") == 0 || text == "1") r.state = State::On;
     else if (_stricmp(text.c_str(), "false") == 0 || text == "0") r.state = State::Off;
     else setReason(&r, "%s holds %s=%s, which is neither true nor false", r.source, kTag, r.value);

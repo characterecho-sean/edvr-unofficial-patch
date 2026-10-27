@@ -2,11 +2,13 @@
 """The mutation proof for tools\\terrain_checkerboard_test: the rig fails when a rule of the VR terrain checkerboard hint, or a wiring pin, is broken.
 
 The rig (terrain_checkerboard_test.cpp) pins the words and the pure picks (T1, T2), the reader on fixture folders (T3), the monitor's rule for a
-half-written file (T4), the worker thread on a real log (T5) and the wiring in menu.cpp, the worker and the headers as source pins (T6). A rig that
+half-written file (T4), the worker thread on a real log (T5), the wiring in menu.cpp, the worker and the headers as source pins (T6) and Elite's
+Bloom for the Star glow hint, which reads BloomQuality through the same reader (T7). A rig that
 passes proves little until it is seen to FAIL on a source that breaks the rule it pins. This tool does that, for three kinds of mutation:
 
-  code    one textual edit of the words header or the reader header, in a temp copy of the sources OUTSIDE the repo; the rig is built against the
-          edited copies (-DTCB_NOTICE_HEADER, -DTCB_READER_HEADER, -DTCB_MUTANT, which leaves the worker out) and run on the rule's case;
+  code    one textual edit of the words header, the reader header or the two Star glow Bloom headers, in a temp copy of the sources OUTSIDE the
+          repo; the rig is built against the edited copies (-DTCB_NOTICE_HEADER, -DTCB_READER_HEADER, -DTCB_BLOOM_HEADER, -DTCB_MUTANT, which
+          leaves the worker out) and run on the rule's case;
   worker  one textual edit of the worker's source (terrain_checkerboard.cpp), the rig built with it and the real Config, Log and fault guard, and run
           on T5 (the thread, the real log and tools\\edvr_log.py);
   pin     one textual edit of a COPY of a source file the rig's pins read (menu.cpp, the worker, the headers, the flat runtime, the proxy, the device
@@ -40,6 +42,8 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
 NOTICE = "src/common/terrain_checkerboard_notice.h"
 READER = "src/d3d11/terrain_checkerboard_reader.h"
+BLOOM = "src/common/star_glow_bloom.h"
+BLOOM_READER = "src/d3d11/star_glow_bloom_reader.h"
 WORKER = "src/d3d11/terrain_checkerboard.cpp"
 WORKER_H = "src/d3d11/terrain_checkerboard.h"
 MENU = "src/d3d11/menu.cpp"
@@ -59,9 +63,11 @@ RUN_TIMEOUT = 180.0
 
 # The files a temp tree holds for each kind (a mutation edits one of them; the rest are copies). Relative paths inside it are the repo's, so the
 # sources' relative includes resolve inside the temp tree.
-HEADER_FILES = [NOTICE, READER, FLAT_SETTINGS, "src/d3d11/flat_mono_frame.h", "src/d3d11/flat_temporal_model.h", "src/common/elite_graphics_folder.h"]
+HEADER_FILES = [NOTICE, READER, BLOOM, BLOOM_READER, FLAT_SETTINGS, "src/d3d11/flat_mono_frame.h", "src/d3d11/flat_temporal_model.h", "src/common/elite_graphics_folder.h"]
 WORKER_FILES = HEADER_FILES + [WORKER, WORKER_H, "src/common/config.h", "src/common/ini_name.h", "src/common/runtime_profile.h", "src/common/guard.h", "src/common/log.h"]
-PIN_FILES = [NOTICE, READER, WORKER, WORKER_H, FLAT_SETTINGS, MENU, FLAT_RUNTIME, PROXY, HOOK]
+PIN_FILES = [NOTICE, READER, BLOOM, BLOOM_READER, WORKER, WORKER_H, FLAT_SETTINGS, MENU, FLAT_RUNTIME, PROXY, HOOK]
+CODE_TARGETS = (NOTICE, READER, BLOOM, BLOOM_READER)   # the headers a code mutation edits; the header flavour of the rig runs the rules below
+CODE_RULES = ("T1", "T2", "T3", "T4", "T7")
 
 
 class Mutant:
@@ -72,7 +78,7 @@ class Mutant:
         self.why = why
         self.target = target                                                    # the file edited
         self.rule = re.match(r"T\d+", self.caught[0]).group(0)                  # the rig's case to run
-        if name.startswith("pin-") or target not in (NOTICE, READER, WORKER):
+        if name.startswith("pin-") or target not in CODE_TARGETS + (WORKER,):
             self.kind = "pin"
         else:
             self.kind = "worker" if target == WORKER else "code"
@@ -83,6 +89,7 @@ def M(name, caught, edits, why, target):
 
 
 N, R, W = NOTICE, READER, WORKER
+B, BR = BLOOM, BLOOM_READER
 MUTANTS = [
     # ---- T1: the words and the constants ------------------------------------------------------------------------------------------
     M("toast-too-long", "T1b", [('"Distant terrain shimmers: turn off terrain checkerboard"', '"Distant terrain shimmers a lot: turn off terrain checkerboard"')], "the toast is past 55 characters", N),
@@ -116,7 +123,7 @@ MUTANTS = [
     M("log-unbounded", "T2d", [("if (*logged < kLogMax) { ++*logged; return LogDue::Line; }", "{ ++*logged; return LogDue::Line; }")], "no bound on the log", N),
     M("log-no-limit-line", "T2d", [("    if (*logged == kLogMax) { ++*logged; return LogDue::Limit; }\n", "")], "the bound is reached without saying so", N),
     # ---- T3: the reader on fixture folders ----------------------------------------------------------------------------------------------
-    M("reads-settings-tag", ("T3a", "T3b", "T3i"), [("flatXmlText(stripXmlComments(xml), kTag, &text)", "flatXmlText(stripXmlComments(settings), kTag, &text)")], "the toggle is read from Settings.xml's own tag", R),
+    M("reads-settings-tag", ("T3a", "T3b", "T3i"), [("flatXmlText(stripXmlComments(xml), tag, &text)", "flatXmlText(stripXmlComments(settings), tag, &text)")], "the toggle is read from Settings.xml's own tag", R),
     M("lowest-version", "T3c", [("const int pick = flatPickCustomFxcfg(versioned);", "const int pick = versioned.empty() ? -1 : 0;")], "the first Custom file is read, not the highest version", R),
     M("lookalikes-allowed", "T3d", [("            if (flatCustomFxcfgVersion(f.name, &major, &minor)) versioned.push_back(f);", "            versioned.push_back(f);")], "a lookalike file is handed to the pick", R),
     M("no-custom-is-off", ("T3d", "T3e"), [('            setReason(&r, "preset Custom but the folder has no Custom.<major>.<minor>.fxcfg");', "            r.state = State::Off;")], "no Custom file reads as OFF", R),
@@ -124,13 +131,13 @@ MUTANTS = [
     M("no-folder-is-off", "T3f", [(r'        setReason(&r, "no Elite graphics settings folder was found at Frontier Developments\\Elite Dangerous\\Options\\Graphics under LocalAppData");', "        r.state = State::Off;")],
       "no settings folder reads as OFF", R),
     M("no-preset-name-is-on", "T3f", [('        setReason(&r, "Settings.xml names no PresetName, so the active preset is not known");', "        r.state = State::On;")], "no PresetName reads as ON", R),
-    M("tag-absent-is-off", "T3g", [('        setReason(&r, "%s has no %s", r.source, kTag);', "        r.state = State::Off;")], "an absent tag reads as OFF", R),
-    M("tag-absent-is-on", "T3g", [('        setReason(&r, "%s has no %s", r.source, kTag);', "        r.state = State::On;")], "an absent tag reads as the game's inferred default, ON", R),
+    M("tag-absent-is-off", "T3g", [('        setReason(&r, "%s has no %s", r.source, tag);', "        r.state = State::Off;")], "an absent tag reads as OFF", R),
+    M("tag-absent-is-on", "T3g", [('        setReason(&r, "%s has no %s", r.source, tag);', "        r.state = State::On;")], "an absent tag reads as the game's inferred default, ON", R),
     M("value-yes-on", "T3b", [('if (_stricmp(text.c_str(), "true") == 0 || text == "1") r.state = State::On;', 'if (_stricmp(text.c_str(), "true") == 0 || text == "1" || _stricmp(text.c_str(), "yes") == 0) r.state = State::On;')], "yes is a value", R),
     M("value-one-lost", "T3b", [('if (_stricmp(text.c_str(), "true") == 0 || text == "1") r.state = State::On;', 'if (_stricmp(text.c_str(), "true") == 0) r.state = State::On;')], "1 is not on", R),
     M("value-true-case", "T3b", [('if (_stricmp(text.c_str(), "true") == 0 || text == "1") r.state = State::On;', 'if (text == "true" || text == "1") r.state = State::On;')], "True and TRUE are not on", R),
     M("false-is-on", "T3a", [('else if (_stricmp(text.c_str(), "false") == 0 || text == "0") r.state = State::Off;', 'else if (_stricmp(text.c_str(), "false") == 0 || text == "0") r.state = State::On;')], "false reads as ON", R),
-    M("comments-read", "T3j", [("flatXmlText(stripXmlComments(xml), kTag, &text)", "flatXmlText(xml, kTag, &text)")], "a commented-out tag is read", R),
+    M("comments-read", "T3j", [("flatXmlText(stripXmlComments(xml), tag, &text)", "flatXmlText(xml, tag, &text)")], "a commented-out tag is read", R),
     M("settings-comments-read", "T3j", [('flatXmlText(stripXmlComments(settings), "PresetName", &preset)', 'flatXmlText(settings, "PresetName", &preset)')], "a commented-out PresetName is read", R),
     M("open-comment-kept", "T3j", [("            if (end == std::string::npos) break;", "            if (end == std::string::npos) { out += xml[i++]; continue; }")], "a comment that never ends does not take the rest of the file", R),
     M("stock-name-unchecked", "T3l", [("        if (!plausibleStockPreset(preset)) {", "        if (false) {")], "a preset name that could be a path is put in one", R),
@@ -200,15 +207,60 @@ MUTANTS = [
     M("pin-log-unbounded", "T6e", [("    switch (tcn::logDue(logged)) {", "    switch (tcn::LogDue::Line) {")], "the worker's log has no bound", WORKER),
     M("pin-publish-every-poll", "T6e", [("    if (stateMoved) {\n        const uint32_t before", "    if (true) {\n        const uint32_t before")], "every change is published as a new version, not only a change of the state", WORKER),
     M("pin-worker-reads-config", "T6e", [('#include "../common/config.h"', '#include "../common/config.h"\n// Config::get().getBool("terrain", false);')], "the worker reads a config key (the feature has none)", WORKER),
-    M("pin-reader-settings-tag", "T6f", [("flatXmlText(stripXmlComments(xml), kTag, &text)", "flatXmlText(stripXmlComments(settings), kTag, &text)")], "the toggle is asked of Settings.xml", R),
-    M("pin-reader-third-search", "T6f", [("    readerCopy(r.value, sizeof(r.value), text);", "    readerCopy(r.value, sizeof(r.value), text);\n    std::string again;\n    flatXmlText(settings, kTag, &again);")], "Settings.xml is asked for the tag as well", R),
+    M("pin-reader-settings-tag", "T6f", [("flatXmlText(stripXmlComments(xml), tag, &text)", "flatXmlText(stripXmlComments(settings), tag, &text)")], "the toggle is asked of Settings.xml", R),
+    M("pin-reader-third-search", "T6f", [("    readerCopy(r.value, sizeof(r.value), text);", "    readerCopy(r.value, sizeof(r.value), text);\n    std::string again;\n    flatXmlText(settings, tag, &again);")], "Settings.xml is asked for the tag as well", R),
     M("pin-reader-copies-listing", "T6f", [("    const EliteFolderListing listing = flatListEliteGraphics(folder);", "    WIN32_FIND_DATAW fd{};\n    FindFirstFileW(L\"\", &fd);\n    const EliteFolderListing listing = flatListEliteGraphics(folder);")],
       "the folder listing is written again here instead of called", R),
     M("pin-reader-pick-copied", "T6f", [("const int pick = flatPickCustomFxcfg(versioned);", "const int pick = versioned.empty() ? -1 : 0;")], "the highest-version pick is not the flat panel's helper", R),
-    M("pin-reader-writes", "T6f", [("    std::string text;\n    if (!flatXmlText(stripXmlComments(xml), kTag, &text)) {", "    DeleteFileW(L\"\");\n    std::string text;\n    if (!flatXmlText(stripXmlComments(xml), kTag, &text)) {")], "the reader writes or deletes a file", R),
+    M("pin-reader-writes", "T6f", [("    std::string text;\n    if (!flatXmlText(stripXmlComments(xml), tag, &text)) {", "    DeleteFileW(L\"\");\n    std::string text;\n    if (!flatXmlText(stripXmlComments(xml), tag, &text)) {")], "the reader writes or deletes a file", R),
+    M("pin-reader-not-shared", "T6f", [("    if (!readPresetTag(folder, gameDir, kTag, &r)) return r;", "    if (!readPresetTag(folder, gameDir, \"TerrainCheckerboardRenderingEnabled\", &r)) return r;")],
+      "the terrain toggle reads another spelling of the tag than the constant the pin names", R),
     M("pin-notice-includes-windows", "T6g", [("#include <cstdio>", "#include <cstdio>\n#include <windows.h>")], "the words header depends on Windows", N),
     M("pin-notice-names-config", "T6g", [("namespace edvr {\nnamespace tcn {", "namespace edvr {\nclass Config;\nnamespace tcn {")], "the words header names the config", N),
     M("pin-notice-includes-string", "T6g", [("#include <cstdint>", "#include <cstdint>\n#include <string>")], "the words header grows a dependency", N),
+    # ---- T7: Elite's Bloom for the Star glow hint -----------------------------------------------------------------------------------------
+    # the meaning of BloomQuality's text
+    M("bloom-zero-is-on", "T7a", [("    if (number == 0) return Bloom::Off;", "    if (number == 0) return Bloom::On;")], "BloomQuality 0 reads as ON", B),
+    M("bloom-negative-is-off", "T7a", [("    return number > 0 ? Bloom::On : Bloom::Unknown;", "    return number > 0 ? Bloom::On : Bloom::Off;")], "a negative quality reads as OFF", B),
+    M("bloom-false-is-on", "T7a", [('    if (_stricmp(text, "false") == 0) return Bloom::Off;', '    if (_stricmp(text, "false") == 0) return Bloom::On;')], "false reads as ON", B),
+    M("bloom-fraction-is-whole", "T7a", [("    if (end == text || *end != 0) return Bloom::Unknown;", "    if (end == text) return Bloom::Unknown;")], "2x and 0.5 read as numbers", B),
+    # the hint's condition
+    M("bloom-hint-at-100", "T7b", [("percent > kStockPercent && state == Bloom::Off ?", "percent >= kStockPercent && state == Bloom::Off ?")], "the hint shows at the stock 100", B),
+    M("bloom-hint-unknown-is-off", "T7b", [("percent > kStockPercent && state == Bloom::Off ?", "percent > kStockPercent && state != Bloom::On ?")], "an unknown Bloom is treated as off", B),
+    M("bloom-hint-inverted", "T7b", [("percent > kStockPercent && state == Bloom::Off ?", "percent > kStockPercent && state == Bloom::On ?")], "the condition is inverted: the hint shows with Bloom on", B),
+    M("bloom-hint-ignores-setting", "T7b", [("percent > kStockPercent && state == Bloom::Off ?", "state == Bloom::Off ?")], "the hint shows whatever the setting", B),
+    M("bloom-hint-words", "T7b", [("so it changes nothing until Bloom is on.", "so it may change little until Bloom is on.")], "the words lose the fact that it changes nothing", B),
+    # where each menu says it
+    M("bloom-note-every-tab", "T7c", [("    return flatProfile && visualTab ? hint(percent, state) : nullptr;", "    return flatProfile ? hint(percent, state) : nullptr;")], "the flat note shows on every tab", B),
+    M("bloom-note-in-vr", "T7c", [("    return flatProfile && visualTab ? hint(percent, state) : nullptr;", "    return visualTab ? hint(percent, state) : nullptr;")], "the note shows in the VR menu too", B),
+    M("bloom-hint-any-row", "T7c", [("    return !flatProfile && starGlowRowHighlighted ? hint(percent, state) : nullptr;", "    return !flatProfile ? hint(percent, state) : nullptr;")], "the VR hint shows on every row", B),
+    M("bloom-hint-in-flat", "T7c", [("    return !flatProfile && starGlowRowHighlighted ? hint(percent, state) : nullptr;", "    return starGlowRowHighlighted ? hint(percent, state) : nullptr;")], "the hint shows in the flat panel as well as the note", B),
+    # the log lines
+    M("bloom-log-off-line", "T7h", [("Elite's Bloom is off (preset %s, BloomQuality %s): the glow changes nothing until Bloom is on", "Elite's Bloom is off (preset %s, BloomQuality %s)")], "the off line no longer says the glow changes nothing", B),
+    M("bloom-log-on-line", "T7h", [("Elite's Bloom is on (preset %s, BloomQuality %s)", "Elite's Bloom is on (preset %s)")], "the on line drops the value", B),
+    M("bloom-log-unknown-blank", "T7h", [('r.reason[0] ? r.reason : "no reason was recorded"', 'r.reason')], "an unknown line with no reason ends in an empty bracket", B),
+    # the reader
+    M("bloom-wrong-tag", "T7d", [('inline constexpr char kTag[] = "BloomQuality";', 'inline constexpr char kTag[] = "DOFEnabled";')], "another tag is read", BR),
+    M("bloom-unreadable-is-off", ("T7d", "T7e"), [('        std::snprintf(r.reason, sizeof(r.reason), "%s", raw.reason);\n        return r;', '        std::snprintf(r.reason, sizeof(r.reason), "%s", raw.reason);\n        r.state = Bloom::Off;\n        return r;')],
+      "a missing folder, file or tag reads as OFF", BR),
+    M("bloom-nonnumber-is-off", "T7e", [("    r.state = bloomOfText(r.value);", "    r.state = bloomOfText(r.value) == Bloom::On ? Bloom::On : Bloom::Off;")], "a value that is no number reads as OFF", BR),
+    # the Watch: what it reads, and when
+    M("bloom-watch-reads-at-100", "T7h", [("        if (percent <= kStockPercent || percent == before) return false;", "        if (percent == before) return false;")], "the files are read at the stock 100", BR),
+    M("bloom-watch-rise-not-said", "T7h", [("        return readNow(before <= kStockPercent, line);", "        return readNow(false, line);")], "a rise above 100 that finds the state last said is not said", BR),
+    M("bloom-watch-move-rereads-nothing", "T7h", [("        return readNow(before <= kStockPercent, line);", "        return before > kStockPercent ? false : readNow(true, line);")], "a move above 100 reads nothing", BR),
+    M("bloom-watch-open-no-read", "T7h", [("        if (percent_ <= kStockPercent) return false;\n        return readNow(false, line);", "        return false;")], "a menu opening reads nothing", BR),
+    M("bloom-watch-open-at-100", "T7h", [("        if (percent_ <= kStockPercent) return false;\n        return readNow(false, line);", "        return readNow(false, line);")], "a menu opening reads at the stock 100", BR),
+    M("bloom-watch-change-silent", "T7h", [("        if (!rise && logged_ && reading_.state == loggedState_) return false;", "        if (!rise) return false;")], "a change of state after the rise is not said", BR),
+    M("bloom-watch-always-says", "T7h", [("        if (!rise && logged_ && reading_.state == loggedState_) return false;", "        if (false) return false;")], "every read says its line, state changed or not", BR),
+    # the pins: one parser, pure words, one author of the lines
+    M("pin-bloom-reader-parses", "T7i", [("    tcn::Reading raw;\n", "    tcn::Reading raw;\n    std::string again;\n    flatXmlText(std::string(), kTag, &again);\n")], "the Bloom reader parses a tag itself", BR),
+    M("pin-bloom-reader-opens-file", "T7i", [("    tcn::Reading raw;\n", "    tcn::Reading raw;\n    CreateFileW(L\"\", GENERIC_READ, 0, nullptr, OPEN_EXISTING, 0, nullptr);\n")], "the Bloom reader opens a file itself", BR),
+    M("pin-bloom-reader-stock-path", "T7i", [("    tcn::Reading raw;\n", "    tcn::Reading raw;\n    const std::wstring stock = gameDir + L\"\\\\Stock\";\n")], "the Bloom reader builds a file path itself", BR),
+    M("pin-bloom-reader-says-line", "T7i", [("// WHAT IT SAYS.", "// \"star glow: Elite's Bloom is on\"\n// WHAT IT SAYS.")], "the reader writes a second copy of a line", BR),
+    M("pin-bloom-pure-windows", "T7i", [("#include <cstdio>", "#include <cstdio>\n#include <windows.h>")], "the words header depends on Windows", B),
+    M("pin-bloom-pure-string", "T7i", [("#include <cstring>", "#include <cstring>\n#include <string>\n// std::string")], "the words header grows a string of its own", B),
+    M("pin-bloom-line-copied", "T7i", [("// This header is the pure half:", "// \"star glow: Elite's Bloom is off\"\n// This header is the pure half:")], "a fourth spelling of the lines", B),
+    M("pin-bloom-terrain-not-shared", "T7i", [("    if (!readPresetTag(folder, gameDir, kTag, &r)) return r;", "    if (false) return r;")], "the terrain toggle no longer reads through the function the Bloom reader calls", R),
 ]
 
 
@@ -378,8 +430,8 @@ def run_all(only=None, jobs=None, keep=False, dry_run=False, out=sys.stdout):
             print(text, file=out)
             print("the rig does not compile as a header mutant host (-DTCB_MUTANT)", file=out)
             return 1
-        outcome, detail = run_rig(header_exe, "T1,T2,T3,T4,T6", tc)
-        print("control (the header flavour, T1..T4 and T6): %s %s" % (outcome, detail), file=out)
+        outcome, detail = run_rig(header_exe, "T1,T2,T3,T4,T6,T7", tc)
+        print("control (the header flavour, T1..T4, T6 and T7): %s %s" % (outcome, detail), file=out)
         if outcome != "pass":
             print("the header flavour does not pass on the unmutated tree; nothing below means anything", file=out)
             return 1
@@ -393,7 +445,8 @@ def run_all(only=None, jobs=None, keep=False, dry_run=False, out=sys.stdout):
             except ValueError as error:
                 return m, "badedit", str(error)
             root = stage_root(work, m.name, m.target, text, HEADER_FILES)
-            define = ['/DTCB_NOTICE_HEADER="%s"' % str(root / NOTICE).replace("\\", "/"), '/DTCB_READER_HEADER="%s"' % str(root / READER).replace("\\", "/"), "/DTCB_MUTANT"]
+            define = ['/DTCB_NOTICE_HEADER="%s"' % str(root / NOTICE).replace("\\", "/"), '/DTCB_READER_HEADER="%s"' % str(root / READER).replace("\\", "/"),
+                      '/DTCB_BLOOM_HEADER="%s"' % str(root / BLOOM_READER).replace("\\", "/"), "/DTCB_MUTANT"]
             d = work / ("build_" + m.name)
             d.mkdir()
             code, output, exe = build_rig(tc, d, extra=define, sources=[RIG])
@@ -499,7 +552,7 @@ def self_test():
         if m.kind == "worker":
             check(m.rule == "T5", "%s: a worker mutation is caught by T5 (the thread and the real log)" % m.name)
         if m.kind == "code":
-            check(m.rule in ("T1", "T2", "T3", "T4"), "%s: a header mutation is caught by T1..T4, which the header flavour runs" % m.name)
+            check(m.rule in CODE_RULES, "%s: a header mutation is caught by %s, which the header flavour runs" % (m.name, "/".join(CODE_RULES)))
     rules = {m.rule for m in MUTANTS}
     check(rules == cases, "every rule of the rig has a mutation, and only rules of the rig: %s vs %s" % (sorted(rules), sorted(cases)))
     labels = set(re.findall(r'"(T\d+[a-z]):', rig))
