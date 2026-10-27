@@ -657,7 +657,10 @@ void pins() {
     // P2: ui_depth publishes the composite flag from the loop that already finds the surface: false first, before any early return, and set
     // from the same `composite` the pass classifies by. And depth is LEFT OUT for the new pair on purpose: no stand-in names it and the
     // hologram family list does not, because the stand-in's input signature (TEXCOORD4/7/8) is not the new vertex shader's output.
-    const std::string onEye = functionBody(depth, "bool uiDepthOnEyeDraw(ID3D11DeviceContext* ctx, const HoloDraw& draw) {");
+    // Since 2026-10-27 the call is two functions (the memo's wrapper, which resets the outputs and tests the pass, and the classifier it
+    // calls after them); the pins read them in that order, as the one body they were before.
+    const std::string onEye = functionBody(depth, "bool uiDepthOnEyeDraw(ID3D11DeviceContext* ctx, const HoloDraw& draw) {") +
+                              functionBody(depth, "static bool classifyEyeDraw(ID3D11DeviceContext* ctx, classifiermemo::Exit* exit) {");
     const auto depthPlaces = [](const std::string& body) {
         return inOrder(body, {"detail::g_uiDepthDrawComposite = false;", "if (!detail::g_uiDepthOn || detail::g_uiDepthStoodDown) return false;",
                               "const bool composite = surfaceSlot >= 0;", "detail::g_uiDepthDrawComposite = composite;", "const uint64_t h = boundVsHash(ctx);"}) &&

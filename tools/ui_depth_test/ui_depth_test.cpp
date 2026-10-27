@@ -39,6 +39,8 @@ void Log::note(const char*, ...) {}
 // object_probe.h) to gate its per-draw logging; driven directly below,
 // the way g_holoDepthOn and the rest of detail:: already are on this page.
 namespace detail { bool g_objectProbeOn = false; bool g_objectProbeLedgerOn = false; }
+// perf_monitor.h's draw-sample flag, which the eye-draw memo's verification reads (inline in the header); this rig never samples.
+namespace detail { bool g_perfMonitorSampleDraws = false; }
 int64_t qpcNow() { LARGE_INTEGER t;QueryPerformanceCounter(&t);return t.QuadPart; }
 int64_t qpcFrequency() { LARGE_INTEGER t;QueryPerformanceFrequency(&t);return t.QuadPart; }
 int guardFilter(unsigned long, const char*) { return EXCEPTION_EXECUTE_HANDLER; }
@@ -50,6 +52,7 @@ float Config::getFloat(const char*, float) const { std::abort(); }
 std::string Config::getString(const char*, const char*) const { std::abort(); }
 void* bindingGet(BindSlot) { std::abort(); }
 uint32_t bindingGeneration(BindSlot) { std::abort(); }
+uint32_t bindingEyeKeyGeneration() { std::abort(); }   // the eye-draw memo's key (2026-10-27): read only after the classifier's own on test
 uint64_t bindingShaderHash(BindSlot) { std::abort(); }
 bool bindingResolve(void*, ResourceInfo*) { std::abort(); }
 bool bindingResolveResource(void*, ResourceInfo*) { std::abort(); }

@@ -6,6 +6,7 @@
 #include "frame_ticks.h"
 #include "gpu_frame_timing.h"
 #include "vscreen.h"   // vScreenAaOffForDraws, vScreenEyeDrawsThisFrame: the draw hook CPU line
+#include "ui_depth.h"        // uiDepthLogMemoWindow: the ui depth memo line at the 1800-frame edge (built 2026-10-27, temporary)
 #include "gpu_census.h"      // gpuCensusFrameSpan: the overlay's GPU time with the application clock off (2026-10-14)
 #include "frame_span_tile.h" // gpuTimeTileText: which GPU number the GPU TIME tile shows
 
@@ -1238,6 +1239,9 @@ void perfMonitorFrame(ID3D11Device* dev) {
             drawstep::formatCallsLine(stepLine, sizeof(stepLine), g_drawSteps, info);
             Log::get().note("%s", stepLine);
             g_drawSteps.reset();
+            // The ui_depth eye-draw memo's window (built 2026-10-27, the same desk design, temporary): its hits, misses by cause,
+            // verified hits and mismatches over this window, one line, then its counters reset.
+            uiDepthLogMemoWindow(s.frameNo);
         }
         s.drawWindowMs = 0.0; s.drawWindowMaxMs = 0.0f; s.drawWindowSamples = 0;
         // Written every window, quiet or not, so a window with no refresh in it (all zeros) can be told from a build that does not have this line.

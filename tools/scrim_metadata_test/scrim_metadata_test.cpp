@@ -91,10 +91,67 @@ ID3D11ShaderResourceView* boundSrv(ID3D11DeviceContext* context, UINT slot) {
 
 uint64_t calls() { return edvr::scrimMetadataResolveCallsForTest(); }
 
+// The eye draws' aggregate generation (binding_shadow.h bindingEyeKeyGeneration, built 2026-10-27 for the ui_depth eye-draw memo): this
+// rig links the real binding_shadow.cpp, so it checks the real writers. It moves on a set, an invalidate and a shader set of each
+// of the eight slots it follows (the vertex and pixel shaders, pixel SRV 0..3, render target 0, the depth view) and on no other slot,
+// and on every forget-all and frame boundary. The checks run before any device exists: none of them touches one.
+int eyeKeyGenerationChecks() {
+    using edvr::BindSlot;
+    int checks = 0;
+    const auto in = [](uint32_t index) {
+        const BindSlot s = static_cast<BindSlot>(index);
+        return s == BindSlot::Vs || s == BindSlot::Ps || s == BindSlot::PsSrv0 || s == BindSlot::PsSrv1 ||
+               s == BindSlot::PsSrv2 || s == BindSlot::PsSrv3 || s == BindSlot::Rtv0 || s == BindSlot::Dsv0;
+    };
+    int followed = 0;
+    int inert = 0;
+    int pointerStub = 0;
+    void* const p = &pointerStub;
+    for (uint32_t i = 0; i < static_cast<uint32_t>(BindSlot::Count); ++i) {
+        const BindSlot slot = static_cast<BindSlot>(i);
+        const bool follows = in(i);
+        followed += follows ? 1 : 0;
+        inert += follows ? 0 : 1;
+        const uint32_t beforeSet = edvr::bindingEyeKeyGeneration();
+        edvr::bindingSet(slot, p);
+        const uint32_t afterSet = edvr::bindingEyeKeyGeneration();
+        check((afterSet != beforeSet) == follows, follows ? "eye key moves on a set of a followed slot"
+                                                           : "eye key stays on a set of a slot it does not follow");
+        edvr::bindingSet(slot, p);   // the same pointer again: a rebind is a move all the same (bindingSet's own contract)
+        check((edvr::bindingEyeKeyGeneration() != afterSet) == follows,
+              follows ? "eye key moves on a rebind of the same pointer" : "eye key stays on a rebind of a slot it does not follow");
+        const uint32_t beforeInvalidate = edvr::bindingEyeKeyGeneration();
+        edvr::bindingInvalidate(slot);
+        check((edvr::bindingEyeKeyGeneration() != beforeInvalidate) == follows,
+              follows ? "eye key moves on an invalidate of a followed slot" : "eye key stays on an invalidate of a slot it does not follow");
+        const uint32_t beforeShader = edvr::bindingEyeKeyGeneration();
+        edvr::bindingSetShader(slot, p, 0x1234u);
+        check((edvr::bindingEyeKeyGeneration() != beforeShader) == follows,
+              follows ? "eye key moves on a shader set of a followed slot" : "eye key stays on a shader set of a slot it does not follow");
+        checks += 4;
+    }
+    check(followed == 8, "the eye key follows eight slots");
+    check(inert == static_cast<int>(BindSlot::Count) - 8, "every other slot is left alone");
+    const uint32_t beforeForget = edvr::bindingEyeKeyGeneration();
+    edvr::bindingForgetAll();
+    check(edvr::bindingEyeKeyGeneration() != beforeForget, "eye key moves on forget-all");
+    const uint32_t beforeBoundary = edvr::bindingEyeKeyGeneration();
+    edvr::bindingFrameBoundary();
+    check(edvr::bindingEyeKeyGeneration() != beforeBoundary, "eye key moves on the frame boundary");
+    const uint32_t beforeQuiet = edvr::bindingEyeKeyGeneration();
+    (void)edvr::bindingGet(BindSlot::Vs);
+    (void)edvr::bindingGeneration(BindSlot::Ps);
+    (void)edvr::bindingShaderHash(BindSlot::Vs);
+    check(edvr::bindingEyeKeyGeneration() == beforeQuiet, "eye key stays put when nothing is written");
+    return checks + 5;
+}
+
 }  // namespace
 
 int main() {
     try {
+        std::printf("scrim_metadata_test: %d eye key generation checks passed (the slot sweep ran per set, rebind, invalidate and shader set)\n",
+                    eyeKeyGenerationChecks());
         const auto createDevice = edvr::systemD3D11CreateDevice();
         check(createDevice != nullptr, "load System32 D3D11CreateDevice");
         ComPtr<ID3D11Device> device;

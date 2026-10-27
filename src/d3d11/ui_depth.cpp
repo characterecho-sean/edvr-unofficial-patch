@@ -32,10 +32,12 @@
 #include "../common/guard.h"
 #include "../common/log.h"
 #include "binding_shadow.h"
+#include "classifier_memo.h"   // the eye-draw classifiers' memo, its verification and its window line (built 2026-10-27)
 #include "depth_probe.h"    // depthProbeIsSceneDepth, ...Format: where the pass reads
 #include "exposure_fix.h"   // lookupShaderHash
 #include "native_on_foot_f116.h"   // F116: the terminal hide's frame order and hysteresis (pure)
 #include "object_probe.h"   // objectProbeLedgerActive: the UI content census's eye-run signal
+#include "perf_monitor.h"   // perfMonitorSampleDraws: a draw-sample frame never verifies the memo
 #include "shader_swap.h"    // shaderSwapCompilePs: the alpha-aware depth shaders
 #include "temporal_pass.h"  // temporalPassPlanes: the scene's encoding
 #include "vscreen.h"        // vScreenSetRenderTargetsRaw: the rebind past the shadow
@@ -330,6 +332,22 @@ uint32_t g_surfaceCount = 0;
 uint32_t g_surfaceNext = 0;
 uint32_t g_evictions = 0;      // ring overwrites + recycled-address drops
 bool     g_ringNoted = false;
+
+// The classifier epoch (built 2026-10-27; docs\engine-render-performance-2026-09-19.md, "Desk design: the ui_depth eye-draw memo").
+// It moves at every write to what the two eye-draw classifiers decline from, so a memoised decline cannot outlive its inputs: the
+// surface table (addSurface, surfaceMatches' eviction, the shutdown reset), the view memo's overrides (the chrome tracker's put, the
+// shutdown clear), the family, exclude and hologram family lists (uiDepthConfigure, holoDepthConfigure), and every frame boundary,
+// so an answer never lives past its frame either. A view-memo miss that only records what the table already says needs no bump.
+// This is behaviour, not an instrument: no config key, a fix that always helps. Each write site carries the bump beside it.
+uint32_t g_classifierEpoch = 1;
+
+// The two memos (behaviour), and the verify frame and the counters around them (a TEMPORARY instrument, same desk design: a hit also
+// runs the full classifier on one frame in 16 and compares every output; the line prints at perf_monitor.cpp's 1800-frame edge, and
+// all of it comes out once the flight shows no mismatch). The verify counter is ui_depth's own, advanced at uiDepthFrameBoundary.
+classifiermemo::Memo  g_eyeMemo, g_holoMemo;
+classifiermemo::Tally g_eyeTally, g_holoTally;
+uint32_t g_memoFrameCounter = 0;
+bool     g_memoVerifyFrame = false;
 
 // The offscreen learner's state for the currently bound target.
 uint32_t g_rtvGen = ~0u;
@@ -760,6 +778,7 @@ bool surfaceMatches(const ResourceInfo& info) {
     --g_surfaceCount;
     if (g_surfaceNext >= g_surfaceCount) g_surfaceNext = 0;
     ++g_evictions;
+    ++g_classifierEpoch;   // the table lost a surface: a memoised decline may have rested on it
     return false;
 }
 
@@ -785,6 +804,7 @@ void addSurface(const void* res, uint32_t w, uint32_t h, uint32_t fmt, char fami
                             kMaxSurfaces);
         }
     }
+    ++g_classifierEpoch;   // a surface was added or replaced (the early return above changed nothing and needs none)
     ++g_wLearned;
 }
 
@@ -2242,6 +2262,7 @@ void holoDepthConfigure() {
     detail::g_holoDepthOn = on;
     g_holoFamilyCount = famCount;
     memcpy(g_holoFamilies, fam, famCount * sizeof(uint64_t));
+    ++g_classifierEpoch;   // after the list's writes, so a call that read the old list stores a key already out of date
     if (changed) {
         Log::get().note("hologram depth: on -- %u cockpit famil%s, %u world marker%s, "
                         "floor %.3f (display brightness), share %.2f, cockpit radius %.0f m.",
@@ -2453,6 +2474,7 @@ void uiDepthConfigure(Config& cfg) {
 
     const bool was = detail::g_uiDepthOn;
     detail::g_uiDepthOn = g_keyOn && g_passOn;
+    ++g_classifierEpoch;   // the direct and exclude lists, g_smokeOn and g_trained are all written above
     if (detail::g_uiDepthOn && !was) {
         g_announced = false;
         g_waitingNoted = false;
@@ -2550,7 +2572,10 @@ bool uiDepthLearnScannerChrome(ID3D11DeviceContext*, uint64_t vs,
     addSurface(info.resource, info.a, info.b, info.fmt, 'C');
     // The view may have been judged "not a surface" this frame or last;
     // the memo answers viewIsSurface for a hundred frames, so overwrite it.
-    if (view) g_viewMemo.put(view, g_frame, 1u);
+    if (view) {
+        g_viewMemo.put(view, g_frame, 1u);
+        ++g_classifierEpoch;   // a view the memo called "not a surface" now answers yes; a memoised decline may have rested on the old answer
+    }
     if (!(g_chromeSaid & 8u)) {
         g_chromeSaid |= 8u;
         Log::get().note("ui depth: the scanner's chrome surface (%ux%u, DXGI format %u) is "
@@ -2617,20 +2642,16 @@ void uiDepthNoteOffscreenDraw(ID3D11DeviceContext* ctx) {
     }
 }
 
-bool uiDepthOnEyeDraw(ID3D11DeviceContext* ctx, const HoloDraw& draw) {
-    detail::g_uiDepthDrawComposite = false;   // this draw's answer, set below; false on every early return
-    detail::g_uiDepthPlanetPending=false;detail::g_uiDepthPlanetSolarPending=false;
-    detail::g_uiDepthWorldScreenPending=false;
-    g_coronaPending=false;g_coronaMotion=false;
-    g_holoDraw=draw;
-    detail::g_uiDepthMode = Mode::kNone;
-    g_wantRebind = false;
-    g_wantMask = false;
-    g_rebindEye = -1;
-    g_drawEye = -1;
-    g_reissueShader = nullptr;
-    g_reissueMaskSlot = 0;
-    if (!detail::g_uiDepthOn || detail::g_uiDepthStoodDown) return false;
+// The eye-draw classifier proper: everything uiDepthOnEyeDraw does after it has reset its outputs and found the pass on. Split out
+// on 2026-10-27 so the memo (uiDepthOnEyeDraw below) can skip it and the verification can run it on demand. `*exit` says which exit
+// it took: kPlainDecline ONLY at the family gate below -- the one answer the bindings and the classifier's epoch fully determine,
+// reached before any counter, log line, shader lookup, eye resolve or scene-depth judgment -- and kOther for every other return,
+// each of which is either an answer with side effects or a decline that reads more than the memo's key.
+static bool classifyEyeDraw(ID3D11DeviceContext* ctx, classifiermemo::Exit* exit) {
+    *exit = classifiermemo::Exit::kOther;
+    // F108's refusal below counts the draw and may say so once; a draw that took it and still reaches the family gate is not a
+    // plain decline, because a hit would skip the count.
+    bool worldScreenCounted = false;
     // Cheapest first: no depth target, nothing to write (the post chain's
     // fullscreen draws, ten a frame).
     const void* dsv = bindingGet(BindSlot::Dsv0);
@@ -2677,6 +2698,7 @@ bool uiDepthOnEyeDraw(ID3D11DeviceContext* ctx, const HoloDraw& draw) {
             detail::g_uiDepthWorldScreenPending = true;
             return false;
         }
+        worldScreenCounted = true;
         ++g_worldScreenWindow.classRefused[static_cast<size_t>(why)];
         const uint32_t bit = 1u << static_cast<uint32_t>(why);
         if (!(g_worldScreenClassNoted & bit)) {
@@ -2690,7 +2712,11 @@ bool uiDepthOnEyeDraw(ID3D11DeviceContext* ctx, const HoloDraw& draw) {
         }
     }
     const bool stellar=h==kRingVs || h==kOrbitalVs;
-    if (!stellar && !composite && !(h && inList(g_families, g_familyCount, h))) return false;
+    if (!stellar && !composite && !(h && inList(g_families, g_familyCount, h))) {
+        // THE PLAIN DECLINE: nine eye draws in ten end here (the 2026-10-27 binding-repeat flight). This is the exit the memo stores.
+        if (!worldScreenCounted) *exit = classifiermemo::Exit::kPlainDecline;
+        return false;
+    }
     if (h && inList(g_exclude, g_excludeCount, h)) return false;
 
     // WHICH PROJECTION. The cockpit's families bind the scene pair and
@@ -2862,6 +2888,118 @@ bool uiDepthOnEyeDraw(ID3D11DeviceContext* ctx, const HoloDraw& draw) {
                              : "interface projection; alpha-aware depth into private scene copy for AA");
     ++g_wComposite;
     return true;
+}
+
+// What uiDepthOnEyeDraw leaves behind for the draw's caller, gathered so a memo hit can be compared with the full classifier's run.
+// Every output the call writes is here (the desk design's list); g_holoDraw is the call's argument, set before the memo, and the
+// counters and notes the positive paths make are not outputs a plain decline writes. TEMPORARY, with the verification it serves.
+namespace {
+struct EyeOutputs {
+    bool ret = false;
+    bool composite = false, planet = false, planetSolar = false, worldScreen = false;
+    bool corona = false, coronaMotion = false, wantRebind = false, wantMask = false;
+    Mode mode = Mode::kNone;
+    int rebindEye = -1, drawEye = -1, maskSlot = 0;
+    const DepthShader* shader = nullptr;
+};
+
+EyeOutputs captureEyeOutputs(bool ret) {
+    EyeOutputs o;
+    o.ret = ret;
+    o.composite = detail::g_uiDepthDrawComposite;
+    o.planet = detail::g_uiDepthPlanetPending;
+    o.planetSolar = detail::g_uiDepthPlanetSolarPending;
+    o.worldScreen = detail::g_uiDepthWorldScreenPending;
+    o.corona = g_coronaPending;
+    o.coronaMotion = g_coronaMotion;
+    o.mode = detail::g_uiDepthMode;
+    o.wantRebind = g_wantRebind;
+    o.wantMask = g_wantMask;
+    o.rebindEye = g_rebindEye;
+    o.drawEye = g_drawEye;
+    o.shader = g_reissueShader;
+    o.maskSlot = g_reissueMaskSlot;
+    return o;
+}
+
+// Bit i is output i of classifiermemo::EyeOutput. The exit is the caller's to add: it is not a global the call writes.
+uint32_t eyeOutputDiff(const EyeOutputs& a, const EyeOutputs& b) {
+    namespace cm = classifiermemo;
+    uint32_t mask = 0;
+    const auto note = [&](bool differs, cm::EyeOutput which) { if (differs) mask |= 1u << which; };
+    note(a.ret != b.ret, cm::kEyeReturn);
+    note(a.composite != b.composite, cm::kEyeComposite);
+    note(a.planet != b.planet, cm::kEyePlanet);
+    note(a.planetSolar != b.planetSolar, cm::kEyePlanetSolar);
+    note(a.worldScreen != b.worldScreen, cm::kEyeWorldScreen);
+    note(a.corona != b.corona, cm::kEyeCorona);
+    note(a.coronaMotion != b.coronaMotion, cm::kEyeCoronaMotion);
+    note(a.mode != b.mode, cm::kEyeMode);
+    note(a.wantRebind != b.wantRebind, cm::kEyeWantRebind);
+    note(a.wantMask != b.wantMask, cm::kEyeWantMask);
+    note(a.rebindEye != b.rebindEye, cm::kEyeRebindEye);
+    note(a.drawEye != b.drawEye, cm::kEyeDrawEye);
+    note(a.shader != b.shader, cm::kEyeShader);
+    note(a.maskSlot != b.maskSlot, cm::kEyeMaskSlot);
+    return mask;
+}
+}  // namespace
+
+// A memo hit on a verify frame: take what the hit leaves, run the full classifier anyway, compare every output, and count and name
+// what differs. The full run's outputs STAND, so a verify frame behaves exactly as it would without the memo; its exit also
+// re-stores the memo, so a wrong stored answer heals instead of repeating. TEMPORARY, with the rest of the verification.
+static bool verifyEyeHit(ID3D11DeviceContext* ctx, const classifiermemo::Key& now) {
+    namespace cm = classifiermemo;
+    const EyeOutputs hit = captureEyeOutputs(false);
+    cm::Exit exit = cm::Exit::kOther;
+    const bool ret = classifyEyeDraw(ctx, &exit);
+    uint32_t differ = eyeOutputDiff(hit, captureEyeOutputs(ret));
+    if (exit != cm::Exit::kPlainDecline) differ |= 1u << cm::kEyeExit;
+    g_eyeTally.noteVerified(differ);
+    if (differ && g_eyeTally.takeName()) {
+        char line[400];
+        cm::formatMismatchLine(line, sizeof(line), "eye draws", g_eyeTally.named, boundVsHash(ctx), differ, cm::kEyeOutputCount,
+                               cm::eyeOutputName);
+        Log::get().note("%s", line);
+    }
+    cm::store(g_eyeMemo, now, exit);
+    return ret;
+}
+
+// Every eye draw: the outputs reset, then the memo, then (on a miss) the classifier. Memoised 2026-10-27 (docs\engine-render-
+// performance-2026-09-19.md, "Desk design: the ui_depth eye-draw memo"): a call whose key (the bindings' aggregate generation and
+// the classifier's epoch) is the key of the last full run that left at the plain decline returns false at once. That is exactly
+// what the full run would do -- the resets above it have run, g_uiDepthDrawComposite is false, and no other output is written --
+// so vscreen's call sites need not know. Any other exit is stored as "not a plain decline" and the next call runs in full.
+bool uiDepthOnEyeDraw(ID3D11DeviceContext* ctx, const HoloDraw& draw) {
+    detail::g_uiDepthDrawComposite = false;   // this draw's answer, set below; false on every early return
+    detail::g_uiDepthPlanetPending=false;detail::g_uiDepthPlanetSolarPending=false;
+    detail::g_uiDepthWorldScreenPending=false;
+    g_coronaPending=false;g_coronaMotion=false;
+    g_holoDraw=draw;
+    detail::g_uiDepthMode = Mode::kNone;
+    g_wantRebind = false;
+    g_wantMask = false;
+    g_rebindEye = -1;
+    g_drawEye = -1;
+    g_reissueShader = nullptr;
+    g_reissueMaskSlot = 0;
+    if (!detail::g_uiDepthOn || detail::g_uiDepthStoodDown) return false;
+    // The key is read BEFORE the classifier runs: a write the classifier itself makes (a surface evicted by a view-memo miss) then
+    // leaves the stored key out of date, and the next call runs in full, which is the safe direction.
+    const classifiermemo::Key now{bindingEyeKeyGeneration(), g_classifierEpoch};
+    const classifiermemo::Probe found = classifiermemo::probe(g_eyeMemo, now);
+    g_eyeTally.noteProbe(found);
+    if (found == classifiermemo::Probe::kHit) {
+        // The temporary check: one ui_depth frame in 16, and never a draw-sample frame (the step clock measures those and must see
+        // the memo's real cost).
+        if (g_memoVerifyFrame && !perfMonitorSampleDraws()) return verifyEyeHit(ctx, now);
+        return false;
+    }
+    classifiermemo::Exit exit = classifiermemo::Exit::kOther;
+    const bool ret = classifyEyeDraw(ctx, &exit);
+    classifiermemo::store(g_eyeMemo, now, exit);
+    return ret;
 }
 
 bool uiDepthWantsReissue() {
@@ -3529,17 +3667,28 @@ void uiDepthReissueEnd(ID3D11DeviceContext* ctx) {
 // uiDepthOnEyeDraw at the same vscreen.cpp call site rather than inside
 // it: this mechanism needs no coverage shader and applies to families
 // uiDepthOnEyeDraw's own lists never claim -- the icon core has none.
-bool uiDepthHologramOnEyeDraw(ID3D11DeviceContext* ctx) {
-    g_holoEye = -1;
-    if (!detail::g_holoDepthOn) return false;
+//
+// Memoised 2026-10-27 like uiDepthOnEyeDraw (docs\engine-render-performance-2026-09-19.md, "Desk design: the ui_depth eye-draw
+// memo"), and split the same way: classifyHologramDraw is the body after the first two lines, and `*exit` is kPlainDecline at its
+// two cheap declines only -- the hash is 0 or excluded, or in neither list. Those read the vertex shader's hash and the lists, which
+// the key covers. The later declines (the depth view, the render target, the eye) read dsvIsSceneDepth and the eye table, which can
+// change within a frame (the depth probe learns the scene depth at its first draw), so they and acceptance store "not a plain decline".
+static bool classifyHologramDraw(ID3D11DeviceContext* ctx, classifiermemo::Exit* exit) {
+    *exit = classifiermemo::Exit::kOther;
     // Cheapest first: the vertex-shader hash alone rejects nearly every
     // draw, before the two binding-shadow reads below. Either list
     // qualifies; which one is recorded in g_holoIsWorldMarker, for
     // ContributionBegin's DSS choice below.
     const uint64_t h = boundVsHash(ctx);
-    if (!h || uiDepthIsExcluded(h)) return false;
+    if (!h || uiDepthIsExcluded(h)) {
+        *exit = classifiermemo::Exit::kPlainDecline;
+        return false;
+    }
     const bool worldMarker = inList(kHoloWorldMarkers, kHoloWorldMarkerCount, h);
-    if (!worldMarker && !inList(g_holoFamilies, g_holoFamilyCount, h)) return false;   // built-in families only
+    if (!worldMarker && !inList(g_holoFamilies, g_holoFamilyCount, h)) {   // built-in families only
+        *exit = classifiermemo::Exit::kPlainDecline;
+        return false;
+    }
     // A bound depth-stencil must still be the scene's. None bound is
     // accepted: the icon core and the corona draw with depth off, and
     // neither pass below reads the game's depth.
@@ -3557,6 +3706,59 @@ bool uiDepthHologramOnEyeDraw(ID3D11DeviceContext* ctx) {
     ++g_holoWindowListed;
     if (worldMarker) ++g_holoWindowMarkerDraws;
     return true;
+}
+
+// A memo hit on a verify frame, as verifyEyeHit does for the eye draws: what the hit leaves is "no eye, false"; the full classifier
+// runs anyway, its return value and g_holoEye are compared, and it must have left at a cheap decline. The full run's outputs stand.
+// TEMPORARY, with the rest of the verification.
+static bool verifyHologramHit(ID3D11DeviceContext* ctx, const classifiermemo::Key& now) {
+    namespace cm = classifiermemo;
+    const bool hitRet = false;
+    const int hitEye = g_holoEye;   // -1: the call reset it before the memo
+    cm::Exit exit = cm::Exit::kOther;
+    const bool ret = classifyHologramDraw(ctx, &exit);
+    uint32_t differ = 0;
+    if (ret != hitRet) differ |= 1u << cm::kHoloReturn;
+    if (g_holoEye != hitEye) differ |= 1u << cm::kHoloEye;
+    if (exit != cm::Exit::kPlainDecline) differ |= 1u << cm::kHoloExit;
+    g_holoTally.noteVerified(differ);
+    if (differ && g_holoTally.takeName()) {
+        char line[400];
+        cm::formatMismatchLine(line, sizeof(line), "hologram draws", g_holoTally.named, boundVsHash(ctx), differ, cm::kHoloOutputCount,
+                               cm::holoOutputName);
+        Log::get().note("%s", line);
+    }
+    cm::store(g_holoMemo, now, exit);
+    return ret;
+}
+
+bool uiDepthHologramOnEyeDraw(ID3D11DeviceContext* ctx) {
+    g_holoEye = -1;
+    if (!detail::g_holoDepthOn) return false;
+    // Its own key and its own stored exit, apart from uiDepthOnEyeDraw's: the two classifiers leave at different places on the same
+    // draw. The key is read before the classifier runs, as there.
+    const classifiermemo::Key now{bindingEyeKeyGeneration(), g_classifierEpoch};
+    const classifiermemo::Probe found = classifiermemo::probe(g_holoMemo, now);
+    g_holoTally.noteProbe(found);
+    if (found == classifiermemo::Probe::kHit) {
+        if (g_memoVerifyFrame && !perfMonitorSampleDraws()) return verifyHologramHit(ctx, now);
+        return false;
+    }
+    classifiermemo::Exit exit = classifiermemo::Exit::kOther;
+    const bool ret = classifyHologramDraw(ctx, &exit);
+    classifiermemo::store(g_holoMemo, now, exit);
+    return ret;
+}
+
+// Built 2026-10-27, TEMPORARY (the same desk design): the one "ui depth memo:" line for the window that perf_monitor.cpp's 1800-frame
+// edge closes, written right after its "draw hook CPU by step" lines, and the window's counters reset. The mismatch lines
+// (verifyEyeHit, verifyHologramHit) are written as they happen.
+void uiDepthLogMemoWindow(uint32_t endFrame) {
+    char line[1200];
+    classifiermemo::formatWindowLine(line, sizeof(line), endFrame, g_eyeTally, g_holoTally);
+    Log::get().note("%s", line);
+    g_eyeTally.resetWindow();
+    g_holoTally.resetWindow();
 }
 
 // Pass (a): the game's own draw again, RTV0 rebound to a scratch
@@ -4295,6 +4497,8 @@ void releaseChromeHeld() {
 
 void uiDepthFrameBoundary(ID3D11DeviceContext* ctx) {
     ++g_frame;
+    ++g_classifierEpoch;   // no memoised decline outlives its frame (the view memo's entries are stamped by g_frame)
+    g_memoVerifyFrame = classifiermemo::verifyFrame(++g_memoFrameCounter);   // the temporary check's frame, one in 16
     releaseChromeHeld();   // the pass, which stages an eye run, has run for the frame
     g_uiContent.retire(g_frame);
     if(ctx)g_uiContent.gpu.poll(ctx);
@@ -4522,6 +4726,9 @@ void uiDepthShutdown() {
     g_surfaceCount = 0;
     g_surfaceNext = 0;
     g_viewMemo.clear();
+    ++g_classifierEpoch;   // the table and the view memo are empty; every memoised decline is out of date
+    classifiermemo::invalidate(g_eyeMemo);
+    classifiermemo::invalidate(g_holoMemo);
     g_vsMemo.clear();
     g_psMemo.clear();
     for (uint32_t i = 0; i < kExhausted; ++i) g_exhausted[i] = Exhausted();

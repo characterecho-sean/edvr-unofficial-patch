@@ -58,7 +58,7 @@
 
 * **Next (2026-10-27, last entry):** AA on's +1.65 ms is per-draw
   classifiers; 91% of eye draws repeat bindings with 0 answer changes, so
-  a generation memo could save ~0.8 ms. ui-depth memo DESIGNED, not built.
+  a generation memo could save ~0.8 ms. ui-depth memo BUILT, NOT FLOWN.
 
 ## Frame budget philosophy
 
@@ -3868,3 +3868,49 @@ stays.
    path still runs in full.
 5. Flown parked at the same pad, AA on for at least 3 minutes, with no
    build running on the machine. No AA-off leg is needed.
+
+**Memo built (2026-10-27, same branch), NOT FLOWN.** It is as designed,
+with these details:
+- **Code.**
+  - `bindingEyeKeyGeneration()` in binding_shadow, bumped through a
+    slot mask in the three setters, and at forget-all and the frame
+    boundary.
+  - `g_classifierEpoch` in ui_depth.cpp, bumped at:
+    - the eviction in surfaceMatches;
+    - a real add in addSurface;
+    - holoDepthConfigure and uiDepthConfigure;
+    - the chrome put;
+    - uiDepthFrameBoundary;
+    - the shutdown reset.
+
+    A grep found no other writer of the surface table, the lists or the
+    view memo.
+  - The bodies moved into `classifyEyeDraw` and `classifyHologramDraw`,
+    each reporting its exit. The pure logic is in `classifier_memo.h`.
+- **Exits.** Only the family gate is a plain decline. A world-screen
+  pair that F108 refused and counted falls through to that gate, and it
+  is stored as "other", or a hit would skip its count. Both memos read
+  their key before classifying, so an eviction during a full run leaves
+  the stored key stale, and the next call runs in full.
+- **Verify frames.** One ui_depth frame in 16, with the phase rotating
+  by one every 16 frames so it cannot lock onto the draw-sample
+  cadence. A frame is also skipped whenever `perfMonitorSampleDraws()`
+  is true.
+- **Logging.** The `ui depth memo:` line follows the step lines at each
+  1800-frame edge. The first three mismatches per classifier are named
+  in their own lines.
+- **Rigs.**
+  - aa_off_test now has 186 checks.
+  - scrim_metadata_test has 73 aggregate-generation checks: each of
+    the 17 slots through each setter, plus forget-all and the frame
+    boundary.
+  - ui_depth_test and hologram_depth_test have stubs.
+  - ui_composite_census_test's source pin reads the new split.
+
+The binding-repeat counter came out in 18aea473, back to af9c429b's
+code.
+
+Flight: parked at the Cranfield pad, AA on for at least 3 minutes,
+nothing building on the machine. Read the `ui depth memo:` line (hit
+rate, verified hits, mismatches), the step lines (v:ui-depth) and
+ui_depth's own window counts, after `edvr_log.py --expect-build HEAD`.

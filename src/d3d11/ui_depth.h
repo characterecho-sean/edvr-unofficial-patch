@@ -128,6 +128,8 @@ bool uiDepthIsExcluded(uint64_t vsHash);
 // pixel-stage slot 0..3) or a named direct family, with a depth target
 // bound that is the scene pair's. True means the draw should write its
 // coverage depth; the caller reissues it after the original draw.
+// The plain decline (no family, no composite) is memoised inside (classifier_memo.h), keyed on the bindings and the classifier's
+// own state, so the caller sees the same outputs and counts as before.
 bool uiDepthOnEyeDraw(ID3D11DeviceContext* ctx, const HoloDraw& draw = {});
 
 // The generic, contribution-based hologram/icon depth pass: a family-
@@ -306,6 +308,11 @@ float uiDepthCoronaHold();
 
 // Once per frame: the masks cleared, the engage line, the totals every 20 s.
 void uiDepthFrameBoundary(ID3D11DeviceContext* ctx);
+
+// Built 2026-10-27, TEMPORARY (docs\engine-render-performance-2026-09-19.md, "Desk design: the ui_depth eye-draw memo"): writes the
+// "ui depth memo:" line for the window that ends at `endFrame` -- both classifiers' memo hits, misses by cause, verified hits and
+// mismatches -- and resets the window. perf_monitor.cpp calls it at its 1800-frame edge, right after the "draw hook CPU by step" lines.
+void uiDepthLogMemoWindow(uint32_t endFrame);
 
 void uiDepthShutdown();
 
