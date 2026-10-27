@@ -596,8 +596,8 @@ void panelTable(const std::string& root, const std::string& gen) {
         check(schemaHasRow(schema, r.section, r.key),
               (std::string("the generated schema has the Visual tab's ") + r.section + "." + r.key).c_str());
     }
-    // The Visual rows as generated, Fix tier, each once, in edvr.ini order. Intro movie is `menu visual`, the page VR's menu builds too (2026-10-27); Star glow is a
-    // choice of five percentages on `flat_visual`, a page only this panel builds (nothing in VR reads the key). The tab is built from the table, whatever the page.
+    // The Visual rows as generated, Fix tier, each once, in edvr.ini order. Intro movie and Star glow are `menu visual`, the page VR's menu builds too (2026-10-27; the
+    // headset reads the Star glow since the VR port, so its row moved off `flat_visual`). The tab is built from the table, whatever the page.
     {
         const std::string movie = schemaRow(schema, "visual", "intro_video");
         const std::string glow = schemaRow(schema, "visual", "star_glow");
@@ -606,8 +606,8 @@ void panelTable(const std::string& root, const std::string& gen) {
               "the generated Intro movie row is a Fix-tier choice (screen, stock, skip) on the Visual page VR's menu builds too");
         check(glow.find("\"Star glow\"") != std::string::npos &&
                   glow.find("MenuKind::Choice, \"100\", \"\", \"\", 2, \"100=100%|125=125%|150=150%|175=175%|200=200%\", false, false, 1,") != std::string::npos &&
-                  glow.find("MenuTier::Fix, \"flat_visual\",") != std::string::npos,
-              "the generated Star glow row is a Fix-tier choice of 100 to 200 percent, shipped 100, live, on the flat-only page 'flat_visual'");
+                  glow.find("MenuTier::Fix, \"visual\",") != std::string::npos,
+              "the generated Star glow row is a Fix-tier choice of 100 to 200 percent, shipped 100, live, on the Visual page VR's menu builds too");
         // The VR-only rows of VR's Visual page are not rows of the flat tab: the flat gate refuses their keys, so a flat row would show a value that does nothing.
         check(schemaHasRow(schema, "visual", "world_scale") && !flatVisualHasRow("visual", "world_scale") && !flatVisualHasRow("fix", "intro_backdrop") &&
                   !flatVisualHasRow("fix", "panel_curvature") && !flatProfileReadsKey("visual.world_scale") && !flatProfileReadsKey("fix.intro_backdrop") &&

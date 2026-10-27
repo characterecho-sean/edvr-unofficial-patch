@@ -507,7 +507,7 @@ const char* hudAntiAliasingRefusal() {
 // visual.star_glow (the Star glow row). It strengthens the halo of Elite's own bloom, so with Elite's Bloom option off it changes nothing, and the
 // menus say so (star_glow_bloom.h: the flat panel's Visual tab as a note under the rows, the VR menu as the hint line while this row is highlighted).
 // The row is never dimmed for it: a dimmed row stops responding, and the setting is still the player's to make. Matched by key, so the hint follows
-// the row wherever it is drawn (today `menu flat_visual`, flat only; VR's Visual page when the row moves to `menu visual`).
+// the row wherever it is drawn (`menu visual` since 2026-10-27: the flat Visual tab and VR's Visual page both draw it).
 static_assert(sgb::kStockPercent == kStarGlowStock, "the hint's threshold is the setting's stock value");
 bool isStarGlowRow(const MenuRowDef& d) {
     return strcmp(d.section, "visual") == 0 && strcmp(d.key, "star_glow") == 0;
@@ -1694,8 +1694,8 @@ void buildPages() {
         }
         {
             // Visual (2026-10-22): the [visual] options that do something in flat, for everyone. The rows are the table in menu_flat_rows.h, kept in edvr.ini
-            // order whatever page their `menu` token names: Intro movie is `menu visual`, which VR's Visual page lists too, and Star glow is `menu flat_visual`, a
-            // page VR builds none of. The generator fails the build for a row the table lists that the schema has no row for.
+            // order whatever page their `menu` token names: Intro movie and Star glow are `menu visual`, which VR's Visual page lists too; a row only this tab
+            // shows would be `menu flat_visual`, a page VR builds none of. The generator fails the build for a row the table lists that the schema has no row for.
             Page p;
             p.name = kFlatTabNames[1];
             for (int i = 0; i < kRowDefCount; ++i) {
@@ -1751,7 +1751,7 @@ void buildPages() {
     }
     {
         // Visual (2026-10-27): how the world looks through the headset, apart from the fixes. The rows are the `menu visual` rows of edvr.ini, in file order, under the ini's own
-        // heading blocks (World scale, Intro movie, Intro background picture, Screen curve). The flat panel's Visual tab is the same name and another list (kFlatVisualRows):
+        // heading blocks (World scale, Intro movie, Star glow, Intro background picture, Screen curve). The flat panel's Visual tab is the same name and another list (kFlatVisualRows):
         // a row VR shows and flat does not is `menu visual`, one flat shows and VR does not is `menu flat_visual`.
         Page p;
         p.name = "Visual";
@@ -4264,6 +4264,8 @@ void menuProfileSwitch() {
 }
 
 bool menuIsConfigured() { return g_s.configured; }
+
+sgb::Bloom menuStarGlowBloom() { return g_s.starGlowBloom.state(); }
 
 bool menuFlatPadOwnsHotkey(uint16_t buttons, uint8_t trigger) {
     const State& s = g_s;

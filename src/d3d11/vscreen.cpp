@@ -73,6 +73,7 @@
 #include "engine_velocity.h"
 #include "vr_world_route.h"
 #include "vr_camera_census.h"
+#include "vr_star_glow.h"        // visual.star_glow in the headset: a star pass issued once more into its H's layer, the bloom's first level fed H'
 #include "vscreen_footprint.h"   // fix.vscreen_res_width = auto's footprint instrument (the on-foot screen's width in the eye)
 #include "map_wait.h"         // the game's time inside Map, for the native timing line
 #include "flat_runtime.h"
@@ -3873,6 +3874,19 @@ __declspec(noinline) void pureDrawReissue(ID3D11DeviceContext* self, char kind, 
     }
 }
 
+// visual.star_glow in the headset (vr_star_glow.h). Right after the game's own issue of a draw on the owner context, with everything the draw ran with still
+// bound, the module puts the game's view of H back at t0 (when the draw was the first level reading H'), classifies the draw, and for a star pass it lets
+// through binds the pass's layer; the draw is then issued once more here, with the game's own arguments and state (the planet re-issue's shape), and the
+// game's targets and depth state go back. `v` is the verdict the draw got: only a draw no fix altered or withheld is repeated. NOINLINE for the reason
+// pureDrawReissue is: the draw path pays this call only while the glow is armed, and one relaxed load otherwise.
+__declspec(noinline) void starGlowAfterDraw(ID3D11DeviceContext* self, char kind, UINT count,
+                                            UINT instances, const DrawArgs& args, DrawVerdict v) {
+    if (vrStarGlowAfterDraw(self, v == DrawVerdict::kNone && !uiLayerIssueBlocked())) {
+        pureDrawReissue(self, kind, count, instances, args);
+        vrStarGlowReplayEnd(self);
+    }
+}
+
 // The blend probe's offer (blend_probe.h; TEMPORARY): one eye draw of a collecting capture, with everything its routing decided. Called
 // from forwardWithVerdict only while blendProbeWantsDraws(); NOINLINE so the draw path pays nothing else for it. The replay is the draw
 // again through the real entry point, below every hook (pureDrawReissue), which blend_probe.cpp issues with a scissor and no writes.
@@ -5090,6 +5104,8 @@ void STDMETHODCALLTYPE hookedDraw(ID3D11DeviceContext* self, UINT count, UINT st
     if (!fast && v == DrawVerdict::kNone && self == g_state->ownerCtx) engineVelocityBeforeDraw(self, g_state->rtv0Eye);
     if (self == g_state->ownerCtx) pixelProbeBefore(g_state, self);
     if (g_vrWorldWants && self == g_state->ownerCtx) vrWorldRouteDraw(self);   // the VR world route's detector; at the tone, its resolve
+    const bool starGlow = vrStarGlowWanted() && self == g_state->ownerCtx;   // visual.star_glow (vr_star_glow.h): one relaxed load while off
+    if (starGlow) vrStarGlowBeforeDraw(self);
     if (fast) {
         // forwardWithVerdict's own return for the owner's blocked UI layer is kept; the game's draw otherwise as it is issued there.
         if (!(self == g_state->ownerCtx && uiLayerIssueBlocked())) {
@@ -5107,6 +5123,7 @@ void STDMETHODCALLTYPE hookedDraw(ID3D11DeviceContext* self, UINT count, UINT st
         return true;
     });
     if (v == DrawVerdict::kPanel) endPanelOverride(self);
+    if (starGlow) starGlowAfterDraw(self, 'D', count, 1, args, v);
     if (self == g_state->ownerCtx) pixelProbeAfterEye(g_state, self, count, 1, false);
 }
 void STDMETHODCALLTYPE hookedDrawAuto(ID3D11DeviceContext* self) {
@@ -5169,6 +5186,8 @@ void STDMETHODCALLTYPE hookedDrawIndexed(ID3D11DeviceContext* self, UINT count,
     if (!fast && v == DrawVerdict::kNone && self == g_state->ownerCtx) engineVelocityBeforeDraw(self, g_state->rtv0Eye);
     if (self == g_state->ownerCtx) pixelProbeBefore(g_state, self);
     if (g_vrWorldWants && self == g_state->ownerCtx) vrWorldRouteDraw(self);
+    const bool starGlow = vrStarGlowWanted() && self == g_state->ownerCtx;   // visual.star_glow (vr_star_glow.h): one relaxed load while off
+    if (starGlow) vrStarGlowBeforeDraw(self);
     if (fast) {
         if (!(self == g_state->ownerCtx && uiLayerIssueBlocked())) {
             const int64_t r0 = clock.on ? qpcNow() : 0;
@@ -5185,6 +5204,7 @@ void STDMETHODCALLTYPE hookedDrawIndexed(ID3D11DeviceContext* self, UINT count,
         return true;
     });
     if (v == DrawVerdict::kPanel) endPanelOverride(self);
+    if (starGlow) starGlowAfterDraw(self, 'I', count, 1, args, v);
     if (self == g_state->ownerCtx) pixelProbeAfterEye(g_state, self, count, 1, false);
 }
 void STDMETHODCALLTYPE hookedDrawInstanced(ID3D11DeviceContext* self, UINT perInstance,
@@ -5255,6 +5275,8 @@ void STDMETHODCALLTYPE hookedDrawInstanced(ID3D11DeviceContext* self, UINT perIn
     const UINT drawn = g_state->glareClamp && g_state->glareClamp < instances
                            ? g_state->glareClamp
                            : instances;
+    const bool starGlow = vrStarGlowWanted() && self == g_state->ownerCtx;   // visual.star_glow (vr_star_glow.h): one relaxed load while off
+    if (starGlow) vrStarGlowBeforeDraw(self);
     if (fast) {
         if (!(self == g_state->ownerCtx && uiLayerIssueBlocked())) {
             const int64_t r0 = clock.on ? qpcNow() : 0;
@@ -5272,6 +5294,7 @@ void STDMETHODCALLTYPE hookedDrawInstanced(ID3D11DeviceContext* self, UINT perIn
         return true;
     });
     if (v == DrawVerdict::kPanel) endPanelOverride(self);
+    if (starGlow) starGlowAfterDraw(self, 'N', perInstance, drawn, args, v);
     if (self == g_state->ownerCtx) pixelProbeAfterEye(g_state, self, perInstance, drawn, false);
 }
 void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
@@ -5346,6 +5369,8 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
     }
     if (self == g_state->ownerCtx) pixelProbeBefore(g_state, self);
     if (g_vrWorldWants && self == g_state->ownerCtx) vrWorldRouteDraw(self);
+    const bool starGlow = vrStarGlowWanted() && self == g_state->ownerCtx;   // visual.star_glow (vr_star_glow.h): one relaxed load while off
+    if (starGlow) vrStarGlowBeforeDraw(self);
     forwardWithVerdict(self, v, 'X', perInstance, instances, args, [&](AlteredDraw altered) {
         const int64_t r0 = clock.on ? qpcNow() : 0;
         {
@@ -5435,6 +5460,7 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
         g_state->introCurveThisDraw = false;
         introCurveEndDraw();
     }
+    if (starGlow) starGlowAfterDraw(self, 'X', perInstance, instances, args, v);
     if (self == g_state->ownerCtx) pixelProbeAfterEye(g_state, self, perInstance, instances, false);
 }
 
@@ -6222,6 +6248,7 @@ EDVR_BOUNDARY_TICK(tkTemporalTick, "temporal_tick");
 EDVR_BOUNDARY_TICK(tkTemporalBoundary, "temporal_boundary");
 EDVR_BOUNDARY_TICK(tkDepthProbe, "depth_probe");
 EDVR_BOUNDARY_TICK(tkGpuCensus, "gpu_census");
+EDVR_BOUNDARY_TICK(tkVrStarGlow, "vr_star_glow");
 EDVR_BOUNDARY_TICK(tkSceneArrived, "scene_arrived");
 EDVR_BOUNDARY_TICK(tkIntroPanel, "intro_panel");
 EDVR_BOUNDARY_TICK(tkIntroCurve, "intro_curve");
@@ -6313,6 +6340,9 @@ void vScreenFrameBoundary() {
         // section's timer, rotates which one is actively timed next frame,
         // and every 30 s logs one summary line. Always on, no ini key.
         tkGpuCensus.run([&] { gpuCensusFrame(g_state->ownerCtx); });
+        // visual.star_glow in the headset (vr_star_glow.h): the frame that ended into the window, the setting (live) and the Bloom reading menuTick refreshed just
+        // before the boundary, then armed, paused or off; the 10 s lines. At the stock 100 this is a generation compare and returns.
+        tkVrStarGlow.run([&] { vrStarGlowFrameBoundary(); });
         // Told to the openvr half whether or not any intro fix is on: it
         // must depend on the GAME reaching a scene, not on EDVR being
         // configured to do anything about the intro.
