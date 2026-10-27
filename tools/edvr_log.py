@@ -12127,6 +12127,7 @@ def _hj_f109_look(rows, ctx):
     (it is dropped in both turn styles), and calls split by the old ratio (no gain yet) are PARTIAL. F109b: the guard's holds (the game moved the view past what the
     head aim asked), its new bases for the player's own turn, its growth restarts after a rows gap and the re-arms after a trip are reported, not judged."""
     sec, eng, trips, nots, stops, held, rearm = (rows.get(k, []) for k in ("sec", "engaged", "trip", "not", "stops", "held", "rearm"))
+    recentred, bigstep = rows.get("recentred", []), rows.get("bigstep", [])
     if not sec and not eng and not trips and not nots and not stops:
         return None
     if not eng:
@@ -12164,6 +12165,15 @@ def _hj_f109_look(rows, ctx):
     if c109:
         text += ("; F109c: foreign calls %d (the gain's ends %s %s), the aim's pitch apart from the carried by 5 deg or more in %d of %d read seconds (largest %.1f)") % (
             sum(int(r["foreign"]) for r in c109), c109[-1]["glo"], c109[-1]["ghi"], sum(1 for d in drift if d >= 5.0), len(drift), max(drift) if drift else 0.0)
+    # F133: the follower's re-centres on a standing yaw offset (a head step lost to a stall) and the large head steps taken as motion (a turn across a stall): counts, not judged
+    rc133 = sum(int(r["recentre"]) for r in sec if r.get("recentre") is not None)
+    if rc133 or recentred or bigstep:
+        text += "; F133: re-centred %d" % max(rc133, len(recentred))
+        if recentred:
+            text += " (the standing yaw offset up to %.1f deg)" % max(abs(float(r["off"])) for r in recentred)
+        if bigstep:
+            text += ", large head steps taken as motion %d (largest %.1f deg over %d ms)" % (max(int(r["n"]) for r in bigstep), max(float(r["deg"]) for r in bigstep),
+                                                                                         max(int(r["lms"]) for r in bigstep))
     if head >= 5.0 and applied < 0.1 * head:
         return ("NEVER APPLIED", text + "; the game took none of the head's turn")
     notes = []
@@ -13169,7 +13179,7 @@ HEALTH_RULES = (
         ("false", r"boarding reset \(F115\): a false start: the cockpit's own panels drew with native stereo on foot and stopped"),
         ("_", r"boarding reset \(F115\): native stereo on foot began: the on-foot camera changes publish again"),
     ), _hj_f115_boarding),
-    _hrule("look to aim (F109)", ("F109", "F109b"), ("native on foot look to aim (F109)", "native on foot look to aim (F109b)"), (
+    _hrule("look to aim (F109)", ("F109", "F109b", "F133"), ("native on foot look to aim (F109)", "native on foot look to aim (F109b)", "native on foot look to aim (F133)"), (
         ("sec", r"native on foot look to aim \(F109\) 1 s: (?P<state>following|blocked), item weight (?P<w>[\d.]+), smoothing (?P<tau>\d+) ms; head yaw (?P<hy>%s) "
                 r"pitch (?P<hp>%s) deg, asked (?P<ky>%s) (?P<kp>%s), applied (?P<ay>%s) (?P<ap>%s), the player's own (?P<uy>%s) (?P<up>%s); the reported head from the aim "
                 r"yaw (?P<oy>%s) pitch (?P<op>%s) deg now \(largest (?P<omax>[\d.]+), (?:read|not read)\); seated yaw (?P<sy>%s) pitch (?P<sp>%s) deg carried; the "
@@ -13180,9 +13190,12 @@ HEALTH_RULES = (
                 r"pitched 10 deg or more\); centred (?P<centred>\d+)(?:; F109b's guard: held (?P<gheld>\d+) \(the view moved past the asks\), re-based "
                 r"(?P<guser>\d+) \(the player's own turn\), growth restarted (?P<ggap>\d+) \(a rows gap\), trips (?P<gtrips>\d+), re-armed (?P<grearm>\d+))?"
                 r"(?:; F109c: the gain's ends (?P<glo>%s) (?P<ghi>%s), foreign calls (?P<foreign>\d+) \(no gain taken\); the aim's pitch \(the FP root\) apart from the "
-                r"carried by (?P<drift>%s) deg more than at the engage \(largest (?P<dmax>[\d.]+) this second, (?P<dread>read|not read)\))?(?:; held by F131 (?P<f131n>\d+) ticks \((?P<f131why>[^)]*)\))?"
+                r"carried by (?P<drift>%s) deg more than at the engage \(largest (?P<dmax>[\d.]+) this second, (?P<dread>read|not read)\))?(?:; held by F131 (?P<f131n>\d+) ticks \((?P<f131why>[^)]*)\))?(?:; re-centred (?P<recentre>\d+))?"
                 % ((_HN,) * 19)),
         ("engaged", r"native on foot look to aim \(F109\): engaged: "),
+        ("recentred", r"native on foot look to aim \(F133\): re-centred: the reported head stood (?P<off>[+-][\d.]+) deg off the aim in yaw for (?P<s>[\d.]+) s with the head still"),
+        ("bigstep", r"native on foot look to aim \(F133\): a head step of (?P<yaw>[+-][\d.]+) deg yaw (?P<pitch>[+-][\d.]+) deg pitch over (?P<ms>\d+) ms \((?P<dps>\d+) deg/s\) was "
+                    r"taken as motion, not a recentre; large steps taken as motion (?P<n>\d+) \(largest (?P<deg>[\d.]+) deg over (?P<lms>\d+) ms\)"),
         ("trip", r"native on foot look to aim \(F109\): GUARD TRIPPED \((?P<why>.+?)\): stopped(?P<latched> until)?"),
         ("held", r"native on foot look to aim \(F109b\): the guard held \((?P<mode>look to aim|an ADS press)\): the view parted from the head by yaw (?P<ry>%s) "
                  r"pitch (?P<rp>%s) deg, past what the head aim asked since the base \(yaw (?P<ky>%s) pitch (?P<kp>%s) deg" % ((_HN,) * 4)),
@@ -15536,10 +15549,10 @@ def self_test_health():
         L109, S109, M109, A109 = "look to aim (F109)", "snap turn (F109)", "smooth turn (F109)", "ADS player turn (F109)"
 
         def look109(state="following", hy=12.0, hp=-3.0, ay=None, ap=None, uy=0.0, up=0.0, oy=0.2, op=-0.1, res=0.3, bmax=12.0, ds=0, dm=0, dp=0, clean=80,
-                    dirty=2, unsplit=0, blocked=0, spring=0, gated=0, gheld=0, guser=0, ggap=0, gtrips=0, grearm=0, foreign=0, drift=0.0, dread="read", f131n=0, f131why="none"):
+                    dirty=2, unsplit=0, blocked=0, spring=0, gated=0, gheld=0, guser=0, ggap=0, gtrips=0, grearm=0, foreign=0, drift=0.0, dread="read", f131n=0, f131why="none", recentre=0):
             return R("native on foot look to aim (F109) 1 s:", state, 0.0, 150, hy, hp, hy, hp, hy if ay is None else ay, hp if ap is None else ap, uy, up, oy, op,
                      0.5, "read", 30.0, -5.0, res, 0, 2.0, bmax, 88, 90, ds, dm, dp, clean, dirty, unsplit, 0.85, 0.85, blocked, "not holding", 0, spring, 0.0,
-                     gated, 1, gheld, guser, ggap, gtrips, grearm, 1.0, 0.85335, foreign, drift, abs(drift), dread, f131n, f131why)
+                     gated, 1, gheld, guser, ggap, gtrips, grearm, 1.0, 0.85335, foreign, drift, abs(drift), dread, f131n, f131why, recentre)
 
         KEYS109 = R("native on foot look to aim (F109): keys: %s, smoothing", "on", 150, "snap", 45)
         ENG109 = R("native on foot look to aim (F109): engaged:", "snap", 45, 150, ", their yaw turns the player in snaps", "")
@@ -15632,6 +15645,15 @@ def self_test_health():
         check("F132 pairing: the summary log's reseed line alone", [reseed132(), reseed132(n=1)], 0, [("OK", G68)],
               has=["2 reseed second(s) in the event lines: 4 reseeds in 180 game frames; largest gap 11.9 ms"], lacks=["UNPARSED", "a tenth or more"])
         check("F132 pairing: reseeds in a tenth of the frames in the summary log", [reseed132(n=60, frames=90)], 0, [("PARTIAL", G68)], has=["a tenth or more of those frames were refused"],
+              lacks=["UNPARSED"])
+
+        # ---- F133: head steps judged by rate; the follower re-centres on a standing yaw offset ----
+        RC133 = R("native on foot look to aim (F133): re-centred: the reported head stood %+.1f deg off the aim in yaw for %.1f s", -39.3, 2.0)
+        BIG133 = R("native on foot look to aim (F133): a head step of %+.1f deg yaw %+.1f deg pitch over %.0f ms (%.0f deg/s)", -41.1, 0.4, 3000, 14, 1, 41.1, 3000)
+        check("F133 look: a re-centre and a large step across a stall are counted, not judged", [ENG109, look109(), BIG133, RC133, look109(recentre=1)], 0, [("OK", L109)],
+              has=["F133: re-centred 1 (the standing yaw offset up to 39.3 deg), large head steps taken as motion 1 (largest 41.1 deg over 3000 ms)"], lacks=["UNPARSED"])
+        check("F133 look: a build before F133 (no re-centre tail) still reads", [ENG109, look109()], 0, [("OK", L109)], lacks=["UNPARSED", "F133"])
+        check("F133 look: the 1 s line's re-centres without event lines", [ENG109, look109(recentre=2), look109(recentre=0)], 0, [("OK", L109)], has=["F133: re-centred 2"],
               lacks=["UNPARSED"])
 
         # ---- F131: look to aim holds while a panel or a menu is open, and while the game runs no look ----

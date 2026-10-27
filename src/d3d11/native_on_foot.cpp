@@ -53,6 +53,7 @@
 #include "native_on_foot_f113.h"   // F113: each eye's scene rows whenever the world is drawn (pure parts)
 #include "native_on_foot_f130.h"   // F130: one disagreeing scene mesh no longer switches the eye rows' sources off (pure parts)
 #include "native_on_foot_f131.h"   // F131: look to aim holds while a panel or a menu is open, and while the game runs no look (pure parts)
+#include "native_on_foot_f133.h"   // F133: head steps judged by rate, not size; the follower re-centres on a standing yaw offset (pure parts)
 #include "native_on_foot_f109.h"   // F109: look to aim on foot, the player's own turn in ADS, snap or smooth turning (pure parts)
 #include "native_on_foot_f129.h"   // F129: look to aim reads its turn from the player's own look processor; the look path instrument (pure parts)
 #include "../common/comfort_fade.h"   // F109: the snap's short fade (edvr::comfort::publish; the runtime blends it over both eyes)
@@ -7576,6 +7577,17 @@ struct F131State {
     nofoot::f129::RateCap cap;    // the begin and end lines: at most 6 a minute, the rest said in the next
 };
 F131State g_f131;
+// F133 (frame thread only): a head step is a discontinuity by its rate (the time between two head samples is the frame thread's read times), and a standing yaw offset
+// between the reported head and the aim re-centres the follower.
+struct F133State {
+    uint64_t prevQpc = 0;             // the frame thread's QPC when g_adsPrevHead was first read
+    double headYawDeg = 0.0;          // the head's accepted yaw steps summed (the re-centre's stillness window reads it)
+    nofoot::f133::Recentre rc;
+    nofoot::f133::BigSteps big;       // steps over 30 deg taken as motion (the old size rule would have skipped them)
+    uint32_t recentres = 0, recentresSeen = 0;
+    nofoot::f129::RateCap cap;        // its two event lines: 6 a minute at most between them
+};
+F133State g_f133;
 std::atomic<float> g_f109AimPitchAbsDeg{0.0f};   // |the carried pitch| while look to aim is engaged (the Animate post-hook's F98c gate), else 0
 std::atomic<uint32_t> g_f109SettleGated{0};      // settled stances F98c did not take because the aim was pitched 10 deg or more (the hook counts)
 constexpr double kF109SettlePitchDeg = 10.0;
@@ -7730,6 +7742,19 @@ void ltaDisengage(uint64_t now, const char* why, bool unwind) noexcept {
                     "view stays the headset's); the mouse and the stick look as the game's own",
                     why, g_adsMap.yawCarried / nofoot::kAdsDeg, g_adsMap.pitchSeat / nofoot::kAdsDeg, g_adsMap.relDur);
 }
+// F133: a head step over the old 30 deg size rule that the rate rule took as motion (a turn across a stall). One event line (6 a minute with the re-centre's); the count and
+// the largest are cumulative, so a line held back is still counted in the next.
+void f133NoteBig(uint64_t now, const nofoot::f133::Step& hs, double dtSec) noexcept {
+    const double big = std::max(std::fabs(hs.dYaw), std::fabs(hs.dPitch)) / nofoot::kAdsDeg;
+    g_f133.big.note(big, dtSec * 1000.0);
+    if (!g_f133.cap.allow(now, 6)) return;
+    const uint32_t held = g_f133.cap.takeSuppressed();
+    char heldText[96] = "";
+    if (held) std::snprintf(heldText, sizeof(heldText), " [%u earlier F133 line(s) were not written: at most 6 a minute]", held);
+    Log::get().note("native on foot look to aim (F133): a head step of %+.1f deg yaw %+.1f deg pitch over %.0f ms (%.0f deg/s) was taken as motion, not a recentre; large steps "
+                    "taken as motion %u (largest %.1f deg over %.0f ms)%s",
+                    hs.dYaw / nofoot::kAdsDeg, hs.dPitch / nofoot::kAdsDeg, dtSec * 1000.0, hs.rateDps, g_f133.big.n, g_f133.big.largestDeg, g_f133.big.largestMs, heldText);
+}
 // The follower's ask this tick (seat radians), after this tick's applied turn (aY, aP: the split's share in the seat convention) and the head's step.
 void ltaFollow(uint64_t now, double dt, bool headStep, double dYaw, double dPitch, double aY, double aP, const EdvrNativeNowPose& np, double* askY,
                double* askP) noexcept {
@@ -7760,6 +7785,25 @@ void ltaFollow(uint64_t now, double dt, bool headStep, double dYaw, double dPitc
         Log::get().note("native on foot look to aim (F109): the game's look is %s (%u blocked calls so far, episode %u); %s",
                         blockedNow ? "blocked (it dropped the asks)" : "back", g_f109Blocked.load(std::memory_order_relaxed), g_lta.blockedEpisodes,
                         blockedNow ? "the follower holds, one probe every 100 ms" : "the follower catches the head up under its rate cap (the view never moved)");
+    }
+    {   // F133: the reported head stands off the aim in yaw while the head is still: the follower integrates head steps and never read the offset, so a head step lost to a
+        // stall (or any other cause) left the body off the head for good. Yaw only: the game clamps the aim's pitch, so a pitch offset can be legitimate (the F109c case) and
+        // a re-centre would fight the clamp. Following only: not blocked, not held (F131), no snap fade running, not in an ADS press, the engage's own centring done.
+        double oy = 0.0, op = 0.0;
+        const bool offValid = np.renderValid && f109::centreOffset(np.render, &oy, &op);
+        const bool following = !g_lta.blocked && !g_f131.held && !g_lta.centrePending && g_turn.run.phase == f109::SnapRun::kIdle && g_adsState == kAdsIdle;
+        const nofoot::f133::Recentre::Out rc = g_f133.rc.step(static_cast<double>(now) / 1000.0, following, offValid, oy / f109::kDeg, g_f133.headYawDeg);
+        if (rc.fire) {
+            g_lta.follow.addHead(oy, 0.0);
+            ++g_f133.recentres;
+            if (g_f133.cap.allow(now, 6)) {
+                const uint32_t held = g_f133.cap.takeSuppressed();
+                char heldText[96] = "";
+                if (held) std::snprintf(heldText, sizeof(heldText), " [%u earlier F133 line(s) were not written: at most 6 a minute]", held);
+                Log::get().note("native on foot look to aim (F133): re-centred: the reported head stood %+.1f deg off the aim in yaw for %.1f s with the head still; the aim turns "
+                                "onto the head%s", rc.offDeg, rc.standSec, heldText);
+            }
+        }
     }
     const double armedW = static_cast<double>(g_f88WPub.load(std::memory_order_relaxed));
     const double tau = f109::followerTau(static_cast<double>(g_lookSmoothMs.load(std::memory_order_relaxed)), armedW, g_adsW);
@@ -8543,10 +8587,18 @@ void adsAimTick(uint64_t now, bool session) noexcept {
     double dYaw = 0.0, dPitch = 0.0;
     bool headStep = false;
     if (haveLocal && np.frameSequence != g_adsHeadSeq) {
+        const uint64_t sampleQpc = f30Qpc();   // F133: when the frame thread first read this head sample
         const double pos[3] = {np.local[3], np.local[7], np.local[11]};
         if (g_adsHavePrev) {
-            headStep = np.referenceGeneration == g_adsPrevGen && nofoot::adsHeadDelta(g_adsPrevHead, np.local, &dYaw, &dPitch);
+            // F133: the step is judged by its rate over the frame thread's read times (a 41 deg turn across a 3 s stall is motion; a recentre is an instant step)
+            const uint64_t freqQ = f66QpcFreq();
+            const double dtSec = g_f133.prevQpc && sampleQpc > g_f133.prevQpc && freqQ ? static_cast<double>(sampleQpc - g_f133.prevQpc) / static_cast<double>(freqQ) : 0.0;
+            const nofoot::f133::Step hs = nofoot::f133::headStep(g_adsPrevHead, np.local, dtSec);
+            headStep = np.referenceGeneration == g_adsPrevGen && hs.ok;
             if (headStep) {
+                dYaw = hs.dYaw;
+                dPitch = hs.dPitch;
+                if (hs.bigAsMotion) f133NoteBig(now, hs, dtSec);
                 ++g_adsSteps;
             } else {
                 ++g_adsSkips;
@@ -8561,6 +8613,7 @@ void adsAimTick(uint64_t now, bool session) noexcept {
             }
         }
         std::memcpy(g_adsPrevHead, np.local, sizeof(g_adsPrevHead));
+        g_f133.prevQpc = sampleQpc;
         g_adsHavePrev = true;
         g_adsPrevGen = np.referenceGeneration;
         g_adsHeadSeq = np.frameSequence;
@@ -8574,6 +8627,7 @@ void adsAimTick(uint64_t now, bool session) noexcept {
     if (headStep) {
         g_adsSumHead[0] += dYaw;
         g_adsSumHead[1] += dPitch;
+        g_f133.headYawDeg += dYaw / nofoot::kAdsDeg;   // F133
     }
     // The map: the cancel of what the game applied for our input (exactly), then the next ask (the head's step, or an unwind: the press's release, or the head aim
     // turned off mid-press). F92b: the published cancel carries this tick's ask (AdsAimMap::aheadYaw). F109: under look to aim the ask is the follower's (weight 1:
@@ -8773,7 +8827,7 @@ void adsAimTick(uint64_t now, bool session) noexcept {
                             "pitch %.5f; blocked %u (%s, held %u ticks), spring calls %u (%+.2f deg); F98c's settle refused %u calls (the aim pitched 10 deg or "
                             "more); centred %u; F109b's guard: held %u (the view moved past the asks), re-based %u (the player's own turn), growth restarted "
                             "%u (a rows gap), trips %u, re-armed %u; F109c: the gain's ends %.5f %.5f, foreign calls %u (no gain taken); the aim's pitch (the FP "
-                            "root) apart from the carried by %+.1f deg more than at the engage (largest %.1f this second, %s); held by F131 %u ticks (%s)",
+                            "root) apart from the carried by %+.1f deg more than at the engage (largest %.1f this second, %s); held by F131 %u ticks (%s); re-centred %u",
                             g_lta.blocked ? "blocked" : "following", g_lta.armedWLast, g_lta.tauLast * 1000.0, g_lta.sumHead[0] * kD, g_lta.sumHead[1] * kD,
                             g_lta.sumAsk[0] * kD, g_lta.sumAsk[1] * kD, g_lta.sumApplied[0] * kD, g_lta.sumApplied[1] * kD, g_lta.sumUser[0] * kD,
                             g_lta.sumUser[1] * kD, g_lta.offNow[0], g_lta.offNow[1], g_lta.offMax, g_lta.offHave ? "read" : "not read",
@@ -8786,7 +8840,8 @@ void adsAimTick(uint64_t now, bool session) noexcept {
                             g_adsResid.gapRestarts - g_lta.gapsSeen, g_lta.trips, g_lta.rearms,
                             static_cast<double>(g_f109GainEndLo.load(std::memory_order_relaxed)), static_cast<double>(g_f109GainEndHi.load(std::memory_order_relaxed)),
                             foreign - g_lta.foreignSeen, g_lta.driftNow, g_lta.driftMax, g_lta.driftRead ? "read" : "not read", g_f131.ticks,
-                            nofoot::f131::reasonShort(g_f131.reasonsLast, f131Why, sizeof(f131Why)));
+                            nofoot::f131::reasonShort(g_f131.reasonsLast, f131Why, sizeof(f131Why)), g_f133.recentres - g_f133.recentresSeen);
+            g_f133.recentresSeen = g_f133.recentres;
             g_f131.ticks = 0;
             g_f131.reasonsLast = 0;
             g_lta.foreignSeen = foreign;

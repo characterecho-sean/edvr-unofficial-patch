@@ -37,6 +37,7 @@
 #include "f130_checks.h"    // F130: one disagreeing scene mesh no longer switches the eye rows' sources off (the marks, the source draw, the SRV flight replayed)
 #include "f131_checks.h"    // F131: look to aim holds while a panel or a menu is open, and while the game runs no look
 #include "f132_checks.h"    // F132: the G frame pairing re-seeds its phase after a far-apart refusal (either true order, a missing call, a real gap)
+#include "f133_checks.h"    // F133: head steps judged by rate (a stall is not a recentre); the follower re-centres on a standing yaw offset
 #include "f110_checks.h"    // F110: the ADS sight lock's model right eye (the left-eye job camera plus the IPD)
 #include "f111_checks.h"    // F111: the panel pointer instrument's statistics and verdict
 #include "f113_checks.h"    // F113: each eye's scene rows whenever the world is drawn (the depth prepass and the terrain as sources)
@@ -7470,6 +7471,9 @@ int wmain(int argc, wchar_t** argv) {
     // F132: G's frame pairing started on the wrong call of the game's order re-seeds after one refusal and pairs from the next frame; a missing call, either order and a
     // gap that is real on every frame (refused every time, reseeds counted, no runaway).
     f132test::run132(check);
+    // F133: a 41 deg head step over a 3 s stall is motion and over 11 ms a discontinuity (a 25 deg step over 11 ms too, which the 30 deg size rule took as motion); the
+    // re-centre on a standing yaw offset fires once after 2 s still, not at 2 deg, not while the head turns, not twice within 2 s.
+    f133test::run133(check);
     // F110: the ADS sight lock's model right eye from the left-eye job camera and from a solved left eye, the fallback, the IPD's sign.
     f110test::run110(check);
     // F111: the panel pointer instrument names the stage that turns a move the other way (K1 to K5, one at a time), the camera getters' decoding.
