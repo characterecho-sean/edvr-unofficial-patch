@@ -55,7 +55,6 @@
 #include "native_on_foot_f131.h"   // F131: look to aim holds while a panel or a menu is open, and while the game runs no look (pure parts)
 #include "native_on_foot_f133.h"   // F133: head steps judged by rate, not size; the follower re-centres on a standing yaw offset (pure parts)
 #include "native_on_foot_f135.h"   // F135: the on-foot menu probe, measure only (pure parts)
-#include "native_on_foot_f136.h"   // F136: an upright body under a level head while the aim is pitched down (pure parts)
 #include "xinput_watch.h"          // F135: the pad's Start and Back edges, evidence for the menu probe only
 #include "native_on_foot_f109.h"   // F109: look to aim on foot, the player's own turn in ADS, snap or smooth turning (pure parts)
 #include "native_on_foot_f129.h"   // F129: look to aim reads its turn from the player's own look processor; the look path instrument (pure parts)
@@ -15771,10 +15770,6 @@ struct F98Left {
 std::atomic<uint32_t> g_f98Seq{0};
 F98Left g_f98;
 std::atomic<bool> g_f98Reset{false};
-// F136: the upright torso's second (the hook writes under the counter, the frame thread prints and resets once a second).
-std::atomic<uint32_t> g_f136Seq{0};
-nofoot::f136::Window g_f136Win;
-std::atomic<bool> g_f136Reset{false};
 
 // F66g, the parity split (the overseer's second candidate for the F65 judder: a two-slot pose source, where our writes reach the drawn pose only on
 // alternate frames). The hook counts its own outputs by game-frame parity (the local P1 frame index's low bit): calls, the distinct span buffers it
@@ -18518,83 +18513,6 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
             g_ikMark[j] |= 2u;
         }
     }
-    // F136: an upright chest under a level head while the aim is pitched down (mouse look; native_on_foot_f136.h). After the pin and before everything that reads the spine
-    // (the upper-arm points U* below, the F58 bend, the square-up, the arm solve), the chest is turned back about the body's right axis through the spine root (joint 16) by
-    // w x (the animated lean - the stance's lean at a level aim), shared over the spine levels as the bend shares its own (1/3, 2/3, 1 over 16, 21 and 24 and what hangs under
-    // them), on the same M0 the bend and the square-up rotate, written with the same spine list. The level lean is learned per held item from this pose itself while the aim
-    // is level for 0.5 s; an item never seen level is left alone. w is the head's pitch above the aim's through smoothstep(10, 30 deg), only with the aim pitched down by more
-    // than 10 deg, ramped over 0.15 s, 0 in ADS and 0 while look to aim drops the player's look (the head follows the aim: the gap is near 0 there anyway). Not in the pin's
-    // neck-protected scope (the neck already sits on its target). Every item: the correction is the animated lean's excess over the same item's level lean, which a stance that
-    // does not bend at an aim down leaves at 0. The view is not touched.
-    bool f136Write = false;
-    {
-        static nofoot::f136::Ramp s_f136Ramp;
-        static nofoot::f136::LevelLean s_f136Level;
-        static uint64_t s_f136Ms = 0;
-        const double dt136 = s_f136Ms && now > s_f136Ms ? static_cast<double>(now - s_f136Ms) / 1000.0 : 0.0;
-        s_f136Ms = now;
-        const bool spine136 = pl.sqOk && count > 34 && nofoot::kIkSpine[0] < count && nofoot::kIkSpine[2] < count;
-        double chest136[3] = {}, neck136[3] = {}, root136[3] = {}, leanAnim136 = 0.0, leanLevel136 = 0.0, leanWritten136 = 0.0, back136 = 0.0;
-        bool leanOk136 = false;
-        if (spine136) {
-            ikPos(g_ikM0[24], chest136);
-            ikPos(g_ikM0[34], neck136);
-            ikPos(g_ikM0[nofoot::kIkSpine[0]], root136);
-            leanAnim136 = nofoot::f136::leanDeg(chest136, neck136);
-            leanOk136 = std::isfinite(leanAnim136) && std::isfinite(chest136[1]) && std::isfinite(neck136[1]) && std::isfinite(root136[1]);
-        }
-        const bool aimOk136 = pinCall.valid && pinCall.f86Ok && pinCall.localPitchValid;
-        s_f136Level.observe(aimOk136 && leanOk136, pinCall.f86AimPitch, leanAnim136, itemSerialForCall, static_cast<double>(now) / 1000.0, now);
-        const bool levelKnown136 = s_f136Level.level(itemSerialForCall, &leanLevel136);
-        double target136 = 0.0;
-        if (spine136 && leanOk136 && aimOk136 && levelKnown136 && !pinCall.neckYawScope)
-            target136 = nofoot::f136::weightFor(g_ltaDrop.load(std::memory_order_relaxed), true, pinCall.f86AimPitch, pinCall.localPitchDeg, adsW);
-        const double w136 = s_f136Ramp.step(target136, dt136);
-        if (leanOk136 && levelKnown136) back136 = nofoot::f136::backDeg(w136, leanAnim136, leanLevel136);
-        leanWritten136 = leanAnim136;
-        uint32_t joints136 = 0;
-        if (back136 > 0.0 && !g_ikWriteDown.load(std::memory_order_relaxed)) {
-            double Rl[3][9];
-            for (int l = 0; l < 3; ++l) nofoot::f136::backRot(back136, nofoot::kIkSpineWeight[l], Rl[l]);
-            for (uint32_t k = 0; k < pl.sq.n; ++k) {
-                const uint32_t j = pl.sq.j[k];
-                if (j >= count) continue;
-                float tmp[16];
-                std::memcpy(tmp, g_ikM0[j], sizeof(tmp));
-                nofoot::ikPivot(tmp, Rl[pl.sq.level[k] < 3 ? pl.sq.level[k] : 2], root136, g_ikM0[j]);
-                ++joints136;
-            }
-            double chestW[3], neckW[3];
-            ikPos(g_ikM0[24], chestW);
-            ikPos(g_ikM0[34], neckW);
-            leanWritten136 = nofoot::f136::leanDeg(chestW, neckW);
-            f136Write = joints136 > 0;
-        }
-        g_f136Seq.fetch_add(1, std::memory_order_acq_rel);
-        if (g_f136Reset.exchange(false, std::memory_order_relaxed)) g_f136Win.clear();
-        nofoot::f136::Window& fw = g_f136Win;
-        ++fw.calls;
-        fw.wSum += w136;
-        fw.wMax = std::max(fw.wMax, w136);
-        fw.serial = itemSerialForCall;
-        if (aimOk136) {
-            ++fw.aimN;
-            fw.aimSum += pinCall.f86AimPitch;
-            fw.gapSum += pinCall.localPitchDeg - pinCall.f86AimPitch;
-        }
-        if (leanOk136) {
-            ++fw.leanN;
-            fw.animSum += leanAnim136;
-            fw.writtenSum += leanWritten136;
-            if (levelKnown136) fw.levelSum += leanLevel136;
-            else ++fw.levelUnknown;
-        }
-        if (f136Write) {
-            ++fw.applied;
-            fw.joints = joints136;
-        }
-        g_f136Seq.fetch_add(1, std::memory_order_release);
-    }
     // F66c stage 1 (before the bend): the upper-arm joints U (L, R) as stage 0 left them, and the square-up's angle from them and the FP forward
     // (G's z row on xz): both exogenous (the game's animation, the stand's raise, the FP rig). The bend then moves the shoulders; unarmed square-up
     // may turn them, while armed keeps the authored stance. The reach constraint reads U*, these points turned by any selected square-up, never bent shoulders.
@@ -19481,7 +19399,7 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
     }
     // F57: the squared torso: every spine-list joint not written from the solve takes its squared M0 (an arm whose solve did not write rides
     // its clavicle). F58: the same for the bent spine (the arms solved on it, or riding it when the arm IK does not write).
-    if (sqWrite || bendWrite || f136Write) {
+    if (sqWrite || bendWrite) {
         bool sane = true;
         for (uint32_t k = 0; k < pl.sq.n && sane; ++k) {
             const uint32_t j = pl.sq.j[k];
@@ -19491,7 +19409,6 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
             if (mode != 0) ikRefuse(kIkRefSingular);
             if (bendWrite) bendRefuse(kBendRefSingular);
             bendWrite = false;
-            f136Write = false;
             nList = 0;   // the arms were solved on the squared (or bent) torso: write neither
         } else {
             for (uint32_t k = 0; k < pl.sq.n && nList < nofoot::kPfzMaxJoints; ++k) {
@@ -21344,32 +21261,6 @@ void f68cLine(uint64_t now) noexcept {
                     w.farApart ? w.farGapSumMs / static_cast<double>(w.farApart) : 0.0, w.farGapMaxMs, static_cast<unsigned long long>(w.farFpFirst),
                     static_cast<unsigned long long>(w.farTpFirst));
 }
-// F136 (frame thread, once a second): the upright torso's second, when the weight was above 0 in it (so the second it falls to 0 is said too).
-void f136Line(uint64_t now) noexcept {
-    static uint64_t lineMs = 0;
-    if (lineMs == 0) lineMs = now;
-    if (now - lineMs < 1000) return;
-    lineMs = now;
-    nofoot::f136::Window w;
-    bool got = false;
-    for (int tries = 0; tries < 2 && !got; ++tries) {
-        const uint32_t s1 = g_f136Seq.load(std::memory_order_acquire);
-        if (s1 & 1u) continue;
-        w = g_f136Win;
-        std::atomic_thread_fence(std::memory_order_acquire);
-        got = g_f136Seq.load(std::memory_order_relaxed) == s1;
-    }
-    g_f136Reset.store(true, std::memory_order_relaxed);
-    if (!got || w.wMax <= 0.0 || w.calls == 0) return;
-    char name[64] = {};
-    uint32_t serial = 0;
-    if (!opticItemRead(&serial, name) || !name[0]) std::snprintf(name, sizeof(name), "serial %u", w.serial);
-    const double n = static_cast<double>(w.calls), a = w.aimN ? static_cast<double>(w.aimN) : 1.0, l = w.leanN ? static_cast<double>(w.leanN) : 1.0;
-    const uint32_t levelN = w.leanN > w.levelUnknown ? w.leanN - w.levelUnknown : 0;
-    Log::get().note("native on foot upright torso (F136) 1 s: item %.63s, aim pitch %+.1f, head over aim %+.1f deg, w mean %.2f max %.2f, chest lean animated %+.1f -> written "
-                    "%+.1f (level %+.1f), joints written %u",
-                    name, w.aimSum / a, w.gapSum / a, w.wSum / n, w.wMax, w.animSum / l, w.writtenSum / l, levelN ? w.levelSum / static_cast<double>(levelN) : 0.0, w.joints);
-}
 void f67fLine(uint64_t now) noexcept {
     static uint64_t lineMs = 0;
     if (lineMs == 0) lineMs = now;
@@ -21664,7 +21555,6 @@ void armIkTick(uint64_t now) noexcept {
     f67fLine(now);         // F67f: the armed invariants, once a second (and F69h's off hand line)
     gripTick();            // F69g: the grip frames, once per item and side after 0.5 s steady
     f68cLine(now);         // F68c: how G was built (same-frame pairs), once a second
-    f136Line(now);         // F136: the upright torso, once a second while its weight was above 0
     f126Line(now);         // F126: the eye pairs refused and the arm IK calls refused for an earlier FP rig, every 10 s
     if (mode == 0 || !active || !g_pfzArmed) return;
     if (g_ikLineMs == 0) g_ikLineMs = now;
