@@ -58,7 +58,7 @@
 
 * **Next (2026-10-27, last entry):** AA on's +1.65 ms is per-draw
   classifiers. ui-depth memo FLOWN: exact, -0.21 ms (shipped, b1561dff).
-  Trims A-F: no gain. Fast path Phase 1 (shadow) BUILT, NOT FLOWN.
+  Fast path shadow FLOWN 0%: layout gate wrong, 70% no ticket. Next: 1b.
 
 ## Frame budget philosophy
 
@@ -4373,6 +4373,57 @@ on. Read `draw fast path (shadow):`:
 - the would-take share, eye and off-screen;
 - the refusals by reason;
 - the mismatches, which must be 0.
+
+**Phase 1 flown (2026-10-27, Steam log `edvr_gfx_20261027_162747.log`,
+build a7ff834d; same rig).** Loaded in docked at Cranfield at 16:29:41.
+AA was on until 16:31:21, then F7 off until 16:32:46, then on.
+- **Draws.** Owner X draws were 18-29k a frame, about half eye and half
+  off-screen.
+- **Would take: 0.0%,** eye and off-screen, in every window.
+- **Refusals, by first reason, a typical scene window (10800):**
+
+  | Reason | Share | Detail |
+  |---|---|---|
+  | no ticket | 69% | |
+  | armed | 15% | all of it "layout" |
+  | args class | 9% | |
+  | dynamic | 6% | camera watch 4%, object-probe checks 1.5% |
+  | key moved | 0.6% | |
+
+- **Tickets recorded:** about 30% of owner X draws.
+- **Mismatches:** 0 of the 4.2k draws compared, all in loading
+  windows, which is too few to mean anything.
+
+Two causes, both mine:
+1. **"Layout" is not an armed state.** `depthProbeLayoutActive()` reads
+   `g_layoutTarget`, which the depth probe sets EVERY frame to the
+   busiest non-eye depth target (depth_probe.cpp:1116-1118). The sample
+   itself runs only on that target's first draw and every 1024th
+   (:615), inside depthProbeNoteDraw. The fast path keeps calling
+   depthProbeNoteDraw, so the sample runs anyway. Armed-layout refused
+   every draw that held a ticket, which is why the share is exactly 0.
+   ruled out: depthProbeLayoutActive as a fast-path gate, because the
+   kept depthProbeNoteDraw performs the sample (flown 2026-10-27).
+2. **70% of draws are not "ordinary" by some term, and the line cannot
+   say which.** Tickets are recorded only on ordinary draws, and the
+   tally counts terms only on would-take draws, which there were none
+   of.
+
+Suspects, each with the evidence that decides it:
+- the special-VS term. `particleOnDrawMayMatch` is a conservative "may"
+  test, and a VS whose hash is 0 (unknown) may read as a billboard;
+- weaponMotionWants on a common off-eye scene VS (AACF..D809 is in both
+  lists);
+- the after-UI stamp still moving on ordinary draws while the layer
+  watches;
+- off-screen targets that never settle for uiDepthNoteOffscreenDraw.
+
+Next build (Phase 1b):
+- remove layout from the armed set;
+- add a per-window tally of why a draw recorded no ticket, by first
+  failing term, eye and off-screen apart, with the three most frequent
+  VS hashes for the top two terms;
+- fly the same leg.
 
 **The Phase 2 flight should show:**
 - the `fast` step's calls and cost;
