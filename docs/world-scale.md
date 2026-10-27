@@ -2,10 +2,11 @@
 
 ## Status
 
-- **State (2026-10-27):** phase 1 BUILT, NOT FLOWN. Branch
-  `claude/openxr-world-scale-option-b1032a`: 50426f7c (the feature),
-  c023d9d3 (key moved to `[visual]`), full build green. F1 is to be flown
-  on the Epic copy. No issue yet.
+- **State (2026-10-27):** phase 1 FLOWN OK (F1, Epic copy,
+  `edvr_gfx_20261027_074146.log`, v0.22.0-rc.2-6-ge8d54bc5; Sean: "Seems to
+  work well"). Branch `claude/openxr-world-scale-option-b1032a`: 50426f7c
+  (the feature), c023d9d3 (key moved to `[visual]`). Not merged. Tester zip
+  `dist\edvr-world-scale-e8d54bc5-dlls.zip` (the flown pair). No issue.
 - **What it is:** OpenXR Toolkit's "World scale" changes only the distance
   between the two eye cameras the game renders with, about their midpoint.
   A larger percentage moves the eyes closer together and makes the world
@@ -31,16 +32,17 @@
   the code lists it there since 5cde1d76 (10-22), which the Epic build
   had. Cause not found from the code; needs the install and a look.
 - **Unknowns, answered by F1:**
-  - U1: whether Elite re-reads `GetEyeToHeadTransform` every frame on the
-    native path. The ~12 calls per frame were measured through the legacy
-    proxy (`openxr-port.md`). The native path has no per-call counter.
+  - U1: ANSWERED by F1: Elite re-reads the eye transform live. `--health`
+    "world scale" OK: values swept 50..200 % from the menu, 162 read lines,
+    one at every latched value; at 110 % the headset's eyes were 60.6 mm
+    apart and Elite's 55.1 mm.
   - U2: what Elite's full-screen quad pass does with the half-IPD it reads
     (slot 28, caller 0x1428219D0, `terrain-culling.md` 0x28219D0 entry).
     Its effect at a non-100 % value is unknown.
   - U3: whether leaning in the cockpit "swims" at 130 % with head
     translation left at 1:1.
-- **Next:** fly F1 below on the Epic install. Expected log lines are in
-  "Instrumentation"; `edvr_log.py --health` has a "world scale" rule.
+  U2 and U3 drew no complaint in F1 but were not reported on one by one.
+- **Next:** merge to main; tester reports on U2/U3 decide phase 2.
 
 ## What OpenXR Toolkit does
 
