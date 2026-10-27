@@ -2,9 +2,8 @@
 
 ## Status
 
-Draft notes for the second 0.22.0 prerelease. RC2 has not been tagged or
-published. Review fixes passed the full native Windows build. Those fixes still
-need a headset flight before release.
+Release notes for `v0.22.0-rc.2`, the second 0.22.0 prerelease. Changes below
+are relative to RC1. Native on-foot VR requires Elite build 334925.
 
 ## Native on-foot VR fixes
 
@@ -17,6 +16,10 @@ RC2 builds on that work with fixes from the first round of testing.
 - Made sniper aiming down sights more reliable when the game accepts an aim
   request late. Releasing ADS after an automatic position recentre now keeps
   the original facing direction instead of leaving the view turned.
+- Fixed pistol sights sitting too low while aiming: the standing eye-height
+  adjustment now releases while the sights control the view.
+- Fixed a laser-rifle aiming fallback that could leave the sight to the left of
+  the view when its pose samples arrived one frame apart.
 - Ship selection now uses the ship-preview camera for the rendered eyes, rather
   than leaving the view inside the selected ship. The preview stays at the
   game's viewing pose while the menu is open.
@@ -55,11 +58,6 @@ The on-foot mouse cursor remains hidden by default because its visible position
 can drift from the click position in VR. Mouse clicks still work. The advanced
 `fix.native_on_foot_panel_mouse = on` setting shows it again without resolving
 that alignment problem.
-
-Native on-foot VR still requires Elite build 334925. The wider leash, sniper
-ADS release and bracer visibility have been confirmed in headset testing. The
-ship-preview and seated-view changes retain the behavior recorded as flown in
-this branch. The fixes from this review still need headset testing.
 
 ## Thanks
 
