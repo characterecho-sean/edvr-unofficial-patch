@@ -58,7 +58,7 @@
 
 * **Next (2026-10-27, last entry):** step clock FLOWN: AA on's +1.65 ms
   is spread over per-draw classifiers (ui-depth 0.42, engine-vel 0.32).
-  Next: count binding repeats between draws before a generation cache.
+  Binding-repeat counter BUILT, NOT FLOWN: fly the same pad leg.
 
 ## Frame budget philosophy
 
@@ -3601,3 +3601,45 @@ repeat them between consecutive draws. If they do, one generation
 compare can stand for the chain. The repeat rate is the evidence
 needed first: per eye draw, count whether any of those slots' bind
 generations moved since the previous eye draw.
+
+**Binding-repeat counter built (2026-10-27, same branch), NOT FLOWN.**
+`src\d3d11\bind_repeat.h` is a temporary instrument with no key.
+
+- **Capture.** On a sampled frame, each owner-context VR draw reads the
+  generation and pointer of eight slots: VS, PS, PS SRV 0-3, RTV0 and
+  DSV0. The read happens at the thunk's entry, before the draw clock.
+- **Grade.** After the verdict, the draw is graded against the
+  previous owner draw and, for an eye draw, against the previous eye
+  draw:
+  - repeat: no generation moved;
+  - rebound: the same pointers, but a generation moved (the binding
+    shadow bumps a generation on every rebind, even of the same view,
+    and every generation once a frame);
+  - changed: some pointer differs;
+  - first: no previous draw in the same frame.
+- **Answer stability.** For eye draws graded repeat or rebound, the
+  counter checks whether the verdict and the three ui_depth flags
+  (`t_uiDepthThisDraw`, `t_compositeThisDraw`, `t_holoDepthThisDraw`)
+  matched the previous eye draw's, and whether a draw that differed had
+  the same draw arguments. That tuple is a proxy: a real cache would
+  also have to reproduce ui_depth's other per-draw state.
+- **What a cache could skip.** The step clock's figures are split by
+  grade. Eye-only steps (v:ui-depth, v:census, v:fixes) use the eye
+  grade; the rest use the any-draw grade.
+- **Its own cost.** The grading has its own step, `bind-count`. On
+  sampled frames it also runs inside the old line's whole-clocked
+  draws, so the old line reads about that much higher than in the last
+  flight. Measure it as bind-count's figure.
+- **Lines.** Two new lines follow the step lines in each 1800-frame
+  window: `draw hook CPU by step, by binding repeat:` and `draw
+  bindings, sampled frames:`.
+- **Rig.** aa_off_test, 188 checks.
+
+Flight: the same pad leg on Steam, AA on, then F7 off, then F7 on.
+
+What to read:
+- The eye-draw repeat and rebound shares, and which slot moves most.
+- Whether the answers ever differ on repeat draws. Any differing draw
+  with the same arguments means the key is not enough.
+- The milliseconds on repeat draws in v:ui-depth, f:ui-layer and
+  engine-vel: the most a cache could save.
