@@ -21,6 +21,7 @@
 #include "flat_cpu.h"
 #include "flat_local_reject.h"
 #include "flat_runtime.h"
+#include "scope_zoom_s0.h"
 
 extern "C" DWORD _tls_index; // CRT-provided once a __declspec(thread) exists
 
@@ -423,6 +424,22 @@ void observeOffThread(uintptr_t r0, uintptr_t camera) noexcept {
     observer->offThread(camera, rva, kind, readable, GetCurrentThreadId());
 }
 
+// S0 (scope zoom, measure only; scope_zoom_s0.h): the camera's kind, vertical FOV and aspect into the table the frame thread's ADS press lines read. Three loads in one guarded
+// block and a lock-free store, on whichever thread the game refreshed the camera; it reads, never writes the camera, and does no I/O (the 2026-09-28 lesson above).
+void noteCameraFov(uintptr_t camera) noexcept {
+    if (!camera) return;
+    uint32_t kind = 0;
+    float fov = 0.0f, aspect = 0.0f;
+    __try {
+        kind = *reinterpret_cast<const uint32_t*>(camera + kCamKind);
+        fov = *reinterpret_cast<const float*>(camera + kCamFov);
+        aspect = *reinterpret_cast<const float*>(camera + kCamAspect);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return;
+    }
+    scopezoom::g_cameraTable.note(camera, kind, fov, aspect, GetTickCount64());
+}
+
 // ---- THE VR WORLD ROUTE'S CALL (flat_camera_inject.h, "THE VR WORLD ROUTE'S INJECTION MODE") -------------------------------
 // refreshPre hands a call here when the route's frame step has set the mode word (g_vrBits != 0). flat_camera_vr.h decides
 // (kind, role, admission, the flush, the counters); what is here is the memory: the reads the decision needs, the census's
@@ -588,6 +605,7 @@ void refreshPre(uintptr_t r0, uintptr_t ctx, uintptr_t p2, uintptr_t camera) noe
     g_inject.lastCtx.store(ctx, std::memory_order_relaxed);
     g_inject.lastP2.store(p2, std::memory_order_relaxed);
     g_inject.lastCamera.store(camera, std::memory_order_relaxed);
+    noteCameraFov(camera);   // S0: both profiles, every thread, before the gate and the VR branch
 
     // The thread first. The phase machine, the decision, the census and the
     // set of injected cameras belong to the thread that runs Present; a call

@@ -54,6 +54,7 @@
 #include "f158_checks.h"    // F158: the local body's draws over the first 30 s on foot (the window's rules, the list and its cap, the switch time, the stop and adjacency tests, the lines)
 #include "f159_checks.h"    // F159: the left elbow's stable pole reseeded at the shoulder's height (the condition, the gate, the real solver's raised elbow), the seed births and their lines
 #include "f160_checks.h"    // F160: the neck reference's raise blended through the ADS release (the decision, the kept target, the counts, the flight's release replayed on the real parts), the holster line
+#include "s0_checks.h"      // S0: the scope zoom instrument (measure only): the projection decode, the press tracker, the camera table, the probe points, the line formats
 #include "f151_checks.h"    // F151: the weapon readout's draw bound by its place (the ordinals, each guard, one bind per key, the lost-frame count) and the held copy's scope from the selected slot
 #include "f110_checks.h"    // F110: the ADS sight lock's model right eye (the left-eye job camera plus the IPD)
 #include "f111_checks.h"    // F111: the panel pointer instrument's statistics and verdict
@@ -7565,6 +7566,10 @@ int wmain(int argc, wchar_t** argv) {
     // falls back to 0), the kept target whole at the release's end, the releases counted by class; the flight's release replayed on the real ramp, settle window and follower (the raise back
     // 0.63 s after the request went off before, with the release now); the holster line and its rate limit. The holster bridge itself is checked with F99a's (run99).
     f160test::run160(check);
+    // S0 (scope zoom, measure only): clipZoom on scene rows of several FOVs, poses and scales; the press tracker on the spec's scoped, unscoped, never-settling and first-frame presses,
+    // the late flag (with and without the flat lag guard) and a quick second press; the camera table's slots, drops and staleness; the probe points and the lens centre in pixels;
+    // the four lines the DLL writes.
+    s0test::runS0(check);
     // F110: the ADS sight lock's model right eye from the left-eye job camera and from a solved left eye, the fallback, the IPD's sign.
     f110test::run110(check);
     // F111: the panel pointer instrument names the stage that turns a move the other way (K1 to K5, one at a time), the camera getters' decoding.

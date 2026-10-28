@@ -10332,7 +10332,10 @@ def self_test_phase_failure():
 # build. The PARTIAL cut-offs (90% of the decisions scaled or bound, half the draws patched, half the seconds holding, 80%/50% elsewhere) are judgement calls from the
 # 2026-10-24 flight; every counter that decides a status is printed beside it, so a reader can overrule one.
 _HN =r"[+-]?\d+(?:\.\d+)?"
-HEALTH_TAG_RE = re.compile(r"\((F\d+[a-z]?(?:/F\d+[a-z]?)*)(?![0-9A-Za-z])")
+# F<n> tags are the on-foot arc's features; S<n> (S0: scope zoom, measure only, src\d3d11\scope_zoom_s0.h) is the scope zoom arc's. The S0 census rule also reads the pixel
+# probe's own closing line, which carries no tag (H_S0_PROBE_RE): health_scan hands it to the S0 rules.
+HEALTH_TAG_RE = re.compile(r"\((F\d+[a-z]?(?:/F\d+[a-z]?)*|S\d+)(?![0-9A-Za-z])")
+H_S0_PROBE_RE = re.compile(r"pixel probe: frame \d+ done -- ")
 HEALTH_STAMP_RE = re.compile(r"^\[(\d{2}):(\d{2}):(\d{2})\.(\d{3})\]\s*")
 HEALTH_TIME_RE = re.compile(r"^(\d{1,2}):(\d{2})(?::(\d{2})(?:\.(\d{1,3}))?)?$")
 HEALTH_OTHER_TAGS = 8
@@ -13885,6 +13888,182 @@ def _hj_world_scale(rows, ctx):
     return ("OK", text + "; Elite read its eye transform at each value (%d read line(s), the last at geometry sequence %s)" % (len(reads), reads[-1]["seq"]))
 
 
+# ---- S0: scope zoom, measure only (src\d3d11\scope_zoom_s0.h; docs\design-vr-scope-magnification-2026-10-28.md section 6) ----
+# Four lines, each for the open questions it answers: the flat press line (Q1, Q2 flat, Q3: every camera the view-constant refresh hook noted during a press, its FOV at the hip
+# and settled), the VR press line (Q2 VR: w, the readout's two camera FOVs, the eyes' projection scale as a control, the VR camera hook's cameras), the lens geometry (Q5: the
+# sight point as the lens centre c in each eye, once at the press's first settled frame) and the lens census (Q4: the pixel probe about c in the aiming eye, whose own closing line
+# says how many eyes and draws it saw). H_S0_DONE_WITHIN_S: how long after a run line its pixel probe closing line may come (it comes within two frames).
+H_S0_FLAT, H_S0_VR, H_S0_GEO, H_S0_CENSUS = "scope zoom (S0) flat", "scope zoom (S0) vr", "scope lens geometry (S0)", "scope lens census (S0)"
+H_S0_DONE_WITHIN_S = 3.0
+H_S0_FLAT_CAM_RE = re.compile(r"cam (?P<id>\d+) at 0x(?P<ptr>[0-9A-F]+) kind (?P<kind>\d+) aspect (?P<aspect>[^\s;]+) hip (?P<hip>[^\s;]+) deg ads (?P<ads>[^\s;]+) deg M (?P<m>[^\s;]+) "
+                              r"ramp (?P<ramp>[\d.]+) s settled (?P<settled>[01]) \(min (?P<min>[^\s;]+) max (?P<max>[^\s;)]+) deg\)")
+H_S0_VR_CAM_RE = re.compile(r"cam (?P<id>\d+) at 0x(?P<ptr>[0-9A-F]+) kind (?P<kind>\d+) hip (?P<hip>[^\s;]+) ads (?P<ads>[^\s;]+) deg")
+H_S0_PAIR_RE = re.compile(r"hip (?P<hip>[^\s;]+) ads (?P<ads>[^\s;]+)$")
+
+
+def _hs0_num(text):
+    try:
+        return float(text)
+    except (TypeError, ValueError):
+        return None
+
+
+def _hs0_moved(a, b):
+    """Two readings of one source that differ by more than the tracker's own 0.1 % tolerance."""
+    return a is not None and b is not None and abs(a - b) > 1e-3 * max(abs(a), abs(b), 1e-9)
+
+
+def _hj_s0_flat(rows, ctx):
+    """S0, flat: one `scope zoom (S0) flat: press` line per ADS press (Status.json's ADS bit with on foot), listing the cameras the refresh hook noted during it with their
+    vertical FOV at the hip and settled. OK when a camera is settled in some press (a FOV the tracker held within 0.1 % for 0.6 s); the text names the cameras whose FOV moved and
+    the zoom M they give. PARTIAL when press lines list cameras and none settled. NEVER APPLIED when every press line says `cameras none`, or the watching line says the hook is
+    not running and press lines exist (no camera could be noted). IDLE with only the watching (or flags) line: no press yet. Cameras that settled beat the announce: a hook that
+    came up after the watching line was written is not a failure."""
+    watch, flags, press = rows.get("watch", []), rows.get("flags", []), rows.get("press", [])
+    if not (watch or flags or press):
+        return None
+    hook = watch[-1]["hook"] if watch else None
+    down = hook is not None and hook != "running"
+    if not press:
+        return ("IDLE", "no ADS press line; the refresh hook: %s; %s" % (hook or "no watching line",
+                "the journal's flags were readable (on foot %s, ADS %s at first)" % (flags[0]["on"], flags[0]["ads"]) if flags
+                else "the journal's on-foot and ADS flags were never readable in this window"))
+    cams = [c.groupdict() for p in press for c in H_S0_FLAT_CAM_RE.finditer(p["cams"])]
+    settled = [c for c in cams if c["settled"] == "1"]
+    base = "%d press line(s) (items %s), %d camera reading(s), %d settled" % (
+        len(press), ", ".join("%s %d" % (k, n) for k, n in collections.Counter(p["item"] for p in press).most_common(4)), len(cams), len(settled))
+    if settled:
+        moving = collections.Counter((c["kind"], c["hip"], c["ads"], c["m"]) for c in settled if _hs0_moved(_hs0_num(c["hip"]), _hs0_num(c["ads"])))
+        if moving:
+            base += "; FOV moved: " + ", ".join("kind %s %s -> %s deg, M %s (x%d)" % (k, h, a, m, n) for (k, h, a, m), n in moving.most_common(4))
+        else:
+            base += "; no settled camera's FOV moved (M = 1 everywhere)"
+        if down:
+            base += "; the watching line said the refresh hook was not running (%s) yet cameras were noted" % hook
+        return ("OK", base)
+    if down:
+        return ("NEVER APPLIED", "%d press line(s), and the watching line says the refresh hook is not running (%s): no camera could be noted (flat needs a temporal mode)" % (len(press), hook))
+    if all(p["cams"].startswith("cameras none") for p in press):
+        return ("NEVER APPLIED", "every one of the %d press line(s) says cameras none: the hook ran (%s) but no camera reached the table during a press" % (len(press), hook or "no watching line"))
+    return ("PARTIAL", base + "; no camera held a stable FOV for 0.6 s in a press")
+
+
+H_S0_VR_SOURCES = (("rc16C", "rc16"), ("rc17C", "rc17"), ("eyeL p11", "eyel"), ("eyeR p11", "eyer"))
+
+
+def _hj_s0_vr(rows, ctx):
+    """S0, VR: one `scope zoom (S0) vr: press` line per press of the sights in native on foot, with w (the game's ADS fraction), RC+0x16C and +0x17C (the readout's two camera
+    FOVs), the eyes' p11 (a control: the scene rows should not move) and the VR camera hook's cameras. OK when a press line has a value for any source; the text names the sources
+    that moved between the hip and the press. A watching line is written when native on foot first arms (the tick runs), so a log of a build without S0 is not judged. NEVER
+    APPLIED when every source is none on every press line, or when the tick announced itself, F141 wrote ADS second lines (a press in native on foot: the witness is `native on foot
+    ADS sight point (F141) <n> s: item`, once per second of ADS) and there is no S0 vr press line (a press the tick never saw, or the log ended inside the only press). IDLE with
+    the watching line alone. Not present with neither."""
+    press, watch = rows.get("press", []), rows.get("watch", [])
+    if not press:
+        f141 = _hrows(ctx, "ADS sight point (F141)", "sec")
+        if watch and f141:
+            return ("NEVER APPLIED", "F141 wrote %d ADS second line(s) (%d s with the sights up in native on foot) and there is no scope zoom (S0) vr press line, though the tick announced "
+                                     "itself: a press it never saw, or the log ended inside the only press" % (len(f141), _hsecs(f141)))
+        if watch:
+            return ("IDLE", "watching, and no press of the sights in native on foot in this window")
+        return None
+    have, moved = collections.Counter(), collections.defaultdict(list)
+    for r in press:
+        if r["wmax"] != "none":
+            have["w"] += 1
+        for label, key in H_S0_VR_SOURCES:
+            m = H_S0_PAIR_RE.match(r[key])
+            if m:
+                have[label] += 1
+                a, b = _hs0_num(m.group("hip")), _hs0_num(m.group("ads"))
+                if _hs0_moved(a, b):
+                    moved[label].append("%s -> %s" % (m.group("hip"), m.group("ads")))
+        for c in H_S0_VR_CAM_RE.finditer(r["cams"]):
+            have["cameras"] += 1
+            if _hs0_moved(_hs0_num(c.group("hip")), _hs0_num(c.group("ads"))):
+                moved["cam kind " + c.group("kind")].append("%s -> %s deg" % (c.group("hip"), c.group("ads")))
+    settled = sum(1 for r in press if r["settled"] == "1")
+    scopes = collections.Counter(r["scope"] for r in press)
+    text = "%d press line(s) (scope %s), %d with w at 1.0 for 0.6 s; values: %s" % (
+        len(press), ", ".join("%s %d" % (k, n) for k, n in scopes.most_common()), settled,
+        ", ".join("%s %d" % (k, have[k]) for k in ("w", "rc16C", "rc17C", "eyeL p11", "eyeR p11", "cameras")))
+    if moved:
+        text += "; moved between the hip and the press: " + "; ".join("%s %s (x%d)" % (k, v[0], len(v)) for k, v in sorted(moved.items()))
+    else:
+        text += "; no source moved between the hip and the press"
+    if not sum(have.values()):
+        return ("NEVER APPLIED", "%d press line(s) and every source is none on all of them (w, RC FOVs, eye rows, cameras): the instrument ran and read nothing" % len(press))
+    return ("OK", text)
+
+
+def _hj_s0_geo(rows, ctx):
+    """S0, lens geometry: one line at the first settled frame of a VR press, with c (the sight point through the eye's scene rows) in each eye. OK when a line has c for the
+    right (aiming) eye. NEVER APPLIED when every line has c none for the right eye, or when the VR press lines say a press settled and there is no geometry line."""
+    geo = rows.get("geo", [])
+    if not geo:
+        settled = [r for r in _hrows(ctx, H_S0_VR, "press") if r["settled"] == "1"]
+        if settled:
+            return ("NEVER APPLIED", "%d VR press line(s) say settled 1 and there is no geometry line: the first-settled-frame step never ran" % len(settled))
+        return None
+    right = [g for g in geo if g["rx"] is not None]
+    if not right:
+        why = collections.Counter(g["rwhy"] for g in geo)
+        return ("NEVER APPLIED", "%d geometry line(s) and every one has c none for the right eye: %s" % (len(geo), "; ".join("%s x%d" % (w, n) for w, n in why.most_common(3))))
+    last = right[-1]
+    text = ("%d geometry line(s), c for the right eye on %d (scope yes %d); last: ndc (%s, %s) px (%s, %s) of %sx%s, %s deg off the axis; game |E-S| %s cm, eye R to S %s cm" % (
+        len(geo), len(right), sum(1 for g in right if g["scope"] == "yes"), last["rx"], last["ry"], last["rpx"], last["rpy"], last["rw"], last["rh"], last["ro"], last["es"], last["rs"]))
+    left = sum(1 for g in geo if g["lx"] is not None)
+    return ("OK", text + "; the left eye on %d" % left)
+
+
+def _hj_s0_census(rows, ctx):
+    """S0, lens census: a run line says the pixel probe was set to four points about c in the right eye and armed; the probe's own closing line (`pixel probe: frame N done`, no
+    tag) within 3 s says how many eyes and draws it saw. A run is good when its closing line has eyes seen >= 1 and draws that changed a window >= 1, dry when it saw eyes and no
+    change, and broken when it has no closing line or eyes seen 0 (the probe is not in the native stereo draw path). OK when a run is good and none broken; PARTIAL when some are
+    broken, or all are dry, or every run was skipped; NEVER APPLIED when a run is broken and none is good, or when a scoped press settled (a geometry line with scope yes) and there
+    is neither a run nor a skipped line. Closing lines with no run before them (an eye dump's) are not judged."""
+    runs = sorted(rows.get("run", []), key=lambda r: r["_order"])
+    skips, dones = rows.get("skip", []), sorted(rows.get("done", []), key=lambda r: r["_order"])
+    if not runs and not skips:
+        scoped = [g for g in _hrows(ctx, H_S0_GEO, "geo") if g["scope"] == "yes"]
+        if scoped:
+            return ("NEVER APPLIED", "%d scoped press(es) reached a settled frame (a geometry line with scope yes) and there is neither a census run nor a skipped line: the census never ran" % len(scoped))
+        return None
+    if not runs:
+        why = collections.Counter(sk["why"] for sk in skips)
+        return ("PARTIAL", "every census run was skipped (%d): %s" % (len(skips), "; ".join("%s x%d" % (w, n) for w, n in why.most_common(3))))
+    results = []
+    for i, r in enumerate(runs):
+        nxt = runs[i + 1]["_order"] if i + 1 < len(runs) else None
+        done = None
+        for d in dones:
+            if d["_order"] <= r["_order"]:
+                continue
+            if nxt is not None and d["_order"] > nxt:
+                break
+            if r.get("_t") is not None and d.get("_t") is not None and d["_t"] - r["_t"] > H_S0_DONE_WITHIN_S:
+                break
+            done = d
+            break
+        results.append((r, done))
+    good = [(r, d) for r, d in results if d is not None and int(d["eyes"]) >= 1 and int(d["changed"]) >= 1]
+    dry = [(r, d) for r, d in results if d is not None and int(d["eyes"]) >= 1 and int(d["changed"]) == 0]
+    broken = [(r, d) for r, d in results if d is None or int(d["eyes"]) == 0]
+
+    def one(r, d):
+        if d is None:
+            return "run %s (press %s, scope %s): no pixel probe closing line within %d s" % (r["run"], r["press"], r["scope"], H_S0_DONE_WITHIN_S)
+        return "run %s (press %s, scope %s): eyes seen %s, %s draws into eye targets, %s changed a window" % (r["run"], r["press"], r["scope"], d["eyes"], d["draws"], d["changed"])
+    text = "%d run(s)%s: %s" % (len(results), " and %d skipped" % len(skips) if skips else "", "; ".join(one(r, d) for r, d in results[:4]))
+    if broken and not good:
+        return ("NEVER APPLIED", text + "; the probe saw no eye draws or never closed (the pixel probe is not in the native stereo draw path, or its frame never closed)")
+    if broken:
+        return ("PARTIAL", text + "; %d run(s) with no eye seen or no closing line" % len(broken))
+    if good:
+        return ("OK", text)
+    return ("PARTIAL", text + "; the probe saw eye draws and no draw changed a window at the points")
+
+
 def _hrule(name, tags, labels, kinds, judge, needs_detail=False):
     return HealthRule(name, tuple(tags), tuple(labels), tuple((k, re.compile(rx)) for k, rx in kinds), judge, needs_detail)
 
@@ -14639,6 +14818,31 @@ HEALTH_RULES = (
         ("notread", r"HUD hide \(F116\): the game's hide counters are NOT read -- (?P<why>.*?) \(the hide on the terminal footprint is unaffected\)"),
         ("refread", r"HUD hide \(F116\): a counter read refused -- (?P<why>.*?) \(said once per reason\)"),
     ), _hj_f116_hud_hide),
+    # S0 (scope zoom, measure only; src\d3d11\scope_zoom_s0.h): four lines tagged (S0); the census rule also reads the pixel probe's closing line, which has no tag.
+    _hrule(H_S0_FLAT, ("S0",), (H_S0_FLAT,), (
+        ("watch", r"scope zoom \(S0\) flat: watching \(measure only, no key\): .*the view-constant refresh hook \((?P<hook>running|not running[^)]*)\)\.$"),
+        ("flags", r"scope zoom \(S0\) flat: the journal's flags are readable from Status\.json \(on foot (?P<on>[01]), ADS (?P<ads>[01])\); a press is the ADS flag with on foot set\.$"),
+        ("press", r"scope zoom \(S0\) flat: press (?P<n>\d+) item (?P<item>\S+) hold (?P<hold>[\d.]+) s; (?P<cams>cameras none \(.*\)|cam .+)$"),
+    ), _hj_s0_flat),
+    _hrule(H_S0_VR, ("S0",), (H_S0_VR,), (
+        ("watch", r"scope zoom \(S0\) vr: watching \(measure only, no key\): .*a pixel probe census\.$"),
+        ("press", r"scope zoom \(S0\) vr: press (?P<n>\d+) item (?P<item>\S+) scope (?P<scope>yes|no|unknown) copy (?P<copy>\d+) hold (?P<hold>[\d.]+) s w_max (?P<wmax>[^\s;]+) "
+                  r"w_full (?P<wfull>[\d.]+) s settled (?P<settled>[01]); rc16C (?P<rc16>none|hip [^\s;]+ ads [^\s;]+); rc17C (?P<rc17>none|hip [^\s;]+ ads [^\s;]+); "
+                  r"eyeL p11 (?P<eyel>none|hip [^\s;]+ ads [^\s;]+); eyeR p11 (?P<eyer>none|hip [^\s;]+ ads [^\s;]+); (?P<cams>cameras none|cam .+)$"),
+    ), _hj_s0_vr),
+    _hrule(H_S0_GEO, ("S0",), (H_S0_GEO,), (
+        ("geo", r"scope lens geometry \(S0\): press (?P<n>\d+) item (?P<item>\S+) scope (?P<scope>yes|no|unknown); "
+                r"eye L (?:c ndc \((?P<lx>[^,\s]+), (?P<ly>[^)\s]+)\) px \((?P<lpx>[^,\s]+), (?P<lpy>[^)\s]+)\) of (?P<lw>\d+)x(?P<lh>\d+) off-axis (?P<lo>\S+) deg|c none \((?P<lwhy>[^)]*)\)); "
+                r"eye R (?:c ndc \((?P<rx>[^,\s]+), (?P<ry>[^)\s]+)\) px \((?P<rpx>[^,\s]+), (?P<rpy>[^)\s]+)\) of (?P<rw>\d+)x(?P<rh>\d+) off-axis (?P<ro>\S+) deg|c none \((?P<rwhy>[^)]*)\)); "
+                r"game \|E-S\| (?P<es>\S+) cm; eye R to S (?P<rs>\S+) cm$"),
+    ), _hj_s0_geo),
+    _hrule(H_S0_CENSUS, ("S0",), (H_S0_CENSUS,), (
+        ("run", r"scope lens census \(S0\): run (?P<run>\d+) press (?P<press>\d+) item (?P<item>\S+) scope (?P<scope>yes|no|unknown) eye R points (?P<points>[\d.,;]+) at 0, 1\.5, 4, 8 deg "
+                r"about c \(.*clamped to the target: (?P<clamp>none|[\d,]+)\); the pixel probe's lines follow(?:; the probe keeps these points afterwards.*)?$"),
+        ("skip", r"scope lens census \(S0\): run skipped \((?P<why>.*)\)$"),
+        ("done", r"pixel probe: frame (?P<frame>\d+) done -- eyes seen (?P<eyes>\d+), draws into eye targets (?P<draws>\d+), copied (?P<copied>\d+), dropped (?P<dropped>\d+), "
+                 r"declined (?P<declined>\d+) \(array/format\), draws that changed a window (?P<changed>\d+)\.$"),
+    ), _hj_s0_census),
     # World scale: lines of the runtime log, which carry no build tag (health_scan_runtime reads them); no graphics-log tag dispatches to this rule.
     _hrule(H_WORLD, (), (H_WORLD_LABEL,), (
         ("change", H_WORLD_CHANGE),
@@ -14688,10 +14892,10 @@ def health_scan(text, since=None, until=None):
         ("head containment (F119)", re.compile(r"head containment \(F119\): report context: reference (?P<reference>\d+) \((?P<known>known|not read)\), epoch (?P<epoch>\d+), (?P<context>steady|mixed rest)$")),
     )
     for raw in text.splitlines():
-        if "(F" not in raw:
+        if "(F" not in raw and "(S" not in raw and "pixel probe: frame " not in raw:
             continue
         m = HEALTH_TAG_RE.search(raw)
-        if not m:
+        if not m and not H_S0_PROBE_RE.search(raw):   # an untagged line is read only when it is the pixel probe's closing line (the S0 census rule's)
             continue
         sm = HEALTH_STAMP_RE.match(raw)
         tod = int(sm.group(1)) * 3600 + int(sm.group(2)) * 60 + int(sm.group(3)) + int(sm.group(4)) / 1000.0 if sm else None
@@ -14717,10 +14921,10 @@ def health_scan(text, since=None, until=None):
         if stamp:
             first = first or stamp
             last = stamp
-        label = raw[sm.end() if sm else 0:m.start()].strip()
+        label = raw[sm.end() if sm else 0:m.start()].strip() if m else "pixel probe"
         if len(label) > 48:
             label = "..." + label[-45:]
-        tags = m.group(1).split("/")
+        tags = m.group(1).split("/") if m else ["S0"]
         for tag in tags:
             c = census.setdefault(tag, [0, stamp, stamp, collections.Counter()])
             c[0] += 1
@@ -14825,7 +15029,10 @@ def health_report(scan, window="", rules=None):
     if unjudged:
         lines.append("  not judged (detail log off)  %s" % ", ".join(unjudged))
     covered = {t for rule in HEALTH_RULES for t in rule.tags}
-    order = sorted(census, key=lambda t: (-int(re.match(r"F(\d+)", t).group(1)), t))
+    def tag_key(t):   # F tags newest first as before, then the S tags
+        parts = re.match(r"([FS])(\d+)", t)
+        return (0 if parts.group(1) == "F" else 1, -int(parts.group(2)), t)
+    order = sorted(census, key=tag_key)
     shown = [t for t in order if t not in covered] if not scan.get("all") else order
     if scan.get("all"):
         lines.append("  every tag (* has a rule above):")
@@ -15009,7 +15216,7 @@ def main(argv=None):
                          "prompt anchor and label F87p, the label's designed offset F93c and its own-anchor move F94b, the head in the shadows F95c, the full outfit F142-F144 (Gear_Back promotion for the coat, the coat's clip, the first-person census), the coat's pack draw left out of both eyes F157, the ADS sight offset F139, the ADS eye depth F152 (base + offset + trim per weapon), the engine shadow against the own shadow of the readout's origin rows (on the F85b line), the weapon readout's placement F140 and F144 (with the journal's loadout), the game's ADS sight point and the readout anchor F141, the ADS sight line F143, the weapon UI's tag slots F145, the ADS entry path F144, the marker tee and the pose hook's CPU F100, the in-world screens' coverage F105, the terminal hold F108, the HUD hide F116, and world scale, read from the paired runtime log) saying OK, "
                          "PARTIAL, NEVER APPLIED "
                          "(its own lines show it did nothing), IDLE or UNPARSED with the counters that decide it, then a census of "
-                         "every `(F<n>...)` tagged line (count, first and last time, leading label) for the features with no rule. "
+                         "every `(F<n>...)` or `(S<n>)` tagged line (count, first and last time, leading label) for the features with no rule. "
                          "Exit 3 when any family is NEVER APPLIED, 4 when a rule no longer matches its lines, 2 for a wrong build")
     ap.add_argument("--since", default=None,
                     help="with --health, only lines at or after this time of day, HH:MM[:SS] (the log's own clock)")
@@ -15550,6 +15757,8 @@ def self_test_health():
     f159_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f159.h")
     f160_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f160.h")
     f154_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f154.h")
+    s0_path = os.path.join(repo_root(), "src", "d3d11", "scope_zoom_s0.h")
+    probe_path = os.path.join(repo_root(), "src", "d3d11", "pixel_probe.cpp")
     try:
         source, swap, f90src, f91src = read_text(src_path), read_text(swap_path), read_text(f90_path), read_text(f91_path)
         f105src, f105note = read_text(f105_path), read_text(f105_note_path)
@@ -15565,6 +15774,8 @@ def self_test_health():
         f159src = read_text(f159_path)
         f160src = read_text(f160_path)
         f154src = read_text(f154_path)
+        s0src = read_text(s0_path)
+        probesrc = read_text(probe_path)
     except OSError as e:
         print("health: the DLL source the self-test reads its log formats from is not where it looks (%s)" % e)
         return False
@@ -15718,6 +15929,24 @@ def self_test_health():
             fmts[key] = health_c_format(f154src, needle)
         if fmts[key] is None:
             raise AssertionError("native_on_foot_f154.h has no format holding %r: the --health rule that reads it is out of date" % needle)
+        return health_render(fmts[key], vals)
+
+    def RS0(needle, *vals):
+        """S0's lines (scope_zoom_s0.h builds them: formatFlatWatching, formatFlatPress, formatVrPress, formatGeometry, formatCensusRun and their pieces), from their own format literals."""
+        key = "s0:" + needle
+        if key not in fmts:
+            fmts[key] = health_c_format(s0src, needle)
+        if fmts[key] is None:
+            raise AssertionError("scope_zoom_s0.h has no format holding %r: the --health rule that reads it is out of date" % needle)
+        return health_render(fmts[key], vals)
+
+    def RPROBE(needle, *vals):
+        """The pixel probe's closing line (pixel_probe.cpp closeProbedFrame), which the S0 census rule reads (it carries no tag)."""
+        key = "probe:" + needle
+        if key not in fmts:
+            fmts[key] = health_c_format(probesrc, needle)
+        if fmts[key] is None:
+            raise AssertionError("pixel_probe.cpp has no format holding %r: the --health rule that reads it is out of date" % needle)
         return health_render(fmts[key], vals)
 
     def stamp(sec):
@@ -18852,6 +19081,157 @@ def self_test_health():
         if rc != 1 or "no such runtime log" not in out:
             print("health world scale: a --runtime-file that is not there did not stop (rc=%d):\n%s" % (rc, out))
             ok = False
+
+        # ---- scope zoom (S0): the first scope zoom flight, measure only ----
+        SF0, SV0, SG0, SC0 = H_S0_FLAT, H_S0_VR, H_S0_GEO, H_S0_CENSUS
+        SNIPER = "$wpn_m_sniper_plasma_charged_name;"
+        S0_UP = "running"
+        S0_DOWN = "not running, its install is pending: flat needs a temporal mode"
+
+        def s0_watch(hook=S0_UP):
+            return RS0("scope zoom (S0) flat: watching", hook)
+
+        def s0_flags(on=1, ads=0):
+            return RS0("scope zoom (S0) flat: the journal's flags are readable", on, ads)
+
+        def s0_cam(cid=2, ptr=0x1F2E3D4C, kind=3, aspect="1.7778", hip="59.989", ads="28.648", m="2.2606", ramp=0.31, settled=1, mn="28.648", mx="59.989"):
+            return RS0("cam %u at 0x%llX kind %u aspect", cid, ptr, kind, aspect, hip, ads, m, ramp, settled, mn, mx)
+
+        def s0_still(cid=1, kind=4):
+            return s0_cam(cid=cid, kind=kind, hip="59.989", ads="59.989", m="1.0000", ramp=0.0, mn="59.989", mx="59.989")
+
+        def s0_flat(n=1, item=SNIPER, hold=4.2, cams=None, more=0):
+            head = RS0("scope zoom (S0) flat: press %u item %s hold", n, item, hold)
+            if cams is None:
+                cams = [s0_cam()]
+            body_text = "; ".join(cams) if cams else RS0("cameras none (the refresh hook noted")
+            return head + body_text + (RS0("; %u more camera(s) not listed", more) if more else "")
+
+        def s0_src(pair=None):
+            return "none" if pair is None else RS0("hip %s ads %s", pair[0], pair[1])
+
+        def s0_vcam(cid=3, ptr=0x2A4B0010, kind=3, hip="59.989", ads="28.648"):
+            return RS0("; cam %u at 0x%llX kind %u hip", cid, ptr, kind, hip, ads)
+
+        def s0_vr(n=2, item=SNIPER, scope="yes", copy=0, hold=5.1, wmax="1.000", wfull=4.3, settled=1, rc16=("1.5710", "1.5710"), rc17=None, eyel=("1.0000", "1.0000"),
+                  eyer=("1.0000", "1.0000"), cams=None):
+            head = RS0("scope zoom (S0) vr: press %u item %s scope %s copy %u hold %.2f s w_max", n, item, scope, copy, hold, wmax, wfull, settled)
+            tail = RS0("; rc16C ") + s0_src(rc16) + RS0("; rc17C ") + s0_src(rc17) + RS0("; eyeL p11 ") + s0_src(eyel) + RS0("; eyeR p11 ") + s0_src(eyer)
+            return head + tail + (RS0("; cameras none") if cams is None else "".join(cams))
+
+        def s0_eye(c=("0.0123", "-0.0456"), px=("1249.2", "1196.2"), size=(2468, 2288), off="3.21", why="no scene rows published"):
+            if c is None:
+                return RS0("c none (%s)", why)
+            return RS0("c ndc (%.4f, %.4f) px (%s, %s) of %ux%u off-axis", float(c[0]), float(c[1]), px[0], px[1], size[0], size[1], off)
+
+        def s0_geo(n=2, item=SNIPER, scope="yes", left=None, right=None, es="12.34", rs="56.78"):
+            return (RS0("scope lens geometry (S0): press %u item %s scope %s; eye L ", n, item, scope) + (left or s0_eye()) + RS0("; eye R ") + (right or s0_eye()) +
+                    RS0("; game |E-S| %s cm", es, rs))
+
+        def s0_run(run=1, press=2, item=SNIPER, scope="yes", points="0.512,0.488;0.540,0.488;0.512,0.380;0.470,0.560", clamp="none", first=True):
+            return (RS0("scope lens census (S0): run %u press %u item %s scope %s eye R points %s at 0, 1.5", run, press, item, scope, points, clamp) +
+                    (RS0("; the probe keeps these points afterwards") if first else ""))
+
+        def s0_skip(why="the pixel probe is armed already"):
+            return RS0("scope lens census (S0): run skipped (%s)", why)
+
+        def s0_done(frame=900, eyes=2, draws=140, copied=560, dropped=0, declined=0, changed=7):
+            return RPROBE("pixel probe: frame %u done -- eyes seen", frame, eyes, draws, copied, dropped, declined, changed)
+
+        # flat: Q1, Q2 (flat), Q3
+        check("S0 flat: a scoped press with a settled camera, and a camera that did not move", [s0_watch(), s0_flags(), s0_flat(cams=[s0_cam(), s0_still()])], 0, [("OK", SF0)],
+              has=["1 press line(s) (items " + SNIPER + " 1), 2 camera reading(s), 2 settled", "FOV moved: kind 3 59.989 -> 28.648 deg, M 2.2606 (x1)"], lacks=["UNPARSED"])
+        check("S0 flat: three presses of the same camera count the move three times", [s0_watch(), s0_flat(1), s0_flat(2), s0_flat(3)], 0, [("OK", SF0)], has=["3 press line(s)", "M 2.2606 (x3)"])
+        check("S0 flat: an unscoped press settles with M = 1", [s0_watch(), s0_flat(cams=[s0_still(kind=3)])], 0, [("OK", SF0)], has=["no settled camera's FOV moved (M = 1 everywhere)"])
+        check("S0 flat: a line that holds the cameras it left out is still read", [s0_watch(), s0_flat(cams=[s0_cam()], more=5)], 0, [("OK", SF0)], lacks=["UNPARSED"])
+        check("S0 flat: a camera with no hip (the sights up from the first frame) is read",
+              [s0_watch(), s0_flat(cams=[s0_cam(hip="none", m="none")])], 0, [("OK", SF0)], lacks=["UNPARSED"])
+        check("S0 flat: the announce said the hook was not running and cameras settled all the same", [s0_watch(S0_DOWN), s0_flat()], 0, [("OK", SF0)],
+              has=["the watching line said the refresh hook was not running (" + S0_DOWN + ") yet cameras were noted"])
+        check("S0 flat: press lines with cameras and none settled", [s0_watch(), s0_flat(cams=[s0_cam(settled=0, ramp=0.0)])], 0, [("PARTIAL", SF0)],
+              has=["no camera held a stable FOV for 0.6 s in a press"])
+        check("S0 flat: every press line says cameras none", [s0_watch(), s0_flat(1, cams=[]), s0_flat(2, cams=[])], 3, [("NEVER APPLIED", SF0)],
+              has=["every one of the 2 press line(s) says cameras none: the hook ran (running)"])
+        check("S0 flat: the watching line says the hook is not running and a press happened", [s0_watch(S0_DOWN), s0_flat(1, cams=[])], 3, [("NEVER APPLIED", SF0)],
+              has=["the watching line says the refresh hook is not running (" + S0_DOWN + "): no camera could be noted"])
+        check("S0 flat: the watching line alone is idle", [s0_watch()], 0, [("IDLE", SF0)],
+              has=["no ADS press line; the refresh hook: running; the journal's on-foot and ADS flags were never readable in this window"])
+        check("S0 flat: the flags readable and no press is idle, and says so", [s0_watch(), s0_flags(1, 0)], 0, [("IDLE", SF0)],
+              has=["the journal's flags were readable (on foot 1, ADS 0 at first)"])
+        check("S0 flat: a press line that drifted from its pattern is unparsed", ["scope zoom (S0) flat: press x item y"], 4, [("UNPARSED", SF0)])
+        check("S0 flat: no S0 line leaves the four rules not present", [inst141()], 0, [], has=["not present", SF0, SV0, SG0, SC0], lacks=["UNPARSED"])
+
+        # VR: Q2 (VR)
+        def s0_vrwatch():
+            return RS0("scope zoom (S0) vr: watching")
+
+        def s0_all(**vr):
+            """The whole VR chain of one scoped press: the announce, the press line, the geometry, the census run and the probe's closing line."""
+            return [s0_vrwatch(), s0_vr(**vr), s0_geo(), s0_run(), s0_done()]
+
+        none_src = dict(wmax="none", rc16=None, eyel=None, eyer=None, settled=0)
+        check("S0 vr: a scoped press with w, the RC fields and the eye rows", s0_all(), 0, [("OK", SV0)],
+              has=["1 press line(s) (scope yes 1), 1 with w at 1.0 for 0.6 s; values: w 1, rc16C 1, rc17C 0, eyeL p11 1, eyeR p11 1, cameras 0", "no source moved between the hip and the press"],
+              lacks=["UNPARSED"])
+        check("S0 vr: a source that moved between the hip and the press is named", s0_all(rc16=("1.5710", "0.8000"), cams=[s0_vcam()]), 0, [("OK", SV0)],
+              has=["moved between the hip and the press: cam kind 3 59.989 -> 28.648 deg (x1); rc16C 1.5710 -> 0.8000 (x1)", "cameras 1"])
+        check("S0 vr: only the camera hook has a value", [s0_vr(cams=[s0_vcam()], **none_src)], 0, [("OK", SV0)], has=["w 0, rc16C 0, rc17C 0, eyeL p11 0, eyeR p11 0, cameras 1"])
+        check("S0 vr: every source none on every press", [s0_vr(**none_src), s0_vr(n=3, **none_src)], 3, [("NEVER APPLIED", SV0)],
+              has=["2 press line(s) and every source is none on all of them"])
+        check("S0 vr: the tick announced itself, F141 saw the sights up and there is no S0 vr press line", [s0_vrwatch(), inst141(), sp141(), sp141(wl=4)], 3, [("NEVER APPLIED", SV0)],
+              has=["F141 wrote 2 ADS second line(s) (14 s with the sights up in native on foot) and there is no scope zoom (S0) vr press line, though the tick announced itself"])
+        check("S0 vr: the announce alone is idle", [s0_vrwatch()], 0, [("IDLE", SV0)], has=["watching, and no press of the sights in native on foot in this window"])
+        check("S0 vr: a log of a build without S0 (F141 ADS seconds and no announce) is not judged", [inst141(), sp141()], 0, [],
+              lacks=[row(st, SV0) for st in ("OK", "PARTIAL", "NEVER APPLIED", "IDLE", "UNPARSED")], has=[SV0])
+        check("S0 vr: a press line that drifted from its pattern is unparsed", ["scope zoom (S0) vr: press 2 item x scope maybe"], 4, [("UNPARSED", SV0)])
+        check("S0 vr: an announce that drifted from its pattern is unparsed", ["scope zoom (S0) vr: watching for something else"], 4, [("UNPARSED", SV0)])
+
+        # lens geometry: Q5
+        check("S0 geometry: c for the right eye", s0_all(), 0, [("OK", SG0)],
+              has=["1 geometry line(s), c for the right eye on 1 (scope yes 1); last: ndc (0.0123, -0.0456) px (1249.2, 1196.2) of 2468x2288, 3.21 deg off the axis; game |E-S| 12.34 cm, "
+                   "eye R to S 56.78 cm; the left eye on 1"], lacks=["UNPARSED"])
+        check("S0 geometry: the left eye has no c and the right eye has", [s0_vr(), s0_geo(left=s0_eye(c=None, why="no sight point S this frame")), s0_run(), s0_done()], 0, [("OK", SG0)],
+              has=["the left eye on 0"])
+        check("S0 geometry: a line with no pixels (the eye's size unknown) is read", [s0_vr(), s0_geo(right=s0_eye(px=("none", "none"), size=(0, 0))), s0_run(), s0_done()], 0, [("OK", SG0)],
+              lacks=["UNPARSED"])
+        check("S0 geometry: a press settled and no geometry line", [s0_vrwatch(), s0_vr(settled=1)], 3, [("NEVER APPLIED", SG0)],
+              has=["1 VR press line(s) say settled 1 and there is no geometry line"])
+        check("S0 geometry: a press that never settled has no geometry to show", [s0_vr(settled=0, wmax="0.400")], 0, [("OK", SV0)], lacks=["NEVER APPLIED"])
+        check("S0 geometry: c none for the right eye on every line", [s0_vr(), s0_geo(right=s0_eye(c=None, why="S behind the eye")), s0_geo(n=3, right=s0_eye(c=None, why="S behind the eye")),
+                                                                   s0_skip("c missing for eye R: S behind the eye")], 3,
+              [("NEVER APPLIED", SG0)], has=["2 geometry line(s) and every one has c none for the right eye: S behind the eye x2"])
+        check("S0 geometry: a line that drifted from its pattern is unparsed", ["scope lens geometry (S0): press 2 item x"], 4, [("UNPARSED", SG0)])
+
+        # lens census: Q4
+        check("S0 census: a run and the probe's closing line with eyes and a changed window", s0_all(), 0, [("OK", SC0)],
+              has=["1 run(s): run 1 (press 2, scope yes): eyes seen 2, 140 draws into eye targets, 7 changed a window"], lacks=["UNPARSED"])
+        check("S0 census: a point clamped to the target is read", [s0_vr(), s0_geo(), s0_run(clamp="1,3"), s0_done()], 0, [("OK", SC0)], lacks=["UNPARSED"])
+        check("S0 census: four runs, the last of them the unscoped control", [s0_vr(), s0_geo(), s0_run(1, 2), s0_done(900), s0_run(2, 3, first=False), s0_done(910), s0_run(3, 4, first=False), s0_done(920),
+                                                                   s0_run(4, 5, scope="no", first=False), s0_done(930)], 0, [("OK", SC0)],
+              has=["4 run(s):", "run 4 (press 5, scope no)"])
+        check("S0 census: a run with no closing line", [s0_vr(), s0_geo(), s0_run()], 3, [("NEVER APPLIED", SC0)],
+              has=["run 1 (press 2, scope yes): no pixel probe closing line within 3 s", "the pixel probe is not in the native stereo draw path"])
+        check("S0 census: the closing line comes too late to be the run's", [s0_vr(), s0_geo(), (10, s0_run()), (20, s0_done())], 3, [("NEVER APPLIED", SC0)],
+              has=["no pixel probe closing line within 3 s"])
+        check("S0 census: the probe saw no eye", [s0_vr(), s0_geo(), s0_run(), s0_done(eyes=0, draws=0, copied=0, changed=0)], 3, [("NEVER APPLIED", SC0)],
+              has=["eyes seen 0, 0 draws into eye targets, 0 changed a window"])
+        check("S0 census: one run good and one with no closing line", [s0_vr(), s0_geo(), s0_run(1, 2), s0_done(), s0_run(2, 3, first=False)], 0, [("PARTIAL", SC0)],
+              has=["1 run(s) with no eye seen or no closing line"])
+        check("S0 census: eyes seen and no draw changed a window", [s0_vr(), s0_geo(), s0_run(), s0_done(changed=0)], 0, [("PARTIAL", SC0)],
+              has=["the probe saw eye draws and no draw changed a window at the points"])
+        check("S0 census: every run was skipped", [s0_vr(), s0_geo(), s0_skip(), s0_skip("c missing for eye R: S behind the eye")], 0, [("PARTIAL", SC0)],
+              has=["every census run was skipped (2): the pixel probe is armed already x1; c missing for eye R: S behind the eye x1"])
+        check("S0 census: a scoped press settled and the census neither ran nor skipped", [s0_vr(), s0_geo()], 3, [("NEVER APPLIED", SC0)],
+              has=["1 scoped press(es) reached a settled frame (a geometry line with scope yes) and there is neither a census run nor a skipped line"])
+        check("S0 census: an unscoped press past the control run asks nothing of the census", [s0_vr(scope="no"), s0_geo(scope="no")], 0, [("OK", SG0)], lacks=["NEVER APPLIED", "UNPARSED"])
+        check("S0 census: a probe closing line with no run before it (an eye dump's) is not judged", [s0_done(), s0_done(frame=905)], 0, [],
+              lacks=["NEVER APPLIED", "UNPARSED"] + [row(st, SC0) for st in ("OK", "PARTIAL", "IDLE")])
+        check("S0 census: a line that drifted from its pattern is unparsed", ["scope lens census (S0): run x"], 4, [("UNPARSED", SC0)])
+
+        # the tag census and the F tags' own behaviour
+        check("S0 tags: an S tag is listed with --health-all and the F tags still sort first", [inst141(), s0_watch(), s0_vr(settled=0)], 0, [("OK", SV0)],
+              has=["every tag (* has a rule above):", "F141", "S0"], extra=["--health-all"])
+        check("S0 tags: (Status.json and (S words that are no tag are not read as one", ["journal: Status.json (Status flags) changed (S words)", s0_watch()], 0, [("IDLE", SF0)], lacks=["UNPARSED"])
 
         # ---- the one failure line the rules read that is not in native_on_foot.cpp ----
         checks += 1

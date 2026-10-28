@@ -71,6 +71,9 @@
 #include "native_on_foot_f158.h"   // F158: the local body's draws over the first 30 s on foot, measured (pure parts)
 #include "native_on_foot_f159.h"   // F159: the left elbow's stable pole reseeded at the shoulder's height, its seeds' births counted and logged (pure parts)
 #include "native_on_foot_f160.h"   // F160: the neck reference's raise blended through the ADS release; the holster bridge's line (pure parts)
+#include "scope_zoom_s0.h"   // S0: the scope zoom instrument, measure only (pure parts)
+#include "flat_camera_inject.h"   // S0: flatCameraInjectObserveStatus, the refresh hook's state for the flat announce
+#include "pixel_probe.h"   // S0: the pixel probe's points and its armed state, for the lens census
 #include "xinput_watch.h"         // F135: the pad's Start and Back edges, evidence for the menu probe only
 #include "native_on_foot_f109.h"   // F109: look to aim on foot, the player's own turn in ADS, snap or smooth turning (pure parts)
 #include "native_on_foot_f129.h"   // F129: look to aim reads its turn from the player's own look processor; the look path instrument (pure parts)
@@ -1941,6 +1944,33 @@ std::string censusSlotText(const char* label, bool okW, uintptr_t slotAddr) {
            " pg250=" + censusByteText(okPg250, pg250);
 }
 
+// The F8 census's walk: the frozen selector's owner (+0x58), the owner's settings (+0x1180) and the settings' RC (+0x18), each a guarded read tried only after the one before it read a
+// non-null pointer. hudCensusTick prints from it (the detail log); scope zoom S0 reads RC's two camera FOVs from it every frame, with no log.on_foot_detail needed.
+struct CensusWalk {
+    uint64_t owner = 0, settings = 0, rc = 0;
+    bool okO = false, okS = false, okRc = false;
+};
+CensusWalk censusWalk(uint64_t selector) noexcept {
+    CensusWalk w;
+    w.okO = guardedRead(static_cast<uintptr_t>(selector) + nofoot::kCensusOwnerOff, &w.owner, 8) && w.owner;
+    w.okS = w.okO && guardedRead(static_cast<uintptr_t>(w.owner) + nofoot::kCensusSettingsOff, &w.settings, 8) && w.settings;
+    w.okRc = w.okS && guardedRead(static_cast<uintptr_t>(w.settings) + nofoot::kCensusRcOff, &w.rc, 8) && w.rc;
+    return w;
+}
+// RC's two camera FOVs: +0x16C (the F8 census's fov) and +0x17C (the readout's second one, INFERRED to be the viewmodel FOV: docs\design-vr-scope-magnification-2026-10-28.md section 1), each NaN when its
+// own read fails. False when the walk does not reach RC.
+bool censusRcFovs(float* fov16C, float* fov17C) noexcept {
+    *fov16C = *fov17C = std::numeric_limits<float>::quiet_NaN();
+    const uint64_t sel = g_frozenSelector.load(std::memory_order_acquire);
+    if (!sel) return false;
+    const CensusWalk w = censusWalk(sel);
+    if (!w.okRc) return false;
+    float a = 0.0f, b = 0.0f;
+    if (guardedRead(static_cast<uintptr_t>(w.rc) + nofoot::kCensusFovOff, &a, 4)) *fov16C = a;
+    if (guardedRead(static_cast<uintptr_t>(w.rc) + nofoot::kCensusFov2Off, &b, 4)) *fov17C = b;
+    return true;
+}
+
 void hudCensusTick(uint64_t nowMs, bool session) {
     if (!session) return;
     if (!nofoot::logwin::detail()) return;   // F125: the census is the detail log's line; its reads serve only the line
@@ -1949,10 +1979,10 @@ void hudCensusTick(uint64_t nowMs, bool session) {
     if (!sel) {
         text += " no selector frozen yet";
     } else {
-        uint64_t owner = 0, settings = 0, rc = 0, w = 0;
-        const bool okO = guardedRead(static_cast<uintptr_t>(sel) + nofoot::kCensusOwnerOff, &owner, 8) && owner;
-        const bool okS = okO && guardedRead(static_cast<uintptr_t>(owner) + nofoot::kCensusSettingsOff, &settings, 8) && settings;
-        const bool okRc = okS && guardedRead(static_cast<uintptr_t>(settings) + nofoot::kCensusRcOff, &rc, 8) && rc;
+        uint64_t w = 0;
+        const CensusWalk walk = censusWalk(sel);
+        const uint64_t settings = walk.settings, rc = walk.rc;
+        const bool okS = walk.okS, okRc = walk.okRc;
         float fov = 0.0f;
         const bool okFov = okRc && guardedRead(static_cast<uintptr_t>(rc) + nofoot::kCensusFovOff, &fov, 4);
         uint32_t mode = 0;
@@ -23578,6 +23608,8 @@ void f141ActivationTick(uint64_t now) noexcept {
                     "reference)", count, static_cast<unsigned long long>(act), sightOk ? sight : "(not read)", eyeOk ? eye : "(not read)", adsOn ? "on" : "off",
                     valid == 0xFF ? "not read" : valid ? "yes" : "no");
 }
+// S0 (scope zoom, measure only): the latest ADS fraction w and sight point S of the drained samples; defined with S0's tick below.
+void s0VrNoteSample(const F141Sample& s, uint64_t now) noexcept;
 bool g_f141DownNoted = false, g_f141PrevWant = false;
 uint32_t g_f141PrevHeld = 0;
 void f141AdsTick(uint64_t now) noexcept {
@@ -23640,6 +23672,7 @@ void f141AdsTick(uint64_t now) noexcept {
         }
         f141RawLog(s);   // F142: E and S as the hook read them, whole, once per activation
         if (!live) continue;
+        s0VrNoteSample(s, now);   // S0: the latest w and S, for the scope zoom instrument (reads the sample, changes nothing)
         // F147: every live sample goes past the settle gate: a new activation or another item or scope starts it again, and a fraction under 1.0 (the new weapon's raise, with
         // no S fetched) clears its hold
         g_f144Gate.track(s.activation, gateKey);
@@ -33929,9 +33962,394 @@ void nativeOnFootMarkerProbeShutdown() {
     f44::f119Release();   // F119: the head containment depth grid's resources
 }
 
+// ---- S0: scope zoom, measure only (scope_zoom_s0.h; docs\design-vr-scope-magnification-2026-10-28.md, section 6) -----------------------------------------------------------------------
+// Four tagged lines answer the design's open questions (Q1 to Q6). There is no key, nothing is written to a game object and nothing the player sees changes. The flat tick (flat profile) writes
+// `scope zoom (S0) flat` once a press of the sights (Status.json's ADS bit with on foot): the vertical FOV of every camera the view-constant refresh hook (flat_camera_inject.cpp) noted during
+// it, at the hip and settled. The VR tick (native on foot armed, after F141's drain) writes `scope zoom (S0) vr` once a press (the game's ADS fraction w, the readout's two camera FOVs, the
+// eyes' projection scale as a control, the VR camera hook's cameras) and, at the press's first settled frame, `scope lens geometry (S0)` (the sight point S as the lens centre c in each eye) and,
+// for the first three scoped presses and the first unscoped one, `scope lens census (S0)`: the pixel probe's four points about c in the aiming eye, armed, so its own lines say which draws land
+// there. Frame thread only, except the camera table the refresh hook fills. A line is written when its piece runs, so a piece that never ran is a line that is not there, and --health says so.
+namespace {
+namespace s0 {
+namespace sz = edvr::scopezoom;
+
+constexpr uint32_t kPressLineCap = 200;   // press lines a session, per profile; later presses are counted, not written
+constexpr uint64_t kFreshMs = 250;        // a camera or a sample not noted for this long is not live
+constexpr uint32_t kScopedRuns = 3;       // scoped presses the lens census probes; one unscoped press is probed as the control
+constexpr double kNaN = sz::kNaN;
+
+double seconds() noexcept {
+    static const double inv = [] {
+        LARGE_INTEGER f;
+        return QueryPerformanceFrequency(&f) && f.QuadPart > 0 ? 1.0 / static_cast<double>(f.QuadPart) : 0.001;
+    }();
+    LARGE_INTEGER c;
+    QueryPerformanceCounter(&c);
+    return static_cast<double>(c.QuadPart) * inv;
+}
+// A vertical FOV in radians a camera can have; else NaN (a camera kind whose +0x280 is something else must not be read as a zoom).
+double validFov(float fov) noexcept { return (std::isfinite(fov) && fov > 0.01f && fov < 3.1f) ? static_cast<double>(fov) : kNaN; }
+bool freshMs(uint64_t nowMs, uint64_t ms) noexcept { return nowMs < ms || nowMs - ms <= kFreshMs; }   // the hook's tick may be one beat later than ours
+
+// One camera's tracker; the set holds as many as the camera table has slots.
+struct CamTracker {
+    uintptr_t camera = 0;
+    uint32_t id = 0, kind = 0;
+    double aspect = kNaN;
+    uint64_t lastSeenMs = 0;
+    bool ended = false;   // this frame's feed ended its press
+    sz::PressTracker tr;
+};
+struct CamSet {
+    CamTracker t[sz::CameraTable::kSlots];
+    double lagGuardS = 0.0;
+    // One frame: the table's cameras into their trackers (a tracker per camera pointer), the press flag shared. A camera that is not live this frame feeds no value.
+    void feed(double tSec, uint64_t nowMs, bool ads) noexcept {
+        sz::CameraTable::Entry e[sz::CameraTable::kSlots];
+        const size_t n = sz::g_cameraTable.snapshot(e, sz::CameraTable::kSlots);
+        bool matched[sz::CameraTable::kSlots] = {};
+        for (CamTracker& c : t) {
+            if (c.camera && !c.tr.inPress() && nowMs > c.lastSeenMs && nowMs - c.lastSeenMs > 10000) c.camera = 0;   // gone for 10 s: the tracker is free
+            c.ended = false;
+            if (!c.camera) continue;
+            double v = kNaN;
+            for (size_t i = 0; i < n; ++i) {
+                if (e[i].camera != c.camera) continue;
+                matched[i] = true;
+                if (freshMs(nowMs, e[i].ms)) {
+                    v = validFov(e[i].fov);
+                    c.kind = e[i].kind;
+                    c.id = e[i].id;
+                    c.aspect = e[i].aspect;
+                    c.lastSeenMs = nowMs;
+                }
+                break;
+            }
+            c.ended = c.tr.feed(tSec, ads, v);
+        }
+        for (size_t i = 0; i < n; ++i) {
+            if (matched[i] || !freshMs(nowMs, e[i].ms)) continue;
+            CamTracker* slot = nullptr;
+            for (CamTracker& c : t)
+                if (!c.camera) { slot = &c; break; }
+            if (!slot) {   // the oldest idle one that has been quiet for a second
+                for (CamTracker& c : t)
+                    if (!c.tr.inPress() && nowMs > c.lastSeenMs && nowMs - c.lastSeenMs > 1000 && (!slot || c.lastSeenMs < slot->lastSeenMs)) slot = &c;
+            }
+            if (!slot) continue;
+            *slot = CamTracker{};
+            slot->tr = sz::PressTracker(lagGuardS);
+            slot->camera = e[i].camera;
+            slot->id = e[i].id;
+            slot->kind = e[i].kind;
+            slot->aspect = e[i].aspect;
+            slot->lastSeenMs = nowMs;
+            slot->ended = slot->tr.feed(tSec, ads, validFov(e[i].fov));
+        }
+    }
+    // The presses that ended in the last feed and had values: what the line lists.
+    size_t collect(sz::CamPress* out, size_t max) const noexcept {
+        size_t n = 0;
+        for (const CamTracker& c : t) {
+            if (!c.camera || !c.ended || !c.tr.result().valid || c.tr.result().samples == 0 || n >= max) continue;
+            sz::CamPress p;
+            p.id = c.id;
+            p.camera = c.camera;
+            p.kind = c.kind;
+            p.aspect = c.aspect;
+            p.r = c.tr.result();
+            out[n++] = p;
+        }
+        return n;
+    }
+};
+
+// ---- the flat tick: Q1, Q2 (flat), Q3 ------------------------------------------------------------------------------------------------------------------------------------------------------
+struct Flat {
+    bool wasFlat = false, announced = false, flagsNoted = false, open = false;
+    uint64_t firstMs = 0;
+    uint32_t press = 0;
+    double t0 = 0.0;
+    char itemBegin[64] = {};
+    CamSet cams;
+} g_flat;
+
+void flatTick(uint64_t nowMs) noexcept {
+    Flat& f = g_flat;
+    if (!runtimeFlatProfile()) {
+        f.wasFlat = false;
+        f.open = false;
+        return;
+    }
+    if (!f.wasFlat) {   // the first flat frame (or the first after a live switch back)
+        f.wasFlat = true;
+        f.announced = f.flagsNoted = f.open = false;
+        f.firstMs = nowMs;
+    }
+    char line[1100];
+    if (!f.announced) {   // said once the hook's install has been tried (it is made on the first flat frame with a temporal mode), or after 10 s
+        const char* status = flatCameraInjectObserveStatus();
+        if (std::strcmp(status, "pending") != 0 || nowMs - f.firstMs >= 10000) {
+            char hook[112];
+            if (std::strcmp(status, "installed") == 0) std::snprintf(hook, sizeof(hook), "running");
+            else std::snprintf(hook, sizeof(hook), "not running, its install is %s: flat needs a temporal mode", status);
+            sz::formatFlatWatching(line, sizeof(line), hook);
+            Log::get().note("%s", line);
+            f.announced = true;
+        }
+    }
+    bool onFoot = false, ads = false;
+    const bool known = journalFlatOnFoot(&onFoot) && journalFlatAds(&ads);
+    if (known && !f.flagsNoted) {
+        f.flagsNoted = true;
+        sz::formatFlatFlags(line, sizeof(line), onFoot, ads);
+        Log::get().note("%s", line);
+    }
+    const bool pressNow = known && onFoot && ads;
+    const double t = seconds();
+    f.cams.lagGuardS = sz::kFlatLagGuardS;
+    f.cams.feed(t, nowMs, pressNow);
+    if (pressNow && !f.open) {
+        f.open = true;
+        f.t0 = t;
+        ++f.press;
+        if (!journalFlatHeldItemName(f.itemBegin, sizeof(f.itemBegin))) f.itemBegin[0] = '\0';
+        return;
+    }
+    if (pressNow || !f.open) return;
+    f.open = false;   // the press ended: one line
+    if (f.press > kPressLineCap) return;
+    char item[64] = {};
+    if (!journalFlatHeldItemName(item, sizeof(item)) || !item[0]) std::snprintf(item, sizeof(item), "%s", f.itemBegin);
+    sz::CamPress cams[sz::CameraTable::kSlots];
+    const size_t n = f.cams.collect(cams, sz::CameraTable::kSlots);
+    sz::formatFlatPress(line, sizeof(line), f.press, item, t - f.t0, cams, n);
+    Log::get().note("%s", line);
+}
+
+// ---- the VR tick: Q2 (VR), Q4, Q5, Q6 -----------------------------------------------------------------------------------------------------------------------------------------------------
+struct Vr {
+    bool announced = false;   // the watching line was written
+    bool open = false;
+    uint32_t press = 0;
+    double t0 = 0.0, lastT = 0.0, activeS = 0.0;   // activeS: seconds with the sights up (the state Active), apart from the release
+    F141Item item;
+    uint32_t heldSerial = 0;
+    sz::PressTracker rc16C, rc17C, eyeL, eyeR;
+    CamSet cams;
+    // the latest samples of F141's drain (s0VrNoteSample)
+    float w = 0.0f;
+    uint64_t wMs = 0;
+    bool wSeen = false;
+    float S[3] = {}, Epos[3] = {};
+    uint64_t sMs = 0;
+    bool haveS = false;
+    // this press
+    double wMax = kNaN, fullRunS = 0.0, fullMaxS = 0.0;
+    bool settled = false;
+    // the session
+    uint32_t runs = 0, scopedRuns = 0;
+    bool controlRun = false;
+} g_vr;
+
+// c in each eye and the numbers beside it, at the press's first settled frame. S is the game's world point, in the space P14w, E and the eyes' origins (rows' o) share: F143's toRoot subtracts p14w
+// from S as it is, adsSightTick's sightPointNdc takes p14w and the same o, and eyeFromRows puts the rendered eye in that world (within 0.5 m of the job camera), so S needs no transform. c is
+// S through each eye's scene rows (sightPointNdc at a distance of 0 along any direction). The right eye (eye index 1: eyeIndexFor's order, temporal_pass.h) is the aiming eye.
+struct Geometry {
+    sz::LensEye eye[2];
+    const char* why[2] = {"no scene rows published", "no scene rows published"};
+    float tan[2][4] = {};
+    bool tanOk[2] = {false, false};
+    double eMinusSCm = kNaN, eyeRToSCm = kNaN;
+};
+Geometry geometryNow(const Vr& v, uint64_t nowMs) noexcept {
+    Geometry g;
+    const bool sFresh = v.haveS && freshMs(nowMs, v.sMs);
+    const double S[3] = {v.S[0], v.S[1], v.S[2]};
+    if (sFresh) {
+        const double d[3] = {S[0] - v.Epos[0], S[1] - v.Epos[1], S[2] - v.Epos[2]};
+        g.eMinusSCm = 100.0 * nofoot::ikLen(d);
+    }
+    const double fwd[3] = {0.0, 0.0, 1.0};
+    for (int e = 0; e < 2; ++e) {
+        uint32_t rf = ~0u;
+        float rows[16], o[4];
+        if (!eyeRowsRead(e, &rf, rows, o, nullptr)) continue;
+        if (!nofoot::sceneRowsFreshForLock(rf, g_f44Frame.load(std::memory_order_relaxed))) { g.why[e] = "scene rows not this frame's"; continue; }
+        if (!sFresh) { g.why[e] = "no sight point S this frame"; continue; }
+        const double od[3] = {o[0], o[1], o[2]};
+        double ndc[2];
+        if (!nofoot::sightPointNdc(rows, od, S, fwd, 0.0, ndc)) { g.why[e] = "S behind the eye"; continue; }
+        g.tanOk[e] = sz::tangentsOf(sz::clipZoom(rows), g.tan[e]);
+        g.eye[e] = sz::lensEye(ndc, g.tanOk[e] ? g.tan[e] : nullptr, f44::g_f85SceneW[e], f44::g_f85SceneH[e]);
+        double eyeW[3];
+        if (e == 1 && nofoot::eyeFromRows(rows, od, eyeW)) {
+            const double r[3] = {eyeW[0] - S[0], eyeW[1] - S[1], eyeW[2] - S[2]};
+            g.eyeRToSCm = 100.0 * nofoot::ikLen(r);
+        }
+    }
+    return g;
+}
+
+// The pixel probe about c in the right eye, for the first three scoped presses and the first unscoped one. Every press that qualifies and is not probed says why on a skip line.
+void censusNow(Vr& v, const Geometry& g) noexcept {
+    const bool scoped = v.item.scope == loadout::kScopeYes, unscoped = v.item.scope == loadout::kScopeNo;
+    if (!((scoped && v.scopedRuns < kScopedRuns) || (unscoped && !v.controlRun))) return;
+    char line[1100];
+    const char* why = nullptr;
+    sz::ProbeSet set;
+    if (!g.eye[1].ok) why = g.why[1];
+    else if (!g.tanOk[1]) why = "the right eye's tangents are not usable";
+    else if (pixelProbeArmed()) why = "the pixel probe is armed already";
+    else if (!sz::probePoints(g.eye[1].ndc, g.tan[1], &set)) why = "the probe points are not usable";
+    if (why) {
+        char reason[96];
+        std::snprintf(reason, sizeof(reason), "c missing for eye R: %s", why);
+        sz::formatCensusSkip(line, sizeof(line), g.eye[1].ok ? why : reason);
+        Log::get().note("%s", line);
+        return;
+    }
+    pixelProbeConfigure(set.pt, set.n);
+    pixelProbeArm();
+    ++v.runs;
+    if (scoped) ++v.scopedRuns;
+    else v.controlRun = true;
+    sz::formatCensusRun(line, sizeof(line), v.runs, v.press, v.item.name, loadout::scopeName(v.item.scope), set, v.runs == 1);
+    Log::get().note("%s", line);
+}
+
+void vrSettled(Vr& v, uint64_t nowMs) noexcept {
+    v.item = f141Item();   // the scope may have resolved since the press began
+    const Geometry g = geometryNow(v, nowMs);
+    char line[1100];
+    sz::formatGeometry(line, sizeof(line), v.press, v.item.name, loadout::scopeName(v.item.scope), g.eye[0], g.why[0], g.eye[1], g.why[1], g.eMinusSCm, g.eyeRToSCm);
+    Log::get().note("%s", line);
+    censusNow(v, g);
+}
+
+void vrTick(uint64_t nowMs) noexcept {
+    Vr& v = g_vr;
+    if (g_install != InstallState::Armed || runtimeFlatProfile()) {
+        v.open = false;
+        v.lastT = 0.0;
+        return;
+    }
+    if (!v.announced) {   // the tick runs (native on foot is armed): said once, so --health can tell an S0 build whose tick never ran from a log of a build without S0
+        v.announced = true;
+        char watching[640];
+        sz::formatVrWatching(watching, sizeof(watching));
+        Log::get().note("%s", watching);
+    }
+    const bool onFoot = nativeOnFootActive();
+    const bool ads = onFoot && g_adsState != kAdsIdle;
+    if (!onFoot && !v.open) {
+        v.lastT = 0.0;
+        return;
+    }
+    const double t = seconds();
+    const double dt = v.lastT > 0.0 ? std::fmin(std::fmax(t - v.lastT, 0.0), 0.25) : 0.0;
+    v.lastT = t;
+    // the sources, fed every frame on foot (between presses too: the hip comes from there)
+    float rc16 = std::numeric_limits<float>::quiet_NaN(), rc17 = rc16;
+    if (onFoot) censusRcFovs(&rc16, &rc17);
+    double p11[2] = {kNaN, kNaN};
+    for (int e = 0; e < 2 && onFoot; ++e) {
+        uint32_t rf = ~0u;
+        float rows[16], o[4];
+        if (!eyeRowsRead(e, &rf, rows, o, nullptr) || !nofoot::sceneRowsFreshForLock(rf, g_f44Frame.load(std::memory_order_relaxed))) continue;
+        const sz::ClipZoom z = sz::clipZoom(rows);
+        if (z.ok) p11[e] = z.p11;
+    }
+    const bool e16 = v.rc16C.feed(t, ads, std::isfinite(rc16) ? static_cast<double>(rc16) : kNaN);
+    const bool e17 = v.rc17C.feed(t, ads, std::isfinite(rc17) ? static_cast<double>(rc17) : kNaN);
+    const bool eL = v.eyeL.feed(t, ads, p11[0]);
+    const bool eR = v.eyeR.feed(t, ads, p11[1]);
+    v.cams.lagGuardS = 0.0;
+    v.cams.feed(t, nowMs, ads);
+    if (ads) {
+        if (!v.open) {   // the press begins: the sights are asked for
+            v.open = true;
+            ++v.press;
+            v.t0 = t;
+            v.activeS = 0.0;
+            v.wMax = kNaN;
+            v.fullRunS = v.fullMaxS = 0.0;
+            v.settled = false;
+            v.item = f141Item();
+            v.heldSerial = g_heldItemSerial.load(std::memory_order_acquire);
+        }
+        const uint32_t heldNow = g_heldItemSerial.load(std::memory_order_acquire);
+        if (heldNow != v.heldSerial) {   // another item in the press: the line names the one held last
+            v.heldSerial = heldNow;
+            v.item = f141Item();
+        }
+        if (g_adsState == kAdsActive) v.activeS += dt;
+        const bool wLive = v.wSeen && freshMs(nowMs, v.wMs) && std::isfinite(v.w);
+        if (wLive) {
+            const double w = static_cast<double>(v.w);
+            v.wMax = std::isfinite(v.wMax) ? std::fmax(v.wMax, w) : w;
+            if (v.w >= 1.0f) {
+                v.fullRunS += dt;
+                v.fullMaxS = std::fmax(v.fullMaxS, v.fullRunS);
+            } else {
+                v.fullRunS = 0.0;
+            }
+        } else {
+            v.fullRunS = 0.0;
+        }
+        if (!v.settled && v.fullRunS >= nofoot::f144::kFullHoldS) {   // F144's hold: w at 1.0 for 0.6 s
+            v.settled = true;
+            vrSettled(v, nowMs);
+        }
+        return;
+    }
+    if (!v.open) return;
+    v.open = false;   // the press ended: one line, whatever is missing
+    if (v.press > kPressLineCap) return;
+    sz::VrPress p;
+    p.press = v.press;
+    p.item = v.item.name;
+    p.scope = loadout::scopeName(v.item.scope);
+    p.copy = v.item.copy;
+    p.holdS = v.activeS;
+    p.wMax = v.wMax;
+    p.wFullS = v.fullMaxS;
+    p.settled = v.settled;
+    if (e16) p.rc16C = v.rc16C.result();
+    if (e17) p.rc17C = v.rc17C.result();
+    if (eL) p.eyeL = v.eyeL.result();
+    if (eR) p.eyeR = v.eyeR.result();
+    sz::CamPress cams[sz::CameraTable::kSlots];
+    const size_t n = v.cams.collect(cams, sz::CameraTable::kSlots);
+    char line[1100];
+    sz::formatVrPress(line, sizeof(line), p, cams, n);
+    Log::get().note("%s", line);
+}
+
+}  // namespace s0
+
+void s0VrNoteSample(const F141Sample& s, uint64_t now) noexcept {
+    s0::Vr& v = s0::g_vr;
+    if (s.in.wOk && std::isfinite(s.in.w)) {
+        v.w = s.in.w;
+        v.wMs = now;
+        v.wSeen = true;
+    }
+    if (s.in.sOk && s.in.eOk && nofoot::f141::finiteAll(s.in.S, 3) && std::isfinite(s.in.E[12]) && std::isfinite(s.in.E[13]) && std::isfinite(s.in.E[14])) {
+        std::memcpy(v.S, s.in.S, sizeof(v.S));
+        v.Epos[0] = s.in.E[12];
+        v.Epos[1] = s.in.E[13];
+        v.Epos[2] = s.in.E[14];
+        v.sMs = now;
+        v.haveS = true;
+    }
+}
+}  // namespace
+
 void nativeOnFootFrameBoundary(uint32_t frameNo) {
     g_f44Frame.store(frameNo, std::memory_order_relaxed);   // F44: the marker probe's frame (the tag's frame bits, the captures' frame)
     g_nativeOnFootTeeFrameNow.store(frameNo, std::memory_order_relaxed);   // F100: the tee's prefilter compares its fast frame against this
+    s0::flatTick(GetTickCount64());   // S0: scope zoom, measure only (flat profile only; before the Armed gate, which flat never passes)
     if (g_install == InstallState::NotTried) installOnce();
     if (g_install == InstallState::Armed) readKey();
     drainEvents();
@@ -34117,6 +34535,7 @@ void nativeOnFootFrameBoundary(uint32_t frameNo) {
     eyeProbeLine();   // F18 (TEMPORARY): P1's one-a-second line
     alignTick(GetTickCount64());   // F33: the body align (TEMPORARY, live)
     f141Tick(GetTickCount64());    // F141: the game's ADS sight point against P14 (the source of the ADS eye's shift since F143), the readout's anchor (an instrument); after the ADS lock's tick, on the same snapshots
+    s0::vrTick(GetTickCount64());  // S0: scope zoom, measure only (VR, native on foot armed): the press line, the lens geometry and the pixel probe's census; after F141's drain
     rotCalTick(GetTickCount64());  // F61: the rotation calibration (TEMPORARY, live; publishes zero while its key is off)
     f44::f119Boundary(frameNo, GetTickCount64());   // F119: the head containment instrument's depth grid and its line, after alignTick took the frame's head offset; F123: the leash and the wall contact
     {   // F123: the comfort fade is the max of F109's snap fade and the containment's, sent once a frame

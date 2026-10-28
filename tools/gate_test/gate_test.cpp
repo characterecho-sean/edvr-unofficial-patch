@@ -1577,6 +1577,29 @@ int journalWorkerChecks() {
                "flat: Flags without bit 4 answers known and not supercruise");
         verify(!journalWatchActive() && !journalGameplay() && !journalSupercruiseKnown() && !journalSupercruise(),
                "flat: the VR accessors still answer the no-journal values");
+        // S0 (scope zoom, measure only): the on-foot bit, the ADS bit (Flags2 bit 5) and SelectedWeapon through the flat readers.
+        {
+            writeWhole(statusFile, "{ \"timestamp\":\"2026-10-28T10:00:00Z\", \"event\":\"Status\", \"Flags\":16777216, \"Flags2\":33, \"GuiFocus\":0, "
+                                   "\"SelectedWeapon\":\"$wpn_m_sniper_plasma_charged_name;\" }\n");
+            char name[64] = {};
+            bool onFoot = false, ads = false;
+            verify(tickUntil([&] { return journalFlatAds(&ads) && ads; }, 10000) && journalFlatOnFoot(&onFoot) && onFoot && journalFlatHeldItemName(name, sizeof(name)) &&
+                       std::strcmp(name, "$wpn_m_sniper_plasma_charged_name;") == 0,
+                   "flat: Flags2 bits 0 and 5 and SelectedWeapon reach journalFlatOnFoot, journalFlatAds and journalFlatHeldItemName");
+            char vrName[64] = {};
+            verify(!journalOnFoot() && !journalAds() && !journalHeldItemName(vrName, sizeof(vrName)) && vrName[0] == '\0',
+                   "flat: the VR accessors of the same sample still answer the no-journal values");
+            writeWhole(statusFile, statusText(16777216u, 1, 0));   // on foot, sights down, no SelectedWeapon
+            verify(tickUntil([&] { bool a = true; return journalFlatAds(&a) && !a; }, 10000) && journalFlatOnFoot(&onFoot) && onFoot && !journalFlatHeldItemName(name, sizeof(name)) && name[0] == '\0',
+                   "flat: the sights down and no SelectedWeapon answer known, not ADS, and no name");
+            writeWhole(statusFile, statusText(0u, -1, -1));   // a menu: no Flags2
+            verify(tickUntil([&] { bool a = true; return !journalFlatAds(&a); }, 10000) && !journalFlatOnFoot(&onFoot), "flat: a Status.json without Flags2 answers not-known for both bits");
+            g_runtimeProfile = RuntimeProfile::Vr;
+            writeWhole(statusFile, "{ \"timestamp\":\"2026-10-28T10:00:00Z\", \"event\":\"Status\", \"Flags\":16777216, \"Flags2\":33, \"SelectedWeapon\":\"$wpn_x;\" }\n");
+            verify(tickUntil([] { return journalAds(); }, 10000) && !journalFlatAds(&ads) && !journalFlatOnFoot(&onFoot) && !journalFlatHeldItemName(name, sizeof(name)),
+                   "the VR profile: the VR accessors answer and the flat readers do not");
+            g_runtimeProfile = RuntimeProfile::Flat;
+        }
         g_runtimeProfile = savedProfile;
         stopWorker();
     }
