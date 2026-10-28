@@ -29,7 +29,7 @@ game's own zoom as a magnified picture inside the scope's lens. The rest of the 
 - **ruled out (cost or brief):** a third camera pass (C), magnifying in DLSS's input (E), a whole-view FOV change (D). Section 2.
 - **Analysis hand-over FILED** (analysis `1547986`): `analysis\decomp\verify_20261028_ads_zoom_receiver.txt` (the receiver, the correction to
   `analysis\decomp\verify_20261027_ads_sight_line.txt` section 1, the candidates).
-- **Next flight: S0 VR** on Frontier (Q2 VR, Q4 to Q6; card in section 6). The flat card still lacks the other weapons and a
+- **Next flight: S0 VR** on Epic in VR mode (installed `d90db147`; Q2 VR, Q4 to Q6; card in section 6). The flat card still lacks the other weapons and a
   `HumanoidFOV` change (Q3).
 - **Key (after S0, on the maintainer's word):** `fix.native_on_foot_ads_scope_zoom` = on | off. Section 5.
 
@@ -182,9 +182,10 @@ Unconfirmed: whether the probe sees native-stereo eye draws. The census rule che
 - Flat (Epic, `--scope both --xess` as that install is, the game in flat mode): every weapon, hip to ADS three times, each held 3 s or
   more; scoped copy then unscoped (the Executioner both, and any other scoped weapon owned). Change the on-foot FOV option
   (`HumanoidFOV`, not the ship's FOV) once and repeat the Executioner.
-- VR (Frontier, `advanced.vr_camera_census` on for the camera source): the scoped Executioner in ADS, 10 s still and 10 s turning the
-  head; the unscoped copy; one eye dump in scoped ADS. The first three scoped presses arm the probe on their own.
-- Read `edvr_log.py --expect-build HEAD --health` first, then the four lines.
+- VR (Epic's both install with the game in VR mode, `advanced.vr_camera_census` on for the camera source; set in Epic's edvr.ini
+  2026-10-28): the scoped Executioner in ADS, 10 s still and 10 s turning the head; the unscoped copy; one eye dump in scoped ADS. The
+  first three scoped presses arm the probe on their own.
+- Read `edvr_log.py --expect-build <installed build> --health` first, then the four lines.
 
 **After S0:** see-through glass and M under about 2.5 for every zooming weapon: build A behind the key. An opaque screen: A with that draw
 moved after the door, or B3. Zoom above 2.5: A's detail is likely too low, so put B3 to the maintainer. A per-frame VR field found: read it;
