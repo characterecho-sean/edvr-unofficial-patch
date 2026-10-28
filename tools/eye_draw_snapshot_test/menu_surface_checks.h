@@ -20,7 +20,7 @@ inline std::string menuSurfaceChecks() {
     put(root,left);put(root+8,right);put(root+0x20,uint16_t(20));
     const auto owner=[&](unsigned index){
         const uint64_t full=base+0x1000+index*0x1000,panel=base+0x7000+index*0x1000,list=base+0xc000+index*0x100;
-        put(full,fv);put(full+16,ov);put(panel+f117::kOffList,list);put(list,full+16);put(list+f117::kListCount,uint64_t(120));
+        put(full,fv);put(full+16,ov);put(panel+pickmesh::kOffList,list);put(list,full+16);put(list+pickmesh::kListCount,uint64_t(120));
         put(full+0x828,uint64_t(3));put(full+0x830,root);put(full+0x860,base+0x1f000);put(full+0x868,base+0xd000);
         Row scope;scope.generation=7;scope.ledgerFrame=801;scope.renderFrame=900;scope.panel=panel;scope.ctl=42;scope.thread=9;
         scope.reads=1024;scope.observedOwner=full+16;scope.ownerWorld[0]=scope.ownerOut[0]=1;return scope;};
@@ -40,13 +40,13 @@ inline std::string menuSurfaceChecks() {
     check(placement.before(placed,scope.ctl,scope.panel,scope.renderFrame,scope.thread,990,read),"placement fixture begins before mesh rebuild");
     capture.arm(placed.generation,801,bindings);
     const uint64_t pickList=base+0xc000,pickTris=base+0x15000;
-    put(pickTris,std::array<f117::Tri,120>{});put(pickList+f117::kListTris,pickTris);
+    put(pickTris,std::array<pickmesh::Tri,120>{});put(pickList+pickmesh::kListTris,pickTris);
     unsigned originals=0;
     afterOriginal([&](){
-        ++originals;put(pickList+f117::kListCount,uint64_t(0));
+        ++originals;put(pickList+pickmesh::kListCount,uint64_t(0));
         observeOwner(placed,base+0x1010,base+0x18000,read);
         capture.observe(placed,base+0x1010,1000,801,901,read);
-        put(pickList+f117::kListCount,uint64_t(120));return 17ull;
+        put(pickList+pickmesh::kListCount,uint64_t(120));return 17ull;
     },[&](uint64_t){placement.finish(placed,1010,read);});
     check(originals==1&&capture.rows.size()==1&&capture.rows[0].status==4,"surface observer forwards original once and captures paired owner");
     check(capture.rows[0].preRebuildCountRead==1&&capture.rows[0].preRebuildTriangleCount==0&&
@@ -81,16 +81,16 @@ inline std::string menuSurfaceChecks() {
     const auto changed=[&](uintptr_t at,void* out,size_t bytes){const bool ok=read(at,out,bytes);if(at==left+0x20&&++keyReads==2)*static_cast<uint16_t*>(out)=99;return ok;};
     SurfaceCapture::keys(walk,changed);check(walk.mapStatus==3&&walk.pairs[0].keyStatus==3,"changed tree identity invalidates key attribution");
     capture.arm(7,801,bindings);for(unsigned i=0;i<5;++i){auto s=owner(i);put(entry+24,base+0x1000+i*0x1000);
-        put(base+0xc000+i*0x100+f117::kListCount,uint64_t(i==0?2:i==1?0:120));
+        put(base+0xc000+i*0x100+pickmesh::kListCount,uint64_t(i==0?2:i==1?0:120));
         capture.observe(s,base+0x1010+i*0x1000,1040+i,801,901,read);}
     check(capture.rows.size()==4&&capture.quota==1&&capture.rows[0].preRebuildTriangleCount==2&&
           capture.rows[1].preRebuildTriangleCount==0&&capture.rows[2].preRebuildTriangleCount==120,
           "typed quad and pre-rebuild-zero owners are captured with the unchanged four-owner quota");
-    scope=owner(0);put(entry+24,base+0x1000);capture.arm(7,801,bindings);put(base+0xc000+f117::kListCount,uint64_t(2));capture.observe(scope,base+0x1010,1050,801,901,read);
+    scope=owner(0);put(entry+24,base+0x1000);capture.arm(7,801,bindings);put(base+0xc000+pickmesh::kListCount,uint64_t(2));capture.observe(scope,base+0x1010,1050,801,901,read);
     check(capture.rows.size()==1&&capture.rows[0].preRebuildTriangleCount==2&&capture.nonMenu==0,
           "ordinary cached quad count is evidence, not a callback-time identity claim");
     capture.arm(7,801,bindings);
-    const auto unreadCount=[&](uintptr_t at,void* out,size_t bytes){return at!=base+0xc000+f117::kListCount&&read(at,out,bytes);};
+    const auto unreadCount=[&](uintptr_t at,void* out,size_t bytes){return at!=base+0xc000+pickmesh::kListCount&&read(at,out,bytes);};
     capture.observe(scope,base+0x1010,1051,801,901,unreadCount);
     check(capture.rows.size()==1&&capture.rows[0].status==4&&!capture.rows[0].preRebuildCountRead&&
           capture.rows[0].pairs[0].mesh.status==4,"unreadable pre-rebuild count does not suppress typed authored evidence");

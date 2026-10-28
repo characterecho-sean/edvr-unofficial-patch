@@ -10643,8 +10643,6 @@ def _hj_f111_pointer(rows, ctx):
     n = max(int(r["n"]) for r in armed) if armed else None
     if n == 0 and not sec:
         return ("NEVER APPLIED", "no hook armed%s" % armed[-1]["rest"])
-    if not sec and not tot and _hpanel_mouse_off(ctx, armed):
-        return ("IDLE", "the panel mouse key is off: the instruments are idle by design")
     if not sec and tot:
         stage = tot[-1]["verdict"].strip()
         text = "the flight so far (%s s with the pointer): %s (no 1 s line: the detail log's)" % (tot[-1]["secs"], stage)
@@ -10803,20 +10801,6 @@ def _f119_windows(rows):
     for row in windows.values():
         row["offs"] = "; ".join(row.pop("_classes")) or "none"
     return list(windows.values())
-
-
-def _hpanel_mouse_off(ctx, triggers):
-    """Known off throughout the relevant window, including its carried entry state; a late off observation cannot erase earlier unknown/on time."""
-    rows = ctx.get("panel mouse (F122)", {})
-    states = [(r.get("to") or r.get("setting"), r.get("_t")) for kind in ("entry", "setting", "sec") for r in rows.get(kind, [])]
-    if not states or any(state != "off" for state, _ in states):
-        return False
-    since = ctx.get("_health_window", {}).get("since")
-    if since is not None and not rows.get("entry") and not any(t == since for _, t in states):
-        return False   # unknown at the selected window's start; an off line later cannot prove the whole interval off
-    first = min((r["_t"] for r in triggers if r.get("_t") is not None), default=None)
-    known = min((t for _, t in states if t is not None), default=None)
-    return first is not None and known is not None and known <= first
 
 
 def _hvisor_census_needed(ctx):
@@ -11034,113 +11018,124 @@ def _hj_f123_containment(rows, ctx):
     return ("OK", text)
 
 
-def _hj_f117_cursor(rows, ctx):
-    """F117: the cursor's place on a turned on-foot panel, per setting of the temporary A/B key (panel, view, game). Per second: the 2D placements on
-    turned and upright pick meshes, the cursor moved, the refusals, and whether the cursor on turned panels follows the true uv or moves against it.
-    NEVER APPLIED when a setting that moves (panel, view) met turned panels and moved none; PARTIAL when it moved them and the cursor still went against
-    the uv; IDLE with no turned panel."""
-    sec = rows.get("sec", [])
-    if not sec:
+def _hfloat(text):
+    """A number a line printed, or None for the n/a it prints where it has no value."""
+    try:
+        return float(text)
+    except (TypeError, ValueError):
         return None
-    order, groups = [], {}
-    for r in sec:
-        k = r["setting"].strip()
-        if k not in groups:
-            groups[k] = []
-            order.append(k)
-        groups[k].append(r)
-    parts, never, partial, any_turned, any_ok = [], [], [], False, False
-    for k in order:
-        g = groups[k]
-        turned, moved = sum(int(r["turned"]) for r in g), sum(int(r["moved"]) for r in g)
-        follows = sum(1 for r in g if r["cursor"].strip() == "follows the uv")
-        against = sum(1 for r in g if r["cursor"].strip() == "against the uv")
-        refused = "no triangle at the uv %d, the sprite not at the uv %d, no triangle at the turned uv %d" % (
-            sum(int(r["notri"]) for r in g), sum(int(r["notat"]) for r in g), sum(int(r["noturn"]) for r in g))
-        parts.append("%s: %d s, turned %d, moved %d, the cursor follows the uv in %d s, against it in %d s (refused: %s)" % (
-            k, len(g), turned, moved, follows, against, refused))
-        any_turned |= turned > 0
-        if k in ("panel", "view") and turned:
-            if not moved:
-                never.append(k)
-            elif against > follows:
-                partial.append(k)
-            elif follows:
-                any_ok = True
-    text = "; ".join(parts)
-    if never:
-        return ("NEVER APPLIED", text + "; %s met turned panels and moved none" % ", ".join(never))
-    if not any_turned:
-        return ("IDLE", text + "; no turned panel")
-    if partial:
-        return ("PARTIAL", text + "; %s moved the cursor and it is still against the uv" % ", ".join(partial))
-    return ("OK" if any_ok else "IDLE", text)
 
 
-def _hj_f120_follow(rows, ctx):
-    """F120: the cursor on a screen-space on-foot panel when the head turns, per setting of the temporary A/B key (panel, head). A second is judged when the
-    mouse was still (the same uv on the panel in consecutive placements) and the head turned more than 5 deg against the HUD frame while it was; the cursor's
-    drift on the panel in those seconds is under 5 mm when the cursor stays on the drawn panel. OK: the judged seconds under panel mostly drifted under 5 mm.
-    PARTIAL: most drifted 5 mm or more, or the HRC frame turned with the head in every judged second (E.Ht constant: the correction is near zero and the
-    drift cannot tell whether a panel seen to hold still is in that frame). NEVER APPLIED: panel met screen-space placements and corrected none. IDLE: no
-    screen-space panel, or none of the seconds could be judged."""
-    sec, pins = rows.get("sec", []), rows.get("pin", [])
-    if not sec and not pins:
+def _hmedian(values):
+    vals = sorted(v for v in values if v is not None)
+    return vals[len(vals) // 2] if vals else None
+
+
+def _hk_case(k):
+    """F154: which turn of the game's pick point a k reads as. k = 1: held on the panel in the eye's frame; 0: locked to the camera; -1 and -2: turning against the
+    head by once and twice the panel's turn; +2: with the head by twice the panel's. Anything else is named other."""
+    if k is None:
+        return "not read"
+    for centre, name in ((0.0, "about 0 (locked to the camera)"), (1.0, "about 1 (held on the panel)"), (-1.0, "about -1 (against the head, as far as the panel turns)"),
+                         (-2.0, "about -2 (against the head, twice as far as the panel turns)"), (2.0, "about +2 (with the head, twice as far as the panel turns)")):
+        if abs(k - centre) <= 0.35:
+            return name
+    return "other"
+
+
+_F154_CAUSES = ("no lever", "tiny rho", "not finite", "write failed")
+
+
+def _hj_f154_turn(rows, ctx):
+    """F154, F155: where the on-foot panel cursor goes, and how the game's own cursor point turns against the head. Since F155 the cursor on a screen-space panel is the
+    game's place with the pick mesh's lever undone (the drawn point), hidden where the lever is not known; the F154 builds chose among five placements by a key and
+    their lines carry the setting (shipped, uv, game, drawn, mirrored), which this rule still reads. A second is judged when the mouse was still on a screen-space panel
+    (the same uv in consecutive placements) and the head turned more than 2 deg against the HUD frame while it was; its k per stream (the game's point, the written one) is
+    1 for a point held on the panel in the eye's frame, 0 locked to the camera, negative against the head. OK: the written point's k within 0.25 of 1 on every axis it
+    could read. PARTIAL: it differs from 1 by more than that on an axis, or the hide fallback ran on more than a tenth of the screen-space placements. NEVER APPLIED: the
+    lever hook never armed, or screen-space placements were met and none got the drawn point. IDLE: no judged second. The text names the game's own k and its case (about 0,
+    1, -1, -2, +2, other) and the sign of rho, the lever the game applies to the pick mesh."""
+    armed, moves = rows.get("armed", []), rows.get("setting", [])
+    # The F155 lines carry no setting (the drawn point is the only one); the F154 builds' lines do, and an F154 line has no hidden count.
+    zero = {"hid": "0", "hf": "0"}
+    sec = sorted([dict(zero, **dict(r, old=False, setting="drawn")) for r in rows.get("sec", [])] + [dict(zero, **dict(r, old=True)) for r in rows.get("secold", [])],
+                 key=lambda r: r.get("_order", 0))
+    writes = sorted([dict(zero, **dict(r, old=False, setting="drawn")) for r in rows.get("writes", [])] + [dict(zero, **dict(r, old=True)) for r in rows.get("writesold", [])],
+                    key=lambda r: r.get("_order", 0))
+    if not (armed or sec or writes or moves):
         return None
-    unpinned = [r for r in pins if r["state"].startswith("NOT pinned")]
-    if not sec:   # F125: the 1 s lines are the detail log's; without it no line says whether a panel was placed
-        return ("IDLE", ("no 1 s line (the detail log was off)" if _hdetail(ctx) in ("off", "mixed") else "no 2D placement on a panel") +
-                ("; the owner function's bytes are NOT pinned" if unpinned else ""))
-    order, groups = [], {}
-    for r in sec:
-        k = r["setting"].strip()
-        if k not in groups:
-            groups[k] = []
-            order.append(k)
-        groups[k].append(r)
-    kinds = (("rflat", "flat"), ("rnoeye", "no eye view"), ("rnohrc", "no HRC matrix"), ("rdeg", "degenerate row"), ("rnot", "not screen-space"),
-             ("rpin", "owner bytes not pinned"), ("rhead", "setting head"), ("rwrite", "write failed"))
-    parts, total_screen, never, partial, ok_any = [], 0, [], [], False
-    for k in order:
-        g = groups[k]
-        screen, corrected = sum(int(r["screen"]) for r in g), sum(int(r["corrected"]) for r in g)
-        judged = [r for r in g if int(r["still"]) > 0 and float(r["stt"]) > 5.0]
-        drifts = sorted(float(r["drift"]) for r in judged)
-        over = sum(1 for d in drifts if d >= 5.0)
-        turning = sum(1 for r in judged if "turns with the head" in r["frame"])
-        refused = ", ".join("%s %d" % (name, n) for name, n in ((name, sum(int(r[key]) for r in g)) for key, name in kinds) if n)
-        text = "%s: %d s, %d 2D placements, %d screen-space, corrected %d" % (k, len(g), sum(int(r["pl"]) for r in g), screen, corrected)
-        if refused:
-            text += " (refused: %s)" % refused
-        if judged:
-            text += "; %d judged second(s) (mouse still, head turn over 5 deg): cursor drift median %.1f mm, worst %.1f mm, %d at or over 5 mm" % (
-                len(judged), drifts[len(drifts) // 2], drifts[-1], over)
-            if turning:
-                text += ", the HUD frame turned with the head in %d of them" % turning
+    canon = ("shipped", "uv", "game", "drawn", "mirrored")
+    dead = [r for r in armed if r["state"] != "armed"]
+    seen = {r["setting"] for r in sec} | {r["setting"] for r in writes}
+    names = [n for n in canon if n in seen]
+    parts, never, hidden_over = [], [], []
+    for name in names:
+        s_rows, w_rows = [r for r in sec if r["setting"] == name], [r for r in writes if r["setting"] == name]
+        src = w_rows or s_rows   # the writes lines cover every placement; the turn lines only the judged seconds
+        pl, screen, written, hidden, hide_failed = (sum(int(r[k]) for r in src) for k in ("pl", "screen", "written", "hid", "hf"))
+        refused = [sum(int(r[k]) for r in src) for k in ("r0", "r1", "r2", "wf")]
+        causes = ", ".join("%s %d" % (n, c) for n, c in zip(_F154_CAUSES, refused) if c)
+        text = "%s: %d placements, %d screen-space, %d written" % (name, pl, screen, written)
+        if hidden or hide_failed:
+            text += ", %d hidden%s" % (hidden, ", %d hides failed" % hide_failed if hide_failed else "")
+        if causes:
+            text += " (refused: " + causes + ")"
+        if s_rows:
+            kw = [_hmedian([_hfloat(r[key]) for r in s_rows]) for key in ("kyw", "kpw")]
+            text += "; %d judged second(s): written k yaw %s pitch %s" % (len(s_rows), "n/a" if kw[0] is None else "%+.2f" % kw[0], "n/a" if kw[1] is None else "%+.2f" % kw[1])
         parts.append(text)
-        total_screen += screen
-        if k == "panel":
-            if screen and not corrected:
-                never.append(k)
-            elif judged and 2 * over > len(judged):
-                partial.append("%s drifted 5 mm or more in %d of %d judged seconds" % (k, over, len(judged)))
-            elif judged and turning == len(judged):
-                partial.append("the HRC frame turned with the head in all %d judged seconds under %s (E.Ht constant: the correction is near zero and the drift cannot "
-                               "show whether a panel seen to hold still is in that frame)" % (len(judged), k))
-            elif judged:
-                ok_any = True
-    text = "; ".join(parts)
-    if unpinned:
-        text += "; the owner function's bytes are NOT pinned (%s)" % unpinned[-1]["state"]
+        if name in ("drawn", "mirrored") and screen and not written:
+            never.append("%s met %d screen-space placements and wrote none (%s)" % (name, screen, ", ".join(x for x in (causes, "hidden %d" % hidden if hidden else "") if x) or "no refusal counted"))
+        elif name in ("drawn", "mirrored") and pl and not screen and any(r["old"] for r in src):
+            # The 2026-10-28 F154 flight: F120's pin read F154's own jump, so the screen-space test refused every panel and drawn and mirrored never acted.
+            never.append("%s met %d placements and none was screen-space (the screen-space test refused every panel: see the F120 pin line)" % (name, pl))
+        if name == "drawn" and screen and hidden * 10 > screen:
+            hidden_over.append("the hide fallback ran on %d of %d screen-space placements (%s)" % (hidden, screen, causes or "no cause counted"))
+    text = "; ".join(parts) if parts else "no placement on a panel"
+    w_rho = [(v, _hfloat(r["rfov"])) for r, v in ((r, _hfloat(r.get("rm"))) for r in writes) if v is not None]
+    if w_rho and not sec:
+        mean = sum(v for v, _ in w_rho) / len(w_rho)
+        fov = [f for _, f in w_rho if f is not None]
+        text += "; rho %s (mean %+.3f over %d window(s) of the writes line%s)" % ("negative" if mean < 0 else "positive", mean, len(w_rho),
+                                                                               "" if not fov else ", the fov ratio %.3f" % fov[-1])
+    if sec:
+        kg = [_hmedian([_hfloat(r[key]) for r in sec]) for key in ("kyg", "kpg")]
+        rho = [v for v in (_hfloat(r["rm"]) for r in sec) if v is not None]
+        mean = sum(rho) / len(rho) if rho else None
+        fov = [v for v in (_hfloat(r["rfov"]) for r in sec) if v is not None]
+        text += "; the game's own point: k yaw %s, pitch %s" % tuple("n/a" if v is None else "%+.2f (%s)" % (v, _hk_case(v)) for v in kg)
+        text += "; rho %s" % ("not read" if mean is None else "%s (mean %+.3f over %d judged second(s)%s)" % (
+            "negative" if mean < 0 else "positive", mean, len(rho), "" if not fov else ", the fov ratio %.3f" % fov[-1]))
+        turn, eye = max(float(r["turn"]) for r in sec), max(float(r["eye"]) for r in sec)
+        text += "; the head turned %.1f deg at most against the HUD frame, the eye moved %.1f mm at most" % (turn, eye)
+    if dead:
+        return ("NEVER APPLIED", text + "; the lever hook was not armed (%s): the lever cannot be read, so the drawn point is never written and the sprite is hidden on every "
+                "screen-space panel" % (dead[-1]["rest"].lstrip(": ") or "no reason given"))
     if never:
-        return ("NEVER APPLIED", text + "; %s met screen-space placements and corrected none" % ", ".join(never))
-    if not total_screen:
-        return ("IDLE", text + "; no screen-space panel")
-    if partial:
-        return ("PARTIAL", text + "; " + "; ".join(partial))
-    if ok_any:
-        return ("OK", text)
-    return ("IDLE", text + "; no mouse-still second with a head turn over 5 deg under panel to judge")
+        return ("NEVER APPLIED", text + "; " + "; ".join(never))
+    if not sec:
+        if hidden_over:
+            return ("PARTIAL", text + "; " + "; ".join(hidden_over))
+        return ("IDLE", text + "; no mouse-still second with the head turned over 2 deg against the HUD frame on a screen-space panel to judge")
+    active = sec[-1]["setting"]
+    a_rows = [r for r in sec if r["setting"] == active]
+    off = []
+    read = False
+    for axis, key in (("yaw", "kyw"), ("pitch", "kpw")):
+        v = _hmedian([_hfloat(r[key]) for r in a_rows])
+        if v is None:
+            continue
+        read = True
+        if abs(v - 1.0) > 0.25:
+            off.append("%s %+.2f" % (axis, v))
+    if off:
+        return ("PARTIAL", text + "; under %s the written point's k is not within 0.25 of 1 (%s): the cursor does not stay on the panel%s" % (
+            active, ", ".join(off), "; " + "; ".join(hidden_over) if hidden_over else ""))
+    if hidden_over:
+        return ("PARTIAL", text + "; " + "; ".join(hidden_over))
+    if not read:
+        return ("IDLE", text + "; the turn was too small about either axis to read k under %s" % active)
+    return ("OK", text + "; under %s the written point holds on the panel (k within 0.25 of 1)" % active)
 
 
 def _hj_f121_visor_axis(rows, ctx):
@@ -11307,45 +11302,6 @@ def _hj_f121c_eyes(rows, ctx):
     return ("IDLE", text + "; no visor draw to judge")
 
 
-def _hj_f122_mouse(rows, ctx):
-    """F122: the mouse cursor on on-foot panels, behind the advanced key fix.native_on_foot_panel_mouse (off hides the sprite the game draws, on draws it). Per
-    second with a panel reached: the key, the panels seen (a placement that set the hit byte), the sprites hidden and the hides whose write failed; once, whether
-    the placement hook that hides is armed. OK: off and every panel seen had its sprite hidden. PARTIAL: off, some hidden and some not (a write failed). NEVER
-    APPLIED: off and panels were seen with nothing hidden, or the placement hook was not armed. IDLE: the key on (nothing is hidden by design), or no panel reached."""
-    sec, sets, hooks = rows.get("sec", []), rows.get("setting", []), rows.get("hook", [])
-    if not sec and not sets and not hooks:
-        return None
-    key = sets[-1]["to"] if sets else (sec[-1]["setting"].strip() if sec else (rows["entry"][-1]["to"] if rows.get("entry") else "off"))
-    parts = ["key %s%s" % (key, " (%d change line(s))" % len(sets) if len(sets) > 1 else "")]
-    never, partial, hid_any = [], [], False
-    for k in ("off", "on"):
-        g = [r for r in sec if r["setting"].strip() == k]
-        if not g:
-            continue
-        seen, hidden, failed = (sum(int(r[f]) for r in g) for f in ("seen", "hidden", "failed"))
-        parts.append("%s: %d s with a panel, %d panels seen, %d sprites hidden, %d hide writes failed" % (k, _hcount(g, "xs", lambda r: int(r["seen"]) > 0), seen, hidden, failed))
-        if k == "off":
-            if seen and not hidden:
-                never.append("panels were seen (%d) and nothing was hidden" % seen)
-            elif failed or hidden < seen:
-                partial.append("%d of %d sprites hidden, %d hide writes failed" % (hidden, seen, failed))
-            elif hidden:
-                hid_any = True
-    unarmed = [r for r in hooks if r["state"] == "NOT armed"]
-    if unarmed and key == "off":
-        never.append("the placement hook was not armed (EliteDangerous64.exe+0x%s), so the cursor cannot be hidden" % unarmed[-1]["rva"])
-    text = "; ".join(parts)
-    if never:
-        return ("NEVER APPLIED", text + "; " + "; ".join(never))
-    if partial:
-        return ("PARTIAL", text + "; " + "; ".join(partial))
-    if hid_any:
-        return ("OK", text)
-    if key == "on" or any(r["setting"].strip() == "on" for r in sec):
-        return ("IDLE", text + "; the key is on: the game's cursor is drawn, nothing is hidden by design")
-    return ("IDLE", text + "; no panel was reached while the key was off")
-
-
 def _hj_f126_review(rows, ctx):
     """F126: the review fixes' two guards, counted every 10 s on foot (a window with no pin call and no arm IK call prints nothing). The pin takes the midpoint of the eyes
     only from two eyes' rows of one frame and keeps its last pair otherwise (the refused count); the arm IK refuses a call whose FP snapshot is of an earlier FP rig than the
@@ -11407,8 +11363,6 @@ def _hj_f114b_pointer(rows, ctx):
         if armed and all(r["state"] == "NOT armed" for r in armed):
             return ("NEVER APPLIED", "the owner transform hook was not armed%s, and %s" % (
                 armed[-1]["rest"], "no 1 s line (the detail log was off)" if quiet else "no panel was seen"))
-        if _hpanel_mouse_off(ctx, armed + owners):
-            return ("IDLE", "the panel mouse key is off: the instruments are idle by design")
         if quiet:
             return ("IDLE", "no 1 s line (the detail log was off) and no flight-so-far line (under 10 s with a panel, or none)")
         return ("NEVER APPLIED", "the hooks never saw a panel (no 1 s line): no panel with a mouse pointer was used on foot")
@@ -14027,30 +13981,36 @@ HEALTH_RULES = (
                   r"(?P<secs>\d+) s with a panel"),
         ("owner", r"panel pointer \(F114b\): a placed panel's pick mesh owner names EliteDangerous64\.exe\+0x(?P<rva>[0-9A-F]+) at vtable \+0x10 \((?P<what>[^)]*)\)"),
     ), _hj_f114b_pointer, needs_detail=True),   # F125: as F111's
-    _hrule("panel cursor fix (F117)", ("F117",), ("panel cursor fix (F117)",), (
-        ("sec", r"panel cursor fix \(F117\) 1 s: setting (?P<setting>[^;]+); the cursor on turned panels (?P<cursor>[^;]+); 2D placements (?P<pl>\d+): turned "
-                r"(?P<turned>\d+), upright (?P<upright>\d+); moved (?P<moved>\d+); left: upright \d+, the game's setting (?P<gameset>\d+); refused: no triangle at "
-                r"the uv (?P<notri>\d+), the sprite not at the uv (?P<notat>\d+), no triangle at the turned uv (?P<noturn>\d+); the uv to the cursor on turned "
-                r"panels right (?P<tr>%s) down (?P<td>%s)" % (_HN, _HN)),
-        ("setting", r"native on foot panel cursor fix \(F117\): (?P<to>panel|view|game) \(TEMPORARY"),
-        ("_", r"panel cursor fix \(F117\) so far: "),
-    ), _hj_f117_cursor, needs_detail=True),   # F125: as F111's
-    _hrule("panel cursor follow (F120)", ("F120",), ("panel cursor follow (F120)",), (
-        ("sec", r"panel cursor follow \(F120\) 1 s: setting (?P<setting>[^;]+); 2D placements (?P<pl>\d+), screen-space (?P<screen>\d+), corrected (?P<corrected>\d+), "
-                r"references taken (?P<refs>\d+); refused: flat (?P<rflat>\d+), no eye view (?P<rnoeye>\d+), no HRC matrix (?P<rnohrc>\d+), degenerate row (?P<rdeg>\d+), "
-                r"not screen-space (?P<rnot>\d+), owner bytes not pinned (?P<rpin>\d+), setting head (?P<rhead>\d+), write failed (?P<rwrite>\d+); this second the head "
-                r"turned (?P<te>[\d.]+) deg, the HUD frame (?P<th>[\d.]+) deg, the head against the HUD frame (?P<teh>[\d.]+) deg \((?P<frame>[^)]*)\); E\.Ht \(det "
-                r"(?P<det>%s)\) yaw (?P<yaw>%s) pitch (?P<pitch>%s) roll (?P<roll>%s) deg; mouse still: (?P<still>\d+) placements, head against the HUD frame "
-                r"(?P<stt>[\d.]+) deg, cursor drift (?P<drift>[\d.]+) mm" % (_HN, _HN, _HN, _HN)),
-        ("setting", r"native on foot panel cursor follow \(F120\): (?P<to>panel|head) \(TEMPORARY"),
-        ("pin", r"panel cursor follow \(F120\): the screen-space owner function at EliteDangerous64\.exe\+0x(?P<rva>[0-9A-F]+) is (?P<state>.*)$"),
-        ("_", r"panel cursor follow \(F120\) so far: "),
-    ), _hj_f120_follow, needs_detail=True),   # F125: as F111's
-    _hrule("panel mouse (F122)", ("F122",), ("panel mouse (F122)",), (
-        ("sec", r"panel mouse \(F122\) " + H_WL + r": setting (?P<setting>on|off); panels seen (?P<seen>\d+), sprites hidden (?P<hidden>\d+), hide write failed (?P<failed>\d+)(?:; panels active (?P<xs>\d+) of (?P<ws>\d+) s)?$"),
-        ("setting", r"native on foot panel mouse \(F122\): (?P<to>on|off) \(live;"),
-        ("hook", r"panel mouse \(F122\): the placement hook is (?P<state>armed|NOT armed) \(EliteDangerous64\.exe\+0x(?P<rva>[0-9A-F]+)\)(?P<rest>.*)$"),
-    ), _hj_f122_mouse),
+    _hrule("panel cursor turn (F154)", ("F154",), ("panel cursor turn (F154)", "panel cursor writes (F154)", "panel cursor frame (F154)", "panel lever (F154)",
+                                                     "native on foot panel cursor (F154)"), (
+        ("armed", r"panel lever \(F154\): lever hook (?P<state>armed|NOT armed) at EliteDangerous64\.exe\+0x(?P<rva>[0-9A-F]+) .*?, profile vr(?P<rest>.*)$"),
+        # F155: the lines of the drawn cursor (no setting, the game's and the written point, the sprites hidden by the fallback)
+        ("sec", r"panel cursor turn \(F154\) 1 s: placements (?P<pl>\d+): screen-space (?P<screen>\d+), written (?P<written>\d+), hidden (?P<hid>\d+), refused: "
+                r"no lever (?P<r0>\d+), tiny rho (?P<r1>\d+), not finite (?P<r2>\d+), write failed (?P<wf>\d+), hide failed (?P<hf>\d+), no eye view (?P<t0>\d+), "
+                r"no HRC matrix (?P<t1>\d+), degenerate row (?P<t2>\d+); judged (?P<judged>\d+) placements in (?P<jruns>\d+) of (?P<runs>\d+) runs, the head turned "
+                r"(?P<turn>[\d.]+) deg at most against the HUD frame, the eye moved (?P<eye>[\d.]+) mm at most; k yaw: game (?P<kyg>\S+) written (?P<kyw>\S+); k pitch: "
+                r"game (?P<kpg>\S+) written (?P<kpw>\S+); rho mean (?P<rm>\S+) min (?P<rmin>\S+) max (?P<rmax>\S+) from (?P<calls>\d+) owner calls \(screen-space "
+                r"(?P<lev>\d+), not (?P<ns>\d+), unread (?P<un>\d+)\); rho_fov (?P<rfov>\S+) fov_C1 (?P<fc1>\S+) deg fov_UI (?P<fui>\S+) deg mode (?P<mode>\S+); "
+                r"q\.z (?P<qz>\S+) m$"),
+        ("writes", r"panel cursor writes \(F154\) (?P<wl>\d+) s: placements (?P<pl>\d+): screen-space (?P<screen>\d+), written (?P<written>\d+), hidden (?P<hid>\d+), "
+                   r"refused: no lever (?P<r0>\d+), tiny rho (?P<r1>\d+), not finite (?P<r2>\d+), write failed (?P<wf>\d+), hide failed (?P<hf>\d+); owner calls "
+                   r"(?P<calls>\d+) \(screen-space (?P<lev>\d+), not (?P<ns>\d+), unread (?P<un>\d+)\); rho mean (?P<rm>\S+) min (?P<rmin>\S+) max (?P<rmax>\S+), "
+                   r"rho_fov (?P<rfov>\S+) fov_C1 (?P<fc1>\S+) deg fov_UI (?P<fui>\S+) deg mode (?P<mode>\S+), q\.z (?P<qz>\S+) m$"),
+        # the F154 builds' lines (2026-10-28): a setting in each, F117's point as a third stream, no hidden count; the writes line's lever tail came in F154b
+        ("secold", r"panel cursor turn \(F154\) 1 s: setting (?P<setting>\w+); placements (?P<pl>\d+): screen-space (?P<screen>\d+), written (?P<written>\d+), refused: "
+                   r"no lever (?P<r0>\d+), tiny rho (?P<r1>\d+), not finite (?P<r2>\d+), write failed (?P<wf>\d+), no eye view (?P<t0>\d+), no HRC matrix (?P<t1>\d+), "
+                   r"degenerate row (?P<t2>\d+); judged (?P<judged>\d+) placements in (?P<jruns>\d+) of (?P<runs>\d+) runs, the head turned (?P<turn>[\d.]+) deg at most "
+                   r"against the HUD frame, the eye moved (?P<eye>[\d.]+) mm at most; k yaw: game (?P<kyg>\S+) uv (?P<kyu>\S+) written (?P<kyw>\S+); k pitch: game (?P<kpg>\S+) "
+                   r"uv (?P<kpu>\S+) written (?P<kpw>\S+); rho mean (?P<rm>\S+) min (?P<rmin>\S+) max (?P<rmax>\S+) from (?P<calls>\d+) owner calls \(screen-space (?P<lev>\d+), "
+                   r"not (?P<ns>\d+), unread (?P<un>\d+)\); rho_fov (?P<rfov>\S+) fov_C1 (?P<fc1>\S+) deg fov_UI (?P<fui>\S+) deg mode (?P<mode>\S+); q\.z (?P<qz>\S+) m$"),
+        ("writesold", r"panel cursor writes \(F154\) (?P<wl>\d+) s: setting (?P<setting>\w+); placements (?P<pl>\d+): screen-space (?P<screen>\d+), written (?P<written>\d+), "
+                      r"refused: no lever (?P<r0>\d+), tiny rho (?P<r1>\d+), not finite (?P<r2>\d+), write failed (?P<wf>\d+); owner calls (?P<calls>\d+) "
+                      r"\(screen-space (?P<lev>\d+), not (?P<ns>\d+), unread (?P<un>\d+)\)(?:; rho mean (?P<rm>\S+) min (?P<rmin>\S+) max (?P<rmax>\S+), rho_fov "
+                      r"(?P<rfov>\S+) fov_C1 (?P<fc1>\S+) deg fov_UI (?P<fui>\S+) deg mode (?P<mode>\S+), q\.z (?P<qz>\S+) m)?$"),
+        ("setting", r"native on foot panel cursor \(F154\): (?P<to>shipped|uv|game|drawn|mirrored) \(TEMPORARY"),
+        ("_", r"panel cursor turn \(F154\) so far, \d+ s with a judged run: (?:placements|setting) "),
+        ("_", r"panel cursor frame \(F154\): ledger frame \d+ render frame \d+ panel "),
+    ), _hj_f154_turn),
     _hrule("review fixes (F126)", ("F126",), ("review fixes (F126)",), (
         ("sec", r"review fixes \(F126\) 10 s: pin eye pairs: (?P<calls>\d+) pin calls, (?P<taken>\d+) pairs taken, (?P<frames>\d+) refused for rows of two different frames; "
                 r"arm IK: (?P<ik>\d+) calls, (?P<rig>\d+) refused for an FP snapshot of an earlier rig$"),
@@ -14634,7 +14594,6 @@ def health_scan(text, since=None, until=None):
     carried, entered = None, False
     settings = {}
     setting_rules = (
-        ("panel mouse (F122)", re.compile(r"native on foot panel mouse \(F122\): (?P<to>on|off) \(live;")),
         ("visor census (F121b)", re.compile(r"native on foot visor axis \(F121b\): (?P<to>on|off) \(TEMPORARY")),
         ("head containment (F119)", re.compile(r"head containment \(F119\): report context: reference (?P<reference>\d+) \((?P<known>known|not read)\), epoch (?P<epoch>\d+), (?P<context>steady|mixed rest)$")),
     )
@@ -15499,6 +15458,7 @@ def self_test_health():
     f140reader_path = os.path.join(repo_root(), "src", "d3d11", "journal_loadout_reader.h")
     f158_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f158.h")
     f159_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f159.h")
+    f154_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f154.h")
     try:
         source, swap, f90src, f91src = read_text(src_path), read_text(swap_path), read_text(f90_path), read_text(f91_path)
         f105src, f105note = read_text(f105_path), read_text(f105_note_path)
@@ -15512,6 +15472,7 @@ def self_test_health():
         f140readersrc = read_text(f140reader_path)
         f158src = read_text(f158_path)
         f159src = read_text(f159_path)
+        f154src = read_text(f154_path)
     except OSError as e:
         print("health: the DLL source the self-test reads its log formats from is not where it looks (%s)" % e)
         return False
@@ -15647,6 +15608,15 @@ def self_test_health():
             fmts[key] = health_c_format(f123src, needle)
         if fmts[key] is None:
             raise AssertionError("native_on_foot_f123.h has no format holding %r: the --health rule that reads it is out of date" % needle)
+        return health_render(fmts[key], vals)
+
+    def R154(needle, *vals):
+        """F154's lines (native_on_foot_f154.h builds them: formatTurn, formatWrites, formatFrame), from their own format literals."""
+        key = "f154:" + needle
+        if key not in fmts:
+            fmts[key] = health_c_format(f154src, needle)
+        if fmts[key] is None:
+            raise AssertionError("native_on_foot_f154.h has no format holding %r: the --health rule that reads it is out of date" % needle)
         return health_render(fmts[key], vals)
 
     def stamp(sec):
@@ -16287,76 +16257,6 @@ def self_test_health():
         check("F125 F114b: detail off and the hook not armed is still NEVER APPLIED", [P_OFF, p114_armed("NOT armed", why="x")], 3, [("NEVER APPLIED", F114B)],
               has=["the owner transform hook was not armed: x, and no 1 s line (the detail log was off)"])
 
-        # ---- panel cursor fix (F117): the cursor on a turned panel against the true uv, per setting ----
-        F117 = "panel cursor fix (F117)"
-
-        def pcf(setting="panel", cursor="follows the uv", turned=80, upright=0, moved=80, gameset=0, notat=0, tr=0.98, td=0.97):
-            return R("panel cursor fix (F117) 1 s", setting, cursor, turned + upright, turned, upright, moved, upright, gameset, 0, notat, 0, tr, td, 0.0, 0.0)
-
-        def pcf_set(to="panel"):
-            # the change line an F117 to F121 build wrote when its key moved (the key is retired in F122; older logs carry the line)
-            return ("native on foot panel cursor fix (F117): %s (TEMPORARY, live; a turned panel's cursor: panel = at the panel's point for the click's place, "
-                    "view = mirrored through the view's centre, game = the game's own place)" % to)
-
-        check("F117 cursor: panel follows the uv, game against it (the A/B)",
-              [pcf_set(), pcf(), pcf(), pcf_set("game"), pcf("game", "against the uv", moved=0, gameset=80, tr=-0.99, td=-0.98)], 0, [("OK", F117)],
-              has=["panel: 2 s, turned 160, moved 160, the cursor follows the uv in 2 s, against it in 0 s", "game: 1 s, turned 80, moved 0, the cursor "
-                   "follows the uv in 0 s, against it in 1 s"], lacks=["UNPARSED"])
-        check("F117 cursor: turned panels, nothing moved", [pcf(moved=0, notat=80, cursor="against the uv", tr=-0.99, td=-0.98)], 3, [("NEVER APPLIED", F117)],
-              has=["the sprite not at the uv 80"])
-        check("F117 cursor: moved but still against the uv", [pcf(cursor="against the uv", tr=-0.9, td=-0.9)] * 2, 0, [("PARTIAL", F117)],
-              has=["still against the uv"])
-        check("F117 cursor: only upright panels", [pcf(cursor="no turned panel", turned=0, upright=60, moved=0)], 0, [("IDLE", F117)],
-              has=["no turned panel"])
-
-        # ---- panel cursor follow (F120): the cursor on a screen-space panel when the head turns, per setting ----
-        F120 = "panel cursor follow (F120)"
-        TURNS = "the HUD frame turns with the head, E.Ht holds constant, so the correction is near zero and a panel seen to hold still is not in the HRC frame"
-        STILL = "the HUD frame holds still, so the correction follows the head's turn"
-
-        def pcfo(setting="panel", pl=90, screen=90, corrected=90, refs=0, refused=(0, 0, 0, 0, 0, 0, 0, 0), te=20.0, th=0.0, teh=20.0, frame=STILL, det=1,
-                 ypr=(1.0, -2.0, 0.5), still=80, stt=18.0, drift=0.4):
-            return R("panel cursor follow (F120) 1 s", setting, pl, screen, corrected, refs, *refused, te, th, teh, frame, det, *ypr, still, stt, drift)
-
-        def pcfo_set(to="panel"):
-            # the change line an F120 or F121 build wrote when its key moved (the key is retired in F122; older logs carry the line)
-            return ("native on foot panel cursor follow (F120): %s (TEMPORARY, live; a screen-space panel's cursor when the head turns: panel = stays on the drawn "
-                    "panel, head = the game's own place, riding with the head)" % to)
-
-        def pcfo_pin(state="pinned (its first 16 bytes match build 334925)"):
-            return R("panel cursor follow (F120): the screen-space owner function", 0x47299F0, state)
-
-        check("F120 follow: panel holds the cursor on the panel, head lets it ride (the A/B)",
-              [pcfo_pin(), pcfo_set(), pcfo(), pcfo(), pcfo(), pcfo_set("head"), pcfo("head", corrected=0, refused=(0, 0, 0, 0, 0, 0, 90, 0), drift=113.3),
-               pcfo("head", corrected=0, refused=(0, 0, 0, 0, 0, 0, 90, 0), drift=108.0)], 0, [("OK", F120)],
-              has=["panel: 3 s, 270 2D placements, 270 screen-space, corrected 270; 3 judged second(s) (mouse still, head turn over 5 deg): cursor drift median 0.4 mm, "
-                   "worst 0.4 mm, 0 at or over 5 mm", "head: 2 s", "corrected 0 (refused: setting head 180); 2 judged second(s)", "cursor drift median 113.3 mm"],
-              lacks=["UNPARSED", "NOT pinned"])
-        check("F120 follow: the owner bytes do not match the pin, every panel refused", [pcfo_pin("NOT pinned (its first 16 bytes are 4C 8B DC 49 89 5B 18 57 48 81 EC "
-                                                                                              "40 01 00 00 42; every panel is refused)"),
-                                                                                  pcfo(screen=0, corrected=0, refused=(0, 0, 0, 0, 0, 90, 0, 0), te=0.0, teh=0.0,
-                                                                                       frame="no screen-space panel", still=0, stt=0.0, drift=0.0)] * 2, 0,
-              [("IDLE", F120)], has=["the owner function's bytes are NOT pinned", "owner bytes not pinned 180"])
-        check("F120 follow: drifted 5 mm or more under panel", [pcfo(drift=12.0), pcfo(drift=9.0), pcfo(drift=2.0)], 0, [("PARTIAL", F120)],
-              has=["2 at or over 5 mm", "panel drifted 5 mm or more in 2 of 3 judged seconds"])
-        check("F120 follow: the HRC frame turned with the head in every judged second", [pcfo(frame=TURNS, teh=0.2, drift=0.0)] * 3, 0, [("PARTIAL", F120)],
-              has=["the HUD frame turned with the head in 3 of them", "the HRC frame turned with the head in all 3 judged seconds under panel"])
-        check("F120 follow: screen-space placements, none corrected", [pcfo(corrected=0, refused=(0, 0, 0, 90, 0, 0, 0, 0))] * 2, 3, [("NEVER APPLIED", F120)],
-              has=["refused: degenerate row 180", "panel met screen-space placements and corrected none"])
-        check("F120 follow: only panels that are not screen-space", [pcfo(screen=0, corrected=0, refused=(0, 0, 0, 0, 90, 0, 0, 0), te=0.0, teh=0.0,
-                                                                         frame="no screen-space panel", still=0, stt=0.0, drift=0.0)] * 2, 0, [("IDLE", F120)],
-              has=["no screen-space panel", "refused: not screen-space 180"])
-        check("F120 follow: corrected, but no mouse-still second with a head turn to judge", [pcfo(still=0, stt=0.0, drift=0.0), pcfo(stt=3.0, drift=0.1)], 0,
-              [("IDLE", F120)], has=["no mouse-still second with a head turn over 5 deg under panel to judge"])
-        check("F120 follow: the flat profile refuses", [pcfo("flat (refused)", screen=0, corrected=0, refused=(90, 0, 0, 0, 0, 0, 0, 0), te=0.0, teh=0.0,
-                                                          frame="no screen-space panel", still=0, stt=0.0, drift=0.0)], 0, [("IDLE", F120)], has=["refused: flat 90"])
-        # F125: the 1 s lines are the detail log's (F117 and F120 have only those to judge: with the detail log off they are not judged, or idle beside a pin line)
-        check("F125 F120: detail off, the pin line alone", [P_OFF, pcfo_pin()], 0, [("IDLE", F120)], has=["no 1 s line (the detail log was off)"],
-              lacks=["no 2D placement"])
-        check("F125 F120: no F125 line, the pin line alone is as before", [pcfo_pin()], 0, [("IDLE", F120)], has=["no 2D placement on a panel"])
-        check("F125 F117/F120: detail off, only the flight-so-far lines", [P_OFF, R("panel cursor fix (F117) so far", "panel", "follows the uv", 20, 900, 0, 900, 0.98,
-                                                                                  0.97), R("panel cursor follow (F120) so far", "panel", 20, 900, 0, 20.0, 80, 18.0, 0.4)],
-              0, has=["  not judged (detail log off)  ", "panel cursor fix (F117), panel cursor follow (F120)"], lacks=["UNPARSED"])
         # ---- visor axis (F121): the on-foot helmet visor's frame centred on each eye's optical axis (the Pimax Crystal Super's tangents: outer 1.2546, inner 0.8746) ----
         F121 = "visor axis (F121)"
 
@@ -16481,31 +16381,98 @@ def self_test_health():
         check("F121b census: seconds with no answered sample are not a black scene", [cen(key="on", n=0, e0=0, e1=0, black=0, mx="0", mean=0.0, exr=0, dropped=15)], 0,
               [("IDLE", F121B)], has=["no sample answered"])
         check("F121b census: a line the rule does not parse", ["visor axis (F121b) 1 s: a format nobody wrote"], 4, [("UNPARSED", F121B)])
-        # ---- panel mouse (F122): the cursor on on-foot panels hidden by default, behind one advanced key ----
-        F122 = "panel mouse (F122)"
+        # ---- panel cursor turn (F154, F155): the drawn cursor, its hide fallback, and how the game's own point turns against the head ----
+        F154 = "panel cursor turn (F154)"
 
-        def pm(setting="off", seen=90, hidden=90, failed=0, wl=1, active=None):
-            return R("panel mouse (F122) %u s", wl, setting, seen, hidden, failed, int(bool(seen)) if active is None else active, wl)
+        def pt(pl=90, screen=90, written=90, hidden=0, refused=(0, 0, 0, 0), hf=0, tref=(0, 0, 0), judged=40, jruns=2, runs=3, turn=12.0, eye=3.0, ky=("-2.00", "+1.00"),
+               kp=("n/a", "n/a"), rho=("-1.865", "-1.870", "-1.860"), calls=300, lev=300, ns=0, un=0, cross=("1.992", "93.60", "56.25", "4"), qz="+0.7450", win="1 s"):
+            return R154("panel cursor turn (F154) %s", win, pl, screen, written, hidden, *refused, hf, *tref, judged, jruns, runs, turn, eye, *ky, *kp, *rho, calls, lev, ns, un, *cross, qz)
 
-        def pm_set(to="off"):
-            return R("native on foot panel mouse (F122): %s (live", to)
+        def pw(wl=10, pl=900, screen=900, written=900, hidden=0, refused=(0, 0, 0, 0), hf=0, calls=3000, lev=3000, ns=0, un=0, rho=("-1.865", "-1.870", "-1.860"),
+               cross=("1.992", "93.60", "56.25", "4"), qz="+0.7450"):
+            return R154("panel cursor writes (F154) %u s", wl, pl, screen, written, hidden, *refused, hf, calls, lev, ns, un, *rho, *cross, qz)
 
-        def pm_hook(state="armed", rest=""):
-            return R("panel mouse (F122): the placement hook is %s (EliteDangerous64.exe+0x%llX)%s", state, 0x4559C50, rest)
+        def pa(state="armed", why=""):
+            return R("panel lever (F154): lever hook %s at EliteDangerous64.exe", state, 0x47299F0, ": " if why else "", why)
 
-        check("F122 mouse: off hides every sprite of the panels reached", [pm_set(), pm_hook(), pm(), pm(), pm()], 0, [("OK", F122)],
-              has=["key off", "off: 3 s with a panel, 270 panels seen, 270 sprites hidden, 0 hide writes failed"], lacks=["UNPARSED"])
-        check("F122 mouse: off, panels reached, nothing hidden", [pm_set(), pm_hook(), pm(hidden=0, failed=90), pm(hidden=0, failed=90)], 3, [("NEVER APPLIED", F122)],
-              has=["panels were seen (180) and nothing was hidden", "off: 2 s with a panel, 180 panels seen, 0 sprites hidden, 180 hide writes failed"])
-        check("F122 mouse: the placement hook was not armed", [pm_set(), pm_hook("NOT armed", ": the cursor cannot be hidden, the game draws it")], 3,
-              [("NEVER APPLIED", F122)], has=["the placement hook was not armed (EliteDangerous64.exe+0x4559C50)"])
-        check("F122 mouse: some writes failed", [pm_set(), pm_hook(), pm(hidden=80, failed=10), pm()], 0, [("PARTIAL", F122)],
-              has=["170 of 180 sprites hidden, 10 hide writes failed"])
-        check("F122 mouse: off, no panel reached", [pm_set(), pm_hook()], 0, [("IDLE", F122)], has=["key off", "no panel was reached while the key was off"])
-        check("F122 mouse: on draws the game's cursor", [pm_set("on"), pm_hook(), pm("on", hidden=0), pm("on", hidden=0)], 0, [("IDLE", F122)],
-              has=["key on", "on: 2 s with a panel, 180 panels seen, 0 sprites hidden", "nothing is hidden by design"])
-        check("F122 mouse: the key moved from off to on and back", [pm_set(), pm_hook(), pm(), pm_set("on"), pm("on", hidden=0), pm_set("off"), pm()], 0,
-              [("OK", F122)], has=["key off (3 change line(s))", "off: 2 s with a panel, 180 panels seen, 180 sprites hidden", "on: 1 s with a panel, 90 panels seen"])
+        check("F155 cursor: the drawn point holds on the panel; the game's own point turns twice against the head",
+              [pa(), pt(), pt(), pt(), pw()], 0, [("OK", F154)],
+              has=["drawn: 900 placements, 900 screen-space, 900 written; 3 judged second(s): written k yaw +1.00 pitch n/a",
+                   "the game's own point: k yaw -2.00 (about -2 (against the head, twice as far as the panel turns)), pitch n/a",
+                   "rho negative (mean -1.865 over 3 judged second(s), the fov ratio 1.992)", "under drawn the written point holds on the panel (k within 0.25 of 1)"],
+              lacks=["UNPARSED"])
+        check("F155 cursor: the written point not on the panel", [pa(), pt(ky=("-2.00", "-2.00")), pt(ky=("-2.01", "-1.95"))], 0, [("PARTIAL", F154)],
+              has=["under drawn the written point's k is not within 0.25 of 1 (yaw -1.95)"])
+        check("F155 cursor: the hide fallback on more than a tenth of the screen-space placements",
+              [pa(), pt(), pw(written=700, hidden=200, refused=(150, 30, 20, 0))], 0, [("PARTIAL", F154)],
+              has=["drawn: 900 placements, 900 screen-space, 700 written, 200 hidden (refused: no lever 150, tiny rho 30, not finite 20)",
+                   "the hide fallback ran on 200 of 900 screen-space placements (no lever 150, tiny rho 30, not finite 20)"])
+        check("F155 cursor: the hide fallback on a tenth or less, the written point on the panel", [pa(), pt(), pw(written=860, hidden=40, refused=(40, 0, 0, 0))], 0, [("OK", F154)],
+              has=["860 written, 40 hidden (refused: no lever 40)"], lacks=["the hide fallback ran"])
+        check("F155 cursor: the hide fallback alone, with no judged second", [pa(), pw(written=700, hidden=200, refused=(200, 0, 0, 0))], 0, [("PARTIAL", F154)],
+              has=["the hide fallback ran on 200 of 900 screen-space placements (no lever 200)", "rho negative (mean -1.865 over 1 window(s) of the writes line"])
+        check("F155 cursor: a hide that failed is counted", [pa(), pw(written=700, hidden=190, hf=10, refused=(200, 0, 0, 0))], 0, [("PARTIAL", F154)],
+              has=["190 hidden, 10 hides failed"])
+        check("F155 cursor: the lever hook was not armed",
+              [pa("NOT armed", "its vtable slot does not hold it"), pt(written=0, hidden=90, refused=(90, 0, 0, 0), ky=("-2.00", "-2.00"), rho=("n/a", "n/a", "n/a"), calls=0, lev=0,
+                                                                  cross=("n/a", "n/a", "n/a", "n/a"), qz="n/a")], 3,
+              [("NEVER APPLIED", F154)], has=["the lever hook was not armed (its vtable slot does not hold it)", "rho not read"])
+        check("F155 cursor: screen-space placements met and none got the drawn point", [pa(), pw(written=0, hidden=900, refused=(0, 900, 0, 0), lev=0, un=3000)], 3,
+              [("NEVER APPLIED", F154)], has=["drawn met 900 screen-space placements and wrote none (tiny rho 900, hidden 900)"])
+        check("F155 cursor: panels met and none was screen-space is nothing to judge", [pa(), pw(screen=0, written=0)], 0, [("IDLE", F154)],
+              has=["drawn: 900 placements, 0 screen-space, 0 written", "no mouse-still second with the head turned over 2 deg against the HUD frame on a screen-space panel to judge"])
+        check("F155 cursor: the writes line alone gives rho", [pa(), pw()], 0, [("IDLE", F154)], has=["rho negative (mean -1.865 over 1 window(s) of the writes line, the fov ratio 1.992)"])
+        check("F155 cursor: the hook armed, no panel placed", [pa()], 0, [("IDLE", F154)], has=["no placement on a panel"])
+        check("F155 cursor: a turn about neither axis to read", [pa(), pt(ky=("n/a", "n/a"), kp=("n/a", "n/a"))], 0, [("IDLE", F154)],
+              has=["the turn was too small about either axis to read k under drawn"])
+        for k_game, word in (("+2.05", "about +2 (with the head"), ("+0.10", "about 0 (locked to the camera)"), ("+0.95", "about 1 (held on the panel)"),
+                             ("-0.90", "about -1 (against the head, as far"), ("-2.10", "about -2 (against the head, twice"), ("+0.60", "(other)")):
+            check("F155 cursor: the game's own k %s reads as %s" % (k_game, word), [pa(), pt(ky=(k_game, "+1.00"), kp=(k_game, "+1.00"))], 0, [("OK", F154)],
+                  has=["k yaw %s (%s" % (k_game, word) if word != "(other)" else "k yaw +0.60 (other)"])
+        check("F155 cursor: a positive rho", [pa(), pt(rho=("+1.000", "+1.000", "+1.000"), ky=("+1.00", "+1.00"))], 0, [("OK", F154)], has=["rho positive (mean +1.000"])
+        check("F155 cursor: the flight-so-far line and the dump-sync lines are read, not counted",
+              [pa(), pt(), pt(win="so far, 10 s with a judged run"), R154("panel cursor frame (F154): ledger frame %u", 1234, 5678, 0x1234)], 0, [("OK", F154)], lacks=["UNPARSED"])
+        check("F155 cursor: a line the rule does not parse", ["panel cursor turn (F154) 1 s: a format nobody wrote"], 4, [("UNPARSED", F154)])
+
+        # The F154 builds' lines (a setting in each, the F117 point as a third stream, no hidden count), from the flights of 2026-10-28, copied from the logs.
+        OLD_ARMED = ("panel lever (F154): lever hook armed at EliteDangerous64.exe+0x47299F0 (the screen-space pick mesh owner's vtable +0x10, build 334925, prologue and slot "
+                     "verified; the lever and the fields it comes from are read, nothing is written), profile vr")
+        OLD_SET_SHIPPED = ("native on foot panel cursor (F154): shipped (TEMPORARY, live; with fix.native_on_foot_panel_mouse on, the cursor on a screen-space panel is placed: shipped = F117 "
+                           "then F120, uv = F117 alone, game = the game's own place, drawn = the game's place with the pick mesh's lever undone, mirrored = the same lever taken as the "
+                           "cursor's draw divides by |rho|; the clicks land where the mouse is in every setting)")
+        OLD_W_114227_SHIPPED = ("panel cursor writes (F154) 10 s: setting shipped; placements 627: screen-space 0, written 627, refused: no lever 0, tiny rho 0, not finite 0, write failed 0; "
+                                "owner calls 627 (screen-space 627, not 0, unread 0)")
+        OLD_W_114227_DRAWN = ["panel cursor writes (F154) 3 s: setting drawn; placements 166: screen-space 0, written 0, refused: no lever 0, tiny rho 0, not finite 0, write failed 0; "
+                              "owner calls 177 (screen-space 177, not 0, unread 0)",
+                              "panel cursor writes (F154) 5 s: setting drawn; placements 292: screen-space 0, written 0, refused: no lever 0, tiny rho 0, not finite 0, write failed 0; "
+                              "owner calls 304 (screen-space 304, not 0, unread 0)"]
+        OLD_T_115855_SHIPPED = ("panel cursor turn (F154) 1 s: setting shipped; placements 90: screen-space 90, written 90, refused: no lever 0, tiny rho 0, not finite 0, write failed 0, "
+                                "no eye view 0, no HRC matrix 0, degenerate row 0; judged 56 placements in 1 of 13 runs, the head turned 14.8 deg at most against the HUD frame, the eye "
+                                "moved 23.8 mm at most; k yaw: game -1.92 uv -2.18 written -1.18; k pitch: game -1.12 uv -1.54 written -0.88; rho mean -1.949 min -1.949 max -1.949 from "
+                                "90 owner calls (screen-space 90, not 0, unread 0); rho_fov -1.949 fov_C1 93.60 deg fov_UI -57.30 deg mode 4; q.z +0.6949 m")
+        OLD_T_115855_DRAWN = ("panel cursor turn (F154) 1 s: setting drawn; placements 79: screen-space 79, written 79, refused: no lever 0, tiny rho 0, not finite 0, write failed 0, "
+                              "no eye view 0, no HRC matrix 0, degenerate row 0; judged 18 placements in 2 of 36 runs, the head turned 6.3 deg at most against the HUD frame, the eye "
+                              "moved 11.2 mm at most; k yaw: game -2.97 uv -0.70 written +1.12; k pitch: game -2.80 uv -0.17 written +1.15; rho mean -1.949 min -1.949 max -1.949 from "
+                              "79 owner calls (screen-space 79, not 0, unread 0); rho_fov -1.949 fov_C1 93.60 deg fov_UI -57.30 deg mode 4; q.z +0.6702 m")
+        OLD_T_115855_MIRRORED = ("panel cursor turn (F154) 1 s: setting mirrored; placements 90: screen-space 90, written 90, refused: no lever 0, tiny rho 0, not finite 0, write failed 0, "
+                                 "no eye view 0, no HRC matrix 0, degenerate row 0; judged 22 placements in 1 of 30 runs, the head turned 13.5 deg at most against the HUD frame, the "
+                                 "eye moved 22.5 mm at most; k yaw: game -2.28 uv -1.84 written +2.26; k pitch: game -3.74 uv -0.98 written +2.23; rho mean -1.949 min -1.949 max "
+                                 "-1.949 from 90 owner calls (screen-space 90, not 0, unread 0); rho_fov -1.949 fov_C1 93.60 deg fov_UI -57.30 deg mode 4; q.z +0.6923 m")
+        OLD_W_115855_SHIPPED = ("panel cursor writes (F154) 10 s: setting shipped; placements 781: screen-space 781, written 781, refused: no lever 0, tiny rho 0, not finite 0, write failed 0; "
+                                "owner calls 826 (screen-space 826, not 0, unread 0); rho mean -1.949 min -1.949 max -1.949, rho_fov -1.949 fov_C1 93.60 deg fov_UI -57.30 deg mode 4, "
+                                "q.z +0.6674 m")
+        check("F154 flight edvr_gfx_20261028_114227: the screen-space test refused every panel, so the drawn setting met placements and none was screen-space",
+              [OLD_ARMED, OLD_SET_SHIPPED, OLD_W_114227_SHIPPED] + OLD_W_114227_DRAWN, 3, [("NEVER APPLIED", F154)],
+              has=["drawn: 458 placements, 0 screen-space, 0 written", "drawn met 458 placements and none was screen-space"], lacks=["UNPARSED"])
+        check("F154 flight edvr_gfx_20261028_115855: the drawn setting held the written point on the panel", [OLD_ARMED, OLD_SET_SHIPPED, OLD_T_115855_SHIPPED, OLD_T_115855_DRAWN,
+                                                                                                         OLD_W_115855_SHIPPED], 0, [("OK", F154)],
+              has=["shipped: 781 placements, 781 screen-space, 781 written; 1 judged second(s): written k yaw -1.18 pitch -0.88", "drawn: 79 placements, 79 screen-space, 79 written; "
+                   "1 judged second(s): written k yaw +1.12 pitch +1.15", "the game's own point: k yaw -1.92 (about -2", "rho negative (mean -1.949 over 2 judged second(s), the fov ratio -1.949)",
+                   "under drawn the written point holds on the panel"], lacks=["UNPARSED"])
+        check("F154 flight edvr_gfx_20261028_115855: mirrored left the written point at twice the panel's turn", [OLD_ARMED, OLD_T_115855_DRAWN, OLD_T_115855_MIRRORED], 0,
+              [("PARTIAL", F154)], has=["under mirrored the written point's k is not within 0.25 of 1 (yaw +2.26, pitch +2.23)"], lacks=["UNPARSED"])
+        check("F154 flight edvr_gfx_20261028_115855: shipped turned against the head", [OLD_ARMED, OLD_T_115855_SHIPPED], 0, [("PARTIAL", F154)],
+              has=["under shipped the written point's k is not within 0.25 of 1 (yaw -1.18, pitch -0.88)"], lacks=["UNPARSED"])
 
         # ---- review fixes (F126): the pin's eye pairs refused for rows of two frames, the arm IK calls refused for an FP snapshot of an earlier rig ----
         F126 = "review fixes (F126)"
@@ -18527,25 +18494,6 @@ def self_test_health():
             print("health: F125 containment did not weight its F87h on-foot evidence", weighted)
             ok = False
 
-        legacy_mouse = "panel mouse (F122) 1 s: setting off; panels seen 90, sprites hidden 90, hide write failed 0"
-        check("F125 panel: old one-second mouse line", [legacy_mouse], 0, [("OK", F122)], has=["off: 1 s with a panel"], lacks=["UNPARSED"])
-        check("F125 panel: active seconds in ten-second windows", [pm(wl=10, seen=900, hidden=900, active=3), pm(wl=3, seen=90, hidden=90, active=1)], 0,
-              [("OK", F122)], has=["off: 4 s with a panel, 990 panels seen"], lacks=["UNPARSED"])
-        check("F125 panel: key off throughout makes its closed instruments idle", [R("native on foot log (F125): detail %s", "on", 1), pm_set(), ptr_armed(), p114_armed()], 0,
-              [("IDLE", F111), ("IDLE", F114B)], has=["the panel mouse key is off: the instruments are idle by design"], lacks=["UNPARSED"])
-        check("F125 panel: key off never hides a real installation failure", [R("native on foot log (F125): detail %s", "on", 1), pm_set(), ptr_armed(0), p114_armed("NOT armed", why="x")], 3,
-              [("NEVER APPLIED", F111), ("NEVER APPLIED", F114B)], lacks=["UNPARSED"])
-        check("F125 panel: an on interval cannot be erased by a later off line", [R("native on foot log (F125): detail %s", "on", 1), pm_set("on"), pm_set("off"), ptr_armed(), p114_armed()], 3,
-              [("NEVER APPLIED", F111), ("NEVER APPLIED", F114B)], lacks=["idle by design", "UNPARSED"])
-        check("F125 panel: off-on-off still contains an active interval", [R("native on foot log (F125): detail %s", "on", 1), pm_set("off"), pm_set("on"), pm_set("off"), ptr_armed(), p114_armed()], 3,
-              [("NEVER APPLIED", F111), ("NEVER APPLIED", F114B)], lacks=["idle by design", "UNPARSED"])
-        check("F125 panel: a later off observation cannot prove earlier unknown state", [R("native on foot log (F125): detail %s", "on", 1), ptr_armed(), p114_armed(), pm_set()], 3,
-              [("NEVER APPLIED", F111), ("NEVER APPLIED", F114B)], lacks=["idle by design", "UNPARSED"])
-        check("F125 panel: setting carried into a since window", [(0, R("native on foot log (F125): detail %s", "on", 1)), (1, pm_set()), (90, ptr_armed()), (91, p114_armed())], 0,
-              [("IDLE", F111), ("IDLE", F114B)], has=["idle by design"], lacks=["UNPARSED"], extra=["--since", "10:01:00"])
-        check("F125 panel: unknown-to-off mid-selected-window is not known off throughout", [(0, R("native on foot log (F125): detail %s", "on", 1)), (90, f90_part()), (100, pm_set()),
-              (101, ptr_armed()), (102, p114_armed())], 3, [("NEVER APPLIED", F111), ("NEVER APPLIED", F114B)],
-              lacks=["idle by design", "UNPARSED"], extra=["--since", "10:01:00"])
         check("F125 visor: default census absence needs detail", [R("native on foot log (F125): detail %s", "off", 10), f90_part()], 0, [("OK", F90S)],
               has=["not judged (detail log off)", F121B], lacks=[row("NEVER APPLIED", F121B)])
         check("F125 visor: active axis with detail off still judges missing census", [R("native on foot log (F125): detail %s", "off", 10), cen_key("on"), vax_win()], 3,
@@ -18577,8 +18525,8 @@ def self_test_health():
                          lambda rows, ctx: ("NEVER APPLIED", "a trigger the log proves, read from another rule's rows"), True)
         d_rules = tuple(HEALTH_RULES) + (syn,)
         checks += 1
-        if F91F not in ND or len(ND) < 5:
-            print("health: F125: ADS press fit (F91) and the four panel rules (F111, F114b, F117, F120) must need the detail log; needs_detail: %r" % ND)
+        if F91F not in ND or len(ND) < 3:
+            print("health: F125: ADS press fit (F91) and the two panel rules (F111, F114b) must need the detail log; needs_detail: %r" % ND)
             ok = False
 
         def detail_report(name, msgs, rc, has=(), lacks=(), since=None):

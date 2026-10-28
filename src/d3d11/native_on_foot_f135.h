@@ -1,7 +1,7 @@
 // F135 (native on-foot VR): the on-foot menu probe, MEASURE ONLY. Header only, no game or D3D11 state, so native_frame_test runs the very functions the hooks and the frame thread
 // use. Journal: the arc doc, 2026-10-27, F135.
 //
-// Look to aim moves the on-foot Esc (pause) menu with the head. F131 holds look to aim on one signal, the F122 placement count (g_f131PanelSeq), and in the flight
+// Look to aim moves the on-foot Esc (pause) menu with the head. F131 holds look to aim on one signal, the placement count (g_f131PanelSeq), and in the flight
 // edvr_gfx_20261027_091608 it fired only at 09:24:06.4, apparently once the mouse was over the menu, about 11 s after the menu was up; the game's HUD hide counters (F116) did
 // not move. This probe counts the calls of every hook EDVR already has that can see a panel or a menu, per frame, and watches the Escape key (and the pad's Start and Back) as ground
 // truth for the flight only (never a signal), to find the hook, or the field, that is active exactly while a menu or an on-foot panel is up, mouse still or not.

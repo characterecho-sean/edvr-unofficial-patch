@@ -58,18 +58,6 @@ template <class Check> inline void run(Check&& check) {
     h::formatHeadWindow(line, sizeof(line), w, 0, 8, 1, 0.1, 2, 2, false);
     check(w.seconds == 1 && w.cls[0].n == 1 && std::strstr(line, "class s 1; window 2"),
           "F125 containment: a short flushed new-generation window starts fresh and uses the caller's next monotonically increasing id");
-    edvr::nofoot::logwin::PanelWindow panel;
-    panel.state(false, true, false);
-    panel.take(3, 3, 0, false);
-    check(panel.changed(true, true, false) && !panel.key && panel.seconds == 1 && panel.seen == 3 && panel.hidden == 3,
-          "F125 panel: a change before the first fold drains partial counters under the old off setting");
-    panel.clear(); panel.state(true, true, false);
-    for (int i = 0; i < 10; ++i) panel.take(i < 3 ? 90 : 0, 0, 0, true);
-    check(panel.key && panel.seconds == 10 && panel.active == 3 && panel.seen == 270,
-          "F125 panel: ten functional folds retain active seconds instead of treating every summary row as one active second");
-    panel.clear();
-    check(panel.known && panel.key && panel.changed(false, true, false),
-          "F125 panel: resetting reporting sums keeps the primed key so an edge before the next fold cannot relabel old counts");
     h::RestContext rest;
     rest.observe(7, 1);
     rest.pending(2);

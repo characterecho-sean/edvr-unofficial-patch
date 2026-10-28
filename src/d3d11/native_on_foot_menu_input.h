@@ -1,6 +1,6 @@
 #pragma once
 #include "native_on_foot_f114b.h"
-#include "native_on_foot_f117.h"
+#include "native_on_foot_pick_mesh.h"
 #include <atomic>
 #include <mutex>
 #include <vector>
@@ -25,7 +25,7 @@ struct Row {
     uint8_t modeCode[8]{},buttons[6]{};
     float mouse[2]{},other[2]{},dir[3]{},uv[2]{},rayOrigin[3]{},rayDir[3]{},rayT=0,sprite[3]{},ownerWorld[16]{},ownerOut[16]{};
 };
-struct Mesh {uint64_t panel=0,list=0,owner=0,triangleAddress=0,qpc=0;uint32_t ledgerFrame=0,renderFrame=0;std::vector<f117::Tri> triangles;};
+struct Mesh {uint64_t panel=0,list=0,owner=0,triangleAddress=0,qpc=0;uint32_t ledgerFrame=0,renderFrame=0;std::vector<pickmesh::Tri> triangles;};
 template<class Read> void observeRay(Row& r,uintptr_t origin,uintptr_t dir,uintptr_t u,uintptr_t v,uintptr_t t,uint64_t result,Read read) {
     ++r.rayCalls;r.reads&=~(128u|256u|512u);float rayOrigin[3]{},rayDir[3]{},uv[2]{},distance=0;
     if(read(origin,rayOrigin,sizeof(rayOrigin))&&read(dir,rayDir,sizeof(rayDir))) {
@@ -89,8 +89,8 @@ public:
         r.afterQpc=qpc;uint8_t hit=0;if(read(r.ctl+f111::kOffHit,&hit,1)){r.hit=hit;r.reads|=32;}
         if(read(r.ctl+f111::kOffPos,r.sprite,sizeof(r.sprite)))r.reads|=64;
         uint64_t tris=0,vt=0,count=0;
-        if(read(r.panel+f117::kOffList,&r.list,8)&&r.list&&read(r.list+f117::kListCount,&count,8)&&count<=UINT32_MAX&&
-           read(r.list+f117::kListTris,&tris,8))r.triCount=static_cast<uint32_t>(count);
+        if(read(r.panel+pickmesh::kOffList,&r.list,8)&&r.list&&read(r.list+pickmesh::kListCount,&count,8)&&count<=UINT32_MAX&&
+           read(r.list+pickmesh::kListTris,&tris,8))r.triCount=static_cast<uint32_t>(count);
         else r.meshStatus=3;
         if(r.list&&read(r.list,&r.owner,8)&&r.owner&&read(r.owner,&vt,8)&&vt)read(vt+0x10,&r.ownerFn,8);
         r.ownerVtable=vt;r.triangleAddress=tris;
@@ -104,12 +104,12 @@ public:
         if(!r.meshStatus) {
             // The game rebuilds the list during placement. Equal owner/count alone
             // cannot identify its current triangles, even within one ledger frame.
-            std::vector<f117::Tri> current(r.triCount),verify(r.triCount);
+            std::vector<pickmesh::Tri> current(r.triCount),verify(r.triCount);
             uint64_t verifyTris=0,verifyCount=0;
-            const size_t bytes=current.size()*sizeof(f117::Tri);
+            const size_t bytes=current.size()*sizeof(pickmesh::Tri);
             if(!read(tris,current.data(),bytes)||!read(tris,verify.data(),bytes)||
                std::memcmp(current.data(),verify.data(),bytes)!=0||
-               !read(r.list+f117::kListTris,&verifyTris,8)||!read(r.list+f117::kListCount,&verifyCount,8)||
+               !read(r.list+pickmesh::kListTris,&verifyTris,8)||!read(r.list+pickmesh::kListCount,&verifyCount,8)||
                verifyTris!=tris||verifyCount!=count){r.meshStatus=3;++readFaults;}
             if(!r.meshStatus)for(uint32_t i=0;i<meshes.size();++i) {
                 const auto& old=meshes[i];

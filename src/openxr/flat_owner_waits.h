@@ -202,12 +202,23 @@ class FlatOwnerWaits final {
   void finished(Ticket& t) { t.finishedUs = hooks_.nowUs(); }
 
   // Folds a finished job into the window; the caller thread for an invoke, the owner for a submit job. Prints the caller line when the
-  // job waited behind a clear frame long enough.
+  // job waited behind a clear frame long enough. The line goes out first: take() on another thread then never counts a job whose line has
+  // not been written yet (the window line prints from the owner's tick, and the rig drains from its own thread).
   void note(const Ticket& t) {
     if (!t.tracked || !t.ran) return;
     const int64_t queueUs = int64_t(t.startedUs) - int64_t(t.enqueuedUs);
     const int64_t runUs = int64_t(t.finishedUs) - int64_t(t.startedUs);
     const double queueMs = double(queueUs) / 1000.0, runMs = double(runUs) / 1000.0;
+    if (t.behindClear && queueUs >= kCallerWaitUs && hooks_.print) {
+      const unsigned sample = admitCallerLine(hooks_.nowUs() / 1000);
+      if (sample) {
+        callerReports_.fetch_add(1, std::memory_order_relaxed);
+        char line[1024]{};
+        const FlatOwnerCallerStack* st = t.stack.get();
+        const int n = formatFlatOwnerCallerLine(t, queueMs, sample, st, line, sizeof line);
+        if (n > 0) hooks_.print(line);
+      }
+    }
     {
       std::lock_guard<std::mutex> lock(mutex_);
       ++w_.jobs;
@@ -220,16 +231,6 @@ class FlatOwnerWaits final {
       if (t.behindClear) ++r.behindClear;
       r.maxMs = (std::max)(r.maxMs, queueMs); r.sumMs += queueMs; r.runMaxMs = (std::max)(r.runMaxMs, runMs);
       if (t.viaInvoke) (t.renderThread ? w_.renderWaitSumMs : w_.otherWaitSumMs) += queueMs + runMs;
-    }
-    if (t.behindClear && queueUs >= kCallerWaitUs && hooks_.print) {
-      const unsigned sample = budget_.take(hooks_.nowUs() / 1000);
-      if (sample) {
-        callerReports_.fetch_add(1, std::memory_order_relaxed);
-        char line[1024]{};
-        const FlatOwnerCallerStack* st = t.stack.get();
-        const int n = formatFlatOwnerCallerLine(t, queueMs, sample, st, line, sizeof line);
-        if (n > 0) hooks_.print(line);
-      }
     }
   }
 
@@ -321,6 +322,13 @@ class FlatOwnerWaits final {
   static constexpr unsigned kAgeSamples = 1024;   // flat_cache ages per window: ~175 answers per 5 s at one locate per game frame
   struct Ages { unsigned stored = 0; int64_t us[kAgeSamples]; };
   static unsigned long long ull(uint64_t v) { return static_cast<unsigned long long>(v); }
+  // GameCallProbeBudget::take never waits: a thread that arrives while another is inside it is answered 0, and its wait goes unnamed
+  // though the budget has room. An invoke is noted on its caller and a submit job on the owner, so two can arrive together; admission
+  // takes mutex_ so each waits its turn. The lock is held for the budget's few instructions, never across the print.
+  unsigned admitCallerLine(uint64_t nowMs) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return budget_.take(nowMs);
+  }
   // Nearest rank, as OwnerInvokeStats: v[(n*pct+99)/100 - 1]. Sorts the first n.
   static int64_t pick(int64_t* v, unsigned n, unsigned pct) {
     std::sort(v, v + n);
@@ -331,7 +339,7 @@ class FlatOwnerWaits final {
   std::atomic<uint32_t> state_{0}, renderThread_{0};
   std::atomic<uint64_t> clearSeq_{0}, pumpSeq_{0}, localPose_{0}, localPoll_{0};
   std::atomic<unsigned> callerReports_{0};
-  edvr::GameCallProbeBudget budget_;
+  edvr::GameCallProbeBudget budget_;        // under mutex_, by admitCallerLine
   uint64_t pumpBeganUs_ = 0;                // owner thread only
   uint64_t windowBeganUs_ = 0, windowNumber_ = 0;   // owner thread only
   std::mutex mutex_;
