@@ -24,7 +24,6 @@
 #include "native_on_foot_f142.h"   // F142: the full outfit's promotion through the same call, and the outfit census
 #include "native_on_foot_f143.h"   // F143: the clip measure's schedule, the clip snapshot
 #include "native_on_foot_f144.h"   // F144: Gear_Back only for an outer garment, the first-person census
-#include "native_on_foot_f152.h"   // F152: the coat's Gear_Back kept to the shadows with the head turned (the decision, the sample word)
 #include "native_on_foot_logwin.h"   // F125: the detail key's cached value (the 5 s probe lines here are the detail log's)
 
 #include <windows.h>
@@ -132,12 +131,6 @@ std::atomic<uint64_t> g_f143ClipWrites{0}, g_f143ClipFaults{0};
 avh::Ring<nofoot::f143::ClipSnap, 4> g_f143Ring;
 // F144: Gear_Back's decision (the last one made, for the frame thread's line) and the first-person census.
 std::atomic<int> g_f144Gear{0};
-// F152: the head's yaw against the body, as the body pin publishes it (nofoot::f152::packSample: the yaw and the tick in one word; 0 = none yet), the last promotion decision, and
-// the counts the frame thread logs: outer-garment visibility calls the turn kept from the promotion, the changes to "not promoting", the largest |yaw| published (tenths of a degree).
-std::atomic<uint64_t> g_f152Sample{0};
-std::atomic<bool> g_f152Promote{true};
-std::atomic<uint64_t> g_f152Gated{0};
-std::atomic<uint32_t> g_f152Stops{0}, g_f152YawMaxX10{0};
 std::atomic<bool> g_f144FpBusy{false};
 std::atomic<uint64_t> g_f144FpMs{0};
 std::atomic<uint32_t> g_f144FpFaults{0};
@@ -1027,8 +1020,8 @@ __declspec(noinline) bool sehReadClipPart(const uint8_t* amc, uint32_t idx, Clip
 }
 // The unclip write: enable 0, dirty 1, every call, also when the game already has enable 0. 1 = written, 0 = no modifier (nothing written), -1 = a fault. F144 to F146 wrote it
 // every call and F148 restored that after F147 skipped a modifier whose enable was already 0. The write is every call, as flown. It is not what keeps the backpack out of the
-// view: a flight that wrote it every call still showed the pack with the head turned from the body (F151's flight, edvr_gfx_20261028_072553), and the turn explains every
-// sighting (F152's gate on the part's promotion below).
+// view: a flight that wrote it every call still showed the pack with the head turned from the body (F151's flight, edvr_gfx_20261028_072553). The pack's own draw is left out of both
+// eyes instead (F157, native_on_foot.cpp).
 __declspec(noinline) int sehWriteClipPart(uint8_t* amc, uint32_t idx) noexcept {
     __try {
         uint64_t mod = 0;
@@ -3316,30 +3309,6 @@ NativeOnFootHeadShadowStats nativeOnFootHeadShadowStats() {
     return s;
 }
 
-// F152: the clock the turn decision reads (the clip probe's test clock in the hooks rig, else the tick count).
-static uint64_t f152Now() noexcept {
-#ifdef EDVR_NATIVE_ON_FOOT_HOOKS_TEST
-    if (g_clipTestNow) return g_clipTestNow;
-#endif
-    return GetTickCount64();
-}
-// F152: whether the coat's Gear_Back may be promoted with the head where it is. One decision per visibility call, from the pin's newest sample when it is fresh (nofoot::f152).
-static bool f152Allows() noexcept {
-    const bool before = g_f152Promote.load(std::memory_order_relaxed);
-    const nofoot::f152::TurnDecision d = nofoot::f152::turnDecide(before, g_f152Sample.load(std::memory_order_acquire), static_cast<uint32_t>(f152Now()));
-    if (d.promote != before) {
-        g_f152Promote.store(d.promote, std::memory_order_relaxed);
-        if (!d.promote) g_f152Stops.fetch_add(1, std::memory_order_relaxed);
-    }
-    return d.promote;
-}
-void nativeOnFootBodyYawPublish(double phiDeg) noexcept {
-    if (!std::isfinite(phiDeg)) return;
-    g_f152Sample.store(nofoot::f152::packSample(static_cast<float>(phiDeg), static_cast<uint32_t>(f152Now())), std::memory_order_release);
-    const uint32_t x10 = static_cast<uint32_t>(std::fmin(std::fabs(phiDeg), 359.9) * 10.0 + 0.5);
-    uint32_t seen = g_f152YawMaxX10.load(std::memory_order_relaxed);
-    while (x10 > seen && !g_f152YawMaxX10.compare_exchange_weak(seen, x10, std::memory_order_relaxed)) {}
-}
 // F142 (always on since F146): native_on_foot_hooks.h says what these do. The hook thread: the same gate as F95c's swap (the head hide capable, not stood down, the local
 // third-person AMC, the head hide writing now); one compare-exchange per part the game has in the shadow-views-only class. A call nothing was promoted in leaves nothing to
 // restore (Begin returns false and End is not called).
@@ -3359,12 +3328,6 @@ bool nativeOnFootOutfitBegin(void* amcPtr, nofoot::f142::OutfitSwap* s, bool all
     // F147: EVASuit_Gear_Back alone, and only for an outer garment (F144's decision); every other part, and the other suit's backpack, keeps the game's class
     const uint64_t promote = nofoot::f144::promoteMask(promoteAllowedMask(), gearBackNow(amc));
     if (!promote) return false;
-    // F152: with the head turned well away from the body the coat's back and pack sit in the left eye's periphery; the part keeps the game's class while the turn lasts (the
-    // unclip is unchanged). The decision has a hysteresis and is kept while the pin's sample is stale.
-    if (!f152Allows()) {
-        g_f152Gated.fetch_add(1, std::memory_order_relaxed);
-        return false;
-    }
     if (!sehPromoteOutfit(amc, s, static_cast<uint32_t>(skeleton), ~promote)) {
         uint32_t lost = 0;
         sehRestoreOutfit(amc, s, &lost);   // the parts promoted before the fault go back
@@ -3402,9 +3365,6 @@ NativeOnFootOutfitStats nativeOnFootOutfitStats() {
     for (uint32_t i = 0; i < avh::kPartCount; ++i) s.clip[i] = g_f143ClipPart[i].load(std::memory_order_relaxed);   // F143
     s.clipWrites = g_f143ClipWrites.load(std::memory_order_relaxed);
     s.clipFaults = g_f143ClipFaults.load(std::memory_order_relaxed);
-    s.turnGated = g_f152Gated.load(std::memory_order_relaxed);   // F152
-    s.turnStops = g_f152Stops.load(std::memory_order_relaxed);
-    s.yawAbsMaxDeg = 0.1f * static_cast<float>(g_f152YawMaxX10.load(std::memory_order_relaxed));
     return s;
 }
 void nativeOnFootArmedStateSet(uint8_t state) noexcept {
@@ -3421,9 +3381,6 @@ bool nativeOnFootFpCensusTake(nofoot::f144::FpCensus* out) noexcept {
 }
 bool nativeOnFootOutfitCensusTake(nofoot::f142::Census* out) noexcept {
     return out && g_f142CensusRing.take(out);
-}
-uint32_t nativeOnFootOutfitGeneration() noexcept {
-    return g_f142OutfitGen.load(std::memory_order_relaxed);
 }
 
 #ifdef EDVR_NATIVE_ON_FOOT_HOOKS_TEST
@@ -3530,11 +3487,6 @@ void reset() {
         static nofoot::f142::Census dropped;   // (3 KB: not on this stack)
         while (g_f142CensusRing.take(&dropped)) {}
         g_f144Gear.store(0);         // F144
-        g_f152Sample.store(0);       // F152
-        g_f152Promote.store(true);
-        g_f152Gated.store(0);
-        g_f152Stops.store(0);
-        g_f152YawMaxX10.store(0);
         g_f144FpBusy.store(false);
         g_f144FpMs.store(0);
         g_f144FpHaveSig = false;

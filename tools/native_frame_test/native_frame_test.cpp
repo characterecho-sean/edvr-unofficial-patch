@@ -49,8 +49,8 @@
 #include "f144_checks.h"    // F144: the settled sight line per (item, scope), the coat's Gear_Back decision and first-person census, the readout placed per role and what reaches the draw
 #include "f145_checks.h"    // F145: the weapon UI's tag slots given back (the pick, the F144 flight replayed, the event ring) and the proof against the seed (the seed-only map on the two-eye rig)
 #include "f149_checks.h"    // F149/F150: the ADS eye depth, one per weapon (the game's unscoped camera plus a back-off), never further forward than the key (the tables, the rule, the cap, the shift at the same depth, the cache by copy)
-#include "f152_checks.h"    // F152: the coat's Gear_Back kept to the shadows with the head turned (phi, the hysteresis, the sample word and its stale rule), the readout origin's two shadows
-#include "f154_checks.h"    // F154/F156 (TEMPORARY): the local body's eye draws listed by first appearance (the numbers, the cap of 128, no renumbering within a pass, a new pass from -1) and one hidden: the number, stencil ref 21 and the eye target all required
+#include "f152_checks.h"    // F152: the readout origin's two shadows (the engine's first, the own one when engine motion is down, their difference, a ranged write into the rows)
+#include "f157_checks.h"    // F157: the coat outfit's pack draw left out of both eyes (the identity, each requirement refusing on its own, the outfit gate, the counts by eye and frame)
 #include "f151_checks.h"    // F151: the weapon readout's draw bound by its place (the ordinals, each guard, one bind per key, the lost-frame count) and the held copy's scope from the selected slot
 #include "f110_checks.h"    // F110: the ADS sight lock's model right eye (the left-eye job camera plus the IPD)
 #include "f111_checks.h"    // F111: the panel pointer instrument's statistics and verdict
@@ -7541,19 +7541,17 @@ int wmain(int argc, wchar_t** argv) {
     // item with no row its settled line when the copy is known unscoped, else the fallback base (21); the line's shift taken at the same depth; the lock's follower carrying a change
     // of k between weapons or of the trim; and the F144 cache told by copy while the scope is unknown.
     f149test::run149(check);
-    // F152: the coat's Gear_Back with the head turned (phi from the body pin's eye-minus-neck vector, the 45/38 deg hysteresis, the sample word and its 100 ms stale rule), and the
-    // readout origin's two shadows (the engine's first, the own one when engine motion is down, their difference where both exist, a ranged write into the rows).
+    // F152: the readout origin's two shadows (the engine's first, the own one when engine motion is down, their difference where both exist, a ranged write into the rows).
     f152test::run152(check);
     // F151: a weapon readout draw no stream window held is bound to the part's record by its place (the eye, the mesh field by field, the ordinal among the eye's draws of the mesh, the
     // instance count, the previous frame, the part drawn once, the key not named or taken in the eye-frame, exactly one tagged record in this frame's Unmap), never from a bind; the
     // frames one eye drew the part and the other did not are counted; the held copy's scope is read from the game's selected slot when the name finds two copies (an ambiguous loadout
     // resolved by slot, a slot holding another item and no selection unknown, an unambiguous name left alone).
     f151test::run151(check);
-    // F154/F156 (TEMPORARY): the local body's eye draws listed by identity in the order they first appear (the shaders, the index count and the instance count each tell two draws apart; the
-    // index buffer, start index and base vertex are merged and counted as variants, up to 64 an entry), colliding slots, 128 draws, the 129th turned away and its identity counted, no
-    // renumbering within a pass, the hide needing the dial's number, stencil ref 21 and an eye render target together (any shader), the left-out counts and the frames drawn by eye, a
-    // pass beginning when the dial leaves -1 (the list emptied and numbered from 0), and the writer's publish order.
-    f154test::run154(check);
+    // F157: the coat outfit's pack draw left out of both eyes: the identity (the shaders, the index count and the instance count, each told apart), the stencil ref 21 and the eye target
+    // each required on their own, the outfit gate (native on foot active and Gear_Back decided as the outer garment, each other decision refused), the draws left out counted by eye and
+    // by frame, and a writer counting while the frame thread takes.
+    f157test::run157(check);
     // F110: the ADS sight lock's model right eye from the left-eye job camera and from a solved left eye, the fallback, the IPD's sign.
     f110test::run110(check);
     // F111: the panel pointer instrument names the stage that turns a move the other way (K1 to K5, one at a time), the camera getters' decoding.

@@ -1911,23 +1911,15 @@ void testLegacyOnFootRowsStayOutOfMenu() {
             }
         check(found == 5 && shaped, "the four Weapon UI trims and the ADS eye trim are [experimental] number rows: -30..30 cm, step 0.5, signed, live, shipped 0.0, labelled without (test)");
     }
-    // F154/F155 (TEMPORARY): "Body draw to hide (test)", a sixth [experimental] number row on the developer tier, under its own heading and not on the Native on foot page (the page's 16 rows
-    // are unchanged): a whole number from -1 (off, the shipped value) to 127 in steps of 1, live, no unit and no sign. It is removed when the draw it finds is found.
+    // F157: the developer tier's "Body draw to hide (test)" dial (F154 to F156) is retired: the key stays in edvr.ini on a hidden retired line (`# ui: hidden -- retired (F157)`), so it
+    // has a row in neither menu, the developer tier's included, and the dial's heading is gone with it.
     {
-        int found = 0, at = -1;
-        for (int i = 0; i < kCount; ++i)
-            if (strcmp(kMenuRows[i].section, "experimental") == 0 && strcmp(kMenuRows[i].key, "native_on_foot_body_draw_hide") == 0) {
-                ++found;
-                at = i;
-            }
-        bool shaped = found == 1;
-        if (shaped) {
-            const MenuRowDef& d = kMenuRows[at];
-            shaped = d.kind == MenuKind::Number && d.tier == MenuTier::Experimental && strcmp(d.label, "Body draw to hide (test)") == 0 && strcmp(d.lo, "-1") == 0 && strcmp(d.hi, "127") == 0 &&
-                     strcmp(d.step, "1") == 0 && d.unit[0] == '\0' && !d.showSign && d.applies == 1 && strcmp(d.shipped, "-1") == 0 && d.precision == 0 &&
-                     strcmp(d.page, "experimental") == 0 && strcmp(d.group, "Native on foot: body draws (test)") == 0 && menuStepOf(d) == 1.0;
+        int found = 0, headed = 0;
+        for (int i = 0; i < kCount; ++i) {
+            if (strcmp(kMenuRows[i].key, "native_on_foot_body_draw_hide") == 0) ++found;
+            if (strcmp(kMenuRows[i].group, "Native on foot: body draws (test)") == 0) ++headed;
         }
-        check(shaped, "Body draw to hide (test) is one [experimental] number row: -1..127, step 1, live, shipped -1, under the heading Native on foot: body draws (test), off the Native on foot page");
+        check(found == 0 && headed == 0, "the retired Body draw to hide (test) dial has no row in the menu and no heading of its own (F157)");
     }
 }
 
