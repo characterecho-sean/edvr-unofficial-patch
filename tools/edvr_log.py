@@ -11185,7 +11185,16 @@ def _hj_f154_turn(rows, ctx):
         if name in ("drawn", "mirrored") and screen and not written:
             never.append("%s met %d screen-space placements and wrote none (%s)" % (
                 name, screen, ", ".join("%s %d" % (n, c) for n, c in zip(("no lever", "tiny rho", "not finite", "write failed"), refused) if c) or "no refusal counted"))
+        elif name in ("drawn", "mirrored") and pl and not screen:
+            # The 2026-10-28 flight: F120's pin read F154's own jump, so the screen-space test refused every panel and drawn and mirrored never acted.
+            never.append("%s met %d placements and none was screen-space (the screen-space test refused every panel: see the F120 pin line)" % (name, pl))
     text = "; ".join(parts) if parts else "no placement on a panel"
+    w_rho = [(v, _hfloat(r["rfov"])) for r, v in ((r, _hfloat(r.get("rm"))) for r in writes) if v is not None]
+    if w_rho and not sec:
+        mean = sum(v for v, _ in w_rho) / len(w_rho)
+        fov = [f for _, f in w_rho if f is not None]
+        text += "; rho %s (mean %+.3f over %d window(s) of the writes line%s)" % ("negative" if mean < 0 else "positive", mean, len(w_rho),
+                                                                               "" if not fov else ", the fov ratio %.3f" % fov[-1])
     if sec:
         kg = [_hmedian([_hfloat(r[key]) for r in sec]) for key in ("kyg", "kpg")]
         rho = [v for v in (_hfloat(r["rm"]) for r in sec) if v is not None]
@@ -13229,7 +13238,8 @@ HEALTH_RULES = (
                 r"not (?P<ns>\d+), unread (?P<un>\d+)\); rho_fov (?P<rfov>\S+) fov_C1 (?P<fc1>\S+) deg fov_UI (?P<fui>\S+) deg mode (?P<mode>\S+); q\.z (?P<qz>\S+) m$"),
         ("writes", r"panel cursor writes \(F154\) (?P<wl>\d+) s: setting (?P<setting>\w+); placements (?P<pl>\d+): screen-space (?P<screen>\d+), written (?P<written>\d+), "
                    r"refused: no lever (?P<r0>\d+), tiny rho (?P<r1>\d+), not finite (?P<r2>\d+), write failed (?P<wf>\d+); owner calls (?P<calls>\d+) "
-                   r"\(screen-space (?P<lev>\d+), not (?P<ns>\d+), unread (?P<un>\d+)\)$"),
+                   r"\(screen-space (?P<lev>\d+), not (?P<ns>\d+), unread (?P<un>\d+)\)(?:; rho mean (?P<rm>\S+) min (?P<rmin>\S+) max (?P<rmax>\S+), rho_fov "
+                   r"(?P<rfov>\S+) fov_C1 (?P<fc1>\S+) deg fov_UI (?P<fui>\S+) deg mode (?P<mode>\S+), q\.z (?P<qz>\S+) m)?$"),
         ("setting", r"native on foot panel cursor \(F154\): (?P<to>shipped|uv|game|drawn|mirrored) \(TEMPORARY"),
         ("_", r"panel cursor turn \(F154\) so far, \d+ s with a judged run: setting "),
         ("_", r"panel cursor frame \(F154\): ledger frame \d+ render frame \d+ panel "),
@@ -15493,8 +15503,9 @@ def self_test_health():
                kp=("n/a", "n/a", "n/a"), rho=("-1.865", "-1.870", "-1.860"), calls=300, lev=300, ns=0, un=0, cross=("1.992", "93.60", "56.25", "4"), qz="+0.7450", win="1 s"):
             return R154("panel cursor turn (F154) %s", win, setting, pl, screen, written, *refused, *tref, judged, jruns, runs, turn, eye, *ky, *kp, *rho, calls, lev, ns, un, *cross, qz)
 
-        def pw(setting="shipped", wl=10, pl=900, screen=900, written=900, refused=(0, 0, 0, 0), calls=3000, lev=3000, ns=0, un=0):
-            return R154("panel cursor writes (F154) %u s", wl, setting, pl, screen, written, *refused, calls, lev, ns, un)
+        def pw(setting="shipped", wl=10, pl=900, screen=900, written=900, refused=(0, 0, 0, 0), calls=3000, lev=3000, ns=0, un=0, rho=("-1.865", "-1.870", "-1.860"),
+               cross=("1.992", "93.60", "56.25", "4"), qz="+0.7450"):
+            return R154("panel cursor writes (F154) %u s", wl, setting, pl, screen, written, *refused, calls, lev, ns, un, *rho, *cross, qz)
 
         def pa(state="armed", why=""):
             return R("panel lever (F154): lever hook %s at EliteDangerous64.exe", state, 0x47299F0, ": " if why else "", why)
@@ -15529,7 +15540,15 @@ def self_test_health():
         check("F154 cursor: mirrored refused for a rho under 0.05", [pa(), ps("mirrored"), pw("mirrored", written=0, refused=(0, 900, 0, 0))], 3, [("NEVER APPLIED", F154)],
               has=["mirrored met 900 screen-space placements and wrote none (tiny rho 900)"])
         check("F154 cursor: shipped writing nothing is not drawn's failure", [pa(), ps(), pw("shipped", written=0)], 0, [("IDLE", F154)],
-              has=["no mouse-still second with the head turned over 2 deg against the HUD frame on a screen-space panel to judge"])
+              has=["no mouse-still second with the head turned over 2 deg against the HUD frame on a screen-space panel to judge",
+                   "rho negative (mean -1.865 over 1 window(s) of the writes line, the fov ratio 1.992)"])
+        check("F154 cursor: drawn met placements and none was screen-space (the 2026-10-28 flight: F120's pin read F154's jump)",
+              [pa(), ps("drawn"), pw("drawn", screen=0, written=0)], 3, [("NEVER APPLIED", F154)],
+              has=["drawn met 900 placements and none was screen-space (the screen-space test refused every panel: see the F120 pin line)"])
+        check("F154 cursor: a writes line from before the lever was on it still parses",
+              [pa(), ps("game"), "panel cursor writes (F154) 10 s: setting game; placements 194: screen-space 0, written 0, refused: no lever 0, tiny rho 0, not finite 0, "
+               "write failed 0; owner calls 198 (screen-space 198, not 0, unread 0)"], 0, [("IDLE", F154)], has=["game: 194 placements, 0 screen-space, 0 written"],
+              lacks=["UNPARSED", "rho negative", "rho positive"])
         check("F154 cursor: the key on, the hook armed, no panel placed", [pa(), ps()], 0, [("IDLE", F154)], has=["no placement on a panel"])
         check("F154 cursor: a turn about neither axis to read", [pa(), ps(), pt(ky=("n/a", "n/a", "n/a"), kp=("n/a", "n/a", "n/a"))], 0, [("IDLE", F154)],
               has=["the turn was too small about either axis to read k under shipped"])

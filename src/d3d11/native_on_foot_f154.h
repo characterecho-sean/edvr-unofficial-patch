@@ -509,13 +509,21 @@ inline int formatTurn(char* out, size_t cap, const char* window, const char* set
                          s.unread, rhoFov.t, fovC1.t, fovUi.t, mode.t, qz.t);
 }
 
-// panel cursor writes (F154): a window's placements and writes, whatever the head did (the turn line is only for seconds with a judged run).
+// panel cursor writes (F154): a window's placements and writes, whatever the head did (the turn line is only for seconds with a judged run), and the lever the
+// owner calls read in it, so rho is on record in a flight with no judged second (the 2026-10-28 flight had none).
 inline int formatWrites(char* out, size_t cap, unsigned seconds, const char* setting, const Sec& s) noexcept {
+    const bool haveRho = s.leverReads > 0;
+    const Txt rhoMean = numText(haveRho, "%+.3f", haveRho ? s.rhoSum / s.leverReads : 0.0), rhoMin = numText(haveRho, "%+.3f", s.rhoMin),
+              rhoMax = numText(haveRho, "%+.3f", s.rhoMax), qz = numText(haveRho, "%+.4f", haveRho ? s.qzSum / s.leverReads : 0.0);
+    const Txt rhoFov = numText(s.haveCross, "%.3f", s.cross.rhoFov()), fovC1 = numText(s.haveCross && s.cross.haveC1, "%.2f", s.cross.fovC1 * 180.0 / 3.14159265358979323846),
+              fovUi = numText(s.haveCross && s.cross.haveUi, "%.2f", s.cross.fovUi * 180.0 / 3.14159265358979323846),
+              mode = numText(s.haveCross && s.cross.haveMode, "%.0f", static_cast<double>(s.cross.mode));
     return std::snprintf(out, cap,
                          "panel cursor writes (F154) %u s: setting %s; placements %u: screen-space %u, written %u, refused: no lever %u, tiny rho %u, not finite %u, "
-                         "write failed %u; owner calls %u (screen-space %u, not %u, unread %u)",
+                         "write failed %u; owner calls %u (screen-space %u, not %u, unread %u); rho mean %s min %s max %s, rho_fov %s fov_C1 %s deg fov_UI %s deg "
+                         "mode %s, q.z %s m",
                          seconds, setting, s.placements, s.screen, s.written, s.refusedLever[0], s.refusedLever[1], s.refusedLever[2], s.writeFailed, s.calls,
-                         s.leverReads, s.notScreen, s.unread);
+                         s.leverReads, s.notScreen, s.unread, rhoMean.t, rhoMin.t, rhoMax.t, rhoFov.t, fovC1.t, fovUi.t, mode.t, qz.t);
 }
 
 // One placement in an eye run's window, for matching the dump's cursor quad (its VS constant rows) with the sprite offline.

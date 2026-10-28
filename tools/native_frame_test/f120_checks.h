@@ -186,6 +186,11 @@ inline void run120(Check&& check) {
         const bool pinned = w::ownerPinned(bytes);
         bytes[9] ^= 0x01;
         const bool differs = !w::ownerPinned(bytes);
+        // F154: the lever hook's jump over the prologue (the bytes the 2026-10-28 flight read) is the pin only while that hook is armed.
+        const uint8_t hooked[16] = {0xE9, 0x0B, 0x66, 0x01, 0x80, 0x5B, 0x18, 0x57, 0x48, 0x81, 0xEC, 0x40, 0x01, 0x00, 0x00, 0x41};
+        check(w::ownerPinnedOrHooked(hooked, true) && !w::ownerPinnedOrHooked(hooked, false) && w::ownerPinnedOrHooked(w::kOwnerPrologue, false) &&
+                  !w::ownerPinnedOrHooked(bytes, false),
+              "F154: the jump F154's lever hook writes over the owner's prologue counts as the pin only with that hook armed");
         check(pinned && differs && w::screenSpace(w::kOwnerRva, 2, 1) && !w::screenSpace(0x4526E40, 2, 1) && !w::screenSpace(w::kOwnerRva, 0, 1) &&
                   !w::screenSpace(w::kOwnerRva, 2, 0) && w::kOwnerRva == 0x47299F0 && w::kOffOwnerCount == 0x1B0 && w::kOffOwnerArray == 0x1B8 &&
                   w::kOffScreenFlag == 0x1C0,

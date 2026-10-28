@@ -35,6 +35,9 @@ constexpr double kMaxDriftMm = 5.0;           // ... and wants the cursor's drif
 constexpr double kMaxNonOrtho = 0.05;         // the largest dot product of two normalised rows still taken for a rotation
 
 inline bool ownerPinned(const uint8_t bytes[16]) noexcept { return std::memcmp(bytes, kOwnerPrologue, sizeof(kOwnerPrologue)) == 0; }
+// The pin's verdict when it is first read. F154's lever hook overwrites the first bytes with its jump, and only installs after checking the same 16 bytes, so
+// with that hook armed the function is the pinned one whatever its bytes now read (the 2026-10-28 flight read the jump and refused every panel).
+inline bool ownerPinnedOrHooked(const uint8_t bytes[16], bool leverHookArmed) noexcept { return leverHookArmed || ownerPinned(bytes); }
 
 // The screen-space test: the owner function is the pinned one, its list is not empty and the first entry's flag is set.
 inline bool screenSpace(uintptr_t ownerFnRva, uint64_t count, uint8_t flag) noexcept { return ownerFnRva == kOwnerRva && count > 0 && flag != 0; }

@@ -5897,13 +5897,14 @@ void f117Tick(uint64_t now) {
 }
 
 // Frame thread: the screen-space owner function's first 16 bytes against the 334925 pin, once (the placement hook reads the verdict), and the one line that says it.
+// f111Tick reads it before F154's lever hook installs; a hook already armed counts as the pin (its install checked the same 16 bytes before its jump replaced them).
 void f120PinTick() {
     namespace w = nofoot::f120;
     if (g_f120Pin.load() == 0 && g_base) {
         uint8_t b[16] = {};
         if (guardedRead(g_base + w::kOwnerRva, b, sizeof(b))) {
             std::memcpy(g_f120PinBytes, b, sizeof(b));
-            g_f120Pin.store(w::ownerPinned(b) ? 1 : 2);
+            g_f120Pin.store(w::ownerPinnedOrHooked(b, g_f154Armed.load(std::memory_order_acquire)) ? 1 : 2);
         }
     }
     const int pin = g_f120Pin.load();
@@ -6084,7 +6085,9 @@ void f111RefreshGates() {
     if(observer&&g_f111Armed[0])g_menuBridge.gateOpened(g_menuInput.frame.load(),menuInputQpc());
 }
 void f111Tick(uint64_t now) {
-    installF111Once();installF154Once();f111RefreshGates();
+    installF111Once();
+    if (g_panelMouse.load(std::memory_order_relaxed)) f120PinTick();   // F120's pin from the untouched bytes, before F154's hook writes its jump over them
+    installF154Once();f111RefreshGates();
     f114bTick(now);
     f117Tick(now);
     f120Tick(now);

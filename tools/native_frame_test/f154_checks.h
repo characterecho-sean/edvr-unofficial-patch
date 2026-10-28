@@ -517,9 +517,11 @@ inline void run154(Check&& check) {
         y::formatWrites(line, sizeof(line), 10, "mirrored", s);
         const std::string writes = line;
         check(writes.rfind("panel cursor writes (F154) 10 s: setting mirrored; placements 120: screen-space 118, written 90, refused: no lever 7, tiny rho 0, not finite 0, write failed 0; "
-                           "owner calls 1 (screen-space 2, not 0, unread 0)",
-                           0) == 0,
-              "F154: the writes line carries the window's seconds, the setting, the placements, writes, refusals by cause and the owner calls");
+                           "owner calls 1 (screen-space 2, not 0, unread 0); rho mean -1.865 min -1.870 max -1.860, rho_fov 1.992 fov_C1 93.60 deg fov_UI 56.25 deg mode 4, "
+                           "q.z +0.7450 m",
+                           0) == 0 && writes.size() < 1000,
+              "F154: the writes line carries the window's seconds, the setting, the placements, writes, refusals by cause, the owner calls and the lever they read "
+              "(rho, the cross-check, q.z), so rho is on record without a judged second");
         y::FrameRec r;
         r.ledger = 1234;
         r.render = 5678;
