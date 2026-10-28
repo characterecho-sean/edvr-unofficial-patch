@@ -6,8 +6,12 @@ game's own zoom as a magnified picture inside the scope's lens. The rest of the 
 
 ## Status
 
-- **State: S0 BUILT, NOT FLOWN** (`84d13bfa`, measure only, no key; full build green). No rendering code. Branch
+- **State: S0 FLAT FLOWN, S0 VR NOT FLOWN** (`d90db147`, measure only, no key). No rendering code. Branch
   `claude/vr-scope-zoom-design-6ef950`.
+- **Flat zoom MEASURED** (section 7, Epic 2026-10-28): the camera's FOV (+0x280) narrows from `HumanoidFOV` 56.327 deg to 15.000 deg
+  for the scoped Executioner (M 4.07) and to 35.000 deg for the bare copy (M 1.70), with a 0.8 s ramp. Open: kind 0 or kind 3 as the
+  world's camera (kind 3 rests at 47 deg with the weapon out; from there M would be 3.30 and 1.62).
+- **A is now in doubt:** M 3.3 to 4.1 is past the 2.5 line (section 6, "After S0"), so B3 is the maintainer's call.
 - **Recommendation: option A** (section 2): after DLSS and RCAS, copy the aiming eye's picture inside the lens, magnified by the game's
   zoom M about the sight point (the shield ripple's route). Under 0.1 ms, one eye, scoped ADS only; no scene pass, no motion vectors, no
   DLSS change; F106 carries it to the left eye. The price is detail: 1/M of the output's density.
@@ -17,7 +21,7 @@ game's own zoom as a magnified picture inside the scope's lens. The rest of the 
     HumanoidAimAssistComponent (setter 0x1A8C350): aim-assist tuning, not the "zoom/FOV floats" the analysis note named.
   - ruled out: EDVR's F8 census FOV (`RC+0x16C`) as a VR zoom field, because it read -1.000 through every ADS press of
     `edvr_gfx_20261028_060723`, the scoped plasma sniper included.
-  - Left: the camera FOV lerp, the readout's camera FOVs (+0x16C, +0x17C), the stat `ScopeMagnification`, the flat projection rows.
+  - Left for VR: the readout's camera FOVs (+0x16C, +0x17C), the refresh hook's cameras (flat's source), the stat `ScopeMagnification`.
 - **Open questions** (each has a log line in the first flight, section 6):
   Q1 the zoom per (item, scope); Q2 which field carries it per frame (flat, VR); Q3 absolute FOV or relative to the player's FOV option;
   Q4 what is drawn in the lens (see-through glass, opaque screen, reticle); Q5 the lens's footprint and the sight point's offset in it;
@@ -25,8 +29,8 @@ game's own zoom as a magnified picture inside the scope's lens. The rest of the 
 - **ruled out (cost or brief):** a third camera pass (C), magnifying in DLSS's input (E), a whole-view FOV change (D). Section 2.
 - **Analysis hand-over FILED** (analysis `1547986`): `analysis\decomp\verify_20261028_ads_zoom_receiver.txt` (the receiver, the correction to
   `analysis\decomp\verify_20261027_ads_sight_line.txt` section 1, the candidates).
-- **Next flight: S0**. One flat session on Epic gives Q1 to Q3; one VR session on Frontier gives Q2 (VR) and Q4 to Q6. Section 6 has
-  the four lines as built and the flight card.
+- **Next flight: S0 VR** on Frontier (Q2 VR, Q4 to Q6; card in section 6). The flat card still lacks the other weapons and a
+  `HumanoidFOV` change (Q3).
 - **Key (after S0, on the maintainer's word):** `fix.native_on_foot_ads_scope_zoom` = on | off. Section 5.
 
 ## 1. Where the game keeps the zoom
@@ -175,8 +179,9 @@ Changed from the plan:
 Unconfirmed: whether the probe sees native-stereo eye draws. The census rule checks its `eyes seen`.
 
 **Flight card.**
-- Flat (Epic, `--scope flat --xess`, the game in flat mode): every weapon, hip to ADS three times, each held 3 s or more; scoped copy then
-  unscoped (the Executioner both, and any other scoped weapon owned). Change the FOV option once and repeat the Executioner.
+- Flat (Epic, `--scope both --xess` as that install is, the game in flat mode): every weapon, hip to ADS three times, each held 3 s or
+  more; scoped copy then unscoped (the Executioner both, and any other scoped weapon owned). Change the on-foot FOV option
+  (`HumanoidFOV`, not the ship's FOV) once and repeat the Executioner.
 - VR (Frontier, `advanced.vr_camera_census` on for the camera source): the scoped Executioner in ADS, 10 s still and 10 s turning the
   head; the unscoped copy; one eye dump in scoped ADS. The first three scoped presses arm the probe on their own.
 - Read `edvr_log.py --expect-build HEAD --health` first, then the four lines.
@@ -184,3 +189,27 @@ Unconfirmed: whether the probe sees native-stereo eye draws. The census rule che
 **After S0:** see-through glass and M under about 2.5 for every zooming weapon: build A behind the key. An opaque screen: A with that draw
 moved after the door, or B3. Zoom above 2.5: A's detail is likely too low, so put B3 to the maintainer. A per-frame VR field found: read it;
 otherwise bake the flat table.
+
+## 7. Journal
+
+**2026-10-28, S0 flat flight** (Epic, `edvr_gfx_20261028_153658`, `d90db147`, build matched). `--health`: S0 flat OK, 4 presses, all
+the Executioner (the loadout: PrimaryWeapon1 class 5 with `weapon_scope`, PrimaryWeapon2 class 2 with none). By the card's order, presses 1
+and 4 are the scoped copy and 2 and 3 the bare one.
+
+| Copy | kind 0 (16:9) and kind 4 (1:1) | kind 3 (16:9) | M from 56.327 deg |
+|---|---|---|---|
+| scoped (presses 1, 4) | 56.327 -> 15.000 deg, ramp 0.8 s | 15.000 deg | 4.07 |
+| bare (presses 2, 3) | 56.327 -> 35.000 deg, ramp 0.8 s | 30.000 deg | 1.70 (kind 0) |
+
+- The hip is Settings.xml's `HumanoidFOV` (56.327), the on-foot FOV option. The ship's `FOV` is separate (55.55). Neither changed in the
+  flight, so Q3 is not shown. The round ADS values (15, 30, 35) point to absolute FOVs per weapon (INFERRED).
+- The zoom's source in flat is the camera's own FOV (+0x280), which the refresh builds the projection from.
+- Kind 3 never came back to 56.327 deg after press 1: its maximum is 47.000 deg in every press, and its ramps (15 to 42 s) are stale.
+  INFERRED: a second camera at 47 deg while the weapon is out. Open: whether the world is drawn with kind 0 or kind 3. That sets the bare
+  copy's M (1.70, or 1.62 from 47 deg) and the hip the scoped M is measured from (4.07, or 3.30).
+- Instrument limit: `PressTracker` never commits a plateau that begins before Status.json's late flag falls. So a camera whose resting
+  value changes keeps its first hip, as kind 3 did. Its minimum and maximum still show the truth.
+- Not covered: the other weapons (only the Executioner was pressed), the FOV option (Q3).
+- **Consequence:** the scoped Executioner's M (3.3 to 4.1) is past section 6's 2.5 line for option A. So B3 (the left eye rendered as the
+  zoomed view) goes to the maintainer, and the VR S0 flight still decides Q2 (VR) and Q4 to Q6. The bare copy zooms too (1.7), so its sight
+  needs the same Q4 answer.
