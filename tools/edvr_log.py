@@ -13355,12 +13355,61 @@ def _hj_f95a_motion(rows, ctx):
     return ("OK", text)
 
 
+_H159_WHY = ("first", "item", "generation", "armsOk", "standDown", "supportCup", "refused", "uncommitted", "F159")
+
+
+def _hj_f159_elbow(rows):
+    """F159: the left elbow's stable pole on the two-handed guns (the non-pistol left arm), per item: the solved and FP elbows' heights over the shoulder, the seconds with the
+    solved elbow within 1 cm of the shoulder's height (the longest run of them at the hip), the swivel's distance from the pole's reference, the reseeds, and the seed births by
+    reason (the window lines' exact counts; the birth lines, at most one in 0.5 s, give the first cause and the figures). More than 2 s in a row with the elbow at the shoulder's
+    height at the hip is PARTIAL. Returns (text, notes), or None with no F159 line."""
+    pole, births = rows.get("pole", []), rows.get("birth", [])
+    if not pole and not births:
+        return None
+    items = collections.OrderedDict()
+    for r in pole:
+        items.setdefault(r["item"], []).append(r)
+    parts, raised = [], []
+    for item, rs in items.items():
+        n = sum(int(r["n"]) for r in rs)
+        if not n:
+            continue
+        mean = lambda k, rr=rs, nn=n: sum(int(r["n"]) * float(r[k]) for r in rr) / nn
+        run = max(int(r["run"]) for r in rs)
+        parts.append("%s %d s: %d solves, the solved elbow %+.1f cm over the shoulder (min %+.1f, max %+.1f), within 1 cm of the shoulder's height or above in %d s (%d at the hip, "
+                     "longest run at the hip %d s), the FP elbow %+.1f cm, the pole's preferred elbow at the ceiling in %d solves, the chosen elbow %.1f deg off the reference "
+                     "(max %.1f), reseeds %d" % (
+                         item, _hsecs(rs), n, mean("solved"), min(float(r["smin"]) for r in rs), max(float(r["smax"]) for r in rs), sum(int(r["secs"]) for r in rs),
+                         sum(int(r["hipsecs"]) for r in rs), run, mean("fp"), sum(int(r["ceil"]) for r in rs), mean("disp"), max(float(r["dmax"]) for r in rs),
+                         sum(int(r["reseeds"]) for r in rs)))
+        if run > 2:
+            raised.append("%s %d s" % (item, run))
+    keys = ("b_first", "b_item", "b_gen", "b_arms", "b_down", "b_cup", "b_ref", "b_unc", "b_f159")
+    if pole:
+        counts = [sum(int(r[k]) for r in pole) for k in keys]
+    else:
+        counts = [sum(1 for r in births if r["why"] == name) for name in _H159_WHY]
+    text = "left elbow pole (F159): " + ("; ".join(parts) if parts else "no solve with the stable pole")
+    by_reason = ", ".join("%s %d" % (name, c) for name, c in zip(_H159_WHY, counts) if c)
+    text += "; seed births by reason: %s" % (by_reason or "none")
+    if births:
+        firsts = collections.Counter("%s after %s" % (r["why"], r["since"]) for r in births if r.get("since"))
+        text += " (%d birth line(s)%s)" % (len(births), ": " + ", ".join("%s %d" % (k, v) for k, v in firsts.most_common(4)) if firsts else "")
+    notes = (["the left elbow stayed within 1 cm of the shoulder's height for more than 2 s in a row at the hip on a two-handed gun (%s)" % ", ".join(raised)]
+             if raised else [])
+    return text, notes
+
+
 def _hj_f98a_elbow(rows, ctx):
     """F98a: the left arm with a weapon drawn, per item: the game's aim pitch, the chest's lean, F82's torso yaw, the elbow's swivel from the stance's own plane and its
-    step a frame, where the swivel came from. An elbow off the stance's plane by over 45 deg in most of a second, or a step over 10 deg, is PARTIAL."""
+    step a frame, where the swivel came from. An elbow off the stance's plane by over 45 deg in most of a second, or a step over 10 deg, is PARTIAL. F159's lines (the stable
+    pole's elbow height, its reseeds and seed births) ride this rule: see _hj_f159_elbow."""
     sec = rows.get("sec", [])
+    f159 = _hj_f159_elbow(rows)
     if not sec:
-        return None
+        if f159 is None:
+            return None
+        return ("PARTIAL" if f159[1] else "OK", f159[0] + ("; " + "; ".join(f159[1]) if f159[1] else ""))
     items = collections.OrderedDict()
     for r in sec:
         items.setdefault(r["item"], []).append(r)
@@ -13411,6 +13460,9 @@ def _hj_f98a_elbow(rows, ctx):
                 notes.append("leading hypothesis: the forearm's twist limit (%d of %d flip seconds hit it with the axis 15 deg or more from down)" % (twist_n, flip_n))
             else:
                 notes.append("neither hypothesis fits the %d flip seconds (the axis 15 deg or more from down, the twist limit not hit)" % flip_n)
+    if f159 is not None:
+        text += "; " + f159[0]
+        notes = notes + f159[1]
     if notes:
         return ("PARTIAL", text + "; " + "; ".join(notes))
     return ("OK", text)
@@ -14447,7 +14499,7 @@ HEALTH_RULES = (
                 r"\(min (?P<chestmin>%s)\), INSIDE (?P<inside>\d+) of (?P<clr>\d+); legs hip to foot over the leg: animated (?P<la>[\d.]+), written (?P<lw>[\d.]+) "
                 r"\(min (?P<lmin>[\d.]+)\), feet lifted (?P<lifted>\d+)" % ((_HN,) * 8)),
     ), _hj_f97a_body),
-    _hrule("left elbow (F98a)", ("F98a",), ("native on foot left elbow (F98a)",), (
+    _hrule("left elbow (F98a)", ("F98a", "F159"), ("native on foot left elbow (F98a)", "native on foot left elbow pole (F159)", "native on foot left elbow seed (F159)"), (
         ("sec", r"native on foot left elbow \(F98a\) (?P<wl>\d+) s: item (?P<item>\S+); (?P<n>\d+) solves: the game's aim pitch (?P<aim>%s) deg \(min %s max %s\); the chest's lean as "
                 r"written (?P<lean>%s) deg \(animated (?P<leanAnim>%s)\); F82's torso yaw (?P<yaw>%s) deg \(largest [\d.]+\); the elbow's swivel from the stance's plane "
                 r"(?P<plane>[\d.]+) deg \(max [\d.]+, over 45 deg in (?P<over45>\d+)\); its step a frame (?P<step>[\d.]+) deg rms \(max [\d.]+, over 10 deg (?P<over10>\d+), "
@@ -14458,6 +14510,19 @@ HEALTH_RULES = (
                 r"(?:at the largest step \((?P<dstep>[\d.]+) deg\) the axis was (?P<dang>[\d.]+) deg from down, the twist limit (?P<dtwist>hit|not hit)"
                 r"|no elbow step was measured))?"
                 r"(?:; seconds mostly over 45 deg (?P<swung_s>\d+); flip seconds (?P<flip_s>\d+) \(near vertical (?P<near_s>\d+), twist limit (?P<twist_s>\d+), near with twist (?P<near_twist_s>\d+)\))?" % ((_HN,) * 6)),
+        # F159: the left elbow's stable pole in the same window (a line of its own: F98a's has no room under the log's 1200 bytes), and each seed's birth
+        ("pole", r"native on foot left elbow pole \(F159\) (?P<wl>\d+) s: item (?P<item>\S+); (?P<n>\d+) solves with the stable pole \((?P<hipn>\d+) at the hip\): the solved elbow "
+                 r"(?P<solved>%s) cm over the shoulder \(min (?P<smin>%s) max (?P<smax>%s)\), within 1 cm of the shoulder's height or above in (?P<high>\d+) \((?P<hiphigh>\d+) at the hip\); "
+                 r"the FP elbow (?P<fp>%s) cm over the FP shoulder \(min (?P<fpmin>%s) max (?P<fpmax>%s)\); the pole's preferred elbow within 1 cm of the shoulder's height or above in "
+                 r"(?P<ceil>\d+); the chosen elbow (?P<disp>[\d.]+) deg from the pole's reference \(max (?P<dmax>[\d.]+)\); reseeds (?P<reseeds>\d+); seed births: first (?P<b_first>\d+), "
+                 r"item (?P<b_item>\d+), generation (?P<b_gen>\d+), armsOk (?P<b_arms>\d+), standDown (?P<b_down>\d+), supportCup (?P<b_cup>\d+), refused (?P<b_ref>\d+), "
+                 r"uncommitted (?P<b_unc>\d+), F159 (?P<b_f159>\d+); seconds with the elbow within 1 cm of the shoulder (?P<secs>\d+), at the hip (?P<hipsecs>\d+), longest run at the hip "
+                 r"(?P<run>\d+) s" % ((_HN,) * 6)),
+        ("birth", r"native on foot left elbow seed \(F159\): born by (?P<why>\w+) \((?:reseeded in place|first cause (?P<since>\w+), no seed for (?P<absent>\d+) ms)\); base swivel "
+                  r"(?P<base>%s) deg(?P<clamp>, clamped)?, from (?P<src>the FP elbow's pole|the legacy pole|the body-down pole); seeded elbow (?P<seeded>%s) cm over the shoulder, the FP "
+                  r"elbow (?P<fp>%s) cm; the left hand (?P<err>[\d.]+) cm off its grip; armed ramp (?P<ramp>[\d.]+); stance (?P<stance>\w+); head pitch (?P<pitch>%s deg|unread)"
+                  r"(?:; the pole it replaced put the elbow (?P<was>%s) cm over the shoulder with the arm (?P<off>[\d.]+) cm off its axis)?"
+                  r"(?:; (?P<skipped>\d+) earlier seed\(s\) not logged \(one line in 0\.5 s\))?" % ((_HN,) * 5)),
     ), _hj_f98a_elbow),
     _hrule("draw onset (F99a)", ("F99a",), ("native on foot draw onset (F99a)",), (
         ("sec", r"native on foot draw onset \(F99a\): item (?P<item>\S+); the game's selection (?P<sel>id [0-9A-F]{8}|not seen); body (?P<body>moving|still); Status\.json "
@@ -15433,6 +15498,7 @@ def self_test_health():
     f121c_path = os.path.join(repo_root(), "src", "d3d11", "visor_eye_trust.h")
     f140reader_path = os.path.join(repo_root(), "src", "d3d11", "journal_loadout_reader.h")
     f158_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f158.h")
+    f159_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f159.h")
     try:
         source, swap, f90src, f91src = read_text(src_path), read_text(swap_path), read_text(f90_path), read_text(f91_path)
         f105src, f105note = read_text(f105_path), read_text(f105_note_path)
@@ -15445,6 +15511,7 @@ def self_test_health():
         f121csrc = read_text(f121c_path)
         f140readersrc = read_text(f140reader_path)
         f158src = read_text(f158_path)
+        f159src = read_text(f159_path)
     except OSError as e:
         print("health: the DLL source the self-test reads its log formats from is not where it looks (%s)" % e)
         return False
@@ -15493,6 +15560,15 @@ def self_test_health():
             fmts[key] = health_c_format(f158src, needle) or health_c_format(source, needle)
         if fmts[key] is None:
             raise AssertionError("native_on_foot_f158.h and native_on_foot.cpp have no format holding %r: the --health rule that reads it is out of date" % needle)
+        return health_render(fmts[key], vals)
+
+    def R159(needle, *vals):
+        """F159's lines (formatSummary, formatBirth in native_on_foot_f159.h), from their own format literals."""
+        key = "f159:" + needle
+        if key not in fmts:
+            fmts[key] = health_c_format(f159src, needle)
+        if fmts[key] is None:
+            raise AssertionError("native_on_foot_f159.h has no format holding %r: the --health rule that reads it is out of date" % needle)
         return health_render(fmts[key], vals)
 
     def R105(needle, *vals):
@@ -16629,6 +16705,51 @@ def self_test_health():
         check("F124 elbow: body-down solves with no flip, and a second with no step measured",
               [elbow98(PISTOL98, tail=down98(closest=30.0, step=2.0, ang=50.0)), elbow98(PISTOL98, tail=down98(closest=35.0))], 0, [("OK", F98)],
               has=["the body-down pole: 152 solves, the arm's axis came within 30.0 deg of the body's down"], lacks=["UNPARSED", "flip second", "hypothesis"])
+
+        # ---- F159: the left elbow's stable pole at the shoulder's height, its reseeds and its seeds' births (the lines ride the F98a rule) ----
+        def pole159(item=RIFLE97, wl=10, n=900, hipn=900, solved=-12.0, smin=-16.0, smax=-8.0, high=0, hiphigh=0, fp=-14.0, fpmin=-16.0, fpmax=-12.0, ceil=0, disp=0.0, dmax=0.0,
+                    reseeds=0, births=(0,) * 9, secs=0, hipsecs=0, run=0):
+            """F159's window line, from the DLL's own format (formatSummary, native_on_foot_f159.h)."""
+            return R159("native on foot left elbow pole (F159) %u s: item %s", wl, item, n, hipn, solved, smin, smax, high, hiphigh, fp, fpmin, fpmax, ceil, disp, dmax, reseeds,
+                        *births, secs, hipsecs, run)
+
+        def birth159(why="item", since="item", absent=120, base=-31.0, clamp=False, src="the FP elbow's pole", seeded=-12.0, fp=-14.0, err=4.0, ramp=1.0, stance="standing",
+                     pitch=-6.0, was=None, off=15.8, skipped=0):
+            """F159's birth line (formatBirth); with was given it is a reseed, born in place."""
+            cause = "reseeded in place" if was is not None else R159("first cause %s, no seed for %llu ms", since, absent)
+            line = R159("native on foot left elbow seed (F159): born by %s (%s)", why, cause, base, ", clamped" if clamp else "", src, seeded, fp, err, ramp, stance,
+                        "unread" if pitch is None else "%+.1f deg" % pitch)
+            if was is not None:
+                line += R159("; the pole it replaced put the elbow", was, off)
+            if skipped:
+                line += R159("earlier seed(s) not logged", skipped)
+            return line
+
+        check("F159 elbow: the natural elbow under the shoulder", [elbow98(), pole159()], 0, [("OK", F98)],
+              has=["left elbow pole (F159): " + RIFLE97 + " 10 s: 900 solves, the solved elbow -12.0 cm over the shoulder (min -16.0, max -8.0), within 1 cm of the shoulder's height or "
+                   "above in 0 s (0 at the hip, longest run at the hip 0 s), the FP elbow -14.0 cm", "seed births by reason: none"], lacks=["UNPARSED", "more than 2 s"])
+        check("F159 elbow: the flight's raised elbow, 8 s in a row at the hip, with its reseed",
+              [elbow98(), pole159(solved=-0.3, smin=-1.2, smax=0.4, high=840, hiphigh=840, ceil=880, disp=8.5, dmax=13.0, secs=8, hipsecs=8, run=8, reseeds=1,
+                                  births=(0, 1, 0, 0, 0, 0, 0, 0, 1))], 0, [("PARTIAL", F98)],
+              has=["the left elbow stayed within 1 cm of the shoulder's height for more than 2 s in a row at the hip on a two-handed gun (" + RIFLE97 + " 8 s)",
+                   "the chosen elbow 8.5 deg off the reference (max 13.0), reseeds 1", "seed births by reason: item 1, F159 1"], lacks=["UNPARSED"])
+        check("F159 elbow: two seconds in a row is not more than two", [elbow98(), pole159(high=180, hiphigh=180, secs=2, hipsecs=2, run=2)], 0, [("OK", F98)],
+              has=["longest run at the hip 2 s"], lacks=["more than 2 s", "UNPARSED"])
+        check("F159 elbow: a run split by a window's edge (the next line carries the run on)",
+              [elbow98(), pole159(run=2, hipsecs=2, secs=2, high=160, hiphigh=160), elbow98(), pole159(run=5, hipsecs=3, secs=3, high=240, hiphigh=240)], 0, [("PARTIAL", F98)],
+              has=["(" + RIFLE97 + " 5 s)", "in 5 s (5 at the hip, longest run at the hip 5 s)"], lacks=["UNPARSED"])
+        check("F159 elbow: the elbow at the shoulder's height in ADS only is not the hip's run",
+              [elbow98(), pole159(hipn=0, high=700, hiphigh=0, secs=9, hipsecs=0, run=0)], 0, [("OK", F98)],
+              has=["in 9 s (0 at the hip, longest run at the hip 0 s)"], lacks=["more than 2 s", "UNPARSED"])
+        check("F159 elbow: the births by reason, each line's first cause, a reseed and a limited line",
+              [elbow98(), pole159(reseeds=1, births=(1, 2, 0, 0, 0, 1, 0, 0, 1)), birth159("item", "item", 5), birth159("supportCup", "item", 340, clamp=True, src="the legacy pole", skipped=3),
+               birth159("F159", was=0.4, pitch=None, stance="crouched", seeded=-11.9, base=-75.0, src="the body-down pole")], 0, [("OK", F98)],
+              has=["seed births by reason: first 1, item 2, supportCup 1, F159 1", "(3 birth line(s): item after item 1, supportCup after item 1)"], lacks=["UNPARSED"])
+        check("F159 elbow: the lines alone (the F98a line missing) are read, not dropped",
+              [pole159(high=840, hiphigh=840, secs=8, hipsecs=8, run=8), birth159("armsOk", "standDown")], 0, [("PARTIAL", F98)],
+              has=["more than 2 s in a row at the hip", "(1 birth line(s): armsOk after standDown 1)"], lacks=["UNPARSED"])
+        check("F159 elbow: a line that drifted from its pattern is unparsed", ["native on foot left elbow pole (F159) 10 s: something else"], 4, [("UNPARSED", F98)])
+        check("F159 elbow: a birth line that drifted from its pattern is unparsed", ["native on foot left elbow seed (F159): born somewhere"], 4, [("UNPARSED", F98)])
 
         # ---- draw onset (F99a): a drawn item's hands from the game's own selection ----
         F99 = "draw onset (F99a)"

@@ -69,6 +69,7 @@
 #include "native_on_foot_f151.h"   // F151: the weapon readout's draw bound by its place when its stream entry lies outside every shadow window (pure parts)
 #include "native_on_foot_f157.h"   // F157: the coat outfit's pack draw left out of both eyes (pure parts)
 #include "native_on_foot_f158.h"   // F158: the local body's draws over the first 30 s on foot, measured (pure parts)
+#include "native_on_foot_f159.h"   // F159: the left elbow's stable pole reseeded at the shoulder's height, its seeds' births counted and logged (pure parts)
 #include "xinput_watch.h"         // F135: the pad's Start and Back edges, evidence for the menu probe only
 #include "native_on_foot_f109.h"   // F109: look to aim on foot, the player's own turn in ADS, snap or smooth turning (pure parts)
 #include "native_on_foot_f129.h"   // F129: look to aim reads its turn from the player's own look processor; the look path instrument (pure parts)
@@ -16235,6 +16236,9 @@ struct F98Left {
     // pointing down shows as the flips at a small angle; the twist limit as the flips with it hit at a large one.
     uint32_t downN = 0, downStepTwist = 0;
     double downMin = 1e9, downStepMax = -1.0, downStepAng = 0.0;
+    // F159: the solves with the stable pole of the non-pistol left arm: the solved and FP elbows' heights over the shoulder, the preferred elbow at the ceiling, the swivel's distance
+    // from the pole's reference, the reseeds and the seed births by reason (its own line: F98a's has no room under the log's 1200 bytes).
+    nofoot::f159::Counters f159;
 };
 std::atomic<uint32_t> g_f98Seq{0};
 F98Left g_f98;
@@ -18482,11 +18486,16 @@ void armMoveDrain() noexcept {
 
 void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
     static nofoot::IkPhysicalPoleSet s_physicalPole;
+    // F159: the left arm's seed (why it was gone), the reseed's run and the birth lines' limit.
+    static nofoot::f159::PoleTracker s_f159Poles;
+    static nofoot::f159::ReseedGate s_f159Gate;
+    static nofoot::f159::LineLimit s_f159BirthLimit;
     nofoot::IkPhysicalPole physicalPoleCommit[2]{};
     bool physicalPoleCommitValid[2] = {};
     bool physicalPoleAttempted[2] = {};
-    const auto resetPhysicalPole = [&]() noexcept {
+    const auto resetPhysicalPole = [&](uint8_t why = nofoot::f159::kWhyStandDown) noexcept {
         nofoot::ikPhysicalPoleReset(s_physicalPole);
+        s_f159Poles.gone(why, GetTickCount64());
     };
     // Snapshot item identity and its profile before selecting any grip target; discard this sample if Status changes mid-hook.
     const uint32_t itemSerialForCall = g_heldItemSerial.load(std::memory_order_acquire);
@@ -18671,6 +18680,11 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
         bool f98SeedKept = false, f98RadialOk = false;
         int f98Source = 0;
         double f98SeedSpanDeg = 0.0, f98Radial[3] = {}, f98Axis[3] = {};
+        // F159 (the left arm's non-pistol stable pole): measured this solve; the preferred elbow (the pole's reference placed on the circle), the solved elbow and the FP elbow over
+        // the shoulder (m); the swivel's distance from the reference (deg); the preferred elbow at the ceiling; the call at the hip; the pole reseeded; the Why of a seed born (0xFF none)
+        bool f159Measured = false, f159Ceiling = false, f159Hip = true, f159Reseed = false;
+        uint8_t f159Birth = 0xFF;
+        double f159PrefOverM = 0.0, f159SolvedOverM = 0.0, f159FpOverM = 0.0, f159DispDeg = 0.0;
         double poseHand[3] = {}, poseTarget[3] = {}, posePreferred[3] = {}, poseAxis[3] = {}, poseRadial[3] = {}, poseWeight = 0.0, poseViolationM = 0.0;
         double poseOutSign = 1.0, poseElbowOutM = nofoot::kIkElbowOutM;
         bool poseActualValid = false;
@@ -18746,7 +18760,12 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
     const bool physicalPoleActive = armedNow && armsOk && mode == 3 && writeOk;
     const uint64_t physicalPoleIdentity = f83NativeEpochIdentity ? (0x8000000000000000ull | f83SelectionForCall.epoch) : itemSerialForCall;
     const bool preserveSuspendedPole = f83SelectionSuspended && mode == 3 && s_physicalPole.active;
-    nofoot::ikPhysicalPoleBegin(s_physicalPole, pl.generation, physicalPoleIdentity, physicalPoleActive || preserveSuspendedPole);
+    {   // F159: why the seeds are dropped here (read before the reset runs on the set's own fields)
+        const uint8_t beginWhy = nofoot::f159::beginWhy(physicalPoleActive || preserveSuspendedPole, armsOk, s_physicalPole.generation, pl.generation, s_physicalPole.item,
+                                                         physicalPoleIdentity);
+        if (nofoot::ikPhysicalPoleBegin(s_physicalPole, pl.generation, physicalPoleIdentity, physicalPoleActive || preserveSuspendedPole) && beginWhy != nofoot::f159::kWhyFirst)
+            s_f159Poles.gone(beginWhy, now);
+    }
     double offW = armedNow ? offOut.w : 1.0;
     const bool offFlip = armedNow && offOut.ok && offOut.two != s_offTwoPrev;
     if (armedNow && offOut.ok) s_offTwoPrev = offOut.two;
@@ -18994,7 +19013,10 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
         physicalPoleAttempted[0] = nofoot::ikPhysicalPoleSideEligible(0, (supportCup && supportTargetValid) || authoredPistolSupport,
                                                                       offOut.ok && offOut.stablePolicy);
         physicalPoleAttempted[0] = physicalPoleAttempted[0] || rifleStableAuthority;
-        if (!physicalPoleAttempted[0] && !f83SelectionSuspended) nofoot::ikPhysicalPoleResetSide(s_physicalPole, 0);
+        if (!physicalPoleAttempted[0] && !f83SelectionSuspended) {
+            nofoot::ikPhysicalPoleResetSide(s_physicalPole, 0);
+            s_f159Poles.gone(nofoot::f159::kWhySupportCup, now);
+        }
     }
     // F75: measure the barrels of the 3P animated right attach (66) and the FP right attach (51) through G once from the animated pose and FP snapshot.
     // Armed torso yaw remains zero; the barrel rows and shoulder angle are diagnostics only, and the unarmed square-up still uses shoulders.
@@ -19024,7 +19046,7 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
                    exactRifleForCall, rifleQualityWeight, &s_physicalPole, physicalPoleActive, offOut.ok && offOut.stablePolicy, rifleStableAuthority, bodyDetachForCall,
                    adsPush, static_cast<double>(wBase), writeOk, armsOk ? effectiveHand : nullptr, wSqRamp, sqAmount, barrelDirs, sqArmed, offW,
                    solveEnvelope, elbowOutM, trimRad, pinCall)) {
-        resetPhysicalPole();
+        resetPhysicalPole(nofoot::f159::kWhyRefused);
         g_ikWriteDown.store(true, std::memory_order_relaxed);
         return ikRefuse(kIkRefWrite);
     }
@@ -19461,18 +19483,50 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
             if (!seed.valid) {
                 if (!nofoot::ikElbowRadial(tb, baseTheta, seed.reference)) {
                     nofoot::ikPhysicalPoleResetSide(s_physicalPole, side);
+                    if (side == 0) s_f159Poles.gone(nofoot::f159::kWhyRefused, now);
                     ikRefuse(kIkRefSingular);
                     continue;
                 }
                 std::memcpy(seed.previous, seed.reference, sizeof(seed.reference));
                 std::memcpy(seed.axis, tb.dir, sizeof(seed.axis));
                 seed.valid = true;
+                if (side == 0) {   // F159: the left arm's seed is born; why the last one was gone (the pistol's body-down pole is not seeded: its births are not counted)
+                    const nofoot::f159::Birth born = s_f159Poles.born(now);
+                    s_f159Gate.breakRun();
+                    uint32_t skipped = 0;
+                    if (!authoredPistolSupport) {
+                        o.f159Birth = born.why;
+                        if (s_f159BirthLimit.take(now, &skipped)) {
+                            double Eb[3];
+                            tb.elbowAt(baseTheta, Eb);
+                            nofoot::f159::BirthLine bl;
+                            bl.why = born.why;
+                            bl.since = born.since;
+                            bl.absentMs = born.absentMs;
+                            bl.baseDeg = baseTheta * 180.0 / nofoot::kIkPi;
+                            bl.clamped = o.clamped;
+                            bl.fpPole = o.poleFp;
+                            bl.seededOverCm = (Eb[1] - tb.S[1]) * 100.0;
+                            bl.fpOverCm = (fE[1] - fS[1]) * 100.0;
+                            bl.handErrCm = o.dist;
+                            bl.armedRamp = static_cast<double>(armedW);
+                            bl.stance = g_f119StancePub.load(std::memory_order_relaxed);
+                            bl.pitchOk = pinCall.localPitchValid;
+                            bl.pitchDeg = pinCall.localPitchDeg;
+                            bl.skipped = skipped;
+                            char birthLine[400];
+                            nofoot::f159::formatBirth(birthLine, sizeof(birthLine), bl);
+                            Log::get().note("%s", birthLine);
+                        }
+                    }
+                }
             }
             if (side == 0 && authoredPistolSupport) {
                 const double bodyUp[3] = {0.0, 1.0, 0.0};
                 const nofoot::IkPistolDownSwivel stable = nofoot::ikPistolDownSwivel(tb, seed.valid ? seed.previous : nullptr, bodyUp, elbowOutM, trimRad);
                 if (!stable.ok) {
                     nofoot::ikPhysicalPoleResetSide(s_physicalPole, side);
+                    s_f159Poles.gone(nofoot::f159::kWhyRefused, now);
                     ikRefuse(kIkRefSingular);
                     continue;
                 }
@@ -19490,6 +19544,7 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
                 const nofoot::IkStableSwivel stable = nofoot::ikStableSwivel(tb, seed, outSign, elbowOutM);
                 if (!stable.ok) {
                     nofoot::ikPhysicalPoleResetSide(s_physicalPole, side);
+                    if (side == 0) s_f159Poles.gone(nofoot::f159::kWhyRefused, now);
                     ikRefuse(kIkRefSingular);
                     continue;
                 }
@@ -19498,6 +19553,56 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
                 // Keep the authored-pose acquisition ramp; at weight 1 this is the transported physical pole's exact solution.
                 theta = wSolve * nofoot::ikWrapPi(stable.theta);
                 if (stable.transportedReference) stablePoleReferenceTheta = tb.angleOf(stable.reference);
+                if (side == 0) {
+                    // F159: the left elbow's pole. The preferred elbow is the transported reference placed on the circle; when it is within 1 cm of the shoulder's height or above
+                    // (the nearest feasible swivel then parks the elbow on the E.y <= S.y ceiling, 2 to 13 deg off the reference) for three solves in a row with the arm bent, the seed is
+                    // rebuilt from the body-down pole (at most one reseed in 0.5 s). Measured on every solve with the stable pole.
+                    const double refTheta = tb.angleOf(stable.reference);
+                    double Ep[3];
+                    tb.elbowAt(refTheta, Ep);
+                    const double prefOver = Ep[1] - tb.S[1];
+                    o.f159Measured = true;
+                    o.f159Hip = nofoot::f159::atHip(bodyDetachForCall);
+                    o.f159PrefOverM = prefOver;
+                    o.f159Ceiling = nofoot::f159::atCeiling(prefOver);
+                    o.f159DispDeg = std::fabs(nofoot::ikWrapPi(stable.theta - refTheta)) * 180.0 / nofoot::kIkPi;
+                    if (s_f159Gate.step(nofoot::f159::reseedCondition(prefOver, tb.h), now)) {
+                        const double bodyUp[3] = {0.0, 1.0, 0.0};
+                        const nofoot::IkPistolDownSwivel down = nofoot::ikPistolDownSwivel(tb, seed.previous, bodyUp, elbowOutM, trimRad);
+                        if (down.ok) {
+                            stablePoleFallback = down.usedFallback;
+                            o.poseOutWaived = true;   // the body-down pole replaces the model-X half-space for this solve, as F81's pistol and F84's rifle support do
+                            o.f159Reseed = true;
+                            o.f159Birth = nofoot::f159::kWhyReseed;
+                            theta = wSolve * nofoot::ikWrapPi(down.theta);
+                            stablePoleReferenceTheta = tb.angleOf(down.reference);
+                            std::memcpy(seed.axis, down.axis, sizeof(seed.axis));
+                            std::memcpy(seed.reference, down.reference, sizeof(seed.reference));
+                            uint32_t skipped = 0;
+                            if (s_f159BirthLimit.take(now, &skipped)) {
+                                double Er[3];
+                                tb.elbowAt(down.theta, Er);
+                                nofoot::f159::BirthLine bl;
+                                bl.why = bl.since = nofoot::f159::kWhyReseed;
+                                bl.reseed = true;
+                                bl.baseDeg = nofoot::ikWrapPi(down.theta) * 180.0 / nofoot::kIkPi;
+                                bl.seededOverCm = (Er[1] - tb.S[1]) * 100.0;
+                                bl.fpOverCm = (fE[1] - fS[1]) * 100.0;
+                                bl.handErrCm = o.dist;
+                                bl.armedRamp = static_cast<double>(armedW);
+                                bl.stance = g_f119StancePub.load(std::memory_order_relaxed);
+                                bl.pitchOk = pinCall.localPitchValid;
+                                bl.pitchDeg = pinCall.localPitchDeg;
+                                bl.wasOverCm = prefOver * 100.0;
+                                bl.offsetCm = tb.h * 100.0;
+                                bl.skipped = skipped;
+                                char reseedLine[400];
+                                nofoot::f159::formatBirth(reseedLine, sizeof(reseedLine), bl);
+                                Log::get().note("%s", reseedLine);
+                            }
+                        }
+                    }
+                }
                 // F98a: the seed's axis and reference are kept, so the next frame transports the reference from the seed in one rotation. Carried frame to
                 // frame (F76 to F97), the reference picked up the rotation of every loop the arm's axis went round (the aim's pitch, the pin moving the body with
                 // the head's pitch, F82's torso yaw) and the elbow came to rest up to 90 deg off the stance's own plane; from the seed it depends on where the
@@ -19686,6 +19791,8 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
                 o.f98Axis[i] = tb.dir[i];
             }
             o.f98RadialOk = nofoot::ikUnit(o.f98Radial, o.f98Radial);
+            o.f159SolvedOverM = E[1] - S[1];   // F159: the solved elbow's height over the shoulder, and the FP elbow's over the FP shoulder
+            o.f159FpOverM = fE[1] - fS[1];
         }
         o.hFlexAnim = hs.flexAnimDeg;
         o.hFlexSolved = hs.flexSolvedDeg;
@@ -20339,6 +20446,17 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
                 f.spanMax = std::max(f.spanMax, so[0].f98SeedSpanDeg);
             }
             if (so[0].hTwistLimited) ++f.twistLimited;
+            if (so[0].f159Measured) {   // F159: this solve's figures of the left elbow's stable pole
+                nofoot::f159::Sample sample159;
+                sample159.solvedOverM = so[0].f159SolvedOverM;
+                sample159.fpOverM = so[0].f159FpOverM;
+                sample159.dispDeg = so[0].f159DispDeg;
+                sample159.ceiling = so[0].f159Ceiling;
+                sample159.hip = so[0].f159Hip;
+                sample159.reseed = so[0].f159Reseed;
+                sample159.birth = so[0].f159Birth;
+                f.f159.add(sample159);
+            }
             g_f98Seq.fetch_add(1, std::memory_order_release);
         }
         pinRecord(pinCall, res);
@@ -20631,6 +20749,7 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
             g_ikWriteDown.store(true, std::memory_order_relaxed);
             for (int side = 0; side < 2; ++side)
                 if (physicalPoleAttempted[side]) nofoot::ikPhysicalPoleResetSide(s_physicalPole, side);
+            if (physicalPoleAttempted[0]) s_f159Poles.gone(nofoot::f159::kWhyRefused, now);
             return ikRefuse(kIkRefWrite);
         }
     }
@@ -20949,7 +21068,10 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
     for (int side = 0; side < 2; ++side) if (physicalPoleAttempted[side]) {
         if (physicalPoleCommitValid[side] && so[side].wrote && so[side].poseActualValid && g_heldItemSerial.load(std::memory_order_acquire) == itemSerialForCall)
             s_physicalPole.side[side] = physicalPoleCommit[side];
-        else if (!(side == 0 && f83SelectionSuspended)) nofoot::ikPhysicalPoleResetSide(s_physicalPole, side);
+        else if (!(side == 0 && f83SelectionSuspended)) {
+            nofoot::ikPhysicalPoleResetSide(s_physicalPole, side);
+            if (side == 0) s_f159Poles.gone(nofoot::f159::kWhyUncommitted, now);
+        }
     }
     if (gripPending && g_heldItemSerial.load(std::memory_order_acquire) == itemSerialForCall) gripPost(gripSample);
 }
@@ -21377,10 +21499,11 @@ struct F125ElbowWindow {
     int stance = 2;
     bool detail = false, active = false;
     char item[64] = "none";
+    nofoot::f159::HighSeconds high;   // F159: the seconds with the left elbow at the shoulder's height, and the run at the hip (kept across a window that closes full)
 };
 F125ElbowWindow g_f125Elbow;
 nofoot::logpin::ContextSecond g_f125ElbowContext;
-void f125ElbowClose(uint64_t now) noexcept {
+void f125ElbowClose(uint64_t now, bool keepRun = false) noexcept {
     F125ElbowWindow& w = g_f125Elbow;
     if (w.seconds && w.sum.n) {
         const F98Left& f98 = w.sum;
@@ -21407,8 +21530,16 @@ void f125ElbowClose(uint64_t now) noexcept {
                         f98.yawMax, f98.planeSum / n98, f98.planeMax, static_cast<unsigned>(f98.planeOver45), f98.steps ? std::sqrt(f98.stepSq / f98.steps) : 0.0,
                         f98.stepMax, f98.stepsOver10, f98.steps, f98.src[1], f98.spanN ? f98.spanSum / f98.spanN : 0.0, f98.spanMax, f98.src[2], f98.src[0],
                         f98.twistLimited, down98, w.swung, w.flips, w.nearCount, w.twisted, w.nearTwisted);
+        // F159: the left elbow's stable pole in the same window, on a line of its own (F98a's has no room left under the log's 1200 bytes)
+        if (f98.f159.n) {
+            char line159[1100];
+            nofoot::f159::formatSummary(line159, sizeof(line159), w.seconds, w.item, f98.f159, w.high);
+            Log::get().note("%s", line159);
+        }
     }
+    const nofoot::f159::HighSeconds carried159 = w.high.next(keepRun);
     w = F125ElbowWindow{};
+    w.high = carried159;
 }
 void f66dLine(uint64_t now, int mode) noexcept {
     F125ElbowWindow& pending = g_f125Elbow;
@@ -21493,13 +21624,14 @@ void f66dLine(uint64_t now, int mode) noexcept {
         }
         nofoot::logpin::elbow(w.sum, f98);
         w.swung += f98.planeOver45 * 2 > f98.n;
+        w.high.fold(f98.f159);   // F159
         if (f98.downN && f98.downStepMax > 10.0) {
             ++w.flips;
             if (f98.downStepAng < 15.0 || f98.downStepAng > 165.0) { ++w.nearCount; w.nearTwisted += f98.downStepTwist != 0; }
             else if (f98.downStepTwist) ++w.twisted;
         }
         ++w.seconds;
-        if (mixedRawSecond || nofoot::logwin::due(w.seconds)) f125ElbowClose(now);
+        if (mixedRawSecond || nofoot::logwin::due(w.seconds)) f125ElbowClose(now, !mixedRawSecond);
 
     }
 }
