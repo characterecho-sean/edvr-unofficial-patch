@@ -2945,8 +2945,11 @@ struct AdsSightGrowth {
 // (the rifle's lens dot within 0.6 deg, the pistol's rear sight within 1 deg): P14 is the animator's eye point. The F63 lock removed only the perpendicular part of
 // the error, so the rifle eye sat 7.3 cm AHEAD of P14 and the pistol eye 5.7 cm BEHIND it. The sights are 33.3 cm (the rifle's lens ring) and 40.8 cm (the pistol's
 // rear sight) ahead of P14; the flat game narrows the FOV to make them look bigger, which VR cannot do, so "closer" is the eye moving forward along the sight line:
-// the target eye point is P14w + k f, k the user's setting (0..30 cm, default 15: the rifle eye about 18 cm behind the lens ring, the pistol's about 26 cm behind
-// the rear sight), never closer than kAdsEyeClearanceM to any FP weapon point readable on the line.
+// the target eye point is P14w + k f, never closer than kAdsEyeClearanceM to any FP weapon point readable on the line. F149: k is the user's setting (0..30 cm, default 21)
+// as the furthest forward the eye sits: k = min(the setting, the game's own ADS camera depth for the held (item, scope): E's forward from P14, the settled line's or the
+// baked table's, native_on_foot_f149.h), then the 0..30 cm clamp (adsEyeDistanceClampCm), then the clearance cap (adsEyeDistanceCap). So the eye is never further forward than
+// the setting, and goes back to the game's camera where that is further back than the setting (the laser SMG's is 15 cm, the pistols' behind P14: 0). An item with neither a
+// line nor a table row has the setting alone. The one k feeds the eye point, the clearance cap, the error to the target and the sight line's shift (F143's Q).
 // The lock's target is absolute: on an active ADS tick with a valid rendered-eye measurement, target = applied + measured error. One critically damped filter
 // (tau kAdsEyeTauSec) follows that target; a missing measurement holds the last target. The actual ADS state gates the target, independently of the head-aim ramp.
 constexpr double kAdsEyeDistDefaultCm = 21.0, kAdsEyeDistMaxCm = 30.0;   // F98c: the pilot's (15 before)
