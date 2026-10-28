@@ -70,6 +70,7 @@
 #include "native_on_foot_f117.h"   // F117: the panel cursor's place on a turned panel (pure parts)
 #include "native_on_foot_f120.h"   // F120: the panel cursor kept on the panel when the head turns (pure parts)
 #include "native_on_foot_f122.h"   // F122: the on-foot panel mouse cursor hidden by default (pure parts)
+#include "native_on_foot_f154.h"   // F154: the pick mesh's lever read from the game, the cursor's live A/B and the signed turn instrument (pure parts)
 #include "native_on_foot_f126.h"   // F126: the pin's eye pair, the arm IK's snapshot rig, three review findings (pure parts)
 #include "native_on_foot_f115.h"   // F115: boarding undoes every on-foot camera change (pure parts)
 #include "native_on_foot_f118.h"   // F118: why the reticle is seen double, measure only (pure parts)
@@ -368,6 +369,9 @@ std::atomic<float> g_hudDistance{nofoot::kHudDefaultDistance};   // fix.native_o
 float g_hudDistanceLast = -1.0f;                   // frame thread only: as last logged (F12)
 std::atomic<bool> g_panelMouse{false};             // F122: fix.native_on_foot_panel_mouse is on, live: the game's cursor is drawn on on-foot panels (F117 and F120, panel); off hides it
 int g_panelMouseLast = -1;                         // frame thread only: as last logged
+std::atomic<int> g_panelCursorTest{0};             // F154: fix.native_on_foot_panel_cursor_test as a nofoot::f154::Setting (shipped when unknown), live; the VR profile's only
+int g_panelCursorTestLast = -1;                    // frame thread only: as last logged
+std::string g_panelCursorTestBadLast;              // frame thread only: the unknown value last named
 std::atomic<bool> g_meshCreateLive{false};         // the creation patch is applied (set by the frame thread; read by the P2 hook, F12)
 
 bool g_panelsKeyLast = false, g_meshKeyLast = false;   // frame thread only: as last logged
@@ -892,6 +896,25 @@ void readKey() {
                         "pointer is; on draws it, which may not line up with the panel in VR)",
                         mouseOn ? "on" : "off");
         g_panelMouseLast = mouseOn ? 1 : 0;
+    }
+    // F154 (TEMPORARY, live, menu "Panel cursor (test)"): where the cursor is placed with fix.native_on_foot_panel_mouse on, VR only (the flat profile keeps shipped, and reads
+    // "off" for a key its allow-list lacks). An unknown value places it as shipped and is named once.
+    {
+        const std::string cursorTest = cfg.getString("fix.native_on_foot_panel_cursor_test", "shipped");
+        nofoot::f154::Setting setting = nofoot::f154::Setting::kShipped;
+        const bool known = nofoot::f154::parseSetting(cursorTest.c_str(), &setting);
+        if (!known && !runtimeFlatProfile() && cursorTest != g_panelCursorTestBadLast) {
+            Log::get().note("native on foot: fix.native_on_foot_panel_cursor_test = %s is not shipped, uv, game, drawn or mirrored; the cursor is placed as shipped", cursorTest.c_str());
+            g_panelCursorTestBadLast = cursorTest;
+        }
+        g_panelCursorTest.store(static_cast<int>(setting), std::memory_order_relaxed);
+        if (first || static_cast<int>(setting) != g_panelCursorTestLast) {
+            Log::get().note("native on foot panel cursor (F154): %s (TEMPORARY, live; with fix.native_on_foot_panel_mouse on, the cursor on a screen-space panel is placed: "
+                            "shipped = F117 then F120, uv = F117 alone, game = the game's own place, drawn = the game's place with the pick mesh's lever undone, "
+                            "mirrored = the same lever taken as the cursor's draw divides by |rho|; the clicks land where the mouse is in every setting)",
+                            nofoot::f154::settingName(setting));
+            g_panelCursorTestLast = static_cast<int>(setting);
+        }
     }
     int smooth =cfg.getInt("fix.native_on_foot_hud_follow_smoothing_ms", nofoot::kHudSmoothDefault);
     if (smooth < nofoot::kHudSmoothMin) smooth = nofoot::kHudSmoothMin;
@@ -5002,6 +5025,22 @@ uint64_t g_f120LastMs = 0, g_f120SecondsWith = 0;   // frame thread only
 std::atomic<int> g_f120Pin{0};
 uint8_t g_f120PinBytes[16] = {};                    // written before g_f120Pin is set
 bool g_f120PinLogged = false;                       // frame thread only
+// F154: the screen-space pick mesh owner's transform hook (installed on the first frame the key is on in VR, not before), the last lever per owner, the turn
+// instrument and its second's and window's readings (all under g_f111Mu except where said), the dump-sync records and the per-setting totals.
+F9Probe g_f154Probe;
+bool g_f154Tried = false;                           // frame thread only
+std::atomic<bool> g_f154Armed{false};               // set by the frame thread after the install; the hook's gate is g_f154Probe.gate
+nofoot::f154::LeverTable g_f154Levers;
+nofoot::f154::TurnTracker g_f154Turn;
+nofoot::f154::Sec g_f154Sec;                        // this second's
+nofoot::f154::Sec g_f154Win;                        // this 10 s window's writes line
+nofoot::f154::Sec g_f154Total;                      // the flight's under the current setting: frame thread only
+nofoot::f154::FrameRec g_f154Frames[nofoot::f154::kFrameRecords];   // the dump-sync records queued by placements, written by the frame thread
+uint32_t g_f154FrameHead = 0, g_f154FrameTail = 0, g_f154FrameDropped = 0;   // head: next to write (hook), tail: next to print (frame thread)
+uint32_t g_f154LastRecLedger = 0;                   // under g_f111Mu: the last dump-sync record's eye run frame and panel (one record per frame and panel)
+uintptr_t g_f154LastRecPanel = 0;
+int g_f154TallySetting = -1;                        // frame thread only: the setting the totals and the window belong to
+uint64_t g_f154LastMs = 0, g_f154WinMs = 0, g_f154SecondsJudged = 0, g_f154WinSeconds = 0;   // frame thread only
 // F122: this second's panels seen (a placement that set the hit byte), sprites hidden and hides whose write failed (the hook threads add, the frame thread takes).
 std::atomic<uint32_t> g_f122Seen{0}, g_f122Hidden{0}, g_f122Failed{0};
 // F131: panels reached, ever (g_f122Seen is taken to zero by its window): look to aim holds while this moves (the placement hook runs every frame a panel is up).
@@ -5118,7 +5157,7 @@ void f111ReadCamera(uintptr_t ctl) {
 
 // F114b: the eye's view as the F9 probe last read it: the HRC submit's view rows (+0x20..+0x4C) and position (+0x50), the left eye's (view 2)
 // when there is one, else any. False without one (the flat profile, or before the first HUD submit).
-bool f114bEyeView(double E[9], double e[3]) {
+bool f114bEyeView(double E[9], double e[3], int* viewId = nullptr) {
     F9Lock lock;
     const F9InstRow* pick = nullptr;
     for (const auto& r : g_f9Insts) {
@@ -5133,6 +5172,7 @@ bool f114bEyeView(double E[9], double e[3]) {
     for (int i = 0; i < 3; ++i)
         for (int k = 0; k < 3; ++k) E[i * 3 + k] = pick->rot[i * 4 + k];
     for (int k = 0; k < 3; ++k) e[k] = pick->cam[k];
+    if (viewId) *viewId = static_cast<int>(pick->viewId);
     return true;
 }
 
@@ -5303,27 +5343,34 @@ void panelMouseHide(uintptr_t ctl) {
 }
 
 // F120: whether the panel's pick mesh owner is the screen-space kind: the pinned function at its vtable +0x10, a non-empty list and the first entry's flag.
-bool f120ScreenSpace(uintptr_t list) {
+// ownerOut (F154, whose lever is kept per owner) gets the owner pointer as soon as it is read.
+bool f120ScreenSpace(uintptr_t list, uintptr_t* ownerOut = nullptr) {
     namespace w = nofoot::f120;
     uintptr_t owner = 0, vt = 0, fn = 0, array = 0, first = 0;
     uint64_t count = 0;
     uint8_t flag = 0;
-    if (!g_base || !guardedRead(list, &owner, 8) || !owner || !guardedRead(owner, &vt, 8) || !vt || !guardedRead(vt + 0x10, &fn, 8) || fn != g_base + w::kOwnerRva ||
+    if (!g_base || !guardedRead(list, &owner, 8) || !owner) return false;
+    if (ownerOut) *ownerOut = owner;
+    if (!guardedRead(owner, &vt, 8) || !vt || !guardedRead(vt + 0x10, &fn, 8) || fn != g_base + w::kOwnerRva ||
         !guardedRead(owner + w::kOffOwnerCount, &count, 8) || !count || !guardedRead(owner + w::kOffOwnerArray, &array, 8) || !array ||
         !guardedRead(array, &first, 8) || !first || !guardedRead(first + w::kOffScreenFlag, &flag, 1))
         return false;
     return w::screenSpace(fn - g_base, count, flag);
 }
 
-// After a 2D placement on a panel (its window ran and its sprite is placed), the sprite's place, written once at +0x140 and nowhere else (the clicks keep the
-// true uv): F117 first, the sprite on a turned pick mesh as its setting asks (an upright mesh, the flat profile and the setting game leave the game's place;
-// it reads the panel's pick triangles, the ones the game just interpolated), then F120, the point carried by what the head has turned against the HUD frame
-// since the panel opened (screen-space panels only), starting from F117's point where F117 moved the sprite.
+/// After a 2D placement on a panel (its window ran and its sprite is placed), the sprite's place, written once at +0x140 and nowhere else (the clicks keep the
+// true uv). F154 chooses it by the live setting (fix.native_on_foot_panel_cursor_test; the flat profile is always shipped). shipped: F117 first, the sprite on a
+// turned pick mesh as its setting asks (an upright mesh, the flat profile and the setting game leave the game's place; it reads the panel's pick triangles, the ones
+// the game just interpolated), then F120, the point carried by what the head has turned against the HUD frame since the panel opened (screen-space panels only),
+// starting from F117's point where F117 moved the sprite. uv: F117's point alone. game: no write. drawn and mirrored: the game's own sprite (read before any
+// write) with the pick mesh's lever undone, from the lever the owner transform hook read for this panel's owner (screen-space panels only).
 void panelCursorApply(uintptr_t ctl, uintptr_t panel, float u, float v) {
     namespace z = nofoot::f117;
     namespace w = nofoot::f120;
+    namespace y = nofoot::f154;
     const bool flat = runtimeFlatProfile();
     const z::Mode mode = flat ? z::Mode::kGame : z::Mode::kPanel;   // F122: panel, fixed (the retired test key chose between panel, view and game)
+    const y::Setting setting = flat ? y::Setting::kShipped : static_cast<y::Setting>(g_panelCursorTest.load(std::memory_order_relaxed));
     uint8_t hit = 0;
     float sprite[3] = {};
     if (!guardedRead(ctl + nofoot::f111::kOffHit, &hit, 1) || !hit || !guardedRead(ctl + nofoot::f111::kOffPos, sprite, sizeof(sprite))) return;
@@ -5350,12 +5397,14 @@ void panelCursorApply(uintptr_t ctl, uintptr_t panel, float u, float v) {
     in.v = v;
     in.key = panel;
     for (int k = 0; k < 3; ++k) in.p[k] = f117Moved ? d117.target[k] : static_cast<double>(sprite[k]);
+    uintptr_t owner = 0;
+    double eyeO[3] = {};
+    int eyeView = 0;
     if (!flat) {
         in.pinned = g_f120Pin.load(std::memory_order_relaxed) == 1;
-        in.screen = in.pinned && listOk && f120ScreenSpace(list);
+        in.screen = in.pinned && listOk && f120ScreenSpace(list, &owner);
         if (in.screen) {
-            double eyeO[3] = {};
-            in.haveEye = f114bEyeView(in.E, eyeO);
+            in.haveEye = f114bEyeView(in.E, eyeO, &eyeView);
             float m[16] = {};
             if (g_f12Hrc && guardedRead(g_f12Hrc + nofoot::kF9HrcMatrixOff, m, sizeof(m))) {
                 for (int r = 0; r < 3; ++r)
@@ -5365,12 +5414,17 @@ void panelCursorApply(uintptr_t ctl, uintptr_t panel, float u, float v) {
         }
     }
     w::Out out;
+    y::Lever lever;
+    bool haveLever = false;
     {
         std::lock_guard<std::mutex> lock(g_f111Mu);
-        out = g_f120.place(in);
+        if (y::appliesF120(setting)) out = g_f120.place(in);   // F154: the other settings leave F120's tracker, and so its counts and rule, idle
+        if (in.screen && owner) haveLever = g_f154Levers.fresh(owner, in.frame, &lever);
     }
-    double target[3] = {};
-    const bool wantWrite = w::finalTarget(f117Moved, d117.target, out, target);
+    const double game[3] = {sprite[0], sprite[1], sprite[2]};   // the game's own place, read before any write
+    const y::Pick pick = y::choose(setting, in.screen, f117Moved, d117.target, out, game, haveLever ? &lever : nullptr);
+    const bool wantWrite = pick.write;
+    const double* target = pick.target;
     bool written = true;
     if (wantWrite)
         written = guardedWriteFloat(ctl + nofoot::f111::kOffPos, static_cast<float>(target[0])) &&
@@ -5378,15 +5432,73 @@ void panelCursorApply(uintptr_t ctl, uintptr_t panel, float u, float v) {
                   guardedWriteFloat(ctl + nofoot::f111::kOffPos + 8, static_cast<float>(target[2]));
     double shown[3] = {sprite[0], sprite[1], sprite[2]};   // F117's reading is of its own place, before F120's rotation
     if (f117Moved) {
-        if (written)
+        if (!y::appliesF117(setting))
+            d117.why = z::Why::kGame;   // F154: this setting does not place the sprite from F117's point (the point still feeds the uv stream below)
+        else if (written)
             for (int k = 0; k < 3; ++k) shown[k] = d117.target[k];
         else
             d117.why = z::Why::kNotAtUv;   // counted as refused; the game's place stands
     }
     const double uc = u < 0.0f ? 0.0 : u > 1.0f ? 1.0 : u, vc = v < 0.0f ? 0.0 : v > 1.0f ? 1.0 : v;
+    // F154: the turn instrument's three streams of points: the game's, F117's (the game's where F117 did not move it) and the written one (the game's where nothing was).
+    double streams[y::kStreams][3];
+    for (int k = 0; k < 3; ++k) {
+        streams[y::kGame][k] = game[k];
+        streams[y::kUv][k] = f117Moved ? d117.target[k] : game[k];
+        streams[y::kWritten][k] = wantWrite && written ? target[k] : game[k];
+    }
+    y::TurnInput ti;
+    if (!flat && in.screen) {
+        ti.frame = in.frame;
+        ti.key = panel;
+        ti.u = u;
+        ti.v = v;
+        ti.haveEye = in.haveEye;
+        ti.haveHrc = in.haveHrc;
+        std::memcpy(ti.E, in.E, sizeof(ti.E));
+        std::memcpy(ti.H, in.H, sizeof(ti.H));
+        std::memcpy(ti.eye, eyeO, sizeof(ti.eye));
+        std::memcpy(ti.p, streams, sizeof(ti.p));
+    }
     std::lock_guard<std::mutex> lock(g_f111Mu);
     if (have117) z::add(g_f117Sec, g_f117Last, d117, uc, vc, shown);
     if (wantWrite && !written && out.why == w::Why::kApplied && out.changes) g_f120.writeFailed();
+    if (flat) return;
+    g_f154Sec.addPlacement(in.screen, pick, written);
+    if (in.screen) g_f154Turn.place(ti, g_f154Sec);
+    // F154: while an eye run is capturing, this placement's numbers beside the frame the dump records, for the frame thread to write (one record per frame and panel).
+    if (!g_menuInput.active()) return;
+    const uint32_t ledger = g_menuInput.frame.load(std::memory_order_relaxed);
+    if (ledger == g_f154LastRecLedger && panel == g_f154LastRecPanel) return;
+    if (g_f154FrameHead - g_f154FrameTail >= y::kFrameRecords) {
+        ++g_f154FrameDropped;
+        return;
+    }
+    y::FrameRec& r = g_f154Frames[g_f154FrameHead % y::kFrameRecords];
+    r = y::FrameRec{};
+    r.used = true;
+    r.ledger = ledger;
+    r.render = in.frame;
+    r.panel = panel;
+    r.setting = static_cast<uint8_t>(setting);
+    r.u = u;
+    r.v = v;
+    std::memcpy(r.p, streams, sizeof(r.p));
+    r.wrote = wantWrite && written;
+    r.haveLever = haveLever;
+    if (haveLever) {
+        r.rho = lever.rho;
+        for (int k = 0; k < 3; ++k) r.q[k] = lever.q[k];
+    }
+    r.haveEye = in.screen && in.haveEye;
+    r.haveHrc = in.screen && in.haveHrc;
+    r.viewId = eyeView;
+    std::memcpy(r.E, in.E, sizeof(r.E));
+    std::memcpy(r.eye, eyeO, sizeof(r.eye));
+    std::memcpy(r.H, in.H, sizeof(r.H));
+    ++g_f154FrameHead;
+    g_f154LastRecLedger = ledger;
+    g_f154LastRecPanel = panel;
 }
 
 // The placement on one panel: scopes the panel's ray hit and cursor window to this controller.
@@ -5540,6 +5652,69 @@ uint64_t __fastcall f114bOwnerXformHooked(void* owner, void* out, uint64_t c, ui
     std::memcpy(s->ext.owner16, o16, sizeof(o16));
     std::memcpy(s->ext.out16, q16, sizeof(q16));
     return result;
+}
+
+// F154: the screen-space pick mesh owner's transform (the owner's vtable +0x10 at exe+0x47299F0, rcx the owner, rdx the output block), VR only, installed the first
+// frame fix.native_on_foot_panel_mouse is on. After the game's function filled its block, the lever it applied (rho = out scale / the entry's scale, and q' =
+// the position after it) is kept per owner with the native frame, for the placement that follows (panelCursorApply), and the fov fields the game computed rho
+// from are read once a frame as a cross-check. Nothing is written.
+uint64_t __fastcall f154OwnerXformHooked(void* owner, void* out, uint64_t c, uint64_t d) {
+    const F9Fn4 original = reinterpret_cast<F9Fn4>(g_f154Probe.original);
+    if (!original) return 0;
+    const uint64_t result = original(owner, out, c, d);
+    if (!owner || !out) return result;
+    namespace y = nofoot::f154;
+    const auto read = [](uintptr_t address, void* destination, size_t bytes) { return guardedRead(address, destination, bytes); };
+    const uintptr_t o = reinterpret_cast<uintptr_t>(owner);
+    y::Lever lever;
+    const y::ReadResult rr = y::readLever(o, reinterpret_cast<uintptr_t>(out), read, &lever);
+    const uint32_t frame = g_nativeOnFootTeeFrameNow.load(std::memory_order_relaxed);
+    bool crossDue = false;
+    {
+        std::lock_guard<std::mutex> lock(g_f111Mu);
+        g_f154Sec.addCall(rr);
+        if (rr == y::ReadResult::kLever) {
+            lever.frame = frame;
+            g_f154Levers.put(lever);
+            g_f154Sec.addLever(lever.rho, lever.q[2]);
+            crossDue = g_f154Levers.crossDue(frame);
+            if (crossDue) g_f154Levers.crossTaken(frame);
+        }
+    }
+    if (crossDue) {
+        const y::Cross cross = y::readCross(o, read);
+        std::lock_guard<std::mutex> lock(g_f111Mu);
+        g_f154Sec.haveCross = cross.haveC1 || cross.haveUi || cross.haveMode;
+        g_f154Sec.cross = cross;
+    }
+    return result;
+}
+
+// Frame thread, once, the first frame the key is on in VR (not before: with the key off the game's function is never touched): the hook on the screen-space owner's
+// transform, behind the identity check, its vtable slot and the 16-byte pin F120 uses. One line says whether it armed and why not.
+void installF154Once() {
+    if (g_f154Tried || !g_f111Tried || runtimeFlatProfile() || !g_panelMouse.load(std::memory_order_relaxed)) return;
+    g_f154Tried = true;
+    namespace y = nofoot::f154;
+    const uintptr_t base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+    const char* peWhy = nullptr;
+    std::string why;
+    uintptr_t slot = 0;
+    size_t stolen = 0;
+    const F9ProbeSpec spec{"native-on-foot-pick-owner-lever", y::kOwnerRva, nofoot::f120::kOwnerPrologue, sizeof(nofoot::f120::kOwnerPrologue), y::kOwnerStolen,
+                           reinterpret_cast<void*>(&f154OwnerXformHooked), "owner lever"};
+    if (!base || !checkIdentity(base, &peWhy)) {
+        why = std::string("identity mismatch (") + (peWhy ? peWhy : "no module") + ")";
+    } else if (!guardedRead(base + y::kOwnerSlotRva, &slot, 8) || slot != base + y::kOwnerRva) {
+        why = "its vtable slot does not hold it";
+    } else if (installF9ProbeInto(g_f154Probe, spec, base, &stolen, &why)) {
+        g_f154Probe.gate.store(0, std::memory_order_seq_cst);   // opened by the frame thread while the key is on and native stereo is on foot
+        g_f154Armed.store(true, std::memory_order_release);
+    }
+    const bool armed = g_f154Armed.load(std::memory_order_acquire);
+    Log::get().note("panel lever (F154): lever hook %s at EliteDangerous64.exe+0x%llX (the screen-space pick mesh owner's vtable +0x10, build 334925, "
+                    "prologue and slot verified; the lever and the fields it comes from are read, nothing is written), profile vr%s%s",
+                    armed ? "armed" : "NOT armed", static_cast<unsigned long long>(y::kOwnerRva), armed ? "" : ": ", armed ? "" : why.c_str());
 }
 
 // Frame thread, once: VR only, behind the identity check and each hook's vtable slot. One line for the four.
@@ -5784,6 +5959,71 @@ void f120Tick(uint64_t now) {
     }
 }
 
+// Frame thread: F154's lines. The dump-sync records the placements queued during an eye run, written first (no game thread writes a line). Then once a second: the
+// turn line of a second with a judged run (the head turned over 2 deg against the HUD frame within a mouse-still run), the flight so far under the current setting
+// every 10 such seconds, and every 10 s the writes line (placements, writes and refusals whatever the head did). A setting change ends the old setting's window and
+// totals, said at once, and starts the new ones with the turn instrument's runs cleared.
+void f154Tick(uint64_t now) {
+    namespace y = nofoot::f154;
+    char line[1800];
+    for (;;) {
+        y::FrameRec r;
+        {
+            std::lock_guard<std::mutex> lock(g_f111Mu);
+            if (g_f154FrameTail == g_f154FrameHead) break;
+            r = g_f154Frames[g_f154FrameTail % y::kFrameRecords];
+            ++g_f154FrameTail;
+        }
+        y::formatFrame(line, sizeof(line), r);
+        Log::get().note("%s", line);
+    }
+    const int cur = g_panelCursorTest.load(std::memory_order_relaxed);
+    const bool changed = g_f154TallySetting >= 0 && cur != g_f154TallySetting;
+    if (!changed && now - g_f154LastMs < 1000) return;
+    g_f154LastMs = now;
+    y::Sec sec;
+    {
+        std::lock_guard<std::mutex> lock(g_f111Mu);
+        sec = g_f154Sec;
+        g_f154Sec = y::Sec{};
+        if (changed) g_f154Turn.reset();
+    }
+    const char* setting = y::settingName(static_cast<y::Setting>(g_f154TallySetting >= 0 ? g_f154TallySetting : cur));
+    g_f154Win.merge(sec);
+    ++g_f154WinSeconds;
+    if (sec.judgedSecond()) {
+        ++g_f154SecondsJudged;
+        g_f154Total.merge(sec);
+        y::formatTurn(line, sizeof(line), "1 s", setting, sec);
+        Log::get().note("%s", line);
+        if (g_f154SecondsJudged % 10 == 0) {
+            char window[64];
+            std::snprintf(window, sizeof(window), "so far, %llu s with a judged run", static_cast<unsigned long long>(g_f154SecondsJudged));
+            y::formatTurn(line, sizeof(line), window, setting, g_f154Total);
+            Log::get().note("%s", line);
+        }
+    }
+    if (changed && g_f154SecondsJudged > 0 && g_f154SecondsJudged % 10 != 0) {   // the old setting's flight so far, said before its totals are dropped
+        char window[64];
+        std::snprintf(window, sizeof(window), "so far, %llu s with a judged run", static_cast<unsigned long long>(g_f154SecondsJudged));
+        y::formatTurn(line, sizeof(line), window, setting, g_f154Total);
+        Log::get().note("%s", line);
+    }
+    if ((changed || g_f154WinSeconds >= 10) && (g_f154Win.placements || g_f154Win.calls)) {
+        y::formatWrites(line, sizeof(line), static_cast<unsigned>(g_f154WinSeconds), setting, g_f154Win);
+        Log::get().note("%s", line);
+    }
+    if (changed || g_f154WinSeconds >= 10) {
+        g_f154Win = y::Sec{};
+        g_f154WinSeconds = 0;
+    }
+    if (changed) {
+        g_f154Total = y::Sec{};
+        g_f154SecondsJudged = 0;
+    }
+    g_f154TallySetting = cur;
+}
+
 // Frame thread: once, whether the placement hook (the one that hides) is armed, then F122's line once a second with a panel reached.
 using F125PanelWindow = nofoot::logwin::PanelWindow;
 F125PanelWindow g_f125Panel;
@@ -5840,13 +6080,15 @@ void f111RefreshGates() {
     }
     for(size_t i=0;i<kF111Hooks;++i)if(g_f111Armed[i])g_f111Probe[i].gate.store((probe||(i==0?(gates.instruments||observer):nofoot::menu_input::hookGate(static_cast<unsigned>(i),gates.instruments,gates.placement,observer)))?1u:0u,std::memory_order_seq_cst);
     if(g_f114bArmed)g_f114bProbe.gate.store(probe||gates.instruments||observer?1u:0u,std::memory_order_seq_cst);
+    if(g_f154Armed.load(std::memory_order_acquire))g_f154Probe.gate.store(gates.instruments&&!runtimeFlatProfile()?1u:0u,std::memory_order_seq_cst);   // F154: the key on, VR, on foot
     if(observer&&g_f111Armed[0])g_menuBridge.gateOpened(g_menuInput.frame.load(),menuInputQpc());
 }
 void f111Tick(uint64_t now) {
-    installF111Once();f111RefreshGates();
+    installF111Once();installF154Once();f111RefreshGates();
     f114bTick(now);
     f117Tick(now);
     f120Tick(now);
+    f154Tick(now);
     f122Tick(now);
     if (now - g_f111LastMs < 1000) return;
     g_f111LastMs = now;

@@ -11131,6 +11131,96 @@ def _hj_f120_follow(rows, ctx):
     return ("IDLE", text + "; no mouse-still second with a head turn over 5 deg under panel to judge")
 
 
+def _hfloat(text):
+    """A number a line printed, or None for the n/a it prints where it has no value."""
+    try:
+        return float(text)
+    except (TypeError, ValueError):
+        return None
+
+
+def _hmedian(values):
+    vals = sorted(v for v in values if v is not None)
+    return vals[len(vals) // 2] if vals else None
+
+
+def _hk_case(k):
+    """F154: which turn of the game's pick point a k reads as. k = 1: held on the panel in the eye's frame; 0: locked to the camera; -1 and -2: turning against the
+    head by once and twice the panel's turn; +2: with the head by twice the panel's. Anything else is named other."""
+    if k is None:
+        return "not read"
+    for centre, name in ((0.0, "about 0 (locked to the camera)"), (1.0, "about 1 (held on the panel)"), (-1.0, "about -1 (against the head, as far as the panel turns)"),
+                         (-2.0, "about -2 (against the head, twice as far as the panel turns)"), (2.0, "about +2 (with the head, twice as far as the panel turns)")):
+        if abs(k - centre) <= 0.35:
+            return name
+    return "other"
+
+
+def _hj_f154_turn(rows, ctx):
+    """F154: where the on-foot panel cursor goes, per setting of the temporary A/B key (shipped, uv, game, drawn, mirrored), and how the game's own cursor point turns
+    against the head. A second is judged when the mouse was still on a screen-space panel (the same uv in consecutive placements) and the head turned more than 2 deg
+    against the HUD frame while it was; its k per stream (the game's point, F117's, the written one) is 1 for a point held on the panel in the eye's frame, 0 locked to
+    the camera, negative against the head. OK: the active setting's written k within 0.25 of 1 on every axis it could read. PARTIAL: it differs from 1 by more than that on
+    an axis. NEVER APPLIED: the lever hook never armed, or drawn or mirrored met screen-space placements and wrote none. IDLE: no judged second. The text names the game's
+    own k and its case (about 0, 1, -1, -2, +2, other) and the sign of rho, the lever the game applies to the pick mesh."""
+    armed, sec, writes, moves = rows.get("armed", []), rows.get("sec", []), rows.get("writes", []), rows.get("setting", [])
+    if not (armed or sec or writes or moves):
+        return None
+    canon = ("shipped", "uv", "game", "drawn", "mirrored")
+    dead = [r for r in armed if r["state"] != "armed"]
+    names = [n for n in canon if n in {r["setting"] for r in sec} | {r["setting"] for r in writes}]
+    parts, never = [], []
+    for name in names:
+        s_rows, w_rows = [r for r in sec if r["setting"] == name], [r for r in writes if r["setting"] == name]
+        src = w_rows or s_rows   # the writes lines cover every placement; the turn lines only the judged seconds
+        pl, screen, written = (sum(int(r[k]) for r in src) for k in ("pl", "screen", "written"))
+        refused = [sum(int(r[k]) for r in src) for k in ("r0", "r1", "r2", "wf")]
+        text = "%s: %d placements, %d screen-space, %d written" % (name, pl, screen, written)
+        if any(refused):
+            text += " (refused: " + ", ".join("%s %d" % (n, c) for n, c in zip(("no lever", "tiny rho", "not finite", "write failed"), refused) if c) + ")"
+        if s_rows:
+            kw = [_hmedian([_hfloat(r[key]) for r in s_rows]) for key in ("kyw", "kpw")]
+            text += "; %d judged second(s): written k yaw %s pitch %s" % (len(s_rows), "n/a" if kw[0] is None else "%+.2f" % kw[0], "n/a" if kw[1] is None else "%+.2f" % kw[1])
+        parts.append(text)
+        if name in ("drawn", "mirrored") and screen and not written:
+            never.append("%s met %d screen-space placements and wrote none (%s)" % (
+                name, screen, ", ".join("%s %d" % (n, c) for n, c in zip(("no lever", "tiny rho", "not finite", "write failed"), refused) if c) or "no refusal counted"))
+    text = "; ".join(parts) if parts else "no placement on a panel"
+    if sec:
+        kg = [_hmedian([_hfloat(r[key]) for r in sec]) for key in ("kyg", "kpg")]
+        rho = [v for v in (_hfloat(r["rm"]) for r in sec) if v is not None]
+        mean = sum(rho) / len(rho) if rho else None
+        fov = [v for v in (_hfloat(r["rfov"]) for r in sec) if v is not None]
+        text += "; the game's own point: k yaw %s, pitch %s" % tuple("n/a" if v is None else "%+.2f (%s)" % (v, _hk_case(v)) for v in kg)
+        text += "; rho %s" % ("not read" if mean is None else "%s (mean %+.3f over %d judged second(s)%s)" % (
+            "negative" if mean < 0 else "positive", mean, len(rho), "" if not fov else ", the fov ratio %.3f" % fov[-1]))
+        turn, eye = max(float(r["turn"]) for r in sec), max(float(r["eye"]) for r in sec)
+        text += "; the head turned %.1f deg at most against the HUD frame, the eye moved %.1f mm at most" % (turn, eye)
+    if dead:
+        return ("NEVER APPLIED", text + "; the lever hook was not armed (%s): the lever cannot be read and drawn and mirrored cannot act" % (
+            dead[-1]["rest"].lstrip(": ") or "no reason given"))
+    if never:
+        return ("NEVER APPLIED", text + "; " + "; ".join(never))
+    if not sec:
+        return ("IDLE", text + "; no mouse-still second with the head turned over 2 deg against the HUD frame on a screen-space panel to judge")
+    active = sec[-1]["setting"]
+    a_rows = [r for r in sec if r["setting"] == active]
+    off = []
+    read = False
+    for axis, key in (("yaw", "kyw"), ("pitch", "kpw")):
+        v = _hmedian([_hfloat(r[key]) for r in a_rows])
+        if v is None:
+            continue
+        read = True
+        if abs(v - 1.0) > 0.25:
+            off.append("%s %+.2f" % (axis, v))
+    if not read:
+        return ("IDLE", text + "; the turn was too small about either axis to read k under %s" % active)
+    if off:
+        return ("PARTIAL", text + "; under %s the written point's k is not within 0.25 of 1 (%s): the cursor does not stay on the panel" % (active, ", ".join(off)))
+    return ("OK", text + "; under %s the written point holds on the panel (k within 0.25 of 1)" % active)
+
+
 def _hj_f121_visor_axis(rows, ctx):
     """F121: the on-foot helmet visor's frame (the breath fog, the condensation, the curvature) centred on each eye's optical axis by a replacement vertex
     shader that moves the interpolated uv by s (+a/2 left, -a/2 right, a = (outer - inner) / (outer + inner) from the eye tangents). Every 30 s of visor draws: seen
@@ -13128,6 +13218,22 @@ HEALTH_RULES = (
         ("setting", r"native on foot panel mouse \(F122\): (?P<to>on|off) \(live;"),
         ("hook", r"panel mouse \(F122\): the placement hook is (?P<state>armed|NOT armed) \(EliteDangerous64\.exe\+0x(?P<rva>[0-9A-F]+)\)(?P<rest>.*)$"),
     ), _hj_f122_mouse),
+    _hrule("panel cursor turn (F154)", ("F154",), ("panel cursor turn (F154)", "panel cursor writes (F154)", "panel cursor frame (F154)", "panel lever (F154)",
+                                                     "native on foot panel cursor (F154)"), (
+        ("armed", r"panel lever \(F154\): lever hook (?P<state>armed|NOT armed) at EliteDangerous64\.exe\+0x(?P<rva>[0-9A-F]+) .*?, profile vr(?P<rest>.*)$"),
+        ("sec", r"panel cursor turn \(F154\) 1 s: setting (?P<setting>\w+); placements (?P<pl>\d+): screen-space (?P<screen>\d+), written (?P<written>\d+), refused: "
+                r"no lever (?P<r0>\d+), tiny rho (?P<r1>\d+), not finite (?P<r2>\d+), write failed (?P<wf>\d+), no eye view (?P<t0>\d+), no HRC matrix (?P<t1>\d+), "
+                r"degenerate row (?P<t2>\d+); judged (?P<judged>\d+) placements in (?P<jruns>\d+) of (?P<runs>\d+) runs, the head turned (?P<turn>[\d.]+) deg at most "
+                r"against the HUD frame, the eye moved (?P<eye>[\d.]+) mm at most; k yaw: game (?P<kyg>\S+) uv (?P<kyu>\S+) written (?P<kyw>\S+); k pitch: game (?P<kpg>\S+) "
+                r"uv (?P<kpu>\S+) written (?P<kpw>\S+); rho mean (?P<rm>\S+) min (?P<rmin>\S+) max (?P<rmax>\S+) from (?P<calls>\d+) owner calls \(screen-space (?P<lev>\d+), "
+                r"not (?P<ns>\d+), unread (?P<un>\d+)\); rho_fov (?P<rfov>\S+) fov_C1 (?P<fc1>\S+) deg fov_UI (?P<fui>\S+) deg mode (?P<mode>\S+); q\.z (?P<qz>\S+) m$"),
+        ("writes", r"panel cursor writes \(F154\) (?P<wl>\d+) s: setting (?P<setting>\w+); placements (?P<pl>\d+): screen-space (?P<screen>\d+), written (?P<written>\d+), "
+                   r"refused: no lever (?P<r0>\d+), tiny rho (?P<r1>\d+), not finite (?P<r2>\d+), write failed (?P<wf>\d+); owner calls (?P<calls>\d+) "
+                   r"\(screen-space (?P<lev>\d+), not (?P<ns>\d+), unread (?P<un>\d+)\)$"),
+        ("setting", r"native on foot panel cursor \(F154\): (?P<to>shipped|uv|game|drawn|mirrored) \(TEMPORARY"),
+        ("_", r"panel cursor turn \(F154\) so far, \d+ s with a judged run: setting "),
+        ("_", r"panel cursor frame \(F154\): ledger frame \d+ render frame \d+ panel "),
+    ), _hj_f154_turn),
     _hrule("review fixes (F126)", ("F126",), ("review fixes (F126)",), (
         ("sec", r"review fixes \(F126\) 10 s: pin eye pairs: (?P<calls>\d+) pin calls, (?P<taken>\d+) pairs taken, (?P<frames>\d+) refused for rows of two different frames; "
                 r"arm IK: (?P<ik>\d+) calls, (?P<rig>\d+) refused for an FP snapshot of an earlier rig$"),
@@ -14405,6 +14511,7 @@ def self_test_health():
     f123_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f123.h")
     f121b_path = os.path.join(repo_root(), "src", "d3d11", "visor_census_core.h")
     f121c_path = os.path.join(repo_root(), "src", "d3d11", "visor_eye_trust.h")
+    f154_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f154.h")
     try:
         source, swap, f90src, f91src = read_text(src_path), read_text(swap_path), read_text(f90_path), read_text(f91_path)
         f105src, f105note = read_text(f105_path), read_text(f105_note_path)
@@ -14415,6 +14522,7 @@ def self_test_health():
         f123src = read_text(f123_path)
         f121bsrc = read_text(f121b_path)
         f121csrc = read_text(f121c_path)
+        f154src = read_text(f154_path)
     except OSError as e:
         print("health: the DLL source the self-test reads its log formats from is not where it looks (%s)" % e)
         return False
@@ -14522,6 +14630,15 @@ def self_test_health():
             fmts[key] = health_c_format(f123src, needle)
         if fmts[key] is None:
             raise AssertionError("native_on_foot_f123.h has no format holding %r: the --health rule that reads it is out of date" % needle)
+        return health_render(fmts[key], vals)
+
+    def R154(needle, *vals):
+        """F154's lines (native_on_foot_f154.h builds them: formatTurn, formatWrites, formatFrame), from their own format literals."""
+        key = "f154:" + needle
+        if key not in fmts:
+            fmts[key] = health_c_format(f154src, needle)
+        if fmts[key] is None:
+            raise AssertionError("native_on_foot_f154.h has no format holding %r: the --health rule that reads it is out of date" % needle)
         return health_render(fmts[key], vals)
 
     def stamp(sec):
@@ -15368,6 +15485,63 @@ def self_test_health():
               has=["key on", "on: 2 s with a panel, 180 panels seen, 0 sprites hidden", "nothing is hidden by design"])
         check("F122 mouse: the key moved from off to on and back", [pm_set(), pm_hook(), pm(), pm_set("on"), pm("on", hidden=0), pm_set("off"), pm()], 0,
               [("OK", F122)], has=["key off (3 change line(s))", "off: 2 s with a panel, 180 panels seen, 180 sprites hidden", "on: 1 s with a panel, 90 panels seen"])
+
+        # ---- panel cursor turn (F154): where the cursor goes per setting, and how the game's own point turns against the head ----
+        F154 = "panel cursor turn (F154)"
+
+        def pt(setting="shipped", pl=90, screen=90, written=90, refused=(0, 0, 0, 0), tref=(0, 0, 0), judged=40, jruns=2, runs=3, turn=12.0, eye=3.0, ky=("-2.00", "+1.00", "+1.00"),
+               kp=("n/a", "n/a", "n/a"), rho=("-1.865", "-1.870", "-1.860"), calls=300, lev=300, ns=0, un=0, cross=("1.992", "93.60", "56.25", "4"), qz="+0.7450", win="1 s"):
+            return R154("panel cursor turn (F154) %s", win, setting, pl, screen, written, *refused, *tref, judged, jruns, runs, turn, eye, *ky, *kp, *rho, calls, lev, ns, un, *cross, qz)
+
+        def pw(setting="shipped", wl=10, pl=900, screen=900, written=900, refused=(0, 0, 0, 0), calls=3000, lev=3000, ns=0, un=0):
+            return R154("panel cursor writes (F154) %u s", wl, setting, pl, screen, written, *refused, calls, lev, ns, un)
+
+        def pa(state="armed", why=""):
+            return R("panel lever (F154): lever hook %s at EliteDangerous64.exe", state, 0x47299F0, ": " if why else "", why)
+
+        def ps(to="shipped"):
+            return R("native on foot panel cursor (F154): %s (TEMPORARY", to)
+
+        check("F154 cursor: shipped holds the written point on the panel; the game's own point turns twice against the head",
+              [pa(), ps(), pt(), pt(), pt(), pw()], 0, [("OK", F154)],
+              has=["shipped: 900 placements, 900 screen-space, 900 written; 3 judged second(s): written k yaw +1.00 pitch n/a",
+                   "the game's own point: k yaw -2.00 (about -2 (against the head, twice as far as the panel turns)), pitch n/a",
+                   "rho negative (mean -1.865 over 3 judged second(s), the fov ratio 1.992)", "under shipped the written point holds on the panel (k within 0.25 of 1)"],
+              lacks=["UNPARSED"])
+        check("F154 cursor: game leaves the game's own point, which is not on the panel",
+              [pa(), ps("game"), pt("game", written=0, ky=("-2.00", "+1.00", "-2.00")), pt("game", written=0, ky=("-2.01", "+1.00", "-2.01"))], 0, [("PARTIAL", F154)],
+              has=["game: 180 placements, 180 screen-space, 0 written", "under game the written point's k is not within 0.25 of 1 (yaw -2.00)"])
+        check("F154 cursor: drawn puts the written point on the panel",
+              [pa(), ps("drawn"), pt("drawn", ky=("-2.00", "-0.98", "+0.98")), pt("drawn", ky=("-2.00", "-0.98", "+1.02"))], 0, [("OK", F154)],
+              has=["under drawn the written point holds on the panel", "drawn: 180 placements, 180 screen-space, 180 written; 2 judged second(s): written k yaw +1.02 pitch n/a"])
+        check("F154 cursor: mirrored leaves it short of the panel", [pa(), ps("mirrored"), pt("mirrored", ky=("-2.00", "-0.98", "+0.55"), kp=("-1.99", "-1.01", "+0.52"))], 0,
+              [("PARTIAL", F154)], has=["under mirrored the written point's k is not within 0.25 of 1 (yaw +0.55, pitch +0.52)", "k yaw -2.00 (about -2"])
+        check("F154 cursor: every setting in turn, the last one judged",
+              [pa(), ps(), pt(), pt("shipped"), ps("uv"), pt("uv", ky=("-2.00", "-1.00", "-1.00")), ps("game"), pt("game", written=0, ky=("-2.00", "-1.00", "-2.00")),
+               ps("drawn"), pt("drawn", ky=("-2.00", "-1.00", "+1.00")), ps("mirrored"), pt("mirrored", ky=("-2.00", "-1.00", "+0.97"))], 0, [("OK", F154)],
+              has=["shipped: 180 placements", "uv: 90 placements", "game: 90 placements", "drawn: 90 placements", "mirrored: 90 placements", "under mirrored the written point holds"])
+        check("F154 cursor: the hook was not armed",
+              [pa("NOT armed", "its vtable slot does not hold it"), ps("drawn"),
+               pt("drawn", written=0, refused=(90, 0, 0, 0), ky=("-2.00", "+1.00", "-2.00"), rho=("n/a", "n/a", "n/a"), calls=0, lev=0, cross=("n/a", "n/a", "n/a", "n/a"), qz="n/a")], 3,
+              [("NEVER APPLIED", F154)], has=["the lever hook was not armed (its vtable slot does not hold it)", "rho not read"])
+        check("F154 cursor: drawn met screen-space placements and wrote none", [pa(), ps("drawn"), pw("drawn", written=0, refused=(900, 0, 0, 0), lev=0, ns=0, un=3000, calls=3000)], 3,
+              [("NEVER APPLIED", F154)], has=["drawn met 900 screen-space placements and wrote none (no lever 900)"])
+        check("F154 cursor: mirrored refused for a rho under 0.05", [pa(), ps("mirrored"), pw("mirrored", written=0, refused=(0, 900, 0, 0))], 3, [("NEVER APPLIED", F154)],
+              has=["mirrored met 900 screen-space placements and wrote none (tiny rho 900)"])
+        check("F154 cursor: shipped writing nothing is not drawn's failure", [pa(), ps(), pw("shipped", written=0)], 0, [("IDLE", F154)],
+              has=["no mouse-still second with the head turned over 2 deg against the HUD frame on a screen-space panel to judge"])
+        check("F154 cursor: the key on, the hook armed, no panel placed", [pa(), ps()], 0, [("IDLE", F154)], has=["no placement on a panel"])
+        check("F154 cursor: a turn about neither axis to read", [pa(), ps(), pt(ky=("n/a", "n/a", "n/a"), kp=("n/a", "n/a", "n/a"))], 0, [("IDLE", F154)],
+              has=["the turn was too small about either axis to read k under shipped"])
+        for k_game, word in (("+2.05", "about +2 (with the head"), ("+0.10", "about 0 (locked to the camera)"), ("+0.95", "about 1 (held on the panel)"),
+                             ("-0.90", "about -1 (against the head, as far"), ("-2.10", "about -2 (against the head, twice"), ("+0.60", "(other)")):
+            check("F154 cursor: the game's own k %s reads as %s" % (k_game, word), [pa(), ps("game"), pt("game", ky=(k_game, "+1.00", k_game), kp=(k_game, "+1.00", k_game))], 0,
+                  [("PARTIAL" if abs(float(k_game) - 1.0) > 0.25 else "OK", F154)], has=["k yaw %s (%s" % (k_game, word) if word != "(other)" else "k yaw +0.60 (other)"])
+        check("F154 cursor: a positive rho", [pa(), ps(), pt(rho=("+1.000", "+1.000", "+1.000"), ky=("+1.00", "+1.00", "+1.00"))], 0, [("OK", F154)], has=["rho positive (mean +1.000"])
+        check("F154 cursor: the flight-so-far line and the dump-sync lines are read, not counted",
+              [pa(), ps(), pt(), pt(win="so far, 10 s with a judged run"), R154("panel cursor frame (F154): ledger frame %u", 1234, 5678, 0x1234, "shipped")], 0,
+              [("OK", F154)], lacks=["UNPARSED"])
+        check("F154 cursor: a line the rule does not parse", ["panel cursor turn (F154) 1 s: a format nobody wrote"], 4, [("UNPARSED", F154)])
 
         # ---- review fixes (F126): the pin's eye pairs refused for rows of two frames, the arm IK calls refused for an FP snapshot of an earlier rig ----
         F126 = "review fixes (F126)"

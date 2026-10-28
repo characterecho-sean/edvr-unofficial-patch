@@ -51,6 +51,7 @@
 #include "f117_checks.h"    // F117: the panel cursor's place on a turned panel (the turn read from the pick mesh, panel and view)
 #include "f120_checks.h"    // F120: the panel cursor kept on the panel when the head turns (the reference, M = E Ht H0 E0t, refusals, drift, words)
 #include "f122_checks.h"    // F122: the on-foot panel mouse cursor hidden by default (the key, the one write, the counts, the hooks it opens)
+#include "f154_checks.h"    // F154: the pick mesh's lever read from the game, the cursor's live A/B (shipped, uv, game, drawn, mirrored), the signed turn instrument
 #include "f119_checks.h"    // F119: head containment, measure only (the head's offset by class, the depth grid decoded, the lines)
 #include "f126_checks.h"    // F126: the pin's eye pair from one frame, the arm IK's snapshot of the current FP rig, a nearly straight elbow reaching the grip
 #include "f123_checks.h"    // F123: head containment, the leash and the wall contact (the fade ramp, the hard timer, the contact trigger and latch, the recentre sequence, the lines)
@@ -7523,6 +7524,10 @@ int wmain(int argc, wchar_t** argv) {
     f119test::run119(check);
     // F122: the hide: the key, what a placement does, the one write against a controller's memory, the counts and the hooks the key opens.
     f122test::run122(check);
+    // F154: the lever the screen-space pick mesh owner applies, read as the hook reads it (the sign of rho, q', the fov cross-check), its undo (drawn) and its |rho| form
+    // (mirrored), the five settings' choice of point and the refusals, the lever table's freshness, and the signed turn fit (k = 0, 1, -1, -2, +2 on yaw and pitch), the
+    // eye's move, the runs, the lines.
+    f154test::run154(check);
     // F126: the review's three findings: the eye pair only from one frame (4 m/s, 90 Hz: 22 mm), the arm IK's snapshot only of the rig the plan names, a bend just under
     // the hinge window reaching the grip as exactly as one just over it.
     f126test::run126(check);

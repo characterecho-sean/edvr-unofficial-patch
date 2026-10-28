@@ -1983,6 +1983,7 @@ AUDIT_EXACT_ONLY = (
     ("d3d11/native_on_foot_f114b.h", "the exact-build panel pointer's owner transform and click path"),
     ("d3d11/native_on_foot_f116.h", "the exact-build HUD submit gate's addresses and pins"),
     ("d3d11/native_on_foot_f120.h", "the exact-build screen-space owner's address and pin"),
+    ("d3d11/native_on_foot_f154.h", "the exact-build screen-space owner's vtable slot and the stolen size of its hook"),
     ("d3d11/mem_tick.cpp", "a diagnostic whose addresses are not in the table"),
     ("d3d11/terrain_cull_cover*", "terrain cull cover, which finds its site by its own scan on an unknown build"),
 )

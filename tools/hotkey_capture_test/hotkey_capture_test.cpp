@@ -1833,8 +1833,8 @@ void testLegacyOnFootRowsStayOutOfMenu() {
     int nativePageRows = 0;
     for (int i = 0; i < kCount; ++i)
         if (strcmp(kMenuRows[i].page, "native_on_foot") == 0) ++nativePageRows;
-    check(nativePageRows == 17, "the Native on foot page has 17 rows (F127: 21 rows went to edvr.ini and the installer's window, and Reticle follows was retired; "
-                                "F128: Visor axis (test) was retired with the correction always on)");
+    check(nativePageRows == 18, "the Native on foot page has 18 rows (F127: 21 rows went to edvr.ini and the installer's window, and Reticle follows was retired; "
+                                "F128: Visor axis (test) was retired with the correction always on; F154: Panel cursor (test) is a temporary row after the HUD's)");
     // F127: the page's order and its five headings. The switch is always first; look and aim, then aiming down sights, then body and view, the HUD last. kMenuRows is in
     // edvr.ini order; the group is the ini's heading block above the key, which the page shows as a heading.
     {
@@ -1857,6 +1857,7 @@ void testLegacyOnFootRowsStayOutOfMenu() {
             {"native_on_foot_hud_element_scale", "HUD"},
             {"native_on_foot_hud_spread", "HUD"},
             {"native_on_foot_hud_follow", "HUD"},
+            {"native_on_foot_panel_cursor_test", "Panel cursor (test)"},   // F154: temporary, under its own heading after the HUD's, until the flight picks a setting
         };
         constexpr int kWant = static_cast<int>(sizeof(want) / sizeof(want[0]));
         int at = 0;
@@ -1872,7 +1873,7 @@ void testLegacyOnFootRowsStayOutOfMenu() {
             }
             ++at;
         }
-        check(inOrder && at == kWant, "the Native on foot page keeps its order and headings: Native on foot VR first, then Look and aim, Aiming down sights, Body and view, and the HUD last");
+        check(inOrder && at == kWant, "the Native on foot page keeps its order and headings: Native on foot VR first, then Look and aim, Aiming down sights, Body and view, the HUD, and F154's temporary Panel cursor (test) last");
         int firstPageRow = -1;
         for (int i = 0; i < kCount && firstPageRow < 0; ++i)
             if (strcmp(kMenuRows[i].page, "native_on_foot") == 0) firstPageRow = i;
