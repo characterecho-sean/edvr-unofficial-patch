@@ -33,11 +33,13 @@ constexpr double kPistolClass[4] = {f90::kForwardDefaultCm, f90::kLeftDefaultCm,
 constexpr double kRifleClass[4] = {f90::kRifleForwardDefaultCm, f90::kRifleLeftDefaultCm, f90::kRifleUpDefaultCm, f90::kRifleTowardDefaultCm};
 inline const double* classValues(int cls) noexcept { return cls == kClassPistol ? kPistolClass : kRifleClass; }
 
-// The totals' ranges (the class keys'), and the trims' own.
-constexpr double kMinCm[4] = {f90::kForwardMinCm, f90::kLeftMinCm, f90::kUpMinCm, f90::kTowardMinCm};
-constexpr double kMaxCm[4] = {f90::kForwardMaxCm, f90::kLeftMaxCm, f90::kUpMaxCm, f90::kTowardMaxCm};
-constexpr double kTrimMinCm[4] = {-10.0, -10.0, -10.0, -5.0};
-constexpr double kTrimMaxCm[4] = {10.0, 10.0, 10.0, 5.0};
+// The totals' ranges and the trims' own. F145: the trims run -30..+30 cm on all four axes (the pilot ran the shotgun's and the laser SMG's forward trim into its +10 stop in ADS),
+// and the totals' ranges are the same -30..+30 so that a trim is never silently cut by a narrower total (the retired class keys' ranges were forward -10..30, left -15..15, up
+// -10..10, toward eye -5..10).
+constexpr double kMinCm[4] = {-30.0, -30.0, -30.0, -30.0};
+constexpr double kMaxCm[4] = {30.0, 30.0, 30.0, 30.0};
+constexpr double kTrimMinCm[4] = {-30.0, -30.0, -30.0, -30.0};
+constexpr double kTrimMaxCm[4] = {30.0, 30.0, 30.0, 30.0};
 inline double clampTotal(int i, double cm) noexcept { return f88::clampCm(cm, kMinCm[i], kMaxCm[i]); }
 inline double clampTrim(int i, double cm) noexcept { return f88::clampCm(cm, kTrimMinCm[i], kTrimMaxCm[i]); }
 

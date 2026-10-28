@@ -12863,13 +12863,14 @@ def _hclip_text(clip, clipparts, clipw):
 
 
 def _hj_f144_readout_placement(rows, ctx):
-    """F144: the weapon readout placed per role (hip, ADS) for each weapon, dialled with the four live trims (fix.native_on_foot_weapon_ui_forward_cm, _left_cm, _up_cm,
-    _toward_eye_cm), which are added to the role drawn now (the ADS role from an ADS weight of 0.5) and to no other. Each window's line, per (item, scope, class, role), gives the
-    seed (today's values; 0 for a rifle's hip readout, which draws where the game draws it), the trims, the total, the frames the placement was applied, measured and bound at
-    the draw's issue, and the PROOF: the drawn part's move against the unplaced draw along the weapon's axes, which must equal the total's within 1 mm. The report gives, per
-    group, the totals the pilot left (by trim, as F139's rule does for the sights) and whether the move reached the draw. NEVER APPLIED when a role's total moved nothing that was
-    drawn ("NOT REACHING THE DRAW": bound on no frame, or a drawn move of 0 against a total that asks one); PARTIAL when the drawn move differed from the total by over a
-    millimetre, or the camera could not be solved; OK otherwise."""
+    """F144/F145: the weapon readout placed per role (hip, ADS) for each weapon, dialled with the four live trims (fix.native_on_foot_weapon_ui_forward_cm, _left_cm, _up_cm,
+    _toward_eye_cm, each -30..+30 cm since F145), which are added to the role drawn now (the ADS role from an ADS weight of 0.5) and to no other. Each window's line, per (item, scope,
+    class, role), gives the seed (the pilot's dialled totals since F145; 0 for a rifle's hip readout without one, which draws where the game draws it), the trims, the total, the
+    frames the placement was applied, measured and bound at the draw's issue, and the PROOF (F145): the drawn part's move against the SAME FRAME PLACED AT THE SEED ALONE, along
+    the weapon's axes, which must equal what the trims ask within 1 mm; the move against the game's own draw is information beside it. The report gives, per group, the totals the
+    pilot left (by trim, as F139's rule does for the sights) and whether the trims reached the draw. NEVER APPLIED when a role's trims moved nothing that was drawn ("NOT REACHING THE
+    DRAW": bound on no frame, or a drawn move of 0 against trims that ask one); PARTIAL when the drawn move differed from the trims' by over a millimetre, or the draw could not be
+    measured; OK otherwise (including a role with no trim asked)."""
     sec = rows.get("sec", [])
     if not sec:
         return None
@@ -12898,21 +12899,48 @@ def _hj_f144_readout_placement(rows, ctx):
         last = g["last"]
         label = "%s scope %s (%s class) %s role" % (item, scope, cls, role)
         text = ("%s: total forward %s left %s up %s toward %s cm (the last window; seed %s %s %s %s, trim %s %s %s %s), %d s, placed on %d frames, bound at the draw's issue on %d; "
-                "drawn move forward %s left %s up %s cm, worst difference %.2f mm: %s") % (
+                "drawn move against the same frame at the seed alone forward %s left %s up %s cm against the trims' %s cm, worst difference %.2f mm: %s; against the game's own draw "
+                "(information) forward %s left %s up %s cm, %s cm against the total's %s cm") % (
             label, last["f"], last["l"], last["u"], last["t"], last["sf"], last["sl"], last["su"], last["st"], last["tf"], last["tl"], last["tu"], last["tt"], g["s"], g["placed"],
-            g["bound"], last["mf"], last["ml"], last["mu"], g["diffmax"], last["verdict"])
+            g["bound"], last["mf"], last["ml"], last["mu"], last["exp"], g["diffmax"], last["verdict"], last["gf"], last["gl"], last["gu"], last["gabs"], last["gexp"])
         if len(g["by"]) > 1:
             text += "; by trim: " + ", ".join("(%s) -> (%s) (%d s)" % (" ".join("%+.1f" % x for x in tr), " ".join("%+.1f" % x for x in v[1]), v[0]) for tr, v in g["by"].items())
         parts.append(text)
         if g["bad"]:
             bad.append("%s: NOT REACHING THE DRAW in %d window(s)" % (label, g["bad"]))
         elif g["differs"] or g["unmeasured"]:
-            partial.append("%s: the drawn move differed from the total in %d window(s), not measured in %d" % (label, g["differs"], g["unmeasured"]))
+            partial.append("%s: the drawn move differed from the trims' in %d window(s), not measured in %d" % (label, g["differs"], g["unmeasured"]))
     text = "; ".join(parts)
     if bad:
         return ("NEVER APPLIED", text + " [" + "; ".join(bad) + "]")
     if partial:
         return ("PARTIAL", text + " [" + "; ".join(partial) + "]")
+    return ("OK", text)
+
+
+def _hj_f145_weapon_slots(rows, ctx):
+    """F145: the weapon UI's eight tag slots (F85b: a readout part's submit is tagged with a key, 0x70 + a slot, given to its name id). The game makes new part ids at every
+    loadout switch and a slot used to be a name's for the whole session, so the table was full after the third loadout: the plasma pistol's ADS readout and the scoped sniper's parts
+    (the F144 flight) were submitted every frame and never tagged, decided or placed. A name with no slot now takes the one asked for longest ago once that was 5 s ago. One line
+    per recycle (a name, its slot, the name it replaced, how long that had been unasked), capped at 32 a session. OK when slots changed hands; PARTIAL when a name found every slot
+    in use within 5 s (its part is not placed; the line names it and counts the submits dropped); nothing here when the table never filled."""
+    took, none, capped = rows.get("took", []), rows.get("none", []), rows.get("capped", [])
+    if not took and not none and not capped:
+        return None
+    text = ""
+    if took:
+        text = "%d slot(s) changed hands (the last: name %s took slot %s from name %s, unseen for %s s; %s recycles this session)" % (
+            len(took), took[-1]["name"], took[-1]["slot"], took[-1]["old"], took[-1]["idle"], took[-1]["n"])
+    if capped:
+        text += ("; " if text else "") + "later events were counted, not written"
+    if none:
+        names = []
+        for x in none:
+            if x["name"] not in names:
+                names.append(x["name"])
+        text += ("; " if text else "") + "NO SLOT for name(s) %s: every one of the %s slots was asked for within the last %s s, so their parts are not tagged and not placed (%s submits dropped so far)" % (
+            ", ".join(names), none[-1]["slots"], none[-1]["within"], none[-1]["dropped"])
+        return ("PARTIAL", text)
     return ("OK", text)
 
 
@@ -14121,10 +14149,17 @@ HEALTH_RULES = (
         ("sec", r"weapon UI placement \(F144\) " + H_WL + r": item (?P<item>.+?) scope (?P<scope>yes|no|unknown), (?P<cls>pistol|rifle) class, (?P<role>hip|ADS) role "
                 r"\((?P<drawn>drawn now, trimmed|seed only)\), seed forward (?P<sf>%s) left (?P<sl>%s) up (?P<su>%s) toward eye (?P<st>%s) cm, trims (?P<tf>%s) (?P<tl>%s) "
                 r"(?P<tu>%s) (?P<tt>%s) cm, total forward (?P<f>%s) left (?P<l>%s) up (?P<u>%s) toward eye (?P<t>%s) cm; placed on (?P<placed>\d+) frames, measured on "
-                r"(?P<measured>\d+), bound at the draw's issue on (?P<bound>\d+); drawn move against the unplaced draw \(mean over the bound frames\) forward (?P<mf>%s) left "
-                r"(?P<ml>%s) up (?P<mu>%s) cm along the weapon's axes, (?P<abs>[\d.]+) cm against the total's (?P<exp>[\d.]+) cm, worst difference (?P<diff>[\d.]+) mm: "
-                r"(?P<verdict>.+)$" % ((_HN,) * 15)),
+                r"(?P<measured>\d+), bound at the draw's issue on (?P<bound>\d+); drawn move against the same frame at the seed alone \(mean over the bound frames\) forward (?P<mf>%s) "
+                r"left (?P<ml>%s) up (?P<mu>%s) cm along the weapon's axes, (?P<abs>[\d.]+) cm against the trims' (?P<exp>[\d.]+) cm, worst difference (?P<diff>[\d.]+) mm: "
+                r"(?P<verdict>.+?); against the game's own draw \(information\) forward (?P<gf>%s) left (?P<gl>%s) up (?P<gu>%s) cm, (?P<gabs>[\d.]+) cm against the total's "
+                r"(?P<gexp>[\d.]+) cm$" % ((_HN,) * 18)),
     ), _hj_f144_readout_placement),
+    _hrule("weapon UI slots (F145)", ("F145",), ("weapon UI slot (F145)",), (
+        ("took", r"weapon UI slot \(F145\): name (?P<name>\d+) took slot (?P<slot>\d+) from name (?P<old>\d+), unseen for (?P<idle>%s) s \((?P<n>\d+) recycles this session\)$" % _HN),
+        ("none", r"weapon UI slot \(F145\): name (?P<name>\d+) has no slot: every one of the (?P<slots>\d+) slots was asked for within the last (?P<within>%s) s, so its submits are "
+                 r"not tagged and the part is not placed \((?P<dropped>\d+) submits dropped for want of a slot so far\)$" % _HN),
+        ("capped", r"weapon UI slot \(F145\): later events are counted, not written \(32 lines a session\)$"),
+    ), _hj_f145_weapon_slots),
     _hrule("ADS entry path (F144)", ("F144",), ("native on foot ADS entry path (F144)",), (
         ("path", r"native on foot ADS entry path \(F144\): item (?P<item>.+?) scope (?P<scope>yes|no|unknown), eye less F_root in the character's axes from right (?P<r0>%s) up "
                  r"(?P<u0>%s) cm at the press to right (?P<rs>%s) up (?P<us>%s) cm settled \(the last (?P<win>[\d.]+) s of (?P<n>\d+) engaged eye samples\); excursion beyond the "
@@ -17010,31 +17045,62 @@ def self_test_health():
         KINRIFLE144 = "$wpn_m_assaultrifle_kinetic_fauto_name;"
 
         def pl144(item=KINRIFLE144, scope="no", cls="rifle", role="hip", drawn="seed only", seed=(0.0, 0.0, 0.0, 0.0), trim=(0.0, 0.0, 0.0, 0.0), total=(0.0, 0.0, 0.0, 0.0), placed=480,
-                  measured=480, bound=480, move=(0.0, 0.0, 0.0), absm=0.0, expm=0.0, diff=0.0, verdict="no move asked: drawn where the game draws it", wl=10):
-            return R("weapon UI placement (F144) %u s", wl, item, scope, cls, role, drawn, *seed, *trim, *total, placed, measured, bound, *move, absm, expm, diff, verdict)
+                  measured=480, bound=480, move=(0.0, 0.0, 0.0), absm=0.0, expm=0.0, diff=0.0, verdict="no trim asked: drawn at its seed", gmove=(0.0, 0.0, 0.0), gabs=0.0, gexp=0.0, wl=10):
+            return R("weapon UI placement (F144) %u s", wl, item, scope, cls, role, drawn, *seed, *trim, *total, placed, measured, bound, *move, absm, expm, diff, verdict, *gmove, gabs,
+                     gexp)
 
-        reach = dict(drawn="drawn now, trimmed", seed=(0.0, 3.5, 0.0, 0.0), trim=(0.0, 1.5, 0.0, 0.0), total=(0.0, 5.0, 0.0, 0.0), move=(0.0, 5.0, 0.0), absm=5.0, expm=5.0, diff=0.31,
-                     verdict="reaches the draw")
-        check("F144 readout placement: the rifle's hip readout at seed 0 is drawn where the game draws it", [pl144()], 0, [("OK", P144)],
-              has=[KINRIFLE144 + " scope no (rifle class) hip role: total forward +0.0 left +0.0 up +0.0 toward +0.0 cm", "no move asked: drawn where the game draws it"], lacks=["UNPARSED"])
+        # the shape of a dialled ADS role: seed (3.5, 5.5), the pilot's trim 1.5 cm left; the draw moved the part by the trims (against the seed) and, against the game's own draw, by
+        # the whole total
+        reach = dict(drawn="drawn now, trimmed", seed=(3.5, 5.5, 0.0, 0.0), trim=(0.0, 1.5, 0.0, 0.0), total=(3.5, 7.0, 0.0, 0.0), move=(0.0, 1.5, 0.0), absm=1.5, expm=1.5, diff=0.31,
+                     verdict="reaches the draw", gmove=(3.5, 7.0, 0.0), gabs=7.83, gexp=7.83)
+        check("F144 readout placement: no trim asked, the part drawn at its seed", [pl144()], 0, [("OK", P144)],
+              has=[KINRIFLE144 + " scope no (rifle class) hip role: total forward +0.0 left +0.0 up +0.0 toward +0.0 cm", "no trim asked: drawn at its seed", "against the game's own draw (information) forward "],
+              lacks=["UNPARSED"])
         check("F144 readout placement: a trim reaches the draw", [pl144(role="ADS", **reach)], 0, [("OK", P144)],
-              has=["ADS role: total forward +0.0 left +5.0 up +0.0 toward +0.0 cm (the last window; seed +0.0 +3.5 +0.0 +0.0, trim +0.0 +1.5 +0.0 +0.0)", "drawn move forward +0.00 left +5.00 up +0.00 cm",
-                   "reaches the draw"], lacks=["UNPARSED"])
+              has=["ADS role: total forward +3.5 left +7.0 up +0.0 toward +0.0 cm (the last window; seed +3.5 +5.5 +0.0 +0.0, trim +0.0 +1.5 +0.0 +0.0)",
+                   "drawn move against the same frame at the seed alone forward +0.00 left +1.50 up +0.00 cm against the trims' 1.50 cm, worst difference 0.31 mm: reaches the draw",
+                   "against the game's own draw (information) forward +3.50 left +7.00 up +0.00 cm, 7.83 cm against the total's 7.83 cm"], lacks=["UNPARSED"])
         check("F144 readout placement: the trims the pilot left, by trim and per role", [pl144(role="hip"), pl144(role="hip", drawn="drawn now, trimmed", trim=(0.0, 1.0, 0.0, 0.0),
                                                                                                                total=(0.0, 1.0, 0.0, 0.0), move=(0.0, 1.0, 0.0), absm=1.0, expm=1.0,
                                                                                                                verdict="reaches the draw", wl=6), pl144(role="ADS", **reach)], 0,
               [("OK", P144)], has=["hip role: total forward +0.0 left +1.0 up +0.0 toward +0.0 cm", "by trim: (+0.0 +0.0 +0.0 +0.0) -> (+0.0 +0.0 +0.0 +0.0) (10 s), (+0.0 +1.0 +0.0 +0.0) -> "
-                                   "(+0.0 +1.0 +0.0 +0.0) (6 s)", "ADS role: total forward +0.0 left +5.0"], lacks=["UNPARSED"])
-        check("F144 readout placement: the move asked and not drawn", [pl144(role="ADS", **dict(reach, move=(0.0, 0.0, 0.0), absm=0.0, diff=50.0, verdict="NOT REACHING THE DRAW"))], 3,
-              [("NEVER APPLIED", P144)], has=["ADS role: NOT REACHING THE DRAW in 1 window(s)", "worst difference 50.00 mm: NOT REACHING THE DRAW"], lacks=["UNPARSED"])
+                                   "(+0.0 +1.0 +0.0 +0.0) (6 s)", "ADS role: total forward +3.5 left +7.0"], lacks=["UNPARSED"])
+        check("F144 readout placement: the trims asked and not drawn", [pl144(role="ADS", **dict(reach, move=(0.0, 0.0, 0.0), absm=0.0, diff=15.0, verdict="NOT REACHING THE DRAW"))], 3,
+              [("NEVER APPLIED", P144)], has=["ADS role: NOT REACHING THE DRAW in 1 window(s)", "worst difference 15.00 mm: NOT REACHING THE DRAW"], lacks=["UNPARSED"])
         check("F144 readout placement: never bound at the issue", [pl144(role="ADS", **dict(reach, bound=0, measured=480, move=(0.0, 0.0, 0.0), absm=0.0, diff=0.0,
                                                                                           verdict="NOT REACHING THE DRAW"))], 3, [("NEVER APPLIED", P144)], has=["bound at the draw's issue on 0"],
               lacks=["UNPARSED"])
-        check("F144 readout placement: the drawn move 1.5 mm off the total", [pl144(role="ADS", **dict(reach, diff=1.5, verdict="the drawn move differs from the total"))], 0, [("PARTIAL", P144)],
-              has=["the drawn move differed from the total in 1 window(s)"], lacks=["UNPARSED"])
+        check("F144 readout placement: the drawn move 1.5 mm off the trims'", [pl144(role="ADS", **dict(reach, diff=1.5, verdict="the drawn move differs from the trims'"))], 0,
+              [("PARTIAL", P144)], has=["the drawn move differed from the trims' in 1 window(s)"], lacks=["UNPARSED"])
         check("F144 readout placement: the draw's camera not solved", [pl144(measured=0, bound=0, verdict="not measured (the draw's camera could not be solved)")], 0, [("PARTIAL", P144)],
               has=["not measured in 1"], lacks=["UNPARSED"])
+        check("F144 readout placement: the move against the game's draw is information only (tens of cm, the verdict reaches)",
+              [pl144(role="ADS", **dict(reach, gmove=(-15.6, 9.6, 4.3), gabs=18.86, gexp=3.5))], 0, [("OK", P144)],
+              has=["against the game's own draw (information) forward -15.60 left +9.60 up +4.30 cm, 18.86 cm against the total's 3.50 cm"], lacks=["UNPARSED", "PARTIAL"])
         check("F144 readout placement: a drifted line is unparsed", ["weapon UI placement (F144) 10 s: something else"], 4, [("UNPARSED", P144)])
+        check("F144 readout placement: the F144 build's line (against the unplaced draw) is unparsed, not misread",
+              ["weapon UI placement (F144) 10 s: item " + KINRIFLE144 + " scope no, rifle class, ADS role (seed only), seed forward +0.0 left +3.5 up +0.0 toward eye +0.0 cm, trims +0.0 "
+               "+0.0 +0.0 +0.0 cm, total forward +0.0 left +3.5 up +0.0 toward eye +0.0 cm; placed on 480 frames, measured on 480, bound at the draw's issue on 480; drawn move against "
+               "the unplaced draw (mean over the bound frames) forward -15.63 left +9.58 up +4.29 cm along the weapon's axes, 18.86 cm against the total's 3.50 cm, worst difference "
+               "174.32 mm: the drawn move differs from the total"], 4, [("UNPARSED", P144)])
+
+        # ---- F145: the weapon UI's tag slots ----
+        S145 = "weapon UI slots (F145)"
+
+        def took145(name=31837, slot=0, old=30903, idle=215.4, n=1):
+            return R("weapon UI slot (F145): name %u took slot", name, slot, old, idle, n)
+
+        def none145(name=29157, slots=8, within=5, dropped=2160):
+            return R("weapon UI slot (F145): name %u has no slot", name, slots, within, dropped)
+
+        check("F145 weapon UI slots: the plasma pistol's and the sniper's parts took slots", [took145(), took145(name=32832, slot=1, old=30915, idle=237.3, n=2), took145(name=29157, slot=2, old=30901,
+                                                                                                                                                     idle=330.1, n=3)], 0, [("OK", S145)],
+              has=["3 slot(s) changed hands (the last: name 29157 took slot 2 from name 30901, unseen for 330.1 s; 3 recycles this session)"], lacks=["UNPARSED", "NO SLOT"])
+        check("F145 weapon UI slots: a name found every slot in use", [took145(), none145(), none145(name=29158, dropped=2400)], 0, [("PARTIAL", S145)],
+              has=["NO SLOT for name(s) 29157, 29158: every one of the 8 slots was asked for within the last 5 s", "(2400 submits dropped so far)"], lacks=["UNPARSED"])
+        check("F145 weapon UI slots: the line cap is told", [took145(), R("weapon UI slot (F145): later events are counted, not written")], 0, [("OK", S145)],
+              has=["later events were counted, not written"], lacks=["UNPARSED"])
+        check("F145 weapon UI slots: a drifted line is unparsed", ["weapon UI slot (F145): something else"], 4, [("UNPARSED", S145)])
 
         # ---- F144: the ADS entry path of a traced press ----
         EP144 = "ADS entry path (F144)"

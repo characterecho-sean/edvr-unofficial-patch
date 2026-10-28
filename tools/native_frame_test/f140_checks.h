@@ -246,14 +246,16 @@ inline void runPlacement(Check&& check) {
         check(!tm.table && tm.total[0] == 1.5 && tm.total[1] == 2.5 && tm.total[2] == 2.0 && tm.total[3] == 0.5, "F140: the trim adds to the class's values for a miss too, whatever the scope state");
         const f140::Placement tool = f140::place(true, 5, 5, "$humanoid_companalyser_name;", ls::kScopeNo, f140::kClassPistol, trim);
         check(tool.coherent && !tool.weapon && !tool.table && tool.trim[0] == 0.0 && std::memcmp(tool.total, pistol, sizeof(tool.total)) == 0, "F140: a tool takes no trim and the class values");
-        // the clamp: the trim to its own range, the total to the class keys' ranges
+        // the clamp (F145): the trim to its own range, -30..30 cm on all four axes, the total to the same
         const double big[4] = {99.0, -99.0, -99.0, 99.0};
         const f140::Placement c = f140::place(true, 5, 5, kPistolKinetic, ls::kScopeNo, f140::kClassPistol, big);
-        check(c.trim[0] == 10.0 && c.trim[1] == -10.0 && c.trim[2] == -10.0 && c.trim[3] == 5.0, "F140: the trims are clamped to -10..10 cm (toward you -5..5)");
-        check(c.total[0] == 23.0 && c.total[1] == -6.5 && c.total[2] == -10.0 && c.total[3] == 8.0, "F140: the totals are clamped to the retired keys' ranges: up -3 - 10 = -13 reads -10");
-        check(f140::clampTotal(0, 35.0) == 30.0 && f140::clampTotal(0, -20.0) == -10.0 && f140::clampTotal(1, 20.0) == 15.0 && f140::clampTotal(3, 12.0) == 10.0 && f140::clampTotal(3, -9.0) == -5.0 &&
-                  f140::clampTotal(2, std::nan("")) == 0.0,
-              "F140: the totals' ranges are forward -10..30, left -15..15, up -10..10, toward you -5..10 (a value that is not a number reads 0)");
+        check(c.trim[0] == 30.0 && c.trim[1] == -30.0 && c.trim[2] == -30.0 && c.trim[3] == 30.0, "F145: the trims are clamped to -30..30 cm on all four axes (F140's were -10..10, toward you -5..5)");
+        check(c.total[0] == 30.0 && c.total[1] == -26.5 && c.total[2] == -30.0 && c.total[3] == 30.0, "F145: the totals are clamped to -30..30: 13 + 30 = 43 reads 30, -3 - 30 = -33 reads -30");
+        check(f140::clampTrim(0, 10.5) == 10.5 && f140::clampTrim(3, -12.0) == -12.0 && f140::clampTrim(1, 31.0) == 30.0 && f140::clampTrim(2, -31.0) == -30.0,
+              "F145: a trim past the old stop (10 cm; toward you 5) is kept up to 30");
+        check(f140::clampTotal(0, 35.0) == 30.0 && f140::clampTotal(0, -20.0) == -20.0 && f140::clampTotal(1, 20.0) == 20.0 && f140::clampTotal(3, 12.0) == 12.0 && f140::clampTotal(3, -9.0) == -9.0 &&
+                  f140::clampTotal(2, -40.0) == -30.0 && f140::clampTotal(2, std::nan("")) == 0.0,
+              "F145: the totals' ranges are -30..30 on all four axes (a value that is not a number reads 0)");
         const double nan4[4] = {std::nan(""), INFINITY, 0, 0};
         const f140::Placement n = f140::place(true, 5, 5, kPistolKinetic, ls::kScopeNo, f140::kClassPistol, nan4);
         check(n.trim[0] == 0.0 && n.trim[1] == 0.0 && n.total[0] == 13.0, "F140: a trim that is not a number is 0");

@@ -63,6 +63,7 @@
 #include "native_on_foot_f142.h"   // F142: the icon mesh table's slot reuse, the full outfit A/B's promotion, the outfit census (pure parts)
 #include "native_on_foot_f143.h"   // F143: the ADS eye on the game's sight line, the coat's clip modifiers (pure parts)
 #include "native_on_foot_f144.h"   // F144: the settled sight line per (item, scope), the coat's Gear_Back and first-person census, the readout placed per role (pure parts)
+#include "native_on_foot_f145.h"   // F145: the weapon UI's tag slots given back, the proof against the seed (pure parts)
 #include "xinput_watch.h"          // F135: the pad's Start and Back edges, evidence for the menu probe only
 #include "native_on_foot_f109.h"   // F109: look to aim on foot, the player's own turn in ADS, snap or smooth turning (pure parts)
 #include "native_on_foot_f129.h"   // F129: look to aim reads its turn from the player's own look processor; the look path instrument (pure parts)
@@ -4034,14 +4035,73 @@ enum F85bPath : int { kF85bPathTag = 0, kF85bPathValue = 1, kF85bPathNone = 2 };
 std::atomic<int> g_f85bPath{kF85bPathTag};
 std::atomic<uint64_t> g_f85bSeen{0}, g_f85bNotSpace1{0}, g_f85bSlotFull{0}, g_f85bNoGetter[kF85bParts], g_f85bNoCamera[kF85bParts], g_f85bReadFault[kF85bParts],
     g_f85bUntaggable[kF85bParts], g_f85bWriteFault[kF85bParts], g_f85bTagged[kF85bParts], g_f85bTaggedAll{0}, g_f85bFirstTagMs{0};
+// F145: the slot table gives a slot back. A slot was the name id's for the whole session, and the game makes new part ids at every loadout switch, so eight were gone after the
+// third loadout and the plasma pistol's ADS readout and the scoped sniper's parts (the F144 flight) were never tagged. A name with no slot now takes the one whose name was asked
+// for the longest ago, once that was nativeOnFootF145's kSlotIdleMs ago (nofoot::f145::pickSlot). g_f85bSlotSeenMs: the tick a slot's name was last submitted; g_f85bSlotGen: bumped
+// when the slot changes hands, so the render side drops what it kept for the old name. The submit hook runs on the game's thread and does not write the log: its events go to a
+// ring the frame thread drains (f85Report).
+std::atomic<uint64_t> g_f85bSlotSeenMs[kF85bParts];
+std::atomic<uint32_t> g_f85bSlotGen[kF85bParts];
+nofoot::f145::EventRing<16> g_f145Slots;
+std::atomic<uint32_t> g_f145Recycles{0};
+uint16_t g_f145NoSlotNames[16] = {};   // game thread only: the names already reported as having no slot
+uint32_t g_f145NoSlotCount = 0;
 int f85bSlotOf(uint16_t nameId) noexcept {
+    namespace f145 = nofoot::f145;
     const uint32_t want = static_cast<uint32_t>(nameId) + 1u;
+    const uint64_t now = GetTickCount64();
+    uint32_t names[kF85bParts];
+    uint64_t seen[kF85bParts];
     for (uint32_t i = 0; i < kF85bParts; ++i) {
-        uint32_t cur = g_f85bSlotName[i].load(std::memory_order_relaxed);
-        if (cur == 0 && g_f85bSlotName[i].compare_exchange_strong(cur, want, std::memory_order_relaxed)) cur = want;
-        if (cur == want) return static_cast<int>(i);
+        names[i] = g_f85bSlotName[i].load(std::memory_order_relaxed);
+        seen[i] = g_f85bSlotSeenMs[i].load(std::memory_order_relaxed);
     }
-    return -1;
+    const f145::SlotPick p = f145::pickSlot(names, seen, kF85bParts, want, now);
+    switch (p.how) {
+        case f145::kSlotHit:
+            g_f85bSlotSeenMs[p.slot].store(now, std::memory_order_relaxed);
+            return p.slot;
+        case f145::kSlotFree: {
+            uint32_t cur = 0;
+            if (!g_f85bSlotName[p.slot].compare_exchange_strong(cur, want, std::memory_order_relaxed)) return -1;
+            g_f85bSlotSeenMs[p.slot].store(now, std::memory_order_relaxed);
+            return p.slot;
+        }
+        case f145::kSlotRecycled: {
+            const uint32_t s = static_cast<uint32_t>(p.slot);
+            g_f85bNoGetter[s].store(0, std::memory_order_relaxed);
+            g_f85bNoCamera[s].store(0, std::memory_order_relaxed);
+            g_f85bReadFault[s].store(0, std::memory_order_relaxed);
+            g_f85bUntaggable[s].store(0, std::memory_order_relaxed);
+            g_f85bWriteFault[s].store(0, std::memory_order_relaxed);
+            g_f85bTagged[s].store(0, std::memory_order_relaxed);
+            g_f91SlotLayout[s].state.store(0, std::memory_order_release);   // the layout is the new part's to capture
+            g_f85bSlotGen[s].fetch_add(1, std::memory_order_release);
+            g_f85bSlotName[s].store(want, std::memory_order_relaxed);
+            g_f85bSlotSeenMs[s].store(now, std::memory_order_relaxed);
+            g_f145Recycles.fetch_add(1, std::memory_order_relaxed);
+            f145::SlotEvent ev;
+            ev.kind = f145::kEvRecycled;
+            ev.slot = static_cast<uint8_t>(s);
+            ev.name = static_cast<uint16_t>(nameId);
+            ev.oldName = static_cast<uint16_t>(p.oldName - 1u);
+            ev.idleMs = static_cast<uint32_t>(p.idleMs);
+            g_f145Slots.push(ev);
+            return p.slot;
+        }
+        default: {   // every slot was asked for within kSlotIdleMs: said once per name
+            bool known = false;
+            for (uint32_t i = 0; i < g_f145NoSlotCount && i < 16; ++i) known = known || g_f145NoSlotNames[i] == nameId;
+            if (!known) {
+                g_f145NoSlotNames[g_f145NoSlotCount++ % 16] = nameId;
+                f145::SlotEvent ev;
+                ev.kind = f145::kEvNoSlot;
+                ev.name = nameId;
+                g_f145Slots.push(ev);
+            }
+            return -1;
+        }
+    }
 }
 // The getter row that joins this submit: same render frame, item, renderer, part and instance, before it, and fresh (200 ms): the join the trace reader makes.
 bool f85bFindGetterRow(const WeaponUiPartSample& row, WeaponUiPartSample* out) noexcept {
@@ -29697,8 +29757,11 @@ struct F144Pending {
     bool valid = false;
     uint32_t frame = 0;
     int cls = 0, role = 0;
-    nofoot::f144::Move move;
+    nofoot::f144::Move move;   // F145: against the same frame placed at the seed alone (the proof)
+    nofoot::f144::Move game;   // and against the game's own draw (information)
 };
+// F145: each role's seed as keys, set by the decision (f90Decide) for the proof (f85bDecide) that follows it on the same thread: [class: 0 pistol, 1 rifle][role: hip, ADS].
+nofoot::f90::Keys g_f145Seed[nofoot::f140::kClasses][nofoot::f144::kRoles];
 F144Pending g_f144Pending[kF85bParts][2];   // [slot][eye]
 int g_f90SlotHip = -1;    // the hip readout's slot (its F86d rays give the surface under the moved readout)
 int g_f92SlotRifle = -1;   // F92: the rifle's ADS readout's slot, the same for its line
@@ -29725,6 +29788,17 @@ void f93SwapLog(uint32_t placedFrame, uint32_t gap, bool placed) {
 // One weapon UI draw's F90 decision; the map is applied to uf (the getter frame of this eye) and returned for the proof.
 nofoot::f90::Out f90Decide(uint32_t frame, int e, const Rec& r, const Find* f, uint32_t slot, const F85Solve& s, nofoot::f85::UFrame& uf) {
     namespace f90 = nofoot::f90;
+    {   // F145: a slot that changed hands (f85bSlotOf gave it to another name) starts clean: what was kept for the old name is dropped
+        static uint32_t seenGen[kF85bParts] = {};
+        const uint32_t gen = g_f85bSlotGen[slot].load(std::memory_order_acquire);
+        if (gen != seenGen[slot]) {
+            seenGen[slot] = gen;
+            g_f90Part[slot] = F90Part{};
+            g_f91RoleLog[slot] = f90::RoleLog{};
+            g_f144Pending[slot][0] = F144Pending{};
+            g_f144Pending[slot][1] = F144Pending{};
+        }
+    }
     f90::In in;
     in.frame = frame;
     const uint32_t nameId = g_f85bSlotName[slot].load(std::memory_order_relaxed);
@@ -29777,7 +29851,14 @@ nofoot::f90::Out f90Decide(uint32_t frame, int e, const Rec& r, const Find* f, u
         for (int i = 0; i < 4; ++i) trim[i] = static_cast<double>(g_f140TrimCm[i].load(std::memory_order_relaxed));
         const int drawn = f144::drawnRole(adsWNow);
         for (int c = 0; c < f140::kClasses; ++c)
-            for (int r = 0; r < f144::kRoles; ++r) rp[c][r] = f144::place(heldRead, heldSnapSerial, heldNow, heldName, scopeState, c, r, r == drawn, trim);
+            for (int r = 0; r < f144::kRoles; ++r) {
+                rp[c][r] = f144::place(heldRead, heldSnapSerial, heldNow, heldName, scopeState, c, r, r == drawn, trim);
+                f90::Keys& sk = g_f145Seed[c][r];   // F145: the proof's reference is the same frame at this seed alone
+                sk.forwardCm = rp[c][r].seed[0];
+                sk.leftCm = rp[c][r].seed[1];
+                sk.upCm = rp[c][r].seed[2];
+                sk.towardCm = rp[c][r].seed[3];
+            }
     }
     // F93a: the class the game draws, from the class parts; this draw's own class part counts for itself. A weapon class's part appearing opens a swap.
     const uint64_t nowMs = GetTickCount64();
@@ -29990,12 +30071,13 @@ void f144Report(uint32_t windowSecs) {
                 const double n = a.bound ? static_cast<double>(a.bound) : 1.0;
                 Log::get().note("weapon UI placement (F144) %u s: item %s scope %s, %s class, %s role (%s), seed forward %+.1f left %+.1f up %+.1f toward eye %+.1f cm, trims %+.1f %+.1f %+.1f "
                                 "%+.1f cm, total forward %+.1f left %+.1f up %+.1f toward eye %+.1f cm; placed on %llu frames, measured on %llu, bound at the draw's issue on %llu; drawn move "
-                                "against the unplaced draw (mean over the bound frames) forward %+.2f left %+.2f up %+.2f cm along the weapon's axes, %.2f cm against the total's %.2f cm, "
-                                "worst difference %.2f mm: %s",
+                                "against the same frame at the seed alone (mean over the bound frames) forward %+.2f left %+.2f up %+.2f cm along the weapon's axes, %.2f cm against the trims' "
+                                "%.2f cm, worst difference %.2f mm: %s; against the game's own draw (information) forward %+.2f left %+.2f up %+.2f cm, %.2f cm against the total's %.2f cm",
                                 windowSecs, a.item[0] ? a.item : "none", loadout::scopeName(a.scope), ci == nofoot::f140::kClassRifle ? "rifle" : "pistol", f144::roleName(ri),
                                 a.trim[0] != 0.0 || a.trim[1] != 0.0 || a.trim[2] != 0.0 || a.trim[3] != 0.0 ? "drawn now, trimmed" : "seed only", a.seed[0], a.seed[1], a.seed[2], a.seed[3],
                                 a.trim[0], a.trim[1], a.trim[2], a.trim[3], a.total[0], a.total[1], a.total[2], a.total[3], ull(a.placed), ull(a.measured), ull(a.bound),
-                                a.moveSum[0] / n, a.moveSum[1] / n, a.moveSum[2] / n, a.absSum / n, a.expSum / n, a.diffMaxMm, f144::verdictText(f144::verdictOf(a)));
+                                a.moveSum[0] / n, a.moveSum[1] / n, a.moveSum[2] / n, a.absSum / n, a.expSum / n, a.diffMaxMm, f144::verdictText(f144::verdictOf(a)),
+                                a.gameMoveSum[0] / n, a.gameMoveSum[1] / n, a.gameMoveSum[2] / n, a.gameAbsSum / n, a.gameExpSum / n);
             }
             a = f144::RoleAcc{};
         }
@@ -30268,25 +30350,46 @@ void f85bDecide(ID3D11DeviceContext* ctx, uint32_t frame, const Rec& r, ID3D11Bu
         pe.originCmSum += originCm;
         pe.originCmMax = std::max(pe.originCmMax, originCm);
     }
-    {   // F144: the proof that the placement reaches the draw. The patched rows (as the private b0 stores them) are inverted to the camera they draw with; the part's content centre
-        // through it, against the same centre through the getter's own frame (before F90's map), is the move the draw makes; it is held until the patch is bound at the issue.
+    {   // F144/F145: the proof that the placement reaches the draw. The part's content centre is followed through the patched rows (as the private b0 stores them) to the world point
+        // they draw it at (nofoot::f145::drawnPoint: through the rows' own map, not a camera solved from them, which reads a size factor as a distance). F145: the reference is the
+        // same frame placed at the seed alone (the decision's size factor, a move to the seed's target), so the difference is what the trims moved; the move against the game's own
+        // draw (the getter's U, before F90's map) is kept as information. It is held until the patch is bound at the issue.
         namespace f144 = nofoot::f144;
+        namespace f145 = nofoot::f145;
         F144Pending& pm = g_f144Pending[slot][e == 1 ? 1 : 0];
         pm.valid = false;
         if ((f90o.b == nofoot::f90::kBMoved || f90o.b == nofoot::f90::kBMovedPrevious) && f90o.cls != nofoot::f90::kDrawnNone) {
             const int ci = f90o.cls == nofoot::f90::kDrawnPrimary ? 1 : 0, ri = f90o.role == nofoot::f90::kRoleHip ? f144::kHip : f144::kAds;
             f144::RoleAcc& acc = g_f144Acc[ci][ri];
-            const nofoot::f85::CamK kd = nofoot::f85::solveK(nofoot::f85::rowsOfComposite(r4, r5, r7), s.W, s.ap);
-            if (kd.ok && f90o.haveWf) {
-                ++acc.measured;
-                double drawn[3], game[3], expected[3] = {};
-                nofoot::f85::mulVec3(kd.K3, f90o.cv, drawn);
-                for (int i = 0; i < 3; ++i) {
-                    drawn[i] += kd.k4[i];
-                    game[i] = f90o.C[i] - s.ow[i];
+            double drawn[3];
+            bool ok = f90o.haveWf && f145::drawnPoint(s.K, s.B, nofoot::f85::rowsOfComposite(r4, r5, r7), f90o.cv, drawn);
+            // the seed-only frame: the same map less the trims
+            double eyeRel[3], eyeAbs[3];
+            const bool eyeOk = nofoot::f86::cameraOriginOfRows(s.W, eyeRel);
+            for (int i = 0; i < 3; ++i) eyeAbs[i] = eyeOk ? eyeRel[i] + s.ow[i] : 0.0;
+            nofoot::f90::Map mapSeed;
+            double drawnSeed[3] = {};
+            ok = ok && f145::seedOnlyMap(f90o, g_f145Seed[ci][ri], eyeOk ? eyeAbs : nullptr, &mapSeed);
+            if (ok) {
+                nofoot::f85::UFrame uf2 = ufGame;
+                nofoot::f90::applyMap(uf2, mapSeed);
+                nofoot::f85::Corr c2 = nofoot::f85::makeCorrection(s.K, uf2);
+                ok = c2.ok;
+                if (ok) {
+                    if (scale != 1.0) nofoot::f86::scaleCorrection(c2, scale, s.oh);
+                    float q4[4], q5[4], q7[4];
+                    nofoot::f85::rowsToFloat(nofoot::f85::applyCorrection(s.B, c2), q4, q5, q7);
+                    ok = f145::drawnPoint(s.K, s.B, nofoot::f85::rowsOfComposite(q4, q5, q7), f90o.cv, drawnSeed);
                 }
-                if (f90o.map.move) std::memcpy(expected, f90o.map.t, sizeof(expected));
-                pm.move = f144::moveOf(drawn, game, expected, f90o.wfUsed.b, f90o.wfUsed.l, f90o.wfUsed.u);
+            }
+            if (ok) {
+                ++acc.measured;
+                double game[3], expectedGame[3] = {}, expectedTrim[3];
+                for (int i = 0; i < 3; ++i) game[i] = f90o.C[i] - s.ow[i];
+                if (f90o.map.move) std::memcpy(expectedGame, f90o.map.t, sizeof(expectedGame));
+                f145::trimMove(f90o.map, mapSeed, expectedTrim);
+                pm.move = f144::moveOf(drawn, drawnSeed, expectedTrim, f90o.wfUsed.b, f90o.wfUsed.l, f90o.wfUsed.u);
+                pm.game = f144::moveOf(drawn, game, expectedGame, f90o.wfUsed.b, f90o.wfUsed.l, f90o.wfUsed.u);
                 pm.valid = true;
                 pm.frame = frame;
                 pm.cls = ci;
@@ -30321,7 +30424,7 @@ void f85bBound(int eye, int slot) {
     if (eye < 0 || eye > 1 || slot < 0 || slot >= static_cast<int>(kF85bParts)) return;
     ++g_f85w.pe[slot][eye].corrected;
     F144Pending& pm = g_f144Pending[slot][eye];   // F144: the measured move reached the draw: the patch was bound at its issue
-    if (pm.valid && pm.frame == g_fix.frame) g_f144Acc[pm.cls][pm.role].fold(pm.move);
+    if (pm.valid && pm.frame == g_fix.frame) g_f144Acc[pm.cls][pm.role].fold(pm.move, pm.game);
     pm.valid = false;
 }
 
@@ -30408,6 +30511,27 @@ void f85Report(uint64_t nowMs, bool fold, uint32_t windowSecs, bool detailLog, b
         g_f85c.keyFrame = ~0u;
     }
     const uint64_t dSeen = seen - prevSeen, dTagged = taggedAll - prevTagged;
+    {   // F145: the submit hook's slot events (it runs on the game's thread and does not write the log)
+        static uint32_t slotLines = 0;
+        nofoot::f145::SlotEvent ev;
+        while (g_f145Slots.take(&ev)) {
+            if (slotLines >= 32) {
+                if (slotLines == 32) {
+                    ++slotLines;
+                    Log::get().note("weapon UI slot (F145): later events are counted, not written (32 lines a session)");
+                }
+                continue;
+            }
+            ++slotLines;
+            if (ev.kind == nofoot::f145::kEvRecycled)
+                Log::get().note("weapon UI slot (F145): name %u took slot %u from name %u, unseen for %.1f s (%u recycles this session)", static_cast<unsigned>(ev.name),
+                                static_cast<unsigned>(ev.slot), static_cast<unsigned>(ev.oldName), static_cast<double>(ev.idleMs) / 1000.0, g_f145Recycles.load(std::memory_order_relaxed));
+            else
+                Log::get().note("weapon UI slot (F145): name %u has no slot: every one of the %u slots was asked for within the last %.0f s, so its submits are not tagged and the part is "
+                                "not placed (%llu submits dropped for want of a slot so far)", static_cast<unsigned>(ev.name), static_cast<unsigned>(kF85bParts),
+                                static_cast<double>(nofoot::f145::kSlotIdleMs) / 1000.0, ull(g_f85bSlotFull.load(std::memory_order_relaxed)));
+        }
+    }
 
     // The path decision: tags written and none found in the pool after 3 s: the packer does not carry the tag -> the value path; then none either -> idle.
     if (fold) {

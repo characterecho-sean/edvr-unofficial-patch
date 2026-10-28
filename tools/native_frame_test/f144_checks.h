@@ -212,33 +212,55 @@ inline void run144(Check&& check) {
     // ---- 3. the readout placed per role ---------------------------------------------------------------------------------------------------------------------------------
     {
         double none[4] = {};
-        // the seeds are today's values, row by row
+        // F145: the seeds are the pilot's dialled totals for the scope-no rows of eight weapons; everything else is as F144 left it
+        struct Seed { const char* item; int role; double v[4]; };
+        const Seed baked[] = {
+            {"$wpn_m_assaultrifle_kinetic_fauto_name;", f144::kHip, {5.0, 4.5, 0.0, 0.0}},   {"$wpn_m_assaultrifle_kinetic_fauto_name;", f144::kAds, {3.5, 5.5, 0.0, 0.0}},
+            {"$wpn_m_assaultrifle_plasma_fauto_name;", f144::kHip, {7.0, 2.5, 0.0, 0.0}},    {"$wpn_m_assaultrifle_plasma_fauto_name;", f144::kAds, {7.0, 6.0, 0.0, 0.0}},
+            {"$wpn_m_launcher_rocket_sauto_name;", f144::kHip, {5.5, 0.0, 0.0, 0.0}},        {"$wpn_m_launcher_rocket_sauto_name;", f144::kAds, {5.5, 3.5, 0.0, 0.0}},
+            {"$wpn_m_shotgun_plasma_doublebarrel_name;", f144::kHip, {10.0, -0.5, 1.0, 0.0}}, {"$wpn_m_shotgun_plasma_doublebarrel_name;", f144::kAds, {10.0, 3.0, 1.0, 0.0}},
+            {"$wpn_m_submachinegun_kinetic_fauto_name;", f144::kHip, {6.5, 0.0, 0.0, 0.0}},  {"$wpn_m_submachinegun_kinetic_fauto_name;", f144::kAds, {6.5, 3.5, 0.0, 0.0}},
+            {"$wpn_m_submachinegun_laser_fauto_name;", f144::kHip, {7.0, 1.5, 0.5, 0.0}},    {"$wpn_m_submachinegun_laser_fauto_name;", f144::kAds, {10.0, 4.5, 1.0, 0.0}},
+            {"$wpn_s_pistol_kinetic_sauto_name;", f144::kHip, {13.0, 3.5, -3.0, 3.0}},       {"$wpn_s_pistol_kinetic_sauto_name;", f144::kAds, {16.0, 5.0, -3.0, 3.0}},
+            {"$wpn_s_pistol_laser_sauto_name;", f144::kHip, {13.0, 3.5, -3.0, 3.0}},         {"$wpn_s_pistol_laser_sauto_name;", f144::kAds, {18.0, 6.5, -3.0, 3.0}},
+        };
         bool seeds = f144::kTableCount == 44;
+        for (const Seed& sd : baked) {
+            const f144::Row* r = f144::find(sd.item, ls::kScopeNo, sd.role);
+            seeds = seeds && r;
+            for (int i = 0; seeds && i < 4; ++i) seeds = seeds && r->v[i] == sd.v[i];
+        }
+        check(seeds, "F145: the scope-no rows of the eight weapons the pilot dialled hold his totals, role by role (the kinetic pistol's hip and the laser pistol's hip unchanged)");
+        // not baked: the scope-yes rows (F144's seeds: the F140 table for ADS and the pistols, 0 for a rifle's hip), the plasma pistol and the plasma sniper, whatever the scope
+        bool kept = true;
         for (const f140::Entry& e : f140::kTable) {
+            bool baked8 = false;
+            for (const Seed& sd : baked) baked8 = baked8 || (std::strcmp(sd.item, e.item) == 0);
+            if (baked8 && e.scope == ls::kScopeNo) continue;
             const f144::Row* ads = f144::find(e.item, e.scope, f144::kAds);
             const f144::Row* hip = f144::find(e.item, e.scope, f144::kHip);
             const bool pistol = e.v[0] == 13.0;
-            seeds = seeds && ads && hip;
-            for (int i = 0; seeds && i < 4; ++i) {
-                seeds = seeds && ads->v[i] == e.v[i];                        // the F140 table is the ADS role's seed
-                seeds = seeds && hip->v[i] == (pistol ? e.v[i] : 0.0);       // a pistol's hip role took the same placement; a rifle's was never placed
+            kept = kept && ads && hip;
+            for (int i = 0; kept && i < 4; ++i) {
+                kept = kept && ads->v[i] == e.v[i];
+                kept = kept && hip->v[i] == (pistol ? e.v[i] : 0.0);
             }
         }
-        check(seeds, "F144: the table is keyed by (item, scope, role) and seeded from today's values: F140's row for the ADS role (and a pistol's hip), 0 for a rifle's hip role");
+        check(kept, "F145: the scope-yes rows, the plasma pistol and the plasma sniper keep F144's seeds (the F140 table for the ADS roles and the pistols, 0 for a rifle's hip role)");
         const char* kinRifle = "$wpn_m_assaultrifle_kinetic_fauto_name;";
         const char* plasmaPistol = "$wpn_s_pistol_plasma_charged_name;";
         const double trim[4] = {1.0, 2.0, -1.5, 0.5};
         // trims added to the role drawn now only
         const f144::RolePlacement hipDrawn = f144::place(true, 7, 7, kinRifle, ls::kScopeNo, f140::kClassRifle, f144::kHip, true, trim);
         const f144::RolePlacement adsIdle = f144::place(true, 7, 7, kinRifle, ls::kScopeNo, f140::kClassRifle, f144::kAds, false, trim);
-        check(hipDrawn.coherent && hipDrawn.weapon && hipDrawn.table && near144(hipDrawn.total[0], 1.0, 1e-12) && near144(hipDrawn.total[1], 2.0, 1e-12) && near144(hipDrawn.total[2], -1.5, 1e-12) &&
-                  near144(hipDrawn.total[3], 0.5, 1e-12) && hipDrawn.seed[0] == 0.0 && hipDrawn.seed[1] == 0.0,
-              "F144: at the hip the trims move the rifle's hip role (seed 0): total = the trims");
-        check(near144(adsIdle.total[1], 3.5, 1e-12) && adsIdle.trim[1] == 0.0 && adsIdle.total[0] == 0.0, "F144: ... and not its ADS role, which stays at its seed (0, 3.5, 0, 0)");
+        check(hipDrawn.coherent && hipDrawn.weapon && hipDrawn.table && near144(hipDrawn.total[0], 6.0, 1e-12) && near144(hipDrawn.total[1], 6.5, 1e-12) && near144(hipDrawn.total[2], -1.5, 1e-12) &&
+                  near144(hipDrawn.total[3], 0.5, 1e-12) && hipDrawn.seed[0] == 5.0 && hipDrawn.seed[1] == 4.5,
+              "F144: at the hip the trims move the rifle's hip role: total = its seed (5, 4.5, 0, 0) + the trims");
+        check(near144(adsIdle.total[1], 5.5, 1e-12) && adsIdle.trim[1] == 0.0 && adsIdle.total[0] == 3.5, "F144: ... and not its ADS role, which stays at its seed (3.5, 5.5, 0, 0)");
         const f144::RolePlacement adsDrawn = f144::place(true, 7, 7, kinRifle, ls::kScopeNo, f140::kClassRifle, f144::kAds, true, trim);
         const f144::RolePlacement hipIdle = f144::place(true, 7, 7, kinRifle, ls::kScopeNo, f140::kClassRifle, f144::kHip, false, trim);
-        check(near144(adsDrawn.total[1], 5.5, 1e-12) && near144(adsDrawn.total[0], 1.0, 1e-12) && hipIdle.total[0] == 0.0 && hipIdle.total[1] == 0.0 && hipIdle.trim[0] == 0.0,
-              "F144: in ADS the trims move the ADS role (3.5 + 2.0 left) and not the hip role");
+        check(near144(adsDrawn.total[1], 7.5, 1e-12) && near144(adsDrawn.total[0], 4.5, 1e-12) && hipIdle.total[0] == 5.0 && hipIdle.total[1] == 4.5 && hipIdle.trim[0] == 0.0,
+              "F144: in ADS the trims move the ADS role (3.5 + 1.0 forward, 5.5 + 2.0 left) and not the hip role");
         const f144::RolePlacement pHip = f144::place(true, 7, 7, plasmaPistol, ls::kScopeNo, f140::kClassPistol, f144::kHip, true, trim);
         const f144::RolePlacement pAds = f144::place(true, 7, 7, plasmaPistol, ls::kScopeNo, f140::kClassPistol, f144::kAds, false, trim);
         check(near144(pHip.total[0], 14.0, 1e-12) && near144(pHip.total[1], 5.5, 1e-12) && near144(pAds.total[0], 13.0, 1e-12) && near144(pAds.total[1], 3.5, 1e-12) && near144(pAds.total[2], -3.0, 1e-12),
@@ -246,6 +268,9 @@ inline void run144(Check&& check) {
         // never carried to another weapon or scope: each (item, scope, role) is its own row, the trim a live key of the moment
         const f144::RolePlacement other = f144::place(true, 7, 7, "$wpn_m_assaultrifle_laser_fauto_name;", ls::kScopeYes, f140::kClassRifle, f144::kHip, false, trim);
         check(other.table && other.total[0] == 0.0 && other.total[1] == 0.0 && other.entryScope == ls::kScopeYes, "F144: another weapon and scope: its own row, the trims at rest");
+        const f144::RolePlacement sameWeaponScopeYes = f144::place(true, 7, 7, kinRifle, ls::kScopeYes, f140::kClassRifle, f144::kHip, false, trim);
+        check(sameWeaponScopeYes.table && sameWeaponScopeYes.total[0] == 0.0 && sameWeaponScopeYes.total[1] == 0.0 && sameWeaponScopeYes.entryScope == ls::kScopeYes,
+              "F145: the kinetic rifle with a scope is its own row: the baked no-scope totals are not carried to it");
         // not a weapon, not coherent, a miss, unknown scope, clamps
         const f144::RolePlacement tool = f144::place(true, 7, 7, "$humanoid_companalyser_name;", ls::kScopeNo, f140::kClassRifle, f144::kAds, true, trim);
         check(tool.coherent && !tool.weapon && !tool.table && tool.trim[0] == 0.0 && tool.total[1] == 3.5, "F144: a tool takes no trim and falls back to the class's values");
@@ -258,7 +283,9 @@ inline void run144(Check&& check) {
         check(unk.table && unk.scopeUnknown && unk.entryScope == ls::kScopeNo, "F144: an unknown scope state uses the no-scope row and says so");
         const double big[4] = {50.0, -50.0, 50.0, -50.0};
         const f144::RolePlacement clamped = f144::place(true, 7, 7, kinRifle, ls::kScopeNo, f140::kClassRifle, f144::kHip, true, big);
-        check(near144(clamped.total[0], 10.0, 1e-12) && near144(clamped.total[1], -10.0, 1e-12) && near144(clamped.total[3], -5.0, 1e-12), "F144: the trims are clamped to their ranges before they are added");
+        check(near144(clamped.trim[0], 30.0, 1e-12) && near144(clamped.trim[1], -30.0, 1e-12) && near144(clamped.trim[3], -30.0, 1e-12) && near144(clamped.total[0], 30.0, 1e-12) &&
+                  near144(clamped.total[1], -25.5, 1e-12) && near144(clamped.total[3], -30.0, 1e-12),
+              "F145: the trims are clamped to -30..30 cm before they are added (5 + 50 reads 5 + 30, clamped again to 30; 4.5 - 50 reads 4.5 - 30)");
         check(f144::drawnRole(0.0) == f144::kHip && f144::drawnRole(0.49) == f144::kHip && f144::drawnRole(0.5) == f144::kAds && f144::drawnRole(1.0) == f144::kAds,
               "F144: the ADS role is the one drawn from an ADS weight of 0.5");
     }
@@ -370,7 +397,7 @@ inline void run144(Check&& check) {
                   "F144: the rifle's ADS readout is placed as before");
         }
     }
-    {   // the proof: the drawn move against the unplaced draw
+    {   // the proof: the drawn move against the reference (F145: the same frame at the seed alone; F144: the unplaced draw)
         const double game[3] = {1.0, 2.0, 3.0};
         const double b[3] = {0, 0, 1}, l[3] = {1, 0, 0}, u[3] = {0, 1, 0};
         const double expected[3] = {0.01, 0.002, 0.03};   // 1 cm left-axis, 0.2 up, 3 forward
@@ -387,20 +414,30 @@ inline void run144(Check&& check) {
         a.measured = 10;
         check(f144::verdictOf(a) == f144::kVNotReaching && std::strstr(f144::verdictText(f144::verdictOf(a)), "NOT REACHING THE DRAW") != nullptr,
               "F144: measured but never bound at the issue: NOT REACHING THE DRAW");
-        for (int i = 0; i < 10; ++i) a.fold(m);
+        for (int i = 0; i < 10; ++i) a.fold(m, m);
         check(f144::verdictOf(a) == f144::kVReaches && a.bound == 10 && near144(a.moveSum[0], 30.0, 1e-9), "F144: bound, the drawn move equal to the total within 1 mm: reaches the draw");
         f144::RoleAcc z = a;
         z.diffMaxMm = 1.5;
         check(f144::verdictOf(z) == f144::kVDiffers, "F144: 1.5 mm off the total: the drawn move differs");
         f144::RoleAcc d;
         d.measured = 5;
-        for (int i = 0; i < 5; ++i) d.fold(none);
+        for (int i = 0; i < 5; ++i) d.fold(none, none);
         check(f144::verdictOf(d) == f144::kVNotReaching, "F144: bound, the total's move 3 cm, the drawn move 0: NOT REACHING THE DRAW");
         f144::RoleAcc zero;
         zero.measured = 5;
         f144::Move zm;
-        for (int i = 0; i < 5; ++i) zero.fold(zm);
-        check(f144::verdictOf(zero) == f144::kVNoMoveAsked, "F144: a total of 0 (the rifle's hip seed) and a drawn move of 0: no move asked, drawn where the game draws it");
+        for (int i = 0; i < 5; ++i) zero.fold(zm, zm);
+        check(f144::verdictOf(zero) == f144::kVNoMoveAsked && std::strstr(f144::verdictText(f144::kVNoMoveAsked), "no trim asked") != nullptr,
+              "F145: no trim asked and a drawn move of 0 against the seed: no trim asked, drawn at its seed");
+        // the move against the game's draw is information: it may be tens of cm while the proof against the seed reads the trims
+        f144::RoleAcc info;
+        info.measured = 4;
+        const double gameFar[3] = {1.0, 2.0, 3.0}, drawnFar[3] = {1.0 + 0.16, 2.0 - 0.09, 3.0 + 0.04};   // a seed-and-size artefact of 18.8 cm
+        const double noExpect[3] = {};
+        const f144::Move vsGame = f144::moveOf(drawnFar, gameFar, noExpect, b, l, u);
+        for (int i = 0; i < 4; ++i) info.fold(m, vsGame);
+        check(f144::verdictOf(info) == f144::kVReaches && near144(info.gameAbsSum / 4.0, vsGame.absCm, 1e-9) && info.gameAbsSum / 4.0 > 10.0 && info.gameDiffMaxMm > 100.0,
+              "F145: the move against the game's draw (tens of cm here) is kept apart and does not decide the verdict against the seed");
     }
 }
 

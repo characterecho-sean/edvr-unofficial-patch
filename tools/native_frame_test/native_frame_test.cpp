@@ -47,6 +47,7 @@
 #include "f142_checks.h"    // F142: the icon mesh table's slot reuse, the full outfit promotion, the outfit census, and F141's used-lane test and rejection counts
 #include "f143_checks.h"    // F143: the ADS eye on the game's sight line (Q on the line E -> S, the filter, the gates and the bound, the trims) and the coat's clip A/B (the extra parts, when the measure reads)
 #include "f144_checks.h"    // F144: the settled sight line per (item, scope), the coat's Gear_Back decision and first-person census, the readout placed per role and what reaches the draw
+#include "f145_checks.h"    // F145: the weapon UI's tag slots given back (the pick, the F144 flight replayed, the event ring) and the proof against the seed (the seed-only map on the two-eye rig)
 #include "f110_checks.h"    // F110: the ADS sight lock's model right eye (the left-eye job camera plus the IPD)
 #include "f111_checks.h"    // F111: the panel pointer instrument's statistics and verdict
 #include "f113_checks.h"    // F113: each eye's scene rows whenever the world is drawn (the depth prepass and the terrain as sources)
@@ -7527,6 +7528,10 @@ int wmain(int argc, wchar_t** argv) {
     // with today's seeds (the rifle class's hip readout placed with 0 keys draws as the game does), the trims added to the role drawn now only, the pistol's ADS role's own
     // target from the hip's centre, and the proof of the drawn move against the total.
     f144test::run144(check);
+    // F145: the tag slot pick (a hit, a free slot, the slot asked for longest ago once idle 5 s, none while all are in use), the F144 flight's eleven part names over four loadouts
+    // replayed into eight slots, the event ring, and the proof of a trim against the same frame placed at the seed alone (the rifle's ADS role with its size factor, the pistol's ADS role
+    // with its target taken from the hip part's centre, the hip role).
+    f145test::run145(check);
     // F110: the ADS sight lock's model right eye from the left-eye job camera and from a solved left eye, the fallback, the IPD's sign.
     f110test::run110(check);
     // F111: the panel pointer instrument names the stage that turns a move the other way (K1 to K5, one at a time), the camera getters' decoding.

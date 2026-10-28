@@ -380,6 +380,9 @@ struct Out {
     double cv[3] = {};
     bool haveWf = false;
     WeaponFrame wfUsed;
+    // F145: the point the target was taken from when it is not this part's own content centre C (the pistol's ADS role takes it from the hip part's), for the proof's seed-only map.
+    double Cref[3] = {};
+    bool haveCref = false;
 };
 // One weapon UI draw: A's scale and B's move for the part the record's mesh and scale name (F91: partOf; the name id is not read), given the eye's getter
 // frame uf (P - o_world = U3 v + u4). frameFn() returns the weapon frame; it is called only when this draw latches T. The caller applies o.map to uf
@@ -480,6 +483,8 @@ inline Out decide(const In& in, const f85::UFrame& uf, Latch& latch, Rot rotate,
                 bool ok = true;
                 o.wfUsed = latch.wf;
                 o.haveWf = latch.wf.src != kFrameNone;
+                std::memcpy(o.Cref, latch.C, sizeof(o.Cref));   // F145: its target is taken from the hip part's content centre
+                o.haveCref = true;
                 if (in.roleKeys && !sameKeys(in.adsKeys, in.keys)) {
                     // F144: its own keys, taken from the hip part's content centre in the hip's weapon frame, once for the hip latch's frame (both eyes share it)
                     if (latch.ads.have && latch.ads.serial == in.itemSerial && latch.ads.frame == latch.frame) {

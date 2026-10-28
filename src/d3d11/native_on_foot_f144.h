@@ -311,47 +311,48 @@ struct Row {
     int role;
     double v[4];        // forward, left, up, toward eye (cm), in the weapon frame the class's placement uses (native_on_foot_f90.h target())
 };
-// Seeded from today's values: the F140 table is the ADS role's seed for a rifle-class weapon and both roles' for a pistol (its hip and ADS readouts took one placement); the
-// rifle-class weapons' hip readout was never placed, so its seed is 0 (all four 0 draw it exactly where the game does).
+// F144 seeded this from the values then in use (the F140 table for the ADS roles and the pistols, 0 for a rifle-class weapon's hip role). F145 bakes the pilot's dialled totals
+// (the seed plus trim each role was last settled at for 3 s or more in the F144 flight) into the scope-no rows of the eight weapons he dialled: the pistols' hip rows are as they
+// were (13, 3.5, -3, 3). The scope-yes rows, the fists, the plasma pistol and the plasma sniper stay as F144 left them: the pistol and the sniper were never placed in that flight.
 constexpr Row kTable[] = {
     {"$wpn_m_assaultrifle_laser_fauto_name;", loadout::kScopeNo, kHip, {0.0, 0.0, 0.0, 0.0}},
     {"$wpn_m_assaultrifle_laser_fauto_name;", loadout::kScopeNo, kAds, {0.0, 3.5, 0.0, 0.0}},
     {"$wpn_m_assaultrifle_laser_fauto_name;", loadout::kScopeYes, kHip, {0.0, 0.0, 0.0, 0.0}},
     {"$wpn_m_assaultrifle_laser_fauto_name;", loadout::kScopeYes, kAds, {0.0, 3.5, 0.0, 0.0}},
-    {"$wpn_m_assaultrifle_plasma_fauto_name;", loadout::kScopeNo, kHip, {0.0, 0.0, 0.0, 0.0}},
-    {"$wpn_m_assaultrifle_plasma_fauto_name;", loadout::kScopeNo, kAds, {0.0, 3.5, 0.0, 0.0}},
+    {"$wpn_m_assaultrifle_plasma_fauto_name;", loadout::kScopeNo, kHip, {7.0, 2.5, 0.0, 0.0}},
+    {"$wpn_m_assaultrifle_plasma_fauto_name;", loadout::kScopeNo, kAds, {7.0, 6.0, 0.0, 0.0}},
     {"$wpn_m_assaultrifle_plasma_fauto_name;", loadout::kScopeYes, kHip, {0.0, 0.0, 0.0, 0.0}},
     {"$wpn_m_assaultrifle_plasma_fauto_name;", loadout::kScopeYes, kAds, {0.0, 3.5, 0.0, 0.0}},
-    {"$wpn_m_assaultrifle_kinetic_fauto_name;", loadout::kScopeNo, kHip, {0.0, 0.0, 0.0, 0.0}},
-    {"$wpn_m_assaultrifle_kinetic_fauto_name;", loadout::kScopeNo, kAds, {0.0, 3.5, 0.0, 0.0}},
+    {"$wpn_m_assaultrifle_kinetic_fauto_name;", loadout::kScopeNo, kHip, {5.0, 4.5, 0.0, 0.0}},
+    {"$wpn_m_assaultrifle_kinetic_fauto_name;", loadout::kScopeNo, kAds, {3.5, 5.5, 0.0, 0.0}},
     {"$wpn_m_assaultrifle_kinetic_fauto_name;", loadout::kScopeYes, kHip, {0.0, 0.0, 0.0, 0.0}},
     {"$wpn_m_assaultrifle_kinetic_fauto_name;", loadout::kScopeYes, kAds, {0.0, 3.5, 0.0, 0.0}},
-    {"$wpn_m_launcher_rocket_sauto_name;", loadout::kScopeNo, kHip, {0.0, 0.0, 0.0, 0.0}},
-    {"$wpn_m_launcher_rocket_sauto_name;", loadout::kScopeNo, kAds, {0.0, 3.5, 0.0, 0.0}},
+    {"$wpn_m_launcher_rocket_sauto_name;", loadout::kScopeNo, kHip, {5.5, 0.0, 0.0, 0.0}},
+    {"$wpn_m_launcher_rocket_sauto_name;", loadout::kScopeNo, kAds, {5.5, 3.5, 0.0, 0.0}},
     {"$wpn_m_launcher_rocket_sauto_name;", loadout::kScopeYes, kHip, {0.0, 0.0, 0.0, 0.0}},
     {"$wpn_m_launcher_rocket_sauto_name;", loadout::kScopeYes, kAds, {0.0, 3.5, 0.0, 0.0}},
     {"$wpn_m_sniper_plasma_charged_name;", loadout::kScopeNo, kHip, {0.0, 0.0, 0.0, 0.0}},
     {"$wpn_m_sniper_plasma_charged_name;", loadout::kScopeNo, kAds, {0.0, 3.5, 0.0, 0.0}},
     {"$wpn_m_sniper_plasma_charged_name;", loadout::kScopeYes, kHip, {0.0, 0.0, 0.0, 0.0}},
     {"$wpn_m_sniper_plasma_charged_name;", loadout::kScopeYes, kAds, {0.0, 3.5, 0.0, 0.0}},
-    {"$wpn_m_submachinegun_kinetic_fauto_name;", loadout::kScopeNo, kHip, {0.0, 0.0, 0.0, 0.0}},
-    {"$wpn_m_submachinegun_kinetic_fauto_name;", loadout::kScopeNo, kAds, {0.0, 3.5, 0.0, 0.0}},
+    {"$wpn_m_submachinegun_kinetic_fauto_name;", loadout::kScopeNo, kHip, {6.5, 0.0, 0.0, 0.0}},
+    {"$wpn_m_submachinegun_kinetic_fauto_name;", loadout::kScopeNo, kAds, {6.5, 3.5, 0.0, 0.0}},
     {"$wpn_m_submachinegun_kinetic_fauto_name;", loadout::kScopeYes, kHip, {0.0, 0.0, 0.0, 0.0}},
     {"$wpn_m_submachinegun_kinetic_fauto_name;", loadout::kScopeYes, kAds, {0.0, 3.5, 0.0, 0.0}},
-    {"$wpn_m_submachinegun_laser_fauto_name;", loadout::kScopeNo, kHip, {0.0, 0.0, 0.0, 0.0}},
-    {"$wpn_m_submachinegun_laser_fauto_name;", loadout::kScopeNo, kAds, {0.0, 3.5, 0.0, 0.0}},
+    {"$wpn_m_submachinegun_laser_fauto_name;", loadout::kScopeNo, kHip, {7.0, 1.5, 0.5, 0.0}},
+    {"$wpn_m_submachinegun_laser_fauto_name;", loadout::kScopeNo, kAds, {10.0, 4.5, 1.0, 0.0}},
     {"$wpn_m_submachinegun_laser_fauto_name;", loadout::kScopeYes, kHip, {0.0, 0.0, 0.0, 0.0}},
     {"$wpn_m_submachinegun_laser_fauto_name;", loadout::kScopeYes, kAds, {0.0, 3.5, 0.0, 0.0}},
-    {"$wpn_m_shotgun_plasma_doublebarrel_name;", loadout::kScopeNo, kHip, {0.0, 0.0, 0.0, 0.0}},
-    {"$wpn_m_shotgun_plasma_doublebarrel_name;", loadout::kScopeNo, kAds, {0.0, 3.5, 0.0, 0.0}},
+    {"$wpn_m_shotgun_plasma_doublebarrel_name;", loadout::kScopeNo, kHip, {10.0, -0.5, 1.0, 0.0}},
+    {"$wpn_m_shotgun_plasma_doublebarrel_name;", loadout::kScopeNo, kAds, {10.0, 3.0, 1.0, 0.0}},
     {"$wpn_m_shotgun_plasma_doublebarrel_name;", loadout::kScopeYes, kHip, {0.0, 0.0, 0.0, 0.0}},
     {"$wpn_m_shotgun_plasma_doublebarrel_name;", loadout::kScopeYes, kAds, {0.0, 3.5, 0.0, 0.0}},
     {"$wpn_s_pistol_kinetic_sauto_name;", loadout::kScopeNo, kHip, {13.0, 3.5, -3.0, 3.0}},
-    {"$wpn_s_pistol_kinetic_sauto_name;", loadout::kScopeNo, kAds, {13.0, 3.5, -3.0, 3.0}},
+    {"$wpn_s_pistol_kinetic_sauto_name;", loadout::kScopeNo, kAds, {16.0, 5.0, -3.0, 3.0}},
     {"$wpn_s_pistol_kinetic_sauto_name;", loadout::kScopeYes, kHip, {13.0, 3.5, -3.0, 3.0}},
     {"$wpn_s_pistol_kinetic_sauto_name;", loadout::kScopeYes, kAds, {13.0, 3.5, -3.0, 3.0}},
     {"$wpn_s_pistol_laser_sauto_name;", loadout::kScopeNo, kHip, {13.0, 3.5, -3.0, 3.0}},
-    {"$wpn_s_pistol_laser_sauto_name;", loadout::kScopeNo, kAds, {13.0, 3.5, -3.0, 3.0}},
+    {"$wpn_s_pistol_laser_sauto_name;", loadout::kScopeNo, kAds, {18.0, 6.5, -3.0, 3.0}},
     {"$wpn_s_pistol_laser_sauto_name;", loadout::kScopeYes, kHip, {13.0, 3.5, -3.0, 3.0}},
     {"$wpn_s_pistol_laser_sauto_name;", loadout::kScopeYes, kAds, {13.0, 3.5, -3.0, 3.0}},
     {"$wpn_s_pistol_plasma_charged_name;", loadout::kScopeNo, kHip, {13.0, 3.5, -3.0, 3.0}},
@@ -438,7 +439,10 @@ inline Move moveOf(const double drawn[3], const double game[3], const double exp
     m.diffMm = 1000.0 * std::sqrt(e[0] * e[0] + e[1] * e[1] + e[2] * e[2]);
     return m;
 }
-// A role's window: the frames its placement was applied, the frames measured (the patched rows solved to a camera) and bound at the draw's issue, and the bound frames' sums.
+// A role's window: the frames its placement was applied, the frames measured (the patched rows solved to a camera, and the seed-only reference too) and bound at the draw's issue,
+// and the bound frames' sums. F145: the proof is the drawn move against the same frame placed at the seed alone (the sums without a prefix: what the trims asked and what the draw
+// did with it), the move against the game's own draw is kept as information (the game* sums): a seed moves the part from where the game draws it on purpose, and a size factor
+// makes the inverted camera no rotation, so that move reads tens of cm in the ADS roles whatever the pilot dialled.
 struct RoleAcc {
     bool have = false;
     char item[64] = {};
@@ -446,18 +450,25 @@ struct RoleAcc {
     double seed[4] = {}, trim[4] = {}, total[4] = {};
     uint64_t placed = 0, measured = 0, bound = 0;
     double moveSum[3] = {}, absSum = 0.0, expSum = 0.0, diffMaxMm = 0.0;
-    void fold(const Move& m) noexcept {
+    double gameMoveSum[3] = {}, gameAbsSum = 0.0, gameExpSum = 0.0, gameDiffMaxMm = 0.0;
+    void fold(const Move& vsSeed, const Move& vsGame) noexcept {
         ++bound;
-        for (int i = 0; i < 3; ++i) moveSum[i] += m.cm[i];
-        absSum += m.absCm;
-        expSum += m.expAbsCm;
-        diffMaxMm = std::max(diffMaxMm, m.diffMm);
+        for (int i = 0; i < 3; ++i) {
+            moveSum[i] += vsSeed.cm[i];
+            gameMoveSum[i] += vsGame.cm[i];
+        }
+        absSum += vsSeed.absCm;
+        expSum += vsSeed.expAbsCm;
+        diffMaxMm = std::max(diffMaxMm, vsSeed.diffMm);
+        gameAbsSum += vsGame.absCm;
+        gameExpSum += vsGame.expAbsCm;
+        gameDiffMaxMm = std::max(gameDiffMaxMm, vsGame.diffMm);
     }
 };
 enum Verdict : int { kVNotMeasured = 0, kVNotReaching, kVNoMoveAsked, kVDiffers, kVReaches };
-constexpr double kReachMm = 1.0;       // the drawn move must equal the total's within this
+constexpr double kReachMm = 1.0;       // the drawn move must equal the trims' within this
 constexpr double kNoMoveCm = 0.05;     // a move under this (0.5 mm) is no move
-constexpr double kAskedCm = 0.1;       // a total's move of at least this (1 mm) is a move asked
+constexpr double kAskedCm = 0.1;       // a trim move of at least this (1 mm) is a move asked
 inline int verdictOf(const RoleAcc& a) noexcept {
     if (!a.measured) return kVNotMeasured;
     if (!a.bound) return kVNotReaching;
@@ -471,8 +482,8 @@ inline const char* verdictText(int v) noexcept {
     switch (v) {
         case kVNotMeasured: return "not measured (the draw's camera could not be solved)";
         case kVNotReaching: return "NOT REACHING THE DRAW";
-        case kVNoMoveAsked: return "no move asked: drawn where the game draws it";
-        case kVDiffers: return "the drawn move differs from the total";
+        case kVNoMoveAsked: return "no trim asked: drawn at its seed";
+        case kVDiffers: return "the drawn move differs from the trims'";
         default: return "reaches the draw";
     }
 }
