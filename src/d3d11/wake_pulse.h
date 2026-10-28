@@ -81,11 +81,6 @@ bool wakePulseSkips(ID3D11DeviceContext* ctx, char kind, uint32_t count,
                     uint32_t targetW, uint32_t targetH, uint32_t startIndex,
                     int baseVertex);
 
-// TEMPORARY (Phase 1 shadow instrument, built 2026-10-27; draw_fast_path_shadow.h): is a target of this size the pulse's surface (wide enough,
-// the panel's aspect)? The test wakePulseSkips opens with after its key check, pure and without side effects: the repeat-draw fast path
-// keeps a draw into such a surface on the full path, where the pulse's counters and shape tests run.
-bool wakePulseSurfaceShape(uint32_t targetW, uint32_t targetH);
-
 // The receipt: dropped draws are counted and reported, because a
 // suppression that says nothing is indistinguishable from one that never
 // matched.

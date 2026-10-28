@@ -1,8 +1,6 @@
 #include "perf_monitor.h"
 #include "config_refresh_line.h"
 #include "cross_profile_cost.h"
-#include "draw_step_clock.h"   // the draw hook CPU by step lines (built 2026-10-27, temporary)
-#include "draw_fast_path_ab.h" // the fast path's per-window A/B line and its arm (built 2026-10-27, Phase 2b, temporary)
 #include "engine_motion_cpu.h"
 #include "frame_ticks.h"
 #include "gpu_frame_timing.h"
@@ -74,8 +72,6 @@ constexpr uint64_t kSlowEveryMs = 1000;
 constexpr uint64_t kGraceMs = 2000;
 // One frame in sixteen samples the draw hooks.
 constexpr uint32_t kDrawSampleEvery = 16;
-// The steps-mode draws of the window (draw_step_clock.h): written from the drawing thread, read and reset at the 1800-frame edge.
-drawstep::Window g_drawSteps;
 // The drop log line: at most one every five seconds, sixty a session.
 constexpr uint64_t kDropLogEveryMs = 5000;
 constexpr uint32_t kDropLogMax = 60;
@@ -190,11 +186,6 @@ struct State {
     int      count = 0;
     int64_t  lastQpc = 0;
     uint32_t frameNo = 0;
-    // TEMPORARY (draw_fast_path_ab.h, Phase 2b): the A/B window's books. The frame and the wall clock of the previous 1800-frame edge (the session's first window starts at its first frame),
-    // and the native application CPU of each frame the window saw (nativeTimingReadCompletions's applicationMs, the benchmark's own CPU series), for the median at the edge.
-    uint32_t abEdgeFrame = 0;
-    uint64_t abEdgeMs = 0;
-    std::vector<double> abCpu;
 
     // The frame in progress: events and their longest duration, the draw
     // sample, all cleared at the boundary.
@@ -1073,10 +1064,6 @@ void hookTickNote(const FrameTickSummary& t, uint64_t nowMs) {
 void perfMonitorFrame(ID3D11Device* dev) {
     State& s = g_s;
     ++s.frameNo;
-    if (!s.abEdgeMs) {   // TEMPORARY (Phase 2b): the A/B's first window starts at the first frame
-        s.abEdgeMs = nowMs();
-        s.abEdgeFrame = s.frameNo - 1;
-    }
     Frame f;
     const int64_t q = qpcNow();
     // The gap as it really was. f.presentMs below is 0 for a gap of 5 s or more, which keeps a loading
@@ -1155,8 +1142,6 @@ void perfMonitorFrame(ID3D11Device* dev) {
             benchmark.cpuMs = completion.applicationMs;
             benchmark.cpuValid = completion.haveCpu && !completion.invalid &&
                                  completion.applicationValid;
-            // TEMPORARY (Phase 2b): the same valid frame, kept for the A/B line's median over the window. At most a few thousand a window; past that it is dropped.
-            if (benchmark.cpuValid && std::isfinite(benchmark.cpuMs) && s.abCpu.size() < 8192) s.abCpu.push_back(benchmark.cpuMs);
             s.nativeBenchmark.observe(benchmark, historyNow);
         }
         GpuFrameSnapshot gpuCompletions[32]{};
@@ -1233,74 +1218,6 @@ void perfMonitorFrame(ID3D11Device* dev) {
             double(s.drawWindowMaxMs), s.drawWindowSamples, unsigned(kDrawSampleEvery),
             unsigned(kPerfMonitorDrawTimeStride), unsigned(kPerfMonitorDrawTimeStride),
             vScreenAaOffForDraws() ? "off" : "on", vScreenEyeDrawsThisFrame());
-        // TEMPORARY, built 2026-10-27 (draw_fast_path_ab.h, Phase 2b): the A/B window's line, filled in below as the figures come to hand.
-        fastab::Window ab;
-        ab.endFrame = s.frameNo;
-        ab.on = vScreenDrawFastPathArmed();
-        ab.frames = s.frameNo - s.abEdgeFrame;
-        {
-            const uint64_t abNow = nowMs();
-            ab.seconds = s.abEdgeMs && abNow > s.abEdgeMs ? static_cast<double>(abNow - s.abEdgeMs) / 1000.0 : 0.0;
-        }
-        ab.oldKnown = s.drawWindowSamples != 0;
-        ab.oldMeanMs = s.drawWindowSamples ? s.drawWindowMs / s.drawWindowSamples : 0.0;
-        ab.oldSamples = s.drawWindowSamples;
-        // Built 2026-10-27, a temporary instrument for the AA-on draw-hook increment (docs\engine-render-performance-2026-09-19.md's
-        // 2026-10-27 entry): the same window, split by step. The clock floor is measured here, as the window closes, in the CPU state
-        // it just ran in; the line is two lines because one holds about 1170 characters.
-        {
-            drawstep::FormatInfo info;
-            info.endFrame = s.frameNo;
-            info.sampledFrames = s.drawWindowSamples;
-            info.stride = kPerfMonitorDrawTimeStride;
-            info.ticksPerSecond = qpcFrequency();
-            info.floorNs = drawstep::calibrateMarkNs([] { return qpcNow(); }, info.ticksPerSecond);
-            info.aaOn = !vScreenAaOffForDraws();
-            // TEMPORARY, built 2026-10-27 (draw_fast_path_ab.h, Phase 2b): the A/B line's figures that come from the step clock, taken before the window resets: EDVR's step sum
-            // (the step line's "EDVR") and the X draws a frame the clocked draws give, which both arms have.
-            drawstep::Totals stepTotals;
-            const bool stepOk = drawstep::summarise(g_drawSteps, info, &stepTotals);
-            ab.stepKnown = stepOk;
-            ab.stepSumMs = stepOk ? stepTotals.edvrMs : 0.0;
-            ab.clockDrawsKnown = stepOk && stepTotals.kindSeen[3];
-            ab.clockDrawsPerFrame = ab.clockDrawsKnown ? stepTotals.kindDrawsPerFrame[3] : 0.0;
-            char stepLine[1200];
-            drawstep::formatStepsLine(stepLine, sizeof(stepLine), g_drawSteps, info);
-            Log::get().note("%s", stepLine);
-            drawstep::formatCallsLine(stepLine, sizeof(stepLine), g_drawSteps, info);
-            Log::get().note("%s", stepLine);
-            g_drawSteps.reset();
-            // TEMPORARY, built 2026-10-27 (ui_family_memo.h): the UI layer's family-decision memo's window, right after the step lines it
-            // is read beside. Written every window; the call starts the counters again.
-            vScreenUiFamilyCacheLine(stepLine, sizeof(stepLine), s.frameNo);
-            Log::get().note("%s", stepLine);
-            // TEMPORARY, built 2026-10-27 (draw_fast_path_shadow.h): the repeat-draw fast path's shadow window, right after the family cache line, as three
-            // lines (the counts, why draws recorded no ticket, the args class's bounds). Written every window; the call starts the counters again.
-            char shadowNoTicketLine[1200], shadowArgsLine[1200];
-            // The window's owner X draws as the shadow counted them, before the call below starts its counters again (zero in an OFF window).
-            const VScreenFastPathTotals abTotals = vScreenDrawFastPathTotals();
-            ab.ownerDraws = abTotals.ownerDraws;
-            ab.fastDraws = abTotals.fastDraws;
-            vScreenDrawFastPathShadowLines(stepLine, sizeof(stepLine), shadowNoTicketLine, sizeof(shadowNoTicketLine), shadowArgsLine, sizeof(shadowArgsLine),
-                                           s.frameNo);
-            Log::get().note("%s", stepLine);
-            Log::get().note("%s", shadowNoTicketLine);
-            Log::get().note("%s", shadowArgsLine);
-            // TEMPORARY, built 2026-10-27 (draw_fast_path_ab.h, Phase 2b): the A/B line, after the other draw lines, for the window that just ended under the arm it ran with; then the
-            // arm of the window that begins, set once for all of it. The native application CPU median is over the frames the native timing gave a valid sample for in the window
-            // (none, and '-', when the native path was not running).
-            double cpuMedian = 0.0;
-            ab.cpuSamples = static_cast<uint32_t>(s.abCpu.size());
-            ab.cpuKnown = fastab::median(s.abCpu.data(), s.abCpu.size(), &cpuMedian);
-            ab.cpuP50Ms = cpuMedian;
-            s.abCpu.clear();
-            char abLine[1200];
-            fastab::formatLine(abLine, sizeof(abLine), ab);
-            Log::get().note("%s", abLine);
-            vScreenDrawFastPathArm(fastab::armAfterEdge(s.frameNo));
-            s.abEdgeFrame = s.frameNo;
-            s.abEdgeMs = nowMs();
-        }
         s.drawWindowMs = 0.0; s.drawWindowMaxMs = 0.0f; s.drawWindowSamples = 0;
         // Written every window, quiet or not, so a window with no refresh in it (all zeros) can be told from a build that does not have this line.
         const uint32_t reloads = s.cfgReloads.exchange(0, std::memory_order_relaxed);
@@ -1394,10 +1311,6 @@ void perfMonitorNotePresentWait(double ms) {
 void perfMonitorDrawTicks(int64_t wholeTicks, int64_t realTicks) {
     if (wholeTicks > 0) g_s.drawWholeTicks += wholeTicks;
     if (realTicks > 0) g_s.drawRealTicks += realTicks;
-}
-
-void perfMonitorDrawSteps(char kind, const drawstep::StepAccum& run) {
-    g_drawSteps.add(kind, run);
 }
 
 void perfMonitorSetActive(bool active) {

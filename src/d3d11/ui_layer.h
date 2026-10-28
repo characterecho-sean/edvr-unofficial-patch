@@ -88,14 +88,7 @@ extern bool g_uiLayerWorldReissue;
 extern bool g_uiLayerMapsOn;
 extern uint64_t g_uiLayerGateFrame;
 extern uint64_t g_uiLayerNamedAt;
-extern uint32_t g_uiLayerFamilyEpoch;
 }  // namespace detail
-
-// The family decision's epoch (built 2026-10-27, ui_family_memo.h): a counter that only moves forward, bumped wherever the layer
-// resets or rewrites its target-kind cache other than by that cache's own refresh on a new Rtv0 generation (the flat adapter's size
-// change and release, ui_layer.cpp), and wherever the layer's liveness is recomputed (refreshLive). vscreen's memo of the plain
-// decline keys on it beside the bindings, so none of those events can leave a stale decline standing. One load.
-inline uint32_t uiLayerFamilyEpoch() { return detail::g_uiLayerFamilyEpoch; }
 
 // The draw path's one gate: fix.ui_quality is on, a temporal mode is on, and
 // the layer has not stood down. One load.
@@ -351,9 +344,6 @@ inline bool uiLayerRedirecting() { return detail::g_uiLayerRedirecting; }
 // hand). Every case is counted and each shader pair named once.
 inline bool uiLayerWatching() { return detail::g_uiLayerWatching; }
 inline bool uiLayerSeedDiagnostics() { return detail::g_uiSeedDiagnostics; }
-// TEMPORARY (Phase 1 shadow instrument, built 2026-10-27; draw_fast_path_shadow.h): one number that is the same before and after a call of
-// uiLayerNoteOther exactly when the call changed none of the counters, notes or the watch budget it keeps. Reads only; out of line (ui_layer.cpp).
-uint64_t uiLayerAfterUiStamp();
 bool uiLayerNoteOther(ID3D11DeviceContext* ctx, uint32_t count, bool verdictForwards, bool substituted,
                       bool excluded, bool panelSized, uint32_t instances, uint32_t verdict, char drawKind);
 // Completes CPU-only observation after the forwarding/substitution decision.

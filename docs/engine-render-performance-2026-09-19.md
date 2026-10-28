@@ -58,7 +58,7 @@
 
 * **Next (2026-10-28, last entry):** AA on's +1.65 ms is per-draw
   classifiers. ui-depth memo FLOWN: exact, -0.21 ms (shipped, b1561dff).
-  Fast path: no saving (2b A/B; a review agrees). Retirement asked.
+  Fast path, step clock, trim F RETIRED (no saving). Per-draw arc closed.
 
 ## Frame budget philosophy
 
@@ -4973,3 +4973,33 @@ shadow and A/B lines. No further flight for the fast path. This closes
 the per-draw AA-on arc. The levers still open are the draw count and
 making the always-on instruments armed-only. Before more CPU work, check
 whether this rig is CPU-bound at 68 fps.
+
+### 2026-10-28 -- Retired: the fast path, the step clock and trim F
+
+Done as the review above recommends, at Sean's word. Full build green
+(aa_off_test 76 checks, 0 failed; receipt 8b7ed89a). Not flown.
+- **The fast path (Phases 1-2b).** src and tools are back at 12c230c3:
+  - the three headers;
+  - the vscreen.cpp glue and fast block;
+  - the predicate exports in object_probe, optimized_station,
+    screen_motion, ui_depth, ui_layer and wake_pulse;
+  - the rig checks.
+- **The step clock (af9c429b).** draw_step_clock.h is gone, and the
+  thunks are back to the DrawClock they had before it. The "draw hook
+  CPU" line keeps its meaning: one frame in 16, every 64th draw,
+  forwarded game draw time excluded. 2b's move of the X thunk's clock
+  goes too, so the line no longer covers the prologue or a fast-path
+  decision. Removed with it: the "by step" lines and the mark
+  calibration.
+- **Trim F (036e235f), with its verification.** ui_family_memo.h,
+  `uiLayerFamilyMemoised`, `g_uiLayerFamilyEpoch` and the "ui layer
+  family cache" line are gone. The family decision is plain
+  `uiLayerFamilyOf` again.
+- **Kept, byte for byte:**
+  - trims A-E (engine_velocity, remlok_fix, scrim_fix, and their call
+    sites);
+  - the ui_depth memo (classifier_memo.h, the classifier epoch,
+    `bindingEyeKeyGeneration`).
+
+This closes the per-draw AA-on arc. The memo's -0.21 ms is what it
+bought.

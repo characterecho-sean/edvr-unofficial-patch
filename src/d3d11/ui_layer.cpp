@@ -90,7 +90,6 @@ bool g_uiLayerWorldReissue = false; // the VR world route: the screen composite 
 bool g_uiLayerMapsOn = false;       // the on-foot maps gate: the layer and screen motion live -- naming decides the gate
 uint64_t g_uiLayerGateFrame = 0;    // frame boundaries the layer has seen: what a naming is attributed to (ui_layer.h)
 uint64_t g_uiLayerNamedAt = ~0ull;  // the gate frame in which a draw last named the screen's source (never: ~0)
-uint32_t g_uiLayerFamilyEpoch = 0;  // ui_layer.h uiLayerFamilyEpoch: moves when the target-kind cache is reset or the liveness recomputed
 }  // namespace detail
 
 namespace {
@@ -156,7 +155,6 @@ void refreshLive() {
     detail::g_uiQualityLive = quality;
     detail::g_uiLayerLive = uiLayerMachineryLive(quality, g_weaponsLive || g_rippleLive);
     detail::g_uiLayerCrispOn = detail::g_uiLayerLive && !g_crispStoodDown;
-    ++detail::g_uiLayerFamilyEpoch;   // the liveness the family decision's gates read moved: vscreen's memo of its plain decline re-checks
 }
 
 // The HDR HUD path fails alone: the cockpit HUD families (the holo panels,
@@ -6275,19 +6273,6 @@ bool uiLayerNoteOther(ID3D11DeviceContext* ctx, uint32_t count, bool verdictForw
     return took;
 }
 
-// TEMPORARY (Phase 1 shadow instrument, built 2026-10-27; draw_fast_path_shadow.h, docs\engine-render-performance-2026-09-19.md "Desk design: the
-// repeat-draw fast path"). One number that moves when uiLayerNoteOther does something that is a decision or a change of state: the sum of the
-// counters it and seedWritersCheck bump when they decide (the after-UI writes, reads, follows, post passes, declines, world-route losses, seed
-// invalidations, the writers the seed preserved), the lines it has named, and the watch budget it has spent. Each only moves forward within one call
-// (the budget by what it spends), so the sum before and after a call is equal exactly when the call changed none of them. The depth-view memo's hit and
-// miss counters (dsvMemoHits, dsvMemoMisses) are left out on purpose: they count lookups of a memo that is a function of the Dsv0 binding, a diagnostic
-// that moves on every owner draw once the layer has taken one this frame, and not an effect. Reads only.
-uint64_t uiLayerAfterUiStamp() {
-    const Window& w = g_win;
-    return w.afterWrites + w.afterReads + w.afterFollowed + w.afterPostPass + w.afterDeclined + w.worldLeftDraws + w.seedStale +
-           w.depthOnlySeedPreservedWriters + g_afterSeenCount + (kWatchPerFrame - g_watchBudget);
-}
-
 void uiLayerSeedDrawOutcome(bool forwarded, bool substituted, bool redirected, bool known) {
     if (g_seedCensus.enabled) g_seedCensus.finishDraw(forwarded, substituted, redirected, known);
 }
@@ -6644,10 +6629,7 @@ void uiLayerFlatSetDraw(uint64_t frame, float jx, float jy, uint32_t renderW, ui
     g_flatDraw.seq = frame;
     g_flatDraw.jx = jx;
     g_flatDraw.jy = jy;
-    if (g_flatDraw.renderW != renderW || g_flatDraw.renderH != renderH) {
-        g_tc = TargetCache{};  // the eye size moved
-        ++detail::g_uiLayerFamilyEpoch;
-    }
+    if (g_flatDraw.renderW != renderW || g_flatDraw.renderH != renderH) g_tc = TargetCache{};  // the eye size moved
     g_flatDraw.renderW = renderW;
     g_flatDraw.renderH = renderH;
 }
@@ -6675,7 +6657,6 @@ bool uiLayerFlatRelease() {
     }
     g_glow = GlowFeedTexture{};  // H' is H's size: a resize or a profile switch builds it afresh
     g_tc = TargetCache{};
-    ++detail::g_uiLayerFamilyEpoch;
     g_flatDraw = FlatDraw{};
     g_crispPending = CrispTonePending{};
     detail::g_uiLayerCrispPending = false;

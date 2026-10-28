@@ -2424,10 +2424,6 @@ bool optimizedStationSkipsDraw(uint64_t vs, uint64_t ps) noexcept {
     return true;
 }
 
-// TEMPORARY (Phase 1 shadow instrument, built 2026-10-27; draw_fast_path_shadow.h): is this the sun pair, whatever the skip's state? Reads only; the
-// skip's own test above counts the draws it drops.
-bool optimizedStationIsSunPair(uint64_t vs, uint64_t ps) noexcept { return vs == kSunVs && ps == kSunPs; }
-
 void optimizedStationNoteSunDraw(SunDrawPath path) noexcept {
     (path == SunDrawPath::kMasked ? g_winSunMasked : g_winSunNotIssued).fetch_add(1, std::memory_order_relaxed);
 }

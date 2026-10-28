@@ -44,15 +44,10 @@ void objectProbeConfigure(Config& cfg);
 namespace detail {
 extern bool g_objectProbeOn;
 extern bool g_objectProbeLedgerOn;
-extern uint32_t g_objectProbeChecksLeft;
 }  // namespace detail
 inline bool objectProbeWantsDraws() {
     return detail::g_objectProbeOn || detail::g_objectProbeLedgerOn;
 }
-// TEMPORARY (Phase 1 shadow instrument, built 2026-10-27; draw_fast_path_shadow.h): how many instanced eye draws the pool recognition will still
-// ask this frame (object_probe.cpp g_checksLeft: refilled about once a second, spent by the first instanced eye draws of that frame). While it is
-// not zero an eye draw reads a shader resource and spends a check, so the repeat-draw fast path stands aside. One load.
-inline uint32_t objectProbeChecksLeft() { return detail::g_objectProbeChecksLeft; }
 
 // One eye draw, after the eye gate: an instanced draw may be asked for its
 // t33 binding, a few times a frame until the pool is known and then once a

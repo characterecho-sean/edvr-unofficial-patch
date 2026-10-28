@@ -17,7 +17,6 @@
 // in 29 different places and its shaders are told about it separately.
 #pragma once
 
-#include <cstddef>
 #include <cstdint>
 
 #include "../common/vtable_hook.h"  // HookMode
@@ -123,23 +122,6 @@ uint32_t vScreenEyeDrawsThisFrame();
 // VR's temporal anti-aliasing reads off, as the draw path last took it from the config (the AA-off fast path,
 // draw_fast_path.h). For the draw hook CPU line only.
 bool vScreenAaOffForDraws();
-// TEMPORARY (built 2026-10-27, ui_family_memo.h): the "ui layer family cache:" line for the perf monitor's 1800-frame edge. Writes it into
-// `out` (always, even for a window with no calls), returns its length, and starts the window's counters again.
-size_t vScreenUiFamilyCacheLine(char* out, size_t cap, uint32_t endFrame);
-// TEMPORARY (built 2026-10-27, draw_fast_path_shadow.h): the "draw fast path:", "draw fast path no ticket:" and "draw fast path
-// args:" lines for the same edge. Writes the three into `line`, `noTicketLine` and `argsLine` (always), each under 1150 characters at its worst, and starts
-// the window's counters again.
-void vScreenDrawFastPathShadowLines(char* line, size_t lineCap, char* noTicketLine, size_t noTicketCap, char* argsLine, size_t argsCap, uint32_t endFrame);
-// TEMPORARY (built 2026-10-27, draw_fast_path_ab.h, Phase 2b): the fast path's A/B. vScreenDrawFastPathArm sets the arm of the window that begins, once at an
-// 1800-frame edge (a switch to ON drops the ticket); the draw path reads it on every owner X draw, and OFF is no mechanism at all. The totals are the window's owner
-// X draws and the fast path's, read before vScreenDrawFastPathShadowLines starts the counters again (zero in an OFF window).
-struct VScreenFastPathTotals {
-    uint64_t ownerDraws = 0;
-    uint64_t fastDraws = 0;
-};
-void vScreenDrawFastPathArm(bool on);
-bool vScreenDrawFastPathArmed();
-VScreenFastPathTotals vScreenDrawFastPathTotals();
 
 // The context's OMSetRenderTargets through the ORIGINAL entry, past the
 // hook and the binding shadow: for a fix that rebinds around one draw and

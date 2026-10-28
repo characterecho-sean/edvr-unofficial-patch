@@ -472,14 +472,7 @@ static void r8Pins(const std::string& root) {
     check(!pf.empty() && !vs.empty(), "R8.sources-readable");
     check(countOf(vs, "particleRollFreeBegin(self)") == 1 && countOf(vs, "particleRollFreeEnd(ctx)") == 1,
           "R8.begin-and-end-wired-once-in-forwardWithVerdict");
-    // Two clears: the ladder's (beginPanelOverride, ahead of every early return) and the repeat-draw fast path's, which never reaches the ladder
-    // (vscreen.cpp, `if (shadow.fast) {`; draw_fast_path_shadow.h). The fast path's is inside its block, ahead of the block's return.
-    const size_t fastAt = vs.find("if (shadow.fast) {");
-    const size_t firstClear = vs.find("particleRollFreeClear();");
-    const size_t fastClear = fastAt == std::string::npos ? std::string::npos : vs.find("particleRollFreeClear();", fastAt);
-    check(countOf(vs, "particleRollFreeClear();") == 2 && fastAt != std::string::npos && firstClear < fastAt && fastClear != std::string::npos &&
-              fastClear < vs.find("return;", fastAt),
-          "R8.pending-cleared-at-the-top-of-the-ladder-and-by-the-fast-path");
+    check(countOf(vs, "particleRollFreeClear();") == 1, "R8.pending-cleared-at-the-top-of-the-ladder");
     check(pf.find("if (detail::g_particleMode != Mode::kSteady || !ctx) return false;") != std::string::npos,
           "R8.stock-returns-before-matching");
     check(countOf(pf, "g_blocks.enabled = ") >= 2 && countOf(pf, "g_blocks.clear()") >= 2, "R8.mode-changes-clear-and-gate-the-table");
