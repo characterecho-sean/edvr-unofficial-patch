@@ -58,7 +58,7 @@
 
 * **Next (2026-10-27, last entry):** AA on's +1.65 ms is per-draw
   classifiers. ui-depth memo FLOWN: exact, -0.21 ms (shipped, b1561dff).
-  Shadow 1d FLOWN: 44-51% would take, 0/65M wrong. Phase 2 (skips) BUILT.
+  Phase 2 FLOWN: takes 61%, 0/25M wrong; saving unproven. Next: 2b A/B.
 
 ## Frame budget philosophy
 
@@ -4764,6 +4764,72 @@ What to read:
 - EDVR's step sum and the old `draw hook CPU:` against the memo flight
   (log 122848: sum 3.53, old line 3.87-4.26), allowing for the
   instrument's own cost.
+
+**Phase 2 flown (2026-10-27, Steam log `edvr_gfx_20261027_200348.log`,
+build 81ec108c; same rig).** Loaded in docked at Cranfield at 20:05:48,
+AA on, looked around, then F7 off from 20:12:36 to 20:13:39. Sean saw
+nothing wrong.
+
+Another worktree's build ran beside the flight: 844 files, 20:06-20:10,
+mostly 20:08-20:09, plus a few at 20:12-20:13. So the clean timing
+windows are 30600-36000 (20:10:35-20:12:15). The counts below hold in
+every window.
+
+**The fast path took:**
+- eye draws: 65-67%;
+- off-screen draws: 41-55% (up to 65% with AA off);
+- all owner X draws: about 61% with AA on and 66% with AA off.
+
+The band merge cut "band changed" from about 20% to about 3.5%.
+
+**Verify frames:** 105-106 a window, 0.9-2.3M would-take draws compared
+a window, 0 mismatches in every window (about 25M over the flight).
+
+**Steps, clean windows' mean against the memo flight (ms a frame):**
+
+| Steps | Phase 2 | Memo flight |
+|---|---|---|
+| the v:* steps together | 0.63 | 1.40 |
+| f:scopes + f:ui-layer + f:after-ui + f:before | 0.38 | 0.70 |
+| p:screen | 0.056 | 0.182 |
+| the new `fast` step (about 15.6k draws, about 15 ns each) | 0.23 | - |
+| tail, which now carries the ticket update and capture | 0.18 | 0.09 |
+| engine-vel (carries the after-verdict capture) | 0.33 | 0.32 |
+| EDVR's step sum | 2.40 | 3.53 |
+| old line | 2.35-3.18 | 3.87-4.26 |
+
+**Why the net saving is not yet established:**
+- The clean windows had 20-31k owner X draws a frame, against about 35k
+  in the memo flight. Per draw, the step sum is about 91 ns against
+  101, roughly 10%.
+- The fast-path decision runs before the DrawClock is built, so neither
+  the step clock nor the old line measures it.
+- Full-path draws now carry the mechanism's own capture, in the tail
+  and engine-vel steps. They are also the heavier, non-repeat draws:
+  about 155 ns each, against the memo flight's 101 average.
+- Frame rate (64-76 fps against about 60) and the native benchmark's
+  cpu p50 (8.6-9.6 ms against 6.5-10.1) move with the scene. A
+  comparison across flights cannot separate the fast path's effect
+  from the draw count.
+
+What is established:
+- the mechanism is exact: 0 mismatches over about 155M would-take
+  draws in five flights;
+- it takes about 61% of owner X draws;
+- it costs about 15 ns a fast draw;
+- the classifier steps it skips fall by 45-70%.
+
+**Next (Phase 2b): an A/B inside one flight.**
+- Alternate 1800-frame windows: fast path ON (as now), then OFF (the
+  plain full path, with no decision, capture or tickets at all), and so
+  on. That is automatic, with no key, so one parked leg gives paired
+  windows at the same scene.
+- Build the DrawClock at the X thunk's start, so the old line covers
+  the decision too.
+- Log each window's arm with its old line, step sum, fps, native cpu
+  p50 and draws a frame.
+- The saving is the difference between adjacent windows at matched
+  draw counts.
 
 **The Phase 2 flight should show:**
 - the `fast` step's calls and cost;
