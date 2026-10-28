@@ -165,11 +165,24 @@ inline void run(Check&& check) {
         check(!latch.usable(10), "F85b: no latch before both eyes are in");
         latch.put(0, 10, Ke[0], oh[0], ow[0]);
         check(!latch.usable(10), "F85b: one eye's K is not a latch");
-        check(latch.put(1, 10, Ke[1], oh[1], ow[1]) && latch.agreed && latch.usable(10) && latch.usable(11) && !latch.usable(12),
-              "F85b: both eyes of a frame agreeing latch for that frame and the next, not the one after");
+        check(latch.put(1, 10, Ke[1], oh[1], ow[1]) && latch.agreed && latch.usable(10) && latch.usable(11), "F85b: both eyes of a frame agreeing latch for that frame and the next");
+        // F148: the latch holds over a missed pair: usable from the pairing's frame to kLatchHoldFrames after it, not before it and not past it
+        check(f85::kLatchHoldFrames == 4u && latch.usable(12) && latch.usable(13) && latch.usable(10 + f85::kLatchHoldFrames) && !latch.usable(10 + f85::kLatchHoldFrames + 1u),
+              "F85b: the latch holds over a missed pair for kLatchHoldFrames frames (usable at the pairing + 4, refused at + 5)");
+        check(!latch.usable(9) && !latch.usable(0), "F85b: a frame before the paired frame is not usable");
+        check(latch.gap(10) == 0u && latch.gap(11) == 1u && latch.gap(12) == 2u && latch.gap(10 + f85::kLatchHoldFrames) == f85::kLatchHoldFrames,
+              "F85b: the gap counts the frames from the pairing (a gap of 2 and more is a held latch)");
+        check(!latch.pastHold(10) && !latch.pastHold(10 + f85::kLatchHoldFrames) && latch.pastHold(10 + f85::kLatchHoldFrames + 1u) && !latch.pastHold(9),
+              "F85b: an agreeing pair is past its hold from the pairing + 5 on, and not before it");
         latch.put(0, 11, off, oh[0], ow[0]);
         check(latch.put(1, 11, Ke[1], oh[1], ow[1]) && !latch.agreed && !latch.usable(11) && latch.disagreed == 1,
               "F85b: a frame whose eyes disagree drops the latch and is counted");
+        check(!latch.usable(12) && !latch.usable(11 + f85::kLatchHoldFrames) && !latch.pastHold(11 + f85::kLatchHoldFrames + 1u),
+              "F85b: a disagreement drops the latch at once, whatever the hold, and a disagreeing pair is not 'past its hold'");
+        // after the disagreement at 11 the frames 12 and 13 form no pair; an agreeing pair at 14 latches again, and its hold runs from 14
+        latch.put(0, 14, Ke[0], oh[0], ow[0]);
+        check(latch.put(1, 14, Ke[1], oh[1], ow[1]) && latch.agreed && latch.usable(15) && latch.usable(14 + f85::kLatchHoldFrames) && !latch.usable(14 + f85::kLatchHoldFrames + 1u),
+              "F85b: the next agreeing pair latches again and the hold runs from it");
     }
     // ---- 1 and 2: H = 30 degrees yaw, U = K . H; the unpatched anchor is off by H, rows . M land on W_e . (U v) within 0.01 px -------------
     {

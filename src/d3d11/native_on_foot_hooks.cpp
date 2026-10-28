@@ -1018,15 +1018,15 @@ __declspec(noinline) bool sehReadClipPart(const uint8_t* amc, uint32_t idx, Clip
         return false;
     }
 }
-// The unclip write: enable 0, dirty 1. 1 = written, 0 = no modifier (nothing written), 2 = the modifier is already unclipped (enable 0: nothing written, so the game is not asked
-// to rebuild it every frame), -1 = a fault.
+// The unclip write: enable 0, dirty 1, every call, also when the game already has enable 0. 1 = written, 0 = no modifier (nothing written), -1 = a fault. F148: the dirty mark
+// every call is load-bearing. F147 skipped a modifier whose enable was already 0 (the game's armed state), and in the coat outfit the backpack in EVASuit_Gear_Back showed with
+// a weapon at the hip; F144 and F145, writing every call, showed the coat without it (the arc doc, 2026-10-28).
 __declspec(noinline) int sehWriteClipPart(uint8_t* amc, uint32_t idx) noexcept {
     __try {
         uint64_t mod = 0;
         std::memcpy(&mod, amc + avh::kOffAmcParts + idx * avh::kPartStride + avh::kOffPartClipMod, 8);
         if (!plausiblePointer(mod)) return 0;
         volatile uint8_t* m = reinterpret_cast<volatile uint8_t*>(mod);
-        if (m[avh::kClipModEnable] == 0) return 2;
         m[avh::kClipModEnable] = 0;
         m[avh::kClipModDirty] = 1;
         return 1;

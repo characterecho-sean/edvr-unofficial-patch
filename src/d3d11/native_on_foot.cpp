@@ -25839,6 +25839,9 @@ const char* const kF85WhyName[kF85WhyCount] = {"b0 not a whole-buffer bind", "no
                                                "K's origin far from U's"};
 struct F85bPe {   // one part, one eye, this second
     uint64_t found = 0, matched = 0, decided = 0, corrected = 0, refused = 0, why[kF85WhyCount] = {}, n = 0, newest = 0, multi = 0;
+    // F148: draws decided on a latch held over a missed pair, by frames since the pairing (index 2 to kLatchHoldFrames; 0 and 1 are the pairing of this frame or the last), and
+    // the refusals past the hold (an agreeing pair, but older than kLatchHoldFrames).
+    uint64_t heldGap[nofoot::f85::kLatchHoldFrames + 1u] = {}, pastHold = 0;
     double errPxSum = 0.0, errPxMax = 0.0, errDegSum = 0.0, angleSum = 0.0, yawSum = 0.0, pitchSum = 0.0, resPxMax = 0.0, originCmSum = 0.0, originCmMax = 0.0;
 };
 struct F85Win {
@@ -30253,10 +30256,12 @@ void f85bDecide(ID3D11DeviceContext* ctx, uint32_t frame, const Rec& r, ID3D11Bu
     int why = -1;
     if (!f85Solve(e, frame, sh, oHud, s, &why)) { f85Refuse(pe, why); return; }
     f85LatchPut(e, frame, s);
-    if (!g_f85Latch.usable(frame)) {
-        f85Refuse(pe, g_f85Latch.pairs == 0 || g_f85Latch.pairedFrame == ~0u || frame > g_f85Latch.pairedFrame + 1u ? kF85WhyNoPair : kF85WhyDisagree);
+    if (!g_f85Latch.usable(frame)) {   // F148: the latch holds kLatchHoldFrames frames after a pairing (the draw's own K is solved this frame; the latch vouches that the eyes' K agreed)
+        if (g_f85Latch.pastHold(frame)) ++pe.pastHold;
+        f85Refuse(pe, g_f85Latch.pairs == 0 || g_f85Latch.pairedFrame == ~0u || frame > g_f85Latch.pairedFrame + nofoot::f85::kLatchHoldFrames ? kF85WhyNoPair : kF85WhyDisagree);
         return;
     }
+    const uint32_t latchGap = g_f85Latch.gap(frame);   // F148: 0 or 1 = a pairing of this frame or the last, 2 and more = held over a missed pair
     nofoot::f85::UFrame uf = nofoot::f85::uFrame(u.U, s.oh, s.ow);
     // F90: A, the part's size (the rifle's and the pistol's ADS readouts, known since F91 by the record's mesh and scale, scaled about their content centre to the
     // hip readout's texels per metre), and B, the pistol's readout moved in the
@@ -30406,6 +30411,7 @@ void f85bDecide(ID3D11DeviceContext* ctx, uint32_t frame, const Rec& r, ID3D11Bu
         }
     }
     ++pe.decided;
+    if (latchGap >= 2u && latchGap <= nofoot::f85::kLatchHoldFrames) ++pe.heldGap[latchGap];   // F148
     if (s.rowsState == drawtag::kRowsNewest) ++pe.newest;
     f86hCount(frame, e, false);
     g_fix.pending = true;
@@ -30602,6 +30608,13 @@ void f85Report(uint64_t nowMs, bool fold, uint32_t windowSecs, bool detailLog, b
                                 p, nameId ? nameId - 1u : 0u, e, ull(g_f85bTagged[p].load(std::memory_order_relaxed)), ull(pe.found), ull(pe.matched), ull(pe.decided), ull(pe.corrected),
                                 ull(pe.newest), ull(pe.multi), ull(pe.refused), why, pe.errPxSum / nn, pe.errPxMax, pe.errDegSum / nn, pe.angleSum / nn, pe.yawSum / nn, pe.pitchSum / nn, pe.resPxMax,
                                 pe.originCmSum / nn, pe.originCmMax, w.agreeMmMax, w.agreeDegMax, windowSecs);
+                // F148: the both-eyes latch's hold, in plain words, on a line of its own (the line above has no room left under the 1100-byte budget the health self-test holds). The draws counted
+                // were decided on a latch whose pairing was 2 to 4 frames old (the eyes' K agreed then; the draw's own K was solved this frame); the refusals counted are those of a pair older than that.
+                // Zero is printed as zero, so the words alone tell this build from one before it.
+                static_assert(nofoot::f85::kLatchHoldFrames == 4u, "the F85b held line names the gaps 2, 3 and 4");
+                Log::get().note("weapon UI pin (F85b) part slot %u (name %u) eye %d: held over a missed pair %llu (gap 2 %llu, 3 %llu, 4 %llu), refused past the hold %llu; over %u s", p,
+                                nameId ? nameId - 1u : 0u, e, ull(pe.heldGap[2] + pe.heldGap[3] + pe.heldGap[4]), ull(pe.heldGap[2]), ull(pe.heldGap[3]), ull(pe.heldGap[4]), ull(pe.pastHold),
+                                windowSecs);
             }
         }
         // The tag census, every second a part was submitted (and an idle line every 5 s while on foot with the fix on, so a silent instrument is told from a working one)

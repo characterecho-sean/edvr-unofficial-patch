@@ -11555,6 +11555,10 @@ def _hj_f85b(rows, ctx):
         why.update(_hpairs(x["why"]))
     text = "%d matched submits in %d s, path %s, found %d (pool: by tag %d, by translation %d), decided %d, bound %d, refused %d [%s]" % (
         submits, _hcount(active, "xs", lambda r: int(r["submits"]) > 0), path, found, ftag, fval, decided, bound, refused, _htop(why, 2))
+    # F148: the latch held over a missed pair (a draw corrected 2 to 4 frames after the eyes' K last agreed) and the refusals past that hold; a log from before has no such line
+    held = rows.get("held", [])
+    if held:
+        text += "; latch held over a missed pair %d (gap 2 %d, 3 %d, 4 %d), refused past the hold %d" % tuple(_hsum(held, k) for k in ("held", "g2", "g3", "g4", "past"))
     if path == "none" or found == 0 or decided == 0 or bound == 0:
         return ("NEVER APPLIED", text)
     return ("PARTIAL" if bound * 10 < decided * 9 or refused * 10 > decided else "OK", text)
@@ -13670,6 +13674,9 @@ HEALTH_RULES = (
                 r"path (?P<path>\w+); finds in the pool: by the tag (?P<ftag>\d+), by the translation (?P<fval>\d+); K solves (?P<solves>\d+), eye pairs (?P<pairs>\d+)(?:.*; matched submits in (?P<xs>\d+) of (?P<ws>\d+) s$)?"),
         ("part", r"weapon UI pin \(F85b\) part slot (?P<slot>\d+) \(name (?P<name>\d+)\) eye (?P<eye>\d): tagged (?P<tagged>\d+) in all \(all eyes\), found (?P<found>\d+), "
                  r"matched (?P<matched>\d+), decided (?P<decided>\d+), bound (?P<bound>\d+) \([^)]*\), refused (?P<refused>\d+) \[(?P<why>[^\]]*)\](?:.*; over " + H_WL + r"$)?"),
+        # F148: the both-eyes latch's hold, on a line of its own per part and eye (a log from before has none)
+        ("held", r"weapon UI pin \(F85b\) part slot (?P<slot>\d+) \(name (?P<name>\d+)\) eye (?P<eye>\d): held over a missed pair (?P<held>\d+) \(gap 2 (?P<g2>\d+), 3 (?P<g3>\d+), "
+                 r"4 (?P<g4>\d+)\), refused past the hold (?P<past>\d+); over " + H_WL + r"$"),
         ("_", r"weapon UI pin \(F85b\): identification path"),
     ), _hj_f85b),
     _hrule("reticle depth (F85c)", ("F85c",), ("reticle depth (F85c)",), (
@@ -15465,6 +15472,10 @@ def self_test_health():
 
         def pin_part(found=88, decided=88, bound=88, refused=0, why="none", wl=1):
             return RWindowTail("weapon UI pin (F85b) part slot %u", 0, 29510, 0, 400, found, found, decided, bound, 0, 0, refused, why, tail=(wl,))
+
+        def pin_held(g2=0, g3=0, g4=0, past=0, wl=1, eye=0):
+            # F148: the line of the both-eyes latch's hold: draws corrected on a latch held over a missed pair at gap 2, 3 and 4 (the line prints their total first), and the refusals past the hold
+            return R("eye %d: held over a missed pair", 0, 29510, eye, g2 + g3 + g4, g2, g3, g4, past, wl)
 
         def retic(draws=47, patched=42, reads=21, refs=(), wl=1, draw_secs=None):
             v = [draws, patched, 50.0, 50.0, 50.0, reads, 20, 1] + [None] * 9 + [0] * 13
@@ -17470,6 +17481,15 @@ def self_test_health():
         check("F85b: submits that never reach a part line", [pin_sec(), pin_sec()], 3, [("NEVER APPLIED", F85B)], has=["found 0"])
         check("F85b: a tenth of the decisions refused", [pin_sec(), pin_part(found=100, decided=90, bound=90, refused=20, why="no scene rows for the eye 18, no K 2")], 0,
               [("PARTIAL", F85B)], has=["refused 20 [no scene rows for the eye 18, no K 2]"])
+        # F148: the latch held over a missed pair. Zero reads as zero (the words are present: the new build ran and never needed the hold); a log from before has no such words
+        check("F85b: the latch held over a missed pair, summed over the lines of both eyes", [pin_sec(), pin_part(), pin_held(5, 3, 1, 2), pin_held(4, 0, 0, 1, eye=1)], 0, [("OK", F85B)],
+              has=["latch held over a missed pair 13 (gap 2 9, 3 3, 4 1), refused past the hold 3"], lacks=["UNPARSED"])
+        check("F85b: the latch never needed the hold", [pin_sec(), pin_part(), pin_held(), pin_held(eye=1)], 0, [("OK", F85B)],
+              has=["latch held over a missed pair 0 (gap 2 0, 3 0, 4 0), refused past the hold 0"], lacks=["UNPARSED"])
+        check("F85b: a log from before F148 (no held line) still reads and says nothing of the hold", [pin_sec(), pin_part(), pin_part()], 0, [("OK", F85B)],
+              has=["decided 176, bound 176, refused 0 [none]"], lacks=["UNPARSED", "latch held"])
+        check("F85b: a held line in a ten-second window", [pin_sec(wl=10), pin_part(wl=10), pin_held(2, 1, 0, 0, wl=10)], 0, [("OK", F85B)],
+              has=["latch held over a missed pair 3 (gap 2 2, 3 1, 4 0)"], lacks=["UNPARSED"])
 
         # ---- reticle depth (F85c) ----
         check("F85c: patched at the hit depth", [retic()] * 2, 0, [("OK", F85C)], has=["patched 84 of 94 key 10 draws (89%) in 2 s", "readbacks 42 (hit 40, sky 2)"])
@@ -17829,6 +17849,7 @@ def self_test_health():
         # exceed practical ten-second windows; keep even those below 1100 bytes, leaving room for the timestamp and logger prefix.
         UI_BUDGETS = (
             ("weapon UI pin (F85b) part slot %u", ["r" * 399]),
+            ("eye %d: held over a missed pair", []),
             ("weapon UI pin (F85b): %s%llu matched", ["p" * 80, "tag", "s" * 299]),
             ("reticle depth (F85c): key 10 draws", []),
             ("reticle depth (F118) %u s", []),

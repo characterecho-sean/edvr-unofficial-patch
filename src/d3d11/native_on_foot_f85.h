@@ -268,7 +268,10 @@ inline bool isWeaponKey(uint32_t key, uint32_t* slot = nullptr) noexcept {
     return true;
 }
 // The two eyes' K of one frame and the latch the draws read: the last frame in which both eyes' estimates were in and agreed. A draw is
-// corrected only while the latch holds (and the frame of the latch is this frame or the one before); the latch drops on a disagreement.
+// corrected only while the latch holds: from the pairing's frame to kLatchHoldFrames frames after it. The latch drops at once on a disagreement.
+// Each draw is corrected with the K its own frame solved; the latch only vouches that the two eyes' K agreed recently, so it holds over the frames
+// in which one eye drew no readout and no new pair was formed (F148: the one-frame hold refused 112 of eye 0's draws in 54 of 342 part-eye seconds).
+constexpr uint32_t kLatchHoldFrames = 4u;
 struct KLatch {
     uint32_t frame[2] = {~0u, ~0u};
     CamK k[2];
@@ -294,8 +297,12 @@ struct KLatch {
         if (!agreed) ++disagreed;
         return true;
     }
-    // May a draw of frame f use the corrected rows: the latch holds from a pairing at f or f - 1.
-    bool usable(uint32_t f) const noexcept { return agreed && pairedFrame != ~0u && (f == pairedFrame || f == pairedFrame + 1u); }
+    // May a draw of frame f use the corrected rows: the latch holds from the pairing's frame to kLatchHoldFrames frames after it, while the pair agreed.
+    bool usable(uint32_t f) const noexcept { return agreed && pairedFrame != ~0u && f >= pairedFrame && f - pairedFrame <= kLatchHoldFrames; }
+    // Frames from the pairing to frame f (a usable frame's: 0 or 1 is the pairing of this frame or the last, 2 to kLatchHoldFrames is the latch held over a missed pair).
+    uint32_t gap(uint32_t f) const noexcept { return f - pairedFrame; }
+    // An agreeing pair whose hold ran out before frame f: the draw is refused for want of a recent pair, not for a disagreement.
+    bool pastHold(uint32_t f) const noexcept { return agreed && pairedFrame != ~0u && f > pairedFrame && f - pairedFrame > kLatchHoldFrames; }
 };
 
 // ---- the VALUE path: a record whose position is bit-equal to a published translation ---------------------------------------------------------

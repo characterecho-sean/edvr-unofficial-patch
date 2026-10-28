@@ -1496,8 +1496,8 @@ void testOutfitGlue(const CtlPages& p) {
     for (const char* n : allowedNames) mods[idx(n)][avh::kClipModDirty] = 0;
     imgFade(local.b);
     NativeOnFootOutfitStats st3 = nativeOnFootOutfitStats();
-    check(groupIs(allowedNames, 5, 0, 0) && st3.clipWrites == st2.clipWrites,
-          "...a part whose enable is already 0 is not written again (the game is not asked to rebuild it every frame)");
+    check(groupIs(allowedNames, 5, 0, 1) && st3.clipWrites == st2.clipWrites + 5,
+          "...a part whose enable is already 0 is written again, dirty 1 every call (F148: skipping it showed the coat's backpack at the hip)");
     gameApply();
     imgFade(local.b);
     check(groupIs(allowedNames, 5, 0, 1) && groupIs(decoyNames, 9, 1, 0) && nativeOnFootOutfitStats().clipWrites == st3.clipWrites + 5, "...and the game's next item apply (enable back to 1) is unclipped again");
