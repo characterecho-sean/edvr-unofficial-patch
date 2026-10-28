@@ -58,7 +58,7 @@
 
 * **Next (2026-10-28, last entry):** AA on's +1.65 ms is per-draw
   classifiers. ui-depth memo FLOWN: exact, -0.21 ms (shipped, b1561dff).
-  Fast path exact, but the 2b A/B shows no saving. Retirement asked.
+  Fast path: no saving (2b A/B; a review agrees). Retirement asked.
 
 ## Frame budget philosophy
 
@@ -4932,8 +4932,44 @@ time went; the old line shows how much.
 
 ruled out: the repeat-draw fast path as a CPU lever, because the
 in-flight A/B shows the X hook's time unchanged (+0.02 ms, standard
-error about 0.05, five bracketed pairs at 26k draws); its decision and
-fast block cost what the skipped chain cost on the draws it takes.
+error about 0.05, five bracketed pairs at 26k draws; -0.013 ms trimmed,
+below); its decision and fast block cost what the skipped chain cost on
+the draws it takes. A build stripped of its instruments is bounded at
+about 0.1-0.3 ms (inferred, below), not worth a ticket that tracks about
+25 terms across nine or more files.
 
-**Next:** retire Phases 1-2b (asked, not done). Keep the ui_depth memo
-and trims A-E, and revert trim F with its verification.
+**Independent review (2026-10-28, a second reader of the code and the
+log).** It agrees on the windows, on the old line as the fair measure,
+and on retirement. Each clocked draw takes four clock reads in both
+arms (draw_step_clock.h:212-266). The sampled frames are frameNo % 16 ==
+0 (perf_monitor.cpp:1316) and are never verify frames
+(draw_fast_path_shadow.h:425). Corrections to this entry:
+- **The old line's mean is driven by single preempted samples.** One
+  clocked draw scaled by 64 makes a 12-18 ms frame, and ON had the three
+  largest (12.9, 18.4, 11.9 ms). With each window's largest sample
+  dropped, the paired difference is -0.013 ms, standard error about
+  0.027 (95%: about -0.09 to +0.06). Future A/Bs report the old line's
+  median or trimmed mean.
+- **Only `pre`, `fast` and `tail` are robust step deltas,** at one mark a
+  draw in both arms. The chain figures above (2.33 -> 1.57, and 45
+  against 85 ns a draw) carry the floor error too: a chain draw carries
+  about 20 marks, so 1 ns of floor moves them about 20 ns a draw.
+- **The mechanism's capture is counted inside the chain.**
+  `shadowAfterVerdict` runs after the kVRest mark (vscreen.cpp:5764), so
+  its cost lands in the next step: engine-vel went from about 10 to 29
+  ns a call. "Added about 0.73" understates the mechanism.
+- **The bound on a stripped build is inferred.** The instrument tallies
+  are worth about 0.03-0.06 ms. How the remainder splits between capture
+  and the dearer draws left on the full path is unknown.
+- **Where the time sits now:** about 10.5k non-repeat draws a frame at
+  roughly 170-190 ns each, about 2 ms. It is still spread: the largest
+  steps are f:before 0.21, v:ui-depth 0.13 and v:fixes 0.12 ms. So
+  extending any one memo is bounded at about 0.1-0.2 ms.
+
+**Next:** retire Phases 1-2b (asked, not done): revert the src and tools
+changes of a7ff834d..e261adc6. Keep the ui_depth memo and trims A-E,
+revert trim F with its verification, and remove the step clock with the
+shadow and A/B lines. No further flight for the fast path. This closes
+the per-draw AA-on arc. The levers still open are the draw count and
+making the always-on instruments armed-only. Before more CPU work, check
+whether this rig is CPU-bound at 68 fps.
