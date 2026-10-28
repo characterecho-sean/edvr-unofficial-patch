@@ -6,9 +6,11 @@ game's own zoom as a magnified picture inside the scope's lens. The rest of the 
 
 ## Status
 
-- **State: S0 FLAT AND VR FLOWN** (`d90db147`, measure only, no key; section 7). Q2 settled (VR has no zoom field: flat table);
-  Q4 and Q6 open (no eye dump yet). No rendering code. Branch
+- **State: S0 FLAT ONCE, VR TWICE** (`d90db147`, measure only, no key; section 7). Q2 settled (VR has no zoom field: flat table).
+  Q4 settled by the eye dumps: see-through glass, the world at true scale behind it, the footprint = the hole in the frame's depth.
+  Q6: a chevron and a tint on the glass, in the scene colour (no UI over the lens). No rendering code. Branch
   `claude/vr-scope-zoom-design-6ef950`.
+- ruled out: every S0 lens census so far (the probe watched the left eye at the right eye's points).
 - **Flat zoom MEASURED** (section 7, Epic 2026-10-28): the camera's FOV (+0x280) narrows from `HumanoidFOV` 56.327 deg to 15.000 deg
   for the scoped Executioner (M 4.07) and to 35.000 deg for the bare copy (M 1.70), with a 0.8 s ramp. Open: kind 0 or kind 3 as the
   world's camera (kind 3 rests at 47 deg with the weapon out; from there M would be 3.30 and 1.62).
@@ -31,8 +33,8 @@ game's own zoom as a magnified picture inside the scope's lens. The rest of the 
 - **ruled out (cost or brief):** a third camera pass (C), magnifying in DLSS's input (E), a whole-view FOV change (D). Section 2.
 - **Analysis hand-over FILED** (analysis `1547986`): `analysis\decomp\verify_20261028_ads_zoom_receiver.txt` (the receiver, the correction to
   `analysis\decomp\verify_20261027_ads_sight_line.txt` section 1, the candidates).
-- **Next flight: the same build** on Epic: VR, an eye dump (INSERT) in scoped and in bare ADS (Q4 to Q6); flat, the other weapons and a
-  `HumanoidFOV` change (Q1, Q3). Section 7.
+- **Next flight: the same build**, Epic in flat mode only: the other weapons and a `HumanoidFOV` change (Q1, Q3). Section 7.
+- **Decision waiting on the maintainer:** A or B3 (M 4.07 for the scoped Executioner; the glass itself suits A).
 - **Key (after S0, on the maintainer's word):** `fix.native_on_foot_ads_scope_zoom` = on | off. Section 5.
 
 ## 1. Where the game keeps the zoom
@@ -236,3 +238,29 @@ census all OK. Two presses, the scoped copy then the bare one, both settled (w =
   - No eye dump was taken. The census rule's OK overstates what this run shows.
 - **Next, the same build in one Epic session:** VR, an eye dump (INSERT) in scoped ADS and one in bare ADS (Q4 to Q6 from the picture;
   the dump also re-runs the probe at S0's points). Flat, the other weapons and a `HumanoidFOV` change (Q1, Q3).
+
+**2026-10-28, S0 VR flight 2, the eye dumps** (Epic in VR mode, `edvr_gfx_20261028_173510`, `d90db147`, build matched). `--health`: S0
+vr, geometry and census OK (F85c NEVER APPLIED, as on every flight of this build). The scoped copy (held 6.5 s), then the bare one (5.4 s),
+both settled. Dumps `173845379001` (scoped ADS), `173855469002` (bare ADS), `173903271003` (the hip, after the release). No flat part.
+- Q2 as in flight 1: RC+0x16C/+0x17C -1, no camera narrowed, p11 0.9390.
+- ruled out: flight 1's census reading ("the sky drew over all four windows"), because the probe's eye 0 is the left eye and its points
+  are the right eye's. The dump's DLSS inputs (eye 0) show the sight at the left eye's c (px 1478), so the probe watched open ground
+  17 deg beside it. No S0 census run has looked at the lens; the dump answers Q4 to Q6 instead.
+- **Q4 SETTLED, see-through glass** (MEASURED, both copies). In the left eye's depth the sight's frame writes depth (0.14 reverse-Z, about
+  18 cm) and the glass writes none: inside the frame the depth carries on the ground's gradient from outside it (scoped 0.00122 at c,
+  between 0.00126 left of the frame and 0.00118 right of it; bare 0.00025, a farther hill). The world shows through at true scale under a
+  light teal tint. No opaque screen, no picture in the lens. The lens's footprint is therefore the hole in the frame's depth around c (or
+  F119's weapon stencil): section 3's fallback is the route, and its opaque-screen case does not arise.
+- **Q5** (MEASURED on the final right-eye image, 4032x4034, about 1894 px per unit tangent): the opening is a flat hexagon about 11 x 6 deg
+  scoped and 10.6 x 7 deg bare, with c about 1.2 deg (scoped) and 0.8 deg (bare) above its centre. At M 4.07 the scoped lens would show
+  2.7 x 1.5 deg of the world. EDVR's scoped eye sits 11 cm nearer than the game's E, so the lens looks 1.6 times larger than from E.
+- **Q6** (MEASURED): over the glass the game draws a chevron reticle and the tint, both in the scene colour before DLSS (DlssBeforeUi);
+  EDVR's UI mask is 0 over the whole 300 px square around c. The chevron sits at the same offset from c in both eyes, so it is on the glass
+  (about 3 mm below S), not at infinity. Its apex reads 0.9 deg (scoped) and 1.2 deg (bare) below c from EDVR's eye, and about 0.5 deg
+  from the game's E. A magnified copy (A) magnifies it with the world, as flat's zoomed camera does, and from EDVR's nearer eye it lands
+  about 3.7 deg below c, near the lens's lower edge; drawing it at true scale instead would need its draw named. No HUD or readout part
+  lies over the glass.
+- Instrument limits for any later census: the probe watches one eye (the first-seen, the left here) and one target format. Points must be
+  per eye.
+- **Next:** flat only, the same build: the other weapons and a `HumanoidFOV` change (Q1, Q3, kind 0 or 3). A or B3 is the maintainer's
+  call now; Q4 removed nothing from A, and M 4.07 is what argues for B3.
