@@ -87,9 +87,9 @@ a Visual one between them, below), and the Debug rows are the `menu debug` rows.
 THE VISUAL PAGE (2026-10-22 flat, 2026-10-27 VR) is `menu visual`, in both menus. The flat profile's F8 panel has three tabs, Performance, Visual and Debug, in that
 order, and its Visual tab lists the rows of menu_flat_rows.h's kFlatVisualRows (Intro movie, Star glow), Fix tier, whatever page their token names. VR's menu has a
 Visual page too, built like Native on foot (Fix tier, the ini's own heading blocks, file order) from the rows whose token is `menu visual`: how the world looks, apart
-from the fixes (World scale, Intro movie, Intro background picture, Screen curve). A row that does something in only one of the two says so by its token: `menu visual`
-on a row the flat table does not list is VR-only (World scale), and `menu flat_visual` is the flat tab's own row that VR's page must not show (Star glow, which VR
-never reads). A [visual] row with no token is desktop-only, as a [fix] row is.
+from the fixes (World scale, Intro movie, Star glow, Intro background picture, Screen curve). A row that does something in only one of the two says so by its token:
+`menu visual` on a row the flat table does not list is VR-only (World scale), and `menu flat_visual` is a flat-tab-only row that VR's page must not show (none today:
+Star glow was one until the headset read it, 2026-10-27). A [visual] row with no token is desktop-only, as a [fix] row is.
 
 THE FLAT PANEL'S OWN PERFORMANCE ROWS (2026-10-24) are `menu flat_performance`: a [fix] row that belongs on the flat panel's Performance tab and does nothing in the
 headset (fix.hud_antialiasing, which smooths a layer only the flat profile has). The Performance tab is built from menu_flat_rows.h's kFlatPageRows whatever page

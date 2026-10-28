@@ -26,6 +26,7 @@
 
 #include "flat_sharpen_rig.h"
 #include "../../src/common/runtime_profile.h"
+#include "../../src/common/star_glow_bloom.h"
 #include "../../src/d3d11/flat_sharpen.h"
 #include "../../src/d3d11/menu_flat_rows.h"
 #include "../../src/d3d11/swapchain_probe.h"
@@ -201,6 +202,50 @@ bool sourceGatesHudAaRow(const std::string& menuCpp) {
            menuCpp.find("snprintf(c.hint, sizeof(c.hint), \"%s\", hudAntiAliasingHint());") != std::string::npos &&
            menuCpp.find("if (isHudAntiAliasingRow(d) && hudAntiAliasingRowDisabled()) {") != std::string::npos &&
            menuCpp.find("g_s.lastWrite = hudAntiAliasingRefusal();") != std::string::npos;
+}
+
+// The Star glow row's Bloom hint (2026-10-27): with Elite's Bloom option known to be off and the setting above 100, the flat panel's Visual tab says so in a note under its rows and the
+// VR menu says so in the hint line while the Star glow row is highlighted (src/common/star_glow_bloom.h has the words, the condition and the placement functions; the truth tables
+// are checked below and in tools\terrain_checkerboard_test, T7). menu.cpp is 4000 lines the rig cannot draw, so what it holds is that the two sites still ask those functions with
+// the profile's and the page's own terms, that the row is never dimmed or refused for it (a dimmed row stops responding), and that the files are read when a menu opens or the setting
+// changes (the config generation moved), never per frame.
+int occurrences(const std::string& text, const std::string& needle) {
+    int n = 0;
+    for (size_t at = text.find(needle); at != std::string::npos; at = text.find(needle, at + needle.size())) ++n;
+    return n;
+}
+bool sourceSaysStarGlowBloom(const std::string& menuCpp) {
+    const std::string build = functionBody(menuCpp, "void buildContent(MenuContent& c) {");
+    const std::string tick = functionBody(menuCpp, "void starGlowBloomTick() {");
+    const std::string opened = functionBody(menuCpp, "void starGlowBloomMenuOpened() {");
+    const std::string configure = functionBody(menuCpp, "void starGlowBloomConfigure() {");
+    const std::string row = functionBody(menuCpp, "bool isStarGlowRow(const MenuRowDef& d) {");
+    const std::string step = functionBody(menuCpp, "void stepRow(int defIndex, int dir, int mult) {");
+    const std::string openMenu = functionBody(menuCpp, "void openMenu(uint64_t now) {");
+    const std::string menuConfigure = functionBody(menuCpp, "void menuConfigure(Config& cfg) {");
+    const size_t dimAt = build.find("const bool dim =");
+    const size_t dimEnd = dimAt == std::string::npos ? std::string::npos : build.find(';', dimAt);
+    const std::string dim = dimEnd == std::string::npos ? std::string() : build.substr(dimAt, dimEnd - dimAt);
+    const size_t note = build.find("sgb::tabNote(runtimeFlatProfile(), strcmp(p.name, kFlatTabNames[1]) == 0, s.starGlowBloom.percent(),");
+    const size_t warning = build.find("if (runtimeFlatProfile() && s.flatWarnActive) {");
+    return !build.empty() && !dim.empty() && !tick.empty() && !opened.empty() && !configure.empty() && !row.empty() && !step.empty() && !openMenu.empty() && !menuConfigure.empty() &&
+           // the flat note: on the Visual tab (the table's own name for it), by the placement function, wrapped like the settings warning, above it
+           note != std::string::npos && warning != std::string::npos && note < warning && occurrences(menuCpp, "sgb::tabNote(") == 1 &&
+           build.find("s.starGlowBloom.state())) {", note) != std::string::npos && build.find("flatWrapWarning(bloomNote,", note) != std::string::npos && build.find("kMenuNote", note) < warning &&
+           // the VR hint: the highlighted Star glow row, by the placement function, into the hint line
+           build.find("sgb::rowHint(runtimeFlatProfile(), hi && isStarGlowRow(d), s.starGlowBloom.percent(), s.starGlowBloom.state())") != std::string::npos &&
+           occurrences(menuCpp, "sgb::rowHint(") == 1 && build.find("snprintf(c.hint, sizeof(c.hint), \"%s\", bloomHint);") != std::string::npos &&
+           // the row is matched by its key, wherever it is drawn, and never dimmed or refused for the hint
+           row.find("strcmp(d.section, \"visual\") == 0 && strcmp(d.key, \"star_glow\") == 0") != std::string::npos && dim.find("tarGlow") == std::string::npos &&
+           step.find("tarGlow") == std::string::npos && occurrences(menuCpp, "isStarGlowRow(") == 2 &&
+           // read when the config's generation moved, never per frame; a menu opening reads again; both profiles configure it and tick it
+           tick.find("if (s.starGlowBloomGenSeen && generation == s.starGlowBloomGen) return;") != std::string::npos && tick.find("Config::get().generation()") != std::string::npos &&
+           tick.find("starGlowPercent(Config::get())") != std::string::npos && tick.find("s.starGlowBloom.noteSetting(percent, &line)") != std::string::npos &&
+           tick.find("Log::get().note(\"%s\", line.c_str());") != std::string::npos &&
+           opened.find("g_s.starGlowBloom.noteMenuOpened(&line)") != std::string::npos && opened.find("Log::get().note(\"%s\", line.c_str());") != std::string::npos &&
+           configure.find("g_s.starGlowBloom.configure(flatEliteGraphicsFolder(), executableDirectory());") != std::string::npos &&
+           occurrences(menuCpp, "starGlowBloomTick();") == 2 && occurrences(openMenu, "starGlowBloomMenuOpened();") == 2 && occurrences(menuConfigure, "starGlowBloomConfigure();") == 2 &&
+           occurrences(menuCpp, "readEliteBloom(") == 0 && occurrences(menuCpp, "noteSetting(") == 1 && occurrences(menuCpp, "noteMenuOpened(") == 1;
 }
 
 // The flat Performance tab is built from kFlatPageRows whatever page a row's `menu` token names (the page token is what keeps a flat-only row off VR's page), and
@@ -461,6 +506,48 @@ void panelTable(const std::string& root, const std::string& gen) {
         if (k != std::string::npos) swapped.replace(k, std::strlen(nameDebug), "p.name = kFlatTabNames[0];");
         check(k != std::string::npos && !sourceBuildsFlatVisualFromTable(swapped), "control: a Visual tab with no Debug tab after it is caught");
     }
+    // THE STAR GLOW'S BLOOM HINT (2026-10-27). Said on the Visual tab only, under the condition, as a note; in the VR menu on the highlighted Star glow row, as the hint line.
+    {
+        using edvr::sgb::Bloom;
+        int tabsWithNote = 0, visualTab = -1;
+        for (size_t t = 0; t < kFlatTabCount; ++t) {
+            const bool visual = std::strcmp(kFlatTabNames[t], "Visual") == 0;
+            if (visual) visualTab = static_cast<int>(t);
+            if (edvr::sgb::tabNote(true, visual, 150, Bloom::Off)) ++tabsWithNote;
+        }
+        check(tabsWithNote == 1 && visualTab == 1, "the flat panel's Bloom note is on exactly one of the three tabs, the Visual tab");
+        bool visualTable = true;
+        for (int percent : {100, 125, 150, 175, 200})
+            for (Bloom state : {Bloom::Unknown, Bloom::Off, Bloom::On}) {
+                const bool want = percent > 100 && state == Bloom::Off;
+                visualTable = visualTable && (edvr::sgb::tabNote(true, true, percent, state) != nullptr) == want && edvr::sgb::tabNote(true, false, percent, state) == nullptr &&
+                              (edvr::sgb::rowHint(false, true, percent, state) != nullptr) == want && edvr::sgb::rowHint(false, false, percent, state) == nullptr &&
+                              edvr::sgb::rowHint(true, true, percent, state) == nullptr && edvr::sgb::tabNote(false, true, percent, state) == nullptr;
+            }
+        check(visualTable, "the Bloom note (Visual tab) and the VR hint (highlighted Star glow row) show for 125..200 with Bloom off and for no other setting or Bloom state, and the other profile's place stays empty");
+        check(sourceSaysStarGlowBloom(menuCpp),
+              "menu.cpp says it: the note on the Visual tab above the settings warning, the hint on the highlighted Star glow row, the row never dimmed or refused, read at a menu opening and a change of the setting");
+        const std::string noteEveryTab = mutated("strcmp(p.name, kFlatTabNames[1]) == 0, s.starGlowBloom.percent(),", "true, s.starGlowBloom.percent(),");
+        const std::string noteInVr = mutated("sgb::tabNote(runtimeFlatProfile(),", "sgb::tabNote(true,");
+        const std::string hintEveryRow = mutated("hi && isStarGlowRow(d), s.starGlowBloom.percent()", "hi, s.starGlowBloom.percent()");
+        const std::string hintInFlat = mutated("sgb::rowHint(runtimeFlatProfile(),", "sgb::rowHint(false,");
+        const std::string rowDimmed = mutated("(hudAaRow && hudAntiAliasingRowDisabled());", "(hudAaRow && hudAntiAliasingRowDisabled()) || isStarGlowRow(d);");
+        const std::string stepRefused = mutated("    if (isOpenxrRenderScaleRow(d)) {\n        // A width for the worn headset", "    if (isStarGlowRow(d)) return;\n    if (isOpenxrRenderScaleRow(d)) {\n        // A width for the worn headset");
+        const std::string everyFrame = mutated("    if (s.starGlowBloomGenSeen && generation == s.starGlowBloomGen) return;\n", "");
+        const std::string noOpenRead = mutated("starGlowBloomMenuOpened();    // ... and so is the Bloom option", "// ... and so is the Bloom option");
+        const std::string noVrTick = mutated("        drainWrites();\n        starGlowBloomTick();\n", "        drainWrites();\n");
+        const std::string noVrConfigure = mutated("        s.configured = true;\n        starGlowBloomConfigure();\n", "        s.configured = true;\n");
+        check(!noteEveryTab.empty() && !sourceSaysStarGlowBloom(noteEveryTab), "control: a note on every tab is caught");
+        check(!noteInVr.empty() && !sourceSaysStarGlowBloom(noteInVr), "control: a note asked of a profile other than the running one is caught");
+        check(!hintEveryRow.empty() && !sourceSaysStarGlowBloom(hintEveryRow), "control: a VR hint on every highlighted row is caught");
+        check(!hintInFlat.empty() && !sourceSaysStarGlowBloom(hintInFlat), "control: a VR hint asked of a profile other than the running one is caught");
+        check(!rowDimmed.empty() && !sourceSaysStarGlowBloom(rowDimmed), "control: a Star glow row dimmed for the hint (it would stop responding) is caught");
+        check(!stepRefused.empty() && !sourceSaysStarGlowBloom(stepRefused), "control: a Star glow row that refuses its steps is caught");
+        check(!everyFrame.empty() && !sourceSaysStarGlowBloom(everyFrame), "control: a tick that looks at the setting every frame, with no change of the config generation, is caught");
+        check(!noOpenRead.empty() && !sourceSaysStarGlowBloom(noOpenRead), "control: a flat panel that does not read Elite's Bloom when it opens is caught");
+        check(!noVrTick.empty() && !sourceSaysStarGlowBloom(noVrTick), "control: a VR menu that never ticks the Star glow's Bloom is caught");
+        check(!noVrConfigure.empty() && !sourceSaysStarGlowBloom(noVrConfigure), "control: a VR menu that never gives the Bloom reader its folders is caught");
+    }
     check(kFlatDebugRowCount == 2 && flatDebugHasRow("advanced", "flat_cpu_timing") && flatDebugHasRow("advanced", "flat_refusal_view") &&
               std::strcmp(kFlatDebugRows[0].key, "flat_cpu_timing") == 0 && std::strcmp(kFlatDebugRows[1].key, "flat_refusal_view") == 0,
           "the Debug tab has CPU timing, then the motion source view");
@@ -509,8 +596,8 @@ void panelTable(const std::string& root, const std::string& gen) {
         check(schemaHasRow(schema, r.section, r.key),
               (std::string("the generated schema has the Visual tab's ") + r.section + "." + r.key).c_str());
     }
-    // The Visual rows as generated, Fix tier, each once, in edvr.ini order. Intro movie is `menu visual`, the page VR's menu builds too (2026-10-27); Star glow is a
-    // choice of five percentages on `flat_visual`, a page only this panel builds (nothing in VR reads the key). The tab is built from the table, whatever the page.
+    // The Visual rows as generated, Fix tier, each once, in edvr.ini order. Intro movie and Star glow are `menu visual`, the page VR's menu builds too (2026-10-27; the
+    // headset reads the Star glow since the VR port, so its row moved off `flat_visual`). The tab is built from the table, whatever the page.
     {
         const std::string movie = schemaRow(schema, "visual", "intro_video");
         const std::string glow = schemaRow(schema, "visual", "star_glow");
@@ -519,8 +606,8 @@ void panelTable(const std::string& root, const std::string& gen) {
               "the generated Intro movie row is a Fix-tier choice (screen, stock, skip) on the Visual page VR's menu builds too");
         check(glow.find("\"Star glow\"") != std::string::npos &&
                   glow.find("MenuKind::Choice, \"100\", \"\", \"\", 2, \"100=100%|125=125%|150=150%|175=175%|200=200%\", false, false, 1,") != std::string::npos &&
-                  glow.find("MenuTier::Fix, \"flat_visual\",") != std::string::npos,
-              "the generated Star glow row is a Fix-tier choice of 100 to 200 percent, shipped 100, live, on the flat-only page 'flat_visual'");
+                  glow.find("MenuTier::Fix, \"visual\",") != std::string::npos,
+              "the generated Star glow row is a Fix-tier choice of 100 to 200 percent, shipped 100, live, on the Visual page VR's menu builds too");
         // The VR-only rows of VR's Visual page are not rows of the flat tab: the flat gate refuses their keys, so a flat row would show a value that does nothing.
         check(schemaHasRow(schema, "visual", "world_scale") && !flatVisualHasRow("visual", "world_scale") && !flatVisualHasRow("fix", "intro_backdrop") &&
                   !flatVisualHasRow("fix", "panel_curvature") && !flatProfileReadsKey("visual.world_scale") && !flatProfileReadsKey("fix.intro_backdrop") &&

@@ -255,9 +255,9 @@ the rows whose token is `menu visual`; the flat tab is built from the table what
 two lists differ on purpose, and the token says which row is whose: `menu visual` on a row the flat
 table does not list is VR's alone (World scale, Intro background picture, Screen curve: the flat
 gate refuses their keys, so a flat row would show a value that does nothing); `menu flat_visual` is
-the flat tab's own row that VR's page must not show (Star glow: nothing in VR reads it; its
-consumer is `flat_star_glow.cpp`, in `flat_runtime.cpp`); Intro movie is `menu visual` and is on
-both. The generator (`tools/gen_settings_schema.py`) refuses a `flat_visual` row the table does not
+a flat-tab-only row that VR's page must not show (none today: Star glow was one until the headset
+read it, 2026-10-27; its consumers are `flat_star_glow.cpp` and `vr_star_glow.cpp`); Intro movie
+and Star glow are `menu visual` and are on both. The generator (`tools/gen_settings_schema.py`) refuses a `flat_visual` row the table does not
 list, and, for both flat tables, a listed row that has no row in the schema (no `menu` token, a hidden
 key, a key the code does not read), so a tab cannot silently lack a row it names. A `[visual]` row
 with no `menu` token is desktop-only, as a `[fix]` row is; the installer's window shows every
@@ -912,9 +912,10 @@ they were there (flown 2026-09-07).
      bigger, below smaller; the runtime moves the two eye origins the game is told
      about, about their midpoint, by 100 over the percent, and the layer, the menu
      and EDVR's own panels keep the located eyes, `docs/world-scale.md`) and
-     **Intro movie** (`visual.intro_video`, moved here from the Fixes page).
-     Star glow is not on it: only the flat profile reads `visual.star_glow`, so its
-     token is `menu flat_visual`. A live `edvr.ini` with no `world_scale` line is
+     **Intro movie** (`visual.intro_video`, moved here from the Fixes page) and
+     **Star glow** (`visual.star_glow`, 100 to 200 percent, live; both profiles read it
+     since the VR port, and the headset's hint line says so when Elite's Bloom is off).
+     A live `edvr.ini` with no `world_scale` line is
      not a problem: the row shows the shipped 100, and the first change appends the
      line to `[visual]`, as for any key the file lacks (`hotkey_capture_test` pins the
      append and the page's rows).
