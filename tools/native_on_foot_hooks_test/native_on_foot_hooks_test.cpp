@@ -1157,8 +1157,8 @@ void testFpBodyHideGlue(const CtlPages& p) {
         for (uint32_t part = 0; part < avh::kPartCount; ++part)
             for (uint32_t variant = 0; variant < avh::kPartVariants; ++variant) {
                 // F144: the list also covers every other arm, hand and shoulder part (EVASuit_Gear_Arms 52, UpperArms 35, UpperArmL 36, UpperArmR 37, Shoulders 34, Shoulder_Left 50, Shoulder_Right 51,
-                // FlightSuit_Arms 21, FlightSuit_Hands 22, OuterClothing_Arms 23); the hybrid body still hides the skeleton (49) only
-                const bool extra = part == 52 || part == 35 || part == 36 || part == 37 || part == 34 || part == 50 || part == 51 || part == 21 || part == 22 || part == 23;
+                // FlightSuit_Arms 21, FlightSuit_Hands 22, OuterClothing_Arms 23; F164: ShoulderPads 14); the hybrid body still hides the skeleton (49) only
+                const bool extra = part == 52 || part == 35 || part == 36 || part == 37 || part == 34 || part == 50 || part == 51 || part == 21 || part == 22 || part == 23 || part == 14;
                 const bool hidden = part == 49 || (!hybrid && (part == 28 || part == 29 || part == 38 || part == 39 || part == 40 || extra));
                 const uint64_t expected = hidden ? 0 : 0x8000000000000001ull + part;
                 if (fp.mask(part, variant) != expected) return false;
@@ -1167,7 +1167,7 @@ void testFpBodyHideGlue(const CtlPages& p) {
     };
     check(fpMasksMatch(false), "FULL 3P: FP arms, hands, skeleton and combined/L/R bracers hidden in all four views; every unrelated mask unchanged");
     const FpBodyReadback rb = nativeOnFootFpBodyReadback();
-    bool bracerReadback = rb.parts == 16 && rb.amc == reinterpret_cast<uint64_t>(fp.b);
+    bool bracerReadback = rb.parts == 17 && rb.amc == reinterpret_cast<uint64_t>(fp.b);   // F164: the 16 names and ShoulderPads
     for (uint32_t slot = 3; slot < 6; ++slot)
         for (uint32_t variant = 0; variant < 4; ++variant)
             bracerReadback = bracerReadback && rb.name[slot] != nullptr && rb.masks[slot][variant] == 0;
@@ -1509,6 +1509,129 @@ void testOutfitGlue(const CtlPages& p) {
     edvr::g_nativeOnFootActive.store(false);
 }
 
+// F164: the legacy flight suit's torso, arms, hands and shoulder pads are unclipped like the EVA suit's, through the real functions on a fake AMC. FlightSuit_Legs (a decoy modifier here, so
+// that a write would show; the game gives it none) and the comparison parts are not written, the EVA suit's five parts behave as before, and a first-person AMC is never written.
+void testFlightSuitUnclipGlue(const CtlPages& p) {
+    std::printf("glue: the flight suit's torso, arms, hands and shoulder pads are unclipped (enable 0, dirty 1) on the local third-person AMC, and nothing else is\n");
+    namespace t = edvr::nofoothookstest;
+    static AmcBuf local, fp;
+    static alignas(16) uint8_t skelA[0x100], skelB[0x100];
+    static alignas(16) uint8_t mods[avh::kPartCount][32];
+    Rig rig;
+    t::reset();
+    nofoot::logwin::setDetail(false);
+    edvr::g_nativeOnFootActive.store(false);
+    cimgInit(-1);
+    installTargets(p);
+    nativeOnFootHooksBody(true, false, "rig: install");
+    rig.boundary(); rig.boundary();
+    imgInvoke(skelA, skelB, g_cimg + avh::kPovNameRva);
+    local.init(reinterpret_cast<uint64_t>(skelA), 3);
+    fp.init(reinterpret_cast<uint64_t>(skelB), 2);
+    edvr::g_nativeOnFootActive.store(true);
+    edvr::nativeOnFootCameraPublish(0, 0);
+    nativeOnFootHooksBody(true, true, ""); rig.boundary();
+    t::clipProbeSink(&Capture::add, &rig.cap);
+    const auto idx = [](const char* n) { return static_cast<uint32_t>(avh::partIndexByName(n)); };
+    const char* const flight[4] = {"FlightSuit_Torso", "FlightSuit_Arms", "FlightSuit_Hands", "ShoulderPads"};
+    const char* const eva[5] = {"EVASuit_Torso", "EVASuit_Arms", "EVASuit_Hands", "Shoulder_Left", "Shoulder_Right"};
+    const char* const kept[4] = {"FlightSuit_Legs", "EVASuit_Legs", "EVASuit_Feet", "FirstPersonSkeleton"};   // the flight suit's legs and the three comparison parts
+    bool named = true;
+    for (const char* n : flight) named = named && idx(n) < avh::kPartCount;
+    for (const char* n : eva) named = named && idx(n) < avh::kPartCount;
+    for (const char* n : kept) named = named && idx(n) < avh::kPartCount;
+    check(named && idx("FlightSuit_Torso") == 17 && idx("FlightSuit_Arms") == 21 && idx("FlightSuit_Hands") == 22 && idx("ShoulderPads") == 14 && idx("FlightSuit_Legs") == 16,
+          "FLIGHT SUIT: every part the rig names is in the part-name table (the flight suit's at 17, 21, 22, 14 and the legs at 16)");
+    const auto amountOf = [](const char* n) { return std::strcmp(n, "FlightSuit_Torso") == 0 ? 0.0f : 0.6f; };   // the flight's rows: the torso 0.0, the rest 0.6
+    const auto gameApply = [&]() {
+        std::memset(mods, 0, sizeof(mods));
+        for (uint32_t i = 0; i < avh::kPartCount; ++i) {
+            const float a = i == idx("FlightSuit_Torso") ? 0.0f : 0.6f;
+            std::memcpy(mods[i] + avh::kClipModAmount, &a, 4);
+            mods[i][avh::kClipModEnable] = 1;
+            mods[i][avh::kClipModDirty] = 0;
+        }
+    };
+    const auto point = [&](AmcBuf& a, const char* n, bool on) {
+        const uint64_t ptr = on ? reinterpret_cast<uint64_t>(mods[idx(n)]) : 0ull;
+        std::memcpy(a.b + avh::kOffAmcParts + idx(n) * avh::kPartStride + avh::kOffPartClipMod, &ptr, 8);
+    };
+    const auto instance = [&](AmcBuf& a, const char* n, bool on) {
+        const uint64_t v = on ? 0xD000ull + idx(n) : 0ull;
+        std::memcpy(a.b + avh::kOffAmcInstances + idx(n) * avh::kPartStride, &v, 8);
+    };
+    const auto groupIs = [&](const char* const* names, size_t n, uint8_t enable, uint8_t dirty) {
+        for (size_t i = 0; i < n; ++i) {
+            const uint8_t* m = mods[idx(names[i])];
+            const float a = amountOf(names[i]);
+            if (m[avh::kClipModEnable] != enable || m[avh::kClipModDirty] != dirty || std::memcmp(m + avh::kClipModAmount, &a, 4)) return false;
+        }
+        return true;
+    };
+    // the flight suit's outfit on the local AMC (and, as decoys, the same modifiers on the first-person AMC): the four parts and the decoys carry a modifier, the EVA suit's parts have none
+    for (const char* n : flight) { instance(local, n, true); point(local, n, true); point(fp, n, true); }
+    for (const char* n : eva) { point(local, n, false); point(fp, n, true); }
+    for (const char* n : kept) { point(local, n, true); point(fp, n, true); }
+    gameApply();
+    nativeOnFootBodyClipTick(1000, true, false, "rig: unclip");
+    imgFade(fp.b);
+    check(groupIs(flight, 4, 1, 0) && groupIs(eva, 5, 1, 0) && groupIs(kept, 4, 1, 0), "FLIGHT SUIT: a first-person AMC's modifiers (the flight suit's four, the EVA suit's five, the comparisons) are never written");
+    imgFade(local.b);
+    check(groupIs(flight, 4, 0, 1), "...the local third-person AMC: FlightSuit_Torso, _Arms, _Hands and ShoulderPads are written (enable 0, dirty 1, each amount kept)");
+    check(groupIs(kept, 4, 1, 0) && groupIs(eva, 5, 1, 0), "...FlightSuit_Legs (even with a modifier), EVASuit_Legs, EVASuit_Feet and FirstPersonSkeleton are not written, and the EVA suit's parts (no modifier on this outfit) stay as they were");
+    imgFade(local.b);
+    check(groupIs(flight, 4, 0, 1), "...a second call writes them again (every call)");
+    gameApply();
+    imgFade(local.b);
+    check(groupIs(flight, 4, 0, 1) && groupIs(kept, 4, 1, 0), "...and the game's next item apply (enable back to 1) is unclipped again");
+    point(local, "FlightSuit_Legs", false);   // the game's own shape: the legs have no modifier
+    gameApply();
+    imgFade(local.b);
+    check(groupIs(flight, 4, 0, 1) && groupIs(kept, 4, 1, 0), "...with FlightSuit_Legs carrying no modifier, as the game has it, the four are written and nothing faults");
+    point(local, "FlightSuit_Legs", true);
+    gameApply();
+    edvr::nativeOnFootCameraPublish(1, 0);
+    imgFade(local.b);
+    edvr::nativeOnFootCameraPublish(0, 0);
+    check(groupIs(flight, 4, 1, 0), "...in the game's third-person camera nothing is written");
+    nativeOnFootHybridTick(2000, true, "rig: hybrid");
+    imgFade(local.b);
+    check(groupIs(flight, 4, 1, 0), "...the hybrid body unclips the EVA torso alone: the flight suit's four are not written");
+    nativeOnFootHybridTick(3000, false, "rig: full body");
+    nativeOnFootBodyClipTick(4000, false, false, "rig: off");
+    imgFade(local.b);
+    check(groupIs(flight, 4, 1, 0), "...with the unclip off, nothing is written");
+
+    // the EVA suit's outfit: the same five parts as before, the flight suit's four have no modifier
+    for (const char* n : flight) { instance(local, n, false); point(local, n, false); }
+    for (const char* n : eva) point(local, n, true);
+    gameApply();
+    nativeOnFootBodyClipTick(5000, true, false, "rig: unclip");
+    imgFade(fp.b);
+    check(groupIs(eva, 5, 1, 0), "EVA SUIT: a first-person AMC is still never written");
+    imgFade(local.b);
+    check(groupIs(eva, 5, 0, 1) && groupIs(kept, 4, 1, 0) && groupIs(flight, 4, 1, 0), "...the local AMC: EVASuit_Torso, _Arms, _Hands and both shoulders are written, the comparisons and the flight suit's parts (none on this outfit) are not");
+    gameApply();
+    local.refillMasks();
+    nativeOnFootHybridTick(6000, true, "rig: hybrid");
+    imgFade(local.b);
+    const char* const maskedByHybrid[4] = {"EVASuit_Arms", "EVASuit_Hands", "Shoulder_Left", "Shoulder_Right"};
+    bool masksZero = true;
+    for (const char* n : maskedByHybrid)
+        for (uint32_t k = 0; k < avh::kPartVariants; ++k) masksZero = masksZero && local.mask(idx(n), k) == 0;
+    bool masksKept = true;
+    for (const char* n : {"EVASuit_Torso", "FlightSuit_Torso", "FlightSuit_Arms", "FlightSuit_Hands", "ShoulderPads", "FlightSuit_Legs"})
+        for (uint32_t k = 0; k < avh::kPartVariants; ++k) masksKept = masksKept && local.mask(idx(n), k) == 0x8000000000000001ull + idx(n);
+    const char* const torso[1] = {"EVASuit_Torso"};
+    const char* const hybridRest[4] = {"EVASuit_Arms", "EVASuit_Hands", "Shoulder_Left", "Shoulder_Right"};
+    check(groupIs(torso, 1, 0, 1) && groupIs(hybridRest, 4, 1, 0) && masksZero && masksKept,
+          "HYBRID: the EVA torso is unclipped, its arms, hands and both shoulders are hidden by their masks (clip untouched), and no flight suit part's mask or clip is touched");
+    nativeOnFootHybridTick(7000, false, "rig: full body");
+    nativeOnFootBodyClipTick(8000, false, false, "rig: off");
+    t::reset();
+    edvr::g_nativeOnFootActive.store(false);
+}
+
 // F93d: native on foot's camera signal. The native key on: the controller hook is installed for the signal, its gate opens only on foot, its post-call reads
 // the mode byte the update left and publishes it (native_on_foot.h), presses nothing and changes nothing; native stereo's head hiding zeroes the local head parts
 // in the game's first-person camera only (mode 0), and leaves them to the game in its third-person camera suite (1..6).
@@ -1743,6 +1866,7 @@ void testGlue() {
     testFpBodyHideGlue(p);
     testGearClipProbeGlue(p);
     testOutfitGlue(p);
+    testFlightSuitUnclipGlue(p);
     testNativeCameraGlue(p);
     testSkeletonLatch(p);
     t::reset();
