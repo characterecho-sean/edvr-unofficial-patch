@@ -28,9 +28,35 @@ the arc's status, the log lines the build writes, and the flight checklist.
   combined build, NOT FLOWN):** `classifyReset` takes a press seen anywhere but on foot as `honour_press` (`seat_store` names it `why=manual_reset_press_menu` or
   `_cockpit`); `kOnFootIsSeated = false`: on foot every reset and a runtime recentre recentre on foot only and store nothing, entering on foot applies nothing,
   boarding puts the stored seat back, at the native on-foot boarding edge (one origin change). Dated note below.
+- **Issue 135 (2026-10-28): after the F123 leash's recentre, boarding did not put the seat back.** The recentre moved the origin without telling the
+  seat memory, so `originIsSeat` stayed set from the disembark and the boarding logged `apply_wanted=0`. Fix on `claude/issue-135-seat-memory-7cd466`:
+  `applyPositionRecentre` calls `seat.noteOrigin(false)`, as an on-foot pass-through reset already did; its `position_recentre` line gains
+  `origin_is_seat=`. Rig: position_recentre_cases (3 checks fail without the fix). Validated build, NOT FLOWN, not merged. Flight check: a boarding after
+  `position_recentre,...,ok=1` logs `seat_event,why=boarded,...,apply_wanted=1` and `seat_reset,...,decision=transition_seat`. Dated note below.
 - Next flight: the checklist at the end of this doc.
 
 ## Decisions and dated notes
+
+- **2026-10-28: issue 135, the leash's recentre left the origin marked as the seat.** Reported on v0.22.0-rc.2 (SteamVR OpenXR, Valve Index,
+  `keep`): after time on foot, boarding the ship or the SRV left the seated view where the player last stood, about 37 cm forward of the seat. The
+  seat memory's `originIsSeat` is set when the stored seat lands and must be cleared by any other origin change. A disembark leaves it set (since F115
+  nothing moves the origin on foot by itself), and `transition()` asks for the stored seat at a boarding only when it is clear. Every on-foot origin
+  change cleared it (a game reset's or a runtime recentre's pass-through, through `noteReset`) except F123's position-only recentre (28f5c251,
+  2026-10-25). Its comment said the seat memory was not asked, and the F123 rig set the flag false by hand before the recentre, which hid the gap.
+  At the boarding edge the look restore then put the seated space back on `currentOrigin`, which was the leash's on-foot origin.
+  Sean's own logs since 2026-10-25 (Frontier and Steam: 61 leash recentres in 26 logs) have 8 boardings after a leash recentre with no origin reset in
+  between. 7 logged `apply_wanted=0,...,origin_is_seat=1` (the leash had moved the origin 14.5 to 74.0 cm). The eighth
+  (`edvr_openxr_20261026_035852_042`, 10:22:05 UTC) applied only because an on-foot pass-through reset at 10:09:58 had cleared the flag, and that
+  reset logged `origin_was_seat=1` straight after two leash recentres. The issue quotes the same pattern, with the same exception, from the reporter's
+  rc.1 and rc.2 logs. `seat_meter` at `transition_2s` supports this without proving it: 5 of the 7 put the head 10 to 18 cm under the origin (the
+  leash's standing height), against 10 of the 67 other boardings with a meter line. Fix: `applyPositionRecentre` calls `seat.noteOrigin(false)` once it has moved the
+  origin. The boarding then applies the stored seat (`transition_seat`), the path an on-foot pass-through reset already takes and that has flown.
+  Ruled out as fixes: applying the seat at every boarding whatever the flag says, or clearing the flag at the disembark, because either one adds a
+  reset and a game notification to the 65 boardings in those logs whose origin had not moved; comparing `currentOrigin` with the stored seat, because that needs
+  a distance threshold. Unaffected: the leash is refused unless the seat memory places the player on foot, so a recentre made in the seat is never
+  undone; an on-foot press already cleared the flag; with no seat stored the flag cannot be set; `game` and `unpublished` modes apply nothing.
+  A side effect in the report: with no restore, the player pressed recentre in the cockpit, and outside the window with the key unobservable,
+  `honour_store` saved wherever the head was.
 
 - **2026-10-25: a recentre in a menu or a load is the seat (F115; the native on-foot arc doc, 2026-10-25, F115).** Log `edvr_gfx_20261025_071049` (Pimax Crystal
   Super on Pimax OpenXR, Epic): a seat stored by an on-foot press in the session before (y 0.436) was applied at the start (13:11:01 UTC, `intro_seat`); the pilot

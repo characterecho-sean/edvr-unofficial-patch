@@ -3449,10 +3449,12 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   // leash and wall contact). The baseline origin goes under the head without changing its yaw or the live look account. The seated space keeps its compensated yaw, applied eye
   // alignment and ADS pitch at this call and the following polls. Absorbing the look compensation into currentOrigin would make an ADS release leave that yaw behind permanently.
   // The position is composed through seatedPoseFor, with the ADS pivot at the current head; the existing applied alignment is retained exactly once. The seated space is
-  // replaced in place, as lookPoll and eyePoll do. It is NOT a reset: no origin generation bump, the game is told nothing, the seat memory is not asked and the stored seat never
-  // written (an on-foot origin is never the seat: F115, kOnFootIsSeated). The action succeeds once. A temporarily untracked head is retried for at most 0.5 s while the same ask
-  // stands in the same reference generation; withdrawal, a changed reference, and leaving on foot cancel it. Refused, and said: the seat memory does not place the player on foot, a stored seat
-  // is due (a boarding), the rotation calibration is on (it would be applied twice), the head is not tracked. A frame open leaves the ask pending for the next poll.
+  // replaced in place, as lookPoll and eyePoll do. It is NOT a reset: no origin generation bump, the game is told nothing and the stored seat is never written (an on-foot
+  // origin is never the seat: F115, kOnFootIsSeated). The seat memory is told only that the origin has left the seat, as an on-foot reset's pass-through tells it, so the next
+  // boarding puts the stored seat back (issue 135: it was not told, and boardings kept the leash's on-foot origin with apply_wanted=0). The action succeeds once. A
+  // temporarily untracked head is retried for at most 0.5 s while the same ask stands in the same reference generation; withdrawal, a changed reference, and leaving on foot
+  // cancel it. Refused, and said: the seat memory does not place the player on foot, a stored seat is due (a boarding), the rotation calibration is on (it would be applied
+  // twice), the head is not tracked. A frame open leaves the ask pending for the next poll.
   uint32_t positionRecentreHandled=0;uint64_t positionRecentres=0,positionRecentreRefusals=0;
   static constexpr uint64_t kPositionRecentreRetryMs=500;
   uint32_t positionRecentreRetry=0;uint64_t positionRecentreRetryMs=0,positionRecentreRetryOrigin=0,positionRecentreRetryGeometry=0;
@@ -3520,13 +3522,14 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       return false;
     }
     currentOrigin=SeatPose{head.pose.position.x,head.pose.position.y,head.pose.position.z,baselineYaw};
+    seat.noteOrigin(false);   // issue 135: the boarding transition applies the stored seat only when the origin is not already it
     lookSeated=next;
     dropPoseFrame(PoseInvalidation::Other);
     fillPollRing();
     ++positionRecentres;
-    nativeTracePrintf("position_recentre,serial=%u,ok=1,n=%llu,from=%.3f/%.3f/%.3f/%.4f,to=%.3f/%.3f/%.3f/%.4f,moved_cm=%.1f,yaw_kept=%u,stored_seat_touched=0,baseline_yaw_deg=%.3f,look_comp_deg=%.3f,look_base_deg=%.3f\n",unsigned(ask),
+    nativeTracePrintf("position_recentre,serial=%u,ok=1,n=%llu,from=%.3f/%.3f/%.3f/%.4f,to=%.3f/%.3f/%.3f/%.4f,moved_cm=%.1f,yaw_kept=%u,stored_seat_touched=0,origin_is_seat=%u,baseline_yaw_deg=%.3f,look_comp_deg=%.3f,look_base_deg=%.3f\n",unsigned(ask),
         (unsigned long long)positionRecentres,beforeSeated.x,beforeSeated.y,beforeSeated.z,beforeSeated.yaw,next.x,next.y,next.z,next.yaw,
-        seatDistance(beforeSeated,next)*100.0,unsigned(next.yaw==beforeSeated.yaw),seatRadToDeg(baselineYaw),seatRadToDeg(lookComp),seatRadToDeg(lookBase));
+        seatDistance(beforeSeated,next)*100.0,unsigned(next.yaw==beforeSeated.yaw),unsigned(seat.originIsSeat()),seatRadToDeg(baselineYaw),seatRadToDeg(lookComp),seatRadToDeg(lookBase));
     return true;
   }
   // F61: the head's yaw (the seat's sign) and pitch (nose up positive) in the SEATED space, degrees. False when not located.

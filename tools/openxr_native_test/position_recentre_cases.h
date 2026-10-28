@@ -1,8 +1,9 @@
 #pragma once
 // F123: the runtime's position-only recentre (src/openxr/native_runtime_host.h applyPositionRecentre, asked for by positionRecentrePoll from a version 10 answer's positionRecentre).
 // The leash and the wall contact move the seated origin under the head and nothing else: the seated space's yaw (the look compensation included) is kept exactly, the head's own
-// heading is never read, the origin generation does not move, the game is told nothing, and the stored seat is never touched (F115: an on-foot origin is not the seat). Through the
-// real host on its own owner thread, against the fake XR runtime (its head is the pose set here, in natural LOCAL).
+// heading is never read, the origin generation does not move, the game is told nothing, and the stored seat is never touched (F115: an on-foot origin is not the seat). The seat
+// memory is told the origin has left the seat, so the next boarding puts the stored seat back (issue 135). Through the real host on its own owner thread, against the fake XR
+// runtime (its head is the pose set here, in natural LOCAL).
 #include "pose_cache_invalidation_cases.h"
 #include <cmath>
 #include <cstring>
@@ -47,22 +48,22 @@ template<class Check> void runPositionRecentreCases(Check&& check) {
     const double yawHead=60.0*3.14159265358979323846/180.0;
     f.fake.head.orientation={0.0f,float(std::sin(yawHead*0.5)),0.0f,float(std::cos(yawHead*0.5))};   // the head faces 60 deg off: its heading must not become the origin's
     f.fake.head.position={5.0f,1.6f,-2.0f};
-    const SeatPose storedSeat{9.0,0.0,0.0,0.25};
+    const SeatPose storedSeat{1.0,0.0,0.0,0.5};
     const double seatedYaw=0.8;   // the seated space's yaw: an origin yaw of 0.5 turned by the look compensation to 0.8
     f.owner.invoke([&]{
       SeatContext c{};
       c.published=c.keep=c.gameplay=true;c.onFootKnown=c.onFoot=true;
       h.seat.setSeat(storedSeat);
       h.seat.onContext(c,GetTickCount64());
-      h.seat.noteOrigin(false);
-      h.currentOrigin=SeatPose{1.0,0.0,0.0,0.5};
+      h.seat.noteOrigin(true);   // disembarked: the cockpit's seat is still the origin on foot, and the flag stays set until something moves it (issue 135)
+      h.currentOrigin=storedSeat;
       h.lookSeated=SeatPose{1.2,-0.1,0.3,seatedYaw};   // carries an alignment translation as well
       h.lookSeatedKnown=true;
       h.lookBase=2.0;h.lookComp=0.3;h.lookWanted=2.3;
       h.eyeApplied[0]=0.2;h.eyeApplied[1]=-0.1;h.eyeApplied[2]=0.3;
       h.seated.replace(xrFromSeatPose(h.lookSeated));
     });
-    check(h.seat.where()==SeatWhere::OnFoot,"(the seat memory places the player on foot)");
+    check(h.seat.where()==SeatWhere::OnFoot&&h.seat.originIsSeat(),"(the seat memory places the player on foot, the origin still on the seat)");
     const uint64_t generationBefore=h.poses.read().originGeneration;
     const unsigned long long recentersBefore=(unsigned long long)h.recenters;
     bool ok=false;
@@ -74,7 +75,7 @@ template<class Check> void runPositionRecentreCases(Check&& check) {
           h.eyeApplied[0]==0.2&&h.eyeApplied[1]==-0.1&&h.eyeApplied[2]==0.3,
           "F123: live look base/compensation/wanted and applied eye alignment are retained, with the alignment composed exactly once at the call");
     check(h.seat.seat().x==storedSeat.x&&h.seat.seat().y==storedSeat.y&&h.seat.seat().z==storedSeat.z&&h.seat.seat().yaw==storedSeat.yaw&&!h.seat.originIsSeat()&&h.seat.has(),
-          "F123: the stored seat is untouched and the new origin is not the seat (an on-foot origin is never stored: F115)");
+          "F123: the stored seat is untouched and the new origin is not the seat (an on-foot origin is never stored: F115; the seat memory is told: issue 135)");
     check(h.poses.read().originGeneration==generationBefore&&(unsigned long long)h.recenters==recentersBefore,"F123: not a reset: the origin generation and the recentre count do not move, and the game is told nothing");
     check(h.positionRecentres==1&&h.positionRecentreRefusals==0,"F123: one recentre counted, none refused");
 
@@ -225,6 +226,36 @@ template<class Check> void runPositionRecentreCases(Check&& check) {
       }
       f.owner.invoke([&]{h.features.close();});
     }
+
+    // Issue 135: the leash's recentre on foot, then a boarding, which must put the stored seat back. Before, the recentre left the flag the disembark carried
+    // (the origin is the seat) set, so the boarding asked for nothing (apply_wanted=0) and the cockpit kept the on-foot origin. A boarding with no on-foot move
+    // still asks for nothing: the seat is already the origin.
+    bool onSeat=false,recentred=false,offSeat=true,movedOff=false,seatApplied=false,landed=false,secondAsk=true;SeatEvents boarding{};
+    f.owner.invoke([&]{
+      const auto context=[&](bool aboard){
+        SeatContext c{};c.published=c.keep=c.gameplay=true;c.seatedKnown=c.onFootKnown=true;c.seated=aboard;c.onFoot=!aboard;
+        return h.seat.onContext(c,GetTickCount64());
+      };
+      f.fake.head.position={5.0f,1.6f,-2.0f};f.fake.flags=launch_fixture::tracked;f.fake.locateResult=XR_SUCCESS;
+      h.rotWanted[0]=h.rotWanted[1]=h.rotApplied[0]=h.rotApplied[1]=0;
+      h.currentOrigin=storedSeat;h.lookSeated=storedSeat;h.lookSeatedKnown=true;h.lookComp=0;h.adsApplied=0;
+      h.eyeApplied[0]=h.eyeApplied[1]=h.eyeApplied[2]=0;
+      h.seated.replace(xrFromSeatPose(storedSeat));
+      context(false);h.seat.noteOrigin(true);
+      onSeat=h.seat.where()==SeatWhere::OnFoot&&h.seat.originIsSeat()&&!h.seat.applyPending();
+      recentred=h.applyPositionRecentre(30);
+      offSeat=h.seat.originIsSeat();movedOff=h.currentOrigin.x==5.0;
+      boarding=context(true);
+      seatApplied=h.seat.keep()&&h.seat.applyPending()&&h.applyStoredSeat("seat_transition","transition_seat",true);   // seatPoll's condition and call
+      landed=std::fabs(h.currentOrigin.x-storedSeat.x)<1e-5&&std::fabs(h.currentOrigin.y-storedSeat.y)<1e-5&&std::fabs(h.currentOrigin.z-storedSeat.z)<1e-5&&
+        std::fabs(h.currentOrigin.yaw-storedSeat.yaw)<1e-5&&h.seat.originIsSeat()&&!h.seat.applyPending();
+      context(false);
+      secondAsk=context(true).applyWanted;
+    });
+    check(onSeat&&recentred&&movedOff&&!offSeat,"issue 135: the leash's recentre moves the origin off the seat, and the seat memory is told");
+    check(boarding.applyWanted&&std::strcmp(boarding.why,"boarded")==0,"issue 135: the boarding after the leash's recentre asks for the stored seat (apply_wanted=1)");
+    check(seatApplied&&landed,"issue 135: the stored seat lands as the origin, and the origin is the seat again");
+    check(!secondAsk,"issue 135: a boarding with no on-foot move asks for nothing (the origin is still the seat)");
     f.owner.stop();
   }
   if(hadPrevious)SetEnvironmentVariableW(L"LOCALAPPDATA",previous);else SetEnvironmentVariableW(L"LOCALAPPDATA",nullptr);
