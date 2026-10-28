@@ -71,6 +71,7 @@
 #include "native_on_foot_f158.h"   // F158: the local body's draws over the first 30 s on foot, measured (pure parts)
 #include "native_on_foot_f159.h"   // F159: the left elbow's stable pole reseeded at the shoulder's height, its seeds' births counted and logged (pure parts)
 #include "native_on_foot_f160.h"   // F160: the neck reference's raise blended through the ADS release; the holster bridge's line (pure parts)
+#include "native_on_foot_f161.h"   // F161: the left arm's distance to the eye, measured (pure parts)
 #include "xinput_watch.h"         // F135: the pad's Start and Back edges, evidence for the menu probe only
 #include "native_on_foot_f109.h"   // F109: look to aim on foot, the player's own turn in ADS, snap or smooth turning (pure parts)
 #include "native_on_foot_f129.h"   // F129: look to aim reads its turn from the player's own look processor; the look path instrument (pure parts)
@@ -16249,6 +16250,8 @@ struct F98Left {
     // F159: the solves with the stable pole of the non-pistol left arm: the solved and FP elbows' heights over the shoulder, the preferred elbow at the ceiling, the swivel's distance
     // from the pole's reference, the reseeds and the seed births by reason (its own line: F98a's has no room under the log's 1200 bytes).
     nofoot::f159::Counters f159;
+    // F161: the eye as drawn against the left upper arm and the elbow as finally written, per context (the hip or ADS, standing or crouched), on a line of its own.
+    nofoot::f161::Counters f161;
 };
 std::atomic<uint32_t> g_f98Seq{0};
 F98Left g_f98;
@@ -16861,6 +16864,7 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
         }
         // ADS leaves the camera and weapon aim untouched, but releases the body toward the authored neck pose.
         const double detachW = pc.detachW;
+        const double t93BeforeDetachY = T[1];   // F161: F93's height before the detach, for the crouched stance's lowering (F97a) that holds through it
         pc.targetFromAuthoredM = nofoot::pinDetachTarget(T, N0, pc.detachW, T);
         // F74: move the detached body target by the same world-space camera offset, converted through this call's actual inverse AMC.
         // The held FP weapon/root and grip targets are never written by this path.
@@ -16874,7 +16878,8 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
         }
         // F94a: unarmed the body stands at its animated height: the neck target keeps the animated neck's height (the view's height comes from the neck instead,
         // above). F97a: armed (F88's weight w), F93's height where F93 raised the body, lowered only as far as keeps the eye at the hip the key's height over the
-        // neck, blended by w (native_on_foot_f97.h). The horizontal target is the rest offset's, as before.
+        // neck, blended by w (native_on_foot_f97.h). The horizontal target is the rest offset's, as before. F161: crouched (the camera's crouch weight), the lowering holds
+        // through the ADS detach.
         f97W = static_cast<double>(g_f88WPub.load(std::memory_order_relaxed));
         // F98c: the eye at the hip is the pin's eye plus the neck reference's raise this pose carried (the eye height, with and without an item; the weapon eye
         // offset's up is retired), so the lowering only keeps the eye out of the torso when the model moves under the camera
@@ -16882,7 +16887,8 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
         f97H = static_cast<double>(g_f94EyeHeightCm.load(std::memory_order_relaxed)) * 0.01;
         pc.f94Asked = T[1] - N0[1];
         {
-            const nofoot::f97::ArmedTarget at = nofoot::f97::armedNeckTarget(N0[1], T[1], pc.eyeYSelected + f97EyeOverE, f97H, pc.detachW, f97W);
+            const nofoot::f97::ArmedTarget at = nofoot::f97::armedNeckTarget(N0[1], T[1], pc.eyeYSelected + f97EyeOverE, f97H, pc.detachW, f97W, pc.wc,
+                                                                                t93BeforeDetachY + neckViewShift[1]);
             T[1] = at.y;
             pc.f97W = f97W;
             pc.f97Asked = at.asked;
@@ -17224,10 +17230,13 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
                                                                               currentNeckPose.referenceGeneration) &&
                                     nofoot::pinNeckTargetPhysicalRest(E, neckEyeForward, neckEyeUp, localPitchRad, localPitchValid, physicalTarget);
         if (pc.neckRestCandidateValid) {
+            const double restBeforeDetachY = physicalTarget[1];   // F161: the rest target's height before the detach, for the crouched stance's lowering that holds through it
             nofoot::pinDetachTarget(physicalTarget, N0, pc.detachW, physicalTarget);
             nofoot::weaponViewOffsetTarget(physicalTarget, neckViewShift);
-            // F94a/F97a: the rifle's physical rest target takes the same height rule (the animated neck's unarmed, F93's raise and the eye's lowering armed)
-            physicalTarget[1] = nofoot::f97::armedNeckTarget(N0[1], physicalTarget[1], pc.eyeYSelected + f97EyeOverE, f97H, pc.detachW, f97W).y;
+            // F94a/F97a: the rifle's physical rest target takes the same height rule (the animated neck's unarmed, F93's raise and the eye's lowering armed; F161: crouched, the
+            // lowering holds through the detach)
+            physicalTarget[1] = nofoot::f97::armedNeckTarget(N0[1], physicalTarget[1], pc.eyeYSelected + f97EyeOverE, f97H, pc.detachW, f97W, pc.wc,
+                                                             restBeforeDetachY + neckViewShift[1]).y;
             std::memcpy(pc.neckRestTarget, physicalTarget, sizeof(physicalTarget));
             std::memcpy(T, physicalTarget, sizeof(physicalTarget));
         } else {
@@ -20497,6 +20506,19 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
                 sample159.birth = so[0].f159Birth;
                 f.f159.add(sample159);
             }
+            // F161: the eye as drawn against the left upper arm (the upper arm joint to the forearm joint) and the elbow, as finally written, in this call's context
+            if (pinCall.f97EyeDrawnOk && pl.ok[0]) {
+                double shoulder161[3], elbow161[3];
+                if (finalAt(pl.side[0].U, shoulder161) && finalAt(pl.side[0].F, elbow161)) {
+                    nofoot::f161::Sample sample161;
+                    sample161.armM = nofoot::f161::pointSegmentDistance(pinCall.f97EyeDrawn, shoulder161, elbow161);
+                    sample161.elbowM = nofoot::f161::distance(pinCall.f97EyeDrawn, elbow161);
+                    sample161.ads = !nofoot::f159::atHip(pinCall.detachW);
+                    sample161.crouched = nofoot::pinCrouchedWc(pinCall.wc);
+                    sample161.moving = pinCall.f95Moving;
+                    f.f161.add(sample161);
+                }
+            }
             g_f98Seq.fetch_add(1, std::memory_order_release);
         }
         pinRecord(pinCall, res);
@@ -21540,6 +21562,7 @@ struct F125ElbowWindow {
     bool detail = false, active = false;
     char item[64] = "none";
     nofoot::f159::HighSeconds high;   // F159: the seconds with the left elbow at the shoulder's height, and the run at the hip (kept across a window that closes full)
+    nofoot::f161::Seconds near161;    // F161: the seconds with the left upper arm within 4 cm of the eye, and within 2.5 cm
 };
 F125ElbowWindow g_f125Elbow;
 nofoot::logpin::ContextSecond g_f125ElbowContext;
@@ -21575,6 +21598,12 @@ void f125ElbowClose(uint64_t now, bool keepRun = false) noexcept {
             char line159[1100];
             nofoot::f159::formatSummary(line159, sizeof(line159), w.seconds, w.item, f98.f159, w.high);
             Log::get().note("%s", line159);
+        }
+        // F161: the eye against the left upper arm and the elbow, per context, on a line of its own
+        if (f98.f161.frames()) {
+            char line161[1100];
+            nofoot::f161::formatSummary(line161, sizeof(line161), w.seconds, w.item, f98.f161, w.near161);
+            Log::get().note("%s", line161);
         }
     }
     const nofoot::f159::HighSeconds carried159 = w.high.next(keepRun);
@@ -21665,6 +21694,7 @@ void f66dLine(uint64_t now, int mode) noexcept {
         nofoot::logpin::elbow(w.sum, f98);
         w.swung += f98.planeOver45 * 2 > f98.n;
         w.high.fold(f98.f159);   // F159
+        w.near161.fold(f98.f161);   // F161
         if (f98.downN && f98.downStepMax > 10.0) {
             ++w.flips;
             if (f98.downStepAng < 15.0 || f98.downStepAng > 165.0) { ++w.nearCount; w.nearTwisted += f98.downStepTwist != 0; }

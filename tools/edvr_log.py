@@ -13422,6 +13422,52 @@ def _hj_f98a_elbow(rows, ctx):
     return ("OK", text)
 
 
+# F161: the left arm's distance to the eye, per context (formatSummary in src/d3d11/native_on_foot_f161.h): the contexts in the order the line prints them, and the line
+H161_CONTEXTS = ("hip standing", "hip crouched", "ADS standing", "ADS crouched")
+H161_LABEL = "native on foot left arm to the eye (F161)"
+H161_RE = (r"native on foot left arm to the eye \(F161\) (?P<wl>\d+) s: item (?P<item>\S+); the eye to the left upper arm \(shoulder to elbow\) and to the elbow, by context: " +
+           "".join((r"%s (?P<n%d>\d+) frames: arm min (?P<amin%d>%s) mean (?P<amean%d>%s) cm, elbow min (?P<emin%d>%s) mean (?P<emean%d>%s) cm, under 4 cm (?P<u4%d>\d+) "
+                    r"\(moving (?P<u4m%d>\d+)\), under 2\.5 cm (?P<u25%d>\d+); ") % (name, i, i, _HN, i, _HN, i, _HN, i, _HN, i, i, i) for i, name in enumerate(H161_CONTEXTS)) +
+           r"seconds with the arm under 4 cm of the eye (?P<s4>\d+), under 2\.5 cm (?P<s25>\d+)")
+
+
+def _hj_f161_arm_eye(rows, ctx):
+    """F161: the eye as drawn against the left upper arm (shoulder to elbow) and the elbow as finally written, per item and context (the hip or ADS, standing or crouched): the
+    frames, the nearest and the mean distance (cm), the frames with the arm under 4 cm of the eye (the moving ones among them) and under 2.5 cm (the near plane cuts the arm
+    there). The pilot's crouch-walk in ADS had the upper arm 1.3 to 4.7 cm from the eye. Any second with a frame under 4 cm is PARTIAL, with the item, the hip or ADS, the stance
+    and how many of the frames were moving; a log with none of them is OK (the arm stayed clear), and a log whose window lines carry no frame has nothing to judge."""
+    sec = rows.get("sec", [])
+    if not sec:
+        return None
+    items = collections.OrderedDict()
+    for r in sec:
+        items.setdefault(r["item"], []).append(r)
+    parts, near = [], []
+    for item, rs in items.items():
+        per = []
+        for i, name in enumerate(H161_CONTEXTS):
+            used = [r for r in rs if int(r["n%d" % i])]
+            n = sum(int(r["n%d" % i]) for r in used)
+            if not n:
+                continue
+            u4, u4m, u25 = (sum(int(r[k + str(i)]) for r in used) for k in ("u4", "u4m", "u25"))
+            amin, emin = min(float(r["amin%d" % i]) for r in used), min(float(r["emin%d" % i]) for r in used)
+            amean, emean = (sum(int(r["n%d" % i]) * float(r[k + str(i)]) for r in used) / n for k in ("amean", "emean"))
+            per.append("%s %d frames: upper arm nearest %.1f cm, mean %.1f; elbow nearest %.1f, mean %.1f; under 4 cm %d (moving %d), under 2.5 cm %d" % (name, n, amin, amean, emin, emean, u4, u4m, u25))
+            if u4:
+                where, stance = name.split(" ")
+                near.append("%s, %s, %s: %d frame(s) under 4 cm (%d moving), %d under 2.5 cm, nearest %.1f cm" % (item, where, stance, u4, u4m, u25, amin))
+        if per:
+            parts.append("%s %d s: %s" % (item, _hsecs(rs), "; ".join(per)))
+    if not parts:
+        return None
+    s4, s25 = sum(int(r["s4"]) for r in sec), sum(int(r["s25"]) for r in sec)
+    text = "left arm to the eye (F161): %s; seconds with the arm under 4 cm of the eye %d, under 2.5 cm %d" % ("; ".join(parts), s4, s25)
+    if s4 or near:
+        return ("PARTIAL", text + "; the left upper arm came within 4 cm of the eye (%s)" % ("; ".join(near) or "no context counts a frame"))
+    return ("OK", text)
+
+
 def _hj_f99a_draw(rows, ctx):
     """F99a: one line per draw (the game's selection of an item while Status.json named none): when Status.json named it, where the hands' authority came from
     and when, when the armed ramp was full, all from the game's selection. A draw the game selected 100 ms or more before Status.json named it whose hands waited
@@ -14563,6 +14609,9 @@ HEALTH_RULES = (
                   r"(?:; the pole it replaced put the elbow (?P<was>%s) cm over the shoulder with the arm (?P<off>[\d.]+) cm off its axis)?"
                   r"(?:; (?P<skipped>\d+) earlier seed\(s\) not logged \(one line in 0\.5 s\))?" % ((_HN,) * 5)),
     ), _hj_f98a_elbow),
+    _hrule("left arm to the eye (F161)", ("F161",), (H161_LABEL,), (
+        ("sec", H161_RE),
+    ), _hj_f161_arm_eye),
     _hrule("draw onset (F99a)", ("F99a",), ("native on foot draw onset (F99a)",), (
         ("sec", r"native on foot draw onset \(F99a\): item (?P<item>\S+); the game's selection (?P<sel>id [0-9A-F]{8}|not seen); body (?P<body>moving|still); Status\.json "
                 r"named it (?P<status>at \+\d+ ms|never); the hands' authority from (?P<src>the game's selection|the native primary selection|Status\.json) "
@@ -15549,6 +15598,7 @@ def self_test_health():
     f158_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f158.h")
     f159_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f159.h")
     f160_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f160.h")
+    f161_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f161.h")
     f154_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f154.h")
     try:
         source, swap, f90src, f91src = read_text(src_path), read_text(swap_path), read_text(f90_path), read_text(f91_path)
@@ -15564,6 +15614,7 @@ def self_test_health():
         f158src = read_text(f158_path)
         f159src = read_text(f159_path)
         f160src = read_text(f160_path)
+        f161src = read_text(f161_path)
         f154src = read_text(f154_path)
     except OSError as e:
         print("health: the DLL source the self-test reads its log formats from is not where it looks (%s)" % e)
@@ -15631,6 +15682,15 @@ def self_test_health():
             fmts[key] = health_c_format(f160src, needle)
         if fmts[key] is None:
             raise AssertionError("native_on_foot_f160.h has no format holding %r: the --health rule that reads it is out of date" % needle)
+        return health_render(fmts[key], vals)
+
+    def R161(needle, *vals):
+        """F161's line (formatSummary in native_on_foot_f161.h: the head, each context's piece, the tail), from its own format literals."""
+        key = "f161:" + needle
+        if key not in fmts:
+            fmts[key] = health_c_format(f161src, needle)
+        if fmts[key] is None:
+            raise AssertionError("native_on_foot_f161.h has no format holding %r: the --health rule that reads it is out of date" % needle)
         return health_render(fmts[key], vals)
 
     def R105(needle, *vals):
@@ -16818,6 +16878,40 @@ def self_test_health():
               has=["more than 2 s in a row at the hip", "(1 birth line(s): armsOk after standDown 1)"], lacks=["UNPARSED"])
         check("F159 elbow: a line that drifted from its pattern is unparsed", ["native on foot left elbow pole (F159) 10 s: something else"], 4, [("UNPARSED", F98)])
         check("F159 elbow: a birth line that drifted from its pattern is unparsed", ["native on foot left elbow seed (F159): born somewhere"], 4, [("UNPARSED", F98)])
+
+        # ---- F161: the left arm's distance to the eye, per context (the hip or ADS, standing or crouched) ----
+        F161 = "left arm to the eye (F161)"
+        QUIET161 = (0, 0.0, 0.0, 0.0, 0.0, 0, 0, 0)
+
+        def arm161(item=RIFLE97, wl=10, bins=None, s4=0, s25=0):
+            """F161's window line, from the DLL's own format (formatSummary, native_on_foot_f161.h); bins: {context index: (frames, arm min, arm mean, elbow min, elbow mean,
+            frames under 4 cm, of them moving, frames under 2.5 cm)}, the contexts in H161_CONTEXTS' order, the ones not given with no frame."""
+            line = R161("native on foot left arm to the eye (F161) %u s: item %s", wl, item)
+            for i, name in enumerate(H161_CONTEXTS):
+                line += R161("%s %u frames: arm min", name, *(bins or {}).get(i, QUIET161))
+            return line + R161("seconds with the arm under 4 cm of the eye", s4, s25)
+
+        CLEAR161 = {0: (900, 14.0, 21.5, 16.0, 24.0, 0, 0, 0), 3: (120, 6.8, 9.4, 9.0, 13.0, 0, 0, 0)}
+        FLIGHT161 = {3: (300, 1.3, 3.1, 4.0, 6.0, 280, 240, 150), 1: (80, 5.2, 7.0, 8.0, 10.0, 0, 0, 0)}
+        check("F161 arm: the arm stays clear of the eye", [arm161(bins=CLEAR161)], 0, [("OK", F161)],
+              has=["left arm to the eye (F161): " + RIFLE97 + " 10 s: hip standing 900 frames: upper arm nearest 14.0 cm, mean 21.5; elbow nearest 16.0, mean 24.0; under 4 cm 0 (moving 0), "
+                   "under 2.5 cm 0", "ADS crouched 120 frames: upper arm nearest 6.8 cm", "seconds with the arm under 4 cm of the eye 0, under 2.5 cm 0"], lacks=["UNPARSED", "came within 4 cm"])
+        check("F161 arm: the flight's crouch-walk in ADS, the arm 1.3 cm from the eye", [arm161(bins=FLIGHT161, s4=7, s25=5)], 0, [("PARTIAL", F161)],
+              has=["the left upper arm came within 4 cm of the eye (" + RIFLE97 + ", ADS, crouched: 280 frame(s) under 4 cm (240 moving), 150 under 2.5 cm, nearest 1.3 cm)",
+                   "seconds with the arm under 4 cm of the eye 7, under 2.5 cm 5"], lacks=["UNPARSED", "hip, crouched:"])
+        check("F161 arm: frames under 4 cm at the hip standing, not moving, are named for what they are",
+              [arm161(bins={0: (900, 3.4, 11.0, 5.0, 14.0, 12, 0, 0)}, s4=1)], 0, [("PARTIAL", F161)],
+              has=["(" + RIFLE97 + ", hip, standing: 12 frame(s) under 4 cm (0 moving), 0 under 2.5 cm, nearest 3.4 cm)"], lacks=["UNPARSED"])
+        check("F161 arm: a second under 4 cm in the seconds count with no context counting a frame is PARTIAL too", [arm161(bins=CLEAR161, s4=2)], 0, [("PARTIAL", F161)],
+              has=["seconds with the arm under 4 cm of the eye 2, under 2.5 cm 0", "came within 4 cm of the eye (no context counts a frame)"], lacks=["UNPARSED"])
+        check("F161 arm: two windows and two items add up, each item named", [arm161(bins=FLIGHT161, s4=3, s25=2), arm161(bins={3: (300, 2.0, 3.5, 5.0, 7.0, 100, 90, 10)}, s4=3, s25=1),
+                                                                                  arm161("$wpn_m_shotgun_plasma_name;", bins={3: (200, 3.0, 8.0, 6.0, 12.0, 40, 40, 0)}, s4=2)], 0, [("PARTIAL", F161)],
+              has=["" + RIFLE97 + " 20 s: ", "ADS crouched 600 frames: upper arm nearest 1.3 cm, mean 3.3; elbow nearest 4.0, mean 6.5; under 4 cm 380 (moving 330), under 2.5 cm 160",
+                   "$wpn_m_shotgun_plasma_name; 10 s: ", "seconds with the arm under 4 cm of the eye 8, under 2.5 cm 3",
+                   "$wpn_m_shotgun_plasma_name;, ADS, crouched: 40 frame(s) under 4 cm (40 moving), 0 under 2.5 cm, nearest 3.0 cm"], lacks=["UNPARSED"])
+        check("F161 arm: a window with no frame in any context has nothing to judge", [arm161()], 0, [], lacks=["UNPARSED", row("PARTIAL", F161), row("OK", F161)])
+        check("F161 arm: a line that drifted from its pattern is unparsed", ["native on foot left arm to the eye (F161) 10 s: something else"], 4, [("UNPARSED", F161)])
+        check("F161 arm: a context renamed in the line is unparsed", [arm161(bins=CLEAR161).replace("ADS crouched", "ADS kneeling")], 4, [("UNPARSED", F161)])
 
         # ---- draw onset (F99a): a drawn item's hands from the game's own selection ----
         F99 = "draw onset (F99a)"

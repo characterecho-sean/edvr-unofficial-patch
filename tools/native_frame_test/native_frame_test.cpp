@@ -54,6 +54,7 @@
 #include "f158_checks.h"    // F158: the local body's draws over the first 30 s on foot (the window's rules, the list and its cap, the switch time, the stop and adjacency tests, the lines)
 #include "f159_checks.h"    // F159: the left elbow's stable pole reseeded at the shoulder's height (the condition, the gate, the real solver's raised elbow), the seed births and their lines
 #include "f160_checks.h"    // F160: the neck reference's raise blended through the ADS release (the decision, the kept target, the counts, the flight's release replayed on the real parts), the holster line
+#include "f161_checks.h"    // F161: the left arm's distance to the eye (the point-to-segment distance against a brute force, the contexts, the 4 cm and 2.5 cm counts, the seconds, the line's width)
 #include "f151_checks.h"    // F151: the weapon readout's draw bound by its place (the ordinals, each guard, one bind per key, the lost-frame count) and the held copy's scope from the selected slot
 #include "f110_checks.h"    // F110: the ADS sight lock's model right eye (the left-eye job camera plus the IPD)
 #include "f111_checks.h"    // F111: the panel pointer instrument's statistics and verdict
@@ -7469,7 +7470,8 @@ int wmain(int argc, wchar_t** argv) {
     f94btest::run95b(check);
     // F95c: the head parts as shadow-only through the visibility call (the game's class 2), the fade hook's guard and its action.
     f95ctest::run95c(check);
-    // F97a: the armed neck target (F93's raise, the eye's lowering, the weight's blend), the legs' room for a raise, the stance bins.
+    // F97a: the armed neck target (F93's raise, the eye's lowering, the weight's blend), the legs' room for a raise, the stance bins. F161: the crouched stance keeps the lowering through
+    // the ADS detach (the standing stance is the earlier formula bit for bit; the blends across the detach and the crouch weight are continuous; the two callers' targets meet at full detach).
     f97test::run97(check);
     // F97b: the label's size and record place as a panel at its anchor (the game's NDC-fixed size shrinks as cos^2 and cos off the eye's axis), the guards.
     f97btest::run97b(check);
@@ -7565,6 +7567,10 @@ int wmain(int argc, wchar_t** argv) {
     // falls back to 0), the kept target whole at the release's end, the releases counted by class; the flight's release replayed on the real ramp, settle window and follower (the raise back
     // 0.63 s after the request went off before, with the release now); the holster line and its rate limit. The holster bridge itself is checked with F99a's (run99).
     f160test::run160(check);
+    // F161 (measure only): the left arm's distance to the eye as drawn (the point to the upper arm's segment against a brute force, to the elbow), counted per context (the hip or ADS,
+    // standing or crouched, moving), the frames within 4 cm and 2.5 cm, the seconds that had any, and the window's line within the log's limit. F97a's lowering held through ADS while
+    // crouched (the standing stance the earlier formula bit for bit, the blends across the detach and the stance continuous) is checked with F97a's (run97).
+    f161test::run161(check);
     // F110: the ADS sight lock's model right eye from the left-eye job camera and from a solved left eye, the fallback, the IPD's sign.
     f110test::run110(check);
     // F111: the panel pointer instrument names the stage that turns a move the other way (K1 to K5, one at a time), the camera getters' decoding.

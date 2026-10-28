@@ -133,6 +133,7 @@ template<class T> inline void elbow(T& d, const T& s) noexcept {
     d.spanMax = std::max(d.spanMax, s.spanMax);
     for (uint32_t i = 0; i < 3; ++i) d.src[i] += s.src[i];
     d.f159.merge(s.f159);
+    d.f161.merge(s.f161);
     if (s.downStepMax > d.downStepMax) {
         d.downStepMax = s.downStepMax; d.downStepAng = s.downStepAng; d.downStepTwist = s.downStepTwist;
     }
