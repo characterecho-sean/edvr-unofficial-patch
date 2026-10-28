@@ -58,7 +58,7 @@
 
 * **Next (2026-10-27, last entry):** AA on's +1.65 ms is per-draw
   classifiers. ui-depth memo FLOWN: exact, -0.21 ms (shipped, b1561dff).
-  Phase 2 FLOWN: takes 61%, 0/25M wrong; saving unproven. Next: 2b A/B.
+  Phase 2 FLOWN: takes 61%, 0/25M wrong; saving unproven. 2b A/B BUILT.
 
 ## Frame budget philosophy
 
@@ -4830,6 +4830,35 @@ What is established:
   p50 and draws a frame.
 - The saving is the difference between adjacent windows at matched
   draw counts.
+
+**Phase 2b built (2026-10-27), NOT FLOWN.**
+- **Arms.** The window after the edge at frame E is ON when E / 1800 is
+  even: the first window is ON, the next OFF, and so on. It is set at
+  perf_monitor.cpp:1300, after that edge's A/B line, so each window
+  reports the arm it ran under. The ticket is dropped on each switch to
+  ON.
+- **OFF has no mechanism.** The decision is behind
+  `g_fastPathOn && owner`. The after-verdict capture and the end of the
+  thunk run only after a decision. The forwardWithVerdict and owner-block
+  notes, the after-UI stamp reads and the celestial and orbit matches all
+  test the arm. The rig pins every shadow call behind it.
+- **The DrawClock** is built at the X thunk's start (vscreen.cpp:5684),
+  so the old line and `pre` now cover the prologue and the decision.
+- **The A/B line,** `draw fast path A/B:`, gives per window:
+  - the arm;
+  - frames, seconds and fps;
+  - X draws a frame from the step clock (both arms), and the exact count
+    with the fast share (ON only);
+  - the old line's mean;
+  - the step clock's EDVR sum;
+  - the native application CPU p50 (`completion.applicationMs`). That
+    misses the post-submit phase, but the draw hooks are before submit.
+- **Rig:** aa_off_test, 465 checks.
+
+Flight: parked at the Cranfield pad with AA on, head still, for at least
+5 minutes, so there are four or five ON/OFF pairs. Nothing building. Then
+read the A/B lines in order and compare each OFF window with its
+neighbours at matched draw counts.
 
 **The Phase 2 flight should show:**
 - the `fast` step's calls and cost;

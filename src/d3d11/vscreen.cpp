@@ -43,6 +43,7 @@
 #include "draw_fast_path.h"   // the AA-off draw path's decisions (2026-10-13)
 #include "draw_step_clock.h"  // the draw thunks' clock, by step (built 2026-10-27, temporary)
 #include "draw_fast_path_shadow.h"   // TEMPORARY (built 2026-10-27, Phases 1 and 2): the repeat-draw fast path and its verification, pure logic
+#include "draw_fast_path_ab.h"       // TEMPORARY (built 2026-10-27, Phase 2b): the fast path's A/B, the arm and its line, pure logic
 #include "../common/temporal_mode.h"  // temporalModeEnabledFor: the AA-off fast path's switch
 #include "object_probe.h"     // tier 2 stage 1: the instanced-mesh pool, read on two frames
 #include "pixel_probe.h"      // advanced.pixel_probe: who drew this pixel, during an eye dump
@@ -1938,16 +1939,21 @@ inline bool drawPathFast(DrawVerdict v) {
                                             engineVelocityLiveNow(), g_vrWorldWants, v != DrawVerdict::kNone});
 }
 
-// ---- TEMPORARY, the repeat-draw fast path and its verification (Phase 1 built 2026-10-27, Phase 2 the same day) ----------------------------------------
+// ---- TEMPORARY, the repeat-draw fast path and its verification (Phase 1 built 2026-10-27, Phase 2 the same day, Phase 2b its A/B) --------------------------
 // docs\engine-render-performance-2026-09-19.md, "Desk design: the repeat-draw fast path"; the logic is draw_fast_path_shadow.h's, this is the glue that
-// gathers its inputs from the draw path. For every owner X draw the thunk asks (before its clock starts, shadowBegin) whether the draw takes the fast path.
+// gathers its inputs from the draw path. For every owner X draw the thunk asks (shadowBegin) whether the draw takes the fast path.
 // PHASE 2: it does, unless the frame is a verify frame (one in 16, never a draw-sample frame). A fast-path draw skips beginPanelOverride, forwardWithVerdict,
 // the lambda's owner block and the tail, does the work those do for an ordinary draw (the thunk's fast block says which, line by line), and is counted
 // there. A draw that would take the fast path, on a verify frame, takes the full path: the shadow captures its outcome at three points (right after
 // beginPanelOverride, inside forwardWithVerdict, inside the lambda's owner block) and at the end of the thunk compares it with the ticket, which is what
 // the previous full-path draw promised. Every other full-path draw is counted and writes the next ticket. perf_monitor prints the window at the 1800-frame
-// edge (vScreenDrawFastPathShadowLines). The per-draw cost of the decision lands before the draw clock starts; the notes inside the forward scope land in
-// its steps and are read only. Removed with the instrument once the arc is decided.
+// edge (vScreenDrawFastPathShadowLines). Removed with the instrument once the arc is decided.
+// PHASE 2b: all of it runs only while g_fastPathOn is true. perf_monitor sets it once at each 1800-frame edge (vScreenDrawFastPathArm, draw_fast_path_ab.h) for
+// the whole next window, ON and OFF alternating. With it false the X thunk makes no shadow call: no decision, no outcome capture, no note in
+// forwardWithVerdict or the lambda, no ticket write, no counter -- the full path it ran before the shadow phases. A plain global, read by the draw thread and
+// written between frames by the thread that presents.
+bool g_fastPathOn = fastab::kInitialArm;
+
 struct ShadowState {
     fastshadow::Tracker tracker;     // the ticket, the window's counters, the mismatches named so far
     uint32_t terms = 0;              // the draw in flight's non-ordinary terms, reset at thunk entry (owner context, one thread)
@@ -1955,27 +1961,34 @@ struct ShadowState {
     uint64_t frames = 0;             // the frame boundaries seen: the verify phase's clock (Phase 2)
     bool verifyPhase = false;        // this frame's phase is a verify phase (fastshadow::verifyPhase); the draw-sample test is asked per draw (Phase 2)
     uint64_t verifyCounted = 0;      // the frame the window's verify-frame count last took (Phase 2): counted by the first verifying draw of a frame
+    // The draw in flight (Phase 2b: kept here, beside `terms`, so the thunk's own local is two bytes and an OFF draw pays for nothing else): the verdict taken at
+    // entry, the exclusion and band the args bands put it in, the class it landed in, and whether the frame verifies (the draw is counted against the frame's
+    // base and feeds the sketches).
+    struct Cur {
+        bool verify = false;
+        fastshadow::ArgsBound bound;
+        fastshadow::Class cls = fastshadow::Class::kUnresolved;
+        fastshadow::Verdict verdict;
+    } cur;
 };
 ShadowState g_shadow;
 
-// One draw's shadow, held by the thunk: whether it is an owner X draw, the eligibility verdict taken at entry, the exclusion and band the args bands put it in,
-// and the class it landed in. Phase 2: whether the draw takes the fast path (the verdict is a take and the frame is not a verify frame) and whether the
-// frame verifies (the draw is counted against the frame's base and feeds the sketches).
+// One draw's shadow, held by the thunk: whether shadowBegin ran for it (an owner X draw with the arm ON), and whether it takes the fast path (the verdict is a take
+// and the frame is not a verify frame).
 struct ShadowDraw {
     bool live = false;
     bool fast = false;
-    bool verify = false;
-    fastshadow::ArgsBound bound;
-    fastshadow::Class cls = fastshadow::Class::kUnresolved;
-    fastshadow::Verdict verdict;
 };
 
 constexpr uint32_t shadowFlag(bool on, unsigned bit) { return static_cast<uint32_t>(on) << bit; }
 
-inline void shadowNote(fastshadow::Term t) { g_shadow.terms |= fastshadow::termBit(t); }
+inline void shadowNote(fastshadow::Term t) {
+    if (!g_fastPathOn) return;
+    g_shadow.terms |= fastshadow::termBit(t);
+}
 // forwardWithVerdict serves all four draw thunks; only the owner context's DrawIndexedInstanced draw is shadowed.
 inline void shadowNoteX(bool owner, char kind, fastshadow::Term t) {
-    if (owner && kind == 'X') g_shadow.terms |= fastshadow::termBit(t);
+    if (g_fastPathOn && owner && kind == 'X') g_shadow.terms |= fastshadow::termBit(t);
 }
 // The 2D screen's composite: the vertex shader and pixel shader pair that screenMotionRecognize, cameraCensusEyeDraw and footprintEyeDraw each compare
 // first, and the only draw the footprint instrument acts on. The vertex shader alone is one of the specials (shadowSpecialVs).
@@ -1985,6 +1998,7 @@ constexpr uint64_t kShadowScreenCompositeVs = 0x5C36AF051B98B9F1ull, kShadowScre
 // census when the thunk's own test for it holds, and the footprint when it is on, the draw is eye geometry and the pair bound is the 2D screen's composite.
 // The thunk's calls and their lines are untouched; this reads the same flags again where the full path ran.
 inline void shadowNoteProbes(bool eyeGeometry) {
+    if (!g_fastPathOn) return;
     const bool census = g_vrWorldWants && vrCameraCensusWanted();
     const bool footprintOn = eyeGeometry && vscreenFootprintWanted();
     const bool pair = bindingShaderHash(BindSlot::Vs) == kShadowScreenCompositeVs && bindingShaderHash(BindSlot::Ps) == kShadowScreenCompositePs;
@@ -2039,9 +2053,11 @@ inline fastshadow::Key shadowKeyNow() {
     return k;
 }
 
-// At thunk entry, for an owner X draw, before the clock starts: would this draw take the fast path?
-__declspec(noinline) void shadowBegin(ShadowDraw& d, const State* s, UINT count, UINT instances) {
-    d.live = true;
+// In the thunk, for an owner X draw with the arm ON (g_fastPathOn), after the clock starts and the prologue: would this draw take the fast path?
+__declspec(noinline) void shadowBegin(ShadowDraw& draw, const State* s, UINT count, UINT instances) {
+    ShadowState::Cur& d = g_shadow.cur;
+    draw.live = true;
+    d.cls = fastshadow::Class::kUnresolved;
     g_shadow.terms = 0;
     // The args bands (draw_fast_path_shadow.h): the count's band, and the per-draw tests that keep a draw out of it. VsCb0 and the scrim's cache are not in
     // the key, so both are read here, before the draw can move them.
@@ -2080,7 +2096,7 @@ __declspec(noinline) void shadowBegin(ShadowDraw& d, const State* s, UINT count,
         if (!drawGateWanted()) d.verdict.reason = fastshadow::Reason::kGateClosed;
         else if (g_shadow.tracker.ticket.cls == fastshadow::Class::kEye && !uiDepthEyeDeclineHeld()) d.verdict.reason = fastshadow::Reason::kUiDepthMemo;
         else if (!d.verify) {
-            d.fast = true;
+            draw.fast = true;
             d.cls = g_shadow.tracker.ticket.cls;
         }
     }
@@ -2089,7 +2105,8 @@ __declspec(noinline) void shadowBegin(ShadowDraw& d, const State* s, UINT count,
 // Right after beginPanelOverride returned: the verdict, every per-draw output it leaves, the class the draw landed in, the Vs-keyed specials, and the
 // two off-screen terms. The class is the target's own test (rtv0Eye) when that test is current for this binding; beginPanelOverride returns at the draw
 // gate before it reads the target, so with the gate closed the memo may be stale and the draw's class is unknown.
-__declspec(noinline) void shadowAfterVerdict(ShadowDraw& d, State* s, DrawVerdict v, UINT count, UINT instances) {
+__declspec(noinline) void shadowAfterVerdict(ShadowDraw&, State* s, DrawVerdict v, UINT count, UINT instances) {
+    ShadowState::Cur& d = g_shadow.cur;
     using namespace fastshadow;
     const uint64_t vs = bindingShaderHash(BindSlot::Vs), ps = bindingShaderHash(BindSlot::Ps);
     d.cls = s->rtv0EyeGen != bindingGeneration(BindSlot::Rtv0) ? Class::kUnresolved : s->rtv0Eye ? Class::kEye : Class::kOff;
@@ -2112,7 +2129,8 @@ __declspec(noinline) void shadowAfterVerdict(ShadowDraw& d, State* s, DrawVerdic
 
 // The end of the thunk: count the draw, compare it when it would have taken the fast path, write the next ticket. A mismatch among the session's first
 // five is named, with the shaders and the terms that differ.
-__declspec(noinline) void shadowEnd(ShadowDraw& d, UINT count, UINT instances) {
+__declspec(noinline) void shadowEnd(ShadowDraw&, UINT count, UINT instances) {
+    ShadowState::Cur& d = g_shadow.cur;
     // Phase 2: the vertex shader (a sketch input) and the verify flag go in together; off a verify frame the sketches are not fed and the shader is not read.
     const uint32_t mm = g_shadow.tracker.finish(d.verdict, d.cls, g_shadow.terms, d.bound, shadowKeyNow(), d.verify ? bindingShaderHash(BindSlot::Vs) : 0ull, d.verify);
     if (!mm || !g_shadow.tracker.takeNameSlot()) return;
@@ -4579,10 +4597,10 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
         // uiLayerWorldScreenHeld() returns; it is written at the frame boundary only).
         const bool afterExcluded = uiDepthIsExcluded(bindingShaderHash(BindSlot::Vs));
         const bool afterPanelSized = !afterExcluded && uiLayerWorldScreenHeld() && srv0IsPanelSized(g_state, kind, count);
-        const uint64_t afterUiStamp = kind == 'X' ? uiLayerAfterUiStamp() : 0;   // TEMPORARY (shadow instrument): the counters the call keeps, before it
+        const uint64_t afterUiStamp = g_fastPathOn && kind == 'X' ? uiLayerAfterUiStamp() : 0;   // TEMPORARY (shadow instrument, arm ON only): the counters the call keeps, before it
         uiLayer = uiLayerNoteOther(self, count, uiLayerVerdictForwards(v), g_state->curveThisDraw,
                                    afterExcluded, afterPanelSized, instances, static_cast<uint32_t>(v), kind);
-        if (kind == 'X' && uiLayerAfterUiStamp() != afterUiStamp) shadowNote(fastshadow::kTermAfterUi);   // TEMPORARY (shadow instrument): and after it
+        if (g_fastPathOn && kind == 'X' && uiLayerAfterUiStamp() != afterUiStamp) shadowNote(fastshadow::kTermAfterUi);   // TEMPORARY (shadow instrument, arm ON only): and after it
         // A draw the retry took is the layer's, not the route's to re-issue (the held screen's exclusion never
         // lets it take a 2D screen composite; this keeps "taken AND re-issued" impossible by construction).
         if (uiLayer && worldReissue.on) {
@@ -4676,7 +4694,7 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     // Planet patch motion (celestial_motion.h): a colour-pass patch draw's constants are read from the CPU shadow here, before the game's
     // own issue -- no GPU copy, no reissue. celestialMotionLive() first, one load; then the VS hash the draw path already holds.
     if (owner && celestialMotionLive() && bindingShaderHash(BindSlot::Vs) == kCelestialPatchVs) celestialMotionNoteDraw(self);
-    if (owner && kind == 'X' && celestialMotionLive() && bindingShaderHash(BindSlot::Vs) == kCelestialPatchVs) shadowNote(fastshadow::kTermCelestialOrbit);   // TEMPORARY (the fast path's shadow instrument): the match above fired
+    if (g_fastPathOn && owner && kind == 'X' && celestialMotionLive() && bindingShaderHash(BindSlot::Vs) == kCelestialPatchVs) shadowNote(fastshadow::kTermCelestialOrbit);   // TEMPORARY (the fast path's shadow instrument): the match above fired
     if (effectCaptureScope.ctx) objectProbePanelDrawBegin(self);
     // The orbit lines (orbital_width.h; fix.ui_quality): the game's own draw of their vertex shader into an eye target is
     // issued with the half-width scaled by the panel patch's factor -- a patched copy of that shader and a private b13
@@ -4685,7 +4703,7 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     // when the factor is below 1; one hash compare for any other draw.
     const bool orbitScaled = owner && g_state->rtv0Eye && bindingShaderHash(BindSlot::Vs) == orbital_width::kVs &&
                              orbitalWidthBegin(self, instances, args.startInstance);
-    if (owner && kind == 'X' && g_state->rtv0Eye && bindingShaderHash(BindSlot::Vs) == orbital_width::kVs) shadowNote(fastshadow::kTermCelestialOrbit);   // TEMPORARY (the fast path's shadow instrument): the orbit lines' match fired
+    if (g_fastPathOn && owner && kind == 'X' && g_state->rtv0Eye && bindingShaderHash(BindSlot::Vs) == orbital_width::kVs) shadowNote(fastshadow::kTermCelestialOrbit);   // TEMPORARY (the fast path's shadow instrument): the orbit lines' match fired
     // The supercruise bars (supercruise_bars.h): the layer decided to take the draw, so its issue will be made through the private
     // geometry shader. The tent is one render pixel of the line the game drew, so the game's own viewport is read here, BEFORE the
     // layer's bracket below remaps it to the layer's.
@@ -5660,17 +5678,20 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
         return;
     }
     if (g_vrWorldInternal) { g_state->realDrawIndexedInstanced(self, perInstance, instances, startIndex, baseVertex, startInstance); return; }
+    // The draw clock starts here (Phase 2b, built 2026-10-27), right after the flat and world-route returns and ahead of the prologue and the fast-path decision, so the
+    // `draw hook CPU` line and the step clock's `pre` cover the same prologue in both arms of the A/B, and the decision in the ON arm. The D, I and N thunks build theirs where
+    // they always did.
+    DrawClock clock('X');
     gpuFrameCommandIfLive(self);
     // F44 (TEMPORARY instrument): before the verdict, so the bindings read are the game's; copies into EDVR's staging only.
     if (nativeOnFootMarkerProbeLive() && self == g_state->ownerCtx) nativeOnFootMarkerTee(self, instances, startInstance, 'X', perInstance, startIndex, baseVertex);
     if (self == g_state->ownerCtx) { temporalPassCountDraw(); if (temporalPassWantsDraw()) temporalPassNoteDraw(self); }
     noteStaleForward(kSlotDrawIndexedInstanced, reinterpret_cast<const void*>(g_state->realDrawIndexedInstanced),
                      "DrawIndexedInstanced");
-    // TEMPORARY (the repeat-draw fast path, built 2026-10-27; see shadowBegin): does this owner draw take the fast path (shadow.fast), and is this a verify frame
-    // (shadow.verify)? Asked before the clock starts, so the draw hook CPU lines leave the decision out; the fast block below is inside it.
+    // TEMPORARY (the repeat-draw fast path, built 2026-10-27; see shadowBegin): while the A/B's arm is ON (g_fastPathOn, draw_fast_path_ab.h), does this owner draw take the fast path
+    // (shadow.fast), and is this a verify frame (g_shadow.cur.verify)? With the arm OFF nothing of the mechanism is called, here or below.
     ShadowDraw shadow;
-    if (self == g_state->ownerCtx) shadowBegin(shadow, g_state, perInstance, instances);
-    DrawClock clock('X');
+    if (g_fastPathOn && self == g_state->ownerCtx) shadowBegin(shadow, g_state, perInstance, instances);
     // The rect deriver's capture runs INSIDE beginPanelOverride (the
     // chrome tracker's matched branch), so its draw-args stash must land
     // before the call.
@@ -5701,7 +5722,7 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
     // Nothing else is skipped that has an effect on an ordinary draw (the shadow wiring rig pins this list). The ticket is unchanged after the draw.
     if (shadow.fast) {
         State* const fs = g_state;
-        g_shadow.tracker.noteFast(shadow.cls);
+        g_shadow.tracker.noteFast(g_shadow.cur.cls);
         particleRollFreeClear();
         fs->glareClamp = 0;
         fs->curveThisDraw = false;
@@ -5711,7 +5732,7 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
         t_holoDepthThisDraw = false;
         if ((++fs->bindAuditSeq & 1023u) == 0) bindingAudit(fs, self);
         if (depthProbeWanted()) depthProbeNoteDraw(self, bindingGet(BindSlot::Dsv0), fs->rtv0Eye, bindingGet(BindSlot::Rtv0) == nullptr);
-        if (shadow.cls == fastshadow::Class::kEye) {
+        if (g_shadow.cur.cls == fastshadow::Class::kEye) {
             ++fs->eyeDrawsThisFrame;
             {
                 void* const eyeDsv = bindingGet(BindSlot::Dsv0);
@@ -6438,6 +6459,27 @@ void vScreenDrawFastPathShadowLines(char* line, size_t lineCap, char* noTicketLi
     fastshadow::formatArgsLine(argsLine, argsCap, endFrame, frames, t.count);
     t.count.reset();
     t.windowStart = endFrame;
+}
+
+// TEMPORARY (built 2026-10-27, draw_fast_path_ab.h, Phase 2b): the A/B's arm. The perf monitor calls this once at each 1800-frame edge, after it has written the
+// window that ended, with the arm of the window that begins (fastab::armAfterEdge). A switch to ON drops the ticket (Tracker::onArm). A plain store: the draw
+// thread reads g_fastPathOn on every owner X draw, and nothing else orders against it.
+void vScreenDrawFastPathArm(bool on) {
+    g_shadow.tracker.onArm(g_fastPathOn, on);
+    g_fastPathOn = on;
+}
+bool vScreenDrawFastPathArmed() { return g_fastPathOn; }
+
+// The window's owner X draws as the shadow counted them -- the full path's and the fast path's -- for the A/B line. Read before vScreenDrawFastPathShadowLines
+// starts the counters again. Zero in an OFF window: nothing counts there.
+VScreenFastPathTotals vScreenDrawFastPathTotals() {
+    const fastshadow::Counters& c = g_shadow.tracker.count;
+    VScreenFastPathTotals t;
+    for (unsigned i = 0; i < 3; ++i) {
+        t.ownerDraws += c.draws[i] + c.fast[i];
+        t.fastDraws += c.fast[i];
+    }
+    return t;
 }
 
 // The one refresh. vScreenRefreshConfig runs it behind the reload's gate; vScreenForceRefreshConfig runs it with the gate taken away.

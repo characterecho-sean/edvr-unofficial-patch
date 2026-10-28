@@ -33,6 +33,7 @@
 #include "../../src/common/gpu_disjoint_clock.h"
 #include "../../src/d3d11/classifier_memo.h"
 #include "../../src/d3d11/draw_fast_path.h"
+#include "../../src/d3d11/draw_fast_path_ab.h"
 #include "../../src/d3d11/draw_fast_path_shadow.h"
 #include "../../src/d3d11/draw_step_clock.h"
 #include "../../src/d3d11/frame_span_tile.h"
@@ -1841,13 +1842,13 @@ void testShadowWiring() {
     const std::string thunkHead = "void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,";
     const size_t t0 = vscreen.find(thunkHead);
     const std::string thunk = t0 == std::string::npos ? std::string() : squeezedCode(vscreen.substr(t0, vscreen.find("\n}\n", t0) - t0));
-    const size_t world = thunk.find("if(g_vrWorldInternal){"), begin = thunk.find("if(self==g_state->ownerCtx)shadowBegin(shadow,g_state,perInstance,instances);"),
+    const size_t world = thunk.find("if(g_vrWorldInternal){"), begin = thunk.find("if(g_fastPathOn&&self==g_state->ownerCtx)shadowBegin(shadow,g_state,perInstance,instances);"),
                  clock = thunk.find("DrawClockclock('X');"), verdict = thunk.find("constDrawVerdictv=beginPanelOverride(self,'X',perInstance,instances,args);"),
                  after = thunk.find("if(shadow.live)shadowAfterVerdict(shadow,g_state,v,perInstance,instances);"), pixel = thunk.find("pixelProbeAfterEye(g_state,self,perInstance,instances,false);"),
                  end = thunk.find("if(shadow.live)shadowEnd(shadow,perInstance,instances);");
     check(world != std::string::npos && begin != std::string::npos && clock != std::string::npos && verdict != std::string::npos && after != std::string::npos &&
-              pixel != std::string::npos && end != std::string::npos && world < begin && begin < clock && clock < verdict && verdict < after && after < pixel && pixel < end,
-          "shadow wiring: the thunk asks before its clock starts and after the flat and world-route returns, captures right after the verdict, and counts at the end");
+              pixel != std::string::npos && end != std::string::npos && world < clock && clock < begin && begin < verdict && verdict < after && after < pixel && pixel < end,
+          "shadow wiring: the thunk starts its clock after the flat and world-route returns, asks (arm ON only) after the clock and the prologue, captures right after the verdict, and counts at the end");
     check(world != std::string::npos && end != std::string::npos && thunk.substr(0, world).find("shadow") == std::string::npos &&
               thunk.substr(end) == "if(shadow.live)shadowEnd(shadow,perInstance,instances);",
           "shadow wiring: nothing of the shadow is reached by the flat profile's branch, and the thunk's last statement is the shadow's end");
@@ -1912,7 +1913,7 @@ void testShadowWiring() {
               "shadow wiring: the after-UI stamp sums the decisions and state changes (writes, reads, follows, post passes, declines, world-route losses, seed invalidations, preserved writers, "
               "named lines, the watch budget) and not the depth-view memo's lookup counters");
     }
-    check(contains(code, "constuint64_tafterUiStamp=kind=='X'?uiLayerAfterUiStamp():0;") && contains(code, "if(kind=='X'&&uiLayerAfterUiStamp()!=afterUiStamp)shadowNote(fastshadow::kTermAfterUi);") &&
+    check(contains(code, "constuint64_tafterUiStamp=g_fastPathOn&&kind=='X'?uiLayerAfterUiStamp():0;") && contains(code, "if(g_fastPathOn&&kind=='X'&&uiLayerAfterUiStamp()!=afterUiStamp)shadowNote(fastshadow::kTermAfterUi);") &&
               contains(code, "constboolsmUi=screenMotionUiDraw(") && contains(code, "constboolsmDraw=screenMotionDraw(") && contains(code, "if(smUi||smDraw)shadowNote(fastshadow::kTermScreenMotion);") &&
               contains(code, "shadowNote(fastshadow::kTermWeapon);") && contains(code, "if(temporalWantsScene)shadowNote(fastshadow::kTermRigid);") &&
               contains(code, "shadowNoteProbes(eyeGeometry);") && contains(code, "if(layered)shadowNoteX(owner,kind,fastshadow::kTermLayered);") &&
@@ -2575,12 +2576,12 @@ void testFastPathWiring() {
     if (block.empty() || bpo.empty() || fwv.empty() || begin.empty()) return;
     // The block, statement by statement, in order. Each marker must be found after the one before it.
     static const char* const kList[] = {
-        "if(shadow.fast){", "State*constfs=g_state;", "g_shadow.tracker.noteFast(shadow.cls);",
+        "if(shadow.fast){", "State*constfs=g_state;", "g_shadow.tracker.noteFast(g_shadow.cur.cls);",
         // 1. beginPanelOverride's per-draw stores, then its eye or off-screen work
         "particleRollFreeClear();", "fs->glareClamp=0;", "fs->curveThisDraw=false;", "fs->introCurveThisDraw=false;", "t_uiDepthThisDraw=false;", "t_compositeThisDraw=false;",
         "t_holoDepthThisDraw=false;", "if((++fs->bindAuditSeq&1023u)==0)bindingAudit(fs,self);",
         "if(depthProbeWanted())depthProbeNoteDraw(self,bindingGet(BindSlot::Dsv0),fs->rtv0Eye,bindingGet(BindSlot::Rtv0)==nullptr);",
-        "if(shadow.cls==fastshadow::Class::kEye){", "++fs->eyeDrawsThisFrame;",
+        "if(g_shadow.cur.cls==fastshadow::Class::kEye){", "++fs->eyeDrawsThisFrame;",
         "if(depthProbeEyeDrawNeedsNote(eyeDsv))depthProbeNoteEyeDraw(self,eyeDsv,fs->eyeDrawsThisFrame);",
         "if(uiDepthWantsDraws())uiDepthOnEyeDraw(self,{'X',perInstance,instances,startIndex,baseVertex,startInstance});",
         "if(uiDepthHologramWantsDraws())uiDepthHologramOnEyeDraw(self);",
@@ -2640,8 +2641,8 @@ void testFastPathWiring() {
     check(contains(begin, "d.verify=fastshadow::verifyDraw(g_shadow.verifyPhase,perfMonitorSampleDraws());") &&
               contains(begin, "if(d.verdict.reason==fastshadow::Reason::kTake){if(!drawGateWanted())d.verdict.reason=fastshadow::Reason::kGateClosed;"
                               "elseif(g_shadow.tracker.ticket.cls==fastshadow::Class::kEye&&!uiDepthEyeDeclineHeld())d.verdict.reason=fastshadow::Reason::kUiDepthMemo;"
-                              "elseif(!d.verify){d.fast=true;d.cls=g_shadow.tracker.ticket.cls;}}") &&
-              countOf(code, "d.fast=true") == 1 && countOf(code, ".fast=") == 1 && countOf(code, "shadow.fast=") == 0 &&
+                              "elseif(!d.verify){draw.fast=true;d.cls=g_shadow.tracker.ticket.cls;}}") &&
+              countOf(code, "draw.fast=true") == 1 && countOf(code, ".fast=") == 1 && countOf(code, "shadow.fast=") == 0 &&
               contains(begin, "[s]{returnsrv0KnownNotPanel(s);}") &&
               contains(code, "inlineboolsrv0KnownNotPanel(constState*s){returnfastshadow::srv0NotPanelKnown(bindingGet(BindSlot::PsSrv0)!=nullptr,s->psSrv0PanelGen,bindingGeneration(BindSlot::PsSrv0),s->psSrv0Panel);}"),
           "fast path wiring: a draw takes the fast path only as a would-take draw off a verify frame with the gate open and the ui_depth memos holding, and the band merge reads the memo's generation and answer");
@@ -2654,7 +2655,257 @@ void testFastPathWiring() {
                           "returnclassifiermemo::hit(g_eyeMemo,now)&&(!detail::g_holoDepthOn||classifiermemo::hit(g_holoMemo,now));}") &&
               contains(depth, "if(classifiermemo::hit(g_eyeMemo,now))returnfalse;") && contains(depth, "if(classifiermemo::hit(g_holoMemo,now))returnfalse;"),
           "fast path wiring: uiDepthEyeDeclineHeld asks the two memos at the key the classifiers read, in the cases they would be called");
-    check(contains(code, "g_shadow.tracker.noteFast(shadow.cls);") && countOf(code, ".noteFast(") == 1, "fast path wiring: a fast-path draw is counted once, in the block");
+    check(contains(code, "g_shadow.tracker.noteFast(g_shadow.cur.cls);") && countOf(code, ".noteFast(") == 1, "fast path wiring: a fast-path draw is counted once, in the block");
+}
+
+// ---- Phase 2b: the fast path's A/B inside one flight (Cut H) -----------------------------------------------------------------------------------------------
+
+namespace fab = edvr::fastab;
+
+// The arm by window: set once at each 1800-frame edge for the whole next window, ON and OFF alternating, ON first.
+void testFastAbArm() {
+    bool wrong = false;
+    for (uint32_t k = 0; k < 200; ++k) wrong = wrong || fab::armAfterEdge(k * 1800) != (k % 2 == 0);
+    check(!wrong && fab::kInitialArm && fab::armAfterEdge(0) && !fab::armAfterEdge(1800) && fab::armAfterEdge(3600) && !fab::armAfterEdge(5400),
+          "A/B arm: the window after the edge at frame E is ON when E / 1800 is even (ON, OFF, ON, ...), and the session starts ON");
+    // The monitor, simulated: the arm starts at its initial value; at each edge the window that ended is reported under the arm it ran with, then the arm switches.
+    bool arm = fab::kInitialArm, alternating = true, frameWrong = false, edgeWrong = false;
+    unsigned flips = 0, reportedOn = 0, reportedOff = 0;
+    for (uint32_t f = 1; f <= 1800u * 40u; ++f) {
+        frameWrong = frameWrong || fab::armOfFrame(f) != arm;   // the arm the draw path reads for a draw of frame f
+        if (f % 1800 != 0) continue;
+        (arm ? reportedOn : reportedOff)++;
+        edgeWrong = edgeWrong || arm != ((f / 1800) % 2 == 1);   // the window ending at 1800 m was ON for odd m
+        const bool next = fab::armAfterEdge(f);
+        alternating = alternating && next != arm;
+        flips += next != arm;
+        arm = next;
+    }
+    check(!frameWrong && !edgeWrong && alternating && flips == 40 && reportedOn == 20 && reportedOff == 20,
+          "A/B arm: over 40 windows the arm flips at every edge, a draw's frame always reads the arm of its own window, and the window ending at 1800 m reports ON for odd m");
+    check(fab::armOfFrame(0) == fab::kInitialArm && fab::armOfFrame(1) && fab::armOfFrame(1800) && !fab::armOfFrame(1801) && !fab::armOfFrame(3600) && fab::armOfFrame(3601),
+          "A/B arm: the edge frame still belongs to the window it ends, and the next frame is the first of the next window");
+}
+
+// The ticket on a switch: a switch to ON drops it, so an ON window never takes a ticket from before the switch.
+void testFastAbTicket() {
+    const fsh::Key key = shadowKey(7, 7, 7);
+    const fsh::ArgsBound in(fsh::Bound::kIn, fsh::Band::kB);
+    fsh::Tracker t;
+    t.finish(fsh::Verdict(), fsh::Class::kEye, 0, in, key, 0x1, true);
+    check(t.ticket.valid && t.judge(key, in, 0, [] { return 0u; }, [] { return 0u; }).reason == fsh::Reason::kTake, "A/B ticket: a recorded ticket takes");
+    t.onArm(true, true);
+    t.onArm(false, false);
+    t.onArm(true, false);
+    check(t.ticket.valid, "A/B ticket: staying ON, staying OFF and switching to OFF leave the ticket alone");
+    t.onArm(false, true);
+    check(!t.ticket.valid && t.judge(key, in, 0, [] { return 0u; }, [] { return 0u; }).reason == fsh::Reason::kNoTicket,
+          "A/B ticket: a switch to ON drops the ticket, and the first draw of the ON window is refused for want of one");
+    // A whole cycle: ON draws record, the OFF window runs no mechanism, the next ON window starts with no ticket whatever the key says.
+    fsh::Tracker c;
+    c.finish(fsh::Verdict(), fsh::Class::kEye, 0, in, key, 0x1, true);
+    fsh::Verdict v = c.judge(key, in, 0, [] { return 0u; }, [] { return 0u; });
+    c.onArm(true, false);   // the edge into the OFF window: no draw reaches the tracker until the next edge
+    c.onArm(false, true);   // the edge back: the same key, still, as far as the ticket knows
+    const fsh::Verdict after = c.judge(key, in, 0, [] { return 0u; }, [] { return 0u; });
+    check(v.reason == fsh::Reason::kTake && after.reason == fsh::Reason::kNoTicket, "A/B ticket: after an OFF window the same key finds no ticket");
+    const uint64_t counted = c.count.draws[0] + c.count.draws[1] + c.count.draws[2] + c.count.fast[0] + c.count.fast[1];
+    c.onArm(true, false);
+    check(counted == 1 && c.count.draws[0] + c.count.draws[1] + c.count.draws[2] + c.count.fast[0] + c.count.fast[1] == counted,
+          "A/B ticket: switching the arm counts nothing");
+}
+
+// The native CPU figure: the median of the window's frames.
+void testFastAbMedian() {
+    double out = -1.0;
+    check(!fab::median(&out, 0, &out) && out == -1.0, "A/B median: no samples gives none, and leaves the output alone");
+    double one[1] = {8.5};
+    check(fab::median(one, 1, &out) && out == 8.5, "A/B median: one sample is itself");
+    double odd[5] = {9.0, 7.0, 8.0, 6.0, 10.0};
+    check(fab::median(odd, 5, &out) && out == 8.0, "A/B median: the middle of an odd count");
+    double even[4] = {4.0, 1.0, 3.0, 2.0};
+    check(fab::median(even, 4, &out) && out == 3.0, "A/B median: an even count takes the upper middle, as the Present hook ticks line does");
+    std::vector<double> many;
+    for (int i = 0; i < 1801; ++i) many.push_back(static_cast<double>((i * 7919) % 1801));   // a permutation of 0..1800
+    check(fab::median(many.data(), many.size(), &out) && out == 900.0, "A/B median: a window's worth of shuffled frames gives its middle");
+    double dup[6] = {5.0, 5.0, 5.0, 9.0, 5.0, 1.0};
+    check(fab::median(dup, 6, &out) && out == 5.0, "A/B median: duplicates are fine");
+}
+
+// The line.
+void testFastAbText() {
+    char buf[2048];
+    fab::Window w;
+    w.endFrame = 5400;
+    w.on = true;
+    w.frames = 1800;
+    w.seconds = 25.0;
+    w.clockDrawsKnown = true;
+    w.clockDrawsPerFrame = 21500.4;
+    w.ownerDraws = 1800ull * 20000ull;
+    w.fastDraws = 21960000ull;
+    w.oldKnown = true;
+    w.oldMeanMs = 2.35;
+    w.oldSamples = 112;
+    w.stepKnown = true;
+    w.stepSumMs = 2.4;
+    w.cpuKnown = true;
+    w.cpuP50Ms = 8.7;
+    w.cpuSamples = 1790;
+    const size_t n = fab::formatLine(buf, sizeof(buf), w);
+    std::string line(buf);
+    check(n == line.size() && line.rfind("draw fast path A/B: TEMPORARY (built 2026-10-27, Phase 2b), 1800-frame window ending 5400, arm ON, 1800 frames, 25.00 s, 72.0 fps.", 0) == 0,
+          "A/B text: the line names itself, its window, its arm, the frames, the seconds and the fps");
+    check(contains(line, "X draws a frame 21500 (step clock estimate); owner X draws a frame 20000.0, fast path 61.0%."),
+          "A/B text: an ON window gives the step clock's X draws, the exact owner draws a frame and the fast share");
+    check(contains(line, "Old draw hook CPU line mean 2.350 ms over 112 sampled frames. EDVR step sum 2.400 ms. Native application CPU p50 8.700 ms over 1790 frames."),
+          "A/B text: the old line's mean, EDVR's step sum and the native application CPU median");
+    w.on = false;
+    w.ownerDraws = w.fastDraws = 0;
+    fab::formatLine(buf, sizeof(buf), w);
+    line = buf;
+    check(contains(line, "arm OFF") && contains(line, "owner X draws and fast share - (OFF: no counters)") && !contains(line, "fast path 0") && contains(line, "X draws a frame 21500 (step clock estimate)"),
+          "A/B text: an OFF window keeps the step clock's X draws and reads '-' for the counts nothing made");
+    w.on = true;
+    fab::formatLine(buf, sizeof(buf), w);
+    check(contains(std::string(buf), "owner X draws and fast share - (none counted)"), "A/B text: an ON window that counted nothing says so");
+    fab::Window none;
+    none.endFrame = 1800;
+    none.on = true;
+    none.frames = 1800;
+    fab::formatLine(buf, sizeof(buf), none);
+    line = buf;
+    check(contains(line, "1800 frames, - s, - fps. X draws a frame - (step clock estimate)") && contains(line, "mean - ms over 0 sampled frames. EDVR step sum - ms. Native application CPU p50 - ms over 0 frames (none:") &&
+              !contains(line, "nan") && !contains(line, "inf"),
+          "A/B text: a figure that is not available reads '-', and the CPU median says why");
+    char tiny[50];
+    memset(tiny, 'x', sizeof(tiny));
+    const size_t nt = fab::formatLine(tiny, sizeof(tiny), w);
+    check(nt < sizeof(tiny) && tiny[nt] == '\0', "A/B text: a short buffer is cut and terminated, never overrun");
+    char one[1] = {'x'};
+    check(fab::formatLine(one, 1, w) == 0 && one[0] == '\0', "A/B text: a one-byte buffer holds the terminator alone");
+    // The worst case: every figure at its widest.
+    fab::Window big;
+    big.endFrame = 4000000000u;
+    big.on = true;
+    big.frames = 4000000000u;
+    big.seconds = 99999999999.0;
+    big.clockDrawsKnown = true;
+    big.clockDrawsPerFrame = 99999999999.0;
+    big.ownerDraws = 18446744073709551615ull;
+    big.fastDraws = 18446744073709551615ull;
+    big.oldKnown = big.stepKnown = big.cpuKnown = true;
+    big.oldMeanMs = big.stepSumMs = big.cpuP50Ms = 99999999.999;
+    big.oldSamples = big.cpuSamples = 4000000000u;
+    char wide[4096];
+    const size_t worst = fab::formatLine(wide, sizeof(wide), big);
+    big.cpuKnown = false;
+    big.on = false;
+    const size_t worstB = fab::formatLine(wide, sizeof(wide), big);
+    check(worst > 0 && worst < 1150 && worstB < 1150 && std::strlen(wide) == worstB, "A/B text: the line is under 1150 characters at its worst (every figure at its widest)");
+    std::printf("aa_off_test: fast path A/B line worst case %zu characters\n", worst > worstB ? worst : worstB);
+}
+
+// The source: OFF takes no mechanism path, the arm is set where and how the design says, the clock starts where it should, and the line comes from the right figures.
+void testFastAbWiring() {
+    const std::string vscreen = slurpFile("src/d3d11/vscreen.cpp"), monitor = slurpFile("src/d3d11/perf_monitor.cpp");
+    check(vscreen.size() > 100000 && monitor.size() > 20000, "A/B wiring: vscreen.cpp and perf_monitor.cpp are readable from the repo root");
+    const std::string code = squeezedCode(vscreen), pm = squeezedCode(monitor);
+    const auto bodyOf = [&](const std::string& head, const char* end) {
+        const size_t at = vscreen.find(head);
+        return at == std::string::npos ? std::string() : squeezedCode(vscreen.substr(at, vscreen.find(end, at) - at));
+    };
+    const std::string thunk = bodyOf("void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,", "\n}\n");
+    const std::string fwv = bodyOf("void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,", "\n}\n");
+    const std::string bpo = bodyOf("DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,", "\n}\n");
+    check(!thunk.empty() && !fwv.empty() && !bpo.empty(), "A/B wiring: the X thunk, forwardWithVerdict and beginPanelOverride are found");
+    if (thunk.empty() || fwv.empty() || bpo.empty()) return;
+    // 1. The arm: a plain global, written in one place.
+    check(countOf(code, "boolg_fastPathOn=fastab::kInitialArm;") == 1 && countOf(code, "g_fastPathOn=") == 2 && contains(code, "voidvScreenDrawFastPathArm(boolon){g_shadow.tracker.onArm(g_fastPathOn,on);g_fastPathOn=on;}") &&
+              contains(code, "boolvScreenDrawFastPathArmed(){returng_fastPathOn;}"),
+          "A/B wiring: the arm is one plain global, initial ON, written only by vScreenDrawFastPathArm, which hands a change to the tracker first");
+    // 2. The monitor sets it once, at the edge, for the next window, after it has written the window that ended, and writes the A/B line after the other draw lines.
+    const size_t edge = pm.find("if(s.frameNo%1800==0){"), shadowArgs = pm.find("Log::get().note(\"%s\",shadowArgsLine);"), line = pm.find("fastab::formatLine(abLine,sizeof(abLine),ab);"),
+                 note = pm.find("Log::get().note(\"%s\",abLine);"), arm = pm.find("vScreenDrawFastPathArm(fastab::armAfterEdge(s.frameNo));"), books = pm.find("s.abEdgeFrame=s.frameNo;"),
+                 reset = pm.find("s.drawWindowMs=0.0;s.drawWindowMaxMs=0.0f;s.drawWindowSamples=0;"), totals = pm.find("vScreenDrawFastPathTotals()"),
+                 shadowLines = pm.find("vScreenDrawFastPathShadowLines(stepLine,"), armedRead = pm.find("ab.on=vScreenDrawFastPathArmed();");
+    check(edge != std::string::npos && armedRead != std::string::npos && totals != std::string::npos && shadowLines != std::string::npos && shadowArgs != std::string::npos && line != std::string::npos &&
+              note != std::string::npos && arm != std::string::npos && books != std::string::npos && reset != std::string::npos && edge < armedRead && armedRead < totals && totals < shadowLines &&
+              shadowLines < shadowArgs && shadowArgs < line && line < note && note < arm && arm < books && books < reset && countOf(pm, "vScreenDrawFastPathArm(") == 1,
+          "A/B wiring: at the 1800-frame edge the monitor reads the arm the window ran with, takes the window's totals before the shadow lines reset them, writes the A/B line after the other draw lines, then sets the next arm, once");
+    // 3. The line's figures are the old line's and the step line's own.
+    check(contains(pm, "ab.oldMeanMs=s.drawWindowSamples?s.drawWindowMs/s.drawWindowSamples:0.0;") && contains(pm, "Log::get().note(\"drawhookCPU:1800-framewindowending%u;%.3fms/sampledframemean") &&
+              contains(pm, "s.frameNo,s.drawWindowSamples?s.drawWindowMs/s.drawWindowSamples:0.0,") &&
+              contains(pm, "constboolstepOk=drawstep::summarise(g_drawSteps,info,&stepTotals);") && contains(pm, "ab.stepSumMs=stepOk?stepTotals.edvrMs:0.0;") &&
+              pm.find("constboolstepOk=") < pm.find("drawstep::formatStepsLine(") && pm.find("drawstep::formatStepsLine(") < pm.find("g_drawSteps.reset();"),
+          "A/B wiring: the old line's mean and EDVR's step sum come from the same window figures the old line and the step line print, read before the step window resets");
+    // 4. The native CPU: the benchmark's own per-frame application CPU, valid frames only, taken at the median and cleared at the edge.
+    check(contains(pm, "benchmark.cpuMs=completion.applicationMs;") && contains(pm, "if(benchmark.cpuValid&&std::isfinite(benchmark.cpuMs)&&s.abCpu.size()<8192)s.abCpu.push_back(benchmark.cpuMs);") &&
+              contains(pm, "ab.cpuKnown=fastab::median(s.abCpu.data(),s.abCpu.size(),&cpuMedian);") && contains(pm, "s.abCpu.clear();"),
+          "A/B wiring: the native CPU figure is the median of the window's valid per-frame application CPU samples, cleared at the edge");
+    // 5. OFF takes no mechanism path. Every shadow call in the X thunk, forwardWithVerdict and the lambda is behind the arm.
+    check(contains(thunk, "ShadowDrawshadow;if(g_fastPathOn&&self==g_state->ownerCtx)shadowBegin(shadow,g_state,perInstance,instances);") && countOf(code, "shadowBegin(") == 2 && countOf(code, "draw.live=true;") == 1 &&
+              countOf(code, "draw.fast=true;") == 1 && countOf(thunk, "shadow.live") == 2 && countOf(thunk, "shadow.fast") == 1 && countOf(code, "shadowAfterVerdict(") == 2 && countOf(code, "shadowEnd(") == 2 &&
+              contains(thunk, "if(shadow.live)shadowAfterVerdict(shadow,g_state,v,perInstance,instances);") && contains(thunk, "if(shadow.live)shadowEnd(shadow,perInstance,instances);"),
+          "A/B wiring: shadowBegin is called only with the arm ON, and the fast block, the capture and the end are reached only through what it sets");
+    check(contains(code, "inlinevoidshadowNote(fastshadow::Termt){if(!g_fastPathOn)return;g_shadow.terms|=fastshadow::termBit(t);}") &&
+              contains(code, "inlinevoidshadowNoteX(boolowner,charkind,fastshadow::Termt){if(g_fastPathOn&&owner&&kind=='X')g_shadow.terms|=fastshadow::termBit(t);}") &&
+              contains(code, "inlinevoidshadowNoteProbes(booleyeGeometry){if(!g_fastPathOn)return;"),
+          "A/B wiring: the three note helpers return first thing with the arm OFF");
+    const std::set<std::string> notes = membersIn(code, "shadowNote(fastshadow::kTerm");
+    const std::set<std::string> notesX = membersIn(code, "shadowNoteX(owner,kind,fastshadow::kTerm");
+    check(notes == std::set<std::string>{"AfterUi", "CelestialOrbit", "Weapon", "Rigid", "ScreenMotion", "Census"} &&
+              notesX == std::set<std::string>{"Family", "CompositeCounted", "Layered", "Reissue"} && countOf(code, "shadowNoteProbes(eyeGeometry);") == 1 && countOf(code, "shadowNote(") == 8,
+          "A/B wiring: the notes in forwardWithVerdict and the lambda are the known ones, each through a helper that checks the arm");
+    check(contains(code, "constuint64_tafterUiStamp=g_fastPathOn&&kind=='X'?uiLayerAfterUiStamp():0;") && contains(code, "if(g_fastPathOn&&kind=='X'&&uiLayerAfterUiStamp()!=afterUiStamp)shadowNote(fastshadow::kTermAfterUi);") &&
+              countOf(code, "uiLayerAfterUiStamp()") == 2 &&
+              contains(code, "if(g_fastPathOn&&owner&&kind=='X'&&celestialMotionLive()&&bindingShaderHash(BindSlot::Vs)==kCelestialPatchVs)shadowNote(fastshadow::kTermCelestialOrbit);") &&
+              contains(code, "if(g_fastPathOn&&owner&&kind=='X'&&g_state->rtv0Eye&&bindingShaderHash(BindSlot::Vs)==orbital_width::kVs)shadowNote(fastshadow::kTermCelestialOrbit);"),
+          "A/B wiring: the after-UI stamp reads and the two matches the notes re-test are behind the arm, so an OFF draw pays for none of them");
+    check(countOf(fwv, "g_shadow") == 0 && countOf(bpo, "g_shadow") == 0 && countOf(thunk, "g_shadow") == 3 &&
+              countOf(thunk.substr(thunk.find("if(shadow.fast){"), thunk.find("return;}", thunk.find("if(shadow.fast){")) - thunk.find("if(shadow.fast){")), "g_shadow") == 3,
+          "A/B wiring: forwardWithVerdict and beginPanelOverride touch no shadow state but the notes' helpers, and the thunk touches it only inside the fast block");
+    // 6. The clock starts at the top of the X thunk, right after the flat and world-route returns, ahead of the prologue and the decision; D, I and N build theirs where they did.
+    check(contains(thunk, "if(g_vrWorldInternal){g_state->realDrawIndexedInstanced(self,perInstance,instances,startIndex,baseVertex,startInstance);return;}DrawClockclock('X');gpuFrameCommandIfLive(self);") &&
+              countOf(thunk, "DrawClockclock(") == 1,
+          "A/B wiring: the X thunk's DrawClock is built right after the world-route return, ahead of gpuFrameCommandIfLive");
+    const size_t c0 = thunk.find("DrawClockclock('X');"), p1 = thunk.find("gpuFrameCommandIfLive(self);"), p2 = thunk.find("nativeOnFootMarkerTee(self,instances,startInstance,'X'"), p3 = thunk.find("temporalPassCountDraw();"),
+                 p4 = thunk.find("noteStaleForward(kSlotDrawIndexedInstanced,"), d0 = thunk.find("if(g_fastPathOn&&self==g_state->ownerCtx)shadowBegin("), s0 = thunk.find("fssPanelRectDrawArgs(baseVertex,startInstance);"),
+                 m0 = thunk.find("clock.mark(drawstep::kPre);"), f0 = thunk.find("if(shadow.fast){");
+    check(c0 != std::string::npos && c0 < p1 && p1 < p2 && p2 < p3 && p3 < p4 && p4 < d0 && d0 < s0 && s0 < m0 && m0 < f0,
+          "A/B wiring: in the X thunk the clock, the prologue (gpu frame command, marker tee, camera count, stale-forward note), the decision, the args stashes, the pre mark and the fast block run in that order");
+    check(contains(code, "if(self==g_state->ownerCtx){temporalPassCountDraw();if(temporalPassWantsDraw())temporalPassNoteDraw(self);}DrawClockclock('D');") &&
+              contains(code, "if(self==g_state->ownerCtx){temporalPassCountDraw();if(temporalPassWantsDraw())temporalPassNoteDraw(self);}DrawClockclock('I');") &&
+              contains(code, "noteStaleForward(kSlotDrawInstanced,reinterpret_cast<constvoid*>(g_state->realDrawInstanced),\"DrawInstanced\");DrawClockclock('N');"),
+          "A/B wiring: the D, I and N thunks build their clocks where they did, after their prologues");
+    {
+        // Controls: the decision made without the arm, the clock built after the prologue, a note helper that no longer checks the arm, and an after-UI stamp read
+        // outside the arm each make their pin fail.
+        std::string unguarded = thunk;
+        const std::string guardedCall = "if(g_fastPathOn&&self==g_state->ownerCtx)shadowBegin(";
+        const size_t g = unguarded.find(guardedCall);
+        if (g != std::string::npos) unguarded.replace(g, guardedCall.size(), "if(self==g_state->ownerCtx)shadowBegin(");
+        std::string late = thunk;
+        const std::string clockStmt = "DrawClockclock('X');";
+        const size_t cs = late.find(clockStmt);
+        if (cs != std::string::npos) {
+            late.erase(cs, clockStmt.size());
+            late.insert(late.find("noteStaleForward(kSlotDrawIndexedInstanced,"), clockStmt);
+        }
+        std::string helper = code;
+        const std::string guardedHelper = "inlinevoidshadowNote(fastshadow::Termt){if(!g_fastPathOn)return;";
+        const size_t h = helper.find(guardedHelper);
+        if (h != std::string::npos) helper.replace(h, guardedHelper.size(), "inlinevoidshadowNote(fastshadow::Termt){");
+        std::string stamp = code;
+        const std::string guardedStamp = "afterUiStamp=g_fastPathOn&&kind=='X'?";
+        const size_t st = stamp.find(guardedStamp);
+        if (st != std::string::npos) stamp.replace(st, guardedStamp.size(), "afterUiStamp=kind=='X'?");
+        check(g != std::string::npos && !contains(unguarded, "ShadowDrawshadow;if(g_fastPathOn&&self==g_state->ownerCtx)shadowBegin(shadow,g_state,perInstance,instances);") &&
+                  cs != std::string::npos && late.find("DrawClockclock('X');") > late.find("gpuFrameCommandIfLive(self);") &&
+                  h != std::string::npos && !contains(helper, "inlinevoidshadowNote(fastshadow::Termt){if(!g_fastPathOn)return;g_shadow.terms|=fastshadow::termBit(t);}") &&
+                  st != std::string::npos && !contains(stamp, "constuint64_tafterUiStamp=g_fastPathOn&&kind=='X'?uiLayerAfterUiStamp():0;"),
+              "A/B wiring control: the decision without the arm, the clock after the prologue, a note helper without the arm and an unguarded stamp each change what the pins read");
+    }
 }
 
 void usage() {
@@ -2721,7 +2972,12 @@ int main(int argc, char** argv) {
     testFastPathCounts();
     testFastPathStepClock();
     testFastPathWiring();
-    std::printf("aa_off_test: the repeat-draw fast path and its verification (Phases 1 and 2): %d checks\n", g_checks - checksBeforeShadow);
+    testFastAbArm();
+    testFastAbTicket();
+    testFastAbMedian();
+    testFastAbText();
+    testFastAbWiring();
+    std::printf("aa_off_test: the repeat-draw fast path, its verification and its A/B (Phases 1, 2 and 2b): %d checks\n", g_checks - checksBeforeShadow);
     std::printf("aa_off_test: %d checks, %d failed\n", g_checks, g_failed);
     return g_failed ? 1 : 0;
 }

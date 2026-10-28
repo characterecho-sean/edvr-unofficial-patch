@@ -77,7 +77,7 @@ namespace drawstep {
 
 // ---- the steps --------------------------------------------------------------------
 enum Step : uint8_t {
-    kPre = 0,
+    kPre = 0,        // pre: the X thunk's clock starts at the top of the thunk (Phase 2b), so for X this is the prologue, the fast-path decision (arm ON) and the args stashes; D, I and N start theirs after the prologue
     kVHudFss,        // v:hud/fss
     kVContext,       // v:context
     kVParticles,     // v:particles

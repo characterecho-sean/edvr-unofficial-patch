@@ -505,6 +505,12 @@ struct Tracker {
     // The fast path took an owner X draw (Phase 2): a plain increment, and the ticket stays as it was.
     void noteFast(Class cls) { ++count.fast[static_cast<size_t>(cls)]; }
 
+    // Phase 2b: the A/B switch (draw_fast_path_ab.h). A switch to ON drops the ticket, so an ON window never takes a ticket written before the switch (the
+    // game's state moved on in the OFF window, and a ticket's key says nothing across a window the mechanism did not watch). Every other change of arm leaves it.
+    void onArm(bool wasOn, bool nowOn) {
+        if (nowOn && !wasOn) ticket = Ticket();
+    }
+
     // True for the first kNamedMismatches mismatched draws of the session, once each.
     bool takeNameSlot() {
         if (named >= kNamedMismatches) return false;
