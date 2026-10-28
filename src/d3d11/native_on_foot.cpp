@@ -62,6 +62,7 @@
 #include "native_on_foot_f141.h"   // F141: the game's ADS sight point and the weapon readout's anchor, measure only (the build's addresses; pure parts)
 #include "native_on_foot_f142.h"   // F142: the icon mesh table's slot reuse, the full outfit A/B's promotion, the outfit census (pure parts)
 #include "native_on_foot_f143.h"   // F143: the ADS eye on the game's sight line, the coat's clip modifiers (pure parts)
+#include "native_on_foot_f144.h"   // F144: the settled sight line per (item, scope), the coat's Gear_Back and first-person census, the readout placed per role (pure parts)
 #include "xinput_watch.h"          // F135: the pad's Start and Back edges, evidence for the menu probe only
 #include "native_on_foot_f109.h"   // F109: look to aim on foot, the player's own turn in ADS, snap or smooth turning (pure parts)
 #include "native_on_foot_f129.h"   // F129: look to aim reads its turn from the player's own look processor; the look path instrument (pure parts)
@@ -11434,8 +11435,10 @@ struct AdsSightWin {
     char f139Item[64] = {};
     // F143: the ADS shift's source per frame (the game's line, or F139's table and why), the game's shift (cm, summed over the game-line frames), the pair's age (ms), the line's
     // angle off the root's forward (deg), and the step of the applied game shift between consecutive game-line frames (mm).
-    uint32_t f143Frames = 0, f143Game = 0, f143Why[nofoot::f143::kWhyCount] = {}, f143Steps = 0;
-    double f143UpSum = 0.0, f143RightSum = 0.0, f143AgeSum = 0.0, f143AgeMax = 0.0, f143DegSum = 0.0, f143StepSumMm = 0.0, f143StepMaxMm = 0.0, f143Prev[3] = {};
+    // F144: the line is the settled one (kept per (item, scope) for the session); the frames the table blended into it, and the settled line as it stood at the last such frame.
+    uint32_t f143Frames = 0, f143Game = 0, f143Why[nofoot::f143::kWhyCount] = {}, f143Steps = 0, f144Blending = 0, f144Samples = 0;
+    double f143UpSum = 0.0, f143RightSum = 0.0, f143DegSum = 0.0, f143StepSumMm = 0.0, f143StepMaxMm = 0.0, f143Prev[3] = {}, f144E[3] = {}, f144S[3] = {};
+    uint64_t f144Used = 0;
     bool f143PrevHave = false;
     double opticYawSum = 0.0, opticPitchSum = 0.0, opticRootNdcSum[3][2] = {}, opticP14NdcSum[3][2] = {};
     uint32_t opticRootNdcN[3] = {}, opticP14NdcN[3] = {};
@@ -11510,8 +11513,11 @@ bool retNdcRead(int e, uint32_t* frame, double ndc[2], double* depth) noexcept {
 }
 AdsSightWin g_adsSightWin;
 // F143: the game's sight line E -> S as the frame thread's F141 drain publishes it (the filtered pair, its time, the item and scope); adsSightTick reads it on the same thread.
-nofoot::f143::Pub g_f143Pub;
-nofoot::f143::LineFilter g_f143Filter;
+// F144: the settled sight lines of the session (the F141 drain feeds them with settled samples; the sight lock reads them from a press's first frame), the press's settle gate and
+// the blend from the table's shift to a line that first becomes usable mid-press.
+nofoot::f144::Cache g_f144Cache;
+nofoot::f144::SettleGate g_f144Gate;
+nofoot::f144::Blend g_f144Blend;
 nofoot::adslog::Window g_adsSightLogWindow;
 nofoot::AdsSightGrowth g_adsSightGrowth;
 double g_adsSightIpd = nofoot::kAdsSightIpdFallbackM;   // F110: the job camera (the left eye) to the right eye
@@ -11556,16 +11562,18 @@ void adsSightLog(uint32_t seconds, bool steady, bool hold, bool detailed) noexce
                         w.f139UpSum / fn, w.f139RightSum / fn, w.f139Frames, w.f139Applied, w.f139F79, 100.0 * nofoot::f139::kBoundM, w.f139Refused, w.f139NoItem,
                         w.f139ScopeUnknown);
     }
-    if (w.f143Frames) {   // F143: the source of the ADS shift per frame: the game's sight line, or F139's table and why (every ADS window; --health reads it)
+    if (w.f143Frames) {   // F143/F144: the source of the ADS shift per frame: the settled sight line of the held (item, scope), or F139's table and why (every ADS window; --health reads it)
         const double gn = w.f143Game ? static_cast<double>(w.f143Game) : 1.0;
         namespace f143 = nofoot::f143;
-        Log::get().note("native on foot ADS sight line (F143) %u s: item %s scope %s, source per frame: game line %u, table %u (fallback by reason: no pair %u, stale %u, another "
-                        "item or scope %u, item not read %u, degenerate line %u, past the bound %u, key off %u); game shift up %+.2f right %+.2f cm (mean over the game-line frames), "
-                        "table up %+.2f right %+.2f cm, trims up %+.1f right %+.1f cm; pair age mean %.0f max %.0f ms, the line %.2f deg off the root's forward; shift step between "
-                        "frames mean %.2f max %.2f mm over %u steps",
-                        seconds, w.f139Item[0] ? w.f139Item : "none", loadout::scopeName(w.f139Scope), w.f143Game, w.f143Frames - w.f143Game, w.f143Why[f143::kNoPair],
-                        w.f143Why[f143::kStale], w.f143Why[f143::kOtherItem], w.f143Why[f143::kNoItem], w.f143Why[f143::kDegenerate], w.f143Why[f143::kBound], w.f143Why[f143::kKeyOff],
-                        w.f143UpSum / gn, w.f143RightSum / gn, w.f139TableUpCm, w.f139TableRightCm, w.f139TrimCm, w.f139TrimRightCm, w.f143AgeSum / gn, w.f143AgeMax,
+        Log::get().note("native on foot ADS sight line (F143) %u s: item %s scope %s, source per frame: settled line %u (blending in on %u), table %u (fallback by reason: no settled line "
+                        "yet %u, another item or scope %u, item not read %u, degenerate line %u, past the bound %u, key off %u); settled line (cm from P14 in the root's right, up and "
+                        "forward) E %+.2f %+.2f %+.2f S %+.2f %+.2f %+.2f from %u settled samples, used on %llu frames this session; game shift up %+.2f right %+.2f cm (mean over the "
+                        "settled-line frames), table up %+.2f right %+.2f cm, trims up %+.1f right %+.1f cm; the line %.2f deg off the root's forward; shift step between frames mean "
+                        "%.2f max %.2f mm over %u steps",
+                        seconds, w.f139Item[0] ? w.f139Item : "none", loadout::scopeName(w.f139Scope), w.f143Game, w.f144Blending, w.f143Frames - w.f143Game,
+                        w.f143Why[f143::kNoLine], w.f143Why[f143::kOtherItem], w.f143Why[f143::kNoItem], w.f143Why[f143::kDegenerate], w.f143Why[f143::kBound], w.f143Why[f143::kKeyOff],
+                        100.0 * w.f144E[0], 100.0 * w.f144E[1], 100.0 * w.f144E[2], 100.0 * w.f144S[0], 100.0 * w.f144S[1], 100.0 * w.f144S[2], w.f144Samples,
+                        static_cast<unsigned long long>(w.f144Used), w.f143UpSum / gn, w.f143RightSum / gn, w.f139TableUpCm, w.f139TableRightCm, w.f139TrimCm, w.f139TrimRightCm,
                         w.f143DegSum / gn, w.f143Steps ? w.f143StepSumMm / static_cast<double>(w.f143Steps) : 0.0, w.f143StepMaxMm, w.f143Steps);
     }
     if (detailed) {
@@ -11678,6 +11686,7 @@ void adsSightLog(uint32_t seconds, bool steady, bool hold, bool detailed) noexce
 }
 void adsSightTick(uint64_t now, double dt, const EyeSample& s) noexcept {
     const bool active = g_adsState == kAdsActive;
+    if (!active) g_f144Blend.reset();   // F144: a press's first frame with a settled line uses it at once; the blend is for a line that becomes usable mid-press
     g_opticAdsState.seq.fetch_add(1, std::memory_order_acq_rel);
     g_opticAdsState.frame = g_f44Frame.load(std::memory_order_relaxed);
     g_opticAdsState.qpc = f30Qpc();
@@ -11824,36 +11833,49 @@ void adsSightTick(uint64_t now, double dt, const EyeSample& s) noexcept {
                     w.f139UpSum += d139.appliedUpCm;
                     w.f139RightSum += d139.appliedRightCm;
                 }
-                // F143: the shift from the game's own sight line E -> S (the pair F141's drain publishes: the filtered line relative to P14w in the FP root's axes), taken at the
-                // lock's eye depth k from this frame's P14w and root, with the two live trims added, under the same 8 cm bound. F139's table + trims (d139) is the fallback, and
-                // the reason is counted. The origin (P14w, or F79's measured origin), k, f and everything downstream are unchanged: only the source of the shift is.
+                // F143/F144: the shift from the game's own sight line E -> S, settled: the line kept for the held (item, scope) for the session, fed by the F141 drain with settled
+                // samples only (after the game's raise animation has stopped moving E), relative to P14w in the FP root's axes. It is taken at the lock's eye depth k from this
+                // frame's P14w and root, with the two live trims added, under the same 8 cm bound, from the press's first frame; until a line exists (or when it cannot be used)
+                // F139's table + trims (d139) stands in, the reason counted, and a line that becomes usable mid-press is blended in over 0.25 s. The origin (P14w, or F79's
+                // measured origin), k, f and everything downstream are unchanged: only the source of the shift is.
                 {
                     namespace f143 = nofoot::f143;
-                    const f143::Choice c = f143::choose(g_adsGameSightKey.load(std::memory_order_relaxed), itemOk, d139.weapon, currentItemSerial, scopeState, g_f143Pub, now, p14w, upRow, row0,
-                                                  fUnit, adsOrigin, eyeCap.kM, d139.trimUpCm, d139.trimRightCm);
+                    namespace f144 = nofoot::f144;
+                    f144::Entry* ent = itemOk ? g_f144Cache.find(opticItemName, scopeState) : nullptr;
+                    const f143::Choice c = f144::choose(g_adsGameSightKey.load(std::memory_order_relaxed), itemOk, d139.weapon, ent, p14w, upRow, row0, fUnit, adsOrigin, eyeCap.kM,
+                                                        d139.trimUpCm, d139.trimRightCm);
                     ++w.f143Frames;
                     ++w.f143Why[c.why < f143::kWhyCount ? c.why : f143::kKeyOff];
+                    const double wt = g_f144Blend.step(c.game, now);
+                    double tableShift[3] = {}, shift[3];
+                    if (d139.applied) std::memcpy(tableShift, d139.shift, sizeof(tableShift));
                     if (c.game) {
+                        f144::blendShift(wt, tableShift, c.shift, shift);
                         ++w.f143Game;
+                        if (wt < 1.0) ++w.f144Blending;
                         w.f143UpSum += c.gameUpCm;
                         w.f143RightSum += c.gameRightCm;
-                        w.f143AgeSum += c.ageMs;
-                        w.f143AgeMax = std::max(w.f143AgeMax, c.ageMs);
                         w.f143DegSum += c.lineDeg;
                         if (w.f143PrevHave) {
-                            const double stepMm = 1000.0 * f143::stepM(c.shift, w.f143Prev);
+                            const double stepMm = 1000.0 * f143::stepM(shift, w.f143Prev);
                             ++w.f143Steps;
                             w.f143StepSumMm += stepMm;
                             w.f143StepMaxMm = std::max(w.f143StepMaxMm, stepMm);
                         }
-                        std::memcpy(w.f143Prev, c.shift, sizeof(w.f143Prev));
+                        std::memcpy(w.f143Prev, shift, sizeof(w.f143Prev));
                         w.f143PrevHave = true;
-                        for (int axis = 0; axis < 3; ++axis) adsOrigin[axis] += c.shift[axis];
+                        if (ent) {
+                            ++ent->gameFrames;
+                            std::memcpy(w.f144E, ent->line.e, sizeof(w.f144E));
+                            std::memcpy(w.f144S, ent->line.s, sizeof(w.f144S));
+                            w.f144Samples = ent->line.samples;
+                            w.f144Used = ent->gameFrames;
+                        }
                     } else {
                         w.f143PrevHave = false;
-                        if (d139.applied)
-                            for (int axis = 0; axis < 3; ++axis) adsOrigin[axis] += d139.shift[axis];
+                        std::memcpy(shift, tableShift, sizeof(shift));
                     }
+                    for (int axis = 0; axis < 3; ++axis) adsOrigin[axis] += shift[axis];
                 }
             }
             const double pT[3] = {adsOrigin[0] + eyeCap.kM * fUnit[0], adsOrigin[1] + eyeCap.kM * fUnit[1], adsOrigin[2] + eyeCap.kM * fUnit[2]};
@@ -13591,12 +13613,33 @@ struct F89Tally {
     double lwMax = 0.0, lwEngagedMax = 0.0;
 };
 F89Tally g_f89Tally;
+// F144: the ADS entry path of a traced press, from the trace's own eye samples (the eye less F_root, right and up, while ADS is engaged): the eye's excursion beyond its settled
+// value in the first 1.5 s, the pull the pilot sees on entering ADS. One line when the press's trace ends; the item and scope are those held at the press.
+nofoot::f144::EntryPath g_f144Path;
+char g_f144PathItem[64] = "none";
+int g_f144PathScope = loadout::kScopeUnknown;
+void f144PathLog() noexcept {
+    namespace f144 = nofoot::f144;
+    const f144::PathResult r = g_f144Path.result();
+    if (!r.ok) {
+        Log::get().note("native on foot ADS entry path (F144): item %s scope %s, no settled eye (%s; %d engaged eye samples)", g_f144PathItem, loadout::scopeName(g_f144PathScope), r.why, r.n);
+        return;
+    }
+    Log::get().note("native on foot ADS entry path (F144): item %s scope %s, eye less F_root in the character's axes from right %+.2f up %+.2f cm at the press to right %+.2f up %+.2f cm "
+                    "settled (the last %.1f s of %d engaged eye samples); excursion beyond the settled value in the first %.1f s: lateral %+.2f cm at t %.2f s, vertical %+.2f cm at t %.2f s",
+                    g_f144PathItem, loadout::scopeName(g_f144PathScope), r.lateral.first, r.vertical.first, r.lateral.settled, r.vertical.settled, f144::kPathSettleS, r.n,
+                    f144::kPathWindowS, r.lateral.over > 0.0 ? r.lateral.dev : 0.0, r.lateral.overT, r.vertical.over > 0.0 ? r.vertical.dev : 0.0, r.vertical.overT);
+}
 void f89TallyClose() noexcept {
     F89Tally& k = g_f89Tally;
     if (!k.open) return;
     k.open = false;
     Log::get().note("ads transition (F89) %s traced: frames %u, engaged %u, lock weight max %.2f, on the engaged frames %.2f", k.press ? "press" : "release", k.frames, k.engaged,
                     k.lwMax, k.lwEngagedMax);
+    if (k.press) {
+        f144PathLog();
+        g_f144Path.reset();
+    }
 }
 void f87EyeLines(uint64_t now, double dt, double offsetW, const EdvrNativeNowPose& np, bool haveFrame, bool ads, const EyeSample& s, const FpRootSnap& fp, bool fpFresh) noexcept {
     if (!nativeOnFootActive()) {
@@ -13636,7 +13679,15 @@ void f87EyeLines(uint64_t now, double dt, double offsetW, const EdvrNativeNowPos
             g_f89Tally = F89Tally{};
             g_f89Tally.open = true;
             g_f89Tally.press = tf.press;
+            if (tf.press) {   // F144: the entry path of this press
+                g_f144Path.reset();
+                uint32_t serial = 0;
+                if (!opticItemRead(&serial, g_f144PathItem) || !g_f144PathItem[0]) std::snprintf(g_f144PathItem, sizeof(g_f144PathItem), "none");
+                g_f144PathScope = std::strcmp(g_f144PathItem, "none") != 0 ? loadout::heldScope(g_f144PathItem).state : loadout::kScopeUnknown;
+            }
         }
+        if (tf.trace && tf.press && g_f89Tally.open && g_adsState == kAdsActive && eyeUsed)
+            g_f144Path.add(tf.t, g_f87EyeRoot.last[0] * 100.0, g_f87EyeRoot.last[1] * 100.0);   // F144: while ADS is engaged only (a release's return is not the entry)
         if (tf.trace && g_f89Tally.open) {
             F89Tally& k = g_f89Tally;
             ++k.frames;
@@ -23174,6 +23225,7 @@ void f141AdsTick(uint64_t now) noexcept {
     g_f141Want.store(nativeOnFootActive() && (g_adsState == kAdsActive || g_adsState == kAdsReleasing), std::memory_order_relaxed);
     const F141Item it = live ? f141Item() : F141Item{};
     if (live && !g_f141WasLive) {   // a press begins: the window's sums and the one-shot's count start here
+        g_f144Gate.reset();         // F144: the settle gate is per press
         g_f141Acc.reset();
         g_f141Lost = 0;
         f141TakeBases(g_f141Base, g_f141ShotBase);
@@ -23218,21 +23270,20 @@ void f141AdsTick(uint64_t now) noexcept {
         f::P14Off p;
         if (fp) p = f::p14Offset(s.in.S, s.in.E, fp->p14w, fp->froot);
         g_f141Acc.add(s.adsOn != 0, s.in, b, fp != nullptr, p, gap);
-        // F143: a usable sample paired with the FP snapshot of its own render frame gives the game's sight line E -> S relative to that frame's P14w, in that frame's FP root
-        // axes. The filter (tau 0.15 s) restarts on another item, scope or activation; the tick's samples are one step.
-        if (b.geo && fp && gap == 0 && it.coherent) {
+        // F143/F144: a usable sample paired with the FP snapshot of its own render frame gives the game's sight line E -> S relative to that frame's P14w, in that frame's FP root
+        // axes. Only a settled sample (the game's ADS fraction 1.0 for 0.6 s of this press, E and S moved under 2 mm from the previous usable sample) feeds the held weapon's
+        // line, kept per (item name, scope) for the session; the tick's settled samples are one step of an exponential with a 1 s time constant.
+        if (b.geo && fp && gap == 0) {
             double eRoot[3], sRoot[3];
-            if (nofoot::f143::toRoot(fp->froot, fp->p14w, &s.in.E[12], eRoot) && nofoot::f143::toRoot(fp->froot, fp->p14w, s.in.S, sRoot)) {
-                nofoot::f143::LineKey key;
-                key.held = it.held;
-                key.coherent = it.coherent;
-                key.scope = it.scope;
-                key.activation = s.activation;
-                g_f143Filter.note(key, eRoot, sRoot);
+            if (nofoot::f143::toRoot(fp->froot, fp->p14w, &s.in.E[12], eRoot) && nofoot::f143::toRoot(fp->froot, fp->p14w, s.in.S, sRoot) &&
+                g_f144Gate.settled(s.in.wOk, s.in.w, now, eRoot, sRoot) && it.coherent && nofoot::f139::isWeapon(it.name)) {
+                if (nofoot::f144::Entry* ent = g_f144Cache.get(it.name, it.scope, now)) ent->line.note(eRoot, sRoot);
             }
         }
     }
-    if (live && g_f143Filter.flush(now)) nofoot::f143::publish(g_f143Pub, g_f143Filter);   // F143: published at this tick's time; adsSightTick takes it next frame
+    if (live)
+        for (nofoot::f144::Entry& ent : g_f144Cache.e)
+            if (ent.used && ent.line.pn) ent.line.flush(now);   // F144: the tick's settled samples, applied at this tick's time; adsSightTick takes them next frame
 }
 
 // The readout's anchor: one window of parts per held item and scope (frame thread only).
@@ -24546,6 +24597,70 @@ void f143ClipLog(const nofoot::f143::ClipSnap& c) noexcept {
     }
     flush();
 }
+// F144: the local first-person AMC's census as log lines (the same shape as the third-person census above): a header, then each part with an instance: its instances, class,
+// flags and the view masks the game left before EDVR's zero, and whether EDVR's list zeroes it (and whether a mask bit was set, so the zero changed something).
+struct F144FpState {
+    nofoot::f144::FpCensus last;
+    bool haveLast = false;
+    uint32_t changes = 0, listings = 0, headers = 0, skipped = 0;
+};
+F144FpState g_f144Fp;
+void f144FpCensusLog(const nofoot::f144::FpCensus& fc) noexcept {
+    namespace f142 = nofoot::f142;
+    F144FpState& s = g_f144Fp;
+    const f142::Census& c = fc.c;
+    ++s.changes;
+    uint8_t ch[12] = {};
+    const uint32_t nch = s.haveLast ? f142::changedParts(s.last.c, c, ch, 12) : 0;
+    const bool listChanged = s.haveLast && (s.last.listMask != fc.listMask || s.last.zeroedMask != fc.zeroedMask);
+    const bool full = !s.haveLast || s.listings < 6;
+    if (!full && s.headers >= 40) {
+        if (!s.skipped) Log::get().note("native on foot first-person census (F144): later changes are counted, not written (the cap is 40 headers a session after the first 6 listings)");
+        ++s.skipped;
+        s.last = fc;
+        return;
+    }
+    ++s.headers;
+    if (full) ++s.listings;
+    char changed[320] = "", what[480];
+    size_t at = 0;
+    for (uint32_t i = 0; i < nch && i < 12; ++i) {
+        if (at + 40 >= sizeof(changed)) break;
+        const int w = std::snprintf(changed + at, sizeof(changed) - at, "%s%s", at ? ", " : "", f142PartName(ch[i]));
+        if (w > 0) at += static_cast<size_t>(w);
+    }
+    uint32_t inList = 0, zeroed = 0;
+    for (uint32_t i = 0; i < c.n && i < f142::kPartCount; ++i) {
+        if ((fc.listMask >> c.row[i].idx) & 1ull) ++inList;
+        if ((fc.zeroedMask >> c.row[i].idx) & 1ull) ++zeroed;
+    }
+    if (!s.haveLast) std::snprintf(what, sizeof(what), "first read");
+    else if (changed[0]) std::snprintf(what, sizeof(what), "changed: %s%s", changed, listChanged ? ", the zeroed set" : "");
+    else std::snprintf(what, sizeof(what), "changed: %s", listChanged ? "the zeroed set" : "none");
+    Log::get().note("native on foot first-person census (F144): change %u of the local first-person AMC 0x%llX: %u of %u parts have instances, EDVR's list covers %u of them and the zero "
+                    "changed %u (a mask bit was set); %s; %s",
+                    s.changes, static_cast<unsigned long long>(c.amc), c.n, avh::kPartCount, inList, zeroed, what,
+                    full ? "every part with an instance follows" : "only the parts that changed follow");
+    for (uint32_t i = 0; i < c.n && i < f142::kPartCount; ++i) {
+        const f142::PartRow& r = c.row[i];
+        bool isChanged = !s.haveLast;
+        for (uint32_t k = 0; k < nch && k < 12; ++k)
+            if (ch[k] == r.idx) isChanged = true;
+        if (!full && !isChanged) continue;
+        char inst[12] = "";
+        size_t iat = 0;
+        for (uint32_t k = 0; k < avh::kPartVariants; ++k)
+            if (r.inst & (1u << k)) iat += static_cast<size_t>(std::snprintf(inst + iat, sizeof(inst) - iat, "%s%u", iat ? "," : "", k));
+        const bool listed = ((fc.listMask >> r.idx) & 1ull) != 0, zeroedHere = ((fc.zeroedMask >> r.idx) & 1ull) != 0;
+        Log::get().note("native on foot first-person part (F144): %s instances %s state %d (%s) flags 0x%02X masks before EDVR's zero 0x%llX,0x%llX,0x%llX,0x%llX; %s%s", f142PartName(r.idx),
+                        inst, r.state, f142::classText(r.state), r.flags, static_cast<unsigned long long>(r.masks[0]), static_cast<unsigned long long>(r.masks[1]),
+                        static_cast<unsigned long long>(r.masks[2]), static_cast<unsigned long long>(r.masks[3]),
+                        listed ? (zeroedHere ? "in EDVR's list, zeroed (a mask bit was set)" : "in EDVR's list, mask already 0") : "not in EDVR's list: left as the game draws it",
+                        s.haveLast && isChanged ? " [changed]" : "");
+    }
+    s.last = fc;
+    s.haveLast = true;
+}
 void f142WindowClose(uint64_t now, const NativeOnFootOutfitStats& c) noexcept {
     F142State& s = g_f142;
     if (!s.windowMs) return;
@@ -24582,6 +24697,16 @@ void f142Tick(uint64_t now) noexcept {
     F142State& s = g_f142;
     static nofoot::f142::Census taken;   // 3 KB: not on the stack
     while (nativeOnFootOutfitCensusTake(&taken)) f142CensusLog(taken);
+    static nofoot::f144::FpCensus fpTaken;   // 3 KB: not on the stack
+    while (nativeOnFootFpCensusTake(&fpTaken)) f144FpCensusLog(fpTaken);   // F144: the first-person avatar's census, whatever the key says
+    {   // F144: Gear_Back's decision (promoted and unclipped only for an outer garment), said when it changes
+        static int lastGear = 0;
+        const int gear = nativeOnFootGearBack();
+        if (gear != lastGear) {
+            lastGear = gear;
+            if (gear) Log::get().note("native on foot full outfit (F144): %s", nofoot::f144::gearBackText(gear));
+        }
+    }
     static nofoot::f143::ClipSnap clipTaken;   // 3 KB: not on the stack
     while (nativeOnFootOutfitClipTake(&clipTaken)) f143ClipLog(clipTaken);   // F143: the clip measure's snapshots, whatever the key says
     const bool want = nativeOnFootActive() && g_fullOutfitKeyOn.load(std::memory_order_relaxed);
@@ -29564,6 +29689,17 @@ struct F140Seen {
     double seed[4] = {}, trim[4] = {}, total[4] = {};
 };
 F140Seen g_f140Seen[nofoot::f140::kClasses];
+// F144: the placement each role used in the window and the proof of what reached the draw: [class: 0 pistol, 1 rifle][role: hip, ADS]. The decision (f90Decide) counts the frames the
+// placement was applied; f85bDecide measures the drawn move (the patched rows inverted to the camera they draw with, against the unplaced draw) and f85bBound, called when the
+// patch is bound at the draw's issue, folds that measurement in. Render thread only.
+nofoot::f144::RoleAcc g_f144Acc[2][nofoot::f144::kRoles];
+struct F144Pending {
+    bool valid = false;
+    uint32_t frame = 0;
+    int cls = 0, role = 0;
+    nofoot::f144::Move move;
+};
+F144Pending g_f144Pending[kF85bParts][2];   // [slot][eye]
 int g_f90SlotHip = -1;    // the hip readout's slot (its F86d rays give the surface under the moved readout)
 int g_f92SlotRifle = -1;   // F92: the rifle's ADS readout's slot, the same for its line
 nofoot::f90::Latch g_f90Latch;
@@ -29626,17 +29762,22 @@ nofoot::f90::Out f90Decide(uint32_t frame, int e, const Rec& r, const Find* f, u
         const bool held = serial == g_heldItemSerial.load(std::memory_order_acquire);
         in.item = !read ? f90::kItemNotHeld : !pistol && !primary ? f90::kItemOther : !held ? f90::kItemNotHeld : pistol ? f90::kItemPistol : f90::kItemPrimary;
     }
-    // F140: the placement of the held weapon for each class of part, from the table by (item, scope fitted) or the class's built-in values, plus the live trims. The item is the
-    // coherent snapshot F139 uses (read, and its serial the held item's); the scope state is the journal's loadout. Which part is placed, and when, is decided below as before.
-    nofoot::f140::Placement place140[nofoot::f140::kClasses];
+    // F140/F144: the placement of the held weapon for each class of part and each role (hip, ADS), from the table by (item, scope fitted, role) or the class's built-in values, plus
+    // the live trims, which are added to the role drawn now (the ADS role from an ADS weight of 0.5) and to no other. The item is the coherent snapshot F139 uses (read, and its
+    // serial the held item's); the scope state is the journal's loadout. Which part is placed, and when, is decided below as before.
+    nofoot::f144::RolePlacement rp[nofoot::f140::kClasses][nofoot::f144::kRoles];
+    const double adsWNow = static_cast<double>(g_ikAdsW.load(std::memory_order_relaxed));
     if (placementPart) {
         namespace f140 = nofoot::f140;
+        namespace f144 = nofoot::f144;
         const uint32_t heldNow = g_heldItemSerial.load(std::memory_order_acquire);
         const bool itemOk = f140::itemCoherent(heldRead, heldSnapSerial, heldNow, heldName);
         const int scopeState = itemOk ? loadout::heldScope(heldName).state : loadout::kScopeUnknown;
         double trim[4];
         for (int i = 0; i < 4; ++i) trim[i] = static_cast<double>(g_f140TrimCm[i].load(std::memory_order_relaxed));
-        for (int c = 0; c < f140::kClasses; ++c) place140[c] = f140::place(heldRead, heldSnapSerial, heldNow, heldName, scopeState, c, trim);
+        const int drawn = f144::drawnRole(adsWNow);
+        for (int c = 0; c < f140::kClasses; ++c)
+            for (int r = 0; r < f144::kRoles; ++r) rp[c][r] = f144::place(heldRead, heldSnapSerial, heldNow, heldName, scopeState, c, r, r == drawn, trim);
     }
     // F93a: the class the game draws, from the class parts; this draw's own class part counts for itself. A weapon class's part appearing opens a swap.
     const uint64_t nowMs = GetTickCount64();
@@ -29668,10 +29809,15 @@ nofoot::f90::Out f90Decide(uint32_t frame, int e, const Rec& r, const Find* f, u
     // F140: the pistol parts (the hip readout and the pistol's ADS readout) take the held item's placement with the pistol class's values for a miss, the rifle's ADS readout
     // with the rifle class's; a table entry is the item's whichever part it draws (the rocket launcher's while it draws the pistol part)
     if (placementPart) {
-        in.keys = place140[nofoot::f140::kClassPistol].keys();
-        in.rifleKeys = place140[nofoot::f140::kClassRifle].keys();
+        namespace f140 = nofoot::f140;
+        namespace f144 = nofoot::f144;
+        in.roleKeys = true;
+        in.keys = rp[f140::kClassPistol][f144::kHip].keys();
+        in.adsKeys = rp[f140::kClassPistol][f144::kAds].keys();
+        in.rifleKeys = rp[f140::kClassRifle][f144::kAds].keys();
+        in.rifleHipKeys = rp[f140::kClassRifle][f144::kHip].keys();
     }
-    in.adsW = static_cast<double>(g_ikAdsW.load(std::memory_order_relaxed));
+    in.adsW = adsWNow;
     const auto frameFn = []() {   // the FP right attach (joint 51) through F_root, both within kIkFreshMs
         float m[nofoot::kIkFpSlots][16];
         uint64_t fpMs = 0;
@@ -29685,7 +29831,7 @@ nofoot::f90::Out f90Decide(uint32_t frame, int e, const Rec& r, const Find* f, u
     f90::applyMap(uf, o.map);
     if (o.b == f90::kBMoved || o.b == f90::kBMovedPrevious) {   // F93a: the swap's first placed frame
         uint32_t gap = 0;
-        if (g_f93Swap.onPlaced(f90::placementClassOfRole(o.role), frame, &gap)) f93SwapLog(frame, gap, true);
+        if (g_f93Swap.onPlaced(o.cls != f90::kDrawnNone ? o.cls : f90::placementClassOfRole(o.role), frame, &gap)) f93SwapLog(frame, gap, true);
     }
     // F91: the slot's role, named once per held item and on every change (a miss is loud); F92: and what was applied (scaled, placed) against merely matched
     {
@@ -29733,23 +29879,42 @@ nofoot::f90::Out f90Decide(uint32_t frame, int e, const Rec& r, const Find* f, u
     }
     // the placements' figures: the rifle's ADS readout's (F92) apart from the pistol's
     const bool rifle = o.role == f90::kRoleRifleAds;
-    F90Place& ps = rifle ? g_f92Rifle : g_f90Pistol;
-    if (placementPart && (o.b == f90::kBMoved || o.b == f90::kBMovedPrevious)) {   // F140: what this class's placement used, for the window's lines
-        const int cls = rifle ? nofoot::f140::kClassRifle : nofoot::f140::kClassPistol;
-        const nofoot::f140::Placement& pl = place140[cls];
-        F140Seen& sn = g_f140Seen[cls];
-        sn.have = true;
-        ++sn.placed;
-        if (pl.coherent && pl.scopeUnknown) ++sn.scopeUnknown;
-        if (!pl.coherent) ++sn.untrusted;
-        std::snprintf(sn.item, sizeof(sn.item), "%s", pl.coherent ? heldName : "none");
-        sn.scope = pl.scope;
-        sn.entryScope = pl.entryScope;
-        sn.table = pl.table;
-        for (int i = 0; i < 4; ++i) {
-            sn.seed[i] = pl.seed[i];
-            sn.trim[i] = pl.trim[i];
-            sn.total[i] = pl.total[i];
+    // F144: the shared hip readout placed while the rifle class is drawn counts apart (its own placement; the rifle ADS readout's lines and the F93a swap are not its)
+    static F90Place g_f144RifleHipStats;
+    const bool rifleHipPlaced = o.role == f90::kRoleHip && o.cls == f90::kDrawnPrimary;
+    F90Place& ps = rifleHipPlaced ? g_f144RifleHipStats : rifle ? g_f92Rifle : g_f90Pistol;
+    if (placementPart && (o.b == f90::kBMoved || o.b == f90::kBMovedPrevious) && o.cls != f90::kDrawnNone) {
+        namespace f144 = nofoot::f144;
+        const int ci = o.cls == f90::kDrawnPrimary ? nofoot::f140::kClassRifle : nofoot::f140::kClassPistol;
+        const int ri = o.role == f90::kRoleHip ? f144::kHip : f144::kAds;
+        const f144::RolePlacement& pl = rp[ci][ri];
+        {   // F144: this role's placement, for the proof line
+            f144::RoleAcc& acc = g_f144Acc[ci][ri];
+            acc.have = true;
+            ++acc.placed;
+            std::snprintf(acc.item, sizeof(acc.item), "%s", pl.coherent ? heldName : "none");
+            acc.scope = pl.scope;
+            for (int i = 0; i < 4; ++i) {
+                acc.seed[i] = pl.seed[i];
+                acc.trim[i] = pl.trim[i];
+                acc.total[i] = pl.total[i];
+            }
+        }
+        if (pl.drawnNow && !rifleHipPlaced) {   // F140: what this class's placement used (the role drawn now), for the window's lines
+            F140Seen& sn = g_f140Seen[ci];
+            sn.have = true;
+            ++sn.placed;
+            if (pl.coherent && pl.scopeUnknown) ++sn.scopeUnknown;
+            if (!pl.coherent) ++sn.untrusted;
+            std::snprintf(sn.item, sizeof(sn.item), "%s", pl.coherent ? heldName : "none");
+            sn.scope = pl.scope;
+            sn.entryScope = pl.entryScope;
+            sn.table = pl.table;
+            for (int i = 0; i < 4; ++i) {
+                sn.seed[i] = pl.seed[i];
+                sn.trim[i] = pl.trim[i];
+                sn.total[i] = pl.total[i];
+            }
         }
     }
     if (o.frameComputed) {
@@ -29812,6 +29977,29 @@ void f140Report(int cls, uint32_t windowSecs) {
 }
 // The 1 s lines: A per decided part with a role other than the hip's (F91: the role, its slot and name), or the idle form naming each decided part's slot,
 // name, mesh and scale when none matched a row; B while a pistol is held.
+// F144: the window's `weapon UI placement (F144)` line for each role that was placed: its seed, the trims, the total, and what reached the draw. The drawn move is the patched rows
+// inverted to the camera they draw the part's content centre with, against the same frame's unplaced draw (the getter's own frame), along the weapon's axes; it must equal the
+// total's move within 1 mm. A measurement counts only when the patch was bound at the draw's issue.
+void f144Report(uint32_t windowSecs) {
+    namespace f144 = nofoot::f144;
+    using ull = unsigned long long;
+    for (int ci = 0; ci < 2; ++ci)
+        for (int ri = 0; ri < f144::kRoles; ++ri) {
+            f144::RoleAcc& a = g_f144Acc[ci][ri];
+            if (a.have) {
+                const double n = a.bound ? static_cast<double>(a.bound) : 1.0;
+                Log::get().note("weapon UI placement (F144) %u s: item %s scope %s, %s class, %s role (%s), seed forward %+.1f left %+.1f up %+.1f toward eye %+.1f cm, trims %+.1f %+.1f %+.1f "
+                                "%+.1f cm, total forward %+.1f left %+.1f up %+.1f toward eye %+.1f cm; placed on %llu frames, measured on %llu, bound at the draw's issue on %llu; drawn move "
+                                "against the unplaced draw (mean over the bound frames) forward %+.2f left %+.2f up %+.2f cm along the weapon's axes, %.2f cm against the total's %.2f cm, "
+                                "worst difference %.2f mm: %s",
+                                windowSecs, a.item[0] ? a.item : "none", loadout::scopeName(a.scope), ci == nofoot::f140::kClassRifle ? "rifle" : "pistol", f144::roleName(ri),
+                                a.trim[0] != 0.0 || a.trim[1] != 0.0 || a.trim[2] != 0.0 || a.trim[3] != 0.0 ? "drawn now, trimmed" : "seed only", a.seed[0], a.seed[1], a.seed[2], a.seed[3],
+                                a.trim[0], a.trim[1], a.trim[2], a.trim[3], a.total[0], a.total[1], a.total[2], a.total[3], ull(a.placed), ull(a.measured), ull(a.bound),
+                                a.moveSum[0] / n, a.moveSum[1] / n, a.moveSum[2] / n, a.absSum / n, a.expSum / n, a.diffMaxMm, f144::verdictText(f144::verdictOf(a)));
+            }
+            a = f144::RoleAcc{};
+        }
+}
 void f90Report(bool fold, uint32_t windowSecs, bool onFootWindow) {
     namespace f90 = nofoot::f90;
     using ull = unsigned long long;
@@ -29948,6 +30136,7 @@ void f90Report(bool fold, uint32_t windowSecs, bool onFootWindow) {
     adsMoveShare.reset(rs.fullAdsMoved);
     rs = F90Place{};
     f140Report(nofoot::f140::kClassRifle, windowSecs);
+    f144Report(windowSecs);
     rifleMoved.clear();
     rifleAds.clear();
     pistolMoved.clear();
@@ -30079,6 +30268,32 @@ void f85bDecide(ID3D11DeviceContext* ctx, uint32_t frame, const Rec& r, ID3D11Bu
         pe.originCmSum += originCm;
         pe.originCmMax = std::max(pe.originCmMax, originCm);
     }
+    {   // F144: the proof that the placement reaches the draw. The patched rows (as the private b0 stores them) are inverted to the camera they draw with; the part's content centre
+        // through it, against the same centre through the getter's own frame (before F90's map), is the move the draw makes; it is held until the patch is bound at the issue.
+        namespace f144 = nofoot::f144;
+        F144Pending& pm = g_f144Pending[slot][e == 1 ? 1 : 0];
+        pm.valid = false;
+        if ((f90o.b == nofoot::f90::kBMoved || f90o.b == nofoot::f90::kBMovedPrevious) && f90o.cls != nofoot::f90::kDrawnNone) {
+            const int ci = f90o.cls == nofoot::f90::kDrawnPrimary ? 1 : 0, ri = f90o.role == nofoot::f90::kRoleHip ? f144::kHip : f144::kAds;
+            f144::RoleAcc& acc = g_f144Acc[ci][ri];
+            const nofoot::f85::CamK kd = nofoot::f85::solveK(nofoot::f85::rowsOfComposite(r4, r5, r7), s.W, s.ap);
+            if (kd.ok && f90o.haveWf) {
+                ++acc.measured;
+                double drawn[3], game[3], expected[3] = {};
+                nofoot::f85::mulVec3(kd.K3, f90o.cv, drawn);
+                for (int i = 0; i < 3; ++i) {
+                    drawn[i] += kd.k4[i];
+                    game[i] = f90o.C[i] - s.ow[i];
+                }
+                if (f90o.map.move) std::memcpy(expected, f90o.map.t, sizeof(expected));
+                pm.move = f144::moveOf(drawn, game, expected, f90o.wfUsed.b, f90o.wfUsed.l, f90o.wfUsed.u);
+                pm.valid = true;
+                pm.frame = frame;
+                pm.cls = ci;
+                pm.role = ri;
+            }
+        }
+    }
     ++pe.decided;
     if (s.rowsState == drawtag::kRowsNewest) ++pe.newest;
     f86hCount(frame, e, false);
@@ -30105,6 +30320,9 @@ void f85bDecide(ID3D11DeviceContext* ctx, uint32_t frame, const Rec& r, ID3D11Bu
 void f85bBound(int eye, int slot) {
     if (eye < 0 || eye > 1 || slot < 0 || slot >= static_cast<int>(kF85bParts)) return;
     ++g_f85w.pe[slot][eye].corrected;
+    F144Pending& pm = g_f144Pending[slot][eye];   // F144: the measured move reached the draw: the patch was bound at its issue
+    if (pm.valid && pm.frame == g_fix.frame) g_f144Acc[pm.cls][pm.role].fold(pm.move);
+    pm.valid = false;
 }
 
 // ---- F85c ----------------------------------------------------------------------------------------------------------------------------------

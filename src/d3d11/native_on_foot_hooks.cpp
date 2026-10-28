@@ -23,6 +23,7 @@
 #include "native_on_foot_f95c.h"   // F95c: the head's shadow-only class through the visibility call, the fade hook's action
 #include "native_on_foot_f142.h"   // F142: the full outfit A/B's promotion through the same call, and the outfit census
 #include "native_on_foot_f143.h"   // F143: the clip measure, the unclip A/B's parts
+#include "native_on_foot_f144.h"   // F144: Gear_Back only for an outer garment, the first-person census
 #include "native_on_foot_logwin.h"   // F125: the detail key's cached value (the 5 s probe lines here are the detail log's)
 
 #include <windows.h>
@@ -126,6 +127,14 @@ std::atomic<bool> g_f143Busy{false};
 std::atomic<uint64_t> g_f143ClipPart[avh::kPartCount];   // static storage: zero
 std::atomic<uint64_t> g_f143ClipWrites{0}, g_f143ClipFaults{0};
 avh::Ring<nofoot::f143::ClipSnap, 4> g_f143Ring;
+// F144: Gear_Back's decision (the last one made, for the frame thread's line) and the first-person census.
+std::atomic<int> g_f144Gear{0};
+std::atomic<bool> g_f144FpBusy{false};
+std::atomic<uint64_t> g_f144FpMs{0};
+std::atomic<uint32_t> g_f144FpFaults{0};
+uint64_t g_f144FpSig = 0;                             // g_f144FpBusy: the signature of the last first-person census queued
+bool g_f144FpHaveSig = false;
+avh::Ring<nofoot::f144::FpCensus, 4> g_f144FpRing;
 constexpr uint32_t kF143ClockReadCap = 300;           // 25 minutes of 5 s reads; after that only a change of the armed state reads
 // F15 (native on foot E1, TEMPORARY): the first-person body hide. The frame thread writes g_fpHideWant and the names (g_fpIdx); the hook thread writes the
 // readback and counts the first-person AMC calls. g_fpBodyMutex guards g_fpIdx and g_fpReadback.
@@ -576,7 +585,7 @@ namespace f142 = nofoot::f142;
 static_assert(f142::kPartCount == avh::kPartCount, "F142: the swap record and the census hold every part of the avatar's table");
 // The classes of every part for the call: f142::promoteClasses with the game's own volatile reads and compare-exchanges (F95c's swap, the other way). False on a fault; the
 // parts promoted before it are in s.
-__declspec(noinline) bool sehPromoteOutfit(uint8_t* amc, f142::OutfitSwap* s, uint32_t skeletonIdx) noexcept {
+__declspec(noinline) bool sehPromoteOutfit(uint8_t* amc, f142::OutfitSwap* s, uint32_t skeletonIdx, uint64_t skipMask) noexcept {
     __try {
         f142::promoteClasses(
             *s, skeletonIdx, &avh::isHeadPart,
@@ -584,11 +593,36 @@ __declspec(noinline) bool sehPromoteOutfit(uint8_t* amc, f142::OutfitSwap* s, ui
             [amc](uint32_t i, int32_t desired, int32_t expected) {
                 volatile LONG* p = reinterpret_cast<volatile LONG*>(amc + f95c::kOffPartClass + i * avh::kPartStride);
                 return InterlockedCompareExchange(p, desired, expected) == expected;
-            });
+            },
+            skipMask);
         return true;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return false;
     }
+}
+// F144: whether a part has any instance (the four instance pointers). 1 yes, 0 no, -1 a fault.
+__declspec(noinline) int sehHasInstance(const uint8_t* amc, uint32_t idx) noexcept {
+    __try {
+        for (uint32_t k = 0; k < avh::kPartVariants; ++k) {
+            uint64_t inst = 0;
+            std::memcpy(&inst, amc + avh::kOffAmcInstances + idx * avh::kPartStride + 8 * k, 8);
+            if (inst != 0) return 1;
+        }
+        return 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return -1;
+    }
+}
+// F144: EVASuit_Gear_Back is the coat only for an outer garment (no EVASuit_Arms instance, an EVASuit_Gear_Arms instance); the other suit's is its backpack. Read where the promotion
+// is, on the same thread, from the avatar's instances. The decision is kept for the frame thread's line. kGearUnknown on a fault (nothing is promoted).
+int gearBackNow(const uint8_t* amc) noexcept {
+    static const int suitArms = avh::partIndexByName("EVASuit_Arms"), gearArms = avh::partIndexByName("EVASuit_Gear_Arms");
+    if (suitArms < 0 || gearArms < 0) return nofoot::f144::kGearUnknown;
+    const int suit = sehHasInstance(amc, static_cast<uint32_t>(suitArms)), gear = sehHasInstance(amc, static_cast<uint32_t>(gearArms));
+    if (suit < 0 || gear < 0) return nofoot::f144::kGearUnknown;
+    const int d = nofoot::f144::gearBackDecision(suit != 0, gear != 0);
+    g_f144Gear.store(d, std::memory_order_relaxed);
+    return d;
 }
 // The game's classes put back (f142::restoreClasses): `lost` counts the classes the game changed during the call, which stand. False on a fault.
 __declspec(noinline) bool sehRestoreOutfit(uint8_t* amc, const f142::OutfitSwap* s, uint32_t* lost) noexcept {
@@ -815,6 +849,32 @@ __declspec(noinline) bool sehZeroFpMasks(uint8_t* amc, const int* idx, uint32_t*
         return false;
     }
 }
+// F144: the local first-person AMC's census, before EDVR's zero: about every 100 ms, the parts with an instance (instances, class, flags, items, view masks as the game left them),
+// the parts EDVR's list zeroes, and those of them with a mask bit set (what the zero changes). Queued when the parts, their classes, flags or items, or the zeroed set differ from the
+// last queued (never the masks: they come and go with the scene's views). SEH-guarded; three faults stop it.
+void fpCensusStep(uint8_t* amc, const int* idx) noexcept {
+    if (g_f144FpFaults.load(std::memory_order_acquire) >= avh::kMaxHideFaults) return;
+    const uint64_t now = GetTickCount64();
+    if (now - g_f144FpMs.load(std::memory_order_relaxed) < 100) return;
+    if (g_f144FpBusy.exchange(true, std::memory_order_acquire)) return;
+    g_f144FpMs.store(now, std::memory_order_relaxed);
+    static nofoot::f144::FpCensus fc;   // (3 KB; only this thread, under g_f144FpBusy)
+    fc = nofoot::f144::FpCensus{};
+    fc.c.amc = reinterpret_cast<uint64_t>(amc);
+    if (!sehReadOutfitCensus(amc, &fc.c)) {
+        g_f144FpFaults.fetch_add(1, std::memory_order_relaxed);
+    } else {
+        for (uint32_t i = 0; i < avh::kFpBodyPartCount; ++i)
+            if (idx[i] >= 0) fc.listMask |= 1ull << idx[i];
+        fc.zeroedMask = nofoot::f144::zeroedOf(fc.c, fc.listMask);
+        const uint64_t sig = nofoot::f144::fpSig(fc);
+        if ((!g_f144FpHaveSig || sig != g_f144FpSig) && g_f144FpRing.push(fc)) {
+            g_f144FpSig = sig;
+            g_f144FpHaveSig = true;
+        }
+    }
+    g_f144FpBusy.store(false, std::memory_order_release);
+}
 void fpBodyStep(void* amcPtr) noexcept {
     if (!amcPtr || !g_fpHideWant.load(std::memory_order_acquire) || g_hideDown.load(std::memory_order_acquire)) return;
     if (nativeOnFootCameraExternal()) return;   // F93d: the first-person avatar is the game's own business in its third-person camera
@@ -838,6 +898,7 @@ void fpBodyStep(void* amcPtr) noexcept {
     bool any = false;
     for (int i : idx) any = any || i >= 0;
     if (!any) return;   // no name resolved: nothing to zero (the frame thread logs why)
+    fpCensusStep(amc, idx);   // F144: the first-person avatar's parts and masks as the game left them, before this call's zero
     uint64_t masks[avh::kFpBodyPartCount][avh::kPartVariants] = {};
     uint32_t zeroed = 0;
     if (!sehZeroFpMasks(amc, idx, &zeroed, masks)) {
@@ -1084,7 +1145,10 @@ void bodyClipStep(void* amcPtr) noexcept {
     // F143 (TEMPORARY A/B, fix.native_on_foot_body_full_outfit on): the same unclip, same thread and gate (the unclip is wanted, the game's camera is first person), for every
     // part with a modifier that is neither a head part nor in F19's list: the coat's Gear_Back and the other gear parts. A part without a modifier is not written (0).
     if (unclip && g_f142Want.load(std::memory_order_relaxed) && !g_f143Down.load(std::memory_order_acquire)) {
-        const uint64_t extra = nofoot::f143::extraUnclipMask(clipListMask(idx), headPartMask());
+        // F144: Gear_Back is unclipped (like promoted) only for an outer garment; the other suit's is its backpack
+        static const int gearBack = avh::partIndexByName("EVASuit_Gear_Back");
+        const uint64_t holdBack = gearBack >= 0 && !nofoot::f144::gearBackPromoted(gearBackNow(amc)) ? 1ull << gearBack : 0ull;
+        const uint64_t extra = nofoot::f143::extraUnclipMask(clipListMask(idx), headPartMask() | holdBack);
         for (uint32_t i = 0; i < avh::kPartCount; ++i) {
             if (!((extra >> i) & 1ull)) continue;
             const int r = sehWriteClipPart(amc, i);
@@ -3239,8 +3303,10 @@ bool nativeOnFootOutfitBegin(void* amcPtr, nofoot::f142::OutfitSwap* s, bool all
     if (!sehReadAmcIdent(amc, &id) || !avh::isLocalAmc(id.id, id.pose, g_skelIface[0].load(std::memory_order_acquire), id.mode)) return false;
     g_f142Calls.fetch_add(1, std::memory_order_relaxed);
     s->amc = amc;
-    static const int skeleton = avh::partIndexByName("FirstPersonSkeleton");
-    if (!sehPromoteOutfit(amc, s, static_cast<uint32_t>(skeleton))) {
+    static const int skeleton = avh::partIndexByName("FirstPersonSkeleton"), gearBack = avh::partIndexByName("EVASuit_Gear_Back");
+    // F144: Gear_Back only for an outer garment; every other part keeps F142's rule
+    const uint64_t skip = gearBack >= 0 && !nofoot::f144::gearBackPromoted(gearBackNow(amc)) ? 1ull << gearBack : 0ull;
+    if (!sehPromoteOutfit(amc, s, static_cast<uint32_t>(skeleton), skip)) {
         uint32_t lost = 0;
         sehRestoreOutfit(amc, s, &lost);   // the parts promoted before the fault go back
         f142Fault();
@@ -3284,6 +3350,12 @@ void nativeOnFootArmedStateSet(uint8_t state) noexcept {
 }
 bool nativeOnFootOutfitClipTake(nofoot::f143::ClipSnap* out) noexcept {
     return out && g_f143Ring.take(out);
+}
+int nativeOnFootGearBack() noexcept {
+    return g_f144Gear.load(std::memory_order_relaxed);
+}
+bool nativeOnFootFpCensusTake(nofoot::f144::FpCensus* out) noexcept {
+    return out && g_f144FpRing.take(out);
 }
 bool nativeOnFootOutfitCensusTake(nofoot::f142::Census* out) noexcept {
     return out && g_f142CensusRing.take(out);
@@ -3382,6 +3454,13 @@ void reset() {
         g_f142CensusMs.store(0);
         static nofoot::f142::Census dropped;   // (3 KB: not on this stack)
         while (g_f142CensusRing.take(&dropped)) {}
+        g_f144Gear.store(0);         // F144
+        g_f144FpBusy.store(false);
+        g_f144FpMs.store(0);
+        g_f144FpHaveSig = false;
+        g_f144FpSig = 0;
+        static nofoot::f144::FpCensus droppedFp;
+        while (g_f144FpRing.take(&droppedFp)) {}
         g_f143SeenArmed.store(-1);   // F143: the next launch of the hooks reads at once
         g_f143NextMs.store(0);
         g_f143Busy.store(false);

@@ -263,8 +263,12 @@ inline bool isHeadPart(uint32_t idx) {
 }
 // F15 (native on foot, TEMPORARY E1): the first-person body's parts, hidden on the local first-person AMC (mode 2). Looked up by name in the part-name
 // table, never by index; -1 when the name is not in the table.
+// F144: and every other arm, hand and shoulder part of the table, appended (the skeleton stays slot 2): the coat outfit's arms are EVASuit_Gear_Arms with EVASuit_Gear_UpperArmL/R,
+// whose first-person sleeve floated in front of the third-person body ("four arms"); the suit shoulders and the flight suit's and the outer clothing's arms and hands likewise.
 inline constexpr const char* kFpBodyPartNames[] = {"EVASuit_Arms", "EVASuit_Hands", "FirstPersonSkeleton",
-                                                "EVASuit_Gear_LowerArms", "EVASuit_Gear_LowerArmL", "EVASuit_Gear_LowerArmR"};
+                                                "EVASuit_Gear_LowerArms", "EVASuit_Gear_LowerArmL", "EVASuit_Gear_LowerArmR",
+                                                "EVASuit_Gear_Arms", "EVASuit_Gear_UpperArms", "EVASuit_Gear_UpperArmL", "EVASuit_Gear_UpperArmR", "EVASuit_Gear_Shoulders",
+                                                "Shoulder_Left", "Shoulder_Right", "FlightSuit_Arms", "FlightSuit_Hands", "OuterClothing_Arms"};
 constexpr uint32_t kFpBodyPartCount = sizeof(kFpBodyPartNames) / sizeof(kFpBodyPartNames[0]);
 constexpr uint32_t kFpSkeletonPartSlot = 2;
 inline int partIndexByName(const char* name) {

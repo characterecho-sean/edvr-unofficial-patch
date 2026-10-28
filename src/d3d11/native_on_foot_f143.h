@@ -1,15 +1,12 @@
 // F143 (native on-foot VR): the pure parts of two changes. Header only, no game or D3D11 state, so native_frame_test runs the very functions the frame thread, the avatar
 // hooks and the ADS sight lock use. Journal: the arc doc, 2026-10-27, "the F142 flight" and F143.
 //
-// 1. The ADS eye on the game's own sight line. F141's hook reads, on the game thread, the eye matrix E (position in row 3) and the sight point S the game's ADS bend aims
-//    the shots through; the F142 flight showed the bend takes effect in VR (the shots go along the line E -> S) and that this line, taken at EDVR's eye depth, matches the
-//    pilot's hand-trimmed totals within 0.32 cm on nine weapons. So the sight lock's shift (F139's, from a table and two live trims) is taken from that line:
-//      - each usable sample paired with the FP snapshot of its own render frame gives E and S relative to that frame's P14w, in that frame's FP root axes (right, up, forward,
-//        each made unit); a filter per activation (an exponential, tau 0.15 s, reset when the item, its scope or F141's activation changes) smooths the pair;
-//      - the filtered pair is published with its time, the item and the scope;
-//      - the sight lock, when the pair is for the held item and scope and under 0.25 s old, rebuilds E and S in the world from this frame's P14w and root, takes Q, the
-//        point on the line E -> S at the lock's eye depth k along the root's forward from the origin, and shifts the eye from (origin + k f) to Q, less the part along f; the
-//        two live trims (up along u, right along r) are added, under F139's 8 cm bound. A line it cannot use falls back to F139's table, and the reason is counted.
+// 1. The ADS eye on the game's own sight line. F141's hook reads, on the game thread, the eye matrix E (position in row 3) and the sight point S the game's ADS bend aims the
+//    shots through; the F142 flight showed the bend takes effect in VR (the shots go along the line E -> S) and that this line, taken at EDVR's eye depth, matches the pilot's
+//    hand-trimmed totals within 0.32 cm on nine weapons. So the sight lock's shift (F139's, from a table and two live trims) is taken from that line, relative to P14w in the
+//    FP root's axes (F144 keeps a settled line per (item, scope): native_on_foot_f144.h). lineShift takes Q, the point on the line at the lock's eye depth k along the root's
+//    forward from the origin, and shifts the eye from (origin + k f) to Q, less the part along f; the two live trims (up along u, right along r) are added, under F139's 8 cm
+//    bound. A line it cannot use falls back to F139's table, and the reason is counted.
 //
 // 2. The coat's clip modifiers. The fade hook's step reads, for every part of the local third-person avatar with an instance, the part's vertex clip modifier ("pVertexClipAmount",
 //    part entry + 0x610: amount +8, enable +0xC, dirty +0xD) and view masks, every 5 s and when EDVR's armed state changes (the measure). With fix.native_on_foot_body_full_outfit
@@ -28,8 +25,6 @@ namespace nofoot {
 namespace f143 {
 
 // ---- 1. the game's sight line ---------------------------------------------------------------------------------------------------------------------------------------
-constexpr double kTauS = 0.15;           // the pair's filter: an exponential, time constant in seconds
-constexpr uint64_t kStaleMs = 250;       // a published pair older than this is not used
 constexpr double kMinAlongM = 0.01;      // |dot(S - E, f)| under 1 cm: the line has no depth to take Q on
 
 // The vectors the filter and the choice work in: root axes are (right, up, forward) in metres from P14w.
@@ -61,88 +56,11 @@ inline bool toRoot(const float froot[16], const double p14w[3], const float pos[
     return detail::finite3(out);
 }
 
-// What a pair belongs to: the filter restarts when any of these changes.
-struct LineKey {
-    uint32_t held = 0;          // the held item's serial (g_heldItemSerial)
-    bool coherent = false;      // the item snapshot was usable
-    int scope = 0;              // the held weapon's scope state (loadout::Scope)
-    uint32_t activation = 0;    // F141's activation count (the act or its sight handle changed)
-    bool operator==(const LineKey& o) const noexcept { return held == o.held && coherent == o.coherent && scope == o.scope && activation == o.activation; }
-    bool operator!=(const LineKey& o) const noexcept { return !(*this == o); }
-};
-// The filter. note() collects a tick's samples (the mean of a tick is one step: samples drained together carry one time); flush() applies that mean at the tick's time.
-struct LineFilter {
-    bool have = false;
-    LineKey key;
-    uint64_t ms = 0;
-    double e[3] = {}, s[3] = {};
-    uint32_t samples = 0;                  // samples folded in since the last reset
-    double pe[3] = {}, ps[3] = {};
-    uint32_t pn = 0;                       // pending samples of the tick
-    void reset() noexcept { *this = LineFilter{}; }
-    bool started = false;                  // a key was noted (the filter's own, set by the first note after a reset)
-    void note(const LineKey& k, const double eRoot[3], const double sRoot[3]) noexcept {
-        if (!started || k != key) {        // another item, scope or activation: the filter starts again from this sample
-            reset();
-            key = k;
-            started = true;
-        }
-        for (int i = 0; i < 3; ++i) {
-            pe[i] += eRoot[i];
-            ps[i] += sRoot[i];
-        }
-        ++pn;
-    }
-    // Apply the tick's mean at nowMs. True when the state changed (the caller publishes).
-    bool flush(uint64_t nowMs, double tauS = kTauS) noexcept {
-        if (!pn) return false;
-        double me[3], ms3[3];
-        for (int i = 0; i < 3; ++i) {
-            me[i] = pe[i] / pn;
-            ms3[i] = ps[i] / pn;
-        }
-        if (!have) {
-            for (int i = 0; i < 3; ++i) {
-                e[i] = me[i];
-                s[i] = ms3[i];
-            }
-            have = true;
-        } else {
-            const double dt = nowMs > ms ? static_cast<double>(nowMs - ms) / 1000.0 : 0.0;
-            const double a = tauS > 0.0 ? 1.0 - std::exp(-dt / tauS) : 1.0;
-            for (int i = 0; i < 3; ++i) {
-                e[i] += a * (me[i] - e[i]);
-                s[i] += a * (ms3[i] - s[i]);
-            }
-        }
-        ms = nowMs;
-        samples += pn;
-        pn = 0;
-        for (int i = 0; i < 3; ++i) pe[i] = ps[i] = 0.0;
-        return true;
-    }
-};
-// The published pair.
-struct Pub {
-    bool valid = false;
-    uint64_t ms = 0;
-    LineKey key;
-    double e[3] = {}, s[3] = {};
-};
-inline void publish(Pub& p, const LineFilter& f) noexcept {
-    p.valid = f.have;
-    p.ms = f.ms;
-    p.key = f.key;
-    for (int i = 0; i < 3; ++i) {
-        p.e[i] = f.e[i];
-        p.s[i] = f.s[i];
-    }
-}
-
-// Why a frame's shift came from the table and not the game's line (kGame: it came from the line). Order of the tests is the order here.
-enum Why : uint8_t { kGame = 0, kNoPair, kStale, kOtherItem, kNoItem, kDegenerate, kBound, kKeyOff, kWhyCount };
+// Why a frame's shift came from the table and not the game's line (kGame: it came from the line). F144 replaced F143's live pair (no pair, stale) with a settled line kept per
+// (item, scope) for the session (native_on_foot_f144.h): "no settled line yet" is the reason a weapon's first presses have no line.
+enum Why : uint8_t { kGame = 0, kNoLine, kOtherItem, kNoItem, kDegenerate, kBound, kKeyOff, kWhyCount };
 inline const char* whyText(unsigned w) noexcept {
-    static const char* const kText[kWhyCount] = {"the game's line", "no pair published", "pair stale (over 250 ms)", "another item or scope (or not a held weapon)", "item not read",
+    static const char* const kText[kWhyCount] = {"the game's line", "no settled line yet", "another item or scope (or not a held weapon)", "item not read",
                                                  "degenerate line (under 1 cm of depth)", "past the 8 cm bound", "key off"};
     return w < kWhyCount ? kText[w] : "?";
 }
@@ -153,32 +71,25 @@ struct Choice {
     double gameShift[3] = {};    // the game's alone (world, perpendicular to f)
     double gameUpCm = 0.0, gameRightCm = 0.0;   // the game's alone along the root's up and right
     double shiftM = 0.0;         // |shift|
-    double ageMs = 0.0;          // the pair's age
     double lineDeg = 0.0;        // the angle of S - E from the root's forward
     double q[3] = {};            // Q in the world
 };
-// The choice for one frame of the lock. keyOn: fix.native_on_foot_ads_game_sight. itemOk: the coherent item snapshot (F139's); weapon: a $wpn_ item; heldSerial and scopeState are
-// the held item's now. p14w, up, right and fwd are this frame's P14 and FP root (axes of any length: unitised); origin is the lock's origin before any shift (P14w, or F79's
-// measured origin) and k the lock's eye depth along fwd; trimUpCm and trimRightCm are the live keys' values (clamped here, 0 for a non-weapon).
-inline Choice choose(bool keyOn, bool itemOk, bool weapon, uint32_t heldSerial, int scopeState, const Pub& pub, uint64_t nowMs, const double p14w[3], const double up[3],
-                     const double right[3], const double fwd[3], const double origin[3], double k, double trimUpCm, double trimRightCm) noexcept {
+// The shift of one line (E and S in the root's axes, metres from P14w) for one frame of the lock. p14w, up, right and fwd are this frame's P14 and FP root (axes of any
+// length: unitised); origin is the lock's origin before any shift (P14w, or F79's measured origin) and k the lock's eye depth along fwd; trimUpCm and trimRightCm are the live
+// keys' values (clamped here, 0 for a non-weapon). kDegenerate: an axis with no length, a value that is not a number, or a line under 1 cm deep; kBound: past F139's 8 cm.
+inline Choice lineShift(const double eRoot[3], const double sRoot[3], const double p14w[3], const double up[3], const double right[3], const double fwd[3], const double origin[3],
+                        double k, double trimUpCm, double trimRightCm) noexcept {
     Choice c;
-    if (!keyOn) { c.why = kKeyOff; return c; }
-    if (!itemOk) { c.why = kNoItem; return c; }
-    if (!pub.valid) { c.why = kNoPair; return c; }
-    if (!weapon || !pub.key.coherent || pub.key.held != heldSerial || pub.key.scope != scopeState) { c.why = kOtherItem; return c; }
-    c.ageMs = nowMs > pub.ms ? static_cast<double>(nowMs - pub.ms) : 0.0;
-    if (c.ageMs > static_cast<double>(kStaleMs)) { c.why = kStale; return c; }
     double r[3], u[3], f[3];
     if (!detail::unit3(right, r) || !detail::unit3(up, u) || !detail::unit3(fwd, f) || !std::isfinite(k) || !detail::finite3(p14w) || !detail::finite3(origin) ||
-        !detail::finite3(pub.e) || !detail::finite3(pub.s)) {
+        !detail::finite3(eRoot) || !detail::finite3(sRoot)) {
         c.why = kDegenerate;
         return c;
     }
     double ew[3], sw[3], d[3];
     for (int i = 0; i < 3; ++i) {
-        ew[i] = p14w[i] + pub.e[0] * r[i] + pub.e[1] * u[i] + pub.e[2] * f[i];
-        sw[i] = p14w[i] + pub.s[0] * r[i] + pub.s[1] * u[i] + pub.s[2] * f[i];
+        ew[i] = p14w[i] + eRoot[0] * r[i] + eRoot[1] * u[i] + eRoot[2] * f[i];
+        sw[i] = p14w[i] + sRoot[0] * r[i] + sRoot[1] * u[i] + sRoot[2] * f[i];
         d[i] = sw[i] - ew[i];
     }
     const double along = detail::dot3(d, f);

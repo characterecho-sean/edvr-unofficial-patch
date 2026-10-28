@@ -112,8 +112,9 @@ struct OutfitSwap {
 // cas(idx, desired, expected) -> true when the class was `expected` and is `desired` now. promoteClasses writes the promotion of every part and records what it changed;
 // restoreClasses puts each recorded part's game class back if it is still the class written, and returns how many the game changed during the call (they stand).
 template <class ReadFn, class CasFn>
-inline void promoteClasses(OutfitSwap& s, uint32_t skeletonIdx, bool (*isHead)(uint32_t), ReadFn&& read, CasFn&& cas) noexcept {
+inline void promoteClasses(OutfitSwap& s, uint32_t skeletonIdx, bool (*isHead)(uint32_t), ReadFn&& read, CasFn&& cas, uint64_t skipMask = 0) noexcept {
     for (uint32_t i = 0; i < kPartCount; ++i) {
+        if ((skipMask >> i) & 1ull) continue;   // F144: a part never promoted (Gear_Back when it is a backpack)
         const int32_t was = read(i);
         const int32_t set = promotedClass(was, isHead && isHead(i), i == skeletonIdx);
         if (set == was) continue;

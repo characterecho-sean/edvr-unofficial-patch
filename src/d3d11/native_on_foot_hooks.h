@@ -202,6 +202,9 @@ struct NativeOnFootOutfitStats {   // cumulative (the frame thread logs the chan
     uint64_t clip[avh::kPartCount] = {};
     uint64_t clipWrites = 0, clipFaults = 0;
 };
+// F144: the last Gear_Back decision (nofoot::f144::GearBack: 0 not decided, 1 outer garment: promoted and unclipped, 2 suit arms present, 3 no outer-garment arms: kept shadows
+// only), made on the visibility call's thread while fix.native_on_foot_body_full_outfit is on.
+int nativeOnFootGearBack() noexcept;
 NativeOnFootOutfitStats nativeOnFootOutfitStats();
 // The outfit census (F142), taken on the fade hook's thread for the local third-person AMC (about every 100 ms, SEH-guarded) and queued when any part's instances, class, flags
 // or items differ from the last queued one (and once at the first read). The frame thread takes them one at a time; false when none is waiting.
@@ -216,6 +219,14 @@ namespace f143 {
 struct ClipSnap;
 }  // namespace f143
 }  // namespace nofoot
+namespace nofoot {
+namespace f144 {
+struct FpCensus;
+}  // namespace f144
+}  // namespace nofoot
+// F144: the local first-person AMC's census (the parts with an instance, their view masks before EDVR's zeroing, the parts EDVR's list zeroes and those it changed), taken in the
+// first-person body's step (about every 100 ms, SEH-guarded) and queued when the parts, their classes, flags or items, or the zeroed set change. False when none is waiting.
+bool nativeOnFootFpCensusTake(nofoot::f144::FpCensus* out) noexcept;
 void nativeOnFootArmedStateSet(uint8_t state) noexcept;
 bool nativeOnFootOutfitClipTake(nofoot::f143::ClipSnap* out) noexcept;
 

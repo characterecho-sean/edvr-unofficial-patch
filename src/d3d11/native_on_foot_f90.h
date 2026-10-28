@@ -259,10 +259,14 @@ struct LatchT {
     bool have = false;
     uint32_t frame = 0, serial = 0;
     double T[3] = {}, C[3] = {};   // absolute world
+    WeaponFrame wf;                // F144: the weapon frame T was taken in (the pistol's ADS role takes its own target from the hip's C in it)
 };
-// The pistol's latch (its own fields, as F90 had them) and the rifle's (F92).
+// The pistol's latch (its own fields, as F90 had them) and the rifle's (F92). F144: the shared hip readout while the rifle class is drawn (rifleHip) and the pistol's ADS
+// role when its keys differ from the hip's (ads, keyed by the hip latch's frame).
 struct Latch : LatchT {
     LatchT rifle;
+    LatchT rifleHip;
+    LatchT ads;
 };
 // ---- F93a: the class the game is drawing --------------------------------------------------------------------------------------------------------------------------
 // Each class draws a readout part only it has, every frame its item is out (the rifle's ADS readout at the hip too, the pistol's ADS readout at the hip too, the
@@ -345,10 +349,20 @@ struct In {
     double ow[3] = {};        // the eye's rows' origin (absolute)
     bool eyeOk = false;
     double eye[3] = {};       // the eye's origin from its scene rows (absolute)
-    Keys keys;                // the pistol readout's
+    Keys keys;                // the pistol readout's (F144: the pistol class's hip role)
     Keys rifleKeys;           // F92: the rifle's ADS readout's
+    // F144: one placement per role. With roleKeys false (every build before F144, and the checks that predate it) the decision is as it was: the pistol's ADS readout takes
+    // the hip's target, and the shared hip readout is not placed while the rifle class is drawn. With roleKeys true the pistol's ADS role takes adsKeys (the target taken with
+    // them from the hip part's content centre; adsKeys equal to keys is the hip's target itself) and the hip readout while the rifle class is drawn takes rifleHipKeys (all
+    // four 0: placed where the game draws it, no move).
+    bool roleKeys = false;
+    Keys adsKeys;             // F144: the pistol's ADS role
+    Keys rifleHipKeys;        // F144: the hip role while the rifle class is drawn
     double adsW = 0.0;        // the ADS weight at the draw, for the line only: the decision never reads it
 };
+inline bool sameKeys(const Keys& a, const Keys& b) noexcept {
+    return a.forwardCm == b.forwardCm && a.leftCm == b.leftCm && a.upCm == b.upCm && a.towardCm == b.towardCm;
+}
 struct Out {
     int role = kRoleNone;
     int a = kANotTable, b = kBNone;
@@ -360,6 +374,12 @@ struct Out {
     WeaponFrame wf;
     bool haveT = false;
     double T[3] = {}, shiftM = 0.0;    // B's target and, when this call latched it, |T - C|
+    // F144: the class whose placement was applied or refused for this part (kDrawnPrimary, kDrawnPistol, else none), the content centre in the record's vertex space (the
+    // proof inverts the patched rows with it), and the weapon frame the target was taken in (the move is measured along its axes).
+    int cls = kDrawnNone;
+    double cv[3] = {};
+    bool haveWf = false;
+    WeaponFrame wfUsed;
 };
 // One weapon UI draw: A's scale and B's move for the part the record's mesh and scale name (F91: partOf; the name id is not read), given the eye's getter
 // frame uf (P - o_world = U3 v + u4). frameFn() returns the weapon frame; it is called only when this draw latches T. The caller applies o.map to uf
@@ -388,6 +408,7 @@ inline Out decide(const In& in, const f85::UFrame& uf, Latch& latch, Rot rotate,
         o.C[i] = Crel[i] + in.ow[i];
     }
     o.haveC = true;
+    for (int i = 0; i < 3; ++i) o.cv[i] = c[i];
     if (p->role != kRoleHip) {
         o.a = kAScaled;
         o.k = sizeFactor(p->role);
@@ -399,10 +420,13 @@ inline Out decide(const In& in, const f85::UFrame& uf, Latch& latch, Rot rotate,
     }
     // A part's target in the weapon's frame, latched once a render frame: the first decision of the frame (either eye) reads the weapon frame and latches T, the
     // other eye reuses it. All keys 0: no move at all, so the rows are F85b's (the rifle's ADS readout: F91's) bit for bit in both eyes.
-    const auto place = [&](LatchT& L, const Keys& keys) {
+    const auto place = [&](LatchT& L, const Keys& keys, int cls) {
+        o.cls = cls;
         if (L.have && L.serial == in.itemSerial && L.frame == in.frame) {
             std::memcpy(o.T, L.T, sizeof(o.T));
             o.haveT = true;
+            o.wfUsed = L.wf;
+            o.haveWf = L.wf.src != kFrameNone;
         } else {
             o.wf = frameFn();
             o.frameComputed = true;
@@ -412,6 +436,9 @@ inline Out decide(const In& in, const f85::UFrame& uf, Latch& latch, Rot rotate,
                 L.serial = in.itemSerial;
                 std::memcpy(L.T, o.T, sizeof(L.T));
                 std::memcpy(L.C, o.C, sizeof(L.C));
+                L.wf = o.wf;
+                o.wfUsed = o.wf;
+                o.haveWf = o.wf.src != kFrameNone;
                 o.latched = true;
                 o.haveT = true;
                 const double d[3] = {o.T[0] - o.C[0], o.T[1] - o.C[1], o.T[2] - o.C[2]};
@@ -433,23 +460,50 @@ inline Out decide(const In& in, const f85::UFrame& uf, Latch& latch, Rot rotate,
         // no placement for this role
     } else if (in.drawnClass == kDrawnMixed) {
         o.b = kBRefClass;   // two classes' parts in the newest frame: the game is drawing both items (a switch); the shared hip readout could be either's
+    } else if (in.roleKeys && p->role == kRoleHip && in.drawnClass == kDrawnPrimary) {
+        // F144: the shared hip readout while the rifle class is drawn (it was never placed: "matched only"): its own placement; all four keys 0 draw it where the game does
+        if (in.item == kItemPistol && in.drawnClassAgeS > kClassGraceS) o.b = kBRefItem;
+        else place(latch.rifleHip, in.rifleHipKeys, kDrawnPrimary);
     } else if (in.drawnClass != wantClass) {
         // the game draws another class (or none): no placement for this part
     } else if (in.item == otherItem && in.drawnClassAgeS > kClassGraceS) {
         o.b = kBRefItem;    // Status.json names the other weapon class long after any switch: a weapon this table does not know shares the part
     } else if (riflePart) {
-        place(latch.rifle, in.rifleKeys);
+        place(latch.rifle, in.rifleKeys, kDrawnPrimary);
     } else {
         const bool sameItem = latch.have && latch.serial == in.itemSerial;
         if (p->role == kRoleHip) {
-            place(latch, in.keys);
+            place(latch, in.keys, kDrawnPistol);
         } else {   // the pistol's ADS readout: this frame's T, else the previous frame's (counted), else none
+            o.cls = kDrawnPistol;
             if (sameItem && (latch.frame == in.frame || latch.frame + 1u == in.frame)) {
-                std::memcpy(o.T, latch.T, sizeof(o.T));
-                o.haveT = true;
-                o.b = latch.frame == in.frame ? kBMoved : kBMovedPrevious;
-                o.map.move = true;
-                for (int i = 0; i < 3; ++i) o.map.t[i] = o.T[i] - o.C[i];
+                bool ok = true;
+                o.wfUsed = latch.wf;
+                o.haveWf = latch.wf.src != kFrameNone;
+                if (in.roleKeys && !sameKeys(in.adsKeys, in.keys)) {
+                    // F144: its own keys, taken from the hip part's content centre in the hip's weapon frame, once for the hip latch's frame (both eyes share it)
+                    if (latch.ads.have && latch.ads.serial == in.itemSerial && latch.ads.frame == latch.frame) {
+                        std::memcpy(o.T, latch.ads.T, sizeof(o.T));
+                    } else if (target(latch.C, latch.wf, in.adsKeys, in.eyeOk ? in.eye : nullptr, o.T)) {
+                        latch.ads.have = true;
+                        latch.ads.frame = latch.frame;
+                        latch.ads.serial = in.itemSerial;
+                        std::memcpy(latch.ads.T, o.T, sizeof(o.T));
+                        std::memcpy(latch.ads.C, latch.C, sizeof(latch.ads.C));
+                    } else {
+                        ok = false;
+                        const bool needFrame = in.adsKeys.forwardCm != 0.0 || in.adsKeys.leftCm != 0.0 || in.adsKeys.upCm != 0.0;
+                        o.b = needFrame && latch.wf.src == kFrameNone ? kBRefFrame : kBRefEye;
+                    }
+                } else {
+                    std::memcpy(o.T, latch.T, sizeof(o.T));
+                }
+                if (ok) {
+                    o.haveT = true;
+                    o.b = latch.frame == in.frame ? kBMoved : kBMovedPrevious;
+                    o.map.move = true;
+                    for (int i = 0; i < 3; ++i) o.map.t[i] = o.T[i] - o.C[i];
+                }
             } else {
                 o.b = kBRefNoTarget;
             }
@@ -513,7 +567,7 @@ inline void roleText(const Out& o, char* buf, size_t cap) noexcept {
         return;
     }
     const bool scaled = o.a == kAScaled, placed = o.b == kBMoved || o.b == kBMovedPrevious, refused = o.b >= kBRefItem && o.b < kBCount;
-    const char* kind = o.role == kRoleRifleAds ? "rifle placement" : "pistol placement";
+    const char* kind = o.role == kRoleRifleAds || o.cls == kDrawnPrimary ? "rifle placement" : "pistol placement";   // F144: the hip readout placed while the rifle class is drawn is the rifle's
     const double k = o.role == kRoleHip ? 1.0 : sizeFactor(o.role);
     char head[96];
     if (scaled || placed)

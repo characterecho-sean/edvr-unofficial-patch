@@ -1154,7 +1154,10 @@ void testFpBodyHideGlue(const CtlPages& p) {
     const auto fpMasksMatch = [&](bool hybrid) {
         for (uint32_t part = 0; part < avh::kPartCount; ++part)
             for (uint32_t variant = 0; variant < avh::kPartVariants; ++variant) {
-                const bool hidden = part == 49 || (!hybrid && (part == 28 || part == 29 || part == 38 || part == 39 || part == 40));
+                // F144: the list also covers every other arm, hand and shoulder part (EVASuit_Gear_Arms 52, UpperArms 35, UpperArmL 36, UpperArmR 37, Shoulders 34, Shoulder_Left 50, Shoulder_Right 51,
+                // FlightSuit_Arms 21, FlightSuit_Hands 22, OuterClothing_Arms 23); the hybrid body still hides the skeleton (49) only
+                const bool extra = part == 52 || part == 35 || part == 36 || part == 37 || part == 34 || part == 50 || part == 51 || part == 21 || part == 22 || part == 23;
+                const bool hidden = part == 49 || (!hybrid && (part == 28 || part == 29 || part == 38 || part == 39 || part == 40 || extra));
                 const uint64_t expected = hidden ? 0 : 0x8000000000000001ull + part;
                 if (fp.mask(part, variant) != expected) return false;
             }
@@ -1162,7 +1165,7 @@ void testFpBodyHideGlue(const CtlPages& p) {
     };
     check(fpMasksMatch(false), "FULL 3P: FP arms, hands, skeleton and combined/L/R bracers hidden in all four views; every unrelated mask unchanged");
     const FpBodyReadback rb = nativeOnFootFpBodyReadback();
-    bool bracerReadback = rb.parts == 6 && rb.amc == reinterpret_cast<uint64_t>(fp.b);
+    bool bracerReadback = rb.parts == 16 && rb.amc == reinterpret_cast<uint64_t>(fp.b);
     for (uint32_t slot = 3; slot < 6; ++slot)
         for (uint32_t variant = 0; variant < 4; ++variant)
             bracerReadback = bracerReadback && rb.name[slot] != nullptr && rb.masks[slot][variant] == 0;

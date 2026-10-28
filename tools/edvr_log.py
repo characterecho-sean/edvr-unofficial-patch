@@ -12736,13 +12736,16 @@ def _hj_f141_readout_anchor(rows, ctx):
 
 
 def _hj_f143_sight_line(rows, ctx):
-    """F143 (TEMPORARY key fix.native_on_foot_ads_game_sight): the ADS eye's shift from the game's own sight line. F141's hook reads, on the game thread, the eye matrix E and the
-    sight point S the game's ADS bend aims the shots through; the line E -> S, at the lock's eye depth, is the shift (the origin, the depth and everything downstream are
-    unchanged), with the two live trims added under F139's 8 cm bound; F139's table is the fallback and the reason is counted (no pair published, stale, another item or scope,
-    item not read, a line under 1 cm deep, past the bound, key off). The ADS windows' lines give, per (item, scope), the frames from each source, the game's shift (up, right),
-    the table value and the trims beside it, the pair's age, the line's angle off the root's forward and the shift's step between frames (jitter). OK when the game's line was the
-    source on at least 90% of every group's frames; PARTIAL when a group fell back on more than a tenth of its frames (the leading reasons are said); NEVER APPLIED when there
-    are ADS frames and not one came from the game's line (unless the key is off on every frame: IDLE); IDLE when no ADS second."""
+    """F143/F144 (TEMPORARY key fix.native_on_foot_ads_game_sight): the ADS eye's shift from the game's own sight line. F141's hook reads, on the game thread, the eye matrix E and
+    the sight point S the game's ADS bend aims the shots through; F144 keeps that line settled per (item, scope) for the session (fed only by samples after the game's raise
+    animation has stopped moving E: the ADS fraction 1.0 for 0.6 s of the press, E and S moved under 2 mm), and the sight lock takes the shift from it at its eye depth from the
+    press's first frame, the two live trims added under F139's 8 cm bound. Until a line exists (a weapon's first press), or when it cannot be used, F139's table stands in and the
+    reason is counted (no settled line yet, another item or scope, item not read, a line under 1 cm deep, past the bound, key off); a line that first becomes usable mid-press is
+    blended in over 0.25 s. The ADS windows' lines give, per (item, scope), the frames from each source, the settled line (E and S from P14 in the root's axes) with its settled
+    sample count and the frames it was used this session, the game's shift (up, right), the table value and the trims beside it, the line's angle off the root's forward and the
+    shift's step between frames (jitter). OK when the settled line was the source on at least 90% of every group's frames; PARTIAL when a group fell back on more than a tenth of
+    its frames (the leading reasons are said); NEVER APPLIED when there are ADS frames and not one came from a line (unless the key is off on every frame: IDLE); IDLE when no
+    ADS second."""
     sec, key = rows.get("sec", []), rows.get("key", [])
     if not sec and not key:
         return None
@@ -12750,21 +12753,22 @@ def _hj_f143_sight_line(rows, ctx):
     keytext = "; the key is %s" % state if state else ""
     if not sec:
         return ("IDLE", "no ADS second with a sight line" + keytext)
-    names = (("nopair", "no pair published"), ("stale", "pair stale"), ("other", "another item or scope"), ("noitem", "item not read"), ("degen", "degenerate line"),
-             ("bound", "past the bound"), ("keyoff", "key off"))
+    names = (("noline", "no settled line yet"), ("other", "another item or scope"), ("noitem", "item not read"), ("degen", "degenerate line"), ("bound", "past the bound"),
+             ("keyoff", "key off"))
     groups = collections.OrderedDict()
     for r in sec:
-        g = groups.setdefault((r["item"], r["scope"]), collections.defaultdict(float, agemax=0.0, stepmax=0.0))
+        g = groups.setdefault((r["item"], r["scope"]), collections.defaultdict(float, stepmax=0.0))
         g["s"] += _hwl(r)
-        for k in ("game", "table", "steps") + tuple(n for n, _ in names):
+        for k in ("game", "table", "steps", "blend") + tuple(n for n, _ in names):
             g[k] += int(r[k])
         gm, st = int(r["game"]), int(r["steps"])
-        for k in ("gup", "gright", "agemean", "deg"):
+        for k in ("gup", "gright", "deg"):
             g[k + "_w"] += float(r[k]) * gm
         g["stepmean_w"] += float(r["stepmean"]) * st
-        g["agemax"] = max(g["agemax"], float(r["agemax"]))
         g["stepmax"] = max(g["stepmax"], float(r["stepmax"]))
         g["last"] = r
+        if gm:
+            g["lastline"] = r
     parts, partial = [], []
     total_game = sum(int(g["game"]) for g in groups.values())
     total_frames = sum(int(g["game"] + g["table"]) for g in groups.values())
@@ -12774,12 +12778,18 @@ def _hj_f143_sight_line(rows, ctx):
         gm = int(g["game"])
         last = g["last"]
         reasons = ", ".join("%s %d" % (t, g[n]) for n, t in names if g[n]) or "none"
-        text = "%s scope %s: the game's line on %d of %d frames (%s%%), the table on %d (%s)" % (item, scope, gm, frames, "%.0f" % (100.0 * gm / frames) if frames else "-", frames - gm, reasons)
+        text = "%s scope %s: the settled line on %d of %d frames (%s%%), the table on %d (%s)" % (item, scope, gm, frames, "%.0f" % (100.0 * gm / frames) if frames else "-",
+                                                                                                    frames - gm, reasons)
         if gm:
-            text += ("; game shift up %+.2f right %+.2f cm (mean), table up %+.1f right %+.1f cm, trims up %+.1f right %+.1f cm; pair age mean %.0f max %.0f ms; the line %.2f deg off the "
-                     "root's forward; shift step between frames mean %.2f max %.2f mm over %d steps") % (
-                g["gup_w"] / gm, g["gright_w"] / gm, float(last["tup"]), float(last["tright"]), float(last["trimu"]), float(last["trimr"]), g["agemean_w"] / gm, g["agemax"],
-                g["deg_w"] / gm, g["stepmean_w"] / g["steps"] if g["steps"] else 0.0, g["stepmax"], int(g["steps"]))
+            ll = g["lastline"]
+            text += ("; settled line (cm from P14 in the root's right, up, forward) E %+.2f %+.2f %+.2f S %+.2f %+.2f %+.2f from %s settled samples, used on %s frames this session; "
+                     "game shift up %+.2f right %+.2f cm (mean), table up %+.1f right %+.1f cm, trims up %+.1f right %+.1f cm; the line %.2f deg off the root's forward; shift step "
+                     "between frames mean %.2f max %.2f mm over %d steps") % (
+                float(ll["ex"]), float(ll["ey"]), float(ll["ez"]), float(ll["sx"]), float(ll["sy"]), float(ll["sz"]), ll["samples"], ll["used"], g["gup_w"] / gm,
+                g["gright_w"] / gm, float(last["tup"]), float(last["tright"]), float(last["trimu"]), float(last["trimr"]), g["deg_w"] / gm,
+                g["stepmean_w"] / g["steps"] if g["steps"] else 0.0, g["stepmax"], int(g["steps"]))
+            if g["blend"]:
+                text += "; blended in from the table on %d frames" % g["blend"]
         else:
             text += "; table up %+.1f right %+.1f cm, trims up %+.1f right %+.1f cm" % (float(last["tup"]), float(last["tright"]), float(last["trimu"]), float(last["trimr"]))
         text += "; %d s" % g["s"]
@@ -12794,7 +12804,7 @@ def _hj_f143_sight_line(rows, ctx):
         for g in groups.values():
             for n, t in names:
                 lead[t] += int(g[n])
-        return ("NEVER APPLIED", text + " [%d ADS frames and none from the game's line; leading reason: %s]" % (total_frames, _htop(lead, 3)))
+        return ("NEVER APPLIED", text + " [%d ADS frames and none from a settled line; leading reason: %s]" % (total_frames, _htop(lead, 3)))
     if partial:
         return ("PARTIAL", text + " [" + "; ".join(partial) + "]")
     return ("OK", text)
@@ -12852,6 +12862,88 @@ def _hclip_text(clip, clipparts, clipw):
     return "; ".join(out)
 
 
+def _hj_f144_readout_placement(rows, ctx):
+    """F144: the weapon readout placed per role (hip, ADS) for each weapon, dialled with the four live trims (fix.native_on_foot_weapon_ui_forward_cm, _left_cm, _up_cm,
+    _toward_eye_cm), which are added to the role drawn now (the ADS role from an ADS weight of 0.5) and to no other. Each window's line, per (item, scope, class, role), gives the
+    seed (today's values; 0 for a rifle's hip readout, which draws where the game draws it), the trims, the total, the frames the placement was applied, measured and bound at
+    the draw's issue, and the PROOF: the drawn part's move against the unplaced draw along the weapon's axes, which must equal the total's within 1 mm. The report gives, per
+    group, the totals the pilot left (by trim, as F139's rule does for the sights) and whether the move reached the draw. NEVER APPLIED when a role's total moved nothing that was
+    drawn ("NOT REACHING THE DRAW": bound on no frame, or a drawn move of 0 against a total that asks one); PARTIAL when the drawn move differed from the total by over a
+    millimetre, or the camera could not be solved; OK otherwise."""
+    sec = rows.get("sec", [])
+    if not sec:
+        return None
+    groups = collections.OrderedDict()
+    for r in sec:
+        g = groups.setdefault((r["item"], r["scope"], r["cls"], r["role"]),
+                              {"s": 0, "placed": 0, "measured": 0, "bound": 0, "by": collections.OrderedDict(), "bad": 0, "differs": 0, "unmeasured": 0, "diffmax": 0.0, "last": r})
+        g["s"] += _hwl(r)
+        for k in ("placed", "measured", "bound"):
+            g[k] += int(r[k])
+        v = r["verdict"]
+        if "NOT REACHING THE DRAW" in v:
+            g["bad"] += 1
+        elif "differs" in v:
+            g["differs"] += 1
+        elif "not measured" in v:
+            g["unmeasured"] += 1
+        g["diffmax"] = max(g["diffmax"], float(r["diff"]))
+        g["last"] = r
+        trim = tuple(float(r[k]) for k in ("tf", "tl", "tu", "tt"))
+        by = g["by"].setdefault(trim, [0, tuple(float(r[k]) for k in ("f", "l", "u", "t"))])
+        by[0] += _hwl(r)
+        by[1] = tuple(float(r[k]) for k in ("f", "l", "u", "t"))
+    parts, bad, partial = [], [], []
+    for (item, scope, cls, role), g in groups.items():
+        last = g["last"]
+        label = "%s scope %s (%s class) %s role" % (item, scope, cls, role)
+        text = ("%s: total forward %s left %s up %s toward %s cm (the last window; seed %s %s %s %s, trim %s %s %s %s), %d s, placed on %d frames, bound at the draw's issue on %d; "
+                "drawn move forward %s left %s up %s cm, worst difference %.2f mm: %s") % (
+            label, last["f"], last["l"], last["u"], last["t"], last["sf"], last["sl"], last["su"], last["st"], last["tf"], last["tl"], last["tu"], last["tt"], g["s"], g["placed"],
+            g["bound"], last["mf"], last["ml"], last["mu"], g["diffmax"], last["verdict"])
+        if len(g["by"]) > 1:
+            text += "; by trim: " + ", ".join("(%s) -> (%s) (%d s)" % (" ".join("%+.1f" % x for x in tr), " ".join("%+.1f" % x for x in v[1]), v[0]) for tr, v in g["by"].items())
+        parts.append(text)
+        if g["bad"]:
+            bad.append("%s: NOT REACHING THE DRAW in %d window(s)" % (label, g["bad"]))
+        elif g["differs"] or g["unmeasured"]:
+            partial.append("%s: the drawn move differed from the total in %d window(s), not measured in %d" % (label, g["differs"], g["unmeasured"]))
+    text = "; ".join(parts)
+    if bad:
+        return ("NEVER APPLIED", text + " [" + "; ".join(bad) + "]")
+    if partial:
+        return ("PARTIAL", text + " [" + "; ".join(partial) + "]")
+    return ("OK", text)
+
+
+def _hj_f144_entry_path(rows, ctx):
+    """F144: the ADS entry path of each traced press, from the F89 trace's own eye samples (the eye less F_root, right and up, while ADS is engaged): the eye's excursion beyond its
+    settled value (the mean of the last second of the press) in the first 1.5 s, in the direction it was travelling, with the time of the largest. A press held under 2.5 s has no
+    settled value (said). The report names the largest lateral and vertical excursion per weapon (item, scope), which is the pull the pilot sees on entering ADS. IDLE when
+    no traced press was held long enough."""
+    path, nopath = rows.get("path", []), rows.get("nopath", [])
+    if not path and not nopath:
+        return None
+    if not path:
+        return ("IDLE", "%d traced press(es), none held 2.5 s: no settled eye (the last: %s)" % (len(nopath), nopath[-1]["why"]))
+    groups = collections.OrderedDict()
+    for r in path:
+        g = groups.setdefault((r["item"], r["scope"]), {"n": 0, "lat": (0.0, 0.0), "vert": (0.0, 0.0)})
+        g["n"] += 1
+        lat, vert = (float(r["lat"]), float(r["lt"])), (float(r["vert"]), float(r["vt"]))
+        if abs(lat[0]) > abs(g["lat"][0]):
+            g["lat"] = lat
+        if abs(vert[0]) > abs(g["vert"][0]):
+            g["vert"] = vert
+    parts = ["%s scope %s: %d press(es), largest lateral excursion %+.2f cm at t %.2f s, largest vertical %+.2f cm at t %.2f s" % (
+        item, scope, g["n"], g["lat"][0], g["lat"][1], g["vert"][0], g["vert"][1]) for (item, scope), g in groups.items()]
+    worst = max(groups.items(), key=lambda kv: abs(kv[1]["lat"][0]))
+    text = "; ".join(parts) + "; the largest lateral pull: %s scope %s %+.2f cm" % (worst[0][0], worst[0][1], worst[1]["lat"][0])
+    if nopath:
+        text += "; %d press(es) held under 2.5 s (no settled eye)" % len(nopath)
+    return ("OK", text)
+
+
 def _hj_f142_outfit(rows, ctx):
     """F142 (TEMPORARY A/B, fix.native_on_foot_body_full_outfit): the overcoat. The game gives a part of the outfit it wants only in the shadows (the coat's EVASuit_Gear_Back)
     the shadow-views-only class in first person, so on EDVR's body the suit shows through. With the key on, the avatar's visibility call gives every such part that is not a head
@@ -12863,7 +12955,8 @@ def _hj_f142_outfit(rows, ctx):
     key, sec, down = rows.get("key", []), rows.get("sec", []), rows.get("down", [])
     census, part = rows.get("census", []), rows.get("part", [])
     clip, clipparts, clipw = rows.get("clip", []), rows.get("clipparts", []), rows.get("clipw", [])
-    if not any((key, sec, down, census, part, clip, clipparts, clipw)):
+    gear, fpcensus, fppart = rows.get("gear", []), rows.get("fpcensus", []), rows.get("fppart", [])
+    if not any((key, sec, down, census, part, clip, clipparts, clipw, gear, fpcensus, fppart)):
         return None
     state = key[-1]["state"] if key else None
     last = collections.OrderedDict()
@@ -12879,6 +12972,17 @@ def _hj_f142_outfit(rows, ctx):
     cliptext = _hclip_text(clip, clipparts, clipw)   # F143
     if cliptext:
         ctext += ("; " if ctext else "") + cliptext
+    # F144: Gear_Back is promoted and unclipped only for an outer garment (the coat); the first-person avatar's census: its parts with an instance, what EDVR's list zeroes
+    if gear:
+        ctext += ("; " if ctext else "") + "%s (%d decision line(s))" % (gear[-1]["what"], len(gear))
+    if fpcensus or fppart:
+        lastfp = collections.OrderedDict()
+        for x in fppart:
+            lastfp[x["name"]] = x
+        zero = [n for n, x in lastfp.items() if x["list"].startswith("in EDVR's list, zeroed")]
+        open_ = [n for n, x in lastfp.items() if x["list"].startswith("not in EDVR's list") and any(int(x["m%d" % k], 16) for k in range(4))]
+        ctext += ("; " if ctext else "") + "first-person census: %d change(s) written (%s); at the last read EDVR zeroed %s; parts with an instance and a mask bit set that EDVR leaves: %s" % (
+            len(fpcensus), "; ".join(x["what"] for x in fpcensus[:3]) or "none", ", ".join(zero) or "none", ", ".join(open_) or "none")
     if not sec:
         if state == "on":
             return ("IDLE", "the key is on; no window line (native on foot never ran with it, or the window was not written)" + ("; " + ctext if ctext else ""))
@@ -13974,8 +14078,17 @@ HEALTH_RULES = (
                  r"(?P<wf>\d+), a degenerate P14 frame (?P<pf>\d+)\]; U with a non-finite padding lane \(3, 7, 11, 15; used all the same\) (?P<pad>\d+)$"),
         ("raw", r"native on foot readout anchor \(F141\): raw floats, part (?P<part>\d+) \(line (?P<line>\d+) of at most (?P<cap>\d+)\), item (?P<item>.+?): U = (?P<m>\[[^\]]*\])"),
     ), _hj_f141_readout_anchor),
-    _hrule("full outfit (F142)", ("F142", "F143"), ("native on foot full outfit (F142", "native on foot outfit census (F142)", "native on foot outfit part (F142)",
-                                                  "native on foot outfit clip (F143)", "native on foot outfit clip parts (F143)", "native on foot full outfit clip (F143)"), (
+    _hrule("full outfit (F142)", ("F142", "F143", "F144"), ("native on foot full outfit (F142", "native on foot outfit census (F142)", "native on foot outfit part (F142)",
+                                                           "native on foot outfit clip (F143)", "native on foot outfit clip parts (F143)", "native on foot full outfit clip (F143)",
+                                                           "native on foot full outfit (F144)", "native on foot first-person census (F144)", "native on foot first-person part (F144)"), (
+        ("gear", r"native on foot full outfit \(F144\): (?P<what>Gear_Back .+)$"),
+        ("fpcensus", r"native on foot first-person census \(F144\): change (?P<n>\d+) of the local first-person AMC 0x(?P<amc>[0-9A-Fa-f]+): (?P<parts>\d+) of (?P<of>\d+) parts have "
+                     r"instances, EDVR's list covers (?P<inlist>\d+) of them and the zero changed (?P<zeroed>\d+) \(a mask bit was set\); (?P<what>first read|changed: .+?); "
+                     r"(?P<list>every part with an instance follows|only the parts that changed follow)$"),
+        ("fppart", r"native on foot first-person part \(F144\): (?P<name>\w+) instances (?P<inst>[0-3,]+) state (?P<state>-?\d+) \((?P<cls>[^)]*)\) flags 0x(?P<flags>[0-9A-F]{2}) masks "
+                   r"before EDVR's zero 0x(?P<m0>[0-9A-F]+),0x(?P<m1>[0-9A-F]+),0x(?P<m2>[0-9A-F]+),0x(?P<m3>[0-9A-F]+); (?P<list>in EDVR's list, zeroed \(a mask bit was set\)|in "
+                   r"EDVR's list, mask already 0|not in EDVR's list: left as the game draws it)(?P<chg> \[changed\])?$"),
+        ("_", r"native on foot first-person census \(F144\): later changes are counted, not written"),
         ("key", r"native on foot full outfit \(F142, TEMPORARY\): fix\.native_on_foot_body_full_outfit is (?P<state>on|off) -- "),
         ("sec", r"native on foot full outfit \(F142\) " + H_WL + r": visibility calls of the local avatar (?P<calls>\d+), calls with a part promoted (?P<swapped>\d+), parts "
                 r"promoted (?P<promoted>\d+) \(by name: (?P<names>.+?)\), class changed by the game before the write (?P<refused>\d+), during the call (?P<lost>\d+), faults "
@@ -13995,13 +14108,29 @@ HEALTH_RULES = (
         ("clipw", r"native on foot full outfit clip \(F143\) " + H_WL + r": modifiers unclipped by the A/B (?P<writes>\d+) \(by name: (?P<names>.+?)\), write faults (?P<faults>\d+)$"),
     ), _hj_f142_outfit),
     _hrule("ADS sight line (F143)", ("F143",), ("native on foot ADS sight line (F143)", "native on foot ADS sight from the game (F143"), (
-        ("sec", r"native on foot ADS sight line \(F143\) " + H_WL + r": item (?P<item>.+?) scope (?P<scope>yes|no|unknown), source per frame: game line (?P<game>\d+), table (?P<table>\d+) "
-                r"\(fallback by reason: no pair (?P<nopair>\d+), stale (?P<stale>\d+), another item or scope (?P<other>\d+), item not read (?P<noitem>\d+), degenerate line "
-                r"(?P<degen>\d+), past the bound (?P<bound>\d+), key off (?P<keyoff>\d+)\); game shift up (?P<gup>%s) right (?P<gright>%s) cm \(mean over the game-line frames\), "
-                r"table up (?P<tup>%s) right (?P<tright>%s) cm, trims up (?P<trimu>%s) right (?P<trimr>%s) cm; pair age mean (?P<agemean>%s) max (?P<agemax>%s) ms, the line "
-                r"(?P<deg>%s) deg off the root's forward; shift step between frames mean (?P<stepmean>%s) max (?P<stepmax>%s) mm over (?P<steps>\d+) steps$" % ((_HN,) * 11)),
+        ("sec", r"native on foot ADS sight line \(F143\) " + H_WL + r": item (?P<item>.+?) scope (?P<scope>yes|no|unknown), source per frame: settled line (?P<game>\d+) "
+                r"\(blending in on (?P<blend>\d+)\), table (?P<table>\d+) \(fallback by reason: no settled line yet (?P<noline>\d+), another item or scope (?P<other>\d+), item not "
+                r"read (?P<noitem>\d+), degenerate line (?P<degen>\d+), past the bound (?P<bound>\d+), key off (?P<keyoff>\d+)\); settled line \(cm from P14 in the root's right, up "
+                r"and forward\) E (?P<ex>%s) (?P<ey>%s) (?P<ez>%s) S (?P<sx>%s) (?P<sy>%s) (?P<sz>%s) from (?P<samples>\d+) settled samples, used on (?P<used>\d+) frames this "
+                r"session; game shift up (?P<gup>%s) right (?P<gright>%s) cm \(mean over the settled-line frames\), table up (?P<tup>%s) right (?P<tright>%s) cm, trims up "
+                r"(?P<trimu>%s) right (?P<trimr>%s) cm; the line (?P<deg>%s) deg off the root's forward; shift step between frames mean (?P<stepmean>%s) max (?P<stepmax>%s) mm over "
+                r"(?P<steps>\d+) steps$" % ((_HN,) * 15)),
         ("key", r"native on foot ADS sight from the game \(F143, TEMPORARY\): fix\.native_on_foot_ads_game_sight is (?P<state>on|off) -- "),
     ), _hj_f143_sight_line),
+    _hrule("weapon UI placement (F144)", ("F144",), ("weapon UI placement (F144)",), (
+        ("sec", r"weapon UI placement \(F144\) " + H_WL + r": item (?P<item>.+?) scope (?P<scope>yes|no|unknown), (?P<cls>pistol|rifle) class, (?P<role>hip|ADS) role "
+                r"\((?P<drawn>drawn now, trimmed|seed only)\), seed forward (?P<sf>%s) left (?P<sl>%s) up (?P<su>%s) toward eye (?P<st>%s) cm, trims (?P<tf>%s) (?P<tl>%s) "
+                r"(?P<tu>%s) (?P<tt>%s) cm, total forward (?P<f>%s) left (?P<l>%s) up (?P<u>%s) toward eye (?P<t>%s) cm; placed on (?P<placed>\d+) frames, measured on "
+                r"(?P<measured>\d+), bound at the draw's issue on (?P<bound>\d+); drawn move against the unplaced draw \(mean over the bound frames\) forward (?P<mf>%s) left "
+                r"(?P<ml>%s) up (?P<mu>%s) cm along the weapon's axes, (?P<abs>[\d.]+) cm against the total's (?P<exp>[\d.]+) cm, worst difference (?P<diff>[\d.]+) mm: "
+                r"(?P<verdict>.+)$" % ((_HN,) * 15)),
+    ), _hj_f144_readout_placement),
+    _hrule("ADS entry path (F144)", ("F144",), ("native on foot ADS entry path (F144)",), (
+        ("path", r"native on foot ADS entry path \(F144\): item (?P<item>.+?) scope (?P<scope>yes|no|unknown), eye less F_root in the character's axes from right (?P<r0>%s) up "
+                 r"(?P<u0>%s) cm at the press to right (?P<rs>%s) up (?P<us>%s) cm settled \(the last (?P<win>[\d.]+) s of (?P<n>\d+) engaged eye samples\); excursion beyond the "
+                 r"settled value in the first (?P<w>[\d.]+) s: lateral (?P<lat>%s) cm at t (?P<lt>[\d.]+) s, vertical (?P<vert>%s) cm at t (?P<vt>[\d.]+) s$" % ((_HN,) * 6)),
+        ("nopath", r"native on foot ADS entry path \(F144\): item (?P<item>.+?) scope (?P<scope>yes|no|unknown), no settled eye \((?P<why>[^;]+); (?P<n>\d+) engaged eye samples\)$"),
+    ), _hj_f144_entry_path),
     _hrule("menu probe (F135)", ("F135",), ("native on foot menu probe (F135)",), (
         ("sec", r"native on foot menu probe \(F135\) 1 s: update (?P<upd>\d+) \(objs (?P<updo>.*?)\), placement (?P<place>\d+) \(objs (?P<placeo>.*?)\), ray (?P<ray>\d+), "
                 r"cursor window (?P<win>\d+), owner transform (?P<own>\d+), panel submit (?P<ps>\d+), inst submit (?P<is>\d+), bridge update (?P<bu>\d+) placement "
@@ -16838,41 +16967,116 @@ def self_test_health():
         check("F143 full outfit: a drifted clip parts line is unparsed", ["native on foot outfit clip parts (F143) #1 something else"], 4, [("UNPARSED", FO142)])
         check("F143 full outfit: a drifted A/B line is unparsed", ["native on foot full outfit clip (F143) 10 s: something else"], 4, [("UNPARSED", FO142)])
 
-        # ---- F143: the ADS eye on the game's sight line (fix.native_on_foot_ads_game_sight, TEMPORARY) ----
+        # ---- F143/F144: the ADS eye on the game's sight line, settled per (item, scope) (fix.native_on_foot_ads_game_sight, TEMPORARY) ----
         L143 = "ADS sight line (F143)"
         LASER143 = "$wpn_m_submachinegun_laser_fauto_name;"
 
-        def sl143(item=PLASMA141, scope="no", game=480, table=0, nopair=0, stale=0, other=0, noitem=0, degen=0, bound=0, keyoff=0, gup=0.92, gright=0.03, tup=0.8, tright=0.0, trimu=0.0,
-                  trimr=0.0, agemean=33.0, agemax=80.0, deg=0.12, stepmean=0.4, stepmax=1.5, steps=470, wl=10):
-            return R("native on foot ADS sight line (F143) %u s", wl, item, scope, game, table, nopair, stale, other, noitem, degen, bound, keyoff, gup, gright, tup, tright, trimu, trimr,
-                     agemean, agemax, deg, stepmean, stepmax, steps)
+        def sl143(item=PLASMA141, scope="no", game=480, blend=0, table=0, noline=0, other=0, noitem=0, degen=0, bound=0, keyoff=0, e=(0.0, 0.0, 15.0), sv=(0.5, 0.0, 36.0), samples=1200,
+                  used=5000, gup=0.92, gright=0.03, tup=0.8, tright=0.0, trimu=0.0, trimr=0.0, deg=0.12, stepmean=0.1, stepmax=0.4, steps=470, wl=10):
+            return R("native on foot ADS sight line (F143) %u s", wl, item, scope, game, blend, table, noline, other, noitem, degen, bound, keyoff, *e, *sv, samples, used, gup, gright, tup,
+                     tright, trimu, trimr, deg, stepmean, stepmax, steps)
 
         def gs143(state="on"):
             return R("native on foot ADS sight from the game (F143, TEMPORARY)", state, "x")
 
-        check("F143 sight line: the game's line was the source", [gs143(), sl143(), sl143(wl=4)], 0, [("OK", L143)],
-              has=[PLASMA141 + " scope no: the game's line on 960 of 960 frames (100%), the table on 0 (none); game shift up +0.92 right +0.03 cm (mean), table up +0.8 right +0.0 cm, "
-                   "trims up +0.0 right +0.0 cm; pair age mean 33 max 80 ms; the line 0.12 deg off the root's forward; shift step between frames mean 0.40 max 1.50 mm over 940 steps; 14 s",
-                   "the key is on"], lacks=["UNPARSED"])
-        check("F143 sight line: the first frames fall back on the table until a pair arrives", [gs143(), sl143(game=465, table=15, nopair=15)], 0, [("OK", L143)],
-              has=["the game's line on 465 of 480 frames (97%), the table on 15 (no pair published 15)"], lacks=["UNPARSED"])
-        check("F143 sight line: the table stood in on a fifth of the frames", [gs143(), sl143(game=380, table=100, stale=60, other=40)], 0, [("PARTIAL", L143)],
-              has=["the game's line on 380 of 480 frames (79%), the table on 100 (pair stale 60, another item or scope 40)", "the table stood in on 100 of 480 frames"], lacks=["UNPARSED"])
-        check("F143 sight line: ADS frames and none from the game's line", [gs143(), sl143(game=0, table=480, nopair=480, gup=0.0, gright=0.0, agemean=0.0, agemax=0.0, deg=0.0, stepmean=0.0, stepmax=0.0, steps=0)],
-              3, [("NEVER APPLIED", L143)], has=["480 ADS frames and none from the game's line; leading reason: no pair published 480", "table up +0.8 right +0.0 cm"], lacks=["UNPARSED"])
-        check("F143 sight line: the line used on no frame, degenerate", [gs143(), sl143(game=0, table=480, degen=300, bound=180, gup=0.0, gright=0.0, agemean=0.0, agemax=0.0, deg=0.0, stepmean=0.0, stepmax=0.0,
+        check("F143 sight line: the settled line was the source", [gs143(), sl143(), sl143(wl=4)], 0, [("OK", L143)],
+              has=[PLASMA141 + " scope no: the settled line on 960 of 960 frames (100%), the table on 0 (none); settled line (cm from P14 in the root's right, up, forward) E +0.00 +0.00 +15.00 "
+                   "S +0.50 +0.00 +36.00 from 1200 settled samples, used on 5000 frames this session; game shift up +0.92 right +0.03 cm (mean), table up +0.8 right +0.0 cm, trims up "
+                   "+0.0 right +0.0 cm; the line 0.12 deg off the root's forward; shift step between frames mean 0.10 max 0.40 mm over 940 steps; 14 s", "the key is on"],
+              lacks=["UNPARSED"])
+        check("F143 sight line: a weapon's first press blends in from the table", [gs143(), sl143(game=470, blend=30, table=10, noline=10)], 0, [("OK", L143)],
+              has=["the settled line on 470 of 480 frames (98%), the table on 10 (no settled line yet 10)", "blended in from the table on 30 frames"], lacks=["UNPARSED"])
+        check("F143 sight line: the table stood in on a fifth of the frames", [gs143(), sl143(game=380, table=100, noline=60, other=40)], 0, [("PARTIAL", L143)],
+              has=["the settled line on 380 of 480 frames (79%), the table on 100 (no settled line yet 60, another item or scope 40)", "the table stood in on 100 of 480 frames"],
+              lacks=["UNPARSED"])
+        check("F143 sight line: ADS frames and none from a line", [gs143(), sl143(game=0, table=480, noline=480, gup=0.0, gright=0.0, deg=0.0, stepmean=0.0, stepmax=0.0, steps=0)], 3,
+              [("NEVER APPLIED", L143)], has=["480 ADS frames and none from a settled line; leading reason: no settled line yet 480", "table up +0.8 right +0.0 cm"], lacks=["UNPARSED"])
+        check("F143 sight line: the line used on no frame, degenerate", [gs143(), sl143(game=0, table=480, degen=300, bound=180, gup=0.0, gright=0.0, deg=0.0, stepmean=0.0, stepmax=0.0,
                                                                                     steps=0)], 3, [("NEVER APPLIED", L143)],
               has=["leading reason: degenerate line 300, past the bound 180"], lacks=["UNPARSED"])
-        check("F143 sight line: the key off is the table, not a failure", [gs143("off"), sl143(game=0, table=480, keyoff=480, gup=0.0, gright=0.0, agemean=0.0, agemax=0.0, deg=0.0, stepmean=0.0, stepmax=0.0,
+        check("F143 sight line: the key off is the table, not a failure", [gs143("off"), sl143(game=0, table=480, keyoff=480, gup=0.0, gright=0.0, deg=0.0, stepmean=0.0, stepmax=0.0,
                                                                                                  steps=0)], 0, [("IDLE", L143)],
               has=["the key is off: F139's table was the source on every frame", "key off 480"], lacks=["UNPARSED"])
         check("F143 sight line: the key line alone, no ADS second", [gs143()], 0, [("IDLE", L143)], has=["no ADS second with a sight line; the key is on"], lacks=["UNPARSED"])
-        check("F143 sight line: two weapons, the laser SMG's line and a trim", [gs143(), sl143(), sl143(item=LASER143, gup=-4.62, gright=-0.49, tup=-3.0, trimu=0.5, trimr=-0.3, deg=0.9)], 0, [("OK", L143)],
-              has=[LASER143 + " scope no: the game's line on 480 of 480 frames (100%)", "game shift up -4.62 right -0.49 cm (mean), table up -3.0 right +0.0 cm, trims up +0.5 right -0.3 cm"],
+        check("F143 sight line: two weapons, the laser SMG's line and a trim", [gs143(), sl143(), sl143(item=LASER143, gup=-4.62, gright=-0.49, tup=-3.0, trimu=0.5, trimr=-0.3, deg=0.9)], 0,
+              [("OK", L143)], has=[LASER143 + " scope no: the settled line on 480 of 480 frames (100%)", "game shift up -4.62 right -0.49 cm (mean), table up -3.0 right +0.0 cm, trims up +0.5 right -0.3 cm"],
               lacks=["UNPARSED"])
         check("F143 sight line: the shift's jitter is said", [gs143(), sl143(stepmean=2.5, stepmax=9.0)], 0, [("OK", L143)],
               has=["shift step between frames mean 2.50 max 9.00 mm over 470 steps"], lacks=["UNPARSED"])
         check("F143 sight line: a drifted line is unparsed", ["native on foot ADS sight line (F143) 10 s: something else"], 4, [("UNPARSED", L143)])
+
+        # ---- F144: the weapon readout placed per role, and what reaches the draw ----
+        P144 = "weapon UI placement (F144)"
+        KINRIFLE144 = "$wpn_m_assaultrifle_kinetic_fauto_name;"
+
+        def pl144(item=KINRIFLE144, scope="no", cls="rifle", role="hip", drawn="seed only", seed=(0.0, 0.0, 0.0, 0.0), trim=(0.0, 0.0, 0.0, 0.0), total=(0.0, 0.0, 0.0, 0.0), placed=480,
+                  measured=480, bound=480, move=(0.0, 0.0, 0.0), absm=0.0, expm=0.0, diff=0.0, verdict="no move asked: drawn where the game draws it", wl=10):
+            return R("weapon UI placement (F144) %u s", wl, item, scope, cls, role, drawn, *seed, *trim, *total, placed, measured, bound, *move, absm, expm, diff, verdict)
+
+        reach = dict(drawn="drawn now, trimmed", seed=(0.0, 3.5, 0.0, 0.0), trim=(0.0, 1.5, 0.0, 0.0), total=(0.0, 5.0, 0.0, 0.0), move=(0.0, 5.0, 0.0), absm=5.0, expm=5.0, diff=0.31,
+                     verdict="reaches the draw")
+        check("F144 readout placement: the rifle's hip readout at seed 0 is drawn where the game draws it", [pl144()], 0, [("OK", P144)],
+              has=[KINRIFLE144 + " scope no (rifle class) hip role: total forward +0.0 left +0.0 up +0.0 toward +0.0 cm", "no move asked: drawn where the game draws it"], lacks=["UNPARSED"])
+        check("F144 readout placement: a trim reaches the draw", [pl144(role="ADS", **reach)], 0, [("OK", P144)],
+              has=["ADS role: total forward +0.0 left +5.0 up +0.0 toward +0.0 cm (the last window; seed +0.0 +3.5 +0.0 +0.0, trim +0.0 +1.5 +0.0 +0.0)", "drawn move forward +0.00 left +5.00 up +0.00 cm",
+                   "reaches the draw"], lacks=["UNPARSED"])
+        check("F144 readout placement: the trims the pilot left, by trim and per role", [pl144(role="hip"), pl144(role="hip", drawn="drawn now, trimmed", trim=(0.0, 1.0, 0.0, 0.0),
+                                                                                                               total=(0.0, 1.0, 0.0, 0.0), move=(0.0, 1.0, 0.0), absm=1.0, expm=1.0,
+                                                                                                               verdict="reaches the draw", wl=6), pl144(role="ADS", **reach)], 0,
+              [("OK", P144)], has=["hip role: total forward +0.0 left +1.0 up +0.0 toward +0.0 cm", "by trim: (+0.0 +0.0 +0.0 +0.0) -> (+0.0 +0.0 +0.0 +0.0) (10 s), (+0.0 +1.0 +0.0 +0.0) -> "
+                                   "(+0.0 +1.0 +0.0 +0.0) (6 s)", "ADS role: total forward +0.0 left +5.0"], lacks=["UNPARSED"])
+        check("F144 readout placement: the move asked and not drawn", [pl144(role="ADS", **dict(reach, move=(0.0, 0.0, 0.0), absm=0.0, diff=50.0, verdict="NOT REACHING THE DRAW"))], 3,
+              [("NEVER APPLIED", P144)], has=["ADS role: NOT REACHING THE DRAW in 1 window(s)", "worst difference 50.00 mm: NOT REACHING THE DRAW"], lacks=["UNPARSED"])
+        check("F144 readout placement: never bound at the issue", [pl144(role="ADS", **dict(reach, bound=0, measured=480, move=(0.0, 0.0, 0.0), absm=0.0, diff=0.0,
+                                                                                          verdict="NOT REACHING THE DRAW"))], 3, [("NEVER APPLIED", P144)], has=["bound at the draw's issue on 0"],
+              lacks=["UNPARSED"])
+        check("F144 readout placement: the drawn move 1.5 mm off the total", [pl144(role="ADS", **dict(reach, diff=1.5, verdict="the drawn move differs from the total"))], 0, [("PARTIAL", P144)],
+              has=["the drawn move differed from the total in 1 window(s)"], lacks=["UNPARSED"])
+        check("F144 readout placement: the draw's camera not solved", [pl144(measured=0, bound=0, verdict="not measured (the draw's camera could not be solved)")], 0, [("PARTIAL", P144)],
+              has=["not measured in 1"], lacks=["UNPARSED"])
+        check("F144 readout placement: a drifted line is unparsed", ["weapon UI placement (F144) 10 s: something else"], 4, [("UNPARSED", P144)])
+
+        # ---- F144: the ADS entry path of a traced press ----
+        EP144 = "ADS entry path (F144)"
+
+        def ep144(item=KINRIFLE144, scope="no", first=(8.1, 0.0), settled=(-0.3, -2.1), n=90, lat=-1.0, lt=0.68, vert=0.0, vt=0.0):
+            return R("native on foot ADS entry path (F144): item %s scope %s, eye less", item, scope, *first, *settled, 1.0, n, 1.5, lat, lt, vert, vt)
+
+        check("F144 entry path: the pull per weapon, from the trace", [ep144(), ep144(lat=-0.4, lt=0.9), ep144(item=LASER143, lat=0.3, lt=0.5, vert=-0.8, vt=1.1)], 0, [("OK", EP144)],
+              has=[KINRIFLE144 + " scope no: 2 press(es), largest lateral excursion -1.00 cm at t 0.68 s, largest vertical +0.00 cm at t 0.00 s",
+                   LASER143 + " scope no: 1 press(es), largest lateral excursion +0.30 cm at t 0.50 s, largest vertical -0.80 cm at t 1.10 s", "the largest lateral pull: " + KINRIFLE144 + " scope no -1.00 cm"],
+              lacks=["UNPARSED"])
+        check("F144 entry path: a press held under 2.5 s has no settled eye", [R("native on foot ADS entry path (F144): item %s scope %s, no settled eye", KINRIFLE144, "no",
+                                                                                 "the press ended before 2.5 s: no settled value", 120)], 0, [("IDLE", EP144)],
+              has=["1 traced press(es), none held 2.5 s"], lacks=["UNPARSED"])
+        check("F144 entry path: a short press beside a long one", [ep144(), R("native on foot ADS entry path (F144): item %s scope %s, no settled eye", KINRIFLE144, "no",
+                                                                               "the press ended before 2.5 s: no settled value", 120)], 0, [("OK", EP144)],
+              has=["1 press(es) held under 2.5 s"], lacks=["UNPARSED"])
+        check("F144 entry path: a drifted line is unparsed", ["native on foot ADS entry path (F144): something else"], 4, [("UNPARSED", EP144)])
+
+        # ---- F144: the coat's Gear_Back decision and the first-person census (the full outfit rule) ----
+        def gear144(what="Gear_Back promoted: outer garment"):
+            return R("native on foot full outfit (F144):", what)
+
+        def fpc144(n=1, amc=0x28A831A0DD8, parts=14, of=54, inlist=6, zeroed=5, what="first read", lst="every part with an instance follows"):
+            return R("native on foot first-person census (F144): change %u", n, amc, parts, of, inlist, zeroed, what, lst)
+
+        def fpp144(name="EVASuit_Gear_Arms", inst="0", state=1, cls="every view", flags=5, masks=(0xF, 0, 0, 0), lst="in EDVR's list, zeroed (a mask bit was set)", chg=""):
+            return R("native on foot first-person part (F144): %s instances", name, inst, state, cls, flags, *masks, lst, chg)
+
+        check("F144 full outfit: Gear_Back promoted for the coat", [fo_key(), fo_sec(), gear144()], 0, [("OK", FO142)], has=["Gear_Back promoted: outer garment (1 decision line(s))"], lacks=["UNPARSED"])
+        check("F144 full outfit: Gear_Back kept for the other suit's backpack", [fo_key(), fo_sec(), gear144("Gear_Back kept shadows only: suit arms present"), gear144()], 0, [("OK", FO142)],
+              has=["Gear_Back promoted: outer garment (2 decision line(s))"], lacks=["UNPARSED"])
+        check("F144 full outfit: the first-person census lists what EDVR zeroes and what it leaves",
+              [fo_key("off"), fpc144(), fpp144(), fpp144(name="EVASuit_Gear_UpperArmL", lst="in EDVR's list, mask already 0", masks=(0, 0, 0, 0)),
+               fpp144(name="EVASuit_Legs", masks=(0x3, 0, 0, 0), lst="not in EDVR's list: left as the game draws it")], 0, [("IDLE", FO142)],
+              has=["first-person census: 1 change(s) written (first read); at the last read EDVR zeroed EVASuit_Gear_Arms; parts with an instance and a mask bit set that EDVR leaves: EVASuit_Legs"],
+              lacks=["UNPARSED"])
+        check("F144 full outfit: a first-person change", [fo_key("off"), fpc144(), fpp144(), fpc144(n=2, what="changed: EVASuit_Gear_Arms, the zeroed set", lst="only the parts that changed follow"),
+                                                          fpp144(chg=" [changed]", masks=(0, 0, 0, 0), lst="in EDVR's list, mask already 0")], 0, [("IDLE", FO142)],
+              has=["first-person census: 2 change(s) written (first read; changed: EVASuit_Gear_Arms, the zeroed set); at the last read EDVR zeroed none"], lacks=["UNPARSED"])
+        check("F144 full outfit: a drifted first-person line is unparsed", ["native on foot first-person census (F144): something else"], 4, [("UNPARSED", FO142)])
+        check("F144 full outfit: a drifted decision line is unparsed", ["native on foot full outfit (F144): something else"], 4, [("UNPARSED", FO142)])
 
         # ---- F135: the on-foot menu probe (MEASURE ONLY) ----
         M135 = "menu probe (F135)"
