@@ -1375,11 +1375,14 @@ static void retiredKeyScan(const std::wstring& root) {
 // close, retired in F106 (the left eye now shows the aiming eye's view, fix.native_on_foot_ads_sight_both_eyes), the old look to aim controller's three
 // test keys, retired in F109 (look to aim rides the ADS head aim's map), and the weapon eye's right key, retired in F112 (the eye offset is forward
 // alone; fix.native_on_foot_weapon_view_offset_cm is the sideways setting), and F117's and F120's two panel cursor test keys, retired in F122 (the cursor
-// is hidden by default behind fix.native_on_foot_panel_mouse; drawn, both corrections run at their panel value), and the aim reticle's placement key,
+// is hidden by default behind the panel mouse key; drawn, both corrections run at their panel value), and the panel mouse key and the panel cursor test key, retired in
+// F155 (the cursor is always drawn on an on-foot panel in VR at the game's place with the pick mesh's lever undone, hidden where that is not known; F117's and F120's
+// placements were removed), and the aim reticle's placement key,
 // retired in F127 (the reticle always sits on the mouse-aim axis, the former default; its head and game placements were removed),
 // and the visor-axis test key, retired in F128 (the correction is always on in outer mode), and the ADS sight switch, the two ADS sight trims and the full outfit switch, retired
 // in F146 (the ADS eye always takes the game's sight line and the body always draws the full outfit; the pilot's totals are in the tables), and the ADS eye distance, retired in F152
-// (the held weapon's ADS eye depth is the game's unscoped camera plus a baked offset plus the developer tier's trim; the cap's old value is not carried over), under native on foot's convention
+// (the held weapon's ADS eye depth is the game's unscoped camera plus a baked offset plus the developer tier's trim; the cap's old value is not carried over), and the developer tier's
+// body-draw test dial, retired in F157 (the coat outfit's pack draw it found is always left out of both eyes while the coat is worn), under native on foot's convention
 // for retired keys (its F34, F66 and
 // F96 keys are the same): the shipped file keeps each at its retired value on a hidden retired line,
 // and native_on_foot.cpp's retiredKeysNote reads each once, to name a value that differs. Nothing else may spell them: no other line of the shipped
@@ -1391,9 +1394,10 @@ static const char* const kRetiredNotedKeys[] = {
     "fix.native_on_foot_look_to_aim_yaw_sign", "fix.native_on_foot_look_to_aim_comp_delay", "fix.native_on_foot_look_to_aim_comp_sign",
     "fix.native_on_foot_weapon_eye_right_cm", "fix.native_on_foot_panel_cursor_fix", "fix.native_on_foot_panel_cursor_follow",
     "fix.native_on_foot_reticle_follow",
-    "fix.native_on_foot_visor_axis",
+    "fix.native_on_foot_visor_axis", "fix.native_on_foot_panel_mouse", "fix.native_on_foot_panel_cursor_test",
     "fix.native_on_foot_ads_game_sight", "fix.native_on_foot_ads_sight_up_cm", "fix.native_on_foot_ads_sight_right_cm", "fix.native_on_foot_body_full_outfit",
     "fix.native_on_foot_ads_eye_distance_cm",
+    "experimental.native_on_foot_body_draw_hide",
 };
 // The marker line above each: "# ui: hidden -- retired (F98): ignored." (later keys name their own retirement's F number).
 static bool isRetiredNotedMarker(const std::string& line) {
@@ -1444,9 +1448,10 @@ static void retiredNotedKeyScan(const std::wstring& root) {
     }
     const int count = static_cast<int>(sizeof(kRetiredNotedKeys) / sizeof(kRetiredNotedKeys[0]));
     if (good == count)
-        ok("the shipped edvr.ini spells each of the twenty-four retired keys (Explorer Cam's eight and the weapon eye's up from F98, the training connect probe's from "
+        ok("the shipped edvr.ini spells each of the twenty-seven retired keys (Explorer Cam's eight and the weapon eye's up from F98, the training connect probe's from "
            "F100, the ADS left eye close from F106, the old look to aim's three test keys from F109, the weapon eye's right from F112, the two panel cursor test "
-           "keys from F122, the aim reticle's placement from F127, the visor-axis test key from F128, the ADS sight switch and trims and the full outfit switch from F146, the ADS eye distance from F152) "
+           "keys from F122, the aim reticle's placement from F127, the visor-axis test key from F128, the panel mouse key and the panel cursor test key from the "
+           "panel cursor's F155, the ADS sight switch and trims and the full outfit switch from F146, the ADS eye distance from F152, the body-draw test dial from F157) "
            "once, as its own hidden retired line, and nowhere else");
     else
         fail("the shipped edvr.ini keeps each F98 retired key on one hidden retired line and nowhere else", why);
@@ -1478,8 +1483,8 @@ static void retiredNotedKeyScan(const std::wstring& root) {
         }
     }
     if (!bad && inNote >= 2 * count)
-        ok("the twenty-four retired keys (F98, F98c, F100, F106, F109, F112, F122, F127, F128, F146, F152) are read and named only in native_on_foot.cpp's retiredKeysNote (each read once "
-           "and named once)");
+        ok("the twenty-seven retired keys (F98, F98c, F100, F106, F109, F112, F122, F127, F128, the panel cursor's F155, F146, F152, F157) are read and named only in "
+           "native_on_foot.cpp's retiredKeysNote (each read once and named once)");
     else if (!bad)
         fail("each F98 retired key is read and named in retiredKeysNote", std::to_string(inNote) + " spellings there, " + std::to_string(2 * count) + " wanted");
 }

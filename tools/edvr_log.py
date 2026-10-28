@@ -10643,8 +10643,6 @@ def _hj_f111_pointer(rows, ctx):
     n = max(int(r["n"]) for r in armed) if armed else None
     if n == 0 and not sec:
         return ("NEVER APPLIED", "no hook armed%s" % armed[-1]["rest"])
-    if not sec and not tot and _hpanel_mouse_off(ctx, armed):
-        return ("IDLE", "the panel mouse key is off: the instruments are idle by design")
     if not sec and tot:
         stage = tot[-1]["verdict"].strip()
         text = "the flight so far (%s s with the pointer): %s (no 1 s line: the detail log's)" % (tot[-1]["secs"], stage)
@@ -10803,20 +10801,6 @@ def _f119_windows(rows):
     for row in windows.values():
         row["offs"] = "; ".join(row.pop("_classes")) or "none"
     return list(windows.values())
-
-
-def _hpanel_mouse_off(ctx, triggers):
-    """Known off throughout the relevant window, including its carried entry state; a late off observation cannot erase earlier unknown/on time."""
-    rows = ctx.get("panel mouse (F122)", {})
-    states = [(r.get("to") or r.get("setting"), r.get("_t")) for kind in ("entry", "setting", "sec") for r in rows.get(kind, [])]
-    if not states or any(state != "off" for state, _ in states):
-        return False
-    since = ctx.get("_health_window", {}).get("since")
-    if since is not None and not rows.get("entry") and not any(t == since for _, t in states):
-        return False   # unknown at the selected window's start; an off line later cannot prove the whole interval off
-    first = min((r["_t"] for r in triggers if r.get("_t") is not None), default=None)
-    known = min((t for _, t in states if t is not None), default=None)
-    return first is not None and known is not None and known <= first
 
 
 def _hvisor_census_needed(ctx):
@@ -11034,113 +11018,124 @@ def _hj_f123_containment(rows, ctx):
     return ("OK", text)
 
 
-def _hj_f117_cursor(rows, ctx):
-    """F117: the cursor's place on a turned on-foot panel, per setting of the temporary A/B key (panel, view, game). Per second: the 2D placements on
-    turned and upright pick meshes, the cursor moved, the refusals, and whether the cursor on turned panels follows the true uv or moves against it.
-    NEVER APPLIED when a setting that moves (panel, view) met turned panels and moved none; PARTIAL when it moved them and the cursor still went against
-    the uv; IDLE with no turned panel."""
-    sec = rows.get("sec", [])
-    if not sec:
+def _hfloat(text):
+    """A number a line printed, or None for the n/a it prints where it has no value."""
+    try:
+        return float(text)
+    except (TypeError, ValueError):
         return None
-    order, groups = [], {}
-    for r in sec:
-        k = r["setting"].strip()
-        if k not in groups:
-            groups[k] = []
-            order.append(k)
-        groups[k].append(r)
-    parts, never, partial, any_turned, any_ok = [], [], [], False, False
-    for k in order:
-        g = groups[k]
-        turned, moved = sum(int(r["turned"]) for r in g), sum(int(r["moved"]) for r in g)
-        follows = sum(1 for r in g if r["cursor"].strip() == "follows the uv")
-        against = sum(1 for r in g if r["cursor"].strip() == "against the uv")
-        refused = "no triangle at the uv %d, the sprite not at the uv %d, no triangle at the turned uv %d" % (
-            sum(int(r["notri"]) for r in g), sum(int(r["notat"]) for r in g), sum(int(r["noturn"]) for r in g))
-        parts.append("%s: %d s, turned %d, moved %d, the cursor follows the uv in %d s, against it in %d s (refused: %s)" % (
-            k, len(g), turned, moved, follows, against, refused))
-        any_turned |= turned > 0
-        if k in ("panel", "view") and turned:
-            if not moved:
-                never.append(k)
-            elif against > follows:
-                partial.append(k)
-            elif follows:
-                any_ok = True
-    text = "; ".join(parts)
-    if never:
-        return ("NEVER APPLIED", text + "; %s met turned panels and moved none" % ", ".join(never))
-    if not any_turned:
-        return ("IDLE", text + "; no turned panel")
-    if partial:
-        return ("PARTIAL", text + "; %s moved the cursor and it is still against the uv" % ", ".join(partial))
-    return ("OK" if any_ok else "IDLE", text)
 
 
-def _hj_f120_follow(rows, ctx):
-    """F120: the cursor on a screen-space on-foot panel when the head turns, per setting of the temporary A/B key (panel, head). A second is judged when the
-    mouse was still (the same uv on the panel in consecutive placements) and the head turned more than 5 deg against the HUD frame while it was; the cursor's
-    drift on the panel in those seconds is under 5 mm when the cursor stays on the drawn panel. OK: the judged seconds under panel mostly drifted under 5 mm.
-    PARTIAL: most drifted 5 mm or more, or the HRC frame turned with the head in every judged second (E.Ht constant: the correction is near zero and the
-    drift cannot tell whether a panel seen to hold still is in that frame). NEVER APPLIED: panel met screen-space placements and corrected none. IDLE: no
-    screen-space panel, or none of the seconds could be judged."""
-    sec, pins = rows.get("sec", []), rows.get("pin", [])
-    if not sec and not pins:
+def _hmedian(values):
+    vals = sorted(v for v in values if v is not None)
+    return vals[len(vals) // 2] if vals else None
+
+
+def _hk_case(k):
+    """F154: which turn of the game's pick point a k reads as. k = 1: held on the panel in the eye's frame; 0: locked to the camera; -1 and -2: turning against the
+    head by once and twice the panel's turn; +2: with the head by twice the panel's. Anything else is named other."""
+    if k is None:
+        return "not read"
+    for centre, name in ((0.0, "about 0 (locked to the camera)"), (1.0, "about 1 (held on the panel)"), (-1.0, "about -1 (against the head, as far as the panel turns)"),
+                         (-2.0, "about -2 (against the head, twice as far as the panel turns)"), (2.0, "about +2 (with the head, twice as far as the panel turns)")):
+        if abs(k - centre) <= 0.35:
+            return name
+    return "other"
+
+
+_F154_CAUSES = ("no lever", "tiny rho", "not finite", "write failed")
+
+
+def _hj_f154_turn(rows, ctx):
+    """F154, F155: where the on-foot panel cursor goes, and how the game's own cursor point turns against the head. Since F155 the cursor on a screen-space panel is the
+    game's place with the pick mesh's lever undone (the drawn point), hidden where the lever is not known; the F154 builds chose among five placements by a key and
+    their lines carry the setting (shipped, uv, game, drawn, mirrored), which this rule still reads. A second is judged when the mouse was still on a screen-space panel
+    (the same uv in consecutive placements) and the head turned more than 2 deg against the HUD frame while it was; its k per stream (the game's point, the written one) is
+    1 for a point held on the panel in the eye's frame, 0 locked to the camera, negative against the head. OK: the written point's k within 0.25 of 1 on every axis it
+    could read. PARTIAL: it differs from 1 by more than that on an axis, or the hide fallback ran on more than a tenth of the screen-space placements. NEVER APPLIED: the
+    lever hook never armed, or screen-space placements were met and none got the drawn point. IDLE: no judged second. The text names the game's own k and its case (about 0,
+    1, -1, -2, +2, other) and the sign of rho, the lever the game applies to the pick mesh."""
+    armed, moves = rows.get("armed", []), rows.get("setting", [])
+    # The F155 lines carry no setting (the drawn point is the only one); the F154 builds' lines do, and an F154 line has no hidden count.
+    zero = {"hid": "0", "hf": "0"}
+    sec = sorted([dict(zero, **dict(r, old=False, setting="drawn")) for r in rows.get("sec", [])] + [dict(zero, **dict(r, old=True)) for r in rows.get("secold", [])],
+                 key=lambda r: r.get("_order", 0))
+    writes = sorted([dict(zero, **dict(r, old=False, setting="drawn")) for r in rows.get("writes", [])] + [dict(zero, **dict(r, old=True)) for r in rows.get("writesold", [])],
+                    key=lambda r: r.get("_order", 0))
+    if not (armed or sec or writes or moves):
         return None
-    unpinned = [r for r in pins if r["state"].startswith("NOT pinned")]
-    if not sec:   # F125: the 1 s lines are the detail log's; without it no line says whether a panel was placed
-        return ("IDLE", ("no 1 s line (the detail log was off)" if _hdetail(ctx) in ("off", "mixed") else "no 2D placement on a panel") +
-                ("; the owner function's bytes are NOT pinned" if unpinned else ""))
-    order, groups = [], {}
-    for r in sec:
-        k = r["setting"].strip()
-        if k not in groups:
-            groups[k] = []
-            order.append(k)
-        groups[k].append(r)
-    kinds = (("rflat", "flat"), ("rnoeye", "no eye view"), ("rnohrc", "no HRC matrix"), ("rdeg", "degenerate row"), ("rnot", "not screen-space"),
-             ("rpin", "owner bytes not pinned"), ("rhead", "setting head"), ("rwrite", "write failed"))
-    parts, total_screen, never, partial, ok_any = [], 0, [], [], False
-    for k in order:
-        g = groups[k]
-        screen, corrected = sum(int(r["screen"]) for r in g), sum(int(r["corrected"]) for r in g)
-        judged = [r for r in g if int(r["still"]) > 0 and float(r["stt"]) > 5.0]
-        drifts = sorted(float(r["drift"]) for r in judged)
-        over = sum(1 for d in drifts if d >= 5.0)
-        turning = sum(1 for r in judged if "turns with the head" in r["frame"])
-        refused = ", ".join("%s %d" % (name, n) for name, n in ((name, sum(int(r[key]) for r in g)) for key, name in kinds) if n)
-        text = "%s: %d s, %d 2D placements, %d screen-space, corrected %d" % (k, len(g), sum(int(r["pl"]) for r in g), screen, corrected)
-        if refused:
-            text += " (refused: %s)" % refused
-        if judged:
-            text += "; %d judged second(s) (mouse still, head turn over 5 deg): cursor drift median %.1f mm, worst %.1f mm, %d at or over 5 mm" % (
-                len(judged), drifts[len(drifts) // 2], drifts[-1], over)
-            if turning:
-                text += ", the HUD frame turned with the head in %d of them" % turning
+    canon = ("shipped", "uv", "game", "drawn", "mirrored")
+    dead = [r for r in armed if r["state"] != "armed"]
+    seen = {r["setting"] for r in sec} | {r["setting"] for r in writes}
+    names = [n for n in canon if n in seen]
+    parts, never, hidden_over = [], [], []
+    for name in names:
+        s_rows, w_rows = [r for r in sec if r["setting"] == name], [r for r in writes if r["setting"] == name]
+        src = w_rows or s_rows   # the writes lines cover every placement; the turn lines only the judged seconds
+        pl, screen, written, hidden, hide_failed = (sum(int(r[k]) for r in src) for k in ("pl", "screen", "written", "hid", "hf"))
+        refused = [sum(int(r[k]) for r in src) for k in ("r0", "r1", "r2", "wf")]
+        causes = ", ".join("%s %d" % (n, c) for n, c in zip(_F154_CAUSES, refused) if c)
+        text = "%s: %d placements, %d screen-space, %d written" % (name, pl, screen, written)
+        if hidden or hide_failed:
+            text += ", %d hidden%s" % (hidden, ", %d hides failed" % hide_failed if hide_failed else "")
+        if causes:
+            text += " (refused: " + causes + ")"
+        if s_rows:
+            kw = [_hmedian([_hfloat(r[key]) for r in s_rows]) for key in ("kyw", "kpw")]
+            text += "; %d judged second(s): written k yaw %s pitch %s" % (len(s_rows), "n/a" if kw[0] is None else "%+.2f" % kw[0], "n/a" if kw[1] is None else "%+.2f" % kw[1])
         parts.append(text)
-        total_screen += screen
-        if k == "panel":
-            if screen and not corrected:
-                never.append(k)
-            elif judged and 2 * over > len(judged):
-                partial.append("%s drifted 5 mm or more in %d of %d judged seconds" % (k, over, len(judged)))
-            elif judged and turning == len(judged):
-                partial.append("the HRC frame turned with the head in all %d judged seconds under %s (E.Ht constant: the correction is near zero and the drift cannot "
-                               "show whether a panel seen to hold still is in that frame)" % (len(judged), k))
-            elif judged:
-                ok_any = True
-    text = "; ".join(parts)
-    if unpinned:
-        text += "; the owner function's bytes are NOT pinned (%s)" % unpinned[-1]["state"]
+        if name in ("drawn", "mirrored") and screen and not written:
+            never.append("%s met %d screen-space placements and wrote none (%s)" % (name, screen, ", ".join(x for x in (causes, "hidden %d" % hidden if hidden else "") if x) or "no refusal counted"))
+        elif name in ("drawn", "mirrored") and pl and not screen and any(r["old"] for r in src):
+            # The 2026-10-28 F154 flight: F120's pin read F154's own jump, so the screen-space test refused every panel and drawn and mirrored never acted.
+            never.append("%s met %d placements and none was screen-space (the screen-space test refused every panel: see the F120 pin line)" % (name, pl))
+        if name == "drawn" and screen and hidden * 10 > screen:
+            hidden_over.append("the hide fallback ran on %d of %d screen-space placements (%s)" % (hidden, screen, causes or "no cause counted"))
+    text = "; ".join(parts) if parts else "no placement on a panel"
+    w_rho = [(v, _hfloat(r["rfov"])) for r, v in ((r, _hfloat(r.get("rm"))) for r in writes) if v is not None]
+    if w_rho and not sec:
+        mean = sum(v for v, _ in w_rho) / len(w_rho)
+        fov = [f for _, f in w_rho if f is not None]
+        text += "; rho %s (mean %+.3f over %d window(s) of the writes line%s)" % ("negative" if mean < 0 else "positive", mean, len(w_rho),
+                                                                               "" if not fov else ", the fov ratio %.3f" % fov[-1])
+    if sec:
+        kg = [_hmedian([_hfloat(r[key]) for r in sec]) for key in ("kyg", "kpg")]
+        rho = [v for v in (_hfloat(r["rm"]) for r in sec) if v is not None]
+        mean = sum(rho) / len(rho) if rho else None
+        fov = [v for v in (_hfloat(r["rfov"]) for r in sec) if v is not None]
+        text += "; the game's own point: k yaw %s, pitch %s" % tuple("n/a" if v is None else "%+.2f (%s)" % (v, _hk_case(v)) for v in kg)
+        text += "; rho %s" % ("not read" if mean is None else "%s (mean %+.3f over %d judged second(s)%s)" % (
+            "negative" if mean < 0 else "positive", mean, len(rho), "" if not fov else ", the fov ratio %.3f" % fov[-1]))
+        turn, eye = max(float(r["turn"]) for r in sec), max(float(r["eye"]) for r in sec)
+        text += "; the head turned %.1f deg at most against the HUD frame, the eye moved %.1f mm at most" % (turn, eye)
+    if dead:
+        return ("NEVER APPLIED", text + "; the lever hook was not armed (%s): the lever cannot be read, so the drawn point is never written and the sprite is hidden on every "
+                "screen-space panel" % (dead[-1]["rest"].lstrip(": ") or "no reason given"))
     if never:
-        return ("NEVER APPLIED", text + "; %s met screen-space placements and corrected none" % ", ".join(never))
-    if not total_screen:
-        return ("IDLE", text + "; no screen-space panel")
-    if partial:
-        return ("PARTIAL", text + "; " + "; ".join(partial))
-    if ok_any:
-        return ("OK", text)
-    return ("IDLE", text + "; no mouse-still second with a head turn over 5 deg under panel to judge")
+        return ("NEVER APPLIED", text + "; " + "; ".join(never))
+    if not sec:
+        if hidden_over:
+            return ("PARTIAL", text + "; " + "; ".join(hidden_over))
+        return ("IDLE", text + "; no mouse-still second with the head turned over 2 deg against the HUD frame on a screen-space panel to judge")
+    active = sec[-1]["setting"]
+    a_rows = [r for r in sec if r["setting"] == active]
+    off = []
+    read = False
+    for axis, key in (("yaw", "kyw"), ("pitch", "kpw")):
+        v = _hmedian([_hfloat(r[key]) for r in a_rows])
+        if v is None:
+            continue
+        read = True
+        if abs(v - 1.0) > 0.25:
+            off.append("%s %+.2f" % (axis, v))
+    if off:
+        return ("PARTIAL", text + "; under %s the written point's k is not within 0.25 of 1 (%s): the cursor does not stay on the panel%s" % (
+            active, ", ".join(off), "; " + "; ".join(hidden_over) if hidden_over else ""))
+    if hidden_over:
+        return ("PARTIAL", text + "; " + "; ".join(hidden_over))
+    if not read:
+        return ("IDLE", text + "; the turn was too small about either axis to read k under %s" % active)
+    return ("OK", text + "; under %s the written point holds on the panel (k within 0.25 of 1)" % active)
 
 
 def _hj_f121_visor_axis(rows, ctx):
@@ -11307,45 +11302,6 @@ def _hj_f121c_eyes(rows, ctx):
     return ("IDLE", text + "; no visor draw to judge")
 
 
-def _hj_f122_mouse(rows, ctx):
-    """F122: the mouse cursor on on-foot panels, behind the advanced key fix.native_on_foot_panel_mouse (off hides the sprite the game draws, on draws it). Per
-    second with a panel reached: the key, the panels seen (a placement that set the hit byte), the sprites hidden and the hides whose write failed; once, whether
-    the placement hook that hides is armed. OK: off and every panel seen had its sprite hidden. PARTIAL: off, some hidden and some not (a write failed). NEVER
-    APPLIED: off and panels were seen with nothing hidden, or the placement hook was not armed. IDLE: the key on (nothing is hidden by design), or no panel reached."""
-    sec, sets, hooks = rows.get("sec", []), rows.get("setting", []), rows.get("hook", [])
-    if not sec and not sets and not hooks:
-        return None
-    key = sets[-1]["to"] if sets else (sec[-1]["setting"].strip() if sec else (rows["entry"][-1]["to"] if rows.get("entry") else "off"))
-    parts = ["key %s%s" % (key, " (%d change line(s))" % len(sets) if len(sets) > 1 else "")]
-    never, partial, hid_any = [], [], False
-    for k in ("off", "on"):
-        g = [r for r in sec if r["setting"].strip() == k]
-        if not g:
-            continue
-        seen, hidden, failed = (sum(int(r[f]) for r in g) for f in ("seen", "hidden", "failed"))
-        parts.append("%s: %d s with a panel, %d panels seen, %d sprites hidden, %d hide writes failed" % (k, _hcount(g, "xs", lambda r: int(r["seen"]) > 0), seen, hidden, failed))
-        if k == "off":
-            if seen and not hidden:
-                never.append("panels were seen (%d) and nothing was hidden" % seen)
-            elif failed or hidden < seen:
-                partial.append("%d of %d sprites hidden, %d hide writes failed" % (hidden, seen, failed))
-            elif hidden:
-                hid_any = True
-    unarmed = [r for r in hooks if r["state"] == "NOT armed"]
-    if unarmed and key == "off":
-        never.append("the placement hook was not armed (EliteDangerous64.exe+0x%s), so the cursor cannot be hidden" % unarmed[-1]["rva"])
-    text = "; ".join(parts)
-    if never:
-        return ("NEVER APPLIED", text + "; " + "; ".join(never))
-    if partial:
-        return ("PARTIAL", text + "; " + "; ".join(partial))
-    if hid_any:
-        return ("OK", text)
-    if key == "on" or any(r["setting"].strip() == "on" for r in sec):
-        return ("IDLE", text + "; the key is on: the game's cursor is drawn, nothing is hidden by design")
-    return ("IDLE", text + "; no panel was reached while the key was off")
-
-
 def _hj_f126_review(rows, ctx):
     """F126: the review fixes' two guards, counted every 10 s on foot (a window with no pin call and no arm IK call prints nothing). The pin takes the midpoint of the eyes
     only from two eyes' rows of one frame and keeps its last pair otherwise (the refused count); the arm IK refuses a call whose FP snapshot is of an earlier FP rig than the
@@ -11407,8 +11363,6 @@ def _hj_f114b_pointer(rows, ctx):
         if armed and all(r["state"] == "NOT armed" for r in armed):
             return ("NEVER APPLIED", "the owner transform hook was not armed%s, and %s" % (
                 armed[-1]["rest"], "no 1 s line (the detail log was off)" if quiet else "no panel was seen"))
-        if _hpanel_mouse_off(ctx, armed + owners):
-            return ("IDLE", "the panel mouse key is off: the instruments are idle by design")
         if quiet:
             return ("IDLE", "no 1 s line (the detail log was off) and no flight-so-far line (under 10 s with a panel, or none)")
         return ("NEVER APPLIED", "the hooks never saw a panel (no 1 s line): no panel with a mouse pointer was used on foot")
@@ -13068,19 +13022,11 @@ def _hj_f142_outfit(rows, ctx):
         _hsecs(sec), tot["calls"], tot["swapped"], tot["promoted"], _htop(names, 6), tot["refused"], tot["lost"], faults)
     if down:
         text += "; stood down after %s faults" % down[-1]["faults"]
-    # F152: the coat's Gear_Back kept to the shadows while the head is turned 45 deg or more from the body (resumed below 38): the calls it was kept on, the stops, and the largest
-    # |yaw| the pin published (a session figure). A log from before has no such columns.
-    turn = [r for r in sec if r.get("gated") is not None]
-    gated = _hsum(turn, "gated") if turn else 0
-    if turn:
-        text += "; head turn (F152): %d outer-garment call(s) kept from the promotion, %d stop(s), largest |head yaw| %s deg" % (gated, _hsum(turn, "stops"), max(int(r["yawmax"]) for r in turn))
     if ctext:
         text += "; " + ctext
     if not tot["promoted"]:
         if not tot["calls"]:
             return ("NEVER APPLIED", text + "; the visibility hook never covered the local avatar while the body wrote")
-        if gated:
-            return ("IDLE", text + "; the head's turn kept Gear_Back to the shadows on every outer-garment call (%d): nothing to promote" % gated)
         # F147: only EVASuit_Gear_Back is ever promoted, and only for an outer garment. In the other suit (suit arms present) or an outfit with no gear arms, F144 holds it back
         # and nothing was meant to be promoted: that is the feature doing what it should, not a hook that never found a part.
         if gear and "kept shadows only" in gear[-1]["what"]:
@@ -13150,6 +13096,87 @@ def _hj_f152_ads_depth(rows, ctx):
     if flags:
         return ("PARTIAL", text + " [" + "; ".join(flags) + "]")
     return ("OK", text)
+
+
+def _hj_f157_coat_pack(rows, ctx):
+    """F157: the coat outfit's pack draw (the backpack and the antenna, EVASuit_Gear_Back) left out of both eyes. While native on foot is active and F144 decided Gear_Back is the
+    outer garment (the coat), every draw into an eye-sized target with stencil ref 21 and the pack's shaders, index count and instance count is skipped; a window line (10 s, each
+    second in the detail log) counts the draws left out in each eye, the frames with one, and the seconds a weapon was drawn. OK when draws were left out while the coat outfit was
+    armed; NEVER APPLIED when the coat outfit was armed with a weapon drawn for 5 s or more and nothing was left out; IDLE otherwise (the coat outfit armed without a weapon drawn for
+    that long, or a saved value of the retired body-draw dial named and nothing else). No line at all is the coat outfit never armed in the window (not present)."""
+    sec, retired = rows.get("sec", []), rows.get("retired", [])
+    if not sec and not retired:
+        return None
+    rtext = "; a saved value of the retired body-draw dial (%s) was named and ignored" % retired[-1]["v"] if retired else ""
+    if not sec:
+        return ("IDLE", "no coat pack window in the log: the coat outfit was not armed (native on foot active with Gear_Back decided as the outer garment)" + rtext)
+    e0, e1 = _hsum(sec, "e0"), _hsum(sec, "e1")
+    eu = sum(int(r.get("eu") or 0) for r in sec)
+    frames, weapon = _hsum(sec, "frames"), _hsum(sec, "weapon")
+    text = "the coat outfit armed for %d s (%d window(s)), a weapon drawn for %d s: the pack's draw left out %d time(s) in eye 0 and %d in eye 1%s over %d frame(s)" % (
+        _hsecs(sec), len(sec), weapon, e0, e1, " (%d in an eye the target's table could not name)" % eu if eu else "", frames)
+    if e0 + e1 + eu:
+        return ("OK", text + rtext)
+    if weapon >= 5:
+        return ("NEVER APPLIED", text + "; the coat outfit was armed with a weapon drawn for %d s and no draw of the pack was left out (the draw path did not run, or the pack's identity "
+                                        "or stencil ref no longer matches this build's draw)%s" % (weapon, rtext))
+    return ("IDLE", text + "; no weapon was drawn for 5 s of it, so nothing is judged" + rtext)
+
+
+def _hj_f158_spawn(rows, ctx):
+    """F158 (MEASURE ONLY): the local body's draws over the first 30 s on foot. A window of 30 s opens when native on foot begins and when F144 decides the coat outfit; it lists
+    every kind of draw into an eye with stencil ref 21 (identity: the shaders, index count and instance count) with the ms of its first and last frame, and is written once, when it
+    ends: a header (the switch time: when the pack, F157's identity, was first drawn), an identity line each, and the adjacent pairs (an identity whose range ends where the next
+    one's begins in one index buffer). Per window this reports the switch time, the identities that stopped within 1 s of it (those in an adjacent pair that stopped first), and the
+    overflow. NEVER APPLIED when a window of 5 s or more listed no draw at all (the draw path did not run, or stencil ref 21 into an eye matches nothing in this build); OK when a
+    window saw the pack; IDLE when windows listed draws and none saw the pack (another outfit, or the pack's identity no longer matches); PARTIAL when OK but a window was not recorded."""
+    heads, ids, pairs, lost = rows.get("head", []), rows.get("id", []), rows.get("pairs", []), rows.get("lost", [])
+    if not heads and not ids and not pairs and not lost:
+        return None
+    parts, silent, seen_pack, listed_any = [], [], 0, False
+    for h in heads:
+        win, ran, listed = h["win"], int(h["ran"]), int(h["listed"])
+        switch = int(h["switch"]) if h.get("switch") is not None else None
+        over = "none" if not int(h["odraws"]) else "%s draw(s) of %s%s identity(ies) past the cap of %s turned away" % (h["odraws"], h["oids"], h["oplus"], h["cap"])
+        start = _hclock(h["_t"] - ran / 1000.0) if h.get("_t") is not None else "?"
+        head = "window %s (from about %s, opened by %s, %d ms, ended by %s%s)" % (win, start, h["opened"], ran, h["ended"],
+                                                                                  ", %s later trigger(s) ignored" % h["ignored"] if int(h["ignored"]) else "")
+        if listed:
+            listed_any = True
+        elif ran >= 5000 and not int(h["odraws"]):
+            silent.append(win)
+            parts.append(head + ": no draw of the local body was listed")
+            continue
+        mine = [r for r in ids if r["win"] == win]
+        marked = []   # the pairs with an identity that stopped within 1 s of the switch: (a, b, who stopped)
+        for p in [p for p in pairs if p["win"] == win]:
+            marked += [(int(a), int(b), w) for a, b, w in re.findall(r"(\d+)>(\d+) stopped:(a|b|both)", p["list"])]
+        if switch is None:
+            parts.append(head + ": the pack was not drawn; %d identity(ies) listed; overflow %s" % (listed, over))
+            continue
+        seen_pack += 1
+        near = [r for r in mine if r.get("stop") is not None and abs(int(r["last"]) - switch) <= 1000]
+        inpair = {x for a, b, _ in marked for x in (a, b)}
+        near.sort(key=lambda r: (int(r["n"]) not in inpair, int(r["n"])))
+        shown = []
+        for r in near[:8]:
+            n = int(r["n"])
+            mates = sorted({b if a == n else a for a, b, _ in marked if n in (a, b)})
+            shown.append("#%d (count %s instances %s, last %s ms%s)" % (n, r["count"], r["inst"], r["last"], "; adjacent to " + ", ".join("#%d" % m for m in mates) if mates else ""))
+        if len(near) > 8:
+            shown.append("%d more" % (len(near) - 8))
+        parts.append("%s: the pack first drawn at %d ms; %d of %d identity(ies) stopped within 1 s of it%s; %d adjacent pair(s) with one of them; overflow %s" % (
+            head, switch, len(near), listed, ": " + ", ".join(shown) if shown else "", len(marked), over))
+    if lost:
+        parts.append("%d window(s) not recorded (%s)" % (len(lost), lost[0]["why"]))
+    text = " | ".join(parts) if parts else "%d identity line(s) and no window header" % len(ids)
+    if silent:
+        return ("NEVER APPLIED", text + " [window %s ran 5 s or more and listed nothing: the draw path did not run, or stencil ref 21 into an eye-sized target matches no draw in this build]" % ", ".join(silent))
+    if seen_pack:
+        return ("PARTIAL" if lost else "OK", text)
+    if listed_any:
+        return ("IDLE", text + " [no window saw the pack: another outfit, or its identity no longer matches this build's draw]")
+    return ("IDLE", text)
 
 
 def _hj_f135_menu(rows, ctx):
@@ -13282,12 +13309,61 @@ def _hj_f95a_motion(rows, ctx):
     return ("OK", text)
 
 
+_H159_WHY = ("first", "item", "generation", "armsOk", "standDown", "supportCup", "refused", "uncommitted", "F159")
+
+
+def _hj_f159_elbow(rows):
+    """F159: the left elbow's stable pole on the two-handed guns (the non-pistol left arm), per item: the solved and FP elbows' heights over the shoulder, the seconds with the
+    solved elbow within 1 cm of the shoulder's height (the longest run of them at the hip), the swivel's distance from the pole's reference, the reseeds, and the seed births by
+    reason (the window lines' exact counts; the birth lines, at most one in 0.5 s, give the first cause and the figures). More than 2 s in a row with the elbow at the shoulder's
+    height at the hip is PARTIAL. Returns (text, notes), or None with no F159 line."""
+    pole, births = rows.get("pole", []), rows.get("birth", [])
+    if not pole and not births:
+        return None
+    items = collections.OrderedDict()
+    for r in pole:
+        items.setdefault(r["item"], []).append(r)
+    parts, raised = [], []
+    for item, rs in items.items():
+        n = sum(int(r["n"]) for r in rs)
+        if not n:
+            continue
+        mean = lambda k, rr=rs, nn=n: sum(int(r["n"]) * float(r[k]) for r in rr) / nn
+        run = max(int(r["run"]) for r in rs)
+        parts.append("%s %d s: %d solves, the solved elbow %+.1f cm over the shoulder (min %+.1f, max %+.1f), within 1 cm of the shoulder's height or above in %d s (%d at the hip, "
+                     "longest run at the hip %d s), the FP elbow %+.1f cm, the pole's preferred elbow at the ceiling in %d solves, the chosen elbow %.1f deg off the reference "
+                     "(max %.1f), reseeds %d" % (
+                         item, _hsecs(rs), n, mean("solved"), min(float(r["smin"]) for r in rs), max(float(r["smax"]) for r in rs), sum(int(r["secs"]) for r in rs),
+                         sum(int(r["hipsecs"]) for r in rs), run, mean("fp"), sum(int(r["ceil"]) for r in rs), mean("disp"), max(float(r["dmax"]) for r in rs),
+                         sum(int(r["reseeds"]) for r in rs)))
+        if run > 2:
+            raised.append("%s %d s" % (item, run))
+    keys = ("b_first", "b_item", "b_gen", "b_arms", "b_down", "b_cup", "b_ref", "b_unc", "b_f159")
+    if pole:
+        counts = [sum(int(r[k]) for r in pole) for k in keys]
+    else:
+        counts = [sum(1 for r in births if r["why"] == name) for name in _H159_WHY]
+    text = "left elbow pole (F159): " + ("; ".join(parts) if parts else "no solve with the stable pole")
+    by_reason = ", ".join("%s %d" % (name, c) for name, c in zip(_H159_WHY, counts) if c)
+    text += "; seed births by reason: %s" % (by_reason or "none")
+    if births:
+        firsts = collections.Counter("%s after %s" % (r["why"], r["since"]) for r in births if r.get("since"))
+        text += " (%d birth line(s)%s)" % (len(births), ": " + ", ".join("%s %d" % (k, v) for k, v in firsts.most_common(4)) if firsts else "")
+    notes = (["the left elbow stayed within 1 cm of the shoulder's height for more than 2 s in a row at the hip on a two-handed gun (%s)" % ", ".join(raised)]
+             if raised else [])
+    return text, notes
+
+
 def _hj_f98a_elbow(rows, ctx):
     """F98a: the left arm with a weapon drawn, per item: the game's aim pitch, the chest's lean, F82's torso yaw, the elbow's swivel from the stance's own plane and its
-    step a frame, where the swivel came from. An elbow off the stance's plane by over 45 deg in most of a second, or a step over 10 deg, is PARTIAL."""
+    step a frame, where the swivel came from. An elbow off the stance's plane by over 45 deg in most of a second, or a step over 10 deg, is PARTIAL. F159's lines (the stable
+    pole's elbow height, its reseeds and seed births) ride this rule: see _hj_f159_elbow."""
     sec = rows.get("sec", [])
+    f159 = _hj_f159_elbow(rows)
     if not sec:
-        return None
+        if f159 is None:
+            return None
+        return ("PARTIAL" if f159[1] else "OK", f159[0] + ("; " + "; ".join(f159[1]) if f159[1] else ""))
     items = collections.OrderedDict()
     for r in sec:
         items.setdefault(r["item"], []).append(r)
@@ -13338,6 +13414,9 @@ def _hj_f98a_elbow(rows, ctx):
                 notes.append("leading hypothesis: the forearm's twist limit (%d of %d flip seconds hit it with the axis 15 deg or more from down)" % (twist_n, flip_n))
             else:
                 notes.append("neither hypothesis fits the %d flip seconds (the axis 15 deg or more from down, the twist limit not hit)" % flip_n)
+    if f159 is not None:
+        text += "; " + f159[0]
+        notes = notes + f159[1]
     if notes:
         return ("PARTIAL", text + "; " + "; ".join(notes))
     return ("OK", text)
@@ -13379,7 +13458,86 @@ def _hj_f99a_draw(rows, ctx):
     return ("OK", text)
 
 
+# F160: the three ways a holster bridge ends (holsterEndName in src/d3d11/native_on_foot_f160.h), as the line says them, and as this report does
+H160_ENDS = (("Status.json named no item", "Status.json"), ("the game selected an item again", "a new selection"), ("the 4 s limit", "the 4 s limit"))
+
+
+def _hj_f160_holster(rows, ctx):
+    """F160: one line per holster the game's own selection saw (its none id read after a held one while Status.json still named the item): the armed flag is false from
+    then until Status.json lets the item go, the game selects an item again, or 4 s pass. The bridge's run when Status.json let go is the game's lead over Status.json (the
+    hands are unarmed that much sooner than they were). A bridge that ran to the 4 s limit is PARTIAL: Status.json kept naming an item, or the none id was not a holster.
+    The F66a lines (Status.json's own flips) are the cross-check: a flip to the fists after an item is a holster the game made, so one or more of them with no bridge line in
+    the window is the bridge never running (NEVER APPLIED), in a log of a build that has F160 (its F98c lines carry the ADS return's tail; a log of an earlier build has no way
+    to show a bridge and is not judged)."""
+    br = rows.get("bridge", [])
+    armed_before, status_holsters = False, 0
+    for r in sorted(rows.get("flip", []), key=lambda r: r["_order"]):
+        if r["to"] == "armed":
+            armed_before = True
+        else:
+            if r["tag"] == "fists" and armed_before:
+                status_holsters += 1
+            armed_before = False
+    if not br:
+        built = ctx is not None and any(r.get("rel") is not None for r in _hrows(ctx, "eye level (F98c)", "sec"))
+        if status_holsters and built:
+            return ("NEVER APPLIED", "no holster bridge line, while Status.json flipped to the fists after an item %d time(s) (F66a): the game's none selection was never read, "
+                    "or not as a holster" % status_holsters)
+        return None
+    counts = [(label, sum(1 for r in br if r["end"] == phrase)) for phrase, label in H160_ENDS]
+    held_back = sum(int(r.get("skipped") or 0) for r in br)
+    leads = sorted(int(r["ms"]) for r in br if r["end"] == H160_ENDS[0][0])
+    items = collections.Counter(r["item"] for r in br)
+    text = "%d holster bridge(s) (%d line(s)): ended by %s; items %s" % (
+        len(br) + held_back, len(br), ", ".join("%s %d" % (label, n) for label, n in counts),
+        ", ".join("%s %d" % (name, n) for name, n in items.most_common(4)))
+    if leads:
+        mid = len(leads) // 2
+        median = leads[mid] if len(leads) % 2 else (leads[mid - 1] + leads[mid]) // 2
+        text += "; the game's selection led Status.json by a median %d ms (max %d ms, min %d ms)" % (median, leads[-1], leads[0])
+    if held_back:
+        text += "; %d bridge(s) not logged (one line in 0.5 s)" % held_back
+    text += "; Status.json flipped to the fists after an item %d time(s) (F66a)" % status_holsters
+    timeouts = counts[2][1]
+    if timeouts:
+        return ("PARTIAL", text + "; %d bridge(s) ran to the 4 s limit: Status.json kept naming an item, or the none selection was not a holster; the flag went back to Status.json" % timeouts)
+    return ("OK", text)
+
+
+def _hj_f160_return(sec, ctx=None):
+    """F160: the neck reference's raise published as (1 - w) times the last settled target through the ADS release, in place of 0. Counted per release, at its first call: a
+    release is blended when the item and the stance class are those of the kept target, else it is not (no stored raise, another item, another stance: the two changes are the
+    pilot's, the first is not). Returns (status, text), or None with no release in the window. NEVER APPLIED when releases ran and none was blended (the raise came back
+    0.63 s after the request went off, on every one), or when the F89 trace saw a release and the windows of a build with this counter counted none (the return never ran);
+    PARTIAL when some had no stored raise to bring back."""
+    got = [r for r in sec if r.get("rel") is not None]
+    tot = dict((k, sum(int(r[k]) for r in got)) for k in ("rel", "bl", "blc", "nostored", "other_item", "other_stance"))
+    if not tot["rel"]:
+        traced = sum(1 for r in _hrows(ctx, H_F89_ADS, "start") if r["dir"] == "release") if ctx is not None and got else 0
+        if traced:
+            return ("NEVER APPLIED", "ADS return (F160): the F89 trace saw %d release(s) and the %d window line(s) of this build counted none: the return never ran" % (traced, len(got)))
+        return None
+    text = ("ADS return (F160): %d release(s), %d blended (%d calls), not blended: no stored raise %d, another item %d, another stance %d" % (
+        tot["rel"], tot["bl"], tot["blc"], tot["nostored"], tot["other_item"], tot["other_stance"]))
+    if not tot["bl"]:
+        return ("NEVER APPLIED", text + "; no release brought the raise back with the sights letting go")
+    if tot["nostored"]:
+        return ("PARTIAL", text + "; %d release(s) had no settled stance to bring back" % tot["nostored"])
+    return ("OK", text)
+
+
 def _hj_f98c_eye(rows, ctx):
+    """F98c's verdict (_hj_f98c_eye_base), and F160's on the same lines (the ADS return): the worse of the two, both texts."""
+    base = _hj_f98c_eye_base(rows, ctx)
+    f160 = _hj_f160_return(rows.get("sec", []), ctx)
+    if base is None or f160 is None:
+        return base
+    severity = {"NEVER APPLIED": 2, "PARTIAL": 1}
+    status = f160[0] if severity.get(f160[0], 0) > severity.get(base[0], 0) else base[0]
+    return (status, base[1] + "; " + f160[1])
+
+
+def _hj_f98c_eye_base(rows, ctx):
     """F98c: the settled targets by source, unarmed and armed, and the eye's height they put the view at. Armed, the eye stands over the stored unarmed neck of the
     stance; the starting raise is for a session with no unarmed stance stored. The starting raise taken after a second that closed with one stored, or unarmed
     stances settling with none ever stored (the stance's class never known), is PARTIAL."""
@@ -13902,30 +14060,36 @@ HEALTH_RULES = (
                   r"(?P<secs>\d+) s with a panel"),
         ("owner", r"panel pointer \(F114b\): a placed panel's pick mesh owner names EliteDangerous64\.exe\+0x(?P<rva>[0-9A-F]+) at vtable \+0x10 \((?P<what>[^)]*)\)"),
     ), _hj_f114b_pointer, needs_detail=True),   # F125: as F111's
-    _hrule("panel cursor fix (F117)", ("F117",), ("panel cursor fix (F117)",), (
-        ("sec", r"panel cursor fix \(F117\) 1 s: setting (?P<setting>[^;]+); the cursor on turned panels (?P<cursor>[^;]+); 2D placements (?P<pl>\d+): turned "
-                r"(?P<turned>\d+), upright (?P<upright>\d+); moved (?P<moved>\d+); left: upright \d+, the game's setting (?P<gameset>\d+); refused: no triangle at "
-                r"the uv (?P<notri>\d+), the sprite not at the uv (?P<notat>\d+), no triangle at the turned uv (?P<noturn>\d+); the uv to the cursor on turned "
-                r"panels right (?P<tr>%s) down (?P<td>%s)" % (_HN, _HN)),
-        ("setting", r"native on foot panel cursor fix \(F117\): (?P<to>panel|view|game) \(TEMPORARY"),
-        ("_", r"panel cursor fix \(F117\) so far: "),
-    ), _hj_f117_cursor, needs_detail=True),   # F125: as F111's
-    _hrule("panel cursor follow (F120)", ("F120",), ("panel cursor follow (F120)",), (
-        ("sec", r"panel cursor follow \(F120\) 1 s: setting (?P<setting>[^;]+); 2D placements (?P<pl>\d+), screen-space (?P<screen>\d+), corrected (?P<corrected>\d+), "
-                r"references taken (?P<refs>\d+); refused: flat (?P<rflat>\d+), no eye view (?P<rnoeye>\d+), no HRC matrix (?P<rnohrc>\d+), degenerate row (?P<rdeg>\d+), "
-                r"not screen-space (?P<rnot>\d+), owner bytes not pinned (?P<rpin>\d+), setting head (?P<rhead>\d+), write failed (?P<rwrite>\d+); this second the head "
-                r"turned (?P<te>[\d.]+) deg, the HUD frame (?P<th>[\d.]+) deg, the head against the HUD frame (?P<teh>[\d.]+) deg \((?P<frame>[^)]*)\); E\.Ht \(det "
-                r"(?P<det>%s)\) yaw (?P<yaw>%s) pitch (?P<pitch>%s) roll (?P<roll>%s) deg; mouse still: (?P<still>\d+) placements, head against the HUD frame "
-                r"(?P<stt>[\d.]+) deg, cursor drift (?P<drift>[\d.]+) mm" % (_HN, _HN, _HN, _HN)),
-        ("setting", r"native on foot panel cursor follow \(F120\): (?P<to>panel|head) \(TEMPORARY"),
-        ("pin", r"panel cursor follow \(F120\): the screen-space owner function at EliteDangerous64\.exe\+0x(?P<rva>[0-9A-F]+) is (?P<state>.*)$"),
-        ("_", r"panel cursor follow \(F120\) so far: "),
-    ), _hj_f120_follow, needs_detail=True),   # F125: as F111's
-    _hrule("panel mouse (F122)", ("F122",), ("panel mouse (F122)",), (
-        ("sec", r"panel mouse \(F122\) " + H_WL + r": setting (?P<setting>on|off); panels seen (?P<seen>\d+), sprites hidden (?P<hidden>\d+), hide write failed (?P<failed>\d+)(?:; panels active (?P<xs>\d+) of (?P<ws>\d+) s)?$"),
-        ("setting", r"native on foot panel mouse \(F122\): (?P<to>on|off) \(live;"),
-        ("hook", r"panel mouse \(F122\): the placement hook is (?P<state>armed|NOT armed) \(EliteDangerous64\.exe\+0x(?P<rva>[0-9A-F]+)\)(?P<rest>.*)$"),
-    ), _hj_f122_mouse),
+    _hrule("panel cursor turn (F154)", ("F154",), ("panel cursor turn (F154)", "panel cursor writes (F154)", "panel cursor frame (F154)", "panel lever (F154)",
+                                                     "native on foot panel cursor (F154)"), (
+        ("armed", r"panel lever \(F154\): lever hook (?P<state>armed|NOT armed) at EliteDangerous64\.exe\+0x(?P<rva>[0-9A-F]+) .*?, profile vr(?P<rest>.*)$"),
+        # F155: the lines of the drawn cursor (no setting, the game's and the written point, the sprites hidden by the fallback)
+        ("sec", r"panel cursor turn \(F154\) 1 s: placements (?P<pl>\d+): screen-space (?P<screen>\d+), written (?P<written>\d+), hidden (?P<hid>\d+), refused: "
+                r"no lever (?P<r0>\d+), tiny rho (?P<r1>\d+), not finite (?P<r2>\d+), write failed (?P<wf>\d+), hide failed (?P<hf>\d+), no eye view (?P<t0>\d+), "
+                r"no HRC matrix (?P<t1>\d+), degenerate row (?P<t2>\d+); judged (?P<judged>\d+) placements in (?P<jruns>\d+) of (?P<runs>\d+) runs, the head turned "
+                r"(?P<turn>[\d.]+) deg at most against the HUD frame, the eye moved (?P<eye>[\d.]+) mm at most; k yaw: game (?P<kyg>\S+) written (?P<kyw>\S+); k pitch: "
+                r"game (?P<kpg>\S+) written (?P<kpw>\S+); rho mean (?P<rm>\S+) min (?P<rmin>\S+) max (?P<rmax>\S+) from (?P<calls>\d+) owner calls \(screen-space "
+                r"(?P<lev>\d+), not (?P<ns>\d+), unread (?P<un>\d+)\); rho_fov (?P<rfov>\S+) fov_C1 (?P<fc1>\S+) deg fov_UI (?P<fui>\S+) deg mode (?P<mode>\S+); "
+                r"q\.z (?P<qz>\S+) m$"),
+        ("writes", r"panel cursor writes \(F154\) (?P<wl>\d+) s: placements (?P<pl>\d+): screen-space (?P<screen>\d+), written (?P<written>\d+), hidden (?P<hid>\d+), "
+                   r"refused: no lever (?P<r0>\d+), tiny rho (?P<r1>\d+), not finite (?P<r2>\d+), write failed (?P<wf>\d+), hide failed (?P<hf>\d+); owner calls "
+                   r"(?P<calls>\d+) \(screen-space (?P<lev>\d+), not (?P<ns>\d+), unread (?P<un>\d+)\); rho mean (?P<rm>\S+) min (?P<rmin>\S+) max (?P<rmax>\S+), "
+                   r"rho_fov (?P<rfov>\S+) fov_C1 (?P<fc1>\S+) deg fov_UI (?P<fui>\S+) deg mode (?P<mode>\S+), q\.z (?P<qz>\S+) m$"),
+        # the F154 builds' lines (2026-10-28): a setting in each, F117's point as a third stream, no hidden count; the writes line's lever tail came in F154b
+        ("secold", r"panel cursor turn \(F154\) 1 s: setting (?P<setting>\w+); placements (?P<pl>\d+): screen-space (?P<screen>\d+), written (?P<written>\d+), refused: "
+                   r"no lever (?P<r0>\d+), tiny rho (?P<r1>\d+), not finite (?P<r2>\d+), write failed (?P<wf>\d+), no eye view (?P<t0>\d+), no HRC matrix (?P<t1>\d+), "
+                   r"degenerate row (?P<t2>\d+); judged (?P<judged>\d+) placements in (?P<jruns>\d+) of (?P<runs>\d+) runs, the head turned (?P<turn>[\d.]+) deg at most "
+                   r"against the HUD frame, the eye moved (?P<eye>[\d.]+) mm at most; k yaw: game (?P<kyg>\S+) uv (?P<kyu>\S+) written (?P<kyw>\S+); k pitch: game (?P<kpg>\S+) "
+                   r"uv (?P<kpu>\S+) written (?P<kpw>\S+); rho mean (?P<rm>\S+) min (?P<rmin>\S+) max (?P<rmax>\S+) from (?P<calls>\d+) owner calls \(screen-space (?P<lev>\d+), "
+                   r"not (?P<ns>\d+), unread (?P<un>\d+)\); rho_fov (?P<rfov>\S+) fov_C1 (?P<fc1>\S+) deg fov_UI (?P<fui>\S+) deg mode (?P<mode>\S+); q\.z (?P<qz>\S+) m$"),
+        ("writesold", r"panel cursor writes \(F154\) (?P<wl>\d+) s: setting (?P<setting>\w+); placements (?P<pl>\d+): screen-space (?P<screen>\d+), written (?P<written>\d+), "
+                      r"refused: no lever (?P<r0>\d+), tiny rho (?P<r1>\d+), not finite (?P<r2>\d+), write failed (?P<wf>\d+); owner calls (?P<calls>\d+) "
+                      r"\(screen-space (?P<lev>\d+), not (?P<ns>\d+), unread (?P<un>\d+)\)(?:; rho mean (?P<rm>\S+) min (?P<rmin>\S+) max (?P<rmax>\S+), rho_fov "
+                      r"(?P<rfov>\S+) fov_C1 (?P<fc1>\S+) deg fov_UI (?P<fui>\S+) deg mode (?P<mode>\S+), q\.z (?P<qz>\S+) m)?$"),
+        ("setting", r"native on foot panel cursor \(F154\): (?P<to>shipped|uv|game|drawn|mirrored) \(TEMPORARY"),
+        ("_", r"panel cursor turn \(F154\) so far, \d+ s with a judged run: (?:placements|setting) "),
+        ("_", r"panel cursor frame \(F154\): ledger frame \d+ render frame \d+ panel "),
+    ), _hj_f154_turn),
     _hrule("review fixes (F126)", ("F126",), ("review fixes (F126)",), (
         ("sec", r"review fixes \(F126\) 10 s: pin eye pairs: (?P<calls>\d+) pin calls, (?P<taken>\d+) pairs taken, (?P<frames>\d+) refused for rows of two different frames; "
                 r"arm IK: (?P<ik>\d+) calls, (?P<rig>\d+) refused for an FP snapshot of an earlier rig$"),
@@ -14248,8 +14412,10 @@ HEALTH_RULES = (
         ("_", r"native on foot full outfit \(F142, TEMPORARY\): fix\.native_on_foot_body_full_outfit is (?:on|off) -- "),
         ("sec", r"native on foot full outfit \(F142\) " + H_WL + r": visibility calls of the local avatar (?P<calls>\d+), calls with a part promoted (?P<swapped>\d+), parts "
                 r"promoted (?P<promoted>\d+) \(by name: (?P<names>.+?)\), class changed by the game before the write (?P<refused>\d+), during the call (?P<lost>\d+), faults "
-                r"(?P<faults>\d+)(?:; head turn \(F152\): outer-garment calls kept from the promotion by the head's turn (?P<gated>\d+), stops (?P<stops>\d+), largest \|head yaw against the "
-                r"body\| (?P<yawmax>\d+) deg \(this session; Gear_Back stops at 45 deg and resumes below 38\))?$"),
+                r"(?P<faults>\d+)"
+                # F152 (the head's turn kept from the promotion, removed in F157): a log from the builds between them has these columns; they are read and ignored
+                r"(?:; head turn \(F152\): outer-garment calls kept from the promotion by the head's turn \d+, stops \d+, largest \|head yaw against the "
+                r"body\| \d+ deg \(this session; Gear_Back stops at 45 deg and resumes below 38\))?$"),
         ("down", r"native on foot full outfit \(F142\): stood down for the session after (?P<faults>\d+) faults"),
         ("census", r"native on foot outfit census \(F142\): change (?P<n>\d+) of the local third-person avatar AMC 0x(?P<amc>[0-9A-Fa-f]+): (?P<parts>\d+) of (?P<of>\d+) parts "
                    r"have instances; (?P<what>first read|changed: .+?); (?P<list>every part with an instance follows|only the parts that changed follow)$"),
@@ -14273,6 +14439,25 @@ HEALTH_RULES = (
         ("key", r"native on foot ADS eye offset \(F152, experimental\): experimental\.native_on_foot_ads_eye_offset_cm = (?P<v>%s) cm" % _HN),
         ("retired", r"native on foot: fix\.native_on_foot_ads_eye_distance_cm is retired \(F152\): ignored \(the file said (?P<v>%s) cm" % _HN),
     ), _hj_f152_ads_depth),
+    # F157: the coat outfit's pack draw left out of both eyes, one window line while the coat outfit is armed (and the line that names a saved value of the retired body-draw dial)
+    _hrule("coat pack hidden (F157)", ("F157",), ("native on foot coat pack hidden (F157)", "native_on_foot_body_draw_hide is retired (F157)"), (
+        ("sec", r"native on foot coat pack hidden \(F157\) " + H_WL + r": skipped eye 0 (?P<e0>\d+), eye 1 (?P<e1>\d+)(?:, eye unknown (?P<eu>\d+))? \((?P<frames>\d+) frames\), "
+                r"a weapon drawn for (?P<weapon>\d+) s$"),
+        ("retired", r"native on foot: experimental\.native_on_foot_body_draw_hide is retired \(F157\): ignored \(the file said (?P<v>-?\d+), "),
+    ), _hj_f157_coat_pack),
+    # F158 (measure only): the local body's draws over the first 30 s on foot, written once when the window ends: a header, an identity per line, the adjacent pairs
+    _hrule("body draws at spawn (F158)", ("F158",), ("body draws at spawn (F158)",), (
+        ("head", r"body draws at spawn \(F158\) window (?P<win>\d+): opened by (?P<opened>.+?), ran (?P<ran>\d+) ms \(ended by (?P<ended>.+?)\), the pack "
+                 r"(?:first drawn at (?P<switch>\d+) ms|not drawn in the window), (?P<listed>\d+) identity\(ies\) listed, (?P<odraws>\d+) draw\(s\) of (?P<oids>\d+)(?P<oplus>\+?) "
+                 r"identity\(ies\) past the cap of (?P<cap>\d+) turned away, (?P<ignored>\d+) later trigger\(s\) ignored, counted as the game issues them \(before the pack's skip\)$"),
+        ("id", r"body draws at spawn \(F158\) window (?P<win>\d+) identity (?P<n>\d+): vs (?P<vs>[0-9A-F]{16}) ps (?P<ps>[0-9A-F]{16}) count (?P<count>\d+) instances (?P<inst>\d+), "
+               r"first (?P<first>\d+) ms, last (?P<last>\d+) ms, frames eye 0 (?P<f0>\d+), eye 1 (?P<f1>\d+)(?:, eye unknown (?P<fu>\d+))?, first variant ib (?P<ib>[0-9A-F]+) "
+               r"start (?P<start>\d+) base (?P<base>-?\d+), (?P<variants>\d+)(?P<vplus>\+?) variant\(s\), previous draw (?P<prev>none|ib [0-9A-F]+ start \d+ count \d+)"
+               r"(?P<pack>, is the pack)?(?:, stopped at (?P<stop>\d+) ms)?$"),
+        ("pairs", r"body draws at spawn \(F158\) window (?P<win>\d+) adjacent pairs: (?P<total>\d+) pair\(s\), (?P<marked>\d+) with an identity stopped within 1 s of the switch time: "
+                  r"(?P<list>.+)$"),
+        ("lost", r"body draws at spawn \(F158\) window (?P<win>\d+): not recorded \((?P<why>.+)\)$"),
+    ), _hj_f158_spawn),
     _hrule("ADS sight line (F143)", ("F143",), ("native on foot ADS sight line (F143)", "native on foot ADS sight from the game (F143"), (
         # F146: the "key off" reason and the trims' columns are optional (a log from before F146 has them), and so is the switch's own line, read and ignored
         ("sec", r"native on foot ADS sight line \(F143\) " + H_WL + r": item (?P<item>.+?) scope (?P<scope>yes|no|unknown), source per frame: settled line (?P<game>\d+) "
@@ -14353,7 +14538,7 @@ HEALTH_RULES = (
                 r"\(min (?P<chestmin>%s)\), INSIDE (?P<inside>\d+) of (?P<clr>\d+); legs hip to foot over the leg: animated (?P<la>[\d.]+), written (?P<lw>[\d.]+) "
                 r"\(min (?P<lmin>[\d.]+)\), feet lifted (?P<lifted>\d+)" % ((_HN,) * 8)),
     ), _hj_f97a_body),
-    _hrule("left elbow (F98a)", ("F98a",), ("native on foot left elbow (F98a)",), (
+    _hrule("left elbow (F98a)", ("F98a", "F159"), ("native on foot left elbow (F98a)", "native on foot left elbow pole (F159)", "native on foot left elbow seed (F159)"), (
         ("sec", r"native on foot left elbow \(F98a\) (?P<wl>\d+) s: item (?P<item>\S+); (?P<n>\d+) solves: the game's aim pitch (?P<aim>%s) deg \(min %s max %s\); the chest's lean as "
                 r"written (?P<lean>%s) deg \(animated (?P<leanAnim>%s)\); F82's torso yaw (?P<yaw>%s) deg \(largest [\d.]+\); the elbow's swivel from the stance's plane "
                 r"(?P<plane>[\d.]+) deg \(max [\d.]+, over 45 deg in (?P<over45>\d+)\); its step a frame (?P<step>[\d.]+) deg rms \(max [\d.]+, over 10 deg (?P<over10>\d+), "
@@ -14364,6 +14549,19 @@ HEALTH_RULES = (
                 r"(?:at the largest step \((?P<dstep>[\d.]+) deg\) the axis was (?P<dang>[\d.]+) deg from down, the twist limit (?P<dtwist>hit|not hit)"
                 r"|no elbow step was measured))?"
                 r"(?:; seconds mostly over 45 deg (?P<swung_s>\d+); flip seconds (?P<flip_s>\d+) \(near vertical (?P<near_s>\d+), twist limit (?P<twist_s>\d+), near with twist (?P<near_twist_s>\d+)\))?" % ((_HN,) * 6)),
+        # F159: the left elbow's stable pole in the same window (a line of its own: F98a's has no room under the log's 1200 bytes), and each seed's birth
+        ("pole", r"native on foot left elbow pole \(F159\) (?P<wl>\d+) s: item (?P<item>\S+); (?P<n>\d+) solves with the stable pole \((?P<hipn>\d+) at the hip\): the solved elbow "
+                 r"(?P<solved>%s) cm over the shoulder \(min (?P<smin>%s) max (?P<smax>%s)\), within 1 cm of the shoulder's height or above in (?P<high>\d+) \((?P<hiphigh>\d+) at the hip\); "
+                 r"the FP elbow (?P<fp>%s) cm over the FP shoulder \(min (?P<fpmin>%s) max (?P<fpmax>%s)\); the pole's preferred elbow within 1 cm of the shoulder's height or above in "
+                 r"(?P<ceil>\d+); the chosen elbow (?P<disp>[\d.]+) deg from the pole's reference \(max (?P<dmax>[\d.]+)\); reseeds (?P<reseeds>\d+); seed births: first (?P<b_first>\d+), "
+                 r"item (?P<b_item>\d+), generation (?P<b_gen>\d+), armsOk (?P<b_arms>\d+), standDown (?P<b_down>\d+), supportCup (?P<b_cup>\d+), refused (?P<b_ref>\d+), "
+                 r"uncommitted (?P<b_unc>\d+), F159 (?P<b_f159>\d+); seconds with the elbow within 1 cm of the shoulder (?P<secs>\d+), at the hip (?P<hipsecs>\d+), longest run at the hip "
+                 r"(?P<run>\d+) s" % ((_HN,) * 6)),
+        ("birth", r"native on foot left elbow seed \(F159\): born by (?P<why>\w+) \((?:reseeded in place|first cause (?P<since>\w+), no seed for (?P<absent>\d+) ms)\); base swivel "
+                  r"(?P<base>%s) deg(?P<clamp>, clamped)?, from (?P<src>the FP elbow's pole|the legacy pole|the body-down pole); seeded elbow (?P<seeded>%s) cm over the shoulder, the FP "
+                  r"elbow (?P<fp>%s) cm; the left hand (?P<err>[\d.]+) cm off its grip; armed ramp (?P<ramp>[\d.]+); stance (?P<stance>\w+); head pitch (?P<pitch>%s deg|unread)"
+                  r"(?:; the pole it replaced put the elbow (?P<was>%s) cm over the shoulder with the arm (?P<off>[\d.]+) cm off its axis)?"
+                  r"(?:; (?P<skipped>\d+) earlier seed\(s\) not logged \(one line in 0\.5 s\))?" % ((_HN,) * 5)),
     ), _hj_f98a_elbow),
     _hrule("draw onset (F99a)", ("F99a",), ("native on foot draw onset (F99a)",), (
         ("sec", r"native on foot draw onset \(F99a\): item (?P<item>\S+); the game's selection (?P<sel>id [0-9A-F]{8}|not seen); body (?P<body>moving|still); Status\.json "
@@ -14371,12 +14569,23 @@ HEALTH_RULES = (
                 r"(?P<at>at \+\d+ ms|never); the armed ramp full (?P<full>at \+\d+ ms|never); bridges started (?P<started>\d+), released unnamed (?P<expired>\d+), "
                 r"put away (?P<away>\d+)"),
     ), _hj_f99a_draw),
+    _hrule("holster bridge (F160)", ("F160", "F66a"), ("native on foot holster bridge (F160)",), (
+        # Status.json's own flips of the held item (F66a), for the cross-check: a flip to the fists after an item is a holster
+        ("flip", r"native on foot armed \(F66a\): SelectedWeapon \"[^\"]*\" -> (?P<to>armed|unarmed)(?: \[(?P<tag>unknown|fists)\])?(?: \[native primary selection\])? "
+                 r"\(Status\.json samples read \d+;"),
+        ("bridge", r"native on foot holster bridge \(F160\): item (?P<item>\S+); the game's selection read none after id (?P<id>[0-9A-F]{8}) while Status\.json still named the item; "
+                   r"the bridge ran (?P<ms>\d+) ms and ended: (?P<end>Status\.json named no item|the game selected an item again|the 4 s limit)"
+                   r"(?:; (?P<skipped>\d+) earlier bridge\(s\) not logged \(one line in 0\.5 s\))?$"),
+    ), _hj_f160_holster),
     _hrule("eye level (F98c)", ("F98c",), ("native on foot eye level (F98c)",), (
         ("sec", r"native on foot eye level \(F98c\) (?P<wl>\d+) s: item (?P<item>\S+); settled targets: unarmed (?P<un>\d+) \(the stance not known (?P<unk>\d+)(?:, hunched (?P<hunch>\d+))?\), armed (?P<ar>\d+): "
                 r"the unarmed eye of the stance (?P<stance>\d+), the standing unarmed raise over the crouch (?P<over>\d+), the starting raise (?P<start>\d+); the eye they "
                 r"put the view at: unarmed (?P<ueye>[\d.]+ m \(min [\d.]+ max [\d.]+\)|none), armed (?P<aeye>[\d.]+ m \(min [\d.]+ max [\d.]+\)|none); the unarmed "
                 r"neck stored: standing (?P<ns>[\d.]+ m|none), crouched (?P<nc>[\d.]+ m|none)"
-                r"(?:; starting raise after stored (?P<after_stored>\d+); largest 1 s neck change (?P<neck_jump>[\d.]+) m)?"),
+                r"(?:; starting raise after stored (?P<after_stored>\d+); largest 1 s neck change (?P<neck_jump>[\d.]+) m)?"
+                # F160: the ADS releases of the window, how each was classed, and the pin calls that published the raise's blend
+                r"(?:; ADS return \(F160\): (?P<rel>\d+) releases, (?P<bl>\d+) blended \((?P<blc>\d+) calls\), not blended for want of a stored raise (?P<nostored>\d+), "
+                r"another item (?P<other_item>\d+), another stance (?P<other_stance>\d+))?$"),
     ), _hj_f98c_eye),
     _hrule("head in the shadows (F95c)", ("F95c",), ("native on foot head shadow (F95c)",), (
         ("sec", r"native on foot head shadow \(F95c\) (?P<wl>\d+) s: visibility calls (?P<calls>\d+), head as shadow-only (?P<swapped>\d+) \(head parts (?P<parts>\d+)\), "
@@ -14475,7 +14684,6 @@ def health_scan(text, since=None, until=None):
     carried, entered = None, False
     settings = {}
     setting_rules = (
-        ("panel mouse (F122)", re.compile(r"native on foot panel mouse \(F122\): (?P<to>on|off) \(live;")),
         ("visor census (F121b)", re.compile(r"native on foot visor axis \(F121b\): (?P<to>on|off) \(TEMPORARY")),
         ("head containment (F119)", re.compile(r"head containment \(F119\): report context: reference (?P<reference>\d+) \((?P<known>known|not read)\), epoch (?P<epoch>\d+), (?P<context>steady|mixed rest)$")),
     )
@@ -14798,7 +15006,7 @@ def main(argv=None):
                     help="post-flight feature health: one line per build-tagged feature family (weapon readout size and pistol "
                          "readout F90, weapon readout part roles, ADS press fit and ADS item gate F91, rifle ADS readout F92, readout swap F93a, weapon UI pin F85b, reticle "
                          "depth F85c, view height hold F87h, weapon eye offset F88, ADS transition F89, ADS sight in both eyes F106, marker fix, "
-                         "prompt anchor and label F87p, the label's designed offset F93c and its own-anchor move F94b, the head in the shadows F95c, the full outfit F142-F144 and F152 (Gear_Back promotion and the head turn that holds it back, the coat's clip, the first-person census), the ADS sight offset F139, the ADS eye depth F152 (base + offset + trim per weapon), the engine shadow against the own shadow of the readout's origin rows (on the F85b line), the weapon readout's placement F140 and F144 (with the journal's loadout), the game's ADS sight point and the readout anchor F141, the ADS sight line F143, the weapon UI's tag slots F145, the ADS entry path F144, the marker tee and the pose hook's CPU F100, the in-world screens' coverage F105, the terminal hold F108, the HUD hide F116, and world scale, read from the paired runtime log) saying OK, "
+                         "prompt anchor and label F87p, the label's designed offset F93c and its own-anchor move F94b, the head in the shadows F95c, the full outfit F142-F144 (Gear_Back promotion for the coat, the coat's clip, the first-person census), the coat's pack draw left out of both eyes F157, the ADS sight offset F139, the ADS eye depth F152 (base + offset + trim per weapon), the engine shadow against the own shadow of the readout's origin rows (on the F85b line), the weapon readout's placement F140 and F144 (with the journal's loadout), the game's ADS sight point and the readout anchor F141, the ADS sight line F143, the weapon UI's tag slots F145, the ADS entry path F144, the marker tee and the pose hook's CPU F100, the in-world screens' coverage F105, the terminal hold F108, the HUD hide F116, and world scale, read from the paired runtime log) saying OK, "
                          "PARTIAL, NEVER APPLIED "
                          "(its own lines show it did nothing), IDLE or UNPARSED with the counters that decide it, then a census of "
                          "every `(F<n>...)` tagged line (count, first and last time, leading label) for the features with no rule. "
@@ -15338,6 +15546,10 @@ def self_test_health():
     f121b_path = os.path.join(repo_root(), "src", "d3d11", "visor_census_core.h")
     f121c_path = os.path.join(repo_root(), "src", "d3d11", "visor_eye_trust.h")
     f140reader_path = os.path.join(repo_root(), "src", "d3d11", "journal_loadout_reader.h")
+    f158_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f158.h")
+    f159_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f159.h")
+    f160_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f160.h")
+    f154_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f154.h")
     try:
         source, swap, f90src, f91src = read_text(src_path), read_text(swap_path), read_text(f90_path), read_text(f91_path)
         f105src, f105note = read_text(f105_path), read_text(f105_note_path)
@@ -15349,6 +15561,10 @@ def self_test_health():
         f121bsrc = read_text(f121b_path)
         f121csrc = read_text(f121c_path)
         f140readersrc = read_text(f140reader_path)
+        f158src = read_text(f158_path)
+        f159src = read_text(f159_path)
+        f160src = read_text(f160_path)
+        f154src = read_text(f154_path)
     except OSError as e:
         print("health: the DLL source the self-test reads its log formats from is not where it looks (%s)" % e)
         return False
@@ -15387,6 +15603,34 @@ def self_test_health():
             fmts[key] = health_c_format(f91src, needle)
         if fmts[key] is None:
             raise AssertionError("native_on_foot_f91.h has no format holding %r: the --health rule that reads it is out of date" % needle)
+        return health_render(fmts[key], vals)
+
+    def R158(needle, *vals):
+        """F158's lines (formatHeader, formatIdentity, formatPairs and their pieces in native_on_foot_f158.h) and the two "not recorded" notes (native_on_foot.cpp), from their own
+        format literals."""
+        key = "f158:" + needle
+        if key not in fmts:
+            fmts[key] = health_c_format(f158src, needle) or health_c_format(source, needle)
+        if fmts[key] is None:
+            raise AssertionError("native_on_foot_f158.h and native_on_foot.cpp have no format holding %r: the --health rule that reads it is out of date" % needle)
+        return health_render(fmts[key], vals)
+
+    def R159(needle, *vals):
+        """F159's lines (formatSummary, formatBirth in native_on_foot_f159.h), from their own format literals."""
+        key = "f159:" + needle
+        if key not in fmts:
+            fmts[key] = health_c_format(f159src, needle)
+        if fmts[key] is None:
+            raise AssertionError("native_on_foot_f159.h has no format holding %r: the --health rule that reads it is out of date" % needle)
+        return health_render(fmts[key], vals)
+
+    def R160(needle, *vals):
+        """F160's holster line (formatHolster in native_on_foot_f160.h), from its own format literals."""
+        key = "f160:" + needle
+        if key not in fmts:
+            fmts[key] = health_c_format(f160src, needle)
+        if fmts[key] is None:
+            raise AssertionError("native_on_foot_f160.h has no format holding %r: the --health rule that reads it is out of date" % needle)
         return health_render(fmts[key], vals)
 
     def R105(needle, *vals):
@@ -15465,6 +15709,15 @@ def self_test_health():
             fmts[key] = health_c_format(f123src, needle)
         if fmts[key] is None:
             raise AssertionError("native_on_foot_f123.h has no format holding %r: the --health rule that reads it is out of date" % needle)
+        return health_render(fmts[key], vals)
+
+    def R154(needle, *vals):
+        """F154's lines (native_on_foot_f154.h builds them: formatTurn, formatWrites, formatFrame), from their own format literals."""
+        key = "f154:" + needle
+        if key not in fmts:
+            fmts[key] = health_c_format(f154src, needle)
+        if fmts[key] is None:
+            raise AssertionError("native_on_foot_f154.h has no format holding %r: the --health rule that reads it is out of date" % needle)
         return health_render(fmts[key], vals)
 
     def stamp(sec):
@@ -16105,76 +16358,6 @@ def self_test_health():
         check("F125 F114b: detail off and the hook not armed is still NEVER APPLIED", [P_OFF, p114_armed("NOT armed", why="x")], 3, [("NEVER APPLIED", F114B)],
               has=["the owner transform hook was not armed: x, and no 1 s line (the detail log was off)"])
 
-        # ---- panel cursor fix (F117): the cursor on a turned panel against the true uv, per setting ----
-        F117 = "panel cursor fix (F117)"
-
-        def pcf(setting="panel", cursor="follows the uv", turned=80, upright=0, moved=80, gameset=0, notat=0, tr=0.98, td=0.97):
-            return R("panel cursor fix (F117) 1 s", setting, cursor, turned + upright, turned, upright, moved, upright, gameset, 0, notat, 0, tr, td, 0.0, 0.0)
-
-        def pcf_set(to="panel"):
-            # the change line an F117 to F121 build wrote when its key moved (the key is retired in F122; older logs carry the line)
-            return ("native on foot panel cursor fix (F117): %s (TEMPORARY, live; a turned panel's cursor: panel = at the panel's point for the click's place, "
-                    "view = mirrored through the view's centre, game = the game's own place)" % to)
-
-        check("F117 cursor: panel follows the uv, game against it (the A/B)",
-              [pcf_set(), pcf(), pcf(), pcf_set("game"), pcf("game", "against the uv", moved=0, gameset=80, tr=-0.99, td=-0.98)], 0, [("OK", F117)],
-              has=["panel: 2 s, turned 160, moved 160, the cursor follows the uv in 2 s, against it in 0 s", "game: 1 s, turned 80, moved 0, the cursor "
-                   "follows the uv in 0 s, against it in 1 s"], lacks=["UNPARSED"])
-        check("F117 cursor: turned panels, nothing moved", [pcf(moved=0, notat=80, cursor="against the uv", tr=-0.99, td=-0.98)], 3, [("NEVER APPLIED", F117)],
-              has=["the sprite not at the uv 80"])
-        check("F117 cursor: moved but still against the uv", [pcf(cursor="against the uv", tr=-0.9, td=-0.9)] * 2, 0, [("PARTIAL", F117)],
-              has=["still against the uv"])
-        check("F117 cursor: only upright panels", [pcf(cursor="no turned panel", turned=0, upright=60, moved=0)], 0, [("IDLE", F117)],
-              has=["no turned panel"])
-
-        # ---- panel cursor follow (F120): the cursor on a screen-space panel when the head turns, per setting ----
-        F120 = "panel cursor follow (F120)"
-        TURNS = "the HUD frame turns with the head, E.Ht holds constant, so the correction is near zero and a panel seen to hold still is not in the HRC frame"
-        STILL = "the HUD frame holds still, so the correction follows the head's turn"
-
-        def pcfo(setting="panel", pl=90, screen=90, corrected=90, refs=0, refused=(0, 0, 0, 0, 0, 0, 0, 0), te=20.0, th=0.0, teh=20.0, frame=STILL, det=1,
-                 ypr=(1.0, -2.0, 0.5), still=80, stt=18.0, drift=0.4):
-            return R("panel cursor follow (F120) 1 s", setting, pl, screen, corrected, refs, *refused, te, th, teh, frame, det, *ypr, still, stt, drift)
-
-        def pcfo_set(to="panel"):
-            # the change line an F120 or F121 build wrote when its key moved (the key is retired in F122; older logs carry the line)
-            return ("native on foot panel cursor follow (F120): %s (TEMPORARY, live; a screen-space panel's cursor when the head turns: panel = stays on the drawn "
-                    "panel, head = the game's own place, riding with the head)" % to)
-
-        def pcfo_pin(state="pinned (its first 16 bytes match build 334925)"):
-            return R("panel cursor follow (F120): the screen-space owner function", 0x47299F0, state)
-
-        check("F120 follow: panel holds the cursor on the panel, head lets it ride (the A/B)",
-              [pcfo_pin(), pcfo_set(), pcfo(), pcfo(), pcfo(), pcfo_set("head"), pcfo("head", corrected=0, refused=(0, 0, 0, 0, 0, 0, 90, 0), drift=113.3),
-               pcfo("head", corrected=0, refused=(0, 0, 0, 0, 0, 0, 90, 0), drift=108.0)], 0, [("OK", F120)],
-              has=["panel: 3 s, 270 2D placements, 270 screen-space, corrected 270; 3 judged second(s) (mouse still, head turn over 5 deg): cursor drift median 0.4 mm, "
-                   "worst 0.4 mm, 0 at or over 5 mm", "head: 2 s", "corrected 0 (refused: setting head 180); 2 judged second(s)", "cursor drift median 113.3 mm"],
-              lacks=["UNPARSED", "NOT pinned"])
-        check("F120 follow: the owner bytes do not match the pin, every panel refused", [pcfo_pin("NOT pinned (its first 16 bytes are 4C 8B DC 49 89 5B 18 57 48 81 EC "
-                                                                                              "40 01 00 00 42; every panel is refused)"),
-                                                                                  pcfo(screen=0, corrected=0, refused=(0, 0, 0, 0, 0, 90, 0, 0), te=0.0, teh=0.0,
-                                                                                       frame="no screen-space panel", still=0, stt=0.0, drift=0.0)] * 2, 0,
-              [("IDLE", F120)], has=["the owner function's bytes are NOT pinned", "owner bytes not pinned 180"])
-        check("F120 follow: drifted 5 mm or more under panel", [pcfo(drift=12.0), pcfo(drift=9.0), pcfo(drift=2.0)], 0, [("PARTIAL", F120)],
-              has=["2 at or over 5 mm", "panel drifted 5 mm or more in 2 of 3 judged seconds"])
-        check("F120 follow: the HRC frame turned with the head in every judged second", [pcfo(frame=TURNS, teh=0.2, drift=0.0)] * 3, 0, [("PARTIAL", F120)],
-              has=["the HUD frame turned with the head in 3 of them", "the HRC frame turned with the head in all 3 judged seconds under panel"])
-        check("F120 follow: screen-space placements, none corrected", [pcfo(corrected=0, refused=(0, 0, 0, 90, 0, 0, 0, 0))] * 2, 3, [("NEVER APPLIED", F120)],
-              has=["refused: degenerate row 180", "panel met screen-space placements and corrected none"])
-        check("F120 follow: only panels that are not screen-space", [pcfo(screen=0, corrected=0, refused=(0, 0, 0, 0, 90, 0, 0, 0), te=0.0, teh=0.0,
-                                                                         frame="no screen-space panel", still=0, stt=0.0, drift=0.0)] * 2, 0, [("IDLE", F120)],
-              has=["no screen-space panel", "refused: not screen-space 180"])
-        check("F120 follow: corrected, but no mouse-still second with a head turn to judge", [pcfo(still=0, stt=0.0, drift=0.0), pcfo(stt=3.0, drift=0.1)], 0,
-              [("IDLE", F120)], has=["no mouse-still second with a head turn over 5 deg under panel to judge"])
-        check("F120 follow: the flat profile refuses", [pcfo("flat (refused)", screen=0, corrected=0, refused=(90, 0, 0, 0, 0, 0, 0, 0), te=0.0, teh=0.0,
-                                                          frame="no screen-space panel", still=0, stt=0.0, drift=0.0)], 0, [("IDLE", F120)], has=["refused: flat 90"])
-        # F125: the 1 s lines are the detail log's (F117 and F120 have only those to judge: with the detail log off they are not judged, or idle beside a pin line)
-        check("F125 F120: detail off, the pin line alone", [P_OFF, pcfo_pin()], 0, [("IDLE", F120)], has=["no 1 s line (the detail log was off)"],
-              lacks=["no 2D placement"])
-        check("F125 F120: no F125 line, the pin line alone is as before", [pcfo_pin()], 0, [("IDLE", F120)], has=["no 2D placement on a panel"])
-        check("F125 F117/F120: detail off, only the flight-so-far lines", [P_OFF, R("panel cursor fix (F117) so far", "panel", "follows the uv", 20, 900, 0, 900, 0.98,
-                                                                                  0.97), R("panel cursor follow (F120) so far", "panel", 20, 900, 0, 20.0, 80, 18.0, 0.4)],
-              0, has=["  not judged (detail log off)  ", "panel cursor fix (F117), panel cursor follow (F120)"], lacks=["UNPARSED"])
         # ---- visor axis (F121): the on-foot helmet visor's frame centred on each eye's optical axis (the Pimax Crystal Super's tangents: outer 1.2546, inner 0.8746) ----
         F121 = "visor axis (F121)"
 
@@ -16299,31 +16482,98 @@ def self_test_health():
         check("F121b census: seconds with no answered sample are not a black scene", [cen(key="on", n=0, e0=0, e1=0, black=0, mx="0", mean=0.0, exr=0, dropped=15)], 0,
               [("IDLE", F121B)], has=["no sample answered"])
         check("F121b census: a line the rule does not parse", ["visor axis (F121b) 1 s: a format nobody wrote"], 4, [("UNPARSED", F121B)])
-        # ---- panel mouse (F122): the cursor on on-foot panels hidden by default, behind one advanced key ----
-        F122 = "panel mouse (F122)"
+        # ---- panel cursor turn (F154, F155): the drawn cursor, its hide fallback, and how the game's own point turns against the head ----
+        F154 = "panel cursor turn (F154)"
 
-        def pm(setting="off", seen=90, hidden=90, failed=0, wl=1, active=None):
-            return R("panel mouse (F122) %u s", wl, setting, seen, hidden, failed, int(bool(seen)) if active is None else active, wl)
+        def pt(pl=90, screen=90, written=90, hidden=0, refused=(0, 0, 0, 0), hf=0, tref=(0, 0, 0), judged=40, jruns=2, runs=3, turn=12.0, eye=3.0, ky=("-2.00", "+1.00"),
+               kp=("n/a", "n/a"), rho=("-1.865", "-1.870", "-1.860"), calls=300, lev=300, ns=0, un=0, cross=("1.992", "93.60", "56.25", "4"), qz="+0.7450", win="1 s"):
+            return R154("panel cursor turn (F154) %s", win, pl, screen, written, hidden, *refused, hf, *tref, judged, jruns, runs, turn, eye, *ky, *kp, *rho, calls, lev, ns, un, *cross, qz)
 
-        def pm_set(to="off"):
-            return R("native on foot panel mouse (F122): %s (live", to)
+        def pw(wl=10, pl=900, screen=900, written=900, hidden=0, refused=(0, 0, 0, 0), hf=0, calls=3000, lev=3000, ns=0, un=0, rho=("-1.865", "-1.870", "-1.860"),
+               cross=("1.992", "93.60", "56.25", "4"), qz="+0.7450"):
+            return R154("panel cursor writes (F154) %u s", wl, pl, screen, written, hidden, *refused, hf, calls, lev, ns, un, *rho, *cross, qz)
 
-        def pm_hook(state="armed", rest=""):
-            return R("panel mouse (F122): the placement hook is %s (EliteDangerous64.exe+0x%llX)%s", state, 0x4559C50, rest)
+        def pa(state="armed", why=""):
+            return R("panel lever (F154): lever hook %s at EliteDangerous64.exe", state, 0x47299F0, ": " if why else "", why)
 
-        check("F122 mouse: off hides every sprite of the panels reached", [pm_set(), pm_hook(), pm(), pm(), pm()], 0, [("OK", F122)],
-              has=["key off", "off: 3 s with a panel, 270 panels seen, 270 sprites hidden, 0 hide writes failed"], lacks=["UNPARSED"])
-        check("F122 mouse: off, panels reached, nothing hidden", [pm_set(), pm_hook(), pm(hidden=0, failed=90), pm(hidden=0, failed=90)], 3, [("NEVER APPLIED", F122)],
-              has=["panels were seen (180) and nothing was hidden", "off: 2 s with a panel, 180 panels seen, 0 sprites hidden, 180 hide writes failed"])
-        check("F122 mouse: the placement hook was not armed", [pm_set(), pm_hook("NOT armed", ": the cursor cannot be hidden, the game draws it")], 3,
-              [("NEVER APPLIED", F122)], has=["the placement hook was not armed (EliteDangerous64.exe+0x4559C50)"])
-        check("F122 mouse: some writes failed", [pm_set(), pm_hook(), pm(hidden=80, failed=10), pm()], 0, [("PARTIAL", F122)],
-              has=["170 of 180 sprites hidden, 10 hide writes failed"])
-        check("F122 mouse: off, no panel reached", [pm_set(), pm_hook()], 0, [("IDLE", F122)], has=["key off", "no panel was reached while the key was off"])
-        check("F122 mouse: on draws the game's cursor", [pm_set("on"), pm_hook(), pm("on", hidden=0), pm("on", hidden=0)], 0, [("IDLE", F122)],
-              has=["key on", "on: 2 s with a panel, 180 panels seen, 0 sprites hidden", "nothing is hidden by design"])
-        check("F122 mouse: the key moved from off to on and back", [pm_set(), pm_hook(), pm(), pm_set("on"), pm("on", hidden=0), pm_set("off"), pm()], 0,
-              [("OK", F122)], has=["key off (3 change line(s))", "off: 2 s with a panel, 180 panels seen, 180 sprites hidden", "on: 1 s with a panel, 90 panels seen"])
+        check("F155 cursor: the drawn point holds on the panel; the game's own point turns twice against the head",
+              [pa(), pt(), pt(), pt(), pw()], 0, [("OK", F154)],
+              has=["drawn: 900 placements, 900 screen-space, 900 written; 3 judged second(s): written k yaw +1.00 pitch n/a",
+                   "the game's own point: k yaw -2.00 (about -2 (against the head, twice as far as the panel turns)), pitch n/a",
+                   "rho negative (mean -1.865 over 3 judged second(s), the fov ratio 1.992)", "under drawn the written point holds on the panel (k within 0.25 of 1)"],
+              lacks=["UNPARSED"])
+        check("F155 cursor: the written point not on the panel", [pa(), pt(ky=("-2.00", "-2.00")), pt(ky=("-2.01", "-1.95"))], 0, [("PARTIAL", F154)],
+              has=["under drawn the written point's k is not within 0.25 of 1 (yaw -1.95)"])
+        check("F155 cursor: the hide fallback on more than a tenth of the screen-space placements",
+              [pa(), pt(), pw(written=700, hidden=200, refused=(150, 30, 20, 0))], 0, [("PARTIAL", F154)],
+              has=["drawn: 900 placements, 900 screen-space, 700 written, 200 hidden (refused: no lever 150, tiny rho 30, not finite 20)",
+                   "the hide fallback ran on 200 of 900 screen-space placements (no lever 150, tiny rho 30, not finite 20)"])
+        check("F155 cursor: the hide fallback on a tenth or less, the written point on the panel", [pa(), pt(), pw(written=860, hidden=40, refused=(40, 0, 0, 0))], 0, [("OK", F154)],
+              has=["860 written, 40 hidden (refused: no lever 40)"], lacks=["the hide fallback ran"])
+        check("F155 cursor: the hide fallback alone, with no judged second", [pa(), pw(written=700, hidden=200, refused=(200, 0, 0, 0))], 0, [("PARTIAL", F154)],
+              has=["the hide fallback ran on 200 of 900 screen-space placements (no lever 200)", "rho negative (mean -1.865 over 1 window(s) of the writes line"])
+        check("F155 cursor: a hide that failed is counted", [pa(), pw(written=700, hidden=190, hf=10, refused=(200, 0, 0, 0))], 0, [("PARTIAL", F154)],
+              has=["190 hidden, 10 hides failed"])
+        check("F155 cursor: the lever hook was not armed",
+              [pa("NOT armed", "its vtable slot does not hold it"), pt(written=0, hidden=90, refused=(90, 0, 0, 0), ky=("-2.00", "-2.00"), rho=("n/a", "n/a", "n/a"), calls=0, lev=0,
+                                                                  cross=("n/a", "n/a", "n/a", "n/a"), qz="n/a")], 3,
+              [("NEVER APPLIED", F154)], has=["the lever hook was not armed (its vtable slot does not hold it)", "rho not read"])
+        check("F155 cursor: screen-space placements met and none got the drawn point", [pa(), pw(written=0, hidden=900, refused=(0, 900, 0, 0), lev=0, un=3000)], 3,
+              [("NEVER APPLIED", F154)], has=["drawn met 900 screen-space placements and wrote none (tiny rho 900, hidden 900)"])
+        check("F155 cursor: panels met and none was screen-space is nothing to judge", [pa(), pw(screen=0, written=0)], 0, [("IDLE", F154)],
+              has=["drawn: 900 placements, 0 screen-space, 0 written", "no mouse-still second with the head turned over 2 deg against the HUD frame on a screen-space panel to judge"])
+        check("F155 cursor: the writes line alone gives rho", [pa(), pw()], 0, [("IDLE", F154)], has=["rho negative (mean -1.865 over 1 window(s) of the writes line, the fov ratio 1.992)"])
+        check("F155 cursor: the hook armed, no panel placed", [pa()], 0, [("IDLE", F154)], has=["no placement on a panel"])
+        check("F155 cursor: a turn about neither axis to read", [pa(), pt(ky=("n/a", "n/a"), kp=("n/a", "n/a"))], 0, [("IDLE", F154)],
+              has=["the turn was too small about either axis to read k under drawn"])
+        for k_game, word in (("+2.05", "about +2 (with the head"), ("+0.10", "about 0 (locked to the camera)"), ("+0.95", "about 1 (held on the panel)"),
+                             ("-0.90", "about -1 (against the head, as far"), ("-2.10", "about -2 (against the head, twice"), ("+0.60", "(other)")):
+            check("F155 cursor: the game's own k %s reads as %s" % (k_game, word), [pa(), pt(ky=(k_game, "+1.00"), kp=(k_game, "+1.00"))], 0, [("OK", F154)],
+                  has=["k yaw %s (%s" % (k_game, word) if word != "(other)" else "k yaw +0.60 (other)"])
+        check("F155 cursor: a positive rho", [pa(), pt(rho=("+1.000", "+1.000", "+1.000"), ky=("+1.00", "+1.00"))], 0, [("OK", F154)], has=["rho positive (mean +1.000"])
+        check("F155 cursor: the flight-so-far line and the dump-sync lines are read, not counted",
+              [pa(), pt(), pt(win="so far, 10 s with a judged run"), R154("panel cursor frame (F154): ledger frame %u", 1234, 5678, 0x1234)], 0, [("OK", F154)], lacks=["UNPARSED"])
+        check("F155 cursor: a line the rule does not parse", ["panel cursor turn (F154) 1 s: a format nobody wrote"], 4, [("UNPARSED", F154)])
+
+        # The F154 builds' lines (a setting in each, the F117 point as a third stream, no hidden count), from the flights of 2026-10-28, copied from the logs.
+        OLD_ARMED = ("panel lever (F154): lever hook armed at EliteDangerous64.exe+0x47299F0 (the screen-space pick mesh owner's vtable +0x10, build 334925, prologue and slot "
+                     "verified; the lever and the fields it comes from are read, nothing is written), profile vr")
+        OLD_SET_SHIPPED = ("native on foot panel cursor (F154): shipped (TEMPORARY, live; with fix.native_on_foot_panel_mouse on, the cursor on a screen-space panel is placed: shipped = F117 "
+                           "then F120, uv = F117 alone, game = the game's own place, drawn = the game's place with the pick mesh's lever undone, mirrored = the same lever taken as the "
+                           "cursor's draw divides by |rho|; the clicks land where the mouse is in every setting)")
+        OLD_W_114227_SHIPPED = ("panel cursor writes (F154) 10 s: setting shipped; placements 627: screen-space 0, written 627, refused: no lever 0, tiny rho 0, not finite 0, write failed 0; "
+                                "owner calls 627 (screen-space 627, not 0, unread 0)")
+        OLD_W_114227_DRAWN = ["panel cursor writes (F154) 3 s: setting drawn; placements 166: screen-space 0, written 0, refused: no lever 0, tiny rho 0, not finite 0, write failed 0; "
+                              "owner calls 177 (screen-space 177, not 0, unread 0)",
+                              "panel cursor writes (F154) 5 s: setting drawn; placements 292: screen-space 0, written 0, refused: no lever 0, tiny rho 0, not finite 0, write failed 0; "
+                              "owner calls 304 (screen-space 304, not 0, unread 0)"]
+        OLD_T_115855_SHIPPED = ("panel cursor turn (F154) 1 s: setting shipped; placements 90: screen-space 90, written 90, refused: no lever 0, tiny rho 0, not finite 0, write failed 0, "
+                                "no eye view 0, no HRC matrix 0, degenerate row 0; judged 56 placements in 1 of 13 runs, the head turned 14.8 deg at most against the HUD frame, the eye "
+                                "moved 23.8 mm at most; k yaw: game -1.92 uv -2.18 written -1.18; k pitch: game -1.12 uv -1.54 written -0.88; rho mean -1.949 min -1.949 max -1.949 from "
+                                "90 owner calls (screen-space 90, not 0, unread 0); rho_fov -1.949 fov_C1 93.60 deg fov_UI -57.30 deg mode 4; q.z +0.6949 m")
+        OLD_T_115855_DRAWN = ("panel cursor turn (F154) 1 s: setting drawn; placements 79: screen-space 79, written 79, refused: no lever 0, tiny rho 0, not finite 0, write failed 0, "
+                              "no eye view 0, no HRC matrix 0, degenerate row 0; judged 18 placements in 2 of 36 runs, the head turned 6.3 deg at most against the HUD frame, the eye "
+                              "moved 11.2 mm at most; k yaw: game -2.97 uv -0.70 written +1.12; k pitch: game -2.80 uv -0.17 written +1.15; rho mean -1.949 min -1.949 max -1.949 from "
+                              "79 owner calls (screen-space 79, not 0, unread 0); rho_fov -1.949 fov_C1 93.60 deg fov_UI -57.30 deg mode 4; q.z +0.6702 m")
+        OLD_T_115855_MIRRORED = ("panel cursor turn (F154) 1 s: setting mirrored; placements 90: screen-space 90, written 90, refused: no lever 0, tiny rho 0, not finite 0, write failed 0, "
+                                 "no eye view 0, no HRC matrix 0, degenerate row 0; judged 22 placements in 1 of 30 runs, the head turned 13.5 deg at most against the HUD frame, the "
+                                 "eye moved 22.5 mm at most; k yaw: game -2.28 uv -1.84 written +2.26; k pitch: game -3.74 uv -0.98 written +2.23; rho mean -1.949 min -1.949 max "
+                                 "-1.949 from 90 owner calls (screen-space 90, not 0, unread 0); rho_fov -1.949 fov_C1 93.60 deg fov_UI -57.30 deg mode 4; q.z +0.6923 m")
+        OLD_W_115855_SHIPPED = ("panel cursor writes (F154) 10 s: setting shipped; placements 781: screen-space 781, written 781, refused: no lever 0, tiny rho 0, not finite 0, write failed 0; "
+                                "owner calls 826 (screen-space 826, not 0, unread 0); rho mean -1.949 min -1.949 max -1.949, rho_fov -1.949 fov_C1 93.60 deg fov_UI -57.30 deg mode 4, "
+                                "q.z +0.6674 m")
+        check("F154 flight edvr_gfx_20261028_114227: the screen-space test refused every panel, so the drawn setting met placements and none was screen-space",
+              [OLD_ARMED, OLD_SET_SHIPPED, OLD_W_114227_SHIPPED] + OLD_W_114227_DRAWN, 3, [("NEVER APPLIED", F154)],
+              has=["drawn: 458 placements, 0 screen-space, 0 written", "drawn met 458 placements and none was screen-space"], lacks=["UNPARSED"])
+        check("F154 flight edvr_gfx_20261028_115855: the drawn setting held the written point on the panel", [OLD_ARMED, OLD_SET_SHIPPED, OLD_T_115855_SHIPPED, OLD_T_115855_DRAWN,
+                                                                                                         OLD_W_115855_SHIPPED], 0, [("OK", F154)],
+              has=["shipped: 781 placements, 781 screen-space, 781 written; 1 judged second(s): written k yaw -1.18 pitch -0.88", "drawn: 79 placements, 79 screen-space, 79 written; "
+                   "1 judged second(s): written k yaw +1.12 pitch +1.15", "the game's own point: k yaw -1.92 (about -2", "rho negative (mean -1.949 over 2 judged second(s), the fov ratio -1.949)",
+                   "under drawn the written point holds on the panel"], lacks=["UNPARSED"])
+        check("F154 flight edvr_gfx_20261028_115855: mirrored left the written point at twice the panel's turn", [OLD_ARMED, OLD_T_115855_DRAWN, OLD_T_115855_MIRRORED], 0,
+              [("PARTIAL", F154)], has=["under mirrored the written point's k is not within 0.25 of 1 (yaw +2.26, pitch +2.23)"], lacks=["UNPARSED"])
+        check("F154 flight edvr_gfx_20261028_115855: shipped turned against the head", [OLD_ARMED, OLD_T_115855_SHIPPED], 0, [("PARTIAL", F154)],
+              has=["under shipped the written point's k is not within 0.25 of 1 (yaw -1.18, pitch -0.88)"], lacks=["UNPARSED"])
 
         # ---- review fixes (F126): the pin's eye pairs refused for rows of two frames, the arm IK calls refused for an FP snapshot of an earlier rig ----
         F126 = "review fixes (F126)"
@@ -16524,6 +16774,51 @@ def self_test_health():
               [elbow98(PISTOL98, tail=down98(closest=30.0, step=2.0, ang=50.0)), elbow98(PISTOL98, tail=down98(closest=35.0))], 0, [("OK", F98)],
               has=["the body-down pole: 152 solves, the arm's axis came within 30.0 deg of the body's down"], lacks=["UNPARSED", "flip second", "hypothesis"])
 
+        # ---- F159: the left elbow's stable pole at the shoulder's height, its reseeds and its seeds' births (the lines ride the F98a rule) ----
+        def pole159(item=RIFLE97, wl=10, n=900, hipn=900, solved=-12.0, smin=-16.0, smax=-8.0, high=0, hiphigh=0, fp=-14.0, fpmin=-16.0, fpmax=-12.0, ceil=0, disp=0.0, dmax=0.0,
+                    reseeds=0, births=(0,) * 9, secs=0, hipsecs=0, run=0):
+            """F159's window line, from the DLL's own format (formatSummary, native_on_foot_f159.h)."""
+            return R159("native on foot left elbow pole (F159) %u s: item %s", wl, item, n, hipn, solved, smin, smax, high, hiphigh, fp, fpmin, fpmax, ceil, disp, dmax, reseeds,
+                        *births, secs, hipsecs, run)
+
+        def birth159(why="item", since="item", absent=120, base=-31.0, clamp=False, src="the FP elbow's pole", seeded=-12.0, fp=-14.0, err=4.0, ramp=1.0, stance="standing",
+                     pitch=-6.0, was=None, off=15.8, skipped=0):
+            """F159's birth line (formatBirth); with was given it is a reseed, born in place."""
+            cause = "reseeded in place" if was is not None else R159("first cause %s, no seed for %llu ms", since, absent)
+            line = R159("native on foot left elbow seed (F159): born by %s (%s)", why, cause, base, ", clamped" if clamp else "", src, seeded, fp, err, ramp, stance,
+                        "unread" if pitch is None else "%+.1f deg" % pitch)
+            if was is not None:
+                line += R159("; the pole it replaced put the elbow", was, off)
+            if skipped:
+                line += R159("earlier seed(s) not logged", skipped)
+            return line
+
+        check("F159 elbow: the natural elbow under the shoulder", [elbow98(), pole159()], 0, [("OK", F98)],
+              has=["left elbow pole (F159): " + RIFLE97 + " 10 s: 900 solves, the solved elbow -12.0 cm over the shoulder (min -16.0, max -8.0), within 1 cm of the shoulder's height or "
+                   "above in 0 s (0 at the hip, longest run at the hip 0 s), the FP elbow -14.0 cm", "seed births by reason: none"], lacks=["UNPARSED", "more than 2 s"])
+        check("F159 elbow: the flight's raised elbow, 8 s in a row at the hip, with its reseed",
+              [elbow98(), pole159(solved=-0.3, smin=-1.2, smax=0.4, high=840, hiphigh=840, ceil=880, disp=8.5, dmax=13.0, secs=8, hipsecs=8, run=8, reseeds=1,
+                                  births=(0, 1, 0, 0, 0, 0, 0, 0, 1))], 0, [("PARTIAL", F98)],
+              has=["the left elbow stayed within 1 cm of the shoulder's height for more than 2 s in a row at the hip on a two-handed gun (" + RIFLE97 + " 8 s)",
+                   "the chosen elbow 8.5 deg off the reference (max 13.0), reseeds 1", "seed births by reason: item 1, F159 1"], lacks=["UNPARSED"])
+        check("F159 elbow: two seconds in a row is not more than two", [elbow98(), pole159(high=180, hiphigh=180, secs=2, hipsecs=2, run=2)], 0, [("OK", F98)],
+              has=["longest run at the hip 2 s"], lacks=["more than 2 s", "UNPARSED"])
+        check("F159 elbow: a run split by a window's edge (the next line carries the run on)",
+              [elbow98(), pole159(run=2, hipsecs=2, secs=2, high=160, hiphigh=160), elbow98(), pole159(run=5, hipsecs=3, secs=3, high=240, hiphigh=240)], 0, [("PARTIAL", F98)],
+              has=["(" + RIFLE97 + " 5 s)", "in 5 s (5 at the hip, longest run at the hip 5 s)"], lacks=["UNPARSED"])
+        check("F159 elbow: the elbow at the shoulder's height in ADS only is not the hip's run",
+              [elbow98(), pole159(hipn=0, high=700, hiphigh=0, secs=9, hipsecs=0, run=0)], 0, [("OK", F98)],
+              has=["in 9 s (0 at the hip, longest run at the hip 0 s)"], lacks=["more than 2 s", "UNPARSED"])
+        check("F159 elbow: the births by reason, each line's first cause, a reseed and a limited line",
+              [elbow98(), pole159(reseeds=1, births=(1, 2, 0, 0, 0, 1, 0, 0, 1)), birth159("item", "item", 5), birth159("supportCup", "item", 340, clamp=True, src="the legacy pole", skipped=3),
+               birth159("F159", was=0.4, pitch=None, stance="crouched", seeded=-11.9, base=-75.0, src="the body-down pole")], 0, [("OK", F98)],
+              has=["seed births by reason: first 1, item 2, supportCup 1, F159 1", "(3 birth line(s): item after item 1, supportCup after item 1)"], lacks=["UNPARSED"])
+        check("F159 elbow: the lines alone (the F98a line missing) are read, not dropped",
+              [pole159(high=840, hiphigh=840, secs=8, hipsecs=8, run=8), birth159("armsOk", "standDown")], 0, [("PARTIAL", F98)],
+              has=["more than 2 s in a row at the hip", "(1 birth line(s): armsOk after standDown 1)"], lacks=["UNPARSED"])
+        check("F159 elbow: a line that drifted from its pattern is unparsed", ["native on foot left elbow pole (F159) 10 s: something else"], 4, [("UNPARSED", F98)])
+        check("F159 elbow: a birth line that drifted from its pattern is unparsed", ["native on foot left elbow seed (F159): born somewhere"], 4, [("UNPARSED", F98)])
+
         # ---- draw onset (F99a): a drawn item's hands from the game's own selection ----
         F99 = "draw onset (F99a)"
         TOOL99 = "$humanoid_companalyser_name;"
@@ -16541,8 +16836,14 @@ def self_test_health():
         # ---- eye level (F98c): armed, the eye where it stands unarmed in the same stance ----
         F98C = "eye level (F98c)"
 
-        def eye98(item=RIFLE97, un=0, unk=0, ar=0, stance=0, over=0, start=0, ueye="none", aeye="none", ns="1.543 m", nc="none", hunch=0, wl=1, after_stored=None, neck_jump=None):
-            line = R("native on foot eye level (F98c) %u s: item %s", wl, item, un, unk, hunch, ar, stance, over, start, ueye, aeye, ns, nc, after_stored or 0, neck_jump or 0.0)
+        def eye98(item=RIFLE97, un=0, unk=0, ar=0, stance=0, over=0, start=0, ueye="none", aeye="none", ns="1.543 m", nc="none", hunch=0, wl=1, after_stored=None, neck_jump=None,
+                  ads=None):
+            """F98c's window line; ads: F160's tail as (releases, blended, blended calls, no stored raise, another item, another stance), else the line of a build before it."""
+            line = R("native on foot eye level (F98c) %u s: item %s", wl, item, un, unk, hunch, ar, stance, over, start, ueye, aeye, ns, nc, after_stored or 0, neck_jump or 0.0,
+                     *(ads or ()))
+            if ads is not None:
+                return line
+            line = line.split("; ADS return (F160)")[0]
             return line if after_stored is not None or neck_jump is not None else line.split("; starting raise after stored")[0]
 
         EYE = "1.693 m (min 1.693 max 1.693)"
@@ -16559,6 +16860,72 @@ def self_test_health():
         check("F103 eye: the combat stance hunched, the upright neck kept", [eye98("$humanoid_fists_name;", un=90, ueye=EYE, ns="1.542 m"),
               eye98("$humanoid_fists_name;", un=70, hunch=70, ueye=EYE, ns="1.542 m"), eye98(ar=74, stance=74, aeye=EYE, ns="1.542 m")], 0, [("OK", F98C)],
               has=["unarmed 160 (the stance not known 0, hunched 70)", "the armed eye 1.693 m"], lacks=["jumped", "UNPARSED"])
+
+        # ---- ADS return (F160): the raise's blend through the release, on the F98c line ----
+        check("F160 return: every release blended", [eye98(ar=60, stance=60, aeye=EYE, ads=(2, 2, 52, 0, 0, 0))], 0, [("OK", F98C)],
+              has=["ADS return (F160): 2 release(s), 2 blended (52 calls), not blended: no stored raise 0, another item 0, another stance 0"], lacks=["UNPARSED", "PARTIAL"])
+        check("F160 return: a window with no release says nothing of it", [eye98(ar=60, stance=60, aeye=EYE, ads=(0, 0, 0, 0, 0, 0))], 0, [("OK", F98C)], lacks=["ADS return (F160)", "UNPARSED"])
+        check("F160 return: a release in a window with no armed settled stance", [eye98("$humanoid_fists_name;", un=60, ueye=EYE, ads=(1, 1, 26, 0, 0, 0))], 0,
+              [("IDLE", F98C)], has=["no armed settled stance", "ADS return (F160): 1 release(s), 1 blended"], lacks=["UNPARSED"])
+        check("F160 return: releases that never brought the raise back", [eye98(ar=60, stance=60, aeye=EYE, ads=(3, 0, 0, 3, 0, 0))], 3, [("NEVER APPLIED", F98C)],
+              has=["ADS return (F160): 3 release(s), 0 blended (0 calls), not blended: no stored raise 3", "no release brought the raise back with the sights letting go"])
+        check("F160 return: a release with another item or stance is the pilot's, not the blend's", [eye98(ar=60, stance=60, aeye=EYE, ads=(4, 2, 52, 0, 1, 1))], 0, [("OK", F98C)],
+              has=["4 release(s), 2 blended (52 calls), not blended: no stored raise 0, another item 1, another stance 1"], lacks=["UNPARSED", "PARTIAL"])
+        check("F160 return: one release of three had no stored raise", [eye98(ar=60, stance=60, aeye=EYE, ads=(3, 2, 52, 1, 0, 0))], 0, [("PARTIAL", F98C)],
+              has=["1 release(s) had no settled stance to bring back"])
+        check("F160 return: it adds to F98c's own verdict (the starting raise taken with an unarmed stance stored)",
+              [eye98("$humanoid_fists_name;", un=60, ueye=EYE), eye98(ar=60, start=60, after_stored=60, aeye="1.629 m (min 1.629 max 1.629)", ads=(1, 0, 0, 1, 0, 0))], 3, [("NEVER APPLIED", F98C)],
+              has=["the starting raise taken 60 times with an unarmed stance stored", "no release brought the raise back"])
+        check("F160 return: the windows' releases add up across lines", [eye98(ar=60, stance=60, aeye=EYE, ads=(1, 1, 26, 0, 0, 0), wl=10),
+              eye98(ar=60, stance=60, aeye=EYE, ads=(2, 2, 52, 0, 0, 0), wl=10)], 0, [("OK", F98C)], has=["3 release(s), 3 blended (78 calls)"])
+        check("F160 return: the F89 trace saw a release and no window of this build counted one (the return never ran)",
+              [ads_start("release"), eye98(ar=60, stance=60, aeye=EYE, ads=(0, 0, 0, 0, 0, 0))], 3, [("NEVER APPLIED", F98C)],
+              has=["the F89 trace saw 1 release(s) and the 1 window line(s) of this build counted none: the return never ran"])
+        check("F160 return: a release traced by F89 in a log whose build has no counter is not judged", [ads_start("release"), eye98(ar=60, stance=60, aeye=EYE)], 0, [("OK", F98C)],
+              lacks=["the return never ran"])
+        check("F160 return: a trace of the press only is no release", [ads_start("press"), eye98(ar=60, stance=60, aeye=EYE, ads=(0, 0, 0, 0, 0, 0))], 0, [("OK", F98C)],
+              lacks=["the return never ran"])
+        check("F160 return: a tail that drifted from its pattern is unparsed", [eye98(ar=60, stance=60, aeye=EYE, ads=(1, 1, 26, 0, 0, 0)).replace(
+              "ADS return (F160): 1 releases", "ADS return (F160): something else")], 4, [("UNPARSED", F98C)])
+
+        # ---- holster bridge (F160): the holster from the game's own selection ----
+        H160 = "holster bridge (F160)"
+        ST160, NEW160, LIM160 = H160_ENDS[0][0], H160_ENDS[1][0], H160_ENDS[2][0]
+        for phrase in (ST160, NEW160, LIM160):   # the three ends are the header's holsterEndName; the format has no %s for them
+            if phrase not in f160src:
+                raise AssertionError("native_on_foot_f160.h does not say %r: the --health rule that reads it is out of date" % phrase)
+
+        def holster160(item=RIFLE97, ident=0x12, ms=1349.6, end=ST160, skipped=0):
+            """F160's holster line, from the DLL's own format (formatHolster, native_on_foot_f160.h)."""
+            line = R160("native on foot holster bridge (F160): item %s", item, ident, ms, end)
+            return line + (R160("earlier bridge(s) not logged", skipped) if skipped else "")
+
+        check("F160 holster: the flight's three holsters, Status.json 1.0-3.1 s behind the game's selection",
+              [holster160(ms=1349.6), holster160(ms=970.4, ident=0x13), holster160(ms=3080.0)], 0, [("OK", H160)],
+              has=["3 holster bridge(s) (3 line(s)): ended by Status.json 3, a new selection 0, the 4 s limit 0; items " + RIFLE97 + " 3",
+                   "led Status.json by a median 1350 ms (max 3080 ms, min 970 ms)"], lacks=["UNPARSED", "PARTIAL"])
+        check("F160 holster: a draw while it ran and a limit", [holster160(ms=300.0, end=NEW160), holster160(ms=4011.0, end=LIM160), holster160(ms=1100.0)], 0, [("PARTIAL", H160)],
+              has=["ended by Status.json 1, a new selection 1, the 4 s limit 1", "median 1100 ms", "1 bridge(s) ran to the 4 s limit"], lacks=["UNPARSED"])
+        check("F160 holster: the lines the rate limit kept out are counted", [holster160(skipped=3), holster160(ms=1200.0, item="$humanoid_rechargetool_name;")], 0, [("OK", H160)],
+              has=["5 holster bridge(s) (2 line(s))", "3 bridge(s) not logged (one line in 0.5 s)", "median 1275 ms"], lacks=["UNPARSED"])
+        check("F160 holster: an even number of leads takes the middle two", [holster160(ms=1000.0), holster160(ms=2000.0)], 0, [("OK", H160)], has=["median 1500 ms (max 2000 ms, min 1000 ms)"])
+        def flip160(item, to, tag="", primary=""):
+            """F66a's held-item change line, from the DLL's own format (f66ArmedStep, native_on_foot.cpp)."""
+            return R("native on foot armed (F66a): SelectedWeapon", item, to, " [%s]" % tag if tag else "", " [native primary selection]" if primary else "", 120)
+
+        check("F160 holster: the flips of Status.json are counted beside the bridges",
+              [flip160(RIFLE97, "armed"), holster160(), flip160("$humanoid_fists_name;", "unarmed", "fists"), flip160(RIFLE97, "armed"), holster160(ms=1000.0),
+               flip160("$humanoid_fists_name;", "unarmed", "fists")], 0, [("OK", H160)], has=["Status.json flipped to the fists after an item 2 time(s) (F66a)"], lacks=["UNPARSED"])
+        check("F160 holster: Status.json flipped to the fists after an item and no bridge ran",
+              [eye98(ar=60, stance=60, aeye=EYE, ads=(0, 0, 0, 0, 0, 0)), flip160(RIFLE97, "armed", primary="p"), flip160("$humanoid_fists_name;", "unarmed", "fists")], 3,
+              [("NEVER APPLIED", H160)], has=["no holster bridge line, while Status.json flipped to the fists after an item 1 time(s) (F66a)"])
+        check("F160 holster: the same flips in a log of the build before F160 are not judged (it could not show a bridge)",
+              [eye98(ar=60, stance=60, aeye=EYE), flip160(RIFLE97, "armed", primary="p"), flip160("$humanoid_fists_name;", "unarmed", "fists")], 0,
+              lacks=["NEVER APPLIED", "no holster bridge line"])
+        check("F160 holster: a swap, an unknown Status.json and the first reading are not holsters",
+              [flip160("$humanoid_fists_name;", "unarmed", "fists"), flip160(RIFLE97, "armed"), flip160("$wpn_m_smg_name;", "armed"), flip160("(not in Status.json)", "unarmed", "unknown")], 0,
+              lacks=["NEVER APPLIED", "UNPARSED", "no holster bridge line"])
+        check("F160 holster: a line that drifted from its pattern is unparsed", ["native on foot holster bridge (F160): item x; the bridge ended somewhere"], 4, [("UNPARSED", H160)])
 
         # ---- camera away (F107): the game's camera away from the commander ----
         F107 = "camera away (F107)"
@@ -17093,8 +17460,8 @@ def self_test_health():
             """The switch's own line, as a log from before F146 has it."""
             return "native on foot full outfit (F142, TEMPORARY): fix.native_on_foot_body_full_outfit is %s -- x" % state
 
-        def fo_sec(wl=10, calls=900, swapped=900, promoted=900, names="EVASuit_Gear_Back 900", refused=0, lost=0, faults=0, gated=0, stops=0, yaw=0):
-            return R("native on foot full outfit (F142) %u s", wl, calls, swapped, promoted, names, refused, lost, faults, gated, stops, yaw)
+        def fo_sec(wl=10, calls=900, swapped=900, promoted=900, names="EVASuit_Gear_Back 900", refused=0, lost=0, faults=0):
+            return R("native on foot full outfit (F142) %u s", wl, calls, swapped, promoted, names, refused, lost, faults)
 
         def fo_census(n=1, amc=0x28A831A0DD8, parts=24, of=54, what="first read", lst="every part with an instance follows"):
             return R("native on foot outfit census (F142): change %u", n, amc, parts, of, what, lst)
@@ -17337,16 +17704,18 @@ def self_test_health():
         check("F144 full outfit: a drifted first-person line is unparsed", ["native on foot first-person census (F144): something else"], 4, [("UNPARSED", FO142)])
         check("F144 full outfit: a drifted decision line is unparsed", ["native on foot full outfit (F144): something else"], 4, [("UNPARSED", FO142)])
 
-        # ---- F152: the head turn on the full outfit line ----
-        check("F152 full outfit: the head turn's counts ride the window line", [fo_census(), fo_part(), fo_sec(gated=120, stops=3, yaw=62), fo_sec()], 0, [("OK", FO142)],
-              has=["head turn (F152): 120 outer-garment call(s) kept from the promotion, 3 stop(s), largest |head yaw| 62 deg"], lacks=["UNPARSED"])
-        check("F152 full outfit: the turn kept the promotion on every outer-garment call", [fo_sec(swapped=0, promoted=0, names="none", gated=900, stops=2, yaw=71), gear144()], 0,
-              [("IDLE", FO142)], has=["the head's turn kept Gear_Back to the shadows on every outer-garment call (900)"], lacks=["UNPARSED", "NEVER APPLIED"])
-        check("F152 full outfit: nothing promoted and nothing gated stays NEVER APPLIED", [fo_sec(swapped=0, promoted=0, names="none"), gear144()], 3, [("NEVER APPLIED", FO142)],
-              lacks=["UNPARSED", "head turn kept"])
-        check("F152 full outfit: a window line from before F152 (no head turn columns) still reads",
+        # ---- F157: the head turn is gone from the full outfit line; the builds that wrote it are still read ----
+        check("F157 full outfit: nothing promoted stays NEVER APPLIED", [fo_sec(swapped=0, promoted=0, names="none"), gear144()], 3, [("NEVER APPLIED", FO142)],
+              lacks=["UNPARSED", "head turn"])
+        check("F157 full outfit: the window line says nothing of a head turn", [fo_census(), fo_part(), fo_sec()], 0, [("OK", FO142)], lacks=["UNPARSED", "head turn"])
+        check("F157 full outfit: a window line of the builds between F152 and F157 (the head turn columns) still reads, and they are not reported",
+              ["native on foot full outfit (F142) 10 s: visibility calls of the local avatar 900, calls with a part promoted 780, parts promoted 780 (by name: EVASuit_Gear_Back 780), "
+               "class changed by the game before the write 0, during the call 0, faults 0; head turn (F152): outer-garment calls kept from the promotion by the head's turn 120, stops 3, "
+               "largest |head yaw against the body| 62 deg (this session; Gear_Back stops at 45 deg and resumes below 38)"], 0, [("OK", FO142)],
+              has=["780 parts promoted"], lacks=["UNPARSED", "head turn"])
+        check("F157 full outfit: a window line from before F152 (no head turn columns) still reads",
               ["native on foot full outfit (F142) 10 s: visibility calls of the local avatar 900, calls with a part promoted 900, parts promoted 900 (by name: EVASuit_Gear_Back 900), "
-               "class changed by the game before the write 0, during the call 0, faults 0"], 0, [("OK", FO142)], has=["900 parts promoted"], lacks=["UNPARSED", "head turn (F152)"])
+               "class changed by the game before the write 0, during the call 0, faults 0"], 0, [("OK", FO142)], has=["900 parts promoted"], lacks=["UNPARSED", "head turn"])
 
         # ---- F152: the held weapon's ADS eye depth, base + offset + trim ----
         E152 = "ADS eye depth (F152)"
@@ -17382,6 +17751,126 @@ def self_test_health():
               has=["a saved value of the retired ADS eye distance (14.0 cm) was named and ignored"], lacks=["UNPARSED"])
         check("F152 ADS eye depth: the key line alone, no weapon aimed", [key152(2.0)], 0, [("IDLE", E152)], has=["no ADS eye depth line", "the trim key read +2.0 cm"], lacks=["UNPARSED"])
         check("F152 ADS eye depth: a drifted line is unparsed", ["native on foot ADS eye depth (F152) 10 s: something else"], 4, [("UNPARSED", E152)])
+
+        # ---- F157: the coat outfit's pack draw left out of both eyes ----
+        P157 = "coat pack hidden (F157)"
+
+        def cp157(wl=10, e0=590, e1=590, eu=0, frames=590, w=10):
+            return R("native on foot coat pack hidden (F157) %u s", wl, e0, e1, ", eye unknown %d" % eu if eu else "", frames, w)
+
+        def cpret157(v=3):
+            return R("experimental.native_on_foot_body_draw_hide is retired (F157)", v)
+
+        check("F157 coat pack: two windows with the pack left out in both eyes and a weapon drawn", [cp157(), cp157(e0=560, e1=560, frames=560, w=8)], 0, [("OK", P157)],
+              has=["the coat outfit armed for 20 s (2 window(s)), a weapon drawn for 18 s", "the pack's draw left out 1150 time(s) in eye 0 and 1150 in eye 1 over 1150 frame(s)"],
+              lacks=["UNPARSED", "NEVER APPLIED"])
+        check("F157 coat pack: the pack left out with no weapon drawn is still left out", [cp157(e0=30, e1=30, frames=30, w=0)], 0, [("OK", P157)], has=["a weapon drawn for 0 s"],
+              lacks=["UNPARSED"])
+        check("F157 coat pack: draws left out in an eye the target's table could not name are counted apart", [cp157(e0=0, e1=0, eu=40, frames=40, w=6)], 0, [("OK", P157)],
+              has=["40 in an eye the target's table could not name"], lacks=["UNPARSED"])
+        check("F157 coat pack: a window flushed after 1 s reads", [cp157(wl=1, e0=58, e1=58, frames=58, w=1)], 0, [("OK", P157)], has=["armed for 1 s (1 window(s))"], lacks=["UNPARSED"])
+        check("F157 coat pack: the coat outfit armed with a weapon drawn for 10 s and nothing left out never applied", [cp157(e0=0, e1=0, frames=0, w=10)], 3, [("NEVER APPLIED", P157)],
+              has=["a weapon drawn for 10 s", "no draw of the pack was left out"], lacks=["UNPARSED"])
+        check("F157 coat pack: ... the weapon seconds add up across windows (3 s and 3 s)", [cp157(e0=0, e1=0, frames=0, w=3), cp157(e0=0, e1=0, frames=0, w=3)], 3, [("NEVER APPLIED", P157)],
+              has=["a weapon drawn for 6 s"], lacks=["UNPARSED"])
+        check("F157 coat pack: ... but 5 s is the line (4 s is idle)", [cp157(e0=0, e1=0, frames=0, w=4)], 0, [("IDLE", P157)],
+              has=["no weapon was drawn for 5 s of it, so nothing is judged"], lacks=["UNPARSED", "NEVER APPLIED"])
+        check("F157 coat pack: ... and 5 s is never applied", [cp157(e0=0, e1=0, frames=0, w=5)], 3, [("NEVER APPLIED", P157)], lacks=["UNPARSED"])
+        check("F157 coat pack: the coat outfit armed with no weapon drawn and nothing left out is idle", [cp157(e0=0, e1=0, frames=0, w=0)], 0, [("IDLE", P157)], lacks=["UNPARSED", "NEVER APPLIED"])
+        check("F157 coat pack: draws left out in an earlier window and none in a later one are ok (the sums decide)", [cp157(), cp157(e0=0, e1=0, frames=0, w=10)], 0, [("OK", P157)],
+              lacks=["UNPARSED", "NEVER APPLIED"])
+        check("F157 coat pack: a saved value of the retired body-draw dial is named", [cpret157(3), cp157()], 0, [("OK", P157)],
+              has=["a saved value of the retired body-draw dial (3) was named and ignored"], lacks=["UNPARSED"])
+        check("F157 coat pack: the retired line alone is idle", [cpret157(127)], 0, [("IDLE", P157)], has=["no coat pack window in the log", "retired body-draw dial (127)"], lacks=["UNPARSED"])
+        out157 = check("F157 coat pack: a log with no coat pack line leaves the rule not present (the coat outfit was never armed)",
+                       ["native on foot full outfit (F144): Gear_Back kept shadows only: suit arms present"], 0, lacks=["UNPARSED", "NEVER APPLIED"])
+        if "not present" not in out157 or P157 not in out157.split("not present", 1)[1]:
+            print("health F157 coat pack: the rule is not listed as not present:\n%s" % out157)
+            ok = False
+        check("F157 coat pack: a drifted window line is unparsed", ["native on foot coat pack hidden (F157) 10 s: something else"], 4, [("UNPARSED", P157)])
+        check("F157 coat pack: a drifted retired line is unparsed", ["native on foot: experimental.native_on_foot_body_draw_hide is retired (F157): ignored (something else)"], 4,
+              [("UNPARSED", P157)])
+
+        # ---- F158 (measure only): the local body's draws over the first 30 s on foot, written once when the window ends ----
+        P158 = "body draws at spawn (F158)"
+        PACK_VS, PACK_PS = 0x7B0DC42D383F694C, 0x0DF03E64DF9DBEF1
+
+        def hd158(win=1, opened="native on foot beginning", ran=30003, ended="the clock", switch=7100, listed=5, odraws=0, oids=0, plus="", ign=0):
+            pack = R158("first drawn at %u ms", switch) if switch is not None else R158("not drawn in the window")
+            return R158("body draws at spawn (F158) window %u: opened by", win, opened, ran, ended, pack, listed, odraws, oids, plus, 256, ign)
+
+        def id158(win=1, n=0, count=3474, inst=1, first=0, last=30000, f0=1790, f1=1790, fu=0, vs=0x1111111111111111, ps=0x2222222222222222, ib=0x1DF15DD06A0, start=3879112, base=11,
+                  variants=1, vplus="", prev=None, pack=False, stop=None):
+            unknown = R158(", eye unknown %u", fu) if fu else ""
+            before = R158("ib %llX start %u count %u", *prev) if prev else "none"
+            tail = (R158(", is the pack") if pack else "") + (R158(", stopped at %u ms", stop) if stop is not None else "")
+            return R158("body draws at spawn (F158) window %u identity %u: vs", win, n, vs, ps, count, inst, first, last, f0, f1, unknown, ib, start, base, variants, vplus, before, tail)
+
+        def pr158(win=1, total=2, marked=1, lst="0>1 stopped:both, 3>4"):
+            return R158("body draws at spawn (F158) window %u adjacent pairs:", win, total, marked, lst)
+
+        def lost158(win=1, why="opened"):
+            return R158("body draws at spawn (F158) window %u: not recorded (the draw thread held the list when the window " + why + ")", win)
+
+        def window158(win=1, sec=40, switch=7100, ran=30003, **kw):
+            """The flight's story in one window: two lower-detail meshes adjacent in one index buffer that stop at 7000 ms, a mesh drawn to the end, the full-detail pair from the switch.
+            The header is at second `sec` (the window ended then), the rest follow."""
+            return [(sec, hd158(win=win, switch=switch, ran=ran, listed=5, **kw)),
+                    id158(win, 0, count=1200, last=7000, start=1000, stop=7000, prev=(0xFF, 9, 9), ib=0x100),
+                    id158(win, 1, count=6000, last=7000, start=2200, stop=7000, prev=(0x100, 1000, 1200), ib=0x100),
+                    id158(win, 2, count=900, last=30000, start=60, ib=0x200, prev=(0x100, 2200, 6000)),
+                    id158(win, 3, count=3474, first=7100, last=30000, vs=PACK_VS, ps=PACK_PS, start=3879112, ib=0x300, variants=64, vplus="+", prev=(0x200, 60, 900)),
+                    id158(win, 4, count=30312, first=7100, last=30000, vs=PACK_VS, ps=PACK_PS, start=3882586, ib=0x300, variants=64, vplus="+", prev=(0x300, 3879112, 3474), pack=True),
+                    pr158(win)]
+
+        no_pairs158 = pr158(total=0, marked=0, lst="none")
+        check("F158 body draws: the flight's window: the lower-detail pair stopped at the switch", window158(), 0, [("OK", P158)],
+              has=["the pack first drawn at 7100 ms", "2 of 5 identity(ies) stopped within 1 s of it: #0 (count 1200 instances 1, last 7000 ms; adjacent to #1), #1 (count 6000 instances 1, last 7000 ms; adjacent to #0)",
+                   "1 adjacent pair(s) with one of them", "overflow none", "opened by native on foot beginning, 30003 ms, ended by the clock"], lacks=["UNPARSED", "NEVER APPLIED"])
+        check("F158 body draws: the window's start is the header's clock less its length", window158(), 0, [("OK", P158)], has=["window 1 (from about 10:00:09, "], lacks=["UNPARSED"])
+        out158 = check("F158 body draws: an identity that stopped in a pair comes before one that stopped alone",
+                       [hd158(listed=4), id158(1, 3, last=7050, stop=7050, count=700, start=9000), id158(1, 5, last=7000, stop=7000, count=800, start=1000, ib=0x100),
+                        id158(1, 6, last=7000, stop=7000, count=300, start=1800, ib=0x100), id158(1, 9, last=3000, stop=3000, count=100), pr158(total=1, marked=1, lst="5>6 stopped:both")],
+                       0, [("OK", P158)], has=["3 of 4 identity(ies) stopped within 1 s of it: #5 (count 800"], lacks=["UNPARSED", "#9 ("])
+        if not (out158.find("#5 (") < out158.find("#6 (") < out158.find("#3 (")):
+            print("health F158 body draws: the identities in a pair are not listed first:\n%s" % out158)
+            ok = False
+        check("F158 body draws: 1000 ms from the switch is near and 1001 ms is not", [hd158(listed=2), id158(1, 0, last=8100, stop=8100, count=10), id158(1, 1, last=8101, stop=8101, count=11),
+                                                                                        no_pairs158], 0, [("OK", P158)],
+              has=["1 of 2 identity(ies) stopped within 1 s of it: #0 (count 10"], lacks=["#1 (count 11", "UNPARSED"])
+        check("F158 body draws: a stop before the switch is near by the same distance", [hd158(listed=1), id158(1, 0, last=6100, stop=6100, count=10), no_pairs158], 0,
+              [("OK", P158)], has=["1 of 1 identity(ies) stopped within 1 s of it: #0 (count 10"], lacks=["UNPARSED"])
+        check("F158 body draws: an identity that did not stop is not counted whatever its last time", [hd158(listed=1), id158(1, 0, last=7100, count=10), no_pairs158], 0,
+              [("OK", P158)], has=["0 of 1 identity(ies) stopped within 1 s of it"], lacks=["UNPARSED"])
+        check("F158 body draws: two windows, each read with its own identities", window158(1, 40, switch=7100) + window158(2, 100, switch=3200, opened="the coat outfit decided", ign=1), 0,
+              [("OK", P158)], has=["window 1 (", "window 2 (", "opened by the coat outfit decided, 30003 ms, ended by the clock, 1 later trigger(s) ignored", "the pack first drawn at 3200 ms"],
+              lacks=["UNPARSED"])
+        check("F158 body draws: the overflow is named", [hd158(listed=256, odraws=903, oids=768, plus="+"), id158(1, 0, last=7000, stop=7000), no_pairs158], 0,
+              [("OK", P158)], has=["overflow 903 draw(s) of 768+ identity(ies) past the cap of 256 turned away"], lacks=["UNPARSED"])
+        check("F158 body draws: a window that never saw the pack is idle", [hd158(switch=None, listed=2), id158(1, 0, last=30000), id158(1, 1, last=30000, count=5), no_pairs158], 0,
+              [("IDLE", P158)], has=["the pack was not drawn; 2 identity(ies) listed", "no window saw the pack"], lacks=["UNPARSED", "NEVER APPLIED"])
+        check("F158 body draws: a window of 5 s or more that listed nothing never applied", [hd158(switch=None, listed=0, ran=30003), no_pairs158], 3, [("NEVER APPLIED", P158)],
+              has=["no draw of the local body was listed", "window 1 ran 5 s or more and listed nothing"], lacks=["UNPARSED"])
+        check("F158 body draws: ... 5 s exactly is the line", [hd158(switch=None, listed=0, ran=5000, ended="native on foot ending"), no_pairs158], 3, [("NEVER APPLIED", P158)],
+              lacks=["UNPARSED"])
+        check("F158 body draws: ... and 4999 ms is idle", [hd158(switch=None, listed=0, ran=4999, ended="native on foot ending"), no_pairs158], 0, [("IDLE", P158)],
+              lacks=["UNPARSED", "NEVER APPLIED"])
+        check("F158 body draws: one empty window among windows that saw the pack still fails", window158(1) + [(100, hd158(win=2, switch=None, listed=0)), pr158(win=2, total=0, marked=0, lst="none")], 3,
+              [("NEVER APPLIED", P158)], has=["window 2 ran 5 s or more and listed nothing"], lacks=["UNPARSED"])
+        check("F158 body draws: a window not recorded makes an otherwise good run partial", window158() + [lost158(2)], 0, [("PARTIAL", P158)],
+              has=["1 window(s) not recorded (the draw thread held the list when the window opened)"], lacks=["UNPARSED"])
+        check("F158 body draws: a window not recorded and nothing else is idle", [lost158(1, "ended")], 0, [("IDLE", P158)], has=["1 window(s) not recorded"], lacks=["UNPARSED", "NEVER APPLIED"])
+        check("F158 body draws: an eye the table could not name reads", [hd158(listed=1), id158(1, 0, last=7000, stop=7000, fu=12), no_pairs158], 0, [("OK", P158)], lacks=["UNPARSED"])
+        check("F158 body draws: a pairs list cut short with its 'more' reads", [hd158(listed=2), id158(1, 0, last=7000, stop=7000, count=1200, start=1000, ib=0x100),
+              id158(1, 1, last=7000, stop=7000, count=6000, start=2200, ib=0x100), pr158(total=254, marked=1, lst="0>1 stopped:both, 1>2, 2>3, +250 more")], 0, [("OK", P158)],
+              has=["1 adjacent pair(s) with one of them"], lacks=["UNPARSED"])
+        out158 = check("F158 body draws: a log with no F158 line leaves the rule not present", ["native on foot full outfit (F144): Gear_Back kept shadows only: suit arms present"], 0,
+                       lacks=["UNPARSED", "NEVER APPLIED"])
+        if "not present" not in out158 or P158 not in out158.split("not present", 1)[1]:
+            print("health F158 body draws: the rule is not listed as not present:\n%s" % out158)
+            ok = False
+        check("F158 body draws: a drifted header is unparsed", ["body draws at spawn (F158) window 1: something else"], 4, [("UNPARSED", P158)])
+        check("F158 body draws: a drifted identity line is unparsed", ["body draws at spawn (F158) window 1 identity 0: something else"], 4, [("UNPARSED", P158)])
 
         # ---- F135: the on-foot menu probe (MEASURE ONLY) ----
         M135 = "menu probe (F135)"
@@ -18178,25 +18667,6 @@ def self_test_health():
             print("health: F125 containment did not weight its F87h on-foot evidence", weighted)
             ok = False
 
-        legacy_mouse = "panel mouse (F122) 1 s: setting off; panels seen 90, sprites hidden 90, hide write failed 0"
-        check("F125 panel: old one-second mouse line", [legacy_mouse], 0, [("OK", F122)], has=["off: 1 s with a panel"], lacks=["UNPARSED"])
-        check("F125 panel: active seconds in ten-second windows", [pm(wl=10, seen=900, hidden=900, active=3), pm(wl=3, seen=90, hidden=90, active=1)], 0,
-              [("OK", F122)], has=["off: 4 s with a panel, 990 panels seen"], lacks=["UNPARSED"])
-        check("F125 panel: key off throughout makes its closed instruments idle", [R("native on foot log (F125): detail %s", "on", 1), pm_set(), ptr_armed(), p114_armed()], 0,
-              [("IDLE", F111), ("IDLE", F114B)], has=["the panel mouse key is off: the instruments are idle by design"], lacks=["UNPARSED"])
-        check("F125 panel: key off never hides a real installation failure", [R("native on foot log (F125): detail %s", "on", 1), pm_set(), ptr_armed(0), p114_armed("NOT armed", why="x")], 3,
-              [("NEVER APPLIED", F111), ("NEVER APPLIED", F114B)], lacks=["UNPARSED"])
-        check("F125 panel: an on interval cannot be erased by a later off line", [R("native on foot log (F125): detail %s", "on", 1), pm_set("on"), pm_set("off"), ptr_armed(), p114_armed()], 3,
-              [("NEVER APPLIED", F111), ("NEVER APPLIED", F114B)], lacks=["idle by design", "UNPARSED"])
-        check("F125 panel: off-on-off still contains an active interval", [R("native on foot log (F125): detail %s", "on", 1), pm_set("off"), pm_set("on"), pm_set("off"), ptr_armed(), p114_armed()], 3,
-              [("NEVER APPLIED", F111), ("NEVER APPLIED", F114B)], lacks=["idle by design", "UNPARSED"])
-        check("F125 panel: a later off observation cannot prove earlier unknown state", [R("native on foot log (F125): detail %s", "on", 1), ptr_armed(), p114_armed(), pm_set()], 3,
-              [("NEVER APPLIED", F111), ("NEVER APPLIED", F114B)], lacks=["idle by design", "UNPARSED"])
-        check("F125 panel: setting carried into a since window", [(0, R("native on foot log (F125): detail %s", "on", 1)), (1, pm_set()), (90, ptr_armed()), (91, p114_armed())], 0,
-              [("IDLE", F111), ("IDLE", F114B)], has=["idle by design"], lacks=["UNPARSED"], extra=["--since", "10:01:00"])
-        check("F125 panel: unknown-to-off mid-selected-window is not known off throughout", [(0, R("native on foot log (F125): detail %s", "on", 1)), (90, f90_part()), (100, pm_set()),
-              (101, ptr_armed()), (102, p114_armed())], 3, [("NEVER APPLIED", F111), ("NEVER APPLIED", F114B)],
-              lacks=["idle by design", "UNPARSED"], extra=["--since", "10:01:00"])
         check("F125 visor: default census absence needs detail", [R("native on foot log (F125): detail %s", "off", 10), f90_part()], 0, [("OK", F90S)],
               has=["not judged (detail log off)", F121B], lacks=[row("NEVER APPLIED", F121B)])
         check("F125 visor: active axis with detail off still judges missing census", [R("native on foot log (F125): detail %s", "off", 10), cen_key("on"), vax_win()], 3,
@@ -18228,8 +18698,8 @@ def self_test_health():
                          lambda rows, ctx: ("NEVER APPLIED", "a trigger the log proves, read from another rule's rows"), True)
         d_rules = tuple(HEALTH_RULES) + (syn,)
         checks += 1
-        if F91F not in ND or len(ND) < 5:
-            print("health: F125: ADS press fit (F91) and the four panel rules (F111, F114b, F117, F120) must need the detail log; needs_detail: %r" % ND)
+        if F91F not in ND or len(ND) < 3:
+            print("health: F125: ADS press fit (F91) and the two panel rules (F111, F114b) must need the detail log; needs_detail: %r" % ND)
             ok = False
 
         def detail_report(name, msgs, rc, has=(), lacks=(), since=None):

@@ -1828,6 +1828,8 @@ void testLegacyOnFootRowsStayOutOfMenu() {
                                 "native_on_foot_hud_left_y", "native_on_foot_hud_top_x", "native_on_foot_hud_top_y", "native_on_foot_hud_right_x",
                                 "native_on_foot_hud_right_y", "native_on_foot_hud_centre_x", "native_on_foot_hud_centre_y",
                                 "native_on_foot_hud_follow_smoothing_ms", "native_on_foot_reticle_follow", "native_on_foot_visor_axis",
+                                // F155 (the panel cursor's series): the panel cursor's two settings, retired (the cursor is always drawn), and no row
+                                "native_on_foot_panel_mouse", "native_on_foot_panel_cursor_test",
                                 // F146: the ADS sight switch, the two ADS sight trims and the full outfit switch, retired; the four Weapon UI trims moved to [experimental]
                                 "native_on_foot_ads_game_sight", "native_on_foot_ads_sight_up_cm", "native_on_foot_ads_sight_right_cm", "native_on_foot_body_full_outfit",
                                 "native_on_foot_weapon_ui_forward_cm", "native_on_foot_weapon_ui_left_cm", "native_on_foot_weapon_ui_up_cm", "native_on_foot_weapon_ui_toward_eye_cm",
@@ -1839,8 +1841,9 @@ void testLegacyOnFootRowsStayOutOfMenu() {
     for (int i = 0; i < kCount; ++i)
         if (strcmp(kMenuRows[i].page, "native_on_foot") == 0) ++nativePageRows;
     check(nativePageRows == 16, "the Native on foot page has 16 rows (F127: 21 rows went to edvr.ini and the installer's window, and Reticle follows was retired; "
-                                "F128: Visor axis (test) was retired with the correction always on; F146: the ADS sight switch, the two ADS sight trims and the full outfit switch "
-                                "were retired, and the four Weapon UI trims went to [experimental]; F152: ADS eye distance was retired, its per-weapon trim is an [experimental] row)");
+                                "F128: Visor axis (test) was retired with the correction always on; the panel cursor's F155 retired its F154's Panel cursor (test) row with the "
+                                "drawn placement shipped; F146: the ADS sight switch, the two ADS sight trims and the full outfit switch were retired, and the four Weapon UI trims "
+                                "went to [experimental]; F152: ADS eye distance was retired, its per-weapon trim is an [experimental] row)");
     // F127: the page's order and its five headings. The switch is always first; look and aim, then aiming down sights, then body and view, the HUD last. kMenuRows is in
     // edvr.ini order; the group is the ini's heading block above the key, which the page shows as a heading.
     {
@@ -1910,6 +1913,16 @@ void testLegacyOnFootRowsStayOutOfMenu() {
                          strcmp(d.step, "0.5") == 0 && strcmp(d.unit, "cm") == 0 && d.showSign && d.applies == 1 && strcmp(d.shipped, "0.0") == 0;
             }
         check(found == 5 && shaped, "the four Weapon UI trims and the ADS eye trim are [experimental] number rows: -30..30 cm, step 0.5, signed, live, shipped 0.0, labelled without (test)");
+    }
+    // F157: the developer tier's "Body draw to hide (test)" dial (F154 to F156) is retired: the key stays in edvr.ini on a hidden retired line (`# ui: hidden -- retired (F157)`), so it
+    // has a row in neither menu, the developer tier's included, and the dial's heading is gone with it.
+    {
+        int found = 0, headed = 0;
+        for (int i = 0; i < kCount; ++i) {
+            if (strcmp(kMenuRows[i].key, "native_on_foot_body_draw_hide") == 0) ++found;
+            if (strcmp(kMenuRows[i].group, "Native on foot: body draws (test)") == 0) ++headed;
+        }
+        check(found == 0 && headed == 0, "the retired Body draw to hide (test) dial has no row in the menu and no heading of its own (F157)");
     }
 }
 

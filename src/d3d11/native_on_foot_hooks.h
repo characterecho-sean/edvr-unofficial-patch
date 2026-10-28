@@ -200,19 +200,10 @@ struct NativeOnFootOutfitStats {   // cumulative (the frame thread logs the chan
     // F143: the unclip for the full outfit: clip modifiers written (enable 0, dirty 1) for the parts F19's list does not cover, by part index; guarded writes that faulted
     uint64_t clip[avh::kPartCount] = {};
     uint64_t clipWrites = 0, clipFaults = 0;
-    // F152: outer-garment visibility calls the head's turn kept from the promotion (Gear_Back stayed in the game's shadows-only class), the changes to "not promoting", and the
-    // largest |head yaw against the body| the pin published, degrees
-    uint64_t turnGated = 0;
-    uint32_t turnStops = 0;
-    float yawAbsMaxDeg = 0.0f;
 };
 // F144: the last Gear_Back decision (nofoot::f144::GearBack: 0 not decided, 1 outer garment: promoted and unclipped, 2 suit arms present, 3 no outer-garment arms: kept shadows
 // only), made on the visibility call's thread while the head hide writes.
 int nativeOnFootGearBack() noexcept;
-// F152 (native_on_foot_f152.h): the head's yaw against the body (degrees, positive to the body's right; atan2 of the body pin's eye-minus-neck vector's right and forward parts),
-// published by the body pin on each of its calls and read by the visibility call: the coat's Gear_Back is promoted only while the turn is under the threshold (stop at 45 deg,
-// resume below 38), and a sample older than 100 ms keeps the last decision. Thread-safe (one 64-bit word).
-void nativeOnFootBodyYawPublish(double phiDeg) noexcept;
 NativeOnFootOutfitStats nativeOnFootOutfitStats();
 // The outfit census (F142), taken on the fade hook's thread for the local third-person AMC (about every 100 ms, SEH-guarded) and queued when any part's instances, class, flags
 // or items differ from the last queued one (and once at the first read). The frame thread takes them one at a time; false when none is waiting.

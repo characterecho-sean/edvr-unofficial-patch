@@ -98,13 +98,13 @@ public:
         const uint64_t ownerVtable=bindings.ownerVtable,fullVtable=bindings.fullVtable;
         uint64_t fn=0;
         if(!same(read,owner,ownerVtable)||!same(read,r.fullPanel,fullVtable)||!read(ownerVtable+16,&fn,8)||fn!=bindings.ownerFunction||
-           !read(r.panel+f117::kOffList,&r.list,8)||!r.list||!same(read,r.list,owner)){++typeDeclined;return;}
+           !read(r.panel+pickmesh::kOffList,&r.list,8)||!r.list||!same(read,r.list,owner)){++typeDeclined;return;}
         for(const auto& old:rows)if(old.owner==owner){++duplicate;return;}
         if(rows.size()>=kMaxOwners){++quota;return;}
         // The game's mesh refresh clears this count before calling the owner's
         // transform and populates its triangles after this callback returns.
         // It is callback-time evidence, never a surface identity gate.
-        if(read(r.list+f117::kListCount,&r.preRebuildTriangleCount,8))r.preRebuildCountRead=1;
+        if(read(r.list+pickmesh::kListCount,&r.preRebuildTriangleCount,8))r.preRebuildCountRead=1;
         if(!read(r.fullPanel+0x828,&r.count,8)||!read(r.fullPanel+0x830,&r.mapHead,8)||
            !read(r.fullPanel+0x860,&r.definition,8)||!read(r.fullPanel+0x868,&r.entry,8)){r.status=2;rows.push_back(std::move(r));return;}
         uint64_t fallbackNodes[kMaxWalk]{},fallbackLeft[kMaxWalk]{};unsigned fallbackCount=0;
@@ -136,9 +136,9 @@ public:
         }
         if((scope.reads&1024)&&scope.observedOwner==owner&&!scope.observedOwnerMixed){r.transformValid=1;
             std::memcpy(r.ownerWorld,scope.ownerWorld,sizeof(r.ownerWorld));std::memcpy(r.ownerOutput,scope.ownerOut,sizeof(r.ownerOutput));}
-        if(!same(read,owner,ownerVtable)||!same(read,r.fullPanel,fullVtable)||!same(read,ownerVtable+16,fn)||!same(read,r.panel+f117::kOffList,r.list)||!same(read,r.list,owner)||
+        if(!same(read,owner,ownerVtable)||!same(read,r.fullPanel,fullVtable)||!same(read,ownerVtable+16,fn)||!same(read,r.panel+pickmesh::kOffList,r.list)||!same(read,r.list,owner)||
             !same(read,r.fullPanel+0x828,r.count)||!same(read,r.fullPanel+0x830,r.mapHead)||!same(read,r.fullPanel+0x860,r.definition)||!same(read,r.fullPanel+0x868,r.entry)||
-            (r.preRebuildCountRead&&!same(read,r.list+f117::kListCount,r.preRebuildTriangleCount)))r.status=3;
+            (r.preRebuildCountRead&&!same(read,r.list+pickmesh::kListCount,r.preRebuildTriangleCount)))r.status=3;
         if(r.path==1&&r.status==4){uint32_t flag=0;
             if(!read(r.entry,&flag,4)||flag!=r.entryFlag||!same(read,r.entry+24,r.fullPanel)||
                !same(read,r.entry+8,r.pairs[0].handle)||!same(read,r.entry+16,r.pairs[1].handle))r.status=3;}

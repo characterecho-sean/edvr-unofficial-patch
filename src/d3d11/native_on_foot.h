@@ -33,6 +33,7 @@
 #include "native_on_foot_core.h"   // nofoot::hudIssuerIndex: the on-foot HUD issuers' vertex shaders
 #include "native_on_foot_f100.h"   // F100: the marker tee's prefilter (pure parts)
 #include "native_on_foot_f115.h"   // F115: the cockpit's own panels' vertex shaders (the boarding edge)
+#include "native_on_foot_f157.h"   // F157: the coat's pack draw, the cheap match the draw path asks first (pure parts)
 
 struct ID3D11DeviceContext;   // the F18 body cull's Begin/End (d3d11.h is not needed by the rigs that include this header)
 struct ID3D11Resource;        // F44: the marker probe's Map/Unmap tees
@@ -325,6 +326,24 @@ bool nativeOnFootBodyCullBegin(ID3D11DeviceContext* ctx, uint32_t indexCount, ui
 void nativeOnFootBodyCullEnd(ID3D11DeviceContext* ctx);
 // vScreen's shutdown, beside remlokShutdown: releases the cached clones and the game states they were made from.
 void nativeOnFootBodyCullShutdown();
+
+// F157 (native_on_foot_f157.h): the coat outfit's pack, a draw of the local body, is left out of both eyes. The frame thread publishes here every frame whether the coat outfit is armed:
+// native on foot is active and F144's Gear_Back decision for the local avatar is the outer garment. The draw path's cost with it false is the one relaxed load in
+// nativeOnFootCoatPackLive(); only while it is true does beginPanelOverride (vscreen.cpp) call nativeOnFootCoatPackSkips for an indexed eye draw.
+inline std::atomic<bool> g_nativeOnFootCoatPackLive{false};
+inline bool nativeOnFootCoatPackLive() { return g_nativeOnFootCoatPackLive.load(std::memory_order_relaxed); }
+// Draw thread, owner context, an indexed draw into an eye-sized target (eyeTarget; rtvResource is its resource, for the eye's name in the counts, and may be null). True when the draw
+// is the coat's pack (the index count and instance count, the shaders bound, stencil ref 21): the caller returns kSkip.
+bool nativeOnFootCoatPackSkips(ID3D11DeviceContext* ctx, uint32_t indexCount, uint32_t instances, bool eyeTarget, const void* rtvResource);   // native_on_foot.cpp
+
+// F158 (MEASURE ONLY, native_on_foot_f158.h): the local body's draws over the first 30 s on foot. The frame thread publishes here whether a window is open (it opens when native on foot
+// begins and when F144 decides the coat outfit, and runs 30 s). The draw path's cost outside a window is the one relaxed load in nativeOnFootSpawnLive(); only inside one does
+// beginPanelOverride (vscreen.cpp) call nativeOnFootSpawnDraw for an indexed eye draw, ahead of F157's skip, so a draw is counted as the game issues it.
+inline std::atomic<bool> g_nativeOnFootSpawnLive{false};
+inline bool nativeOnFootSpawnLive() { return g_nativeOnFootSpawnLive.load(std::memory_order_relaxed); }
+// Draw thread, owner context, an indexed draw into an eye-sized target (rtvResource is its resource, for the eye's name, and may be null; startIndex and baseVertex are the call's own).
+// Records the draw as the previous one of its eye, and lists it when its stencil ref is 21. Never skips a draw.
+void nativeOnFootSpawnDraw(ID3D11DeviceContext* ctx, uint32_t indexCount, uint32_t instances, uint32_t startIndex, int32_t baseVertex, const void* rtvResource);   // native_on_foot.cpp
 
 // F26: the native on-foot mode-change counter (the frame thread bumps it on each enter or leave). The UI layer re-arms its eye check on a change.
 inline std::atomic<uint32_t> g_nativeOnFootEdges{0};

@@ -49,7 +49,11 @@
 #include "f144_checks.h"    // F144: the settled sight line per (item, scope), the coat's Gear_Back decision and first-person census, the readout placed per role and what reaches the draw
 #include "f145_checks.h"    // F145: the weapon UI's tag slots given back (the pick, the F144 flight replayed, the event ring) and the proof against the seed (the seed-only map on the two-eye rig)
 #include "f149_checks.h"    // F149/F150: the ADS eye depth, one per weapon (the game's unscoped camera plus a back-off), never further forward than the key (the tables, the rule, the cap, the shift at the same depth, the cache by copy)
-#include "f152_checks.h"    // F152: the coat's Gear_Back kept to the shadows with the head turned (phi, the hysteresis, the sample word and its stale rule), the readout origin's two shadows
+#include "f152_checks.h"    // F152: the readout origin's two shadows (the engine's first, the own one when engine motion is down, their difference, a ranged write into the rows)
+#include "f157_checks.h"    // F157: the coat outfit's pack draw left out of both eyes (the identity, each requirement refusing on its own, the outfit gate, the counts by eye and frame)
+#include "f158_checks.h"    // F158: the local body's draws over the first 30 s on foot (the window's rules, the list and its cap, the switch time, the stop and adjacency tests, the lines)
+#include "f159_checks.h"    // F159: the left elbow's stable pole reseeded at the shoulder's height (the condition, the gate, the real solver's raised elbow), the seed births and their lines
+#include "f160_checks.h"    // F160: the neck reference's raise blended through the ADS release (the decision, the kept target, the counts, the flight's release replayed on the real parts), the holster line
 #include "f151_checks.h"    // F151: the weapon readout's draw bound by its place (the ordinals, each guard, one bind per key, the lost-frame count) and the held copy's scope from the selected slot
 #include "f110_checks.h"    // F110: the ADS sight lock's model right eye (the left-eye job camera plus the IPD)
 #include "f111_checks.h"    // F111: the panel pointer instrument's statistics and verdict
@@ -58,9 +62,7 @@
 #include "f114b_checks.h"   // F114b: the panel pointer's turned transform, the click path, the mode getter
 #include "f115_checks.h"    // F115: boarding undoes every on-foot camera change (the exit edge, the zeros, the read-back)
 #include "f118_checks.h"    // F118: why the reticle is seen double (steps and flips, trailing frames, the footprint), measure only
-#include "f117_checks.h"    // F117: the panel cursor's place on a turned panel (the turn read from the pick mesh, panel and view)
-#include "f120_checks.h"    // F120: the panel cursor kept on the panel when the head turns (the reference, M = E Ht H0 E0t, refusals, drift, words)
-#include "f122_checks.h"    // F122: the on-foot panel mouse cursor hidden by default (the key, the one write, the counts, the hooks it opens)
+#include "f154_checks.h"    // F154, F155: the pick mesh's lever read from the game, the drawn cursor and its hide fallback, the signed turn instrument
 #include "f119_checks.h"    // F119: head containment, measure only (the head's offset by class, the depth grid decoded, the lines)
 #include "f126_checks.h"    // F126: the pin's eye pair from one frame, the arm IK's snapshot of the current FP rig, a nearly straight elbow reaching the grip
 #include "f123_checks.h"    // F123: head containment, the leash and the wall contact (the fade ramp, the hard timer, the contact trigger and latch, the recentre sequence, the lines)
@@ -7540,14 +7542,29 @@ int wmain(int argc, wchar_t** argv) {
     // item with no row its settled line when the copy is known unscoped, else the fallback base (21); the line's shift taken at the same depth; the lock's follower carrying a change
     // of k between weapons or of the trim; and the F144 cache told by copy while the scope is unknown.
     f149test::run149(check);
-    // F152: the coat's Gear_Back with the head turned (phi from the body pin's eye-minus-neck vector, the 45/38 deg hysteresis, the sample word and its 100 ms stale rule), and the
-    // readout origin's two shadows (the engine's first, the own one when engine motion is down, their difference where both exist, a ranged write into the rows).
+    // F152: the readout origin's two shadows (the engine's first, the own one when engine motion is down, their difference where both exist, a ranged write into the rows).
     f152test::run152(check);
     // F151: a weapon readout draw no stream window held is bound to the part's record by its place (the eye, the mesh field by field, the ordinal among the eye's draws of the mesh, the
     // instance count, the previous frame, the part drawn once, the key not named or taken in the eye-frame, exactly one tagged record in this frame's Unmap), never from a bind; the
     // frames one eye drew the part and the other did not are counted; the held copy's scope is read from the game's selected slot when the name finds two copies (an ambiguous loadout
     // resolved by slot, a slot holding another item and no selection unknown, an unambiguous name left alone).
     f151test::run151(check);
+    // F157: the coat outfit's pack draw left out of both eyes: the identity (the shaders, the index count and the instance count, each told apart), the stencil ref 21 and the eye target
+    // each required on their own, the outfit gate (native on foot active and Gear_Back decided as the outer garment, each other decision refused), the draws left out counted by eye and
+    // by frame, and a writer counting while the frame thread takes.
+    f157test::run157(check);
+    // F158 (measure only): the local body's draws over the first 30 s on foot: the window's open and close rules (the edge, the coat decision, one window at a time, 30 s or native on
+    // foot ending), the list (identities, times, frames per eye, variants, the previous draw at first sight), the cap of 256 and its overflow, the pack's switch time, the stop test,
+    // the adjacency test, and the lines written once at the window's end.
+    f158test::run158(check);
+    // F159: the left elbow's stable pole reseeded from the body-down pole when its preferred elbow is within 1 cm of the shoulder's height or above (the arm bent, three solves in a row,
+    // at most once in 0.5 s), on the real solver at the flight's reach (the ceiling-parked elbow, the body-down seed 12 cm under the shoulder, the straight arm exempt); the seed births counted
+    // by the reason the last seed was gone and logged once in 0.5 s; the window's counters, the seconds and the run at the hip, and the lines' widths.
+    f159test::run159(check);
+    // F160: the neck reference's raise published as (1 - w) times the last settled target through the ADS release (the press stays 0; another item or stance class, or nothing kept,
+    // falls back to 0), the kept target whole at the release's end, the releases counted by class; the flight's release replayed on the real ramp, settle window and follower (the raise back
+    // 0.63 s after the request went off before, with the release now); the holster line and its rate limit. The holster bridge itself is checked with F99a's (run99).
+    f160test::run160(check);
     // F110: the ADS sight lock's model right eye from the left-eye job camera and from a solved left eye, the fallback, the IPD's sign.
     f110test::run110(check);
     // F111: the panel pointer instrument names the stage that turns a move the other way (K1 to K5, one at a time), the camera getters' decoding.
@@ -7563,15 +7580,13 @@ int wmain(int argc, wchar_t** argv) {
     f115test::run115(check);
     // F118 (measure only): the readback steps and flips, the trailing frames, the footprint's directions and its decode from lines marched over an edge and a wall.
     f118test::run118(check);
-    // F117: a turned pick mesh read from its triangles; panel puts the cursor at the uv's drawn place, view mirrors it, an upright panel is left alone.
-    f117test::run117(check);
-    // F120: a screen-space panel's cursor carried by the head's turn against the HUD frame since the panel opened; composed after F117's place.
-    f120test::run120(check);
     // F119 (measure only): the physical head from the pose and its alignment, the second's percentiles and histogram by class, EDVR's own offsets kept apart, the depth
     // grid decoded from the shader's words (a wall, the player's weapon, the near plane, the sky), the baseline and contact tallies, and the lines within the log's limit.
     f119test::run119(check);
-    // F122: the hide: the key, what a placement does, the one write against a controller's memory, the counts and the hooks the key opens.
-    f122test::run122(check);
+    // F154, F155: the lever the screen-space pick mesh owner applies, read as the hook reads it (the sign of rho, q', the fov cross-check), its undo (the drawn point), the
+    // placement's decision (drawn on a screen-space panel, the hide fallback for each refusal, nothing on another panel or in flat) and its writes against a controller's
+    // memory, the lever table's freshness, and the signed turn fit (k = 0, 1, -1, -2, +2 on yaw and pitch), the eye's move, the runs, the lines.
+    f154test::run154(check);
     // F126: the review's three findings: the eye pair only from one frame (4 m/s, 90 Hz: 22 mm), the arm IK's snapshot only of the rig the plan names, a bend just under
     // the hinge window reaching the grip as exactly as one just over it.
     f126test::run126(check);

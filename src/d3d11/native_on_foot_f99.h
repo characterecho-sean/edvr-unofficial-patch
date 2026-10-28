@@ -11,7 +11,8 @@
 //
 // The bridge: a new selection of an item (any slot: a tool, the pistol, a weapon) made by the game while Status.json still names none arms the hands at once, until
 // Status.json names an item (it then arms them as before), the game puts the item away, or kBridgeMaxS passes without Status.json naming one (released through the
-// same 0.3 s ramp). The first selection read after the hook comes up, or after the scope opens again, is not a draw. Holstering and swaps keep Status.json's timing.
+// same 0.3 s ramp). The first selection read after the hook comes up, or after the scope opens again, is not a draw. Swaps keep Status.json's timing; the holster does
+// not (F160, HolsterBridge below).
 #pragma once
 
 #include <cstdint>
@@ -74,6 +75,75 @@ struct Bridge {
             }
         }
         o.armed = bridging;
+        return o;
+    }
+};
+
+// F160: the holster, seen from the game's selection. Flight edvr_gfx_20261028_125106 (build 1126ce79), the pilot: "holstering a rifle at the hip has a delay before the
+// headset meets the new pose". The armed flag follows Status.json, which kept naming the item 1.35 s, 0.97 s and 3.08 s after the game's own selection read none (F83,
+// id FFFFFFFF); only then did F88's weight (0.25 s) and the armed ramp (0.3 s) take the weapon eye's forward offset (14.3 cm) and F97a's raise away. Swaps between two items
+// go from one id straight to the other with no none id between them, so a none id read after a held one is a holster. The bridge starts when the selection read is fresh,
+// readable and not suspended and its id becomes kNoItem after a held one while Status.json still names a held item; while it runs the armed flag is false. It ends when
+// Status.json no longer names a held item (the flag is Status.json's again, and says the same), when the game selects an item again (a draw, or a swap: Status.json's flag
+// again) or after kHolsterMaxS (back to Status.json, counted as a timeout). The ramps stay as they were.
+constexpr double kHolsterMaxS = 4.0;
+enum HolsterEnd : uint8_t { kHolsterNotEnded = 0, kHolsterStatus = 1, kHolsterDrawn = 2, kHolsterTimeout = 3 };
+struct HolsterIn {
+    bool active = false;      // native stereo on foot
+    bool nativeOk = false;    // the game's selection read this tick: fresh, readable, not suspended
+    uint32_t nativeId = kNoItem;
+    bool nativeHeld = false;  // the selection is an item in any slot (a primary included; not the holster, not kNoItem)
+    bool statusHeld = false;  // Status.json names a weapon or tool
+    double dt = 0.0;
+};
+struct HolsterOut {
+    bool running = false;     // the bridge holds the armed flag false this tick
+    bool started = false;
+    uint8_t ended = kHolsterNotEnded;
+    double ranS = 0.0;        // an end: how long the bridge ran, the game's lead over Status.json when it ended by Status.json
+    uint32_t fromId = kNoItem;   // an end: the id of the item the game had selected before the none
+};
+struct HolsterBridge {
+    bool have = false, lastHeld = false, running = false;
+    uint32_t lastId = kNoItem, fromId = kNoItem;
+    double age = 0.0;
+    void reset() noexcept { *this = HolsterBridge{}; }
+    HolsterOut step(const HolsterIn& in) noexcept {
+        HolsterOut o;
+        if (!in.active) {
+            reset();
+            return o;
+        }
+        bool selected = false;   // the game selected an item on this read
+        if (in.nativeOk) {
+            const bool wasHeld = have && lastHeld;
+            const uint32_t wasId = lastId;
+            have = true;
+            lastHeld = in.nativeHeld;
+            lastId = in.nativeId;
+            if (!running && wasHeld && !in.nativeHeld && in.nativeId == kNoItem && in.statusHeld) {
+                running = true;
+                age = 0.0;
+                fromId = wasId;
+                o.started = true;
+            } else if (in.nativeHeld) {
+                selected = true;
+            }
+        }
+        if (running && !o.started) {
+            age += in.dt > 0.0 ? in.dt : 0.0;
+            uint8_t end = kHolsterNotEnded;
+            if (!in.statusHeld) end = kHolsterStatus;
+            else if (selected) end = kHolsterDrawn;
+            else if (age > kHolsterMaxS) end = kHolsterTimeout;
+            if (end != kHolsterNotEnded) {
+                o.ended = end;
+                o.ranS = age;
+                o.fromId = fromId;
+                running = false;
+            }
+        }
+        o.running = running;
         return o;
     }
 };

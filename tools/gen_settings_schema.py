@@ -1094,8 +1094,8 @@ def run(root, out, check):
         return 1
     devSilent = []
     for s in settings:
-        if s.section not in DEV_SECTIONS or s.devHidden:
-            continue
+        if s.section not in DEV_SECTIONS or s.devHidden or s.hidden:
+            continue   # `# dev: hidden`, or `# ui: hidden` (a retired key the code still reads to name a saved value): a row in neither schema
         dotted = '%s.%s' % (s.section, s.key)
         if dotted not in code:
             continue
@@ -1573,6 +1573,14 @@ def self_test():
     name = 'dev-tier-hidden'
     wrote = case(name, other % '# dev: hidden\n', other_reads, 0)
     expect_not_in(name, wrote, 'some_probe')
+    # A retired developer-tier key (F157): the code still reads it to name a saved value, and `# ui: hidden -- retired` gives it a row in neither schema, the developer tier's
+    # included (the documented contract for a hidden key). The same key with a plain `# ui:` line is a row.
+    name = 'dev-tier-ui-hidden'
+    wrote = case(name, other % '# ui: hidden -- retired (F157): ignored.\n', other_reads, 0)
+    expect_not_in(name, wrote, 'some_probe')
+    name = 'dev-tier-ui-row'
+    wrote = case(name, other % '# ui: A probe\n', other_reads, 0)
+    expect_in(name, wrote, 'some_probe')
 
     # `# retired-default: X` is the installer merge's annotation, not prose.
     # Both shapes the tree has had: a block that ends in one (camera_index_track,
