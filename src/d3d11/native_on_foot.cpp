@@ -67,7 +67,7 @@
 #include "native_on_foot_f149.h"   // F149/F150/F152: the ADS eye depth, one per weapon (the game's unscoped ADS camera plus a baked offset plus the live trim; the tables, the rule; pure parts)
 #include "native_on_foot_f152.h"   // F152: the coat's Gear_Back with the head turned (the yaw, the decision), the readout's origin rows (the own shadow of b1; pure parts)
 #include "native_on_foot_f151.h"   // F151: the weapon readout's draw bound by its place when its stream entry lies outside every shadow window (pure parts)
-#include "native_on_foot_f154.h"   // F154 (TEMPORARY): the local body's draws listed and one hidden at a time, to find the coat's pack (pure parts)
+#include "native_on_foot_f154.h"   // F154/F156 (TEMPORARY): the local body's draws listed and one hidden at a time, to find the coat's pack (pure parts)
 #include "xinput_watch.h"          // F135: the pad's Start and Back edges, evidence for the menu probe only
 #include "native_on_foot_f109.h"   // F109: look to aim on foot, the player's own turn in ADS, snap or smooth turning (pure parts)
 #include "native_on_foot_f129.h"   // F129: look to aim reads its turn from the player's own look processor; the look path instrument (pure parts)
@@ -195,7 +195,7 @@ std::atomic<bool> g_adsAimKey{true};                          // the key as the 
 std::atomic<float> g_adsEyeTrimCm{0.0f};                      // F152: experimental.native_on_foot_ads_eye_offset_cm in cm (-30..30), live: added to the held weapon's ADS eye depth
 std::atomic<float> g_weaponViewOffsetCm{static_cast<float>(nofoot::kWeaponViewOffsetDefaultCm)}; // fix.native_on_foot_weapon_view_offset_cm, live
 double g_adsEyeCmLast = -1.0;                                 // the value last logged (frame thread)
-std::atomic<int32_t> g_bodyDrawDial{-1};                      // F154/F155 (TEMPORARY): experimental.native_on_foot_body_draw_hide, -1 or 0..127, live (the frame thread publishes it as g_nativeOnFootBodyDrawLive)
+std::atomic<int32_t> g_bodyDrawDial{-1};                      // F154/F156 (TEMPORARY): experimental.native_on_foot_body_draw_hide, -1 or 0..127, live (the frame thread publishes it as g_nativeOnFootBodyDrawLive)
 int g_bodyDrawDialLast = -2;                                  // the value last logged (frame thread)
 std::atomic<float> g_f87SettleS{static_cast<float>(nofoot::f87::kSettleDefaultS)};   // F87h (TEMPORARY): fix.native_on_foot_standing_height_settle_s, live
 double g_f87SettleLast = -1.0;                                // the value last logged (frame thread)
@@ -1031,7 +1031,7 @@ void readKey() {
         g_adsEyeCmLast = cm;
         g_adsEyeTrimCm.store(static_cast<float>(cm), std::memory_order_relaxed);
     }
-    // F154/F155 (TEMPORARY, live, the developer tier's "Body draw to hide (test)"): -1 hides nothing; 0..127 leaves one of the clip shader's listed draws out of both eyes while native
+    // F154/F156 (TEMPORARY, live, the developer tier's "Body draw to hide (test)"): -1 hides nothing; 0..127 leaves one of the local body's listed draws out of both eyes while native
     // stereo is on foot (bodyDrawTick publishes the dial to the draw path; the list is built only while it is 0..127). Setting it from -1 to a number begins a pass: the list is
     // emptied and numbered from 0 again. The pilot steps the number until the coat's pack goes.
     {
@@ -1040,9 +1040,9 @@ void readKey() {
         if (first || dial != g_bodyDrawDialLast)
             Log::get().note("native on foot body draw hide (F154, TEMPORARY): experimental.native_on_foot_body_draw_hide = %d -- %s", dial,
                             dial < 0 ? "off: no draw is listed or left out"
-                                     : "while native stereo is on foot, the draws into the eyes that use the clip pixel shader are listed as `body draw N` in the order they first appear (the list "
-                                       "starts again from 0 each time this leaves -1), and the draw numbered by this value is left out of both eyes; a 1 s line names the draw held and how many "
-                                       "of its draws were left out in each eye");
+                                     : "while native stereo is on foot, the draws into the eyes with stencil ref 21 are listed as `body draw N` in the order they first appear, told apart by "
+                                       "their shaders, index count and instance count (the list starts again from 0 each time this leaves -1), and the draw numbered by this value is left out of "
+                                       "both eyes; a 1 s line names the draw held and how many of its draws were left out in each eye");
         g_bodyDrawDialLast = dial;
         g_bodyDrawDial.store(dial, std::memory_order_relaxed);
     }
@@ -33026,10 +33026,10 @@ __declspec(noinline) bool shadowOverlayGuarded(float (&rows)[6][4], const uint8_
 }  // namespace f44
 }  // namespace
 
-// ---- F154/F155 (TEMPORARY instrument): the clip shader's draws listed, and one left out of the eyes at a time (experimental.native_on_foot_body_draw_hide) -----------------------
+// ---- F154/F156 (TEMPORARY instrument): the local body's draws listed, and one left out of the eyes at a time (experimental.native_on_foot_body_draw_hide) -----------------------
 // The coat's backpack and antenna come into the eye with the head turned and in the sights. They are EVASuit_Gear_Back, which the coat's torso needs, so the part cannot be hidden.
-// The body parts that carry the vertex clip modifier are drawn with one pixel shader (nofoot::f154::kClipPs). The draw path lists the eye draws that use it here (any vertex shader and
-// any stencil ref; native_on_foot_f154.h says how a draw is told apart and numbered), the frame thread writes each new one to the log with its number, and the dial leaves the numbered
+// The draw path lists the eye draws with stencil ref 21 here, with any shader (native_on_foot_f154.h says how a draw is told apart, merged and numbered: by its shaders, index count and
+// instance count, the index buffer, start index and base vertex counted as variants), the frame thread writes each new one to the log with its number, and the dial leaves the numbered
 // draw out of both eyes (beginPanelOverride returns kSkip for it). The list is built, and the stencil ref read paid for, only while the dial is 0..127 and native stereo is on foot
 // (g_nativeOnFootBodyDrawLive, which the frame thread sets each frame). A pass begins when the dial is set from -1 to a number: the frame thread empties the list (under the draw
 // thread's flag) and the numbers start again, so the pass lists what is drawn now. Within a pass nothing is renumbered, and each entry counts the frames it was drawn in each eye; the
@@ -33069,16 +33069,17 @@ bool bodyDrawListReset() {
 }
 
 void bodyDrawHeader(const char* why, uint32_t pass, uint32_t gen) {
-    Log::get().note("body draw list (F154): %s -- pass %u: %d draw(s) of the clip shader listed so far (pixel shader %016llX into an eye, any vertex shader and stencil ref), "
-                    "numbered in the order they first appeared, never renumbered within a pass, at most %d; outfit census %u",
-                    why, pass, g_bodyList.count(), static_cast<unsigned long long>(nofoot::f154::kClipPs), nofoot::f154::kCap, gen);
+    Log::get().note("body draw list (F154): %s -- pass %u: %d draw identity(ies) of the local body listed so far (stencil ref %u into an eye, any shader), told apart by the shaders, "
+                    "the index count and the instance count (the index buffer, start index and base vertex are merged and counted as variants), numbered in the order they first "
+                    "appeared, never renumbered within a pass, at most %d; outfit census %u",
+                    why, pass, g_bodyList.count(), static_cast<unsigned>(nofoot::f154::kStencilRef), nofoot::f154::kCap, gen);
 }
 
 void bodyDrawEntryLine(int n) {
     const nofoot::f154::Entry& e = g_bodyList.at(n);
-    Log::get().note("body draw %d: vs %016llX ps %016llX ib %llX start %u count %u base %d instances %u stencil %u (eye %s)", n, static_cast<unsigned long long>(e.id.vs),
-                    static_cast<unsigned long long>(e.id.ps), static_cast<unsigned long long>(e.id.ib), static_cast<unsigned>(e.id.start), static_cast<unsigned>(e.id.count),
-                    static_cast<int>(e.id.base), static_cast<unsigned>(e.instances), static_cast<unsigned>(e.stencil), nofoot::f154::eyeText(e.eyes.load(std::memory_order_relaxed)));
+    Log::get().note("body draw %d: vs %016llX ps %016llX count %u instances %u, first seen at ib %llX start %u base %d (eye %s)", n, static_cast<unsigned long long>(e.id.vs),
+                    static_cast<unsigned long long>(e.id.ps), static_cast<unsigned>(e.id.count), static_cast<unsigned>(e.id.instances), static_cast<unsigned long long>(e.first.ib),
+                    static_cast<unsigned>(e.first.start), static_cast<int>(e.first.base), nofoot::f154::eyeText(e.eyes.load(std::memory_order_relaxed)));
 }
 
 // The window of one held dial value: what the draw path left out since the last line, by eye, and in how many frames. A dial that names no listed draw says so.
@@ -33093,18 +33094,20 @@ void bodyDrawHideLine(int dial, uint32_t seconds) {
     const uint32_t su = e.skipped[2].exchange(0, std::memory_order_relaxed), frames = e.skipFrames.exchange(0, std::memory_order_relaxed);
     char unknown[48] = "";
     if (su) std::snprintf(unknown, sizeof(unknown), ", eye unknown %u", static_cast<unsigned>(su));
-    Log::get().note("body draw hide (F154) %u s: %d = vs %016llX ps %016llX start %u count %u, skipped eye 0 %u, eye 1 %u%s (%u frames)", seconds, dial,
-                    static_cast<unsigned long long>(e.id.vs), static_cast<unsigned long long>(e.id.ps), static_cast<unsigned>(e.id.start), static_cast<unsigned>(e.id.count),
+    Log::get().note("body draw hide (F154) %u s: %d = vs %016llX ps %016llX count %u instances %u, skipped eye 0 %u, eye 1 %u%s (%u frames)", seconds, dial,
+                    static_cast<unsigned long long>(e.id.vs), static_cast<unsigned long long>(e.id.ps), static_cast<unsigned>(e.id.count), static_cast<unsigned>(e.id.instances),
                     static_cast<unsigned>(s0), static_cast<unsigned>(s1), unknown, static_cast<unsigned>(frames));
 }
 
 // The pass's summary, once when it ends (the dial back to -1) or pauses (native stereo on foot ended; the list and its counts go on if the pass resumes): one line a listed draw with
-// the number of frames it was drawn in each eye, out of the frames of the pass, and the pass frame it first appeared in. The entries that come and go with what the pilot holds show
+// the number of variants merged into it (a "+" when it had more than the list tells apart), the number of frames it was drawn in each eye, out of the frames of the pass, and the pass
+// frame it first appeared in. The entries that come and go with what the pilot holds show
 // as the ones drawn in fewer frames than they have been listed.
 void bodyDrawPassSummary(const BodyDrawState& s, const char* how) {
     const int listed = g_bodyList.count();
-    Log::get().note("body draw pass (F154) %u %s: %d draw(s) listed over %u frame(s) with native stereo on foot, %u draw(s) past the cap of %d turned away", s.pass, how, listed,
-                    static_cast<unsigned>(s.passFrames), static_cast<unsigned>(g_bodyList.refused()), nofoot::f154::kCap);
+    Log::get().note("body draw pass (F154) %u %s: %d draw identity(ies) listed over %u frame(s) with native stereo on foot, %u%s identity(ies) past the cap of %d turned away (%u draw(s))",
+                    s.pass, how, listed, static_cast<unsigned>(s.passFrames), static_cast<unsigned>(g_bodyList.turnedIdentities()), g_bodyList.turnedLost() ? "+" : "", nofoot::f154::kCap,
+                    static_cast<unsigned>(g_bodyList.refused()));
     for (int i = 0; i < listed; ++i) {
         const nofoot::f154::Entry& e = g_bodyList.at(i);
         const uint32_t f0 = e.drawnFrames[0].load(std::memory_order_relaxed), f1 = e.drawnFrames[1].load(std::memory_order_relaxed);
@@ -33112,10 +33115,11 @@ void bodyDrawPassSummary(const BodyDrawState& s, const char* how) {
         char unknown[40] = "";
         if (fu) std::snprintf(unknown, sizeof(unknown), ", unknown %u", static_cast<unsigned>(fu));
         const uint32_t seen = i < s.logged ? s.seenAt[i] : s.passFrames + 1u;   // the entries not yet written appeared in the frame just ended
-        Log::get().note("body draw pass (F154) %u entry %d: vs %016llX ps %016llX start %u count %u stencil %u%s, frames drawn: eye 0 %u, eye 1 %u%s (of %u; first seen in frame %u)", s.pass, i,
-                        static_cast<unsigned long long>(e.id.vs), static_cast<unsigned long long>(e.id.ps), static_cast<unsigned>(e.id.start), static_cast<unsigned>(e.id.count),
-                        static_cast<unsigned>(e.stencil), e.stencilVaries.load(std::memory_order_relaxed) ? " (and others)" : "", static_cast<unsigned>(f0), static_cast<unsigned>(f1),
-                        unknown, static_cast<unsigned>(s.passFrames), static_cast<unsigned>(seen > 1u ? seen - 1u : 1u));
+        Log::get().note("body draw pass (F154) %u entry %d: vs %016llX ps %016llX count %u instances %u, %u%s variant(s) merged, frames drawn: eye 0 %u, eye 1 %u%s (of %u; first seen in frame %u)",
+                        s.pass, i, static_cast<unsigned long long>(e.id.vs), static_cast<unsigned long long>(e.id.ps), static_cast<unsigned>(e.id.count),
+                        static_cast<unsigned>(e.id.instances), static_cast<unsigned>(e.variants.load(std::memory_order_relaxed)),
+                        e.variantsLost.load(std::memory_order_relaxed) ? "+" : "", static_cast<unsigned>(f0), static_cast<unsigned>(f1), unknown, static_cast<unsigned>(s.passFrames),
+                        static_cast<unsigned>(seen > 1u ? seen - 1u : 1u));
     }
 }
 
@@ -33174,8 +33178,8 @@ void bodyDrawTick(uint64_t now, uint32_t frameNo) {
     }
     if (!s.fullSaid && g_bodyList.refused() > 0) {
         s.fullSaid = true;
-        Log::get().note("body draw list (F154): the list is full at %d draws and a draw of another identity was seen (%u draw(s) so far): it is neither numbered nor hidden",
-                        listed, static_cast<unsigned>(g_bodyList.refused()));
+        Log::get().note("body draw list (F154): the list is full at %d draws; %u%s identity(ies) of other kinds turned away so far (%u draw(s)): they are neither numbered nor hidden",
+                        listed, static_cast<unsigned>(g_bodyList.turnedIdentities()), g_bodyList.turnedLost() ? "+" : "", static_cast<unsigned>(g_bodyList.refused()));
     }
     if (s.held != dial) {
         if (s.held >= 0) bodyDrawHideLine(s.held, nofoot::logwin::closedSeconds(now - s.heldMs));
@@ -33188,17 +33192,17 @@ void bodyDrawTick(uint64_t now, uint32_t frameNo) {
 }
 }  // namespace
 
-// F154/F155 (declared in native_on_foot.h): the draw thread, an indexed eye draw on the owner context, only while the dial is 0..127 and native stereo is on foot. A draw that does not
-// use the clip pixel shader returns at once. Reads the stencil ref and the index buffer of one that does, lists it by its identity; true when it is the dial's.
+// F154/F156 (declared in native_on_foot.h): the draw thread, an indexed eye draw on the owner context, only while the dial is 0..127 and native stereo is on foot. Reads the stencil ref
+// and, for the local body's draws (21), the index buffer; lists the draw by its identity (the shaders, the index count and the instance count) and counts the index buffer, start
+// index and base vertex as a variant of it; true when it is the dial's.
 bool nativeOnFootBodyDrawSkips(ID3D11DeviceContext* ctx, uint32_t indexCount, uint32_t instances, uint32_t startIndex, int32_t baseVertex, bool eyeTarget, const void* rtvResource) {
     const int dial = g_nativeOnFootBodyDrawLive.load(std::memory_order_relaxed);
     if (dial < 0 || !eyeTarget || !nativeOnFootActive()) return false;
-    const uint64_t ps = bindingShaderHash(BindSlot::Ps);
-    if (!nofoot::f154::listable(ps, eyeTarget)) return false;
     ID3D11DepthStencilState* ds = nullptr;
     UINT ref = 0;
     ctx->OMGetDepthStencilState(&ds, &ref);
     if (ds) ds->Release();
+    if (!nofoot::f154::listable(ref, eyeTarget)) return false;
     ID3D11Buffer* ib = nullptr;
     DXGI_FORMAT ibFormat = DXGI_FORMAT_UNKNOWN;
     UINT ibOffset = 0;
@@ -33206,11 +33210,13 @@ bool nativeOnFootBodyDrawSkips(ID3D11DeviceContext* ctx, uint32_t indexCount, ui
     if (ib) ib->Release();   // the identity is kept, never a reference
     nofoot::f154::Identity id;
     id.vs = bindingShaderHash(BindSlot::Vs);
-    id.ps = ps;
-    id.ib = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(ib));
-    id.start = startIndex;
+    id.ps = bindingShaderHash(BindSlot::Ps);
     id.count = indexCount;
-    id.base = baseVertex;
+    id.instances = instances;
+    nofoot::f154::Variant variant;
+    variant.ib = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(ib));
+    variant.start = startIndex;
+    variant.base = baseVertex;
     const uint32_t frame = g_f44Frame.load(std::memory_order_relaxed);
     int eye = f44::eyeOfDraw(frame);
     if (eye != 0 && eye != 1) {
@@ -33219,8 +33225,8 @@ bool nativeOnFootBodyDrawSkips(ID3D11DeviceContext* ctx, uint32_t indexCount, ui
         if (eye != 0 && eye != 1) eye = -1;
     }
     if (g_bodyBusy.test_and_set(std::memory_order_acquire)) return false;   // the frame thread is emptying the list: this draw is neither listed nor hidden
-    const nofoot::f154::DrawList::Note note = g_bodyList.note(id, instances, eye, frame, ref);
-    const bool hide = nofoot::f154::hides(dial, note.index, ps, eyeTarget);
+    const nofoot::f154::DrawList::Note note = g_bodyList.note(id, variant, eye, frame);
+    const bool hide = nofoot::f154::hides(dial, note.index, ref, eyeTarget);
     if (hide) g_bodyList.countSkip(note.index, eye, frame);
     g_bodyBusy.clear(std::memory_order_release);
     return hide;

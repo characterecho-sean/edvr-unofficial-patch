@@ -326,14 +326,14 @@ void nativeOnFootBodyCullEnd(ID3D11DeviceContext* ctx);
 // vScreen's shutdown, beside remlokShutdown: releases the cached clones and the game states they were made from.
 void nativeOnFootBodyCullShutdown();
 
-// F154/F155 (TEMPORARY, experimental.native_on_foot_body_draw_hide: -1 or 0..127; native_on_foot_f154.h): finds the coat's pack among the eye draws that use the clip pixel shader (the
-// body parts with the vertex clip modifier) by leaving one listed draw out of both eyes. The frame thread publishes the dial here every frame: the number while the key is 0..127 and
-// native stereo is on foot, else -1. The draw path's cost with it at -1 is the one relaxed load in nativeOnFootBodyDrawLive(); only then does beginPanelOverride (vscreen.cpp) call
-// nativeOnFootBodyDrawSkips for an indexed eye draw.
+// F154/F156 (TEMPORARY, experimental.native_on_foot_body_draw_hide: -1 or 0..127; native_on_foot_f154.h): finds the coat's pack among the local body's eye draws (stencil ref 21, any
+// shader) by leaving one listed draw out of both eyes. The frame thread publishes the dial here every frame: the number while the key is 0..127 and native stereo is on foot, else -1.
+// The draw path's cost with it at -1 is the one relaxed load in nativeOnFootBodyDrawLive(); only then does beginPanelOverride (vscreen.cpp) call nativeOnFootBodyDrawSkips for an
+// indexed eye draw.
 inline std::atomic<int32_t> g_nativeOnFootBodyDrawLive{-1};
 inline bool nativeOnFootBodyDrawLive() { return g_nativeOnFootBodyDrawLive.load(std::memory_order_relaxed) >= 0; }
-// Draw thread, owner context, an indexed draw. eyeTarget: Rtv0 is one of the eye textures; rtvResource: its resource (the eye's name for the counts; may be null). A draw that does not
-// use the clip pixel shader returns false at once. Otherwise reads the stencil ref, lists the draw, and returns true when it is the dial's draw: the caller returns kSkip.
+// Draw thread, owner context, an indexed draw. eyeTarget: Rtv0 is one of the eye textures; rtvResource: its resource (the eye's name for the counts; may be null). Reads the stencil
+// ref and returns false at once for any but 21 (the local body); otherwise lists the draw and returns true when it is the dial's draw: the caller returns kSkip.
 bool nativeOnFootBodyDrawSkips(ID3D11DeviceContext* ctx, uint32_t indexCount, uint32_t instances, uint32_t startIndex, int32_t baseVertex, bool eyeTarget, const void* rtvResource);   // native_on_foot.cpp
 
 // F26: the native on-foot mode-change counter (the frame thread bumps it on each enter or leave). The UI layer re-arms its eye check on a change.

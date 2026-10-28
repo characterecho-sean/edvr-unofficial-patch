@@ -50,7 +50,7 @@
 #include "f145_checks.h"    // F145: the weapon UI's tag slots given back (the pick, the F144 flight replayed, the event ring) and the proof against the seed (the seed-only map on the two-eye rig)
 #include "f149_checks.h"    // F149/F150: the ADS eye depth, one per weapon (the game's unscoped camera plus a back-off), never further forward than the key (the tables, the rule, the cap, the shift at the same depth, the cache by copy)
 #include "f152_checks.h"    // F152: the coat's Gear_Back kept to the shadows with the head turned (phi, the hysteresis, the sample word and its stale rule), the readout origin's two shadows
-#include "f154_checks.h"    // F154/F155 (TEMPORARY): the clip shader's eye draws listed by first appearance (the numbers, the cap of 128, no renumbering within a pass, a new pass from -1) and one hidden: the number, the pixel shader and the eye target all required
+#include "f154_checks.h"    // F154/F156 (TEMPORARY): the local body's eye draws listed by first appearance (the numbers, the cap of 128, no renumbering within a pass, a new pass from -1) and one hidden: the number, stencil ref 21 and the eye target all required
 #include "f151_checks.h"    // F151: the weapon readout's draw bound by its place (the ordinals, each guard, one bind per key, the lost-frame count) and the held copy's scope from the selected slot
 #include "f110_checks.h"    // F110: the ADS sight lock's model right eye (the left-eye job camera plus the IPD)
 #include "f111_checks.h"    // F111: the panel pointer instrument's statistics and verdict
@@ -7549,9 +7549,10 @@ int wmain(int argc, wchar_t** argv) {
     // frames one eye drew the part and the other did not are counted; the held copy's scope is read from the game's selected slot when the name finds two copies (an ambiguous loadout
     // resolved by slot, a slot holding another item and no selection unknown, an unambiguous name left alone).
     f151test::run151(check);
-    // F154/F155 (TEMPORARY): the clip shader's eye draws listed by identity in the order they first appear (the six fields each tell two draws apart, colliding slots, 128 draws, the 129th turned
-    // away, no renumbering within a pass), the hide needing the dial's number, the clip pixel shader and an eye render target together, the stencil ref recorded (any ref lists), the left-out
-    // counts and the frames drawn by eye, a pass beginning when the dial leaves -1 (the list emptied and numbered from 0), and the writer's publish order.
+    // F154/F156 (TEMPORARY): the local body's eye draws listed by identity in the order they first appear (the shaders, the index count and the instance count each tell two draws apart; the
+    // index buffer, start index and base vertex are merged and counted as variants, up to 64 an entry), colliding slots, 128 draws, the 129th turned away and its identity counted, no
+    // renumbering within a pass, the hide needing the dial's number, stencil ref 21 and an eye render target together (any shader), the left-out counts and the frames drawn by eye, a
+    // pass beginning when the dial leaves -1 (the list emptied and numbered from 0), and the writer's publish order.
     f154test::run154(check);
     // F110: the ADS sight lock's model right eye from the left-eye job camera and from a solved left eye, the fallback, the IPD's sign.
     f110test::run110(check);
