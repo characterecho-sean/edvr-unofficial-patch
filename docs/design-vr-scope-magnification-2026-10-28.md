@@ -33,7 +33,8 @@ game's own zoom as a magnified picture inside the scope's lens. The rest of the 
 - **ruled out (cost or brief):** a third camera pass (C), magnifying in DLSS's input (E), a whole-view FOV change (D). Section 2.
 - **Analysis hand-over FILED** (analysis `1547986`): `analysis\decomp\verify_20261028_ads_zoom_receiver.txt` (the receiver, the correction to
   `analysis\decomp\verify_20261027_ads_sight_line.txt` section 1, the candidates).
-- **Next flight: the same build**, Epic in flat mode only: the other weapons and a `HumanoidFOV` change (Q1, Q3). Section 7.
+- **Next flight: the same build**, Epic in flat mode only: the other weapons' unscoped ADS (no other scoped weapon is owned) and a
+  `HumanoidFOV` change (Q1 unscoped, Q3). Sections 4 and 7.
 - **Decision waiting on the maintainer:** A or B3 (M 4.07 for the scoped Executioner; the glass itself suits A).
 - **Key (after S0, on the maintainer's word):** `fix.native_on_foot_ads_scope_zoom` = on | off. Section 5.
 
@@ -145,6 +146,11 @@ From the game only, per (item, scope), filled by S0's flat flight. The pilot's l
 Scoped copies flown so far: the plasma sniper only. The chart expects the Executioner scoped at about 1.8 and the other scopes near 1.0.
 An entry under 1.05 gets no lens: magnification that small would only cost detail. Unscoped ADS is measured too (Q1), in case the game
 narrows the FOV slightly without a scope.
+
+The maintainer owns no other scoped weapon (2026-10-28), so the scoped table holds the Executioner alone (15.000 deg, M 4.07; the chart's
+1.8 does not match it). Any other scoped (item, scope) gets no lens until a value is measured (S0's flat line, flown by someone who owns
+it) or the game's own value is found (Z3, the `ScopeMagnification` stat, by static RE). Unscoped ADS does narrow (the bare Executioner to
+35 deg, M 1.70), so the other weapons' unscoped presses decide whether the feature is for scopes only or for every sight with glass.
 
 ## 5. Config surface
 
