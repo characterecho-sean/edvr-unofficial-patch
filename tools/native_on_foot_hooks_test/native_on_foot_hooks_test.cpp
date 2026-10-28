@@ -1446,6 +1446,57 @@ void testOutfitGlue(const CtlPages& p) {
     edvr::nativeOnFootCameraPublish(0, 0);
     check(!began && classOf(back) == 2 && othersKept(), "...in the game's third-person camera nothing is promoted");
 
+    // ---- F152: the head turned away from the body keeps Gear_Back to the shadows (stop at 45 deg, resume below 38, a sample older than 100 ms keeps the decision)
+    {
+        const NativeOnFootOutfitStats a0 = nativeOnFootOutfitStats();
+        const auto callAt = [&](uint64_t now) {
+            t::clipProbeClock(now);
+            const bool b = nativeOnFootOutfitBegin(local.b, &sw, true);
+            if (b) nativeOnFootOutfitEnd(&sw);
+            return b;
+        };
+        const auto publishAt = [&](uint64_t now, double phi) {
+            t::clipProbeClock(now);
+            edvr::nativeOnFootBodyYawPublish(phi);
+        };
+        setClass(back, 2);
+        check(callAt(50000), "F152: no sample yet: Gear_Back is promoted as before");
+        publishAt(50010, 0.0);
+        check(callAt(50020) && classOf(back) == 2, "F152: the head square to the body (0 deg): promoted, and the game's class put back after the call");
+        publishAt(50100, 50.0);
+        check(!callAt(50110) && classOf(back) == 2, "F152: the head 50 deg from the body: Gear_Back stays in the game's class, nothing is promoted");
+        publishAt(50200, -50.0);
+        check(!callAt(50210), "F152: ... and -50 deg the same (the turn to the left)");
+        publishAt(50300, 40.0);
+        check(!callAt(50310), "F152: ... 40 deg is still not promoted (the hysteresis: resume below 38)");
+        publishAt(50400, 37.0);
+        check(callAt(50410), "F152: ... 37 deg resumes the promotion");
+        publishAt(50500, 44.0);
+        check(callAt(50510), "F152: ... 44 deg, resumed, stays promoted (stop at 45)");
+        publishAt(50600, 45.0);
+        check(!callAt(50610), "F152: ... 45 deg stops it");
+        publishAt(50700, 50.0);
+        check(!callAt(50900), "F152: a sample older than 100 ms keeps the last decision: not promoting at 50 deg");
+        publishAt(51000, 10.0);
+        check(callAt(51200) == false, "F152: ... even when the last decision was to stop and the head is back: the stale 10 deg sample decides nothing");
+        publishAt(51300, 10.0);
+        check(callAt(51310), "F152: ... a fresh 10 deg sample resumes it");
+        publishAt(51400, 60.0);
+        check(!callAt(51410) && !callAt(51420), "F152: 60 deg stops it again");
+        publishAt(51500, 20.0);
+        check(callAt(51510), "F152: back to 20 deg resumes it");
+        publishAt(51600, 50.0);
+        check(callAt(51800), "F152: a stale 50 deg sample keeps the last decision: promoting");
+        const NativeOnFootOutfitStats a1 = nativeOnFootOutfitStats();
+        check(a1.turnGated == a0.turnGated + 8 && a1.turnStops == a0.turnStops + 3 && std::fabs(a1.yawAbsMaxDeg - 60.0f) < 0.15f,
+              "F152: the counts: eight calls kept from the promotion, three stops, the largest |yaw| 60 deg");
+        const double unrelated[3] = {NAN, INFINITY, -INFINITY};
+        for (double v : unrelated) edvr::nativeOnFootBodyYawPublish(v);
+        check(nativeOnFootOutfitStats().yawAbsMaxDeg == a1.yawAbsMaxDeg, "F152: a yaw that is not a number is published as nothing");
+        setClass(back, 2);
+        t::clipProbeClock(0);
+    }
+
     // ---- the extra unclip: the five parts, in the coat only
     const char* const allowedNames[5] = {"EVASuit_Gear_UpperArmL", "EVASuit_Gear_UpperArmR", "EVASuit_Gear_Chest", "EVASuit_Gear_Back", "EVASuit_Gear_Arms"};
     const char* const decoyNames[9] = {"EVASuit_Gear_Neck", "EVASuit_Gear_Shoulders", "EVASuit_Gear_UpperArms", "EVASuit_Gear_Waist", "EVASuit_Gear_Thighs", "EVASuit_Gear_Knees",
@@ -1497,7 +1548,7 @@ void testOutfitGlue(const CtlPages& p) {
     imgFade(local.b);
     NativeOnFootOutfitStats st3 = nativeOnFootOutfitStats();
     check(groupIs(allowedNames, 5, 0, 1) && st3.clipWrites == st2.clipWrites + 5,
-          "...a part whose enable is already 0 is written again, dirty 1 every call (F148: skipping it showed the coat's backpack at the hip)");
+          "...a part whose enable is already 0 is written again, dirty 1 every call (as F144 to F146 flew)");
     gameApply();
     imgFade(local.b);
     check(groupIs(allowedNames, 5, 0, 1) && groupIs(decoyNames, 9, 1, 0) && nativeOnFootOutfitStats().clipWrites == st3.clipWrites + 5, "...and the game's next item apply (enable back to 1) is unclipped again");

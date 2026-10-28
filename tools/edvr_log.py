@@ -11576,9 +11576,26 @@ def _hj_f85b(rows, ctx):
             nwhy.update(_hpairs(x["why"]))
         per = [(sum(int(x["outside"]) for x in placeeye if x["eye"] == str(e)), sum(int(x["bound"]) for x in placeeye if x["eye"] == str(e))) for e in (0, 1)]
         text += "; draws outside every stream window eye 0 %d (bound by place %d), eye 1 %d (bound by place %d), not bound for [%s]" % (per[0][0], per[0][1], per[1][0], per[1][1], _htop(nwhy, 3))
+    # F152: where the origin rows (b1 row 275) of the marker composite draws came from, per window: engine motion's CB shadow, native on foot's own CPU shadow (the one that
+    # stands in when engine motion is down: AA off, F7), or none; the two compared where both had rows; and the refusals "no b1 origin" while the own shadow held rows, which
+    # must be 0 (a count here means the plumbing from the shadow to the decision broke). A log from before has none of it.
+    orows = [r for r in sec if r.get("oeng") is not None]
+    oflag = []
+    if orows:
+        eng, own, none = (_hsum(orows, k) for k in ("oeng", "oown", "onone"))
+        opairs, odiffering, obug = (_hsum(orows, k) for k in ("opairs", "odiffering", "obug"))
+        omax = max(float(r["odiff"]) for r in orows)
+        text += "; origin rows (F152): engine shadow %d, own shadow %d, none %d; own against engine max difference %.1e over %d draws (%d differing)" % (eng, own, none, omax, opairs, odiffering)
+        if obug:
+            oflag.append("BUG: %d weapon UI draw(s) refused for no b1 origin while the own shadow held rows" % obug)
+        if odiffering:
+            oflag.append("the own shadow's rows differed from the engine's on %d of %d draws (max %.1e)" % (odiffering, opairs, omax))
+        if none and not eng and not own:
+            oflag.append("no source gave the origin rows on any of the %d marker composite draws" % none)
     if path == "none" or found == 0 or decided == 0 or bound == 0:
-        return ("NEVER APPLIED", text)
-    return ("PARTIAL" if bound * 10 < decided * 9 or refused * 10 > decided else "OK", text)
+        return ("NEVER APPLIED", text + (" [" + "; ".join(oflag) + "]" if oflag else ""))
+    verdict = "PARTIAL" if bound * 10 < decided * 9 or refused * 10 > decided or oflag else "OK"
+    return (verdict, text + (" [" + "; ".join(oflag) + "]" if oflag else ""))
 
 
 def _hj_f85c(rows, ctx):
@@ -13051,11 +13068,19 @@ def _hj_f142_outfit(rows, ctx):
         _hsecs(sec), tot["calls"], tot["swapped"], tot["promoted"], _htop(names, 6), tot["refused"], tot["lost"], faults)
     if down:
         text += "; stood down after %s faults" % down[-1]["faults"]
+    # F152: the coat's Gear_Back kept to the shadows while the head is turned 45 deg or more from the body (resumed below 38): the calls it was kept on, the stops, and the largest
+    # |yaw| the pin published (a session figure). A log from before has no such columns.
+    turn = [r for r in sec if r.get("gated") is not None]
+    gated = _hsum(turn, "gated") if turn else 0
+    if turn:
+        text += "; head turn (F152): %d outer-garment call(s) kept from the promotion, %d stop(s), largest |head yaw| %s deg" % (gated, _hsum(turn, "stops"), max(int(r["yawmax"]) for r in turn))
     if ctext:
         text += "; " + ctext
     if not tot["promoted"]:
         if not tot["calls"]:
             return ("NEVER APPLIED", text + "; the visibility hook never covered the local avatar while the body wrote")
+        if gated:
+            return ("IDLE", text + "; the head's turn kept Gear_Back to the shadows on every outer-garment call (%d): nothing to promote" % gated)
         # F147: only EVASuit_Gear_Back is ever promoted, and only for an outer garment. In the other suit (suit arms present) or an outfit with no gear arms, F144 holds it back
         # and nothing was meant to be promoted: that is the feature doing what it should, not a hook that never found a part.
         if gear and "kept shadows only" in gear[-1]["what"]:
@@ -13072,6 +13097,58 @@ def _hj_f142_outfit(rows, ctx):
         notes.append("stood down")
     if notes:
         return ("PARTIAL", text + " [" + "; ".join(notes) + "]")
+    return ("OK", text)
+
+
+def _hj_f152_ads_depth(rows, ctx):
+    """F152: the held weapon's ADS eye depth, base + offset + trim. The depth is the game's unscoped ADS camera for the weapon (E's forward from the FP animation's aiming joint)
+    plus an offset baked per weapon plus the live trim (experimental.native_on_foot_ads_eye_offset_cm, -30..30 cm, 0 by default), held to 0..30 cm and cut by the clearance cap.
+    Each ADS window's line names the item, its scope state, the three parts, their sum, the depth asked after the clamp, where the base came from, and the eye after the clearance
+    cap. The report gives, per weapon, the last window's figures and the seconds held at each trim (so the next flight's dialled depth per weapon can be read), the key line's
+    value, and a saved value of the retired setting. OK when every window's trim is the key's; PARTIAL when a weapon's base was the fallback (no measurement, not in the table) or the
+    clamp cut the sum; NEVER APPLIED when the key reads a trim that no ADS window after it carried (the setting does not reach the eye); IDLE with no ADS window."""
+    sec, key, ret = rows.get("sec", []), rows.get("key", []), rows.get("retired", [])
+    if not sec and not key and not ret:
+        return None
+    ktext = ""
+    if key:
+        ktext = "; the trim key read %s cm (%d line(s))" % (key[-1]["v"], len(key))
+    if ret:
+        ktext += "; a saved value of the retired ADS eye distance (%s cm) was named and ignored" % ret[-1]["v"]
+    if not sec:
+        return ("IDLE", "no ADS eye depth line in the window (no weapon was aimed down sights, or a build before F152)" + ktext)
+    items = collections.OrderedDict()
+    for r in sec:
+        g = items.setdefault(r["item"], {"s": 0, "last": r, "trims": collections.OrderedDict(), "scopes": [], "fallback": 0, "clamped": 0})
+        g["s"] += _hwl(r)
+        g["last"] = r
+        trim = float(r["trim"])
+        g["trims"][trim] = g["trims"].get(trim, 0) + _hwl(r)
+        if r["scope"] not in g["scopes"]:
+            g["scopes"].append(r["scope"])
+        if r["src"].startswith("the fallback"):
+            g["fallback"] += _hwl(r)
+        if abs(float(r["sum"]) - float(r["asked"])) > 0.015:
+            g["clamped"] += _hwl(r)
+    parts, flags = [], []
+    for item, g in items.items():
+        r = g["last"]
+        held = ", ".join("trim %+.1f for %d s" % (t, n) for t, n in g["trims"].items())
+        parts.append("%s (scope %s): the last window %s cm = the game's camera %s + offset %s + trim %s, asked %s, eye %s after the clearance cap, base from %s; held %d s (%s)" % (
+            item, "/".join(g["scopes"]), r["sum"], r["base"], r["off"], r["trim"], r["asked"], r["eye"], r["src"], g["s"], held))
+        if g["fallback"]:
+            flags.append("%s: the base was the fallback (21 cm, no measurement) for %d s" % (item, g["fallback"]))
+        if g["clamped"]:
+            flags.append("%s: the 0..30 cm clamp cut the sum for %d s" % (item, g["clamped"]))
+    text = "; ".join(parts) + ktext
+    if key:
+        last = key[-1]
+        after = [r for r in sec if r["_order"] > last["_order"]]
+        if float(last["v"]) != 0.0 and after and not any(abs(float(r["trim"]) - float(last["v"])) < 0.06 for r in after):
+            return ("NEVER APPLIED", text + " [the trim key reads %s cm but no ADS window after it carried it (the windows say trim %s)]" % (
+                last["v"], ", ".join(sorted({r["trim"] for r in after}))))
+    if flags:
+        return ("PARTIAL", text + " [" + "; ".join(flags) + "]")
     return ("OK", text)
 
 
@@ -13693,7 +13770,9 @@ HEALTH_RULES = (
     ), _hj_f93_swap),
     _hrule("weapon UI pin (F85b)", ("F85b",), ("weapon UI pin (F85b)",), (
         ("sec", r"weapon UI pin \(F85b\): (?:no weapon UI part this second \([^)]*\); )?(?P<submits>\d+) matched submits (?:this second|over (?P<wl>\d+) s) \((?P<tagged>\d+) tagged; [^)]*\); "
-                r"path (?P<path>\w+); finds in the pool: by the tag (?P<ftag>\d+), by the translation (?P<fval>\d+); K solves (?P<solves>\d+), eye pairs (?P<pairs>\d+)(?:.*; matched submits in (?P<xs>\d+) of (?P<ws>\d+) s$)?"),
+                r"path (?P<path>\w+); finds in the pool: by the tag (?P<ftag>\d+), by the translation (?P<fval>\d+); K solves (?P<solves>\d+), eye pairs (?P<pairs>\d+)(?:.*; matched submits in (?P<xs>\d+) of (?P<ws>\d+) s(?:; origin rows \(F152\): engine shadow (?P<oeng>\d+), own shadow (?P<oown>\d+), none "
+                r"(?P<onone>\d+), own against engine max difference (?P<odiff>[0-9.eE+-]+) over (?P<opairs>\d+) draws \((?P<odiffering>\d+) differing\), refused with no b1 origin "
+                r"while the own shadow had rows (?P<obug>\d+))?$)?"),
         ("part", r"weapon UI pin \(F85b\) part slot (?P<slot>\d+) \(name (?P<name>\d+)\) eye (?P<eye>\d): tagged (?P<tagged>\d+) in all \(all eyes\), found (?P<found>\d+), "
                  r"matched (?P<matched>\d+), decided (?P<decided>\d+), bound (?P<bound>\d+) \([^)]*\), refused (?P<refused>\d+) \[(?P<why>[^\]]*)\](?:.*; over " + H_WL + r"$)?"),
         # F148: the both-eyes latch's hold, on a line of its own per part and eye (a log from before has none)
@@ -14169,7 +14248,8 @@ HEALTH_RULES = (
         ("_", r"native on foot full outfit \(F142, TEMPORARY\): fix\.native_on_foot_body_full_outfit is (?:on|off) -- "),
         ("sec", r"native on foot full outfit \(F142\) " + H_WL + r": visibility calls of the local avatar (?P<calls>\d+), calls with a part promoted (?P<swapped>\d+), parts "
                 r"promoted (?P<promoted>\d+) \(by name: (?P<names>.+?)\), class changed by the game before the write (?P<refused>\d+), during the call (?P<lost>\d+), faults "
-                r"(?P<faults>\d+)$"),
+                r"(?P<faults>\d+)(?:; head turn \(F152\): outer-garment calls kept from the promotion by the head's turn (?P<gated>\d+), stops (?P<stops>\d+), largest \|head yaw against the "
+                r"body\| (?P<yawmax>\d+) deg \(this session; Gear_Back stops at 45 deg and resumes below 38\))?$"),
         ("down", r"native on foot full outfit \(F142\): stood down for the session after (?P<faults>\d+) faults"),
         ("census", r"native on foot outfit census \(F142\): change (?P<n>\d+) of the local third-person avatar AMC 0x(?P<amc>[0-9A-Fa-f]+): (?P<parts>\d+) of (?P<of>\d+) parts "
                    r"have instances; (?P<what>first read|changed: .+?); (?P<list>every part with an instance follows|only the parts that changed follow)$"),
@@ -14186,6 +14266,13 @@ HEALTH_RULES = (
         ("clipparts", r"native on foot outfit clip parts \(F143\) #(?P<n>\d+) armed (?P<armed>unarmed|weapon|tool): (?P<body>\[.+\])$"),
         ("clipw", r"native on foot full outfit clip \(F143\) " + H_WL + r": modifiers unclipped (?:by the A/B|for the coat) (?P<writes>\d+) \(by name: (?P<names>.+?)\), write faults (?P<faults>\d+)$"),
     ), _hj_f142_outfit),
+    _hrule("ADS eye depth (F152)", ("F152",), ("native on foot ADS eye depth (F152)", "native on foot ADS eye offset (F152", "fix.native_on_foot_ads_eye_distance_cm is retired (F152)"), (
+        ("sec", r"native on foot ADS eye depth \(F152\) " + H_WL + r": item (?P<item>.+?) scope (?P<scope>yes|no|unknown), the weapon's depth (?P<sum>%s) cm = the game's unscoped "
+                r"camera (?P<base>%s) cm \+ the baked offset (?P<off>%s) cm \+ the trim (?P<trim>%s) cm \(clamped to 0\.\.30 cm: (?P<asked>%s) cm asked; base from (?P<src>.+?)"
+                r"(?:, other sources on (?P<other>\d+) frames)?\), (?P<eye>%s) cm after the clearance cap \(cut on (?P<cut>\d+) of (?P<frames>\d+) frames in the sights\)$" % ((_HN,) * 6)),
+        ("key", r"native on foot ADS eye offset \(F152, experimental\): experimental\.native_on_foot_ads_eye_offset_cm = (?P<v>%s) cm" % _HN),
+        ("retired", r"native on foot: fix\.native_on_foot_ads_eye_distance_cm is retired \(F152\): ignored \(the file said (?P<v>%s) cm" % _HN),
+    ), _hj_f152_ads_depth),
     _hrule("ADS sight line (F143)", ("F143",), ("native on foot ADS sight line (F143)", "native on foot ADS sight from the game (F143"), (
         # F146: the "key off" reason and the trims' columns are optional (a log from before F146 has them), and so is the switch's own line, read and ignored
         ("sec", r"native on foot ADS sight line \(F143\) " + H_WL + r": item (?P<item>.+?) scope (?P<scope>yes|no|unknown), source per frame: settled line (?P<game>\d+) "
@@ -14711,7 +14798,7 @@ def main(argv=None):
                     help="post-flight feature health: one line per build-tagged feature family (weapon readout size and pistol "
                          "readout F90, weapon readout part roles, ADS press fit and ADS item gate F91, rifle ADS readout F92, readout swap F93a, weapon UI pin F85b, reticle "
                          "depth F85c, view height hold F87h, weapon eye offset F88, ADS transition F89, ADS sight in both eyes F106, marker fix, "
-                         "prompt anchor and label F87p, the label's designed offset F93c and its own-anchor move F94b, the head in the shadows F95c, the full outfit F142-F144 (Gear_Back promotion, the coat's clip, the first-person census), the ADS sight offset F139, the weapon readout's placement F140 and F144 (with the journal's loadout), the game's ADS sight point and the readout anchor F141, the ADS sight line F143, the weapon UI's tag slots F145, the ADS entry path F144, the marker tee and the pose hook's CPU F100, the in-world screens' coverage F105, the terminal hold F108, the HUD hide F116, and world scale, read from the paired runtime log) saying OK, "
+                         "prompt anchor and label F87p, the label's designed offset F93c and its own-anchor move F94b, the head in the shadows F95c, the full outfit F142-F144 and F152 (Gear_Back promotion and the head turn that holds it back, the coat's clip, the first-person census), the ADS sight offset F139, the ADS eye depth F152 (base + offset + trim per weapon), the engine shadow against the own shadow of the readout's origin rows (on the F85b line), the weapon readout's placement F140 and F144 (with the journal's loadout), the game's ADS sight point and the readout anchor F141, the ADS sight line F143, the weapon UI's tag slots F145, the ADS entry path F144, the marker tee and the pose hook's CPU F100, the in-world screens' coverage F105, the terminal hold F108, the HUD hide F116, and world scale, read from the paired runtime log) saying OK, "
                          "PARTIAL, NEVER APPLIED "
                          "(its own lines show it did nothing), IDLE or UNPARSED with the counters that decide it, then a census of "
                          "every `(F<n>...)` tagged line (count, first and last time, leading label) for the features with no rule. "
@@ -15495,9 +15582,10 @@ def self_test_health():
             return RWindowTail("pistol readout (F90) %u s: item %s", wl, "$wpn_s_pistol_kinetic_sauto_name;", 3, 13.0, 6.0, -3.0, 2.0, "table, scope no", attach, root, none, 0.0, 0.0, hip, hip, ads, 0.5714, 0, refused, why,
                       tail=(int(bool(hip + ads)) if moved_secs is None else moved_secs, wl))
 
-        def pin_sec(submits=540, path="tag", wl=1, submit_secs=None):
+        def pin_sec(submits=540, path="tag", wl=1, submit_secs=None, origin=()):
+            # F152: origin = (engine shadow, own shadow, none, max difference, draws compared, differing, refused with no b1 origin while the own shadow had rows), appended to the line
             return R("weapon UI pin (F85b): %s%llu matched", "" if submits else "no weapon UI part this second (no tool or weapon out, or the submit hook sees none); ",
-                     submits, wl, submits * 2 // 3, 0, path, submits * 2 // 3 if path == "tag" else 0, submits * 2 // 3 if path == "value" else 0, 540, 100, 0, None, None, "none", int(bool(submits)) if submit_secs is None else submit_secs, wl)
+                     submits, wl, submits * 2 // 3, 0, path, submits * 2 // 3 if path == "tag" else 0, submits * 2 // 3 if path == "value" else 0, 540, 100, 0, None, None, "none", int(bool(submits)) if submit_secs is None else submit_secs, wl, *origin)
 
         def pin_part(found=88, decided=88, bound=88, refused=0, why="none", wl=1):
             return RWindowTail("weapon UI pin (F85b) part slot %u", 0, 29510, 0, 400, found, found, decided, bound, 0, 0, refused, why, tail=(wl,))
@@ -17005,8 +17093,8 @@ def self_test_health():
             """The switch's own line, as a log from before F146 has it."""
             return "native on foot full outfit (F142, TEMPORARY): fix.native_on_foot_body_full_outfit is %s -- x" % state
 
-        def fo_sec(wl=10, calls=900, swapped=900, promoted=900, names="EVASuit_Gear_Back 900", refused=0, lost=0, faults=0):
-            return R("native on foot full outfit (F142) %u s", wl, calls, swapped, promoted, names, refused, lost, faults)
+        def fo_sec(wl=10, calls=900, swapped=900, promoted=900, names="EVASuit_Gear_Back 900", refused=0, lost=0, faults=0, gated=0, stops=0, yaw=0):
+            return R("native on foot full outfit (F142) %u s", wl, calls, swapped, promoted, names, refused, lost, faults, gated, stops, yaw)
 
         def fo_census(n=1, amc=0x28A831A0DD8, parts=24, of=54, what="first read", lst="every part with an instance follows"):
             return R("native on foot outfit census (F142): change %u", n, amc, parts, of, what, lst)
@@ -17248,6 +17336,52 @@ def self_test_health():
               has=["first-person census: 2 change(s) written (first read; changed: EVASuit_Gear_Arms, the zeroed set); at the last read EDVR zeroed none"], lacks=["UNPARSED"])
         check("F144 full outfit: a drifted first-person line is unparsed", ["native on foot first-person census (F144): something else"], 4, [("UNPARSED", FO142)])
         check("F144 full outfit: a drifted decision line is unparsed", ["native on foot full outfit (F144): something else"], 4, [("UNPARSED", FO142)])
+
+        # ---- F152: the head turn on the full outfit line ----
+        check("F152 full outfit: the head turn's counts ride the window line", [fo_census(), fo_part(), fo_sec(gated=120, stops=3, yaw=62), fo_sec()], 0, [("OK", FO142)],
+              has=["head turn (F152): 120 outer-garment call(s) kept from the promotion, 3 stop(s), largest |head yaw| 62 deg"], lacks=["UNPARSED"])
+        check("F152 full outfit: the turn kept the promotion on every outer-garment call", [fo_sec(swapped=0, promoted=0, names="none", gated=900, stops=2, yaw=71), gear144()], 0,
+              [("IDLE", FO142)], has=["the head's turn kept Gear_Back to the shadows on every outer-garment call (900)"], lacks=["UNPARSED", "NEVER APPLIED"])
+        check("F152 full outfit: nothing promoted and nothing gated stays NEVER APPLIED", [fo_sec(swapped=0, promoted=0, names="none"), gear144()], 3, [("NEVER APPLIED", FO142)],
+              lacks=["UNPARSED", "head turn kept"])
+        check("F152 full outfit: a window line from before F152 (no head turn columns) still reads",
+              ["native on foot full outfit (F142) 10 s: visibility calls of the local avatar 900, calls with a part promoted 900, parts promoted 900 (by name: EVASuit_Gear_Back 900), "
+               "class changed by the game before the write 0, during the call 0, faults 0"], 0, [("OK", FO142)], has=["900 parts promoted"], lacks=["UNPARSED", "head turn (F152)"])
+
+        # ---- F152: the held weapon's ADS eye depth, base + offset + trim ----
+        E152 = "ADS eye depth (F152)"
+        SMG152 = "$wpn_m_submachinegun_laser_fauto_name;"
+        AR152 = "$wpn_m_assaultrifle_kinetic_fauto_name;"
+
+        def ed152(item=AR152, scope="no", wl=10, base=25.0, off=-19.0, trim=0.0, asked=None, src="the table", other=0, eye=None, cut=0, frames=900):
+            total = base + off + trim
+            asked = min(max(total, 0.0), 30.0) if asked is None else asked
+            return R("native on foot ADS eye depth (F152) %u s", wl, item, scope, total, base, off, trim, asked, src, ", other sources on %d frames" % other if other else "",
+                     asked if eye is None else eye, cut, frames)
+
+        def key152(v=0.0):
+            return R("native on foot ADS eye offset (F152, experimental)", v, -30.0, 30.0, 40.0)
+
+        def ret152(v=14.0):
+            return R("fix.native_on_foot_ads_eye_distance_cm is retired (F152)", v)
+
+        check("F152 ADS eye depth: the kinetic AR at its baked 6 cm, no trim", [key152(), ed152()], 0, [("OK", E152)],
+              has=[AR152, "the last window 6.00 cm = the game's camera 25.00 + offset -19.00 + trim +0.00, asked 6.00", "held 10 s (trim +0.0 for 10 s)"], lacks=["UNPARSED"])
+        check("F152 ADS eye depth: a trim dialled on the laser SMG, the held seconds per trim", [key152(0.0), ed152(item=SMG152, base=15.0, off=-5.0, trim=0.0, wl=10),
+              key152(5.0), ed152(item=SMG152, base=15.0, off=-5.0, trim=5.0, wl=20), ed152(item=SMG152, base=15.0, off=-5.0, trim=5.0, wl=10)], 0, [("OK", E152)],
+              has=["the last window 15.00 cm = the game's camera 15.00 + offset -5.00 + trim +5.00, asked 15.00", "held 40 s (trim +0.0 for 10 s, trim +5.0 for 30 s)"], lacks=["UNPARSED"])
+        check("F152 ADS eye depth: the key reads a trim and no window after it carried it", [key152(5.0), ed152(item=SMG152, base=15.0, off=-5.0, trim=0.0)], 3, [("NEVER APPLIED", E152)],
+              has=["the trim key reads +5.0 cm but no ADS window after it carried it"], lacks=["UNPARSED"])
+        check("F152 ADS eye depth: a window before the key's change is not held against it", [ed152(trim=0.0), key152(5.0)], 0, [("OK", E152)], lacks=["UNPARSED", "NEVER APPLIED"])
+        check("F152 ADS eye depth: an item with no measurement uses the fallback base", [key152(), ed152(item="$wpn_m_assaultrifle_laser_fauto_name;", base=21.0, off=0.0,
+              src="the fallback base (no measurement)")], 0, [("PARTIAL", E152)], has=["the base was the fallback (21 cm, no measurement) for 10 s"], lacks=["UNPARSED"])
+        check("F152 ADS eye depth: the 0..30 cm clamp cut the sum", [key152(30.0), ed152(item=SMG152, base=15.0, off=-5.0, trim=30.0)], 0, [("PARTIAL", E152)],
+              has=["the 0..30 cm clamp cut the sum for 10 s", "= the game's camera 15.00 + offset -5.00 + trim +30.00, asked 30.00"], lacks=["UNPARSED"])
+        check("F152 ADS eye depth: a window with two sources of the base", [key152(), ed152(other=12)], 0, [("OK", E152)], lacks=["UNPARSED"])
+        check("F152 ADS eye depth: a saved value of the retired setting is named", [ret152(14.0), key152(), ed152()], 0, [("OK", E152)],
+              has=["a saved value of the retired ADS eye distance (14.0 cm) was named and ignored"], lacks=["UNPARSED"])
+        check("F152 ADS eye depth: the key line alone, no weapon aimed", [key152(2.0)], 0, [("IDLE", E152)], has=["no ADS eye depth line", "the trim key read +2.0 cm"], lacks=["UNPARSED"])
+        check("F152 ADS eye depth: a drifted line is unparsed", ["native on foot ADS eye depth (F152) 10 s: something else"], 4, [("UNPARSED", E152)])
 
         # ---- F135: the on-foot menu probe (MEASURE ONLY) ----
         M135 = "menu probe (F135)"
@@ -17550,6 +17684,19 @@ def self_test_health():
         check("F85b: place lines in a ten-second window, many lost frames do not change the verdict", [pin_sec(wl=10), pin_part(wl=10), pin_place(tag=700, placed=4, decided=704, pdecided=4, lost=30, wl=10, eye=1),
               pin_placeeye(outside=40, bound=4, why="other mesh 30, other ordinal 6", wl=10)], 0, [("OK", F85B)],
               has=["frames lost eye 0 0, eye 1 30", "eye 1 40 (bound by place 4)", "not bound for [other mesh 30, other ordinal 6]"], lacks=["UNPARSED"])
+        # F152: the origin rows (b1 row 275) of the marker composite draws by source: the engine shadow, the own shadow (engine motion down), none; compared where both had rows
+        check("F85b: a log from before F152 (no origin columns) reads and says nothing of them", [pin_sec().split("; origin rows (F152)")[0], pin_part(), pin_held()], 0, [("OK", F85B)],
+              lacks=["UNPARSED", "origin rows (F152)"])
+        check("F152 origin rows: the engine shadow gave them and the own shadow agreed", [pin_sec(origin=(540, 0, 0, 0.0, 540, 0, 0)), pin_part()], 0, [("OK", F85B)],
+              has=["origin rows (F152): engine shadow 540, own shadow 0, none 0; own against engine max difference 0.0e+00 over 540 draws (0 differing)"], lacks=["UNPARSED", "BUG"])
+        check("F152 origin rows: engine motion down, the own shadow gave them", [pin_sec(origin=(0, 540, 0, 0.0, 0, 0, 0)), pin_part()], 0, [("OK", F85B)],
+              has=["origin rows (F152): engine shadow 0, own shadow 540, none 0"], lacks=["UNPARSED", "BUG", "no source"])
+        check("F152 origin rows: refused for no b1 origin while the own shadow held rows is a bug", [pin_sec(origin=(0, 540, 0, 0.0, 0, 0, 7)), pin_part()], 0, [("PARTIAL", F85B)],
+              has=["BUG: 7 weapon UI draw(s) refused for no b1 origin while the own shadow held rows"], lacks=["UNPARSED"])
+        check("F152 origin rows: the two shadows' rows differ", [pin_sec(origin=(540, 0, 0, 0.5, 540, 3, 0)), pin_part()], 0, [("PARTIAL", F85B)],
+              has=["the own shadow's rows differed from the engine's on 3 of 540 draws (max 5.0e-01)"], lacks=["UNPARSED"])
+        check("F152 origin rows: no source gave them on any draw", [pin_sec(origin=(0, 0, 540, 0.0, 0, 0, 0)), pin_part()], 0, [("PARTIAL", F85B)],
+              has=["no source gave the origin rows on any of the 540 marker composite draws"], lacks=["UNPARSED"])
         check("F85b: a place line whose words drifted is named as a line the rule does not read, beside the verdict", [pin_sec(), pin_part(), "weapon UI pin (F85b) eye 1: place bind (F151): something else"], 0,
               [("OK", F85B)], has=["[+1 line(s) the rule's patterns do not match:", "place bind (F151): something else"])
 

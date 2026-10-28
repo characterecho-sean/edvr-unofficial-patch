@@ -49,6 +49,7 @@
 #include "f144_checks.h"    // F144: the settled sight line per (item, scope), the coat's Gear_Back decision and first-person census, the readout placed per role and what reaches the draw
 #include "f145_checks.h"    // F145: the weapon UI's tag slots given back (the pick, the F144 flight replayed, the event ring) and the proof against the seed (the seed-only map on the two-eye rig)
 #include "f149_checks.h"    // F149/F150: the ADS eye depth, one per weapon (the game's unscoped camera plus a back-off), never further forward than the key (the tables, the rule, the cap, the shift at the same depth, the cache by copy)
+#include "f152_checks.h"    // F152: the coat's Gear_Back kept to the shadows with the head turned (phi, the hysteresis, the sample word and its stale rule), the readout origin's two shadows
 #include "f151_checks.h"    // F151: the weapon readout's draw bound by its place (the ordinals, each guard, one bind per key, the lost-frame count) and the held copy's scope from the selected slot
 #include "f110_checks.h"    // F110: the ADS sight lock's model right eye (the left-eye job camera plus the IPD)
 #include "f111_checks.h"    // F111: the panel pointer instrument's statistics and verdict
@@ -7534,11 +7535,14 @@ int wmain(int argc, wchar_t** argv) {
     // replayed into eight slots, the event ring, and the proof of a trim against the same frame placed at the seed alone (the rifle's ADS role with its size factor, the pistol's ADS role
     // with its target taken from the hip part's centre, the hip role).
     f145test::run145(check);
-    // F149/F150: the ADS eye depth: min(the key, the weapon's depth), then the 0..30 cm clamp, then the clearance cap; the weapon's depth is the table's base (the game's unscoped
-    // ADS camera) plus the item's back-off (the kinetic assault rifle 15, the laser SMG 10, the plasma sniper 16 with a scope or without, the pistols 0), else for an item with no row its
-    // settled line when the copy is known unscoped, else the key alone (21); the line's shift taken at the same depth; the lock's follower carrying a change of k between weapons;
-    // and the F144 cache told by copy while the scope is unknown.
+    // F149/F150/F152: the ADS eye depth: the weapon's depth plus the live trim (-30..30 cm), then the 0..30 cm clamp, then the clearance cap; the weapon's depth is the table's base (the
+    // game's unscoped ADS camera) plus the item's baked offset (the kinetic assault rifle 6, the laser SMG 10, the plasma sniper 16 with a scope or without, the pistols 0), else for an
+    // item with no row its settled line when the copy is known unscoped, else the fallback base (21); the line's shift taken at the same depth; the lock's follower carrying a change
+    // of k between weapons or of the trim; and the F144 cache told by copy while the scope is unknown.
     f149test::run149(check);
+    // F152: the coat's Gear_Back with the head turned (phi from the body pin's eye-minus-neck vector, the 45/38 deg hysteresis, the sample word and its 100 ms stale rule), and the
+    // readout origin's two shadows (the engine's first, the own one when engine motion is down, their difference where both exist, a ranged write into the rows).
+    f152test::run152(check);
     // F151: a weapon readout draw no stream window held is bound to the part's record by its place (the eye, the mesh field by field, the ordinal among the eye's draws of the mesh, the
     // instance count, the previous frame, the part drawn once, the key not named or taken in the eye-frame, exactly one tagged record in this frame's Unmap), never from a bind; the
     // frames one eye drew the part and the other did not are counted; the held copy's scope is read from the game's selected slot when the name finds two copies (an ambiguous loadout

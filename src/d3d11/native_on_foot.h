@@ -379,6 +379,9 @@ void nativeOnFootMarkerProbeDraw(ID3D11DeviceContext* ctx, uint32_t instances, u
 // F47: the game's UpdateSubresource of a buffer (owner context, before the real call): the marker composite's b0 CPU shadow takes the write.
 // `boxed` with [left, right) the byte range the data covers; otherwise the whole buffer from data.
 void nativeOnFootMarkerProbeUpdate(const ID3D11Resource* resource, const void* data, bool boxed, uint32_t left, uint32_t right);
+// F152: a Copy into a buffer on the owner context (CopyResource, CopySubresourceRegion, CopyStructureCount): a scene constants buffer whose rows 270..275 native on foot shadows
+// loses them until its next Map and Unmap.
+void nativeOnFootCb1Copied(const ID3D11Resource* resource);
 // vScreen's shutdown: the staging buffers (and F47's private constant buffers).
 void nativeOnFootMarkerProbeShutdown();
 

@@ -38,6 +38,7 @@
 #include "flat_query_cut.h"   // the flat bracket's kept answers, and the sampled check of each
 #include "kinematic_eval_hook.h"
 #include "kinematic_eval_probe.h"
+#include "object_record_writer_hook.h"   // objectRecordWriterHookMatches: the lookup's prologue may be the record-writer hook's
 #include "skin_entity_hook.h"   // F2: the read-only observer of the game's skinning job assembly (identity of skinned characters)
 #include "skin_join_gpu.h"      // F2: the join at the palette chain's dispatch, the pose table, the views the cloned vertex shaders read
 #include "vscreen.h"
@@ -599,6 +600,23 @@ constexpr uint32_t kEngineWitnessRvas[20] = {0x4315A29u, 0x4315A31u, kItemCtorCa
                                              0x4315D14u, 0x4315D22u, 0x4315D27u, 0x4315DB5u, 0x4C861D6u, 0x4C861F4u};
 std::atomic<bool> g_unknownBuildNoted{false};   // the unknown build's "found by signature" line, once per session
 
+// The dictionary lookup's first 32 bytes, as the emit bracket needs them (read at `at`, the running build's copy of kLookupRva): the pin's, or the bytes EDVR's own
+// record-writer hook leaves there (object_record_writer_hook.cpp). That hook replaces the first five bytes with a jump to its relay and leaves the eleven after them; an
+// eye-dump object classification installs it and it stays for the life of the process (a capture only gates it), and it relays to the game's lookup with the registers it was
+// given, so a call through g_lookup still reaches the game's function. Every configure reads this again: an AA off and on re-runs it with the hook in place, and a pin-only
+// compare then stood the feature down for good ("lookup mismatch at RVA 0x3699C00", flight edvr_gfx_20261028_073013). Null: usable; else the reason.
+const char* lookupPrologueWhy(uintptr_t at) noexcept {
+    uint8_t got[sizeof(kLookupPrologue)] = {};
+    __try {
+        std::memcpy(got, reinterpret_cast<const void*>(at), sizeof(kLookupPrologue));
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return "engine image unreadable";
+    }
+    if (gamePinMatches(static_cast<uint32_t>(kLookupRva), got, kLookupPrologue, sizeof(kLookupPrologue))) return nullptr;
+    if (objectRecordWriterHookMatches(at)) return nullptr;
+    return "lookup mismatch at RVA 0x3699C00";
+}
+
 #ifndef EDVR_ENGINE_VELOCITY_RIG
 const char* verifyEngine(uintptr_t base) noexcept {
     if (!gameBuildIdentity(nullptr, nullptr)) return "not build 334925 (no PE header)";
@@ -627,11 +645,9 @@ const char* verifyEngine(uintptr_t base) noexcept {
         if (!callAt || !ctorAt || call[0] != 0xE8 || uint64_t(callAt) + 5u + uint64_t(int64_t(rel)) != uint64_t(ctorAt))
             return "an unknown build: the producer's call found by signature does not reach the item constructor found by signature";
     }
+    if (const char* why = lookupPrologueWhy(base + lookup)) return why;
     __try {
-        uint8_t got[sizeof(kLookupPrologue)] = {};
-        std::memcpy(got, reinterpret_cast<const void*>(base + lookup), sizeof(kLookupPrologue));
-        if (!gamePinMatches(static_cast<uint32_t>(kLookupRva), got, kLookupPrologue, sizeof(kLookupPrologue)))
-            return "lookup mismatch at RVA 0x3699C00";
+        uint8_t got[sizeof(kAppendBytes)] = {};
         std::memcpy(got, reinterpret_cast<const void*>(base + append), sizeof(kAppendBytes));
         if (!gamePinMatches(static_cast<uint32_t>(kAppendRva), got, kAppendBytes, sizeof(kAppendBytes)))
             return "append sequence mismatch at RVA 0x4315DA5";
@@ -647,7 +663,12 @@ const char* verifyEngine(uintptr_t base) noexcept {
 #else
 // tools/engine_velocity_test drives this file's draw half on WARP: there is
 // no engine image to check, and the rig's own fixture stands in for the emit.
-const char* verifyEngine(uintptr_t) noexcept { return nullptr; }
+// The one check it keeps is the lookup's prologue, on a fixture the rig sets
+// (engineVelocityLookupFixtureForRig; none: nothing to check).
+const uint8_t* g_rigLookupFixture = nullptr;
+const char* verifyEngine(uintptr_t) noexcept {
+    return g_rigLookupFixture ? lookupPrologueWhy(reinterpret_cast<uintptr_t>(g_rigLookupFixture)) : nullptr;
+}
 #endif
 
 void observeRawCurrentPose(uintptr_t record, uintptr_t node, uintptr_t owner,const emit::Pose& now,
@@ -2767,6 +2788,9 @@ size_t engineVelocityRememberedForRig(bool pixel) {
     return pixel ? g_ps.size() : g_vs.size();
 }
 size_t engineVelocityRememberCapForRig() { return kRememberCap; }
+// pin_tests.h: the 32 bytes the rig's lookup check reads (null: no check), and the pin's size.
+void engineVelocityLookupFixtureForRig(const uint8_t* bytes) { g_rigLookupFixture = bytes; }
+const uint8_t* engineVelocityLookupPinForRig(size_t* n) { if (n) *n = sizeof(kLookupPrologue); return kLookupPrologue; }
 #endif
 
 void engineVelocityAfterFlatDraw(ID3D11DeviceContext* ctx) {

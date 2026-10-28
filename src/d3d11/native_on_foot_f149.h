@@ -1,23 +1,24 @@
-// F149/F150 (native on-foot VR): the ADS eye depth, one per weapon, never further forward than the key. Header only, no game or D3D11 state, so native_frame_test runs the very
-// functions the ADS sight lock uses.
+// F149/F150/F152 (native on-foot VR): the ADS eye depth, one per weapon. Header only, no game or D3D11 state, so native_frame_test runs the very functions the ADS sight lock uses.
 //
-// The ADS eye sits at the sight origin (the FP animation's aiming joint P14, or F79's measured optic origin) + k f, f the FP root's forward. Until F148 k was the key
-// (fix.native_on_foot_ads_eye_distance_cm, the pilot's 21 cm) for every weapon, and for the laser SMG that put the eye inside the gun. E's forward from P14 (F141's eye matrix E,
-// def_c_povCamera_joint through the HumanoidWeaponAiming bend) is the game's own ADS camera depth for the weapon: laser SMG +15.0, kinetic AR +25.0, kinetic SMG +20.0, rocket
-// +22.0, plasma sniper +16.0 unscoped, laser pistol -2.5, plasma pistol -7.5.
+// The ADS eye sits at the sight origin (the FP animation's aiming joint P14, or F79's measured optic origin) + k f, f the FP root's forward. Until F148 k was one setting for every
+// weapon (the pilot's 21 cm), and for the laser SMG that put the eye inside the gun. E's forward from P14 (F141's eye matrix E, def_c_povCamera_joint through the HumanoidWeaponAiming
+// bend) is the game's own ADS camera depth for the weapon: laser SMG +15.0, kinetic AR +25.0, kinetic SMG +20.0, rocket +22.0, plasma sniper +16.0 unscoped, laser pistol -2.5, plasma
+// pistol -7.5.
 //
-// The rule: the depth asked for the held weapon is min(the key, the weapon's depth), then the key's own 0..30 cm clamp (adsEyeDistanceClampCm), then the clearance cap against the FP
-// weapon's points (adsEyeDistanceCap, unchanged). The key therefore reads "the furthest forward the ADS eye sits". The weapon's depth is base + offset:
+// F152: the depth is base + offset + trim, then the 0..30 cm clamp (adsEyeDistanceClampCm), then the clearance cap against the FP weapon's points (adsEyeDistanceCap, unchanged). The
+// old setting, a cap at 21 cm, is gone: it let the pilot move a weapon back but never forward past the weapon's own depth (the laser SMG would not leave 10 cm; the rocket launcher's
+// 21.98 was cut to 21).
 //   base   the game's unscoped ADS camera depth for the item (kAdsCameraDepths): a measurement, one value per item whatever the scope state. The game backs the camera off with a
 //          scope because it zooms at the same time (the scoped plasma sniper's is 5.0, the unscoped one's 16.0); VR cannot zoom, so following the scoped camera would make the
 //          scope view smaller than the unscoped one, and the unscoped camera is the base for both.
-//   offset the back-off from that camera (kAdsBackOffs): 0 for an item without a row. Only the two weapons whose camera puts the eye inside the gun have one. A flown value changes
-//          this table and no other.
-// An item without a row in kAdsCameraDepths (the TK Aphelion has no measurement) takes its settled line's E forward when the held copy is known unscoped (scope state no), else the
-// key alone. The settled line (F144) feeds the depth of no item that has a row; it still feeds the sight line's shift.
+//   offset the baked back-off from that camera (kAdsBackOffs): 0 for an item without a row. Only the two weapons whose camera puts the eye inside the gun have one. A flown value
+//          changes this table and no other.
+//   trim   the live setting in the experimental menu (-30..+30 cm, 0 adds nothing), added to the held weapon's depth, whatever the weapon.
+// An item without a row in kAdsCameraDepths (the TK Aphelion has no measurement) takes its settled line's E forward as the base when the held copy is known unscoped (the settled line
+// feeds the depth of no item that has a row; it still feeds the sight line's shift), else kAdsFallbackBaseCm, the depth every weapon had before F149 (the old setting's 21 cm).
 //
-// The one value asked feeds the eye point (P14 + k f), the clearance cap, the error to the target eye point and the sight line's shift (F143's Q on the line at the lock's eye
-// depth); a change of k between weapons reaches the eye through the lock's follower (adsEyeStep).
+// The one value asked feeds the eye point (P14 + k f), the clearance cap, the error to the target eye point and the sight line's shift (F143's Q on the line at the lock's eye depth); a
+// change of k between weapons or of the trim reaches the eye through the lock's follower (adsEyeStep).
 #pragma once
 
 #include <cmath>
@@ -34,7 +35,15 @@ namespace nofoot {
 namespace f149 {
 
 enum Source : int { kSrcNone = 0, kSrcTable = 1, kSrcSettled = 2, kSrcCount = 3 };
-inline const char* sourceText(int s) noexcept { return s == kSrcSettled ? "the settled line" : s == kSrcTable ? "the table" : "none"; }
+inline const char* sourceText(int s) noexcept { return s == kSrcSettled ? "the settled line" : s == kSrcTable ? "the table" : "the fallback base (no measurement)"; }
+// The trim's range (cm): the experimental setting's, the same as the readout trims.
+constexpr double kTrimMinCm = -30.0, kTrimMaxCm = 30.0;
+// The base for an item with no table row and no usable settled line: the depth every weapon had before F149 (the retired setting's shipping 21 cm).
+constexpr double kAdsFallbackBaseCm = 21.0;
+inline double clampTrimCm(double cm) noexcept {
+    if (!std::isfinite(cm)) return 0.0;
+    return cm < kTrimMinCm ? kTrimMinCm : cm > kTrimMaxCm ? kTrimMaxCm : cm;
+}
 
 struct ItemCm {
     const char* item;   // the exact item name (Status.json SelectedWeapon)
@@ -59,11 +68,11 @@ constexpr ItemCm kAdsCameraDepths[] = {
     {"$wpn_s_pistol_plasma_charged_name;", -7.51},
 };
 constexpr int kAdsCameraDepthCount = static_cast<int>(sizeof(kAdsCameraDepths) / sizeof(kAdsCameraDepths[0]));
-// The offset: how far back of the base the eye sits, cm (negative is back). Both are STARTING VALUES to confirm in flight, not measurements: the kinetic AR's camera (25.00)
-// put the eye at 21 cm inside the gun (flight edvr_gfx_20261028_050843), and 10 cm back of it (15 cm) is the pilot's pick; the laser SMG's camera (15.00) still clips the gun and
-// 5 cm back of it (10 cm) is a first guess. An item without a row has offset 0.
+// The offset: how far back of the base the eye sits, cm (negative is back). The kinetic AR's is the pilot's: the camera (25.00) put the eye 21 cm inside the gun (flight
+// edvr_gfx_20261028_050843) and he dialled 6 cm with the trim and held it 55 s (flight edvr_gfx_20261028_073013, from 07:33:22): -19.0 from the camera. The laser SMG's -5.0 (10 cm)
+// is a first guess, UNCONFIRMED: the pilot could not move it forward of 10 cm (the old cap) and no flight has held another depth for it. An item without a row has offset 0.
 constexpr ItemCm kAdsBackOffs[] = {
-    {"$wpn_m_assaultrifle_kinetic_fauto_name;", -10.0},
+    {"$wpn_m_assaultrifle_kinetic_fauto_name;", -19.0},
     {"$wpn_m_submachinegun_laser_fauto_name;", -5.0},
 };
 constexpr int kAdsBackOffCount = static_cast<int>(sizeof(kAdsBackOffs) / sizeof(kAdsBackOffs[0]));
@@ -87,35 +96,35 @@ inline bool tableDepthCm(const char* name, double* baseCm, double* offsetCm) noe
 }
 
 struct EyeDepth {
-    double keyCm = 0.0;       // the key after its 0..30 cm clamp
-    double baseCm = 0.0;      // the table's base (the game's unscoped ADS camera depth), or the settled line's E forward (cm from P14); 0 with source none
-    double offsetCm = 0.0;    // the table's back-off (0 for the settled line and for an item without one)
-    double depthCm = 0.0;     // the weapon's depth: base + offset; 0 with source none
-    int source = kSrcNone;    // where the weapon's depth came from (Source)
-    double askedCm = 0.0;     // min(key, depth) after the clamp: the k asked of the clearance cap
+    double trimCm = 0.0;      // the live trim after its -30..30 cm clamp
+    double baseCm = 0.0;      // the table's base (the game's unscoped ADS camera depth), the settled line's E forward (cm from P14), or the fallback base
+    double offsetCm = 0.0;    // the table's baked back-off (0 for the settled line, the fallback and an item without one)
+    double depthCm = 0.0;     // base + offset + trim, before the 0..30 cm clamp (so a clamp shows)
+    int source = kSrcNone;    // where the base came from (Source)
+    double askedCm = 0.0;     // depthCm after the 0..30 cm clamp: the k asked of the clearance cap
 };
-// The depth asked for the held item. keyCm: the setting (clamped here; a NaN reads the default). itemOk: the item snapshot is coherent (F139::itemCoherent). scopeState: the held
-// copy's scope state (loadout::kScope*). settled: the held item's F144 entry (null for none), used only for an item without a table row, and only when the copy is known unscoped
-// (scope state no); its line is used once it has one (line.have), E's forward in metres in the root's axes.
-inline EyeDepth eyeDepth(double keyCm, bool itemOk, const char* name, int scopeState, const f144::Entry* settled) noexcept {
+// The depth asked for the held item. trimCm: the live setting (clamped here; a NaN reads 0). itemOk: the item snapshot is coherent (F139::itemCoherent). scopeState: the held copy's
+// scope state (loadout::kScope*). settled: the held item's F144 entry (null for none), used only for an item without a table row, and only when the copy is known unscoped (scope state
+// no); its line is used once it has one (line.have), E's forward in metres in the root's axes.
+inline EyeDepth eyeDepth(double trimCm, bool itemOk, const char* name, int scopeState, const f144::Entry* settled) noexcept {
     EyeDepth d;
-    d.keyCm = adsEyeDistanceClampCm(keyCm);
-    d.askedCm = d.keyCm;
-    if (!itemOk) return d;
-    double base = 0.0, offset = 0.0;
-    if (tableDepthCm(name, &base, &offset)) {
-        d.source = kSrcTable;
-    } else if (scopeState == loadout::kScopeNo && settled && settled->line.have && std::isfinite(settled->line.e[2])) {
-        base = 100.0 * settled->line.e[2];
-        offset = 0.0;
-        d.source = kSrcSettled;
-    } else {
-        return d;
+    d.trimCm = clampTrimCm(trimCm);
+    double base = kAdsFallbackBaseCm, offset = 0.0;
+    if (itemOk) {
+        double tableBase = 0.0, tableOffset = 0.0;
+        if (tableDepthCm(name, &tableBase, &tableOffset)) {
+            d.source = kSrcTable;
+            base = tableBase;
+            offset = tableOffset;
+        } else if (scopeState == loadout::kScopeNo && settled && settled->line.have && std::isfinite(settled->line.e[2])) {
+            d.source = kSrcSettled;
+            base = 100.0 * settled->line.e[2];
+        }
     }
     d.baseCm = base;
     d.offsetCm = offset;
-    d.depthCm = base + offset;
-    d.askedCm = adsEyeDistanceClampCm(d.depthCm < d.keyCm ? d.depthCm : d.keyCm);
+    d.depthCm = base + offset + d.trimCm;
+    d.askedCm = adsEyeDistanceClampCm(d.depthCm);
     return d;
 }
 

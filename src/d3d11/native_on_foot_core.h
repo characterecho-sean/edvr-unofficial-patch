@@ -2939,21 +2939,20 @@ struct AdsSightGrowth {
     uint64_t runMs(uint64_t ms) const noexcept { return growing && ms > startMs ? ms - startMs : 0; }
 };
 
-// ---- F70: the ADS eye point (fix.native_on_foot_ads_eye_distance_cm) ------------------------------------------------------------------------
+// ---- F70: the ADS eye point (F152: experimental.native_on_foot_ads_eye_offset_cm) ---------------------------------------------------------------
 // RE (log 152023, dumps 152230 rifle and 152353 pistol): the exe has no sight, scope or eye joint and no per-weapon ADS camera table; the ADS pose is the FP
 // animation's, with joint 14 (def_c_povCamera_joint) as the camera, still computed in VR. The line through P14 along the FP root's forward passes through the optics
 // (the rifle's lens dot within 0.6 deg, the pistol's rear sight within 1 deg): P14 is the animator's eye point. The F63 lock removed only the perpendicular part of
 // the error, so the rifle eye sat 7.3 cm AHEAD of P14 and the pistol eye 5.7 cm BEHIND it. The sights are 33.3 cm (the rifle's lens ring) and 40.8 cm (the pistol's
 // rear sight) ahead of P14; the flat game narrows the FOV to make them look bigger, which VR cannot do, so "closer" is the eye moving forward along the sight line:
-// the target eye point is P14w + k f, never closer than kAdsEyeClearanceM to any FP weapon point readable on the line. F149/F150: k is the user's setting (0..30 cm, default 21)
-// as the furthest forward the eye sits: k = min(the setting, the held weapon's depth), then the 0..30 cm clamp (adsEyeDistanceClampCm), then the clearance cap
-// (adsEyeDistanceCap). The weapon's depth is its base, the game's own unscoped ADS camera depth for the item (E's forward from P14; one value per item, the scope state ignored),
-// plus its back-off (native_on_foot_f149.h: 0 except for the two weapons whose camera puts the eye inside the gun). So the eye is never further forward than the setting, and goes
-// back to the weapon's depth where that is further back than the setting (the laser SMG's is 10 cm, the pistols' behind P14: 0). An item with no table row has its settled line's
-// forward when the copy is known unscoped, else the setting alone. The one k feeds the eye point, the clearance cap, the error to the target and the sight line's shift (F143's Q).
+// the target eye point is P14w + k f, never closer than kAdsEyeClearanceM to any FP weapon point readable on the line. F149/F150/F152: k is the held weapon's depth plus the live trim,
+// then the 0..30 cm clamp (adsEyeDistanceClampCm), then the clearance cap (adsEyeDistanceCap). The weapon's depth is its base, the game's own unscoped ADS camera depth for the item (E's
+// forward from P14; one value per item, the scope state ignored), plus its baked offset (native_on_foot_f149.h: 0 except for the two weapons whose camera puts the eye inside the
+// gun); an item with no table row has its settled line's forward when the copy is known unscoped, else the fallback base (kAdsEyeDistDefaultCm, the 21 cm every weapon had before F149).
+// The one k feeds the eye point, the clearance cap, the error to the target and the sight line's shift (F143's Q).
 // The lock's target is absolute: on an active ADS tick with a valid rendered-eye measurement, target = applied + measured error. One critically damped filter
 // (tau kAdsEyeTauSec) follows that target; a missing measurement holds the last target. The actual ADS state gates the target, independently of the head-aim ramp.
-constexpr double kAdsEyeDistDefaultCm = 21.0, kAdsEyeDistMaxCm = 30.0;   // F98c: the pilot's (15 before)
+constexpr double kAdsEyeDistDefaultCm = 21.0, kAdsEyeDistMaxCm = 30.0;   // F98c: the pilot's (15 before); F152: the default is the fallback base, the max the depth's clamp
 constexpr double kAdsEyeClearanceM = 0.06;      // the eye stays this far behind any readable FP weapon point on the sight line
 constexpr double kAdsEyeOnLineM = 0.06;         // "on the line": a point within this of the sight line, ahead of P14
 constexpr double kAdsEyeTauSec = 0.05;          // 95% in about 0.25 s (tau 0.07 would take 0.33 s)
@@ -2986,7 +2985,7 @@ struct AdsEyeCap {
     double limitM = 1e9;   // the tightest limit those points gave (the nearest point's along less the clearance)
 };
 // k capped so the eye (P14w + k f) stays kAdsEyeClearanceM behind every point of pts (world) that is ahead of P14 and within kAdsEyeOnLineM of the sight line.
-// With none readable the cap is the setting's own bound (the caller logs it).
+// With none readable the cap is the depth's own bound (the caller logs it).
 inline AdsEyeCap adsEyeDistanceCap(double kWantedM, const double p14w[3], const double f[3], const double pts[][3], int n) noexcept {
     AdsEyeCap c;
     c.kM = kWantedM == kWantedM ? kWantedM : 0.0;

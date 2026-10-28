@@ -31,6 +31,12 @@
 #include "../../src/d3d11/engine_velocity.h"
 #include "../../src/d3d11/engine_velocity_primary_copy.h"
 
+namespace edvr {
+// Rig-only accessors in engine_velocity.cpp (EDVR_ENGINE_VELOCITY_RIG): the 32 bytes the lookup check reads, and the pin they are compared with.
+void engineVelocityLookupFixtureForRig(const uint8_t* bytes);
+const uint8_t* engineVelocityLookupPinForRig(size_t* n);
+}  // namespace edvr
+
 namespace pin_tests {
 using Microsoft::WRL::ComPtr;
 using lifecycle_fake::g_log;
@@ -174,8 +180,41 @@ inline void run(const lifecycle_tests::Harness& h) {
         h.check(!watchesPrimaryResource(dyn.Get()) && refs(dyn.Get()) == dynBase && copy::g_pools.empty(),
                 "pins A4: stand-down releases the nominated pool, its lease and the eye-frame's hold");
     }
+
+    // A5 (F152): the dictionary lookup's prologue under EDVR's own record-writer hook. The hook replaces the lookup's first five bytes with a jump and stays for the life of
+    // the process; an AA off and on (engineVelocityShutdown, then configure) re-runs the build check, and a pin-only compare stood the feature down for good.
+    {
+        size_t pinBytes = 0;
+        const uint8_t* pin = edvr::engineVelocityLookupPinForRig(&pinBytes);
+        std::vector<uint8_t> pristine(pin, pin + pinBytes), hooked(pristine), foreign(pristine);
+        hooked[0] = 0xE9;                 // the hook's jump to its relay: five bytes, the eleven after them untouched
+        hooked[1] = 0x10; hooked[2] = 0x20; hooked[3] = 0x30; hooked[4] = 0x00;
+        foreign[0] = 0xE9;                // a jump too, but one of the eleven bytes the hook leaves is not the pin's: not the pin and not the record-writer hook's
+        foreign[8] ^= 0xFF;
+        const auto rounds = [&](const std::vector<uint8_t>& bytes, bool hookOwns, const char* what, bool wantLive) {
+            lifecycle_fake::g_writerHookOwns = hookOwns;
+            edvr::engineVelocityLookupFixtureForRig(bytes.data());
+            for (int round = 0; round < 3; ++round) {   // on, off, on, off, on, off: the F7 compare's sequence, and once more
+                const size_t mark = g_log.size();
+                edvr::engineVelocityConfigure(true);
+                const bool up = lines("engine-record velocity live", mark) == 1 && lines("STOOD DOWN", mark) == 0;
+                const bool down = lines("STOOD DOWN", mark) == 1 && lines("lookup mismatch at RVA 0x3699C00", mark) == 1;
+                char text[240];
+                std::snprintf(text, sizeof(text), "pins A5: %s: round %d configures %s", what, round, wantLive ? "live" : "stood down");
+                h.check(wantLive ? up : down, text);
+                edvr::engineVelocityConfigure(false);
+                h.check(!edvr::engineVelocityActive(), "pins A5: off between the rounds");
+            }
+        };
+        rounds(pristine, false, "the pristine lookup", true);
+        rounds(hooked, true, "the lookup under the record-writer hook (its patch is accepted every time)", true);
+        rounds(hooked, false, "a jump at the lookup that is not the record-writer hook's", false);
+        rounds(foreign, true, "a jump with one of the eleven bytes after it changed, the hook installed (the rest must still be the pin's)", false);
+        edvr::engineVelocityLookupFixtureForRig(nullptr);
+        lifecycle_fake::g_writerHookOwns = false;
+    }
     edvr::g_clockForTest = nullptr;
     std::printf("  pins: the pool cache holds nothing while the feature is off, releases on stand-down, logs a full "
-                "cache once, and a mid-session activation nominates the pool from its binding\n");
+                "cache once, and a mid-session activation nominates the pool from its binding; the lookup check accepts the record-writer hook's patch across an off and on\n");
 }
 }  // namespace pin_tests

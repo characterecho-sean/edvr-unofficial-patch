@@ -1830,15 +1830,17 @@ void testLegacyOnFootRowsStayOutOfMenu() {
                                 "native_on_foot_hud_follow_smoothing_ms", "native_on_foot_reticle_follow", "native_on_foot_visor_axis",
                                 // F146: the ADS sight switch, the two ADS sight trims and the full outfit switch, retired; the four Weapon UI trims moved to [experimental]
                                 "native_on_foot_ads_game_sight", "native_on_foot_ads_sight_up_cm", "native_on_foot_ads_sight_right_cm", "native_on_foot_body_full_outfit",
-                                "native_on_foot_weapon_ui_forward_cm", "native_on_foot_weapon_ui_left_cm", "native_on_foot_weapon_ui_up_cm", "native_on_foot_weapon_ui_toward_eye_cm"};
+                                "native_on_foot_weapon_ui_forward_cm", "native_on_foot_weapon_ui_left_cm", "native_on_foot_weapon_ui_up_cm", "native_on_foot_weapon_ui_toward_eye_cm",
+                                // F152: the ADS eye distance (a cap at 21 cm), retired; the developer tier's "ADS eye forward / back" is the per-weapon trim that replaces it
+                                "native_on_foot_ads_eye_distance_cm"};
     // kMenuRows is generated at build time from repository annotations. A player's older live INI supplies values at runtime,
     // but cannot add rows back to this compiled table.
     int nativePageRows = 0;
     for (int i = 0; i < kCount; ++i)
         if (strcmp(kMenuRows[i].page, "native_on_foot") == 0) ++nativePageRows;
-    check(nativePageRows == 17, "the Native on foot page has 17 rows (F127: 21 rows went to edvr.ini and the installer's window, and Reticle follows was retired; "
+    check(nativePageRows == 16, "the Native on foot page has 16 rows (F127: 21 rows went to edvr.ini and the installer's window, and Reticle follows was retired; "
                                 "F128: Visor axis (test) was retired with the correction always on; F146: the ADS sight switch, the two ADS sight trims and the full outfit switch "
-                                "were retired, and the four Weapon UI trims went to [experimental])");
+                                "were retired, and the four Weapon UI trims went to [experimental]; F152: ADS eye distance was retired, its per-weapon trim is an [experimental] row)");
     // F127: the page's order and its five headings. The switch is always first; look and aim, then aiming down sights, then body and view, the HUD last. kMenuRows is in
     // edvr.ini order; the group is the ini's heading block above the key, which the page shows as a heading.
     {
@@ -1849,7 +1851,6 @@ void testLegacyOnFootRowsStayOutOfMenu() {
             {"native_on_foot_turn_style", "Look and aim"},
             {"native_on_foot_snap_turn_deg", "Look and aim"},
             {"native_on_foot_look_to_aim_smoothing_ms", "Look and aim"},
-            {"native_on_foot_ads_eye_distance_cm", "Aiming down sights"},
             {"native_on_foot_ads_sight_both_eyes", "Aiming down sights"},
             {"native_on_foot_ads_head_aim", "Aiming down sights"},
             {"native_on_foot_eye_height_cm", "Body and view"},
@@ -1892,10 +1893,12 @@ void testLegacyOnFootRowsStayOutOfMenu() {
     }
     // F146: the four Weapon UI trims are [experimental] rows, shown in the developer tier under their own heading: a number from -30 to 30 in steps of 0.5 cm with an explicit sign,
     // live, labelled without "(test)". They carry the old fix. values over through edvr.ini's moved-from lines (tools/config_test and tools/installer_test hold that).
+    // F152: the fifth, "ADS eye forward / back", beside them on the same page and tier, shaped the same (it carries no old value over: the key it replaces changed meaning).
     {
         static const struct { const char* key; const char* label; } want[] = {
             {"native_on_foot_weapon_ui_forward_cm", "Weapon UI forward"}, {"native_on_foot_weapon_ui_left_cm", "Weapon UI left"},
-            {"native_on_foot_weapon_ui_up_cm", "Weapon UI up"}, {"native_on_foot_weapon_ui_toward_eye_cm", "Weapon UI toward you"}};
+            {"native_on_foot_weapon_ui_up_cm", "Weapon UI up"}, {"native_on_foot_weapon_ui_toward_eye_cm", "Weapon UI toward you"},
+            {"native_on_foot_ads_eye_offset_cm", "ADS eye forward / back"}};
         int found = 0;
         bool shaped = true;
         for (const auto& w : want)
@@ -1906,7 +1909,7 @@ void testLegacyOnFootRowsStayOutOfMenu() {
                 shaped = shaped && d.kind == MenuKind::Number && d.tier == MenuTier::Experimental && strcmp(d.label, w.label) == 0 && strcmp(d.lo, "-30") == 0 && strcmp(d.hi, "30") == 0 &&
                          strcmp(d.step, "0.5") == 0 && strcmp(d.unit, "cm") == 0 && d.showSign && d.applies == 1 && strcmp(d.shipped, "0.0") == 0;
             }
-        check(found == 4 && shaped, "the four Weapon UI trims are [experimental] number rows: -30..30 cm, step 0.5, signed, live, shipped 0.0, labelled without (test)");
+        check(found == 5 && shaped, "the four Weapon UI trims and the ADS eye trim are [experimental] number rows: -30..30 cm, step 0.5, signed, live, shipped 0.0, labelled without (test)");
     }
 }
 

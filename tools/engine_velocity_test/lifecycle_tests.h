@@ -70,6 +70,8 @@ struct Slot { void* ptr = nullptr; uint32_t gen = 1; uint64_t hash = 0; };
 Slot g_slots[static_cast<unsigned>(edvr::BindSlot::Count)];
 ID3D11DepthStencilView* g_eyeDsv[2] = {};
 bool g_hookLive = true;
+// F152: whether EDVR's record-writer hook owns the lookup's prologue now (the stub of objectRecordWriterHookMatches the lookup check asks).
+bool g_writerHookOwns = false;
 unsigned g_emitAttaches = 0, g_emitDetaches = 0;
 // The pool copier's observer as configure registers it (copier_tests.h calls it
 // the way the game's job threads do).
@@ -129,6 +131,16 @@ void kinematicEvalSetClearObserver(EngineClearObserverFn) noexcept {}
 const char* kinematicEvalClearStatus() noexcept { return "rig: hooked"; }
 // src\common\game_build.h's resolver, as on build 334925 (the known build): an RVA is itself.
 uintptr_t gameRva(uint32_t knownRva) noexcept { return knownRva; }
+// ... and its pin compare on that build: an exact compare.
+bool gamePinMatches(uint32_t, const uint8_t* got, const uint8_t* pin, size_t n) noexcept { return got && pin && std::memcmp(got, pin, n) == 0; }
+// ... and the writer hook's own check as the real one makes it (object_record_writer_hook.cpp, matchesBytes): the hook is installed (the rig's flag), the first byte is the jump
+// and the eleven bytes after its five are the prologue's (the relay's displacement is not checked here).
+bool objectRecordWriterHookMatches(uintptr_t at) noexcept {
+    static const uint8_t tail[11] = {0x48, 0x89, 0x6C, 0x24, 0x18, 0x56, 0x57, 0x41, 0x56, 0x48, 0x83};
+    if (!lifecycle_fake::g_writerHookOwns || !at) return false;
+    const uint8_t* b = reinterpret_cast<const uint8_t*>(at);
+    return b[0] == 0xE9 && std::memcmp(b + 5, tail, sizeof(tail)) == 0;
+}
 bool kinematicEvalEmitHookLive(const char** why) noexcept {
     if (why) *why = lifecycle_fake::g_hookLive ? nullptr : "rig: kinematic-build-144315a20 refused";
     return lifecycle_fake::g_hookLive;
