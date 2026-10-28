@@ -2,9 +2,12 @@
 
 ## Status
 
-- **State (2026-10-28):** rounds 1 to 3 FLOWN OK on Steam (`edvr_gfx_20261028_161013.log`,
-  `_164251.log`, `_170329.log`). Round 4 (the Windows cursor hidden over the window
-  while it has focus) BUILT, NOT FLOWN. One live key, `visual.desktop_window` (`game` |
+- **State (2026-10-28):** rounds 1 to 4 FLOWN OK on Steam (`edvr_gfx_20261028_161013.log`,
+  `_164251.log`, `_170329.log`; round 4, the cursor hidden over the window while it has
+  focus, confirmed by Sean). ON MAIN; tester zip
+  `dist\edvr-desktop-window-<commit>-dlls.zip` in this worktree. The cost against `game`
+  is not measured (fps sits at the 90 Hz cap and the log carries no game-side busy
+  figure); EDVR's own Present-hook work is 0.01-0.07 ms. One live key, `visual.desktop_window` (`game` |
   `left_eye` | `right_eye` | `both_eyes`, default `game`), on the Visual page of the
   in-headset menu. VR only. No temporary keys.
 - **What it does:** while Elite is in VR with 3D on, EDVR makes Elite's desktop
@@ -26,7 +29,7 @@
   the title bar or frame, over another window, or when not foreground. Runs only when
   the window's thread is the Present thread (else `the cursor is not hidden -- the window
   belongs to thread X, Present runs on Y`, once).
-- **First flight of round 4 must show:** the cursor gone while over the picture with
+- **What round 4's flight was to show** (Sean: it works): the cursor gone while over the picture with
   focus, back over the title bar and edges and when another window has focus; the cursor
   line's tail `hidden on N of M Presents, offset now K, pushed down P` (N near M while
   the cursor sits over the picture, K a small negative number, P in the hundreds a
