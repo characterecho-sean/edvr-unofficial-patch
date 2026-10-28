@@ -181,7 +181,7 @@ MUTANTS = [
     # path and in the slow one), the draw's skinDraw guard, the flat source's early return in ensureSlots and the guard on wantSkin. Any ONE removed is an equivalent
     # mutant by design, so this removes every one the draw path reads: the flat profile's skinned draws are then patched and get a target 7, and L13.j-l must see it.
     M("flat-profile-layers-all-removed", "L13", "engine",
-      [("        familyForProfile(bindingShaderHash(BindSlot::Vs), runtimeFlatProfile()) < 0) {\n", "        engine_velocity_family::familyOfVs(bindingShaderHash(BindSlot::Vs)) < 0) {\n"),
+      [("        quickFamilyForProfile(bindingShaderHash(BindSlot::Vs), runtimeFlatProfile()) < 0) {\n", "        engine_velocity_family::familyOfVs(bindingShaderHash(BindSlot::Vs)) < 0) {\n"),
        ("    const int f = familyForProfile(vsHash, runtimeFlatProfile());\n", "    const int f = engine_velocity_family::familyOfVs(vsHash);\n"),
        ("    if (!keyedPs(f, psHash, runtimeFlatProfile())) {\n", "    if (!keyedPs(f, psHash, false)) {\n"),
        ("    bool skinDraw = fam.skin && !runtimeFlatProfile();", "    bool skinDraw = fam.skin;"),

@@ -51,6 +51,11 @@
 // more than that, so their calls are COUNTED, on sampled frames, and only the
 // probe branches, which have real work, are clocked.
 //
+// THE ONE GAME FUNCTION PRICED: the pool copier's forward (kGameCopy). Its span is
+// read off the copier relay's own pause and resume readings, less any EDVR scope
+// nested in it, and is kept in a cell that is no part: it is in no total, and line
+// 5 of the report prints it apart, labelled as the game's work.
+//
 // THREAD ATTRIBUTION. "Render thread" is the thread that calls Present: the
 // Present hook calls cutFrame, and the slot of the thread that cut is the render
 // slot from then on. Every other slot is "other threads".
@@ -122,7 +127,11 @@ enum Part : unsigned {
     kParts
 };
 constexpr unsigned kCal = kParts;          // the calibration cell, never reported
-constexpr unsigned kCells = kParts + 1;
+// The game's own pool copy (FUN_144C846A0's body), timed between the copier relay's pause and resume readings: Elite's
+// work, never EDVR's, so it is in no part, no total, no LONG FRAME figure and no instrument cost. It prices the per-frame
+// t33 pool rewrite (docs\engine-render-performance-2026-09-19.md, the 2026-10-27 static-geometry entry).
+constexpr unsigned kGameCopy = kParts + 1;
+constexpr unsigned kCells = kParts + 2;
 
 struct PartInfo {
     const char* name;
@@ -221,9 +230,9 @@ struct alignas(64) Slot {
     Cell cell[kCells];
     std::atomic<uint32_t> tid{0};
     std::atomic<uint32_t> maxEpoch{0};
-    uint64_t spare_[3] = {};            // fills the slot to seven cache lines
+    uint64_t spare_[7] = {};            // fills the slot to eight cache lines
 };
-static_assert(sizeof(Cell) == 32 && sizeof(Slot) == 448, "the layout the comments describe");
+static_assert(sizeof(Cell) == 32 && sizeof(Slot) == 512, "the layout the comments describe");
 
 constexpr unsigned kMaxSlots = 128;
 inline Slot g_slots[kMaxSlots];
@@ -349,6 +358,16 @@ inline int64_t resume(Token& k) noexcept {
     resumeAt(k, now);
     return now;
 }
+// resume, for a relay that also prices the game code it forwarded to: the span from the pause's reading to this one,
+// less the wall time of any EDVR scope nested in the forward (a relay the game's code called), goes to `cell` as one
+// call. No extra clock reading, and a scope the gate did not clock records nothing, so the cell has its part's sampling.
+inline int64_t resumeForward(Token& k, unsigned cell, int64_t pausedAt) noexcept {
+    if (!k.live) return 0;
+    const int64_t now = EDVR_EMCPU_NOW();
+    if (k.paused) record(k.slot, cell, (now - pausedAt) - k.ctx->child, true);
+    resumeAt(k, now);
+    return now;
+}
 inline void leave(Token& k) noexcept {
     if (!k.live) return;
     const int64_t now = EDVR_EMCPU_NOW();
@@ -378,6 +397,7 @@ private:
 struct CutState {
     uint64_t ticks[kParts];
     uint64_t calls[kParts];
+    uint64_t gameTicks, gameCalls;   // kGameCopy
 };
 inline CutState g_cut[kMaxSlots + 1];
 constexpr unsigned kMaskWords = (kMaxSlots + 1 + 63) / 64;
@@ -388,6 +408,7 @@ struct FrameCut {
     uint64_t otherTicks[kParts];
     uint64_t otherCalls[kParts];
     uint64_t otherMask[kMaskWords];   // the slots (threads) with any activity this frame
+    uint64_t gameRenderTicks, gameRenderCalls, gameOtherTicks, gameOtherCalls;   // kGameCopy: the game's, in no part
     bool sampled;                     // this frame was a sampled frame (the caller says so: it set the gate)
 };
 
@@ -420,6 +441,13 @@ inline void cutFrame(FrameCut& out) noexcept {
                 if (dt | dk) active = true;
             }
         }
+        // The game's copy: a thread that ran it also ran the copier part, so it adds no thread to the mask.
+        const uint64_t gt = s->cell[kGameCopy].ticks.load(std::memory_order_relaxed);
+        const uint64_t gk = s->cell[kGameCopy].calls.load(std::memory_order_relaxed);
+        (render ? out.gameRenderTicks : out.gameOtherTicks) += gt - st.gameTicks;
+        (render ? out.gameRenderCalls : out.gameOtherCalls) += gk - st.gameCalls;
+        st.gameTicks = gt;
+        st.gameCalls = gk;
         if (active) out.otherMask[index / 64] |= uint64_t(1) << (index % 64);
     }
 }
@@ -602,6 +630,7 @@ struct WindowReport {
     double totalP50 = 0, totalP95 = 0, totalMax = 0;       // render thread, every part, ms per frame
     double otherMs = 0;                                    // window total, every part, other threads
     double otherP50 = 0, otherP95 = 0, otherMax = 0;       // other threads, every part, thread-ms per SAMPLED frame
+    PartWindow gameCopy;                                   // kGameCopy: the game's pool copy, in none of the figures above
     unsigned otherThreads = 0;
     unsigned overflowThreads = 0;
     Floor floor;
@@ -637,6 +666,7 @@ public:
         std::memset(renderTicks_, 0, sizeof(renderTicks_));
         std::memset(otherTicks_, 0, sizeof(otherTicks_));
         std::memset(mask_, 0, sizeof(mask_));
+        gameRenderCalls_ = gameOtherCalls_ = gameRenderTicks_ = gameOtherTicks_ = 0;
     }
     unsigned frames() const noexcept { return frames_; }
     unsigned sampledFrames() const noexcept { return sampled_; }
@@ -660,6 +690,11 @@ public:
         }
         ms_[kParts][frames_] = static_cast<float>(total);
         if (c.sampled) otherSampled_[sampled_++] = static_cast<float>(other);
+        gameMs_[frames_] = static_cast<float>(static_cast<double>(c.gameRenderTicks) * msPerTick);
+        gameRenderCalls_ += c.gameRenderCalls;
+        gameOtherCalls_ += c.gameOtherCalls;
+        gameRenderTicks_ += c.gameRenderTicks;
+        gameOtherTicks_ += c.gameOtherTicks;
         for (unsigned w = 0; w < kMaskWords; ++w) mask_[w] |= c.otherMask[w];
         ++frames_;
     }
@@ -667,11 +702,19 @@ public:
     // Folds the window into out and empties it. renderMax/otherMax are the
     // per-call maxima in ticks (from the slots, collectCallMax).
     void finish(WindowReport& out, double msPerTick, const uint64_t renderMax[kParts],
-                const uint64_t otherMax[kParts]) noexcept {
+                const uint64_t otherMax[kParts], uint64_t gameRenderMax = 0, uint64_t gameOtherMax = 0) noexcept {
         out = WindowReport{};
         out.valid = frames_ > 0;
         out.frames = frames_;
         out.sampledFrames = sampled_;
+        PartWindow& g = out.gameCopy;
+        g.renderCalls = gameRenderCalls_;
+        g.otherCalls = gameOtherCalls_;
+        g.renderMs = static_cast<double>(gameRenderTicks_) * msPerTick;
+        g.otherMs = static_cast<double>(gameOtherTicks_) * msPerTick;
+        g.renderCallMaxMs = static_cast<double>(gameRenderMax) * msPerTick;
+        g.otherCallMaxMs = static_cast<double>(gameOtherMax) * msPerTick;
+        percentiles(gameMs_, frames_, &g.renderP50, &g.renderP95, &g.renderMax);
         for (unsigned p = 0; p < kParts; ++p) {
             PartWindow& w = out.part[p];
             w.renderCalls = renderCalls_[p];
@@ -700,15 +743,20 @@ private:
     uint64_t renderCalls_[kParts] = {}, otherCalls_[kParts] = {};
     uint64_t renderTicks_[kParts] = {}, otherTicks_[kParts] = {};
     uint64_t mask_[kMaskWords] = {};
+    uint64_t gameRenderCalls_ = 0, gameOtherCalls_ = 0, gameRenderTicks_ = 0, gameOtherTicks_ = 0;
     float ms_[kParts + 1][kMaxFrames];
     float otherSampled_[kMaxFrames];
+    float gameMs_[kMaxFrames];   // the render thread's game copy, ms per frame
 };
 
 // The per-call maxima of the window that just ended, from the slots that
 // recorded anything in it; then the next window starts.
-inline void collectCallMax(uint64_t renderMax[kParts], uint64_t otherMax[kParts]) noexcept {
+inline void collectCallMax(uint64_t renderMax[kParts], uint64_t otherMax[kParts], uint64_t* gameRenderMax = nullptr,
+                           uint64_t* gameOtherMax = nullptr) noexcept {
     std::memset(renderMax, 0, sizeof(uint64_t) * kParts);
     std::memset(otherMax, 0, sizeof(uint64_t) * kParts);
+    if (gameRenderMax) *gameRenderMax = 0;
+    if (gameOtherMax) *gameOtherMax = 0;
     const uint32_t epoch = g_epoch.load(std::memory_order_relaxed);
     const Slot* render = g_renderSlot.load(std::memory_order_relaxed);
     const unsigned n = slotCount();
@@ -718,6 +766,8 @@ inline void collectCallMax(uint64_t renderMax[kParts], uint64_t otherMax[kParts]
         uint64_t* dst = s == render ? renderMax : otherMax;
         for (unsigned p = 0; p < kParts; ++p)
             dst[p] = (std::max)(dst[p], s->cell[p].maxTicks.load(std::memory_order_relaxed));
+        uint64_t* game = s == render ? gameRenderMax : gameOtherMax;
+        if (game) *game = (std::max)(*game, s->cell[kGameCopy].maxTicks.load(std::memory_order_relaxed));
     }
     g_epoch.fetch_add(1, std::memory_order_relaxed);
 }
@@ -769,9 +819,9 @@ public:
             fig.otherCalls += cut.otherCalls[p];
         }
         if (nowMs - windowStartMs_ >= kWindowMs || window_.full()) {
-            uint64_t renderMax[kParts], otherMax[kParts];
-            collectCallMax(renderMax, otherMax);
-            window_.finish(report_, msPerTick, renderMax, otherMax);
+            uint64_t renderMax[kParts], otherMax[kParts], gameRenderMax = 0, gameOtherMax = 0;
+            collectCallMax(renderMax, otherMax, &gameRenderMax, &gameOtherMax);
+            window_.finish(report_, msPerTick, renderMax, otherMax, gameRenderMax, gameOtherMax);
             report_.seconds = static_cast<double>(nowMs - windowStartMs_) / 1000.0;
             report_.samplePeriod = schedule_.period();
             report_.samplingOff = !samplingOk_;
@@ -1017,6 +1067,46 @@ inline size_t formatOtherParts(char* buf, size_t cap, const WindowReport& r) noe
         }
     }
     appendf(buf, cap, len, ".");
+    return len;
+}
+
+// Line 5: the game's own pool copy, timed inside the copier relay's forward, on the same sampling as the copier part.
+// Elite's work, not EDVR's: it is in no figure on the four lines above.
+inline size_t formatGameCopy(char* buf, size_t cap, const WindowReport& r) noexcept {
+    size_t len = 0;
+    if (!buf || !cap) return 0;
+    buf[0] = 0;
+    const PartWindow& g = r.gameCopy;
+    const double frames = r.frames ? static_cast<double>(r.frames) : 1.0;
+    const double sampled = r.sampledFrames ? static_cast<double>(r.sampledFrames) : 1.0;
+    appendf(buf, cap, len,
+            "engine motion CPU, the game's own pool copy (FUN_144C846A0's body inside the copier relay's forward; Elite's "
+            "work, not EDVR's, in no figure above), \"-\" = no copy on that class of thread: ");
+    if (!g.renderCalls) {
+        appendf(buf, cap, len, "render thread -");
+    } else {
+        char perFrame[24];
+        callsText(perFrame, sizeof(perFrame), static_cast<double>(g.renderCalls) / frames);
+        appendf(buf, cap, len,
+                "render thread, every call: mean %.3f ms per frame, p50/p95/max %.2f/%.2f/%.2f (%s calls per frame; longest "
+                "call %.3f ms)",
+                g.renderMs / frames, g.renderP50, g.renderP95, g.renderMax, perFrame, g.renderCallMaxMs);
+    }
+    if (r.samplingOff) {
+        appendf(buf, cap, len, "; other threads, every frame (sampling off): %.3f thread-ms per frame over %.1f calls.",
+                g.otherMs / frames, static_cast<double>(g.otherCalls) / frames);
+    } else if (!r.sampledFrames) {
+        appendf(buf, cap, len, "; other threads: no sampled frame in this window.");
+    } else if (!g.otherCalls) {
+        appendf(buf, cap, len, "; other threads (the %u sampled frames) -.", r.sampledFrames);
+    } else {
+        char perFrame[24];
+        callsText(perFrame, sizeof(perFrame), static_cast<double>(g.otherCalls) / sampled);
+        appendf(buf, cap, len,
+                "; other threads, the %u sampled frames only: %.3f thread-ms per sampled frame (%s calls per sampled frame; "
+                "longest call %.3f ms).",
+                r.sampledFrames, g.otherMs / sampled, perFrame, g.otherCallMaxMs);
+    }
     return len;
 }
 

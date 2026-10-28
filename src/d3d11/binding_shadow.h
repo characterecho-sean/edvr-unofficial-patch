@@ -112,7 +112,7 @@ struct ResourceInfo {
 // Writers stay in the .cpp. They run once per bind, not once per draw, and the
 // generation policy in the comment above is worth keeping in one place.
 // EDVR_BINDING_SHADOW_EXTERNAL: a standalone test rig that supplies its own
-// three readers defines this before including, and gets declarations instead.
+// readers (bindingEyeKeyGeneration is the fourth) defines this before including, and gets declarations instead.
 // Several rigs drive a fake shadow, and a rig may assert how many hash reads
 // the code under test performs -- a contract an inline field read cannot
 // keep, and worth keeping.
@@ -124,6 +124,8 @@ struct BindingSlot {
     uint64_t hash = 0;  // a shader slot's content hash (bindingSetShader)
 };
 extern BindingSlot g_bindingSlots[static_cast<size_t>(BindSlot::Count)];
+// The eye draws' aggregate generation (bindingEyeKeyGeneration below), written only by the setters in the .cpp.
+extern uint32_t g_bindingEyeKeyGen;
 }  // namespace detail
 
 // The pointer last seen bound to a slot, or nullptr.
@@ -136,9 +138,19 @@ inline void* bindingGet(BindSlot slot) {
 inline uint32_t bindingGeneration(BindSlot slot) {
     return detail::g_bindingSlots[static_cast<size_t>(slot)].gen;
 }
+
+// ONE generation for eight slots (built 2026-10-27, docs\engine-render-performance-2026-09-19.md, "Desk design: the ui_depth
+// eye-draw memo"): it moves exactly when the generation of any of the vertex shader, the pixel shader, pixel SRV 0..3, render
+// target 0 or the depth view moves, and on every forget-all and frame boundary. A classifier that depends on those bindings keys
+// its memo on this one load instead of reading eight. It is the set the binding-repeat flight measured (91% of eye draws repeat
+// the previous draw's bindings), so the memo's hit rate is that flown figure. Like the readers above it is a load, not a call.
+inline uint32_t bindingEyeKeyGeneration() {
+    return detail::g_bindingEyeKeyGen;
+}
 #else
 void* bindingGet(BindSlot slot);
 uint32_t bindingGeneration(BindSlot slot);
+uint32_t bindingEyeKeyGeneration();
 #endif
 
 // Record a new binding. Bumps that slot's generation even when the pointer is

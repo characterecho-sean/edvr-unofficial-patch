@@ -257,7 +257,7 @@ float effectiveScale() {
 
 // F25: the on-foot visor edge. census_skip of vs:B553BB479B7C0B97 removed it on foot (Sean, F24 flight). The draw is a fullscreen triangle, once per
 // eye before the tonemap, with a DSV bound, PS 68ABCB9FEF6CA66C, RT 2016x2016 R11G11B10, SRV2 1024x1024 BC4 and SRV3 512x512 BC5.
-constexpr uint64_t kOnFootVisorVs = 0xB553BB479B7C0B97ull;
+constexpr uint64_t kOnFootVisorVs = kRemlokOnFootVisorVs;   // remlok_fix.h: the draw path's inline test reads the same constant
 constexpr uint64_t kOnFootVisorPs = 0x68ABCB9FEF6CA66Cull;
 constexpr uint32_t kOnFootVisorRt = 2016, kOnFootVisorRtFormat = 26;   // DXGI_FORMAT_R11G11B10_FLOAT
 bool onFootVisorMatches() {

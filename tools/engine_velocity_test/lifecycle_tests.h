@@ -810,7 +810,25 @@ inline void run(const Harness& h) {
     }
     lifecycle_fake::g_objectHash[g.ps2.Get()] = 0x3434972DB5336AA4ull;
     h.context->PSSetShader(g.ps2.Get(), nullptr, 0);   // live only; the hook "missed" the bind
-    edvr::engine_velocity_detail::psShadowProbe(h.context);
+    {
+        // 2026-10-27: the header's one-in-64 draw reaches the probe through psShadowProbeSampled (out of line, so the inline gate stays
+        // small): the probe runs only for a pool family's vertex shader or a keyed or self-marking pixel shader. With neither bound the
+        // bypass bind is left alone (the probe did not run); the shadow's hashes are put back after.
+        auto& vsSlot = lifecycle_fake::g_slots[static_cast<unsigned>(edvr::BindSlot::Vs)];
+        auto& psSlot = lifecycle_fake::g_slots[static_cast<unsigned>(edvr::BindSlot::Ps)];
+        const uint64_t vsHash = vsSlot.hash, psHash = psSlot.hash;
+        void* const shadowPs = psSlot.ptr;
+        h.check(edvr::engine_velocity_family::familyOfVs(vsHash) >= 0,
+                "C: the shadow's vertex shader is a pool family's here, so the sampled probe has its reason to run below");
+        vsSlot.hash = 0x1111111111111111ull;
+        psSlot.hash = 0x2222222222222222ull;
+        edvr::engine_velocity_detail::psShadowProbeSampled(h.context);
+        h.check(psSlot.ptr == shadowPs && psSlot.hash == 0x2222222222222222ull,
+                "C: with neither a pool family's vertex shader nor a keyed pixel shader bound the sampled probe does not run (the bypass bind is not healed)");
+        vsSlot.hash = vsHash;
+        psSlot.hash = psHash;
+    }
+    edvr::engine_velocity_detail::psShadowProbeSampled(h.context);   // the pool family's vertex shader is bound: the probe runs
     h.check(lifecycle_fake::g_slots[static_cast<unsigned>(edvr::BindSlot::Ps)].ptr == g.ps2.Get(),
             "F7: a genuine bypass-bound game shader still heals the shadow");
 

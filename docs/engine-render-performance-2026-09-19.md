@@ -54,11 +54,11 @@
   closed-solid and eroded-box occluders, remove zero draws ("Probe v2
   flown"); LODDistanceScale as a draw-count lever at this view ("Leg
   C"); applicationMs as a frame-fit signal, it omits the post-submit
-  phase ("Shadow flight 1").
+  phase ("Shadow flight 1"); the repeat-draw fast path ("Phase 2b flown").
 
-* **Next flight:** a cpu_profile leg at the pad, k 6 (F9/F11), to
-  see what the slow 30% of frames do; the 4b benefit judgement gets
-  a stable-scene-only correction, in build.
+* **Next (2026-10-28, last entry):** AA on's +1.65 ms is per-draw
+  classifiers. ui-depth memo FLOWN: exact, -0.21 ms (shipped, b1561dff).
+  Fast path, step clock, trim F RETIRED (no saving). Per-draw arc closed.
 
 ## Frame budget philosophy
 
@@ -3332,3 +3332,1674 @@ restore in force).
 Next: a cpu_profile leg at the pad at k 6 (F9/F11 hotkeys) to see
 what the slow 30% of frames do; the 4b correction to the benefit
 judgement (stable scene only, tested+passed) is in build.
+
+### 2026-10-27 -- Static-geometry RE pass (desk work, no flight): the motion path already treats static geometry as static; the one sizeable static redundancy is Elite's per-frame pool rewrite, unpriced
+
+Sean's question: settlement buildings, props and terrain do not move,
+so does EDVR or Elite run motion-vector or AA work for them that could
+be skipped? Two read-only passes, one over EDVR's source on main, one
+over the decompile notes. EDVR's RVAs are build 334925; the decompile
+files are 332841, and the render chain is reloc-only between them
+(build-334925.md).
+
+**EDVR's motion path (read in code).**
+- Pool-family substitution is decided by binding generations, never by
+  what the draw's instances hold (engine_velocity.h:163-187). The slow
+  half (patched PS/VS, MRT6, blend) runs only when the game rebinds:
+  0.02-0.06 ms a frame (kinematic-motion-injection-2026-09-19.md,
+  lines ~3977-3979). Unsubstituting static-only draws would add
+  toggles, at 11-13 D3D calls each (engine_velocity.h:245-251). No
+  online signal maps a draw to its records, except for skinned
+  families.
+- The emit resolves and writes the previous pose for every joined item,
+  static or not. `last != pose` only bumps `recordsMoving`
+  (engine_velocity_emit.h:199-213, 502-508). A static skip saves at most
+  the emit bracket, 0.015-0.2 ms a frame of job-thread time, which the
+  2026-09-22 measurement puts off the critical path. It would also move
+  the pixel to the camera term. That path is not bit-identical to the
+  engine path for a static surface: it differs in compose order, the
+  hidden-history test, the celestial check and the stale gate
+  (temporal_shader_source.h ~1002-1037; flat_mono_shader_source.h
+  ~393-410).
+- The per-pixel record fetch for static pixels was already ruled out as
+  a cost (2026-09-23, kinematic doc).
+- Flat: the per-draw shell was cut on 2026-10-18 (geometry issue reuse,
+  early match). At the measured CZ view flat runs at 118 fps, equal to
+  the GPU span (flat-callback-cpu-handoff-2026-10-18.md).
+
+**Elite (decompile, 332841 RVAs).**
+- Every frame, for a static record: FUN_14433DB20 recomposes the world
+  pose from node x parent, packs the quaternion twice, writes
+  +0x170/+0x17C/+0x240, and runs the slot loop (unpack, 4x4 compose,
+  vtable +0x78 per slot) when +0x68 returns nonzero. FUN_144312040
+  composes again, and the builder FUN_1442B4420 writes the 0x150-byte
+  items. The pose outputs are bit-identical for a static record. The
+  per-view LOD, frustum and mask outputs depend on the camera and are
+  not. The camera never enters the pose math. The floating origin
+  enters through the parent translation, so an input-keyed cache would
+  invalidate itself on a rebase.
+- A cache inside the job (survivor (b) of the 09-21 gate) has two
+  pure-function sites. One is FUN_14433DB20's compose, about 1 KB of
+  2,389 B with about 31 float inputs. The other is FUN_144312E00
+  (985 B). The node append and lookup must still run every frame, so
+  the cache saves only arithmetic: an estimated 0.5 ms or less summed
+  over threads, 0.1-0.2 ms on the critical path, against 0.78-0.81 ms
+  for the whole pipeline. Both sites need mid-function patches.
+- The pool copier FUN_144C81BE0 is this pass's one sizeable finding.
+  On 334925 it is 0x4C846A0, already hooked as
+  `engine-primary-pool-copy` (kinematic_eval_hook.cpp:293, 701-716).
+  Each frame it memcpys the items into the WRITE_DISCARD-mapped t33
+  pool: stride 336, 15,360 slots (5.16 MB), about 12.3k records, so
+  about 4.1 MB a frame. A static record's bytes do not change between
+  frames: no builder record's pose changed over 3 frames
+  (design-occlusion-culling §10). The copy is UNPRICED: EDVR's copier
+  clock pauses around the forward (:714-716), so no log line holds it.
+  The "draw-item chain 0x4c81ca0 < 0x4c8227c" in R5c (the "Phase A,
+  valid" entry) is this loop and its call site. R5c's 3.36 ms of
+  running minus the named pipeline parts bounds it at about 1.7 ms or
+  less, by subtraction only. Bandwidth suggests 0.3-0.6 ms for 4.1 MB
+  of write-combined stores (inferred).
+- FUN_14430EFE0's per-view verdict is consumed only by the class-2
+  emit. It runs about 28.9k calls a frame, up to ~23% of them for
+  builder records. That is worker CPU only, and not specific to static
+  geometry.
+- No new static/dynamic flag. rec+0x2B0 is the child count; stage 3's
+  "dirty flag" is bucket+0x2B0, another struct. The class byte
+  (rec+0x2B8 -> +0x160)+0x4B == 2 splits the singleton path from the
+  builder path, and both paths hold statics and movers.
+
+ruled out: unsubstituting static-only pool draws, because substitution
+is keyed on pipeline state at 0.02-0.06 ms a frame and toggling per
+draw costs more than it saves.
+ruled out: skipping the emit's previous-pose write for static records
+as a CPU lever, because it is at most 0.2 ms of job-thread time off the
+critical path, and the camera term it falls to is not bit-identical.
+ruled out: a pose cache inside the job as a wall-time lever, because
+the whole pipeline is 0.78-0.81 ms on the critical path and the cache
+saves only arithmetic (0.1-0.2 ms).
+
+Open, cheapest first; one parked pad leg reads both:
+1. Price the native pool copy. Add a QPC pair around `forward(task)` in
+   `poolCopyObserved`, split by thread class (render, job), on the
+   existing 30 s line. Gate: at 1 ms a frame or more on the caller
+   thread at the pad, design an incremental pool upload, an EDVR-owned
+   buffer fed only the changed ranges. Its failure modes are slot
+   repacking when the visible set churns, and rebases. It helps the
+   mean, not the frame-time tail that refinement 4b found. Under about
+   0.3 ms, close it.
+2. Price the VR AA-on per-draw increment at a settlement on the current
+   build. The last settlement figure is leg C (2026-09-23): 1.55 ms of
+   draw hooks at 18.8k draws, from before engine motion existed. Aboard,
+   AA on costs 0.55-0.60 us a draw against 0.14-0.16 off
+   (stereo-cpu-sharing-2026-10-16.md:23), and the increment is
+   unattributed. Read `draw hook CPU:`, `engine motion CPU` and `perf
+   baseline F5` with AA on and off. This is not specific to static
+   geometry. If the increment is large, the lever is a per-pipeline-state
+   verdict in the X thunk (vscreen.cpp:5307-5349), like flat's 10-18 cut.
+
+**Item 1 built (2026-10-27, branch
+claude/motion-vector-aa-settlements-e8c512), NOT FLOWN.** The copier
+relay hands its own pause and resume readings to
+`emcpu::resumeForward`. That prices the game's copy, less any nested
+EDVR scope, into a cell of its own (`kGameCopy`), with no extra clock
+reading and in no EDVR total. A fifth 30 s line, `engine motion CPU,
+the game's own pool copy`, prints the render thread's mean and
+p50/p95/max per frame, calls a frame and longest call, then the other
+threads' thread-ms per sampled frame. The relay stays installed once AA
+has been on, so the AA-off leg should price the copy too (a
+cross-check). If it does not, that leg prints "-". Rig:
+engine_motion_cpu_test, 160 checks.
+
+Flight: Steam, parked in the cockpit at a settlement pad, head still.
+AA on for at least 90 s, then F7 (hotkey.compare_aa, the AA comparison
+key) for AA off for at least 90 s, then F7 again for AA on for at least
+60 s. No other key: every line read here prints on its own 30 s window.
+Read line 5 per window and `draw hook CPU:`, after `edvr_log.py
+--expect-build HEAD`. (`perf baseline F5` is the baseline probe's VR
+draw-hook line, performance.md. That probe, 5d8f6810, is on neither
+this branch nor main, so this build prints no such line.)
+
+**Pad leg flown (2026-10-27, Steam log `edvr_gfx_20261027_093013.log`,
+build 22ddf59f; Pimax Crystal Super on Pimax OpenXR, RTX 5090, DLSS
+performance preset K, 2016x2017 in and 4032x4034 out per eye).**
+Docked at Cranfield Nutrition Biosphere (38 Lyncis 4 f) at 09:37:38,
+head still. AA on to 09:39:49, F7 off to 09:41:30, F7 on to 09:42:28.
+That leaves four clean AA-on windows, two AA-off ones and one AA-on
+one.
+
+1. The game's pool copy costs 0.23-0.25 ms a frame on the render
+   thread in the first AA-on leg (p95 0.27-0.30, four calls a frame)
+   and 0.28 ms in the last (p95 0.34). No copy ran on any other thread.
+   That is under the 0.3 ms line, so item 1 is closed.
+   ruled out: an incremental t33 pool upload, because the whole copy
+   costs 0.23-0.28 ms a frame at a settlement pad and an incremental
+   upload would save only part of it (flown 2026-10-27).
+   The AA-off windows print "-". With AA off the relay's scope is never
+   entered (the copier part is "-" too), so that leg gave no
+   cross-check. Elite still makes the copy then.
+2. Draw hook CPU, in ms per sampled frame, with that one frame's eye
+   draws: AA on, first leg 3.38 / 3.47 / 3.82 / 3.54 at 14.2-15.8k
+   draws (0.22-0.25 us a draw); AA off 2.45 / 2.44 at 20.5-22.6k (0.11
+   us); AA on, last leg 4.26 at 21.9k (0.19 us). At matched draw counts
+   (the last two legs, about 22k), AA on adds about 1.8 ms a frame,
+   about 0.08 us a draw. Engine motion's own render-thread work is p50
+   0.32-0.38 ms a frame with AA on, about 0.16 ms of it the instrument's
+   floor, and 0.02 ms with AA off. So it accounts for about 0.35 ms of
+   the increment at most, and about 1.4 ms is unattributed. Caveats: the
+   draw counts are single frames, the matched comparison rests on one
+   window per leg, and the draws grew from 15k to 22k at the same pad
+   between the first leg and the second (cause not read). Frame rate:
+   55-60 fps with AA on, 46 with AA off (native 4032x4034 per eye).
+
+Next: attribute the roughly 1.4 ms inside the AA-on draw path before
+any cut is proposed. That means clocking each per-draw step (the X
+thunk's verdict, the binding-generation check, the tees) on the same
+parked leg.
+
+**Step clock built (2026-10-27, same branch), NOT FLOWN.**
+`src\d3d11\draw_step_clock.h` (temporary, no key) clocks the VR draw
+thunks step by step on the draws half a stride from the ones the
+`draw hook CPU:` line clocks, so that line keeps its meaning. On a
+sampled frame the whole clock still takes draw 0 of each 64; the step
+clock takes draw 32.
+
+- **Steps.** Each mark ends a step. There are 26 steps:
+  - pre;
+  - eight verdict sub-steps (`v:hud/fss`, `v:context`, `v:particles`,
+    `v:eye-test`, `v:offscreen`, `v:ui-depth`, `v:census`, `v:fixes`)
+    and `v:rest`;
+  - `engine-vel`, `probes`;
+  - the forward scope before the draw (`f:scopes`, `f:ui-layer`,
+    `f:verdict-begin`, `f:before`);
+  - `GAME` (the game's own draw, excluded), `reissue`, `weapon`;
+  - the X draw's post-draw work (`p:rigid`, `p:screen`, `p:rest`);
+  - the forward scope after the draw (`f:layer-end`, `f:ui-depth`,
+    `f:after`);
+  - tail.
+- **Clock floor.** Each step is printed net of its marks' clock reads.
+  The floor is calibrated as each window closes.
+- **Cost to other draws.** Every other draw pays one branch per thunk
+  mark and one plain load per sub-mark. The sub-marks test a
+  process-wide count of live step clocks before they read the
+  thread-local, so the whole-clocked draws add almost nothing to the
+  old line.
+- **Two new lines** after `draw hook CPU:` in each 1800-frame window:
+  - `draw hook CPU by step:` gives net ms a frame per step, EDVR's sum
+    and the game's draw;
+  - `draw hook CPU by step, calls and kinds:` gives calls a frame per
+    step, and draws and EDVR ms a frame for D, I, N and X.
+- **Cross-check.** The old line should read near EDVR's sum less
+  `weapon`, which the old clock counts with the game's draw. If it does
+  not, the floor correction is off and the split is not trusted.
+- **Rig.** aa_off_test, 129 checks.
+
+Flight: the same leg on Steam. Park at a settlement pad, head still.
+AA on for at least 90 s, F7 for AA off for at least 90 s, F7 for AA on
+for at least 60 s. Read the three lines per window after `edvr_log.py
+--expect-build HEAD`.
+
+What to read:
+- The steps whose net figure moves between AA on and AA off hold the
+  increment.
+- The D/I/N against X split says whether it is in the X thunk, which
+  has no AA-off fast path, or in the fast-path thunks.
+
+**Step clock flown (2026-10-27, Steam log `edvr_gfx_20261027_101918.log`,
+build af9c429b; same rig: Pimax Crystal Super on Pimax OpenXR, RTX 5090,
+DLSS performance).** Loaded in docked at Cranfield Nutrition Biosphere
+at 10:21:55. F7 turned AA off at 10:23:15 and back on at 10:24:46.
+- Clean windows: AA on at frames 16200, 18000 and 25200; AA off at
+  19800 and 21600.
+- Frame rate: 62 fps with AA on, 48 with AA off.
+- Draws: 34.5k hooked draws a frame. Of those, 33k are X, about 1.4k
+  are D and about 100 are N; 16.8k go into the eyes. Every step ran the
+  same number of times in both modes.
+- Clock floor: about 16 ns a mark, at 23.8 marks per clocked draw.
+  That is a large amount taken off each absolute figure, but it
+  cancels in the on/off difference, which is the quantity read here.
+
+EDVR's step sum is 3.73 ms a frame with AA on (mean of the three
+windows) and 2.07 with AA off: an increment of 1.65 ms. The old line
+reads 3.9-4.2 against 2.6. It sits 0.4-0.6 ms above the step sum
+because it does not take off its own clock reads. The increment is
+nearly all in the X draws (3.28-3.82 ms against 1.84-1.95) and is
+spread across several per-draw classifiers. No one step holds it:
+
+| Step | AA on | AA off | Increment | Calls a frame | Per call |
+|---|---|---|---|---|---|
+| v:ui-depth | 0.470 | 0.046 | +0.42 | 16.8k (eye) | ~25 ns |
+| engine-vel | 0.378 | 0.061 | +0.32 | 34.5k | ~9 ns |
+| f:ui-layer | 0.281 | 0.084 | +0.20 | 34.5k | ~6 ns |
+| v:census | 0.163 | 0.028 | +0.14 | 16.8k (eye) | ~8 ns |
+| p:screen | 0.158 | 0.035 | +0.12 | 33k | ~4 ns |
+| f:layer-end | 0.170 | 0.083 | +0.09 | 34.5k | ~3 ns |
+| v:eye-test | 0.150 | 0.076 | +0.07 | 34.5k | ~2 ns |
+| f:before | 0.178 | 0.108 | +0.07 | 34.5k | ~2 ns |
+| the other 16 steps | | | +0.22 together | | |
+
+- **v:ui-depth.** The largest block is the two ui_depth classifiers,
+  which run on every eye draw with AA on. uiDepthOnEyeDraw resets a
+  dozen globals, reads the depth view, tests four SRV slots against the
+  learned surfaces and hashes the bound VS. uiDepthHologramOnEyeDraw
+  hashes the VS and walks two family lists. For an ordinary scene draw
+  both answer "no", draw after draw.
+- **engine-vel** is the generation-compare gate and the skin-draw note
+  on all 34.5k draws. The engine motion CPU line's "draw side" counts
+  only the 330-400 calls that pass the gate, which is why it read 0.13
+  ms.
+- **f:ui-layer, v:census and p:screen** are the same pattern: a
+  predicate chain asked on every draw, each a few ns.
+
+ruled out: one hot step in the AA-on draw path, because the 1.65 ms
+increment is spread over eight steps at 2-25 ns a call, none above 0.42
+ms (flown 2026-10-27).
+
+Next lever, not yet evidenced: a per-draw early-out keyed on binding
+generations. Most of these classifiers read the same few bindings (VS,
+PS, PS SRVs 0-3, RTV0, DSV0), and Elite's 33k X draws a frame may
+repeat them between consecutive draws. If they do, one generation
+compare can stand for the chain. The repeat rate is the evidence
+needed first: per eye draw, count whether any of those slots' bind
+generations moved since the previous eye draw.
+
+**Binding-repeat counter built (2026-10-27, same branch), NOT FLOWN.**
+`src\d3d11\bind_repeat.h` is a temporary instrument with no key.
+
+- **Capture.** On a sampled frame, each owner-context VR draw reads the
+  generation and pointer of eight slots: VS, PS, PS SRV 0-3, RTV0 and
+  DSV0. The read happens at the thunk's entry, before the draw clock.
+- **Grade.** After the verdict, the draw is graded against the
+  previous owner draw and, for an eye draw, against the previous eye
+  draw:
+  - repeat: no generation moved;
+  - rebound: the same pointers, but a generation moved (the binding
+    shadow bumps a generation on every rebind, even of the same view,
+    and every generation once a frame);
+  - changed: some pointer differs;
+  - first: no previous draw in the same frame.
+- **Answer stability.** For eye draws graded repeat or rebound, the
+  counter checks whether the verdict and the three ui_depth flags
+  (`t_uiDepthThisDraw`, `t_compositeThisDraw`, `t_holoDepthThisDraw`)
+  matched the previous eye draw's, and whether a draw that differed had
+  the same draw arguments. That tuple is a proxy: a real cache would
+  also have to reproduce ui_depth's other per-draw state.
+- **What a cache could skip.** The step clock's figures are split by
+  grade. Eye-only steps (v:ui-depth, v:census, v:fixes) use the eye
+  grade; the rest use the any-draw grade.
+- **Its own cost.** The grading has its own step, `bind-count`. On
+  sampled frames it also runs inside the old line's whole-clocked
+  draws, so the old line reads about that much higher than in the last
+  flight. Measure it as bind-count's figure.
+- **Lines.** Two new lines follow the step lines in each 1800-frame
+  window: `draw hook CPU by step, by binding repeat:` and `draw
+  bindings, sampled frames:`.
+- **Rig.** aa_off_test, 188 checks.
+
+Flight: the same pad leg on Steam, AA on, then F7 off, then F7 on.
+
+What to read:
+- The eye-draw repeat and rebound shares, and which slot moves most.
+- Whether the answers ever differ on repeat draws. Any differing draw
+  with the same arguments means the key is not enough.
+- The milliseconds on repeat draws in v:ui-depth, f:ui-layer and
+  engine-vel: the most a cache could save.
+
+**Binding-repeat counter flown (2026-10-27, Steam log
+`edvr_gfx_20261027_110149.log`, build 17714416; same rig).** Loaded in
+docked at Cranfield at 11:04:24. F7 turned AA off at 11:05:50 and back
+on at 11:07:21.
+
+Another worktree's full build ran beside the flight. It wrote files
+from 11:05 to 11:09, which covers the AA-off leg and the second AA-on
+leg, so this flight's timings are contaminated. The window ending at
+frame 19800 (11:05:13-11:05:48) is unusable for timing: bind-count
+reads 11.9 ms there against 0.33-0.41 in every other window, which
+looks like render-thread preemption as the build started. The binding
+counts and answer comparisons below do not depend on timing.
+
+- **Repeats.** About 33.4k owner draws a frame. Against the previous
+  owner draw: repeat 94%, rebound 1.3%, changed 4.6%. About 16.2k eye
+  draws a frame. Against the previous eye draw: repeat 90.1-90.9%,
+  rebound 2.2-2.6%, changed 6.9-7.3%. This holds in every window, AA
+  on or off.
+- **Per slot on eye draws** (generation moved / pointer changed):
+
+  | Slot | Generation moved | Pointer changed |
+  |---|---|---|
+  | VS | 5.0% | 5.0% |
+  | PS | 5.4% | 5.4% |
+  | SRV0-3 | 8.4-9.8% | 4.4-6.1% |
+  | RTV0, DSV0 | 0.2% | 0.1% |
+
+  The SRVs account for the rebound share: Elite rebinds the same
+  texture views.
+- **Answer stability.** In each AA-on window, about 1.64-1.65M repeat
+  eye draws and about 40-44k rebound ones were compared with the
+  previous eye draw. Not one differed in the verdict, the interface
+  depth, the composite or the hologram flag. (With AA off the ui_depth
+  flags are not computed, so the AA-off windows prove nothing here.)
+- **Time on repeat draws** (ms a frame, AA on, windows 18000 and
+  28800):
+
+  | Step | On repeat draws |
+  |---|---|
+  | v:ui-depth | 0.33 / 0.32 |
+  | v:census | 0.14 / 0.13 |
+  | p:screen | 0.13 / 0.13 |
+  | f:ui-layer | 0.16 / 0.20 |
+  | engine-vel | 0.12 / 0.14 (its changed draws cost more: 0.28 / 0.20) |
+  | v:eye-test | 0.12 / 0.12 |
+  | f:before | 0.09 / 0.09 |
+  | f:layer-end | 0.07 / 0.10 |
+  | the eight together | 1.15 / 1.25 |
+
+  Less the AA-off leg's repeat figures for the same steps (window
+  23400, contaminated by the build, so these are approximate), the
+  AA-on work on repeat draws is about 0.8 ms a frame.
+- **The instrument's own cost.** bind-count is 0.33-0.41 ms a frame
+  on sampled frames, and the capture comes on top, outside every clock.
+  This build's old line reads 4.4-4.9 ms with AA on, not 3.9-4.2, which
+  is that cost plus the background build.
+
+Conclusion: a cache keyed on these eight slots' generations would have
+given the same answer on every repeat eye draw seen here. It could
+take back up to about 0.8 ms a frame of the 1.65 ms AA-on increment,
+less its own check.
+
+The cheapest check is one load and compare per draw. That needs an
+aggregate generation, bumped by bindingSet for any of the eight slots
+and by the per-frame bump, with each classifier remembering the value
+it last answered at. This is not yet designed in detail. Before
+building it:
+- the memo must replay ALL of a classifier's per-draw outputs.
+  uiDepthOnEyeDraw sets about a dozen globals besides the flags
+  compared here, and counts world-screen draws.
+- the per-draw work that must still run (eye-draw counts, the census
+  when armed) must be separated from what may be skipped.
+
+v:ui-depth is the place to start: it is the largest step at 0.30 ms
+on repeat draws, and it is the one whose answers were compared.
+
+### 2026-10-27 -- Desk design: the ui_depth eye-draw memo (not built)
+
+Read from `ui_depth.cpp` (uiDepthOnEyeDraw at 2620-2865, viewIsSurface
+851, the surface table at 745-790, uiDepthConfigure 2435,
+uiDepthHologramOnEyeDraw 3532) and `binding_shadow.cpp` (the setters
+89-122).
+
+**Where an ordinary scene draw leaves.** uiDepthOnEyeDraw does the
+following, in order:
+1. resets its outputs: `g_uiDepthDrawComposite`, the planet, solar,
+   world-screen and corona pendings, `g_holoDraw = draw`, the mode,
+   `g_wantRebind`, `g_wantMask`, `g_rebindEye`, `g_drawEye`,
+   `g_reissueShader` and `g_reissueMaskSlot`;
+2. tests the on and stood-down flags;
+3. returns if no DSV is bound;
+4. calls viewIsSurface on PS SRV 0-3, a probe of the view memo each;
+5. hashes the VS, and checks the smoke, planet, solar and world-screen
+   pairs;
+6. leaves at the family gate (line 2693: not stellar, not a composite,
+   VS not in `g_families`).
+
+That exit, the plain decline, comes before any counter, log line,
+shader lookup, eye resolve or scene-depth judgment. Every positive path
+(planets, world screens, families, composites) has side effects:
+`++g_wComposite`, `++g_wDirect`, `++g_worldScreenWindow`, noteFamily,
+depthShaderFor and eyeIndexFor.
+
+The memo therefore covers the plain decline only. Any other answer is
+computed in full every time, so the families and composites keep their
+counts and logs exactly.
+
+The hologram classifier is the same shape. Its cheap declines
+(`!h`, excluded, and in neither the marker nor the family list) depend
+only on the VS hash and three lists. Its later declines read
+dsvIsSceneDepth and the eye table, which can change within a frame (the
+depth probe learns the scene depth at its first draw), so only the
+cheap declines are memoised.
+
+**What the plain-decline answer depends on:**
+- bindings: VS, PS (read only for the smoke, planet and world-screen
+  pairs), PS SRV 0-3 and DSV0;
+- ui_depth's state: the on and stood-down flags (tested before the
+  memo), `g_families` and `g_exclude` (set only in uiDepthConfigure),
+  the holo family lists (holoDepthConfigure), and the learned-surface
+  table, read through the per-view memo.
+
+  The table changes in four places: addSurface; surfaceMatches'
+  eviction of a surface whose size or format no longer matches; the
+  chrome tracker's `g_viewMemo.put(view, ..., 1)` (line 2553); and the
+  reset at 4522. The view memo also expires per frame (its entries live
+  a hundred frames).
+
+**The key.**
+- **The bindings: one aggregate generation**, `bindingEyeKeyGeneration()`,
+  in binding_shadow:
+  - bindingSet, bindingInvalidate and bindingSetShader bump it when the
+    slot is one of VS, PS, PS SRV 0-3, RTV0 or DSV0. That is a mask
+    test, as these are the eight slots the counter measured; RTV0 is
+    not read by the decline, but keeping the measured set keeps the
+    flown 90.6%.
+  - bindingForgetAll and bindingFrameBoundary bump it unconditionally.
+  - It is an inline reader, like bindingGeneration. A rig defining
+    EDVR_BINDING_SHADOW_EXTERNAL gets a declaration.
+  - Its value moves exactly when some one of the eight generations
+    moves, so its repeat rate is the measured one.
+- **ui_depth's state: a classifier epoch** in ui_depth.cpp, bumped at:
+  - uiDepthFrameBoundary;
+  - uiDepthConfigure and holoDepthConfigure;
+  - addSurface, and the eviction branch in surfaceMatches;
+  - the put at 2553;
+  - the surface reset and `g_viewMemo.clear()`.
+
+  A view-memo miss that only records what the table already says needs
+  no bump.
+- **The memo** stores both values and which exit was taken: a plain
+  decline, or the hologram's cheap decline. A call hits when both values
+  match and the stored exit was a plain decline.
+
+**What still runs on a hit.**
+- uiDepthOnEyeDraw:
+  - the on and stood-down test;
+  - every output reset, including `g_holoDraw = draw` (the arguments
+    differ per draw);
+  - the two loads and compares;
+  - `return false`. `g_uiDepthDrawComposite` stays false, so
+    vscreen's `t_compositeThisDraw` is unchanged.
+- The hologram classifier: `g_holoEye = -1`, `return false`.
+- Everything else in the eye branch is untouched: the eye-draw count,
+  the depth probe note, the intro panel and curve, the glare camera.
+  The memo lives inside the two functions, so vscreen's call sites do
+  not change.
+
+What a hit skips:
+- four view-memo probes;
+- the VS hash read, or its fallback;
+- the pair compares;
+- the family and exclude list walks.
+
+None of these has a side effect on a hit: a view memo hit writes
+nothing, and a miss would only re-record the table's answer.
+
+**Expected.** v:ui-depth on repeat draws is about 0.30 ms of AA-on
+work. At about 14.7k repeat eye draws a frame, a hit should cost 3-5 ns
+(the call, the resets, two compares), so the saving is about 0.2-0.25
+ms a frame. That is about 15% of the AA-on increment.
+
+The other steps with work on repeat draws (v:census 0.12, p:screen
+0.13, f:ui-layer 0.11, engine-vel 0.09, v:eye-test 0.08) can share the
+aggregate generation later. Each needs its own read like this one
+first.
+
+**Verification, built in, temporary.**
+- On verify frames (frame % 16 == 8, never a draw-sample frame, so the
+  step clock still measures the memo's real cost), a hit ALSO runs the
+  full classifier.
+- It then compares every output listed above, and checks that the full
+  path left at the plain decline. The hologram classifier is checked
+  the same way (`g_holoEye`, the return value).
+- The full path's outputs stand, so verify frames behave exactly as
+  today. Mismatches are counted per output, and the first few are named
+  with the VS hash.
+- A 30 s line gives:
+  - eye draws, hits and the hit rate;
+  - misses by cause: the generation moved, the epoch moved, or the last
+    exit was not a plain decline;
+  - verified hits and their mismatches.
+- The pure memo logic (key, hit, store, invalidate, the verify tally,
+  the line) goes in a small header with rig checks in aa_off_test.
+  binding_shadow's rig gets a check that the aggregate moves with each
+  of the eight slots and with no other.
+
+The binding-repeat counter's question is answered, so it comes out of
+this build (it costs 0.35-0.4 ms on sampled frames). The step clock
+stays.
+
+**The flight should show:**
+1. The memo hit rate on eye draws: about 88-90% (the 90.6% repeat share,
+   less the few repeats whose last exit was not a plain decline).
+2. Verified hits in the millions and mismatches 0. Any mismatch means
+   the key misses an input, and the memo does not ship.
+3. v:ui-depth with AA on falling from 0.43-0.54 ms to about 0.15-0.25,
+   with the other steps unchanged. The old line falls by about the
+   same, once the counter's removal is allowed for.
+4. ui_depth's own window counts (composite, direct, no shader, world
+   screens) the same as before at the same pad, since every positive
+   path still runs in full.
+5. Flown parked at the same pad, AA on for at least 3 minutes, with no
+   build running on the machine. No AA-off leg is needed.
+
+**Memo built (2026-10-27, same branch), NOT FLOWN.** It is as designed,
+with these details:
+- **Code.**
+  - `bindingEyeKeyGeneration()` in binding_shadow, bumped through a
+    slot mask in the three setters, and at forget-all and the frame
+    boundary.
+  - `g_classifierEpoch` in ui_depth.cpp, bumped at:
+    - the eviction in surfaceMatches;
+    - a real add in addSurface;
+    - holoDepthConfigure and uiDepthConfigure;
+    - the chrome put;
+    - uiDepthFrameBoundary;
+    - the shutdown reset.
+
+    A grep found no other writer of the surface table, the lists or the
+    view memo.
+  - The bodies moved into `classifyEyeDraw` and `classifyHologramDraw`,
+    each reporting its exit. The pure logic is in `classifier_memo.h`.
+- **Exits.** Only the family gate is a plain decline. A world-screen
+  pair that F108 refused and counted falls through to that gate, and it
+  is stored as "other", or a hit would skip its count. Both memos read
+  their key before classifying, so an eviction during a full run leaves
+  the stored key stale, and the next call runs in full.
+- **Verify frames.** One ui_depth frame in 16, with the phase rotating
+  by one every 16 frames so it cannot lock onto the draw-sample
+  cadence. A frame is also skipped whenever `perfMonitorSampleDraws()`
+  is true.
+- **Logging.** The `ui depth memo:` line follows the step lines at each
+  1800-frame edge. The first three mismatches per classifier are named
+  in their own lines.
+- **Rigs.**
+  - aa_off_test now has 186 checks.
+  - scrim_metadata_test has 73 aggregate-generation checks: each of
+    the 17 slots through each setter, plus forget-all and the frame
+    boundary.
+  - ui_depth_test and hologram_depth_test have stubs.
+  - ui_composite_census_test's source pin reads the new split.
+
+The binding-repeat counter came out in 18aea473, back to af9c429b's
+code.
+
+Flight: parked at the Cranfield pad, AA on for at least 3 minutes,
+nothing building on the machine. Read the `ui depth memo:` line (hit
+rate, verified hits, mismatches), the step lines (v:ui-depth) and
+ui_depth's own window counts, after `edvr_log.py --expect-build HEAD`.
+
+**Memo flown (2026-10-27, Steam log `edvr_gfx_20261027_122848.log`,
+build 1fc4deb2; same rig).**
+- **The flight.** Loaded in docked at Cranfield at 12:30:49, AA on,
+  parked until 12:32:47. That gives three clean windows (16200, 18000,
+  19800), not the full three minutes. No build ran during the leg: the
+  only build writes were three files at 12:29.
+- **Hits and verification.** Eye draws hit 90.9-91.1% of the time,
+  about 17.3k calls a frame. The hologram hit rate is the same. Misses
+  were almost all a moved generation; "no plain decline stored" was
+  0.01-0.03% and the epoch moved once. About 5.0M hits were verified
+  across the three windows (6.3M with the loading window), with 0
+  mismatches in every output and in the exit, for both classifiers.
+- **Cost.** v:ui-depth is 0.253-0.263 ms a frame, against a mean of
+  0.47 (0.43-0.54) in the step clock flight. That saves 0.21 ms a
+  frame, 45% of the step.
+  - Of the remaining 0.26: about 0.05 is the AA-off baseline of the
+    step's other work.
+  - The rest is the hit path, about 12 ns an eye draw for both
+    calls: two cross-TU calls, the resets and the temporary tallies.
+    That is more than the 3-5 ns estimated.
+  - The other steps are the same within the noise between flights
+    (v:census 0.14-0.15, f:ui-layer 0.27-0.31, p:screen 0.17-0.20).
+    The old line (3.87-4.26) cannot resolve 0.2 ms between flights;
+    the step is the read.
+- **The positive paths are unchanged.** World screens: seen 3600,
+  marked 3600 per window, as in the 10:22 flight. Hologram depth: 7.05-7.16
+  listed draws a frame, two resolved eye-frames a frame, 0 declined, as
+  before (7.07-7.14).
+
+Verdict: the memo is exact, and it saves about 0.2 ms a frame at a
+settlement pad with AA on. To ship it, remove the verification and the
+counters, which are temporary. That also takes their cost off the
+hit path. Moving the hit test inline (ui_depth.h, like
+uiDepthWantsDraws) would save the two calls, but it means exposing the
+memo's state in the header.
+
+The other steps on repeat draws (f:ui-layer, v:census, p:screen,
+engine-vel, v:eye-test; about 0.5 ms together) can key on the same
+aggregate generation. Each needs its own desk read first, as this one
+had.
+
+The verification and counters were stripped in b1561dff (the memo
+alone). `main` was merged in at 3003f672.
+
+### 2026-10-27 -- Desk design: three more draw-path trims (not built)
+
+There were three reads: v:fixes (the eye recognisers, 0.21 ms in every
+mode), f:ui-layer (+0.20 with AA on) and the engine velocity gate
+(+0.25). None of the three supports another binding-keyed memo. Each
+has a cheaper, exact trim instead.
+
+**Engine velocity** (`engine_velocity.h:163-196`,
+`engine_velocity.cpp:3084-3113`).
+- The gate in front of the slow half is nine tests, not four:
+  - the Vs, Ps, Rtv0, Dsv0 and Blend generations;
+  - the VsSrv33 and VsCb1 pointers;
+  - the eye;
+  - the guarded SRV3.
+
+  It costs about 4 ns a repeat draw, already near its floor.
+- A miss enters `beforeDrawSlow`, which reads `qpcNow()` first even
+  though only the locked path uses it (line 3112). It then scans the
+  14-record family table to find "not a pool family".
+- The flight logged about 1.1k such quick paths a frame (1.96M
+  "lock-free looks" per 1800 frames) and 340 locked slow halves, which
+  is about 0.14 ms of real work.
+- The trims:
+  - **(A)** read the clock after the quick-path return;
+  - **(B)** a one-entry memo of the family lookup, (VS hash, flat) to
+    family. That is a pure function, so it is exact;
+  - **(C)** move the 1-in-64 PS probe and its scans out of the inline
+    gate into an out-of-line function, so the gate is small enough to
+    inline at its six call sites.
+- About 0.06-0.12 ms together.
+- ruled out: keying the gate on bindingEyeKeyGeneration, because it
+  follows SRV 0-2 (moved on 8-10% of draws) and not Blend, which the
+  gate needs.
+
+**v:fixes** (vscreen.cpp, between the v:census and v:fixes marks).
+- Every recogniser but two rejects an ordinary scene draw with inline
+  shape tests.
+- The two that cost are:
+  - `remlokOnFootDiagnose`, a call into another file on every eye draw,
+    for one VS hash;
+  - `scrimOnEyeDraw`. Its wash shape (X, one instance, count of at
+    least 100) is most scene meshes, so the call runs on most eye
+    draws, and its decline comes from a one-entry PsSrv0 metadata
+    cache inside that call.
+- The trims:
+  - **(D)** the visor VS test inline, before the call;
+  - **(E)** the scrim PsSrv0 cache's hit-and-decline test inline in
+    scrim_fix.h, before the call.
+- Both are the same predicate moved, so they are exact. About 0.06-0.09
+  ms together.
+- ruled out: an "all recognisers declined" memo, because the shape tests
+  read count and instances, which change draw to draw, and its epoch
+  would need about 14 inputs in 9 files.
+
+**f:ui-layer** (forwardWithVerdict, `vscreen.cpp:4249-4320`).
+- For an ordinary eye draw the family answer depends only on:
+  - the VS hash;
+  - the PS hash, read only for nine named VSs;
+  - RTV0's target kind, which is cached on RTV0's generation;
+  - the on-foot sharp-HUD flag.
+- It reads no other mutable state, and kind 2 (post-tonemap, a few dozen
+  draws a frame) is the only branch that does more.
+- The trim, **(F)**: a one-entry plain-decline cache in vscreen.cpp,
+  before `uiLayerFamilyOf`.
+  - **Key:** (VS hash, PS hash, RTV0 generation, the on-foot flag), plus
+    a small epoch bumped where ui_layer resets its target-kind cache
+    (ui_layer.cpp:6632, 6659).
+  - **Stored only on:** a proven kNone, at a target kind other than 2,
+    and a VS other than the panel or loader VS (those call the family
+    probe).
+  - It keys on hashes rather than the aggregate generation, because the
+    SRVs the aggregate follows are not inputs here.
+- About 0.05-0.10 ms.
+- The after-UI branch (4289) runs per draw while the layer is
+  "watching", with frame-mutable inputs, and no binding key can skip it.
+  Its share of the block is unknown, so the build splits the step there.
+
+**The build:**
+- trims A-F;
+- the stale "four generation compares" comments corrected;
+- a step-clock sub-mark between the family decision and the after-UI
+  branch;
+- a temporary verification of (F) alone (the only new cache with a
+  hand-derived key), as the ui_depth memo had: on rotating non-sampled
+  frames a hit also runs `uiLayerFamilyOf`, with mismatches counted and
+  named;
+- a rig sweep of every named VS and PS through the cached path. A-E
+  are code moved, not answers cached.
+
+Expected total: 0.17-0.31 ms a frame with AA on, of which 0.06-0.09
+(D, E) also helps with AA off. That is well under the 0.5-0.6 the
+repeat-draw split promised, because most of the remaining cost is the
+call floor and real work on draws whose bindings changed.
+
+**The flight should show** (parked at the Cranfield pad, AA on for at
+least 3 minutes, nothing building), against
+`edvr_gfx_20261027_122848.log`:
+
+| Step | Before | Expected |
+|---|---|---|
+| engine-vel | 0.32 | 0.20-0.26 |
+| v:fixes | 0.21 | 0.12-0.15 |
+| f:ui-layer | 0.28 | 0.18-0.23, with the after-UI share read off its new sub-step |
+
+The other steps should be unchanged, and (F) should show 0 mismatches.
+
+A further candidate, not in this build: inlining the ui_depth memo's
+hit test into ui_depth.h. It would save two calls per eye draw, about
+0.1 ms, but it needs a read of who else writes the outputs a hit
+resets.
+
+**Trims A-F built (2026-10-27, same branch), NOT FLOWN.**
+- **A, B, C** (engine_velocity.cpp, engine_velocity.h).
+  - A: `qpcNow()` now comes after the quick-path return.
+  - B: `quickFamilyForProfile` is a one-entry memo of (hash, flat) over
+    the pure family lookup.
+  - C: the 1-in-64 probe's scans moved out of line, into
+    `psShadowProbeSampled`.
+  - The gate's comments now name its nine tests.
+  - A's only reader-side effect: `slowTicks` no longer includes the
+    quick test on locked draws.
+- **D:** `remlokOnFootVisorVsBound()` inline in remlok_fix.h. The
+  diagnostic's first line was that same test.
+- **E:** `scrimWashSrv0Declines()` inline in scrim_fix.h, over the
+  PsSrv0 cache that has moved to `detail`. It is true exactly when
+  `scrimOnEyeDraw` would return false from that cache.
+- **F:** `uiLayerFamilyMemoised` in vscreen.cpp, with the rules in
+  `ui_family_memo.h`.
+  - Key: the VS and PS hashes, Rtv0's generation, the on-foot flag, and
+    `uiLayerFamilyEpoch()`.
+  - The epoch is bumped in refreshLive and at both of ui_layer's
+    target-cache resets.
+  - A decline is stored only for kNone, at a target kind other than 2,
+    for a VS other than the panel or loader VS, and only with the
+    on-foot flag the same after the run as before.
+  - Its TEMPORARY verification runs on rotating frames that the draw
+    clock does not sample, and prints `ui layer family cache:` per
+    window.
+- **Step clock:** a new step, `f:after-ui`, for the after-UI branch.
+  f:ui-layer is now the family decision plus the composite census; its
+  second mark runs on composite draws only.
+- **Rigs:**
+  - aa_off_test, 215 checks, including a sweep of 7,656 named-pair
+    draws and 400,000 random draws, cached against uncached, with 0
+    differences and 8 mutation controls that each fail;
+  - scrim_metadata_test, for E and D;
+  - visor_axis_test V8, a wiring pin for D;
+  - engine_velocity_test, 18,913 checks, with two new lifecycle checks
+    for C;
+  - skin_engine_test, with a mutant re-anchored for B.
+
+Flight: parked at the Cranfield pad, AA on for at least 3 minutes,
+nothing building.
+- Compare engine-vel, v:fixes, f:ui-layer and f:after-ui with
+  `edvr_gfx_20261027_122848.log`.
+- Read the `ui layer family cache:` line: hits, and 0 mismatches.
+- The other steps should be unchanged.
+
+**Trims flown (2026-10-27, Steam log `edvr_gfx_20261027_144901.log`,
+build 036e235f; same rig).** Loaded in docked at Cranfield at 14:54:03,
+AA on, parked to 14:57:27. That gives six clean windows (23400-32400),
+with no build running.
+- **F is exact.** The family memo answered 94.6% of 32.1M owner eye
+  draws a window. On the verify frames, about 1.78M hits a window also
+  ran the full decision, and none named a family.
+- **None of the trims moved its step beyond the window-to-window
+  spread.** The spread inside each flight is about ±0.05 ms on
+  engine-vel and about ±0.2 on EDVR's sum. Means of the six windows
+  against the memo flight's three:
+
+  | Step | Memo flight | Trims flight | Predicted | Result |
+  |---|---|---|---|---|
+  | engine-vel | 0.315 | 0.341 | 0.20-0.26 | no drop |
+  | v:fixes | 0.210 | 0.195 | 0.12-0.15 | about -0.015 |
+  | f:ui-layer + f:after-ui | 0.283 | 0.309 (0.172 + 0.137) | 0.18-0.23 | no drop |
+
+  The engine motion line's quick-path count is the same as before (about
+  1.1k a frame) and so is the slow half (0.13-0.15 ms).
+- **Overall.** EDVR's sum is 3.77, against 3.53. That is within the
+  spread, with about 3% more eye draws (17.8k against 17.3k).
+- **New measurement: the after-UI branch costs 0.106-0.203 ms a frame**
+  (mean 0.137) with AA on. It runs on every draw while the layer is
+  watching. f:ui-layer's family decision and census are 0.172.
+
+ruled out: trimming nanoseconds from per-draw predicate chains (inline
+early-outs, a qpc read moved, the family scan memoised, the gate's probe
+moved out of line, a value-keyed family cache) as a measurable lever.
+Six exact trims predicted to save 0.17-0.31 ms moved nothing beyond
+about 0.015 ms (flown 2026-10-27). The desk estimates were 4-10x too
+high: the predictable branches and calls they removed were already
+overlapped by the CPU. The ui_depth memo paid off because it removed
+real work, four view-memo probes and list walks a draw, not call
+overhead.
+
+What this leaves:
+- About 1.45 ms of the AA-on increment. It is spread at 2-5 ns a draw
+  over a dozen steps, about 35k draws a frame.
+- Desk trims of single steps are now below what a flight can resolve.
+- The only lever left at this scale is structural: one fast path for a
+  repeat draw of an ordinary scene mesh that skips the whole classifier
+  chain, both the verdict and the forward scope. The stability check of
+  2026-10-27 (no change in the verdict or the ui_depth flags over 1.6M
+  repeat eye draws) supports the premise. But every step's per-draw side
+  effects (counts, census, probes, the eye-draw tally) would have to be
+  separated out first. That is a design of its own, not a trim.
+
+Proposed for the code here:
+- **F:** revert it and its verification. It is exact, but it has no
+  measured gain, and it adds an epoch across ui_layer.cpp and vscreen.cpp.
+- **A-E:** keep them. They are exact by construction, simple, and v:fixes
+  shows the small gain they promise at most.
+- **The step clock:** remove it when the arc closes.
+
+### 2026-10-27 -- Desk design: the repeat-draw fast path (not built)
+
+Three read-only inventories covered the X thunk with its pre-draw and
+post-draw blocks, all of beginPanelOverride, and all of
+forwardWithVerdict. Every statement on the path of an ordinary owner X
+draw (kNone, unclaimed, AA on) was classed as one of:
+- P, a pure decision on listed inputs;
+- S, a per-draw side effect;
+- G, gated by a normally-off flag;
+- L, learning that changes later answers;
+- D, alters the issued draw.
+
+The ruled-out ns trims removed slivers of steps. This removes whole
+steps for the draws that repeat. It is behaviour, with no key.
+
+**Where the draws go.**
+- About 35k hooked draws a frame. 33-35k of them are X; about 17.8k
+  are eye draws and about 17k are off-screen.
+- 94% of owner draws repeat the previous draw's eight-slot key.
+- EDVR's step sum is about 3.6-3.8 ms. Leaving out pre (0.45),
+  engine-vel (0.34), weapon and GAME, about 2.8 ms is the verdict, the
+  forward scope and the post-draw blocks.
+
+**The ticket.** A full-path owner X draw that ends "ordinary" records a
+ticket.
+- The key:
+  - `bindingEyeKeyGeneration()`. It moves on any VS, PS, PS SRV 0-3,
+    RTV0 or DSV0 set, and every frame, so no first-of-frame event (the
+    camera latch, the depth probe's first draw) can be a repeat;
+  - the eye or off-screen class, which follows from RTV0;
+  - `g_classifierEpoch`;
+  - the layer's family epoch (if F is kept) and a new after-UI quiet
+    epoch;
+  - a new fast-path epoch.
+- The next owner X draw takes the fast path when the key is equal and
+  its args class and the dynamic flags pass.
+
+"Ordinary" is the conjunction the full path observed. Each term is a
+deterministic function of the key while the key holds:
+- the verdict was kNone, and every per-draw output was at its reset
+  value. That means t_uiDepth, t_composite and t_holo, curveThisDraw,
+  introCurveThisDraw, glareClamp, the ui_depth pendings, and
+  g_uiLayerCrispPending;
+- the UI family was none, the layer was not engaged, and the after-UI
+  `uiLayerNoteOther` returned with no effect;
+- weapon motion did not want the VS. Screen motion did not match: give
+  screenMotionUiDraw and screenMotionDraw bool returns for this. The
+  rigid-draw query was false: both eyes are already noted this frame,
+  and that latch only goes false to true within a frame;
+- the VS is not one of the Vs-keyed specials:
+  - celestial patch;
+  - orbit lines;
+  - the panel or loader VS;
+  - the HUD issuer probe set;
+  - the sun pair;
+  - a billboard;
+  - the visor.
+- the object probe's `g_checksLeft == 0`;
+- off-screen only: the target is settled for uiDepthNoteOffscreenDraw
+  (known or checks exhausted), and it is not a wake-pulse surface (the
+  1.2224 aspect).
+
+**Args class:**
+- kind 'X';
+- `64 < count <= 10000`;
+- `count != 240`;
+- `instances >= 1`.
+
+This keeps out every count test the inventories found:
+- the count 6 quads: chrome, intro, holo, backdrop, curve;
+- night vision at 240;
+- the sun-glare nomination above 10000, which also reads VsCb0;
+- the panel-size test and the after-UI watch budget, both at 64 or
+  below;
+- wake pulse's 576 and 1728, already outside the class by its surface
+  test.
+
+Every other matcher that reads instances requires exactly 1, so a
+larger value only declines more. D, I and N, about 1.5k draws a frame,
+stay on the full path in this version.
+
+**Dynamic flags tested on every fast-path draw** (plain loads; any
+true value takes the full path):
+- `g_cameraDrawWatch`;
+- `g_uiLayerIssueBlocked`;
+- `g_uiLayerCrispPending`;
+- `g_rollFreePending`;
+- `g_uiLayerWorldReissue`;
+- `g_vrWorldInternal` and `g_vrWorldWants`;
+- the step clock's steps-mode draw. The fast path marks a step of its
+  own instead.
+
+**The fast-path epoch, and the contract.** The inventories found about
+30 normally-off flags: the census and its skips, the quad, pixel,
+blend, object-ledger, marker and footprint probes, the camera census,
+the gpu pass profile, the layout sample, the experimental FSS keys,
+dust and stars hidden, curvature, distance, and others.
+- **The config ones.** One epoch, bumped at vScreenRefreshConfig and
+  at each runtime arm or disarm site, invalidates every ticket.
+- **The contract for future code.** The fast path runs only while
+  every subscriber `drawGateSubscribed()` lists is in a certified set,
+  meaning its behaviour on an ordinary draw is captured by the key or
+  the ticket. A new draw feature added to that list, and not
+  certified, turns the fast path off by itself. Nobody has to remember
+  the contract.
+
+**What the fast path still does,** in this order. Each item is the S or
+D work the inventories required.
+- thunk entry as now: `gpuFrameCommandIfLive`, and
+  `temporalPassCountDraw` (`++g_cameraDrawCount`);
+- the per-draw stores beginPanelOverride makes:
+  - `particleRollFreeClear`;
+  - `glareClamp = 0`;
+  - `curveThisDraw`, `introCurveThisDraw` and the three t_ flags false;
+  - `++bindAuditSeq`, running bindingAudit on its 1024th;
+- `depthProbeNoteDraw`'s per-draw tallies, with its every-1024th layout
+  sample left G;
+- eye only:
+  - `++eyeDrawsThisFrame`;
+  - the crisp reset that `uiLayerCrispNoteEyeDraw` makes;
+  - the ui_depth outputs, which are already at their reset values
+    after the ticket's plain decline. Confirm by grep that nothing
+    else writes them; `g_holoDraw` is read only after a true
+    classification;
+- off-screen only: `++cands[rtv0Cand].thisFrame`;
+- `engineVelocityBeforeDraw` and `NoteSkinDraw`, unchanged. The gate
+  stays the substitution's guard: its nine tests cover Blend, VsSrv33
+  and VsCb1, which the ticket's key does not;
+- the game's draw, under `GpuCensusAlteredScope` with the class from
+  `engineVelocityDrawSubstituted()`. A PoolFamily draw keeps its
+  occurrence count and sampled timer.
+
+What it skips: the rest of beginPanelOverride, all of
+forwardWithVerdict (every scope there is a no-op for kNone), the
+lambda's owner block, and the tail's G checks.
+
+**Expected.**
+- The fast path should cost 20-30 ns a draw.
+- About 75% of the 2.8 ms lands on repeat draws (the 2026-10-27 class
+  split). If 80-90% of owner X draws take the path, the saving is about
+  0.8-1.6 ms a frame, with AA on and off.
+- The trims' estimates were 4-10x high, so this one is checked first by
+  counting, before anything is skipped.
+
+**Phase 1, shadow mode (no behaviour change).**
+- Build the key, the ticket and the eligibility test. Run the full path
+  on every draw.
+- On each draw that WOULD take the fast path, compare the full path's
+  actual outcome with the ticket's: the verdict, every per-draw output,
+  and each ordinary term.
+- Count the would-take draws by class, the mismatches by term (the
+  first few named with the VS, the PS and the count), and the reasons
+  for refusal (key moved, epoch moved, args class, a dynamic flag, the
+  certified-set test).
+- A `draw fast path (shadow):` line per 1800-frame window.
+
+**Phase 2.** Skip, keeping Phase 1's comparison on rotating non-sampled
+frames as the ui_depth memo had. Add the `fast` step to the step clock.
+
+**The Phase 1 flight should show:**
+- the would-take share of owner X draws, eye and off-screen apart;
+- mismatches at 0 over millions. A mismatch names the input the key
+  misses;
+- the refusal reasons, to see what limits the share.
+
+Fly it parked, then looking around the settlement and the cockpit for
+a minute (UI takes, holo, terminals), and include an AA-off leg.
+
+**Phase 1 built (2026-10-27, same branch), NOT FLOWN.**
+- **Code.** `draw_fast_path_shadow.h` holds the key, the args class,
+  the ticket, judge and finish, 25 outcome terms, the counters and the
+  line. `draw_gate_subscribers.h` holds the gate's 28 subscribers as a
+  bit set. The glue is in the X thunk, forwardWithVerdict and the
+  lambda. It is TEMPORARY, and it changes no behaviour: the only new
+  returns are inside its helpers.
+- **Certified subscribers: 18 of 28.** Distance and panel curve are
+  certified, not armed, because they act only on draws of 64 indices
+  or fewer, which the args class excludes. The curve's paths were
+  traced to `srv0IsPanelSized`, `curveThisDraw`, `introCurveThisDraw`
+  and the six-index recognisers. Sean's Steam ini has distance 0.65 and
+  curvature 0.25, so armed would have read 0%.
+- **Defaults the design had wrong.** The footprint is on by default
+  (`vscreen_res_width = auto`), so it is certified, and its 2D-screen
+  composite VS is a special. The loader panel is on by default, so it
+  is armed only on loader-shaped frames.
+- **The after-UI term** is a before/after stamp of ui_layer's effect
+  counters, leaving out the DSV memo's diagnostic hit and miss counts.
+- **Screen motion's** two draw calls now return whether they recognised
+  their pair.
+- **Rig:** aa_off_test, 321 checks.
+- **Cost.** The instrument costs an estimated 40-60 ns an owner X draw,
+  so this flight's timings are not comparable. Its counts are the
+  result.
+
+Flight: parked at the Cranfield pad for at least 2 minutes, then a
+minute looking around the cockpit and settlement (HUD, holo, a
+terminal if one is near), then F7 AA off for 1 minute, then F7 back
+on. Read `draw fast path (shadow):`:
+- the would-take share, eye and off-screen;
+- the refusals by reason;
+- the mismatches, which must be 0.
+
+**Phase 1 flown (2026-10-27, Steam log `edvr_gfx_20261027_162747.log`,
+build a7ff834d; same rig).** Loaded in docked at Cranfield at 16:29:41.
+AA was on until 16:31:21, then F7 off until 16:32:46, then on.
+- **Draws.** Owner X draws were 18-29k a frame, about half eye and half
+  off-screen.
+- **Would take: 0.0%,** eye and off-screen, in every window.
+- **Refusals, by first reason, a typical scene window (10800):**
+
+  | Reason | Share | Detail |
+  |---|---|---|
+  | no ticket | 69% | |
+  | armed | 15% | all of it "layout" |
+  | args class | 9% | |
+  | dynamic | 6% | camera watch 4%, object-probe checks 1.5% |
+  | key moved | 0.6% | |
+
+- **Tickets recorded:** about 30% of owner X draws.
+- **Mismatches:** 0 of the 4.2k draws compared, all in loading
+  windows, which is too few to mean anything.
+
+Two causes, both mine:
+1. **"Layout" is not an armed state.** `depthProbeLayoutActive()` reads
+   `g_layoutTarget`, which the depth probe sets EVERY frame to the
+   busiest non-eye depth target (depth_probe.cpp:1116-1118). The sample
+   itself runs only on that target's first draw and every 1024th
+   (:615), inside depthProbeNoteDraw. The fast path keeps calling
+   depthProbeNoteDraw, so the sample runs anyway. Armed-layout refused
+   every draw that held a ticket, which is why the share is exactly 0.
+   ruled out: depthProbeLayoutActive as a fast-path gate, because the
+   kept depthProbeNoteDraw performs the sample (flown 2026-10-27).
+2. **70% of draws are not "ordinary" by some term, and the line cannot
+   say which.** Tickets are recorded only on ordinary draws, and the
+   tally counts terms only on would-take draws, which there were none
+   of.
+
+Suspects, each with the evidence that decides it:
+- the special-VS term. `particleOnDrawMayMatch` is a conservative "may"
+  test, and a VS whose hash is 0 (unknown) may read as a billboard;
+- weaponMotionWants on a common off-eye scene VS (AACF..D809 is in both
+  lists);
+- the after-UI stamp still moving on ordinary draws while the layer
+  watches;
+- off-screen targets that never settle for uiDepthNoteOffscreenDraw.
+
+Next build (Phase 1b):
+- remove layout from the armed set;
+- add a per-window tally of why a draw recorded no ticket, by first
+  failing term, eye and off-screen apart, with the three most frequent
+  VS hashes for the top two terms;
+- fly the same leg.
+
+**Phase 1b built (2026-10-27), NOT FLOWN.**
+- **Layout.** It is out of the armed set (14 flags remain), and
+  `depthProbeLayoutActive` is removed, so depth_probe matches 12c230c3.
+- **The no-ticket tally.** Each owner X draw that records no ticket is
+  counted under its first failing reason, in this order:
+  1. unclassed;
+  2. args class;
+  3. off-screen unsettled;
+  4. wake surface;
+  5. then the 23 outcome terms in enum order, from verdict to special VS.
+
+  A draw failing several terms shows only the earliest. The counts are
+  kept for eye and off-screen apart, and the tally plus the tickets
+  equals the owner X draws.
+- **VS hashes.** Each reason keeps an 8-slot space-saving sketch of the
+  VS hashes it counted, with 0 as a value of its own.
+- **The second line.** `draw fast path (shadow) no ticket:` gives, per
+  class, the top six reasons a frame, then the top three VS hashes,
+  with their shares, for the two largest reasons.
+- **Rig:** aa_off_test, 353 checks.
+- **Flight:** the same leg as Phase 1.
+
+**Phase 1b flown (2026-10-27, Steam log `edvr_gfx_20261027_165254.log`,
+build 3ef08f21; same rig).** Loaded in docked at Cranfield at 16:55:05.
+AA was on, then F7 off from 16:55:52 to 16:56:57, then on.
+- **Off-screen draws would take the fast path 23-40% of the time.**
+  That is 1.9-5.5k a frame, rising as the scene settled, and 39.9% with
+  AA off. The comparison checked 3.3-10M would-take draws a window, 35M
+  over five windows, with 0 mismatches.
+- **Eye draws: 0%.** Every eye draw recorded no ticket. The first
+  failing reasons were:
+  - args class: 52-54% of eye draws;
+  - census: 45-46%;
+  - after-ui: under 1%;
+  - ui depth, composite, roll-free, verdict: a few a frame.
+- **Off-screen no-ticket** was almost all args class (5.6k a frame),
+  then wake surface (about 10), special VS and unsettled (a few).
+- **The args class is the largest limiter overall.** It failed on
+  10-14k of 22-29k owner X draws a frame (about 47%), eye and
+  off-screen alike. Its top VS hashes were 8BC3FFBCA98BCD4C (31-36%),
+  EB5234DB6ADB491D (26-31%) and 5B4D8E894EEDA8B4 (10-11%): common scene
+  shaders.
+
+Two causes:
+1. **The "census" term is an instrument error.** It was captured as
+   `g_vrWorldWants || (eyeGeometry && vscreenFootprintWanted())`. That
+   is the gate, not the effect. The footprint is on by default
+   (`vscreen_res_width = auto`), so the term was true on every eye
+   geometry draw. But `footprintEyeDraw` (vscreen.cpp:4138) acts only
+   when VS is 5C36AF051B98B9F1 and PS is CFE84157BC76E921, the 2D
+   screen composite, which is already a special. Its top VS
+   (EB5234DB.., 5B4D8E89.., BBE58E40..) are ordinary scene shaders.
+   The term must be what the call does: the world-route census
+   (already a dynamic flag), or the footprint's VS and PS pair.
+2. **The args class excludes about half the scene's draws,** eye and
+   off-screen alike, and the line does not say which bound: count 64
+   or under, over 10000, 240, or instances 0. The suspect is the
+   10000 upper bound. Big settlement meshes are over 10000, and the
+   only test behind that bound is the sun-glare camera nomination.
+   That nomination is pointer-cached (vscreen.cpp ~2498: it resolves
+   only when VsCb0 differs from `sceneCbNominated`), so on a repeat
+   draw with the same VsCb0 it is a no-op. If so, the bound can become
+   "count <= 10000, or VsCb0 already nominated, or the sun-glare world
+   inactive".
+
+Next build (Phase 1c):
+- capture the census and footprint term from the effect, as above;
+- split the args-class reason into its four bounds, eye and off-screen
+  apart, each with its top three VS hashes;
+- for draws over 10000, count how many have
+  `bindingGet(VsCb0) == sceneCbNominated` or the sun-glare world
+  inactive.
+
+Fly the same leg. Expected: eye draws join, and the split shows how
+much of the 47% a widened class would admit.
+
+**Phase 1c built (2026-10-27), NOT FLOWN.**
+- **Census term.** It is now `census || (footprintOn && pair)`. Census
+  is `g_vrWorldWants && vrCameraCensusWanted()`; the pair is VS 5C36..
+  and PS CFE8.. (vscreen.cpp ~1973).
+- **The args class** is four reasons, first applying:
+  1. count 64 or under;
+  2. count over 10000;
+  3. count 240;
+  4. no instances.
+
+  They are on the main line and in the no-ticket tally, each with VS
+  sketches for eye and off-screen apart. The no-ticket order is now 30
+  reasons.
+- **Draws over 10000** are counted at thunk entry against the
+  nomination's own gate (vscreen.cpp ~2641-2651), as one of:
+  - glare off;
+  - no cb;
+  - cb nominated;
+  - acts.
+
+  Off-screen draws never reach the nomination.
+- **A third line,** `draw fast path (shadow) args:`, gives each bound's
+  top VS for eye and off-screen, then the over-10000 shares.
+- **Rig:** aa_off_test, 376 checks.
+- **Worst-case lengths:** 1051, 981 and 1144 characters.
+
+**Phase 1c flown (2026-10-27, Steam log `edvr_gfx_20261027_174248.log`,
+build 03335ec3; same rig).** Loaded in docked at Cranfield at 17:44:42.
+AA was on, then F7 off from 17:45:46 to 17:46:47, then on. Two scene
+windows (12600 and 14400) are read below.
+- **Would take:**
+  - eye: 33.2-34.3% (3.5-4.6k a frame);
+  - off-screen: 25.5-26.7% (3.3-4.0k a frame);
+  - all owner X draws: 29-30% (23.6-28.6k a frame).
+- **Mismatches: 0 of 12.3M and 15.6M compared.** The census fix let the
+  eye draws in, and none of them differed from the full path.
+- **What still refuses** (refusals per window, as a share of owner X
+  draws):
+
+  | Reason | Share | Detail |
+  |---|---|---|
+  | count of 64 or under | about 45% (10.4-12.8k a frame) | the largest by far |
+  | dynamic | about 7% | camera watch about 4.5%, object-probe checks about 3% |
+  | key moved | about 3% | |
+  | over 10000 | about 3% (0.8k a frame) | |
+  | count 240 | about 0.2% | |
+
+  On eye draws the outcome terms that block a ticket are now small:
+  after-ui about 85 a frame, special VS about 60, ui depth about 15.
+- **The 64-or-under draws are ordinary scene shaders.** Eye: EB5234DB..
+  51%, 5B4D8E89.. 19%, BBE58E40.. 11%. Off-screen: 8BC3FFBC.. 75%,
+  C2208C16.. 11%. They are small meshes drawn instanced.
+- **The over-10000 sun-glare nomination never acts.**
+
+  | Class | Glare off | No cb | cb already nominated | Acts |
+  |---|---|---|---|---|
+  | Eye | 0% | 21-26% | 74-79% | 0% |
+  | Off-screen | 0% | 38-40% | 60-62% | 0% (it is eye-only) |
+
+Why the lower bound is too cautious. I set it at 64 to cover every
+count test the inventories found:
+- the count 6 quads;
+- the after-UI watch budget, at 6 or under;
+- `srv0IsPanelSized`, at 64 or under: the distance fix, the curve, and
+  the after-UI read test;
+- the crisp tonemap at 3 and the N-only 3 and 4 shapes, which do not
+  apply to X.
+
+Only `srv0IsPanelSized` acts between 7 and 64, and its answer for a
+draw under 64 is a memo keyed on PsSrv0's generation, which the key
+covers. So a repeat in that range gets the same answer, but only if
+the previous draw was in the same range. A draw over 64 never runs the
+test.
+
+Next build (Phase 1d):
+- **The args class becomes a band that the ticket records,** and the
+  next draw must be in the same band:
+  - band A: count 7-64;
+  - band B: count 65-10000, except 240;
+  - band C: count over 10000, admitted only while the nomination is a
+    no-op for this draw: glare off, no VsCb0, or VsCb0 already
+    nominated. That is a per-draw test, because VsCb0 is not in the
+    key.
+- **Kept out:** count 6 or under, 240, and instances 0.
+- **Re-grep before building:** every count test reachable on an owner X
+  draw, to confirm that nothing between 7 and 64 except
+  srv0IsPanelSized depends on count. The shadow comparison catches
+  anything missed, as a mismatch.
+
+Expected: most of the 45% joins. Most draws repeat their key, so the
+would-take share should rise towards 70-80%.
+
+ruled out: the 10000 count bound as needed, because the sun-glare
+nomination did not act on one draw over 10000 in two windows. A
+no-op test per draw replaces it.
+
+**Phase 1d built (2026-10-27), NOT FLOWN.**
+
+Step 0 re-grepped every count test reachable on an owner X draw: the
+thunk, the verdict, the forward scope, the owner block and their
+callees, about 40 sites. The edges and exclusions:
+- `srv0IsPanelSized` at count 64 (vscreen.cpp:1402, then a memo keyed
+  on PsSrv0's generation);
+- the nomination at count 10000;
+- count 6: intro, curve, holo, target sharp, backdrop, FSS panel,
+  chrome;
+- count 240: night vision;
+- count 6 or under: after-UI's read watch, and particles below 6 or 3.
+
+Two findings changed the plan:
+1. **Scrim** (scrim_fix.h:124: X, instances 1, count 100 or over) splits
+   bands B and C by count and by instances.
+2. **The distance fix** (Sean's ini: panel_distance 0.65) is not
+   repeat-stable on a panel-sized eye draw of 64 or under. It learns
+   compositeCb on the first such draw and overrides on later ones,
+   from VsCb0 and the cb shadow, which the key does not hold.
+
+Both became one per-draw exclusion, "open": the full path would ask
+scrim and scrim's PsSrv0 cache cannot decline, or the distance fix is
+on and a band A eye draw's PsSrv0 is not known to be non-panel.
+
+Everything else that splits a band is already a term or armed:
+- wake pulse's exact counts sit behind the wake-surface term;
+- loader 30 is armed on loader frames;
+- the body-cull counts are armed;
+- the marker captures are armed;
+- weapon motion is the weapon term;
+- planets are the planet terms;
+- holo-motion runs only in term paths.
+
+**Bands as built:**
+- A: count 7-64;
+- B: count 65-10000, except 240;
+- C: count over 10000, while the nomination is a no-op for this draw
+  (glare off, no VsCb0, or VsCb0 already nominated).
+
+The ticket records its band, and a would-take draw must be in the same
+band. Excluded, first that applies:
+1. count 6 or under;
+2. count over 10000 with the nomination acting;
+3. count 240;
+4. no instances;
+5. open.
+
+The refusal order is: no ticket, key moved, the exclusions, band
+changed, dynamic, armed, not certified.
+
+**Rig:** aa_off_test, 389 checks. **Worst-case lengths:** 1117, 1010
+and 1129 characters.
+
+A risk the comparison will show: weaponMotionWants reads
+`g.sourceFrame == g.frame`, which can flip mid-frame and is not in the
+key.
+
+**Phase 1d flown (2026-10-27, Steam log `edvr_gfx_20261027_191314.log`,
+build 1de66d63; same rig).** Loaded in docked at Cranfield at 19:15:10.
+AA was on, then F7 off from 19:15:59 to 19:17:13, then on.
+
+| Window | Eye | Off-screen | All owner X draws | Compared | Mismatches |
+|---|---|---|---|---|---|
+| 12600 (AA on) | 59.7% | 28.8% | 44% | 21.1M | 0 |
+| 14400 (AA on) | 57.4% | 37.4% | 46.5% | 21.4M | 0 |
+| 16200 (mostly AA off) | 58.1% | 45.7% | 51% | 22.4M | 0 |
+
+About 65M would-take draws were compared across the three windows,
+with no mismatch. The weapon risk did not appear.
+
+**Refusals now,** per window as a share of owner X draws:
+
+| Reason | Share | Note |
+|---|---|---|
+| band changed | about 20% | 4.8-5.2k a frame |
+| no ticket | about 19% | |
+| dynamic | 3-10% | camera watch about 5% with AA on |
+| count 6 or under | about 5% | |
+| key moved | about 3% | |
+| open | about 2.5% | |
+
+**The no-ticket draws.** Draws of 6 or under (1.5-1.8k a frame eye,
+about 1.2k off-screen) and open draws (about 0.9k eye, 1.0-1.2k
+off-screen) make up nearly all of them. The scrim's one-entry PsSrv0
+cache thrashes when draws alternate views.
+
+**Band changed is now the largest refusal.** The same key alternates
+between meshes of 64 or under and over 64. The bands exist only
+because a band A draw asks `srv0IsPanelSized`, the PsSrv0-keyed panel
+memo, and a band B draw does not. When that memo already answers "not
+panel" for the bound PsSrv0, a band A draw takes exactly band B's path,
+and the two bands can share a ticket. The step-0 grep found nothing
+else that distinguishes A from B: loader 30 is armed, wake counts are
+behind a term, and scrim is open per draw.
+
+**Next.** Merge bands A and B whenever the PsSrv0 panel memo reads "not
+panel". That is exact by the grep, and the comparison verifies it. It
+should take most of the 20%, to about 65-70%. Then Phase 2: actually
+skip. The comparison keeps running on rotating unsampled frames, and
+the step clock gets the `fast` step. That is the first measurement of
+the real saving.
+
+**Phase 2 built (2026-10-27), NOT FLOWN. The first behaviour change.**
+
+**The band merge.** Bands A and B share a ticket when
+`srv0KnownNotPanel` holds: PsSrv0 unbound, or the panel memo's
+generation is current and its answer is "not panel".
+
+**Skipping.** A would-take draw takes the fast path, except on verify
+frames: one frame in 16, rotating, never a draw-sample frame. There it
+takes the full path and is compared.
+
+**The fast block** (X thunk, vscreen.cpp ~5702-5739, after the
+prologue, the clock and the stashes):
+1. noteFast;
+2. particleRollFreeClear;
+3. glareClamp, curve, introCurve and the three t_ flags cleared;
+4. bindAuditSeq, with the audit on its 1024th;
+5. depthProbeNoteDraw;
+6. by class:
+   - eye: the eye count, the depth probe's eye note, the two ui_depth
+     classifiers and the crisp-HUD note;
+   - off-screen: screenMotionSource when live, then the
+     scene-candidate tally;
+7. engineVelocityBeforeDraw and NoteSkinDraw;
+8. the `fast` mark;
+9. the game's draw, in GpuCensusAlteredScope (kNone, unlayered) inside
+   the whole clock's realCall.
+
+Four additions came from the implementation:
+- **The ui_depth classifiers are called, not assumed.** A D, I or N
+  draw at the same key can leave their outputs set, and
+  forwardWithVerdict reads the pendings ungated. The draw takes the
+  fast path only when both memos hit (`uiDepthEyeDeclineHeld`); a miss
+  is the refusal "ui depth memo missed".
+- **screenMotionSource on off-screen draws,** because the full path's
+  off-screen branch makes that call.
+- **A closed draw gate is a refusal,** because the full path returns
+  before the eye count.
+- **An unbound PsSrv0 counts as "not panel"** for the merge.
+
+**Lines.** `draw fast path:` gives:
+- fast-path draws a frame and their share by class;
+- the verify frames' would-take share, compared draws and mismatches;
+- the refusals.
+
+The no-ticket and args sketches are fed on verify frames only.
+
+**Rig:** aa_off_test, 427 checks, with the fast block pinned statement
+by statement, and billboard_rollfree_test R8 updated.
+
+**Flight:** parked at the Cranfield pad, AA on for at least 2 minutes,
+nothing building, then a minute looking around the cockpit, settlement
+and HUD. Watch for anything visibly wrong:
+- HUD, panels, holo, terminals;
+- sky, shadows, foliage, ghosting.
+
+Then F7 AA off for a minute, and F7 back on.
+
+What to read:
+- `draw fast path:`: the fast share, and mismatches at 0;
+- the step lines: `fast` and GAME against the other steps, whose calls
+  should fall by the fast share;
+- EDVR's step sum and the old `draw hook CPU:` against the memo flight
+  (log 122848: sum 3.53, old line 3.87-4.26), allowing for the
+  instrument's own cost.
+
+**Phase 2 flown (2026-10-27, Steam log `edvr_gfx_20261027_200348.log`,
+build 81ec108c; same rig).** Loaded in docked at Cranfield at 20:05:48,
+AA on, looked around, then F7 off from 20:12:36 to 20:13:39. Sean saw
+nothing wrong.
+
+Another worktree's build ran beside the flight: 844 files, 20:06-20:10,
+mostly 20:08-20:09, plus a few at 20:12-20:13. So the clean timing
+windows are 30600-36000 (20:10:35-20:12:15). The counts below hold in
+every window.
+
+**The fast path took:**
+- eye draws: 65-67%;
+- off-screen draws: 41-55% (up to 65% with AA off);
+- all owner X draws: about 61% with AA on and 66% with AA off.
+
+The band merge cut "band changed" from about 20% to about 3.5%.
+
+**Verify frames:** 105-106 a window, 0.9-2.3M would-take draws compared
+a window, 0 mismatches in every window (about 25M over the flight).
+
+**Steps, clean windows' mean against the memo flight (ms a frame):**
+
+| Steps | Phase 2 | Memo flight |
+|---|---|---|
+| the v:* steps together | 0.63 | 1.40 |
+| f:scopes + f:ui-layer + f:after-ui + f:before | 0.38 | 0.70 |
+| p:screen | 0.056 | 0.182 |
+| the new `fast` step (about 15.6k draws, about 15 ns each) | 0.23 | - |
+| tail, which now carries the ticket update and capture | 0.18 | 0.09 |
+| engine-vel (carries the after-verdict capture) | 0.33 | 0.32 |
+| EDVR's step sum | 2.40 | 3.53 |
+| old line | 2.35-3.18 | 3.87-4.26 |
+
+**Why the net saving is not yet established:**
+- The clean windows had 20-31k owner X draws a frame, against about 35k
+  in the memo flight. Per draw, the step sum is about 91 ns against
+  101, roughly 10%.
+- The fast-path decision runs before the DrawClock is built, so neither
+  the step clock nor the old line measures it.
+- Full-path draws now carry the mechanism's own capture, in the tail
+  and engine-vel steps. They are also the heavier, non-repeat draws:
+  about 155 ns each, against the memo flight's 101 average.
+- Frame rate (64-76 fps against about 60) and the native benchmark's
+  cpu p50 (8.6-9.6 ms against 6.5-10.1) move with the scene. A
+  comparison across flights cannot separate the fast path's effect
+  from the draw count.
+
+What is established:
+- the mechanism is exact: 0 mismatches over about 155M would-take
+  draws in five flights;
+- it takes about 61% of owner X draws;
+- it costs about 15 ns a fast draw;
+- the classifier steps it skips fall by 45-70%.
+
+**Next (Phase 2b): an A/B inside one flight.**
+- Alternate 1800-frame windows: fast path ON (as now), then OFF (the
+  plain full path, with no decision, capture or tickets at all), and so
+  on. That is automatic, with no key, so one parked leg gives paired
+  windows at the same scene.
+- Build the DrawClock at the X thunk's start, so the old line covers
+  the decision too.
+- Log each window's arm with its old line, step sum, fps, native cpu
+  p50 and draws a frame.
+- The saving is the difference between adjacent windows at matched
+  draw counts.
+
+**Phase 2b built (2026-10-27); flown 2026-10-28, in the next entry.**
+- **Arms.** The window after the edge at frame E is ON when E / 1800 is
+  even: the first window is ON, the next OFF, and so on. It is set at
+  perf_monitor.cpp:1300, after that edge's A/B line, so each window
+  reports the arm it ran under. The ticket is dropped on each switch to
+  ON.
+- **OFF has no mechanism.** The decision is behind
+  `g_fastPathOn && owner`. The after-verdict capture and the end of the
+  thunk run only after a decision. The forwardWithVerdict and owner-block
+  notes, the after-UI stamp reads and the celestial and orbit matches all
+  test the arm. The rig pins every shadow call behind it.
+- **The DrawClock** is built at the X thunk's start (vscreen.cpp:5684),
+  so the old line and `pre` now cover the prologue and the decision.
+- **The A/B line,** `draw fast path A/B:`, gives per window:
+  - the arm;
+  - frames, seconds and fps;
+  - X draws a frame from the step clock (both arms), and the exact count
+    with the fast share (ON only);
+  - the old line's mean;
+  - the step clock's EDVR sum;
+  - the native application CPU p50 (`completion.applicationMs`). That
+    misses the post-submit phase, but the draw hooks are before submit.
+- **Rig:** aa_off_test, 465 checks.
+
+Flight: parked at the Cranfield pad with AA on, head still, for at least
+5 minutes, so there are four or five ON/OFF pairs. Nothing building. Then
+read the A/B lines in order and compare each OFF window with its
+neighbours at matched draw counts.
+
+**The Phase 2 flight should show:**
+- the `fast` step's calls and cost;
+- EDVR's sum down by the predicted amount;
+- the other steps' calls down by the same share;
+- ui_depth's world-screen and hologram counts, the engine motion line
+  and the depth-probe tallies unchanged;
+- no visual change: HUD, holo, terminals, weapons, sky.
+
+### 2026-10-28 -- Phase 2b flown: the fast path saves nothing in the X hook
+
+Flown 2026-10-28 05:17-05:25 on Steam, parked at the Cranfield pad, AA
+on (temporal AA line: full-frame NGX, 4032x4034). Build e261adc6
+(`edvr_log.py --expect-build HEAD` matches), log
+`edvr_gfx_20261028_051715.log`. No build ran: no build output in any
+checkout was written between 05:17 and 05:26.
+
+The first eight windows are the arrival, at 4-21k draws a frame, with
+tickets still warming (2.1% and 47.7% fast). Windows 18000-36000 are
+steady at 26.0-26.3k draws. The last window (37800, ON) has no OFF
+window after it, and its fps fell to 62.3 and app CPU p50 rose to 9.16
+ms as the session ended; it is left out of the pairs.
+
+| Window | Arm | Draws | Fast | fps | Old line | Step sum | App CPU p50 |
+|---|---|---|---|---|---|---|---|
+| 18000 | OFF | 26094 | - | 67.0 | 3.291 | 2.941 | 8.413 |
+| 19800 | ON | 26348 | 60.8% | 66.3 | 3.396 | 2.966 | 8.428 |
+| 21600 | OFF | 26058 | - | 66.7 | 3.330 | 2.871 | 8.380 |
+| 23400 | ON | 26083 | 61.0% | 68.1 | 3.278 | 2.932 | 8.224 |
+| 25200 | OFF | 26059 | - | 68.8 | 3.377 | 2.976 | 8.283 |
+| 27000 | ON | 25999 | 61.5% | 69.5 | 3.454 | 0.476 | 7.982 |
+| 28800 | OFF | 26085 | - | 68.4 | 3.228 | 2.980 | 8.334 |
+| 30600 | ON | 25989 | 61.7% | 69.4 | 3.249 | 3.037 | 8.014 |
+| 32400 | OFF | 26157 | - | 69.0 | 3.258 | 3.344 | 8.218 |
+| 34200 | ON | 25943 | 61.6% | 69.6 | 3.253 | 3.044 | 8.056 |
+| 36000 | OFF | 26069 | - | 68.7 | 3.388 | 3.053 | 8.443 |
+
+**Each ON window against the mean of the OFF windows either side:**
+- **Old line:** +0.086, -0.076, +0.152, +0.006, -0.070 ms; mean +0.02,
+  standard error about 0.05. A 0.2 ms saving would read four standard
+  errors below this. The old line takes four clock reads on each
+  clocked draw in both arms, so it is the fair comparison.
+- **App CPU p50:** +0.03, -0.11, -0.33, -0.26, -0.28 ms; mean -0.19.
+  This is not robust: pairing the last window with its one neighbour
+  (9.16 against 8.44) brings the mean to -0.04. It is not in the X
+  hook's own time, which the old line rules out.
+- **fps:** -0.55, +0.35, +0.90, +0.70, +0.75; mean +0.4.
+- **Mismatches:** 0 in every window, about 12M compared this flight and
+  about 167M over six flights.
+
+**Why, from the steps** (four clean ON windows against six OFF, ms a
+frame):
+- `pre` 0.41 -> 0.77: the decision, about 13 ns on every one of 27.4k
+  draws;
+- `fast` 0.25: about 15 ns on each of 17k taken draws;
+- `tail` 0.10 -> 0.19: the ticket update and capture;
+- every other step except GAME, the chain the fast path skips: 2.33 ->
+  1.57.
+
+The chain fell by 0.76 ms and the mechanism added about 0.73. The
+chain cost about 45 ns on each draw the fast path took, against an 85
+ns average: it takes the draws whose classifiers were already cheap,
+because the memos hit on them.
+
+**The step sum cannot settle an A/B between these arms.** An OFF draw
+carries 24.7 marks and an ON draw 11.7, and the clock takes off a
+calibrated 16 ns a mark. A 1 ns error in that calibration moves the
+ON-OFF difference by about 0.36 ms a frame. In window 27000 it read 32
+ns and zeroed most steps (step sum 0.476). The steps show where the
+time went; the old line shows how much.
+
+ruled out: the repeat-draw fast path as a CPU lever, because the
+in-flight A/B shows the X hook's time unchanged (+0.02 ms, standard
+error about 0.05, five bracketed pairs at 26k draws; -0.013 ms trimmed,
+below); its decision and fast block cost what the skipped chain cost on
+the draws it takes. A build stripped of its instruments is bounded at
+about 0.1-0.3 ms (inferred, below), not worth a ticket that tracks about
+25 terms across nine or more files.
+
+**Independent review (2026-10-28, a second reader of the code and the
+log).** It agrees on the windows, on the old line as the fair measure,
+and on retirement. Each clocked draw takes four clock reads in both
+arms (draw_step_clock.h:212-266). The sampled frames are frameNo % 16 ==
+0 (perf_monitor.cpp:1316) and are never verify frames
+(draw_fast_path_shadow.h:425). Corrections to this entry:
+- **The old line's mean is driven by single preempted samples.** One
+  clocked draw scaled by 64 makes a 12-18 ms frame, and ON had the three
+  largest (12.9, 18.4, 11.9 ms). With each window's largest sample
+  dropped, the paired difference is -0.013 ms, standard error about
+  0.027 (95%: about -0.09 to +0.06). Future A/Bs report the old line's
+  median or trimmed mean.
+- **Only `pre`, `fast` and `tail` are robust step deltas,** at one mark a
+  draw in both arms. The chain figures above (2.33 -> 1.57, and 45
+  against 85 ns a draw) carry the floor error too: a chain draw carries
+  about 20 marks, so 1 ns of floor moves them about 20 ns a draw.
+- **The mechanism's capture is counted inside the chain.**
+  `shadowAfterVerdict` runs after the kVRest mark (vscreen.cpp:5764), so
+  its cost lands in the next step: engine-vel went from about 10 to 29
+  ns a call. "Added about 0.73" understates the mechanism.
+- **The bound on a stripped build is inferred.** The instrument tallies
+  are worth about 0.03-0.06 ms. How the remainder splits between capture
+  and the dearer draws left on the full path is unknown.
+- **Where the time sits now:** about 10.5k non-repeat draws a frame at
+  roughly 170-190 ns each, about 2 ms. It is still spread: the largest
+  steps are f:before 0.21, v:ui-depth 0.13 and v:fixes 0.12 ms. So
+  extending any one memo is bounded at about 0.1-0.2 ms.
+
+**Next:** retire Phases 1-2b (asked, not done): revert the src and tools
+changes of a7ff834d..e261adc6. Keep the ui_depth memo and trims A-E,
+revert trim F with its verification, and remove the step clock with the
+shadow and A/B lines. No further flight for the fast path. This closes
+the per-draw AA-on arc. The levers still open are the draw count and
+making the always-on instruments armed-only. Before more CPU work, check
+whether this rig is CPU-bound at 68 fps.
+
+### 2026-10-28 -- Retired: the fast path, the step clock and trim F
+
+Done as the review above recommends, at Sean's word. Full build green
+(aa_off_test 76 checks, 0 failed; receipt 8b7ed89a). Not flown.
+- **The fast path (Phases 1-2b).** src and tools are back at 12c230c3:
+  - the three headers;
+  - the vscreen.cpp glue and fast block;
+  - the predicate exports in object_probe, optimized_station,
+    screen_motion, ui_depth, ui_layer and wake_pulse;
+  - the rig checks.
+- **The step clock (af9c429b).** draw_step_clock.h is gone, and the
+  thunks are back to the DrawClock they had before it. The "draw hook
+  CPU" line keeps its meaning: one frame in 16, every 64th draw,
+  forwarded game draw time excluded. 2b's move of the X thunk's clock
+  goes too, so the line no longer covers the prologue or a fast-path
+  decision. Removed with it: the "by step" lines and the mark
+  calibration.
+- **Trim F (036e235f), with its verification.** ui_family_memo.h,
+  `uiLayerFamilyMemoised`, `g_uiLayerFamilyEpoch` and the "ui layer
+  family cache" line are gone. The family decision is plain
+  `uiLayerFamilyOf` again.
+- **Kept, byte for byte:**
+  - trims A-E (engine_velocity, remlok_fix, scrim_fix, and their call
+    sites);
+  - the ui_depth memo (classifier_memo.h, the classifier epoch,
+    `bindingEyeKeyGeneration`).
+
+This closes the per-draw AA-on arc. The memo's -0.21 ms is what it
+bought.

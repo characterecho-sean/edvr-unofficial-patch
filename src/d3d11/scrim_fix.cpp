@@ -18,6 +18,7 @@ namespace edvr {
 // draw, and the build has no /GL to fold a cross-TU getter.
 namespace detail {
 bool g_scrimOn = false;
+MetadataCache g_washMetadata;   // declared in scrim_fix.h: scrimWashSrv0Declines reads it inline
 }  // namespace detail
 
 namespace {
@@ -84,14 +85,11 @@ uint64_t                  g_applied = 0;
 // generation is therefore a bounded identity: the cache never dereferences or
 // owns the pointer, and pointer reuse cannot inherit an older classification.
 // Failed resolves stay unknown and are retried; only successful answers cache.
-struct MetadataCache {
-    void* view = nullptr;
-    uint32_t generation = 0;
-    bool known = false;
-    bool matches = false;
-};
+// The struct and the slot-0 entry are in scrim_fix.h (detail::MetadataCache, detail::g_washMetadata): the draw path reads the
+// slot-0 entry inline to skip the call it would decline from the cache.
+using detail::MetadataCache;
+using detail::g_washMetadata;
 
-MetadataCache g_washMetadata;
 MetadataCache g_uiMetadata;
 
 #ifdef EDVR_SCRIM_METADATA_TEST

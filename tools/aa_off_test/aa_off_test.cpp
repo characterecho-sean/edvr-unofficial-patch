@@ -7,9 +7,12 @@
 //   Cut C: map_wait.h's call counts (exact) and sampled ticks (scaled at take), and map_wait_sample.h's sampler.
 //   Cut D: gpu_frame_timing.h's gpuFrameCommandIfLive, with a counting stub for the out-of-line gpuFrameCommand:
 //          with the instrument off, no call is made; on, every call is made.
+//   Cut E: classifier_memo.h (built 2026-10-27, the ui_depth eye-draw memo): a call hits only when something is stored, both halves
+//          of its key equal the stored key and the stored exit is a plain decline; a moved generation or epoch is a miss.
 //
 // Exit codes: 0 pass, 1 a check failed, 2 usage. --dry-run touches nothing.
 #include "../../src/common/gpu_disjoint_clock.h"
+#include "../../src/d3d11/classifier_memo.h"
 #include "../../src/d3d11/draw_fast_path.h"
 #include "../../src/d3d11/frame_span_tile.h"
 #include "../../src/d3d11/gpu_frame_timing.h"
@@ -22,6 +25,7 @@ static_assert(edvr::kFrameSpanSlots * 2u <= edvr::DisjointClock::kLeases,
 
 #include <atomic>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 
@@ -302,6 +306,73 @@ void testOverlayLine() {
     check(std::strcmp(field, "frame work span: completed 5400, skipped 3, invalid 2, last 4.257 ms") == 0, "census field: counts and the last pair in ms");
 }
 
+// ---- Cut E: classifier_memo.h -------------------------------------------------------------------------------------------------------
+
+// A hit needs something stored, both halves of the key equal AND the stored exit to be a plain decline; every other call is a miss.
+void testMemoHit() {
+    using namespace edvr::classifiermemo;
+    Memo m;
+    const Key k{5, 7};
+    check(!hit(m, k), "memo: nothing stored is a miss");
+    check(!hit(m, Key{0, 0}), "memo: nothing stored is a miss even for the zero key");
+    store(m, k, Exit::kPlainDecline);
+    check(hit(m, k), "memo: both halves equal after a plain decline is a hit");
+    check(!hit(m, Key{6, 7}), "memo: a moved generation is a miss");
+    check(!hit(m, Key{5, 8}), "memo: a moved epoch is a miss");
+    check(!hit(m, Key{6, 8}), "memo: both moved is a miss");
+    check(!hit(m, Key{4, 7}) && !hit(m, Key{5, 6}), "memo: a key that moved backwards is a miss as well, never a hit");
+    check(!hit(m, Key{0, 0}), "memo: the zero key does not match a stored one");
+    // The stored exit decides what an equal key means.
+    store(m, k, Exit::kOther);
+    check(!hit(m, k), "memo: an equal key after an exit that was not a plain decline is a miss");
+    check(!hit(m, Key{6, 7}) && !hit(m, Key{5, 8}), "memo: a moved key after a non-plain exit is a miss as well");
+    store(m, k, Exit::kPlainDecline);
+    check(hit(m, k), "memo: storing the plain decline again restores the hit");
+    store(m, Key{9, 9}, Exit::kPlainDecline);
+    check(!hit(m, k) && hit(m, Key{9, 9}), "memo: a later store replaces the earlier key");
+    invalidate(m);
+    check(!hit(m, Key{9, 9}) && !m.stored, "memo: invalidate forgets the answer, so the same key misses");
+    // Both classifiers keep a memo of their own: storing in one leaves the other alone.
+    Memo eye, holo;
+    store(eye, k, Exit::kPlainDecline);
+    check(!hit(holo, k) && hit(eye, k), "memo: two memos are independent");
+    // Over a grid of keys against one stored key, exactly the stored key after a plain decline hits.
+    unsigned hits = 0;
+    for (uint32_t g = 3; g < 8; ++g) {
+        for (uint32_t e = 3; e < 8; ++e) {
+            for (int plain = 0; plain < 2; ++plain) {
+                Memo c;
+                store(c, Key{5, 5}, plain ? Exit::kPlainDecline : Exit::kOther);
+                if (hit(c, Key{g, e})) ++hits;
+            }
+        }
+    }
+    check(hits == 1, "memo: over a grid of keys and exits exactly one cell is a hit");
+}
+
+// A model of a run of draws through the memo, as uiDepthOnEyeDraw drives it: key, hit test, and on a miss the full run's exit stored.
+void testMemoRun() {
+    using namespace edvr::classifiermemo;
+    Memo m;
+    unsigned fullRuns = 0;
+    const auto call = [&](Key now, Exit exitIfRun) {
+        if (hit(m, now)) return true;
+        ++fullRuns;
+        store(m, now, exitIfRun);
+        return false;
+    };
+    const Key a{10, 3}, b{11, 3}, c{11, 4};
+    check(!call(a, Exit::kPlainDecline), "run: the first call finds nothing stored and runs in full");
+    check(call(a, Exit::kPlainDecline) && call(a, Exit::kPlainDecline), "run: the repeats hit");
+    check(!call(b, Exit::kOther), "run: a draw whose bindings moved runs in full, and its exit is not a plain decline");
+    check(!call(b, Exit::kOther), "run: its repeat finds the key but not a plain decline, so it runs in full again");
+    check(!call(a, Exit::kPlainDecline), "run: back to the plain draw, the generation has moved");
+    check(call(a, Exit::kPlainDecline), "run: ...and it hits again");
+    check(!call(c, Exit::kPlainDecline), "run: a bump of both runs in full");
+    check(!call(Key{11, 5}, Exit::kPlainDecline), "run: an epoch move alone runs in full");
+    check(fullRuns == 6, "run: of nine calls three hit and six ran in full");
+}
+
 void usage() {
     std::puts("usage: aa_off_test --self-test | --dry-run");
 }
@@ -327,6 +398,8 @@ int main(int argc, char** argv) {
     testGpuTimeTile();
     testFrameWorkSlack();
     testOverlayLine();
+    testMemoHit();
+    testMemoRun();
     std::printf("aa_off_test: %d checks, %d failed\n", g_checks, g_failed);
     return g_failed ? 1 : 0;
 }

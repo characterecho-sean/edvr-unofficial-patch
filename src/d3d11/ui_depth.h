@@ -128,6 +128,8 @@ bool uiDepthIsExcluded(uint64_t vsHash);
 // pixel-stage slot 0..3) or a named direct family, with a depth target
 // bound that is the scene pair's. True means the draw should write its
 // coverage depth; the caller reissues it after the original draw.
+// The plain decline (no family, no composite) is memoised inside (classifier_memo.h), keyed on the bindings and the classifier's
+// own state, so the caller sees the same outputs and counts as before.
 bool uiDepthOnEyeDraw(ID3D11DeviceContext* ctx, const HoloDraw& draw = {});
 
 // The generic, contribution-based hologram/icon depth pass: a family-

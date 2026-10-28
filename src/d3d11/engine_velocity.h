@@ -98,10 +98,12 @@ void engineVelocityRememberPs(ID3D11PixelShader*, uint64_t hash, const void* byt
                               bool linked);
 
 // The per-draw hook (vscreen's draw hooks, owner context, before the real
-// draw). The inline half is a handful of compares: the slow half runs only
-// when the game has rebound a shader, a render target, the depth target or
-// the blend state, bound another pool view or scene constant buffer, or
-// written a watched source, since the last look.
+// draw). The inline half is nine compares (the shadow's Vs, Ps, Rtv0, Dsv0
+// and Blend generations; the VsSrv33 and VsCb1 pointers; the eye; and, while
+// the overlay guard holds PS t3, that slot's generation) and the sampling
+// counter: the slow half runs only when the game has rebound a shader, a
+// render target, the depth target or the blend state, bound another pool view
+// or scene constant buffer, or written a watched source, since the last look.
 namespace engine_velocity_detail {
 struct DrawCache {
     uint32_t vs = 0, ps = 0, rtv = 0, dsv = 0, blend = 0;
@@ -135,6 +137,9 @@ extern uint32_t g_psShadowProbeN;   // owner thread; the header's sampling count
 // shader absent from the shadow; otherwise it adopts our substitution as
 // game state and destroys restoration ownership.
 void psShadowProbe(ID3D11DeviceContext*);
+// The sampled draw's half of the probe (the header's one-in-64 counter has already fired): runs the probe only when the bound vertex
+// shader is a pool family's or the bound pixel shader a keyed or self-marking one. Out of line, with the two table scans.
+void psShadowProbeSampled(ID3D11DeviceContext*);
 void noteResourceMapped(const ID3D11Resource*, void* data, int mapType) noexcept;
 void noteResourceWrite(const ID3D11Resource*) noexcept;
 constexpr unsigned kPrimaryPoolResources=16;
@@ -171,16 +176,11 @@ inline void engineVelocityBeforeDraw(ID3D11DeviceContext* ctx, bool rtv0Eye) {
         (cache.guarded && cache.srv3 != bindingGeneration(BindSlot::PsSrv3))) {
         beforeDrawSlow(ctx, rtv0Eye);
         slow = true;
-    } else if (((++g_psShadowProbeN) & 63u) == 0u &&
-               (engine_velocity_family::familyOfVs(bindingShaderHash(BindSlot::Vs)) >= 0 ||
-                engine_velocity_family::anyFamilyPs(bindingShaderHash(BindSlot::Ps)))) {
-        // One pool-context draw in 64 checks for an unobserved game bind.
-        // A live shader different from the shadow is normally our installed
-        // substitution, so the probe first excludes its owned identity. The
-        // 162120 capture's live/shadow differences all reproduce EDVR patch
-        // hashes; they are not evidence of a real hook bypass. A different
-        // registered game shader heals the shadow and takes the slow half.
-        psShadowProbe(ctx);
+    } else if (((++g_psShadowProbeN) & 63u) == 0u) {
+        // One pool-context draw in 64 checks for an unobserved game bind: the
+        // out-of-line half does the family scans and the probe, so this gate
+        // stays small enough to inline at its call sites.
+        psShadowProbeSampled(ctx);
     }
     if (cache.family >= 0) ++familyDraws[cache.family];
     if (cache.guarded && !slow) ++g_guardedFast;   // a guarded draw the cache let through: the slow half counts its own

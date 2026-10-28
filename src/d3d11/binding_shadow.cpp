@@ -13,11 +13,26 @@ namespace edvr {
 // written only through the setters below.
 namespace detail {
 BindingSlot g_bindingSlots[static_cast<size_t>(BindSlot::Count)];
+uint32_t g_bindingEyeKeyGen = 0;
 }  // namespace detail
 
 namespace {
 
 using Slot = detail::BindingSlot;
+
+// The eight slots the eye draws' aggregate generation follows (bindingEyeKeyGeneration, binding_shadow.h): the vertex and pixel
+// shaders, pixel SRV 0..3, render target 0 and the depth view. The set is the one the binding-repeat flight measured. A mask over
+// the slot's index, so a setter's test is one AND; every other slot (the constant buffers, the compute slots, the pool, the
+// blend) leaves the aggregate alone.
+constexpr uint32_t slotBit(BindSlot s) { return 1u << static_cast<uint32_t>(s); }
+constexpr uint32_t kEyeKeySlots = slotBit(BindSlot::Vs) | slotBit(BindSlot::Ps) | slotBit(BindSlot::PsSrv0) |
+                                  slotBit(BindSlot::PsSrv1) | slotBit(BindSlot::PsSrv2) | slotBit(BindSlot::PsSrv3) |
+                                  slotBit(BindSlot::Rtv0) | slotBit(BindSlot::Dsv0);
+static_assert(static_cast<uint32_t>(BindSlot::Count) <= 32, "the eye key's slot mask is one word");
+
+void noteEyeKeySlot(BindSlot s) {
+    if (kEyeKeySlots & slotBit(s)) ++detail::g_bindingEyeKeyGen;
+}
 
 // This module's own budget, not shared with any fix.
 //
@@ -90,12 +105,14 @@ void bindingSet(BindSlot slot, void* ptr) {
     Slot& s = slotOf(slot);
     s.ptr = ptr;
     ++s.gen;
+    noteEyeKeySlot(slot);
 }
 
 void bindingInvalidate(BindSlot slot) {
     Slot& s = slotOf(slot);
     s.ptr = nullptr;
     ++s.gen;
+    noteEyeKeySlot(slot);
 }
 
 void bindingSetShader(BindSlot slot, void* ptr, uint64_t hash) {
@@ -103,6 +120,7 @@ void bindingSetShader(BindSlot slot, void* ptr, uint64_t hash) {
     s.ptr = ptr;
     s.hash = hash;
     ++s.gen;
+    noteEyeKeySlot(slot);
 }
 
 void bindingForgetAll() {
@@ -111,6 +129,7 @@ void bindingForgetAll() {
         s.hash = 0;
         ++s.gen;
     }
+    ++detail::g_bindingEyeKeyGen;   // every slot moved, so the aggregate does, once
 }
 
 void bindingFrameBoundary() {
@@ -119,6 +138,7 @@ void bindingFrameBoundary() {
     // fix everything after the first Present, measured at 1800 overrides before
     // the change and 1 after.
     for (Slot& s : detail::g_bindingSlots) ++s.gen;
+    ++detail::g_bindingEyeKeyGen;   // ...and the aggregate, so a memo keyed on it cannot outlive a frame either
 }
 
 namespace {

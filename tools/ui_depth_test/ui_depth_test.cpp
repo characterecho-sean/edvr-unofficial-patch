@@ -50,6 +50,7 @@ float Config::getFloat(const char*, float) const { std::abort(); }
 std::string Config::getString(const char*, const char*) const { std::abort(); }
 void* bindingGet(BindSlot) { std::abort(); }
 uint32_t bindingGeneration(BindSlot) { std::abort(); }
+uint32_t bindingEyeKeyGeneration() { std::abort(); }   // the eye-draw memo's key (2026-10-27): read only after the classifier's own on test
 uint64_t bindingShaderHash(BindSlot) { std::abort(); }
 bool bindingResolve(void*, ResourceInfo*) { std::abort(); }
 bool bindingResolveResource(void*, ResourceInfo*) { std::abort(); }

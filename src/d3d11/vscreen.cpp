@@ -2588,7 +2588,9 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     // The RemLok overlay fix, after the probes so a census taken while it
     // runs still records the draw the game submitted. The shape is asked
     // first, inline (remlok_fix.h): any other shape comes back kNone.
-    remlokOnFootDiagnose(kind, count, instances);   // F26: the on-foot visor diagnostic (read only; VS B553BB479B7C0B97 only)
+    // F26: the on-foot visor diagnostic (read only; VS B553BB479B7C0B97 only). The vertex shader is asked inline first: the call returns
+    // at once for any other, and was made on every eye draw.
+    if (remlokOnFootVisorVsBound()) remlokOnFootDiagnose(kind, count, instances);
     if (remlokWantsDraws() && remlokOverlayShape(kind, count, instances)) {
         const RemlokAction a = remlokOnEyeDraw(kind, count, instances);
         if (a == RemlokAction::kHide) return DrawVerdict::kSkip;
@@ -2611,8 +2613,10 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
 
     // The loader dialog's dimming wash, recognised by what it samples -- and
     // first by its shape, inline (scrim_fix.h), which turns away the quads
-    // and small draws before the call.
-    if (scrimWantsDraws() && scrimWashShape(kind, count, instances) &&
+    // and small draws before the call, and then by its slot-0 cache's decline,
+    // inline too: most meshes bind a texture that cache already knows is not
+    // the wash's, and the call would only have said so.
+    if (scrimWantsDraws() && scrimWashShape(kind, count, instances) && !scrimWashSrv0Declines() &&
         scrimOnEyeDraw(kind, count, instances)) {
         return DrawVerdict::kScrim;
     }
@@ -5359,10 +5363,11 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
     // relaxed load of a zero.
     const bool bodyCull = nativeOnFootBodyCullWanted() && self == g_state->ownerCtx &&
                           nativeOnFootBodyCullBegin(self, perInstance, instances);
-    // Engine-record velocity (with fix.temporal_aa): four generation
-    // compares; the pool families' substituted shaders and MRT6 are bound
-    // only when the game has rebound something since the last look. After the
-    // verdict, which refreshes rtv0Eye; a draw a verdict claims is left alone.
+    // Engine-record velocity (with fix.temporal_aa): nine compares (the Vs, Ps,
+    // Rtv0, Dsv0 and Blend generations, the VsSrv33 and VsCb1 pointers, the eye
+    // and the guarded SRV3); the pool families' substituted shaders and MRT6 are
+    // bound only when the game has rebound something since the last look. After
+    // the verdict, which refreshes rtv0Eye; a draw a verdict claims is left alone.
     if (v == DrawVerdict::kNone && self == g_state->ownerCtx) {
         engineVelocityBeforeDraw(self, g_state->rtv0Eye);
         engineVelocityNoteSkinDraw(self, startInstance, instances);   // F2: a skinned family's draw lists the instance entries it reads
