@@ -25,6 +25,9 @@
 //          and the class change; the first five named; the certified set; the window line's text, its "-" cases and its worst-case length;
 //          and the source's wiring (the gate's list and the subscriber set agree term for term, the shadow sits after the flat and world-route
 //          returns, and adds no return to the draw path).
+//          Phase 1b to 1d (the same day): the no-ticket tally and its sketches, the census term from its effect, the args bands (A 7-64, B 65-10000 but 240, C
+//          above 10000 while the sun-glare nomination is a no-op), the per-draw "open" exclusion (the scrim and the panel distance fix), the ticket's band and
+//          `band changed`, and the text and worst-case length of the three window lines.
 //
 // Exit codes: 0 pass, 1 a check failed, 2 usage. --dry-run touches nothing.
 #include "../../src/common/gpu_disjoint_clock.h"
@@ -1468,18 +1471,19 @@ fsh::Key shadowKey(uint32_t bind, uint32_t classifier, uint32_t family) {
     return k;
 }
 
-// The class of draw the fast path would take: kind X, a count over 64 and up to 10000 but not 240, at least one instance.
+// The args bands (Phase 1d): kind X, a count of 7 or more but not 240, at least one instance; with no per-draw test open here.
 void testShadowArgsClass() {
-    check(!fsh::argsClass('X', 64, 1) && fsh::argsClass('X', 65, 1), "shadow args class: 64 is out and 65 is in");
+    check(!fsh::argsClass('X', 6, 1) && fsh::argsClass('X', 7, 1), "shadow args class: 6 is out and 7 is in");
+    check(fsh::argsClass('X', 64, 1) && fsh::argsClass('X', 65, 1), "shadow args class: 64 and 65 are both in (two bands now, not an edge)");
     check(fsh::argsClass('X', 239, 1) && !fsh::argsClass('X', 240, 1) && fsh::argsClass('X', 241, 1), "shadow args class: 240 (night vision) alone is out");
-    check(fsh::argsClass('X', 10000, 1) && !fsh::argsClass('X', 10001, 1), "shadow args class: 10000 is in and 10001 (the sun-glare nomination) is out");
+    check(fsh::argsClass('X', 10000, 1) && fsh::argsClass('X', 10001, 1), "shadow args class: 10000 and 10001 are both in (band C is admitted by the per-draw test)");
     check(!fsh::argsClass('X', 500, 0) && fsh::argsClass('X', 500, 1) && fsh::argsClass('X', 500, 64), "shadow args class: no instances is out, one or more is in");
     check(!fsh::argsClass('N', 500, 1) && !fsh::argsClass('D', 500, 1) && !fsh::argsClass('I', 500, 1) && !fsh::argsClass('Z', 500, 1),
           "shadow args class: only kind X");
-    check(!fsh::argsClass('X', 0, 1) && !fsh::argsClass('X', 6, 1) && !fsh::argsClass('X', 3, 1), "shadow args class: the quads and the small draws are out");
+    check(!fsh::argsClass('X', 0, 1) && !fsh::argsClass('X', 3, 1) && !fsh::argsClass('X', 6, 1), "shadow args class: the quads and the small draws are out");
     unsigned in = 0;
     for (uint32_t count = 0; count <= 12000; ++count) in += fsh::argsClass('X', count, 1) ? 1u : 0u;
-    check(in == 9935, "shadow args class: of the counts 0 to 12000 exactly 65 to 10000 except 240 are in");
+    check(in == 12001 - 7 - 1, "shadow args class: of the counts 0 to 12000 exactly 7 and above except 240 are in");
 }
 
 // What each stage of the eligibility test has gathered.
@@ -1492,6 +1496,7 @@ fsh::Verdict shadowJudge(bool ticket, bool keyEqual, bool args, uint32_t dyn, ui
     const fsh::Key now = shadowKey(5, 6, 7);
     t.ticket.valid = ticket;
     t.ticket.key = keyEqual ? now : shadowKey(5, 6, 8);
+    t.ticket.band = fsh::Band::kB;
     return t.judge(now, args, wanting, [&] { ++calls->dyn; return dyn; }, [&] { ++calls->armed; return armed; });
 }
 
@@ -1536,6 +1541,7 @@ void testShadowRefusalOrder() {
     fsh::Tracker t;
     t.ticket.valid = true;
     t.ticket.key = shadowKey(1, 1, 1);
+    t.ticket.band = fsh::Band::kB;
     ShadowCalls calls;
     const fsh::Verdict dv = t.judge(shadowKey(1, 1, 1), true, 0, [&] { ++calls.dyn; return (1u << fsh::kDynCrispPending) | (1u << fsh::kDynProbeChecks); },
                                     [&] { ++calls.armed; return 0u; });
@@ -1545,6 +1551,7 @@ void testShadowRefusalOrder() {
           "shadow refusal order: a dynamic refusal is counted under its first flag");
     t.ticket.valid = true;
     t.ticket.key = shadowKey(1, 1, 1);
+    t.ticket.band = fsh::Band::kB;
     const fsh::Verdict av = t.judge(shadowKey(1, 1, 1), true, 0, [] { return 0u; }, [] { return (1u << fsh::kArmPixel) | (1u << fsh::kArmLoaderFrame); });
     t.finish(av, fsh::Class::kOff, 0, true, shadowKey(1, 1, 1));
     check(av.reason == fsh::Reason::kArmed && t.count.armedBy[fsh::kArmPixel] == 1 && t.count.armedBy[fsh::kArmLoaderFrame] == 0,
@@ -1840,14 +1847,15 @@ void testShadowWiring() {
               contains(code, "voidfootprintEyeDraw(ID3D11DeviceContext*self,floatapplied,INTbaseVertex,UINTstartInstance){if(bindingShaderHash(BindSlot::Vs)!=0x5C36AF051B98B9F1ull"),
           "shadow wiring: the footprint instrument is certified because it acts only at the 2D screen's composite, and that vertex shader is one of the specials");
     {
-        // The panel distance and the curved screen are certified, not armed, because everything they act on is outside the args class (count over 64): the
-        // gates sit in the source where the certification says.
+        // The panel distance and the curved screen are certified, not armed. Both act through srv0IsPanelSized (false above 64 indices, a memo keyed on PsSrv0's
+        // generation at 64 or under); the curve's effects are outcome terms, and the distance fix, which is not repeat-stable on a panel-sized draw, is
+        // kept out by the "open" exclusion. The gates sit in the source where the certification says.
         const size_t armedAt = vscreen.find("inline uint32_t shadowArmedFlags(const State* s) {");
         const std::string armedBody = armedAt == std::string::npos ? std::string() : squeezedCode(vscreen.substr(armedAt, vscreen.find("\n}\n", armedAt) - armedAt));
         const std::string intro = squeezedCode(slurpFile("src/d3d11/intro_curve.cpp")), panel = squeezedCode(slurpFile("src/d3d11/intro_panel.cpp"));
         const std::string composite = "if(kind!='X'||count!=6||instances!=1)returnfalse;";
-        check(fsh::kArgsCountOver == 64 && !armedBody.empty() && !contains(armedBody, "panelCurveWants") && !contains(armedBody, "distanceEnabled"),
-              "shadow wiring: the armed flags leave out the panel distance and the curved screen, and the args class starts above the 64 their tests stop at");
+        check(fsh::kArgsCountA == 64 && !armedBody.empty() && !contains(armedBody, "panelCurveWants") && !contains(armedBody, "distanceEnabled"),
+              "shadow wiring: the armed flags leave out the panel distance and the curved screen, and band A ends at the 64 their only count test stops at");
         check(contains(code, "srv0IsPanelSized(State*s,charkind,uint32_tcount){if(count>64)returnfalse;") &&
                   contains(code, "if(!s->distanceEnabled)returnDrawVerdict::kNone;if(!srv0IsPanelSized(s,kind,count))returnDrawVerdict::kNone;") &&
                   contains(code, "if(panelCurveWants()&&srv0IsPanelSized(s,kind,count)&&"),
@@ -1886,13 +1894,8 @@ void testShadowWiring() {
         check(!armedBody.empty() && !contains(armedBody, "depthProbeLayoutActive") && noLayoutName && fsh::kArmCount == 14 &&
                   !contains(slurpFile("src/d3d11/depth_probe.h"), "depthProbeLayoutActive") && !contains(slurpFile("src/d3d11/depth_probe.cpp"), "g_depthProbeLayoutTarget"),
               "shadow wiring: the layout sample is not an armed flag (depthProbeNoteDraw performs it, and the fast path keeps calling it), and its accessor is gone");
-        check(contains(code, "g_shadow.tracker.finish(d.verdict,d.cls,g_shadow.terms,d.bound,shadowKeyNow(),fastshadow::DrawFacts(bindingShaderHash(BindSlot::Vs),d.over));") &&
-                  contains(code, "d.bound=fastshadow::argsBound(count,instances);") &&
-                  contains(code, "d.over=fastshadow::kFactOver|(sunglareWorldActive()?0u:fastshadow::kFactWorldInactive)|(cb?0u:fastshadow::kFactCbNull)|"
-                                 "(cb==s->sceneCbNominated?fastshadow::kFactCbNominated:0u);") &&
-                  contains(code, "if(count>fastshadow::kArgsCountMax){void*constcb=bindingGet(BindSlot::VsCb0);") &&
-                  contains(code, "if(sunglareWorldActive()&&count>10000){void*cb=bindingGet(BindSlot::VsCb0);if(cb&&cb!=s->sceneCbNominated){"),
-              "shadow wiring: the end of the thunk hands the tally the bound vertex shader and the over-10000 facts, read at entry with the nomination's own test and before it can move sceneCbNominated");
+        check(contains(code, "g_shadow.tracker.finish(d.verdict,d.cls,g_shadow.terms,d.bound,shadowKeyNow(),bindingShaderHash(BindSlot::Vs));"),
+              "shadow wiring: the end of the thunk hands the tally the bound vertex shader, bindingShaderHash(Vs), with the draw's exclusion and band");
         const size_t linesAt = code.find("voidvScreenDrawFastPathShadowLines(");
         const std::string lines = linesAt == std::string::npos ? std::string() : code.substr(linesAt, code.find("}", linesAt) - linesAt);
         const size_t f1 = lines.find("fastshadow::formatLine("), f2 = lines.find("fastshadow::formatNoTicketLine("), f3 = lines.find("fastshadow::formatArgsLine("),
@@ -1912,15 +1915,16 @@ void testShadowWiring() {
 }
 
 // ---- Phase 1b: why a draw recorded no ticket ----------------------------------------------------------------------------------------------------
-// The first failing reason by an independent chain: the class unknown, the four args bounds (count <= 64, count > 10000, count == 240, no instances),
-// unsettled, wake surface, then the other 23 terms in their order. `bound` is 0 for in the class, else 1 to 4.
+// The first failing reason by an independent chain: the class unknown, the five exclusions of the args bands (count <= 6, count > 10000 with the nomination
+// acting, count == 240, no instances, the scrim open), unsettled, wake surface, then the other 23 terms in their order. `bound` is 0 for in the bands,
+// else 1 to 5.
 int expectedNoTicket(uint32_t terms, unsigned bound, fsh::Class cls) {
     if (cls == fsh::Class::kUnresolved) return 0;
     if (bound) return static_cast<int>(bound);
-    if (terms & fsh::termBit(fsh::kTermUnsettled)) return 5;
-    if (terms & fsh::termBit(fsh::kTermWake)) return 6;
+    if (terms & fsh::termBit(fsh::kTermUnsettled)) return 6;
+    if (terms & fsh::termBit(fsh::kTermWake)) return 7;
     for (unsigned i = 0; i < 23; ++i)
-        if (terms & (1u << i)) return static_cast<int>(7 + i);
+        if (terms & (1u << i)) return static_cast<int>(8 + i);
     return -1;
 }
 
@@ -1932,145 +1936,183 @@ void testShadowNoTicketOrder() {
     }
     unsigned wrong = 0, inconsistent = 0, cases = 0;
     for (int cls = 0; cls < 3; ++cls)
-        for (unsigned bound = 0; bound < 5; ++bound)
+        for (unsigned bound = 0; bound < 6; ++bound)
             for (uint32_t terms : sets) {
                 const fsh::Class c = static_cast<fsh::Class>(cls);
-                const fsh::ArgsBound ab = bound ? fsh::ArgsBound(static_cast<fsh::Bound>(bound)) : fsh::ArgsBound();
+                const fsh::ArgsBound ab = bound ? fsh::ArgsBound(static_cast<fsh::Bound>(bound), fsh::Band::kB) : fsh::ArgsBound(true);
                 const int got = fsh::noTicketReason(terms, ab, c);
                 wrong += got != expectedNoTicket(terms, bound, c);
                 inconsistent += (got < 0) != fsh::ticketValid(terms, ab.in(), c);
                 ++cases;
             }
-    check(wrong == 0 && cases == 15 * (2 + 25 + 300),
-          "no-ticket order: over every class, every bound of the args class and every one or two outcome terms the first failing reason is the one in the order");
+    check(wrong == 0 && cases == 18 * (2 + 25 + 300),
+          "no-ticket order: over every class, every exclusion of the args bands and every one or two outcome terms the first failing reason is the one in the order");
     check(inconsistent == 0, "no-ticket order: a draw has a failing reason exactly when it records no ticket (the same test as the ticket's)");
-    check(fsh::kNoTicketReasons == 30 && std::string(fsh::noTicketName(0)) == "class unknown" && std::string(fsh::noTicketName(1)) == "count<=64" &&
-              std::string(fsh::noTicketName(2)) == "count>10000" && std::string(fsh::noTicketName(3)) == "count 240" && std::string(fsh::noTicketName(4)) == "no instances" &&
-              std::string(fsh::noTicketName(5)) == "unsettled" && std::string(fsh::noTicketName(6)) == "wake surface" && std::string(fsh::noTicketName(7)) == "verdict" &&
-              std::string(fsh::noTicketName(29)) == "special vs" && std::string(fsh::noTicketName(30)) == "?",
-          "no-ticket order: 30 reasons, named in order from the class unknown, through the four bounds, to the special vertex shaders");
+    check(fsh::kNoTicketReasons == 31 && std::string(fsh::noTicketName(0)) == "class unknown" && std::string(fsh::noTicketName(1)) == "count<=6" &&
+              std::string(fsh::noTicketName(2)) == "count>10000 acts" && std::string(fsh::noTicketName(3)) == "count 240" && std::string(fsh::noTicketName(4)) == "no instances" &&
+              std::string(fsh::noTicketName(5)) == "scrim or panel open" && std::string(fsh::noTicketName(6)) == "unsettled" && std::string(fsh::noTicketName(7)) == "wake surface" &&
+              std::string(fsh::noTicketName(8)) == "verdict" && std::string(fsh::noTicketName(30)) == "special vs" && std::string(fsh::noTicketName(31)) == "?",
+          "no-ticket order: 31 reasons, named in order from the class unknown, through the five exclusions, to the special vertex shaders");
     const uint32_t all = fsh::kOutcomeMask, bothOff = fsh::termBit(fsh::kTermUnsettled) | fsh::termBit(fsh::kTermWake);
-    const fsh::ArgsBound bSmall(fsh::Bound::kSmall), bLarge(fsh::Bound::kLarge), b240(fsh::Bound::k240), bNoInst(fsh::Bound::kNoInstances), bIn;
+    const fsh::ArgsBound bSmall(fsh::Bound::kSmall, fsh::Band::kNone), bActs(fsh::Bound::kLargeActs, fsh::Band::kC), b240(fsh::Bound::k240, fsh::Band::kNone),
+        bNoInst(fsh::Bound::kNoInstances, fsh::Band::kB), bScrim(fsh::Bound::kOpen, fsh::Band::kB), bIn(fsh::Bound::kIn, fsh::Band::kB);
     check(fsh::noTicketReason(all, bSmall, fsh::Class::kUnresolved) == 0 && fsh::noTicketReason(all, bSmall, fsh::Class::kEye) == 1 &&
-              fsh::noTicketReason(all, bLarge, fsh::Class::kEye) == 2 && fsh::noTicketReason(all, b240, fsh::Class::kOff) == 3 && fsh::noTicketReason(all, bNoInst, fsh::Class::kOff) == 4 &&
-              fsh::noTicketReason(all, bIn, fsh::Class::kOff) == 5 && fsh::noTicketReason(all & ~fsh::termBit(fsh::kTermUnsettled), bIn, fsh::Class::kOff) == 6 &&
-              fsh::noTicketReason(all & ~bothOff, bIn, fsh::Class::kEye) == 7 &&
-              fsh::noTicketReason(fsh::termBit(fsh::kTermSpecialVs) | fsh::termBit(fsh::kTermWeapon) | fsh::termBit(fsh::kTermAfterUi), bIn, fsh::Class::kEye) == 7 + fsh::kTermAfterUi &&
-              fsh::noTicketReason(fsh::termBit(fsh::kTermSpecialVs), bIn, fsh::Class::kEye) == 29 && fsh::noTicketReason(0, bIn, fsh::Class::kOff) == -1,
-          "no-ticket order: everything wrong reads the class, then the four bounds in order, then unsettled, wake surface, verdict; the special vertex shaders come last; an ordinary draw has none");
+              fsh::noTicketReason(all, bActs, fsh::Class::kEye) == 2 && fsh::noTicketReason(all, b240, fsh::Class::kOff) == 3 && fsh::noTicketReason(all, bNoInst, fsh::Class::kOff) == 4 &&
+              fsh::noTicketReason(all, bScrim, fsh::Class::kOff) == 5 && fsh::noTicketReason(all, bIn, fsh::Class::kOff) == 6 &&
+              fsh::noTicketReason(all & ~fsh::termBit(fsh::kTermUnsettled), bIn, fsh::Class::kOff) == 7 && fsh::noTicketReason(all & ~bothOff, bIn, fsh::Class::kEye) == 8 &&
+              fsh::noTicketReason(fsh::termBit(fsh::kTermSpecialVs) | fsh::termBit(fsh::kTermWeapon) | fsh::termBit(fsh::kTermAfterUi), bIn, fsh::Class::kEye) == 8 + fsh::kTermAfterUi &&
+              fsh::noTicketReason(fsh::termBit(fsh::kTermSpecialVs), bIn, fsh::Class::kEye) == 30 && fsh::noTicketReason(0, bIn, fsh::Class::kOff) == -1,
+          "no-ticket order: everything wrong reads the class, then the five exclusions in order, then unsettled, wake surface, verdict; the special vertex shaders come last; an ordinary draw has none");
 }
 
-// Phase 1c: the four bounds of the args class, the first that applies.
-void testShadowBounds() {
-    // An independent chain over the counts and the instances that matter.
-    unsigned wrong = 0, notClass = 0, cases = 0;
-    const uint32_t counts[] = {0, 1, 6, 63, 64, 65, 239, 240, 241, 9999, 10000, 10001, 20000, 4000000000u};
+// Phase 1d: the bands, the exclusions, and the ticket's band.
+void testShadowBands() {
+    using fsh::Band;
+    // The band of a count: the edges 6/7, 64/65, 239/240/241, 10000/10001.
+    check(fsh::bandOf(0) == Band::kNone && fsh::bandOf(6) == Band::kNone && fsh::bandOf(7) == Band::kA && fsh::bandOf(64) == Band::kA && fsh::bandOf(65) == Band::kB &&
+              fsh::bandOf(239) == Band::kB && fsh::bandOf(240) == Band::kNone && fsh::bandOf(241) == Band::kB && fsh::bandOf(10000) == Band::kB && fsh::bandOf(10001) == Band::kC &&
+              fsh::bandOf(4000000000u) == Band::kC,
+          "bands: A is 7 to 64, B is 65 to 10000 but not 240, C is above 10000; 6 or under and 240 have none");
+    // The classification chain, by an independent one: count <= 6, then the nomination acting, then 240, then no instances, then the scrim open.
+    unsigned wrong = 0, cases = 0, bandWrong = 0;
+    const uint32_t counts[] = {0, 1, 6, 7, 63, 64, 65, 99, 100, 239, 240, 241, 9999, 10000, 10001, 20000, 4000000000u};
     for (uint32_t count : counts)
-        for (uint32_t instances : {0u, 1u, 2u, 64u}) {
-            fsh::Bound want = fsh::Bound::kIn;
-            if (count <= 64) want = fsh::Bound::kSmall;
-            else if (count > 10000) want = fsh::Bound::kLarge;
-            else if (count == 240) want = fsh::Bound::k240;
-            else if (instances == 0) want = fsh::Bound::kNoInstances;
-            wrong += fsh::boundOf(count, instances) != want;
-            notClass += (fsh::boundOf(count, instances) == fsh::Bound::kIn) != fsh::argsClass('X', count, instances);
-            ++cases;
-        }
-    check(wrong == 0 && cases == 14 * 4, "bounds: count <= 64, then count > 10000, then count == 240, then no instances, the first that applies");
-    check(notClass == 0, "bounds: a draw is outside no bound exactly when it is in the args class");
-    check(fsh::boundOf(64, 0) == fsh::Bound::kSmall && fsh::boundOf(10001, 0) == fsh::Bound::kLarge && fsh::boundOf(240, 0) == fsh::Bound::k240 && fsh::boundOf(65, 0) == fsh::Bound::kNoInstances &&
-              fsh::boundOf(10000, 1) == fsh::Bound::kIn && fsh::boundOf(65, 1) == fsh::Bound::kIn,
-          "bounds: a draw that breaks several is counted at the first (64 with no instances is small, 10001 with none is large, 240 with none is 240)");
-    check(fsh::ArgsBound(true).in() && !fsh::ArgsBound(false).in() && fsh::ArgsBound(false).b == fsh::Bound::kSmall && fsh::ArgsBound().in() &&
-              fsh::argsBound(500, 1).in() && fsh::argsBound(500, 0).b == fsh::Bound::kNoInstances,
-          "bounds: a bool converts (true in the class, false the first bound); the draw path passes the real one");
-    // The main line's refusals use the same bounds, after the key and before the dynamic flags.
-    const fsh::Bound all[] = {fsh::Bound::kSmall, fsh::Bound::kLarge, fsh::Bound::k240, fsh::Bound::kNoInstances};
-    const fsh::Reason reasons[] = {fsh::Reason::kArgsSmall, fsh::Reason::kArgsLarge, fsh::Reason::kArgs240, fsh::Reason::kArgsNoInstances};
-    bool refusals = true;
-    for (int i = 0; i < 4; ++i) {
-        fsh::Tracker t;
-        t.ticket.valid = true;
-        t.ticket.key = shadowKey(1, 1, 1);
-        ShadowCalls calls;
-        const fsh::Verdict v = t.judge(shadowKey(1, 1, 1), fsh::ArgsBound(all[i]), fsh::kSubCensus, [&] { ++calls.dyn; return 1u; }, [&] { ++calls.armed; return 1u; });
-        t.finish(v, fsh::Class::kEye, 0, fsh::ArgsBound(all[i]), shadowKey(1, 1, 1));
-        refusals = refusals && v.reason == reasons[i] && calls.dyn == 0 && calls.armed == 0 && t.count.refused[static_cast<size_t>(reasons[i])] == 1 &&
-                   t.count.refused[static_cast<size_t>(fsh::Reason::kDynamic)] == 0;
-    }
-    fsh::Tracker moved;
-    moved.ticket.valid = true;
-    moved.ticket.key = shadowKey(1, 1, 2);
-    const fsh::Verdict mv = moved.judge(shadowKey(1, 1, 1), fsh::ArgsBound(fsh::Bound::kLarge), 0, [] { return 0u; }, [] { return 0u; });
-    check(refusals && mv.reason == fsh::Reason::kKeyMoved && std::string(fsh::reasonName(fsh::Reason::kArgsLarge)) == "args count>10000",
-          "bounds: the main line's args refusal is one reason per bound, in the same order, after the ticket and the key and before any flag is gathered");
-    // Each bound's vertex shaders are kept apart by class and by bound.
+        for (uint32_t instances : {0u, 1u, 2u, 64u})
+            for (int acts = 0; acts < 2; ++acts)
+                for (int scrim = 0; scrim < 2; ++scrim) {
+                    if (acts && count <= 10000) continue;   // the nomination acts only above 10000: the caller's test says so (nominationActs)
+                    fsh::Bound want = fsh::Bound::kIn;
+                    if (count <= 6) want = fsh::Bound::kSmall;
+                    else if (acts) want = fsh::Bound::kLargeActs;
+                    else if (count == 240) want = fsh::Bound::k240;
+                    else if (instances == 0) want = fsh::Bound::kNoInstances;
+                    else if (scrim) want = fsh::Bound::kOpen;
+                    const fsh::ArgsBound got = fsh::classifyArgs(count, instances, acts != 0, scrim != 0);
+                    wrong += got.b != want;
+                    bandWrong += got.band != fsh::bandOf(count);
+                    ++cases;
+                }
+    check(wrong == 0 && cases == 160, "bands: a draw is kept out by the first of count <= 6, the nomination acting, count 240, no instances, a recogniser open");
+    check(bandWrong == 0, "bands: a draw carries the band of its count, kept out or not (so the ticket can compare it)");
+    check(fsh::classifyArgs(64, 0, false, true).b == fsh::Bound::kNoInstances && fsh::classifyArgs(240, 0, false, false).b == fsh::Bound::k240 &&
+              fsh::classifyArgs(10001, 0, true, false).b == fsh::Bound::kLargeActs && fsh::classifyArgs(5, 1, false, true).b == fsh::Bound::kSmall &&
+              fsh::classifyArgs(500, 1, false, false).in() && fsh::classifyArgs(500, 1, false, false).band == Band::kB,
+          "bands: a draw that breaks several is counted at the first, and one that breaks none is in its band");
+    check(fsh::ArgsBound(true).in() && fsh::ArgsBound(true).band == Band::kB && !fsh::ArgsBound(false).in() && fsh::ArgsBound().band == Band::kNone,
+          "bands: a bool converts (true in band B, false kept out as the first bound); the draw path passes the real classification");
+    // The sun-glare nomination's own test, and band C's admission.
+    unsigned nomWrong = 0;
+    for (uint32_t count : {7u, 10000u, 10001u, 20000u})
+        for (int world = 0; world < 2; ++world)
+            for (int cb = 0; cb < 3; ++cb) {   // 0 no cb, 1 the nominated one, 2 another
+                const bool noop = !world || cb == 0 || cb == 1;
+                const bool acts = fsh::nominationActs(count, world != 0, cb != 0, cb == 1);
+                nomWrong += acts != (count > 10000 && !noop);
+            }
+    check(nomWrong == 0 && !fsh::nominationActs(10000, true, true, false) && fsh::nominationActs(10001, true, true, false),
+          "bands: the nomination acts on a draw over 10000 exactly when the glare world is active and VsCb0 is set and is not the one nominated; band C is admitted otherwise");
+    // The ticket's band and `band changed`: after the key, and after the exclusions.
+    const fsh::Key key = shadowKey(6, 6, 6);
+    const auto record = [&](fsh::Tracker& t, uint32_t count, uint32_t instances, bool acts = false, bool scrim = false) {
+        t.finish(fsh::Verdict(), fsh::Class::kEye, 0, fsh::classifyArgs(count, instances, acts, scrim), key, 0x1);
+    };
+    const auto judge = [&](fsh::Tracker& t, uint32_t count, uint32_t instances, const fsh::Key& now, bool acts = false, bool scrim = false) {
+        return t.judge(now, fsh::classifyArgs(count, instances, acts, scrim), 0, [] { return 0u; }, [] { return 0u; });
+    };
     fsh::Tracker t;
+    record(t, 30, 3);
+    check(t.ticket.valid && t.ticket.band == Band::kA && judge(t, 40, 1, key).reason == fsh::Reason::kTake, "bands: a draw in band A records band A, and another in band A would take");
+    check(judge(t, 100, 1, key).reason == fsh::Reason::kBandChanged && judge(t, 20000, 1, key).reason == fsh::Reason::kBandChanged,
+          "bands: a draw in band B or C after a band A ticket is 'band changed'");
+    check(judge(t, 5, 1, key).reason == fsh::Reason::kArgsSmall && judge(t, 240, 1, key).reason == fsh::Reason::kArgs240 && judge(t, 40, 0, key).reason == fsh::Reason::kArgsNoInstances &&
+              judge(t, 20000, 1, key, true).reason == fsh::Reason::kArgsLargeActs && judge(t, 150, 1, key, false, true).reason == fsh::Reason::kArgsOpen,
+          "bands: a draw kept out is counted under its exclusion, not as a change of band");
+    check(judge(t, 100, 1, shadowKey(6, 6, 7)).reason == fsh::Reason::kKeyMoved, "bands: a moved key is 'key moved' before 'band changed'");
+    record(t, 100, 1);
+    check(t.ticket.band == Band::kB && judge(t, 9999, 2, key).reason == fsh::Reason::kTake && judge(t, 64, 2, key).reason == fsh::Reason::kBandChanged &&
+              judge(t, 10001, 2, key).reason == fsh::Reason::kBandChanged,
+          "bands: band B takes within itself, whatever the count and the instances, and changes with band A or C");
+    record(t, 20000, 1);
+    check(t.ticket.valid && t.ticket.band == Band::kC && judge(t, 30000, 1, key).reason == fsh::Reason::kTake && judge(t, 20000, 1, key, true).reason == fsh::Reason::kArgsLargeActs,
+          "bands: band C records band C and takes while the nomination is a no-op, and is kept out when it acts");
+    record(t, 20000, 1, true);
+    check(!t.ticket.valid && t.ticket.band == Band::kC && judge(t, 30000, 1, key).reason == fsh::Reason::kNoTicket,
+          "bands: a band C draw the nomination acted on records no ticket");
+    record(t, 150, 1, false, true);
+    check(!t.ticket.valid && judge(t, 150, 1, key).reason == fsh::Reason::kNoTicket, "bands: a draw the scrim was open on records no ticket");
+    record(t, 240, 1);
+    check(!t.ticket.valid && t.ticket.band == Band::kNone, "bands: a draw of count 240 records no ticket, and no band");
+    check(t.count.refused[static_cast<size_t>(fsh::Reason::kBandChanged)] == 0 && t.count.take[0] == 0, "bands: judge alone counts nothing");
+    // `band changed` through the tracker counts under its own reason, and the ticket a refused draw leaves is its own.
+    fsh::Tracker u;
+    record(u, 30, 1);
+    const fsh::Verdict changed = u.judge(key, fsh::classifyArgs(300, 1, false, false), 0, [] { return 0u; }, [] { return 0u; });
+    u.finish(changed, fsh::Class::kEye, 0, fsh::classifyArgs(300, 1, false, false), key, 0x1);
+    check(changed.reason == fsh::Reason::kBandChanged && u.count.refused[static_cast<size_t>(fsh::Reason::kBandChanged)] == 1 && u.ticket.valid && u.ticket.band == Band::kB &&
+              std::string(fsh::reasonName(fsh::Reason::kBandChanged)) == "band changed" && std::string(fsh::reasonName(fsh::Reason::kArgsLargeActs)) == "args count>10000 acts" &&
+              std::string(fsh::reasonName(fsh::Reason::kArgsOpen)) == "args scrim or panel open" && std::string(fsh::reasonName(fsh::Reason::kArgsSmall)) == "args count<=6",
+          "bands: 'band changed' is counted as its own refusal, and the draw that was refused writes its own band");
+    // The refusal order on the main line: ticket, key, the exclusions, the band, the dynamic flags.
+    const fsh::Reason order[] = {fsh::Reason::kNoTicket, fsh::Reason::kKeyMoved, fsh::Reason::kArgsSmall, fsh::Reason::kArgsLargeActs, fsh::Reason::kArgs240,
+                                 fsh::Reason::kArgsNoInstances, fsh::Reason::kArgsOpen, fsh::Reason::kBandChanged, fsh::Reason::kDynamic, fsh::Reason::kArmed,
+                                 fsh::Reason::kNotCertified};
+    bool inOrder = true;
+    for (size_t i = 0; i + 1 < sizeof(order) / sizeof(order[0]); ++i) inOrder = inOrder && static_cast<int>(order[i]) + 1 == static_cast<int>(order[i + 1]);
+    check(inOrder && static_cast<int>(fsh::Reason::kCount) == 12, "bands: the reasons run no ticket, key moved, the five exclusions, band changed, dynamic, armed, not certified");
+    // The exclusions' vertex shaders are kept apart by class and by exclusion.
+    fsh::Tracker v;
     const fsh::Verdict full;
-    const fsh::Key key = shadowKey(3, 3, 3);
-    for (int i = 0; i < 6; ++i) t.finish(full, fsh::Class::kEye, 0, fsh::ArgsBound(fsh::Bound::kSmall), key, 0xE1);
-    for (int i = 0; i < 3; ++i) t.finish(full, fsh::Class::kEye, 0, fsh::ArgsBound(fsh::Bound::kSmall), key, 0xE2);
-    t.finish(full, fsh::Class::kEye, 0, fsh::ArgsBound(fsh::Bound::kSmall), key, 0);
-    for (int i = 0; i < 4; ++i) t.finish(full, fsh::Class::kOff, 0, fsh::ArgsBound(fsh::Bound::kSmall), key, 0xF1);
-    for (int i = 0; i < 5; ++i) t.finish(full, fsh::Class::kOff, 0, fsh::ArgsBound(fsh::Bound::kLarge), key, 0xF2);
-    t.finish(full, fsh::Class::kEye, 0, fsh::ArgsBound(fsh::Bound::k240), key, 0xE3);
-    t.finish(full, fsh::Class::kOff, 0, fsh::ArgsBound(fsh::Bound::kNoInstances), key, 0xF3);
-    t.finish(full, fsh::Class::kUnresolved, 0, fsh::ArgsBound(fsh::Bound::kLarge), key, 0x99);   // an unclassed draw is 'class unknown', not a bound
-    const fsh::Counters& c = t.count;
+    const auto kept = [&](fsh::Class cl, fsh::Bound b, uint64_t vs, int n) {
+        for (int i = 0; i < n; ++i) v.finish(full, cl, 0, fsh::ArgsBound(b, fsh::Band::kB), key, vs);
+    };
+    kept(fsh::Class::kEye, fsh::Bound::kSmall, 0xE1, 6);
+    kept(fsh::Class::kEye, fsh::Bound::kSmall, 0xE2, 3);
+    kept(fsh::Class::kEye, fsh::Bound::kSmall, 0, 1);
+    kept(fsh::Class::kOff, fsh::Bound::kSmall, 0xF1, 4);
+    kept(fsh::Class::kOff, fsh::Bound::kLargeActs, 0xF2, 5);
+    kept(fsh::Class::kEye, fsh::Bound::k240, 0xE3, 1);
+    kept(fsh::Class::kOff, fsh::Bound::kNoInstances, 0xF3, 1);
+    kept(fsh::Class::kEye, fsh::Bound::kOpen, 0xE4, 2);
+    kept(fsh::Class::kUnresolved, fsh::Bound::kLargeActs, 0x99, 1);   // an unclassed draw is 'class unknown', not an exclusion
+    const fsh::Counters& c = v.count;
     unsigned slot[3];
-    check(c.noTicket[0][fsh::kNtBoundSmall] == 10 && c.noTicket[1][fsh::kNtBoundSmall] == 4 && c.noTicket[1][fsh::kNtBoundLarge] == 5 && c.noTicket[0][fsh::kNtBound240] == 1 &&
-              c.noTicket[1][fsh::kNtBoundNoInstances] == 1 && c.noTicket[2][fsh::kNtClassUnknown] == 1 && c.noTicket[2][fsh::kNtBoundLarge] == 0,
-          "bounds: the draws outside each bound are counted by class, an unclassed one as 'class unknown'");
+    check(c.noTicket[0][fsh::kNtBoundSmall] == 10 && c.noTicket[1][fsh::kNtBoundSmall] == 4 && c.noTicket[1][fsh::kNtBoundLargeActs] == 5 && c.noTicket[0][fsh::kNtBound240] == 1 &&
+              c.noTicket[1][fsh::kNtBoundNoInstances] == 1 && c.noTicket[0][fsh::kNtBoundOpen] == 2 && c.noTicket[2][fsh::kNtClassUnknown] == 1 &&
+              c.noTicket[2][fsh::kNtBoundLargeActs] == 0,
+          "bands: the draws kept out by each exclusion are counted by class, an unclassed one as 'class unknown'");
     check(c.boundVs[0][0].top(3, slot) == 3 && c.boundVs[0][0].key[slot[0]] == 0xE1 && c.boundVs[0][0].count[slot[0]] == 6 && c.boundVs[0][0].key[slot[1]] == 0xE2 &&
               c.boundVs[0][0].key[slot[2]] == 0 && c.boundVs[0][0].count[slot[2]] == 1,
-          "bounds: the eye's count<=64 sketch has its three vertex shaders in order, the hash 0 among them");
+          "bands: the eye's count<=6 sketch has its three vertex shaders in order, the hash 0 among them");
     check(c.boundVs[1][0].top(3, slot) == 1 && c.boundVs[1][0].key[slot[0]] == 0xF1 && c.boundVs[1][1].top(3, slot) == 1 && c.boundVs[1][1].key[slot[0]] == 0xF2 &&
               c.boundVs[0][2].top(3, slot) == 1 && c.boundVs[0][2].key[slot[0]] == 0xE3 && c.boundVs[1][3].top(3, slot) == 1 && c.boundVs[1][3].key[slot[0]] == 0xF3 &&
-              c.boundVs[0][1].top(3, slot) == 0 && c.boundVs[0][3].top(3, slot) == 0 && c.boundVs[1][2].top(3, slot) == 0,
-          "bounds: each (class, bound) keeps its own sketch, and a pair with no draws keeps none");
-    t.count.reset();
-    check(t.count.boundVs[0][0].count[0] == 0 && t.count.boundVs[1][0].count[0] == 0 && t.count.over[0][fsh::kOverDraws] == 0, "bounds: the reset empties the bound sketches");
+              c.boundVs[0][4].top(3, slot) == 1 && c.boundVs[0][4].key[slot[0]] == 0xE4 && c.boundVs[0][1].top(3, slot) == 0 && c.boundVs[0][3].top(3, slot) == 0 &&
+              c.boundVs[1][2].top(3, slot) == 0,
+          "bands: each (class, exclusion) keeps its own sketch, and a pair with no draws keeps none");
+    v.count.reset();
+    check(v.count.boundVs[0][0].count[0] == 0 && v.count.boundVs[1][0].count[0] == 0 && v.count.noTicket[0][fsh::kNtBoundSmall] == 0, "bands: the reset empties the exclusions' sketches");
 }
 
-// Phase 1c: what the sun-glare nomination does on a draw over 10000, by class.
-void testShadowOverShares() {
-    fsh::Tracker t;
-    const fsh::Verdict full;
-    const fsh::Key key = shadowKey(4, 4, 4);
-    const fsh::ArgsBound large(fsh::Bound::kLarge);
-    using fsh::kFactOver; using fsh::kFactWorldInactive; using fsh::kFactCbNull; using fsh::kFactCbNominated;
-    // Eye: 4 with the glare world inactive; 3 active with no cb; 5 active with the nominated cb; 2 active with a cb that is not yet nominated (these proceed).
-    for (int i = 0; i < 4; ++i) t.finish(full, fsh::Class::kEye, 0, large, key, fsh::DrawFacts(1, kFactOver | kFactWorldInactive));
-    for (int i = 0; i < 3; ++i) t.finish(full, fsh::Class::kEye, 0, large, key, fsh::DrawFacts(1, kFactOver | kFactCbNull));
-    for (int i = 0; i < 5; ++i) t.finish(full, fsh::Class::kEye, 0, large, key, fsh::DrawFacts(1, kFactOver | kFactCbNominated));
-    for (int i = 0; i < 2; ++i) t.finish(full, fsh::Class::kEye, 0, large, key, fsh::DrawFacts(1, kFactOver));
-    // Off-screen: 6 over 10000 with a nominated cb, 2 with a fresh cb; the eye-only nomination does not run for them, so neither is an act.
-    for (int i = 0; i < 6; ++i) t.finish(full, fsh::Class::kOff, 0, large, key, fsh::DrawFacts(1, kFactOver | kFactCbNominated));
-    for (int i = 0; i < 2; ++i) t.finish(full, fsh::Class::kOff, 0, large, key, fsh::DrawFacts(1, kFactOver));
-    // A draw at the bound's edge carries no facts and is not counted; a draw in the class is not either.
-    t.finish(full, fsh::Class::kEye, 0, fsh::ArgsBound(fsh::Bound::kSmall), key, 5);
-    t.finish(full, fsh::Class::kEye, 0, fsh::ArgsBound(), key, 5);
-    t.finish(full, fsh::Class::kUnresolved, 0, large, key, fsh::DrawFacts(1, kFactOver | kFactCbNominated));   // an unclassed draw is not counted
-    const uint64_t* e = t.count.over[0];
-    const uint64_t* o = t.count.over[1];
-    check(e[fsh::kOverDraws] == 14 && e[fsh::kOverWorldInactive] == 4 && e[fsh::kOverCbNull] == 3 && e[fsh::kOverCbNominated] == 5 && e[fsh::kOverActs] == 2,
-          "over 10000: the eye draws are counted by the glare world inactive, no cb, the nominated cb, and the ones the nomination proceeds on");
-    check(o[fsh::kOverDraws] == 8 && o[fsh::kOverWorldInactive] == 0 && o[fsh::kOverCbNull] == 0 && o[fsh::kOverCbNominated] == 6 && o[fsh::kOverActs] == 0,
-          "over 10000: off-screen draws are counted apart, and none of them acts (the nomination is in the eye branch)");
-    check(t.count.over[2][fsh::kOverDraws] == 0 && e[fsh::kOverDraws] == t.count.noTicket[0][fsh::kNtBoundLarge] && o[fsh::kOverDraws] == t.count.noTicket[1][fsh::kNtBoundLarge],
-          "over 10000: the draws counted are the draws outside the count > 10000 bound, class by class");
-    // The three no-op cases are the three early outs of the nomination's own test, in its order, and a draw is an act exactly when none holds.
-    unsigned wrong = 0;
-    for (int world = 0; world < 2; ++world)
-        for (int cb = 0; cb < 3; ++cb) {   // 0 no cb, 1 the nominated one, 2 another
-            const bool inactive = !world, noCb = cb == 0, nominated = cb == 1;
-            const bool noop = inactive || noCb || nominated;
-            fsh::Tracker u;
-            u.finish(full, fsh::Class::kEye, 0, large, key,
-                     fsh::DrawFacts(1, kFactOver | (inactive ? kFactWorldInactive : 0u) | (noCb ? kFactCbNull : 0u) | (nominated ? kFactCbNominated : 0u)));
-            wrong += (u.count.over[0][fsh::kOverActs] == 1) == noop;
-        }
-    check(wrong == 0, "over 10000: the nomination acts on an eye draw exactly when the glare world is active and VsCb0 is set and is not the one nominated");
+// Phase 1d: the scrim and the nomination, pinned in the source the per-draw tests mirror.
+void testShadowPerDrawTests() {
+    const std::string code = squeezedCode(slurpFile("src/d3d11/vscreen.cpp"));
+    const std::string scrimH = squeezedCode(slurpFile("src/d3d11/scrim_fix.h")), scrimC = squeezedCode(slurpFile("src/d3d11/scrim_fix.cpp"));
+    check(contains(code, "acts=fastshadow::nominationActs(count,sunglareWorldActive(),cb!=nullptr,cb==s->sceneCbNominated);") &&
+              contains(code, "if(count>fastshadow::kArgsCountMax){void*constcb=bindingGet(BindSlot::VsCb0);acts=") &&
+              contains(code, "if(sunglareWorldActive()&&count>10000){void*cb=bindingGet(BindSlot::VsCb0);if(cb&&cb!=s->sceneCbNominated){") &&
+              contains(code, "d.bound=fastshadow::classifyArgs(count,instances,acts,scrimOpen||panelOpen);") && fsh::kArgsCountMax == 10000,
+          "per-draw tests: band C's test is the nomination's own gate, read at thunk entry from VsCb0 and sceneCbNominated, with the same 10000");
+    check(contains(code, "constboolscrimOpen=scrimWantsDraws()&&scrimWashShape('X',count,instances)&&!scrimWashSrv0Declines()&&bindingGet(BindSlot::PsSrv0)!=nullptr;") &&
+              contains(scrimH, "inlineboolscrimWashShape(charkind,uint32_tcount,uint32_tinstances){returnkind=='X'&&instances==1&&count>=100;}") &&
+              contains(scrimH, "inlineboolscrimWashSrv0Declines(){constdetail::MetadataCache&c=detail::g_washMetadata;returnc.known&&!c.matches&&c.view==bindingGet(BindSlot::PsSrv0)&&"
+                               "c.generation==bindingGeneration(BindSlot::PsSrv0);}") &&
+              contains(scrimC, "boolscrimOnEyeDraw(charkind,uint32_tcount,uint32_tinstances){if(!detail::g_scrimOn)returnfalse;if(!scrimWashShape(kind,count,instances)){returnfalse;}") &&
+              contains(code, "if(scrimWantsDraws()&&scrimWashShape(kind,count,instances)&&!scrimWashSrv0Declines()&&scrimOnEyeDraw(kind,count,instances)){returnDrawVerdict::kScrim;}"),
+          "per-draw tests: the scrim is kept out exactly when the full path would ask scrimOnEyeDraw: wanted, in its shape (kind X, one instance, 100 indices or more), and the slot-0 cache has not ruled the binding out");
+    check(contains(code, "constboolpanelOpen=s->distanceEnabled&&count<=fastshadow::kArgsCountA&&g_shadow.tracker.ticket.cls==fastshadow::Class::kEye&&"
+                         "bindingGet(BindSlot::PsSrv0)!=nullptr&&!(s->psSrv0PanelGen==bindingGeneration(BindSlot::PsSrv0)&&!s->psSrv0Panel);") &&
+              contains(code, "srv0IsPanelSized(State*s,charkind,uint32_tcount){if(count>64)returnfalse;void*srv=bindingGet(BindSlot::PsSrv0);if(!srv)returnfalse;"
+                             "constuint32_tgen=bindingGeneration(BindSlot::PsSrv0);if(s->psSrv0PanelGen==gen)returns->psSrv0Panel;returnsrv0IsPanelSizedSlow(s,kind,count,srv,gen);}"),
+          "per-draw tests: an eye-class draw of 64 or under is kept out as 'open' while the distance fix is on, unless the srv0IsPanelSized memo (keyed on PsSrv0's generation) says the binding is not panel-sized");
 }
 
 // Phase 1c: the census term is what the calls DO. The gate alone (the footprint switched on, which it is by default) is not the term.
@@ -2254,56 +2296,52 @@ void testShadowNoTicketText() {
     check(cutLen < sizeof(cut) && std::strlen(cut) == cutLen, "no-ticket text: counters no tracker can reach are cut at the buffer and terminated");
 }
 
-// Phase 1c: the args line.
+// Phase 1d: the args line.
 void testShadowArgsText() {
     char buf[2048];
     fsh::Counters none;
     const size_t emptyLen = fsh::formatArgsLine(buf, sizeof(buf), 5400, 1800, none);
     const std::string empty(buf);
     check(emptyLen == empty.size() && empty.compare(0, 29, "draw fast path (shadow) args:") == 0 && contains(empty, "1800-frame window ending 5400, 1800 frames") &&
-              contains(empty, "top vertex shaders and shares: -.") && contains(empty, "Over 10000 a frame, % glare off/no cb/cb nominated/acts: -."),
-          "args text: the line names itself and the window, and reads '-' for the bounds and for the draws over 10000 when there are none");
+              contains(empty, "top vertex shaders and shares in percent: -."),
+          "args text: the line names itself and the window, and reads '-' when no classed draw was kept out");
     // A typical window over ten frames, through the tracker.
     fsh::Tracker t;
     const fsh::Verdict full;
     const fsh::Key key = shadowKey(5, 5, 5);
-    for (int i = 0; i < 20; ++i) t.finish(full, fsh::Class::kEye, 0, fsh::ArgsBound(fsh::Bound::kSmall), key, 0xA001);
-    for (int i = 0; i < 7; ++i) t.finish(full, fsh::Class::kEye, 0, fsh::ArgsBound(fsh::Bound::kSmall), key, 0xA002);
-    for (int i = 0; i < 3; ++i) t.finish(full, fsh::Class::kEye, 0, fsh::ArgsBound(fsh::Bound::kSmall), key, 0);
-    using fsh::kFactOver; using fsh::kFactWorldInactive; using fsh::kFactCbNominated;
-    for (int i = 0; i < 5; ++i) t.finish(full, fsh::Class::kEye, 0, fsh::ArgsBound(fsh::Bound::kLarge), key, fsh::DrawFacts(0xC001, kFactOver | kFactWorldInactive));
-    for (int i = 0; i < 12; ++i) t.finish(full, fsh::Class::kEye, 0, fsh::ArgsBound(fsh::Bound::kLarge), key, fsh::DrawFacts(0xC001, kFactOver | kFactCbNominated));
-    for (int i = 0; i < 3; ++i) t.finish(full, fsh::Class::kEye, 0, fsh::ArgsBound(fsh::Bound::kLarge), key, fsh::DrawFacts(0xC001, kFactOver));
-    for (int i = 0; i < 10; ++i) t.finish(full, fsh::Class::kOff, 0, fsh::ArgsBound(fsh::Bound::kLarge), key, fsh::DrawFacts(0xD001, kFactOver | kFactCbNominated));
-    t.finish(full, fsh::Class::kOff, 0, fsh::ArgsBound(fsh::Bound::kNoInstances), key, 0xD002);
+    const auto kept = [&](fsh::Class cl, fsh::Bound b, uint64_t vs, int n) {
+        for (int i = 0; i < n; ++i) t.finish(full, cl, 0, fsh::ArgsBound(b, fsh::Band::kB), key, vs);
+    };
+    kept(fsh::Class::kEye, fsh::Bound::kSmall, 0xA001, 20);
+    kept(fsh::Class::kEye, fsh::Bound::kSmall, 0xA002, 7);
+    kept(fsh::Class::kEye, fsh::Bound::kSmall, 0, 3);
+    kept(fsh::Class::kEye, fsh::Bound::kLargeActs, 0xC001, 5);
+    kept(fsh::Class::kOff, fsh::Bound::kLargeActs, 0xD001, 10);
+    kept(fsh::Class::kOff, fsh::Bound::kOpen, 0xD002, 1);
     fsh::formatArgsLine(buf, sizeof(buf), 7200, 10, t.count);
     const std::string line(buf);
-    check(contains(line, " eye count<=64 3.0: 000000000000A001 67%, 000000000000A002 23%, 0000000000000000 10%; eye count>10000 2.0: 000000000000C001 100%; "
-                         "off-screen count>10000 1.0: 000000000000D001 100%; off-screen no instances 0.1: 000000000000D002 100%;"),
-          "args text: per class and bound the draws a frame and the top vertex shaders with their shares, the hash 0 among them, in the bounds' order, a bound with no draws left out");
-    check(contains(line, "acts: eye 2.0 25/0/60/15%; off-screen 1.0 0/0/100/0%;"),
-          "args text: the draws over 10000 a frame by class, with the shares where the nomination is a no-op or acts");
-    check(!contains(line, "count 240") && !contains(line, "unclassed"), "args text: a bound or a class with no draws is not listed");
+    check(contains(line, " eye: count<=6 3.0: 000000000000A001 67, 000000000000A002 23, 0000000000000000 10; count>10000 acts 0.5: 000000000000C001 100;"),
+          "args text: per class the draws a frame kept out by each exclusion, and the top vertex shaders with their shares, the hash 0 among them");
+    check(contains(line, " off-screen: count>10000 acts 1.0: 000000000000D001 100; scrim or panel open 0.1: 000000000000D002 100;"),
+          "args text: the exclusions in order, and a class with none left out");
+    check(!contains(line, "count 240") && !contains(line, "no instances") && !contains(line, "unclassed"), "args text: an exclusion or a class with no draws is not listed");
     char tiny[70];
     memset(tiny, 'x', sizeof(tiny));
     const size_t nt = fsh::formatArgsLine(tiny, sizeof(tiny), 7200, 10, t.count);
     check(nt < sizeof(tiny) && tiny[nt] == '\0', "args text: a short buffer is cut and terminated, never overrun");
-    // The worst case: all eight (class, bound) pairs at four billion over one frame with full sketches, and the over-10000 shares all 100%.
+    // The worst case: all ten (class, exclusion) pairs at four billion over one frame with full sketches.
     fsh::Counters w;
-    for (unsigned cl = 0; cl < 2; ++cl) {
-        for (unsigned b = 0; b < 4; ++b) {
+    for (unsigned cl = 0; cl < 2; ++cl)
+        for (unsigned b = 0; b < 5; ++b) {
             w.noTicket[cl][fsh::kNtBoundSmall + b] = 4000000000ull;
             for (unsigned i = 0; i < fsh::VsSketch::kSlots; ++i) {
                 w.boundVs[cl][b].key[i] = 0xFFFFFFFFFFFFFFF0ull + i;
                 w.boundVs[cl][b].count[i] = 4000000000ull - i;
             }
         }
-        w.over[cl][fsh::kOverDraws] = 4000000000ull;
-        w.over[cl][fsh::kOverWorldInactive] = w.over[cl][fsh::kOverCbNull] = w.over[cl][fsh::kOverCbNominated] = w.over[cl][fsh::kOverActs] = 4000000000ull;
-    }
     char big[4096];
     const size_t worst = fsh::formatArgsLine(big, sizeof(big), 4000000000u, 1, w);
-    check(worst > 0 && worst < 1150 && std::strlen(big) == worst, "args text: the line is under 1150 characters at its worst (all eight class and bound pairs at four billion, every sketch full)");
+    check(worst > 0 && worst < 1150 && std::strlen(big) == worst, "args text: the line is under 1150 characters at its worst (all ten class and exclusion pairs at four billion, every sketch full)");
     std::printf("aa_off_test: shadow args line worst case %zu characters\n", worst);
 }
 
@@ -2362,8 +2400,8 @@ int main(int argc, char** argv) {
     testShadowNoTicketClasses();
     testShadowSketch();
     testShadowNoTicketText();
-    testShadowBounds();
-    testShadowOverShares();
+    testShadowBands();
+    testShadowPerDrawTests();
     testShadowCensusTerm();
     testShadowArgsText();
     std::printf("aa_off_test: the repeat-draw fast path's shadow instrument: %d checks\n", g_checks - checksBeforeShadow);

@@ -58,7 +58,7 @@
 
 * **Next (2026-10-27, last entry):** AA on's +1.65 ms is per-draw
   classifiers. ui-depth memo FLOWN: exact, -0.21 ms (shipped, b1561dff).
-  Shadow 1c FLOWN: 29-30% would take, 0/28M wrong. Next 1d: count bands.
+  Shadow 1c FLOWN: 29-30% would take, 0/28M wrong. 1d (bands) BUILT.
 
 ## Frame budget philosophy
 
@@ -4596,6 +4596,64 @@ would-take share should rise towards 70-80%.
 ruled out: the 10000 count bound as needed, because the sun-glare
 nomination did not act on one draw over 10000 in two windows. A
 no-op test per draw replaces it.
+
+**Phase 1d built (2026-10-27), NOT FLOWN.**
+
+Step 0 re-grepped every count test reachable on an owner X draw: the
+thunk, the verdict, the forward scope, the owner block and their
+callees, about 40 sites. The edges and exclusions:
+- `srv0IsPanelSized` at count 64 (vscreen.cpp:1402, then a memo keyed
+  on PsSrv0's generation);
+- the nomination at count 10000;
+- count 6: intro, curve, holo, target sharp, backdrop, FSS panel,
+  chrome;
+- count 240: night vision;
+- count 6 or under: after-UI's read watch, and particles below 6 or 3.
+
+Two findings changed the plan:
+1. **Scrim** (scrim_fix.h:124: X, instances 1, count 100 or over) splits
+   bands B and C by count and by instances.
+2. **The distance fix** (Sean's ini: panel_distance 0.65) is not
+   repeat-stable on a panel-sized eye draw of 64 or under. It learns
+   compositeCb on the first such draw and overrides on later ones,
+   from VsCb0 and the cb shadow, which the key does not hold.
+
+Both became one per-draw exclusion, "open": the full path would ask
+scrim and scrim's PsSrv0 cache cannot decline, or the distance fix is
+on and a band A eye draw's PsSrv0 is not known to be non-panel.
+
+Everything else that splits a band is already a term or armed:
+- wake pulse's exact counts sit behind the wake-surface term;
+- loader 30 is armed on loader frames;
+- the body-cull counts are armed;
+- the marker captures are armed;
+- weapon motion is the weapon term;
+- planets are the planet terms;
+- holo-motion runs only in term paths.
+
+**Bands as built:**
+- A: count 7-64;
+- B: count 65-10000, except 240;
+- C: count over 10000, while the nomination is a no-op for this draw
+  (glare off, no VsCb0, or VsCb0 already nominated).
+
+The ticket records its band, and a would-take draw must be in the same
+band. Excluded, first that applies:
+1. count 6 or under;
+2. count over 10000 with the nomination acting;
+3. count 240;
+4. no instances;
+5. open.
+
+The refusal order is: no ticket, key moved, the exclusions, band
+changed, dynamic, armed, not certified.
+
+**Rig:** aa_off_test, 389 checks. **Worst-case lengths:** 1117, 1010
+and 1129 characters.
+
+A risk the comparison will show: weaponMotionWants reads
+`g.sourceFrame == g.frame`, which can flip mid-frame and is not in the
+key.
 
 **The Phase 2 flight should show:**
 - the `fast` step's calls and cost;

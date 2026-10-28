@@ -1946,12 +1946,11 @@ struct ShadowState {
 };
 ShadowState g_shadow;
 
-// One draw's shadow, held by the thunk: whether it is an owner X draw, the eligibility verdict taken at entry, the bound of the args class it is outside (or
-// in), the over-10000 facts read before the draw (the nomination moves sceneCbNominated), and the class it landed in.
+// One draw's shadow, held by the thunk: whether it is an owner X draw, the eligibility verdict taken at entry, the exclusion and band the args bands put it in,
+// and the class it landed in.
 struct ShadowDraw {
     bool live = false;
     fastshadow::ArgsBound bound;
-    uint32_t over = 0;
     fastshadow::Class cls = fastshadow::Class::kUnresolved;
     fastshadow::Verdict verdict;
 };
@@ -2029,15 +2028,26 @@ inline fastshadow::Key shadowKeyNow() {
 __declspec(noinline) void shadowBegin(ShadowDraw& d, const State* s, UINT count, UINT instances) {
     d.live = true;
     g_shadow.terms = 0;
-    d.bound = fastshadow::argsBound(count, instances);
-    d.over = 0;
+    // The args bands (draw_fast_path_shadow.h): the count's band, and the per-draw tests that keep a draw out of it. VsCb0 and the scrim's cache are not in
+    // the key, so both are read here, before the draw can move them.
+    //  - Band C is admitted only while the sun-glare camera nomination in beginPanelOverride's eye branch (`if (sunglareWorldActive() && count > 10000) { cb =
+    //    VsCb0; if (cb && cb != s->sceneCbNominated) { resolve } }`) is a no-op for this draw: the glare's world shader inactive, no VsCb0, or VsCb0 the
+    //    one already nominated. Class-blind: the nomination runs in the eye branch only, and an off-screen draw is held to the same test.
+    //  - The scrim fix asks about a draw of its shape (`scrimWantsDraws() && scrimWashShape` below the inline cache test) and learns the binding as it does; the
+    //    draw is kept out while that question is open: wanted, in the shape, PsSrv0 bound, and the cache has not ruled the binding out.
+    bool acts = false;
     if (count > fastshadow::kArgsCountMax) {
-        // The sun-glare camera nomination in beginPanelOverride's eye branch (`if (sunglareWorldActive() && count > 10000) { cb = VsCb0; if (cb && cb !=
-        // s->sceneCbNominated) { resolve } }`), as its three no-op cases read before the draw: the glare's world shader inactive, no VsCb0, VsCb0 already nominated.
         void* const cb = bindingGet(BindSlot::VsCb0);
-        d.over = fastshadow::kFactOver | (sunglareWorldActive() ? 0u : fastshadow::kFactWorldInactive) | (cb ? 0u : fastshadow::kFactCbNull) |
-                 (cb == s->sceneCbNominated ? fastshadow::kFactCbNominated : 0u);
+        acts = fastshadow::nominationActs(count, sunglareWorldActive(), cb != nullptr, cb == s->sceneCbNominated);
     }
+    const bool scrimOpen = scrimWantsDraws() && scrimWashShape('X', count, instances) && !scrimWashSrv0Declines() && bindingGet(BindSlot::PsSrv0) != nullptr;
+    //  - The panel distance fix learns the composite's constant buffer on the first panel-sized draw and overrides on the later ones, from VsCb0 and the
+    //    constant-buffer shadow, which the key does not hold. Its only count test is srv0IsPanelSized (64 indices or under, a memo keyed on PsSrv0's
+    //    generation), and only an eye draw reaches it, so an eye-class draw of 64 or under is kept out while the fix is on unless the memo says PsSrv0 is
+    //    not panel-sized. The class is the ticket's (the same key is the same Rtv0); PsSrv0 unbound is a known no.
+    const bool panelOpen = s->distanceEnabled && count <= fastshadow::kArgsCountA && g_shadow.tracker.ticket.cls == fastshadow::Class::kEye &&
+                           bindingGet(BindSlot::PsSrv0) != nullptr && !(s->psSrv0PanelGen == bindingGeneration(BindSlot::PsSrv0) && !s->psSrv0Panel);
+    d.bound = fastshadow::classifyArgs(count, instances, acts, scrimOpen || panelOpen);
     d.verdict = g_shadow.tracker.judge(shadowKeyNow(), d.bound, g_shadow.wanting.load(std::memory_order_relaxed), [] { return shadowDynamicFlags(); },
                                        [s] { return shadowArmedFlags(s); });
 }
@@ -2069,8 +2079,7 @@ __declspec(noinline) void shadowAfterVerdict(ShadowDraw& d, State* s, DrawVerdic
 // The end of the thunk: count the draw, compare it when it would have taken the fast path, write the next ticket. A mismatch among the session's first
 // five is named, with the shaders and the terms that differ.
 __declspec(noinline) void shadowEnd(ShadowDraw& d, UINT count, UINT instances) {
-    const uint32_t mm = g_shadow.tracker.finish(d.verdict, d.cls, g_shadow.terms, d.bound, shadowKeyNow(),
-                                                fastshadow::DrawFacts(bindingShaderHash(BindSlot::Vs), d.over));
+    const uint32_t mm = g_shadow.tracker.finish(d.verdict, d.cls, g_shadow.terms, d.bound, shadowKeyNow(), bindingShaderHash(BindSlot::Vs));
     if (!mm || !g_shadow.tracker.takeNameSlot()) return;
     char terms[256];
     fastshadow::formatTerms(terms, sizeof(terms), mm);

@@ -76,11 +76,13 @@ constexpr uint32_t kSubscriberAll = (1u << kSubscriberCount) - 1u;
 //     only at the 2D screen's composite, the vertex shader and pixel shader pair that vscreen.cpp's footprintEyeDraw compares first, and that pair's
 //     vertex shader is one of the specials below. The design lists it among the normally-off probes; with the key at auto it is on.
 //   - The panel distance (s->distanceEnabled) and the curved screen (panelCurveWants). Both are settings a player sets and leaves on, so they are wanting
-//     in an ordinary session, and the args class excludes everything they act on. The distance fix returns kNone at `if (!srv0IsPanelSized(...))`
-//     (vscreen.cpp, beginPanelOverride), and srv0IsPanelSized returns false at `count > 64` before any side effect; the curve's recognition
-//     (`panelCurveWants() && srv0IsPanelSized(...)`) is behind the same test, its forward-scope effects (the substitution and the world route's reissue of
-//     it) are behind curveThisDraw, and its surface strip (the intro movie's and the splash's composite) is behind a verdict or introCurveThisDraw and a
-//     count of exactly 6. curveThisDraw and introCurveThisDraw are outcome terms. aa_off_test pins each of those gates in the source.
+//     in an ordinary session. Both act through srv0IsPanelSized, which answers false above 64 indices before any side effect and, at 64 or under, from a
+//     memo keyed on PsSrv0's generation (vscreen.cpp), so for a draw above 64 they cannot act. For band A (7 to 64): the curve's recognition
+//     (`panelCurveWants() && srv0IsPanelSized(...)`) takes the memo's answer, which the key holds, and its effects (the substitution and the world route's
+//     reissue of it) are behind curveThisDraw, an outcome term, as is the surface strip's introCurveThisDraw (a verdict or a count of exactly 6). The
+//     distance fix is not repeat-stable on a panel-sized draw: it learns compositeCb on the first and then overrides, and both depend on VsCb0 and the
+//     constant-buffer shadow, which the key does not hold. So while the distance fix is on, a band A eye draw is kept out unless the memo says its PsSrv0 is
+//     not panel-sized (the "open" exclusion below). aa_off_test pins each of those gates in the source.
 // Not certified, and why: the census and every skip and probe, the FSS keys, space dust and the witchspace stars hidden (the design lists them as
 // normally off, and they are). Each of those is also tested directly in the armed list.
 constexpr uint32_t kCertified = kSubDistance | kSubRemlok | kSubHolo | kSubTargetSharp | kSubUiDepth | kSubSunglare | kSubObjectProbe | kSubPanelCurve |
@@ -131,38 +133,72 @@ inline const char* armedName(unsigned i) {
     return i < kArmCount ? kNames[i] : "?";
 }
 
-// ---- The args class: the draws whose count the inventories found no test for ---------------------------------------------------------------------------
-// Kept out: the quads (6), night vision (240), the sun-glare nomination (above 10000, which also reads VsCb0), the panel-size test and the after-UI
-// watch budget (64 or less); every other matcher that reads instances requires exactly 1, so a larger value only declines more.
-constexpr uint32_t kArgsCountOver = 64, kArgsCountMax = 10000, kArgsNightVisionCount = 240;
-inline bool argsClass(char kind, uint32_t count, uint32_t instances) {
-    return kind == 'X' && count > kArgsCountOver && count <= kArgsCountMax && count != kArgsNightVisionCount && instances >= 1;
-}
+// ---- The args bands: the draws whose count and instances the inventories found no test splitting ----------------------------------------------------------
+// Phase 1d (built 2026-10-27), after the Phase 1c flight showed the Phase 1 class (count 65 to 10000, but 240, one instance or more) refusing about 45% of
+// owner X draws at a count of 64 or under. The ticket records the draw's BAND and a would-take draw must be in the same band as the ticket's:
+//   band A: count 7 to 64. The only count test that reaches an ordinary draw here is srv0IsPanelSized (count <= 64, then a memo keyed on PsSrv0's
+//           generation, which the key holds); a draw over 64 never runs it, so a repeat is only a repeat of the draw before it in the same band.
+//   band B: count 65 to 10000, but not 240. No count test reaches an ordinary draw.
+//   band C: count over 10000. Admitted only while the sun-glare camera nomination (beginPanelOverride's eye branch) is a no-op for THIS draw, which is a
+//           per-draw test because VsCb0 is not in the key: the glare's world shader inactive, no VsCb0, or VsCb0 already nominated.
+//   kept out: count 6 or under (the quads, the crisp tonemap's 3, the after-UI watch at 6 or under, the particles' 3 and 6), count 240 (night vision),
+//           instances 0, a band C draw the nomination would act on, and a draw a normally-quiet recogniser has an open question about (below).
+// The scrim wash (scrim_fix.h scrimWashShape: kind X, instances == 1, count >= 100) splits band B and band C by count AND by instances, so a band split at
+// 100 would not close it. It is a per-draw test instead: the draw is kept out while scrimWantsDraws() holds, the draw has the scrim's shape, PsSrv0 is bound
+// and scrimWashSrv0Declines() is false (the scrim has not ruled out this binding), which is exactly when the full path would ask scrimOnEyeDraw.
+// The panel distance fix is the other: with fix.panel_distance on, an eye draw of 64 indices or under whose PsSrv0 the srv0IsPanelSized memo does not
+// say is not panel-sized is kept out, because the fix learns the composite's constant buffer on the first such draw and overrides on the later ones,
+// from state (VsCb0, the constant-buffer shadow) the key does not hold. Both are the one exclusion "open".
+// Everything else that tests the count on an X draw is behind a vertex shader hash that is a term (weapon motion, the planet and solar passes, the special
+// shaders), behind a surface that is a term (the wake pulse's 576 and 1728), armed (the loader panel's 30 on a loader frame, the census skips, the quad
+// probes, the marker probe, the body cull, the eye-run ledger), or a count of 6 or under (excluded).
+constexpr uint32_t kArgsCountQuad = 6, kArgsCountA = 64, kArgsCountMax = 10000, kArgsNightVisionCount = 240;
 
-// Which bound of the class an X draw is outside (Phase 1c, built 2026-10-27), the first that applies in this order: count <= 64, count > 10000,
-// count == 240, no instances. Phase 1b flew with the args class failing on about 47% of owner X draws and the line unable to say which bound.
-enum class Bound : uint8_t { kIn = 0, kSmall, kLarge, k240, kNoInstances, kCount };
-inline Bound boundOf(uint32_t count, uint32_t instances) {
-    if (count <= kArgsCountOver) return Bound::kSmall;
-    if (count > kArgsCountMax) return Bound::kLarge;
-    if (count == kArgsNightVisionCount) return Bound::k240;
-    if (instances == 0) return Bound::kNoInstances;
-    return Bound::kIn;
-}
-inline const char* boundName(Bound b) {
-    static const char* const kNames[static_cast<size_t>(Bound::kCount)] = {"in", "count<=64", "count>10000", "count 240", "no instances"};
+enum class Band : uint8_t { kNone = 0, kA, kB, kC };
+inline const char* bandName(Band b) {
+    static const char* const kNames[4] = {"none", "A", "B", "C"};
     return kNames[static_cast<size_t>(b)];
 }
-// A bound, or "in the class". A bool converts to it (true: in the class; false: outside, read as the first bound) for the callers that only know
-// whether; the draw path passes the real bound.
+// The band of a count: none for 6 or under and for 240.
+inline Band bandOf(uint32_t count) {
+    if (count <= kArgsCountQuad || count == kArgsNightVisionCount) return Band::kNone;
+    if (count <= kArgsCountA) return Band::kA;
+    return count <= kArgsCountMax ? Band::kB : Band::kC;
+}
+
+// What a draw is kept out by (Phase 1c, split into bounds), the first that applies in this order: count <= 6, count > 10000 with the nomination acting,
+// count == 240, no instances, the scrim open.
+enum class Bound : uint8_t { kIn = 0, kSmall, kLargeActs, k240, kNoInstances, kOpen, kCount };
+inline const char* boundName(Bound b) {
+    static const char* const kNames[static_cast<size_t>(Bound::kCount)] = {"in", "count<=6", "count>10000 acts", "count 240", "no instances", "scrim or panel open"};
+    return kNames[static_cast<size_t>(b)];
+}
+
+// Would the sun-glare camera nomination act on this draw? beginPanelOverride: `if (sunglareWorldActive() && count > 10000) { cb = VsCb0; if (cb && cb !=
+// sceneCbNominated) { resolve... } }`. It is a no-op when the glare's world shader is inactive, when there is no VsCb0, and when VsCb0 is the nominated one.
+inline bool nominationActs(uint32_t count, bool worldActive, bool haveCb, bool cbIsNominated) { return count > kArgsCountMax && worldActive && haveCb && !cbIsNominated; }
+
+// A bound and the band, or "in the bands". A bool converts to it (true: in band B; false: kept out as the first bound) for the callers that only know
+// whether; the draw path passes the real classification.
 struct ArgsBound {
     Bound b = Bound::kIn;
+    Band band = Band::kNone;
     ArgsBound() = default;
-    ArgsBound(bool in) : b(in ? Bound::kIn : Bound::kSmall) {}
-    explicit ArgsBound(Bound x) : b(x) {}
+    ArgsBound(bool in) : b(in ? Bound::kIn : Bound::kSmall), band(in ? Band::kB : Band::kNone) {}
+    ArgsBound(Bound x, Band y) : b(x), band(y) {}
     bool in() const { return b == Bound::kIn; }
 };
-inline ArgsBound argsBound(uint32_t count, uint32_t instances) { return ArgsBound(boundOf(count, instances)); }
+inline ArgsBound classifyArgs(uint32_t count, uint32_t instances, bool nominationActing, bool open) {
+    const Band band = bandOf(count);
+    if (count <= kArgsCountQuad) return ArgsBound(Bound::kSmall, band);
+    if (nominationActing) return ArgsBound(Bound::kLargeActs, band);
+    if (count == kArgsNightVisionCount) return ArgsBound(Bound::k240, band);
+    if (instances == 0) return ArgsBound(Bound::kNoInstances, band);
+    if (open) return ArgsBound(Bound::kOpen, band);
+    return ArgsBound(Bound::kIn, band);
+}
+// Is an X draw of this count and instances in a band, with every per-draw test passing?
+inline bool argsClass(char kind, uint32_t count, uint32_t instances) { return kind == 'X' && classifyArgs(count, instances, false, false).in(); }
 
 // ---- The key and the ticket -----------------------------------------------------------------------------------------------------------------------
 struct Key {
@@ -243,6 +279,7 @@ struct Ticket {
     Key key;
     Class cls = Class::kUnresolved;
     bool valid = false;
+    Band band = Band::kNone;   // the band of the draw that wrote it (Phase 1d): a would-take draw must be in the same one
 };
 
 // What a would-take draw's actual outcome says against the ticket: every term not ordinary, and a class that changed.
@@ -251,17 +288,20 @@ inline uint32_t mismatchTerms(uint32_t terms, Class cls, Class ticketCls) {
 }
 
 // ---- Eligibility ------------------------------------------------------------------------------------------------------------------------------------
-// The refusal reason of an owner X draw, the first that applies in this order, or kTake.
-// The args class is four reasons, one per bound, the first that applies (Phase 1c).
-enum class Reason : uint8_t { kTake = 0, kNoTicket, kKeyMoved, kArgsSmall, kArgsLarge, kArgs240, kArgsNoInstances, kDynamic, kArmed, kNotCertified, kCount };
+// The refusal reason of an owner X draw, the first that applies in this order, or kTake. The args exclusions come before `band changed`, so a draw that is
+// kept out of the bands is counted under its own exclusion and not as a change of band (Phase 1d).
+enum class Reason : uint8_t { kTake = 0, kNoTicket, kKeyMoved, kArgsSmall, kArgsLargeActs, kArgs240, kArgsNoInstances, kArgsOpen, kBandChanged, kDynamic,
+                              kArmed, kNotCertified, kCount };
 inline const char* reasonName(Reason r) {
-    static const char* const kNames[static_cast<size_t>(Reason::kCount)] = {"take", "no ticket", "key moved", "args count<=64", "args count>10000", "args count 240",
-                                                                           "args no instances", "dynamic", "armed", "not certified"};
+    static const char* const kNames[static_cast<size_t>(Reason::kCount)] = {
+        "take", "no ticket", "key moved", "args count<=6", "args count>10000 acts", "args count 240", "args no instances", "args scrim or panel open", "band changed",
+        "dynamic", "armed", "not certified"};
     return kNames[static_cast<size_t>(r)];
 }
-// The refusal reason for a draw outside the class (the bound must not be kIn).
+// The refusal reason for a draw kept out of the bands (the bound must not be kIn).
 inline Reason argsReason(Bound b) {
-    return b == Bound::kLarge ? Reason::kArgsLarge : b == Bound::k240 ? Reason::kArgs240 : b == Bound::kNoInstances ? Reason::kArgsNoInstances : Reason::kArgsSmall;
+    return b == Bound::kLargeActs ? Reason::kArgsLargeActs : b == Bound::k240 ? Reason::kArgs240 : b == Bound::kNoInstances ? Reason::kArgsNoInstances
+           : b == Bound::kOpen ? Reason::kArgsOpen : Reason::kArgsSmall;
 }
 
 struct Verdict {
@@ -279,18 +319,18 @@ inline unsigned lowestBit(uint32_t m) {
 // ---- Why a draw recorded no ticket (Phase 1b, built 2026-10-27) ----------------------------------------------------------------------------------------
 // Phase 1 flew at 0% would-take with about 70% of owner X draws recording no ticket and no way to say which term stopped them: the comparison runs only
 // on would-take draws. This counts, for every owner X draw that does NOT record a ticket, the FIRST reason in a fixed order, by class, and keeps the
-// vertex shaders that reason was counted for. The order: the class unknown; the four bounds of the args class (Phase 1c: count <= 64, count > 10000,
-// count == 240, no instances; the first that applies); an off-screen target unsettled; a wake-pulse surface; then the other 23 outcome terms in their
+// vertex shaders that reason was counted for. The order: the class unknown; the five exclusions of the args bands (Phase 1d: count <= 6, count > 10000 with
+// the nomination acting, count == 240, no instances, the scrim open; the first that applies); an off-screen target unsettled; a wake-pulse surface; then the other 23 outcome terms in their
 // own order (verdict first, the special vertex shaders last). A draw with several non-ordinary terms is counted under the first, so a later term is
 // hidden behind an earlier one until that one is dealt with.
-constexpr unsigned kNtClassUnknown = 0, kNtBoundSmall = 1, kNtBoundLarge = 2, kNtBound240 = 3, kNtBoundNoInstances = 4, kNtUnsettled = 5, kNtWake = 6,
-                   kNtFirstTerm = 7;
+constexpr unsigned kNtClassUnknown = 0, kNtBoundSmall = 1, kNtBoundLargeActs = 2, kNtBound240 = 3, kNtBoundNoInstances = 4, kNtBoundOpen = 5, kNtUnsettled = 6, kNtWake = 7,
+                   kNtFirstTerm = 8;
 constexpr unsigned kNoTicketReasons = kNtFirstTerm + (static_cast<unsigned>(kTermCount) - 2);
 static_assert(static_cast<unsigned>(kTermUnsettled) == static_cast<unsigned>(kTermCount) - 2 && static_cast<unsigned>(kTermWake) == static_cast<unsigned>(kTermCount) - 1,
-              "the two off-screen terms are the last two, so reason 7 + i is outcome term i for the other 23");
+              "the two off-screen terms are the last two, so reason 8 + i is outcome term i for the other 23");
 static_assert(kNoTicketReasons <= 32, "the reasons fit the sketch table");
 inline const char* noTicketName(unsigned r) {
-    return r == kNtClassUnknown ? "class unknown" : r >= kNtBoundSmall && r <= kNtBoundNoInstances ? boundName(static_cast<Bound>(r - kNtBoundSmall + 1))
+    return r == kNtClassUnknown ? "class unknown" : r >= kNtBoundSmall && r <= kNtBoundOpen ? boundName(static_cast<Bound>(r - kNtBoundSmall + 1))
            : r == kNtUnsettled ? "unsettled" : r == kNtWake ? "wake surface" : r < kNoTicketReasons ? termName(r - kNtFirstTerm) : "?";
 }
 // The first failing reason of a draw, or -1 when it records a ticket (the same test as ticketValid, with the reason kept).
@@ -339,24 +379,6 @@ struct VsSketch {
     }
 };
 
-// ---- What the sun-glare nomination does on a draw over 10000 (Phase 1c) -------------------------------------------------------------------------------
-// beginPanelOverride's eye branch nominates the scene camera from a big draw's VsCb0: `if (sunglareWorldActive() && count > 10000) { cb = VsCb0; if (cb &&
-// cb != sceneCbNominated) { resolve ... } }`. It is a no-op when the glare's world shader is inactive, when there is no VsCb0, or when VsCb0 is the one
-// already nominated, and it only runs for eye draws. The thunk reads those three facts before the draw (the nomination moves sceneCbNominated), and the
-// tally counts them by class so a widened args class can be sized.
-constexpr uint32_t kFactOver = 1, kFactWorldInactive = 2, kFactCbNull = 4, kFactCbNominated = 8;
-enum Over : unsigned { kOverDraws = 0, kOverWorldInactive, kOverCbNull, kOverCbNominated, kOverActs, kOverCount };
-
-// What the draw path hands the tally beside the verdict and the terms: the bound vertex shader (bindingShaderHash(Vs); 0 is a value like any other) and the
-// over-10000 facts above. Converts from the hash alone.
-struct DrawFacts {
-    uint64_t vs = 0;
-    uint32_t over = 0;
-    DrawFacts() = default;
-    DrawFacts(uint64_t hash) : vs(hash) {}
-    DrawFacts(uint64_t hash, uint32_t facts) : vs(hash), over(facts) {}
-};
-
 // ---- The window's counters -------------------------------------------------------------------------------------------------------------------------
 struct Counters {
     uint64_t draws[3] = {};                                     // owner X draws by class
@@ -370,8 +392,7 @@ struct Counters {
     uint64_t mismatch[kMismatchTermCount] = {};                 // by term
     uint64_t noTicket[3][kNoTicketReasons] = {};                // draws that recorded no ticket: by class, by first failing reason (Phase 1b)
     VsSketch noTicketVs[kNoTicketReasons];                      // ...and the vertex shaders each reason was counted for, all classes together
-    VsSketch boundVs[3][4];                                     // the four args bounds' vertex shaders by class (Phase 1c; bound b is index b - 1)
-    uint64_t over[3][kOverCount] = {};                          // draws over 10000 by class, and the nomination's no-op cases among them (Phase 1c)
+    VsSketch boundVs[3][5];                                     // the five exclusions' vertex shaders by class (Phase 1d; bound b is index b - 1)
     void reset() { *this = Counters(); }
 };
 
@@ -393,6 +414,7 @@ struct Tracker {
         if (!ticket.valid) { v.reason = Reason::kNoTicket; return v; }
         if (!sameKey(ticket.key, now)) { v.reason = Reason::kKeyMoved; return v; }
         if (!args.in()) { v.reason = argsReason(args.b); return v; }
+        if (args.band != ticket.band) { v.reason = Reason::kBandChanged; return v; }
         v.dynamic = dynFn();
         if (v.dynamic) { v.reason = Reason::kDynamic; return v; }
         v.armed = armFn();
@@ -402,21 +424,13 @@ struct Tracker {
         return v;
     }
 
-    // One owner X draw, finished: the class it landed in, its non-ordinary terms, the bound of the args class it is outside (or in), the key as it stands
-    // after the draw, and the facts beside it (the bound vertex shader, the over-10000 facts). Counts it, compares it when it was a would-take draw
-    // (returning the mismatch terms, 0 for none), writes the next ticket, and when no ticket results counts the first reason why.
-    uint32_t finish(const Verdict& v, Class cls, uint32_t terms, ArgsBound bound, const Key& after, const DrawFacts& facts = DrawFacts()) {
+    // One owner X draw, finished: the class it landed in, its non-ordinary terms, the exclusion and band of the args bands it was classified into, the key as it
+    // stands after the draw, and the vertex shader bound for it (bindingShaderHash(Vs); 0 is a value like any other). Counts it, compares it when it was a
+    // would-take draw (returning the mismatch terms, 0 for none), writes the next ticket with the draw's band, and when no ticket results counts the first
+    // reason why.
+    uint32_t finish(const Verdict& v, Class cls, uint32_t terms, ArgsBound bound, const Key& after, uint64_t vs = 0) {
         const size_t c = static_cast<size_t>(cls);
         ++count.draws[c];
-        if ((facts.over & kFactOver) && c < 2) {
-            uint64_t* o = count.over[c];
-            const bool inactive = (facts.over & kFactWorldInactive) != 0, noCb = (facts.over & kFactCbNull) != 0, nominated = (facts.over & kFactCbNominated) != 0;
-            ++o[kOverDraws];
-            o[kOverWorldInactive] += inactive;
-            o[kOverCbNull] += noCb;
-            o[kOverCbNominated] += nominated;
-            o[kOverActs] += (cls == Class::kEye && !inactive && !noCb && !nominated);   // only an eye draw reaches the nomination, and only these proceed to its resolve
-        }
         uint32_t mm = 0;
         if (v.reason == Reason::kTake) {
             ++count.take[c];
@@ -434,6 +448,7 @@ struct Tracker {
         }
         ticket.key = after;
         ticket.cls = cls;
+        ticket.band = bound.band;
         ticket.valid = ticketValid(terms, bound.in(), cls);
         if (ticket.valid) {
             ++count.tickets;
@@ -441,9 +456,9 @@ struct Tracker {
             const int why = noTicketReason(terms, bound, cls);
             if (why >= 0) {
                 ++count.noTicket[c][why];
-                count.noTicketVs[why].add(facts.vs);
-                if (why >= static_cast<int>(kNtBoundSmall) && why <= static_cast<int>(kNtBoundNoInstances) && c < 2)
-                    count.boundVs[c][why - static_cast<int>(kNtBoundSmall)].add(facts.vs);
+                count.noTicketVs[why].add(vs);
+                if (why >= static_cast<int>(kNtBoundSmall) && why <= static_cast<int>(kNtBoundOpen) && c < 2)
+                    count.boundVs[c][why - static_cast<int>(kNtBoundSmall)].add(vs);
             }
         }
         return mm;
@@ -585,8 +600,8 @@ inline size_t formatNoTicketLine(char* out, size_t cap, uint32_t endFrame, uint3
             reasonTotal[r] += c.noTicket[cl][r];
             all += c.noTicket[cl][r];
         }
-    o.put("draw fast path (shadow) no ticket: TEMPORARY (built 2026-10-27, Phase 1c), 1800-frame window ending %u, %u frames. Owner X draws a frame that "
-          "recorded no ticket, by first failing reason (class unknown, the four args bounds, unsettled, wake surface, then verdict to special vs): ",
+    o.put("draw fast path (shadow) no ticket: TEMPORARY (built 2026-10-27, Phase 1d), 1800-frame window ending %u, %u frames. Owner X draws a frame that "
+          "recorded no ticket, by first failing reason (class unknown, the five exclusions, unsettled, wake surface, then verdict to special vs): ",
           static_cast<unsigned>(endFrame), static_cast<unsigned>(frames));
     if (!all) {
         o.put("-.");
@@ -622,46 +637,40 @@ inline size_t formatNoTicketLine(char* out, size_t cap, uint32_t endFrame, uint3
     return o.len;
 }
 
-// The third line of the window (Phase 1c): the draws outside the args class, a frame, by class and by the first bound that applies (count <= 64, count >
-// 10000, count == 240, no instances), each with its three most frequent vertex shaders and each one's share of that bound's draws in that class; then,
-// for the draws over 10000, a frame by class, the shares (glare off / no cb / cb nominated / acts) where the sun-glare nomination is a no-op or would
-// proceed to its resolve. '-' when no classed draw was outside the class. Under 1150 characters at its worst (the rig pins it).
+// The third line of the window (Phase 1d): the classed owner X draws kept out of the bands, a frame, by class and by the first exclusion that applies (count
+// <= 6, count > 10000 with the nomination acting, count == 240, no instances, the scrim open), each with its three most frequent vertex shaders and each one's
+// share, in percent, of that exclusion's draws in that class. '-' when no classed draw was kept out. Under 1150 characters at its worst (the rig pins it).
+inline void putPerFrame(Out& o, double perFrame) { o.put(perFrame < 100.0 ? " %.1f" : " %.0f", perFrame); }
 inline size_t formatArgsLine(char* out, size_t cap, uint32_t endFrame, uint32_t frames, const Counters& c) {
     Out o(out, cap);
     const double f = frames ? static_cast<double>(frames) : 1.0;
-    uint64_t any = 0, overAny = 0;
-    for (unsigned cl = 0; cl < 2; ++cl) {
-        for (unsigned b = 0; b < 4; ++b) any += c.noTicket[cl][kNtBoundSmall + b];
-        overAny += c.over[cl][kOverDraws];
-    }
-    o.put("draw fast path (shadow) args: TEMPORARY (Phase 1c), 1800-frame window ending %u, %u frames. Owner X draws a frame outside the "
-          "args class, by first bound, with top vertex shaders and shares:",
+    uint64_t any = 0;
+    for (unsigned cl = 0; cl < 2; ++cl)
+        for (unsigned b = 0; b < 5; ++b) any += c.noTicket[cl][kNtBoundSmall + b];
+    o.put("draw fast path (shadow) args: 1800-frame window ending %u, %u frames. Owner X draws a frame kept out of the bands, by first exclusion, with their top "
+          "vertex shaders and shares in percent:",
           static_cast<unsigned>(endFrame), static_cast<unsigned>(frames));
     if (!any) o.put(" -.");
-    for (unsigned cl = 0; cl < 2; ++cl)
-        for (unsigned b = 0; b < 4; ++b) {
+    for (unsigned cl = 0; cl < 2; ++cl) {
+        bool first = true;
+        for (unsigned b = 0; b < 5; ++b) {
             const uint64_t n = c.noTicket[cl][kNtBoundSmall + b];
             if (!n) continue;
+            if (first) o.put(" %s:", className(static_cast<Class>(cl)));
+            first = false;
             const VsSketch& sk = c.boundVs[cl][b];
             unsigned slot[3];
             const unsigned got = sk.top(3, slot);
-            o.put(" %s %s %.1f:", className(static_cast<Class>(cl)), boundName(static_cast<Bound>(b + 1)), static_cast<double>(n) / f);
+            o.put(" %s", boundName(static_cast<Bound>(b + 1)));
+            putPerFrame(o, static_cast<double>(n) / f);
+            o.put(":");
             for (unsigned j = 0; j < got; ++j) {
                 double share = 100.0 * static_cast<double>(sk.count[slot[j]]) / static_cast<double>(n);
                 if (share > 100.0) share = 100.0;
-                o.put("%s %016llX %.0f%%", j ? "," : "", static_cast<unsigned long long>(sk.key[slot[j]]), share);
+                o.put("%s %016llX %.0f", j ? "," : "", static_cast<unsigned long long>(sk.key[slot[j]]), share);
             }
             o.put(";");
         }
-    o.put(" Over 10000 a frame, %% glare off/no cb/cb nominated/acts:");
-    if (!overAny) o.put(" -.");
-    for (unsigned cl = 0; cl < 2; ++cl) {
-        const uint64_t n = c.over[cl][kOverDraws];
-        if (!n) continue;
-        const double d = static_cast<double>(n);
-        o.put(" %s %.1f %.0f/%.0f/%.0f/%.0f%%;", className(static_cast<Class>(cl)), d / f, 100.0 * static_cast<double>(c.over[cl][kOverWorldInactive]) / d,
-              100.0 * static_cast<double>(c.over[cl][kOverCbNull]) / d, 100.0 * static_cast<double>(c.over[cl][kOverCbNominated]) / d,
-              100.0 * static_cast<double>(c.over[cl][kOverActs]) / d);
     }
     return o.len;
 }
