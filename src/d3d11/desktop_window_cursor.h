@@ -23,6 +23,12 @@ void desktopWindowCursorUninstall();
 void desktopWindowCursorSetActive(bool active);
 // The window's client centre in screen coordinates, as the render thread last measured it, for "SetCursorPos at the client centre".
 void desktopWindowCursorPublishCentre(int x, int y);
+// Round 4, at each owned Present while the window is active: the Windows cursor is hidden while the window is the foreground one and the cursor is inside its client area,
+// and shown otherwise (the title bar and frame stay grabbable). The show count belongs to the thread that owns the window, so this does nothing unless the Present hook
+// runs on it (said once). EDVR keeps an offset of its own hides (never above 0); the ShowCursor hook, on that thread only and only while hiding is wanted, pushes the count
+// below 0 again after each of the game's calls and gives the game the count it would have seen without EDVR. The offset is given back when hiding is no longer wanted and
+// in desktopWindowCursorSetActive(false).
+void desktopWindowCursorHide(HWND hwnd);
 // The 10 s cursor line, and the counters start again. Returns the length written.
 int desktopWindowCursorTakeLine(char* out, size_t size);
 

@@ -7,6 +7,8 @@
 //   keeps the dimension the user changed more and clamps to the work area (minimum client height 240), and the census of the skipped draws.
 //   THE CURSOR (round 3): the clip verdict (a rectangle is released only while the window is active), the client-centre test, the DirectInput cooperative level's words and
 //   the cursor line; and the pins that hold the hooks to passing through everything but that one call.
+//   THE HIDDEN CURSOR (round 4): the rule (foreground and inside the client and active), the show-count protocol against a fake ShowCursor (the game sees the counts it would
+//   see without EDVR, a game "show" never leaves the real count at 0 or above while hiding is wanted, the hides are given back), and the pins on the thread check and the undo.
 //   THE WIRING (source pins, each with a control that trips it): the key is read as one word with the default game, the flat profile's allow-list does not carry it,
 //   the window is moved only from the thread-pool callback, the Present hook calls the feature before the census span and the real Present, the draw skip sits in the
 //   verdict and in the three thunks the verdict does not cover, the host hands the eye over after it is captured, the export and the source are built, and edvr.ini
@@ -287,10 +289,80 @@ static void cursorRules() {
     desktopWindowCooperativeWords(words, sizeof words, 0u);
     check(!std::strcmp(words, "neither exclusive nor nonexclusive, neither foreground nor background"), "no flags");
     char line[500];
-    desktopWindowCursorLine(line, sizeof line, 12, "1920x1080 at 0,0", 3, 580, 575, 590, 2, "hide, display count -1");
+    desktopWindowCursorLine(line, sizeof line, 12, "1920x1080 at 0,0", 3, 580, 575, 590, 2, "hide, display count -1", 54, 60, -2, 7);
     check(!std::strcmp(line, "desktop window: cursor (10 s): clip released 12 (last rect 1920x1080 at 0,0), clip passed 3, setpos 580 (at the client centre 575), getpos 590, showcursor 2 "
-                             "(last hide, display count -1)"),
-          "the cursor line");
+                             "(last hide, display count -1), hidden on 54 of 60 Presents, offset now -2, pushed down 7"),
+          "the cursor line, with the hide at its end");
+}
+
+// A fake ShowCursor: one count, one thread's.
+struct FakeShow {
+    int real = 0;
+    int calls = 0;
+    bool stuck = false;   // a ShowCursor that never goes down
+    int operator()(bool visible) {
+        ++calls;
+        if (!stuck) real += visible ? 1 : -1;
+        return real;
+    }
+};
+
+static void hideRules() {
+    // The rule.
+    check(desktopWindowHideCursor(true, true, true), "active, foreground and inside the client: hidden");
+    check(!desktopWindowHideCursor(true, false, true) && !desktopWindowHideCursor(true, true, false) && !desktopWindowHideCursor(false, true, true) && !desktopWindowHideCursor(false, false, false),
+          "not foreground, not inside the client (title bar, frame, another window) or not active: visible");
+    check(desktopWindowPointInRect(10, 20, 10, 20, 110, 220) && desktopWindowPointInRect(109, 219, 10, 20, 110, 220) && !desktopWindowPointInRect(110, 100, 10, 20, 110, 220) &&
+              !desktopWindowPointInRect(50, 220, 10, 20, 110, 220) && !desktopWindowPointInRect(9, 100, 10, 20, 110, 220) && !desktopWindowPointInRect(50, 19, 10, 20, 110, 220),
+          "inside the client is the left and top edges in, the right and bottom out");
+    check(desktopWindowPointInRect(-1919, 5, -1920, 0, -1000, 100), "screen coordinates can be negative");
+
+    // The protocol, with the game at count 0 (the cursor visible, as the flight saw it: the game's hide returned 0).
+    FakeShow fake;
+    DesktopWindowShowCount count;
+    count.hide(fake);
+    check(fake.real == -1 && count.offset() == -1 && fake.calls == 1, "a Present with hiding wanted and the count not known: one hide, and the real count is below 0");
+    count.hide(fake);
+    check(fake.calls == 1 && count.offset() == -1, "the count is known to be below 0: nothing more is called");
+    int seen = count.afterGameCall(fake(true), true, fake);   // the game calls ShowCursor(TRUE): the real count goes to 0
+    check(seen == 1 && fake.real == -1 && count.offset() == -2 && count.takePushed() == 1, "a game show: it sees 1, as it would without EDVR, and the real count is pushed below 0 again");
+    seen = count.afterGameCall(fake(false), true, fake);      // the game hides: the real count goes to -2
+    check(seen == 0 && fake.real == -2 && count.offset() == -2 && count.takePushed() == 0, "a game hide: it sees 0, and nothing is pushed");
+    bool flashed = false;
+    for (int i = 0; i < 100; ++i) {   // the game's 50 to 200 calls a second, in pairs
+        const int a = count.afterGameCall(fake(true), true, fake);
+        flashed = flashed || fake.real >= 0;
+        const int b = count.afterGameCall(fake(false), true, fake);
+        flashed = flashed || fake.real >= 0;
+        if (a != 1 || b != 0) flashed = true;
+        if (count.offset() > 0) flashed = true;
+    }
+    check(!flashed, "a hundred game show and hide pairs: the real count is never 0 or above after a call, the game always sees 1 and 0, the offset is never above 0");
+    count.unhide(fake);
+    check(count.offset() == 0 && fake.real == 0, "the hides are given back: the real count is the game's, the offset 0");
+    check(count.afterGameCall(fake(true), false, fake) == 1 && fake.real == 1, "not wanted: the game's count is the real one, untouched");
+    count.unhide(fake);
+    check(fake.real == 1, "an unhide at offset 0 calls nothing");
+
+    // The bounds: a count that never goes down is tried 16 times and no more; a deep offset is given back.
+    FakeShow stuck;
+    stuck.stuck = true;
+    stuck.real = 3;
+    DesktopWindowShowCount bounded;
+    bounded.hide(stuck);
+    check(stuck.calls == DesktopWindowShowCount::kPushBound && bounded.offset() == -DesktopWindowShowCount::kPushBound, "a hide that does not take is tried 16 times, no more");
+    FakeShow deep;
+    DesktopWindowShowCount many;
+    many.noteReal(deep(false));   // hiding wanted, the count below 0
+    for (int i = 0; i < 40; ++i) many.afterGameCall(deep(true), true, deep);   // 40 game shows in a row, each pushed down
+    const int before = many.offset();
+    many.unhide(deep);
+    check(before < -16 && many.offset() == 0, "an offset deeper than 16 is still given back in one go");
+    DesktopWindowShowCount fresh;
+    FakeShow high;
+    high.real = 5;
+    fresh.hide(high);
+    check(high.real == -1 && fresh.offset() == -6, "a count above 0 is brought below 0 (the cursor was shown several times over)");
 }
 
 static void lines() {
@@ -429,7 +501,7 @@ static void wiring(const std::string& root) {
                at(setPos, "return TRUE") == std::string::npos && at(setPos, "return FALSE") == std::string::npos &&
                at(getPos, "if (g_active.load(std::memory_order_relaxed))") != std::string::npos && at(getPos, "return g_realGetPos(point);") != std::string::npos &&
                at(getPos, "return TRUE") == std::string::npos && at(getPos, "return FALSE") == std::string::npos &&
-               at(show, "const int count = g_realShow(show);") != std::string::npos && at(show, "return count;") != std::string::npos && count(show, "return ") == 1;
+               at(show, "const int real = g_realShow(show);") != std::string::npos && at(show, "return count;") != std::string::npos && count(show, "return ") == 1;
     };
     check(cursorHooks(cursor), "ClipCursor, SetCursorPos, GetCursorPos and ShowCursor are patched in the executable; only ClipCursor with a rectangle, while active, is changed");
     check(!cursorHooks(replaced(cursor, "desktopWindowClipVerdict(g_active.load(std::memory_order_relaxed), rect != nullptr)", "desktopWindowClipVerdict(true, rect != nullptr)")),
@@ -459,6 +531,27 @@ static void wiring(const std::string& root) {
     check(flagged(cpp, cursor), "the cursor flag is set at the activation's commit, cleared in leave before its early return, and a clip is released once on the transition");
     check(!flagged(replaced(cpp, "desktopWindowCursorSetActive(false);", ""), cursor), "control: a flag never cleared trips the pin");
     check(!flagged(replaced(cpp, "S.active = true;\n        desktopWindowCursorSetActive(true);", "S.active = true;"), cursor), "control: a flag never set trips the pin");
+    // The hidden cursor (round 4): on the window's thread only, undone in SetActive(false), decided after the centre is published.
+    auto hides = [&](const std::string& c, const std::string& w) {
+        const std::string hide = between(c, "void desktopWindowCursorHide(HWND hwnd) {", "int desktopWindowCursorTakeLine(");
+        const std::string hook = between(c, "int WINAPI hookShowCursor(BOOL show) {", "template <class F>");
+        const std::string active = between(c, "void desktopWindowCursorSetActive(bool active) {", "void desktopWindowCursorHide(HWND hwnd) {");
+        const size_t centre = at(w, "desktopWindowCursorPublishCentre(centre.x, centre.y);"), decide = at(w, "desktopWindowCursorHide(hwnd);", centre);
+        return at(hide, "GetWindowThreadProcessId(hwnd, nullptr)") != std::string::npos && at(hide, "if (owner != here) {") != std::string::npos &&
+               at(hide, "the cursor is not hidden -- the window belongs to thread %lu, Present runs on %lu") != std::string::npos &&
+               at(hide, "desktopWindowHideCursor(true, GetForegroundWindow() == hwnd, inside)") != std::string::npos && at(hide, "GetCursorPos(&cursor)") != std::string::npos &&
+               at(hide, "ClientToScreen(hwnd, &origin)") != std::string::npos && at(hide, "desktopWindowPointInRect(cursor.x, cursor.y, origin.x, origin.y, origin.x + client.right, origin.y + client.bottom)") != std::string::npos &&
+               at(hide, "g_count.hide(realShow);") != std::string::npos && at(hide, "g_count.unhide(realShow);") != std::string::npos &&
+               at(hook, "if (g_hideThread.load(std::memory_order_relaxed) == GetCurrentThreadId())") != std::string::npos &&
+               at(hook, "g_count.afterGameCall(real, g_hideWanted.load(std::memory_order_relaxed), realShow);") != std::string::npos &&
+               at(active, "if (g_realShow) g_count.unhide(realShow);") != std::string::npos && at(active, "g_hideWanted.store(false") != std::string::npos &&
+               centre != std::string::npos && decide != std::string::npos;
+    };
+    check(hides(cursor, cpp), "the cursor is hidden by the rule, on the window's thread only (said once otherwise), with the hook acting on that thread only, and the hides given back when the activation ends");
+    check(!hides(replaced(cursor, "if (owner != here) {", "if (false) {"), cpp), "control: no thread check trips the pin");
+    check(!hides(replaced(cursor, "if (g_hideThread.load(std::memory_order_relaxed) == GetCurrentThreadId())", "if (true)"), cpp), "control: a ShowCursor hook that acts on every thread trips the pin");
+    check(!hides(replaced(cursor, "if (g_realShow) g_count.unhide(realShow);", ""), cpp), "control: no undo when the activation ends trips the pin");
+    check(!hides(cursor, replaced(cpp, "desktopWindowCursorHide(hwnd);", "")), "control: a rule never decided trips the pin");
     {   // the line follows the census line, every 10 s, and the centre is published every Present
         const size_t fn = at(cpp, "bool desktopWindowPresent(");
         const size_t census = at(cpp, "g_census.format(census, sizeof census);", fn), take = at(cpp, "desktopWindowCursorTakeLine(cursor, sizeof cursor);", census);
@@ -503,6 +596,7 @@ int main(int argc, char** argv) {
     rules();
     windowRules();
     cursorRules();
+    hideRules();
     lines();
     if (argc > 1) wiring(argv[1]);
     else check(false, "argv[1] is the repository root");

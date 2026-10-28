@@ -40,6 +40,16 @@ ShowFn g_realShow = nullptr;
 IatPatch g_patchClip, g_patchSetPos, g_patchGetPos, g_patchShow;
 bool g_installTried = false;
 
+// The hide (round 4). The wanted state is decided by the render thread at each Present and read by the ShowCursor hook, which acts only on the thread that owns the window
+// (g_hideThread, set by the Present hook when it runs on it), so g_count is touched by that one thread only.
+std::atomic<bool> g_hideWanted{false};
+std::atomic<DWORD> g_hideThread{0};
+DesktopWindowShowCount g_count;
+std::atomic<uint32_t> g_hiddenPresents{0}, g_decidedPresents{0};
+bool g_noteThread = false, g_noteHook = false;   // said once; the render thread
+
+int realShow(bool visible) { return g_realShow(visible ? TRUE : FALSE); }
+
 BOOL WINAPI hookClipCursor(const RECT* rect) {
     switch (desktopWindowClipVerdict(g_active.load(std::memory_order_relaxed), rect != nullptr)) {
         case DwClipVerdict::Release:
@@ -77,8 +87,12 @@ BOOL WINAPI hookGetCursorPos(LPPOINT point) {
 }
 
 int WINAPI hookShowCursor(BOOL show) {
-    const int count = g_realShow(show);
-    if (g_active.load(std::memory_order_relaxed)) {   // counted only
+    const int real = g_realShow(show);
+    int count = real;
+    // On the window's thread only: while the cursor is wanted hidden the count is pushed below 0 again, and the game is given the count it would have seen without EDVR.
+    if (g_hideThread.load(std::memory_order_relaxed) == GetCurrentThreadId())
+        count = g_count.afterGameCall(real, g_hideWanted.load(std::memory_order_relaxed), realShow);
+    if (g_active.load(std::memory_order_relaxed)) {   // counted
         g_showCalls.fetch_add(1, std::memory_order_relaxed);
         g_lastShow.store(show ? 1 : 0, std::memory_order_relaxed);
         g_lastDisplay.store(count, std::memory_order_relaxed);
@@ -118,6 +132,8 @@ void desktopWindowCursorInstall() {
 
 void desktopWindowCursorUninstall() {
     g_active.store(false, std::memory_order_relaxed);
+    g_hideWanted.store(false, std::memory_order_relaxed);
+    if (g_hideThread.load(std::memory_order_relaxed) == GetCurrentThreadId() && g_realShow) g_count.unhide(realShow);   // give back the hides, if this is the thread that made them
     iatHookUninstall(&g_patchClip);
     iatHookUninstall(&g_patchSetPos);
     iatHookUninstall(&g_patchGetPos);
@@ -132,7 +148,48 @@ void desktopWindowCursorSetActive(bool active) {
         ClipCursor(nullptr);
         g_centre.store(0, std::memory_order_relaxed);
     }
-    if (!active) g_centre.store(0, std::memory_order_relaxed);
+    if (!active) {
+        g_centre.store(0, std::memory_order_relaxed);
+        g_hideWanted.store(false, std::memory_order_relaxed);
+        if (g_realShow) g_count.unhide(realShow);   // the cursor comes back: every hide EDVR made is given back (a no-op at offset 0; the offset exists on the Present thread only)
+    }
+}
+
+void desktopWindowCursorHide(HWND hwnd) {
+    if (!g_active.load(std::memory_order_relaxed) || !hwnd) return;
+    g_decidedPresents.fetch_add(1, std::memory_order_relaxed);
+    const DWORD here = GetCurrentThreadId(), owner = GetWindowThreadProcessId(hwnd, nullptr);
+    if (owner != here) {   // the show count is the window's thread's: from another thread this would hide nothing, or the wrong thread's cursor
+        g_hideWanted.store(false, std::memory_order_relaxed);
+        if (!g_noteThread) {
+            g_noteThread = true;
+            Log::get().note("desktop window: the cursor is not hidden -- the window belongs to thread %lu, Present runs on %lu", static_cast<unsigned long>(owner),
+                            static_cast<unsigned long>(here));
+        }
+        return;
+    }
+    if (!g_patchShow.applied) {   // without the ShowCursor hook the game's own calls would show it again between Presents
+        g_hideWanted.store(false, std::memory_order_relaxed);
+        if (!g_noteHook) {
+            g_noteHook = true;
+            Log::get().note("desktop window: the cursor is not hidden -- the ShowCursor hook is not installed");
+        }
+        return;
+    }
+    g_hideThread.store(here, std::memory_order_relaxed);
+    // EDVR's own calls, through EDVR's own import table (the patches are in the executable's): the cursor in screen coordinates against the client area in screen coordinates.
+    POINT cursor{}, origin{0, 0};
+    RECT client{};
+    const bool inside = GetCursorPos(&cursor) && GetClientRect(hwnd, &client) && ClientToScreen(hwnd, &origin) &&
+                        desktopWindowPointInRect(cursor.x, cursor.y, origin.x, origin.y, origin.x + client.right, origin.y + client.bottom);
+    const bool hide = desktopWindowHideCursor(true, GetForegroundWindow() == hwnd, inside);
+    g_hideWanted.store(hide, std::memory_order_relaxed);
+    if (hide) {
+        g_hiddenPresents.fetch_add(1, std::memory_order_relaxed);
+        g_count.hide(realShow);
+    } else {
+        g_count.unhide(realShow);
+    }
 }
 
 void desktopWindowCursorPublishCentre(int x, int y) {
@@ -154,7 +211,8 @@ int desktopWindowCursorTakeLine(char* out, size_t size) {
     char show[64] = "none";
     const int lastShow = g_lastShow.exchange(-1, std::memory_order_relaxed);
     if (lastShow >= 0) std::snprintf(show, sizeof show, "%s, display count %d", lastShow ? "show" : "hide", g_lastDisplay.load(std::memory_order_relaxed));
-    return desktopWindowCursorLine(out, size, released, rect, passed, setPos, setPosCentre, getPos, showCalls, show);
+    const unsigned hidden = g_hiddenPresents.exchange(0, std::memory_order_relaxed), decided = g_decidedPresents.exchange(0, std::memory_order_relaxed);
+    return desktopWindowCursorLine(out, size, released, rect, passed, setPos, setPosCentre, getPos, showCalls, show, hidden, decided, g_count.offset(), g_count.takePushed());
 }
 
 void desktopWindowNoteMouseCooperative(DWORD flags, long hr) {

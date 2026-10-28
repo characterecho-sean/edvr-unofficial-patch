@@ -927,6 +927,7 @@ Outcome presentActive(IDXGISwapChain* swap, ID3D11Device* device, uint64_t now, 
         POINT centre = {clientW / 2, clientH / 2};
         if (ClientToScreen(hwnd, &centre)) desktopWindowCursorPublishCentre(centre.x, centre.y);
     }
+    desktopWindowCursorHide(hwnd);   // the cursor over the picture, while the window has focus (round 4)
     evaluateWindow(swap, hwnd, aspect, now);
 
     bool stale = false;

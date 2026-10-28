@@ -307,12 +307,73 @@ inline int desktopWindowCooperativeWords(char* out, size_t size, uint32_t flags)
     const char* where = foreground && !background ? "foreground" : background && !foreground ? "background" : foreground ? "foreground and background" : "neither foreground nor background";
     return std::snprintf(out, size, "%s, %s%s", level, where, (flags & 0x10u) ? ", no windows key" : "");
 }
-// The cursor line, every 10 s while active, after the census line (the strings are the caller's: "WxH at x,y" or "none", and "show, display count N" or "none").
+// The cursor line, every 10 s while active, after the census line (the strings are the caller's: "WxH at x,y" or "none", and "show, display count N" or "none"). Round 4 added
+// the hide at its end: Presents the cursor was wanted hidden on of those it was decided on, the net hides EDVR holds (never above 0), and the pushes the ShowCursor hook made.
 inline int desktopWindowCursorLine(char* out, size_t size, unsigned released, const char* lastRect, unsigned passed, unsigned setPos, unsigned setPosCentre, unsigned getPos,
-                                   unsigned showCalls, const char* lastShow) {
-    return std::snprintf(out, size, "desktop window: cursor (10 s): clip released %u (last rect %s), clip passed %u, setpos %u (at the client centre %u), getpos %u, showcursor %u (last %s)",
-                         released, lastRect, passed, setPos, setPosCentre, getPos, showCalls, lastShow);
+                                   unsigned showCalls, const char* lastShow, unsigned hiddenPresents, unsigned decidedPresents, int offset, unsigned pushed) {
+    return std::snprintf(out, size,
+                         "desktop window: cursor (10 s): clip released %u (last rect %s), clip passed %u, setpos %u (at the client centre %u), getpos %u, showcursor %u (last %s), "
+                         "hidden on %u of %u Presents, offset now %d, pushed down %u",
+                         released, lastRect, passed, setPos, setPosCentre, getPos, showCalls, lastShow, hiddenPresents, decidedPresents, offset, pushed);
 }
+
+// ---- the cursor is hidden over the picture (round 4) ----
+// Sean wants the Windows cursor gone while it is over the desktop window's client area and the window has focus; over the title bar or frame, over another window, or when
+// the window is not the foreground one it stays, so the title bar and edges can be grabbed. Decided at each owned Present while the window is active.
+inline bool desktopWindowHideCursor(bool active, bool foreground, bool insideClient) { return active && foreground && insideClient; }
+// A screen point inside the client rectangle {left, top, right, bottom} (right and bottom excluded), in screen coordinates.
+inline bool desktopWindowPointInRect(int x, int y, int left, int top, int right, int bottom) { return x >= left && x < right && y >= top && y < bottom; }
+
+// The cursor shows while the show count of the thread that owns the window is 0 or more. EDVR hides it by calling ShowCursor(FALSE) until the count is below 0; the game goes
+// on calling ShowCursor itself (50 to 200 times a second while it has focus), and must see the counts it would see without EDVR, so EDVR keeps an offset: its net hides,
+// never above 0 (0 or negative). The game's count is the real count less the offset. All of it belongs to ONE thread (the window's; the Present hook runs on it, and the
+// ShowCursor hook acts only when called on it), so nothing here is atomic. `show` is a callable taking true to show and false to hide and returning the real count.
+class DesktopWindowShowCount {
+public:
+    static constexpr int kPushBound = 16;     // hides in one go, to get the count below 0
+    static constexpr int kUndoBound = 256;    // shows in one go, to give them back
+
+    int offset() const { return offset_; }
+    bool known() const { return known_; }
+    int last() const { return last_; }
+    unsigned takePushed() { const unsigned n = pushed_; pushed_ = 0; return n; }
+    // Any ShowCursor call on the thread returned this count.
+    void noteReal(int count) { last_ = count; known_ = true; }
+    // A Present at which hiding is wanted: if the count is not known to be below 0, hide until it is.
+    template <class Show> void hide(Show&& show) {
+        for (int i = 0; i < kPushBound && (!known_ || last_ >= 0); ++i) {
+            noteReal(show(false));
+            --offset_;
+        }
+    }
+    // A Present at which hiding is not wanted (or the activation ended): give back every hide EDVR made.
+    template <class Show> void unhide(Show&& show) {
+        for (int i = 0; i < kUndoBound && offset_ < 0; ++i) {
+            noteReal(show(true));
+            ++offset_;
+        }
+    }
+    // The ShowCursor hook, after the game's call returned realCount: while hiding is wanted the count is pushed below 0 again (so a game "show" never flashes the cursor
+    // between Presents), and the game gets the count it would have seen without EDVR: the real one less the offset in force when it called.
+    template <class Show> int afterGameCall(int realCount, bool hidingWanted, Show&& show) {
+        const int seen = realCount - offset_;
+        noteReal(realCount);
+        if (hidingWanted) {
+            for (int i = 0; i < kPushBound && last_ >= 0; ++i) {
+                noteReal(show(false));
+                --offset_;
+                ++pushed_;
+            }
+        }
+        return seen;
+    }
+
+private:
+    int offset_ = 0;
+    int last_ = 0;
+    bool known_ = false;
+    unsigned pushed_ = 0;
+};
 
 // The formats of one draw. The shader view reads the bytes the eye holds as they are: a typeless source gets the UNORM view of its family, a typed one its own
 // format; a typed _SRGB source is decoded by the view and encoded again by an _SRGB target on an 8-bit buffer. The target is the buffer's own bit depth.
