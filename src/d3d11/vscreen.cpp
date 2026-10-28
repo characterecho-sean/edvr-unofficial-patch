@@ -2034,7 +2034,9 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     // F157: the coat outfit's pack, a draw of the local body, is left out of both eyes while the coat outfit is armed (native on foot active, Gear_Back decided as the outer garment).
     // Not armed, this is the one relaxed load. It asks before the gate below, whose answer says nothing about native on foot, so the eye memo is refreshed here on Rtv0's generation
     // (the same refresh the eye gate makes further down, and the same answer). The index count and instance count are checked first, from the call's own arguments.
-    if (nativeOnFootCoatPackLive() && (kind == 'X' || kind == 'I') && nofoot::f157::countsMatch(count, instances)) {
+    // F158 (measure only): while its window is open (a second relaxed load, its own), every indexed draw into an eye-sized target is handed to nativeOnFootSpawnDraw first, so the pack
+    // is counted as the game issues it, before F157 leaves it out. That call never skips a draw.
+    if ((kind == 'X' || kind == 'I') && (nativeOnFootSpawnLive() || (nativeOnFootCoatPackLive() && nofoot::f157::countsMatch(count, instances)))) {
         const uint32_t bodyRtvGen = bindingGeneration(BindSlot::Rtv0);
         if (s->rtv0EyeGen != bodyRtvGen) {
             s->rtv0Cand = -1;
@@ -2043,7 +2045,9 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
         }
         if (s->rtv0Eye) {
             const ResourceInfo* bodyRt = rtv0Resolved(s);
-            if (nativeOnFootCoatPackSkips(self, count, instances, true, bodyRt ? bodyRt->resource : nullptr)) return DrawVerdict::kSkip;
+            const void* bodyRes = bodyRt ? bodyRt->resource : nullptr;
+            if (nativeOnFootSpawnLive()) nativeOnFootSpawnDraw(self, count, instances, args.start, args.base, bodyRes);
+            if (nativeOnFootCoatPackLive() && nofoot::f157::countsMatch(count, instances) && nativeOnFootCoatPackSkips(self, count, instances, true, bodyRes)) return DrawVerdict::kSkip;
         }
     }
     if (flatTemporalCapturing()) flatTemporalDraw(self, count, instances);

@@ -13169,6 +13169,62 @@ def _hj_f157_coat_pack(rows, ctx):
     return ("IDLE", text + "; no weapon was drawn for 5 s of it, so nothing is judged" + rtext)
 
 
+def _hj_f158_spawn(rows, ctx):
+    """F158 (MEASURE ONLY): the local body's draws over the first 30 s on foot. A window of 30 s opens when native on foot begins and when F144 decides the coat outfit; it lists
+    every kind of draw into an eye with stencil ref 21 (identity: the shaders, index count and instance count) with the ms of its first and last frame, and is written once, when it
+    ends: a header (the switch time: when the pack, F157's identity, was first drawn), an identity line each, and the adjacent pairs (an identity whose range ends where the next
+    one's begins in one index buffer). Per window this reports the switch time, the identities that stopped within 1 s of it (those in an adjacent pair that stopped first), and the
+    overflow. NEVER APPLIED when a window of 5 s or more listed no draw at all (the draw path did not run, or stencil ref 21 into an eye matches nothing in this build); OK when a
+    window saw the pack; IDLE when windows listed draws and none saw the pack (another outfit, or the pack's identity no longer matches); PARTIAL when OK but a window was not recorded."""
+    heads, ids, pairs, lost = rows.get("head", []), rows.get("id", []), rows.get("pairs", []), rows.get("lost", [])
+    if not heads and not ids and not pairs and not lost:
+        return None
+    parts, silent, seen_pack, listed_any = [], [], 0, False
+    for h in heads:
+        win, ran, listed = h["win"], int(h["ran"]), int(h["listed"])
+        switch = int(h["switch"]) if h.get("switch") is not None else None
+        over = "none" if not int(h["odraws"]) else "%s draw(s) of %s%s identity(ies) past the cap of %s turned away" % (h["odraws"], h["oids"], h["oplus"], h["cap"])
+        start = _hclock(h["_t"] - ran / 1000.0) if h.get("_t") is not None else "?"
+        head = "window %s (from about %s, opened by %s, %d ms, ended by %s%s)" % (win, start, h["opened"], ran, h["ended"],
+                                                                                  ", %s later trigger(s) ignored" % h["ignored"] if int(h["ignored"]) else "")
+        if listed:
+            listed_any = True
+        elif ran >= 5000 and not int(h["odraws"]):
+            silent.append(win)
+            parts.append(head + ": no draw of the local body was listed")
+            continue
+        mine = [r for r in ids if r["win"] == win]
+        marked = []   # the pairs with an identity that stopped within 1 s of the switch: (a, b, who stopped)
+        for p in [p for p in pairs if p["win"] == win]:
+            marked += [(int(a), int(b), w) for a, b, w in re.findall(r"(\d+)>(\d+) stopped:(a|b|both)", p["list"])]
+        if switch is None:
+            parts.append(head + ": the pack was not drawn; %d identity(ies) listed; overflow %s" % (listed, over))
+            continue
+        seen_pack += 1
+        near = [r for r in mine if r.get("stop") is not None and abs(int(r["last"]) - switch) <= 1000]
+        inpair = {x for a, b, _ in marked for x in (a, b)}
+        near.sort(key=lambda r: (int(r["n"]) not in inpair, int(r["n"])))
+        shown = []
+        for r in near[:8]:
+            n = int(r["n"])
+            mates = sorted({b if a == n else a for a, b, _ in marked if n in (a, b)})
+            shown.append("#%d (count %s instances %s, last %s ms%s)" % (n, r["count"], r["inst"], r["last"], "; adjacent to " + ", ".join("#%d" % m for m in mates) if mates else ""))
+        if len(near) > 8:
+            shown.append("%d more" % (len(near) - 8))
+        parts.append("%s: the pack first drawn at %d ms; %d of %d identity(ies) stopped within 1 s of it%s; %d adjacent pair(s) with one of them; overflow %s" % (
+            head, switch, len(near), listed, ": " + ", ".join(shown) if shown else "", len(marked), over))
+    if lost:
+        parts.append("%d window(s) not recorded (%s)" % (len(lost), lost[0]["why"]))
+    text = " | ".join(parts) if parts else "%d identity line(s) and no window header" % len(ids)
+    if silent:
+        return ("NEVER APPLIED", text + " [window %s ran 5 s or more and listed nothing: the draw path did not run, or stencil ref 21 into an eye-sized target matches no draw in this build]" % ", ".join(silent))
+    if seen_pack:
+        return ("PARTIAL" if lost else "OK", text)
+    if listed_any:
+        return ("IDLE", text + " [no window saw the pack: another outfit, or its identity no longer matches this build's draw]")
+    return ("IDLE", text)
+
+
 def _hj_f135_menu(rows, ctx):
     """F135 (MEASURE ONLY): which panel hook, or field, is active exactly while the on-foot Esc menu or a panel is up. For each Escape (or pad Start or Back) down edge, the
     counters that rose within 0.5 s after it, those that were already non-zero before it, and those that stayed 0, from the probe's rise and fall event lines; the 1 s lines'
@@ -14298,6 +14354,19 @@ HEALTH_RULES = (
                 r"a weapon drawn for (?P<weapon>\d+) s$"),
         ("retired", r"native on foot: experimental\.native_on_foot_body_draw_hide is retired \(F157\): ignored \(the file said (?P<v>-?\d+), "),
     ), _hj_f157_coat_pack),
+    # F158 (measure only): the local body's draws over the first 30 s on foot, written once when the window ends: a header, an identity per line, the adjacent pairs
+    _hrule("body draws at spawn (F158)", ("F158",), ("body draws at spawn (F158)",), (
+        ("head", r"body draws at spawn \(F158\) window (?P<win>\d+): opened by (?P<opened>.+?), ran (?P<ran>\d+) ms \(ended by (?P<ended>.+?)\), the pack "
+                 r"(?:first drawn at (?P<switch>\d+) ms|not drawn in the window), (?P<listed>\d+) identity\(ies\) listed, (?P<odraws>\d+) draw\(s\) of (?P<oids>\d+)(?P<oplus>\+?) "
+                 r"identity\(ies\) past the cap of (?P<cap>\d+) turned away, (?P<ignored>\d+) later trigger\(s\) ignored, counted as the game issues them \(before the pack's skip\)$"),
+        ("id", r"body draws at spawn \(F158\) window (?P<win>\d+) identity (?P<n>\d+): vs (?P<vs>[0-9A-F]{16}) ps (?P<ps>[0-9A-F]{16}) count (?P<count>\d+) instances (?P<inst>\d+), "
+               r"first (?P<first>\d+) ms, last (?P<last>\d+) ms, frames eye 0 (?P<f0>\d+), eye 1 (?P<f1>\d+)(?:, eye unknown (?P<fu>\d+))?, first variant ib (?P<ib>[0-9A-F]+) "
+               r"start (?P<start>\d+) base (?P<base>-?\d+), (?P<variants>\d+)(?P<vplus>\+?) variant\(s\), previous draw (?P<prev>none|ib [0-9A-F]+ start \d+ count \d+)"
+               r"(?P<pack>, is the pack)?(?:, stopped at (?P<stop>\d+) ms)?$"),
+        ("pairs", r"body draws at spawn \(F158\) window (?P<win>\d+) adjacent pairs: (?P<total>\d+) pair\(s\), (?P<marked>\d+) with an identity stopped within 1 s of the switch time: "
+                  r"(?P<list>.+)$"),
+        ("lost", r"body draws at spawn \(F158\) window (?P<win>\d+): not recorded \((?P<why>.+)\)$"),
+    ), _hj_f158_spawn),
     _hrule("ADS sight line (F143)", ("F143",), ("native on foot ADS sight line (F143)", "native on foot ADS sight from the game (F143"), (
         # F146: the "key off" reason and the trims' columns are optional (a log from before F146 has them), and so is the switch's own line, read and ignored
         ("sec", r"native on foot ADS sight line \(F143\) " + H_WL + r": item (?P<item>.+?) scope (?P<scope>yes|no|unknown), source per frame: settled line (?P<game>\d+) "
@@ -15363,6 +15432,7 @@ def self_test_health():
     f121b_path = os.path.join(repo_root(), "src", "d3d11", "visor_census_core.h")
     f121c_path = os.path.join(repo_root(), "src", "d3d11", "visor_eye_trust.h")
     f140reader_path = os.path.join(repo_root(), "src", "d3d11", "journal_loadout_reader.h")
+    f158_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f158.h")
     try:
         source, swap, f90src, f91src = read_text(src_path), read_text(swap_path), read_text(f90_path), read_text(f91_path)
         f105src, f105note = read_text(f105_path), read_text(f105_note_path)
@@ -15374,6 +15444,7 @@ def self_test_health():
         f121bsrc = read_text(f121b_path)
         f121csrc = read_text(f121c_path)
         f140readersrc = read_text(f140reader_path)
+        f158src = read_text(f158_path)
     except OSError as e:
         print("health: the DLL source the self-test reads its log formats from is not where it looks (%s)" % e)
         return False
@@ -15412,6 +15483,16 @@ def self_test_health():
             fmts[key] = health_c_format(f91src, needle)
         if fmts[key] is None:
             raise AssertionError("native_on_foot_f91.h has no format holding %r: the --health rule that reads it is out of date" % needle)
+        return health_render(fmts[key], vals)
+
+    def R158(needle, *vals):
+        """F158's lines (formatHeader, formatIdentity, formatPairs and their pieces in native_on_foot_f158.h) and the two "not recorded" notes (native_on_foot.cpp), from their own
+        format literals."""
+        key = "f158:" + needle
+        if key not in fmts:
+            fmts[key] = health_c_format(f158src, needle) or health_c_format(source, needle)
+        if fmts[key] is None:
+            raise AssertionError("native_on_foot_f158.h and native_on_foot.cpp have no format holding %r: the --health rule that reads it is out of date" % needle)
         return health_render(fmts[key], vals)
 
     def R105(needle, *vals):
@@ -17448,6 +17529,87 @@ def self_test_health():
         check("F157 coat pack: a drifted window line is unparsed", ["native on foot coat pack hidden (F157) 10 s: something else"], 4, [("UNPARSED", P157)])
         check("F157 coat pack: a drifted retired line is unparsed", ["native on foot: experimental.native_on_foot_body_draw_hide is retired (F157): ignored (something else)"], 4,
               [("UNPARSED", P157)])
+
+        # ---- F158 (measure only): the local body's draws over the first 30 s on foot, written once when the window ends ----
+        P158 = "body draws at spawn (F158)"
+        PACK_VS, PACK_PS = 0x7B0DC42D383F694C, 0x0DF03E64DF9DBEF1
+
+        def hd158(win=1, opened="native on foot beginning", ran=30003, ended="the clock", switch=7100, listed=5, odraws=0, oids=0, plus="", ign=0):
+            pack = R158("first drawn at %u ms", switch) if switch is not None else R158("not drawn in the window")
+            return R158("body draws at spawn (F158) window %u: opened by", win, opened, ran, ended, pack, listed, odraws, oids, plus, 256, ign)
+
+        def id158(win=1, n=0, count=3474, inst=1, first=0, last=30000, f0=1790, f1=1790, fu=0, vs=0x1111111111111111, ps=0x2222222222222222, ib=0x1DF15DD06A0, start=3879112, base=11,
+                  variants=1, vplus="", prev=None, pack=False, stop=None):
+            unknown = R158(", eye unknown %u", fu) if fu else ""
+            before = R158("ib %llX start %u count %u", *prev) if prev else "none"
+            tail = (R158(", is the pack") if pack else "") + (R158(", stopped at %u ms", stop) if stop is not None else "")
+            return R158("body draws at spawn (F158) window %u identity %u: vs", win, n, vs, ps, count, inst, first, last, f0, f1, unknown, ib, start, base, variants, vplus, before, tail)
+
+        def pr158(win=1, total=2, marked=1, lst="0>1 stopped:both, 3>4"):
+            return R158("body draws at spawn (F158) window %u adjacent pairs:", win, total, marked, lst)
+
+        def lost158(win=1, why="opened"):
+            return R158("body draws at spawn (F158) window %u: not recorded (the draw thread held the list when the window " + why + ")", win)
+
+        def window158(win=1, sec=40, switch=7100, ran=30003, **kw):
+            """The flight's story in one window: two lower-detail meshes adjacent in one index buffer that stop at 7000 ms, a mesh drawn to the end, the full-detail pair from the switch.
+            The header is at second `sec` (the window ended then), the rest follow."""
+            return [(sec, hd158(win=win, switch=switch, ran=ran, listed=5, **kw)),
+                    id158(win, 0, count=1200, last=7000, start=1000, stop=7000, prev=(0xFF, 9, 9), ib=0x100),
+                    id158(win, 1, count=6000, last=7000, start=2200, stop=7000, prev=(0x100, 1000, 1200), ib=0x100),
+                    id158(win, 2, count=900, last=30000, start=60, ib=0x200, prev=(0x100, 2200, 6000)),
+                    id158(win, 3, count=3474, first=7100, last=30000, vs=PACK_VS, ps=PACK_PS, start=3879112, ib=0x300, variants=64, vplus="+", prev=(0x200, 60, 900)),
+                    id158(win, 4, count=30312, first=7100, last=30000, vs=PACK_VS, ps=PACK_PS, start=3882586, ib=0x300, variants=64, vplus="+", prev=(0x300, 3879112, 3474), pack=True),
+                    pr158(win)]
+
+        no_pairs158 = pr158(total=0, marked=0, lst="none")
+        check("F158 body draws: the flight's window: the lower-detail pair stopped at the switch", window158(), 0, [("OK", P158)],
+              has=["the pack first drawn at 7100 ms", "2 of 5 identity(ies) stopped within 1 s of it: #0 (count 1200 instances 1, last 7000 ms; adjacent to #1), #1 (count 6000 instances 1, last 7000 ms; adjacent to #0)",
+                   "1 adjacent pair(s) with one of them", "overflow none", "opened by native on foot beginning, 30003 ms, ended by the clock"], lacks=["UNPARSED", "NEVER APPLIED"])
+        check("F158 body draws: the window's start is the header's clock less its length", window158(), 0, [("OK", P158)], has=["window 1 (from about 10:00:09, "], lacks=["UNPARSED"])
+        out158 = check("F158 body draws: an identity that stopped in a pair comes before one that stopped alone",
+                       [hd158(listed=4), id158(1, 3, last=7050, stop=7050, count=700, start=9000), id158(1, 5, last=7000, stop=7000, count=800, start=1000, ib=0x100),
+                        id158(1, 6, last=7000, stop=7000, count=300, start=1800, ib=0x100), id158(1, 9, last=3000, stop=3000, count=100), pr158(total=1, marked=1, lst="5>6 stopped:both")],
+                       0, [("OK", P158)], has=["3 of 4 identity(ies) stopped within 1 s of it: #5 (count 800"], lacks=["UNPARSED", "#9 ("])
+        if not (out158.find("#5 (") < out158.find("#6 (") < out158.find("#3 (")):
+            print("health F158 body draws: the identities in a pair are not listed first:\n%s" % out158)
+            ok = False
+        check("F158 body draws: 1000 ms from the switch is near and 1001 ms is not", [hd158(listed=2), id158(1, 0, last=8100, stop=8100, count=10), id158(1, 1, last=8101, stop=8101, count=11),
+                                                                                        no_pairs158], 0, [("OK", P158)],
+              has=["1 of 2 identity(ies) stopped within 1 s of it: #0 (count 10"], lacks=["#1 (count 11", "UNPARSED"])
+        check("F158 body draws: a stop before the switch is near by the same distance", [hd158(listed=1), id158(1, 0, last=6100, stop=6100, count=10), no_pairs158], 0,
+              [("OK", P158)], has=["1 of 1 identity(ies) stopped within 1 s of it: #0 (count 10"], lacks=["UNPARSED"])
+        check("F158 body draws: an identity that did not stop is not counted whatever its last time", [hd158(listed=1), id158(1, 0, last=7100, count=10), no_pairs158], 0,
+              [("OK", P158)], has=["0 of 1 identity(ies) stopped within 1 s of it"], lacks=["UNPARSED"])
+        check("F158 body draws: two windows, each read with its own identities", window158(1, 40, switch=7100) + window158(2, 100, switch=3200, opened="the coat outfit decided", ign=1), 0,
+              [("OK", P158)], has=["window 1 (", "window 2 (", "opened by the coat outfit decided, 30003 ms, ended by the clock, 1 later trigger(s) ignored", "the pack first drawn at 3200 ms"],
+              lacks=["UNPARSED"])
+        check("F158 body draws: the overflow is named", [hd158(listed=256, odraws=903, oids=768, plus="+"), id158(1, 0, last=7000, stop=7000), no_pairs158], 0,
+              [("OK", P158)], has=["overflow 903 draw(s) of 768+ identity(ies) past the cap of 256 turned away"], lacks=["UNPARSED"])
+        check("F158 body draws: a window that never saw the pack is idle", [hd158(switch=None, listed=2), id158(1, 0, last=30000), id158(1, 1, last=30000, count=5), no_pairs158], 0,
+              [("IDLE", P158)], has=["the pack was not drawn; 2 identity(ies) listed", "no window saw the pack"], lacks=["UNPARSED", "NEVER APPLIED"])
+        check("F158 body draws: a window of 5 s or more that listed nothing never applied", [hd158(switch=None, listed=0, ran=30003), no_pairs158], 3, [("NEVER APPLIED", P158)],
+              has=["no draw of the local body was listed", "window 1 ran 5 s or more and listed nothing"], lacks=["UNPARSED"])
+        check("F158 body draws: ... 5 s exactly is the line", [hd158(switch=None, listed=0, ran=5000, ended="native on foot ending"), no_pairs158], 3, [("NEVER APPLIED", P158)],
+              lacks=["UNPARSED"])
+        check("F158 body draws: ... and 4999 ms is idle", [hd158(switch=None, listed=0, ran=4999, ended="native on foot ending"), no_pairs158], 0, [("IDLE", P158)],
+              lacks=["UNPARSED", "NEVER APPLIED"])
+        check("F158 body draws: one empty window among windows that saw the pack still fails", window158(1) + [(100, hd158(win=2, switch=None, listed=0)), pr158(win=2, total=0, marked=0, lst="none")], 3,
+              [("NEVER APPLIED", P158)], has=["window 2 ran 5 s or more and listed nothing"], lacks=["UNPARSED"])
+        check("F158 body draws: a window not recorded makes an otherwise good run partial", window158() + [lost158(2)], 0, [("PARTIAL", P158)],
+              has=["1 window(s) not recorded (the draw thread held the list when the window opened)"], lacks=["UNPARSED"])
+        check("F158 body draws: a window not recorded and nothing else is idle", [lost158(1, "ended")], 0, [("IDLE", P158)], has=["1 window(s) not recorded"], lacks=["UNPARSED", "NEVER APPLIED"])
+        check("F158 body draws: an eye the table could not name reads", [hd158(listed=1), id158(1, 0, last=7000, stop=7000, fu=12), no_pairs158], 0, [("OK", P158)], lacks=["UNPARSED"])
+        check("F158 body draws: a pairs list cut short with its 'more' reads", [hd158(listed=2), id158(1, 0, last=7000, stop=7000, count=1200, start=1000, ib=0x100),
+              id158(1, 1, last=7000, stop=7000, count=6000, start=2200, ib=0x100), pr158(total=254, marked=1, lst="0>1 stopped:both, 1>2, 2>3, +250 more")], 0, [("OK", P158)],
+              has=["1 adjacent pair(s) with one of them"], lacks=["UNPARSED"])
+        out158 = check("F158 body draws: a log with no F158 line leaves the rule not present", ["native on foot full outfit (F144): Gear_Back kept shadows only: suit arms present"], 0,
+                       lacks=["UNPARSED", "NEVER APPLIED"])
+        if "not present" not in out158 or P158 not in out158.split("not present", 1)[1]:
+            print("health F158 body draws: the rule is not listed as not present:\n%s" % out158)
+            ok = False
+        check("F158 body draws: a drifted header is unparsed", ["body draws at spawn (F158) window 1: something else"], 4, [("UNPARSED", P158)])
+        check("F158 body draws: a drifted identity line is unparsed", ["body draws at spawn (F158) window 1 identity 0: something else"], 4, [("UNPARSED", P158)])
 
         # ---- F135: the on-foot menu probe (MEASURE ONLY) ----
         M135 = "menu probe (F135)"

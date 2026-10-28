@@ -68,7 +68,8 @@
 #include "native_on_foot_f152.h"   // F152: the readout's origin rows (the own shadow of b1; pure parts)
 #include "native_on_foot_f151.h"   // F151: the weapon readout's draw bound by its place when its stream entry lies outside every shadow window (pure parts)
 #include "native_on_foot_f157.h"   // F157: the coat outfit's pack draw left out of both eyes (pure parts)
-#include "xinput_watch.h"          // F135: the pad's Start and Back edges, evidence for the menu probe only
+#include "native_on_foot_f158.h"   // F158: the local body's draws over the first 30 s on foot, measured (pure parts)
+#include "xinput_watch.h"         // F135: the pad's Start and Back edges, evidence for the menu probe only
 #include "native_on_foot_f109.h"   // F109: look to aim on foot, the player's own turn in ADS, snap or smooth turning (pure parts)
 #include "native_on_foot_f129.h"   // F129: look to aim reads its turn from the player's own look processor; the look path instrument (pure parts)
 #include "../common/comfort_fade.h"   // F109: the snap's short fade (edvr::comfort::publish; the runtime blends it over both eyes)
@@ -33092,6 +33093,114 @@ bool nativeOnFootCoatPackSkips(ID3D11DeviceContext* ctx, uint32_t indexCount, ui
     return true;
 }
 
+// ---- F158 (MEASURE ONLY): the local body's draws over the first 30 s on foot ----------------------------------------------------------------------------------------------------
+// F157 leaves the coat's full-detail pack out from the first second it is armed, yet the pack was in view for the first seconds after spawning: the game drew it another way at first.
+// A window of 30 s opens when native on foot begins and when F144 decides the coat outfit (native_on_foot_f158.h has the rules). While it runs, the draw path lists every kind of draw the
+// local body makes into the eyes (stencil ref 21, any shader) with the times it was drawn; the frame thread writes the window once, when it ends. Nothing is written while it runs.
+namespace {
+nofoot::f158::SpawnLog g_spawnLog;              // the draw thread writes; the frame thread opens and reads it with the draw thread excluded
+std::atomic_flag g_spawnBusy = ATOMIC_FLAG_INIT;   // held by the draw thread for one draw, and by the frame thread for an open or a read
+
+struct SpawnState {   // the frame thread's
+    nofoot::f158::WindowRules rules;
+    uint32_t window = 0;       // the open (or last) window's number, counted from 1 over the session
+    bool recording = false;    // the list was emptied when this window opened and the draw path is recording into it
+};
+SpawnState g_spawn;
+
+// The frame thread: the draw thread's flag, waited for a moment. The draw thread holds it for one draw, so this fails only when that thread was stopped inside one.
+bool spawnTake() {
+    for (int i = 0; i < 200000; ++i) {
+        if (!g_spawnBusy.test_and_set(std::memory_order_acquire)) return true;
+        YieldProcessor();
+    }
+    return false;
+}
+
+// The frame thread: the window that just ended, written once (the header, an identity per line in first-seen order, the adjacent pairs), and the list given back to the draw thread.
+void spawnWrite(uint32_t window, const nofoot::f158::WindowRules::Step& step) {
+    if (!g_spawn.recording) {
+        Log::get().note("body draws at spawn (F158) window %u: not recorded (the draw thread held the list when the window opened)", static_cast<unsigned>(window));
+        return;
+    }
+    if (!spawnTake()) {
+        Log::get().note("body draws at spawn (F158) window %u: not recorded (the draw thread held the list when the window ended)", static_cast<unsigned>(window));
+        return;
+    }
+    char line[1100];
+    nofoot::f158::formatHeader(line, sizeof(line), window, step.closedTrigger, step.closedMs, step.closed, g_spawnLog, step.closedIgnored);
+    Log::get().note("%s", line);
+    for (uint32_t i = 0; i < g_spawnLog.count(); ++i) {
+        nofoot::f158::formatIdentity(line, sizeof(line), window, i, g_spawnLog.at(i), step.closedMs);
+        Log::get().note("%s", line);
+    }
+    nofoot::f158::formatPairs(line, sizeof(line), window, g_spawnLog, step.closedMs);
+    Log::get().note("%s", line);
+    g_spawnBusy.clear(std::memory_order_release);
+}
+
+// The frame thread, every frame (the boundary): the window's rules, the flag the draw path reads, the list emptied when a window opens and written when it ends. A window that ends
+// closes the draw path first (the flag), then reads the list; a window that opens empties the list before the flag is set.
+void spawnTick(uint64_t now) {
+    SpawnState& s = g_spawn;
+    const nofoot::f158::WindowRules::Step step = s.rules.step(nativeOnFootActive(), nofoot::f144::gearBackPromoted(nativeOnFootGearBack()), now);
+    if (step.closed != nofoot::f158::Ended::kNone) {
+        g_nativeOnFootSpawnLive.store(false, std::memory_order_relaxed);
+        spawnWrite(s.window, step);
+        s.recording = false;
+    }
+    if (step.opened != nofoot::f158::Trigger::kNone) {
+        ++s.window;
+        if (spawnTake()) {
+            g_spawnLog.begin(now);
+            g_spawnBusy.clear(std::memory_order_release);
+            s.recording = true;
+            g_nativeOnFootSpawnLive.store(true, std::memory_order_relaxed);
+        }
+    }
+}
+}  // namespace
+
+// F158 (declared in native_on_foot.h): the draw thread, an indexed draw into an eye-sized target on the owner context, only while a window is open. Every such draw is the previous
+// indexed draw of its eye for the next one; the local body's (stencil ref 21, any shader) is listed by its identity with the index buffer, start index and base vertex it read.
+void nativeOnFootSpawnDraw(ID3D11DeviceContext* ctx, uint32_t indexCount, uint32_t instances, uint32_t startIndex, int32_t baseVertex, const void* rtvResource) {
+    if (!g_nativeOnFootSpawnLive.load(std::memory_order_relaxed)) return;
+    ID3D11Buffer* ib = nullptr;
+    DXGI_FORMAT ibFormat = DXGI_FORMAT_UNKNOWN;
+    UINT ibOffset = 0;
+    ctx->IAGetIndexBuffer(&ib, &ibFormat, &ibOffset);
+    if (ib) ib->Release();   // the identity is kept, never a reference
+    ID3D11DepthStencilState* ds = nullptr;
+    UINT ref = 0;
+    ctx->OMGetDepthStencilState(&ds, &ref);
+    if (ds) ds->Release();
+    const uint32_t frame = g_f44Frame.load(std::memory_order_relaxed);
+    int eye = f44::eyeOfDraw(frame);
+    if (eye != 0 && eye != 1) {
+        char src = 0;
+        eye = f44::targetEye(rtvResource, &src);
+        if (eye != 0 && eye != 1) eye = -1;
+    }
+    if (g_spawnBusy.test_and_set(std::memory_order_acquire)) return;   // the frame thread is emptying or reading the list: this draw is not recorded
+    if (g_nativeOnFootSpawnLive.load(std::memory_order_relaxed)) {   // the window may have ended since the first look
+        const uint64_t ibId = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(ib));
+        const nofoot::f158::Prev before = g_spawnLog.swapPrev(eye, nofoot::f158::Prev{true, ibId, startIndex, indexCount});
+        if (nofoot::f158::listable(ref)) {
+            nofoot::f158::Identity id;
+            id.vs = bindingShaderHash(BindSlot::Vs);
+            id.ps = bindingShaderHash(BindSlot::Ps);
+            id.count = indexCount;
+            id.instances = instances;
+            nofoot::f158::Variant variant;
+            variant.ib = ibId;
+            variant.start = startIndex;
+            variant.base = baseVertex;
+            g_spawnLog.note(id, variant, before, eye, frame, GetTickCount64());
+        }
+    }
+    g_spawnBusy.clear(std::memory_order_release);
+}
+
 void nativeOnFootMenuInputArm(const wchar_t* stamp,uint32_t first,uint32_t last){
     g_menuInput.arm(stamp,first,last);g_menuBridge.arm(first,last,g_menuInput.generation.load());
     nofoot::menu_input::SurfaceBindings surface;
@@ -33694,6 +33803,7 @@ void nativeOnFootFrameBoundary(uint32_t frameNo) {
     headShadowTick(now);   // F95c: the head kept in the shadows; its lines
     f142Tick(now);         // F142: the outfit census (a change), and the full outfit's window while the key is on
     coatPackTick(now);     // F157: whether the coat outfit is armed, to the draw path; the draws left out of the eyes, written once a window
+    spawnTick(now);        // F158: the 30 s window of the local body's draws (measure only), opened, closed and written here
     gateLine(now);
     avatarLine(now);
     avatarCensusLine(now);

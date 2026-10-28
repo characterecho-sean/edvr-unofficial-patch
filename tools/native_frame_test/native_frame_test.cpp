@@ -51,6 +51,7 @@
 #include "f149_checks.h"    // F149/F150: the ADS eye depth, one per weapon (the game's unscoped camera plus a back-off), never further forward than the key (the tables, the rule, the cap, the shift at the same depth, the cache by copy)
 #include "f152_checks.h"    // F152: the readout origin's two shadows (the engine's first, the own one when engine motion is down, their difference, a ranged write into the rows)
 #include "f157_checks.h"    // F157: the coat outfit's pack draw left out of both eyes (the identity, each requirement refusing on its own, the outfit gate, the counts by eye and frame)
+#include "f158_checks.h"    // F158: the local body's draws over the first 30 s on foot (the window's rules, the list and its cap, the switch time, the stop and adjacency tests, the lines)
 #include "f151_checks.h"    // F151: the weapon readout's draw bound by its place (the ordinals, each guard, one bind per key, the lost-frame count) and the held copy's scope from the selected slot
 #include "f110_checks.h"    // F110: the ADS sight lock's model right eye (the left-eye job camera plus the IPD)
 #include "f111_checks.h"    // F111: the panel pointer instrument's statistics and verdict
@@ -7552,6 +7553,10 @@ int wmain(int argc, wchar_t** argv) {
     // each required on their own, the outfit gate (native on foot active and Gear_Back decided as the outer garment, each other decision refused), the draws left out counted by eye and
     // by frame, and a writer counting while the frame thread takes.
     f157test::run157(check);
+    // F158 (measure only): the local body's draws over the first 30 s on foot: the window's open and close rules (the edge, the coat decision, one window at a time, 30 s or native on
+    // foot ending), the list (identities, times, frames per eye, variants, the previous draw at first sight), the cap of 256 and its overflow, the pack's switch time, the stop test,
+    // the adjacency test, and the lines written once at the window's end.
+    f158test::run158(check);
     // F110: the ADS sight lock's model right eye from the left-eye job camera and from a solved left eye, the fallback, the IPD's sign.
     f110test::run110(check);
     // F111: the panel pointer instrument names the stage that turns a move the other way (K1 to K5, one at a time), the camera getters' decoding.
