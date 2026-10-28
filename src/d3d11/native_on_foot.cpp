@@ -70,6 +70,7 @@
 #include "native_on_foot_f157.h"   // F157: the coat outfit's pack draw left out of both eyes (pure parts)
 #include "native_on_foot_f158.h"   // F158: the local body's draws over the first 30 s on foot, measured (pure parts)
 #include "native_on_foot_f159.h"   // F159: the left elbow's stable pole reseeded at the shoulder's height, its seeds' births counted and logged (pure parts)
+#include "native_on_foot_f160.h"   // F160: the neck reference's raise blended through the ADS release; the holster bridge's line (pure parts)
 #include "xinput_watch.h"         // F135: the pad's Start and Back edges, evidence for the menu probe only
 #include "native_on_foot_f109.h"   // F109: look to aim on foot, the player's own turn in ADS, snap or smooth turning (pure parts)
 #include "native_on_foot_f129.h"   // F129: look to aim reads its turn from the player's own look processor; the look path instrument (pure parts)
@@ -202,6 +203,7 @@ double g_f94EyeHeightLast = -1.0;                             // the value last 
 // F95a: the stance's settle window (the Animate post-hook), the body's motion as the pin read it (for the HUD probe's split), the view's last frame (the hook),
 // and the HUD's motion against the eye (the HRC instance submit, under F9Lock; the frame thread prints and resets it with the pin's line).
 nofoot::f95::StanceSettle g_f95Settle;
+nofoot::f160::AdsReturn g_f160;   // F160: the last settled target published outside ADS, for the raise's return through the release (the Animate post-hook; one writer)
 std::atomic<bool> g_f95Moving{false};
 // F123: the comfort fade has two publishers on the frame thread, F109's snap turn and the head containment (the leash and the wall contact); each sets its own level here and the
 // boundary publishes their max once a frame (nofoot::f123::FadeMix). The recentre's hold: the standing-height hold waits while the origin is about to move and starts again from the
@@ -12768,6 +12770,21 @@ double g_f66aGateSum = 0.0;
 nofoot::f99::Bridge g_f99Bridge;
 nofoot::f99::Onset g_f99Onset;
 uint32_t g_f99Started = 0, g_f99Expired = 0, g_f99PutAway = 0;
+// F160 (frame thread): the holster seen from the game's selection (HolsterBridge, native_on_foot_f99.h), the item Status.json named when it began, and its line's rate limit.
+nofoot::f99::HolsterBridge g_f160Holster;
+char g_f160HolsterItem[64] = {};
+nofoot::f160::LineGate g_f160HolsterGate;
+void f160HolsterLine(uint64_t now, const nofoot::f99::HolsterOut& ho) noexcept {
+    nofoot::f160::HolsterLine hl;
+    std::memcpy(hl.item, g_f160HolsterItem, sizeof(hl.item));
+    hl.fromId = ho.fromId;
+    hl.end = ho.ended;
+    hl.ranMs = 1000.0 * ho.ranS;
+    if (!g_f160HolsterGate.take(now, &hl.skipped)) return;
+    char line[320];
+    nofoot::f160::formatHolster(line, sizeof(line), hl);
+    Log::get().note("%s", line);
+}
 void f99OnsetLine(const nofoot::f99::OnsetRecord& r) noexcept {
     char item[64] = {};
     journalHeldItemName(item, sizeof(item));
@@ -13434,7 +13451,19 @@ void f66ArmedStep(uint64_t now, double dt) noexcept {
     }
     if (bo.expired) ++g_f99Expired;
     if (bo.putAway) ++g_f99PutAway;
-    g_armed = active && (kind == kHeldItem || nativePrimary || bo.armed);
+    // F160: the holster from the game's selection: the armed flag is false from the game's none selection until Status.json lets the item go (it kept naming it 1.0-3.1 s
+    // after), the game selects an item again, or kHolsterMaxS passes (native_on_foot_f99.h). The ramps are as they were.
+    nofoot::f99::HolsterIn hi;
+    hi.active = active;
+    hi.nativeOk = f99NativeOk;
+    hi.nativeId = f83.selectedId;
+    hi.nativeHeld = f83.held;
+    hi.statusHeld = kind == kHeldItem;
+    hi.dt = dt;
+    const nofoot::f99::HolsterOut ho = g_f160Holster.step(hi);
+    if (ho.started && !journalHeldItemName(g_f160HolsterItem, sizeof(g_f160HolsterItem))) g_f160HolsterItem[0] = '\0';
+    if (ho.ended != nofoot::f99::kHolsterNotEnded) f160HolsterLine(now, ho);
+    g_armed = active && !ho.running && (kind == kHeldItem || nativePrimary || bo.armed);
     g_f68dFists.store(kind != kHeldItem, std::memory_order_relaxed);   // F68d: the detector's fists input (unknown counts as fists)
     if (!active) g_armedBlend.w = 0.0f;
     else g_armedBlend.step(g_armed, dt);
@@ -16357,6 +16386,7 @@ struct PinStats {
     double f98EyeSum[2] = {}, f98EyeMin[2] = {1e9, 1e9}, f98EyeMax[2] = {-1e9, -1e9};
     bool f98Have[2] = {};          // the stored unarmed stances (standing, crouched) as the second closed
     double f98Neck[2] = {};
+    nofoot::f160::Counts f160;     // F160: the ADS releases, how each was classed, and the calls that published the raise's blend
     // F97a: per stance bin (standing, crouched, moving crouched, moving): the weight, the raise written and asked (cm), the calls capped by the legs, the legs'
     // extension animated and written, the feet lifted, and the eye as drawn over the clavicle line and ahead of the chest (cm) with the INSIDE frames.
     struct F97Bin {
@@ -16450,6 +16480,9 @@ struct PinCall {
     // F98c: where a settled target came from (nofoot::f94::EyeSource; kEyeSourceN when none was taken) and the eye's height it puts the view at (the model, m)
     uint8_t f98Src = nofoot::f94::kEyeSourceN;
     double f98EyeY = 0.0;
+    // F160: what the raise's target was in the sights or leaving them (nofoot::f160::Why; kNone outside), and whether this call began a release
+    uint8_t f160Why = nofoot::f160::kNone;
+    bool f160Begins = false;
     // F97a: F88's weight, the armed demand (F93's raise and the eye's lowering, m), the raise capped by the legs, the stance bin (nofoot::f97::Stance), the eye as
     // drawn in the model (m) and, at the close, its clearance over the clavicle line and ahead of the chest 24 (heading axes, m) and the INSIDE test on it.
     double f97W = 0.0, f97Asked = 0.0, f97RaiseF93 = 0.0, f97LowerEye = 0.0, f97EyeDrawn[3] = {}, f97ClavUp = 0.0, f97ChestFwd = 0.0;
@@ -16725,6 +16758,7 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
         if (g_pinEyeCalX != pl.x) {
             g_pinEyeCal.reset();
             g_f98Eye.reset();   // F98c: another skeleton's unarmed necks are not this one's
+            g_f160.reset();     // F160: nor its kept target
             g_pinEyeCalX = pl.x;
         }
         if (localPitchValid && (!g_pinEyeCalRefGenHave || in.localPoseGeneration != g_pinEyeCalRefGen)) {
@@ -16861,7 +16895,10 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
         // camera (nofoot::f94::EyeLevel): the eye where it would stand unarmed. Anything else (the walk cycle, a landing, a stance still changing) publishes nothing:
         // the frame thread holds the raise where the last settled stance put it.
         {
-            if (g_f138HookReset.exchange(false, std::memory_order_relaxed)) g_f138.reset();   // F138: an edge of the on-foot camera, the shutdown
+            if (g_f138HookReset.exchange(false, std::memory_order_relaxed)) {
+                g_f138.reset();   // F138: an edge of the on-foot camera, the shutdown
+                g_f160.reset();   // F160: the kept target is the last stance's, not the next scope's
+            }
             bool f138Own = false;   // F138: this block published a target (ADS's zero, a settled stance): the added sink has no say this call
             nofoot::f95::SettleIn si;
             // F98c: not while aiming down sights (F73's detach): the sight lock owns the eye there. The stance's raise is published as zero with the detach,
@@ -16893,17 +16930,37 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
             si.camY = pc.eyeYSelected;
             const nofoot::f95::SettleOut so = g_f95Settle.step(si);
             pc.f95Why = so.why;
-            if (pc.detachW > 0.0 && refusal != kPinRefCameraAway) {
-                pc.f95Target = 0.0;
-                f94TargetPublish(0.0, now);
+            // the stance's class: the pin's crouch weight against its standing calibration, else against the stored standing unarmed camera; neither, not known
+            const auto stanceClassOf = [&](double cameraYNow) noexcept {
+                namespace f94 = nofoot::f94;
+                int stanceClass = f94::kClassUnknown;
+                if (pc.calHave) stanceClass = nofoot::pinCrouchedWc(pc.wc) ? f94::kClassCrouched : f94::kClassStanding;
+                else if (g_f98Eye.have[f94::kClassStanding])
+                    stanceClass = nofoot::pinCrouchedWc(nofoot::pinCrouchWeight(true, g_f98Eye.camY[f94::kClassStanding], cameraYNow)) ? f94::kClassCrouched : f94::kClassStanding;
+                return stanceClass;
+            };
+            const bool inSights = pc.detachW > 0.0 && refusal != kPinRefCameraAway;
+            nofoot::f160::AdsReturn::Done f160Done;
+            if (!inSights) {
+                if (pc.detachW > 0.0) g_f160.leave();   // the game's camera is away from the commander: not a release
+                else if (g_f160.falling) f160Done = g_f160.finish(itemSerialForCall, stanceClassOf(pc.eyeYSelected));   // the release ran its course: the formula's last value
+            }
+            if (inSights) {
+                // F160: the release brings the raise back with the sights letting go: while the detach weight falls (the request is off) and the item and the stance class are
+                // those of the last settled target published outside ADS, the target is (1 - w) times it; the press, and anything else, publish 0 as before. The settle window
+                // is not changed: it still fills 0.3 s after the release and corrects what the kept target had wrong.
+                const nofoot::f160::AdsReturn::Out ret = g_f160.step(pc.detachW, g_bodyDetachAds.load(std::memory_order_relaxed), itemSerialForCall, stanceClassOf(pc.eyeYSelected));
+                pc.f160Why = ret.r.why;
+                pc.f160Begins = ret.releaseBegins;
+                pc.f95Target = ret.r.targetM;
+                f94TargetPublish(ret.r.targetM, now);
+                f138Own = true;
+            } else if (f160Done.publish) {
+                pc.f95Target = f160Done.targetM;
+                f94TargetPublish(f160Done.targetM, now);
                 f138Own = true;
             } else if (so.settled) {
-                // the stance's class: the pin's crouch weight against its standing calibration, else against the stored standing unarmed camera; neither, not known
-                namespace f94 = nofoot::f94;
-                int cls = f94::kClassUnknown;
-                if (pc.calHave) cls = nofoot::pinCrouchedWc(pc.wc) ? f94::kClassCrouched : f94::kClassStanding;
-                else if (g_f98Eye.have[f94::kClassStanding])
-                    cls = nofoot::pinCrouchedWc(nofoot::pinCrouchWeight(true, g_f98Eye.camY[f94::kClassStanding], so.camY)) ? f94::kClassCrouched : f94::kClassStanding;
+                const int cls = stanceClassOf(so.camY);
                 const bool itemDrawn = armed || f97W > 0.0;
                 // F103: an unarmed standing stance whose head joint is under a standing commander's height (the fists' combat stance) is hunched, not the
                 // standing reference (native_on_foot_f94.h); a head not read counts as upright, as before
@@ -16911,6 +16968,7 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
                 pc.f95Target = g_f98Eye.target(itemDrawn, cls, so.neckY, so.camY, f97H, &pc.f98Src, upright);
                 pc.f98EyeY = so.camY + pc.f95Target;
                 f94TargetPublish(pc.f95Target, now);
+                g_f160.store(pc.f95Target, itemSerialForCall, cls);   // F160: the target the release brings back
                 f138Own = true;
                 // F138: an unarmed upright stance is the reference the pitched look's sink is measured against: the target just published, G of this call, the animated neck, the
                 // headset's LOCAL height and the LOCAL pose's generation (no valid pose, no reference)
@@ -17745,6 +17803,7 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
         }
         // F95a: the settle window's verdict, the settled target's range, the view's step with the head still
         ++st.f95Why[pc.f95Why < nofoot::f95::kWhyN ? pc.f95Why : nofoot::f95::kInvalid];
+        st.f160.add(pc.f160Why, pc.f160Begins);   // F160: the release's class, and the calls that published its blend
         if (pc.f95Why == nofoot::f95::kSettled) {
             st.f95TgtMin = std::min(st.f95TgtMin, 100.0 * pc.f95Target);
             st.f95TgtMax = std::max(st.f95TgtMax, 100.0 * pc.f95Target);
@@ -22537,7 +22596,7 @@ void f125PinPrint(const F125PinWindow& w) noexcept {
 
         }
         }
-        if (st.f98Src[0] || st.f98Src[1] || st.f98Src[2] || st.f98Src[3] || st.f98Src[4] || st.f98Src[5]) {
+        if (st.f98Src[0] || st.f98Src[1] || st.f98Src[2] || st.f98Src[3] || st.f98Src[4] || st.f98Src[5] || st.f160.any()) {
             const char* item = w.item;
             // F98c: the settled targets by source and the eye's height they put the view at (the model, the head level), unarmed and armed, with the stored unarmed
             // necks. Armed from "the unarmed eye of the stance", the armed eye reads the unarmed eye of the same stance; a build that never stores an unarmed
@@ -22555,10 +22614,12 @@ void f125PinPrint(const F125PinWindow& w) noexcept {
             // F103: "hunched" counts the unarmed standing stances whose head joint was under a standing height: their eye from the stored upright neck.
             Log::get().note("native on foot eye level (F98c) %u s: item %s; settled targets: unarmed %u (the stance not known %u, hunched %u), armed %u: the unarmed eye of "
                             "the stance %u, the standing unarmed raise over the crouch %u, the starting raise %u; the eye they put the view at: unarmed %s, armed %s; the "
-                            "unarmed neck stored: standing %s, crouched %s; starting raise after stored %u; largest 1 s neck change %.3f m",
+                            "unarmed neck stored: standing %s, crouched %s; starting raise after stored %u; largest 1 s neck change %.3f m; ADS return (F160): %u releases, "
+                            "%u blended (%u calls), not blended for want of a stored raise %u, another item %u, another stance %u",
                             ws, item, st.f98Src[f94::kEyeUnarmed] + st.f98Src[f94::kEyeUnarmedNoClass] + st.f98Src[f94::kEyeHunched], st.f98Src[f94::kEyeUnarmedNoClass],
                             st.f98Src[f94::kEyeHunched], st.f98Src[f94::kEyeStance] + st.f98Src[f94::kEyeStandingOverCrouch] + st.f98Src[f94::kEyeStart], st.f98Src[f94::kEyeStance],
-                            st.f98Src[f94::kEyeStandingOverCrouch], st.f98Src[f94::kEyeStart], eyeBuf[0], eyeBuf[1], neckBuf[0], neckBuf[1], w.neck.startAfterStored, w.neck.jump);
+                            st.f98Src[f94::kEyeStandingOverCrouch], st.f98Src[f94::kEyeStart], eyeBuf[0], eyeBuf[1], neckBuf[0], neckBuf[1], w.neck.startAfterStored, w.neck.jump,
+                            st.f160.releases, st.f160.blended, st.f160.callsBlended, st.f160.notBlended[0], st.f160.notBlended[1], st.f160.notBlended[2]);
         }
         // F95a: the view's vertical motion a game frame with the head still (the pin's camera, the head's own motion out), the HUD's motion against the eye (the HRC
         // views' camera in the HUD's frame less the LOCAL head), how far the raise moved the view, and the settle window's verdicts. Standing every figure should be

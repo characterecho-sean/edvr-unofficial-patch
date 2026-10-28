@@ -95,6 +95,7 @@ template<class T> inline void pin(T& d, const T& s) noexcept {
     for (uint32_t i = 0; i < 2; ++i) d.ageMaxPar[i] = std::max(d.ageMaxPar[i], s.ageMaxPar[i]);
     for (uint32_t i = 0; i < sizeof(d.f95Why) / sizeof(d.f95Why[0]); ++i) d.f95Why[i] += s.f95Why[i];
     for (uint32_t i = 0; i < sizeof(d.f98Src) / sizeof(d.f98Src[0]); ++i) d.f98Src[i] += s.f98Src[i];
+    d.f160.merge(s.f160);
     for (uint32_t i = 0; i < 2; ++i) d.f98EyeSum[i] += s.f98EyeSum[i];
     for (uint32_t i = 0; i < 2; ++i) d.f98EyeMin[i] = std::min(d.f98EyeMin[i], s.f98EyeMin[i]);
     for (uint32_t i = 0; i < 2; ++i) d.f98EyeMax[i] = std::max(d.f98EyeMax[i], s.f98EyeMax[i]);

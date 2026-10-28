@@ -13458,7 +13458,86 @@ def _hj_f99a_draw(rows, ctx):
     return ("OK", text)
 
 
+# F160: the three ways a holster bridge ends (holsterEndName in src/d3d11/native_on_foot_f160.h), as the line says them, and as this report does
+H160_ENDS = (("Status.json named no item", "Status.json"), ("the game selected an item again", "a new selection"), ("the 4 s limit", "the 4 s limit"))
+
+
+def _hj_f160_holster(rows, ctx):
+    """F160: one line per holster the game's own selection saw (its none id read after a held one while Status.json still named the item): the armed flag is false from
+    then until Status.json lets the item go, the game selects an item again, or 4 s pass. The bridge's run when Status.json let go is the game's lead over Status.json (the
+    hands are unarmed that much sooner than they were). A bridge that ran to the 4 s limit is PARTIAL: Status.json kept naming an item, or the none id was not a holster.
+    The F66a lines (Status.json's own flips) are the cross-check: a flip to the fists after an item is a holster the game made, so one or more of them with no bridge line in
+    the window is the bridge never running (NEVER APPLIED), in a log of a build that has F160 (its F98c lines carry the ADS return's tail; a log of an earlier build has no way
+    to show a bridge and is not judged)."""
+    br = rows.get("bridge", [])
+    armed_before, status_holsters = False, 0
+    for r in sorted(rows.get("flip", []), key=lambda r: r["_order"]):
+        if r["to"] == "armed":
+            armed_before = True
+        else:
+            if r["tag"] == "fists" and armed_before:
+                status_holsters += 1
+            armed_before = False
+    if not br:
+        built = ctx is not None and any(r.get("rel") is not None for r in _hrows(ctx, "eye level (F98c)", "sec"))
+        if status_holsters and built:
+            return ("NEVER APPLIED", "no holster bridge line, while Status.json flipped to the fists after an item %d time(s) (F66a): the game's none selection was never read, "
+                    "or not as a holster" % status_holsters)
+        return None
+    counts = [(label, sum(1 for r in br if r["end"] == phrase)) for phrase, label in H160_ENDS]
+    held_back = sum(int(r.get("skipped") or 0) for r in br)
+    leads = sorted(int(r["ms"]) for r in br if r["end"] == H160_ENDS[0][0])
+    items = collections.Counter(r["item"] for r in br)
+    text = "%d holster bridge(s) (%d line(s)): ended by %s; items %s" % (
+        len(br) + held_back, len(br), ", ".join("%s %d" % (label, n) for label, n in counts),
+        ", ".join("%s %d" % (name, n) for name, n in items.most_common(4)))
+    if leads:
+        mid = len(leads) // 2
+        median = leads[mid] if len(leads) % 2 else (leads[mid - 1] + leads[mid]) // 2
+        text += "; the game's selection led Status.json by a median %d ms (max %d ms, min %d ms)" % (median, leads[-1], leads[0])
+    if held_back:
+        text += "; %d bridge(s) not logged (one line in 0.5 s)" % held_back
+    text += "; Status.json flipped to the fists after an item %d time(s) (F66a)" % status_holsters
+    timeouts = counts[2][1]
+    if timeouts:
+        return ("PARTIAL", text + "; %d bridge(s) ran to the 4 s limit: Status.json kept naming an item, or the none selection was not a holster; the flag went back to Status.json" % timeouts)
+    return ("OK", text)
+
+
+def _hj_f160_return(sec, ctx=None):
+    """F160: the neck reference's raise published as (1 - w) times the last settled target through the ADS release, in place of 0. Counted per release, at its first call: a
+    release is blended when the item and the stance class are those of the kept target, else it is not (no stored raise, another item, another stance: the two changes are the
+    pilot's, the first is not). Returns (status, text), or None with no release in the window. NEVER APPLIED when releases ran and none was blended (the raise came back
+    0.63 s after the request went off, on every one), or when the F89 trace saw a release and the windows of a build with this counter counted none (the return never ran);
+    PARTIAL when some had no stored raise to bring back."""
+    got = [r for r in sec if r.get("rel") is not None]
+    tot = dict((k, sum(int(r[k]) for r in got)) for k in ("rel", "bl", "blc", "nostored", "other_item", "other_stance"))
+    if not tot["rel"]:
+        traced = sum(1 for r in _hrows(ctx, H_F89_ADS, "start") if r["dir"] == "release") if ctx is not None and got else 0
+        if traced:
+            return ("NEVER APPLIED", "ADS return (F160): the F89 trace saw %d release(s) and the %d window line(s) of this build counted none: the return never ran" % (traced, len(got)))
+        return None
+    text = ("ADS return (F160): %d release(s), %d blended (%d calls), not blended: no stored raise %d, another item %d, another stance %d" % (
+        tot["rel"], tot["bl"], tot["blc"], tot["nostored"], tot["other_item"], tot["other_stance"]))
+    if not tot["bl"]:
+        return ("NEVER APPLIED", text + "; no release brought the raise back with the sights letting go")
+    if tot["nostored"]:
+        return ("PARTIAL", text + "; %d release(s) had no settled stance to bring back" % tot["nostored"])
+    return ("OK", text)
+
+
 def _hj_f98c_eye(rows, ctx):
+    """F98c's verdict (_hj_f98c_eye_base), and F160's on the same lines (the ADS return): the worse of the two, both texts."""
+    base = _hj_f98c_eye_base(rows, ctx)
+    f160 = _hj_f160_return(rows.get("sec", []), ctx)
+    if base is None or f160 is None:
+        return base
+    severity = {"NEVER APPLIED": 2, "PARTIAL": 1}
+    status = f160[0] if severity.get(f160[0], 0) > severity.get(base[0], 0) else base[0]
+    return (status, base[1] + "; " + f160[1])
+
+
+def _hj_f98c_eye_base(rows, ctx):
     """F98c: the settled targets by source, unarmed and armed, and the eye's height they put the view at. Armed, the eye stands over the stored unarmed neck of the
     stance; the starting raise is for a session with no unarmed stance stored. The starting raise taken after a second that closed with one stored, or unarmed
     stances settling with none ever stored (the stance's class never known), is PARTIAL."""
@@ -14490,12 +14569,23 @@ HEALTH_RULES = (
                 r"(?P<at>at \+\d+ ms|never); the armed ramp full (?P<full>at \+\d+ ms|never); bridges started (?P<started>\d+), released unnamed (?P<expired>\d+), "
                 r"put away (?P<away>\d+)"),
     ), _hj_f99a_draw),
+    _hrule("holster bridge (F160)", ("F160", "F66a"), ("native on foot holster bridge (F160)",), (
+        # Status.json's own flips of the held item (F66a), for the cross-check: a flip to the fists after an item is a holster
+        ("flip", r"native on foot armed \(F66a\): SelectedWeapon \"[^\"]*\" -> (?P<to>armed|unarmed)(?: \[(?P<tag>unknown|fists)\])?(?: \[native primary selection\])? "
+                 r"\(Status\.json samples read \d+;"),
+        ("bridge", r"native on foot holster bridge \(F160\): item (?P<item>\S+); the game's selection read none after id (?P<id>[0-9A-F]{8}) while Status\.json still named the item; "
+                   r"the bridge ran (?P<ms>\d+) ms and ended: (?P<end>Status\.json named no item|the game selected an item again|the 4 s limit)"
+                   r"(?:; (?P<skipped>\d+) earlier bridge\(s\) not logged \(one line in 0\.5 s\))?$"),
+    ), _hj_f160_holster),
     _hrule("eye level (F98c)", ("F98c",), ("native on foot eye level (F98c)",), (
         ("sec", r"native on foot eye level \(F98c\) (?P<wl>\d+) s: item (?P<item>\S+); settled targets: unarmed (?P<un>\d+) \(the stance not known (?P<unk>\d+)(?:, hunched (?P<hunch>\d+))?\), armed (?P<ar>\d+): "
                 r"the unarmed eye of the stance (?P<stance>\d+), the standing unarmed raise over the crouch (?P<over>\d+), the starting raise (?P<start>\d+); the eye they "
                 r"put the view at: unarmed (?P<ueye>[\d.]+ m \(min [\d.]+ max [\d.]+\)|none), armed (?P<aeye>[\d.]+ m \(min [\d.]+ max [\d.]+\)|none); the unarmed "
                 r"neck stored: standing (?P<ns>[\d.]+ m|none), crouched (?P<nc>[\d.]+ m|none)"
-                r"(?:; starting raise after stored (?P<after_stored>\d+); largest 1 s neck change (?P<neck_jump>[\d.]+) m)?"),
+                r"(?:; starting raise after stored (?P<after_stored>\d+); largest 1 s neck change (?P<neck_jump>[\d.]+) m)?"
+                # F160: the ADS releases of the window, how each was classed, and the pin calls that published the raise's blend
+                r"(?:; ADS return \(F160\): (?P<rel>\d+) releases, (?P<bl>\d+) blended \((?P<blc>\d+) calls\), not blended for want of a stored raise (?P<nostored>\d+), "
+                r"another item (?P<other_item>\d+), another stance (?P<other_stance>\d+))?$"),
     ), _hj_f98c_eye),
     _hrule("head in the shadows (F95c)", ("F95c",), ("native on foot head shadow (F95c)",), (
         ("sec", r"native on foot head shadow \(F95c\) (?P<wl>\d+) s: visibility calls (?P<calls>\d+), head as shadow-only (?P<swapped>\d+) \(head parts (?P<parts>\d+)\), "
@@ -15458,6 +15548,7 @@ def self_test_health():
     f140reader_path = os.path.join(repo_root(), "src", "d3d11", "journal_loadout_reader.h")
     f158_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f158.h")
     f159_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f159.h")
+    f160_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f160.h")
     f154_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f154.h")
     try:
         source, swap, f90src, f91src = read_text(src_path), read_text(swap_path), read_text(f90_path), read_text(f91_path)
@@ -15472,6 +15563,7 @@ def self_test_health():
         f140readersrc = read_text(f140reader_path)
         f158src = read_text(f158_path)
         f159src = read_text(f159_path)
+        f160src = read_text(f160_path)
         f154src = read_text(f154_path)
     except OSError as e:
         print("health: the DLL source the self-test reads its log formats from is not where it looks (%s)" % e)
@@ -15530,6 +15622,15 @@ def self_test_health():
             fmts[key] = health_c_format(f159src, needle)
         if fmts[key] is None:
             raise AssertionError("native_on_foot_f159.h has no format holding %r: the --health rule that reads it is out of date" % needle)
+        return health_render(fmts[key], vals)
+
+    def R160(needle, *vals):
+        """F160's holster line (formatHolster in native_on_foot_f160.h), from its own format literals."""
+        key = "f160:" + needle
+        if key not in fmts:
+            fmts[key] = health_c_format(f160src, needle)
+        if fmts[key] is None:
+            raise AssertionError("native_on_foot_f160.h has no format holding %r: the --health rule that reads it is out of date" % needle)
         return health_render(fmts[key], vals)
 
     def R105(needle, *vals):
@@ -16735,8 +16836,14 @@ def self_test_health():
         # ---- eye level (F98c): armed, the eye where it stands unarmed in the same stance ----
         F98C = "eye level (F98c)"
 
-        def eye98(item=RIFLE97, un=0, unk=0, ar=0, stance=0, over=0, start=0, ueye="none", aeye="none", ns="1.543 m", nc="none", hunch=0, wl=1, after_stored=None, neck_jump=None):
-            line = R("native on foot eye level (F98c) %u s: item %s", wl, item, un, unk, hunch, ar, stance, over, start, ueye, aeye, ns, nc, after_stored or 0, neck_jump or 0.0)
+        def eye98(item=RIFLE97, un=0, unk=0, ar=0, stance=0, over=0, start=0, ueye="none", aeye="none", ns="1.543 m", nc="none", hunch=0, wl=1, after_stored=None, neck_jump=None,
+                  ads=None):
+            """F98c's window line; ads: F160's tail as (releases, blended, blended calls, no stored raise, another item, another stance), else the line of a build before it."""
+            line = R("native on foot eye level (F98c) %u s: item %s", wl, item, un, unk, hunch, ar, stance, over, start, ueye, aeye, ns, nc, after_stored or 0, neck_jump or 0.0,
+                     *(ads or ()))
+            if ads is not None:
+                return line
+            line = line.split("; ADS return (F160)")[0]
             return line if after_stored is not None or neck_jump is not None else line.split("; starting raise after stored")[0]
 
         EYE = "1.693 m (min 1.693 max 1.693)"
@@ -16753,6 +16860,72 @@ def self_test_health():
         check("F103 eye: the combat stance hunched, the upright neck kept", [eye98("$humanoid_fists_name;", un=90, ueye=EYE, ns="1.542 m"),
               eye98("$humanoid_fists_name;", un=70, hunch=70, ueye=EYE, ns="1.542 m"), eye98(ar=74, stance=74, aeye=EYE, ns="1.542 m")], 0, [("OK", F98C)],
               has=["unarmed 160 (the stance not known 0, hunched 70)", "the armed eye 1.693 m"], lacks=["jumped", "UNPARSED"])
+
+        # ---- ADS return (F160): the raise's blend through the release, on the F98c line ----
+        check("F160 return: every release blended", [eye98(ar=60, stance=60, aeye=EYE, ads=(2, 2, 52, 0, 0, 0))], 0, [("OK", F98C)],
+              has=["ADS return (F160): 2 release(s), 2 blended (52 calls), not blended: no stored raise 0, another item 0, another stance 0"], lacks=["UNPARSED", "PARTIAL"])
+        check("F160 return: a window with no release says nothing of it", [eye98(ar=60, stance=60, aeye=EYE, ads=(0, 0, 0, 0, 0, 0))], 0, [("OK", F98C)], lacks=["ADS return (F160)", "UNPARSED"])
+        check("F160 return: a release in a window with no armed settled stance", [eye98("$humanoid_fists_name;", un=60, ueye=EYE, ads=(1, 1, 26, 0, 0, 0))], 0,
+              [("IDLE", F98C)], has=["no armed settled stance", "ADS return (F160): 1 release(s), 1 blended"], lacks=["UNPARSED"])
+        check("F160 return: releases that never brought the raise back", [eye98(ar=60, stance=60, aeye=EYE, ads=(3, 0, 0, 3, 0, 0))], 3, [("NEVER APPLIED", F98C)],
+              has=["ADS return (F160): 3 release(s), 0 blended (0 calls), not blended: no stored raise 3", "no release brought the raise back with the sights letting go"])
+        check("F160 return: a release with another item or stance is the pilot's, not the blend's", [eye98(ar=60, stance=60, aeye=EYE, ads=(4, 2, 52, 0, 1, 1))], 0, [("OK", F98C)],
+              has=["4 release(s), 2 blended (52 calls), not blended: no stored raise 0, another item 1, another stance 1"], lacks=["UNPARSED", "PARTIAL"])
+        check("F160 return: one release of three had no stored raise", [eye98(ar=60, stance=60, aeye=EYE, ads=(3, 2, 52, 1, 0, 0))], 0, [("PARTIAL", F98C)],
+              has=["1 release(s) had no settled stance to bring back"])
+        check("F160 return: it adds to F98c's own verdict (the starting raise taken with an unarmed stance stored)",
+              [eye98("$humanoid_fists_name;", un=60, ueye=EYE), eye98(ar=60, start=60, after_stored=60, aeye="1.629 m (min 1.629 max 1.629)", ads=(1, 0, 0, 1, 0, 0))], 3, [("NEVER APPLIED", F98C)],
+              has=["the starting raise taken 60 times with an unarmed stance stored", "no release brought the raise back"])
+        check("F160 return: the windows' releases add up across lines", [eye98(ar=60, stance=60, aeye=EYE, ads=(1, 1, 26, 0, 0, 0), wl=10),
+              eye98(ar=60, stance=60, aeye=EYE, ads=(2, 2, 52, 0, 0, 0), wl=10)], 0, [("OK", F98C)], has=["3 release(s), 3 blended (78 calls)"])
+        check("F160 return: the F89 trace saw a release and no window of this build counted one (the return never ran)",
+              [ads_start("release"), eye98(ar=60, stance=60, aeye=EYE, ads=(0, 0, 0, 0, 0, 0))], 3, [("NEVER APPLIED", F98C)],
+              has=["the F89 trace saw 1 release(s) and the 1 window line(s) of this build counted none: the return never ran"])
+        check("F160 return: a release traced by F89 in a log whose build has no counter is not judged", [ads_start("release"), eye98(ar=60, stance=60, aeye=EYE)], 0, [("OK", F98C)],
+              lacks=["the return never ran"])
+        check("F160 return: a trace of the press only is no release", [ads_start("press"), eye98(ar=60, stance=60, aeye=EYE, ads=(0, 0, 0, 0, 0, 0))], 0, [("OK", F98C)],
+              lacks=["the return never ran"])
+        check("F160 return: a tail that drifted from its pattern is unparsed", [eye98(ar=60, stance=60, aeye=EYE, ads=(1, 1, 26, 0, 0, 0)).replace(
+              "ADS return (F160): 1 releases", "ADS return (F160): something else")], 4, [("UNPARSED", F98C)])
+
+        # ---- holster bridge (F160): the holster from the game's own selection ----
+        H160 = "holster bridge (F160)"
+        ST160, NEW160, LIM160 = H160_ENDS[0][0], H160_ENDS[1][0], H160_ENDS[2][0]
+        for phrase in (ST160, NEW160, LIM160):   # the three ends are the header's holsterEndName; the format has no %s for them
+            if phrase not in f160src:
+                raise AssertionError("native_on_foot_f160.h does not say %r: the --health rule that reads it is out of date" % phrase)
+
+        def holster160(item=RIFLE97, ident=0x12, ms=1349.6, end=ST160, skipped=0):
+            """F160's holster line, from the DLL's own format (formatHolster, native_on_foot_f160.h)."""
+            line = R160("native on foot holster bridge (F160): item %s", item, ident, ms, end)
+            return line + (R160("earlier bridge(s) not logged", skipped) if skipped else "")
+
+        check("F160 holster: the flight's three holsters, Status.json 1.0-3.1 s behind the game's selection",
+              [holster160(ms=1349.6), holster160(ms=970.4, ident=0x13), holster160(ms=3080.0)], 0, [("OK", H160)],
+              has=["3 holster bridge(s) (3 line(s)): ended by Status.json 3, a new selection 0, the 4 s limit 0; items " + RIFLE97 + " 3",
+                   "led Status.json by a median 1350 ms (max 3080 ms, min 970 ms)"], lacks=["UNPARSED", "PARTIAL"])
+        check("F160 holster: a draw while it ran and a limit", [holster160(ms=300.0, end=NEW160), holster160(ms=4011.0, end=LIM160), holster160(ms=1100.0)], 0, [("PARTIAL", H160)],
+              has=["ended by Status.json 1, a new selection 1, the 4 s limit 1", "median 1100 ms", "1 bridge(s) ran to the 4 s limit"], lacks=["UNPARSED"])
+        check("F160 holster: the lines the rate limit kept out are counted", [holster160(skipped=3), holster160(ms=1200.0, item="$humanoid_rechargetool_name;")], 0, [("OK", H160)],
+              has=["5 holster bridge(s) (2 line(s))", "3 bridge(s) not logged (one line in 0.5 s)", "median 1275 ms"], lacks=["UNPARSED"])
+        check("F160 holster: an even number of leads takes the middle two", [holster160(ms=1000.0), holster160(ms=2000.0)], 0, [("OK", H160)], has=["median 1500 ms (max 2000 ms, min 1000 ms)"])
+        def flip160(item, to, tag="", primary=""):
+            """F66a's held-item change line, from the DLL's own format (f66ArmedStep, native_on_foot.cpp)."""
+            return R("native on foot armed (F66a): SelectedWeapon", item, to, " [%s]" % tag if tag else "", " [native primary selection]" if primary else "", 120)
+
+        check("F160 holster: the flips of Status.json are counted beside the bridges",
+              [flip160(RIFLE97, "armed"), holster160(), flip160("$humanoid_fists_name;", "unarmed", "fists"), flip160(RIFLE97, "armed"), holster160(ms=1000.0),
+               flip160("$humanoid_fists_name;", "unarmed", "fists")], 0, [("OK", H160)], has=["Status.json flipped to the fists after an item 2 time(s) (F66a)"], lacks=["UNPARSED"])
+        check("F160 holster: Status.json flipped to the fists after an item and no bridge ran",
+              [eye98(ar=60, stance=60, aeye=EYE, ads=(0, 0, 0, 0, 0, 0)), flip160(RIFLE97, "armed", primary="p"), flip160("$humanoid_fists_name;", "unarmed", "fists")], 3,
+              [("NEVER APPLIED", H160)], has=["no holster bridge line, while Status.json flipped to the fists after an item 1 time(s) (F66a)"])
+        check("F160 holster: the same flips in a log of the build before F160 are not judged (it could not show a bridge)",
+              [eye98(ar=60, stance=60, aeye=EYE), flip160(RIFLE97, "armed", primary="p"), flip160("$humanoid_fists_name;", "unarmed", "fists")], 0,
+              lacks=["NEVER APPLIED", "no holster bridge line"])
+        check("F160 holster: a swap, an unknown Status.json and the first reading are not holsters",
+              [flip160("$humanoid_fists_name;", "unarmed", "fists"), flip160(RIFLE97, "armed"), flip160("$wpn_m_smg_name;", "armed"), flip160("(not in Status.json)", "unarmed", "unknown")], 0,
+              lacks=["NEVER APPLIED", "UNPARSED", "no holster bridge line"])
+        check("F160 holster: a line that drifted from its pattern is unparsed", ["native on foot holster bridge (F160): item x; the bridge ended somewhere"], 4, [("UNPARSED", H160)])
 
         # ---- camera away (F107): the game's camera away from the commander ----
         F107 = "camera away (F107)"
