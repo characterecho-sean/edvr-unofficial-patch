@@ -44,13 +44,25 @@ inline void run144(Check&& check) {
         check(g.settled(true, 1.0f, 1700, e1, s0), "F144: 600 ms after, with E and S still (0 mm from the previous sample): settled");
         check(!g.settled(true, 1.0f, 1800, e2, s0), "F144: E moved 3 mm from the previous usable sample: not settled");
         check(g.settled(true, 1.0f, 1900, e2, s0), "F144: ... and the next sample, 0 mm on, is");
-        check(!g.settled(true, 0.99f, 2000, e2, s0) && g.settled(true, 1.0f, 2100, e2, s0), "F144: a fraction under 1.0 is not settled; this press's first 1.0 stands");
-        check(!g.settled(false, 1.0f, 2200, e2, s0), "F144: a fraction that was not read is not settled");
+        // F147: the fraction dropping under 1.0 starts the hold again (a weapon swapped while ADS is held raises the new weapon with the fraction down)
+        check(!g.settled(true, 0.99f, 2000, e2, s0) && !g.fullSeen && !g.havePrev, "F147: a fraction under 1.0 is not settled and clears the hold and the previous sample");
+        check(!g.settled(true, 1.0f, 2100, e2, s0) && g.fullSeen && g.fullMs == 2100, "F147: ... the next 1.0 starts the 0.6 s again");
+        check(!g.settled(true, 1.0f, 2699, e2, s0) && g.settled(true, 1.0f, 2700, e2, s0), "F147: ... and settles 600 ms on");
+        check(!g.settled(false, 1.0f, 2800, e2, s0) && !g.fullSeen, "F144: a fraction that was not read is not settled (and starts the hold again)");
+        check(!g.settled(true, 1.0f, 2900, e2, s0) && !g.settled(true, 1.0f, 3499, e2, s0) && g.settled(true, 1.0f, 3500, e2, s0), "F147: ... likewise");
         double s2[3] = {0.001, -0.040, 0.3519};   // S 1.9 mm
-        check(g.settled(true, 1.0f, 2300, e2, s0) && g.settled(true, 1.0f, 2400, e2, s2) && g.settled(true, 1.0f, 2500, e2, s0),
+        check(g.settled(true, 1.0f, 3600, e2, s0) && g.settled(true, 1.0f, 3700, e2, s2) && g.settled(true, 1.0f, 3800, e2, s0),
               "F144: S moving 1.9 mm (under 2 mm) keeps it settled, and moving back 1.9 mm too");
         double s3[3] = {0.001, -0.040, 0.3521};
-        check(!g.settled(true, 1.0f, 2600, e2, s3), "F144: S moving 2.1 mm: not settled");
+        check(!g.settled(true, 1.0f, 3900, e2, s3), "F144: S moving 2.1 mm: not settled");
+        // F147: a new activation, or another item or scope, starts the gate again; the same ones do not
+        check(g.track(7, 100) && !g.track(7, 100) && !g.settled(true, 1.0f, 4000, e2, s0) && g.fullSeen && !g.settled(true, 1.0f, 4599, e2, s0) && g.settled(true, 1.0f, 4600, e2, s0),
+              "F147: the first activation and item key start the gate; the same ones leave it; it waits its own 0.6 s");
+        check(!g.track(7, 100) && g.settled(true, 1.0f, 4700, e2, s0), "F147: the same activation and item: nothing reset");
+        check(g.track(8, 100) && !g.fullSeen && !g.havePrev && !g.settled(true, 1.0f, 4800, e2, s0) && !g.settled(true, 1.0f, 5300, e2, s0),
+              "F147: a new activation (the game's act or its sight handle changed) starts the gate again");
+        check(g.settled(true, 1.0f, 5400, e2, s0) && g.track(8, 101) && !g.settled(true, 1.0f, 5500, e2, s0) && !g.settled(true, 1.0f, 6000, e2, s0),
+              "F147: another held item or scope starts it again: the old weapon's hold does not count for the new one");
         g.reset();
         check(!g.settled(true, 1.0f, 3000, e0, s0) && g.fullSeen && g.havePrev, "F144: a new press starts again (reset)");
         check(!g.settled(true, 1.0f, 3300, e0, s0) && !g.settled(true, 1.0f, 3599, e0, s0) && g.settled(true, 1.0f, 3600, e0, s0), "F144: ... and waits its own 0.6 s");
@@ -182,6 +194,51 @@ inline void run144(Check&& check) {
               "F144: the decision's text");
         const int suitArms = edvr::avh::partIndexByName("EVASuit_Arms"), gearArms = edvr::avh::partIndexByName("EVASuit_Gear_Arms"), gearBack = edvr::avh::partIndexByName("EVASuit_Gear_Back");
         check(suitArms >= 0 && gearArms >= 0 && gearBack >= 0 && gearBack == 48, "F144: the three parts are in the part table (Gear_Back 48)");
+        // F147: the full outfit acts on what the flights showed, and only in the coat
+        {
+            int pidx[1], uidx[5];
+            for (size_t i = 0; i < 1; ++i) pidx[i] = edvr::avh::partIndexByName(f144::kPromoteNames[i]);
+            for (size_t i = 0; i < 5; ++i) uidx[i] = edvr::avh::partIndexByName(f144::kUnclipNames[i]);
+            const uint64_t promoteAllowed = f144::maskOfIdx(pidx, 1), unclipAllowed = f144::maskOfIdx(uidx, 5);
+            check(promoteAllowed == (1ull << 48) && unclipAllowed == ((1ull << 36) | (1ull << 37) | (1ull << 41) | (1ull << 48) | (1ull << 52)),
+                  "F147: the promotion is EVASuit_Gear_Back (48) alone; the extra unclip is Gear_UpperArmL (36), _UpperArmR (37), _Chest (41), _Back (48) and EVASuit_Gear_Arms (52)");
+            check(f144::promoteMask(promoteAllowed, f144::kGearOuter) == (1ull << 48) && f144::promoteMask(promoteAllowed, f144::kGearSuitArms) == 0 &&
+                      f144::promoteMask(promoteAllowed, f144::kGearNoArms) == 0 && f144::promoteMask(promoteAllowed, f144::kGearUnknown) == 0,
+                  "F147: Gear_Back is promoted only under the outer-garment decision (the other suit's backpack, no gear arms, an unread decision: nothing)");
+            uint64_t list = 0, head = 0;
+            static const char* const f19[] = {"EVASuit_Torso", "EVASuit_Arms", "EVASuit_Hands", "Shoulder_Left", "Shoulder_Right", "EVASuit_Legs", "EVASuit_Feet", "FirstPersonSkeleton",
+                                              "EVASuit_Gear_LowerArms", "EVASuit_Gear_LowerArmL", "EVASuit_Gear_LowerArmR"};
+            for (const char* n : f19) list |= 1ull << edvr::avh::partIndexByName(n);
+            for (uint32_t h : edvr::avh::kHeadParts) head |= 1ull << h;
+            const uint64_t coat = f144::unclipMask(unclipAllowed, list, head, f144::kGearOuter);
+            check(coat == unclipAllowed, "F147: in the coat the extra unclip writes exactly those five (none is in F19's list or a head part)");
+            check(f144::unclipMask(unclipAllowed, list, head, f144::kGearSuitArms) == 0 && f144::unclipMask(unclipAllowed, list, head, f144::kGearNoArms) == 0 &&
+                      f144::unclipMask(unclipAllowed, list, head, f144::kGearUnknown) == 0,
+                  "F147: with arms from the other suit, no gear arms, or no decision the extra unclip writes nothing");
+            const auto in = [&](uint64_t m, const char* n) { return ((m >> edvr::avh::partIndexByName(n)) & 1ull) != 0; };
+            check(!in(coat, "EVASuit_Gear_Neck") && !in(coat, "ShoulderPads") && !in(coat, "BodyAccessory_01") && !in(coat, "EVASuit_Gear_Waist") && !in(coat, "OuterClothing_Torso") &&
+                      !in(coat, "EVASuit") && !in(coat, "EVASuit_Gear_UpperArms") && !in(coat, "EVASuit_Gear_Legs") && !in(coat, "EVASuit_Gear_Head") && !in(promoteAllowed, "EVASuit_Gear_Neck"),
+                  "F147: another shadow-only or gear part (neck, shoulder pads, an accessory, the waist, the overshirt, the upper arms' combined part, legs, head) is left alone");
+            check(f144::maskOfIdx(nullptr, 0) == 0 && f144::unclipMask(~0ull, ~0ull, 0, f144::kGearOuter) == 0 && f144::unclipMask(~0ull, 0, ~0ull, f144::kGearOuter) == 0,
+                  "F147: F19's list and the head parts are never in the extra unclip, whatever is allowed");
+            const int bad[3] = {-1, 70, 5};
+            check(f144::maskOfIdx(bad, 3) == (1ull << 5), "F147: an unresolved or out-of-range part adds nothing");
+            // the promotion through f142::promoteClasses with the allow-list: Gear_Neck in the shadow-only class stays the game's, as does a backpack suit's Gear_Back
+            int32_t cls2[f142::kPartCount];
+            for (uint32_t i = 0; i < f142::kPartCount; ++i) cls2[i] = 1;
+            cls2[48] = 2;
+            cls2[33] = 2;   // EVASuit_Gear_Neck
+            cls2[14] = 2;   // ShoulderPads
+            f142::OutfitSwap sw2;
+            f142::promoteClasses(sw2, 49, &edvr::avh::isHeadPart, [&](uint32_t i) { return cls2[i]; },
+                                 [&](uint32_t i, int32_t d, int32_t e) { if (cls2[i] != e) return false; cls2[i] = d; return true; }, ~f144::promoteMask(promoteAllowed, f144::kGearOuter));
+            check(sw2.n == 1 && sw2.part[0] == 48 && cls2[48] == 1 && cls2[33] == 2 && cls2[14] == 2, "F147: in the coat only Gear_Back leaves the shadow-only class; the neck gear and the shoulder pads keep the game's");
+            for (uint32_t i = 0; i < f142::kPartCount; ++i) cls2[i] = i == 48 || i == 33 ? 2 : 1;
+            f142::OutfitSwap sw3;
+            f142::promoteClasses(sw3, 49, &edvr::avh::isHeadPart, [&](uint32_t i) { return cls2[i]; },
+                                 [&](uint32_t i, int32_t d, int32_t e) { if (cls2[i] != e) return false; cls2[i] = d; return true; }, ~f144::promoteMask(promoteAllowed, f144::kGearSuitArms));
+            check(sw3.n == 0 && cls2[48] == 2 && cls2[33] == 2, "F147: in the other suit nothing is promoted: its backpack and its neck gear stay shadow-only");
+        }
         // the promotion with Gear_Back held back
         int32_t cls[f142::kPartCount];
         for (uint32_t i = 0; i < f142::kPartCount; ++i) cls[i] = 1;
@@ -236,20 +293,29 @@ inline void run144(Check&& check) {
         }
         check(seeds, "F145/F146: the rows of the weapons the pilot dialled hold his totals, role by role: eight weapons' scope-no rows (F145; the kinetic and laser pistols' hip unchanged), the plasma shotgun's revised, and (F146) the plasma pistol (scope no) and the scoped plasma sniper");
         // not baked: every other (item, scope) keeps F144's seeds (the F140 table for the ADS roles and the pistols, 0 for a rifle's hip role)
+        // F147: F140's own table, which this read, is gone; its nine weapons are listed here with the class values each had (the pistols 13, 3.5, -3, 3; every other 0, 3.5, 0, 0)
+        struct Old {
+            const char* item;
+            bool pistol;
+        };
+        const Old nine[] = {{"$wpn_m_assaultrifle_laser_fauto_name;", false},   {"$wpn_m_assaultrifle_plasma_fauto_name;", false}, {"$wpn_m_launcher_rocket_sauto_name;", false},
+                            {"$wpn_m_sniper_plasma_charged_name;", false},       {"$wpn_m_submachinegun_kinetic_fauto_name;", false}, {"$wpn_m_submachinegun_laser_fauto_name;", false},
+                            {"$wpn_s_pistol_kinetic_sauto_name;", true},         {"$wpn_s_pistol_laser_sauto_name;", true},      {"$wpn_s_pistol_plasma_charged_name;", true}};
         bool kept = true;
-        for (const f140::Entry& e : f140::kTable) {
-            bool bakedRow = false;
-            for (const Seed& sd : baked) bakedRow = bakedRow || (std::strcmp(sd.item, e.item) == 0 && sd.scope == e.scope);
-            if (bakedRow) continue;
-            const f144::Row* ads = f144::find(e.item, e.scope, f144::kAds);
-            const f144::Row* hip = f144::find(e.item, e.scope, f144::kHip);
-            const bool pistol = e.v[0] == 13.0;
-            kept = kept && ads && hip;
-            for (int i = 0; kept && i < 4; ++i) {
-                kept = kept && ads->v[i] == e.v[i];
-                kept = kept && hip->v[i] == (pistol ? e.v[i] : 0.0);
+        for (const Old& o : nine)
+            for (int scope : {ls::kScopeNo, ls::kScopeYes}) {
+                bool bakedRow = false;
+                for (const Seed& sd : baked) bakedRow = bakedRow || (std::strcmp(sd.item, o.item) == 0 && sd.scope == scope);
+                if (bakedRow) continue;
+                const f144::Row* ads = f144::find(o.item, scope, f144::kAds);
+                const f144::Row* hip = f144::find(o.item, scope, f144::kHip);
+                const double v[4] = {o.pistol ? 13.0 : 0.0, 3.5, o.pistol ? -3.0 : 0.0, o.pistol ? 3.0 : 0.0};
+                kept = kept && ads && hip;
+                for (int i = 0; kept && i < 4; ++i) {
+                    kept = kept && ads->v[i] == v[i];
+                    kept = kept && hip->v[i] == (o.pistol ? v[i] : 0.0);
+                }
             }
-        }
         check(kept, "F145/F146: every row not baked (the scope-yes rows but the sniper's, the sniper's scope-no rows, the plasma pistol's scope-yes rows) keeps F144's seeds");
         const char* kinRifle = "$wpn_m_assaultrifle_kinetic_fauto_name;";
         const char* plasmaPistol = "$wpn_s_pistol_plasma_charged_name;";

@@ -122,13 +122,8 @@ inline double stepM(const double a[3], const double b[3]) noexcept {
 }
 
 // ---- 2. the coat's clip modifiers ----------------------------------------------------------------------------------------------------------------------------------
-constexpr uint32_t kPartCount = 54;   // avatar_hooks_core.h kPartCount (checked where both are included)
-// The parts the unclip A/B adds: every part but the head parts and those F19's unclip list already names (its bits in listMask: the torso, arms, hands, shoulders, lower-arm gear,
-// and the comparison parts the list names but leaves clipped: legs, feet, the first-person skeleton). Bit i = part index i.
-inline uint64_t extraUnclipMask(uint64_t listMask, uint64_t headMask) noexcept {
-    const uint64_t all = (1ull << kPartCount) - 1ull;
-    return all & ~listMask & ~headMask;
-}
+constexpr uint32_t kPartCount = 54;   // avatar_hooks_core.h kPartCount (a static_assert in native_on_foot_hooks.cpp holds the two together)
+static_assert(kPartCount < 64, "the part masks are 64-bit words");
 // EDVR's armed state as the measure names it: 0 unarmed, 1 a weapon ($wpn_ item) in hand, 2 a tool.
 enum Armed : uint8_t { kUnarmed = 0, kWeapon = 1, kTool = 2 };
 inline uint8_t armedState(bool armed, const char* heldName) noexcept {
@@ -138,13 +133,20 @@ inline uint8_t armedState(bool armed, const char* heldName) noexcept {
 inline const char* armedText(unsigned a) noexcept {
     return a == kUnarmed ? "unarmed" : a == kWeapon ? "weapon" : a == kTool ? "tool" : "?";
 }
-// When the measure reads: at the first call, every 5 s, and when the armed state differs from the last read's. 0 not now, 1 the 5 s clock, 2 the armed state changed (or the
-// first read). The clock's reads stop after capClock of them a session (the armed-state reads do not).
-enum ReadWhy : int { kReadNo = 0, kReadClock = 1, kReadState = 2 };
-inline int readWhy(int lastArmed, uint8_t armed, uint64_t nowMs, uint64_t nextMs, uint32_t clockReads, uint32_t capClock) noexcept {
-    if (lastArmed < 0 || lastArmed != static_cast<int>(armed)) return kReadState;
-    if (nowMs >= nextMs && clockReads < capClock) return kReadClock;
+// When the measure reads (F147): at the first call, when the outfit changed (the F142 census queued a change), and when EDVR's armed state changes to a state not yet read in this
+// outfit. Not on a clock, and not at every draw and holster: a snapshot is about 3 KB of log text. At most capReads a session. 0 not now; 1 the 5 s clock (the F143 to F146
+// builds' schedule, which logs from before still carry); 2 the armed state first changed to this state in this outfit; 3 the first call; 4 the outfit changed.
+enum ReadWhy : int { kReadNo = 0, kReadClock = 1, kReadState = 2, kReadFirst = 3, kReadOutfit = 4 };
+inline int readWhy(int lastArmed, uint8_t armed, unsigned seenMask, bool outfitChanged, uint32_t reads, uint32_t capReads) noexcept {
+    if (reads >= capReads) return kReadNo;
+    if (lastArmed < 0) return kReadFirst;
+    if (outfitChanged) return kReadOutfit;
+    if (lastArmed != static_cast<int>(armed) && armed < 8 && !((seenMask >> armed) & 1u)) return kReadState;
     return kReadNo;
+}
+inline const char* readWhyText(unsigned w) noexcept {
+    return w == kReadClock ? "on the 5 s clock" : w == kReadState ? "when the armed state first changed to this state in this outfit" : w == kReadFirst ? "at the first call"
+         : w == kReadOutfit ? "when the outfit changed" : "?";
 }
 struct ClipRow {
     uint8_t idx = 0;
@@ -158,7 +160,7 @@ struct ClipRow {
 struct ClipSnap {
     uint64_t amc = 0;
     uint8_t armed = 0;              // Armed
-    uint8_t why = kReadClock;       // ReadWhy
+    uint8_t why = kReadFirst;       // ReadWhy
     bool flagsOk = false;
     uint8_t flag321 = 0, flag322 = 0;
     uint32_t n = 0;                 // rows used: the parts with an instance

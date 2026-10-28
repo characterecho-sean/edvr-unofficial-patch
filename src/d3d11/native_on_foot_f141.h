@@ -1,5 +1,7 @@
-// F141 (native on-foot VR, MEASURE ONLY): the game's ADS sight point, and the weapon readout's anchor. Header only, no game or D3D11 state, so native_frame_test
-// runs the very functions the hooks and the frame thread use. Journal: the arc doc, 2026-10-27, F141. RE: analysis\decomp\verify_20261027_ads_sight_line.txt and
+// F141 (native on-foot VR): the game's ADS sight point, and the weapon readout's anchor. It began as a measurement; since F143 and F144 the sight point it reads (E and S) is the
+// source of the ADS eye's shift (the settled sight line), so the hook is behaviour and is held to the head hide's rules (F147: it stands down after three faults inside the
+// game's functions, asks for S only at w = 1.0 as the game does, and skips every act but the local player's once that is known). Header only, no game or D3D11 state, so
+// native_frame_test runs the very functions the hooks and the frame thread use. Journal: the arc doc, 2026-10-27, F141. RE: analysis\decomp\verify_20261027_ads_sight_line.txt and
 // verify_20261027_ads_readout_anchor.txt (build 334925).
 //
 // The sight point. Flat ADS does not move the camera onto the sight: HumanoidWeaponAiming's per-frame 0x1908760 (rcx = the activity, "act") bends the SHOT. Once
@@ -8,7 +10,7 @@
 // that points forward of the eye matrix E's forward row. In VR the shots follow P14's forward, so the bend is not taking effect; the candidates are (a) w never
 // reaches 1, (b) the handle is invalid, (c) 0x1908760 is not called for the local player, (d) another writer of the aim dir before the shot, (e) E is not P14.
 // A hook on 0x1908760 reads after the game's own call (and the aim dir before it); an entry hook on the aim 0x19079E0 reads the aim dir at the shot. Nothing is
-// written into the game.
+// written into the game; the hook calls the game's own query functions (the handle, the fraction, the local position, the point transform) with the bend's own arguments.
 //
 // The readout's anchor. The 16 floats EDVR's weapon UI getter observation already reads at 0x1AB1960 are a locator's world matrix U. Per part key, over a held
 // item and its scope, the spread of U against the held weapon's world W (the FP attach joint 51 through F_root) and against P14's world says whether the part is
@@ -154,11 +156,12 @@ struct BendIn {
 };
 // F142: why a sample gave no geometry (BendOut::why), counted per window so a run in which every sample is rejected reads as the instrument's, never as a finding about the
 // game. kWhyHandle is not a rejection: the game's sight handle was not valid (candidate b), so S was never asked for.
-enum Why : uint8_t { kWhyOk = 0, kWhyENotRead, kWhyENonFinite, kWhyHandle, kWhySNotRead, kWhySNonFinite, kWhyRow, kWhySOnE, kWhyCount };
+// F147: kWhyNotFull is not a rejection either: S is asked for only at w = 1.0 (the game's own precondition), so a sample under it has none.
+enum Why : uint8_t { kWhyOk = 0, kWhyENotRead, kWhyENonFinite, kWhyHandle, kWhySNotRead, kWhySNonFinite, kWhyRow, kWhySOnE, kWhyNotFull, kWhyCount };
 constexpr double kSOnEMetres = 1e-6;   // |S - E| under this has no ray
 inline const char* whyText(unsigned w) noexcept {
     static const char* const kText[kWhyCount] = {"usable", "E not read", "E non-finite in a used lane", "sight handle not valid (the game's)", "S not read",
-                                                 "S non-finite", "a degenerate row of E", "|S - E| under 1 um"};
+                                                 "S non-finite", "a degenerate row of E", "|S - E| under 1 um", "the ADS fraction under 1.0 (S not fetched)"};
     return w < kWhyCount ? kText[w] : "?";
 }
 struct BendOut {
@@ -189,7 +192,7 @@ inline BendOut bend(const BendIn& in) noexcept {
     if (!in.eOk) { o.why = kWhyENotRead; return o; }
     if (!finiteUsed(in.E)) { o.why = kWhyENonFinite; return o; }
     o.ePad = !finitePad(in.E);
-    if (!in.sOk) { o.why = (in.okRead && !in.ok) ? kWhyHandle : kWhySNotRead; return o; }
+    if (!in.sOk) { o.why = (in.okRead && !in.ok) ? kWhyHandle : (in.wOk && std::isfinite(in.w) && in.w < 1.0f) ? kWhyNotFull : kWhySNotRead; return o; }
     if (!finiteAll(in.S, 3)) { o.why = kWhySNonFinite; return o; }
     double ex[3], ey[3], ez[3], p[3];
     row3(in.E, 0, ex);
@@ -283,11 +286,11 @@ struct Acc {
     uint32_t ePadN = 0, posPairs = 0, posRowNear = 0, posColNear = 0;
     static constexpr double kNearM = 0.5;
     void reset() noexcept { *this = Acc{}; }
-    // The samples the instrument rejected (every reason but usable and the game's own invalid handle) of the ADS-on ones.
+    // The samples the instrument rejected (every reason but usable, the game's own invalid handle and S not fetched under w = 1.0) of the ADS-on ones.
     uint32_t rejected() const noexcept {
         uint32_t n = 0;
         for (unsigned i = 1; i < kWhyCount; ++i)
-            if (i != kWhyHandle) n += why[i];
+            if (i != kWhyHandle && i != kWhyNotFull) n += why[i];
         return n;
     }
     // One local call: adsOn (data+0x10), the bend's geometry, and S against P14 when an FP snapshot was paired (gap: |sample frame - snapshot frame|).

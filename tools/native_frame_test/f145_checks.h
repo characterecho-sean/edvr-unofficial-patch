@@ -9,10 +9,13 @@
 #include "../../src/d3d11/native_on_foot_f145.h"
 #include "f144_checks.h"
 
+#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <thread>
+#include <vector>
 
 namespace f145test {
 
@@ -21,30 +24,25 @@ namespace f144 = edvr::nofoot::f144;
 namespace f90 = edvr::nofoot::f90;
 namespace f85 = edvr::nofoot::f85;
 
-// A small copy of the submit hook's slot table, driving pickSlot the way f85bSlotOf does.
+// The submit hook's slot table over the real claim (f145::claimSlot, which f85bSlotOf calls).
 struct Table {
     static constexpr uint32_t kN = 8;
-    uint32_t names[kN] = {};
-    uint64_t seen[kN] = {};
+    std::atomic<uint32_t> names[kN];
+    std::atomic<uint64_t> seen[kN];
+    std::atomic<uint32_t> gens[kN];
     uint32_t recycles = 0, noSlot = 0;
-    int ask(uint16_t nameId, uint64_t nowMs) {
-        const uint32_t want = nameId + 1u;
-        const f145::SlotPick p = f145::pickSlot(names, seen, kN, want, nowMs);
-        switch (p.how) {
-            case f145::kSlotHit:
-            case f145::kSlotFree:
-                names[p.slot] = want;
-                seen[p.slot] = nowMs;
-                return p.slot;
-            case f145::kSlotRecycled:
-                names[p.slot] = want;
-                seen[p.slot] = nowMs;
-                ++recycles;
-                return p.slot;
-            default:
-                ++noSlot;
-                return -1;
+    Table() {
+        for (uint32_t i = 0; i < kN; ++i) {
+            names[i].store(0);
+            seen[i].store(0);
+            gens[i].store(0);
         }
+    }
+    int ask(uint16_t nameId, uint64_t nowMs) {
+        const f145::SlotPick p = f145::claimSlot<kN>(names, seen, gens, nameId + 1u, nowMs);
+        if (p.how == f145::kSlotRecycled) ++recycles;
+        if (p.how == f145::kSlotNone) ++noSlot;
+        return p.slot;
     }
 };
 
@@ -160,6 +158,132 @@ inline void run145(Check&& check) {
         bool order = true;
         for (uint16_t n = 1; n <= 4; ++n) order = order && ring.take(&ev) && ev.name == n && ev.slot == n && ev.oldName == n + 10 && ev.idleMs == 7000u + n && ev.kind == f145::kEvRecycled;
         check(order && !ring.take(&ev) && ring.push(ev), "F145: events come out in the order they went in, and the freed room is usable again");
+    }
+    // ---- F147: the claim is atomic and the ring takes several producers ----------------------------------------------------------------------------------------------------
+    {
+        // A table of eight slots, every one last asked for long ago: any new name recycles.
+        const auto idleTable = [](Table& t) {
+            for (uint32_t i = 0; i < Table::kN; ++i) {
+                t.names[i].store(100u + i);
+                t.seen[i].store(1000u + i);   // slot 0 the oldest
+            }
+        };
+        {   // a rival takes the picked victim between the pick and the claim: the claim loses, picks again and takes another slot; the rival keeps its slot
+            Table t;
+            idleTable(t);
+            int hooks = 0;
+            const f145::SlotPick p = f145::claimSlotWith<Table::kN>(t.names, t.seen, t.gens, 500u, 20000, [&](const f145::SlotPick& pick) {
+                if (++hooks == 1) t.names[pick.slot].store(900u);
+            });
+            check(p.how == f145::kSlotRecycled && p.slot == 1 && t.names[0].load() == 900u && t.names[1].load() == 500u && t.gens[0].load() == 0u && t.gens[1].load() == 1u && hooks == 2,
+                  "F147: a rival wins the picked victim first: the claim picks again, takes the next idle slot, and leaves the rival's name alone");
+        }
+        {   // the picked free slot is taken by a rival for ANOTHER name: the next free slot; for the SAME name: a hit on the rival's slot
+            Table t;
+            for (uint32_t i = 2; i < Table::kN; ++i) {
+                t.names[i].store(100u + i);
+                t.seen[i].store(19000u);
+            }
+            int hooks = 0;
+            f145::SlotPick p = f145::claimSlotWith<Table::kN>(t.names, t.seen, t.gens, 500u, 20000, [&](const f145::SlotPick& pick) {
+                if (++hooks == 1) t.names[pick.slot].store(900u);
+            });
+            check(p.how == f145::kSlotFree && p.slot == 1 && t.names[0].load() == 900u && t.names[1].load() == 500u, "F147: a rival takes the picked free slot for another name: the claim takes the next free one");
+            Table u;
+            for (uint32_t i = 2; i < Table::kN; ++i) {
+                u.names[i].store(100u + i);
+                u.seen[i].store(19000u);
+            }
+            hooks = 0;
+            p = f145::claimSlotWith<Table::kN>(u.names, u.seen, u.gens, 500u, 20000, [&](const f145::SlotPick& pick) {
+                if (++hooks == 1) u.names[pick.slot].store(500u);
+            });
+            check(p.how == f145::kSlotHit && p.slot == 0 && u.names[1].load() == 0u, "F147: ... for the same name: the claim finds it holding the slot (a hit), and takes no second one");
+        }
+        {   // a rival wins every try: four lost races end in none, not in a slot the claim does not hold
+            Table t;
+            idleTable(t);
+            uint32_t next = 900u;
+            const f145::SlotPick p = f145::claimSlotWith<Table::kN>(t.names, t.seen, t.gens, 500u, 20000, [&](const f145::SlotPick& pick) {
+                if (pick.slot >= 0) t.names[pick.slot].store(next++);
+            });
+            bool held = false;
+            for (uint32_t i = 0; i < Table::kN; ++i) held = held || t.names[i].load() == 500u;
+            check(p.how == f145::kSlotNone && p.slot == -1 && !held, "F147: four lost races give none, and the name is in no slot");
+        }
+        {   // the generation moves only when a slot changes hands
+            Table t;
+            idleTable(t);
+            f145::claimSlot<Table::kN>(t.names, t.seen, t.gens, 101u, 20000);   // a hit
+            const uint32_t afterHit = t.gens[1].load();
+            f145::claimSlot<Table::kN>(t.names, t.seen, t.gens, 500u, 20000);   // recycles slot 0, the oldest
+            check(afterHit == 0u && t.gens[0].load() == 1u && t.names[0].load() == 500u, "F147: the generation of a slot is bumped once, when it changes hands, after the name has changed");
+        }
+        {   // real threads: four new names race for a table of idle slots; every one gets its own slot and the generations add up to four
+            bool distinct = true, named = true, gensOk = true;
+            int rounds = 0;
+            for (; rounds < 300 && distinct && named && gensOk; ++rounds) {
+                Table t;
+                idleTable(t);
+                std::atomic<int> ready{0};
+                int got[4] = {-9, -9, -9, -9};
+                std::vector<std::thread> th;
+                for (int k = 0; k < 4; ++k)
+                    th.emplace_back([&, k] {
+                        ready.fetch_add(1);
+                        while (ready.load() < 4) {
+                        }
+                        got[k] = f145::claimSlot<Table::kN>(t.names, t.seen, t.gens, 500u + static_cast<uint32_t>(k), 20000).slot;
+                    });
+                for (std::thread& x : th) x.join();
+                uint32_t gens = 0;
+                for (uint32_t i = 0; i < Table::kN; ++i) gens += t.gens[i].load();
+                for (int a = 0; a < 4; ++a) {
+                    distinct = distinct && got[a] >= 0;
+                    named = named && got[a] >= 0 && t.names[got[a]].load() == 500u + static_cast<uint32_t>(a);
+                    for (int b = a + 1; b < 4; ++b) distinct = distinct && got[a] != got[b];
+                }
+                gensOk = gens == 4u;
+            }
+            check(distinct && named && gensOk, "F147: four threads racing for idle slots: every one holds its own slot with its own name, and the generations add up (300 rounds)");
+        }
+        {   // the ring with four producers and the one consumer: every event once, in each producer's own order
+            constexpr int kProducers = 4, kEach = 600;
+            f145::EventRing<16> ring;
+            std::vector<std::thread> th;
+            std::atomic<int> ready{0};
+            for (int k = 0; k < kProducers; ++k)
+                th.emplace_back([&, k] {
+                    ready.fetch_add(1);
+                    while (ready.load() < kProducers) {
+                    }
+                    for (int i = 0; i < kEach; ++i) {
+                        f145::SlotEvent e;
+                        e.kind = f145::kEvRecycled;
+                        e.slot = static_cast<uint8_t>(k);
+                        e.name = static_cast<uint16_t>(i);
+                        e.idleMs = 5000u + static_cast<uint32_t>(i);
+                        while (!ring.push(e)) std::this_thread::yield();
+                    }
+                });
+            int next[kProducers] = {};
+            int taken = 0;
+            bool inOrder = true, whole = true;
+            while (taken < kProducers * kEach) {
+                f145::SlotEvent e;
+                if (!ring.take(&e)) {
+                    std::this_thread::yield();
+                    continue;
+                }
+                ++taken;
+                if (e.slot >= kProducers || e.name != next[e.slot]) inOrder = false;
+                else ++next[e.slot];
+                whole = whole && e.kind == f145::kEvRecycled && e.idleMs == 5000u + e.name;
+            }
+            for (std::thread& x : th) x.join();
+            f145::SlotEvent rest;
+            check(inOrder && whole && !ring.take(&rest) && next[0] == kEach && next[3] == kEach, "F147: four producers into a 16-cell ring: every event once, whole, in each producer's order, none left");
+        }
     }
     // ---- 2. the proof against the seed -----------------------------------------------------------------------------------------------------------------------------
     {

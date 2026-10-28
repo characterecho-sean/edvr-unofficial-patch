@@ -2,8 +2,8 @@
 //
 // F143 (native_on_foot_f143.h): (1) the ADS eye's shift taken from the game's own sight line E -> S (read by F141's hook, expressed relative to P14w in the FP root's axes;
 // F144 keeps it settled per (item, scope)): Q is the point on the line at the lock's eye depth k along the root's forward from the origin, the game's shift is Q less
-// (origin + k f) less its part along f, and F139's 8 cm bound stands (F146 removed the two live trims). (2) the coat's clip modifiers: the parts the unclip A/B adds (everything but
-// the head parts and F19's list), and when the measure reads.
+// (origin + k f) less its part along f, and F139's 8 cm bound stands (F146 removed the two live trims). (2) the coat's clip modifiers: when the measure reads (F147: the first call, a changed outfit,
+// an armed state's first change in an outfit; capped).
 #pragma once
 
 #include "../../src/d3d11/avatar_hooks_core.h"
@@ -108,41 +108,31 @@ inline void run143(Check&& check) {
     // ---- 2. the coat's clip modifiers --------------------------------------------------------------------------------------------------------------------------------
     {
         check(f143::kPartCount == edvr::avh::kPartCount, "F143: the clip snapshot holds every part of the avatar's table");
-        uint64_t list = 0, head = 0;
-        static const char* const names[] = {"EVASuit_Torso", "EVASuit_Arms", "EVASuit_Hands", "Shoulder_Left", "Shoulder_Right", "EVASuit_Legs", "EVASuit_Feet", "FirstPersonSkeleton",
-                                            "EVASuit_Gear_LowerArms", "EVASuit_Gear_LowerArmL", "EVASuit_Gear_LowerArmR"};
-        for (const char* n : names) {
-            const int i = edvr::avh::partIndexByName(n);
-            if (i >= 0) list |= 1ull << i;
-        }
-        for (uint32_t h : edvr::avh::kHeadParts) head |= 1ull << h;
-        const uint64_t extra = f143::extraUnclipMask(list, head);
-        int count = 0;
-        for (int i = 0; i < 54; ++i) count += (extra >> i) & 1;
-        const auto has = [&](const char* n) { return ((extra >> edvr::avh::partIndexByName(n)) & 1ull) != 0; };
-        check(count == 54 - 12 - 11, "F143: the A/B adds 31 parts: 54 less the 12 head parts and the 11 the unclip list names");
-        check(has("EVASuit_Gear_Back") && has("EVASuit_Gear_UpperArms") && has("EVASuit_Gear_Chest") && has("EVASuit_Gear_Waist") && has("OuterClothing_Torso") && has("EVASuit"),
-              "F143: ... among them the coat's Gear_Back and the other gear parts");
-        check(!has("EVASuit_Torso") && !has("EVASuit_Arms") && !has("EVASuit_Hands") && !has("Shoulder_Left") && !has("EVASuit_Gear_LowerArmL") && !has("EVASuit_Legs") &&
-                  !has("EVASuit_Feet") && !has("FirstPersonSkeleton"),
-              "F143: ... not the parts already covered, nor the comparison parts the list leaves clipped, nor the first-person skeleton");
-        check(!has("Head") && !has("Hair") && !has("EVASuit_Helmet") && !has("EVASuit_Eyewear") && !has("EVASuit_Gear_Head") && !has("Beard") && !has("Teeth"), "F143: ... and no head part");
-        check((extra >> 54) == 0 && f143::extraUnclipMask(0, 0) == (1ull << 54) - 1ull && f143::extraUnclipMask((1ull << 54) - 1ull, 0) == 0, "F143: the mask is the avatar's 54 bits and no more");
         // armed state
         check(f143::armedState(false, "$wpn_m_assaultrifle_laser_fauto_name;") == f143::kUnarmed && f143::armedState(true, "$wpn_m_assaultrifle_laser_fauto_name;") == f143::kWeapon &&
                   f143::armedState(true, "$humanoid_companalyser_name;") == f143::kTool && f143::armedState(true, nullptr) == f143::kTool && f143::armedState(true, "") == f143::kTool,
               "F143: unarmed, a weapon ($wpn_ item) and a tool");
         check(std::strcmp(f143::armedText(0), "unarmed") == 0 && std::strcmp(f143::armedText(1), "weapon") == 0 && std::strcmp(f143::armedText(2), "tool") == 0 && std::strcmp(f143::armedText(9), "?") == 0,
               "F143: the armed state as the log says it");
-        // when the measure reads
-        check(f143::readWhy(-1, 0, 1000, 0, 0, 300) == f143::kReadState, "F143: the first call reads");
-        check(f143::readWhy(0, 0, 1000, 6000, 0, 300) == f143::kReadNo && f143::readWhy(0, 0, 5999, 6000, 0, 300) == f143::kReadNo, "F143: nothing to read before the 5 s clock");
-        check(f143::readWhy(0, 0, 6000, 6000, 0, 300) == f143::kReadClock, "F143: the 5 s clock reads");
-        check(f143::readWhy(0, 1, 1000, 6000, 0, 300) == f143::kReadState && f143::readWhy(1, 2, 1000, 6000, 0, 300) == f143::kReadState, "F143: a change of the armed state reads at once");
-        check(f143::readWhy(0, 0, 9000, 6000, 300, 300) == f143::kReadNo && f143::readWhy(0, 2, 9000, 6000, 300, 300) == f143::kReadState,
-              "F143: past the cap the clock stops reading, a change of the armed state does not");
+        // when the measure reads (F147): the first call, a changed outfit, the armed state's first change to a state in this outfit; capped; no clock
+        const unsigned none = 0u, unarmedSeen = 1u << f143::kUnarmed, weaponSeen = 1u << f143::kWeapon;
+        check(f143::readWhy(-1, 0, none, false, 0, 24) == f143::kReadFirst, "F147: the first call reads");
+        check(f143::readWhy(0, 0, unarmedSeen, false, 1, 24) == f143::kReadNo, "F147: nothing to read while the outfit and the armed state stand (no clock)");
+        check(f143::readWhy(0, 1, unarmedSeen, false, 1, 24) == f143::kReadState, "F147: the armed state changed to a state not yet read in this outfit: reads");
+        check(f143::readWhy(1, 0, unarmedSeen | weaponSeen, false, 2, 24) == f143::kReadNo && f143::readWhy(0, 1, unarmedSeen | weaponSeen, false, 2, 24) == f143::kReadNo,
+              "F147: a holster and a draw in an outfit that has both states read read nothing");
+        check(f143::readWhy(0, 2, unarmedSeen | weaponSeen, false, 2, 24) == f143::kReadState, "F147: ... a tool, the third state, reads once");
+        check(f143::readWhy(0, 0, unarmedSeen, true, 1, 24) == f143::kReadOutfit && f143::readWhy(1, 1, weaponSeen, true, 1, 24) == f143::kReadOutfit,
+              "F147: a changed outfit reads, whatever the armed state");
+        check(f143::readWhy(-1, 0, none, false, 24, 24) == f143::kReadNo && f143::readWhy(0, 1, unarmedSeen, true, 30, 24) == f143::kReadNo,
+              "F147: past the cap of 24 snapshots a session nothing reads");
+        check(f143::readWhy(0, 9, unarmedSeen, false, 1, 24) == f143::kReadNo, "F147: an armed state outside 0..7 reads nothing");
+        check(std::strcmp(f143::readWhyText(f143::kReadFirst), "at the first call") == 0 && std::strcmp(f143::readWhyText(f143::kReadOutfit), "when the outfit changed") == 0 &&
+                  std::strcmp(f143::readWhyText(f143::kReadState), "when the armed state first changed to this state in this outfit") == 0 &&
+                  std::strcmp(f143::readWhyText(f143::kReadClock), "on the 5 s clock") == 0 && std::strcmp(f143::readWhyText(99), "?") == 0,
+              "F147: the reasons as the log says them");
         f143::ClipSnap snap;
-        check(snap.n == 0 && snap.why == f143::kReadClock && !snap.flagsOk, "F143: an empty clip snapshot");
+        check(snap.n == 0 && snap.why == f143::kReadFirst && !snap.flagsOk, "F143: an empty clip snapshot");
     }
 }
 

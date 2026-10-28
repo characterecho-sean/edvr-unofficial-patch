@@ -67,6 +67,53 @@ inline SlotPick pickSlot(const uint32_t* names, const uint64_t* seenMs, uint32_t
     }
     return p;
 }
+// F147: the claim the submit hook makes on the shared slot arrays (names[i]: the name id + 1, 0 free; seenMs[i]: the tick it was last asked for; gens[i]: bumped when the slot
+// changes hands). pickSlot decides on a snapshot; the claim itself is a compare-exchange on the slot's name, so two submits that picked the same victim (or the same free slot)
+// cannot both win it: the loser takes a fresh snapshot and picks again (it may find the winner holding the very name it wants, a hit). The slot's tick is stored BEFORE the
+// compare-exchange, so a snapshot that sees the new name (acquire) also sees the new tick and does not take the winner's slot for an idle one; a loser's store leaves the tick
+// of a slot someone has just claimed at "now", which it was. The generation is bumped after the name changes, so a reader that sees the new generation never sees the old name
+// beside it. `afterPick(pick)` is called between the snapshot and the claim (a no-op in the product; the rig makes a rival claim there). kSlotNone: every slot is in use, or four
+// tries lost their race. The one window left: a name asked for again after its slot sat idle for kSlotIdleMs, at the very moment another name recycles that slot; the claim re-checks
+// the name after refreshing the tick, which narrows it to a few instructions, and the next ask of that name finds no hit and takes another slot.
+template <uint32_t N, class AfterPick>
+inline SlotPick claimSlotWith(std::atomic<uint32_t>* names, std::atomic<uint64_t>* seenMs, std::atomic<uint32_t>* gens, uint32_t want, uint64_t nowMs, AfterPick&& afterPick) noexcept {
+    for (int attempt = 0; attempt < 4; ++attempt) {
+        uint32_t n[N];
+        uint64_t s[N];
+        for (uint32_t i = 0; i < N; ++i) {
+            n[i] = names[i].load(std::memory_order_acquire);   // the name first: a new name seen here makes its tick (stored before it) visible to the next load
+            s[i] = seenMs[i].load(std::memory_order_relaxed);
+        }
+        const SlotPick p = pickSlot(n, s, N, want, nowMs);
+        afterPick(p);
+        switch (p.how) {
+            case kSlotHit:
+                seenMs[p.slot].store(nowMs, std::memory_order_relaxed);
+                if (names[p.slot].load(std::memory_order_acquire) != want) continue;   // recycled under this call: pick again
+                return p;
+            case kSlotFree: {
+                seenMs[p.slot].store(nowMs, std::memory_order_relaxed);
+                uint32_t cur = 0;
+                if (!names[p.slot].compare_exchange_strong(cur, want, std::memory_order_acq_rel, std::memory_order_relaxed)) continue;
+                return p;
+            }
+            case kSlotRecycled: {
+                seenMs[p.slot].store(nowMs, std::memory_order_relaxed);
+                uint32_t cur = p.oldName;
+                if (!names[p.slot].compare_exchange_strong(cur, want, std::memory_order_acq_rel, std::memory_order_relaxed)) continue;
+                gens[p.slot].fetch_add(1u, std::memory_order_release);
+                return p;
+            }
+            default:
+                return p;
+        }
+    }
+    return SlotPick{};
+}
+template <uint32_t N>
+inline SlotPick claimSlot(std::atomic<uint32_t>* names, std::atomic<uint64_t>* seenMs, std::atomic<uint32_t>* gens, uint32_t want, uint64_t nowMs) noexcept {
+    return claimSlotWith<N>(names, seenMs, gens, want, nowMs, [](const SlotPick&) {});
+}
 // A slot event for the frame thread's log (the submit hook runs on the game's thread and does not write the log): a recycle, or a name that found every slot in use.
 enum EventKind : uint8_t { kEvRecycled = 1, kEvNoSlot = 2 };
 struct SlotEvent {
@@ -74,23 +121,46 @@ struct SlotEvent {
     uint16_t name = 0, oldName = 0;   // name ids (not +1)
     uint32_t idleMs = 0;
 };
-// One producer (the submit hook), one consumer (the frame thread).
+// F147: any number of producers (the submit hooks), one consumer (the frame thread). A bounded queue whose cells each carry a sequence number (Vyukov's): a producer claims a
+// position with a compare-exchange only when that cell is free, writes the event, then publishes the cell; the consumer takes a cell only once it is published, so no event is
+// read half written and two producers never write the same cell. N is a power of two.
 template <uint32_t N>
 struct EventRing {
-    SlotEvent ev[N];
-    std::atomic<uint32_t> head{0}, tail{0};
+    static_assert(N >= 2u && (N & (N - 1u)) == 0u, "EventRing<N>: N must be a power of two");
+    struct Cell {
+        std::atomic<uint32_t> seq{0};
+        SlotEvent ev;
+    };
+    Cell cell[N];
+    std::atomic<uint32_t> head{0};   // the next position a producer claims
+    uint32_t tail = 0;               // the consumer's own
+    EventRing() noexcept {
+        for (uint32_t i = 0; i < N; ++i) cell[i].seq.store(i, std::memory_order_relaxed);
+    }
     bool push(const SlotEvent& e) noexcept {
-        const uint32_t h = head.load(std::memory_order_relaxed);
-        if (h - tail.load(std::memory_order_acquire) >= N) return false;
-        ev[h % N] = e;
-        head.store(h + 1u, std::memory_order_release);
-        return true;
+        uint32_t pos = head.load(std::memory_order_relaxed);
+        for (;;) {
+            Cell& c = cell[pos % N];
+            const int32_t diff = static_cast<int32_t>(c.seq.load(std::memory_order_acquire) - pos);
+            if (diff == 0) {
+                if (head.compare_exchange_weak(pos, pos + 1u, std::memory_order_relaxed)) {
+                    c.ev = e;
+                    c.seq.store(pos + 1u, std::memory_order_release);
+                    return true;
+                }
+            } else if (diff < 0) {
+                return false;   // the consumer has not freed this cell: full
+            } else {
+                pos = head.load(std::memory_order_relaxed);   // another producer took it
+            }
+        }
     }
     bool take(SlotEvent* out) noexcept {
-        const uint32_t t = tail.load(std::memory_order_relaxed);
-        if (t == head.load(std::memory_order_acquire)) return false;
-        *out = ev[t % N];
-        tail.store(t + 1u, std::memory_order_release);
+        Cell& c = cell[tail % N];
+        if (c.seq.load(std::memory_order_acquire) != tail + 1u) return false;
+        *out = c.ev;
+        c.seq.store(tail + N, std::memory_order_release);
+        ++tail;
         return true;
     }
 };

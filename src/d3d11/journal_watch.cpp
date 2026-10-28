@@ -247,6 +247,9 @@ void resetVisible() {
 std::atomic<bool> g_eager{false};
 // Built F66a: the native on-foot tick's own request for the 100 ms cadence (journalWatchSetEagerStatusOnFoot); the worker reads on the faster.
 std::atomic<bool> g_eagerOnFoot{false};
+// F147: the native on-foot tick's request for the suit loadout's weapon slots (journalWatchSetLoadoutWanted). False until native on foot is first active, and always false in the
+// flat profile: nothing reads the loadout there, and the reader opens and walks the whole journal.
+std::atomic<bool> g_loadoutWanted{false};
 
 // The rig's hook (journal_watch.h). Null in the product.
 std::atomic<JournalWorkHook> g_workHook{nullptr};
@@ -306,6 +309,7 @@ struct Session {
     PeriodicWork workStatus{"journal_status"};
     PeriodicWork workTail{"journal_tail", "bytes"};
     PeriodicWork workReglob{"journal_reglob", "files"};
+    PeriodicWork workLoadout{"journal_loadout"};   // F147
     // SEH containment, as the frame boundary's tick had: a fault in a pass is
     // absorbed and logged once, and a run of them retires the watcher.
     FaultBudget  budget{"journal.worker", 8};
@@ -726,8 +730,13 @@ bool pass(Session& s, char* buf) {
         if (s.handle == INVALID_HANDLE_VALUE) return true;   // nothing yet
     }
 
-    // F140: the suit loadout's weapon slots, from the first byte of this same journal (journal_loadout_reader.h says why it is not the tail below).
-    s.loadoutReader.poll(s.dir, s.file);
+    // F140: the suit loadout's weapon slots, from the first byte of this same journal (journal_loadout_reader.h says why it is not the tail below). F147: only in the VR
+    // profile and only once native on foot has been active (journalWatchSetLoadoutWanted); the first poll after that reads the file once from its start, every later one
+    // only what was appended, and a poll while it is not wanted does nothing. Its time is timed apart from the tail's.
+    if (g_loadoutWanted.load(std::memory_order_relaxed) && !runtimeFlatProfile()) {
+        PeriodicWorkScope timing(s.workLoadout);
+        s.loadoutReader.poll(s.dir, s.file);
+    }
 
     // Read whatever has appeared since last time.
     {
@@ -1019,7 +1028,11 @@ void journalWatchConfigure() {
                     "(LoadGame), on-foot sessions beginning (Disembark), and "
                     "jumps (StartJump, resolved by FSDJump or "
                     "SupercruiseEntry) for the witchspace star fix. Event "
-                    "names only; nothing else is read or kept.");
+                    "names only are kept, with one exception: while native "
+                    "on foot is on, the suit loadout's weapon slots (module "
+                    "name, scope or not, mods) are also read from the whole "
+                    "journal, by their own reader, once native on foot first "
+                    "becomes active; the commander's loadout name is not kept.");
 }
 
 void journalWatchTick() {
@@ -1109,6 +1122,13 @@ bool journalHeldItemName(char* out, size_t cap) {
 void journalWatchSetEagerStatusOnFoot(bool eager) {
     if (g_eagerOnFoot.exchange(eager, std::memory_order_relaxed) == eager) return;
     if (Session* s = g_session.load(std::memory_order_acquire)) SetEvent(s->wake);
+}
+void journalWatchSetLoadoutWanted(bool wanted) {
+    if (wanted && runtimeFlatProfile()) return;
+    if (g_loadoutWanted.exchange(wanted, std::memory_order_relaxed) == wanted) return;
+    if (wanted) {
+        if (Session* s = g_session.load(std::memory_order_acquire)) SetEvent(s->wake);
+    }
 }
 bool journalFlatSupercruise(bool* supercruise) {
     if (!runtimeFlatProfile() || !g_v.active.load(std::memory_order_acquire) || !peek(g_v.supercruiseKnown)) return false;

@@ -196,7 +196,7 @@ struct NativeOnFootOutfitStats {   // cumulative (the frame thread logs the chan
     uint64_t lost = 0;         // classes the game changed during a call (its value stood)
     uint64_t part[avh::kPartCount] = {};   // promotions by part index
     uint32_t faults = 0;
-    bool down = false;         // three faults: the A/B stood down for the session
+    bool down = false;         // three faults: the full outfit stood down for the session
     // F143: the unclip for the full outfit: clip modifiers written (enable 0, dirty 1) for the parts F19's list does not cover, by part index; guarded writes that faulted
     uint64_t clip[avh::kPartCount] = {};
     uint64_t clipWrites = 0, clipFaults = 0;

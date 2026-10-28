@@ -49,14 +49,37 @@ inline double dist3(const double a[3], const double b[3]) noexcept {
 }  // namespace detail
 
 // One press's gate. settled() is asked of every usable sample paired with the FP snapshot of its own render frame, in order; reset() at the press's start.
+// F147: the gate also starts again when the sample's activation (the game's act or its sight handle) or the held item and scope changes, and when the ADS fraction drops under
+// 1.0: a weapon swapped while ADS is held raises the new weapon with the fraction down, and the old weapon's hold must not count for it (its E and S would be averaged into
+// the old weapon's line, the one that persists for the session).
 struct SettleGate {
     bool fullSeen = false;
     uint64_t fullMs = 0;
     bool havePrev = false;
     double pe[3] = {}, ps[3] = {};
+    uint32_t activation = ~0u;
+    uint64_t itemKey = 0;
     void reset() noexcept { *this = SettleGate{}; }
+    // The sample's activation and the held (item, scope) key; a change of either starts the gate again. True when it did.
+    bool track(uint32_t act, uint64_t key) noexcept {
+        if (act == activation && key == itemKey) return false;
+        reset();
+        activation = act;
+        itemKey = key;
+        return true;
+    }
+    // The ADS fraction is down for a sample the caller saw (no S was fetched for it): the hold and the previous sample are forgotten.
+    void drop() noexcept {
+        fullSeen = false;
+        havePrev = false;
+    }
     bool settled(bool wOk, float w, uint64_t nowMs, const double e[3], const double s[3]) noexcept {
         const bool full = wOk && std::isfinite(w) && w >= 1.0f;
+        if (!full) {   // the fraction is down (or unread): the hold starts again at its next 1.0, and this sample is no reference for the next
+            fullSeen = false;
+            havePrev = false;
+            return false;
+        }
         if (full && !fullSeen) {
             fullSeen = true;
             fullMs = nowMs;
@@ -266,12 +289,29 @@ struct EntryPath {
 };
 
 // ---- 2. the coat: Gear_Back only for an outer garment ---------------------------------------------------------------------------------------------------------------------
+// F147: and nothing but what the flights showed. The promotion (the shadow-only class to every view for the visibility call) is EVASuit_Gear_Back alone; the extra unclip (the
+// clip modifier's enable 0) is the five parts the coat outfit showed it writing; both only under the outer-garment decision below. Every other part, and every other suit's
+// gear, keeps the game's class and clip. (F142 and F143 acted on every shadow-only part and on every part with a modifier; the backpack in the face was that rule on a part the
+// game hides from the first-person camera on purpose, and the rule had two outfits behind it.)
+inline constexpr const char* kPromoteNames[] = {"EVASuit_Gear_Back"};
+inline constexpr const char* kUnclipNames[] = {"EVASuit_Gear_UpperArmL", "EVASuit_Gear_UpperArmR", "EVASuit_Gear_Chest", "EVASuit_Gear_Back", "EVASuit_Gear_Arms"};
+// The part mask (bit i = part i) of resolved part indices; a name that did not resolve (-1) adds nothing.
+inline uint64_t maskOfIdx(const int* idx, size_t n) noexcept {
+    uint64_t m = 0;
+    for (size_t i = 0; i < n; ++i)
+        if (idx[i] >= 0 && idx[i] < 64) m |= 1ull << idx[i];
+    return m;
+}
 enum GearBack : int { kGearUnknown = 0, kGearOuter = 1, kGearSuitArms = 2, kGearNoArms = 3 };
 inline int gearBackDecision(bool suitArms, bool gearArms) noexcept {
     if (suitArms) return kGearSuitArms;
     return gearArms ? kGearOuter : kGearNoArms;
 }
 inline bool gearBackPromoted(int d) noexcept { return d == kGearOuter; }
+// The parts one visibility call may promote: the flown part (allowed) when the decision is an outer garment, else none.
+inline uint64_t promoteMask(uint64_t allowed, int decision) noexcept { return gearBackPromoted(decision) ? allowed : 0ull; }
+// The parts the extra unclip may write: the flown five (allowed) when the decision is an outer garment, less F19's own list and the head parts (which it never writes), else none.
+inline uint64_t unclipMask(uint64_t allowed, uint64_t listMask, uint64_t headMask, int decision) noexcept { return gearBackPromoted(decision) ? allowed & ~listMask & ~headMask : 0ull; }
 inline const char* gearBackText(int d) noexcept {
     switch (d) {
         case kGearOuter: return "Gear_Back promoted: outer garment";

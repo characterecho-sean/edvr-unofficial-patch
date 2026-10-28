@@ -6,6 +6,9 @@
 // journal file (the one journal_watch.cpp tails) on its own handle and reads it from its first byte whatever the provenance, up to kMaxPerPoll a poll until it has caught up
 // (a long session's journal is a few MB; the worker is its own thread), then follows it. It keeps the three weapon slots (module name, scope or not, the mods) and nothing else
 // of what it reads. A new journal file is read from its top and updates the loadout it finds: the loadout is the commander's own, it carries across a relaunch.
+// F147: the worker polls it only in the VR profile and only after native on foot has first been active (journalWatchSetLoadoutWanted), so a flat session and a VR session that
+// never goes on foot never open this file; the first poll after that is the one whole read, every later one only the appended bytes. The log line names the loadout by its
+// id and the weapons with their scope state, not by the commander's name for it.
 #pragma once
 
 #include <windows.h>

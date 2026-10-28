@@ -1,4 +1,4 @@
-// F141 checks (native on-foot VR, measure only): the game's ADS sight point and the weapon readout's anchor. Header only, run by native_frame_test (run141).
+// F141 checks (native on-foot VR): the game's ADS sight point (the ADS eye's source since F143) and the weapon readout's anchor. Header only, run by native_frame_test (run141).
 // Convention: matrices are row-vector (rows x, y, z, position; a point p goes to p M), as the game's and EDVR's; the bend's E has rows x, y, z = forward and the
 // position; the aim dir is in the eye's own axes, (0, 0, 1) straight down E's forward; S's offset from P14's line is in the FP root's unit rows (right, up, forward).
 #pragma once
@@ -89,6 +89,18 @@ inline void run141(Check&& check) {
         x.sOk = false;
         const f141::BendOut bx = f141::bend(x);
         check(!bx.geo && close141(bx.aimOutDeg, rayDeg, 1e-3), "F141: S not read: no geometry, the aim dir angles still read");
+        check(bx.why == f141::kWhySNotRead, "F141: S not read at a fraction of 1.0 is the instrument's: S not read");
+        // F147: S is asked for only at w = 1.0, so a sample under it has none and says why (not a rejection)
+        x = in;
+        x.sOk = false;
+        x.w = 0.4f;
+        check(f141::bend(x).why == f141::kWhyNotFull && !f141::bend(x).geo, "F147: no S under a fraction of 1.0: kWhyNotFull");
+        x.ok = false;
+        check(f141::bend(x).why == f141::kWhyHandle, "F147: the game's invalid handle is named before the fraction");
+        x.ok = true;
+        x.wOk = false;
+        check(f141::bend(x).why == f141::kWhySNotRead, "F147: a fraction that was not read is not 'under 1.0': S not read");
+        check(std::strstr(f141::whyText(f141::kWhyNotFull), "under 1.0") != nullptr && f141::kWhyCount == 9, "F147: the new reason has its text");
         x = in;
         x.aimOut[0] = 0.0f; x.aimOut[1] = 0.0f; x.aimOut[2] = 1.0f;
         check(close141(f141::bend(x).aimOutVsRayDeg, rayDeg, 1e-3), "F141: an unbent exit aim is the ray's angle off the sight ray");
@@ -147,6 +159,13 @@ inline void run141(Check&& check) {
         a.add(true, nos, f141::bend(nos), false, p, 0);
         check(a.samples == 4 && a.adsOff == 1 && a.wN == 3 && close141(a.wMin, 0.4, 1e-6) && close141(a.wMax, 1.0, 1e-9) && a.wFull == 2 && a.okN == 3 && a.applied == 1 && a.geoN == 2,
               "F141: the window: an ADS-off call counts apart, w's min and max, applied only at w = 1");
+        f141::Acc under;
+        f141::BendIn lowNoS = in;
+        lowNoS.w = 0.4f;
+        lowNoS.sOk = false;
+        under.add(true, lowNoS, f141::bend(lowNoS), false, p, 0);
+        under.add(true, in, f141::bend(in), true, p, 0);
+        check(under.why[f141::kWhyNotFull] == 1 && under.why[f141::kWhyOk] == 1 && under.rejected() == 0, "F147: a sample under w 1.0 is counted apart and is not a rejection");
         check(a.p14N == 2 && a.p14Exact == 1 && close141(f141::Acc::mean(a.frameGapSum, a.p14N), 1.0, 1e-9) && close141(f141::Acc::mean(a.p14Up, a.p14N), 0.02, 1e-12) &&
                   a.noFp == 0 && close141(a.eDistMax, 0.05, 1e-12) && a.rayVsN == 1,
               "F141: the window: S against P14 on the paired calls (one of the same frame), the frame gap's mean, the exit against the ray on the applied call");

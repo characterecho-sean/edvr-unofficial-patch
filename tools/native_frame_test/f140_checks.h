@@ -1,11 +1,12 @@
-// F140 checks (native on-foot VR): the weapon readout placed per weapon from a table keyed by (item, scope fitted), and the journal's loadout that says which scope is fitted.
+// F140 checks (native on-foot VR): the journal's loadout that says which scope is fitted, and what the weapon readout's placement shares.
 // Header only, run by native_frame_test (run140). Two halves: the journal parser (journal_loadout.h: the name mapping, the three events and the removal, the unknown and
-// ambiguous cases, the chunked reading) and the placement (native_on_foot_f140.h: a table hit, a miss, the trim, the clamp, the rocket launcher's entry while the pistol part is
-// drawn, an untrusted name).
+// ambiguous cases, the chunked reading) and what the placement shares (native_on_foot_f140.h: the class built-ins, the ranges, a weapon, a trusted item; F147: the table is
+// F144's alone, so its rows are checked here for the nine weapons F140 held, and the rocket launcher's row while the pistol part is drawn).
 #pragma once
 
 #include "../../src/d3d11/journal_loadout.h"
 #include "../../src/d3d11/native_on_foot_f140.h"
+#include "../../src/d3d11/native_on_foot_f144.h"   // F147: the one table (F140's own was removed)
 #include "f90_checks.h"   // the F85 two-eye rig and the part records, for the placement through f90::decide
 
 #include <algorithm>
@@ -81,6 +82,16 @@ inline void runLoadout(Check&& check) {
         check(laser.state == ls::kScopeNo && laser.why == ls::kWhyOk && laser.slots == 1 && pistol.state == ls::kScopeNo, "F140: the held weapon's name finds its slot: scope no");
         const ls::LineResult again = feedLine(l, kSwitch);
         check(again.event == ls::kEvSwitch && !again.changed && l.generation == 1, "F140: the same loadout again changes nothing (no new generation, no log line)");
+        // F147: the log line names the loadout by its id and the weapons with their scope state; the commander's name for it ("Combat") is parsed (a rename is a change) but not written
+        char text[640];
+        ls::describe(l, text, sizeof(text));
+        check(std::strstr(text, "SwitchSuitLoadout, loadout id 4293000002: PrimaryWeapon1 wpn_m_assaultrifle_kinetic_fauto scope no [weapon_handling]; PrimaryWeapon2 wpn_m_assaultrifle_laser_fauto scope no "
+                                "[weapon_stability]; SecondaryWeapon wpn_s_pistol_laser_sauto scope no []") == text && !std::strstr(text, "Combat") && !std::strstr(text, "\""),
+              "F147: the loadout line carries the id, the weapons and their scope state, and not the commander's name for the loadout");
+        std::string renamedLine = kSwitch;
+        renamedLine.replace(renamedLine.find("Combat"), 6, "Renamed");
+        const ls::LineResult renamed = feedLine(l, renamedLine.c_str());
+        check(renamed.event == ls::kEvSwitch && renamed.changed && l.generation == 2 && std::strcmp(l.name, "Renamed") == 0, "F147: ... a loadout the commander renamed is still read as a change (the name is parsed, not written)");
     }
     {   // LoadoutEquipModule: one slot, the other two stand; then SuitLoadout replaces all three
         ls::Loadout l;
@@ -205,90 +216,61 @@ inline void runLoadout(Check&& check) {
 
 template <class Check>
 inline void runPlacement(Check&& check) {
+    namespace f144 = edvr::nofoot::f144;
     const double noTrim[4] = {0, 0, 0, 0};
     const double* pistol = f140::kPistolClass;
     const double* rifle = f140::kRifleClass;
     check(pistol[0] == 13.0 && pistol[1] == 3.5 && pistol[2] == -3.0 && pistol[3] == 3.0 && rifle[0] == 0.0 && rifle[1] == 3.5 && rifle[2] == 0.0 && rifle[3] == 0.0,
           "F140: the class built-ins are the retired keys': pistol 13, 3.5, -3, 3 and rifle 0, 3.5, 0, 0 cm");
-    {   // the table: the nine weapons, each under both scope states, seeded with the class values they get today
-        const char* const pistols[3] = {kPistolKinetic, kPistolLaser, "$wpn_s_pistol_plasma_charged_name;"};
-        const char* const rifles[6] = {kLaserRifle, kPlasmaAr, kRocket, kSniper2, kKineticSmg, kLaserSmg};
-        check(f140::kTableCount == 18, "F140: nine weapons, two scope states each");
+    {   // F147: one table. F140 had its own (a row per weapon and scope), dead since F144's replaced it; the nine weapons it held are F144's rows now, under both scope states and both roles
+        const char* const nine[9] = {kPistolKinetic, kPistolLaser, "$wpn_s_pistol_plasma_charged_name;", kLaserRifle, kPlasmaAr, kRocket, kSniper2, kKineticSmg, kLaserSmg};
         bool ok = true;
-        for (const char* w : pistols)
-            for (int s : {ls::kScopeNo, ls::kScopeYes}) {
-                const f140::Entry* e = f140::find(w, s);
-                ok = ok && e && std::memcmp(e->v, pistol, sizeof(e->v)) == 0;
-            }
-        for (const char* w : rifles)
-            for (int s : {ls::kScopeNo, ls::kScopeYes}) {
-                const f140::Entry* e = f140::find(w, s);
-                ok = ok && e && std::memcmp(e->v, rifle, sizeof(e->v)) == 0;
-            }
-        check(ok, "F140: a table hit for each of the nine items under each scope state, seeded with its class's values (the pistols the pistol class's, every $wpn_m_ weapon the rifle class's)");
-        check(!f140::find("$wpn_m_unknown_name;", ls::kScopeNo) && !f140::find(nullptr, ls::kScopeNo) && !f140::find("$wpn_s_pistol_laser_sauto_name", ls::kScopeNo) &&
-                  f140::find(kRocket, ls::kScopeUnknown) == f140::find(kRocket, ls::kScopeNo),
-              "F140: an item not in the table is a miss (the key is the exact name); an unknown scope state finds the no-scope row");
+        for (const char* w : nine)
+            for (int s : {ls::kScopeNo, ls::kScopeYes})
+                for (int role : {f144::kHip, f144::kAds}) ok = ok && f144::find(w, s, role);
+        check(ok, "F147: each of the nine weapons F140 listed has a row in the one table (F144's) under each scope state and each role");
+        check(!f144::find("$wpn_m_unknown_name;", ls::kScopeNo, f144::kAds) && !f144::find(nullptr, ls::kScopeNo, f144::kAds) && !f144::find("$wpn_s_pistol_laser_sauto_name", ls::kScopeNo, f144::kAds) &&
+                  f144::find(kRocket, ls::kScopeUnknown, f144::kAds) == f144::find(kRocket, ls::kScopeNo, f144::kAds),
+              "F147: an item not in the table is a miss (the key is the exact name); an unknown scope state finds the no-scope row");
     }
-    {   // a hit, a miss, the trim, the clamp
-        const f140::Placement hit = f140::place(true, 5, 5, kRocket, ls::kScopeNo, f140::kClassPistol, noTrim);
-        check(hit.coherent && hit.weapon && hit.table && hit.total[0] == 0.0 && hit.total[1] == 3.5 && hit.total[2] == 0.0 && hit.total[3] == 0.0 && hit.seed[1] == 3.5,
-              "F140: a table hit: the rocket launcher's entry (0, 3.5, 0, 0), not the pistol class's");
-        const f140::Placement miss = f140::place(true, 5, 5, "$wpn_m_newgun_fauto_name;", ls::kScopeNo, f140::kClassPistol, noTrim);
-        check(miss.coherent && miss.weapon && !miss.table && std::memcmp(miss.total, pistol, sizeof(miss.total)) == 0, "F140: a miss falls back to the class it draws: a new weapon's pistol part takes the pistol class's values");
-        const f140::Placement missRifle = f140::place(true, 5, 5, "$wpn_m_newgun_fauto_name;", ls::kScopeNo, f140::kClassRifle, noTrim);
-        check(!missRifle.table && std::memcmp(missRifle.total, rifle, sizeof(missRifle.total)) == 0, "F140: and its rifle part the rifle class's");
-        const double trim[4] = {1.5, -1.0, 2.0, 0.5};
-        const f140::Placement t = f140::place(true, 5, 5, kPistolLaser, ls::kScopeNo, f140::kClassPistol, trim);
-        check(t.table && t.total[0] == 14.5 && t.total[1] == 2.5 && t.total[2] == -1.0 && t.total[3] == 3.5 && t.trim[0] == 1.5 && t.seed[0] == 13.0,
-              "F140: the trim adds to the table's values (13 + 1.5, 3.5 - 1, -3 + 2, 3 + 0.5)");
-        const f140::Placement tm = f140::place(true, 5, 5, "$wpn_m_newgun_fauto_name;", ls::kScopeYes, f140::kClassRifle, trim);
-        check(!tm.table && tm.total[0] == 1.5 && tm.total[1] == 2.5 && tm.total[2] == 2.0 && tm.total[3] == 0.5, "F140: the trim adds to the class's values for a miss too, whatever the scope state");
-        const f140::Placement tool = f140::place(true, 5, 5, "$humanoid_companalyser_name;", ls::kScopeNo, f140::kClassPistol, trim);
-        check(tool.coherent && !tool.weapon && !tool.table && tool.trim[0] == 0.0 && std::memcmp(tool.total, pistol, sizeof(tool.total)) == 0, "F140: a tool takes no trim and the class values");
-        // the clamp (F145): the trim to its own range, -30..30 cm on all four axes, the total to the same
-        const double big[4] = {99.0, -99.0, -99.0, 99.0};
-        const f140::Placement c = f140::place(true, 5, 5, kPistolKinetic, ls::kScopeNo, f140::kClassPistol, big);
-        check(c.trim[0] == 30.0 && c.trim[1] == -30.0 && c.trim[2] == -30.0 && c.trim[3] == 30.0, "F145: the trims are clamped to -30..30 cm on all four axes (F140's were -10..10, toward you -5..5)");
-        check(c.total[0] == 30.0 && c.total[1] == -26.5 && c.total[2] == -30.0 && c.total[3] == 30.0, "F145: the totals are clamped to -30..30: 13 + 30 = 43 reads 30, -3 - 30 = -33 reads -30");
+    {   // the ranges (F145): the trim to its own range, -30..30 cm on all four axes, the total to the same
         check(f140::clampTrim(0, 10.5) == 10.5 && f140::clampTrim(3, -12.0) == -12.0 && f140::clampTrim(1, 31.0) == 30.0 && f140::clampTrim(2, -31.0) == -30.0,
               "F145: a trim past the old stop (10 cm; toward you 5) is kept up to 30");
         check(f140::clampTotal(0, 35.0) == 30.0 && f140::clampTotal(0, -20.0) == -20.0 && f140::clampTotal(1, 20.0) == 20.0 && f140::clampTotal(3, 12.0) == 12.0 && f140::clampTotal(3, -9.0) == -9.0 &&
                   f140::clampTotal(2, -40.0) == -30.0 && f140::clampTotal(2, std::nan("")) == 0.0,
               "F145: the totals' ranges are -30..30 on all four axes (a value that is not a number reads 0)");
-        const double nan4[4] = {std::nan(""), INFINITY, 0, 0};
-        const f140::Placement n = f140::place(true, 5, 5, kPistolKinetic, ls::kScopeNo, f140::kClassPistol, nan4);
-        check(n.trim[0] == 0.0 && n.trim[1] == 0.0 && n.total[0] == 13.0, "F140: a trim that is not a number is 0");
-        // the totals of a placement with all four zero would be no move at all: the keys say so
-        const f140::Placement zero = f140::place(true, 5, 5, kPistolKinetic, ls::kScopeNo, f140::kClassPistol, noTrim);
-        check(zero.keys().any() && zero.keys().forwardCm == 13.0, "F140: keys() carries the totals into F90's Keys");
+        check(f140::clampTrim(0, std::nan("")) == 0.0 && f140::clampTrim(1, INFINITY) == 0.0, "F140: a trim that is not a number is 0");
     }
-    {   // an untrusted name falls back to the class's values and takes no trim
+    {   // a weapon, and an item snapshot that can be trusted
+        check(f140::isWeapon(kRocket) && f140::isWeapon(kPistolLaser) && !f140::isWeapon("$humanoid_companalyser_name;") && !f140::isWeapon(nullptr) && !f140::isWeapon(""), "F140: only a $wpn_ item is a weapon (a tool takes no trim)");
+        check(f140::itemCoherent(true, 5, 5, kRocket) && !f140::itemCoherent(false, 5, 5, kRocket) && !f140::itemCoherent(true, 5, 6, kRocket) && !f140::itemCoherent(true, 5, 5, "") &&
+                  !f140::itemCoherent(true, 5, 5, nullptr),
+              "F140: an item that was not read, a snapshot of another serial (the item changed between the reads) or no name is not trusted");
+    }
+    {   // the placement is F144's: an untrusted name takes the class's values and no trim
         const double trim[4] = {2.0, 2.0, 2.0, 2.0};
-        const f140::Placement unread = f140::place(false, 5, 5, kRocket, ls::kScopeNo, f140::kClassPistol, trim);
-        const f140::Placement stale = f140::place(true, 5, 6, kRocket, ls::kScopeNo, f140::kClassPistol, trim);
-        const f140::Placement nameless = f140::place(true, 5, 5, "", ls::kScopeNo, f140::kClassPistol, trim);
-        const f140::Placement nullName = f140::place(true, 5, 5, nullptr, ls::kScopeNo, f140::kClassRifle, trim);
+        const f144::RolePlacement unread = f144::place(false, 5, 5, kRocket, ls::kScopeNo, f140::kClassPistol, f144::kHip, true, trim);
+        const f144::RolePlacement stale = f144::place(true, 5, 6, kRocket, ls::kScopeNo, f140::kClassPistol, f144::kHip, true, trim);
+        const f144::RolePlacement nullName = f144::place(true, 5, 5, nullptr, ls::kScopeNo, f140::kClassRifle, f144::kAds, true, trim);
         check(!unread.coherent && !unread.table && std::memcmp(unread.total, pistol, sizeof(unread.total)) == 0 && unread.trim[0] == 0.0, "F140: an item that was not read: the class's values, no trim");
         check(!stale.coherent && !stale.table && std::memcmp(stale.total, pistol, sizeof(stale.total)) == 0 && stale.trim[1] == 0.0,
-              "F140: a snapshot of another serial (the item changed between the reads): the class's values, no trim, not the rocket launcher's entry");
-        check(!nameless.coherent && !nullName.coherent && std::memcmp(nullName.total, rifle, sizeof(nullName.total)) == 0, "F140: no name: the class's values");
+              "F140: a snapshot of another serial (the item changed between the reads): the class's values, no trim, not the rocket launcher's row");
+        check(!nullName.coherent && std::memcmp(nullName.total, rifle, sizeof(nullName.total)) == 0, "F140: no name: the class's values");
     }
-    {   // the rocket launcher's entry is used while it draws the pistol part: through f90::decide on the F85 rig
+    {   // an item's own keys are used while it draws the other class's part: through f90::decide on the F85 rig
         namespace t90 = f90test;
         const t90::Rig g = t90::makeRig();
         const t90::Record hip{t90::kN89Hip, {0.10, -0.12, 0.36}, 0.07207, {2.0, 1.0}};
         const t90::Weapon wp = t90::weaponOf(g, 7.0);
         const auto rot = edvr::drawtag::rotateByPackedQuat;
         const auto frameFn = [&] { return f90::weaponFrame(true, wp.attach, true, wp.froot); };
-        const double noT[4] = {0, 0, 0, 0};
-        const f140::Placement rocket = f140::place(true, 5, 5, kRocket, ls::kScopeNo, f140::kClassPistol, noT);
-        const f140::Placement pistolItem = f140::place(true, 5, 5, kPistolLaser, ls::kScopeNo, f140::kClassPistol, noT);
+        const f144::RolePlacement rocket = f144::place(true, 5, 5, kRocket, ls::kScopeNo, f140::kClassPistol, f144::kHip, false, noTrim);
+        const f144::RolePlacement pistolItem = f144::place(true, 5, 5, kPistolLaser, ls::kScopeNo, f140::kClassPistol, f144::kHip, false, noTrim);
         // the game is drawing the pistol part (a switch in flight: Status.json already names the rocket launcher, a primary), within the grace
         f90::In in = t90::inOf(g, 0, 300, hip, f90::kItemPrimary, 7, rocket.keys());
         in.drawnClass = f90::kDrawnPistol;
         in.drawnClassAgeS = 0.5;
-        in.rifleKeys = f140::place(true, 5, 5, kRocket, ls::kScopeNo, f140::kClassRifle, noT).keys();
+        in.rifleKeys = f144::place(true, 5, 5, kRocket, ls::kScopeNo, f140::kClassRifle, f144::kAds, false, noTrim).keys();
         f90::Latch latch;
         const f90::Out o = f90::decide(in, t90::uOf(g, 0), latch, rot, frameFn);
         f90::In inP = t90::inOf(g, 0, 300, hip, f90::kItemPistol, 7, pistolItem.keys());
@@ -298,11 +280,11 @@ inline void runPlacement(Check&& check) {
         const bool targeted = f90::target(o.C, o.wf, rocket.keys(), in.eyeOk ? in.eye : nullptr, wantT);
         double pistolT[3];
         f90::target(op.C, op.wf, pistolItem.keys(), inP.eyeOk ? inP.eye : nullptr, pistolT);
-        check(o.b == f90::kBMoved && targeted && t90::dist3(o.T, wantT) < 1e-12, "F140: the rocket launcher drawing the pistol's part: placed at its own entry's target (0 forward, 3.5 left)");
+        check(o.b == f90::kBMoved && targeted && t90::dist3(o.T, wantT) < 1e-12, "F140: the rocket launcher drawing the pistol's part: placed at its own row's target (5.5 forward at the hip)");
         check(op.b == f90::kBMoved && t90::dist3(op.T, pistolT) < 1e-12 && t90::dist3(o.T, op.T) > 1e-3,
-              "F140: and not at the pistol class's (13, 3.5, -3, 3): the same part, the same frame, another place");
+              "F140: and not at the pistol's (13, 3.5, -3, 3): the same part, the same frame, another place");
         // the same part drawn by a pistol that is not in the table takes the pistol class's values
-        const f140::Placement newPistol = f140::place(true, 5, 5, "$wpn_s_pistol_new_sauto_name;", ls::kScopeNo, f140::kClassPistol, noT);
+        const f144::RolePlacement newPistol = f144::place(true, 5, 5, "$wpn_s_pistol_new_sauto_name;", ls::kScopeNo, f140::kClassPistol, f144::kHip, false, noTrim);
         f90::In inN = t90::inOf(g, 0, 300, hip, f90::kItemPistol, 7, newPistol.keys());
         f90::Latch latchN;
         const f90::Out on = f90::decide(inN, t90::uOf(g, 0), latchN, rot, frameFn);

@@ -32,6 +32,8 @@
 
 #include "../../src/common/code_hook.h"
 #include "../../src/d3d11/native_on_foot_hooks.h"
+#include "../../src/d3d11/native_on_foot_f142.h"   // F147: the outfit swap record and F95c's class offsets, for the full outfit's glue
+#include "../../src/d3d11/native_on_foot_f144.h"   // F147: the Gear_Back decision's names
 #include "../../src/d3d11/avatar_hooks_core.h"
 #include "../../src/d3d11/avatar_skeleton_core.h"
 #include "../../src/d3d11/native_on_foot.h"   // the native flag and the camera signal the controller hook publishes (F93d)
@@ -1355,6 +1357,158 @@ void testGearClipProbeGlue(const CtlPages& p) {
     t::reset();
 }
 
+// F147 (the review's M1/m8): the full outfit (F142) and the coat's extra unclip (F143), through the real functions on a fake AMC. The promotion is EVASuit_Gear_Back alone and the extra
+// unclip five parts, both only when F144's decision says outer garment (no EVASuit_Arms instance, an EVASuit_Gear_Arms instance); every other part, and the other suit, keeps the
+// game's class and clip.
+void testOutfitGlue(const CtlPages& p) {
+    std::printf("glue: the full outfit promotes EVASuit_Gear_Back alone, and the coat's extra unclip writes five parts, both only for an outer garment\n");
+    namespace t = edvr::nofoothookstest;
+    namespace f142 = edvr::nofoot::f142;
+    namespace f144 = edvr::nofoot::f144;
+    static AmcBuf local;
+    static alignas(16) uint8_t skelA[0x100], skelB[0x100];
+    static alignas(16) uint8_t mods[avh::kPartCount][32];
+    Rig rig;
+    t::reset();
+    nofoot::logwin::setDetail(false);
+    edvr::g_nativeOnFootActive.store(false);
+    cimgInit(-1);
+    installTargets(p);
+    nativeOnFootHooksBody(true, false, "rig: install");
+    rig.boundary(); rig.boundary();
+    imgInvoke(skelA, skelB, g_cimg + avh::kPovNameRva);
+    local.init(reinterpret_cast<uint64_t>(skelA), 3);
+    edvr::g_nativeOnFootActive.store(true);
+    edvr::nativeOnFootCameraPublish(0, 0);
+    nativeOnFootHooksBody(true, true, ""); rig.boundary();
+    t::clipProbeSink(&Capture::add, &rig.cap);
+    imgFade(local.b);   // the fade hook finds the local AMC: the swap's gate reads it
+    const auto idx = [](const char* n) { return static_cast<uint32_t>(avh::partIndexByName(n)); };
+    const uint32_t back = idx("EVASuit_Gear_Back"), chest = idx("EVASuit_Gear_Chest"), upL = idx("EVASuit_Gear_UpperArmL"), upR = idx("EVASuit_Gear_UpperArmR"),
+                   gearArms = idx("EVASuit_Gear_Arms"), suitArms = idx("EVASuit_Arms"), neck = idx("EVASuit_Gear_Neck"), skeleton = idx("FirstPersonSkeleton"), hair = idx("Hair"),
+                   gearLegs = idx("EVASuit_Gear_Legs");
+    check(back < avh::kPartCount && chest < avh::kPartCount && upL < avh::kPartCount && upR < avh::kPartCount && gearArms < avh::kPartCount && suitArms < avh::kPartCount &&
+              neck < avh::kPartCount && skeleton < avh::kPartCount && hair < avh::kPartCount && gearLegs < avh::kPartCount,
+          "OUTFIT: every part the rig names is in the part-name table");
+    const auto setClass = [&](uint32_t i, int32_t c) { std::memcpy(local.b + nofoot::f95c::kOffPartClass + i * avh::kPartStride, &c, 4); };
+    const auto classOf = [&](uint32_t i) {
+        int32_t c = 0;
+        std::memcpy(&c, local.b + nofoot::f95c::kOffPartClass + i * avh::kPartStride, 4);
+        return c;
+    };
+    const auto setInstance = [&](uint32_t i, bool on) {
+        const uint64_t v = on ? 0xC000ull + i : 0ull;
+        std::memcpy(local.b + avh::kOffAmcInstances + i * avh::kPartStride, &v, 8);
+    };
+    // every one of these is in the game's shadow-views-only class; the swap may change the back and nothing else
+    const uint32_t shadowed[] = {back, chest, upL, upR, neck, gearArms, skeleton, hair, gearLegs};
+    const auto shadowAll = [&] {
+        for (uint32_t i : shadowed) setClass(i, 2);
+    };
+    const auto othersKept = [&] {
+        for (uint32_t i : shadowed)
+            if (i != back && classOf(i) != 2) return false;
+        return true;
+    };
+    f142::OutfitSwap sw;
+    NativeOnFootOutfitStats st0 = nativeOnFootOutfitStats();
+
+    // ---- the promotion
+    shadowAll();
+    bool began = nativeOnFootOutfitBegin(local.b, &sw, true);
+    check(!began && !sw.armed && classOf(back) == 2 && othersKept() && nativeOnFootGearBack() == f144::kGearNoArms,
+          "OUTFIT, no EVASuit_Gear_Arms instance: nothing is promoted, Gear_Back stays in the game's class (the decision says no outer-garment arms)");
+    setInstance(suitArms, true);
+    setInstance(gearArms, true);
+    began = nativeOnFootOutfitBegin(local.b, &sw, true);
+    check(!began && !sw.armed && classOf(back) == 2 && othersKept() && nativeOnFootGearBack() == f144::kGearSuitArms,
+          "OUTFIT, the other suit (an EVASuit_Arms instance beside the gear arms): its backpack is not promoted");
+    setInstance(suitArms, false);
+    began = nativeOnFootOutfitBegin(local.b, &sw, false);
+    check(!began && classOf(back) == 2 && othersKept(), "...a caller that does not allow the swap changes nothing");
+    began = nativeOnFootOutfitBegin(local.b, &sw, true);
+    check(began && sw.armed && sw.n == 1 && sw.part[0] == back && classOf(back) == 1 && othersKept() && nativeOnFootGearBack() == f144::kGearOuter,
+          "OUTFIT, an outer garment: EVASuit_Gear_Back goes to every view for the call, and the chest, upper arms, neck, gear arms, first-person skeleton, a head part and the rest stay in the game's class");
+    nativeOnFootOutfitEnd(&sw);
+    NativeOnFootOutfitStats st1 = nativeOnFootOutfitStats();
+    check(!sw.armed && classOf(back) == 2 && othersKept() && st1.promoted == st0.promoted + 1 && st1.swapped == st0.swapped + 1 && st1.part[back] == st0.part[back] + 1 && st1.lost == st0.lost,
+          "...End puts the game's class back by compare-exchange; one part promoted, none lost, the counts say Gear_Back");
+    began = nativeOnFootOutfitBegin(local.b, &sw, true);
+    setClass(back, 3);   // the game wrote the class during its call
+    nativeOnFootOutfitEnd(&sw);
+    check(began && classOf(back) == 3 && nativeOnFootOutfitStats().lost == st1.lost + 1, "...a class the game changed during the call stands (main views only), counted as lost");
+    setClass(back, 1);
+    began = nativeOnFootOutfitBegin(local.b, &sw, true);
+    check(!began && !sw.armed && classOf(back) == 1, "...Gear_Back already in every view: nothing to promote, nothing restored");
+    setClass(back, 2);
+    edvr::nativeOnFootCameraPublish(1, 0);
+    began = nativeOnFootOutfitBegin(local.b, &sw, true);
+    edvr::nativeOnFootCameraPublish(0, 0);
+    check(!began && classOf(back) == 2 && othersKept(), "...in the game's third-person camera nothing is promoted");
+
+    // ---- the extra unclip: the five parts, in the coat only
+    const char* const allowedNames[5] = {"EVASuit_Gear_UpperArmL", "EVASuit_Gear_UpperArmR", "EVASuit_Gear_Chest", "EVASuit_Gear_Back", "EVASuit_Gear_Arms"};
+    const char* const decoyNames[9] = {"EVASuit_Gear_Neck", "EVASuit_Gear_Shoulders", "EVASuit_Gear_UpperArms", "EVASuit_Gear_Waist", "EVASuit_Gear_Thighs", "EVASuit_Gear_Knees",
+                                       "EVASuit_Gear_Feet", "EVASuit_Gear_Legs", "EVASuit_Legs"};
+    const float amount = .6f;
+    const auto gameApply = [&]() {
+        for (auto& m : mods) {
+            std::memcpy(m + avh::kClipModAmount, &amount, 4);
+            m[avh::kClipModEnable] = 1;
+            m[avh::kClipModDirty] = 0;
+        }
+    };
+    std::memset(mods, 0, sizeof(mods));
+    gameApply();
+    for (const char* n : allowedNames) {
+        const uint64_t ptr = reinterpret_cast<uint64_t>(mods[idx(n)]);
+        std::memcpy(local.b + avh::kOffAmcParts + idx(n) * avh::kPartStride + avh::kOffPartClipMod, &ptr, 8);
+    }
+    for (const char* n : decoyNames) {
+        const uint64_t ptr = reinterpret_cast<uint64_t>(mods[idx(n)]);
+        std::memcpy(local.b + avh::kOffAmcParts + idx(n) * avh::kPartStride + avh::kOffPartClipMod, &ptr, 8);
+    }
+    const auto groupIs = [&](const char* const* names, size_t n, uint8_t enable, uint8_t dirty) {
+        for (size_t i = 0; i < n; ++i) {
+            const uint8_t* m = mods[idx(names[i])];
+            if (m[avh::kClipModEnable] != enable || m[avh::kClipModDirty] != dirty || std::memcmp(m + avh::kClipModAmount, &amount, 4)) return false;
+        }
+        return true;
+    };
+    nativeOnFootBodyClipTick(1000, true, false, "rig: unclip");
+    edvr::nativeOnFootCameraPublish(0, 0);
+    // the other suit first: its backpack and the rest of the five stay clipped
+    setInstance(suitArms, true);
+    imgFade(local.b);
+    check(groupIs(allowedNames, 5, 1, 0) && groupIs(decoyNames, 9, 1, 0) && nativeOnFootGearBack() == f144::kGearSuitArms,
+          "COAT UNCLIP, the other suit: none of the five parts is written");
+    setInstance(suitArms, false);
+    setInstance(gearArms, false);
+    imgFade(local.b);
+    check(groupIs(allowedNames, 5, 1, 0) && groupIs(decoyNames, 9, 1, 0) && nativeOnFootGearBack() == f144::kGearNoArms, "...nor in an outfit with no outer-garment arms");
+    setInstance(gearArms, true);
+    const uint64_t writes0 = nativeOnFootOutfitStats().clipWrites;
+    imgFade(local.b);
+    NativeOnFootOutfitStats st2 = nativeOnFootOutfitStats();
+    check(groupIs(allowedNames, 5, 0, 1) && groupIs(decoyNames, 9, 1, 0) && st2.clipWrites == writes0 + 5 && st2.clip[back] >= 1 && st2.clip[chest] >= 1 && st2.clip[upL] >= 1 && st2.clip[upR] >= 1 &&
+              st2.clip[gearArms] >= 1 && st2.clip[neck] == 0 && st2.clip[gearLegs] == 0,
+          "COAT UNCLIP, an outer garment: the upper arms, chest, back and gear arms are written (enable 0, dirty 1, the amount kept); the neck, shoulders, waist, thighs, knees, feet, legs and the comparison legs are not");
+    for (const char* n : allowedNames) mods[idx(n)][avh::kClipModDirty] = 0;
+    imgFade(local.b);
+    NativeOnFootOutfitStats st3 = nativeOnFootOutfitStats();
+    check(groupIs(allowedNames, 5, 0, 0) && st3.clipWrites == st2.clipWrites,
+          "...a part whose enable is already 0 is not written again (the game is not asked to rebuild it every frame)");
+    gameApply();
+    imgFade(local.b);
+    check(groupIs(allowedNames, 5, 0, 1) && groupIs(decoyNames, 9, 1, 0) && nativeOnFootOutfitStats().clipWrites == st3.clipWrites + 5, "...and the game's next item apply (enable back to 1) is unclipped again");
+    nativeOnFootBodyClipTick(2000, false, false, "rig: off");
+    gameApply();
+    imgFade(local.b);
+    check(groupIs(allowedNames, 5, 1, 0), "...with the unclip off, nothing is written");
+    t::reset();
+    edvr::g_nativeOnFootActive.store(false);
+}
+
 // F93d: native on foot's camera signal. The native key on: the controller hook is installed for the signal, its gate opens only on foot, its post-call reads
 // the mode byte the update left and publishes it (native_on_foot.h), presses nothing and changes nothing; native stereo's head hiding zeroes the local head parts
 // in the game's first-person camera only (mode 0), and leaves them to the game in its third-person camera suite (1..6).
@@ -1588,6 +1742,7 @@ void testGlue() {
     testHeadHideGlue(p);
     testFpBodyHideGlue(p);
     testGearClipProbeGlue(p);
+    testOutfitGlue(p);
     testNativeCameraGlue(p);
     testSkeletonLatch(p);
     t::reset();

@@ -7,7 +7,7 @@
 //    A new configuration finds a free slot, else the slot not seen for the longest, and only one not seen for kIconReuseMinAgeFrames or more; a slot a copy is in flight for,
 //    one the staging ring names, and one a live record's icon index names is never reused.
 //
-// 2. The full outfit (an A/B behind a `fix.` switch until F146 removed it: it is always on). The local third-person avatar's parts each have a
+// 2. The full outfit (behind a `fix.` switch until F146 removed it: it is always on; F147: only EVASuit_Gear_Back is promoted, and only for an outer garment). The local third-person avatar's parts each have a
 //    visibility class (AMC+0x1820+idx*0x680: 0 never, 1 every view, 2 the shadow views only, 3 the main views only; native_on_foot_f95c.h). In the coat outfit the game gives the
 //    coat's part (EVASuit_Gear_Back) class 2 in first person, so it is in the shadows only and the suit shows through. The full outfit gives class 1 to every class-2 part that is
 //    not a head part and not the first-person skeleton for the length of the avatar's visibility call (F95c's compare-exchange swap, the other way) and puts the game's class back
@@ -112,6 +112,11 @@ struct OutfitSwap {
 // The swap's two loops, shared by the avatar hook (volatile LONG reads and InterlockedCompareExchange under SEH) and the rig (plain ints). read(idx) -> the class now;
 // cas(idx, desired, expected) -> true when the class was `expected` and is `desired` now. promoteClasses writes the promotion of every part and records what it changed;
 // restoreClasses puts each recorded part's game class back if it is still the class written, and returns how many the game changed during the call (they stand).
+// F147 (the review's N5): this is a compare-exchange on the class WRITTEN, so a game write of that very value during the call (the game choosing every view for the part itself, say
+// on a camera change) looks like our own and is put back to the shadow-only class; `lost` does not count it. The window is the game's one visibility call (microseconds), and the
+// class is state the game writes only from its pending requests (native_on_foot_f95c.h), so a write undone this way would stand until the next request touches the part. It cannot be
+// closed from here: the four classes 0..3 all mean something to the game, so there is no spare value to tell ours apart by, and a value outside them has not been flown. The same
+// shape is F95c's swap. Left as it is; a part found in the shadow-only class after the game chose every view for it would be this.
 template <class ReadFn, class CasFn>
 inline void promoteClasses(OutfitSwap& s, uint32_t skeletonIdx, bool (*isHead)(uint32_t), ReadFn&& read, CasFn&& cas, uint64_t skipMask = 0) noexcept {
     for (uint32_t i = 0; i < kPartCount; ++i) {

@@ -43,7 +43,7 @@
 #include "f138_checks.h"    // F138: the view holds its height over the neck while the look is pitched (the weight, the sink, the reference, the return edge, the reasons, the bins)
 #include "f139_checks.h"    // F139: each weapon's sight on the ADS line (the table, the live trim, the shift, the bound, F79's origin beside it, the item snapshot)
 #include "f140_checks.h"    // F140: the weapon readout placed per weapon (the table by item and scope, the trims, the clamp, an untrusted name); the journal's loadout parser
-#include "f141_checks.h"    // F141 (measure only): the game's ADS sight point (the bend's test, S against P14, the window's sums) and the readout's anchor (U against W and P14)
+#include "f141_checks.h"    // F141: the game's ADS sight point (the bend's test, S against P14, the window's sums) and the readout's anchor (U against W and P14)
 #include "f142_checks.h"    // F142: the icon mesh table's slot reuse, the full outfit promotion, the outfit census, and F141's used-lane test and rejection counts
 #include "f143_checks.h"    // F143: the ADS eye on the game's sight line (Q on the line E -> S, the filter, the gates and the bound, the trims) and the coat's clip A/B (the extra parts, when the measure reads)
 #include "f144_checks.h"    // F144: the settled sight line per (item, scope), the coat's Gear_Back decision and first-person census, the readout placed per role and what reaches the draw
@@ -7512,7 +7512,7 @@ int wmain(int argc, wchar_t** argv) {
     // F140: the journal's loadout (the name mapping, SuitLoadout, SwitchSuitLoadout, LoadoutEquipModule, a removal, the unknown and ambiguous cases, chunked reading) and the weapon
     // readout's placement per (item, scope): a table hit, a miss, the trim, the clamp, the rocket launcher's entry while the pistol part is drawn, an untrusted name.
     f140test::run140(check);
-    // F141 (measure only): the bend's own test (w >= 1, the handle valid, the sight ahead), the sight ray in the eye's axes, S against P14's line in the FP root's
+    // F141: the bend's own test (w >= 1, the handle valid, the sight ahead), the sight ray in the eye's axes, S against P14's line in the FP root's
     // axes, the window's sums, a locator name, an activation; U against a moved weapon constant, the spread's mean, largest distance and rotation, a part's basis.
     f141test::run141(check);
     // F142: the icon mesh table's reuse choice (the oldest slot idle 60 frames, never one in flight, owned or named by a record), the full outfit A/B's promotion (state 2 becomes 1

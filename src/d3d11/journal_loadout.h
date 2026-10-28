@@ -349,12 +349,13 @@ struct LineFeeder {
     }
 };
 
-// The loadout line for the log: "SuitLoadout, loadout "Combat" (id 4293000002): PrimaryWeapon1 wpn_m_x scope no [mods]; ...".
+// The loadout line for the log: "SuitLoadout, loadout id 4293000002: PrimaryWeapon1 wpn_m_x scope no [mods]; ...". F147: the commander's name for the loadout is not written
+// (it is theirs, and nothing reads it); the id and the weapons with their scope state say which loadout it was.
 inline void describe(const Loadout& l, char* buf, size_t cap) noexcept {
     if (!buf || !cap) return;
     size_t n = 0;
     buf[0] = '\0';
-    const int h = std::snprintf(buf, cap, "%s, loadout \"%s\" (id %llu): ", eventName(l.source), l.name, static_cast<unsigned long long>(l.haveId ? l.id : 0));
+    const int h = std::snprintf(buf, cap, "%s, loadout id %llu: ", eventName(l.source), static_cast<unsigned long long>(l.haveId ? l.id : 0));
     if (h < 0 || static_cast<size_t>(h) >= cap) return;
     n = static_cast<size_t>(h);
     for (int i = 0; i < kSlotCount; ++i) {

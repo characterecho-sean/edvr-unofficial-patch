@@ -58,9 +58,9 @@
 #include "native_on_foot_f137.h"   // F137: a virtual neck under mouse look (pure parts)
 #include "native_on_foot_f138.h"   // F138: the view holds its height over the neck while the look is pitched (pure parts)
 #include "native_on_foot_f139.h"   // F139: each weapon's sight on the ADS line (the table, the live trim, the shift; pure parts)
-#include "native_on_foot_f140.h"   // F140: the weapon readout placed per weapon (the table by item and scope, the live trims; pure parts)
-#include "native_on_foot_f141.h"   // F141: the game's ADS sight point and the weapon readout's anchor, measure only (the build's addresses; pure parts)
-#include "native_on_foot_f142.h"   // F142: the icon mesh table's slot reuse, the full outfit A/B's promotion, the outfit census (pure parts)
+#include "native_on_foot_f140.h"   // F140: what the weapon readout's placement shares (the classes' built-in values, the clamps; F147: the table is native_on_foot_f144.h's alone)
+#include "native_on_foot_f141.h"   // F141: the game's ADS sight point (the source of the ADS eye's shift since F143) and the weapon readout's anchor (the build's addresses; pure parts)
+#include "native_on_foot_f142.h"   // F142: the icon mesh table's slot reuse, the full outfit's promotion, the outfit census (pure parts)
 #include "native_on_foot_f143.h"   // F143: the ADS eye on the game's sight line, the coat's clip modifiers (pure parts)
 #include "native_on_foot_f144.h"   // F144: the settled sight line per (item, scope), the coat's Gear_Back and first-person census, the readout placed per role (pure parts)
 #include "native_on_foot_f145.h"   // F145: the weapon UI's tag slots given back, the proof against the seed (pure parts)
@@ -241,7 +241,7 @@ std::atomic<bool> g_f93SteadyKey{true};
 // keeps it on the sight line; on: F62b's position lock, the head's translation since the press taken out of the eye (through the eye alignment, two frames late).
 std::atomic<bool> g_f93HoldKey{false};
 // F140 (live; F146: experimental): the held weapon's readout trims, experimental.native_on_foot_weapon_ui_forward_cm / _left_cm / _up_cm / _toward_eye_cm (moved from fix.* in
-// F146), added to the weapon's table values (native_on_foot_f140.h; the render thread's decision reads them at each weapon readout draw). They replaced F90's four pistol keys and
+// F146), added to the weapon's table values (native_on_foot_f144.h; the render thread's decision reads them at each weapon readout draw). They replaced F90's four pistol keys and
 // F92's four rifle keys, retired.
 std::atomic<float> g_f140TrimCm[4]{};   // static storage: zero
 double g_f140TrimLast[4] = {};   // forward, left, up, toward eye: the values last logged (frame thread)
@@ -376,7 +376,8 @@ bool g_panelsKeyLast = false, g_meshKeyLast = false;   // frame thread only: as 
 std::atomic<bool> g_hudKeyOn{false};               // fix.native_on_foot_hud, as the frame thread last read it (F8)
 bool g_hudKeyLast = false;                         // frame thread only: the hud key as last logged
 std::atomic<bool> g_keyOn{true};                   // fix.native_on_foot, as the frame thread last read it
-std::atomic<bool> g_methodGate{true};              // fix.native_on_foot_method is gate (F2); the setter substitutes only when it is swap
+std::atomic<bool> g_f141Down{false};               // F147: F141's hooks stood down for the session (three faults inside the game's functions): the sight line takes F139's table
+std::atomic<bool> g_methodGate{true};            // fix.native_on_foot_method is gate (F2); the setter substitutes only when it is swap
 std::atomic<bool> g_lastForwardedHmd{false};       // the most recent setter call forwarded an HMD mode (3 or 4): the gate method's flag reads it
 uintptr_t g_base = 0;
 // The spinlock the F9-F16 probes and the frame thread share (moved up from the F9 section in F16: readKey uses it first).
@@ -792,7 +793,7 @@ void retiredKeysNote(const Config& cfg, bool first) {
     if (cfg.getString("fix.native_on_foot_visor_axis", "on") != "on")
         Log::get().note("native on foot: fix.native_on_foot_visor_axis is retired (F128): ignored (the visor frame always follows each eye's optical axis in outer mode; "
                         "eye-trust checks and invalid-output protection remain active)");
-    // F140: F90's four pistol readout keys and F92's four rifle ADS readout keys. The weapon readout is placed per weapon from a table (native_on_foot_f140.h) whose seeds are
+    // F140: F90's four pistol readout keys and F92's four rifle ADS readout keys. The weapon readout is placed per weapon from a table (native_on_foot_f144.h) whose seeds are
     // these keys' built-in values, and experimental.native_on_foot_weapon_ui_*_cm trim the held weapon's. The shipping file carries each at its last value (pistol 13, 3.5, -3, 3; rifle
     // 0, 3.5, 0, 0); a value that differs is named once.
     {
@@ -1105,7 +1106,7 @@ void readKey() {
         g_f93HoldKey.store(hold, std::memory_order_relaxed);
     }
     // F140 (live; F146: [experimental], the developer tier's "Weapon UI forward / left / up / toward you", moved from [fix] with `# moved-from:` so a saved value carries over):
-    // the held weapon's readout trims, in cm (-30..30), added to the weapon's table values (native_on_foot_f140.h) in the weapon's frame: along the barrel, across it to the left,
+    // the held weapon's readout trims, in cm (-30..30), added to the weapon's table values (native_on_foot_f144.h) in the weapon's frame: along the barrel, across it to the left,
     // along its up, and toward your eye on the line of sight. 0, 0, 0, 0 leave the table's placement. They replaced F90's four pistol keys and F92's four rifle keys
     // (retiredKeysNote). For adjusting a weapon's readout from feedback: the totals the pilot settled are in the table (native_on_foot_f144.h).
     {
@@ -4005,30 +4006,19 @@ std::atomic<uint64_t> g_f85bSlotSeenMs[kF85bParts];
 std::atomic<uint32_t> g_f85bSlotGen[kF85bParts];
 nofoot::f145::EventRing<16> g_f145Slots;
 std::atomic<uint32_t> g_f145Recycles{0};
-uint16_t g_f145NoSlotNames[16] = {};   // game thread only: the names already reported as having no slot
-uint32_t g_f145NoSlotCount = 0;
+// F147: the submit hook may run on more than one thread, so the names already reported as having no slot are atomics (two threads asking for the same new name at once can say
+// it twice, never lose the entry), the claim is a compare-exchange (nofoot::f145::claimSlot) and the event ring takes several producers.
+std::atomic<uint16_t> g_f145NoSlotNames[16];
+std::atomic<uint32_t> g_f145NoSlotCount{0};
 int f85bSlotOf(uint16_t nameId) noexcept {
     namespace f145 = nofoot::f145;
     const uint32_t want = static_cast<uint32_t>(nameId) + 1u;
-    const uint64_t now = GetTickCount64();
-    uint32_t names[kF85bParts];
-    uint64_t seen[kF85bParts];
-    for (uint32_t i = 0; i < kF85bParts; ++i) {
-        names[i] = g_f85bSlotName[i].load(std::memory_order_relaxed);
-        seen[i] = g_f85bSlotSeenMs[i].load(std::memory_order_relaxed);
-    }
-    const f145::SlotPick p = f145::pickSlot(names, seen, kF85bParts, want, now);
+    const f145::SlotPick p = f145::claimSlot<kF85bParts>(g_f85bSlotName, g_f85bSlotSeenMs, g_f85bSlotGen, want, GetTickCount64());
     switch (p.how) {
         case f145::kSlotHit:
-            g_f85bSlotSeenMs[p.slot].store(now, std::memory_order_relaxed);
+        case f145::kSlotFree:
             return p.slot;
-        case f145::kSlotFree: {
-            uint32_t cur = 0;
-            if (!g_f85bSlotName[p.slot].compare_exchange_strong(cur, want, std::memory_order_relaxed)) return -1;
-            g_f85bSlotSeenMs[p.slot].store(now, std::memory_order_relaxed);
-            return p.slot;
-        }
-        case f145::kSlotRecycled: {
+        case f145::kSlotRecycled: {   // this call won the slot (the compare-exchange): what was kept for the old name is its to drop
             const uint32_t s = static_cast<uint32_t>(p.slot);
             g_f85bNoGetter[s].store(0, std::memory_order_relaxed);
             g_f85bNoCamera[s].store(0, std::memory_order_relaxed);
@@ -4037,9 +4027,6 @@ int f85bSlotOf(uint16_t nameId) noexcept {
             g_f85bWriteFault[s].store(0, std::memory_order_relaxed);
             g_f85bTagged[s].store(0, std::memory_order_relaxed);
             g_f91SlotLayout[s].state.store(0, std::memory_order_release);   // the layout is the new part's to capture
-            g_f85bSlotGen[s].fetch_add(1, std::memory_order_release);
-            g_f85bSlotName[s].store(want, std::memory_order_relaxed);
-            g_f85bSlotSeenMs[s].store(now, std::memory_order_relaxed);
             g_f145Recycles.fetch_add(1, std::memory_order_relaxed);
             f145::SlotEvent ev;
             ev.kind = f145::kEvRecycled;
@@ -4050,11 +4037,12 @@ int f85bSlotOf(uint16_t nameId) noexcept {
             g_f145Slots.push(ev);
             return p.slot;
         }
-        default: {   // every slot was asked for within kSlotIdleMs: said once per name
+        default: {   // every slot was asked for within kSlotIdleMs (or the claim lost its race four times): said once per name
             bool known = false;
-            for (uint32_t i = 0; i < g_f145NoSlotCount && i < 16; ++i) known = known || g_f145NoSlotNames[i] == nameId;
+            const uint32_t count = g_f145NoSlotCount.load(std::memory_order_relaxed);
+            for (uint32_t i = 0; i < count && i < 16; ++i) known = known || g_f145NoSlotNames[i].load(std::memory_order_relaxed) == nameId;
             if (!known) {
-                g_f145NoSlotNames[g_f145NoSlotCount++ % 16] = nameId;
+                g_f145NoSlotNames[g_f145NoSlotCount.fetch_add(1u, std::memory_order_relaxed) % 16].store(nameId, std::memory_order_relaxed);
                 f145::SlotEvent ev;
                 ev.kind = f145::kEvNoSlot;
                 ev.name = nameId;
@@ -11574,13 +11562,13 @@ void adsSightLog(uint32_t seconds, bool steady, bool hold, bool detailed) noexce
                         c.missed, c.rmsMm(c.shiftSs), c.rmsMm(c.lockSs), c.rmsMm(c.headSs), c.steps, c.alongStepRmsMm(), c.autocorr(1), c.autocorr(2), c.acN);
         c.reset();
     }
-    if (w.f139Frames) {   // F139: the held weapon's sight offset (every ADS window; --health reads it): the per-item totals the tuning flight leaves for the table
-        const double fn = static_cast<double>(w.f139Frames);
+    if (w.f139Frames) {   // F139: the held weapon's sight table (every ADS window; --health reads it): its figures, and what it did on the frames it was the source of the shift (F147)
+        const double an = w.f139Applied ? static_cast<double>(w.f139Applied) : 1.0;
         Log::get().note("native on foot ADS sight offset (F139) %u s: item %s scope %s, table up %+.1f right %+.1f cm, applied up %+.2f cm "
-                        "right %+.2f cm (mean of %u frames in the sights; applied on %u), F79 optic origin on %u frames, refused over the %.0f cm bound %u, no coherent item %u, "
-                        "scope unknown on %u frames (the no-scope row)",
+                        "right %+.2f cm (mean over the frames the table was the source of; %u frames in the sights, the table applied on %u), F79 optic origin on %u frames, "
+                        "refused over the %.0f cm bound %u, no coherent item %u, scope unknown on %u frames (the no-scope row)",
                         seconds, w.f139Item[0] ? w.f139Item : "none", loadout::scopeName(w.f139Scope), w.f139TableUpCm, w.f139TableRightCm,
-                        w.f139UpSum / fn, w.f139RightSum / fn, w.f139Frames, w.f139Applied, w.f139F79, 100.0 * nofoot::f139::kBoundM, w.f139Refused, w.f139NoItem,
+                        w.f139UpSum / an, w.f139RightSum / an, w.f139Frames, w.f139Applied, w.f139F79, 100.0 * nofoot::f139::kBoundM, w.f139Refused, w.f139NoItem,
                         w.f139ScopeUnknown);
     }
     if (w.f143Frames) {   // F143/F144: the source of the ADS shift per frame: the settled sight line of the held (item, scope), or F139's table and why (every ADS window; --health reads it)
@@ -11844,12 +11832,7 @@ void adsSightTick(uint64_t now, double dt, const EyeSample& s) noexcept {
                     ++w.f139NoItem;
                 }
                 if (rifleAnchor.applied) ++w.f139F79;
-                if (d139.refused) ++w.f139Refused;
-                if (d139.applied) {   // (the table's own figures, whichever source below is used: the F143 line says which was)
-                    ++w.f139Applied;
-                    w.f139UpSum += d139.appliedUpCm;
-                    w.f139RightSum += d139.appliedRightCm;
-                }
+                // (F147: the table's refusal and application are counted below, on the frames it was the source of the shift)
                 // F143/F144: the shift from the game's own sight line E -> S, settled: the line kept for the held (item, scope) for the session, fed by the F141 drain with settled
                 // samples only (after the game's raise animation has stopped moving E), relative to P14w in the FP root's axes. It is taken at the lock's eye depth k from this
                 // frame's P14w and root, under the same 8 cm bound, from the press's first frame; until a line exists (or when it cannot be used)
@@ -11858,11 +11841,22 @@ void adsSightTick(uint64_t now, double dt, const EyeSample& s) noexcept {
                 {
                     namespace f143 = nofoot::f143;
                     namespace f144 = nofoot::f144;
-                    f144::Entry* ent = itemOk ? g_f144Cache.find(opticItemName, scopeState) : nullptr;
+                    // F147: stood down, the hook's lines are not used any more: the table (F139) decides
+                    f144::Entry* ent = itemOk && !g_f141Down.load(std::memory_order_relaxed) ? g_f144Cache.find(opticItemName, scopeState) : nullptr;
                     const f143::Choice c = f144::choose(itemOk, d139.weapon, ent, p14w, upRow, row0, fUnit, adsOrigin, eyeCap.kM);
                     ++w.f143Frames;
                     ++w.f143Why[c.why < f143::kWhyCount ? c.why : f143::kNoLine];
                     const double wt = g_f144Blend.step(c.game, now);
+                    // F147: the F139 line counts the table (refused, or applied with its figures) only on the frames it was the source of the shift, or part of it while a settled line
+                    // blends in; on a frame the game's line alone decided, the table did nothing and the line says so
+                    if (!c.game || wt < 1.0) {
+                        if (d139.refused) ++w.f139Refused;
+                        if (d139.applied) {
+                            ++w.f139Applied;
+                            w.f139UpSum += d139.appliedUpCm;
+                            w.f139RightSum += d139.appliedRightCm;
+                        }
+                    }
                     double tableShift[3] = {}, shift[3];
                     if (d139.applied) std::memcpy(tableShift, d139.shift, sizeof(tableShift));
                     if (c.game) {
@@ -13298,6 +13292,7 @@ void f66ArmedStep(uint64_t now, double dt) noexcept {
     const bool fresh = g_reachHave && (now > g_reachLast.ms ? now - g_reachLast.ms : 0) <= nofoot::kIkFreshMs;
     const bool active = nativeOnFootActive();
     journalWatchSetEagerStatusOnFoot(active);
+    journalWatchSetLoadoutWanted(active && g_keyOn.load(std::memory_order_relaxed));   // F147: the loadout's weapon slots are read only while native on foot is active (the VR profile, the key on)
     const JournalHeldItem kind = active ? journalHeldItem() : kHeldUnknown;
     F83SelectionRead f83{};
     const bool f83Read = active && f83SelectionRead(&f83) && f83SelectionFresh(f83);
@@ -22705,13 +22700,16 @@ void installEyeProbeOnce() {
     }
 }
 
-// ---- F141 (MEASURE ONLY): the game's ADS sight point, and the weapon readout's anchor -------------------------------------------------------------------
-// native_on_foot_f141.h holds build 334925's addresses and the pure parts. Two hooks, both read only, installed once (VR, behind the identity check): the bend
+// ---- F141: the game's ADS sight point (since F143 the source of the ADS eye's shift), and the weapon readout's anchor ----------------------------------------------
+// native_on_foot_f141.h holds build 334925's addresses and the pure parts. Two hooks, installed once (VR, behind the identity check, with fix.native_on_foot on): the bend
 // 0x1908760 (HumanoidWeaponAiming's per-frame ADS bend; the detour reads the eye's aim dir, calls the game, then reads what the bend used: the eye matrix from
 // memory where its getter points, and the ADS fraction, the sight handle's validity, its local position and the point transform through the same game calls
 // with the same arguments the bend makes) and the aim 0x19079E0 (the eye's aim dir at the shot, and the shot's world dir after it). Both only forward outside
-// EDVR's ADS state (engaged or releasing, g_f141Want). Every read is guardedRead,
-// every call is under SEH with its target inside the game's image; a fault drops the field and is counted. Nothing is written into the game. The frame thread
+// EDVR's ADS state (engaged or releasing, g_f141Want) and while native on foot is active. Every read is guardedRead, every call is under SEH with its target inside the game's
+// image; a fault drops the field and is counted, and the third fault inside one of the game's functions stands the hook down for the session (F147: a fault in game code may have
+// left a lock or a half-written cache behind, and the call was repeated every frame; the sight line then falls back to F139's table, one line says so). The point S is asked for
+// only at an ADS fraction of 1.0, as the game does; and once the local player's act is known a call for another act returns before any game call of ours (the known act is
+// cleared at each ADS press and when the held item changes, so a swapped weapon's act is found again). Nothing is written into the game. The frame thread
 // pairs each local call with the FP snapshot of its render frame and prints the window's line while ADS is active, a line per activation and a one-shot line when
 // ADS runs 3 s with no local call. The readout's anchor needs no hook: the frame thread drains the weapon UI getter observation's trace (F85b).
 using F141Fn1 = uint64_t(__fastcall*)(void*);
@@ -22723,6 +22721,13 @@ F9Probe g_f141Bend, g_f141Aim;
 bool g_f141Tried = false;                                // frame thread only
 bool g_f141BendArmed = false, g_f141AimArmed = false;    // frame thread only: set once, at the install
 std::atomic<bool> g_f141Stop{false};                     // shutdown: the callbacks forward and read nothing
+// g_f141Down (F147: stood down for the session after three faults inside the game's functions; the callbacks forward and read nothing) is declared with the keys above, where the
+// sight line's choice reads it.
+std::atomic<uint32_t> g_f141CallFaults{0};               // faults inside the game's own functions (the validity, fraction, local position and transform calls)
+constexpr uint32_t kF141MaxCallFaults = 3;
+void f141CallFault() noexcept {
+    if (g_f141CallFaults.fetch_add(1, std::memory_order_relaxed) + 1 >= kF141MaxCallFaults) g_f141Down.store(true, std::memory_order_release);
+}
 uintptr_t g_f141ImageEnd = 0;                            // the game image's end, written before either gate opens
 std::atomic<uint64_t> g_f141Local{0}, g_f141Other{0}, g_f141NotEye{0}, g_f141Faults{0};   // the bend's calls: the local player's, other humanoids', [act+0x98] not an eye, a failed read or call
 std::atomic<uintptr_t> g_f141LocalAct{0};                // the last local call's act: the aim hook's filter
@@ -22841,10 +22846,13 @@ void f141AfterBend(uintptr_t act, uintptr_t ifaceIn, const float aimIn[4], bool 
     bool eyeValid = false;
     if (!f141CallValid(validFn, eye + f::kEyeLocator, &eyeValid)) {
         g_f141Faults.fetch_add(1, std::memory_order_relaxed);
+        f141CallFault();
         return;
     }
     if (!eyeValid) {
         g_f141Other.fetch_add(1, std::memory_order_relaxed);
+        uintptr_t was = act;   // the known local act's eye locator is no longer valid: find the local act again
+        g_f141LocalAct.compare_exchange_strong(was, 0, std::memory_order_relaxed);
         return;
     }
     g_f141Local.fetch_add(1, std::memory_order_relaxed);
@@ -22862,18 +22870,28 @@ void f141AfterBend(uintptr_t act, uintptr_t ifaceIn, const float aimIn[4], bool 
     bool fault = !adsRead || !s.in.aimOutOk || !s.in.eOk;
     if (s.adsOn) {
         uintptr_t ctl = 0, wFn = 0;
-        s.in.wOk = guardedRead(act + f::kActAdsCtl, &ctl, 8) && f141Slot(ctl, f::kAdsFractionSlot, &wFn) && f141CallFloat(wFn, ctl, &s.in.w);
+        if (guardedRead(act + f::kActAdsCtl, &ctl, 8) && f141Slot(ctl, f::kAdsFractionSlot, &wFn)) {
+            s.in.wOk = f141CallFloat(wFn, ctl, &s.in.w);
+            if (!s.in.wOk) f141CallFault();
+        }
         bool ok = false;
         s.in.okRead = f141CallValid(validFn, act + f::kActSight, &ok);
+        if (!s.in.okRead) f141CallFault();
         s.in.ok = ok;
         fault = fault || !s.in.wOk || !s.in.okRead;
-        if (s.in.okRead && ok) {   // S = [act+0x68]->vt+0x38(out, 0x3176930(act+0x198, tmp)), the bend's own sequence; 16-byte aligned as the game's stack slots are
+        // F147: S only at an ADS fraction of 1.0 (the game fetches it no earlier), and not once a call has taken the hook down
+        if (s.in.okRead && ok && s.in.wOk && s.in.w >= 1.0f && !g_f141Down.load(std::memory_order_relaxed)) {
+            // S = [act+0x68]->vt+0x38(out, 0x3176930(act+0x198, tmp)), the bend's own sequence; 16-byte aligned as the game's stack slots are
             alignas(16) float tmp[16] = {};
             alignas(16) float in4[4] = {};
             alignas(16) float out[16] = {};
             uintptr_t ret = 0, xf = 0, xfFn = 0;
-            s.in.sOk = f141CallLocal(g_base + f::kHandleLocalRva, act + f::kActSight, tmp, &ret) && ret >= 0x10000 && guardedRead(ret, in4, sizeof(in4)) &&
-                       guardedRead(act + f::kActXform, &xf, 8) && f141Slot(xf, f::kXformSlot, &xfFn) && f141CallXform(xfFn, xf, out, in4);
+            if (!f141CallLocal(g_base + f::kHandleLocalRva, act + f::kActSight, tmp, &ret)) {
+                f141CallFault();
+            } else if (ret >= 0x10000 && guardedRead(ret, in4, sizeof(in4)) && guardedRead(act + f::kActXform, &xf, 8) && f141Slot(xf, f::kXformSlot, &xfFn)) {
+                if (f141CallXform(xfFn, xf, out, in4)) s.in.sOk = true;
+                else f141CallFault();
+            }
             if (s.in.sOk) {
                 std::memcpy(s.in.S, out, sizeof(s.in.S));
                 std::memcpy(s.in.sRaw, out, sizeof(s.in.sRaw));   // F142: the whole 16-float output, for the raw-float line
@@ -22916,7 +22934,14 @@ uint64_t __fastcall f141BendHooked(void* act) noexcept {
     const F141Fn1 original = reinterpret_cast<F141Fn1>(g_f141Bend.original);
     if (!original) return 0;
     const uintptr_t a = reinterpret_cast<uintptr_t>(act);
-    if (!a || g_f141Stop.load(std::memory_order_relaxed) || !g_f141Want.load(std::memory_order_relaxed) || !nativeOnFootActive()) return original(act);
+    if (!a || g_f141Stop.load(std::memory_order_relaxed) || g_f141Down.load(std::memory_order_relaxed) || !g_f141Want.load(std::memory_order_relaxed) || !nativeOnFootActive())
+        return original(act);
+    // F147: once the local player's act is known, another act's call returns before any game call of ours (every armed NPC's bend runs this hook each frame of the player's ADS)
+    const uintptr_t knownLocal = g_f141LocalAct.load(std::memory_order_relaxed);
+    if (knownLocal && a != knownLocal) {
+        g_f141Other.fetch_add(1, std::memory_order_relaxed);
+        return original(act);
+    }
     uintptr_t iface = 0;
     alignas(16) float aimIn[4] = {};
     const bool aimInOk = guardedRead(a + nofoot::f141::kActEyeIface, &iface, 8) && iface >= 0x10000 &&
@@ -22970,8 +22995,8 @@ uint64_t __fastcall f141AimHooked(void* act) noexcept {
     const F141Fn1 original = reinterpret_cast<F141Fn1>(g_f141Aim.original);
     if (!original) return 0;
     const uintptr_t a = reinterpret_cast<uintptr_t>(act);
-    if (!a || g_f141Stop.load(std::memory_order_relaxed) || a != g_f141LocalAct.load(std::memory_order_relaxed) || !g_f141Want.load(std::memory_order_relaxed) ||
-        !nativeOnFootActive())
+    if (!a || g_f141Stop.load(std::memory_order_relaxed) || g_f141Down.load(std::memory_order_relaxed) || a != g_f141LocalAct.load(std::memory_order_relaxed) ||
+        !g_f141Want.load(std::memory_order_relaxed) || !nativeOnFootActive())
         return original(act);
     uintptr_t iface = 0;
     alignas(16) float at[4] = {};
@@ -22983,6 +23008,7 @@ uint64_t __fastcall f141AimHooked(void* act) noexcept {
 
 void installF141Once() {
     if (g_f141Tried) return;
+    if (!g_keyOn.load(std::memory_order_relaxed)) return;   // F147: with fix.native_on_foot off nothing goes into the game (it is tried again when the key reads on)
     g_f141Tried = true;
     if (!runtimeVrProfile()) {
         Log::get().note("native on foot ADS sight point (F141): not installed (the flat profile)");
@@ -23010,8 +23036,9 @@ void installF141Once() {
         g_f141BendArmed = installF9ProbeInto(g_f141Bend, spec, base, &stolen, &why);
         if (g_f141BendArmed) {
             Log::get().note("native on foot ADS sight point (F141): bend hook installed at EliteDangerous64.exe+0x%llX, stolen=%zu bytes, prologue %zu bytes verified "
-                            "(measure only: after the game's own call it reads the eye's aim dir and matrix, and repeats the bend's own calls: the ADS fraction, the sight "
-                            "handle's validity and local position, the point transform)", static_cast<unsigned long long>(f::kBendRva), stolen, sizeof(f::kBendPrologue));
+                            "(feeds the ADS eye: after the game's own call it reads the eye's aim dir and matrix, and repeats the bend's own calls: the ADS fraction, the sight "
+                            "handle's validity and, at a fraction of 1.0, its local position and the point transform; it stands down after three faults inside the game's calls)",
+                            static_cast<unsigned long long>(f::kBendRva), stolen, sizeof(f::kBendPrologue));
         } else {
             Log::get().note("native on foot ADS sight point (F141): bend hook NOT installed at EliteDangerous64.exe+0x%llX -- %s. The game was not touched by it.",
                             static_cast<unsigned long long>(f::kBendRva), why.c_str());
@@ -23181,11 +23208,13 @@ void f141AdsLog(uint32_t secs) noexcept {
                     a.aimOutMax, Acc::mean(a.rayVsSum, a.rayVsN), a.rayVsN, shotText);
     if (on) {   // F142: why samples gave no geometry (a separate line: the one above is near the log's 1200 bytes). A window in which every sample is rejected is the instrument's.
         namespace f = nofoot::f141;
-        Log::get().note("native on foot ADS sight point (F141) %u s: item %s scope %s: instrument: ADS samples %u, usable %u, sight handle not valid (the game's) %u, rejected %u "
+        Log::get().note("native on foot ADS sight point (F141) %u s: item %s scope %s: instrument: ADS samples %u, usable %u, sight handle not valid (the game's) %u, S not fetched "
+                        "under an ADS fraction of 1.0 %u, rejected %u "
                         "[E not read %u, E non-finite in a used lane %u, S not read %u, S non-finite %u, |S - E| under 1 um %u, a degenerate row %u]; E with a non-finite "
                         "padding lane (lanes 3, 7, 11, 15; used all the same) %u; of %u paired samples E's position lies within 50 cm of P14 as row 3 (E[12..14], the one used) on "
                         "%u, as column 3 (E[3], E[7], E[11]) on %u",
-                        secs, g_f141WinItem.name, loadout::scopeName(g_f141WinItem.scope), on, a.why[f::kWhyOk], a.why[f::kWhyHandle], a.rejected(), a.why[f::kWhyENotRead],
+                        secs, g_f141WinItem.name, loadout::scopeName(g_f141WinItem.scope), on, a.why[f::kWhyOk], a.why[f::kWhyHandle], a.why[f::kWhyNotFull], a.rejected(),
+                        a.why[f::kWhyENotRead],
                         a.why[f::kWhyENonFinite], a.why[f::kWhySNotRead], a.why[f::kWhySNonFinite], a.why[f::kWhySOnE], a.why[f::kWhyRow], a.ePadN, a.posPairs, a.posRowNear,
                         a.posColNear);
     }
@@ -23235,11 +23264,27 @@ void f141ActivationTick(uint64_t now) noexcept {
                     "reference)", count, static_cast<unsigned long long>(act), sightOk ? sight : "(not read)", eyeOk ? eye : "(not read)", adsOn ? "on" : "off",
                     valid == 0xFF ? "not read" : valid ? "yes" : "no");
 }
+bool g_f141DownNoted = false, g_f141PrevWant = false;
+uint32_t g_f141PrevHeld = 0;
 void f141AdsTick(uint64_t now) noexcept {
     namespace f = nofoot::f141;
     const bool live = nativeOnFootActive() && g_adsState == kAdsActive;
-    g_f141Want.store(nativeOnFootActive() && (g_adsState == kAdsActive || g_adsState == kAdsReleasing), std::memory_order_relaxed);
+    const bool want = nativeOnFootActive() && (g_adsState == kAdsActive || g_adsState == kAdsReleasing);
+    g_f141Want.store(want, std::memory_order_relaxed);
+    // F147: the known local act is cleared at each ADS press and when the held item changes, so the hook finds the local player's act again (a swapped weapon has a new one)
+    const uint32_t heldNow = g_heldItemSerial.load(std::memory_order_acquire);
+    if (want && (!g_f141PrevWant || heldNow != g_f141PrevHeld)) g_f141LocalAct.store(0, std::memory_order_relaxed);
+    g_f141PrevWant = want;
+    g_f141PrevHeld = heldNow;
+    if (!g_f141DownNoted && g_f141Down.load(std::memory_order_acquire)) {
+        g_f141DownNoted = true;
+        Log::get().note("native on foot ADS sight point (F141): STOOD DOWN for the session after %u faults inside the game's own functions (the validity, fraction, local position or "
+                        "point transform call): the hooks forward and read nothing from here, and the ADS eye takes F139's per-weapon table (faults counted %llu)",
+                        g_f141CallFaults.load(std::memory_order_relaxed), static_cast<unsigned long long>(g_f141Faults.load(std::memory_order_relaxed)));
+    }
     const F141Item it = live ? f141Item() : F141Item{};
+    // F147: the gate starts again with each sample's activation and the item and scope held at this tick (a weapon swapped in the press must not feed the old weapon's line)
+    const uint64_t gateKey = nofoot::adslog::mix(nofoot::adslog::mix(0u, it.held), static_cast<uint64_t>(it.scope));
     if (live && !g_f141WasLive) {   // a press begins: the window's sums and the one-shot's count start here
         g_f144Gate.reset();         // F144: the settle gate is per press
         g_f141Acc.reset();
@@ -23280,6 +23325,10 @@ void f141AdsTick(uint64_t now) noexcept {
         }
         f141RawLog(s);   // F142: E and S as the hook read them, whole, once per activation
         if (!live) continue;
+        // F147: every live sample goes past the settle gate: a new activation or another item or scope starts it again, and a fraction under 1.0 (the new weapon's raise, with
+        // no S fetched) clears its hold
+        g_f144Gate.track(s.activation, gateKey);
+        if (!(s.in.wOk && s.in.w >= 1.0f)) g_f144Gate.drop();
         const f::BendOut b = f::bend(s.in);
         uint32_t gap = ~0u;
         const F141Fp* fp = f141FpFind(s.frame, &gap);
@@ -24586,7 +24635,7 @@ void f143ClipLog(const nofoot::f143::ClipSnap& c) noexcept {
         std::snprintf(f322, sizeof(f322), "0x%02X", c.flag322);
     }
     Log::get().note("native on foot outfit clip (F143) #%u armed %s (read %s): [AMC+0x321] %s [AMC+0x322] %s, %u parts have instances, %u of them a clip modifier; the parts follow",
-                    seq, f143::armedText(c.armed), c.why == f143::kReadClock ? "on the 5 s clock" : "when the armed state changed (or at the first call)", f321, f322, c.n, mods);
+                    seq, f143::armedText(c.armed), f143::readWhyText(c.why), f321, f322, c.n, mods);
     char line[1100];
     size_t at = 0;
     const char* const armed = f143::armedText(c.armed);
@@ -24681,7 +24730,7 @@ void f142WindowClose(uint64_t now, const NativeOnFootOutfitStats& c) noexcept {
     F142State& s = g_f142;
     if (!s.windowMs) return;
     const NativeOnFootOutfitStats& p = s.base;
-    {   // F143: the unclip A/B's writes this window (the parts with a clip modifier that F19's list does not cover), by name
+    {   // F143: the coat's unclip writes this window (the parts with a clip modifier that F19's list does not cover; F147: five parts, in the coat only), by name
         char clipNames[300] = "";
         size_t cat = 0;
         for (uint32_t i = 0; i < avh::kPartCount; ++i) {
@@ -24690,7 +24739,7 @@ void f142WindowClose(uint64_t now, const NativeOnFootOutfitStats& c) noexcept {
             const int w = std::snprintf(clipNames + cat, sizeof(clipNames) - cat, "%s%s %llu", cat ? ", " : "", f142PartName(i), static_cast<unsigned long long>(n));
             if (w > 0) cat += static_cast<size_t>(w);
         }
-        Log::get().note("native on foot full outfit clip (F143) %u s: modifiers unclipped by the A/B %llu (by name: %s), write faults %llu", nofoot::logwin::closedSeconds(now - s.windowMs),
+        Log::get().note("native on foot full outfit clip (F143) %u s: modifiers unclipped for the coat %llu (by name: %s), write faults %llu", nofoot::logwin::closedSeconds(now - s.windowMs),
                         static_cast<unsigned long long>(c.clipWrites - p.clipWrites), cat ? clipNames : "none", static_cast<unsigned long long>(c.clipFaults - p.clipFaults));
     }
     char byName[420] = "";
@@ -29753,6 +29802,9 @@ nofoot::f90::Out f90Decide(uint32_t frame, int e, const Rec& r, const Find* f, u
             g_f91RoleLog[slot] = f90::RoleLog{};
             g_f144Pending[slot][0] = F144Pending{};
             g_f144Pending[slot][1] = F144Pending{};
+            // F147: the surface lines read these two slots; a slot that changed hands is no longer the part they were set for (F86d's ray text would name the new part)
+            if (g_f90SlotHip == static_cast<int>(slot)) g_f90SlotHip = -1;
+            if (g_f92SlotRifle == static_cast<int>(slot)) g_f92SlotRifle = -1;
         }
     }
     f90::In in;
@@ -33153,7 +33205,7 @@ void nativeOnFootFrameBoundary(uint32_t frameNo) {
     cameraGateTick(now);   // F93d: the game's camera (first person or its third-person suite) gates every body change; its lines
     nativePreviewCameraBoundary(keyOn && session, nativeOnFootActive() && !nativeOnFootCameraExternal());
     headShadowTick(now);   // F95c: the head kept in the shadows; its lines
-    f142Tick(now);         // F142: the outfit census (a change), and the full outfit A/B's window while the key is on
+    f142Tick(now);         // F142: the outfit census (a change), and the full outfit's window while the key is on
     gateLine(now);
     avatarLine(now);
     avatarCensusLine(now);
@@ -33199,7 +33251,7 @@ void nativeOnFootFrameBoundary(uint32_t frameNo) {
     // F14: the layout probe, its lines, the HUD spread, and the reticle probe (temporary).
     installF14ProbesOnce();
     installEyeProbeOnce();   // F18 (TEMPORARY): probe P1, read only
-    installF141Once();       // F141 (measure only): the ADS bend's and the aim's read-only hooks
+    installF141Once();       // F141 (behaviour since F143, stood down after three faults; F147): the ADS bend's and the aim's hooks, installed while the key is on
     installBodyShiftOnce();  // F35 (TEMPORARY): the body shift's post-hook on the submit job (body mode only)
     f54::tick(now);          // F54 (TEMPORARY): the held weapon's MGMC and record-submit hooks (measure always; shift with the FP raise), its lines
     pfzTick(now);            // F49 (TEMPORARY): the pose freeze's Animate post-hook (installed unless the key is off), its gate, blend and lines
@@ -33292,7 +33344,7 @@ void nativeOnFootFrameBoundary(uint32_t frameNo) {
     neckLine(now);
     eyeProbeLine();   // F18 (TEMPORARY): P1's one-a-second line
     alignTick(GetTickCount64());   // F33: the body align (TEMPORARY, live)
-    f141Tick(GetTickCount64());    // F141 (measure only): the game's ADS sight point against P14, the readout's anchor; after the ADS lock's tick, on the same snapshots
+    f141Tick(GetTickCount64());    // F141: the game's ADS sight point against P14 (the source of the ADS eye's shift since F143), the readout's anchor (an instrument); after the ADS lock's tick, on the same snapshots
     rotCalTick(GetTickCount64());  // F61: the rotation calibration (TEMPORARY, live; publishes zero while its key is off)
     f44::f119Boundary(frameNo, GetTickCount64());   // F119: the head containment instrument's depth grid and its line, after alignTick took the frame's head offset; F123: the leash and the wall contact
     {   // F123: the comfort fade is the max of F109's snap fade and the containment's, sent once a frame
