@@ -2000,6 +2000,7 @@ AUDIT_NOT_ADDRESSES = (
     ("d3d11/perf_monitor.cpp", (0x150E828,), "an NVAPI function id"),
     ("d3d11/kinematic_eval_probe.cpp", (0x4301234, 0x4305678), "the probe self-test's made-up vtable RVAs"),
     ("d3d11/draw_record_tag.h", (0x00A5C35A,), "the draw-record sentinel's XOR salt"),
+    ("common/desktop_window_math.h", (0x01000000, 0x00C00000), "Win32 window style bits (WS_MAXIMIZE, WS_CAPTION), written out so the header needs no windows.h"),
     ("d3d11/flat_stationary_camera_capture.cpp", (0x6000000,),
      "the known build's bound on the RVAs the capture logs (an unknown build uses its SizeOfImage)"),
     ("d3d11/scheduler_stack_probe.h", (0x4DB6000,),

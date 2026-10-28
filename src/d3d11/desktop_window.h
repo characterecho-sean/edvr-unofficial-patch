@@ -18,6 +18,7 @@
 
 struct IDXGISwapChain;
 struct ID3D11Device;
+struct ID3D11DeviceContext;
 
 namespace edvr {
 
@@ -25,8 +26,10 @@ namespace edvr {
 extern std::atomic<void*> g_desktopWindowBack;
 inline void* desktopWindowBackIdentity() { return g_desktopWindowBack.load(std::memory_order_relaxed); }
 inline bool desktopWindowSkipping() { return desktopWindowBackIdentity() != nullptr; }
-// A draw was skipped because its render target 0 was the buffer. Counts for the 10 s line.
-void desktopWindowNoteSkippedDraw();
+// A draw was skipped because its render target 0 was the buffer: counted for the 10 s line and, by its shader hashes, the draw kind letter of the hook (D I N X Y Z A) and
+// whether a depth-stencil view was bound, for the census line (desktop_window_census.h). Render thread only, no allocation, no lock. One skipped draw in 32 is also checked
+// against the context itself (ctx), to tell a stale binding shadow from a true buffer draw.
+void desktopWindowNoteSkippedDraw(ID3D11DeviceContext* ctx, char kind, uint64_t vsHash, uint64_t psHash, bool depthBound);
 
 // Elite's Present, before the real call, on the render thread. flatProfile: the flat profile is active (the feature never runs there). Returns true when the feature
 // was doing anything this Present (the caller marks the frame tick). Never throws; a fault stands the feature down for the session.

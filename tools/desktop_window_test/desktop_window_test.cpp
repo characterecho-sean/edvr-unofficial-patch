@@ -3,11 +3,14 @@
 //   THE PURE RULES (src/common/desktop_window_math.h). The setting's words, the picture's shape from the eye and its bounds, the fit, where the picture goes in the swap
 //   chain's buffer under each scaling (a window of the picture's shape is filled exactly; any other is undistorted with bars), the pixel rectangles of two eyes, the
 //   window's plan on a monitor, the format answers and the three log lines tools\edvr_log.py --health reads.
+//   THE WINDOW RULES (round 2): the framed, sizable style (0x94020000 -> 0x14CC0000), which style bits are ours, when a client is off the picture's shape, the correction that
+//   keeps the dimension the user changed more and clamps to the work area (minimum client height 240), and the census of the skipped draws.
 //   THE WIRING (source pins, each with a control that trips it): the key is read as one word with the default game, the flat profile's allow-list does not carry it,
 //   the window is moved only from the thread-pool callback, the Present hook calls the feature before the census span and the real Present, the draw skip sits in the
 //   verdict and in the three thunks the verdict does not cover, the host hands the eye over after it is captured, the export and the source are built, and edvr.ini
 //   documents the key in [visual] after world_scale.
 // No device and no window. argv[1] is the repository root.
+#include "../../src/common/desktop_window_census.h"
 #include "../../src/common/desktop_window_math.h"
 
 #include <cmath>
@@ -167,14 +170,111 @@ static void rules() {
     check(f.ok && f.target == DXGI_FORMAT_R8G8B8A8_UNORM, "an sRGB-typed buffer with a UNORM eye asks for a UNORM view (the device decides whether it may)");
 }
 
+static void windowRules() {
+    // The style while active.
+    check(desktopWindowFramedStyle(0x94020000u) == 0x14CC0000u, "the flown popup style 0x94020000 becomes 0x14CC0000");
+    check(desktopWindowFramedStyle(0x14CC0000u) == 0x14CC0000u, "our style is its own fixed point");
+    check(desktopWindowFramedStyle(0x16CF0000u) == 0x16CC0000u, "Elite's own windowed style (overlapped, with both boxes) loses its minimize and maximize boxes");
+    check(desktopWindowFramedStyle(0x17CF0000u) == 0x16CC0000u && desktopWindowFramedStyle(0x36CF0000u) == 0x16CC0000u, "the maximized and minimized state bits are dropped");
+    check(desktopWindowFramedStyle(0x84020000u) == 0x04CC0000u, "a window that is not visible stays not visible (visible, clip siblings and clip children stay as they were)");
+    check((desktopWindowFramedStyle(0x94020000u) & (kDwWsMinimizeBox | kDwWsMaximizeBox | kDwWsPopup)) == 0 &&
+              (desktopWindowFramedStyle(0x94020000u) & (kDwWsCaption | kDwWsSysMenu | kDwWsThickFrame)) == (kDwWsCaption | kDwWsSysMenu | kDwWsThickFrame),
+          "framed, with a system menu and a sizing frame, and no boxes");
+    check(desktopWindowStyleIsOurs(0x14CC0000u, 0x14CC0000u) && desktopWindowStyleIsOurs(0x04CC0000u, 0x14CC0000u) && desktopWindowStyleIsOurs(0x15CC0000u, 0x14CC0000u),
+          "a state or clip bit moving is still our style");
+    check(!desktopWindowStyleIsOurs(0x94020000u, 0x14CC0000u) && !desktopWindowStyleIsOurs(0x16CF0000u, 0x14CC0000u) && !desktopWindowStyleIsOurs(0x14CD0000u, 0x14CC0000u),
+          "the game's popup, its windowed style and a window with a maximize box are not ours");
+
+    // The client's shape.
+    const double a = 1456.0 / 1560.0;
+    check(!desktopWindowAspectOff(972, 1041, a, 2), "a client of the picture's shape is not off");
+    check(desktopWindowAspectOff(972, 1060, a, 2) && desktopWindowAspectOff(975, 1041, a, 2), "a client more than two pixels off on either axis is off");
+    check(!desktopWindowAspectOff(972, 1043, a, 2), "two pixels off on both axes is not off");
+    check(!desktopWindowAspectOff(1000, 501, 2.0, 2) && desktopWindowAspectOff(1000, 498, 2.0, 2), "a wide picture is held to two pixels on the width as well");
+    check(!desktopWindowAspectOff(0, 0, a, 2) && !desktopWindowAspectOff(100, 100, 0.0, 2), "no client and no shape are never off");
+
+    const DwArea work{0, 0, 1920, 1080};
+    const int inside[4] = {100, 100, 500, 500}, left[4] = {-1, 0, 100, 100}, tall[4] = {0, 0, 1920, 1081};
+    check(desktopWindowRectInside(inside, work) && !desktopWindowRectInside(left, work) && !desktopWindowRectInside(tall, work) && desktopWindowRectInside(inside, DwArea{100, 100, 500, 500}),
+          "a window rectangle inside a work area, edges included");
+    check(desktopWindowTooLarge(1921, 500, work) && desktopWindowTooLarge(500, 1081, work) && !desktopWindowTooLarge(1920, 1080, work), "a window larger than the work area");
+
+    // The correction.
+    DwCorrection c = desktopWindowCorrect(1.0, 100, 100, 1200, 1000, 1000, 1000, 16, 39, work);
+    check(c.ok && !c.keptHeight && c.clientWidth == 1041 && c.clientHeight == 1041 && c.left == 100 && c.top == 0 && c.right == 1157 && c.bottom == 1080,
+          "the user widened it: the width is kept, the height follows, then it is shrunk to the work area and slid up inside it");
+    c = desktopWindowCorrect(1.0, 100, 100, 1000, 800, 1000, 1000, 16, 39, work);
+    check(c.ok && c.keptHeight && c.clientWidth == 800 && c.clientHeight == 800 && c.left == 100 && c.top == 100 && c.right == 916 && c.bottom == 939,
+          "the user made it shorter: the height is kept, the width follows, the top-left stays");
+    c = desktopWindowCorrect(1.0, 100, 100, 1000, 800, 0, 0, 16, 39, work);
+    check(c.ok && !c.keptHeight && c.clientWidth == 1000 && c.clientHeight == 1000 && c.top == 41 && c.bottom == 1080, "with no settled size the width is kept");
+    c = desktopWindowCorrect(2.0, 0, 0, 300, 120, 600, 300, 16, 39, work);
+    check(c.ok && c.keptHeight && c.clientHeight == 240 && c.clientWidth == 480 && c.right == 496 && c.bottom == 279, "a client shorter than 240 is made 240 high, its width from the shape");
+    c = desktopWindowCorrect(1.0, 0, 0, 2000, 2000, 1000, 1000, 16, 39, DwArea{0, 0, 800, 600});
+    check(c.ok && c.clientWidth == 561 && c.clientHeight == 561 && c.right == 577 && c.bottom == 600, "larger than the work area: shrunk to fit it, in the picture's shape");
+    c = desktopWindowCorrect(1.0, -50, 10, 1000, 1000, 1000, 1000, 16, 39, work);
+    check(c.ok && c.left == 0 && c.top == 10 && c.right == 1016 && c.bottom == 1049, "a window sticking out on the left is moved inside");
+    c = desktopWindowCorrect(1.0, 1500, 900, 600, 600, 600, 600, 16, 39, work);
+    check(c.ok && c.right == 1920 && c.left == 1920 - 616 && c.bottom == 1080 && c.top == 1080 - 639, "a window sticking out on the right and the bottom is moved inside");
+    check(!desktopWindowCorrect(0.0, 0, 0, 100, 100, 0, 0, 0, 0, work).ok && !desktopWindowCorrect(1.0, 0, 0, 0, 100, 0, 0, 0, 0, work).ok, "no shape and no client correct nothing");
+    c = desktopWindowCorrect(a, 466, 0, 972, 1041, 972, 1041, 16, 39, work);
+    check(c.ok && c.clientWidth == 972 && c.clientHeight == 1041 && c.left == 466 && c.top == 0, "a window already right is left where it is");
+
+    // The census of the skipped draws.
+    check(DesktopWindowCensus::kindOf('D') == DesktopWindowCensus::Draw && DesktopWindowCensus::kindOf('I') == DesktopWindowCensus::Indexed &&
+              DesktopWindowCensus::kindOf('N') == DesktopWindowCensus::Instanced && DesktopWindowCensus::kindOf('X') == DesktopWindowCensus::IndexedInstanced &&
+              DesktopWindowCensus::kindOf('Y') == DesktopWindowCensus::Indirect && DesktopWindowCensus::kindOf('Z') == DesktopWindowCensus::Indirect &&
+              DesktopWindowCensus::kindOf('A') == DesktopWindowCensus::Auto,
+          "the hooks' kind letters");
+    DesktopWindowCensus census;
+    char text[800];
+    census.format(text, sizeof text);
+    check(!std::strcmp(text, "desktop window: skipped by shader (10 s): (none); other 0; pairs 0; with depth 0; kinds draw 0 indexed 0 instanced 0 indexed_instanced 0 indirect 0 auto 0; "
+                             "render target 0 checked on 0, the buffer on 0"),
+          "an empty window's line");
+    for (int i = 0; i < 5; ++i) census.note(1, 2, 'I', true);
+    for (int i = 0; i < 2; ++i) census.note(3, 4, 'D', false);
+    for (int i = 0; i < 7; ++i) census.note(1, 9, 'X', false);
+    census.note(5, 6, 'A', true);
+    census.sample(true);
+    census.sample(false);
+    census.format(text, sizeof text);
+    check(std::strstr(text, "skipped by shader (10 s): 0000000000000001/0000000000000009 x7, 0000000000000001/0000000000000002 x5, 0000000000000003/0000000000000004 x2, "
+                            "0000000000000005/0000000000000006 x1; other 0; pairs 4; with depth 6; kinds draw 2 indexed 5 instanced 0 indexed_instanced 7 indirect 0 auto 1; "
+                            "render target 0 checked on 2, the buffer on 1") != nullptr,
+          "pairs are listed biggest first, with their counts, the depth count, the kinds and the context checks");
+    check(census.total() == 15 && census.pairs() == 4 && census.unplaced() == 0 && census.withDepth() == 6, "the totals");
+    census.reset();
+    check(census.total() == 0 && census.pairs() == 0 && census.sampled() == 0, "a reset empties the table");
+    for (uint64_t i = 0; i < 20; ++i) census.note(100 + i, 7, 'D', false);   // twenty pairs, one draw each: the table holds sixteen
+    census.note(100, 7, 'D', false);                                          // the first again: it is in the table
+    census.format(text, sizeof text);
+    check(census.pairs() == 16 && census.unplaced() == 4 && census.total() == 21 && std::strstr(text, "pairs 16+;") && std::strstr(text, "0000000000000064/0000000000000007 x2") &&
+              std::strstr(text, "other 14;"),
+          "a full table counts the pairs it could not place, says so, and keeps them in other");
+    census.reset();
+    census.note(1, 1, 'D', false);
+    census.note(2, 2, 'D', false);
+    census.note(3, 3, 'D', false);
+    census.format(text, sizeof text);
+    check(std::strstr(text, "0000000000000001/0000000000000001 x1, 0000000000000002/0000000000000002 x1, 0000000000000003/0000000000000003 x1;") != nullptr, "equal counts keep their first-seen order");
+    census.reset();
+    for (uint64_t i = 0; i < 9; ++i) for (uint64_t j = 0; j <= i; ++j) census.note(i, 0, 'D', false);   // nine pairs, counts 1 to 9
+    census.format(text, sizeof text);
+    check(std::strstr(text, "0000000000000008/0000000000000000 x9, 0000000000000007/0000000000000000 x8, 0000000000000006/0000000000000000 x7, 0000000000000005/0000000000000000 x6, "
+                            "0000000000000004/0000000000000000 x5, 0000000000000003/0000000000000000 x4; other 6;") != nullptr && std::strstr(text, "pairs 9;") != nullptr,
+          "only the top six are named, and the rest are other");
+}
+
 static void lines() {
     char line[400];
     desktopWindowSettingLine(line, sizeof line, "left_eye", nullptr);
     check(!std::strcmp(line, "desktop window: setting left_eye"), "the setting line");
     desktopWindowSettingLine(line, sizeof line, "both_eyes", "game");
     check(!std::strcmp(line, "desktop window: setting both_eyes (was game)"), "the setting line, changed");
-    desktopWindowStatsLine(line, sizeof line, 600, 610, 1220, 610, 610, 3, 972, 1041, 1920, 1080);
-    check(!std::strcmp(line, "desktop window: 10 s: drawn=600 seen=610 skipped_draws=1220 eyes_L=610 eyes_R=610 stale=3 client=972x1041 swap_chain=1920x1080"), "the 10 s line");
+    desktopWindowStatsLine(line, sizeof line, 600, 610, 1220, 610, 610, 3, 972, 1041, 1920, 1080, 4, 2);
+    check(!std::strcmp(line, "desktop window: 10 s: drawn=600 seen=610 skipped_draws=1220 eyes_L=610 eyes_R=610 stale=3 client=972x1041 swap_chain=1920x1080 moves=4 resizes=2"),
+          "the 10 s line, with the user's moves and resizes at the end");
     desktopWindowStoppedLine(line, sizeof line, "no eye image for 500 ms (3D is off, or no frames arrive)", 600, 610, "restored to 100,100 1280x720");
     check(!std::strcmp(line, "desktop window: stopped (no eye image for 500 ms (3D is off, or no frames arrive)); drawn=600 of 610 Presents; window restored to 100,100 1280x720"),
           "the stopped line");
@@ -201,17 +301,31 @@ static void wiring(const std::string& root) {
     check(at(flatKeys, "desktop_window") == std::string::npos, "the flat profile's allow-list does not carry visual.desktop_window");
     check(at(cpp, "if (flat) {") != std::string::npos && at(cpp, "S.mode = DesktopWindowMode::Game;", at(cpp, "if (flat) {")) != std::string::npos, "the flat profile is game before any read");
 
-    // The window is moved from the pool callback and nowhere else; the hook only reads it.
+    // The window's style and rectangle are changed from the pool callback and nowhere else (style first, then the rectangle with SWP_FRAMECHANGED); the hook only reads.
     auto movedOnlyByPool = [](const std::string& t) {
         const size_t set = at(t, "SetWindowPos(");
+        const size_t setStyle = at(t, "SetWindowLongPtrW(r->hwnd, GWL_STYLE, r->style);");
         const size_t cb = at(t, "VOID CALLBACK moveWindowCallback");
-        return count(t, "SetWindowPos(") == 1 && cb != std::string::npos && set > cb && at(t, "TrySubmitThreadpoolCallback(moveWindowCallback") != std::string::npos &&
-               at(t, "SWP_ASYNCWINDOWPOS | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOOWNERZORDER") != std::string::npos && at(t, "MoveWindow(") == std::string::npos &&
-               at(t, "ShowWindow(") == std::string::npos;
+        return count(t, "SetWindowPos(") == 1 && count(t, "SetWindowLongPtrW(") == 1 && cb != std::string::npos && set > setStyle && setStyle > cb &&
+               at(t, "TrySubmitThreadpoolCallback(moveWindowCallback") != std::string::npos &&
+               at(t, "UINT flags = SWP_ASYNCWINDOWPOS | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOOWNERZORDER;") != std::string::npos &&
+               at(t, "flags |= SWP_FRAMECHANGED;") != std::string::npos && at(t, "MoveWindow(") == std::string::npos && at(t, "ShowWindow(") == std::string::npos;
     };
-    check(movedOnlyByPool(cpp), "the window is moved by SetWindowPos in the thread-pool callback only, asynchronously, and by nothing else");
+    check(movedOnlyByPool(cpp), "the window's style and rectangle are changed in the thread-pool callback only, asynchronously, style first, and by nothing else");
     check(!movedOnlyByPool(cpp + "\nvoid f(HWND h){ SetWindowPos(h, nullptr, 0, 0, 1, 1, 0); }\n"), "control: a SetWindowPos from the hook trips the pin");
-    check(at(cpp, "(style & WS_CAPTION) == WS_CAPTION ? mi.rcWork : mi.rcMonitor") != std::string::npos, "the bound is the work area for a captioned window, else the monitor");
+    check(!movedOnlyByPool(cpp + "\nvoid f(HWND h){ SetWindowLongPtrW(h, GWL_STYLE, 0); }\n"), "control: a SetWindowLongPtrW from the hook trips the pin");
+    auto windowRulesWired = [](const std::string& t) {
+        return at(t, "desktopWindowFramedStyle(static_cast<uint32_t>(style))") != std::string::npos && at(t, "if (windowInMoveSize(hwnd)) return;") != std::string::npos &&
+               at(t, "(info.flags & GUI_INMOVESIZE) != 0") != std::string::npos && at(t, "GetGUIThreadInfo(thread, &info)") != std::string::npos &&
+               at(t, "\"AdjustWindowRectExForDpi\"") != std::string::npos && at(t, "\"GetDpiForWindow\"") != std::string::npos && at(t, "AdjustWindowRectEx(&probe") != std::string::npos &&
+               at(t, "MonitorFromRect(&r, MONITOR_DEFAULTTONEAREST)") != std::string::npos && at(t, "desktopWindowPlan(aspect, work.left, work.top, work.right, work.bottom, frameDx, frameDy)") != std::string::npos &&
+               at(t, "desktopWindowCorrect(aspect, cur[0], cur[1], clientW, clientH") != std::string::npos && at(t, "S.styleSeenOurs && !ours") != std::string::npos &&
+               at(t, "++S.userResizes") != std::string::npos && at(t, "++S.userMoves") != std::string::npos && at(t, "kUnsettledAllowed = 20") != std::string::npos &&
+               at(t, "kFightsAllowed = 10") != std::string::npos;
+    };
+    check(windowRulesWired(cpp), "the window rules are wired: our style, the move-size loop, the frame from the system then from the window, the settled start, the correction, fights, user moves and resizes");
+    check(!windowRulesWired(replaced(cpp, "if (windowInMoveSize(hwnd)) return;", "")), "control: no wait for the user's move or size loop trips the pin");
+    check(at(cpp, "(style & WS_CAPTION)") == std::string::npos, "the bound no longer depends on the game's style: the work area, always");
 
     // The Present hook: before the census span and before the real Present, inside hookedPresent.
     auto presentOrder = [](const std::string& t) {
@@ -229,13 +343,23 @@ static void wiring(const std::string& root) {
     auto skips = [](const std::string& t) {
         const size_t verdict = at(t, "DrawVerdict beginPanelOverride(");
         const size_t station = at(t, "optimizedStationSkipsDraw(bindingShaderHash(BindSlot::Vs)", verdict);
-        const size_t mine = at(t, "if (desktopWindowSkipsDraw(s)) return DrawVerdict::kSkip;", verdict);
-        return verdict != std::string::npos && station != std::string::npos && mine != std::string::npos && station < mine && count(t, "desktopWindowSkipsDraw(g_state)") == 3 &&
-               at(t, "void* back = desktopWindowBackIdentity();") != std::string::npos && at(t, "rt->resource != back") != std::string::npos;
+        const size_t mine = at(t, "if (desktopWindowSkipsDraw(s, self, kind)) return DrawVerdict::kSkip;", verdict);
+        return verdict != std::string::npos && station != std::string::npos && mine != std::string::npos && station < mine && count(t, "desktopWindowSkipsDraw(g_state, self, '") == 3 &&
+               at(t, "void* back = desktopWindowBackIdentity();") != std::string::npos && at(t, "rt->resource != back") != std::string::npos &&
+               at(t, "desktopWindowNoteSkippedDraw(self, kind, bindingShaderHash(BindSlot::Vs), bindingShaderHash(BindSlot::Ps), bindingGet(BindSlot::Dsv0) != nullptr);") != std::string::npos;
     };
     check(skips(vscreen), "the verdict and the DrawAuto and indirect thunks skip a draw whose render target 0 is the swap chain's buffer");
-    check(!skips(replaced(vscreen, "if (desktopWindowSkipsDraw(s)) return DrawVerdict::kSkip;", "")), "control: no skip in the verdict trips the pin");
-    check(!skips(replaced(vscreen, "if (self == g_state->ownerCtx && desktopWindowSkipsDraw(g_state)) return;   // visual.desktop_window", "")), "control: a thunk without the skip trips the pin");
+    check(!skips(replaced(vscreen, "if (desktopWindowSkipsDraw(s, self, kind)) return DrawVerdict::kSkip;", "")), "control: no skip in the verdict trips the pin");
+    check(!skips(replaced(vscreen, "if (self == g_state->ownerCtx && desktopWindowSkipsDraw(g_state, self, 'A')) return;   // visual.desktop_window", "")), "control: a thunk without the skip trips the pin");
+    check(!skips(replaced(vscreen, "desktopWindowNoteSkippedDraw(self, kind, bindingShaderHash(BindSlot::Vs), bindingShaderHash(BindSlot::Ps), bindingGet(BindSlot::Dsv0) != nullptr);",
+                          "desktopWindowNoteSkippedDraw(self, kind, 0, 0, false);")),
+          "control: a census that does not read the shaders and the depth view trips the pin");
+    {   // the census line follows the 10 s line and starts the table again, in the Present hook's code
+        const size_t fn = at(cpp, "bool desktopWindowPresent(");
+        const size_t stats = at(cpp, "desktopWindowStatsLine(line", fn), format = at(cpp, "g_census.format(census, sizeof census);", fn), reset = at(cpp, "g_census.reset();", format);
+        check(fn != std::string::npos && stats != std::string::npos && format != std::string::npos && reset != std::string::npos && stats < format && format < reset,
+              "the census line is written after the 10 s line and the table is reset after it");
+    }
     check(at(cpp, "VrWorldInternalScope internal;") != std::string::npos && at(cpp, "saved.restore(ctx);") != std::string::npos, "the draw runs under the internal scope and puts the context's state back");
     check(at(cpp, "back.Get(), std::memory_order_relaxed);") != std::string::npos && at(cpp, "ComPtr<ID3D11Texture2D> back;") != std::string::npos, "the buffer is a local reference, its identity a raw pointer");
 
@@ -271,6 +395,7 @@ static void wiring(const std::string& root) {
 
 int main(int argc, char** argv) {
     rules();
+    windowRules();
     lines();
     if (argc > 1) wiring(argv[1]);
     else check(false, "argv[1] is the repository root");

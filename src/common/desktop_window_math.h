@@ -211,6 +211,81 @@ inline bool desktopWindowRectsNear(const int a[4], const int b[4], int tolerance
     return true;
 }
 
+// ---- the window is an ordinary, movable, resizable one (round 2) ----
+// While the feature is active the window is framed and sizable whatever the game had (a borderless popup, or Elite's own windowed style): a caption, a system menu and a
+// thick frame, and no minimize box (a minimized window could stop Elite rendering) and no maximize box. The bits are the Win32 values, written out so this header needs no
+// windows.h: WS_POPUP, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_MAXIMIZE, WS_MINIMIZE, WS_CAPTION, WS_SYSMENU, WS_THICKFRAME. WS_VISIBLE, WS_CLIPSIBLINGS and WS_CLIPCHILDREN stay
+// as the game had them. 0x94020000 (the borderless popup of the first flight) becomes 0x14CC0000.
+constexpr uint32_t kDwWsPopup = 0x80000000u, kDwWsMaximizeBox = 0x00010000u, kDwWsMinimizeBox = 0x00020000u, kDwWsMaximize = 0x01000000u, kDwWsMinimize = 0x20000000u,
+                   kDwWsCaption = 0x00C00000u, kDwWsSysMenu = 0x00080000u, kDwWsThickFrame = 0x00040000u;
+inline uint32_t desktopWindowFramedStyle(uint32_t style) {
+    return (style & ~(kDwWsPopup | kDwWsMaximizeBox | kDwWsMinimizeBox | kDwWsMaximize | kDwWsMinimize)) | kDwWsCaption | kDwWsSysMenu | kDwWsThickFrame;
+}
+// Is a window's style the one EDVR put on it? Only the bits EDVR manages are compared: a state bit (visible, maximized) or a clip bit moving is not the game re-applying its mode.
+inline bool desktopWindowStyleIsOurs(uint32_t style, uint32_t ours) {
+    constexpr uint32_t managed = kDwWsPopup | kDwWsMaximizeBox | kDwWsMinimizeBox | kDwWsCaption | kDwWsSysMenu | kDwWsThickFrame;
+    return (style & managed) == (ours & managed);
+}
+
+// The client's shape is the picture's when neither axis is off by more than the tolerance (pixels) against what the other axis implies.
+inline bool desktopWindowAspectOff(int clientW, int clientH, double aspect, int tolerance) {
+    if (!(aspect > 0) || clientW < 1 || clientH < 1) return false;
+    const double wantW = clientH * aspect, wantH = clientW / aspect;
+    return std::fabs(clientW - wantW) > tolerance || std::fabs(clientH - wantH) > tolerance;
+}
+
+struct DwArea {
+    int left = 0, top = 0, right = 0, bottom = 0;
+};
+// A window rectangle {left, top, right, bottom} lies wholly inside an area (a work area).
+inline bool desktopWindowRectInside(const int r[4], const DwArea& a) { return r[0] >= a.left && r[1] >= a.top && r[2] <= a.right && r[3] <= a.bottom; }
+// A window of this outer size cannot fit the area, whatever its position.
+inline bool desktopWindowTooLarge(int outerW, int outerH, const DwArea& a) { return outerW > a.right - a.left || outerH > a.bottom - a.top; }
+
+constexpr int kDesktopWindowMinClientHeight = 240;
+
+// The user owns the window's position and size; EDVR keeps only the shape. When the client is off the picture's shape (or the window is larger than the work area) this
+// gives the window to ask for: keep the dimension the user changed more, relative to the last settled client size (the width when there is none), set the other from the
+// shape, keep the window's top-left, then clamp: shrink to the work area if it is larger, hold a minimum client height, and slide the window inside the work area. The frame
+// (the window's size less its client's) is measured by the caller.
+struct DwCorrection {
+    bool ok = false, keptHeight = false;
+    int left = 0, top = 0, right = 0, bottom = 0;
+    int clientWidth = 0, clientHeight = 0;
+};
+inline DwCorrection desktopWindowCorrect(double aspect, int winLeft, int winTop, int clientW, int clientH, int settledW, int settledH, int frameDx, int frameDy,
+                                         const DwArea& work, int minClientH = kDesktopWindowMinClientHeight) {
+    DwCorrection c;
+    if (!(aspect > 0) || clientW < 1 || clientH < 1) return c;
+    bool keepHeight = false;
+    if (settledW > 0 && settledH > 0) {
+        const double relW = std::fabs(static_cast<double>(clientW - settledW)) / settledW, relH = std::fabs(static_cast<double>(clientH - settledH)) / settledH;
+        keepHeight = relH > relW;
+    }
+    auto rnd = [](double v) { return static_cast<int>(std::floor(v + 0.5)); };
+    int cw = keepHeight ? rnd(clientH * aspect) : clientW, ch = keepHeight ? clientH : rnd(clientW / aspect);
+    const int availW = (work.right - work.left) - frameDx, availH = (work.bottom - work.top) - frameDy;
+    if (availW >= 1 && availH >= 1 && (cw > availW || ch > availH)) {
+        if (availW / aspect <= availH) { cw = availW; ch = rnd(cw / aspect); }
+        else { ch = availH; cw = rnd(ch * aspect); }
+        if (cw > availW) cw = availW;
+        if (ch > availH) ch = availH;
+    }
+    if (ch < minClientH) { ch = minClientH; cw = rnd(ch * aspect); }
+    if (cw < 1) cw = 1;
+    const int outerW = cw + frameDx, outerH = ch + frameDy;
+    int left = winLeft, top = winTop;
+    if (left + outerW > work.right) left = work.right - outerW;
+    if (left < work.left) left = work.left;
+    if (top + outerH > work.bottom) top = work.bottom - outerH;
+    if (top < work.top) top = work.top;
+    c.ok = true;
+    c.keptHeight = keepHeight;
+    c.left = left; c.top = top; c.right = left + outerW; c.bottom = top + outerH;
+    c.clientWidth = cw; c.clientHeight = ch;
+    return c;
+}
+
 // The formats of one draw. The shader view reads the bytes the eye holds as they are: a typeless source gets the UNORM view of its family, a typed one its own
 // format; a typed _SRGB source is decoded by the view and encoded again by an _SRGB target on an 8-bit buffer. The target is the buffer's own bit depth.
 // Anything else is a refusal with its reason (said once; nothing is skipped and nothing is drawn).
@@ -263,9 +338,10 @@ inline int desktopWindowStoppedLine(char* out, size_t size, const char* reason, 
 }
 inline int desktopWindowStatsLine(char* out, size_t size, unsigned long long drawn, unsigned long long seen, unsigned long long skipped,
                                   unsigned long long left, unsigned long long right, unsigned long long stale, int clientW, int clientH,
-                                  unsigned chainW, unsigned chainH) {
-    return std::snprintf(out, size, "desktop window: 10 s: drawn=%llu seen=%llu skipped_draws=%llu eyes_L=%llu eyes_R=%llu stale=%llu client=%dx%d swap_chain=%ux%u",
-                         drawn, seen, skipped, left, right, stale, clientW, clientH, chainW, chainH);
+                                  unsigned chainW, unsigned chainH, unsigned moves, unsigned resizes) {
+    return std::snprintf(out, size,
+                         "desktop window: 10 s: drawn=%llu seen=%llu skipped_draws=%llu eyes_L=%llu eyes_R=%llu stale=%llu client=%dx%d swap_chain=%ux%u moves=%u resizes=%u",
+                         drawn, seen, skipped, left, right, stale, clientW, clientH, chainW, chainH, moves, resizes);
 }
 
 }  // namespace edvr

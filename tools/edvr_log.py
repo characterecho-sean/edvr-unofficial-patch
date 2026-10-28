@@ -10363,7 +10363,7 @@ H_DESKTOP = "desktop window"
 H_DESKTOP_LABEL = "desktop window:"
 H_DESKTOP_SETTING = r"desktop window: setting (?P<value>game|left_eye|right_eye|both_eyes)(?: \(was (?P<was>game|left_eye|right_eye|both_eyes)\))?$"
 H_DESKTOP_SEC = (r"desktop window: 10 s: drawn=(?P<drawn>\d+) seen=(?P<seen>\d+) skipped_draws=(?P<skipped>\d+) eyes_L=(?P<left>\d+) eyes_R=(?P<right>\d+) "
-                 r"stale=(?P<stale>\d+) client=(?P<cw>\d+)x(?P<ch>\d+) swap_chain=(?P<sw>\d+)x(?P<sh>\d+)$")
+                 r"stale=(?P<stale>\d+) client=(?P<cw>\d+)x(?P<ch>\d+) swap_chain=(?P<sw>\d+)x(?P<sh>\d+)(?: moves=(?P<moves>\d+) resizes=(?P<resizes>\d+))?$")
 H_DESKTOP_STOP = r"desktop window: stopped \((?P<reason>.*)\); drawn=(?P<drawn>\d+) of (?P<seen>\d+) Presents; window (?P<window>.*)$"
 H_DESKTOP_OTHER = r"desktop window: (?!setting |10 s: |stopped \()"
 H_F125_LABEL = "native on foot log (F125)"
@@ -13919,6 +13919,8 @@ def _hj_desktop_window(rows, ctx):
     if last:
         text += ", %s Elite draw(s) skipped, eye images handed over L %s R %s, %s stale Present(s), client %sx%s, swap chain %sx%s (the last 10 s line)" % (
             last["skipped"], last["left"], last["right"], last["stale"], last["cw"], last["ch"], last["sw"], last["sh"])
+        if last.get("moves") is not None:   # the user's changes since each line, from the second round's lines on
+            text += "; the user moved the window %d time(s) and resized it %d time(s)" % (sum(int(r["moves"] or 0) for r in sec), sum(int(r["resizes"] or 0) for r in sec))
     if stopped:
         text += "; %d activation(s) ended, the last with the window %s" % (len(stopped), stopped[-1]["window"])
     return ("OK", text)
@@ -18919,6 +18921,7 @@ def self_test_health():
         # ---- the desktop window: the graphics log's untagged lines, rendered from the C format strings in src\common\desktop_window_math.h and src\d3d11\desktop_window.cpp ----
         dwsrc = read_text(os.path.join(repo_root(), "src", "common", "desktop_window_math.h"))
         dwcpp = read_text(os.path.join(repo_root(), "src", "d3d11", "desktop_window.cpp"))
+        dwcensus = read_text(os.path.join(repo_root(), "src", "common", "desktop_window_census.h"))
 
         def RD(source, needle, *vals):
             key = "dw:" + needle
@@ -18933,14 +18936,16 @@ def self_test_health():
                 return RD(dwsrc, "desktop window: setting %s (was %s)", value, was)
             return RD(dwsrc, 'desktop window: setting %s", value', value)
 
-        def dw_sec(drawn=600, seen=610, skipped=1200, left=610, right=610, stale=3, cw=972, ch=1041, sw=1920, sh=1080):
-            return RD(dwsrc, "desktop window: 10 s: drawn=%llu", drawn, seen, skipped, left, right, stale, cw, ch, sw, sh)
+        def dw_sec(drawn=600, seen=610, skipped=1200, left=610, right=610, stale=3, cw=972, ch=1041, sw=1920, sh=1080, moves=2, resizes=1):
+            return RD(dwsrc, "desktop window: 10 s: drawn=%llu", drawn, seen, skipped, left, right, stale, cw, ch, sw, sh, moves, resizes)
 
         def dw_stop(drawn=400, seen=410, window="restored to 100,100 1280x720", reason="no eye image for 500 ms (3D is off, or no frames arrive)"):
             return RD(dwsrc, "desktop window: stopped (%s)", reason, drawn, seen, window)
 
         def dw_story():
-            return [RD(dwcpp, "desktop window: reshape request %u", 1, "", 100, 100, 1280, 720, 466, 0, 988, 1080, 1280, 720, 972, 1041, ""),
+            return [RD(dwcpp, "desktop window: reshape request %u", 1, "", "framed window", 0, 0, 3840, 2160, 840, 0, 2175, 2199, 3840, 2160, 2159, 2160, 0x94020000, 0x14CC0000, ""),
+                    RD(dwcpp, "desktop window: the game changed the window's style away from ours", 0x94020000, 1),
+                    RD(dwcensus, "desktop window: skipped by shader (10 s): %s", "0000000000000001/0000000000000002 x5", 0, 1, "", 5, 0, 5, 0, 0, 0, 0, 2, 1),
                     RD(dwcpp, "desktop window: not drawing -- %s", "the window's client area is empty (minimized)"),
                     RD(dwcpp, "desktop window: swap chain now %ux%u", 1920, 1080, 1280, 720, 12)]
 
@@ -18951,6 +18956,10 @@ def self_test_health():
               has=["setting left_eye; 600 Present(s) drawn, 1200 Elite draw(s) skipped", "client 972x1041, swap chain 1920x1080"])
         check("desktop window: both_eyes and only the line that ends an activation", dw_ok + [dw_setting("both_eyes")] + dw_story() + [dw_stop()], 0, [("OK", DW)],
               has=["setting both_eyes; 400 Present(s) drawn", "1 activation(s) ended, the last with the window restored to 100,100 1280x720"])
+        check("desktop window: the user's moves and resizes are read from the 10 s line", dw_ok + [dw_setting("left_eye"), dw_sec(moves=3, resizes=2), dw_sec(moves=1, resizes=0)], 0,
+              [("OK", DW)], has=["the user moved the window 4 time(s) and resized it 2 time(s)"])
+        check("desktop window: a 10 s line without moves and resizes (the first flight's) still parses", dw_ok + [dw_setting("left_eye"), dw_sec().replace(" moves=2 resizes=1", "")], 0,
+              [("OK", DW)], lacks=["UNPARSED", "the user moved"])
         check("desktop window: game, then left_eye live, then it drew", dw_ok + [dw_setting("game"), dw_setting("left_eye", "game"), dw_sec()], 0, [("OK", DW)], has=["setting left_eye"])
         check("desktop window: a mode asked for and no Present drawn is NEVER APPLIED", dw_ok + [dw_setting("right_eye")] + dw_story(), 3, [("NEVER APPLIED", DW)],
               has=["the setting was right_eye but no 10 s line and no stopped line shows a Present drawn", "exit 3"])

@@ -1,8 +1,9 @@
 // visual.desktop_window: see desktop_window.h for the shape of the feature and docs\desktop-window.md for the design and what the first flight must show.
 //
 // Threads. noteEye (the handoff) runs on the XR owner thread and only takes the mutex, swaps a reference and stamps a tick. Everything else runs on the render
-// thread, in Elite's Present hook, before the real Present: the config read, the window checks, the draw, the log lines. The window is moved from a thread-pool
-// callback with SWP_ASYNCWINDOWPOS, never from the hook: Elite's window procedure could otherwise run re-entrantly inside Present.
+// thread, in Elite's Present hook, before the real Present: the config read, the window checks, the draw, the log lines. The window's style and rectangle are changed from
+// a thread-pool callback with SWP_ASYNCWINDOWPOS, never from the hook: Elite's window procedure could otherwise run re-entrantly inside Present. The skip census
+// (desktopWindowNoteSkippedDraw) is written by the draw hooks, which are the same thread.
 #include "temporal_shader_bytecode.h"
 #include "desktop_window.h"
 
@@ -14,6 +15,7 @@
 
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <mutex>
@@ -21,6 +23,7 @@
 #include <string>
 
 #include "../common/config.h"
+#include "../common/desktop_window_census.h"
 #include "../common/desktop_window_math.h"
 #include "../common/guard.h"
 #include "../common/log.h"
@@ -66,6 +69,8 @@ std::atomic<uint64_t> g_lastTick[2] = {};      // stampMs of each eye's last han
 std::atomic<uint64_t> g_handoffs[2] = {};
 std::atomic<bool> g_holding{false};
 std::atomic<uint64_t> g_skipped{0};
+DesktopWindowCensus g_census;                  // the skipped draws of the current 10 s window; render thread only (desktop_window_census.h)
+FaultBudget g_sampleBudget("desktopWindowSample", 3);
 int g_contextToken = 0;                        // the table's context: any address that is ours
 
 HRESULT WINAPI noteEye(void* context, uint32_t eye, ID3D11Texture2D* texture, const float* bounds) {
@@ -168,10 +173,21 @@ struct Session {
     DwScaling scaling = DwScaling::Stretch;
     IDXGISwapChain* scalingChain = nullptr;   // identity only, to notice a different chain
     // the window
-    bool haveGameRect = false, haveTarget = false, atTargetSeen = false;
+    bool haveGame = false;                       // the game's style and rect, remembered at the first look of an activation, to put back
     int gameRect[4] = {};
-    int target[4] = {};
+    LONG_PTR gameStyle = 0, gameExStyle = 0;
+    LONG_PTR ourStyle = 0;                       // desktopWindowFramedStyle of the game's
+    bool styleSeenOurs = false;                  // our style has been seen on the window since it was last asked for; losing it after that is the game's doing
+    bool pending = false, pendingStyle = false;  // a request of ours is in flight (and it asked for the style)
+    int target[4] = {};                          // the rectangle of the request in flight
+    bool haveSettled = false;
+    int settledRect[4] = {};                     // the window's rect when its client last had the picture's shape: where a later activation starts
+    int settledClient[2] = {};                   // its client size then: what the next resize is measured against
+    bool havePrev = false;
+    int prevRect[4] = {};                        // the rect at the last look, to see the user's moves and resizes
+    double aspect = 0;                           // the picture's shape at the last Present
     unsigned requests = 0, fights = 0, unsettled = 0;
+    unsigned userMoves = 0, userResizes = 0;     // seen since the last 10 s line
     bool gaveUp = false;
     uint64_t lastRequestMs = 0, lastEvaluateMs = 0;
     // log-once memory
@@ -326,18 +342,28 @@ bool ensurePipe(ID3D11Device* device, ID3D11DeviceContext* ctx) {
 }
 
 // ---- the window ----
+// The window is an ordinary one while the feature is active (docs\desktop-window.md, "The window"): framed and sizable, moved and resized by the user as they like. EDVR
+// keeps only the picture's shape on it, and the draw keeps the picture undistorted (with bars) in between. A request changes the style (SetWindowLongPtrW, then
+// SWP_FRAMECHANGED) and the rectangle together, from a pool thread; it is posted to the window's own thread and never made from the Present hook.
 struct MoveRequest {
     HWND hwnd;
     int x, y, w, h;
+    bool setStyle;
+    LONG_PTR style;
 };
 VOID CALLBACK moveWindowCallback(PTP_CALLBACK_INSTANCE, PVOID context) {
     std::unique_ptr<MoveRequest> r(static_cast<MoveRequest*>(context));
-    if (IsWindow(r->hwnd))
-        SetWindowPos(r->hwnd, nullptr, r->x, r->y, r->w, r->h, SWP_ASYNCWINDOWPOS | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+    if (!IsWindow(r->hwnd)) return;
+    UINT flags = SWP_ASYNCWINDOWPOS | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOOWNERZORDER;
+    if (r->setStyle) {
+        SetWindowLongPtrW(r->hwnd, GWL_STYLE, r->style);
+        flags |= SWP_FRAMECHANGED;
+    }
+    SetWindowPos(r->hwnd, nullptr, r->x, r->y, r->w, r->h, flags);
 }
-// rect is {left, top, right, bottom}. The call returns at once; the move happens on a pool thread and is posted to the window's own thread.
-bool requestMove(HWND hwnd, const int rect[4]) {
-    MoveRequest* r = new (std::nothrow) MoveRequest{hwnd, rect[0], rect[1], rect[2] - rect[0], rect[3] - rect[1]};
+// rect is {left, top, right, bottom}. The call returns at once; the change happens on a pool thread.
+bool requestWindow(HWND hwnd, const int rect[4], bool setStyle, LONG_PTR style) {
+    MoveRequest* r = new (std::nothrow) MoveRequest{hwnd, rect[0], rect[1], rect[2] - rect[0], rect[3] - rect[1], setStyle, style};
     if (!r) return false;
     if (!TrySubmitThreadpoolCallback(moveWindowCallback, r, nullptr)) {
         delete r;
@@ -346,8 +372,96 @@ bool requestMove(HWND hwnd, const int rect[4]) {
     return true;
 }
 
-// Reads the window and, when it is not where the picture's shape wants it, asks for it to be moved. Read-only Win32 calls on the render thread; the move itself is
-// the pool thread's. Rate limited (kEvaluateEveryMs reads, kRequestEveryMs requests).
+// What a style adds around a client (the window's size less its client's), asked of the system for the window's DPI where user32 has the call (Windows 10 1607), else the
+// plain one. Used only before our style is on the window; after that the frame is measured from the window itself.
+bool predictFrame(HWND hwnd, LONG_PTR style, LONG_PTR exStyle, int* dx, int* dy) {
+    using AdjustForDpi = BOOL(WINAPI*)(LPRECT, DWORD, BOOL, DWORD, UINT);
+    using DpiForWindow = UINT(WINAPI*)(HWND);
+    static AdjustForDpi adjust = nullptr;
+    static DpiForWindow dpiOf = nullptr;
+    static bool resolved = false;
+    if (!resolved) {
+        resolved = true;
+        if (const HMODULE user = GetModuleHandleW(L"user32.dll")) {
+            adjust = reinterpret_cast<AdjustForDpi>(GetProcAddress(user, "AdjustWindowRectExForDpi"));
+            dpiOf = reinterpret_cast<DpiForWindow>(GetProcAddress(user, "GetDpiForWindow"));
+        }
+    }
+    RECT probe{0, 0, 100, 100};
+    const UINT dpi = dpiOf ? dpiOf(hwnd) : 0;
+    const BOOL ok = adjust && dpi ? adjust(&probe, static_cast<DWORD>(style), FALSE, static_cast<DWORD>(exStyle), dpi)
+                                  : AdjustWindowRectEx(&probe, static_cast<DWORD>(style), FALSE, static_cast<DWORD>(exStyle));
+    if (!ok) return false;
+    *dx = (probe.right - probe.left) - 100;
+    *dy = (probe.bottom - probe.top) - 100;
+    return true;
+}
+
+// The window's thread is in a move or size loop: the user has hold of it.
+bool windowInMoveSize(HWND hwnd) {
+    const DWORD thread = GetWindowThreadProcessId(hwnd, nullptr);
+    GUITHREADINFO info{};
+    info.cbSize = sizeof info;
+    return thread && GetGUIThreadInfo(thread, &info) && (info.flags & GUI_INMOVESIZE) != 0;
+}
+
+DwArea areaOf(const RECT& r) {
+    DwArea a;
+    a.left = r.left; a.top = r.top; a.right = r.right; a.bottom = r.bottom;
+    return a;
+}
+
+struct Ask {
+    int rect[4] = {};
+    int clientW = 0, clientH = 0;       // the client the rect is meant to give
+    bool setStyle = false;
+    LONG_PTR fromStyle = 0, toStyle = 0;
+    const char* why = "";
+};
+// Makes the request, remembers it as in flight, says so (the first kRequestLogCap).
+void issue(HWND hwnd, const int cur[4], int curClientW, int curClientH, const Ask& a, uint64_t now) {
+    std::memcpy(S.target, a.rect, sizeof S.target);
+    S.pending = true;
+    S.pendingStyle = a.setStyle;
+    if (a.setStyle) S.styleSeenOurs = false;   // asked for; it counts as seen once it is observed on the window
+    S.lastRequestMs = now;
+    S.presentsSinceReshape = 0;
+    ++S.requests;
+    const bool queued = requestWindow(hwnd, a.rect, a.setStyle, a.toStyle);
+    if (S.requests <= kRequestLogCap)
+        Log::get().note("desktop window: reshape request %u%s (%s): window %d,%d %dx%d -> %d,%d %dx%d (client %dx%d now, %dx%d wanted); style 0x%08lX -> 0x%08lX%s", S.requests,
+                        S.requests == kRequestLogCap ? " (the last one logged)" : "", a.why, cur[0], cur[1], cur[2] - cur[0], cur[3] - cur[1], a.rect[0], a.rect[1],
+                        a.rect[2] - a.rect[0], a.rect[3] - a.rect[1], curClientW, curClientH, a.clientW, a.clientH, static_cast<unsigned long>(a.fromStyle),
+                        static_cast<unsigned long>(a.toStyle), queued ? "" : " -- NOT QUEUED (the thread pool refused it)");
+}
+
+// Where the window starts (round 2): where it last had the picture's shape this session, if that still lies inside a monitor's work area; else the largest window of the
+// picture's shape the work area of the window's monitor holds, centred. False when nothing fits.
+bool startRect(const RECT& work, double aspect, int frameDx, int frameDy, Ask& out) {
+    if (S.haveSettled) {
+        const RECT r = {S.settledRect[0], S.settledRect[1], S.settledRect[2], S.settledRect[3]};
+        MONITORINFO mi{};
+        mi.cbSize = sizeof mi;
+        const HMONITOR monitor = MonitorFromRect(&r, MONITOR_DEFAULTTONEAREST);
+        if (monitor && GetMonitorInfoW(monitor, &mi) && desktopWindowRectInside(S.settledRect, areaOf(mi.rcWork))) {
+            std::memcpy(out.rect, S.settledRect, sizeof out.rect);
+            out.clientW = out.rect[2] - out.rect[0] - frameDx;
+            out.clientH = out.rect[3] - out.rect[1] - frameDy;
+            return true;
+        }
+    }
+    const DwWindowPlan plan = desktopWindowPlan(aspect, work.left, work.top, work.right, work.bottom, frameDx, frameDy);
+    if (!plan.ok) return false;
+    out.rect[0] = plan.left; out.rect[1] = plan.top; out.rect[2] = plan.right; out.rect[3] = plan.bottom;
+    out.clientW = plan.clientWidth;
+    out.clientH = plan.clientHeight;
+    return true;
+}
+
+// Reads the window and, when it needs it, asks for a change. Read-only Win32 calls on the render thread; the change itself is the pool thread's. Reads at most every
+// kEvaluateEveryMs, requests at most every kRequestEveryMs. The rules (docs\desktop-window.md):
+//   the user in a move or size loop: nothing; our style missing: ask for it (a fight if it was there and went); the client off the picture's shape, or the window larger
+//   than the work area: ask for the dimension the user changed least to follow the other; a position alone is never corrected; a settled window is remembered.
 void evaluateWindow(IDXGISwapChain* swap, HWND hwnd, double aspect, uint64_t now) {
     if (S.gaveUp || now - S.lastEvaluateMs < kEvaluateEveryMs) return;
     S.lastEvaluateMs = now;
@@ -367,102 +481,150 @@ void evaluateWindow(IDXGISwapChain* swap, HWND hwnd, double aspect, uint64_t now
         }
         return;
     }
-    RECT wr{};
-    if (!GetWindowRect(hwnd, &wr)) return;
+    if (windowInMoveSize(hwnd)) return;   // the user has hold of it: the draw keeps the picture undistorted, with bars
+    RECT wr{}, cr{};
+    if (!GetWindowRect(hwnd, &wr) || !GetClientRect(hwnd, &cr)) return;
     const LONG_PTR style = GetWindowLongPtrW(hwnd, GWL_STYLE), exStyle = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
     MONITORINFO mi{};
     mi.cbSize = sizeof mi;
     const HMONITOR monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
     if (!monitor || !GetMonitorInfoW(monitor, &mi)) return;
-    const RECT bound = (style & WS_CAPTION) == WS_CAPTION ? mi.rcWork : mi.rcMonitor;
-    RECT probe{0, 0, 100, 100};
-    if (!AdjustWindowRectEx(&probe, static_cast<DWORD>(style), FALSE, static_cast<DWORD>(exStyle))) return;
-    const DwWindowPlan plan = desktopWindowPlan(aspect, bound.left, bound.top, bound.right, bound.bottom, (probe.right - probe.left) - 100, (probe.bottom - probe.top) - 100);
-    if (!plan.ok) {
-        if (!S.noteShape) {
-            S.noteShape = true;
-            Log::get().note("desktop window: the monitor's %s cannot hold a window of this shape (aspect %.4f); the window is not reshaped",
-                            (style & WS_CAPTION) == WS_CAPTION ? "work area" : "area", aspect);
-        }
-        return;
-    }
+    const DwArea work = areaOf(mi.rcWork);
     const int cur[4] = {wr.left, wr.top, wr.right, wr.bottom};
-    const int want[4] = {plan.left, plan.top, plan.right, plan.bottom};
-    if (S.haveTarget) {
-        if (desktopWindowRectsNear(cur, S.target, kNearPx)) {
-            S.atTargetSeen = true;
+    const int clientW = cr.right - cr.left, clientH = cr.bottom - cr.top;
+    const bool first = !S.haveGame;
+    if (first) {   // the game's own window, remembered to put back
+        std::memcpy(S.gameRect, cur, sizeof S.gameRect);
+        S.gameStyle = style;
+        S.gameExStyle = exStyle;
+        S.ourStyle = static_cast<LONG_PTR>(desktopWindowFramedStyle(static_cast<uint32_t>(style)));
+        S.haveGame = true;
+    }
+    const bool ours = desktopWindowStyleIsOurs(static_cast<uint32_t>(style), static_cast<uint32_t>(S.ourStyle));
+
+    // A request of ours in flight: did it land? One that has not after kRequestEveryMs did not.
+    if (S.pending) {
+        if (desktopWindowRectsNear(cur, S.target, kNearPx) && (!S.pendingStyle || ours)) {
+            S.pending = false;
+            S.pendingStyle = false;
             S.unsettled = 0;
-        } else if (S.atTargetSeen) {
-            // It was at our target and is not: the game (or the user) moved it. Counted; the game wins after too many.
-            S.atTargetSeen = false;
-            ++S.fights;
-            Log::get().note("desktop window: the window was moved off its target (now %d,%d %dx%d); that is %u time(s)", cur[0], cur[1], cur[2] - cur[0], cur[3] - cur[1], S.fights);
-            if (S.fights > kFightsAllowed) {
+            if (ours) S.styleSeenOurs = true;
+            std::memcpy(S.prevRect, cur, sizeof S.prevRect);   // our own change is not the user's
+            S.havePrev = true;
+        } else if (now - S.lastRequestMs >= kRequestEveryMs) {
+            S.pending = false;
+            S.pendingStyle = false;
+            if (++S.unsettled >= kUnsettledAllowed) {
                 S.gaveUp = true;
-                Log::get().note("desktop window: the game moved the window off its target more than %u times; the window is no longer reshaped this session (the picture "
-                                "is still drawn, undistorted)", kFightsAllowed);
+                Log::get().note("desktop window: %u requests in a row did not land; the window is no longer reshaped this session (the picture is still drawn, undistorted)",
+                                S.unsettled);
                 return;
             }
+        } else {
+            return;   // give it time
         }
     }
-    if (desktopWindowRectsNear(cur, want, kNearPx)) {
-        if (!S.haveTarget || !desktopWindowRectsNear(want, S.target, kNearPx)) std::memcpy(S.target, want, sizeof S.target);
-        if (S.haveTarget) {
-            S.atTargetSeen = true;
-            S.unsettled = 0;
+
+    // The style. Losing ours after it was there is the game re-applying its own mode: a fight, counted, and the game wins after too many.
+    if (S.styleSeenOurs && !ours) {
+        S.styleSeenOurs = false;
+        S.havePrev = false;
+        ++S.fights;
+        Log::get().note("desktop window: the game changed the window's style away from ours (now 0x%08lX); that is %u time(s)", static_cast<unsigned long>(style), S.fights);
+        if (S.fights > kFightsAllowed) {
+            S.gaveUp = true;
+            Log::get().note("desktop window: the game changed the style back more than %u times; the window is no longer reshaped this session (the picture is still drawn, "
+                            "undistorted)", kFightsAllowed);
+            return;
         }
+    }
+    if (!ours) {
+        if (now - S.lastRequestMs < kRequestEveryMs) return;
+        int frameDx = 0, frameDy = 0;
+        if (!predictFrame(hwnd, S.ourStyle, exStyle, &frameDx, &frameDy)) return;
+        Ask ask;
+        ask.setStyle = true;
+        ask.fromStyle = style;
+        ask.toStyle = S.ourStyle;
+        ask.why = S.fights ? "the game's style came back" : "framed window";
+        if (!startRect(mi.rcWork, aspect, frameDx, frameDy, ask)) {
+            if (!S.noteShape) {
+                S.noteShape = true;
+                Log::get().note("desktop window: the monitor's work area cannot hold a window of this shape (aspect %.4f); the window is not reshaped", aspect);
+            }
+            return;
+        }
+        issue(hwnd, cur, clientW, clientH, ask, now);
+        return;
+    }
+    S.styleSeenOurs = true;
+
+    // Ours. The user's moves and resizes, counted (a drag is one: the loop above kept the rect from changing under us); a position alone is never corrected.
+    if (S.havePrev && !desktopWindowRectsNear(cur, S.prevRect, kNearPx)) {
+        const bool resized = std::abs((cur[2] - cur[0]) - (S.prevRect[2] - S.prevRect[0])) > kNearPx || std::abs((cur[3] - cur[1]) - (S.prevRect[3] - S.prevRect[1])) > kNearPx;
+        if (resized) ++S.userResizes;
+        else ++S.userMoves;
+    }
+    std::memcpy(S.prevRect, cur, sizeof S.prevRect);
+    S.havePrev = true;
+    const int outerW = cur[2] - cur[0], outerH = cur[3] - cur[1];
+    const bool off = desktopWindowAspectOff(clientW, clientH, aspect, kNearPx);
+    const bool tooLarge = desktopWindowTooLarge(outerW, outerH, work);
+    if (!off && !tooLarge) {   // settled: where a later activation starts, and the client size the next resize is measured against
+        std::memcpy(S.settledRect, cur, sizeof S.settledRect);
+        S.settledClient[0] = clientW;
+        S.settledClient[1] = clientH;
+        S.haveSettled = true;
         return;
     }
     if (now - S.lastRequestMs < kRequestEveryMs) return;
-    if (S.unsettled >= kUnsettledAllowed) {
-        S.gaveUp = true;
-        Log::get().note("desktop window: %u requests in a row and the window never reached its target; the window is no longer reshaped this session (the picture "
-                        "is still drawn, undistorted)", S.unsettled);
-        return;
-    }
-    // The first request of an activation, or the window is not where we last put it: what is there now is the game's.
-    if (!S.haveTarget || !desktopWindowRectsNear(cur, S.target, kNearPx)) {
-        std::memcpy(S.gameRect, cur, sizeof S.gameRect);
-        S.haveGameRect = true;
-    }
-    std::memcpy(S.target, want, sizeof S.target);
-    S.haveTarget = true;
-    S.atTargetSeen = false;
-    ++S.unsettled;
-    S.lastRequestMs = now;
-    S.presentsSinceReshape = 0;
-    ++S.requests;
-    RECT client{};
-    GetClientRect(hwnd, &client);
-    const bool queued = requestMove(hwnd, want);
-    if (S.requests <= kRequestLogCap)
-        Log::get().note("desktop window: reshape request %u%s: window %d,%d %dx%d -> %d,%d %dx%d (client %ldx%ld now, %dx%d wanted)%s", S.requests,
-                        S.requests == kRequestLogCap ? " (the last one logged)" : "", cur[0], cur[1], cur[2] - cur[0], cur[3] - cur[1], want[0], want[1],
-                        want[2] - want[0], want[3] - want[1], client.right - client.left, client.bottom - client.top, plan.clientWidth, plan.clientHeight,
-                        queued ? "" : " -- NOT QUEUED (the thread pool refused it)");
+    const DwCorrection fix = desktopWindowCorrect(aspect, cur[0], cur[1], clientW, clientH, S.haveSettled ? S.settledClient[0] : 0, S.haveSettled ? S.settledClient[1] : 0,
+                                                  outerW - clientW, outerH - clientH, work);
+    if (!fix.ok) return;
+    Ask ask;
+    ask.rect[0] = fix.left; ask.rect[1] = fix.top; ask.rect[2] = fix.right; ask.rect[3] = fix.bottom;
+    ask.clientW = fix.clientWidth;
+    ask.clientH = fix.clientHeight;
+    ask.fromStyle = ask.toStyle = style;
+    ask.why = off ? (fix.keptHeight ? "the shape, keeping the height" : "the shape, keeping the width") : "larger than the work area";
+    if (desktopWindowRectsNear(cur, ask.rect, kNearPx)) return;   // the clamp leaves it where it is
+    issue(hwnd, cur, clientW, clientH, ask, now);
 }
 
-// Back where Elite had it, if it is still where we put it. Returns the words for the log.
+// Back where Elite had it, if the style is still ours. Returns the words for the log.
 void restoreWindow(char* out, size_t size) {
-    if (!S.haveTarget || !S.hwnd || !IsWindow(S.hwnd)) {
+    if (!S.haveGame || !S.hwnd || !IsWindow(S.hwnd)) {
         std::snprintf(out, size, "no reshape was made");
     } else {
-        RECT wr{};
+        RECT wr{}, cr{};
         GetWindowRect(S.hwnd, &wr);
+        GetClientRect(S.hwnd, &cr);
+        const LONG_PTR style = GetWindowLongPtrW(S.hwnd, GWL_STYLE);
         const int cur[4] = {wr.left, wr.top, wr.right, wr.bottom};
-        if (S.haveGameRect && desktopWindowRectsNear(cur, S.target, kNearPx)) {
-            const bool queued = requestMove(S.hwnd, S.gameRect);
-            std::snprintf(out, size, "%s to %d,%d %dx%d", queued ? "restored" : "restore NOT QUEUED", S.gameRect[0], S.gameRect[1], S.gameRect[2] - S.gameRect[0],
-                          S.gameRect[3] - S.gameRect[1]);
-        } else if (S.haveGameRect && desktopWindowRectsNear(cur, S.gameRect, kNearPx)) {
+        const bool ours = desktopWindowStyleIsOurs(static_cast<uint32_t>(style), static_cast<uint32_t>(S.ourStyle));
+        const bool gamesOwn = desktopWindowStyleIsOurs(static_cast<uint32_t>(style), static_cast<uint32_t>(S.gameStyle));
+        if (ours) {
+            // Where a later activation starts, if the window was at the picture's shape just now.
+            if (!desktopWindowAspectOff(cr.right - cr.left, cr.bottom - cr.top, S.aspect, kNearPx) && !windowInMoveSize(S.hwnd)) {
+                std::memcpy(S.settledRect, cur, sizeof S.settledRect);
+                S.haveSettled = true;
+            }
+            const bool setStyle = !desktopWindowStyleIsOurs(static_cast<uint32_t>(S.gameStyle), static_cast<uint32_t>(S.ourStyle));
+            const bool queued = requestWindow(S.hwnd, S.gameRect, setStyle, S.gameStyle);
+            std::snprintf(out, size, "%s to %d,%d %dx%d, style 0x%08lX%s", queued ? "restored" : "restore NOT QUEUED", S.gameRect[0], S.gameRect[1],
+                          S.gameRect[2] - S.gameRect[0], S.gameRect[3] - S.gameRect[1], static_cast<unsigned long>(S.gameStyle), setStyle ? " back" : "");
+        } else if (gamesOwn && desktopWindowRectsNear(cur, S.gameRect, kNearPx)) {
             std::snprintf(out, size, "never left the game's place");
         } else {
-            std::snprintf(out, size, "left alone (the game moved it to %d,%d %dx%d)", cur[0], cur[1], cur[2] - cur[0], cur[3] - cur[1]);
+            std::snprintf(out, size, "left alone (the game changed the style itself: now 0x%08lX, ours was 0x%08lX; window %d,%d %dx%d)", static_cast<unsigned long>(style),
+                          static_cast<unsigned long>(S.ourStyle), cur[0], cur[1], cur[2] - cur[0], cur[3] - cur[1]);
         }
     }
-    S.haveTarget = false;
-    S.haveGameRect = false;
-    S.atTargetSeen = false;
+    S.haveGame = false;
+    S.pending = false;
+    S.pendingStyle = false;
+    S.styleSeenOurs = false;
+    S.havePrev = false;
     S.unsettled = 0;
 }
 
@@ -471,9 +633,9 @@ void leave(const char* reason) {
     g_desktopWindowBack.store(nullptr, std::memory_order_relaxed);
     if (!S.active) return;
     S.active = false;
-    char window[160];
+    char window[200];
     restoreWindow(window, sizeof window);
-    char line[400];
+    char line[500];
     desktopWindowStoppedLine(line, sizeof line, reason, S.drawn, S.seen, window);
     Log::get().note("%s", line);
 }
@@ -724,6 +886,8 @@ Outcome presentActive(IDXGISwapChain* swap, ID3D11Device* device, uint64_t now, 
         S.lastSerial[0] = S.lastSerial[1] = 0;
         S.presentsSinceReshape = 0;
         S.lastEvaluateMs = 0;
+        S.userMoves = S.userResizes = 0;
+        g_census.reset();
         if (S.activations <= kActivationLogCap) {
             RECT wr{};
             GetWindowRect(hwnd, &wr);
@@ -755,6 +919,7 @@ Outcome presentActive(IDXGISwapChain* swap, ID3D11Device* device, uint64_t now, 
     S.clientH = clientH;
     g_desktopWindowBack.store(back.Get(), std::memory_order_relaxed);   // identity for the draw skip; the reference below is released before the hook returns
     ++S.presentsSinceReshape;
+    S.aspect = aspect;
     evaluateWindow(swap, hwnd, aspect, now);
 
     bool stale = false;
@@ -778,7 +943,31 @@ Outcome presentActive(IDXGISwapChain* swap, ID3D11Device* device, uint64_t now, 
 
 }  // namespace
 
-void desktopWindowNoteSkippedDraw() { g_skipped.fetch_add(1, std::memory_order_relaxed); }
+namespace {
+// Is render target 0, as the context itself says, the swap chain's buffer? The binding shadow said so when the draw was skipped; this asks the context.
+bool renderTargetIsBuffer(ID3D11DeviceContext* ctx) {
+    ID3D11RenderTargetView* rtv = nullptr;
+    ctx->OMGetRenderTargets(1, &rtv, nullptr);
+    if (!rtv) return false;
+    ID3D11Resource* resource = nullptr;
+    rtv->GetResource(&resource);
+    const bool same = resource && static_cast<void*>(resource) == g_desktopWindowBack.load(std::memory_order_relaxed);
+    if (resource) resource->Release();
+    rtv->Release();
+    return same;
+}
+}  // namespace
+
+void desktopWindowNoteSkippedDraw(ID3D11DeviceContext* ctx, char kind, uint64_t vsHash, uint64_t psHash, bool depthBound) {
+    // One writer (the render thread's draw hooks): a load and a store, not a locked add.
+    const uint64_t n = g_skipped.load(std::memory_order_relaxed) + 1;
+    g_skipped.store(n, std::memory_order_relaxed);
+    g_census.note(vsHash, psHash, kind, depthBound);
+    if ((n & 31u) == 0 && ctx) {   // one in 32 is checked against the context
+        bool onBuffer = false;
+        if (guardedBudget(g_sampleBudget, [&] { onBuffer = renderTargetIsBuffer(ctx); })) g_census.sample(onBuffer);
+    }
+}
 
 bool desktopWindowPresent(IDXGISwapChain* swap, ID3D11Device* device, unsigned presentFlags, bool flatProfile) {
     if (presentFlags & DXGI_PRESENT_TEST) return false;
@@ -825,8 +1014,13 @@ bool desktopWindowPresent(IDXGISwapChain* swap, ID3D11Device* device, unsigned p
             S.nextStatsMs = now + kTenSecondsMs;
             char line[320];
             desktopWindowStatsLine(line, sizeof line, S.drawn, S.seen, g_skipped.load(std::memory_order_relaxed), g_handoffs[0].load(std::memory_order_relaxed),
-                                   g_handoffs[1].load(std::memory_order_relaxed), S.stale, S.clientW, S.clientH, S.chainW, S.chainH);
+                                   g_handoffs[1].load(std::memory_order_relaxed), S.stale, S.clientW, S.clientH, S.chainW, S.chainH, S.userMoves, S.userResizes);
             Log::get().note("%s", line);
+            S.userMoves = S.userResizes = 0;
+            char census[640];
+            g_census.format(census, sizeof census);
+            Log::get().note("%s", census);
+            g_census.reset();
         }
         return true;
     }
