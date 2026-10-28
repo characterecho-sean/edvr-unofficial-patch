@@ -50,6 +50,7 @@
 #include "f145_checks.h"    // F145: the weapon UI's tag slots given back (the pick, the F144 flight replayed, the event ring) and the proof against the seed (the seed-only map on the two-eye rig)
 #include "f149_checks.h"    // F149/F150: the ADS eye depth, one per weapon (the game's unscoped camera plus a back-off), never further forward than the key (the tables, the rule, the cap, the shift at the same depth, the cache by copy)
 #include "f152_checks.h"    // F152: the coat's Gear_Back kept to the shadows with the head turned (phi, the hysteresis, the sample word and its stale rule), the readout origin's two shadows
+#include "f154_checks.h"    // F154 (TEMPORARY): the local body's draws listed by first appearance (the numbers, the cap, no renumbering) and one hidden: the number, the stencil ref and the eye target all required
 #include "f151_checks.h"    // F151: the weapon readout's draw bound by its place (the ordinals, each guard, one bind per key, the lost-frame count) and the held copy's scope from the selected slot
 #include "f110_checks.h"    // F110: the ADS sight lock's model right eye (the left-eye job camera plus the IPD)
 #include "f111_checks.h"    // F111: the panel pointer instrument's statistics and verdict
@@ -7548,6 +7549,9 @@ int wmain(int argc, wchar_t** argv) {
     // frames one eye drew the part and the other did not are counted; the held copy's scope is read from the game's selected slot when the name finds two copies (an ambiguous loadout
     // resolved by slot, a slot holding another item and no selection unknown, an unambiguous name left alone).
     f151test::run151(check);
+    // F154 (TEMPORARY): the local body's draws listed by identity in the order they first appear (the six fields each tell two draws apart, colliding slots, 64 draws, the 65th turned away, no
+    // renumbering), the hide needing the dial's number, stencil ref 21 and an eye render target together, the left-out counts by eye and frame, and the writer's publish order.
+    f154test::run154(check);
     // F110: the ADS sight lock's model right eye from the left-eye job camera and from a solved left eye, the fallback, the IPD's sign.
     f110test::run110(check);
     // F111: the panel pointer instrument names the stage that turns a move the other way (K1 to K5, one at a time), the camera getters' decoding.

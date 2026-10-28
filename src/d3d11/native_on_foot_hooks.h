@@ -217,6 +217,8 @@ NativeOnFootOutfitStats nativeOnFootOutfitStats();
 // The outfit census (F142), taken on the fade hook's thread for the local third-person AMC (about every 100 ms, SEH-guarded) and queued when any part's instances, class, flags
 // or items differ from the last queued one (and once at the first read). The frame thread takes them one at a time; false when none is waiting.
 bool nativeOnFootOutfitCensusTake(nofoot::f142::Census* out) noexcept;
+// F154 (TEMPORARY): the number of outfit changes the census has queued this session (the F147 clip measure's generation); the body draw list's header is written again when it moves.
+uint32_t nativeOnFootOutfitGeneration() noexcept;
 
 // F143. EDVR's armed state for the clip measure (0 unarmed, 1 a weapon in hand, 2 a tool; nofoot::f143::Armed), set by the frame thread. The measure reads, in the fade hook's step for
 // the local third-person AMC and before that call's unclip writes, every part's clip modifier (amount, enable, dirty) and view masks, every 5 s and when the armed state changes,

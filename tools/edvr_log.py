@@ -13152,6 +13152,56 @@ def _hj_f152_ads_depth(rows, ctx):
     return ("OK", text)
 
 
+def _hj_f154_body_draws(rows, ctx):
+    """F154 (TEMPORARY instrument): which of the local body's draws the pilot held out of the eyes, to find the coat's pack (the backpack and antenna). With
+    experimental.native_on_foot_body_draw_hide at 0..63 the DLL lists the body's draws into the eyes as `body draw N` (stencil ref 21, in the order they first appear) and leaves
+    the numbered one out of both eyes; every second it writes the number held, its identity (vertex and pixel shader, start index, index count) and how many of its draws were left out
+    in each eye. The report lists each number held, in time order, with the clock of its first second, its seconds, its identity and what was left out, then the number the pilot
+    stopped on and the longest hold: the number to look at for the pack, read without the pilot reporting it. OK when every number held had draws left out; PARTIAL when a number held
+    for 2 s or more left out nothing (not in the list, or not drawn then); NEVER APPLIED when the key read 0..63 while native stereo was on foot and no hold line followed (the
+    instrument did not run); IDLE when the key stayed -1 (or the key was set where native stereo was never on foot)."""
+    sec, none, key, head, full = (rows.get(k, []) for k in ("sec", "none", "key", "head", "full"))
+    if not (sec or none or key or head or full):
+        return None
+    ktext = "; the key read %s (%d line(s))" % (", ".join(sorted({r["v"] for r in key}, key=int)), len(key)) if key else ""
+    if head:
+        ktext += "; the list header %d time(s), the outfit census at %s" % (len(head), head[-1]["gen"])
+    if full:
+        ktext += "; the list filled (64 draws) and %s draw(s) of other identities were turned away" % full[-1]["refused"]
+    held = sorted(sec + none, key=lambda r: r["_order"])
+    armed = [k for k in key if int(k["v"]) >= 0]
+    if not held:
+        if armed and ctx.get("look to aim (F109)", {}).get("sec"):
+            return ("NEVER APPLIED", "the key read %s while native stereo was on foot and no hold line followed (the draw path or the frame tick did not run)%s" % (armed[-1]["v"], ktext))
+        if armed:
+            return ("IDLE", "the key read %s but native stereo was never on foot in the window%s" % (armed[-1]["v"], ktext))
+        return ("IDLE", "the dial stayed at -1: nothing was listed or left out%s" % ktext.lstrip("; "))
+    runs = []
+    for r in held:
+        ident = ("vs %s ps %s start %s count %s" % (r["vs"], r["ps"], r["start"], r["count"])) if "vs" in r else "not in the list (%s listed)" % r["listed"]
+        if runs and runs[-1]["n"] == r["n"] and runs[-1]["ident"] == ident:
+            run = runs[-1]
+        else:
+            run = {"n": r["n"], "ident": ident, "t": r.get("_t"), "s": 0, "e0": 0, "e1": 0, "eu": 0, "frames": 0, "inlist": "vs" in r}
+            runs.append(run)
+        run["s"] += _hwl(r)
+        run["e0"] += int(r["e0"])
+        run["e1"] += int(r["e1"])
+        run["eu"] += int(r.get("eu") or 0)
+        run["frames"] += int(r["frames"])
+    parts = []
+    for run in runs:
+        parts.append("%s = %s from %s for %d s (left out: eye 0 %d, eye 1 %d%s, %d frames)" % (
+            run["n"], run["ident"], _hclock(run["t"]) if run["t"] is not None else "?", run["s"], run["e0"], run["e1"], ", unknown %d" % run["eu"] if run["eu"] else "", run["frames"]))
+    last = runs[-1]
+    longest = max(runs, key=lambda x: (x["s"], x["frames"]))
+    text = "held %d number(s), the last %s (%s) for %d s, the longest %s for %d s: %s%s" % (len(runs), last["n"], last["ident"], last["s"], longest["n"], longest["s"], "; ".join(parts), ktext)
+    idle = [run for run in runs if run["s"] >= 2 and run["e0"] + run["e1"] + run["eu"] == 0]
+    if idle:
+        return ("PARTIAL", text + " [%s held for 2 s or more with no draw left out]" % ", ".join("%s (%s)" % (run["n"], "not drawn" if run["inlist"] else "not in the list") for run in idle))
+    return ("OK", text)
+
+
 def _hj_f135_menu(rows, ctx):
     """F135 (MEASURE ONLY): which panel hook, or field, is active exactly while the on-foot Esc menu or a panel is up. For each Escape (or pad Start or Back) down edge, the
     counters that rose within 0.5 s after it, those that were already non-zero before it, and those that stayed 0, from the probe's rise and fall event lines; the 1 s lines'
@@ -14273,6 +14323,17 @@ HEALTH_RULES = (
         ("key", r"native on foot ADS eye offset \(F152, experimental\): experimental\.native_on_foot_ads_eye_offset_cm = (?P<v>%s) cm" % _HN),
         ("retired", r"native on foot: fix\.native_on_foot_ads_eye_distance_cm is retired \(F152\): ignored \(the file said (?P<v>%s) cm" % _HN),
     ), _hj_f152_ads_depth),
+    # F154 (TEMPORARY instrument): the body draw held out of the eyes, one line a second while experimental.native_on_foot_body_draw_hide is 0..63. The entry lines (`body draw N: vs ...`)
+    # carry no tag and are for the reader of the log; the rule reads the hold lines, the key and the list's header.
+    _hrule("body draw hide (F154)", ("F154",), ("body draw hide (F154)", "body draw list (F154)", "native on foot body draw hide (F154"), (
+        ("sec", r"body draw hide \(F154\) " + H_WL + r": (?P<n>\d+) = vs (?P<vs>[0-9A-F]{16}) ps (?P<ps>[0-9A-F]{16}) start (?P<start>\d+) count (?P<count>\d+), skipped eye 0 (?P<e0>\d+), "
+                r"eye 1 (?P<e1>\d+)(?:, eye unknown (?P<eu>\d+))? \((?P<frames>\d+) frames\)$"),
+        ("none", r"body draw hide \(F154\) " + H_WL + r": (?P<n>\d+) = not in the list \((?P<listed>\d+) listed\), skipped eye 0 (?P<e0>\d+), eye 1 (?P<e1>\d+) \((?P<frames>\d+) frames\)$"),
+        ("key", r"native on foot body draw hide \(F154, TEMPORARY\): experimental\.native_on_foot_body_draw_hide = (?P<v>-?\d+) -- "),
+        ("head", r"body draw list \(F154\): (?P<why>the list starts|the outfit changed) -- (?P<n>\d+) draw\(s\) of the local body listed so far \(stencil ref (?P<ref>\d+) into an eye\), "
+                 r"numbered in the order they first appeared, never renumbered, at most (?P<cap>\d+); outfit census (?P<gen>\d+)$"),
+        ("full", r"body draw list \(F154\): the list is full at (?P<n>\d+) draws and a draw of another identity was seen \((?P<refused>\d+) draw\(s\) so far\)"),
+    ), _hj_f154_body_draws),
     _hrule("ADS sight line (F143)", ("F143",), ("native on foot ADS sight line (F143)", "native on foot ADS sight from the game (F143"), (
         # F146: the "key off" reason and the trims' columns are optional (a log from before F146 has them), and so is the switch's own line, read and ignored
         ("sec", r"native on foot ADS sight line \(F143\) " + H_WL + r": item (?P<item>.+?) scope (?P<scope>yes|no|unknown), source per frame: settled line (?P<game>\d+) "
@@ -17382,6 +17443,57 @@ def self_test_health():
               has=["a saved value of the retired ADS eye distance (14.0 cm) was named and ignored"], lacks=["UNPARSED"])
         check("F152 ADS eye depth: the key line alone, no weapon aimed", [key152(2.0)], 0, [("IDLE", E152)], has=["no ADS eye depth line", "the trim key read +2.0 cm"], lacks=["UNPARSED"])
         check("F152 ADS eye depth: a drifted line is unparsed", ["native on foot ADS eye depth (F152) 10 s: something else"], 4, [("UNPARSED", E152)])
+
+        # ---- F154 (TEMPORARY instrument): the body draw the pilot held out of the eyes, to find the coat's pack ----
+        B154 = "body draw hide (F154)"
+        VS154, PS154 = 0x9D800F45B12A6AAC, 0x194DD6A677084A74
+
+        def bd154(n=7, wl=1, vs=VS154, ps=PS154, start=0, count=13260, e0=90, e1=90, eu=0, frames=90):
+            return R("body draw hide (F154) %u s: %d = vs", wl, n, vs, ps, start, count, e0, e1, ", eye unknown %d" % eu if eu else "", frames)
+
+        def bdnone154(n=40, wl=1, listed=30):
+            return R("body draw hide (F154) %u s: %d = not in the list", wl, n, listed)
+
+        def bdkey154(v=-1):
+            return R("native on foot body draw hide (F154, TEMPORARY)", v)
+
+        def bdhead154(why="the list starts", n=0, gen=0):
+            return R("body draw list (F154): %s --", why, n, 21, 64, gen)
+
+        def bdfull154(n=64, refused=3):
+            return R("body draw list (F154): the list is full", n, refused)
+
+        check("F154 body draw: the key at -1 alone, nothing listed", [bdkey154(-1)], 0, [("IDLE", B154)], has=["the dial stayed at -1", "the key read -1 (1 line(s))"], lacks=["UNPARSED"])
+        check("F154 body draw: one number held, with its identity, its seconds and what was left out in each eye", [bdkey154(7), bdhead154(), bd154(), bd154(), bd154()], 0, [("OK", B154)],
+              has=["held 1 number(s), the last 7 (vs 9D800F45B12A6AAC ps 194DD6A677084A74 start 0 count 13260) for 3 s, the longest 7 for 3 s",
+                   "7 = vs 9D800F45B12A6AAC ps 194DD6A677084A74 start 0 count 13260 from 10:00:03 for 3 s (left out: eye 0 270, eye 1 270, 270 frames)"], lacks=["UNPARSED"])
+        check("F154 body draw: stepped 0, 1, 2 and held on 2: each number in time order, the last and the longest named",
+              [bdkey154(0), bdhead154(), bd154(n=0, start=0, count=13260), bd154(n=1, start=13260, count=30216), bd154(n=2, start=0, count=23784), bd154(n=2, start=0, count=23784)], 0,
+              [("OK", B154)], has=["held 3 number(s), the last 2 (vs 9D800F45B12A6AAC ps 194DD6A677084A74 start 0 count 23784) for 2 s, the longest 2 for 2 s",
+                                   "0 = vs 9D800F45B12A6AAC ps 194DD6A677084A74 start 0 count 13260 from 10:00:03 for 1 s (left out: eye 0 90, eye 1 90, 90 frames); 1 = vs 9D800F45B12A6AAC "
+                                   "ps 194DD6A677084A74 start 13260 count 30216 from 10:00:04 for 1 s (left out: eye 0 90, eye 1 90, 90 frames); 2 = vs ",
+                                   "start 0 count 23784 from 10:00:05 for 2 s (left out: eye 0 180, eye 1 180, 180 frames)"], lacks=["UNPARSED"])
+        check("F154 body draw: a number returned to after another is a run of its own", [bdkey154(3), bd154(n=3, wl=1), bd154(n=5, start=9, count=9), bd154(n=3, wl=1)], 0, [("OK", B154)],
+              has=["held 3 number(s)", "3 = vs", "5 = vs"], lacks=["UNPARSED"])
+        check("F154 body draw: a window that closed early counts its own seconds", [bdkey154(4), bd154(n=4, wl=1), bd154(n=4, wl=3)], 0, [("OK", B154)],
+              has=["held 1 number(s), the last 4 (vs 9D800F45B12A6AAC ps 194DD6A677084A74 start 0 count 13260) for 4 s"], lacks=["UNPARSED"])
+        check("F154 body draw: draws left out in an eye the table could not name are counted apart", [bdkey154(7), bd154(eu=12, e0=60, e1=0, frames=60)], 0, [("OK", B154)],
+              has=["(left out: eye 0 60, eye 1 0, unknown 12, 60 frames)"], lacks=["UNPARSED"])
+        check("F154 body draw: a number past the list, held for 2 s, is partial", [bdkey154(40), bdnone154(), bdnone154()], 0, [("PARTIAL", B154)],
+              has=["40 = not in the list (30 listed) from 10:00:02 for 2 s", "40 (not in the list) held for 2 s or more with no draw left out"], lacks=["UNPARSED"])
+        check("F154 body draw: a listed number that left nothing out for 2 s is partial (not drawn then)",
+              [bdkey154(9), bd154(n=9, e0=0, e1=0, frames=0), bd154(n=9, e0=0, e1=0, frames=0)], 0, [("PARTIAL", B154)], has=["9 (not drawn) held for 2 s or more with no draw left out"], lacks=["UNPARSED"])
+        check("F154 body draw: a number passed in one second with nothing left out is not held against the run", [bdkey154(9), bd154(n=9, e0=0, e1=0, frames=0), bd154(n=10)], 0, [("OK", B154)],
+              has=["held 2 number(s)"], lacks=["UNPARSED", "PARTIAL"])
+        check("F154 body draw: the list's header again after an outfit change, and a full list", [bdkey154(0), bdhead154(), bdhead154("the outfit changed", 12, 2), bdfull154(64, 3), bd154()], 0, [("OK", B154)],
+              has=["the list header 2 time(s), the outfit census at 2", "the list filled (64 draws) and 3 draw(s) of other identities were turned away"], lacks=["UNPARSED"])
+        check("F154 body draw: the key read 0..63 while native stereo was on foot and no hold line followed never applied",
+              [ENG109, look109(), bdkey154(5), look109()], 3, [("NEVER APPLIED", B154)], has=["the key read 5 while native stereo was on foot and no hold line followed"], lacks=["UNPARSED"])
+        check("F154 body draw: the key read 0..63 and native stereo was never on foot is idle", [bdkey154(5)], 0, [("IDLE", B154)],
+              has=["the key read 5 but native stereo was never on foot in the window"], lacks=["UNPARSED", "NEVER APPLIED"])
+        check("F154 body draw: a drifted hold line is unparsed", ["body draw hide (F154) 1 s: something else"], 4, [("UNPARSED", B154)])
+        check("F154 body draw: the entry lines (no tag) are not read", ["body draw 3: vs 9D800F45B12A6AAC ps 194DD6A677084A74 ib 1000 start 0 count 13260 base 0 instances 1 (eye both)"], 0, [],
+              has=["health: no rule had a line"], lacks=["UNPARSED"])
 
         # ---- F135: the on-foot menu probe (MEASURE ONLY) ----
         M135 = "menu probe (F135)"

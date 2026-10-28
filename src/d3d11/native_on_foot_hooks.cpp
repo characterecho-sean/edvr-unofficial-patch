@@ -3422,6 +3422,9 @@ bool nativeOnFootFpCensusTake(nofoot::f144::FpCensus* out) noexcept {
 bool nativeOnFootOutfitCensusTake(nofoot::f142::Census* out) noexcept {
     return out && g_f142CensusRing.take(out);
 }
+uint32_t nativeOnFootOutfitGeneration() noexcept {
+    return g_f142OutfitGen.load(std::memory_order_relaxed);
+}
 
 #ifdef EDVR_NATIVE_ON_FOOT_HOOKS_TEST
 namespace nofoothookstest {

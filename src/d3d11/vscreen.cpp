@@ -2031,6 +2031,21 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     // The optimized station's sun skip: while the ship is sealed in a hangar, the sun pair is not drawn. It sits after the foreign-context return,
     // because the bindings are the immediate context's.
     if (optimizedStationSkipsDraw(bindingShaderHash(BindSlot::Vs), bindingShaderHash(BindSlot::Ps))) return DrawVerdict::kSkip;
+    // F154 (TEMPORARY, experimental.native_on_foot_body_draw_hide): one of the local body's draws into an eye left out, to find the coat's pack. With the key at -1 this is the one
+    // relaxed load. It asks before the gate below, whose answer says nothing about native on foot, so the eye memo is refreshed here on Rtv0's generation (the same refresh the
+    // eye gate makes further down, and the same answer).
+    if (nativeOnFootBodyDrawLive() && (kind == 'X' || kind == 'I')) {
+        const uint32_t bodyRtvGen = bindingGeneration(BindSlot::Rtv0);
+        if (s->rtv0EyeGen != bodyRtvGen) {
+            s->rtv0Cand = -1;
+            s->rtv0Eye = targetIsEyeSized(bindingGet(BindSlot::Rtv0), &s->rtv0Cand);
+            s->rtv0EyeGen = bodyRtvGen;
+        }
+        if (s->rtv0Eye) {
+            const ResourceInfo* bodyRt = rtv0Resolved(s);
+            if (nativeOnFootBodyDrawSkips(self, count, instances, args.start, args.base, true, bodyRt ? bodyRt->resource : nullptr)) return DrawVerdict::kSkip;
+        }
+    }
     if (flatTemporalCapturing()) flatTemporalDraw(self, count, instances);
     // Cleared before anything can set it, on every draw, so a substitution
     // can never be attributed to a draw that did not ask for one.
