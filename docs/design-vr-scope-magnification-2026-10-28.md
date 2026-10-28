@@ -6,7 +6,8 @@ game's own zoom as a magnified picture inside the scope's lens. The rest of the 
 
 ## Status
 
-- **State: DESIGN ONLY.** No code, no key, nothing built or flown. Branch `claude/vr-scope-zoom-design-6ef950`.
+- **State: S0 BUILT, NOT FLOWN** (`84d13bfa`, measure only, no key; full build green). No rendering code. Branch
+  `claude/vr-scope-zoom-design-6ef950`.
 - **Recommendation: option A** (section 2): after DLSS and RCAS, copy the aiming eye's picture inside the lens, magnified by the game's
   zoom M about the sight point (the shield ripple's route). Under 0.1 ms, one eye, scoped ADS only; no scene pass, no motion vectors, no
   DLSS change; F106 carries it to the left eye. The price is detail: 1/M of the output's density.
@@ -24,7 +25,8 @@ game's own zoom as a magnified picture inside the scope's lens. The rest of the 
 - **ruled out (cost or brief):** a third camera pass (C), magnifying in DLSS's input (E), a whole-view FOV change (D). Section 2.
 - **Analysis hand-over FILED** (analysis `1547986`): `analysis\decomp\verify_20261028_ads_zoom_receiver.txt` (the receiver, the correction to
   `analysis\decomp\verify_20261027_ads_sight_line.txt` section 1, the candidates).
-- **Next flight: S0**, measure only, no key. One flat session gives Q1 to Q3; one VR session gives Q2 (VR), Q4 to Q6. Section 6.
+- **Next flight: S0**. One flat session on Epic gives Q1 to Q3; one VR session on Frontier gives Q2 (VR) and Q4 to Q6. Section 6 has
+  the four lines as built and the flight card.
 - **Key (after S0, on the maintainer's word):** `fix.native_on_foot_ads_scope_zoom` = on | off. Section 5.
 
 ## 1. Where the game keeps the zoom
@@ -144,32 +146,40 @@ narrows the FOV slightly without a scope.
 
 ## 6. The first flight: S0 (measure only, no rendering code)
 
-**Offline first (no flight):** read the scoped-sniper eye dumps `173533772002`, `193900687001` and `193909388002`. The frames looked at here
-(`C00`) are hip views. If any frame is in scoped ADS, it answers part of Q4 before the build.
+**As built** (`84d13bfa`): pure logic in `src\d3d11\scope_zoom_s0.h` (rig `tools\native_frame_test\s0_checks.h`), glue in
+native_on_foot.cpp. Four lines, each a `--health` rule under the tag S0 (NEVER APPLIED when presses ran and the line has nothing):
+1. `scope zoom (S0) flat` (Q1, Q2 flat, Q3), one per ADS press: Status.json's ADS bit with on foot (re-read every 100 ms; the game
+   writes it about once a second, so a 3 s lag guard). It logs the held item, and for every camera that the view-constant refresh hook noted
+   (FUN_1405922f0; camera +0x280 vertical FOV, +0x260 aspect; in flat while a temporal mode is on) its FOV at the hip and settled in ADS,
+   with M and the ramp. Flat has no scope state (the loadout reader is VR only): the flight card's order names the copy. **Reading:** the
+   camera that narrows gives M; an ADS FOV that stays put when the FOV option moves the hip means absolute FOVs (Q3).
+2. `scope zoom (S0) vr` (Q2 VR), per press: w; RC+0x16C and +0x17C, the F8 census's settings object, which the RE note says the readout
+   reaches as `[AR+0xE0]->vt+0xE8()` (read by the census's pointer walk, no game call); each eye's p11 from its scene rows (a control that
+   must not move); the refresh hook's cameras (only while the VR camera census or the world route runs that hook). **Reading:** a value
+   that narrows in scoped ADS is the per-frame field; none means the flat table.
+3. `scope lens geometry (S0)` (Q5), at the first settled frame (w = 1 for 0.6 s): c (F141's S through each eye's rows) in NDC, pixels and
+   degrees off axis; the game's |E - S| against EDVR's right eye to S.
+4. `scope lens census (S0)` (Q4, Q6), at that moment for the first three scoped presses and the first unscoped one: the pixel probe's four
+   16x16 windows in the right eye at c and at 1.5, 4 and 8 deg from it. Its own lines follow, one per draw that changes a window (VS/PS,
+   blend, depth, count, texels changed). The probe keeps those points, so an eye dump in scoped ADS probes the same places. **Reading:** a
+   blended draw over world depth is glass (A applies); an opaque draw nearer than S is a screen; a small draw at c only is the reticle. Q6:
+   a readout or gunsight draw among them is in the scene under the lens and must move after the door; the dump's treated against final
+   crops show what the UI layer adds after the door.
 
-**S0 lines** (each with a `--health` rule: OK when the line holds a scoped press; NEVER APPLIED when scoped ADS frames ran with no line):
-1. `scope zoom (S0) flat` (Q1, Q2, Q3), once per press: item, scope, the FOV option; the scene projection's P00 and P11 (the rows the
-   temporal pass already decodes) at the hip (median of the last 0.5 s) and in ADS (settled, w at 1.0 for 0.6 s); M; the ramp time; Z1's
-   +0x16C/+0x17C at both; the game's E depth. w, E and the readout's AR come from F141's bend hook and the F85b getter, and the scope from the
-   journal loadout reader; all three run only in native on-foot VR today (F141, F147's m4), so S0 runs them in flat for this line.
-   **Reading:** P11's ratio is the zoom whatever field carries it; a Z1 value that moves with P11 is the per-frame field; M changing with
-   the FOV option means absolute FOVs.
-2. `scope zoom (S0) vr` (Q2 in VR), once per press: Z1's two FOVs, the census FOV and w per (item, scope). **Reading:** a value that narrows
-   with w in scoped ADS is read per frame; constant or -1 means the flat table.
-3. `scope lens census (S0)` (Q4), each scoped ADS second, aiming eye: the draws whose footprint covers a ring of 8 points at 0.25, 0.5 and 1 x
-   the expected lens radius about c, with VS/PS hash, blend (opaque / alpha / additive), stencil 0x10 or not, depth against the sight
-   point's, and the coverage fraction. **Reading:** a blended draw over world depth is a glass and A applies; an opaque draw nearer than S is
-   a screen (section 3's opaque case); a small draw at c only is a reticle.
-4. `scope lens geometry (S0)` (Q5): c in pixels; the lens bounding box from the named draw and from the stencil hole; the radius in pixels
-   and degrees; |c - centre| / r; EDVR's eye depth against the game's scoped E.
-5. `scope lens overlap (S0)` (Q6): for each readout part, the AR gunsight part and HUD draw near c, its footprint's overlap with the lens and
-   whether it is drawn before or after the door.
+Changed from the plan:
+- The planned lens census and overlap lines became one census on the existing pixel probe (four points, not a ring), read with the eye dump.
+  A new per-draw coverage pass is more instrument than the question needs.
+- Z1 is read through the census's walk.
+- Flat's FOV comes from the camera the projection is built from. Nothing decodes P00/P11 in flat.
+
+Unconfirmed: whether the probe sees native-stereo eye draws. The census rule checks its `eyes seen`.
 
 **Flight card.**
-- Flat (Epic, or the unified install's flat mode): every weapon, hip to ADS three times, scoped and unscoped copies (the Executioner both,
-  and any other scoped weapon owned). Change the FOV option once and repeat the Executioner.
-- VR (Frontier): the scoped Executioner in ADS, 10 s still and 10 s turning the head; the unscoped copy; one eye dump in scoped ADS.
-- Read `--health` first, then the five lines.
+- Flat (Epic, `--scope flat --xess`, the game in flat mode): every weapon, hip to ADS three times, each held 3 s or more; scoped copy then
+  unscoped (the Executioner both, and any other scoped weapon owned). Change the FOV option once and repeat the Executioner.
+- VR (Frontier, `advanced.vr_camera_census` on for the camera source): the scoped Executioner in ADS, 10 s still and 10 s turning the
+  head; the unscoped copy; one eye dump in scoped ADS. The first three scoped presses arm the probe on their own.
+- Read `edvr_log.py --expect-build HEAD --health` first, then the four lines.
 
 **After S0:** see-through glass and M under about 2.5 for every zooming weapon: build A behind the key. An opaque screen: A with that draw
 moved after the door, or B3. Zoom above 2.5: A's detail is likely too low, so put B3 to the maintainer. A per-frame VR field found: read it;
