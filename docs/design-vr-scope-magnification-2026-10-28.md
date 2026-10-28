@@ -22,8 +22,8 @@ game's own zoom as a magnified picture inside the scope's lens. The rest of the 
   Q4 what is drawn in the lens (see-through glass, opaque screen, reticle); Q5 the lens's footprint and the sight point's offset in it;
   Q6 what must stay unmagnified over it (readout, AR gunsight, HUD).
 - **ruled out (cost or brief):** a third camera pass (C), magnifying in DLSS's input (E), a whole-view FOV change (D). Section 2.
-- **Analysis hand-over WAITING:** `%LOCALAPPDATA%\EDVR\analysis-inbox\20261028-101014-ads-zoom-receiver\` (the receiver, the correction to
-  `analysis\decomp\verify_20261027_ads_sight_line.txt` section 1, the candidates). No intake session was running.
+- **Analysis hand-over FILED** (analysis `1547986`): `analysis\decomp\verify_20261028_ads_zoom_receiver.txt` (the receiver, the correction to
+  `analysis\decomp\verify_20261027_ads_sight_line.txt` section 1, the candidates).
 - **Next flight: S0**, measure only, no key. One flat session gives Q1 to Q3; one VR session gives Q2 (VR), Q4 to Q6. Section 6.
 - **Key (after S0, on the maintainer's word):** `fix.native_on_foot_ads_scope_zoom` = on | off. Section 5.
 
@@ -37,7 +37,7 @@ What is known:
 - Flat ADS keeps the eye on its locator and bends the shot through S (`analysis\decomp\verify_20261027_ads_sight_line.txt`). So the zoom is
   an FOV change only, with no camera snap.
 
-Static RE this session (`analysis\decomp\verify_20261028_ads_zoom_receiver.txt` once filed; READ unless marked):
+Static RE this session (`analysis\decomp\verify_20261028_ads_zoom_receiver.txt`, analysis `1547986`; READ unless marked):
 - The bend's pair is aim assist. 0x1908760 sends floats +0x74 and +0x78 of `[[act+0x140]->vt+0x20()]+0x2F0` to typeId 0x5F77034 on every
   call. Constructor 0x19CE660 provides that interface at comp+0x58, and its slot +0x18 (0x1A8C350) stores the two floats at +0x148/+0x14C.
   The registrar names the component `HumanoidAimAssistComponent` (size 0x1E0, pool 0x5F6D320). HumanoidEyeComponent also depends on the
