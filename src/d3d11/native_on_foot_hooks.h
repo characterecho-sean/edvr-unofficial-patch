@@ -198,11 +198,26 @@ struct NativeOnFootOutfitStats {   // cumulative (the frame thread logs the chan
     uint64_t part[avh::kPartCount] = {};   // promotions by part index
     uint32_t faults = 0;
     bool down = false;         // three faults: the A/B stood down for the session
+    // F143: the unclip A/B under the same key: clip modifiers written (enable 0, dirty 1) for the parts F19's list does not cover, by part index; guarded writes that faulted
+    uint64_t clip[avh::kPartCount] = {};
+    uint64_t clipWrites = 0, clipFaults = 0;
 };
 NativeOnFootOutfitStats nativeOnFootOutfitStats();
 // The outfit census (F142), taken on the fade hook's thread for the local third-person AMC (about every 100 ms, SEH-guarded) and queued when any part's instances, class, flags
 // or items differ from the last queued one (and once at the first read). The frame thread takes them one at a time; false when none is waiting.
 bool nativeOnFootOutfitCensusTake(nofoot::f142::Census* out) noexcept;
+
+// F143. EDVR's armed state for the clip measure (0 unarmed, 1 a weapon in hand, 2 a tool; nofoot::f143::Armed), set by the frame thread. The measure reads, in the fade hook's step for
+// the local third-person AMC and before that call's unclip writes, every part's clip modifier (amount, enable, dirty) and view masks, every 5 s and when the armed state changes,
+// under SEH (three faults stop it); the frame thread takes the snapshots one at a time. With fix.native_on_foot_body_full_outfit on (nativeOnFootFullOutfitSet) the unclip also writes
+// enable 0 and dirty 1 for every non-head part its list does not cover (the A/B; counted in NativeOnFootOutfitStats::clip).
+namespace nofoot {
+namespace f143 {
+struct ClipSnap;
+}  // namespace f143
+}  // namespace nofoot
+void nativeOnFootArmedStateSet(uint8_t state) noexcept;
+bool nativeOnFootOutfitClipTake(nofoot::f143::ClipSnap* out) noexcept;
 
 #ifdef EDVR_NATIVE_ON_FOOT_HOOKS_TEST
 // The rig's seam (tools\native_on_foot_hooks_test): the same boundary with a sink of the rig's, synthetic functions in place of the game's,

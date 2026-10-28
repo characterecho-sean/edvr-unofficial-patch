@@ -12735,6 +12735,123 @@ def _hj_f141_readout_anchor(rows, ctx):
     return ("PARTIAL" if partial else "OK", text + (" [" + "; ".join(partial) + "]" if partial else ""))
 
 
+def _hj_f143_sight_line(rows, ctx):
+    """F143 (TEMPORARY key fix.native_on_foot_ads_game_sight): the ADS eye's shift from the game's own sight line. F141's hook reads, on the game thread, the eye matrix E and the
+    sight point S the game's ADS bend aims the shots through; the line E -> S, at the lock's eye depth, is the shift (the origin, the depth and everything downstream are
+    unchanged), with the two live trims added under F139's 8 cm bound; F139's table is the fallback and the reason is counted (no pair published, stale, another item or scope,
+    item not read, a line under 1 cm deep, past the bound, key off). The ADS windows' lines give, per (item, scope), the frames from each source, the game's shift (up, right),
+    the table value and the trims beside it, the pair's age, the line's angle off the root's forward and the shift's step between frames (jitter). OK when the game's line was the
+    source on at least 90% of every group's frames; PARTIAL when a group fell back on more than a tenth of its frames (the leading reasons are said); NEVER APPLIED when there
+    are ADS frames and not one came from the game's line (unless the key is off on every frame: IDLE); IDLE when no ADS second."""
+    sec, key = rows.get("sec", []), rows.get("key", [])
+    if not sec and not key:
+        return None
+    state = key[-1]["state"] if key else None
+    keytext = "; the key is %s" % state if state else ""
+    if not sec:
+        return ("IDLE", "no ADS second with a sight line" + keytext)
+    names = (("nopair", "no pair published"), ("stale", "pair stale"), ("other", "another item or scope"), ("noitem", "item not read"), ("degen", "degenerate line"),
+             ("bound", "past the bound"), ("keyoff", "key off"))
+    groups = collections.OrderedDict()
+    for r in sec:
+        g = groups.setdefault((r["item"], r["scope"]), collections.defaultdict(float, agemax=0.0, stepmax=0.0))
+        g["s"] += _hwl(r)
+        for k in ("game", "table", "steps") + tuple(n for n, _ in names):
+            g[k] += int(r[k])
+        gm, st = int(r["game"]), int(r["steps"])
+        for k in ("gup", "gright", "agemean", "deg"):
+            g[k + "_w"] += float(r[k]) * gm
+        g["stepmean_w"] += float(r["stepmean"]) * st
+        g["agemax"] = max(g["agemax"], float(r["agemax"]))
+        g["stepmax"] = max(g["stepmax"], float(r["stepmax"]))
+        g["last"] = r
+    parts, partial = [], []
+    total_game = sum(int(g["game"]) for g in groups.values())
+    total_frames = sum(int(g["game"] + g["table"]) for g in groups.values())
+    total_keyoff = sum(int(g["keyoff"]) for g in groups.values())
+    for (item, scope), g in groups.items():
+        frames = int(g["game"] + g["table"])
+        gm = int(g["game"])
+        last = g["last"]
+        reasons = ", ".join("%s %d" % (t, g[n]) for n, t in names if g[n]) or "none"
+        text = "%s scope %s: the game's line on %d of %d frames (%s%%), the table on %d (%s)" % (item, scope, gm, frames, "%.0f" % (100.0 * gm / frames) if frames else "-", frames - gm, reasons)
+        if gm:
+            text += ("; game shift up %+.2f right %+.2f cm (mean), table up %+.1f right %+.1f cm, trims up %+.1f right %+.1f cm; pair age mean %.0f max %.0f ms; the line %.2f deg off the "
+                     "root's forward; shift step between frames mean %.2f max %.2f mm over %d steps") % (
+                g["gup_w"] / gm, g["gright_w"] / gm, float(last["tup"]), float(last["tright"]), float(last["trimu"]), float(last["trimr"]), g["agemean_w"] / gm, g["agemax"],
+                g["deg_w"] / gm, g["stepmean_w"] / g["steps"] if g["steps"] else 0.0, g["stepmax"], int(g["steps"]))
+        else:
+            text += "; table up %+.1f right %+.1f cm, trims up %+.1f right %+.1f cm" % (float(last["tup"]), float(last["tright"]), float(last["trimu"]), float(last["trimr"]))
+        text += "; %d s" % g["s"]
+        parts.append(text)
+        if frames and gm * 10 < frames * 9:
+            partial.append("%s scope %s: the table stood in on %d of %d frames (%s)" % (item, scope, frames - gm, frames, reasons))
+    text = "; ".join(parts) + keytext
+    if not total_game:
+        if total_keyoff == total_frames:
+            return ("IDLE", text + " [the key is off: F139's table was the source on every frame]")
+        lead = collections.Counter()
+        for g in groups.values():
+            for n, t in names:
+                lead[t] += int(g[n])
+        return ("NEVER APPLIED", text + " [%d ADS frames and none from the game's line; leading reason: %s]" % (total_frames, _htop(lead, 3)))
+    if partial:
+        return ("PARTIAL", text + " [" + "; ".join(partial) + "]")
+    return ("OK", text)
+
+
+_HCLIP_ENTRY_RE = re.compile(r"\[(?P<name>\w+) (?P<kind>no modifier|modifier unread|modifier amount (?P<amt>-?[\d.]+) enable (?P<en>\d+) dirty (?P<dirty>\d+)) masks (?P<m>[0-9xA-Fa-f/]+)\]")
+
+
+def _hclip_text(clip, clipparts, clipw):
+    """F143: the coat's clip modifiers. The fade hook's step reads, every 5 s and when EDVR's armed state changes, the clip modifier ("pVertexClipAmount": amount, enable, dirty) of
+    every part of the local third-person avatar that has an instance, with [AMC+0x321] and [AMC+0x322] and the view masks; the lines name the armed state (unarmed, weapon, tool).
+    The text gives the snapshots by armed state, the parts whose modifier (set or not, enable, amount) differs between unarmed and an armed state (the discriminating read: what
+    the game does to the coat's part when a weapon is out), the flags by state, and the parts the unclip A/B wrote (enable 0, dirty 1) with the key on."""
+    out = []
+    byarmed = collections.Counter(x["armed"] for x in clip)
+    if clip:
+        out.append("clip: %d snapshot(s) (%s)" % (len(clip), ", ".join("%s %d" % (a, byarmed[a]) for a in ("unarmed", "weapon", "tool") if byarmed[a])))
+        flags = collections.OrderedDict()
+        for x in clip:
+            flags.setdefault(x["armed"], set()).add("%s/%s" % (x["f321"], x["f322"]))
+        out.append("[AMC+0x321]/[AMC+0x322] by state: " + ", ".join("%s %s" % (a, " ".join(sorted(v))) for a, v in flags.items()))
+    sigs = collections.OrderedDict()   # name -> armed -> set of (kind, enable, amount)
+    for x in clipparts:
+        for m in _HCLIP_ENTRY_RE.finditer(x["body"]):
+            if m.group("amt") is not None:
+                sig = ("modifier", m.group("en"), "%.3f" % float(m.group("amt")))
+            else:
+                sig = (m.group("kind"), "-", "-")
+            sigs.setdefault(m.group("name"), {}).setdefault(x["armed"], set()).add(sig)
+    if sigs:
+        def show(sset):
+            return "/".join(sorted(("enable %s amount %s" % (sg[1], sg[2])) if sg[0] == "modifier" else sg[0] for sg in sset))
+        differ = []
+        for name, by in sigs.items():
+            if "unarmed" not in by:
+                continue
+            for other in ("weapon", "tool"):
+                if other in by and by[other] != by["unarmed"]:
+                    differ.append("%s (unarmed %s, %s %s)" % (name, show(by["unarmed"]), other, show(by[other])))
+        compared = sorted({a for by in sigs.values() for a in by})
+        if "unarmed" not in compared or len(compared) < 2:
+            out.append("modifiers read in %s only: no unarmed against armed comparison yet" % (", ".join(compared) or "no state"))
+        elif differ:
+            out.append("modifier differs between unarmed and armed on: " + "; ".join(differ))
+        else:
+            out.append("no part's modifier (set, enable, amount) differs between unarmed and armed (read in %s)" % ", ".join(compared))
+        mods = sorted(n for n, by in sigs.items() if any(sg[0] == "modifier" for ss in by.values() for sg in ss))
+        out.append("parts with a modifier: %s" % (", ".join(mods) or "none"))
+    if clipw:
+        names = collections.Counter()
+        for r in clipw:
+            names += _hpairs(r["names"])
+        out.append("A/B unclip: %d modifier write(s) in %d s (by name: %s), %d write fault(s)" % (sum(int(r["writes"]) for r in clipw), _hsecs(clipw), _htop(names, 8),
+                                                                                        max(int(r["faults"]) for r in clipw)))
+    return "; ".join(out)
+
+
 def _hj_f142_outfit(rows, ctx):
     """F142 (TEMPORARY A/B, fix.native_on_foot_body_full_outfit): the overcoat. The game gives a part of the outfit it wants only in the shadows (the coat's EVASuit_Gear_Back)
     the shadow-views-only class in first person, so on EDVR's body the suit shows through. With the key on, the avatar's visibility call gives every such part that is not a head
@@ -12745,7 +12862,8 @@ def _hj_f142_outfit(rows, ctx):
     changed a class on a tenth of the promotions or the A/B stood down; OK otherwise."""
     key, sec, down = rows.get("key", []), rows.get("sec", []), rows.get("down", [])
     census, part = rows.get("census", []), rows.get("part", [])
-    if not any((key, sec, down, census, part)):
+    clip, clipparts, clipw = rows.get("clip", []), rows.get("clipparts", []), rows.get("clipw", [])
+    if not any((key, sec, down, census, part, clip, clipparts, clipw)):
         return None
     state = key[-1]["state"] if key else None
     last = collections.OrderedDict()
@@ -12758,6 +12876,9 @@ def _hj_f142_outfit(rows, ctx):
         shadow = ["%s (masks %s)" % (n, "/".join("0x" + x["m%d" % k] for k in range(4) if int(x["m%d" % k], 16))) if any(int(x["m%d" % k], 16) for k in range(4)) else "%s (no mask)" % n
                   for n, x in last.items() if x["state"] == "2" and not x["head"]]
         ctext += ("; " if ctext else "census: ") + "at the last read, parts in the shadow-views-only class that are not head parts: %s" % (", ".join(shadow) or "none")
+    cliptext = _hclip_text(clip, clipparts, clipw)   # F143
+    if cliptext:
+        ctext += ("; " if ctext else "") + cliptext
     if not sec:
         if state == "on":
             return ("IDLE", "the key is on; no window line (native on foot never ran with it, or the window was not written)" + ("; " + ctext if ctext else ""))
@@ -13853,7 +13974,8 @@ HEALTH_RULES = (
                  r"(?P<wf>\d+), a degenerate P14 frame (?P<pf>\d+)\]; U with a non-finite padding lane \(3, 7, 11, 15; used all the same\) (?P<pad>\d+)$"),
         ("raw", r"native on foot readout anchor \(F141\): raw floats, part (?P<part>\d+) \(line (?P<line>\d+) of at most (?P<cap>\d+)\), item (?P<item>.+?): U = (?P<m>\[[^\]]*\])"),
     ), _hj_f141_readout_anchor),
-    _hrule("full outfit (F142)", ("F142",), ("native on foot full outfit (F142", "native on foot outfit census (F142)", "native on foot outfit part (F142)"), (
+    _hrule("full outfit (F142)", ("F142", "F143"), ("native on foot full outfit (F142", "native on foot outfit census (F142)", "native on foot outfit part (F142)",
+                                                  "native on foot outfit clip (F143)", "native on foot outfit clip parts (F143)", "native on foot full outfit clip (F143)"), (
         ("key", r"native on foot full outfit \(F142, TEMPORARY\): fix\.native_on_foot_body_full_outfit is (?P<state>on|off) -- "),
         ("sec", r"native on foot full outfit \(F142\) " + H_WL + r": visibility calls of the local avatar (?P<calls>\d+), calls with a part promoted (?P<swapped>\d+), parts "
                 r"promoted (?P<promoted>\d+) \(by name: (?P<names>.+?)\), class changed by the game before the write (?P<refused>\d+), during the call (?P<lost>\d+), faults "
@@ -13865,7 +13987,21 @@ HEALTH_RULES = (
                  r"0x(?P<flags>[0-9A-F]{2}) current item (?P<cur>-?\d+) pending item (?P<pend>-?\d+) masks 0x(?P<m0>[0-9A-F]+),0x(?P<m1>[0-9A-F]+),0x(?P<m2>[0-9A-F]+),"
                  r"0x(?P<m3>[0-9A-F]+)(?P<chg> \[changed\])?$"),
         ("_", r"native on foot outfit census \(F142\): later changes are counted, not written"),
+        # F143: the coat's clip modifiers measured (a header and the parts, every 5 s and when the armed state changes), and the unclip A/B's writes under the same key
+        ("clip", r"native on foot outfit clip \(F143\) #(?P<n>\d+) armed (?P<armed>unarmed|weapon|tool) \(read (?P<why>on the 5 s clock|when the armed state changed \(or at the first call\))\): "
+                 r"\[AMC\+0x321\] (?P<f321>0x[0-9A-F]{2}|unread) \[AMC\+0x322\] (?P<f322>0x[0-9A-F]{2}|unread), (?P<parts>\d+) parts have instances, (?P<mods>\d+) of them a clip "
+                 r"modifier; the parts follow$"),
+        ("clipparts", r"native on foot outfit clip parts \(F143\) #(?P<n>\d+) armed (?P<armed>unarmed|weapon|tool): (?P<body>\[.+\])$"),
+        ("clipw", r"native on foot full outfit clip \(F143\) " + H_WL + r": modifiers unclipped by the A/B (?P<writes>\d+) \(by name: (?P<names>.+?)\), write faults (?P<faults>\d+)$"),
     ), _hj_f142_outfit),
+    _hrule("ADS sight line (F143)", ("F143",), ("native on foot ADS sight line (F143)", "native on foot ADS sight from the game (F143"), (
+        ("sec", r"native on foot ADS sight line \(F143\) " + H_WL + r": item (?P<item>.+?) scope (?P<scope>yes|no|unknown), source per frame: game line (?P<game>\d+), table (?P<table>\d+) "
+                r"\(fallback by reason: no pair (?P<nopair>\d+), stale (?P<stale>\d+), another item or scope (?P<other>\d+), item not read (?P<noitem>\d+), degenerate line "
+                r"(?P<degen>\d+), past the bound (?P<bound>\d+), key off (?P<keyoff>\d+)\); game shift up (?P<gup>%s) right (?P<gright>%s) cm \(mean over the game-line frames\), "
+                r"table up (?P<tup>%s) right (?P<tright>%s) cm, trims up (?P<trimu>%s) right (?P<trimr>%s) cm; pair age mean (?P<agemean>%s) max (?P<agemax>%s) ms, the line "
+                r"(?P<deg>%s) deg off the root's forward; shift step between frames mean (?P<stepmean>%s) max (?P<stepmax>%s) mm over (?P<steps>\d+) steps$" % ((_HN,) * 11)),
+        ("key", r"native on foot ADS sight from the game \(F143, TEMPORARY\): fix\.native_on_foot_ads_game_sight is (?P<state>on|off) -- "),
+    ), _hj_f143_sight_line),
     _hrule("menu probe (F135)", ("F135",), ("native on foot menu probe (F135)",), (
         ("sec", r"native on foot menu probe \(F135\) 1 s: update (?P<upd>\d+) \(objs (?P<updo>.*?)\), placement (?P<place>\d+) \(objs (?P<placeo>.*?)\), ray (?P<ray>\d+), "
                 r"cursor window (?P<win>\d+), owner transform (?P<own>\d+), panel submit (?P<ps>\d+), inst submit (?P<is>\d+), bridge update (?P<bu>\d+) placement "
@@ -16664,6 +16800,79 @@ def self_test_health():
         check("F142 full outfit: a drifted line is unparsed", ["native on foot full outfit (F142) 10 s: something else"], 4, [("UNPARSED", FO142)])
         check("F142 full outfit: a drifted census line is unparsed", ["native on foot outfit census (F142): something else"], 4, [("UNPARSED", FO142)])
         check("F142 full outfit: the icon table lines are not its", [icon_full(2), fo_key("off")], 0, [("IDLE", FO142)], lacks=["UNPARSED"])
+
+        # ---- F143: the coat's clip modifiers (measure) and the unclip A/B under the same key ----
+        def clip_hdr(n=1, armed="unarmed", why="on the 5 s clock", f321="0x08", f322="0x00", parts=24, mods=3):
+            return R("native on foot outfit clip (F143) #%u", n, armed, why, f321, f322, parts, mods)
+
+        CLIPBODY_ON = (" [EVASuit_Torso modifier amount 0.0000 enable 0 dirty 1 masks 0xF/0x0/0x0/0x0] [EVASuit_Gear_Back modifier amount 0.0000 enable 1 dirty 0 masks "
+                       "0x180000000/0x0/0x0/0x0] [EVASuit_Legs no modifier masks 0xF/0x0/0x0/0x0]")
+        CLIPBODY_OFF = CLIPBODY_ON.replace("enable 1 dirty 0", "enable 0 dirty 0")
+
+        def clip_parts(n=1, armed="unarmed", body=CLIPBODY_ON):
+            return R("native on foot outfit clip parts (F143) #%u armed %s:", n, armed, body)
+
+        def clip_w(wl=10, writes=900, names="EVASuit_Gear_Back 900", faults=0):
+            return R("native on foot full outfit clip (F143) %u s", wl, writes, names, faults)
+
+        check("F143 full outfit: the clip modifiers differ between unarmed and armed (the discriminating read)",
+              [fo_key("off"), clip_hdr(), clip_parts(), clip_hdr(n=2, armed="weapon", why="when the armed state changed (or at the first call)", f322="0x04"),
+               clip_parts(n=2, armed="weapon", body=CLIPBODY_OFF)], 0, [("IDLE", FO142)],
+              has=["clip: 2 snapshot(s) (unarmed 1, weapon 1)", "[AMC+0x321]/[AMC+0x322] by state: unarmed 0x08/0x00, weapon 0x08/0x04",
+                   "modifier differs between unarmed and armed on: EVASuit_Gear_Back (unarmed enable 1 amount 0.000, weapon enable 0 amount 0.000)",
+                   "parts with a modifier: EVASuit_Gear_Back, EVASuit_Torso"], lacks=["UNPARSED", "EVASuit_Torso (unarmed"])
+        check("F143 full outfit: no modifier differs between unarmed and armed", [fo_key("off"), clip_hdr(), clip_parts(), clip_hdr(n=2, armed="weapon"), clip_parts(n=2, armed="weapon")], 0,
+              [("IDLE", FO142)], has=["no part's modifier (set, enable, amount) differs between unarmed and armed (read in unarmed, weapon)"], lacks=["UNPARSED"])
+        check("F143 full outfit: only the unarmed state read", [fo_key("off"), clip_hdr(), clip_parts()], 0, [("IDLE", FO142)],
+              has=["modifiers read in unarmed only: no unarmed against armed comparison yet"], lacks=["UNPARSED"])
+        check("F143 full outfit: a tool is a state of its own", [fo_key("off"), clip_hdr(), clip_parts(), clip_hdr(n=2, armed="tool"), clip_parts(n=2, armed="tool", body=CLIPBODY_OFF)], 0,
+              [("IDLE", FO142)], has=["(unarmed enable 1 amount 0.000, tool enable 0 amount 0.000)", "unarmed 1, tool 1"], lacks=["UNPARSED"])
+        check("F143 full outfit: a part with no modifier against one with", [fo_key("off"), clip_hdr(), clip_parts(body=" [EVASuit_Gear_Back no modifier masks 0x0/0x0/0x0/0x0]"),
+                                                                             clip_hdr(n=2, armed="weapon"), clip_parts(n=2, armed="weapon", body=" [EVASuit_Gear_Back modifier amount 0.5000 enable 1 dirty 0 masks 0x1/0x0/0x0/0x0]")],
+              0, [("IDLE", FO142)], has=["EVASuit_Gear_Back (unarmed no modifier, weapon enable 1 amount 0.500)"], lacks=["UNPARSED"])
+        check("F143 full outfit: the unclip A/B's writes by name", [fo_key(), fo_sec(), clip_w(), clip_w(wl=5, writes=450, names="EVASuit_Gear_Back 450")], 0, [("OK", FO142)],
+              has=["A/B unclip: 1350 modifier write(s) in 15 s (by name: EVASuit_Gear_Back 1350), 0 write fault(s)"], lacks=["UNPARSED"])
+        check("F143 full outfit: the A/B wrote nothing", [fo_key(), fo_sec(), clip_w(writes=0, names="none")], 0, [("OK", FO142)],
+              has=["A/B unclip: 0 modifier write(s) in 10 s (by name: none)"], lacks=["UNPARSED"])
+        check("F143 full outfit: a drifted clip line is unparsed", ["native on foot outfit clip (F143) #1 armed unarmed: something else"], 4, [("UNPARSED", FO142)])
+        check("F143 full outfit: a drifted clip parts line is unparsed", ["native on foot outfit clip parts (F143) #1 something else"], 4, [("UNPARSED", FO142)])
+        check("F143 full outfit: a drifted A/B line is unparsed", ["native on foot full outfit clip (F143) 10 s: something else"], 4, [("UNPARSED", FO142)])
+
+        # ---- F143: the ADS eye on the game's sight line (fix.native_on_foot_ads_game_sight, TEMPORARY) ----
+        L143 = "ADS sight line (F143)"
+        LASER143 = "$wpn_m_submachinegun_laser_fauto_name;"
+
+        def sl143(item=PLASMA141, scope="no", game=480, table=0, nopair=0, stale=0, other=0, noitem=0, degen=0, bound=0, keyoff=0, gup=0.92, gright=0.03, tup=0.8, tright=0.0, trimu=0.0,
+                  trimr=0.0, agemean=33.0, agemax=80.0, deg=0.12, stepmean=0.4, stepmax=1.5, steps=470, wl=10):
+            return R("native on foot ADS sight line (F143) %u s", wl, item, scope, game, table, nopair, stale, other, noitem, degen, bound, keyoff, gup, gright, tup, tright, trimu, trimr,
+                     agemean, agemax, deg, stepmean, stepmax, steps)
+
+        def gs143(state="on"):
+            return R("native on foot ADS sight from the game (F143, TEMPORARY)", state, "x")
+
+        check("F143 sight line: the game's line was the source", [gs143(), sl143(), sl143(wl=4)], 0, [("OK", L143)],
+              has=[PLASMA141 + " scope no: the game's line on 960 of 960 frames (100%), the table on 0 (none); game shift up +0.92 right +0.03 cm (mean), table up +0.8 right +0.0 cm, "
+                   "trims up +0.0 right +0.0 cm; pair age mean 33 max 80 ms; the line 0.12 deg off the root's forward; shift step between frames mean 0.40 max 1.50 mm over 940 steps; 14 s",
+                   "the key is on"], lacks=["UNPARSED"])
+        check("F143 sight line: the first frames fall back on the table until a pair arrives", [gs143(), sl143(game=465, table=15, nopair=15)], 0, [("OK", L143)],
+              has=["the game's line on 465 of 480 frames (97%), the table on 15 (no pair published 15)"], lacks=["UNPARSED"])
+        check("F143 sight line: the table stood in on a fifth of the frames", [gs143(), sl143(game=380, table=100, stale=60, other=40)], 0, [("PARTIAL", L143)],
+              has=["the game's line on 380 of 480 frames (79%), the table on 100 (pair stale 60, another item or scope 40)", "the table stood in on 100 of 480 frames"], lacks=["UNPARSED"])
+        check("F143 sight line: ADS frames and none from the game's line", [gs143(), sl143(game=0, table=480, nopair=480, gup=0.0, gright=0.0, agemean=0.0, agemax=0.0, deg=0.0, stepmean=0.0, stepmax=0.0, steps=0)],
+              3, [("NEVER APPLIED", L143)], has=["480 ADS frames and none from the game's line; leading reason: no pair published 480", "table up +0.8 right +0.0 cm"], lacks=["UNPARSED"])
+        check("F143 sight line: the line used on no frame, degenerate", [gs143(), sl143(game=0, table=480, degen=300, bound=180, gup=0.0, gright=0.0, agemean=0.0, agemax=0.0, deg=0.0, stepmean=0.0, stepmax=0.0,
+                                                                                    steps=0)], 3, [("NEVER APPLIED", L143)],
+              has=["leading reason: degenerate line 300, past the bound 180"], lacks=["UNPARSED"])
+        check("F143 sight line: the key off is the table, not a failure", [gs143("off"), sl143(game=0, table=480, keyoff=480, gup=0.0, gright=0.0, agemean=0.0, agemax=0.0, deg=0.0, stepmean=0.0, stepmax=0.0,
+                                                                                                 steps=0)], 0, [("IDLE", L143)],
+              has=["the key is off: F139's table was the source on every frame", "key off 480"], lacks=["UNPARSED"])
+        check("F143 sight line: the key line alone, no ADS second", [gs143()], 0, [("IDLE", L143)], has=["no ADS second with a sight line; the key is on"], lacks=["UNPARSED"])
+        check("F143 sight line: two weapons, the laser SMG's line and a trim", [gs143(), sl143(), sl143(item=LASER143, gup=-4.62, gright=-0.49, tup=-3.0, trimu=0.5, trimr=-0.3, deg=0.9)], 0, [("OK", L143)],
+              has=[LASER143 + " scope no: the game's line on 480 of 480 frames (100%)", "game shift up -4.62 right -0.49 cm (mean), table up -3.0 right +0.0 cm, trims up +0.5 right -0.3 cm"],
+              lacks=["UNPARSED"])
+        check("F143 sight line: the shift's jitter is said", [gs143(), sl143(stepmean=2.5, stepmax=9.0)], 0, [("OK", L143)],
+              has=["shift step between frames mean 2.50 max 9.00 mm over 470 steps"], lacks=["UNPARSED"])
+        check("F143 sight line: a drifted line is unparsed", ["native on foot ADS sight line (F143) 10 s: something else"], 4, [("UNPARSED", L143)])
 
         # ---- F135: the on-foot menu probe (MEASURE ONLY) ----
         M135 = "menu probe (F135)"
