@@ -5,7 +5,7 @@
 // of just judder in place. Only the HUD/aim should move with look to aim." The panels and the menu are anchored to the aim, which look to aim moves to follow the head:
 //  - with a full-screen menu up (the maps gate held the 2D screen: gate=panel, world-frames=0, panel-frames=900) it kept asking for the head's tremor, 0.01 to 0.09 deg a
 //    second, all applied: the menu juddered;
-//  - with on-foot panels open (the F122 placement hook saw them, 90 a second) the aim followed 45 deg head turns, and the panels with it;
+//  - with on-foot panels open (the placement hook saw them, 90 a second) the aim followed 45 deg head turns, and the panels with it;
 //  - from 07:00:55 the game ran no look processor at all (F129: comps now 0) and the follower kept asking (+117 deg asked in one second, 0 applied), queueing a backlog.
 // So while one of the three is true the follower asks nothing (no ask, no probe, no snap), the player's look is the game's own, and the aim stays where it is; when
 // all three have been clear for kLeaveClearMs the follower starts again from a fresh centring, as an engage does.
@@ -66,7 +66,7 @@ inline const char* reasonShort(uint32_t mask, char* buf, size_t cap) noexcept {
 struct Sample {
     uint64_t nowMs = 0;
     bool active = false;       // look to aim is engaged on foot (else the hold has nothing to hold)
-    uint32_t panelSeq = 0;     // the F122 placement hook's count of panels reached (it only grows)
+    uint32_t panelSeq = 0;     // the placement hook's count of panels reached (it only grows)
     // F131c: when the F111 cursor window hook or the F114b owner transform hook last ran (the same clock as nowMs; 0: never). The flight edvr_gfx_20261027_100213 (the F135
     // probe) saw both rise within 0.15 s of each Escape press and fall when the menu closed, mouse still or not, while the placement count above moved only once the
     // pointer was on a panel (11 s after the menu opened in flight 091608).

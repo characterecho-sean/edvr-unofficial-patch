@@ -48,10 +48,7 @@
 #include "f114b_checks.h"   // F114b: the panel pointer's turned transform, the click path, the mode getter
 #include "f115_checks.h"    // F115: boarding undoes every on-foot camera change (the exit edge, the zeros, the read-back)
 #include "f118_checks.h"    // F118: why the reticle is seen double (steps and flips, trailing frames, the footprint), measure only
-#include "f117_checks.h"    // F117: the panel cursor's place on a turned panel (the turn read from the pick mesh, panel and view)
-#include "f120_checks.h"    // F120: the panel cursor kept on the panel when the head turns (the reference, M = E Ht H0 E0t, refusals, drift, words)
-#include "f122_checks.h"    // F122: the on-foot panel mouse cursor hidden by default (the key, the one write, the counts, the hooks it opens)
-#include "f154_checks.h"    // F154: the pick mesh's lever read from the game, the cursor's live A/B (shipped, uv, game, drawn, mirrored), the signed turn instrument
+#include "f154_checks.h"    // F154, F155: the pick mesh's lever read from the game, the drawn cursor and its hide fallback, the signed turn instrument
 #include "f119_checks.h"    // F119: head containment, measure only (the head's offset by class, the depth grid decoded, the lines)
 #include "f126_checks.h"    // F126: the pin's eye pair from one frame, the arm IK's snapshot of the current FP rig, a nearly straight elbow reaching the grip
 #include "f123_checks.h"    // F123: head containment, the leash and the wall contact (the fade ramp, the hard timer, the contact trigger and latch, the recentre sequence, the lines)
@@ -7515,18 +7512,12 @@ int wmain(int argc, wchar_t** argv) {
     f115test::run115(check);
     // F118 (measure only): the readback steps and flips, the trailing frames, the footprint's directions and its decode from lines marched over an edge and a wall.
     f118test::run118(check);
-    // F117: a turned pick mesh read from its triangles; panel puts the cursor at the uv's drawn place, view mirrors it, an upright panel is left alone.
-    f117test::run117(check);
-    // F120: a screen-space panel's cursor carried by the head's turn against the HUD frame since the panel opened; composed after F117's place.
-    f120test::run120(check);
     // F119 (measure only): the physical head from the pose and its alignment, the second's percentiles and histogram by class, EDVR's own offsets kept apart, the depth
     // grid decoded from the shader's words (a wall, the player's weapon, the near plane, the sky), the baseline and contact tallies, and the lines within the log's limit.
     f119test::run119(check);
-    // F122: the hide: the key, what a placement does, the one write against a controller's memory, the counts and the hooks the key opens.
-    f122test::run122(check);
-    // F154: the lever the screen-space pick mesh owner applies, read as the hook reads it (the sign of rho, q', the fov cross-check), its undo (drawn) and its |rho| form
-    // (mirrored), the five settings' choice of point and the refusals, the lever table's freshness, and the signed turn fit (k = 0, 1, -1, -2, +2 on yaw and pitch), the
-    // eye's move, the runs, the lines.
+    // F154, F155: the lever the screen-space pick mesh owner applies, read as the hook reads it (the sign of rho, q', the fov cross-check), its undo (the drawn point), the
+    // placement's decision (drawn on a screen-space panel, the hide fallback for each refusal, nothing on another panel or in flat) and its writes against a controller's
+    // memory, the lever table's freshness, and the signed turn fit (k = 0, 1, -1, -2, +2 on yaw and pitch), the eye's move, the runs, the lines.
     f154test::run154(check);
     // F126: the review's three findings: the eye pair only from one frame (4 m/s, 90 Hz: 22 mm), the arm IK's snapshot only of the rig the plan names, a bend just under
     // the hinge window reaching the grip as exactly as one just over it.

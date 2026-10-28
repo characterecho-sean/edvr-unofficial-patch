@@ -1872,7 +1872,7 @@ def self_test():
               "audit: an exact-only file's address resolved elsewhere passes")
         for name in ("native_on_foot.cpp", "native_on_foot_hooks.cpp", "avatar_hooks_core.h", "avatar_skeleton_core.h",
                      "native_on_foot_f87.h", "native_on_foot_f111.h", "native_on_foot_f114b.h", "native_on_foot_f116.h",
-                     "native_on_foot_f120.h"):
+                     "native_on_foot_f154.h"):
             check(audited(name, "bool f(uint32_t stamp){ return stamp == 0x6ADA8048u; }\n"
                                 "uintptr_t g(uintptr_t b){ return b + 0x4315000u; }") == [],
                   "audit: the exact-build native file %s retains its identity and raw addresses" % name)
@@ -1982,7 +1982,6 @@ AUDIT_EXACT_ONLY = (
     ("d3d11/native_on_foot_f111.h", "the exact-build panel pointer probe's functions and slots"),
     ("d3d11/native_on_foot_f114b.h", "the exact-build panel pointer's owner transform and click path"),
     ("d3d11/native_on_foot_f116.h", "the exact-build HUD submit gate's addresses and pins"),
-    ("d3d11/native_on_foot_f120.h", "the exact-build screen-space owner's address and pin"),
     ("d3d11/native_on_foot_f154.h", "the exact-build screen-space owner's vtable slot and the stolen size of its hook"),
     ("d3d11/mem_tick.cpp", "a diagnostic whose addresses are not in the table"),
     ("d3d11/terrain_cull_cover*", "terrain cull cover, which finds its site by its own scan on an unknown build"),

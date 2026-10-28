@@ -1375,7 +1375,9 @@ static void retiredKeyScan(const std::wstring& root) {
 // close, retired in F106 (the left eye now shows the aiming eye's view, fix.native_on_foot_ads_sight_both_eyes), the old look to aim controller's three
 // test keys, retired in F109 (look to aim rides the ADS head aim's map), and the weapon eye's right key, retired in F112 (the eye offset is forward
 // alone; fix.native_on_foot_weapon_view_offset_cm is the sideways setting), and F117's and F120's two panel cursor test keys, retired in F122 (the cursor
-// is hidden by default behind fix.native_on_foot_panel_mouse; drawn, both corrections run at their panel value), and the aim reticle's placement key,
+// is hidden by default behind the panel mouse key; drawn, both corrections run at their panel value), and the panel mouse key and the panel cursor test key, retired in
+// F155 (the cursor is always drawn on an on-foot panel in VR at the game's place with the pick mesh's lever undone, hidden where that is not known; F117's and F120's
+// placements were removed), and the aim reticle's placement key,
 // retired in F127 (the reticle always sits on the mouse-aim axis, the former default; its head and game placements were removed),
 // and the visor-axis test key, retired in F128 (the correction is always on in outer mode), under native on foot's convention for retired keys (its F34, F66 and
 // F96 keys are the same): the shipped file keeps each at its retired value on a hidden retired line,
@@ -1388,7 +1390,7 @@ static const char* const kRetiredNotedKeys[] = {
     "fix.native_on_foot_look_to_aim_yaw_sign", "fix.native_on_foot_look_to_aim_comp_delay", "fix.native_on_foot_look_to_aim_comp_sign",
     "fix.native_on_foot_weapon_eye_right_cm", "fix.native_on_foot_panel_cursor_fix", "fix.native_on_foot_panel_cursor_follow",
     "fix.native_on_foot_reticle_follow",
-    "fix.native_on_foot_visor_axis",
+    "fix.native_on_foot_visor_axis", "fix.native_on_foot_panel_mouse", "fix.native_on_foot_panel_cursor_test",
 };
 // The marker line above each: "# ui: hidden -- retired (F98): ignored." (later keys name their own retirement's F number).
 static bool isRetiredNotedMarker(const std::string& line) {
@@ -1439,9 +1441,9 @@ static void retiredNotedKeyScan(const std::wstring& root) {
     }
     const int count = static_cast<int>(sizeof(kRetiredNotedKeys) / sizeof(kRetiredNotedKeys[0]));
     if (good == count)
-        ok("the shipped edvr.ini spells each of the nineteen retired keys (Explorer Cam's eight and the weapon eye's up from F98, the training connect probe's from "
+        ok("the shipped edvr.ini spells each of the twenty-one retired keys (Explorer Cam's eight and the weapon eye's up from F98, the training connect probe's from "
            "F100, the ADS left eye close from F106, the old look to aim's three test keys from F109, the weapon eye's right from F112, the two panel cursor test "
-           "keys from F122, the aim reticle's placement from F127, the visor-axis test key from F128) once, as its own hidden retired line, and nowhere else");
+           "keys from F122, the aim reticle's placement from F127, the visor-axis test key from F128, the panel mouse key and the panel cursor test key from F155) once, as its own hidden retired line, and nowhere else");
     else
         fail("the shipped edvr.ini keeps each F98 retired key on one hidden retired line and nowhere else", why);
 
@@ -1472,7 +1474,7 @@ static void retiredNotedKeyScan(const std::wstring& root) {
         }
     }
     if (!bad && inNote >= 2 * count)
-        ok("the nineteen retired keys (F98, F98c, F100, F106, F109, F112, F122, F127, F128) are read and named only in native_on_foot.cpp's retiredKeysNote (each read once and "
+        ok("the twenty-one retired keys (F98, F98c, F100, F106, F109, F112, F122, F127, F128, F155) are read and named only in native_on_foot.cpp's retiredKeysNote (each read once and "
            "named once)");
     else if (!bad)
         fail("each F98 retired key is read and named in retiredKeysNote", std::to_string(inNote) + " spellings there, " + std::to_string(2 * count) + " wanted");

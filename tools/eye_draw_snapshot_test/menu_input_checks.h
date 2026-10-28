@@ -30,13 +30,13 @@ inline std::string menuInputChecks() {
     observeWindow(rayRow,1,goodRead);observeWindow(rayRow,1,badRead);
     check(!(rayRow.reads&(256|512))&&rayRow.windowCalls==2,"failed repeated window clears its earlier UV validity");
     std::array<uint8_t,0x200> ctl{};std::array<uint8_t,0x500> panel{};std::array<uint8_t,0x40> list{},mode{};
-    std::array<uint8_t,0x80> vt{};std::array<uint8_t,8> code{0xB0,0,0xC3};std::vector<edvr::nofoot::f117::Tri> triangles(120),replacementTriangles(120);
+    std::array<uint8_t,0x80> vt{};std::array<uint8_t,8> code{0xB0,0,0xC3};std::vector<edvr::nofoot::pickmesh::Tri> triangles(120),replacementTriangles(120);
     replacementTriangles[0].v[0][0]=1.0f;
     const auto put=[](uint8_t* dst,uintptr_t value){std::memcpy(dst,&value,8);};
     put(ctl.data()+edvr::nofoot::f114b::kOffMode,reinterpret_cast<uintptr_t>(mode.data()));put(mode.data(),reinterpret_cast<uintptr_t>(vt.data()));
     put(vt.data()+edvr::nofoot::f114b::kModeGetter,reinterpret_cast<uintptr_t>(code.data()));
-    put(panel.data()+edvr::nofoot::f117::kOffList,reinterpret_cast<uintptr_t>(list.data()));
-    put(list.data()+edvr::nofoot::f117::kListTris,reinterpret_cast<uintptr_t>(triangles.data()));put(list.data()+edvr::nofoot::f117::kListCount,120);
+    put(panel.data()+edvr::nofoot::pickmesh::kOffList,reinterpret_cast<uintptr_t>(list.data()));
+    put(list.data()+edvr::nofoot::pickmesh::kListTris,reinterpret_cast<uintptr_t>(triangles.data()));put(list.data()+edvr::nofoot::pickmesh::kListCount,120);
     struct Region{uintptr_t start;size_t size;};
     const Region regions[]={{reinterpret_cast<uintptr_t>(ctl.data()),ctl.size()},{reinterpret_cast<uintptr_t>(panel.data()),panel.size()},
         {reinterpret_cast<uintptr_t>(list.data()),list.size()},{reinterpret_cast<uintptr_t>(mode.data()),mode.size()},{reinterpret_cast<uintptr_t>(vt.data()),vt.size()},
@@ -50,21 +50,21 @@ inline std::string menuInputChecks() {
           "existing plain mode accessor is decoded without calling it; selected-frame cached curved input triangles and UV retain");
     Capture changed;changed.arm(L"123456789099",800,819);changed.frame.store(801);Row firstMesh,changedMesh;
     changed.before(firstMesh,reinterpret_cast<uintptr_t>(ctl.data()),reinterpret_cast<uintptr_t>(panel.data()),0,9,100,read);changed.finish(firstMesh,101,read);
-    put(list.data()+edvr::nofoot::f117::kListCount,6);
+    put(list.data()+edvr::nofoot::pickmesh::kListCount,6);
     changed.before(changedMesh,reinterpret_cast<uintptr_t>(ctl.data()),reinterpret_cast<uintptr_t>(panel.data()),0,9,102,read);changed.finish(changedMesh,103,read);
     check(changed.meshes.size()==2&&changed.rows.back().meshStatus==7&&changed.meshes.back().triangles.size()==6,
           "same-frame list count changes never reuse a mismatching earlier triangle payload");
-    put(list.data()+edvr::nofoot::f117::kListCount,120);
+    put(list.data()+edvr::nofoot::pickmesh::kListCount,120);
     Capture sameCount;sameCount.arm(L"123456789098",800,819);sameCount.frame.store(801);Row originalMesh,replacedMesh,inPlaceMesh;
     sameCount.before(originalMesh,reinterpret_cast<uintptr_t>(ctl.data()),reinterpret_cast<uintptr_t>(panel.data()),0,9,104,read);sameCount.finish(originalMesh,105,read);
-    put(list.data()+edvr::nofoot::f117::kListTris,reinterpret_cast<uintptr_t>(replacementTriangles.data()));
+    put(list.data()+edvr::nofoot::pickmesh::kListTris,reinterpret_cast<uintptr_t>(replacementTriangles.data()));
     sameCount.before(replacedMesh,reinterpret_cast<uintptr_t>(ctl.data()),reinterpret_cast<uintptr_t>(panel.data()),0,9,106,read);sameCount.finish(replacedMesh,107,read);
     replacementTriangles[0].v[0][0]=2.0f;
     sameCount.before(inPlaceMesh,reinterpret_cast<uintptr_t>(ctl.data()),reinterpret_cast<uintptr_t>(panel.data()),0,9,108,read);sameCount.finish(inPlaceMesh,109,read);
     check(sameCount.meshes.size()==3&&sameCount.rows.size()==3&&sameCount.rows[0].mesh==0&&sameCount.rows[1].mesh==1&&sameCount.rows[2].mesh==2&&
           sameCount.meshes[0].triangles[0].v[0][0]==0.0f&&sameCount.meshes[1].triangles[0].v[0][0]==1.0f&&sameCount.meshes[2].triangles[0].v[0][0]==2.0f,
           "same-count replacement and in-place rebuild each retain their own callback-time triangle payload");
-    put(list.data()+edvr::nofoot::f117::kListTris,reinterpret_cast<uintptr_t>(triangles.data()));
+    put(list.data()+edvr::nofoot::pickmesh::kListTris,reinterpret_cast<uintptr_t>(triangles.data()));
     Row inFlight;c.before(inFlight,reinterpret_cast<uintptr_t>(ctl.data()),reinterpret_cast<uintptr_t>(panel.data()),0,9,111,read);
     const std::string fixture=c.close(31,1000);c.finish(inFlight,112,read);
     check(fixture.find("\"in_flight_at_close\":1")!=std::string::npos&&fixture.find("\"getter_calls\":0")!=std::string::npos&&c.rows.empty(),
@@ -74,10 +74,10 @@ inline std::string menuInputChecks() {
     check(c.rows.empty()&&c.pending.load()==0,"a scope from a discarded/replaced generation cannot enter the new capture or underflow its pending count");
     c.frame.store(1020);check(!c.active(),"input observer closes at its bounded ledger window, before the later GPU readback write");c.discard();
     c.arm(L"123456789004",1100,1119);c.frame.store(1101);
-    put(list.data()+edvr::nofoot::f117::kListCount,257);
+    put(list.data()+edvr::nofoot::pickmesh::kListCount,257);
     for(unsigned i=0;i<81;++i){Row capped;c.before(capped,reinterpret_cast<uintptr_t>(ctl.data()),reinterpret_cast<uintptr_t>(panel.data()),0,9,300+i,read);c.finish(capped,400+i,read);}
     check(c.rows.size()==80&&c.rows[0].meshStatus==2&&c.meshes.empty()&&c.rowQuota==1,"oversize input triangles and non-anchor row quota refuse explicitly without copying beyond the cap");
-    put(list.data()+edvr::nofoot::f117::kListCount,120);Row anchor;c.before(anchor,reinterpret_cast<uintptr_t>(ctl.data()),reinterpret_cast<uintptr_t>(panel.data()),0,9,500,read);c.finish(anchor,501,read);
+    put(list.data()+edvr::nofoot::pickmesh::kListCount,120);Row anchor;c.before(anchor,reinterpret_cast<uintptr_t>(ctl.data()),reinterpret_cast<uintptr_t>(panel.data()),0,9,500,read);c.finish(anchor,501,read);
     check(c.rows.size()==81&&c.meshes.size()==1,"other-panel saturation cannot consume the independently reserved curved-menu input rows/meshes");
     c.mutex.lock();bool admitted=true;std::thread concurrent([&](){Row denied;admitted=c.before(denied,reinterpret_cast<uintptr_t>(ctl.data()),reinterpret_cast<uintptr_t>(panel.data()),0,9,600,read);});concurrent.join();c.mutex.unlock();
     check(!admitted&&c.contended.load()==1,"hook-thread admission never waits on the capture mutex and records contention");

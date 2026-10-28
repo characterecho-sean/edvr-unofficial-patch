@@ -120,19 +120,3 @@ inline int formatHeadWindow(char* out, size_t cap, const HeadWindow& w, int cls,
 }
 
 }}} // namespace edvr::nofoot::f119
-
-namespace edvr { namespace nofoot { namespace logwin {
-// Counts belong to their sampled key/scope even when a change arrives before the first full second. Reporting resets retain the primed state.
-struct PanelWindow {
-    uint32_t seen = 0, hidden = 0, failed = 0, seconds = 0, active = 0;
-    bool known = false, key = false, onFoot = false, detail = false;
-    void state(bool k, bool on, bool d) noexcept { known = true; key = k; onFoot = on; detail = d; }
-    bool changed(bool k, bool on, bool d) const noexcept { return known && (key != k || onFoot != on || detail != d); }
-    void take(uint32_t s, uint32_t h, uint32_t f, bool fold) noexcept {
-        if (!fold && !s && !h && !f) return;
-        if (!onFoot && !s && !h && !f) return;
-        ++seconds; active += s != 0; seen += s; hidden += h; failed += f;
-    }
-    void clear() noexcept { seen = hidden = failed = seconds = active = 0; }
-};
-}}}
