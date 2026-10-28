@@ -57,6 +57,7 @@
 #include "../../src/common/star_glow.h"
 #include "../../src/common/temporal_mode.h"
 #include "../../src/common/log.h"
+#include "../../src/d3d11/native_on_foot_f162.h"   // F162: the ADS sight eye key's text (a header with no dependencies)
 #include "config_contract_gen.h"   // build\gen: the tables the DLLs register, from the real edvr.ini
 
 using namespace edvr;
@@ -1372,7 +1373,7 @@ static void retiredKeyScan(const std::wstring& root) {
 
 // Explorer Cam's eight keys, retired in F98 with Explorer Cam, the weapon eye's up key, retired in F98c (one eye height with and without an item), and
 // the training connect probe's key, retired in F100 (its hooks and lines removed; the connection retry keeps the hooks it reads), and the ADS left eye
-// close, retired in F106 (the left eye now shows the aiming eye's view, fix.native_on_foot_ads_sight_both_eyes), the old look to aim controller's three
+// close, retired in F106 (the left eye now shows the aiming eye's view, fix.native_on_foot_ads_sight_eye = both), the old look to aim controller's three
 // test keys, retired in F109 (look to aim rides the ADS head aim's map), and the weapon eye's right key, retired in F112 (the eye offset is forward
 // alone; fix.native_on_foot_weapon_view_offset_cm is the sideways setting), and F117's and F120's two panel cursor test keys, retired in F122 (the cursor
 // is hidden by default behind the panel mouse key; drawn, both corrections run at their panel value), and the panel mouse key and the panel cursor test key, retired in
@@ -2237,6 +2238,77 @@ int main(int argc, char** argv) {
             } else {
                 Config::get().init(scratch);
                 expectStr("visual.intro_video", "<unset>", "control: without the annotation an old-layout intro_video is NOT read as the new name");
+            }
+            Config::get().setAuditTables(nullptr, 0, nullptr, 0);
+        }
+
+        // --- F162: fix.native_on_foot_ads_sight_both_eyes (on | off) moved to fix.native_on_foot_ads_sight_eye (both | right | left), over the SHIPPED tables ----
+        //
+        // The same proof: an old-layout line is read as the new key (its text, on or off, which the reader's parse takes for both or right), a line still carrying the
+        // old shipped default is not a choice, a new-layout value is read as it stands, and it is the shipped annotation doing it.
+        {
+            using contractgen::kKnownKeys;
+            using contractgen::kMovedKeys;
+            constexpr size_t kKnownCount = sizeof(kKnownKeys) / sizeof(kKnownKeys[0]);
+            constexpr size_t kMovedCount = sizeof(kMovedKeys) / sizeof(kMovedKeys[0]);
+            static const char* filtered[kMovedCount][3];
+            size_t filteredCount = 0;
+            bool carriesSightEye = false;
+            for (size_t i = 0; i < kMovedCount; ++i) {
+                if (std::string(kMovedKeys[i][0]) == "fix.native_on_foot_ads_sight_both_eyes" && std::string(kMovedKeys[i][1]) == "fix.native_on_foot_ads_sight_eye" &&
+                    std::string(kMovedKeys[i][2]) == "on") {
+                    carriesSightEye = true;
+                    continue;   // the control's tables lose this one move
+                }
+                for (int c = 0; c < 3; ++c) filtered[filteredCount][c] = kMovedKeys[i][c];
+                ++filteredCount;
+            }
+            check(carriesSightEye, "the shipped moved-from map carries fix.native_on_foot_ads_sight_both_eyes to fix.native_on_foot_ads_sight_eye, its shipped default on");
+            int known = 0, retired = 0;
+            for (size_t i = 0; i < kKnownCount; ++i) {
+                if (strcmp(kKnownKeys[i], "fix.native_on_foot_ads_sight_eye") == 0) ++known;
+                if (strcmp(kKnownKeys[i], "fix.native_on_foot_ads_sight_both_eyes") == 0) ++retired;
+            }
+            check(known == 1 && retired == 0, "fix.native_on_foot_ads_sight_eye is a known key, and fix.native_on_foot_ads_sight_both_eyes is not one any more",
+                  std::to_string(known) + " known, " + std::to_string(retired) + " retired still known");
+            {   // the reader's text: both, right and left, either case, and the carried on and off; anything else is both and says so
+                using edvr::nofoot::f162::parse;
+                bool k1 = true, k2 = true, k3 = true, k4 = true, k5 = true, k6 = true, k7 = false;
+                const bool ok = parse("both", &k1) == edvr::nofoot::f162::kBoth && parse(" Right ", &k2) == edvr::nofoot::f162::kRight && parse("LEFT", &k3) == edvr::nofoot::f162::kLeft &&
+                                parse("on", &k4) == edvr::nofoot::f162::kBoth && parse("off", &k5) == edvr::nofoot::f162::kRight && parse("middle", &k6) == edvr::nofoot::f162::kBoth &&
+                                parse(nullptr, &k7) == edvr::nofoot::f162::kBoth;
+                check(ok && k1 && k2 && k3 && k4 && k5 && !k6 && !k7, "the sight eye's text: both, right and left in any case, the carried on and off as both and right, anything else both and not known");
+            }
+
+            Config::get().setAuditTables(kKnownKeys, kKnownCount, kMovedKeys, kMovedCount);
+            if (!writeIni(scratch, "[fix]\r\nnative_on_foot_ads_sight_both_eyes = off\r\n")) {
+                fail("old-layout sight eye ini", "could not write it");
+            } else {
+                Config::get().init(scratch);
+                expectStr("fix.native_on_foot_ads_sight_eye", "off", "an old-layout native_on_foot_ads_sight_both_eyes = off is read as the sight eye's text (the reader takes off for right)");
+                if (!rewriteIni(scratch, "[fix]\r\nnative_on_foot_ads_sight_both_eyes = on\r\n") || !Config::get().reloadIfChanged()) {
+                    fail("old-layout stale sight eye reload", "the edit did not reload");
+                } else {
+                    expectStr("fix.native_on_foot_ads_sight_eye", "<unset>", "an old-layout line still carrying the shipped default on is ignored, not read");
+                }
+                if (!rewriteIni(scratch, "[fix]\r\nnative_on_foot_ads_sight_both_eyes = off\r\nnative_on_foot_ads_sight_eye = left\r\n") || !Config::get().reloadIfChanged()) {
+                    fail("both-layout sight eye reload", "the edit did not reload");
+                } else {
+                    expectStr("fix.native_on_foot_ads_sight_eye", "left", "when both spellings are set, fix.native_on_foot_ads_sight_eye wins");
+                }
+                if (!rewriteIni(scratch, "[fix]\r\nnative_on_foot_ads_sight_eye = right\r\n") || !Config::get().reloadIfChanged()) {
+                    fail("new-layout sight eye reload", "the edit did not reload");
+                } else {
+                    expectStr("fix.native_on_foot_ads_sight_eye", "right", "a new-layout fix.native_on_foot_ads_sight_eye is read as it stands");
+                }
+            }
+            // CONTROL: the same old-layout file over the same tables minus that one move: the choice is stranded under the old name.
+            Config::get().setAuditTables(kKnownKeys, kKnownCount, reinterpret_cast<const char* const(*)[3]>(filtered), filteredCount);
+            if (!writeIni(scratch, "[fix]\r\nnative_on_foot_ads_sight_both_eyes = off\r\n")) {
+                fail("control sight eye ini", "could not write it");
+            } else {
+                Config::get().init(scratch);
+                expectStr("fix.native_on_foot_ads_sight_eye", "<unset>", "control: without the annotation an old-layout native_on_foot_ads_sight_both_eyes is NOT read as the new name");
             }
             Config::get().setAuditTables(nullptr, 0, nullptr, 0);
         }

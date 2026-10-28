@@ -1,5 +1,5 @@
 #pragma once
-// F106 (native on foot, fix.native_on_foot_ads_sight_both_eyes): while the sights are up the LEFT eye shows the RIGHT eye's image, turned into the left eye's view by
+// F106 (native on foot, fix.native_on_foot_ads_sight_eye = both): while the sights are up the LEFT eye shows the RIGHT eye's image, turned into the left eye's view by
 // rotation only, so both eyes see the scene from the aiming eye's position and the sight sits centred in both. The pure parts: the mapping from a left swapchain pixel
 // to the texel of the right eye's captured image (the share shader, kStereoShareHlsl in stereo_shader_source.h, computes the same in float), its coverage, the right
 // eye's hidden-area mask and the figures of the per-press line. Design and journal: docs\design-native-onfoot-vr-2026-10-13.md, F106.

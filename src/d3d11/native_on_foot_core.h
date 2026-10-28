@@ -2830,6 +2830,7 @@ inline void adsCamBodyMotion(const double dH[3], const double s[3], double out[3
 // forward), then seated = seatedFromBody(e_body, 0) (diag(-1, -1, +1) . body): the eye alignment's target-minus-camera convention, so the
 // view run's filter (gain 0.02 a frame, 5 cm a frame) moves the right eye onto the sight line. The applied lock is clamped to 12 cm.
 // F70 REPLACED this: the lock aims at P14w + k f (the along part too), is feed-forward, and is clamped to 40 cm (see the F70 section below).
+// F162: "the right eye" here is the AIMING eye: the right eye, or the left eye with fix.native_on_foot_ads_sight_eye = left (adsAimingEyeError, below).
 constexpr double kAdsSightClampM = 0.40;   // F70: was 0.12; the target eye point is k ahead of P14 (up to 30 cm) plus the perpendicular and along offsets (about 7 cm each)
 // F110: the model of the right eye when its rows are not this frame's. F63 took the job camera for the eyes' midpoint and added half the IPD; F66e found the job
 // camera is the LEFT eye (both eyes solved in every ADS frame of the F102 flight over Virtual Desktop: L - cam 0.0 cm, R - cam +6.2 cm, IPD 6.18 cm), so that
@@ -2907,6 +2908,35 @@ inline bool adsSightError(const double p14w[3], const double cam[3], const doubl
     double eye[3];
     for (int i = 0; i < 3; ++i) eye[i] = cam[i] + camToEyeM * rHat[i];
     return adsSightErrorEye(p14w, eye, f, rows, out);
+}
+// F162 (fix.native_on_foot_ads_sight_eye): the sight lock lines up the AIMING eye, 1 the right eye (both and right: F63 to F161) or 0 the left eye (left). The job camera is the
+// left eye and the right eye is the job camera plus the IPD along R^ (F110), so the same lock puts the left eye on the line with the right eye one IPD to its right.
+// The model of the aiming eye when its own rows are not this frame's: aim 1 is adsModelRightEye as it was (bit for bit); aim 0 is the job camera, which is the left eye.
+inline uint8_t adsModelAimingEye(int aim, const double cam[3], bool leftSolved, const double leftEye[3], const double rHat[3], double ipdM, double out[3]) noexcept {
+    if (aim != 0) return adsModelRightEye(cam, leftSolved, leftEye, rHat, ipdM, out);
+    for (int i = 0; i < 3; ++i) out[i] = cam[i];
+    return kAdsModelFromCamera;
+}
+// What the lock took for the aiming eye this frame: its solved rendered eye, else the model; ok is false when neither gave an error (no rows and a degenerate right axis).
+struct AdsAimPick {
+    bool ok = false;
+    bool solved = false;
+    uint8_t modelSrc = kAdsModelFromCamera;
+};
+// The lock's error to the target eye point (origin + k f, F70) for the aiming eye. eyeOk / eyeW are the two eyes' solved positions (index 0 left, 1 right); modelOk says R^ is
+// usable (the model right eye needs it). modelEye is written whether or not it is used (the model of the aiming eye, as F110's was written for the right eye).
+inline AdsAimPick adsAimingEyeError(int aim, const bool eyeOk[2], const double eyeW[2][3], bool modelOk, const double cam[3], const double rHat[3], double ipdM,
+                                    const double origin[3], const double f[3], const double rows[9], double k, AdsSightErr& out, double modelEye[3]) noexcept {
+    const int a = aim == 0 ? 0 : 1;
+    AdsAimPick pick;
+    pick.modelSrc = adsModelAimingEye(a, cam, eyeOk[0], eyeW[0], rHat, ipdM, modelEye);
+    if (eyeOk[a] && adsSightErrorEyeK(origin, eyeW[a], f, rows, k, out)) {
+        pick.ok = true;
+        pick.solved = true;
+    } else if (modelOk && adsSightErrorEyeK(origin, modelEye, f, rows, k, out)) {
+        pick.ok = true;
+    }
+    return pick;
 }
 // |v| at most maxM, the direction kept (the eye alignment's clamps: 0.6 m for the view run, kAdsSightClampM for the sight lock).
 inline void clampNorm3(double v[3], double maxM) noexcept {

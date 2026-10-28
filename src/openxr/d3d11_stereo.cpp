@@ -468,7 +468,7 @@ XrResult D3D11Stereo::renderCaptured(const XrView (&views)[2],XrSpace space,cons
       drawContext->RSSetViewports(1,&viewports[i]);
       drawContext->PSSetShaderResources(0,1,srvs[i].GetAddressOf());
       drawContext->UpdateSubresource(blitConstants_.Get(),0,nullptr,&constants[i],0,0);drawContext->Draw(3,0);
-      // F106 (native on foot, fix.native_on_foot_ads_sight_both_eyes): the LEFT eye takes the RIGHT eye's image, turned into the left view, by the share times its
+      // F106 (native on foot, fix.native_on_foot_ads_sight_eye = both): the LEFT eye takes the RIGHT eye's image, turned into the left view, by the share times its
       // coverage, over the left eye's own image just drawn. The source is the right eye's capture (srvs[1]): complete before this call (both eyes are captured and
       // any shared transfer completed before compose), never written by it (the passes here write only the swapchain images), and it already holds the scene, the HUD
       // and the menu. Same viewport as the left eye's own image, so a trimmed border stays black; the fade and the plugins' overlay below apply over it.

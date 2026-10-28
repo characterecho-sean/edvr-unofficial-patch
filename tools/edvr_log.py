@@ -10600,8 +10600,9 @@ def _hj_f91_fit(rows, ctx):
 
 
 def _hj_f110_model_eye(rows, ctx):
-    """F110: the ADS sight lock's right eye per second: solved from its rows, or the model (the job camera, the left eye, or the solved left eye, plus the IPD). The
-    share of ADS frames on the model, and the job camera's model against the solved right eye whenever both were there: over 0.5 cm is PARTIAL (F63's half-IPD
+    """F110: the ADS sight lock's aiming eye per second (F162: the right eye, or the left eye with the sight eye set to left; a line before F162 is the right eye's): solved
+    from its rows, or the model (for the right eye the job camera, the left eye, or the solved left eye, plus the IPD; for the left eye the job camera). The
+    share of ADS frames on the model, and the job camera's model against the solved aiming eye whenever both were there: over 0.5 cm is PARTIAL (F63's half-IPD
     model stood 3.1 cm short, at the nose). A build before F110 writes the old line: any frame on its model is PARTIAL."""
     new, old = rows.get("sec", []), rows.get("old", [])
     if not new and not old:
@@ -10617,17 +10618,18 @@ def _hj_f110_model_eye(rows, ctx):
     solved, model = sum(int(r["solved"]) for r in new), sum(int(r["model"]) for r in new)
     fromcam, fromleft = sum(int(r["fromcam"]) for r in new), sum(int(r["fromleft"]) for r in new)
     dn = sum(int(r["dn"]) for r in new)
+    aim = "/".join(sorted({r.get("aim") or "right" for r in new}))
     if not solved + model:
         return ("IDLE", "%d s, no ADS frame drove the lock" % _hsecs(new))
-    text = "%d s: the solved right eye %d frames, the model %d (%.0f%%: from the job camera %d, from the solved left eye %d)" % (
-        _hsecs(new), solved, model, 100.0 * model / (solved + model), fromcam, fromleft)
+    text = "%d s: aiming eye %s, the solved %s eye %d frames, the model %d (%.0f%%: from the job camera %d, from the solved left eye %d)" % (
+        _hsecs(new), aim, aim, solved, model, 100.0 * model / (solved + model), fromcam, fromleft)
     if not dn:
-        return ("OK", text + "; no frame had the model and the solved right eye together")
+        return ("OK", text + "; no frame had the model and the solved %s eye together" % aim)
     dmean = sum(int(r["dn"]) * float(r["dmean"]) for r in new) / dn
     dmax = max(float(r["dmax"]) for r in new if int(r["dn"]))
-    text += "; the job camera's model against the solved right eye %.1f cm mean, %.1f max over %d frames" % (dmean, dmax, dn)
+    text += "; the job camera's model against the solved %s eye %.1f cm mean, %.1f max over %d frames" % (aim, dmean, dmax, dn)
     if dmean > 0.5:
-        return ("PARTIAL", text + ": the model is off the right eye")
+        return ("PARTIAL", text + ": the model is off the %s eye" % aim)
     return ("OK", text)
 
 
@@ -11434,6 +11436,9 @@ def _hj_f93_chain(rows, ctx):
     meas, matched = _hsum(on, "n"), _hsum(on, "matched")
     text = "%d s; steady eye on: matched %d of %d measured frames (F70's %d, model eye %d, held %d)%s" % (
         _hsecs(sec), matched, meas, _hsum(on, "legacy"), _hsum(on, "model"), _hsum(on, "missed"), "; " + "; ".join(parts) if parts else "")
+    aims = sorted({x["aim"] for x in sec if x.get("aim")})   # F162: the eye the chain measured (a line before it has none: the right eye)
+    if aims:
+        text += "; aiming eye %s" % "/".join(aims)
     if meas and matched == 0:
         return ("NEVER APPLIED", text + " (the steady eye never matched the alignment the eye was drawn with)")
     if meas and matched * 5 < meas * 4:
@@ -11658,12 +11663,17 @@ def _hj_f106_share(rows, ctx):
     100% of the left eye taken from the right. NEVER APPLIED: ADS was up with the key on (a share asked for, or an F89 trace press under the key) and no press line came
     back, so the share never ran (an openvr_api.dll from before F106 darkens instead). IDLE: the key off, or no ADS. PARTIAL: presses drawn, none at full weight with a
     plausible coverage, or refused frames, or the guard tripped."""
-    press, sec, ev, guard, key = (rows.get(k, []) for k in ("press", "sec", "event", "guard", "key"))
-    if not (press or sec or ev or guard or key):
+    press, sec, ev, guard, key, eyekey = (rows.get(k, []) for k in ("press", "sec", "event", "guard", "key", "eyekey"))
+    if not (press or sec or ev or guard or key or eyekey):
         return None
     on = [r for r in sec if r["key"] == "on"]
     asked = max([float(r.get("asked") or r["w"]) for r in on] or [0.0])
-    key_on = any(r["key"] == "on" for r in key) or bool(on) or any(r["key"] == "on" for r in ev)
+    key_on = any(r["key"] == "on" for r in key) or bool(on) or any(r["key"] == "on" for r in ev) or any(r["mode"] == "both" for r in eyekey)
+    # F162: the sight eye. The key line (both, right or left) and the aiming eye the 1 s and edge lines name; a log before F162 has the old on | off key: on is both, off is right.
+    aims = [r["aim"] for r in sec + ev + eyekey if r.get("aim")]
+    modes = [r["mode"] for r in eyekey]
+    eye = aims[-1] if aims else None
+    left = bool(modes and modes[-1] == "left") or (eye == "left" and not key_on)
     traced = sum(1 for r in _hrows(ctx, H_F89_ADS, "start") if r["dir"] == "press")
     gn = max([int(r["n"]) for r in guard] or [0])
     full = [r for r in press if float(r["peak"]) >= 0.99 and int(r["full"]) > 0]
@@ -11679,8 +11689,10 @@ def _hj_f106_share(rows, ctx):
         if asked > 0.0 or (traced and key_on):
             return ("NEVER APPLIED", text + " (the share was asked for and the runtime never reported drawing it: an openvr_api.dll from before F106, or one that "
                                             "cannot reach this d3d11.dll's export)")
-        if not key_on and (sec or key or ev):
-            return ("IDLE", text + " (key off)")
+        if not key_on and (sec or key or ev or eyekey):
+            if left:   # F162: the left eye is the aiming eye, so there is no right eye's view to show the left: the share never runs, and that is the setting, not a fault
+                return ("IDLE", text + " (sight eye left: the left eye is lined up on the sights and each eye keeps its own view, so no share runs)")
+            return ("IDLE", text + " (key off%s)" % ("; sight eye right: each eye keeps its own view" if eye == "right" or (modes and modes[-1] == "right") else ""))
         return ("IDLE", text + " (no ADS press)")
     if not plausible:
         return ("PARTIAL", text + " (no press reached full weight with 30-100% of the left eye taken)")
@@ -14080,9 +14092,9 @@ HEALTH_RULES = (
     ), _hj_f113_rows),
     _hrule("ADS model eye (F110)", ("F110", "F66e"), ("ADS sight check (F66e/F79)",), (
         ("sec", r"native on foot ADS sight check \(F66e/F79\): eye rows " + H_WL_THIS + r": both eyes (?P<both>\d+), one eye (?P<one>\d+), none/implausible (?P<none>\d+) "
-                r"\(\d+ implausible: over 0\.5 m from the job camera\); the lock's right eye: the solved rendered eye in (?P<solved>\d+) frames, the model in "
+                r"\(\d+ implausible: over 0\.5 m from the job camera\); the lock's (?:eye \(aiming eye (?P<aim>left|right)\)|right eye): the solved rendered eye in (?P<solved>\d+) frames, the model in "
                 r"(?P<model>\d+) \(F110: from the job camera, the left eye, (?P<fromcam>\d+), from the solved left eye (?P<fromleft>\d+); IPD (?P<ipd>[\d.]+) m, "
-                r"(?P<ipdsrc>the eyes' offsets|the fallback)\); the job camera's model minus the solved right eye \(body right, up, forward, cm, mean\) (?P<dr>%s) "
+                r"(?P<ipdsrc>the eyes' offsets|the fallback)\); the job camera's model minus the solved (?:aiming|right) eye \(body right, up, forward, cm, mean\) (?P<dr>%s) "
                 r"(?P<du>%s) (?P<df>%s), (?P<dmean>[\d.]+) cm mean, (?P<dmax>[\d.]+) max over (?P<dn>\d+) frames" % (_HN, _HN, _HN)),
         ("old", r"native on foot ADS sight check \(F66e/F79\): eye rows " + H_WL_THIS + r": both eyes (?P<both>\d+), one eye (?P<one>\d+), none/implausible (?P<none>\d+) "
                 r"\(\d+ implausible: over 0\.5 m from the job camera\); the lock's right eye: the solved rendered eye in (?P<solved>\d+) frames, the F63 model "
@@ -14169,7 +14181,7 @@ HEALTH_RULES = (
                 r"exposure e0 (?P<ex0>\S+) e1 (?P<ex1>\S+) \(read in (?P<exr>\d+) samples, non-finite in (?P<exn>\d+)\); dropped (?P<drop>\d+)$"),
     ), _hj_f121b_census, needs_detail=True),
     _hrule("ADS eye chain (F93b)", ("F93b",), ("ADS eye chain (F93b)", "ADS steady eye (F93b)", "ADS eye hold (F93b)"), (
-        ("sec", r"native on foot ADS eye chain \(F93b\) " + H_WL + r": steady eye (?P<steady>on|off), eye hold (?P<hold>on|off); the sight lock's target from the alignment the "
+        ("sec", r"native on foot ADS eye chain \(F93b\) " + H_WL + r": steady eye (?P<steady>on|off), eye hold (?P<hold>on|off)(?:, aiming eye (?P<aim>left|right))?; the sight lock's target from the alignment the "
                 r"measured eye was rendered with (?P<matched>\d+) of (?P<n>\d+) measured frames \(serial lag mean (?P<lag>[\d.]+) max \d+\), F70's (?P<legacy>\d+), the model "
                 r"eye (?P<model>\d+), held \(its alignment not in the history\) (?P<missed>\d+); per frame rms: sight shift (?P<shift>[\d.]+) mm, position lock "
                 r"(?P<lock>[\d.]+) mm, head translation (?P<head>[\d.]+) mm over (?P<steps>\d+) frames; the along error's step (?P<along>[\d.]+) mm rms, autocorrelation "
@@ -14191,13 +14203,15 @@ HEALTH_RULES = (
         ("allowed", r"native on foot ADS item gate \(F91\): allowed: \"(?P<item>[^\"]*)\""),
         ("ticks", r"native on foot ADS input \(F70b\): source .*item gate refused (?P<ticks>\d+) ticks \(F91: held \"(?P<held>[^\"]*)\" (?P<state>allowed|refused)(?:.*?; over (?P<wl>\d+) s)?.*$"),
     ), _hj_f91_gate),
-    _hrule(H_F106, ("F106",), ("ADS sight in both eyes (F106)",), (
+    _hrule(H_F106, ("F106", "F162"), ("ADS sight in both eyes (F106)", "ADS sight eye (F162)"), (
         ("press", r"ADS sight in both eyes \(F106\) press: peak (?P<peak>[\d.]+), frames (?P<frames>\d+) \(at full weight (?P<full>\d+), refused (?P<refused>\d+), "
                   r"replayed \d+\) over [\d.]+ s; the eyes' rotation \(left view against the right\) yaw (?P<yaw>%s) pitch %s roll %s deg; .*?the left eye from the "
                   r"right at full weight (?P<cov>[\d.]+)%% \(wholly [\d.]+%%\); hidden area (?P<hidden>used|none) \(\d+ triangles\)" % (_HN, _HN, _HN)),
-        ("sec", r"ADS sight in both eyes \(F106\) " + H_WL + r": share (?P<w>[\d.]+) \(key (?P<key>on|off), lock weight [\d.]+, ads state \w+\)(?:.*?; ADS (?P<adssec>\d+) of \d+ s; key on in ADS (?P<ons>\d+) of \d+ s; share asked max (?P<asked>[\d.]+))?.*$"),
-        ("event", r"ADS sight in both eyes \(F106\): (?P<ev>shared|stereo) \(key (?P<key>on|off), lock weight [\d.]+\)"),
+        ("sec", r"ADS sight in both eyes \(F106\) " + H_WL + r": share (?P<w>[\d.]+) \(key (?P<key>on|off)(?:, aiming eye (?P<aim>left|right))?, lock weight [\d.]+, ads state \w+\)(?:.*?; ADS (?P<adssec>\d+) of \d+ s; key on in ADS (?P<ons>\d+) of \d+ s; share asked max (?P<asked>[\d.]+))?.*$"),
+        ("event", r"ADS sight in both eyes \(F106\): (?P<ev>shared|stereo) \(key (?P<key>on|off)(?:, aiming eye (?P<aim>left|right))?, lock weight [\d.]+\)"),
         ("guard", r"ADS sight in both eyes \(F106\): GUARD TRIPPED \((?P<n>\d+) so far\)"),
+        # F162: the sight eye key (it replaced the F106 line below, which a log from F106 to F161 still carries)
+        ("eyekey", r"native on foot ADS sight eye \(F162\): fix\.native_on_foot_ads_sight_eye is (?P<mode>both|right|left) \(aiming eye (?P<aim>left|right)\)"),
         ("key", r"native on foot ADS sight in both eyes \(F106\): fix\.native_on_foot_ads_sight_both_eyes is (?P<key>on|off)"),
     ), _hj_f106_share),
     _hrule("marker fix (F62c/F64)", ("F62c", "F64", "F87c"), ("marker fix (F62c/F64)", "marker fix (F62c)", "marker fix (F87c)"), (
@@ -15943,17 +15957,23 @@ def self_test_health():
             """F125: a traced event's own line at its end."""
             return R("ads transition (F89) %s traced: frames", d, frames, engaged, lw, elw)
 
-        def share_sec(w=0.44, key="on", state="engaged"):
-            return R("ADS sight in both eyes (F106) %u s: share", 1, w, key, w, state, int(state != "idle"), 1, int(key == "on" and state != "idle"), 1, w)
+        def share_sec(w=0.44, key="on", state="engaged", aim="right"):
+            return R("ADS sight in both eyes (F106) %u s: share", 1, w, key, aim, w, state, int(state != "idle"), 1, int(key == "on" and state != "idle"), 1, w)
 
-        def share_ev(ev="shared", key="on"):
-            return R("ADS sight in both eyes (F106): %s (key %s", ev, key, 0.08)
+        def share_ev(ev="shared", key="on", aim="right"):
+            return R("ADS sight in both eyes (F106): %s (key %s", ev, key, aim, 0.08)
 
         def share_guard(n=2):
             return R("ADS sight in both eyes (F106): GUARD TRIPPED", n, 0.5, "no weapon or tool is drawn")
 
-        def share_key(key="on"):
-            return R("native on foot ADS sight in both eyes (F106): fix.native_on_foot_ads_sight_both_eyes is %s", key, "x")
+        def share_key(mode="both"):
+            """F162: the sight eye key line; both and right line up the right eye, left the left eye."""
+            return R("native on foot ADS sight eye (F162): fix.native_on_foot_ads_sight_eye is %s (aiming eye %s)", mode, "left" if mode == "left" else "right", "", "x")
+
+        def old_share_key(key="on"):
+            """The F106 to F161 build's key line (the key before F162), written out as it was: no source format holds it any more."""
+            return ("native on foot ADS sight in both eyes (F106): fix.native_on_foot_ads_sight_both_eyes is %s -- " % key +
+                    ("while you aim down sights both eyes see the view from your aiming (right) eye" if key == "on" else "each eye keeps its own view while you aim down sights (normal stereo)"))
 
         def share_press(peak=1.0, frames=98, full=80, refused=0, cov=74.1, hidden=212, yaw=21.5):
             return R("ADS sight in both eyes (F106) press: peak", peak, frames, full, refused, 0, 1.63, yaw, 0.0, 0.0, -1.428, 0.884, 1.0, -1.0, -0.884, 1.428, 1.0,
@@ -16148,8 +16168,8 @@ def self_test_health():
         F110 = "ADS model eye (F110)"
 
         def sight_check(both=87, one=0, none=0, solved=87, model=0, fromcam=0, fromleft=0, ipd=0.0626, src="the eyes' offsets", d=(0.0, 0.0, 0.0), dmean=0.1,
-                        dmax=0.3, dn=87):
-            return R("native on foot ADS sight check (F66e/F79): eye rows", 1, both, one, none, 0, solved, model, fromcam, fromleft, ipd, src, d[0], d[1], d[2], dmean,
+                        dmax=0.3, dn=87, aim="right"):
+            return R("native on foot ADS sight check (F66e/F79): eye rows", 1, both, one, none, 0, aim, solved, model, fromcam, fromleft, ipd, src, d[0], d[1], d[2], dmean,
                      dmax, dn, 0.0, 0.0, 0.0, 6.2, 0.1, 0.1, 6.18, both, 5.8, 5.9, -20.9, 0.5, 0.6, -21.0, 0.44, 0.19, 0.26, 0.18, -0.24, 0.19, -0.23, 0.18, "")
 
         # the tester's log (edvr_gfx_20261025_114257, the build before F110): every ADS frame on F63's half-IPD model
@@ -16164,6 +16184,16 @@ def self_test_health():
               [("OK", F110)], has=["the model 144 (100%: from the job camera 144, from the solved left eye 0)", "no frame had the model and the solved right eye"])
         check("F110 model eye: the tester's build (F63's half-IPD model)", [OLD_TESTER] * 3, 0, [("PARTIAL", F110)],
               has=["F63's model 216 (100%)", "half the IPD: the nose"])
+        # F162: the aiming eye. A line before it is the right eye's (the F110 to F161 builds wrote "the lock's right eye" and "the solved right eye").
+        before_f162 = sight_check().replace("the lock's eye (aiming eye right):", "the lock's right eye:").replace("minus the solved aiming eye", "minus the solved right eye")
+        check("F110 model eye: a build before F162 (the lock's right eye) reads as the right eye", [before_f162] * 2, 0, [("OK", F110)],
+              has=["aiming eye right, the solved right eye 174 frames", "the model 0 (0%"], lacks=["UNPARSED"])
+        check("F162 model eye: the left eye aims, solved, the camera's model on it", [sight_check(aim="left", d=(0.0, 0.0, 0.0), dmean=0.0, dmax=0.1)] * 3, 0, [("OK", F110)],
+              has=["aiming eye left, the solved left eye 261 frames", "against the solved left eye 0.0 cm mean"], lacks=["UNPARSED"])
+        check("F162 model eye: the left eye aims, no rows, every frame on the camera (the left eye)", [sight_check(aim="left", both=0, none=72, solved=0, model=72, fromcam=72, dn=0)] * 2,
+              0, [("OK", F110)], has=["aiming eye left, the solved left eye 0 frames, the model 144 (100%: from the job camera 144, from the solved left eye 0)"])
+        check("F162 model eye: the left eye aims and the camera is 3 cm off the solved left eye", [sight_check(aim="left", d=(3.0, 0.0, 0.0), dmean=3.0, dmax=3.1)] * 2, 0,
+              [("PARTIAL", F110)], has=["the model is off the left eye"])
 
         # ---- eye rows (F113): each eye's scene rows and their source ----
         F113 = "eye rows (F113)"
@@ -16656,8 +16686,8 @@ def self_test_health():
         # ---- ADS eye chain (F93b): the steady eye and the eye hold ----
         F93C = "ADS eye chain (F93b)"
 
-        def chain(steady="on", hold="off", matched=88, n=90, legacy=0, ac2=-0.02, along=0.05):
-            return R("native on foot ADS eye chain (F93b) %u s", 1, steady, hold, matched, n, 2.0, 2, legacy, n - matched - legacy, 0, 0.004, 0.0 if hold == "off" else 0.08, 0.057,
+        def chain(steady="on", hold="off", matched=88, n=90, legacy=0, ac2=-0.02, along=0.05, aim="right"):
+            return R("native on foot ADS eye chain (F93b) %u s", 1, steady, hold, aim, matched, n, 2.0, 2, legacy, n - matched - legacy, 0, 0.004, 0.0 if hold == "off" else 0.08, 0.057,
                      89, along, -0.5, ac2, 86)
 
         check("F93b fit: the steady eye and the eye hold split the windows",
@@ -16673,13 +16703,14 @@ def self_test_health():
                                                                R("native on foot ADS eye hold (F93b): %s (live, from the next press", "on", "no")], 0, [("IDLE", F93C)],
               has=["switched: steady eye 1, eye hold 1 time(s)"])
         def chain_window(wl, steps, acn, along, ac2, lock):
-            return R("native on foot ADS eye chain (F93b) %u s", wl, "on", "on", steps, steps, 2.0, 2, 0, 0, 0, 0.004, lock, 0.057,
+            return R("native on foot ADS eye chain (F93b) %u s", wl, "on", "on", "right", steps, steps, 2.0, 2, 0, 0, 0, 0.004, lock, 0.057,
                      steps, along, -0.5, ac2, acn)
         check("F125 ADS: chain RMS and correlation use frame counts across unequal windows",
               [chain_window(10, 900, 900, 0.01, -0.10, 0.02), chain_window(1, 90, 90, 0.10, -0.50, 0.20)],
               0, [("OK", F93C)], has=["11 s;", "along step 0.032 mm, lag-2 autocorrelation -0.14, position lock step 0.063 mm"])
-        old_chain = chain()
-        check("F125 ADS: legacy one-second chain remains readable", [old_chain], 0, [("OK", F93C)], has=["1 s; steady eye on"])
+        old_chain = chain().replace(", aiming eye right", "")   # F162 added the aiming eye after the hold: a line before it has none
+        check("F125 ADS: legacy one-second chain remains readable", [old_chain], 0, [("OK", F93C)], has=["1 s; steady eye on"], lacks=["aiming eye"])
+        check("F162 chain: the aiming eye is named", [chain(aim="left"), chain(aim="left")], 0, [("OK", F93C)], has=["; aiming eye left"])
         # ---- game camera (F93d): the camera suite on foot gates every body change ----
         F93D = "game camera (F93d)"
         CTL = 0x14D09AB8080
@@ -18379,7 +18410,7 @@ def self_test_health():
               0, [("OK", "ADS item gate (F91)")], has=["refused ticks 18 over 12 s"])
 
         def share_window(wl, ads_s, on_s, peak):
-            return R("ADS sight in both eyes (F106) %u s: share", wl, 0.0, "on", 0.0, "idle", ads_s, wl, on_s, wl, peak)
+            return R("ADS sight in both eyes (F106) %u s: share", wl, 0.0, "on", "right", 0.0, "idle", ads_s, wl, on_s, wl, peak)
         check("F125 ADS: release flush retains a nonzero request", [share_window(2, 2, 2, 1.0)], 3, [("NEVER APPLIED", H_F106)],
               has=["ADS seconds with the key on 2 of 2, share asked max 1.00"])
         # ---- ADS sight in both eyes (F106; it replaced F89's left eye close) ----
@@ -18390,7 +18421,19 @@ def self_test_health():
               [("NEVER APPLIED", S106)], has=["never reported drawing it"])
         check("F106: F89 trace presses with the key on and no share line drawn", [share_key(), ads_start("press"), ads_frame(), ads_start("release")], 3,
               [("NEVER APPLIED", S106)], has=["F89 trace presses 1"])
-        check("F106: key off", [share_key("off"), share_sec(0.0, "off"), share_sec(0.0, "off")], 0, [("IDLE", S106)], has=["(key off)"])
+        check("F106: sight eye right: no share, and the setting says so", [share_key("right"), share_sec(0.0, "off"), share_sec(0.0, "off")], 0, [("IDLE", S106)],
+              has=["(key off; sight eye right: each eye keeps its own view)"], lacks=["NEVER APPLIED"])
+        check("F162: sight eye left: no share, IDLE and never NEVER APPLIED, with F89 trace presses and 1 s lines in the sights",
+              [share_key("left"), share_ev("stereo", "off", "left"), share_sec(0.0, "off", "engaged", "left"), share_sec(0.0, "off", "engaged", "left"), ads_start("press"), ads_frame(),
+               ads_start("release")], 0, [("IDLE", S106)], has=["(sight eye left: the left eye is lined up on the sights and each eye keeps its own view, so no share runs)"],
+              lacks=["NEVER APPLIED"])
+        check("F162: sight eye left from the key line alone (no ADS yet)", [share_key("left")], 0, [("IDLE", S106)], has=["sight eye left"])
+        check("F162: a session that went from both to left: the share asked in the first half still has to have been drawn",
+              [share_key("both"), share_ev("shared"), share_sec(), share_sec(1.0), share_ev("stereo"), share_key("left"), share_sec(0.0, "off", "engaged", "left")], 3,
+              [("NEVER APPLIED", S106)], has=["never reported drawing it"])
+        check("F106: the build before F162 with its key off", [old_share_key("off")], 0, [("IDLE", S106)], has=["(key off)"], lacks=["sight eye"])
+        check("F106: key off", [old_share_key("off"), R("ADS sight in both eyes (F106) %u s: share", 1, 0.0, "off", None, 0.0, "idle", 0, 1, 0, 1, 0.0).replace(", aiming eye x", "")] * 2,
+              0, [("IDLE", S106)], has=["(key off)"])
         check("F106: key on, no ADS", [share_key()], 0, [("IDLE", S106)], has=["(no ADS press)"])
         check("F106: a press that never reached full weight", [share_sec(0.6), share_press(peak=0.6, full=0)], 0, [("PARTIAL", S106)],
               has=["no press reached full weight"])
@@ -18839,10 +18882,10 @@ def self_test_health():
         ads_budgets = (
             ("view height hold (F87h) %u s", ["frozen (the applied alignment's serial is not in the history)"]),
             ("weapon eye offset (F88) %u s", ["follow", ",".join(["1.00"] * 10)]),
-            ("ADS sight in both eyes (F106) %u s", ["off", "releasing"]),
-            ("native on foot ADS eye chain (F93b) %u s", ["off", "off"]),
+            ("ADS sight in both eyes (F106) %u s", ["off", "right", "releasing"]),
+            ("native on foot ADS eye chain (F93b) %u s", ["off", "off", "right"]),
             ("native on foot ADS sight offset (F139) %u s", ["x" * 63, "unknown"]),
-            ("ADS sight check (F66e/F79)", ["the eyes' offsets", " (an eye had no NDC: its figures are zero)"]),
+            ("ADS sight check (F66e/F79)", ["right", "the eyes' offsets", " (an eye had no NDC: its figures are zero)"]),
             ("native on foot ADS input (F70b): source %s; request", ["bound HumanoidZoom", "off", "absent/invalid", "unknown", "latched", "x" * 63, "refused", "x" * 63]),
         )
         for needle, strings in ads_budgets:

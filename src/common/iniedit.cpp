@@ -187,7 +187,20 @@ struct MovedTarget {
                               // user line still carrying it is stale, not a
                               // choice, and must not override the new
                               // default when it migrates
+    // "(values on=both, off=right)": the new key's word for each of the old
+    // key's, lowercased old word first. A key whose choices were renamed as it
+    // moved (F162: the on | off switch became both | right | left) carries the
+    // user's choice, not the old word. A value the list does not name moves
+    // as it is.
+    std::vector<std::pair<std::string, std::string>> values;
 };
+
+std::string movedValue(const MovedTarget& t, const std::string& value) {
+    const std::string at = lower(value);
+    for (const auto& v : t.values)
+        if (v.first == at) return v.second;
+    return value;
+}
 
 // "# retired-default: early" above a key, in the NEW file: a value this key
 // used to SHIP as its default and no longer does.
@@ -241,7 +254,11 @@ std::map<std::string, std::set<std::string>> retiredDefaults(const IniDoc& doc) 
 
 std::map<std::string, MovedTarget> movedKeys(const IniDoc& doc) {
     std::map<std::string, MovedTarget> out;
-    std::vector<std::pair<std::string, std::string>> pending;  // old, default
+    struct Pending {
+        std::string old, oldDefault;
+        std::vector<std::pair<std::string, std::string>> values;
+    };
+    std::vector<Pending> pending;
     for (const IniLine& line : doc.lines) {
         if (line.kind == LineKind::Comment) {
             const std::string body = trim(line.text);
@@ -250,18 +267,41 @@ std::map<std::string, MovedTarget> movedKeys(const IniDoc& doc) {
             const std::string text = trim(body.substr(at));
             if (lower(text).rfind("moved-from:", 0) == 0) {
                 std::string spec = trim(text.substr(strlen("moved-from:")));
-                std::string oldDefault;
+                Pending p;
+                // The value map first, and cut out of the spec: it follows the
+                // default clause, which would otherwise end the spec at "(default".
+                const size_t vopen = spec.find("(values");
+                if (vopen != std::string::npos) {
+                    const size_t vclose = spec.find(')', vopen);
+                    if (vclose != std::string::npos) {
+                        const std::string list = spec.substr(vopen + strlen("(values"), vclose - vopen - strlen("(values"));
+                        size_t from = 0;
+                        while (from <= list.size()) {
+                            size_t comma = list.find(',', from);
+                            if (comma == std::string::npos) comma = list.size();
+                            const std::string pair = list.substr(from, comma - from);
+                            const size_t eq = pair.find('=');
+                            if (eq != std::string::npos) {
+                                const std::string oldWord = lower(trim(pair.substr(0, eq))), newWord = trim(pair.substr(eq + 1));
+                                if (!oldWord.empty() && !newWord.empty()) p.values.emplace_back(oldWord, newWord);
+                            }
+                            from = comma + 1;
+                        }
+                        spec = trim(spec.substr(0, vopen) + " " + spec.substr(vclose + 1));
+                    }
+                }
                 const size_t open = spec.find("(default");
                 if (open != std::string::npos) {
                     const size_t close = spec.find(')', open);
                     if (close != std::string::npos) {
-                        oldDefault =
+                        p.oldDefault =
                             trim(spec.substr(open + strlen("(default"),
                                              close - open - strlen("(default")));
                         spec = trim(spec.substr(0, open));
                     }
                 }
-                pending.emplace_back(spec, oldDefault);
+                p.old = spec;
+                pending.push_back(p);
             }
             continue;
         }
@@ -270,7 +310,7 @@ std::map<std::string, MovedTarget> movedKeys(const IniDoc& doc) {
             continue;
         }
         for (const auto& p : pending) {
-            out[lower(p.first)] = {line.section, line.key, p.second};
+            out[lower(p.old)] = {line.section, line.key, p.oldDefault, p.values};
         }
         pending.clear();
     }
@@ -492,11 +532,13 @@ std::string mergeIni(const std::string& next, const std::string& user, const std
                         }
                     }
                     if (target != std::string::npos) {
+                        const std::string carried = movedValue(move->second, u.value);
                         replacements[target] =
-                            rewriteValue(nextDoc.lines[target].text, u.value,
+                            rewriteValue(nextDoc.lines[target].text, carried,
                                          nextDoc.lines[target].kind == LineKind::CommentedKey);
                         rep.followed.push_back(dotted + " = " + u.value + "  ->  " +
-                                               dottedName(newSection, newKey));
+                                               dottedName(newSection, newKey) +
+                                               (carried == u.value ? std::string() : " = " + carried));
                         continue;
                     }
                 }

@@ -1854,7 +1854,7 @@ void testLegacyOnFootRowsStayOutOfMenu() {
             {"native_on_foot_turn_style", "Look and aim"},
             {"native_on_foot_snap_turn_deg", "Look and aim"},
             {"native_on_foot_look_to_aim_smoothing_ms", "Look and aim"},
-            {"native_on_foot_ads_sight_both_eyes", "Aiming down sights"},
+            {"native_on_foot_ads_sight_eye", "Aiming down sights"},
             {"native_on_foot_ads_head_aim", "Aiming down sights"},
             {"native_on_foot_eye_height_cm", "Body and view"},
             {"native_on_foot_weapon_view_offset_cm", "Body and view"},
@@ -1887,6 +1887,21 @@ void testLegacyOnFootRowsStayOutOfMenu() {
         check(firstPageRow >= 0 && strcmp(kMenuRows[firstPageRow].section, "fix") == 0 && strcmp(kMenuRows[firstPageRow].key, "native_on_foot") == 0 &&
                   strcmp(kMenuRows[firstPageRow].label, "Native on foot VR") == 0,
               "the first row of the Native on foot page is the feature switch, labelled Native on foot VR");
+    }
+    // F162: the sight in both eyes switch (on, off) became the ADS sight eye (both, right, left): the same place on the page, a three-way choice, live, shipped both. The old key has no row.
+    {
+        int found = 0, oldRows = 0;
+        bool shaped = true;
+        for (int i = 0; i < kCount; ++i) {
+            const MenuRowDef& d = kMenuRows[i];
+            if (strcmp(d.key, "native_on_foot_ads_sight_both_eyes") == 0) ++oldRows;
+            if (strcmp(d.section, "fix") != 0 || strcmp(d.key, "native_on_foot_ads_sight_eye") != 0) continue;
+            ++found;
+            shaped = shaped && d.kind == MenuKind::Choice && strcmp(d.label, "ADS: sight eye") == 0 && strcmp(d.choices, "both|right|left") == 0 && strcmp(d.shipped, "both") == 0 &&
+                     d.applies == 1 && d.tier == MenuTier::Fix && strcmp(d.page, "native_on_foot") == 0 && strcmp(d.group, "Aiming down sights") == 0;
+        }
+        check(found == 1 && oldRows == 0 && shaped,
+              "ADS: sight eye is one Native on foot row under Aiming down sights: a choice of both, right and left, live, shipped both; the old sight in both eyes key has no row (F162)");
     }
     for (const char* key : keys) {
         bool found = false;

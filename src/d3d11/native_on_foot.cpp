@@ -72,6 +72,7 @@
 #include "native_on_foot_f159.h"   // F159: the left elbow's stable pole reseeded at the shoulder's height, its seeds' births counted and logged (pure parts)
 #include "native_on_foot_f160.h"   // F160: the neck reference's raise blended through the ADS release; the holster bridge's line (pure parts)
 #include "native_on_foot_f161.h"   // F161: the left arm's distance to the eye, measured (pure parts)
+#include "native_on_foot_f162.h"   // F162: the ADS sight eye, both | right | left (the key's text, the aiming eye; pure parts)
 #include "xinput_watch.h"         // F135: the pad's Start and Back edges, evidence for the menu probe only
 #include "native_on_foot_f109.h"   // F109: look to aim on foot, the player's own turn in ADS, snap or smooth turning (pure parts)
 #include "native_on_foot_f129.h"   // F129: look to aim reads its turn from the player's own look processor; the look path instrument (pure parts)
@@ -238,9 +239,11 @@ int g_f88BodyLast = -1;
 double g_f88Ignore[3] = {};   // the seated shift the pin ignores of w O this tick (alignTick's, read by the ADS eye point line; frame thread)
 // F97a: F88's weight, published each align tick for the Animate post-hook (the armed body's blend)
 std::atomic<float> g_f88WPub{0.0f};
-// F106: fix.native_on_foot_ads_sight_both_eyes (live): while the sights are up the left eye shows the right (aiming) eye's image, turned into its own view, by the ADS
-// lock's weight. A USER key, default on. It replaced F89's left eye close (its key retired: retiredKeysNote).
-std::atomic<bool> g_f106SightBothKey{true};
+// F162: fix.native_on_foot_ads_sight_eye (live), both | right | left (nofoot::f162::SightEye). The sight lock lines up the right eye (both, right) or the left eye (left); both
+// also has F106's share: while the sights are up the left eye shows the right (aiming) eye's image, turned into its own view, by the ADS lock's weight. A USER key, default
+// both. It replaced F106's fix.native_on_foot_ads_sight_both_eyes (on | off) by a moved-from line in edvr.ini; F106 replaced F89's left eye close (its key retired: retiredKeysNote).
+std::atomic<int> g_adsSightEyeKey{nofoot::f162::kBoth};
+int adsAimEye() noexcept { return nofoot::f162::aimingEye(g_adsSightEyeKey.load(std::memory_order_relaxed)); }   // 0 the left eye, 1 the right eye
 // F93b (TEMPORARY A/B, live): fix.native_on_foot_ads_eye_steady. on (the default): the ADS sight lock's target is the shift the measured eye was rendered with plus the
 // error measured on it (nofoot::f93::sightTarget); off: F70's, the shift published now plus that error.
 std::atomic<bool> g_f93SteadyKey{true};
@@ -763,11 +766,11 @@ void retiredKeysNote(const Config& cfg, bool first) {
     if (cfg.getString("fix.training_connect_probe", "on") != "on")
         Log::get().note("native on foot: fix.training_connect_probe is retired (F100): ignored (the probe's hooks and lines were removed; fix.connection_retry keeps "
                         "the hooks it needs)");
-    // F106: the left eye no longer closes in ADS; fix.native_on_foot_ads_sight_both_eyes shows it the aiming eye's view instead. The shipping file carries the old key at
-    // its last value (on).
+    // F106: the left eye no longer closes in ADS; fix.native_on_foot_ads_sight_eye = both (F106's key, then on | off) shows it the aiming eye's view instead. The shipping file
+    // carries the old key at its last value (on).
     if (cfg.getString("fix.native_on_foot_ads_close_left_eye", "on") != "on")
         Log::get().note("native on foot: fix.native_on_foot_ads_close_left_eye is retired (F106): ignored (the left eye no longer closes in ADS; "
-                        "fix.native_on_foot_ads_sight_both_eyes shows both eyes the view from the aiming eye instead)");
+                        "fix.native_on_foot_ads_sight_eye = both shows both eyes the view from the aiming eye instead)");
     // F109: F22-F25's look to aim controller is gone with its three test keys; look to aim rides the ADS head aim's map, whose signs and timing are measured. The
     // shipping file carries each at its last value (1, 0, 1).
     if (cfg.getInt("fix.native_on_foot_look_to_aim_yaw_sign", 1) != 1)
@@ -1098,16 +1101,24 @@ void readKey() {
         g_f88UpCm.store(static_cast<float>(up), std::memory_order_relaxed);
         g_f88Body.store(body, std::memory_order_relaxed);
     }
-    // F106 (live, the Native on foot page's "ADS: sight in both eyes"): while the sights are up the left eye shows the right eye's image, the eye the sight lock lines
-    // up, turned into the left eye's view, so the sight sits centred in both eyes. A user key, default on; one line a session and one at each change.
+    // F162 (live, the Native on foot page's "ADS: sight eye"): which eye the sight lock lines up on the sights, and whether F106's share runs. both: the right eye is lined up and
+    // the left eye shows the right eye's image, turned into the left eye's view, so the sight sits centred in both eyes (F106). right: the right eye is lined up, each eye keeps its
+    // own view. left: the left eye is lined up, each eye keeps its own view. A user key, default both; one line a session and one at each change. The old key's saved value
+    // arrives in this key's text through edvr.ini's moved-from line (on is both, off is right; nofoot::f162::parse reads either spelling).
     {
-        const bool on = cfg.getString("fix.native_on_foot_ads_sight_both_eyes", "on") != "off";
-        if (first || on != g_f106SightBothKey.load(std::memory_order_relaxed))
-            Log::get().note("native on foot ADS sight in both eyes (F106): fix.native_on_foot_ads_sight_both_eyes is %s -- %s", on ? "on" : "off",
-                            on ? "while you aim down sights both eyes see the view from your aiming (right) eye, so the sights sit centred in both and neither eye is closed; "
-                                 "it comes in with the sight lock (0.15 s) and goes with it (0.3 s); depth flattens while you aim; never outside ADS"
-                               : "each eye keeps its own view while you aim down sights (normal stereo)");
-        g_f106SightBothKey.store(on, std::memory_order_relaxed);
+        bool known = true;
+        const nofoot::f162::SightEye mode = nofoot::f162::parse(cfg.getString("fix.native_on_foot_ads_sight_eye", "both").c_str(), &known);
+        if (first || mode != g_adsSightEyeKey.load(std::memory_order_relaxed)) {
+            const char* what = mode == nofoot::f162::kBoth
+                ? "while you aim down sights your right eye comes to the sights and both eyes see its view, so the sights sit centred in both and neither eye is closed; it comes in "
+                  "with the sight lock (0.15 s) and goes with it (0.3 s); depth flattens while you aim; never outside ADS"
+                : mode == nofoot::f162::kRight
+                ? "while you aim down sights your right eye comes to the sights and each eye keeps its own view (normal stereo)"
+                : "while you aim down sights your left eye comes to the sights and each eye keeps its own view (normal stereo)";
+            Log::get().note("native on foot ADS sight eye (F162): fix.native_on_foot_ads_sight_eye is %s (aiming eye %s)%s -- %s", nofoot::f162::name(mode),
+                            nofoot::f162::aimingName(nofoot::f162::aimingEye(mode)), known ? "" : "; the value in the file is none of both, right or left: both is used", what);
+        }
+        g_adsSightEyeKey.store(mode, std::memory_order_relaxed);
     }
     // F93b (TEMPORARY A/B, live): the ADS sight lock's input (fix.native_on_foot_ads_eye_steady).
     {
@@ -11449,27 +11460,28 @@ void bodyFilter(AlignRun& a, const double target[3], double dt) noexcept {
 // selects zero through the same critically damped filter. The head-aim ramp does not scale eye motion. The shift is clamped to 40 cm. The guard trips it off
 // when |e perpendicular| grows for 0.5 s, until the next ADS engage.
 struct AdsSightWin {
+    int aim = 1;   // F162: the aiming eye (0 left, 1 right) the window's frames were locked on; set each tick, so a line says the eye of the frames it sums
     uint32_t driving = 0, idle = 0, noFp = 0, noRoot = 0, noSample = 0, degenerate = 0, flipped = 0, trippedFrames = 0;
     double perpSum = 0.0, perpMax = 0.0, beforeSum = 0.0, wSum = 0.0;
     double relSum[3] = {};   // P14w - cam, body axes (right, up, forward)
     // F66e: the rendered eyes solved from their scene rows: frames with both eyes' rows, one eye's, none (or implausible); frames the lock used the
-    // solved right eye and the F63 model; per eye the eye minus the job camera (body axes, metres), the distance to the sight line (perpendicular
+    // solved aiming eye (F162; the right eye until then) and the model; per eye the eye minus the job camera (body axes, metres), the distance to the sight line (perpendicular
     // and along, metres), the IPD, and (F67b) the last NDC of the points 0.5 m and 10 m along the sight from P14w in each eye's scene rows.
     uint32_t rowsBoth = 0, rowsOne = 0, rowsNone = 0, implausible = 0, usedSolved = 0, usedModel = 0;
-    // F110: the model's source on the frames the lock used it (nofoot::AdsModelSource), and the camera's model minus the solved right eye (body axes, m)
+    // F110: the model's source on the frames the lock used it (nofoot::AdsModelSource), and the camera's model minus the solved aiming eye (body axes, m)
     uint32_t modelFrom[nofoot::kAdsModelSources] = {}, modelDiffN = 0;
     double modelDiffSum[3] = {}, modelDiffAbsSum = 0.0, modelDiffMax = 0.0;
     double eyeRel[2][3] = {}, perpEye[2] = {}, alongEye[2] = {}, ipdSum = 0.0, perpEyeMax[2] = {};
     uint32_t eyeN[2] = {}, ipdN = 0;
     double ndcNear[2][2] = {}, ndcFar[2][2] = {};
     bool ndcHave[2] = {};
-    // F68b: the reticle composite against the sight line in the right eye: frames it was found (key 10 matched in the right eye this frame or the one
+    // F68b: the reticle composite against the sight line in the aiming eye (F162): frames it was found (key 10 matched in that eye this frame or the one
     // before) of the frames with a sight NDC, the means of the two NDC points and the reticle's depth, the sight minus the reticle (right, up, total; deg).
     uint32_t retFrames = 0, retMiss = 0;
     double retNdc[2] = {}, sightNdc[2] = {}, retDepth = 0.0, retRight = 0.0, retUp = 0.0, retTotal = 0.0, retTotalMax = 0.0, retRightMax = 0.0, retUpMax = 0.0;
     // F70: k as asked and after the clearance cap (sums over the driving frames), the frames a readable weapon point capped it, the points readable on the line, the
     // along error to the target eye point (signed sum, largest |value|; metres), the 3P root's drift from where it stood at the press (now, largest this press;
-    // metres) and the sight's NDC in the right eye at 0.3, 0.5 and 10 m ahead of the target eye point.
+    // metres) and the sight's NDC in the aiming eye at 0.3, 0.5 and 10 m ahead of the target eye point.
     double kWantedSum = 0.0, kEffSum = 0.0, alongErrSum = 0.0, alongErrAbsMax = 0.0, rootDriftNow = 0.0, rootDriftMax = 0.0, ndcD[3] = {0.3, 0.5, 10.0};
     uint32_t capped = 0, readableMax = 0;
     // F149/F150/F152: k asked is the held weapon's depth plus the live trim, clamped to 0..30 cm (kWantedSum, metres, summed over the driving frames). Beside it, by the source of
@@ -11584,12 +11596,12 @@ void adsSightLog(uint32_t seconds, bool steady, bool hold, bool detailed) noexce
     const double opticDistances[3] = {0.3, 0.5, 10.0};
     const double n = w.driving ? static_cast<double>(w.driving) : 1.0;
     if (detailed) {
-    Log::get().note("native on foot ADS sight lock (F63/F75/F79): raw P14w - cam (body right, up, forward) %.1f %.1f %.1f cm (mean); IPD %.4f m (%s; F110: the job camera, the left eye, to the right eye); "
-                    "e perpendicular (the right eye to the effective raw-P14 or calibrated-rifle sight line) after the lock mean %.1f cm, max %.1f cm; before the lock (estimate: e + the "
+    Log::get().note("native on foot ADS sight lock (F63/F75/F79): aiming eye %s; raw P14w - cam (body right, up, forward) %.1f %.1f %.1f cm (mean); IPD %.4f m (%s; F110: the job camera, the left eye, to the right eye); "
+                    "e perpendicular (the aiming eye to the effective raw-P14 or calibrated-rifle sight line) after the lock mean %.1f cm, max %.1f cm; before the lock (estimate: e + the "
                     "camera's move by the lock) mean %.1f cm; applied lock (seated) %.1f %.1f %.1f cm (|%.1f| cm, clamp %.0f cm); head-aim ADS weight mean %.2f "
                     "(now %.2f); frames driving %u, idle %u, no FP snapshot (joint 14) %u, no F_root %u, no AMC sample %u, degenerate %u, right axis "
                     "flipped to the body's right %u, held off by the guard %u%s",
-                    100.0 * w.relSum[0] / n, 100.0 * w.relSum[1] / n, 100.0 * w.relSum[2] / n, g_adsSightIpd,
+                    nofoot::f162::aimingName(w.aim), 100.0 * w.relSum[0] / n, 100.0 * w.relSum[1] / n, 100.0 * w.relSum[2] / n, g_adsSightIpd,
                     g_adsSightIpdMeasured ? "the eyes' offsets" : "the fallback: no per-eye offset noted", 100.0 * w.perpSum / n,
                     100.0 * w.perpMax, 100.0 * w.beforeSum / n, 100.0 * g_adsSight.applied[0], 100.0 * g_adsSight.applied[1],
                     100.0 * g_adsSight.applied[2], 100.0 * appliedNorm, 100.0 * nofoot::kAdsSightClampM, w.wSum / n, g_adsW, w.driving, w.idle,
@@ -11599,11 +11611,11 @@ void adsSightLog(uint32_t seconds, bool steady, bool hold, bool detailed) noexce
     {   // F93b: the eye chain this second (every ADS second, the trace's 4 events a minute aside). The proof of the steady eye: matched on every measured frame, the along
         // error's step autocorrelation at lag 2 near 0 (F92's flight: -0.41 in every still rifle window) and its rms down from 0.08 mm.
         nofoot::f93::ChainSecond& c = g_f93Chain;
-        Log::get().note("native on foot ADS eye chain (F93b) %u s: steady eye %s, eye hold %s; the sight lock's target from the alignment the measured eye was rendered with "
+        Log::get().note("native on foot ADS eye chain (F93b) %u s: steady eye %s, eye hold %s, aiming eye %s; the sight lock's target from the alignment the measured eye was rendered with "
                         "%u of %u measured frames (serial lag mean %.1f max %u), F70's %u, the model eye %u, held (its alignment not in the history) %u; per frame rms: sight "
                         "shift %.3f mm, position lock %.3f mm, head translation %.3f mm over %u frames; the along error's step %.3f mm rms, autocorrelation lag 1 "
                         "%+.2f lag 2 %+.2f over %u steps (the head's translation taken out two frames late reads about -0.4 at lag 2)",
-                        seconds, steady ? "on" : "off", hold ? "on" : "off", c.matched, c.n, c.lagMean(),
+                        seconds, steady ? "on" : "off", hold ? "on" : "off", nofoot::f162::aimingName(w.aim), c.matched, c.n, c.lagMean(),
                         static_cast<unsigned>(c.lagMax), c.legacy, c.model,
                         c.missed, c.rmsMm(c.shiftSs), c.rmsMm(c.lockSs), c.rmsMm(c.headSs), c.steps, c.alongStepRmsMm(), c.autocorr(1), c.autocorr(2), c.acN);
         c.reset();
@@ -11672,7 +11684,7 @@ void adsSightLog(uint32_t seconds, bool steady, bool hold, bool detailed) noexce
             std::snprintf(ndcText, sizeof(ndcText), "(%.4f, %.4f) at %.1f m, (%.4f, %.4f) at %.1f m, (%.4f, %.4f) at %.1f m", w.ndc3[0][0], w.ndc3[0][1], w.ndcD[0], w.ndc3[1][0],
                           w.ndc3[1][1], w.ndcD[1], w.ndc3[2][0], w.ndc3[2][1], w.ndcD[2]);
         else
-            std::snprintf(ndcText, sizeof(ndcText), "not available this second (no fresh right-eye rows, or a point behind the eye)");
+            std::snprintf(ndcText, sizeof(ndcText), "not available this second (no fresh aiming-eye rows, or a point behind the eye)");
         // F149/F150/F152: where the weapon's base came from this second: one source over every driving frame, or each source's mean and frames. A source's text is the depth asked
         // (base + offset + trim, clamped) with its three parts, in cm.
         char camText[480];
@@ -11720,7 +11732,8 @@ void adsSightLog(uint32_t seconds, bool steady, bool hold, bool detailed) noexce
     }
     // F66e: the two rendered eyes against the job camera and the sight line. The eye positions are solved from each eye's scene rows (clip x, y, w
     // zero). If the job camera sat at one eye (A1) the first ADS second shows it here, before the lock moves: eye minus camera not symmetric.
-    // Flight proof: IPD 6.0-6.1 cm; the right eye's distance to the sight line under 0.5 cm and the left's about 6 cm; used = solved right eye.
+    // Flight proof: IPD 6.0-6.1 cm; the aiming eye's distance to the sight line under 0.5 cm and the other eye's about 6 cm; used = the solved aiming eye (F162: the right eye
+    // with both and right, the left eye with left).
     {
         const double l0 = w.eyeN[0] ? static_cast<double>(w.eyeN[0]) : 1.0, l1 = w.eyeN[1] ? static_cast<double>(w.eyeN[1]) : 1.0;
         const double ni = w.ipdN ? static_cast<double>(w.ipdN) : 1.0;
@@ -11728,14 +11741,14 @@ void adsSightLog(uint32_t seconds, bool steady, bool hold, bool detailed) noexce
         // whenever both were there: about 0 cm (F63's half-IPD model read the IPD's half, 3.1 cm, short: the nose)
         const double nd = w.modelDiffN ? static_cast<double>(w.modelDiffN) : 1.0;
         Log::get().note("native on foot ADS sight check (F66e/F79): eye rows these %u s: both eyes %u, one eye %u, none/implausible %u (%u implausible: over 0.5 m "
-                        "from the job camera); the lock's right eye: the solved rendered eye in %u frames, the model in %u (F110: from the job camera, the "
-                        "left eye, %u, from the solved left eye %u; IPD %.4f m, %s); the job camera's model minus the solved right eye (body right, up, forward, cm, "
+                        "from the job camera); the lock's eye (aiming eye %s): the solved rendered eye in %u frames, the model in %u (F110: from the job camera, the "
+                        "left eye, %u, from the solved left eye %u; IPD %.4f m, %s); the job camera's model minus the solved aiming eye (body right, up, forward, cm, "
                         "mean) %+.1f %+.1f %+.1f, %.1f cm mean, %.1f max over %u frames; eye minus job camera (body right, up, forward, cm, mean) L %.1f %.1f %.1f "
                         "R %.1f %.1f %.1f; IPD %.2f cm (%u "
                         "frames); eye to the raw-P14 reference sight line (perpendicular cm mean/max, distance along to P14 cm mean) L %.1f/%.1f %.1f, R %.1f/%.1f %.1f; NDC "
                         "of raw-P14 sight at 0.5 m and 10 m (F67b; L: %.4f %.4f and %.4f %.4f; R: %.4f %.4f and %.4f %.4f; these remain raw-P14 diagnostics "
                         "when the rifle anchor is active)%s",
-                        seconds, w.rowsBoth, w.rowsOne, w.rowsNone, w.implausible, w.usedSolved, w.usedModel, w.modelFrom[nofoot::kAdsModelFromCamera],
+                        seconds, w.rowsBoth, w.rowsOne, w.rowsNone, w.implausible, nofoot::f162::aimingName(w.aim), w.usedSolved, w.usedModel, w.modelFrom[nofoot::kAdsModelFromCamera],
                         w.modelFrom[nofoot::kAdsModelFromLeftEye], g_adsSightIpd, g_adsSightIpdMeasured ? "the eyes' offsets" : "the fallback",
                         100.0 * w.modelDiffSum[0] / nd, 100.0 * w.modelDiffSum[1] / nd, 100.0 * w.modelDiffSum[2] / nd, 100.0 * w.modelDiffAbsSum / nd,
                         100.0 * w.modelDiffMax, w.modelDiffN, 100.0 * w.eyeRel[0][0] / l0, 100.0 * w.eyeRel[0][1] / l0,
@@ -11752,16 +11765,16 @@ void adsSightLog(uint32_t seconds, bool steady, bool hold, bool detailed) noexce
     {
         const double rn = w.retFrames ? static_cast<double>(w.retFrames) : 1.0;
         if (w.retFrames)
-            Log::get().note("native on foot ADS reticle (F68b): the on-foot reticle composite (key 10, the aim reticle) in the right eye on %u of %u frames with a sight "
+            Log::get().note("native on foot ADS reticle (F68b): the on-foot reticle composite (key 10, the aim reticle) in the aiming eye (%s) on %u of %u frames with a sight "
                             "NDC (%u without); its NDC mean (%.4f, %.4f) at depth %.1f m; the sight line (P14 + 10 m f) mean (%.4f, %.4f); sight minus reticle "
                             "%+.2f deg right, %+.2f deg up, total mean %.2f deg (largest %.2f; largest |right| %.2f, |up| %.2f): the sight-to-fire angle, to agree "
                             "within 0.3 deg for shots to land on the sights",
-                            w.retFrames, w.retFrames + w.retMiss, w.retMiss, w.retNdc[0] / rn, w.retNdc[1] / rn, w.retDepth / rn, w.sightNdc[0] / rn,
+                            nofoot::f162::aimingName(w.aim), w.retFrames, w.retFrames + w.retMiss, w.retMiss, w.retNdc[0] / rn, w.retNdc[1] / rn, w.retDepth / rn, w.sightNdc[0] / rn,
                             w.sightNdc[1] / rn, w.retRight / rn, w.retUp / rn, w.retTotal / rn, w.retTotalMax, w.retRightMax, w.retUpMax);
         else if (w.retMiss)
-            Log::get().note("native on foot ADS reticle (F68b): the reticle composite (key 10) was NOT found in the right eye on any of %u frames with a sight NDC "
+            Log::get().note("native on foot ADS reticle (F68b): the reticle composite (key 10) was NOT found in the aiming eye (%s) on any of %u frames with a sight NDC "
                             "(no matched key-10 composite draw: the marker probe is off, the reticle is hidden in this ADS, or the tag was not found)",
-                            w.retMiss);
+                            nofoot::f162::aimingName(w.aim), w.retMiss);
     }
     {
         const double bn = w.opticBasisN ? static_cast<double>(w.opticBasisN) : 1.0;
@@ -11775,8 +11788,8 @@ void adsSightLog(uint32_t seconds, bool steady, bool hold, bool detailed) noexce
             else std::snprintf(item, sizeof(item), "%s%.1fm=missing", q ? "," : "", opticDistances[q]);
             strncat_s(opticNdc, item, _TRUNCATE);
         }
-        Log::get().note("native on foot ADS optic basis (F70c): valid/bad basis %u/%u, fresh right eye %u (missing %u), mean yaw/pitch vs root %.2f/%.2f deg; right-eye root/P14-forward NDC %s / %s (per-distance counts included)",
-                        w.opticBasisN, w.opticBadBasis, w.opticEyeN, w.opticNoEye, w.opticYawSum / bn, w.opticPitchSum / bn, rootNdc, opticNdc);
+        Log::get().note("native on foot ADS optic basis (F70c): valid/bad basis %u/%u, fresh aiming eye (%s) %u (missing %u), mean yaw/pitch vs root %.2f/%.2f deg; aiming-eye root/P14-forward NDC %s / %s (per-distance counts included)",
+                        w.opticBasisN, w.opticBadBasis, nofoot::f162::aimingName(w.aim), w.opticEyeN, w.opticNoEye, w.opticYawSum / bn, w.opticPitchSum / bn, rootNdc, opticNdc);
     }
     }
     w = AdsSightWin{};
@@ -11800,6 +11813,10 @@ void adsSightTick(uint64_t now, double dt, const EyeSample& s) noexcept {
         []() noexcept {}, [&](uint32_t seconds) noexcept { adsSightLog(seconds, lastSteady, lastHold, g_adsSightLogWindow.detailed); });
     lastSteady = logSteady; lastHold = g_adsHoldThisPress;
     AdsSightWin& w = g_adsSightWin;
+    // F162: the aiming eye for this tick (0 left, 1 right): the sight lock, the measures of the ADS eye and the reticle all take it. Both and right are 1, which is what every one of them
+    // took before the key had a left value.
+    const int aim = adsAimEye();
+    w.aim = aim;
     if (active && !g_adsEyeOnset.stateSeen) {
         g_adsEyeOnset.stateSeen = true;
         g_adsEyeOnset.stateMs = now;
@@ -11814,7 +11831,7 @@ void adsSightTick(uint64_t now, double dt, const EyeSample& s) noexcept {
     nofoot::AdsOpticBasis opticBasis;
     nofoot::AdsSightErr E;
     bool have = false;
-    bool f93Solved = false;          // F93b: the error was measured on the solved rendered eye (the right eye's rows of f93RowsFrame)
+    bool f93Solved = false;          // F93b: the error was measured on the solved rendered eye (the aiming eye's rows of f93RowsFrame)
     uint32_t f93RowsFrame = ~0u;
     nofoot::AdsEyeCap eyeCap;
     nofoot::f149::EyeDepth adsDepth;   // F149/F150: the depth asked of the clearance cap this frame and where the weapon's depth came from
@@ -12013,10 +12030,10 @@ void adsSightTick(uint64_t now, double dt, const EyeSample& s) noexcept {
                                                 worldScaleEyeFactor(nativeFrameWorldScale()));
             double rHat[3] = {};
             bool flipped = false;
-            // F66e: the rendered eyes. Each eye's position is solved from its scene rows (clip x, y, w vanish there); when the right eye's rows are
-            // this frame's (at most one frame behind the boundary) and it lies within 0.5 m of the job camera, the lock's E_R is that eye, else the
-            // model (F110: the job camera, the left eye, or the solved left eye, plus the IPD along the FP root's right). The sight line's distance from
-            // each eye is logged either way.
+            // F66e: the rendered eyes. Each eye's position is solved from its scene rows (clip x, y, w vanish there); when the aiming eye's rows are
+            // this frame's (at most one frame behind the boundary) and it lies within 0.5 m of the job camera, the lock's E is that eye, else the
+            // model (F110: for the right eye the job camera, the left eye, or the solved left eye, plus the IPD along the FP root's right; F162: for the left eye the job camera).
+            // The sight line's distance from each eye is logged either way.
             double eyeW[2][3] = {};
             float eyeRows[2][16] = {}, eyeO[2][4] = {};
             bool eyeOk[2] = {false, false};
@@ -12037,21 +12054,21 @@ void adsSightTick(uint64_t now, double dt, const EyeSample& s) noexcept {
                 }
                 eyeOk[e] = true;
             }
-            if (eyeOk[1]) {
+            if (eyeOk[aim]) {
                 ++w.opticEyeN;
                 g_adsOpticGood.fetch_add(1, std::memory_order_relaxed);
-                {   // F91 B: the rifle's sight line (the FP root's forward, the lock's sight direction) in the right eye's view, for the trace
+                {   // F91 B: the rifle's sight line (the FP root's forward, the lock's sight direction) in the aiming eye's view, for the trace
                     double vr[3], vu[3], vf[3], yawDeg = 0.0, pitchDeg = 0.0;
-                    if (nofoot::rotAxesFromClip(eyeRows[1], vr, vu, vf) && nofoot::f91::rifleInView(fUnit, vr, vu, vf, &yawDeg, &pitchDeg)) {
+                    if (nofoot::rotAxesFromClip(eyeRows[aim], vr, vu, vf) && nofoot::f91::rifleInView(fUnit, vr, vu, vf, &yawDeg, &pitchDeg)) {
                         g_f91.rifleTick = g_f91.tick;
                         g_f91.rifle[0] = yawDeg;
                         g_f91.rifle[1] = pitchDeg;
                     }
                 }
-                const double rightOrigin[3] = {eyeO[1][0], eyeO[1][1], eyeO[1][2]};
+                const double aimOrigin[3] = {eyeO[aim][0], eyeO[aim][1], eyeO[aim][2]};
                 for (int q = 0; q < 3; ++q) {
-                    opticRootNdcHave[q] = nofoot::sightPointNdc(eyeRows[1], rightOrigin, p14w, f, opticDistances[q], opticRootNdc[q]);
-                    opticP14NdcHave[q] = opticBasisValid && nofoot::sightPointNdc(eyeRows[1], rightOrigin, p14w, opticBasis.forward, opticDistances[q], opticP14Ndc[q]);
+                    opticRootNdcHave[q] = nofoot::sightPointNdc(eyeRows[aim], aimOrigin, p14w, f, opticDistances[q], opticRootNdc[q]);
+                    opticP14NdcHave[q] = opticBasisValid && nofoot::sightPointNdc(eyeRows[aim], aimOrigin, p14w, opticBasis.forward, opticDistances[q], opticP14Ndc[q]);
                     if (opticRootNdcHave[q]) { ++w.opticRootNdcN[q]; for (int c = 0; c < 2; ++c) w.opticRootNdcSum[q][c] += opticRootNdc[q][c]; }
                     if (opticP14NdcHave[q]) { ++w.opticP14NdcN[q]; for (int c = 0; c < 2; ++c) w.opticP14NdcSum[q][c] += opticP14Ndc[q][c]; }
                 }
@@ -12070,12 +12087,12 @@ void adsSightTick(uint64_t now, double dt, const EyeSample& s) noexcept {
                 w.perpEyeMax[e] = std::max(w.perpEyeMax[e], perp);
                 w.alongEye[e] += along;
                 ++w.eyeN[e];
-                // F67b: P14 itself is behind the right eye (w < 0), so the sight is sampled 0.5 m and 10 m in front of it. An eye on the sight line sees
+                // F67b: P14 itself is behind the eye (w < 0), so the sight is sampled 0.5 m and 10 m in front of it. An eye on the sight line sees
                 // both at the same NDC; an eye beside it sees them apart by (its offset / the distance) x its focal scale.
                 const double od[3] = {eyeO[e][0], eyeO[e][1], eyeO[e][2]};
                 w.ndcHave[e] = nofoot::sightPointNdc(eyeRows[e], od, p14w, f, 0.5, w.ndcNear[e]) &&
                                nofoot::sightPointNdc(eyeRows[e], od, p14w, f, 10.0, w.ndcFar[e]);
-                if (e == 1) {   // F70: the sight at 0.3, 0.5 and 10 m ahead of the TARGET eye point: equal NDC when the eye is on the line
+                if (e == aim) {   // F70: the sight at 0.3, 0.5 and 10 m ahead of the TARGET eye point (F162: in the aiming eye): equal NDC when the eye is on the line
                     w.ndc3Have = true;
                     for (int q = 0; q < 3; ++q) w.ndc3Have = nofoot::sightPointNdc(eyeRows[e], od, pT, f, w.ndcD[q], w.ndc3[q]) && w.ndc3Have;
                 }
@@ -12085,17 +12102,17 @@ void adsSightTick(uint64_t now, double dt, const EyeSample& s) noexcept {
                 w.ipdSum += nofoot::ikLen(d);
                 ++w.ipdN;
             }
-            // F68b: the reticle composite in the right eye against the sight line at 10 m (both through the eye's scene rows, the same jitter).
-            if (eyeOk[1] && w.ndcHave[1]) {
+            // F68b: the reticle composite in the aiming eye against the sight line at 10 m (both through the eye's scene rows, the same jitter).
+            if (eyeOk[aim] && w.ndcHave[aim]) {
                 uint32_t rfr = ~0u;
                 double rn[2] = {}, rdepth = 0.0, dRight = 0.0, dUp = 0.0, dTot = 0.0;
-                const bool got = retNdcRead(1, &rfr, rn, &rdepth) && nofoot::sceneRowsFreshForLock(rfr, g_f44Frame.load(std::memory_order_relaxed));
-                if (got && nofoot::ndcAngles(eyeRows[1], rn, w.ndcFar[1], &dRight, &dUp, &dTot)) {
+                const bool got = retNdcRead(aim, &rfr, rn, &rdepth) && nofoot::sceneRowsFreshForLock(rfr, g_f44Frame.load(std::memory_order_relaxed));
+                if (got && nofoot::ndcAngles(eyeRows[aim], rn, w.ndcFar[aim], &dRight, &dUp, &dTot)) {
                     ++w.retFrames;
                     w.retNdc[0] += rn[0];
                     w.retNdc[1] += rn[1];
-                    w.sightNdc[0] += w.ndcFar[1][0];
-                    w.sightNdc[1] += w.ndcFar[1][1];
+                    w.sightNdc[0] += w.ndcFar[aim][0];
+                    w.sightNdc[1] += w.ndcFar[aim][1];
                     w.retDepth += rdepth;
                     w.retRight += dRight;
                     w.retUp += dUp;
@@ -12108,18 +12125,15 @@ void adsSightTick(uint64_t now, double dt, const EyeSample& s) noexcept {
                 }
             }
             const bool modelOk = nofoot::adsSightRight(row0, f, bodyRight, rHat, &flipped);
-            bool lockOk = false;
-            bool usedSolved = false;
-            // F110: the model right eye (native_on_foot_core.h): the solved left eye, else the job camera (the left eye), plus the IPD along R^. Whenever the right
-            // eye is solved too, the camera's model is measured against it: the model the lock falls back to with no rows at all.
+            // F110: the model of the aiming eye (native_on_foot_core.h): for the right eye the solved left eye, else the job camera (the left eye), plus the IPD along R^; F162: for the
+            // left eye the job camera. Whenever the aiming eye is solved too, the camera's model is measured against it: the model the lock falls back to with no rows at all.
             double modelEye[3] = {};
-            const uint8_t modelSrc = nofoot::adsModelRightEye(cam, eyeOk[0], eyeW[0], rHat, g_adsSightIpd, modelEye);
-            if (modelOk && eyeOk[1]) {
+            if (modelOk && eyeOk[aim]) {
                 double camModel[3] = {};
-                nofoot::adsModelRightEye(cam, false, eyeW[0], rHat, g_adsSightIpd, camModel);
+                nofoot::adsModelAimingEye(aim, cam, false, eyeW[0], rHat, g_adsSightIpd, camModel);
                 double dBody[3] = {}, d2 = 0.0;
                 for (size_t i = 0; i < 3; ++i) {
-                    dBody[i] = (camModel[0] - eyeW[1][0]) * rows[3 * i] + (camModel[1] - eyeW[1][1]) * rows[3 * i + 1] + (camModel[2] - eyeW[1][2]) * rows[3 * i + 2];
+                    dBody[i] = (camModel[0] - eyeW[aim][0]) * rows[3 * i] + (camModel[1] - eyeW[aim][1]) * rows[3 * i + 1] + (camModel[2] - eyeW[aim][2]) * rows[3 * i + 2];
                     w.modelDiffSum[i] += dBody[i];
                     d2 += dBody[i] * dBody[i];
                 }
@@ -12128,13 +12142,13 @@ void adsSightTick(uint64_t now, double dt, const EyeSample& s) noexcept {
                 w.modelDiffMax = std::max(w.modelDiffMax, dn);
                 ++w.modelDiffN;
             }
-            if (eyeOk[1] && nofoot::adsSightErrorEyeK(adsOrigin, eyeW[1], f, rows, eyeCap.kM, E)) {
-                lockOk = true;
-                usedSolved = true;
+            const nofoot::AdsAimPick pick = nofoot::adsAimingEyeError(aim, eyeOk, eyeW, modelOk, cam, rHat, g_adsSightIpd, adsOrigin, f, rows, eyeCap.kM, E, modelEye);
+            const uint8_t modelSrc = pick.modelSrc;
+            const bool lockOk = pick.ok;
+            const bool usedSolved = pick.solved;
+            if (usedSolved) {
                 f93Solved = true;
-                f93RowsFrame = eyeFrame[1];
-            } else if (modelOk && nofoot::adsSightErrorEyeK(adsOrigin, modelEye, f, rows, eyeCap.kM, E)) {
-                lockOk = true;
+                f93RowsFrame = eyeFrame[aim];
             }
             if (lockOk) {
                 if (usedSolved) ++w.usedSolved;
@@ -13751,13 +13765,13 @@ nofoot::f87::HoldOut f87HoldTick(uint64_t now, double dt, const EdvrNativeNowPos
                  : g_f87SlewedSec ? "holding (rate-limited)" : "holding";
     return out;
 }
-// The eye over the weapon's root (the right eye less the FP root, in the character's axes: the AMC's right, up and forward) and the camera path's stability, once a second
-// on foot. The right eye is the scene's (eye 1's rows of this game frame); the root is the FP root the frame thread reads (fresh within 100 ms).
+// The eye over the weapon's root (the aiming eye less the FP root, in the character's axes: the AMC's right, up and forward) and the camera path's stability, once a second
+// on foot. The aiming eye is the scene's (F162: eye 1's rows of this game frame with both and right, eye 0's with left); the root is the FP root the frame thread reads (fresh within 100 ms).
 nofoot::f87::EyeRootSecond g_f87EyeRoot;
 double g_f87CamN = 0.0, g_f87CamMeanP = 0.0, g_f87CamM2P = 0.0, g_f87CamMeanY = 0.0, g_f87CamM2Y = 0.0;
 uint64_t g_f87EyeLineMs = 0;
 // F89: the ADS transition trace (nofoot::f89::AdsTrace): one line a frame for 4 s after each press (F91; 1.5 s before) and 1.5 s after each release, at most 4 events a
-// minute. The eye is the right eye's (eye 1's scene rows) less F_root in the character's axes, as the line above; the step is its motion since the last new rows, in the same
+// minute. The eye is the aiming eye's (F162; eye 1's scene rows with both and right) less F_root in the character's axes, as the line above; the step is its motion since the last new rows, in the same
 // frame. F91 B: every traced line carries the vibration instrument's fields ("; view (F91)": nofoot::f91::formatView) and each 0.5 s of a press is fitted (a "press fit (F91)"
 // line: nofoot::f91::fitWindow).
 nofoot::f89::AdsTrace g_f89Trace;
@@ -13817,19 +13831,27 @@ void f87EyeLines(uint64_t now, double dt, double offsetW, const EdvrNativeNowPos
         eyeOk[e] = got && age >= 0 && age <= 1 && nofoot::eyeFromRows(rows[e], org, eyes[e]);
     }
     const bool rowsOk = s.valid && s.rows[4] == s.rows[4];
-    if (eyeOk[1] && fpFresh && rowsOk) {
+    // F162: the eye over the root is the aiming eye's (the right eye with both and right, as before; the left eye with left). A change of the key between two samples would read
+    // as a step of the eyes' distance, so the step starts again at it.
+    const int aim = adsAimEye();
+    static int lastAim = 1;
+    if (aim != lastAim) {
+        lastAim = aim;
+        g_f89EyeStep.drop();
+    }
+    if (eyeOk[aim] && fpFresh && rowsOk) {
         const double ax[3][3] = {{s.rows[0], s.rows[1], s.rows[2]}, {s.rows[3], s.rows[4], s.rows[5]}, {s.rows[6], s.rows[7], s.rows[8]}};
         const double root[3] = {fp.origin[0], fp.origin[1], fp.origin[2]};
-        g_f87EyeRoot.add(eyes[1], root, ax);
+        g_f87EyeRoot.add(eyes[aim], root, ax);
     }
     {   // F89: the ADS transition trace. The state is the resolved ADS state (the bound action, else the journal); the journal's flag and the lock's weight are logged beside it.
         const nofoot::f89::TraceFrame tf = g_f89Trace.step(g_adsState == kAdsActive, now, dt);
-        const bool eyeUsed = eyeOk[1] && fpFresh && rowsOk;
-        const bool newRows = eyeUsed && fr[1] != g_f89EyeRowFrame;
+        const bool eyeUsed = eyeOk[aim] && fpFresh && rowsOk;
+        const bool newRows = eyeUsed && fr[aim] != g_f89EyeRowFrame;
         double stepCm = 0.0;
         if (newRows) {
             stepCm = g_f89EyeStep.step(g_f87EyeRoot.last);
-            g_f89EyeRowFrame = fr[1];
+            g_f89EyeRowFrame = fr[aim];
         } else if (!eyeUsed) {
             g_f89EyeStep.drop();
         }
@@ -14028,8 +14050,8 @@ void f87EyeLines(uint64_t now, double dt, double offsetW, const EdvrNativeNowPos
         uint32_t serial = 0;
         if (!opticItemRead(&serial, item) || !item[0]) std::snprintf(item, sizeof(item), "none");
         nofoot::f87::EyeRootSecond& er = g_f87EyeRoot;
-        Log::get().note("eye to weapon root (F87h) 1 s: right eye - F_root (character axes) right %+.1f up %+.1f forward %+.1f cm (up min %+.1f max %+.1f, n %u), item %s, ADS %d",
-                        er.last[0] * 100.0, er.last[1] * 100.0, er.last[2] * 100.0, er.n ? er.upMin * 100.0 : 0.0, er.n ? er.upMax * 100.0 : 0.0, static_cast<unsigned>(er.n), item, ads ? 1 : 0);
+        Log::get().note("eye to weapon root (F87h) 1 s: aiming eye (%s) - F_root (character axes) right %+.1f up %+.1f forward %+.1f cm (up min %+.1f max %+.1f, n %u), item %s, ADS %d",
+                        nofoot::f162::aimingName(adsAimEye()), er.last[0] * 100.0, er.last[1] * 100.0, er.last[2] * 100.0, er.n ? er.upMin * 100.0 : 0.0, er.n ? er.upMax * 100.0 : 0.0, static_cast<unsigned>(er.n), item, ads ? 1 : 0);
     }
     g_f87EyeRoot.reset();
     if (nofoot::logwin::detail()) {
@@ -14243,9 +14265,9 @@ void f138Reset() noexcept {
     g_f138LineReset.store(true, std::memory_order_relaxed);
 }
 
-// ---- F106: ADS, the sight in both eyes (fix.native_on_foot_ads_sight_both_eyes) ------------------------------------------------------------------------------
-// See nofoot::f106::share (native_on_foot_f106.h). Once per align tick, after the ADS lock's weight is known (adsAimTick): with the key on, in native on foot, a weapon or
-// tool drawn, the share is the ADS lock's weight (0.15 s in, 0.3 s out); anything else is exactly 0, and a nonzero weight with the guard failing is logged. The level goes
+// ---- F106: ADS, the sight in both eyes (F162: fix.native_on_foot_ads_sight_eye = both) --------------------------------------------------------------------
+// See nofoot::f106::share (native_on_foot_f106.h). Once per align tick, after the ADS lock's weight is known (adsAimTick): with the key at both, in native on foot, a weapon or
+// tool drawn, the share is the ADS lock's weight (0.15 s in, 0.3 s out); anything else is exactly 0 (right and left never share), and a nonzero weight with the guard failing is logged. The level goes
 // to the provider (left_eye_share.h), which hands it to the runtime in the version 10 answer; the runtime draws the right eye's image, turned into the left view, over the
 // left eye's own image by it, in that eye's scene pass (d3d11_stereo.cpp). A level not republished within 0.2 s decays to 0 on the reading side, so a stalled frame
 // thread never leaves the left eye on the right eye's view. What the runtime drew comes back once a press through edvrNoteNativeEyeShare (the press line, at the end
@@ -14255,26 +14277,28 @@ uint64_t g_f106GuardLineMs = 0;
 uint32_t g_f106GuardTrips = 0;
 void f106ShareTick(uint64_t now) noexcept {
     namespace f106 = nofoot::f106;
-    const bool key = g_f106SightBothKey.load(std::memory_order_relaxed);
+    const bool key = nofoot::f162::sharesView(g_adsSightEyeKey.load(std::memory_order_relaxed));
+    const int aim = adsAimEye();
     const bool onFoot = nativeOnFootActive();
     const f106::Share s = f106::share(key, onFoot, g_armed, g_adsW);
     static nofoot::adslog::Window window;
     static uint32_t adsSeconds = 0, onSeconds = 0;
     static double askedMax = 0.0, lastShare = 0.0, lastLock = 0.0;
     static bool lastKey = false;
-    static int lastState = kAdsIdle;
+    static int lastState = kAdsIdle, lastAim = 1;
     uint64_t context = nofoot::adslog::mix(g_heldItemSerial.load(std::memory_order_relaxed), key ? 1u : 0u);
     context = nofoot::adslog::mix(context, g_adsState == kAdsActive ? 1u : 0u);
+    context = nofoot::adslog::mix(context, aim == 0 ? 1u : 0u);
     context = nofoot::adslog::mix(context, g_cfgGeneration);
     window.poll(now, onFoot && (s.weight > 0.0 || g_adsState != kAdsIdle), context, [&]() noexcept {
         if (lastState != kAdsIdle) { ++adsSeconds; if (lastKey) ++onSeconds; }
     }, [&](uint32_t seconds) noexcept {
-        Log::get().note("ADS sight in both eyes (F106) %u s: share %.2f (key %s, lock weight %.2f, ads state %s); path: the runtime's left eye scene pass (the right eye's "
+        Log::get().note("ADS sight in both eyes (F106) %u s: share %.2f (key %s, aiming eye %s, lock weight %.2f, ads state %s); path: the runtime's left eye scene pass (the right eye's "
                         "image, turned into the left view, over the left eye's own; the fade and the plugin overlay over both); ADS %u of %u s; key on in ADS %u of %u s; share asked max %.2f",
-                        seconds, lastShare, lastKey ? "on" : "off", lastLock, kAdsStateNames[lastState], adsSeconds, seconds, onSeconds, seconds, askedMax);
+                        seconds, lastShare, lastKey ? "on" : "off", nofoot::f162::aimingName(lastAim), lastLock, kAdsStateNames[lastState], adsSeconds, seconds, onSeconds, seconds, askedMax);
         adsSeconds = onSeconds = 0; askedMax = 0.0;
     });
-    lastShare = s.weight; lastLock = g_adsW; lastKey = key; lastState = g_adsState;
+    lastShare = s.weight; lastLock = g_adsW; lastKey = key; lastState = g_adsState; lastAim = aim;
     if (window.open) askedMax = std::max(askedMax, s.weight);
     eyeshare::publish(static_cast<float>(s.weight), now);
     if (s.tripped) {
@@ -14288,7 +14312,7 @@ void f106ShareTick(uint64_t now) noexcept {
     const bool shared = s.weight > 0.0;
     if (shared != g_f106ShareOn) {
         g_f106ShareOn = shared;
-        Log::get().note("ADS sight in both eyes (F106): %s (key %s, lock weight %.2f)", shared ? "shared" : "stereo", key ? "on" : "off", g_adsW);
+        Log::get().note("ADS sight in both eyes (F106): %s (key %s, aiming eye %s, lock weight %.2f)", shared ? "shared" : "stereo", key ? "on" : "off", nofoot::f162::aimingName(aim), g_adsW);
     }
 
 }

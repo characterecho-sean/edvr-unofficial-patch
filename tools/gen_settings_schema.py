@@ -448,9 +448,10 @@ def parse_ini(path):
                 # Migration metadata, not prose -- captured so the window can
                 # read an un-migrated file the way the runtime does.
                 spec = body[len('moved-from:'):].strip()
-                dm = re.match(r'^(\S+)\s*\(default\s+([^)]*)\)$', spec)
+                # `old.key (default X) (values a=b, c=d)`: both clauses optional, in that order; the value map is the installer merge's alone (iniedit.cpp movedKeys()).
+                dm = re.match(r'^(\S+)\s*(?:\(default\s+([^)]*)\))?\s*(?:\(values\s+[^)]*\))?$', spec)
                 if dm:
-                    movedFrom.append((dm.group(1), dm.group(2).strip()))
+                    movedFrom.append((dm.group(1), (dm.group(2) or '').strip()))
                 else:
                     movedFrom.append((spec, ''))
             elif body.lower().startswith('retired-default:'):

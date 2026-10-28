@@ -2643,7 +2643,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     // The comfort fade (comfort_fade.h), on a replayed pair as much as a fresh one: the level is told to each draw, so a hitch cannot flash the scene. Only a provider
     // that is here and answered version 5 has one to give (native_frame_client.h zeroes the rest); the menu quad is another layer and is not touched.
     const float fade=comfortFade();
-    // F106: the left eye's share of the right eye's image (fix.native_on_foot_ads_sight_both_eyes), also on a replayed pair: it is this frame's level, an argument of
+    // F106: the left eye's share of the right eye's image (fix.native_on_foot_ads_sight_eye = both), also on a replayed pair: it is this frame's level, an argument of
     // each draw, mapped with the views the pair was drawn with. The right eye's hidden area (the visibility mask the game's hidden-area mesh is made from) goes with it
     // while it is above 0.
     const float leftShare=leftEyeShare();
@@ -2693,7 +2693,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   }
   // The level the provider gave this frame, or 0: no provider, no frame read yet, or an answer that carried none.
   float comfortFade() const {return features.acquired()&&featureFrameKnown?comfort::sanitize(featureFrame.fadeAlpha):0.f;}
-  // F106: the LEFT eye's share of the right eye's image (fix.native_on_foot_ads_sight_both_eyes in the d3d11 half): a version 10 answer's leftEyeShare, else 0. A d3d11.dll
+  // F106: the LEFT eye's share of the right eye's image (fix.native_on_foot_ads_sight_eye = both in the d3d11 half): a version 10 answer's leftEyeShare, else 0. A d3d11.dll
   // from F89 to F105 sends its left eye darkening in the same slot with the same timing (the ADS lock's weight), which this reads as the share. Traced at each edge between
   // stereo and shared, and once a second while shared.
   float leftEyeShare() {
