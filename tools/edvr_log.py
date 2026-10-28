@@ -13328,14 +13328,16 @@ def _hj_f159_elbow(rows):
     """F159: the left elbow's stable pole on the two-handed guns (the non-pistol left arm), per item: the solved and FP elbows' heights over the shoulder, the seconds with the
     solved elbow within 1 cm of the shoulder's height (the longest run of them at the hip), the swivel's distance from the pole's reference, the reseeds, and the seed births by
     reason (the window lines' exact counts; the birth lines, at most one in 0.5 s, give the first cause and the figures). More than 2 s in a row with the elbow at the shoulder's
-    height at the hip is PARTIAL. Returns (text, notes), or None with no F159 line."""
+    height at the hip is PARTIAL. F165 (the left elbow's blend toward the body-down pole while crouched in the sights, appended to the same line): per item the weight's mean, and
+    in the sights crouched against the rest the solves, the ones with the blend applied and the elbow's plane change; 30 or more solves crouched in the sights with the blend applied
+    in none of them is NEVER APPLIED (the code never ran), applied in under half of them PARTIAL. Returns (text, notes, never), or None with no F159 line."""
     pole, births = rows.get("pole", []), rows.get("birth", [])
     if not pole and not births:
         return None
     items = collections.OrderedDict()
     for r in pole:
         items.setdefault(r["item"], []).append(r)
-    parts, raised = [], []
+    parts, raised, never, thin = [], [], [], []
     for item, rs in items.items():
         n = sum(int(r["n"]) for r in rs)
         if not n:
@@ -13350,6 +13352,22 @@ def _hj_f159_elbow(rows):
                          sum(int(r["reseeds"]) for r in rs)))
         if run > 2:
             raised.append("%s %d s" % (item, run))
+        # F165: the lines of a build before it carry no blend part
+        blend = [r for r in rs if r.get("bn") is not None]
+        if blend:
+            bn = sum(int(r["n"]) for r in blend)
+            adsn, adsapp = sum(int(r["bn"]) for r in blend), sum(int(r["bapp"]) for r in blend)
+            restn, restapp = sum(int(r["rn"]) for r in blend), sum(int(r["rapp"]) for r in blend)
+            wmean = sum(int(r["n"]) * float(r["bw"]) for r in blend) / bn if bn else 0.0
+            adsplane = sum(int(r["bn"]) * float(r["bpa"]) for r in blend) / adsn if adsn else 0.0
+            restplane = sum(int(r["rn"]) * float(r["rpa"]) for r in blend) / restn if restn else 0.0
+            parts[-1] += (", blend to the body-down pole (F165): weight mean %.2f, crouched in the sights %d solves (%d blended) with the elbow %.1f deg off the stance's plane "
+                          "(max %.1f), the rest %d solves (%d blended) %.1f deg (max %.1f)" % (
+                              wmean, adsn, adsapp, adsplane, max(float(r["bpam"]) for r in blend), restn, restapp, restplane, max(float(r["rpam"]) for r in blend)))
+            if adsn >= 30 and adsapp == 0:
+                never.append("the body-down blend was applied in none of %d solves crouched in the sights with %s" % (adsn, item))
+            elif adsn >= 30 and adsapp * 2 < adsn:
+                thin.append("%s: applied in %d of %d solves crouched in the sights" % (item, adsapp, adsn))
     keys = ("b_first", "b_item", "b_gen", "b_arms", "b_down", "b_cup", "b_ref", "b_unc", "b_f159")
     if pole:
         counts = [sum(int(r[k]) for r in pole) for k in keys]
@@ -13362,8 +13380,8 @@ def _hj_f159_elbow(rows):
         firsts = collections.Counter("%s after %s" % (r["why"], r["since"]) for r in births if r.get("since"))
         text += " (%d birth line(s)%s)" % (len(births), ": " + ", ".join("%s %d" % (k, v) for k, v in firsts.most_common(4)) if firsts else "")
     notes = (["the left elbow stayed within 1 cm of the shoulder's height for more than 2 s in a row at the hip on a two-handed gun (%s)" % ", ".join(raised)]
-             if raised else [])
-    return text, notes
+             if raised else []) + (["the body-down blend was thin crouched in the sights (%s)" % "; ".join(thin)] if thin else [])
+    return text, notes, never
 
 
 def _hj_f98a_elbow(rows, ctx):
@@ -13375,7 +13393,8 @@ def _hj_f98a_elbow(rows, ctx):
     if not sec:
         if f159 is None:
             return None
-        return ("PARTIAL" if f159[1] else "OK", f159[0] + ("; " + "; ".join(f159[1]) if f159[1] else ""))
+        said = f159[2] + f159[1]
+        return ("NEVER APPLIED" if f159[2] else "PARTIAL" if f159[1] else "OK", f159[0] + ("; " + "; ".join(said) if said else ""))
     items = collections.OrderedDict()
     for r in sec:
         items.setdefault(r["item"], []).append(r)
@@ -13426,9 +13445,13 @@ def _hj_f98a_elbow(rows, ctx):
                 notes.append("leading hypothesis: the forearm's twist limit (%d of %d flip seconds hit it with the axis 15 deg or more from down)" % (twist_n, flip_n))
             else:
                 notes.append("neither hypothesis fits the %d flip seconds (the axis 15 deg or more from down, the twist limit not hit)" % flip_n)
+    never = []
     if f159 is not None:
         text += "; " + f159[0]
         notes = notes + f159[1]
+        never = f159[2]
+    if never:
+        return ("NEVER APPLIED", text + "; " + "; ".join(never + notes))
     if notes:
         return ("PARTIAL", text + "; " + "; ".join(notes))
     return ("OK", text)
@@ -14624,7 +14647,11 @@ HEALTH_RULES = (
                  r"(?P<ceil>\d+); the chosen elbow (?P<disp>[\d.]+) deg from the pole's reference \(max (?P<dmax>[\d.]+)\); reseeds (?P<reseeds>\d+); seed births: first (?P<b_first>\d+), "
                  r"item (?P<b_item>\d+), generation (?P<b_gen>\d+), armsOk (?P<b_arms>\d+), standDown (?P<b_down>\d+), supportCup (?P<b_cup>\d+), refused (?P<b_ref>\d+), "
                  r"uncommitted (?P<b_unc>\d+), F159 (?P<b_f159>\d+); seconds with the elbow within 1 cm of the shoulder (?P<secs>\d+), at the hip (?P<hipsecs>\d+), longest run at the hip "
-                 r"(?P<run>\d+) s" % ((_HN,) * 6)),
+                 r"(?P<run>\d+) s"
+                 # F165: the blend toward the body-down pole while crouched in the sights, appended to the same line (builds before F165 print none)
+                 r"(?:; elbow blend to the body-down pole \(F165\): weight mean (?P<bw>[\d.]+); in the sights crouched (?P<bn>\d+) solves, (?P<bapp>\d+) blended, the elbow "
+                 r"(?P<bpa>[\d.]+) deg off the stance's plane \(max (?P<bpam>[\d.]+)\); the rest (?P<rn>\d+) solves, (?P<rapp>\d+) blended, (?P<rpa>[\d.]+) deg "
+                 r"\(max (?P<rpam>[\d.]+)\))?" % ((_HN,) * 6)),
         ("birth", r"native on foot left elbow seed \(F159\): born by (?P<why>\w+) \((?:reseeded in place|first cause (?P<since>\w+), no seed for (?P<absent>\d+) ms)\); base swivel "
                   r"(?P<base>%s) deg(?P<clamp>, clamped)?, from (?P<src>the FP elbow's pole|the legacy pole|the body-down pole); seeded elbow (?P<seeded>%s) cm over the shoulder, the FP "
                   r"elbow (?P<fp>%s) cm; the left hand (?P<err>[\d.]+) cm off its grip; armed ramp (?P<ramp>[\d.]+); stance (?P<stance>\w+); head pitch (?P<pitch>%s deg|unread)"
@@ -15619,6 +15646,7 @@ def self_test_health():
     f140reader_path = os.path.join(repo_root(), "src", "d3d11", "journal_loadout_reader.h")
     f158_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f158.h")
     f159_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f159.h")
+    f165_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f165.h")
     f160_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f160.h")
     f161_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f161.h")
     f154_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f154.h")
@@ -15635,6 +15663,7 @@ def self_test_health():
         f140readersrc = read_text(f140reader_path)
         f158src = read_text(f158_path)
         f159src = read_text(f159_path)
+        f165src = read_text(f165_path)
         f160src = read_text(f160_path)
         f161src = read_text(f161_path)
         f154src = read_text(f154_path)
@@ -15695,6 +15724,15 @@ def self_test_health():
             fmts[key] = health_c_format(f159src, needle)
         if fmts[key] is None:
             raise AssertionError("native_on_foot_f159.h has no format holding %r: the --health rule that reads it is out of date" % needle)
+        return health_render(fmts[key], vals)
+
+    def R165(needle, *vals):
+        """F165's part of the F159 window line (appendSummary in native_on_foot_f165.h), from its own format literal."""
+        key = "f165:" + needle
+        if key not in fmts:
+            fmts[key] = health_c_format(f165src, needle)
+        if fmts[key] is None:
+            raise AssertionError("native_on_foot_f165.h has no format holding %r: the --health rule that reads it is out of date" % needle)
         return health_render(fmts[key], vals)
 
     def R160(needle, *vals):
@@ -16917,6 +16955,39 @@ def self_test_health():
               has=["more than 2 s in a row at the hip", "(1 birth line(s): armsOk after standDown 1)"], lacks=["UNPARSED"])
         check("F159 elbow: a line that drifted from its pattern is unparsed", ["native on foot left elbow pole (F159) 10 s: something else"], 4, [("UNPARSED", F98)])
         check("F159 elbow: a birth line that drifted from its pattern is unparsed", ["native on foot left elbow seed (F159): born somewhere"], 4, [("UNPARSED", F98)])
+
+        # ---- F165: the left elbow's blend toward the body-down pole while crouched in the sights (a part of the F159 window line) ----
+        def blend165(w=0.62, adsn=300, adsapp=300, adsplane=12.0, adsmax=20.0, restn=600, restapp=0, restplane=9.0, restmax=30.0):
+            """F165's part of the F159 window line, from the DLL's own format (appendSummary, native_on_foot_f165.h)."""
+            return R165("; elbow blend to the body-down pole (F165)", w, adsn, adsapp, adsplane, adsmax, restn, restapp, restplane, restmax)
+
+        SHOTGUN165 = "$wpn_m_shotgun_plasma_name;"
+        check("F165 blend: crouched in the sights, the blend applied in every solve",
+              [elbow98(SHOTGUN165), pole159(SHOTGUN165) + blend165()], 0, [("OK", F98)],
+              has=["blend to the body-down pole (F165): weight mean 0.62, crouched in the sights 300 solves (300 blended) with the elbow 12.0 deg off the stance's plane (max 20.0), "
+                   "the rest 600 solves (0 blended) 9.0 deg (max 30.0)"], lacks=["UNPARSED", "never", "was thin"])
+        check("F165 blend: crouched in the sights and the blend applied in none of 120 solves is a feature that never ran",
+              [elbow98(SHOTGUN165), pole159(SHOTGUN165, n=720, hipn=720) + blend165(w=0.0, adsn=120, adsapp=0, adsplane=40.0, adsmax=48.0, restn=600)], 3, [("NEVER APPLIED", F98)],
+              has=["the body-down blend was applied in none of 120 solves crouched in the sights with " + SHOTGUN165], lacks=["UNPARSED"])
+        check("F165 blend: the same fault on the F159 line alone (the F98a line missing) is read, not dropped",
+              [pole159(SHOTGUN165, n=720, hipn=720) + blend165(w=0.0, adsn=120, adsapp=0, restn=600)], 3, [("NEVER APPLIED", F98)],
+              has=["the body-down blend was applied in none of 120 solves"], lacks=["UNPARSED"])
+        check("F165 blend: applied in under half of the solves crouched in the sights is thin",
+              [elbow98(SHOTGUN165), pole159(SHOTGUN165, n=700, hipn=700) + blend165(adsn=100, adsapp=20, restn=600)], 0, [("PARTIAL", F98)],
+              has=["the body-down blend was thin crouched in the sights (" + SHOTGUN165 + ": applied in 20 of 100 solves crouched in the sights)"], lacks=["UNPARSED", "never"])
+        check("F165 blend: under 30 solves crouched in the sights is too few to call the blend absent",
+              [elbow98(SHOTGUN165), pole159(SHOTGUN165, n=629, hipn=629) + blend165(w=0.0, adsn=29, adsapp=0, restn=600)], 0, [("OK", F98)],
+              has=["crouched in the sights 29 solves (0 blended)"], lacks=["UNPARSED", "never", "was thin"])
+        check("F165 blend: a flight with no crouched solve (the hip and the sights standing) is not judged absent",
+              [elbow98(SHOTGUN165), pole159(SHOTGUN165, n=900, hipn=900) + blend165(w=0.0, adsn=0, adsapp=0, adsplane=0.0, adsmax=0.0, restn=900, restapp=0)], 0, [("OK", F98)],
+              has=["crouched in the sights 0 solves (0 blended) with the elbow 0.0 deg"], lacks=["UNPARSED", "never", "was thin"])
+        check("F165 blend: a line from a build before F165 (no blend part) reads as before",
+              [elbow98(SHOTGUN165), pole159(SHOTGUN165)], 0, [("OK", F98)], has=["left elbow pole (F159): " + SHOTGUN165 + " 10 s: 900 solves"], lacks=["F165", "UNPARSED"])
+        check("F165 blend: two windows add up, the plane change weighted by the solves",
+              [elbow98(SHOTGUN165), pole159(SHOTGUN165, n=400, hipn=400) + blend165(w=0.5, adsn=100, adsapp=100, adsplane=20.0, adsmax=25.0, restn=300, restplane=10.0, restmax=15.0),
+               elbow98(SHOTGUN165), pole159(SHOTGUN165, n=400, hipn=400) + blend165(w=1.0, adsn=300, adsapp=300, adsplane=10.0, adsmax=18.0, restn=100, restapp=0, restplane=30.0, restmax=44.0)], 0,
+              [("OK", F98)], has=["weight mean 0.75, crouched in the sights 400 solves (400 blended) with the elbow 12.5 deg off the stance's plane (max 25.0), the rest 400 solves (0 blended) 15.0 deg (max 44.0)"],
+              lacks=["UNPARSED"])
 
         # ---- F161: the left arm's distance to the eye, per context (the hip or ADS, standing or crouched) ----
         F161 = "left arm to the eye (F161)"

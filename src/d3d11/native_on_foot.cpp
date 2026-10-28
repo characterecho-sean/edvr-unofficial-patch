@@ -74,6 +74,7 @@
 #include "native_on_foot_f161.h"   // F161: the left arm's distance to the eye, measured (pure parts)
 #include "native_on_foot_f162.h"   // F162: the ADS sight eye, both | right | left (the key's text, the aiming eye; pure parts)
 #include "native_on_foot_f163.h"   // F163: the crouched stance from the animated neck's drop, which holds in the sights (pure parts)
+#include "native_on_foot_f165.h"   // F165: the left elbow's body-down pole blended in while crouched in the sights, for every two-handed gun (pure parts)
 #include "xinput_watch.h"         // F135: the pad's Start and Back edges, evidence for the menu probe only
 #include "native_on_foot_f109.h"   // F109: look to aim on foot, the player's own turn in ADS, snap or smooth turning (pure parts)
 #include "native_on_foot_f129.h"   // F129: look to aim reads its turn from the player's own look processor; the look path instrument (pure parts)
@@ -16277,6 +16278,9 @@ struct F98Left {
     nofoot::f159::Counters f159;
     // F161: the eye as drawn against the left upper arm and the elbow as finally written, per context (the hip or ADS, standing or crouched), on a line of its own.
     nofoot::f161::Counters f161;
+    // F165: the stable-pole solves' blend toward the body-down pole while crouched in the sights: the weight asked for, the blend applied, the elbow's plane change, in the sights
+    // crouched and the rest (appended to F159's line).
+    nofoot::f165::Counters f165;
 };
 std::atomic<uint32_t> g_f98Seq{0};
 F98Left g_f98;
@@ -18766,6 +18770,9 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
         bool f159Measured = false, f159Ceiling = false, f159Hip = true, f159Reseed = false;
         uint8_t f159Birth = 0xFF;
         double f159PrefOverM = 0.0, f159SolvedOverM = 0.0, f159FpOverM = 0.0, f159DispDeg = 0.0;
+        // F165 (the left arm's non-pistol stable pole): the blend weight toward the body-down pole (crouched weight x ADS detach weight) and whether the blend was applied
+        bool f165Applied = false;
+        double f165W = 0.0;
         double poseHand[3] = {}, poseTarget[3] = {}, posePreferred[3] = {}, poseAxis[3] = {}, poseRadial[3] = {}, poseWeight = 0.0, poseViolationM = 0.0;
         double poseOutSign = 1.0, poseElbowOutM = nofoot::kIkElbowOutM;
         bool poseActualValid = false;
@@ -19632,7 +19639,8 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
                 stablePoleFallback = stable.usedFallback;
                 o.physicalPoleStable = true;
                 // Keep the authored-pose acquisition ramp; at weight 1 this is the transported physical pole's exact solution.
-                theta = wSolve * nofoot::ikWrapPi(stable.theta);
+                double poleTheta165 = nofoot::ikWrapPi(stable.theta);   // F165: the pole's own swivel (F159's reseed replaces it below), before the ramp and the blend
+                theta = wSolve * poleTheta165;
                 if (stable.transportedReference) stablePoleReferenceTheta = tb.angleOf(stable.reference);
                 if (side == 0) {
                     // F159: the left elbow's pole. The preferred elbow is the transported reference placed on the circle; when it is within 1 cm of the shoulder's height or above
@@ -19655,7 +19663,8 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
                             o.poseOutWaived = true;   // the body-down pole replaces the model-X half-space for this solve, as F81's pistol and F84's rifle support do
                             o.f159Reseed = true;
                             o.f159Birth = nofoot::f159::kWhyReseed;
-                            theta = wSolve * nofoot::ikWrapPi(down.theta);
+                            poleTheta165 = nofoot::ikWrapPi(down.theta);
+                            theta = wSolve * poleTheta165;
                             stablePoleReferenceTheta = tb.angleOf(down.reference);
                             std::memcpy(seed.axis, down.axis, sizeof(seed.axis));
                             std::memcpy(seed.reference, down.reference, sizeof(seed.reference));
@@ -19684,13 +19693,30 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
                         }
                     }
                 }
+                // F165: crouched in the sights the left elbow of every two-handed gun takes the body-down pole (the pistol's, F84's rifle support's, F159's reseed's), by w = the crouched
+                // weight (F163) x the ADS detach weight, along the shorter way round the circle from the pole's swivel (nofoot::f165::blendPole). w = 0 (standing, or at the hip) leaves
+                // theta as it was, bit for bit. The seed (axis, reference) is not touched: leaving the sights or standing up returns along the pole's own angle. F159's reseed cannot fight
+                // this: it replaces the pole's swivel with ikPistolDownSwivel's (the same function and arguments as blendPole's), and a blend of that angle toward itself is itself.
+                // The model-X half-space is waived as in those paths (o.poseOutWaived); the ceiling stays (blendPole's clamp).
+                if (side == 0 && pinWanted && pinCall.valid) {
+                    const double w165 = nofoot::f165::blendWeight(pinCall.postureW, pinCall.detachW);
+                    o.f165W = w165;
+                    if (w165 > 0.0) {
+                        const nofoot::f165::Blend mix = nofoot::f165::blendPole(tb, poleTheta165, w165, seed.previous, outSign, elbowOutM, trimRad);
+                        if (mix.applied) {
+                            theta = wSolve * mix.theta;
+                            o.f165Applied = true;
+                            o.poseOutWaived = true;
+                        }
+                    }
+                }
                 // F98a: the seed's axis and reference are kept, so the next frame transports the reference from the seed in one rotation. Carried frame to
                 // frame (F76 to F97), the reference picked up the rotation of every loop the arm's axis went round (the aim's pitch, the pin moving the body with
                 // the head's pitch, F82's torso yaw) and the elbow came to rest up to 90 deg off the stance's own plane; from the seed it depends on where the
                 // arm is now, not on how it got there. Only the previous radial (the fallback's) moves with the arm.
                 physicalPoleCommit[side] = seed;
                 o.f98SeedKept = true;
-                o.f98Source = 1;
+                o.f98Source = o.f165Applied && o.f165W >= 0.5 ? 2 : 1;   // F165: mostly the body-down pole (counted with F84's and the pistol's, F124's near-vertical figures)
                 {
                     double sa[3];
                     o.f98SeedSpanDeg = nofoot::ikUnit(seed.axis, sa) ? std::acos(std::fmax(-1.0, std::fmin(1.0, nofoot::ikDot(sa, tb.dir)))) * 180.0 / nofoot::kIkPi : 0.0;
@@ -20537,6 +20563,13 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
                 sample159.reseed = so[0].f159Reseed;
                 sample159.birth = so[0].f159Birth;
                 f.f159.add(sample159);
+                // F165: the same solves' blend weight, whether the blend was applied and the elbow's plane change, in the sights crouched against the rest
+                nofoot::f165::Sample sample165;
+                sample165.weight = so[0].f165W;
+                sample165.planeDeg = so[0].hPlane;
+                sample165.applied = so[0].f165Applied;
+                sample165.crouchedAds = nofoot::f165::crouchedAds(pinCall.postureW, pinCall.detachW);
+                f.f165.add(sample165);
             }
             // F161: the eye as drawn against the left upper arm (the upper arm joint to the forearm joint) and the elbow, as finally written, in this call's context
             if (pinCall.f97EyeDrawnOk && pl.ok[0]) {
@@ -21629,8 +21662,9 @@ void f125ElbowClose(uint64_t now, bool keepRun = false) noexcept {
                         f98.twistLimited, down98, w.swung, w.flips, w.nearCount, w.twisted, w.nearTwisted);
         // F159: the left elbow's stable pole in the same window, on a line of its own (F98a's has no room left under the log's 1200 bytes)
         if (f98.f159.n) {
-            char line159[1100];
+            char line159[1180];
             nofoot::f159::formatSummary(line159, sizeof(line159), w.seconds, w.item, f98.f159, w.high);
+            nofoot::f165::appendSummary(line159, sizeof(line159), f98.f165);   // F165: the blend's weight and the elbow's plane change, in the sights crouched against the rest
             Log::get().note("%s", line159);
         }
         // F161: the eye against the left upper arm and the elbow, per context, on a line of its own

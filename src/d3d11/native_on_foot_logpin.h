@@ -134,6 +134,7 @@ template<class T> inline void elbow(T& d, const T& s) noexcept {
     for (uint32_t i = 0; i < 3; ++i) d.src[i] += s.src[i];
     d.f159.merge(s.f159);
     d.f161.merge(s.f161);
+    d.f165.merge(s.f165);
     if (s.downStepMax > d.downStepMax) {
         d.downStepMax = s.downStepMax; d.downStepAng = s.downStepAng; d.downStepTwist = s.downStepTwist;
     }
