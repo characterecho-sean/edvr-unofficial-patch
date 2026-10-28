@@ -6,7 +6,8 @@ game's own zoom as a magnified picture inside the scope's lens. The rest of the 
 
 ## Status
 
-- **State: S0 FLAT FLOWN, S0 VR NOT FLOWN** (`d90db147`, measure only, no key). No rendering code. Branch
+- **State: S0 FLAT AND VR FLOWN** (`d90db147`, measure only, no key; section 7). Q2 settled (VR has no zoom field: flat table);
+  Q4 and Q6 open (no eye dump yet). No rendering code. Branch
   `claude/vr-scope-zoom-design-6ef950`.
 - **Flat zoom MEASURED** (section 7, Epic 2026-10-28): the camera's FOV (+0x280) narrows from `HumanoidFOV` 56.327 deg to 15.000 deg
   for the scoped Executioner (M 4.07) and to 35.000 deg for the bare copy (M 1.70), with a 0.8 s ramp. Open: kind 0 or kind 3 as the
@@ -21,7 +22,8 @@ game's own zoom as a magnified picture inside the scope's lens. The rest of the 
     HumanoidAimAssistComponent (setter 0x1A8C350): aim-assist tuning, not the "zoom/FOV floats" the analysis note named.
   - ruled out: EDVR's F8 census FOV (`RC+0x16C`) as a VR zoom field, because it read -1.000 through every ADS press of
     `edvr_gfx_20261028_060723`, the scoped plasma sniper included.
-  - Left for VR: the readout's camera FOVs (+0x16C, +0x17C), the refresh hook's cameras (flat's source), the stat `ScopeMagnification`.
+  - ruled out (S0 VR, section 7): RC+0x16C/+0x17C and the refresh hook's cameras as VR zoom fields (-1, and nothing narrowed).
+    Unread: the stat `ScopeMagnification`. M in VR comes from the flat table.
 - **Open questions** (each has a log line in the first flight, section 6):
   Q1 the zoom per (item, scope); Q2 which field carries it per frame (flat, VR); Q3 absolute FOV or relative to the player's FOV option;
   Q4 what is drawn in the lens (see-through glass, opaque screen, reticle); Q5 the lens's footprint and the sight point's offset in it;
@@ -29,8 +31,8 @@ game's own zoom as a magnified picture inside the scope's lens. The rest of the 
 - **ruled out (cost or brief):** a third camera pass (C), magnifying in DLSS's input (E), a whole-view FOV change (D). Section 2.
 - **Analysis hand-over FILED** (analysis `1547986`): `analysis\decomp\verify_20261028_ads_zoom_receiver.txt` (the receiver, the correction to
   `analysis\decomp\verify_20261027_ads_sight_line.txt` section 1, the candidates).
-- **Next flight: S0 VR** on Epic in VR mode (installed `d90db147`; Q2 VR, Q4 to Q6; card in section 6). The flat card still lacks the other weapons and a
-  `HumanoidFOV` change (Q3).
+- **Next flight: the same build** on Epic: VR, an eye dump (INSERT) in scoped and in bare ADS (Q4 to Q6); flat, the other weapons and a
+  `HumanoidFOV` change (Q1, Q3). Section 7.
 - **Key (after S0, on the maintainer's word):** `fix.native_on_foot_ads_scope_zoom` = on | off. Section 5.
 
 ## 1. Where the game keeps the zoom
@@ -214,3 +216,23 @@ and 4 are the scoped copy and 2 and 3 the bare one.
 - **Consequence:** the scoped Executioner's M (3.3 to 4.1) is past section 6's 2.5 line for option A. So B3 (the left eye rendered as the
   zoomed view) goes to the maintainer, and the VR S0 flight still decides Q2 (VR) and Q4 to Q6. The bare copy zooms too (1.7), so its sight
   needs the same Q4 answer.
+
+**2026-10-28, S0 VR flight** (Epic in VR mode, `edvr_gfx_20261028_155111`, `d90db147`, build matched). `--health`: S0 vr, geometry and
+census all OK. Two presses, the scoped copy then the bare one, both settled (w = 1.0 for 4.2 s and 4.5 s).
+- ruled out: RC+0x16C and +0x17C as a VR zoom field, because both read -1.0000 at the hip and in ADS for both copies.
+- ruled out: the refresh hook's cameras as a VR zoom field, because none narrowed. The eyes (kind 5, 93.6 deg) held. The only one that moved
+  was a square kind 0 camera at 90.5 deg in ADS; its 160.9 deg hip is the stale-hip limit.
+- So VR computes no zoom that S0 can see, and M comes from the flat table (section 1). The eyes' p11 held at 0.9390 (the control).
+- Q5: the right eye's c sits 0.87 deg (scoped) and 1.27 deg (bare) off that eye's axis, at px (821, 995) of 2016x2017. The left eye's c is
+  17 deg off its axis. The game's |E - S| is 28.67 cm scoped against EDVR's 17.68 cm (EDVR keeps the bare depth, 11 cm nearer: F149's +5
+  and +16 cm). Bare: 17.97 against 17.97.
+- Q4 and Q6, NOT settled:
+  - The probe ran in one eye's lit-colour target (its draws: the lighting resolve `7E38A6AA1269C901/7CECABDE34FFBE9E` and the sky
+    `F8FA801F2CB1E27C/84965D3C050FB01B`). It declined 1284 draws of other formats (its one atlas takes the first target's format, so the
+    G-buffer is never seen).
+  - It wrote "eye 0", from `eyeIndexFor`'s first-seen order, which does not name the physical eye.
+  - In that eye the sky drew over all four windows, so no opaque depth was there. Additive instanced strips (VS `0357BBB2DEE43C1F`) and an
+    alpha UI quad (VS `4EF6DDB075A927FA`, PS `098C0764D28FC42C`, 8 deg down-left) also drew; both differ between the copies.
+  - No eye dump was taken. The census rule's OK overstates what this run shows.
+- **Next, the same build in one Epic session:** VR, an eye dump (INSERT) in scoped ADS and one in bare ADS (Q4 to Q6 from the picture;
+  the dump also re-runs the probe at S0's points). Flat, the other weapons and a `HumanoidFOV` change (Q1, Q3).
