@@ -58,7 +58,7 @@
 
 * **Next (2026-10-27, last entry):** AA on's +1.65 ms is per-draw
   classifiers. ui-depth memo FLOWN: exact, -0.21 ms (shipped, b1561dff).
-  Shadow 1c FLOWN: 29-30% would take, 0/28M wrong. 1d (bands) BUILT.
+  Shadow 1d FLOWN: 44-51% would take, 0/65M wrong. Next: merge bands, Ph 2.
 
 ## Frame budget philosophy
 
@@ -4654,6 +4654,51 @@ and 1129 characters.
 A risk the comparison will show: weaponMotionWants reads
 `g.sourceFrame == g.frame`, which can flip mid-frame and is not in the
 key.
+
+**Phase 1d flown (2026-10-27, Steam log `edvr_gfx_20261027_191314.log`,
+build 1de66d63; same rig).** Loaded in docked at Cranfield at 19:15:10.
+AA was on, then F7 off from 19:15:59 to 19:17:13, then on.
+
+| Window | Eye | Off-screen | All owner X draws | Compared | Mismatches |
+|---|---|---|---|---|---|
+| 12600 (AA on) | 59.7% | 28.8% | 44% | 21.1M | 0 |
+| 14400 (AA on) | 57.4% | 37.4% | 46.5% | 21.4M | 0 |
+| 16200 (mostly AA off) | 58.1% | 45.7% | 51% | 22.4M | 0 |
+
+About 65M would-take draws were compared across the three windows,
+with no mismatch. The weapon risk did not appear.
+
+**Refusals now,** per window as a share of owner X draws:
+
+| Reason | Share | Note |
+|---|---|---|
+| band changed | about 20% | 4.8-5.2k a frame |
+| no ticket | about 19% | |
+| dynamic | 3-10% | camera watch about 5% with AA on |
+| count 6 or under | about 5% | |
+| key moved | about 3% | |
+| open | about 2.5% | |
+
+**The no-ticket draws.** Draws of 6 or under (1.5-1.8k a frame eye,
+about 1.2k off-screen) and open draws (about 0.9k eye, 1.0-1.2k
+off-screen) make up nearly all of them. The scrim's one-entry PsSrv0
+cache thrashes when draws alternate views.
+
+**Band changed is now the largest refusal.** The same key alternates
+between meshes of 64 or under and over 64. The bands exist only
+because a band A draw asks `srv0IsPanelSized`, the PsSrv0-keyed panel
+memo, and a band B draw does not. When that memo already answers "not
+panel" for the bound PsSrv0, a band A draw takes exactly band B's path,
+and the two bands can share a ticket. The step-0 grep found nothing
+else that distinguishes A from B: loader 30 is armed, wake counts are
+behind a term, and scrim is open per draw.
+
+**Next.** Merge bands A and B whenever the PsSrv0 panel memo reads "not
+panel". That is exact by the grep, and the comparison verifies it. It
+should take most of the 20%, to about 65-70%. Then Phase 2: actually
+skip. The comparison keeps running on rotating unsampled frames, and
+the step clock gets the `fast` step. That is the first measurement of
+the real saving.
 
 **The Phase 2 flight should show:**
 - the `fast` step's calls and cost;
