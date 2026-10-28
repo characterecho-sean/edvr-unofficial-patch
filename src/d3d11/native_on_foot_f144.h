@@ -134,11 +134,23 @@ struct Line {
         return true;
     }
 };
-// The session's lines, by (item name, scope state): the exact Status.json name, so a weapon drawn again later finds its line.
+// The held copy (F150). Two copies of one item in a loadout (a scoped and an unscoped plasma sniper) read the same name, and while the loadout cannot say which copy is in hand
+// (the scope state unknown) they must not share a line: each press would start on the other copy's line and slide to its own. The scope tells the copies apart whenever it is
+// known (yes or no), so the copy is 0 there. Otherwise it is 1 + the game's selected slot id (the native selection the F83 hook reads: 2 the first primary, 3 the second, 4 the
+// secondary, 5 the tool in the flight edvr_gfx_20261028_060723), and kNoCopy when the selection cannot be read: no line is kept for an unidentified copy, or used.
+constexpr uint32_t kNoCopy = ~0u;
+inline bool scopeTellsCopies(int scopeState) noexcept { return scopeState == loadout::kScopeYes || scopeState == loadout::kScopeNo; }
+inline uint32_t copyKey(int scopeState, bool selectionHeld, uint32_t selectedId) noexcept {
+    if (scopeTellsCopies(scopeState)) return 0;
+    if (!selectionHeld || selectedId >= kNoCopy - 1u) return kNoCopy;
+    return 1u + selectedId;
+}
+// The session's lines, by (item name, scope state, copy): the exact Status.json name, so a weapon drawn again later finds its line.
 struct Entry {
     bool used = false;
     char name[64] = {};
     int scope = 0;
+    uint32_t copy = 0;         // F150: copyKey of the copy the line was learned on (0 whenever the scope was known)
     uint64_t lastUse = 0;
     Line line;
     uint64_t gameFrames = 0;   // frames the sight lock took its shift from this line (this session)
@@ -146,16 +158,16 @@ struct Entry {
 struct Cache {
     static constexpr int kN = 16;
     Entry e[kN];
-    Entry* find(const char* name, int scope) noexcept {
-        if (!name) return nullptr;
+    Entry* find(const char* name, int scope, uint32_t copy = 0) noexcept {
+        if (!name || copy == kNoCopy) return nullptr;
         for (Entry& x : e)
-            if (x.used && x.scope == scope && std::strcmp(x.name, name) == 0) return &x;
+            if (x.used && x.scope == scope && x.copy == copy && std::strcmp(x.name, name) == 0) return &x;
         return nullptr;
     }
-    // The line for (name, scope), made when there is none (the least recently used entry is replaced). nullptr for no name.
-    Entry* get(const char* name, int scope, uint64_t nowMs) noexcept {
-        if (!name || !name[0]) return nullptr;
-        if (Entry* f = find(name, scope)) {
+    // The line for (name, scope, copy), made when there is none (the least recently used entry is replaced). nullptr for no name or an unidentified copy.
+    Entry* get(const char* name, int scope, uint64_t nowMs, uint32_t copy = 0) noexcept {
+        if (!name || !name[0] || copy == kNoCopy) return nullptr;
+        if (Entry* f = find(name, scope, copy)) {
             f->lastUse = nowMs;
             return f;
         }
@@ -171,6 +183,7 @@ struct Cache {
         victim->used = true;
         std::snprintf(victim->name, sizeof(victim->name), "%s", name);
         victim->scope = scope;
+        victim->copy = copy;
         victim->lastUse = nowMs;
         return victim;
     }

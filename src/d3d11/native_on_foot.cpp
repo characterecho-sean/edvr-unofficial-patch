@@ -64,7 +64,7 @@
 #include "native_on_foot_f143.h"   // F143: the ADS eye on the game's sight line, the coat's clip modifiers (pure parts)
 #include "native_on_foot_f144.h"   // F144: the settled sight line per (item, scope), the coat's Gear_Back and first-person census, the readout placed per role (pure parts)
 #include "native_on_foot_f145.h"   // F145: the weapon UI's tag slots given back, the proof against the seed (pure parts)
-#include "native_on_foot_f149.h"   // F149: the ADS eye depth from the game's ADS camera, never further forward than the key (the table, the rule; pure parts)
+#include "native_on_foot_f149.h"   // F149/F150: the ADS eye depth, one per weapon (the game's unscoped ADS camera plus a back-off), never further forward than the key (the tables, the rule; pure parts)
 #include "xinput_watch.h"          // F135: the pad's Start and Back edges, evidence for the menu probe only
 #include "native_on_foot_f109.h"   // F109: look to aim on foot, the player's own turn in ADS, snap or smooth turning (pure parts)
 #include "native_on_foot_f129.h"   // F129: look to aim reads its turn from the player's own look processor; the look path instrument (pure parts)
@@ -189,7 +189,7 @@ std::atomic<bool> g_rotCalKey{false};   // F61 (TEMPORARY): fix.native_on_foot_r
 // queues the look input (game input units) and the update hook takes it; the processor hook publishes the game's applied deltas (cumulative,
 // the game's sign, one writer: the game thread) split into ours and the player's, and the gain it measured. Atomics only: no locks in the hooks.
 std::atomic<bool> g_adsAimKey{true};                          // the key as the frame thread last read it (default on; F92b: a user key, live mid-press)
-std::atomic<float> g_adsEyeDistM{0.15f};                      // F70: fix.native_on_foot_ads_eye_distance_cm in metres (0..0.30), live; F149: the furthest forward the ADS eye sits
+std::atomic<float> g_adsEyeDistM{0.15f};                      // F70: fix.native_on_foot_ads_eye_distance_cm in metres (0..0.30), live; F149/F150: the furthest forward the ADS eye sits
 std::atomic<float> g_weaponViewOffsetCm{static_cast<float>(nofoot::kWeaponViewOffsetDefaultCm)}; // fix.native_on_foot_weapon_view_offset_cm, live
 double g_adsEyeCmLast = -1.0;                                 // the value last logged (frame thread)
 std::atomic<float> g_f87SettleS{static_cast<float>(nofoot::f87::kSettleDefaultS)};   // F87h (TEMPORARY): fix.native_on_foot_standing_height_settle_s, live
@@ -1004,15 +1004,15 @@ void readKey() {
         g_rotCalKey.store(rc, std::memory_order_relaxed);
     }
     // F70 (live, the Native on foot page's "ADS eye distance"): the furthest forward of the game's own aiming eye point (the FP animation's joint 14) the eye sits while
-    // aiming down sights: 0..30 cm, default 21. Higher brings the sights closer. F149: where the held weapon's own ADS camera is further back than this, the eye sits at that
-    // camera (native_on_foot_f149.h); the eye never goes within 6 cm of an FP weapon point it can read on the sight line.
+    // aiming down sights: 0..30 cm, default 21. Higher brings the sights closer. F149/F150: where the held weapon's own depth (the game's unscoped ADS camera plus the weapon's
+    // back-off, native_on_foot_f149.h) is further back than this, the eye sits at that depth; the eye never goes within 6 cm of an FP weapon point it can read on the sight line.
     {
         const double cm = nofoot::adsEyeDistanceClampCm(
             static_cast<double>(cfg.getFloat("fix.native_on_foot_ads_eye_distance_cm", static_cast<float>(nofoot::kAdsEyeDistDefaultCm))));
         if (first || cm != g_adsEyeCmLast)
-            Log::get().note("native on foot ADS eye distance (F70/F149): fix.native_on_foot_ads_eye_distance_cm = %.0f cm -- while aiming down sights your eye sits at most %.0f cm "
+            Log::get().note("native on foot ADS eye distance (F70/F150): fix.native_on_foot_ads_eye_distance_cm = %.0f cm -- while aiming down sights your eye sits at most %.0f cm "
                             "forward of the game's own aiming eye point (the sight line through the FP povCamera joint 14), %.0f cm at most 30, and no further forward than the held "
-                            "weapon's own ADS camera (the per-second ADS eye point line names it); the sights look closer the larger it is; the eye never goes within 6 cm of an "
+                            "weapon's own depth (the game's unscoped ADS camera plus a per-weapon back-off; the per-second ADS eye point line names it); the sights look closer the larger it is; the eye never goes within 6 cm of an "
                             "FP weapon point it can read on the sight line (the lock's clamp is %.0f cm in all)", cm, cm, cm, 100.0 * nofoot::kAdsSightClampM);
         g_adsEyeCmLast = cm;
         g_adsEyeDistM.store(static_cast<float>(cm / 100.0), std::memory_order_relaxed);
@@ -7076,6 +7076,14 @@ bool f83SelectionFresh(const F83SelectionRead& s) noexcept {
     const uint64_t now = f30Qpc(), freq = f66QpcFreq();
     return s.qpc != 0 && now >= s.qpc && freq != 0 && now - s.qpc <= freq / 4u;
 }
+// F150: the held copy for the F144 cache (nofoot::f144::copyKey): 0 where the scope state tells two copies of one item apart, else the game's selected slot id from this selection
+// (read fresh, an item selected), else kNoCopy. g_heldItemSerial is no copy's identity: it counts changes of the item's name, and a swap between two copies of one item
+// changes none.
+uint32_t heldCopyKey(int scopeState) noexcept {
+    F83SelectionRead sel;
+    const bool held = !nofoot::f144::scopeTellsCopies(scopeState) && f83SelectionRead(&sel) && f83SelectionFresh(sel) && sel.readable && !sel.suspended && sel.held;
+    return nofoot::f144::copyKey(scopeState, held, sel.selectedId);
+}
 void f83ObserveNativeSelection(void* activity) noexcept {
     nofoot::NativePrimarySelectionInput in;
     const uintptr_t a = reinterpret_cast<uintptr_t>(activity);
@@ -11406,7 +11414,7 @@ void bodyFilter(AlignRun& a, const double target[3], double dt) noexcept {
 
 // ---- F63/F70 (no key): the ADS sight lock, the frame thread's half (alignTick, before the eye alignment is published) ------------------
 // During actual active ADS, a fresh FP snapshot (joint 14, the FP povCamera), F_root and AMC sample (100 ms) drive the rendered eye toward P14w + k f
-// (k the ADS eye depth: F149, the user's ADS eye distance or the held weapon's own ADS camera where that is further back). F70a gives the full measured correction to one absolute target; missing data holds that target, and release or the guard
+// (k the ADS eye depth: F149/F150, the user's ADS eye distance or the held weapon's own depth where that is further back). F70a gives the full measured correction to one absolute target; missing data holds that target, and release or the guard
 // selects zero through the same critically damped filter. The head-aim ramp does not scale eye motion. The shift is clamped to 40 cm. The guard trips it off
 // when |e perpendicular| grows for 0.5 s, until the next ADS engage.
 struct AdsSightWin {
@@ -11433,10 +11441,11 @@ struct AdsSightWin {
     // metres) and the sight's NDC in the right eye at 0.3, 0.5 and 10 m ahead of the target eye point.
     double kWantedSum = 0.0, kEffSum = 0.0, alongErrSum = 0.0, alongErrAbsMax = 0.0, rootDriftNow = 0.0, rootDriftMax = 0.0, ndcD[3] = {0.3, 0.5, 10.0};
     uint32_t capped = 0, readableMax = 0;
-    // F149: k asked is the key or, where the held weapon's own ADS camera is further back, that camera (kWantedSum, metres, summed over the driving frames); the key (metres), the
-    // camera's depth (metres) and the frames of each source of it (nofoot::f149::Source), summed beside it.
-    double kKeySum = 0.0, kCameraSum[nofoot::f149::kSrcCount] = {};
-    uint32_t kCameraFrames[nofoot::f149::kSrcCount] = {};
+    // F149/F150: k asked is the key or, where the held weapon's own depth is further back, that depth (kWantedSum, metres, summed over the driving frames); the key (metres), the
+    // weapon's depth (metres), its base (the game's unscoped camera, or the settled line's E forward; metres) and the frames of each source of it (nofoot::f149::Source),
+    // summed beside it. The offset is the depth less the base.
+    double kKeySum = 0.0, kDepthSum[nofoot::f149::kSrcCount] = {}, kBaseSum[nofoot::f149::kSrcCount] = {};
+    uint32_t kDepthFrames[nofoot::f149::kSrcCount] = {};
     double ndc3[3][2] = {};
     bool ndc3Have = false;
     uint32_t opticBasisN = 0, opticEyeN = 0, opticNoEye = 0, opticBadBasis = 0;
@@ -11616,23 +11625,33 @@ void adsSightLog(uint32_t seconds, bool steady, bool hold, bool detailed) noexce
                           w.ndc3[1][1], w.ndcD[1], w.ndc3[2][0], w.ndc3[2][1], w.ndcD[2]);
         else
             std::snprintf(ndcText, sizeof(ndcText), "not available this second (no fresh right-eye rows, or a point behind the eye)");
-        // F149: where the game's ADS camera depth came from this second: one source over every driving frame, or each source's mean and frames
-        char camText[240];
+        // F149/F150: where the weapon's depth came from this second: one source over every driving frame, or each source's mean and frames. A source's text is the depth (base + offset)
+        // with its base (the game's unscoped camera depth) and its offset, in cm.
+        char camText[400];
         {
             namespace f149 = nofoot::f149;
             int used = 0;
-            for (int q = 0; q < f149::kSrcCount; ++q) used += w.kCameraFrames[q] ? 1 : 0;
-            auto mean = [&](int q) { return w.kCameraFrames[q] ? 100.0 * w.kCameraSum[q] / static_cast<double>(w.kCameraFrames[q]) : 0.0; };
-            if (used == 0 || (used == 1 && w.kCameraFrames[f149::kSrcNone]))
-                std::snprintf(camText, sizeof(camText), "%s", f149::sourceText(f149::kSrcNone));
-            else if (used == 1)
-                std::snprintf(camText, sizeof(camText), "%.1f cm from %s", mean(w.kCameraFrames[f149::kSrcSettled] ? f149::kSrcSettled : f149::kSrcTable),
-                              f149::sourceText(w.kCameraFrames[f149::kSrcSettled] ? f149::kSrcSettled : f149::kSrcTable));
-            else
-                std::snprintf(camText, sizeof(camText), "%.1f cm from the settled line on %u frames, %.1f cm from the table on %u, none on %u", mean(f149::kSrcSettled),
-                              w.kCameraFrames[f149::kSrcSettled], mean(f149::kSrcTable), w.kCameraFrames[f149::kSrcTable], w.kCameraFrames[f149::kSrcNone]);
+            for (int q = 0; q < f149::kSrcCount; ++q) used += w.kDepthFrames[q] ? 1 : 0;
+            auto part = [&](int q, char* out, size_t cap) {
+                const double frames = w.kDepthFrames[q] ? static_cast<double>(w.kDepthFrames[q]) : 1.0;
+                const double depth = 100.0 * w.kDepthSum[q] / frames, base = 100.0 * w.kBaseSum[q] / frames;
+                std::snprintf(out, cap, "%.1f cm (the game's unscoped camera %.1f cm, offset %+.1f cm) from %s", depth, base, depth - base, f149::sourceText(q));
+            };
+            std::snprintf(camText, sizeof(camText), "%s", f149::sourceText(f149::kSrcNone));
+            size_t len = 0;
+            for (const int q : {f149::kSrcSettled, f149::kSrcTable, f149::kSrcNone}) {
+                if (!w.kDepthFrames[q] || (used == 1 && q == f149::kSrcNone)) continue;
+                char one[160];
+                if (q == f149::kSrcNone) std::snprintf(one, sizeof(one), "%s", f149::sourceText(q));
+                else part(q, one, sizeof(one));
+                if (len >= sizeof(camText)) break;
+                const int wrote = used > 1 ? std::snprintf(camText + len, sizeof(camText) - len, "%s%s on %u frames", len ? ", " : "", one, w.kDepthFrames[q])
+                                           : std::snprintf(camText + len, sizeof(camText) - len, "%s", one);
+                if (wrote < 0) break;
+                len += static_cast<size_t>(wrote);
+            }
         }
-        Log::get().note("native on foot ADS eye point (F70/F75/F79): k %.1f cm asked (the key %.1f cm, the game's ADS camera %s), %.1f cm after the raw-P14 clearance cap (%s); the eye to the effective sight origin (raw P14, or calibrated rifle optic) + k f after the lock: "
+        Log::get().note("native on foot ADS eye point (F70/F75/F79): k %.1f cm asked (the key %.1f cm, the weapon's depth %s), %.1f cm after the raw-P14 clearance cap (%s); the eye to the effective sight origin (raw P14, or calibrated rifle optic) + k f after the lock: "
                         "along mean %+.2f max |%.2f| cm (target 0 +-0.5), perpendicular mean %.2f max %.2f cm (max 0.5); applied shift |%.1f| cm (clamp %.0f cm), "
                         "head-aim ADS weight mean %.2f (now %.2f); the pin input camera minus the job camera (world, cm) %+.1f %+.1f %+.1f against total expected %+.1f %+.1f %+.1f "
                         "(difference %.2f cm; |S| %.1f cm: the body is pinned to the unlocked head); the 3P root's world drift since the press: "
@@ -11751,7 +11770,7 @@ void adsSightTick(uint64_t now, double dt, const EyeSample& s) noexcept {
     bool f93Solved = false;          // F93b: the error was measured on the solved rendered eye (the right eye's rows of f93RowsFrame)
     uint32_t f93RowsFrame = ~0u;
     nofoot::AdsEyeCap eyeCap;
-    nofoot::f149::EyeDepth adsDepth;   // F149: the depth asked of the clearance cap this frame and where the game's ADS camera depth came from
+    nofoot::f149::EyeDepth adsDepth;   // F149/F150: the depth asked of the clearance cap this frame and where the weapon's depth came from
     // F70: the 3P root's world drift from where it stood when this press began (the AMC origin of the pin's input): the body must stay put while the eye moves.
     {
         static bool rootHave = false;
@@ -11796,7 +11815,7 @@ void adsSightTick(uint64_t now, double dt, const EyeSample& s) noexcept {
             if (opticBasisValid) { ++w.opticBasisN; w.opticYawSum += opticBasis.yawDeg; w.opticPitchSum += opticBasis.pitchDeg; }
             else { ++w.opticBadBasis; g_adsOpticBadBasis.fetch_add(1, std::memory_order_relaxed); }
             const double bodyRight[3] = {s.rows[0], s.rows[1], s.rows[2]}, cam[3] = {s.cam[0], s.cam[1], s.cam[2]};
-            // F70: the target eye point P14w + k f. k is the depth asked (F149: the user's setting, or the held weapon's own ADS camera where that is further back), capped so
+            // F70: the target eye point P14w + k f. k is the depth asked (F149/F150: the user's setting, or the held weapon's own depth where that is further back), capped so
             // the eye stays 6 cm behind any FP weapon point readable on the sight line:
             // the FP attaches (51, 52) and hands (37, 44) of the snapshot, in the world through the whole F_root. Usually none lies within 6 cm of the line, and the
             // depth asked stands (the 1 s line says which).
@@ -11810,13 +11829,33 @@ void adsSightTick(uint64_t now, double dt, const EyeSample& s) noexcept {
             char opticItemName[64] = {};
             const bool opticItemSnapshot = opticItemRead(&opticItemSerial, opticItemName);
             const uint32_t currentItemSerial = g_heldItemSerial.load(std::memory_order_acquire);
-            // F139/F140: the held item, coherent when its snapshot is the held item's now, and its scope state from the journal's loadout. F144: the settled line of the held (item, scope);
-            // F147: stood down, the hook's lines are not used any more: the table (F139) decides the shift, and F149's table the depth.
+            // F139/F140: the held item, coherent when its snapshot is the held item's now, and its scope state from the journal's loadout. F144: the settled line of the held (item, scope,
+            // copy); F150: the copy is told only while the scope state is unknown (two copies of one item, one with a scope and one without), by the game's selected slot, and a copy
+            // that cannot be told has no line; F147: stood down, the hook's lines are not used any more: the table (F139) decides the shift, and F149's table the depth.
             const bool itemOk = nofoot::f139::itemCoherent(opticItemSnapshot, opticItemSerial, currentItemSerial, opticItemName);
             const int scopeState = itemOk ? loadout::heldScope(opticItemName).state : loadout::kScopeUnknown;
-            nofoot::f144::Entry* ent = itemOk && !g_f141Down.load(std::memory_order_relaxed) ? g_f144Cache.find(opticItemName, scopeState) : nullptr;
-            // F149: the one depth for the frame: min(the key, the game's ADS camera depth for the held (item, scope): its settled line, else the baked table, else none), clamped to
-            // 0..30 cm. The clearance cap takes it, and what it returns is the k of the eye point, the error to it and the sight line's shift below.
+            const uint32_t heldCopy = itemOk ? heldCopyKey(scopeState) : nofoot::f144::kNoCopy;
+            {   // F150: the copy this press runs on, when the scope state cannot say (a line on each change, 32 a session)
+                static char copyItem[64] = {};
+                static uint32_t copyLast = 0, copyLines = 0;
+                if (itemOk && heldCopy != 0 && (heldCopy != copyLast || std::strcmp(copyItem, opticItemName) != 0) && copyLines < 32) {
+                    ++copyLines;
+                    if (heldCopy == nofoot::f144::kNoCopy)
+                        Log::get().note("native on foot ADS held copy (F150): item %s, scope unknown and the game's selected slot not readable: the copy cannot be told, so no settled line is kept "
+                                        "or used for it (the table shifts the eye)", opticItemName);
+                    else
+                        Log::get().note("native on foot ADS held copy (F150): item %s, scope unknown: the game's selected slot %u; the settled line is kept for this slot alone, so another "
+                                        "copy of the item in a different slot has its own", opticItemName, heldCopy - 1u);
+                }
+                if (itemOk) {
+                    copyLast = heldCopy;
+                    std::snprintf(copyItem, sizeof(copyItem), "%s", opticItemName);
+                }
+            }
+            nofoot::f144::Entry* ent = itemOk && !g_f141Down.load(std::memory_order_relaxed) ? g_f144Cache.find(opticItemName, scopeState, heldCopy) : nullptr;
+            // F149/F150: the one depth for the frame: min(the key, the held weapon's depth), clamped to 0..30 cm. The weapon's depth is its table row (the game's unscoped ADS camera
+            // plus the item's back-off), else for an item with no row its settled line's E forward when the copy is known unscoped, else none. The clearance cap takes it, and what
+            // it returns is the k of the eye point, the error to it and the sight line's shift below.
             adsDepth = nofoot::f149::eyeDepth(static_cast<double>(g_adsEyeDistM.load(std::memory_order_relaxed)) * 100.0, itemOk, opticItemName, scopeState, ent);
             eyeCap = nofoot::adsEyeDistanceCap(adsDepth.askedCm / 100.0, p14w, fUnit, fpts, 4);
             // F79: the measured rifle-only rendered-optic origin shifts the sight line transversely. Keep the clearance cap and raw-P14
@@ -12146,10 +12185,11 @@ void adsSightTick(uint64_t now, double dt, const EyeSample& s) noexcept {
         const double lockBody[3] = {-g_adsSight.applied[0], -g_adsSight.applied[1], g_adsSight.applied[2]};
         for (size_t i = 0; i < 3; ++i) before[i] = E.eFullBody[i] + lockBody[i];
         ++w.driving;
-        w.kWantedSum += adsDepth.askedCm / 100.0;   // F70, F149: the key or the game's ADS camera depth where that is further back
+        w.kWantedSum += adsDepth.askedCm / 100.0;   // F70, F149/F150: the key or the weapon's depth where that is further back
         w.kKeySum += adsDepth.keyCm / 100.0;
-        w.kCameraSum[adsDepth.source] += adsDepth.cameraCm / 100.0;
-        ++w.kCameraFrames[adsDepth.source];
+        w.kDepthSum[adsDepth.source] += adsDepth.depthCm / 100.0;
+        w.kBaseSum[adsDepth.source] += adsDepth.baseCm / 100.0;
+        ++w.kDepthFrames[adsDepth.source];
         w.kEffSum += eyeCap.kM;
         if (eyeCap.capped) ++w.capped;
         w.readableMax = std::max(w.readableMax, static_cast<uint32_t>(eyeCap.readable));
@@ -23144,6 +23184,7 @@ struct F141Item {
     uint32_t held = 0;
     bool coherent = false;
     int scope = loadout::kScopeUnknown;
+    uint32_t copy = 0;   // F150: nofoot::f144::copyKey of the held copy (0 where the scope is known)
     char name[64] = {};
 };
 F141Item f141Item() noexcept {
@@ -23154,7 +23195,10 @@ F141Item f141Item() noexcept {
     it.held = g_heldItemSerial.load(std::memory_order_acquire);
     it.coherent = nofoot::f139::itemCoherent(read, snap, it.held, name);
     std::snprintf(it.name, sizeof(it.name), "%s", it.coherent ? name : "none");
-    if (it.coherent) it.scope = loadout::heldScope(name).state;
+    if (it.coherent) {
+        it.scope = loadout::heldScope(name).state;
+        it.copy = heldCopyKey(it.scope);
+    }
     return it;
 }
 
@@ -23316,8 +23360,9 @@ void f141AdsTick(uint64_t now) noexcept {
                         g_f141CallFaults.load(std::memory_order_relaxed), static_cast<unsigned long long>(g_f141Faults.load(std::memory_order_relaxed)));
     }
     const F141Item it = live ? f141Item() : F141Item{};
-    // F147: the gate starts again with each sample's activation and the item and scope held at this tick (a weapon swapped in the press must not feed the old weapon's line)
-    const uint64_t gateKey = nofoot::adslog::mix(nofoot::adslog::mix(0u, it.held), static_cast<uint64_t>(it.scope));
+    // F147: the gate starts again with each sample's activation and the item and scope held at this tick (a weapon swapped in the press must not feed the old weapon's line).
+    // F150: and the copy: two copies of one item swapped in the press carry the same name and serial
+    const uint64_t gateKey = nofoot::adslog::mix(nofoot::adslog::mix(nofoot::adslog::mix(0u, it.held), static_cast<uint64_t>(it.scope)), static_cast<uint64_t>(it.copy));
     if (live && !g_f141WasLive) {   // a press begins: the window's sums and the one-shot's count start here
         g_f144Gate.reset();         // F144: the settle gate is per press
         g_f141Acc.reset();
@@ -23375,7 +23420,7 @@ void f141AdsTick(uint64_t now) noexcept {
             double eRoot[3], sRoot[3];
             if (nofoot::f143::toRoot(fp->froot, fp->p14w, &s.in.E[12], eRoot) && nofoot::f143::toRoot(fp->froot, fp->p14w, s.in.S, sRoot) &&
                 g_f144Gate.settled(s.in.wOk, s.in.w, now, eRoot, sRoot) && it.coherent && nofoot::f139::isWeapon(it.name)) {
-                if (nofoot::f144::Entry* ent = g_f144Cache.get(it.name, it.scope, now)) ent->line.note(eRoot, sRoot);
+                if (nofoot::f144::Entry* ent = g_f144Cache.get(it.name, it.scope, now, it.copy)) ent->line.note(eRoot, sRoot);   // F150: null for a copy that cannot be told apart
             }
         }
     }
