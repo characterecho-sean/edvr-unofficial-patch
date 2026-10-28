@@ -6,6 +6,7 @@
 // (desktopWindowNoteSkippedDraw) is written by the draw hooks, which are the same thread.
 #include "temporal_shader_bytecode.h"
 #include "desktop_window.h"
+#include "desktop_window_cursor.h"
 
 #include <windows.h>
 
@@ -631,6 +632,7 @@ void restoreWindow(char* out, size_t size) {
 // The activation ends. Said once, with its reason and what became of the window.
 void leave(const char* reason) {
     g_desktopWindowBack.store(nullptr, std::memory_order_relaxed);
+    desktopWindowCursorSetActive(false);   // the cursor hooks pass everything through again
     if (!S.active) return;
     S.active = false;
     char window[200];
@@ -878,6 +880,7 @@ Outcome presentActive(IDXGISwapChain* swap, ID3D11Device* device, uint64_t now, 
     const bool first = !S.active;
     if (first) {
         S.active = true;
+        desktopWindowCursorSetActive(true);   // the cursor is free to leave the window: a clip Elite holds goes now, and a ClipCursor with a rectangle is released from here on
         ++S.activations;
         S.nextStatsMs = now + kTenSecondsMs;
         S.hwnd = hwnd;
@@ -920,6 +923,10 @@ Outcome presentActive(IDXGISwapChain* swap, ID3D11Device* device, uint64_t now, 
     g_desktopWindowBack.store(back.Get(), std::memory_order_relaxed);   // identity for the draw skip; the reference below is released before the hook returns
     ++S.presentsSinceReshape;
     S.aspect = aspect;
+    {   // where SetCursorPos at the client's centre would be, for the cursor line
+        POINT centre = {clientW / 2, clientH / 2};
+        if (ClientToScreen(hwnd, &centre)) desktopWindowCursorPublishCentre(centre.x, centre.y);
+    }
     evaluateWindow(swap, hwnd, aspect, now);
 
     bool stale = false;
@@ -1021,6 +1028,9 @@ bool desktopWindowPresent(IDXGISwapChain* swap, ID3D11Device* device, unsigned p
             g_census.format(census, sizeof census);
             Log::get().note("%s", census);
             g_census.reset();
+            char cursor[640];
+            desktopWindowCursorTakeLine(cursor, sizeof cursor);
+            Log::get().note("%s", cursor);
         }
         return true;
     }

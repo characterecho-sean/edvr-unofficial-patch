@@ -2,41 +2,51 @@
 
 ## Status
 
-- **State (2026-10-28):** round 1 FLOWN OK on Steam (`edvr_gfx_20261028_161013.log`).
-  Round 2 (an ordinary movable, resizable window; the skipped-draw census)
-  BUILT, NOT FLOWN. One live key, `visual.desktop_window` (`game` | `left_eye` |
-  `right_eye` | `both_eyes`, default `game`), on the Visual page of the
-  in-headset menu. VR profile only.
+- **State (2026-10-28):** rounds 1 and 2 FLOWN OK on Steam (`edvr_gfx_20261028_161013.log`,
+  `edvr_gfx_20261028_164251.log`). Round 3 (the cursor can leave the window) BUILT,
+  NOT FLOWN. One live key, `visual.desktop_window` (`game` | `left_eye` | `right_eye` |
+  `both_eyes`, default `game`), on the Visual page of the in-headset menu. VR only.
 - **What it does:** while Elite is in VR with 3D on, EDVR makes Elite's desktop
   window a framed, sizable window of the eye image's shape and fills it with
   EDVR's finished eye image (after DLSS/DLAA/FSR, sharpening, the UI layer and
   EDVR's menu). Elite's own drawing into it is skipped. With no eye image (3D off)
   EDVR stops, restores the window, and Elite's window takes over.
-- **Round 1 flight:** active with `left_eye` 4032x4034; the popup window
-  0,0 3840x2160 was reshaped to 840,0 2159x2160; Elite resized its own swap chain
-  to 2159x2160 one Present later; no fights; restored at 3D off.
-- **Unexplained:** Elite's skipped draws per Present climbed steadily, about 365,
-  527, 755, 961, 1205 in successive 10 s windows (`skipped_draws` over `drawn`),
-  far more than a mirror copy. The instrument is the census line after each
-  `10 s:` line: `skipped by shader (10 s)`, the top six VS/PS pairs, `other`,
-  `pairs`, `with depth`, the draw kinds, and `render target 0 checked on N, the
-  buffer on M` (one skipped draw in 32 is asked of the context itself: M below N
-  means the binding shadow's answer is stale). Hypotheses to separate: (a) the
-  shadow's render target 0 is stale and scene draws are taken for buffer draws
-  (checked N, buffer M with M much below N; a spread of scene shader hashes);
-  (b) Elite really draws a growing number of things into the buffer, such as a
-  desktop UI or a flat re-render (M equals N; a few hashes, the count of one pair
-  growing); (c) a depth view bound means a scene pass (`with depth`).
-- **First flight of round 2 must show:** the style `0x94020000 -> 0x14CC0000` in the
-  `reshape request` line and a framed window; moving it by the title bar and
-  resizing it by an edge or corner (the window follows the picture's shape a
-  second after letting go, the dimension changed most kept; `moves=`/`resizes=` on
-  the `10 s:` line); no correction while dragging; deactivating at 3D off with
-  `restored to ... style 0x94020000 back`; a second activation starting where the
-  window last was; and the census. Dragging may pause Elite's rendering if its
-  message pump runs on the render thread, as in Elite's own windowed mode; the
-  flight shows whether it does (frame pacing in the `10 s:` lines while dragging).
-- **Ruled out:** nothing yet. **Temporary keys:** none.
+- **Round 1 flight:** `left_eye` 4032x4034; the popup 0,0 3840x2160 became
+  840,0 2159x2160; Elite resized its own swap chain one Present later; no fights;
+  restored at 3D off.
+- **Round 2 flight:** style `0x94020000 -> 0x14CC0000` applied; first client
+  2031x2032; the user resized it to 1534x1394 and EDVR snapped it to 1393x1394,
+  keeping the height; Elite resized its own chain each time, one Present later.
+  Rendering kept going through the drag: about 88 Presents a second across it, one
+  59 ms frame just after. EDVR's own CPU in the Present hook was 0.01-0.07 ms
+  (`desktop_window` in the frame breakdowns).
+- **The skipped draws, explained:** the census says nearly all are one pair, VS
+  `529D6238D813A0A4` / PS `ED6D0B2A85BED8DD`, plain Draw, no depth view; the context
+  check agreed on every sampled draw (for example 9355 of 9355). Elite really draws
+  them into its desktop window. Their number varied with time, not monotonically:
+  about 360 a Present at first, a peak near 2,450, then down to about 320. The other
+  two pairs: Elite's mirror copy `01C3B84C82172B56/DED8796049C7BB4A` (2 a Present) and
+  `1D65FB796B89CE23/9F366C4EBECFF1CE` (1 a Present).
+- **Ruled out:** a stale binding shadow taking scene draws for buffer draws, because
+  the context itself named the buffer on every sampled skipped draw.
+- **Round 3, the mouse lock.** The cursor cannot leave Elite's window. Elite's exe
+  imports user32 `ClipCursor`, `SetCursorPos`, `GetCursorPos`, `ShowCursor`,
+  `SetCursor`, `GetCursorInfo`, `ClientToScreen`, `ScreenToClient` and
+  `DirectInput8Create`. Which makes the lock is NOT known. Hypotheses, to be told
+  apart by one flight: **H1** `ClipCursor` with a rectangle confines it (the line's
+  `clip released` is above 0 and the cursor is free); **H2** `SetCursorPos` re-centres
+  it every frame, the mouse-look lock (`setpos` near the Present rate with most `at
+  the client centre`); if Elite also reads `GetCursorPos` every frame it steers by the
+  cursor's movement, and suppressing `SetCursorPos` would break mouse flight, so it
+  is counted and NOT changed; **H3** a DirectInput mouse in exclusive mode, neither
+  user32 call involved (the `DirectInput mouse cooperative level` line says
+  exclusive or not).
+- **First flight of round 3 must show:** the install line (which of the four hooks
+  patched), the cursor line after each census line, `clip released` and its last rect,
+  the cooperative level once, and whether the cursor can leave the window with the
+  window active, and is confined again after 3D off (Elite sets its own clip again).
+  If the cursor is still held with `clip released` 0 and `setpos` high, it is H2 or H3.
+- **Temporary keys:** none.
 
 ## Design
 
@@ -96,6 +106,21 @@
   Not reshaped in exclusive fullscreen, maximized or minimized. No game address
   is hooked, so it works on every build.
 
+- **The cursor (round 3)** (`desktop_window_cursor.cpp`). The executable's import
+  table is patched once at startup in a VR-scope install (never a flat-only one) for
+  `ClipCursor`, `SetCursorPos`, `GetCursorPos` and `ShowCursor`; the install line says
+  which patched. They pass through, on any thread (atomic state, no window call in
+  them), except `ClipCursor` with a rectangle while an activation is committed: the
+  real `ClipCursor(nullptr)` is called, TRUE is returned and it is counted. `ClipCursor(nullptr)`
+  passes. At each activation the real `ClipCursor(nullptr)` is called once from the
+  render thread. Not active, nothing is touched. `SetCursorPos`, `GetCursorPos` and
+  `ShowCursor` are only counted: `setpos` and how many were within 2 px of the client's
+  centre (published by the render thread each Present), `getpos`, and the last
+  show/hide with the display count. The 10 s `cursor` line follows the census line.
+  The DirectInput door (`input_gate.cpp`) sees the game's mouse at `CreateDevice` and
+  observes its `SetCooperativeLevel` (slot 13) forward-first; the flags are logged once
+  (`exclusive|nonexclusive, foreground|background`).
+
 ## Decisions the briefs left open
 
 - `ASPECT_RATIO_STRETCH` fits the picture into the buffer's own shape.
@@ -104,3 +129,5 @@
 - A window larger than its monitor's work area is corrected like an off-shape
   client (the size is shrunk to fit); a position alone, partly off screen, is not.
 - The census also asks the context for render target 0 on one skipped draw in 32.
+- `SetCursorPos` is never suppressed this round (H2: it could be the mouse-look).
+- The DirectInput mouse is observed only in a VR-scope install, on the first table.

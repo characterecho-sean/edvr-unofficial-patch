@@ -18922,6 +18922,7 @@ def self_test_health():
         dwsrc = read_text(os.path.join(repo_root(), "src", "common", "desktop_window_math.h"))
         dwcpp = read_text(os.path.join(repo_root(), "src", "d3d11", "desktop_window.cpp"))
         dwcensus = read_text(os.path.join(repo_root(), "src", "common", "desktop_window_census.h"))
+        dwcursor = read_text(os.path.join(repo_root(), "src", "d3d11", "desktop_window_cursor.cpp"))
 
         def RD(source, needle, *vals):
             key = "dw:" + needle
@@ -18947,7 +18948,11 @@ def self_test_health():
                     RD(dwcpp, "desktop window: the game changed the window's style away from ours", 0x94020000, 1),
                     RD(dwcensus, "desktop window: skipped by shader (10 s): %s", "0000000000000001/0000000000000002 x5", 0, 1, "", 5, 0, 5, 0, 0, 0, 0, 2, 1),
                     RD(dwcpp, "desktop window: not drawing -- %s", "the window's client area is empty (minimized)"),
-                    RD(dwcpp, "desktop window: swap chain now %ux%u", 1920, 1080, 1280, 720, 12)]
+                    RD(dwcpp, "desktop window: swap chain now %ux%u", 1920, 1080, 1280, 720, 12),
+                    # round 3: the cursor lines (the untagged story lines the rule matches and does not count)
+                    RD(dwcursor, "desktop window: cursor hooks in the executable's import table", "patched", "patched", "patched", "patched"),
+                    RD(dwsrc, "desktop window: cursor (10 s): clip released %u", 12, "1920x1080 at 0,0", 3, 580, 575, 590, 2, "hide, display count -1"),
+                    RD(dwcursor, "desktop window: the game's DirectInput mouse cooperative level", 0x6, "nonexclusive, foreground", 0)]
 
         DW, dw_ok = H_DESKTOP, [f90_part()]
         check("desktop window: no line at all, nothing said", dw_ok, 0, [("OK", F90S)], lacks=["desktop window", "NEVER APPLIED"])

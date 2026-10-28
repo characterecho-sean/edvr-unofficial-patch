@@ -5,6 +5,8 @@
 //   window's plan on a monitor, the format answers and the three log lines tools\edvr_log.py --health reads.
 //   THE WINDOW RULES (round 2): the framed, sizable style (0x94020000 -> 0x14CC0000), which style bits are ours, when a client is off the picture's shape, the correction that
 //   keeps the dimension the user changed more and clamps to the work area (minimum client height 240), and the census of the skipped draws.
+//   THE CURSOR (round 3): the clip verdict (a rectangle is released only while the window is active), the client-centre test, the DirectInput cooperative level's words and
+//   the cursor line; and the pins that hold the hooks to passing through everything but that one call.
 //   THE WIRING (source pins, each with a control that trips it): the key is read as one word with the default game, the flat profile's allow-list does not carry it,
 //   the window is moved only from the thread-pool callback, the Present hook calls the feature before the census span and the real Present, the draw skip sits in the
 //   verdict and in the three thunks the verdict does not cover, the host hands the eye over after it is captured, the export and the source are built, and edvr.ini
@@ -266,6 +268,31 @@ static void windowRules() {
           "only the top six are named, and the rest are other");
 }
 
+static void cursorRules() {
+    check(desktopWindowClipVerdict(false, true) == DwClipVerdict::Pass && desktopWindowClipVerdict(false, false) == DwClipVerdict::Pass, "not active, ClipCursor passes untouched, rectangle or not");
+    check(desktopWindowClipVerdict(true, true) == DwClipVerdict::Release, "active, ClipCursor with a rectangle is released");
+    check(desktopWindowClipVerdict(true, false) == DwClipVerdict::PassCounted, "active, ClipCursor(nullptr) passes, and is counted");
+    check(desktopWindowAtCentre(960, 540, 960, 540) && desktopWindowAtCentre(961, 539, 960, 540) && !desktopWindowAtCentre(963, 540, 960, 540) && !desktopWindowAtCentre(960, 543, 960, 540),
+          "a SetCursorPos is at the client centre within two pixels");
+    check(desktopWindowAtCentre(-1919, 1, -1920, 0), "screen coordinates can be negative");
+    char words[160];
+    desktopWindowCooperativeWords(words, sizeof words, 0x6u);
+    check(!std::strcmp(words, "nonexclusive, foreground"), "DISCL_NONEXCLUSIVE | DISCL_FOREGROUND");
+    desktopWindowCooperativeWords(words, sizeof words, 0x5u);
+    check(!std::strcmp(words, "exclusive, foreground"), "DISCL_EXCLUSIVE | DISCL_FOREGROUND");
+    desktopWindowCooperativeWords(words, sizeof words, 0x9u);
+    check(!std::strcmp(words, "exclusive, background"), "DISCL_EXCLUSIVE | DISCL_BACKGROUND");
+    desktopWindowCooperativeWords(words, sizeof words, 0x15u);
+    check(!std::strcmp(words, "exclusive, foreground, no windows key"), "DISCL_NOWINKEY is said");
+    desktopWindowCooperativeWords(words, sizeof words, 0u);
+    check(!std::strcmp(words, "neither exclusive nor nonexclusive, neither foreground nor background"), "no flags");
+    char line[500];
+    desktopWindowCursorLine(line, sizeof line, 12, "1920x1080 at 0,0", 3, 580, 575, 590, 2, "hide, display count -1");
+    check(!std::strcmp(line, "desktop window: cursor (10 s): clip released 12 (last rect 1920x1080 at 0,0), clip passed 3, setpos 580 (at the client centre 575), getpos 590, showcursor 2 "
+                             "(last hide, display count -1)"),
+          "the cursor line");
+}
+
 static void lines() {
     char line[400];
     desktopWindowSettingLine(line, sizeof line, "left_eye", nullptr);
@@ -375,7 +402,86 @@ static void wiring(const std::string& root) {
     check(handsOver(host), "the host hands each captured eye's finished texture over, acquires the provider as optional and closes it");
     check(!handsOver(replaced(host, "desktopWindow.noteEye(unsigned(eye),treated.Get(),treatedBounds);", "")), "control: no handoff trips the pin");
 
+    // The cursor (round 3): four IAT hooks on the executable that pass everything through but ClipCursor with a rectangle while the window is active.
+    const std::string cursor = readFile(root + "\\src\\d3d11\\desktop_window_cursor.cpp");
+    const std::string proxy = readFile(root + "\\src\\d3d11\\d3d11_proxy.cpp");
+    const std::string gate = readFile(root + "\\src\\d3d11\\input_gate.cpp");
+    check(!cursor.empty() && !proxy.empty() && !gate.empty(), "the cursor pins' files are where they look");
+    auto between = [](const std::string& t, const char* from, const char* to) {
+        const size_t a = t.find(from);
+        const size_t b = a == std::string::npos ? a : t.find(to, a);
+        return a == std::string::npos || b == std::string::npos ? std::string() : t.substr(a, b - a);
+    };
+    auto cursorHooks = [&](const std::string& t) {
+        const std::string clip = between(t, "BOOL WINAPI hookClipCursor(", "BOOL WINAPI hookSetCursorPos(");
+        const std::string setPos = between(t, "BOOL WINAPI hookSetCursorPos(", "BOOL WINAPI hookGetCursorPos(");
+        const std::string getPos = between(t, "BOOL WINAPI hookGetCursorPos(", "int WINAPI hookShowCursor(");
+        const std::string show = between(t, "int WINAPI hookShowCursor(", "template <class F>");
+        return at(t, "iatHookInstall(\"user32.dll\", \"ClipCursor\", reinterpret_cast<void*>(&hookClipCursor)") != std::string::npos &&
+               at(t, "iatHookInstall(\"user32.dll\", \"SetCursorPos\", reinterpret_cast<void*>(&hookSetCursorPos)") != std::string::npos &&
+               at(t, "iatHookInstall(\"user32.dll\", \"GetCursorPos\", reinterpret_cast<void*>(&hookGetCursorPos)") != std::string::npos &&
+               at(t, "iatHookInstall(\"user32.dll\", \"ShowCursor\", reinterpret_cast<void*>(&hookShowCursor)") != std::string::npos &&
+               // ClipCursor: the verdict of the active flag and the rectangle; a rectangle is released and answered TRUE; nothing else is changed
+               at(clip, "desktopWindowClipVerdict(g_active.load(std::memory_order_relaxed), rect != nullptr)") != std::string::npos &&
+               at(clip, "g_realClip(nullptr);\n            return TRUE;") != std::string::npos && count(clip, "return TRUE;") == 1 && count(clip, "return g_realClip(rect);") == 2 &&
+               // SetCursorPos, GetCursorPos and ShowCursor: counted only while active, and the real function's answer always
+               at(setPos, "if (g_active.load(std::memory_order_relaxed)) {") != std::string::npos && at(setPos, "return g_realSetPos(x, y);") != std::string::npos &&
+               at(setPos, "return TRUE") == std::string::npos && at(setPos, "return FALSE") == std::string::npos &&
+               at(getPos, "if (g_active.load(std::memory_order_relaxed))") != std::string::npos && at(getPos, "return g_realGetPos(point);") != std::string::npos &&
+               at(getPos, "return TRUE") == std::string::npos && at(getPos, "return FALSE") == std::string::npos &&
+               at(show, "const int count = g_realShow(show);") != std::string::npos && at(show, "return count;") != std::string::npos && count(show, "return ") == 1;
+    };
+    check(cursorHooks(cursor), "ClipCursor, SetCursorPos, GetCursorPos and ShowCursor are patched in the executable; only ClipCursor with a rectangle, while active, is changed");
+    check(!cursorHooks(replaced(cursor, "desktopWindowClipVerdict(g_active.load(std::memory_order_relaxed), rect != nullptr)", "desktopWindowClipVerdict(true, rect != nullptr)")),
+          "control: a ClipCursor released whether or not the window is active trips the pin");
+    check(!cursorHooks(replaced(cursor, "return g_realSetPos(x, y);", "return TRUE;")), "control: a SetCursorPos that does not reach the real one trips the pin");
+    check(!cursorHooks(replaced(cursor, "return g_realGetPos(point);", "return TRUE;")), "control: a GetCursorPos that does not reach the real one trips the pin");
+    check(!cursorHooks(replaced(cursor, "g_realClip(nullptr);\n            return TRUE;", "return g_realClip(rect);")), "control: a ClipCursor that is not released trips the pin");
+    // Installed once at startup, in a VR-scope install only, and put back at shutdown.
+    auto installed = [](const std::string& t) {
+        const size_t bypass = at(t, "LoadLibrary deadlock bypass installed in executable");
+        const size_t install = at(t, "if (edvr::runtimeScopeIncludesVr()) edvr::desktopWindowCursorInstall();", bypass);
+        const size_t shutdown = at(t, "void shutdown() {");
+        const size_t uninstall = at(t, "edvr::desktopWindowCursorUninstall();", shutdown);
+        return bypass != std::string::npos && install != std::string::npos && shutdown != std::string::npos && uninstall != std::string::npos && count(t, "desktopWindowCursorInstall()") == 1;
+    };
+    check(installed(proxy), "the cursor hooks are installed once at startup in the VR scope and uninstalled at shutdown");
+    check(!installed(replaced(proxy, "if (edvr::runtimeScopeIncludesVr()) edvr::desktopWindowCursorInstall();", "edvr::desktopWindowCursorInstall();")), "control: an install for every scope trips the pin");
+    // The active flag: set when an activation commits, cleared in leave; the clip Elite holds is let go once on the transition.
+    auto flagged = [](const std::string& t, const std::string& c) {
+        const size_t leaveAt = at(t, "void leave(const char* reason) {");
+        const size_t clearAt = at(t, "desktopWindowCursorSetActive(false);", leaveAt);
+        const size_t returnAt = at(t, "if (!S.active) return;", leaveAt);
+        const size_t commit = at(t, "S.active = true;\n        desktopWindowCursorSetActive(true);");
+        return leaveAt != std::string::npos && clearAt != std::string::npos && returnAt != std::string::npos && clearAt < returnAt && commit != std::string::npos &&
+               at(c, "if (active && !was) {") != std::string::npos && at(c, "ClipCursor(nullptr);", at(c, "if (active && !was) {")) != std::string::npos;
+    };
+    check(flagged(cpp, cursor), "the cursor flag is set at the activation's commit, cleared in leave before its early return, and a clip is released once on the transition");
+    check(!flagged(replaced(cpp, "desktopWindowCursorSetActive(false);", ""), cursor), "control: a flag never cleared trips the pin");
+    check(!flagged(replaced(cpp, "S.active = true;\n        desktopWindowCursorSetActive(true);", "S.active = true;"), cursor), "control: a flag never set trips the pin");
+    {   // the line follows the census line, every 10 s, and the centre is published every Present
+        const size_t fn = at(cpp, "bool desktopWindowPresent(");
+        const size_t census = at(cpp, "g_census.format(census, sizeof census);", fn), take = at(cpp, "desktopWindowCursorTakeLine(cursor, sizeof cursor);", census);
+        check(fn != std::string::npos && census != std::string::npos && take != std::string::npos && at(cpp, "desktopWindowCursorPublishCentre(centre.x, centre.y);") != std::string::npos,
+              "the cursor line is written after the census line, and the client centre is published");
+    }
+    // The DirectInput mouse: only its cooperative level is observed, the driver's answer is forwarded first and returned unchanged, in the VR scope.
+    auto mouseObserved = [&](const std::string& t) {
+        const std::string hook = between(t, "HRESULT STDMETHODCALLTYPE hookMouseSetCooperativeLevel(", "void captureMouse(");
+        const size_t branch = at(t, "} else if (isMouseGuid(guid)) {");
+        return at(t, "constexpr size_t kSlotSetCooperativeLevel = 13;") != std::string::npos &&
+               at(hook, "const HRESULT hr = g_mouseDoor.original(self, hwnd, flags);") != std::string::npos && at(hook, "desktopWindowNoteMouseCooperative(flags, hr);") != std::string::npos &&
+               at(hook, "return hr;") != std::string::npos && at(hook, "original(self, hwnd, flags)") < at(hook, "desktopWindowNoteMouseCooperative") &&
+               branch != std::string::npos && at(t, "if (runtimeScopeIncludesVr()) guardedBudget(g_budgetDi, [&] { captureMouse(*device); });", branch) != std::string::npos &&
+               at(t, "d.hook.replace(kSlotSetCooperativeLevel,") != std::string::npos && count(t, "kSlotSetCooperativeLevel,") == 1;
+    };
+    check(mouseObserved(gate), "the game's DirectInput mouse: SetCooperativeLevel (slot 13) is forwarded first and its flags are logged, in the VR scope");
+    check(!mouseObserved(replaced(gate, "if (runtimeScopeIncludesVr()) guardedBudget(g_budgetDi, [&] { captureMouse(*device); });", "guardedBudget(g_budgetDi, [&] { captureMouse(*device); });")),
+          "control: a mouse watched in every scope trips the pin");
+    check(!mouseObserved(replaced(gate, "const HRESULT hr = g_mouseDoor.original(self, hwnd, flags);", "const HRESULT hr = S_OK;")), "control: a SetCooperativeLevel that does not reach the driver trips the pin");
+
     // The build: the export, the source, the shaders, and the rig itself.
+    check(count(build, "desktop_window_cursor.cpp") == 3, "build.bat compiles the cursor module into the DLL and into the two rigs that compile input_gate.cpp");
     check(at(build, "--extra-export edvrAcquireDesktopWindow") != std::string::npos && at(build, "\"src\\d3d11\\desktop_window.cpp\"") != std::string::npos &&
               at(build, ":rig_desktop_window_test") != std::string::npos,
           "build.bat exports edvrAcquireDesktopWindow, compiles desktop_window.cpp and runs this rig");
@@ -396,6 +502,7 @@ static void wiring(const std::string& root) {
 int main(int argc, char** argv) {
     rules();
     windowRules();
+    cursorRules();
     lines();
     if (argc > 1) wiring(argv[1]);
     else check(false, "argv[1] is the repository root");

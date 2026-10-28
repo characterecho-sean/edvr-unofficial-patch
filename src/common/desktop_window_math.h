@@ -286,6 +286,34 @@ inline DwCorrection desktopWindowCorrect(double aspect, int winLeft, int winTop,
     return c;
 }
 
+// ---- the cursor (round 3) ----
+// While the desktop window is active the cursor must be free to leave Elite's window. The executable's ClipCursor, SetCursorPos, GetCursorPos and ShowCursor are watched
+// (desktop_window_cursor.cpp); only ClipCursor with a rectangle is changed, and only while the window is active: it is released instead. SetCursorPos is the mouse-look's
+// re-centre if Elite steers by the cursor's movement, so it is counted and never touched.
+enum class DwClipVerdict : uint8_t { Pass, PassCounted, Release };
+inline DwClipVerdict desktopWindowClipVerdict(bool active, bool hasRect) {
+    if (!active) return DwClipVerdict::Pass;
+    return hasRect ? DwClipVerdict::Release : DwClipVerdict::PassCounted;
+}
+// A SetCursorPos target within two pixels of the client's centre (screen coordinates): the mouse-look's re-centre.
+inline bool desktopWindowAtCentre(int x, int y, int centreX, int centreY, int tolerance = 2) {
+    const int dx = x - centreX, dy = y - centreY;
+    return (dx < 0 ? -dx : dx) <= tolerance && (dy < 0 ? -dy : dy) <= tolerance;
+}
+// DirectInput's cooperative level words: DISCL_EXCLUSIVE 1, NONEXCLUSIVE 2, FOREGROUND 4, BACKGROUND 8, NOWINKEY 0x10.
+inline int desktopWindowCooperativeWords(char* out, size_t size, uint32_t flags) {
+    const bool exclusive = (flags & 1u) != 0, shared = (flags & 2u) != 0, foreground = (flags & 4u) != 0, background = (flags & 8u) != 0;
+    const char* level = exclusive && !shared ? "exclusive" : shared && !exclusive ? "nonexclusive" : exclusive ? "exclusive and nonexclusive" : "neither exclusive nor nonexclusive";
+    const char* where = foreground && !background ? "foreground" : background && !foreground ? "background" : foreground ? "foreground and background" : "neither foreground nor background";
+    return std::snprintf(out, size, "%s, %s%s", level, where, (flags & 0x10u) ? ", no windows key" : "");
+}
+// The cursor line, every 10 s while active, after the census line (the strings are the caller's: "WxH at x,y" or "none", and "show, display count N" or "none").
+inline int desktopWindowCursorLine(char* out, size_t size, unsigned released, const char* lastRect, unsigned passed, unsigned setPos, unsigned setPosCentre, unsigned getPos,
+                                   unsigned showCalls, const char* lastShow) {
+    return std::snprintf(out, size, "desktop window: cursor (10 s): clip released %u (last rect %s), clip passed %u, setpos %u (at the client centre %u), getpos %u, showcursor %u (last %s)",
+                         released, lastRect, passed, setPos, setPosCentre, getPos, showCalls, lastShow);
+}
+
 // The formats of one draw. The shader view reads the bytes the eye holds as they are: a typeless source gets the UNORM view of its family, a typed one its own
 // format; a typed _SRGB source is decoded by the view and encoded again by an _SRGB target on an 8-bit buffer. The target is the buffer's own bit depth.
 // Anything else is a refusal with its reason (said once; nothing is skipped and nothing is drawn).

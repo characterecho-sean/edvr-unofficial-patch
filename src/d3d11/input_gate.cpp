@@ -20,6 +20,7 @@
 #include "../common/runtime_profile.h"
 #include "../common/timing.h"
 #include "../common/vtable_hook.h"
+#include "desktop_window_cursor.h"   // desktopWindowNoteMouseCooperative: the game mouse's cooperative level, observed
 #include "joy_watch.h"
 #include "menu_pad.h"
 
@@ -1164,6 +1165,67 @@ void captureKeyboard(void* device, std::index_sequence<I...>) {
                     "is left untouched. Please report this log.", kGameDeviceDoors);
 }
 
+// ---- the game's mouse: its cooperative level, observed (visual.desktop_window, round 3) ----
+// One slot (SetCooperativeLevel, 13) on the table of the first mouse the game creates, in place and stacked with whatever else patched that table. The hook forwards first and
+// looks after, so what the game gets is the driver's answer unchanged. Only a device recorded at CreateDevice as a mouse is reported: the table is shared with the keyboard
+// and the controllers. Whether the mouse is exclusive says if DirectInput is what holds the cursor (hypothesis H3, docs\desktop-window.md). VR scope only.
+constexpr size_t kSlotSetCooperativeLevel = 13;
+typedef HRESULT(STDMETHODCALLTYPE* PFN_SetCooperativeLevel)(void*, HWND, DWORD);
+constexpr size_t kMouseDevices = 4;
+std::atomic<void*> g_mice[kMouseDevices] = {};
+struct MouseDoor {
+    VTableHook hook;
+    PFN_SetCooperativeLevel original = nullptr;
+    std::atomic<bool> installed{false};
+};
+MouseDoor g_mouseDoor;
+
+bool isGameMouse(void* device) {
+    for (auto& m : g_mice) {
+        if (m.load(std::memory_order_relaxed) == device) return true;
+    }
+    return false;
+}
+
+void mouseForget(void* device) {
+    for (auto& m : g_mice) {
+        void* expected = device;
+        m.compare_exchange_strong(expected, nullptr);
+    }
+}
+
+HRESULT STDMETHODCALLTYPE hookMouseSetCooperativeLevel(void* self, HWND hwnd, DWORD flags) {
+    const HRESULT hr = g_mouseDoor.original(self, hwnd, flags);
+    if (isGameMouse(self)) desktopWindowNoteMouseCooperative(flags, hr);
+    return hr;
+}
+
+void captureMouse(void* device) {
+    mouseForget(device);
+    bool stored = false;
+    for (auto& m : g_mice) {
+        void* expected = nullptr;
+        if (m.compare_exchange_strong(expected, device)) {
+            stored = true;
+            break;
+        }
+    }
+    if (!stored) g_mice[0].store(device);
+    CaptureLock lock;
+    MouseDoor& d = g_mouseDoor;
+    if (d.installed.load()) return;
+    if (!d.hook.attach(device, 32) || d.hook.executablePrefix() <= kSlotSetCooperativeLevel) {
+        d.hook.uninstall();
+        return;
+    }
+    d.hook.setMode(HookMode::InPlace);
+    if (!d.hook.replace(kSlotSetCooperativeLevel, reinterpret_cast<void*>(&hookMouseSetCooperativeLevel), reinterpret_cast<void**>(&d.original)) || !d.hook.commit()) {
+        d.hook.uninstall();
+        return;
+    }
+    d.installed = true;
+}
+
 // ---- the joystick doors: observation and plugin gating ------------------
 
 template <size_t Index>
@@ -1336,11 +1398,15 @@ HRESULT STDMETHODCALLTYPE factoryCreateDevice(void* self, REFGUID guid, void** d
     if (SUCCEEDED(hr) && device && *device && !outer) {
         watchForget(*device);   // whatever this object is, an old controller at its address is not its identity
         keyboardForget(*device);   // and an old keyboard at its address is not its identity either
+        mouseForget(*device);
         if (isKeyboardGuid(guid)) {
             guardedBudget(g_budgetDi, [&] {
                 captureKeyboard(*device, std::make_index_sequence<kGameDeviceDoors>{});
             });
-        } else if (!isMouseGuid(guid)) {
+        } else if (isMouseGuid(guid)) {
+            // The mouse is only watched: its cooperative level is logged (desktop_window_cursor.cpp), and nothing about it is changed. VR scope.
+            if (runtimeScopeIncludesVr()) guardedBudget(g_budgetDi, [&] { captureMouse(*device); });
+        } else {
             // A keyboard the game enumerated under an instance GUID: the game's own record says
             // so, and no driver is asked.
             guardedBudget(g_budgetDi, [&] {
@@ -1971,6 +2037,9 @@ void inputGateShutdown() {
         if (f.owner) reinterpret_cast<IUnknown*>(f.owner)->Release();
         f.owner = nullptr;
     }
+    g_mouseDoor.hook.uninstall();
+    g_mouseDoor.installed = false;
+    for (auto& m : g_mice) m.store(nullptr);
 }
 
 void inputGateInstallEarly() {

@@ -35,6 +35,7 @@
 #include "flat_wrapper_note.h"
 #include "format_support_log.h"
 #include "input_gate.h"
+#include "desktop_window_cursor.h"   // visual.desktop_window: the executable's cursor calls, watched (VR scope)
 #include "loaded_module_match.h"
 #include "vr_ssaa_hold.h"  // vrSsaaHoldEarlyInstall: the Supersampling hold's hooks at DLL load
 #include "mode_watch.h"    // modeWatchStart: the 3D mode watch, started after the profile lines
@@ -513,6 +514,10 @@ BOOL CALLBACK initOnceCallback(PINIT_ONCE, PVOID, PVOID*) {
         g_patchExeLoadLibraryExA.applied ? 1 : 0,
         g_patchExeLoadLibraryExW.applied ? 1 : 0);
 
+    // visual.desktop_window, round 3: the executable's ClipCursor, SetCursorPos, GetCursorPos and ShowCursor, so the cursor can leave Elite's window while the desktop
+    // window is active. They pass through except ClipCursor with a rectangle while it is active. A flat-only install has no desktop window and no hooks.
+    if (edvr::runtimeScopeIncludesVr()) edvr::desktopWindowCursorInstall();
+
     // Now, out from under the loader lock, is when another proxy can safely be
     // brought in.
     chainThroughOtherProxy(cfg);
@@ -553,6 +558,7 @@ void shutdown() {
     edvr::iatHookUninstall(&g_patchExeLoadLibraryW);
     edvr::iatHookUninstall(&g_patchExeLoadLibraryExA);
     edvr::iatHookUninstall(&g_patchExeLoadLibraryExW);
+    edvr::desktopWindowCursorUninstall();
 
     // Before the module goes: a filter pointing into an unmapped image would
     // take the game's own crash reporting down with it.
