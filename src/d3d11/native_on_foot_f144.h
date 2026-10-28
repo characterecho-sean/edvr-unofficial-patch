@@ -8,7 +8,7 @@
 //    one exists the table stands in, and when one first becomes available mid-press the shift blends from the table's to the line's over 0.25 s. The entry path is measured from
 //    the F89 trace's own eye less F_root samples: the eye's overshoot beyond its settled value in the first 1.5 s.
 //
-// 2. The coat. Under fix.native_on_foot_body_full_outfit, EVASuit_Gear_Back is promoted (and unclipped) only for an outer garment: the third-person avatar has no EVASuit_Arms
+// 2. The coat. EVASuit_Gear_Back is promoted (and unclipped) only for an outer garment: the third-person avatar has no EVASuit_Arms
 //    instance and has an EVASuit_Gear_Arms instance (the coat); the other suit's Gear_Back is its backpack and stays the game's shadows-only part. The first-person avatar's
 //    census (the parts with an instance, their masks before EDVR's zeroing, which EDVR zeroed) is written on a change.
 //
@@ -153,14 +153,13 @@ struct Cache {
     }
 };
 // The choice for one frame: the settled line of the held (item, scope), else the table (the reason counted). settled may be null.
-inline f143::Choice choose(bool keyOn, bool itemOk, bool weapon, const Entry* settled, const double p14w[3], const double up[3], const double right[3], const double fwd[3],
-                           const double origin[3], double k, double trimUpCm, double trimRightCm) noexcept {
+inline f143::Choice choose(bool itemOk, bool weapon, const Entry* settled, const double p14w[3], const double up[3], const double right[3], const double fwd[3],
+                           const double origin[3], double k) noexcept {
     f143::Choice c;
-    if (!keyOn) { c.why = f143::kKeyOff; return c; }
     if (!itemOk) { c.why = f143::kNoItem; return c; }
     if (!weapon) { c.why = f143::kOtherItem; return c; }
     if (!settled || !settled->line.have) { c.why = f143::kNoLine; return c; }
-    return f143::lineShift(settled->line.e, settled->line.s, p14w, up, right, fwd, origin, k, trimUpCm, trimRightCm);
+    return f143::lineShift(settled->line.e, settled->line.s, p14w, up, right, fwd, origin, k);
 }
 // The blend from the table's shift to the settled line's. step() returns the settled line's weight for this frame (1: the line alone, 0: the table alone). A press whose first
 // frame already has a line uses it at once; a line that becomes usable after a frame of the table (or after a frame it was not usable) blends in over kBlendS.
@@ -313,7 +312,8 @@ struct Row {
 };
 // F144 seeded this from the values then in use (the F140 table for the ADS roles and the pistols, 0 for a rifle-class weapon's hip role). F145 bakes the pilot's dialled totals
 // (the seed plus trim each role was last settled at for 3 s or more in the F144 flight) into the scope-no rows of the eight weapons he dialled: the pistols' hip rows are as they
-// were (13, 3.5, -3, 3). The scope-yes rows, the fists, the plasma pistol and the plasma sniper stay as F144 left them: the pistol and the sniper were never placed in that flight.
+// were (13, 3.5, -3, 3). F146 bakes the last three: the plasma shotgun (scope no), the plasma pistol (scope no) and the scoped plasma sniper, which the F145 flight placed once the
+// weapon UI's tag slots were given back. The other scope-yes rows and the fists stay as F144 left them, and the plasma sniper's scope-no rows (a weapon the pilot flies with its scope).
 constexpr Row kTable[] = {
     {"$wpn_m_assaultrifle_laser_fauto_name;", loadout::kScopeNo, kHip, {0.0, 0.0, 0.0, 0.0}},
     {"$wpn_m_assaultrifle_laser_fauto_name;", loadout::kScopeNo, kAds, {0.0, 3.5, 0.0, 0.0}},
@@ -333,8 +333,8 @@ constexpr Row kTable[] = {
     {"$wpn_m_launcher_rocket_sauto_name;", loadout::kScopeYes, kAds, {0.0, 3.5, 0.0, 0.0}},
     {"$wpn_m_sniper_plasma_charged_name;", loadout::kScopeNo, kHip, {0.0, 0.0, 0.0, 0.0}},
     {"$wpn_m_sniper_plasma_charged_name;", loadout::kScopeNo, kAds, {0.0, 3.5, 0.0, 0.0}},
-    {"$wpn_m_sniper_plasma_charged_name;", loadout::kScopeYes, kHip, {0.0, 0.0, 0.0, 0.0}},
-    {"$wpn_m_sniper_plasma_charged_name;", loadout::kScopeYes, kAds, {0.0, 3.5, 0.0, 0.0}},
+    {"$wpn_m_sniper_plasma_charged_name;", loadout::kScopeYes, kHip, {-0.5, 3.5, 0.0, 0.0}},
+    {"$wpn_m_sniper_plasma_charged_name;", loadout::kScopeYes, kAds, {-0.5, 7.0, 0.0, 0.0}},
     {"$wpn_m_submachinegun_kinetic_fauto_name;", loadout::kScopeNo, kHip, {6.5, 0.0, 0.0, 0.0}},
     {"$wpn_m_submachinegun_kinetic_fauto_name;", loadout::kScopeNo, kAds, {6.5, 3.5, 0.0, 0.0}},
     {"$wpn_m_submachinegun_kinetic_fauto_name;", loadout::kScopeYes, kHip, {0.0, 0.0, 0.0, 0.0}},
@@ -343,8 +343,8 @@ constexpr Row kTable[] = {
     {"$wpn_m_submachinegun_laser_fauto_name;", loadout::kScopeNo, kAds, {10.0, 4.5, 1.0, 0.0}},
     {"$wpn_m_submachinegun_laser_fauto_name;", loadout::kScopeYes, kHip, {0.0, 0.0, 0.0, 0.0}},
     {"$wpn_m_submachinegun_laser_fauto_name;", loadout::kScopeYes, kAds, {0.0, 3.5, 0.0, 0.0}},
-    {"$wpn_m_shotgun_plasma_doublebarrel_name;", loadout::kScopeNo, kHip, {10.0, -0.5, 1.0, 0.0}},
-    {"$wpn_m_shotgun_plasma_doublebarrel_name;", loadout::kScopeNo, kAds, {10.0, 3.0, 1.0, 0.0}},
+    {"$wpn_m_shotgun_plasma_doublebarrel_name;", loadout::kScopeNo, kHip, {10.5, 3.0, 1.0, 0.0}},
+    {"$wpn_m_shotgun_plasma_doublebarrel_name;", loadout::kScopeNo, kAds, {19.0, 4.0, 1.0, 0.0}},
     {"$wpn_m_shotgun_plasma_doublebarrel_name;", loadout::kScopeYes, kHip, {0.0, 0.0, 0.0, 0.0}},
     {"$wpn_m_shotgun_plasma_doublebarrel_name;", loadout::kScopeYes, kAds, {0.0, 3.5, 0.0, 0.0}},
     {"$wpn_s_pistol_kinetic_sauto_name;", loadout::kScopeNo, kHip, {13.0, 3.5, -3.0, 3.0}},
@@ -355,8 +355,8 @@ constexpr Row kTable[] = {
     {"$wpn_s_pistol_laser_sauto_name;", loadout::kScopeNo, kAds, {18.0, 6.5, -3.0, 3.0}},
     {"$wpn_s_pistol_laser_sauto_name;", loadout::kScopeYes, kHip, {13.0, 3.5, -3.0, 3.0}},
     {"$wpn_s_pistol_laser_sauto_name;", loadout::kScopeYes, kAds, {13.0, 3.5, -3.0, 3.0}},
-    {"$wpn_s_pistol_plasma_charged_name;", loadout::kScopeNo, kHip, {13.0, 3.5, -3.0, 3.0}},
-    {"$wpn_s_pistol_plasma_charged_name;", loadout::kScopeNo, kAds, {13.0, 3.5, -3.0, 3.0}},
+    {"$wpn_s_pistol_plasma_charged_name;", loadout::kScopeNo, kHip, {11.0, 5.0, -0.5, 3.0}},
+    {"$wpn_s_pistol_plasma_charged_name;", loadout::kScopeNo, kAds, {11.0, 5.0, -0.5, 3.0}},
     {"$wpn_s_pistol_plasma_charged_name;", loadout::kScopeYes, kHip, {13.0, 3.5, -3.0, 3.0}},
     {"$wpn_s_pistol_plasma_charged_name;", loadout::kScopeYes, kAds, {13.0, 3.5, -3.0, 3.0}},
 };

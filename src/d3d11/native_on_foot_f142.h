@@ -7,10 +7,11 @@
 //    A new configuration finds a free slot, else the slot not seen for the longest, and only one not seen for kIconReuseMinAgeFrames or more; a slot a copy is in flight for,
 //    one the staging ring names, and one a live record's icon index names is never reused.
 //
-// 2. The full outfit A/B (fix.native_on_foot_body_full_outfit, TEMPORARY). The local third-person avatar's parts each have a visibility class (AMC+0x1820+idx*0x680: 0 never,
-//    1 every view, 2 the shadow views only, 3 the main views only; native_on_foot_f95c.h). In the coat outfit the game gives the coat's part (EVASuit_Gear_Back) class 2 in
-//    first person, so it is in the shadows only and the suit shows through. The A/B gives class 1 to every class-2 part that is not a head part and not the first-person
-//    skeleton for the length of the avatar's visibility call (F95c's compare-exchange swap, the other way) and puts the game's class back after it.
+// 2. The full outfit (an A/B behind a `fix.` switch until F146 removed it: it is always on). The local third-person avatar's parts each have a
+//    visibility class (AMC+0x1820+idx*0x680: 0 never, 1 every view, 2 the shadow views only, 3 the main views only; native_on_foot_f95c.h). In the coat outfit the game gives the
+//    coat's part (EVASuit_Gear_Back) class 2 in first person, so it is in the shadows only and the suit shows through. The full outfit gives class 1 to every class-2 part that is
+//    not a head part and not the first-person skeleton for the length of the avatar's visibility call (F95c's compare-exchange swap, the other way) and puts the game's class back
+//    after it.
 //
 // 3. The outfit census: per part of the local third-person avatar, the instances present, the class, the flags, the current and pending item and the view masks, written when
 //    any of them but the masks changes (the masks come and go with the scene's views).

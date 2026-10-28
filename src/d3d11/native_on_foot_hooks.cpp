@@ -102,9 +102,8 @@ std::atomic<uint32_t> g_f95cFaults{0};
 std::atomic<bool> g_f95cDown{false};
 std::mutex g_f95cViewMutex;              // guards g_f95cViews (the hook only try-locks it)
 NativeOnFootHeadShadowViews g_f95cViews;
-// F142 (TEMPORARY A/B): the outfit's non-head shadow-only parts as every-view for the visibility call (native_on_foot_f142.h). The frame thread sets the key's value; the
-// hook counts; the frame thread logs the change. The census (taken in the fade hook's step, the same thread as the head hide) goes to the frame thread by a ring.
-std::atomic<bool> g_f142Want{false};
+// F142 (always on since F146, while the head hide writes): the outfit's non-head shadow-only parts as every-view for the visibility call (native_on_foot_f142.h). The hook
+// counts; the frame thread logs the change. The census (taken in the fade hook's step, the same thread as the head hide) goes to the frame thread by a ring.
 std::atomic<uint64_t> g_f142Calls{0}, g_f142Swapped{0}, g_f142Promoted{0}, g_f142Refused{0}, g_f142Lost{0};
 std::atomic<uint64_t> g_f142Part[avh::kPartCount];   // static storage: zero
 std::atomic<uint32_t> g_f142Faults{0};
@@ -1142,9 +1141,9 @@ void bodyClipStep(void* amcPtr) noexcept {
             else if (r < 0) g_clipWriteFaults.fetch_add(1, std::memory_order_relaxed);
         }
     }
-    // F143 (TEMPORARY A/B, fix.native_on_foot_body_full_outfit on): the same unclip, same thread and gate (the unclip is wanted, the game's camera is first person), for every
+    // F143 (always on since F146): the same unclip, same thread and gate (the unclip is wanted, the game's camera is first person), for every
     // part with a modifier that is neither a head part nor in F19's list: the coat's Gear_Back and the other gear parts. A part without a modifier is not written (0).
-    if (unclip && g_f142Want.load(std::memory_order_relaxed) && !g_f143Down.load(std::memory_order_acquire)) {
+    if (unclip && !g_f143Down.load(std::memory_order_acquire)) {
         // F144: Gear_Back is unclipped (like promoted) only for an outer garment; the other suit's is its backpack
         static const int gearBack = avh::partIndexByName("EVASuit_Gear_Back");
         const uint64_t holdBack = gearBack >= 0 && !nofoot::f144::gearBackPromoted(gearBackNow(amc)) ? 1ull << gearBack : 0ull;
@@ -3285,17 +3284,14 @@ NativeOnFootHeadShadowStats nativeOnFootHeadShadowStats() {
     return s;
 }
 
-// F142 (TEMPORARY A/B): native_on_foot_hooks.h says what these do. The hook thread: the same gate as F95c's swap (the head hide capable, not stood down, the local third-person
-// AMC, the head hide writing now), the key on; one compare-exchange per part the game has in the shadow-views-only class. A call nothing was promoted in leaves nothing to
+// F142 (always on since F146): native_on_foot_hooks.h says what these do. The hook thread: the same gate as F95c's swap (the head hide capable, not stood down, the local
+// third-person AMC, the head hide writing now); one compare-exchange per part the game has in the shadow-views-only class. A call nothing was promoted in leaves nothing to
 // restore (Begin returns false and End is not called).
-void nativeOnFootFullOutfitSet(bool on) noexcept {
-    g_f142Want.store(on, std::memory_order_relaxed);
-}
 bool nativeOnFootOutfitBegin(void* amcPtr, nofoot::f142::OutfitSwap* s, bool allow) noexcept {
     s->armed = false;
     s->n = 0;
     s->refused = 0;
-    if (!amcPtr || !allow || !g_f142Want.load(std::memory_order_relaxed)) return false;
+    if (!amcPtr || !allow) return false;
     if (!g_hideOn.load(std::memory_order_acquire) || g_hideDown.load(std::memory_order_acquire) || g_f142Down.load(std::memory_order_acquire)) return false;
     if (reinterpret_cast<uint64_t>(amcPtr) != g_amcLocal.load(std::memory_order_relaxed) || !headHideWritesNow()) return false;
     uint8_t* const amc = static_cast<uint8_t*>(amcPtr);
@@ -3446,8 +3442,7 @@ void reset() {
         avh::AmcCensus drop;
         while (g_censusRing.take(&drop)) {}
     }
-    {   // F142: the A/B and its census start from nothing at the next launch of the hooks
-        g_f142Want.store(false);
+    {   // F142: the full outfit and its census start from nothing at the next launch of the hooks
         g_f142Busy.store(false);
         g_f142HaveSig = false;
         g_f142Sig = 0;

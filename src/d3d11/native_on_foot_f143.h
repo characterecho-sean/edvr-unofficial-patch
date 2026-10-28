@@ -3,14 +3,14 @@
 //
 // 1. The ADS eye on the game's own sight line. F141's hook reads, on the game thread, the eye matrix E (position in row 3) and the sight point S the game's ADS bend aims the
 //    shots through; the F142 flight showed the bend takes effect in VR (the shots go along the line E -> S) and that this line, taken at EDVR's eye depth, matches the pilot's
-//    hand-trimmed totals within 0.32 cm on nine weapons. So the sight lock's shift (F139's, from a table and two live trims) is taken from that line, relative to P14w in the
-//    FP root's axes (F144 keeps a settled line per (item, scope): native_on_foot_f144.h). lineShift takes Q, the point on the line at the lock's eye depth k along the root's
-//    forward from the origin, and shifts the eye from (origin + k f) to Q, less the part along f; the two live trims (up along u, right along r) are added, under F139's 8 cm
-//    bound. A line it cannot use falls back to F139's table, and the reason is counted.
+//    hand-trimmed totals within 0.32 cm on nine weapons. So the sight lock's shift (F139's table) is taken from that line, relative to P14w in the FP root's axes (F144 keeps a
+//    settled line per (item, scope): native_on_foot_f144.h). lineShift takes Q, the point on the line at the lock's eye depth k along the root's forward from the origin, and
+//    shifts the eye from (origin + k f) to Q, less the part along f, under F139's 8 cm bound. A line it cannot use falls back to F139's table, and the reason is counted. F146
+//    removed the switch ("ADS sight from the game") and the two live trims: the line is the only source, and the table is its fallback.
 //
 // 2. The coat's clip modifiers. The fade hook's step reads, for every part of the local third-person avatar with an instance, the part's vertex clip modifier ("pVertexClipAmount",
-//    part entry + 0x610: amount +8, enable +0xC, dirty +0xD) and view masks, every 5 s and when EDVR's armed state changes (the measure). With fix.native_on_foot_body_full_outfit
-//    on, F19's unclip (enable 0, dirty 1) also covers every non-head part its list does not (the A/B).
+//    part entry + 0x610: amount +8, enable +0xC, dirty +0xD) and view masks, every 5 s and when EDVR's armed state changes (the measure). F19's unclip (enable 0, dirty 1) also
+//    covers every non-head part its list does not (the full outfit; the switch for it was removed in F146, so it is always on).
 #pragma once
 
 #include <cmath>
@@ -57,28 +57,28 @@ inline bool toRoot(const float froot[16], const double p14w[3], const float pos[
 }
 
 // Why a frame's shift came from the table and not the game's line (kGame: it came from the line). F144 replaced F143's live pair (no pair, stale) with a settled line kept per
-// (item, scope) for the session (native_on_foot_f144.h): "no settled line yet" is the reason a weapon's first presses have no line.
-enum Why : uint8_t { kGame = 0, kNoLine, kOtherItem, kNoItem, kDegenerate, kBound, kKeyOff, kWhyCount };
+// (item, scope) for the session (native_on_foot_f144.h): "no settled line yet" is the reason a weapon's first presses have no line. (F146: the "key off" reason went with the key.)
+enum Why : uint8_t { kGame = 0, kNoLine, kOtherItem, kNoItem, kDegenerate, kBound, kWhyCount };
 inline const char* whyText(unsigned w) noexcept {
     static const char* const kText[kWhyCount] = {"the game's line", "no settled line yet", "another item or scope (or not a held weapon)", "item not read",
-                                                 "degenerate line (under 1 cm of depth)", "past the 8 cm bound", "key off"};
+                                                 "degenerate line (under 1 cm of depth)", "past the 8 cm bound"};
     return w < kWhyCount ? kText[w] : "?";
 }
 struct Choice {
-    uint8_t why = kKeyOff;       // kGame when the game's line is the source
+    uint8_t why = kNoLine;       // kGame when the game's line is the source
     bool game = false;
-    double shift[3] = {};        // world, metres: to be added to the origin (the game's shift and the two trims, perpendicular to f, within the bound)
-    double gameShift[3] = {};    // the game's alone (world, perpendicular to f)
+    double shift[3] = {};        // world, metres: to be added to the origin (the game's shift, perpendicular to f, within the bound)
+    double gameShift[3] = {};    // the game's shift (world, perpendicular to f)
     double gameUpCm = 0.0, gameRightCm = 0.0;   // the game's alone along the root's up and right
     double shiftM = 0.0;         // |shift|
     double lineDeg = 0.0;        // the angle of S - E from the root's forward
     double q[3] = {};            // Q in the world
 };
 // The shift of one line (E and S in the root's axes, metres from P14w) for one frame of the lock. p14w, up, right and fwd are this frame's P14 and FP root (axes of any
-// length: unitised); origin is the lock's origin before any shift (P14w, or F79's measured origin) and k the lock's eye depth along fwd; trimUpCm and trimRightCm are the live
-// keys' values (clamped here, 0 for a non-weapon). kDegenerate: an axis with no length, a value that is not a number, or a line under 1 cm deep; kBound: past F139's 8 cm.
+// length: unitised); origin is the lock's origin before any shift (P14w, or F79's measured origin) and k the lock's eye depth along fwd.
+// kDegenerate: an axis with no length, a value that is not a number, or a line under 1 cm deep; kBound: past F139's 8 cm.
 inline Choice lineShift(const double eRoot[3], const double sRoot[3], const double p14w[3], const double up[3], const double right[3], const double fwd[3], const double origin[3],
-                        double k, double trimUpCm, double trimRightCm) noexcept {
+                        double k) noexcept {
     Choice c;
     double r[3], u[3], f[3];
     if (!detail::unit3(right, r) || !detail::unit3(up, u) || !detail::unit3(fwd, f) || !std::isfinite(k) || !detail::finite3(p14w) || !detail::finite3(origin) ||
@@ -104,14 +104,9 @@ inline Choice lineShift(const double eRoot[3], const double sRoot[3], const doub
     }
     const double gAlong = detail::dot3(g, f);
     for (int i = 0; i < 3; ++i) c.gameShift[i] = g[i] - gAlong * f[i];
-    const double tu = f139::clampTrimCm(trimUpCm), tr = f139::clampTrimCm(trimRightCm);
-    double raw[3], s[3];
-    for (int i = 0; i < 3; ++i) raw[i] = c.gameShift[i] + 0.01 * (tu * u[i] + tr * r[i]);
-    const double rAlong = detail::dot3(raw, f);
-    for (int i = 0; i < 3; ++i) s[i] = raw[i] - rAlong * f[i];
-    const double l = std::sqrt(detail::dot3(s, s));
-    if (!detail::finite3(s) || !std::isfinite(l) || l > f139::kBoundM + 1e-9) { c.why = kBound; return c; }
-    for (int i = 0; i < 3; ++i) c.shift[i] = s[i];
+    const double l = std::sqrt(detail::dot3(c.gameShift, c.gameShift));
+    if (!detail::finite3(c.gameShift) || !std::isfinite(l) || l > f139::kBoundM + 1e-9) { c.why = kBound; return c; }
+    for (int i = 0; i < 3; ++i) c.shift[i] = c.gameShift[i];
     c.shiftM = l;
     c.gameUpCm = 100.0 * detail::dot3(c.gameShift, u);
     c.gameRightCm = 100.0 * detail::dot3(c.gameShift, r);

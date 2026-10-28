@@ -6,9 +6,10 @@
 // values are now a table of each weapon's own placement, keyed by (exact item name, scope fitted). When a placement applies is unchanged (F93a's drawn class, the latch, the
 // refusals); only which values it uses changes. A pistol-class part drawn by an item whose entry says otherwise uses the entry.
 //
-// The values are forward, left, up and toward eye, in cm, in the weapon frame with the same target() as before (native_on_foot_f90.h). Four TEMPORARY live trims,
-// fix.native_on_foot_weapon_ui_forward_cm, _left_cm, _up_cm and _toward_eye_cm (default 0), are added to the held weapon's values and the totals clamped to the ranges the
-// class keys had; the pilot tunes each weapon in one flight and the tuned totals go into the table. An item that is not in the table, or a name that cannot be trusted (its
+// The values are forward, left, up and toward eye, in cm, in the weapon frame with the same target() as before (native_on_foot_f90.h). Four live trims,
+// experimental.native_on_foot_weapon_ui_forward_cm, _left_cm, _up_cm and _toward_eye_cm (default 0; fix.* until F146, which moved them to [experimental] for adjusting a weapon's
+// readout from feedback), are added to the held weapon's values and the totals clamped (F145: -30..30 cm); the pilot tuned each weapon in a flight and the tuned totals are in the
+// table (native_on_foot_f144.h). An item that is not in the table, or a name that cannot be trusted (its
 // snapshot was not read, or its serial is not the held item's), keeps the old behaviour: the drawn class's built-in values (an untrusted name takes no trim).
 //
 // The scope state comes from the journal's loadout (journal_loadout.h); a state that is not known uses the no-scope row and is counted. Both rows of a weapon start at the same

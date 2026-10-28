@@ -191,14 +191,6 @@ std::atomic<bool> g_adsAimKey{true};                          // the key as the 
 std::atomic<float> g_adsEyeDistM{0.15f};                      // F70: fix.native_on_foot_ads_eye_distance_cm in metres (0..0.30, default 0.15), live
 std::atomic<float> g_weaponViewOffsetCm{static_cast<float>(nofoot::kWeaponViewOffsetDefaultCm)}; // fix.native_on_foot_weapon_view_offset_cm, live
 double g_adsEyeCmLast = -1.0;                                 // the value last logged (frame thread)
-std::atomic<float> g_adsSightUpCm{0.0f};                      // F139 (TEMPORARY): fix.native_on_foot_ads_sight_up_cm, live (the held weapon's trim, cm, -8..8)
-double g_adsSightUpCmLast = -1000.0;                          // the value last logged (frame thread)
-std::atomic<bool> g_adsGameSightKey{true};                    // F143 (TEMPORARY): fix.native_on_foot_ads_game_sight, live (on: the ADS eye's shift from the game's sight line; off: F139's table)
-bool g_adsGameSightLogged = false;                            // the key's value was logged (frame thread)
-std::atomic<float> g_adsSightRightCm{0.0f};                   // F142 (TEMPORARY): fix.native_on_foot_ads_sight_right_cm, live (the held weapon's lateral trim, cm, -8..8)
-double g_adsSightRightCmLast = -1000.0;                       // the value last logged (frame thread)
-std::atomic<bool> g_fullOutfitKeyOn{false};                   // F142 (TEMPORARY): fix.native_on_foot_body_full_outfit, as the frame thread last read it
-bool g_fullOutfitKeyLogged = false;                           // the key's value was logged (frame thread)
 std::atomic<float> g_f87SettleS{static_cast<float>(nofoot::f87::kSettleDefaultS)};   // F87h (TEMPORARY): fix.native_on_foot_standing_height_settle_s, live
 double g_f87SettleLast = -1.0;                                // the value last logged (frame thread)
 std::atomic<float> g_f94EyeHeightCm{static_cast<float>(nofoot::f94::kEyeHeightDefaultCm)};   // F94a: fix.native_on_foot_eye_height_cm, live (the eyes over the neck)
@@ -248,8 +240,9 @@ std::atomic<bool> g_f93SteadyKey{true};
 // F93b (TEMPORARY A/B, live from the next press): fix.native_on_foot_ads_eye_hold. off (the default): in ADS the eye follows the head's own translation and the sight lock
 // keeps it on the sight line; on: F62b's position lock, the head's translation since the press taken out of the eye (through the eye alignment, two frames late).
 std::atomic<bool> g_f93HoldKey{false};
-// F140 (TEMPORARY, live): the held weapon's readout trims, fix.native_on_foot_weapon_ui_forward_cm / _left_cm / _up_cm / _toward_eye_cm, added to the weapon's table values
-// (native_on_foot_f140.h; the render thread's decision reads them at each weapon readout draw). They replace F90's four pistol keys and F92's four rifle keys, retired.
+// F140 (live; F146: experimental): the held weapon's readout trims, experimental.native_on_foot_weapon_ui_forward_cm / _left_cm / _up_cm / _toward_eye_cm (moved from fix.* in
+// F146), added to the weapon's table values (native_on_foot_f140.h; the render thread's decision reads them at each weapon readout draw). They replaced F90's four pistol keys and
+// F92's four rifle keys, retired.
 std::atomic<float> g_f140TrimCm[4]{};   // static storage: zero
 double g_f140TrimLast[4] = {};   // forward, left, up, toward eye: the values last logged (frame thread)
 std::atomic<int> g_adsYawSign{1}, g_adsPitchSign{1};          // the sign keys (TEMPORARY): 1, -1 or 0 (that axis off)
@@ -800,12 +793,12 @@ void retiredKeysNote(const Config& cfg, bool first) {
         Log::get().note("native on foot: fix.native_on_foot_visor_axis is retired (F128): ignored (the visor frame always follows each eye's optical axis in outer mode; "
                         "eye-trust checks and invalid-output protection remain active)");
     // F140: F90's four pistol readout keys and F92's four rifle ADS readout keys. The weapon readout is placed per weapon from a table (native_on_foot_f140.h) whose seeds are
-    // these keys' built-in values, and fix.native_on_foot_weapon_ui_*_cm trim the held weapon's. The shipping file carries each at its last value (pistol 13, 3.5, -3, 3; rifle
+    // these keys' built-in values, and experimental.native_on_foot_weapon_ui_*_cm trim the held weapon's. The shipping file carries each at its last value (pistol 13, 3.5, -3, 3; rifle
     // 0, 3.5, 0, 0); a value that differs is named once.
     {
         const auto named = [](const char* key, float live, float builtIn) {
             if (std::fabs(live - builtIn) > 1e-6f)
-                Log::get().note("native on foot: %s is retired (F140): ignored (the weapon readout is placed per weapon from a table; fix.native_on_foot_weapon_ui_forward_cm, "
+                Log::get().note("native on foot: %s is retired (F140): ignored (the weapon readout is placed per weapon from a table; experimental.native_on_foot_weapon_ui_forward_cm, "
                                 "_left_cm, _up_cm and _toward_eye_cm trim the held weapon's; the file said %+.1f, the built-in was %+.1f)", key, static_cast<double>(live),
                                 static_cast<double>(builtIn));
         };
@@ -818,6 +811,18 @@ void retiredKeysNote(const Config& cfg, bool first) {
         named("fix.native_on_foot_rifle_ads_readout_up_cm", cfg.getFloat("fix.native_on_foot_rifle_ads_readout_up_cm", 0.0f), 0.0f);
         named("fix.native_on_foot_rifle_ads_readout_toward_eye_cm", cfg.getFloat("fix.native_on_foot_rifle_ads_readout_toward_eye_cm", 0.0f), 0.0f);
     }
+    // F146: the ADS sight switch, the two ADS sight trims and the full outfit switch. The weapons' sights were dialled with the trims and the pilot's totals are in the tables; the
+    // game's own sight line is the ADS eye's source and the full outfit is the body. The shipping file carries each at its last value (on, 0, 0, on); a value that differs is named once.
+    if (cfg.getString("fix.native_on_foot_ads_game_sight", "on") != "on")
+        Log::get().note("native on foot: fix.native_on_foot_ads_game_sight is retired (F146): ignored (the ADS eye always goes onto the game's own sight line; F139's per-weapon table "
+                        "is the fallback for a weapon's first press and when the line cannot be read)");
+    if (std::fabs(cfg.getFloat("fix.native_on_foot_ads_sight_up_cm", 0.0f)) > 1e-6f)
+        Log::get().note("native on foot: fix.native_on_foot_ads_sight_up_cm is retired (F146): ignored (the ADS eye takes the game's sight line; there is no height trim)");
+    if (std::fabs(cfg.getFloat("fix.native_on_foot_ads_sight_right_cm", 0.0f)) > 1e-6f)
+        Log::get().note("native on foot: fix.native_on_foot_ads_sight_right_cm is retired (F146): ignored (the ADS eye takes the game's sight line; there is no right trim)");
+    if (cfg.getString("fix.native_on_foot_body_full_outfit", "on") != "on")
+        Log::get().note("native on foot: fix.native_on_foot_body_full_outfit is retired (F146): ignored (the body always draws the full outfit while native on foot is on the "
+                        "full third-person body)");
 }
 // The key, re-read when the configuration changes (Config::generation()). Read by its literal name (tools/gen_settings_schema.py).
 void readKey() {
@@ -1009,55 +1014,10 @@ void readKey() {
         g_adsEyeCmLast = cm;
         g_adsEyeDistM.store(static_cast<float>(cm / 100.0), std::memory_order_relaxed);
     }
-    // F143 (TEMPORARY, live, "ADS sight from the game (test)"): on (the default) takes the ADS eye's shift from the game's own sight line E -> S (F141's hook reads both on the
-    // game thread; the line at the eye's depth matched the pilot's hand-trimmed totals within 0.32 cm on nine weapons), the two trims below added; F139's table is the fallback
-    // when the line cannot be used. off is F139's table and the two trims alone, as F142 built it.
-    {
-        const bool gameOn = cfg.getString("fix.native_on_foot_ads_game_sight", "on") != "off";
-        if (first || !g_adsGameSightLogged || gameOn != g_adsGameSightKey.load(std::memory_order_relaxed))
-            Log::get().note("native on foot ADS sight from the game (F143, TEMPORARY): fix.native_on_foot_ads_game_sight is %s -- %s", gameOn ? "on" : "off",
-                            gameOn ? "while aiming down sights your eye moves onto the line the game aims the shots along (its eye through its sight point), at your eye distance; "
-                                     "the height and right trims add to it; a line it cannot read falls back to EDVR's per-weapon table"
-                                   : "while aiming down sights your eye moves by EDVR's per-weapon table and the height and right trims");
-        g_adsGameSightLogged = true;
-        g_adsGameSightKey.store(gameOn, std::memory_order_relaxed);
-    }
-    // F139 (TEMPORARY, live, the Native on foot page's "ADS sight height (test)"): the held weapon's sight height trim, cm up (-8..8, default 0), added to the item's table
-    // value while aiming down sights: the eye moves off the game's aiming line onto the weapon's own sight line. Any held weapon takes it; the tuned totals go into the table.
-    {
-        const double cm = nofoot::f139::clampTrimCm(static_cast<double>(cfg.getFloat("fix.native_on_foot_ads_sight_up_cm", 0.0f)));
-        if (first || cm != g_adsSightUpCmLast)
-            Log::get().note("native on foot ADS sight height (F139, TEMPORARY): fix.native_on_foot_ads_sight_up_cm = %+.1f cm -- while aiming down sights your eye moves this far "
-                            "up (down if negative) off the game's aiming line, on top of the height EDVR holds for the weapon in your hands (the held weapon only: -%.0f..+%.0f cm)",
-                            cm, nofoot::f139::kTrimMaxCm, nofoot::f139::kTrimMaxCm);
-        g_adsSightUpCmLast = cm;
-        g_adsSightUpCm.store(static_cast<float>(cm), std::memory_order_relaxed);
-    }
-    // F142 (TEMPORARY, live, "ADS sight right (test)"): the lateral column of the same trim: cm to the right (-8..8, default 0), added to the item's table right (0 for every
-    // weapon until this has measured one) while aiming down sights, for the held weapon only. With the height trim it tests whether the game's sight point predicts both offsets.
-    {
-        const double cm = nofoot::f139::clampTrimCm(static_cast<double>(cfg.getFloat("fix.native_on_foot_ads_sight_right_cm", 0.0f)));
-        if (first || cm != g_adsSightRightCmLast)
-            Log::get().note("native on foot ADS sight right (F139, TEMPORARY): fix.native_on_foot_ads_sight_right_cm = %+.1f cm -- while aiming down sights your eye moves this far "
-                            "to the right (left if negative) off the game's aiming line, beside the height trim (the held weapon only: -%.0f..+%.0f cm)",
-                            cm, nofoot::f139::kTrimMaxCm, nofoot::f139::kTrimMaxCm);
-        g_adsSightRightCmLast = cm;
-        g_adsSightRightCm.store(static_cast<float>(cm), std::memory_order_relaxed);
-    }
-    // F142 (TEMPORARY, live, "Full outfit on body (test)"): the A/B for the overcoat. on: while EDVR's native body is on foot in the game's first-person camera, a part the
-    // game draws into the shadow views only (its class 2) that is not a head part and not the first-person skeleton is drawn in the main views too, for the length of the
-    // avatar's visibility call. off (the default) is the body as it was.
-    {
-        const bool outfitOn = cfg.getString("fix.native_on_foot_body_full_outfit", "off") == "on";
-        if (first || !g_fullOutfitKeyLogged || outfitOn != g_fullOutfitKeyOn.load(std::memory_order_relaxed))
-            Log::get().note("native on foot full outfit (F142, TEMPORARY): fix.native_on_foot_body_full_outfit is %s -- %s", outfitOn ? "on" : "off",
-                            outfitOn ? "a part of the outfit the game draws only into the shadow views is drawn in the main views too on your body (not the head, not the "
-                                       "first-person skeleton)"
-                                     : "the body takes the game's part visibility as it stands");
-        g_fullOutfitKeyLogged = true;
-        g_fullOutfitKeyOn.store(outfitOn, std::memory_order_relaxed);
-        nativeOnFootFullOutfitSet(outfitOn);
-    }
+    // F146: the ADS sight switch ("ADS sight from the game"), the two ADS sight trims (height and right) and the full outfit switch are gone, with their `fix.` keys (named by
+    // retiredKeysNote); the behaviour they tuned is the only behaviour. While aiming down sights the eye goes onto the game's own sight line (F143,
+    // settled per weapon and scope by F144; F139's table is its fallback), and the body is drawn with the full outfit (F142's promotion, F143's unclip, F144's Gear_Back rule).
+    // A settings file that still carries one is named by retiredKeysNote.
     // F74: the user's live left/right view offset relative to an equipped weapon or tool. The default is 0: no shift (F112; F90 had 2.0 cm right, 2.5 before).
     {
         const float rawCm = cfg.getFloat("fix.native_on_foot_weapon_view_offset_cm", static_cast<float>(nofoot::kWeaponViewOffsetDefaultCm));
@@ -1144,22 +1104,23 @@ void readKey() {
                             : "off -- in ADS the eye follows the head's own translation and the sight lock keeps it on the sight line");
         g_f93HoldKey.store(hold, std::memory_order_relaxed);
     }
-    // F140 (TEMPORARY, live, the Native on foot page's "Weapon UI forward / left / up / toward you"): the held weapon's readout trims, in cm, added to the weapon's table
-    // values (native_on_foot_f140.h) in the weapon's frame: along the barrel, across it to the left, along its up, and toward your eye on the line of sight. 0, 0, 0, 0 leave
-    // the table's placement. They replace F90's four pistol keys and F92's four rifle keys (retiredKeysNote). The pilot's tuned totals go into the table.
+    // F140 (live; F146: [experimental], the developer tier's "Weapon UI forward / left / up / toward you", moved from [fix] with `# moved-from:` so a saved value carries over):
+    // the held weapon's readout trims, in cm (-30..30), added to the weapon's table values (native_on_foot_f140.h) in the weapon's frame: along the barrel, across it to the left,
+    // along its up, and toward your eye on the line of sight. 0, 0, 0, 0 leave the table's placement. They replaced F90's four pistol keys and F92's four rifle keys
+    // (retiredKeysNote). For adjusting a weapon's readout from feedback: the totals the pilot settled are in the table (native_on_foot_f144.h).
     {
         namespace f140 = nofoot::f140;
-        static const char* const kKey[4] = {"fix.native_on_foot_weapon_ui_forward_cm", "fix.native_on_foot_weapon_ui_left_cm", "fix.native_on_foot_weapon_ui_up_cm",
-                                            "fix.native_on_foot_weapon_ui_toward_eye_cm"};
+        static const char* const kKey[4] = {"experimental.native_on_foot_weapon_ui_forward_cm", "experimental.native_on_foot_weapon_ui_left_cm",
+                                            "experimental.native_on_foot_weapon_ui_up_cm", "experimental.native_on_foot_weapon_ui_toward_eye_cm"};
         static const char* const kWhat[4] = {"toward the muzzle along the barrel", "to the left of the barrel, across it", "along the weapon's up",
                                              "toward your eye along the line of sight, so only its depth changes"};
-        const double v[4] = {f140::clampTrim(0, static_cast<double>(cfg.getFloat("fix.native_on_foot_weapon_ui_forward_cm", 0.0f))),
-                             f140::clampTrim(1, static_cast<double>(cfg.getFloat("fix.native_on_foot_weapon_ui_left_cm", 0.0f))),
-                             f140::clampTrim(2, static_cast<double>(cfg.getFloat("fix.native_on_foot_weapon_ui_up_cm", 0.0f))),
-                             f140::clampTrim(3, static_cast<double>(cfg.getFloat("fix.native_on_foot_weapon_ui_toward_eye_cm", 0.0f)))};
+        const double v[4] = {f140::clampTrim(0, static_cast<double>(cfg.getFloat("experimental.native_on_foot_weapon_ui_forward_cm", 0.0f))),
+                             f140::clampTrim(1, static_cast<double>(cfg.getFloat("experimental.native_on_foot_weapon_ui_left_cm", 0.0f))),
+                             f140::clampTrim(2, static_cast<double>(cfg.getFloat("experimental.native_on_foot_weapon_ui_up_cm", 0.0f))),
+                             f140::clampTrim(3, static_cast<double>(cfg.getFloat("experimental.native_on_foot_weapon_ui_toward_eye_cm", 0.0f)))};
         for (int i = 0; i < 4; ++i) {
             if (first || v[i] != g_f140TrimLast[i])
-                Log::get().note("native on foot weapon UI trim (F140, TEMPORARY): %s = %+.1f cm -- positive moves the held weapon's readout %s, on top of its table placement "
+                Log::get().note("native on foot weapon UI trim (F140, experimental): %s = %+.1f cm -- positive moves the held weapon's readout %s, on top of its table placement "
                                 "(range %.0f..%.0f)", kKey[i], v[i], kWhat[i], f140::kTrimMinCm[i], f140::kTrimMaxCm[i]);
             g_f140TrimLast[i] = v[i];
             g_f140TrimCm[i].store(static_cast<float>(v[i]), std::memory_order_relaxed);
@@ -10165,8 +10126,8 @@ uint64_t __fastcall eyeProbeHooked(void* amc, void* job) noexcept {
     // call goes through Begin, which also withdraws the AMC's previous ticket; it writes only for the local third-person AMC while the head hide writes.
     nofoot::f95c::Swap headShadow;
     const bool swapped = amc && nativeOnFootHeadShadowBegin(amc, job, &headShadow, !g_eyeStop.load(std::memory_order_relaxed));
-    // F142 (TEMPORARY A/B, fix.native_on_foot_body_full_outfit): the same call, the other way: a non-head part the game has in the shadow-views-only class is every view for
-    // the call (the coat's part in first person), put back after it. Off (the default) it returns at once and nothing is touched.
+    // F142 (F146: always on, while the head hide writes): the same call, the other way: a non-head part the game has in the shadow-views-only class is every view for
+    // the call (the coat's part in first person), put back after it. Outside the head hide's gate it returns at once and nothing is touched.
     nofoot::f142::OutfitSwap outfit;
     const bool outfitSwapped = amc && nativeOnFootOutfitBegin(amc, &outfit, !g_eyeStop.load(std::memory_order_relaxed));
     const uint64_t result = original(amc, job);
@@ -11488,10 +11449,10 @@ struct AdsSightWin {
     uint32_t rifleAnchorUsed = 0, rifleAnchorItemRefused = 0, rifleAnchorFrameRefused = 0, rifleAnchorGeometryRefused = 0, rifleAnchorMatrixRefused = 0;
     double rifleAnchorShiftSum[3] = {}, rifleAnchorSpanSum = 0.0, rifleAnchorResidualMaxM = 0.0;
     // F139: the frames of the lock with a shift decided (ADS active, the lock's data fresh), those the shift was applied on or refused past the bound, those with no coherent item,
-    // the frames F79's origin stood, the applied up and right summed (cm), and the last coherent item's name, table value and trim.
+    // the frames F79's origin stood, the applied up and right summed (cm), and the last coherent item's name and table value.
     uint32_t f139Frames = 0, f139Applied = 0, f139Refused = 0, f139NoItem = 0, f139F79 = 0, f139ScopeUnknown = 0;
     int f139Scope = loadout::kScopeUnknown;   // F140: the held weapon's scope state at the last coherent frame (the table row used is the no-scope one when unknown)
-    double f139UpSum = 0.0, f139RightSum = 0.0, f139TableUpCm = 0.0, f139TableRightCm = 0.0, f139TrimCm = 0.0, f139TrimRightCm = 0.0;   // F142: the right trim beside the up one
+    double f139UpSum = 0.0, f139RightSum = 0.0, f139TableUpCm = 0.0, f139TableRightCm = 0.0;
     char f139Item[64] = {};
     // F143: the ADS shift's source per frame (the game's line, or F139's table and why), the game's shift (cm, summed over the game-line frames), the pair's age (ms), the line's
     // angle off the root's forward (deg), and the step of the applied game shift between consecutive game-line frames (mm).
@@ -11615,10 +11576,10 @@ void adsSightLog(uint32_t seconds, bool steady, bool hold, bool detailed) noexce
     }
     if (w.f139Frames) {   // F139: the held weapon's sight offset (every ADS window; --health reads it): the per-item totals the tuning flight leaves for the table
         const double fn = static_cast<double>(w.f139Frames);
-        Log::get().note("native on foot ADS sight offset (F139) %u s: item %s scope %s, table up %+.1f right %+.1f cm, trim %+.1f cm, trim right %+.1f cm, applied up %+.2f cm "
+        Log::get().note("native on foot ADS sight offset (F139) %u s: item %s scope %s, table up %+.1f right %+.1f cm, applied up %+.2f cm "
                         "right %+.2f cm (mean of %u frames in the sights; applied on %u), F79 optic origin on %u frames, refused over the %.0f cm bound %u, no coherent item %u, "
                         "scope unknown on %u frames (the no-scope row)",
-                        seconds, w.f139Item[0] ? w.f139Item : "none", loadout::scopeName(w.f139Scope), w.f139TableUpCm, w.f139TableRightCm, w.f139TrimCm, w.f139TrimRightCm,
+                        seconds, w.f139Item[0] ? w.f139Item : "none", loadout::scopeName(w.f139Scope), w.f139TableUpCm, w.f139TableRightCm,
                         w.f139UpSum / fn, w.f139RightSum / fn, w.f139Frames, w.f139Applied, w.f139F79, 100.0 * nofoot::f139::kBoundM, w.f139Refused, w.f139NoItem,
                         w.f139ScopeUnknown);
     }
@@ -11626,14 +11587,14 @@ void adsSightLog(uint32_t seconds, bool steady, bool hold, bool detailed) noexce
         const double gn = w.f143Game ? static_cast<double>(w.f143Game) : 1.0;
         namespace f143 = nofoot::f143;
         Log::get().note("native on foot ADS sight line (F143) %u s: item %s scope %s, source per frame: settled line %u (blending in on %u), table %u (fallback by reason: no settled line "
-                        "yet %u, another item or scope %u, item not read %u, degenerate line %u, past the bound %u, key off %u); settled line (cm from P14 in the root's right, up and "
+                        "yet %u, another item or scope %u, item not read %u, degenerate line %u, past the bound %u); settled line (cm from P14 in the root's right, up and "
                         "forward) E %+.2f %+.2f %+.2f S %+.2f %+.2f %+.2f from %u settled samples, used on %llu frames this session; game shift up %+.2f right %+.2f cm (mean over the "
-                        "settled-line frames), table up %+.2f right %+.2f cm, trims up %+.1f right %+.1f cm; the line %.2f deg off the root's forward; shift step between frames mean "
+                        "settled-line frames), table up %+.2f right %+.2f cm; the line %.2f deg off the root's forward; shift step between frames mean "
                         "%.2f max %.2f mm over %u steps",
                         seconds, w.f139Item[0] ? w.f139Item : "none", loadout::scopeName(w.f139Scope), w.f143Game, w.f144Blending, w.f143Frames - w.f143Game,
-                        w.f143Why[f143::kNoLine], w.f143Why[f143::kOtherItem], w.f143Why[f143::kNoItem], w.f143Why[f143::kDegenerate], w.f143Why[f143::kBound], w.f143Why[f143::kKeyOff],
+                        w.f143Why[f143::kNoLine], w.f143Why[f143::kOtherItem], w.f143Why[f143::kNoItem], w.f143Why[f143::kDegenerate], w.f143Why[f143::kBound],
                         100.0 * w.f144E[0], 100.0 * w.f144E[1], 100.0 * w.f144E[2], 100.0 * w.f144S[0], 100.0 * w.f144S[1], 100.0 * w.f144S[2], w.f144Samples,
-                        static_cast<unsigned long long>(w.f144Used), w.f143UpSum / gn, w.f143RightSum / gn, w.f139TableUpCm, w.f139TableRightCm, w.f139TrimCm, w.f139TrimRightCm,
+                        static_cast<unsigned long long>(w.f144Used), w.f143UpSum / gn, w.f143RightSum / gn, w.f139TableUpCm, w.f139TableRightCm,
                         w.f143DegSum / gn, w.f143Steps ? w.f143StepSumMm / static_cast<double>(w.f143Steps) : 0.0, w.f143StepMaxMm, w.f143Steps);
     }
     if (detailed) {
@@ -11863,7 +11824,7 @@ void adsSightTick(uint64_t now, double dt, const EyeSample& s) noexcept {
                 }
             }
             // F139: the held weapon's own sight line. After F79's decision (the laser assault rifle's origin stands exactly as it was), the eye's origin moves by the item's table
-            // up (plus the live trim, any held weapon) along the FP root's up row, and right along its right row, less the part along the sight line; bounded to 8 cm, past it
+            // up along the FP root's up row, and right along its right row, less the part along the sight line; bounded to 8 cm, past it
             // nothing is moved and the refusal counted. The clearance cap above stays on P14.
             {
                 namespace f139 = nofoot::f139;
@@ -11871,16 +11832,12 @@ void adsSightTick(uint64_t now, double dt, const EyeSample& s) noexcept {
                 // F140: the table is keyed by (item, scope fitted); the scope state comes from the journal's loadout (journal_loadout.h) for the same coherent item
                 const bool itemOk = f139::itemCoherent(opticItemSnapshot, opticItemSerial, currentItemSerial, opticItemName);
                 const int scopeState = itemOk ? loadout::heldScope(opticItemName).state : loadout::kScopeUnknown;
-                const f139::Decision d139 = f139::decide(opticItemSnapshot, opticItemSerial, currentItemSerial, opticItemName, scopeState,
-                                                         static_cast<double>(g_adsSightUpCm.load(std::memory_order_relaxed)),
-                                                         static_cast<double>(g_adsSightRightCm.load(std::memory_order_relaxed)), upRow, row0, fUnit);
+                const f139::Decision d139 = f139::decide(opticItemSnapshot, opticItemSerial, currentItemSerial, opticItemName, scopeState, upRow, row0, fUnit);
                 ++w.f139Frames;
                 if (d139.coherent) {
                     std::snprintf(w.f139Item, sizeof(w.f139Item), "%s", opticItemName);
                     w.f139TableUpCm = d139.tableUpCm;
                     w.f139TableRightCm = d139.tableRightCm;
-                    w.f139TrimCm = d139.trimUpCm;
-                    w.f139TrimRightCm = d139.trimRightCm;
                     w.f139Scope = d139.scope;
                     if (d139.scopeUnknown) ++w.f139ScopeUnknown;
                 } else {
@@ -11895,17 +11852,16 @@ void adsSightTick(uint64_t now, double dt, const EyeSample& s) noexcept {
                 }
                 // F143/F144: the shift from the game's own sight line E -> S, settled: the line kept for the held (item, scope) for the session, fed by the F141 drain with settled
                 // samples only (after the game's raise animation has stopped moving E), relative to P14w in the FP root's axes. It is taken at the lock's eye depth k from this
-                // frame's P14w and root, with the two live trims added, under the same 8 cm bound, from the press's first frame; until a line exists (or when it cannot be used)
-                // F139's table + trims (d139) stands in, the reason counted, and a line that becomes usable mid-press is blended in over 0.25 s. The origin (P14w, or F79's
+                // frame's P14w and root, under the same 8 cm bound, from the press's first frame; until a line exists (or when it cannot be used)
+                // F139's table (d139) stands in, the reason counted, and a line that becomes usable mid-press is blended in over 0.25 s. The origin (P14w, or F79's
                 // measured origin), k, f and everything downstream are unchanged: only the source of the shift is.
                 {
                     namespace f143 = nofoot::f143;
                     namespace f144 = nofoot::f144;
                     f144::Entry* ent = itemOk ? g_f144Cache.find(opticItemName, scopeState) : nullptr;
-                    const f143::Choice c = f144::choose(g_adsGameSightKey.load(std::memory_order_relaxed), itemOk, d139.weapon, ent, p14w, upRow, row0, fUnit, adsOrigin, eyeCap.kM,
-                                                        d139.trimUpCm, d139.trimRightCm);
+                    const f143::Choice c = f144::choose(itemOk, d139.weapon, ent, p14w, upRow, row0, fUnit, adsOrigin, eyeCap.kM);
                     ++w.f143Frames;
-                    ++w.f143Why[c.why < f143::kWhyCount ? c.why : f143::kKeyOff];
+                    ++w.f143Why[c.why < f143::kWhyCount ? c.why : f143::kNoLine];
                     const double wt = g_f144Blend.step(c.game, now);
                     double tableShift[3] = {}, shift[3];
                     if (d139.applied) std::memcpy(tableShift, d139.shift, sizeof(tableShift));
@@ -24550,10 +24506,10 @@ void headShadowTick(uint64_t now) noexcept {
     s.last = c;
 }
 
-// ---- F142 (TEMPORARY A/B): the full outfit and the outfit census (native_on_foot_f142.h; native_on_foot_hooks.cpp, nativeOnFootOutfitBegin and End, outfitCensusStep) ------
-// Frame thread, every boundary while native stereo is on foot. The census (about every 100 ms on the fade hook's thread, queued on a change) is written whatever the key says:
-// a header and one line per part that has an instance, for the first 6 changes; later changes write the header and the parts that changed. With fix.native_on_foot_body_full_outfit
-// on, once a window: the visibility calls the A/B covered, the parts it promoted by name, the classes the game changed before the write and during the call.
+// ---- F142 (the full outfit since F146): the full outfit and the outfit census (native_on_foot_f142.h; native_on_foot_hooks.cpp, nativeOnFootOutfitBegin and End, outfitCensusStep) ------
+// Frame thread, every boundary while native stereo is on foot. The census (about every 100 ms on the fade hook's thread, queued on a change) is written whatever:
+// a header and one line per part that has an instance, for the first 6 changes; later changes write the header and the parts that changed. While native on foot is active,
+// once a window: the visibility calls the A/B covered, the parts it promoted by name, the classes the game changed before the write and during the call.
 struct F142State {
     NativeOnFootOutfitStats base;
     uint64_t windowMs = 0;
@@ -24769,7 +24725,7 @@ void f142Tick(uint64_t now) noexcept {
     }
     static nofoot::f143::ClipSnap clipTaken;   // 3 KB: not on the stack
     while (nativeOnFootOutfitClipTake(&clipTaken)) f143ClipLog(clipTaken);   // F143: the clip measure's snapshots, whatever the key says
-    const bool want = nativeOnFootActive() && g_fullOutfitKeyOn.load(std::memory_order_relaxed);
+    const bool want = nativeOnFootActive();
     if (s.windowMs && (!want || s.detail != nofoot::logwin::detail())) {
         f142WindowClose(now, nativeOnFootOutfitStats());
         s.detail = nofoot::logwin::detail();

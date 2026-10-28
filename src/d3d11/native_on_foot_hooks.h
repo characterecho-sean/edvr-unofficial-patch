@@ -176,21 +176,20 @@ struct NativeOnFootHeadShadowStats {   // cumulative (the frame thread logs the 
 };
 NativeOnFootHeadShadowStats nativeOnFootHeadShadowStats();
 
-// F142 (TEMPORARY A/B, fix.native_on_foot_body_full_outfit; native_on_foot_f142.h). The overcoat: the game gives the coat's part (EVASuit_Gear_Back) the shadow-views-only class
-// in first person, so on EDVR's body the suit shows through. While the key is on, F95c's swap the other way: the same visibility call, for the local third-person AMC while
+// F142 (native_on_foot_f142.h; always on since F146, when the full outfit's switch was removed). The overcoat: the game gives the coat's part (EVASuit_Gear_Back) the
+// shadow-views-only class in first person, so on EDVR's body the suit shows through. F95c's swap the other way: the same visibility call, for the local third-person AMC while
 // the head hide writes, gives every part the game left in the shadow-views-only class (2) that is not a head part and not the first-person skeleton the every-view class (1)
-// for the length of the call; End puts the game's class back, and a class the game changed in between stands. No mask is written. `on` is set by the frame thread, live.
+// for the length of the call; End puts the game's class back, and a class the game changed in between stands. No mask is written.
 namespace nofoot {
 namespace f142 {
 struct OutfitSwap;
 struct Census;
 }  // namespace f142
 }  // namespace nofoot
-void nativeOnFootFullOutfitSet(bool on) noexcept;
 bool nativeOnFootOutfitBegin(void* amc, nofoot::f142::OutfitSwap* s, bool allow) noexcept;
 void nativeOnFootOutfitEnd(nofoot::f142::OutfitSwap* s) noexcept;
 struct NativeOnFootOutfitStats {   // cumulative (the frame thread logs the change)
-    uint64_t calls = 0;        // visibility calls of the local third-person AMC while the key is on and the head hide writes
+    uint64_t calls = 0;        // visibility calls of the local third-person AMC while the head hide writes
     uint64_t swapped = 0;      // ...that ran with at least one part promoted
     uint64_t promoted = 0;     // parts promoted, summed over the calls
     uint64_t refused = 0;      // classes the game changed between our read and our write (left alone)
@@ -198,12 +197,12 @@ struct NativeOnFootOutfitStats {   // cumulative (the frame thread logs the chan
     uint64_t part[avh::kPartCount] = {};   // promotions by part index
     uint32_t faults = 0;
     bool down = false;         // three faults: the A/B stood down for the session
-    // F143: the unclip A/B under the same key: clip modifiers written (enable 0, dirty 1) for the parts F19's list does not cover, by part index; guarded writes that faulted
+    // F143: the unclip for the full outfit: clip modifiers written (enable 0, dirty 1) for the parts F19's list does not cover, by part index; guarded writes that faulted
     uint64_t clip[avh::kPartCount] = {};
     uint64_t clipWrites = 0, clipFaults = 0;
 };
 // F144: the last Gear_Back decision (nofoot::f144::GearBack: 0 not decided, 1 outer garment: promoted and unclipped, 2 suit arms present, 3 no outer-garment arms: kept shadows
-// only), made on the visibility call's thread while fix.native_on_foot_body_full_outfit is on.
+// only), made on the visibility call's thread while the head hide writes.
 int nativeOnFootGearBack() noexcept;
 NativeOnFootOutfitStats nativeOnFootOutfitStats();
 // The outfit census (F142), taken on the fade hook's thread for the local third-person AMC (about every 100 ms, SEH-guarded) and queued when any part's instances, class, flags
@@ -212,8 +211,8 @@ bool nativeOnFootOutfitCensusTake(nofoot::f142::Census* out) noexcept;
 
 // F143. EDVR's armed state for the clip measure (0 unarmed, 1 a weapon in hand, 2 a tool; nofoot::f143::Armed), set by the frame thread. The measure reads, in the fade hook's step for
 // the local third-person AMC and before that call's unclip writes, every part's clip modifier (amount, enable, dirty) and view masks, every 5 s and when the armed state changes,
-// under SEH (three faults stop it); the frame thread takes the snapshots one at a time. With fix.native_on_foot_body_full_outfit on (nativeOnFootFullOutfitSet) the unclip also writes
-// enable 0 and dirty 1 for every non-head part its list does not cover (the A/B; counted in NativeOnFootOutfitStats::clip).
+// under SEH (three faults stop it); the frame thread takes the snapshots one at a time. The unclip also writes (F146: always) enable 0 and dirty 1 for every non-head part its
+// list does not cover (counted in NativeOnFootOutfitStats::clip).
 namespace nofoot {
 namespace f143 {
 struct ClipSnap;

@@ -1827,16 +1827,18 @@ void testLegacyOnFootRowsStayOutOfMenu() {
                                 "native_on_foot_rifle_ads_readout_toward_eye_cm", "native_on_foot_hud_room", "native_on_foot_hud_left_x",
                                 "native_on_foot_hud_left_y", "native_on_foot_hud_top_x", "native_on_foot_hud_top_y", "native_on_foot_hud_right_x",
                                 "native_on_foot_hud_right_y", "native_on_foot_hud_centre_x", "native_on_foot_hud_centre_y",
-                                "native_on_foot_hud_follow_smoothing_ms", "native_on_foot_reticle_follow", "native_on_foot_visor_axis"};
+                                "native_on_foot_hud_follow_smoothing_ms", "native_on_foot_reticle_follow", "native_on_foot_visor_axis",
+                                // F146: the ADS sight switch, the two ADS sight trims and the full outfit switch, retired; the four Weapon UI trims moved to [experimental]
+                                "native_on_foot_ads_game_sight", "native_on_foot_ads_sight_up_cm", "native_on_foot_ads_sight_right_cm", "native_on_foot_body_full_outfit",
+                                "native_on_foot_weapon_ui_forward_cm", "native_on_foot_weapon_ui_left_cm", "native_on_foot_weapon_ui_up_cm", "native_on_foot_weapon_ui_toward_eye_cm"};
     // kMenuRows is generated at build time from repository annotations. A player's older live INI supplies values at runtime,
     // but cannot add rows back to this compiled table.
     int nativePageRows = 0;
     for (int i = 0; i < kCount; ++i)
         if (strcmp(kMenuRows[i].page, "native_on_foot") == 0) ++nativePageRows;
-    check(nativePageRows == 25, "the Native on foot page has 25 rows (F127: 21 rows went to edvr.ini and the installer's window, and Reticle follows was retired; "
-                                "F128: Visor axis (test) was retired with the correction always on; F139: ADS sight height (test) was added under Aiming down sights; "
-                                "F140: the four Weapon UI trims were added under HUD; F142: ADS sight right (test) was added under Aiming down sights and Full outfit on body (test) "
-                                "under Body and view; F143: ADS sight from the game (test) was added before ADS sight height (test))");
+    check(nativePageRows == 17, "the Native on foot page has 17 rows (F127: 21 rows went to edvr.ini and the installer's window, and Reticle follows was retired; "
+                                "F128: Visor axis (test) was retired with the correction always on; F146: the ADS sight switch, the two ADS sight trims and the full outfit switch "
+                                "were retired, and the four Weapon UI trims went to [experimental])");
     // F127: the page's order and its five headings. The switch is always first; look and aim, then aiming down sights, then body and view, the HUD last. kMenuRows is in
     // edvr.ini order; the group is the ini's heading block above the key, which the page shows as a heading.
     {
@@ -1850,23 +1852,15 @@ void testLegacyOnFootRowsStayOutOfMenu() {
             {"native_on_foot_ads_eye_distance_cm", "Aiming down sights"},
             {"native_on_foot_ads_sight_both_eyes", "Aiming down sights"},
             {"native_on_foot_ads_head_aim", "Aiming down sights"},
-            {"native_on_foot_ads_game_sight", "Aiming down sights"},
-            {"native_on_foot_ads_sight_up_cm", "Aiming down sights"},
-            {"native_on_foot_ads_sight_right_cm", "Aiming down sights"},
             {"native_on_foot_eye_height_cm", "Body and view"},
             {"native_on_foot_weapon_view_offset_cm", "Body and view"},
             {"native_on_foot_weapon_eye_forward_cm", "Body and view"},
             {"native_on_foot_breathable_visor", "Body and view"},
-            {"native_on_foot_body_full_outfit", "Body and view"},
             {"native_on_foot_hud_distance", "HUD"},
             {"native_on_foot_hud_size", "HUD"},
             {"native_on_foot_hud_element_scale", "HUD"},
             {"native_on_foot_hud_spread", "HUD"},
             {"native_on_foot_hud_follow", "HUD"},
-            {"native_on_foot_weapon_ui_forward_cm", "HUD"},
-            {"native_on_foot_weapon_ui_left_cm", "HUD"},
-            {"native_on_foot_weapon_ui_up_cm", "HUD"},
-            {"native_on_foot_weapon_ui_toward_eye_cm", "HUD"},
         };
         constexpr int kWant = static_cast<int>(sizeof(want) / sizeof(want[0]));
         int at = 0;
@@ -1895,6 +1889,24 @@ void testLegacyOnFootRowsStayOutOfMenu() {
         for (int i = 0; i < kCount; ++i)
             if (strcmp(kMenuRows[i].section, "fix") == 0 && strcmp(kMenuRows[i].key, key) == 0) found = true;
         checkf(!found, "%s remains a compatible setting but has no in-headset menu row", key);
+    }
+    // F146: the four Weapon UI trims are [experimental] rows, shown in the developer tier under their own heading: a number from -30 to 30 in steps of 0.5 cm with an explicit sign,
+    // live, labelled without "(test)". They carry the old fix. values over through edvr.ini's moved-from lines (tools/config_test and tools/installer_test hold that).
+    {
+        static const struct { const char* key; const char* label; } want[] = {
+            {"native_on_foot_weapon_ui_forward_cm", "Weapon UI forward"}, {"native_on_foot_weapon_ui_left_cm", "Weapon UI left"},
+            {"native_on_foot_weapon_ui_up_cm", "Weapon UI up"}, {"native_on_foot_weapon_ui_toward_eye_cm", "Weapon UI toward you"}};
+        int found = 0;
+        bool shaped = true;
+        for (const auto& w : want)
+            for (int i = 0; i < kCount; ++i) {
+                const MenuRowDef& d = kMenuRows[i];
+                if (strcmp(d.section, "experimental") != 0 || strcmp(d.key, w.key) != 0) continue;
+                ++found;
+                shaped = shaped && d.kind == MenuKind::Number && d.tier == MenuTier::Experimental && strcmp(d.label, w.label) == 0 && strcmp(d.lo, "-30") == 0 && strcmp(d.hi, "30") == 0 &&
+                         strcmp(d.step, "0.5") == 0 && strcmp(d.unit, "cm") == 0 && d.showSign && d.applies == 1 && strcmp(d.shipped, "0.0") == 0;
+            }
+        check(found == 4 && shaped, "the four Weapon UI trims are [experimental] number rows: -30..30 cm, step 0.5, signed, live, shipped 0.0, labelled without (test)");
     }
 }
 
