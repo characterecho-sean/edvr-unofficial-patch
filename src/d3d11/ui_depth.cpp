@@ -3651,6 +3651,15 @@ bool uiDepthHologramOnEyeDraw(ID3D11DeviceContext* ctx) {
     return ret;
 }
 
+// TEMPORARY (Phase 2 fast path, built 2026-10-27; draw_fast_path_shadow.h, ui_depth.h). The two memos' hit test at the key both calls above would read now,
+// without the calls' output resets: true when the eye classifier (its pass on) and the hologram classifier (its pass on) would each return at once from
+// a stored plain decline. Pass off means the call is not made. Reads only.
+bool uiDepthEyeDeclineHeld() {
+    if (!detail::g_uiDepthOn || detail::g_uiDepthStoodDown) return true;
+    const classifiermemo::Key now{bindingEyeKeyGeneration(), g_classifierEpoch};
+    return classifiermemo::hit(g_eyeMemo, now) && (!detail::g_holoDepthOn || classifiermemo::hit(g_holoMemo, now));
+}
+
 // Pass (a): the game's own draw again, RTV0 rebound to a scratch
 // contribution target whose blend mirrors the game's own (holoContribBlendFor)
 // -- VS/PS/inputs untouched, so RGB accumulates exactly the light the

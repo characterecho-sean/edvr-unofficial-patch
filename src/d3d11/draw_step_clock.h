@@ -94,6 +94,7 @@ enum Step : uint8_t {
     kFwAfterUi,      // f:after-ui
     kFwVerdict,      // f:verdict-begin
     kFwBefore,       // f:before
+    kFast,           // fast: the repeat-draw fast path's work before the game's own draw (Phase 2, 2026-10-27), in place of v:*, engine-vel, probes, f:*
     kGameDraw,       // GAME: the game's own first real call, not EDVR's
     kReissue,        // reissue
     kWeapon,         // weapon
@@ -107,11 +108,11 @@ enum Step : uint8_t {
     kStepCount
 };
 
-// The names the log line prints. Short because 27 of them share a line the log truncates near 1170 characters.
+// The names the log line prints. Short because 28 of them share a line the log truncates near 1170 characters.
 inline const char* stepName(unsigned step) {
     static const char* const kNames[kStepCount] = {
         "pre", "v:hud/fss", "v:context", "v:particles", "v:eye-test", "v:offscreen", "v:ui-depth", "v:census", "v:fixes", "v:rest",
-        "engine-vel", "probes", "f:scopes", "f:ui-layer", "f:after-ui", "f:verdict-begin", "f:before", "GAME", "reissue", "weapon",
+        "engine-vel", "probes", "f:scopes", "f:ui-layer", "f:after-ui", "f:verdict-begin", "f:before", "fast", "GAME", "reissue", "weapon",
         "p:rigid", "p:screen", "p:rest", "f:layer-end", "f:ui-depth", "f:after", "tail"};
     return step < kStepCount ? kNames[step] : "?";
 }

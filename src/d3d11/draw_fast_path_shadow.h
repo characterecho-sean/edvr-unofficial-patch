@@ -1,12 +1,12 @@
 #pragma once
-// TEMPORARY, a Phase 1 shadow instrument (built 2026-10-27; docs\engine-render-performance-2026-09-19.md, "Desk design: the repeat-draw fast path").
-// No Windows and no D3D here, so tools\aa_off_test drives every decision the draw path takes.
+// TEMPORARY, the repeat-draw fast path and its verification (Phase 1 built 2026-10-27, Phase 2 the same day; docs\engine-render-performance-2026-09-19.md,
+// "Desk design: the repeat-draw fast path"). No Windows and no D3D here, so tools\aa_off_test drives every decision the draw path takes.
 //
-// WHAT THIS MEASURES. The design would let an owner DrawIndexedInstanced that repeats the previous draw's key skip most of the draw thunk: the rest of
-// beginPanelOverride, all of forwardWithVerdict, the lambda's owner block, the tail's normally-off checks. This build skips nothing. Every draw takes
-// today's full path; this module only decides, for each owner X draw, whether it WOULD have taken the fast path, and then compares what the full path
-// actually did with what the previous draw's ticket promised. A mismatch names an input the key misses. Phase 2 (the skipping) is built only once a
-// flight reads mismatches at zero over millions of would-take draws.
+// WHAT THIS DECIDES. An owner DrawIndexedInstanced that repeats the previous draw's key skips most of the draw thunk: the rest of beginPanelOverride, all
+// of forwardWithVerdict, the lambda's owner block, the tail's normally-off checks (Phase 2). This module decides, for each owner X draw, whether it takes
+// that fast path; vscreen.cpp does the work the skipped code would have done on an ordinary draw. On one frame in 16 (a verify frame, never a draw-sample
+// frame) a draw that WOULD take it takes the full path instead, and what that did is compared with what the previous draw's ticket promised, as in
+// Phase 1. A mismatch names an input the key misses.
 //
 // THE KEY. Everything the ordinary outcome is a function of, that is not a dynamic flag: the bindings' aggregate generation (binding_shadow.h
 // bindingEyeKeyGeneration: it moves on any VS, PS, PS SRV 0-3, RTV0 or DSV0 set and at every frame boundary, so a first-of-frame event can never be a
@@ -165,6 +165,16 @@ inline Band bandOf(uint32_t count) {
     if (count <= kArgsCountA) return Band::kA;
     return count <= kArgsCountMax ? Band::kB : Band::kC;
 }
+// Phase 2: bands A and B tell an ordinary draw apart in one test only, srv0IsPanelSized, which a draw of 64 indices or under asks and a larger one does
+// not. Where that test's answer for the bound PsSrv0 is already known to be "not panel-sized" (vscreen.cpp srv0KnownNotPanel: the memo is current for the
+// binding and says false, or PsSrv0 is unbound, which the function answers false before the memo), it is a plain false for either draw, and a band A draw
+// and a band B draw behave alike: they may share a ticket, in either direction. Band C never merges (the sun-glare nomination, and counts only the world
+// shader asks about), and a draw kept out of the bands has no band to merge.
+inline bool bandsMergeable(Band a, Band b) { return (a == Band::kA && b == Band::kB) || (a == Band::kB && b == Band::kA); }
+inline bool bandsShare(Band a, Band b, bool srv0NotPanel) { return a == b || (srv0NotPanel && bandsMergeable(a, b)); }
+// The four facts srv0IsPanelSized's early exits read for a draw of 64 indices or under: PsSrv0 bound, the memo's generation, PsSrv0's generation now, and the memo's
+// answer. "No" is known without asking when PsSrv0 is unbound (the function returns false before the memo) or the memo is current and says false.
+inline bool srv0NotPanelKnown(bool srvBound, uint32_t memoGen, uint32_t gen, bool memoPanel) { return !srvBound || (memoGen == gen && !memoPanel); }
 
 // What a draw is kept out by (Phase 1c, split into bounds), the first that applies in this order: count <= 6, count > 10000 with the nomination acting,
 // count == 240, no instances, the scrim open.
@@ -290,12 +300,16 @@ inline uint32_t mismatchTerms(uint32_t terms, Class cls, Class ticketCls) {
 // ---- Eligibility ------------------------------------------------------------------------------------------------------------------------------------
 // The refusal reason of an owner X draw, the first that applies in this order, or kTake. The args exclusions come before `band changed`, so a draw that is
 // kept out of the bands is counted under its own exclusion and not as a change of band (Phase 1d).
+// Phase 2 adds the last two: conditions the fast path needs that the key, the ticket and the args class do not hold. They come after `not certified`, and
+// vscreen.cpp's shadowBegin sets them on a draw the rules above would take: the draw gate was closed for the draw (a live settings change inside a frame
+// can close it; the full path then returns from beginPanelOverride before the work the fast path repeats), or an eye draw's two ui_depth classifiers would
+// not answer from their plain-decline memos (the full path would run, and count, a classification the fast path skips).
 enum class Reason : uint8_t { kTake = 0, kNoTicket, kKeyMoved, kArgsSmall, kArgsLargeActs, kArgs240, kArgsNoInstances, kArgsOpen, kBandChanged, kDynamic,
-                              kArmed, kNotCertified, kCount };
+                              kArmed, kNotCertified, kGateClosed, kUiDepthMemo, kCount };
 inline const char* reasonName(Reason r) {
     static const char* const kNames[static_cast<size_t>(Reason::kCount)] = {
         "take", "no ticket", "key moved", "args count<=6", "args count>10000 acts", "args count 240", "args no instances", "args scrim or panel open", "band changed",
-        "dynamic", "armed", "not certified"};
+        "dynamic", "armed", "not certified", "draw gate closed", "ui depth memo missed"};
     return kNames[static_cast<size_t>(r)];
 }
 // The refusal reason for a draw kept out of the bands (the bound must not be kIn).
@@ -352,7 +366,9 @@ struct VsSketch {
     static constexpr unsigned kSlots = 8;
     uint64_t key[kSlots] = {};
     uint64_t count[kSlots] = {};
+    uint64_t total = 0;   // values added (Phase 2: the sketches are fed on verify frames only, so a share is a slot's count over THIS total)
     void add(uint64_t value) {
+        ++total;
         for (unsigned i = 0; i < kSlots; ++i)
             if (count[i] && key[i] == value) { ++count[i]; return; }
         unsigned least = kSlots;
@@ -381,8 +397,11 @@ struct VsSketch {
 
 // ---- The window's counters -------------------------------------------------------------------------------------------------------------------------
 struct Counters {
-    uint64_t draws[3] = {};                                     // owner X draws by class
-    uint64_t take[3] = {};                                      // ...of them, would-take
+    uint64_t draws[3] = {};                                     // owner X draws that took the FULL path, by class (Phase 2: a fast-path draw is in fast[], not here)
+    uint64_t take[3] = {};                                      // ...of them, would-take (a verify frame's: the compared draws)
+    uint64_t fast[3] = {};                                      // owner X draws that took the fast path, by class (Phase 2)
+    uint64_t verifyDraws[3] = {};                               // owner X draws on verify frames, by class (Phase 2): the base of the would-take share there
+    uint32_t verifyFrames = 0;                                  // verify frames in the window (Phase 2)
     uint64_t refused[static_cast<size_t>(Reason::kCount)] = {};  // by first reason (index kTake unused)
     uint64_t dynBy[kDynCount] = {};                             // dynamic refusals by the first flag up
     uint64_t armedBy[kArmCount] = {};                           // armed refusals by the first flag armed
@@ -396,6 +415,15 @@ struct Counters {
     void reset() { *this = Counters(); }
 };
 
+// ---- The verify frames (Phase 2) -----------------------------------------------------------------------------------------------------------------------
+// On one frame in 16 a draw that WOULD take the fast path takes the full path instead, and is compared with its ticket as in Phase 1. The phase is
+// (n + n/16) % 16 == 8 over n, the count of frame boundaries the shadow has seen: the choice the ui_depth and family memos made (ui_family_memo.h). The perf
+// monitor samples the draw clock on frames numbered 0 mod 16, so a plain n % 16 == 8 would never meet one; this phase slips by one every 16 frames, so over
+// 256 frames each phase is verified once. A draw-sample frame is never a verify frame, however the phase falls: the step clock measures those frames and
+// must see the fast path's real cost.
+inline bool verifyPhase(uint64_t n) { return (n + n / 16) % 16 == 8; }
+inline bool verifyDraw(bool phase, bool sampledFrame) { return phase && !sampledFrame; }
+
 // How many mismatches are named in the log (the first five of the session).
 constexpr uint32_t kNamedMismatches = 5;
 
@@ -407,14 +435,16 @@ struct Tracker {
     uint32_t windowStart = 0;   // the frame the window's counters began at
 
     // The would-take decision for an owner X draw about to be issued. The dynamic and armed gathers are called only when the draw reaches that
-    // stage, so a draw refused earlier pays for neither. `wanting` is the draw gate's wanting set (certified or not).
-    template <class DynFn, class ArmFn>
-    Verdict judge(const Key& now, ArgsBound args, uint32_t wanting, DynFn&& dynFn, ArmFn&& armFn) const {
+    // stage, so a draw refused earlier pays for neither. `wanting` is the draw gate's wanting set (certified or not). `notPanelFn` (Phase 2) is asked only
+    // when the draw's band and the ticket's are the two that can merge (bandsMergeable): true when the bound PsSrv0 is known not to be panel-sized, which
+    // lets a band A draw and a band B draw share a ticket. The five-argument form never merges.
+    template <class DynFn, class ArmFn, class NotPanelFn>
+    Verdict judge(const Key& now, ArgsBound args, uint32_t wanting, DynFn&& dynFn, ArmFn&& armFn, NotPanelFn&& notPanelFn) const {
         Verdict v;
         if (!ticket.valid) { v.reason = Reason::kNoTicket; return v; }
         if (!sameKey(ticket.key, now)) { v.reason = Reason::kKeyMoved; return v; }
         if (!args.in()) { v.reason = argsReason(args.b); return v; }
-        if (args.band != ticket.band) { v.reason = Reason::kBandChanged; return v; }
+        if (args.band != ticket.band && !(bandsMergeable(args.band, ticket.band) && notPanelFn())) { v.reason = Reason::kBandChanged; return v; }
         v.dynamic = dynFn();
         if (v.dynamic) { v.reason = Reason::kDynamic; return v; }
         v.armed = armFn();
@@ -423,14 +453,20 @@ struct Tracker {
         v.reason = Reason::kTake;
         return v;
     }
+    template <class DynFn, class ArmFn>
+    Verdict judge(const Key& now, ArgsBound args, uint32_t wanting, DynFn&& dynFn, ArmFn&& armFn) const {
+        return judge(now, args, wanting, static_cast<DynFn&&>(dynFn), static_cast<ArmFn&&>(armFn), [] { return false; });
+    }
 
-    // One owner X draw, finished: the class it landed in, its non-ordinary terms, the exclusion and band of the args bands it was classified into, the key as it
-    // stands after the draw, and the vertex shader bound for it (bindingShaderHash(Vs); 0 is a value like any other). Counts it, compares it when it was a
-    // would-take draw (returning the mismatch terms, 0 for none), writes the next ticket with the draw's band, and when no ticket results counts the first
-    // reason why.
-    uint32_t finish(const Verdict& v, Class cls, uint32_t terms, ArgsBound bound, const Key& after, uint64_t vs = 0) {
+    // One owner X draw, finished on the FULL path: the class it landed in, its non-ordinary terms, the exclusion and band of the args bands it was classified
+    // into, the key as it stands after the draw, and the vertex shader bound for it (bindingShaderHash(Vs); 0 is a value like any other). Counts it, compares it
+    // when it was a would-take draw (returning the mismatch terms, 0 for none), writes the next ticket with the draw's band, and when no ticket results counts
+    // the first reason why. `verify` (Phase 2) is true on a verify frame: the draw is counted against the frame's base, and the vertex-shader sketches, which
+    // cost a scan of eight slots, are fed on verify frames only.
+    uint32_t finish(const Verdict& v, Class cls, uint32_t terms, ArgsBound bound, const Key& after, uint64_t vs = 0, bool verify = true) {
         const size_t c = static_cast<size_t>(cls);
         ++count.draws[c];
+        if (verify) ++count.verifyDraws[c];
         uint32_t mm = 0;
         if (v.reason == Reason::kTake) {
             ++count.take[c];
@@ -456,13 +492,18 @@ struct Tracker {
             const int why = noTicketReason(terms, bound, cls);
             if (why >= 0) {
                 ++count.noTicket[c][why];
-                count.noTicketVs[why].add(vs);
-                if (why >= static_cast<int>(kNtBoundSmall) && why <= static_cast<int>(kNtBoundOpen) && c < 2)
-                    count.boundVs[c][why - static_cast<int>(kNtBoundSmall)].add(vs);
+                if (verify) {
+                    count.noTicketVs[why].add(vs);
+                    if (why >= static_cast<int>(kNtBoundSmall) && why <= static_cast<int>(kNtBoundOpen) && c < 2)
+                        count.boundVs[c][why - static_cast<int>(kNtBoundSmall)].add(vs);
+                }
             }
         }
         return mm;
     }
+
+    // The fast path took an owner X draw (Phase 2): a plain increment, and the ticket stays as it was.
+    void noteFast(Class cls) { ++count.fast[static_cast<size_t>(cls)]; }
 
     // True for the first kNamedMismatches mismatched draws of the session, once each.
     bool takeNameSlot() {
@@ -522,53 +563,6 @@ inline size_t formatTerms(char* out, size_t cap, uint32_t mask) {
     return o.len;
 }
 
-inline void putShare(Out& o, uint64_t take, uint64_t draws, double frames) {
-    if (!draws) { o.put("-"); return; }
-    o.put("%.1f%% (%.1f a frame)", 100.0 * static_cast<double>(take) / static_cast<double>(draws), static_cast<double>(take) / frames);
-}
-
-// The window's line, written at the 1800-frame edge. Under 1150 characters at its worst (the rig pins it): the lists are the largest entries only,
-// each with its exact count, and say how many were left out.
-inline size_t formatLine(char* out, size_t cap, uint32_t endFrame, uint32_t frames, const Counters& c) {
-    Out o(out, cap);
-    const double f = frames ? static_cast<double>(frames) : 1.0;
-    o.put("draw fast path (shadow): TEMPORARY (built 2026-10-27, Phase 1, nothing skipped), 1800-frame window ending %u, %u frames. "
-          "Owner X draws a frame %.1f (eye %.1f, off-screen %.1f, unclassed %.1f). Would take: eye ",
-          static_cast<unsigned>(endFrame), static_cast<unsigned>(frames),
-          static_cast<double>(c.draws[0] + c.draws[1] + c.draws[2]) / f, static_cast<double>(c.draws[0]) / f, static_cast<double>(c.draws[1]) / f,
-          static_cast<double>(c.draws[2]) / f);
-    putShare(o, c.take[0], c.draws[0], f);
-    o.put(", off-screen ");
-    putShare(o, c.take[1], c.draws[1], f);
-    o.put(". Refused by first reason (window totals):");
-    bool any = false;
-    for (size_t r = 1; r < static_cast<size_t>(Reason::kCount); ++r) {
-        if (!c.refused[r]) continue;
-        o.put("%s %s %llu", any ? "," : "", reasonName(static_cast<Reason>(r)), static_cast<unsigned long long>(c.refused[r]));
-        if (static_cast<Reason>(r) == Reason::kDynamic) {
-            o.put(" (");
-            putTop(o, dynName, c.dynBy, kDynCount, 4);
-            o.put(")");
-        } else if (static_cast<Reason>(r) == Reason::kArmed) {
-            o.put(" (");
-            putTop(o, armedName, c.armedBy, kArmCount, 5);
-            o.put(")");
-        }
-        any = true;
-    }
-    if (!any) o.put(" none");
-    o.put(". Tickets recorded %llu. Mismatches: ", static_cast<unsigned long long>(c.tickets));
-    if (!c.compared) {
-        o.put("-");   // nothing to compare
-    } else {
-        o.put("%llu draws of %llu compared (", static_cast<unsigned long long>(c.mismatchDraws), static_cast<unsigned long long>(c.compared));
-        putTop(o, termName, c.mismatch, kMismatchTermCount, 10);
-        o.put(")");
-    }
-    o.put(".");
-    return o.len;
-}
-
 // The indices of the `n` largest non-zero entries of v[0..len), largest first (ties by index); returns how many were found. len is at most 32.
 inline unsigned topIndices(const uint64_t* v, unsigned len, unsigned n, unsigned* out) {
     bool used[32] = {};
@@ -582,6 +576,68 @@ inline unsigned topIndices(const uint64_t* v, unsigned len, unsigned n, unsigned
         out[got++] = best;
     }
     return got;
+}
+
+inline void putShare(Out& o, uint64_t take, uint64_t draws, double frames, const char* per = "a frame") {
+    if (!draws) { o.put("-"); return; }
+    o.put("%.1f%% (%.1f %s)", 100.0 * static_cast<double>(take) / static_cast<double>(draws), static_cast<double>(take) / frames, per);
+}
+
+// How many refusal reasons the main line lists (the rest are counted as "+k more").
+constexpr unsigned kRefusalsListed = 8;
+
+// The window's line, written at the 1800-frame edge. Under 1150 characters at its worst (the rig pins it): the lists are the largest entries only,
+// each with its exact count, and say how many were left out.
+//   Owner X draws a frame: every one (fast path or full); the fast path's share of each class, with draws a frame; then, on the window's verify frames
+//   only (one in 16, full path), the share that would have taken the fast path, which is the compared set; then the full-path draws by first reason, the
+//   tickets written, and the comparison's result.
+inline size_t formatLine(char* out, size_t cap, uint32_t endFrame, uint32_t frames, const Counters& c) {
+    Out o(out, cap);
+    const double f = frames ? static_cast<double>(frames) : 1.0;
+    uint64_t all[3];
+    for (unsigned i = 0; i < 3; ++i) all[i] = c.draws[i] + c.fast[i];
+    o.put("draw fast path: TEMPORARY (built 2026-10-27, Phase 2), 1800-frame window ending %u, %u frames. "
+          "Owner X draws a frame %.1f (eye %.1f, off-screen %.1f, unclassed %.1f). Fast path took: eye ",
+          static_cast<unsigned>(endFrame), static_cast<unsigned>(frames), static_cast<double>(all[0] + all[1] + all[2]) / f, static_cast<double>(all[0]) / f,
+          static_cast<double>(all[1]) / f, static_cast<double>(all[2]) / f);
+    putShare(o, c.fast[0], all[0], f);
+    o.put(", off-screen ");
+    putShare(o, c.fast[1], all[1], f);
+    const double vf = c.verifyFrames ? static_cast<double>(c.verifyFrames) : 1.0;
+    o.put(". Verify frames %u, full path: would take eye ", static_cast<unsigned>(c.verifyFrames));
+    putShare(o, c.take[0], c.verifyDraws[0], vf, "a verify frame");
+    o.put(", off-screen ");
+    putShare(o, c.take[1], c.verifyDraws[1], vf, "a verify frame");
+    o.put(". Full path by first reason (window totals):");
+    unsigned idx[kRefusalsListed];
+    const unsigned shown = topIndices(c.refused, static_cast<unsigned>(Reason::kCount), kRefusalsListed, idx);
+    unsigned nonzero = 0;
+    for (size_t r = 1; r < static_cast<size_t>(Reason::kCount); ++r) nonzero += c.refused[r] != 0;
+    for (unsigned j = 0; j < shown; ++j) {
+        const Reason r = static_cast<Reason>(idx[j]);
+        o.put("%s %s %llu", j ? "," : "", reasonName(r), static_cast<unsigned long long>(c.refused[idx[j]]));
+        if (r == Reason::kDynamic) {
+            o.put(" (");
+            putTop(o, dynName, c.dynBy, kDynCount, 3);
+            o.put(")");
+        } else if (r == Reason::kArmed) {
+            o.put(" (");
+            putTop(o, armedName, c.armedBy, kArmCount, 4);
+            o.put(")");
+        }
+    }
+    if (!shown) o.put(" none");
+    if (nonzero > shown) o.put(", +%u more", nonzero - shown);
+    o.put(". Tickets recorded %llu. Mismatches: ", static_cast<unsigned long long>(c.tickets));
+    if (!c.compared) {
+        o.put("-");   // nothing to compare
+    } else {
+        o.put("%llu draws of %llu compared (", static_cast<unsigned long long>(c.mismatchDraws), static_cast<unsigned long long>(c.compared));
+        putTop(o, termName, c.mismatch, kMismatchTermCount, 6);
+        o.put(")");
+    }
+    o.put(".");
+    return o.len;
 }
 
 // How many reasons the line lists for each class; the rest are counted as "+k more".
@@ -600,7 +656,7 @@ inline size_t formatNoTicketLine(char* out, size_t cap, uint32_t endFrame, uint3
             reasonTotal[r] += c.noTicket[cl][r];
             all += c.noTicket[cl][r];
         }
-    o.put("draw fast path (shadow) no ticket: TEMPORARY (built 2026-10-27, Phase 1d), 1800-frame window ending %u, %u frames. Owner X draws a frame that "
+    o.put("draw fast path no ticket: TEMPORARY (built 2026-10-27, Phase 2), 1800-frame window ending %u, %u frames. Owner X full-path draws a frame that "
           "recorded no ticket, by first failing reason (class unknown, the five exclusions, unsettled, wake surface, then verdict to special vs): ",
           static_cast<unsigned>(endFrame), static_cast<unsigned>(frames));
     if (!all) {
@@ -618,7 +674,7 @@ inline size_t formatNoTicketLine(char* out, size_t cap, uint32_t endFrame, uint3
         if (nonzero > shown) o.put(", +%u more", nonzero - shown);
         o.put("); ");
     }
-    o.put("Most frequent vertex shaders of the two largest reasons: ");
+    o.put("Most frequent vertex shaders of the two largest reasons (sampled on verify frames, shares of the sample): ");
     unsigned two[2];
     const unsigned reasons = topIndices(reasonTotal, kNoTicketReasons, 2, two);
     for (unsigned i = 0; i < reasons; ++i) {
@@ -628,7 +684,7 @@ inline size_t formatNoTicketLine(char* out, size_t cap, uint32_t endFrame, uint3
         const unsigned got = sk.top(3, slot);
         o.put("%s%s (%.1f a frame):", i ? "; " : "", noTicketName(r), static_cast<double>(reasonTotal[r]) / f);
         for (unsigned j = 0; j < got; ++j) {
-            double share = 100.0 * static_cast<double>(sk.count[slot[j]]) / static_cast<double>(reasonTotal[r]);
+            double share = 100.0 * static_cast<double>(sk.count[slot[j]]) / static_cast<double>(sk.total ? sk.total : reasonTotal[r]);
             if (share > 100.0) share = 100.0;
             o.put("%s VS %016llX %.0f%%", j ? "," : "", static_cast<unsigned long long>(sk.key[slot[j]]), share);
         }
@@ -647,8 +703,8 @@ inline size_t formatArgsLine(char* out, size_t cap, uint32_t endFrame, uint32_t 
     uint64_t any = 0;
     for (unsigned cl = 0; cl < 2; ++cl)
         for (unsigned b = 0; b < 5; ++b) any += c.noTicket[cl][kNtBoundSmall + b];
-    o.put("draw fast path (shadow) args: 1800-frame window ending %u, %u frames. Owner X draws a frame kept out of the bands, by first exclusion, with their top "
-          "vertex shaders and shares in percent:",
+    o.put("draw fast path args: 1800-frame window ending %u, %u frames. Full-path draws a frame kept out of the bands, by first exclusion, with their top "
+          "vertex shaders (verify-frame sample) and shares in percent:",
           static_cast<unsigned>(endFrame), static_cast<unsigned>(frames));
     if (!any) o.put(" -.");
     for (unsigned cl = 0; cl < 2; ++cl) {
@@ -665,7 +721,7 @@ inline size_t formatArgsLine(char* out, size_t cap, uint32_t endFrame, uint32_t 
             putPerFrame(o, static_cast<double>(n) / f);
             o.put(":");
             for (unsigned j = 0; j < got; ++j) {
-                double share = 100.0 * static_cast<double>(sk.count[slot[j]]) / static_cast<double>(n);
+                double share = 100.0 * static_cast<double>(sk.count[slot[j]]) / static_cast<double>(sk.total ? sk.total : n);
                 if (share > 100.0) share = 100.0;
                 o.put("%s %016llX %.0f", j ? "," : "", static_cast<unsigned long long>(sk.key[slot[j]]), share);
             }

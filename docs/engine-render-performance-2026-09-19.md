@@ -58,7 +58,7 @@
 
 * **Next (2026-10-27, last entry):** AA on's +1.65 ms is per-draw
   classifiers. ui-depth memo FLOWN: exact, -0.21 ms (shipped, b1561dff).
-  Shadow 1d FLOWN: 44-51% would take, 0/65M wrong. Next: merge bands, Ph 2.
+  Shadow 1d FLOWN: 44-51% would take, 0/65M wrong. Phase 2 (skips) BUILT.
 
 ## Frame budget philosophy
 
@@ -4699,6 +4699,71 @@ should take most of the 20%, to about 65-70%. Then Phase 2: actually
 skip. The comparison keeps running on rotating unsampled frames, and
 the step clock gets the `fast` step. That is the first measurement of
 the real saving.
+
+**Phase 2 built (2026-10-27), NOT FLOWN. The first behaviour change.**
+
+**The band merge.** Bands A and B share a ticket when
+`srv0KnownNotPanel` holds: PsSrv0 unbound, or the panel memo's
+generation is current and its answer is "not panel".
+
+**Skipping.** A would-take draw takes the fast path, except on verify
+frames: one frame in 16, rotating, never a draw-sample frame. There it
+takes the full path and is compared.
+
+**The fast block** (X thunk, vscreen.cpp ~5702-5739, after the
+prologue, the clock and the stashes):
+1. noteFast;
+2. particleRollFreeClear;
+3. glareClamp, curve, introCurve and the three t_ flags cleared;
+4. bindAuditSeq, with the audit on its 1024th;
+5. depthProbeNoteDraw;
+6. by class:
+   - eye: the eye count, the depth probe's eye note, the two ui_depth
+     classifiers and the crisp-HUD note;
+   - off-screen: screenMotionSource when live, then the
+     scene-candidate tally;
+7. engineVelocityBeforeDraw and NoteSkinDraw;
+8. the `fast` mark;
+9. the game's draw, in GpuCensusAlteredScope (kNone, unlayered) inside
+   the whole clock's realCall.
+
+Four additions came from the implementation:
+- **The ui_depth classifiers are called, not assumed.** A D, I or N
+  draw at the same key can leave their outputs set, and
+  forwardWithVerdict reads the pendings ungated. The draw takes the
+  fast path only when both memos hit (`uiDepthEyeDeclineHeld`); a miss
+  is the refusal "ui depth memo missed".
+- **screenMotionSource on off-screen draws,** because the full path's
+  off-screen branch makes that call.
+- **A closed draw gate is a refusal,** because the full path returns
+  before the eye count.
+- **An unbound PsSrv0 counts as "not panel"** for the merge.
+
+**Lines.** `draw fast path:` gives:
+- fast-path draws a frame and their share by class;
+- the verify frames' would-take share, compared draws and mismatches;
+- the refusals.
+
+The no-ticket and args sketches are fed on verify frames only.
+
+**Rig:** aa_off_test, 427 checks, with the fast block pinned statement
+by statement, and billboard_rollfree_test R8 updated.
+
+**Flight:** parked at the Cranfield pad, AA on for at least 2 minutes,
+nothing building, then a minute looking around the cockpit, settlement
+and HUD. Watch for anything visibly wrong:
+- HUD, panels, holo, terminals;
+- sky, shadows, foliage, ghosting.
+
+Then F7 AA off for a minute, and F7 back on.
+
+What to read:
+- `draw fast path:`: the fast share, and mismatches at 0;
+- the step lines: `fast` and GAME against the other steps, whose calls
+  should fall by the fast share;
+- EDVR's step sum and the old `draw hook CPU:` against the memo flight
+  (log 122848: sum 3.53, old line 3.87-4.26), allowing for the
+  instrument's own cost.
 
 **The Phase 2 flight should show:**
 - the `fast` step's calls and cost;

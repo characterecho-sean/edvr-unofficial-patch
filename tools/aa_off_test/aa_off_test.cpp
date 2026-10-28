@@ -1672,24 +1672,33 @@ void testShadowMismatch() {
     check(named == fsh::kNamedMismatches && fsh::kNamedMismatches == 5 && n.named == 5, "shadow mismatch: the first five mismatches of a session are named, and no more");
     check(fsh::lowestBit(0) == 32 && fsh::lowestBit(1) == 0 && fsh::lowestBit(0x80) == 7, "shadow mismatch: the first flag of a mask");
 }
-
-// The text.
+// The text (Phase 2: `draw fast path:`, the fast path's share, the verify frames' would-take share, the full path's refusals).
 void testShadowText() {
     char buf[2048];
     fsh::Counters none;
     const size_t emptyLen = fsh::formatLine(buf, sizeof(buf), 5400, 1800, none);
     const std::string empty(buf);
-    check(emptyLen == empty.size() && contains(empty, "draw fast path (shadow):") && contains(empty, "TEMPORARY") && contains(empty, "1800-frame window ending 5400, 1800 frames"),
-          "shadow text: the line names itself, the window and its frames");
-    check(contains(empty, "Would take: eye -, off-screen -") && contains(empty, "Refused by first reason (window totals): none.") && contains(empty, "Mismatches: -."),
+    check(emptyLen == empty.size() && empty.rfind("draw fast path: TEMPORARY (built 2026-10-27, Phase 2)", 0) == 0 && !contains(empty, "(shadow)") &&
+              contains(empty, "1800-frame window ending 5400, 1800 frames"),
+          "shadow text: the line is `draw fast path:`, keeps the TEMPORARY tag, and names the window and its frames");
+    check(contains(empty, "Fast path took: eye -, off-screen -") && contains(empty, "Verify frames 0, full path: would take eye -, off-screen -") &&
+              contains(empty, "Full path by first reason (window totals): none.") && contains(empty, "Mismatches: -."),
           "shadow text: an empty window reads '-' for the shares and the mismatches, and 'none' for refusals");
     fsh::Counters c;
-    c.draws[0] = 1800 * 17800;
-    c.draws[1] = 1800 * 17000;
-    c.take[0] = 1800 * 16000;
-    c.take[1] = 1800 * 15000;
+    // Eye 17800 owner X draws a frame: 8000 full path and 9800 fast; off-screen 17000: 7000 full and 10000 fast. 112 verify frames of the 1800.
+    c.draws[0] = 1800 * 8000;
+    c.draws[1] = 1800 * 7000;
+    c.fast[0] = 1800 * 9800;
+    c.fast[1] = 1800 * 10000;
+    c.verifyFrames = 112;
+    c.verifyDraws[0] = 112ull * 17800;
+    c.verifyDraws[1] = 112ull * 17000;
+    c.take[0] = 112ull * 10000;
+    c.take[1] = 112ull * 9000;
     c.refused[static_cast<size_t>(fsh::Reason::kNoTicket)] = 3;
     c.refused[static_cast<size_t>(fsh::Reason::kKeyMoved)] = 2000;
+    c.refused[static_cast<size_t>(fsh::Reason::kUiDepthMemo)] = 500;
+    c.refused[static_cast<size_t>(fsh::Reason::kBandChanged)] = 100;
     c.refused[static_cast<size_t>(fsh::Reason::kDynamic)] = 9;
     c.dynBy[fsh::kDynProbeChecks] = 9;
     c.refused[static_cast<size_t>(fsh::Reason::kArmed)] = 7;
@@ -1698,11 +1707,25 @@ void testShadowText() {
     c.tickets = 123456;
     fsh::formatLine(buf, sizeof(buf), 7200, 1800, c);
     std::string line(buf);
-    check(contains(line, "Owner X draws a frame 34800.0 (eye 17800.0, off-screen 17000.0, unclassed 0.0)") && contains(line, "eye 89.9% (16000.0 a frame), off-screen 88.2% (15000.0 a frame)"),
-          "shadow text: the draws a frame and the would-take shares, eye and off-screen apart");
-    check(contains(line, "no ticket 3, key moved 2000, dynamic 9 (probe checks 9), armed 7 (dust 5, pixel 2)") && !contains(line, "args class") && !contains(line, "not certified"),
-          "shadow text: refusals by reason, the largest first, the detail under dynamic and armed, and a zero reason left out");
-    check(contains(line, "Tickets recorded 123456.") && contains(line, "Mismatches: -."), "shadow text: the tickets, and '-' while there is nothing to compare");
+    check(contains(line, "Owner X draws a frame 34800.0 (eye 17800.0, off-screen 17000.0, unclassed 0.0)"),
+          "shadow text: the owner X draws a frame count the fast path's draws and the full path's");
+    check(contains(line, "Fast path took: eye 55.1% (9800.0 a frame), off-screen 58.8% (10000.0 a frame)"),
+          "shadow text: the fast path's share of each class, with its draws a frame");
+    check(contains(line, "Verify frames 112, full path: would take eye 56.2% (10000.0 a verify frame), off-screen 52.9% (9000.0 a verify frame)"),
+          "shadow text: the would-take share is read on the verify frames, per verify frame");
+    check(contains(line, "key moved 2000, ui depth memo missed 500, band changed 100, dynamic 9 (probe checks 9), armed 7 (dust 5, pixel 2), no ticket 3. Tickets recorded 123456.") &&
+              !contains(line, "args class") && !contains(line, "not certified") && !contains(line, "more"),
+          "shadow text: the full path's draws by reason, the largest first, the detail under dynamic and armed, and a zero reason left out");
+    check(contains(line, "Mismatches: -."), "shadow text: '-' while there is nothing to compare");
+    // More reasons than the line lists: the largest eight, then how many were left out.
+    fsh::Counters many;
+    for (size_t r = 1; r < static_cast<size_t>(fsh::Reason::kCount); ++r) many.refused[r] = 100 * r;
+    fsh::formatLine(buf, sizeof(buf), 7200, 1800, many);
+    line = buf;
+    const unsigned reasons = static_cast<unsigned>(fsh::Reason::kCount) - 1;
+    check(reasons > fsh::kRefusalsListed && contains(line, ", +" + std::to_string(reasons - fsh::kRefusalsListed) + " more.") && contains(line, "ui depth memo missed 1300, draw gate closed 1200") &&
+              !contains(line, "no ticket 100"),
+          "shadow text: past eight reasons the line keeps the eight largest and says how many were left out");
     c.compared = 1000000;
     c.mismatchDraws = 0;
     fsh::formatLine(buf, sizeof(buf), 7200, 1800, c);
@@ -1726,17 +1749,24 @@ void testShadowText() {
     check(nt < sizeof(tiny) && tiny[nt] == '\0', "shadow text: a short buffer is cut and terminated, never overrun");
     char one[1] = {'x'};
     check(fsh::formatLine(one, 1, 1, 1, c) == 0 && one[0] == '\0', "shadow text: a one-byte buffer holds the terminator alone");
-    // The worst case: every counter large and every list full. The log note truncates near 1170.
+    // The worst case: every counter large and every list full, at three window lengths (a counter that large over one frame, over the real 1800, and over
+    // four billion frames, which makes every per-frame figure small and every total long). The log note truncates near 1170.
     fsh::Counters w;
-    for (int i = 0; i < 3; ++i) w.draws[i] = w.take[i] = 4000000000ull;
+    for (int i = 0; i < 3; ++i) w.draws[i] = w.fast[i] = w.verifyDraws[i] = w.take[i] = 4000000000ull;
+    w.verifyFrames = 4000000000u;
     for (size_t r = 1; r < static_cast<size_t>(fsh::Reason::kCount); ++r) w.refused[r] = 4000000000ull - r;
     for (unsigned i = 0; i < fsh::kDynCount; ++i) w.dynBy[i] = 4000000000ull - i;
     for (unsigned i = 0; i < fsh::kArmCount; ++i) w.armedBy[i] = 4000000000ull - i;
     for (unsigned i = 0; i < fsh::kMismatchTermCount; ++i) w.mismatch[i] = 4000000000ull - i;
     w.tickets = w.compared = w.mismatchDraws = 4000000000ull;
     char big[4096];
-    const size_t worst = fsh::formatLine(big, sizeof(big), 4000000000u, 4000000000u, w);
-    check(worst > 0 && worst < 1150 && std::strlen(big) == worst, "shadow text: the line is under 1150 characters at its worst (every counter at four billion, every list full)");
+    size_t worst = 0;
+    for (const uint32_t frames : {1u, 1800u, 4000000000u}) {
+        w.verifyFrames = frames < 112u ? 1u : frames / 16u;
+        const size_t len = fsh::formatLine(big, sizeof(big), 4000000000u, frames, w);
+        check(len > 0 && len < 1150 && std::strlen(big) == len, "shadow text: the line is under 1150 characters at its worst (every counter at four billion, every list full)");
+        if (len > worst) worst = len;
+    }
     std::printf("aa_off_test: shadow line worst case %zu characters\n", worst);
 }
 
@@ -1821,8 +1851,12 @@ void testShadowWiring() {
     check(world != std::string::npos && end != std::string::npos && thunk.substr(0, world).find("shadow") == std::string::npos &&
               thunk.substr(end) == "if(shadow.live)shadowEnd(shadow,perInstance,instances);",
           "shadow wiring: nothing of the shadow is reached by the flat profile's branch, and the thunk's last statement is the shadow's end");
-    check(clock != std::string::npos && countOf(thunk.substr(clock), "return") == 1 && contains(thunk.substr(clock), "returntrue;"),
-          "shadow wiring: past the clock's start the thunk has one return, the lambda's (the shadow adds no early return to the draw path)");
+    // Phase 2: past the clock's start the thunk has two returns, the repeat-draw fast path's (the last statement of `if(shadow.fast){...}`) and the lambda's.
+    const size_t fastAt = thunk.find("if(shadow.fast){"), fastEnd = fastAt == std::string::npos ? std::string::npos : thunk.find("return;}", fastAt);
+    check(clock != std::string::npos && fastAt != std::string::npos && fastEnd != std::string::npos && countOf(thunk.substr(clock), "return") == 2 &&
+              countOf(thunk.substr(fastAt, fastEnd + 8 - fastAt), "return") == 1 && contains(thunk.substr(clock), "returntrue;") &&
+              thunk.compare(fastEnd + 8, std::string("constDrawVerdictv=beginPanelOverride(").size(), "constDrawVerdictv=beginPanelOverride(") == 0,
+          "shadow wiring: past the clock's start the thunk has two returns, the fast path's (closing its block, ahead of the verdict) and the lambda's");
     check(countOf(squeezedCode(vscreen), "drawGateResample(s);") == 2 && countOf(squeezedCode(vscreen), "drawGateSet(drawGateSubscribed(s))") == 1,
           "shadow wiring: the gate and the subscriber set are resampled together at both sites");
     {
@@ -1835,9 +1869,9 @@ void testShadowWiring() {
         check(at != std::string::npos && callsIn(dropped, {"inlineuint32_tdrawGateSubscribers", "if"}) != gateCalls &&
                   callsIn(widened, {"booldrawGateSubscribed"}) != listCalls,
               "shadow wiring control: a getter dropped from the set, or added to the gate alone, fails the agreement pin");
-        const std::string extraReturn = thunk.substr(clock) + "return;";
+        const std::string extraReturn = thunk.substr(clock) + "return;";   // Phase 2: two returns are the baseline, a third changes what the pin reads
         const std::string moved = "shadowBegin(shadow,g_state,perInstance,instances);" + thunk;
-        check(clock != std::string::npos && world != std::string::npos && countOf(extraReturn, "return") == 2 &&
+        check(clock != std::string::npos && world != std::string::npos && countOf(extraReturn, "return") == 3 &&
                   moved.substr(0, moved.find("if(g_vrWorldInternal){")).find("shadow") != std::string::npos,
               "shadow wiring control: a return added past the clock, or a shadow call ahead of the flat branch, changes what the pins read");
     }
@@ -1894,8 +1928,8 @@ void testShadowWiring() {
         check(!armedBody.empty() && !contains(armedBody, "depthProbeLayoutActive") && noLayoutName && fsh::kArmCount == 14 &&
                   !contains(slurpFile("src/d3d11/depth_probe.h"), "depthProbeLayoutActive") && !contains(slurpFile("src/d3d11/depth_probe.cpp"), "g_depthProbeLayoutTarget"),
               "shadow wiring: the layout sample is not an armed flag (depthProbeNoteDraw performs it, and the fast path keeps calling it), and its accessor is gone");
-        check(contains(code, "g_shadow.tracker.finish(d.verdict,d.cls,g_shadow.terms,d.bound,shadowKeyNow(),bindingShaderHash(BindSlot::Vs));"),
-              "shadow wiring: the end of the thunk hands the tally the bound vertex shader, bindingShaderHash(Vs), with the draw's exclusion and band");
+        check(contains(code, "g_shadow.tracker.finish(d.verdict,d.cls,g_shadow.terms,d.bound,shadowKeyNow(),d.verify?bindingShaderHash(BindSlot::Vs):0ull,d.verify);"),
+              "shadow wiring: the end of the thunk hands the tally the bound vertex shader, bindingShaderHash(Vs), on a verify frame only, with the draw's exclusion and band");
         const size_t linesAt = code.find("voidvScreenDrawFastPathShadowLines(");
         const std::string lines = linesAt == std::string::npos ? std::string() : code.substr(linesAt, code.find("}", linesAt) - linesAt);
         const size_t f1 = lines.find("fastshadow::formatLine("), f2 = lines.find("fastshadow::formatNoTicketLine("), f3 = lines.find("fastshadow::formatArgsLine("),
@@ -2055,10 +2089,10 @@ void testShadowBands() {
     // The refusal order on the main line: ticket, key, the exclusions, the band, the dynamic flags.
     const fsh::Reason order[] = {fsh::Reason::kNoTicket, fsh::Reason::kKeyMoved, fsh::Reason::kArgsSmall, fsh::Reason::kArgsLargeActs, fsh::Reason::kArgs240,
                                  fsh::Reason::kArgsNoInstances, fsh::Reason::kArgsOpen, fsh::Reason::kBandChanged, fsh::Reason::kDynamic, fsh::Reason::kArmed,
-                                 fsh::Reason::kNotCertified};
+                                 fsh::Reason::kNotCertified, fsh::Reason::kGateClosed, fsh::Reason::kUiDepthMemo};
     bool inOrder = true;
     for (size_t i = 0; i + 1 < sizeof(order) / sizeof(order[0]); ++i) inOrder = inOrder && static_cast<int>(order[i]) + 1 == static_cast<int>(order[i + 1]);
-    check(inOrder && static_cast<int>(fsh::Reason::kCount) == 12, "bands: the reasons run no ticket, key moved, the five exclusions, band changed, dynamic, armed, not certified");
+    check(inOrder && static_cast<int>(fsh::Reason::kCount) == 14, "bands: the reasons run no ticket, key moved, the five exclusions, band changed, dynamic, armed, not certified, draw gate closed, ui depth memo missed");
     // The exclusions' vertex shaders are kept apart by class and by exclusion.
     fsh::Tracker v;
     const fsh::Verdict full;
@@ -2237,7 +2271,7 @@ void testShadowNoTicketText() {
     fsh::Counters none;
     const size_t emptyLen = fsh::formatNoTicketLine(buf, sizeof(buf), 5400, 1800, none);
     const std::string empty(buf);
-    check(emptyLen == empty.size() && empty.compare(0, 34, "draw fast path (shadow) no ticket:") == 0 && contains(empty, "1800-frame window ending 5400, 1800 frames") &&
+    check(emptyLen == empty.size() && empty.rfind("draw fast path no ticket: TEMPORARY (built 2026-10-27, Phase 2)", 0) == 0 && contains(empty, "1800-frame window ending 5400, 1800 frames") &&
               contains(empty, "then verdict to special vs): -."),
           "no-ticket text: the line names itself and the window, and reads '-' when nothing went without a ticket");
     check(!contains(empty, "Most frequent"), "no-ticket text: nothing counted lists no vertex shaders");
@@ -2257,7 +2291,7 @@ void testShadowNoTicketText() {
     const std::string line(buf);
     check(contains(line, "eye 150.0 (weapon 100.0, special vs 50.0); off-screen 50.0 (unsettled 30.0, weapon 20.0); "),
           "no-ticket text: per class the reasons with their counts a frame, largest first");
-    check(contains(line, "Most frequent vertex shaders of the two largest reasons: weapon (120.0 a frame): VS 0000000000001111 50%, VS 0000000000002222 33%, VS 0000000000000000 17%; "
+    check(contains(line, "Most frequent vertex shaders of the two largest reasons (sampled on verify frames, shares of the sample): weapon (120.0 a frame): VS 0000000000001111 50%, VS 0000000000002222 33%, VS 0000000000000000 17%; "
                          "special vs (50.0 a frame): VS 0000000000003333 100%."),
           "no-ticket text: for the two largest reasons overall their top three vertex shaders with each one's share, the hash 0 among them");
     check(!contains(line, "unclassed") && !contains(line, "4444"), "no-ticket text: an empty class and the third reason are left out");
@@ -2302,8 +2336,8 @@ void testShadowArgsText() {
     fsh::Counters none;
     const size_t emptyLen = fsh::formatArgsLine(buf, sizeof(buf), 5400, 1800, none);
     const std::string empty(buf);
-    check(emptyLen == empty.size() && empty.compare(0, 29, "draw fast path (shadow) args:") == 0 && contains(empty, "1800-frame window ending 5400, 1800 frames") &&
-              contains(empty, "top vertex shaders and shares in percent: -."),
+    check(emptyLen == empty.size() && empty.rfind("draw fast path args: 1800-frame window", 0) == 0 && contains(empty, "1800-frame window ending 5400, 1800 frames") &&
+              contains(empty, "(verify-frame sample) and shares in percent: -."),
           "args text: the line names itself and the window, and reads '-' when no classed draw was kept out");
     // A typical window over ten frames, through the tracker.
     fsh::Tracker t;
@@ -2343,6 +2377,284 @@ void testShadowArgsText() {
     const size_t worst = fsh::formatArgsLine(big, sizeof(big), 4000000000u, 1, w);
     check(worst > 0 && worst < 1150 && std::strlen(big) == worst, "args text: the line is under 1150 characters at its worst (all ten class and exclusion pairs at four billion, every sketch full)");
     std::printf("aa_off_test: shadow args line worst case %zu characters\n", worst);
+}
+
+// ---- Phase 2: the repeat-draw fast path and its verification (Cut H) ---------------------------------------------------------------------------------------
+
+// The band merge: a band A draw and a band B draw share a ticket, in either direction, while srv0IsPanelSized's answer for the bound PsSrv0 is already known
+// to be "no". The memo's generation and answer are the four facts of srv0NotPanelKnown; the judge asks for it only when it can matter.
+void testFastPathBandMerge() {
+    using fsh::Band;
+    bool tableOk = true;
+    for (int bound = 0; bound < 2; ++bound)
+        for (uint32_t memoGen : {7u, 8u})
+            for (int panel = 0; panel < 2; ++panel)
+                tableOk = tableOk && fsh::srv0NotPanelKnown(bound != 0, memoGen, 7u, panel != 0) == (!bound || (memoGen == 7u && !panel));
+    check(tableOk && fsh::srv0NotPanelKnown(true, 7, 7, false) && !fsh::srv0NotPanelKnown(true, 7, 7, true) && !fsh::srv0NotPanelKnown(true, 6, 7, false) &&
+              fsh::srv0NotPanelKnown(false, 0, 7, true),
+          "band merge: the answer is known to be 'no' when PsSrv0 is unbound, or the memo is current for PsSrv0's generation and says false");
+    const fsh::Key key = shadowKey(3, 3, 3);
+    unsigned wrong = 0, pairs = 0;
+    for (Band tb : {Band::kA, Band::kB, Band::kC})
+        for (Band db : {Band::kA, Band::kB, Band::kC})
+            for (int notPanel = 0; notPanel < 2; ++notPanel) {
+                fsh::Tracker t;
+                t.finish(fsh::Verdict(), fsh::Class::kEye, 0, fsh::ArgsBound(fsh::Bound::kIn, tb), key, 0x1);
+                unsigned asked = 0;
+                const fsh::Verdict v = t.judge(key, fsh::ArgsBound(fsh::Bound::kIn, db), 0, [] { return 0u; }, [] { return 0u; }, [&] { ++asked; return notPanel != 0; });
+                const bool mergeable = (tb == Band::kA && db == Band::kB) || (tb == Band::kB && db == Band::kA);
+                const bool want = tb == db || (mergeable && notPanel);
+                wrong += (v.reason == fsh::Reason::kTake) != want;
+                wrong += !want && v.reason != fsh::Reason::kBandChanged;
+                wrong += asked != (mergeable ? 1u : 0u);   // asked only when the bands differ and are the two that can merge
+                wrong += fsh::bandsShare(db, tb, notPanel != 0) != want;
+                ++pairs;
+            }
+    check(wrong == 0 && pairs == 18, "band merge: A and B merge in either direction exactly when the answer is known 'no', C merges with nothing, and the answer is asked only for A against B");
+    // The five-argument form (the rule Phase 1d flew) never merges.
+    fsh::Tracker a;
+    a.finish(fsh::Verdict(), fsh::Class::kEye, 0, fsh::ArgsBound(fsh::Bound::kIn, Band::kA), key, 0x1);
+    check(a.judge(key, fsh::ArgsBound(fsh::Bound::kIn, Band::kB), 0, [] { return 0u; }, [] { return 0u; }).reason == fsh::Reason::kBandChanged,
+          "band merge: the form without the answer keeps the band rule");
+    // The merge sits where `band changed` did: after the key and the exclusions, ahead of the dynamic flags.
+    unsigned asked = 0;
+    const auto ask = [&] { ++asked; return true; };
+    check(a.judge(shadowKey(3, 3, 4), fsh::ArgsBound(fsh::Bound::kIn, Band::kB), 0, [] { return 0u; }, [] { return 0u; }, ask).reason == fsh::Reason::kKeyMoved && asked == 0 &&
+              a.judge(key, fsh::ArgsBound(fsh::Bound::k240, Band::kB), 0, [] { return 0u; }, [] { return 0u; }, ask).reason == fsh::Reason::kArgs240 && asked == 0,
+          "band merge: a moved key or an excluded draw is refused under its own reason before the merge is asked");
+    check(a.judge(key, fsh::ArgsBound(fsh::Bound::kIn, Band::kB), 0, [] { return 1u; }, [] { return 0u; }, ask).reason == fsh::Reason::kDynamic && asked == 1 &&
+              a.judge(key, fsh::ArgsBound(fsh::Bound::kIn, Band::kB), 0, [] { return 0u; }, [] { return 1u; }, ask).reason == fsh::Reason::kArmed &&
+              a.judge(key, fsh::ArgsBound(fsh::Bound::kIn, Band::kB), fsh::kSubFssRes, [] { return 0u; }, [] { return 0u; }, ask).reason == fsh::Reason::kNotCertified,
+          "band merge: a merged draw still meets the dynamic flags, the armed flags and the certified test");
+    // A fast-path draw does not move the ticket: only a full-path draw writes one.
+    fsh::Tracker n;
+    n.finish(fsh::Verdict(), fsh::Class::kEye, 0, fsh::ArgsBound(fsh::Bound::kIn, Band::kA), key, 0x1);
+    const fsh::Ticket before = n.ticket;
+    n.noteFast(fsh::Class::kEye);
+    check(n.ticket.valid && n.ticket.band == Band::kA && fsh::sameKey(n.ticket.key, before.key) && n.ticket.cls == before.cls && n.count.fast[0] == 1,
+          "band merge: a fast-path draw counts itself and leaves the ticket, its band and its key as they were");
+}
+
+// The verify frames: one frame in 16, never a draw-sample frame.
+void testFastPathVerifyFrames() {
+    unsigned phases = 0, perResidue[16] = {}, verifyDraws = 0, onSampled = 0, differsFromFamily = 0;
+    for (uint64_t n = 0; n < 256; ++n) {
+        const bool phase = fsh::verifyPhase(n);
+        phases += phase;
+        if (phase) ++perResidue[n % 16];
+        const bool sampled = n % 16 == 0;   // the perf monitor samples the draw clock on frames numbered 0 mod 16
+        const bool verify = fsh::verifyDraw(phase, sampled);
+        verifyDraws += verify;
+        onSampled += verify && sampled;
+        differsFromFamily += phase != fm::verifyFrame(n);
+    }
+    bool eachOnce = true;
+    for (unsigned r = 0; r < 16; ++r) eachOnce = eachOnce && perResidue[r] == 1;
+    check(phases == 16 && eachOnce, "verify frames: 16 of every 256 frames, each phase of the draw-sample clock once");
+    check(verifyDraws == 15 && onSampled == 0 && !fsh::verifyDraw(true, true) && fsh::verifyDraw(true, false) && !fsh::verifyDraw(false, false) && !fsh::verifyDraw(false, true),
+          "verify frames: a draw-sample frame is never a verify frame, however the phase falls (frame 128 is one such), and every other phase frame is");
+    check(differsFromFamily == 0, "verify frames: the phase is the one the ui_depth and family memos verified with, (n + n/16) % 16 == 8");
+}
+
+// What the tracker counts for the fast path: a fast-path draw is a plain increment, a verify frame's draws feed the sketches and the base of the would-take
+// share, and the two conditions the glue adds are refusals like any other.
+void testFastPathCounts() {
+    const fsh::Key key = shadowKey(4, 4, 4);
+    const fsh::ArgsBound in(fsh::Bound::kIn, fsh::Band::kB);
+    // A full-path draw off a verify frame feeds no sketch; on a verify frame it does, and counts toward the verify base.
+    fsh::Tracker t;
+    const uint32_t unsettled = fsh::termBit(fsh::kTermUnsettled);
+    t.finish(fsh::Verdict(), fsh::Class::kOff, unsettled, in, key, 0xAB, false);
+    check(t.count.draws[1] == 1 && t.count.verifyDraws[1] == 0 && t.count.noTicket[1][fsh::kNtUnsettled] == 1 && t.count.noTicketVs[fsh::kNtUnsettled].total == 0 &&
+              t.count.noTicketVs[fsh::kNtUnsettled].count[0] == 0,
+          "fast path counts: a full-path draw off a verify frame is counted and its reason tallied, and the vertex-shader sketch is not fed");
+    t.finish(fsh::Verdict(), fsh::Class::kOff, unsettled, in, key, 0xAB, true);
+    check(t.count.draws[1] == 2 && t.count.verifyDraws[1] == 1 && t.count.noTicket[1][fsh::kNtUnsettled] == 2 && t.count.noTicketVs[fsh::kNtUnsettled].total == 1 &&
+              t.count.noTicketVs[fsh::kNtUnsettled].key[0] == 0xAB,
+          "fast path counts: on a verify frame the same draw also feeds the sketch and the verify frames' base");
+    fsh::Tracker b;
+    const fsh::ArgsBound quadArgs(fsh::Bound::kSmall, fsh::Band::kNone);
+    b.finish(fsh::Verdict(), fsh::Class::kEye, 0, quadArgs, key, 0xCD, false);
+    b.finish(fsh::Verdict(), fsh::Class::kEye, 0, quadArgs, key, 0xCD, true);
+    check(b.count.noTicket[0][fsh::kNtBoundSmall] == 2 && b.count.boundVs[0][0].total == 1 && b.count.noTicketVs[fsh::kNtBoundSmall].total == 1,
+          "fast path counts: the exclusions' sketches are fed on verify frames only, their counts on every draw");
+    // The default keeps the Phase 1 behaviour: a verify frame.
+    fsh::Tracker d;
+    d.finish(fsh::Verdict(), fsh::Class::kEye, unsettled, in, key, 0xEF);
+    check(d.count.verifyDraws[0] == 1 && d.count.noTicketVs[fsh::kNtUnsettled].total == 1, "fast path counts: a finish without the flag is a verify frame's");
+    // A would-take draw is compared only through finish (a verify frame); the fast path never compares.
+    fsh::Tracker w;
+    w.finish(fsh::Verdict(), fsh::Class::kEye, 0, in, key, 0x1, true);
+    fsh::Verdict take;
+    take.reason = fsh::Reason::kTake;
+    const uint32_t mm = w.finish(take, fsh::Class::kEye, fsh::termBit(fsh::kTermFamily), in, key, 0x1, true);
+    check(mm == fsh::termBit(fsh::kTermFamily) && w.count.take[0] == 1 && w.count.compared == 1 && w.count.mismatchDraws == 1 && w.count.mismatch[fsh::kTermFamily] == 1,
+          "fast path counts: a would-take draw on a verify frame is compared with its ticket, and a differing term is a mismatch");
+    w.noteFast(fsh::Class::kEye);
+    w.noteFast(fsh::Class::kOff);
+    w.noteFast(fsh::Class::kOff);
+    check(w.count.fast[0] == 1 && w.count.fast[1] == 2 && w.count.compared == 1 && w.count.draws[0] == 2 && w.count.draws[1] == 0,
+          "fast path counts: fast-path draws are counted by class and never compared, and are not in the full path's draws");
+    // The two conditions the glue adds are refusals under their own names.
+    fsh::Tracker g;
+    g.finish(fsh::Verdict(), fsh::Class::kEye, 0, in, key, 0x1, false);
+    fsh::Verdict closed, memo;
+    closed.reason = fsh::Reason::kGateClosed;
+    memo.reason = fsh::Reason::kUiDepthMemo;
+    g.finish(closed, fsh::Class::kEye, 0, in, key, 0x1, false);
+    g.finish(memo, fsh::Class::kEye, 0, in, key, 0x1, false);
+    g.finish(memo, fsh::Class::kEye, 0, in, key, 0x1, false);
+    check(g.count.refused[static_cast<size_t>(fsh::Reason::kGateClosed)] == 1 && g.count.refused[static_cast<size_t>(fsh::Reason::kUiDepthMemo)] == 2 && g.count.take[0] == 0 &&
+              g.count.compared == 0 && std::string(fsh::reasonName(fsh::Reason::kGateClosed)) == "draw gate closed" &&
+              std::string(fsh::reasonName(fsh::Reason::kUiDepthMemo)) == "ui depth memo missed",
+          "fast path counts: a closed draw gate and a missed ui_depth memo are refusals of their own, not would-take draws");
+    // The reset empties the Phase 2 counters too.
+    g.count.verifyFrames = 5;
+    g.noteFast(fsh::Class::kEye);
+    g.count.reset();
+    check(g.count.fast[0] == 0 && g.count.verifyFrames == 0 && g.count.verifyDraws[0] == 0, "fast path counts: the window's reset empties the fast path's counters");
+}
+
+// The step clock: a fast-path draw runs pre, fast, the game's draw, tail.
+void testFastPathStepClock() {
+    using namespace edvr::drawstep;
+    check(kFast == kFwBefore + 1 && kGameDraw == kFast + 1 && std::strcmp(stepName(kFast), "fast") == 0 && kStepCount == 28,
+          "fast path steps: `fast` is a step of its own between f:before and the game's draw");
+    FakeEnv::reset();
+    FakeEnv::g_sampled = true;
+    FakeEnv::g_ordinal = 31;
+    FakeEnv::g_time = 100;
+    {
+        TestClock c('X');
+        FakeEnv::g_time = 110;
+        c.mark(kPre);
+        FakeEnv::g_time = 140;
+        c.mark(kFast);
+        FakeEnv::g_time = 240;
+        c.stepDraw();
+        FakeEnv::g_time = 245;
+    }
+    const StepAccum& a = FakeEnv::g_lastRun;
+    check(a.ticks[kPre] == 10 && a.ticks[kFast] == 30 && a.ticks[kGameDraw] == 100 && a.ticks[kTail] == 5 && a.marks[kFast] == 1 && a.marks[kEngineVelocity] == 0 &&
+              a.marks[kFwBefore] == 0 && a.marks[kFwAfter] == 0 && a.marks[kVRest] == 0 && a.marks[kReissue] == 0,
+          "fast path steps: a repeat-draw fast path goes pre, fast, the game's draw, tail, with no verdict, forward scope or reissue step");
+    check(FakeEnv::g_window.kindDraws[3] == 1 && FakeEnv::g_window.kindTicks[3] == 45 && FakeEnv::g_window.kindMarks[3] == 3,
+          "fast path steps: the X draw's EDVR ticks are everything but the game's draw (45), and its marks the three that closed them");
+    // In the text: the step is named in both lines, in its place.
+    FormatInfo in;
+    in.endFrame = 5400;
+    in.sampledFrames = 112;
+    in.stride = 64;
+    in.ticksPerSecond = 10000000;
+    in.floorNs = 900.0;
+    char steps[1400], calls[1400];
+    Window w = FakeEnv::g_window;
+    formatStepsLine(steps, sizeof(steps), w, in);
+    formatCallsLine(calls, sizeof(calls), w, in);
+    check(std::strstr(steps, "f:before -, fast ") != nullptr && std::strstr(steps, ", GAME ") != nullptr && std::strstr(steps, "fast ") < std::strstr(steps, "GAME ") &&
+              std::strstr(calls, "f:before -, fast ") != nullptr && std::strstr(calls, "fast ") < std::strstr(calls, "GAME "),
+          "fast path steps: `fast` is printed in both step lines, after f:before and ahead of GAME");
+}
+
+// The source: the fast path does exactly the listed work in the listed order, and the full path it replaces is unchanged.
+void testFastPathWiring() {
+    const std::string vscreen = slurpFile("src/d3d11/vscreen.cpp");
+    check(vscreen.size() > 100000, "fast path wiring: vscreen.cpp is readable from the repo root");
+    const auto bodyOf = [&](const std::string& head, const char* end) {
+        const size_t at = vscreen.find(head);
+        return at == std::string::npos ? std::string() : squeezedCode(vscreen.substr(at, vscreen.find(end, at) - at));
+    };
+    const std::string thunk = bodyOf("void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,", "\n}\n");
+    const std::string bpo = bodyOf("DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,", "\n}\n");
+    const std::string fwv = bodyOf("void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,", "\n}\n");
+    const std::string begin = bodyOf("__declspec(noinline) void shadowBegin(", "\n}\n");
+    const size_t at = thunk.find("if(shadow.fast){"), stop = at == std::string::npos ? at : thunk.find("return;}", at);
+    const std::string block = at == std::string::npos || stop == std::string::npos ? std::string() : thunk.substr(at, stop + 8 - at);
+    check(!thunk.empty() && !bpo.empty() && !fwv.empty() && !begin.empty() && !block.empty(),
+          "fast path wiring: the thunk, its fast block, beginPanelOverride, forwardWithVerdict and shadowBegin are found");
+    if (block.empty() || bpo.empty() || fwv.empty() || begin.empty()) return;
+    // The block, statement by statement, in order. Each marker must be found after the one before it.
+    static const char* const kList[] = {
+        "if(shadow.fast){", "State*constfs=g_state;", "g_shadow.tracker.noteFast(shadow.cls);",
+        // 1. beginPanelOverride's per-draw stores, then its eye or off-screen work
+        "particleRollFreeClear();", "fs->glareClamp=0;", "fs->curveThisDraw=false;", "fs->introCurveThisDraw=false;", "t_uiDepthThisDraw=false;", "t_compositeThisDraw=false;",
+        "t_holoDepthThisDraw=false;", "if((++fs->bindAuditSeq&1023u)==0)bindingAudit(fs,self);",
+        "if(depthProbeWanted())depthProbeNoteDraw(self,bindingGet(BindSlot::Dsv0),fs->rtv0Eye,bindingGet(BindSlot::Rtv0)==nullptr);",
+        "if(shadow.cls==fastshadow::Class::kEye){", "++fs->eyeDrawsThisFrame;",
+        "if(depthProbeEyeDrawNeedsNote(eyeDsv))depthProbeNoteEyeDraw(self,eyeDsv,fs->eyeDrawsThisFrame);",
+        "if(uiDepthWantsDraws())uiDepthOnEyeDraw(self,{'X',perInstance,instances,startIndex,baseVertex,startInstance});",
+        "if(uiDepthHologramWantsDraws())uiDepthHologramOnEyeDraw(self);",
+        "if(uiLayerCrispOn()&&self==fs->ownerCtx)uiLayerCrispNoteEyeDraw(self,'X',perInstance,instances,startInstance);", "}else{",
+        "if(screenMotionLive())screenMotionSource(self,fs->panelW?fs->panelW:1920,fs->panelH?fs->panelH:1080);", "if(fs->rtv0Cand>=0)++fs->cands[fs->rtv0Cand].thisFrame;", "}",
+        // 2. the engine-velocity calls, 3. the game's draw
+        "engineVelocityBeforeDraw(self,fs->rtv0Eye);", "engineVelocityNoteSkinDraw(self,startInstance,instances);", "clock.mark(drawstep::kFast);",
+        "constint64_tr0=clock.on?qpcNow():0;",
+        "GpuCensusAlteredScopetimed(self,AlteredDraw(classifyAlteredDraw(true,true,engineVelocityDrawSubstituted(),false)));",
+        "fs->realDrawIndexedInstanced(self,perInstance,instances,startIndex,baseVertex,startInstance);", "clock.stepDraw();", "if(clock.on)clock.realCall(r0);", "return;}"};
+    size_t from = 0;
+    bool ordered = true;
+    for (const char* marker : kList) {
+        const size_t where = block.find(marker, from);
+        if (where == std::string::npos) {
+            std::printf("aa_off_test: fast block: not found after the one before: %s\n", marker);
+            ordered = false;
+            break;
+        }
+        from = where + std::strlen(marker);
+    }
+    check(ordered && from == block.size(), "fast path wiring: the fast block does the listed work in the listed order and ends at its return");
+    // ...and nothing else: the calls it makes are exactly these.
+    const std::set<std::string> want = {"particleRollFreeClear", "bindingAudit", "depthProbeWanted", "depthProbeNoteDraw", "bindingGet", "depthProbeEyeDrawNeedsNote", "depthProbeNoteEyeDraw",
+                                        "uiDepthWantsDraws", "uiDepthOnEyeDraw", "uiDepthHologramWantsDraws", "uiDepthHologramOnEyeDraw", "uiLayerCrispOn", "uiLayerCrispNoteEyeDraw",
+                                        "screenMotionLive", "screenMotionSource", "engineVelocityBeforeDraw", "engineVelocityNoteSkinDraw", "noteFast", "mark", "qpcNow",
+                                        "GpuCensusAlteredScopetimed", "AlteredDraw", "classifyAlteredDraw", "engineVelocityDrawSubstituted", "realDrawIndexedInstanced", "stepDraw", "realCall"};
+    const std::set<std::string> got = callsIn(block, {"if"});
+    check(got == want, "fast path wiring: the fast block makes no call beyond the listed ones");
+    if (got != want) {
+        for (const std::string& n : got) if (!want.count(n)) std::printf("aa_off_test: fast block calls, not listed: %s\n", n.c_str());
+        for (const std::string& n : want) if (!got.count(n)) std::printf("aa_off_test: fast block lacks: %s\n", n.c_str());
+    }
+    // The full path it stands in for is unchanged: the same statements, in beginPanelOverride, the thunk and forwardWithVerdict.
+    const size_t gate = bpo.find("if(!drawGateWanted()){returnDrawVerdict::kNone;}");
+    check(gate != std::string::npos && bpo.find("particleRollFreeClear();") < bpo.find("s->glareClamp=0;") && bpo.find("s->glareClamp=0;") < bpo.find("s->curveThisDraw=false;") &&
+              contains(bpo, "s->curveThisDraw=false;s->introCurveThisDraw=false;t_uiDepthThisDraw=false;t_compositeThisDraw=false;") && bpo.find("t_compositeThisDraw=false;") < gate &&
+              contains(bpo, "if((++s->bindAuditSeq&1023u)==0)bindingAudit(s,self);") && bpo.find("if((++s->bindAuditSeq&1023u)==0)bindingAudit(s,self);") > gate &&
+              contains(bpo, "if(depthProbeWanted()){depthProbeNoteDraw(self,bindingGet(BindSlot::Dsv0),s->rtv0Eye,bindingGet(BindSlot::Rtv0)==nullptr);}"),
+          "fast path wiring: beginPanelOverride still makes the per-draw stores in the order the block repeats them, the audit and the depth probe's note behind the draw gate");
+    check(contains(bpo, "++s->eyeDrawsThisFrame;{void*consteyeDsv=bindingGet(BindSlot::Dsv0);if(depthProbeEyeDrawNeedsNote(eyeDsv))depthProbeNoteEyeDraw(self,eyeDsv,s->eyeDrawsThisFrame);}") &&
+              contains(bpo, "if(uiDepthWantsDraws()){t_uiDepthThisDraw=uiDepthOnEyeDraw(self,{kind,count,instances,args.start,args.base,args.startInstance});t_compositeThisDraw=uiDepthDrawSampledSurface();}") &&
+              contains(bpo, "if(uiDepthHologramWantsDraws())t_holoDepthThisDraw=uiDepthHologramOnEyeDraw(self);") &&
+              contains(bpo, "if(uiLayerCrispOn()&&self==g_state->ownerCtx){uiLayerCrispNoteEyeDraw(self,kind,count,instances,args.startInstance);}"),
+          "fast path wiring: the eye branch still counts the draw, notes its depth target, runs the two ui_depth classifiers and the crisp note, as the block does");
+    check(contains(bpo, "if(!s->rtv0Eye){if(screenMotionLive())screenMotionSource(self,s->panelW?s->panelW:1920,s->panelH?s->panelH:1080);") &&
+              contains(bpo, "if(s->rtv0Cand>=0){State::SceneCandidate&c=s->cands[s->rtv0Cand];++c.thisFrame;}") &&
+              contains(bpo, "if(uiDepthWantsDraws())uiDepthNoteOffscreenDraw(self);"),
+          "fast path wiring: the off-screen branch still feeds the screen motion's source and the candidate's count, as the block does, and the ui_depth learner the block skips (a settled target)");
+    check(contains(thunk, "if(v==DrawVerdict::kNone&&self==g_state->ownerCtx){engineVelocityBeforeDraw(self,g_state->rtv0Eye);engineVelocityNoteSkinDraw(self,startInstance,instances);}") &&
+              contains(thunk, "GpuCensusAlteredScopetimed(self,altered);g_state->realDrawIndexedInstanced(self,perInstance,instances,startIndex,baseVertex,startInstance);}clock.stepDraw();") &&
+              contains(thunk, "if(clock.on)clock.realCall(r0);") &&
+              contains(fwv, "classifyAlteredDraw(owner,v==DrawVerdict::kNone,engineVelocityDrawSubstituted(),layered);"),
+          "fast path wiring: the full path still calls the engine-velocity pair for a draw with no verdict, and the game's draw in the altered scope under the clock's real call, as the block does");
+    // The decision: a fast draw is a would-take draw, off a verify frame, with the gate open and (an eye draw) the ui_depth memos holding; nothing else sets the flag.
+    const std::string code = squeezedCode(vscreen);
+    check(contains(begin, "d.verify=fastshadow::verifyDraw(g_shadow.verifyPhase,perfMonitorSampleDraws());") &&
+              contains(begin, "if(d.verdict.reason==fastshadow::Reason::kTake){if(!drawGateWanted())d.verdict.reason=fastshadow::Reason::kGateClosed;"
+                              "elseif(g_shadow.tracker.ticket.cls==fastshadow::Class::kEye&&!uiDepthEyeDeclineHeld())d.verdict.reason=fastshadow::Reason::kUiDepthMemo;"
+                              "elseif(!d.verify){d.fast=true;d.cls=g_shadow.tracker.ticket.cls;}}") &&
+              countOf(code, "d.fast=true") == 1 && countOf(code, ".fast=") == 1 && countOf(code, "shadow.fast=") == 0 &&
+              contains(begin, "[s]{returnsrv0KnownNotPanel(s);}") &&
+              contains(code, "inlineboolsrv0KnownNotPanel(constState*s){returnfastshadow::srv0NotPanelKnown(bindingGet(BindSlot::PsSrv0)!=nullptr,s->psSrv0PanelGen,bindingGeneration(BindSlot::PsSrv0),s->psSrv0Panel);}"),
+          "fast path wiring: a draw takes the fast path only as a would-take draw off a verify frame with the gate open and the ui_depth memos holding, and the band merge reads the memo's generation and answer");
+    check(contains(code, "++g_shadow.frames;g_shadow.verifyPhase=fastshadow::verifyPhase(g_shadow.frames);") && contains(code, "voidvScreenFrameBoundary(){") &&
+              code.find("++g_shadow.frames;") > code.find("voidvScreenFrameBoundary(){") && contains(code, "if(d.verify&&g_shadow.verifyCounted!=g_shadow.frames){"),
+          "fast path wiring: the verify phase's clock is advanced once a frame at the frame boundary, and a verify frame is counted by its first verifying draw");
+    // The ui_depth peek is the two memos' own hit test, with the call's key.
+    const std::string depth = squeezedCode(slurpFile("src/d3d11/ui_depth.cpp"));
+    check(contains(depth, "booluiDepthEyeDeclineHeld(){if(!detail::g_uiDepthOn||detail::g_uiDepthStoodDown)returntrue;constclassifiermemo::Keynow{bindingEyeKeyGeneration(),g_classifierEpoch};"
+                          "returnclassifiermemo::hit(g_eyeMemo,now)&&(!detail::g_holoDepthOn||classifiermemo::hit(g_holoMemo,now));}") &&
+              contains(depth, "if(classifiermemo::hit(g_eyeMemo,now))returnfalse;") && contains(depth, "if(classifiermemo::hit(g_holoMemo,now))returnfalse;"),
+          "fast path wiring: uiDepthEyeDeclineHeld asks the two memos at the key the classifiers read, in the cases they would be called");
+    check(contains(code, "g_shadow.tracker.noteFast(shadow.cls);") && countOf(code, ".noteFast(") == 1, "fast path wiring: a fast-path draw is counted once, in the block");
 }
 
 void usage() {
@@ -2404,7 +2716,12 @@ int main(int argc, char** argv) {
     testShadowPerDrawTests();
     testShadowCensusTerm();
     testShadowArgsText();
-    std::printf("aa_off_test: the repeat-draw fast path's shadow instrument: %d checks\n", g_checks - checksBeforeShadow);
+    testFastPathBandMerge();
+    testFastPathVerifyFrames();
+    testFastPathCounts();
+    testFastPathStepClock();
+    testFastPathWiring();
+    std::printf("aa_off_test: the repeat-draw fast path and its verification (Phases 1 and 2): %d checks\n", g_checks - checksBeforeShadow);
     std::printf("aa_off_test: %d checks, %d failed\n", g_checks, g_failed);
     return g_failed ? 1 : 0;
 }

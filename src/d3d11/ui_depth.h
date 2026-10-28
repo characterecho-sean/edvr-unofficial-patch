@@ -77,6 +77,10 @@ extern uint32_t g_uiDepthClassifierEpoch;
 inline uint32_t uiDepthClassifierEpoch() { return detail::g_uiDepthClassifierEpoch; }
 // TEMPORARY (same): true when a further draw into the bound off-screen target changes nothing in uiDepthNoteOffscreenDraw's learner. Reads only.
 bool uiDepthOffscreenTargetSettled();
+// TEMPORARY (Phase 2 fast path, built 2026-10-27; draw_fast_path_shadow.h): true when an eye draw at the bindings' current key would be answered by the
+// plain-decline memos alone -- uiDepthOnEyeDraw's and uiDepthHologramOnEyeDraw's, each when its pass is on -- so that calling them runs no classifier and
+// counts nothing (or when neither pass is on and neither is called). Reads only. The fast path asks it before it commits to skipping the classifiers.
+bool uiDepthEyeDeclineHeld();
 inline bool uiDepthWantsDraws() {
     return detail::g_uiDepthOn && !detail::g_uiDepthStoodDown;
 }
