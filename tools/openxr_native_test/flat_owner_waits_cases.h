@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <functional>
 #include <future>
 #include <mutex>
 #include <set>
@@ -26,6 +27,7 @@ inline std::atomic<bool> gFlat{true};
 inline thread_local uint32_t tTid = 0;
 inline std::mutex gLinesMutex;
 inline std::vector<std::string> gLines;
+inline std::function<void()> gOnPrint;   // runs on the printing thread right after the line is stored, outside gLinesMutex
 
 inline uint64_t nowUs() { return gNowUs.load(); }
 inline bool flat() { return gFlat.load(); }
@@ -34,7 +36,12 @@ inline void stack(FlatOwnerCallerStack& out) {
   out.captured = 5; out.gameFrames = 2;
   std::snprintf(out.rvas, sizeof out.rvas, "0x1A2B/0x3C4D");
 }
-inline void print(const char* line) { std::lock_guard<std::mutex> lock(gLinesMutex); gLines.emplace_back(line); }
+inline void print(const char* line) {
+  std::function<void()> onPrint;
+  { std::lock_guard<std::mutex> lock(gLinesMutex); gLines.emplace_back(line); onPrint = gOnPrint; }
+  if (onPrint) onPrint();
+}
+inline void setOnPrint(std::function<void()> fn) { std::lock_guard<std::mutex> lock(gLinesMutex); gOnPrint = std::move(fn); }
 
 inline FlatOwnerWaits::Hooks hooks() {
   FlatOwnerWaits::Hooks h;
@@ -49,6 +56,17 @@ inline std::vector<std::string> linesStarting(const char* prefix) {
 }
 inline void clearLines() { std::lock_guard<std::mutex> lock(gLinesMutex); gLines.clear(); }
 inline bool approx(double a, double b) { return std::fabs(a - b) < 1e-6; }
+// What the caller lines say, for a failure message: how many there were and each one's kind, thread, via and stack flag. A missing field
+// reads "?", where parseOwnerFields(...).at() would throw out of the rig.
+inline std::string describeCallers(const std::vector<std::string>& lines) {
+  std::string out = "callers=" + std::to_string(lines.size());
+  for (const auto& l : lines) {
+    const auto f = ownerinvoke_detail::parseOwnerFields(l.c_str());
+    const auto get = [&](const char* key) { const auto it = f.find(key); return it == f.end() ? std::string("?") : it->second; };
+    out += " [" + get("kind") + "/" + get("thread") + "/" + get("via") + "/stack=" + get("stack") + "]";
+  }
+  return out;
+}
 template<class Pred> bool spinUntil(Pred pred) {
   for (unsigned i = 0; i < 4000 && !pred(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(1));
   return pred();
@@ -187,6 +205,58 @@ template<class Check> void runFlatOwnerWaitsCases(Check check) {
     check(snap.jobs == 8 && snap.behindClear == 7, "flat-owner-waits: jobs and behind_clear counted");
   }
 
+  // The caller line is written before its job is counted, so a window drained at any instant that counts a job already has the job's line.
+  // The service case below drains the window from another thread while the owner folds in a submit job; counting first let that drain
+  // land between the count and the line. Here the print hook drains the window from inside note(): the job is not in it yet.
+  gNowUs = 7000000; gFlat = true; clearLines(); tTid = 7;
+  {
+    FlatOwnerWaits w(hooks());
+    w.bindRenderThread(7);
+    uint64_t jobsAtPrint = ~0ull;
+    setOnPrint([&] { jobsAtPrint = w.take().jobs; });
+    FlatOwnerWaits::Ticket t;
+    w.clearEnter(); w.enqueue(t, Site::LocateHead, true); w.clearLeave();
+    gNowUs += 20000; w.started(t); w.finished(t); w.note(t);
+    setOnPrint({});
+    check(linesStarting("flat_owner_wait_caller,").size() == 1, "flat-owner-waits: the one wait behind a clear frame names its caller");
+    check(jobsAtPrint == 0, "flat-owner-waits: a job's caller line is written before the job is counted");
+    check(w.take().jobs == 1, "flat-owner-waits: the job is counted once its line is written");
+  }
+
+  // Who notes does not decide whether a wait is named: an invoke is noted on its caller's thread and a submit job on the owner, and two can
+  // reach the budget together. Four threads (as many as the early samples) note one qualifying wait each at once; all four are named. A
+  // thread that lost the budget would leave a round with fewer; more threads than samples would hide that, the slot going to another.
+  gNowUs = 8000000; gFlat = true; tTid = 7;
+  {
+    constexpr unsigned kThreads = 4, kRounds = 200;
+    unsigned fewest = kThreads;   // the fewest lines any round named
+    for (unsigned round = 0; round < kRounds; ++round) {
+      clearLines();
+      FlatOwnerWaits w(hooks());
+      w.bindRenderThread(7);
+      FlatOwnerWaits::Ticket t;
+      t.tracked = t.ran = t.viaInvoke = t.behindClear = true;
+      t.site = Site::LocateHead; t.enqueuedUs = 0; t.startedUs = 20000; t.finishedUs = 20000;
+      std::atomic<unsigned> ready{0};
+      std::atomic<bool> go{false};
+      std::vector<std::thread> threads;
+      for (unsigned i = 0; i < kThreads; ++i) {
+        threads.emplace_back([&] {
+          ready.fetch_add(1);
+          while (!go.load()) std::this_thread::yield();
+          w.note(t);
+        });
+      }
+      while (ready.load() < kThreads) std::this_thread::yield();
+      go = true;
+      for (auto& th : threads) th.join();
+      fewest = (std::min)(fewest, unsigned(linesStarting("flat_owner_wait_caller,").size()));
+    }
+    const std::string msg = "flat-owner-waits: waits noted at once on four threads are all named (fewest named in a round of " +
+      std::to_string(kRounds) + ": " + std::to_string(fewest) + ", wanted 4)";
+    check(fewest == 4, msg.c_str());
+  }
+
   // A real service: the owner's idle pump holds a flagged clear frame while two calls queue behind it.
   gNowUs = 1000; gFlat = true; clearLines(); tTid = 0;
   {
@@ -258,7 +328,12 @@ template<class Check> void runFlatOwnerWaitsCases(Check check) {
       if (f.at("kind") == "locate_head" && f.at("thread") == "render" && f.at("via") == "invoke" && f.at("stack") == "1") sawInvoke = true;
       if (f.at("kind") == "frame_end_finish" && f.at("thread") == "other" && f.at("via") == "submit" && f.at("stack") == "1") sawSubmit = true;
     }
-    check(callers.size() == 2 && sawInvoke && sawSubmit, "flat-owner-waits: the caller of each worst wait is named, from the thread that enqueued it");
+    // note() writes a job's line before it counts the job, so with both jobs counted above both lines are out, and admission waits its turn
+    // (see the four-thread case). A short count here is a line that was never admitted, not one that has yet to arrive. Two flakes were
+    // this check: the line written after the count (the drain landed between), and the budget's try-lock answering one of two threads 0.
+    const std::string callersMsg ="flat-owner-waits: the caller of each worst wait is named, from the thread that enqueued it (observed " +
+      describeCallers(callers) + ", wanted 2: locate_head/render/invoke/stack=1 and frame_end_finish/other/submit/stack=1)";
+    check(callers.size() == 2 && sawInvoke && sawSubmit, callersMsg.c_str());
 
     // Outside flat the same service tracks nothing.
     gFlat = false; tTid = 7;
