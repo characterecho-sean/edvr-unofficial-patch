@@ -76,7 +76,7 @@ inline void run149(Check&& check) {
         bool known = true, weapons = true, unique = true, finite = true, offsetsOk = true;
         for (int i = 0; i < f149::kAdsCameraDepthCount; ++i) {
             const f149::ItemCm& r = f149::kAdsCameraDepths[i];
-            known = known && f144::find(r.item, ls::kScopeNo, f144::kHip) != nullptr;
+            known = known && f144::find(r.item, f144::kHip) != nullptr;
             weapons = weapons && nf::f139::isWeapon(r.item);
             finite = finite && std::isfinite(r.cm) && r.cm > -50.0 && r.cm < 50.0;
             for (int j = i + 1; j < f149::kAdsCameraDepthCount; ++j) unique = unique && std::strcmp(r.item, f149::kAdsCameraDepths[j].item) != 0;

@@ -49,6 +49,7 @@
 #include "f144_checks.h"    // F144: the settled sight line per (item, scope), the coat's Gear_Back decision and first-person census, the readout placed per role and what reaches the draw
 #include "f145_checks.h"    // F145: the weapon UI's tag slots given back (the pick, the F144 flight replayed, the event ring) and the proof against the seed (the seed-only map on the two-eye rig)
 #include "f149_checks.h"    // F149/F150: the ADS eye depth, one per weapon (the game's unscoped camera plus a back-off), never further forward than the key (the tables, the rule, the cap, the shift at the same depth, the cache by copy)
+#include "f151_checks.h"    // F151: the weapon readout's draw bound by its place (the ordinals, each guard, one bind per key, the lost-frame count) and the held copy's scope from the selected slot
 #include "f110_checks.h"    // F110: the ADS sight lock's model right eye (the left-eye job camera plus the IPD)
 #include "f111_checks.h"    // F111: the panel pointer instrument's statistics and verdict
 #include "f113_checks.h"    // F113: each eye's scene rows whenever the world is drawn (the depth prepass and the terrain as sources)
@@ -7538,6 +7539,11 @@ int wmain(int argc, wchar_t** argv) {
     // settled line when the copy is known unscoped, else the key alone (21); the line's shift taken at the same depth; the lock's follower carrying a change of k between weapons;
     // and the F144 cache told by copy while the scope is unknown.
     f149test::run149(check);
+    // F151: a weapon readout draw no stream window held is bound to the part's record by its place (the eye, the mesh field by field, the ordinal among the eye's draws of the mesh, the
+    // instance count, the previous frame, the part drawn once, the key not named or taken in the eye-frame, exactly one tagged record in this frame's Unmap), never from a bind; the
+    // frames one eye drew the part and the other did not are counted; the held copy's scope is read from the game's selected slot when the name finds two copies (an ambiguous loadout
+    // resolved by slot, a slot holding another item and no selection unknown, an unambiguous name left alone).
+    f151test::run151(check);
     // F110: the ADS sight lock's model right eye from the left-eye job camera and from a solved left eye, the fallback, the IPD's sign.
     f110test::run110(check);
     // F111: the panel pointer instrument names the stage that turns a move the other way (K1 to K5, one at a time), the camera getters' decoding.

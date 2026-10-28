@@ -11559,6 +11559,23 @@ def _hj_f85b(rows, ctx):
     held = rows.get("held", [])
     if held:
         text += "; latch held over a missed pair %d (gap 2 %d, 3 %d, 4 %d), refused past the hold %d" % tuple(_hsum(held, k) for k in ("held", "g2", "g3", "g4", "past"))
+    # F151: draws bound by their place when no stream window held their entry, the decisions and refusals that followed, and the frames in which the other eye drew the part and
+    # this eye drew none (per eye: eye 0 against eye 1 is the check); a log from before has no such lines
+    place = rows.get("place", [])
+    if place:
+        pwhy = collections.Counter()
+        for x in place:
+            pwhy.update(_hpairs(x["why"]))
+        lost = [sum(int(x["lost"]) for x in place if x["eye"] == str(e)) for e in (0, 1)]
+        text += "; place bind: seen by tag %d, bound by place %d, decided from a bind by place %d, refused after a bind by place %d [%s], frames lost eye 0 %d, eye 1 %d" % (
+            _hsum(place, "tag"), _hsum(place, "placed"), _hsum(place, "pdecided"), _hsum(place, "prefused"), _htop(pwhy, 2), lost[0], lost[1])
+    placeeye = rows.get("placeeye", [])
+    if placeeye:
+        nwhy = collections.Counter()
+        for x in placeeye:
+            nwhy.update(_hpairs(x["why"]))
+        per = [(sum(int(x["outside"]) for x in placeeye if x["eye"] == str(e)), sum(int(x["bound"]) for x in placeeye if x["eye"] == str(e))) for e in (0, 1)]
+        text += "; draws outside every stream window eye 0 %d (bound by place %d), eye 1 %d (bound by place %d), not bound for [%s]" % (per[0][0], per[0][1], per[1][0], per[1][1], _htop(nwhy, 3))
     if path == "none" or found == 0 or decided == 0 or bound == 0:
         return ("NEVER APPLIED", text)
     return ("PARTIAL" if bound * 10 < decided * 9 or refused * 10 > decided else "OK", text)
@@ -12451,12 +12468,12 @@ def _hj_f139_sight_offset(rows, ctx):
 
 def _hj_f140_placement(rows, ctx):
     """F140: the weapon readout (the ammunition counter drawn on the weapon) placed per weapon. Each placed window's line names the held item and its scope state (the journal's
-    loadout), the class of part placed (pistol: the hip readout and the pistol's ADS readout; rifle: the rifle's ADS readout), whether the table had the item (an entry, under the
-    scope row) or the class's built-in values stood in, the seed, the four live trims (experimental.native_on_foot_weapon_ui_*_cm; fix. before F146) and the clamped total used. These totals are the figures
-    a tuning flight leaves for the table, so the report gives, per (item, scope, class), the last window's total forward / left / up / toward, the seed and trim, and the
-    seconds placed. The loadout lines (the journal's SuitLoadout, SwitchSuitLoadout and LoadoutEquipModule, one per change) are counted. OK when every group was placed from a table
-    entry with the scope state known and the item trusted; PARTIAL when a group used the class's values (an item the table does not hold), or the scope state was unknown
-    on more than a tenth of its frames, or the item was not trusted on some; IDLE when a loadout was read and nothing was placed."""
+    loadout), the class of part placed (pistol: the hip readout and the pistol's ADS readout; rifle: the rifle's ADS readout), whether the table had the item (an entry: F151, one
+    row per item whatever the scope) or the class's built-in values stood in, the seed, the four live trims (experimental.native_on_foot_weapon_ui_*_cm; fix. before F146) and the clamped total used. These totals are the figures
+    a tuning flight leaves for the table, so the report gives, per (item, class), the last window's total forward / left / up / toward, the seed and trim, and the
+    seconds placed; the scope states the item was held with are listed in its group, never split into groups. The loadout lines (the journal's SuitLoadout, SwitchSuitLoadout and
+    LoadoutEquipModule, one per change) are counted. OK when every group was placed from a table entry and the item trusted; PARTIAL when a group used the class's values (an item
+    the table does not hold) or the item was not trusted on some (a scope state unknown is counted and is no fault: the row is the same); IDLE when a loadout was read and nothing was placed."""
     sec, lo, trims = rows.get("sec", []), rows.get("loadout", []), rows.get("trim", [])
     if not sec and not lo and not trims:
         return None
@@ -12470,8 +12487,10 @@ def _hj_f140_placement(rows, ctx):
         return ("IDLE", "no weapon readout placed in the window" + lotext)
     groups = collections.OrderedDict()
     for r in sec:
-        g = groups.setdefault((r["item"], r["scope"], r["cls"]), {"s": 0, "placed": 0, "unk": 0, "untrusted": 0, "table": False, "klass": False, "by": collections.OrderedDict(), "last": r})
+        g = groups.setdefault((r["item"], r["cls"]), {"s": 0, "placed": 0, "unk": 0, "untrusted": 0, "table": False, "klass": False, "by": collections.OrderedDict(), "last": r, "scopes": []})
         g["s"] += _hwl(r)
+        if r["scope"] not in g["scopes"]:
+            g["scopes"].append(r["scope"])   # F151: one row per item whatever the scope; the states the lines name are listed, not split into groups
         g["placed"] += int(r["placed"])
         g["unk"] += int(r["unk"])
         g["untrusted"] += int(r["untrusted"])
@@ -12485,22 +12504,23 @@ def _hj_f140_placement(rows, ctx):
         by[0] += _hwl(r)
         by[1] = tuple(float(r[k]) for k in ("f", "l", "u", "t"))
     part, parts = [], []
-    for (item, scope, cls), g in groups.items():
+    for (item, cls), g in groups.items():
         last = g["last"]
+        scope = "/".join(g["scopes"])
         text = ("%s scope %s (%s class): total forward %s left %s up %s toward %s cm (the last window; seed %s %s %s %s from the %s, trim %s %s %s %s), %d s, placed on %d frames" % (
             item, scope, cls, last["f"], last["l"], last["u"], last["t"], last["sf"], last["sl"], last["su"], last["st"], last["src"], last["tf"], last["tl"], last["tu"], last["tt"],
             g["s"], g["placed"]))
         if len(g["by"]) > 1:
             text += "; by trim: " + ", ".join("(%s) -> (%s) (%d s)" % (" ".join("%+.1f" % x for x in tr), " ".join("%+.1f" % x for x in v[1]), v[0]) for tr, v in g["by"].items())
         if g["unk"]:
-            text += "; scope unknown on %d frames (the no-scope row)" % g["unk"]
+            text += "; scope unknown on %d frames (the same row)" % g["unk"]
         if g["untrusted"]:
             text += "; item not trusted on %d frames (the class's values, no trim)" % g["untrusted"]
         parts.append(text)
         if g["klass"]:
             part.append("%s: not in the table (the %s class's values)" % (item, cls))
-        elif g["unk"] * 10 > g["placed"] or g["untrusted"]:
-            part.append("%s: scope unknown on %d and item untrusted on %d of %d frames" % (item, g["unk"], g["untrusted"], g["placed"]))
+        elif g["untrusted"]:
+            part.append("%s: item untrusted on %d of %d frames" % (item, g["untrusted"], g["placed"]))
     text = "; ".join(parts) + lotext
     return ("PARTIAL" if part else "OK", text + (" [" + "; ".join(part) + "]" if part else ""))
 
@@ -12872,8 +12892,8 @@ def _hclip_text(clip, clipparts, clipw):
 
 def _hj_f144_readout_placement(rows, ctx):
     """F144/F145: the weapon readout placed per role (hip, ADS) for each weapon, dialled with the four live trims (experimental.native_on_foot_weapon_ui_forward_cm, _left_cm, _up_cm,
-    _toward_eye_cm, each -30..+30 cm since F145), which are added to the role drawn now (the ADS role from an ADS weight of 0.5) and to no other. Each window's line, per (item, scope,
-    class, role), gives the seed (the pilot's dialled totals since F145; 0 for a rifle's hip readout without one, which draws where the game draws it), the trims, the total, the
+    _toward_eye_cm, each -30..+30 cm since F145), which are added to the role drawn now (the ADS role from an ADS weight of 0.5) and to no other. Each window's line, per (item, class, role) (F151: the
+    scope state is named in the line and in the group, never a key), gives the seed (the pilot's dialled totals since F145; 0 for a rifle's hip readout without one, which draws where the game draws it), the trims, the total, the
     frames the placement was applied, measured and bound at the draw's issue, and the PROOF (F145): the drawn part's move against the SAME FRAME PLACED AT THE SEED ALONE, along
     the weapon's axes, which must equal what the trims ask within 1 mm; the move against the game's own draw is information beside it. The report gives, per group, the totals the
     pilot left (by trim, as F139's rule does for the sights) and whether the trims reached the draw. NEVER APPLIED when a role's trims moved nothing that was drawn ("NOT REACHING THE
@@ -12884,9 +12904,11 @@ def _hj_f144_readout_placement(rows, ctx):
         return None
     groups = collections.OrderedDict()
     for r in sec:
-        g = groups.setdefault((r["item"], r["scope"], r["cls"], r["role"]),
-                              {"s": 0, "placed": 0, "measured": 0, "bound": 0, "by": collections.OrderedDict(), "bad": 0, "differs": 0, "unmeasured": 0, "diffmax": 0.0, "last": r})
+        g = groups.setdefault((r["item"], r["cls"], r["role"]),
+                              {"s": 0, "placed": 0, "measured": 0, "bound": 0, "by": collections.OrderedDict(), "bad": 0, "differs": 0, "unmeasured": 0, "diffmax": 0.0, "last": r, "scopes": []})
         g["s"] += _hwl(r)
+        if r["scope"] not in g["scopes"]:
+            g["scopes"].append(r["scope"])   # F151: one row per (item, role) whatever the scope
         for k in ("placed", "measured", "bound"):
             g[k] += int(r[k])
         v = r["verdict"]
@@ -12903,9 +12925,9 @@ def _hj_f144_readout_placement(rows, ctx):
         by[0] += _hwl(r)
         by[1] = tuple(float(r[k]) for k in ("f", "l", "u", "t"))
     parts, bad, partial = [], [], []
-    for (item, scope, cls, role), g in groups.items():
+    for (item, cls, role), g in groups.items():
         last = g["last"]
-        label = "%s scope %s (%s class) %s role" % (item, scope, cls, role)
+        label = "%s scope %s (%s class) %s role" % (item, "/".join(g["scopes"]), cls, role)
         text = ("%s: total forward %s left %s up %s toward %s cm (the last window; seed %s %s %s %s, trim %s %s %s %s), %d s, placed on %d frames, bound at the draw's issue on %d; "
                 "drawn move against the same frame at the seed alone forward %s left %s up %s cm against the trims' %s cm, worst difference %.2f mm: %s; against the game's own draw "
                 "(information) forward %s left %s up %s cm, %s cm against the total's %s cm") % (
@@ -13677,6 +13699,13 @@ HEALTH_RULES = (
         # F148: the both-eyes latch's hold, on a line of its own per part and eye (a log from before has none)
         ("held", r"weapon UI pin \(F85b\) part slot (?P<slot>\d+) \(name (?P<name>\d+)\) eye (?P<eye>\d): held over a missed pair (?P<held>\d+) \(gap 2 (?P<g2>\d+), 3 (?P<g3>\d+), "
                  r"4 (?P<g4>\d+)\), refused past the hold (?P<past>\d+); over " + H_WL + r"$"),
+        # F151: a part's draws of one eye by how they were identified (by the stream entry, by the place), the decisions from a bind by place, and the frames the eye drew none
+        ("place", r"weapon UI pin \(F85b\) part slot (?P<slot>\d+) \(name (?P<name>\d+)\) eye (?P<eye>\d): place bind \(F151\): seen by tag (?P<tag>\d+), bound by place (?P<placed>\d+), "
+                  r"decided (?P<decided>\d+) \((?P<pdecided>\d+) of them from a bind by place\), refused after a bind by place (?P<prefused>\d+) \[(?P<why>[^\]]*)\], "
+                  r"lost (?P<lost>\d+); over " + H_WL + r"$"),
+        # F151: per eye, the draws no stream window held, and what the place rule said of each (a log from before has none)
+        ("placeeye", r"weapon UI pin \(F85b\) eye (?P<eye>\d): place bind \(F151\): (?P<outside>\d+) draws outside every stream window, bound by place (?P<bound>\d+), "
+                     r"not bound (?P<notbound>\d+) \[(?P<why>[^\]]*)\]; over " + H_WL + r"$"),
         ("_", r"weapon UI pin \(F85b\): identification path"),
     ), _hj_f85b),
     _hrule("reticle depth (F85c)", ("F85c",), ("reticle depth (F85c)",), (
@@ -15477,6 +15506,14 @@ def self_test_health():
             # F148: the line of the both-eyes latch's hold: draws corrected on a latch held over a missed pair at gap 2, 3 and 4 (the line prints their total first), and the refusals past the hold
             return R("eye %d: held over a missed pair", 0, 29510, eye, g2 + g3 + g4, g2, g3, g4, past, wl)
 
+        def pin_place(tag=88, placed=0, decided=88, pdecided=0, prefused=0, why="none", lost=0, wl=1, eye=0):
+            # F151: a part's draws of one eye by how they were identified: seen by the stream entry, bound by place, decided (all, then from a bind by place), refused after a bind by place, lost
+            return R("eye %d: place bind (F151): seen by tag", 0, 29510, eye, tag, placed, decided, pdecided, prefused, why, lost, wl)
+
+        def pin_placeeye(outside=4, bound=0, why="no place kept 4", wl=1, eye=1):
+            # F151: per eye, the draws no stream window held and what the place rule said of each (the line prints the count not bound itself)
+            return R("(F85b) eye %d: place bind (F151)", eye, outside, bound, outside - bound, why, wl)
+
         def retic(draws=47, patched=42, reads=21, refs=(), wl=1, draw_secs=None):
             v = [draws, patched, 50.0, 50.0, 50.0, reads, 20, 1] + [None] * 9 + [0] * 13
             for i, n in enumerate(refs):
@@ -16783,12 +16820,16 @@ def self_test_health():
               [wp140(), trim140("forward", 1.0), wp140(trim=(1.0, 0.0, 0.0, 0.0), wl=10), wp140(trim=(1.0, -0.5, 0.0, 0.0), wl=4)], 0, [("OK", P140)],
               has=["by trim: (+0.0 +0.0 +0.0 +0.0) -> (+0.0 +3.5 +0.0 +0.0) (10 s)", "(+1.0 -0.5 +0.0 +0.0) -> (+1.0 +3.0 +0.0 +0.0) (4 s)", "total forward +1.0 left +3.0 up +0.0 toward +0.0 cm",
                    "trim key lines 1"], lacks=["UNPARSED"])
-        check("F140 placement: the scope states of one weapon are separate groups", [wp140(scope="no"), wp140(scope="yes", trim=(0.0, 1.0, 0.0, 0.0))], 0, [("OK", P140)],
-              has=[RIFLE_AR140 + " scope no (rifle class)", RIFLE_AR140 + " scope yes (rifle class): total forward +0.0 left +4.5"], lacks=["UNPARSED"])
+        # F151: one row per item whatever the scope: the states a weapon was held with are listed in one group, and an unknown scope state is counted, not a fault
+        check("F151 placement: the scope states of one weapon are one group (one row, the trims of either copy on it)", [wp140(scope="no"), wp140(scope="yes", trim=(0.0, 1.0, 0.0, 0.0))], 0, [("OK", P140)],
+              has=[RIFLE_AR140 + " scope no/yes (rifle class): total forward +0.0 left +4.5", "by trim: (+0.0 +0.0 +0.0 +0.0) -> (+0.0 +3.5 +0.0 +0.0) (10 s), (+0.0 +1.0 +0.0 +0.0) -> (+0.0 +4.5 +0.0 +0.0) (10 s)"],
+              lacks=["UNPARSED", " scope yes (rifle class)", " scope no (rifle class)"])
         check("F140 placement: an item the table does not hold uses its class's values", [wp140(item="$wpn_m_newgun_fauto_name;", src="class values")], 0, [("PARTIAL", P140)],
               has=["$wpn_m_newgun_fauto_name;: not in the table (the rifle class's values)", "from the class values"], lacks=["UNPARSED"])
-        check("F140 placement: the scope state unknown on most frames, and an untrusted item, are said", [wp140(scope="unknown", unk=1800), wp140(untrusted=30)], 0, [("PARTIAL", P140)],
-              has=["scope unknown on 1800 frames (the no-scope row)", "item not trusted on 30 frames (the class's values, no trim)"], lacks=["UNPARSED"])
+        check("F140 placement: an untrusted item is said, and the scope state unknown is counted (the same row)", [wp140(scope="unknown", unk=1800), wp140(untrusted=30)], 0, [("PARTIAL", P140)],
+              has=["scope unknown on 1800 frames (the same row)", "item not trusted on 30 frames (the class's values, no trim)"], lacks=["UNPARSED"])
+        check("F151 placement: the scope state unknown alone is no fault, the row is the item's whatever the scope", [wp140(scope="unknown", unk=1800)], 0, [("OK", P140)],
+              has=["scope unknown on 1800 frames (the same row)"], lacks=["UNPARSED", "PARTIAL"])
         check("F140 placement: a drifted line is unparsed", ["weapon UI placement (F140) 10 s: something else"], 4, [("UNPARSED", P140)])
         check("F140 placement: a loadout line that could not open its journal is named, not unparsed", [RLoad("journal loadout (F140): could not open %S", 5)], 0,
               lacks=["UNPARSED"])
@@ -17125,6 +17166,10 @@ def self_test_health():
                                                                                                                verdict="reaches the draw", wl=6), pl144(role="ADS", **reach)], 0,
               [("OK", P144)], has=["hip role: total forward +0.0 left +1.0 up +0.0 toward +0.0 cm", "by trim: (+0.0 +0.0 +0.0 +0.0) -> (+0.0 +0.0 +0.0 +0.0) (10 s), (+0.0 +1.0 +0.0 +0.0) -> "
                                    "(+0.0 +1.0 +0.0 +0.0) (6 s)", "ADS role: total forward +3.5 left +7.0"], lacks=["UNPARSED"])
+        check("F151 readout placement: one row per (item, role) whatever the scope, the states held with are listed", [pl144(scope="no"), pl144(scope="yes"), pl144(scope="unknown", role="ADS"),
+              pl144(scope="yes", role="ADS")], 0, [("OK", P144)],
+              has=[KINRIFLE144 + " scope no/yes (rifle class) hip role", KINRIFLE144 + " scope unknown/yes (rifle class) ADS role"],
+              lacks=["UNPARSED", " scope yes (rifle class) hip role", " scope no (rifle class) hip role", " scope yes (rifle class) ADS role"])
         check("F144 readout placement: the trims asked and not drawn", [pl144(role="ADS", **dict(reach, move=(0.0, 0.0, 0.0), absm=0.0, diff=15.0, verdict="NOT REACHING THE DRAW"))], 3,
               [("NEVER APPLIED", P144)], has=["ADS role: NOT REACHING THE DRAW in 1 window(s)", "worst difference 15.00 mm: NOT REACHING THE DRAW"], lacks=["UNPARSED"])
         check("F144 readout placement: never bound at the issue", [pl144(role="ADS", **dict(reach, bound=0, measured=480, move=(0.0, 0.0, 0.0), absm=0.0, diff=0.0,
@@ -17490,6 +17535,23 @@ def self_test_health():
               has=["decided 176, bound 176, refused 0 [none]"], lacks=["UNPARSED", "latch held"])
         check("F85b: a held line in a ten-second window", [pin_sec(wl=10), pin_part(wl=10), pin_held(2, 1, 0, 0, wl=10)], 0, [("OK", F85B)],
               has=["latch held over a missed pair 3 (gap 2 2, 3 1, 4 0)"], lacks=["UNPARSED"])
+        # F151: the draws bound by their place. Counts add over the lines of both eyes, the lost frames stay per eye (eye 0 against eye 1 is the check), the refusal reasons of the
+        # eye's outside draws are read from their own line, zero reads as zero, and a log from before has none of it
+        check("F85b: draws bound by their place, the lost frames per eye", [pin_sec(), pin_part(), pin_place(tag=80, placed=2, decided=82, pdecided=2, eye=0),
+              pin_place(tag=77, placed=3, decided=80, pdecided=2, prefused=1, why="K not a rotation 1", lost=4, eye=1), pin_placeeye(outside=12, bound=3, why="other ordinal 6, no place kept 3")],
+              0, [("OK", F85B)],
+              has=["place bind: seen by tag 157, bound by place 5, decided from a bind by place 4, refused after a bind by place 1 [K not a rotation 1], frames lost eye 0 0, eye 1 4",
+                   "draws outside every stream window eye 0 0 (bound by place 0), eye 1 12 (bound by place 3), not bound for [other ordinal 6, no place kept 3]"], lacks=["UNPARSED"])
+        check("F85b: the place lines at zero", [pin_sec(), pin_part(), pin_place(eye=0), pin_place(eye=1)], 0, [("OK", F85B)],
+              has=["place bind: seen by tag 176, bound by place 0, decided from a bind by place 0, refused after a bind by place 0 [none], frames lost eye 0 0, eye 1 0"],
+              lacks=["UNPARSED", "draws outside every stream window"])
+        check("F85b: a log from before F151 (no place lines) reads and says nothing of them", [pin_sec(), pin_part(), pin_held()], 0, [("OK", F85B)],
+              has=["decided 88, bound 88, refused 0 [none]"], lacks=["UNPARSED", "place bind", "outside every stream window"])
+        check("F85b: place lines in a ten-second window, many lost frames do not change the verdict", [pin_sec(wl=10), pin_part(wl=10), pin_place(tag=700, placed=4, decided=704, pdecided=4, lost=30, wl=10, eye=1),
+              pin_placeeye(outside=40, bound=4, why="other mesh 30, other ordinal 6", wl=10)], 0, [("OK", F85B)],
+              has=["frames lost eye 0 0, eye 1 30", "eye 1 40 (bound by place 4)", "not bound for [other mesh 30, other ordinal 6]"], lacks=["UNPARSED"])
+        check("F85b: a place line whose words drifted is named as a line the rule does not read, beside the verdict", [pin_sec(), pin_part(), "weapon UI pin (F85b) eye 1: place bind (F151): something else"], 0,
+              [("OK", F85B)], has=["[+1 line(s) the rule's patterns do not match:", "place bind (F151): something else"])
 
         # ---- reticle depth (F85c) ----
         check("F85c: patched at the hit depth", [retic()] * 2, 0, [("OK", F85C)], has=["patched 84 of 94 key 10 draws (89%) in 2 s", "readbacks 42 (hit 40, sky 2)"])
@@ -17850,6 +17912,8 @@ def self_test_health():
         UI_BUDGETS = (
             ("weapon UI pin (F85b) part slot %u", ["r" * 399]),
             ("eye %d: held over a missed pair", []),
+            ("eye %d: place bind (F151): seen by tag", ["w" * 299]),
+            ("(F85b) eye %d: place bind (F151)", ["r" * 419]),
             ("weapon UI pin (F85b): %s%llu matched", ["p" * 80, "tag", "s" * 299]),
             ("reticle depth (F85c): key 10 draws", []),
             ("reticle depth (F118) %u s", []),

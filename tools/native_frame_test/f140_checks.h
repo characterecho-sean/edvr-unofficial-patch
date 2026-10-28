@@ -222,16 +222,14 @@ inline void runPlacement(Check&& check) {
     const double* rifle = f140::kRifleClass;
     check(pistol[0] == 13.0 && pistol[1] == 3.5 && pistol[2] == -3.0 && pistol[3] == 3.0 && rifle[0] == 0.0 && rifle[1] == 3.5 && rifle[2] == 0.0 && rifle[3] == 0.0,
           "F140: the class built-ins are the retired keys': pistol 13, 3.5, -3, 3 and rifle 0, 3.5, 0, 0 cm");
-    {   // F147: one table. F140 had its own (a row per weapon and scope), dead since F144's replaced it; the nine weapons it held are F144's rows now, under both scope states and both roles
+    {   // F147: one table. F140 had its own (a row per weapon and scope), dead since F144's replaced it; the nine weapons it held are F144's rows now, under both roles (F151: one row per role, whatever the scope)
         const char* const nine[9] = {kPistolKinetic, kPistolLaser, "$wpn_s_pistol_plasma_charged_name;", kLaserRifle, kPlasmaAr, kRocket, kSniper2, kKineticSmg, kLaserSmg};
         bool ok = true;
         for (const char* w : nine)
-            for (int s : {ls::kScopeNo, ls::kScopeYes})
-                for (int role : {f144::kHip, f144::kAds}) ok = ok && f144::find(w, s, role);
-        check(ok, "F147: each of the nine weapons F140 listed has a row in the one table (F144's) under each scope state and each role");
-        check(!f144::find("$wpn_m_unknown_name;", ls::kScopeNo, f144::kAds) && !f144::find(nullptr, ls::kScopeNo, f144::kAds) && !f144::find("$wpn_s_pistol_laser_sauto_name", ls::kScopeNo, f144::kAds) &&
-                  f144::find(kRocket, ls::kScopeUnknown, f144::kAds) == f144::find(kRocket, ls::kScopeNo, f144::kAds),
-              "F147: an item not in the table is a miss (the key is the exact name); an unknown scope state finds the no-scope row");
+            for (int role : {f144::kHip, f144::kAds}) ok = ok && f144::find(w, role);
+        check(ok, "F147: each of the nine weapons F140 listed has a row in the one table (F144's) under each role");
+        check(!f144::find("$wpn_m_unknown_name;", f144::kAds) && !f144::find(nullptr, f144::kAds) && !f144::find("$wpn_s_pistol_laser_sauto_name", f144::kAds),
+              "F147: an item not in the table is a miss (the key is the exact name)");
     }
     {   // the ranges (F145): the trim to its own range, -30..30 cm on all four axes, the total to the same
         check(f140::clampTrim(0, 10.5) == 10.5 && f140::clampTrim(3, -12.0) == -12.0 && f140::clampTrim(1, 31.0) == 30.0 && f140::clampTrim(2, -31.0) == -30.0,

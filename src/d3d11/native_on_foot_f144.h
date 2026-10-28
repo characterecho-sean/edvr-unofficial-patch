@@ -15,9 +15,10 @@
 // 3. The weapon readout placed per role. The readout parts have roles (F91: the hip readout, the rifle's ADS readout, the pistol's ADS readout; the tool's is never touched).
 //    Before F144 the pistol class placed its hip and ADS readouts by one set of keys (the ADS part took the hip's target), the rifle class placed only its ADS readout, and the
 //    rifle's hip readout was "matched only": the four live trims reached the parts that were placed but never the rifle's hip readout. Now every weapon has a placement per role
-//    (forward, left, up, toward the eye, cm), keyed by (item, scope, role) and seeded from today's values (the F140 table is the ADS and pistol roles' seed; the rifle hip role's seed
-//    is 0, which draws it exactly where it is drawn now). The four trims are added to the role drawn now (the ADS role while the ADS weight is at least 0.5, else the hip role) and to
-//    no other, so a trim never carries to another weapon, scope or role. The proof measures what reaches the draw.
+//    (forward, left, up, toward the eye, cm), keyed by (item, role) and seeded from today's values (the F140 table is the ADS and pistol roles' seed; the rifle hip role's seed
+//    is 0, which draws it exactly where it is drawn now). F151: the key has no scope (a copy with a scope, without one or unknown reads the same row; the ADS eye depth is the same
+//    since F150). The four trims are added to the role drawn now (the ADS role while the ADS weight is at least 0.5, else the hip role) and to no other, so a trim never carries to
+//    another weapon or role. The proof measures what reaches the draw.
 #pragma once
 
 #include <algorithm>
@@ -359,78 +360,57 @@ constexpr double kAdsDrawnW = 0.5;   // the ADS weight from which the ADS role i
 inline int drawnRole(double adsW) noexcept { return adsW >= kAdsDrawnW ? kAds : kHip; }
 struct Row {
     const char* item;   // the exact item name (Status.json SelectedWeapon)
-    int scope;          // loadout::kScopeNo or kScopeYes
     int role;
     double v[4];        // forward, left, up, toward eye (cm), in the weapon frame the class's placement uses (native_on_foot_f90.h target())
 };
-// F144 seeded this from the values then in use (the F140 table for the ADS roles and the pistols, 0 for a rifle-class weapon's hip role). F145 bakes the pilot's dialled totals
-// (the seed plus trim each role was last settled at for 3 s or more in the F144 flight) into the scope-no rows of the eight weapons he dialled: the pistols' hip rows are as they
-// were (13, 3.5, -3, 3). F146 bakes the last three: the plasma shotgun (scope no), the plasma pistol (scope no) and the scoped plasma sniper, which the F145 flight placed once the
-// weapon UI's tag slots were given back. The other scope-yes rows and the fists stay as F144 left them, and the plasma sniper's scope-no rows (a weapon the pilot flies with its scope).
+// One row per item and role, whatever the scope (F151). F144 seeded a row per (item, scope, role) from the values then in use (the F140 table for the ADS roles and the pistols, 0 for
+// a rifle-class weapon's hip role); F145 baked the pilot's dialled totals into the scope-no rows of eight weapons and F146 the last three (the plasma shotgun and pistol with no scope,
+// and the scoped plasma sniper). F151 takes the scope out of the key: since F150 the ADS eye depth is the same with or without a scope (VR cannot zoom, so the game's scoped camera
+// is not used), so the readout's place relative to the eye is the same too. A copy with a scope, without one or with the scope state unknown reads the same row, and the experimental
+// trims dialled on either copy are added to that one row. Where an item had both rows the scope-no row stands; the scope-yes rows it replaces were the generic seeds, never dialled
+// (0 0 0 0 and 0 3.5 0 0 for the rifle class, 13 3.5 -3 3 for the pistols). The plasma sniper's rows are the pilot's dialled values, taken from its scope-yes rows (hip -0.5 3.5 0 0,
+// ADS -0.5 7.0 0 0); its scope-no rows were the generic seeds, never dialled, and are gone. The sight line (F139's table, F143's and F144's settled line) stays per scope: it follows
+// the scope's own sight point, which the game reports.
 constexpr Row kTable[] = {
-    {"$wpn_m_assaultrifle_laser_fauto_name;", loadout::kScopeNo, kHip, {0.0, 0.0, 0.0, 0.0}},
-    {"$wpn_m_assaultrifle_laser_fauto_name;", loadout::kScopeNo, kAds, {0.0, 3.5, 0.0, 0.0}},
-    {"$wpn_m_assaultrifle_laser_fauto_name;", loadout::kScopeYes, kHip, {0.0, 0.0, 0.0, 0.0}},
-    {"$wpn_m_assaultrifle_laser_fauto_name;", loadout::kScopeYes, kAds, {0.0, 3.5, 0.0, 0.0}},
-    {"$wpn_m_assaultrifle_plasma_fauto_name;", loadout::kScopeNo, kHip, {7.0, 2.5, 0.0, 0.0}},
-    {"$wpn_m_assaultrifle_plasma_fauto_name;", loadout::kScopeNo, kAds, {7.0, 6.0, 0.0, 0.0}},
-    {"$wpn_m_assaultrifle_plasma_fauto_name;", loadout::kScopeYes, kHip, {0.0, 0.0, 0.0, 0.0}},
-    {"$wpn_m_assaultrifle_plasma_fauto_name;", loadout::kScopeYes, kAds, {0.0, 3.5, 0.0, 0.0}},
-    {"$wpn_m_assaultrifle_kinetic_fauto_name;", loadout::kScopeNo, kHip, {5.0, 4.5, 0.0, 0.0}},
-    {"$wpn_m_assaultrifle_kinetic_fauto_name;", loadout::kScopeNo, kAds, {3.5, 5.5, 0.0, 0.0}},
-    {"$wpn_m_assaultrifle_kinetic_fauto_name;", loadout::kScopeYes, kHip, {0.0, 0.0, 0.0, 0.0}},
-    {"$wpn_m_assaultrifle_kinetic_fauto_name;", loadout::kScopeYes, kAds, {0.0, 3.5, 0.0, 0.0}},
-    {"$wpn_m_launcher_rocket_sauto_name;", loadout::kScopeNo, kHip, {5.5, 0.0, 0.0, 0.0}},
-    {"$wpn_m_launcher_rocket_sauto_name;", loadout::kScopeNo, kAds, {5.5, 3.5, 0.0, 0.0}},
-    {"$wpn_m_launcher_rocket_sauto_name;", loadout::kScopeYes, kHip, {0.0, 0.0, 0.0, 0.0}},
-    {"$wpn_m_launcher_rocket_sauto_name;", loadout::kScopeYes, kAds, {0.0, 3.5, 0.0, 0.0}},
-    {"$wpn_m_sniper_plasma_charged_name;", loadout::kScopeNo, kHip, {0.0, 0.0, 0.0, 0.0}},
-    {"$wpn_m_sniper_plasma_charged_name;", loadout::kScopeNo, kAds, {0.0, 3.5, 0.0, 0.0}},
-    {"$wpn_m_sniper_plasma_charged_name;", loadout::kScopeYes, kHip, {-0.5, 3.5, 0.0, 0.0}},
-    {"$wpn_m_sniper_plasma_charged_name;", loadout::kScopeYes, kAds, {-0.5, 7.0, 0.0, 0.0}},
-    {"$wpn_m_submachinegun_kinetic_fauto_name;", loadout::kScopeNo, kHip, {6.5, 0.0, 0.0, 0.0}},
-    {"$wpn_m_submachinegun_kinetic_fauto_name;", loadout::kScopeNo, kAds, {6.5, 3.5, 0.0, 0.0}},
-    {"$wpn_m_submachinegun_kinetic_fauto_name;", loadout::kScopeYes, kHip, {0.0, 0.0, 0.0, 0.0}},
-    {"$wpn_m_submachinegun_kinetic_fauto_name;", loadout::kScopeYes, kAds, {0.0, 3.5, 0.0, 0.0}},
-    {"$wpn_m_submachinegun_laser_fauto_name;", loadout::kScopeNo, kHip, {7.0, 1.5, 0.5, 0.0}},
-    {"$wpn_m_submachinegun_laser_fauto_name;", loadout::kScopeNo, kAds, {10.0, 4.5, 1.0, 0.0}},
-    {"$wpn_m_submachinegun_laser_fauto_name;", loadout::kScopeYes, kHip, {0.0, 0.0, 0.0, 0.0}},
-    {"$wpn_m_submachinegun_laser_fauto_name;", loadout::kScopeYes, kAds, {0.0, 3.5, 0.0, 0.0}},
-    {"$wpn_m_shotgun_plasma_doublebarrel_name;", loadout::kScopeNo, kHip, {10.5, 3.0, 1.0, 0.0}},
-    {"$wpn_m_shotgun_plasma_doublebarrel_name;", loadout::kScopeNo, kAds, {19.0, 4.0, 1.0, 0.0}},
-    {"$wpn_m_shotgun_plasma_doublebarrel_name;", loadout::kScopeYes, kHip, {0.0, 0.0, 0.0, 0.0}},
-    {"$wpn_m_shotgun_plasma_doublebarrel_name;", loadout::kScopeYes, kAds, {0.0, 3.5, 0.0, 0.0}},
-    {"$wpn_s_pistol_kinetic_sauto_name;", loadout::kScopeNo, kHip, {13.0, 3.5, -3.0, 3.0}},
-    {"$wpn_s_pistol_kinetic_sauto_name;", loadout::kScopeNo, kAds, {16.0, 5.0, -3.0, 3.0}},
-    {"$wpn_s_pistol_kinetic_sauto_name;", loadout::kScopeYes, kHip, {13.0, 3.5, -3.0, 3.0}},
-    {"$wpn_s_pistol_kinetic_sauto_name;", loadout::kScopeYes, kAds, {13.0, 3.5, -3.0, 3.0}},
-    {"$wpn_s_pistol_laser_sauto_name;", loadout::kScopeNo, kHip, {13.0, 3.5, -3.0, 3.0}},
-    {"$wpn_s_pistol_laser_sauto_name;", loadout::kScopeNo, kAds, {18.0, 6.5, -3.0, 3.0}},
-    {"$wpn_s_pistol_laser_sauto_name;", loadout::kScopeYes, kHip, {13.0, 3.5, -3.0, 3.0}},
-    {"$wpn_s_pistol_laser_sauto_name;", loadout::kScopeYes, kAds, {13.0, 3.5, -3.0, 3.0}},
-    {"$wpn_s_pistol_plasma_charged_name;", loadout::kScopeNo, kHip, {11.0, 5.0, -0.5, 3.0}},
-    {"$wpn_s_pistol_plasma_charged_name;", loadout::kScopeNo, kAds, {11.0, 5.0, -0.5, 3.0}},
-    {"$wpn_s_pistol_plasma_charged_name;", loadout::kScopeYes, kHip, {13.0, 3.5, -3.0, 3.0}},
-    {"$wpn_s_pistol_plasma_charged_name;", loadout::kScopeYes, kAds, {13.0, 3.5, -3.0, 3.0}},
+    {"$wpn_m_assaultrifle_laser_fauto_name;", kHip, {0.0, 0.0, 0.0, 0.0}},
+    {"$wpn_m_assaultrifle_laser_fauto_name;", kAds, {0.0, 3.5, 0.0, 0.0}},
+    {"$wpn_m_assaultrifle_plasma_fauto_name;", kHip, {7.0, 2.5, 0.0, 0.0}},
+    {"$wpn_m_assaultrifle_plasma_fauto_name;", kAds, {7.0, 6.0, 0.0, 0.0}},
+    {"$wpn_m_assaultrifle_kinetic_fauto_name;", kHip, {5.0, 4.5, 0.0, 0.0}},
+    {"$wpn_m_assaultrifle_kinetic_fauto_name;", kAds, {3.5, 5.5, 0.0, 0.0}},
+    {"$wpn_m_launcher_rocket_sauto_name;", kHip, {5.5, 0.0, 0.0, 0.0}},
+    {"$wpn_m_launcher_rocket_sauto_name;", kAds, {5.5, 3.5, 0.0, 0.0}},
+    {"$wpn_m_sniper_plasma_charged_name;", kHip, {-0.5, 3.5, 0.0, 0.0}},
+    {"$wpn_m_sniper_plasma_charged_name;", kAds, {-0.5, 7.0, 0.0, 0.0}},
+    {"$wpn_m_submachinegun_kinetic_fauto_name;", kHip, {6.5, 0.0, 0.0, 0.0}},
+    {"$wpn_m_submachinegun_kinetic_fauto_name;", kAds, {6.5, 3.5, 0.0, 0.0}},
+    {"$wpn_m_submachinegun_laser_fauto_name;", kHip, {7.0, 1.5, 0.5, 0.0}},
+    {"$wpn_m_submachinegun_laser_fauto_name;", kAds, {10.0, 4.5, 1.0, 0.0}},
+    {"$wpn_m_shotgun_plasma_doublebarrel_name;", kHip, {10.5, 3.0, 1.0, 0.0}},
+    {"$wpn_m_shotgun_plasma_doublebarrel_name;", kAds, {19.0, 4.0, 1.0, 0.0}},
+    {"$wpn_s_pistol_kinetic_sauto_name;", kHip, {13.0, 3.5, -3.0, 3.0}},
+    {"$wpn_s_pistol_kinetic_sauto_name;", kAds, {16.0, 5.0, -3.0, 3.0}},
+    {"$wpn_s_pistol_laser_sauto_name;", kHip, {13.0, 3.5, -3.0, 3.0}},
+    {"$wpn_s_pistol_laser_sauto_name;", kAds, {18.0, 6.5, -3.0, 3.0}},
+    {"$wpn_s_pistol_plasma_charged_name;", kHip, {11.0, 5.0, -0.5, 3.0}},
+    {"$wpn_s_pistol_plasma_charged_name;", kAds, {11.0, 5.0, -0.5, 3.0}},
 };
 constexpr int kTableCount = static_cast<int>(sizeof(kTable) / sizeof(kTable[0]));
-inline int entryScopeOf(int scopeState) noexcept { return scopeState == loadout::kScopeYes ? loadout::kScopeYes : loadout::kScopeNo; }
-inline const Row* find(const char* name, int scopeState, int role) noexcept {
+inline const Row* find(const char* name, int role) noexcept {
     if (!name) return nullptr;
-    const int scope = entryScopeOf(scopeState);
     for (const Row& r : kTable)
-        if (r.scope == scope && r.role == role && std::strcmp(name, r.item) == 0) return &r;
+        if (r.role == role && std::strcmp(name, r.item) == 0) return &r;
     return nullptr;
 }
 struct RolePlacement {
     bool coherent = false;       // the item snapshot was usable
     bool weapon = false;         // a $wpn_ item: the trims apply
-    bool table = false;          // the item has a row (under the scope row used)
+    bool table = false;          // the item has a row
     bool drawnNow = false;       // this role is the one drawn now: the trims are added to it
-    bool scopeUnknown = false;
+    bool scopeUnknown = false;   // the scope state was not known (the row is the same; the lines count it)
     int cls = f140::kClassRifle; // the class whose built-in values stood in for a miss
     int role = kHip;
-    int scope = loadout::kScopeUnknown, entryScope = loadout::kScopeNo;
+    int scope = loadout::kScopeUnknown;   // the held copy's scope state, for the lines; it never chooses the row
     double seed[4] = {}, trim[4] = {}, total[4] = {};
     f90::Keys keys() const noexcept {
         f90::Keys k;
@@ -442,7 +422,8 @@ struct RolePlacement {
     }
 };
 // The placement of one role of the held item. cls picks the built-in values a miss falls back to (the pistol class's for both its roles; the rifle class's for its ADS role and 0
-// for its hip role). trim: the four live keys, added only when this role is the one drawn now and the item is a coherent $wpn_ item.
+// for its hip role). trim: the four live keys, added only when this role is the one drawn now and the item is a coherent $wpn_ item. scopeState is recorded for the lines and counted
+// when unknown; the row is the item's whatever it is (F151).
 inline RolePlacement place(bool readOk, uint32_t snapshotSerial, uint32_t currentSerial, const char* name, int scopeState, int cls, int role, bool drawnNow,
                            const double trim[4]) noexcept {
     RolePlacement p;
@@ -450,7 +431,6 @@ inline RolePlacement place(bool readOk, uint32_t snapshotSerial, uint32_t curren
     p.role = role;
     p.drawnNow = drawnNow;
     p.scope = scopeState;
-    p.entryScope = entryScopeOf(scopeState);
     p.scopeUnknown = scopeState != loadout::kScopeNo && scopeState != loadout::kScopeYes;
     if (cls == f140::kClassPistol) {
         for (int i = 0; i < 4; ++i) p.seed[i] = f140::kPistolClass[i];
@@ -460,7 +440,7 @@ inline RolePlacement place(bool readOk, uint32_t snapshotSerial, uint32_t curren
     p.coherent = f140::itemCoherent(readOk, snapshotSerial, currentSerial, name);
     if (p.coherent) {
         p.weapon = f140::isWeapon(name);
-        if (const Row* r = find(name, scopeState, role)) {
+        if (const Row* r = find(name, role)) {
             p.table = true;
             for (int i = 0; i < 4; ++i) p.seed[i] = r->v[i];
         }

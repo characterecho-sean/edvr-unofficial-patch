@@ -65,6 +65,7 @@
 #include "native_on_foot_f144.h"   // F144: the settled sight line per (item, scope), the coat's Gear_Back and first-person census, the readout placed per role (pure parts)
 #include "native_on_foot_f145.h"   // F145: the weapon UI's tag slots given back, the proof against the seed (pure parts)
 #include "native_on_foot_f149.h"   // F149/F150: the ADS eye depth, one per weapon (the game's unscoped ADS camera plus a back-off), never further forward than the key (the tables, the rule; pure parts)
+#include "native_on_foot_f151.h"   // F151: the weapon readout's draw bound by its place when its stream entry lies outside every shadow window (pure parts)
 #include "xinput_watch.h"          // F135: the pad's Start and Back edges, evidence for the menu probe only
 #include "native_on_foot_f109.h"   // F109: look to aim on foot, the player's own turn in ADS, snap or smooth turning (pure parts)
 #include "native_on_foot_f129.h"   // F129: look to aim reads its turn from the player's own look processor; the look path instrument (pure parts)
@@ -7084,6 +7085,31 @@ uint32_t heldCopyKey(int scopeState) noexcept {
     const bool held = !nofoot::f144::scopeTellsCopies(scopeState) && f83SelectionRead(&sel) && f83SelectionFresh(sel) && sel.readable && !sel.suspended && sel.held;
     return nofoot::f144::copyKey(scopeState, held, sel.selectedId);
 }
+// F151: the held item's scope state from the journal's loadout. Where two slots hold the item with different mods (a scoped and an unscoped plasma sniper) the name cannot say which
+// is in hand; the game's selected slot (this selection, read fresh, an item selected) does, if that slot holds the item's name (loadout::scopeOfHeldBySlot). Every consumer of the
+// scope state (the F144 readout rows, the F139/F143/F144 sight lines, the F150 copy key) takes it from here. The resolution is logged once per change (32 lines a session); the
+// frame thread and the render thread both call it.
+void f151ScopeNote(const char* name, const loadout::HeldScope& h) noexcept {
+    if (h.slot < 0 || h.slot >= loadout::kSlotCount) return;
+    uint64_t key = 14695981039346656037ull;
+    for (const char* c = name; c && *c; ++c) key = (key ^ static_cast<uint8_t>(*c)) * 1099511628211ull;
+    key = (key ^ (static_cast<uint64_t>(h.slot) << 8 | static_cast<uint64_t>(h.state))) * 1099511628211ull;
+    static std::atomic<uint64_t> last{0};
+    static std::atomic<uint32_t> lines{0};
+    if (last.exchange(key, std::memory_order_relaxed) == key) return;
+    if (lines.fetch_add(1u, std::memory_order_relaxed) >= 32u) return;
+    Log::get().note("native on foot held scope (F151): item %s is in two slots with different mods; scope from the selected slot: %s %s", name, loadout::kSlotNames[h.slot],
+                    loadout::scopeName(h.state));
+}
+loadout::HeldScope heldScopeOf(const char* name) noexcept {
+    loadout::HeldScope h = loadout::heldScope(name);
+    if (h.why != loadout::kWhyAmbiguous) return h;
+    F83SelectionRead sel;
+    const bool usable = f83SelectionRead(&sel) && f83SelectionFresh(sel) && sel.readable && !sel.suspended && sel.held;
+    h = loadout::heldScopeBySlot(name, usable, usable ? sel.selectedId : 0u);
+    f151ScopeNote(name, h);
+    return h;
+}
 void f83ObserveNativeSelection(void* activity) noexcept {
     nofoot::NativePrimarySelectionInput in;
     const uintptr_t a = reinterpret_cast<uintptr_t>(activity);
@@ -11833,7 +11859,7 @@ void adsSightTick(uint64_t now, double dt, const EyeSample& s) noexcept {
             // copy); F150: the copy is told only while the scope state is unknown (two copies of one item, one with a scope and one without), by the game's selected slot, and a copy
             // that cannot be told has no line; F147: stood down, the hook's lines are not used any more: the table (F139) decides the shift, and F149's table the depth.
             const bool itemOk = nofoot::f139::itemCoherent(opticItemSnapshot, opticItemSerial, currentItemSerial, opticItemName);
-            const int scopeState = itemOk ? loadout::heldScope(opticItemName).state : loadout::kScopeUnknown;
+            const int scopeState = itemOk ? heldScopeOf(opticItemName).state : loadout::kScopeUnknown;   // F151: two copies of the item are told by the game's selected slot
             const uint32_t heldCopy = itemOk ? heldCopyKey(scopeState) : nofoot::f144::kNoCopy;
             {   // F150: the copy this press runs on, when the scope state cannot say (a line on each change, 32 a session)
                 static char copyItem[64] = {};
@@ -13767,7 +13793,7 @@ void f87EyeLines(uint64_t now, double dt, double offsetW, const EdvrNativeNowPos
                 g_f144Path.reset();
                 uint32_t serial = 0;
                 if (!opticItemRead(&serial, g_f144PathItem) || !g_f144PathItem[0]) std::snprintf(g_f144PathItem, sizeof(g_f144PathItem), "none");
-                g_f144PathScope = std::strcmp(g_f144PathItem, "none") != 0 ? loadout::heldScope(g_f144PathItem).state : loadout::kScopeUnknown;
+                g_f144PathScope = std::strcmp(g_f144PathItem, "none") != 0 ? heldScopeOf(g_f144PathItem).state : loadout::kScopeUnknown;
             }
         }
         if (tf.trace && tf.press && g_f89Tally.open && g_adsState == kAdsActive && eyeUsed)
@@ -23196,7 +23222,7 @@ F141Item f141Item() noexcept {
     it.coherent = nofoot::f139::itemCoherent(read, snap, it.held, name);
     std::snprintf(it.name, sizeof(it.name), "%s", it.coherent ? name : "none");
     if (it.coherent) {
-        it.scope = loadout::heldScope(name).state;
+        it.scope = heldScopeOf(name).state;
         it.copy = heldCopyKey(it.scope);
     }
     return it;
@@ -25920,14 +25946,22 @@ struct F85bPe {   // one part, one eye, this second
     // F148: draws decided on a latch held over a missed pair, by frames since the pairing (index 2 to kLatchHoldFrames; 0 and 1 are the pairing of this frame or the last), and
     // the refusals past the hold (an agreeing pair, but older than kLatchHoldFrames).
     uint64_t heldGap[nofoot::f85::kLatchHoldFrames + 1u] = {}, pastHold = 0;
+    // F151: the draws seen by their stream entry (tagSeen) and by their place (placeBound: the draw's entry lay outside every shadow window and its place was the part's in the last
+    // frame), the draws decided from a bind by place, the refusals after one (by reason, as why[]), and the frames in which the other eye drew the part and this eye drew none
+    // (lost: counted when the later frame closes it).
+    uint64_t tagSeen = 0, placeBound = 0, placeDecided = 0, placeRefused = 0, placeWhy[kF85WhyCount] = {}, lost = 0;
     double errPxSum = 0.0, errPxMax = 0.0, errDegSum = 0.0, angleSum = 0.0, yawSum = 0.0, pitchSum = 0.0, resPxMax = 0.0, originCmSum = 0.0, originCmMax = 0.0;
 };
 struct F85Win {
     F85bPe pe[kF85bParts][2];
     uint64_t tagFinds = 0, valueFinds = 0, solves = 0;
     double agreeMmMax = 0.0, agreeDegMax = 0.0;
+    // F151: per eye, the marker composite draws whose stream entry lay outside every shadow window, and what the place rule said of each (nofoot::f151::Verdict).
+    uint64_t placeOutside[2] = {}, placeVerdict[2][nofoot::f151::kVerdictCount] = {};
 };
 F85Win g_f85w;
+static_assert(nofoot::f151::kSlots == nofoot::f85::kWeaponKeySlots, "F151's places are kept per weapon UI part slot");
+nofoot::f151::Places g_f151;   // F151: render thread only (the marker draw tee, f85bDecide)
 nofoot::f85::KLatch g_f85Latch;
 bool g_f85InValueScan = false;
 uint32_t g_f85SceneW[2] = {}, g_f85SceneH[2] = {};   // each eye's scene target (the eye's scene rows' draw), for the depth probe's pick
@@ -28622,9 +28656,13 @@ bool f85Solve(int e, uint32_t frame, const CbShadow* sh, const float* oHud, F85S
     if (!s.K.ok || s.K.rigid > nofoot::f85::kRigidMax) { *why = kF85WhyNotRigid; return false; }
     return true;
 }
-void f85Refuse(F85bPe& pe, int why) {
+void f85Refuse(F85bPe& pe, int why, bool byPlace = false) {
     ++pe.refused;
     ++pe.why[why];
+    if (byPlace) {   // F151: refused after a bind by place (also counted above, as any refusal)
+        ++pe.placeRefused;
+        ++pe.placeWhy[why];
+    }
 }
 // K is a camera of this frame: the pair of the two eyes' estimates, compared once both are in (the latch the weapon UI's rows read).
 void f85LatchPut(int e, uint32_t frame, const F85Solve& s) {
@@ -29831,7 +29869,7 @@ struct F140Seen {
     bool have = false, table = false;
     uint64_t placed = 0, scopeUnknown = 0, untrusted = 0;
     char item[64] = {};
-    int scope = loadout::kScopeUnknown, entryScope = loadout::kScopeNo;
+    int scope = loadout::kScopeUnknown;   // F151: for the lines; the placement row is the item's whatever the scope
     double seed[4] = {}, trim[4] = {}, total[4] = {};
 };
 F140Seen g_f140Seen[nofoot::f140::kClasses];
@@ -29935,7 +29973,7 @@ nofoot::f90::Out f90Decide(uint32_t frame, int e, const Rec& r, const Find* f, u
         namespace f144 = nofoot::f144;
         const uint32_t heldNow = g_heldItemSerial.load(std::memory_order_acquire);
         const bool itemOk = f140::itemCoherent(heldRead, heldSnapSerial, heldNow, heldName);
-        const int scopeState = itemOk ? loadout::heldScope(heldName).state : loadout::kScopeUnknown;
+        const int scopeState = itemOk ? heldScopeOf(heldName).state : loadout::kScopeUnknown;   // F151: two copies of the item are told by the game's selected slot
         double trim[4];
         for (int i = 0; i < 4; ++i) trim[i] = static_cast<double>(g_f140TrimCm[i].load(std::memory_order_relaxed));
         const int drawn = f144::drawnRole(adsWNow);
@@ -30078,7 +30116,6 @@ nofoot::f90::Out f90Decide(uint32_t frame, int e, const Rec& r, const Find* f, u
             if (!pl.coherent) ++sn.untrusted;
             std::snprintf(sn.item, sizeof(sn.item), "%s", pl.coherent ? heldName : "none");
             sn.scope = pl.scope;
-            sn.entryScope = pl.entryScope;
             sn.table = pl.table;
             for (int i = 0; i < 4; ++i) {
                 sn.seed[i] = pl.seed[i];
@@ -30133,8 +30170,9 @@ void f140PlacementText(const F140Seen& s, char* buf, size_t cap) {
     }
     std::snprintf(buf, cap, "%s, scope %s", s.table ? "table" : "class", loadout::scopeName(s.scope));
 }
-// F140: the window's `weapon UI placement` line for one class (when it placed at all), then the window starts over. The seed is the table's entry for the item under its scope
-// row, else the class's built-in values; the totals are what the placement used. --health reads these for the figures to bake into the table.
+// F140: the window's `weapon UI placement` line for one class (when it placed at all), then the window starts over. The seed is the table's entry for the item (F151: one row
+// whatever the scope, which the line names for information only), else the class's built-in values; the totals are what the placement used. --health reads these for the figures to
+// bake into the table.
 void f140Report(int cls, uint32_t windowSecs) {
     F140Seen& s = g_f140Seen[cls];
     if (s.have)
@@ -30315,28 +30353,37 @@ void f90Report(bool fold, uint32_t windowSecs, bool onFootWindow) {
 }
 
 // The decision for a draw whose record carries a weapon UI tag (the CPU identification named it): sets g_fix.pending with the rewritten rows, or counts why not.
-void f85bDecide(ID3D11DeviceContext* ctx, uint32_t frame, const Rec& r, ID3D11Buffer* b0Plain, const float* oHud, const CbShadow* sh, const Find* f) {
+// F151: byPlace says the draw's stream entry lay outside every shadow window and the tee bound it to the part's record by its place (nofoot::f151): the draw is decided by every
+// check a named draw is, and counted apart from the named ones.
+void f85bDecide(ID3D11DeviceContext* ctx, uint32_t frame, const Rec& r, ID3D11Buffer* b0Plain, const float* oHud, const CbShadow* sh, const Find* f, bool byPlace) {
     uint32_t slot = 0;
     if (!nofoot::f85::isWeaponKey(f->key, &slot)) return;
     const int e = r.eye;
     F85bPe& pe = g_f85w.pe[slot][e];
     ++pe.found;
-    if (!b0Plain) { f85Refuse(pe, kF85WhyNoRanged); return; }
-    if (!sh || !sh->valid) { f85Refuse(pe, kF85WhyNoRows); return; }
-    if (!oHud) { f85Refuse(pe, kF85WhyNoOrigin); return; }
+    if (byPlace) ++pe.placeBound;
+    else ++pe.tagSeen;
+    {   // F151: the part drew in this eye in this frame; a frame in which one eye drew it and the other did not is counted for the eye that did not, when a later frame closes it
+        const int lostEye = g_f151.seen[slot].see(e, frame);
+        if (lostEye == 0 || lostEye == 1) ++g_f85w.pe[slot][lostEye].lost;
+    }
+    if (!b0Plain) { f85Refuse(pe, kF85WhyNoRanged, byPlace); return; }
+    if (!sh || !sh->valid) { f85Refuse(pe, kF85WhyNoRows, byPlace); return; }
+    if (!oHud) { f85Refuse(pe, kF85WhyNoOrigin, byPlace); return; }
     // A draw of several instances is rewritten whole (every instance of a draw shares its b0): counted, and refused past 16 (not a weapon readout).
-    if (r.instances > 16) { f85Refuse(pe, kF85WhyMulti); return; }
+    if (r.instances > 16) { f85Refuse(pe, kF85WhyMulti, byPlace); return; }
     if (r.instances > 1) ++pe.multi;
     F85bUCell u;
-    if (!f85bReadU(f->sentinel, &u)) { f85Refuse(pe, kF85WhyNoU); return; }
+    if (!f85bReadU(f->sentinel, &u)) { f85Refuse(pe, kF85WhyNoU, byPlace); return; }
     ++pe.matched;
     F85Solve s;
     int why = -1;
-    if (!f85Solve(e, frame, sh, oHud, s, &why)) { f85Refuse(pe, why); return; }
+    if (!f85Solve(e, frame, sh, oHud, s, &why)) { f85Refuse(pe, why, byPlace); return; }
     f85LatchPut(e, frame, s);
     if (!g_f85Latch.usable(frame)) {   // F148: the latch holds kLatchHoldFrames frames after a pairing (the draw's own K is solved this frame; the latch vouches that the eyes' K agreed)
         if (g_f85Latch.pastHold(frame)) ++pe.pastHold;
-        f85Refuse(pe, g_f85Latch.pairs == 0 || g_f85Latch.pairedFrame == ~0u || frame > g_f85Latch.pairedFrame + nofoot::f85::kLatchHoldFrames ? kF85WhyNoPair : kF85WhyDisagree);
+        f85Refuse(pe, g_f85Latch.pairs == 0 || g_f85Latch.pairedFrame == ~0u || frame > g_f85Latch.pairedFrame + nofoot::f85::kLatchHoldFrames ? kF85WhyNoPair : kF85WhyDisagree,
+                  byPlace);
         return;
     }
     const uint32_t latchGap = g_f85Latch.gap(frame);   // F148: 0 or 1 = a pairing of this frame or the last, 2 and more = held over a missed pair
@@ -30394,7 +30441,7 @@ void f85bDecide(ID3D11DeviceContext* ctx, uint32_t frame, const Rec& r, ID3D11Bu
         part.wouldScale = wouldScale;
     }
     nofoot::f85::Corr c = nofoot::f85::makeCorrection(s.K, uf);
-    if (!c.ok) { f85Refuse(pe, kF85WhyCorr); return; }
+    if (!c.ok) { f85Refuse(pe, kF85WhyCorr, byPlace); return; }
     if (!f90o.map.identity()) {   // F90: a scaled M3 is not a rotation: the angle and the yaw / pitch figures stay those of K -> U (the game's U)
         const nofoot::f85::Corr cg = nofoot::f85::makeCorrection(s.K, ufGame);
         c.angleDeg = cg.angleDeg;
@@ -30408,7 +30455,7 @@ void f85bDecide(ID3D11DeviceContext* ctx, uint32_t frame, const Rec& r, ID3D11Bu
         originCm += d * d;
     }
     originCm = std::sqrt(originCm) * 100.0;
-    if (!(originCm < 500.0)) { f85Refuse(pe, kF85WhyFarOrigin); return; }
+    if (!(originCm < 500.0)) { f85Refuse(pe, kF85WhyFarOrigin, byPlace); return; }
     const nofoot::f85::Rows Bp = nofoot::f85::applyCorrection(s.B, c);
     float r4[4], r5[4], r7[4];
     nofoot::f85::rowsToFloat(Bp, r4, r5, r7);   // as the private b0 stores them
@@ -30489,6 +30536,7 @@ void f85bDecide(ID3D11DeviceContext* ctx, uint32_t frame, const Rec& r, ID3D11Bu
         }
     }
     ++pe.decided;
+    if (byPlace) ++pe.placeDecided;   // F151
     if (latchGap >= 2u && latchGap <= nofoot::f85::kLatchHoldFrames) ++pe.heldGap[latchGap];   // F148
     if (s.rowsState == drawtag::kRowsNewest) ++pe.newest;
     f86hCount(frame, e, false);
@@ -30667,7 +30715,7 @@ void f85Report(uint64_t nowMs, bool fold, uint32_t windowSecs, bool detailLog, b
         for (uint32_t p = 0; p < kF85bParts; ++p) {
             for (int e = 0; e < 2; ++e) {
                 const F85bPe& pe = w.pe[p][e];
-                if (!pe.found && !pe.refused) continue;
+                if (!pe.found && !pe.refused && !pe.lost) continue;
                 any = true;
                 char why[400];
                 size_t len = 0;
@@ -30693,7 +30741,41 @@ void f85Report(uint64_t nowMs, bool fold, uint32_t windowSecs, bool detailLog, b
                 Log::get().note("weapon UI pin (F85b) part slot %u (name %u) eye %d: held over a missed pair %llu (gap 2 %llu, 3 %llu, 4 %llu), refused past the hold %llu; over %u s", p,
                                 nameId ? nameId - 1u : 0u, e, ull(pe.heldGap[2] + pe.heldGap[3] + pe.heldGap[4]), ull(pe.heldGap[2]), ull(pe.heldGap[3]), ull(pe.heldGap[4]), ull(pe.pastHold),
                                 windowSecs);
+                // F151: the part's draws of this eye by how they were identified, on a line of its own (the part line has no room left). Seen by tag: the draw's stream entry named the
+                // record. Bound by place: no shadow window held the entry, and the draw sat where the part's readout sat in the last frame. Decided: all of them, then those from a bind
+                // by place; refused after a bind by place: the decision's own checks said no. Lost: frames in which the other eye drew the part and this eye drew none, named or bound.
+                // Zero is printed as zero.
+                char placeWhy[300];
+                size_t placeLen = 0;
+                placeWhy[0] = '\0';
+                for (int k = 0; k < kF85WhyCount; ++k)
+                    if (pe.placeWhy[k]) {
+                        const int n = std::snprintf(placeWhy + placeLen, sizeof(placeWhy) - placeLen, "%s%s %llu", placeLen ? ", " : "", kF85WhyName[k], ull(pe.placeWhy[k]));
+                        if (n > 0 && static_cast<size_t>(n) < sizeof(placeWhy) - placeLen) placeLen += static_cast<size_t>(n);
+                    }
+                if (!placeLen) std::snprintf(placeWhy, sizeof(placeWhy), "none");
+                Log::get().note("weapon UI pin (F85b) part slot %u (name %u) eye %d: place bind (F151): seen by tag %llu, bound by place %llu, decided %llu (%llu of them from a bind by place), "
+                                "refused after a bind by place %llu [%s], lost %llu; over %u s",
+                                p, nameId ? nameId - 1u : 0u, e, ull(pe.tagSeen), ull(pe.placeBound), ull(pe.decided), ull(pe.placeDecided), ull(pe.placeRefused), placeWhy, ull(pe.lost),
+                                windowSecs);
             }
+        }
+        // F151: per eye, the marker composite draws no stream window held (the F87c "outside"), and what the place rule said of each: bound, or the guard that refused (in the order
+        // they are checked). Most are not the weapon's: a lost frame loses all of the eye's draws at once.
+        for (int e = 0; e < 2; ++e) {
+            if (!w.placeOutside[e]) continue;
+            char reasons[420];
+            size_t len = 0;
+            reasons[0] = '\0';
+            for (int k = 1; k < nofoot::f151::kVerdictCount; ++k)
+                if (w.placeVerdict[e][k]) {
+                    const int n = std::snprintf(reasons + len, sizeof(reasons) - len, "%s%s %llu", len ? ", " : "", nofoot::f151::verdictName(k), ull(w.placeVerdict[e][k]));
+                    if (n > 0 && static_cast<size_t>(n) < sizeof(reasons) - len) len += static_cast<size_t>(n);
+                }
+            if (!len) std::snprintf(reasons, sizeof(reasons), "none");
+            const uint64_t bound = w.placeVerdict[e][nofoot::f151::kBound];
+            Log::get().note("weapon UI pin (F85b) eye %d: place bind (F151): %llu draws outside every stream window, bound by place %llu, not bound %llu [%s]; over %u s", e,
+                            ull(w.placeOutside[e]), ull(bound), ull(w.placeOutside[e] - bound), reasons, windowSecs);
         }
         // The tag census, every second a part was submitted (and an idle line every 5 s while on foot with the fix on, so a silent instrument is told from a working one)
         if (dSeen || any || onFootWindow) {
@@ -30884,7 +30966,7 @@ void f85bValueFinds(const Pool& p, const uint8_t* base, int mapType, uint32_t fr
 // key must be matched in both eyes; its own baseline and find are used; the eye's reference is world_first or temporal (F64: no last good
 // delta; the eye's newest scene rows within one frame instead).
 void fixDecide(ID3D11DeviceContext* ctx, uint32_t frame, const Rec& r, int slot, size_t recIndex, ID3D11Buffer* b0Plain, const float* oHud,
-               const CbShadow* sh, const Find* cpuFind) {
+               const CbShadow* sh, const Find* cpuFind, bool byPlace) {
     if (r.eye != 0 && r.eye != 1) {
         ++g_win.fixNoEye;
         return;
@@ -30892,8 +30974,9 @@ void fixDecide(ID3D11DeviceContext* ctx, uint32_t frame, const Rec& r, int slot,
     const int e = r.eye;
     EyeStats& s = g_win.eye[e];
     // F85b: a draw whose record carries a weapon UI tag (the CPU identification named it) is rewritten onto the weapon's camera; it takes no part in the marker keys.
+    // F151: or the draw was bound to such a record by its place (byPlace; cpuFind is that record's find).
     if (cpuFind && nofoot::f85::isWeaponKey(cpuFind->key)) {
-        f85bDecide(ctx, frame, r, b0Plain, oHud, sh, cpuFind);
+        f85bDecide(ctx, frame, r, b0Plain, oHud, sh, cpuFind, byPlace);
         return;
     }
     int ks = -1;
@@ -31453,6 +31536,55 @@ void fixDecide(ID3D11DeviceContext* ctx, uint32_t frame, const Rec& r, int slot,
     std::memcpy(g_fix.rows45 + 4, r5, sizeof(r5));
 }
 
+// F151: the mesh of a draw, from its icon table slot (the draw configuration the slot was made for; compared whole).
+nofoot::f151::Mesh placeMeshOf(const IconMesh& m) {
+    nofoot::f151::Mesh out;
+    out.vb = m.vb;
+    out.ib = m.ib;
+    out.stride = m.stride;
+    out.vbOffset = m.vbOffset;
+    out.ibOffset = m.ibOffset;
+    out.ibFmt = m.ibFmt;
+    out.count = m.count;
+    out.start = m.start;
+    out.base = m.base;
+    out.kind = m.kind;
+    out.valid = m.state != 0;
+    return out;
+}
+// F151: how many finds carry `key` (the full tag key: the part's first or second post of the frame) in `pool`'s newest write Unmap, when that Unmap is the draw's frame's; *one is
+// the first of them.
+uint32_t findsOfKeyThisUnmap(const void* pool, uint32_t key, uint32_t frame, const Find** one) {
+    *one = nullptr;
+    uint32_t uf = ~0u;
+    for (const Pool& p : g_pools)
+        if (p.res && p.res == pool) {
+            uf = p.unmapFrame;
+            break;
+        }
+    if (uf == ~0u) return 0;
+    uint32_t n = 0;
+    for (int s = 0; s < 2; ++s)
+        for (uint32_t i = 0; i < g_findN[s]; ++i) {
+            const Find& f = g_finds[s][i];
+            if (f.pool != pool || f.key != key || !nofoot::f151::findIsThisUnmap(f.frame, uf, frame)) continue;
+            if (!n) *one = &f;
+            ++n;
+        }
+    return n;
+}
+// F151: a marker composite draw of eye e whose stream entry lay outside every shadow window: the find of the weapon UI part whose readout sat at this draw's place in the last
+// frame (nofoot::f151::Places::bind: the eye, the mesh, the ordinal among the eye's draws of it, the instance count; the key's one tagged record in this frame's Unmap, not named
+// or taken in this eye in this frame), else null. Every call is counted by eye and verdict for the 1 s line.
+const Find* placeBind(int e, uint32_t frame, const void* pool, const nofoot::f151::Mesh& mesh, uint16_t ord, uint32_t instances) {
+    if (e < 0 || e > 1) return nullptr;
+    ++g_f85w.placeOutside[e];
+    const Find* one = nullptr;
+    const nofoot::f151::Verdict v = g_f151.bind(e, frame, mesh, ord, instances, [&](uint32_t key) { return findsOfKeyThisUnmap(pool, key, frame, &one); });
+    ++g_f85w.placeVerdict[e][v];
+    return v == nofoot::f151::kBound ? one : nullptr;
+}
+
 // F46: a marker composite draw (VS B10B032BDFD46700) bound to a watched pool, in a frame with a find in it: its instance stream, b0 rows 4..7
 // and b1 row 275 are copied into the frame's staging slot, with the UI layer's eye of its target and the target's size. Nothing is written.
 // F47: EVERY marker composite draw is recorded (its eye, its place in the frame, its t33 pool, watched or not) for the per-frame lines; a
@@ -31522,6 +31654,15 @@ void markerDraw(ID3D11DeviceContext* ctx, uint32_t frame, uint64_t vs, uint32_t 
         if (fixKey) r.icon = static_cast<int8_t>(iconCapture(ctx, frame, vbs, strides, offs, args, kind));   // F67d: the icon's mesh, once per draw configuration
     }
     const Find* cpuFind = nullptr;
+    // F151: this draw's place in its eye-frame: its mesh (the icon table slot) and its ordinal among the eye's draws of that mesh. Counted at every direct marker composite draw
+    // of the eye that has a mesh, named or not, so the ordinal means the same in every frame.
+    nofoot::f151::Mesh placeMesh;
+    uint16_t placeOrd = nofoot::f151::kNoOrdinal;
+    if (fixKey && direct && (r.eye == 0 || r.eye == 1) && r.icon >= 0 && r.icon < kIconMeshes) {
+        placeMesh = placeMeshOf(g_iconMesh[r.icon]);
+        placeOrd = g_f151.ordinal(r.eye, frame, placeMesh);
+    }
+    bool streamOutside = false;
     if (fixKey && r.watched && direct && eights == 1 && pick >= 0 && (r.eye == 0 || r.eye == 1) && offs[pick] % drawtag::kStreamStride == 0) {
         const uint32_t entry = offs[pick] / drawtag::kStreamStride + startInstance;
         streamLearn(vbs[pick], r.eye, entry, frame);
@@ -31537,6 +31678,7 @@ void markerDraw(ID3D11DeviceContext* ctx, uint32_t frame, uint64_t vs, uint32_t 
             else ++g_win.cpuOther;
         } else if (outside) {
             ++g_win.cpuOutside;
+            streamOutside = true;   // F151: no window held the entry; the place may name the draw (below, where the draw is decided)
         } else {
             ++g_win.cpuNoShadow;
         }
@@ -31631,7 +31773,18 @@ void markerDraw(ID3D11DeviceContext* ctx, uint32_t frame, uint64_t vs, uint32_t 
         ++g_win.recs;
         // F47: the correction's decision for this draw (the key on only).
         if (fixKey) {
-            fixDecide(ctx, frame, list.back(), slot, list.size() - 1, b0Plain, shadowO ? shadow[5] : nullptr, sh, cpuFind);
+            // F151: a weapon readout draw named by its stream entry leaves its place for the next frame; a draw no window held is bound to the part whose readout sat at its place in
+            // the last frame (a draw bound by place leaves none).
+            const Find* decideFind = cpuFind;
+            bool byPlace = false;
+            uint32_t partSlot = 0;
+            if (cpuFind && placeOrd != nofoot::f151::kNoOrdinal && nofoot::f85::isWeaponKey(cpuFind->key, &partSlot)) {
+                g_f151.note(r.eye, partSlot, frame, placeMesh, placeOrd, instances, cpuFind->key);
+            } else if (!cpuFind && streamOutside) {
+                decideFind = placeBind(r.eye, frame, t33.res, placeMesh, placeOrd, instances);
+                byPlace = decideFind != nullptr;
+            }
+            fixDecide(ctx, frame, list.back(), slot, list.size() - 1, b0Plain, shadowO ? shadow[5] : nullptr, sh, decideFind, byPlace);
             labelCapture(ctx, frame, vbs, strides, offs, kind);   // F87p: the label's small draw, once a second per eye
         }
     }

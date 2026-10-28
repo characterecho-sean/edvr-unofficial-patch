@@ -270,29 +270,29 @@ inline void run144(Check&& check) {
     // ---- 3. the readout placed per role ---------------------------------------------------------------------------------------------------------------------------------
     {
         double none[4] = {};
-        // F145: the seeds are the pilot's dialled totals for the scope-no rows of eight weapons; everything else is as F144 left it
-        struct Seed { const char* item; int scope; int role; double v[4]; };
+        // F145/F146/F151: the seeds are the pilot's dialled totals (the eight weapons' scope-no rows of F145, the last three of F146); F151: one row per item and role, whatever the scope
+        struct Seed { const char* item; int role; double v[4]; };
         const Seed baked[] = {
-            {"$wpn_m_assaultrifle_kinetic_fauto_name;", ls::kScopeNo, f144::kHip, {5.0, 4.5, 0.0, 0.0}},   {"$wpn_m_assaultrifle_kinetic_fauto_name;", ls::kScopeNo, f144::kAds, {3.5, 5.5, 0.0, 0.0}},
-            {"$wpn_m_assaultrifle_plasma_fauto_name;", ls::kScopeNo, f144::kHip, {7.0, 2.5, 0.0, 0.0}},    {"$wpn_m_assaultrifle_plasma_fauto_name;", ls::kScopeNo, f144::kAds, {7.0, 6.0, 0.0, 0.0}},
-            {"$wpn_m_launcher_rocket_sauto_name;", ls::kScopeNo, f144::kHip, {5.5, 0.0, 0.0, 0.0}},        {"$wpn_m_launcher_rocket_sauto_name;", ls::kScopeNo, f144::kAds, {5.5, 3.5, 0.0, 0.0}},
-            {"$wpn_m_shotgun_plasma_doublebarrel_name;", ls::kScopeNo, f144::kHip, {10.5, 3.0, 1.0, 0.0}}, {"$wpn_m_shotgun_plasma_doublebarrel_name;", ls::kScopeNo, f144::kAds, {19.0, 4.0, 1.0, 0.0}},
-            {"$wpn_m_submachinegun_kinetic_fauto_name;", ls::kScopeNo, f144::kHip, {6.5, 0.0, 0.0, 0.0}},  {"$wpn_m_submachinegun_kinetic_fauto_name;", ls::kScopeNo, f144::kAds, {6.5, 3.5, 0.0, 0.0}},
-            {"$wpn_m_submachinegun_laser_fauto_name;", ls::kScopeNo, f144::kHip, {7.0, 1.5, 0.5, 0.0}},    {"$wpn_m_submachinegun_laser_fauto_name;", ls::kScopeNo, f144::kAds, {10.0, 4.5, 1.0, 0.0}},
-            {"$wpn_s_pistol_kinetic_sauto_name;", ls::kScopeNo, f144::kHip, {13.0, 3.5, -3.0, 3.0}},       {"$wpn_s_pistol_kinetic_sauto_name;", ls::kScopeNo, f144::kAds, {16.0, 5.0, -3.0, 3.0}},
-            {"$wpn_s_pistol_laser_sauto_name;", ls::kScopeNo, f144::kHip, {13.0, 3.5, -3.0, 3.0}},         {"$wpn_s_pistol_laser_sauto_name;", ls::kScopeNo, f144::kAds, {18.0, 6.5, -3.0, 3.0}},
-            // F146: the last three: the plasma pistol (scope no) and the scoped plasma sniper
-            {"$wpn_s_pistol_plasma_charged_name;", ls::kScopeNo, f144::kHip, {11.0, 5.0, -0.5, 3.0}}, {"$wpn_s_pistol_plasma_charged_name;", ls::kScopeNo, f144::kAds, {11.0, 5.0, -0.5, 3.0}},
-            {"$wpn_m_sniper_plasma_charged_name;", ls::kScopeYes, f144::kHip, {-0.5, 3.5, 0.0, 0.0}}, {"$wpn_m_sniper_plasma_charged_name;", ls::kScopeYes, f144::kAds, {-0.5, 7.0, 0.0, 0.0}},
+            {"$wpn_m_assaultrifle_kinetic_fauto_name;", f144::kHip, {5.0, 4.5, 0.0, 0.0}},   {"$wpn_m_assaultrifle_kinetic_fauto_name;", f144::kAds, {3.5, 5.5, 0.0, 0.0}},
+            {"$wpn_m_assaultrifle_plasma_fauto_name;", f144::kHip, {7.0, 2.5, 0.0, 0.0}},    {"$wpn_m_assaultrifle_plasma_fauto_name;", f144::kAds, {7.0, 6.0, 0.0, 0.0}},
+            {"$wpn_m_launcher_rocket_sauto_name;", f144::kHip, {5.5, 0.0, 0.0, 0.0}},        {"$wpn_m_launcher_rocket_sauto_name;", f144::kAds, {5.5, 3.5, 0.0, 0.0}},
+            {"$wpn_m_shotgun_plasma_doublebarrel_name;", f144::kHip, {10.5, 3.0, 1.0, 0.0}}, {"$wpn_m_shotgun_plasma_doublebarrel_name;", f144::kAds, {19.0, 4.0, 1.0, 0.0}},
+            {"$wpn_m_submachinegun_kinetic_fauto_name;", f144::kHip, {6.5, 0.0, 0.0, 0.0}},  {"$wpn_m_submachinegun_kinetic_fauto_name;", f144::kAds, {6.5, 3.5, 0.0, 0.0}},
+            {"$wpn_m_submachinegun_laser_fauto_name;", f144::kHip, {7.0, 1.5, 0.5, 0.0}},    {"$wpn_m_submachinegun_laser_fauto_name;", f144::kAds, {10.0, 4.5, 1.0, 0.0}},
+            {"$wpn_s_pistol_kinetic_sauto_name;", f144::kHip, {13.0, 3.5, -3.0, 3.0}},       {"$wpn_s_pistol_kinetic_sauto_name;", f144::kAds, {16.0, 5.0, -3.0, 3.0}},
+            {"$wpn_s_pistol_laser_sauto_name;", f144::kHip, {13.0, 3.5, -3.0, 3.0}},         {"$wpn_s_pistol_laser_sauto_name;", f144::kAds, {18.0, 6.5, -3.0, 3.0}},
+            {"$wpn_s_pistol_plasma_charged_name;", f144::kHip, {11.0, 5.0, -0.5, 3.0}},      {"$wpn_s_pistol_plasma_charged_name;", f144::kAds, {11.0, 5.0, -0.5, 3.0}},
+            // F146: the scoped plasma sniper, whose dialled values are the item's rows since F151 (its generic scope-no seeds, never dialled, are gone)
+            {"$wpn_m_sniper_plasma_charged_name;", f144::kHip, {-0.5, 3.5, 0.0, 0.0}},       {"$wpn_m_sniper_plasma_charged_name;", f144::kAds, {-0.5, 7.0, 0.0, 0.0}},
         };
-        bool seeds = f144::kTableCount == 44;
+        bool seeds = f144::kTableCount == 22;
         for (const Seed& sd : baked) {
-            const f144::Row* r = f144::find(sd.item, sd.scope, sd.role);
+            const f144::Row* r = f144::find(sd.item, sd.role);
             seeds = seeds && r;
             for (int i = 0; seeds && i < 4; ++i) seeds = seeds && r->v[i] == sd.v[i];
         }
-        check(seeds, "F145/F146: the rows of the weapons the pilot dialled hold his totals, role by role: eight weapons' scope-no rows (F145; the kinetic and laser pistols' hip unchanged), the plasma shotgun's revised, and (F146) the plasma pistol (scope no) and the scoped plasma sniper");
-        // not baked: every other (item, scope) keeps F144's seeds (the F140 table for the ADS roles and the pistols, 0 for a rifle's hip role)
+        check(seeds, "F145/F146/F151: the rows of the weapons the pilot dialled hold his totals, role by role: eight weapons (F145; the kinetic and laser pistols' hip unchanged), the plasma shotgun's revised, the plasma pistol (F146) and the plasma sniper's scoped-copy values (-0.5 3.5 0 0 hip, -0.5 7.0 0 0 ADS); 22 rows in all, one per item and role");
+        // not baked: every other row keeps F144's seeds (the F140 table for the ADS roles and the pistols, 0 for a rifle's hip role)
         // F147: F140's own table, which this read, is gone; its nine weapons are listed here with the class values each had (the pistols 13, 3.5, -3, 3; every other 0, 3.5, 0, 0)
         struct Old {
             const char* item;
@@ -302,21 +302,27 @@ inline void run144(Check&& check) {
                             {"$wpn_m_sniper_plasma_charged_name;", false},       {"$wpn_m_submachinegun_kinetic_fauto_name;", false}, {"$wpn_m_submachinegun_laser_fauto_name;", false},
                             {"$wpn_s_pistol_kinetic_sauto_name;", true},         {"$wpn_s_pistol_laser_sauto_name;", true},      {"$wpn_s_pistol_plasma_charged_name;", true}};
         bool kept = true;
-        for (const Old& o : nine)
-            for (int scope : {ls::kScopeNo, ls::kScopeYes}) {
-                bool bakedRow = false;
-                for (const Seed& sd : baked) bakedRow = bakedRow || (std::strcmp(sd.item, o.item) == 0 && sd.scope == scope);
-                if (bakedRow) continue;
-                const f144::Row* ads = f144::find(o.item, scope, f144::kAds);
-                const f144::Row* hip = f144::find(o.item, scope, f144::kHip);
-                const double v[4] = {o.pistol ? 13.0 : 0.0, 3.5, o.pistol ? -3.0 : 0.0, o.pistol ? 3.0 : 0.0};
-                kept = kept && ads && hip;
-                for (int i = 0; kept && i < 4; ++i) {
-                    kept = kept && ads->v[i] == v[i];
-                    kept = kept && hip->v[i] == (o.pistol ? v[i] : 0.0);
-                }
+        for (const Old& o : nine) {
+            bool bakedRow = false;
+            for (const Seed& sd : baked) bakedRow = bakedRow || std::strcmp(sd.item, o.item) == 0;
+            if (bakedRow) continue;
+            const f144::Row* ads = f144::find(o.item, f144::kAds);
+            const f144::Row* hip = f144::find(o.item, f144::kHip);
+            const double v[4] = {o.pistol ? 13.0 : 0.0, 3.5, o.pistol ? -3.0 : 0.0, o.pistol ? 3.0 : 0.0};
+            kept = kept && ads && hip;
+            for (int i = 0; kept && i < 4; ++i) {
+                kept = kept && ads->v[i] == v[i];
+                kept = kept && hip->v[i] == (o.pistol ? v[i] : 0.0);
             }
-        check(kept, "F145/F146: every row not baked (the scope-yes rows but the sniper's, the sniper's scope-no rows, the plasma pistol's scope-yes rows) keeps F144's seeds");
+        }
+        check(kept, "F145/F146/F151: every row not baked keeps F144's seeds (the laser assault rifle's: 0 0 0 0 hip, 0 3.5 0 0 ADS)");
+        // F151: one row per (item, role): each of the eleven items has exactly a hip and an ADS row, none twice, none naming a scope
+        bool oneEach = f144::kTableCount == 22;
+        for (int i = 0; i < f144::kTableCount; ++i)
+            for (int j = i + 1; j < f144::kTableCount; ++j)
+                oneEach = oneEach && !(std::strcmp(f144::kTable[i].item, f144::kTable[j].item) == 0 && f144::kTable[i].role == f144::kTable[j].role);
+        for (const Old& o : nine) oneEach = oneEach && f144::find(o.item, f144::kHip) && f144::find(o.item, f144::kAds);
+        check(oneEach, "F151: the table has one hip row and one ADS row for each of the nine weapons F140 listed and the two others, none twice (the scope is no part of the key)");
         const char* kinRifle = "$wpn_m_assaultrifle_kinetic_fauto_name;";
         const char* plasmaPistol = "$wpn_s_pistol_plasma_charged_name;";
         const double trim[4] = {1.0, 2.0, -1.5, 0.5};
@@ -335,12 +341,41 @@ inline void run144(Check&& check) {
         const f144::RolePlacement pAds = f144::place(true, 7, 7, plasmaPistol, ls::kScopeNo, f140::kClassPistol, f144::kAds, false, trim);
         check(near144(pHip.total[0], 12.0, 1e-12) && near144(pHip.total[1], 7.0, 1e-12) && near144(pHip.total[2], -2.0, 1e-12) && near144(pHip.total[3], 3.5, 1e-12) && near144(pAds.total[0], 11.0, 1e-12) && near144(pAds.total[1], 5.0, 1e-12) && near144(pAds.total[2], -0.5, 1e-12) && pAds.trim[0] == 0.0,
               "F144/F146: a pistol's hip and ADS roles are dialled apart (the plasma pistol's seed 11, 5, -0.5, 3 plus the trims at the hip, the seed alone for the idle ADS role)");
-        // never carried to another weapon or scope: each (item, scope, role) is its own row, the trim a live key of the moment
-        const f144::RolePlacement other = f144::place(true, 7, 7, "$wpn_m_assaultrifle_laser_fauto_name;", ls::kScopeYes, f140::kClassRifle, f144::kHip, false, trim);
-        check(other.table && other.total[0] == 0.0 && other.total[1] == 0.0 && other.entryScope == ls::kScopeYes, "F144: another weapon and scope: its own row, the trims at rest");
+        // never carried to another weapon: each (item, role) is its own row, the trim a live key of the moment
+        const f144::RolePlacement other = f144::place(true, 7, 7, "$wpn_m_assaultrifle_laser_fauto_name;", ls::kScopeNo, f140::kClassRifle, f144::kHip, false, trim);
+        check(other.table && other.total[0] == 0.0 && other.total[1] == 0.0, "F144: another weapon: its own row, the trims at rest");
+        // F151: the scope is no part of the row: a copy with a scope, without one, or of unknown state reads the item's one row, and the trims reach that row from any of them
         const f144::RolePlacement sameWeaponScopeYes = f144::place(true, 7, 7, kinRifle, ls::kScopeYes, f140::kClassRifle, f144::kHip, false, trim);
-        check(sameWeaponScopeYes.table && sameWeaponScopeYes.total[0] == 0.0 && sameWeaponScopeYes.total[1] == 0.0 && sameWeaponScopeYes.entryScope == ls::kScopeYes,
-              "F145: the kinetic rifle with a scope is its own row: the baked no-scope totals are not carried to it");
+        check(sameWeaponScopeYes.table && sameWeaponScopeYes.scope == ls::kScopeYes && !sameWeaponScopeYes.scopeUnknown && sameWeaponScopeYes.seed[0] == 5.0 &&
+                  sameWeaponScopeYes.seed[1] == 4.5 && sameWeaponScopeYes.total[0] == 5.0 && sameWeaponScopeYes.total[1] == 4.5,
+              "F151: the kinetic rifle with a scope reads the scope-no row (5, 4.5, 0, 0): the baked totals are the item's, not the copy's");
+        {
+            bool same = true, sniperOk = true, trimsOk = true, rowsOk = true;
+            const char* const items[11] = {"$wpn_m_assaultrifle_laser_fauto_name;", "$wpn_m_assaultrifle_plasma_fauto_name;", "$wpn_m_assaultrifle_kinetic_fauto_name;", "$wpn_m_launcher_rocket_sauto_name;",
+                                           "$wpn_m_sniper_plasma_charged_name;", "$wpn_m_submachinegun_kinetic_fauto_name;", "$wpn_m_submachinegun_laser_fauto_name;",
+                                           "$wpn_m_shotgun_plasma_doublebarrel_name;", "$wpn_s_pistol_kinetic_sauto_name;", "$wpn_s_pistol_laser_sauto_name;", "$wpn_s_pistol_plasma_charged_name;"};
+            for (const char* it : items)
+                for (int role : {f144::kHip, f144::kAds}) {
+                    const int cls = std::strncmp(it, "$wpn_s_", 7) == 0 ? f140::kClassPistol : f140::kClassRifle;
+                    const f144::RolePlacement n = f144::place(true, 7, 7, it, ls::kScopeNo, cls, role, true, trim);
+                    const f144::RolePlacement y = f144::place(true, 7, 7, it, ls::kScopeYes, cls, role, true, trim);
+                    const f144::RolePlacement u = f144::place(true, 7, 7, it, ls::kScopeUnknown, cls, role, true, trim);
+                    const f144::Row* row = f144::find(it, role);
+                    rowsOk = rowsOk && row && n.table && y.table && u.table;
+                    for (int i = 0; i < 4; ++i) {
+                        same = same && n.seed[i] == y.seed[i] && n.seed[i] == u.seed[i] && row && n.seed[i] == row->v[i];
+                        trimsOk = trimsOk && n.trim[i] == y.trim[i] && n.trim[i] == u.trim[i] && n.total[i] == y.total[i] && n.total[i] == u.total[i];
+                    }
+                }
+            check(rowsOk && same, "F151: each of the eleven items and both roles reads the same seed, the table's row, whether the copy has a scope, has none or its scope state is unknown");
+            check(trimsOk, "F151: the same trims on any of the three copies give the same totals on the same row (the trims dialled on either copy apply to that one row)");
+            const f144::RolePlacement sh = f144::place(true, 7, 7, "$wpn_m_sniper_plasma_charged_name;", ls::kScopeNo, f140::kClassRifle, f144::kHip, false, none);
+            const f144::RolePlacement sa = f144::place(true, 7, 7, "$wpn_m_sniper_plasma_charged_name;", ls::kScopeUnknown, f140::kClassRifle, f144::kAds, false, none);
+            const f144::RolePlacement sy = f144::place(true, 7, 7, "$wpn_m_sniper_plasma_charged_name;", ls::kScopeYes, f140::kClassRifle, f144::kAds, true, trim);
+            sniperOk = sh.total[0] == -0.5 && sh.total[1] == 3.5 && sh.total[2] == 0.0 && sh.total[3] == 0.0 && sa.total[0] == -0.5 && sa.total[1] == 7.0 && sa.total[2] == 0.0 && sa.total[3] == 0.0 &&
+                       near144(sy.total[0], 0.5, 1e-12) && near144(sy.total[1], 9.0, 1e-12) && near144(sy.total[2], -1.5, 1e-12) && near144(sy.total[3], 0.5, 1e-12);
+            check(sniperOk, "F151: the plasma sniper's row is the pilot's dialled values for every copy: hip -0.5 3.5 0 0, ADS -0.5 7.0 0 0 (with no scope and with an unknown state too), and the trims on top");
+        }
         // not a weapon, not coherent, a miss, unknown scope, clamps
         const f144::RolePlacement tool = f144::place(true, 7, 7, "$humanoid_companalyser_name;", ls::kScopeNo, f140::kClassRifle, f144::kAds, true, trim);
         check(tool.coherent && !tool.weapon && !tool.table && tool.trim[0] == 0.0 && tool.total[1] == 3.5, "F144: a tool takes no trim and falls back to the class's values");
@@ -350,7 +385,7 @@ inline void run144(Check&& check) {
         const f144::RolePlacement missRifleHip = f144::place(true, 7, 7, "$wpn_m_new_name;", ls::kScopeNo, f140::kClassRifle, f144::kHip, false, trim);
         check(!missPistol.table && missPistol.total[0] == 13.0 && !missRifleHip.table && missRifleHip.total[0] == 0.0 && missRifleHip.total[1] == 0.0, "F144: a miss takes the class's values (the pistol's, or 0 for the rifle class's hip)");
         const f144::RolePlacement unk = f144::place(true, 7, 7, kinRifle, ls::kScopeUnknown, f140::kClassRifle, f144::kAds, false, none);
-        check(unk.table && unk.scopeUnknown && unk.entryScope == ls::kScopeNo, "F144: an unknown scope state uses the no-scope row and says so");
+        check(unk.table && unk.scopeUnknown && unk.scope == ls::kScopeUnknown && unk.seed[0] == 3.5 && unk.seed[1] == 5.5, "F144/F151: an unknown scope state reads the item's one row and says it was unknown");
         const double big[4] = {50.0, -50.0, 50.0, -50.0};
         const f144::RolePlacement clamped = f144::place(true, 7, 7, kinRifle, ls::kScopeNo, f140::kClassRifle, f144::kHip, true, big);
         check(near144(clamped.trim[0], 30.0, 1e-12) && near144(clamped.trim[1], -30.0, 1e-12) && near144(clamped.trim[3], -30.0, 1e-12) && near144(clamped.total[0], 30.0, 1e-12) &&

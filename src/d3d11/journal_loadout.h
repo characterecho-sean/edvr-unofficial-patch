@@ -11,7 +11,7 @@
 // The journal's ModuleName "wpn_m_sniper_plasma_charged" is Status.json's "$wpn_m_sniper_plasma_charged_name;": the "$" and the "_name;" taken off, compared without case.
 //
 // The held weapon's scope state is yes or no when exactly one slot holds its name, or every slot holding it agrees; unknown when no loadout was read yet, when the name is in
-// no slot, or when two slots hold it with different mods (the native primary selection carries an item id with no slot, so it cannot settle that).
+// no slot, or when two slots hold it with different mods; F151: in that last case the game's selected slot settles it (scopeOfHeldBySlot) while the selection is readable.
 #pragma once
 
 #include <atomic>
@@ -88,6 +88,7 @@ struct HeldScope {
     int state = kScopeUnknown;
     int why = kWhyNoName;
     int slots = 0;   // slots whose module is the held item's
+    int slot = -1;   // F151: the slot the state was read from, when two slots hold the item with different mods and the game's selection named one of them; else -1
 };
 inline HeldScope scopeOfHeld(const Loadout& l, const char* statusName) noexcept {
     HeldScope h;
@@ -110,6 +111,26 @@ inline HeldScope scopeOfHeld(const Loadout& l, const char* statusName) noexcept 
         h.state = yes ? kScopeYes : kScopeNo;
         h.why = kWhyOk;
     }
+    return h;
+}
+// F151: two copies of one item in the loadout (a scoped and an unscoped plasma sniper) read the same name, and the name cannot say which is in hand. The game's native selection
+// can: its id (F83's selectedId, sink+0x180) is 2 for PrimaryWeapon1, 3 for PrimaryWeapon2 and 4 for SecondaryWeapon (the tool is 5; in the flight edvr_gfx_20261028_060723 the
+// snipers' ids 2 and 3 went with E +5.00, the scoped copy, and +16.00). When the name lookup is ambiguous and the selection is fresh and readable (the caller's judgement:
+// selectionReadable), the state is that of the selected slot, only if that slot holds the held item's name; any other case keeps what the name lookup said.
+constexpr uint32_t kFirstSlotId = 2u;
+inline int slotOfSelectedId(uint32_t id) noexcept {
+    return id >= kFirstSlotId && id < kFirstSlotId + static_cast<uint32_t>(kSlotCount) ? static_cast<int>(id - kFirstSlotId) : -1;
+}
+inline HeldScope scopeOfHeldBySlot(const Loadout& l, const char* statusName, bool selectionReadable, uint32_t selectedId) noexcept {
+    HeldScope h = scopeOfHeld(l, statusName);
+    if (h.why != kWhyAmbiguous || !selectionReadable) return h;
+    const int i = slotOfSelectedId(selectedId);
+    if (i < 0) return h;
+    const Slot& s = l.slot[i];
+    if (!s.have || !statusNameMatches(statusName, s.module)) return h;
+    h.state = s.scope ? kScopeYes : kScopeNo;
+    h.why = kWhyOk;
+    h.slot = i;
     return h;
 }
 
@@ -405,6 +426,13 @@ inline HeldScope heldScope(const char* statusName, uint32_t* generation = nullpt
     }
     if (generation) *generation = l.generation;
     return scopeOfHeld(l, statusName);
+}
+// F151: as heldScope, with the selected slot settling two copies of the item (scopeOfHeldBySlot).
+inline HeldScope heldScopeBySlot(const char* statusName, bool selectionReadable, uint32_t selectedId, uint32_t* generation = nullptr) noexcept {
+    Loadout l;
+    if (!g_published.read(&l)) return heldScope(statusName, generation);
+    if (generation) *generation = l.generation;
+    return scopeOfHeldBySlot(l, statusName, selectionReadable, selectedId);
 }
 
 }  // namespace loadout
