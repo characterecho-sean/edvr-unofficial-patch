@@ -459,6 +459,12 @@ struct UiGlowStar {
 };
 ID3D11ShaderResourceView* uiLayerGlowFeed(ID3D11DeviceContext* ctx, uint64_t frame, uint32_t slot, const void* hdr, int* verdict,
                                           UiGlowStar* star = nullptr);
+// visual.star_glow in the headset (vr_star_glow.h): the same H' = H + m * S, for the first level of an eye's bloom chain, with no HUD term (in VR the HUD is
+// not in H, and the layer's HUD feed belongs to the flat profile). It is glowFeedPass with no HUD: a copy of H, then the star pass, one command list on the
+// coverage pass's deferred context, executed with the immediate context's state restored. `star` is required (its srv and m); `hdr` is the resource the
+// first-level draw reads at `slot`. Returns H''s shader view (owned here, valid until the next call or the layer's release), or null with `verdict`
+// (UiGlowFeed as an int) and the star input's out flags saying why. The caller binds it for the one draw and puts the game's view back after.
+ID3D11ShaderResourceView* uiLayerStarFeed(ID3D11DeviceContext* ctx, uint32_t slot, const void* hdr, UiGlowStar* star, int* verdict);
 // The UiLayerDecision (as an int) the last uiLayerDecide came to: the adapter names its refusals by it.
 int uiLayerLastDecision();
 // How many decisions uiLayerDecide has come to since the DLL loaded: the blend probe (TEMPORARY) compares it before and after a draw's

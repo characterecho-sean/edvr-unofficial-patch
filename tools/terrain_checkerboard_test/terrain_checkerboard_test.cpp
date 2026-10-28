@@ -25,6 +25,10 @@
 //       line added to any page, the hint after the supersampling one), the render thread never reads a file, the flat profile never
 //       touches it, the worker's lifetime (a detached thread in a try block, stopped by a flag and an event, not from DllMain), the
 //       reader asks Settings.xml for the preset's name and for nothing else, the words header stays free of Windows and the config
+//   T7  Elite's Bloom for the Star glow hint (src/common/star_glow_bloom.h, src/d3d11/star_glow_bloom_reader.h), which reads BloomQuality through
+//       the SAME reader as T3: the value's meaning, the hint's truth table (setting x Bloom on, off, unknown), where each menu says it, the reader
+//       on fixture folders (Custom, the stock VR and flat presets, a file being rewritten, every way to be unknown), the Watch (what it reads and
+//       when, the three log lines) and the source pins that keep it one parser
 //
 // Usage: --self-test [<repo root>] [--only T1,T3,...] [--root <dir>] | --dry-run (does nothing). Run from the repo root (the pins read src\
 // and T5 runs python tools\edvr_log.py). Exit 0 and "PASS" only when every check holds; the first failing label is printed as `FAIL: <label>`.
@@ -49,6 +53,12 @@
 #define TCB_READER_HEADER "../../src/d3d11/terrain_checkerboard_reader.h"
 #endif
 #include TCB_READER_HEADER
+// The Star glow hint's reader and Watch (src/d3d11/star_glow_bloom_reader.h, with src/common/star_glow_bloom.h) read BloomQuality through the same reader;
+// the mutation tool builds the rig against edited copies of those two as well.
+#ifndef TCB_BLOOM_HEADER
+#define TCB_BLOOM_HEADER "../../src/d3d11/star_glow_bloom_reader.h"
+#endif
+#include TCB_BLOOM_HEADER
 
 // The worker's own source, config, log and guard are linked in the control build and in the worker mutants; a header mutant is built without them
 // (TCB_MUTANT), and T5 is left out of it.
@@ -60,6 +70,7 @@
 #endif
 
 namespace tcn = edvr::tcn;
+namespace sgb = edvr::sgb;
 
 namespace {
 
@@ -991,8 +1002,9 @@ void caseT6() {
           "T6e: the worker says it started, polls through the monitor, and reads no config key (the feature has none)");
 
     // the reader's rules
-    check(count(reader, "flatXmlText(") == 2 && has(reader, "flatXmlText(stripXmlComments(settings), \"PresetName\", &preset)") && has(reader, "flatXmlText(stripXmlComments(xml), kTag, &text)") &&
-              !has(reader, "stripXmlComments(settings), kTag") && has(reader, "inline constexpr char kTag[] = \"TerrainCheckerboardRenderingEnabled\";"),
+    check(count(reader, "flatXmlText(") == 2 && has(reader, "flatXmlText(stripXmlComments(settings), \"PresetName\", &preset)") && has(reader, "flatXmlText(stripXmlComments(xml), tag, &text)") &&
+              !has(reader, "stripXmlComments(settings), tag") && !has(reader, "stripXmlComments(settings), kTag") && has(reader, "readPresetTag(folder, gameDir, kTag, &r)") &&
+              has(reader, "inline constexpr char kTag[] = \"TerrainCheckerboardRenderingEnabled\";"),
           "T6f: Settings.xml is asked for the preset's name and for nothing else; the toggle is read from the preset's own file");
     check(has(reader, "flatListEliteGraphics(folder)") && has(reader, "flatPickCustomFxcfg(versioned)") && has(reader, "flatCustomFxcfgVersion(f.name, &major, &minor)") && has(reader, "flatReadSmallFile(") &&
               !has(reader, "FindFirstFile") && !has(reader, "CreateFileW") && !has(reader, "ReadFile(") && !has(reader, "WriteFile") && !has(reader, "DeleteFile") && !has(reader, "MoveFile"),
@@ -1003,12 +1015,314 @@ void caseT6() {
           "T6g: the words header includes three standard headers and nothing else: no Windows, no config, no log");
 }
 
+// ---- T7: Elite's Bloom, for the Star glow hint ----------------------------------------------------------------------------------------
+// The files as the game writes them, with BloomQuality (the real stock values: Low 0, Mid 1, High 2, Ultra 3, every VR preset 0; read from build 334925's OptionDefaults).
+std::string bloomCustomXml(const char* value, const char* eol = "\r\n", const char* indent = "\t", bool withTag = true) {
+    const std::string e = eol, i = indent;
+    std::string out = std::string("<?xml version=\"1.0\" encoding=\"UTF-8\" ?>") + e + "<Root PresetName=\"Custom\" MajorVersion=\"4\" MinorVersion=\"4\">" + e;
+    out += i + "<AAMode>0</AAMode>" + e;
+    if (withTag) out += i + "<BloomQuality>" + value + "</BloomQuality>" + e;
+    out += i + "<DOFEnabled>0</DOFEnabled>" + e + i + "<TerrainCheckerboardRenderingEnabled>true</TerrainCheckerboardRenderingEnabled>" + e + "</Root>" + e;
+    return out;
+}
+std::string bloomStockXml(const std::string& preset, const char* value, bool withTag = true) {
+    std::string out = "<?xml version=\"1.0\" encoding=\"UTF-8\" ?>\r\n<RenderOptions PresetName=\"" + preset + "\">\r\n\t<FOV>60.000000</FOV>\r\n\t<AAMode>4</AAMode>\r\n";
+    if (withTag) out += std::string("\t<BloomQuality>") + value + "</BloomQuality>\r\n";
+    out += "\t<DOFEnabled>1</DOFEnabled>\r\n\t<TerrainCheckerboardRenderingEnabled>false</TerrainCheckerboardRenderingEnabled>\r\n</RenderOptions>\r\n";
+    return out;
+}
+// Settings.xml with a BloomQuality of its own, which is never the answer (the preset's file is).
+std::string bloomSettingsXml(const std::string& preset, const char* decoy = "3") {
+    std::string out = "<?xml version=\"1.0\" encoding=\"UTF-8\" ?>\r\n<GraphicsOptions>\r\n\t<Version>1</Version>\r\n\t<PresetName>" + preset + "</PresetName>\r\n";
+    if (decoy) out += std::string("\t<BloomQuality>") + decoy + "</BloomQuality>\r\n";
+    out += "</GraphicsOptions>\r\n";
+    return out;
+}
+sgb::Reading readBloom(const Fx& fx) { return sgb::readEliteBloom(fx.folder, fx.game); }
+const char* bloomWord(sgb::Bloom b) { return b == sgb::Bloom::On ? "on" : b == sgb::Bloom::Off ? "off" : "unknown"; }
+void expectBloom(const sgb::Reading& r, sgb::Bloom want, const char* label) {
+    checkf(r.state == want, "%s (read %s, wanted %s: %s)", label, bloomWord(r.state), bloomWord(want), r.reason);
+}
+
+void caseT7() {
+    using sgb::Bloom;
+    // a. what BloomQuality's text means
+    {
+        static const struct { const char* text; Bloom want; } kValues[] = {
+            {"0", Bloom::Off}, {"1", Bloom::On}, {"2", Bloom::On}, {"3", Bloom::On}, {"4", Bloom::On}, {"false", Bloom::Off}, {"False", Bloom::Off},
+            {"true", Bloom::On}, {"TRUE", Bloom::On}, {"", Bloom::Unknown}, {"-1", Bloom::Unknown}, {"0.5", Bloom::Unknown}, {"yes", Bloom::Unknown},
+            {"2x", Bloom::Unknown}, {"0x1", Bloom::Unknown}, {"off", Bloom::Unknown}, {"?", Bloom::Unknown}};
+        for (const auto& v : kValues)
+            checkf(sgb::bloomOfText(v.text) == v.want, "T7a: BloomQuality \"%s\" reads %s (0 and false are off, a whole number above 0 and true are on, anything else is unknown)", v.text,
+                   bloomWord(v.want));
+        check(sgb::bloomOfText(nullptr) == Bloom::Unknown, "T7a: no text at all is unknown");
+    }
+    // b. the hint: the setting is above 100 AND Bloom is known to be off
+    {
+        static const char kText[] = "Bloom is off in Elite's graphics options. Star glow strengthens the game's bloom, so it changes nothing until Bloom is on.";
+        const int settings[] = {100, 125, 150, 175, 200};
+        const Bloom states[] = {Bloom::Unknown, Bloom::Off, Bloom::On};
+        bool table = true;
+        for (int percent : settings)
+            for (Bloom state : states) {
+                const char* h = sgb::hint(percent, state);
+                const bool want = percent > 100 && state == Bloom::Off;
+                table = table && (want ? (h && std::strcmp(h, kText) == 0) : h == nullptr);
+            }
+        check(table, "T7b: the hint shows for 125..200 with Bloom off, and for no other pair of {100, 125, 150, 175, 200} x {on, off, unknown}");
+        check(sgb::hint(150, Bloom::Off) && std::strcmp(sgb::hint(150, Bloom::Off), kText) == 0 && !has(kText, "\n") && has(kText, "Bloom is off in Elite's graphics options") &&
+                  has(kText, "changes nothing until Bloom is on") && std::strlen(kText) < 200,
+              "T7b: the words are one line that fits the menu's 200-byte hint, say Bloom is off in Elite's graphics options, and say it changes nothing until Bloom is on");
+        check(sgb::hint(100, Bloom::Off) == nullptr && sgb::hint(100, Bloom::Unknown) == nullptr && sgb::hint(150, Bloom::Unknown) == nullptr && sgb::hint(150, Bloom::On) == nullptr,
+              "T7b: at the stock 100, or with Bloom on or unknown, there is no hint (a hint that may be wrong is worse than none)");
+        check(sgb::kStockPercent == 100, "T7b: the threshold is the stock 100");
+    }
+    // c. where each menu says it: the flat panel's Visual tab as a note, the VR menu as the highlighted row's hint, never both, never a dimmed row
+    {
+        const Bloom states[] = {Bloom::Unknown, Bloom::Off, Bloom::On};
+        bool flatTab = true, vrRow = true, exclusive = true;
+        for (int percent : {100, 150})
+            for (Bloom state : states)
+                for (int a = 0; a < 2; ++a) {
+                    const bool cond = percent > 100 && state == Bloom::Off;
+                    const bool b = a != 0;
+                    const char* flatNote = sgb::tabNote(true, b, percent, state);
+                    const char* vrNote = sgb::tabNote(false, b, percent, state);
+                    const char* flatHint = sgb::rowHint(true, b, percent, state);
+                    const char* vrHint = sgb::rowHint(false, b, percent, state);
+                    flatTab = flatTab && ((flatNote != nullptr) == (cond && b)) && vrNote == nullptr;
+                    vrRow = vrRow && ((vrHint != nullptr) == (cond && b)) && flatHint == nullptr;
+                    exclusive = exclusive && !(flatNote && flatHint) && !(vrNote && vrHint);
+                }
+        check(flatTab, "T7c: the flat panel's note shows on the Visual tab only, under the condition, and never in the VR menu");
+        check(vrRow, "T7c: the VR hint shows only while the Star glow row is highlighted, under the condition, and never in the flat panel");
+        check(exclusive, "T7c: the note and the hint are never both said in one profile");
+        check(sgb::tabNote(true, true, 150, Bloom::Off) == sgb::hint(150, Bloom::Off) && sgb::rowHint(false, true, 150, Bloom::Off) == sgb::hint(150, Bloom::Off),
+              "T7c: both places say the very same words");
+    }
+    // d. the reader, on fixture folders
+    {
+        Fx fx;   // Custom, off
+        fx.put("Settings.xml", bloomSettingsXml("Custom"));
+        fx.put("Custom.4.4.fxcfg", bloomCustomXml("0"));
+        const sgb::Reading off = readBloom(fx);
+        check(off.state == Bloom::Off && eq(off.preset, "Custom") && eq(off.source, "Custom.4.4.fxcfg") && eq(off.value, "0"),
+              "T7d: Custom with BloomQuality 0 is OFF, and says the preset, the file and the value");
+        fx.put("Custom.4.4.fxcfg", bloomCustomXml("2"));
+        const sgb::Reading on = readBloom(fx);
+        check(on.state == Bloom::On && eq(on.value, "2"), "T7d: Custom with BloomQuality 2 is ON (Settings.xml's own BloomQuality 3 decoy is never the answer)");
+        Fx fy;
+        fy.put("Settings.xml", bloomSettingsXml("Custom", "0"));
+        fy.put("Custom.4.3.fxcfg", bloomCustomXml("0"));
+        fy.put("Custom.4.4.fxcfg", bloomCustomXml("3"));
+        fy.put("Custom.4.0.fxcfg-backup", bloomCustomXml("0"));
+        expectBloom(readBloom(fy), Bloom::On, "T7d: the highest Custom version (4.4: 3) is read, not the older 4.3 or the lookalike, nor Settings.xml's 0");
+    }
+    {
+        // the stock presets, with the values the game ships
+        static const struct { const char* name; const char* value; Bloom want; } kStock[] = {
+            {"VRHigh", "0", Bloom::Off}, {"VRLow", "0", Bloom::Off}, {"VRMedium", "0", Bloom::Off}, {"VRUltra", "0", Bloom::Off},
+            {"Low", "0", Bloom::Off}, {"Mid", "1", Bloom::On}, {"High", "2", Bloom::On}, {"Ultra", "3", Bloom::On}};
+        for (const auto& s : kStock) {
+            Fx fx;
+            fx.put("Settings.xml", bloomSettingsXml(s.name));
+            fx.putGame(std::string("OptionDefaults\\") + s.name + ".fxcfg", bloomStockXml(s.name, s.value));
+            const sgb::Reading r = readBloom(fx);
+            const std::string source = std::string("OptionDefaults\\") + s.name + ".fxcfg";
+            checkf(r.state == s.want && eq(r.preset, s.name) && source == r.source && eq(r.value, s.value),
+                   "T7d: stock preset %s reads BloomQuality %s from OptionDefaults (read %s, source %s): every stock VR preset is off, High and Ultra on", s.name, s.value,
+                   bloomWord(r.state), r.source);
+        }
+        Fx fx;   // a Custom file does not decide a stock preset, and a stock file does not decide Custom
+        fx.put("Settings.xml", bloomSettingsXml("VRHigh"));
+        fx.put("Custom.4.4.fxcfg", bloomCustomXml("3"));
+        fx.putGame("OptionDefaults\\VRHigh.fxcfg", bloomStockXml("VRHigh", "0"));
+        expectBloom(readBloom(fx), Bloom::Off, "T7d: a stock preset is read from the game's OptionDefaults, not from a Custom file beside Settings.xml");
+        Fx fy;
+        fy.put("Settings.xml", bloomSettingsXml("Custom"));
+        fy.put("Custom.4.4.fxcfg", bloomCustomXml("0"));
+        fy.putGame("OptionDefaults\\VRHigh.fxcfg", bloomStockXml("VRHigh", "3"));
+        expectBloom(readBloom(fy), Bloom::Off, "T7d: and Custom is read from the folder, not from a stock file");
+    }
+    // e. every way to be unknown, each with its reason, none a guess
+    {
+        Fx fa;   // no Settings.xml
+        fa.put("Custom.4.4.fxcfg", bloomCustomXml("0"));
+        const sgb::Reading a = readBloom(fa);
+        check(a.state == Bloom::Unknown && has(a.reason, "Settings.xml"), "T7e: no Settings.xml: unknown (the active preset is not known), whatever Custom files lie there");
+        const sgb::Reading gone = sgb::readEliteBloom(g_tmp + L"\\no\\such\\folder", g_tmp);
+        check(gone.state == Bloom::Unknown && has(gone.reason, "no Elite graphics settings folder"), "T7e: no Options\\Graphics folder: unknown, and the reason names it");
+        check(sgb::readEliteBloom(L"", L"").state == Bloom::Unknown, "T7e: no folder at all (LocalAppData not set): unknown");
+        Fx fb;   // Custom, no Custom file
+        fb.put("Settings.xml", bloomSettingsXml("Custom"));
+        fb.put("Custom Copy.fxcfg", bloomCustomXml("0"));
+        const sgb::Reading b = readBloom(fb);
+        check(b.state == Bloom::Unknown && has(b.reason, "Custom.<major>.<minor>.fxcfg"), "T7e: Custom with no Custom.<major>.<minor>.fxcfg (only a lookalike): unknown, never off from a file the game does not read");
+        Fx fc;   // a stock preset with no OptionDefaults file, and a user-made preset
+        fc.put("Settings.xml", bloomSettingsXml("VRHigh"));
+        const sgb::Reading c = readBloom(fc);
+        check(c.state == Bloom::Unknown && has(c.reason, "OptionDefaults\\VRHigh.fxcfg"), "T7e: a stock preset whose OptionDefaults file is missing: unknown, and the reason names the file");
+        Fx fd;
+        fd.put("Settings.xml", bloomSettingsXml("TomCatT"));
+        fd.put("TomCatT.4.0.fxcfg", bloomCustomXml("0"));
+        check(readBloom(fd).state == Bloom::Unknown && has(readBloom(fd).reason, "TomCatT"), "T7e: a user-made preset (its own files in the options folder, none in OptionDefaults): unknown");
+        check(sgb::readEliteBloom(fc.folder, L"").state == Bloom::Unknown, "T7e: no game folder: unknown");
+        Fx fe;   // the tag is not in the file
+        fe.put("Settings.xml", bloomSettingsXml("Custom"));
+        fe.put("Custom.4.4.fxcfg", bloomCustomXml("", "\r\n", "\t", false));
+        const sgb::Reading e = readBloom(fe);
+        check(e.state == Bloom::Unknown && has(e.reason, "has no BloomQuality") && has(e.reason, "Custom.4.4.fxcfg"), "T7e: BloomQuality absent from the Custom file: unknown, and the reason names the file (the Settings.xml decoy is not used)");
+        Fx ff;
+        ff.put("Settings.xml", bloomSettingsXml("High"));
+        ff.putGame("OptionDefaults\\High.fxcfg", bloomStockXml("High", "", false));
+        expectBloom(readBloom(ff), Bloom::Unknown, "T7e: BloomQuality absent from a stock preset's file: unknown");
+        static const char* kBad[] = {"", "abc", "-1", "1.5", "2x"};
+        for (const char* v : kBad) {
+            Fx fg;
+            fg.put("Settings.xml", bloomSettingsXml("Custom"));
+            fg.put("Custom.4.4.fxcfg", bloomCustomXml(v));
+            const sgb::Reading g = readBloom(fg);
+            checkf(g.state == Bloom::Unknown && g.reason[0] != 0, "T7e: BloomQuality \"%s\" is no whole number of 0 or more: unknown, with a reason", v);
+        }
+        Fx fh;   // names that could be paths
+        fh.put("Settings.xml", bloomSettingsXml("..\\..\\Options\\Graphics\\evil"));
+        fh.putGame("OptionDefaults\\evil.fxcfg", bloomStockXml("evil", "0"));
+        fh.put("evil.fxcfg", bloomStockXml("evil", "0"));
+        check(readBloom(fh).state == Bloom::Unknown && std::strchr(readBloom(fh).reason, '\n') == nullptr, "T7e: a preset name that could be a path is never put in one: unknown");
+    }
+    // f. commentary, encodings, and the file being rewritten
+    {
+        Fx fx;
+        fx.put("Settings.xml", bloomSettingsXml("Custom"));
+        fx.put("Custom.4.4.fxcfg", "<Root>\r\n<!-- <BloomQuality>2</BloomQuality> -->\r\n</Root>");
+        expectBloom(readBloom(fx), Bloom::Unknown, "T7f: a BloomQuality inside a comment is not there: unknown");
+        fx.put("Custom.4.4.fxcfg", "<Root>\r\n<!-- <BloomQuality>2</BloomQuality> -->\r\n<BloomQuality>0</BloomQuality>\r\n</Root>");
+        expectBloom(readBloom(fx), Bloom::Off, "T7f: a commented-out old value before the real one: the real one is read");
+        fx.put("Custom.4.4.fxcfg", "<Root>\r\n<!-- note\r\n<BloomQuality>2</BloomQuality>\r\n</Root>");
+        expectBloom(readBloom(fx), Bloom::Unknown, "T7f: a comment that never ends takes the rest of the file with it: unknown");
+        const std::string crlf = bloomCustomXml("2", "\r\n", "\t"), lf = bloomCustomXml("2", "\n", "  ");
+        const std::string shapes[] = {crlf, lf, std::string("\xEF\xBB\xBF") + crlf, bloomCustomXml("2", "", ""), "<Root>\r\n<BloomQuality>\r\n\t2\r\n</BloomQuality>\r\n</Root>"};
+        for (const std::string& s : shapes) {
+            fx.put("Custom.4.4.fxcfg", s);
+            expectBloom(readBloom(fx), Bloom::On, "T7f: the tag is read through CRLF, LF, a BOM, a single line and a value on its own lines");
+        }
+        // the game rewrites the file in place: a read that catches it half written is unknown, and the next one is the new value
+        fx.put("Custom.4.4.fxcfg", bloomCustomXml("2").substr(0, bloomCustomXml("2").find("<BloomQuality>")));
+        expectBloom(readBloom(fx), Bloom::Unknown, "T7f: a file cut before its tag (half written) is unknown");
+        fx.put("Custom.4.4.fxcfg", bloomCustomXml("2").substr(0, bloomCustomXml("2").find("<BloomQuality>") + 14));
+        expectBloom(readBloom(fx), Bloom::Unknown, "T7f: a file cut inside the value (the tag open, no number yet) is unknown");
+        fx.put("Custom.4.4.fxcfg", bloomCustomXml("0"));
+        expectBloom(readBloom(fx), Bloom::Off, "T7f: the finished file is read: off");
+        fx.put("Custom.4.4.fxcfg", bloomCustomXml("2"));
+        expectBloom(readBloom(fx), Bloom::On, "T7f: and rewritten to 2: on");
+    }
+    // g. one parser: the terrain toggle and BloomQuality come out of the same file independently
+    {
+        Fx fx;
+        fx.put("Settings.xml", bloomSettingsXml("VRHigh"));
+        fx.putGame("OptionDefaults\\VRHigh.fxcfg", bloomStockXml("VRHigh", "0"));   // terrain tag false in this fixture
+        const tcn::Reading t = tcn::readTerrainCheckerboard(fx.folder, fx.game);
+        check(t.state == tcn::State::Off && readBloom(fx).state == Bloom::Off, "T7g: one stock file gives the terrain toggle (false) and BloomQuality (0) independently");
+        Fx fy;
+        fy.put("Settings.xml", bloomSettingsXml("Custom"));
+        fy.put("Custom.4.4.fxcfg", bloomCustomXml("2"));   // terrain tag true here
+        check(tcn::readTerrainCheckerboard(fy.folder, fy.game).state == tcn::State::On && readBloom(fy).state == Bloom::On && eq(readBloom(fy).source, "Custom.4.4.fxcfg"),
+              "T7g: one Custom file gives the terrain toggle (true) and BloomQuality (2) independently, from the same pick");
+    }
+    // h. the Watch: what it reads and when, and the three log lines
+    {
+        Fx fx;
+        fx.put("Settings.xml", bloomSettingsXml("VRHigh"));
+        fx.putGame("OptionDefaults\\VRHigh.fxcfg", bloomStockXml("VRHigh", "0"));
+        fx.putGame("OptionDefaults\\High.fxcfg", bloomStockXml("High", "2"));
+        sgb::Watch w;
+        w.configure(fx.folder, fx.game);
+        std::string line;
+        check(!w.noteSetting(100, &line) && !w.noteMenuOpened(&line) && w.reads() == 0 && w.hint() == nullptr && w.state() == Bloom::Unknown,
+              "T7h: at the stock 100 nothing is read and nothing is said, a menu opening included");
+        check(w.noteSetting(150, &line) && w.reads() == 1 &&
+                  line == "star glow: Elite's Bloom is off (preset VRHigh, BloomQuality 0): the glow changes nothing until Bloom is on",
+              "T7h: the setting rising above 100 reads once and says Bloom is off, with the preset and the value");
+        check(w.hint() && std::strcmp(w.hint(), sgb::kHint) == 0 && w.percent() == 150 && w.state() == Bloom::Off, "T7h: ...and the hint is on");
+        check(!w.noteSetting(150, &line) && w.reads() == 1, "T7h: the same setting again reads nothing (the per-frame tick is a compare)");
+        check(!w.noteSetting(175, &line) && w.reads() == 2 && w.hint(), "T7h: moving to another value above 100 reads again, and says nothing while the state is the same");
+        check(!w.noteMenuOpened(&line) && w.reads() == 3, "T7h: a menu opening reads again, and says nothing while the state is the same");
+        // the player turns Bloom on in Elite (the preset changes), then opens the menu
+        fx.put("Settings.xml", bloomSettingsXml("High"));
+        check(w.noteMenuOpened(&line) && w.reads() == 4 && line == "star glow: Elite's Bloom is on (preset High, BloomQuality 2)", "T7h: Bloom turned on is said once, when the menu opens");
+        check(w.hint() == nullptr && w.state() == Bloom::On, "T7h: ...and the hint ends");
+        check(!w.noteMenuOpened(&line) && w.reads() == 5, "T7h: and it is not said again");
+        // the settings file goes away
+        DeleteFileW((fx.folder + L"\\Settings.xml").c_str());
+        check(w.noteMenuOpened(&line) &&
+                  line == "star glow: Elite's Bloom setting is unknown (Settings.xml is missing or unreadable, so the active preset is not known)",
+              "T7h: Bloom unknown says so, with the reason");
+        check(w.hint() == nullptr && w.state() == Bloom::Unknown, "T7h: ...and there is no hint");
+        // down to 100: nothing is read; up again: said again, whatever it finds
+        fx.put("Settings.xml", bloomSettingsXml("VRHigh"));
+        const uint32_t readsAt = w.reads();
+        check(!w.noteSetting(100, &line) && w.reads() == readsAt && w.hint() == nullptr && !w.noteMenuOpened(&line) && w.reads() == readsAt,
+              "T7h: back to 100 reads nothing and the hint is gone");
+        check(w.noteSetting(125, &line) && w.reads() == readsAt + 1 && line.rfind("star glow: Elite's Bloom is off (preset VRHigh", 0) == 0,
+              "T7h: rising above 100 again says it again");
+        w.noteSetting(100, &line);
+        check(w.noteSetting(150, &line) && has(line, "Bloom is off"), "T7h: ...every rise is said, even when the state is the one said last");
+        // a session that starts with the setting above 100
+        sgb::Watch started;
+        started.configure(fx.folder, fx.game);
+        check(started.noteSetting(200, &line) && started.reads() == 1 && has(line, "Bloom is off"), "T7h: a setting that is already above 100 at launch is a rise: read and said");
+        // never configured: unknown, with a reason, said
+        sgb::Watch bare;
+        check(bare.noteSetting(150, &line) && has(line, "Bloom setting is unknown") && has(line, "no Elite graphics settings folder"),
+              "T7h: a Watch that was never given a folder says unknown, with the reason");
+        // the three lines read differently from each other, and all start with the prefix; the absence of any is "the code never ran"
+        const std::string off = "star glow: Elite's Bloom is off", on = "star glow: Elite's Bloom is on", unknown = "star glow: Elite's Bloom setting is unknown";
+        sgb::Reading r;
+        char a[600], b[600], c[600];
+        r.state = Bloom::Off;
+        std::snprintf(r.preset, sizeof(r.preset), "VRHigh");
+        std::snprintf(r.value, sizeof(r.value), "0");
+        sgb::formatLog(a, sizeof(a), r);
+        r.state = Bloom::On;
+        sgb::formatLog(b, sizeof(b), r);
+        r.state = Bloom::Unknown;
+        sgb::formatLog(c, sizeof(c), r);
+        check(std::string(a).compare(0, off.size(), off) == 0 && std::string(b).compare(0, on.size(), on) == 0 && std::string(c).compare(0, unknown.size(), unknown) == 0 &&
+                  std::string(a) != b && std::string(b) != c && std::string(a) != c && !std::strchr(a, '\n') && !std::strchr(b, '\n') && !std::strchr(c, '\n'),
+              "T7h: the three outcomes are three different one-line sentences with the prefix \"star glow: Elite's Bloom\"");
+        check(std::string(c) == "star glow: Elite's Bloom setting is unknown (no reason was recorded)", "T7h: an unknown with no reason still says so");
+    }
+    // i. the source pins: one parser, pure words, and each line said in one place
+    {
+        const std::string pure = readFile("src\\common\\star_glow_bloom.h");
+        const std::string reader = readFile("src\\d3d11\\star_glow_bloom_reader.h");
+        const std::string terrain = readFile("src\\d3d11\\terrain_checkerboard_reader.h");
+        check(!pure.empty() && !reader.empty() && !terrain.empty(), "T7i: the sources the pins read are readable from the repo root");
+        if (g_failure.size()) return;
+        check(has(reader, "tcn::readPresetTag(folder, gameDir, kTag, &raw)") && !has(reader, "flatXmlText(") && !has(reader, "stripXmlComments(") && !has(reader, "plausibleStockPreset(") &&
+                  !has(reader, "L\"") && !has(reader, "Settings.xml") && !has(reader, "FindFirstFile") && !has(reader, "CreateFile") && !has(reader, "ReadFile(") &&
+                  !has(reader, "WriteFile") && !has(reader, "DeleteFile") && has(terrain, "inline bool readPresetTag(") && has(terrain, "if (!readPresetTag(folder, gameDir, kTag, &r)) return r;"),
+              "T7i: BloomQuality is read through the terrain reader's readPresetTag (called, not copied), which the terrain toggle shares; the Bloom reader opens no file and writes none");
+        check(has(reader, "inline constexpr char kTag[] = \"BloomQuality\";") && !has(reader, "Terrain"), "T7i: the tag is BloomQuality, and the Bloom reader knows nothing of the terrain toggle");
+        check(!has(pure, "windows.h") && !has(pure, "Config") && !has(pure, "Log::") && !has(pure, "std::string") && !has(pure, "std::wstring"),
+              "T7i: the words header is pure: no Windows, no config, no log, no strings of its own");
+        check(count(pure, "\"star glow: Elite's Bloom is off (preset %s, BloomQuality %s): the glow changes nothing until Bloom is on\"") == 1 &&
+                  count(pure, "\"star glow: Elite's Bloom is on (preset %s, BloomQuality %s)\"") == 1 && count(pure, "\"star glow: Elite's Bloom setting is unknown (%s)\"") == 1 &&
+                  count(pure, "star glow: Elite's Bloom") == 3 + 1,
+              "T7i: each of the three lines is spelled once (the header's comment names the prefix once more)");
+        const char* others[] = {"src\\d3d11\\menu.cpp", "src\\d3d11\\flat_star_glow.cpp", "src\\d3d11\\flat_star_glow_math.h", "src\\d3d11\\star_glow_bloom_reader.h", "src\\d3d11\\flat_runtime.cpp"};
+        bool unique = true;
+        for (const char* path : others) unique = unique && !has(readFile(path), "star glow: Elite's Bloom");
+        check(unique, "T7i: no other source writes a line that starts \"star glow: Elite's Bloom\" (the three lines have one author)");
+    }
+}
+
 struct Case { const char* id; void (*run)(); };
 const Case kCases[] = {{"T1", caseT1}, {"T2", caseT2}, {"T3", caseT3}, {"T4", caseT4},
 #ifndef TCB_MUTANT
                        {"T5", caseT5},
 #endif
-                       {"T6", caseT6}};
+                       {"T6", caseT6}, {"T7", caseT7}};
 
 bool selected(const std::string& only, const char* id) {
     if (only.empty()) return true;

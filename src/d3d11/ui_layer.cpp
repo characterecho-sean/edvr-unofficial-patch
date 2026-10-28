@@ -4597,6 +4597,24 @@ ID3D11ShaderResourceView* uiLayerGlowFeed(ID3D11DeviceContext* ctx, uint64_t fra
     return out;
 }
 
+ID3D11ShaderResourceView* uiLayerStarFeed(ID3D11DeviceContext* ctx, uint32_t slot, const void* hdr, UiGlowStar* star, int* verdict) {
+    UiGlowFeed v = UiGlowFeed::kNotReady;
+    ID3D11ShaderResourceView* out = nullptr;
+    // No profile test and no HUD: the headset's first level has neither (the flat feed above is gated on the flat profile and on eye 0's HUD layer).
+    if (ctx && hdr && star && star->srv && slot < D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT) {
+        if (!guardedBudget(g_glowBudget, [&] { out = glowFeedPass(ctx, nullptr, slot, hdr, v, star); })) {
+            v = UiGlowFeed::kFault;
+            out = nullptr;
+        }
+    }
+    if (star) {
+        if (!out) star->applied = false;
+        star->verdict = static_cast<int>(v);
+    }
+    if (verdict) *verdict = static_cast<int>(v);
+    return out;
+}
+
 // The whole dependency set a taken HUD draw needs at the tonemap,
 // established no later than the FIRST HUD take of it (review R2): the eye's
 // HDR layer, its 8-bit layer, the RGB-only blend the re-issue draws with,
