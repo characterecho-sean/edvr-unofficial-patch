@@ -1,6 +1,7 @@
 #include "vscreen.h"
 #include "gpu_timing.h"
 #include "optimized_station.h"   // the station's sun skip while sealed (optimized_station.cpp)
+#include "desktop_window.h"      // visual.desktop_window: Elite's draws into the swap chain's buffer are skipped while the eye image is drawn there
 #include "station_draw_mask.h"   // the flat sun draw issued with every write masked (built 2026-10-21)
 #include "gpu_frame_timing.h"
 #include "gpu_census.h"       // issue #38: the per-feature GPU cost census
@@ -1837,6 +1838,18 @@ __forceinline const ResourceInfo* rtv0Resolved(State* s) {
     return &s->rtv0Info;
 }
 
+// visual.desktop_window (desktop_window.h): a draw whose render target 0 is the swap chain's buffer 0 is Elite's own desktop mirror, which the feature replaces while it
+// draws the eye image there. The cost on the draw path is one relaxed load while the feature is off; while it draws, the compare reads the answer the binding shadow already
+// holds for this binding generation (rtv0Resolved). The buffer's identity is a raw pointer used only for this compare; nothing holds a reference to the buffer.
+__forceinline bool desktopWindowSkipsDraw(State* s) {
+    void* back = desktopWindowBackIdentity();
+    if (!back) return false;
+    const ResourceInfo* rt = rtv0Resolved(s);
+    if (!rt || rt->resource != back) return false;
+    desktopWindowNoteSkippedDraw();
+    return true;
+}
+
 // advanced.pixel_probe: resolves this draw's eye once more (the rtv0Eye
 // pattern again) and hands the identity to pixel_probe.h, which decides
 // on its own whether a run is armed and this is its frame. Unconfigured
@@ -2031,6 +2044,8 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     // The optimized station's sun skip: while the ship is sealed in a hangar, the sun pair is not drawn. It sits after the foreign-context return,
     // because the bindings are the immediate context's.
     if (optimizedStationSkipsDraw(bindingShaderHash(BindSlot::Vs), bindingShaderHash(BindSlot::Ps))) return DrawVerdict::kSkip;
+    // visual.desktop_window: Elite's own draw into the swap chain's buffer, while the eye image is drawn there instead (the other draw thunks ask the same, below).
+    if (desktopWindowSkipsDraw(s)) return DrawVerdict::kSkip;
     // F157: the coat outfit's pack, a draw of the local body, is left out of both eyes while the coat outfit is armed (native on foot active, Gear_Back decided as the outer garment).
     // Not armed, this is the one relaxed load. It asks before the gate below, whose answer says nothing about native on foot, so the eye memo is refreshed here on Rtv0's generation
     // (the same refresh the eye gate makes further down, and the same answer). The index count and instance count are checked first, from the call's own arguments.
@@ -4715,6 +4730,7 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstancedIndirect(
         return;
     }
     if (g_vrWorldInternal) { g_state->realDrawIndexedInstancedIndirect(self, args, off); return; }
+    if (self == g_state->ownerCtx && desktopWindowSkipsDraw(g_state)) return;   // visual.desktop_window
     if (self == g_state->ownerCtx && uiLayerIssueBlocked()) return;
     gpuFrameCommandIfLive(self);
     // F45 (TEMPORARY instrument): an indirect draw's instance range is on the GPU; the marker probe only counts it.
@@ -4749,6 +4765,7 @@ void STDMETHODCALLTYPE hookedDrawInstancedIndirect(ID3D11DeviceContext* self,
         return;
     }
     if (g_vrWorldInternal) { g_state->realDrawInstancedIndirect(self, args, off); return; }
+    if (self == g_state->ownerCtx && desktopWindowSkipsDraw(g_state)) return;   // visual.desktop_window
     if (self == g_state->ownerCtx && uiLayerIssueBlocked()) return;
     gpuFrameCommandIfLive(self);
     // F45 (TEMPORARY instrument): an indirect draw's instance range is on the GPU; the marker probe only counts it.
@@ -5162,6 +5179,7 @@ void STDMETHODCALLTYPE hookedDrawAuto(ID3D11DeviceContext* self) {
         return;
     }
     if (g_vrWorldInternal) { g_state->realDrawAuto(self); return; }
+    if (self == g_state->ownerCtx && desktopWindowSkipsDraw(g_state)) return;   // visual.desktop_window
     if (self == g_state->ownerCtx && uiLayerIssueBlocked()) return;
     gpuFrameCommandIfLive(self);
     // No verdict on this path: the fast path's decision is the gate and the AA alone (draw_fast_path.h).
