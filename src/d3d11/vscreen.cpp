@@ -85,6 +85,7 @@
 #include "intro_skip.h"
 #include "intro_upscale.h"
 #include "native_on_foot.h"  // the F0 gate counters (log only)
+#include "native_on_foot_f154.h"  // F154/F155 (TEMPORARY): the clip pixel shader's hash, asked before the body draw hook does anything
 #include "journal_watch.h"  // gameplay started, for the low-peak notice
 #include "loader_panel.h"
 #include "splash_dim.h"
@@ -2031,10 +2032,11 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     // The optimized station's sun skip: while the ship is sealed in a hangar, the sun pair is not drawn. It sits after the foreign-context return,
     // because the bindings are the immediate context's.
     if (optimizedStationSkipsDraw(bindingShaderHash(BindSlot::Vs), bindingShaderHash(BindSlot::Ps))) return DrawVerdict::kSkip;
-    // F154 (TEMPORARY, experimental.native_on_foot_body_draw_hide): one of the local body's draws into an eye left out, to find the coat's pack. With the key at -1 this is the one
-    // relaxed load. It asks before the gate below, whose answer says nothing about native on foot, so the eye memo is refreshed here on Rtv0's generation (the same refresh the
-    // eye gate makes further down, and the same answer).
-    if (nativeOnFootBodyDrawLive() && (kind == 'X' || kind == 'I')) {
+    // F154/F155 (TEMPORARY, experimental.native_on_foot_body_draw_hide): one of the draws that use the clip pixel shader (the body parts with the vertex clip modifier) into an eye
+    // left out, to find the coat's pack. With the key at -1 this is the one relaxed load; with it set, a draw that does not use that shader costs one more compare. It asks before
+    // the gate below, whose answer says nothing about native on foot, so the eye memo is refreshed here on Rtv0's generation (the same refresh the eye gate makes further down, and
+    // the same answer).
+    if (nativeOnFootBodyDrawLive() && (kind == 'X' || kind == 'I') && bindingShaderHash(BindSlot::Ps) == nofoot::f154::kClipPs) {
         const uint32_t bodyRtvGen = bindingGeneration(BindSlot::Rtv0);
         if (s->rtv0EyeGen != bodyRtvGen) {
             s->rtv0Cand = -1;
