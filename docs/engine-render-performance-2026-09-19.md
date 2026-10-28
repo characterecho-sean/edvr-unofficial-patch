@@ -54,11 +54,11 @@
   closed-solid and eroded-box occluders, remove zero draws ("Probe v2
   flown"); LODDistanceScale as a draw-count lever at this view ("Leg
   C"); applicationMs as a frame-fit signal, it omits the post-submit
-  phase ("Shadow flight 1").
+  phase ("Shadow flight 1"); the repeat-draw fast path ("Phase 2b flown").
 
-* **Next (2026-10-27, last entry):** AA on's +1.65 ms is per-draw
+* **Next (2026-10-28, last entry):** AA on's +1.65 ms is per-draw
   classifiers. ui-depth memo FLOWN: exact, -0.21 ms (shipped, b1561dff).
-  Phase 2 FLOWN: takes 61%, 0/25M wrong; saving unproven. 2b A/B BUILT.
+  Fast path exact, but the 2b A/B shows no saving. Retirement asked.
 
 ## Frame budget philosophy
 
@@ -4831,7 +4831,7 @@ What is established:
 - The saving is the difference between adjacent windows at matched
   draw counts.
 
-**Phase 2b built (2026-10-27), NOT FLOWN.**
+**Phase 2b built (2026-10-27); flown 2026-10-28, in the next entry.**
 - **Arms.** The window after the edge at frame E is ON when E / 1800 is
   even: the first window is ON, the next OFF, and so on. It is set at
   perf_monitor.cpp:1300, after that edge's A/B line, so each window
@@ -4867,3 +4867,73 @@ neighbours at matched draw counts.
 - ui_depth's world-screen and hologram counts, the engine motion line
   and the depth-probe tallies unchanged;
 - no visual change: HUD, holo, terminals, weapons, sky.
+
+### 2026-10-28 -- Phase 2b flown: the fast path saves nothing in the X hook
+
+Flown 2026-10-28 05:17-05:25 on Steam, parked at the Cranfield pad, AA
+on (temporal AA line: full-frame NGX, 4032x4034). Build e261adc6
+(`edvr_log.py --expect-build HEAD` matches), log
+`edvr_gfx_20261028_051715.log`. No build ran: no build output in any
+checkout was written between 05:17 and 05:26.
+
+The first eight windows are the arrival, at 4-21k draws a frame, with
+tickets still warming (2.1% and 47.7% fast). Windows 18000-36000 are
+steady at 26.0-26.3k draws. The last window (37800, ON) has no OFF
+window after it, and its fps fell to 62.3 and app CPU p50 rose to 9.16
+ms as the session ended; it is left out of the pairs.
+
+| Window | Arm | Draws | Fast | fps | Old line | Step sum | App CPU p50 |
+|---|---|---|---|---|---|---|---|
+| 18000 | OFF | 26094 | - | 67.0 | 3.291 | 2.941 | 8.413 |
+| 19800 | ON | 26348 | 60.8% | 66.3 | 3.396 | 2.966 | 8.428 |
+| 21600 | OFF | 26058 | - | 66.7 | 3.330 | 2.871 | 8.380 |
+| 23400 | ON | 26083 | 61.0% | 68.1 | 3.278 | 2.932 | 8.224 |
+| 25200 | OFF | 26059 | - | 68.8 | 3.377 | 2.976 | 8.283 |
+| 27000 | ON | 25999 | 61.5% | 69.5 | 3.454 | 0.476 | 7.982 |
+| 28800 | OFF | 26085 | - | 68.4 | 3.228 | 2.980 | 8.334 |
+| 30600 | ON | 25989 | 61.7% | 69.4 | 3.249 | 3.037 | 8.014 |
+| 32400 | OFF | 26157 | - | 69.0 | 3.258 | 3.344 | 8.218 |
+| 34200 | ON | 25943 | 61.6% | 69.6 | 3.253 | 3.044 | 8.056 |
+| 36000 | OFF | 26069 | - | 68.7 | 3.388 | 3.053 | 8.443 |
+
+**Each ON window against the mean of the OFF windows either side:**
+- **Old line:** +0.086, -0.076, +0.152, +0.006, -0.070 ms; mean +0.02,
+  standard error about 0.05. A 0.2 ms saving would read four standard
+  errors below this. The old line takes four clock reads on each
+  clocked draw in both arms, so it is the fair comparison.
+- **App CPU p50:** +0.03, -0.11, -0.33, -0.26, -0.28 ms; mean -0.19.
+  This is not robust: pairing the last window with its one neighbour
+  (9.16 against 8.44) brings the mean to -0.04. It is not in the X
+  hook's own time, which the old line rules out.
+- **fps:** -0.55, +0.35, +0.90, +0.70, +0.75; mean +0.4.
+- **Mismatches:** 0 in every window, about 12M compared this flight and
+  about 167M over six flights.
+
+**Why, from the steps** (four clean ON windows against six OFF, ms a
+frame):
+- `pre` 0.41 -> 0.77: the decision, about 13 ns on every one of 27.4k
+  draws;
+- `fast` 0.25: about 15 ns on each of 17k taken draws;
+- `tail` 0.10 -> 0.19: the ticket update and capture;
+- every other step except GAME, the chain the fast path skips: 2.33 ->
+  1.57.
+
+The chain fell by 0.76 ms and the mechanism added about 0.73. The
+chain cost about 45 ns on each draw the fast path took, against an 85
+ns average: it takes the draws whose classifiers were already cheap,
+because the memos hit on them.
+
+**The step sum cannot settle an A/B between these arms.** An OFF draw
+carries 24.7 marks and an ON draw 11.7, and the clock takes off a
+calibrated 16 ns a mark. A 1 ns error in that calibration moves the
+ON-OFF difference by about 0.36 ms a frame. In window 27000 it read 32
+ns and zeroed most steps (step sum 0.476). The steps show where the
+time went; the old line shows how much.
+
+ruled out: the repeat-draw fast path as a CPU lever, because the
+in-flight A/B shows the X hook's time unchanged (+0.02 ms, standard
+error about 0.05, five bracketed pairs at 26k draws); its decision and
+fast block cost what the skipped chain cost on the draws it takes.
+
+**Next:** retire Phases 1-2b (asked, not done). Keep the ui_depth memo
+and trims A-E, and revert trim F with its verification.
