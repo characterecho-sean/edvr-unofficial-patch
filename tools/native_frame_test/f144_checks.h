@@ -270,20 +270,21 @@ inline void run144(Check&& check) {
     // ---- 3. the readout placed per role ---------------------------------------------------------------------------------------------------------------------------------
     {
         double none[4] = {};
-        // F145/F146/F151: the seeds are the pilot's dialled totals (the eight weapons' scope-no rows of F145, the last three of F146); F151: one row per item and role, whatever the scope
+        // F145/F146/F151/F153: the seeds are the pilot's dialled totals (the eight weapons' scope-no rows of F145, the last three of F146); F151: one row per item and role, whatever the scope;
+        // F153: the ADS role of the plasma sniper, the kinetic assault rifle, the laser SMG and the plasma shotgun, dialled in flight edvr_gfx_20261028_090045
         struct Seed { const char* item; int role; double v[4]; };
         const Seed baked[] = {
-            {"$wpn_m_assaultrifle_kinetic_fauto_name;", f144::kHip, {5.0, 4.5, 0.0, 0.0}},   {"$wpn_m_assaultrifle_kinetic_fauto_name;", f144::kAds, {3.5, 5.5, 0.0, 0.0}},
+            {"$wpn_m_assaultrifle_kinetic_fauto_name;", f144::kHip, {5.0, 4.5, 0.0, 0.0}},   {"$wpn_m_assaultrifle_kinetic_fauto_name;", f144::kAds, {-7.5, 3.0, 0.0, 0.0}},
             {"$wpn_m_assaultrifle_plasma_fauto_name;", f144::kHip, {7.0, 2.5, 0.0, 0.0}},    {"$wpn_m_assaultrifle_plasma_fauto_name;", f144::kAds, {7.0, 6.0, 0.0, 0.0}},
             {"$wpn_m_launcher_rocket_sauto_name;", f144::kHip, {5.5, 0.0, 0.0, 0.0}},        {"$wpn_m_launcher_rocket_sauto_name;", f144::kAds, {5.5, 3.5, 0.0, 0.0}},
-            {"$wpn_m_shotgun_plasma_doublebarrel_name;", f144::kHip, {10.5, 3.0, 1.0, 0.0}}, {"$wpn_m_shotgun_plasma_doublebarrel_name;", f144::kAds, {19.0, 4.0, 1.0, 0.0}},
+            {"$wpn_m_shotgun_plasma_doublebarrel_name;", f144::kHip, {10.5, 3.0, 1.0, 0.0}}, {"$wpn_m_shotgun_plasma_doublebarrel_name;", f144::kAds, {4.5, 2.5, 1.0, 0.0}},
             {"$wpn_m_submachinegun_kinetic_fauto_name;", f144::kHip, {6.5, 0.0, 0.0, 0.0}},  {"$wpn_m_submachinegun_kinetic_fauto_name;", f144::kAds, {6.5, 3.5, 0.0, 0.0}},
-            {"$wpn_m_submachinegun_laser_fauto_name;", f144::kHip, {7.0, 1.5, 0.5, 0.0}},    {"$wpn_m_submachinegun_laser_fauto_name;", f144::kAds, {10.0, 4.5, 1.0, 0.0}},
+            {"$wpn_m_submachinegun_laser_fauto_name;", f144::kHip, {7.0, 1.5, 0.5, 0.0}},    {"$wpn_m_submachinegun_laser_fauto_name;", f144::kAds, {2.0, 2.5, 1.0, 0.0}},
             {"$wpn_s_pistol_kinetic_sauto_name;", f144::kHip, {13.0, 3.5, -3.0, 3.0}},       {"$wpn_s_pistol_kinetic_sauto_name;", f144::kAds, {16.0, 5.0, -3.0, 3.0}},
             {"$wpn_s_pistol_laser_sauto_name;", f144::kHip, {13.0, 3.5, -3.0, 3.0}},         {"$wpn_s_pistol_laser_sauto_name;", f144::kAds, {18.0, 6.5, -3.0, 3.0}},
             {"$wpn_s_pistol_plasma_charged_name;", f144::kHip, {11.0, 5.0, -0.5, 3.0}},      {"$wpn_s_pistol_plasma_charged_name;", f144::kAds, {11.0, 5.0, -0.5, 3.0}},
-            // F146: the scoped plasma sniper, whose dialled values are the item's rows since F151 (its generic scope-no seeds, never dialled, are gone)
-            {"$wpn_m_sniper_plasma_charged_name;", f144::kHip, {-0.5, 3.5, 0.0, 0.0}},       {"$wpn_m_sniper_plasma_charged_name;", f144::kAds, {-0.5, 7.0, 0.0, 0.0}},
+            // F146: the scoped plasma sniper, whose dialled values are the item's rows since F151 (its generic scope-no seeds, never dialled, are gone); F153: its ADS role redialled
+            {"$wpn_m_sniper_plasma_charged_name;", f144::kHip, {-0.5, 3.5, 0.0, 0.0}},       {"$wpn_m_sniper_plasma_charged_name;", f144::kAds, {3.5, 4.0, 0.0, 0.0}},
         };
         bool seeds = f144::kTableCount == 22;
         for (const Seed& sd : baked) {
@@ -291,7 +292,7 @@ inline void run144(Check&& check) {
             seeds = seeds && r;
             for (int i = 0; seeds && i < 4; ++i) seeds = seeds && r->v[i] == sd.v[i];
         }
-        check(seeds, "F145/F146/F151: the rows of the weapons the pilot dialled hold his totals, role by role: eight weapons (F145; the kinetic and laser pistols' hip unchanged), the plasma shotgun's revised, the plasma pistol (F146) and the plasma sniper's scoped-copy values (-0.5 3.5 0 0 hip, -0.5 7.0 0 0 ADS); 22 rows in all, one per item and role");
+        check(seeds, "F145/F146/F151/F153: the rows of the weapons the pilot dialled hold his totals, role by role: eight weapons (F145; the kinetic and laser pistols' hip unchanged), the plasma shotgun's revised, the plasma pistol (F146) and the plasma sniper's scoped-copy values (-0.5 3.5 0 0 hip, 3.5 4.0 0 0 ADS since F153); F153: the ADS roles of the plasma sniper (3.5 4.0 0 0), the kinetic assault rifle (-7.5 3.0 0 0), the laser SMG (2.0 2.5 1.0 0) and the plasma shotgun (4.5 2.5 1.0 0); 22 rows in all, one per item and role");
         // not baked: every other row keeps F144's seeds (the F140 table for the ADS roles and the pistols, 0 for a rifle's hip role)
         // F147: F140's own table, which this read, is gone; its nine weapons are listed here with the class values each had (the pistols 13, 3.5, -3, 3; every other 0, 3.5, 0, 0)
         struct Old {
@@ -332,11 +333,11 @@ inline void run144(Check&& check) {
         check(hipDrawn.coherent && hipDrawn.weapon && hipDrawn.table && near144(hipDrawn.total[0], 6.0, 1e-12) && near144(hipDrawn.total[1], 6.5, 1e-12) && near144(hipDrawn.total[2], -1.5, 1e-12) &&
                   near144(hipDrawn.total[3], 0.5, 1e-12) && hipDrawn.seed[0] == 5.0 && hipDrawn.seed[1] == 4.5,
               "F144: at the hip the trims move the rifle's hip role: total = its seed (5, 4.5, 0, 0) + the trims");
-        check(near144(adsIdle.total[1], 5.5, 1e-12) && adsIdle.trim[1] == 0.0 && adsIdle.total[0] == 3.5, "F144: ... and not its ADS role, which stays at its seed (3.5, 5.5, 0, 0)");
+        check(near144(adsIdle.total[1], 3.0, 1e-12) && adsIdle.trim[1] == 0.0 && adsIdle.total[0] == -7.5, "F144/F153: ... and not its ADS role, which stays at its seed (-7.5, 3.0, 0, 0)");
         const f144::RolePlacement adsDrawn = f144::place(true, 7, 7, kinRifle, ls::kScopeNo, f140::kClassRifle, f144::kAds, true, trim);
         const f144::RolePlacement hipIdle = f144::place(true, 7, 7, kinRifle, ls::kScopeNo, f140::kClassRifle, f144::kHip, false, trim);
-        check(near144(adsDrawn.total[1], 7.5, 1e-12) && near144(adsDrawn.total[0], 4.5, 1e-12) && hipIdle.total[0] == 5.0 && hipIdle.total[1] == 4.5 && hipIdle.trim[0] == 0.0,
-              "F144: in ADS the trims move the ADS role (3.5 + 1.0 forward, 5.5 + 2.0 left) and not the hip role");
+        check(near144(adsDrawn.total[1], 5.0, 1e-12) && near144(adsDrawn.total[0], -6.5, 1e-12) && hipIdle.total[0] == 5.0 && hipIdle.total[1] == 4.5 && hipIdle.trim[0] == 0.0,
+              "F144/F153: in ADS the trims move the ADS role (-7.5 + 1.0 forward, 3.0 + 2.0 left) and not the hip role");
         const f144::RolePlacement pHip = f144::place(true, 7, 7, plasmaPistol, ls::kScopeNo, f140::kClassPistol, f144::kHip, true, trim);
         const f144::RolePlacement pAds = f144::place(true, 7, 7, plasmaPistol, ls::kScopeNo, f140::kClassPistol, f144::kAds, false, trim);
         check(near144(pHip.total[0], 12.0, 1e-12) && near144(pHip.total[1], 7.0, 1e-12) && near144(pHip.total[2], -2.0, 1e-12) && near144(pHip.total[3], 3.5, 1e-12) && near144(pAds.total[0], 11.0, 1e-12) && near144(pAds.total[1], 5.0, 1e-12) && near144(pAds.total[2], -0.5, 1e-12) && pAds.trim[0] == 0.0,
@@ -372,9 +373,9 @@ inline void run144(Check&& check) {
             const f144::RolePlacement sh = f144::place(true, 7, 7, "$wpn_m_sniper_plasma_charged_name;", ls::kScopeNo, f140::kClassRifle, f144::kHip, false, none);
             const f144::RolePlacement sa = f144::place(true, 7, 7, "$wpn_m_sniper_plasma_charged_name;", ls::kScopeUnknown, f140::kClassRifle, f144::kAds, false, none);
             const f144::RolePlacement sy = f144::place(true, 7, 7, "$wpn_m_sniper_plasma_charged_name;", ls::kScopeYes, f140::kClassRifle, f144::kAds, true, trim);
-            sniperOk = sh.total[0] == -0.5 && sh.total[1] == 3.5 && sh.total[2] == 0.0 && sh.total[3] == 0.0 && sa.total[0] == -0.5 && sa.total[1] == 7.0 && sa.total[2] == 0.0 && sa.total[3] == 0.0 &&
-                       near144(sy.total[0], 0.5, 1e-12) && near144(sy.total[1], 9.0, 1e-12) && near144(sy.total[2], -1.5, 1e-12) && near144(sy.total[3], 0.5, 1e-12);
-            check(sniperOk, "F151: the plasma sniper's row is the pilot's dialled values for every copy: hip -0.5 3.5 0 0, ADS -0.5 7.0 0 0 (with no scope and with an unknown state too), and the trims on top");
+            sniperOk = sh.total[0] == -0.5 && sh.total[1] == 3.5 && sh.total[2] == 0.0 && sh.total[3] == 0.0 && sa.total[0] == 3.5 && sa.total[1] == 4.0 && sa.total[2] == 0.0 && sa.total[3] == 0.0 &&
+                       near144(sy.total[0], 4.5, 1e-12) && near144(sy.total[1], 6.0, 1e-12) && near144(sy.total[2], -1.5, 1e-12) && near144(sy.total[3], 0.5, 1e-12);
+            check(sniperOk, "F151/F153: the plasma sniper's row is the pilot's dialled values for every copy: hip -0.5 3.5 0 0, ADS 3.5 4.0 0 0 (with no scope and with an unknown state too), and the trims on top");
         }
         // not a weapon, not coherent, a miss, unknown scope, clamps
         const f144::RolePlacement tool = f144::place(true, 7, 7, "$humanoid_companalyser_name;", ls::kScopeNo, f140::kClassRifle, f144::kAds, true, trim);
@@ -385,7 +386,7 @@ inline void run144(Check&& check) {
         const f144::RolePlacement missRifleHip = f144::place(true, 7, 7, "$wpn_m_new_name;", ls::kScopeNo, f140::kClassRifle, f144::kHip, false, trim);
         check(!missPistol.table && missPistol.total[0] == 13.0 && !missRifleHip.table && missRifleHip.total[0] == 0.0 && missRifleHip.total[1] == 0.0, "F144: a miss takes the class's values (the pistol's, or 0 for the rifle class's hip)");
         const f144::RolePlacement unk = f144::place(true, 7, 7, kinRifle, ls::kScopeUnknown, f140::kClassRifle, f144::kAds, false, none);
-        check(unk.table && unk.scopeUnknown && unk.scope == ls::kScopeUnknown && unk.seed[0] == 3.5 && unk.seed[1] == 5.5, "F144/F151: an unknown scope state reads the item's one row and says it was unknown");
+        check(unk.table && unk.scopeUnknown && unk.scope == ls::kScopeUnknown && unk.seed[0] == -7.5 && unk.seed[1] == 3.0, "F144/F151/F153: an unknown scope state reads the item's one row and says it was unknown");
         const double big[4] = {50.0, -50.0, 50.0, -50.0};
         const f144::RolePlacement clamped = f144::place(true, 7, 7, kinRifle, ls::kScopeNo, f140::kClassRifle, f144::kHip, true, big);
         check(near144(clamped.trim[0], 30.0, 1e-12) && near144(clamped.trim[1], -30.0, 1e-12) && near144(clamped.trim[3], -30.0, 1e-12) && near144(clamped.total[0], 30.0, 1e-12) &&

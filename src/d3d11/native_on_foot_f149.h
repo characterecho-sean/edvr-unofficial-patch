@@ -69,11 +69,12 @@ constexpr ItemCm kAdsCameraDepths[] = {
 };
 constexpr int kAdsCameraDepthCount = static_cast<int>(sizeof(kAdsCameraDepths) / sizeof(kAdsCameraDepths[0]));
 // The offset: how far back of the base the eye sits, cm (negative is back). The kinetic AR's is the pilot's: the camera (25.00) put the eye 21 cm inside the gun (flight
-// edvr_gfx_20261028_050843) and he dialled 6 cm with the trim and held it 55 s (flight edvr_gfx_20261028_073013, from 07:33:22): -19.0 from the camera. The laser SMG's -5.0 (10 cm)
-// is a first guess, UNCONFIRMED: the pilot could not move it forward of 10 cm (the old cap) and no flight has held another depth for it. An item without a row has offset 0.
+// edvr_gfx_20261028_050843) and he dialled 6 cm with the trim and held it 55 s (flight edvr_gfx_20261028_073013, from 07:33:22): -19.0 from the camera; in flight
+// edvr_gfx_20261028_090045 he swept the trim to +21 and back and settled at 0, so 6 cm stands. The laser SMG's -3.0 (12 cm) is the pilot's too: the first guess was -5.0 (10 cm), and in
+// flight edvr_gfx_20261028_090045 he dialled +2.0 from it and held that 38 s, from 09:08:26. An item without a row has offset 0.
 constexpr ItemCm kAdsBackOffs[] = {
     {"$wpn_m_assaultrifle_kinetic_fauto_name;", -19.0},
-    {"$wpn_m_submachinegun_laser_fauto_name;", -5.0},
+    {"$wpn_m_submachinegun_laser_fauto_name;", -3.0},
 };
 constexpr int kAdsBackOffCount = static_cast<int>(sizeof(kAdsBackOffs) / sizeof(kAdsBackOffs[0]));
 

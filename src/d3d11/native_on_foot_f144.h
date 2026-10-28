@@ -369,25 +369,27 @@ struct Row {
 // is not used), so the readout's place relative to the eye is the same too. A copy with a scope, without one or with the scope state unknown reads the same row, and the experimental
 // trims dialled on either copy are added to that one row. Where an item had both rows the scope-no row stands; the scope-yes rows it replaces were the generic seeds, never dialled
 // (0 0 0 0 and 0 3.5 0 0 for the rifle class, 13 3.5 -3 3 for the pistols). The plasma sniper's rows are the pilot's dialled values, taken from its scope-yes rows (hip -0.5 3.5 0 0,
-// ADS -0.5 7.0 0 0); its scope-no rows were the generic seeds, never dialled, and are gone. The sight line (F139's table, F143's and F144's settled line) stays per scope: it follows
-// the scope's own sight point, which the game reports.
+// ADS -0.5 7.0 0 0 until F153); its scope-no rows were the generic seeds, never dialled, and are gone. The sight line (F139's table, F143's and F144's settled line) stays per scope: it
+// follows the scope's own sight point, which the game reports.
+// F153: the ADS role of four weapons holds the totals the pilot dialled in flight edvr_gfx_20261028_090045, at the eye depths of F150 and F152 (the laser SMG's at the 12 cm of
+// kAdsBackOffs, F149): the plasma sniper 3.5 4.0 0 0, the kinetic assault rifle -7.5 3.0 0 0, the laser SMG 2.0 2.5 1.0 0 and the plasma shotgun 4.5 2.5 1.0 0. No hip row changed.
 constexpr Row kTable[] = {
     {"$wpn_m_assaultrifle_laser_fauto_name;", kHip, {0.0, 0.0, 0.0, 0.0}},
     {"$wpn_m_assaultrifle_laser_fauto_name;", kAds, {0.0, 3.5, 0.0, 0.0}},
     {"$wpn_m_assaultrifle_plasma_fauto_name;", kHip, {7.0, 2.5, 0.0, 0.0}},
     {"$wpn_m_assaultrifle_plasma_fauto_name;", kAds, {7.0, 6.0, 0.0, 0.0}},
     {"$wpn_m_assaultrifle_kinetic_fauto_name;", kHip, {5.0, 4.5, 0.0, 0.0}},
-    {"$wpn_m_assaultrifle_kinetic_fauto_name;", kAds, {3.5, 5.5, 0.0, 0.0}},
+    {"$wpn_m_assaultrifle_kinetic_fauto_name;", kAds, {-7.5, 3.0, 0.0, 0.0}},
     {"$wpn_m_launcher_rocket_sauto_name;", kHip, {5.5, 0.0, 0.0, 0.0}},
     {"$wpn_m_launcher_rocket_sauto_name;", kAds, {5.5, 3.5, 0.0, 0.0}},
     {"$wpn_m_sniper_plasma_charged_name;", kHip, {-0.5, 3.5, 0.0, 0.0}},
-    {"$wpn_m_sniper_plasma_charged_name;", kAds, {-0.5, 7.0, 0.0, 0.0}},
+    {"$wpn_m_sniper_plasma_charged_name;", kAds, {3.5, 4.0, 0.0, 0.0}},
     {"$wpn_m_submachinegun_kinetic_fauto_name;", kHip, {6.5, 0.0, 0.0, 0.0}},
     {"$wpn_m_submachinegun_kinetic_fauto_name;", kAds, {6.5, 3.5, 0.0, 0.0}},
     {"$wpn_m_submachinegun_laser_fauto_name;", kHip, {7.0, 1.5, 0.5, 0.0}},
-    {"$wpn_m_submachinegun_laser_fauto_name;", kAds, {10.0, 4.5, 1.0, 0.0}},
+    {"$wpn_m_submachinegun_laser_fauto_name;", kAds, {2.0, 2.5, 1.0, 0.0}},
     {"$wpn_m_shotgun_plasma_doublebarrel_name;", kHip, {10.5, 3.0, 1.0, 0.0}},
-    {"$wpn_m_shotgun_plasma_doublebarrel_name;", kAds, {19.0, 4.0, 1.0, 0.0}},
+    {"$wpn_m_shotgun_plasma_doublebarrel_name;", kAds, {4.5, 2.5, 1.0, 0.0}},
     {"$wpn_s_pistol_kinetic_sauto_name;", kHip, {13.0, 3.5, -3.0, 3.0}},
     {"$wpn_s_pistol_kinetic_sauto_name;", kAds, {16.0, 5.0, -3.0, 3.0}},
     {"$wpn_s_pistol_laser_sauto_name;", kHip, {13.0, 3.5, -3.0, 3.0}},

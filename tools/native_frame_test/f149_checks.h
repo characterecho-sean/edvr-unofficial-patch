@@ -2,7 +2,7 @@
 //
 // F149/F150/F152 (native_on_foot_f149.h, native_on_foot_core.h, native_on_foot_f144.h): the ADS eye depth is the weapon's depth plus the live trim (experimental, -30..+30 cm,
 // 0 by default), clamped to 0..30 cm, then the clearance cap. The weapon's depth is one value per item whatever the scope state: the table's base (the game's unscoped ADS camera
-// depth) plus the item's baked offset (0 except for the kinetic assault rifle, -19, and the laser SMG, -5). An item with no table row takes its settled line's forward when the
+// depth) plus the item's baked offset (0 except for the kinetic assault rifle, -19, and the laser SMG, -3). An item with no table row takes its settled line's forward when the
 // copy is known unscoped, else the fallback base (21 cm). There is no cap at 21 any more. The settled line feeds the depth of no table item. The F144 cache is told by copy while
 // the scope state is unknown (two copies of one item). The checks: the two tables; the rule on every row and for every trim; the source order; the clearance cap after the rule;
 // the sight line's shift taken at the same depth; the lock's follower carrying a depth change; the copy rule.
@@ -59,8 +59,8 @@ inline void run149(Check&& check) {
     // ---- 1. the two tables ------------------------------------------------------------------------------------------------------------------------------------------
     {
         double base = 9.0, off = 9.0;
-        check(f149::tableDepthCm(kLaserSmg, &base, &off) && base == 15.0 && off == -5.0, "F152: the laser SMG's base (the game's unscoped ADS camera) is 15 cm and its baked offset -5 (unconfirmed: a first guess)");
-        check(f149::tableDepthCm(kKineticRifle, &base, &off) && base == 25.0 && off == -19.0, "F152: the kinetic assault rifle's base is 25 cm and its baked offset -19 (the pilot's 6 cm, held 55 s in flight edvr_gfx_20261028_073013)");
+        check(f149::tableDepthCm(kLaserSmg, &base, &off) && base == 15.0 && off == -3.0, "F153: the laser SMG's base (the game's unscoped ADS camera) is 15 cm and its baked offset -3 (the pilot's 12 cm, held 38 s in flight edvr_gfx_20261028_090045)");
+        check(f149::tableDepthCm(kKineticRifle, &base, &off) && base == 25.0 && off == -19.0, "F152: the kinetic assault rifle's base is 25 cm and its baked offset -19 (the pilot's 6 cm, held 55 s in flight edvr_gfx_20261028_073013 and settled on after a trim sweep in flight edvr_gfx_20261028_090045)");
         check(f149::tableDepthCm(kKineticSmg, &base, &off) && base == 20.0 && off == 0.0, "F150: the kinetic SMG's base is 20 cm, no offset");
         check(f149::tableDepthCm(kRocket, &base, &off) && base == 21.98 && off == 0.0, "F150: the rocket launcher's base is 21.98 cm, no offset");
         check(f149::tableDepthCm(kPlasmaRifle, &base, &off) && base == 12.99 && off == 0.0, "F150: the plasma assault rifle's base is 12.99 cm, no offset");
@@ -98,8 +98,8 @@ inline void run149(Check&& check) {
     // ---- 2. the rule --------------------------------------------------------------------------------------------------------------------------------------------
     {
         const f149::EyeDepth smg = f149::eyeDepth(0.0, true, kLaserSmg, ls::kScopeNo, nullptr);
-        check(smg.source == f149::kSrcTable && smg.baseCm == 15.0 && smg.offsetCm == -5.0 && smg.trimCm == 0.0 && smg.depthCm == 10.0 && smg.askedCm == 10.0,
-              "F152: the laser SMG with no trim: base 15 + offset -5 + trim 0 = 10 cm");
+        check(smg.source == f149::kSrcTable && smg.baseCm == 15.0 && smg.offsetCm == -3.0 && smg.trimCm == 0.0 && smg.depthCm == 12.0 && smg.askedCm == 12.0,
+              "F153: the laser SMG with no trim: base 15 + offset -3 + trim 0 = 12 cm");
         const f149::EyeDepth ar = f149::eyeDepth(0.0, true, kKineticRifle, ls::kScopeNo, nullptr);
         check(ar.source == f149::kSrcTable && ar.baseCm == 25.0 && ar.offsetCm == -19.0 && ar.depthCm == 6.0 && ar.askedCm == 6.0,
               "F152: the kinetic assault rifle with no trim: base 25 + offset -19 = 6 cm (the pilot's)");
@@ -113,12 +113,12 @@ inline void run149(Check&& check) {
         // the trim: added to any weapon, moves it both ways, the result clamped to 0..30
         const f149::EyeDepth smgForward = f149::eyeDepth(5.0, true, kLaserSmg, ls::kScopeNo, nullptr);
         const f149::EyeDepth smgForward20 = f149::eyeDepth(20.0, true, kLaserSmg, ls::kScopeNo, nullptr);
-        check(smgForward.askedCm == 15.0 && smgForward.trimCm == 5.0 && smgForward.depthCm == 15.0 && smgForward20.askedCm == 30.0 && smgForward20.depthCm == 30.0,
-              "F152: a trim of +5 on the laser SMG gives 15 cm (past the old cap's 10), +20 gives 30");
+        check(smgForward.askedCm == 17.0 && smgForward.trimCm == 5.0 && smgForward.depthCm == 17.0 && smgForward20.askedCm == 30.0 && smgForward20.depthCm == 32.0,
+              "F153: a trim of +5 on the laser SMG gives 17 cm (past the old cap's 10), +20 gives 30 (its sum 32)");
         const f149::EyeDepth arBack = f149::eyeDepth(-10.0, true, kKineticRifle, ls::kScopeNo, nullptr);
         const f149::EyeDepth smgBack = f149::eyeDepth(-30.0, true, kLaserSmg, ls::kScopeNo, nullptr);
-        check(arBack.depthCm == -4.0 && arBack.askedCm == 0.0 && smgBack.depthCm == -20.0 && smgBack.askedCm == 0.0 && smgBack.trimCm == -30.0,
-              "F152: a trim that takes the depth below 0 clamps at 0 (the kinetic AR -10: -4 -> 0; the laser SMG -30: -20 -> 0), the unclamped sum kept in depthCm");
+        check(arBack.depthCm == -4.0 && arBack.askedCm == 0.0 && smgBack.depthCm == -18.0 && smgBack.askedCm == 0.0 && smgBack.trimCm == -30.0,
+              "F153: a trim that takes the depth below 0 clamps at 0 (the kinetic AR -10: -4 -> 0; the laser SMG -30: -18 -> 0), the unclamped sum kept in depthCm");
         const f149::EyeDepth rocketPlus = f149::eyeDepth(30.0, true, kRocket, ls::kScopeNo, nullptr);
         const f149::EyeDepth rocketSmall = f149::eyeDepth(2.0, true, kRocket, ls::kScopeNo, nullptr);
         check(rocketPlus.askedCm == 30.0 && near149(rocketPlus.depthCm, 51.98) && near149(rocketSmall.askedCm, 23.98),
@@ -126,7 +126,7 @@ inline void run149(Check&& check) {
         const f149::EyeDepth big = f149::eyeDepth(45.0, true, kKineticRifle, ls::kScopeNo, nullptr);
         const f149::EyeDepth neg = f149::eyeDepth(-45.0, true, kLaserSmg, ls::kScopeNo, nullptr);
         const f149::EyeDepth nan = f149::eyeDepth(std::numeric_limits<double>::quiet_NaN(), true, kLaserSmg, ls::kScopeNo, nullptr);
-        check(big.trimCm == 30.0 && big.depthCm == 36.0 && big.askedCm == 30.0 && neg.trimCm == -30.0 && neg.askedCm == 0.0 && nan.trimCm == 0.0 && nan.askedCm == 10.0,
+        check(big.trimCm == 30.0 && big.depthCm == 36.0 && big.askedCm == 30.0 && neg.trimCm == -30.0 && neg.askedCm == 0.0 && nan.trimCm == 0.0 && nan.askedCm == 12.0,
               "F152: a trim of 45 reads 30 (the kinetic AR: 36, asked 30), -45 reads -30, and one that is not a number reads 0 before the rule is applied");
         // the plasma sniper: 16 cm whatever the scope state, and never the settled line's
         const f149::EyeDepth sniperYes = f149::eyeDepth(0.0, true, kSniper, ls::kScopeYes, nullptr);
@@ -193,7 +193,7 @@ inline void run149(Check&& check) {
         // the settled line no longer feeds the depth of an item that has a row: not below the table, not above it, whatever the scope state
         f144::Entry lower = settledEntry(kLaserSmg, ls::kScopeNo, 12.0);
         const f149::EyeDepth a = f149::eyeDepth(0.0, true, kLaserSmg, ls::kScopeNo, &lower);
-        check(a.source == f149::kSrcTable && a.askedCm == 10.0 && a.baseCm == 15.0, "F150: a settled line (E 12 cm forward) does not move the laser SMG's depth: the table's 10");
+        check(a.source == f149::kSrcTable && a.askedCm == 12.0 && a.baseCm == 15.0, "F150/F153: a settled line (E 12 cm forward) does not move the laser SMG's depth: the table's 12");
         f144::Entry deeper = settledEntry(kKineticRifle, ls::kScopeNo, 8.0);
         const f149::EyeDepth b = f149::eyeDepth(0.0, true, kKineticRifle, ls::kScopeNo, &deeper);
         check(b.source == f149::kSrcTable && b.askedCm == 6.0, "F150: ... nor the kinetic assault rifle's (a line at 8 cm leaves its 6)");
@@ -234,21 +234,21 @@ inline void run149(Check&& check) {
     {
         const double p14[3] = {1.0, 1.5, -2.0}, f[3] = {0.0, 0.0, 1.0};
         const f149::EyeDepth smg = f149::eyeDepth(0.0, true, kLaserSmg, ls::kScopeNo, nullptr);
-        const f149::EyeDepth smgForward = f149::eyeDepth(11.0, true, kLaserSmg, ls::kScopeNo, nullptr);
+        const f149::EyeDepth smgForward = f149::eyeDepth(9.0, true, kLaserSmg, ls::kScopeNo, nullptr);
         double cutPoint[1][3] = {{p14[0], p14[1], p14[2] + 0.14}}, farPoint[1][3] = {{p14[0], p14[1], p14[2] + 0.30}};
         const nf::AdsEyeCap cut = nf::adsEyeDistanceCap(smg.askedCm / 100.0, p14, f, cutPoint, 1), kept = nf::adsEyeDistanceCap(smg.askedCm / 100.0, p14, f, farPoint, 1);
         const nf::AdsEyeCap cutForward = nf::adsEyeDistanceCap(smgForward.askedCm / 100.0, p14, f, cutPoint, 1);
-        check(cut.capped && near149(cut.kM, 0.08) && !kept.capped && near149(kept.kM, 0.10) && cutForward.capped && near149(smgForward.askedCm, 21.0) && near149(cutForward.kM, 0.08),
-              "F152: the clearance cap takes the depth asked: a weapon point 14 cm ahead on the line cuts the laser SMG's 10 cm to 8, one 30 cm ahead leaves 10, and a trim that asks 21 is cut to 8 as well");
-        // the sight line's shift is taken at the same k: a line that leaves the root's forward by 2 cm over 20 cm, E 15 cm forward of P14, is -0.5 cm up at the depth asked (10 cm) and 0.6 cm up at 21 cm
+        check(cut.capped && near149(cut.kM, 0.08) && !kept.capped && near149(kept.kM, 0.12) && cutForward.capped && near149(smgForward.askedCm, 21.0) && near149(cutForward.kM, 0.08),
+              "F153: the clearance cap takes the depth asked: a weapon point 14 cm ahead on the line cuts the laser SMG's 12 cm to 8, one 30 cm ahead leaves 12, and a trim that asks 21 is cut to 8 as well");
+        // the sight line's shift is taken at the same k: a line that leaves the root's forward by 2 cm over 20 cm, E 15 cm forward of P14, is -0.3 cm up at the depth asked (12 cm) and 0.6 cm up at 21 cm
         f144::Entry ent = settledEntry(kLaserSmg, ls::kScopeNo, 15.0);
         ent.line.s[1] = 0.02;
         const double up[3] = {0, 1, 0}, right[3] = {1, 0, 0}, origin[3] = {p14[0], p14[1], p14[2]};
         const f143::Choice atAsked = f144::choose(true, true, &ent, p14, up, right, f, origin, smg.askedCm / 100.0);
         const f143::Choice atTrimmed = f144::choose(true, true, &ent, p14, up, right, f, origin, smgForward.askedCm / 100.0);
-        check(atAsked.game && near149(atAsked.gameUpCm, -0.5, 1e-9) && atTrimmed.game && near149(atTrimmed.gameUpCm, 0.6, 1e-9) && near149(atAsked.q[2] - origin[2], 0.10, 1e-12) &&
+        check(atAsked.game && near149(atAsked.gameUpCm, -0.3, 1e-9) && atTrimmed.game && near149(atTrimmed.gameUpCm, 0.6, 1e-9) && near149(atAsked.q[2] - origin[2], 0.12, 1e-12) &&
                   near149(atTrimmed.q[2] - origin[2], 0.21, 1e-12),
-              "F152: the line's shift is Q on the line at the depth asked: -0.5 cm up at 10 cm asked, 0.6 cm up at 21 (a trim of +11), the same k as the eye point");
+              "F153: the line's shift is Q on the line at the depth asked: -0.3 cm up at 12 cm asked, 0.6 cm up at 21 (a trim of +9), the same k as the eye point");
         // the settled line of a table item still gives the shift at the depth the table asked
         const f149::EyeDepth withLine = f149::eyeDepth(0.0, true, kLaserSmg, ls::kScopeNo, &ent);
         check(withLine.source == f149::kSrcTable && withLine.askedCm == smg.askedCm, "F150: the same line leaves the depth where the table put it (the line feeds the shift only)");
