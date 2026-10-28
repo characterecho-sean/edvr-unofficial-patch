@@ -23,7 +23,8 @@
 // was multiplied by (1 - dw); the demand is the larger of the two (the lesser fall), so keeping the second alone changes nothing at full detach (F93's raise is then zero and
 // wins). A crouched stance asks, as the detach rises, the eye's whole lowering in place of the hip's demand (F93's target before the detach and the weapon view offset, t93HipY,
 // against the eye's lowering): from the hip's at dw 0 to the lowering at dw 1, and the standing demand (released by dw, as before) is blended into it by the camera's crouch
-// weight (the pin's w_c, smoothstep over 20 to 45 cm down). A standing stance (w_c 0) is the earlier formula bit for bit; at the hip (dw 0) the demand is the hip's whatever the
+// weight (F161: the pin's w_c, smoothstep over 20 to 45 cm down; F163: the animated neck's drop under the standing neck, smoothstep over 33 to 43 cm, native_on_foot_f163.h, because w_c is 0 on
+// every call without the standing calibration). A standing stance (weight 0) is the earlier formula bit for bit; at the hip (dw 0) the demand is the hip's whatever the
 // stance, and at dw 1 it does not depend on which target the caller holds (the pin's animated target, or the rifle's rest target), so the caller's two paths meet.
 #pragma once
 
@@ -42,8 +43,8 @@ struct ArmedTarget {
 };
 // n0y: the animated neck's height; t93y: F93's target height (the pin's eye less the neck-to-eye vector, after the ADS detach and the weapon view offset);
 // eyeHipLevelY: the eye as drawn at the hip with the head level (the pin's eye, head pitch out, plus w times the weapon eye offset's up); eyeHeightM: the key;
-// detachW: F73's ADS detach weight (it releases the demand of the standing share of the stance); w: F88's weight; crouchedW: the camera's crouch weight (the pin's w_c, 0
-// standing to 1 crouched; F161); t93HipY: t93y as it is with no detach (the same target before the detach, the weapon view offset added), the hip's demand that a crouched
+// detachW: F73's ADS detach weight (it releases the demand of the standing share of the stance); w: F88's weight; crouchedW: the crouched weight (0
+// standing to 1 crouched; F161; F163: the animated neck's drop, native_on_foot_f163.h); t93HipY: t93y as it is with no detach (the same target before the detach, the weapon view offset added), the hip's demand that a crouched
 // stance leaves for the whole lowering as the detach rises (not finite: t93y).
 inline ArmedTarget armedNeckTarget(double n0y, double t93y, double eyeHipLevelY, double eyeHeightM, double detachW, double w, double crouchedW, double t93HipY) noexcept {
     ArmedTarget o;

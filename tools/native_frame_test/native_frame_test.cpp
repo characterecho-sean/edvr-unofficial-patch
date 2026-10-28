@@ -56,6 +56,7 @@
 #include "f160_checks.h"    // F160: the neck reference's raise blended through the ADS release (the decision, the kept target, the counts, the flight's release replayed on the real parts), the holster line
 #include "f161_checks.h"    // F161: the left arm's distance to the eye (the point-to-segment distance against a brute force, the contexts, the 4 cm and 2.5 cm counts, the seconds, the line's width)
 #include "f162_checks.h"    // F162: the ADS sight eye (the key's text, the aiming eye, the share by mode, the lock for the right eye bit for bit as before and for the left eye)
+#include "f163_checks.h"    // F163: the crouched stance from the animated neck's drop (the flights' necks, standing ADS bit for bit, the continuity through a crouch and a stand)
 #include "f151_checks.h"    // F151: the weapon readout's draw bound by its place (the ordinals, each guard, one bind per key, the lost-frame count) and the held copy's scope from the selected slot
 #include "f110_checks.h"    // F110: the ADS sight lock's model right eye (the left-eye job camera plus the IPD)
 #include "f111_checks.h"    // F111: the panel pointer instrument's statistics and verdict
@@ -7576,6 +7577,10 @@ int wmain(int argc, wchar_t** argv) {
     // the lock's error for the right eye bit for bit as the right-eye lock gave it in every row case (both eyes, either alone, none, a degenerate sight); the lock for the left eye:
     // the left eye lands on the target eye point with the right eye one IPD to its right, its model the job camera, and the two locks differ by the IPD along R^.
     f162test::run162(check);
+    // F163: the crouched weight F161's hold through ADS is blended by, from the animated neck's drop under the standing neck (the stored unarmed one, else 1.543 m): 1 on every crouched ADS
+    // neck of the flights of 10-28 (0.847 to 1.080 m, the two eye dumps'), 0 on every standing one (1.247 m up, every item), standing ADS bit for bit F97a's earlier formula, the
+    // continuity of the weight and of the neck target through a crouch and a stand, the reference's fallbacks.
+    f163test::run163(check);
     // F110: the ADS sight lock's model right eye from the left-eye job camera and from a solved left eye, the fallback, the IPD's sign.
     f110test::run110(check);
     // F111: the panel pointer instrument names the stage that turns a move the other way (K1 to K5, one at a time), the camera getters' decoding.

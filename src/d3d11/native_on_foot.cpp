@@ -73,6 +73,7 @@
 #include "native_on_foot_f160.h"   // F160: the neck reference's raise blended through the ADS release; the holster bridge's line (pure parts)
 #include "native_on_foot_f161.h"   // F161: the left arm's distance to the eye, measured (pure parts)
 #include "native_on_foot_f162.h"   // F162: the ADS sight eye, both | right | left (the key's text, the aiming eye; pure parts)
+#include "native_on_foot_f163.h"   // F163: the crouched stance from the animated neck's drop, which holds in the sights (pure parts)
 #include "xinput_watch.h"         // F135: the pad's Start and Back edges, evidence for the menu probe only
 #include "native_on_foot_f109.h"   // F109: look to aim on foot, the player's own turn in ADS, snap or smooth turning (pure parts)
 #include "native_on_foot_f129.h"   // F129: look to aim reads its turn from the player's own look processor; the look path instrument (pure parts)
@@ -16543,6 +16544,8 @@ struct PinCall {
     // F69a: the camera's crouch (w_c, the animated vector's weight) and the cyclopean eye's height less its standing mean; calHave: the calibration exists.
     double wc = 0.0, dEyeY = 0.0;
     bool calHave = false;
+    // F163: the crouched weight F97a's lowering holds through ADS by (F161), from the animated neck's drop under the standing neck (f163::postureWeight); 0 without a neck.
+    double postureW = 0.0, neckDropM = std::nan("");
     bool localPitchValid = false, scenePitchValid = false;
     double localPitchDeg = 0.0, scenePitchDeg = 0.0, rawEyeY = 0.0, eyeYSelected = 0.0;
     uint32_t localPoseGeneration = 0, localPoseAgeMs = 0;
@@ -16886,6 +16889,11 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
                 pc.f94AnimEyeOk = std::isfinite(pc.f94AnimEyeOver);
             }
         }
+        // F163: the stance's crouch from the animated neck's drop under the standing unarmed neck (F98c's stored one, else the commander's), the weight F161's hold through ADS is blended
+        // by. The camera's crouch weight (pc.wc) reads 0 without the standing calibration, which a pilot who drew before standing still never gets (edvr_gfx_20261028_153030: every ADS
+        // second, the camera at 0.95 to 0.99 m and the neck at 0.85 to 1.08 m).
+        pc.neckDropM = nofoot::f163::neckDrop(g_f98Eye.have[nofoot::f94::kClassStanding], g_f98Eye.neckY[nofoot::f94::kClassStanding], N0[1]);
+        pc.postureW = nofoot::f163::postureWeight(pc.neckDropM);
         // ADS leaves the camera and weapon aim untouched, but releases the body toward the authored neck pose.
         const double detachW = pc.detachW;
         const double t93BeforeDetachY = T[1];   // F161: F93's height before the detach, for the crouched stance's lowering (F97a) that holds through it
@@ -16902,7 +16910,7 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
         }
         // F94a: unarmed the body stands at its animated height: the neck target keeps the animated neck's height (the view's height comes from the neck instead,
         // above). F97a: armed (F88's weight w), F93's height where F93 raised the body, lowered only as far as keeps the eye at the hip the key's height over the
-        // neck, blended by w (native_on_foot_f97.h). The horizontal target is the rest offset's, as before. F161: crouched (the camera's crouch weight), the lowering holds
+        // neck, blended by w (native_on_foot_f97.h). The horizontal target is the rest offset's, as before. F161: crouched (F163: the animated neck's drop), the lowering holds
         // through the ADS detach.
         f97W = static_cast<double>(g_f88WPub.load(std::memory_order_relaxed));
         // F98c: the eye at the hip is the pin's eye plus the neck reference's raise this pose carried (the eye height, with and without an item; the weapon eye
@@ -16911,7 +16919,7 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
         f97H = static_cast<double>(g_f94EyeHeightCm.load(std::memory_order_relaxed)) * 0.01;
         pc.f94Asked = T[1] - N0[1];
         {
-            const nofoot::f97::ArmedTarget at = nofoot::f97::armedNeckTarget(N0[1], T[1], pc.eyeYSelected + f97EyeOverE, f97H, pc.detachW, f97W, pc.wc,
+            const nofoot::f97::ArmedTarget at = nofoot::f97::armedNeckTarget(N0[1], T[1], pc.eyeYSelected + f97EyeOverE, f97H, pc.detachW, f97W, pc.postureW,
                                                                                 t93BeforeDetachY + neckViewShift[1]);
             T[1] = at.y;
             pc.f97W = f97W;
@@ -17259,7 +17267,7 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
             nofoot::weaponViewOffsetTarget(physicalTarget, neckViewShift);
             // F94a/F97a: the rifle's physical rest target takes the same height rule (the animated neck's unarmed, F93's raise and the eye's lowering armed; F161: crouched, the
             // lowering holds through the detach)
-            physicalTarget[1] = nofoot::f97::armedNeckTarget(N0[1], physicalTarget[1], pc.eyeYSelected + f97EyeOverE, f97H, pc.detachW, f97W, pc.wc,
+            physicalTarget[1] = nofoot::f97::armedNeckTarget(N0[1], physicalTarget[1], pc.eyeYSelected + f97EyeOverE, f97H, pc.detachW, f97W, pc.postureW,
                                                              restBeforeDetachY + neckViewShift[1]).y;
             std::memcpy(pc.neckRestTarget, physicalTarget, sizeof(physicalTarget));
             std::memcpy(T, physicalTarget, sizeof(physicalTarget));
@@ -20538,7 +20546,9 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
                     sample161.armM = nofoot::f161::pointSegmentDistance(pinCall.f97EyeDrawn, shoulder161, elbow161);
                     sample161.elbowM = nofoot::f161::distance(pinCall.f97EyeDrawn, elbow161);
                     sample161.ads = !nofoot::f159::atHip(pinCall.detachW);
-                    sample161.crouched = nofoot::pinCrouchedWc(pinCall.wc);
+                    sample161.crouched = nofoot::pinCrouchedWc(pinCall.postureW);   // F163: the animated neck's drop, not the camera's weight
+                    sample161.postureW = pinCall.postureW;
+                    sample161.neckDropM = pinCall.neckDropM;
                     sample161.moving = pinCall.f95Moving;
                     f.f161.add(sample161);
                 }

@@ -8,8 +8,12 @@
 //
 // Each left-arm solve, the eye as drawn (the pin's cyclopean eye with all EDVR adds, the one the INSIDE test of F97a uses) against the left upper arm as finally written (the segment from
 // the upper arm joint to the forearm joint, the elbow) and against the elbow itself, in the context of the call: the hip or ADS (the body's detach weight from 0.05, as F159), standing or
-// crouched (the camera's crouch weight from 0.5, the pin's own test), moving or not. The figures are the nearest distance of the eye to the segment and to the elbow, so an eye over the
+// crouched (the crouched weight from 0.5; F163: from the animated neck), moving or not. The figures are the nearest distance of the eye to the segment and to the elbow, so an eye over the
 // middle of the upper arm reads the arm's distance and not the elbow's.
+//
+// F163: "crouched" here, and in F97a's lowering that holds through ADS, is the animated neck's drop (native_on_foot_f163.h), not the pin's camera weight (F69a), which read 0 on every call
+// of the flight edvr_gfx_20261028_153030 for want of a standing calibration. The line carries the weight's mean and the neck's mean drop per context, so a flight shows whether the gate
+// engaged: "ADS crouched" frames with a weight near 1, "ADS standing" near 0.
 #pragma once
 
 #include "native_on_foot_f159.h"
@@ -57,16 +61,17 @@ inline const char* contextName(int c) noexcept {
     return c == kHipStanding ? "hip standing" : c == kHipCrouched ? "hip crouched" : c == kAdsStanding ? "ADS standing" : c == kAdsCrouched ? "ADS crouched" : "unknown";
 }
 
-// One left-arm solve: the eye's nearest distance to the upper arm (shoulder to elbow) and to the elbow (m), and the call's context.
+// One left-arm solve: the eye's nearest distance to the upper arm (shoulder to elbow) and to the elbow (m), and the call's context. postureW and neckDropM (F163): the crouched weight
+// the context was filed by (crouched from 0.5) and the animated neck's drop it came from (m); not numbers when the call had none.
 struct Sample {
-    double armM = 0.0, elbowM = 0.0;
+    double armM = 0.0, elbowM = 0.0, postureW = 0.0, neckDropM = 0.0;
     bool ads = false, crouched = false, moving = false;
 };
 // One context's figures: the frames, the arm's and the elbow's smallest and summed distances (cm), the frames with the arm under 4 cm of the eye (and of those, the moving ones) and
-// under 2.5 cm.
+// under 2.5 cm; the summed crouched weight and neck drop (cm) over the frames that had them (F163).
 struct Bin {
-    uint32_t n = 0, under4 = 0, under4Moving = 0, under25 = 0;
-    double armSum = 0.0, armMin = 1e9, elbowSum = 0.0, elbowMin = 1e9;
+    uint32_t n = 0, under4 = 0, under4Moving = 0, under25 = 0, postureN = 0;
+    double armSum = 0.0, armMin = 1e9, elbowSum = 0.0, elbowMin = 1e9, postureSum = 0.0, dropSumCm = 0.0;
 };
 struct Counters {
     Bin bin[kContextN];
@@ -87,6 +92,11 @@ struct Counters {
         b.armMin = armCm < b.armMin ? armCm : b.armMin;
         b.elbowSum += elbowCm;
         b.elbowMin = elbowCm < b.elbowMin ? elbowCm : b.elbowMin;
+        if (std::isfinite(s.postureW) && std::isfinite(s.neckDropM)) {   // F163
+            ++b.postureN;
+            b.postureSum += s.postureW;
+            b.dropSumCm += s.neckDropM * 100.0;
+        }
     }
     void merge(const Counters& o) noexcept {
         for (int i = 0; i < kContextN; ++i) {
@@ -96,6 +106,9 @@ struct Counters {
             d.under4 += s.under4;
             d.under4Moving += s.under4Moving;
             d.under25 += s.under25;
+            d.postureN += s.postureN;
+            d.postureSum += s.postureSum;
+            d.dropSumCm += s.dropSumCm;
             d.armSum += s.armSum;
             d.elbowSum += s.elbowSum;
             d.armMin = s.armMin < d.armMin ? s.armMin : d.armMin;
@@ -119,16 +132,19 @@ struct Seconds {
 // ---- the line -------------------------------------------------------------------------------------------------------------------------------------------------------------
 
 // The window's line: the item, and for each context its frames, the arm's and the elbow's smallest and mean distance (cm), the frames under 4 cm (the moving ones among them) and under
-// 2.5 cm; a context with no frame prints zeros. Then the seconds with the arm under 4 cm, and under 2.5 cm. The log's lines end at 1200 bytes; this one runs to about 700.
+// 2.5 cm, and (F163) the crouched weight's mean and the animated neck's mean drop (cm) the context was filed by; a context with no frame prints zeros. Then the seconds with the arm
+// under 4 cm, and under 2.5 cm. The log's lines end at 1200 bytes; this one runs to about 850.
 inline int formatSummary(char* buf, size_t n, uint32_t seconds, const char* item, const Counters& c, const Seconds& s) noexcept {
     int len = std::snprintf(buf, n, "native on foot left arm to the eye (F161) %u s: item %s; the eye to the left upper arm (shoulder to elbow) and to the elbow, by context: ", seconds,
                             item ? item : "none");
     if (len < 0 || static_cast<size_t>(len) >= n) return len;
     for (int i = 0; i < kContextN; ++i) {
         const Bin& b = c.bin[i];
-        const double nn = b.n ? static_cast<double>(b.n) : 1.0;
-        const int add = std::snprintf(buf + len, n - static_cast<size_t>(len), "%s %u frames: arm min %.1f mean %.1f cm, elbow min %.1f mean %.1f cm, under 4 cm %u (moving %u), under 2.5 cm %u; ",
-                                      contextName(i), b.n, b.n ? b.armMin : 0.0, b.armSum / nn, b.n ? b.elbowMin : 0.0, b.elbowSum / nn, b.under4, b.under4Moving, b.under25);
+        const double nn = b.n ? static_cast<double>(b.n) : 1.0, pn = b.postureN ? static_cast<double>(b.postureN) : 1.0;
+        const int add = std::snprintf(buf + len, n - static_cast<size_t>(len),
+                                      "%s %u frames: arm min %.1f mean %.1f cm, elbow min %.1f mean %.1f cm, under 4 cm %u (moving %u), under 2.5 cm %u, crouched weight mean %.2f, neck drop mean %.1f cm; ",
+                                      contextName(i), b.n, b.n ? b.armMin : 0.0, b.armSum / nn, b.n ? b.elbowMin : 0.0, b.elbowSum / nn, b.under4, b.under4Moving, b.under25,
+                                      b.postureSum / pn, b.dropSumCm / pn);
         if (add < 0) return len;
         len += add;
         if (static_cast<size_t>(len) >= n) return len;

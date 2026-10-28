@@ -109,40 +109,84 @@ inline void run161(Check&& check) {
     // ---- 3. the line ----------------------------------------------------------------------------------------------------------------------------------------------------------------
     {
         f161::Counters c;
-        const auto add = [&](double armCm, bool ads, bool crouched, bool moving) {
+        // F163: the crouched weight and the animated neck's drop (m) each frame was filed by
+        const auto add = [&](double armCm, bool ads, bool crouched, bool moving, double postureW = 0.0, double neckDropM = 0.05) {
             f161::Sample s;
             s.armM = armCm * 0.01;
             s.elbowM = armCm * 0.01 + 0.03;
             s.ads = ads;
             s.crouched = crouched;
             s.moving = moving;
+            s.postureW = postureW;
+            s.neckDropM = neckDropM;
             c.add(s);
         };
-        add(3.2, true, true, true);
-        add(2.0, true, true, true);
+        add(3.2, true, true, true, 1.0, 0.50);
+        add(2.0, true, true, true, 0.94, 0.60);
         add(15.0, false, false, false);
         f161::Seconds sec;
         sec.under4 = 1;
         sec.under25 = 1;
-        char buf[1100];
+        char buf[1300];
         const int n = f161::formatSummary(buf, sizeof(buf), 10, "$wpn_m_assaultrifle_plasma_fauto_name;", c, sec);
-        check(n > 0 && n < 900 && std::strstr(buf, "(F161) 10 s: item $wpn_m_assaultrifle_plasma_fauto_name;; the eye to the left upper arm (shoulder to elbow) and to the elbow, by context: hip standing 1 frames: "
-                                                  "arm min 15.0 mean 15.0 cm, elbow min 18.0 mean 18.0 cm, under 4 cm 0 (moving 0), under 2.5 cm 0; hip crouched 0 frames: arm min 0.0 mean 0.0 cm, elbow min 0.0 mean 0.0 cm, "
-                                                  "under 4 cm 0 (moving 0), under 2.5 cm 0; ADS standing 0 frames:") != nullptr &&
-                  std::strstr(buf, "ADS crouched 2 frames: arm min 2.0 mean 2.6 cm, elbow min 5.0 mean 5.6 cm, under 4 cm 2 (moving 2), under 2.5 cm 1; seconds with the arm under 4 cm of the eye 1, under 2.5 cm 1") != nullptr,
-              "F161: the window's line names the item, the four contexts (zeros for one with no frame) and the seconds; under 900 bytes");
-        // at its widest: every figure at its widest
+        check(n > 0 && n < 1000 && std::strstr(buf, "(F161) 10 s: item $wpn_m_assaultrifle_plasma_fauto_name;; the eye to the left upper arm (shoulder to elbow) and to the elbow, by context: hip standing 1 frames: "
+                                                  "arm min 15.0 mean 15.0 cm, elbow min 18.0 mean 18.0 cm, under 4 cm 0 (moving 0), under 2.5 cm 0, crouched weight mean 0.00, neck drop mean 5.0 cm; "
+                                                  "hip crouched 0 frames: arm min 0.0 mean 0.0 cm, elbow min 0.0 mean 0.0 cm, under 4 cm 0 (moving 0), under 2.5 cm 0, crouched weight mean 0.00, neck drop mean 0.0 cm; "
+                                                  "ADS standing 0 frames:") != nullptr &&
+                  std::strstr(buf, "ADS crouched 2 frames: arm min 2.0 mean 2.6 cm, elbow min 5.0 mean 5.6 cm, under 4 cm 2 (moving 2), under 2.5 cm 1, crouched weight mean 0.97, neck drop mean 55.0 cm; "
+                                   "seconds with the arm under 4 cm of the eye 1, under 2.5 cm 1") != nullptr,
+              "F161: the window's line names the item, the four contexts (zeros for one with no frame), each one's crouched weight and neck drop (F163), and the seconds; under 1000 bytes");
+        // at its widest: every figure at its widest (the neck's drop at three digits and a sign)
         f161::Counters w;
         for (int i = 0; i < f161::kContextN; ++i) {
             f161::Bin& b = w.bin[i];
-            b.n = b.under4 = b.under4Moving = b.under25 = 4000000000u;
+            b.n = b.under4 = b.under4Moving = b.under25 = b.postureN = 4000000000u;
             b.armSum = b.elbowSum = 1e9;
             b.armMin = b.elbowMin = 999.9;
+            b.postureSum = 0.99 * 4000000000.0;
+            b.dropSumCm = -199.9 * 4000000000.0;
         }
         f161::Seconds ws;
         ws.under4 = ws.under25 = 4000000000u;
         const int wn = f161::formatSummary(buf, sizeof(buf), 4000000000u, "$wpn_m_assaultrifle_kinetic_fauto_suppressed_name;", w, ws);
-        check(wn > 0 && wn < 1100 && std::strlen(buf) == static_cast<size_t>(wn), "F161: the line at its widest (every count at ten digits) stays under the log's 1200 bytes, and the buffer holds it");
+        check(wn > 0 && wn < 1200 && std::strlen(buf) == static_cast<size_t>(wn), "F161: the line at its widest (every count at ten digits) stays under the log's 1200 bytes, and the buffer holds it");
+    }
+    // ---- 4. the crouched weight and the neck's drop per context (F163) ----------------------------------------------------------------------------------------------------
+    {
+        f161::Counters c;
+        const auto add = [&](bool ads, bool crouched, double postureW, double neckDropM) {
+            f161::Sample s;
+            s.armM = 0.20;
+            s.elbowM = 0.25;
+            s.ads = ads;
+            s.crouched = crouched;
+            s.postureW = postureW;
+            s.neckDropM = neckDropM;
+            c.add(s);
+        };
+        add(true, true, 1.0, 0.50);
+        add(true, true, 0.5, 0.38);
+        add(true, false, 0.0, 0.10);
+        add(true, false, 0.0, 0.20);
+        add(true, false, std::nan(""), 0.20);   // a weight that is not a number: the frame counts, its weight and drop do not
+        add(true, false, 0.0, std::nan(""));    // a drop that is not a number: the same
+        const f161::Bin& ac = c.bin[f161::kAdsCrouched];
+        const f161::Bin& as = c.bin[f161::kAdsStanding];
+        check(ac.n == 2 && ac.postureN == 2 && eq(ac.postureSum, 1.5, 1e-12) && eq(ac.dropSumCm, 88.0, 1e-9) && as.n == 4 && as.postureN == 2 && eq(as.postureSum, 0.0, 1e-12) &&
+                  eq(as.dropSumCm, 30.0, 1e-9),
+              "F161: each context sums the crouched weight and the neck's drop (cm) of the frames that had them; a frame without either still counts as a frame");
+        f161::Counters d;
+        d.merge(c);
+        d.merge(c);
+        check(d.bin[f161::kAdsCrouched].postureN == 4 && eq(d.bin[f161::kAdsCrouched].postureSum, 3.0, 1e-12) && eq(d.bin[f161::kAdsCrouched].dropSumCm, 176.0, 1e-9),
+              "F161: two seconds merge the weight and the drop by sums");
+        char buf[1300];
+        f161::Seconds none;
+        f161::formatSummary(buf, sizeof(buf), 5, "$wpn_m_shotgun_plasma_doublebarrel_name;", c, none);
+        check(std::strstr(buf, "ADS standing 4 frames: arm min 20.0 mean 20.0 cm, elbow min 25.0 mean 25.0 cm, under 4 cm 0 (moving 0), under 2.5 cm 0, crouched weight mean 0.00, neck drop mean 15.0 cm; "
+                               "ADS crouched 2 frames:") != nullptr &&
+                  std::strstr(buf, "ADS crouched 2 frames: arm min 20.0 mean 20.0 cm, elbow min 25.0 mean 25.0 cm, under 4 cm 0 (moving 0), under 2.5 cm 0, crouched weight mean 0.75, neck drop mean 44.0 cm; ") != nullptr,
+              "F161: the line says the mean weight and the mean neck's drop of each context, over the frames that had them");
     }
 }
 

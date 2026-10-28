@@ -13437,9 +13437,11 @@ def _hj_f98a_elbow(rows, ctx):
 # F161: the left arm's distance to the eye, per context (formatSummary in src/d3d11/native_on_foot_f161.h): the contexts in the order the line prints them, and the line
 H161_CONTEXTS = ("hip standing", "hip crouched", "ADS standing", "ADS crouched")
 H161_LABEL = "native on foot left arm to the eye (F161)"
+# F163 added each context's crouched weight mean and neck drop mean (cm); a line from the F161 and F162 builds has neither (the group is optional).
 H161_RE = (r"native on foot left arm to the eye \(F161\) (?P<wl>\d+) s: item (?P<item>\S+); the eye to the left upper arm \(shoulder to elbow\) and to the elbow, by context: " +
            "".join((r"%s (?P<n%d>\d+) frames: arm min (?P<amin%d>%s) mean (?P<amean%d>%s) cm, elbow min (?P<emin%d>%s) mean (?P<emean%d>%s) cm, under 4 cm (?P<u4%d>\d+) "
-                    r"\(moving (?P<u4m%d>\d+)\), under 2\.5 cm (?P<u25%d>\d+); ") % (name, i, i, _HN, i, _HN, i, _HN, i, _HN, i, i, i) for i, name in enumerate(H161_CONTEXTS)) +
+                    r"\(moving (?P<u4m%d>\d+)\), under 2\.5 cm (?P<u25%d>\d+)(?:, crouched weight mean (?P<pw%d>[\d.]+), neck drop mean (?P<pd%d>-?[\d.]+) cm)?; ") %
+                   (name, i, i, _HN, i, _HN, i, _HN, i, _HN, i, i, i, i, i) for i, name in enumerate(H161_CONTEXTS)) +
            r"seconds with the arm under 4 cm of the eye (?P<s4>\d+), under 2\.5 cm (?P<s25>\d+)")
 
 
@@ -13465,7 +13467,13 @@ def _hj_f161_arm_eye(rows, ctx):
             u4, u4m, u25 = (sum(int(r[k + str(i)]) for r in used) for k in ("u4", "u4m", "u25"))
             amin, emin = min(float(r["amin%d" % i]) for r in used), min(float(r["emin%d" % i]) for r in used)
             amean, emean = (sum(int(r["n%d" % i]) * float(r[k + str(i)]) for r in used) / n for k in ("amean", "emean"))
-            per.append("%s %d frames: upper arm nearest %.1f cm, mean %.1f; elbow nearest %.1f, mean %.1f; under 4 cm %d (moving %d), under 2.5 cm %d" % (name, n, amin, amean, emin, emean, u4, u4m, u25))
+            text = "%s %d frames: upper arm nearest %.1f cm, mean %.1f; elbow nearest %.1f, mean %.1f; under 4 cm %d (moving %d), under 2.5 cm %d" % (name, n, amin, amean, emin, emean, u4, u4m, u25)
+            # F163: the weight the context was filed by and the neck's drop under it (the DLLs before F163 do not print them)
+            posed = [r for r in used if r.get("pw%d" % i) is not None]
+            if posed:
+                pn = sum(int(r["n%d" % i]) for r in posed)
+                text += ", crouched weight mean %.2f, neck drop mean %.1f cm" % tuple(sum(int(r["n%d" % i]) * float(r[k + str(i)]) for r in posed) / pn for k in ("pw", "pd"))
+            per.append(text)
             if u4:
                 where, stance = name.split(" ")
                 near.append("%s, %s, %s: %d frame(s) under 4 cm (%d moving), %d under 2.5 cm, nearest %.1f cm" % (item, where, stance, u4, u4m, u25, amin))
@@ -16916,7 +16924,8 @@ def self_test_health():
 
         def arm161(item=RIFLE97, wl=10, bins=None, s4=0, s25=0):
             """F161's window line, from the DLL's own format (formatSummary, native_on_foot_f161.h); bins: {context index: (frames, arm min, arm mean, elbow min, elbow mean,
-            frames under 4 cm, of them moving, frames under 2.5 cm)}, the contexts in H161_CONTEXTS' order, the ones not given with no frame."""
+            frames under 4 cm, of them moving, frames under 2.5 cm[, F163's crouched weight mean, neck drop mean in cm])}, the contexts in H161_CONTEXTS' order, the ones not
+            given with no frame."""
             line = R161("native on foot left arm to the eye (F161) %u s: item %s", wl, item)
             for i, name in enumerate(H161_CONTEXTS):
                 line += R161("%s %u frames: arm min", name, *(bins or {}).get(i, QUIET161))
@@ -16943,6 +16952,20 @@ def self_test_health():
         check("F161 arm: a window with no frame in any context has nothing to judge", [arm161()], 0, [], lacks=["UNPARSED", row("PARTIAL", F161), row("OK", F161)])
         check("F161 arm: a line that drifted from its pattern is unparsed", ["native on foot left arm to the eye (F161) 10 s: something else"], 4, [("UNPARSED", F161)])
         check("F161 arm: a context renamed in the line is unparsed", [arm161(bins=CLEAR161).replace("ADS crouched", "ADS kneeling")], 4, [("UNPARSED", F161)])
+        # F163: each context's crouched weight mean and neck drop mean (cm) are read and reported, frame-weighted over the windows
+        POSED163 = {2: (200, 12.0, 20.0, 18.0, 28.0, 0, 0, 0, 0.02, 17.5), 3: (120, 6.8, 9.4, 9.0, 13.0, 0, 0, 0, 0.98, 52.0)}
+        check("F161 arm: the crouched weight and the neck's drop of each context are read from the line (F163)", [arm161(bins=POSED163)], 0, [("OK", F161)],
+              has=["ADS standing 200 frames: upper arm nearest 12.0 cm, mean 20.0; elbow nearest 18.0, mean 28.0; under 4 cm 0 (moving 0), under 2.5 cm 0, crouched weight mean 0.02, neck drop mean 17.5 cm",
+                   "ADS crouched 120 frames: upper arm nearest 6.8 cm, mean 9.4; elbow nearest 9.0, mean 13.0; under 4 cm 0 (moving 0), under 2.5 cm 0, crouched weight mean 0.98, neck drop mean 52.0 cm"],
+              lacks=["UNPARSED"])
+        check("F161 arm: two windows' weights and drops are averaged by their frames", [arm161(bins={3: (100, 6.0, 9.0, 9.0, 13.0, 0, 0, 0, 1.00, 50.0)}),
+                                                                                          arm161(bins={3: (300, 7.0, 9.5, 9.0, 13.0, 0, 0, 0, 0.60, 40.0)})], 0, [("OK", F161)],
+              has=["ADS crouched 400 frames: upper arm nearest 6.0 cm, mean 9.4; elbow nearest 9.0, mean 13.0; under 4 cm 0 (moving 0), under 2.5 cm 0, crouched weight mean 0.70, neck drop mean 42.5 cm"],
+              lacks=["UNPARSED"])
+        # the F161 and F162 builds' line, written out as it was: no weight and no drop in any context
+        check("F161 arm: a line from before F163 (no weight and no drop in the contexts) is read as it was", [re.sub(r", crouched weight mean [\d.]+, neck drop mean -?[\d.]+ cm", "", arm161(bins=FLIGHT161, s4=7, s25=5))],
+              0, [("PARTIAL", F161)], has=["ADS crouched 300 frames: upper arm nearest 1.3 cm, mean 3.1; elbow nearest 4.0, mean 6.0; under 4 cm 280 (moving 240), under 2.5 cm 150",
+                                           "seconds with the arm under 4 cm of the eye 7, under 2.5 cm 5"], lacks=["UNPARSED", "crouched weight"])
 
         # ---- draw onset (F99a): a drawn item's hands from the game's own selection ----
         F99 = "draw onset (F99a)"
