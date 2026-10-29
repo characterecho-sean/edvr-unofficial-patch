@@ -48,7 +48,7 @@ game's own zoom as a magnified picture inside the scope's lens. The rest of the 
   the lens by the tonemap difference (stock brightness); the weapons half governs it, the scope zoom key arms it; the S0 census probes optical
   sights only; the press line counts `composites matched/plain/none` and `--health` makes a taken mark nothing composited a PARTIAL. Its review
   fixes (same section) make the mark's stand-down last a press, not the session, and count it in the press line.
-- **B3-1 BUILT 2026-10-29, NOT FLOWN** (from `4a4a17b6`; section 11, "As built (B3-1)"): the scoped Executioner's lens at full detail. The left eye (F162's both mode) is drawn as the zoomed view
+- **B3-1 BUILT 2026-10-29, INSTALLED on Epic (both) as `9faeadb9`, NOT FLOWN** (from `4a4a17b6`; section 11, "As built (B3-1)"): the scoped Executioner's lens at full detail. The left eye (F162's both mode) is drawn as the zoomed view
   (told frustum = its tangents / M about c, tangents only, set in WaitGetPoses after the trim); the lens samples its post-RCAS picture, each pixel at the place its world point is drawn at in that eye
   (the right eye's depth, T = inverse(A_R) A_L). The raw getter (the UI scale) keeps the true frustum; DLSS resets at both edges; the strip goes black; the light grid cache and the readout pin
   step aside. Three log lines: `scope zoom (B3)` announce and press, `scope zoom (B3) runtime`. Review fixes done 2026-10-29 (section 11, items 1 to 8; the hidden-area mesh per eye left). Next: the flight (A then B3 in one press), then the maintainer's verdict on the key.
@@ -839,7 +839,8 @@ look for the lens's detail, the chevron's place, the HUD's size, shadows, the le
   desktop mirror (visual.desktop_window shows the left eye, so it shows the zoomed picture during the window); the cost of the window copy and the third pass (the existing GPU timers cover pass 2).
 - **Flight card (B3-1, Epic in VR, the full-detail key on the Experimental page with the menu's Developer mode on).** The scoped Executioner in ADS with the scope zoom on and the sight eye at both:
   the key off then on in one press (A then B3), still and turning; an eye dump with each; then look at the lens's detail, the chevron's place, the HUD's size, shadows, the left eye's outer edge (black
-  while the window stands), and stutter on entry. Read `edvr_log.py --expect-build <hash> --health` first (S1, B3), then the B3 and runtime lines.
+  while the window stands), the sky and horizon in the lens against A's, and stutter on entry. Read `edvr_log.py --expect-build 9faeadb9 --health` first (S1, B3), then the B3 and runtime lines: the
+  span ratio against M, `no matrices` (the game building the left render from the raw getter), and the raw getter's callers if the lens's sky is wrong.
 
 **Review fixes (B3-1)** (2026-10-29, the review of `161b1954`, `reviews\scope-zoom-b3-1-review-2026-10-29.md`; the full local build and all its gates green, nothing flown):
 1. **Raw getter callers.** Every caller still gets the true frustum. While the window stands the raw getter's reads are tallied by return address as an RVA in the game's executable (`ScopeZoomCallers`: the first
@@ -861,3 +862,6 @@ look for the lens's detail, the chevron's place, the HUD's size, shadows, the le
    after and before the tick, a stalled thread, a lost tick, an answer that is not version 11, and a second press after a refused one. Source scans remain only for the call sites.
 9. **Hidden-area mesh for eye 0 only: not done.** `GetHiddenAreaMesh` serves an eye only when the other is served (Elite makes a buffer per eye and a zero-byte one is fatal), so withholding one eye is a change to
    that pairing, not a flag; Elite reads the mesh once a session (`docs\eye-mask-2026-09-16.md`), so the window loses nothing in the game and the frame-time comparison is unaffected. Left as is.
+
+**Installed (B3-1)** (2026-10-29): `9faeadb9` (`build.bat --dll-only` on the clean tree) on Epic, `--scope both --xess`, `--verify-only` passed. The live `edvr.ini` there had no
+`native_on_foot_ads_scope_zoom_full_detail` line; it was added under `[experimental]` at `off` with the Edit tool (diffed: three lines added, nothing else changed), so the key can be switched in one press.
