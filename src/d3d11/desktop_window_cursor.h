@@ -1,12 +1,12 @@
-// visual.desktop_window, round 3 (docs\desktop-window.md, "The cursor"): the mouse lock, while the desktop window is active. Sean wants the cursor free to leave Elite's window
-// (to move it, or to use the desktop). Which of Elite's calls makes the lock is not known; one flight tells the three hypotheses apart:
-//   H1  ClipCursor with a rectangle confines the cursor to the window;
-//   H2  SetCursorPos re-centres it every frame, the mouse-look lock: if Elite also reads GetCursorPos every frame it steers by the cursor's movement, and suppressing
-//       SetCursorPos would break mouse flight, so it is counted and not changed;
-//   H3  a DirectInput mouse in exclusive mode, with neither user32 call involved (the cooperative level is observed in input_gate.cpp).
-// The executable's import table is patched for ClipCursor, SetCursorPos, GetCursorPos and ShowCursor (src\common\iat_hook.h), once at startup in a VR-scope install. They pass
-// through, except ClipCursor with a rectangle while the window is active: that is released (the real ClipCursor(nullptr)), counted, and answered TRUE. Not active, everything is
-// untouched. They run on any thread, so every counter and flag is atomic; no Win32 window call is made in them beyond the real function.
+// visual.desktop_window, the Windows cursor (docs\desktop-window.md, "The cursor"). Two jobs, neither of which touches the game's mouse lock:
+//   HIDDEN OVER THE PICTURE (round 4). While the desktop window is active the cursor is hidden when the window is the foreground one and the cursor is inside its client area,
+//   and shown otherwise, so the title bar and edges stay grabbable. The ShowCursor count belongs to the thread that owns the window; see desktopWindowCursorHide.
+//   WHAT THE GAME DOES WITH THE CURSOR (round 3's instruments, kept). SetCursorPos and GetCursorPos are only counted, and the cooperative level of the game's DirectInput mouse is
+//   logged once (input_gate.cpp). Round 3 found the game confines the cursor with ClipCursor to the client rectangle (H1); that lock is what on-foot VR needs, so it is
+//   never touched: no ClipCursor hook, no call. The cursor stays confined while the game holds it, so moving or resizing the window means switching away from the game first.
+// The executable's import table is patched for SetCursorPos, GetCursorPos and ShowCursor (src\common\iat_hook.h), once at startup in a VR-scope install. They pass through; only
+// ShowCursor's count is changed, and only while the cursor is hidden. They run on any thread, so every counter and flag is atomic; no Win32 window call is made in them beyond
+// the real function.
 #pragma once
 
 #include <windows.h>
@@ -19,7 +19,7 @@ namespace edvr {
 void desktopWindowCursorInstall();
 void desktopWindowCursorUninstall();
 
-// An activation committed (true) or ended (false). Setting it true also releases whatever clip Elite had, once, from the render thread.
+// An activation committed (true) or ended (false). Ending it gives back every hide EDVR made.
 void desktopWindowCursorSetActive(bool active);
 // The window's client centre in screen coordinates, as the render thread last measured it, for "SetCursorPos at the client centre".
 void desktopWindowCursorPublishCentre(int x, int y);

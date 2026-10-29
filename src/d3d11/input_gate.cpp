@@ -1168,7 +1168,8 @@ void captureKeyboard(void* device, std::index_sequence<I...>) {
 // ---- the game's mouse: its cooperative level, observed (visual.desktop_window, round 3) ----
 // One slot (SetCooperativeLevel, 13) on the table of the first mouse the game creates, in place and stacked with whatever else patched that table. The hook forwards first and
 // looks after, so what the game gets is the driver's answer unchanged. Only a device recorded at CreateDevice as a mouse is reported: the table is shared with the keyboard
-// and the controllers. Whether the mouse is exclusive says if DirectInput is what holds the cursor (hypothesis H3, docs\desktop-window.md). VR scope only.
+// and the controllers. Observe-only: nothing about the mouse is changed. Round 3 found it nonexclusive and background (the lock is the game's ClipCursor, which is left alone;
+// docs\desktop-window.md). The line stays as an instrument. VR scope only.
 constexpr size_t kSlotSetCooperativeLevel = 13;
 typedef HRESULT(STDMETHODCALLTYPE* PFN_SetCooperativeLevel)(void*, HWND, DWORD);
 constexpr size_t kMouseDevices = 4;

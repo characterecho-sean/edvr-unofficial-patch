@@ -880,7 +880,7 @@ Outcome presentActive(IDXGISwapChain* swap, ID3D11Device* device, uint64_t now, 
     const bool first = !S.active;
     if (first) {
         S.active = true;
-        desktopWindowCursorSetActive(true);   // the cursor is free to leave the window: a clip Elite holds goes now, and a ClipCursor with a rectangle is released from here on
+        desktopWindowCursorSetActive(true);   // the cursor hide is allowed from here on (the game's mouse lock is left as it is)
         ++S.activations;
         S.nextStatsMs = now + kTenSecondsMs;
         S.hwnd = hwnd;

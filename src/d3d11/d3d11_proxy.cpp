@@ -514,8 +514,8 @@ BOOL CALLBACK initOnceCallback(PINIT_ONCE, PVOID, PVOID*) {
         g_patchExeLoadLibraryExA.applied ? 1 : 0,
         g_patchExeLoadLibraryExW.applied ? 1 : 0);
 
-    // visual.desktop_window, round 3: the executable's ClipCursor, SetCursorPos, GetCursorPos and ShowCursor, so the cursor can leave Elite's window while the desktop
-    // window is active. They pass through except ClipCursor with a rectangle while it is active. A flat-only install has no desktop window and no hooks.
+    // visual.desktop_window: the executable's SetCursorPos, GetCursorPos and ShowCursor, so the cursor can be hidden over the desktop window while it has focus. They pass
+    // through; only ShowCursor's count is changed, and only while the cursor is hidden. The game's mouse lock is not touched. A flat-only install has no desktop window and no hooks.
     if (edvr::runtimeScopeIncludesVr()) edvr::desktopWindowCursorInstall();
 
     // Now, out from under the loader lock, is when another proxy can safely be

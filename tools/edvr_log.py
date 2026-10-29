@@ -18950,8 +18950,8 @@ def self_test_health():
                     RD(dwcpp, "desktop window: not drawing -- %s", "the window's client area is empty (minimized)"),
                     RD(dwcpp, "desktop window: swap chain now %ux%u", 1920, 1080, 1280, 720, 12),
                     # round 3: the cursor lines (the untagged story lines the rule matches and does not count)
-                    RD(dwcursor, "desktop window: cursor hooks in the executable's import table", "patched", "patched", "patched", "patched"),
-                    RD(dwsrc, "desktop window: cursor (10 s): clip released %u", 12, "1920x1080 at 0,0", 3, 580, 575, 590, 2, "hide, display count -1", 54, 60, -2, 7),
+                    RD(dwcursor, "desktop window: cursor hooks in the executable's import table", "patched", "patched", "patched"),
+                    RD(dwsrc, "desktop window: cursor (10 s): setpos %u", 580, 575, 590, 2, "hide, display count -1", 54, 60, -2, 7),
                     RD(dwcursor, "desktop window: the cursor is not hidden -- the window belongs to thread", 23680, 4242),
                     RD(dwcursor, "desktop window: the game's DirectInput mouse cooperative level", 0x6, "nonexclusive, foreground", 0)]
 

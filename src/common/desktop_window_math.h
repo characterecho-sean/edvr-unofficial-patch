@@ -286,15 +286,10 @@ inline DwCorrection desktopWindowCorrect(double aspect, int winLeft, int winTop,
     return c;
 }
 
-// ---- the cursor (round 3) ----
-// While the desktop window is active the cursor must be free to leave Elite's window. The executable's ClipCursor, SetCursorPos, GetCursorPos and ShowCursor are watched
-// (desktop_window_cursor.cpp); only ClipCursor with a rectangle is changed, and only while the window is active: it is released instead. SetCursorPos is the mouse-look's
-// re-centre if Elite steers by the cursor's movement, so it is counted and never touched.
-enum class DwClipVerdict : uint8_t { Pass, PassCounted, Release };
-inline DwClipVerdict desktopWindowClipVerdict(bool active, bool hasRect) {
-    if (!active) return DwClipVerdict::Pass;
-    return hasRect ? DwClipVerdict::Release : DwClipVerdict::PassCounted;
-}
+// ---- the cursor (rounds 3 to 5) ----
+// The executable's SetCursorPos, GetCursorPos and ShowCursor are watched (desktop_window_cursor.cpp). SetCursorPos was the mouse-look's re-centre if Elite steered by the cursor's
+// movement (round 3 found it never called), so it is counted and never touched. Round 3 also found the game confines the cursor with ClipCursor to the client rectangle; that
+// lock is what on-foot VR needs, so it is not touched at all (round 5). Only ShowCursor's count is changed, and only while the cursor is hidden (round 4).
 // A SetCursorPos target within two pixels of the client's centre (screen coordinates): the mouse-look's re-centre.
 inline bool desktopWindowAtCentre(int x, int y, int centreX, int centreY, int tolerance = 2) {
     const int dx = x - centreX, dy = y - centreY;
@@ -307,14 +302,14 @@ inline int desktopWindowCooperativeWords(char* out, size_t size, uint32_t flags)
     const char* where = foreground && !background ? "foreground" : background && !foreground ? "background" : foreground ? "foreground and background" : "neither foreground nor background";
     return std::snprintf(out, size, "%s, %s%s", level, where, (flags & 0x10u) ? ", no windows key" : "");
 }
-// The cursor line, every 10 s while active, after the census line (the strings are the caller's: "WxH at x,y" or "none", and "show, display count N" or "none"). Round 4 added
-// the hide at its end: Presents the cursor was wanted hidden on of those it was decided on, the net hides EDVR holds (never above 0), and the pushes the ShowCursor hook made.
-inline int desktopWindowCursorLine(char* out, size_t size, unsigned released, const char* lastRect, unsigned passed, unsigned setPos, unsigned setPosCentre, unsigned getPos,
-                                   unsigned showCalls, const char* lastShow, unsigned hiddenPresents, unsigned decidedPresents, int offset, unsigned pushed) {
+// The cursor line, every 10 s while active, after the census line (the string is the caller's: "show, display count N" or "none"). The hide is at its end: Presents the cursor was
+// wanted hidden on of those it was decided on, the net hides EDVR holds (never above 0), and the pushes the ShowCursor hook made.
+inline int desktopWindowCursorLine(char* out, size_t size, unsigned setPos, unsigned setPosCentre, unsigned getPos, unsigned showCalls, const char* lastShow,
+                                   unsigned hiddenPresents, unsigned decidedPresents, int offset, unsigned pushed) {
     return std::snprintf(out, size,
-                         "desktop window: cursor (10 s): clip released %u (last rect %s), clip passed %u, setpos %u (at the client centre %u), getpos %u, showcursor %u (last %s), "
+                         "desktop window: cursor (10 s): setpos %u (at the client centre %u), getpos %u, showcursor %u (last %s), "
                          "hidden on %u of %u Presents, offset now %d, pushed down %u",
-                         released, lastRect, passed, setPos, setPosCentre, getPos, showCalls, lastShow, hiddenPresents, decidedPresents, offset, pushed);
+                         setPos, setPosCentre, getPos, showCalls, lastShow, hiddenPresents, decidedPresents, offset, pushed);
 }
 
 // ---- the cursor is hidden over the picture (round 4) ----

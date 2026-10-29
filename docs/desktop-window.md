@@ -12,11 +12,12 @@
   in-headset menu. VR only. No temporary keys.
 - **What it does:** while Elite is in VR with 3D on, EDVR makes Elite's desktop
   window a framed, sizable, movable window of the eye image's shape, fills it with
-  EDVR's finished eye image, skips Elite's own drawing into it, frees the cursor,
-  and (round 4) hides it over the picture. At 3D off it restores the window.
+  EDVR's finished eye image, skips Elite's own drawing into it, and (round 4) hides
+  the cursor over the picture. At 3D off it restores the window.
 - **Round 3 results (the mouse lock):** the four cursor hooks all patched. **H1
   confirmed:** the game confines the cursor with `ClipCursor` to the client rect
-  (1357x1358 at 904,45); releasing it worked and the cursor leaves the window.
+  (1357x1358 at 904,45); releasing it worked and the cursor left the window (round 5
+  removes that release).
   **H3 ruled out:** the game's DirectInput mouse is `0x0000000A` (nonexclusive,
   background). **H2 ruled out:** `SetCursorPos` was 0 in every window, so there is no
   re-centring (suppressing it was never needed). The game calls `ShowCursor` about 50 to
@@ -36,6 +37,15 @@
   second only if the game's `ShowCursor(TRUE)` calls keep coming); no flash of the cursor
   on the game's own shows; the cursor back (offset 0) after 3D off; mouse flight
   unchanged (the game still sees the counts it would have).
+- **Round 5, the mouse lock goes back** (BUILT; ON MAIN once merged). Sean: the game's
+  mouse lock (`ClipCursor` to the client rect) is needed for on-foot VR, so round 5 removes
+  the release; the cursor stays confined while the game holds it, so moving or resizing
+  the window means switching away from the game first. Elite's `ClipCursor` is now
+  untouched in every state: no hook on it, no call, no clip counts in the cursor line
+  (`clip released ..., clip passed N, ` is gone). Kept: the `ShowCursor` hook and the
+  round 4 hide, the `SetCursorPos` and `GetCursorPos` counts, the DirectInput
+  cooperative-level line. The install line now lists the three hooks and says only
+  `ShowCursor`'s count is changed, while the cursor is hidden.
 - **Ruled out:** a stale binding shadow taking scene draws for buffer draws (the
   context named the buffer on every sampled skipped draw); H2 and H3 above.
 - Older flights, the skipped-draw census and the round 3 hypotheses are under "Flight
@@ -99,19 +109,18 @@
   Not reshaped in exclusive fullscreen, maximized or minimized. No game address
   is hooked, so it works on every build.
 
-- **The cursor (round 3)** (`desktop_window_cursor.cpp`). The executable's import
+- **The cursor (rounds 3 to 5)** (`desktop_window_cursor.cpp`). The executable's import
   table is patched once at startup in a VR-scope install (never a flat-only one) for
-  `ClipCursor`, `SetCursorPos`, `GetCursorPos` and `ShowCursor`; the install line says
-  which patched. They pass through, on any thread (atomic state, no window call in
-  them), except `ClipCursor` with a rectangle while an activation is committed: the
-  real `ClipCursor(nullptr)` is called, TRUE is returned and it is counted. `ClipCursor(nullptr)`
-  passes. At each activation the real `ClipCursor(nullptr)` is called once from the
-  render thread. Not active, nothing is touched. `SetCursorPos` and `GetCursorPos` are
-  only counted: `setpos` and how many were within 2 px of the client's centre
-  (published by the render thread each Present), `getpos`; `ShowCursor` is counted (the
-  last show/hide with the display count the game was given) and acted on only by the
-  hidden cursor below. The 10 s `cursor` line follows the census line.
-  The DirectInput door (`input_gate.cpp`) sees the game's mouse at `CreateDevice` and
+  `SetCursorPos`, `GetCursorPos` and `ShowCursor`; the install line says which
+  patched. They pass through, on any thread (atomic state, no window call in them);
+  only `ShowCursor`'s count is changed, and only while the cursor is hidden (below).
+  **Elite's `ClipCursor` is never touched** (round 5; round 3 had released it): the
+  game's lock to the client rect is needed for on-foot VR. `SetCursorPos` and
+  `GetCursorPos` are only counted while an activation is committed: `setpos` and how
+  many were within 2 px of the client's centre (published by the render thread each
+  Present), `getpos`; `ShowCursor` is counted too (the last show/hide with the display
+  count the game was given). The 10 s `cursor` line follows the census line. The
+  DirectInput door (`input_gate.cpp`) sees the game's mouse at `CreateDevice` and
   observes its `SetCooperativeLevel` (slot 13) forward-first; the flags are logged once
   (`exclusive|nonexclusive, foreground|background`).
 
@@ -130,8 +139,8 @@
   each game call (so a game "show" never flashes the cursor between Presents), and
   returns the real count minus the offset in force, the value the game would have seen
   without EDVR, so its own bookkeeping is undisturbed. The offset is given back when
-  hiding stops being wanted and in `leave()`. The `ClipCursor` release stays. The
-  cursor line ends `hidden on N of M Presents, offset now K, pushed down P`.
+  hiding stops being wanted and in `leave()`. The cursor line ends `hidden on N of M
+  Presents, offset now K, pushed down P`.
 
 ## Flight history
 
