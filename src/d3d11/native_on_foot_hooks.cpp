@@ -2077,6 +2077,15 @@ bool armBuildPlan(uint64_t x) noexcept {
                         static_cast<unsigned long long>(x), plan.f166.ok() ? "ok" : "REFUSED", nofoot::f166::whyText(plan.f166.why), held[0] ? held : "none",
                         static_cast<unsigned>(plan.f166.arms), static_cast<unsigned>(plan.f166.carriedN));
     }
+    // F169: the left arm's chain (clavicle, upper arm, forearm, hand) and the joints that come with it, for the pistol sprint's delayed swing. A refusal leaves the swing dial doing nothing.
+    {
+        if (plan.ok[0]) plan.f169 = nofoot::f169::buildPlan(g_pfzParents, joints, plan.side[0].C, plan.side[0].U, plan.side[0].F, plan.side[0].H);
+        Log::get().note("native on foot pistol sprint swing plan (F169): X=%016llX %s (%s); left arm chain %u %u %u %u; %u joints come with it",
+                        static_cast<unsigned long long>(x), plan.f169.ok() ? "ok" : "REFUSED", plan.ok[0] ? nofoot::f169::whyText(plan.f169.why) : "the left arm's plan was refused",
+                        plan.ok[0] ? static_cast<unsigned>(plan.side[0].C) : 0xFFFFu, plan.ok[0] ? static_cast<unsigned>(plan.side[0].U) : 0xFFFFu,
+                        plan.ok[0] ? static_cast<unsigned>(plan.side[0].F) : 0xFFFFu, plan.ok[0] ? static_cast<unsigned>(plan.side[0].H) : 0xFFFFu,
+                        static_cast<unsigned>(plan.f169.carriedN));
+    }
     // F65b: the legs for stand armed: each chain from the probe's foot (nofoot::ikLegChain), the anchor (the freeze's: the lowest common
     // ancestor of the neck 34 and the left foot), the pair check against the RE's indices (the R foot confirmed by FindJoint), and the upper
     // body UB. A refusal leaves the legs and the raise off; the arms are unaffected.

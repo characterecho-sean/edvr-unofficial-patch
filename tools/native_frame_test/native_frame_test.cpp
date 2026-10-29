@@ -60,7 +60,8 @@
 #include "f165_checks.h"    // F165: the left elbow's body-down pole blended in while crouched in the sights (the weight, the wrap-aware angle, the flight's aim on the real solver, the clamp, the line)
 #include "f166_checks.h"    // F166: the upper body held at its still crouched-ADS pose while walking crouched in the sights (the plan, the capture rules, the ramp, the slerp blend, the onset replayed, the line)
 #include "f167_checks.h"    // F167: the left hand lets go of the pistol while sprinting (the sprint signal from the flight's speeds, the dead band, the weight by item and speed, the ramps, the continuity, the sights holding the grip, the line)
-#include "f168_checks.h"    // F168: the crouched body's dial (TEMPORARY): the range, the move scaled by the crouched and detach weights (exactly 0 standing and at the hip), its vector along the aim's horizontal forward, the pin's move, the counters and the line
+#include "f168_checks.h"    // F168: the crouched body's dial (TEMPORARY): the range, the move scaled by the crouched and detach weights (exactly 0 standing and at the hip), its vector along the aim's horizontal forward, the pin's move, the counters and the line; F169: a positive dial past the reach rule, the move as written
+#include "f169_checks.h"    // F169: the stance while the aim is pitched (w_c capped under the animated neck's posture weight, the replays, the window and its line); the pistol sprint's arm swing (TEMPORARY): the plan, the ring, the stride's period, the delay, the measure and the line
 #include "f151_checks.h"    // F151: the weapon readout's draw bound by its place (the ordinals, each guard, one bind per key, the lost-frame count) and the held copy's scope from the selected slot
 #include "f110_checks.h"    // F110: the ADS sight lock's model right eye (the left-eye job camera plus the IPD)
 #include "f111_checks.h"    // F111: the panel pointer instrument's statistics and verdict
@@ -7605,6 +7606,11 @@ int wmain(int argc, wchar_t** argv) {
     // the aim's horizontal forward and never vertical, the pin's move equal to it and nothing else, the counters, the line within the log's limit. And (in F166's checks) the spine root held in the model's axes
     // with the hips pitched, the hips' turn from the held pose's, and the later stages' yield: a lean added to the held torso is taken off at weight 1 and untouched at weight 0.
     f168test::run168(check);
+    // F169: a positive crouched-body dial added after the reach rule (the rig runs the real reach rule on a left arm out of reach: +10 cm moves the written neck 10 cm and shortens the left shoulder to the foregrip,
+    // the dial in the target as flown moved it under 1 cm; the dial at 0 bit for bit); the stance while the aim is pitched (w_c capped under the animated neck's posture weight at 20 deg of aim pitch: the
+    // replays of a look-up standing, crouched, a stand-up and a crouch while pitched, an unpitched crouch exactly as before); the pistol sprint's arm swing (the plan, the ring, the stride's period from a
+    // synthetic sine, a half-stride delay inverting it, continuity at the sprint's start and end, the measure's correlations and the lines within the log's limit).
+    f169test::run169(check);
     // F110: the ADS sight lock's model right eye from the left-eye job camera and from a solved left eye, the fallback, the IPD's sign.
     f110test::run110(check);
     // F111: the panel pointer instrument names the stage that turns a move the other way (K1 to K5, one at a time), the camera getters' decoding.

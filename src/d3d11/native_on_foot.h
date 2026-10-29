@@ -35,6 +35,7 @@
 #include "native_on_foot_f115.h"   // F115: the cockpit's own panels' vertex shaders (the boarding edge)
 #include "native_on_foot_f157.h"   // F157: the coat's pack draw, the cheap match the draw path asks first (pure parts)
 #include "native_on_foot_f166.h"   // F166: the upper body held at its still crouched-ADS pose while walking (the plan of the held joints rides the arm plan)
+#include "native_on_foot_f169.h"   // F169: the pistol sprint's arm swing (the plan of the left arm's chain rides the arm plan)
 
 struct ID3D11DeviceContext;   // the F18 body cull's Begin/End (d3d11.h is not needed by the rigs that include this header)
 struct ID3D11Resource;        // F44: the marker probe's Map/Unmap tees
@@ -281,6 +282,8 @@ struct ArmPlan {
     HandRig hand[2];
     // F166: the held joints of the upper body (the spine 16, 21, 24, both clavicles and upper arms) and the joints that come with them, from the parents; why != 0 refuses the hold alone.
     nofoot::f166::Plan f166;
+    // F169: the left arm's chain (clavicle, upper arm, forearm, hand) and the joints that come with it, for the pistol sprint's delayed swing; why != 0 refuses it alone.
+    nofoot::f169::Plan f169;
 };
 inline std::atomic<uint32_t> g_armSeq{0};
 inline ArmPlan g_armPlan;

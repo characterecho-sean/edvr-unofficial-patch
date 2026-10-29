@@ -4861,7 +4861,8 @@ inline double pinEyeHeightNormalized(double eyeY, double localPitchRad, bool val
 struct PinAnimTarget {
     bool anim = false;        // the animated vector was computed (a calibration and a readable head); the vector used is the blend below
     bool clamped = false;
-    double wc = 0.0;          // F69a: the animated vector's weight (the camera's crouch)
+    double wc = 0.0;          // F69a: the animated vector's weight (the camera's crouch); F169: held under the caller's cap
+    double wcUncapped = 0.0;  // F169: the same weight before the cap (equal to wc at a cap of 1)
     double dEyeY = 0.0;       // F69a: E_y - h_stand (m, negative when down); 0 without a calibration
     double vUsed[3] = {};     // neck -> eye as used (model axes)
     double vAnim[3] = {};     // F69a: the animated vector (after the clamp), whether or not it was used
@@ -4894,9 +4895,11 @@ inline bool pinRestReferenceGenerationAllowed(bool currentAvailable, uint32_t sa
 }
 // The neck target: E - v, v = lerp(rest, the animated neck-to-eye vector turned from the head's heading to the eye's, w_c). eyeFwd: the eye's forward in
 // model axes (its heading is pinHeading's, with the same fallback to the body's forward). Without a calibration or a readable head, the F67c target.
+// F169: wcCap is a ceiling on w_c (the caller passes the animated neck's posture weight while the aim is pitched, where the camera's sink reads as a crouch); at 1, the default, w_c is exactly
+// what it was.
 inline void pinNeckTargetAnim(const double eye[3], const double eyeFwd[3], const double p44[3], const double rows[3][3], const double n0[3],
                               const PinEyeCal& cal, double out[3], PinAnimTarget* info, double localPitchRad = 0.0, bool localPitchValid = false,
-                              const double* eyeUp = nullptr) noexcept {
+                              const double* eyeUp = nullptr, double wcCap = 1.0) noexcept {
     PinAnimTarget local;
     PinAnimTarget& pa = info ? *info : local;
     pa = PinAnimTarget{};
@@ -4910,7 +4913,8 @@ inline void pinNeckTargetAnim(const double eye[3], const double eyeFwd[3], const
     pa.eyeYSelected = pinEyeHeightNormalized(eye[1], pitch, localPitchValid);
     for (int i = 0; i < 3; ++i) pa.vUsed[i] = pa.vAnim[i] = rest[i];
     const double hStand = localPitchValid && std::isfinite(localPitchRad) ? cal.eyeY : cal.eyeYRaw;
-    pa.wc = pinCrouchWeight(cal.have, hStand, pa.eyeYSelected);
+    pa.wc = pa.wcUncapped = pinCrouchWeight(cal.have, hStand, pa.eyeYSelected);
+    if (wcCap < pa.wc) pa.wc = wcCap;   // F169: a cap that is not a number compares false and leaves w_c
     pa.dEyeY = cal.have && std::isfinite(hStand) && std::isfinite(pa.eyeYSelected) ? pa.eyeYSelected - hStand : 0.0;
     if (cal.have && pinRowsRigid(rows)) {
         double f[3], u[3];

@@ -1956,6 +1956,25 @@ void testLegacyOnFootRowsStayOutOfMenu() {
         check(found == 1 && shaped && beside,
               "Crouched ADS body forward / back (F168, TEMPORARY) is one [experimental] number row right after ADS eye forward / back, on its page and under its heading: -20..20 cm, step 0.5, signed, live, shipped 0.0");
     }
+    // F169 (TEMPORARY): "Pistol sprint arm swing phase" is the seventh number row of the developer tier's native on foot rows, right after "Crouched ADS body forward / back" on the same page and
+    // under the same heading: 0..1 of a stride in steps of 0.05, not signed, live, shipped 0.0, labelled without (test). It carries no old value over.
+    {
+        int bodyRow = -1, swingRow = -1, found = 0;
+        bool shaped = true;
+        for (int i = 0; i < kCount; ++i) {
+            const MenuRowDef& d = kMenuRows[i];
+            if (strcmp(d.section, "experimental") == 0 && strcmp(d.key, "native_on_foot_crouch_ads_body_forward_cm") == 0) bodyRow = i;
+            if (strcmp(d.section, "experimental") != 0 || strcmp(d.key, "native_on_foot_pistol_sprint_swing_phase") != 0) continue;
+            swingRow = i;
+            ++found;
+            shaped = shaped && d.kind == MenuKind::Number && d.tier == MenuTier::Experimental && strcmp(d.label, "Pistol sprint arm swing phase") == 0 && strcmp(d.lo, "0") == 0 &&
+                     strcmp(d.hi, "1") == 0 && strcmp(d.step, "0.05") == 0 && !d.showSign && d.applies == 1 && strcmp(d.shipped, "0.0") == 0;
+        }
+        const bool beside = bodyRow >= 0 && swingRow == bodyRow + 1 && strcmp(kMenuRows[swingRow].page, kMenuRows[bodyRow].page) == 0 &&
+                            strcmp(kMenuRows[swingRow].group, kMenuRows[bodyRow].group) == 0;
+        check(found == 1 && shaped && beside,
+              "Pistol sprint arm swing phase (F169, TEMPORARY) is one [experimental] number row right after Crouched ADS body forward / back, on its page and under its heading: 0..1, step 0.05, unsigned, live, shipped 0.0");
+    }
     // F157: the developer tier's "Body draw to hide (test)" dial (F154 to F156) is retired: the key stays in edvr.ini on a hidden retired line (`# ui: hidden -- retired (F157)`), so it
     // has a row in neither menu, the developer tier's included, and the dial's heading is gone with it.
     {
