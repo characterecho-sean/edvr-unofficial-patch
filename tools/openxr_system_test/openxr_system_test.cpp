@@ -66,6 +66,9 @@ struct FakeSource final : SystemSource {
   void noteHiddenMesh(unsigned,uint64_t,uint32_t triangles,const char* reason,uint32_t dropped) noexcept override {
     ++meshNotes;lastMeshReason=reason;lastMeshTriangles=triangles;lastMeshDropped=dropped;
   }
+  // Every answer that carried a mesh, not rate limited (visual.desktop_window_crop = native zooms when the game was served one).
+  std::atomic<unsigned> servedMask{0},servedNotes{0};
+  void noteHiddenMeshServed(unsigned eye) noexcept override {servedMask.fetch_or(1u<<eye);++servedNotes;}
   void noteFrequencyQuery(const SystemRead&,vr::TrackedDeviceIndex_t,vr::ETrackedPropertyError error,
       float value,unsigned) noexcept override {
     std::lock_guard<std::mutex> lock(mutex);++frequencyNotes;frequencyError=error;frequencyValue=value;
@@ -257,31 +260,38 @@ void capabilityTests() {
     // millions of units away. One such triangle used to discard the whole eye.
     sliver.vertices.push_back({-2,-1});sliver.vertices.push_back({1,3});sliver.vertices.push_back({-.5f,1.0000001f});
     sliver.indices.push_back(3);sliver.indices.push_back(4);sliver.indices.push_back(5);
-    struct Served{vr::HiddenAreaMesh_t eye[2];const char* reason;uint32_t dropped;};
+    struct Served{vr::HiddenAreaMesh_t eye[2];const char* reason;uint32_t dropped;unsigned servedMask;unsigned servedNotes;};
     const auto serve=[&](const NativeHiddenMask& l,const NativeHiddenMask& r)->Served {
       FakeSource paired;OpenVRSystem pairedSystem(paired);paired.state=source.state;
       auto both=std::make_shared<NativeHiddenMasks>(*masks);both->revision=1;both->eyes[0]=l;both->eyes[1]=r;
       paired.state.hiddenMasks=both;
       Served out{};out.eye[0]=pairedSystem.GetHiddenAreaMesh(vr::Eye_Left);
       out.eye[1]=pairedSystem.GetHiddenAreaMesh(vr::Eye_Right);
-      out.reason=paired.lastMeshReason;out.dropped=paired.lastMeshDropped;return out;
+      out.reason=paired.lastMeshReason;out.dropped=paired.lastMeshDropped;
+      out.servedMask=paired.servedMask;out.servedNotes=paired.servedNotes;return out;
     };
     auto served=serve(triangle,triangle);
     check(served.eye[0].unTriangleCount==1&&served.eye[1].unTriangleCount==1&&!std::strcmp(served.reason,"runtime"),
       "two populated eyes are both served");
+    check(served.servedMask==3&&served.servedNotes==2,
+      "each served eye is reported as served, once per answer (the desktop window's crop rule reads it)");
     served=serve(triangle,none);
     check(!served.eye[0].pVertexData&&!served.eye[0].unTriangleCount&&!served.eye[1].pVertexData&&!served.eye[1].unTriangleCount,
       "a populated left with an empty right serves neither eye (the zero-byte vertex buffer)");
     check(!std::strcmp(served.reason,"empty"),"the empty eye says empty");
+    check(served.servedMask==0&&served.servedNotes==0,"an answer that carried no mesh is never reported as served (control: the served case above is)");
     served=serve(none,triangle);
     check(!served.eye[0].pVertexData&&!served.eye[1].pVertexData&&!std::strcmp(served.reason,"unpaired"),
       "an empty left with a populated right serves neither eye, and the populated one says unpaired");
+    check(served.servedMask==0&&served.servedNotes==0,"unpaired is not served either");
     served=serve(triangle,broken);
     check(!served.eye[0].pVertexData&&!served.eye[1].pVertexData&&!std::strcmp(served.reason,"invalid_mesh"),
       "a malformed right eye takes the left eye's mesh with it");
+    check(served.servedMask==0,"a malformed right eye serves neither eye, and neither is reported as served");
     served=serve(triangle,sliver);
     check(served.eye[0].unTriangleCount==1&&served.eye[1].unTriangleCount==1&&served.dropped==1&&!std::strcmp(served.reason,"runtime"),
       "a sliver triangle is dropped alone, the eye's other triangle and the other eye stay");
+    check(served.servedMask==3,"and both eyes are still reported as served");
   }
   source.state.connected=false;
   check(!system.GetHiddenAreaMesh(vr::Eye_Right).pVertexData&&

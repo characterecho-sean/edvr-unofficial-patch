@@ -56,8 +56,7 @@ constexpr unsigned kActivationLogCap = 8;
 struct Held {
     ID3D11Texture2D* texture = nullptr;
     float bounds[4] = {0, 0, 1, 1};
-    float fov[4] = {};          // {angleLeft, angleRight, angleUp, angleDown}, radians: the field of view the pixels cover (version 2 of the export)
-    bool haveFov = false;
+    bool meshServed = false;    // the runtime has served the game a hidden-area mesh (version 3 of the export; version 1 never says: false)
     uint64_t serial = 0;
 };
 std::mutex g_mutex;
@@ -76,13 +75,11 @@ DesktopWindowCensus g_census;                  // the skipped draws of the curre
 FaultBudget g_sampleBudget("desktopWindowSample", 3);
 int g_contextToken = 0;                        // the table's context: any address that is ours
 
-HRESULT noteEyeWith(void* context, uint32_t eye, ID3D11Texture2D* texture, const float* bounds, const float* fov) {
+HRESULT noteEyeWith(void* context, uint32_t eye, ID3D11Texture2D* texture, const float* bounds, bool meshServed) {
     if (context != &g_contextToken || eye > 1 || !texture || !bounds) return E_INVALIDARG;
     for (int i = 0; i < 4; ++i) {
         if (!std::isfinite(bounds[i])) return E_INVALIDARG;
     }
-    bool haveFov = fov != nullptr;
-    for (int i = 0; haveFov && i < 4; ++i) haveFov = std::isfinite(fov[i]);
     if (!(g_wantMask.load(std::memory_order_relaxed) & (1u << eye))) return S_FALSE;
     texture->AddRef();
     ID3D11Texture2D* spill = nullptr;
@@ -95,8 +92,7 @@ HRESULT noteEyeWith(void* context, uint32_t eye, ID3D11Texture2D* texture, const
         }
         h.texture = texture;
         std::memcpy(h.bounds, bounds, sizeof h.bounds);
-        h.haveFov = haveFov;
-        if (haveFov) std::memcpy(h.fov, fov, sizeof h.fov);
+        h.meshServed = meshServed;
         h.serial = ++g_serial;
         g_retirePending.store(g_retiredCount, std::memory_order_relaxed);
     }
@@ -107,9 +103,11 @@ HRESULT noteEyeWith(void* context, uint32_t eye, ID3D11Texture2D* texture, const
     return S_OK;
 }
 
-// Version 1 of the export: no field of view. Version 2: with it.
-HRESULT WINAPI noteEye(void* context, uint32_t eye, ID3D11Texture2D* texture, const float* bounds) { return noteEyeWith(context, eye, texture, bounds, nullptr); }
-HRESULT WINAPI noteEye2(void* context, uint32_t eye, ID3D11Texture2D* texture, const float* bounds, const float* fov) { return noteEyeWith(context, eye, texture, bounds, fov); }
+// Version 1 of the export: no hidden-area-mesh answer (no mesh). Version 3: with it. (Version 2, round 6's field of view, is retired.)
+HRESULT WINAPI noteEye(void* context, uint32_t eye, ID3D11Texture2D* texture, const float* bounds) { return noteEyeWith(context, eye, texture, bounds, false); }
+HRESULT WINAPI noteEye3(void* context, uint32_t eye, ID3D11Texture2D* texture, const float* bounds, uint32_t hiddenMeshServed) {
+    return noteEyeWith(context, eye, texture, bounds, hiddenMeshServed != 0);
+}
 
 HRESULT WINAPI closeProvider(void* context) {
     if (context != &g_contextToken) return E_INVALIDARG;
@@ -168,10 +166,10 @@ struct Session {
     // round 6: the picture's shape and the window's style, as the settings say now, and as the activation's window state was built for
     DesktopWindowAspect aspectOpt = DesktopWindowAspect::Full, activeAspect = DesktopWindowAspect::Full;
     DesktopWindowStyle styleOpt = DesktopWindowStyle::Window, activeStyle = DesktopWindowStyle::Window;
+    DesktopWindowCropRule cropOpt = DesktopWindowCropRule::Native;   // visual.desktop_window_crop (round 8): how a chosen shape is cut
     int shiftOpt = 0;                   // visual.desktop_window_vertical_shift (round 7): the crop moved up (+) or down (-), percent of the travel it has
     bool optionsLogged = false;
     bool keepHeightOnce = false;        // the picture's shape changed with the window untouched: the next correction keeps the client height
-    bool noteNoFov = false;
     // the pipeline
     Pipe pipe;
     SrvEntry srv[kSrvCache];
@@ -238,6 +236,7 @@ void refreshMode(bool flat) {
         S.mode = DesktopWindowMode::Game;
         S.aspectOpt = DesktopWindowAspect::Full;
         S.styleOpt = DesktopWindowStyle::Window;
+        S.cropOpt = DesktopWindowCropRule::Native;
         S.shiftOpt = 0;
         return;
     }
@@ -257,6 +256,14 @@ void refreshMode(bool flat) {
             if (S.optionsLogged) Log::get().note("desktop window: style %s (was %s)", desktopWindowStyleName(styleOpt), desktopWindowStyleName(S.styleOpt));
             else Log::get().note("desktop window: style %s", desktopWindowStyleName(styleOpt));
         }
+        const std::string rawCrop = cfg.getString("visual.desktop_window_crop", "native");
+        bool cropKnown = true;
+        const DesktopWindowCropRule cropOpt = desktopWindowParseCropRule(rawCrop.c_str(), &cropKnown);
+        if (!cropKnown) Log::get().note("desktop window: unknown crop \"%.40s\" (it is native or center); treated as native", rawCrop.c_str());
+        if (!S.optionsLogged || cropOpt != S.cropOpt) {
+            if (S.optionsLogged) Log::get().note("desktop window: crop rule %s (was %s)", desktopWindowCropRuleName(cropOpt), desktopWindowCropRuleName(S.cropOpt));
+            else Log::get().note("desktop window: crop rule %s", desktopWindowCropRuleName(cropOpt));
+        }
         const int shiftOpt = cfg.getIntInRange("visual.desktop_window_vertical_shift", 0, -100, 100);
         if (!S.optionsLogged || shiftOpt != S.shiftOpt) {
             if (S.optionsLogged) Log::get().note("desktop window: vertical shift %d (was %d)", shiftOpt, S.shiftOpt);
@@ -265,6 +272,7 @@ void refreshMode(bool flat) {
         S.optionsLogged = true;
         S.aspectOpt = aspectOpt;
         S.styleOpt = styleOpt;
+        S.cropOpt = cropOpt;
         S.shiftOpt = shiftOpt;
     }
     const std::string raw = cfg.getString("visual.desktop_window", "game");
@@ -303,8 +311,7 @@ void releaseHeld() {
 struct Snap {
     ComPtr<ID3D11Texture2D> texture[2];
     float bounds[2][4] = {};
-    float fov[2][4] = {};
-    bool haveFov[2] = {};
+    bool meshServed[2] = {};
     uint64_t serial[2] = {};
 };
 void snapshot(Snap& s, unsigned need) {
@@ -313,8 +320,7 @@ void snapshot(Snap& s, unsigned need) {
         if (!(need & (1u << eye)) || !g_held[eye].texture) continue;
         s.texture[eye] = g_held[eye].texture;   // ComPtr copy: its own reference
         std::memcpy(s.bounds[eye], g_held[eye].bounds, sizeof s.bounds[eye]);
-        std::memcpy(s.fov[eye], g_held[eye].fov, sizeof s.fov[eye]);
-        s.haveFov[eye] = g_held[eye].haveFov;
+        s.meshServed[eye] = g_held[eye].meshServed;
         s.serial[eye] = g_held[eye].serial;
     }
 }
@@ -910,8 +916,8 @@ Outcome presentActive(IDXGISwapChain* swap, ID3D11Device* device, uint64_t now, 
         texH[eye] = d.Height;
     }
     // The picture's shape (round 6). `full`: each eye as its bounds sub-rect is. Any other value: the whole picture's shape (each eye half of it with both eyes), and each
-    // eye is cropped to its shape, centred on the eye's default centre (its projection centre) and moved only as far as it takes to stay inside the image; the vertical shift
-    // (round 7) then moves the crop up or down from there.
+    // eye is cropped to its shape by the crop rule (round 8: the texture's centre, or Elite's own mirror's zoom and centre when the runtime has served the game a hidden-area
+    // mesh), moved only as far as it takes to stay inside the image; the vertical shift (round 7) then moves the crop up or down from there. `full` is never cropped or zoomed.
     DwSize shape[2];
     desktopWindowShapes(S.aspectOpt, S.mode, eyeSize, shape);
     double aspect = 0;
@@ -921,22 +927,12 @@ Outcome presentActive(IDXGISwapChain* swap, ID3D11Device* device, uint64_t now, 
     }
     const double ratio = desktopWindowAspectRatio(S.aspectOpt);
     float cropBounds[2][4] = {};
-    double centreU[2] = {0.5, 0.5}, centreV[2] = {0.5, 0.5};
-    bool fromFov[2] = {};
+    DwCropPlan plans[2];
     for (unsigned eye = 0; eye < 2; ++eye) {
         if (!(need & (1u << eye))) continue;
-        if (ratio > 0) {
-            fromFov[eye] = snap.haveFov[eye] && desktopWindowProjectionCentre(snap.fov[eye], &centreU[eye], &centreV[eye]);
-            if (!fromFov[eye]) {
-                centreU[eye] = centreV[eye] = 0.5;
-                if (!S.noteNoFov) {
-                    S.noteNoFov = true;
-                    Log::get().note("desktop window: an eye image came with no field of view; its crop is centred on the middle of its bounds");
-                }
-            }
-        }
-        desktopWindowCrop(snap.bounds[eye], texW[eye], texH[eye], ratio > 0 ? (S.mode == DesktopWindowMode::BothEyes ? ratio * 0.5 : ratio) : 0.0, fromFov[eye], centreU[eye],
-                          centreV[eye], cropBounds[eye], S.shiftOpt);
+        plans[eye] = desktopWindowCropPlan(S.cropOpt, snap.meshServed[eye], eye);
+        desktopWindowCrop(snap.bounds[eye], texW[eye], texH[eye], ratio > 0 ? (S.mode == DesktopWindowMode::BothEyes ? ratio * 0.5 : ratio) : 0.0, true, plans[eye].u, plans[eye].v,
+                          cropBounds[eye], S.shiftOpt, plans[eye].zoom);
     }
     ComPtr<ID3D11DeviceContext> ctx;
     device->GetImmediateContext(&ctx);
@@ -1048,12 +1044,14 @@ Outcome presentActive(IDXGISwapChain* swap, ID3D11Device* device, uint64_t now, 
                             sc.BufferCount, sc.Windowed ? 1 : 0, static_cast<unsigned long>(GetWindowLongPtrW(hwnd, GWL_STYLE)),
                             static_cast<unsigned long>(GetWindowLongPtrW(hwnd, GWL_EXSTYLE)), wr.left, wr.top, wr.right - wr.left, wr.bottom - wr.top, clientW, clientH,
                             mi.rcMonitor.left, mi.rcMonitor.top, mi.rcMonitor.right, mi.rcMonitor.bottom, mi.rcWork.left, mi.rcWork.top, mi.rcWork.right, mi.rcWork.bottom);
-            if (ratio > 0) {   // the crop of each eye, once per activation: its default centre, the vertical shift, and the bounds it was cropped to
+            if (ratio > 0) {   // the crop of each eye, once per activation: the rule (and, for native, the answer about the hidden-area mesh and the mode it picked), the shift, the bounds
                 for (unsigned eye = 0; eye < 2; ++eye) {
                     if (!(need & (1u << eye))) continue;
-                    Log::get().note("desktop window: crop %s, %s eye: default centre u=%.4f v=%.4f of its image (%s), vertical shift %d; crop bounds u %.4f..%.4f v %.4f..%.4f of %ux%u",
-                                    desktopWindowAspectName(S.aspectOpt), eye ? "right" : "left", centreU[eye], centreV[eye], fromFov[eye] ? "from its field of view" : "no field of view: the middle",
-                                    S.shiftOpt, cropBounds[eye][0], cropBounds[eye][2], cropBounds[eye][1], cropBounds[eye][3], texW[eye], texH[eye]);
+                    char ruleText[160];
+                    desktopWindowCropRuleText(ruleText, sizeof ruleText, S.cropOpt, snap.meshServed[eye], eye);
+                    Log::get().note("desktop window: crop %s, %s eye, rule %s, vertical shift %d; crop bounds u %.4f..%.4f v %.4f..%.4f of %ux%u",
+                                    desktopWindowAspectName(S.aspectOpt), eye ? "right" : "left", ruleText, S.shiftOpt, cropBounds[eye][0], cropBounds[eye][2], cropBounds[eye][1],
+                                    cropBounds[eye][3], texW[eye], texH[eye]);
                 }
             }
         }
@@ -1195,15 +1193,16 @@ bool desktopWindowPresent(IDXGISwapChain* swap, ID3D11Device* device, unsigned p
 }  // namespace edvr
 
 extern "C" HRESULT WINAPI edvrAcquireDesktopWindow(const EdvrNativeDesktopWindowRequest* request, EdvrNativeDesktopWindowTable* table) {
-    // Version 1 (no field of view) or 2 (with it); the table answers with the version asked, and its noteEye slot holds that version's function.
+    // Version 1 (no hidden-area-mesh answer) or 3 (with it); the table answers with the version asked, and its noteEye slot holds that version's function. Version 2 (round
+    // 6's field of view) is retired and refused.
     if (!table || table->size != sizeof(*table) ||
-        (table->version != EDVR_NATIVE_DESKTOP_WINDOW_VERSION_1 && table->version != EDVR_NATIVE_DESKTOP_WINDOW_VERSION_2))
+        (table->version != EDVR_NATIVE_DESKTOP_WINDOW_VERSION_1 && table->version != EDVR_NATIVE_DESKTOP_WINDOW_VERSION_3))
         return E_INVALIDARG;
     const uint32_t version = table->version;
     *table = {sizeof(*table), version};
     if (!request || request->size != sizeof(*request) || request->version != version || !request->gameDevice || !request->generation) return E_INVALIDARG;
     table->context = &edvr::g_contextToken;
-    table->noteEye = version == EDVR_NATIVE_DESKTOP_WINDOW_VERSION_2 ? reinterpret_cast<EdvrNativeDesktopWindowNoteEye>(&edvr::noteEye2) : &edvr::noteEye;
+    table->noteEye = version == EDVR_NATIVE_DESKTOP_WINDOW_VERSION_3 ? reinterpret_cast<EdvrNativeDesktopWindowNoteEye>(&edvr::noteEye3) : &edvr::noteEye;
     table->close = edvr::closeProvider;
     return S_OK;
 }

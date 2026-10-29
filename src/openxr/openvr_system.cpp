@@ -404,6 +404,7 @@ HiddenAreaMesh_t OpenVRSystem::GetHiddenAreaMesh(EVREye eye) {
     } else if(!s.hiddenMasksCompatible)reason="modified_frustum";
   } catch(...) {reason="allocation_failure";result={};}
   if(meshProbe_[e].take(GetTickCount64()))source_.noteHiddenMesh(e,revision,result.unTriangleCount,reason,dropped);
+  if(result.pVertexData&&result.unTriangleCount)source_.noteHiddenMeshServed(e);
   return result;
 }
 bool OpenVRSystem::GetControllerState(TrackedDeviceIndex_t,VRControllerState_t* state) {if(state)*state={};return false;}

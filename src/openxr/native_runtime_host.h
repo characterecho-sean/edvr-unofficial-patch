@@ -884,6 +884,12 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     nativeTracePrintf("property_query,slot=%u,index=%u,property=%u,error=%u,game_frames=%u,game_rvas=%s\n",
       slot,index,unsigned(property),unsigned(error),stack.gameFrames,stack.rvas);
   }
+  // Every answer to the game's GetHiddenAreaMesh that carried a mesh (not the rate-limited trace below): the eye's bit is set and stays set, as Elite's own count for
+  // the eye does once it holds a non-empty mesh (RVA 0x4E4910 stores the count only when vertex data comes back; 0x4E45A0 tests either eye's count).
+  void noteHiddenMeshServed(unsigned eye) noexcept override {
+    if(eye<2)hiddenMeshServedEyes.fetch_or(1u<<eye,std::memory_order_release);
+  }
+  std::atomic<unsigned> hiddenMeshServedEyes{0};
   void noteHiddenMesh(unsigned eye,uint64_t revision,uint32_t triangles,const char* reason,uint32_t dropped) noexcept override {
     const auto stack=edvr::captureGameCallStack();
     nativeTracePrintf("hidden_mesh_query,eye=%u,revision=%llu,triangles=%u,dropped=%u,reason=%s,game_frames=%u,game_rvas=%s\n",
@@ -2313,12 +2319,9 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     if(r==vr::VRCompositorError_None && copyPixels){
       ++copiedEyes;temporalFrameEyes|=1u<<unsigned(eye);
       // The eye is captured: its finished texture (after the upscaler, sharpening, the UI layer and the menu) is what visual.desktop_window shows in Elite's window.
-      // It goes with the field of view those pixels hold: frameContentViews, the projection the treated pixels actually hold (finishCapturedEye sets it for this eye each
-      // capture, narrowed by a field-of-view trim and shifted by an untreated frame's jitter), the same one the menu is placed by. The crop to a chosen shape is centred on
-      // the eye's default centre in it.
-      const auto& contentFov=frameContentViews[unsigned(eye)].fov;
-      const float contentAngles[4]={contentFov.angleLeft,contentFov.angleRight,contentFov.angleUp,contentFov.angleDown};
-      desktopWindow.noteEye(unsigned(eye),treated.Get(),treatedBounds,contentAngles);
+      // It goes with whether this runtime has served the game a hidden-area mesh, the test Elite's own mirror makes (either eye's mesh non-empty, kept once served, as the
+      // game keeps its counts): the crop rule visual.desktop_window_crop = native zooms when it has. No query answered yet is no mesh.
+      desktopWindow.noteEye(unsigned(eye),treated.Get(),treatedBounds,(hiddenMeshServedEyes.load(std::memory_order_acquire)&3u)!=0);
     }
     else { invalidateEyeTreatments(); timingInvalidate(); }
     return r;

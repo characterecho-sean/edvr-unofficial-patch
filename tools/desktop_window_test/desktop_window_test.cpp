@@ -9,9 +9,15 @@
 //   the cursor line; and the pins that hold the hooks to passing through everything but that one call.
 //   THE HIDDEN CURSOR (round 4): the rule (foreground and inside the client and active), the show-count protocol against a fake ShowCursor (the game sees the counts it would
 //   see without EDVR, a game "show" never leaves the real count at 0 or above while hiding is wanted, the hides are given back), and the pins on the thread check and the undo.
-//   THE PICTURE'S SHAPE AND THE STYLE (round 6): the aspect and style words, the projection centre from a field of view, the centre crop (an off-centre centre, the clamp at an image
+//   THE PICTURE'S SHAPE AND THE STYLE (round 6): the aspect and style words, the centre crop (an off-centre centre, the clamp at an image
 //   edge, a flipped sub-rect), both eyes as halves, the borderless style and rectangle (0x94020000 and 0x14CC0000 both become 0x94000000), a shape change keeping the client height,
 //   and the pins on the page, the keys, the version 2 export and the live change.
+//   THE CROP RULE (round 8, replacing round 6's projection-centre crop): visual.desktop_window_crop = native | center. center: the shape around the middle of the eye's bounds, no
+//   zoom. native: what Elite's own mirror does (analysis\decomp\verify_20261028_vr_mirror_crop.txt, build 334925): the same as center without a hidden-area mesh, and with one a
+//   1.32x zoom centred at u 0.515 for the left eye, mirrored (0.485) for the right. full is never cropped or zoomed. The words, the constants, the plan, the log words, the numbers
+//   on a 4032x4034 eye (the note's own Pimax figures), both eyes as halves, a sub-rect, a flipped sub-rect, the vertical shift on top of each rule; the mesh flag through the
+//   export (a fake provider behind the real client: version 3 carries it, version 1 does not, version 2 is gone), and the pins on the key, the plan's use, the handoff and the
+//   runtime's answer to GetHiddenAreaMesh.
 //   THE VERTICAL SHIFT (round 7): the crop moved up (+) or down (-) a fraction of the way from its default position to the picture's top or bottom edge: 0 is the crop without a
 //   shift, +-100 reach the edges from any default, +-50 are halfway from an off-centre default, no travel is no change, out of range is held to +-100, a sub-rect works in the
 //   texture's UVs, a flipped sub-rect moves as the viewer sees it; and the pins on the key (one whole number, -100..100, default 0, flat resets it), the call that gives it to the
@@ -23,6 +29,7 @@
 // No device and no window. argv[1] is the repository root.
 #include "../../src/common/desktop_window_census.h"
 #include "../../src/common/desktop_window_math.h"
+#include "../../src/openxr/native_desktop_window_client.h"
 
 #include <cmath>
 #include <cstdio>
@@ -224,18 +231,6 @@ static void shapeRules() {
           "the borderless rectangle is the whole monitor, client and all, on a monitor to the left too");
     check(!desktopWindowBorderlessPlan(0, 0, 0, 1080).ok && !desktopWindowBorderlessPlan(10, 10, 5, 20).ok, "a monitor with no size has no borderless rectangle");
 
-    // The eye's projection centre in its image, the crop's default centre.
-    double u = 0, v = 0;
-    const float symmetric[4] = {-0.8f, 0.8f, 0.8f, -0.8f};
-    check(desktopWindowProjectionCentre(symmetric, &u, &v) && closeTo(u, 0.5, 1e-6) && closeTo(v, 0.5, 1e-6), "a symmetric field of view looks at the middle");
-    const float offCentre[4] = {static_cast<float>(std::atan(-1.0)), static_cast<float>(std::atan(1.5)), static_cast<float>(std::atan(1.2)), static_cast<float>(std::atan(-0.8))};
-    check(desktopWindowProjectionCentre(offCentre, &u, &v) && closeTo(u, 0.4, 1e-5) && closeTo(v, 0.6, 1e-5),
-          "tangents -1 to 1.5 across and 1.2 to -0.8 down: u = 1/2.5 = 0.4 from the left, v = 1.2/2.0 = 0.6 from the top");
-    const float zero[4] = {0, 0, 0, 0}, inverted[4] = {0.5f, -0.5f, 0.5f, -0.5f}, nan[4] = {-0.5f, NAN, 0.5f, -0.5f}, wide[4] = {-1.6f, 0.5f, 0.5f, -0.5f};
-    check(!desktopWindowProjectionCentre(zero, &u, &v) && !desktopWindowProjectionCentre(inverted, &u, &v) && !desktopWindowProjectionCentre(nan, &u, &v) &&
-              !desktopWindowProjectionCentre(wide, &u, &v) && !desktopWindowProjectionCentre(nullptr, &u, &v),
-          "no field of view, an inverted one, a NaN, an angle past a right angle and a null pointer give no centre");
-
     // The crop. A 2000x2000 image, 16:9: the whole width, 1125 rows, the centre decides which.
     const float whole[4] = {0, 0, 1, 1};
     float out[4];
@@ -381,6 +376,143 @@ static void shapeRules() {
     cropOf(whole, 2000, 2000, 16.0 / 9.0, 0.45, 0.35, 100, base);
     cropOf(whole, 2000, 2000, 16.0 / 9.0, 0.55, 0.35, 100, out);
     check(closeTo(base[1], 0.0, 1e-6) && closeTo(out[1], 0.0, 1e-6) && closeTo(base[3], out[3], 1e-9), "two eyes with the same shift: the same rows");
+
+    // ROUND 8, THE CROP RULE. The words.
+    check(desktopWindowParseCropRule("native", &known) == DesktopWindowCropRule::Native && known && desktopWindowParseCropRule("", &known) == DesktopWindowCropRule::Native && known &&
+              desktopWindowParseCropRule(nullptr, &known) == DesktopWindowCropRule::Native && known && desktopWindowParseCropRule("NATIVE", &known) == DesktopWindowCropRule::Native && known,
+          "native is the default word, and the missing one");
+    check(desktopWindowParseCropRule("center", &known) == DesktopWindowCropRule::Center && known && desktopWindowParseCropRule("Center", &known) == DesktopWindowCropRule::Center && known,
+          "center is the other word (so native is not every word)");
+    check(desktopWindowParseCropRule("centre", &known) == DesktopWindowCropRule::Native && !known && desktopWindowParseCropRule("off", &known) == DesktopWindowCropRule::Native && !known &&
+              desktopWindowParseCropRule("native ", &known) == DesktopWindowCropRule::Native && !known,
+          "any other word is native and unknown (the menu says Centre, the file says center; the flat profile's \"off\" too)");
+    check(!std::strcmp(desktopWindowCropRuleName(DesktopWindowCropRule::Native), "native") && !std::strcmp(desktopWindowCropRuleName(DesktopWindowCropRule::Center), "center"),
+          "the rules' names round-trip");
+    // Elite's constants.
+    auto constantsOk = [](double zoom, double pan, double centre) {
+        return closeTo(zoom, 1.32, 1e-12) && closeTo(pan, -0.03, 1e-12) && closeTo(centre, 0.515, 1e-12) && closeTo(centre, 0.5 - 0.5 * pan, 1e-12);
+    };
+    check(constantsOk(kDwMirrorZoom, kDwMirrorPan, kDwMirrorCentreU), "Elite's mirror constants: zoom 1.32, pan -0.03, so the left eye's centre is 0.515");
+    check(!constantsOk(1.3, kDwMirrorPan, kDwMirrorCentreU) && !constantsOk(kDwMirrorZoom, -0.02, kDwMirrorCentreU) && !constantsOk(kDwMirrorZoom, kDwMirrorPan, 0.5) &&
+              !constantsOk(kDwMirrorZoom, kDwMirrorPan, 0.51),
+          "control: a different zoom, pan or centre trips the constants pin");
+    // The plan.
+    {
+        auto plain = [](const DwCropPlan& p) { return p.zoom == 1.0 && p.u == 0.5 && p.v == 0.5 && !p.zoomed; };
+        const DwCropPlan centerLeft = desktopWindowCropPlan(DesktopWindowCropRule::Center, true, 0), centerRight = desktopWindowCropPlan(DesktopWindowCropRule::Center, true, 1);
+        const DwCropPlan noMeshLeft = desktopWindowCropPlan(DesktopWindowCropRule::Native, false, 0), noMeshRight = desktopWindowCropPlan(DesktopWindowCropRule::Native, false, 1);
+        const DwCropPlan meshLeft = desktopWindowCropPlan(DesktopWindowCropRule::Native, true, 0), meshRight = desktopWindowCropPlan(DesktopWindowCropRule::Native, true, 1);
+        check(plain(centerLeft) && plain(centerRight), "center: the texture's centre and no zoom, for either eye, even when a mesh was served");
+        check(plain(noMeshLeft) && plain(noMeshRight), "native with no mesh is the same as center (Elite's mode 7)");
+        check(meshLeft.zoomed && closeTo(meshLeft.zoom, 1.32, 1e-12) && closeTo(meshLeft.u, 0.515, 1e-12) && meshLeft.v == 0.5, "native with a mesh, left eye: 1.32x at u 0.515, v 0.5 (Elite's mode 9)");
+        check(meshRight.zoomed && closeTo(meshRight.zoom, 1.32, 1e-12) && closeTo(meshRight.u, 0.485, 1e-12) && meshRight.v == 0.5 && closeTo(meshLeft.u + meshRight.u, 1.0, 1e-12),
+              "native with a mesh, right eye: the mirror of the left, u 0.485");
+        check(!plain(meshLeft) && !plain(meshRight) && meshLeft.u != meshRight.u && plain(noMeshLeft),
+              "control: a mesh changes the plan under native, and the two eyes' centres differ");
+    }
+    // The log words.
+    {
+        char text[160];
+        desktopWindowCropRuleText(text, sizeof text, DesktopWindowCropRule::Center, true, 0);
+        check(!std::strcmp(text, "center: texture centre, no zoom"), "the center line");
+        desktopWindowCropRuleText(text, sizeof text, DesktopWindowCropRule::Native, false, 0);
+        const std::string none = text;
+        check(none == "native: hidden-area mesh served no, as the game, no mesh", "the native line without a mesh");
+        desktopWindowCropRuleText(text, sizeof text, DesktopWindowCropRule::Native, true, 0);
+        const std::string left = text;
+        desktopWindowCropRuleText(text, sizeof text, DesktopWindowCropRule::Native, true, 1);
+        const std::string right = text;
+        check(left == "native: hidden-area mesh served yes, as the game, mesh: 1.32x at u 0.515" && right == "native: hidden-area mesh served yes, as the game, mesh: 1.32x at u 0.485",
+              "the native line with a mesh, for each eye");
+        check(none != left && left != right, "control: the answer and the eye change the words");
+    }
+    // The numbers on the Pimax eye of the note: 4032x4034, a 16:9 window. Mode 7: u 0..1, v 0.5 +- 0.5/k. Mode 9: u 0.515 +- 0.5/1.32, v 0.5 +- 0.5/(1.32 k).
+    {
+        const float eyeBounds[4] = {0, 0, 1, 1};
+        const double k = (16.0 / 9.0) / (4032.0 / 4034.0);
+        auto cropWith = [&](DesktopWindowCropRule rule, bool mesh, unsigned eye, int shift, float* o, double target = 16.0 / 9.0) {
+            const DwCropPlan p = desktopWindowCropPlan(rule, mesh, eye);
+            desktopWindowCrop(eyeBounds, 4032, 4034, target, true, p.u, p.v, o, shift, p.zoom);
+        };
+        float centre[4], noMesh[4], meshL[4], meshR[4], cmesh[4];
+        cropWith(DesktopWindowCropRule::Center, false, 0, 0, centre);
+        cropWith(DesktopWindowCropRule::Center, true, 0, 0, cmesh);
+        cropWith(DesktopWindowCropRule::Native, false, 0, 0, noMesh);
+        cropWith(DesktopWindowCropRule::Native, true, 0, 0, meshL);
+        cropWith(DesktopWindowCropRule::Native, true, 1, 0, meshR);
+        check(closeTo(centre[0], 0.0, 1e-6) && closeTo(centre[2], 1.0, 1e-6) && closeTo(centre[1], 0.5 - 0.5 / k, 1e-5) && closeTo(centre[3], 0.5 + 0.5 / k, 1e-5) &&
+                  closeTo(centre[1], 0.2189, 1e-4) && closeTo(centre[3], 0.7811, 1e-4),
+              "center on a 4032x4034 eye, 16:9: all the width, v 0.5 +- 0.5/k (the note's mode 7: 0.2189..0.7811)");
+        check(sameBits(centre, noMesh) && sameBits(centre, cmesh), "native with no mesh is exactly the center crop; center ignores the mesh");
+        check(closeTo(meshL[0], 0.515 - 0.5 / 1.32, 1e-5) && closeTo(meshL[2], 0.515 + 0.5 / 1.32, 1e-5) && closeTo(meshL[1], 0.5 - 0.5 / (1.32 * k), 1e-5) &&
+                  closeTo(meshL[3], 0.5 + 0.5 / (1.32 * k), 1e-5) && closeTo(meshL[0], 0.1362, 1e-4) && closeTo(meshL[2], 0.8938, 1e-4) && closeTo(meshL[1], 0.2870, 1e-4) &&
+                  closeTo(meshL[3], 0.7130, 1e-4),
+              "native with a mesh, left eye: u 0.515 +- 0.5/1.32, v 0.5 +- 0.5/(1.32 k) (the note's mode 9: u 0.1362..0.8938, v 0.2870..0.7130)");
+        check(closeTo((meshL[2] - meshL[0]) * 4032.0, 3054.55, 0.01) && closeTo((meshL[3] - meshL[1]) * 4034.0, 1718.18, 0.01), "that is 3055x1718 pixels, the size the note gives");
+        check(closeTo(meshR[0], 0.485 - 0.5 / 1.32, 1e-5) && closeTo(meshR[2], 0.485 + 0.5 / 1.32, 1e-5) && closeTo(meshR[1], meshL[1], 1e-7) && closeTo(meshR[3], meshL[3], 1e-7) &&
+                  closeTo(meshR[0], 1.0 - meshL[2], 1e-5) && closeTo(meshR[2], 1.0 - meshL[0], 1e-5),
+              "native with a mesh, right eye: the left eye's crop mirrored (u centre 0.485), the same rows");
+        check(!sameBits(meshL, noMesh) && !sameBits(meshL, meshR) && (meshL[2] - meshL[0]) < 0.8 && (centre[2] - centre[0]) > 0.99 && meshL[1] > centre[1] && meshL[3] < centre[3],
+              "control: the mesh crop is smaller than the center crop, inside it, and the eyes differ");
+        // Both eyes: each eye is half the shape (8:9); the zoom divides both sides by 1.32 and the shape stays.
+        float halfC[4], halfM[4];
+        cropWith(DesktopWindowCropRule::Center, false, 0, 0, halfC, 16.0 / 9.0 * 0.5);
+        cropWith(DesktopWindowCropRule::Native, true, 0, 0, halfM, 16.0 / 9.0 * 0.5);
+        auto pixelShape = [](const float* c) { return ((c[2] - c[0]) * 4032.0) / ((c[3] - c[1]) * 4034.0); };
+        check(closeTo(pixelShape(halfC), 8.0 / 9.0, 1e-4) && closeTo(pixelShape(halfM), 8.0 / 9.0, 1e-4) && closeTo((halfC[2] - halfC[0]) / (halfM[2] - halfM[0]), 1.32, 1e-4) &&
+                  closeTo((halfC[3] - halfC[1]) / (halfM[3] - halfM[1]), 1.32, 1e-4),
+              "both eyes (8:9 halves): the center and the mesh crops are both 8:9, the mesh one 1.32 times smaller each way");
+        check(!closeTo(pixelShape(halfC), 16.0 / 9.0, 0.1), "control: a half is not the whole shape");
+        // full: no crop and no zoom, under either rule, with any shift.
+        float fullC[4], fullM[4];
+        const DwCropPlan zoomed = desktopWindowCropPlan(DesktopWindowCropRule::Native, true, 0);
+        desktopWindowCrop(eyeBounds, 4032, 4034, 0.0, true, zoomed.u, zoomed.v, fullM, 75, zoomed.zoom);
+        desktopWindowCrop(eyeBounds, 4032, 4034, 0.0, true, 0.5, 0.5, fullC, -75, 1.0);
+        check(sameBits(fullM, eyeBounds) && sameBits(fullC, eyeBounds), "full (target 0) is never cropped or zoomed, whatever the rule, the zoom or the shift");
+        check(!sameBits(meshL, eyeBounds) && !sameBits(centre, eyeBounds), "control: a chosen shape does change the bounds");
+        // The vertical shift on top of each rule, from that rule's default position (Pimax eye: center top row 883, mesh top row 1157.909).
+        float up[4], down[4], half50[4];
+        cropWith(DesktopWindowCropRule::Center, false, 0, 100, up);
+        cropWith(DesktopWindowCropRule::Center, false, 0, -100, down);
+        cropWith(DesktopWindowCropRule::Center, false, 0, 50, half50);
+        check(closeTo(up[1], 0.0, 1e-6) && closeTo(up[3], 2268.0 / 4034.0, 1e-5) && closeTo(down[3], 1.0, 1e-6) && closeTo(down[1], 1.0 - 2268.0 / 4034.0, 1e-5) && closeTo(half50[1], 441.5 / 4034.0, 1e-5) &&
+                  up[0] == centre[0] && up[2] == centre[2] && down[0] == centre[0] && down[2] == centre[2],
+              "center + shift: +100 at the top edge, -100 at the bottom edge, +50 halfway from row 883, the columns unchanged");
+        float mup[4], mdown[4], mhalf[4], mdhalf[4];
+        cropWith(DesktopWindowCropRule::Native, true, 0, 100, mup);
+        cropWith(DesktopWindowCropRule::Native, true, 0, -100, mdown);
+        cropWith(DesktopWindowCropRule::Native, true, 0, 50, mhalf);
+        cropWith(DesktopWindowCropRule::Native, true, 0, -50, mdhalf);
+        check(closeTo(mup[1], 0.0, 1e-6) && closeTo(mup[3], 1718.18 / 4034.0, 1e-4) && closeTo(mdown[3], 1.0, 1e-6) && closeTo(mdown[1], 1.0 - 1718.18 / 4034.0, 1e-4) &&
+                  closeTo(mhalf[1], 1157.909 / 2.0 / 4034.0, 1e-4) && closeTo(mdhalf[1], (1157.909 + (4034.0 - 1718.18 - 1157.909) / 2.0) / 4034.0, 1e-4),
+              "native with a mesh + shift: +-100 reach the edges, +-50 are halfway from the zoomed default (row 1157.9)");
+        check(mup[0] == meshL[0] && mup[2] == meshL[2] && mdown[0] == meshL[0] && mdown[2] == meshL[2] && mhalf[0] == meshL[0] && mdhalf[2] == meshL[2],
+              "with the zoom there is room across too, but the shift stays vertical: the columns do not move");
+        check(mdown[1] > down[1] && (mdown[3] - mdown[1]) < (down[3] - down[1]) && !sameBits(mhalf, half50),
+              "control: the zoom changes the travel (the lowest mesh crop starts lower and is shorter) and the same shift lands in a different place");
+        float rup[4];
+        cropWith(DesktopWindowCropRule::Native, true, 1, 100, rup);
+        check(closeTo(rup[1], mup[1], 1e-7) && closeTo(rup[3], mup[3], 1e-7) && closeTo(rup[0], meshR[0], 1e-7) && !closeTo(rup[0], mup[0], 1e-3), "the right eye takes the same shift: the same rows, its own columns");
+        // A sub-rect of a texture: the centre is a fraction of the sub-rect, in the texture's UVs.
+        const float leftHalf[4] = {0, 0, 0.5f, 1}, rightHalf[4] = {0.5f, 0, 1, 1};
+        float sl[4], sr[4];
+        const DwCropPlan pl = desktopWindowCropPlan(DesktopWindowCropRule::Native, true, 0), pr = desktopWindowCropPlan(DesktopWindowCropRule::Native, true, 1);
+        desktopWindowCrop(leftHalf, 8064, 4034, 16.0 / 9.0, true, pl.u, pl.v, sl, 0, pl.zoom);
+        desktopWindowCrop(rightHalf, 8064, 4034, 16.0 / 9.0, true, pr.u, pr.v, sr, 0, pr.zoom);
+        check(closeTo(sl[0], 0.5 * meshL[0], 1e-5) && closeTo(sl[2], 0.5 * meshL[2], 1e-5) && closeTo(sl[1], meshL[1], 1e-6) && closeTo(sr[0], 0.5 + 0.5 * meshR[0], 1e-5) &&
+                  closeTo(sr[2], 0.5 + 0.5 * meshR[2], 1e-5) && closeTo(sr[1], meshR[1], 1e-6),
+              "the eyes' sub-rects of one wide texture: the same crop, in the texture's UVs");
+        // A flipped sub-rect stays flipped, and with the zoom and any shift is the upright crop mirrored.
+        const float flippedBounds[4] = {1, 1, 0, 0};
+        bool mirroredToo = true;
+        for (int shift = -100; shift <= 100; shift += 50) {
+            float upright[4], flip[4];
+            desktopWindowCrop(eyeBounds, 4032, 4034, 16.0 / 9.0, true, pl.u, pl.v, upright, shift, pl.zoom);
+            desktopWindowCrop(flippedBounds, 4032, 4034, 16.0 / 9.0, true, pl.u, pl.v, flip, shift, pl.zoom);
+            for (int i = 0; i < 4; ++i) mirroredToo = mirroredToo && closeTo(flip[i], 1.0 - upright[i], 1e-6);
+        }
+        check(mirroredToo, "a flipped sub-rect with the zoom: every shift from -100 to 100 is the upright crop mirrored");
+    }
 
     // The layout: full keeps each eye's own size; a shape gives each eye its half of it.
     DwSize eyes[2] = {{1456, 1560}, {1456, 1560}}, shape[2];
@@ -618,6 +750,99 @@ static void lines() {
           "the stopped line");
 }
 
+// The mesh flag through the handoff: the runtime's client against a provider of this rig's own (the same export, the same table), so the negotiation and the call are the
+// real ones. The graphics half's own functions are pinned by source (wiring).
+namespace fakeprovider {
+struct Seen {
+    unsigned acquires = 0, calls = 0;
+    uint32_t asked[4] = {};
+    uint32_t eye = 99, mesh = 77;
+    int via = 0;
+    float bounds[4] = {};
+    int closes = 0;
+};
+Seen seen;
+bool have3 = true, haveAny = true;
+int token = 0;
+HRESULT WINAPI note1(void* context, uint32_t eye, ID3D11Texture2D*, const float* b) {
+    if (context != &token) return E_INVALIDARG;
+    ++seen.calls; seen.via = 1; seen.eye = eye; seen.mesh = 77;
+    std::memcpy(seen.bounds, b, sizeof seen.bounds);
+    return S_OK;
+}
+HRESULT WINAPI note3(void* context, uint32_t eye, ID3D11Texture2D*, const float* b, uint32_t mesh) {
+    if (context != &token) return E_INVALIDARG;
+    ++seen.calls; seen.via = 3; seen.eye = eye; seen.mesh = mesh;
+    std::memcpy(seen.bounds, b, sizeof seen.bounds);
+    return S_OK;
+}
+HRESULT WINAPI close(void* context) { ++seen.closes; return context == &token ? S_OK : E_INVALIDARG; }
+HRESULT WINAPI acquire(const EdvrNativeDesktopWindowRequest* request, EdvrNativeDesktopWindowTable* table) {
+    if (!table || table->size != sizeof(*table)) return E_INVALIDARG;
+    if (seen.acquires < 4) seen.asked[seen.acquires] = table->version;
+    ++seen.acquires;
+    const uint32_t version = table->version;
+    if (!haveAny || (version != EDVR_NATIVE_DESKTOP_WINDOW_VERSION_1 && !(version == EDVR_NATIVE_DESKTOP_WINDOW_VERSION_3 && have3))) return E_INVALIDARG;
+    if (!request || request->version != version) return E_INVALIDARG;
+    *table = {sizeof(*table), version};
+    table->context = &token;
+    table->noteEye = version == EDVR_NATIVE_DESKTOP_WINDOW_VERSION_3 ? reinterpret_cast<EdvrNativeDesktopWindowNoteEye>(&note3) : &note1;
+    table->close = &close;
+    return S_OK;
+}
+}  // namespace fakeprovider
+
+static void handoff() {
+    using fakeprovider::seen;
+    HMODULE self = GetModuleHandleW(nullptr);
+    ID3D11Device* device = reinterpret_cast<ID3D11Device*>(static_cast<uintptr_t>(0x1000));        // never dereferenced
+    ID3D11Texture2D* texture = reinterpret_cast<ID3D11Texture2D*>(static_cast<uintptr_t>(0x2000));
+    const vr::VRTextureBounds_t bounds{0.125f, 0.25f, 0.875f, 0.75f};
+    auto sameBox = [&](const float* b) { return b[0] == 0.125f && b[1] == 0.25f && b[2] == 0.875f && b[3] == 0.75f; };
+    const void* entry = reinterpret_cast<const void*>(&fakeprovider::acquire);
+
+    seen = {};
+    fakeprovider::have3 = fakeprovider::haveAny = true;
+    edvr::openxr::NativeDesktopWindowClient client;
+    check(client.acquireFrom(self, entry, device, 1) == S_OK && client.version() == 3 && seen.acquires == 1 && seen.asked[0] == 3, "the client asks for version 3 first, and gets it");
+    client.noteEye(1, texture, bounds, true);
+    check(seen.calls == 1 && seen.via == 3 && seen.eye == 1 && seen.mesh == 1 && sameBox(seen.bounds), "version 3: a served mesh reaches the provider as 1, with the eye and the bounds");
+    client.noteEye(0, texture, bounds, false);
+    check(seen.calls == 2 && seen.via == 3 && seen.eye == 0 && seen.mesh == 0 && sameBox(seen.bounds), "version 3: no mesh reaches the provider as 0");
+    client.noteEye(0, texture, bounds);
+    check(seen.calls == 3 && seen.mesh == 0, "version 3: no answer given is no mesh");
+    client.noteEye(0, nullptr, bounds, true);
+    check(seen.calls == 3, "control: no texture is no call");
+    check(client.close() == S_OK && !client.acquired() && seen.closes == 1, "the client closes the provider and lets go of the table");
+    client.noteEye(0, texture, bounds, true);
+    check(seen.calls == 3, "control: a closed client hands nothing over");
+
+    // A graphics half that has no version 3: the client falls back to 1 and the flag is not carried (the provider takes it as no mesh).
+    seen = {};
+    fakeprovider::have3 = false;
+    edvr::openxr::NativeDesktopWindowClient oldHalf;
+    check(oldHalf.acquireFrom(self, entry, device, 1) == S_OK && oldHalf.version() == 1 && seen.acquires == 2 && seen.asked[0] == 3 && seen.asked[1] == 1, "without version 3 the client falls back to version 1 (asks 3, then 1)");
+    oldHalf.noteEye(1, texture, bounds, true);
+    check(seen.calls == 1 && seen.via == 1 && seen.mesh == 77 && sameBox(seen.bounds), "version 1: the eye and bounds arrive, the flag is not carried");
+
+    // A provider that answers nothing: the error comes back and nothing is held.
+    seen = {};
+    fakeprovider::haveAny = false;
+    edvr::openxr::NativeDesktopWindowClient none;
+    check(FAILED(none.acquireFrom(self, entry, device, 1)) && !none.acquired() && none.version() == 0 && seen.acquires == 2, "a provider that answers neither version leaves the client without one");
+    none.noteEye(0, texture, bounds, true);
+    check(seen.calls == 0, "control: an unacquired client hands nothing over");
+
+    // Version 2 (round 6) is not asked for, and a provider that only knows it would be refused: the client never offers 2.
+    check(seen.asked[0] == 3 && seen.asked[1] == 1 && seen.asked[0] != 2 && seen.asked[1] != 2, "the client never asks for version 2");
+    seen = {};
+    fakeprovider::have3 = fakeprovider::haveAny = true;
+    edvr::openxr::NativeDesktopWindowClient again;
+    check(again.acquireFrom(nullptr, entry, device, 1) == E_INVALIDARG && again.acquireFrom(self, nullptr, device, 1) == E_NOINTERFACE && again.acquireFrom(self, entry, nullptr, 1) == E_INVALIDARG &&
+              again.acquireFrom(self, entry, device, 0) == E_INVALIDARG && seen.acquires == 0,
+          "no provider, no export, no device or no generation is refused before the export is called");
+}
+
 static void wiring(const std::string& root) {
     const std::string cpp = readFile(root + "\\src\\d3d11\\desktop_window.cpp");
     const std::string hook = readFile(root + "\\src\\d3d11\\device_hook.cpp");
@@ -704,33 +929,77 @@ static void wiring(const std::string& root) {
     // The host hands the eye over after it is captured, and the provider is optional.
     auto handsOver = [](const std::string& t) {
         const size_t cap = at(t, "captured.capture(eye,selected,region,flags,true)");
-        const size_t note = at(t, "desktopWindow.noteEye(unsigned(eye),treated.Get(),treatedBounds,contentAngles);", cap);
+        const size_t note = at(t, "desktopWindow.noteEye(unsigned(eye),treated.Get(),treatedBounds,(hiddenMeshServedEyes.load(std::memory_order_acquire)&3u)!=0);", cap);
         const size_t end = at(t, "return r;", note);
-        return cap != std::string::npos && note != std::string::npos && end != std::string::npos && end - note < 200 &&
+        return cap != std::string::npos && note != std::string::npos && end != std::string::npos && end - note < 300 &&
                at(t, "native_desktop_window,unavailable=") != std::string::npos && at(t, "desktopWindow.acquire(options.graphicsProvider,externalDevice,runtimeGeneration)") != std::string::npos &&
                at(t, "desktopWindow.close();") != std::string::npos;
     };
     check(handsOver(host), "the host hands each captured eye's finished texture over, acquires the provider as optional and closes it");
-    check(!handsOver(replaced(host, "desktopWindow.noteEye(unsigned(eye),treated.Get(),treatedBounds,contentAngles);", "")), "control: no handoff trips the pin");
-    // Round 6: the export is version 2 (the field of view rides with each eye), the runtime asks for 2 then 1, the host takes the field of view from the projection the treated
-    // pixels hold, and the graphics half keeps it and crops with it.
+    check(!handsOver(replaced(host, "desktopWindow.noteEye(unsigned(eye),treated.Get(),treatedBounds,(hiddenMeshServedEyes.load(std::memory_order_acquire)&3u)!=0);", "")), "control: no handoff trips the pin");
+    // Round 8: the export is version 3 (the runtime's hidden-area-mesh answer rides with each eye; version 2, round 6's field of view, is gone), the runtime asks for 3 then 1, the
+    // host sends whether either eye was served a mesh, the OpenVR system says so for every answer that carried one, and the graphics half keeps it and crops with it.
     const std::string exportHeader = readFile(root + "\\src\\common\\native_desktop_window.h");
     const std::string client = readFile(root + "\\src\\openxr\\native_desktop_window_client.h");
-    auto fovWired = [&](const std::string& h, const std::string& c, const std::string& t, const std::string& w) {
-        return at(h, "#define EDVR_NATIVE_DESKTOP_WINDOW_VERSION_2 2u") != std::string::npos && at(h, "typedef HRESULT(WINAPI *EdvrNativeDesktopWindowNoteEye2)(void*, uint32_t, ID3D11Texture2D*, const float*, const float*);") != std::string::npos &&
-               at(c, "{EDVR_NATIVE_DESKTOP_WINDOW_VERSION_2, EDVR_NATIVE_DESKTOP_WINDOW_VERSION_1}") != std::string::npos && at(c, "EdvrNativeDesktopWindowNoteEye2>(table_.noteEye)") != std::string::npos &&
-               at(w, "const auto& contentFov=frameContentViews[unsigned(eye)].fov;") != std::string::npos &&
-               at(w, "const float contentAngles[4]={contentFov.angleLeft,contentFov.angleRight,contentFov.angleUp,contentFov.angleDown};") != std::string::npos &&
-               at(t, "table->version != EDVR_NATIVE_DESKTOP_WINDOW_VERSION_1 && table->version != EDVR_NATIVE_DESKTOP_WINDOW_VERSION_2") != std::string::npos &&
-               at(t, "reinterpret_cast<EdvrNativeDesktopWindowNoteEye>(&edvr::noteEye2)") != std::string::npos &&
-               at(t, "desktopWindowProjectionCentre(snap.fov[eye], &centreU[eye], &centreV[eye])") != std::string::npos && at(t, "draws[i].bounds = cropBounds[eyeIndex[i]];") != std::string::npos &&
-               at(t, "an eye image came with no field of view; its crop is centred on the middle of its bounds") != std::string::npos &&
-               at(t, "desktopWindowShapes(S.aspectOpt, S.mode, eyeSize, shape);") != std::string::npos && at(t, "desktopWindowEyeRects(S.mode, shownPx, shape, rects, eyeIndex)") != std::string::npos;
+    const std::string vrSystem = readFile(root + "\\src\\openxr\\openvr_system.cpp");
+    const std::string systemSource = readFile(root + "\\src\\openxr\\system_source.h");
+    check(!exportHeader.empty() && !client.empty() && !vrSystem.empty() && !systemSource.empty(), "the files the mesh pins read are where they look");
+    auto meshWired = [&](const std::string& h, const std::string& c, const std::string& t, const std::string& w, const std::string& sys, const std::string& src) {
+        return at(h, "#define EDVR_NATIVE_DESKTOP_WINDOW_VERSION_3 3u") != std::string::npos && at(h, "VERSION_2") == std::string::npos &&
+               at(h, "typedef HRESULT(WINAPI *EdvrNativeDesktopWindowNoteEye3)(void*, uint32_t, ID3D11Texture2D*, const float*, uint32_t);") != std::string::npos &&
+               at(c, "{EDVR_NATIVE_DESKTOP_WINDOW_VERSION_3, EDVR_NATIVE_DESKTOP_WINDOW_VERSION_1}") != std::string::npos &&
+               at(c, "EdvrNativeDesktopWindowNoteEye3>(table_.noteEye)(table_.context, eye, texture, box, hiddenMeshServed ? 1u : 0u)") != std::string::npos &&
+               at(c, "VERSION_2") == std::string::npos && at(c, "angles") == std::string::npos &&
+               at(w, "hiddenMeshServedEyes.fetch_or(1u<<eye,std::memory_order_release);") != std::string::npos && at(w, "void noteHiddenMeshServed(unsigned eye) noexcept override {") != std::string::npos &&
+               at(w, "contentAngles") == std::string::npos &&
+               at(t, "table->version != EDVR_NATIVE_DESKTOP_WINDOW_VERSION_1 && table->version != EDVR_NATIVE_DESKTOP_WINDOW_VERSION_3") != std::string::npos &&
+               at(t, "reinterpret_cast<EdvrNativeDesktopWindowNoteEye>(&edvr::noteEye3)") != std::string::npos &&
+               at(t, "return noteEyeWith(context, eye, texture, bounds, hiddenMeshServed != 0);") != std::string::npos && at(t, "h.meshServed = meshServed;") != std::string::npos &&
+               at(t, "s.meshServed[eye] = g_held[eye].meshServed;") != std::string::npos && at(t, "VERSION_2") == std::string::npos && at(t, "haveFov") == std::string::npos &&
+               at(t, "draws[i].bounds = cropBounds[eyeIndex[i]];") != std::string::npos &&
+               at(t, "desktopWindowShapes(S.aspectOpt, S.mode, eyeSize, shape);") != std::string::npos && at(t, "desktopWindowEyeRects(S.mode, shownPx, shape, rects, eyeIndex)") != std::string::npos &&
+               at(sys, "if(result.pVertexData&&result.unTriangleCount)source_.noteHiddenMeshServed(e);") != std::string::npos &&
+               at(src, "virtual void noteHiddenMeshServed(unsigned) noexcept {}") != std::string::npos;
     };
-    check(fovWired(exportHeader, client, cpp, host), "the export is version 2 with the field of view; the runtime asks for 2 then 1; the host sends the content projection; the crop and the layout use it");
-    check(!fovWired(replaced(exportHeader, "#define EDVR_NATIVE_DESKTOP_WINDOW_VERSION_2 2u", ""), client, cpp, host), "control: no version 2 trips the pin");
-    check(!fovWired(exportHeader, client, replaced(cpp, "draws[i].bounds = cropBounds[eyeIndex[i]];", "draws[i].bounds = snap.bounds[eyeIndex[i]];"), host), "control: a draw that ignores the crop trips the pin");
-    check(!fovWired(exportHeader, client, cpp, replaced(host, "const auto& contentFov=frameContentViews[unsigned(eye)].fov;", "const auto& contentFov=frameViews[unsigned(eye)].fov;")), "control: the wrong projection in the host trips the pin");
+    check(meshWired(exportHeader, client, cpp, host, vrSystem, systemSource),
+          "the export is version 3 with the mesh flag; the runtime asks for 3 then 1; the host sends whether either eye was served a mesh; the system reports every served answer; the graphics half keeps and uses it");
+    check(!meshWired(replaced(exportHeader, "#define EDVR_NATIVE_DESKTOP_WINDOW_VERSION_3 3u", ""), client, cpp, host, vrSystem, systemSource), "control: no version 3 trips the pin");
+    check(!meshWired(exportHeader, client, cpp, host, replaced(vrSystem, "if(result.pVertexData&&result.unTriangleCount)source_.noteHiddenMeshServed(e);", ""), systemSource),
+          "control: a system that never says a mesh was served trips the pin");
+    check(!meshWired(exportHeader, client, cpp, replaced(host, "hiddenMeshServedEyes.fetch_or(1u<<eye,std::memory_order_release);", ""), vrSystem, systemSource), "control: a host that never records it trips the pin");
+    check(!meshWired(exportHeader, client, replaced(cpp, "draws[i].bounds = cropBounds[eyeIndex[i]];", "draws[i].bounds = snap.bounds[eyeIndex[i]];"), host, vrSystem, systemSource),
+          "control: a draw that ignores the crop trips the pin");
+    check(!meshWired(exportHeader, client, replaced(cpp, "s.meshServed[eye] = g_held[eye].meshServed;", ""), host, vrSystem, systemSource), "control: a snapshot that drops the flag trips the pin");
+    check(!meshWired(exportHeader, replaced(client, "{EDVR_NATIVE_DESKTOP_WINDOW_VERSION_3, EDVR_NATIVE_DESKTOP_WINDOW_VERSION_1}", "{EDVR_NATIVE_DESKTOP_WINDOW_VERSION_1}"), cpp, host, vrSystem, systemSource),
+          "control: a client that never asks for version 3 trips the pin");
+    check(!meshWired(exportHeader + "\n#define EDVR_NATIVE_DESKTOP_WINDOW_VERSION_2 2u\n", client, cpp, host, vrSystem, systemSource), "control: a version 2 that is back trips the pin");
+    // The crop rule: one word, native by default, read live with the others; the flat profile resets it; the plan decides the centre and the zoom for each eye; `full` (target 0)
+    // is not cropped; the crop line names the rule, the shift and the bounds, and the change is one line.
+    auto cropWired = [](const std::string& t) {
+        const size_t flat = at(t, "if (flat) {");
+        const size_t flatCrop = flat == std::string::npos ? flat : at(t, "S.cropOpt = DesktopWindowCropRule::Native;", flat);
+        const size_t read = at(t, "cfg.getString(\"visual.desktop_window_crop\", \"native\")");
+        return count(t, "cfg.getString(\"visual.desktop_window_crop\"") == 1 && read != std::string::npos && flatCrop != std::string::npos && flatCrop < read &&
+               at(t, "desktopWindowParseCropRule(rawCrop.c_str(), &cropKnown)") != std::string::npos && at(t, "S.cropOpt = cropOpt;") != std::string::npos &&
+               at(t, "desktop window: crop rule %s (was %s)") != std::string::npos && at(t, "desktop window: crop rule %s\"") != std::string::npos &&
+               at(t, "unknown crop \\\"%.40s\\\" (it is native or center); treated as native") != std::string::npos &&
+               at(t, "plans[eye] = desktopWindowCropPlan(S.cropOpt, snap.meshServed[eye], eye);") != std::string::npos &&
+               at(t, "ratio > 0 ? (S.mode == DesktopWindowMode::BothEyes ? ratio * 0.5 : ratio) : 0.0, true, plans[eye].u, plans[eye].v,") != std::string::npos &&
+               at(t, "cropBounds[eye], S.shiftOpt, plans[eye].zoom);") != std::string::npos &&
+               at(t, "desktopWindowCropRuleText(ruleText, sizeof ruleText, S.cropOpt, snap.meshServed[eye], eye);") != std::string::npos &&
+               at(t, "desktop window: crop %s, %s eye, rule %s, vertical shift %d; crop bounds") != std::string::npos &&
+               at(t, "desktopWindowProjectionCentre") == std::string::npos && at(t, "straight ahead") == std::string::npos;
+    };
+    check(cropWired(cpp), "the crop rule is read as one word (native by default), reset by the flat profile, turned into a centre and zoom for each eye, never applied to full, and logged (change, crop line)");
+    check(!cropWired(replaced(cpp, "\"visual.desktop_window_crop\", \"native\"", "\"visual.desktop_window_crop\", \"center\"")), "control: a rule that defaults to center trips the pin");
+    check(!cropWired(replaced(cpp, "S.cropOpt = DesktopWindowCropRule::Native;", "")), "control: a flat profile that does not reset the rule trips the pin");
+    check(!cropWired(replaced(cpp, "plans[eye] = desktopWindowCropPlan(S.cropOpt, snap.meshServed[eye], eye);", "plans[eye] = desktopWindowCropPlan(S.cropOpt, false, eye);")), "control: a plan that ignores the mesh trips the pin");
+    check(!cropWired(replaced(cpp, "cropBounds[eye], S.shiftOpt, plans[eye].zoom);", "cropBounds[eye], S.shiftOpt);")), "control: a crop that is not given the zoom trips the pin");
+    check(!cropWired(replaced(cpp, "ratio > 0 ? (S.mode == DesktopWindowMode::BothEyes ? ratio * 0.5 : ratio) : 0.0, true,", "(S.mode == DesktopWindowMode::BothEyes ? 0.5 : 1.0) * 1.7, true,")),
+          "control: a crop that does not give full a target of 0 trips the pin");
+    check(!cropWired(replaced(cpp, "desktop window: crop rule %s (was %s)", "desktop window: crop %s (was %s)")), "control: a change that is not logged trips the pin");
+    check(!cropWired(replaced(cpp, "desktop window: crop %s, %s eye, rule %s, vertical shift %d; crop bounds", "desktop window: crop %s, %s eye, %s, vertical shift %d; crop bounds")), "control: a crop line that does not name the rule trips the pin");
+    check(!cropWired(cpp + "\n// desktopWindowProjectionCentre(angles)\n"), "control: the projection-centre rule coming back trips the pin");
     // Round 6: a live change of the style or the shape is not a fight; the style goes to the new target and the fight state is forgotten.
     auto liveChange = [](const std::string& t) {
         const size_t a = at(t, "if (S.activeStyle != S.styleOpt) {");
@@ -874,44 +1143,54 @@ static void wiring(const std::string& root) {
     const size_t visual = at(ini, "\n[visual]\n");
     const size_t world = at(ini, "\nworld_scale = 100\n", visual);
     const size_t key = at(ini, "\ndesktop_window = game\n", world);
-    const size_t aspectKey = at(ini, "\ndesktop_window_aspect = full\n", key), shiftKey = at(ini, "\ndesktop_window_vertical_shift = 0\n", aspectKey);
+    const size_t aspectKey = at(ini, "\ndesktop_window_aspect = full\n", key), cropKey = at(ini, "\ndesktop_window_crop = native\n", aspectKey);
+    const size_t shiftKey = at(ini, "\ndesktop_window_vertical_shift = 0\n", cropKey);
     const size_t styleKey = at(ini, "\ndesktop_window_style = window\n", shiftKey);
     const size_t ui = ini.rfind("# ui: Desktop window | choices game=Game, left_eye=Left eye, right_eye=Right eye, both_eyes=Both eyes | live | menu desktop_window\n", key);
     const size_t uiAspect = ini.rfind("# ui: Desktop window shape | choices full=Full picture, 1:1=1:1, 4:3=4:3, 16:10=16:10, 16:9=16:9, 21:9=21:9 | live | menu desktop_window\n", aspectKey);
+    const size_t uiCrop = ini.rfind("# ui: Desktop window crop | choices native=Same as the game's mirror, center=Centre | live | menu desktop_window\n", cropKey);
     const size_t uiShift = ini.rfind("# ui: Desktop window vertical shift | range -100..100 | step 5 | unit % | signed | zero default | recommended 0 | live | menu desktop_window\n", shiftKey);
     const size_t uiStyle = ini.rfind("# ui: Desktop window style | choices window=Window, borderless=Borderless full screen | live | menu desktop_window\n", styleKey);
     check(visual != std::string::npos && world != std::string::npos && key != std::string::npos && ui != std::string::npos && ui > world && key - ui < 160 &&
-              aspectKey != std::string::npos && uiAspect != std::string::npos && uiAspect > key && aspectKey - uiAspect < 200 && shiftKey != std::string::npos && uiShift != std::string::npos &&
-              uiShift > aspectKey && shiftKey - uiShift < 200 && styleKey != std::string::npos && uiStyle != std::string::npos && uiStyle > shiftKey && styleKey - uiStyle < 160 &&
-              count(ini, "\ndesktop_window = ") == 1 && count(ini, "\ndesktop_window_aspect = ") == 1 && count(ini, "\ndesktop_window_vertical_shift = ") == 1 &&
+              aspectKey != std::string::npos && uiAspect != std::string::npos && uiAspect > key && aspectKey - uiAspect < 200 && cropKey != std::string::npos && uiCrop != std::string::npos &&
+              uiCrop > aspectKey && cropKey - uiCrop < 200 && shiftKey != std::string::npos && uiShift != std::string::npos && uiShift > cropKey && shiftKey - uiShift < 200 && styleKey != std::string::npos && uiStyle != std::string::npos && uiStyle > shiftKey && styleKey - uiStyle < 160 &&
+              count(ini, "\ndesktop_window = ") == 1 && count(ini, "\ndesktop_window_aspect = ") == 1 && count(ini, "\ndesktop_window_crop = ") == 1 && count(ini, "\ndesktop_window_vertical_shift = ") == 1 &&
               count(ini, "\ndesktop_window_style = ") == 1,
-          "edvr.ini: [visual], after world_scale, the four keys in order ship game, full, 0 and window, each with its ui: line on the Desktop window page (the shift a signed number row, step 5, unit %)");
+          "edvr.ini: [visual], after world_scale, the five keys in order ship game, full, native, 0 and window, each with its ui: line on the Desktop window page (the crop two choices, the shift a signed number row, step 5, unit %)");
     check(ini.rfind("VR only. Live.\n# ui: Desktop window |", key) != std::string::npos && ini.rfind("VR only. Live.\n# ui: Desktop window shape |", aspectKey) != std::string::npos &&
-              ini.rfind("VR only. Live.\n# ui: Desktop window vertical shift |", shiftKey) != std::string::npos && ini.rfind("VR only. Live.\n# ui: Desktop window style |", styleKey) != std::string::npos,
+              ini.rfind("VR only. Live.\n# ui: Desktop window crop |", cropKey) != std::string::npos && ini.rfind("VR only. Live.\n# ui: Desktop window vertical shift |", shiftKey) != std::string::npos && ini.rfind("VR only. Live.\n# ui: Desktop window style |", styleKey) != std::string::npos,
           "edvr.ini: each comment says VR only and live");
-    check(at(ini, "menu visual", key) == std::string::npos || at(ini, "menu visual", key) > styleKey, "edvr.ini: none of the four is on the Visual page");
-    {   // the shift's words: 0 is the default centre, never "straight ahead" (the default centre may change); the shape's comment says the same
+    check(at(ini, "menu visual", key) == std::string::npos || at(ini, "menu visual", key) > styleKey, "edvr.ini: none of the five is on the Visual page");
+    {   // the words: the shift's 0 is the default centre; the crop's comment says what native and center do, with Elite's two numbers and the mirrored right eye; nothing says straight ahead
         auto unwrapped = [](std::string s) {
             size_t p;
             while ((p = s.find("\n# ")) != std::string::npos) s.replace(p, 3, " ");
             return s;
         };
         const size_t from = ini.rfind("\n# Moves the cut-out", shiftKey);
+        const size_t cropFrom = ini.rfind("\n# Where the cut-out sits", cropKey);
         const std::string words = from == std::string::npos || shiftKey == std::string::npos ? std::string() : unwrapped(ini.substr(from, shiftKey - from));
         const std::string shapeWords = key != std::string::npos && aspectKey > key ? unwrapped(ini.substr(key, aspectKey - key)) : std::string();
-        auto wordsOk = [](const std::string& w, const std::string& s) {
+        const std::string cropWords = cropFrom == std::string::npos || cropKey == std::string::npos ? std::string() : unwrapped(ini.substr(cropFrom, cropKey - cropFrom));
+        auto wordsOk = [](const std::string& w, const std::string& sh, const std::string& cw) {
             return !w.empty() && at(w, "0 is the default centre") != std::string::npos && at(w, "does nothing with the shape \"full\"") != std::string::npos && at(w, "straight ahead") == std::string::npos &&
-                   at(s, "default centre") != std::string::npos && at(s, "straight ahead") == std::string::npos;
+                   !sh.empty() && at(sh, "straight ahead") == std::string::npos && !cw.empty() && at(cw, "straight ahead") == std::string::npos && at(cw, "\"native\" (the default)") != std::string::npos &&
+                   at(cw, "\"center\"") != std::string::npos && at(cw, "1.32 times") != std::string::npos && at(cw, "0.515") != std::string::npos && at(cw, "0.485") != std::string::npos &&
+                   at(cw, "left eye") != std::string::npos && at(cw, "right eye") != std::string::npos && at(cw, "\"full\" is never cropped or zoomed") != std::string::npos &&
+                   at(cw, "hidden area") != std::string::npos;
         };
-        check(wordsOk(words, shapeWords), "edvr.ini: the shift's comment says 0 is the default centre and what it does nothing for; neither it nor the shape's comment says straight ahead");
-        check(!wordsOk(replaced(words, "0 is the default centre", "0 is straight ahead"), shapeWords), "control: a shift comment that says straight ahead trips the words pin");
-        check(!wordsOk(words, replaced(shapeWords, "default centre", "straight ahead")), "control: a shape comment that says straight ahead trips the words pin");
+        check(wordsOk(words, shapeWords, cropWords),
+              "edvr.ini: the shift's comment says 0 is the default centre and what it does nothing for; the crop's comment names both rules, Elite's 1.32 and 0.515, the mirrored 0.485 and that full is never cropped; none says straight ahead");
+        check(!wordsOk(replaced(words, "0 is the default centre", "0 is straight ahead"), shapeWords, cropWords), "control: a shift comment that says straight ahead trips the words pin");
+        check(!wordsOk(words, replaced(shapeWords, "cut the picture to", "straight ahead cut the picture to"), cropWords), "control: a shape comment that says straight ahead trips the words pin");
+        check(!wordsOk(words, shapeWords, replaced(cropWords, "0.485", "0.5")), "control: a crop comment that does not say the right eye's mirror trips the words pin");
+        check(!wordsOk(words, shapeWords, replaced(cropWords, "1.32 times", "twice")), "control: a crop comment with another zoom trips the words pin");
     }
     const std::string schemaTool = readFile(root + "\\tools\\gen_settings_schema.py");
     check(at(schemaTool, "'visual', 'desktop_window', 'flat_visual', 'debug')") != std::string::npos, "the schema generator knows the desktop_window page");
     check(at(cpp, "cfg.getString(\"visual.desktop_window_aspect\", \"full\")") != std::string::npos && at(cpp, "cfg.getString(\"visual.desktop_window_style\", \"window\")") != std::string::npos &&
               at(flatKeys, "desktop_window") == std::string::npos,
-          "the two keys are read as one word each, defaults full and window, in the VR profile only (the flat profile's allow-list does not carry them)");
+          "the shape and style keys are read as one word each, defaults full and window, in the VR profile only (the flat profile's allow-list does not carry them or the crop)");
 
     // Round 7: the vertical shift is one whole number, 0 by default, held to -100..100, read live with the others; the flat profile resets it before any read; the crop of both eyes is
     // given it; its first read and each change are logged; the first-activation crop line carries it.
@@ -921,17 +1200,17 @@ static void wiring(const std::string& root) {
         const size_t read = at(t, "cfg.getIntInRange(\"visual.desktop_window_vertical_shift\", 0, -100, 100)");
         const size_t keep = at(t, "S.shiftOpt = shiftOpt;", read);
         return count(t, "cfg.getIntInRange(\"visual.desktop_window_vertical_shift\"") == 1 && read != std::string::npos && flatShift != std::string::npos && flatShift < read && keep != std::string::npos &&
-               count(t, "centreV[eye], cropBounds[eye], S.shiftOpt);") == 1 && at(t, "desktop window: vertical shift %d (was %d)") != std::string::npos &&
-               at(t, "desktop window: vertical shift %d\"") != std::string::npos && at(t, "default centre u=%.4f v=%.4f of its image (%s), vertical shift %d; crop bounds") != std::string::npos &&
-               at(t, "S.shiftOpt, cropBounds[eye][0]") != std::string::npos && at(t, "straight ahead") == std::string::npos;
+               count(t, "cropBounds[eye], S.shiftOpt, plans[eye].zoom);") == 1 && at(t, "desktop window: vertical shift %d (was %d)") != std::string::npos &&
+               at(t, "desktop window: vertical shift %d\"") != std::string::npos && at(t, "rule %s, vertical shift %d; crop bounds") != std::string::npos &&
+               at(t, "ruleText, S.shiftOpt, cropBounds[eye][0]") != std::string::npos && at(t, "straight ahead") == std::string::npos;
     };
     check(shiftWired(cpp), "the vertical shift is read as one whole number from -100 to 100 (default 0), reset by the flat profile, passed to the crop of both eyes, and logged (first read, change, crop line)");
     check(!shiftWired(replaced(cpp, "\"visual.desktop_window_vertical_shift\", 0, -100, 100", "\"visual.desktop_window_vertical_shift\", 0, 0, 100")), "control: a shift that cannot go below 0 trips the pin");
-    check(!shiftWired(replaced(cpp, "centreV[eye], cropBounds[eye], S.shiftOpt);", "centreV[eye], cropBounds[eye]);")), "control: a crop that is not given the shift trips the pin");
+    check(!shiftWired(replaced(cpp, "cropBounds[eye], S.shiftOpt, plans[eye].zoom);", "cropBounds[eye], 0, plans[eye].zoom);")), "control: a crop that is not given the shift trips the pin");
     check(!shiftWired(replaced(cpp, "S.shiftOpt = 0;\n        return;", "return;")), "control: a flat profile that does not reset the shift trips the pin");
     check(!shiftWired(replaced(cpp, "desktop window: vertical shift %d (was %d)", "desktop window: shift %d (was %d)")), "control: a change that is not logged trips the pin");
     check(!shiftWired(replaced(cpp, "S.shiftOpt = shiftOpt;", "")), "control: a read that is not kept trips the pin");
-    check(!shiftWired(replaced(cpp, "default centre u=%.4f", "straight ahead u=%.4f")), "control: a crop line that says straight ahead trips the pin");
+    check(!shiftWired(replaced(cpp, "rule %s, vertical shift %d; crop bounds", "straight ahead %s, vertical shift %d; crop bounds")), "control: a crop line that says straight ahead trips the pin");
     check(at(flatKeys, "vertical_shift") == std::string::npos, "the flat profile's allow-list does not carry visual.desktop_window_vertical_shift");
 }
 
@@ -942,6 +1221,7 @@ int main(int argc, char** argv) {
     cursorRules();
     hideRules();
     lines();
+    handoff();
     if (argc > 1) wiring(argv[1]);
     else check(false, "argv[1] is the repository root");
     std::printf("desktop_window_test: %u checks, %u failed\n", g_checks, g_failed);

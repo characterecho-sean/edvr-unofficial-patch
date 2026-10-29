@@ -1941,7 +1941,7 @@ void testLegacyOnFootRowsStayOutOfMenu() {
 // the first change from the menu as an appended line.
 
 // 7c. The Desktop window page of VR's menu (2026-10-28), right after Visual: what the window shows, the picture's shape, how far up or down it is cut (round 7: a signed whole-percent
-// number row) and the window's style, the four [visual] keys, Fix tier, in edvr.ini order, no group headings needed (the page is the group), choices in the words the file gives them.
+// number row; round 8: how the shape is cut, native or center) and the window's style, the five [visual] keys, Fix tier, in edvr.ini order, no group headings needed (the page is the group), choices in the words the file gives them.
 void testDesktopWindowPage() {
     printf("desktop window page\n");
     constexpr int kCount = static_cast<int>(sizeof(kMenuRows) / sizeof(kMenuRows[0]));
@@ -1949,6 +1949,7 @@ void testDesktopWindowPage() {
     static const Want want[] = {
         {"desktop_window", "Desktop window", "game=Game|left_eye=Left eye|right_eye=Right eye|both_eyes=Both eyes"},
         {"desktop_window_aspect", "Desktop window shape", "full=Full picture|1:1=1:1|4:3=4:3|16:10=16:10|16:9=16:9|21:9=21:9"},
+        {"desktop_window_crop", "Desktop window crop", "native=Same as the game's mirror|center=Centre"},
         {"desktop_window_vertical_shift", "Desktop window vertical shift", ""},
         {"desktop_window_style", "Desktop window style", "window=Window|borderless=Borderless full screen"},
     };
@@ -1969,7 +1970,7 @@ void testDesktopWindowPage() {
         if (strcmp(kMenuRows[i].key, "desktop_window_vertical_shift") == 0) shift = i;
         ++at;
     }
-    check(inOrder && at == kWant, "VR's Desktop window page is Desktop window, Desktop window shape, Desktop window vertical shift and Desktop window style, [visual] Fix-tier rows (the shift a number, the rest choices), live, in edvr.ini order");
+    check(inOrder && at == kWant, "VR's Desktop window page is Desktop window, Desktop window shape, Desktop window crop, Desktop window vertical shift and Desktop window style, [visual] Fix-tier rows (the shift a number, the rest choices), live, in edvr.ini order");
     for (int i = 0; i < kCount; ++i) {
         if (strncmp(kMenuRows[i].key, "desktop_window", 14) == 0 && strcmp(kMenuRows[i].section, "visual") == 0)
             checkf(strcmp(kMenuRows[i].page, "desktop_window") == 0, "visual.%s is on the Desktop window page, not on the Visual page", kMenuRows[i].key);
