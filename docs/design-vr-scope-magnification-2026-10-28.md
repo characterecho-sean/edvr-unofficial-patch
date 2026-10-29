@@ -50,7 +50,8 @@ game's own zoom as a magnified picture inside the scope's lens. The rest of the 
   fixes (same section) make the mark's stand-down last a press, not the session, and count it in the press line.
 - **Next, B3 for the scoped sniper only** (the maintainer, 2026-10-29, after A2's flight: the 4x lens is "a little blurry"). A keeps 1/M of
   the density, so at M 4.06 the lens shows about 90 x 50 output pixels (45 x 25 rendered) over the glass. B3 renders the unseen left eye
-  (F106's both mode) as the zoomed view. Designed after A3 has flown.
+  (F162's both mode) as the zoomed view. DESIGNED (section 11): tangents only, no pose move; parallax removed per pixel from the right
+  eye's depth; a temporary key to compare it with A.
 - Keys: `fix.native_on_foot_ads_scope_zoom` (default on since A3 flew OK, the maintainer 2026-10-29) and the temporary `experimental.native_on_foot_ads_scope_zoom_fov` (the
   reference FOV, 56.3 by default).
 - Separate arc: a flat stutter on the scoped Executioner's ADS (2026-10-29), in its own doc,
@@ -725,3 +726,52 @@ stock colors." `--health` exit 3 for F91 and F85c only (the native on-foot arc's
   0.21, reissues 0.31 to 0.41 with 18 to 24 empty, engine velocity 0.28). It belongs to native on-foot ADS, not to the lens or the mark.
 - **A settled:** the lens, the optical gate and the mark at stock brightness. Open: the scoped sniper's softness at M 4.06 (B3, next),
   the left aiming eye, c's one-frame lag.
+
+## 11. B3: the scoped sniper's lens rendered at full detail
+
+The maintainer (2026-10-29): the 4x lens is "a little blurry"; B3 for the scoped sniper only, after A3 flew (it did). Research the same day,
+two read-only passes over the runtime and the game's per-eye behaviour; KNOWN = read in code or a flown log.
+
+**What is known.**
+- **The route exists (KNOWN).** FOV trim already gives the game any per-eye frustum: it overwrites `gameGeometry.views[e].fov`
+  (`native_runtime_host.h` ~1689) before the temporal pass begins and the geometry is published, all in WaitGetPoses of the frame the
+  game then renders; the compositor keeps the located views. Flown five times (`eye-mask-2026-09-16.md`). The jitter's tangent shift is a
+  translation only and cannot narrow.
+- **Culling follows each eye (KNOWN).** One traversal, a per-view test with a view bit per eye (`stereo-cpu-sharing-2026-10-16.md`); the
+  right eye loses nothing. Terrain culling takes the larger of the two eyes and never narrows. **LOD (KNOWN from the decompile, unflown):**
+  the per-part test uses the view's 1/fy, so a narrowed eye picks finer LOD in that eye only. **Shadows: unknown.**
+- **DLSS is per eye (KNOWN):** separate features and histories; a reset per eye is one more term in the reset test. The left eye renders
+  first and its post-DLSS picture is in `g_eye[0].temporalOut` when the right eye's door runs, the same frame.
+- **F162's both mode covers the left eye** with the right eye's picture, rotated only, on the located views, except a strip at the left
+  eye's outer edge (about 10 deg, with a 3 deg fade) that keeps the left eye's own render.
+- **Moving the left eye is not the way:** the told eye-to-head pair can move it in the same frame (world scale does), but the eye
+  separation check resets DLSS in both eyes, the weapon view and F126 refuse a separation outside 5 to 8 cm, and the game's job camera is
+  the left eye.
+- **Traps:** `treat()` announces eye 0's frusta as the headset's optics (menu, intro, RemLok, the visor) and needs the true pair, as the trim
+  keeps it; the game's UI scale reads `GetProjectionRaw`, so the HUD could resize; the light-grid cache would miss and thrash on a narrowed
+  eye; the readout pin (F85b, F148, F151) wants both eyes; the hidden-area mesh is read once a session and must not be re-read narrowed
+  (the trim's guard). The pilot's Pimax has no mesh.
+
+**The design (B3-1, one build, the scoped sniper only).**
+- **The zoomed eye.** In scoped ADS with an entry marked rendered in the S1 table (the scoped Executioner), `both` mode and the key on,
+  the left eye's told frustum becomes its own tangents divided by M, an off-axis window centred on its direction to the far point c. Tangents
+  only: no pose change. The window is set at the press's first frame at w 1 and held; it ends when the release begins, while the share
+  still covers the left eye.
+- **DLSS:** the left eye's history resets at both edges (a snap, not a ramp). The lens eases as now and samples the zoomed picture.
+- **The lens.** At the right eye's door, each lens pixel's ray meets the right eye's depth (the glass writes none, so it is the world
+  behind); that point is projected through the left eye's zoomed rows and sampled from the left eye's post-DLSS picture. This removes the
+  6.3 cm parallax per pixel (0.36 deg at 10 m, x M in the lens), limited by the right eye's depth resolution. A ray with no depth (the sky)
+  takes the direction alone. If the zoomed picture is missing or stale, the lens falls back to A for the frame, counted.
+- **The left eye's strip** (the share's uncovered band) fades to black while the eye is zoomed.
+- **Kept true:** eye 0's announced frusta, the UI scale's getter (which getter the HUD reads is checked first; if it is the matrix the game
+  renders with, the HUD's size is logged instead and judged in flight), the hidden-area mesh. The light-grid cache bypasses the zoomed eye.
+  The readout pin takes the right eye alone while the left is zoomed.
+- **A temporary key:** `experimental.native_on_foot_ads_scope_zoom_full_detail` = on | off, live, default off, on the Experimental page:
+  off is A (the copy), on is B3. It goes when B3 is judged.
+
+**Instruments (one press line, B3).** Frames zoomed; DLSS resets per eye; the lens's source per frame (zoomed, fallback to A and why);
+per-eye draw counts in and out of the zoomed span; light-grid bypasses; the shadow constants (cb1 rows 298 to 326) per eye, changed or not;
+the UI scale value the game read; frame time in and out; the parallax shift at c; readout pin pairs missing; strip frames darkened.
+
+**Flight card (B3-1):** the scoped Executioner in ADS, the key off then on in one press (A then B3), still and turning; an eye dump with each;
+look for the lens's detail, the chevron's place, the HUD's size, shadows, the left eye's outer edge, and stutter on entry.
