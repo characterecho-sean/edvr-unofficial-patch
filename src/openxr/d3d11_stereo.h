@@ -108,10 +108,12 @@ class D3D11Stereo final {
                           StereoWallTimes* times = nullptr,
                           const StereoPlacement* placement = nullptr,
                           float fade = 0.0f, const XrPosef* headPose = nullptr, float leftEyeShare = 0.0f,
-                          const StereoHiddenArea* rightHidden = nullptr, float leftStripBlack = 0.0f);
-  // leftStripBlack, 0..1 (B3, the scope zoom's window, scope_zoom_window.h): with a share drawn, the part of the left eye the share does not cover (its outer strip, and the fade
-  // band to it) is blended toward black by that much, so the left eye's own picture, which the zoom has narrowed, is not seen there. 0 (or anything that is not a number) draws
-  // the share exactly as before; with no share drawn it does nothing, the left eye's whole picture being its own.
+                          const StereoHiddenArea* rightHidden = nullptr, float leftStripBlack = 0.0f, bool leftZoomed = false);
+  // leftStripBlack, 0..1 (B3, the scope zoom's window, scope_zoom_window.h): with a share drawn, the part of the left eye the right eye does not cover (its outer strip, and the fade
+  // band to it: the geometry alone, however far the share's weight has fallen) is blended toward black by that much, so the left eye's own picture, which the zoom has narrowed, is
+  // not seen there. 0 (or anything that is not a number) draws the share exactly as before; with no share drawn it does nothing, the left eye's whole picture being its own.
+  // leftZoomed: the pair being drawn was rendered with eye 0 narrowed (a fresh frame the runtime told the window, or a kept pair it replays). Then all of the left eye's own picture
+  // goes black under the share, so the narrowed picture cannot show through in a frame where the weight has already fallen; false leaves the interior as the share draws it.
   const StereoShareFacts& shareFacts() const { return shareFacts_; }
   XrResult renderSkybox(const XrView (&)[2], XrSpace, const SkyboxCapture&,
                         XrCompositionLayerProjection&, float fade = 0.0f);

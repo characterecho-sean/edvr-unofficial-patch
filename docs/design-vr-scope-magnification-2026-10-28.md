@@ -51,7 +51,7 @@ game's own zoom as a magnified picture inside the scope's lens. The rest of the 
 - **B3-1 BUILT 2026-10-29, NOT FLOWN** (from `4a4a17b6`; section 11, "As built (B3-1)"): the scoped Executioner's lens at full detail. The left eye (F162's both mode) is drawn as the zoomed view
   (told frustum = its tangents / M about c, tangents only, set in WaitGetPoses after the trim); the lens samples its post-RCAS picture, each pixel at the place its world point is drawn at in that eye
   (the right eye's depth, T = inverse(A_R) A_L). The raw getter (the UI scale) keeps the true frustum; DLSS resets at both edges; the strip goes black; the light grid cache and the readout pin
-  step aside. Three log lines: `scope zoom (B3)` announce and press, `scope zoom (B3) runtime`. Next: the flight (A then B3 in one press), then the maintainer's verdict on the key.
+  step aside. Three log lines: `scope zoom (B3)` announce and press, `scope zoom (B3) runtime`. Review fixes done 2026-10-29 (section 11, items 1 to 8; the hidden-area mesh per eye left). Next: the flight (A then B3 in one press), then the maintainer's verdict on the key.
 - Keys: `fix.native_on_foot_ads_scope_zoom` (default on since A3 flew OK, the maintainer 2026-10-29) and the temporary `experimental.native_on_foot_ads_scope_zoom_fov` (the
   reference FOV, 56.3 by default) and `experimental.native_on_foot_ads_scope_zoom_full_detail` (TEMPORARY, B3: on | off, live, default off; goes when B3 is judged).
 - Separate arc: a flat stutter on the scoped Executioner's ADS (2026-10-29), in its own doc,
@@ -800,7 +800,7 @@ look for the lens's detail, the chevron's place, the HUD's size, shadows, the le
   fov getter 0x4E2F50, vertical sum atan|t| + atan|b|), and the renderer's picture comes from `GetProjectionMatrix` (0x4E2D30). So the two getters now differ for eye 0 while the window
   stands: the matrix answers the narrowed frustum, the raw getter the frustum without the zoom (`SystemRead::toldRaw`, held in the optics cache too). The HUD's size stays true without un-narrowing the
   render. What the eye camera setter builds from the true raw value (a culling frustum, LOD, shadow fits) is unflown: the runtime's `scope zoom (B3) runtime` line says how many times the game read
-  each getter and the vertical angle each answered (the raw getter's vertical angle should be the true one and the matrix's about 1 / M of it in tangent), and the press line's draw counts and shadow rows say what the left eye did.
+  each getter, the vertical tangent span each answered (the raw getter's the true one, the matrix's 1 / M of it exactly), and who read the raw getter; the press line's draw counts and shadow rows say what the left eye did.
 - **The lens.** At the right eye's door, pass 2 of the B3 variant, per lens pixel p of the hole: q = c + (p - c) / M (the lens's own mapping, eased as in A); the right render's depth at q (the
   rays pass's depth view, the draw's jitter in); the world point from (ndc of q, depth) through T = inverse(A_R) A_L and u (`b3Matrices`: each eye's scene rows as a 4 x 4 with the origin folded in
   and the draw's jitter taken out); that point's NDC in the left eye's zoomed square, hence its pixel in the left picture's window copy, sampled by Catmull-Rom. A sky pixel (depth 0) is read as
@@ -810,8 +810,9 @@ look for the lens's detail, the chevron's place, the HUD's size, shadows, the le
   rows, jitter removed, match the window the runtime told the game (`b3WindowMatches`, 3e-3). The left door (`uiLayerComposite` for eye 0, after the ripple, before the left eye's UI composite, over
   the picture after RCAS or, with RCAS off, the upscaler's) copies 6 degrees about c's place in the zoomed picture (a few MB). The lens's source is counted per frame: zoomed, or A for one of not zoomed
   in this frame, no copy, a copy of another frame, no matrices, no shader (B3 not asked is its own bucket).
-- **The strip.** `kStereoShareHlsl` takes `band.z`, the strip's weight: where the share does not cover (alpha 0 or behind the right view) the left eye's own image is blended toward black by it
-  (alpha a + s (1 - a), colour * a / alpha: rgb * a + dest * (1 - a) * (1 - s)); 0 is the share as it was. The weight crosses with the window (`renderCaptured`'s new last argument).
+- **The strip.** `kStereoShareHlsl` takes `band.z`, the strip's weight, and `band.w`, 1 in a frame drawn with eye 0 narrowed: the left eye's own image under the share is blended toward black by
+  dim = max(s (1 - cover), w), where cover is the right eye's geometric coverage (the edge band and the hidden-area mask, not the share's weight) (alpha a + dim (1 - a), colour * a / alpha:
+  rgb * a + dest * (1 - a) * (1 - dim)); both 0 is the share as it was. They cross with the window (`renderCaptured`'s last two arguments; a replayed pair keeps its own `previousZoomed`).
 - **DLSS.** The left eye's history resets at both edges (`b3ResetEdge`, one more term in `treat()`'s reset test, kept per eye in `History::zoomed`); the right eye's is never asked.
 - **The light grid cache** bypasses the first eye-sized builder call of a frame in which eye 0 is zoomed (`b3LightGridBypass`: the left eye is drawn first; a wrong guess costs a build, never a wrong
   grid). **The readout pin** (`KLatch::putSolo`): while eye 0 is zoomed eye 1's estimate alone vouches for the frame (its hold runs from it) and eye 0's is not put; refusals for want of a pair while zoomed are counted.
@@ -820,8 +821,9 @@ look for the lens's detail, the chevron's place, the HUD's size, shadows, the le
   1167 bytes). The press line has: ticks asked, held and zoom-asked; zoomed frames; tc, M and the window's drift from c (deg); DLSS resets per eye and by the zoom's edge; the lens's source;
   window copies; the parallax at c (left px, from the rays' depth at c); draws a frame per eye in and out of the span; light grid bypasses of calls; the shadow constants (cb1 rows 298 to 326, kept
   with the 270..275 rows of the constants buffer's CPU shadow while a press is open) changed rows a frame per eye and left against right, in and out; frame time in and out; readout pin solo and
-  no-pair. The runtime line has the frames, refusals by reason, the strip's frames, the mesh's, both frusta, and the game's reads of eye 0's projection through each getter with the vertical angle
-  each answered. `--health`: NEVER APPLIED (with the reason), PARTIAL (the lens on A for most zoomed frames, the right eye's history resetting, no reset at the edges, the matrix never read), OK, IDLE.
+  no-pair. The runtime line has the frames, refusals by reason, the strip's frames, the mesh's, both frusta, and the game's reads of eye 0's projection through each getter with the vertical tangent span
+  each answered, their ratio, and the raw getter's callers. `--health`: NEVER APPLIED (with the reason), PARTIAL (the lens on A for most zoomed frames, the right eye's history resetting, no reset at
+  the edges, the matrix never read, the getters' spans not in the ratio of the narrowing), OK, IDLE.
   If the narrowing never reached the game: zoomed frames 0, and the lens source all under `not zoomed`, the runtime line's refusals or its absence say which.
 - **Departures.** (1) The instruments are a B3 line and a runtime line, not fields of the S1 line (no room). (2) The window is latched at the press's first frame with w at 1, but the zoom is asked
   0.1 s later, when the strip is black (a ramp rather than a snap, so the narrowed picture is never visible in the strip). (3) The matrices are the tick's (rows of one frame, jitter out), not made at the
@@ -838,3 +840,24 @@ look for the lens's detail, the chevron's place, the HUD's size, shadows, the le
 - **Flight card (B3-1, Epic in VR, the full-detail key on the Experimental page with the menu's Developer mode on).** The scoped Executioner in ADS with the scope zoom on and the sight eye at both:
   the key off then on in one press (A then B3), still and turning; an eye dump with each; then look at the lens's detail, the chevron's place, the HUD's size, shadows, the left eye's outer edge (black
   while the window stands), and stutter on entry. Read `edvr_log.py --expect-build <hash> --health` first (S1, B3), then the B3 and runtime lines.
+
+**Review fixes (B3-1)** (2026-10-29, the review of `161b1954`, `reviews\scope-zoom-b3-1-review-2026-10-29.md`; the full local build and all its gates green, nothing flown):
+1. **Raw getter callers.** Every caller still gets the true frustum. While the window stands the raw getter's reads are tallied by return address as an RVA in the game's executable (`ScopeZoomCallers`: the first
+   eight distinct callers, the four busiest reported, the rest as `other callers`) and the runtime line names them (`raw getter callers (RVA in the game's executable: reads) ...`); if the lens's sky is wrong in
+   flight, the slot 28 helper (`docs\terrain-culling.md`) will show up there and is the caller to narrow. `--health` prints them; `native_runtime_host.h` and `openxr_native_test` hold the count.
+2. **Older d3d11.dll.** `NativeTemporalClient::begin` sends the frame at `EDVR_NATIVE_TEMPORAL_FRAME_SIZE_NO_ZOOM` (232 bytes) when there is no zoom, so the key-off wire form is the parent's; the whole 256 bytes
+   only with a zoom. `native_temporal_test` pins both sizes, that the provider takes exactly those two, and the client's frames end to end.
+3. **Strip.** The shader dims the left eye's own picture under the share only in the part the right eye does not cover (`s (1 - cover)`), or all of it in a frame drawn with eye 0 narrowed (`band.w`, from the
+   runtime: `zoomAppliedNow`, and `previousZoomed` for a replayed pair). The share's falling weight no longer dips the whole left eye. `openxr_stereo_test` has the cases at a = 0.5, narrowed and not, inside and outside.
+4. **What each getter returned.** The getters report the vertical tangent span they answered (`rawSpanV`, `matrixSpanV`); the runtime line logs those and their ratio (exactly M), not the told frusta or an angle
+   sum. `--health` compares the ratio with the peak narrowing (PARTIAL beyond 5%).
+5. **Press baselines.** `b3Since`: no baseline at the press start, no reading now, or a total that went backwards makes the figure n/a (`zoomed frames n/a`, `DLSS resets L n/a ...`, `light grid bypass n/a of n/a`),
+   never a wrapped difference; `--health` judges such a press on the runtime's frames, and calls it PARTIAL with none.
+6. **Edge frames.** The frame record is asked only once the window is latched (`B3StepOut::frameAsked`). `ScopeZoomRun` counts refusals from the first ask after the last frame that was not asked, so a press carries
+   its own run's refusals only.
+7. **Phantom tag.** `HEALTH_TAG_RE` closes a B tag at once, `(B3)`; the visor override's `(B8 = 0)` is no tag (the self-test case failed on the old regex first).
+8. **Glue tested by behaviour.** The tick's decisions are `b3Step`, `b3IdleStep`, `b3OffStep` and `b3PinAction` in `scope_zoom_b3.h`; `native_frame_test` drives them tick by tick (entry, exit, share under 0.9, key
+   and weapon changes mid-press, no left rows, no qualifying lens), and `openxr_system_test` drives the frame thread, the words, the stale rule and the runtime's decision and press together, with the game asking
+   after and before the tick, a stalled thread, a lost tick, an answer that is not version 11, and a second press after a refused one. Source scans remain only for the call sites.
+9. **Hidden-area mesh for eye 0 only: not done.** `GetHiddenAreaMesh` serves an eye only when the other is served (Elite makes a buffer per eye and a zero-byte one is fatal), so withholding one eye is a change to
+   that pairing, not a flag; Elite reads the mesh once a session (`docs\eye-mask-2026-09-16.md`), so the window loses nothing in the game and the frame-time comparison is unaffected. Left as is.

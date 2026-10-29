@@ -203,6 +203,93 @@ inline void b3StripStep(B3Strip& s, bool latched, double dt) noexcept {
 // The left eye's DLSS history ends where the window starts or ends: its frustum changes M-fold, and a history of the other view would be reprojected into this one.
 inline bool b3ResetEdge(bool zoomedBefore, bool zoomedNow) noexcept { return zoomedBefore != zoomedNow; }
 
+// The frame thread's tick, apart from the game's state: what native_on_foot.cpp's s1::b3Tick decides from the facts it gathers (the gate, the window's latch, the strip's ramp, the
+// request published to the provider), so native_frame_test runs the very function the tick calls. B3Loop is what the tick keeps between ticks.
+struct B3Loop {
+    bool latched = false;
+    double tc[2] = {kNaN, kNaN}, m = kNaN;   // the window's centre and narrowing, latched with the window and held
+    B3Strip strip;
+};
+struct B3StepIn {
+    bool keyOn = false;                     // the scope zoom key and the full-detail key
+    bool rendered = false;                  // the held entry is a rendered one (the scoped Executioner)
+    bool shareMode = false, qualifies = false, sightsFull = false, leftOk = false;   // b3Gate's facts
+    double share = 0.0, dt = 0.0, m = kNaN;
+    double tcNow[2] = {kNaN, kNaN};         // the left eye's direction to the far point c on this tick (what the window latches)
+};
+struct B3StepOut {
+    scopewin::Request request;              // published to the provider this tick
+    bool asked = false;                     // the key is on and the held entry is a rendered one
+    bool latched = false;                   // the window is held after this tick
+    bool askedTick = false, noLeftRowsTick = false, heldTick = false, requestTick = false;   // the press line's gate counts, for this tick
+    bool frameAsked = false;                // the frame record's asked: the lens qualifies and the window is latched, so the doors' sources count a frame as not zoomed only after the window began
+};
+inline B3StepOut b3Step(B3Loop& loop, const B3StepIn& in) noexcept {
+    B3StepOut o;
+    o.asked = in.keyOn && in.rendered;
+    B3GateIn g;
+    g.keyOn = in.keyOn;
+    g.qualifies = in.qualifies;
+    g.rendered = in.rendered;
+    g.shareMode = in.shareMode;
+    g.leftRowsOk = in.leftOk;
+    g.sightsFull = in.sightsFull;
+    g.share = in.share;
+    g.latched = loop.latched;
+    const B3GateOut go = b3Gate(g);
+    o.askedTick = o.asked && in.shareMode && in.qualifies;
+    o.noLeftRowsTick = o.askedTick && in.sightsFull && in.share >= kB3ShareFull && !in.leftOk && !loop.latched;
+    const bool now = loop.latched ? go.hold : go.latchNow;
+    if (go.latchNow) {   // the window is set at the first frame it can start, with w at 1, and held
+        loop.tc[0] = in.tcNow[0];
+        loop.tc[1] = in.tcNow[1];
+        loop.m = in.m;
+    }
+    loop.latched = now;
+    b3StripStep(loop.strip, now, in.dt);
+    o.latched = now;
+    o.heldTick = now;
+    o.requestTick = loop.strip.request;
+    o.request.zoom = loop.strip.request;
+    o.request.m = static_cast<float>(loop.m);
+    o.request.tc[0] = static_cast<float>(loop.tc[0]);
+    o.request.tc[1] = static_cast<float>(loop.tc[1]);
+    o.request.strip = static_cast<float>(loop.strip.fade);
+    o.frameAsked = in.qualifies && o.asked && now;
+    return o;
+}
+// Outside the sights: no window is held and the strip comes back (it is still published until it has).
+inline scopewin::Request b3IdleStep(B3Loop& loop, double dt) noexcept {
+    loop.latched = false;
+    b3StripStep(loop.strip, false, dt);
+    scopewin::Request rq;
+    rq.strip = static_cast<float>(loop.strip.fade);
+    return rq;
+}
+// Not armed, or the flat profile: nothing is held and the strip is gone at once.
+inline scopewin::Request b3OffStep(B3Loop& loop) noexcept {
+    loop.latched = false;
+    loop.strip = B3Strip{};
+    return scopewin::Request{};
+}
+
+// What the readout pin does with eye e's estimate on a frame: both eyes' estimates pair as they always did, but while eye 0 is drawn as the zoomed view its camera is a different one and
+// cannot agree with eye 1's, so eye 1's alone vouches for the frame and eye 0's is not put.
+enum class B3PinAction : uint32_t { kPair = 0, kSolo = 1, kSkip = 2 };
+inline B3PinAction b3PinAction(bool eye0Zoomed, int eye) noexcept {
+    if (!eye0Zoomed) return B3PinAction::kPair;
+    return eye == 1 ? B3PinAction::kSolo : B3PinAction::kSkip;
+}
+
+// A count a press takes as a difference of another module's running total: from the total at the press's start (baseOk: it could be read then) to the total now (nowOk). False -- the
+// figure is n/a, never a wrapped difference -- when either reading is missing or the total went backwards (its owner restarted: the temporal pass's channel closed and reopened).
+inline bool b3Since(bool baseOk, bool nowOk, uint64_t base, uint64_t now, uint32_t* out) noexcept {
+    if (!baseOk || !nowOk || now < base) return false;
+    const uint64_t d = now - base;
+    *out = d > 0xFFFFFFFFull ? 0xFFFFFFFFu : static_cast<uint32_t>(d);
+    return true;
+}
+
 // What the lens took the frame's picture from. kA is the digital zoom: B3 not asked, or the frame fell back to it for the reason named by the others.
 enum class B3Source : uint32_t { kNotAsked = 0, kZoomed = 1, kNotZoomed = 2, kNoCopy = 3, kStale = 4, kNoMatrices = 5, kNoShader = 6 };
 constexpr uint32_t kB3Sources = 7;
@@ -249,8 +336,10 @@ struct B3Press {
     double tc[2] = {kNaN, kNaN}, m = kNaN;
     uint32_t driftN = 0;
     double driftSumDeg = 0.0, driftMaxDeg = 0.0;
-    // the temporal pass, over the press
+    // the temporal pass, over the press: counts taken as differences of its running totals (b3Since). temporalKnown false: they could not be taken (no channel at the press's start
+    // or end, or its totals went backwards), and the line says n/a for them rather than a difference of totals that were not read.
     uint32_t zoomFrames = 0, resets[2] = {}, zoomEdgeResets = 0;
+    bool temporalKnown = true;
     // the door
     uint32_t source[kB3Sources] = {};
     uint32_t copies = 0;
@@ -259,8 +348,9 @@ struct B3Press {
     // the draw path
     uint32_t drawFrames[2] = {};
     uint64_t draws[2][2] = {};   // [eye][inside, outside]: draws summed over the frames
-    // the light grid cache
+    // the light grid cache (the same rule: lightGridKnown false is n/a)
     uint32_t lgCalls = 0, lgBypass = 0;
+    bool lightGridKnown = true;
     // the shadow constants
     uint32_t shN[2][2] = {};
     uint64_t shChanged[2][2] = {};
@@ -273,9 +363,22 @@ struct B3Press {
     uint32_t pinSolo = 0, pinNoPair = 0;
 };
 inline double b3Mean(double sum, uint64_t n) noexcept { return n ? sum / static_cast<double>(n) : kNaN; }
+// A count that may be unknown: its digits, or n/a.
+inline const char* b3Count(bool known, uint32_t v, char* buf, size_t cap) noexcept {
+    if (known) std::snprintf(buf, cap, "%u", v);
+    else std::snprintf(buf, cap, "n/a");
+    return buf;
+}
 constexpr size_t kB3PressLineBytes = 1168;
 inline int formatB3Press(char* buf, size_t n, const B3Press& p) noexcept {
     int len = 0;
+    char zf[16], rl[16], rr[16], ed[16], lgb[16], lgc[16];
+    b3Count(p.temporalKnown, p.zoomFrames, zf, sizeof(zf));
+    b3Count(p.temporalKnown, p.resets[0], rl, sizeof(rl));
+    b3Count(p.temporalKnown, p.resets[1], rr, sizeof(rr));
+    b3Count(p.temporalKnown, p.zoomEdgeResets, ed, sizeof(ed));
+    b3Count(p.lightGridKnown, p.lgBypass, lgb, sizeof(lgb));
+    b3Count(p.lightGridKnown, p.lgCalls, lgc, sizeof(lgc));
     char tcx[24], tcy[24], mm[24], dm[24], dx[24], pm[24], px[24];
     char dl[2][2][24], sh[2][2][24], pr[2][24], fm[2][24], fx[2][24];
     const uint64_t dn[2] = {p.drawFrames[0], p.drawFrames[1]};
@@ -288,17 +391,55 @@ inline int formatB3Press(char* buf, size_t n, const B3Press& p) noexcept {
         numText(b3Mean(p.ftSum[e], p.ftN[e]), 2, fm[e], sizeof(fm[e]));
         numText(p.ftN[e] ? p.ftMax[e] : kNaN, 2, fx[e], sizeof(fx[e]));
     }
-    appendf(buf, n, &len, "scope zoom (B3): press %u key %s; asked %u, held %u, zoom asked %u ticks, no left rows %u; zoomed frames %u; tc (%s, %s) M %s, window drift mean %s max %s deg; "
-            "DLSS resets L %u R %u (zoom edge %u); ", p.press, p.keyOn ? "on" : "off", p.askedTicks, p.heldTicks, p.requestTicks, p.noLeftRows, p.zoomFrames,
+    appendf(buf, n, &len, "scope zoom (B3): press %u key %s; asked %u, held %u, zoom asked %u ticks, no left rows %u; zoomed frames %s; tc (%s, %s) M %s, window drift mean %s max %s deg; "
+            "DLSS resets L %s R %s (zoom edge %s); ", p.press, p.keyOn ? "on" : "off", p.askedTicks, p.heldTicks, p.requestTicks, p.noLeftRows, zf,
             numText(p.tc[0], 4, tcx, sizeof(tcx)), numText(p.tc[1], 4, tcy, sizeof(tcy)), numText(p.m, 3, mm, sizeof(mm)), numText(b3Mean(p.driftSumDeg, p.driftN), 3, dm, sizeof(dm)),
-            numText(p.driftN ? p.driftMaxDeg : kNaN, 3, dx, sizeof(dx)), p.resets[0], p.resets[1], p.zoomEdgeResets);
+            numText(p.driftN ? p.driftMaxDeg : kNaN, 3, dx, sizeof(dx)), rl, rr, ed);
     appendf(buf, n, &len, "lens source: zoomed %u, A: not asked %u, not zoomed %u, no copy %u, stale %u, no matrices %u, no shader %u; copies %u; parallax at c mean %s max %s px; ",
             p.source[static_cast<uint32_t>(B3Source::kZoomed)], p.source[static_cast<uint32_t>(B3Source::kNotAsked)], p.source[static_cast<uint32_t>(B3Source::kNotZoomed)],
             p.source[static_cast<uint32_t>(B3Source::kNoCopy)], p.source[static_cast<uint32_t>(B3Source::kStale)], p.source[static_cast<uint32_t>(B3Source::kNoMatrices)],
             p.source[static_cast<uint32_t>(B3Source::kNoShader)], p.copies, numText(b3Mean(p.parSumPx, p.parN), 1, pm, sizeof(pm)), numText(p.parN ? p.parMaxPx : kNaN, 1, px, sizeof(px)));
-    appendf(buf, n, &len, "draws a frame in/out L %s/%s R %s/%s (frames %u/%u); light grid bypass %u of %u calls; shadow rows changed a frame in/out L %s/%s R %s/%s, L vs R %s/%s; "
-            "frame ms in/out %s/%s (max %s/%s); readout pin solo %u, no pair %u", dl[0][0], dl[0][1], dl[1][0], dl[1][1], p.drawFrames[0], p.drawFrames[1], p.lgBypass, p.lgCalls,
+    appendf(buf, n, &len, "draws a frame in/out L %s/%s R %s/%s (frames %u/%u); light grid bypass %s of %s calls; shadow rows changed a frame in/out L %s/%s R %s/%s, L vs R %s/%s; "
+            "frame ms in/out %s/%s (max %s/%s); readout pin solo %u, no pair %u", dl[0][0], dl[0][1], dl[1][0], dl[1][1], p.drawFrames[0], p.drawFrames[1], lgb, lgc,
             sh[0][0], sh[0][1], sh[1][0], sh[1][1], pr[0], pr[1], fm[0], fm[1], fx[0], fx[1], p.pinSolo, p.pinNoPair);
+    return finishLine(buf, n, len);
+}
+
+// ---- 5. the runtime's report line ---------------------------------------------------------------------------------------------------------------------------------------------------
+// The line the d3d11 half writes for the runtime's report of a press (EdvrNativeScopeZoomReport, scope_zoom_window.h; edvrNoteNativeScopeZoom). What each getter last ANSWERED eye 0 with
+// (the vertical tangent span, not the frusta the runtime told): the matrix getter's is the narrowed one and the raw getter's the true one, so their ratio is the narrowing exactly. And who read
+// the raw getter, by return address as an RVA in the game's executable, so a flight that shows the sky (or anything else) at the wrong scale names the caller to narrow. A span or a caller
+// nobody produced is the word none, so a rule can tell a getter that was never read from one that was.
+constexpr size_t kB3RuntimeLineBytes = 1168;
+inline const char* b3Callers(const EdvrNativeScopeZoomReport& r, char* buf, size_t cap) noexcept {
+    size_t used = 0;
+    buf[0] = '\0';
+    for (unsigned i = 0; i < EDVR_NATIVE_SCOPE_ZOOM_REPORT_CALLERS; ++i) {
+        if (!r.rawCallerReads[i]) continue;
+        const int w = r.rawCallerRva[i] == 0xFFFFFFFFu ? std::snprintf(buf + used, cap - used, "%soutside:%u", used ? " " : "", r.rawCallerReads[i])
+                                                       : std::snprintf(buf + used, cap - used, "%s0x%X:%u", used ? " " : "", r.rawCallerRva[i], r.rawCallerReads[i]);
+        if (w < 0 || static_cast<size_t>(w) >= cap - used) break;
+        used += static_cast<size_t>(w);
+    }
+    if (!used) std::snprintf(buf, cap, "none");
+    return buf;
+}
+inline int formatB3Runtime(char* buf, size_t n, const EdvrNativeScopeZoomReport& r) noexcept {
+    int len = 0;
+    char rs[24], ms[24], ratio[24], callers[96];
+    const double rawSpan = r.rawSpan > 0.f ? static_cast<double>(r.rawSpan) : kNaN, matrixSpan = r.matrixSpan > 0.f ? static_cast<double>(r.matrixSpan) : kNaN;
+    appendf(buf, n, &len,
+            "scope zoom (B3) runtime: zoomed frames %u over %.2f s, peak narrowing %.3f; refused: answer not version 11 %u, share not at full weight %u, share not drawn %u, geometry %u; "
+            "strip darkened %u frames, hidden-area mesh withheld %u frames; eye 0's told frustum without the zoom (left, right, down, up tangents) %+.4f/%+.4f/%+.4f/%+.4f, with it "
+            "%+.4f/%+.4f/%+.4f/%+.4f; ",
+            r.frames, static_cast<double>(r.seconds), static_cast<double>(r.peakM), r.refused[0], r.refused[1], r.refused[2], r.refused[3], r.stripFrames, r.meshWithheld,
+            static_cast<double>(r.trueTan[0]), static_cast<double>(r.trueTan[1]), static_cast<double>(r.trueTan[2]), static_cast<double>(r.trueTan[3]), static_cast<double>(r.zoomTan[0]),
+            static_cast<double>(r.zoomTan[1]), static_cast<double>(r.zoomTan[2]), static_cast<double>(r.zoomTan[3]));
+    appendf(buf, n, &len,
+            "the game's reads of eye 0's projection while it stood: raw getter %u (its UI scale reads it; vertical tangent span answered %s), matrix getter %u (the picture is drawn with it; span %s), "
+            "span ratio raw over matrix %s; raw getter callers (RVA in the game's executable: reads) %s, other callers %u",
+            r.rawReads, numText(rawSpan, 4, rs, sizeof(rs)), r.matrixReads, numText(matrixSpan, 4, ms, sizeof(ms)),
+            numText(std::isfinite(rawSpan) && std::isfinite(matrixSpan) ? rawSpan / matrixSpan : kNaN, 3, ratio, sizeof(ratio)), b3Callers(r, callers, sizeof(callers)), r.rawCallerOther);
     return finishLine(buf, n, len);
 }
 

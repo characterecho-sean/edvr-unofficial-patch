@@ -9,8 +9,10 @@
 #include "projection_math.h"
 #include "../common/scope_zoom_window.h"
 
+#include <atomic>
 #include <cmath>
 #include <cstdint>
+#include <utility>
 
 namespace edvr::openxr {
 
@@ -61,10 +63,57 @@ inline ScopeZoomOutput decideScopeZoom(const ScopeZoomInput& in) {
     o.narrowing = (trueTan[3] - trueTan[2]) / (zoomTan[3] - zoomTan[2]);
     return o;
 }
-// The vertical angle a RawFov spans (atan |up| + atan |down|), degrees: what the game's fov getter reads, which its UI scale divides by.
-inline float rawVerticalDeg(const RawFov& r) {
-    return static_cast<float>((std::atan(std::fabs(static_cast<double>(r.top))) + std::atan(std::fabs(static_cast<double>(r.bottom)))) * 180.0 / 3.14159265358979323846);
-}
+
+// Who read the raw projection getter for eye 0 while the window stood, by the return address as an RVA in the game's executable (openvr_system.cpp frameRva; kFrameOutside for one outside
+// it). The raw getter is the one the zoom keeps true (the game's UI scale reads it), and the design answers every caller of it with the true frustum; if a caller turns out to draw
+// something from it that should have been narrowed, this names it. A fixed table of the first kSlots distinct callers and a count for the rest; lock-free, because the game's threads
+// read the getter and the owner thread resets and reports. A reset while a read is in flight can lose that read; the report is an instrument, not a ledger.
+class ScopeZoomCallers {
+public:
+    static constexpr unsigned kSlots = 8;
+    void reset() noexcept {
+        for (unsigned i = 0; i < kSlots; ++i) { reads_[i].store(0, std::memory_order_relaxed); key_[i].store(0, std::memory_order_relaxed); }
+        overflow_.store(0, std::memory_order_relaxed);
+    }
+    void note(uint32_t rva) noexcept {
+        const uint64_t key = static_cast<uint64_t>(rva) + 1u;   // 0 is an empty slot
+        for (unsigned i = 0; i < kSlots; ++i) {
+            uint64_t have = key_[i].load(std::memory_order_relaxed);
+            if (have == 0) {
+                uint64_t none = 0;
+                have = key_[i].compare_exchange_strong(none, key, std::memory_order_relaxed) ? key : none;
+            }
+            if (have == key) { reads_[i].fetch_add(1, std::memory_order_relaxed); return; }
+        }
+        overflow_.fetch_add(1, std::memory_order_relaxed);
+    }
+    // The busiest callers, most reads first (ties in the order they were first seen); other is every read not in the top slots. A slot nobody filled has 0 reads.
+    void top(uint32_t (&rva)[EDVR_NATIVE_SCOPE_ZOOM_REPORT_CALLERS], uint32_t (&reads)[EDVR_NATIVE_SCOPE_ZOOM_REPORT_CALLERS], uint32_t& other) const noexcept {
+        uint32_t r[kSlots], n[kSlots];
+        unsigned used = 0;
+        for (unsigned i = 0; i < kSlots; ++i) {
+            const uint64_t key = key_[i].load(std::memory_order_relaxed);
+            const uint32_t count = reads_[i].load(std::memory_order_relaxed);
+            if (key == 0 || count == 0) continue;
+            r[used] = static_cast<uint32_t>(key - 1u);
+            n[used] = count;
+            ++used;
+        }
+        for (unsigned a = 1; a < used; ++a)   // insertion sort, stable
+            for (unsigned b = a; b > 0 && n[b] > n[b - 1]; --b) { std::swap(n[b], n[b - 1]); std::swap(r[b], r[b - 1]); }
+        uint64_t rest = overflow_.load(std::memory_order_relaxed);
+        for (unsigned i = 0; i < EDVR_NATIVE_SCOPE_ZOOM_REPORT_CALLERS; ++i) {
+            rva[i] = i < used ? r[i] : 0u;
+            reads[i] = i < used ? n[i] : 0u;
+        }
+        for (unsigned i = EDVR_NATIVE_SCOPE_ZOOM_REPORT_CALLERS; i < used; ++i) rest += n[i];
+        other = rest > 0xFFFFFFFFull ? 0xFFFFFFFFu : static_cast<uint32_t>(rest);
+    }
+private:
+    std::atomic<uint64_t> key_[kSlots]{};
+    std::atomic<uint32_t> reads_[kSlots]{};
+    std::atomic<uint32_t> overflow_{0};
+};
 
 // One press of the zoom: from the first zoomed frame to the first frame without one.
 struct ScopeZoomPress {
@@ -73,9 +122,11 @@ struct ScopeZoomPress {
     uint32_t frames = 0, refused[4] = {}, stripFrames = 0, meshWithheld = 0;
     float peakM = 0.f;
     double trueTan[4] = {}, zoomTan[4] = {};
-    // the game's reads of the projection for eye 0 while the zoom stood, taken from the system object's counters at the press's edges
+    // the game's reads of the projection for eye 0 while the zoom stood, taken from the system object's counters at the press's end: how many, the vertical tangent span each getter last
+    // answered (0: not read), and who read the raw getter
     uint32_t rawReads = 0, matrixReads = 0;
-    float rawVerticalDeg = 0.f, matrixVerticalDeg = 0.f;
+    float rawSpan = 0.f, matrixSpan = 0.f;
+    uint32_t callerRva[EDVR_NATIVE_SCOPE_ZOOM_REPORT_CALLERS] = {}, callerReads[EDVR_NATIVE_SCOPE_ZOOM_REPORT_CALLERS] = {}, callerOther = 0;
     void begin(uint64_t nowUs) { *this = ScopeZoomPress{}; open = true; firstUs = lastUs = nowUs; }
     void applied(const ScopeZoomOutput& o, uint64_t nowUs, bool stripDrawn, bool meshWithheldNow) {
         ++frames;
@@ -84,10 +135,6 @@ struct ScopeZoomPress {
         if (meshWithheldNow) ++meshWithheld;
         if (static_cast<float>(o.narrowing) > peakM) peakM = static_cast<float>(o.narrowing);
         for (int i = 0; i < 4; ++i) { trueTan[i] = o.trueTan[i]; zoomTan[i] = o.zoomTan[i]; }
-    }
-    void refusedBecause(ScopeZoomWhy w) {
-        if (w == ScopeZoomWhy::kApplied || w == ScopeZoomWhy::kNotAsked) return;
-        ++refused[scopeZoomRefusalIndex(w)];
     }
     void fill(EdvrNativeScopeZoomReport& r) const {
         r = EdvrNativeScopeZoomReport{};
@@ -100,9 +147,53 @@ struct ScopeZoomPress {
         r.peakM = peakM;
         r.rawReads = rawReads;
         r.matrixReads = matrixReads;
-        r.rawVerticalDeg = rawVerticalDeg;
-        r.matrixVerticalDeg = matrixVerticalDeg;
+        r.rawSpan = rawSpan;
+        r.matrixSpan = matrixSpan;
         r.meshWithheld = meshWithheld;
+        for (unsigned i = 0; i < EDVR_NATIVE_SCOPE_ZOOM_REPORT_CALLERS; ++i) { r.rawCallerRva[i] = callerRva[i]; r.rawCallerReads[i] = callerReads[i]; }
+        r.rawCallerOther = callerOther;
+    }
+};
+
+// The runtime's bookkeeping around one frame's decision (decideScopeZoom, then the geometry the host also needs): which frame opens a press, which ends one and why, and which refusals
+// a press carries. A refusal is counted from the first frame the zoom was asked for after it was last not asked for, so the run of asks a press belongs to is what it reports, and
+// the refusals of an earlier run (a press that never zoomed, a sight lowered and raised again) are not carried into it. The host traces and tells the d3d11 half what this returns.
+struct ScopeZoomEvents {
+    bool opened = false;          // a press opened on this frame (the zoom is told, and none was before)
+    const char* closed = nullptr; // a press that was open ends on this frame: "asked_off" (no longer asked) or "refused"; the host closes it (reports it, then clears press.open)
+    bool whyChanged = false;      // a refusal whose reason differs from the last frame's (traced once per change)
+};
+struct ScopeZoomRun {
+    ScopeZoomPress press;
+    ScopeZoomWhy whyNoted = ScopeZoomWhy::kNotAsked;
+    uint32_t pending[4] = {};     // refusals of the run of asks in progress that no press has taken
+    ScopeZoomEvents frame(const ScopeZoomOutput& out, uint64_t nowUs) {
+        ScopeZoomEvents ev;
+        if (out.why == ScopeZoomWhy::kApplied) {
+            if (!press.open) {
+                press.begin(nowUs);
+                for (unsigned i = 0; i < 4; ++i) { press.refused[i] = pending[i]; pending[i] = 0; }
+                ev.opened = true;
+            }
+            press.applied(out, nowUs, out.strip > 0.f, true);
+            whyNoted = ScopeZoomWhy::kApplied;
+            return ev;
+        }
+        if (press.open) ev.closed = out.why == ScopeZoomWhy::kNotAsked ? "asked_off" : "refused";
+        if (out.why == ScopeZoomWhy::kNotAsked) {
+            for (unsigned i = 0; i < 4; ++i) pending[i] = 0;
+        } else {
+            const uint32_t index = scopeZoomRefusalIndex(out.why);
+            if (index < 4) ++pending[index];
+            ev.whyChanged = out.why != whyNoted;
+        }
+        whyNoted = out.why;
+        return ev;
+    }
+    // No provider answer or no located geometry on this frame: nothing is narrowed and the run of asks ends. "no_geometry" when a press was open.
+    const char* absent() {
+        for (unsigned i = 0; i < 4; ++i) pending[i] = 0;
+        return press.open ? "no_geometry" : nullptr;
     }
 };
 

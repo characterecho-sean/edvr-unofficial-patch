@@ -447,6 +447,16 @@ void run(){
       check(zboth(14,false,zl,zr)&&!zl&&!zr,"zoom: and then holds");
       uint64_t zf1=0,zr1[2]={},ze1=0;check(edvr::nativeTemporalZoomCounts(&zf1,zr1,&ze1)&&zf1==zf0+2&&ze1==ze0+2&&zr1[0]==zr0[0]+2&&zr1[1]==zr0[1],"zoom: two zoomed frames, two history resets of eye 0 at the edges, none of eye 1's");
       f=zat(15,true);f.preZoom[0]=f.preZoom[1];begin(scaled,f);check(!edvr::nativeTemporalZoomLatest(nullptr,nullptr,nullptr),"zoom: a frame that says zoomed with a frustum without the window that is no frustum is not zoomed");
+      { // the wire form: the provider takes the frame at the size from before B3 (a host with no zoom, or a build from before it) and at the whole size, and no other
+        auto rawBegin=[&](EdvrNativeTemporalFrame& g){EdvrNativeTemporalProjection pj{sizeof(pj),1};HRESULT r=E_FAIL;std::thread cpu([&]{r=scaled.beginFrame(scaled.context,&g,&pj);});cpu.join();return r;};
+        auto g=zat(16,true);g.size=EDVR_NATIVE_TEMPORAL_FRAME_SIZE_NO_ZOOM;   // zoomed, with a pre-zoom frustum, in the bytes past the older size
+        check(rawBegin(g)==S_OK&&!edvr::nativeTemporalZoomLatest(nullptr,nullptr,nullptr),"zoom wire: a frame of the older size is begun and is not zoomed, whatever the bytes past its end say");
+        g=zat(17,true);
+        check(rawBegin(g)==S_OK&&edvr::nativeTemporalZoomLatest(nullptr,nullptr,nullptr),"zoom wire: ... and one of the whole size is begun zoomed");
+        bool refused=true;
+        for(uint32_t bad:{0u,8u,EDVR_NATIVE_TEMPORAL_FRAME_SIZE_NO_ZOOM-4u,EDVR_NATIVE_TEMPORAL_FRAME_SIZE_NO_ZOOM+4u,uint32_t(sizeof(g))-4u,uint32_t(sizeof(g))+4u}){auto h=zat(18,false);h.size=bad;refused=refused&&rawBegin(h)==E_INVALIDARG;}
+        check(refused,"zoom wire: a frame of any other size is refused");
+      }
     }
     check(scaled.close(scaled.context)==S_OK,"separation: close");
   }
@@ -456,7 +466,19 @@ void run(){
   g.headFlags=XR_SPACE_LOCATION_POSITION_VALID_BIT|XR_SPACE_LOCATION_ORIENTATION_VALID_BIT;g.viewFlags=XR_VIEW_STATE_POSITION_VALID_BIT|XR_VIEW_STATE_ORIENTATION_VALID_BIT;
   for(unsigned e=0;e<2;++e){g.views[e].pose.orientation.w=1;g.views[e].pose.position.x=e?.03f:-.03f;g.views[e].fov={-.8f,.7f,.7f,-.6f};g.width[e]=480;g.height[e]=360;}
   float shifts[2][2]{};check(client.begin(g,1,shifts)==S_OK,"client converts located geometry");client.noteProjection(1,0,.025f,50000);
-  ComPtr<ID3D11Texture2D> out;vr::VRTextureBounds_t box{};check(client.treat(1,0,source.Get(),nullptr,out,box)==S_OK&&out.Get()==source.Get(),"client retains provider result");check(client.close()==S_OK&&client.close()==S_FALSE,"client close");
+  ComPtr<ID3D11Texture2D> out;vr::VRTextureBounds_t box{};check(client.treat(1,0,source.Get(),nullptr,out,box)==S_OK&&out.Get()==source.Get(),"client retains provider result");
+  { // B3: the host sends a frame with no zoom at the size from before B3 appended its fields (the key-off wire form is the parent's, byte for byte, and a d3d11.dll from before B3 takes it), and one with a zoom whole.
+    // On the client's own channel: the pool of 16 is spent by the cases below.
+    check(EDVR_NATIVE_TEMPORAL_FRAME_SIZE_NO_ZOOM==232u&&offsetof(EdvrNativeTemporalFrame,trueDown)+sizeof(float)==232u&&sizeof(EdvrNativeTemporalFrame)==256u&&
+          edvr::openxr::temporalFrameSize(false)==232u&&edvr::openxr::temporalFrameSize(true)==256u,"zoom wire: a frame with no zoom is sent at the size from before B3 (232 bytes, the parent's), one with a zoom at the whole struct (256)");
+    check(!edvr::nativeTemporalZoomLatest(nullptr,nullptr,nullptr),"zoom wire: the client's frame with no zoom (the begin above) was begun and is not zoomed");
+    edvr::openxr::RawFov pre{};require(edvr::openxr::fovToRaw(g.views[0].fov,pre),"zoom client: the located frustum converts");
+    g.sequence=2;g.views[0].fov={-.2f,.2f,.2f,-.15f};
+    check(client.begin(g,1,shifts,nullptr,0,0,0.f,0.f,&pre)==S_OK&&edvr::nativeTemporalZoomLatest(nullptr,nullptr,nullptr),"zoom wire: the client's frame with a zoom is begun whole, and zoomed");
+    g.sequence=3;
+    check(client.begin(g,1,shifts)==S_OK&&!edvr::nativeTemporalZoomLatest(nullptr,nullptr,nullptr),"zoom wire: and the next frame with none is not zoomed");
+  }
+  check(client.close()==S_OK&&client.close()==S_FALSE,"client close");
   auto omitted=acquire(d,17);f=frame(17,1);begin(omitted,f);
   check(treat(omitted,1,0,source.Get())==S_OK,"omission baseline");
   f=frame(17,2);begin(omitted,f);const auto count=calls.size();

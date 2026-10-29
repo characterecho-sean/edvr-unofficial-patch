@@ -94,8 +94,9 @@ class SystemSource {
   virtual void noteProjectionQuery(const SystemRead&,unsigned,float,float,
       vr::EGraphicsAPIConvention,bool,const vr::HmdMatrix44_t&,const void*) noexcept {}
   // Every projection read the game makes of an eye (raw: GetProjectionRaw, else GetProjectionMatrix), and whether eye 0's answer was the scope zoom's narrowed one (matrix) or
-  // the true one held back from it (raw). Counted, never logged per call; must stay cheap.
-  virtual void noteProjectionRead(unsigned eye,bool raw,bool zoomHeld) noexcept {(void)eye;(void)raw;(void)zoomHeld;}
+  // the true one held back from it (raw). span is the vertical tangent span the getter answered (projection_math.h rawSpanV, matrixSpanV; 0 when it answered nothing), and caller
+  // the return address as an RVA in the game's executable (exe_module.h frameRva). Counted, never logged per call; must stay cheap.
+  virtual void noteProjectionRead(unsigned eye,bool raw,bool zoomHeld,float span,uint32_t caller) noexcept {(void)eye;(void)raw;(void)zoomHeld;(void)span;(void)caller;}
   virtual void noteFrequencyQuery(const SystemRead&,vr::TrackedDeviceIndex_t,
       vr::ETrackedPropertyError,float,unsigned) noexcept {}
   // The first answer to Elite's eye-transform call that carries a world scale (percent) the last answer did not: the sequence is the geometry

@@ -289,13 +289,13 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   bool featureFrameKnown=false;
   uint64_t featureChanges=0;
   // B3, the scope zoom's window (scope_zoom_state.h): this frame's decision, the press it is part of, and the game's reads of eye 0's projection while it stood.
-  ScopeZoomPress zoomPress;
-  bool zoomAppliedNow=false;
+  ScopeZoomRun zoomRun;
+  ScopeZoomCallers zoomCallers;
+  bool zoomAppliedNow=false,previousZoomed=false;   // eye 0 was told the window for this frame / for the kept pair a replay draws
   float zoomStripNow=0.f;
-  ScopeZoomWhy zoomWhyNoted=ScopeZoomWhy::kNotAsked;
-  uint32_t zoomPendingRefused[4]{};
   std::atomic<bool> zoomReadsOn{false};
   std::atomic<uint32_t> zoomRawReads{0},zoomMatrixReads{0};
+  std::atomic<float> zoomRawSpan{0.f},zoomMatrixSpan{0.f};
   NativeMenuClient menu;
   NativeTemporalClient temporal;
   NativeSharpenClient sharpen;
@@ -872,10 +872,13 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       snapshot.recommendedWidth[1],snapshot.recommendedHeight[1]);
   }
   void noteGeometryQuery(unsigned slot,const SystemRead& snapshot) noexcept override {traceGeometryQuery(slot,snapshot);}
-  // The game's reads of eye 0's projection while the scope zoom's window stands (eye 0, the zoom held back from the raw getter): counted for the press's report.
-  void noteProjectionRead(unsigned eye,bool raw,bool zoomHeld) noexcept override {
+  // The game's reads of eye 0's projection while the scope zoom's window stands (eye 0, the zoom held back from the raw getter): counted for the press's report, with the span each
+  // getter last answered and who read the raw one. Called on the game's threads for every read, so a few relaxed atomics and no lock.
+  void noteProjectionRead(unsigned eye,bool raw,bool zoomHeld,float span,uint32_t caller) noexcept override {
     if(eye!=0||!zoomHeld||!zoomReadsOn.load(std::memory_order_relaxed))return;
     (raw?zoomRawReads:zoomMatrixReads).fetch_add(1,std::memory_order_relaxed);
+    if(span>0.f)(raw?zoomRawSpan:zoomMatrixSpan).store(span,std::memory_order_relaxed);
+    if(raw)zoomCallers.note(caller);
   }
   void noteProjectionQuery(const SystemRead& s,unsigned eye,float nearZ,float farZ,
       vr::EGraphicsAPIConvention convention,bool accepted,const vr::HmdMatrix44_t& m,const void* caller) noexcept override {
@@ -2686,8 +2689,8 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       if(masks){const auto& m=masks->eyes[1];hidden={m.vertices.data(),uint32_t(m.vertices.size()),m.indices.data(),uint32_t(m.indices.size()),masks->revision};}
     }
     const auto r=frameWithheld?stereo.renderCaptured(previousViews,previousSpace,previousPair,layer,observer,nullptr,previousPlacement,fade,
-                                                     previousHeadValid?&previousHeadPose:nullptr,leftShare,&hidden,zoomStripNow):
-      stereo.renderCaptured(frameViews,frameSpace,captured,layer,observer,&wall,framePlacement,fade,locatedHeadPose(),leftShare,&hidden,zoomStripNow);
+                                                     previousHeadValid?&previousHeadPose:nullptr,leftShare,&hidden,zoomStripNow,previousZoomed):
+      stereo.renderCaptured(frameViews,frameSpace,captured,layer,observer,&wall,framePlacement,fade,locatedHeadPose(),leftShare,&hidden,zoomStripNow,zoomAppliedNow);
     sharePress(leftShare,r==XR_SUCCESS,frameWithheld);
     submitSample.xrAcquireMs=wall.acquire;submitSample.xrWaitMs=wall.wait;
     submitSample.xrDrawMs=wall.draw;submitSample.xrReleaseMs=wall.release;
@@ -2716,6 +2719,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       // The kept pair carries the placement it was drawn with; a replay of it
       // under a changed trim would otherwise stretch those pixels.
       previousPlacement[0]=framePlacement[0];previousPlacement[1]=framePlacement[1];
+      previousZoomed=zoomAppliedNow;   // a replay of it draws the same narrowed left picture, which the share's dimming has to know
       previousReference=poses.read().originGeneration;previousPairValid=true;
     } else previousPairValid=false;
   }
@@ -2799,56 +2803,63 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     }
     zoomStripNow=out.strip;
     const bool applied=out.why==ScopeZoomWhy::kApplied;
-    const uint64_t nowUs=frameCycleUs();
     if(applied) {
       toldRaw[0]=preRaw;
       game.views[0].fov=out.fov;
-      if(!zoomPress.open) {
-        zoomPress.begin(nowUs);
-        for(unsigned i=0;i<4;++i){zoomPress.refused[i]=zoomPendingRefused[i];zoomPendingRefused[i]=0;}
-        zoomRawReads.store(0,std::memory_order_relaxed);zoomMatrixReads.store(0,std::memory_order_relaxed);
-        zoomReadsOn.store(true,std::memory_order_relaxed);
-        nativeTracePrintf("scope_zoom,state=on,narrowing=%.3f,true_tan=%.4f/%.4f/%.4f/%.4f,zoom_tan=%.4f/%.4f/%.4f/%.4f,raw_getter_vertical_deg=%.3f,matrix_vertical_deg=%.3f,strip=%.2f,share=%.3f\n",
-          out.narrowing,out.trueTan[0],out.trueTan[1],out.trueTan[2],out.trueTan[3],out.zoomTan[0],out.zoomTan[1],out.zoomTan[2],out.zoomTan[3],
-          double(rawVerticalDeg(preRaw)),double(rawVerticalDeg(zoomRaw)),double(out.strip),double(in.share));
-      }
-      zoomPress.applied(out,nowUs,out.strip>0.f,true);
-      zoomPress.rawVerticalDeg=rawVerticalDeg(preRaw);zoomPress.matrixVerticalDeg=rawVerticalDeg(zoomRaw);
-      zoomWhyNoted=ScopeZoomWhy::kApplied;
-    } else {
-      if(zoomPress.open)closeScopeZoomPress(out.why==ScopeZoomWhy::kNotAsked?"asked_off":"refused");
-      if(out.why!=ScopeZoomWhy::kNotAsked) {
-        const unsigned index=scopeZoomRefusalIndex(out.why);
-        if(index<4){++zoomPendingRefused[index];}
-        if(out.why!=zoomWhyNoted)
-          nativeTracePrintf("scope_zoom,state=refused,why=%u,share=%.3f,share_drawn=%u,share_refused=%u,version=%u\n",unsigned(out.why),double(in.share),unsigned(in.shareDrawn),
-            unsigned(in.shareRefused),unsigned(featureFrameKnown?featureFrame.version:0u));
-      }
-      zoomWhyNoted=out.why;
     }
+    // The press's opening, its ending and the refusals it carries are scope_zoom_state.h's (ScopeZoomRun); this traces them and tells the d3d11 half.
+    const ScopeZoomEvents ev=zoomRun.frame(out,frameCycleUs());
+    if(ev.opened) {
+      beginScopeZoomReads();
+      nativeTracePrintf("scope_zoom,state=on,narrowing=%.3f,true_tan=%.4f/%.4f/%.4f/%.4f,zoom_tan=%.4f/%.4f/%.4f/%.4f,told_span_true=%.4f,told_span_zoomed=%.4f,strip=%.2f,share=%.3f\n",
+        out.narrowing,out.trueTan[0],out.trueTan[1],out.trueTan[2],out.trueTan[3],out.zoomTan[0],out.zoomTan[1],out.zoomTan[2],out.zoomTan[3],
+        double(rawSpanV(preRaw)),double(rawSpanV(zoomRaw)),double(out.strip),double(in.share));
+    }
+    if(ev.closed)closeScopeZoomPress(ev.closed);
+    if(ev.whyChanged)
+      nativeTracePrintf("scope_zoom,state=refused,why=%u,share=%.3f,share_drawn=%u,share_refused=%u,version=%u\n",unsigned(out.why),double(in.share),unsigned(in.shareDrawn),
+        unsigned(in.shareRefused),unsigned(featureFrameKnown?featureFrame.version:0u));
     zoomAppliedNow=applied;
     return applied;
+  }
+  // A press opens: the game's reads of eye 0's projection are counted from here (noteProjectionRead), with the span each getter answered and who read the raw one.
+  void beginScopeZoomReads() {
+    zoomRawReads.store(0,std::memory_order_relaxed);zoomMatrixReads.store(0,std::memory_order_relaxed);
+    zoomRawSpan.store(0.f,std::memory_order_relaxed);zoomMatrixSpan.store(0.f,std::memory_order_relaxed);
+    zoomCallers.reset();
+    zoomReadsOn.store(true,std::memory_order_relaxed);
   }
   // The frame has no provider answer or no located geometry: nothing is narrowed, and a press that was open ends.
   void noteScopeZoomAbsent() {
     zoomStripNow=0.f;zoomAppliedNow=false;
-    if(zoomPress.open)closeScopeZoomPress("no_geometry");
+    if(const char* ended=zoomRun.absent())closeScopeZoomPress(ended);
   }
   void closeScopeZoomPress(const char* ended) {
     zoomReadsOn.store(false,std::memory_order_relaxed);
-    zoomPress.rawReads=zoomRawReads.load(std::memory_order_relaxed);zoomPress.matrixReads=zoomMatrixReads.load(std::memory_order_relaxed);
-    zoomPress.open=false;
-    EdvrNativeScopeZoomReport report{};zoomPress.fill(report);
+    ScopeZoomPress& press=zoomRun.press;
+    press.rawReads=zoomRawReads.load(std::memory_order_relaxed);press.matrixReads=zoomMatrixReads.load(std::memory_order_relaxed);
+    press.rawSpan=zoomRawSpan.load(std::memory_order_relaxed);press.matrixSpan=zoomMatrixSpan.load(std::memory_order_relaxed);
+    zoomCallers.top(press.callerRva,press.callerReads,press.callerOther);
+    press.open=false;
+    EdvrNativeScopeZoomReport report{};press.fill(report);
     HRESULT told=S_FALSE;
     if(graphicsProxy) {
       const auto note=reinterpret_cast<EdvrNoteNativeScopeZoom>(GetProcAddress(graphicsProxy,"edvrNoteNativeScopeZoom"));
       if(note)told=note(&report);
     }
+    char callers[160]="none";size_t used=0;
+    for(unsigned i=0;i<EDVR_NATIVE_SCOPE_ZOOM_REPORT_CALLERS&&used<sizeof(callers);++i) {
+      if(!report.rawCallerReads[i])continue;
+      const int n=std::snprintf(callers+used,sizeof(callers)-used,"%s0x%X:%u",used?"/":"",report.rawCallerRva[i],report.rawCallerReads[i]);
+      if(n<=0)break;
+      used+=(std::min)(size_t(n),sizeof(callers)-used);
+    }
     nativeTracePrintf("scope_zoom_press,frames=%u,refused=%u/%u/%u/%u,strip_frames=%u,mesh_withheld=%u,seconds=%.3f,peak_narrowing=%.3f,true_tan=%.4f/%.4f/%.4f/%.4f,"
-                      "zoom_tan=%.4f/%.4f/%.4f/%.4f,raw_reads=%u,matrix_reads=%u,raw_vertical_deg=%.3f,matrix_vertical_deg=%.3f,ended=%s,told_graphics=%s\n",
+                      "zoom_tan=%.4f/%.4f/%.4f/%.4f,raw_reads=%u,matrix_reads=%u,raw_getter_span=%.4f,matrix_getter_span=%.4f,span_ratio=%.3f,raw_callers=%s,raw_callers_other=%u,ended=%s,told_graphics=%s\n",
       report.frames,report.refused[0],report.refused[1],report.refused[2],report.refused[3],report.stripFrames,report.meshWithheld,double(report.seconds),double(report.peakM),
       double(report.trueTan[0]),double(report.trueTan[1]),double(report.trueTan[2]),double(report.trueTan[3]),double(report.zoomTan[0]),double(report.zoomTan[1]),
-      double(report.zoomTan[2]),double(report.zoomTan[3]),report.rawReads,report.matrixReads,double(report.rawVerticalDeg),double(report.matrixVerticalDeg),ended,
+      double(report.zoomTan[2]),double(report.zoomTan[3]),report.rawReads,report.matrixReads,double(report.rawSpan),double(report.matrixSpan),
+      report.rawSpan>0.f&&report.matrixSpan>0.f?double(report.rawSpan)/double(report.matrixSpan):0.0,callers,report.rawCallerOther,ended,
       told==S_OK?"yes":told==S_FALSE?"no_export":"refused");
   }
   SystemRead read() const override {return geometry.read();}

@@ -17,6 +17,7 @@
 #include <mutex>
 
 #define EDVR_NATIVE_SCOPE_ZOOM_REPORT_VERSION_1 1u
+#define EDVR_NATIVE_SCOPE_ZOOM_REPORT_CALLERS 4u
 
 // One press of the scoped sight's zoom, as the runtime did it. Every figure is the runtime's.
 struct EdvrNativeScopeZoomReport {
@@ -30,9 +31,12 @@ struct EdvrNativeScopeZoomReport {
     float zoomTan[4];           // ... and with it
     uint32_t rawReads;          // the game's reads of the projection through the raw getter for eye 0 while the zoom stood (what its UI scale reads)
     uint32_t matrixReads;       // ... and through the matrix getter (what the picture is drawn with)
-    float rawVerticalDeg;       // the vertical angle the raw getter answered eye 0 (atan |up| + atan |down|), degrees
-    float matrixVerticalDeg;    // ... and the matrix getter
+    float rawSpan;              // the vertical tangent span (bottom minus top) the raw getter last answered eye 0 with while the zoom stood; 0 when it was not read
+    float matrixSpan;           // ... and the matrix getter's (2 / m[1][1] of the matrix it returned); the two are in the ratio of the narrowing
     uint32_t meshWithheld;      // frames the hidden-area mesh was withheld because of the zoom
+    uint32_t rawCallerRva[EDVR_NATIVE_SCOPE_ZOOM_REPORT_CALLERS];     // the busiest callers of the raw getter while the zoom stood, most first: the return address as an RVA in the game's executable (0xFFFFFFFF: outside it)
+    uint32_t rawCallerReads[EDVR_NATIVE_SCOPE_ZOOM_REPORT_CALLERS];   // their reads; 0 in a slot no caller filled
+    uint32_t rawCallerOther;    // the raw getter's reads by every other caller
 };
 // The export's type, spelled without windows.h (HRESULT is long, WINAPI is __stdcall): a rig that cannot include windows.h reads the runtime's headers.
 typedef long(__stdcall* EdvrNoteNativeScopeZoom)(const EdvrNativeScopeZoomReport*);
@@ -162,7 +166,7 @@ inline void clear() {
 // A report the d3d11 half can read: its own size and version, and every figure finite.
 inline bool reportReadable(const EdvrNativeScopeZoomReport* r) {
     if (!r || r->size < sizeof(EdvrNativeScopeZoomReport) || r->version != EDVR_NATIVE_SCOPE_ZOOM_REPORT_VERSION_1) return false;
-    const float values[] = {r->seconds, r->peakM, r->trueTan[0], r->trueTan[1], r->trueTan[2], r->trueTan[3], r->zoomTan[0], r->zoomTan[1], r->zoomTan[2], r->zoomTan[3], r->rawVerticalDeg, r->matrixVerticalDeg};
+    const float values[] = {r->seconds, r->peakM, r->trueTan[0], r->trueTan[1], r->trueTan[2], r->trueTan[3], r->zoomTan[0], r->zoomTan[1], r->zoomTan[2], r->zoomTan[3], r->rawSpan, r->matrixSpan};
     for (float v : values)
         if (!(v == v) || v > 1e9f || v < -1e9f) return false;
     return true;

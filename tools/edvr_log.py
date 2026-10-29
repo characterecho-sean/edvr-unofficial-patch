@@ -10337,8 +10337,9 @@ def self_test_phase_failure():
 _HN =r"[+-]?\d+(?:\.\d+)?"
 # F<n> tags are the on-foot arc's features; S<n> (S0: scope zoom, measure only, src\d3d11\scope_zoom_s0.h) is the scope zoom arc's. The S0 census rule also reads the pixel
 # probe's own closing line, which carries no tag (H_S0_PROBE_RE): health_scan hands it to the S0 rules. B<n> (B3: the scoped sniper's lens at full detail,
-# src\d3d11\scope_zoom_b3.h) is the scope zoom arc's second family; the negative lookahead keeps a format name such as (B8G8R8A8 from being read as a tag.
-HEALTH_TAG_RE = re.compile(r"\((F\d+[a-z]?(?:/F\d+[a-z]?)*|S\d+|B\d+)(?![0-9A-Za-z])")
+# src\d3d11\scope_zoom_b3.h) is the scope zoom arc's second family; a B tag closes at once, (B3), so a format name such as (B8G8R8A8 and a parenthesis that only says (B8 = 0) in words
+# (the visor override's line) are not read as tags.
+HEALTH_TAG_RE = re.compile(r"\((F\d+[a-z]?(?:/F\d+[a-z]?)*|S\d+|B\d+(?=\)))(?![0-9A-Za-z])")
 H_S0_PROBE_RE = re.compile(r"pixel probe: frame \d+ done -- ")
 HEALTH_STAMP_RE = re.compile(r"^\[(\d{2}):(\d{2}):(\d{2})\.(\d{3})\]\s*")
 HEALTH_TIME_RE = re.compile(r"^(\d{1,2}):(\d{2})(?::(\d{2})(?:\.(\d{1,3}))?)?$")
@@ -15009,22 +15010,25 @@ def _b3n(name):
 
 H_B3_ANNOUNCE_RE = r"scope zoom \(B3\): full detail (?P<key>on|off); for the table's rendered entries .*$"
 H_B3_PRESS_RE = (r"scope zoom \(B3\): press (?P<n>\d+) key (?P<key>on|off); asked (?P<asked>\d+), held (?P<held>\d+), zoom asked (?P<zask>\d+) ticks, no left rows (?P<noleft>\d+); "
-                 r"zoomed frames (?P<zf>\d+); tc \(" + _b3n("tcx") + ", " + _b3n("tcy") + r"\) M " + _b3n("m") + ", window drift mean " + _b3n("dm") + " max " + _b3n("dx") + " deg; "
-                 r"DLSS resets L (?P<rl>\d+) R (?P<rr>\d+) \(zoom edge (?P<edge>\d+)\); "
+                 r"zoomed frames (?P<zf>\d+|n/a); tc \(" + _b3n("tcx") + ", " + _b3n("tcy") + r"\) M " + _b3n("m") + ", window drift mean " + _b3n("dm") + " max " + _b3n("dx") + " deg; "
+                 r"DLSS resets L (?P<rl>\d+|n/a) R (?P<rr>\d+|n/a) \(zoom edge (?P<edge>\d+|n/a)\); "
                  r"lens source: zoomed (?P<sz>\d+), A: not asked (?P<sna>\d+), not zoomed (?P<snz>\d+), no copy (?P<snc>\d+), stale (?P<sst>\d+), no matrices (?P<snm>\d+), no shader (?P<sns>\d+); "
                  r"copies (?P<copies>\d+); parallax at c mean " + _b3n("pm") + " max " + _b3n("px") + " px; "
                  r"draws a frame in/out L " + _b3n("dli") + "/" + _b3n("dlo") + " R " + _b3n("dri") + "/" + _b3n("dro") + r" \(frames (?P<fi>\d+)/(?P<fo>\d+)\); "
-                 r"light grid bypass (?P<lgb>\d+) of (?P<lgc>\d+) calls; "
+                 r"light grid bypass (?P<lgb>\d+|n/a) of (?P<lgc>\d+|n/a) calls; "
                  r"shadow rows changed a frame in/out L " + _b3n("sli") + "/" + _b3n("slo") + " R " + _b3n("sri") + "/" + _b3n("sro") + ", L vs R " + _b3n("pri") + "/" + _b3n("pro") + "; "
                  r"frame ms in/out " + _b3n("fmi") + "/" + _b3n("fmo") + r" \(max " + _b3n("fxi") + "/" + _b3n("fxo") + r"\); "
                  r"readout pin solo (?P<solo>\d+), no pair (?P<nopair>\d+)$")
+_B3CALL = r"(?:0x[0-9A-F]+|outside):\d+"
 H_B3_RUNTIME_RE = (r"scope zoom \(B3\) runtime: zoomed frames (?P<frames>\d+) over (?P<secs>[^\s;]+) s, peak narrowing (?P<peak>[^\s;]+); "
                    r"refused: answer not version 11 (?P<ref0>\d+), share not at full weight (?P<ref1>\d+), share not drawn (?P<ref2>\d+), geometry (?P<ref3>\d+); "
                    r"strip darkened (?P<strip>\d+) frames, hidden-area mesh withheld (?P<mesh>\d+) frames; "
                    r"eye 0's told frustum without the zoom \(left, right, down, up tangents\) (?P<t0>" + _B3T + ")/(?P<t1>" + _B3T + ")/(?P<t2>" + _B3T + ")/(?P<t3>" + _B3T + "), "
                    r"with it (?P<z0>" + _B3T + ")/(?P<z1>" + _B3T + ")/(?P<z2>" + _B3T + ")/(?P<z3>" + _B3T + "); "
-                   r"the game's reads of eye 0's projection while it stood: raw getter (?P<rawn>\d+) \(its UI scale reads it; answered (?P<rawdeg>[^\s;)]+) deg vertical\), "
-                   r"matrix getter (?P<matn>\d+) \(the picture is drawn with it; (?P<matdeg>[^\s;)]+) deg vertical\)$")
+                   r"the game's reads of eye 0's projection while it stood: raw getter (?P<rawn>\d+) \(its UI scale reads it; vertical tangent span answered (?P<rawspan>[^\s;)]+)\), "
+                   r"matrix getter (?P<matn>\d+) \(the picture is drawn with it; span (?P<matspan>[^\s;)]+)\), "
+                   r"span ratio raw over matrix (?P<ratio>[^\s;,]+); "
+                   r"raw getter callers \(RVA in the game's executable: reads\) (?P<callers>none|" + _B3CALL + "(?: " + _B3CALL + r"){0,3}), other callers (?P<cother>\d+)$")
 # The lens source's fallbacks to A, in the order the door tests them (b3SourceOf), each with what it means. "not asked" is not one: the lens was not asked for that frame.
 _B3_FALLBACKS = (("snz", "not zoomed", "the left eye was not told the window on the lens's frame"), ("snc", "no copy", "the left door made no copy of the zoomed picture"),
                  ("sst", "stale", "the copy was from another frame than the right eye's"), ("snm", "no matrices", "the two eyes' rows gave the lens no fresh matrices for the window"),
@@ -15050,24 +15054,42 @@ def _b3_press_verdict(p, rt):
     """(status, reasons, note) for one press line the zoom was asked in (key on, asked above 0). NEVER APPLIED when the left eye was zoomed on no frame (zoomed frames 0), with the
     first reason the gate's counts give: no left rows, a window never held, a strip that never reached black, or a zoom that was asked for and never reached the game. PARTIAL, with
     every reason that applies, when it was zoomed and: the lens source `zoomed` is under half of the frames the door classified (or the door classified none), the right eye's DLSS
-    history reset more than twice, no history reset at the window's edges, or the runtime's report shows the game never read the matrix getter while the window stood. rt is the press's
-    runtime report or None; its refused counts are a note, never a failure. note is the figures, whatever the status."""
+    history reset more than twice, no history reset at the window's edges, the runtime's report shows the game never read the matrix getter while the window stood, or the two
+    getters' answers (the vertical tangent span of each, as answered) are not in the ratio of the narrowing the runtime told. The temporal pass's counts (zoomed frames, the resets) are
+    n/a when the press could not read its totals; then the runtime's own count of the frames it told the game stands for zoomed frames, and with no report either the press is PARTIAL
+    (it cannot be judged), never OK or NEVER APPLIED. rt is the press's runtime report or None; its refused counts are a note, never a failure. note is the figures, whatever the status."""
     def n(k):
         return int(p[k])
+
+    def opt(k):
+        return None if p[k] == "n/a" else int(p[k])
     fallbacks = [(n(k), name, what) for k, name, what in _B3_FALLBACKS]
     total = n("sz") + sum(c for c, _, _ in fallbacks)
-    note = ("zoomed frames %d, lens source zoomed %d of %d, parallax at c mean %s max %s px, draws a frame in/out L %s/%s R %s/%s (frames %s/%s), readout pin solo %d (no pair %d), "
-            "light grid bypass %d of %d calls" % (n("zf"), n("sz"), total, p["pm"], p["px"], p["dli"], p["dlo"], p["dri"], p["dro"], p["fi"], p["fo"], n("solo"), n("nopair"), n("lgb"), n("lgc")))
+    note = ("zoomed frames %s, lens source zoomed %d of %d, parallax at c mean %s max %s px, draws a frame in/out L %s/%s R %s/%s (frames %s/%s), readout pin solo %d (no pair %d), "
+            "light grid bypass %s of %s calls" % (p["zf"], n("sz"), total, p["pm"], p["px"], p["dli"], p["dlo"], p["dri"], p["dro"], p["fi"], p["fo"], n("solo"), n("nopair"), p["lgb"], p["lgc"]))
+    ratio_text = None
     if rt:
-        note += ("; the runtime told the game for %s frames over %s s, peak narrowing %s; the game read the raw getter %s times (its UI scale reads it; %s deg vertical) and the matrix getter "
-                 "%s times (%s deg vertical; they should differ by about M %s while the HUD stays true)" % (rt["frames"], rt["secs"], rt["peak"], rt["rawn"], rt["rawdeg"], rt["matn"], rt["matdeg"], p["m"]))
+        note += ("; the runtime told the game for %s frames over %s s, peak narrowing %s; the game read the raw getter %s times (its UI scale reads it; vertical tangent span answered %s) and the matrix "
+                 "getter %s times (span answered %s); the spans' ratio raw over matrix is %s, which is the narrowing told (%s) while the HUD stays true; raw getter callers (RVA in the game's "
+                 "executable: reads) %s, other callers %s" % (rt["frames"], rt["secs"], rt["peak"], rt["rawn"], rt["rawspan"], rt["matn"], rt["matspan"], rt["ratio"], rt["peak"], rt["callers"],
+                                                               rt["cother"]))
         if int(rt["ref0"]) + int(rt["ref1"]) + int(rt["ref2"]) + int(rt["ref3"]):
             note += "; the runtime refused: answer not version 11 %s, share not at full weight %s, share not drawn %s, geometry %s" % (rt["ref0"], rt["ref1"], rt["ref2"], rt["ref3"])
         if int(rt["strip"]) or int(rt["mesh"]):
             note += "; strip darkened %s frames, hidden-area mesh withheld %s frames" % (rt["strip"], rt["mesh"])
+        try:
+            ratio_text = (float(rt["ratio"]), float(rt["peak"]))
+        except ValueError:
+            ratio_text = None   # a getter that was never read (none), or a narrowing that is no number
     else:
         note += "; no `scope zoom (B3) runtime` line comes before this press line"
-    if n("zf") == 0:
+    zf = opt("zf")
+    if zf is None and rt:
+        zf = int(rt["frames"])   # the temporal pass's totals were not there: the runtime's own count of the frames it told the game
+    if zf is None:
+        return ("PARTIAL", ["the temporal pass's counts (zoomed frames, the DLSS resets) are n/a: no channel at the press's start or end, or its totals went backwards, and no `scope zoom (B3) "
+                            "runtime` line came before this press line to count the frames the runtime told the game"], note)
+    if zf == 0:
         if n("held") == 0:
             if n("noleft") > 0:
                 why = "the left eye's rows were never usable (no left rows on %d of the %d tick(s) the zoom was asked for)" % (n("noleft"), n("asked"))
@@ -15084,16 +15106,19 @@ def _b3_press_verdict(p, rt):
         return ("NEVER APPLIED", [why], note)
     reasons = []
     if total == 0:
-        reasons.append("the lens door classified no frame while the left eye was zoomed for %d frame(s) (every lens source count is 0: the lens never ran, so it sampled none of the zoomed picture)" % n("zf"))
+        reasons.append("the lens door classified no frame while the left eye was zoomed for %d frame(s) (every lens source count is 0: the lens never ran, so it sampled none of the zoomed picture)" % zf)
     elif n("sz") * 2 < total:
         big = max(fallbacks, key=lambda f: f[0])
         reasons.append("the lens fell back to A for most frames: %s %d of %d (zoomed %d; %s)" % (big[1], big[0], total, n("sz"), big[2]))
-    if n("rr") > 2:
-        reasons.append("the right eye's history reset %d times (DLSS resets L %d R %d)" % (n("rr"), n("rl"), n("rr")))
-    if n("edge") == 0:
-        reasons.append("no history reset at the window's edges (zoom edge 0 over %d zoomed frame(s))" % n("zf"))
+    if opt("rr") is not None and opt("rr") > 2:
+        reasons.append("the right eye's history reset %d times (DLSS resets L %s R %d)" % (opt("rr"), p["rl"], opt("rr")))
+    if opt("edge") == 0:
+        reasons.append("no history reset at the window's edges (zoom edge 0 over %d zoomed frame(s))" % zf)
     if rt and int(rt["matn"]) == 0:
         reasons.append("the game never read the matrix while the window stood (matrix getter 0 reads, raw getter %s)" % rt["rawn"])
+    if ratio_text and ratio_text[1] > 0 and abs(ratio_text[0] - ratio_text[1]) > 0.05 * ratio_text[1]:
+        reasons.append("the getters' answers are not in the ratio of the narrowing told: raw over matrix span %s against peak narrowing %s (a getter answered a frustum other than the one the "
+                       "runtime told it)" % (rt["ratio"], rt["peak"]))
     return ("PARTIAL" if reasons else "OK", reasons, note)
 
 
@@ -15124,7 +15149,10 @@ def _hj_b3(rows, ctx):
         return ("IDLE", base + "; the zoom was asked for in no press (the key off, or a press in which the sight eye was not both, the held entry not a rendered one or the lens never qualified: "
                           "that is no failure)" + tail)
     verdicts = [(p,) + _b3_press_verdict(p, paired.get(id(p))) for p in counting]
-    base += "; zoomed frames %d in all" % sum(int(p["zf"]) for p in counting)
+    unknown = [p["n"] for p in counting if p["zf"] == "n/a"]
+    base += "; zoomed frames %d in all" % sum(int(p["zf"]) for p in counting if p["zf"] != "n/a")
+    if unknown:
+        base += " (not counting press %s: n/a, the temporal pass's totals were not read)" % ", ".join(unknown)
     bad = [v for v in verdicts if v[1] != "OK"]
     good = [v for v in verdicts if v[1] == "OK"]
     if len(bad) == len(verdicts) and all(v[1] == "NEVER APPLIED" for v in bad):
@@ -21314,16 +21342,24 @@ def self_test_health():
             base.update(kw)
             return b3_press(**base)
 
-        def b3_runtime(frames=260, secs=4.33, peak=4.067, ref=(0, 0, 0, 0), strip=12, mesh=260, raw=260, rawdeg=96.0, mat=260, matdeg=23.5):
-            """The runtime's report of one window: the frames it told the game, its refusals, and what the game read of eye 0's projection while the window stood."""
-            return RB3("scope zoom (B3) runtime: zoomed frames %u over", frames, secs, peak, *ref, strip, mesh, -1.0, 1.0, -1.1, 1.1, -0.25, 0.25, -0.27, 0.27, raw, rawdeg, mat, matdeg)
+        def b3_runtime(frames=260, secs=4.33, peak=4.067, ref=(0, 0, 0, 0), strip=12, mesh=260, raw=260, rawspan=None, mat=260, matspan=None, ratio=None, callers=None, cother=0):
+            """The runtime's report of one window, in formatB3Runtime's two parts: the frames it told the game, its refusals, and what the game read of eye 0's projection while the window
+            stood -- the vertical tangent span each getter answered (the raw one true, the matrix one narrowed by the peak), their ratio, and who read the raw getter. A getter read on no
+            frame has the word none for its span (and the ratio, and with no raw reads, no callers); callers are the 'rva:reads' words."""
+            rawspan = rawspan if rawspan is not None else ("1.2800" if raw else "none")
+            matspan = matspan if matspan is not None else ("%.4f" % (1.28 / peak) if mat else "none")
+            ratio = ratio if ratio is not None else ("%.3f" % peak if raw and mat else "none")
+            callers = callers if callers is not None else (("0x4E3C93:%d" % (raw - 60), "0x2842AE3:60") if raw >= 60 else ("0x2842AE3:%d" % raw,) if raw else ())
+            return (RB3("scope zoom (B3) runtime: zoomed frames %u over", frames, secs, peak, *ref, strip, mesh, -1.0, 1.0, -1.1, 1.1, -0.25, 0.25, -0.27, 0.27) +
+                    RB3("the game's reads of eye 0's projection while it stood: raw getter %u", raw, rawspan, mat, matspan, ratio, " ".join(callers) if callers else "none", cother))
 
         check("B3: a press the zoom applied on, paired with the runtime's report", [b3_announce(), b3_runtime(), b3_press()], 0, [("OK", B3R)],
               has=["full detail on; 1 press line(s), 1 with the zoom asked (key on, asked above 0); zoomed frames 260 in all",
                    "last press 1: zoomed frames 260, lens source zoomed 250 of 260, parallax at c mean 3.2 max 9.1 px, draws a frame in/out L 2410/3180 R 2390/3150 (frames 250/30), "
                    "readout pin solo 0 (no pair 0), light grid bypass 260 of 900 calls",
-                   "the runtime told the game for 260 frames over 4.33 s, peak narrowing 4.067; the game read the raw getter 260 times (its UI scale reads it; 96.000 deg vertical) and the matrix "
-                   "getter 260 times (23.500 deg vertical; they should differ by about M 4.067 while the HUD stays true)",
+                   "the runtime told the game for 260 frames over 4.33 s, peak narrowing 4.067; the game read the raw getter 260 times (its UI scale reads it; vertical tangent span answered 1.2800) "
+                   "and the matrix getter 260 times (span answered 0.3147); the spans' ratio raw over matrix is 4.067, which is the narrowing told (4.067) while the HUD stays true; raw getter "
+                   "callers (RVA in the game's executable: reads) 0x4E3C93:200 0x2842AE3:60, other callers 0",
                    "strip darkened 12 frames, hidden-area mesh withheld 260 frames"], lacks=["UNPARSED", "the runtime refused", "no `scope zoom (B3) runtime` line comes before"])
         check("B3: a press with no runtime report before it is OK and says so", [b3_announce(), b3_press()], 0, [("OK", B3R)],
               has=["no `scope zoom (B3) runtime` line comes before this press line"], lacks=["UNPARSED"])
@@ -21384,11 +21420,33 @@ def self_test_health():
         check("B3: two resets of the right eye is the line", [b3_announce(), b3_runtime(), b3_press(rl=2, rr=2)], 0, [("OK", B3R)], lacks=["history reset"])
         check("B3: no history reset at the window's edges is PARTIAL", [b3_announce(), b3_runtime(), b3_press(edge=0, rl=0)], 0, [("PARTIAL", B3R)],
               has=["press 1 PARTIAL: no history reset at the window's edges (zoom edge 0 over 260 zoomed frame(s))"])
-        check("B3: the game reading the matrix getter on no frame while the window stood is PARTIAL", [b3_announce(), b3_runtime(mat=0, matdeg=0.0), b3_press()], 0, [("PARTIAL", B3R)],
+        check("B3: the game reading the matrix getter on no frame while the window stood is PARTIAL", [b3_announce(), b3_runtime(mat=0), b3_press()], 0, [("PARTIAL", B3R)],
               has=["press 1 PARTIAL: the game never read the matrix while the window stood (matrix getter 0 reads, raw getter 260)"])
         check("B3: a press with no runtime report is not judged on the matrix getter", [b3_announce(), b3_press()], 0, [("OK", B3R)], lacks=["never read the matrix"])
         check("B3: a press that fails more than one check names every one", [b3_announce(), b3_runtime(mat=0), b3_press(src=(10, 0, 0, 0, 240, 0, 10), rr=4, edge=0)], 0, [("PARTIAL", B3R)],
               has=["the lens fell back to A for most frames: stale 240 of 260", "; the right eye's history reset 4 times", "; no history reset at the window's edges", "; the game never read the matrix"])
+        # the getters' answers (the vertical tangent span each returned) and who read the raw one
+        check("B3: the two getters' answers in the ratio of the narrowing told are the line", [b3_announce(), b3_runtime(peak=4.0, rawspan="1.2800", matspan="0.3200", ratio="4.000"), b3_press()], 0, [("OK", B3R)],
+              lacks=["PARTIAL", "not in the ratio"])
+        check("B3: getters whose answers are not in the ratio of the narrowing told are PARTIAL, naming both", [b3_announce(), b3_runtime(peak=4.067, rawspan="1.2800", matspan="0.6400", ratio="2.000"), b3_press()], 0,
+              [("PARTIAL", B3R)], has=["the getters' answers are not in the ratio of the narrowing told: raw over matrix span 2.000 against peak narrowing 4.067"])
+        check("B3: a ratio within five percent of the narrowing is the line", [b3_announce(), b3_runtime(peak=4.067, ratio="4.200"), b3_press()], 0, [("OK", B3R)], lacks=["not in the ratio"])
+        check("B3: a raw getter nobody read (no span, no callers, no ratio) is parsed, and is no failure", [b3_announce(), b3_runtime(raw=0), b3_press()], 0, [("OK", B3R)],
+              has=["raw getter 0 times (its UI scale reads it; vertical tangent span answered none)", "callers (RVA in the game's executable: reads) none, other callers 0"], lacks=["UNPARSED", "not in the ratio"])
+        check("B3: four callers, one outside the game's executable, and the rest counted as other are parsed", [b3_announce(),
+              b3_runtime(callers=("0x4E3C93:100", "0x2842AE3:80", "0x4E3C50:50", "outside:30"), cother=12), b3_press()], 0, [("OK", B3R)],
+              has=["0x4E3C93:100 0x2842AE3:80 0x4E3C50:50 outside:30, other callers 12"], lacks=["UNPARSED"])
+        check("B3: five callers in a line is not the format", [b3_runtime(callers=("0x1:1", "0x2:1", "0x3:1", "0x4:1", "0x5:1"))], 4, [("UNPARSED", B3R)])
+        check("B3: a runtime report that gives the getters' angles, as the first build's did, is unparsed", [b3_runtime().replace("vertical tangent span answered 1.2800", "answered 96.000 deg vertical")], 4,
+              [("UNPARSED", B3R)])
+        # counts the press could not take (the temporal pass's channel was not there at its start or end, or its totals went backwards) are n/a, never a wrapped difference
+        na = dict(zf="n/a", rl="n/a", rr="n/a", edge="n/a", lgb="n/a", lgc="n/a")
+        check("B3: a press whose temporal counts are n/a is judged on the runtime's own frames, and says n/a", [b3_announce(), b3_runtime(), b3_press(**na)], 0, [("OK", B3R)],
+              has=["(not counting press 1: n/a, the temporal pass's totals were not read)", "zoomed frames n/a, lens source zoomed 250 of 260", "light grid bypass n/a of n/a calls"], lacks=["UNPARSED", "history reset"])
+        check("B3: ... and with no runtime report to count the frames it is PARTIAL, not OK and not NEVER APPLIED", [b3_announce(), b3_press(**na)], 0, [("PARTIAL", B3R)],
+              has=["the temporal pass's counts (zoomed frames, the DLSS resets) are n/a", "no `scope zoom (B3) runtime` line came before this press line"], lacks=["NEVER APPLIED", "UNPARSED"])
+        check("B3: ... and n/a with a runtime report that told the game on no frame is NEVER APPLIED, as a counted 0 is", [b3_announce(), b3_runtime(frames=0, ref=(0, 0, 0, 12), strip=0, mesh=0, raw=0, mat=0),
+              b3_never(held=40, zask=30, zf="n/a", rl="n/a", rr="n/a", edge="n/a")], 3, [("NEVER APPLIED", B3R)], lacks=["UNPARSED"])
 
         # the runtime's report belongs to the press line after it
         check("B3: each press takes the runtime report just before it", [b3_announce(), b3_runtime(), b3_press(), b3_runtime(frames=0, ref=(0, 0, 0, 12), strip=0, mesh=0, raw=0, mat=0),
@@ -21419,6 +21477,8 @@ def self_test_health():
               has=["every tag (* has a rule above):", "S1", "B3"], extra=["--health-all"])
         check("B3: (B words, a format name and a B tag with a letter after it are no tag", ["pipeline (B8G8R8A8_UNORM) chosen (B words) (B3x)", b3_announce()], 0, [("IDLE", B3R)],
               has=["1 build-tagged lines, 1 tags"], lacks=["UNPARSED"])
+        check("B3: the visor override's own line, which says (B8 = 0) in words, is no B tag (a tag closes at once: B3)", [R("EliteDangerous64.exe+0x%llX 0 -> 1 (B8 = 0)", 0x1A2B3C), b3_announce()], 0,
+              [("IDLE", B3R)], has=["1 build-tagged lines, 1 tags"], lacks=["UNPARSED"])
         # ---- the desktop window: the graphics log's untagged lines, rendered from the C format strings in src\common\desktop_window_math.h and src\d3d11\desktop_window.cpp ----
         dwsrc = read_text(os.path.join(repo_root(), "src", "common", "desktop_window_math.h"))
         dwcpp = read_text(os.path.join(repo_root(), "src", "d3d11", "desktop_window.cpp"))

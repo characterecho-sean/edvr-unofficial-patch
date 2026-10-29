@@ -114,9 +114,9 @@ void shareSelfTest(bool owned) {
       EyeCapture grayCapture;check(SUCCEEDED(grayCapture.initialize(f.runtime.device.Get())),"strip capture owner");
       const vr::Texture_t gl{gray.Get(),vr::API_DirectX,vr::ColorSpace_Linear},rt2{right.Get(),vr::API_DirectX,vr::ColorSpace_Linear};
       check(grayCapture.capture(vr::Eye_Left,&gl)==vr::VRCompositorError_None&&grayCapture.capture(vr::Eye_Right,&rt2)==vr::VRCompositorError_None,"strip capture");
-      const auto strip=[&](float share,float black) {
+      const auto strip=[&](float share,float black,bool zoomed=false) {
         XrCompositionLayerProjection layer{};const unsigned image=f.runtime.eyes[0].calls%2;
-        check(f.renderer.renderCaptured(f.views,space,grayCapture,layer,nullptr,nullptr,nullptr,0.f,nullptr,share,nullptr,black)==XR_SUCCESS,"strip render");
+        check(f.renderer.renderCaptured(f.views,space,grayCapture,layer,nullptr,nullptr,nullptr,0.f,nullptr,share,nullptr,black,zoomed)==XR_SUCCESS,"strip render");
         return readWhole(f,0,image);
       };
       const auto sum=[&](uint32_t p){unsigned r=0,g=0,b=0;channels(p,r,g,b);return r+g+b;};
@@ -129,6 +129,21 @@ void shareSelfTest(bool owned) {
       check(covered,what);
       std::snprintf(what,sizeof(what),"B3 strip (%s, %s): no strip (and a strip that is no number) is the share exactly as it was, and with no share the strip draws nothing",mode,kind);
       check(s0==nan&&noShare==noShare0,what);
+      // The share's weight falling at the end of a press (a = 0.5 here) with the strip still black: the left eye's own picture is dimmed only in the strip the right eye does not cover, or in a
+      // frame drawn with eye 0 narrowed; the covered interior of an unnarrowed frame is not dimmed by the strip however far the weight has fallen. Inside = the interior, outside = the corner.
+      const std::vector<uint32_t> h0=strip(.5f,0.f),hStrip=strip(.5f,1.f),hZoomed=strip(.5f,0.f,true),hZoomedStrip=strip(.5f,1.f,true),zNoShare=strip(0.f,0.f,true),zFull=strip(1.f,0.f,true);   // the last render is one with a share drawn: the facts the checks after this block read are its
+      std::snprintf(what,sizeof(what),"B3 strip (%s, %s): at a share of 0.5 in a frame that is not narrowed, a black strip leaves the covered interior exactly as it is with no strip (it must not dim the whole left eye while the share releases)",mode,kind);
+      bool interiorUndimmed=true;
+      for(unsigned y=16;y<112;++y)for(unsigned x=16;x<112;++x)interiorUndimmed=interiorUndimmed&&at(hStrip,x,y)==at(h0,x,y);
+      check(interiorUndimmed&&sum(at(h0,64,64))>3*100,what);
+      std::snprintf(what,sizeof(what),"B3 strip (%s, %s): ... and the corner the right eye does not cover is black with the strip black, and the left eye's own picture without it",mode,kind);
+      check(sum(at(hStrip,0,0))<=3&&sum(at(h0,0,0))>3*150,what);
+      std::snprintf(what,sizeof(what),"B3 strip (%s, %s): in a frame drawn with eye 0 narrowed the left eye's own picture is gone under the share (a share of 0.5 shows half the right eye's pixel over black), and the corner is black whatever the strip",mode,kind);
+      check(sum(at(hZoomed,64,64))+3*40<sum(at(h0,64,64))&&sum(at(hZoomed,64,64))>3&&sum(at(hZoomed,0,0))<=3&&hZoomedStrip==hZoomed,what);
+      std::snprintf(what,sizeof(what),"B3 strip (%s, %s): at full weight a narrowed frame's covered interior is still the right eye's own pixel, bit for bit, and with no share a narrowed frame draws nothing",mode,kind);
+      bool zCovered=true;
+      for(unsigned y=16;y<112;++y)for(unsigned x=16;x<112;++x)zCovered=zCovered&&at(zFull,x,y)==at(base.eye[1],x,y);
+      check(zCovered&&zNoShare==noShare0,what);
     }
     {
       bool interior=true;

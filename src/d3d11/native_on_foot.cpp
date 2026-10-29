@@ -29989,10 +29989,13 @@ void f85Refuse(F85bPe& pe, int why, bool byPlace = false) {
 }
 // K is a camera of this frame: the pair of the two eyes' estimates, compared once both are in (the latch the weapon UI's rows read).
 void f85LatchPut(int e, uint32_t frame, const F85Solve& s) {
-    if (nativeTemporalZoomLatest(nullptr, nullptr, nullptr)) {   // B3: eye 0 is drawn as the zoomed view this frame: its camera cannot agree with eye 1's, so eye 1 vouches alone, and eye 0 is not put
-        if (e == 1 && g_f85Latch.putSolo(1, frame, s.K, s.oh, s.ow)) g_b3PinSolo.fetch_add(1, std::memory_order_relaxed);
+    // B3: while eye 0 is drawn as the zoomed view its camera cannot agree with eye 1's, so eye 1 vouches alone and eye 0 is not put (scope_zoom_b3.h b3PinAction)
+    const edvr::scopezoom::B3PinAction pin = edvr::scopezoom::b3PinAction(nativeTemporalZoomLatest(nullptr, nullptr, nullptr), e);
+    if (pin == edvr::scopezoom::B3PinAction::kSolo) {
+        if (g_f85Latch.putSolo(1, frame, s.K, s.oh, s.ow)) g_b3PinSolo.fetch_add(1, std::memory_order_relaxed);
         return;
     }
+    if (pin == edvr::scopezoom::B3PinAction::kSkip) return;
     if (g_f85Latch.put(e, frame, s.K, s.oh, s.ow)) {
         g_f85w.agreeMmMax = std::max(g_f85w.agreeMmMax, g_f85Latch.last.distM * 1000.0);
         g_f85w.agreeDegMax = std::max(g_f85w.agreeDegMax, g_f85Latch.last.angleDeg);
@@ -35440,11 +35443,10 @@ void announce(State& s, bool key, double ref) noexcept {
 // for the lens (b3Matrices) from the rows of one frame, once the left rows describe the window the runtime told the game.
 struct B3State {
     bool announced = false, announcedKey = false, pressKey = false;
-    bool latched = false;
-    double tc[2] = {std::numeric_limits<double>::quiet_NaN(), std::numeric_limits<double>::quiet_NaN()}, m = std::numeric_limits<double>::quiet_NaN();
-    sz::B3Strip strip;
+    sz::B3Loop loop;   // the window's latch (its centre and narrowing) and the strip's ramp: scope_zoom_b3.h b3Step
     sz::B3Press p;   // this press's figures from the tick, the draw path and the shadow constants; the door's, the temporal pass's and the light grid's are added at its end
     uint64_t zoomFrames0 = 0, resets0[2] = {}, edge0 = 0, lgCalls0 = 0, lgBypass0 = 0;
+    bool temporalBase = false;   // the temporal pass's totals were read at the press's start (a press that began with no channel has no baseline: its figures are n/a)
 } g_b3s;
 
 void announceB3(State& s, bool keyOn) noexcept {
@@ -35463,12 +35465,11 @@ void beginB3Press(State& s) noexcept {
     b.p.press = s.press;
     b.pressKey = false;
     uint64_t zf = 0, rs[2] = {}, edge = 0;
-    if (nativeTemporalZoomCounts(&zf, rs, &edge)) {
-        b.zoomFrames0 = zf;
-        b.resets0[0] = rs[0];
-        b.resets0[1] = rs[1];
-        b.edge0 = edge;
-    }
+    b.temporalBase = nativeTemporalZoomCounts(&zf, rs, &edge);
+    b.zoomFrames0 = b.temporalBase ? zf : 0;
+    b.resets0[0] = b.temporalBase ? rs[0] : 0;
+    b.resets0[1] = b.temporalBase ? rs[1] : 0;
+    b.edge0 = b.temporalBase ? edge : 0;
     lightGridCacheZoomCounts(&b.lgCalls0, &b.lgBypass0);
     g_b3EyeDraws[0].store(0, std::memory_order_relaxed);
     g_b3EyeDraws[1].store(0, std::memory_order_relaxed);
@@ -35497,17 +35498,15 @@ void endB3Press(State& s) noexcept {
     p.parN = door.parN;
     p.parSumPx = door.parSumPx;
     p.parMaxPx = door.parMaxPx;
+    // The cross-module counts are differences of running totals (b3Since): no baseline at the press's start, no reading now, or a total that went backwards (the temporal pass's channel
+    // closed and reopened) is n/a in the line, never a wrapped difference.
     uint64_t zf = 0, rs[2] = {}, edge = 0;
-    if (nativeTemporalZoomCounts(&zf, rs, &edge)) {
-        p.zoomFrames = static_cast<uint32_t>(zf - b.zoomFrames0);
-        p.resets[0] = static_cast<uint32_t>(rs[0] - b.resets0[0]);
-        p.resets[1] = static_cast<uint32_t>(rs[1] - b.resets0[1]);
-        p.zoomEdgeResets = static_cast<uint32_t>(edge - b.edge0);
-    }
+    const bool temporalNow = nativeTemporalZoomCounts(&zf, rs, &edge);
+    p.temporalKnown = sz::b3Since(b.temporalBase, temporalNow, b.zoomFrames0, zf, &p.zoomFrames) && sz::b3Since(b.temporalBase, temporalNow, b.resets0[0], rs[0], &p.resets[0]) &&
+                      sz::b3Since(b.temporalBase, temporalNow, b.resets0[1], rs[1], &p.resets[1]) && sz::b3Since(b.temporalBase, temporalNow, b.edge0, edge, &p.zoomEdgeResets);
     uint64_t calls = 0, bypassed = 0;
     lightGridCacheZoomCounts(&calls, &bypassed);
-    p.lgCalls = static_cast<uint32_t>(calls - b.lgCalls0);
-    p.lgBypass = static_cast<uint32_t>(bypassed - b.lgBypass0);
+    p.lightGridKnown = sz::b3Since(true, true, b.lgCalls0, calls, &p.lgCalls) && sz::b3Since(true, true, b.lgBypass0, bypassed, &p.lgBypass);
     p.pinSolo = g_b3PinSolo.exchange(0, std::memory_order_relaxed);
     p.pinNoPair = g_b3PinNoPair.exchange(0, std::memory_order_relaxed);
     for (int e = 0; e < 2; ++e)
@@ -35527,19 +35526,12 @@ void endB3Press(State& s) noexcept {
 }
 // Outside the sights, or not armed: no window is held, and the strip comes back (it is still published until it has).
 void b3Idle(double dt, uint64_t nowMs) noexcept {
-    B3State& b = g_b3s;
-    b.latched = false;
     g_b3Counting.store(false, std::memory_order_relaxed);
-    sz::b3StripStep(b.strip, false, dt);
-    scopewin::Request rq;
-    rq.strip = static_cast<float>(b.strip.fade);
-    scopewin::publish(rq, nowMs);
+    scopewin::publish(sz::b3IdleStep(g_b3s.loop, dt), nowMs);
 }
 void b3Off(uint64_t nowMs) noexcept {
-    g_b3s.latched = false;
-    g_b3s.strip = sz::B3Strip{};
     g_b3Counting.store(false, std::memory_order_relaxed);
-    scopewin::publish(scopewin::Request{}, nowMs);
+    scopewin::publish(sz::b3OffStep(g_b3s.loop), nowMs);
 }
 // The tick's B3 step, in the sights. out is the frame record the lens's doors read; verdict is the lens's gate (qualifies: S and the right eye's rows are fresh, g holds both eyes' rows).
 void b3Tick(State& s, const sz::LensGateIn& gi, sz::LensVerdict verdict, const s0::Geometry& g, double dt, uint64_t nowMs, ScopeZoomFrame& out) noexcept {
@@ -35568,39 +35560,29 @@ void b3Tick(State& s, const sz::LensGateIn& gi, sz::LensVerdict verdict, const s
             leftOk = std::isfinite(tcNow[0]) && std::isfinite(tcNow[1]);
         }
     }
-    sz::B3GateIn gate;
-    gate.keyOn = keyB3;
-    gate.qualifies = qualifies;
-    gate.rendered = rendered;
-    gate.shareMode = shareMode;
-    gate.leftRowsOk = leftOk;
-    gate.sightsFull = sightsFull;
-    gate.share = share;
-    gate.latched = b.latched;
-    const sz::B3GateOut go = sz::b3Gate(gate);
-    if (asked && shareMode && qualifies) ++b.p.askedTicks;
-    if (asked && shareMode && qualifies && sightsFull && share >= sz::kB3ShareFull && !leftOk && !b.latched) ++b.p.noLeftRows;
-    bool now = b.latched ? go.hold : go.latchNow;
-    if (go.latchNow) {   // the window is set at the first frame it can start, with w at 1, and held
-        b.tc[0] = tcNow[0];
-        b.tc[1] = tcNow[1];
-        b.m = gi.m;
-    }
-    b.latched = now;
-    if (now) ++b.p.heldTicks;
-    sz::b3StripStep(b.strip, now, dt);
-    if (b.strip.request) ++b.p.requestTicks;
-    scopewin::Request rq;
-    rq.zoom = b.strip.request;
-    rq.m = static_cast<float>(b.m);
-    rq.tc[0] = static_cast<float>(b.tc[0]);
-    rq.tc[1] = static_cast<float>(b.tc[1]);
-    rq.strip = static_cast<float>(b.strip.fade);
-    scopewin::publish(rq, nowMs);
-    if (now) {
-        b.p.tc[0] = b.tc[0];
-        b.p.tc[1] = b.tc[1];
-        b.p.m = b.m;
+    // the decisions (the gate, the latch, the strip's ramp, the request) are scope_zoom_b3.h's b3Step, which native_frame_test drives; this gathers its facts and publishes what it returns
+    sz::B3StepIn si;
+    si.keyOn = keyB3;
+    si.rendered = rendered;
+    si.shareMode = shareMode;
+    si.qualifies = qualifies;
+    si.sightsFull = sightsFull;
+    si.leftOk = leftOk;
+    si.share = share;
+    si.dt = dt;
+    si.m = gi.m;
+    si.tcNow[0] = tcNow[0];
+    si.tcNow[1] = tcNow[1];
+    const sz::B3StepOut so = sz::b3Step(b.loop, si);
+    if (so.askedTick) ++b.p.askedTicks;
+    if (so.noLeftRowsTick) ++b.p.noLeftRows;
+    if (so.heldTick) ++b.p.heldTicks;
+    if (so.requestTick) ++b.p.requestTicks;
+    scopewin::publish(so.request, nowMs);
+    if (so.latched) {
+        b.p.tc[0] = b.loop.tc[0];
+        b.p.tc[1] = b.loop.tc[1];
+        b.p.m = b.loop.m;
     }
     // the instruments that watch the span from here
     const bool zoomedNow = nativeTemporalZoomLatest(nullptr, nullptr, nullptr);
@@ -35618,14 +35600,13 @@ void b3Tick(State& s, const sz::LensGateIn& gi, sz::LensVerdict verdict, const s
             b.p.ftMax[io] = std::max(b.p.ftMax[io], dt * 1000.0);
         }
     }
-    // the frame record the lens's doors read
-    if (!qualifies) return;
-    out.b3.asked = asked ? 1u : 0u;
-    if (!asked || !b.latched) return;
-    out.b3.tc[0] = static_cast<float>(b.tc[0]);
-    out.b3.tc[1] = static_cast<float>(b.tc[1]);
+    // the frame record the lens's doors read: asked only once the window is latched (a frame before it, or one the gate never let start, is not one the zoom failed on)
+    if (!so.frameAsked) return;
+    out.b3.asked = 1u;
+    out.b3.tc[0] = static_cast<float>(b.loop.tc[0]);
+    out.b3.tc[1] = static_cast<float>(b.loop.tc[1]);
     if (leftOk) {
-        const double drift = sz::lensAngleDeg(tcNow[0], tcNow[1], b.tc[0], b.tc[1]);
+        const double drift = sz::lensAngleDeg(tcNow[0], tcNow[1], b.loop.tc[0], b.loop.tc[1]);
         if (std::isfinite(drift)) {
             ++b.p.driftN;
             b.p.driftSumDeg += drift;
@@ -36064,22 +36045,18 @@ void nativeOnFootShutdown() {
 
 }  // namespace edvr
 
-// F106: the runtime's report of one press of the sights (left_eye_share.h): what it drew for the left eye. Called on the runtime's render thread once a press, when the
-// share has come back to 0; writes the press line --health reads (ADS sight in both eyes (F106) press). E_INVALIDARG, and no line, for a report it cannot read.
-// B3: the runtime's report of one press of the scope zoom's window (scope_zoom_window.h): what it told the game for the left eye. Called on the runtime's owner thread once a press, when the window
-// has ended; writes the line --health reads (scope zoom (B3) runtime). E_INVALIDARG, and no line, for a report it cannot read.
+// B3: the runtime's report of one press of the scope zoom's window (scope_zoom_window.h): what it told the game for the left eye, and what the game's getters answered. Called on the
+// runtime's owner thread once a press, when the window has ended; writes the line --health reads (scope zoom (B3) runtime). E_INVALIDARG, and no line, for a report it cannot read.
 extern "C" HRESULT WINAPI edvrNoteNativeScopeZoom(const EdvrNativeScopeZoomReport* r) {
     if (!edvr::scopewin::reportReadable(r)) return E_INVALIDARG;
-    edvr::Log::get().note("scope zoom (B3) runtime: zoomed frames %u over %.2f s, peak narrowing %.3f; refused: answer not version 11 %u, share not at full weight %u, share not drawn %u, geometry %u; "
-                          "strip darkened %u frames, hidden-area mesh withheld %u frames; eye 0's told frustum without the zoom (left, right, down, up tangents) %+.4f/%+.4f/%+.4f/%+.4f, with it "
-                          "%+.4f/%+.4f/%+.4f/%+.4f; the game's reads of eye 0's projection while it stood: raw getter %u (its UI scale reads it; answered %.3f deg vertical), matrix getter %u (the picture "
-                          "is drawn with it; %.3f deg vertical)",
-                          r->frames, double(r->seconds), double(r->peakM), r->refused[0], r->refused[1], r->refused[2], r->refused[3], r->stripFrames, r->meshWithheld, double(r->trueTan[0]),
-                          double(r->trueTan[1]), double(r->trueTan[2]), double(r->trueTan[3]), double(r->zoomTan[0]), double(r->zoomTan[1]), double(r->zoomTan[2]), double(r->zoomTan[3]), r->rawReads,
-                          double(r->rawVerticalDeg), r->matrixReads, double(r->matrixVerticalDeg));
+    char line[edvr::scopezoom::kB3RuntimeLineBytes];
+    edvr::scopezoom::formatB3Runtime(line, sizeof(line), *r);
+    edvr::Log::get().note("%s", line);
     return S_OK;
 }
 
+// F106: the runtime's report of one press of the sights (left_eye_share.h): what it drew for the left eye. Called on the runtime's render thread once a press, when the
+// share has come back to 0; writes the press line --health reads (ADS sight in both eyes (F106) press). E_INVALIDARG, and no line, for a report it cannot read.
 extern "C" HRESULT WINAPI edvrNoteNativeEyeShare(const EdvrNativeEyeShareReport* r) {
     if (!edvr::eyeshare::reportReadable(r)) return E_INVALIDARG;
     edvr::Log::get().note("ADS sight in both eyes (F106) press: peak %.2f, frames %u (at full weight %u, refused %u, replayed %u) over %.2f s; the eyes' rotation (left view "

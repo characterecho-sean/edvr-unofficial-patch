@@ -110,4 +110,16 @@ inline bool projectionMatrix(const XrFovf& fov, float nearZ, float farZ,
   return projectionMatrix(raw, nearZ, farZ, convention, out);
 }
 
+// The vertical tangent span a frustum covers (bottom minus top, which is |top| + |bottom| for any frustum that holds its axis), and the same span read back from a projection
+// matrix a getter answered (2 / m[1][1]). 0 for anything unusable. The scope zoom's window (scope_zoom_state.h) narrows the matrix by M and keeps the raw getter true, so the two
+// answers are in the ratio M exactly; an angle sum (atan |top| + atan |bottom|) is not, for a window off the axis.
+inline float rawSpanV(const RawFov& r) {
+  const double span = static_cast<double>(r.bottom) - r.top;
+  return std::isfinite(span) && span > 0.0 ? static_cast<float>(span) : 0.0f;
+}
+inline float matrixSpanV(const vr::HmdMatrix44_t& m) {
+  const double m11 = m.m[1][1];
+  return std::isfinite(m11) && m11 > 0.0 ? static_cast<float>(2.0 / m11) : 0.0f;
+}
+
 } // namespace edvr::openxr

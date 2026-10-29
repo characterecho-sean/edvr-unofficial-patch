@@ -4,7 +4,8 @@
 // its direction to the far point c -- and the lens takes its picture from that eye. What is checked here is the arithmetic every module shares: the window (centred on c, divided by M, inside
 // the eye's span), the reprojection of a lens pixel's world point from the right eye's depth through the left eye's zoomed rows (a synthetic world and two eyes 6.3 cm apart: the point lands
 // where the left eye draws it at every depth, a plain sample of the same direction does not), the decisions (the gate and the hold, the strip's ramp, the lens's source and the reason it fell
-// back to A, the reset edge, the light grid's bypass), the readout pin taking the right eye alone, the window's wire form between the halves, and the press line within the log's limit.
+// back to A, the reset edge, the light grid's bypass), the tick itself run tick after tick (b3Step: ADS entry and exit, the share dropping, the key and the weapon changing mid-press, a
+// lost frame), the readout pin taking the right eye alone, the window's wire form between the halves, and the press line and the runtime's report line within the log's limit.
 #pragma once
 
 #include "../../src/d3d11/native_on_foot_f85.h"
@@ -55,6 +56,194 @@ inline bool projectCam(const Cam& c, const double P[3], double ndc[2], double* d
     ndc[1] = clip[1] / clip[3];
     if (depth) *depth = clip[2] / clip[3];
     return true;
+}
+
+// ---- the frame thread's tick: scope_zoom_b3.h's b3Step, b3IdleStep and b3OffStep driven as native_on_foot.cpp's s1::b3Tick and s1::tick drive them, tick after tick at a frame's pace ---------------
+// The window is latched at the first tick it can start, with the sights up, and held; the strip goes black over a tenth of a second and the zoom is asked once it is; the request ends with the
+// window, the strip stays three ticks and comes back. The cases are the presses the flight will make: ADS entry and exit, the share dropping under 0.9, the key toggled mid-press, a weapon
+// switch mid-press, and the lens not qualifying or the left rows missing.
+struct TickSim {
+    sz::B3Loop loop;
+    sz::B3StepIn in;
+    sz::B3StepOut out;
+    sw::Request last;   // what the tick published
+    uint32_t ticks = 0, askedTicks = 0, heldTicks = 0, requestTicks = 0, noLeftRows = 0;
+    TickSim() {
+        in.keyOn = in.rendered = in.shareMode = in.qualifies = in.sightsFull = in.leftOk = true;
+        in.share = 1.0;
+        in.dt = 0.011;
+        in.m = 4.067;
+        in.tcNow[0] = 0.0100;
+        in.tcNow[1] = -0.0200;
+    }
+    void tick() {
+        out = sz::b3Step(loop, in);
+        last = out.request;
+        ++ticks;
+        askedTicks += out.askedTick ? 1u : 0u;
+        heldTicks += out.heldTick ? 1u : 0u;
+        requestTicks += out.requestTick ? 1u : 0u;
+        noLeftRows += out.noLeftRowsTick ? 1u : 0u;
+    }
+    void run(int n) {
+        for (int i = 0; i < n; ++i) tick();
+    }
+    void idle() {   // the sights down: tick() calls b3IdleStep
+        last = sz::b3IdleStep(loop, in.dt);
+        out = sz::B3StepOut{};
+        ++ticks;
+    }
+};
+
+template <class Check>
+inline void runB3Tick(Check&& check) {
+    // ADS entry: latched at the first tick, the strip black over ten ticks, the zoom asked on the tenth and never before the strip is black
+    {
+        TickSim t;
+        t.tick();
+        check(t.out.latched && t.out.heldTick && t.out.askedTick && t.out.asked && t.out.frameAsked && !t.out.requestTick && !t.last.zoom,
+              "B3 tick: the window is latched at the first tick the sights are up with the share full, and the zoom is not yet asked");
+        check(t.loop.tc[0] == 0.0100 && t.loop.tc[1] == -0.0200 && t.loop.m == 4.067, "B3 tick: the window's centre and narrowing are the first tick's");
+        bool stripBlackWhenAsked = true, neverZoomEarly = true;
+        int askedAt = -1;
+        for (int i = 2; i <= 14; ++i) {
+            t.in.tcNow[0] = 0.0100 + 0.001 * i;   // the head drifts: the latched window does not follow
+            t.tick();
+            if (t.last.zoom && askedAt < 0) askedAt = i;
+            if (t.last.zoom) stripBlackWhenAsked = stripBlackWhenAsked && t.last.strip >= 0.999f;
+            if (!t.last.zoom && i >= 11) neverZoomEarly = false;
+        }
+        check(askedAt >= 10 && askedAt <= 11 && stripBlackWhenAsked && neverZoomEarly, "B3 tick: the zoom is asked for on the tenth tick, with the strip black in the same request, and stays asked");
+        check(t.last.tc[0] == 0.0100f && t.last.tc[1] == -0.0200f && t.last.m == 4.067f && t.loop.tc[0] == 0.0100, "B3 tick: the request carries the latched centre and narrowing while the head drifts");
+        check(t.askedTicks == t.ticks && t.heldTicks == t.ticks && t.requestTicks >= 3 && t.noLeftRows == 0u, "B3 tick: every tick counts asked and held, the zoom's ticks only from the tenth");
+        uint32_t w[sw::kWords];   // the request as the runtime reads it: five words and back
+        sw::toWords(t.last, w);
+        const sw::Request back = sw::fromWords(w);
+        check(back.zoom && back.m == 4.067f && back.tc[0] == 0.0100f && back.strip == 1.0f, "B3 tick: and it crosses to the runtime whole");
+    }
+    // ADS exit by the sights coming down: b3IdleStep. The request ends at once, the strip stays black three ticks and comes back
+    {
+        TickSim t;
+        t.run(14);
+        check(t.last.zoom && t.loop.latched, "B3 tick (exit): the zoom stands before the exit");
+        t.idle();
+        check(!t.last.zoom && !t.loop.latched && t.last.strip >= 0.999f, "B3 tick (exit): the sights down end the request at once, the strip still black");
+        t.idle();
+        t.idle();
+        check(t.last.strip >= 0.999f, "B3 tick (exit): the strip stays black for three ticks, the runtime's answer lagging the ask by a frame or two");
+        t.idle();
+        check(t.last.strip < 0.999f && t.last.strip > 0.8f, "B3 tick (exit): then it comes back");
+        for (int i = 0; i < 12; ++i) t.idle();
+        check(t.last.strip == 0.0f && !t.last.zoom && t.loop.strip.fade == 0.0, "B3 tick (exit): and is gone after another tenth of a second");
+        t.tick();   // the next press begins again from the start
+        check(t.out.latched && !t.last.zoom && t.last.strip > 0.0f && t.last.strip < 0.2f, "B3 tick (exit): the next press latches again and ramps from nothing");
+        const sw::Request off = sz::b3OffStep(t.loop);
+        check(!off.zoom && off.strip == 0.0f && !t.loop.latched && t.loop.strip.fade == 0.0, "B3 tick (off): an unarmed tick or the flat profile drops the window and the strip at once");
+    }
+    // the sights up but w under 1 (the game's own transition): the hold ends
+    {
+        TickSim t;
+        t.run(14);
+        t.in.sightsFull = false;
+        t.tick();
+        check(!t.out.latched && !t.last.zoom && !t.out.frameAsked && t.last.strip >= 0.999f, "B3 tick: w under 1 in the sights ends the window the same tick");
+    }
+    // the share dropping: held to 0.9, ended below it; never started under full weight
+    {
+        TickSim t;
+        t.run(14);
+        t.in.share = 0.95;
+        t.tick();
+        check(t.out.latched && t.last.zoom, "B3 tick (share): at 0.95 the window is held and the zoom stays asked (the runtime refuses to narrow until the share is full)");
+        t.in.share = 0.85;
+        t.tick();
+        check(!t.out.latched && !t.last.zoom && t.last.strip >= 0.999f && !t.out.frameAsked, "B3 tick (share): under 0.9 the window ends at once and the strip holds");
+        t.in.share = 1.0;
+        t.tick();
+        check(t.out.latched && t.last.zoom, "B3 tick (share): a share back at full weight with the sights still up starts a new window, and the zoom is asked again at once (the strip never left black)");
+        TickSim u;
+        u.in.share = 0.95;
+        u.run(5);
+        check(!u.out.latched && u.heldTicks == 0u && u.askedTicks == 5u && u.noLeftRows == 0u, "B3 tick (share): a share short of full weight never starts the window, and that is not the left rows' fault");
+    }
+    // the key toggled mid-press; a weapon switch mid-press
+    {
+        TickSim t;
+        t.run(14);
+        t.in.keyOn = false;
+        t.tick();
+        check(!t.out.latched && !t.out.asked && !t.out.askedTick && !t.last.zoom && t.last.strip >= 0.999f && !t.out.frameAsked, "B3 tick (key): the key off mid-press ends the window and the request at once");
+        t.run(2);
+        t.in.keyOn = true;
+        t.in.tcNow[0] = -0.0300;
+        t.in.tcNow[1] = 0.0150;
+        t.tick();
+        check(t.out.latched && t.loop.tc[0] == -0.0300 && t.loop.tc[1] == 0.0150 && t.last.zoom, "B3 tick (key): the key back on latches a new window at the new centre, the strip never having left black");
+        TickSim w;
+        w.run(14);
+        w.in.rendered = false;   // a weapon switch to a sight that is not a rendered entry
+        w.tick();
+        check(!w.out.latched && !w.out.asked && !w.last.zoom, "B3 tick (weapon): a switch to an entry that is not rendered ends the window at once");
+        w.run(6);
+        check(!w.loop.latched && w.last.strip < 0.999f && w.last.strip > 0.0f, "B3 tick (weapon): and the strip comes back");
+        w.in.rendered = true;
+        w.in.tcNow[0] = 0.0500;
+        w.tick();
+        check(w.out.latched && w.loop.tc[0] == 0.0500, "B3 tick (weapon): the switch back latches the window at its new centre");
+    }
+    // the lens not qualifying, the left rows missing, the gate never met
+    {
+        TickSim t;
+        t.in.leftOk = false;
+        t.run(6);
+        check(!t.out.latched && t.noLeftRows == 6u && t.askedTicks == 6u && t.heldTicks == 0u && !t.out.frameAsked, "B3 tick (rows): without the left eye's rows the window never starts, and every such tick is counted");
+        TickSim q;
+        q.in.qualifies = false;
+        q.run(4);
+        check(!q.out.latched && q.askedTicks == 0u && q.noLeftRows == 0u && q.heldTicks == 0u, "B3 tick (lens): a lens that does not qualify never starts the window, and is not counted as asked");
+        TickSim h;
+        h.run(14);
+        h.in.qualifies = false;   // S went stale mid-press: a held window needs neither the lens's S and c nor the left rows
+        h.in.leftOk = false;
+        h.tick();
+        check(h.out.latched && h.last.zoom && !h.out.frameAsked, "B3 tick (lens): the window holds without S or the left rows, but the frame is not one the lens asks for");
+        TickSim m;
+        m.in.shareMode = false;
+        m.run(4);
+        check(!m.out.latched && m.askedTicks == 0u, "B3 tick (mode): a sight eye that does not share the right eye's picture never starts it");
+    }
+    // the frame record's asked (the doors count a frame as not zoomed only once a window began)
+    {
+        TickSim t;
+        t.in.share = 0.95;
+        t.tick();
+        check(t.out.asked && t.out.askedTick && !t.out.latched && !t.out.frameAsked, "B3 tick (record): asked but no window yet: the frame is not asked of the doors (they count it as not asked, not as a fall-back)");
+        t.in.share = 1.0;
+        t.tick();
+        check(t.out.frameAsked, "B3 tick (record): the frame is asked from the tick the window latches");
+        t.in.qualifies = false;
+        t.tick();
+        check(t.out.latched && !t.out.frameAsked, "B3 tick (record): and not in a frame the lens does not qualify for");
+    }
+    // a lost frame: ticks stop with the zoom asked. The runtime reads the request for 200 ms, then none; the strip decays after
+    {
+        TickSim t;
+        t.run(14);
+        sw::clear();
+        sw::publish(t.last, 5000);
+        check(sw::read(5100).zoom && sw::read(5200).zoom, "B3 tick (lost frames): the zoom stands for 200 ms of silence");
+        check(!sw::read(5250).zoom && sw::read(5250).strip > 0.7f && !sw::read(5300).zoom && sw::read(5300).strip > 0.4f && sw::read(5300).strip < 0.6f && sw::read(5500).strip == 0.0f,
+              "B3 tick (lost frames): then none at once, and the strip decays to nothing over another 200 ms, so a stalled frame thread cannot leave the left eye zoomed");
+        t.tick();
+        sw::publish(t.last, 5600);
+        check(sw::read(5610).zoom, "B3 tick (lost frames): a tick after the stall is read again");
+        sw::clear();   // one tick lost between two: the request stands (the runtime reads the last one)
+        sw::publish(t.last, 6000);
+        t.tick();
+        t.tick();   // never published
+        check(sw::read(6022).zoom && t.loop.latched, "B3 tick (lost frames): a tick or two never published leaves the last request standing");
+        sw::clear();
+    }
 }
 
 template <class Check>
@@ -322,6 +511,33 @@ inline void runB3(Check&& check) {
         f85::KLatch pair;
         pair.put(0, 40, k, oh, ow);
         check(pair.put(1, 40, k, oh, ow) && pair.agreed && pair.usable(40), "B3 pin: with the window gone the two eyes pair and compare as they did");
+        // the decision f85LatchPut makes per estimate (scope_zoom_b3.h b3PinAction), driven over frames: the eyes pair until eye 0 is the zoomed view, then eye 1 vouches alone
+        using PA = sz::B3PinAction;
+        check(sz::b3PinAction(false, 0) == PA::kPair && sz::b3PinAction(false, 1) == PA::kPair && sz::b3PinAction(true, 1) == PA::kSolo && sz::b3PinAction(true, 0) == PA::kSkip &&
+                  sz::b3PinAction(true, 2) == PA::kSkip,
+              "B3 pin: both eyes pair unless eye 0 is zoomed; then eye 1 vouches alone and eye 0 is not put");
+        f85::KLatch drive;
+        uint32_t soloCount = 0;
+        const auto put = [&](bool zoomed, int e, uint32_t frame) {
+            const PA a = sz::b3PinAction(zoomed, e);
+            if (a == PA::kSolo) {
+                if (drive.putSolo(1, frame, k, oh, ow)) ++soloCount;
+            } else if (a == PA::kPair) {
+                drive.put(e, frame, k, oh, ow);
+            }
+        };
+        put(false, 0, 10);
+        put(false, 1, 10);
+        check(drive.pairs == 1u && drive.usable(10) && soloCount == 0u, "B3 pin: frames before the window pair");
+        put(true, 0, 11);
+        put(true, 1, 11);
+        check(drive.pairs == 1u && drive.solo == 1u && soloCount == 1u && drive.usable(11) && drive.pairedFrame == 11u && drive.disagreed == 0u,
+              "B3 pin: a frame with eye 0 zoomed is vouched for by eye 1 alone, counted, and disagrees with nothing");
+        put(true, 1, 12);
+        check(drive.usable(12) && drive.solo == 2u, "B3 pin: and the window's later frames hold the latch the same way");
+        put(false, 0, 13);
+        put(false, 1, 13);
+        check(drive.pairs == 2u && drive.pairedFrame == 13u && drive.usable(13), "B3 pin: the frame after the window pairs again");
     }
     // ---- the window between the halves ---------------------------------------------------------------------------------------------------------------------------------------------------
     {
@@ -379,7 +595,7 @@ inline void runB3(Check&& check) {
         EdvrNativeScopeZoomReport cut = rep, later = rep, nan = rep;
         cut.size = 8;
         later.version = 2;
-        nan.rawVerticalDeg = std::nanf("");
+        nan.rawSpan = std::nanf("");
         check(!sw::reportReadable(&cut) && !sw::reportReadable(&later) && !sw::reportReadable(&nan) && !sw::reportReadable(nullptr), "B3 report: a report cut short, from a later version, with a number that is none, or absent is not");
     }
     // ---- the press line ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -481,6 +697,26 @@ inline void runB3(Check&& check) {
         const int wlen = sz::formatB3Press(wline, sizeof(wline), worst);
         check(wlen > 0 && static_cast<size_t>(wlen) < sz::kB3PressLineBytes - 1 && wlen <= 1167 && std::strstr(wline, "readout pin solo 999999, no pair 999999") != nullptr,
               "B3 line: the worst case (every counter six digits) keeps its end and fits the log's 1200 bytes with its stamp and marker");
+        // counts that could not be taken are n/a, not a wrapped difference
+        sz::B3Press unknown = p;
+        unknown.temporalKnown = false;
+        unknown.lightGridKnown = false;
+        char uline[sz::kB3PressLineBytes];
+        sz::formatB3Press(uline, sizeof(uline), unknown);
+        const std::string us(uline);
+        check(us.find("zoomed frames n/a; tc (0.0006, -0.0001) M 4.067") != std::string::npos && us.find("DLSS resets L n/a R n/a (zoom edge n/a); lens source: zoomed 800") != std::string::npos &&
+                  us.find("light grid bypass n/a of n/a calls; shadow rows") != std::string::npos && us.find("zoomed frames 850") == std::string::npos && us.find("DLSS resets L 2 R 1") == std::string::npos,
+              "B3 line: the temporal pass's counts and the light grid's, when the press could not take them, say n/a and print no figure");
+        check(us.find("copies 810; parallax at c mean 120.0") != std::string::npos && us.find("readout pin solo 20, no pair 1") != std::string::npos, "B3 line: ... and every other figure is as it was");
+        {
+            uint32_t d = 77;
+            check(sz::b3Since(true, true, 10, 25, &d) && d == 15u, "B3 since: a difference of two readings of a running total");
+            d = 77;
+            check(!sz::b3Since(false, true, 10, 25, &d) && d == 77u && !sz::b3Since(true, false, 10, 25, &d) && d == 77u,
+                  "B3 since: no baseline at the press's start, or no reading now, is no figure (and the figure is left alone)");
+            check(!sz::b3Since(true, true, 25, 10, &d) && d == 77u, "B3 since: a total that went backwards (its owner restarted) is no figure, not a wrapped difference of four billion");
+            check(sz::b3Since(true, true, 0, 0x1FFFFFFFFull, &d) && d == 0xFFFFFFFFu, "B3 since: a difference past 32 bits is held at the top, not wrapped");
+        }
         sz::B3Press ten = worst;
         ten.press = 4294967295u;
         ten.askedTicks = ten.heldTicks = ten.requestTicks = ten.noLeftRows = ten.zoomFrames = ten.driftN = ten.zoomEdgeResets = 4294967295u;
@@ -491,6 +727,87 @@ inline void runB3(Check&& check) {
         check(tlen > 0 && static_cast<size_t>(tlen) < sz::kB3PressLineBytes - 1 && std::strstr(tline, "readout pin solo 4294967295, no pair 4294967295") != nullptr,
               "B3 line: even with ten-digit counts it keeps its end");
     }
+
+    // ---- the runtime's report line ---------------------------------------------------------------------------------------------------------------------------------------------------------------
+    {
+        EdvrNativeScopeZoomReport r{};
+        r.size = sizeof(r);
+        r.version = EDVR_NATIVE_SCOPE_ZOOM_REPORT_VERSION_1;
+        r.frames = 260;
+        r.refused[1] = 3;
+        r.stripFrames = 12;
+        r.meshWithheld = 260;
+        r.seconds = 4.33f;
+        r.peakM = 4.067f;
+        const float tt[4] = {-0.8f, 0.9f, -0.8f, 0.9f}, zt[4] = {-0.2f, 0.22f, -0.2f, 0.22f};
+        for (int i = 0; i < 4; ++i) {
+            r.trueTan[i] = tt[i];
+            r.zoomTan[i] = zt[i];
+        }
+        r.rawReads = 260;
+        r.matrixReads = 130;
+        r.rawSpan = 1.7f;
+        r.matrixSpan = 0.42f;
+        r.rawCallerRva[0] = 0x4E3C93u;
+        r.rawCallerReads[0] = 200u;
+        r.rawCallerRva[1] = 0x2842AE3u;
+        r.rawCallerReads[1] = 55u;
+        r.rawCallerRva[2] = 0xFFFFFFFFu;
+        r.rawCallerReads[2] = 3u;
+        r.rawCallerOther = 2;
+        check(sw::reportReadable(&r), "B3 runtime line: the report is readable");
+        char line[sz::kB3RuntimeLineBytes];
+        const int len = sz::formatB3Runtime(line, sizeof(line), r);
+        const std::string s(line);
+        check(len > 0 && static_cast<size_t>(len) == s.size() &&
+                  s.rfind("scope zoom (B3) runtime: zoomed frames 260 over 4.33 s, peak narrowing 4.067; refused: answer not version 11 0, share not at full weight 3, share not drawn 0, geometry 0; "
+                          "strip darkened 12 frames, hidden-area mesh withheld 260 frames; ", 0) == 0,
+              "B3 runtime line: the frames, the refusals, the strip and the mesh, in the order --health reads them");
+        check(s.find("the game's reads of eye 0's projection while it stood: raw getter 260 (its UI scale reads it; vertical tangent span answered 1.7000), matrix getter 130 (the picture is drawn with it; "
+                     "span 0.4200), span ratio raw over matrix 4.048; raw getter callers (RVA in the game's executable: reads) 0x4E3C93:200 0x2842AE3:55 outside:3, other callers 2") != std::string::npos,
+              "B3 runtime line: what each getter answered (the span), their ratio, and who read the raw getter with the rest counted as other");
+        check(s.find("deg vertical") == std::string::npos, "B3 runtime line: no angle sum (it is not 1 / M for a window off the axis)");
+        EdvrNativeScopeZoomReport none = r;
+        none.rawReads = 0;
+        none.rawSpan = 0.f;
+        none.matrixReads = 0;
+        none.matrixSpan = 0.f;
+        std::memset(none.rawCallerRva, 0, sizeof(none.rawCallerRva));
+        std::memset(none.rawCallerReads, 0, sizeof(none.rawCallerReads));
+        none.rawCallerOther = 0;
+        char nline[sz::kB3RuntimeLineBytes];
+        sz::formatB3Runtime(nline, sizeof(nline), none);
+        check(std::strstr(nline, "raw getter 0 (its UI scale reads it; vertical tangent span answered none), matrix getter 0 (the picture is drawn with it; span none), span ratio raw over matrix none; "
+                                 "raw getter callers (RVA in the game's executable: reads) none, other callers 0") != nullptr,
+              "B3 runtime line: getters nobody read say none for the span, the ratio and the callers, so a rule can tell a getter never read from one read");
+        EdvrNativeScopeZoomReport half = r;
+        half.matrixSpan = 0.f;
+        char hline[sz::kB3RuntimeLineBytes];
+        sz::formatB3Runtime(hline, sizeof(hline), half);
+        check(std::strstr(hline, "(the picture is drawn with it; span none), span ratio raw over matrix none;") != nullptr, "B3 runtime line: one span missing leaves no ratio");
+        // the longest it can be: every count ten digits, a long run of seconds, big tangents, four callers of ten-digit addresses
+        EdvrNativeScopeZoomReport worst = r;
+        worst.frames = worst.stripFrames = worst.meshWithheld = worst.rawReads = worst.matrixReads = worst.rawCallerOther = 4294967295u;
+        for (int i = 0; i < 4; ++i) {
+            worst.refused[i] = 4294967295u;
+            worst.trueTan[i] = -999999.0f;
+            worst.zoomTan[i] = 999999.0f;
+            worst.rawCallerRva[i] = 0xFFFFFFFEu;
+            worst.rawCallerReads[i] = 4294967295u;
+        }
+        worst.seconds = 99999999.0f;
+        worst.peakM = 8.0f;
+        worst.rawSpan = worst.matrixSpan = 99999999.0f;
+        char wline[sz::kB3RuntimeLineBytes];
+        const int wlen = sz::formatB3Runtime(wline, sizeof(wline), worst);
+        check(wlen > 0 && static_cast<size_t>(wlen) < sz::kB3RuntimeLineBytes - 1 && wlen <= 1167 && std::strstr(wline, "other callers 4294967295") != nullptr,
+              "B3 runtime line: the worst case (ten-digit counts, four callers, large tangents) keeps its end and fits the log's 1200 bytes with its stamp and marker");
+        EdvrNativeScopeZoomReport nanSpan = r, later = r;
+        nanSpan.matrixSpan = std::nanf("");
+        later.version = 2;
+        check(!sw::reportReadable(&nanSpan) && !sw::reportReadable(&later), "B3 runtime line: a span that is no number, or a later version, is not a report the d3d11 half reads");
+    }
+    runB3Tick(check);
 }
 
 }  // namespace b3test

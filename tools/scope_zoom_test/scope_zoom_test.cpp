@@ -134,10 +134,12 @@ static bool wiredFrame(const std::string& n) {
 // strip still published outside the sights, the draw path's count, the readout pin taking the right eye alone, the shadow constants, and the runtime's export.
 static bool wiredB3Frame(const std::string& n) {
     return has(n, "cfg.getString(\"experimental.native_on_foot_ads_scope_zoom_full_detail\", \"off\") == \"on\"") && has(n, "std::atomic<bool> g_scopeZoomFullKey{false};") &&
-           before(n, "b3Tick(s, gi, verdict, g, dt, nowMs, out);", "    scopeZoomPublish(out);\n}\n}  // namespace s1") && has(n, "scopewin::publish(rq, nowMs);") && has(n, "const sz::B3GateOut go = sz::b3Gate(gate);") &&
-           has(n, "sz::b3StripStep(b.strip, now, dt);") && has(n, "rq.zoom = b.strip.request;") && has(n, "void endPress(State& s) noexcept {\n    endB3Press(s);") && has(n, "sz::formatB3Press(line, sizeof(line), p);") &&
+           before(n, "b3Tick(s, gi, verdict, g, dt, nowMs, out);", "    scopeZoomPublish(out);\n}\n}  // namespace s1") && has(n, "scopewin::publish(so.request, nowMs);") && has(n, "const sz::B3StepOut so = sz::b3Step(b.loop, si);") &&
+           has(n, "scopewin::publish(sz::b3IdleStep(g_b3s.loop, dt), nowMs);") && has(n, "scopewin::publish(sz::b3OffStep(g_b3s.loop), nowMs);") && has(n, "if (!so.frameAsked) return;") &&
+           has(n, "p.temporalKnown = sz::b3Since(b.temporalBase, temporalNow,") && has(n, "p.lightGridKnown = sz::b3Since(true, true, b.lgCalls0, calls, &p.lgCalls)") &&
+           has(n, "void endPress(State& s) noexcept {\n    endB3Press(s);") && has(n, "sz::formatB3Press(line, sizeof(line), p);") && has(n, "edvr::scopezoom::formatB3Runtime(line, sizeof(line), *r);") &&
            has(n, "scopeZoomB3Take(&door);") && has(n, "nativeTemporalZoomCounts(&zf, rs, &edge)") && has(n, "lightGridCacheZoomCounts(&calls, &bypassed);") && has(n, "        b3Idle(dt, nowMs);\n        return;") &&
-           has(n, "if (nativeTemporalZoomLatest(nullptr, nullptr, nullptr)) {   // B3: eye 0 is drawn as the zoomed view this frame") && has(n, "g_f85Latch.putSolo(1, frame, s.K, s.oh, s.ow)") &&
+           has(n, "edvr::scopezoom::b3PinAction(nativeTemporalZoomLatest(nullptr, nullptr, nullptr), e);") && has(n, "g_f85Latch.putSolo(1, frame, s.K, s.oh, s.ow)") &&
            has(n, "b3ShadowNote(e, frame, cb1);") && has(n, "void nativeOnFootB3NoteEyeDraw() {") && has(n, "scopewin::clear();") && has(n, "extern \"C\" HRESULT WINAPI edvrNoteNativeScopeZoom(") &&
            has(n, "sz::b3Matrices(g.rows[1], o1, jn[1], g.rows[0], o0, jn[0], out.b3.T, out.b3.u)") && has(n, "sz::b3WindowMatches(zt, lt, 3.0e-3)") && has(n, "const bool keyB3 = g_scopeZoomFullKey.load(std::memory_order_relaxed) && gi.keyOn;");
 }
@@ -146,13 +148,17 @@ static bool wiredB3Frame(const std::string& n) {
 static bool wiredB3Halves(const std::string& frame, const std::string& host, const std::string& temporal, const std::string& stereo, const std::string& vscreen, const std::string& system) {
     return has(frame, "if (carried) edvr::scopewin::toWords(edvr::scopewin::read(GetTickCount64()), result.reservedTerrainGuard);") &&
            before(host, "zoomApplied=applyScopeZoom(gameGeometry,zoomPreRaw,zoomToldRaw);", "geometry.publish(gameGeometry,false,false,frameTangentShift,hiddenMeshCompatible()&&!zoomApplied,zoomApplied?zoomToldRaw:nullptr)") &&
-           has(host, "zoomApplied?&zoomPreRaw:nullptr);") && has(host, "leftShare,&hidden,zoomStripNow)") && has(host, "in.shareDrawn=facts.drawn;in.shareRefused=facts.refused;") &&
+           has(host, "zoomApplied?&zoomPreRaw:nullptr);") && has(host, "locatedHeadPose(),leftShare,&hidden,zoomStripNow,zoomAppliedNow)") && has(host, "leftShare,&hidden,zoomStripNow,previousZoomed)") && has(host, "previousZoomed=zoomAppliedNow;") &&
+           has(host, "const ScopeZoomEvents ev=zoomRun.frame(out,frameCycleUs());") && has(host, "if(raw)zoomCallers.note(caller);") && has(host, "zoomCallers.top(press.callerRva,press.callerReads,press.callerOther);") &&
+           has(system, "source_.noteProjectionRead(eye,true,s.toldRawSet&&liveGeometry,rawSpanV(out),frameRva(exe_,reinterpret_cast<uintptr_t>(_ReturnAddress())));") &&
+           has(system, "source_.noteProjectionRead(eye,false,s.toldRawSet&&liveGeometry,accepted?matrixSpanV(out):0.0f,frameRva(exe_,reinterpret_cast<uintptr_t>(_ReturnAddress())));") &&
+           has(host, "in.shareDrawn=facts.drawn;in.shareRefused=facts.refused;") &&
            has(host, "const bool carries=features.acquired()&&featureFrameKnown&&featureFrame.version>=EDVR_NATIVE_FRAME_VERSION_11;") && has(host, "game.views[0].fov=out.fov;") &&
            has(system, "const RawFov base=liveGeometry?(s.toldRawSet?s.toldRaw[eye]:s.geometry.raw[eye]):s.optics.raw[eye];") &&
            has(temporal, "edvr::terrainCullCoverNoteFrusta(s->announced);") && has(temporal, "const float outer=-s->announced[0][0], inner=s->announced[0][1];") &&
            has(temporal, "const bool zoomMoved=s->history[eye].valid&&edvr::scopezoom::b3ResetEdge(s->history[eye].zoomed,zoomedHere);") && has(temporal, "separationMoved||zoomMoved;") &&
            has(temporal, "const bool zoomedHere=eye==0&&s->zoomedNow;") && has(temporal, "hst.zoomed=zoomedHere;") &&
-           has(stereo, "share.band[2]=leftStripBlack;") && has(vscreen, "if (nativeOnFootB3Counting()) nativeOnFootB3NoteEyeDraw();");
+           has(stereo, "share.band[2]=leftStripBlack;") && has(stereo, "share.band[3]=leftZoomed?1.f:0.f;") && has(vscreen, "if (nativeOnFootB3Counting()) nativeOnFootB3NoteEyeDraw();");
 }
 static bool wiredIni(const std::string& ini) {
     const size_t fixAt = ini.find("native_on_foot_ads_scope_zoom = on"), expAt = ini.find("native_on_foot_ads_scope_zoom_fov = 56.3");
@@ -212,8 +218,11 @@ static void wiringTests() {
     check(!wiredB3Frame(replaced(native, "        b3Idle(dt, nowMs);\n        return;", "        return;")), "control: a strip that is not published once the sights are down (it would stay black) is not the wiring");
     check(!wiredB3Frame(replaced(native, "    endB3Press(s);\n", "")), "control: a press that does not write its B3 line is not the wiring");
     check(!wiredB3Frame(replaced(native, "g_f85Latch.putSolo(1, frame, s.K, s.oh, s.ow)", "false")), "control: a readout pin that does not take the right eye alone while the left is zoomed is not the wiring");
-    check(!wiredB3Frame(replaced(native, "if (nativeTemporalZoomLatest(nullptr, nullptr, nullptr)) {   // B3: eye 0 is drawn as the zoomed view this frame", "if (false) {   // B3: eye 0 is drawn as the zoomed view this frame")),
+    check(!wiredB3Frame(replaced(native, "edvr::scopezoom::b3PinAction(nativeTemporalZoomLatest(nullptr, nullptr, nullptr), e);", "edvr::scopezoom::b3PinAction(false, e);")),
           "control: a pin that never knows eye 0 is zoomed is not the wiring");
+    check(!wiredB3Frame(replaced(native, "if (!so.frameAsked) return;", "if (!qualifies) return;")), "control: a frame the doors are told is asked before the window latched is not the wiring");
+    check(!wiredB3Frame(replaced(native, "p.temporalKnown = sz::b3Since(b.temporalBase, temporalNow,", "p.temporalKnown = (true || temporalNow || b.temporalBase) && sz::b3Since(true, true,")),
+          "control: temporal counts taken as differences of totals whatever the press's baseline or reading was are not the wiring");
     check(!wiredB3Frame(replaced(native, "sz::b3WindowMatches(zt, lt, 3.0e-3)", "true")), "control: matrices made from rows that do not describe the window the runtime told the game are not the wiring");
     {
         const std::string frameCpp = readFile("src/d3d11/native_frame.cpp"), host = readFile("src/openxr/native_runtime_host.h"), tcpp = readFile("src/d3d11/native_temporal.cpp"),
@@ -228,6 +237,16 @@ static void wiringTests() {
         check(!wiredB3Halves(frameCpp, host, replaced(tcpp, "edvr::terrainCullCoverNoteFrusta(s->announced);", "edvr::terrainCullCoverNoteFrusta(s->frusta);"), stereo, vs, system), "control: announced frusta that follow the zoom are not the wiring");
         check(!wiredB3Halves(frameCpp, host, replaced(tcpp, "separationMoved||zoomMoved;", "separationMoved;"), stereo, vs, system), "control: no history reset at the window's edges is not the wiring");
         check(!wiredB3Halves(frameCpp, host, tcpp, replaced(stereo, "share.band[2]=leftStripBlack;", ""), vs, system), "control: a strip that never reaches the shader is not the wiring");
+        check(!wiredB3Halves(frameCpp, host, tcpp, replaced(stereo, "share.band[3]=leftZoomed?1.f:0.f;", ""), vs, system), "control: a narrowed frame that never reaches the shader is not the wiring");
+        check(!wiredB3Halves(frameCpp, replaced(host, "previousZoomed=zoomAppliedNow;", ""), tcpp, stereo, vs, system), "control: a replayed pair that does not remember it was narrowed is not the wiring");
+        check(!wiredB3Halves(frameCpp, replaced(host, "if(raw)zoomCallers.note(caller);", ""), tcpp, stereo, vs, system), "control: raw getter reads that name no caller are not the wiring");
+        check(!wiredB3Halves(frameCpp, host, tcpp, stereo, vs, replaced(system, "rawSpanV(out),frameRva(exe_,", "0.0f,frameRva(exe_,")), "control: a raw getter that does not report what it answered is not the wiring");
+        {   // the client sends a frame with no zoom at the size from before B3 (the key-off wire form is the parent's)
+            const std::string client = readFile("src/openxr/native_temporal_client.h");
+            const std::string sentAt = "EdvrNativeTemporalFrame frame{temporalFrameSize(preZoomEye0 != nullptr), EDVR_NATIVE_TEMPORAL_VERSION_1};";
+            check(has(client, sentAt) && has(client, "return zoomed ? static_cast<uint32_t>(sizeof(EdvrNativeTemporalFrame)) : EDVR_NATIVE_TEMPORAL_FRAME_SIZE_NO_ZOOM;"), "B3: a frame with no zoom is sent at the size from before B3");
+            check(!has(replaced(client, sentAt, "EdvrNativeTemporalFrame frame{sizeof(frame), EDVR_NATIVE_TEMPORAL_VERSION_1};"), sentAt), "control: a client that always sends the whole struct is not the wiring");
+        }
         check(!wiredB3Halves(frameCpp, host, tcpp, stereo, replaced(vs, "if (nativeOnFootB3Counting()) nativeOnFootB3NoteEyeDraw();", ""), system), "control: draws that are not counted are not the wiring");
         check(!wiredB3Halves(frameCpp, host, tcpp, stereo, vs, replaced(system, "(s.toldRawSet?s.toldRaw[eye]:s.geometry.raw[eye])", "s.geometry.raw[eye]")), "control: a raw getter that follows the zoom (the HUD would grow) is not the wiring");
     }

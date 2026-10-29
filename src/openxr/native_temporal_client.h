@@ -7,6 +7,11 @@
 #include <wrl/client.h>
 
 namespace edvr::openxr {
+// The size begin() sends its frame at: the whole struct when eye 0 is drawn with the scope zoom's window (B3), else the size from before B3 appended its fields (the provider
+// takes either; a d3d11.dll from before B3 takes only that one).
+inline uint32_t temporalFrameSize(bool zoomed) {
+  return zoomed ? static_cast<uint32_t>(sizeof(EdvrNativeTemporalFrame)) : EDVR_NATIVE_TEMPORAL_FRAME_SIZE_NO_ZOOM;
+}
 // Unlike the menu, projection notes arrive on the game's system-query callers.
 // Fence the table's lifetime independently of the XR owner's serialization.
 // Provider begin/note/invalidate/close do CPU work only; treat is dispatched
@@ -42,7 +47,9 @@ class NativeTemporalClient final {
     if (!makeGeometrySnapshot(geometry, snapshot) || !referenceGeneration) { invalidate(); return E_INVALIDARG; }
     std::lock_guard<std::mutex> lock(mutex_);
     if (!table_.context) return S_FALSE;
-    EdvrNativeTemporalFrame frame{sizeof(frame), EDVR_NATIVE_TEMPORAL_VERSION_1};
+    // A frame with no zoom is sent at the size from before B3 appended its fields, so the key-off wire form is the parent's byte for byte and an older d3d11.dll (which requires
+    // exactly that size) still begins it.
+    EdvrNativeTemporalFrame frame{temporalFrameSize(preZoomEye0 != nullptr), EDVR_NATIVE_TEMPORAL_VERSION_1};
     frame.generation = generation_; frame.referenceGeneration = referenceGeneration; frame.sequence = geometry.sequence;
     std::memcpy(frame.head, snapshot.headToLocal.m, sizeof(frame.head));
     if (renderedHead) std::memcpy(frame.head, renderedHead->m, sizeof(frame.head));

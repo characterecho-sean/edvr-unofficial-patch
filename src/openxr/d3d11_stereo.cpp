@@ -54,7 +54,7 @@ struct ShareConstants {
   float rightPlace[4];           // the right eye's viewport as fractions of its swapchain image: u0, v0, u1, v1
   float rightAng[4];             // that rectangle as axis angles: x min, x max, y min, y max (radians)
   float leftSize[4];             // the left swapchain image: width, height
-  float band[4];                 // the margin inside the edge, 1 / the band (radians)
+  float band[4];                 // the margin inside the edge, 1 / the band (radians), the strip's black, 1 in a frame drawn with eye 0 narrowed (B3)
 };
 static_assert(sizeof(ShareConstants)==192,"share HLSL constant-buffer packing");
 struct SkyConstants { float orient[3][4]; float tangents[4]; float encode=0, pad[3]{}; };
@@ -330,7 +330,7 @@ bool D3D11Stereo::ensureShareMask(const XrFovf& fov,const StereoHiddenArea* hidd
 XrResult D3D11Stereo::renderCaptured(const XrView (&views)[2],XrSpace space,const EyeCapture& capture,
                                    XrCompositionLayerProjection& layer, GpuWorkObserver* observer,
                                    StereoWallTimes* times, const StereoPlacement* placement, float fade,
-                                   const XrPosef* headPose, float leftEyeShare, const StereoHiddenArea* rightHidden, float leftStripBlack) {
+                                   const XrPosef* headPose, float leftEyeShare, const StereoHiddenArea* rightHidden, float leftStripBlack, bool leftZoomed) {
   layer={XR_TYPE_COMPOSITION_LAYER_PROJECTION};
   fade=comfort::sanitize(fade);
   leftEyeShare=comfort::sanitize(leftEyeShare);
@@ -407,7 +407,8 @@ XrResult D3D11Stereo::renderCaptured(const XrView (&views)[2],XrSpace space,cons
       for(int k=0;k<4;++k){share.leftTan[k]=float(lt[k]);share.rightTan[k]=float(rt[k]);share.rightPlace[k]=float(m.place[k]);share.rightAng[k]=float(m.ang[k]);}
       share.leftSize[0]=float(eyes_[0].width);share.leftSize[1]=float(eyes_[0].height);
       share.band[0]=float(m.marginRad);share.band[1]=float(1.0/m.bandRad);
-      share.band[2]=leftStripBlack;   // B3: the part of the left eye the share does not cover goes toward black by this much (the shader's band.z; 0 is the share as it always was)
+      share.band[2]=leftStripBlack;   // B3: the part of the left eye the right eye does not cover goes toward black by this much (the shader's band.z; 0 is the share as it always was)
+      share.band[3]=leftZoomed?1.f:0.f;   // ... and all of its own picture under the share in a frame drawn with eye 0 narrowed (band.w)
       shareOn=true;
       double ypr[3];shareview::yawPitchRollDeg(m.rot,ypr);
       for(int k=0;k<3;++k)shareFacts_.rotationDeg[k]=float(ypr[k]);

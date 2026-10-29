@@ -158,7 +158,6 @@ HmdMatrix44_t OpenVRSystem::GetProjectionMatrix(EVREye e,float nearZ,float farZ,
   source_.noteGeometryQuery(1,s);
   const unsigned eye=unsigned(e);
   const bool liveGeometry=geometryValid(s);
-  if(eyeValid(e))source_.noteProjectionRead(eye,false,s.toldRawSet&&liveGeometry);
   bool accepted=false;
   if(opticsAvailable(s)&&eyeValid(e)) {
     const RawFov base=liveGeometry?s.geometry.raw[eye]:s.optics.raw[eye];
@@ -171,6 +170,8 @@ HmdMatrix44_t OpenVRSystem::GetProjectionMatrix(EVREye e,float nearZ,float farZ,
       if(liveGeometry) source_.noteProjection(s.geometry.native.sequence,eye,nearZ,farZ);
     }
   }
+  // What this read was answered with (the matrix's own vertical span), for the scope zoom's report of what each getter returned.
+  if(eyeValid(e))source_.noteProjectionRead(eye,false,s.toldRawSet&&liveGeometry,accepted?matrixSpanV(out):0.0f,frameRva(exe_,reinterpret_cast<uintptr_t>(_ReturnAddress())));
   // Record unique clip-plane pairs in each eye/API/live-cache/result bucket.
   // Jitter and frame sequence are deliberately excluded from the key. Separate
   // rejection capacity prevents normal scene queries hiding a bad near/far.
@@ -217,7 +218,7 @@ void OpenVRSystem::GetProjectionRaw(EVREye e,float* l,float* r,float* t,float* b
                                    s.tangentShift[eye][1],out);
     else out=base;
   }
-  if(eyeValid(e))source_.noteProjectionRead(eye,true,s.toldRawSet&&liveGeometry);
+  if(eyeValid(e))source_.noteProjectionRead(eye,true,s.toldRawSet&&liveGeometry,rawSpanV(out),frameRva(exe_,reinterpret_cast<uintptr_t>(_ReturnAddress())));
   if(l)*l=out.left;if(r)*r=out.right;if(t)*t=out.top;if(b)*b=out.bottom;
 }
 DistortionCoordinates_t OpenVRSystem::ComputeDistortion(EVREye,float,float) { unavailable(3);return {}; }
