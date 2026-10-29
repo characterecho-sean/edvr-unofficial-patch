@@ -39,7 +39,6 @@ inline constexpr FlatPageRow kFlatPageRows[] = {
     // HUD Anti-Aliasing (2026-10-24), directly under UI quality: flat only. Its `menu flat_performance` token (tools\gen_settings_schema.py) is a page VR's
     // menu builds none of, so the row is on this tab and not on VR's Performance page; the generator fails the build for a `flat_performance` row not listed here.
     {"fix", "hud_antialiasing",  FlatRowRead::Allowlist},
-    {"fix", "sharp_weapons",     FlatRowRead::Allowlist},   // directly under UI quality in VR (2026-10-16); here HUD Anti-Aliasing sits between them
     {"fix", "optimized_stations", FlatRowRead::Allowlist},
 };
 inline constexpr size_t kFlatPageRowCount = sizeof(kFlatPageRows) / sizeof(kFlatPageRows[0]);
@@ -103,13 +102,6 @@ inline bool flatPageHasRow(const char* section, const char* key) {
 // the whole truth table; menu.cpp asks it and nothing else.
 inline bool flatSharpenRowDim(bool flatProfile, bool antiAliasingOn) {
     return flatProfile && !antiAliasingOn;
-}
-
-// Whether the Sharp weapons row is dimmed (and ignores steps and typing): it lays its layer over the temporal pass's
-// output, so with anti-aliasing off there is nothing for them to act on. The same in both profiles (the caller passes the profile's own reading of
-// fix.temporal_aa). One function so a rig can read the whole truth table; menu.cpp asks it and nothing else.
-inline bool weaponsRowDim(bool antiAliasingOn) {
-    return !antiAliasingOn;
 }
 
 // Whether the HUD Anti-Aliasing row is dimmed (and ignores steps): it smooths the HUD layer, which is live only while fix.ui_quality is not off AND the flat

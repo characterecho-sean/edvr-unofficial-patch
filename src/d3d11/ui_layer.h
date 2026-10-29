@@ -95,10 +95,10 @@ extern uint64_t g_uiLayerNamedAt;
 // the layer has not stood down. One load.
 inline bool uiLayerLive() { return detail::g_uiLayerLive; }
 // The layer's machinery runs for fix.ui_quality (the interface families, the 2D screen, the maps gate, the VR world route, the after-UI
-// take) -- the first half of uiLayerLive(), whose second half is fix.sharp_weapons (the weapons fire in its own HDR layer). With
-// fix.ui_quality off and fix.sharp_weapons on, uiLayerLive() is true and this is false: only the weapons fire is taken.
+// take) -- the first half of uiLayerLive(), whose second half is the weapons fire (in its own HDR layer). With
+// fix.ui_quality off and the weapons fire on, uiLayerLive() is true and this is false: only the weapons fire is taken.
 inline bool uiLayerQualityLive() { return detail::g_uiQualityLive; }
-// The other two halves, each its own: the weapons fire (fix.sharp_weapons on or plain) and the shield ripple that rides the same key. The flat adapter asks them
+// The other two halves, each its own: the weapons fire and the shield ripple, which is a half of its own beside it. The flat adapter asks them
 // to leave a family that is not live where it is (flat_ui_layer.cpp).
 bool uiLayerWeaponsLive();
 bool uiLayerRippleLive();
@@ -219,7 +219,7 @@ inline bool uiLayerHudGlowPending() { return detail::g_uiLayerHudGlowPending; }
 // through the raw entry points, runs the coverage pass (the HDR layer's
 // transmittance into the 8-bit layer's alpha), and marks the layer's frame.
 bool uiLayerCrispToneBegin(ID3D11DeviceContext* ctx);
-// After each issue of the admitted draw, between Begin and End (fix.sharp_weapons): true when ANOTHER issue of the same draw follows --
+// After each issue of the admitted draw, between Begin and End (the weapons fire): true when ANOTHER issue of the same draw follows --
 // the weapons' light and the HUD's are re-issued one after the other into the 8-bit layer, each with its own HDR source and blend. The
 // caller issues the game's draw again for every true. A frame with the HUD alone is one issue, as it always was (this returns false).
 bool uiLayerCrispToneNext(ID3D11DeviceContext* ctx);

@@ -16,10 +16,9 @@
   No flat combat capture exists; open: do flat's weapons draws carry camera rows (`flat ui layer weapons`)? See "Flat port".
 - **Weapons fire (2026-10-16): MERGED** (`claude/billboards-sharp-weapons`; flown OK in combat as `claude/combat-flight-1`; entries "Built" and
   "Combat flights"). 1F17, 939D and 5C1D go into the eye's own additive HDR layer, composited after the upscale by tonemap difference; 820E stays.
-  Sean: weapons and shields look much better, beams and tracers are sharp. **ONE key, `fix.sharp_weapons = on | plain | off`** (default on, independent of
-  `fix.ui_quality`; menu: one "Sharp weapons" row, On / On (plain blend) / Off (stock), directly under UI quality, dimmed with temporal AA off). on = the
-  matched composite, plain = the plain add, off = all stock, shield ripple included. `advanced.sharp_weapons_blend` is MERGED INTO IT and removed (with its
-  menu row and its `MENU_ADVANCED_EXCEPTIONS` entry): an old line is read by nothing, and the old true/yes/1 and false/no/0 spellings of the key still work.
+  Sean: weapons and shields look much better, beams and tracers are sharp. **The key `fix.sharp_weapons` (on | plain | off, default on) was RETIRED
+  2026-10-28:** the menu rows, the flat F8 row and `advanced.sharp_weapons_blend` went with it, and the weapons fire is always on as the matched composite
+  (a fix that always helps gets no toggle). Entries below that name the key are the journal of when it was built.
   The blend A/B showed no difference live (log edvr_gfx_20261016_095256). W3 SETTLED: all three pairs carry the eye's jitter (dump 100257), the cancel table says cancel for each. The 0.5 to 5 percent "layers'
   content never reached a tonemap" was an accounting artifact (one false count per burst end), nothing was dropped; the corrected count
   ("The never-tonemapped frames: found") is merged but NOT yet flown.

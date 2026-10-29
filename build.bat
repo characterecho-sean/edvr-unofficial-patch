@@ -4182,8 +4182,8 @@ exit /b 0
 
 :rig_sharp_weapons_test
 echo [edvr] === sharp_weapons_test.exe ===
-REM fix.sharp_weapons (docs\dlss-blur-elements-2026-10-14.md, "Built, 2026-10-16"): the weapons-fire family rule and its one-token mutants, the jitter-cancel table,
-REM the two keys' independence over the four combinations (the family gate, the decisions, the layer's two halves), the tonemap re-issue plan with its mutants,
+REM The weapons fire (docs\dlss-blur-elements-2026-10-14.md, "Built, 2026-10-16"; its setting was retired 2026-10-28): the weapons-fire family rule and its one-token mutants, the jitter-cancel table,
+REM the two halves' independence over the four combinations (the family gate, the decisions, the layer's two halves), the tonemap re-issue plan with its mutants,
 REM three recorded census frames of the 2026-10-16 flight (tools\sharp_weapons_test\fixtures: exactly the weapon rows change decision), the source scans of the
 REM wiring with a control for each, and -- on WARP, with the debug layer -- the production source pass, blend states and step bindings driven through a synthetic
 REM game tonemap: the tonemap-difference composite equals T(F + L) over a lit background where the plain add is far off, and over black the two agree, with

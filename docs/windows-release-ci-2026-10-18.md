@@ -2,6 +2,8 @@
 
 ## Status
 
+- **2026-10-28:** the Sharp weapons setting (`fix.sharp_weapons`) is RETIRED; the INI-description assertion this doc records no longer applies to it.
+
 - State: current `main` is `de80be5d`. Prior full validation and packaging run
   `39134563542` at `8d5d25c` remains valid prior proof; the flat draw collision
   is resolved.

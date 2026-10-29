@@ -2,13 +2,13 @@
 
 ## Status
 
+- **2026-10-28:** the weapons' layer (`fix.sharp_weapons`) that this doc says is not fed is RETIRED with its setting; the weapons fire is always on and has its own layer.
 - **State (2026-10-28): the HUD's bloom halo in the headset, FLOWN (Sean: "seems good").**
-  VR lost it the same way: the rc.3 Steam VR log (`edvr_gfx_20261028_175126`)
-  has 23.4 HUD draws a frame taken out of H into the eye's layer. At an eye's
-  bloom first level (ps 143AAE05, reading that eye's H) H' = H + that eye's HUD
-  layer is bound for that one draw, in the module that already feeds the star
-  glow. Scene tonemapped once, HUD layer once, H' by none. No key; needs Bloom
-  on. See "2026-10-28: the HUD's bloom in the headset".
+  VR lost it the same way (log `edvr_gfx_20261028_175126`: 23.4 HUD draws a
+  frame taken out of H). At an eye's bloom first level (ps 143AAE05, reading
+  that eye's H) H' = H + that eye's HUD layer is bound for that one draw, in the
+  module that feeds the star glow. Scene tonemapped once, HUD layer once, H' by
+  none. No key; needs Bloom on. See "2026-10-28: the HUD's bloom in the headset".
 - **State (2026-10-21): the HUD's bloom halo, flat, BUILT, NOT FLOWN.** With DLAA
   and `fix.ui_quality` on, the HUD had no bloom (a user's pair of the engine
   pips): the take puts it out of H, which the bloom chain reads (Decision 1).

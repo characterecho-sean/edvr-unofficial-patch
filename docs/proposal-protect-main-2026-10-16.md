@@ -2,6 +2,8 @@
 
 ## Status
 
+- **2026-10-28:** `sharp_weapons_test` no longer pins a Sharp weapons setting (the setting is RETIRED, `fix.sharp_weapons`); the autocrlf failure described below is history.
+
 - **State**: proposal from the PR #92 retro, for Sean to decide. Nothing is
   enabled.
 - **Build coverage delivered**: PR #103 added the `release.yml` checks for pull
