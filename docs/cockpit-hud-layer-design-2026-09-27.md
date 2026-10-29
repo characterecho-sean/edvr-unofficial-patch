@@ -2,7 +2,7 @@
 
 ## Status
 
-- **State (2026-10-28): the HUD's bloom halo in the headset, BUILT, NOT FLOWN.**
+- **State (2026-10-28): the HUD's bloom halo in the headset, FLOWN (Sean: "seems good").**
   VR lost it the same way: the rc.3 Steam VR log (`edvr_gfx_20261028_175126`)
   has 23.4 HUD draws a frame taken out of H into the eye's layer. At an eye's
   bloom first level (ps 143AAE05, reading that eye's H) H' = H + that eye's HUD
@@ -1258,3 +1258,38 @@ HUD draw and its first level. Not flown. The GPU half of the pass is flat's.
   named.
 - ruled out: a second module with its own t0 binding. Two modules binding two
   textures for one draw would not add; the star glow's H' and the HUD's are one.
+
+
+### Flown, VR (log edvr_gfx_20261028_203849)
+
+Build `v0.22.0-rc.3-9-g54682ad4` (54682ad4, `--expect-build HEAD` matched). Steam
+VR, native OpenXR, eye H 2016x2017, layers 4032x4034, Bloom on. Sean, by eye:
+"seems good".
+
+- The mode came on at 20:38:50; the first feed was at 20:40:39 (the left eye,
+  frame 10735), when the cockpit's HUD first drew.
+- 19 window lines: hud-eye-frames 4431 an eye, fed 3590 an eye, first-levels 7180
+  (every first level the hook looked at was fed). Every not-fed count and every
+  pass-failed count is 0 in all 19 windows: no `no-layer`, `no-content`,
+  `tone-done`, `repeat`, no failed pass. So the layer's `hdrTarget` is the
+  bloom's H, and the HUD is drawn before the first level.
+- The 841 eye-frames an eye that were not fed are in two windows (20:41:10 and
+  20:41:20: fed 300 of 666 and 157 of 632). In that stretch the tone pair changed to
+  `2D78DC3F / 99C21CEB` ("no scene image to zero", no bloom input), and the
+  `vr ssaa gate` copy lines show `e+0x88` going 3 -> 0 (20:41:05.4) and 0 -> 3
+  (20:41:18.3). The fed share tracks the share of re-issues with a bloom input
+  (30 s `crisp hud:` line: 0.98 of 1.87 re-issues zeroed a bloom, 52.4%; fed over
+  eye-frames for those three windows, 927 of 1768, 52.4%). Read as Elite's bloom
+  being off for about 13 s (that field is probably BloomQuality; not verified), when
+  no first level exists to feed. Not a miss of the feed.
+- Tone once: both tone pairs of the flight (`642017A6... / D0A16B9E` and
+  `2D78DC3F / D0A16B9E`) name `t2 1008x1008 fmt 26 ZEROED`; the `crisp hud:` line
+  has M = N in the windows with bloom (0.62/0.62, 1.90/1.90) and `re-issue
+  declines: none`, 0 layers that never reached a tonemap.
+- `fix.ui_quality` was toggled twice at 20:41:30-32: the mode went off and on with
+  it ("the HDR HUD take is not armed"), the window before each off line still fed
+  every eye-frame (645 of 645, 60 of 60).
+- Not read from the log: the halo itself and the scene's brightness (Sean's eye);
+  the pass's GPU cost (no timer).
+- The log ends at 20:41:58 with the game window leaving the headset's size (a
+  390 ms freeze as it does); no crash line.
