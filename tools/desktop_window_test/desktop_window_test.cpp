@@ -1146,19 +1146,19 @@ static void wiring(const std::string& root) {
     const size_t aspectKey = at(ini, "\ndesktop_window_aspect = full\n", key), cropKey = at(ini, "\ndesktop_window_crop = native\n", aspectKey);
     const size_t shiftKey = at(ini, "\ndesktop_window_vertical_shift = 0\n", cropKey);
     const size_t styleKey = at(ini, "\ndesktop_window_style = window\n", shiftKey);
-    const size_t ui = ini.rfind("# ui: Desktop window | choices game=Game, left_eye=Left eye, right_eye=Right eye, both_eyes=Both eyes | live | menu desktop_window\n", key);
-    const size_t uiAspect = ini.rfind("# ui: Desktop window shape | choices full=Full picture, 1:1=1:1, 4:3=4:3, 16:10=16:10, 16:9=16:9, 21:9=21:9 | live | menu desktop_window\n", aspectKey);
-    const size_t uiCrop = ini.rfind("# ui: Desktop window crop | choices native=Same as the game's mirror, center=Centre | live | menu desktop_window\n", cropKey);
-    const size_t uiShift = ini.rfind("# ui: Desktop window vertical shift | range -100..100 | step 5 | unit % | signed | zero default | recommended 0 | live | menu desktop_window\n", shiftKey);
-    const size_t uiStyle = ini.rfind("# ui: Desktop window style | choices window=Window, borderless=Borderless full screen | live | menu desktop_window\n", styleKey);
+    const size_t ui = ini.rfind("# ui: Image | choices game=Game, left_eye=Left eye, right_eye=Right eye, both_eyes=Both eyes | live | menu desktop_window\n", key);
+    const size_t uiAspect = ini.rfind("# ui: Shape | choices full=Full picture, 1:1=1:1, 4:3=4:3, 16:10=16:10, 16:9=16:9, 21:9=21:9 | live | menu desktop_window\n", aspectKey);
+    const size_t uiCrop = ini.rfind("# ui: Crop | choices native=Same as the game's mirror, center=Centre | live | menu desktop_window\n", cropKey);
+    const size_t uiShift = ini.rfind("# ui: Vertical shift | range -100..100 | step 5 | unit % | signed | zero default | recommended 0 | live | menu desktop_window\n", shiftKey);
+    const size_t uiStyle = ini.rfind("# ui: Style | choices window=Window, borderless=Borderless full screen | live | menu desktop_window\n", styleKey);
     check(visual != std::string::npos && world != std::string::npos && key != std::string::npos && ui != std::string::npos && ui > world && key - ui < 160 &&
               aspectKey != std::string::npos && uiAspect != std::string::npos && uiAspect > key && aspectKey - uiAspect < 200 && cropKey != std::string::npos && uiCrop != std::string::npos &&
               uiCrop > aspectKey && cropKey - uiCrop < 200 && shiftKey != std::string::npos && uiShift != std::string::npos && uiShift > cropKey && shiftKey - uiShift < 200 && styleKey != std::string::npos && uiStyle != std::string::npos && uiStyle > shiftKey && styleKey - uiStyle < 160 &&
               count(ini, "\ndesktop_window = ") == 1 && count(ini, "\ndesktop_window_aspect = ") == 1 && count(ini, "\ndesktop_window_crop = ") == 1 && count(ini, "\ndesktop_window_vertical_shift = ") == 1 &&
               count(ini, "\ndesktop_window_style = ") == 1,
-          "edvr.ini: [visual], after world_scale, the five keys in order ship left_eye, full, native, 0 and window, each with its ui: line on the Mirror window page (its rows keep the Desktop window labels) (the crop two choices, the shift a signed number row, step 5, unit %)");
-    check(ini.rfind("VR only. Live.\n# ui: Desktop window |", key) != std::string::npos && ini.rfind("VR only. Live.\n# ui: Desktop window shape |", aspectKey) != std::string::npos &&
-              ini.rfind("VR only. Live.\n# ui: Desktop window crop |", cropKey) != std::string::npos && ini.rfind("VR only. Live.\n# ui: Desktop window vertical shift |", shiftKey) != std::string::npos && ini.rfind("VR only. Live.\n# ui: Desktop window style |", styleKey) != std::string::npos,
+          "edvr.ini: [visual], after world_scale, the five keys in order ship left_eye, full, native, 0 and window, each with its ui: line on the Mirror window page, labelled Image, Shape, Crop, Vertical shift and Style (the page names the window) (the crop two choices, the shift a signed number row, step 5, unit %)");
+    check(ini.rfind("VR only. Live.\n# ui: Image |", key) != std::string::npos && ini.rfind("VR only. Live.\n# ui: Shape |", aspectKey) != std::string::npos &&
+              ini.rfind("VR only. Live.\n# ui: Crop |", cropKey) != std::string::npos && ini.rfind("VR only. Live.\n# ui: Vertical shift |", shiftKey) != std::string::npos && ini.rfind("VR only. Live.\n# ui: Style |", styleKey) != std::string::npos,
           "edvr.ini: each comment says VR only and live");
     check(at(ini, "menu visual", key) == std::string::npos || at(ini, "menu visual", key) > styleKey, "edvr.ini: none of the five is on the Visual page");
     {   // the words: the shift's 0 is the default centre; the crop's comment says what native and center do, with Elite's two numbers and the mirrored right eye; nothing says straight ahead

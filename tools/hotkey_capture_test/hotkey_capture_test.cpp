@@ -2034,18 +2034,18 @@ void testLegacyOnFootRowsStayOutOfMenu() {
 // screen curve moved onto it from the Fixes page; Star glow, which both profiles read, is on it too; and a live edvr.ini without the world_scale line takes
 // the first change from the menu as an appended line.
 
-// 7c. The Mirror window page of VR's menu (the Desktop window page, 2026-10-28, until F173; its page id and its rows' labels are unchanged), right after Visual: what the window shows, the picture's shape, how far up or down it is cut (round 7: a signed whole-percent
+// 7c. The Mirror window page of VR's menu (the Desktop window page, 2026-10-28, until F173; its page id is unchanged, and since F174 its rows' labels leave out the window's name, which the page gives), right after Visual: what the window shows, the picture's shape, how far up or down it is cut (round 7: a signed whole-percent
 // number row; round 8: how the shape is cut, native or center) and the window's style, the five [visual] keys, Fix tier, in edvr.ini order, no group headings needed (the page is the group), choices in the words the file gives them.
 void testDesktopWindowPage() {
     printf("desktop window page\n");
     constexpr int kCount = static_cast<int>(sizeof(kMenuRows) / sizeof(kMenuRows[0]));
     struct Want { const char* key; const char* label; const char* choices; };   // an empty choices is the number row
     static const Want want[] = {
-        {"desktop_window", "Desktop window", "game=Game|left_eye=Left eye|right_eye=Right eye|both_eyes=Both eyes"},
-        {"desktop_window_aspect", "Desktop window shape", "full=Full picture|1:1=1:1|4:3=4:3|16:10=16:10|16:9=16:9|21:9=21:9"},
-        {"desktop_window_crop", "Desktop window crop", "native=Same as the game's mirror|center=Centre"},
-        {"desktop_window_vertical_shift", "Desktop window vertical shift", ""},
-        {"desktop_window_style", "Desktop window style", "window=Window|borderless=Borderless full screen"},
+        {"desktop_window", "Image", "game=Game|left_eye=Left eye|right_eye=Right eye|both_eyes=Both eyes"},
+        {"desktop_window_aspect", "Shape", "full=Full picture|1:1=1:1|4:3=4:3|16:10=16:10|16:9=16:9|21:9=21:9"},
+        {"desktop_window_crop", "Crop", "native=Same as the game's mirror|center=Centre"},
+        {"desktop_window_vertical_shift", "Vertical shift", ""},
+        {"desktop_window_style", "Style", "window=Window|borderless=Borderless full screen"},
     };
     constexpr int kWant = static_cast<int>(sizeof(want) / sizeof(want[0]));
     int at = 0, shift = -1, mode = -1;
@@ -2065,7 +2065,7 @@ void testDesktopWindowPage() {
         if (strcmp(kMenuRows[i].key, "desktop_window_vertical_shift") == 0) shift = i;
         ++at;
     }
-    check(inOrder && at == kWant, "VR's Mirror window page is Desktop window, Desktop window shape, Desktop window crop, Desktop window vertical shift and Desktop window style, [visual] Fix-tier rows (the shift a number, the rest choices), live, in edvr.ini order");
+    check(inOrder && at == kWant, "VR's Mirror window page is Image, Shape, Crop, Vertical shift and Style, [visual] Fix-tier rows (the shift a number, the rest choices), live, in edvr.ini order");
     // F173: the mirror window shows the left eye by default (the shipped choice), the other four rows keep their words
     check(mode >= 0 && strcmp(kMenuRows[mode].shipped, "left_eye") == 0, "F173: the Mirror window row (visual.desktop_window) ships on left_eye");
     for (int i = 0; i < kCount; ++i) {
