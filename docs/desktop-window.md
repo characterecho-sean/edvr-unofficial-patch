@@ -2,7 +2,8 @@
 
 ## Status
 
-- **State (2026-10-28):** **Round 7 BUILT, NOT FLOWN** (below). Rounds 1 to 4 FLOWN OK on Steam (`edvr_gfx_20261028_161013.log`,
+- **State (2026-10-28):** **Round 7 FLOWN OK** (Sean: looks good), NOT MERGED: held for the
+  crop-centre decision below. Rounds 1 to 4 FLOWN OK on Steam (`edvr_gfx_20261028_161013.log`,
   `_164251.log`, `_170329.log`; Sean confirmed the hidden cursor). Round 5 (the game keeps its
   mouse lock) ON MAIN d35d70bb. **Round 6 FLOWN OK, ON MAIN** (`edvr_gfx_20261028_192619.log`,
   Sean: looks good; `--health` OK): its own menu page, two new keys, the centre crop,
@@ -19,15 +20,10 @@
   EDVR's finished eye image, skips Elite's own drawing into it, and hides the cursor over the
   picture while the window has focus. The game's mouse lock is untouched. At 3D off the window
   is restored.
-- **Round 6, the shape:** `full` is the picture as before (each eye's bounds sub-rect, both eyes
-  side by side). Any other value is the whole picture's shape; with both eyes each gets half the
-  width (16:9 is two 8:9 halves). Each eye is cropped to the largest rectangle of its shape inside
-  its bounds sub-rect, centred on that eye's projection centre (u = -tan(left) /
-  (tan(right) - tan(left)), v = tan(up) / (tan(up) - tan(down)) of the field of view its pixels
-  cover), moved only as far as it takes to stay inside the image. The field of view comes with
-  each eye: the export is now **version 2** (`noteEye` carries the four angles of
-  `frameContentViews[eye].fov`, the projection the treated pixels hold, narrowed by any trim); no
-  field of view (or a version 1 pair) centres the crop on the middle of the bounds, said once.
+- **Round 6, the shape:** any value but `full` crops each eye (both eyes: half the width each) to
+  the largest rectangle of that shape, centred on the eye's projection centre from the field of
+  view its pixels cover (export **version 2**: `noteEye` carries `frameContentViews[eye].fov`),
+  kept inside the image; no field of view centres on the bounds' middle. Detail under Design.
 - **Round 6, the style:** `window` is as before, snapping to the chosen shape (a shape change
   alone keeps the client height and top-left, then clamps). `borderless` is full-screen
   borderless: popup style (`0x94020000` and `0x14CC0000` both become `0x94000000`), the whole
@@ -37,21 +33,19 @@
   settled window rect if it fits, at the current shape with its client height, clamped to the
   work area; else the largest fit, centred.
 - **Round 7, the vertical shift:** `visual.desktop_window_vertical_shift` moves the crop up (+)
-  or down (-). The default position is found first (centred on the projection centre, then kept
-  inside the image); the shift moves a fraction of the way from there to the highest position
-  (the crop's top edge at the picture's top) or the lowest (its bottom edge at the picture's
-  bottom): 0 changes nothing, +-100 reach the edges, +-50 are halfway. A crop with no room up or
-  down (`full`, or a shape as tall as the picture) does not move; the same shift goes to both
-  eyes, the horizontal position is unchanged. "Up" is the side the draw puts at the window's top,
-  which is where the eye's bounds start (`bounds[1]`); for a flipped sub-rect that is its vMin
-  as named, so it moves as the viewer sees it. Live, VR only, flat 0. The ini words say "0 is
-  the default centre", never "straight ahead". Logs: `vertical shift N` at the first read,
-  `vertical shift N (was M)` on a change, and `vertical shift N` in each `crop` line (now
-  `default centre u= v= ..., vertical shift N; crop bounds ...`).
-- **First flight of round 7 must show:** the row on the Desktop window page between shape and
-  style ("+25 %", "0 % (default)"); with 16:9 and `left_eye`, +100 putting the crop's top at
-  the picture's top and -100 its bottom at the picture's bottom, live; the `vertical shift`
-  lines; no change with `full`.
+  or down (-): from the default position, a fraction of the way to the highest (top edge at the
+  picture's top) or lowest position; 0 changes nothing, +-100 reach the edges; no room, no move.
+  "Up" is the side the window shows at its top (`bounds[1]`). Both eyes alike. Logs `vertical
+  shift N` (first read, each change, each `crop` line).
+- **Elite's own mirror, read from the game** (build 334925; analysis 82dc637,
+  `analysis\decomp\verify_20261028_vr_mirror_crop.txt`): `Stereoscopic_FrameCombineNode::Render`
+  (RVA 0x28A4200) shows the LEFT eye only (the right is drawn off screen: the second copy draw)
+  and reads no field of view. With no hidden-area mesh it crops to the window's shape around the
+  texture centre (mode 7); with one it zooms 1.32x centred at u 0.515 (mode 9). The Pimax
+  serves no mesh, and there EDVR's left-eye 16:9 equals Elite's. A tester saw the centres
+  differ (headset unknown: a mesh, an up/down-asymmetric field of view, or the right eye).
+  OPEN: Sean to choose EDVR's default centre. A flight with `census_cb_watch =
+  01C3B84C82172B56` and `census_cb_slot = 2` confirms the mode-7 numbers (0,0,1,1.7787 at 16:9).
 - **Ruled out:** a stale binding shadow taking scene draws for buffer draws; H2 and H3 of
   round 3 (see "Flight history"). **Round 5:** Elite's `ClipCursor` is never touched; the
   cursor stays confined while the game holds it, so moving or resizing the window means
