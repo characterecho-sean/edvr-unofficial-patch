@@ -19802,8 +19802,14 @@ def self_test_health():
                     # round 6: the picture's shape and the window's style, the live changes and the crop lines
                     RD(dwcpp, "desktop window: aspect %s (was %s)", "16:9", "full"),
                     RD(dwcpp, "desktop window: style %s (was %s)", "borderless", "window"),
-                    RD(dwcpp, "desktop window: crop %s, %s eye: looks straight ahead", "16:9", "left", 0.55, 0.48, "from its field of view", 0.0, 1.0, 0.1, 0.6, 2000, 2000),
-                    RD(dwcpp, "desktop window: an eye image came with no field of view"),
+                    # round 7: the vertical shift (its first read, a live change) and the crop line that names it and the default centre
+                    RD(dwcpp, 'desktop window: vertical shift %d", shiftOpt', 0),
+                    RD(dwcpp, "desktop window: vertical shift %d (was %d)", 25, 0),
+                    # round 8: the crop rule (first read, a live change) and the crop line that names it, the answer about the hidden-area mesh and the mode the native rule picked
+                    RD(dwcpp, 'desktop window: crop rule %s", desktopWindowCropRuleName(cropOpt)', "native"),
+                    RD(dwcpp, "desktop window: crop rule %s (was %s)", "center", "native"),
+                    RD(dwcpp, "desktop window: crop %s, %s eye, rule", "16:9", "left", "native: hidden-area mesh served yes, as the game, mesh: 1.32x at u 0.515", 25, 0.1362, 0.8938, 0.2870, 0.7130, 4032, 4034),
+                    RD(dwcpp, "desktop window: crop %s, %s eye, rule", "16:9", "right", "center: texture centre, no zoom", 0, 0.0, 1.0, 0.2189, 0.7811, 4032, 4034),
                     RD(dwcpp, "desktop window: the game changed the window's style away from ours", 0x94020000, 1),
                     RD(dwcensus, "desktop window: skipped by shader (10 s): %s", "0000000000000001/0000000000000002 x5", 0, 1, "", 5, 0, 5, 0, 0, 0, 0, 2, 1),
                     RD(dwcpp, "desktop window: not drawing -- %s", "the window's client area is empty (minimized)"),

@@ -19,7 +19,6 @@ namespace flatweapontest {
 bool weaponCaptured(uint64_t frame);
 bool published(uint64_t frame);
 bool matchedPlan();
-bool plainPlan();
 ID3D11Texture2D* toneLayer();
 ID3D11Texture2D* weaponLayer();
 }  // namespace flatweapontest
@@ -131,11 +130,10 @@ bool candidate(Rig& r, Tex& hdr, uint64_t frame) {
     return flatUiLayerToneCandidate(r.ctx.Get(), frame, kEyeW, kEyeH, 0, 1, 2, hdr.tex.Get(), kEyeW, kEyeH, "test-hdr");
 }
 
-void runCase(Rig& r, Tex& hdr, const char* mode, const char* quality, uint64_t frame,
+void runCase(Rig& r, Tex& hdr, const char* quality, uint64_t frame,
              bool copyTone = false, Tex* firstDecided = nullptr, bool expectSmoothed = false) {
     auto& cfg = Config::get();
     cfg.set("fix.ui_quality", quality);
-    cfg.set("fix.sharp_weapons", mode);
     uiLayerConfigure(cfg);
     check(uiLayerWeaponsLive() && uiLayerCrispOn(), "flat weapon machinery is live in this key combination");
     uiLayerNoteTemporal(frame - 1, 0, r.frame[0].tex.Get());
@@ -198,8 +196,7 @@ void runCase(Rig& r, Tex& hdr, const char* mode, const char* quality, uint64_t f
     const bool reissued = flatUiLayerToneBegin(r.ctx.Get());
     check(reissued, "the production tone bracket begins after admission");
     if (reissued) {
-        check(std::strcmp(mode, "on") == 0 ? flatweapontest::matchedPlan() : flatweapontest::plainPlan(),
-              "the selected weapon blend has its expected production tone plan");
+        check(flatweapontest::matchedPlan(), "the production tone plan is the matched composite");
         do { r.ctx->Draw(4, 0); } while (flatUiLayerToneNext(r.ctx.Get()));
         flatUiLayerToneEnd(r.ctx.Get());
     }
@@ -254,7 +251,6 @@ int main(int argc, char** argv) {
     g_stubs.eyeRes[0] = hdr.tex.Get();
     auto& cfg = Config::get();
     cfg.set("fix.temporal_aa", "dlss");
-    cfg.set("fix.sharp_weapons", "on");
     cfg.set("fix.ui_quality", "off");
     uiLayerConfigure(cfg);
     const uint64_t first = 100;
@@ -262,13 +258,13 @@ int main(int argc, char** argv) {
     check(flatUiLayerDecide(r.ctx.Get(), weaponFacts(first, hdr)) == FlatUiLayerAsk::kRefused,
           "before a tone proves the HDR target, the weapon stays in the game frame");
     check(!candidate(r, hdr, first), "the proving tone has no captured weapon content to reissue");
-    // The rig has not set the key: HUD Anti-Aliasing (fix.hud_antialiasing) is off by default, so this first composite reads the raw layer.
-    runCase(r, hdr, "on", "off", first + 1, false, nullptr, false);
-    // The key is live: on, the next frame's composite reads the smoothed layer; off again, the raw one; on once more for the frames below.
+    // The rig has not set fix.hud_antialiasing, which is off by default, so this first composite reads the raw layer.
+    runCase(r, hdr, "off", first + 1, false, nullptr, false);
+    // It is live: on, the next frame's composite reads the smoothed layer; off again, the raw one; on once more for the frames below.
     cfg.set("fix.hud_antialiasing", "on");
-    runCase(r, hdr, "plain", "off", first + 2, false, nullptr, true);
+    runCase(r, hdr, "off", first + 2, false, nullptr, true);
     cfg.set("fix.hud_antialiasing", "off");
-    runCase(r, hdr, "on", "100", first + 3, false, nullptr, false);
+    runCase(r, hdr, "100", first + 3, false, nullptr, false);
     cfg.set("fix.hud_antialiasing", "on");
     // Also prove a second physical target for frame N+4. Its first decision
     // in that frame will be abandoned, while the later weapon target is
@@ -282,7 +278,7 @@ int main(int argc, char** argv) {
               "a new target is still refused until a tone proves it");
         check(!candidate(r, other, first + 3), "the second target is proven without captured content");
         g_stubs.eyeRes[0] = hdr.tex.Get();
-        runCase(r, hdr, "plain", "100", first + 4, true, &other, true);
+        runCase(r, hdr, "100", first + 4, true, &other, true);
     }
     // The last captured content is stale in the next frame, even though the
     // same HDR target and tone pair are still bound.

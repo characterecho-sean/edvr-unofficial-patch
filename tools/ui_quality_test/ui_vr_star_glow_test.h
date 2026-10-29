@@ -11,12 +11,13 @@
 //     passes of the two eyes), in the census order, fully interleaved and with the eyes swapped: both eyes replay every pass, the first level of one eye
 //     refuses nothing of the other, a pre-pass of one eye does not unlock the other, another eye's unrelated draw does not end this eye's run, a jet's
 //     source unlocks the jets of both;
-//   * the first level fed once an eye and only at its own shader, the exposure reduction and the composite left alone, H' without a HUD term;
+//   * the first level fed once an eye and only at its own shader, the exposure reduction and the composite left alone, H' = H + m * S (its HUD term is
+//     ui_vr_hud_glow_test.h's);
 //   * the window lines (the head, one for an H) with exact text, the lines for pausing and returning to 100, and every refusal named;
 //   * the wiring, by source scan with controls: the module is in the DLL's source list; the four draw thunks ask one relaxed load and call the module before
 //     and after the game's issue; the re-issue is the planet re-issue's shape; the frame boundary follows menuTick; the first level is found by its shader
 //     only while some H holds light; H' is bound for one draw and the game's view comes back through the raw setter; the replay's bracket restores through
-//     its own guard; S is the layer of the H the first level reads; the pass has no HUD; the Visual page carries the row.
+//     its own guard; S is the layer of the H the first level reads; the star input rides the headset feed that also takes the HUD's term; the Visual page carries the row.
 namespace vrstarglowtest {
 
 using worldroute::bodyOf;
@@ -426,7 +427,7 @@ void testRuns() {
 // ------------------------------------------------------------------ the first level's input
 
 void testComposition() {
-    // In the headset the HUD is not in H: the feed is H + m * S, flat's arithmetic with no HUD term, each channel under the format's clamp.
+    // The star light's term of the feed: H + m * S with the HUD term at zero (the HUD's own is ui_vr_hud_glow_test.h's), flat's arithmetic, each channel under the format's clamp.
     bool exact = true;
     for (int pct : {100, 125, 150, 175, 200}) {
         const double m = flatStarGlowM(pct);
@@ -437,7 +438,7 @@ void testComposition() {
             }
         }
     }
-    check(exact, "vr star glow: H' = H + m * S per channel at every setting (no HUD term)");
+    check(exact, "vr star glow: H' = H + m * S per channel at every setting (the HUD term at zero)");
     check(std::fabs(flatStarFirstLevel(300.0f, 0.0f, 300.0f, flatStarGlowM(150), 0) - 450.0) < 1e-3 && std::fabs(flatStarFirstLevel(300.0f, 0.0f, 0.0f, flatStarGlowM(200), 0) - 300.0) < 1e-3,
           "vr star glow: where the star is all of H, H' reads k times H; away from a star H' is H");
 }
@@ -571,9 +572,10 @@ std::vector<Pin> wiringPins(const Sources& src) {
                     "the glow's frame tick runs inside vScreenFrameBoundary, which runs after menuTick has refreshed the Bloom reading"});
     // The module.
     pins.push_back({"hook-shape",
-                    has(hdr, "inlinevoidvrStarGlowBeforeDraw(ID3D11DeviceContext*ctx){if(detail::g_vrStarGlowPending.load(std::memory_order_relaxed))vrStarGlowFirstLevel(ctx);}") &&
+                    has(hdr, "inlinevoidvrStarGlowBeforeDraw(ID3D11DeviceContext*ctx){if(detail::g_vrStarGlowPending.load(std::memory_order_relaxed)||uiLayerHudGlowPending())vrStarGlowFirstLevel(ctx);}") &&
                         has(hdr, "inlineboolvrStarGlowWanted(){returndetail::g_vrStarGlowWanted.load(std::memory_order_relaxed);}"),
-                    "the draw hooks cost one relaxed load while off, and the first-level test runs only while some H holds light its first level has not read"});
+                    "the draw hooks cost one relaxed load while off, and the first-level test runs only while some H holds light its first level has not read or an eye's HUD "
+                    "layer holds a frame's light its first level has not taken"});
     {
         std::string body;
         const bool found = afterui::functionBody(src.mod, "void vrStarGlowFirstLevel(ID3D11DeviceContext* ctx) {", &body);
@@ -588,8 +590,9 @@ std::vector<Pin> wiringPins(const Sources& src) {
         const bool found = afterui::functionBody(src.mod, "void bindFirstLevel(ID3D11DeviceContext* ctx) {", &body);
         body = afterui::squeeze(body);
         pins.push_back({"h-prime-for-one-draw",
-                        found && inOrder(body, {"constintsi=g_table.find(info.resource);", "vrStarFirstLevel(known,", "Slot&s=g_slots[si];", "s.run.done=true;",
-                                                "star.srv=s.layer.srv.Get();", "uiLayerStarFeed(ctx,0,info.resource,&star,&verdict);", "vrStarCountRefusal(w,VrStarRefusal::kFeedFail);",
+                        found && inOrder(body, {"si=g_table.find(info.resource);", "vrStarFirstLevel(known,", "Slot&s=g_slots[si];", "s.run.done=true;",
+                                                "star.srv=s.layer.srv.Get();", "uiLayerHeadsetGlowFeed(ctx,0,info.resource,starIn,&glow);",
+                                                "vrStarCountRefusal(w,VrStarRefusal::kFeedFail);",
                                                 "vScreenPSSetShaderResourcesRaw(ctx,0,1,&bound);", "g_t0.game=game;", "g_t0.active=true;", "++w.fed;"}) &&
                             countOf(mod, "g_t0.active=true;") == 1,
                         "H' is built from the star layer of the H the first level reads (found by its resource), the H is marked fed first, a feed that fails is counted, "
@@ -601,7 +604,7 @@ std::vector<Pin> wiringPins(const Sources& src) {
         body = afterui::squeeze(body);
         pins.push_back({"game-view-back",
                         found && inOrder(body, {"g_t0.active=false;", "guarded(\"vrStarGlow.restoreT0\"", "vScreenPSSetShaderResourcesRaw(ctx,0,1,&game);", "g_budget.charge();"}) &&
-                            has(mod, "if(g_t0.active)endFirstLevel(ctx);++g_win.draws;"),
+                            has(mod, "if(g_t0.active)endFirstLevel(ctx);if(g_mode!=VrStarMode::kOn)returnfalse;++g_win.draws;"),
                         "the game's view of H goes back at t0 through the raw setter under a guard of its own, before anything else looks at the draw"});
     }
     {
@@ -647,7 +650,7 @@ std::vector<Pin> wiringPins(const Sources& src) {
                         found && inOrder(body, {"if(runtimeFlatProfile()){", "standDown();", "if(g_mode==VrStarMode::kOn)foldFrame();", "starGlowPercent(cfg,&recognised)",
                                                 "constVrStarModemode=vrStarMode(g_percent,g_percent>100?menuStarGlowBloom():sgb::Bloom::Unknown);", "standDown();",
                                                 "if(mode==VrStarMode::kOn){", "g_vrStarGlowWanted.store(true,", "vrStarPausedLine(", "vrStarOffLine("}) &&
-                            countOf(mod, "g_vrStarGlowWanted.store(true,") == 1 && has(mod, "voidstandDown(){detail::g_vrStarGlowWanted.store(false,std::memory_order_relaxed);releaseAll();}"),
+                            countOf(mod, "g_vrStarGlowWanted.store(true,") == 1 && has(mod, "voidstandDown(){detail::g_vrStarGlowWanted.store(g_hudMode==VrHudGlowMode::kOn,std::memory_order_relaxed);releaseAll();}"),
                         "the hooks are armed only in the ON mode, the mode is the setting and the hint's Bloom reading, every other mode (and a switch to the flat profile) stands "
                         "everything down first, and the setting is read live by the config's generation"});
     }
@@ -662,10 +665,13 @@ std::vector<Pin> wiringPins(const Sources& src) {
     }
     {
         std::string body;
-        const bool found = afterui::functionBody(src.uiLayer, "ID3D11ShaderResourceView* uiLayerStarFeed(", &body);
+        const bool found = afterui::functionBody(src.uiLayer, "ID3D11ShaderResourceView* uiLayerHeadsetGlowFeed(", &body);
         body = afterui::squeeze(body);
-        pins.push_back({"no-hud-term", found && has(body, "glowFeedPass(ctx,nullptr,slot,hdr,v,star)") && !has(body, "g_eye[0]") && !has(body, "runtimeFlatProfile"),
-                        "the headset's H' is glowFeedPass with no HUD (a copy of H, then the star pass), and is not gated on the flat profile or eye 0's HUD layer"});
+        pins.push_back({"star-via-headset-feed",
+                        found && has(body, "glowFeedPass(ctx,hud,slot,hdr,v,star)") && has(body, "!runtimeFlatProfile()") &&
+                            has(body, "if(!hud&&!(star&&star->srv)){v=UiGlowFeed::kNoHud;}") && !has(afterui::squeeze(src.uiLayer), "uiLayerStarFeed("),
+                        "the headset's H' is the one feed that takes the star light and, by identity, the eye's HUD (vr_hud_glow's pins hold the HUD half): it runs outside the "
+                        "flat profile only, a star input alone still makes H', no input makes none, and the HUD-less uiLayerStarFeed it replaced is gone"});
     }
     pins.push_back({"visual-page", has(src.ini, "| live | menu visual\nstar_glow = 100") && !has(src.ini, "| live | menu flat_visual\nstar_glow = 100"),
                     "the Star glow row is `menu visual` in the shipped edvr.ini: VR's Visual page lists it (and the hint beside it) and the flat tab still does (kFlatVisualRows)"});
@@ -710,7 +716,7 @@ void testWiring() {
         {"after-reissue", 0, "if (vrStarGlowAfterDraw(self, v == DrawVerdict::kNone && !uiLayerIssueBlocked())) {", "if (vrStarGlowAfterDraw(self, true)) {"},
         {"boundary", 0, "tkVrStarGlow.run([&] { vrStarGlowFrameBoundary(); });", ""},
         {"boundary", 1, "tkMenu.run([] { menuTick(g_state->device); });", ""},
-        {"hook-shape", 3, "if (detail::g_vrStarGlowPending.load(std::memory_order_relaxed)) vrStarGlowFirstLevel(ctx);", "vrStarGlowFirstLevel(ctx);"},
+        {"hook-shape", 3, "if (detail::g_vrStarGlowPending.load(std::memory_order_relaxed) || uiLayerHudGlowPending()) vrStarGlowFirstLevel(ctx);", "vrStarGlowFirstLevel(ctx);"},
         {"first-level-by-shader", 2, "vrStarIsFirstLevel(bindingShaderHash(BindSlot::Ps))", "true"},
         {"h-prime-for-one-draw", 2, "star.srv = s.layer.srv.Get();", "star.srv = g_slots[0].layer.srv.Get();"},
         {"h-prime-for-one-draw", 2, "    g_t0.active = true;\n", ""},
@@ -726,10 +732,11 @@ void testWiring() {
         {"bracket", 2, "const bool ran = guarded(\"vrStarGlow.restore\", [&] {", "const bool ran = guardedBudget(g_budget, [&] {"},
         {"off-is-nothing", 2, "g_percent > 100 ? menuStarGlowBloom() : sgb::Bloom::Unknown", "sgb::Bloom::Unknown"},
         {"off-is-nothing", 2, "detail::g_vrStarGlowWanted.store(true, std::memory_order_relaxed);", "detail::g_vrStarGlowWanted.store(g_percent > 0, std::memory_order_relaxed);"},
-        {"off-is-nothing", 2, "    if (runtimeFlatProfile()) {\n        if (g_mode != VrStarMode::kOff) {\n            standDown();\n            g_mode = VrStarMode::kOff;\n        }\n        return;\n    }\n", ""},
+        {"off-is-nothing", 2, "    if (runtimeFlatProfile()) {\n        hudStandDown();   // the flat profile feeds its own HUD bloom (flat_ui_layer.h); nothing here runs\n        if (g_mode != VrStarMode::kOff) {\n            standDown();\n            g_mode = VrStarMode::kOff;\n        }\n        return;\n    }\n", ""},
         {"fold-counts", 2, "        if (s.run.lit && !s.run.done) vrStarCountRefusal(w, VrStarRefusal::kNoFirstLevel);\n", ""},
-        {"no-hud-term", 4, "glowFeedPass(ctx, nullptr, slot, hdr, v, star)", "glowFeedPass(ctx, &g_eye[0], slot, hdr, v, star)"},
-        {"no-hud-term", 4, "    // No profile test and no HUD: the headset's first level has neither", "    if (!runtimeFlatProfile()) return nullptr;\n    // No profile test and no HUD: the headset's first level has neither"},
+        {"star-via-headset-feed", 4, "glowFeedPass(ctx, hud, slot, hdr, v, star)", "glowFeedPass(ctx, nullptr, slot, hdr, v, nullptr)"},
+        {"star-via-headset-feed", 4, "slot < D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT && !runtimeFlatProfile()) {\n        uint64_t seq = 0;",
+         "slot < D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT) {\n        uint64_t seq = 0;"},
         {"visual-page", 6, "| live | menu visual\nstar_glow = 100", "| live | menu flat_visual\nstar_glow = 100"},
         {"bloom-reading", 7, "sgb::Bloom menuStarGlowBloom() { return g_s.starGlowBloom.state(); }", "sgb::Bloom menuStarGlowBloom() { return sgb::Bloom::Unknown; }"},
     };

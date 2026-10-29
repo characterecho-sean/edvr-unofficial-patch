@@ -1,4 +1,4 @@
-// fix.sharp_weapons' source pass (docs/dlss-blur-elements-2026-10-14.md, "Built, 2026-10-16: weapons fire in the HDR layer"): the HLSL the
+// The weapons fire's source pass (docs/dlss-blur-elements-2026-10-14.md, "Built, 2026-10-16: weapons fire in the HDR layer"): the HLSL the
 // build compiles to fixed DXBC (tools/temporal_shader_build/fixed_sharp_weapons_variants.h) and the rig runs. Header-only text, no device.
 //
 // ONE fullscreen pass, two targets. It reads the game's HDR tonemap input F (the lit R11G11B10 eye target, at the render's size) and writes

@@ -309,7 +309,8 @@ inline DwCorrection desktopWindowCorrect(double aspect, int winLeft, int winTop,
 // ---- the picture's shape and the centre crop (round 6) ----
 // `visual.desktop_window_aspect`: `full` is the picture as each eye's bounds sub-rect gives it (both eyes side by side). Any other value is the shape of the WHOLE picture, and with
 // both eyes each eye gets half the width (16:9 is two 8:9 halves). Each eye is cropped to its shape: the largest rectangle of that shape inside the eye's bounds sub-rect (in
-// pixels), centred on the eye's projection centre (where that eye looks straight ahead) and moved only as far as it takes to stay inside the image.
+// pixels), centred and zoomed by the crop rule (`visual.desktop_window_crop`, desktopWindowCropPlan) and moved only as far as it takes to stay inside the image.
+// `visual.desktop_window_vertical_shift` then moves it up or down from there (desktopWindowCrop).
 enum class DesktopWindowAspect : uint8_t { Full = 0, Square, FourThree, SixteenTen, SixteenNine, TwentyOneNine };
 inline DesktopWindowAspect desktopWindowParseAspect(const char* text, bool* known = nullptr) {
     if (known) *known = true;
@@ -356,24 +357,61 @@ inline void desktopWindowShapes(DesktopWindowAspect a, DesktopWindowMode mode, c
         }
     }
 }
-// Where an eye looks straight ahead in its image, from the field of view the image's pixels cover: angles are {left, right, up, down} in radians as OpenXR gives them (left and
-// down negative). u = -tan(left) / (tan(right) - tan(left)) from the image's left, v = tan(up) / (tan(up) - tan(down)) from its top. False when the angles are not a field of view.
-inline bool desktopWindowProjectionCentre(const float* angles, double* u, double* v) {
-    if (!angles) return false;
-    for (int i = 0; i < 4; ++i) {
-        if (!std::isfinite(angles[i]) || std::fabs(angles[i]) >= 1.5707) return false;
+// ---- the crop rule (round 8) ----
+// `visual.desktop_window_crop`: how a chosen shape is cut out of each eye. `center`: the shape around the middle of the eye's bounds sub-rect (the texture's centre), no zoom.
+// `native` (the default): what Elite's own mirror does in VR, as read from build 334925 (analysis\decomp\verify_20261028_vr_mirror_crop.txt; Stereoscopic_FrameCombineNode::Render at
+// RVA 0x28A4200). Elite shows the LEFT eye only and reads no field of view. Its layout mode is picked by whether the headset was served a hidden-area mesh (SetStereoMode,
+// RVA 0x2874920): none is mode 7, the shape around the texture's centre (0.5, 0.5), the same as `center`; a mesh is mode 9, zoomed 1.32 times (the float at RVA 0x5E86000)
+// and centred at u 0.515 (0.5 - 0.5 * -0.03, the float at RVA 0x5E86004; v stays 0.5). The game never shows the right eye, and the two eyes' masks are mirror images, so EDVR
+// mirrors the left eye's centre for the right eye: u 0.485. `full` (no shape) is never cropped or zoomed by either rule.
+enum class DesktopWindowCropRule : uint8_t { Native = 0, Center };
+// The key's words: `native` (the default and every unknown word) or `center`.
+inline DesktopWindowCropRule desktopWindowParseCropRule(const char* text, bool* known = nullptr) {
+    if (known) *known = true;
+    if (!text || !*text || dwdetail::sameWord(text, "native")) return DesktopWindowCropRule::Native;
+    if (dwdetail::sameWord(text, "center")) return DesktopWindowCropRule::Center;
+    if (known) *known = false;
+    return DesktopWindowCropRule::Native;
+}
+inline const char* desktopWindowCropRuleName(DesktopWindowCropRule rule) { return rule == DesktopWindowCropRule::Center ? "center" : "native"; }
+constexpr double kDwMirrorZoom = 1.32;                                  // Elite's zoom in mode 9 (float at RVA 0x5E86000)
+constexpr double kDwMirrorPan = -0.03;                                  // Elite's pan in mode 9 (float at RVA 0x5E86004): scale-space offset over scale, so the centre is 0.5 - 0.5 * pan
+constexpr double kDwMirrorCentreU = 0.5 - 0.5 * kDwMirrorPan;           // 0.515, the left eye's centre in mode 9
+// The centre (fractions of the eye's bounds sub-rect from its start) and the zoom of one eye's crop. eye is 0 for the left, 1 for the right. Zoom 1 is none.
+struct DwCropPlan {
+    double zoom = 1.0;
+    double u = 0.5, v = 0.5;
+    bool zoomed = false;
+};
+inline DwCropPlan desktopWindowCropPlan(DesktopWindowCropRule rule, bool meshServed, unsigned eye) {
+    DwCropPlan plan;
+    if (rule == DesktopWindowCropRule::Native && meshServed) {
+        plan.zoom = kDwMirrorZoom;
+        plan.u = eye == 0 ? kDwMirrorCentreU : 1.0 - kDwMirrorCentreU;
+        plan.zoomed = true;
     }
-    const double l = std::tan(static_cast<double>(angles[0])), r = std::tan(static_cast<double>(angles[1]));
-    const double t = std::tan(static_cast<double>(angles[2])), b = std::tan(static_cast<double>(angles[3]));
-    if (!(r > l) || !(t > b)) return false;
-    *u = -l / (r - l);
-    *v = t / (t - b);
-    return std::isfinite(*u) && std::isfinite(*v);
+    return plan;
+}
+// The crop line's words for the rule: `center: texture centre, no zoom`; `native: hidden-area mesh served no, as the game, no mesh`;
+// `native: hidden-area mesh served yes, as the game, mesh: 1.32x at u 0.515` (u 0.485 for the right eye).
+inline int desktopWindowCropRuleText(char* out, size_t size, DesktopWindowCropRule rule, bool meshServed, unsigned eye) {
+    if (rule == DesktopWindowCropRule::Center) return std::snprintf(out, size, "center: texture centre, no zoom");
+    const DwCropPlan plan = desktopWindowCropPlan(rule, meshServed, eye);
+    if (!plan.zoomed) return std::snprintf(out, size, "native: hidden-area mesh served no, as the game, no mesh");
+    return std::snprintf(out, size, "native: hidden-area mesh served yes, as the game, mesh: %.2fx at u %.3f", plan.zoom, plan.u);
 }
 // The crop: the bounds {uMin, vMin, uMax, vMax} of the largest rectangle of the target shape (width over height, in pixels) inside the bounds sub-rect of a texW x texH texture,
 // centred on (u, v) (fractions of the sub-rect from its start, where haveCentre; else its middle) and kept inside it. A flipped sub-rect stays flipped. A target of 0 leaves the
-// bounds as they are.
-inline void desktopWindowCrop(const float bounds[4], uint32_t texW, uint32_t texH, double target, bool haveCentre, double u, double v, float out[4]) {
+// bounds as they are. A zoom above 1 (round 8, the native rule with a hidden-area mesh) divides the crop's width and height by it, so it shows that fraction of the rectangle the
+// rule would have shown, around the same centre.
+//
+// THE VERTICAL SHIFT (round 7, a whole number of percent, held to -100..100). After the default position is found (centred, then kept inside), the crop moves a fraction of the
+// way from there to the highest position it can have (its top edge at the picture's top; positive values) or to the lowest (its bottom edge at the picture's bottom; negative
+// values): 0 changes nothing, +-100 reach the edges whatever the default was, and a crop that fills the picture's height has no travel and does not move. "Up" is toward the top of
+// the picture as the viewer sees it, which is where the draw puts the sub-rect's start (t = 0 is bounds[1], the vMin side, so for a flipped sub-rect the top is the side the
+// bounds' vMin names, not the texture's first row). The same shift goes to both eyes; the horizontal position is unchanged.
+inline void desktopWindowCrop(const float bounds[4], uint32_t texW, uint32_t texH, double target, bool haveCentre, double u, double v, float out[4], int verticalShift = 0,
+                              double zoom = 1.0) {
     for (int i = 0; i < 4; ++i) out[i] = bounds[i];
     if (!(target > 0)) return;
     const double du = static_cast<double>(bounds[2]) - bounds[0], dv = static_cast<double>(bounds[3]) - bounds[1];
@@ -382,9 +420,17 @@ inline void desktopWindowCrop(const float bounds[4], uint32_t texW, uint32_t tex
     double cw = w, ch = h;
     if (w / h > target) cw = h * target;
     else ch = w / target;
+    if (zoom > 1.0 && std::isfinite(zoom)) {
+        cw /= zoom;
+        ch /= zoom;
+    }
     const double cx = haveCentre ? u * w : w * 0.5, cy = haveCentre ? v * h : h * 0.5;
     double left = cx - cw * 0.5, top = cy - ch * 0.5;
     left = left < 0 ? 0 : left > w - cw ? w - cw : left;
+    top = top < 0 ? 0 : top > h - ch ? h - ch : top;
+    const int shift = verticalShift < -100 ? -100 : verticalShift > 100 ? 100 : verticalShift;
+    if (shift > 0) top -= top * (shift / 100.0);                          // toward the highest position: the top edge at the picture's top
+    else if (shift < 0) top += (h - ch - top) * (-shift / 100.0);        // toward the lowest: the bottom edge at the picture's bottom
     top = top < 0 ? 0 : top > h - ch ? h - ch : top;
     out[0] = static_cast<float>(bounds[0] + (left / w) * du);
     out[1] = static_cast<float>(bounds[1] + (top / h) * dv);

@@ -3981,7 +3981,7 @@ __declspec(noinline) void crispHudTonemapReissue(ID3D11DeviceContext* self, char
         GpuCensusScope census(self, GpuCensusSection::FrameUiLayerReissues);
         census.markIssued();   // the tonemap re-issue: its scope opens only when the begin admitted the draw
         pureDrawReissue(self, kind, count, instances, args);
-        // fix.sharp_weapons: the weapons' light is re-issued through the same draw before the HUD's (and, matched, twice: the scene alone,
+        // The weapons fire: the weapons' light is re-issued through the same draw before the HUD's (and, matched, twice: the scene alone,
         // then the scene with the light); the layer binds each step's HDR source and blend, and says when no step is left.
         while (uiLayerCrispToneNext(self)) pureDrawReissue(self, kind, count, instances, args);
         uiLayerCrispToneEnd(self);
@@ -4083,7 +4083,7 @@ __declspec(noinline) void curvedScreenSwallowed(ID3D11DeviceContext* self, DrawV
 __declspec(noinline) UiLayerFamily uiLayerFamilyOf(State* s, char kind, UINT count) {
     UiFamilyFacts f;
     f.targetKind = uiLayerTargetKind();
-    // fix.ui_quality off with fix.sharp_weapons on: the layer is live for the weapons fire alone, which is drawn into the lit HDR target
+    // fix.ui_quality off with the weapons fire on: the layer is live for the weapons fire alone, which is drawn into the lit HDR target
     // (kind 1). The post-tonemap target's interface rules (and their facts, probes and census) belong to fix.ui_quality.
     if (f.targetKind == 2 && !uiLayerQualityLive()) return UiLayerFamily::kNone;
     f.vs = bindingShaderHash(BindSlot::Vs);
@@ -4096,7 +4096,7 @@ __declspec(noinline) UiLayerFamily uiLayerFamilyOf(State* s, char kind, UINT cou
     // F26: the on-foot HUD's two vertex shaders are named by their pixel shader too (uiOnFootHudMatch), only while native stereo is on foot.
     else if (f.targetKind == 1 && f.nativeOnFoot && uiOnFootHudVs(f.vs))
         f.ps = bindingShaderHash(BindSlot::Ps);
-    else if (f.targetKind == 1 && (weaponsFireVs(f.vs) || shieldRefractVs(f.vs)))  // fix.sharp_weapons: the pair is the key too
+    else if (f.targetKind == 1 && (weaponsFireVs(f.vs) || shieldRefractVs(f.vs)))  // The weapons fire: the pair is the key too
         f.ps = bindingShaderHash(BindSlot::Ps);
     if (f.targetKind == 2) {
         // ui_depth's exclude list (the null-output mesh B018D143700AB803,

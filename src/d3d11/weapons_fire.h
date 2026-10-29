@@ -1,6 +1,6 @@
-// The weapons-fire draws fix.sharp_weapons takes into its own additive HDR layer (docs/dlss-blur-elements-2026-10-14.md, "Design,
-// 2026-10-16: weapons fire after the upscale" and its "Built" entry): their shader pairs, the jitter-cancel table, the A/B blend key's
-// words and the plan of the tonemap re-issues, in one place, pure, for the family rule (ui_layer_math.h), the draw hook (vscreen.cpp),
+// The weapons-fire draws the weapons layer takes into its own additive HDR layer (docs/dlss-blur-elements-2026-10-14.md, "Design,
+// 2026-10-16: weapons fire after the upscale" and its "Built" entry): their shader pairs, the jitter-cancel table and the plan of the
+// tonemap re-issues, in one place, pure, for the family rule (ui_layer_math.h), the draw hook (vscreen.cpp),
 // the layer (ui_layer.cpp) and the rigs (tools/sharp_weapons_test, tools/ui_quality_test).
 //
 //   BEAMS AND BOLTS: vs 1F17BF54DB6EE407 / ps A75C1DB6562B8CA7. DrawInstanced-class 4-vertex strips, SRC_ALPHA / ONE, depth GREATER with
@@ -69,30 +69,6 @@ inline bool weaponsLayerDropped(uint64_t contentSeq, uint32_t draws, uint64_t pu
     return contentSeq != 0 && draws != 0 && publishedSeq != contentSeq;
 }
 
-// fix.sharp_weapons = on | plain | off. One key for the whole feature (the weapons fire, the shield strike's additive part and the shield ripple):
-//   on:    the layer's weapons light reaches the picture by tonemap difference, T(F_up + L) - T(F_up), added onto the upscaled picture: the light is
-//          tonemapped WITH the scene it lands on, so it is as bright as the game would have drawn it. The old spellings of on (true, yes, 1) read as on.
-//   plain: T(L) added: exact over black space, too bright over a lit background (a planet, a star), where the tonemap compresses.
-//   off:   stock, everything drawn in the scene as the game draws it (false, no, 0 read as off).
-// Anything else reads as on, and says so.
-enum class SharpBlend : uint8_t { kMatched = 0, kPlain };
-enum class SharpWeapons : uint8_t { kOn = 0, kPlain, kOff };
-inline SharpWeapons sharpWeaponsParse(const char* text, bool* recognized) {
-    if (recognized) *recognized = true;
-    if (text) {
-        char low[16] = {};
-        for (size_t i = 0; i + 1 < sizeof(low) && text[i]; ++i) low[i] = static_cast<char>(text[i] >= 'A' && text[i] <= 'Z' ? text[i] - 'A' + 'a' : text[i]);
-        if (std::strcmp(low, "on") == 0 || std::strcmp(low, "true") == 0 || std::strcmp(low, "yes") == 0 || std::strcmp(low, "1") == 0) return SharpWeapons::kOn;
-        if (std::strcmp(low, "plain") == 0) return SharpWeapons::kPlain;
-        if (std::strcmp(low, "off") == 0 || std::strcmp(low, "false") == 0 || std::strcmp(low, "no") == 0 || std::strcmp(low, "0") == 0) return SharpWeapons::kOff;
-    }
-    if (recognized) *recognized = false;
-    return SharpWeapons::kOn;
-}
-inline bool sharpWeaponsTakes(SharpWeapons m) { return m != SharpWeapons::kOff; }
-inline SharpBlend sharpWeaponsBlend(SharpWeapons m) { return m == SharpWeapons::kPlain ? SharpBlend::kPlain : SharpBlend::kMatched; }
-inline const char* sharpBlendName(SharpBlend b) { return b == SharpBlend::kPlain ? "plain" : "matched"; }
-
 // ----------------------------------------------------------------- the tonemap re-issues
 //
 // Per eye-frame the layer re-issues the game's tonemap draw (its exposure, LUT and b2 untouched) over the 8-bit layer E once for every
@@ -116,9 +92,9 @@ struct TonePlan {
     bool coverage = false;    // the HUD's coverage pass runs after the last step (E.a = H.a)
 };
 
-// hud: the HDR HUD layer holds this frame's draws; weapons: the weapons layer does; mode: the key; matchedReady: the scratch and the
-// source pass exist (when they do not, the frame falls back to the plain add, counted).
-inline TonePlan sharpTonePlan(bool hud, bool weapons, SharpBlend mode, bool matchedReady) {
+// hud: the HDR HUD layer holds this frame's draws; weapons: the weapons layer does; matchedReady: the scratch and the source pass exist
+// (when they do not, the frame falls back to the plain add, counted).
+inline TonePlan sharpTonePlan(bool hud, bool weapons, bool matchedReady) {
     TonePlan p;
     if (!weapons) {
         if (hud) {
@@ -128,7 +104,7 @@ inline TonePlan sharpTonePlan(bool hud, bool weapons, SharpBlend mode, bool matc
         return p;
     }
     p.clearEye = true;
-    if (mode == SharpBlend::kMatched && matchedReady) {
+    if (matchedReady) {
         p.sourcePass = true;
         p.steps[p.count++] = ToneStep::kWeaponsBase;
         p.steps[p.count++] = ToneStep::kWeaponsLit;

@@ -951,7 +951,7 @@ static void selfTest() {
         }
     }
 
-    // fix.sharp_weapons' source pass (src/d3d11/sharp_weapons_shaders.h): new, held to its own contract -- the symbols, source names, entry, profile and flags, the
+    // The weapons fire's source pass (src/d3d11/sharp_weapons_shaders.h): new, held to its own contract -- the symbols, source names, entry, profile and flags, the
     // text each compiles, the vertex stage (SV_VertexID in, position and UV out, no resource) and the pixel stage (the one texture at t0, two render targets, no
     // constant buffer and no sampler: the filter is made of Loads, so nothing of the game's sampler state matters).
     {

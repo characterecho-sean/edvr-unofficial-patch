@@ -86,6 +86,7 @@
 #include "../../src/d3d11/flat_ui_layer_math.h"    // the flat layer's adapter rules
 #include "../../src/d3d11/flat_star_glow_math.h"   // visual.star_glow: the pair table, the run machine, the window line
 #include "../../src/d3d11/vr_star_glow_math.h"     // visual.star_glow in the headset: the mode, the first level, the per-H slots and run, the lines
+#include "../../src/d3d11/vr_hud_glow_math.h"      // the HUD's bloom in the headset: the mode, the window, the lines
 #include "../../src/d3d11/orbital_width.h"  // the orbit lines' width decision, for the panel factor's Supersampling term
 #include "../../src/d3d11/ui_layer_seed.h"
 #include "../../src/d3d11/ui_layer_seed_census.h"
@@ -3954,6 +3955,7 @@ void testWriteBack(Gpu& g) {
 #include "ui_tone_scene_test.h"
 #include "ui_star_glow_test.h"
 #include "ui_vr_star_glow_test.h"
+#include "ui_vr_hud_glow_test.h"
 
 // 2026-10-13 instruments: the seed reasons as counters (ui_layer_seed_census.h's tallyUiSeedReasons), one per bit, and the name table.
 void testSeedReasonTally() {
@@ -3984,6 +3986,7 @@ int main(int argc, char** argv) {
         testGlowFeedFilter();
         starglowtest::testAll();
         vrstarglowtest::testAll();
+        vrhudglowtest::testAll();
         std::printf("ui_quality_test --flat-cpu: %u checks, %u failures\n", g_checks, g_fails);
         return g_fails ? 1 : 0;
     }
@@ -4040,6 +4043,7 @@ int main(int argc, char** argv) {
     tonescene::testAll();
     starglowtest::testAll();
     vrstarglowtest::testAll();
+    vrhudglowtest::testAll();
     Gpu g;
     if (!setup(g, hardware)) {
         check(false, "a device and the production composite shader");

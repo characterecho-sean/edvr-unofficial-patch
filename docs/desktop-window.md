@@ -2,51 +2,62 @@
 
 ## Status
 
-- **State (2026-10-28):** rounds 1 to 4 FLOWN OK on Steam (`edvr_gfx_20261028_161013.log`,
-  `_164251.log`, `_170329.log`; Sean confirmed the hidden cursor). Round 5 (the game keeps its
-  mouse lock) ON MAIN d35d70bb. **Round 6 FLOWN OK, ON MAIN** (`edvr_gfx_20261028_192619.log`,
-  Sean: looks good; `--health` OK): its own menu page, two new keys, the centre crop,
-  borderless. Window and borderless switched live both ways; the 16:9 crop centred on the
-  field of view's straight-ahead point (right eye u 0.4108, left u 0.5892, v 0.5000 on the
-  Pimax). Tester zip `dist\edvr-desktop-window-<commit>-dlls.zip`. Three live keys in `[visual]`, all on VR's **Desktop window**
-  page (right after Visual): `visual.desktop_window` (`game` | `left_eye` | `right_eye` |
+- **State (2026-10-28):** rounds 1 to 8 ON MAIN. **Round 8 FLOWN OK on the Pimax**
+  (`edvr_gfx_20261028_215040.log`): the rule switched live 22 times, `hidden-area mesh served
+  no, as the game, no mesh`, so native equals center there, as expected. OPEN: native's mesh
+  path (1.32x at u 0.515) is flown on no headset; a tester with a mesh headset compares it with
+  the game's own mirror. Rounds 1 to 7 FLOWN OK. Five live keys in `[visual]`, on VR's **Desktop
+  window** page (after Visual): `visual.desktop_window` (`game` | `left_eye` | `right_eye` |
   `both_eyes`, default `game`), `desktop_window_aspect` (`full` | `1:1` | `4:3` | `16:10` |
-  `16:9` | `21:9`, default `full`; the ':' values pass the schema and the ini parser as they
-  are), `desktop_window_style` (`window` | `borderless`, default `window`). VR only. No
-  temporary keys.
+  `16:9` | `21:9`, default `full`), `desktop_window_crop` (`native` | `center`, default
+  `native`), `desktop_window_vertical_shift` (-100 to 100, default 0), `desktop_window_style`
+  (`window` | `borderless`, default `window`). VR only. No temporary keys.
 - **What it does:** while Elite is in VR with 3D on, EDVR makes Elite's desktop window a
-  framed, movable, resizable window (or, in `borderless`, the whole monitor) and fills it with
-  EDVR's finished eye image, skips Elite's own drawing into it, and hides the cursor over the
-  picture while the window has focus. The game's mouse lock is untouched. At 3D off the window
-  is restored.
-- **Round 6, the shape:** `full` is the picture as before (each eye's bounds sub-rect, both eyes
-  side by side). Any other value is the whole picture's shape; with both eyes each gets half the
-  width (16:9 is two 8:9 halves). Each eye is cropped to the largest rectangle of its shape inside
-  its bounds sub-rect, centred on where that eye looks straight ahead (u = -tan(left) /
-  (tan(right) - tan(left)), v = tan(up) / (tan(up) - tan(down)) of the field of view its pixels
-  cover), moved only as far as it takes to stay inside the image. The field of view comes with
-  each eye: the export is now **version 2** (`noteEye` carries the four angles of
-  `frameContentViews[eye].fov`, the projection the treated pixels hold, narrowed by any trim); no
-  field of view (or a version 1 pair) centres the crop on the middle of the bounds, said once.
-- **Round 6, the style:** `window` is as before, snapping to the chosen shape (a shape change
-  alone keeps the client height and top-left, then clamps). `borderless` is full-screen
-  borderless: popup style (`0x94020000` and `0x14CC0000` both become `0x94000000`), the whole
-  `rcMonitor` of the window's monitor, no snapping and no user moves, the picture fitted inside
-  with black bars. A live change of style or shape is not a fight: our style is worked out
-  again, the fight state is forgotten and the change is asked for. Back to `window`: the last
-  settled window rect if it fits, at the current shape with its client height, clamped to the
-  work area; else the largest fit, centred.
-- **First flight of round 6 must show:** the Desktop window page after Visual with three rows;
-  `aspect`/`style` lines at start and on each change; 16:9 with `left_eye` cropping around the
-  eye's centre (the `crop` line: u and v off 0.5 for an off-centre headset) and with `both_eyes`
-  two 8:9 halves; `borderless` filling the monitor; going back to `window`; the game's own mouse
-  lock and the hidden cursor still working in both styles; the restore at 3D off.
+  framed, movable, resizable window (or, in `borderless`, the whole monitor) showing EDVR's
+  finished eye image, skips Elite's own drawing into it and hides the cursor over it while it
+  has focus. The game's mouse lock is untouched. At 3D off the window is restored.
+- **Round 6, shape and style:** a shape but `full` crops each eye (both eyes: half the width
+  each) to the largest rectangle of that shape in its bounds sub-rect, kept inside the image;
+  the crop rule (round 8) centres it. `window` snaps to the shape; `borderless` is the whole
+  `rcMonitor` (popup style `0x94000000`), the picture fitted with black bars. A live change of
+  style or shape is not a fight. Back to `window`: the last settled rect if it fits.
+- **Round 7, the vertical shift:** `desktop_window_vertical_shift` moves the crop up (+) or
+  down (-): from the default position, a fraction of the way to the highest (top edge at the
+  picture's top) or lowest position; 0 changes nothing, +-100 reach the edges; no room, no
+  move. "Up" is the side the window shows at its top (`bounds[1]`). Both eyes alike; always
+  vertical, under either rule. Logs `vertical shift N` (first read, each change, `crop` line).
+- **Round 8, the crop rule** (`desktop_window_crop`; menu "Same as the game's mirror" |
+  "Centre"): how a chosen shape is cut; `full` is never cropped or zoomed. `center`: the shape
+  around the middle of the eye's bounds sub-rect, no zoom. `native` is what Elite's own mirror
+  does, read from the game (build 334925, analysis 82dc637,
+  `analysis\decomp\verify_20261028_vr_mirror_crop.txt`; `Stereoscopic_FrameCombineNode::Render`,
+  RVA 0x28A4200, shows the LEFT eye only and reads no field of view): no hidden-area mesh
+  served is mode 7, the same as `center`; a mesh is mode 9, width and height divided by 1.32
+  (RVA 0x5E86000) and centred at u 0.515, v 0.5 (pan -0.03, RVA 0x5E86004). The game never
+  shows the right eye; EDVR mirrors it (u 0.485, the masks being mirror images): its own choice.
+- **Round 8, the mesh flag.** The projection-centre crop (round 6) and the field of view in
+  the handoff (export version 2) are retired: ruled out as the default, because the game's
+  mirror crops around the texture centre and Sean chose to match it. Export **version 3**:
+  `noteEye` carries whether the runtime has served the game a hidden-area mesh; the client asks
+  3 then 1 (1: no flag, no mesh), 2 is refused. The game's test (`0x8D2BD0` -> `0x4E45C0` ->
+  `0x4E45A0`, note R6): `(obj+0x28 != 0) || (obj+0x30 != 0)`, the counts `0x4E4910` stores
+  from `GetHiddenAreaMesh(eye)` only when vertex data comes back: either eye. `OpenVRSystem`
+  reports every answer with data (`noteHiddenMeshServed`, not the rate-limited trace); the host
+  keeps that eye's bit, as Elite keeps its counts. No query answered: no mesh.
+- **Round 8 logs:** `crop rule R` (first read), `(was Q)` (each change); per activation and eye
+  `crop S, left eye, rule native: hidden-area mesh served yes, as the game, mesh: 1.32x at u
+  0.515, vertical shift N; crop bounds ...` (`no, as the game, no mesh`; `center: ...`).
+- **First flight of round 8 must show:** the crop row between shape and shift; with no mesh
+  (the Pimax) `native` equal to `center`; with one, 1.32x at u 0.515 / 0.485; a live switch.
+  `census_cb_watch = 01C3B84C82172B56`, `census_cb_slot = 2` shows Elite's own numbers.
+- **Unsettled:** for a shape narrower than the eye (the both-eyes halves of 1:1, 4:3) Elite
+  letterboxes the whole eye; EDVR cuts a tall rectangle, as `center` does. Elite reads the mesh
+  once; EDVR follows a later answer at once.
 - **Ruled out:** a stale binding shadow taking scene draws for buffer draws; H2 and H3 of
-  round 3 (see "Flight history"). **Round 5:** Elite's `ClipCursor` is never touched; the
-  cursor stays confined while the game holds it, so moving or resizing the window means
-  switching away from the game first.
-- Flights 1 to 4, the skipped-draw census and the round 3 and 4 detail are under "Flight
-  history" below the design.
+  round 3 (see "Flight history"); Elite's `ClipCursor` is never touched (round 5), so moving
+  the window means switching away from the game first; centring on the projection centre
+  (round 8).
+- Flights 1 to 4, the draw census and rounds 3 and 4: "Flight history" below the design.
 
 ## Design
 
@@ -142,11 +153,17 @@
 - **The picture and the style (round 6)** (`desktop_window.cpp`, `desktop_window_math.h`).
   `desktopWindowShapes` turns the eyes' pixel sizes into the sizes the layout uses (`full`: as
   they are; else height-1 halves or wholes of the chosen ratio, so both halves are exactly
-  equal); `desktopWindowProjectionCentre` and `desktopWindowCrop` give each eye's crop bounds,
+  equal); `desktopWindowCropPlan` (round 8: the rule, the mesh flag, the eye) gives each eye's
+  centre and zoom and `desktopWindowCrop` its crop bounds,
   which the draw hands to the existing shader as its bounds (so the filter's quarter-pixel taps
-  and the half-texel clamp work on the crop). A flipped sub-rect stays flipped. The runtime asks
-  for version 2 of `edvrAcquireDesktopWindow` and falls back to 1; the graphics half answers
-  either. `desktopWindowStyleFor(mode, gameStyle)` picks the framed style or
+  and the half-texel clamp work on the crop). A flipped sub-rect stays flipped. The vertical
+  shift (round 7) is `desktopWindowCrop`'s last parameter: after the default top is found and
+  clamped, `top -= top * shift / 100` (shift > 0) or `top += (h - ch - top) * -shift / 100`
+  (shift < 0), clamped again, in the crop's own t-space (t = 0 is the draw's top), so both eyes
+  and a flipped sub-rect take the same rule. The zoom (round 8) divides the crop's width and
+  height before it is centred; `full` (target 0) returns before it. The runtime asks for version 3
+  of `edvrAcquireDesktopWindow` (`noteEye` carries the mesh flag) and falls back to 1; the graphics
+  half answers either, and refuses 2. `desktopWindowStyleFor(mode, gameStyle)` picks the framed style or
   `desktopWindowBorderlessStyle`; a setting change recomputes `S.ourStyle`, clears
   `styleSeenOurs`, drops a request in flight and asks at once (`activeStyle`/`activeAspect`
   against the settings). Borderless asks for `desktopWindowBorderlessPlan(rcMonitor)` and
@@ -194,6 +211,13 @@
   pushed down P`.
 - **Round 5:** the release of the game's lock was removed (see Status); the cursor line lost its
   clip counts, the install line lists three hooks.
+- **Round 6 (`edvr_gfx_20261028_192619.log`):** the Desktop window page after Visual with three
+  rows; `aspect` and `style` lines at the start and on each change; 16:9 cropped around each
+  eye's centre (right eye u 0.4108, left u 0.5892, v 0.5000) and two 8:9 halves with
+  `both_eyes`; `borderless` filling the monitor and back to `window`, live both ways; the mouse
+  lock and the hidden cursor working in both styles; restored at 3D off. `--health` OK. (The
+  crop centre was the projection centre then; round 8 retired that for Elite's own rule.)
+- **Round 7:** the vertical shift flown OK (Sean: looks good).
 
 ## Decisions the briefs left open
 
