@@ -52,6 +52,12 @@ inline void scopeZoomDepthSet(int eye, ID3D11ShaderResourceView* srv, uint32_t w
 void scopeZoomPublish(const ScopeZoomFrame& frame);
 // The door: true while a press is being counted or rays are in flight (so a log of presses is complete); a frame with the lens idle costs the door nothing else.
 bool scopeZoomWanted();
+// The scope's gunsight mark (ui_layer_math.h kScopeMark): true while the last published frame qualifies for the lens and is no older than the door takes a c, which is how the door
+// reads it. Asked by the draw path for the mark's one pair, so the family is named only for a sight the lens magnifies.
+bool scopeZoomMarkArmed();
+// The layer took a mark draw out of the scene for an eye (0 left, 1 right) in the temporal sequence seq: counted for the press line, and the right eye's sequence is what the door
+// compares its own against to count the armed frames that had no mark draw.
+void scopeZoomNoteMark(uint32_t eye, uint64_t seq);
 // A press begins (zero the door's counters) and ends (the counters, finished, for the press line).
 void scopeZoomPressBegin(uint32_t press);
 void scopeZoomPressTake(scopezoom::LensDoorStats* out);

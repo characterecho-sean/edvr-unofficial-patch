@@ -668,7 +668,10 @@ enum class UiLayerFamily : uint8_t {
                    // no older family's number moves (kOnFootHud, the on-foot HUD's, sits ahead of it).
     kShieldRipple,  // the shield-strike refraction (shield_ripple.h: vs 820E5C131B99361D with ps 6EAA86EFE135B2D4): the game's own draw, taken out of the scene and
                     // re-issued through the HDR layer route into the eye's R32G32_FLOAT displacement layer D (t0 swapped for a UV ramp), applied at the door after RCAS.
-                    // Governed by its own half of the layer, beside the weapons fire's. Last in the enum.
+                    // Governed by its own half of the layer, beside the weapons fire's.
+    kScopeMark,     // the optical scope's AR gunsight mark (A2, docs\design-vr-scope-magnification-2026-10-28.md section 9): vs 025B4B9FF54622ED with ps 46F92DC71BF8DFA5 drawing 6 indices
+                    // in 1 instance with the readout atlas bound, named only while the scope lens is armed for the frame (UiFamilyFacts.scopeMark). Taken out of the scene into the
+                    // eye's HDR HUD layer, which the composite lays over the picture after the lens, so the mark keeps its own size. fix.ui_quality's half governs it. Last in the enum.
     kCount
 };
 
@@ -692,6 +695,7 @@ inline const char* uiLayerFamilyName(UiLayerFamily f) {
         case UiLayerFamily::kOnFootHud: return "on-foot HUD";
         case UiLayerFamily::kWeaponsFire: return "weapons fire";
         case UiLayerFamily::kShieldRipple: return "shield ripple";
+        case UiLayerFamily::kScopeMark: return "scope mark";
         default: return "none";
     }
 }
@@ -706,7 +710,7 @@ inline bool uiLayerFamilyTakesHdr(UiLayerFamily f) {
            f == UiLayerFamily::kHoloGeneric || f == UiLayerFamily::kOrbitLines ||
            f == UiLayerFamily::kSupercruiseBars || f == UiLayerFamily::kSpaceDust ||
            f == UiLayerFamily::kMapCanvas || f == UiLayerFamily::kMapSprite || f == UiLayerFamily::kOnFootHud ||
-           f == UiLayerFamily::kWeaponsFire || f == UiLayerFamily::kShieldRipple;
+           f == UiLayerFamily::kWeaponsFire || f == UiLayerFamily::kShieldRipple || f == UiLayerFamily::kScopeMark;
 }
 
 // Which half governs a family: the weapons fire is its own half, and so is the shield ripple (as a half of its own: `rippleOn` is its live state, with
@@ -881,6 +885,31 @@ inline bool uiOnFootHudMatch(uint64_t vs, uint64_t ps) {
     return false;
 }
 
+// A2: the scope's AR gunsight mark. The pair is the weapon and tool material's too (flat_weapon_footprint.h), so the pair is not the key: the mark is that pair drawing kScopeMarkIndices
+// indices in one instance (kind X or I) with the readout atlas bound. The atlas is the texture the weapon readout's composite (vs B10B032BDFD46700) samples: a learned interface
+// surface (ui_depth.cpp learns every texture the GUI renderer draws into), 3525x3133 in the dump census of edvr_gfx_20261028_173510, where the material samples BC-compressed
+// 1024x1024 textures. The family is named only while the scope lens is armed for the frame (scopeZoomMarkArmed).
+constexpr uint64_t kUiVsScopeMark = 0x025B4B9FF54622EDull, kUiPsScopeMark = 0x46F92DC71BF8DFA5ull;
+constexpr uint32_t kScopeMarkIndices = 6, kScopeMarkInstances = 1;
+inline bool uiScopeMarkShape(char kind, uint32_t indices, uint32_t instances) {
+    return (kind == 'X' || kind == 'I') && indices == kScopeMarkIndices && instances == kScopeMarkInstances;
+}
+// The mark's blend is ONE, DEST_ALPHA (the dump census, bl=12,7,1/2,7,1) into the lit R11G11B10_FLOAT eye target. That format has no alpha channel, so D3D11 reads its
+// destination alpha as 1 (tools\sharp_weapons_test destAlphaReproduction runs the blend on WARP) and the blend adds the mark's light to the scene; the layer's alpha is
+// transmittance, so the factor is rewritten to what the game's target gave it, here and nowhere else (every other family keeps destination-alpha factors refused).
+inline bool uiLayerFormatHasAlpha(uint32_t dxgiFormat) {
+    return dxgiFormat != 26 /* R11G11B10_FLOAT */ && dxgiFormat != 67 /* R9G9B9E5_SHAREDEXP */;
+}
+inline UiBlendRt uiLayerBlendDestAlphaOne(UiBlendRt b) {
+    const auto one = [](uint8_t& f) {
+        if (f == uiblend::kDestAlpha) f = uiblend::kOne;
+        else if (f == uiblend::kInvDestAlpha) f = uiblend::kZero;
+    };
+    one(b.src);
+    one(b.dst);
+    return b;
+}
+
 struct UiFamilyFacts {
     int targetKind = 0;           // uiLayerTargetKind: 0 no eye target, 1 not 8-bit UNORM, 2 post-tonemap
     uint64_t vs = 0, ps = 0;      // the bound shaders' hashes (ps asked only where the rule needs it)
@@ -888,6 +917,7 @@ struct UiFamilyFacts {
     bool panelSized = false;      // srv0IsPanelSized: the 2D screen's composite
     bool learnedSurface = false;  // a learned interface surface in PS slots 0..3
     bool nativeOnFoot = false;    // F26: fix.native_on_foot_sharp_hud is on, VR, and native stereo on foot (only VR's on-foot path sets it)
+    bool scopeMark = false;       // A2: the scope lens is armed for the frame and this draw is 6 indices in 1 instance with a learned surface (the readout atlas) bound
 };
 
 // How the rule reached its answer, for the family census (ui_layer.cpp).
@@ -958,6 +988,7 @@ inline UiLayerFamily uiLayerFamilyFor(const UiFamilyFacts& f, UiFamilyWhy* why =
                   (f.ps == 0xEA02FAC2BD6C643Cull || f.ps == 0xE95634B0F61D218Full)))
                   ? UiLayerFamily::kHoloGeneric
               : (f.nativeOnFoot && uiOnFootHudMatch(f.vs, f.ps)) ? UiLayerFamily::kOnFootHud
+              : (f.scopeMark && f.vs == kUiVsScopeMark && f.ps == kUiPsScopeMark) ? UiLayerFamily::kScopeMark
               : UiLayerFamily::kNone;
         if (out != UiLayerFamily::kNone) w = UiFamilyWhy::kDirect;
     } else if (f.excluded) {

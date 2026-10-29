@@ -357,11 +357,11 @@ inline LensEye lensEye(const double ndc[2], const float tan4[4], uint32_t w, uin
 }
 
 constexpr uint32_t kProbePoints = 4;
-// The angles named by the census line, and each point's direction in the eye's own right/up plane: c; 1.5 deg to the right; 4 deg up; 8 deg down and to the left (along the
-// diagonal, so the angle between c's ray and the point's is about 8 deg).
-constexpr double kProbeAnglesDeg[kProbePoints] = {0.0, 1.5, 4.0, 8.0};
-constexpr double kProbeDirX[kProbePoints] = {0.0, 1.0, 0.0, -0.70710678118654752};
-constexpr double kProbeDirY[kProbePoints] = {0.0, 0.0, 1.0, -0.70710678118654752};
+// The angles named by the census line, and each point's direction in the eye's own right/up plane: c; 0.9 deg straight below (where the scope's chevron sits); 1.5 deg above (glass
+// only); 4 deg beside, to the right (the frame).
+constexpr double kProbeAnglesDeg[kProbePoints] = {0.0, 0.9, 1.5, 4.0};
+constexpr double kProbeDirX[kProbePoints] = {0.0, 0.0, 0.0, 1.0};
+constexpr double kProbeDirY[kProbePoints] = {0.0, -1.0, 1.0, 0.0};
 struct ProbeSet {
     uint32_t n = 0;
     PixelProbePoint pt[kProbePoints];
@@ -577,8 +577,12 @@ inline void clampText(uint32_t mask, char* buf, size_t cap) noexcept {
         if (mask & (1u << i)) at += static_cast<size_t>(std::snprintf(buf + at, cap - at, "%s%u", at ? "," : "", i));
     if (at == 0) std::snprintf(buf, cap, "none");
 }
-// scope lens census (S0): the pixel probe was configured with the four points about c and armed; its own lines follow. first: the first run says the points stay.
-inline int formatCensusRun(char* buf, size_t n, uint32_t run, uint32_t press, const char* item, const char* scope, const ProbeSet& set, bool first) noexcept {
+// scope lens census (S0): the pixel probe was configured with the four points about c and armed; its own lines follow. first: the first run says the points stay. geometryEye: the eye
+// whose scene rows the points were worked out from (0 left, 1 right); probeEye: the eye the pixel probe's lines are about (its first-seen eye, 0). Each is printed with its physical
+// eye, so a probe that watches another eye than the one the points came from reads as such.
+inline const char* physicalEye(uint32_t eye) noexcept { return eye == 0 ? "L" : "R"; }
+inline int formatCensusRun(char* buf, size_t n, uint32_t run, uint32_t press, const char* item, const char* scope, const ProbeSet& set, bool first, uint32_t geometryEye = 0,
+                           uint32_t probeEye = 0) noexcept {
     int len = 0;
     char list[160] = {0}, clamp[24];
     size_t at = 0;
@@ -586,9 +590,9 @@ inline int formatCensusRun(char* buf, size_t n, uint32_t run, uint32_t press, co
         at += static_cast<size_t>(std::snprintf(list + at, sizeof(list) - at, "%s%.3f,%.3f", i ? ";" : "", static_cast<double>(set.pt[i].x), static_cast<double>(set.pt[i].y)));
     clampText(set.clamped, clamp, sizeof(clamp));
     appendf(buf, n, &len,
-            "scope lens census (S0): run %u press %u item %s scope %s eye R points %s at 0, 1.5, 4, 8 deg about c (x,y in 0..1 of the eye's target, y down; offsets are plane "
-            "angles from c's ray in the eye's scene rows; clamped to the target: %s); the pixel probe's lines follow",
-            run, press, itemText(item), scope ? scope : "unknown", list, clamp);
+            "scope lens census (S0): run %u press %u item %s scope %s eye %s points %s at 0, 0.9 below, 1.5 above, 4 beside deg about c (x,y in 0..1 of the eye's target, y down; offsets are "
+            "plane angles from c's ray in the eye's scene rows; clamped to the target: %s); probe eye %u is physical eye %s; the pixel probe's lines follow",
+            run, press, itemText(item), scope ? scope : "unknown", physicalEye(geometryEye), list, clamp, probeEye, physicalEye(probeEye));
     if (first) appendf(buf, n, &len, "; the probe keeps these points afterwards, so an eye dump taken later probes the same places (until the config reloads)");
     return finishLine(buf, n, len);
 }

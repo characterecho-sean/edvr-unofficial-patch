@@ -503,6 +503,7 @@ struct Draw {
     bool weapons = false;  // the weapons layer: with hdr, the draw goes to the eye's weapons layer instead of the HUD's
     uint64_t vsHash = 0;   // the decided draw's vertex shader (the weapons-fire pair table's key)
     bool ripple = false;   // the shield ripple: with hdr, the draw goes into the eye's displacement layer D, blend off, t0 swapped for the UV ramp
+    bool destAlphaOne = false;  // the scope mark: the target has no alpha channel, so the game's destination-alpha blend factors are read as 1 and 0 (uiLayerBlendDestAlphaOne)
     ID3D11ShaderResourceView* rippleSrv0 = nullptr;  // the game's t0, held while the ramp is bound (put back at restore)
     bool rippleSwapped = false;                      // the ramp is bound in its place
     bool reissue = false;  // the VR world route's re-issue of the 2D screen (the game's own draw lands in its eye): not a take
@@ -1995,7 +1996,7 @@ bool beginInner(ID3D11DeviceContext* ctx, int which) {
     ctx->OMGetBlendState(&bs, factor, &sampleMask);
     UiBlendRt game, conv;
     ID3D11BlendState* layerBlend = nullptr;
-    const UiBlendShape shape = shapeOf(bs, &game);
+    const UiBlendShape shape = shapeOf(bs, &game, g_draw.destAlphaOne);
     const bool converted = shape == g_draw.shape &&
                            (which ? uiLayerMultiplyBlend(game, &conv) : uiLayerConvertBlend(game, &conv));
     if (converted && rp) layerBlend = g_rip.blend.Get();   // D takes the game's own value: an overwrite, every channel, whatever the game's blend was
@@ -2299,6 +2300,7 @@ bool beginInner(ID3D11DeviceContext* ctx, int which) {
         ++g_win.redirected;
         ++g_sessionRedirected;
         noteTaken(g_draw.family, g_draw.eye, layerW, layerH);
+        if (g_draw.family == UiLayerFamily::kScopeMark) scopeZoomNoteMark(static_cast<uint32_t>(g_draw.eye), g_draw.seq);   // the press line's marks per eye
         // The on-foot maps gate gave the layer the 2D screen (a TAKE; the route's re-issue, where the game's own draw lands in
         // its eye, is not): this eye's picture is the layer's, and the door may run layer-only for it (uiLayerDoorLayerOnly).
         if (g_draw.family == UiLayerFamily::kScreen && !g_draw.hdr && !g_draw.reissue && detail::g_uiLayerMapsOn) {
@@ -2320,16 +2322,21 @@ bool beginInner(ID3D11DeviceContext* ctx, int which) {
     if (!familyEngaged && g_draw.vpCount && which == 0) {
         familyEngaged = true;
         const D3D11_VIEWPORT& gv = g_draw.vp[0];
+        // The scope mark is not in the weapons-fire jitter table, so it takes the cancel every other over-blend family takes (the decision's g_draw.jx): its vertex shader reads the
+        // scene camera rows the jitter is in (flat_projection_recipes.h gives the pair's material draw the camera at b1 row 270), which a flight's eye dump confirms.
+        const char* markJitter = g_draw.family == UiLayerFamily::kScopeMark
+                                     ? " Jitter: cancelled as for every over-blend family (the pair is not in the weapons-fire table); its matrices are taken to carry the eye's jitter."
+                                     : "";
         Log::get().note(
             "ui quality: layer: first %s draw in the %s eye's layer -- the game's viewport "
             "(%.1f, %.1f) %.1fx%.1f became (%.3f, %.3f) %.1fx%.1f, a jitter cancel of (%.3f, "
-            "%.3f) layer pixels.",
+            "%.3f) layer pixels.%s",
             uiLayerFamilyName(g_draw.family), g_draw.eye == 0 ? "left" : "right",
             static_cast<double>(gv.TopLeftX), static_cast<double>(gv.TopLeftY),
             static_cast<double>(gv.Width), static_cast<double>(gv.Height),
             static_cast<double>(vp[0].TopLeftX), static_cast<double>(vp[0].TopLeftY),
             static_cast<double>(vp[0].Width), static_cast<double>(vp[0].Height),
-            static_cast<double>(cx), static_cast<double>(cy));
+            static_cast<double>(cx), static_cast<double>(cy), markJitter);
     }
     if (!g_engageNoted && which == 0) {
         g_engageNoted = true;
@@ -3876,6 +3883,7 @@ bool uiLayerDecide(ID3D11DeviceContext* ctx, int familyInt, bool verdictForwards
     g_draw.hdr = false;
     g_draw.weapons = false;
     g_draw.ripple = false;
+    g_draw.destAlphaOne = false;
     g_draw.vsHash = 0;
     g_draw.reissue = false;
     g_draw.holoPsHash = 0; g_draw.holoOriginal = nullptr; g_draw.holoPatched = nullptr;
@@ -4003,7 +4011,10 @@ bool uiLayerDecide(ID3D11DeviceContext* ctx, int familyInt, bool verdictForwards
         UINT mask = 0;
         ctx->OMGetBlendState(&bs, factor, &mask);
         UiBlendRt game;
-        f.blend = shapeOf(bs, &game);
+        // The scope mark's blend reads destination alpha, which its alpha-less target gives as 1 (uiLayerBlendDestAlphaOne); no other family's blend is rewritten.
+        const bool destAlphaOne = family == UiLayerFamily::kScopeMark && !uiLayerFormatHasAlpha(g_tc.info.fmt);
+        f.blend = shapeOf(bs, &game, destAlphaOne);
+        g_draw.destAlphaOne = destAlphaOne;
         if (bs) bs->Release();
         // A multiply is drawn twice (the layer, then its transmittance): a
         // depth or stencil WRITE would then land twice in the layer's copy.
@@ -4099,6 +4110,15 @@ bool uiLayerDecide(ID3D11DeviceContext* ctx, int familyInt, bool verdictForwards
                                           : "",
                             (f.ds.tests() || f.ds.writes()) ? (std::string(" (") + ds + ")").c_str()
                                                             : "");
+                if (family == UiLayerFamily::kScopeMark) {   // the atlas the key found, once
+                    const int slot = uiDepthSampledSurfaceSlot();
+                    static const BindSlot kSrv[4] = {BindSlot::PsSrv0, BindSlot::PsSrv1, BindSlot::PsSrv2, BindSlot::PsSrv3};
+                    ResourceInfo atlas;
+                    const size_t at = std::strlen(detail);
+                    if (slot >= 0 && bindingResolve(bindingGet(kSrv[slot]), &atlas) && at + 1 < sizeof(detail))
+                        _snprintf_s(detail + at, sizeof(detail) - at, _TRUNCATE, "; the readout atlas %ux%u in PS slot %d (a learned interface surface), %s",
+                                    atlas.a, atlas.b, slot, destAlphaOne ? "ONE, DEST_ALPHA read as ONE, ONE on the alpha-less target" : "blend as the game's");
+                }
             }
         }
         for (auto* r : rtvs)

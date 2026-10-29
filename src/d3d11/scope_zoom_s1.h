@@ -32,31 +32,25 @@ constexpr double kLensRefMinDeg = 30.0, kLensRefMaxDeg = 90.0;
 constexpr int kLensScopeUnknown = 0, kLensScopeNo = 1, kLensScopeYes = 2;
 
 // The ADS FOV the game settles at per item and scope, degrees, from the flat flights (docs\design-vr-scope-magnification-2026-10-28.md, section 7: absolute per weapon, the same at
-// HumanoidFOV 56.327 and 64.752). 0 is unmeasured. An item matches on its stem, so Status.json's "$wpn_m_sniper_plasma_charged_name;" and the journal's "wpn_m_sniper_plasma_charged"
-// are one. Every other item, and every other scoped copy, has no lens.
+// HumanoidFOV 56.327 and 64.752). The table holds optical sights only (A2, section 9): a copy with an iron, reflex or holo sight has no entry and no lens. 0 is no value. An item
+// matches on its stem, so Status.json's "$wpn_m_sniper_plasma_charged_name;" and the journal's "wpn_m_sniper_plasma_charged" are one.
 struct LensEntry {
     const char* stem;
-    double bareDeg;     // the copy without a scope
-    double scopedDeg;   // the copy with one
+    double bareDeg;      // the copy without a scope, when its own sight is optical; 0: not an optical sight (the unscoped Eclipse)
+    double scopedDeg;    // the copy with a scope, measured; 0: unmeasured
+    double standInDeg;   // an unmeasured scoped copy takes this: its bare copy's FOV (the Eclipse's scope is the Aphelion's, and its bare copy is not optical, so the bare ADS FOV measured)
 };
 constexpr LensEntry kLensTable[] = {
-    {"m_sniper_plasma_charged", 35.0, 15.0},
-    {"m_assaultrifle_plasma_fauto", 48.0, 0.0},
-    {"m_assaultrifle_laser_fauto", 48.0, 0.0},
-    {"m_assaultrifle_kinetic_fauto", 48.0, 0.0},
-    {"m_submachinegun_laser_fauto", 50.0, 0.0},
-    {"m_submachinegun_kinetic_fauto", 50.0, 0.0},
-    {"m_shotgun_plasma_doublebarrel", 52.0, 0.0},
-    {"s_pistol_plasma_charged", 52.0, 0.0},
-    {"s_pistol_kinetic_sauto", 52.0, 0.0},
-    {"m_launcher_rocket_sauto", 52.0, 0.0},
-    {"s_pistol_laser_sauto", 52.0, 0.0},
+    {"m_sniper_plasma_charged", 35.0, 15.0, 0.0},       // M Executioner
+    {"m_assaultrifle_plasma_fauto", 48.0, 0.0, 48.0},   // M Oppressor
+    {"m_assaultrifle_laser_fauto", 48.0, 0.0, 48.0},    // TK Aphelion: the base sight is the ring scope
+    {"m_submachinegun_laser_fauto", 0.0, 0.0, 50.0},    // TK Eclipse: scoped only
 };
 constexpr size_t kLensTableItems = sizeof(kLensTable) / sizeof(kLensTable[0]);
 // The (item, scope) entries the table holds: the number the announce line states.
 inline uint32_t lensTableEntries() noexcept {
     uint32_t n = 0;
-    for (const LensEntry& e : kLensTable) n += (e.bareDeg > 0.0 ? 1u : 0u) + (e.scopedDeg > 0.0 ? 1u : 0u);
+    for (const LensEntry& e : kLensTable) n += (e.bareDeg > 0.0 ? 1u : 0u) + (e.scopedDeg > 0.0 || e.standInDeg > 0.0 ? 1u : 0u);
     return n;
 }
 
@@ -77,17 +71,21 @@ inline bool lensStem(const char* name, char* out, size_t cap) noexcept {
     out[n] = '\0';
     return true;
 }
-// The game's ADS FOV (degrees) for the held item and its scope state; false when the pair is not in the table. An unknown scope state is not in the table.
-inline bool lensAdsDeg(const char* itemName, int scope, double* deg) noexcept {
+// The game's ADS FOV (degrees) for the held item and its scope state; false when the pair is not an optical sight (not in the table). An unknown scope state is not an optical sight.
+// *fromBare is set when the FOV is the stand-in of an unmeasured scoped copy.
+inline bool lensAdsDeg(const char* itemName, int scope, double* deg, bool* fromBare = nullptr) noexcept {
     if (deg) *deg = kNaN;
+    if (fromBare) *fromBare = false;
     if (scope != kLensScopeNo && scope != kLensScopeYes) return false;
     char stem[64];
     if (!lensStem(itemName, stem, sizeof(stem))) return false;
     for (const LensEntry& e : kLensTable) {
         if (std::strcmp(stem, e.stem) != 0) continue;
-        const double v = scope == kLensScopeYes ? e.scopedDeg : e.bareDeg;
+        const bool standIn = scope == kLensScopeYes && !(e.scopedDeg > 0.0);
+        const double v = scope == kLensScopeNo ? e.bareDeg : standIn ? e.standInDeg : e.scopedDeg;
         if (!(v > 0.0)) return false;
         if (deg) *deg = v;
+        if (fromBare) *fromBare = standIn;
         return true;
     }
     return false;
@@ -105,17 +103,17 @@ inline double lensZoom(double refDeg, double adsDeg) noexcept {
 
 // ---- 2. the gate and the ease ------------------------------------------------------------------------------------------------------------------------------------------------
 // What a frame of the frame thread's tick came to. kIdle is every frame that asks nothing of the lens (the key off, not on foot, not in the sights, w under 1.0): nothing is counted.
-// The others are counted by the door under their reason; kQualifies frames are the ones the lens runs on.
-enum class LensVerdict : uint32_t { kIdle = 0, kQualifies = 1, kNoS = 2, kNotInTable = 3 };
+// The others are counted by the door under their reason; kQualifies frames are the ones the lens runs on (and the ones the scope's gunsight mark is taken out of the scene for).
+enum class LensVerdict : uint32_t { kIdle = 0, kQualifies = 1, kNoS = 2, kNotOptical = 3 };
 struct LensGateIn {
     bool keyOn = false, onFoot = false, adsActive = false, wFull = false;   // the key, native on foot, the sights up, the game's w at 1.0
-    bool tableHit = false;                                                   // the held (item, scope) is in the table
+    bool optical = false;                                                    // the held (item, scope) is an optical sight, in the table
     double m = kNaN;                                                         // its M against the reference FOV
     bool sFresh = false, cUsable = false;                                    // S not older than 250 ms; c through the right eye's scene rows
 };
 inline LensVerdict lensGate(const LensGateIn& g) noexcept {
     if (!g.keyOn || !g.onFoot || !g.adsActive || !g.wFull) return LensVerdict::kIdle;
-    if (!g.tableHit || !(g.m >= kLensMinM)) return LensVerdict::kNotInTable;   // an M under 1.05 is as good as no entry
+    if (!g.optical || !(g.m >= kLensMinM)) return LensVerdict::kNotOptical;   // an M under 1.05 is as good as no entry
     if (!g.sFresh || !g.cUsable) return LensVerdict::kNoS;
     return LensVerdict::kQualifies;
 }
@@ -334,6 +332,13 @@ inline bool lensHoleStats(const LensReadback& r, double* rMin, double* rMedian, 
 }
 
 // ---- 4. the instrument -------------------------------------------------------------------------------------------------------------------------------------------------------
+// The picture's temporal sequence less the sequence c's draws were made in, in buckets: -1, 0, +1, +2 and any other difference. 0 is c from the picture's own frame.
+constexpr uint32_t kLensGapBuckets = 5;
+inline uint32_t lensGapBucket(uint64_t pictureSeq, uint64_t cSeq) noexcept {
+    const int64_t d = static_cast<int64_t>(pictureSeq - cSeq);
+    return d == -1 ? 0u : d == 0 ? 1u : d == 1 ? 2u : d == 2 ? 3u : 4u;
+}
+
 // What the door counted in a press, plus what the frame thread knows of it. The door adds to it per right-eye frame it is called on; the frame thread takes it at the press's end.
 struct LensDoorStats {
     uint32_t qualifying = 0;          // frames the gate passed
@@ -341,12 +346,15 @@ struct LensDoorStats {
     uint32_t noS = 0;                 // declined by the gate: S or c missing, stale (or behind the eye)
     uint32_t staleC = 0;              // a qualifying frame whose c the door found older than 50 ms or off the picture
     uint32_t openSight = 0;           // the rays said the sight is open (counted from the rays read back)
-    uint32_t notInTable = 0;          // declined by the gate: the (item, scope) not in the table, or M under 1.05
+    uint32_t notOptical = 0;          // declined by the gate: the (item, scope) is not an optical sight, or its M is under 1.05
     uint32_t depthUnavailable = 0;    // no depth for the eye at the door, or not at the size c was worked out for
     uint32_t formatRefused = 0;       // the frame route: a format that is not R8G8B8A8 or B8G8R8A8 UNORM, a region, a view, a copy or a shader that could not be had
     uint32_t dispatched = 0;          // frames the passes were issued on
     uint32_t noop = 0;                // qualifying frames at M = 1 (the first of the ease) that the door would otherwise have run on: nothing to do, nothing issued, not applied
-    uint32_t otherFrame = 0;          // frames (applied or not) whose c was worked out from the draws of another frame than the picture's (the jitter's sequence is not the door's)
+    uint32_t seqGap[kLensGapBuckets] = {};   // frames (applied or not) with a c reading, by the picture's temporal sequence less the sequence c's draws were made in: -1, 0, +1, +2, other
+    uint32_t markRedirected[2] = {};  // the scope's gunsight mark draws taken out of the scene into the eye's layer, per eye (0 left, 1 right), counted at the draw
+    uint32_t markArmedFrames = 0;     // right-eye frames the door saw with the family armed (the gate said qualifies)
+    uint32_t markNoDraw = 0;          // of them, frames in which no mark draw was redirected in the right eye
     uint32_t raysRead = 0;            // of them, frames whose rays were read back
     bool holeKnown = false;           // one settled frame's rays
     double rMinDeg = kNaN, rMedianDeg = kNaN, rMaxDeg = kNaN;
@@ -357,6 +365,10 @@ struct LensDoorStats {
     uint32_t gpuN = 0;                // GPU time of the two passes over the frames that returned a sample
     double raysMsSum = 0.0, raysMsMax = 0.0, magMsSum = 0.0, magMsMax = 0.0;
 };
+// Frames counted with c from another frame than the picture (every bucket but 0): the count A1's press line carried, derived from the buckets.
+inline uint32_t lensOtherFrames(const LensDoorStats& s) noexcept {
+    return s.seqGap[0] + s.seqGap[2] + s.seqGap[3] + s.seqGap[4];
+}
 inline void lensNoteC(LensDoorStats* s, double x, double y) noexcept {
     if (!s || !std::isfinite(x) || !std::isfinite(y)) return;
     ++s->cN;
@@ -412,7 +424,8 @@ inline void lensFinish(LensDoorStats* s) noexcept {
 // What the frame thread counted in the press, from its own gate: the verdicts of the ticks (so a door that is never reached still leaves a press line that says the lens was due), the
 // jitter readings it could not get or got from another frame than the rows, and the angle between c through S and c at the far impact point (the lens uses the far one).
 struct LensTickStats {
-    uint32_t qualified = 0, noS = 0, notInTable = 0, idle = 0;   // the gate's verdicts, one per tick of the press
+    uint32_t qualified = 0, noS = 0, notOptical = 0, idle = 0;   // the gate's verdicts, one per tick of the press
+    uint32_t fovFromBare = 0;                                     // ticks that took the FOV of an unmeasured scoped copy from its bare copy
     uint32_t jitterNone = 0, jitterOther = 0;                     // qualifying ticks with no jitter reading at the draw, or one taken in another frame than the rows
     uint32_t farN = 0;
     double farSumDeg = 0.0, farMaxDeg = 0.0;
@@ -457,11 +470,13 @@ inline int formatLensPress(char* buf, size_t n, const LensPressLine& p) noexcept
     appendf(buf, n, &len, "scope zoom (S1): press %u item %s scope %s key %s ads %s deg M %s h %.1f deg; ", p.press, itemText(p.item), p.scope ? p.scope : "unknown", p.keyOn ? "on" : "off",
             numText(p.adsDeg, 3, ads, sizeof(ads)), numText(p.m, 3, m, sizeof(m)), p.refDeg);
     const LensTickStats& t = p.t;
-    appendf(buf, n, &len, "frame thread: qualified %u, no S %u, not in the table %u, idle %u; jitter reading none %u, from another frame %u; c to the far point mean %s max %s deg; ", t.qualified, t.noS,
-            t.notInTable, t.idle, t.jitterNone, t.jitterOther, numText(t.farN ? t.farSumDeg / static_cast<double>(t.farN) : kNaN, 3, fmean, sizeof(fmean)),
+    appendf(buf, n, &len, "frame thread: qualified %u, no S %u, not an optical sight %u, idle %u; FOV from the bare copy %u; jitter reading none %u, from another frame %u; c to the far point mean %s max %s deg; ",
+            t.qualified, t.noS, t.notOptical, t.idle, t.fovFromBare, t.jitterNone, t.jitterOther, numText(t.farN ? t.farSumDeg / static_cast<double>(t.farN) : kNaN, 3, fmean, sizeof(fmean)),
             numText(t.farN ? t.farMaxDeg : kNaN, 3, fmax, sizeof(fmax)));
-    appendf(buf, n, &len, "applied %u of %u qualifying frames (dispatched %u, at M 1 %u); declined: no S %u, stale c %u, open sight %u, not in the table %u, depth unavailable %u, format refused %u; "
-            "c from another frame than the picture %u; ", d.applied, d.qualifying, d.dispatched, d.noop, d.noS, d.staleC, d.openSight, d.notInTable, d.depthUnavailable, d.formatRefused, d.otherFrame);
+    appendf(buf, n, &len, "applied %u of %u qualifying frames (dispatched %u, at M 1 %u); declined: no S %u, stale c %u, open sight %u, not an optical sight %u, depth unavailable %u, format refused %u; "
+            "picture sequence less c's: -1 %u, 0 %u, +1 %u, +2 %u, other %u; gunsight marks redirected: L %u, R %u; armed frames %u, no mark draw %u; ", d.applied, d.qualifying, d.dispatched, d.noop,
+            d.noS, d.staleC, d.openSight, d.notOptical, d.depthUnavailable, d.formatRefused, d.seqGap[0], d.seqGap[1], d.seqGap[2], d.seqGap[3], d.seqGap[4], d.markRedirected[0], d.markRedirected[1],
+            d.markArmedFrames, d.markNoDraw);
     appendf(buf, n, &len, "hole r min %s median %s max %s deg, %u of %u rays escaped (rays read on %u frames); depth at c %s (near %s); ", numText(d.holeKnown ? d.rMinDeg : kNaN, 2, rmin, sizeof(rmin)),
             numText(d.holeKnown ? d.rMedianDeg : kNaN, 2, rmed, sizeof(rmed)), numText(d.holeKnown ? d.rMaxDeg : kNaN, 2, rmax, sizeof(rmax)), d.holeKnown ? d.holeEscaped : 0u,
             kLensRays, d.raysRead, numText(d.holeKnown ? d.depthAtC : kNaN, 6, dc, sizeof(dc)), numText(d.depthNear, 6, dn, sizeof(dn)));

@@ -36,6 +36,7 @@ struct Pub {
 Pub g_pub;
 std::atomic<bool> g_active{false};       // the last published verdict was not kIdle
 std::atomic<int> g_inflight{0};          // rays in flight to the CPU
+std::atomic<uint64_t> g_markSeq[2];      // the temporal sequence of each eye's last redirected gunsight mark draw (0: none)
 
 uint64_t nowUs() noexcept {
     static const double perUs = [] {
@@ -347,6 +348,20 @@ void scopeZoomPublish(const ScopeZoomFrame& frame) {
 
 bool scopeZoomWanted() { return g_active.load(std::memory_order_relaxed) || g_inflight.load(std::memory_order_relaxed) > 0; }
 
+bool scopeZoomMarkArmed() {
+    if (!g_active.load(std::memory_order_relaxed)) return false;
+    ScopeZoomFrame f;
+    if (!readFrame(&f) || f.verdict != static_cast<uint32_t>(sz::LensVerdict::kQualifies)) return false;
+    const uint64_t t = nowUs();
+    return t >= f.stampUs && sz::lensFresh(t - f.stampUs);
+}
+
+void scopeZoomNoteMark(uint32_t eye, uint64_t seq) {
+    if (eye > 1) return;
+    g_markSeq[eye].store(seq, std::memory_order_relaxed);
+    count([&](sz::LensDoorStats& s) { ++s.markRedirected[eye]; });
+}
+
 void scopeZoomPressBegin(uint32_t press) {
     std::lock_guard<std::mutex> lock(g_mu);
     g_stats = sz::LensDoorStats{};
@@ -387,11 +402,18 @@ void scopeZoomDoor(const ScopeZoomDoorArgs& a, Ptr<ID3D11Texture2D>* copy) {
         count([](sz::LensDoorStats& s) { ++s.noS; });
         return;
     }
-    if (verdict == sz::LensVerdict::kNotInTable) {
-        count([](sz::LensDoorStats& s) { ++s.notInTable; });
+    if (verdict == sz::LensVerdict::kNotOptical) {
+        count([](sz::LensDoorStats& s) { ++s.notOptical; });
         return;
     }
-    // A qualifying frame. Its c must be this young and on the picture.
+    // A qualifying frame: the family that takes the scope's gunsight mark out of the scene was armed for it, and a right-eye frame in which it redirected none is counted.
+    const uint64_t markSeq = g_markSeq[1].load(std::memory_order_relaxed);
+    const bool markDrawn = markSeq != 0 && markSeq == a.sequence;
+    count([&](sz::LensDoorStats& s) {
+        ++s.markArmedFrames;
+        if (!markDrawn) ++s.markNoDraw;
+    });
+    // Its c must be this young and on the picture.
     const uint64_t t = nowUs();
     const bool young = t >= f.stampUs && sz::lensFresh(t - f.stampUs);
     const bool usable = std::isfinite(f.uv[0]) && std::isfinite(f.uv[1]) && std::isfinite(f.jitterUv[0]) && std::isfinite(f.jitterUv[1]) && std::isfinite(f.m) && f.m > 0.0f &&
@@ -400,8 +422,8 @@ void scopeZoomDoor(const ScopeZoomDoorArgs& a, Ptr<ID3D11Texture2D>* copy) {
         count([](sz::LensDoorStats& s) { ++s.staleC; });
         return;
     }
-    // c from the draws of another frame than the picture (the jitter's sequence is the frame the rows were drawn in): counted, and the lens still applies.
-    if (f.jitterSeq != 0 && a.sequence != f.jitterSeq) count([](sz::LensDoorStats& s) { ++s.otherFrame; });
+    // c's frame against the picture's (the jitter's sequence is the frame the rows were drawn in): the gap is counted by bucket, and the lens still applies.
+    if (f.jitterSeq != 0) count([&](sz::LensDoorStats& s) { ++s.seqGap[sz::lensGapBucket(a.sequence, f.jitterSeq)]; });
     if (!a.resolved) {   // the game's own picture, not the upscaler's: the frame route refuses it
         count([](sz::LensDoorStats& s) { ++s.formatRefused; });
         return;

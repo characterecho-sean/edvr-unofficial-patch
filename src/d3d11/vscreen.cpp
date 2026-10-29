@@ -65,6 +65,7 @@
 #include "scheduler_stack_probe.h"  // schedulerStackProbeShutdown
 #include "ui_depth.h"
 #include "ui_layer.h"
+#include "scope_zoom.h"          // scopeZoomMarkArmed: the scope's gunsight mark family is named only while the lens is armed
 #include "ui_layer_math.h"
 #include "vr_world_route.h"  // VrWorldInternalScope: the world route's own D3D calls step past these hooks
 #include "ui_surfaces.h"  // uiAtlasNoteWrite: the glyph atlas instrument's write count
@@ -4080,7 +4081,7 @@ __declspec(noinline) void curvedScreenSwallowed(ID3D11DeviceContext* self, DrawV
 // render-size change is taken from its first draw (ui_layer_math.h's
 // uiLayerFamilyFor, the rule; this gathers its facts, lazily, in its order).
 // The two composites' outcomes are counted for the layer's family census.
-__declspec(noinline) UiLayerFamily uiLayerFamilyOf(State* s, char kind, UINT count) {
+__declspec(noinline) UiLayerFamily uiLayerFamilyOf(State* s, char kind, UINT count, UINT instances) {
     UiFamilyFacts f;
     f.targetKind = uiLayerTargetKind();
     // fix.ui_quality off with the weapons fire on: the layer is live for the weapons fire alone, which is drawn into the lit HDR target
@@ -4098,6 +4099,12 @@ __declspec(noinline) UiLayerFamily uiLayerFamilyOf(State* s, char kind, UINT cou
         f.ps = bindingShaderHash(BindSlot::Ps);
     else if (f.targetKind == 1 && (weaponsFireVs(f.vs) || shieldRefractVs(f.vs)))  // The weapons fire: the pair is the key too
         f.ps = bindingShaderHash(BindSlot::Ps);
+    // A2: the scope's gunsight mark. Its pair is also the weapon and tool material, so the key is the pair drawing 6 indices in 1 instance with a learned interface surface (the readout
+    // atlas) sampled, and only while the scope lens is armed for the frame. The cheap tests come first: the hash of an ordinary draw is not read.
+    else if (f.targetKind == 1 && f.vs == kUiVsScopeMark && uiScopeMarkShape(kind, count, instances) && scopeZoomMarkArmed()) {
+        f.ps = bindingShaderHash(BindSlot::Ps);
+        f.scopeMark = f.ps == kUiPsScopeMark && uiDepthSampledSurfaceSlot() >= 0;
+    }
     if (f.targetKind == 2) {
         // ui_depth's exclude list (the null-output mesh B018D143700AB803,
         // which samples a stale surface and draws nothing, and the ini's
@@ -4273,7 +4280,7 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     // private geometry shader (supercruise_bars.h). Set with the family below, read at the layer's bracket.
     bool barsFamily = false;
     if (owner && uiLayerLive() && g_state->rtv0Eye && v != DrawVerdict::kQuadSkip) {
-        const UiLayerFamily uiFamily = uiLayerFamilyOf(g_state, kind, count);
+        const UiLayerFamily uiFamily = uiLayerFamilyOf(g_state, kind, count, instances);
         compositeCounted = uiDepthScope.composite;
         compositeFamily = uiFamily;
         barsFamily = uiFamily == UiLayerFamily::kSupercruiseBars;

@@ -107,6 +107,18 @@ static bool wiredIni(const std::string& ini) {
     return fixAt != std::string::npos && expAt != std::string::npos && fixAt < expAt && has(ini, "# ui: ADS: scope zoom | choices on, off | recommended off | live | menu native_on_foot") &&
            has(ini, "# ui: ADS: scope zoom FOV (experimental) | range 30..90 | step 0.5 | unit deg | recommended 56.3 | live") && before(ini, "[experimental]", "native_on_foot_ads_scope_zoom_fov = 56.3");
 }
+static bool wiredMark(const std::string& layer, const std::string& vscreen) {
+    const size_t fn = vscreen.find("UiLayerFamily uiLayerFamilyOf(State* s, char kind, UINT count, UINT instances) {");
+    if (fn == std::string::npos) return false;
+    const size_t weapons = vscreen.find("else if (f.targetKind == 1 && (weaponsFireVs(f.vs) || shieldRefractVs(f.vs)))", fn);
+    const size_t mark = vscreen.find("else if (f.targetKind == 1 && f.vs == kUiVsScopeMark && uiScopeMarkShape(kind, count, instances) && scopeZoomMarkArmed()) {", fn);
+    const size_t atlas = vscreen.find("f.scopeMark = f.ps == kUiPsScopeMark && uiDepthSampledSurfaceSlot() >= 0;", fn);
+    const size_t tail = vscreen.find("if (f.targetKind == 2) {", fn);
+    return weapons != std::string::npos && mark != std::string::npos && atlas != std::string::npos && tail != std::string::npos && weapons < mark && mark < atlas && atlas < tail &&
+           has(vscreen, "uiLayerFamilyOf(g_state, kind, count, instances)") && has(layer, "scopeZoomNoteMark(static_cast<uint32_t>(g_draw.eye), g_draw.seq);") &&
+           has(layer, "f.blend = shapeOf(bs, &game, destAlphaOne);") && has(layer, "const UiBlendShape shape = shapeOf(bs, &game, g_draw.destAlphaOne);") &&
+           has(layer, "const bool destAlphaOne = family == UiLayerFamily::kScopeMark && !uiLayerFormatHasAlpha(g_tc.info.fmt);");
+}
 static void wiringTests() {
     const std::string layer = readFile("src/d3d11/ui_layer.cpp"), temporal = readFile("src/d3d11/temporal_pass.cpp"), native = readFile("src/d3d11/native_on_foot.cpp"), ini = readFile("edvr.ini");
     check(!layer.empty() && !temporal.empty() && !native.empty() && !ini.empty(), "the sources the wiring scans read are readable from the repository root");
@@ -123,6 +135,17 @@ static void wiringTests() {
     check(!wiredFrame(replaced(native, "cfg.getString(\"fix.native_on_foot_ads_scope_zoom\", \"off\")", "cfg.getString(\"fix.native_on_foot_ads_zoom\", \"off\")")), "control: a key read by another name is not the wiring");
     check(wiredIni(ini), "the ini states both keys with their rows: the user key on the Native on foot page, the experimental one in the developer tier");
     check(!wiredIni(replaced(ini, "native_on_foot_ads_scope_zoom = off", "native_on_foot_ads_scope_zoom = on")), "control: the user key on by default is not the shipped default");
+
+    // the scope's gunsight mark: named in the draw hook only for the pair's 6 indices in 1 instance while the lens is armed and a learned surface is sampled, counted where the layer takes
+    // it, and blended with destination alpha read as 1 at the decision and at the issue alike
+    const std::string vscreen = readFile("src/d3d11/vscreen.cpp");
+    check(vscreen.size() > 100000, "vscreen.cpp is readable from the repository root");
+    check(wiredMark(layer, vscreen), "the mark is named for the pair's shape, only while armed, with the atlas test, after the weapons-fire read; the layer counts it and reads its blend with destination alpha as 1 at both places");
+    check(!wiredMark(layer, replaced(vscreen, "&& uiScopeMarkShape(kind, count, instances) && scopeZoomMarkArmed()) {", "&& scopeZoomMarkArmed()) {")), "control: a mark named without its shape is not the wiring");
+    check(!wiredMark(layer, replaced(vscreen, "&& uiScopeMarkShape(kind, count, instances) && scopeZoomMarkArmed()) {", "&& uiScopeMarkShape(kind, count, instances)) {")), "control: a mark named while the lens is not armed is not the wiring");
+    check(!wiredMark(layer, replaced(vscreen, "f.scopeMark = f.ps == kUiPsScopeMark && uiDepthSampledSurfaceSlot() >= 0;", "f.scopeMark = f.ps == kUiPsScopeMark;")), "control: a mark named without the atlas bound is not the wiring");
+    check(!wiredMark(replaced(layer, "const UiBlendShape shape = shapeOf(bs, &game, g_draw.destAlphaOne);", "const UiBlendShape shape = shapeOf(bs, &game);"), vscreen), "control: a blend read differently at the issue than at the decision is not the wiring");
+    check(!wiredMark(replaced(layer, "scopeZoomNoteMark(static_cast<uint32_t>(g_draw.eye), g_draw.seq);", ""), vscreen), "control: marks not counted at the layer are not the wiring");
 }
 
 // ============================================================================================ the scene
@@ -560,10 +583,66 @@ void lensTests(Fx& f) {
         in.jitterSeqDelta = 1;
         const Run r = runDoor(f, ring, orig, in);
         const Verdict v = compare(r.image, orig, expectedLens(ring, orig, in.m, cx, cy, 1.0, 0.0), 1);
-        check(r.stats.otherFrame >= 1 && r.stats.otherFrame == r.stats.dispatched && v.insideBad == 0 && v.outsideBad == 0 && v.insideChanged * 10 > v.inside * 9,
-              "a c whose jitter sequence is not the picture's is counted and the lens still runs on it");
+        check(sz::lensOtherFrames(r.stats) >= 1 && sz::lensOtherFrames(r.stats) == r.stats.dispatched && r.stats.seqGap[0] == r.stats.dispatched && v.insideBad == 0 && v.outsideBad == 0 &&
+                  v.insideChanged * 10 > v.inside * 9,
+              "a c whose jitter sequence is one after the picture's is counted in the -1 bucket and the lens still runs on it");
         const Run same = runDoor(f, ring, orig, RunIn{});
-        check(same.stats.otherFrame == 0, "a c from the picture's own frame is not counted");
+        check(sz::lensOtherFrames(same.stats) == 0 && same.stats.seqGap[1] == same.stats.dispatched && same.stats.dispatched >= 1, "a c from the picture's own frame is counted in the 0 bucket and not as another frame");
+        // the other buckets, one frame each (a lens at M 1 counts the gap too: the reading is what the bucket is about)
+        const struct { int delta; uint32_t bucket; } gaps[] = {{1, 0}, {0, 1}, {-1, 2}, {-2, 3}, {-3, 4}, {7, 4}};
+        for (const auto& g : gaps) {
+            RunIn gi;
+            gi.m = 1.0;
+            gi.jitterSeqDelta = g.delta;
+            const Run gr = runDoor(f, ring, orig, gi);
+            uint32_t total = 0;
+            for (uint32_t k = 0; k < sz::kLensGapBuckets; ++k) total += gr.stats.seqGap[k];
+            check(total == 1 && gr.stats.seqGap[g.bucket] == 1, "the picture's sequence less c's lands in its bucket: -1, 0, +1, +2, other");
+        }
+    }
+
+    // ---- the scope's gunsight mark: armed only for a qualifying fresh frame; marks per eye; armed frames with and without a mark draw in the right eye ----
+    {
+        ScopeZoomFrame rec;
+        rec.m = rec.mTarget = 2.5f;
+        rec.verdict = static_cast<uint32_t>(sz::LensVerdict::kQualifies);
+        scopeZoomPublish(rec);
+        check(scopeZoomMarkArmed(), "the mark is armed while the last published frame qualifies for the lens");
+        rec.verdict = static_cast<uint32_t>(sz::LensVerdict::kNotOptical);
+        scopeZoomPublish(rec);
+        check(!scopeZoomMarkArmed(), "a weapon that is not an optical sight does not arm the mark");
+        rec.verdict = static_cast<uint32_t>(sz::LensVerdict::kNoS);
+        scopeZoomPublish(rec);
+        check(!scopeZoomMarkArmed(), "a frame with no S does not arm the mark");
+        rec.verdict = static_cast<uint32_t>(sz::LensVerdict::kIdle);
+        scopeZoomPublish(rec);
+        check(!scopeZoomMarkArmed(), "an idle frame (the key off, not in the sights) does not arm the mark");
+        rec.verdict = static_cast<uint32_t>(sz::LensVerdict::kQualifies);
+        scopeZoomPublish(rec);
+        Sleep(120);
+        check(!scopeZoomMarkArmed(), "a qualifying frame older than the door takes a c does not arm the mark");
+        // the door counts a right-eye frame as armed, and as without a mark draw unless the right eye's mark was redirected in the picture's own sequence (runDoor's first sequence is 100)
+        RunIn in;
+        in.m = 1.0;
+        scopeZoomNoteMark(1, 100);
+        const Run drawn = runDoor(f, ring, orig, in);
+        check(drawn.stats.markArmedFrames == 1 && drawn.stats.markNoDraw == 0, "an armed right-eye frame whose mark draw was redirected in its own sequence has a mark draw");
+        scopeZoomNoteMark(1, 99);
+        const Run missed = runDoor(f, ring, orig, in);
+        check(missed.stats.markArmedFrames == 1 && missed.stats.markNoDraw == 1, "an armed right-eye frame whose last mark draw is from another sequence is counted with no mark draw");
+        scopeZoomNoteMark(1, 0);
+        in.verdict = sz::LensVerdict::kNotOptical;
+        const Run unarmed = runDoor(f, ring, orig, in);
+        check(unarmed.stats.markArmedFrames == 0 && unarmed.stats.markNoDraw == 0, "a frame the gate declined is not an armed frame");
+        // marks per eye, counted at the draw
+        scopeZoomPressBegin(77);
+        scopeZoomNoteMark(0, 5);
+        scopeZoomNoteMark(1, 5);
+        scopeZoomNoteMark(1, 6);
+        scopeZoomNoteMark(2, 7);
+        sz::LensDoorStats marks;
+        scopeZoomPressTake(&marks);
+        check(marks.markRedirected[0] == 1 && marks.markRedirected[1] == 2, "marks redirected are counted per eye (an eye that is neither is ignored)");
     }
 
     // ---- the reasons that decline a frame, each counted and each leaving the frame alone ----
@@ -607,7 +686,7 @@ void lensTests(Fx& f) {
             {"no depth for the eye", [] { RunIn i; i.hasDepth = false; return i; }()},
             {"a picture that is not the upscaler's", [] { RunIn i; i.resolved = false; return i; }()},
             {"the gate's verdict no S", [] { RunIn i; i.verdict = sz::LensVerdict::kNoS; return i; }()},
-            {"the gate's verdict not in the table", [] { RunIn i; i.verdict = sz::LensVerdict::kNotInTable; return i; }()},
+            {"the gate's verdict not an optical sight", [] { RunIn i; i.verdict = sz::LensVerdict::kNotOptical; return i; }()},
             {"the idle verdict", [] { RunIn i; i.verdict = sz::LensVerdict::kIdle; return i; }()},
             {"M at 1 (the first frame of the ease)", [] { RunIn i; i.m = 1.0; return i; }()},
             {"no depth for the eye on the first frame of the ease", [] { RunIn i; i.hasDepth = false; i.m = 1.0; return i; }()},
@@ -625,8 +704,8 @@ void lensTests(Fx& f) {
             else if (what == "no depth for the eye") check(s.depthUnavailable == 1 && s.dispatched == 0, "no depth is counted depth unavailable and leaves the frame alone");
             else if (what == "a picture that is not the upscaler's") check(s.formatRefused == 1 && s.dispatched == 0, "a picture that is not the upscaler's is refused and left alone");
             else if (what == "the gate's verdict no S") check(s.noS == 1 && s.qualifying == 0, "the gate's no S is counted and asks nothing of the passes");
-            else if (what == "the gate's verdict not in the table") check(s.notInTable == 1 && s.qualifying == 0, "the gate's not in the table is counted and asks nothing of the passes");
-            else if (what == "the idle verdict") check(s.noS + s.notInTable + s.staleC + s.dispatched + s.noop + s.formatRefused + s.depthUnavailable == 0, "the idle verdict counts nothing");
+            else if (what == "the gate's verdict not an optical sight") check(s.notOptical == 1 && s.qualifying == 0, "the gate's not an optical sight is counted and asks nothing of the passes");
+            else if (what == "the idle verdict") check(s.noS + s.notOptical + s.staleC + s.dispatched + s.noop + s.formatRefused + s.depthUnavailable == 0, "the idle verdict counts nothing");
             else if (what == "no depth for the eye on the first frame of the ease") check(s.depthUnavailable == 1 && s.noop == 0 && s.applied == 0 && s.qualifying == 1, "the first frame at M 1 with no depth is depth unavailable, not a frame with nothing to do");
             else if (what == "a picture that is not the upscaler's on the first frame of the ease") check(s.formatRefused == 1 && s.noop == 0 && s.applied == 0 && s.qualifying == 1, "the first frame at M 1 over a picture that is not the upscaler's is refused, not a frame with nothing to do");
             else if (what == "a depth that does not cover the render") check(s.depthUnavailable == 1 && s.dispatched == 0 && s.applied == 0, "a depth the picture's uv does not map onto is counted depth unavailable and the frame is left alone");

@@ -78,6 +78,72 @@ static UiFamilyFacts hdrFacts(uint64_t vs, uint64_t ps) {
     return f;
 }
 
+// The scope's gunsight mark (A2): the pair's draw of 6 indices in 1 instance with the readout atlas bound, named only while the scope lens is armed, and the blend it is taken with.
+static void scopeMarkTests() {
+    UiFamilyFacts f = hdrFacts(kUiVsScopeMark, kUiPsScopeMark);
+    check(uiLayerFamilyFor(f) == UiLayerFamily::kNone, "the pair alone is not the scope mark (it is the weapon and tool material too)");
+    f.scopeMark = true;
+    check(uiLayerFamilyFor(f) == UiLayerFamily::kScopeMark, "the pair with the lens armed, the shape and the atlas is the scope mark on the HDR target");
+    for (int bit = 0; bit < 64; bit += 9) {
+        check(uiLayerFamilyFor(hdrFacts(kUiVsScopeMark ^ (1ull << bit), kUiPsScopeMark)) != UiLayerFamily::kScopeMark, "a one-bit change of the vertex shader is not the family");
+        UiFamilyFacts g = hdrFacts(kUiVsScopeMark, kUiPsScopeMark ^ (1ull << bit));
+        g.scopeMark = true;
+        check(uiLayerFamilyFor(g) != UiLayerFamily::kScopeMark, "a one-bit change of the pixel shader is not the family, armed or not");
+    }
+    UiFamilyFacts other = hdrFacts(kUiVsScopeMark, 0xC5A5C7E8216CB9AFull);
+    other.scopeMark = true;
+    check(uiLayerFamilyFor(other) != UiLayerFamily::kScopeMark, "the same vertex shader with the material's pixel shader is not the family");
+    UiFamilyFacts ldr = f;
+    ldr.targetKind = 2;
+    check(uiLayerFamilyFor(ldr) != UiLayerFamily::kScopeMark, "the post-tonemap target never names it");
+    ldr.targetKind = 0;
+    check(uiLayerFamilyFor(ldr) == UiLayerFamily::kNone, "no eye target, no family");
+    check(uiLayerFamilyTakesHdr(UiLayerFamily::kScopeMark) && !uiLayerFamilyIsSceneLines(UiLayerFamily::kScopeMark), "taken by the HDR route, exempt from the density rule");
+    check(std::strcmp(uiLayerFamilyName(UiLayerFamily::kScopeMark), "scope mark") == 0, "the family's name is the log's");
+    check(uiLayerFamilyEnabled(UiLayerFamily::kScopeMark, true, false) && !uiLayerFamilyEnabled(UiLayerFamily::kScopeMark, false, true), "fix.ui_quality's half governs it, the weapons fire's does not");
+
+    // the shape: 6 indices in 1 instance, an indexed kind
+    check(uiScopeMarkShape('X', 6, 1) && uiScopeMarkShape('I', 6, 1) && !uiScopeMarkShape('X', 18, 1) && !uiScopeMarkShape('X', 6, 2) && !uiScopeMarkShape('D', 6, 1) && !uiScopeMarkShape('N', 6, 1) &&
+              !uiScopeMarkShape('X', 0, 0),
+          "the draw shape is 6 indices in 1 instance, indexed: the material's draws (18 indices, several instances) are not it");
+
+    // the decision: ONE, DEST_ALPHA (the dump census, bl=12,7,1/2,7,1) is refused as it stands and additive on an alpha-less target
+    UiBlendRt game;
+    game.enable = true;
+    game.src = uiblend::kOne;
+    game.dst = uiblend::kDestAlpha;
+    game.srcA = uiblend::kOne;
+    game.dstA = uiblend::kDestAlpha;
+    check(uiLayerBlendShape(game) == UiBlendShape::kRefused, "the game's ONE, DEST_ALPHA is refused as it stands (the layer's alpha is not the frame's)");
+    check(!uiLayerFormatHasAlpha(26) && !uiLayerFormatHasAlpha(67) && uiLayerFormatHasAlpha(28) && uiLayerFormatHasAlpha(10) && uiLayerFormatHasAlpha(2),
+          "R11G11B10_FLOAT and the shared-exponent format have no alpha; R8G8B8A8, R16G16B16A16 and R32G32B32A32 do");
+    const UiBlendRt one = uiLayerBlendDestAlphaOne(game);
+    check(one.src == uiblend::kOne && one.dst == uiblend::kOne && uiLayerBlendShape(one) == UiBlendShape::kAdditive, "read as 1 on an alpha-less target it is ONE, ONE: additive");
+    UiBlendRt conv;
+    check(uiLayerConvertBlend(one, &conv) && conv.src == uiblend::kOne && conv.dst == uiblend::kOne && conv.srcA == uiblend::kZero && conv.dstA == uiblend::kOne,
+          "and converts to the layer's additive blend, which keeps the layer's transmittance");
+    UiBlendRt inv = game;
+    inv.dst = uiblend::kInvDestAlpha;
+    check(uiLayerBlendDestAlphaOne(inv).dst == uiblend::kZero, "INV_DEST_ALPHA reads as 0");
+    UiBlendRt untouched = game;
+    untouched.src = uiblend::kSrcAlpha;
+    untouched.dst = uiblend::kInvSrcAlpha;
+    check(uiLayerBlendShape(uiLayerBlendDestAlphaOne(untouched)) == UiBlendShape::kOver, "a blend with no destination-alpha factor is not changed");
+
+    UiLayerDrawFacts d;
+    d.family = UiLayerFamily::kScopeMark;
+    d.eyeTarget = true;
+    d.ldrView = false;
+    d.crispHdr = true;
+    d.eye = 1;
+    d.armed = true;
+    d.blend = UiBlendShape::kAdditive;
+    d.ds.depthTest = true;
+    check(uiLayerDecide(d) == UiLayerDecision::kRedirect, "the mark's draw, read as additive, depth-tested and reproducible, is redirected into the HDR layer");
+    d.blend = uiLayerBlendShape(game);
+    check(uiLayerDecide(d) == UiLayerDecision::kBlendRefused, "the same draw with the blend as the game states it is refused: the rewrite is the family's alone");
+}
+
 static void ruleTests() {
     check(kWeaponPairCount == 3, "three weapons-fire pairs");
     for (size_t i = 0; i < kWeaponPairCount; ++i) {
@@ -122,8 +188,9 @@ static void ruleTests() {
     // Last in the enums: no older number moved.
     check(static_cast<int>(UiLayerFamily::kWeaponsFire) == static_cast<int>(UiLayerFamily::kOnFootHud) + 1 &&
               static_cast<int>(UiLayerFamily::kShieldRipple) == static_cast<int>(UiLayerFamily::kWeaponsFire) + 1 &&
-              static_cast<int>(UiLayerFamily::kShieldRipple) + 1 == static_cast<int>(UiLayerFamily::kCount),
-          "the family is last but one in its enum, the shield ripple last, straight after the on-foot HUD (no older number moved)");
+              static_cast<int>(UiLayerFamily::kScopeMark) == static_cast<int>(UiLayerFamily::kShieldRipple) + 1 &&
+              static_cast<int>(UiLayerFamily::kScopeMark) + 1 == static_cast<int>(UiLayerFamily::kCount),
+          "the weapons fire, the shield ripple and the scope mark follow the on-foot HUD in that order, the scope mark last (no older number moved)");
     check(static_cast<int>(UiLayerDecision::kFamilyOff) == static_cast<int>(UiLayerDecision::kLayerFailed) + 1 &&
               static_cast<int>(UiLayerDecision::kFamilyOff) + 1 == static_cast<int>(UiLayerDecision::kCount) && static_cast<int>(UiLayerDecision::kCount) <= 24,
           "the new decision is last in its enum and the 24-wide tables hold it");
@@ -640,7 +707,7 @@ static bool wiredQualityOnly(const std::string& t) {
            before(t, "    seedWritersCheck(ctx, count, instances, verdict, drawKind);\n", "    if (!detail::g_uiQualityLive) return false;\n    if (!taken[0] && !taken[1]) return false;");
 }
 static bool wiredVscreen(const std::string& t) {
-    const size_t fn = t.find("UiLayerFamily uiLayerFamilyOf(State* s, char kind, UINT count) {");
+    const size_t fn = t.find("UiLayerFamily uiLayerFamilyOf(State* s, char kind, UINT count, UINT instances) {");
     if (fn == std::string::npos) return false;
     const size_t skip = t.find("if (f.targetKind == 2 && !uiLayerQualityLive()) return UiLayerFamily::kNone;", fn);
     const size_t vs = t.find("f.vs = bindingShaderHash(BindSlot::Vs);", fn);
@@ -1240,8 +1307,58 @@ static std::vector<uint8_t> addClamped(const std::vector<uint8_t>& a, const std:
     return out;
 }
 
+// The reproduction behind uiLayerBlendDestAlphaOne: ONE, DEST_ALPHA (the scope mark's blend) into an R11G11B10_FLOAT target adds the source to what the target holds, as ONE, ONE does,
+// because the format has no alpha and the output merger reads its destination alpha as 1. The same blend into an R16G16B16A16_FLOAT target whose alpha is 0 adds nothing of the target.
+static void destAlphaReproduction(Fx& f) {
+    auto vs = f.compile(kToneVs, "vs_5_0");
+    auto ps = f.compile("float4 main(float4 p : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET { return float4(0.5, 0.25, 0.5, 0.0); }", "ps_5_0");
+    ComPtr<ID3D11VertexShader> v;
+    ComPtr<ID3D11PixelShader> p;
+    hr(f.dev->CreateVertexShader(vs->GetBufferPointer(), vs->GetBufferSize(), nullptr, &v), "the reproduction's VS");
+    hr(f.dev->CreatePixelShader(ps->GetBufferPointer(), ps->GetBufferSize(), nullptr, &p), "the reproduction's PS");
+    D3D11_BLEND_DESC bd{};
+    bd.RenderTarget[0].BlendEnable = TRUE;
+    bd.RenderTarget[0].SrcBlend = bd.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ONE;
+    bd.RenderTarget[0].DestBlend = bd.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_DEST_ALPHA;
+    bd.RenderTarget[0].BlendOp = bd.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
+    bd.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+    ComPtr<ID3D11BlendState> bs;
+    hr(f.dev->CreateBlendState(&bd, &bs), "the reproduction's blend");
+    const auto draw = [&](DXGI_FORMAT fmt, const float clear[4]) {
+        ComPtr<ID3D11Texture2D> t = f.texture(4, 4, fmt, D3D11_BIND_RENDER_TARGET, nullptr, 0);
+        ComPtr<ID3D11RenderTargetView> rtv = f.rtvOf(t.Get());
+        f.ctx->ClearRenderTargetView(rtv.Get(), clear);
+        const D3D11_VIEWPORT vp{0, 0, 4, 4, 0, 1};
+        f.ctx->RSSetViewports(1, &vp);
+        ID3D11RenderTargetView* r = rtv.Get();
+        f.ctx->OMSetRenderTargets(1, &r, nullptr);
+        const float factor[4] = {};
+        f.ctx->OMSetBlendState(bs.Get(), factor, 0xFFFFFFFFu);
+        f.ctx->IASetInputLayout(nullptr);
+        f.ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        f.ctx->VSSetShader(v.Get(), nullptr, 0);
+        f.ctx->PSSetShader(p.Get(), nullptr, 0);
+        f.ctx->Draw(3, 0);
+        f.ctx->OMSetRenderTargets(0, nullptr, nullptr);
+        return t;
+    };
+    const float clear[4] = {0.25f, 0.5f, 0.125f, 0.0f};
+    const std::vector<uint8_t> packed = f.read8(draw(DXGI_FORMAT_R11G11B10_FLOAT, clear).Get());
+    uint32_t px = 0;
+    std::memcpy(&px, packed.data(), sizeof(px));
+    const auto f11 = [](uint32_t b) { return std::ldexp(1.0 + (b & 63u) / 64.0, static_cast<int>((b >> 6) & 31u) - 15); };
+    const auto f10 = [](uint32_t b) { return std::ldexp(1.0 + (b & 31u) / 32.0, static_cast<int>((b >> 5) & 31u) - 15); };
+    check(std::fabs(f11(px & 2047u) - 0.75) < 1e-6 && std::fabs(f11((px >> 11) & 2047u) - 0.75) < 1e-6 && std::fabs(f10((px >> 22) & 1023u) - 0.625) < 1e-6,
+          "ONE, DEST_ALPHA into R11G11B10_FLOAT adds the source to the target (0.25 + 0.5, 0.5 + 0.25, 0.125 + 0.5): the destination alpha reads as 1");
+    const std::vector<float> half = f.readHalf(draw(DXGI_FORMAT_R16G16B16A16_FLOAT, clear).Get());
+    check(std::fabs(half[0] - 0.5f) < 1e-3f && std::fabs(half[1] - 0.25f) < 1e-3f && std::fabs(half[2] - 0.5f) < 1e-3f,
+          "control: the same blend into R16G16B16A16_FLOAT with alpha 0 adds nothing of the target (so the rewrite is for the alpha-less format alone)");
+    f.ctx->ClearState();
+}
+
 static void gpuTests() {
     Fx f;
+    destAlphaReproduction(f);
     // Sentinel state on the immediate context, to see the source pass put it back.
     ComPtr<ID3D11Texture2D> sentinelTex = f.texture(4, 4, DXGI_FORMAT_R8G8B8A8_UNORM, D3D11_BIND_RENDER_TARGET, nullptr, 0);
     ComPtr<ID3D11RenderTargetView> sentinelRtv = f.rtvOf(sentinelTex.Get());
@@ -1448,6 +1565,7 @@ int main(int argc, char** argv) {
     }
     try {
         ruleTests();
+        scopeMarkTests();
         keyTests();
         planTests();
         censusTests("tools/sharp_weapons_test/fixtures/census_070029_c1_f0.txt", 2, 0);

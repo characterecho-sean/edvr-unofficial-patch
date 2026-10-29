@@ -34267,21 +34267,24 @@ Geometry geometryNow(const Vr& v, uint64_t nowMs) noexcept {
     return g;
 }
 
-// The pixel probe about c in the right eye, for the first three scoped presses and the first unscoped one. Every press that qualifies and is not probed says why on a skip line.
+// The pixel probe about c in the left eye, for the first three scoped presses and the first unscoped one. The probe's lines are about the first-seen eye, which is the left one in every
+// logged frame, so its points come from the left eye's own geometry (the census used the right eye's before A2). Every press that qualifies and is not probed says why on a skip line.
+constexpr uint32_t kProbeGeometryEye = 0;   // the eye whose scene rows the probe's points are worked out from; the pixel probe watches the first-seen eye, 0
 void censusNow(Vr& v, const Geometry& g) noexcept {
     const bool scoped = v.item.scope == loadout::kScopeYes, unscoped = v.item.scope == loadout::kScopeNo;
     if (!((scoped && v.scopedRuns < kScopedRuns) || (unscoped && !v.controlRun))) return;
+    const uint32_t pe = kProbeGeometryEye;
     char line[1100];
     const char* why = nullptr;
     sz::ProbeSet set;
-    if (!g.eye[1].ok) why = g.why[1];
-    else if (!g.tanOk[1]) why = "the right eye's tangents are not usable";
+    if (!g.eye[pe].ok) why = g.why[pe];
+    else if (!g.tanOk[pe]) why = "the left eye's tangents are not usable";
     else if (pixelProbeArmed()) why = "the pixel probe is armed already";
-    else if (!sz::probePoints(g.eye[1].ndc, g.tan[1], &set)) why = "the probe points are not usable";
+    else if (!sz::probePoints(g.eye[pe].ndc, g.tan[pe], &set)) why = "the probe points are not usable";
     if (why) {
         char reason[96];
-        std::snprintf(reason, sizeof(reason), "c missing for eye R: %s", why);
-        sz::formatCensusSkip(line, sizeof(line), g.eye[1].ok ? why : reason);
+        std::snprintf(reason, sizeof(reason), "c missing for eye L: %s", why);
+        sz::formatCensusSkip(line, sizeof(line), g.eye[pe].ok ? why : reason);
         Log::get().note("%s", line);
         return;
     }
@@ -34290,7 +34293,7 @@ void censusNow(Vr& v, const Geometry& g) noexcept {
     ++v.runs;
     if (scoped) ++v.scopedRuns;
     else v.controlRun = true;
-    sz::formatCensusRun(line, sizeof(line), v.runs, v.press, v.item.name, loadout::scopeName(v.item.scope), set, v.runs == 1);
+    sz::formatCensusRun(line, sizeof(line), v.runs, v.press, v.item.name, loadout::scopeName(v.item.scope), set, v.runs == 1, pe, 0);
     Log::get().note("%s", line);
 }
 
@@ -34423,7 +34426,7 @@ void s0VrNoteSample(const F141Sample& s, uint64_t now) noexcept {
 
 // ---- A1: the scope lens, the frame thread's half (scope_zoom_s1.h, scope_zoom.h; docs\design-vr-scope-magnification-2026-10-28.md, section 8) ---------------------------------------------
 // Each frame in native on foot VR the tick answers one question: does the lens run on the picture this frame draws (fix.native_on_foot_ads_scope_zoom on; the sights up, the game's w at
-// 1.0; the held item and scope in the table with M >= 1.05; S fresh, so c through the right eye's scene rows)? It publishes the answer with c (corrected for the draw's jitter by the
+// 1.0; the held item and scope an optical sight in the table with M >= 1.05; S fresh, so c through the right eye's scene rows)? It publishes the answer with c (corrected for the draw's jitter by the
 // door, which owns the output's size), M after its ease and the tangents of the render, by seqlock, for the door on the draw thread. It borrows S0's geometry (the rows it projected
 // through) and the samples S0 keeps from F141's drain (w, S, E); nothing is written to a game object. c is the game's line E -> S (the shots go along it, F143) projected at the far
 // impact point, kFarM along it past S, not S itself: S is 17 to 28 cm away, so an eye a millimetre off the line would put S 0.3 degrees from the far target and the lens would
@@ -34531,13 +34534,15 @@ void tick(uint64_t nowMs) noexcept {
     gi.adsActive = g_adsState == kAdsActive;
     gi.wFull = v.wSeen && s0::freshMs(nowMs, v.wMs) && std::isfinite(v.w) && v.w >= 1.0f;
     double adsDeg = std::numeric_limits<double>::quiet_NaN();
-    gi.tableHit = sz::lensAdsDeg(s.item.name, s.item.scope, &adsDeg);
-    gi.m = gi.tableHit ? sz::lensZoom(ref, adsDeg) : std::numeric_limits<double>::quiet_NaN();
+    bool fromBare = false;
+    gi.optical = sz::lensAdsDeg(s.item.name, s.item.scope, &adsDeg, &fromBare);
+    if (gi.optical && fromBare) ++s.ts.fovFromBare;
+    gi.m = gi.optical ? sz::lensZoom(ref, adsDeg) : std::numeric_limits<double>::quiet_NaN();
     s.adsDeg = adsDeg;
     s.targetM = gi.m;
     s0::Geometry g;
     double ndcFar[2] = {0.0, 0.0}, farDeg = std::numeric_limits<double>::quiet_NaN();
-    if (gi.keyOn && gi.onFoot && gi.adsActive && gi.wFull && gi.tableHit && gi.m >= sz::kLensMinM) {
+    if (gi.keyOn && gi.onFoot && gi.adsActive && gi.wFull && gi.optical && gi.m >= sz::kLensMinM) {
         g = s0::geometryNow(v, nowMs);   // the right eye's scene rows with S through them (S0's math, its conditions)
         gi.sFresh = v.haveS && s0::freshMs(nowMs, v.sMs);
         gi.cUsable = g.eye[1].ok && g.tanOk[1];   // the rows and their tangents; the lens works in uv, so the scene target's size does not matter
@@ -34558,7 +34563,7 @@ void tick(uint64_t nowMs) noexcept {
     switch (verdict) {   // this press's count of the gate's verdicts, beside the door's own
         case sz::LensVerdict::kQualifies: ++s.ts.qualified; break;
         case sz::LensVerdict::kNoS: ++s.ts.noS; break;
-        case sz::LensVerdict::kNotInTable: ++s.ts.notInTable; break;
+        case sz::LensVerdict::kNotOptical: ++s.ts.notOptical; break;
         default: ++s.ts.idle; break;
     }
     if (verdict == sz::LensVerdict::kQualifies) {

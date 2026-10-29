@@ -279,12 +279,12 @@ inline void runS0(Check&& check) {
         const double c0[2] = {0.0, 0.0};
         sz::ProbeSet s;
         const bool ok = sz::probePoints(c0, sym, &s);
-        const double a15 = std::tan(1.5 * sz::kPi / 180.0), a4 = std::tan(4.0 * sz::kPi / 180.0), a8 = std::tan(8.0 / std::sqrt(2.0) * sz::kPi / 180.0);
+        const double a09 = std::tan(0.9 * sz::kPi / 180.0), a15 = std::tan(1.5 * sz::kPi / 180.0), a4 = std::tan(4.0 * sz::kPi / 180.0);
         check(ok && s.n == 4 && s.clamped == 0 && near3(s.pt[0].x, 0.5, 1e-6) && near3(s.pt[0].y, 0.5, 1e-6), "S0 probe points: a centred c is the middle of the target (0.5, 0.5)");
-        check(near3(s.pt[1].x, 0.5 + 0.5 * a15 / 1.0, 1e-6) && near3(s.pt[1].y, 0.5, 1e-6), "S0 probe points: 1.5 degrees to the right moves x by tan(1.5 deg) / (R - L) * 2 / 2 and not y");
-        check(near3(s.pt[2].x, 0.5, 1e-6) && near3(s.pt[2].y, 0.5 - 0.5 * a4 / 0.8, 1e-6) && s.pt[2].y < 0.5, "S0 probe points: 4 degrees up moves y toward the top of the target (y down)");
-        check(near3(s.pt[3].x, 0.5 - 0.5 * a8 / 1.0, 1e-5) && near3(s.pt[3].y, 0.5 + 0.5 * a8 / 0.8, 1e-5) && s.pt[3].x < 0.5 && s.pt[3].y > 0.5,
-              "S0 probe points: 8 degrees down and to the left along the diagonal");
+        check(near3(s.pt[1].x, 0.5, 1e-6) && near3(s.pt[1].y, 0.5 + 0.5 * a09 / 0.8, 1e-6) && s.pt[1].y > 0.5,
+              "S0 probe points: 0.9 degrees straight below c (where the chevron sits) moves y toward the bottom of the target (y down) by tan(0.9 deg) and not x");
+        check(near3(s.pt[2].x, 0.5, 1e-6) && near3(s.pt[2].y, 0.5 - 0.5 * a15 / 0.8, 1e-6) && s.pt[2].y < 0.5, "S0 probe points: 1.5 degrees above c moves y toward the top of the target");
+        check(near3(s.pt[3].x, 0.5 + 0.5 * a4 / 1.0, 1e-6) && near3(s.pt[3].y, 0.5, 1e-6) && s.pt[3].x > 0.5, "S0 probe points: 4 degrees beside c moves x to the right by tan(4 deg) / (R - L) * 2 / 2 and not y");
         // off-centre c, asymmetric tangents: the plane angle from c's ray is exact
         const float asym[4] = {-1.1f, 0.9f, -0.7f, 0.9f};
         const double c1[2] = {0.3, -0.2};
@@ -297,20 +297,20 @@ inline void runS0(Check&& check) {
         const double dx1 = (std::atan(tp[0][0]) - std::atan(tc[0])) * sz::kDeg, dy1 = (std::atan(tp[0][1]) - std::atan(tc[1])) * sz::kDeg;
         const double dx2 = (std::atan(tp[1][0]) - std::atan(tc[0])) * sz::kDeg, dy2 = (std::atan(tp[1][1]) - std::atan(tc[1])) * sz::kDeg;
         const double dx3 = (std::atan(tp[2][0]) - std::atan(tc[0])) * sz::kDeg, dy3 = (std::atan(tp[2][1]) - std::atan(tc[1])) * sz::kDeg;
-        check(ok1 && near3(tc[0], 0.2, 1e-6) && near3(tc[1], -0.06, 1e-6) && near3(dx1, 1.5, 1e-4) && near3(dy1, 0.0, 1e-4) && near3(dx2, 0.0, 1e-4) && near3(dy2, 4.0, 1e-4) &&
-                  near3(dx3, -8.0 / std::sqrt(2.0), 1e-4) && near3(dy3, -8.0 / std::sqrt(2.0), 1e-4) && o.clamped == 0,
-              "S0 probe points: an off-centre c in an off-axis frustum: each point is the asked plane angle from c's ray, 1.5, 4 and 8 degrees");
+        check(ok1 && near3(tc[0], 0.2, 1e-6) && near3(tc[1], -0.06, 1e-6) && near3(dx1, 0.0, 1e-4) && near3(dy1, -0.9, 1e-4) && near3(dx2, 0.0, 1e-4) && near3(dy2, 1.5, 1e-4) &&
+                  near3(dx3, 4.0, 1e-4) && near3(dy3, 0.0, 1e-4) && o.clamped == 0,
+              "S0 probe points: an off-centre c in an off-axis frustum: each point is the asked plane angle from c's ray, 0.9 below, 1.5 above and 4 beside");
         check(near3(o.pt[0].x, (1.0 + 0.3) * 0.5, 1e-6) && near3(o.pt[0].y, (1.0 + 0.2) * 0.5, 1e-6), "S0 probe points: c itself is (ndc + 1) / 2 in x and (1 - ndc) / 2 in y");
-        // a clamp: c near the right edge, the 1.5 degree point falls off the target
+        // a clamp: c near the right edge, the 4 degree point beside it falls off the target
         const double edge[2] = {0.995, 0.0};
         sz::ProbeSet cl;
         const bool okc = sz::probePoints(edge, sym, &cl);
-        check(okc && cl.clamped == 2u && cl.pt[1].x == 1.0f && cl.pt[0].x < 1.0f && cl.pt[1].y >= 0.0f && cl.pt[1].y <= 1.0f && cl.pt[2].x < 1.0f,
-              "S0 probe points: a point past the target's edge is moved to it and named in the clamp mask (bit 1 here)");
+        check(okc && cl.clamped == 8u && cl.pt[3].x == 1.0f && cl.pt[0].x < 1.0f && cl.pt[3].y >= 0.0f && cl.pt[3].y <= 1.0f && cl.pt[2].x < 1.0f,
+              "S0 probe points: a point past the target's edge is moved to it and named in the clamp mask (bit 3 here)");
         const double corner[2] = {-0.99, 0.99};
         sz::ProbeSet cc;
-        check(sz::probePoints(corner, sym, &cc) && (cc.clamped & 8u) && cc.pt[3].x == 0.0f && cc.pt[2].y == 0.0f && (cc.clamped & 4u),
-              "S0 probe points: the up-left corner clamps the up point and the down-left diagonal point (x to 0)");
+        check(sz::probePoints(corner, sym, &cc) && cc.clamped == 4u && cc.pt[2].y == 0.0f && cc.pt[3].x > 0.0f && cc.pt[1].y > 0.0f,
+              "S0 probe points: the up-left corner clamps the point 1.5 degrees above c (y to 0) and no other: the one beside c moves away from the edge");
         const double nanC[2] = {sz::kNaN, 0.0};
         const float badTan[4] = {1.0f, -1.0f, 0.0f, 0.0f};
         check(!sz::probePoints(nanC, sym, &s) && !sz::probePoints(c0, badTan, &s) && !sz::probePoints(c0, nullptr, &s) && !sz::probePoints(c0, sym, nullptr),
@@ -385,9 +385,12 @@ inline void runS0(Check&& check) {
         const float tg[4] = {-1.0f, 1.0f, -1.0f, 1.0f};
         sz::probePoints(cc, tg, &ps);
         sz::formatCensusRun(buf, sizeof(buf), 1, 4, "$x;", "yes", ps, true);
-        check(starts("scope lens census (S0): run 1 press 4 item $x; scope yes eye R points 0.600,0.450;") && has("at 0, 1.5, 4, 8 deg about c") && has("clamped to the target: none") &&
-                  has("the probe keeps these points afterwards"),
-              "S0 lines: the census run line names the four points, the clamp, and (the first time) that the probe keeps them");
+        check(starts("scope lens census (S0): run 1 press 4 item $x; scope yes eye L points 0.600,0.450;") && has("at 0, 0.9 below, 1.5 above, 4 beside deg about c") && has("clamped to the target: none") &&
+                  has("probe eye 0 is physical eye L;") && has("the probe keeps these points afterwards"),
+              "S0 lines: the census run line says the left eye, names the four points, the clamp, the probe's eye beside the physical eye, and (the first time) that the probe keeps them");
+        sz::formatCensusRun(buf, sizeof(buf), 3, 6, "$x;", "yes", ps, false, 1, 0);
+        check(starts("scope lens census (S0): run 3 press 6 item $x; scope yes eye R points ") && has("probe eye 0 is physical eye L;"),
+              "S0 lines: points from the right eye read against a probe on the left eye say so");
         sz::formatCensusRun(buf, sizeof(buf), 2, 5, "$x;", "yes", ps, false);
         check(!has("the probe keeps these points"), "S0 lines: only the first census run line says the probe keeps its points");
         sz::formatCensusSkip(buf, sizeof(buf), "c missing");
