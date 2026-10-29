@@ -282,6 +282,15 @@ inline bool flatDomainPredictsWorld(const float (&rows)[6][4], const FlatDomainW
     if (detail) *detail = out;
     return out.predicted;
 }
+// An HDR target no draw has named the world for, with a first person in the frame (2026-10-29: on foot, a scanner tool in hand, panned to
+// bare terrain). The pool-less admission (flat_runtime.cpp, unnamedWorldDepth) takes the target's first camera for the world's only when
+// nothing so far was a source or a first-person draw, and a tool in hand is both, so its glow pass made every frame of the view a second
+// camera and refused. Here the cameras decide instead of the counts: the target's first camera is the last world's (near plane and both
+// scales, flatDomainPredictsWorld) and the drawing camera is not (drawPredictedWorld, the draw scope's one prediction). No reference
+// admits nothing.
+inline bool flatDomainHdrFirstCameraIsWorld(const float (&first)[6][4], bool drawPredictedWorld, const FlatDomainWorldReference& ref) {
+    return !drawPredictedWorld && flatDomainPredictsWorld(first, ref);
+}
 // A pre-world depth-only draw is provisional: its camera must become the
 // actual selected world camera in this frame. No later-material coverage is
 // guessed, and a foreign or missing world witness leaves the frame refused.
