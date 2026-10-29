@@ -2,10 +2,11 @@
 
 ## Status
 
-- **State (2026-10-28):** **Round 8 BUILT, NOT FLOWN** (below); rounds 7 and 8 are on the
-  branch only. Round 7 FLOWN OK. Rounds 1 to 6 FLOWN OK, rounds 5 and 6 ON MAIN
-  (`edvr_gfx_20261028_192619.log`, `--health` OK). Tester zip
-  `dist\edvr-desktop-window-<commit>-dlls.zip`. Five live keys in `[visual]`, on VR's **Desktop
+- **State (2026-10-28):** rounds 1 to 8 ON MAIN. **Round 8 FLOWN OK on the Pimax**
+  (`edvr_gfx_20261028_215040.log`): the rule switched live 22 times, `hidden-area mesh served
+  no, as the game, no mesh`, so native equals center there, as expected. OPEN: native's mesh
+  path (1.32x at u 0.515) is flown on no headset; a tester with a mesh headset compares it with
+  the game's own mirror. Rounds 1 to 7 FLOWN OK. Five live keys in `[visual]`, on VR's **Desktop
   window** page (after Visual): `visual.desktop_window` (`game` | `left_eye` | `right_eye` |
   `both_eyes`, default `game`), `desktop_window_aspect` (`full` | `1:1` | `4:3` | `16:10` |
   `16:9` | `21:9`, default `full`), `desktop_window_crop` (`native` | `center`, default
