@@ -2064,6 +2064,19 @@ bool armBuildPlan(uint64_t x) noexcept {
                         joints > nofoot::kIkClavR ? static_cast<unsigned>(g_pfzParents[nofoot::kIkClavR]) : 0xFFFFu, byLevel[0], byLevel[1], byLevel[2],
                         static_cast<unsigned>(plan.sq.n));
     }
+    // F166: the upper body's held joints (the spine, both clavicles and upper arms) and the joints that come with them. A refusal leaves the hold off; nothing else depends on it.
+    {
+        const uint32_t clav[2] = {plan.ok[0] ? plan.side[0].C : 0xFFFFu, plan.ok[1] ? plan.side[1].C : 0xFFFFu};
+        const uint32_t upper[2] = {plan.ok[0] ? plan.side[0].U : 0xFFFFu, plan.ok[1] ? plan.side[1].U : 0xFFFFu};
+        plan.f166 = nofoot::f166::buildPlan(g_pfzParents, joints, clav, upper);
+        char held[96] = {};
+        size_t at = 0;
+        for (uint32_t k = 0; k < plan.f166.n; ++k)
+            armAppend(held, sizeof(held), &at, "%s%u", k ? " " : "", static_cast<unsigned>(plan.f166.joint[k]));
+        Log::get().note("native on foot upper body hold plan (F166): X=%016llX %s (%s); held joints %s (arms %u); %u joints come with them",
+                        static_cast<unsigned long long>(x), plan.f166.ok() ? "ok" : "REFUSED", nofoot::f166::whyText(plan.f166.why), held[0] ? held : "none",
+                        static_cast<unsigned>(plan.f166.arms), static_cast<unsigned>(plan.f166.carriedN));
+    }
     // F65b: the legs for stand armed: each chain from the probe's foot (nofoot::ikLegChain), the anchor (the freeze's: the lowest common
     // ancestor of the neck 34 and the left foot), the pair check against the RE's indices (the R foot confirmed by FindJoint), and the upper
     // body UB. A refusal leaves the legs and the raise off; the arms are unaffected.

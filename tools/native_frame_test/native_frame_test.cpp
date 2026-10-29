@@ -58,6 +58,7 @@
 #include "f162_checks.h"    // F162: the ADS sight eye (the key's text, the aiming eye, the share by mode, the lock for the right eye bit for bit as before and for the left eye)
 #include "f163_checks.h"    // F163: the crouched stance from the animated neck's drop (the flights' necks, standing ADS bit for bit, the continuity through a crouch and a stand)
 #include "f165_checks.h"    // F165: the left elbow's body-down pole blended in while crouched in the sights (the weight, the wrap-aware angle, the flight's aim on the real solver, the clamp, the line)
+#include "f166_checks.h"    // F166: the upper body held at its still crouched-ADS pose while walking crouched in the sights (the plan, the capture rules, the ramp, the slerp blend, the onset replayed, the line)
 #include "f151_checks.h"    // F151: the weapon readout's draw bound by its place (the ordinals, each guard, one bind per key, the lost-frame count) and the held copy's scope from the selected slot
 #include "f110_checks.h"    // F110: the ADS sight lock's model right eye (the left-eye job camera plus the IPD)
 #include "f111_checks.h"    // F111: the panel pointer instrument's statistics and verdict
@@ -7587,6 +7588,12 @@ int wmain(int argc, wchar_t** argv) {
     // lower, its swivel from the body-down pole's plane 43 deg to 0, the ceiling kept, the seed untouched, F159's reseed and F84's rifle support composed), the clamp for a mix over the
     // shoulder, the counters and the line's width.
     f165test::run165(check);
+    // F166: the upper body (the spine 16, 21, 24, both clavicles and upper arms) held at its still crouched-ADS pose while crouch-walking in the sights: the plan from the parents (the held
+    // joints, each joint under them carried by its nearest held ancestor, the legs untouched, the refusals), the capture rules (the first frame, the still pose after 0.25 s, the running
+    // average, the clears by a new press, the crouch left, another weapon or skeleton), the weight (the crouched weight x the detach weight x a 0.15 s in, 0.2 s out ramp; 0 standing, at
+    // the hip and still: nothing written, bit for bit), the slerp blend, the walk's onset replayed (the shoulder 23 cm up and 12 cm forward animated, on the still value held), the
+    // stance read from the game's neck so the hold cannot keep itself on, the counters, the seconds and the line within the log's limit.
+    f166test::run166(check);
     // F110: the ADS sight lock's model right eye from the left-eye job camera and from a solved left eye, the fallback, the IPD's sign.
     f110test::run110(check);
     // F111: the panel pointer instrument names the stage that turns a move the other way (K1 to K5, one at a time), the camera getters' decoding.

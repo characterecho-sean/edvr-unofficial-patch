@@ -13511,6 +13511,85 @@ def _hj_f161_arm_eye(rows, ctx):
     return ("OK", text)
 
 
+# F166: the upper body held at its still crouched-ADS pose while walking crouched in the sights (formatSummary in src/d3d11/native_on_foot_f166.h), and the plan of held joints the
+# census makes once per skeleton (native_on_foot_hooks.cpp). The plan line carries its own label (the window line's label does not match it), so a drifted plan line is unparsed too.
+H166_LABEL = "native on foot upper body hold (F166)"
+H166_PLAN_LABEL = "native on foot upper body hold plan (F166)"
+H166_RE = (r"native on foot upper body hold \(F166\) (?P<wl>\d+) s: item (?P<item>\S+); crouched in the sights (?P<ads>\d+) frames \(still (?P<still>\d+), moving (?P<mv>\d+)\); "
+           r"on the moving frames the hold weight mean (?P<wm>[\d.]+), held \(weight 0\.5 or more\) in (?P<held>\d+), the held pose from a still frame in (?P<ssrc>\d+), "
+           r"from the press's first frame in (?P<fsrc>\d+), none in (?P<nsrc>\d+); on the held frames the chest's lean as written (?P<lw>%s) deg, animated (?P<la>%s), "
+           r"the held pose's (?P<lh>%s) \(the animation (?P<tol>\d+) deg or more from the held pose in (?P<lmoved>\d+) frames, the written lean within that of it in (?P<lheld>\d+)\); "
+           r"the left shoulder from the eye \(right/up/forward, cm\): still (?P<sn0>\d+) frames (?P<s0r>%s)/(?P<s0u>%s)/(?P<s0f>%s), moving (?P<sn1>\d+) frames "
+           r"(?P<s1r>%s)/(?P<s1u>%s)/(?P<s1f>%s); seconds crouched in the sights and moving (?P<secm>\d+), held in half or more of them (?P<sech>\d+), with the animated lean far "
+           r"from the held pose (?P<secl>\d+), the written lean near it in (?P<seclh>\d+); writes refused (?P<failed>\d+)" % ((_HN,) * 9))
+H166_PLAN_RE = (r"native on foot upper body hold plan \(F166\): X=(?P<x>[0-9A-F]{16}) (?P<state>ok|REFUSED) \((?P<why>[^)]*)\); held joints (?P<joints>none|\d+(?: \d+)*) "
+                r"\(arms (?P<arms>\d+)\); (?P<carried>\d+) joints come with them")
+
+
+def _hj_f166_hold(rows, ctx):
+    """F166: the upper body held at its still crouched-ADS pose while crouch-walking in the sights. Per item: the seconds crouched in the sights and moving, the share of their
+    moving frames that were held (the hold's weight 0.5 or more; the ramp's first 0.08 s of each walk is not), the held pose's source (a still frame, or the press's first frame
+    when the pilot moved at once), and whether the chest's lean was held: on the held frames where the animation's lean was 10 deg or more from the held pose's, the written lean
+    stayed within 10 deg of the held pose's in 9 in 10 of them. 30 or more moving frames crouched in the sights with none held is NEVER APPLIED (the code never ran), held in under half
+    of them PARTIAL, as is a lean not held and a write refused. A refused plan (the skeleton's spine is not a chain of direct parents) is NEVER APPLIED whatever the flight did; a
+    plan that is fine and a log with no frame crouched in the sights is IDLE."""
+    sec, plans = rows.get("sec", []), rows.get("plan", [])
+    if not sec and not plans:
+        return None
+    last = plans[-1] if plans else None
+    plan_text = ("plan %s (%s), held joints %s (arms %s), %s joints come with them" % (last["state"], last["why"], last["joints"], last["arms"], last["carried"])) if last else \
+        "no plan line in the window"
+    if last and last["state"] != "ok":
+        return ("NEVER APPLIED", "the hold's plan was refused (%s): %s" % (last["why"], plan_text))
+    if not sec:
+        return ("IDLE", "%s; no frame crouched in the sights" % plan_text)
+    items = collections.OrderedDict()
+    for r in sec:
+        items.setdefault(r["item"], []).append(r)
+    parts, never, thin, notes = [], [], [], []
+    for item, rs in items.items():
+        g = lambda k, rr=rs: sum(int(r[k]) for r in rr)
+        mv, held = g("mv"), g("held")
+        if not g("ads"):
+            continue
+        wmean = sum(int(r["mv"]) * float(r["wm"]) for r in rs) / mv if mv else 0.0
+        hw = held or 1
+        lean = [sum(int(r["held"]) * float(r[k]) for r in rs) / hw for k in ("lw", "la", "lh")]
+        shoulder = []
+        for tag, nk in (("s0", "sn0"), ("s1", "sn1")):
+            n = g(nk) or 1
+            shoulder.append(([sum(int(r[nk]) * float(r[tag + k]) for r in rs) / n for k in ("r", "u", "f")], g(nk)))
+        lmoved, lheld = g("lmoved"), g("lheld")
+        parts.append("%s %d s: crouched in the sights %d frames (still %d, moving %d), held in %d of the moving ones (%.0f%%), weight mean %.2f, the held pose from a still frame in %d, "
+                     "from the press's first frame in %d, none in %d; on the held frames the chest's lean as written %+.1f deg, animated %+.1f, held pose %+.1f (the animation 10 deg or "
+                     "more from the held pose in %d frames, the written lean within 10 deg of it in %d); the left shoulder from the eye (right/up/forward, cm) still %+.1f/%+.1f/%+.1f "
+                     "(%d frames), moving %+.1f/%+.1f/%+.1f (%d frames); %d s crouched in the sights and moving, held in half or more of them in %d s, the lean moved in %d s and held in %d s" % (
+                         item, _hsecs(rs), g("ads"), g("still"), mv, held, 100.0 * held / mv if mv else 0.0, wmean, g("ssrc"), g("fsrc"), g("nsrc"), lean[0], lean[1], lean[2], lmoved,
+                         lheld, shoulder[0][0][0], shoulder[0][0][1], shoulder[0][0][2], shoulder[0][1], shoulder[1][0][0], shoulder[1][0][1], shoulder[1][0][2], shoulder[1][1],
+                         g("secm"), g("sech"), g("secl"), g("seclh")))
+        if mv >= 30 and held == 0:
+            never.append("the hold's weight reached 0.5 in none of %d moving frames crouched in the sights with %s" % (mv, item))
+        elif mv >= 30 and held * 2 < mv:
+            thin.append("%s: held in %d of %d moving frames crouched in the sights" % (item, held, mv))
+        if lmoved and lheld * 10 < lmoved * 9:
+            notes.append("the chest's lean was not held with %s (the written lean stayed within 10 deg of the held pose's in %d of %d frames where the animation had moved it)" % (item, lheld, lmoved))
+        if g("failed"):
+            notes.append("%d write(s) refused with %s (the hold had a pose and a weight and a matrix would not invert, or was not finite)" % (g("failed"), item))
+    if not parts:
+        return ("IDLE", "%s; no frame crouched in the sights" % plan_text)
+    text = "%s; %s" % (plan_text, "; ".join(parts))
+    if thin:
+        notes.insert(0, "the hold was thin (%s)" % "; ".join(thin))
+    if never:
+        return ("NEVER APPLIED", text + "; " + "; ".join(never + notes))
+    if notes:
+        return ("PARTIAL", text + "; " + "; ".join(notes))
+    moving = sum(int(r["mv"]) for r in sec)
+    if moving < 30:
+        return ("IDLE", text + "; under 30 moving frames crouched in the sights: little for the hold to do")
+    return ("OK", text)
+
+
 def _hj_f99a_draw(rows, ctx):
     """F99a: one line per draw (the game's selection of an item while Status.json named none): when Status.json named it, where the hands' authority came from
     and when, when the armed ramp was full, all from the game's selection. A draw the game selected 100 ms or more before Status.json named it whose hands waited
@@ -14661,6 +14740,10 @@ HEALTH_RULES = (
     _hrule("left arm to the eye (F161)", ("F161",), (H161_LABEL,), (
         ("sec", H161_RE),
     ), _hj_f161_arm_eye),
+    _hrule("upper body hold (F166)", ("F166",), (H166_LABEL, H166_PLAN_LABEL), (
+        ("sec", H166_RE),
+        ("plan", H166_PLAN_RE),
+    ), _hj_f166_hold),
     _hrule("draw onset (F99a)", ("F99a",), ("native on foot draw onset (F99a)",), (
         ("sec", r"native on foot draw onset \(F99a\): item (?P<item>\S+); the game's selection (?P<sel>id [0-9A-F]{8}|not seen); body (?P<body>moving|still); Status\.json "
                 r"named it (?P<status>at \+\d+ ms|never); the hands' authority from (?P<src>the game's selection|the native primary selection|Status\.json) "
@@ -15649,6 +15732,7 @@ def self_test_health():
     f165_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f165.h")
     f160_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f160.h")
     f161_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f161.h")
+    f166_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f166.h")
     f154_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f154.h")
     try:
         source, swap, f90src, f91src = read_text(src_path), read_text(swap_path), read_text(f90_path), read_text(f91_path)
@@ -15666,6 +15750,8 @@ def self_test_health():
         f165src = read_text(f165_path)
         f160src = read_text(f160_path)
         f161src = read_text(f161_path)
+        f166src = read_text(f166_path)
+        hooks_src = read_text(os.path.join(repo_root(), "src", "d3d11", "native_on_foot_hooks.cpp"))
         f154src = read_text(f154_path)
     except OSError as e:
         print("health: the DLL source the self-test reads its log formats from is not where it looks (%s)" % e)
@@ -15751,6 +15837,15 @@ def self_test_health():
             fmts[key] = health_c_format(f161src, needle)
         if fmts[key] is None:
             raise AssertionError("native_on_foot_f161.h has no format holding %r: the --health rule that reads it is out of date" % needle)
+        return health_render(fmts[key], vals)
+
+    def R166(needle, *vals):
+        """F166's window line (formatSummary in native_on_foot_f166.h), from its own format literal; the plan line (native_on_foot_hooks.cpp), from its own."""
+        key = "f166:" + needle
+        if key not in fmts:
+            fmts[key] = health_c_format(f166src, needle) or health_c_format(hooks_src, needle)
+        if fmts[key] is None:
+            raise AssertionError("native_on_foot_f166.h and native_on_foot_hooks.cpp have no format holding %r: the --health rule that reads it is out of date" % needle)
         return health_render(fmts[key], vals)
 
     def R105(needle, *vals):
@@ -17037,6 +17132,61 @@ def self_test_health():
         check("F161 arm: a line from before F163 (no weight and no drop in the contexts) is read as it was", [re.sub(r", crouched weight mean [\d.]+, neck drop mean -?[\d.]+ cm", "", arm161(bins=FLIGHT161, s4=7, s25=5))],
               0, [("PARTIAL", F161)], has=["ADS crouched 300 frames: upper arm nearest 1.3 cm, mean 3.1; elbow nearest 4.0, mean 6.0; under 4 cm 280 (moving 240), under 2.5 cm 150",
                                            "seconds with the arm under 4 cm of the eye 7, under 2.5 cm 5"], lacks=["UNPARSED", "crouched weight"])
+
+        # ---- F166: the upper body held at its still crouched-ADS pose while walking crouched in the sights ----
+        F166 = "upper body hold (F166)"
+
+        def hold166(item=RIFLE97, wl=10, ads=900, still=300, mv=600, wm=0.93, held=540, ssrc=600, fsrc=0, nsrc=0, lw=49.0, la=73.0, lh=48.0, lmoved=540, lheld=530,
+                    sh0=(300, -11.0, -10.0, -30.0), sh1=(600, -11.5, -9.0, -31.0), secm=8, sech=8, secl=8, seclh=8, failed=0):
+            """F166's window line, from the DLL's own format (formatSummary, native_on_foot_f166.h); sh0, sh1: (frames, right, up, forward) of the left shoulder from the eye in cm,
+            still and moving."""
+            return R166("native on foot upper body hold (F166) %u s: item %s", wl, item, ads, still, mv, wm, held, ssrc, fsrc, nsrc, lw, la, lh, 10, lmoved, lheld,
+                        sh0[0], sh0[1], sh0[2], sh0[3], sh1[0], sh1[1], sh1[2], sh1[3], secm, sech, secl, seclh, failed)
+
+        def plan166(state="ok", why="ok", joints="16 21 24 35 25 36 26", arms=3, carried=9):
+            """F166's plan line, from the census's own format (native_on_foot_hooks.cpp)."""
+            return R166("native on foot upper body hold plan (F166): X=%016llX", 0x1C998333A20, state, why, joints, arms, carried)
+
+        PLAN166 = "plan ok (ok), held joints 16 21 24 35 25 36 26 (arms 3), 9 joints come with them"
+        check("F166 hold: crouch-walking in the sights, held in 9 in 10 of the moving frames with the lean kept", [plan166(), hold166()], 0, [("OK", F166)],
+              has=[PLAN166 + "; " + RIFLE97 + " 10 s: crouched in the sights 900 frames (still 300, moving 600), held in 540 of the moving ones (90%), weight mean 0.93, the held pose from a "
+                   "still frame in 600, from the press's first frame in 0, none in 0; on the held frames the chest's lean as written +49.0 deg, animated +73.0, held pose +48.0 "
+                   "(the animation 10 deg or more from the held pose in 540 frames, the written lean within 10 deg of it in 530); the left shoulder from the eye (right/up/forward, cm) "
+                   "still -11.0/-10.0/-30.0 (300 frames), moving -11.5/-9.0/-31.0 (600 frames); 8 s crouched in the sights and moving, held in half or more of them in 8 s, the lean "
+                   "moved in 8 s and held in 8 s"], lacks=["UNPARSED", "was thin", "not held"])
+        check("F166 hold: moving 120 frames crouched in the sights with the weight past 0.5 in none is a hold that never ran",
+              [plan166(), hold166(ads=300, still=180, mv=120, wm=0.0, held=0, ssrc=0, nsrc=120, lmoved=0, lheld=0, secm=2, sech=0, secl=0, seclh=0)], 3, [("NEVER APPLIED", F166)],
+              has=["the hold's weight reached 0.5 in none of 120 moving frames crouched in the sights with " + RIFLE97], lacks=["UNPARSED"])
+        check("F166 hold: held in a quarter of the moving frames is thin", [plan166(), hold166(mv=400, held=100, wm=0.3, ssrc=400, lmoved=100, lheld=100)], 0, [("PARTIAL", F166)],
+              has=["the hold was thin (" + RIFLE97 + ": held in 100 of 400 moving frames crouched in the sights)"], lacks=["UNPARSED", "not held"])
+        check("F166 hold: under 30 moving frames crouched in the sights is too few to call the hold absent",
+              [plan166(), hold166(ads=200, still=171, mv=29, wm=0.0, held=0, ssrc=0, nsrc=29, lmoved=0, lheld=0, secm=0, sech=0, secl=0, seclh=0)], 0, [("IDLE", F166)],
+              has=["under 30 moving frames crouched in the sights: little for the hold to do"], lacks=["UNPARSED", "never", "was thin"])
+        check("F166 hold: a written lean that did not stay near the held pose's where the animation moved it is PARTIAL",
+              [plan166(), hold166(lw=70.0, lmoved=500, lheld=100, seclh=1)], 0, [("PARTIAL", F166)],
+              has=["the chest's lean was not held with " + RIFLE97 + " (the written lean stayed within 10 deg of the held pose's in 100 of 500 frames where the animation had moved it)"],
+              lacks=["UNPARSED", "was thin"])
+        check("F166 hold: no frame where the animation moved the lean far from the held pose has nothing to hold, and is OK",
+              [plan166(), hold166(la=49.0, lmoved=0, lheld=0, secl=0, seclh=0)], 0, [("OK", F166)], lacks=["UNPARSED", "not held"])
+        check("F166 hold: a write refused is PARTIAL", [plan166(), hold166(failed=3)], 0, [("PARTIAL", F166)], has=["3 write(s) refused with " + RIFLE97], lacks=["UNPARSED"])
+        check("F166 hold: the press's first frame as the held pose is read and shown", [plan166(), hold166(ssrc=100, fsrc=500)], 0, [("OK", F166)],
+              has=["the held pose from a still frame in 100, from the press's first frame in 500"], lacks=["UNPARSED"])
+        check("F166 hold: a flight with no frame crouched in the sights and a good plan is idle",
+              [plan166(), hold166(ads=0, still=0, mv=0, wm=0.0, held=0, ssrc=0, nsrc=0, lmoved=0, lheld=0, sh0=(0, 0.0, 0.0, 0.0), sh1=(0, 0.0, 0.0, 0.0), secm=0, sech=0, secl=0, seclh=0)],
+              0, [("IDLE", F166)], has=[PLAN166 + "; no frame crouched in the sights"], lacks=["UNPARSED"])
+        check("F166 hold: the plan line alone is idle", [plan166()], 0, [("IDLE", F166)], has=[PLAN166 + "; no frame crouched in the sights"], lacks=["UNPARSED"])
+        check("F166 hold: a refused plan is a hold that never ran whatever the flight did",
+              [plan166("REFUSED", "the spine 16, 21, 24 is not a chain of direct parents", "none", 0, 0), hold166(held=0, mv=600)], 3, [("NEVER APPLIED", F166)],
+              has=["the hold's plan was refused (the spine 16, 21, 24 is not a chain of direct parents): plan REFUSED"], lacks=["UNPARSED"])
+        check("F166 hold: two windows add up, the weight and the lean weighted by their frames",
+              [plan166(), hold166(mv=100, held=100, wm=1.0, lw=48.0, la=70.0, lh=48.0, lmoved=100, lheld=100, secm=1, sech=1, secl=1, seclh=1),
+               hold166(mv=300, held=200, wm=0.5, lw=52.0, la=76.0, lh=48.0, lmoved=200, lheld=190, secm=3, sech=2, secl=2, seclh=2)], 0, [("OK", F166)],
+              has=["20 s: crouched in the sights 1800 frames (still 600, moving 400), held in 300 of the moving ones (75%), weight mean 0.62", "4 s crouched in the sights and moving, held in half or more of "
+                   "them in 3 s, the lean moved in 3 s and held in 3 s"], lacks=["UNPARSED"])
+        check("F166 hold: a window line that drifted from its pattern is unparsed", ["native on foot upper body hold (F166) 10 s: something else"], 4, [("UNPARSED", F166)])
+        check("F166 hold: a plan line that drifted from its pattern is unparsed", ["native on foot upper body hold plan (F166): X=1 something else"], 4, [("UNPARSED", F166)])
+        check("F166 hold: a window line that drifted beside a good one is counted beside the verdict", [plan166(), hold166(), "native on foot upper body hold (F166) 10 s: something else"], 0,
+              [("OK", F166)], has=["[+1 line(s) the rule's patterns do not match: "])
 
         # ---- draw onset (F99a): a drawn item's hands from the game's own selection ----
         F99 = "draw onset (F99a)"
