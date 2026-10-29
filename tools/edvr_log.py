@@ -14028,6 +14028,80 @@ def _hj_f171_carriage(rows, ctx):
     return ("OK", text)
 
 
+# F175 (measure only): the view's roll and pitch against the headset's (formatGroup in src/d3d11/native_on_foot_f175.h), a line a second for each look mode and item with frames.
+H175_LABEL = "native on foot view roll (F175)"
+H175_RE = (r"native on foot view roll \(F175\) (?P<wl>\d+) s: mode (?P<mode>mouse look|look to aim), item (?P<item>armed|unarmed), F61 rig (?P<rig>ON|off); (?P<frames>\d+) frames "
+           r"\(roll: about the view's forward against the character's up, \+ the right side up; error = the view's less the headset's in LOCAL\); roll error mean (?P<rmean>%s) rms (?P<rrms>[\d.]+) "
+           r"max (?P<rmax>[\d.]+) deg, over 2 deg in (?P<over>\d+) frames; head still \(under 10 deg/s\) (?P<sn>\d+) frames mean (?P<smean>%s) rms (?P<srms>[\d.]+) max (?P<smax>[\d.]+); "
+           r"head turning \(yaw over 30 deg/s\) (?P<tn>\d+) frames mean (?P<tmean>%s) rms (?P<trms>[\d.]+) max (?P<tmax>[\d.]+); pitch error \(the view's elevation less (?P<pexp>[^)]+)\) "
+           r"(?P<pn>\d+) frames mean (?P<pmean>%s) rms (?P<prms>[\d.]+) max (?P<pmax>[\d.]+) deg; slope of the roll error against aim pitch x the head's yaw lead (?P<slope>%s) over "
+           r"(?P<pairs>\d+) frames \(x rms (?P<xrms>[\d.]+) rad\); head speed mean (?P<speed>[\d.]+) deg/s; aim pitch mean (?P<aim>%s) deg; reported head lead over the aim yaw (?P<yawlead>%s) "
+           r"pitch (?P<pitchlead>%s) deg" % ((_HN,) * 8))
+H175_FLAG_RMS, H175_FLAG_SECONDS = 1.5, 2   # nofoot::f175::kFlagRmsDeg and kFlagSeconds
+
+
+def _hj_f175_view_roll(rows, ctx):
+    """F175 (measure only): the view's roll and pitch against the headset's. A tester, in a combat zone with look to aim on: "a really unpleasant tilting motion to your view when looking
+    horizontally". By design the view is the headset's, with no roll added, and nothing in the log measured that. Per pin call, with this frame's eye rows (the camera the eyes were rendered
+    with), the sights down and the commander's camera: the view's roll about its forward against the character's up (positive: the right side up) less the headset's roll in LOCAL, the
+    view's elevation less the expected one (look to aim: the headset's in LOCAL; mouse look: plus the aim's pitch), the headset's rate (still under 10 deg/s, turning over 30 deg/s of
+    yaw), and the slope of the roll error against (aim pitch x the reported head's yaw lead over the aim). The report gives the figures by look mode, pooled over the seconds and the
+    items. It flags "the view rolls against the headset" (PARTIAL) when a mode's roll error rms is over 1.5 deg across 2 s or more of frames, naming whether it is with the head still,
+    turning, or both. What separates the readings: a slope near +-1 with the aim pitched and the head leading says EDVR's cancel adds the roll; a roll error with the head still, or in mouse
+    look too, says the game's own camera rolls; a roll error near 0 with a pitch error says the tilt is a nod, not a roll; F61's rig ON is named. IDLE when the log has the raise
+    carriage lines (the pin ran on this build) and no second with frames; no line and no carriage line: not present."""
+    sec = rows.get("sec", [])
+    if not sec:
+        if ctx.get("raise carriage (F171)", {}).get("sec"):
+            return ("IDLE", "the pin ran (raise carriage lines) and no second had a frame with the view's roll measured: no mouse look or look to aim frame with this frame's eye rows, the "
+                            "sights down and a whole LOCAL pose")
+        return None
+    modes = collections.OrderedDict()
+    for r in sec:
+        modes.setdefault(r["mode"], []).append(r)
+    parts, flags = [], []
+    rig_on = any(r["rig"] == "ON" for r in sec)
+    for mode, rs in modes.items():
+        secs = _hsecs(rs)
+        frames = sum(int(r["frames"]) for r in rs)
+        if not frames:
+            continue
+
+        def pooled(n_key, rms_key, rr=rs):
+            n = sum(int(r[n_key]) for r in rr)
+            return n, (sum(int(r[n_key]) * float(r[rms_key]) ** 2 for r in rr) / n) ** 0.5 if n else 0.0
+        rn, rms = frames, (sum(int(r["frames"]) * float(r["rrms"]) ** 2 for r in rs) / frames) ** 0.5
+        mean = sum(int(r["frames"]) * float(r["rmean"]) for r in rs) / frames
+        rmax = max(float(r["rmax"]) for r in rs)
+        over = sum(int(r["over"]) for r in rs)
+        sn, srms = pooled("sn", "srms")
+        tn, trms = pooled("tn", "trms")
+        pn, prms = pooled("pn", "prms")
+        pmean = (sum(int(r["pn"]) * float(r["pmean"]) for r in rs) / pn) if pn else 0.0
+        weight = sum(int(r["pairs"]) * float(r["xrms"]) ** 2 for r in rs)   # sxx of each line: pairs x the input's rms squared
+        slope = (sum(int(r["pairs"]) * float(r["xrms"]) ** 2 * float(r["slope"]) for r in rs) / weight) if weight > 1e-12 else 0.0
+        pairs = sum(int(r["pairs"]) for r in rs)
+        aim = sum(int(r["frames"]) * float(r["aim"]) for r in rs) / frames
+        yawlead = sum(int(r["frames"]) * float(r["yawlead"]) for r in rs) / frames
+        items = ", ".join(sorted(set(r["item"] for r in rs)))
+        parts.append("%s (%s) %d s, %d frames: roll error mean %+.2f rms %.2f max %.2f deg, over 2 deg in %d (%.0f%%); head still %d frames rms %.2f, head turning %d frames rms %.2f; pitch error (%s) "
+                     "mean %+.2f rms %.2f over %d frames; slope against aim pitch x yaw lead %+.3f over %d pairs; aim pitch mean %+.1f deg, reported head yaw lead mean %+.1f deg" % (
+                         mode, items, secs, frames, mean, rms, rmax, over, 100.0 * over / frames, sn, srms, tn, trms, rs[0]["pexp"], pmean, prms, pn, slope, pairs, aim, yawlead))
+        if secs >= H175_FLAG_SECONDS and rms > H175_FLAG_RMS:
+            where = ("with the head still" if srms > H175_FLAG_RMS and trms <= H175_FLAG_RMS else "with the head turning" if trms > H175_FLAG_RMS and srms <= H175_FLAG_RMS else
+                     "with the head still and turning" if srms > H175_FLAG_RMS and trms > H175_FLAG_RMS else "in the frames between still and turning")
+            hint = ("the slope %+.2f against aim pitch x yaw lead is near +-1: EDVR's cancel adds the roll" % slope if abs(slope) >= 0.5 and pairs >= 30 else
+                    "the head was still: the game's own camera rolls" if srms > H175_FLAG_RMS and sn >= 30 else "the slope does not follow aim pitch x yaw lead")
+            flags.append("the view rolls against the headset in %s: roll error rms %.2f deg over %d s of frames, %s (%s)" % (mode, rms, secs, where, hint))
+    if not parts:
+        return None
+    text = "view roll error = the view's roll (about its forward against the character's up, + the right side up) less the headset's; " + "; ".join(parts) + \
+           ("; F61's rotation calibration rig was ON in this log" if rig_on else "; F61's rig off")
+    if flags:
+        return ("PARTIAL", text + "; " + "; ".join(flags))
+    return ("OK", text)
+
+
 # F169: the stance while the aim is pitched (formatStance in src/d3d11/native_on_foot_f169.h). The camera sinks as the aim pitches up and w_c read the sink as a crouch; the cap holds w_c
 # under the animated neck's posture weight from 20 deg of aim pitch. The dial's own note line and the swing's lines carry other labels.
 H169S_LABEL = "native on foot pitched stance (F169)"
@@ -15343,6 +15417,9 @@ HEALTH_RULES = (
     _hrule("raise carriage (F171)", ("F171",), (H171C_LABEL,), (
         ("sec", H171C_RE),
     ), _hj_f171_carriage),
+    _hrule("view roll (F175)", ("F175",), (H175_LABEL,), (
+        ("sec", H175_RE),
+    ), _hj_f175_view_roll),
     _hrule("pitched stance (F169)", ("F169",), (H169S_LABEL,), (
         ("sec", H169S_RE),
     ), _hj_f169_stance),
@@ -16372,6 +16449,7 @@ def self_test_health():
     f171_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f171.h")
     f171c_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f171c.h")
     f172_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f172.h")
+    f175_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f175.h")
     f138_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f138.h")
     f154_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f154.h")
     try:
@@ -16398,6 +16476,7 @@ def self_test_health():
         f171src = read_text(f171_path)
         f171csrc = read_text(f171c_path)
         f172src = read_text(f172_path)
+        f175src = read_text(f175_path)
         f138src = read_text(f138_path)
         hooks_src = read_text(os.path.join(repo_root(), "src", "d3d11", "native_on_foot_hooks.cpp"))
         f154src = read_text(f154_path)
@@ -16548,6 +16627,15 @@ def self_test_health():
             fmts[key] = health_c_format(f171csrc, needle)
         if fmts[key] is None:
             raise AssertionError("native_on_foot_f171c.h has no format holding %r: the --health rule that reads it is out of date" % needle)
+        return health_render(fmts[key], vals)
+
+    def R175(needle, *vals):
+        """F175's view roll line (formatGroup in native_on_foot_f175.h), from its own format literal."""
+        key = "f175:" + needle
+        if key not in fmts:
+            fmts[key] = health_c_format(f175src, needle)
+        if fmts[key] is None:
+            raise AssertionError("native_on_foot_f175.h has no format holding %r: the --health rule that reads it is out of date" % needle)
         return health_render(fmts[key], vals)
 
     def R172(needle, *vals):
@@ -18163,6 +18251,43 @@ def self_test_health():
               has=["raise not turned (a log from before F172)"], lacks=["UNPARSED"])
         check("F171 carriage: a line that drifted from its pattern is unparsed", ["native on foot raise carriage (F171) 1 s: something else"], 4, [("UNPARSED", C171)])
         check("F171 carriage: a line that drifted beside a good one is counted beside the verdict", [car171(LEVEL171), "native on foot raise carriage (F171) 1 s: something else"], 0, [("OK", C171)],
+              has=["[+1 line(s) the rule's patterns do not match: "])
+
+        # ---- F175 (measure only): the view's roll and pitch against the headset's ----
+        V175 = "view roll (F175)"
+
+        def vr175(mode="look to aim", item="armed", rig="off", wl=1, frames=90, roll=(0.1, 0.6, 1.9, 0), still=(60, 0.1, 0.5, 1.2), turning=(20, 0.2, 0.8, 1.9), pitch=(90, 0.1, 0.4, 1.0),
+                  slope=(0.02, 90, 0.05), speed=12.0, aim=5.0, lead=(1.0, -0.5)):
+            """F175's line, from the DLL's own format (formatGroup, native_on_foot_f175.h): the pitch error's expected-pitch words are the mode's; roll: (mean, rms, max, frames over 2 deg);
+            still, turning, pitch: (frames, mean, rms, max); slope: (slope, pairs, x rms); lead: (yaw, pitch) in deg."""
+            return R175("native on foot view roll (F175) %u s", wl, mode, item, rig, frames, roll[0], roll[1], roll[2], roll[3], still[0], still[1], still[2], still[3], turning[0], turning[1], turning[2],
+                        turning[3], "the headset's in LOCAL" if mode == "look to aim" else "the headset's in LOCAL plus the aim's pitch", pitch[0], pitch[1], pitch[2], pitch[3], slope[0], slope[1], slope[2],
+                        speed, aim, lead[0], lead[1])
+
+        check("F175 view roll: look to aim over 3 s with an error well under 1.5 deg is OK, the figures by mode", [vr175(), vr175(), vr175()], 0, [("OK", V175)],
+              has=["look to aim (armed) 3 s, 270 frames: roll error mean +0.10 rms 0.60 max 1.90 deg, over 2 deg in 0 (0%)", "F61's rig off", "slope against aim pitch x yaw lead +0.020 over 270 pairs"],
+              lacks=["UNPARSED", "the view rolls against the headset"])
+        check("F175 view roll: an error rms of 2.4 deg across 3 s with the head still is flagged, with the head still named, and the slope that does not follow the composition",
+              [vr175(roll=(0.5, 2.4, 5.0, 40), still=(60, 0.5, 2.5, 5.0), turning=(20, 0.5, 1.0, 2.0)), vr175(roll=(0.5, 2.4, 5.0, 40), still=(60, 0.5, 2.5, 5.0), turning=(20, 0.5, 1.0, 2.0)),
+               vr175(roll=(0.5, 2.4, 5.0, 40), still=(60, 0.5, 2.5, 5.0), turning=(20, 0.5, 1.0, 2.0))], 0, [("PARTIAL", V175)],
+              has=["the view rolls against the headset in look to aim: roll error rms 2.40 deg over 3 s of frames, with the head still", "the head was still: the game's own camera rolls"], lacks=["UNPARSED"])
+        check("F175 view roll: the roll grows with aim pitch x yaw lead (slope +1.0 over 90 pairs) while the head turns: flagged as EDVR's cancel adding the roll",
+              [vr175(roll=(1.0, 2.0, 6.0, 50), still=(10, 0.1, 0.4, 0.8), turning=(70, 1.1, 2.2, 6.0), slope=(1.0, 90, 0.05)), vr175(roll=(1.0, 2.0, 6.0, 50), still=(10, 0.1, 0.4, 0.8), turning=(70, 1.1, 2.2, 6.0), slope=(1.0, 90, 0.05))], 0,
+              [("PARTIAL", V175)], has=["in look to aim: roll error rms 2.00 deg over 2 s of frames, with the head turning", "the slope +1.00 against aim pitch x yaw lead is near +-1: EDVR's cancel adds the roll"], lacks=["UNPARSED"])
+        check("F175 view roll: one second of error is too little to flag", [vr175(roll=(1.0, 3.0, 8.0, 60))], 0, [("OK", V175)], lacks=["UNPARSED", "the view rolls against the headset"])
+        check("F175 view roll: mouse look is its own mode, with its own expected pitch, beside look to aim",
+              [vr175(), vr175(mode="mouse look", item="unarmed", roll=(0.0, 0.3, 0.9, 0), pitch=(90, 1.0, 2.0, 5.0))], 0, [("OK", V175)],
+              has=["mouse look (unarmed) 1 s, 90 frames", "pitch error (the headset's in LOCAL plus the aim's pitch) mean +1.00 rms 2.00 over 90 frames", "pitch error (the headset's in LOCAL) mean"], lacks=["UNPARSED"])
+        check("F175 view roll: a mode's items are pooled", [vr175(item="armed"), vr175(item="unarmed")], 0, [("OK", V175)], has=["look to aim (armed, unarmed) 2 s, 180 frames"], lacks=["UNPARSED"])
+        check("F175 view roll: F61's rig ON is named", [vr175(rig="ON")], 0, [("OK", V175)], has=["F61's rotation calibration rig was ON in this log"], lacks=["UNPARSED"])
+        check("F175 view roll: a second with frames and an error of 0 is a line of zeros, OK (the code ran and measured nothing wrong)",
+              [vr175(roll=(0.0, 0.0, 0.0, 0), still=(90, 0.0, 0.0, 0.0), turning=(0, 0.0, 0.0, 0.0), pitch=(90, 0.0, 0.0, 0.0), slope=(0.0, 90, 0.0), lead=(0.0, 0.0))], 0, [("OK", V175)],
+              has=["roll error mean +0.00 rms 0.00 max 0.00 deg"], lacks=["UNPARSED"])
+        check("F175 view roll: the raise carriage lines (the pin ran) and no line with frames is idle, said apart from a log that never had the code",
+              [car171(LEVEL171)], 0, [("IDLE", V175)], has=["the pin ran (raise carriage lines) and no second had a frame with the view's roll measured"], lacks=["UNPARSED"])
+        check("F175 view roll: no line and no carriage line is not present (no verdict row)", [f90_part()], 0, [("OK", F90S)], lacks=[row("OK", V175), row("IDLE", V175), row("PARTIAL", V175), row("UNPARSED", V175)])
+        check("F175 view roll: a line that drifted from its pattern is unparsed", ["native on foot view roll (F175) 1 s: something else"], 4, [("UNPARSED", V175)])
+        check("F175 view roll: a line that drifted beside a good one is counted beside the verdict", [vr175(), "native on foot view roll (F175) 1 s: something else"], 0, [("OK", V175)],
               has=["[+1 line(s) the rule's patterns do not match: "])
 
         # ---- F169: the stance while the aim is pitched ----

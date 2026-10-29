@@ -64,6 +64,7 @@
 #include "f169_checks.h"    // F169: the stance while the aim is pitched (w_c capped under the animated neck's posture weight, the replays, the window and its line); the pistol sprint's arm swing (TEMPORARY): the plan, the ring, the stride's period, the delay, the measure and the line
 #include "f170_checks.h"    // F170: the crouched ADS torso squared to the aim (TEMPORARY): the dial, the share, the turn on the real square-up and reach functions (29 deg to 0 at 1, 14.5 at 0.5), the hold not taking it off, the line
 #include "f171_checks.h"    // F171: the crouched ADS body moved to the left of the aim line (TEMPORARY): the dial, the left axis and its sign against the eye's right, the move through the real reach rule, the counters and the line; the raise's carriage (slopes, pairs, window, line); F170's line reaching the log (logpin::elbow's merges against F98Left)
+#include "f175_checks.h"    // F175 (measure only): the view's roll and pitch against the headset's: the roll and elevation on synthetic rotations (5 deg reads 5, yaw and pitch alone 0, the sign, the model's axes against LOCAL's), the angular rate and its holding, the window's statistics and slope, the line
 #include "f173_checks.h"    // F173: the pilot's flown values as the four experimental dials' defaults (the atomic, the fallback and the shipped line pinned per key), and the new non-zero defaults changing nothing standing, at the hip or unarmed
 #include "f172_checks.h"    // F172: the neck raise published pre-turned by the mouse-look aim pitch: the game's turn modelled (R(a) body_in), the slopes it gives unturned and turned, the unturned cases bit for bit, the readers that cancel the z share, the source pins
 #include "f151_checks.h"    // F151: the weapon readout's draw bound by its place (the ordinals, each guard, one bind per key, the lost-frame count) and the held copy's scope from the selected slot
@@ -7632,6 +7633,10 @@ int wmain(int argc, wchar_t** argv) {
     // F173: the four experimental dials ship at the pilot's flown values (body forward 5, body left 25, torso square 0, pistol sprint swing 0.5): each default pinned in the atomic, the fallback and the
     // ini line; at those shipped values the body moves are exactly zero standing, at the hip and crouched at the hip, the torso square has no share, and the swing applies nothing unarmed or unreleased.
     f173test::run173(check);
+    // F175 (measure only): the view's roll and pitch against the headset's. A camera rolled 5 deg reads 5 and yaw and pitch alone read 0 at every angle; the model's axes and LOCAL's give the same roll and elevation for the
+    // same camera; the angular rate and its yaw part between LOCAL poses, held and restarted by the tracker; the window's statistics, the head still and turning, and the slope (+1, 0, -1 on synthetic pairs); the line
+    // inside the log's budget, zeros for a second with frames and an error of 0, nothing for one without; source pins on where the figures are read.
+    f175test::run175(check);
     // F110: the ADS sight lock's model right eye from the left-eye job camera and from a solved left eye, the fallback, the IPD's sign.
     f110test::run110(check);
     // F111: the panel pointer instrument names the stage that turns a move the other way (K1 to K5, one at a time), the camera getters' decoding.
