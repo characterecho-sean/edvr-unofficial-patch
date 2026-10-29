@@ -2,13 +2,12 @@
 
 ## Status
 
+- **2026-10-28: the Sharp weapons setting is RETIRED** (`fix.sharp_weapons`): its flat row is gone, and the HUD Anti-Aliasing row no longer sits under it.
 - **State: SHIPPED (2026-10-09); B390 cockpit proof gap fixed locally (10-11).**
   Steam flat XeSS/UI 125: user reports HUD and menus stable. Correct 4b7bfec4
   proves both E894 variants and composites every steady frame. The October 11
   entry records physical input proof, the fix flight and temporary-probe cleanup.
-  Flown OK on Epic flat. Branch
-  `claude/flat-display-crash-ui-smearing-f1d96a`; the census was removed in the
-  commit that follows the flown build.
+  Flown OK on Epic flat. Branch `claude/flat-display-crash-ui-smearing-f1d96a`; the census was removed in the commit that follows the flown build.
   - SS 1.0 at 125%, HDR route: build `eced5813`, Sean: "Looks great!". In the
     three steady cockpit windows, frames = copies = door-armed = tone-admitted =
     composites = 8046; no back-offs, no declines.

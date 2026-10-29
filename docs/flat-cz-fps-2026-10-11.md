@@ -2,14 +2,14 @@
 
 ## Status
 
+- **2026-10-28: the Sharp weapons setting is RETIRED** (`fix.sharp_weapons`); the advanced exception list no longer names `advanced.sharp_weapons_blend`, which is gone too.
 State (2026-10-18 certificate): geometry issue reuse is implemented on codex/flat-startup-discovery-cpu, full build PASS, Steam flat flown as v0.20.0-rc.4-26-g1012c7c2 in edvr_gfx_20261018_063400.log, carrier 97.7 fps at 06:41:16, live not frozen, no new config key; flight line is "flat geometry issue reuse:" and 052052 stays the baseline (handoff docs/flat-callback-cpu-handoff-2026-10-18.md). Prior snapshot `041f8e78` (`rc.4-23`) showed no useful speed win: last slow1 59.03 FPS, fast 221.29, full slow2 65.18. Earlier slow1 61.64 is a different overlapping slice. All 18,442 selected frames continue AA history/backend at native3840 HDR, zero new resets/refusals/jitter failures. Full slow2 callback gross5.976/net whole11.891 ms vs709's4.558/11.220; coverage is SAME, three new child timers add cost, attribution unresolved. Main unmerged, probe off, settings unchanged. User-requested handoff: `docs/flat-callback-cpu-handoff-2026-10-18.md`; start there for checkout/build/artifacts, external-review assessment and next certificate proof. Existing engine generation cache/1in64 shader checks do not certify all forward-Issue dependencies. No further identical flight requested. Sol RE/tests, Astra evidence only. Phase bootstrap remains unvalidated; Ctrl+NumLock ingress issue persists (earlier entries).
 State (2026-10-16, flight build `claude/flat-settlement-cpu-7`, log `edvr_gfx_20261016_135436.log`): FLOWN OK, ALL THREE ON MAIN on Sean's approval. COPIER claim
 check (`claude/copier-claim-check`, round 6): claims live from about 14:06:30, 6.0M copies lock-free, 0 declined. OFFSCREEN fast path (`claude/flat-offscreen-fastpath`):
 about 3,720 draws a frame served (expected 3.5-3.8k); its saving is still read from the timing-on line, not measured. Merge/clear took 3.0M/8.6M lock-free with 2
 declined. Present p50 11.5-12.0 ms before claims and 11.4-12.4 after: no jump (it was 12.3-12.6 -> 12.8-13.1 with the clear/merge check alone, and 3-5 ms without
 any). DEBUG tab (`claude/flat-debug-menu`): the CPU census (`flat cpu 5s` timing) is OFF by default; the flat F8 panel has Performance and Debug tabs: **CPU timing in the
-log** (`advanced.flat_cpu_timing`), **Motion source view** (`advanced.flat_refusal_view`); turn the timing on to see the families. Sections "round 6", "offscreen fast
-path", "debug tab".
+log** (`advanced.flat_cpu_timing`), **Motion source view** (`advanced.flat_refusal_view`); turn the timing on to see the families. Sections "round 6", "offscreen fast path", "debug tab".
 State (2026-10-16, round 5 results): the claim check for clears and merges is FLOWN OK and ON MAIN (`claude/claim-precheck`): 1.43M clears and 4.1M merges in the first
 window, 0 declined, Present p50 12.3-12.6 -> 12.8-13.1 ms against a 3-5 ms jump without it (log `edvr_gfx_20261016_111653.log`); the remaining +0.5 ms is not attributed.
 State (2026-10-16, results): the observer fix is FLOWN, CONFIRMED and ON MAIN (1ae94885, `claude/engine-motion-observers`): render-thread

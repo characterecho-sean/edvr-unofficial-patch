@@ -2,6 +2,8 @@
 
 ## Status
 
+- **2026-10-28:** the weapons' layer (`fix.sharp_weapons`) that this doc says is not fed is RETIRED with its setting; the weapons fire is always on and has its own layer.
+
 - **State (2026-10-21): the HUD's bloom halo, BUILT, NOT FLOWN.** Reported on
   the latest release: with DLAA and `fix.ui_quality` on, the HUD has no bloom
   (a user's UI-quality-off/on pair of the engine pips). The take puts the HUD

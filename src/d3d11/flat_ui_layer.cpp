@@ -244,7 +244,7 @@ FlatUiLayerAsk flatUiLayerDecide(ID3D11DeviceContext* ctx, const FlatUiLayerDraw
     // The map families first (only with a map open, on the HDR target); otherwise the shared family rule, as it always was.
     const UiLayerFamily family = flatUiFamilyFor(d.vs, d.ps, d.mapOpen, d.hdrTarget);
     if (!flatUiLayerTakesFamily(family)) return g_lastAsk;
-    // The half of the shared layer that governs this family must be live: with fix.ui_quality off and fix.sharp_weapons on, the layer runs for the weapons alone
+    // The half of the shared layer that governs this family must be live: with fix.ui_quality off and the weapons fire on, the layer runs for the weapons alone
     // and the HUD stays in the game's frame (not asked, so not counted); the converse for the weapons.
     if (!flatUiFamilyLive(family, uiLayerQualityLive(), uiLayerWeaponsLive(), uiLayerRippleLive())) return g_lastAsk;
     const size_t fi = static_cast<size_t>(family);
@@ -835,13 +835,13 @@ void flatUiLayerReport(uint64_t windowSeconds) {
     const size_t f0 = static_cast<size_t>(families[0]), f1 = static_cast<size_t>(families[1]),
                  f2 = static_cast<size_t>(families[2]), f3 = static_cast<size_t>(families[3]);
     const size_t fc = static_cast<size_t>(UiLayerFamily::kMapCanvas), fs = static_cast<size_t>(UiLayerFamily::kMapSprite);
-    // fix.sharp_weapons in flat (2026-10-16): the weapons fire and the shield ripple, each asked/decided/taken/refused-at-issue. Zeros print, and a window in which
+    // The weapons fire in flat (2026-10-16): the weapons fire and the shield ripple, each asked/decided/taken/refused-at-issue. Zeros print, and a window in which
     // neither pair reached the adapter says so.
     {
         const size_t fw = static_cast<size_t>(UiLayerFamily::kWeaponsFire), fr = static_cast<size_t>(UiLayerFamily::kShieldRipple);
         if (!w.asked[fw] && !w.asked[fr]) {
-            Log::get().note("flat ui layer weapons: not exercised in this window (no weapons-fire or shield-refraction draw was asked; fix.sharp_weapons %s).",
-                            uiLayerWeaponsLive() ? "is live" : "is not live: off, or flat anti-aliasing off, or stood down");
+            Log::get().note("flat ui layer weapons: not exercised in this window (no weapons-fire or shield-refraction draw was asked; the weapons fire %s).",
+                            uiLayerWeaponsLive() ? "is live" : "is not live: flat anti-aliasing off, or stood down");
         } else {
             Log::get().note(
                 "flat ui layer weapons: weapons-fire asked=%llu decided=%llu taken=%llu refused-at-issue=%llu; shield-ripple asked=%llu decided=%llu taken=%llu "

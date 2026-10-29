@@ -183,7 +183,7 @@ std::string functionBody(const std::string& menuCpp, const char* head) {
 }
 
 // The HUD Anti-Aliasing row's dimming (2026-10-24), the same shape: one question (hudAntiAliasingRowDim, whose truth table is checked below), asked in the profile's
-// own terms -- fix.ui_quality read as the layer reads it, the flat anti-aliasing as the Sharp weapons row's flat branch reads it (the row is flat only) -- from the
+// own terms -- fix.ui_quality read as the layer reads it, the flat anti-aliasing as the flat profile reads it (the row is flat only) -- from the
 // row's drawing and from a step. (A switch is never typed, so there is no third site.) The hint and the refused step name the cause that applies.
 bool sourceGatesHudAaRow(const std::string& menuCpp) {
     const std::string quality = functionBody(menuCpp, "bool hudAntiAliasingUiQualityOn() {");
@@ -437,9 +437,9 @@ void panelTable(const std::string& root, const std::string& gen) {
     check(!vrDims.empty() && !sourceGatesSharpenRow(vrDims), "control: a row asking about a profile other than the running one is caught");
 
     // The HUD Anti-Aliasing row's dimming (UI quality off, or the flat anti-aliasing off) is asked in both places, in the layer's own reading of fix.ui_quality and
-    // the Sharp weapons row's flat reading of the mode, and the hint and the refused step name the cause that applies.
+    // the flat profile's reading of the mode, and the hint and the refused step name the cause that applies.
     check(sourceGatesHudAaRow(menuCpp),
-          "menu.cpp dims the HUD Anti-Aliasing row and refuses its steps through hudAntiAliasingRowDim, reading fix.ui_quality as the layer does and the flat mode as the weapons row does");
+          "menu.cpp dims the HUD Anti-Aliasing row and refuses its steps through hudAntiAliasingRowDim, reading fix.ui_quality as the layer does and the flat mode as the flat profile does");
     const std::string hudNoDraw = mutated("(hudAaRow && hudAntiAliasingRowDisabled())", "false");
     const std::string hudNoStep = mutated("if (isHudAntiAliasingRow(d) && hudAntiAliasingRowDisabled()) {", "if (false) {");
     const std::string hudInverted = mutated("uiQualityParse(quality.c_str(), nullptr) > 0.0f", "uiQualityParse(quality.c_str(), nullptr) <= 0.0f");
@@ -482,11 +482,12 @@ void panelTable(const std::string& root, const std::string& gen) {
           "the flat panel has exactly three tabs: Performance, Visual, then Debug last");
     {
         const char* const order[][2] = {{"fix", "temporal_aa"}, {"fix", "temporal_aa_model"}, {"fix", "render_sharpness"}, {"fix", "ui_quality"},
-                                        {"fix", "hud_antialiasing"}, {"fix", "sharp_weapons"}, {"fix", "optimized_stations"}};
-        bool same = kFlatPageRowCount == 7;
-        for (size_t i = 0; same && i < 7; ++i)
+                                        {"fix", "hud_antialiasing"}, {"fix", "optimized_stations"}};
+        bool same = kFlatPageRowCount == 6;
+        for (size_t i = 0; same && i < 6; ++i)
             same = std::strcmp(kFlatPageRows[i].section, order[i][0]) == 0 && std::strcmp(kFlatPageRows[i].key, order[i][1]) == 0;
-        check(same, "the Performance tab has the flat page's seven rows in their order (HUD Anti-Aliasing directly under UI quality, Sharp weapons under it)");    }
+        check(same, "the Performance tab has the flat page's six rows in their order (HUD Anti-Aliasing directly under UI quality)");
+    }
     check(kFlatVisualRowCount == 2 && std::strcmp(kFlatVisualRows[0].section, "visual") == 0 && std::strcmp(kFlatVisualRows[0].key, "intro_video") == 0 &&
               std::strcmp(kFlatVisualRows[1].section, "visual") == 0 && std::strcmp(kFlatVisualRows[1].key, "star_glow") == 0 &&
               flatVisualHasRow("visual", "star_glow") && !flatVisualHasRow("fix", "temporal_aa"),
@@ -636,8 +637,6 @@ void panelTable(const std::string& root, const std::string& gen) {
         const size_t h = apart.find("{\"fix\", \"hud_antialiasing\",");
         if (h != std::string::npos) apart.insert(h, "{\"fix\", \"other\", \"Other\"},\n    ");
         check(h != std::string::npos && !schemaHudRowIsFlatOnly(apart), "control: a HUD Anti-Aliasing row not directly under UI quality is caught");
-        const size_t sharp = schema.find("{\"fix\", \"sharp_weapons\",");
-        check(sharp != std::string::npos && h != std::string::npos && h < sharp, "Sharp weapons comes after the HUD Anti-Aliasing row in the table");
     }
     check(!schemaHasRow("", "fix", "render_sharpness"),
           "control: a schema without the row is caught");
