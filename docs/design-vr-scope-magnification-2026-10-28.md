@@ -44,7 +44,7 @@ game's own zoom as a magnified picture inside the scope's lens. The rest of the 
   The pilot: "the chevron looks much clearer now"; it is brighter than stock (tonemapped alone, T(F) + T(M) against stock's T(F + M)).
   The lens declines for the left aiming eye (`fix.native_on_foot_ads_sight_eye = left`; the left eye is a later build). c lags the picture
   by one frame on every frame (measured, not changed).
-- **A3 BUILT 2026-10-29, INSTALLED ON EPIC (both), NOT FLOWN** (`c738e367`, main merged at `dcfd0608`; section 10, "As built (A3)"): the mark is drawn into the eye's additive weapons layer and composited after
+- **A3 FLOWN OK 2026-10-29** ("both scopes look good, back to stock colors"; `c738e367`, main merged at `dcfd0608`; section 10): the mark is drawn into the eye's additive weapons layer and composited after
   the lens by the tonemap difference (stock brightness); the weapons half governs it, the scope zoom key arms it; the S0 census probes optical
   sights only; the press line counts `composites matched/plain/none` and `--health` makes a taken mark nothing composited a PARTIAL. Its review
   fixes (same section) make the mark's stand-down last a press, not the session, and count it in the press line.
@@ -711,3 +711,17 @@ found ten things. Each, in one line:
 - **Not verified.** Nothing is flown. A creation failure at the mark's take is not driven by any rig: its source is pinned (with controls) and the stand-down's lapse and streak bookkeeping are run frame by frame against
   the production helpers (`MarkStandDown`, `weaponsLayerLoss`), not through the draw hook. The mark's engaged and plain lines, the stand-down line and the `mark stand-downs` count have never appeared in a log. The
   worst case leaves 7 bytes under the log's 1167: a new field in the press line needs a label cut again.
+
+**2026-10-29, A3 VR flight** (Epic in VR, `edvr_gfx_20261029_140200`, `c738e367`, build matched). The pilot: "Both scopes look good, back to
+stock colors." `--health` exit 3 for F91 and F85c only (the native on-foot arc's, as in A2's flight). `scope zoom (S1)` OK over 9 presses
+(the Executioner scoped and bare, the Tormentor):
+- The lens applied on 4419 of 4426 qualifying frames. Marks taken L 4426, R 4422 against 4425 armed frames; depth seeded on all 8848; composites
+  by the tonemap difference 8848, plain 0, none 0; no stand-down. The non-optical presses declined on every frame, and the census ran only on
+  optical sights.
+- c still lags the picture by one frame on every frame (+1 on 4425).
+- **Cost.** The lens is 0.03 to 0.07 ms; the door's UI layer composite stays near 0.1 ms with the mark's tonemap difference in it. EDVR's
+  in-frame work rises by about 1 ms in the scoped windows (depth-stencil seed 0.27 ms, UI layer reissues 0.47 ms of which 46 a frame empty,
+  engine velocity 0.28 ms), but A1's flight shows the same rise in its scoped windows with no mark at all (in-frame 1.05 ms, seed 0.18 to
+  0.21, reissues 0.31 to 0.41 with 18 to 24 empty, engine velocity 0.28). It belongs to native on-foot ADS, not to the lens or the mark.
+- **A settled:** the lens, the optical gate and the mark at stock brightness. Open: the scoped sniper's softness at M 4.06 (B3, next),
+  the left aiming eye, c's one-frame lag.
