@@ -97,14 +97,14 @@ static bool wiredTemporal(const std::string& t) {
 }
 static bool wiredFrame(const std::string& n) {
     return before(n, "s0::vrTick(GetTickCount64());", "s1::tick(GetTickCount64());") && has(n, "scopeZoomPublish(out);") && has(n, "scopeZoomPressBegin(s.press);") && has(n, "scopeZoomPressTake(&pl.d);") &&
-           has(n, "cfg.getString(\"fix.native_on_foot_ads_scope_zoom\", \"off\")") && has(n, "cfg.getFloat(\"experimental.native_on_foot_ads_scope_zoom_fov\"") &&
+           has(n, "cfg.getString(\"fix.native_on_foot_ads_scope_zoom\", \"on\")") && has(n, "std::atomic<bool> g_scopeZoomKey{true};") && has(n, "cfg.getFloat(\"experimental.native_on_foot_ads_scope_zoom_fov\"") &&
            has(n, "sz::lensGate(gi)") && has(n, "nativeTemporalDrawJitter(1, &tseq, &jx, &jy, &w, &h)") && has(n, "if (e == 1 && g_scopeZoomKey.load(std::memory_order_relaxed)) eyeJitterPublish(frame);") &&
            has(n, "nofoot::sightPointNdc(g.rows[1], od, S, dir, kFarM, ndcFar)") && has(n, "const double dir[3] = {S[0] - v.Epos[0], S[1] - v.Epos[1], S[2] - v.Epos[2]};") &&
            has(n, "if (s.open) endPress(s);");
 }
 static bool wiredIni(const std::string& ini) {
-    const size_t fixAt = ini.find("native_on_foot_ads_scope_zoom = off"), expAt = ini.find("native_on_foot_ads_scope_zoom_fov = 56.3");
-    return fixAt != std::string::npos && expAt != std::string::npos && fixAt < expAt && has(ini, "# ui: ADS: scope zoom | choices on, off | recommended off | live | menu native_on_foot") &&
+    const size_t fixAt = ini.find("native_on_foot_ads_scope_zoom = on"), expAt = ini.find("native_on_foot_ads_scope_zoom_fov = 56.3");
+    return fixAt != std::string::npos && expAt != std::string::npos && fixAt < expAt && has(ini, "# ui: ADS: scope zoom | choices on, off | recommended on | live | menu native_on_foot") &&
            has(ini, "# ui: ADS: scope zoom FOV (experimental) | range 30..90 | step 0.5 | unit deg | recommended 56.3 | live") && before(ini, "[experimental]", "native_on_foot_ads_scope_zoom_fov = 56.3");
 }
 static bool wiredMark(const std::string& layer, const std::string& vscreen) {
@@ -143,9 +143,11 @@ static void wiringTests() {
     check(!wiredFrame(replaced(native, "s1::tick(GetTickCount64());", "")), "control: no tick is not the wiring");
     check(!wiredFrame(replaced(native, "nofoot::sightPointNdc(g.rows[1], od, S, dir, kFarM, ndcFar)", "nofoot::sightPointNdc(g.rows[1], od, S, dir, 0.0, ndcFar)")), "control: c taken at S itself, not at the far point along the line E -> S, is not the wiring");
     check(!wiredFrame(replaced(native, "if (s.open) endPress(s);", "")), "control: a press left open by the flat profile or an unarmed tick with no line is not the wiring");
-    check(!wiredFrame(replaced(native, "cfg.getString(\"fix.native_on_foot_ads_scope_zoom\", \"off\")", "cfg.getString(\"fix.native_on_foot_ads_zoom\", \"off\")")), "control: a key read by another name is not the wiring");
+    check(!wiredFrame(replaced(native, "cfg.getString(\"fix.native_on_foot_ads_scope_zoom\", \"on\")", "cfg.getString(\"fix.native_on_foot_ads_zoom\", \"on\")")), "control: a key read by another name is not the wiring");
+    check(!wiredFrame(replaced(native, "cfg.getString(\"fix.native_on_foot_ads_scope_zoom\", \"on\")", "cfg.getString(\"fix.native_on_foot_ads_scope_zoom\", \"off\")")), "control: the reader's fallback off is not the shipped default");
+    check(!wiredFrame(replaced(native, "std::atomic<bool> g_scopeZoomKey{true};", "std::atomic<bool> g_scopeZoomKey{false};")), "control: the atomic's start value off is not the shipped default");
     check(wiredIni(ini), "the ini states both keys with their rows: the user key on the Native on foot page, the experimental one in the developer tier");
-    check(!wiredIni(replaced(ini, "native_on_foot_ads_scope_zoom = off", "native_on_foot_ads_scope_zoom = on")), "control: the user key on by default is not the shipped default");
+    check(!wiredIni(replaced(ini, "native_on_foot_ads_scope_zoom = on", "native_on_foot_ads_scope_zoom = off")), "control: the user key off by default is not the shipped default");
 
     // the scope's gunsight mark: named in the draw hook only for the pair's 6 indices in 1 instance while the lens is armed and a learned surface is sampled, counted where the layer takes
     // it, and blended with destination alpha read as 1 at the decision and at the issue alike

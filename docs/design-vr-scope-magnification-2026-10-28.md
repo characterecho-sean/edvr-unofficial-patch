@@ -51,7 +51,7 @@ game's own zoom as a magnified picture inside the scope's lens. The rest of the 
 - **Next, B3 for the scoped sniper only** (the maintainer, 2026-10-29, after A2's flight: the 4x lens is "a little blurry"). A keeps 1/M of
   the density, so at M 4.06 the lens shows about 90 x 50 output pixels (45 x 25 rendered) over the glass. B3 renders the unseen left eye
   (F106's both mode) as the zoomed view. Designed after A3 has flown.
-- Keys: `fix.native_on_foot_ads_scope_zoom` (off until flown OK) and the temporary `experimental.native_on_foot_ads_scope_zoom_fov` (the
+- Keys: `fix.native_on_foot_ads_scope_zoom` (default on since A3 flew OK, the maintainer 2026-10-29) and the temporary `experimental.native_on_foot_ads_scope_zoom_fov` (the
   reference FOV, 56.3 by default).
 - Separate arc: a flat stutter on the scoped Executioner's ADS (2026-10-29), in its own doc,
   `docs\investigation-flat-scoped-ads-stutter-2026-10-29.md`, on its own branch.

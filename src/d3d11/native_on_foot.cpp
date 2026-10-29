@@ -268,8 +268,8 @@ std::atomic<float> g_f88WPub{0.0f};
 std::atomic<int> g_adsSightEyeKey{nofoot::f162::kBoth};
 int adsAimEye() noexcept { return nofoot::f162::aimingEye(g_adsSightEyeKey.load(std::memory_order_relaxed)); }   // 0 the left eye, 1 the right eye
 // A1 (live): fix.native_on_foot_ads_scope_zoom, the scope lens (scope_zoom.h): while the sights are up the right eye's picture inside the scope's frame is magnified by the game's
-// own zoom. A USER key, off until the lens has flown; the reference FOV M is measured from is experimental.native_on_foot_ads_scope_zoom_fov (TEMPORARY, degrees, live).
-std::atomic<bool> g_scopeZoomKey{false};
+// own zoom. A USER key, default on since A3 flew OK (2026-10-29); the reference FOV M is measured from is experimental.native_on_foot_ads_scope_zoom_fov (TEMPORARY, degrees, live).
+std::atomic<bool> g_scopeZoomKey{true};
 std::atomic<float> g_scopeZoomRefDeg{static_cast<float>(edvr::scopezoom::kLensRefDefaultDeg)};
 // F93b (TEMPORARY A/B, live): fix.native_on_foot_ads_eye_steady. on (the default): the ADS sight lock's target is the shift the measured eye was rendered with plus the
 // error measured on it (nofoot::f93::sightTarget); off: F70's, the shift published now plus that error.
@@ -1198,12 +1198,12 @@ void readKey() {
         }
         g_adsSightEyeKey.store(mode, std::memory_order_relaxed);
     }
-    // A1 (live, the Native on foot page's "ADS: scope zoom"; the developer tier's "ADS: scope zoom FOV (experimental)"): the scope lens. The key is a user key, off until the lens has
-    // flown; the reference FOV is the h of M = tan(h / 2) / tan(ads / 2), the game's ADS FOV being absolute per weapon. One line at the first read and one at each change; the
+    // A1 (live, the Native on foot page's "ADS: scope zoom"; the developer tier's "ADS: scope zoom FOV (experimental)"): the scope lens. The key is a user key, on by default since A3
+    // flew OK; the reference FOV is the h of M = tan(h / 2) / tan(ads / 2), the game's ADS FOV being absolute per weapon. One line at the first read and one at each change; the
     // instrument's own announce (scope zoom (S1)) follows from the frame tick.
     {
         namespace sz = edvr::scopezoom;
-        const bool zoomOn = cfg.getString("fix.native_on_foot_ads_scope_zoom", "off") == "on";
+        const bool zoomOn = cfg.getString("fix.native_on_foot_ads_scope_zoom", "on") == "on";
         const double ref = sz::lensClampRefDeg(static_cast<double>(cfg.getFloat("experimental.native_on_foot_ads_scope_zoom_fov", static_cast<float>(sz::kLensRefDefaultDeg))));
         if (first || zoomOn != g_scopeZoomKey.load(std::memory_order_relaxed))
             Log::get().note("native on foot ADS scope zoom (A1): fix.native_on_foot_ads_scope_zoom is %s -- %s", zoomOn ? "on" : "off",
