@@ -1,12 +1,12 @@
-// F106 (native on-foot VR): ADS, the sight in both eyes (fix.native_on_foot_ads_sight_both_eyes). The pure part: the share's decision. Design and journal: the arc doc,
+// F106 (native on-foot VR): ADS, the sight in both eyes (fix.native_on_foot_ads_sight_eye = both). The pure part: the share's decision. Design and journal: the arc doc,
 // 2026-10-25, F106.
 //
 // Header only, no game or D3D11 state, so native_frame_test runs the very function the frame thread uses.
 //
-// In ADS the right eye is the eye the sight lock lines up (F70). With the key on, the left eye shows the right eye's image, turned into the left eye's view by rotation
-// only, by the ADS lock's weight (0.15 s in, 0.3 s out); the runtime draws it in the left eye's scene pass (src\openxr\d3d11_stereo.cpp, eye_share.h). It replaced F89's
-// close, which faded the left eye to black by the same weight (its key retired in F106). share() is the whole decision: never above 0
-// outside ADS, with the key off, unarmed or off foot (the guard, whose trip is logged).
+// In ADS the right eye is the eye the sight lock lines up (F70; F162: unless the key says left, and then there is no share). With the key at both (keyOn), the left eye shows the
+// right eye's image, turned into the left eye's view by rotation only, by the ADS lock's weight (0.15 s in, 0.3 s out); the runtime draws it in the left eye's scene pass
+// (src\openxr\d3d11_stereo.cpp, eye_share.h). It replaced F89's close, which faded the left eye to black by the same weight (its key retired in F106). share() is the whole
+// decision: never above 0 outside ADS, with the key at right or left (keyOn false), unarmed or off foot (the guard, whose trip is logged).
 #pragma once
 
 namespace edvr {

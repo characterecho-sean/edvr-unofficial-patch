@@ -599,6 +599,35 @@ static void testShippedIni(const std::wstring& root) {
         expectEq(iniValue(lost, "fix.intro_video", "<absent>"), "skip", "control: it is carried under the old name instead, where nothing reads it");
     }
 
+    // F162: fix.native_on_foot_ads_sight_both_eyes (on | off) became fix.native_on_foot_ads_sight_eye (both | right | left)
+    // (edvr.ini: `# moved-from: fix.native_on_foot_ads_sight_both_eyes (default on) (values on=both, off=right)`). A file from before has the old
+    // line: off is somebody's choice and arrives as right (the new key's word for it, not the old one), on is the old shipped default, a stale
+    // line, not a choice, consumed so the new line stands as shipped (both), and nothing is left under the old name to shadow either.
+    {
+        MergeReport offRep, onRep, newRep;
+        const std::string off = mergeIni(shipped, "[fix]\r\nnative_on_foot_ads_sight_both_eyes = off\r\n", nullptr, {}, &offRep);
+        expectEq(iniValue(off, "fix.native_on_foot_ads_sight_eye", "<absent>"), "right", "a chosen ADS sight in both eyes = off arrives as the sight eye right");
+        expectEq(iniValue(off, "fix.native_on_foot_ads_sight_both_eyes", "<absent>"), "<absent>", "...and nothing is left under the old name to shadow it");
+        check(!offRep.followed.empty() && offRep.followed[0].find("fix.native_on_foot_ads_sight_both_eyes = off  ->  fix.native_on_foot_ads_sight_eye = right") != std::string::npos,
+              "the report says the value followed its key and became right");
+        const std::string on = mergeIni(shipped, "[fix]\r\nnative_on_foot_ads_sight_both_eyes = on\r\n", nullptr, {}, &onRep);
+        expectEq(iniValue(on, "fix.native_on_foot_ads_sight_eye", "<absent>"), "both", "the old shipped default on is not a choice: the sight eye stands as shipped (both)");
+        expectEq(iniValue(on, "fix.native_on_foot_ads_sight_both_eyes", "<absent>"), "<absent>", "...and the stale line is consumed, not carried");
+        // an explicit new-key value wins over the old line, as for every moved key
+        const std::string both = mergeIni(shipped, "[fix]\r\nnative_on_foot_ads_sight_both_eyes = off\r\nnative_on_foot_ads_sight_eye = left\r\n", nullptr, {}, &newRep);
+        expectEq(iniValue(both, "fix.native_on_foot_ads_sight_eye", "<absent>"), "left", "a sight eye already chosen in the file wins over the old line");
+        // CONTROL: the same merge with the annotation taken out. The old word is carried under the old name, where nothing reads it.
+        std::string unannotated = shipped;
+        const std::string line = "# moved-from: fix.native_on_foot_ads_sight_both_eyes (default on) (values on=both, off=right)";
+        const size_t at = unannotated.find(line);
+        if (at != std::string::npos) unannotated.replace(at, line.size(), "# (annotation removed)");
+        check(at != std::string::npos, "the control's ini really lost the sight eye annotation");
+        MergeReport lostRep;
+        const std::string lost = mergeIni(unannotated, "[fix]\r\nnative_on_foot_ads_sight_both_eyes = off\r\n", nullptr, {}, &lostRep);
+        expectEq(iniValue(lost, "fix.native_on_foot_ads_sight_eye", "<absent>"), "both", "control: without the annotation the sight eye stays as shipped");
+        expectEq(iniValue(lost, "fix.native_on_foot_ads_sight_both_eyes", "<absent>"), "off", "control: the choice is carried under the old name instead, where nothing reads it");
+    }
+
     // 2026-09-29: the flat camera path became always-on and its two switches,
     // fix.temporal_aa_camera and fix.temporal_aa_camera_trace, were removed. A
     // rig that flew the experiment has both lines, one or both "on". Neither may

@@ -184,9 +184,11 @@ def keys_moved():
                 body = line.lstrip('#;').strip()
                 if body.lower().startswith('moved-from:'):
                     spec = body[len('moved-from:'):].strip()
-                    dm = re.match(r'^(\S+)\s*\(default\s+([^)]*)\)$', spec)
+                    # `old.key (default X) (values a=b, c=d)`: the default and the value map are both optional, in that order (the value map is the
+                    # installer merge's alone: iniedit.cpp movedKeys()).
+                    dm = re.match(r'^(\S+)\s*(?:\(default\s+([^)]*)\))?\s*(?:\(values\s+[^)]*\))?$', spec)
                     if dm:
-                        pending.append((dm.group(1), dm.group(2).strip()))
+                        pending.append((dm.group(1), (dm.group(2) or '').strip()))
                     else:
                         pending.append((spec, ''))
                     continue

@@ -275,7 +275,7 @@ void refreshMode(bool flat) {
         S.cropOpt = cropOpt;
         S.shiftOpt = shiftOpt;
     }
-    const std::string raw = cfg.getString("visual.desktop_window", "game");
+    const std::string raw = cfg.getString("visual.desktop_window", "left_eye");
     bool known = true;
     const DesktopWindowMode mode = desktopWindowParse(raw.c_str(), &known);
     if (!known) Log::get().note("desktop window: unknown setting \"%.40s\" (it is game, left_eye, right_eye or both_eyes); treated as game", raw.c_str());

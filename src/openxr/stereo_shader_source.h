@@ -10,7 +10,7 @@
 // header covers the text, the variant table and the compiler DLL, so the header is rebuilt, and the rig tools\openxr_stereo_test compiles the text again
 // at test time and compares the embedded bytes.
 //
-// F106 added a fifth entry point, kStereoShareHlsl's "ps": the LEFT eye's share of the RIGHT eye's image (fix.native_on_foot_ads_sight_both_eyes, eye_share.h). It runs
+// F106 added a fifth entry point, kStereoShareHlsl's "ps": the LEFT eye's share of the RIGHT eye's image (fix.native_on_foot_ads_sight_eye = both, eye_share.h). It runs
 // with the blit's vertex shader (one full-screen triangle over the left eye's placement) and blends over the left eye's own image by its alpha. It is new, so nothing
 // pins it to a former call; the build tool's self-test holds its bindings and the stereo rig its pixels.
 #pragma once

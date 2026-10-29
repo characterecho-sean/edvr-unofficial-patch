@@ -54,6 +54,18 @@
 #include "f158_checks.h"    // F158: the local body's draws over the first 30 s on foot (the window's rules, the list and its cap, the switch time, the stop and adjacency tests, the lines)
 #include "f159_checks.h"    // F159: the left elbow's stable pole reseeded at the shoulder's height (the condition, the gate, the real solver's raised elbow), the seed births and their lines
 #include "f160_checks.h"    // F160: the neck reference's raise blended through the ADS release (the decision, the kept target, the counts, the flight's release replayed on the real parts), the holster line
+#include "f161_checks.h"    // F161: the left arm's distance to the eye (the point-to-segment distance against a brute force, the contexts, the 4 cm and 2.5 cm counts, the seconds, the line's width)
+#include "f162_checks.h"    // F162: the ADS sight eye (the key's text, the aiming eye, the share by mode, the lock for the right eye bit for bit as before and for the left eye)
+#include "f163_checks.h"    // F163: the crouched stance from the animated neck's drop (the flights' necks, standing ADS bit for bit, the continuity through a crouch and a stand)
+#include "f165_checks.h"    // F165: the left elbow's body-down pole blended in while crouched in the sights (the weight, the wrap-aware angle, the flight's aim on the real solver, the clamp, the line)
+#include "f166_checks.h"    // F166: the upper body held at its still crouched-ADS pose while walking crouched in the sights (the plan, the capture rules, the ramp, the slerp blend, the onset replayed, the line)
+#include "f167_checks.h"    // F167: the left hand lets go of the pistol while sprinting (the sprint signal from the flight's speeds, the dead band, the weight by item and speed, the ramps, the continuity, the sights holding the grip, the line)
+#include "f168_checks.h"    // F168: the crouched body's dial (TEMPORARY): the range, the move scaled by the crouched and detach weights (exactly 0 standing and at the hip), its vector along the aim's horizontal forward, the pin's move, the counters and the line; F169: a positive dial past the reach rule, the move as written
+#include "f169_checks.h"    // F169: the stance while the aim is pitched (w_c capped under the animated neck's posture weight, the replays, the window and its line); the pistol sprint's arm swing (TEMPORARY): the plan, the ring, the stride's period, the delay, the measure and the line
+#include "f170_checks.h"    // F170: the crouched ADS torso squared to the aim (TEMPORARY): the dial, the share, the turn on the real square-up and reach functions (29 deg to 0 at 1, 14.5 at 0.5), the hold not taking it off, the line
+#include "f171_checks.h"    // F171: the crouched ADS body moved to the left of the aim line (TEMPORARY): the dial, the left axis and its sign against the eye's right, the move through the real reach rule, the counters and the line; the raise's carriage (slopes, pairs, window, line); F170's line reaching the log (logpin::elbow's merges against F98Left)
+#include "f173_checks.h"    // F173: the pilot's flown values as the four experimental dials' defaults (the atomic, the fallback and the shipped line pinned per key), and the new non-zero defaults changing nothing standing, at the hip or unarmed
+#include "f172_checks.h"    // F172: the neck raise published pre-turned by the mouse-look aim pitch: the game's turn modelled (R(a) body_in), the slopes it gives unturned and turned, the unturned cases bit for bit, the readers that cancel the z share, the source pins
 #include "s0_checks.h"      // S0: the scope zoom instrument (measure only): the projection decode, the press tracker, the camera table, the probe points, the line formats
 #include "s1_checks.h"      // S1/A1: the scope lens: the table and M, the gate and the ease, the rays over the depth, the open-sight rule, r(theta), the mask, the window, the line formats
 #include "f151_checks.h"    // F151: the weapon readout's draw bound by its place (the ordinals, each guard, one bind per key, the lost-frame count) and the held copy's scope from the selected slot
@@ -7471,7 +7483,8 @@ int wmain(int argc, wchar_t** argv) {
     f94btest::run95b(check);
     // F95c: the head parts as shadow-only through the visibility call (the game's class 2), the fade hook's guard and its action.
     f95ctest::run95c(check);
-    // F97a: the armed neck target (F93's raise, the eye's lowering, the weight's blend), the legs' room for a raise, the stance bins.
+    // F97a: the armed neck target (F93's raise, the eye's lowering, the weight's blend), the legs' room for a raise, the stance bins. F161: the crouched stance keeps the lowering through
+    // the ADS detach (the standing stance is the earlier formula bit for bit; the blends across the detach and the crouch weight are continuous; the two callers' targets meet at full detach).
     f97test::run97(check);
     // F97b: the label's size and record place as a panel at its anchor (the game's NDC-fixed size shrinks as cos^2 and cos off the eye's axis), the guards.
     f97btest::run97b(check);
@@ -7575,6 +7588,60 @@ int wmain(int argc, wchar_t** argv) {
     // frame (and the speck, the open sight, the picture's edge, the angle stop and the escaped ray's clamp); r(theta), the mask, the source of a magnified pixel and Catmull-Rom; the
     // window and the box; the rays buffer's layout; the accumulators and the two lines the DLL writes.
     s1test::runS1(check);
+    // F161 (measure only): the left arm's distance to the eye as drawn (the point to the upper arm's segment against a brute force, to the elbow), counted per context (the hip or ADS,
+    // standing or crouched, moving), the frames within 4 cm and 2.5 cm, the seconds that had any, and the window's line within the log's limit. F97a's lowering held through ADS while
+    // crouched (the standing stance the earlier formula bit for bit, the blends across the detach and the stance continuous) is checked with F97a's (run97).
+    f161test::run161(check);
+    // F162: fix.native_on_foot_ads_sight_eye = both | right | left. The key's text (the carried on and off), the aiming eye (1 for both and right, 0 for left), F106's share in the both mode only;
+    // the lock's error for the right eye bit for bit as the right-eye lock gave it in every row case (both eyes, either alone, none, a degenerate sight); the lock for the left eye:
+    // the left eye lands on the target eye point with the right eye one IPD to its right, its model the job camera, and the two locks differ by the IPD along R^.
+    f162test::run162(check);
+    // F163: the crouched weight F161's hold through ADS is blended by, from the animated neck's drop under the standing neck (the stored unarmed one, else 1.543 m): 1 on every crouched ADS
+    // neck of the flights of 10-28 (0.847 to 1.080 m, the two eye dumps'), 0 on every standing one (1.247 m up, every item), standing ADS bit for bit F97a's earlier formula, the
+    // continuity of the weight and of the neck target through a crouch and a stand, the reference's fallbacks.
+    f163test::run163(check);
+    // F165: the left elbow of every two-handed gun takes the body-down pole while crouched in the sights: the weight (the crouched weight times the ADS detach weight), the angle blended the
+    // short way round the circle (w = 0 bit for bit the stable pole's, w = 1 the body-down pole's, across +-pi, continuous in w), the flight's aim replayed on the real solver (the elbow
+    // lower, its swivel from the body-down pole's plane 43 deg to 0, the ceiling kept, the seed untouched, F159's reseed and F84's rifle support composed), the clamp for a mix over the
+    // shoulder, the counters and the line's width.
+    f165test::run165(check);
+    // F166: the upper body (the spine 16, 21, 24, both clavicles and upper arms) held at its still crouched-ADS pose while crouch-walking in the sights: the plan from the parents (the held
+    // joints, each joint under them carried by its nearest held ancestor, the legs untouched, the refusals), the capture rules (the first frame, the still pose after 0.25 s, the running
+    // average, the clears by a new press, the crouch left, another weapon or skeleton), the weight (the crouched weight x the detach weight x a 0.15 s in, 0.2 s out ramp; 0 standing, at
+    // the hip and still: nothing written, bit for bit), the slerp blend, the walk's onset replayed (the shoulder 23 cm up and 12 cm forward animated, on the still value held), the
+    // stance read from the game's neck so the hold cannot keep itself on, the counters, the seconds and the line within the log's limit.
+    f166test::run166(check);
+    // F167: the pistol sprint release: the sprint from the AMC's low-passed speed (the flights' sprint plateaus 5.4 to 8.6 m/s, their runs under 3.0; begins at 4.6, ends under 3.9, the
+    // dead band between), the release weight (0 for any other item at any speed, for a pistol walking, running, unarmed or on a stale speed; 1 for a pistol sprinting), the 0.2 s release and
+    // 0.25 s return ramps, the continuity through a scripted run, the sights holding the grip (the cap at 1 less the detach weight), another or put-away pistol starting over, the factor
+    // on the off hand's weight (1 at release 0 bit for bit, the left arm's weight exactly 0 at release 1), the counters, the seconds and the line within the log's limit.
+    f167test::run167(check);
+    // F168 (TEMPORARY): the crouched body's dial: -20..+20 cm held to its range, the move the dial x the crouched weight x the detach weight (exactly 0 with the dial at 0, standing and at the hip), the vector along
+    // the aim's horizontal forward and never vertical, the pin's move equal to it and nothing else, the counters, the line within the log's limit. And (in F166's checks) the spine root held in the model's axes
+    // with the hips pitched, the hips' turn from the held pose's, and the later stages' yield: a lean added to the held torso is taken off at weight 1 and untouched at weight 0.
+    f168test::run168(check);
+    // F169: a positive crouched-body dial added after the reach rule (the rig runs the real reach rule on a left arm out of reach: +10 cm moves the written neck 10 cm and shortens the left shoulder to the foregrip,
+    // the dial in the target as flown moved it under 1 cm; the dial at 0 bit for bit); the stance while the aim is pitched (w_c capped under the animated neck's posture weight at 20 deg of aim pitch: the
+    // replays of a look-up standing, crouched, a stand-up and a crouch while pitched, an unpitched crouch exactly as before); the pistol sprint's arm swing (the plan, the ring, the stride's period from a
+    // synthetic sine, a half-stride delay inverting it, continuity at the sprint's start and end, the measure's correlations and the lines within the log's limit).
+    f169test::run169(check);
+    // F170: the crouched ADS torso squared to the aim: the dial and the share (exactly 0 at the dial's 0, standing and at the hip), the turn on the real shoulder geometry (a line 29 deg off square goes to 0 at a
+    // dial of 1 and 14.5 deg at 0.5, about the vertical through the neck), the written turn added after the upper-body hold's yield (it survives hold weight 1; with no turn the angle is bit for bit as before), the real
+    // reach rule keeping the left shoulder within reach of the foregrip with the shoulders turned, the counters and the line within the log's limit. And (in F138's checks) the running reference for a look-up
+    // before any settle and the window not read twice.
+    f170test::run170(check);
+    // F171: the crouched ADS body moved to the left of the aim line: the dial and the move (exactly 0 at the dial's 0, standing and at the hip), the left axis and its sign against the eye's right at every
+    // heading, the move through the real reach rule on shoulders and grips from the flight (13.9 of 15 cm survive, the left grip still reached), the counters and the line within the log's limit; the raise's
+    // carriage (the slopes 1, 0 and -1 on synthetic pairs, the pairing rules, the window and its mailbox, the line); and F170's line reaching the log (a window built through logpin::elbow carries every
+    // counters member of F98Left, read from the source).
+    f171test::run171(check);
+    // F172: the game turns the eye alignment with the aim's pitch under mouse look (R(a) body_in): the unturned raise reads k_up cos a and k_fwd -sin a (the flight's -0.09 and -1.04 at 85 deg), published turned by
+    // -a it lands at up R, forward 0 at 30, 60, 85 and -60 deg and the carriage slopes come out 1, 0, 0; a = 0, look to aim, a stale aim, the camera external and no raise leave the alignment bit for bit; F119's
+    // whole-vector physical head and the y feeds cancel the z share; the record under the serial stays the unturned seatedY (source pins).
+    f172test::run172(check);
+    // F173: the four experimental dials ship at the pilot's flown values (body forward 5, body left 25, torso square 0, pistol sprint swing 0.5): each default pinned in the atomic, the fallback and the
+    // ini line; at those shipped values the body moves are exactly zero standing, at the hip and crouched at the hip, the torso square has no share, and the swing applies nothing unarmed or unreleased.
+    f173test::run173(check);
     // F110: the ADS sight lock's model right eye from the left-eye job camera and from a solved left eye, the fallback, the IPD's sign.
     f110test::run110(check);
     // F111: the panel pointer instrument names the stage that turns a move the other way (K1 to K5, one at a time), the camera getters' decoding.

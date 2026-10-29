@@ -1,5 +1,5 @@
 #pragma once
-// The left eye's share of the right eye's image, between EDVR's two halves (native on foot, F106, fix.native_on_foot_ads_sight_both_eyes). Same discipline as
+// The left eye's share of the right eye's image, between EDVR's two halves (native on foot, F106, fix.native_on_foot_ads_sight_eye = both). Same discipline as
 // comfort_fade.h, whose level packing and staleness rule it reuses: the d3d11 half publishes one number a frame (0: the left eye's own image; 1: the right eye's image,
 // turned into the left eye's view), the provider's beginFrame reads it and hands it to the runtime in a version 10 answer (EdvrNativeFrameOutput::leftEyeShare, the
 // float's bits), and the runtime draws the right eye's image over the left eye's own by it, in the scene pass of that eye (src\openxr\d3d11_stereo.cpp, eye_share.h).

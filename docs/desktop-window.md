@@ -6,12 +6,13 @@
   (`edvr_gfx_20261028_215040.log`): the rule switched live 22 times, `hidden-area mesh served
   no, as the game, no mesh`, so native equals center there, as expected. OPEN: native's mesh
   path (1.32x at u 0.515) is flown on no headset; a tester with a mesh headset compares it with
-  the game's own mirror. Rounds 1 to 7 FLOWN OK. Five live keys in `[visual]`, on VR's **Desktop
-  window** page (after Visual): `visual.desktop_window` (`game` | `left_eye` | `right_eye` |
-  `both_eyes`, default `game`), `desktop_window_aspect` (`full` | `1:1` | `4:3` | `16:10` |
-  `16:9` | `21:9`, default `full`), `desktop_window_crop` (`native` | `center`, default
-  `native`), `desktop_window_vertical_shift` (-100 to 100, default 0), `desktop_window_style`
-  (`window` | `borderless`, default `window`). VR only. No temporary keys.
+  the game's own mirror. Rounds 1 to 7 FLOWN OK. **2026-10-29 (Sean's word):** default
+  `left_eye` (F173); the page is **Mirror window** (F173), its rows Image, Shape, Crop, Vertical
+  shift, Style (F174). Five live keys in `[visual]`: `visual.desktop_window` (`game` | `left_eye`
+  | `right_eye` | `both_eyes`, default `left_eye`), `desktop_window_aspect` (`full` | `1:1` |
+  `4:3` | `16:10` | `16:9` | `21:9`, default `full`), `desktop_window_crop` (`native` | `center`,
+  default `native`), `desktop_window_vertical_shift` (-100 to 100, default 0),
+  `desktop_window_style` (`window` | `borderless`, default `window`). VR only. No temporary keys.
 - **What it does:** while Elite is in VR with 3D on, EDVR makes Elite's desktop window a
   framed, movable, resizable window (or, in `borderless`, the whole monitor) showing EDVR's
   finished eye image, skips Elite's own drawing into it and hides the cursor over it while it

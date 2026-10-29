@@ -2830,6 +2830,7 @@ inline void adsCamBodyMotion(const double dH[3], const double s[3], double out[3
 // forward), then seated = seatedFromBody(e_body, 0) (diag(-1, -1, +1) . body): the eye alignment's target-minus-camera convention, so the
 // view run's filter (gain 0.02 a frame, 5 cm a frame) moves the right eye onto the sight line. The applied lock is clamped to 12 cm.
 // F70 REPLACED this: the lock aims at P14w + k f (the along part too), is feed-forward, and is clamped to 40 cm (see the F70 section below).
+// F162: "the right eye" here is the AIMING eye: the right eye, or the left eye with fix.native_on_foot_ads_sight_eye = left (adsAimingEyeError, below).
 constexpr double kAdsSightClampM = 0.40;   // F70: was 0.12; the target eye point is k ahead of P14 (up to 30 cm) plus the perpendicular and along offsets (about 7 cm each)
 // F110: the model of the right eye when its rows are not this frame's. F63 took the job camera for the eyes' midpoint and added half the IPD; F66e found the job
 // camera is the LEFT eye (both eyes solved in every ADS frame of the F102 flight over Virtual Desktop: L - cam 0.0 cm, R - cam +6.2 cm, IPD 6.18 cm), so that
@@ -2907,6 +2908,35 @@ inline bool adsSightError(const double p14w[3], const double cam[3], const doubl
     double eye[3];
     for (int i = 0; i < 3; ++i) eye[i] = cam[i] + camToEyeM * rHat[i];
     return adsSightErrorEye(p14w, eye, f, rows, out);
+}
+// F162 (fix.native_on_foot_ads_sight_eye): the sight lock lines up the AIMING eye, 1 the right eye (both and right: F63 to F161) or 0 the left eye (left). The job camera is the
+// left eye and the right eye is the job camera plus the IPD along R^ (F110), so the same lock puts the left eye on the line with the right eye one IPD to its right.
+// The model of the aiming eye when its own rows are not this frame's: aim 1 is adsModelRightEye as it was (bit for bit); aim 0 is the job camera, which is the left eye.
+inline uint8_t adsModelAimingEye(int aim, const double cam[3], bool leftSolved, const double leftEye[3], const double rHat[3], double ipdM, double out[3]) noexcept {
+    if (aim != 0) return adsModelRightEye(cam, leftSolved, leftEye, rHat, ipdM, out);
+    for (int i = 0; i < 3; ++i) out[i] = cam[i];
+    return kAdsModelFromCamera;
+}
+// What the lock took for the aiming eye this frame: its solved rendered eye, else the model; ok is false when neither gave an error (no rows and a degenerate right axis).
+struct AdsAimPick {
+    bool ok = false;
+    bool solved = false;
+    uint8_t modelSrc = kAdsModelFromCamera;
+};
+// The lock's error to the target eye point (origin + k f, F70) for the aiming eye. eyeOk / eyeW are the two eyes' solved positions (index 0 left, 1 right); modelOk says R^ is
+// usable (the model right eye needs it). modelEye is written whether or not it is used (the model of the aiming eye, as F110's was written for the right eye).
+inline AdsAimPick adsAimingEyeError(int aim, const bool eyeOk[2], const double eyeW[2][3], bool modelOk, const double cam[3], const double rHat[3], double ipdM,
+                                    const double origin[3], const double f[3], const double rows[9], double k, AdsSightErr& out, double modelEye[3]) noexcept {
+    const int a = aim == 0 ? 0 : 1;
+    AdsAimPick pick;
+    pick.modelSrc = adsModelAimingEye(a, cam, eyeOk[0], eyeW[0], rHat, ipdM, modelEye);
+    if (eyeOk[a] && adsSightErrorEyeK(origin, eyeW[a], f, rows, k, out)) {
+        pick.ok = true;
+        pick.solved = true;
+    } else if (modelOk && adsSightErrorEyeK(origin, modelEye, f, rows, k, out)) {
+        pick.ok = true;
+    }
+    return pick;
 }
 // |v| at most maxM, the direction kept (the eye alignment's clamps: 0.6 m for the view run, kAdsSightClampM for the sight lock).
 inline void clampNorm3(double v[3], double maxM) noexcept {
@@ -4831,7 +4861,8 @@ inline double pinEyeHeightNormalized(double eyeY, double localPitchRad, bool val
 struct PinAnimTarget {
     bool anim = false;        // the animated vector was computed (a calibration and a readable head); the vector used is the blend below
     bool clamped = false;
-    double wc = 0.0;          // F69a: the animated vector's weight (the camera's crouch)
+    double wc = 0.0;          // F69a: the animated vector's weight (the camera's crouch); F169: held under the caller's cap
+    double wcUncapped = 0.0;  // F169: the same weight before the cap (equal to wc at a cap of 1)
     double dEyeY = 0.0;       // F69a: E_y - h_stand (m, negative when down); 0 without a calibration
     double vUsed[3] = {};     // neck -> eye as used (model axes)
     double vAnim[3] = {};     // F69a: the animated vector (after the clamp), whether or not it was used
@@ -4864,9 +4895,11 @@ inline bool pinRestReferenceGenerationAllowed(bool currentAvailable, uint32_t sa
 }
 // The neck target: E - v, v = lerp(rest, the animated neck-to-eye vector turned from the head's heading to the eye's, w_c). eyeFwd: the eye's forward in
 // model axes (its heading is pinHeading's, with the same fallback to the body's forward). Without a calibration or a readable head, the F67c target.
+// F169: wcCap is a ceiling on w_c (the caller passes the animated neck's posture weight while the aim is pitched, where the camera's sink reads as a crouch); at 1, the default, w_c is exactly
+// what it was.
 inline void pinNeckTargetAnim(const double eye[3], const double eyeFwd[3], const double p44[3], const double rows[3][3], const double n0[3],
                               const PinEyeCal& cal, double out[3], PinAnimTarget* info, double localPitchRad = 0.0, bool localPitchValid = false,
-                              const double* eyeUp = nullptr) noexcept {
+                              const double* eyeUp = nullptr, double wcCap = 1.0) noexcept {
     PinAnimTarget local;
     PinAnimTarget& pa = info ? *info : local;
     pa = PinAnimTarget{};
@@ -4880,7 +4913,8 @@ inline void pinNeckTargetAnim(const double eye[3], const double eyeFwd[3], const
     pa.eyeYSelected = pinEyeHeightNormalized(eye[1], pitch, localPitchValid);
     for (int i = 0; i < 3; ++i) pa.vUsed[i] = pa.vAnim[i] = rest[i];
     const double hStand = localPitchValid && std::isfinite(localPitchRad) ? cal.eyeY : cal.eyeYRaw;
-    pa.wc = pinCrouchWeight(cal.have, hStand, pa.eyeYSelected);
+    pa.wc = pa.wcUncapped = pinCrouchWeight(cal.have, hStand, pa.eyeYSelected);
+    if (wcCap < pa.wc) pa.wc = wcCap;   // F169: a cap that is not a number compares false and leaves w_c
     pa.dEyeY = cal.have && std::isfinite(hStand) && std::isfinite(pa.eyeYSelected) ? pa.eyeYSelected - hStand : 0.0;
     if (cal.have && pinRowsRigid(rows)) {
         double f[3], u[3];

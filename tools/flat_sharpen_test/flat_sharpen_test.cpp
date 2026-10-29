@@ -525,7 +525,7 @@ void panelTable(const std::string& root, const std::string& gen) {
                               (edvr::sgb::rowHint(false, true, percent, state) != nullptr) == want && edvr::sgb::rowHint(false, false, percent, state) == nullptr &&
                               edvr::sgb::rowHint(true, true, percent, state) == nullptr && edvr::sgb::tabNote(false, true, percent, state) == nullptr;
             }
-        check(visualTable, "the Bloom note (Visual tab) and the VR hint (highlighted Star glow row) show for 125..200 with Bloom off and for no other setting or Bloom state, and the other profile's place stays empty");
+        check(visualTable, "the Bloom note (Visual tab) and the VR hint (highlighted Star glow row) show for 125..400 with Bloom off and for no other setting or Bloom state, and the other profile's place stays empty");
         check(sourceSaysStarGlowBloom(menuCpp),
               "menu.cpp says it: the note on the Visual tab above the settings warning, the hint on the highlighted Star glow row, the row never dimmed or refused, read at a menu opening and a change of the setting");
         const std::string noteEveryTab = mutated("strcmp(p.name, kFlatTabNames[1]) == 0, s.starGlowBloom.percent(),", "true, s.starGlowBloom.percent(),");
@@ -606,9 +606,9 @@ void panelTable(const std::string& root, const std::string& gen) {
                   movie.find("MenuTier::Fix, \"visual\",") != std::string::npos,
               "the generated Intro movie row is a Fix-tier choice (screen, stock, skip) on the Visual page VR's menu builds too");
         check(glow.find("\"Star glow\"") != std::string::npos &&
-                  glow.find("MenuKind::Choice, \"100\", \"\", \"\", 2, \"100=100%|125=125%|150=150%|175=175%|200=200%\", false, false, 1,") != std::string::npos &&
+                  glow.find("MenuKind::Choice, \"100\", \"\", \"\", 2, \"100=100%|125=125%|150=150%|175=175%|200=200%|250=250%|300=300%|350=350%|400=400%\", false, false, 1,") != std::string::npos &&
                   glow.find("MenuTier::Fix, \"visual\",") != std::string::npos,
-              "the generated Star glow row is a Fix-tier choice of 100 to 200 percent, shipped 100, live, on the Visual page VR's menu builds too");
+              "the generated Star glow row is a Fix-tier choice of 100 to 400 percent, shipped 100, live, on the Visual page VR's menu builds too");
         // The VR-only rows of VR's Visual page are not rows of the flat tab: the flat gate refuses their keys, so a flat row would show a value that does nothing.
         check(schemaHasRow(schema, "visual", "world_scale") && !flatVisualHasRow("visual", "world_scale") && !flatVisualHasRow("fix", "intro_backdrop") &&
                   !flatVisualHasRow("fix", "panel_curvature") && !flatProfileReadsKey("visual.world_scale") && !flatProfileReadsKey("fix.intro_backdrop") &&

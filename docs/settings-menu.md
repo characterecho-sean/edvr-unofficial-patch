@@ -246,7 +246,7 @@ Native on foot page uses them). The keys are retired: hidden lines in
 BUILT, NOT FLOWN. The flat profile's F8 panel has three tabs, Performance, Visual and Debug, in
 that order. Visual lists the `[visual]` options of edvr.ini that do something in flat (a section of
 user settings, Fix tier, like `[fix]`) for everyone: Intro movie (`visual.intro_video`, formerly
-`fix.intro_video`, which left the Performance tab) and Star glow (`visual.star_glow`, 100 to 200
+`fix.intro_video`, which left the Performance tab) and Star glow (`visual.star_glow`, 100 to 400
 percent in steps of 25, live). The rows are the table `kFlatVisualRows` in `menu_flat_rows.h`,
 kept in edvr.ini order and checked against the flat key gate like the other two tabs.
 
@@ -913,7 +913,7 @@ they were there (flown 2026-09-07).
      about, about their midpoint, by 100 over the percent, and the layer, the menu
      and EDVR's own panels keep the located eyes, `docs/world-scale.md`) and
      **Intro movie** (`visual.intro_video`, moved here from the Fixes page) and
-     **Star glow** (`visual.star_glow`, 100 to 200 percent, live; both profiles read it
+     **Star glow** (`visual.star_glow`, 100 to 400 percent, live; both profiles read it
      since the VR port, and the headset's hint line says so when Elite's Bloom is off).
      A live `edvr.ini` with no `world_scale` line is
      not a problem: the row shows the shipped 100, and the first change appends the

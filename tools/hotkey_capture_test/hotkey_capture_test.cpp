@@ -1521,11 +1521,11 @@ void testCaptureWiringPins(const char* root) {
         const size_t developer = pages.find("if (s.developer) {");
         check(at != std::string::npos && rows != std::string::npos && rows - at < 300 && developer != std::string::npos && at < developer,
               "menu.cpp: buildPages makes the Native on foot page from the Fix-tier rows of the native_on_foot page, grouped under the ini's headings (F127), for everyone, before the developer pages");
-        {   // The Desktop window page (2026-10-28): built right after Visual and before Native on foot, for everyone, from the Fix-tier rows of its own page.
-            const size_t visual = pages.find("p.name = \"Visual\";"), page = pages.find("p.name = \"Desktop window\";"), native = pages.find("p.name = \"Native on foot\";");
+        {   // The Mirror window page (2026-10-28 as the Desktop window page; renamed F173): built right after Visual and before Native on foot, for everyone, from the Fix-tier rows of its own page.
+            const size_t visual = pages.find("p.name = \"Visual\";"), page = pages.find("p.name = \"Mirror window\";"), native = pages.find("p.name = \"Native on foot\";");
             const size_t rows = page == std::string::npos ? page : pages.find("addSettingRows(p, MenuTier::Fix, \"desktop_window\", false);", page);
             check(visual != std::string::npos && page != std::string::npos && native != std::string::npos && visual < page && page < native && rows != std::string::npos && rows - page < 200,
-                  "menu.cpp: buildPages makes the Desktop window page from the Fix-tier rows of the desktop_window page, right after Visual and before Native on foot");
+                  "menu.cpp: buildPages makes the Mirror window page (it was the Desktop window page until F173) from the Fix-tier rows of the desktop_window page, right after Visual and before Native on foot");
             check(visual == std::string::npos || pages.find("addSettingRows(p, MenuTier::Fix, \"visual\", true);", visual) != std::string::npos,
                   "menu.cpp: the Visual page is still built from the visual rows");
         }
@@ -1862,7 +1862,7 @@ void testLegacyOnFootRowsStayOutOfMenu() {
             {"native_on_foot_turn_style", "Look and aim"},
             {"native_on_foot_snap_turn_deg", "Look and aim"},
             {"native_on_foot_look_to_aim_smoothing_ms", "Look and aim"},
-            {"native_on_foot_ads_sight_both_eyes", "Aiming down sights"},
+            {"native_on_foot_ads_sight_eye", "Aiming down sights"},
             {"native_on_foot_ads_head_aim", "Aiming down sights"},
             {"native_on_foot_ads_scope_zoom", "Aiming down sights"},
             {"native_on_foot_eye_height_cm", "Body and view"},
@@ -1897,6 +1897,21 @@ void testLegacyOnFootRowsStayOutOfMenu() {
                   strcmp(kMenuRows[firstPageRow].label, "Native on foot VR") == 0,
               "the first row of the Native on foot page is the feature switch, labelled Native on foot VR");
     }
+    // F162: the sight in both eyes switch (on, off) became the ADS sight eye (both, right, left): the same place on the page, a three-way choice, live, shipped both. The old key has no row.
+    {
+        int found = 0, oldRows = 0;
+        bool shaped = true;
+        for (int i = 0; i < kCount; ++i) {
+            const MenuRowDef& d = kMenuRows[i];
+            if (strcmp(d.key, "native_on_foot_ads_sight_both_eyes") == 0) ++oldRows;
+            if (strcmp(d.section, "fix") != 0 || strcmp(d.key, "native_on_foot_ads_sight_eye") != 0) continue;
+            ++found;
+            shaped = shaped && d.kind == MenuKind::Choice && strcmp(d.label, "ADS: sight eye") == 0 && strcmp(d.choices, "both|right|left") == 0 && strcmp(d.shipped, "both") == 0 &&
+                     d.applies == 1 && d.tier == MenuTier::Fix && strcmp(d.page, "native_on_foot") == 0 && strcmp(d.group, "Aiming down sights") == 0;
+        }
+        check(found == 1 && oldRows == 0 && shaped,
+              "ADS: sight eye is one Native on foot row under Aiming down sights: a choice of both, right and left, live, shipped both; the old sight in both eyes key has no row (F162)");
+    }
     for (const char* key : keys) {
         bool found = false;
         for (int i = 0; i < kCount; ++i)
@@ -1923,6 +1938,85 @@ void testLegacyOnFootRowsStayOutOfMenu() {
             }
         check(found == 5 && shaped, "the four Weapon UI trims and the ADS eye trim are [experimental] number rows: -30..30 cm, step 0.5, signed, live, shipped 0.0, labelled without (test)");
     }
+    // F168 (TEMPORARY): "Crouched ADS body forward / back" is the sixth number row of the developer tier's native on foot rows, right after "ADS eye forward / back" on the same page and under the same
+    // heading: -20..20 cm (a narrower range than the eye's -30..30), step 0.5, signed, live, shipped 5.0 since F173 (0.0 before), labelled without (test). It carries no old value over.
+    {
+        int adsEyeRow = -1, bodyRow = -1, found = 0;
+        bool shaped = true;
+        for (int i = 0; i < kCount; ++i) {
+            const MenuRowDef& d = kMenuRows[i];
+            if (strcmp(d.section, "experimental") == 0 && strcmp(d.key, "native_on_foot_ads_eye_offset_cm") == 0) adsEyeRow = i;
+            if (strcmp(d.section, "experimental") != 0 || strcmp(d.key, "native_on_foot_crouch_ads_body_forward_cm") != 0) continue;
+            bodyRow = i;
+            ++found;
+            shaped = shaped && d.kind == MenuKind::Number && d.tier == MenuTier::Experimental && strcmp(d.label, "Crouched ADS body forward / back") == 0 && strcmp(d.lo, "-20") == 0 &&
+                     strcmp(d.hi, "20") == 0 && strcmp(d.step, "0.5") == 0 && strcmp(d.unit, "cm") == 0 && d.showSign && d.applies == 1 && strcmp(d.shipped, "5.0") == 0;
+        }
+        const bool beside = adsEyeRow >= 0 && bodyRow == adsEyeRow + 1 && strcmp(kMenuRows[bodyRow].page, kMenuRows[adsEyeRow].page) == 0 &&
+                            strcmp(kMenuRows[bodyRow].group, kMenuRows[adsEyeRow].group) == 0;
+        check(found == 1 && shaped && beside,
+              "Crouched ADS body forward / back (F168, TEMPORARY) is one [experimental] number row right after ADS eye forward / back, on its page and under its heading: -20..20 cm, step 0.5, signed, live, shipped 5.0 (F173; 0.0 before)");
+    }
+    // F171 (TEMPORARY): "Crouched ADS body left / right" is the seventh number row of the developer tier's native on foot rows, right after "Crouched ADS body forward / back" on the same page and
+    // under the same heading: -30..30 cm in steps of 0.5 (F172: widened from the forward row's -20..20), signed, live, shipped 25.0 since F173 (15.0 before; positive is left of the aim line), labelled without (test). It
+    // carries no old value over.
+    {
+        int bodyRow = -1, leftRow = -1, found = 0;
+        bool shaped = true;
+        for (int i = 0; i < kCount; ++i) {
+            const MenuRowDef& d = kMenuRows[i];
+            if (strcmp(d.section, "experimental") == 0 && strcmp(d.key, "native_on_foot_crouch_ads_body_forward_cm") == 0) bodyRow = i;
+            if (strcmp(d.section, "experimental") != 0 || strcmp(d.key, "native_on_foot_crouch_ads_body_left_cm") != 0) continue;
+            leftRow = i;
+            ++found;
+            shaped = shaped && d.kind == MenuKind::Number && d.tier == MenuTier::Experimental && strcmp(d.label, "Crouched ADS body left / right") == 0 && strcmp(d.lo, "-30") == 0 &&
+                     strcmp(d.hi, "30") == 0 && strcmp(d.step, "0.5") == 0 && strcmp(d.unit, "cm") == 0 && d.showSign && d.applies == 1 && strcmp(d.shipped, "25.0") == 0;
+        }
+        const bool beside = bodyRow >= 0 && leftRow == bodyRow + 1 && strcmp(kMenuRows[leftRow].page, kMenuRows[bodyRow].page) == 0 &&
+                            strcmp(kMenuRows[leftRow].group, kMenuRows[bodyRow].group) == 0;
+        check(found == 1 && shaped && beside,
+              "Crouched ADS body left / right (F171, TEMPORARY) is one [experimental] number row right after Crouched ADS body forward / back, on its page and under its heading: -30..30 cm (F172: was -20..20), step 0.5, signed, live, shipped 25.0 (F173; 15.0 before)");
+    }
+    // F170 (TEMPORARY): "Crouched ADS torso square" is the eighth number row of the developer tier's native on foot rows (the seventh before F171 put "Crouched ADS body left / right" between), right
+    // after that row on the same page and under the same heading: 0..1 of the shoulder line's blade in steps of 0.05, not signed, live, shipped 0.0 since F173 (1.0 before: the turn was on), labelled without (test). It
+    // carries no old value over.
+    {
+        int leftRow = -1, squareRow = -1, found = 0;
+        bool shaped = true;
+        for (int i = 0; i < kCount; ++i) {
+            const MenuRowDef& d = kMenuRows[i];
+            if (strcmp(d.section, "experimental") == 0 && strcmp(d.key, "native_on_foot_crouch_ads_body_left_cm") == 0) leftRow = i;
+            if (strcmp(d.section, "experimental") != 0 || strcmp(d.key, "native_on_foot_crouch_ads_square") != 0) continue;
+            squareRow = i;
+            ++found;
+            shaped = shaped && d.kind == MenuKind::Number && d.tier == MenuTier::Experimental && strcmp(d.label, "Crouched ADS torso square") == 0 && strcmp(d.lo, "0") == 0 &&
+                     strcmp(d.hi, "1") == 0 && strcmp(d.step, "0.05") == 0 && !d.showSign && d.applies == 1 && strcmp(d.shipped, "0.0") == 0;
+        }
+        const bool beside = leftRow >= 0 && squareRow == leftRow + 1 && strcmp(kMenuRows[squareRow].page, kMenuRows[leftRow].page) == 0 &&
+                            strcmp(kMenuRows[squareRow].group, kMenuRows[leftRow].group) == 0;
+        check(found == 1 && shaped && beside,
+              "Crouched ADS torso square (F170, TEMPORARY) is one [experimental] number row right after Crouched ADS body left / right, on its page and under its heading: 0..1, step 0.05, unsigned, live, shipped 0.0 (F173; 1.0 before)");
+    }
+    // F169 (TEMPORARY): "Pistol sprint arm swing phase" is the ninth number row of the developer tier's native on foot rows (the seventh before F170 put "Crouched ADS torso square" between, the eighth
+    // before F171 put "Crouched ADS body left / right" before that), right after the torso square row on the same page and under the same heading: 0..1 of a stride in steps of 0.05, not signed,
+    // live, shipped 0.5 since F173 (0.0 before), labelled without (test). It carries no old value over.
+    {
+        int squareRow = -1, swingRow = -1, found = 0;
+        bool shaped = true;
+        for (int i = 0; i < kCount; ++i) {
+            const MenuRowDef& d = kMenuRows[i];
+            if (strcmp(d.section, "experimental") == 0 && strcmp(d.key, "native_on_foot_crouch_ads_square") == 0) squareRow = i;
+            if (strcmp(d.section, "experimental") != 0 || strcmp(d.key, "native_on_foot_pistol_sprint_swing_phase") != 0) continue;
+            swingRow = i;
+            ++found;
+            shaped = shaped && d.kind == MenuKind::Number && d.tier == MenuTier::Experimental && strcmp(d.label, "Pistol sprint arm swing phase") == 0 && strcmp(d.lo, "0") == 0 &&
+                     strcmp(d.hi, "1") == 0 && strcmp(d.step, "0.05") == 0 && !d.showSign && d.applies == 1 && strcmp(d.shipped, "0.5") == 0;
+        }
+        const bool beside = squareRow >= 0 && swingRow == squareRow + 1 && strcmp(kMenuRows[swingRow].page, kMenuRows[squareRow].page) == 0 &&
+                            strcmp(kMenuRows[swingRow].group, kMenuRows[squareRow].group) == 0;
+        check(found == 1 && shaped && beside,
+              "Pistol sprint arm swing phase (F169, TEMPORARY) is one [experimental] number row right after Crouched ADS torso square, on its page and under its heading: 0..1, step 0.05, unsigned, live, shipped 0.5 (F173; 0.0 before)");
+    }
     // F157: the developer tier's "Body draw to hide (test)" dial (F154 to F156) is retired: the key stays in edvr.ini on a hidden retired line (`# ui: hidden -- retired (F157)`), so it
     // has a row in neither menu, the developer tier's included, and the dial's heading is gone with it.
     {
@@ -1937,28 +2031,29 @@ void testLegacyOnFootRowsStayOutOfMenu() {
 
 // ---------------------------------------------------------------------------
 // 7b. The Visual page of VR's menu (2026-10-27): how the world looks, apart from the fixes. World scale is a whole-percent number from 50 to 200, live; Desktop window (visual.desktop_window,
-// what Elite's window on the desktop shows) was on it until 2026-10-28, when it and its two new keys moved to the Desktop window page (testDesktopWindowPage); the intro settings and the
+// what Elite's window on the desktop shows) was on it until 2026-10-28, when it and its two new keys moved to the Mirror window page, then the Desktop window page (testDesktopWindowPage); the intro settings and the
 // screen curve moved onto it from the Fixes page; Star glow, which both profiles read, is on it too; and a live edvr.ini without the world_scale line takes
 // the first change from the menu as an appended line.
 
-// 7c. The Desktop window page of VR's menu (2026-10-28), right after Visual: what the window shows, the picture's shape, how far up or down it is cut (round 7: a signed whole-percent
+// 7c. The Mirror window page of VR's menu (the Desktop window page, 2026-10-28, until F173; its page id is unchanged, and since F174 its rows' labels leave out the window's name, which the page gives), right after Visual: what the window shows, the picture's shape, how far up or down it is cut (round 7: a signed whole-percent
 // number row; round 8: how the shape is cut, native or center) and the window's style, the five [visual] keys, Fix tier, in edvr.ini order, no group headings needed (the page is the group), choices in the words the file gives them.
 void testDesktopWindowPage() {
     printf("desktop window page\n");
     constexpr int kCount = static_cast<int>(sizeof(kMenuRows) / sizeof(kMenuRows[0]));
     struct Want { const char* key; const char* label; const char* choices; };   // an empty choices is the number row
     static const Want want[] = {
-        {"desktop_window", "Desktop window", "game=Game|left_eye=Left eye|right_eye=Right eye|both_eyes=Both eyes"},
-        {"desktop_window_aspect", "Desktop window shape", "full=Full picture|1:1=1:1|4:3=4:3|16:10=16:10|16:9=16:9|21:9=21:9"},
-        {"desktop_window_crop", "Desktop window crop", "native=Same as the game's mirror|center=Centre"},
-        {"desktop_window_vertical_shift", "Desktop window vertical shift", ""},
-        {"desktop_window_style", "Desktop window style", "window=Window|borderless=Borderless full screen"},
+        {"desktop_window", "Image", "game=Game|left_eye=Left eye|right_eye=Right eye|both_eyes=Both eyes"},
+        {"desktop_window_aspect", "Shape", "full=Full picture|1:1=1:1|4:3=4:3|16:10=16:10|16:9=16:9|21:9=21:9"},
+        {"desktop_window_crop", "Crop", "native=Same as the game's mirror|center=Centre"},
+        {"desktop_window_vertical_shift", "Vertical shift", ""},
+        {"desktop_window_style", "Style", "window=Window|borderless=Borderless full screen"},
     };
     constexpr int kWant = static_cast<int>(sizeof(want) / sizeof(want[0]));
-    int at = 0, shift = -1;
+    int at = 0, shift = -1, mode = -1;
     bool inOrder = true;
     for (int i = 0; i < kCount; ++i) {
         if (strcmp(kMenuRows[i].page, "desktop_window") != 0) continue;
+        if (strcmp(kMenuRows[i].key, "desktop_window") == 0) mode = i;
         const bool number = at < kWant && want[at].choices[0] == '\0';
         const bool match = at < kWant && strcmp(kMenuRows[i].section, "visual") == 0 && strcmp(kMenuRows[i].key, want[at].key) == 0 && strcmp(kMenuRows[i].label, want[at].label) == 0 &&
                            kMenuRows[i].tier == MenuTier::Fix && kMenuRows[i].kind == (number ? MenuKind::Number : MenuKind::Choice) && kMenuRows[i].applies == 1 &&
@@ -1971,13 +2066,15 @@ void testDesktopWindowPage() {
         if (strcmp(kMenuRows[i].key, "desktop_window_vertical_shift") == 0) shift = i;
         ++at;
     }
-    check(inOrder && at == kWant, "VR's Desktop window page is Desktop window, Desktop window shape, Desktop window crop, Desktop window vertical shift and Desktop window style, [visual] Fix-tier rows (the shift a number, the rest choices), live, in edvr.ini order");
+    check(inOrder && at == kWant, "VR's Mirror window page is Image, Shape, Crop, Vertical shift and Style, [visual] Fix-tier rows (the shift a number, the rest choices), live, in edvr.ini order");
+    // F173: the mirror window shows the left eye by default (the shipped choice), the other four rows keep their words
+    check(mode >= 0 && strcmp(kMenuRows[mode].shipped, "left_eye") == 0, "F173: the Mirror window row (visual.desktop_window) ships on left_eye");
     for (int i = 0; i < kCount; ++i) {
         if (strncmp(kMenuRows[i].key, "desktop_window", 14) == 0 && strcmp(kMenuRows[i].section, "visual") == 0)
-            checkf(strcmp(kMenuRows[i].page, "desktop_window") == 0, "visual.%s is on the Desktop window page, not on the Visual page", kMenuRows[i].key);
+            checkf(strcmp(kMenuRows[i].page, "desktop_window") == 0, "visual.%s is on the Mirror window page, not on the Visual page", kMenuRows[i].key);
     }
     if (shift < 0) {
-        check(false, "the Desktop window page has a vertical shift row");
+        check(false, "the Mirror window page has a vertical shift row");
         return;
     }
     const MenuRowDef& d = kMenuRows[shift];

@@ -206,8 +206,9 @@ inline void run144(Check&& check) {
                       f144::promoteMask(promoteAllowed, f144::kGearNoArms) == 0 && f144::promoteMask(promoteAllowed, f144::kGearUnknown) == 0,
                   "F147: Gear_Back is promoted only under the outer-garment decision (the other suit's backpack, no gear arms, an unread decision: nothing)");
             uint64_t list = 0, head = 0;
-            static const char* const f19[] = {"EVASuit_Torso", "EVASuit_Arms", "EVASuit_Hands", "Shoulder_Left", "Shoulder_Right", "EVASuit_Legs", "EVASuit_Feet", "FirstPersonSkeleton",
-                                              "EVASuit_Gear_LowerArms", "EVASuit_Gear_LowerArmL", "EVASuit_Gear_LowerArmR"};
+            static const char* const f19[] = {"EVASuit_Torso", "EVASuit_Arms", "EVASuit_Hands", "Shoulder_Left", "Shoulder_Right", "FlightSuit_Torso", "FlightSuit_Arms", "FlightSuit_Hands",
+                                              "ShoulderPads", "EVASuit_Legs", "EVASuit_Feet", "FirstPersonSkeleton", "EVASuit_Gear_LowerArms", "EVASuit_Gear_LowerArmL",
+                                              "EVASuit_Gear_LowerArmR"};   // F164: and the flight suit's four
             for (const char* n : f19) list |= 1ull << edvr::avh::partIndexByName(n);
             for (uint32_t h : edvr::avh::kHeadParts) head |= 1ull << h;
             const uint64_t coat = f144::unclipMask(unclipAllowed, list, head, f144::kGearOuter);

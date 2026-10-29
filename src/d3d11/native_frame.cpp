@@ -403,7 +403,7 @@ HRESULT WINAPI beginFrame(void* context, const EdvrNativeFrameInput* input,
         if (output->version >= EDVR_NATIVE_FRAME_VERSION_10) result.reservedYaw = g_adsPitch;
         // F123: the position-only recentre asked of the runtime, in a version 10 and 11 answer only (0 while none stands).
         if (output->version >= EDVR_NATIVE_FRAME_VERSION_10) result.positionRecentre = g_positionRecentre;
-        // F106: the left eye's share of the right eye's image (fix.native_on_foot_ads_sight_both_eyes), in a version 10 and 11 answer only: 0 unless the frame
+        // F106: the left eye's share of the right eye's image (fix.native_on_foot_ads_sight_eye = both), in a version 10 and 11 answer only: 0 unless the frame
         // thread published a fresh level.
         if (output->version >= EDVR_NATIVE_FRAME_VERSION_10)
             result.leftEyeShare = edvr::eyeshare::toBits(edvr::eyeshare::read(GetTickCount64()));

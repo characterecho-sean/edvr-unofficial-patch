@@ -40,7 +40,7 @@ constexpr ULONGLONG kWindowMs = 10000;
 // ---- the setting and the mode ----
 bool g_configRead = false;
 uint32_t g_configGeneration = 0;
-int g_percent = 100;                  // visual.star_glow as the reader gave it: 100, 125, 150, 175 or 200
+int g_percent = 100;                  // visual.star_glow as the reader gave it: 100, 125, 150, 175, 200, 250, 300, 350 or 400
 bool g_unrecognisedNoted = false;
 VrStarMode g_mode = VrStarMode::kOff;
 int g_windowPercent = 100;            // the setting the window being counted belongs to (valid while ON)
@@ -702,7 +702,7 @@ void vrStarGlowFrameBoundary() {
         g_percent = starGlowPercent(cfg, &recognised);
         if (!recognised && !g_unrecognisedNoted) {
             g_unrecognisedNoted = true;
-            Log::get().note("vr star glow: visual.star_glow = \"%s\" is not one of 100, 125, 150, 175, 200; it is read as 100 (the game as it ships)",
+            Log::get().note("vr star glow: visual.star_glow = \"%s\" is not one of 100, 125, 150, 175, 200, 250, 300, 350, 400; it is read as 100 (the game as it ships)",
                             cfg.getString("visual.star_glow", "100").c_str());
         }
     }

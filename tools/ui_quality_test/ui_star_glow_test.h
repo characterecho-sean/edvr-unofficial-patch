@@ -28,21 +28,25 @@ using worldroute::readText;
 
 void testSetting() {
     check(flatStarGlowSnap(100) == 100 && flatStarGlowSnap(125) == 125 && flatStarGlowSnap(150) == 150 && flatStarGlowSnap(175) == 175 &&
-              flatStarGlowSnap(200) == 200,
-          "star glow: the five choices snap to themselves");
+              flatStarGlowSnap(200) == 200 && flatStarGlowSnap(250) == 250 && flatStarGlowSnap(300) == 300 && flatStarGlowSnap(350) == 350 &&
+              flatStarGlowSnap(400) == 400,
+          "star glow: the nine choices snap to themselves");
     check(flatStarGlowSnap(0) == 100 && flatStarGlowSnap(-40) == 100 && flatStarGlowSnap(99) == 100 && flatStarGlowSnap(112) == 100,
           "star glow: anything under 100, and up to 112, is the stock 100");
     check(flatStarGlowSnap(113) == 125 && flatStarGlowSnap(137) == 125 && flatStarGlowSnap(138) == 150 && flatStarGlowSnap(162) == 150 &&
-              flatStarGlowSnap(163) == 175 && flatStarGlowSnap(187) == 175 && flatStarGlowSnap(188) == 200,
+              flatStarGlowSnap(163) == 175 && flatStarGlowSnap(187) == 175 && flatStarGlowSnap(188) == 200 && flatStarGlowSnap(224) == 200 &&
+              flatStarGlowSnap(225) == 250 && flatStarGlowSnap(274) == 250 && flatStarGlowSnap(275) == 300 && flatStarGlowSnap(324) == 300 &&
+              flatStarGlowSnap(325) == 350 && flatStarGlowSnap(374) == 350 && flatStarGlowSnap(375) == 400,
           "star glow: a number between two choices snaps to the nearer, halves up");
-    check(flatStarGlowSnap(201) == 200 && flatStarGlowSnap(1000) == 200, "star glow: anything over 200 is 200");
+    check(flatStarGlowSnap(401) == 400 && flatStarGlowSnap(1000) == 400, "star glow: anything over 400 is 400");
     check(near1(flatStarGlowK(100), 1.0) && near1(flatStarGlowK(125), 1.25) && near1(flatStarGlowK(150), 1.5) && near1(flatStarGlowK(175), 1.75) &&
-              near1(flatStarGlowK(200), 2.0),
+              near1(flatStarGlowK(200), 2.0) && near1(flatStarGlowK(250), 2.5) && near1(flatStarGlowK(300), 3.0) && near1(flatStarGlowK(350), 3.5) &&
+              near1(flatStarGlowK(400), 4.0),
           "star glow: k is the percentage over 100");
     check(near1(flatStarGlowM(100), 0.0) && near1(flatStarGlowM(125), 0.25) && near1(flatStarGlowM(150), 0.5) && near1(flatStarGlowM(175), 0.75) &&
-              near1(flatStarGlowM(200), 1.0),
+              near1(flatStarGlowM(200), 1.0) && near1(flatStarGlowM(400), 3.0),
           "star glow: m is k - 1, the weight of the star layer");
-    check(!flatStarGlowActive(100) && !flatStarGlowActive(99) && flatStarGlowActive(125) && flatStarGlowActive(200),
+    check(!flatStarGlowActive(100) && !flatStarGlowActive(99) && flatStarGlowActive(125) && flatStarGlowActive(200) && flatStarGlowActive(400),
           "star glow: only above 100 does anything run");
 }
 

@@ -940,11 +940,17 @@ void fpBodyStep(void* amcPtr) noexcept {
 // The body shader discards a pixel whose clip value exceeds cb2[5].w, so an enable of 0 keeps those pixels. The unclip writes enable 0 and dirty 1
 // after the fade returns, on the same thread, for the local third-person AMC only (isLocalAmc, as headHideStep identifies it). Nothing is restored.
 // The probe reads the same bytes every 5 s (before that call's write), with the flags [AMC+0x321], [AMC+0x322], [AMC+0x378] once per AMC.
-constexpr size_t kClipParts = 11;            // five body unclip parts, three comparisons, then three lower-arm gear unclip parts
-constexpr size_t kClipUnclipParts = 5;
-constexpr size_t kClipGearFirst = 8;
+// F164: the legacy flight suit's torso, arms, hands and shoulder pads carry the same modifier (flight edvr_gfx_20261028_153030, the outfit census and F143's clip rows: all four enable 1,
+// amounts 0.0, 0.6, 0.6 and 0.6), and the game's first-person clip discarded them in the main view: only FlightSuit_Legs, which has no modifier, was drawn. They are written like the EVA suit's.
+// The order is the roles: the EVA suit's five (the hybrid body uses index 0 as its torso and 1 to 4 as the arms, hands and shoulders it masks), the flight suit's four, the three
+// comparison parts (never written), then the three lower-arm gear parts. kClipUnclipParts and kClipGearFirst bound the roles.
+constexpr size_t kClipParts = 15;
+constexpr size_t kClipUnclipParts = 9;       // indexes 0 to 8 are written
+constexpr size_t kClipGearFirst = 12;        // indexes 9 to 11 are the comparisons; 12 to 14 are the lower-arm gear, written and reported by the gear probe
 inline constexpr const char* kClipPartNames[kClipParts] = {"EVASuit_Torso", "EVASuit_Arms", "EVASuit_Hands", "Shoulder_Left", "Shoulder_Right",
+    "FlightSuit_Torso", "FlightSuit_Arms", "FlightSuit_Hands", "ShoulderPads",
     "EVASuit_Legs", "EVASuit_Feet", "FirstPersonSkeleton", "EVASuit_Gear_LowerArms", "EVASuit_Gear_LowerArmL", "EVASuit_Gear_LowerArmR"};
+static_assert(kClipUnclipParts <= kClipGearFirst && kClipGearFirst < kClipParts, "the clip roles: unclip parts, then comparisons, then gear");
 struct ClipPart {
     bool named = false;         // the name is in the part-name table (index resolved)
     bool present = false;       // any instance of the part is on the AMC
@@ -1093,7 +1099,7 @@ void outfitClipStep(uint8_t* amc) noexcept {
     }
     g_f143Busy.store(false, std::memory_order_release);
 }
-// The part mask of F19's unclip list (every part kClipPartNames names, the comparison parts too: they stay clipped) and of the head parts, once.
+// The part mask of F19's unclip list (every part kClipPartNames names, the comparison parts too: they stay clipped; F164: and the flight suit's four) and of the head parts, once.
 uint64_t clipListMask(const int* idx) noexcept {
     uint64_t m = 0;
     for (size_t i = 0; i < kClipParts; ++i)
@@ -2057,6 +2063,28 @@ bool armBuildPlan(uint64_t x) noexcept {
                         static_cast<unsigned>(plan.sq.chestRoot), joints > nofoot::kIkClavL ? static_cast<unsigned>(g_pfzParents[nofoot::kIkClavL]) : 0xFFFFu,
                         joints > nofoot::kIkClavR ? static_cast<unsigned>(g_pfzParents[nofoot::kIkClavR]) : 0xFFFFu, byLevel[0], byLevel[1], byLevel[2],
                         static_cast<unsigned>(plan.sq.n));
+    }
+    // F166: the upper body's held joints (the spine, both clavicles and upper arms) and the joints that come with them. A refusal leaves the hold off; nothing else depends on it.
+    {
+        const uint32_t clav[2] = {plan.ok[0] ? plan.side[0].C : 0xFFFFu, plan.ok[1] ? plan.side[1].C : 0xFFFFu};
+        const uint32_t upper[2] = {plan.ok[0] ? plan.side[0].U : 0xFFFFu, plan.ok[1] ? plan.side[1].U : 0xFFFFu};
+        plan.f166 = nofoot::f166::buildPlan(g_pfzParents, joints, clav, upper);
+        char held[96] = {};
+        size_t at = 0;
+        for (uint32_t k = 0; k < plan.f166.n; ++k)
+            armAppend(held, sizeof(held), &at, "%s%u", k ? " " : "", static_cast<unsigned>(plan.f166.joint[k]));
+        Log::get().note("native on foot upper body hold plan (F166): X=%016llX %s (%s); held joints %s (arms %u); %u joints come with them",
+                        static_cast<unsigned long long>(x), plan.f166.ok() ? "ok" : "REFUSED", nofoot::f166::whyText(plan.f166.why), held[0] ? held : "none",
+                        static_cast<unsigned>(plan.f166.arms), static_cast<unsigned>(plan.f166.carriedN));
+    }
+    // F169: the left arm's chain (clavicle, upper arm, forearm, hand) and the joints that come with it, for the pistol sprint's delayed swing. A refusal leaves the swing dial doing nothing.
+    {
+        if (plan.ok[0]) plan.f169 = nofoot::f169::buildPlan(g_pfzParents, joints, plan.side[0].C, plan.side[0].U, plan.side[0].F, plan.side[0].H);
+        Log::get().note("native on foot pistol sprint swing plan (F169): X=%016llX %s (%s); left arm chain %u %u %u %u; %u joints come with it",
+                        static_cast<unsigned long long>(x), plan.f169.ok() ? "ok" : "REFUSED", plan.ok[0] ? nofoot::f169::whyText(plan.f169.why) : "the left arm's plan was refused",
+                        plan.ok[0] ? static_cast<unsigned>(plan.side[0].C) : 0xFFFFu, plan.ok[0] ? static_cast<unsigned>(plan.side[0].U) : 0xFFFFu,
+                        plan.ok[0] ? static_cast<unsigned>(plan.side[0].F) : 0xFFFFu, plan.ok[0] ? static_cast<unsigned>(plan.side[0].H) : 0xFFFFu,
+                        static_cast<unsigned>(plan.f169.carriedN));
     }
     // F65b: the legs for stand armed: each chain from the probe's foot (nofoot::ikLegChain), the anchor (the freeze's: the lowest common
     // ancestor of the neck 34 and the left foot), the pair check against the RE's indices (the R foot confirmed by FindJoint), and the upper
@@ -3056,7 +3084,7 @@ void nativeOnFootBodyClipTick(uint64_t now, bool unclipWant, bool probeWant, con
     if (unclipWant && !g_clipWantLast) {
         g_clipOnMs = now;
         g_clipUnseenNoted = false;
-        Log::get().note("native on foot body unclip: on (EVASuit torso, arms and hands, both shoulders and lower-arm gear: enable 0, dirty 1, local third-person AMC)");
+        Log::get().note("native on foot body unclip: on (EVASuit torso, arms and hands, both shoulders, the flight suit's torso, arms, hands and shoulder pads, and lower-arm gear: enable 0, dirty 1, local third-person AMC)");
     }
     if (!unclipWant && g_clipWantLast)
         Log::get().note("native on foot body unclip: off (%s); nothing is restored: the game writes its own enable on its next item apply, and the value it had was not kept", why);

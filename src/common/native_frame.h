@@ -174,7 +174,7 @@ struct EdvrNativeFrameOutput {
     // RETIRED 2026-10-09 (version 4's one word: which projection query channel
     // the terrain guard's widened frustum was told through). Always zero, never
     // read; the slot stays for the same reason as the 21 above.
-    // F106 (fix.native_on_foot_ads_sight_both_eyes): in a version 10 answer only, the slot carries the LEFT eye's share of the right eye's image, a float's bits
+    // F106 (fix.native_on_foot_ads_sight_eye = both): in a version 10 answer only, the slot carries the LEFT eye's share of the right eye's image, a float's bits
     // (left_eye_share.h): 0 (the left eye's own image) to 1 (the right eye's image, turned into the left eye's view). The runtime draws the right eye's image over the
     // left eye's own by it, in that eye's scene pass. F89 to F105 carried the left eye's darkening here, with the same timing: a runtime from F106 on reads such a
     // provider's level as the share, and a runtime from F89 to F105 darkens by this provider's share. A provider or runtime from before F89 leaves it zero and reads

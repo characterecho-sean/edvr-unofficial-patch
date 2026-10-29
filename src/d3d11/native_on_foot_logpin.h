@@ -133,6 +133,12 @@ template<class T> inline void elbow(T& d, const T& s) noexcept {
     d.spanMax = std::max(d.spanMax, s.spanMax);
     for (uint32_t i = 0; i < 3; ++i) d.src[i] += s.src[i];
     d.f159.merge(s.f159);
+    d.f161.merge(s.f161);
+    d.f165.merge(s.f165);
+    d.f166.merge(s.f166);
+    d.f168.merge(s.f168);
+    d.f170.merge(s.f170);   // F171: F170's was missing, so its line (printed when f98.f170.ads is nonzero) never printed in a window built here (the flight edvr_gfx_20261029_043951)
+    d.f171.merge(s.f171);
     if (s.downStepMax > d.downStepMax) {
         d.downStepMax = s.downStepMax; d.downStepAng = s.downStepAng; d.downStepTwist = s.downStepTwist;
     }

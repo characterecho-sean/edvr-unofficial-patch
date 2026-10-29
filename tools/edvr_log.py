@@ -10368,6 +10368,8 @@ H_DESKTOP_SETTING = r"desktop window: setting (?P<value>game|left_eye|right_eye|
 H_DESKTOP_SEC = (r"desktop window: 10 s: drawn=(?P<drawn>\d+) seen=(?P<seen>\d+) skipped_draws=(?P<skipped>\d+) eyes_L=(?P<left>\d+) eyes_R=(?P<right>\d+) "
                  r"stale=(?P<stale>\d+) client=(?P<cw>\d+)x(?P<ch>\d+) swap_chain=(?P<sw>\d+)x(?P<sh>\d+)(?: moves=(?P<moves>\d+) resizes=(?P<resizes>\d+))?$")
 H_DESKTOP_STOP = r"desktop window: stopped \((?P<reason>.*)\); drawn=(?P<drawn>\d+) of (?P<seen>\d+) Presents; window (?P<window>.*)$"
+H_DESKTOP_ACTIVE = r"desktop window: active #(?P<n>\d+)"   # F173: the window took the eye images (an activation): evidence that 3D was on
+H_DESKTOP_DECLINED = r"desktop window: not drawing -- (?P<why>.*)$"   # F173: the draw declined, and why
 H_DESKTOP_OTHER = r"desktop window: (?!setting |10 s: |stopped \()"
 H_F125_LABEL = "native on foot log (F125)"
 H_F125_RE = re.compile(r"native on foot log \(F125\): detail (?P<detail>on|off), summary window (?P<wl>\d+) s")
@@ -10616,8 +10618,9 @@ def _hj_f91_fit(rows, ctx):
 
 
 def _hj_f110_model_eye(rows, ctx):
-    """F110: the ADS sight lock's right eye per second: solved from its rows, or the model (the job camera, the left eye, or the solved left eye, plus the IPD). The
-    share of ADS frames on the model, and the job camera's model against the solved right eye whenever both were there: over 0.5 cm is PARTIAL (F63's half-IPD
+    """F110: the ADS sight lock's aiming eye per second (F162: the right eye, or the left eye with the sight eye set to left; a line before F162 is the right eye's): solved
+    from its rows, or the model (for the right eye the job camera, the left eye, or the solved left eye, plus the IPD; for the left eye the job camera). The
+    share of ADS frames on the model, and the job camera's model against the solved aiming eye whenever both were there: over 0.5 cm is PARTIAL (F63's half-IPD
     model stood 3.1 cm short, at the nose). A build before F110 writes the old line: any frame on its model is PARTIAL."""
     new, old = rows.get("sec", []), rows.get("old", [])
     if not new and not old:
@@ -10633,17 +10636,18 @@ def _hj_f110_model_eye(rows, ctx):
     solved, model = sum(int(r["solved"]) for r in new), sum(int(r["model"]) for r in new)
     fromcam, fromleft = sum(int(r["fromcam"]) for r in new), sum(int(r["fromleft"]) for r in new)
     dn = sum(int(r["dn"]) for r in new)
+    aim = "/".join(sorted({r.get("aim") or "right" for r in new}))
     if not solved + model:
         return ("IDLE", "%d s, no ADS frame drove the lock" % _hsecs(new))
-    text = "%d s: the solved right eye %d frames, the model %d (%.0f%%: from the job camera %d, from the solved left eye %d)" % (
-        _hsecs(new), solved, model, 100.0 * model / (solved + model), fromcam, fromleft)
+    text = "%d s: aiming eye %s, the solved %s eye %d frames, the model %d (%.0f%%: from the job camera %d, from the solved left eye %d)" % (
+        _hsecs(new), aim, aim, solved, model, 100.0 * model / (solved + model), fromcam, fromleft)
     if not dn:
-        return ("OK", text + "; no frame had the model and the solved right eye together")
+        return ("OK", text + "; no frame had the model and the solved %s eye together" % aim)
     dmean = sum(int(r["dn"]) * float(r["dmean"]) for r in new) / dn
     dmax = max(float(r["dmax"]) for r in new if int(r["dn"]))
-    text += "; the job camera's model against the solved right eye %.1f cm mean, %.1f max over %d frames" % (dmean, dmax, dn)
+    text += "; the job camera's model against the solved %s eye %.1f cm mean, %.1f max over %d frames" % (aim, dmean, dmax, dn)
     if dmean > 0.5:
-        return ("PARTIAL", text + ": the model is off the right eye")
+        return ("PARTIAL", text + ": the model is off the %s eye" % aim)
     return ("OK", text)
 
 
@@ -11450,6 +11454,9 @@ def _hj_f93_chain(rows, ctx):
     meas, matched = _hsum(on, "n"), _hsum(on, "matched")
     text = "%d s; steady eye on: matched %d of %d measured frames (F70's %d, model eye %d, held %d)%s" % (
         _hsecs(sec), matched, meas, _hsum(on, "legacy"), _hsum(on, "model"), _hsum(on, "missed"), "; " + "; ".join(parts) if parts else "")
+    aims = sorted({x["aim"] for x in sec if x.get("aim")})   # F162: the eye the chain measured (a line before it has none: the right eye)
+    if aims:
+        text += "; aiming eye %s" % "/".join(aims)
     if meas and matched == 0:
         return ("NEVER APPLIED", text + " (the steady eye never matched the alignment the eye was drawn with)")
     if meas and matched * 5 < meas * 4:
@@ -11674,12 +11681,17 @@ def _hj_f106_share(rows, ctx):
     100% of the left eye taken from the right. NEVER APPLIED: ADS was up with the key on (a share asked for, or an F89 trace press under the key) and no press line came
     back, so the share never ran (an openvr_api.dll from before F106 darkens instead). IDLE: the key off, or no ADS. PARTIAL: presses drawn, none at full weight with a
     plausible coverage, or refused frames, or the guard tripped."""
-    press, sec, ev, guard, key = (rows.get(k, []) for k in ("press", "sec", "event", "guard", "key"))
-    if not (press or sec or ev or guard or key):
+    press, sec, ev, guard, key, eyekey = (rows.get(k, []) for k in ("press", "sec", "event", "guard", "key", "eyekey"))
+    if not (press or sec or ev or guard or key or eyekey):
         return None
     on = [r for r in sec if r["key"] == "on"]
     asked = max([float(r.get("asked") or r["w"]) for r in on] or [0.0])
-    key_on = any(r["key"] == "on" for r in key) or bool(on) or any(r["key"] == "on" for r in ev)
+    key_on = any(r["key"] == "on" for r in key) or bool(on) or any(r["key"] == "on" for r in ev) or any(r["mode"] == "both" for r in eyekey)
+    # F162: the sight eye. The key line (both, right or left) and the aiming eye the 1 s and edge lines name; a log before F162 has the old on | off key: on is both, off is right.
+    aims = [r["aim"] for r in sec + ev + eyekey if r.get("aim")]
+    modes = [r["mode"] for r in eyekey]
+    eye = aims[-1] if aims else None
+    left = bool(modes and modes[-1] == "left") or (eye == "left" and not key_on)
     traced = sum(1 for r in _hrows(ctx, H_F89_ADS, "start") if r["dir"] == "press")
     gn = max([int(r["n"]) for r in guard] or [0])
     full = [r for r in press if float(r["peak"]) >= 0.99 and int(r["full"]) > 0]
@@ -11695,8 +11707,10 @@ def _hj_f106_share(rows, ctx):
         if asked > 0.0 or (traced and key_on):
             return ("NEVER APPLIED", text + " (the share was asked for and the runtime never reported drawing it: an openvr_api.dll from before F106, or one that "
                                             "cannot reach this d3d11.dll's export)")
-        if not key_on and (sec or key or ev):
-            return ("IDLE", text + " (key off)")
+        if not key_on and (sec or key or ev or eyekey):
+            if left:   # F162: the left eye is the aiming eye, so there is no right eye's view to show the left: the share never runs, and that is the setting, not a fault
+                return ("IDLE", text + " (sight eye left: the left eye is lined up on the sights and each eye keeps its own view, so no share runs)")
+            return ("IDLE", text + " (key off%s)" % ("; sight eye right: each eye keeps its own view" if eye == "right" or (modes and modes[-1] == "right") else ""))
         return ("IDLE", text + " (no ADS press)")
     if not plausible:
         return ("PARTIAL", text + " (no press reached full weight with 30-100% of the left eye taken)")
@@ -12342,6 +12356,12 @@ def _hj_f137_neck(rows, ctx):
     return ("PARTIAL", text + "; " + "; ".join(notes)) if notes else ("OK", text)
 
 
+# F171: the reason a pitched call on the running reference carries on the F138 line (nofoot::f138::reasonName(kRunningMeasured)); its comma would split it from its count in the not-applied
+# list, so the judge reads it under a token without one.
+H138_RUNNING_MEASURED = "running reference, measured only"
+H138_RUNNING_TOKEN = "running reference measured only"
+
+
 def _hj_f138_pitched(rows, ctx):
     """F138: the view holds its height over the neck while the look is pitched. The pin hook adds the camera's sink against the stance (the game's camera over the animated
     neck, the headset's own height out) to the raise's target while the aim is pitched, unarmed, weighted by smoothstep(20, 30 deg) since F139 (it was 10 to 20; the unarmed
@@ -12349,9 +12369,14 @@ def _hj_f138_pitched(rows, ctx):
     under look to aim stays as flown and has no line. The instrument counts a call from 10 deg. The end of an episode it published in gives the stance's target back once, else "not needed"; the 1 s lines (a second with a call at 10 deg or more)
     say how many calls added it, which were measured only (an item drawn) and the reasons for every other (no reference, the LOCAL pose's generation changed, the stance
     changed, ADS, the camera away, ...), INSIDE on the drawn eye, and the settle's refusals. OK when it was added in at least one second and INSIDE (F97a's test on the drawn
-    eye) is under 10% of the calls of the applied seconds with the aim up. PARTIAL when INSIDE is 10% or more of those calls, or when it was added in no second and a pitched
+    eye) is under 10% of the calls of the applied seconds with the aim up. F170: NEVER APPLIED when an unarmed pitched second had INSIDE frames and no reference at all (no
+    settled stance and no running one: the "no reference" refusals, and in a log with the reference column none of its calls used either). PARTIAL when INSIDE is 10% or more of those calls, or when it was added in no second and a pitched
     second had an empty hand (the leading reason is named). IDLE when no pitched second had an empty hand (an item drawn: measured only), or when look to aim ran and no
-    second was pitched. The 10 s bin lines are read for presence only."""
+    second was pitched. The 10 s bin lines are read for presence only.
+    F171: a call on the RUNNING reference measures the sink and publishes nothing (the flight edvr_gfx_20261029_043951 ran the raise to its clamp, -50 cm on 90 of 90 ticks, on a running
+    reference's negative sink while the game's camera over the neck read +14 to +40 cm): its own reason, "running reference, measured only", counted in the not-applied list and printed
+    in the verdict, so an unarmed look-up before the first settle reads PARTIAL with that leading reason. The line also carries the reference's age, target and G, G now and the mean
+    target published (a log from before it has no such column)."""
     sec, bins = rows.get("sec", []), rows.get("bins", [])
     if not sec:
         if bins:
@@ -12367,13 +12392,34 @@ def _hj_f138_pitched(rows, ctx):
     empty = [r for r in sec if r["item"] == "none"]
     whys = collections.Counter()
     for r in empty:
-        for name, count in re.findall(r"([^,]+?) (\d+)(?:, |$)", r["why"]):
+        # F171: the reason "running reference, measured only" has a comma of its own, which would split it from its count
+        for name, count in re.findall(r"([^,]+?) (\d+)(?:, |$)", r["why"].replace(H138_RUNNING_MEASURED, H138_RUNNING_TOKEN)):
             whys[name.strip()] += int(count)
     modes = sorted(set(r["mode"] for r in sec))
     text = ("%d pitched s (%d calls; %s), aim %+.0f..%+.0f deg; the camera sank up to %.1f cm against the stance; added in %d s (%d calls, up to %.1f cm), measured only %d calls; "
             "the settle refused for the aim's pitch %d calls (look to aim's gate %d); returned to the stance's raise %d times (refused %d, not needed %d)") % (
         n, calls, " and ".join(modes), min(float(r["amin"]) for r in sec), max(float(r["amax"]) for r in sec), max(float(r["smax"]) for r in sec), len(applied), added,
         max([float(r["amaxadd"]) for r in applied] or [0.0]), measured, refused, lta, returned, retrefused, notneeded)
+    # F170: the reference the considered calls used (a log from before F170 has no such column), and the empty-hand seconds that had the view INSIDE the torso with none at all
+    withref = [r for r in sec if r.get("rsettled") is not None]
+    if withref:
+        text += "; reference used by the considered calls: settled %d, running %d, none %d" % tuple(sum(int(r[k]) for r in withref) for k in ("rsettled", "rrunning", "rnone"))
+    # F171: a call on the running reference measures the sink and publishes nothing; the reference's own figures (the means over the calls that had one) and what was published
+    if whys.get(H138_RUNNING_TOKEN):
+        text += "; measured only on the running reference (F171) %d calls" % whys[H138_RUNNING_TOKEN]
+    withdetail = [r for r in sec if r.get("rdn") is not None and int(r["rdn"]) > 0]
+    if withdetail:
+        had = sum(int(r["rdn"]) for r in withdetail)
+        mean = lambda k: sum(int(r["rdn"]) * float(r[k]) for r in withdetail) / had
+        text += "; reference (F171; %d calls had one; last source %s): age %.1f s, target %+.1f cm, G %+.1f cm, G now %+.1f cm" % (had, withdetail[-1]["rsrc"], mean("rage"), mean("rtgt"), mean("rg"), mean("rgn"))
+    published = [r for r in sec if r.get("rpubn") is not None and int(r["rpubn"]) > 0]
+    if published:
+        pubn = sum(int(r["rpubn"]) for r in published)
+        text += "; mean target published %+.1f cm over %d calls" % (sum(int(r["rpubn"]) * float(r["rpub"]) for r in published) / pubn, pubn)
+    blind = [r for r in empty if int(r["inside"]) > 0 and "no reference" in r["why"] and (r.get("rsettled") is None or int(r["rsettled"]) + int(r["rrunning"]) == 0)]
+    if blind:
+        return ("NEVER APPLIED", text + "; %d unarmed pitched second(s) had the view INSIDE the torso (%d frames) with no reference to add the sink from: neither a settled stance nor a running "
+                "one (a look-up before the first level frame with nothing drawn)" % (len(blind), sum(int(r["inside"]) for r in blind)))
     if applied:
         up = [r for r in applied if float(r["aim"]) > 0.0]
         inside, of = sum(int(r["inside"]) for r in up), sum(int(r["insideof"]) for r in up)
@@ -12385,7 +12431,9 @@ def _hj_f138_pitched(rows, ctx):
         return ("OK", text)
     if empty:
         lead = whys.most_common(1)
-        reason = "%s (%d calls)" % lead[0] if lead else "none counted"
+        reason = "%s (%d calls)" % (lead[0][0].replace(H138_RUNNING_TOKEN, H138_RUNNING_MEASURED), lead[0][1]) if lead else "none counted"
+        if lead and lead[0][0] == H138_RUNNING_TOKEN:
+            reason += " -- since F171 the running reference measures the sink and publishes nothing, so the view sits at the game's camera; the settled reference alone adds it"
         return ("PARTIAL", text + "; never added with an empty hand in %d pitched second(s); leading reason: %s" % (len(empty), reason))
     return ("IDLE", text + "; an item was drawn in every pitched second: measured only")
 
@@ -13332,14 +13380,16 @@ def _hj_f159_elbow(rows):
     """F159: the left elbow's stable pole on the two-handed guns (the non-pistol left arm), per item: the solved and FP elbows' heights over the shoulder, the seconds with the
     solved elbow within 1 cm of the shoulder's height (the longest run of them at the hip), the swivel's distance from the pole's reference, the reseeds, and the seed births by
     reason (the window lines' exact counts; the birth lines, at most one in 0.5 s, give the first cause and the figures). More than 2 s in a row with the elbow at the shoulder's
-    height at the hip is PARTIAL. Returns (text, notes), or None with no F159 line."""
+    height at the hip is PARTIAL. F165 (the left elbow's blend toward the body-down pole while crouched in the sights, appended to the same line): per item the weight's mean, and
+    in the sights crouched against the rest the solves, the ones with the blend applied and the elbow's plane change; 30 or more solves crouched in the sights with the blend applied
+    in none of them is NEVER APPLIED (the code never ran), applied in under half of them PARTIAL. Returns (text, notes, never), or None with no F159 line."""
     pole, births = rows.get("pole", []), rows.get("birth", [])
     if not pole and not births:
         return None
     items = collections.OrderedDict()
     for r in pole:
         items.setdefault(r["item"], []).append(r)
-    parts, raised = [], []
+    parts, raised, never, thin = [], [], [], []
     for item, rs in items.items():
         n = sum(int(r["n"]) for r in rs)
         if not n:
@@ -13354,6 +13404,22 @@ def _hj_f159_elbow(rows):
                          sum(int(r["reseeds"]) for r in rs)))
         if run > 2:
             raised.append("%s %d s" % (item, run))
+        # F165: the lines of a build before it carry no blend part
+        blend = [r for r in rs if r.get("bn") is not None]
+        if blend:
+            bn = sum(int(r["n"]) for r in blend)
+            adsn, adsapp = sum(int(r["bn"]) for r in blend), sum(int(r["bapp"]) for r in blend)
+            restn, restapp = sum(int(r["rn"]) for r in blend), sum(int(r["rapp"]) for r in blend)
+            wmean = sum(int(r["n"]) * float(r["bw"]) for r in blend) / bn if bn else 0.0
+            adsplane = sum(int(r["bn"]) * float(r["bpa"]) for r in blend) / adsn if adsn else 0.0
+            restplane = sum(int(r["rn"]) * float(r["rpa"]) for r in blend) / restn if restn else 0.0
+            parts[-1] += (", blend to the body-down pole (F165): weight mean %.2f, crouched in the sights %d solves (%d blended) with the elbow %.1f deg off the stance's plane "
+                          "(max %.1f), the rest %d solves (%d blended) %.1f deg (max %.1f)" % (
+                              wmean, adsn, adsapp, adsplane, max(float(r["bpam"]) for r in blend), restn, restapp, restplane, max(float(r["rpam"]) for r in blend)))
+            if adsn >= 30 and adsapp == 0:
+                never.append("the body-down blend was applied in none of %d solves crouched in the sights with %s" % (adsn, item))
+            elif adsn >= 30 and adsapp * 2 < adsn:
+                thin.append("%s: applied in %d of %d solves crouched in the sights" % (item, adsapp, adsn))
     keys = ("b_first", "b_item", "b_gen", "b_arms", "b_down", "b_cup", "b_ref", "b_unc", "b_f159")
     if pole:
         counts = [sum(int(r[k]) for r in pole) for k in keys]
@@ -13366,8 +13432,8 @@ def _hj_f159_elbow(rows):
         firsts = collections.Counter("%s after %s" % (r["why"], r["since"]) for r in births if r.get("since"))
         text += " (%d birth line(s)%s)" % (len(births), ": " + ", ".join("%s %d" % (k, v) for k, v in firsts.most_common(4)) if firsts else "")
     notes = (["the left elbow stayed within 1 cm of the shoulder's height for more than 2 s in a row at the hip on a two-handed gun (%s)" % ", ".join(raised)]
-             if raised else [])
-    return text, notes
+             if raised else []) + (["the body-down blend was thin crouched in the sights (%s)" % "; ".join(thin)] if thin else [])
+    return text, notes, never
 
 
 def _hj_f98a_elbow(rows, ctx):
@@ -13379,7 +13445,8 @@ def _hj_f98a_elbow(rows, ctx):
     if not sec:
         if f159 is None:
             return None
-        return ("PARTIAL" if f159[1] else "OK", f159[0] + ("; " + "; ".join(f159[1]) if f159[1] else ""))
+        said = f159[2] + f159[1]
+        return ("NEVER APPLIED" if f159[2] else "PARTIAL" if f159[1] else "OK", f159[0] + ("; " + "; ".join(said) if said else ""))
     items = collections.OrderedDict()
     for r in sec:
         items.setdefault(r["item"], []).append(r)
@@ -13430,11 +13497,645 @@ def _hj_f98a_elbow(rows, ctx):
                 notes.append("leading hypothesis: the forearm's twist limit (%d of %d flip seconds hit it with the axis 15 deg or more from down)" % (twist_n, flip_n))
             else:
                 notes.append("neither hypothesis fits the %d flip seconds (the axis 15 deg or more from down, the twist limit not hit)" % flip_n)
+    never = []
     if f159 is not None:
         text += "; " + f159[0]
         notes = notes + f159[1]
+        never = f159[2]
+    if never:
+        return ("NEVER APPLIED", text + "; " + "; ".join(never + notes))
     if notes:
         return ("PARTIAL", text + "; " + "; ".join(notes))
+    return ("OK", text)
+
+
+# F161: the left arm's distance to the eye, per context (formatSummary in src/d3d11/native_on_foot_f161.h): the contexts in the order the line prints them, and the line
+H161_CONTEXTS = ("hip standing", "hip crouched", "ADS standing", "ADS crouched")
+H161_LABEL = "native on foot left arm to the eye (F161)"
+# F163 added each context's crouched weight mean and neck drop mean (cm); a line from the F161 and F162 builds has neither (the group is optional).
+H161_RE = (r"native on foot left arm to the eye \(F161\) (?P<wl>\d+) s: item (?P<item>\S+); the eye to the left upper arm \(shoulder to elbow\) and to the elbow, by context: " +
+           "".join((r"%s (?P<n%d>\d+) frames: arm min (?P<amin%d>%s) mean (?P<amean%d>%s) cm, elbow min (?P<emin%d>%s) mean (?P<emean%d>%s) cm, under 4 cm (?P<u4%d>\d+) "
+                    r"\(moving (?P<u4m%d>\d+)\), under 2\.5 cm (?P<u25%d>\d+)(?:, crouched weight mean (?P<pw%d>[\d.]+), neck drop mean (?P<pd%d>-?[\d.]+) cm)?; ") %
+                   (name, i, i, _HN, i, _HN, i, _HN, i, _HN, i, i, i, i, i) for i, name in enumerate(H161_CONTEXTS)) +
+           r"seconds with the arm under 4 cm of the eye (?P<s4>\d+), under 2\.5 cm (?P<s25>\d+)")
+
+
+def _hj_f161_arm_eye(rows, ctx):
+    """F161: the eye as drawn against the left upper arm (shoulder to elbow) and the elbow as finally written, per item and context (the hip or ADS, standing or crouched): the
+    frames, the nearest and the mean distance (cm), the frames with the arm under 4 cm of the eye (the moving ones among them) and under 2.5 cm (the near plane cuts the arm
+    there). The pilot's crouch-walk in ADS had the upper arm 1.3 to 4.7 cm from the eye. Any second with a frame under 4 cm is PARTIAL, with the item, the hip or ADS, the stance
+    and how many of the frames were moving; a log with none of them is OK (the arm stayed clear), and a log whose window lines carry no frame has nothing to judge."""
+    sec = rows.get("sec", [])
+    if not sec:
+        return None
+    items = collections.OrderedDict()
+    for r in sec:
+        items.setdefault(r["item"], []).append(r)
+    parts, near = [], []
+    for item, rs in items.items():
+        per = []
+        for i, name in enumerate(H161_CONTEXTS):
+            used = [r for r in rs if int(r["n%d" % i])]
+            n = sum(int(r["n%d" % i]) for r in used)
+            if not n:
+                continue
+            u4, u4m, u25 = (sum(int(r[k + str(i)]) for r in used) for k in ("u4", "u4m", "u25"))
+            amin, emin = min(float(r["amin%d" % i]) for r in used), min(float(r["emin%d" % i]) for r in used)
+            amean, emean = (sum(int(r["n%d" % i]) * float(r[k + str(i)]) for r in used) / n for k in ("amean", "emean"))
+            text = "%s %d frames: upper arm nearest %.1f cm, mean %.1f; elbow nearest %.1f, mean %.1f; under 4 cm %d (moving %d), under 2.5 cm %d" % (name, n, amin, amean, emin, emean, u4, u4m, u25)
+            # F163: the weight the context was filed by and the neck's drop under it (the DLLs before F163 do not print them)
+            posed = [r for r in used if r.get("pw%d" % i) is not None]
+            if posed:
+                pn = sum(int(r["n%d" % i]) for r in posed)
+                text += ", crouched weight mean %.2f, neck drop mean %.1f cm" % tuple(sum(int(r["n%d" % i]) * float(r[k + str(i)]) for r in posed) / pn for k in ("pw", "pd"))
+            per.append(text)
+            if u4:
+                where, stance = name.split(" ")
+                near.append("%s, %s, %s: %d frame(s) under 4 cm (%d moving), %d under 2.5 cm, nearest %.1f cm" % (item, where, stance, u4, u4m, u25, amin))
+        if per:
+            parts.append("%s %d s: %s" % (item, _hsecs(rs), "; ".join(per)))
+    if not parts:
+        return None
+    s4, s25 = sum(int(r["s4"]) for r in sec), sum(int(r["s25"]) for r in sec)
+    text = "left arm to the eye (F161): %s; seconds with the arm under 4 cm of the eye %d, under 2.5 cm %d" % ("; ".join(parts), s4, s25)
+    if s4 or near:
+        return ("PARTIAL", text + "; the left upper arm came within 4 cm of the eye (%s)" % ("; ".join(near) or "no context counts a frame"))
+    return ("OK", text)
+
+
+# F166: the upper body held at its still crouched-ADS pose while walking crouched in the sights (formatSummary in src/d3d11/native_on_foot_f166.h), and the plan of held joints the
+# census makes once per skeleton (native_on_foot_hooks.cpp). The plan line carries its own label (the window line's label does not match it), so a drifted plan line is unparsed too.
+H166_LABEL = "native on foot upper body hold (F166)"
+H166_PLAN_LABEL = "native on foot upper body hold plan (F166)"
+H166_RE = (r"native on foot upper body hold \(F166\) (?P<wl>\d+) s: item (?P<item>\S+); crouched in the sights (?P<ads>\d+) frames \(still (?P<still>\d+), moving (?P<mv>\d+)\); "
+           r"on the moving frames the hold weight mean (?P<wm>[\d.]+), held \(weight 0\.5 or more\) in (?P<held>\d+), the held pose from a still frame in (?P<ssrc>\d+), "
+           r"from the press's first frame in (?P<fsrc>\d+), none in (?P<nsrc>\d+); on the held frames the chest's lean in the body's axes as written (?P<lw>%s) deg, animated (?P<la>%s), "
+           r"the held pose's (?P<lh>%s) \(the animation (?P<tol>\d+) deg or more from the held pose in (?P<lmoved>\d+) frames, the written lean within that of it in (?P<lheld>\d+)\), "
+           r"the hips turned (?P<hips>[\d.]+) deg \(largest (?P<hipsmax>[\d.]+)\) from the held pose's; "
+           r"the left shoulder from the eye \(right/up/forward, cm\): still (?P<sn0>\d+) frames (?P<s0r>%s)/(?P<s0u>%s)/(?P<s0f>%s), moving (?P<sn1>\d+) frames "
+           r"(?P<s1r>%s)/(?P<s1u>%s)/(?P<s1f>%s); seconds crouched in the sights and moving (?P<secm>\d+), held in half or more of them (?P<sech>\d+), with the animated lean far "
+           r"from the held pose (?P<secl>\d+), the written lean near it in (?P<seclh>\d+); writes refused (?P<failed>\d+)" % ((_HN,) * 9))
+H166_PLAN_RE = (r"native on foot upper body hold plan \(F166\): X=(?P<x>[0-9A-F]{16}) (?P<state>ok|REFUSED) \((?P<why>[^)]*)\); held joints (?P<joints>none|\d+(?: \d+)*) "
+                r"\(arms (?P<arms>\d+)\); (?P<carried>\d+) joints come with them")
+
+
+def _hj_f166_hold(rows, ctx):
+    """F166: the upper body held at its still crouched-ADS pose while crouch-walking in the sights. Per item: the seconds crouched in the sights and moving, the share of their
+    moving frames that were held (the hold's weight 0.5 or more; the ramp's first 0.08 s of each walk is not), the held pose's source (a still frame, or the press's first frame
+    when the pilot moved at once), and whether the chest's lean was held: on the held frames where the animation's lean was 10 deg or more from the held pose's, the written lean
+    stayed within 10 deg of the held pose's in 9 in 10 of them. 30 or more moving frames crouched in the sights with none held is NEVER APPLIED (the code never ran), held in under half
+    of them PARTIAL, as is a lean not held and a write refused. A refused plan (the skeleton's spine is not a chain of direct parents) is NEVER APPLIED whatever the flight did; a
+    plan that is fine and a log with no frame crouched in the sights is IDLE."""
+    sec, plans = rows.get("sec", []), rows.get("plan", [])
+    if not sec and not plans:
+        return None
+    last = plans[-1] if plans else None
+    plan_text = ("plan %s (%s), held joints %s (arms %s), %s joints come with them" % (last["state"], last["why"], last["joints"], last["arms"], last["carried"])) if last else \
+        "no plan line in the window"
+    if last and last["state"] != "ok":
+        return ("NEVER APPLIED", "the hold's plan was refused (%s): %s" % (last["why"], plan_text))
+    if not sec:
+        return ("IDLE", "%s; no frame crouched in the sights" % plan_text)
+    items = collections.OrderedDict()
+    for r in sec:
+        items.setdefault(r["item"], []).append(r)
+    parts, never, thin, notes = [], [], [], []
+    for item, rs in items.items():
+        g = lambda k, rr=rs: sum(int(r[k]) for r in rr)
+        mv, held = g("mv"), g("held")
+        if not g("ads"):
+            continue
+        wmean = sum(int(r["mv"]) * float(r["wm"]) for r in rs) / mv if mv else 0.0
+        hw = held or 1
+        lean = [sum(int(r["held"]) * float(r[k]) for r in rs) / hw for k in ("lw", "la", "lh")]
+        hips, hipsmax = sum(int(r["held"]) * float(r["hips"]) for r in rs) / hw, max(float(r["hipsmax"]) for r in rs)   # F168: how far the hips turned from the held pose's
+        shoulder = []
+        for tag, nk in (("s0", "sn0"), ("s1", "sn1")):
+            n = g(nk) or 1
+            shoulder.append(([sum(int(r[nk]) * float(r[tag + k]) for r in rs) / n for k in ("r", "u", "f")], g(nk)))
+        lmoved, lheld = g("lmoved"), g("lheld")
+        parts.append("%s %d s: crouched in the sights %d frames (still %d, moving %d), held in %d of the moving ones (%.0f%%), weight mean %.2f, the held pose from a still frame in %d, "
+                     "from the press's first frame in %d, none in %d; on the held frames the chest's lean in the body's axes as written %+.1f deg, animated %+.1f, held pose %+.1f (the animation "
+                     "10 deg or more from the held pose in %d frames, the written lean within 10 deg of it in %d), the hips turned %.1f deg (largest %.1f) from the held pose's; the left "
+                     "shoulder from the eye (right/up/forward, cm) still %+.1f/%+.1f/%+.1f (%d frames), moving %+.1f/%+.1f/%+.1f (%d frames); %d s crouched in the sights and moving, held "
+                     "in half or more of them in %d s, the lean moved in %d s and held in %d s" % (
+                         item, _hsecs(rs), g("ads"), g("still"), mv, held, 100.0 * held / mv if mv else 0.0, wmean, g("ssrc"), g("fsrc"), g("nsrc"), lean[0], lean[1], lean[2], lmoved,
+                         lheld, hips, hipsmax, shoulder[0][0][0], shoulder[0][0][1], shoulder[0][0][2], shoulder[0][1], shoulder[1][0][0], shoulder[1][0][1], shoulder[1][0][2], shoulder[1][1],
+                         g("secm"), g("sech"), g("secl"), g("seclh")))
+        if mv >= 30 and held == 0:
+            never.append("the hold's weight reached 0.5 in none of %d moving frames crouched in the sights with %s" % (mv, item))
+        elif mv >= 30 and held * 2 < mv:
+            thin.append("%s: held in %d of %d moving frames crouched in the sights" % (item, held, mv))
+        if lmoved and lheld * 10 < lmoved * 9:
+            notes.append("the chest's lean was not held with %s (the written lean stayed within 10 deg of the held pose's in %d of %d frames where the animation had moved it)" % (item, lheld, lmoved))
+        if g("failed"):
+            notes.append("%d write(s) refused with %s (the hold had a pose and a weight and a matrix would not invert, or was not finite)" % (g("failed"), item))
+    if not parts:
+        return ("IDLE", "%s; no frame crouched in the sights" % plan_text)
+    text = "%s; %s" % (plan_text, "; ".join(parts))
+    if thin:
+        notes.insert(0, "the hold was thin (%s)" % "; ".join(thin))
+    if never:
+        return ("NEVER APPLIED", text + "; " + "; ".join(never + notes))
+    if notes:
+        return ("PARTIAL", text + "; " + "; ".join(notes))
+    moving = sum(int(r["mv"]) for r in sec)
+    if moving < 30:
+        return ("IDLE", text + "; under 30 moving frames crouched in the sights: little for the hold to do")
+    return ("OK", text)
+
+
+# F167: the left hand lets go of the pistol while sprinting (formatSummary in src/d3d11/native_on_foot_f167.h). The release is a factor on the off hand's weight; a sprint here is the
+# AMC's low-passed speed at 4.6 m/s or more, and "released" the release weight at 0.5 or more.
+H167_LABEL = "native on foot pistol sprint release (F167)"
+H167_RE = (r"native on foot pistol sprint release \(F167\) (?P<wl>\d+) s: item (?P<item>\S+); armed pistol calls (?P<pistol>\d+), at sprint speed \((?P<thr>[\d.]+) m/s or more\) "
+           r"(?P<fast>\d+), speed mean (?P<smean>[\d.]+) max (?P<smax>[\d.]+) m/s; at the hip (?P<hip>\d+): release weight mean (?P<rmean>[\d.]+), 0\.5 or more in (?P<rel>\d+), "
+           r"fully in (?P<full>\d+) \(the left arm still solved above weight 0\.05 in (?P<grip>\d+)\), the left arm's weight mean (?P<lw>[\d.]+); in the sights (?P<ads>\d+): "
+           r"grip held in (?P<held>\d+), released past the sights' hold in (?P<past>\d+); seconds sprinting at the hip (?P<secs>\d+), released in half or more of them (?P<secr>\d+)")
+
+
+def _hj_f167_sprint(rows, ctx):
+    """F167: the left hand lets go of the pistol while the body sprints (the AMC's low-passed speed at 4.6 m/s or more), so the game's own arm swings; the sights hold the grip. Per
+    item: the armed pistol calls, those at sprint speed and, of those at the hip, the release weight's mean, the calls released (0.5 or more) and fully, and the left arm's weight; in the
+    sights, the calls with the grip held. 30 or more sprint calls at the hip with none released is NEVER APPLIED (the code never ran: the sprint was there and the release was not); released
+    in under half of them, a left arm still solved above weight 0.05 at full release, and a release past what the sights allow are PARTIAL. A pistol held with no call at sprint speed, and under
+    30 sprint calls at the hip, are IDLE; a log with no pistol line has no verdict."""
+    sec = rows.get("sec", [])
+    if not sec:
+        return None
+    items = collections.OrderedDict()
+    for r in sec:
+        items.setdefault(r["item"], []).append(r)
+    parts, never, thin, notes = [], [], [], []
+    for item, rs in items.items():
+        g = lambda k, rr=rs: sum(int(r[k]) for r in rr)
+        pistol, fast, hip = g("pistol"), g("fast"), g("hip")
+        if not pistol:
+            continue
+        if not fast:
+            parts.append("%s %d s: %d armed pistol calls, none at sprint speed (%s m/s or more)" % (item, _hsecs(rs), pistol, rs[-1]["thr"]))
+            continue
+        smean = sum(int(r["fast"]) * float(r["smean"]) for r in rs) / fast
+        smax = max(float(r["smax"]) for r in rs)
+        rmean = sum(int(r["hip"]) * float(r["rmean"]) for r in rs) / hip if hip else 0.0
+        lwmean = sum(int(r["hip"]) * float(r["lw"]) for r in rs) / hip if hip else 0.0
+        rel, full, grip, ads, held, past = g("rel"), g("full"), g("grip"), g("ads"), g("held"), g("past")
+        parts.append("%s %d s: %d armed pistol calls, %d at sprint speed (%s m/s or more; mean %.1f, max %.1f), %d at the hip: release weight mean %.2f, released (0.5 or more) in %d (%.0f%%), "
+                     "fully in %d, the left arm's weight mean %.2f; %d in the sights, the grip held in %d; %d s sprinting at the hip, released in half or more of them in %d s" % (
+                         item, _hsecs(rs), pistol, fast, rs[-1]["thr"], smean, smax, hip, rmean, rel, 100.0 * rel / hip if hip else 0.0, full, lwmean, ads, held, g("secs"), g("secr")))
+        if hip >= 30 and rel == 0:
+            never.append("the release reached 0.5 in none of %d sprint calls at the hip with %s (the left hand kept its grip while the body sprinted)" % (hip, item))
+        elif hip >= 30 and rel * 2 < hip:
+            thin.append("%s: released in %d of %d sprint calls at the hip" % (item, rel, hip))
+        if grip:
+            notes.append("the left arm was still solved above weight 0.05 in %d call(s) fully released with %s (the release did not reach the arm's weight)" % (grip, item))
+        if past:
+            notes.append("%d call(s) in the sights released past what the sights allow with %s (the grip should be held there)" % (past, item))
+    if not parts:
+        return None
+    text = "; ".join(parts)
+    if thin:
+        notes.insert(0, "the release was thin (%s)" % "; ".join(thin))
+    if never:
+        return ("NEVER APPLIED", text + "; " + "; ".join(never + notes))
+    if notes:
+        return ("PARTIAL", text + "; " + "; ".join(notes))
+    if not sum(int(r["fast"]) for r in sec):
+        return ("IDLE", text + "; no pistol sprint")
+    if sum(int(r["hip"]) for r in sec) < 30:
+        return ("IDLE", text + "; under 30 sprint calls at the hip: little for the release to do")
+    return ("OK", text)
+
+
+# F168 (TEMPORARY): the crouched body's dial (experimental.native_on_foot_crouch_ads_body_forward_cm) and the distances it is judged by (formatSummary in
+# src/d3d11/native_on_foot_f168.h). The dial's own note line carries a different label ("body dial"), so it is not a window line this rule must parse.
+H168_LABEL = "native on foot crouched ADS body (F168, TEMPORARY)"
+H168_RE = (r"native on foot crouched ADS body \(F168, TEMPORARY\) (?P<wl>\d+) s: item (?P<item>\S+); the dial experimental\.native_on_foot_crouch_ads_body_forward_cm mean (?P<dial>%s) cm "
+           r"\(largest (?P<dialmax>[\d.]+)\); crouched in the sights (?P<ads>\d+) frames \(still (?P<still>\d+), moving (?P<mv>\d+)\); the body moved toward the gun "
+           r"\(the dial x the crouched weight x the detach weight\) (?P<sh0>%s) cm still, (?P<sh1>%s) moving; as written \(the neck's forward change from the dial-0 body, after the reach rule; "
+           r"(?P<wn0>\d+)/(?P<wn1>\d+) frames\) (?P<wr0>%s) cm still, (?P<wr1>%s) moving; right shoulder to the gun's root \(the FP right handAttach 51 through G: "
+           r"the butt is not a joint the code reads\) (?P<gn0>\d+) frames still (?P<gd0>[\d.]+) cm, (?P<gn1>\d+) moving (?P<gd1>[\d.]+); left shoulder to the left-hand grip "
+           r"\(the FP left handAttach 52 through G\) (?P<rn0>\d+) frames still (?P<rd0>[\d.]+) cm, (?P<rn1>\d+) moving (?P<rd1>[\d.]+); the left shoulder from the eye "
+           r"\(right/up/forward, cm\): still (?P<en0>\d+) frames (?P<e0r>%s)/(?P<e0u>%s)/(?P<e0f>%s), moving (?P<en1>\d+) frames (?P<e1r>%s)/(?P<e1u>%s)/(?P<e1f>%s)" % ((_HN,) * 11))
+
+
+def _hj_f168_dial(rows, ctx):
+    """F168 (TEMPORARY): the crouched body's dial and the distances it is judged by, crouched in the sights, still against moving. Per item: the dial's mean and largest value, the frames,
+    the move the body was given, the right shoulder to the gun's root (the FP right handAttach through G; no butt joint is readable), the left shoulder to the left-hand grip and the left shoulder
+    from the eye. F169: the move is judged as WRITTEN (the neck's forward change from the same body with the dial at 0, after the reach rule), not as asked: the flight
+    edvr_gfx_20261028_201339 asked 8.1 to 17.0 cm and the reach rule gave all of it back (the body's move stayed +18.4 to +18.7 cm), which the asked figure could not show. A positive
+    dial is added after the reach rule, so its written move is the asked one whole: 30 or more frames crouched in the sights with the dial at 0.5 cm or more and nothing written (under 0.05 cm
+    still and moving) is NEVER APPLIED (the code never reached the body), and a written move under 90% of the asked one is PARTIAL. A negative dial rides the target and the reach rule
+    may give part of it back: that is reported (the written against the asked), not a failure. The dial at 0 is the baseline: OK, the figures are what it is judged against. Under 30 frames
+    crouched in the sights is IDLE."""
+    sec = rows.get("sec", [])
+    if not sec:
+        return None
+    items = collections.OrderedDict()
+    for r in sec:
+        items.setdefault(r["item"], []).append(r)
+    parts, never, notes = [], [], []
+    total = 0
+    dial_seen = 0.0
+    for item, rs in items.items():
+        g = lambda k, rr=rs: sum(int(r[k]) for r in rr)
+        ads, still, mv = g("ads"), g("still"), g("mv")
+        if not ads:
+            continue
+        total += ads
+
+        def mean(val, cnt, rr=rs):
+            n = sum(int(r[cnt]) for r in rr)
+            return (sum(int(r[cnt]) * float(r[val]) for r in rr) / n) if n else 0.0, n
+        dial = sum(int(r["ads"]) * float(r["dial"]) for r in rs) / ads
+        dialmax = max(float(r["dialmax"]) for r in rs)
+        dial_seen = max(dial_seen, dialmax)
+        sh0, sh1 = mean("sh0", "still")[0], mean("sh1", "mv")[0]
+        wr0, wr1 = mean("wr0", "wn0"), mean("wr1", "wn1")
+        gun0, gun1 = mean("gd0", "gn0"), mean("gd1", "gn1")
+        grip0, grip1 = mean("rd0", "rn0"), mean("rd1", "rn1")
+        eye0 = [mean("e0" + k, "en0") for k in ("r", "u", "f")]
+        eye1 = [mean("e1" + k, "en1") for k in ("r", "u", "f")]
+        parts.append("%s %d s: dial mean %+.1f cm (largest %.1f), crouched in the sights %d frames (still %d, moving %d), the body moved toward the gun (asked) %+.1f cm still, %+.1f moving, "
+                     "as written (after the reach rule) %+.1f cm still (%d frames), %+.1f moving (%d); right shoulder "
+                     "to the gun's root (the FP right handAttach, the butt is not readable) still %.1f cm (%d frames), moving %.1f (%d); left shoulder to the left-hand grip still %.1f cm (%d), "
+                     "moving %.1f (%d); the left shoulder from the eye (right/up/forward, cm) still %+.1f/%+.1f/%+.1f (%d frames), moving %+.1f/%+.1f/%+.1f (%d frames)" % (
+                         item, _hsecs(rs), dial, dialmax, ads, still, mv, sh0, sh1, wr0[0], wr0[1], wr1[0], wr1[1], gun0[0], gun0[1], gun1[0], gun1[1], grip0[0], grip0[1], grip1[0], grip1[1],
+                         eye0[0][0], eye0[1][0], eye0[2][0], eye0[0][1], eye1[0][0], eye1[1][0], eye1[2][0], eye1[0][1]))
+        asked = (sh0 * still + sh1 * mv) / (still + mv) if still + mv else 0.0
+        wn = wr0[1] + wr1[1]
+        written = (wr0[0] * wr0[1] + wr1[0] * wr1[1]) / wn if wn else 0.0
+        if ads >= 30 and dial >= 0.5 and wn and abs(wr0[0]) < 0.05 and abs(wr1[0]) < 0.05:
+            never.append("the dial reached %.1f cm and the body was written by none of it in %d frames crouched in the sights with %s (the move after the reach rule did not reach the neck)" % (dialmax, ads, item))
+        elif ads >= 30 and dial >= 0.5 and wn and written < 0.9 * asked:
+            notes.append("the body was written %+.1f cm on average against %+.1f cm asked by a dial of %+.1f cm with %s (the move after the reach rule should be whole)" % (written, asked, dial, item))
+        elif ads >= 30 and abs(dial) >= 0.5 and not wn:
+            notes.append("the move as written was not measured in any of %d frames crouched in the sights with %s (the aim had no horizontal forward, or the figure is missing)" % (ads, item))
+        elif ads >= 30 and dial <= -0.5 and wn and abs(written) < 0.5 * abs(asked):
+            parts.append("the reach rule gave back most of the dial's move with %s: %+.1f cm asked, %+.1f cm written (the left arm is at its reach; a negative dial rides the target)" % (item, asked, written))
+    if not parts:
+        return None
+    text = "; ".join(parts)
+    if never:
+        return ("NEVER APPLIED", text + "; " + "; ".join(never + notes))
+    if notes:
+        return ("PARTIAL", text + "; " + "; ".join(notes))
+    if total < 30:
+        return ("IDLE", text + "; under 30 frames crouched in the sights: little to judge")
+    if dial_seen < 0.05:
+        return ("OK", text + "; the dial was 0: these are the baseline figures")
+    return ("OK", text)
+
+
+# F170 (TEMPORARY): the crouched ADS torso squared to the aim (experimental.native_on_foot_crouch_ads_square) and the figures that judge it (formatSummary in
+# src/d3d11/native_on_foot_f170.h). The dial's own note line carries a different label ("torso square dial"), so it is not a window line this rule must parse.
+H170_LABEL = "native on foot crouched ADS torso square (F170, TEMPORARY)"
+H170_RE = (r"native on foot crouched ADS torso square \(F170, TEMPORARY\) (?P<wl>\d+) s: item (?P<item>\S+); the dial experimental\.native_on_foot_crouch_ads_square mean (?P<dial>[\d.]+) "
+           r"\(largest (?P<dialmax>[\d.]+)\); crouched in the sights (?P<ads>\d+) frames \(still (?P<still>\d+), moving (?P<mv>\d+)\); turned toward square "
+           r"in (?P<turned>\d+) frames, the shoulder line 1 deg or more off square in (?P<bladed>\d+); the turn (?P<t0>%s) deg still, (?P<t1>%s) moving; the measured shoulder phi "
+           r"\(the yaw that squares the upper-arm line to the aim\) before the turn (?P<b0>%s) deg still, (?P<b1>%s) moving \((?P<bn0>\d+)/(?P<bn1>\d+) frames\), as written "
+           r"(?P<a0>%s) deg still, (?P<a1>%s) moving \((?P<an0>\d+)/(?P<an1>\d+) frames\); left shoulder from the eye \(right/up/forward, cm\): still (?P<ln0>\d+) frames "
+           r"(?P<l0r>%s)/(?P<l0u>%s)/(?P<l0f>%s), moving (?P<ln1>\d+) frames (?P<l1r>%s)/(?P<l1u>%s)/(?P<l1f>%s); right shoulder from the eye: still (?P<rn0>\d+) frames "
+           r"(?P<r0r>%s)/(?P<r0u>%s)/(?P<r0f>%s), moving (?P<rn1>\d+) frames (?P<r1r>%s)/(?P<r1u>%s)/(?P<r1f>%s); right shoulder to the gun's root "
+           r"(?P<gn0>\d+) frames still (?P<gd0>[\d.]+) cm, (?P<gn1>\d+) moving (?P<gd1>[\d.]+)" % ((_HN,) * 18))
+
+
+def _hj_f170_square(rows, ctx):
+    """F170 (TEMPORARY): the crouched ADS torso squared to the aim. While crouched (F163's weight) in the sights (the detach weight) the torso is turned about the vertical through the neck
+    toward square, by the dial x both weights of the shoulder line's measured blade (the square-up's phi), after the upper-body hold's yield, so it holds while walking crouched in the
+    sights. The flight edvr_gfx_20261028_215408 read a measured phi of -28.7 deg (largest 28.8) in 90 of 90 frames with the F75 square-up's "authored stance selected" writing none of it.
+    Per item: the dial's mean and largest value, the frames, the frames a turn was written in against the frames with the line 1 deg or more off square, the turn, the measured phi before
+    it and as finally written (still and moving), both shoulders from the eye and the right shoulder to the gun's root. NEVER APPLIED when 30 or more frames were crouched in the sights
+    with the dial at 0.05 or more, some off square, and no turn written in any of them (the code never reached the torso); PARTIAL when a turn was written in under 90% of the off-square
+    frames, or the line as written is more than 8 deg from what the dial should leave of the measured one (the measured phi x (1 - the dial's mean)). The dial at 0 is the baseline: OK,
+    the figures are what it is judged against. Under 30 frames crouched in the sights is IDLE."""
+    sec = rows.get("sec", [])
+    if not sec:
+        return None
+    items = collections.OrderedDict()
+    for r in sec:
+        items.setdefault(r["item"], []).append(r)
+    parts, never, notes = [], [], []
+    total, dial_seen = 0, 0.0
+    for item, rs in items.items():
+        g = lambda k, rr=rs: sum(int(r[k]) for r in rr)
+        ads, still, mv, turned, bladed = g("ads"), g("still"), g("mv"), g("turned"), g("bladed")
+        if not ads:
+            continue
+        total += ads
+
+        def mean(val, cnt, rr=rs):
+            n = sum(int(r[cnt]) for r in rr)
+            return (sum(int(r[cnt]) * float(r[val]) for r in rr) / n) if n else 0.0, n
+        dial = sum(int(r["ads"]) * float(r["dial"]) for r in rs) / ads
+        dialmax = max(float(r["dialmax"]) for r in rs)
+        dial_seen = max(dial_seen, dialmax)
+        t0, t1 = mean("t0", "still"), mean("t1", "mv")
+        b0, b1 = mean("b0", "bn0"), mean("b1", "bn1")
+        a0, a1 = mean("a0", "an0"), mean("a1", "an1")
+        gun0, gun1 = mean("gd0", "gn0"), mean("gd1", "gn1")
+        left0, left1 = [mean("l0" + k, "ln0") for k in ("r", "u", "f")], [mean("l1" + k, "ln1") for k in ("r", "u", "f")]
+        right0, right1 = [mean("r0" + k, "rn0") for k in ("r", "u", "f")], [mean("r1" + k, "rn1") for k in ("r", "u", "f")]
+        parts.append("%s %d s: dial mean %.2f (largest %.2f), crouched in the sights %d frames (still %d, moving %d), the torso turned in %d frames of %d with the line 1 deg or more off square, "
+                     "the turn %+.1f deg still (%d frames), %+.1f moving (%d); the measured shoulder phi before the turn %+.1f deg still (%d), %+.1f moving (%d), as written %+.1f deg still (%d), %+.1f "
+                     "moving (%d); the left shoulder from the eye (right/up/forward, cm) still %+.1f/%+.1f/%+.1f (%d frames), moving %+.1f/%+.1f/%+.1f (%d); the right shoulder from the eye still "
+                     "%+.1f/%+.1f/%+.1f (%d), moving %+.1f/%+.1f/%+.1f (%d); right shoulder to the gun's root still %.1f cm (%d), moving %.1f (%d)" % (
+                         item, _hsecs(rs), dial, dialmax, ads, still, mv, turned, bladed, t0[0], t0[1], t1[0], t1[1], b0[0], b0[1], b1[0], b1[1], a0[0], a0[1], a1[0], a1[1],
+                         left0[0][0], left0[1][0], left0[2][0], left0[0][1], left1[0][0], left1[1][0], left1[2][0], left1[0][1],
+                         right0[0][0], right0[1][0], right0[2][0], right0[0][1], right1[0][0], right1[1][0], right1[2][0], right1[0][1], gun0[0], gun0[1], gun1[0], gun1[1]))
+        if ads >= 30 and dialmax >= 0.05 and bladed and not turned:
+            never.append("the dial reached %.2f and no turn was written in any of %d frames crouched in the sights with %s, %d of them with the shoulder line off square (the square-up never "
+                         "reached the torso)" % (dialmax, ads, item, bladed))
+        elif ads >= 30 and dial >= 0.05 and bladed and turned < 0.9 * bladed:
+            notes.append("a turn was written in %d of %d frames with the shoulder line off square with %s" % (turned, bladed, item))
+        elif ads >= 30 and dial >= 0.05 and bladed:
+            for kind, b, a in (("still", b0, a0), ("moving", b1, a1)):
+                if b[1] and a[1] and abs(a[0] - b[0] * (1.0 - dial)) > 8.0:
+                    notes.append("%s with %s: the line as written is %+.1f deg off square against %+.1f measured before the turn; a dial of %.2f should leave %+.1f" % (
+                        kind, item, a[0], b[0], dial, b[0] * (1.0 - dial)))
+    if not parts:
+        return None
+    text = "; ".join(parts)
+    if never:
+        return ("NEVER APPLIED", text + "; " + "; ".join(never + notes))
+    if notes:
+        return ("PARTIAL", text + "; " + "; ".join(notes))
+    if total < 30:
+        return ("IDLE", text + "; under 30 frames crouched in the sights: little to judge")
+    if dial_seen < 0.05:
+        return ("OK", text + "; the dial was 0: these are the baseline figures")
+    return ("OK", text)
+
+
+# F171 (TEMPORARY): the crouched ADS body moved to the left of the aim line (experimental.native_on_foot_crouch_ads_body_left_cm) and the figures that judge it (formatSummary in
+# src/d3d11/native_on_foot_f171.h). The dial's own note line carries a different label ("body sideways dial"), so it is not a window line this rule must parse.
+H171_LABEL = "native on foot crouched ADS body sideways (F171, TEMPORARY)"
+H171_RE = (r"native on foot crouched ADS body sideways \(F171, TEMPORARY\) (?P<wl>\d+) s: item (?P<item>\S+); the dial experimental\.native_on_foot_crouch_ads_body_left_cm mean (?P<dial>%s) cm "
+           r"\(largest (?P<dialmax>[\d.]+); positive is left of the aim\); crouched in the sights (?P<ads>\d+) frames \(still (?P<still>\d+), moving (?P<mv>\d+)\), the move made in (?P<made>\d+); "
+           r"the body moved left \(the dial x the crouched weight x the detach weight\) (?P<sh0>%s) cm still, (?P<sh1>%s) moving; as written \(the neck's sideways change from the dial-0 body, "
+           r"after the reach rule; (?P<wn0>\d+)/(?P<wn1>\d+) frames\) (?P<wr0>%s) still, (?P<wr1>%s) moving; the reach rule took back (?P<bk0>%s) still, (?P<bk1>%s) moving; "
+           r"right shoulder from the eye \(right/up/forward, cm\): still (?P<rn0>\d+) frames (?P<r0r>%s)/(?P<r0u>%s)/(?P<r0f>%s), moving (?P<rn1>\d+) frames (?P<r1r>%s)/(?P<r1u>%s)/(?P<r1f>%s); "
+           r"left shoulder from the eye: still (?P<ln0>\d+) frames (?P<l0r>%s)/(?P<l0u>%s)/(?P<l0f>%s), moving (?P<ln1>\d+) frames (?P<l1r>%s)/(?P<l1u>%s)/(?P<l1f>%s); "
+           r"right shoulder to the gun's root (?P<gn0>\d+) frames still (?P<gd0>[\d.]+) cm, (?P<gn1>\d+) moving (?P<gd1>[\d.]+); left shoulder to the left-hand grip "
+           r"(?P<kn0>\d+) frames still (?P<kd0>[\d.]+) cm, (?P<kn1>\d+) moving (?P<kd1>[\d.]+)" % ((_HN,) * 19))
+
+
+def _hj_f171_sideways(rows, ctx):
+    """F171 (TEMPORARY): the crouched ADS body moved to the left of the aim line. While crouched (F163's weight) in the sights (the detach weight) the body moves by the dial x both weights
+    along the horizontal left of the aim (positive left), in the pin's target BEFORE the reach rule, so the rule keeps the left grip reachable and gives back what the grip needs.
+    The flight edvr_gfx_20261029_043951 put the left shoulder -0.9 right / -14.6 up / -4.0 forward cm from the eye and 57.2 cm from the left grip, the right shoulder 45.9 cm from the gun's
+    root: the body has to stand 15 to 20 cm to the left of the aim line for the stock to meet the right shoulder. Per item: the dial's mean and largest value, the frames and the frames
+    the move was made in, the move asked, as written (the neck's sideways change from the same body with the dial at 0, after the reach rule) and what the reach rule took back, both
+    shoulders from the eye, the right shoulder to the gun's root and the left shoulder to the left grip (still and moving). NEVER APPLIED when 30 or more frames were crouched in the
+    sights with the dial at 0.5 cm or more (either way) and the move was made in none of them (the target never took it); PARTIAL when the move as written is under half of the move asked
+    (the reach rule took most of it back) or was not measured. The dial at 0 is the baseline: OK. Under 30 frames crouched in the sights is IDLE; no crouched ADS frame, no line."""
+    sec = rows.get("sec", [])
+    if not sec:
+        return None
+    items = collections.OrderedDict()
+    for r in sec:
+        items.setdefault(r["item"], []).append(r)
+    parts, never, notes = [], [], []
+    total, dial_seen = 0, 0.0
+    for item, rs in items.items():
+        g = lambda k, rr=rs: sum(int(r[k]) for r in rr)
+        ads, still, mv, made = g("ads"), g("still"), g("mv"), g("made")
+        if not ads:
+            continue
+        total += ads
+
+        def mean(val, cnt, rr=rs):
+            n = sum(int(r[cnt]) for r in rr)
+            return (sum(int(r[cnt]) * float(r[val]) for r in rr) / n) if n else 0.0, n
+        dial = sum(int(r["ads"]) * float(r["dial"]) for r in rs) / ads
+        dialmax = max(float(r["dialmax"]) for r in rs)
+        dial_seen = max(dial_seen, dialmax)
+        sh0, sh1 = mean("sh0", "still")[0], mean("sh1", "mv")[0]
+        wr0, wr1 = mean("wr0", "wn0"), mean("wr1", "wn1")
+        bk0, bk1 = mean("bk0", "wn0")[0], mean("bk1", "wn1")[0]
+        gun0, gun1 = mean("gd0", "gn0"), mean("gd1", "gn1")
+        grip0, grip1 = mean("kd0", "kn0"), mean("kd1", "kn1")
+        right0, right1 = [mean("r0" + k, "rn0") for k in ("r", "u", "f")], [mean("r1" + k, "rn1") for k in ("r", "u", "f")]
+        left0, left1 = [mean("l0" + k, "ln0") for k in ("r", "u", "f")], [mean("l1" + k, "ln1") for k in ("r", "u", "f")]
+        parts.append("%s %d s: dial mean %+.1f cm (largest %.1f; positive is left of the aim), crouched in the sights %d frames (still %d, moving %d), the move made in %d, the body moved left (asked) "
+                     "%+.1f cm still, %+.1f moving, as written (after the reach rule) %+.1f cm still (%d frames), %+.1f moving (%d), the reach rule took back %+.1f still, %+.1f moving; the right shoulder "
+                     "from the eye (right/up/forward, cm) still %+.1f/%+.1f/%+.1f (%d frames), moving %+.1f/%+.1f/%+.1f (%d); the left shoulder from the eye still %+.1f/%+.1f/%+.1f (%d), moving "
+                     "%+.1f/%+.1f/%+.1f (%d); right shoulder to the gun's root still %.1f cm (%d frames), moving %.1f (%d); left shoulder to the left-hand grip still %.1f cm (%d), moving %.1f (%d)" % (
+                         item, _hsecs(rs), dial, dialmax, ads, still, mv, made, sh0, sh1, wr0[0], wr0[1], wr1[0], wr1[1], bk0, bk1,
+                         right0[0][0], right0[1][0], right0[2][0], right0[0][1], right1[0][0], right1[1][0], right1[2][0], right1[0][1],
+                         left0[0][0], left0[1][0], left0[2][0], left0[0][1], left1[0][0], left1[1][0], left1[2][0], left1[0][1],
+                         gun0[0], gun0[1], gun1[0], gun1[1], grip0[0], grip0[1], grip1[0], grip1[1]))
+        asked = (sh0 * still + sh1 * mv) / (still + mv) if still + mv else 0.0
+        wn = wr0[1] + wr1[1]
+        written = (wr0[0] * wr0[1] + wr1[0] * wr1[1]) / wn if wn else 0.0
+        if ads >= 30 and dialmax >= 0.5 and not made:
+            never.append("the dial reached %.1f cm and the move was made in none of %d frames crouched in the sights with %s (the pin's target never took it)" % (dialmax, ads, item))
+        elif ads >= 30 and dialmax >= 0.5 and not wn:
+            notes.append("the move as written was not measured in any of %d frames crouched in the sights with %s (the aim had no horizontal forward, or the figure is missing)" % (ads, item))
+        elif ads >= 30 and dialmax >= 0.5 and abs(asked) >= 0.5 and abs(written) < 0.5 * abs(asked):
+            notes.append("the reach rule took back most of the move with %s: %+.1f cm asked, %+.1f cm written (the left shoulder is at its reach)" % (item, asked, written))
+    if not parts:
+        return None
+    text = "; ".join(parts)
+    if never:
+        return ("NEVER APPLIED", text + "; " + "; ".join(never + notes))
+    if notes:
+        return ("PARTIAL", text + "; " + "; ".join(notes))
+    if total < 30:
+        return ("IDLE", text + "; under 30 frames crouched in the sights: little to judge")
+    if dial_seen < 0.05:
+        return ("OK", text + "; the dial was 0: these are the baseline figures")
+    return ("OK", text)
+
+
+# F171: the raise's carriage (formatSummary in src/d3d11/native_on_foot_f171c.h): per look mode and band of |aim pitch|, the slopes of the game's camera as the job read it before any removal
+# (k_up, k_fwd), of G as F138 forms it (c) and of the eye as drawn (k_eye) against the carried raise, over consecutive pin calls whose carried raise changed 2 mm or more.
+H171C_LABEL = "native on foot raise carriage (F171)"
+H171C_RE = (r"native on foot raise carriage \(F171\) (?P<wl>\d+) s: pin-call pairs \(carried raise changed 2 mm or more\) per look mode and \|aim pitch\| band: (?P<cells>.+?) \| "
+            r"slopes of the change against the carried raise's \(1: carries it, 0: not\): k_up the camera as read before any removal, up from the animated neck, k_fwd forward, "
+            r"c G as F138 forms it, k_eye the eye as drawn, up from the neck as written; samples (?P<samples>\d+), F137 carried up (?P<f137up>%s) forward (?P<f137fwd>%s) cm "
+            r"\(mean\)(?:; turned by the aim pitch \(F172\): (?P<tturned>\d+) of (?P<tticks>\d+) ticks with a raise, mean aim pitch (?P<tpitch>%s) deg, mean z share (?P<tz>%s) cm)?" % ((_HN,) * 4))
+H171C_CELL = re.compile(r"(?P<mode>mouse look|look to aim) (?P<band>under 10|10-40|40\+) deg: (?P<n>\d+) pairs, raise (?P<lo>%s)\.\.(?P<hi>%s) cm, k_up (?P<kup>%s), k_fwd (?P<kfwd>%s), "
+                        r"c (?P<c>%s), k_eye (?P<keye>%s)" % ((_HN,) * 6))
+H171C_BANDS = ("under 10", "10-40", "40+")
+H171C_FLAG_PAIRS, H171C_FLAG_SLOPE = 20, 0.3   # nofoot::f171c::kFlagPairs, kFlagSlope
+
+
+def _hj_f171_carriage(rows, ctx):
+    """F171: the raise's carriage, measured. The flight edvr_gfx_20261029_043951 (unarmed look-up, mouse look, aim +52 to +85 deg) ran the raise to its clamp (-50.0 cm on 90 of 90 ticks) while
+    the game's camera over the neck read +14 to +40 cm, moving against the raise almost one to one. The hook takes the raise the pose carried (by its alignment serial) out of the pin's camera;
+    whether the camera it measures carries that raise is what these lines measure: per look mode and band of |aim pitch| (under 10 deg, 10 to 40, 40 and over), the least-squares slope
+    of consecutive pin calls' changes against the carried raise's change (pairs where it changed 2 mm or more) of the raw camera's up (k_up) and forward (k_fwd), of G (c) and of the drawn
+    eye's up (k_eye). Predicted if the hook's camera carries the raise and G is clear of it: k_up about 1, c about 0; if the camera does not carry it but it is removed anyway: k_up about
+    0, c about -1. The report prints the slopes by band, pair-weighted over the seconds, with the pair counts and the raise's range; it flags "the raise is not in the hook's camera" (PARTIAL)
+    when the 40 deg and over band has 20 or more pairs and k_up is under 0.3. The level band (under 10 deg) is the control. IDLE when the log has pitched seconds from a build with this
+    instrument and no second had a pair; no line and no pitched second: not present.
+    F172: the flight edvr_gfx_20261029_054640 read k_up +0.99 / k_fwd +0.11 / c -0.01 under 10 deg and k_up -0.09 / k_fwd -1.04 / c -1.09 from 40 deg: under mouse look the game turns the
+    eye alignment with the aim's pitch (a raise R up lands at forward -R sin a, up R cos a). From the F172 build the neck raise is published turned by -a, and the line carries the ticks it
+    was turned in; the report says "raise turned by the aim pitch" (more than half the ticks with a raise turned) or "raise not turned" (and "a log from before F172" when the line has no
+    such clause) beside the slopes. The prediction for a turned raise is k_up about 1, k_fwd about 0 and c about 0 in every mouse-look band; the flag keeps its meaning."""
+    sec = rows.get("sec", [])
+    if not sec:
+        pitched = ctx.get("pitched view (F138)", {}).get("sec", [])
+        if any(r.get("rdn") is not None for r in pitched):
+            return ("IDLE", "%d pitched second(s) from a build with the carriage instrument and no second with a pair of consecutive pin calls whose carried raise changed 2 mm or more: "
+                    "the slopes have nothing to be measured on" % len(pitched))
+        return None
+    cells = collections.OrderedDict()   # (mode, band) -> [pairs, sums of pairs x each slope (4), lowest raise, highest raise, seconds]
+    unread = 0
+    for r in sec:
+        seen = False
+        for m in H171C_CELL.finditer(r["cells"]):
+            seen = True
+            n = int(m.group("n"))
+            c = cells.setdefault((m.group("mode"), m.group("band")), [0, 0.0, 0.0, 0.0, 0.0, 1e9, -1e9, 0])
+            c[0] += n
+            for i, k in enumerate(("kup", "kfwd", "c", "keye")):
+                c[1 + i] += n * float(m.group(k))
+            c[5], c[6] = min(c[5], float(m.group("lo"))), max(c[6], float(m.group("hi")))
+            c[7] += 1
+        if not seen:
+            unread += 1
+    if not cells:
+        return None
+    order = sorted(cells, key=lambda k: (k[0] != "mouse look", H171C_BANDS.index(k[1])))
+    parts = []
+    for mode, band in order:
+        n, up, fwd, g, eye, lo, hi, secs = cells[(mode, band)]
+        parts.append("%s %s deg: %d pairs in %d s, raise %+.1f..%+.1f cm, k_up %+.2f, k_fwd %+.2f, c %+.2f, k_eye %+.2f" % (mode, band, n, secs, lo, hi, up / n, fwd / n, g / n, eye / n))
+    # F172: the raise is published turned by the aim pitch under mouse look (the clause is on the line from the F172 build; an earlier log has none)
+    turned_rows = [r for r in sec if r.get("tticks") is not None]
+    if turned_rows:
+        tturned, tticks = sum(int(r["tturned"]) for r in turned_rows), sum(int(r["tticks"]) for r in turned_rows)
+        tpitch = sum(int(r["tturned"]) * float(r["tpitch"]) for r in turned_rows) / tturned if tturned else 0.0
+        tz = sum(int(r["tturned"]) * float(r["tz"]) for r in turned_rows) / tturned if tturned else 0.0
+        label = ("raise turned by the aim pitch (F172): turned in %d of %d ticks with a raise, mean aim pitch %+.1f deg, mean z share %+.1f cm" % (tturned, tticks, tpitch, tz) if tturned * 2 > tticks
+                 else "raise not turned (F172): turned in %d of %d ticks with a raise" % (tturned, tticks))
+    else:
+        label = "raise not turned (a log from before F172)"
+    text = "slopes of the camera's, G's and the eye's changes against the carried raise's (1: carries it, 0: does not), %s; " % label + "; ".join(parts)
+    samples = sum(int(r["samples"]) for r in sec)
+    if samples:
+        text += "; %d samples, F137 carried up %+.1f forward %+.1f cm (mean)" % (samples, sum(int(r["samples"]) * float(r["f137up"]) for r in sec) / samples,
+                                                                             sum(int(r["samples"]) * float(r["f137fwd"]) for r in sec) / samples)
+    if unread:
+        text += "; %d line(s) with no readable cell" % unread
+    steep = [v for (mode, band), v in cells.items() if band == "40+"]
+    pairs = sum(v[0] for v in steep)
+    if pairs >= H171C_FLAG_PAIRS:
+        kup = sum(v[1] for v in steep) / pairs
+        c = sum(v[3] for v in steep) / pairs
+        if kup < H171C_FLAG_SLOPE:
+            return ("PARTIAL", text + "; the raise is not in the hook's camera: the 40 deg and over band has %d pairs and k_up %+.2f (under %.1f), c %+.2f -- the camera the pin hook measures does not carry the raise "
+                    "the alignment serial says, and removing it moves G against it" % (pairs, kup, H171C_FLAG_SLOPE, c))
+    return ("OK", text)
+
+
+# F169: the stance while the aim is pitched (formatStance in src/d3d11/native_on_foot_f169.h). The camera sinks as the aim pitches up and w_c read the sink as a crouch; the cap holds w_c
+# under the animated neck's posture weight from 20 deg of aim pitch. The dial's own note line and the swing's lines carry other labels.
+H169S_LABEL = "native on foot pitched stance (F169)"
+H169S_RE = (r"native on foot pitched stance \(F169\) (?P<wl>\d+) s: pitched calls \(\|aim pitch\| (?P<gate>\d+) deg or more\) (?P<calls>\d+); the camera read as a crouch "
+            r"\(w_c 0\.5 or more\) in (?P<sunk>\d+), with the animated neck standing in (?P<sunks>\d+); the cap took the crouch away in (?P<veto>\d+); used as crouched in (?P<crouched>\d+); "
+            r"the stance flipped (?P<flips>\d+) times with the neck standing \(w_c alone would have flipped it (?P<raw>\d+)\); the view's step with the head still rms (?P<rms>[\d.]+) mm "
+            r"max (?P<smax>[\d.]+) \((?P<sn>\d+) frames\); settled raise targets (?P<st>\d+), (?P<tmin>%s)\.\.(?P<tmax>%s) cm; pitched seconds (?P<ps>\d+), flipped (?P<fs>\d+), "
+            r"with a sink (?P<ss>\d+)" % (_HN, _HN))
+
+
+def _hj_f169_stance(rows, ctx):
+    """F169: the stance while the aim is pitched (20 deg or more). The game's camera sinks as the look pitches up and the camera's crouch weight w_c read the sink as a crouch (the flight
+    edvr_gfx_20261028_201339: the aim held at +85, the animated neck within 3 mm of 1.362 m, the crouched bin 11 to 33 calls of 90 a second, the settled raise's source flipping between
+    the stance's and the standing raise over the crouch). The cap holds w_c under the animated neck's posture weight while pitched, so the stance can flip only when the neck does. Any
+    flip of the stance with the neck standing in both calls, in any pitched stretch, is NEVER APPLIED (the cap did not hold the stance: exit 3). Under 30 pitched calls is IDLE. Otherwise OK,
+    with the sink the cap took away, the view's step with the head still and the settled raise targets' range as the figures to read."""
+    sec = rows.get("sec", [])
+    if not sec:
+        return None
+    g = lambda k: sum(int(r[k]) for r in sec)
+    calls, sunk, sunks, veto, crouched, flips, raw = g("calls"), g("sunk"), g("sunks"), g("veto"), g("crouched"), g("flips"), g("raw")
+    sn = g("sn")
+    rms = (sum(int(r["sn"]) * float(r["rms"]) ** 2 for r in sec) / sn) ** 0.5 if sn else 0.0
+    smax = max(float(r["smax"]) for r in sec)
+    st = g("st")
+    tmin = min((float(r["tmin"]) for r in sec if int(r["st"])), default=0.0)
+    tmax = max((float(r["tmax"]) for r in sec if int(r["st"])), default=0.0)
+    ps, fs, ss = g("ps"), g("fs"), g("ss")
+    text = ("%d s: %d pitched calls (aim pitch %s deg or more); the camera read as a crouch in %d, with the animated neck standing in %d; the cap took the crouch away in %d; used as crouched "
+            "in %d; the stance flipped %d time(s) with the neck standing (w_c alone would have flipped it %d); the view's step with the head still rms %.1f mm (max %.1f); settled raise "
+            "targets %d, %+.1f..%+.1f cm; %d pitched s, the stance flipped in %d, a sink in %d" % (_hsecs(sec), calls, sec[-1]["gate"], sunk, sunks, veto, crouched, flips, raw, rms, smax, st,
+                                                                                              tmin, tmax, ps, fs, ss))
+    if flips:
+        return ("NEVER APPLIED", text + "; the stance flipped %d time(s) with the animated neck standing in %d pitched second(s): the cap on w_c did not hold it (a sink read as a crouch)" % (flips, fs))
+    if calls < 30:
+        return ("IDLE", text + "; under 30 pitched calls: little for the cap to do")
+    return ("OK", text)
+
+
+# F169 (TEMPORARY): the pistol sprint's arm swing (formatSwing in src/d3d11/native_on_foot_f169.h) and the plan of the left arm's chain the census makes once per skeleton
+# (native_on_foot_hooks.cpp). The dial's own note line ("swing dial") carries another label, so it is not a window line this rule must parse.
+H169W_LABEL = "native on foot pistol sprint swing (F169, TEMPORARY)"
+H169W_PLAN_LABEL = "native on foot pistol sprint swing plan (F169)"
+H169W_RE = (r"native on foot pistol sprint swing \(F169, TEMPORARY\) (?P<wl>\d+) s: item (?P<item>\S+); calls released \(0\.5 or more\) (?P<rel>\d+), measured (?P<meas>\d+), "
+            r"with a stride (?P<per>\d+), delayed (?P<dl>\d+); seconds (?P<secs>\d+); the stride (?P<T>[\d.]+) s \(from the animated left hand's forward swing against the chest\); "
+            r"amplitude forward/up \(cm\) left hand as drawn (?P<ldf>[\d.]+)/(?P<ldu>[\d.]+), right hand \(the FP grip as drawn\) (?P<rf>[\d.]+)/(?P<ru>[\d.]+), animated left hand "
+            r"(?P<laf>[\d.]+)/(?P<lau>[\d.]+); zero-lag correlation \(\+1 in unison, -1 opposing\) drawn left against right forward (?P<cdf>%s) up (?P<cdu>%s), animated left against "
+            r"right forward (?P<caf>%s) up (?P<cau>%s); the left hand's forward against the legs \(left foot forward less right foot forward\) drawn (?P<cld>%s) animated (?P<cla>%s); "
+            r"the dial experimental\.native_on_foot_pistol_sprint_swing_phase mean (?P<dial>[\d.]+), the delay applied (?P<delay>[\d.]+) s" % ((_HN,) * 6))
+H169W_PLAN_RE = (r"native on foot pistol sprint swing plan \(F169\): X=(?P<x>[0-9A-F]{16}) (?P<state>ok|REFUSED) \((?P<why>[^)]*)\); left arm chain (?P<c>\d+) (?P<u>\d+) (?P<f>\d+) "
+                 r"(?P<h>\d+); (?P<carried>\d+) joints come with it")
+
+
+def _hj_f169_swing(rows, ctx):
+    """F169 (TEMPORARY): how the two arms swing in a pistol sprint (F167 has let go of the left hand: it is the game's animated arm, the right hand is on the FP pistol), per item,
+    from the calls released 0.5 or more and measured: the stride (from the animated left hand's forward swing against the chest), the swing's amplitude forward and up of the left hand as
+    drawn, the right hand and the animated left hand, the zero-lag correlation of the drawn and the animated left against the right (+1 in unison, -1 opposing), the left hand against the
+    legs, and the dial with the delay it applied. The measure is a report: it reads OK. With the dial above 0.05 and 30 or more measured calls, none delayed is NEVER APPLIED (the stride
+    was never measured, the plan was refused or the stage never ran), under a quarter delayed PARTIAL (the stride is measured over the sprint's first second). A refused plan with the dial
+    above 0 is NEVER APPLIED. Under 30 measured calls is IDLE (no pistol sprint released)."""
+    sec, plans = rows.get("sec", []), rows.get("plan", [])
+    if not sec and not plans:
+        return None
+    last = plans[-1] if plans else None
+    plan_text = ("plan %s (%s), left arm chain %s %s %s %s, %s joints come with it" % (last["state"], last["why"], last["c"], last["u"], last["f"], last["h"], last["carried"])) if last else \
+        "no plan line in the window"
+    meas_all = sum(int(r["meas"]) for r in sec)
+    dial_all = sum(int(r["meas"]) * float(r["dial"]) for r in sec) / meas_all if meas_all else 0.0
+    if last and last["state"] != "ok" and dial_all >= 0.05:
+        return ("NEVER APPLIED", "the swing's plan was refused (%s) with the dial at %.2f: %s" % (last["why"], dial_all, plan_text))
+    if not sec:
+        return ("IDLE", "%s; no pistol sprint released" % plan_text)
+    items = collections.OrderedDict()
+    for r in sec:
+        items.setdefault(r["item"], []).append(r)
+    parts, never, notes = [], [], []
+    for item, rs in items.items():
+        g = lambda k, rr=rs: sum(int(r[k]) for r in rr)
+        rel, meas, per, dl = g("rel"), g("meas"), g("per"), g("dl")
+        if not rel:
+            continue
+        w = lambda k, rr=rs, n=meas: (sum(int(r["meas"]) * float(r[k]) for r in rr) / n) if n else 0.0
+        period = (sum(int(r["per"]) * float(r["T"]) for r in rs) / per) if per else 0.0
+        dial = w("dial")
+        delay = (sum(int(r["dl"]) * float(r["delay"]) for r in rs) / dl) if dl else 0.0
+        parts.append("%s %d s: calls released %d, measured %d, with a stride %d, delayed %d (%d s of sprint); stride %.2f s; amplitude forward/up (cm) left hand as drawn %.1f/%.1f, right hand %.1f/%.1f, "
+                     "animated left hand %.1f/%.1f; correlation (+1 in unison, -1 opposing) drawn left against right forward %+.2f up %+.2f, animated left against right forward %+.2f up %+.2f; "
+                     "left hand against the legs drawn %+.2f animated %+.2f; dial %.2f, the delay applied %.2f s" % (
+                         item, _hsecs(rs), rel, meas, per, dl, g("secs"), period, w("ldf"), w("ldu"), w("rf"), w("ru"), w("laf"), w("lau"), w("cdf"), w("cdu"), w("caf"), w("cau"), w("cld"),
+                         w("cla"), dial, delay))
+        if meas >= 30 and dial >= 0.05 and dl == 0:
+            never.append("the dial was %.2f and the delay was applied in none of %d measured calls with %s (%s)" % (
+                dial, meas, item, "no stride was measured: the animated left hand's forward swing never crossed its mean twice within 0.30 to 1.60 s" if not per else
+                "a stride was measured in %d calls and the stage never applied it" % per))
+        elif meas >= 30 and dial >= 0.05 and dl * 4 < meas:
+            notes.append("the delay was applied in only %d of %d measured calls with %s (the stride is measured over a sprint's first second)" % (dl, meas, item))
+    if not parts:
+        return ("IDLE", "%s; no pistol sprint released" % plan_text)
+    text = "%s; %s" % (plan_text, "; ".join(parts))
+    if never:
+        return ("NEVER APPLIED", text + "; " + "; ".join(never + notes))
+    if notes:
+        return ("PARTIAL", text + "; " + "; ".join(notes))
+    if meas_all < 30:
+        return ("IDLE", text + "; under 30 measured calls: little to read")
     return ("OK", text)
 
 
@@ -14195,7 +14896,10 @@ def _hj_desktop_window(rows, ctx):
     """The desktop window (src\\common\\desktop_window_math.h; visual.desktop_window): ran is a setting line that names a mode other than game, applied is a Present drawn,
     counted by the 10 s lines and by the line that ends an activation (a session whose 3D was on for less than 10 s has only the second). NEVER APPLIED when the setting
     asked for a mode and no line shows a Present drawn: no eye image arrived (3D was never on), or the draw declined (a "not drawing" line says why). No setting line, or only
-    game, is nothing to judge (None)."""
+    game, is nothing to judge (None).
+    F173: the shipped setting is left_eye, so a setting line no longer means the user asked for the window. A setting with no Present drawn and no sign the window ever took the
+    eye images (no activation, no 10 s line, no stopped line, no declined draw) is IDLE: 3D was never on in that log, there was nothing to draw. Any of those signs with no Present
+    drawn is NEVER APPLIED as before."""
     settings = rows.get("setting", [])
     asked = [r["value"] for r in settings if r["value"] != "game"]
     if not asked:
@@ -14203,6 +14907,9 @@ def _hj_desktop_window(rows, ctx):
     drawn = [int(r["drawn"]) for kind in ("sec", "stopped") for r in rows.get(kind, [])]
     mode = asked[-1]
     if not drawn or max(drawn) <= 0:
+        if not (rows.get("active") or rows.get("declined") or rows.get("sec") or rows.get("stopped")):
+            return ("IDLE", "the setting was %s (the shipped default since F173) and no line shows the window active, drawing or declining: 3D was never on in this log, so there was "
+                            "nothing to draw" % mode)
         return ("NEVER APPLIED", "the setting was %s but no 10 s line and no stopped line shows a Present drawn (3D was never on, or the draw declined: the log's "
                                  "'desktop window: not drawing' line says why)" % mode)
     sec = rows.get("sec", [])
@@ -14368,9 +15075,9 @@ HEALTH_RULES = (
     ), _hj_f113_rows),
     _hrule("ADS model eye (F110)", ("F110", "F66e"), ("ADS sight check (F66e/F79)",), (
         ("sec", r"native on foot ADS sight check \(F66e/F79\): eye rows " + H_WL_THIS + r": both eyes (?P<both>\d+), one eye (?P<one>\d+), none/implausible (?P<none>\d+) "
-                r"\(\d+ implausible: over 0\.5 m from the job camera\); the lock's right eye: the solved rendered eye in (?P<solved>\d+) frames, the model in "
+                r"\(\d+ implausible: over 0\.5 m from the job camera\); the lock's (?:eye \(aiming eye (?P<aim>left|right)\)|right eye): the solved rendered eye in (?P<solved>\d+) frames, the model in "
                 r"(?P<model>\d+) \(F110: from the job camera, the left eye, (?P<fromcam>\d+), from the solved left eye (?P<fromleft>\d+); IPD (?P<ipd>[\d.]+) m, "
-                r"(?P<ipdsrc>the eyes' offsets|the fallback)\); the job camera's model minus the solved right eye \(body right, up, forward, cm, mean\) (?P<dr>%s) "
+                r"(?P<ipdsrc>the eyes' offsets|the fallback)\); the job camera's model minus the solved (?:aiming|right) eye \(body right, up, forward, cm, mean\) (?P<dr>%s) "
                 r"(?P<du>%s) (?P<df>%s), (?P<dmean>[\d.]+) cm mean, (?P<dmax>[\d.]+) max over (?P<dn>\d+) frames" % (_HN, _HN, _HN)),
         ("old", r"native on foot ADS sight check \(F66e/F79\): eye rows " + H_WL_THIS + r": both eyes (?P<both>\d+), one eye (?P<one>\d+), none/implausible (?P<none>\d+) "
                 r"\(\d+ implausible: over 0\.5 m from the job camera\); the lock's right eye: the solved rendered eye in (?P<solved>\d+) frames, the F63 model "
@@ -14457,7 +15164,7 @@ HEALTH_RULES = (
                 r"exposure e0 (?P<ex0>\S+) e1 (?P<ex1>\S+) \(read in (?P<exr>\d+) samples, non-finite in (?P<exn>\d+)\); dropped (?P<drop>\d+)$"),
     ), _hj_f121b_census, needs_detail=True),
     _hrule("ADS eye chain (F93b)", ("F93b",), ("ADS eye chain (F93b)", "ADS steady eye (F93b)", "ADS eye hold (F93b)"), (
-        ("sec", r"native on foot ADS eye chain \(F93b\) " + H_WL + r": steady eye (?P<steady>on|off), eye hold (?P<hold>on|off); the sight lock's target from the alignment the "
+        ("sec", r"native on foot ADS eye chain \(F93b\) " + H_WL + r": steady eye (?P<steady>on|off), eye hold (?P<hold>on|off)(?:, aiming eye (?P<aim>left|right))?; the sight lock's target from the alignment the "
                 r"measured eye was rendered with (?P<matched>\d+) of (?P<n>\d+) measured frames \(serial lag mean (?P<lag>[\d.]+) max \d+\), F70's (?P<legacy>\d+), the model "
                 r"eye (?P<model>\d+), held \(its alignment not in the history\) (?P<missed>\d+); per frame rms: sight shift (?P<shift>[\d.]+) mm, position lock "
                 r"(?P<lock>[\d.]+) mm, head translation (?P<head>[\d.]+) mm over (?P<steps>\d+) frames; the along error's step (?P<along>[\d.]+) mm rms, autocorrelation "
@@ -14479,13 +15186,15 @@ HEALTH_RULES = (
         ("allowed", r"native on foot ADS item gate \(F91\): allowed: \"(?P<item>[^\"]*)\""),
         ("ticks", r"native on foot ADS input \(F70b\): source .*item gate refused (?P<ticks>\d+) ticks \(F91: held \"(?P<held>[^\"]*)\" (?P<state>allowed|refused)(?:.*?; over (?P<wl>\d+) s)?.*$"),
     ), _hj_f91_gate),
-    _hrule(H_F106, ("F106",), ("ADS sight in both eyes (F106)",), (
+    _hrule(H_F106, ("F106", "F162"), ("ADS sight in both eyes (F106)", "ADS sight eye (F162)"), (
         ("press", r"ADS sight in both eyes \(F106\) press: peak (?P<peak>[\d.]+), frames (?P<frames>\d+) \(at full weight (?P<full>\d+), refused (?P<refused>\d+), "
                   r"replayed \d+\) over [\d.]+ s; the eyes' rotation \(left view against the right\) yaw (?P<yaw>%s) pitch %s roll %s deg; .*?the left eye from the "
                   r"right at full weight (?P<cov>[\d.]+)%% \(wholly [\d.]+%%\); hidden area (?P<hidden>used|none) \(\d+ triangles\)" % (_HN, _HN, _HN)),
-        ("sec", r"ADS sight in both eyes \(F106\) " + H_WL + r": share (?P<w>[\d.]+) \(key (?P<key>on|off), lock weight [\d.]+, ads state \w+\)(?:.*?; ADS (?P<adssec>\d+) of \d+ s; key on in ADS (?P<ons>\d+) of \d+ s; share asked max (?P<asked>[\d.]+))?.*$"),
-        ("event", r"ADS sight in both eyes \(F106\): (?P<ev>shared|stereo) \(key (?P<key>on|off), lock weight [\d.]+\)"),
+        ("sec", r"ADS sight in both eyes \(F106\) " + H_WL + r": share (?P<w>[\d.]+) \(key (?P<key>on|off)(?:, aiming eye (?P<aim>left|right))?, lock weight [\d.]+, ads state \w+\)(?:.*?; ADS (?P<adssec>\d+) of \d+ s; key on in ADS (?P<ons>\d+) of \d+ s; share asked max (?P<asked>[\d.]+))?.*$"),
+        ("event", r"ADS sight in both eyes \(F106\): (?P<ev>shared|stereo) \(key (?P<key>on|off)(?:, aiming eye (?P<aim>left|right))?, lock weight [\d.]+\)"),
         ("guard", r"ADS sight in both eyes \(F106\): GUARD TRIPPED \((?P<n>\d+) so far\)"),
+        # F162: the sight eye key (it replaced the F106 line below, which a log from F106 to F161 still carries)
+        ("eyekey", r"native on foot ADS sight eye \(F162\): fix\.native_on_foot_ads_sight_eye is (?P<mode>both|right|left) \(aiming eye (?P<aim>left|right)\)"),
         ("key", r"native on foot ADS sight in both eyes \(F106\): fix\.native_on_foot_ads_sight_both_eyes is (?P<key>on|off)"),
     ), _hj_f106_share),
     _hrule("marker fix (F62c/F64)", ("F62c", "F64", "F87c"), ("marker fix (F62c/F64)", "marker fix (F62c)", "marker fix (F87c)"), (
@@ -14663,9 +15372,13 @@ HEALTH_RULES = (
         ("sec", r"native on foot pitched view \(F138\) 1 s: mode (?P<mode>.+?), item (?P<item>.+?), aim pitch (?P<aim>%s) deg \(min (?P<amin>%s) max (?P<amax>%s)\), "
                 r"head pitch (?P<head>%s) deg; the camera's sink against the stance (?P<sink>%s) cm \(max (?P<smax>%s)\), the head's own height since the stance "
                 r"(?P<hrise>%s) cm; w (?P<wmean>[\d.]+)/(?P<wmax>[\d.]+); added (?P<added>%s) cm \(max (?P<amaxadd>%s)\) in (?P<napplied>\d+) of (?P<ncalls>\d+) pitched "
-                r"calls \| measured only: an item drawn (?P<nmeasured>\d+) calls \| not applied: (?P<why>.+?); EDVR carried up (?P<up>%s) forward (?P<fwd>%s) cm "
+                r"calls \| measured only: an item drawn (?P<nmeasured>\d+) calls \| not applied: (?P<why>.+?)(?:; reference used \(F170; the calls that chose one\): "
+                r"settled (?P<rsettled>\d+), running (?P<rrunning>\d+), none (?P<rnone>\d+))?"
+                r"(?:; reference detail \(F171; the calls that had one (?P<rdn>\d+)\): last source (?P<rsrc>\w+), age (?P<rage>%s) s, target (?P<rtgt>%s) cm, G (?P<rg>%s) cm, "
+                r"G now (?P<rgn>%s) cm; target published (?P<rpub>%s) cm in (?P<rpubn>\d+) calls)?"
+                r"; EDVR carried up (?P<up>%s) forward (?P<fwd>%s) cm "
                 r"\(the raise, F137\); the view over the neck (?P<view>%s) cm; INSIDE (?P<inside>\d+) of (?P<insideof>\d+); the settle refused for the aim's pitch "
-                r"(?P<refused>\d+) calls \(look to aim's gate (?P<lta>\d+)\); returned to the stance's raise (?P<returned>\d+) times \(refused (?P<retrefused>\d+), not needed (?P<notneeded>\d+)\)" % ((_HN,) * 12)),
+                r"(?P<refused>\d+) calls \(look to aim's gate (?P<lta>\d+)\); returned to the stance's raise (?P<returned>\d+) times \(refused (?P<retrefused>\d+), not needed (?P<notneeded>\d+)\)" % ((_HN,) * 17)),
         ("bins", r"native on foot pitched view \(F138\) 10 s bins \(per 10 deg of aim pitch: calls, the camera's sink, EDVR carried up, forward, the head's own height since "
                  r"the stance; cm\): (?P<mode>mouse look|look to aim), item (?P<item>.+?): (?=\[)(?P<body>.+)$"),
     ), _hj_f138_pitched),
@@ -14890,13 +15603,46 @@ HEALTH_RULES = (
                  r"(?P<ceil>\d+); the chosen elbow (?P<disp>[\d.]+) deg from the pole's reference \(max (?P<dmax>[\d.]+)\); reseeds (?P<reseeds>\d+); seed births: first (?P<b_first>\d+), "
                  r"item (?P<b_item>\d+), generation (?P<b_gen>\d+), armsOk (?P<b_arms>\d+), standDown (?P<b_down>\d+), supportCup (?P<b_cup>\d+), refused (?P<b_ref>\d+), "
                  r"uncommitted (?P<b_unc>\d+), F159 (?P<b_f159>\d+); seconds with the elbow within 1 cm of the shoulder (?P<secs>\d+), at the hip (?P<hipsecs>\d+), longest run at the hip "
-                 r"(?P<run>\d+) s" % ((_HN,) * 6)),
+                 r"(?P<run>\d+) s"
+                 # F165: the blend toward the body-down pole while crouched in the sights, appended to the same line (builds before F165 print none)
+                 r"(?:; elbow blend to the body-down pole \(F165\): weight mean (?P<bw>[\d.]+); in the sights crouched (?P<bn>\d+) solves, (?P<bapp>\d+) blended, the elbow "
+                 r"(?P<bpa>[\d.]+) deg off the stance's plane \(max (?P<bpam>[\d.]+)\); the rest (?P<rn>\d+) solves, (?P<rapp>\d+) blended, (?P<rpa>[\d.]+) deg "
+                 r"\(max (?P<rpam>[\d.]+)\))?" % ((_HN,) * 6)),
         ("birth", r"native on foot left elbow seed \(F159\): born by (?P<why>\w+) \((?:reseeded in place|first cause (?P<since>\w+), no seed for (?P<absent>\d+) ms)\); base swivel "
                   r"(?P<base>%s) deg(?P<clamp>, clamped)?, from (?P<src>the FP elbow's pole|the legacy pole|the body-down pole); seeded elbow (?P<seeded>%s) cm over the shoulder, the FP "
                   r"elbow (?P<fp>%s) cm; the left hand (?P<err>[\d.]+) cm off its grip; armed ramp (?P<ramp>[\d.]+); stance (?P<stance>\w+); head pitch (?P<pitch>%s deg|unread)"
                   r"(?:; the pole it replaced put the elbow (?P<was>%s) cm over the shoulder with the arm (?P<off>[\d.]+) cm off its axis)?"
                   r"(?:; (?P<skipped>\d+) earlier seed\(s\) not logged \(one line in 0\.5 s\))?" % ((_HN,) * 5)),
     ), _hj_f98a_elbow),
+    _hrule("left arm to the eye (F161)", ("F161",), (H161_LABEL,), (
+        ("sec", H161_RE),
+    ), _hj_f161_arm_eye),
+    _hrule("upper body hold (F166)", ("F166",), (H166_LABEL, H166_PLAN_LABEL), (
+        ("sec", H166_RE),
+        ("plan", H166_PLAN_RE),
+    ), _hj_f166_hold),
+    _hrule("pistol sprint release (F167)", ("F167",), (H167_LABEL,), (
+        ("sec", H167_RE),
+    ), _hj_f167_sprint),
+    _hrule("crouched ADS body dial (F168)", ("F168",), (H168_LABEL,), (
+        ("sec", H168_RE),
+    ), _hj_f168_dial),
+    _hrule("crouched ADS torso square (F170)", ("F170",), (H170_LABEL,), (
+        ("sec", H170_RE),
+    ), _hj_f170_square),
+    _hrule("crouched ADS body sideways (F171)", ("F171",), (H171_LABEL,), (
+        ("sec", H171_RE),
+    ), _hj_f171_sideways),
+    _hrule("raise carriage (F171)", ("F171",), (H171C_LABEL,), (
+        ("sec", H171C_RE),
+    ), _hj_f171_carriage),
+    _hrule("pitched stance (F169)", ("F169",), (H169S_LABEL,), (
+        ("sec", H169S_RE),
+    ), _hj_f169_stance),
+    _hrule("pistol sprint swing (F169)", ("F169",), (H169W_LABEL, H169W_PLAN_LABEL), (
+        ("sec", H169W_RE),
+        ("plan", H169W_PLAN_RE),
+    ), _hj_f169_swing),
     _hrule("draw onset (F99a)", ("F99a",), ("native on foot draw onset (F99a)",), (
         ("sec", r"native on foot draw onset \(F99a\): item (?P<item>\S+); the game's selection (?P<sel>id [0-9A-F]{8}|not seen); body (?P<body>moving|still); Status\.json "
                 r"named it (?P<status>at \+\d+ ms|never); the hands' authority from (?P<src>the game's selection|the native primary selection|Status\.json) "
@@ -15013,6 +15759,8 @@ HEALTH_RULES = (
         ("setting", H_DESKTOP_SETTING),
         ("sec", H_DESKTOP_SEC),
         ("stopped", H_DESKTOP_STOP),
+        ("active", H_DESKTOP_ACTIVE),
+        ("declined", H_DESKTOP_DECLINED),
         ("_", H_DESKTOP_OTHER),
     ), _hj_desktop_window),)
 HEALTH_BY_TAG = {}
@@ -15939,7 +16687,18 @@ def self_test_health():
     f140reader_path = os.path.join(repo_root(), "src", "d3d11", "journal_loadout_reader.h")
     f158_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f158.h")
     f159_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f159.h")
+    f165_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f165.h")
     f160_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f160.h")
+    f161_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f161.h")
+    f166_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f166.h")
+    f167_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f167.h")
+    f168_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f168.h")
+    f169_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f169.h")
+    f170_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f170.h")
+    f171_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f171.h")
+    f171c_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f171c.h")
+    f172_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f172.h")
+    f138_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f138.h")
     f154_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f154.h")
     s0_path = os.path.join(repo_root(), "src", "d3d11", "scope_zoom_s0.h")
     s1_path = os.path.join(repo_root(), "src", "d3d11", "scope_zoom_s1.h")
@@ -15957,7 +16716,19 @@ def self_test_health():
         f140readersrc = read_text(f140reader_path)
         f158src = read_text(f158_path)
         f159src = read_text(f159_path)
+        f165src = read_text(f165_path)
         f160src = read_text(f160_path)
+        f161src = read_text(f161_path)
+        f166src = read_text(f166_path)
+        f167src = read_text(f167_path)
+        f168src = read_text(f168_path)
+        f169src = read_text(f169_path)
+        f170src = read_text(f170_path)
+        f171src = read_text(f171_path)
+        f171csrc = read_text(f171c_path)
+        f172src = read_text(f172_path)
+        f138src = read_text(f138_path)
+        hooks_src = read_text(os.path.join(repo_root(), "src", "d3d11", "native_on_foot_hooks.cpp"))
         f154src = read_text(f154_path)
         s0src = read_text(s0_path)
         s1src = read_text(s1_path)
@@ -16021,6 +16792,15 @@ def self_test_health():
             raise AssertionError("native_on_foot_f159.h has no format holding %r: the --health rule that reads it is out of date" % needle)
         return health_render(fmts[key], vals)
 
+    def R165(needle, *vals):
+        """F165's part of the F159 window line (appendSummary in native_on_foot_f165.h), from its own format literal."""
+        key = "f165:" + needle
+        if key not in fmts:
+            fmts[key] = health_c_format(f165src, needle)
+        if fmts[key] is None:
+            raise AssertionError("native_on_foot_f165.h has no format holding %r: the --health rule that reads it is out of date" % needle)
+        return health_render(fmts[key], vals)
+
     def R160(needle, *vals):
         """F160's holster line (formatHolster in native_on_foot_f160.h), from its own format literals."""
         key = "f160:" + needle
@@ -16028,6 +16808,96 @@ def self_test_health():
             fmts[key] = health_c_format(f160src, needle)
         if fmts[key] is None:
             raise AssertionError("native_on_foot_f160.h has no format holding %r: the --health rule that reads it is out of date" % needle)
+        return health_render(fmts[key], vals)
+
+    def R161(needle, *vals):
+        """F161's line (formatSummary in native_on_foot_f161.h: the head, each context's piece, the tail), from its own format literals."""
+        key = "f161:" + needle
+        if key not in fmts:
+            fmts[key] = health_c_format(f161src, needle)
+        if fmts[key] is None:
+            raise AssertionError("native_on_foot_f161.h has no format holding %r: the --health rule that reads it is out of date" % needle)
+        return health_render(fmts[key], vals)
+
+    def R166(needle, *vals):
+        """F166's window line (formatSummary in native_on_foot_f166.h), from its own format literal; the plan line (native_on_foot_hooks.cpp), from its own."""
+        key = "f166:" + needle
+        if key not in fmts:
+            fmts[key] = health_c_format(f166src, needle) or health_c_format(hooks_src, needle)
+        if fmts[key] is None:
+            raise AssertionError("native_on_foot_f166.h and native_on_foot_hooks.cpp have no format holding %r: the --health rule that reads it is out of date" % needle)
+        return health_render(fmts[key], vals)
+
+    def R167(needle, *vals):
+        """F167's window line (formatSummary in native_on_foot_f167.h), from its own format literal."""
+        key = "f167:" + needle
+        if key not in fmts:
+            fmts[key] = health_c_format(f167src, needle)
+        if fmts[key] is None:
+            raise AssertionError("native_on_foot_f167.h has no format holding %r: the --health rule that reads it is out of date" % needle)
+        return health_render(fmts[key], vals)
+
+    def R168(needle, *vals):
+        """F168's window line (formatSummary in native_on_foot_f168.h), from its own format literal."""
+        key = "f168:" + needle
+        if key not in fmts:
+            fmts[key] = health_c_format(f168src, needle)
+        if fmts[key] is None:
+            raise AssertionError("native_on_foot_f168.h has no format holding %r: the --health rule that reads it is out of date" % needle)
+        return health_render(fmts[key], vals)
+
+    def R169(needle, *vals):
+        """F169's lines (formatStance, formatSwing in native_on_foot_f169.h; the swing's plan line in native_on_foot_hooks.cpp), from their own format literals."""
+        key = "f169:" + needle
+        if key not in fmts:
+            fmts[key] = health_c_format(f169src, needle) or health_c_format(hooks_src, needle)
+        if fmts[key] is None:
+            raise AssertionError("native_on_foot_f169.h and native_on_foot_hooks.cpp have no format holding %r: the --health rule that reads it is out of date" % needle)
+        return health_render(fmts[key], vals)
+
+    def R170(needle, *vals):
+        """F170's window line (formatSummary in native_on_foot_f170.h), from its own format literal."""
+        key = "f170:" + needle
+        if key not in fmts:
+            fmts[key] = health_c_format(f170src, needle)
+        if fmts[key] is None:
+            raise AssertionError("native_on_foot_f170.h has no format holding %r: the --health rule that reads it is out of date" % needle)
+        return health_render(fmts[key], vals)
+
+    def R171(needle, *vals):
+        """F171's window line (formatSummary in native_on_foot_f171.h), from its own format literal."""
+        key = "f171:" + needle
+        if key not in fmts:
+            fmts[key] = health_c_format(f171src, needle)
+        if fmts[key] is None:
+            raise AssertionError("native_on_foot_f171.h has no format holding %r: the --health rule that reads it is out of date" % needle)
+        return health_render(fmts[key], vals)
+
+    def R171c(needle, *vals):
+        """F171's raise carriage line and its cells (formatSummary, cellsText in native_on_foot_f171c.h), from their own format literals."""
+        key = "f171c:" + needle
+        if key not in fmts:
+            fmts[key] = health_c_format(f171csrc, needle)
+        if fmts[key] is None:
+            raise AssertionError("native_on_foot_f171c.h has no format holding %r: the --health rule that reads it is out of date" % needle)
+        return health_render(fmts[key], vals)
+
+    def R172(needle, *vals):
+        """F172's clause on the raise carriage line (appendTurned in native_on_foot_f172.h), from its own format literal."""
+        key = "f172:" + needle
+        if key not in fmts:
+            fmts[key] = health_c_format(f172src, needle)
+        if fmts[key] is None:
+            raise AssertionError("native_on_foot_f172.h has no format holding %r: the --health rule that reads it is out of date" % needle)
+        return health_render(fmts[key], vals)
+
+    def R138(needle, *vals):
+        """F138's 1 s line (formatPitched in native_on_foot_f138.h; F171 moved it out of native_on_foot.cpp) and the reference detail's text, from their own format literals."""
+        key = "f138:" + needle
+        if key not in fmts:
+            fmts[key] = health_c_format(f138src, needle)
+        if fmts[key] is None:
+            raise AssertionError("native_on_foot_f138.h has no format holding %r: the --health rule that reads it is out of date" % needle)
         return health_render(fmts[key], vals)
 
     def R105(needle, *vals):
@@ -16307,17 +17177,23 @@ def self_test_health():
             """F125: a traced event's own line at its end."""
             return R("ads transition (F89) %s traced: frames", d, frames, engaged, lw, elw)
 
-        def share_sec(w=0.44, key="on", state="engaged"):
-            return R("ADS sight in both eyes (F106) %u s: share", 1, w, key, w, state, int(state != "idle"), 1, int(key == "on" and state != "idle"), 1, w)
+        def share_sec(w=0.44, key="on", state="engaged", aim="right"):
+            return R("ADS sight in both eyes (F106) %u s: share", 1, w, key, aim, w, state, int(state != "idle"), 1, int(key == "on" and state != "idle"), 1, w)
 
-        def share_ev(ev="shared", key="on"):
-            return R("ADS sight in both eyes (F106): %s (key %s", ev, key, 0.08)
+        def share_ev(ev="shared", key="on", aim="right"):
+            return R("ADS sight in both eyes (F106): %s (key %s", ev, key, aim, 0.08)
 
         def share_guard(n=2):
             return R("ADS sight in both eyes (F106): GUARD TRIPPED", n, 0.5, "no weapon or tool is drawn")
 
-        def share_key(key="on"):
-            return R("native on foot ADS sight in both eyes (F106): fix.native_on_foot_ads_sight_both_eyes is %s", key, "x")
+        def share_key(mode="both"):
+            """F162: the sight eye key line; both and right line up the right eye, left the left eye."""
+            return R("native on foot ADS sight eye (F162): fix.native_on_foot_ads_sight_eye is %s (aiming eye %s)", mode, "left" if mode == "left" else "right", "", "x")
+
+        def old_share_key(key="on"):
+            """The F106 to F161 build's key line (the key before F162), written out as it was: no source format holds it any more."""
+            return ("native on foot ADS sight in both eyes (F106): fix.native_on_foot_ads_sight_both_eyes is %s -- " % key +
+                    ("while you aim down sights both eyes see the view from your aiming (right) eye" if key == "on" else "each eye keeps its own view while you aim down sights (normal stereo)"))
 
         def share_press(peak=1.0, frames=98, full=80, refused=0, cov=74.1, hidden=212, yaw=21.5):
             return R("ADS sight in both eyes (F106) press: peak", peak, frames, full, refused, 0, 1.63, yaw, 0.0, 0.0, -1.428, 0.884, 1.0, -1.0, -0.884, 1.428, 1.0,
@@ -16512,8 +17388,8 @@ def self_test_health():
         F110 = "ADS model eye (F110)"
 
         def sight_check(both=87, one=0, none=0, solved=87, model=0, fromcam=0, fromleft=0, ipd=0.0626, src="the eyes' offsets", d=(0.0, 0.0, 0.0), dmean=0.1,
-                        dmax=0.3, dn=87):
-            return R("native on foot ADS sight check (F66e/F79): eye rows", 1, both, one, none, 0, solved, model, fromcam, fromleft, ipd, src, d[0], d[1], d[2], dmean,
+                        dmax=0.3, dn=87, aim="right"):
+            return R("native on foot ADS sight check (F66e/F79): eye rows", 1, both, one, none, 0, aim, solved, model, fromcam, fromleft, ipd, src, d[0], d[1], d[2], dmean,
                      dmax, dn, 0.0, 0.0, 0.0, 6.2, 0.1, 0.1, 6.18, both, 5.8, 5.9, -20.9, 0.5, 0.6, -21.0, 0.44, 0.19, 0.26, 0.18, -0.24, 0.19, -0.23, 0.18, "")
 
         # the tester's log (edvr_gfx_20261025_114257, the build before F110): every ADS frame on F63's half-IPD model
@@ -16528,6 +17404,16 @@ def self_test_health():
               [("OK", F110)], has=["the model 144 (100%: from the job camera 144, from the solved left eye 0)", "no frame had the model and the solved right eye"])
         check("F110 model eye: the tester's build (F63's half-IPD model)", [OLD_TESTER] * 3, 0, [("PARTIAL", F110)],
               has=["F63's model 216 (100%)", "half the IPD: the nose"])
+        # F162: the aiming eye. A line before it is the right eye's (the F110 to F161 builds wrote "the lock's right eye" and "the solved right eye").
+        before_f162 = sight_check().replace("the lock's eye (aiming eye right):", "the lock's right eye:").replace("minus the solved aiming eye", "minus the solved right eye")
+        check("F110 model eye: a build before F162 (the lock's right eye) reads as the right eye", [before_f162] * 2, 0, [("OK", F110)],
+              has=["aiming eye right, the solved right eye 174 frames", "the model 0 (0%"], lacks=["UNPARSED"])
+        check("F162 model eye: the left eye aims, solved, the camera's model on it", [sight_check(aim="left", d=(0.0, 0.0, 0.0), dmean=0.0, dmax=0.1)] * 3, 0, [("OK", F110)],
+              has=["aiming eye left, the solved left eye 261 frames", "against the solved left eye 0.0 cm mean"], lacks=["UNPARSED"])
+        check("F162 model eye: the left eye aims, no rows, every frame on the camera (the left eye)", [sight_check(aim="left", both=0, none=72, solved=0, model=72, fromcam=72, dn=0)] * 2,
+              0, [("OK", F110)], has=["aiming eye left, the solved left eye 0 frames, the model 144 (100%: from the job camera 144, from the solved left eye 0)"])
+        check("F162 model eye: the left eye aims and the camera is 3 cm off the solved left eye", [sight_check(aim="left", d=(3.0, 0.0, 0.0), dmean=3.0, dmax=3.1)] * 2, 0,
+              [("PARTIAL", F110)], has=["the model is off the left eye"])
 
         # ---- eye rows (F113): each eye's scene rows and their source ----
         F113 = "eye rows (F113)"
@@ -17020,8 +17906,8 @@ def self_test_health():
         # ---- ADS eye chain (F93b): the steady eye and the eye hold ----
         F93C = "ADS eye chain (F93b)"
 
-        def chain(steady="on", hold="off", matched=88, n=90, legacy=0, ac2=-0.02, along=0.05):
-            return R("native on foot ADS eye chain (F93b) %u s", 1, steady, hold, matched, n, 2.0, 2, legacy, n - matched - legacy, 0, 0.004, 0.0 if hold == "off" else 0.08, 0.057,
+        def chain(steady="on", hold="off", matched=88, n=90, legacy=0, ac2=-0.02, along=0.05, aim="right"):
+            return R("native on foot ADS eye chain (F93b) %u s", 1, steady, hold, aim, matched, n, 2.0, 2, legacy, n - matched - legacy, 0, 0.004, 0.0 if hold == "off" else 0.08, 0.057,
                      89, along, -0.5, ac2, 86)
 
         check("F93b fit: the steady eye and the eye hold split the windows",
@@ -17037,13 +17923,14 @@ def self_test_health():
                                                                R("native on foot ADS eye hold (F93b): %s (live, from the next press", "on", "no")], 0, [("IDLE", F93C)],
               has=["switched: steady eye 1, eye hold 1 time(s)"])
         def chain_window(wl, steps, acn, along, ac2, lock):
-            return R("native on foot ADS eye chain (F93b) %u s", wl, "on", "on", steps, steps, 2.0, 2, 0, 0, 0, 0.004, lock, 0.057,
+            return R("native on foot ADS eye chain (F93b) %u s", wl, "on", "on", "right", steps, steps, 2.0, 2, 0, 0, 0, 0.004, lock, 0.057,
                      steps, along, -0.5, ac2, acn)
         check("F125 ADS: chain RMS and correlation use frame counts across unequal windows",
               [chain_window(10, 900, 900, 0.01, -0.10, 0.02), chain_window(1, 90, 90, 0.10, -0.50, 0.20)],
               0, [("OK", F93C)], has=["11 s;", "along step 0.032 mm, lag-2 autocorrelation -0.14, position lock step 0.063 mm"])
-        old_chain = chain()
-        check("F125 ADS: legacy one-second chain remains readable", [old_chain], 0, [("OK", F93C)], has=["1 s; steady eye on"])
+        old_chain = chain().replace(", aiming eye right", "")   # F162 added the aiming eye after the hold: a line before it has none
+        check("F125 ADS: legacy one-second chain remains readable", [old_chain], 0, [("OK", F93C)], has=["1 s; steady eye on"], lacks=["aiming eye"])
+        check("F162 chain: the aiming eye is named", [chain(aim="left"), chain(aim="left")], 0, [("OK", F93C)], has=["; aiming eye left"])
         # ---- game camera (F93d): the camera suite on foot gates every body change ----
         F93D = "game camera (F93d)"
         CTL = 0x14D09AB8080
@@ -17242,6 +18129,474 @@ def self_test_health():
               has=["more than 2 s in a row at the hip", "(1 birth line(s): armsOk after standDown 1)"], lacks=["UNPARSED"])
         check("F159 elbow: a line that drifted from its pattern is unparsed", ["native on foot left elbow pole (F159) 10 s: something else"], 4, [("UNPARSED", F98)])
         check("F159 elbow: a birth line that drifted from its pattern is unparsed", ["native on foot left elbow seed (F159): born somewhere"], 4, [("UNPARSED", F98)])
+
+        # ---- F165: the left elbow's blend toward the body-down pole while crouched in the sights (a part of the F159 window line) ----
+        def blend165(w=0.62, adsn=300, adsapp=300, adsplane=12.0, adsmax=20.0, restn=600, restapp=0, restplane=9.0, restmax=30.0):
+            """F165's part of the F159 window line, from the DLL's own format (appendSummary, native_on_foot_f165.h)."""
+            return R165("; elbow blend to the body-down pole (F165)", w, adsn, adsapp, adsplane, adsmax, restn, restapp, restplane, restmax)
+
+        SHOTGUN165 = "$wpn_m_shotgun_plasma_name;"
+        check("F165 blend: crouched in the sights, the blend applied in every solve",
+              [elbow98(SHOTGUN165), pole159(SHOTGUN165) + blend165()], 0, [("OK", F98)],
+              has=["blend to the body-down pole (F165): weight mean 0.62, crouched in the sights 300 solves (300 blended) with the elbow 12.0 deg off the stance's plane (max 20.0), "
+                   "the rest 600 solves (0 blended) 9.0 deg (max 30.0)"], lacks=["UNPARSED", "never", "was thin"])
+        check("F165 blend: crouched in the sights and the blend applied in none of 120 solves is a feature that never ran",
+              [elbow98(SHOTGUN165), pole159(SHOTGUN165, n=720, hipn=720) + blend165(w=0.0, adsn=120, adsapp=0, adsplane=40.0, adsmax=48.0, restn=600)], 3, [("NEVER APPLIED", F98)],
+              has=["the body-down blend was applied in none of 120 solves crouched in the sights with " + SHOTGUN165], lacks=["UNPARSED"])
+        check("F165 blend: the same fault on the F159 line alone (the F98a line missing) is read, not dropped",
+              [pole159(SHOTGUN165, n=720, hipn=720) + blend165(w=0.0, adsn=120, adsapp=0, restn=600)], 3, [("NEVER APPLIED", F98)],
+              has=["the body-down blend was applied in none of 120 solves"], lacks=["UNPARSED"])
+        check("F165 blend: applied in under half of the solves crouched in the sights is thin",
+              [elbow98(SHOTGUN165), pole159(SHOTGUN165, n=700, hipn=700) + blend165(adsn=100, adsapp=20, restn=600)], 0, [("PARTIAL", F98)],
+              has=["the body-down blend was thin crouched in the sights (" + SHOTGUN165 + ": applied in 20 of 100 solves crouched in the sights)"], lacks=["UNPARSED", "never"])
+        check("F165 blend: under 30 solves crouched in the sights is too few to call the blend absent",
+              [elbow98(SHOTGUN165), pole159(SHOTGUN165, n=629, hipn=629) + blend165(w=0.0, adsn=29, adsapp=0, restn=600)], 0, [("OK", F98)],
+              has=["crouched in the sights 29 solves (0 blended)"], lacks=["UNPARSED", "never", "was thin"])
+        check("F165 blend: a flight with no crouched solve (the hip and the sights standing) is not judged absent",
+              [elbow98(SHOTGUN165), pole159(SHOTGUN165, n=900, hipn=900) + blend165(w=0.0, adsn=0, adsapp=0, adsplane=0.0, adsmax=0.0, restn=900, restapp=0)], 0, [("OK", F98)],
+              has=["crouched in the sights 0 solves (0 blended) with the elbow 0.0 deg"], lacks=["UNPARSED", "never", "was thin"])
+        check("F165 blend: a line from a build before F165 (no blend part) reads as before",
+              [elbow98(SHOTGUN165), pole159(SHOTGUN165)], 0, [("OK", F98)], has=["left elbow pole (F159): " + SHOTGUN165 + " 10 s: 900 solves"], lacks=["F165", "UNPARSED"])
+        check("F165 blend: two windows add up, the plane change weighted by the solves",
+              [elbow98(SHOTGUN165), pole159(SHOTGUN165, n=400, hipn=400) + blend165(w=0.5, adsn=100, adsapp=100, adsplane=20.0, adsmax=25.0, restn=300, restplane=10.0, restmax=15.0),
+               elbow98(SHOTGUN165), pole159(SHOTGUN165, n=400, hipn=400) + blend165(w=1.0, adsn=300, adsapp=300, adsplane=10.0, adsmax=18.0, restn=100, restapp=0, restplane=30.0, restmax=44.0)], 0,
+              [("OK", F98)], has=["weight mean 0.75, crouched in the sights 400 solves (400 blended) with the elbow 12.5 deg off the stance's plane (max 25.0), the rest 400 solves (0 blended) 15.0 deg (max 44.0)"],
+              lacks=["UNPARSED"])
+
+        # ---- F161: the left arm's distance to the eye, per context (the hip or ADS, standing or crouched) ----
+        F161 = "left arm to the eye (F161)"
+        QUIET161 = (0, 0.0, 0.0, 0.0, 0.0, 0, 0, 0)
+
+        def arm161(item=RIFLE97, wl=10, bins=None, s4=0, s25=0):
+            """F161's window line, from the DLL's own format (formatSummary, native_on_foot_f161.h); bins: {context index: (frames, arm min, arm mean, elbow min, elbow mean,
+            frames under 4 cm, of them moving, frames under 2.5 cm[, F163's crouched weight mean, neck drop mean in cm])}, the contexts in H161_CONTEXTS' order, the ones not
+            given with no frame."""
+            line = R161("native on foot left arm to the eye (F161) %u s: item %s", wl, item)
+            for i, name in enumerate(H161_CONTEXTS):
+                line += R161("%s %u frames: arm min", name, *(bins or {}).get(i, QUIET161))
+            return line + R161("seconds with the arm under 4 cm of the eye", s4, s25)
+
+        CLEAR161 = {0: (900, 14.0, 21.5, 16.0, 24.0, 0, 0, 0), 3: (120, 6.8, 9.4, 9.0, 13.0, 0, 0, 0)}
+        FLIGHT161 = {3: (300, 1.3, 3.1, 4.0, 6.0, 280, 240, 150), 1: (80, 5.2, 7.0, 8.0, 10.0, 0, 0, 0)}
+        check("F161 arm: the arm stays clear of the eye", [arm161(bins=CLEAR161)], 0, [("OK", F161)],
+              has=["left arm to the eye (F161): " + RIFLE97 + " 10 s: hip standing 900 frames: upper arm nearest 14.0 cm, mean 21.5; elbow nearest 16.0, mean 24.0; under 4 cm 0 (moving 0), "
+                   "under 2.5 cm 0", "ADS crouched 120 frames: upper arm nearest 6.8 cm", "seconds with the arm under 4 cm of the eye 0, under 2.5 cm 0"], lacks=["UNPARSED", "came within 4 cm"])
+        check("F161 arm: the flight's crouch-walk in ADS, the arm 1.3 cm from the eye", [arm161(bins=FLIGHT161, s4=7, s25=5)], 0, [("PARTIAL", F161)],
+              has=["the left upper arm came within 4 cm of the eye (" + RIFLE97 + ", ADS, crouched: 280 frame(s) under 4 cm (240 moving), 150 under 2.5 cm, nearest 1.3 cm)",
+                   "seconds with the arm under 4 cm of the eye 7, under 2.5 cm 5"], lacks=["UNPARSED", "hip, crouched:"])
+        check("F161 arm: frames under 4 cm at the hip standing, not moving, are named for what they are",
+              [arm161(bins={0: (900, 3.4, 11.0, 5.0, 14.0, 12, 0, 0)}, s4=1)], 0, [("PARTIAL", F161)],
+              has=["(" + RIFLE97 + ", hip, standing: 12 frame(s) under 4 cm (0 moving), 0 under 2.5 cm, nearest 3.4 cm)"], lacks=["UNPARSED"])
+        check("F161 arm: a second under 4 cm in the seconds count with no context counting a frame is PARTIAL too", [arm161(bins=CLEAR161, s4=2)], 0, [("PARTIAL", F161)],
+              has=["seconds with the arm under 4 cm of the eye 2, under 2.5 cm 0", "came within 4 cm of the eye (no context counts a frame)"], lacks=["UNPARSED"])
+        check("F161 arm: two windows and two items add up, each item named", [arm161(bins=FLIGHT161, s4=3, s25=2), arm161(bins={3: (300, 2.0, 3.5, 5.0, 7.0, 100, 90, 10)}, s4=3, s25=1),
+                                                                                  arm161("$wpn_m_shotgun_plasma_name;", bins={3: (200, 3.0, 8.0, 6.0, 12.0, 40, 40, 0)}, s4=2)], 0, [("PARTIAL", F161)],
+              has=["" + RIFLE97 + " 20 s: ", "ADS crouched 600 frames: upper arm nearest 1.3 cm, mean 3.3; elbow nearest 4.0, mean 6.5; under 4 cm 380 (moving 330), under 2.5 cm 160",
+                   "$wpn_m_shotgun_plasma_name; 10 s: ", "seconds with the arm under 4 cm of the eye 8, under 2.5 cm 3",
+                   "$wpn_m_shotgun_plasma_name;, ADS, crouched: 40 frame(s) under 4 cm (40 moving), 0 under 2.5 cm, nearest 3.0 cm"], lacks=["UNPARSED"])
+        check("F161 arm: a window with no frame in any context has nothing to judge", [arm161()], 0, [], lacks=["UNPARSED", row("PARTIAL", F161), row("OK", F161)])
+        check("F161 arm: a line that drifted from its pattern is unparsed", ["native on foot left arm to the eye (F161) 10 s: something else"], 4, [("UNPARSED", F161)])
+        check("F161 arm: a context renamed in the line is unparsed", [arm161(bins=CLEAR161).replace("ADS crouched", "ADS kneeling")], 4, [("UNPARSED", F161)])
+        # F163: each context's crouched weight mean and neck drop mean (cm) are read and reported, frame-weighted over the windows
+        POSED163 = {2: (200, 12.0, 20.0, 18.0, 28.0, 0, 0, 0, 0.02, 17.5), 3: (120, 6.8, 9.4, 9.0, 13.0, 0, 0, 0, 0.98, 52.0)}
+        check("F161 arm: the crouched weight and the neck's drop of each context are read from the line (F163)", [arm161(bins=POSED163)], 0, [("OK", F161)],
+              has=["ADS standing 200 frames: upper arm nearest 12.0 cm, mean 20.0; elbow nearest 18.0, mean 28.0; under 4 cm 0 (moving 0), under 2.5 cm 0, crouched weight mean 0.02, neck drop mean 17.5 cm",
+                   "ADS crouched 120 frames: upper arm nearest 6.8 cm, mean 9.4; elbow nearest 9.0, mean 13.0; under 4 cm 0 (moving 0), under 2.5 cm 0, crouched weight mean 0.98, neck drop mean 52.0 cm"],
+              lacks=["UNPARSED"])
+        check("F161 arm: two windows' weights and drops are averaged by their frames", [arm161(bins={3: (100, 6.0, 9.0, 9.0, 13.0, 0, 0, 0, 1.00, 50.0)}),
+                                                                                          arm161(bins={3: (300, 7.0, 9.5, 9.0, 13.0, 0, 0, 0, 0.60, 40.0)})], 0, [("OK", F161)],
+              has=["ADS crouched 400 frames: upper arm nearest 6.0 cm, mean 9.4; elbow nearest 9.0, mean 13.0; under 4 cm 0 (moving 0), under 2.5 cm 0, crouched weight mean 0.70, neck drop mean 42.5 cm"],
+              lacks=["UNPARSED"])
+        # the F161 and F162 builds' line, written out as it was: no weight and no drop in any context
+        check("F161 arm: a line from before F163 (no weight and no drop in the contexts) is read as it was", [re.sub(r", crouched weight mean [\d.]+, neck drop mean -?[\d.]+ cm", "", arm161(bins=FLIGHT161, s4=7, s25=5))],
+              0, [("PARTIAL", F161)], has=["ADS crouched 300 frames: upper arm nearest 1.3 cm, mean 3.1; elbow nearest 4.0, mean 6.0; under 4 cm 280 (moving 240), under 2.5 cm 150",
+                                           "seconds with the arm under 4 cm of the eye 7, under 2.5 cm 5"], lacks=["UNPARSED", "crouched weight"])
+
+        # ---- F166: the upper body held at its still crouched-ADS pose while walking crouched in the sights ----
+        F166 = "upper body hold (F166)"
+
+        def hold166(item=RIFLE97, wl=10, ads=900, still=300, mv=600, wm=0.93, held=540, ssrc=600, fsrc=0, nsrc=0, lw=49.0, la=73.0, lh=48.0, lmoved=540, lheld=530,
+                    sh0=(300, -11.0, -10.0, -30.0), sh1=(600, -11.5, -9.0, -31.0), secm=8, sech=8, secl=8, seclh=8, failed=0, hips=14.0, hipsmax=21.5):
+            """F166's window line, from the DLL's own format (formatSummary, native_on_foot_f166.h); sh0, sh1: (frames, right, up, forward) of the left shoulder from the eye in cm,
+            still and moving; hips, hipsmax: how far the hips had turned from the held pose's (deg, mean and largest) on the held frames (F168)."""
+            return R166("native on foot upper body hold (F166) %u s: item %s", wl, item, ads, still, mv, wm, held, ssrc, fsrc, nsrc, lw, la, lh, 10, lmoved, lheld, hips, hipsmax,
+                        sh0[0], sh0[1], sh0[2], sh0[3], sh1[0], sh1[1], sh1[2], sh1[3], secm, sech, secl, seclh, failed)
+
+        def plan166(state="ok", why="ok", joints="16 21 24 35 25 36 26", arms=3, carried=9):
+            """F166's plan line, from the census's own format (native_on_foot_hooks.cpp)."""
+            return R166("native on foot upper body hold plan (F166): X=%016llX", 0x1C998333A20, state, why, joints, arms, carried)
+
+        PLAN166 = "plan ok (ok), held joints 16 21 24 35 25 36 26 (arms 3), 9 joints come with them"
+        check("F166 hold: crouch-walking in the sights, held in 9 in 10 of the moving frames with the lean kept", [plan166(), hold166()], 0, [("OK", F166)],
+              has=[PLAN166 + "; " + RIFLE97 + " 10 s: crouched in the sights 900 frames (still 300, moving 600), held in 540 of the moving ones (90%), weight mean 0.93, the held pose from a "
+                   "still frame in 600, from the press's first frame in 0, none in 0; on the held frames the chest's lean in the body's axes as written +49.0 deg, animated +73.0, held pose +48.0 "
+                   "(the animation 10 deg or more from the held pose in 540 frames, the written lean within 10 deg of it in 530), the hips turned 14.0 deg (largest 21.5) from the held pose's; "
+                   "the left shoulder from the eye (right/up/forward, cm) "
+                   "still -11.0/-10.0/-30.0 (300 frames), moving -11.5/-9.0/-31.0 (600 frames); 8 s crouched in the sights and moving, held in half or more of them in 8 s, the lean "
+                   "moved in 8 s and held in 8 s"], lacks=["UNPARSED", "was thin", "not held"])
+        check("F166 hold: moving 120 frames crouched in the sights with the weight past 0.5 in none is a hold that never ran",
+              [plan166(), hold166(ads=300, still=180, mv=120, wm=0.0, held=0, ssrc=0, nsrc=120, lmoved=0, lheld=0, secm=2, sech=0, secl=0, seclh=0)], 3, [("NEVER APPLIED", F166)],
+              has=["the hold's weight reached 0.5 in none of 120 moving frames crouched in the sights with " + RIFLE97], lacks=["UNPARSED"])
+        check("F166 hold: held in a quarter of the moving frames is thin", [plan166(), hold166(mv=400, held=100, wm=0.3, ssrc=400, lmoved=100, lheld=100)], 0, [("PARTIAL", F166)],
+              has=["the hold was thin (" + RIFLE97 + ": held in 100 of 400 moving frames crouched in the sights)"], lacks=["UNPARSED", "not held"])
+        check("F166 hold: under 30 moving frames crouched in the sights is too few to call the hold absent",
+              [plan166(), hold166(ads=200, still=171, mv=29, wm=0.0, held=0, ssrc=0, nsrc=29, lmoved=0, lheld=0, secm=0, sech=0, secl=0, seclh=0)], 0, [("IDLE", F166)],
+              has=["under 30 moving frames crouched in the sights: little for the hold to do"], lacks=["UNPARSED", "never", "was thin"])
+        check("F166 hold: a written lean that did not stay near the held pose's where the animation moved it is PARTIAL",
+              [plan166(), hold166(lw=70.0, lmoved=500, lheld=100, seclh=1)], 0, [("PARTIAL", F166)],
+              has=["the chest's lean was not held with " + RIFLE97 + " (the written lean stayed within 10 deg of the held pose's in 100 of 500 frames where the animation had moved it)"],
+              lacks=["UNPARSED", "was thin"])
+        check("F166 hold: no frame where the animation moved the lean far from the held pose has nothing to hold, and is OK",
+              [plan166(), hold166(la=49.0, lmoved=0, lheld=0, secl=0, seclh=0)], 0, [("OK", F166)], lacks=["UNPARSED", "not held"])
+        check("F166 hold: a write refused is PARTIAL", [plan166(), hold166(failed=3)], 0, [("PARTIAL", F166)], has=["3 write(s) refused with " + RIFLE97], lacks=["UNPARSED"])
+        check("F166 hold: the press's first frame as the held pose is read and shown", [plan166(), hold166(ssrc=100, fsrc=500)], 0, [("OK", F166)],
+              has=["the held pose from a still frame in 100, from the press's first frame in 500"], lacks=["UNPARSED"])
+        check("F166 hold: a flight with no frame crouched in the sights and a good plan is idle",
+              [plan166(), hold166(ads=0, still=0, mv=0, wm=0.0, held=0, ssrc=0, nsrc=0, lmoved=0, lheld=0, sh0=(0, 0.0, 0.0, 0.0), sh1=(0, 0.0, 0.0, 0.0), secm=0, sech=0, secl=0, seclh=0)],
+              0, [("IDLE", F166)], has=[PLAN166 + "; no frame crouched in the sights"], lacks=["UNPARSED"])
+        check("F166 hold: the plan line alone is idle", [plan166()], 0, [("IDLE", F166)], has=[PLAN166 + "; no frame crouched in the sights"], lacks=["UNPARSED"])
+        check("F166 hold: a refused plan is a hold that never ran whatever the flight did",
+              [plan166("REFUSED", "the spine 16, 21, 24 is not a chain of direct parents", "none", 0, 0), hold166(held=0, mv=600)], 3, [("NEVER APPLIED", F166)],
+              has=["the hold's plan was refused (the spine 16, 21, 24 is not a chain of direct parents): plan REFUSED"], lacks=["UNPARSED"])
+        check("F166 hold: two windows add up, the weight and the lean weighted by their frames",
+              [plan166(), hold166(mv=100, held=100, wm=1.0, lw=48.0, la=70.0, lh=48.0, lmoved=100, lheld=100, secm=1, sech=1, secl=1, seclh=1),
+               hold166(mv=300, held=200, wm=0.5, lw=52.0, la=76.0, lh=48.0, lmoved=200, lheld=190, secm=3, sech=2, secl=2, seclh=2)], 0, [("OK", F166)],
+              has=["20 s: crouched in the sights 1800 frames (still 600, moving 400), held in 300 of the moving ones (75%), weight mean 0.62", "4 s crouched in the sights and moving, held in half or more of "
+                   "them in 3 s, the lean moved in 3 s and held in 3 s"], lacks=["UNPARSED"])
+        check("F166 hold: a window line that drifted from its pattern is unparsed", ["native on foot upper body hold (F166) 10 s: something else"], 4, [("UNPARSED", F166)])
+        check("F166 hold: a plan line that drifted from its pattern is unparsed", ["native on foot upper body hold plan (F166): X=1 something else"], 4, [("UNPARSED", F166)])
+        check("F166 hold: a window line that drifted beside a good one is counted beside the verdict", [plan166(), hold166(), "native on foot upper body hold (F166) 10 s: something else"], 0,
+              [("OK", F166)], has=["[+1 line(s) the rule's patterns do not match: "])
+
+        # ---- F167: the left hand lets go of the pistol while sprinting ----
+        F167 = "pistol sprint release (F167)"
+        PISTOL167 = "$wpn_s_pistol_kinetic_sauto_name;"
+
+        def sprint167(item=PISTOL167, wl=10, pistol=900, fast=300, smean=6.4, smax=8.1, hip=280, rmean=0.93, rel=260, full=240, grip=0, lw=0.01, ads=20, held=20, past=0, secs=3, secr=3):
+            """F167's window line, from the DLL's own format (formatSummary, native_on_foot_f167.h)."""
+            return R167("native on foot pistol sprint release (F167) %u s: item %s", wl, item, pistol, 4.6, fast, smean, smax, hip, rmean, rel, full, grip, lw, ads, held, past, secs, secr)
+
+        check("F167 release: a pistol sprint released in nine in ten of the calls at the hip, the grip held in the sights", [sprint167()], 0, [("OK", F167)],
+              has=[PISTOL167 + " 10 s: 900 armed pistol calls, 300 at sprint speed (4.6 m/s or more; mean 6.4, max 8.1), 280 at the hip: release weight mean 0.93, released (0.5 or more) in 260 "
+                   "(93%), fully in 240, the left arm's weight mean 0.01; 20 in the sights, the grip held in 20; 3 s sprinting at the hip, released in half or more of them in 3 s"],
+              lacks=["UNPARSED", "was thin", "still solved", "past what the sights allow"])
+        check("F167 release: sprint speed and 120 calls at the hip with none released is a release that never ran",
+              [sprint167(fast=120, hip=120, rmean=0.0, rel=0, full=0, lw=1.0, ads=0, held=0, secs=2, secr=0)], 3, [("NEVER APPLIED", F167)],
+              has=["the release reached 0.5 in none of 120 sprint calls at the hip with " + PISTOL167], lacks=["UNPARSED"])
+        check("F167 release: released in a quarter of the calls at the hip is thin", [sprint167(hip=400, rel=100, full=60, rmean=0.3)], 0, [("PARTIAL", F167)],
+              has=["the release was thin (" + PISTOL167 + ": released in 100 of 400 sprint calls at the hip)"], lacks=["UNPARSED", "still solved"])
+        check("F167 release: under 30 sprint calls at the hip is too few to call the release absent",
+              [sprint167(fast=29, hip=29, rmean=0.0, rel=0, full=0, ads=0, held=0, secs=0, secr=0)], 0, [("IDLE", F167)],
+              has=["under 30 sprint calls at the hip: little for the release to do"], lacks=["UNPARSED", "never", "was thin"])
+        check("F167 release: a pistol held and never at sprint speed is idle",
+              [sprint167(fast=0, smean=0.0, smax=0.0, hip=0, rmean=0.0, rel=0, full=0, lw=0.0, ads=0, held=0, secs=0, secr=0)], 0, [("IDLE", F167)],
+              has=[PISTOL167 + " 10 s: 900 armed pistol calls, none at sprint speed (4.6 m/s or more); no pistol sprint"], lacks=["UNPARSED"])
+        check("F167 release: a left arm still solved at full release is PARTIAL", [sprint167(grip=12, lw=0.2)], 0, [("PARTIAL", F167)],
+              has=["the left arm was still solved above weight 0.05 in 12 call(s) fully released with " + PISTOL167], lacks=["UNPARSED"])
+        check("F167 release: a release past what the sights allow is PARTIAL", [sprint167(past=4)], 0, [("PARTIAL", F167)],
+              has=["4 call(s) in the sights released past what the sights allow with " + PISTOL167], lacks=["UNPARSED"])
+        check("F167 release: two windows add up, the means weighted by their calls",
+              [sprint167(fast=100, smean=6.0, smax=7.0, hip=100, rmean=1.0, rel=100, full=90, lw=0.0, ads=0, held=0, secs=1, secr=1),
+               sprint167(fast=300, smean=7.0, smax=9.0, hip=300, rmean=0.5, rel=200, full=100, lw=0.2, ads=10, held=10, secs=3, secr=2)], 0, [("OK", F167)],
+              has=["20 s: 1800 armed pistol calls, 400 at sprint speed (4.6 m/s or more; mean 6.8, max 9.0), 400 at the hip: release weight mean 0.62, released (0.5 or more) in 300 (75%), "
+                   "fully in 190, the left arm's weight mean 0.15; 10 in the sights, the grip held in 10; 4 s sprinting at the hip, released in half or more of them in 3 s"], lacks=["UNPARSED"])
+        check("F167 release: another pistol is its own item", [sprint167(), sprint167(item="$wpn_s_pistol_plasma_charged_name;", hip=100, fast=100, rel=0, full=0, rmean=0.0)], 3,
+              [("NEVER APPLIED", F167)], has=["with $wpn_s_pistol_plasma_charged_name;", PISTOL167 + " 10 s"], lacks=["UNPARSED"])
+        check("F167 release: a window line that drifted from its pattern is unparsed", ["native on foot pistol sprint release (F167) 10 s: something else"], 4, [("UNPARSED", F167)])
+        check("F167 release: a window line that drifted beside a good one is counted beside the verdict", [sprint167(), "native on foot pistol sprint release (F167) 10 s: something else"], 0,
+              [("OK", F167)], has=["[+1 line(s) the rule's patterns do not match: "])
+
+        # ---- F168 (TEMPORARY): the crouched body's dial and the distances it is judged by ----
+        F168 = "crouched ADS body dial (F168)"
+        SHOTGUN168 = "$wpn_m_shotgun_plasma_doublebarrel_name;"
+
+        def body168(item=SHOTGUN168, wl=10, dial=10.0, dialmax=10.0, ads=400, still=150, mv=250, sh0=10.0, sh1=9.0, gun0=(150, 30.0), gun1=(240, 28.0), grip0=(150, 45.0), grip1=(240, 38.0),
+                    eye0=(150, -6.8, -15.0, -24.8), eye1=(240, -1.4, -13.4, -4.9), wr0=None, wr1=None, wn0=None, wn1=None):
+            """F168's window line, from the DLL's own format (formatSummary, native_on_foot_f168.h); gun, grip: (frames, cm); eye: (frames, right, up, forward) in cm; wr0, wr1, wn0, wn1:
+            F169's move as written, still and moving, and the frames each is a mean of (the move asked and the frames still and moving when not given)."""
+            wr0 = sh0 if wr0 is None else wr0
+            wr1 = sh1 if wr1 is None else wr1
+            wn0 = still if wn0 is None else wn0
+            wn1 = mv if wn1 is None else wn1
+            return R168("native on foot crouched ADS body (F168, TEMPORARY) %u s: item %s", wl, item, dial, dialmax, ads, still, mv, sh0, sh1, wn0, wn1, wr0, wr1, gun0[0], gun0[1], gun1[0], gun1[1],
+                        grip0[0], grip0[1], grip1[0], grip1[1], eye0[0], eye0[1], eye0[2], eye0[3], eye1[0], eye1[1], eye1[2], eye1[3])
+
+        check("F168 dial: a dial of 10 cm that moved the body and the figures to judge it by", [body168()], 0, [("OK", F168)],
+              has=[SHOTGUN168 + " 10 s: dial mean +10.0 cm (largest 10.0), crouched in the sights 400 frames (still 150, moving 250), the body moved toward the gun (asked) +10.0 cm still, +9.0 moving, "
+                   "as written (after the reach rule) +10.0 cm still (150 frames), +9.0 moving (250); "
+                   "right shoulder to the gun's root (the FP right handAttach, the butt is not readable) still 30.0 cm (150 frames), moving 28.0 (240); left shoulder to the left-hand grip "
+                   "still 45.0 cm (150), moving 38.0 (240); the left shoulder from the eye (right/up/forward, cm) still -6.8/-15.0/-24.8 (150 frames), moving -1.4/-13.4/-4.9 (240 frames)"],
+              lacks=["UNPARSED", "baseline", "should be whole", "none of it"])
+        check("F168 dial: the dial at 0 is the baseline, OK", [body168(dial=0.0, dialmax=0.0, sh0=0.0, sh1=0.0)], 0, [("OK", F168)], has=["the dial was 0: these are the baseline figures"],
+              lacks=["UNPARSED", "none of it"])
+        check("F168 dial: a dial that asked 12 cm and wrote none of it is a move that never reached the neck (the flight edvr_gfx_20261028_201339: asked 8.1 to 17.0, the reach rule gave it all back)",
+              [body168(dial=12.0, dialmax=12.0, sh0=12.0, sh1=11.5, wr0=0.0, wr1=0.0)], 3, [("NEVER APPLIED", F168)],
+              has=["the dial reached 12.0 cm and the body was written by none of it in 400 frames crouched in the sights with " + SHOTGUN168], lacks=["UNPARSED"])
+        check("F168 dial: a body written 20% of what a positive dial asked is PARTIAL", [body168(still=160, mv=240, sh0=10.0, sh1=10.0, wr0=2.0, wr1=2.0)], 0, [("PARTIAL", F168)],
+              has=["the body was written +2.0 cm on average against +10.0 cm asked by a dial of +10.0 cm with " + SHOTGUN168 + " (the move after the reach rule should be whole)"],
+              lacks=["UNPARSED", "none of it"])
+        check("F168 dial: a move written in full is OK whatever the shape of the asked figure", [body168(sh0=10.0, sh1=10.0, wr0=10.0, wr1=10.0)], 0, [("OK", F168)],
+              lacks=["UNPARSED", "none of it", "should be whole"])
+        check("F168 dial: a dial set with the move never measured as written is named, not passed", [body168(wn0=0, wn1=0, wr0=0.0, wr1=0.0)], 0, [("PARTIAL", F168)],
+              has=["as written (after the reach rule) +0.0 cm still (0 frames), +0.0 moving (0)", "the move as written was not measured in any of 400 frames crouched in the sights with " + SHOTGUN168],
+              lacks=["UNPARSED", "none of it", "should be whole"])
+        check("F168 dial: the dial at 0 with the move not measured is the baseline", [body168(dial=0.0, dialmax=0.0, sh0=0.0, sh1=0.0, wn0=0, wn1=0)], 0, [("OK", F168)], lacks=["UNPARSED", "not measured"])
+        check("F168 dial: under 30 frames crouched in the sights is too few to judge", [body168(ads=20, still=8, mv=12, gun0=(8, 30.0), gun1=(12, 28.0), grip0=(8, 45.0), grip1=(12, 38.0),
+              eye0=(8, -6.8, -15.0, -24.8), eye1=(12, -1.4, -13.4, -4.9))], 0, [("IDLE", F168)], has=["under 30 frames crouched in the sights: little to judge"], lacks=["UNPARSED", "never"])
+        check("F168 dial: a negative dial that moved the body away is OK", [body168(dial=-8.0, dialmax=8.0, sh0=-8.0, sh1=-7.5)], 0, [("OK", F168)],
+              has=["dial mean -8.0 cm (largest 8.0)", "the body moved toward the gun (asked) -8.0 cm still, -7.5 moving"], lacks=["UNPARSED", "none of it", "should be whole"])
+        check("F168 dial: a negative dial the reach rule gave back is reported, not a failure", [body168(dial=-8.0, dialmax=8.0, sh0=-8.0, sh1=-8.0, wr0=-0.5, wr1=-0.4)], 0, [("OK", F168)],
+              has=["the reach rule gave back most of the dial's move with " + SHOTGUN168 + ": -8.0 cm asked, -0.4 cm written"], lacks=["UNPARSED", "should be whole", "none of it"])
+        check("F168 dial: a figure not measured (no frames) prints 0.0 and does not break the rule",
+              [body168(gun0=(0, 0.0), gun1=(0, 0.0), grip0=(0, 0.0), grip1=(0, 0.0), eye0=(0, 0.0, 0.0, 0.0), eye1=(0, 0.0, 0.0, 0.0))], 0, [("OK", F168)],
+              has=["still 0.0 cm (0 frames), moving 0.0 (0)"], lacks=["UNPARSED"])
+        check("F168 dial: two windows add up, the dial and the figures weighted by their frames",
+              [body168(ads=100, still=40, mv=60, dial=5.0, dialmax=5.0, sh0=5.0, sh1=5.0, gun0=(40, 30.0), gun1=(60, 20.0), grip0=(40, 40.0), grip1=(60, 40.0), eye0=(40, -10.0, -10.0, -10.0),
+                      eye1=(60, -10.0, -10.0, -10.0)),
+               body168(ads=300, still=100, mv=200, dial=15.0, dialmax=15.0, sh0=15.0, sh1=15.0, gun0=(100, 30.0), gun1=(200, 30.0), grip0=(100, 40.0), grip1=(200, 40.0),
+                       eye0=(100, -10.0, -10.0, -10.0), eye1=(200, -10.0, -10.0, -10.0))], 0, [("OK", F168)],
+              has=["20 s: dial mean +12.5 cm (largest 15.0), crouched in the sights 400 frames (still 140, moving 260), the body moved toward the gun (asked) +12.1 cm still, +12.7 moving, "
+                   "as written (after the reach rule) +12.1 cm still (140 frames), +12.7 moving (260)"],
+              lacks=["UNPARSED"])
+        check("F168 dial: another item is its own item", [body168(), body168(item="$wpn_m_sniper_plasma_charged_name;", dial=12.0, dialmax=12.0, sh0=0.0, sh1=0.0)], 3,
+              [("NEVER APPLIED", F168)], has=["with $wpn_m_sniper_plasma_charged_name;", SHOTGUN168 + " 10 s"], lacks=["UNPARSED"])
+        check("F168 dial: the dial's own note line (a different label) is not a window line and is not unparsed",
+              ["native on foot crouched ADS body dial (F168, TEMPORARY): experimental.native_on_foot_crouch_ads_body_forward_cm = +10.0 cm -- while crouched and aiming down sights ...", body168()],
+              0, [("OK", F168)], lacks=["UNPARSED"])
+        check("F168 dial: a window line that drifted from its pattern is unparsed", ["native on foot crouched ADS body (F168, TEMPORARY) 10 s: something else"], 4, [("UNPARSED", F168)])
+        check("F168 dial: a window line that drifted beside a good one is counted beside the verdict", [body168(), "native on foot crouched ADS body (F168, TEMPORARY) 10 s: something else"], 0,
+              [("OK", F168)], has=["[+1 line(s) the rule's patterns do not match: "])
+
+        # ---- F170 (TEMPORARY): the crouched ADS torso squared to the aim ----
+        F170 = "crouched ADS torso square (F170)"
+
+        def sq170(item=SHOTGUN168, wl=10, dial=1.0, dialmax=1.0, ads=400, still=150, mv=250, turned=380, bladed=390, t0=(-28.7, 150), t1=(-26.0, 250), b0=(-28.7, 150), b1=(-26.0, 240),
+                  a0=(0.0, 150), a1=(0.0, 240), left0=(150, -4.0, -14.6, -0.4), left1=(240, 3.1, -14.0, -0.6), right0=(150, 17.0, -14.0, 5.0), right1=(240, 19.0, -13.0, 7.0),
+                  gun0=(150, 40.0), gun1=(240, 42.0)):
+            """F170's window line, from the DLL's own format (formatSummary, native_on_foot_f170.h); t, b, a: (mean in deg, frames) for the turn, the measured phi before it and as written;
+            the shoulders from the eye: (frames, right, up, forward) in cm; gun: (frames, cm)."""
+            return R170("native on foot crouched ADS torso square (F170, TEMPORARY) %u s: item %s", wl, item, dial, dialmax, ads, still, mv, turned, bladed, t0[0], t1[0],
+                        b0[0], b1[0], b0[1], b1[1], a0[0], a1[0], a0[1], a1[1], left0[0], left0[1], left0[2], left0[3], left1[0], left1[1], left1[2], left1[3],
+                        right0[0], right0[1], right0[2], right0[3], right1[0], right1[1], right1[2], right1[3], gun0[0], gun0[1], gun1[0], gun1[1])
+
+        check("F170 torso square: a full dial that turned the torso out of its blade and the figures to judge it by", [sq170()], 0, [("OK", F170)],
+              has=[SHOTGUN168 + " 10 s: dial mean 1.00 (largest 1.00), crouched in the sights 400 frames (still 150, moving 250), the torso turned in 380 frames of 390 with the line 1 deg or more off square, "
+                   "the turn -28.7 deg still (150 frames), -26.0 moving (250); the measured shoulder phi before the turn -28.7 deg still (150), -26.0 moving (240), as written +0.0 deg still (150), +0.0 moving (240); "
+                   "the left shoulder from the eye (right/up/forward, cm) still -4.0/-14.6/-0.4 (150 frames), moving +3.1/-14.0/-0.6 (240); the right shoulder from the eye still +17.0/-14.0/+5.0 (150), "
+                   "moving +19.0/-13.0/+7.0 (240); right shoulder to the gun's root still 40.0 cm (150), moving 42.0 (240)"],
+              lacks=["UNPARSED", "baseline", "NEVER", "a turn was written in"])
+        check("F170 torso square: the dial at 0 is the baseline, OK", [sq170(dial=0.0, dialmax=0.0, turned=0, t0=(0.0, 150), t1=(0.0, 250), a0=(-28.7, 150), a1=(-26.0, 240))], 0, [("OK", F170)],
+              has=["the dial was 0: these are the baseline figures"], lacks=["UNPARSED", "NEVER"])
+        check("F170 torso square: a dial of 1 with no turn written in 400 frames, 390 of them off square, is a torso the square-up never reached (the flight: F75 'authored stance selected')",
+              [sq170(turned=0, t0=(0.0, 150), t1=(0.0, 250), a0=(-28.7, 150), a1=(-26.0, 240))], 3, [("NEVER APPLIED", F170)],
+              has=["the dial reached 1.00 and no turn was written in any of 400 frames crouched in the sights with " + SHOTGUN168 + ", 390 of them with the shoulder line off square"], lacks=["UNPARSED"])
+        check("F170 torso square: a turn written in 60% of the frames with the line off square is PARTIAL", [sq170(turned=234, bladed=390)], 0, [("PARTIAL", F170)],
+              has=["a turn was written in 234 of 390 frames with the shoulder line off square with " + SHOTGUN168], lacks=["UNPARSED", "NEVER"])
+        check("F170 torso square: half a dial that left half the blade is OK", [sq170(dial=0.5, dialmax=0.5, t0=(-14.35, 150), t1=(-13.0, 250), a0=(-14.35, 150), a1=(-13.0, 240))], 0, [("OK", F170)],
+              lacks=["UNPARSED", "NEVER", "should leave"])
+        check("F170 torso square: a full dial that left the line 20 deg off square as written is named (something after the turn put it back)",
+              [sq170(a0=(-20.0, 150), a1=(-18.0, 240))], 0, [("PARTIAL", F170)], has=["the line as written is -20.0 deg off square against -28.7 measured before the turn; a dial of 1.00 should leave -0.0"], lacks=["UNPARSED"])
+        check("F170 torso square: a shoulder line already square (nothing to turn) is OK with no turn written",
+              [sq170(turned=0, bladed=0, t0=(0.0, 150), t1=(0.0, 250), b0=(0.2, 150), b1=(-0.3, 240), a0=(0.2, 150), a1=(-0.3, 240))], 0, [("OK", F170)], lacks=["UNPARSED", "NEVER", "PARTIAL"])
+        check("F170 torso square: under 30 frames crouched in the sights is too few to judge", [sq170(ads=20, still=8, mv=12, turned=0, bladed=0, t0=(0.0, 8), t1=(0.0, 12), b0=(-28.7, 8), b1=(-26.0, 12),
+              a0=(-28.7, 8), a1=(-26.0, 12), left0=(8, -4.0, -14.6, -0.4), left1=(12, 3.1, -14.0, -0.6), right0=(8, 17.0, -14.0, 5.0), right1=(12, 19.0, -13.0, 7.0), gun0=(8, 40.0), gun1=(12, 42.0))],
+              0, [("IDLE", F170)], has=["under 30 frames crouched in the sights: little to judge"], lacks=["UNPARSED", "NEVER"])
+        check("F170 torso square: a figure not measured (no frames) prints 0.0 and does not break the rule",
+              [sq170(b0=(0.0, 0), b1=(0.0, 0), a0=(0.0, 0), a1=(0.0, 0), left0=(0, 0.0, 0.0, 0.0), left1=(0, 0.0, 0.0, 0.0), right0=(0, 0.0, 0.0, 0.0), right1=(0, 0.0, 0.0, 0.0), gun0=(0, 0.0), gun1=(0, 0.0))],
+              0, [("OK", F170)], lacks=["UNPARSED", "NEVER"])
+        check("F170 torso square: two windows add up, the figures weighted by their frames",
+              [sq170(ads=100, still=100, mv=0, turned=100, bladed=100, t0=(-28.0, 100), t1=(0.0, 0), b0=(-28.0, 100), b1=(0.0, 0), a0=(0.0, 100), a1=(0.0, 0)),
+               sq170(ads=300, still=0, mv=300, turned=300, bladed=300, t0=(0.0, 0), t1=(-20.0, 300), b0=(0.0, 0), b1=(-20.0, 300), a0=(0.0, 0), a1=(0.0, 300))], 0, [("OK", F170)],
+              has=["crouched in the sights 400 frames (still 100, moving 300)", "the torso turned in 400 frames of 400"], lacks=["UNPARSED", "NEVER"])
+        check("F170 torso square: another item is its own item", [sq170(), sq170(item="$wpn_m_sniper_plasma_charged_name;", turned=0, t0=(0.0, 150), t1=(0.0, 250), a0=(-28.7, 150), a1=(-26.0, 240))], 3,
+              [("NEVER APPLIED", F170)], has=["with $wpn_m_sniper_plasma_charged_name;", SHOTGUN168 + " 10 s"], lacks=["UNPARSED"])
+        check("F170 torso square: the dial's own note line (a different label) is not a window line and is not unparsed",
+              ["native on foot crouched ADS torso square dial (F170, TEMPORARY): experimental.native_on_foot_crouch_ads_square = 1.00 -- while crouched and aiming down sights the torso ...", sq170()], 0,
+              [("OK", F170)], lacks=["UNPARSED"])
+        check("F170 torso square: a window line that drifted from its pattern is unparsed", ["native on foot crouched ADS torso square (F170, TEMPORARY) 10 s: something else"], 4, [("UNPARSED", F170)])
+        check("F170 torso square: a window line that drifted beside a good one is counted beside the verdict",
+              [sq170(), "native on foot crouched ADS torso square (F170, TEMPORARY) 10 s: something else"], 0, [("OK", F170)], has=["[+1 line(s) the rule's patterns do not match: "])
+
+        # ---- F171 (TEMPORARY): the crouched ADS body moved to the left of the aim line ----
+        F171 = "crouched ADS body sideways (F171)"
+
+        def side171(item=SHOTGUN168, wl=10, dial=15.0, dialmax=15.0, ads=400, still=150, mv=250, made=400, sh0=15.0, sh1=15.0, wr0=13.9, wr1=13.9, wn0=None, wn1=None, bk0=None, bk1=None,
+                    right0=(150, 17.0, -14.6, -4.0), right1=(240, 18.0, -13.0, -5.0), left0=(150, -16.0, -14.6, -4.0), left1=(240, -15.0, -13.0, -5.0), gun0=(150, 31.0), gun1=(240, 30.0),
+                    grip0=(150, 60.0), grip1=(240, 61.0)):
+            """F171's window line, from the DLL's own format (formatSummary, native_on_foot_f171.h); sh: the move asked, wr: as written (the frames each is a mean of: wn), bk: what the reach rule
+            took back (asked less written when not given); the shoulders from the eye: (frames, right, up, forward) in cm; gun, grip: (frames, cm)."""
+            wn0 = still if wn0 is None else wn0
+            wn1 = mv if wn1 is None else wn1
+            bk0 = sh0 - wr0 if bk0 is None else bk0
+            bk1 = sh1 - wr1 if bk1 is None else bk1
+            return R171("native on foot crouched ADS body sideways (F171, TEMPORARY) %u s: item %s", wl, item, dial, dialmax, ads, still, mv, made, sh0, sh1, wn0, wn1, wr0, wr1, bk0, bk1,
+                        right0[0], right0[1], right0[2], right0[3], right1[0], right1[1], right1[2], right1[3], left0[0], left0[1], left0[2], left0[3], left1[0], left1[1], left1[2], left1[3],
+                        gun0[0], gun0[1], gun1[0], gun1[1], grip0[0], grip0[1], grip1[0], grip1[1])
+
+        check("F171 sideways: a dial of 15 cm that moved the body to the left and the figures to judge it by", [side171()], 0, [("OK", F171)],
+              has=[SHOTGUN168 + " 10 s: dial mean +15.0 cm (largest 15.0; positive is left of the aim), crouched in the sights 400 frames (still 150, moving 250), the move made in 400, the body moved left "
+                   "(asked) +15.0 cm still, +15.0 moving, as written (after the reach rule) +13.9 cm still (150 frames), +13.9 moving (250), the reach rule took back +1.1 still, +1.1 moving; the right "
+                   "shoulder from the eye (right/up/forward, cm) still +17.0/-14.6/-4.0 (150 frames), moving +18.0/-13.0/-5.0 (240); the left shoulder from the eye still -16.0/-14.6/-4.0 (150), "
+                   "moving -15.0/-13.0/-5.0 (240); right shoulder to the gun's root still 31.0 cm (150 frames), moving 30.0 (240); left shoulder to the left-hand grip still 60.0 cm (150), moving 61.0 (240)"],
+              lacks=["UNPARSED", "baseline", "NEVER", "took back most"])
+        check("F171 sideways: the dial at 0 is the baseline, OK", [side171(dial=0.0, dialmax=0.0, made=0, sh0=0.0, sh1=0.0, wr0=0.0, wr1=0.0)], 0, [("OK", F171)],
+              has=["the dial was 0: these are the baseline figures"], lacks=["UNPARSED", "NEVER"])
+        check("F171 sideways: a dial of 15 cm and the move made in none of 400 frames crouched in the sights is a target that never took it",
+              [side171(made=0, sh0=0.0, sh1=0.0, wr0=0.0, wr1=0.0)], 3, [("NEVER APPLIED", F171)],
+              has=["the dial reached 15.0 cm and the move was made in none of 400 frames crouched in the sights with " + SHOTGUN168 + " (the pin's target never took it)"], lacks=["UNPARSED"])
+        check("F171 sideways: a negative dial with the move made is the same machinery to the right", [side171(dial=-15.0, dialmax=15.0, sh0=-15.0, sh1=-15.0, wr0=-14.1, wr1=-14.1)], 0, [("OK", F171)],
+              has=["dial mean -15.0 cm (largest 15.0; positive is left of the aim)", "the body moved left (asked) -15.0 cm still, -15.0 moving"], lacks=["UNPARSED", "NEVER", "took back most"])
+        check("F171 sideways: the reach rule took back most of the move: written 5 of 15 cm is PARTIAL", [side171(wr0=5.0, wr1=5.0)], 0, [("PARTIAL", F171)],
+              has=["the reach rule took back most of the move with " + SHOTGUN168 + ": +15.0 cm asked, +5.0 cm written (the left shoulder is at its reach)"], lacks=["UNPARSED", "NEVER"])
+        check("F171 sideways: a move made and never measured as written is named, not passed", [side171(wn0=0, wn1=0, wr0=0.0, wr1=0.0, bk0=0.0, bk1=0.0)], 0, [("PARTIAL", F171)],
+              has=["as written (after the reach rule) +0.0 cm still (0 frames), +0.0 moving (0)", "the move as written was not measured in any of 400 frames crouched in the sights with " + SHOTGUN168],
+              lacks=["UNPARSED", "NEVER", "took back most"])
+        check("F171 sideways: under 30 frames crouched in the sights is too few to judge", [side171(ads=20, still=8, mv=12, made=20, gun0=(8, 31.0), gun1=(12, 30.0), grip0=(8, 60.0), grip1=(12, 61.0),
+              right0=(8, 17.0, -14.6, -4.0), right1=(12, 18.0, -13.0, -5.0), left0=(8, -16.0, -14.6, -4.0), left1=(12, -15.0, -13.0, -5.0))], 0, [("IDLE", F171)],
+              has=["under 30 frames crouched in the sights: little to judge"], lacks=["UNPARSED", "NEVER"])
+        check("F171 sideways: a figure not measured (no frames) prints 0.0 and does not break the rule",
+              [side171(gun0=(0, 0.0), gun1=(0, 0.0), grip0=(0, 0.0), grip1=(0, 0.0), right0=(0, 0.0, 0.0, 0.0), right1=(0, 0.0, 0.0, 0.0), left0=(0, 0.0, 0.0, 0.0), left1=(0, 0.0, 0.0, 0.0))], 0,
+              [("OK", F171)], has=["still 0.0 cm (0 frames), moving 0.0 (0)"], lacks=["UNPARSED", "NEVER"])
+        check("F171 sideways: two windows add up, the dial and the figures weighted by their frames",
+              [side171(ads=100, still=40, mv=60, made=100, dial=5.0, dialmax=5.0, sh0=5.0, sh1=5.0, wr0=5.0, wr1=5.0, gun0=(40, 30.0), gun1=(60, 20.0)),
+               side171(ads=300, still=100, mv=200, made=300, dial=15.0, dialmax=15.0, sh0=15.0, sh1=15.0, wr0=14.0, wr1=14.0, gun0=(100, 30.0), gun1=(200, 30.0))], 0, [("OK", F171)],
+              has=["20 s: dial mean +12.5 cm (largest 15.0; positive is left of the aim), crouched in the sights 400 frames (still 140, moving 260), the move made in 400, the body moved left (asked) "
+                   "+12.1 cm still, +12.7 moving"], lacks=["UNPARSED"])
+        check("F171 sideways: another item is its own item", [side171(), side171(item="$wpn_m_sniper_plasma_charged_name;", made=0, sh0=0.0, sh1=0.0, wr0=0.0, wr1=0.0)], 3,
+              [("NEVER APPLIED", F171)], has=["with $wpn_m_sniper_plasma_charged_name;", SHOTGUN168 + " 10 s"], lacks=["UNPARSED"])
+        check("F171 sideways: the dial's own note line (a different label) is not a window line and is not unparsed",
+              ["native on foot crouched ADS body sideways dial (F171, TEMPORARY): experimental.native_on_foot_crouch_ads_body_left_cm = +15.0 cm -- while crouched and aiming down sights ...", side171()], 0,
+              [("OK", F171)], lacks=["UNPARSED"])
+        check("F171 sideways: a window line that drifted from its pattern is unparsed", ["native on foot crouched ADS body sideways (F171, TEMPORARY) 10 s: something else"], 4, [("UNPARSED", F171)])
+        check("F171 sideways: a window line that drifted beside a good one is counted beside the verdict",
+              [side171(), "native on foot crouched ADS body sideways (F171, TEMPORARY) 10 s: something else"], 0, [("OK", F171)], has=["[+1 line(s) the rule's patterns do not match: "])
+
+        # ---- F171: the raise's carriage ----
+        C171 = "raise carriage (F171)"
+
+        def car171(*cells, wl=1, samples=90, f137=(-5.0, 2.0), turned=None):
+            """The carriage line, from the DLL's own formats (formatSummary, cellsText in native_on_foot_f171c.h); a cell: (mode, band, pairs, raise lo, raise hi, k_up, k_fwd, c, k_eye);
+            the second's samples and the virtual neck they carried (up, forward; cm); F172's clause (appendTurned in native_on_foot_f172.h) from turned: (ticks turned, ticks with a raise, mean
+            aim pitch deg, mean z share cm), none for a log from before F172."""
+            text = "".join(R171c("deg: %u pairs, raise", "" if i == 0 else "; ", *cell) for i, cell in enumerate(cells))
+            line = R171c("native on foot raise carriage (F171) %u s:", wl, text, samples, f137[0], f137[1])
+            return line if turned is None else line + R172("turned by the aim pitch (F172): %u of", *turned)
+
+        LEVEL171 = ("mouse look", "under 10", 22, -12.0, -3.0, 0.98, 0.01, -0.02, 0.97)
+        STEEP_ABSENT = ("mouse look", "40+", 37, -50.0, -12.3, 0.02, -0.05, -0.98, 0.01)
+        STEEP_CARRIED = ("mouse look", "40+", 37, -20.0, -3.0, 0.96, 0.02, -0.03, 0.95)
+        check("F171 carriage: a camera that carries the raise at every pitch is OK with the slopes by band", [car171(LEVEL171, ("mouse look", "10-40", 30, -20.0, -4.0, 0.97, 0.0, -0.02, 0.96), STEEP_CARRIED)], 0,
+              [("OK", C171)],
+              has=["mouse look under 10 deg: 22 pairs in 1 s, raise -12.0..-3.0 cm, k_up +0.98, k_fwd +0.01, c -0.02, k_eye +0.97", "mouse look 40+ deg: 37 pairs in 1 s, raise -20.0..-3.0 cm, k_up +0.96, k_fwd +0.02, c -0.03, k_eye +0.95",
+                   "90 samples, F137 carried up -5.0 forward +2.0 cm (mean)"],
+              lacks=["UNPARSED", "not in the hook's camera"])
+        check("F171 carriage: the 40 deg and over band with 37 pairs and k_up 0.02 says the raise is not in the hook's camera (and c is -0.98), the level band beside it is the control",
+              [car171(LEVEL171, STEEP_ABSENT)], 0, [("PARTIAL", C171)],
+              has=["the raise is not in the hook's camera: the 40 deg and over band has 37 pairs and k_up +0.02 (under 0.3), c -0.98", "mouse look under 10 deg: 22 pairs in 1 s, raise -12.0..-3.0 cm, k_up +0.98"],
+              lacks=["UNPARSED"])
+        check("F171 carriage: 19 pairs in the steep band are too few to say it", [car171(("mouse look", "40+", 19, -50.0, -12.3, 0.02, -0.05, -0.98, 0.01))], 0, [("OK", C171)],
+              lacks=["UNPARSED", "not in the hook's camera"])
+        check("F171 carriage: the steep band's slope is pair-weighted over the seconds and over the look modes",
+              [car171(("mouse look", "40+", 30, -50.0, -10.0, 1.0, 0.0, 0.0, 1.0)), car171(("mouse look", "40+", 10, -50.0, -10.0, -1.0, 0.0, 0.0, -1.0)),
+               car171(("look to aim", "40+", 20, -40.0, -9.0, 0.0, 0.0, -1.0, 0.0))], 0, [("OK", C171)],
+              has=["mouse look 40+ deg: 40 pairs in 2 s, raise -50.0..-10.0 cm, k_up +0.50", "look to aim 40+ deg: 20 pairs in 1 s, raise -40.0..-9.0 cm, k_up +0.00"], lacks=["UNPARSED", "not in the hook's camera"])
+        check("F171 carriage: the same weighted over a steep band that mixes the modes reads k_up 0.33 and is not flagged", [car171(("mouse look", "40+", 30, -50.0, -10.0, 1.0, 0.0, 0.0, 1.0),
+              ("look to aim", "40+", 60, -40.0, -9.0, 0.0, 0.0, -1.0, 0.0))], 0, [("OK", C171)], lacks=["UNPARSED", "not in the hook's camera"])
+        check("F171 carriage: the same weighted steep band at 0.20 is flagged", [car171(("mouse look", "40+", 30, -50.0, -10.0, 0.6, 0.0, 0.0, 1.0), ("look to aim", "40+", 30, -40.0, -9.0, -0.2, 0.0, -1.0, 0.0))], 0,
+              [("PARTIAL", C171)], has=["the 40 deg and over band has 60 pairs and k_up +0.20 (under 0.3), c -0.50"], lacks=["UNPARSED"])
+        check("F171 carriage: only the level band: OK, nothing to flag", [car171(LEVEL171)], 0, [("OK", C171)], has=["mouse look under 10 deg: 22 pairs"], lacks=["UNPARSED", "not in the hook's camera"])
+        # F172: the raise published turned by the aim pitch (the flight edvr_gfx_20261029_054640 read k_up -0.09, k_fwd -1.04, c -1.09 from 40 deg unturned)
+        check("F172 turned: a turned raise with the slopes the next flight predicts (k_up 1, k_fwd 0, c 0 in every band) says 'turned' beside them",
+              [car171(LEVEL171, ("mouse look", "10-40", 30, -20.0, -4.0, 0.97, 0.0, -0.02, 0.96), STEEP_CARRIED, turned=(90, 90, 70.0, 28.0))], 0, [("OK", C171)],
+              has=["raise turned by the aim pitch (F172): turned in 90 of 90 ticks with a raise, mean aim pitch +70.0 deg, mean z share +28.0 cm"], lacks=["UNPARSED", "not in the hook's camera", "not turned"])
+        check("F172 turned: the flown unturned pattern (k_up -0.09, k_fwd -1.04 from 40 deg) with the raise not turned is flagged and says 'not turned'",
+              [car171(("mouse look", "under 10", 31, -12.0, -3.0, 0.99, 0.11, -0.01, 0.73), ("mouse look", "40+", 103, -50.0, -12.3, -0.09, -1.04, -1.09, 0.05), turned=(0, 90, 0.0, 0.0))], 0, [("PARTIAL", C171)],
+              has=["raise not turned (F172): turned in 0 of 90 ticks with a raise", "the raise is not in the hook's camera: the 40 deg and over band has 103 pairs and k_up -0.09 (under 0.3), c -1.09"], lacks=["UNPARSED"])
+        check("F172 turned: a turned raise that still reads k_up under 0.3 in the steep band keeps the flag (the turn did not land it)",
+              [car171(("mouse look", "40+", 60, -50.0, -12.3, 0.05, -0.50, -0.50, 0.05), turned=(90, 90, 80.0, 29.0))], 0, [("PARTIAL", C171)],
+              has=["raise turned by the aim pitch (F172)", "the raise is not in the hook's camera"], lacks=["UNPARSED", "not turned"])
+        check("F172 turned: two seconds, one turned and one not, weigh by their ticks: 90 of 180 is not more than half",
+              [car171(LEVEL171, turned=(90, 90, 70.0, 28.0)), car171(LEVEL171, turned=(0, 90, 0.0, 0.0))], 0, [("OK", C171)],
+              has=["raise not turned (F172): turned in 90 of 180 ticks with a raise"], lacks=["UNPARSED"])
+        check("F172 turned: a log from before the clause reads 'not turned (a log from before F172)'", [car171(LEVEL171)], 0, [("OK", C171)],
+              has=["raise not turned (a log from before F172)"], lacks=["UNPARSED"])
+        check("F171 carriage: a line that drifted from its pattern is unparsed", ["native on foot raise carriage (F171) 1 s: something else"], 4, [("UNPARSED", C171)])
+        check("F171 carriage: a line that drifted beside a good one is counted beside the verdict", [car171(LEVEL171), "native on foot raise carriage (F171) 1 s: something else"], 0, [("OK", C171)],
+              has=["[+1 line(s) the rule's patterns do not match: "])
+
+        # ---- F169: the stance while the aim is pitched ----
+        F169S = "pitched stance (F169)"
+
+        def stance169(wl=10, calls=800, sunk=120, sunks=120, veto=120, crouched=0, flips=0, raw=60, rms=2.1, smax=9.0, sn=700, st=40, tmin=27.0, tmax=43.0, ps=8, fs=0, ss=6):
+            """F169's pitched stance line, from the DLL's own format (formatStance, native_on_foot_f169.h); the targets in cm as printed."""
+            return R169("native on foot pitched stance (F169) %u s: pitched calls", wl, 20.0, calls, sunk, sunks, veto, crouched, flips, raw, rms, smax, sn, st, tmin, tmax, ps, fs, ss)
+
+        check("F169 stance: a held look-up with the camera sinking and the stance never flipping is OK", [stance169()], 0, [("OK", F169S)],
+              has=["10 s: 800 pitched calls (aim pitch 20 deg or more); the camera read as a crouch in 120, with the animated neck standing in 120; the cap took the crouch away in 120; used as "
+                   "crouched in 0; the stance flipped 0 time(s) with the neck standing (w_c alone would have flipped it 60); the view's step with the head still rms 2.1 mm (max 9.0); settled raise "
+                   "targets 40, +27.0..+43.0 cm; 8 pitched s, the stance flipped in 0, a sink in 6"], lacks=["UNPARSED", "did not hold"])
+        check("F169 stance: a stance that flipped with the animated neck standing is a cap that did not hold (the flight edvr_gfx_20261028_201339 before the fix)",
+              [stance169(sunk=330, sunks=330, veto=0, crouched=330, flips=88, raw=88, fs=6)], 3, [("NEVER APPLIED", F169S)],
+              has=["the stance flipped 88 time(s) with the animated neck standing in 6 pitched second(s): the cap on w_c did not hold it (a sink read as a crouch)"], lacks=["UNPARSED"])
+        check("F169 stance: one flip in a short second is enough", [stance169(flips=1, fs=0)], 3, [("NEVER APPLIED", F169S)], has=["flipped 1 time(s) with the animated neck standing in 0 pitched second(s)"],
+              lacks=["UNPARSED"])
+        check("F169 stance: under 30 pitched calls is too few to judge", [stance169(calls=12, sunk=0, sunks=0, veto=0, raw=0, sn=10, st=0, tmin=0.0, tmax=0.0, ps=1, ss=0)], 0, [("IDLE", F169S)],
+              has=["under 30 pitched calls: little for the cap to do"], lacks=["UNPARSED", "NEVER"])
+        check("F169 stance: a real crouch while pitched (used as crouched, no flip with the neck standing) is OK", [stance169(sunk=300, sunks=0, veto=0, crouched=300)], 0, [("OK", F169S)],
+              has=["used as crouched in 300"], lacks=["UNPARSED", "did not hold"])
+        check("F169 stance: two windows add up, the step weighted by its frames and the targets' range widened",
+              [stance169(calls=100, sn=100, rms=2.0, tmin=27.0, tmax=30.0, st=10, ps=1), stance169(calls=300, sn=300, rms=4.0, tmin=10.0, tmax=43.0, st=20, ps=3)], 0, [("OK", F169S)],
+              has=["20 s: 400 pitched calls (aim pitch 20 deg or more)", "rms 3.6 mm (max 9.0); settled raise targets 30, +10.0..+43.0 cm; 4 pitched s"], lacks=["UNPARSED"])
+        check("F169 stance: a window line that drifted from its pattern is unparsed", ["native on foot pitched stance (F169) 10 s: something else"], 4, [("UNPARSED", F169S)])
+        check("F169 stance: a window line that drifted beside a good one is counted beside the verdict", [stance169(), "native on foot pitched stance (F169) 10 s: something else"], 0,
+              [("OK", F169S)], has=["[+1 line(s) the rule's patterns do not match: "])
+
+        # ---- F169 (TEMPORARY): the pistol sprint's arm swing ----
+        F169W = "pistol sprint swing (F169)"
+
+        def swing169(item=PISTOL167, wl=10, rel=400, meas=380, per=300, dl=200, secs=4, T=0.64, ld=(10.0, 5.0), rt=(5.0, 2.5), la=(10.0, 5.0), cd=(0.93, 0.88), ca=(0.93, 0.88), cl=(0.10, 0.90),
+                     dial=0.5, delay=0.32):
+            """F169's swing line, from the DLL's own format (formatSwing, native_on_foot_f169.h): amplitudes (forward, up; cm), correlations (forward, up), legs (drawn, animated)."""
+            return R169("native on foot pistol sprint swing (F169, TEMPORARY) %u s: item %s", wl, item, rel, meas, per, dl, secs, T, ld[0], ld[1], rt[0], rt[1], la[0], la[1], cd[0], cd[1], ca[0], ca[1],
+                        cl[0], cl[1], dial, delay)
+
+        def plan169(state="ok", why="ok", chain=(35, 37, 38, 58), carried=24):
+            """F169's plan line, from the census's own format (native_on_foot_hooks.cpp)."""
+            return R169("native on foot pistol sprint swing plan (F169): X=%016llX", 0x1C998333A20, state, why, chain[0], chain[1], chain[2], chain[3], carried)
+
+        PLAN169 = "plan ok (ok), left arm chain 35 37 38 58, 24 joints come with it"
+        check("F169 swing: a pistol sprint measured and delayed by a half stride, the arms in unison without it", [plan169(), swing169()], 0, [("OK", F169W)],
+              has=[PLAN169 + "; " + PISTOL167 + " 10 s: calls released 400, measured 380, with a stride 300, delayed 200 (4 s of sprint); stride 0.64 s; amplitude forward/up (cm) left hand as drawn 10.0/5.0, "
+                   "right hand 5.0/2.5, animated left hand 10.0/5.0; correlation (+1 in unison, -1 opposing) drawn left against right forward +0.93 up +0.88, animated left against right forward "
+                   "+0.93 up +0.88; left hand against the legs drawn +0.10 animated +0.90; dial 0.50, the delay applied 0.32 s"], lacks=["UNPARSED", "never", "only"])
+        check("F169 swing: the dial at 0 is a measure only", [plan169(), swing169(dial=0.0, dl=0, delay=0.0)], 0, [("OK", F169W)], has=["dial 0.00, the delay applied 0.00 s"], lacks=["UNPARSED", "none of"])
+        check("F169 swing: a dial of 0.5 with no delay applied in 380 measured calls and no stride is a swing that never ran",
+              [plan169(), swing169(per=0, dl=0, T=0.0, delay=0.0)], 3, [("NEVER APPLIED", F169W)],
+              has=["the dial was 0.50 and the delay was applied in none of 380 measured calls with " + PISTOL167 + " (no stride was measured: the animated left hand's forward swing never crossed its mean "
+                   "twice within 0.30 to 1.60 s)"], lacks=["UNPARSED"])
+        check("F169 swing: a stride measured and a delay never applied is named", [plan169(), swing169(per=300, dl=0, delay=0.0)], 3, [("NEVER APPLIED", F169W)],
+              has=["a stride was measured in 300 calls and the stage never applied it"], lacks=["UNPARSED"])
+        check("F169 swing: a delay applied in under a quarter of the calls is PARTIAL", [plan169(), swing169(dl=60, delay=0.3)], 0, [("PARTIAL", F169W)],
+              has=["the delay was applied in only 60 of 380 measured calls with " + PISTOL167], lacks=["UNPARSED", "never"])
+        check("F169 swing: a refused plan with the dial above 0 is a swing that never ran", [plan169("REFUSED", "the clavicle, upper arm, forearm and hand are not a chain of direct parents", chain=(35, 37, 38, 58), carried=0), swing169(dl=0, delay=0.0)], 3,
+              [("NEVER APPLIED", F169W)], has=["the swing's plan was refused (the clavicle, upper arm, forearm and hand are not a chain of direct parents) with the dial at 0.50"], lacks=["UNPARSED"])
+        check("F169 swing: a refused plan with the dial at 0 changes nothing", [plan169("REFUSED", "no joints, or a joint out of range", carried=0), swing169(dial=0.0, dl=0, delay=0.0)], 0, [("OK", F169W)],
+              has=["plan REFUSED (no joints, or a joint out of range)"], lacks=["UNPARSED", "never"])
+        check("F169 swing: under 30 measured calls is too few to read", [plan169(), swing169(rel=40, meas=20, per=0, dl=0, secs=0, T=0.0, delay=0.0, dial=0.0)], 0, [("IDLE", F169W)],
+              has=["under 30 measured calls: little to read"], lacks=["UNPARSED"])
+        check("F169 swing: the plan line alone is idle", [plan169()], 0, [("IDLE", F169W)], has=[PLAN169 + "; no pistol sprint released"], lacks=["UNPARSED"])
+        check("F169 swing: two windows add up, the stride and the correlations weighted by their calls",
+              [plan169(), swing169(meas=100, per=100, T=0.60, cd=(1.0, 1.0), dl=100, delay=0.3), swing169(meas=300, per=300, T=0.80, cd=(0.0, 0.0), dl=300, delay=0.35)], 0, [("OK", F169W)],
+              has=["20 s: calls released 800, measured 400, with a stride 400, delayed 400 (8 s of sprint); stride 0.75 s", "drawn left against right forward +0.25 up +0.25"], lacks=["UNPARSED"])
+        check("F169 swing: another pistol is its own item", [plan169(), swing169(), swing169(item="$wpn_s_pistol_plasma_charged_name;", per=0, dl=0, delay=0.0)], 3, [("NEVER APPLIED", F169W)],
+              has=["with $wpn_s_pistol_plasma_charged_name;", PISTOL167 + " 10 s"], lacks=["UNPARSED"])
+        check("F169 swing: the dial's own note line (a different label) is not a window line and is not unparsed",
+              ["native on foot pistol sprint swing dial (F169, TEMPORARY): experimental.native_on_foot_pistol_sprint_swing_phase = 0.50 of a stride -- while a pistol sprint has ...", plan169(), swing169()],
+              0, [("OK", F169W)], lacks=["UNPARSED"])
+        check("F169 swing: a window line that drifted from its pattern is unparsed", ["native on foot pistol sprint swing (F169, TEMPORARY) 10 s: something else"], 4, [("UNPARSED", F169W)])
+        check("F169 swing: a plan line that drifted from its pattern is unparsed", ["native on foot pistol sprint swing plan (F169): X=1 something else"], 4, [("UNPARSED", F169W)])
+        check("F169 swing: a window line that drifted beside a good one is counted beside the verdict", [plan169(), swing169(), "native on foot pistol sprint swing (F169, TEMPORARY) 10 s: something else"], 0,
+              [("OK", F169W)], has=["[+1 line(s) the rule's patterns do not match: "])
 
         # ---- draw onset (F99a): a drawn item's hands from the game's own selection ----
         F99 = "draw onset (F99a)"
@@ -17574,9 +18929,14 @@ def self_test_health():
         ITEM138 = "$wpn_m_assaultrifle_laser_fauto_name;"
 
         def pv138(mode="mouse look", item="none", aim=40.0, amin=30.0, amax=50.0, head=0.0, sink=14.0, smax=18.0, hrise=0.5, wmean=0.98, wmax=1.0, added=13.0, amaxadd=18.0,
-                  applied=58, calls=60, measured=0, why="none", up=-12.0, fwd=-2.0, view=2.5, inside=0, insideof=60, refused=40, lta=0, returned=1, retrefused=0, notneeded=0):
-            return R("native on foot pitched view (F138) 1 s: mode", mode, item, aim, amin, amax, head, sink, smax, hrise, wmean, wmax, added, amaxadd, applied, calls, measured, why,
-                     up, fwd, view, inside, insideof, refused, lta, returned, retrefused, notneeded)
+                  applied=58, calls=60, measured=0, why="none", up=-12.0, fwd=-2.0, view=2.5, inside=0, insideof=60, refused=40, lta=0, returned=1, retrefused=0, notneeded=0, ref=None,
+                  detail=None):
+            if ref is None:   # F170: the reference text the DLL prints (referenceText): the calls that chose one, by the one they used
+                ref = "settled %d, running 0, none 0" % (applied + measured)
+            if detail is None:   # F171: the reference's figures (referenceDetailText): the calls that had one, last source, age, target, G, G now, the mean target published and its calls
+                detail = R138("reference detail (F171; the calls that had one", applied + measured, "settled", 3.0, 12.0, 16.0, 2.0, 20.0, applied)
+            return R138("native on foot pitched view (F138) 1 s: mode", mode, item, aim, amin, amax, head, sink, smax, hrise, wmean, wmax, added, amaxadd, applied, calls, measured, why, ref,
+                        detail, up, fwd, view, inside, insideof, refused, lta, returned, retrefused, notneeded)
 
         def bins138(mode="mouse look", item="none", body="[30,40) 12 +9.0 -10.0 -1.0 +0.5; [40,50) 48 +14.0 -12.0 -2.0 +0.5"):
             return R("native on foot pitched view (F138) 10 s bins", mode, item, body)
@@ -17608,6 +18968,49 @@ def self_test_health():
         check("F138 pitched view: the 10 s bin lines are read", [pv138(), bins138(), bins138(mode="look to aim", item=ITEM138)], 0, [("OK", P138)], lacks=["UNPARSED"])
         check("F138 pitched view: bin lines alone", [bins138()], 0, [("IDLE", P138)], has=["1 bin line(s) and no 1 s line"], lacks=["UNPARSED"])
         check("F138 pitched view: a drifted line is unparsed", ["native on foot pitched view (F138) 1 s: something else"], 4, [("UNPARSED", P138)])
+        # F170: the reference each call used, and an unarmed pitched second with the view inside the torso and no reference at all fails
+        check("F138 pitched view: a settled reference carried the look-up, the line names the references used",
+              [pv138(ref="settled 58, running 0, none 2", applied=58, why="no reference 2")], 0, [("OK", P138)], has=["reference used by the considered calls: settled 58, running 0, none 2"], lacks=["UNPARSED"])
+        # F171: the running reference measures the sink and publishes nothing; its own reason, with a comma in it
+        RM138 = "running reference, measured only"
+        check("F138 pitched view: the running reference measured only (the flight edvr_gfx_20261029_043951): the reason is counted, the leading reason named, the verdict PARTIAL",
+              [pv138(ref="settled 0, running 58, none 2", applied=0, added=0.0, amaxadd=0.0, why="no reference 2, " + RM138 + " 58")], 0, [("PARTIAL", P138)],
+              has=["reference used by the considered calls: settled 0, running 58, none 2", "measured only on the running reference (F171) 58 calls",
+                   "never added with an empty hand in 1 pitched second(s); leading reason: " + RM138 + " (58 calls) -- since F171 the running reference measures the sink and publishes nothing"],
+              lacks=["UNPARSED", "NEVER APPLIED"])
+        check("F138 pitched view: the running reference measured only beside a second that added from a settled one is judged on the one that added",
+              [pv138(ref="settled 0, running 58, none 2", applied=0, added=0.0, amaxadd=0.0, why="no reference 2, " + RM138 + " 58"), pv138()], 0, [("OK", P138)],
+              has=["measured only on the running reference (F171) 58 calls"], lacks=["UNPARSED", "leading reason"])
+        check("F138 pitched view: the reference's figures and what was published are read from the line",
+              [pv138(ref="settled 0, running 58, none 2", applied=0, added=0.0, amaxadd=0.0, why="no reference 2, " + RM138 + " 58",
+                     detail=R138("reference detail (F171; the calls that had one", 58, "running", 2.5, 4.5, 12.3, -26.0, 0.0, 0))], 0, [("PARTIAL", P138)],
+              has=["reference (F171; 58 calls had one; last source running): age 2.5 s, target +4.5 cm, G +12.3 cm, G now -26.0 cm"], lacks=["UNPARSED", "mean target published"])
+        check("F138 pitched view: the mean target published is weighted by the calls that published",
+              [pv138(detail=R138("reference detail (F171; the calls that had one", 58, "settled", 3.0, 12.0, 16.0, 2.0, 20.0, 58)),
+               pv138(detail=R138("reference detail (F171; the calls that had one", 58, "settled", 3.0, 12.0, 16.0, 2.0, 26.0, 29))], 0, [("OK", P138)],
+              has=["mean target published +22.0 cm over 87 calls"], lacks=["UNPARSED"])
+        check("F138 pitched view: INSIDE with no reference at all in an unarmed second (the flight edvr_gfx_20261028_215408 at 21:58:25: no reference 90, INSIDE 90 of 90) is NEVER APPLIED",
+              [pv138(applied=0, added=0.0, amaxadd=0.0, sink=0.0, smax=0.0, why="no reference 90", ref="settled 0, running 0, none 90", calls=90, inside=90, insideof=90, aim=85.0, amin=85.0, amax=85.0)], 3,
+              [("NEVER APPLIED", P138)], has=["1 unarmed pitched second(s) had the view INSIDE the torso (90 frames) with no reference to add the sink from"], lacks=["UNPARSED"])
+        check("F138 pitched view: the same second with the running reference used for every call is not blind",
+              [pv138(ref="settled 0, running 90, none 0", applied=90, calls=90, inside=3, insideof=90)], 0, [("OK", P138)], lacks=["UNPARSED", "NEVER APPLIED"])
+        check("F138 pitched view: some calls without a reference beside others with one is not blind (the first calls of a look)",
+              [pv138(ref="settled 0, running 50, none 10", applied=50, calls=60, why="no reference 10", inside=2, insideof=60)], 0, [("OK", P138)], lacks=["UNPARSED", "NEVER APPLIED"])
+        check("F138 pitched view: no reference with an item drawn is not an empty-hand failure",
+              [pv138(item=ITEM138, applied=0, added=0.0, amaxadd=0.0, measured=0, why="no reference 60", ref="settled 0, running 0, none 60", inside=60, insideof=60)], 0, [("IDLE", P138)],
+              lacks=["UNPARSED", "NEVER APPLIED"])
+        OLD138 = ("native on foot pitched view (F138) 1 s: mode mouse look, item none, aim pitch +85.0 deg (min +85.0 max +85.0), head pitch -10.9 deg; the camera's sink against the stance +0.0 cm "
+                  "(max +0.0), the head's own height since the stance +0.0 cm; w 1.00/1.00; added +0.0 cm (max +0.0) in 0 of 90 pitched calls | measured only: an item drawn 0 calls | not applied: "
+                  "no reference 90; EDVR carried up +8.3 forward -1.6 cm (the raise, F137); the view over the neck -6.3 cm; INSIDE 90 of 90; the settle refused for the aim's pitch 0 calls "
+                  "(look to aim's gate 0); returned to the stance's raise 0 times (refused 0, not needed 0)")
+        check("F138 pitched view: a log from before F170 (no reference column) with INSIDE and no reference is read, and fails the same",
+              [OLD138], 3, [("NEVER APPLIED", P138)], has=["with no reference to add the sink from"], lacks=["UNPARSED"])
+        # F171: the carriage rule beside the F138 lines that say the build has the instrument
+        check("F171 carriage: a build with the instrument (the F138 line carries the reference detail), pitched seconds and no pair in any is idle",
+              [pv138()], 0, [("IDLE", C171)], has=["1 pitched second(s) from a build with the carriage instrument and no second with a pair of consecutive pin calls"], lacks=["UNPARSED"])
+        check("F171 carriage: a log from before it has no reference detail on the F138 line and the rule has no verdict (not present)", [OLD138], 3,
+              lacks=[row("IDLE", C171), row("OK", C171), row("PARTIAL", C171), row("UNPARSED", C171)])
+        check("F171 carriage: the F138 line with the reference detail is read beside a carriage line", [pv138(), car171(LEVEL171)], 0, [("OK", P138), ("OK", C171)], lacks=["UNPARSED"])
 
         # ---- F139: each weapon's sight on the ADS line (F140: keyed by (item, scope fitted); F146: the two live trims are gone) ----
         S139 = "ADS sight offset (F139)"
@@ -18709,7 +20112,7 @@ def self_test_health():
               0, [("OK", "ADS item gate (F91)")], has=["refused ticks 18 over 12 s"])
 
         def share_window(wl, ads_s, on_s, peak):
-            return R("ADS sight in both eyes (F106) %u s: share", wl, 0.0, "on", 0.0, "idle", ads_s, wl, on_s, wl, peak)
+            return R("ADS sight in both eyes (F106) %u s: share", wl, 0.0, "on", "right", 0.0, "idle", ads_s, wl, on_s, wl, peak)
         check("F125 ADS: release flush retains a nonzero request", [share_window(2, 2, 2, 1.0)], 3, [("NEVER APPLIED", H_F106)],
               has=["ADS seconds with the key on 2 of 2, share asked max 1.00"])
         # ---- ADS sight in both eyes (F106; it replaced F89's left eye close) ----
@@ -18720,7 +20123,19 @@ def self_test_health():
               [("NEVER APPLIED", S106)], has=["never reported drawing it"])
         check("F106: F89 trace presses with the key on and no share line drawn", [share_key(), ads_start("press"), ads_frame(), ads_start("release")], 3,
               [("NEVER APPLIED", S106)], has=["F89 trace presses 1"])
-        check("F106: key off", [share_key("off"), share_sec(0.0, "off"), share_sec(0.0, "off")], 0, [("IDLE", S106)], has=["(key off)"])
+        check("F106: sight eye right: no share, and the setting says so", [share_key("right"), share_sec(0.0, "off"), share_sec(0.0, "off")], 0, [("IDLE", S106)],
+              has=["(key off; sight eye right: each eye keeps its own view)"], lacks=["NEVER APPLIED"])
+        check("F162: sight eye left: no share, IDLE and never NEVER APPLIED, with F89 trace presses and 1 s lines in the sights",
+              [share_key("left"), share_ev("stereo", "off", "left"), share_sec(0.0, "off", "engaged", "left"), share_sec(0.0, "off", "engaged", "left"), ads_start("press"), ads_frame(),
+               ads_start("release")], 0, [("IDLE", S106)], has=["(sight eye left: the left eye is lined up on the sights and each eye keeps its own view, so no share runs)"],
+              lacks=["NEVER APPLIED"])
+        check("F162: sight eye left from the key line alone (no ADS yet)", [share_key("left")], 0, [("IDLE", S106)], has=["sight eye left"])
+        check("F162: a session that went from both to left: the share asked in the first half still has to have been drawn",
+              [share_key("both"), share_ev("shared"), share_sec(), share_sec(1.0), share_ev("stereo"), share_key("left"), share_sec(0.0, "off", "engaged", "left")], 3,
+              [("NEVER APPLIED", S106)], has=["never reported drawing it"])
+        check("F106: the build before F162 with its key off", [old_share_key("off")], 0, [("IDLE", S106)], has=["(key off)"], lacks=["sight eye"])
+        check("F106: key off", [old_share_key("off"), R("ADS sight in both eyes (F106) %u s: share", 1, 0.0, "off", None, 0.0, "idle", 0, 1, 0, 1, 0.0).replace(", aiming eye x", "")] * 2,
+              0, [("IDLE", S106)], has=["(key off)"])
         check("F106: key on, no ADS", [share_key()], 0, [("IDLE", S106)], has=["(no ADS press)"])
         check("F106: a press that never reached full weight", [share_sec(0.6), share_press(peak=0.6, full=0)], 0, [("PARTIAL", S106)],
               has=["no press reached full weight"])
@@ -19169,10 +20584,10 @@ def self_test_health():
         ads_budgets = (
             ("view height hold (F87h) %u s", ["frozen (the applied alignment's serial is not in the history)"]),
             ("weapon eye offset (F88) %u s", ["follow", ",".join(["1.00"] * 10)]),
-            ("ADS sight in both eyes (F106) %u s", ["off", "releasing"]),
-            ("native on foot ADS eye chain (F93b) %u s", ["off", "off"]),
+            ("ADS sight in both eyes (F106) %u s", ["off", "right", "releasing"]),
+            ("native on foot ADS eye chain (F93b) %u s", ["off", "off", "right"]),
             ("native on foot ADS sight offset (F139) %u s", ["x" * 63, "unknown"]),
-            ("ADS sight check (F66e/F79)", ["the eyes' offsets", " (an eye had no NDC: its figures are zero)"]),
+            ("ADS sight check (F66e/F79)", ["right", "the eyes' offsets", " (an eye had no NDC: its figures are zero)"]),
             ("native on foot ADS input (F70b): source %s; request", ["bound HumanoidZoom", "off", "absent/invalid", "unknown", "latched", "x" * 63, "refused", "x" * 63]),
         )
         for needle, strings in ads_budgets:
@@ -19592,10 +21007,17 @@ def self_test_health():
               has=["the setting was right_eye but no 10 s line and no stopped line shows a Present drawn", "exit 3"])
         check("desktop window: a 10 s line with drawn=0 is NEVER APPLIED", dw_ok + [dw_setting("left_eye"), dw_sec(drawn=0, seen=300)], 3, [("NEVER APPLIED", DW)])
         check("desktop window: a drifted setting line is UNPARSED", dw_ok + [dw_setting("left_eye").replace("left_eye", "maybe")], 4, [("UNPARSED", DW)])
-        check("desktop window: a drifted 10 s line is no evidence of a draw, and is said", dw_ok + [dw_setting("left_eye"), dw_sec().replace("drawn=", "painted=")], 3, [("NEVER APPLIED", DW)],
+        check("desktop window: a drifted 10 s line is no evidence of a draw, and is said (a declined draw beside it shows the window was tried)",
+              dw_ok + [dw_setting("left_eye"), RD(dwcpp, "desktop window: not drawing -- %s", "no eye image yet"), dw_sec().replace("drawn=", "painted=")], 3, [("NEVER APPLIED", DW)],
               has=["line(s) the rule's patterns do not match"])
-        check("desktop window: the setting counts whatever --since says, the 10 s lines before it do not", dw_ok + [(1, dw_setting("left_eye")), (20, dw_sec())], 3,
-              [("NEVER APPLIED", DW)], extra=["--since", "10:01:00"])
+        check("desktop window: the setting counts whatever --since says, the 10 s lines before it do not (the setting alone, with 3D never on in the window, is idle)", dw_ok + [(1, dw_setting("left_eye")), (20, dw_sec())], 0,
+              [("IDLE", DW)], has=["no line shows the window active, drawing or declining"], extra=["--since", "10:01:00"])
+        # F173: the shipped setting is left_eye, so a setting line alone is the default, not a request
+        check("desktop window: the shipped left_eye and no sign of the window ever active (3D never on) is idle, not a failure", dw_ok + [dw_setting("left_eye")], 0, [("IDLE", DW)],
+              has=["the setting was left_eye (the shipped default since F173) and no line shows the window active, drawing or declining: 3D was never on in this log"], lacks=["NEVER APPLIED"])
+        check("desktop window: an activation and no Present drawn is NEVER APPLIED", dw_ok + [dw_setting("left_eye"), RD(dwcpp, "desktop window: active #%u", 1)], 3, [("NEVER APPLIED", DW)],
+              has=["the setting was left_eye but no 10 s line and no stopped line shows a Present drawn"], lacks=["UNPARSED"])
+        check("desktop window: a declined draw and no Present drawn is NEVER APPLIED", dw_ok + [dw_setting("left_eye"), RD(dwcpp, "desktop window: not drawing -- %s", "no eye image yet")], 3, [("NEVER APPLIED", DW)])
         check("desktop window: a 10 s line inside --since is counted", dw_ok + [(1, dw_setting("left_eye")), (70, dw_sec())], 0, [("OK", DW)], extra=["--since", "10:01:00"])
 
         # ---- the one failure line the rules read that is not in native_on_foot.cpp ----
