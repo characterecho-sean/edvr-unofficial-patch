@@ -9,6 +9,12 @@
 //   not write comes back as the lens's own copy with the original untouched; a stale c, no depth, a picture that is not the upscaler's, a gate verdict that is not a lens and
 //   M = 1 are each counted under their own reason and leave the frame alone. The rays read back give the hole the instrument reports, which agrees with the reference march.
 //   Mutants of the comparator (M off by 20 %, c off by 4 px, the hole 20 % small) each fail the check that passes the real thing.
+//   B3 (the left eye drawn as the zoomed view; docs section 11). THE WIRING: the left door before the left eye's UI composite, the draw hook's count, the provider's five words, the runtime's
+//   narrowing and the raw getter's true answer, the temporal pass's announced frusta and reset edge, the key and its ini rows (default off). THE PASS: a synthetic world (a textured plane at
+//   several distances, and a sky) seen by two eyes 6.3 cm apart, the left one drawn zoomed; the production left door copies its picture and the production door takes the lens from it, each
+//   pixel at the place its world point is drawn at in the left eye: the lens shows the plane's texture at every distance within a few codes of the ideal, and the same pixels sampled without
+//   the parallax removed do not; the lens's source is counted as zoomed, and a frame not asked for, with the left eye not zoomed, with no copy, with a copy of another frame, with no
+//   matrices, or with the left eye behind falls back to the plain lens for the reason named.
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -34,6 +40,7 @@
 #include "../../src/d3d11/scope_zoom_s1.h"
 #include "../../src/d3d11/scope_zoom_shaders.h"
 #include "../../src/d3d11/shader_swap.h"
+#include "../native_frame_test/b3_checks.h"   // B3: the synthetic pinhole eye (makeCam) the pure checks use
 
 using namespace edvr;
 using Microsoft::WRL::ComPtr;
@@ -61,6 +68,17 @@ bool gpuTimingOwns(ID3D11DeviceContext*) noexcept { return false; }
 bool GpuTimer::begin(ID3D11Device*, ID3D11DeviceContext*) noexcept { return false; }
 bool GpuTimer::beginBorrowedFrame(ID3D11Device*, ID3D11DeviceContext*) noexcept { return false; }
 bool GpuTimer::end(ID3D11DeviceContext*) noexcept { return false; }
+// B3: the temporal pass's word on eye 0 (native_temporal.cpp), driven by the rig: on, and the window the frame was told.
+struct StubZoom {
+    bool on = false;
+    float zoomed[4] = {}, pre[4] = {};
+} g_stubZoom;
+bool nativeTemporalZoom(uint64_t, float zoomed[4], float pre[4]) {
+    if (!g_stubZoom.on) return false;
+    if (zoomed) std::memcpy(zoomed, g_stubZoom.zoomed, sizeof(g_stubZoom.zoomed));
+    if (pre) std::memcpy(pre, g_stubZoom.pre, sizeof(g_stubZoom.pre));
+    return true;
+}
 GpuTimerPoll GpuTimer::poll(ID3D11DeviceContext*, double&) noexcept { return GpuTimerPoll::Pending; }
 void GpuTimer::reset(ID3D11DeviceContext*) noexcept {}
 ID3D11ComputeShader* shaderSwapCreateCs(ID3D11DeviceContext* ctx, const void* bytes, size_t n, const char*, const char*) {
@@ -87,9 +105,18 @@ static std::string replaced(std::string text, const std::string& from, const std
 static bool wiredDoor(const std::string& layer) {
     const size_t fn = layer.find("ID3D11Texture2D* uiLayerComposite(uint64_t sequence, uint32_t eye");
     if (fn == std::string::npos) return false;
-    const std::string body = layer.substr(fn, 8300);   // the function is 8022 bytes; a margin for a line or two, so a window can't reach into the next function and satisfy a pin there
+    const std::string body = layer.substr(fn, 8900);   // the function is about 8600 bytes with B3's left door; a margin for a line or two, so a window can't reach into the next function and satisfy a pin there
     return before(body, "rippleDoor(e, eye, sequence", "scopeZoomDoor(lensArgs") && before(body, "scopeZoomDoor(lensArgs", "if (!e.srv || !e.rtv || e.compositedSeq == sequence) return handOn();") &&
            before(body, "scopeZoomDoor(lensArgs", "compositeInner(e, eye, frame") && has(body, "if (eye == 1 && scopeZoomWanted())") && has(body, "lensArgs.resolved = e.doorFromPass;");
+}
+// B3: the left eye's door copies the zoomed picture's window after the ripple and before the left eye's own UI composite, and before the right eye's lens reads it.
+static bool wiredLeftDoor(const std::string& layer) {
+    const size_t fn = layer.find("ID3D11Texture2D* uiLayerComposite(uint64_t sequence, uint32_t eye");
+    if (fn == std::string::npos) return false;
+    const std::string body = layer.substr(fn, 8900);
+    return before(body, "rippleDoor(e, eye, sequence", "scopeZoomLeftDoor(leftArgs)") && before(body, "scopeZoomLeftDoor(leftArgs)", "scopeZoomDoor(lensArgs") &&
+           before(body, "scopeZoomLeftDoor(leftArgs)", "if (!e.srv || !e.rtv || e.compositedSeq == sequence) return handOn();") && has(body, "if (eye == 0 && scopeZoomWanted())") &&
+           has(body, "leftArgs.resolved = e.doorFromPass;") && has(body, "leftArgs.frame = frame;");
 }
 static bool wiredTemporal(const std::string& t) {
     return before(t, "scopeZoomDepthClear(eye);", "depthProbeSceneDepth(sd.Width, sd.Height, eye, &dtex)") && before(t, "depthProbeSceneDepth(sd.Width, sd.Height, eye, &dtex)", "scopeZoomDepthSet(eye, depthSrv") &&
@@ -98,9 +125,34 @@ static bool wiredTemporal(const std::string& t) {
 static bool wiredFrame(const std::string& n) {
     return before(n, "s0::vrTick(GetTickCount64());", "s1::tick(GetTickCount64());") && has(n, "scopeZoomPublish(out);") && has(n, "scopeZoomPressBegin(s.press);") && has(n, "scopeZoomPressTake(&pl.d);") &&
            has(n, "cfg.getString(\"fix.native_on_foot_ads_scope_zoom\", \"on\")") && has(n, "std::atomic<bool> g_scopeZoomKey{true};") && has(n, "cfg.getFloat(\"experimental.native_on_foot_ads_scope_zoom_fov\"") &&
-           has(n, "sz::lensGate(gi)") && has(n, "nativeTemporalDrawJitter(1, &tseq, &jx, &jy, &w, &h)") && has(n, "if (e == 1 && g_scopeZoomKey.load(std::memory_order_relaxed)) eyeJitterPublish(frame);") &&
+           has(n, "sz::lensGate(gi)") && has(n, "nativeTemporalDrawJitter(static_cast<uint32_t>(e), &tseq, &jx, &jy, &w, &h)") &&
+           has(n, "if (g_scopeZoomKey.load(std::memory_order_relaxed) && (e == 1 || g_scopeZoomFullKey.load(std::memory_order_relaxed))) eyeJitterPublish(e, frame);") &&
            has(n, "nofoot::sightPointNdc(g.rows[1], od, S, dir, kFarM, ndcFar)") && has(n, "const double dir[3] = {S[0] - v.Epos[0], S[1] - v.Epos[1], S[2] - v.Epos[2]};") &&
            has(n, "if (s.open) endPress(s);");
+}
+// B3: the key (read by its literal name, default off, live), the tick's step before the publish, the window handed the provider each tick, the press line from every module's half, the
+// strip still published outside the sights, the draw path's count, the readout pin taking the right eye alone, the shadow constants, and the runtime's export.
+static bool wiredB3Frame(const std::string& n) {
+    return has(n, "cfg.getString(\"experimental.native_on_foot_ads_scope_zoom_full_detail\", \"off\") == \"on\"") && has(n, "std::atomic<bool> g_scopeZoomFullKey{false};") &&
+           before(n, "b3Tick(s, gi, verdict, g, dt, nowMs, out);", "    scopeZoomPublish(out);\n}\n}  // namespace s1") && has(n, "scopewin::publish(rq, nowMs);") && has(n, "const sz::B3GateOut go = sz::b3Gate(gate);") &&
+           has(n, "sz::b3StripStep(b.strip, now, dt);") && has(n, "rq.zoom = b.strip.request;") && has(n, "void endPress(State& s) noexcept {\n    endB3Press(s);") && has(n, "sz::formatB3Press(line, sizeof(line), p);") &&
+           has(n, "scopeZoomB3Take(&door);") && has(n, "nativeTemporalZoomCounts(&zf, rs, &edge)") && has(n, "lightGridCacheZoomCounts(&calls, &bypassed);") && has(n, "        b3Idle(dt, nowMs);\n        return;") &&
+           has(n, "if (nativeTemporalZoomLatest(nullptr, nullptr, nullptr)) {   // B3: eye 0 is drawn as the zoomed view this frame") && has(n, "g_f85Latch.putSolo(1, frame, s.K, s.oh, s.ow)") &&
+           has(n, "b3ShadowNote(e, frame, cb1);") && has(n, "void nativeOnFootB3NoteEyeDraw() {") && has(n, "scopewin::clear();") && has(n, "extern \"C\" HRESULT WINAPI edvrNoteNativeScopeZoom(") &&
+           has(n, "sz::b3Matrices(g.rows[1], o1, jn[1], g.rows[0], o0, jn[0], out.b3.T, out.b3.u)") && has(n, "sz::b3WindowMatches(zt, lt, 3.0e-3)") && has(n, "const bool keyB3 = g_scopeZoomFullKey.load(std::memory_order_relaxed) && gi.keyOn;");
+}
+// B3: the provider hands the window to the runtime in a version 11 answer only; the runtime narrows eye 0's told frustum where the trim sets the frame's frusta, keeps the true frustum for the
+// raw getter, the hidden-area mesh and the temporal pass's announcements, and tells the strip to the stereo renderer; the temporal pass resets eye 0's history at the window's edges.
+static bool wiredB3Halves(const std::string& frame, const std::string& host, const std::string& temporal, const std::string& stereo, const std::string& vscreen, const std::string& system) {
+    return has(frame, "if (carried) edvr::scopewin::toWords(edvr::scopewin::read(GetTickCount64()), result.reservedTerrainGuard);") &&
+           before(host, "zoomApplied=applyScopeZoom(gameGeometry,zoomPreRaw,zoomToldRaw);", "geometry.publish(gameGeometry,false,false,frameTangentShift,hiddenMeshCompatible()&&!zoomApplied,zoomApplied?zoomToldRaw:nullptr)") &&
+           has(host, "zoomApplied?&zoomPreRaw:nullptr);") && has(host, "leftShare,&hidden,zoomStripNow)") && has(host, "in.shareDrawn=facts.drawn;in.shareRefused=facts.refused;") &&
+           has(host, "const bool carries=features.acquired()&&featureFrameKnown&&featureFrame.version>=EDVR_NATIVE_FRAME_VERSION_11;") && has(host, "game.views[0].fov=out.fov;") &&
+           has(system, "const RawFov base=liveGeometry?(s.toldRawSet?s.toldRaw[eye]:s.geometry.raw[eye]):s.optics.raw[eye];") &&
+           has(temporal, "edvr::terrainCullCoverNoteFrusta(s->announced);") && has(temporal, "const float outer=-s->announced[0][0], inner=s->announced[0][1];") &&
+           has(temporal, "const bool zoomMoved=s->history[eye].valid&&edvr::scopezoom::b3ResetEdge(s->history[eye].zoomed,zoomedHere);") && has(temporal, "separationMoved||zoomMoved;") &&
+           has(temporal, "const bool zoomedHere=eye==0&&s->zoomedNow;") && has(temporal, "hst.zoomed=zoomedHere;") &&
+           has(stereo, "share.band[2]=leftStripBlack;") && has(vscreen, "if (nativeOnFootB3Counting()) nativeOnFootB3NoteEyeDraw();");
 }
 static bool wiredIni(const std::string& ini) {
     const size_t fixAt = ini.find("native_on_foot_ads_scope_zoom = on"), expAt = ini.find("native_on_foot_ads_scope_zoom_fov = 56.3");
@@ -147,6 +199,46 @@ static void wiringTests() {
     check(!wiredFrame(replaced(native, "cfg.getString(\"fix.native_on_foot_ads_scope_zoom\", \"on\")", "cfg.getString(\"fix.native_on_foot_ads_scope_zoom\", \"off\")")), "control: the reader's fallback off is not the shipped default");
     check(!wiredFrame(replaced(native, "std::atomic<bool> g_scopeZoomKey{true};", "std::atomic<bool> g_scopeZoomKey{false};")), "control: the atomic's start value off is not the shipped default");
     check(wiredIni(ini), "the ini states both keys with their rows: the user key on the Native on foot page, the experimental one in the developer tier");
+    // ---- B3 ----
+    check(wiredLeftDoor(layer), "B3: the left eye's door copies the zoomed picture after the ripple, before the left eye's UI composite and the right eye's lens");
+    check(!wiredLeftDoor(replaced(layer, "if (eye == 0 && scopeZoomWanted())", "if (eye == 1 && scopeZoomWanted())")), "control: a left door asked for the right eye is not the wiring");
+    check(!wiredLeftDoor(replaced(layer, "leftArgs.resolved = e.doorFromPass;", "leftArgs.resolved = true;")), "control: a left copy of a picture that is not the upscaler's is not the wiring");
+    check(has(native, "scopeZoomSetTemporalZoom(&nativeTemporalZoom);"), "B3: the tick hands the doors the temporal pass's word on eye 0");
+    check(wiredB3Frame(native), "B3: the key by its literal name, off by default; the tick's step before the publish; the window handed the provider; the press line from every half; the pin on one eye; the export");
+    check(!wiredB3Frame(replaced(native, "std::atomic<bool> g_scopeZoomFullKey{false};", "std::atomic<bool> g_scopeZoomFullKey{true};")), "control: the full-detail key on at the start is not the shipped default");
+    check(!wiredB3Frame(replaced(native, "cfg.getString(\"experimental.native_on_foot_ads_scope_zoom_full_detail\", \"off\") == \"on\"", "cfg.getString(\"experimental.native_on_foot_ads_scope_zoom_full_detail\", \"on\") == \"on\"")),
+          "control: the reader's fallback on is not the shipped default");
+    check(!wiredB3Frame(replaced(native, "b3Tick(s, gi, verdict, g, dt, nowMs, out);", "")), "control: no B3 step in the tick is not the wiring");
+    check(!wiredB3Frame(replaced(native, "        b3Idle(dt, nowMs);\n        return;", "        return;")), "control: a strip that is not published once the sights are down (it would stay black) is not the wiring");
+    check(!wiredB3Frame(replaced(native, "    endB3Press(s);\n", "")), "control: a press that does not write its B3 line is not the wiring");
+    check(!wiredB3Frame(replaced(native, "g_f85Latch.putSolo(1, frame, s.K, s.oh, s.ow)", "false")), "control: a readout pin that does not take the right eye alone while the left is zoomed is not the wiring");
+    check(!wiredB3Frame(replaced(native, "if (nativeTemporalZoomLatest(nullptr, nullptr, nullptr)) {   // B3: eye 0 is drawn as the zoomed view this frame", "if (false) {   // B3: eye 0 is drawn as the zoomed view this frame")),
+          "control: a pin that never knows eye 0 is zoomed is not the wiring");
+    check(!wiredB3Frame(replaced(native, "sz::b3WindowMatches(zt, lt, 3.0e-3)", "true")), "control: matrices made from rows that do not describe the window the runtime told the game are not the wiring");
+    {
+        const std::string frameCpp = readFile("src/d3d11/native_frame.cpp"), host = readFile("src/openxr/native_runtime_host.h"), tcpp = readFile("src/d3d11/native_temporal.cpp"),
+                          stereo = readFile("src/openxr/d3d11_stereo.cpp"), system = readFile("src/openxr/openvr_system.cpp"), vs = readFile("src/d3d11/vscreen.cpp");
+        check(!frameCpp.empty() && !host.empty() && !tcpp.empty() && !stereo.empty() && !system.empty(), "B3: the sources the halves' wiring scans read are readable");
+        check(wiredB3Halves(frameCpp, host, tcpp, stereo, vs, system), "B3: the provider's words, the runtime's narrowing (before the publish; the raw getter, mesh and announcements kept true), the strip, the draw count, the reset edge");
+        check(!wiredB3Halves(replaced(frameCpp, "if (carried) edvr::scopewin::toWords(", "if (false) edvr::scopewin::toWords("), host, tcpp, stereo, vs, system), "control: words the provider never fills are not the wiring");
+        check(!wiredB3Halves(frameCpp, replaced(host, "hiddenMeshCompatible()&&!zoomApplied,zoomApplied?zoomToldRaw:nullptr", "hiddenMeshCompatible(),nullptr"), tcpp, stereo, vs, system),
+              "control: a zoom whose hidden-area mesh stays and whose raw getter is not held back is not the wiring");
+        check(!wiredB3Halves(frameCpp, replaced(host, "zoomApplied?&zoomPreRaw:nullptr);", "nullptr);"), tcpp, stereo, vs, system), "control: a temporal pass not told the frustum without the zoom is not the wiring");
+        check(!wiredB3Halves(frameCpp, replaced(host, "in.shareDrawn=facts.drawn;in.shareRefused=facts.refused;", ""), tcpp, stereo, vs, system), "control: a zoom that does not look at whether the share was drawn is not the wiring");
+        check(!wiredB3Halves(frameCpp, host, replaced(tcpp, "edvr::terrainCullCoverNoteFrusta(s->announced);", "edvr::terrainCullCoverNoteFrusta(s->frusta);"), stereo, vs, system), "control: announced frusta that follow the zoom are not the wiring");
+        check(!wiredB3Halves(frameCpp, host, replaced(tcpp, "separationMoved||zoomMoved;", "separationMoved;"), stereo, vs, system), "control: no history reset at the window's edges is not the wiring");
+        check(!wiredB3Halves(frameCpp, host, tcpp, replaced(stereo, "share.band[2]=leftStripBlack;", ""), vs, system), "control: a strip that never reaches the shader is not the wiring");
+        check(!wiredB3Halves(frameCpp, host, tcpp, stereo, replaced(vs, "if (nativeOnFootB3Counting()) nativeOnFootB3NoteEyeDraw();", ""), system), "control: draws that are not counted are not the wiring");
+        check(!wiredB3Halves(frameCpp, host, tcpp, stereo, vs, replaced(system, "(s.toldRawSet?s.toldRaw[eye]:s.geometry.raw[eye])", "s.geometry.raw[eye]")), "control: a raw getter that follows the zoom (the HUD would grow) is not the wiring");
+    }
+    {
+        const char* key = "native_on_foot_ads_scope_zoom_full_detail = off";
+        const size_t at = ini.find(key), fovAt = ini.find("native_on_foot_ads_scope_zoom_fov = 56.3");
+        check(at != std::string::npos && fovAt != std::string::npos && fovAt < at && before(ini, "[experimental]", key) && has(ini, "# ui: ADS: scope zoom full detail (experimental) | choices on, off | recommended off | live") &&
+                  has(ini, "# TEMPORARY (B3): ADS: scope zoom full detail:"),
+              "B3: the ini states the key off, in the experimental section after the reference FOV, marked TEMPORARY, with its row");
+        check(!(ini.find("native_on_foot_ads_scope_zoom_full_detail = on") != std::string::npos), "B3: the key is not on in the shipped file");
+    }
     check(!wiredIni(replaced(ini, "native_on_foot_ads_scope_zoom = on", "native_on_foot_ads_scope_zoom = off")), "control: the user key off by default is not the shipped default");
 
     // the scope's gunsight mark: named in the draw hook only for the pair's 6 indices in 1 instance while the lens is armed and a learned surface is sampled, counted where the layer takes
@@ -809,6 +901,265 @@ void lensTests(Fx& f) {
     }
 }
 
+// ============================================================================================ B3: the left eye drawn as the zoomed view
+// A synthetic world seen by two eyes 6.3 cm apart. The right eye (the aiming one) looks down +z with the rig's tangents; the left eye is drawn zoomed: M = 4, a window about its direction to the
+// far point c. A textured plane at distance Z (or a sky, a function of the direction alone) fills the scope's hole. The right picture is a ramp (unrelated to the world, so a lens that did
+// not take its picture from the left eye is seen at once); the left picture is the world as the left eye draws it. The ideal lens shows, at each pixel p of the hole, the world point the
+// right eye sees at q = c + (p - c) / M.
+using b3test::Cam;
+using b3test::makeCam;
+constexpr double kEyeR[3] = {0.0315, 0.0, 0.0}, kEyeL[3] = {-0.0315, 0.0, 0.0};
+constexpr double kNearPlane = 0.025;   // reverse-Z depth = n / z: the depth of 0.6 m is kNearDepth (0.0417)
+constexpr uint32_t kLeftW = 512, kLeftH = 512;
+constexpr double kWinM = 4.0;
+
+Rgba worldTex(double a, double b) {   // a, b: the plane's coordinates over its distance (or the sky's tangents); a period of 0.0133
+    auto q = [](double v) { return static_cast<uint8_t>(std::min(std::max(std::lround(v), 0L), 255L)); };
+    const double u = a / 0.0133, v = b / 0.0133;
+    return Rgba{q(128.0 + 90.0 * std::sin(2.0 * sz::kPi * u + 0.3)), q(128.0 + 90.0 * std::cos(2.0 * sz::kPi * v)), q(128.0 + 60.0 * std::sin(2.0 * sz::kPi * (u + v) * 0.5)), 255};
+}
+struct B3Geom {
+    double trueTan[4] = {-0.5, 0.5, -0.5, 0.5};
+    double tc[2] = {0.0, 0.0};
+    double win[4] = {};
+    B3Geom() {
+        // c in the right eye (unjittered): the rig's c, as a tangent; the left eye's direction to the far point is the same ray 6.3 cm over
+        const double u = cOutX() / kOutW, v = cOutY() / kOutH;
+        tc[0] = trueTan[0] + u * (trueTan[1] - trueTan[0]) + 0.063 / 100.0;
+        tc[1] = trueTan[3] - v * (trueTan[3] - trueTan[2]);
+        sz::b3Window(trueTan, tc, kWinM, win);
+    }
+};
+// The world's colour at the right eye's pixel q (output px), for a plane at Z (Z <= 0: the sky).
+Rgba worldAtRight(const B3Geom& g, double Z, double qx, double qy) {
+    const double tx = g.trueTan[0] + qx / kOutW * (g.trueTan[1] - g.trueTan[0]), ty = g.trueTan[3] - qy / kOutH * (g.trueTan[3] - g.trueTan[2]);
+    return Z > 0.0 ? worldTex(tx + kEyeR[0] / Z, ty) : worldTex(tx, ty);
+}
+Image makeLeft(const B3Geom& g, double Z) {
+    Image im;
+    im.w = kLeftW;
+    im.h = kLeftH;
+    im.px.resize(static_cast<size_t>(kLeftW) * kLeftH);
+    for (uint32_t y = 0; y < kLeftH; ++y)
+        for (uint32_t x = 0; x < kLeftW; ++x) {
+            const double tx = g.win[0] + (x + 0.5) / kLeftW * (g.win[1] - g.win[0]), ty = g.win[3] - (y + 0.5) / kLeftH * (g.win[3] - g.win[2]);
+            im.at(static_cast<int>(x), static_cast<int>(y)) = Z > 0.0 ? worldTex(tx + kEyeL[0] / Z, ty) : worldTex(tx, ty);
+        }
+    return im;
+}
+Scene makeScenePlane(double Z) {
+    Scene s = makeScene(true, -1);
+    for (float& d : s.depth)
+        if (d == static_cast<float>(kFarD)) d = Z > 0.0 ? static_cast<float>(kNearPlane / Z) : 0.0f;
+    return s;
+}
+struct B3In {
+    double Z = 3.0;
+    bool asked = true, matOk = true, zoomedFrame = true, makeLeftCopy = true, leftStaleSeq = false, leftBehind = false, shaderless = false;
+    double m = 2.5;
+};
+struct B3Run {
+    Image image;
+    sz::LensDoorStats stats;
+    sz::B3Press b3;
+    bool gotCopy = false;
+};
+B3Run runLensB3(Fx& f, const B3In& in) {
+    const B3Geom g;
+    const Scene sc = makeScenePlane(in.Z);
+    const Image orig = makeOrig(), left = makeLeft(g, in.Z);
+    ComPtr<ID3D11Texture2D> depthTex;
+    ComPtr<ID3D11ShaderResourceView> srv = f.depthSrv(sc, &depthTex);
+    const UINT bind = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
+    ComPtr<ID3D11Texture2D> frame = f.frameTex(DXGI_FORMAT_R8G8B8A8_UNORM, orig, bind);
+    ComPtr<ID3D11Texture2D> leftTex;
+    {
+        D3D11_TEXTURE2D_DESC d{};
+        d.Width = kLeftW; d.Height = kLeftH; d.MipLevels = d.ArraySize = 1; d.Format = DXGI_FORMAT_R8G8B8A8_UNORM; d.SampleDesc.Count = 1; d.Usage = D3D11_USAGE_DEFAULT; d.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        hr(f.dev->CreateTexture2D(&d, nullptr, &leftTex), "the rig's left picture");
+        f.upload(leftTex.Get(), DXGI_FORMAT_R8G8B8A8_UNORM, left);
+    }
+    // the two eyes' matrices, from rows of one frame (the right eye's unjittered rows, the left eye's with the window)
+    const Cam camR = makeCam(kEyeR, g.trueTan, kNearPlane), camL = makeCam(in.leftBehind ? std::array<double, 3>{-0.0315, 0.0, 2.0}.data() : kEyeL, g.win, kNearPlane);
+    const double zero2[2] = {0.0, 0.0};
+    ScopeZoomFrame rec;
+    check(sz::b3Matrices(camR.rows, camR.o, zero2, camL.rows, camL.o, zero2, rec.b3.T, rec.b3.u), "B3 rig: the two eyes' matrices");
+    scopeZoomDepthClear(1);
+    scopeZoomDepthSet(1, srv.Get(), kRenW, kRenH, static_cast<float>(kNearDepth), true);
+    static uint32_t press = 5000;
+    ++press;
+    scopeZoomPressBegin(press);
+    rec.verdict = static_cast<uint32_t>(sz::LensVerdict::kQualifies);
+    rec.press = press;
+    rec.m = rec.mTarget = static_cast<float>(in.m);
+    rec.uv[0] = static_cast<float>(kCRen[0] / kRenW);
+    rec.uv[1] = static_cast<float>(kCRen[1] / kRenH);
+    rec.jitterUv[0] = static_cast<float>(kJitterPx[0] / kRenW);
+    rec.jitterUv[1] = static_cast<float>(kJitterPx[1] / kRenH);
+    rec.jitterSeq = 100;
+    std::memcpy(rec.tan4, kTan4, sizeof(kTan4));
+    rec.b3.asked = in.asked ? 1u : 0u;
+    rec.b3.matOk = in.matOk ? 1u : 0u;
+    rec.b3.tc[0] = static_cast<float>(g.tc[0]);
+    rec.b3.tc[1] = static_cast<float>(g.tc[1]);
+    g_stubZoom.on = in.zoomedFrame;
+    for (int i = 0; i < 4; ++i) {
+        g_stubZoom.zoomed[i] = static_cast<float>(g.win[i]);
+        g_stubZoom.pre[i] = static_cast<float>(g.trueTan[i]);
+    }
+    scopeZoomPublish(rec);
+    const uint32_t region[4] = {0, 0, kOutW, kOutH}, leftRegion[4] = {0, 0, kLeftW, kLeftH};
+    B3Run out;
+    ComPtr<ID3D11Texture2D> copy;
+    for (uint32_t i = 0; i < 400u; ++i) {
+        if (i) {
+            rec.jitterSeq = static_cast<uint64_t>(100 + i);
+            scopeZoomPublish(rec);
+        }
+        f.upload(frame.Get(), DXGI_FORMAT_R8G8B8A8_UNORM, orig);
+        if (in.makeLeftCopy) {
+            ScopeZoomLeftArgs la;
+            la.sequence = 100 + i + (in.leftStaleSeq ? 7u : 0u);
+            la.frame = leftTex.Get();
+            la.region = leftRegion;
+            la.resolved = true;
+            scopeZoomLeftDoor(la);
+        }
+        ScopeZoomDoorArgs a;
+        a.eye = 1;
+        a.sequence = 100 + i;
+        a.frame = frame.Get();
+        a.region = region;
+        a.inPlace = true;
+        a.resolved = true;
+        copy.Reset();
+        scopeZoomDoor(a, &copy);
+        f.ctx->Flush();
+        sz::LensDoorStats peek;
+        scopeZoomPressTake(&peek);
+        if (peek.raysRead >= 2) break;
+        Sleep(1);
+    }
+    out.gotCopy = copy != nullptr;
+    out.image = f.read(copy ? copy.Get() : frame.Get(), DXGI_FORMAT_R8G8B8A8_UNORM);
+    scopeZoomPressTake(&out.stats);
+    scopeZoomB3Take(&out.b3);
+    scopeZoomDepthClear(1);
+    g_stubZoom.on = false;
+    return out;
+}
+// What the lens should show where the hole is: the world at q = c + (p - c) / M. naive: the left picture taken at the same direction, with no parallax removed (the mutant).
+struct B3Verdict { unsigned inside = 0, bad = 0, worst = 0; };
+B3Verdict compareB3(const Image& got, double Z, double m, const Expected& e, int tol, double mOff = 0.0) {
+    const B3Geom g;
+    B3Verdict v;
+    const double cx = cOutX(), cy = cOutY();
+    for (size_t i = 0; i < got.px.size(); ++i) {
+        if (e.edge[i] < 4.0) continue;
+        const int x = static_cast<int>(i % got.w), y = static_cast<int>(i / got.w);
+        const double mm = m + mOff;
+        const double qx = cx + (x + 0.5 - cx) / mm, qy = cy + (y + 0.5 - cy) / mm;
+        const Rgba want = worldAtRight(g, Z, qx, qy), have = got.px[i];
+        const unsigned d = static_cast<unsigned>(std::max({std::abs(have.r - want.r), std::abs(have.g - want.g), std::abs(have.b - want.b)}));
+        ++v.inside;
+        if (static_cast<int>(d) > tol) ++v.bad;
+        v.worst = std::max(v.worst, d);
+    }
+    return v;
+}
+// The same, for the left picture taken straight (the direction q has in the right eye, read at that direction in the left eye): what a lens without the parallax removed would show.
+B3Verdict compareNaive(const Image& got, double Z, double m, const Expected& e, int tol) {
+    const B3Geom g;
+    B3Verdict v;
+    const Image left = makeLeft(g, Z);
+    const double cx = cOutX(), cy = cOutY();
+    for (size_t i = 0; i < got.px.size(); ++i) {
+        if (e.edge[i] < 4.0) continue;
+        const int x = static_cast<int>(i % got.w), y = static_cast<int>(i / got.w);
+        const double qx = cx + (x + 0.5 - cx) / m, qy = cy + (y + 0.5 - cy) / m;
+        const double tx = g.trueTan[0] + qx / kOutW * (g.trueTan[1] - g.trueTan[0]), ty = g.trueTan[3] - qy / kOutH * (g.trueTan[3] - g.trueTan[2]);
+        const double lx = (tx - g.win[0]) / (g.win[1] - g.win[0]) * kLeftW, ly = (g.win[3] - ty) / (g.win[3] - g.win[2]) * kLeftH;
+        const Rgba want = catmullAt(left, lx, ly), have = got.px[i];
+        const unsigned d = static_cast<unsigned>(std::max({std::abs(have.r - want.r), std::abs(have.g - want.g), std::abs(have.b - want.b)}));
+        ++v.inside;
+        if (static_cast<int>(d) > tol) ++v.bad;
+        v.worst = std::max(v.worst, d);
+    }
+    return v;
+}
+unsigned diffCount(const Image& a, const Image& b) {
+    unsigned n = 0;
+    for (size_t i = 0; i < a.px.size() && i < b.px.size(); ++i) n += (a.px[i].r != b.px[i].r || a.px[i].g != b.px[i].g || a.px[i].b != b.px[i].b) ? 1u : 0u;
+    return n;
+}
+
+void b3Tests(Fx& f) {
+    const Image orig = makeOrig();
+    const Scene ring = makeScene(true, -1);
+    const double cx = cOutX(), cy = cOutY();
+    const Expected e = expectedLens(ring, orig, 2.5, cx, cy, 1.0, 0.0);
+    const uint32_t zoomedIdx = static_cast<uint32_t>(sz::B3Source::kZoomed);
+    // ---- the lens takes its picture from the left eye, at every distance and for the sky ----
+    const double planes[5] = {1.5, 3.0, 10.0, 100.0, 0.0};
+    for (double Z : planes) {
+        B3In in;
+        in.Z = Z;
+        const B3Run r = runLensB3(f, in);
+        const B3Verdict v = compareB3(r.image, Z, in.m, e, 4);
+        std::printf("B3 plane %.1f m: %u px in the hole, %u off by more than 4 codes (worst %u); source zoomed %u, parallax mean %.1f px\n", Z, v.inside, v.bad, v.worst, r.b3.source[zoomedIdx],
+                    r.b3.parN ? r.b3.parSumPx / r.b3.parN : -1.0);
+        check(v.inside > 2000 && v.bad * 100 < v.inside, Z > 0.0 ? "B3: the lens shows the world as the right eye sees it at c + (p - c) / M, taken from the left eye's zoomed picture, at this distance"
+                                                                  : "B3: the lens shows the sky by its direction, taken from the left eye's zoomed picture");
+        check(r.b3.source[zoomedIdx] >= 1 && r.b3.copies >= 1 && r.stats.dispatched >= 1 && !r.gotCopy, "B3: the frames were counted as taken from the zoomed picture, the left door copied it, and the frame was written in place");
+        check(r.b3.source[static_cast<uint32_t>(sz::B3Source::kNotZoomed)] + r.b3.source[static_cast<uint32_t>(sz::B3Source::kNoCopy)] + r.b3.source[static_cast<uint32_t>(sz::B3Source::kStale)] +
+                      r.b3.source[static_cast<uint32_t>(sz::B3Source::kNoMatrices)] + r.b3.source[static_cast<uint32_t>(sz::B3Source::kNoShader)] ==
+                  0u,
+              "B3: and none of them fell back");
+        if (Z == 3.0 || Z == 1.5) {
+            check(r.b3.parN >= 1 && std::fabs(r.b3.parSumPx / r.b3.parN - 0.063 / Z * (kLeftW / (B3Geom().win[1] - B3Geom().win[0]))) < 0.05 * 0.063 / Z * (kLeftW / (B3Geom().win[1] - B3Geom().win[0])),
+                  "B3: the parallax at c the press line reports is 6.3 cm over the distance in the left picture's pixels (within 5 %)");
+            const B3Verdict naive = compareNaive(r.image, Z, in.m, e, 8);
+            check(naive.bad * 4 > naive.inside, "B3: control: the left picture read at the same direction, with the parallax left in, is not what the lens shows (a quarter of the hole disagrees)");
+        }
+        if (Z == 3.0) {
+            const B3Verdict wrongM = compareB3(r.image, Z, in.m, e, 4, 0.5);
+            check(wrongM.bad * 4 > wrongM.inside, "B3: control: a lens magnified 20 % less than the game's zoom is not what the lens shows");
+        }
+    }
+    // ---- each reason the lens falls back to the plain lens, counted, and the plain lens is what it shows ----
+    {
+        B3In base;
+        base.Z = 3.0;
+        const Image a = runDoor(f, ring, orig, RunIn{}).image;   // the plain lens, A, for the same frame
+        struct Case { const char* name; B3In in; sz::B3Source want; };
+        Case cases[6];
+        cases[0] = {"not asked", base, sz::B3Source::kNotAsked};
+        cases[0].in.asked = false;
+        cases[1] = {"the left eye not zoomed in this frame", base, sz::B3Source::kNotZoomed};
+        cases[1].in.zoomedFrame = false;
+        cases[2] = {"no copy of the left picture", base, sz::B3Source::kNoCopy};
+        cases[2].in.makeLeftCopy = false;
+        cases[3] = {"a copy of another frame", base, sz::B3Source::kStale};
+        cases[3].in.leftStaleSeq = true;
+        cases[4] = {"no usable matrices", base, sz::B3Source::kNoMatrices};
+        cases[4].in.matOk = false;
+        cases[5] = {"the left eye behind the point (each pixel falls back)", base, sz::B3Source::kZoomed};
+        cases[5].in.leftBehind = true;
+        for (const Case& c : cases) {
+            const B3Run r = runLensB3(f, c.in);
+            const uint32_t want = static_cast<uint32_t>(c.want);
+            uint32_t others = 0;
+            for (uint32_t i = 0; i < sz::kB3Sources; ++i)
+                if (i != want) others += r.b3.source[i];
+            const unsigned differs = diffCount(r.image, a);
+            std::printf("B3 fall-back, %s: counted %u under its reason, %u elsewhere, %u px differ from the plain lens\n", c.name, r.b3.source[want], others, differs);
+            check(r.b3.source[want] >= 1 && others == 0, "B3: the frames are counted under the reason the lens fell back, and under no other");
+            check(differs * 200 < static_cast<unsigned>(a.px.size()) || differs == 0u, "B3: and the picture is the plain lens's (the same frame, magnified from the right eye's own picture)");
+            check(r.stats.dispatched >= 1, "B3: the fall-back is a lens, not a declined frame");
+        }
+    }
+}
+
 void infoCheck(Fx& f) {
     if (!f.info) {
         std::puts("scope_zoom_test: no debug layer on this machine (the passes ran without it)");
@@ -843,8 +1194,10 @@ int main(int argc, char** argv) {
     }
     try {
         wiringTests();
+        scopeZoomSetTemporalZoom(&nativeTemporalZoom);
         Fx f(hardware);
         lensTests(f);
+        b3Tests(f);
         infoCheck(f);
         scopeZoomRelease();
     } catch (const std::exception& e) {

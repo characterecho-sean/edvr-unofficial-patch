@@ -86,6 +86,9 @@
 #include "scope_zoom_s0.h"   // S0: the scope zoom instrument, measure only (pure parts)
 #include "scope_zoom_s1.h"   // S1/A1: the scope lens's table, gate, ease and lines (pure parts)
 #include "scope_zoom.h"      // S1/A1: the lens's frame record for the door (scopeZoomPublish)
+#include "scope_zoom_b3.h"   // B3: the left eye drawn as the zoomed view, its window, matrices, gate, strip and press line (pure parts)
+#include "../common/scope_zoom_window.h"   // B3: the window the provider hands the runtime each frame (scopewin::publish)
+#include "light_grid_cache_hook.h"   // B3: the cache's counts of the zoomed eye's builder calls (lightGridCacheZoomCounts)
 #include "flat_camera_inject.h"   // S0: flatCameraInjectObserveStatus, the refresh hook's state for the flat announce
 #include "pixel_probe.h"   // S0: the pixel probe's points and its armed state, for the lens census
 #include "xinput_watch.h"         // F135: the pad's Start and Back edges, evidence for the menu probe only
@@ -271,6 +274,19 @@ int adsAimEye() noexcept { return nofoot::f162::aimingEye(g_adsSightEyeKey.load(
 // own zoom. A USER key, default on since A3 flew OK (2026-10-29); the reference FOV M is measured from is experimental.native_on_foot_ads_scope_zoom_fov (TEMPORARY, degrees, live).
 std::atomic<bool> g_scopeZoomKey{true};
 std::atomic<float> g_scopeZoomRefDeg{static_cast<float>(edvr::scopezoom::kLensRefDefaultDeg)};
+// B3 (live, TEMPORARY): experimental.native_on_foot_ads_scope_zoom_full_detail, on | off, default off. On: for the scoped Executioner (the table's rendered entry) with fix.native_on_foot_ads_scope_zoom
+// on and the sight eye at both, the game draws the LEFT eye as the zoomed view and the lens samples that picture (scope_zoom_b3.h); off: the lens is the digital zoom of the right eye (A).
+std::atomic<bool> g_scopeZoomFullKey{false};
+// B3's instruments, written by the draw/render thread and read by the frame thread at a press's end: a press with B3 asked is open (the draw path counts the eyes' draws, the constants buffer's
+// shadow keeps the shadow constants); the eye-sized draws into each eye since the frame thread's last tick; the readout pin's frames taken on one eye, and refused for want of a pair
+// while eye 0 was zoomed; the shadow constants' rows (cb1 298 to 326) changed from the eye's last frame, and between the eyes, inside the zoomed span (0) and outside it (1).
+std::atomic<bool>& g_b3Counting = g_nativeOnFootB3Counting;
+std::atomic<uint32_t> g_b3EyeDraws[2]{};
+std::atomic<uint32_t> g_b3PinSolo{0}, g_b3PinNoPair{0};
+std::atomic<uint32_t> g_b3ShN[2][2]{};
+std::atomic<uint64_t> g_b3ShChanged[2][2]{};
+std::atomic<uint32_t> g_b3ShPairN[2]{};
+std::atomic<uint64_t> g_b3ShPairDiff[2]{};
 // F93b (TEMPORARY A/B, live): fix.native_on_foot_ads_eye_steady. on (the default): the ADS sight lock's target is the shift the measured eye was rendered with plus the
 // error measured on it (nofoot::f93::sightTarget); off: F70's, the shift published now plus that error.
 std::atomic<bool> g_f93SteadyKey{true};
@@ -1215,6 +1231,15 @@ void readKey() {
                             "from: M = tan(h / 2) / tan(the weapon's ADS FOV / 2)", ref, sz::kLensRefMinDeg, sz::kLensRefMaxDeg);
         g_scopeZoomKey.store(zoomOn, std::memory_order_relaxed);
         g_scopeZoomRefDeg.store(static_cast<float>(ref), std::memory_order_relaxed);
+        // B3 (live, TEMPORARY): the full-detail lens, for the scoped Executioner only.
+        const bool full = cfg.getString("experimental.native_on_foot_ads_scope_zoom_full_detail", "off") == "on";
+        if (first || full != g_scopeZoomFullKey.load(std::memory_order_relaxed))
+            Log::get().note("native on foot ADS scope zoom full detail (B3, TEMPORARY): experimental.native_on_foot_ads_scope_zoom_full_detail is %s -- %s", full ? "on" : "off",
+                            full ? "while you aim down sights through the scoped Executioner, with the scope zoom on and ADS: sight eye at both, the game draws the LEFT eye as the zoomed view (its frustum "
+                                   "narrowed by the zoom, about the sight line, no pose change) and the scope's lens shows that picture; the left eye is covered by the right eye's view, and the part of it "
+                                   "the cover does not reach goes black meanwhile"
+                                 : "the scope's lens is the digital zoom of the right eye's picture (A)");
+        g_scopeZoomFullKey.store(full, std::memory_order_relaxed);
     }
     // F93b (TEMPORARY A/B, live): the ADS sight lock's input (fix.native_on_foot_ads_eye_steady).
     {
@@ -11657,13 +11682,13 @@ struct EyeJitterPub {
     uint64_t tseq = 0;
     float jx = 0.0f, jy = 0.0f;
 };
-EyeJitterPub g_eyeJitterPub;
-void eyeJitterPublish(uint32_t frame) noexcept {
+EyeJitterPub g_eyeJitterPub[2];   // B3 takes the left eye's too (the matrices of the two eyes are made without their jitter)
+void eyeJitterPublish(int e, uint32_t frame) noexcept {
     uint64_t tseq = 0;
     float jx = 0.0f, jy = 0.0f;
     uint32_t w = 0, h = 0;
-    const bool got = nativeTemporalDrawJitter(1, &tseq, &jx, &jy, &w, &h) && w && h && std::isfinite(jx) && std::isfinite(jy);
-    EyeJitterPub& q = g_eyeJitterPub;
+    const bool got = nativeTemporalDrawJitter(static_cast<uint32_t>(e), &tseq, &jx, &jy, &w, &h) && w && h && std::isfinite(jx) && std::isfinite(jy);
+    EyeJitterPub& q = g_eyeJitterPub[e];
     q.seq.fetch_add(1, std::memory_order_acq_rel);
     q.ok = got;
     q.frame = frame;
@@ -11674,8 +11699,9 @@ void eyeJitterPublish(uint32_t frame) noexcept {
     q.h = h;
     q.seq.fetch_add(1, std::memory_order_release);
 }
-bool eyeJitterRead(bool* ok, uint32_t* frame, uint64_t* tseq, float* jx, float* jy, uint32_t* w, uint32_t* h) noexcept {
-    EyeJitterPub& q = g_eyeJitterPub;
+bool eyeJitterRead(int e, bool* ok, uint32_t* frame, uint64_t* tseq, float* jx, float* jy, uint32_t* w, uint32_t* h) noexcept {
+    if (e < 0 || e > 1) return false;
+    EyeJitterPub& q = g_eyeJitterPub[e];
     for (int tries = 0; tries < 2; ++tries) {
         const uint32_t s1 = q.seq.load(std::memory_order_acquire);
         if (s1 & 1u || s1 == 0) continue;
@@ -11700,7 +11726,7 @@ void eyeRowsPublish(int e, uint32_t frame, const float rows[16], const float o[4
     std::memcpy(q.rows, rows, sizeof(q.rows));
     std::memcpy(q.o, o, sizeof(q.o));
     q.seq.fetch_add(1, std::memory_order_release);
-    if (e == 1 && g_scopeZoomKey.load(std::memory_order_relaxed)) eyeJitterPublish(frame);   // A1: the jitter this eye's rows were drawn with
+    if (g_scopeZoomKey.load(std::memory_order_relaxed) && (e == 1 || g_scopeZoomFullKey.load(std::memory_order_relaxed))) eyeJitterPublish(e, frame);   // A1: the jitter this eye's rows were drawn with (B3: both eyes')
 }
 bool eyeRowsRead(int e, uint32_t* frame, float rows[16], float o[4], uint64_t* qpc) noexcept {
     if (e < 0 || e > 1) return false;
@@ -26875,7 +26901,10 @@ struct Cb1Shadow {
     void* mapped = nullptr;
     bool valid = false;
     float rows[6][4] = {};
+    float sc[29][4] = {};        // B3: rows 298 to 326, the shadow constants, copied with the rows while a press with B3 asked is open (g_b3Counting); scValid says it holds this write's
+    bool scValid = false;
 };
+constexpr uint32_t kB3ShadowOffset = 298u * 16u, kB3ShadowBytes = 29u * 16u;
 Cb1Shadow g_cb1Shadow[kCb1Shadows];
 uint32_t g_cb1ShadowNext = 0;
 // What the origin rows came from, and how the two shadows agreed where both existed (render thread; the F85b window line reports and clears them).
@@ -26930,6 +26959,33 @@ struct CpuWorld {
     const void* cb1 = nullptr;
 };
 CpuWorld g_cpuWorld[2];
+// B3: the shadow constants (cb1 rows 298 to 326) of an eye's world draw of a frame, from the constants buffer's shadow, kept while a press with B3 asked is open: how many of the 29 rows
+// differ from the same eye's last frame, and between the eyes within one frame, inside the zoomed span (index 0) and outside it (1). The render thread.
+struct B3Shadow {
+    uint32_t frame[2] = {~0u, ~0u};
+    float rows[2][116] = {};
+    bool have[2] = {false, false};
+};
+B3Shadow g_b3Shadow;
+void b3ShadowNote(int e, uint32_t frame, const void* cb1) noexcept {
+    if (e < 0 || e > 1 || !g_b3Counting.load(std::memory_order_relaxed)) return;
+    const Cb1Shadow* sh = cb1ShadowFor(cb1, false);
+    if (!sh || !sh->scValid || sh->mapped) return;
+    const uint32_t io = nativeTemporalZoomLatest(nullptr, nullptr, nullptr) ? 0u : 1u;
+    B3Shadow& b = g_b3Shadow;
+    const float* now = &sh->sc[0][0];
+    if (b.have[e]) {
+        g_b3ShN[e][io].fetch_add(1, std::memory_order_relaxed);
+        g_b3ShChanged[e][io].fetch_add(edvr::scopezoom::b3RowsChanged(b.rows[e], now), std::memory_order_relaxed);
+    }
+    std::memcpy(b.rows[e], now, sizeof(b.rows[e]));
+    b.have[e] = true;
+    b.frame[e] = frame;
+    if (b.have[1 - e] && b.frame[1 - e] == frame) {
+        g_b3ShPairN[io].fetch_add(1, std::memory_order_relaxed);
+        g_b3ShPairDiff[io].fetch_add(edvr::scopezoom::b3RowsChanged(b.rows[0], b.rows[1]), std::memory_order_relaxed);
+    }
+}
 // F52: an eye's temporal reference this frame: the world rows with the temporal pass's camera rotation for the eye (drawtag::swapRotation),
 // at the world rows' o.
 CpuWorld g_tempRef[2];
@@ -28208,6 +28264,7 @@ void rowsSourcePublish(int e, uint32_t frame, uint8_t source, const float shadow
     std::memcpy(g_cpuWorld[e].o, v.o, sizeof(v.o));
     g_cpuWorld[e].cb1 = cb1;   // identity only (the b1 Unmap stamp)
     eyeRowsPublish(e, frame, g_cpuWorld[e].rows, g_cpuWorld[e].o);
+    b3ShadowNote(e, frame, cb1);
     // the eye's scene target for the depth probe's pick: the bound colour target when it is eye-sized (a depth-only pass keeps the last)
     if (void* view = bindingGet(BindSlot::Rtv0)) {
         ResourceInfo ri;
@@ -28402,6 +28459,7 @@ void worldDraw(ID3D11DeviceContext* ctx, uint32_t frame, uint64_t vs, bool censu
         std::memcpy(g_cpuWorld[e].o, v.o, sizeof(v.o));
         g_cpuWorld[e].cb1 = cb1;   // F64: identity only (the b1 Unmap stamp)
         eyeRowsPublish(e, frame, g_cpuWorld[e].rows, g_cpuWorld[e].o);   // F66e: for the frame thread's ADS sight check
+        b3ShadowNote(e, frame, cb1);
         ++g_win.worldShadow;
         ok = true;
     } else if (!covers(cb1, f1 * 16 + kWorldOffset, kWorldBytes)) {
@@ -29931,6 +29989,10 @@ void f85Refuse(F85bPe& pe, int why, bool byPlace = false) {
 }
 // K is a camera of this frame: the pair of the two eyes' estimates, compared once both are in (the latch the weapon UI's rows read).
 void f85LatchPut(int e, uint32_t frame, const F85Solve& s) {
+    if (nativeTemporalZoomLatest(nullptr, nullptr, nullptr)) {   // B3: eye 0 is drawn as the zoomed view this frame: its camera cannot agree with eye 1's, so eye 1 vouches alone, and eye 0 is not put
+        if (e == 1 && g_f85Latch.putSolo(1, frame, s.K, s.oh, s.ow)) g_b3PinSolo.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
     if (g_f85Latch.put(e, frame, s.K, s.oh, s.ow)) {
         g_f85w.agreeMmMax = std::max(g_f85w.agreeMmMax, g_f85Latch.last.distM * 1000.0);
         g_f85w.agreeDegMax = std::max(g_f85w.agreeDegMax, g_f85Latch.last.angleDeg);
@@ -31650,6 +31712,7 @@ void f85bDecide(ID3D11DeviceContext* ctx, uint32_t frame, const Rec& r, ID3D11Bu
     if (!f85Solve(e, frame, sh, oHud, s, &why)) { f85Refuse(pe, why, byPlace); return; }
     f85LatchPut(e, frame, s);
     if (!g_f85Latch.usable(frame)) {   // F148: the latch holds kLatchHoldFrames frames after a pairing (the draw's own K is solved this frame; the latch vouches that the eyes' K agreed)
+        if (nativeTemporalZoomLatest(nullptr, nullptr, nullptr)) g_b3PinNoPair.fetch_add(1, std::memory_order_relaxed);   // B3: refused for want of a pair while eye 0 is the zoomed view
         if (g_f85Latch.pastHold(frame)) ++pe.pastHold;
         f85Refuse(pe, g_f85Latch.pairs == 0 || g_f85Latch.pairedFrame == ~0u || frame > g_f85Latch.pairedFrame + nofoot::f85::kLatchHoldFrames ? kF85WhyNoPair : kF85WhyDisagree,
                   byPlace);
@@ -34462,6 +34525,8 @@ void nativeOnFootMarkerProbeUnmap(const ID3D11Resource* res) {
     for (f44::Cb1Shadow& s : f44::g_cb1Shadow) {   // F152: the scene constants' rows 270..275, before the real Unmap
         if (s.res != res || !s.mapped) continue;
         s.valid = f44::shadowCopyGuarded(s.rows, static_cast<const uint8_t*>(s.mapped) + nofoot::f152::kRowsOffset, nofoot::f152::kRowsBytes);
+        s.scValid = g_b3Counting.load(std::memory_order_relaxed) && s.bytes >= f44::kB3ShadowOffset + f44::kB3ShadowBytes &&
+                    f44::shadowCopyGuarded(s.sc, static_cast<const uint8_t*>(s.mapped) + f44::kB3ShadowOffset, f44::kB3ShadowBytes);   // B3: the shadow constants beside the rows
         s.mapped = nullptr;
         break;
     }
@@ -34487,6 +34552,7 @@ void nativeOnFootCb1Copied(const ID3D11Resource* res) {
     for (f44::Cb1Shadow& s : f44::g_cb1Shadow)
         if (s.res == res) {
             s.valid = false;
+            s.scValid = false;
             return;
         }
 }
@@ -34708,8 +34774,11 @@ void nativeOnFootMarkerProbeUpdate(const ID3D11Resource* res, const void* data, 
         if (s.res != res) continue;
         namespace f152 = nofoot::f152;
         if (s.bytes < f152::kRowsOffset + f152::kRowsBytes) break;
+        s.scValid = false;   // B3: a ranged write may land in rows 298 to 326; a whole-buffer one is copied just below
         if (!boxed) {
             s.valid = f44::shadowCopyGuarded(s.rows, static_cast<const uint8_t*>(data) + f152::kRowsOffset, f152::kRowsBytes);
+            s.scValid = g_b3Counting.load(std::memory_order_relaxed) && s.bytes >= f44::kB3ShadowOffset + f44::kB3ShadowBytes &&
+                        f44::shadowCopyGuarded(s.sc, static_cast<const uint8_t*>(data) + f44::kB3ShadowOffset, f44::kB3ShadowBytes);
         } else if (left <= f152::kRowsOffset && right >= f152::kRowsOffset + f152::kRowsBytes) {
             s.valid = f44::shadowCopyGuarded(s.rows, static_cast<const uint8_t*>(data) + (f152::kRowsOffset - left), f152::kRowsBytes);
         } else if (s.valid && right > left) {
@@ -35362,7 +35431,235 @@ void announce(State& s, bool key, double ref) noexcept {
     s.announcedKey = key;
     s.announcedRef = ref;
 }
+// ---- B3: the left eye drawn as the zoomed view (scope_zoom_b3.h; docs\design-vr-scope-magnification-2026-10-28.md, section 11) ------------------------------------------------------------
+// The frame thread decides, once a tick: whether the window is held (b3Gate: the key, the lens's gate, a rendered entry, the sight eye at both, the share at full weight, the left eye's rows),
+// where its centre is (the left eye's direction to the far point c, latched at the first frame it can start and held), how black the left eye's uncovered strip is (b3StripStep) and
+// whether the zoom is asked for -- once the strip is black. That is published to the provider (scope_zoom_window.h), which hands it to the runtime in the next beginFrame: at the earliest the
+// frame the game starts next (the tick runs at the frame boundary, the runtime's WaitGetPoses follows), at the latest the one after. The runtime narrows eye 0's told frustum and the temporal
+// pass says it did (nativeTemporalZoom), so the span's edges are the temporal pass's, not the tick's. The doors copy the left picture and sample it; the tick makes the two eyes' matrices
+// for the lens (b3Matrices) from the rows of one frame, once the left rows describe the window the runtime told the game.
+struct B3State {
+    bool announced = false, announcedKey = false, pressKey = false;
+    bool latched = false;
+    double tc[2] = {std::numeric_limits<double>::quiet_NaN(), std::numeric_limits<double>::quiet_NaN()}, m = std::numeric_limits<double>::quiet_NaN();
+    sz::B3Strip strip;
+    sz::B3Press p;   // this press's figures from the tick, the draw path and the shadow constants; the door's, the temporal pass's and the light grid's are added at its end
+    uint64_t zoomFrames0 = 0, resets0[2] = {}, edge0 = 0, lgCalls0 = 0, lgBypass0 = 0;
+} g_b3s;
+
+void announceB3(State& s, bool keyOn) noexcept {
+    B3State& b = g_b3s;
+    if (b.announced && b.announcedKey == keyOn) return;
+    b.announced = true;
+    b.announcedKey = keyOn;
+    (void)s;
+    Log::get().note("scope zoom (B3): full detail %s; for the table's rendered entries (the scoped Executioner) with the scope zoom on and ADS: sight eye at both, the left eye is drawn as the zoomed view and the lens "
+                    "shows it; one line a press with it asked follows, and the runtime's report after it.",
+                    keyOn ? "on" : "off");
+}
+void beginB3Press(State& s) noexcept {
+    B3State& b = g_b3s;
+    b.p = sz::B3Press{};
+    b.p.press = s.press;
+    b.pressKey = false;
+    uint64_t zf = 0, rs[2] = {}, edge = 0;
+    if (nativeTemporalZoomCounts(&zf, rs, &edge)) {
+        b.zoomFrames0 = zf;
+        b.resets0[0] = rs[0];
+        b.resets0[1] = rs[1];
+        b.edge0 = edge;
+    }
+    lightGridCacheZoomCounts(&b.lgCalls0, &b.lgBypass0);
+    g_b3EyeDraws[0].store(0, std::memory_order_relaxed);
+    g_b3EyeDraws[1].store(0, std::memory_order_relaxed);
+    g_b3PinSolo.store(0, std::memory_order_relaxed);
+    g_b3PinNoPair.store(0, std::memory_order_relaxed);
+    for (int e = 0; e < 2; ++e)
+        for (int k = 0; k < 2; ++k) {
+            g_b3ShN[e][k].store(0, std::memory_order_relaxed);
+            g_b3ShChanged[e][k].store(0, std::memory_order_relaxed);
+        }
+    for (int k = 0; k < 2; ++k) {
+        g_b3ShPairN[k].store(0, std::memory_order_relaxed);
+        g_b3ShPairDiff[k].store(0, std::memory_order_relaxed);
+    }
+}
+// The line of a press in which B3 was asked, from every module's half of the figures (scope_zoom_b3.h formatB3Press). The cross-module counts are read as differences from the press's start.
+void endB3Press(State& s) noexcept {
+    B3State& b = g_b3s;
+    g_b3Counting.store(false, std::memory_order_relaxed);
+    if (!b.pressKey || s.press > kPressLineCap) return;
+    sz::B3Press p = b.p;
+    sz::B3Press door;
+    scopeZoomB3Take(&door);
+    for (uint32_t i = 0; i < sz::kB3Sources; ++i) p.source[i] = door.source[i];
+    p.copies = door.copies;
+    p.parN = door.parN;
+    p.parSumPx = door.parSumPx;
+    p.parMaxPx = door.parMaxPx;
+    uint64_t zf = 0, rs[2] = {}, edge = 0;
+    if (nativeTemporalZoomCounts(&zf, rs, &edge)) {
+        p.zoomFrames = static_cast<uint32_t>(zf - b.zoomFrames0);
+        p.resets[0] = static_cast<uint32_t>(rs[0] - b.resets0[0]);
+        p.resets[1] = static_cast<uint32_t>(rs[1] - b.resets0[1]);
+        p.zoomEdgeResets = static_cast<uint32_t>(edge - b.edge0);
+    }
+    uint64_t calls = 0, bypassed = 0;
+    lightGridCacheZoomCounts(&calls, &bypassed);
+    p.lgCalls = static_cast<uint32_t>(calls - b.lgCalls0);
+    p.lgBypass = static_cast<uint32_t>(bypassed - b.lgBypass0);
+    p.pinSolo = g_b3PinSolo.exchange(0, std::memory_order_relaxed);
+    p.pinNoPair = g_b3PinNoPair.exchange(0, std::memory_order_relaxed);
+    for (int e = 0; e < 2; ++e)
+        for (int k = 0; k < 2; ++k) {
+            p.shN[e][k] = g_b3ShN[e][k].exchange(0, std::memory_order_relaxed);
+            p.shChanged[e][k] = g_b3ShChanged[e][k].exchange(0, std::memory_order_relaxed);
+        }
+    for (int k = 0; k < 2; ++k) {
+        p.shPairN[k] = g_b3ShPairN[k].exchange(0, std::memory_order_relaxed);
+        p.shPairDiff[k] = g_b3ShPairDiff[k].exchange(0, std::memory_order_relaxed);
+    }
+    p.press = s.press;
+    p.keyOn = g_scopeZoomFullKey.load(std::memory_order_relaxed);
+    char line[sz::kB3PressLineBytes];
+    sz::formatB3Press(line, sizeof(line), p);
+    Log::get().note("%s", line);
+}
+// Outside the sights, or not armed: no window is held, and the strip comes back (it is still published until it has).
+void b3Idle(double dt, uint64_t nowMs) noexcept {
+    B3State& b = g_b3s;
+    b.latched = false;
+    g_b3Counting.store(false, std::memory_order_relaxed);
+    sz::b3StripStep(b.strip, false, dt);
+    scopewin::Request rq;
+    rq.strip = static_cast<float>(b.strip.fade);
+    scopewin::publish(rq, nowMs);
+}
+void b3Off(uint64_t nowMs) noexcept {
+    g_b3s.latched = false;
+    g_b3s.strip = sz::B3Strip{};
+    g_b3Counting.store(false, std::memory_order_relaxed);
+    scopewin::publish(scopewin::Request{}, nowMs);
+}
+// The tick's B3 step, in the sights. out is the frame record the lens's doors read; verdict is the lens's gate (qualifies: S and the right eye's rows are fresh, g holds both eyes' rows).
+void b3Tick(State& s, const sz::LensGateIn& gi, sz::LensVerdict verdict, const s0::Geometry& g, double dt, uint64_t nowMs, ScopeZoomFrame& out) noexcept {
+    B3State& b = g_b3s;
+    s0::Vr& v = s0::g_vr;
+    constexpr double nan = std::numeric_limits<double>::quiet_NaN();
+    const bool keyB3 = g_scopeZoomFullKey.load(std::memory_order_relaxed) && gi.keyOn;
+    const bool rendered = sz::lensRenderedEntry(s.item.name, s.item.scope);
+    const bool asked = keyB3 && rendered;
+    if (asked) b.pressKey = true;
+    const bool shareMode = nofoot::f162::sharesView(g_adsSightEyeKey.load(std::memory_order_relaxed));
+    const double share = static_cast<double>(eyeshare::read(nowMs));
+    const bool sightsFull = gi.onFoot && gi.adsActive && gi.wFull;
+    const bool qualifies = verdict == sz::LensVerdict::kQualifies;
+    // the left eye's direction to the far point c (the lens's c is the right eye's: the point kFarM along the game's line E -> S past S): its tangent in the left eye's own frame
+    bool leftOk = false;
+    double tcNow[2] = {nan, nan};
+    if (asked && qualifies) {
+        const double S[3] = {v.S[0], v.S[1], v.S[2]};
+        const double dir[3] = {S[0] - v.Epos[0], S[1] - v.Epos[1], S[2] - v.Epos[2]};
+        const double od[3] = {g.o[0][0], g.o[0][1], g.o[0][2]};
+        double ndc[2];
+        float tj[4];
+        if (g.rowsFrame[0] != ~0u && nofoot::ikLen(dir) > kMinLineM && nofoot::sightPointNdc(g.rows[0], od, S, dir, kFarM, ndc) && sz::tangentsOf(sz::clipZoom(g.rows[0]), tj)) {
+            sz::tangentOfNdc(ndc, tj, tcNow);   // the jittered tangents give the ray's own tangent exactly: the jitter is in both
+            leftOk = std::isfinite(tcNow[0]) && std::isfinite(tcNow[1]);
+        }
+    }
+    sz::B3GateIn gate;
+    gate.keyOn = keyB3;
+    gate.qualifies = qualifies;
+    gate.rendered = rendered;
+    gate.shareMode = shareMode;
+    gate.leftRowsOk = leftOk;
+    gate.sightsFull = sightsFull;
+    gate.share = share;
+    gate.latched = b.latched;
+    const sz::B3GateOut go = sz::b3Gate(gate);
+    if (asked && shareMode && qualifies) ++b.p.askedTicks;
+    if (asked && shareMode && qualifies && sightsFull && share >= sz::kB3ShareFull && !leftOk && !b.latched) ++b.p.noLeftRows;
+    bool now = b.latched ? go.hold : go.latchNow;
+    if (go.latchNow) {   // the window is set at the first frame it can start, with w at 1, and held
+        b.tc[0] = tcNow[0];
+        b.tc[1] = tcNow[1];
+        b.m = gi.m;
+    }
+    b.latched = now;
+    if (now) ++b.p.heldTicks;
+    sz::b3StripStep(b.strip, now, dt);
+    if (b.strip.request) ++b.p.requestTicks;
+    scopewin::Request rq;
+    rq.zoom = b.strip.request;
+    rq.m = static_cast<float>(b.m);
+    rq.tc[0] = static_cast<float>(b.tc[0]);
+    rq.tc[1] = static_cast<float>(b.tc[1]);
+    rq.strip = static_cast<float>(b.strip.fade);
+    scopewin::publish(rq, nowMs);
+    if (now) {
+        b.p.tc[0] = b.tc[0];
+        b.p.tc[1] = b.tc[1];
+        b.p.m = b.m;
+    }
+    // the instruments that watch the span from here
+    const bool zoomedNow = nativeTemporalZoomLatest(nullptr, nullptr, nullptr);
+    const uint32_t io = zoomedNow ? 0u : 1u;
+    const bool counting = asked && sightsFull;
+    g_b3Counting.store(counting, std::memory_order_relaxed);
+    const uint32_t d0 = g_b3EyeDraws[0].exchange(0, std::memory_order_relaxed), d1 = g_b3EyeDraws[1].exchange(0, std::memory_order_relaxed);
+    if (counting) {
+        b.p.draws[0][io] += d0;
+        b.p.draws[1][io] += d1;
+        ++b.p.drawFrames[io];
+        if (dt > 0.0) {
+            ++b.p.ftN[io];
+            b.p.ftSum[io] += dt * 1000.0;
+            b.p.ftMax[io] = std::max(b.p.ftMax[io], dt * 1000.0);
+        }
+    }
+    // the frame record the lens's doors read
+    if (!qualifies) return;
+    out.b3.asked = asked ? 1u : 0u;
+    if (!asked || !b.latched) return;
+    out.b3.tc[0] = static_cast<float>(b.tc[0]);
+    out.b3.tc[1] = static_cast<float>(b.tc[1]);
+    if (leftOk) {
+        const double drift = sz::lensAngleDeg(tcNow[0], tcNow[1], b.tc[0], b.tc[1]);
+        if (std::isfinite(drift)) {
+            ++b.p.driftN;
+            b.p.driftSumDeg += drift;
+            b.p.driftMaxDeg = std::max(b.p.driftMaxDeg, drift);
+        }
+    }
+    // T and u need both eyes' rows of one frame, the jitter each was drawn with taken out, and the left rows to describe the window the runtime told the game
+    if (g.rowsFrame[0] == ~0u || g.rowsFrame[1] == ~0u || g.rowsFrame[0] != g.rowsFrame[1]) return;
+    double jn[2][2] = {};
+    for (int e = 0; e < 2; ++e) {
+        bool ok = false;
+        uint32_t frame = ~0u, w = 0, h = 0;
+        uint64_t seq = 0;
+        float jx = 0.0f, jy = 0.0f;
+        if (eyeJitterRead(e, &ok, &frame, &seq, &jx, &jy, &w, &h) && ok && w && h) {
+            jn[e][0] = 2.0 * static_cast<double>(jx) / static_cast<double>(w);
+            jn[e][1] = -2.0 * static_cast<double>(jy) / static_cast<double>(h);
+        }
+    }
+    sz::ClipZoom zl = sz::clipZoom(g.rows[0]);
+    float tanU[4];
+    float zoomed[4], pre[4];
+    if (!zl.ok || !nativeTemporalZoomLatest(nullptr, zoomed, pre)) return;
+    zl.offX -= jn[0][0];
+    zl.offY -= jn[0][1];
+    if (!sz::tangentsOf(zl, tanU)) return;
+    const double zt[4] = {zoomed[0], zoomed[1], zoomed[2], zoomed[3]}, lt[4] = {tanU[0], tanU[1], tanU[2], tanU[3]};
+    if (!sz::b3WindowMatches(zt, lt, 3.0e-3)) return;
+    const double o0[3] = {g.o[0][0], g.o[0][1], g.o[0][2]}, o1[3] = {g.o[1][0], g.o[1][1], g.o[1][2]};
+    if (sz::b3Matrices(g.rows[1], o1, jn[1], g.rows[0], o0, jn[0], out.b3.T, out.b3.u)) out.b3.matOk = 1u;
+}
+
 void endPress(State& s) noexcept {
+    endB3Press(s);
     if (s.press > kPressLineCap) return;
     sz::LensPressLine pl;
     pl.press = s.press;
@@ -35386,6 +35683,7 @@ void tick(uint64_t nowMs) noexcept {
     if (g_install != InstallState::Armed || runtimeFlatProfile()) {   // not armed, or the flat profile: a press still open ends here, with its line
         scopeZoomPublish(out);
         if (s.open) endPress(s);
+        b3Off(nowMs);
         s.open = false;
         s.lastT = 0.0;
         s.easeS = 0.0;
@@ -35394,6 +35692,8 @@ void tick(uint64_t nowMs) noexcept {
     const bool key = g_scopeZoomKey.load(std::memory_order_relaxed);
     const double ref = static_cast<double>(g_scopeZoomRefDeg.load(std::memory_order_relaxed));
     if (!s.announced || key != s.announcedKey || ref != s.announcedRef) announce(s, key, ref);   // said when the tick first runs (so --health can tell a build that never ran S1) and at each change
+    announceB3(s, g_scopeZoomFullKey.load(std::memory_order_relaxed));   // B3: the same for the full-detail key
+    scopeZoomSetTemporalZoom(&nativeTemporalZoom);   // B3: the doors ask the temporal pass whether eye 0 is zoomed in their frame (a pointer store; the door links without the pass)
     const bool onFoot = nativeOnFootActive();
     const bool ads = onFoot && g_adsState != kAdsIdle;
     const double t = s0::seconds();
@@ -35409,6 +35709,7 @@ void tick(uint64_t nowMs) noexcept {
         s.adsDeg = s.targetM = std::numeric_limits<double>::quiet_NaN();
         s.ts = sz::LensTickStats{};
         scopeZoomPressBegin(s.press);
+        beginB3Press(s);
     }
     if (!ads) {
         if (s.open) {   // the press ended: the door's counters, one line
@@ -35418,6 +35719,7 @@ void tick(uint64_t nowMs) noexcept {
         }
         s.easeS = 0.0;
         scopeZoomPublish(out);
+        b3Idle(dt, nowMs);
         return;
     }
     s.keyNow = key;
@@ -35482,7 +35784,7 @@ void tick(uint64_t nowMs) noexcept {
         uint32_t jFrame = ~0u, jw = 0, jh = 0;
         uint64_t jSeq = 0;
         float jx = 0.0f, jy = 0.0f;
-        if (!eyeJitterRead(&jOk, &jFrame, &jSeq, &jx, &jy, &jw, &jh) || !jOk || !jw || !jh) {
+        if (!eyeJitterRead(1, &jOk, &jFrame, &jSeq, &jx, &jy, &jw, &jh) || !jOk || !jw || !jh) {
             ++s.ts.jitterNone;
         } else {
             out.jitterUv[0] = jx / static_cast<float>(jw);
@@ -35494,10 +35796,17 @@ void tick(uint64_t nowMs) noexcept {
     } else {
         s.easeS = 0.0;   // the lens drops to 1 on the first frame that does not qualify
     }
+    b3Tick(s, gi, verdict, g, dt, nowMs, out);   // B3: the left eye's window, its strip and the lens's matrices; may add to the record published below
     scopeZoomPublish(out);
 }
 }  // namespace s1
 }  // namespace
+
+// B3: a draw into an eye-sized target, counted for the eye it is drawn into (the depth view's eye); vscreen.cpp calls it while g_nativeOnFootB3Counting says a press of the full-detail lens is open.
+void nativeOnFootB3NoteEyeDraw() {
+    const int e = f44::eyeOfDraw(g_f44Frame.load(std::memory_order_relaxed));
+    if (e == 0 || e == 1) g_b3EyeDraws[e].fetch_add(1, std::memory_order_relaxed);
+}
 
 void nativeOnFootFrameBoundary(uint32_t frameNo) {
     g_f44Frame.store(frameNo, std::memory_order_relaxed);   // F44: the marker probe's frame (the tag's frame bits, the captures' frame)
@@ -35710,6 +36019,7 @@ void nativeOnFootShutdown() {
     f138Reset();   // F138: ... and no stance reference
     f89AlignPublish(zeroEyeAlign);
     eyeshare::publish(0.0f, GetTickCount64());   // F106: no shared left eye past shutdown
+    scopewin::clear();                           // B3: no zoomed left eye, no black strip past shutdown
     nativeFrameSetPositionRecentre(0);           // F123: no recentre asked past shutdown, and no black left
     edvr::comfort::publish(0.0f, GetTickCount64());
     g_weaponUiSubmitGate.store(false, std::memory_order_relaxed);
@@ -35756,6 +36066,20 @@ void nativeOnFootShutdown() {
 
 // F106: the runtime's report of one press of the sights (left_eye_share.h): what it drew for the left eye. Called on the runtime's render thread once a press, when the
 // share has come back to 0; writes the press line --health reads (ADS sight in both eyes (F106) press). E_INVALIDARG, and no line, for a report it cannot read.
+// B3: the runtime's report of one press of the scope zoom's window (scope_zoom_window.h): what it told the game for the left eye. Called on the runtime's owner thread once a press, when the window
+// has ended; writes the line --health reads (scope zoom (B3) runtime). E_INVALIDARG, and no line, for a report it cannot read.
+extern "C" HRESULT WINAPI edvrNoteNativeScopeZoom(const EdvrNativeScopeZoomReport* r) {
+    if (!edvr::scopewin::reportReadable(r)) return E_INVALIDARG;
+    edvr::Log::get().note("scope zoom (B3) runtime: zoomed frames %u over %.2f s, peak narrowing %.3f; refused: answer not version 11 %u, share not at full weight %u, share not drawn %u, geometry %u; "
+                          "strip darkened %u frames, hidden-area mesh withheld %u frames; eye 0's told frustum without the zoom (left, right, down, up tangents) %+.4f/%+.4f/%+.4f/%+.4f, with it "
+                          "%+.4f/%+.4f/%+.4f/%+.4f; the game's reads of eye 0's projection while it stood: raw getter %u (its UI scale reads it; answered %.3f deg vertical), matrix getter %u (the picture "
+                          "is drawn with it; %.3f deg vertical)",
+                          r->frames, double(r->seconds), double(r->peakM), r->refused[0], r->refused[1], r->refused[2], r->refused[3], r->stripFrames, r->meshWithheld, double(r->trueTan[0]),
+                          double(r->trueTan[1]), double(r->trueTan[2]), double(r->trueTan[3]), double(r->zoomTan[0]), double(r->zoomTan[1]), double(r->zoomTan[2]), double(r->zoomTan[3]), r->rawReads,
+                          double(r->rawVerticalDeg), r->matrixReads, double(r->matrixVerticalDeg));
+    return S_OK;
+}
+
 extern "C" HRESULT WINAPI edvrNoteNativeEyeShare(const EdvrNativeEyeShareReport* r) {
     if (!edvr::eyeshare::reportReadable(r)) return E_INVALIDARG;
     edvr::Log::get().note("ADS sight in both eyes (F106) press: peak %.2f, frames %u (at full weight %u, refused %u, replayed %u) over %.2f s; the eyes' rotation (left view "

@@ -22,6 +22,19 @@ struct ScopeZoomMagnifyParams {
     float scale[4];    // output px per render px, x and y
 };
 static_assert(sizeof(ScopeZoomMagnifyParams) == 48, "the magnify pass's constant buffer is three rows");
+// The constants of the magnify pass that samples the left eye's zoomed picture (B3): twelve 16-byte rows. The first three are the magnify pass's.
+struct ScopeZoomMagnifyB3Params {
+    float cM[4];       // c in frame px, M, the feather in output px
+    float win[4];      // the right picture's window copy: origin in frame px, then its size
+    float scale[4];    // output px per render px, x and y
+    float rgn[4];      // the right picture's size in frame px, then the depth's size in px
+    float jit[4];      // the right render's jitter in uv (its content sits this far right and down of the picture's), then the depth of kLensNearM, then the depth a sky pixel is read as
+    float lwin[4];     // the left picture's window copy: origin in the left picture's px, then its size
+    float lsz[4];      // the left picture's size in px, then the margin kept inside the copy for the filter, then 0
+    float tm[16];      // T: a point (ndc x, ndc y, depth, 1) of the right eye's unjittered clip space to the left eye's (scope_zoom_b3.h b3Matrices), four rows
+    float uv4[4];      // u: the last column of the right eye's inverse matrix (one over the right clip w for such a point)
+};
+static_assert(sizeof(ScopeZoomMagnifyB3Params) == 192, "the B3 magnify pass's constant buffer is twelve rows");
 
 // Pass 1: one group of 128 threads, one ray each. Z: the eye's depth at the render's size, the depth channel of the game's R32G8X24 texture (reverse-Z: larger is nearer). Lens: the
 // raw buffer scope_zoom_s1.h lays out (the indirect arguments of pass 2 first). A ray marches from c in 1 px steps along its direction in render px; the frame is the first run of
@@ -192,6 +205,101 @@ void main(uint3 id : SV_DispatchThreadID) {
     Copy.GetDimensions(texSize.x, texSize.y);
     float2 src = (cM.xy + d / cM.z) - win.xy;
     float4 mag = saturate(sampleCR(src, texSize));
+    float4 orig = Copy.Load(int3(px - int2(win.xy), 0));
+    Frame[uint2(px)] = lerp(orig, mag, wgt);
+}
+)HLSL";
+
+// Pass 2 for B3: kScopeZoomMagnifyCsHlsl's mask, feather and fall-back, with the picture the lens shows taken from the LEFT eye's zoomed picture (B3, scope_zoom_b3.h). A pixel p of the
+// hole shows what the aiming eye would see at q = c + (p - c) / M; its ray meets the aiming eye's depth at q (Z, the depth channel of the game's texture; a sky pixel reads as a point far
+// away), and that world point is projected through the left eye's zoomed matrices (T, u: scope_zoom_b3.h b3Reproject) to the pixel of the left picture's window copy (Left) it is drawn
+// at, which the Catmull-Rom filter samples. The 6.3 cm between the eyes is thereby taken out per pixel. A point behind the left eye or outside its window copy (less the filter's margin)
+// takes the aiming eye's own sample, as the plain lens does.
+constexpr char kScopeZoomMagnifyB3CsHlsl[] = R"HLSL(
+cbuffer P : register(b0) {
+    float4 cM;
+    float4 win;
+    float4 scale;
+    float4 rgn;
+    float4 jit;
+    float4 lwin;
+    float4 lsz;
+    float4 T0;
+    float4 T1;
+    float4 T2;
+    float4 T3;
+    float4 uvec;
+};
+Texture2D<float4> Copy : register(t0);
+ByteAddressBuffer Lens : register(t1);
+Texture2D<float> Z : register(t2);
+Texture2D<float4> Left : register(t3);
+RWTexture2D<unorm float4> Frame : register(u0);
+SamplerState Lin : register(s0);
+float4 sampleCR(Texture2D<float4> tex, float2 pos, float2 texSize) {
+    float2 tp1 = floor(pos - 0.5) + 0.5;
+    float2 f = pos - tp1;
+    float2 w0 = f * (-0.5 + f * (1.0 - 0.5 * f));
+    float2 w1 = 1.0 + f * f * (-2.5 + 1.5 * f);
+    float2 w2 = f * (0.5 + f * (2.0 - 1.5 * f));
+    float2 w3 = f * f * (-0.5 + 0.5 * f);
+    float2 w12 = w1 + w2;
+    float2 off12 = w2 / w12;
+    float2 t0 = (tp1 - 1.0) / texSize;
+    float2 t3 = (tp1 + 2.0) / texSize;
+    float2 t12 = (tp1 + off12) / texSize;
+    float4 r = tex.SampleLevel(Lin, float2(t0.x, t0.y), 0) * (w0.x * w0.y);
+    r += tex.SampleLevel(Lin, float2(t12.x, t0.y), 0) * (w12.x * w0.y);
+    r += tex.SampleLevel(Lin, float2(t3.x, t0.y), 0) * (w3.x * w0.y);
+    r += tex.SampleLevel(Lin, float2(t0.x, t12.y), 0) * (w0.x * w12.y);
+    r += tex.SampleLevel(Lin, float2(t12.x, t12.y), 0) * (w12.x * w12.y);
+    r += tex.SampleLevel(Lin, float2(t3.x, t12.y), 0) * (w3.x * w12.y);
+    r += tex.SampleLevel(Lin, float2(t0.x, t3.y), 0) * (w0.x * w3.y);
+    r += tex.SampleLevel(Lin, float2(t12.x, t3.y), 0) * (w12.x * w3.y);
+    r += tex.SampleLevel(Lin, float2(t3.x, t3.y), 0) * (w3.x * w3.y);
+    return r;
+}
+[numthreads(32, 8, 1)]
+void main(uint3 id : SV_DispatchThreadID) {
+    uint4 box = Lens.Load4(12);
+    if (id.x >= box.z || id.y >= box.w) return;
+    int2 px = int2(box.xy) + int2(id.xy);
+    float2 d = float2(px) + 0.5 - cM.xy;
+    float2 dRen = d / scale.xy;
+    float phi = atan2(dRen.y, dRen.x);
+    if (phi < 0.0) phi += 6.28318530718;
+    float fk = phi * (128.0 / 6.28318530718);
+    uint k0 = ((uint)floor(fk)) & 127u;
+    uint k1 = (k0 + 1u) & 127u;
+    float r = lerp(asfloat(Lens.Load(64 + 4 * k0)), asfloat(Lens.Load(64 + 4 * k1)), frac(fk));
+    float inside = (r - length(dRen)) * 0.5 * (scale.x + scale.y);
+    float wgt = saturate(inside / cM.w);
+    if (wgt <= 0.0) return;
+    float2 q = cM.xy + d / cM.z;
+    float2 uvU = q / rgn.xy;
+    float2 uvD = uvU + jit.xy;
+    int2 zp = clamp(int2(floor(uvD * rgn.zw)), int2(0, 0), int2(rgn.zw) - 1);
+    float dz = max(Z.Load(int3(zp, 0)), jit.w);
+    float4 v = float4(2.0 * uvU.x - 1.0, 1.0 - 2.0 * uvU.y, dz, 1.0);
+    float4 vt = v.x * T0 + v.y * T1 + v.z * T2 + v.w * T3;
+    float den = dot(v, uvec);
+    bool ok = (vt.w * den > 0.0) && (abs(vt.w) > 1.0e-20) && (abs(den) > 1.0e-20);
+    float2 lp = float2(0.0, 0.0);
+    if (ok) {
+        float2 ndcL = vt.xy / vt.w;
+        lp = float2(ndcL.x * 0.5 + 0.5, 0.5 - ndcL.y * 0.5) * lsz.xy - lwin.xy;
+        ok = all(lp >= lsz.z) && all(lp <= lwin.zw - lsz.z);
+    }
+    float2 texSize;
+    Copy.GetDimensions(texSize.x, texSize.y);
+    float4 mag;
+    if (ok) {
+        float2 leftSize;
+        Left.GetDimensions(leftSize.x, leftSize.y);
+        mag = saturate(sampleCR(Left, lp, leftSize));
+    } else {
+        mag = saturate(sampleCR(Copy, q - win.xy, texSize));
+    }
     float4 orig = Copy.Load(int3(px - int2(win.xy), 0));
     Frame[uint2(px)] = lerp(orig, mag, wgt);
 }

@@ -26,8 +26,10 @@ class SystemPublication {
     metadata.tangentShift[1][0]=metadata.tangentShift[1][1]=0.0f;
     state_=metadata;sequence_=0;active_=true;return generation_;
   }
+  // toldRaw (the scope zoom): two RawFov, the frustum the raw getter answers while eye 0's told frustum is narrowed (the located one, or the trim's, without the zoom); the
+  // optics cache keeps them too, so a frame without tracking cannot serve the narrowed one. Null: both getters answer the game's geometry.
   bool publish(const GeometryInput& input,bool focusKnown,bool focused,
-               const float (*tangentShift)[2]=nullptr,bool masksCompatible=true) {
+               const float (*tangentShift)[2]=nullptr,bool masksCompatible=true,const RawFov* toldRaw=nullptr) {
     GeometrySnapshot candidate{};const bool valid=makeGeometrySnapshot(input,candidate);
     std::lock_guard<std::mutex> lock(mutex_);
     if(!active_||input.generation!=generation_||input.sequence<=sequence_)return false;
@@ -41,7 +43,7 @@ class SystemPublication {
       state_.optics.generation=candidate.native.generation;
       state_.optics.sequence=candidate.native.sequence;
       for(unsigned eye=0;eye<2;++eye) {
-        state_.optics.raw[eye]=candidate.raw[eye];
+        state_.optics.raw[eye]=toldRaw?toldRaw[eye]:candidate.raw[eye];
         state_.optics.eyeToHead[eye]=candidate.eyeToHead[eye];
       }
       state_.optics.worldScalePercent=candidate.native.worldScalePercent;
@@ -53,6 +55,7 @@ class SystemPublication {
     if(tangentShift) for(unsigned eye=0;eye<2;++eye)
       shiftsValid &= shiftedRawFov(candidate.raw[eye],tangentShift[eye][0],
                                    tangentShift[eye][1],shifted);
+    state_.toldRawSet=false;
     if(!valid||!shiftsValid) {
       state_.geometryValid=false;state_.geometry={};
       state_.tangentShift[0][0]=state_.tangentShift[0][1]=0.0f;
@@ -60,6 +63,7 @@ class SystemPublication {
       return false;
     }
     state_.geometry=candidate;
+    if(toldRaw){state_.toldRawSet=true;state_.toldRaw[0]=toldRaw[0];state_.toldRaw[1]=toldRaw[1];}
     for(unsigned eye=0;eye<2;++eye)for(unsigned axis=0;axis<2;++axis)
       state_.tangentShift[eye][axis]=tangentShift?tangentShift[eye][axis]:0.0f;
     return true;

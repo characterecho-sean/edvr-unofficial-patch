@@ -40,9 +40,10 @@ struct LensEntry {
     double bareDeg;      // the copy without a scope, when its own sight is optical; 0: not an optical sight (the unscoped Eclipse)
     double scopedDeg;    // the copy with a scope, measured; 0: unmeasured
     double standInDeg;   // an unmeasured scoped copy takes this: its bare copy's FOV (the Eclipse's scope is the Aphelion's, and its bare copy is not optical, so the bare ADS FOV measured)
+    bool renderedScoped = false;   // B3: the scoped copy's lens is rendered at full detail (the left eye drawn as the zoomed view) when experimental.native_on_foot_ads_scope_zoom_full_detail is on
 };
 constexpr LensEntry kLensTable[] = {
-    {"m_sniper_plasma_charged", 35.0, 15.0, 0.0},       // M Executioner
+    {"m_sniper_plasma_charged", 35.0, 15.0, 0.0, true}, // M Executioner
     {"m_assaultrifle_plasma_fauto", 48.0, 0.0, 48.0},   // M Oppressor
     {"m_assaultrifle_laser_fauto", 48.0, 0.0, 48.0},    // TK Aphelion: the base sight is the ring scope
     {"m_submachinegun_laser_fauto", 0.0, 0.0, 50.0},    // TK Eclipse: scoped only
@@ -89,6 +90,16 @@ inline bool lensAdsDeg(const char* itemName, int scope, double* deg, bool* fromB
         if (fromBare) *fromBare = standIn;
         return true;
     }
+    return false;
+}
+// B3: whether the held (item, scope) is an entry whose lens is rendered at full detail: the scoped copy of a row marked renderedScoped (the scoped Executioner). The bare copy and every
+// other row are not, and an unknown scope state is not.
+inline bool lensRenderedEntry(const char* itemName, int scope) noexcept {
+    if (scope != kLensScopeYes) return false;
+    char stem[64];
+    if (!lensStem(itemName, stem, sizeof(stem))) return false;
+    for (const LensEntry& e : kLensTable)
+        if (std::strcmp(stem, e.stem) == 0) return e.renderedScoped && e.scopedDeg > 0.0;
     return false;
 }
 // The reference FOV after its range: a value that is not a number reads as the default.

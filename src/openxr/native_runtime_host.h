@@ -28,6 +28,8 @@
 #include <mutex>
 #include "../common/comfort_fade.h"
 #include "../common/left_eye_share.h"
+#include "../common/scope_zoom_window.h"
+#include "scope_zoom_state.h"
 #include "../common/frame_flag.h"
 #include "../common/parallel_projection_notice.h"
 #include "../common/periodic_work.h"
@@ -286,6 +288,14 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   EdvrNativeFrameDecision featureDecision{sizeof(featureDecision),EDVR_NATIVE_FRAME_VERSION_1};
   bool featureFrameKnown=false;
   uint64_t featureChanges=0;
+  // B3, the scope zoom's window (scope_zoom_state.h): this frame's decision, the press it is part of, and the game's reads of eye 0's projection while it stood.
+  ScopeZoomPress zoomPress;
+  bool zoomAppliedNow=false;
+  float zoomStripNow=0.f;
+  ScopeZoomWhy zoomWhyNoted=ScopeZoomWhy::kNotAsked;
+  uint32_t zoomPendingRefused[4]{};
+  std::atomic<bool> zoomReadsOn{false};
+  std::atomic<uint32_t> zoomRawReads{0},zoomMatrixReads{0};
   NativeMenuClient menu;
   NativeTemporalClient temporal;
   NativeSharpenClient sharpen;
@@ -862,6 +872,11 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       snapshot.recommendedWidth[1],snapshot.recommendedHeight[1]);
   }
   void noteGeometryQuery(unsigned slot,const SystemRead& snapshot) noexcept override {traceGeometryQuery(slot,snapshot);}
+  // The game's reads of eye 0's projection while the scope zoom's window stands (eye 0, the zoom held back from the raw getter): counted for the press's report.
+  void noteProjectionRead(unsigned eye,bool raw,bool zoomHeld) noexcept override {
+    if(eye!=0||!zoomHeld||!zoomReadsOn.load(std::memory_order_relaxed))return;
+    (raw?zoomRawReads:zoomMatrixReads).fetch_add(1,std::memory_order_relaxed);
+  }
   void noteProjectionQuery(const SystemRead& s,unsigned eye,float nearZ,float farZ,
       vr::EGraphicsAPIConvention convention,bool accepted,const vr::HmdMatrix44_t& m,const void* caller) noexcept override {
     nativeTracePrintf("projection_query,eye=%u,near=%.9g,far=%.9g,api=%u,accepted=%u,live=%u,optics=%u,sequence=%llu,caller=%p,m00=%.9g,m11=%.9g,m02=%.9g,m12=%.9g,m22=%.9g,m23=%.9g\n",
@@ -1588,6 +1603,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     // given and to nothing else: the located views (the layer, the menu, the plugins) keep the headset's own eyes.
     uint32_t worldScale=edvr::kWorldScaleDefault;
     auto gameGeometry=located;
+    bool zoomApplied=false;RawFov zoomPreRaw{},zoomToldRaw[2]{};   // B3: eye 0's told frustum narrowed this frame, and the frusta the raw getter and the announcements keep
     // This is the geometry exposed to Elite and the temporal provider. Keep
     // runtime `located` dimensions raw for XR accounting, but make every
     // game-facing path even so Elite's quality multiplier cannot truncate an
@@ -1691,8 +1707,11 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
           gameGeometry.views[e].fov={std::atan(frustum.left),std::atan(frustum.right),std::atan(frustum.up),std::atan(frustum.down)};
           gameGeometry.width[e]=dims.width;gameGeometry.height[e]=dims.height;
         }
+        // B3: the left eye drawn as the zoomed view (tangents only), set where the trim has just set its own and before anything reads the frame's frustum.
+        zoomApplied=applyScopeZoom(gameGeometry,zoomPreRaw,zoomToldRaw);
       }
     }
+    if(!(features.acquired()&&locatedValid))noteScopeZoomAbsent();
     gameGeometry.worldScalePercent=worldScale;
     if(locatedValid)noteWorldScale(worldScale,located,gameGeometry);
     if(locatedValid) geometry.recommend(gameGeometry.width,gameGeometry.height);
@@ -1723,12 +1742,12 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       // trim), which the engine-side panel sizing takes k_out from.
       const auto begun=temporal.begin(treatedGeometry,poses.read().originGeneration,frameTangentShift,&render.pose.mDeviceToAbsoluteTracking,
           (std::max)(gameGeometry.width[0],gameGeometry.width[1]),(std::max)(gameGeometry.height[0],gameGeometry.height[1]),
-          std::fabs(temporalGeometry.raw[0].top),std::fabs(temporalGeometry.raw[0].bottom));
+          std::fabs(temporalGeometry.raw[0].top),std::fabs(temporalGeometry.raw[0].bottom),zoomApplied?&zoomPreRaw:nullptr);
       if(begun!=S_OK){boundary.clear();return fail(XR_ERROR_VALIDATION_FAILURE);}
       ++temporalFrames;
     } else invalidateEyeTreatments();
-    // The hidden-area mesh is withheld on a trim (hiddenMeshCompatible).
-    const bool geometryValid=geometry.publish(gameGeometry,false,false,frameTangentShift,hiddenMeshCompatible());
+    // The hidden-area mesh is withheld on a trim (hiddenMeshCompatible) and while the scope zoom's window stands (it is cut for the true frustum); the raw getter keeps the true one.
+    const bool geometryValid=geometry.publish(gameGeometry,false,false,frameTangentShift,hiddenMeshCompatible()&&!zoomApplied,zoomApplied?zoomToldRaw:nullptr);
     boundary.setGeometryReady(geometryValid);
     frameGeometry=located;frameGeometryAvailable=true;
     frameViews[0]=located.views[0];frameViews[1]=located.views[1];
@@ -2667,8 +2686,8 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       if(masks){const auto& m=masks->eyes[1];hidden={m.vertices.data(),uint32_t(m.vertices.size()),m.indices.data(),uint32_t(m.indices.size()),masks->revision};}
     }
     const auto r=frameWithheld?stereo.renderCaptured(previousViews,previousSpace,previousPair,layer,observer,nullptr,previousPlacement,fade,
-                                                     previousHeadValid?&previousHeadPose:nullptr,leftShare,&hidden):
-      stereo.renderCaptured(frameViews,frameSpace,captured,layer,observer,&wall,framePlacement,fade,locatedHeadPose(),leftShare,&hidden);
+                                                     previousHeadValid?&previousHeadPose:nullptr,leftShare,&hidden,zoomStripNow):
+      stereo.renderCaptured(frameViews,frameSpace,captured,layer,observer,&wall,framePlacement,fade,locatedHeadPose(),leftShare,&hidden,zoomStripNow);
     sharePress(leftShare,r==XR_SUCCESS,frameWithheld);
     submitSample.xrAcquireMs=wall.acquire;submitSample.xrWaitMs=wall.wait;
     submitSample.xrDrawMs=wall.draw;submitSample.xrReleaseMs=wall.release;
@@ -2758,6 +2777,79 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       double(report.leftTangents[0]),double(report.leftTangents[1]),double(report.leftTangents[2]),double(report.leftTangents[3]),
       double(report.rightTangents[0]),double(report.rightTangents[1]),double(report.rightTangents[2]),double(report.rightTangents[3]),
       double(report.coverage),double(report.coverageWhole),report.hiddenTriangles,told==S_OK?"yes":told==S_FALSE?"no_export":"refused");
+  }
+  // B3, the scope zoom's window (scope_zoom_state.h; the request is the provider's version 11 answer, scope_zoom_window.h): whether eye 0's told frustum is narrowed this frame. Set in
+  // WaitGetPoses where the trim sets the frame's frusta; the located views the layer lies on, the raw getter's answer, the temporal pass's announcements and the hidden-area mesh stay
+  // true (the callers). A press of it is traced when it opens (state=on) and when it ends (scope_zoom_press), and at the end told to the d3d11 half (edvrNoteNativeScopeZoom).
+  bool applyScopeZoom(GeometryInput& game,RawFov& preRaw,RawFov (&toldRaw)[2]) {
+    const bool carries=features.acquired()&&featureFrameKnown&&featureFrame.version>=EDVR_NATIVE_FRAME_VERSION_11;
+    ScopeZoomInput in;
+    in.answerCarries=carries;
+    if(carries) {
+      in.request=scopewin::fromWords(featureFrame.reservedTerrainGuard);
+      in.share=eyeshare::fromBits(featureFrame.leftEyeShare);
+    }
+    const StereoShareFacts& facts=stereo.shareFacts();
+    in.shareDrawn=facts.drawn;in.shareRefused=facts.refused;
+    in.base=game.views[0].fov;
+    ScopeZoomOutput out=decideScopeZoom(in);
+    RawFov zoomRaw{};
+    if(out.why==ScopeZoomWhy::kApplied&&!(fovToRaw(in.base,preRaw)&&fovToRaw(game.views[1].fov,toldRaw[1])&&fovToRaw(out.fov,zoomRaw))) {
+      out=ScopeZoomOutput{};out.fov=in.base;out.why=ScopeZoomWhy::kGeometry;
+    }
+    zoomStripNow=out.strip;
+    const bool applied=out.why==ScopeZoomWhy::kApplied;
+    const uint64_t nowUs=frameCycleUs();
+    if(applied) {
+      toldRaw[0]=preRaw;
+      game.views[0].fov=out.fov;
+      if(!zoomPress.open) {
+        zoomPress.begin(nowUs);
+        for(unsigned i=0;i<4;++i){zoomPress.refused[i]=zoomPendingRefused[i];zoomPendingRefused[i]=0;}
+        zoomRawReads.store(0,std::memory_order_relaxed);zoomMatrixReads.store(0,std::memory_order_relaxed);
+        zoomReadsOn.store(true,std::memory_order_relaxed);
+        nativeTracePrintf("scope_zoom,state=on,narrowing=%.3f,true_tan=%.4f/%.4f/%.4f/%.4f,zoom_tan=%.4f/%.4f/%.4f/%.4f,raw_getter_vertical_deg=%.3f,matrix_vertical_deg=%.3f,strip=%.2f,share=%.3f\n",
+          out.narrowing,out.trueTan[0],out.trueTan[1],out.trueTan[2],out.trueTan[3],out.zoomTan[0],out.zoomTan[1],out.zoomTan[2],out.zoomTan[3],
+          double(rawVerticalDeg(preRaw)),double(rawVerticalDeg(zoomRaw)),double(out.strip),double(in.share));
+      }
+      zoomPress.applied(out,nowUs,out.strip>0.f,true);
+      zoomPress.rawVerticalDeg=rawVerticalDeg(preRaw);zoomPress.matrixVerticalDeg=rawVerticalDeg(zoomRaw);
+      zoomWhyNoted=ScopeZoomWhy::kApplied;
+    } else {
+      if(zoomPress.open)closeScopeZoomPress(out.why==ScopeZoomWhy::kNotAsked?"asked_off":"refused");
+      if(out.why!=ScopeZoomWhy::kNotAsked) {
+        const unsigned index=scopeZoomRefusalIndex(out.why);
+        if(index<4){++zoomPendingRefused[index];}
+        if(out.why!=zoomWhyNoted)
+          nativeTracePrintf("scope_zoom,state=refused,why=%u,share=%.3f,share_drawn=%u,share_refused=%u,version=%u\n",unsigned(out.why),double(in.share),unsigned(in.shareDrawn),
+            unsigned(in.shareRefused),unsigned(featureFrameKnown?featureFrame.version:0u));
+      }
+      zoomWhyNoted=out.why;
+    }
+    zoomAppliedNow=applied;
+    return applied;
+  }
+  // The frame has no provider answer or no located geometry: nothing is narrowed, and a press that was open ends.
+  void noteScopeZoomAbsent() {
+    zoomStripNow=0.f;zoomAppliedNow=false;
+    if(zoomPress.open)closeScopeZoomPress("no_geometry");
+  }
+  void closeScopeZoomPress(const char* ended) {
+    zoomReadsOn.store(false,std::memory_order_relaxed);
+    zoomPress.rawReads=zoomRawReads.load(std::memory_order_relaxed);zoomPress.matrixReads=zoomMatrixReads.load(std::memory_order_relaxed);
+    zoomPress.open=false;
+    EdvrNativeScopeZoomReport report{};zoomPress.fill(report);
+    HRESULT told=S_FALSE;
+    if(graphicsProxy) {
+      const auto note=reinterpret_cast<EdvrNoteNativeScopeZoom>(GetProcAddress(graphicsProxy,"edvrNoteNativeScopeZoom"));
+      if(note)told=note(&report);
+    }
+    nativeTracePrintf("scope_zoom_press,frames=%u,refused=%u/%u/%u/%u,strip_frames=%u,mesh_withheld=%u,seconds=%.3f,peak_narrowing=%.3f,true_tan=%.4f/%.4f/%.4f/%.4f,"
+                      "zoom_tan=%.4f/%.4f/%.4f/%.4f,raw_reads=%u,matrix_reads=%u,raw_vertical_deg=%.3f,matrix_vertical_deg=%.3f,ended=%s,told_graphics=%s\n",
+      report.frames,report.refused[0],report.refused[1],report.refused[2],report.refused[3],report.stripFrames,report.meshWithheld,double(report.seconds),double(report.peakM),
+      double(report.trueTan[0]),double(report.trueTan[1]),double(report.trueTan[2]),double(report.trueTan[3]),double(report.zoomTan[0]),double(report.zoomTan[1]),
+      double(report.zoomTan[2]),double(report.zoomTan[3]),report.rawReads,report.matrixReads,double(report.rawVerticalDeg),double(report.matrixVerticalDeg),ended,
+      told==S_OK?"yes":told==S_FALSE?"no_export":"refused");
   }
   SystemRead read() const override {return geometry.read();}
   void noteProjection(uint64_t sequence,uint32_t eye,float nearZ,float farZ) noexcept override {

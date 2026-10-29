@@ -330,10 +330,11 @@ bool D3D11Stereo::ensureShareMask(const XrFovf& fov,const StereoHiddenArea* hidd
 XrResult D3D11Stereo::renderCaptured(const XrView (&views)[2],XrSpace space,const EyeCapture& capture,
                                    XrCompositionLayerProjection& layer, GpuWorkObserver* observer,
                                    StereoWallTimes* times, const StereoPlacement* placement, float fade,
-                                   const XrPosef* headPose, float leftEyeShare, const StereoHiddenArea* rightHidden) {
+                                   const XrPosef* headPose, float leftEyeShare, const StereoHiddenArea* rightHidden, float leftStripBlack) {
   layer={XR_TYPE_COMPOSITION_LAYER_PROJECTION};
   fade=comfort::sanitize(fade);
   leftEyeShare=comfort::sanitize(leftEyeShare);
+  leftStripBlack=comfort::sanitize(leftStripBlack);
   shareFacts_.drawn=shareFacts_.refused=false;
   if(ownedImmediateScene_&&GetCurrentThreadId()!=sceneOwnerThread_)return XR_ERROR_CALL_ORDER_INVALID;
   if(!ready_)return lastResult_==XR_SUCCESS?XR_ERROR_CALL_ORDER_INVALID:lastResult_;
@@ -406,6 +407,7 @@ XrResult D3D11Stereo::renderCaptured(const XrView (&views)[2],XrSpace space,cons
       for(int k=0;k<4;++k){share.leftTan[k]=float(lt[k]);share.rightTan[k]=float(rt[k]);share.rightPlace[k]=float(m.place[k]);share.rightAng[k]=float(m.ang[k]);}
       share.leftSize[0]=float(eyes_[0].width);share.leftSize[1]=float(eyes_[0].height);
       share.band[0]=float(m.marginRad);share.band[1]=float(1.0/m.bandRad);
+      share.band[2]=leftStripBlack;   // B3: the part of the left eye the share does not cover goes toward black by this much (the shader's band.z; 0 is the share as it always was)
       shareOn=true;
       double ypr[3];shareview::yawPitchRollDeg(m.rot,ypr);
       for(int k=0;k<3;++k)shareFacts_.rotationDeg[k]=float(ypr[k]);

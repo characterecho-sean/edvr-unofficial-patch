@@ -2447,6 +2447,7 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
         return DrawVerdict::kNone;
     }
     ++s->eyeDrawsThisFrame;
+    if (nativeOnFootB3Counting()) nativeOnFootB3NoteEyeDraw();   // B3: the eye this draw is drawn into, counted while a press of the full-detail scope lens is open (one relaxed load otherwise)
     // (The temporal pass's camera latch used to fire at the frame's first
     // eye draw here; since 2026-09-04 the depth probe fires it at the
     // first draw into the scene pair's depth, which is the scene camera's

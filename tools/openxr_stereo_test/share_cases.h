@@ -108,6 +108,28 @@ void shareSelfTest(bool owned) {
       check(same,what);
     }
     const Out full=render(capture,1.f,nullptr,nullptr,true);
+    { // B3: while the scope zoom's window stands the left eye's own picture is the zoomed view, so the part of it the share does not cover (the corner here, inside the edge margin) goes
+      // toward black by the strip's weight; the covered interior is the right eye's pixel whatever the strip is, no strip is the share exactly as it was, and no share draws no strip.
+      auto gray=shareTexture(f,[](unsigned,unsigned){return rgbaOf(180,180,180);});
+      EyeCapture grayCapture;check(SUCCEEDED(grayCapture.initialize(f.runtime.device.Get())),"strip capture owner");
+      const vr::Texture_t gl{gray.Get(),vr::API_DirectX,vr::ColorSpace_Linear},rt2{right.Get(),vr::API_DirectX,vr::ColorSpace_Linear};
+      check(grayCapture.capture(vr::Eye_Left,&gl)==vr::VRCompositorError_None&&grayCapture.capture(vr::Eye_Right,&rt2)==vr::VRCompositorError_None,"strip capture");
+      const auto strip=[&](float share,float black) {
+        XrCompositionLayerProjection layer{};const unsigned image=f.runtime.eyes[0].calls%2;
+        check(f.renderer.renderCaptured(f.views,space,grayCapture,layer,nullptr,nullptr,nullptr,0.f,nullptr,share,nullptr,black)==XR_SUCCESS,"strip render");
+        return readWhole(f,0,image);
+      };
+      const auto sum=[&](uint32_t p){unsigned r=0,g=0,b=0;channels(p,r,g,b);return r+g+b;};
+      const std::vector<uint32_t> s0=strip(1.f,0.f),sHalf=strip(1.f,.5f),s1=strip(1.f,1.f),noShare=strip(0.f,1.f),noShare0=strip(0.f,0.f),nan=strip(1.f,std::numeric_limits<float>::quiet_NaN());
+      std::snprintf(what,sizeof(what),"B3 strip (%s, %s): the corner the share does not cover is the left eye's own picture with no strip, half toward black with half a strip, and black with a whole one",mode,kind);
+      check(sum(at(s0,0,0))>3*150&&sum(at(sHalf,0,0))<sum(at(s0,0,0))&&sum(at(sHalf,0,0))>sum(at(s1,0,0))&&sum(at(s1,0,0))<=3&&sum(at(s1,0,0))<sum(at(sHalf,0,0)),what);
+      bool covered=true;
+      for(unsigned y=16;y<112;++y)for(unsigned x=16;x<112;++x)covered=covered&&at(s1,x,y)==at(base.eye[1],x,y)&&at(sHalf,x,y)==at(base.eye[1],x,y);
+      std::snprintf(what,sizeof(what),"B3 strip (%s, %s): inside the coverage the pixel is the right eye's own, bit for bit, whatever the strip is",mode,kind);
+      check(covered,what);
+      std::snprintf(what,sizeof(what),"B3 strip (%s, %s): no strip (and a strip that is no number) is the share exactly as it was, and with no share the strip draws nothing",mode,kind);
+      check(s0==nan&&noShare==noShare0,what);
+    }
     {
       bool interior=true;
       for(unsigned y=16;y<112;++y)for(unsigned x=16;x<112;++x)interior=interior&&at(full.eye[0],x,y)==at(base.eye[1],x,y);

@@ -2,6 +2,7 @@
 #include "../../src/openxr/system_source.h"
 #include "../../src/openxr/geometry_snapshot.h"
 #include "../../src/openxr/system_publication.h"
+#include "../../src/openxr/scope_zoom_state.h"   // B3: the runtime's decision to narrow eye 0's told frustum
 
 #include <atomic>
 #include <cmath>
@@ -69,6 +70,9 @@ struct FakeSource final : SystemSource {
   // Every answer that carried a mesh, not rate limited (visual.desktop_window_crop = native zooms when the game was served one).
   std::atomic<unsigned> servedMask{0},servedNotes{0};
   void noteHiddenMeshServed(unsigned eye) noexcept override {servedMask.fetch_or(1u<<eye);++servedNotes;}
+  // B3: the game's reads of the projection (raw: GetProjectionRaw), and the ones that were eye 0's with the scope zoom held back from the raw getter.
+  std::atomic<unsigned> reads[2][2]{},heldReads{0};
+  void noteProjectionRead(unsigned eye,bool raw,bool zoomHeld) noexcept override {if(eye<2)reads[eye][raw?1:0].fetch_add(1);if(eye==0&&zoomHeld)heldReads.fetch_add(1);}
   void noteFrequencyQuery(const SystemRead&,vr::TrackedDeviceIndex_t,vr::ETrackedPropertyError error,
       float value,unsigned) noexcept override {
     std::lock_guard<std::mutex> lock(mutex);++frequencyNotes;frequencyError=error;frequencyValue=value;
@@ -540,7 +544,79 @@ __declspec(noinline) void headPoseTests(vr::IVRSystem* system, FakeSource& sourc
     concrete.useExeModule(realExe);
   }
 }
+// B3, the scope zoom's window (scope_zoom_state.h, system_publication.h): eye 0's told frustum is narrowed, the projection matrix getter answers the narrowed one, the raw getter (which the game's
+// UI scale reads) the frustum without the zoom, eye 1 is untouched, the hidden-area mesh is cut for the true frustum, and the runtime decides to narrow only in the cases it should.
+void scopeZoomTest() {
+  using edvr::openxr::ScopeZoomInput;using edvr::openxr::ScopeZoomWhy;using edvr::openxr::decideScopeZoom;using edvr::openxr::RawFov;using edvr::openxr::SystemPublication;
+  namespace sw=edvr::scopewin;
+  ScopeZoomInput in;
+  in.answerCarries=true;in.share=1.f;in.shareDrawn=true;in.base={-0.6f,0.7f,0.5f,-0.4f};
+  in.request.zoom=true;in.request.m=4.f;in.request.tc[0]=0.001f;in.request.tc[1]=-0.02f;
+  auto out=decideScopeZoom(in);
+  RawFov trueRaw{};edvr::openxr::fovToRaw(in.base,trueRaw);
+  const double spanX=double(trueRaw.right)-trueRaw.left,spanY=double(trueRaw.bottom)-trueRaw.top;
+  check(out.why==ScopeZoomWhy::kApplied&&near(float(out.narrowing),4.f,1e-3f),"scope zoom: asked, covered and drawn, the told frustum narrows by M");
+  check(std::fabs((out.zoomTan[1]-out.zoomTan[0])-spanX/4.0)<1e-5&&std::fabs((out.zoomTan[3]-out.zoomTan[2])-spanY/4.0)<1e-5&&
+        std::fabs((out.zoomTan[0]+out.zoomTan[1])*0.5-0.001)<1e-5&&std::fabs((out.zoomTan[2]+out.zoomTan[3])*0.5+0.02)<1e-5,"scope zoom: the window is the eye's span over M, centred on the asked direction");
+  check(out.fov.angleLeft<out.fov.angleRight&&out.fov.angleDown<out.fov.angleUp&&out.fov.angleLeft>=in.base.angleLeft&&out.fov.angleRight<=in.base.angleRight&&
+        out.fov.angleDown>=in.base.angleDown&&out.fov.angleUp<=in.base.angleUp,"scope zoom: and lies inside the frustum it narrows");
+  auto no=[&](ScopeZoomInput x,ScopeZoomWhy why,const char* text){const auto o=decideScopeZoom(x);check(o.why==why&&std::memcmp(&o.fov,&x.base,sizeof(x.base))==0,text);};
+  { auto x=in;x.request.zoom=false;no(x,ScopeZoomWhy::kNotAsked,"scope zoom: not asked leaves the frustum alone"); }
+  { auto x=in;x.answerCarries=false;no(x,ScopeZoomWhy::kVersion,"scope zoom: an answer that is not version 11 carries no zoom, and says so when it asked"); }
+  { auto x=in;x.answerCarries=false;x.request.zoom=false;no(x,ScopeZoomWhy::kNotAsked,"scope zoom: ... and nothing when it did not ask"); }
+  { auto x=in;x.share=0.95f;no(x,ScopeZoomWhy::kShare,"scope zoom: the right eye's picture must cover the left wholly (a share under full weight refuses)"); }
+  { auto x=in;x.shareDrawn=false;no(x,ScopeZoomWhy::kShareNotDrawn,"scope zoom: and the share must have been drawn the frame before"); }
+  { auto x=in;x.shareRefused=true;no(x,ScopeZoomWhy::kShareNotDrawn,"scope zoom: ... and not refused"); }
+  { auto x=in;x.request.tc[0]=1.5f;no(x,ScopeZoomWhy::kGeometry,"scope zoom: a centre outside the eye's span makes no window"); }
+  { auto x=in;x.base={0.1f,0.1f,0.5f,-0.4f};no(x,ScopeZoomWhy::kGeometry,"scope zoom: an unusable frustum makes no window"); }
+  { auto x=in;x.request.strip=0.7f;check(decideScopeZoom(x).strip==0.7f,"scope zoom: the strip crosses with the zoom");x.request.zoom=false;check(decideScopeZoom(x).strip==0.7f,"scope zoom: ... and without it (the strip is black before the zoom is asked for)");
+    x.answerCarries=false;check(decideScopeZoom(x).strip==0.f,"scope zoom: ... but not from an answer that carries nothing"); }
+  // the press as the runtime counts it, and its report
+  edvr::openxr::ScopeZoomPress press;
+  press.begin(1000000);press.refusedBecause(ScopeZoomWhy::kShare);press.refusedBecause(ScopeZoomWhy::kNotAsked);press.applied(out,1500000,true,true);press.applied(out,2000000,false,true);
+  press.rawReads=12;press.matrixReads=34;press.rawVerticalDeg=edvr::openxr::rawVerticalDeg(trueRaw);
+  EdvrNativeScopeZoomReport report{};press.fill(report);
+  check(report.frames==2&&report.refused[1]==1&&report.refused[0]==0&&report.stripFrames==1&&report.meshWithheld==2&&near(report.seconds,1.f,1e-4f)&&near(report.peakM,4.f,1e-3f)&&
+        report.rawReads==12&&report.matrixReads==34&&sw::reportReadable(&report)&&report.rawVerticalDeg>45.f&&report.rawVerticalDeg<60.f,
+        "scope zoom: a press counts its frames, its refusals by reason, the strip's and the mesh's frames and what the game read, and the report is readable");
+  // the publication: matrix getter narrowed, raw getter true
+  SystemPublication publication;SystemRead metadata{};metadata.connected=true;
+  const auto generation=publication.begin(metadata);
+  GeometryInput g=geometry(generation,1);
+  RawFov told[2]{};edvr::openxr::fovToRaw(g.views[0].fov,told[0]);edvr::openxr::fovToRaw(g.views[1].fov,told[1]);
+  GeometryInput narrowed=geometry(generation,2);narrowed.views[0].fov={-0.15f,0.19f,0.13f,-0.1f};
+  check(publication.publish(narrowed,false,false,nullptr,false,told),"scope zoom: a frame with eye 0 narrowed publishes");
+  FakeSource source;source.state=publication.read();edvr::openxr::OpenVRSystem system(source);
+  float l,r,t0,b;
+  system.GetProjectionRaw(vr::Eye_Left,&l,&r,&t0,&b);
+  check(near(l,told[0].left)&&near(r,told[0].right)&&near(t0,told[0].top)&&near(b,told[0].bottom),"scope zoom: the raw getter, which the game's UI scale reads, answers eye 0's frustum without the zoom");
+  const auto matrix=system.GetProjectionMatrix(vr::Eye_Left,.025f,50000.f,vr::API_DirectX);
+  RawFov zoomRaw{};edvr::openxr::fovToRaw(narrowed.views[0].fov,zoomRaw);
+  check(near(matrix.m[0][0],2.f/(zoomRaw.right-zoomRaw.left),1e-2f)&&near(matrix.m[1][1],2.f/(zoomRaw.bottom-zoomRaw.top),1e-2f)&&matrix.m[0][0]>2.f*(2.f/(told[0].right-told[0].left)),
+        "scope zoom: the projection matrix getter, which the picture is drawn with, answers the narrowed frustum");
+  float l1,r1,t1,b1;system.GetProjectionRaw(vr::Eye_Right,&l1,&r1,&t1,&b1);
+  const auto matrix1=system.GetProjectionMatrix(vr::Eye_Right,.025f,50000.f,vr::API_DirectX);
+  check(near(l1,told[1].left)&&near(r1,told[1].right)&&near(matrix1.m[0][0],2.f/(told[1].right-told[1].left),1e-2f),"scope zoom: eye 1 is untouched in both getters");
+  check(source.reads[0][1].load()==1&&source.reads[0][0].load()==1&&source.reads[1][1].load()==1&&source.reads[1][0].load()==1&&source.heldReads.load()==2,
+        "scope zoom: the reads of each getter are noted per eye, and eye 0's two are noted as held back from the raw getter");
+  check(!source.state.hiddenMasksCompatible,"scope zoom: the hidden-area mesh is withheld (published as not compatible)");
+  // optics keep the true frustum, so a frame without tracking cannot serve the narrowed one
+  publication.invalidate(generation);source.state=publication.read();
+  float lo,ro,to,bo;system.GetProjectionRaw(vr::Eye_Left,&lo,&ro,&to,&bo);
+  const auto matrixOptics=system.GetProjectionMatrix(vr::Eye_Left,.025f,50000.f,vr::API_DirectX);
+  check(near(lo,told[0].left)&&near(ro,told[0].right)&&near(matrixOptics.m[0][0],2.f/(told[0].right-told[0].left),1e-2f),"scope zoom: the cached optics hold the true frustum for both getters when the geometry is gone");
+  // the next frame without the zoom publishes both getters alike again
+  SystemPublication publication2;const auto gen2=publication2.begin(metadata);
+  check(publication2.publish(geometry(gen2,1),false,false,nullptr,true,told),"scope zoom: a frame");
+  check(publication2.publish(geometry(gen2,2),false,false,nullptr,true),"scope zoom: the next frame without the zoom");
+  FakeSource source2;source2.state=publication2.read();edvr::openxr::OpenVRSystem system2(source2);
+  float l2,r2,t2,b2;system2.GetProjectionRaw(vr::Eye_Left,&l2,&r2,&t2,&b2);
+  check(!source2.state.toldRawSet&&near(l2,told[0].left)&&near(r2,told[0].right),"scope zoom: without the zoom the raw getter answers the game's geometry, as before");
+  system2.GetProjectionMatrix(vr::Eye_Left,.025f,50000.f,vr::API_DirectX);
+  check(source2.heldReads.load()==0,"scope zoom: and no read is noted as held back");
+}
 int selfTest() {
+  scopeZoomTest();
   publicationTest();
   oddRecommendationTest();
   capabilityTests();

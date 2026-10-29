@@ -41,6 +41,10 @@ struct SystemRead {
   vr::HmdMatrix34_t seatedToStanding{}, rawToStanding{};
   // Game-facing per-eye tangent offsets. Cached optics remains unjittered.
   float tangentShift[2][2]{};
+  // The scope zoom (B3): while eye 0's told frustum is narrowed, the projection matrix getter answers it (geometry.raw) and the raw getter, which the game's UI scale reads, answers
+  // the frustum it would have been told without the zoom (toldRaw). Not set: both answer geometry.raw.
+  bool toldRawSet=false;
+  RawFov toldRaw[2]{};
 };
 
 // Who called GetDeviceToAbsoluteTrackingPose and which instant it is to be located at. Taken on the CALLER's thread before the hop to
@@ -89,6 +93,9 @@ class SystemSource {
   }
   virtual void noteProjectionQuery(const SystemRead&,unsigned,float,float,
       vr::EGraphicsAPIConvention,bool,const vr::HmdMatrix44_t&,const void*) noexcept {}
+  // Every projection read the game makes of an eye (raw: GetProjectionRaw, else GetProjectionMatrix), and whether eye 0's answer was the scope zoom's narrowed one (matrix) or
+  // the true one held back from it (raw). Counted, never logged per call; must stay cheap.
+  virtual void noteProjectionRead(unsigned eye,bool raw,bool zoomHeld) noexcept {(void)eye;(void)raw;(void)zoomHeld;}
   virtual void noteFrequencyQuery(const SystemRead&,vr::TrackedDeviceIndex_t,
       vr::ETrackedPropertyError,float,unsigned) noexcept {}
   // The first answer to Elite's eye-transform call that carries a world scale (percent) the last answer did not: the sequence is the geometry

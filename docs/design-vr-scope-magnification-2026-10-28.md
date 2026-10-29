@@ -48,12 +48,12 @@ game's own zoom as a magnified picture inside the scope's lens. The rest of the 
   the lens by the tonemap difference (stock brightness); the weapons half governs it, the scope zoom key arms it; the S0 census probes optical
   sights only; the press line counts `composites matched/plain/none` and `--health` makes a taken mark nothing composited a PARTIAL. Its review
   fixes (same section) make the mark's stand-down last a press, not the session, and count it in the press line.
-- **Next, B3 for the scoped sniper only** (the maintainer, 2026-10-29, after A2's flight: the 4x lens is "a little blurry"). A keeps 1/M of
-  the density, so at M 4.06 the lens shows about 90 x 50 output pixels (45 x 25 rendered) over the glass. B3 renders the unseen left eye
-  (F162's both mode) as the zoomed view. DESIGNED (section 11): tangents only, no pose move; parallax removed per pixel from the right
-  eye's depth; a temporary key to compare it with A.
+- **B3-1 BUILT 2026-10-29, NOT FLOWN** (from `4a4a17b6`; section 11, "As built (B3-1)"): the scoped Executioner's lens at full detail. The left eye (F162's both mode) is drawn as the zoomed view
+  (told frustum = its tangents / M about c, tangents only, set in WaitGetPoses after the trim); the lens samples its post-RCAS picture, each pixel at the place its world point is drawn at in that eye
+  (the right eye's depth, T = inverse(A_R) A_L). The raw getter (the UI scale) keeps the true frustum; DLSS resets at both edges; the strip goes black; the light grid cache and the readout pin
+  step aside. Three log lines: `scope zoom (B3)` announce and press, `scope zoom (B3) runtime`. Next: the flight (A then B3 in one press), then the maintainer's verdict on the key.
 - Keys: `fix.native_on_foot_ads_scope_zoom` (default on since A3 flew OK, the maintainer 2026-10-29) and the temporary `experimental.native_on_foot_ads_scope_zoom_fov` (the
-  reference FOV, 56.3 by default).
+  reference FOV, 56.3 by default) and `experimental.native_on_foot_ads_scope_zoom_full_detail` (TEMPORARY, B3: on | off, live, default off; goes when B3 is judged).
 - Separate arc: a flat stutter on the scoped Executioner's ADS (2026-10-29), in its own doc,
   `docs\investigation-flat-scoped-ads-stutter-2026-10-29.md`, on its own branch.
 - **Key (after S0, on the maintainer's word):** `fix.native_on_foot_ads_scope_zoom` = on | off. Section 5.
@@ -775,3 +775,66 @@ the UI scale value the game read; frame time in and out; the parallax shift at c
 
 **Flight card (B3-1):** the scoped Executioner in ADS, the key off then on in one press (A then B3), still and turning; an eye dump with each;
 look for the lens's detail, the chevron's place, the HUD's size, shadows, the left eye's outer edge, and stutter on entry.
+
+
+**As built (B3-1)** (2026-10-29, from `4a4a17b6`; the full local build and all its gates green, nothing flown). B3 is behind the temporary key `experimental.native_on_foot_ads_scope_zoom_full_detail`
+(on | off, live, default off, the developer tier's Experimental page, marked TEMPORARY in `edvr.ini`); off is A exactly as before.
+- **Where it lives.** Pure parts: `src\d3d11\scope_zoom_b3.h` (the window, the matrices and the reprojection, the gate, the strip's ramp, the lens's source, the line) and
+  `src\common\scope_zoom_window.h` (the request the two halves share, its wire form, the one window function, the runtime's report). The table's flag is `LensEntry::renderedScoped` in
+  `scope_zoom_s1.h` (only the scoped Executioner). The frame thread: `s1::b3Tick` in `native_on_foot.cpp`. The runtime: `scope_zoom_state.h` and `NativeRuntimeHost::applyScopeZoom`. The doors:
+  `scopeZoomLeftDoor` and the third pass `kScopeZoomMagnifyB3CsHlsl` in `scope_zoom.cpp`, `scope_zoom_shaders.h`. Rigs: `native_frame_test` (`b3_checks.h`), `scope_zoom_test`, `openxr_system_test`,
+  `native_temporal_test`, `openxr_stereo_test` (`share_cases.h`); `--health` reads the three lines (`edvr_log.py`, tag B3).
+- **How the narrowing reaches the game, and when.** The frame thread decides once a tick (the frame boundary): `b3Gate` holds the window while the key, the lens's gate, a rendered entry,
+  the sight eye at `both` and the share (at least 0.9; 0.999 to start) stand; the window's centre is the left eye's direction to the far point c (the lens's c, 100 m along E -> S), latched at the first
+  frame it can start, with w at 1, and held. M is the lens's target M. The strip goes black over 0.1 s first and the zoom is asked for once it is (`b3StripStep`), so the narrowed picture is never
+  the left eye's visible one. It crosses as five of the retired guard's words in a version 11 answer (`EdvrNativeFrameOutput::reservedTerrainGuard[0..4]`: magic and flag, M, tc x, tc y, strip),
+  `scopewin::publish` -> the provider's `beginFrame` (`native_frame.cpp`) -> the runtime's `WaitGetPoses`, where `applyScopeZoom` sets `gameGeometry.views[0].fov` right after the trim sets
+  the frame's frusta, before `temporal.begin` and `geometry.publish`. Tangents only: no pose, size or eye-to-head change. Latency: a decision made at frame N's boundary is read by the next
+  `WaitGetPoses`, so it reaches the game one frame later (N+1) when the game asks after the boundary, two when it asked before; the request is not older than 200 ms or it reads as none (the
+  reader decays it), so a stalled frame thread cannot leave the left eye zoomed. The span's real edges are the temporal pass's (`nativeTemporalZoom`, from the frame's own `begin`), not the tick's.
+  The runtime narrows only while the share is at full weight and was drawn the frame before; otherwise it counts the refusal by reason.
+- **What stays true.** The compositor's located views (untouched: `frameViews` are the located ones). Eye 0's announced frusta: `EdvrNativeTemporalFrame` carries `zoomed` and the frustum without
+  the window (`preZoom`); `begin()` puts it back for the announcements (`announced[0]`: the panels' vertical frustum, the visor and menu tangents, the terrain cull cover's input), while the
+  upscaler, the jitter conversion and the history follow the zoomed `frusta`. The hidden-area mesh is withheld while the window stands (the trim's guard) and `eyeMesh` would use the true frustum.
+  **The UI scale.** `docs\terrain-culling.md` (READ, 2026-10-09): the game's UI scale (0x2842AE3, k = tan(0.782) / tan(vFOV / 2)) and its eye camera setter (0x2878DC0) read `GetProjectionRaw` (the
+  fov getter 0x4E2F50, vertical sum atan|t| + atan|b|), and the renderer's picture comes from `GetProjectionMatrix` (0x4E2D30). So the two getters now differ for eye 0 while the window
+  stands: the matrix answers the narrowed frustum, the raw getter the frustum without the zoom (`SystemRead::toldRaw`, held in the optics cache too). The HUD's size stays true without un-narrowing the
+  render. What the eye camera setter builds from the true raw value (a culling frustum, LOD, shadow fits) is unflown: the runtime's `scope zoom (B3) runtime` line says how many times the game read
+  each getter and the vertical angle each answered (the raw getter's vertical angle should be the true one and the matrix's about 1 / M of it in tangent), and the press line's draw counts and shadow rows say what the left eye did.
+- **The lens.** At the right eye's door, pass 2 of the B3 variant, per lens pixel p of the hole: q = c + (p - c) / M (the lens's own mapping, eased as in A); the right render's depth at q (the
+  rays pass's depth view, the draw's jitter in); the world point from (ndc of q, depth) through T = inverse(A_R) A_L and u (`b3Matrices`: each eye's scene rows as a 4 x 4 with the origin folded in
+  and the draw's jitter taken out); that point's NDC in the left eye's zoomed square, hence its pixel in the left picture's window copy, sampled by Catmull-Rom. A sky pixel (depth 0) is read as
+  a point 1e5 m away, so its direction alone decides. A point behind the left eye, or outside the copy less a 2 px margin, takes A's sample for that pixel (not counted: the shader has no counter).
+  The ease, the mask, the feather and the chevron (the weapons layer's mark, composited after) are unchanged. T and u are made on the frame thread from the rows of both eyes of one frame
+  and published with c; they are the eyes' relative transform, which does not move with the head, so the one-frame lag of c does not reach them; the tick refuses them (`no matrices`) unless the left
+  rows, jitter removed, match the window the runtime told the game (`b3WindowMatches`, 3e-3). The left door (`uiLayerComposite` for eye 0, after the ripple, before the left eye's UI composite, over
+  the picture after RCAS or, with RCAS off, the upscaler's) copies 6 degrees about c's place in the zoomed picture (a few MB). The lens's source is counted per frame: zoomed, or A for one of not zoomed
+  in this frame, no copy, a copy of another frame, no matrices, no shader (B3 not asked is its own bucket).
+- **The strip.** `kStereoShareHlsl` takes `band.z`, the strip's weight: where the share does not cover (alpha 0 or behind the right view) the left eye's own image is blended toward black by it
+  (alpha a + s (1 - a), colour * a / alpha: rgb * a + dest * (1 - a) * (1 - s)); 0 is the share as it was. The weight crosses with the window (`renderCaptured`'s new last argument).
+- **DLSS.** The left eye's history resets at both edges (`b3ResetEdge`, one more term in `treat()`'s reset test, kept per eye in `History::zoomed`); the right eye's is never asked.
+- **The light grid cache** bypasses the first eye-sized builder call of a frame in which eye 0 is zoomed (`b3LightGridBypass`: the left eye is drawn first; a wrong guess costs a build, never a wrong
+  grid). **The readout pin** (`KLatch::putSolo`): while eye 0 is zoomed eye 1's estimate alone vouches for the frame (its hold runs from it) and eye 0's is not put; refusals for want of a pair while zoomed are counted.
+- **Instruments.** One line a press with B3 asked (`scope zoom (B3): press N ...`, `formatB3Press`; its worst case, every counter six digits, fits the log's 1167 bytes, and ten digits keep its end) and
+  the runtime's report after the window ends (`scope zoom (B3) runtime: ...`, through the new d3d11 export `edvrNoteNativeScopeZoom`, as F106's share does). The S1 press line is untouched (it sits at 1160 of
+  1167 bytes). The press line has: ticks asked, held and zoom-asked; zoomed frames; tc, M and the window's drift from c (deg); DLSS resets per eye and by the zoom's edge; the lens's source;
+  window copies; the parallax at c (left px, from the rays' depth at c); draws a frame per eye in and out of the span; light grid bypasses of calls; the shadow constants (cb1 rows 298 to 326, kept
+  with the 270..275 rows of the constants buffer's CPU shadow while a press is open) changed rows a frame per eye and left against right, in and out; frame time in and out; readout pin solo and
+  no-pair. The runtime line has the frames, refusals by reason, the strip's frames, the mesh's, both frusta, and the game's reads of eye 0's projection through each getter with the vertical angle
+  each answered. `--health`: NEVER APPLIED (with the reason), PARTIAL (the lens on A for most zoomed frames, the right eye's history resetting, no reset at the edges, the matrix never read), OK, IDLE.
+  If the narrowing never reached the game: zoomed frames 0, and the lens source all under `not zoomed`, the runtime line's refusals or its absence say which.
+- **Departures.** (1) The instruments are a B3 line and a runtime line, not fields of the S1 line (no room). (2) The window is latched at the press's first frame with w at 1, but the zoom is asked
+  0.1 s later, when the strip is black (a ramp rather than a snap, so the narrowed picture is never visible in the strip). (3) The matrices are the tick's (rows of one frame, jitter out), not made at the
+  door. (4) The runtime refuses the zoom unless the share covers the left eye wholly and was drawn: a safety the spec did not name. (5) The terrain cull cover is told the announced frusta, not the zoomed
+  ones. (6) `begin()` accepts the temporal frame's size from before B3 (a runtime built without it) as a frame with no zoom. (7) The per-eye draw count classifies a frame by the latest frame the
+  runtime began at the frame boundary; a boundary that falls between a frame's draws and the next `WaitGetPoses` misfiles one frame at each edge.
+- **Rig results** (this build): the lens takes the left eye's picture at 1.5, 3, 10 and 100 m and for the sky with 0 of 12972 hole pixels more than 4 codes from the world as the right eye sees it
+  (worst 1 code), and the same pixels read straight from the left picture are far off at 1.5 and 3 m (control); the parallax at c reads 86, 43, 12.9 and 1.3 px at 1.5, 3, 10 and 100 m (6.3 cm over the
+  distance in the window's pixels); each fall-back reason is counted under its own bucket and the picture is A's; the temporal pass resets eye 0 at both edges and never eye 1.
+- **Not verified, for the flight.** That the game narrows eye 0's picture from the matrix getter alone while the raw getter stays true (the render may use the raw value somewhere: the left rows'
+  tangents say, `no matrices` counts it); the HUD's size; LOD and cull in the narrowed eye (the draws a frame in and out); the shadow constants; that the left door sees the picture after RCAS at the
+  size the lens expects (`no copy` counts it); the parallax removal on a real scene (an eye dump of the lens against A's); how often the copy's 6 degrees run out; the left eye's strip and the
+  desktop mirror (visual.desktop_window shows the left eye, so it shows the zoomed picture during the window); the cost of the window copy and the third pass (the existing GPU timers cover pass 2).
+- **Flight card (B3-1, Epic in VR, the full-detail key on the Experimental page with the menu's Developer mode on).** The scoped Executioner in ADS with the scope zoom on and the sight eye at both:
+  the key off then on in one press (A then B3), still and turning; an eye dump with each; then look at the lens's detail, the chevron's place, the HUD's size, shadows, the left eye's outer edge (black
+  while the window stands), and stutter on entry. Read `edvr_log.py --expect-build <hash> --health` first (S1, B3), then the B3 and runtime lines.

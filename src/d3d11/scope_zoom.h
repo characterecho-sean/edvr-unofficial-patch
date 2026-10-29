@@ -10,9 +10,18 @@
 
 #include <cstdint>
 
-#include "scope_zoom_s1.h"
+#include "scope_zoom_b3.h"
 
 namespace edvr {
+
+// B3 (the scoped sniper's lens at full detail; scope_zoom_b3.h): what the frame thread tells the doors about the left eye's zoomed window.
+struct ScopeZoomB3Frame {
+    uint32_t asked = 0;      // 1: the full-detail key is on and the held entry is a rendered one, on a frame the lens qualifies for: the left door copies the zoomed picture's window and the lens reads it
+    uint32_t matOk = 0;      // 1: T and u are made from the two eyes' rows of one frame, and the left rows describe the window the runtime told the game
+    float tc[2] = {};        // the window's centre, in the left eye's tangent plane
+    float T[16] = {};        // a point of the right eye's clip space, as a row (ndc x, ndc y, depth, 1), to the left eye's: b3Matrices
+    float u[4] = {};
+};
 
 // What the frame thread publishes each frame the tick runs (every other field is meaningful for a kQualifies verdict only).
 struct ScopeZoomFrame {
@@ -24,6 +33,7 @@ struct ScopeZoomFrame {
     float jitterUv[2] = {};          // the draw's jitter in the uv of the render's size (the game's content sits this far right and down of its unjittered place)
     uint64_t jitterSeq = 0;          // the temporal sequence of the frame that jitter, and the rows c came from, were drawn in (0: no jitter reading); the door's sequence is the picture's
     float tan4[4] = {};              // the tangents {L, R, D, U} the render's NDC square spans
+    ScopeZoomB3Frame b3;             // B3 (meaningful for a kQualifies verdict only)
     uint64_t stampUs = 0;            // set by scopeZoomPublish
 };
 
@@ -62,6 +72,21 @@ void scopeZoomNoteMark(uint32_t eye, uint64_t seq, uint32_t path);
 void scopeZoomNoteMarkComposite(uint32_t kind);
 // The gunsight mark's route through the weapons layer stood down (ui_layer.cpp markStandDown): counted for the press line.
 void scopeZoomNoteMarkStandDown();
+// B3: the left eye's door, called with eye 0's picture after the upscaler and RCAS and before the left eye's UI composite. When the lens is to be rendered (the frame record says so) and the
+// frame has the left eye drawn with the zoomed window, it copies the part of the picture the lens may read (scope_zoom_b3.h b3CopyRect) for the right eye's door a moment later.
+struct ScopeZoomLeftArgs {
+    uint64_t sequence = 0;
+    ID3D11Texture2D* frame = nullptr;
+    const uint32_t* region = nullptr;   // x0, y0, x1, y1 in the frame's pixels: the whole texture, or the copy is not made
+    bool resolved = false;              // the frame is the upscaler's picture
+};
+void scopeZoomLeftDoor(const ScopeZoomLeftArgs& args);
+// The doors ask the temporal pass whether eye 0 is zoomed in their frame through this pointer, set once by the frame tick (native_on_foot.cpp: scopeZoomSetTemporalZoom(&nativeTemporalZoom)),
+// so the door links without the temporal pass (the rigs that link it stub nothing). Not set: eye 0 is never zoomed, and a frame asked for B3 falls back to the plain lens, counted.
+using ScopeZoomTemporalFn = bool (*)(uint64_t sequence, float zoomed[4], float pre[4]);
+void scopeZoomSetTemporalZoom(ScopeZoomTemporalFn fn);
+// B3: the door's half of the press line's figures (the lens's source, the copies, the parallax at c); zero at scopeZoomPressBegin.
+void scopeZoomB3Take(scopezoom::B3Press* out);
 // A press begins (zero the door's counters) and ends (the counters, finished, for the press line).
 void scopeZoomPressBegin(uint32_t press);
 // The press the last scopeZoomPressBegin named (0 before any): the mark's stand-down lasts until it changes.

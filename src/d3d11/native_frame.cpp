@@ -2,6 +2,7 @@
 
 #include "../common/comfort_fade.h"
 #include "../common/left_eye_share.h"
+#include "../common/scope_zoom_window.h"
 #include "../common/config.h"
 #include "../common/world_scale.h"
 #include "../common/frame_flag.h"
@@ -415,6 +416,9 @@ HRESULT WINAPI beginFrame(void* context, const EdvrNativeFrameInput* input,
         const uint32_t percent = carried ? worldScaleKey() : edvr::kWorldScaleDefault;
         if (carried) result.worldScalePercent = percent;
         g_worldScaleGiven.store(percent, std::memory_order_relaxed);
+        // B3 (the scope zoom's window): the left eye drawn as the zoomed view, in a version 11 answer only, in five of the retired guard's words. None once the frame thread's request is
+        // stale; a shape that cannot carry it leaves the words zero (no zoom, no strip).
+        if (carried) edvr::scopewin::toWords(edvr::scopewin::read(GetTickCount64()), result.reservedTerrainGuard);
     }
     // The old Explorer Cam's headset offset (headOffset, yawRadians,
     // offsetEnabled, offsetGamePoses) is retired: those slots stay zero, so a

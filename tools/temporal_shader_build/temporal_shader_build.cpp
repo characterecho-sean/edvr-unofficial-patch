@@ -630,8 +630,8 @@ static void selfTest() {
     coreLegacy.insert(coreLegacy.end(), originalCore.begin(), originalCore.end());
     coreLegacy.insert(coreLegacy.end(), originalExtra.begin(), originalExtra.end());
     auto coreFixed = fixedVariants(extractCore(edvr::kTemporalCsHlsl));
-    check(originalCore.size() == 28 && originalExtra.size() == 12 && coreFixed.size() == 78 && coreLegacy.size() + 31 == coreFixed.size(),
-          "all original fixed shader contracts, three bounded diagnostics, six flat foreground shaders, the supercruise bars' geometry shader, the foreground map's four sibling-pass compute shaders (donor, fit and the shadow's two), the sky ring's compute shader, the UI layer's in-place composite, the explosion billboards' five facing transcriptions the sharp weapons' two source-pass shaders, the shield ripple's door pass, the HUD bloom feed pass, the star light pass, the visor's axis-centred vertex shader, the desktop window's two draw shaders and the scope lens's two compute passes are registered");
+    check(originalCore.size() == 28 && originalExtra.size() == 12 && coreFixed.size() == 79 && coreLegacy.size() + 32 == coreFixed.size(),
+          "all original fixed shader contracts, three bounded diagnostics, six flat foreground shaders, the supercruise bars' geometry shader, the foreground map's four sibling-pass compute shaders (donor, fit and the shadow's two), the sky ring's compute shader, the UI layer's in-place composite, the explosion billboards' five facing transcriptions the sharp weapons' two source-pass shaders, the shield ripple's door pass, the HUD bloom feed pass, the star light pass, the visor's axis-centred vertex shader, the desktop window's two draw shaders and the scope lens's three compute passes are registered");
     for(size_t i=0;i<coreFixed.size();++i)for(size_t j=0;j<i;++j)
         check(std::strcmp(coreFixed[i].symbol,coreFixed[j].symbol)!=0,"generated shader symbols do not collide");
     using ReflectFn = HRESULT(WINAPI*)(LPCVOID, SIZE_T, REFIID, void**);
@@ -1115,19 +1115,22 @@ static void selfTest() {
         }
     }
 
-    // The scope lens's two compute passes (src/d3d11/scope_zoom_shaders.h; src/d3d11/scope_zoom.cpp): new, held to their own contract -- the symbols, source names, entry, profile
+    // The scope lens's three compute passes (src/d3d11/scope_zoom_shaders.h; src/d3d11/scope_zoom.cpp; the third is B3's magnify pass with the left eye's zoomed picture and the depth): new, held to their own contract -- the symbols, source names, entry, profile
     // and flags, the text each compiles, the group each is dispatched with (128 threads in one group for the rays; 32x8 for the magnify) and the bindings scope_zoom.cpp sets: the
     // rays pass reads the depth at t0 and fills the raw buffer at u0 with its 80-byte block at b0; the magnify pass reads the window's copy at t0 and the raw buffer at t1, writes
     // the picture as a typed UAV at u0, filters with the sampler at s0 and has its 48-byte block at b0.
     {
         struct Binding { const char* name; D3D_SHADER_INPUT_TYPE type; UINT slot; };
         struct Pass { const char* symbol; const char* sourceName; const char* source; UINT gx, gy; UINT cbSize; std::vector<Binding> bindings; };
-        const Pass passes[2] = {
+        const Pass passes[3] = {
             {"kScopeZoomRaysBytecode", "scope_zoom_rays_cs", edvr::kScopeZoomRaysCsHlsl, 128, 1, sizeof(edvr::ScopeZoomRaysParams),
              {{"Z", D3D_SIT_TEXTURE, 0}, {"Lens", D3D_SIT_UAV_RWBYTEADDRESS, 0}, {"P", D3D_SIT_CBUFFER, 0}}},
             {"kScopeZoomMagnifyBytecode", "scope_zoom_magnify_cs", edvr::kScopeZoomMagnifyCsHlsl, 32, 8, sizeof(edvr::ScopeZoomMagnifyParams),
-             {{"Copy", D3D_SIT_TEXTURE, 0}, {"Lens", D3D_SIT_BYTEADDRESS, 1}, {"Frame", D3D_SIT_UAV_RWTYPED, 0}, {"Lin", D3D_SIT_SAMPLER, 0}, {"P", D3D_SIT_CBUFFER, 0}}}};
-        for (size_t i = 0; i < 2; ++i) {
+             {{"Copy", D3D_SIT_TEXTURE, 0}, {"Lens", D3D_SIT_BYTEADDRESS, 1}, {"Frame", D3D_SIT_UAV_RWTYPED, 0}, {"Lin", D3D_SIT_SAMPLER, 0}, {"P", D3D_SIT_CBUFFER, 0}}},
+            {"kScopeZoomMagnifyB3Bytecode", "scope_zoom_magnify_b3_cs", edvr::kScopeZoomMagnifyB3CsHlsl, 32, 8, sizeof(edvr::ScopeZoomMagnifyB3Params),
+             {{"Copy", D3D_SIT_TEXTURE, 0}, {"Lens", D3D_SIT_BYTEADDRESS, 1}, {"Z", D3D_SIT_TEXTURE, 2}, {"Left", D3D_SIT_TEXTURE, 3}, {"Frame", D3D_SIT_UAV_RWTYPED, 0},
+              {"Lin", D3D_SIT_SAMPLER, 0}, {"P", D3D_SIT_CBUFFER, 0}}}};
+        for (size_t i = 0; i < 3; ++i) {
             auto& shader = coreFixed[coreLegacy.size() + 29 + i];
             check(!std::strcmp(shader.symbol, passes[i].symbol) && !std::strcmp(shader.sourceName, passes[i].sourceName) &&
                   !std::strcmp(shader.entry, "main") && !std::strcmp(shader.profile, "cs_5_0") && shader.alternate == passes[i].source &&

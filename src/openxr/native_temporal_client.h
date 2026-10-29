@@ -36,7 +36,7 @@ class NativeTemporalClient final {
   // geometry's own widths are what the frame was rendered for); 0 unknown.
   HRESULT begin(const GeometryInput& geometry, uint64_t referenceGeneration, float (&shift)[2][2],
       const vr::HmdMatrix34_t* renderedHead = nullptr, uint32_t askedWidth = 0, uint32_t askedHeight = 0,
-      float trueUp = 0.0f, float trueDown = 0.0f) {
+      float trueUp = 0.0f, float trueDown = 0.0f, const RawFov* preZoomEye0 = nullptr) {
     std::memset(shift, 0, sizeof(shift));
     GeometrySnapshot snapshot{};
     if (!makeGeometrySnapshot(geometry, snapshot) || !referenceGeneration) { invalidate(); return E_INVALIDARG; }
@@ -58,6 +58,11 @@ class NativeTemporalClient final {
     frame.askedHeight = askedHeight;
     frame.trueUp = trueUp;
     frame.trueDown = trueDown;
+    if (preZoomEye0) {
+      frame.zoomed = 1u;
+      frame.preZoom[0] = preZoomEye0->left; frame.preZoom[1] = preZoomEye0->right;
+      frame.preZoom[2] = preZoomEye0->top; frame.preZoom[3] = preZoomEye0->bottom;
+    }
     EdvrNativeTemporalProjection output{sizeof(output), EDVR_NATIVE_TEMPORAL_VERSION_1};
     const auto result = table_.beginFrame(table_.context, &frame, &output);
     if (result != S_OK) return result;

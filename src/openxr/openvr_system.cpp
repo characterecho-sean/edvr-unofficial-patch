@@ -158,6 +158,7 @@ HmdMatrix44_t OpenVRSystem::GetProjectionMatrix(EVREye e,float nearZ,float farZ,
   source_.noteGeometryQuery(1,s);
   const unsigned eye=unsigned(e);
   const bool liveGeometry=geometryValid(s);
+  if(eyeValid(e))source_.noteProjectionRead(eye,false,s.toldRawSet&&liveGeometry);
   bool accepted=false;
   if(opticsAvailable(s)&&eyeValid(e)) {
     const RawFov base=liveGeometry?s.geometry.raw[eye]:s.optics.raw[eye];
@@ -210,11 +211,13 @@ void OpenVRSystem::GetProjectionRaw(EVREye e,float* l,float* r,float* t,float* b
   const unsigned eye=unsigned(e);
   const bool liveGeometry=geometryValid(s);
   if(opticsAvailable(s)&&eyeValid(e)) {
-    const RawFov base=liveGeometry?s.geometry.raw[eye]:s.optics.raw[eye];
+    // The scope zoom narrows eye 0's matrix; this getter, which the game's UI scale reads, keeps the frustum the game would have been told without it.
+    const RawFov base=liveGeometry?(s.toldRawSet?s.toldRaw[eye]:s.geometry.raw[eye]):s.optics.raw[eye];
     if(liveGeometry) shiftedRawFov(base,s.tangentShift[eye][0],
                                    s.tangentShift[eye][1],out);
     else out=base;
   }
+  if(eyeValid(e))source_.noteProjectionRead(eye,true,s.toldRawSet&&liveGeometry);
   if(l)*l=out.left;if(r)*r=out.right;if(t)*t=out.top;if(b)*b=out.bottom;
 }
 DistortionCoordinates_t OpenVRSystem::ComputeDistortion(EVREye,float,float) { unavailable(3);return {}; }
@@ -369,7 +372,7 @@ bool OpenVRSystem::PollNextEventWithPose(ETrackingUniverseOrigin origin,VREvent_
 const OpenVRSystem::MeshEntry* OpenVRSystem::eyeMesh(const SystemRead& s,unsigned e,const char*& failure) {
   // Keep temporal jitter out of the retained mesh; its conservative inset
   // leaves the unjittered visible region unmasked.
-  const RawFov fov=geometryValid(s)?s.geometry.raw[e]:s.optics.raw[e];
+  const RawFov fov=geometryValid(s)?(s.toldRawSet?s.toldRaw[e]:s.geometry.raw[e]):s.optics.raw[e];   // the scope zoom's narrowed frustum is never the mesh's
   for(auto& entry:meshes_)if(entry->masks==s.hiddenMasks&&entry->eye==e&&
       std::memcmp(&entry->fov,&fov,sizeof(fov))==0)return entry.get();
   if(meshes_.size()>=64){failure="retention_limit";return nullptr;}

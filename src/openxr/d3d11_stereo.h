@@ -108,7 +108,10 @@ class D3D11Stereo final {
                           StereoWallTimes* times = nullptr,
                           const StereoPlacement* placement = nullptr,
                           float fade = 0.0f, const XrPosef* headPose = nullptr, float leftEyeShare = 0.0f,
-                          const StereoHiddenArea* rightHidden = nullptr);
+                          const StereoHiddenArea* rightHidden = nullptr, float leftStripBlack = 0.0f);
+  // leftStripBlack, 0..1 (B3, the scope zoom's window, scope_zoom_window.h): with a share drawn, the part of the left eye the share does not cover (its outer strip, and the fade
+  // band to it) is blended toward black by that much, so the left eye's own picture, which the zoom has narrowed, is not seen there. 0 (or anything that is not a number) draws
+  // the share exactly as before; with no share drawn it does nothing, the left eye's whole picture being its own.
   const StereoShareFacts& shareFacts() const { return shareFacts_; }
   XrResult renderSkybox(const XrView (&)[2], XrSpace, const SkyboxCapture&,
                         XrCompositionLayerProjection&, float fade = 0.0f);

@@ -279,7 +279,7 @@ struct KLatch {
     uint32_t pairedFrame = ~0u;
     bool agreed = false;
     KAgree last;
-    uint64_t pairs = 0, disagreed = 0;
+    uint64_t pairs = 0, disagreed = 0, solo = 0;
     // Records eye e's estimate; when the other eye's is of the same frame, compares them. Returns true if this call made a comparison.
     bool put(int e, uint32_t f, const CamK& ck, const double oh[3], const double ow[3]) noexcept {
         if (e < 0 || e > 1) return false;
@@ -295,6 +295,21 @@ struct KLatch {
         ++pairs;
         agreed = kAgreeWithin(last);
         if (!agreed) ++disagreed;
+        return true;
+    }
+    // B3 (the scope zoom's window): while eye 0 is drawn as the zoomed view its camera is a different one and cannot agree with eye 1's, so eye 1 alone vouches: its estimate stands as
+    // the frame's pairing (the hold runs from it as from any pairing) without a comparison. Eye 0's estimate is not put while the window stands (the caller). Counted.
+    bool putSolo(int e, uint32_t f, const CamK& ck, const double oh[3], const double ow[3]) noexcept {
+        if (e < 0 || e > 1 || !ck.ok) return false;
+        frame[e] = f;
+        k[e] = ck;
+        for (int i = 0; i < 3; ++i) {
+            oHud[e][i] = oh[i];
+            oWorld[e][i] = ow[i];
+        }
+        pairedFrame = f;
+        agreed = true;
+        ++solo;
         return true;
     }
     // May a draw of frame f use the corrected rows: the latch holds from the pairing's frame to kLatchHoldFrames frames after it, while the pair agreed.

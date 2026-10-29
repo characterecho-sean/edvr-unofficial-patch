@@ -68,6 +68,7 @@
 #include "f172_checks.h"    // F172: the neck raise published pre-turned by the mouse-look aim pitch: the game's turn modelled (R(a) body_in), the slopes it gives unturned and turned, the unturned cases bit for bit, the readers that cancel the z share, the source pins
 #include "s0_checks.h"      // S0: the scope zoom instrument (measure only): the projection decode, the press tracker, the camera table, the probe points, the line formats
 #include "s1_checks.h"      // S1/A1: the scope lens: the table and M, the gate and the ease, the rays over the depth, the open-sight rule, r(theta), the mask, the window, the line formats
+#include "b3_checks.h"      // B3: the scoped sniper's lens at full detail: the window, the reprojection, the decisions, the wire form, the press line
 #include "f151_checks.h"    // F151: the weapon readout's draw bound by its place (the ordinals, each guard, one bind per key, the lost-frame count) and the held copy's scope from the selected slot
 #include "f110_checks.h"    // F110: the ADS sight lock's model right eye (the left-eye job camera plus the IPD)
 #include "f111_checks.h"    // F111: the panel pointer instrument's statistics and verdict
@@ -7588,6 +7589,10 @@ int wmain(int argc, wchar_t** argv) {
     // frame (and the speck, the open sight, the picture's edge, the angle stop and the escaped ray's clamp); r(theta), the mask, the source of a magnified pixel and Catmull-Rom; the
     // window and the box; the rays buffer's layout; the accumulators and the two lines the DLL writes.
     s1test::runS1(check);
+    // B3 (the scoped sniper's lens at full detail): the table's rendered flag; the window (centred on c, divided by M, inside the eye's span); the copy window; the reprojection of a lens pixel's
+    // world point from the right eye's depth through the left eye's zoomed rows at several depths (the parallax removed, the sky by its direction, the jitter taken out, a point behind refused); the gate
+    // and the hold, the strip's ramp, the lens's source and the reason for a fall-back, the reset edge, the light grid's bypass; the readout pin on one eye; the window's wire form; the press line.
+    b3test::runB3(check);
     // F161 (measure only): the left arm's distance to the eye as drawn (the point to the upper arm's segment against a brute force, to the elbow), counted per context (the hip or ADS,
     // standing or crouched, moving), the frames within 4 cm and 2.5 cm, the seconds that had any, and the window's line within the log's limit. F97a's lowering held through ADS while
     // crouched (the standing stance the earlier formula bit for bit, the blends across the detach and the stance continuous) is checked with F97a's (run97).

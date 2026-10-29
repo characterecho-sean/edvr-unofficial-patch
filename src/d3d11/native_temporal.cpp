@@ -11,7 +11,8 @@
 #include "vscreen.h"           // vScreenClearRenderTargetViewRaw: the black frame's one clear
 #include "vr_camera_census.h"   // nativeTemporalEyeGeometry's declaration, so its definition below is checked against it
 #include "terrain_cull_cover_hook.h"   // the terrain cull cover (docs/terrain-culling.md): begin() tells it the frusta the game is handed
-#include "light_grid_cache_hook.h"     // the light grid cache's jitter probe: begin() tells it this frame's jitter
+#include "light_grid_cache_hook.h"     // the light grid cache's jitter probe: begin() tells it this frame's jitter, and whether eye 0 is zoomed
+#include "scope_zoom_b3.h"             // B3: the reset edge's rule (b3ResetEdge)
 #include "../common/config.h"
 #include "../common/frame_flag.h"
 #include "../common/temporal_math.h"
@@ -39,6 +40,7 @@ struct History {
   uint32_t width = 0, height = 0;
   uint32_t outputWidth = 0, outputHeight = 0;
   DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
+  bool zoomed = false;   // eye 0 only: the frame was drawn with the scope zoom's window (B3)
 };
 struct Settings {
   bool on=false,dlaa=false,upscale=false,jitter=true,lag=false; int motion=3,signX=1,signY=1;
@@ -68,6 +70,11 @@ struct State {
   bool active = false, begun = false, standDown = false;
   uint64_t sequence = 0, reference = 0;
   float head[12]{}, eyes[2][12]{}, frusta[2][4]{};
+  // B3 (the scope zoom's window, common/scope_zoom_window.h): eye 0's frustum in frusta[0] is the zoomed window this frame (zoomedNow), and preZoom is the one the game would have been told
+  // without it. What eye 0 ANNOUNCES to the rest of EDVR (the panels' size, the menu, the visor, the terrain cull's cover) is announced[], the frusta with that one put back.
+  bool zoomedNow = false;
+  float preZoom[4]{}, announced[2][4]{};
+  uint64_t zoomFrames = 0, zoomEdgeResets = 0, resetsEye[2]{};
   float shift[2][2]{};
   uint32_t width[2]{}, height[2]{};
   uint32_t recW=0,recH=0; bool flipped[2]{};
@@ -127,6 +134,15 @@ std::atomic<uint64_t> g_asked{0};
 // float bits), for the engine-side panel sizing's untrimmed k. 0 when the
 // host does not say.
 std::atomic<uint64_t> g_trueVertical{0};
+// B3: the frame's zoom of eye 0, for the door (the left eye's window copy and the lens read it between treat() and the next begin). Its own lock, apart from `mutex`, so the door
+// may ask from anywhere after treat() returned.
+struct ZoomPub {
+  uint64_t sequence = 0;
+  bool zoomed = false;
+  float zoom[4]{}, pre[4]{};
+};
+ZoomPub g_zoomPub;
+std::mutex g_zoomMu;
 // The render thread inside treat(), holding `mutex` across the temporal
 // pass: the readers below that must take the lock answer "no" there rather
 // than re-lock it.
@@ -185,6 +201,12 @@ Settings readConfig() {
   s.upscale=_stricmp(mode.c_str(),"dlss")==0||_stricmp(mode.c_str(),"fsr")==0||_stricmp(mode.c_str(),"xess")==0;
   // The shipped values: jitter on, blend .90, clamp 1.0, depth-derived motion, the jitter sign as is, no lag.
   s.jitter=true; s.blend=.90f; s.clamp=1.f; s.motion=3; s.signX=s.signY=1; s.lag=false; return s;
+}
+// B3: no frame is zoomed once the channel is invalidated or closed (the door and the light grid cache would otherwise go on asking for a window nobody tells the game).
+void clearZoom(State& s) {
+  s.zoomedNow=false;
+  {std::lock_guard<std::mutex> zl(g_zoomMu);g_zoomPub=ZoomPub{};}
+  edvr::lightGridCacheNoteZoomedFrame(false);
 }
 void reset(State& s) {
   for(auto& h:s.history) h={}; s.treated[0]=s.treated[1]=false;
@@ -378,7 +400,7 @@ uint32_t jitterCycleFor(State& s,unsigned eye) {
 
 HRESULT WINAPI begin(void* p,const EdvrNativeTemporalFrame* f,EdvrNativeTemporalProjection* out) {
   std::lock_guard<std::mutex> lock(mutex); State* s=identify(p);
-  if(!s||!s->active||s!=current||!f||!out||f->size!=sizeof(*f)||f->version!=EDVR_NATIVE_TEMPORAL_VERSION_1||
+  if(!s||!s->active||s!=current||!f||!out||(f->size!=sizeof(*f)&&f->size!=EDVR_NATIVE_TEMPORAL_FRAME_SIZE_NO_ZOOM)||f->version!=EDVR_NATIVE_TEMPORAL_VERSION_1||
      f->generation!=s->generation||!f->sequence||!f->referenceGeneration||
      !finite(f->head,12)||!rigid(f->head)) return E_INVALIDARG;
   if(out->size!=sizeof(*out)||out->version!=EDVR_NATIVE_TEMPORAL_VERSION_1)return E_INVALIDARG;
@@ -396,10 +418,18 @@ HRESULT WINAPI begin(void* p,const EdvrNativeTemporalFrame* f,EdvrNativeTemporal
   s->recW=f->recommendedWidth;s->recH=f->recommendedHeight;
   g_recommended.store((uint64_t(s->recW)<<32)|s->recH,std::memory_order_release);
   std::memcpy(s->head,f->head,sizeof(s->head));std::memcpy(s->eyes,f->eyeToHead,sizeof(s->eyes));std::memcpy(s->frusta,f->frusta,sizeof(s->frusta));
+  // B3: the host says eye 0's frustum is the scope zoom's window and gives the one without it; a frame that says it with a pre-zoom frustum that is no frustum is not zoomed.
+  s->zoomedNow=f->size==sizeof(*f)&&f->zoomed==1u&&frustum(f->preZoom);   // a frame of the size from before B3 has neither field
+  std::memcpy(s->announced,s->frusta,sizeof(s->announced));
+  if(s->zoomedNow){std::memcpy(s->preZoom,f->preZoom,sizeof(s->preZoom));std::memcpy(s->announced[0],f->preZoom,sizeof(s->announced[0]));++s->zoomFrames;}
+  else std::memset(s->preZoom,0,sizeof(s->preZoom));
+  {std::lock_guard<std::mutex> zl(g_zoomMu);g_zoomPub.sequence=f->sequence;g_zoomPub.zoomed=s->zoomedNow;std::memcpy(g_zoomPub.zoom,s->frusta[0],16);std::memcpy(g_zoomPub.pre,s->preZoom,16);}
+  edvr::lightGridCacheNoteZoomedFrame(s->zoomedNow);
   // The game's terrain cull builds a centred frustum from the vFOV and aspect it is told; the cover widens it to the largest tangents of what the game is handed (the
-  // unjittered frusta of this frame, after any FOV trim). Atomics only; the hook may be inert, and this is then a store nobody reads.
-  edvr::terrainCullCoverNoteFrusta(s->frusta);
-  {const float up=std::fabs(s->frusta[0][2]),down=std::fabs(s->frusta[0][3]);uint32_t a=0,b=0;
+  // unjittered frusta of this frame, after any FOV trim). Atomics only; the hook may be inert, and this is then a store nobody reads. The scope zoom's window is not what the
+  // game is handed for this (the raw getter keeps the true frustum), so it is the announced one.
+  edvr::terrainCullCoverNoteFrusta(s->announced);
+  {const float up=std::fabs(s->announced[0][2]),down=std::fabs(s->announced[0][3]);uint32_t a=0,b=0;
    std::memcpy(&a,&up,4);std::memcpy(&b,&down,4);g_vertical.store((uint64_t(a)<<32)|b,std::memory_order_release);}
   {const bool asked=f->askedWidth&&f->askedHeight&&f->askedWidth<=D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION&&f->askedHeight<=D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION;
    g_asked.store(asked?((uint64_t(f->askedWidth)<<32)|f->askedHeight):0,std::memory_order_release);}
@@ -454,8 +484,8 @@ HRESULT WINAPI treat(void* p,uint64_t seq,uint32_t eye,ID3D11Texture2D* source,c
   edvr::uiLayerNoteSubmitted(seq,eye,source);
   if (eye==0) {
     edvr::announceEyeTextureSize(w,h);
-    const float outer=-s->frusta[0][0], inner=s->frusta[0][1];
-    const float top=-s->frusta[0][2], bottom=s->frusta[0][3];
+    const float outer=-s->announced[0][0], inner=s->announced[0][1];   // B3: the frustum without the scope zoom's window
+    const float top=-s->announced[0][2], bottom=s->announced[0][3];
     if(std::isfinite(outer)&&std::isfinite(inner)&&outer>0&&inner>0)
       edvr::announceEyeTangents(outer,inner);
     if(std::isfinite(top)&&std::isfinite(bottom)&&top>0&&bottom>0)
@@ -502,9 +532,12 @@ HRESULT WINAPI treat(void* p,uint64_t seq,uint32_t eye,ID3D11Texture2D* source,c
   if(separationMoved&&eye==0&&s->separationNotes++<kSeparationNotes)
     edvr::Log::get().note("native temporal: history reset, the eye separation moved from %.1f mm to %.1f mm (the world scale, or an IPD the runtime changed); sequence %llu.",
         1000.0*separationWas,1000.0*separationNow,(unsigned long long)seq);
+  // B3: eye 0's frustum changes M-fold where the scope zoom's window starts and ends; a history of the other view would be reprojected into this one.
+  const bool zoomedHere=eye==0&&s->zoomedNow;
+  const bool zoomMoved=s->history[eye].valid&&edvr::scopezoom::b3ResetEdge(s->history[eye].zoomed,zoomedHere);
   const bool resetHistory=!s->history[eye].valid||s->history[eye].reference!=s->reference||s->continuity[eye]+1!=seq||
       s->history[eye].width!=w||s->history[eye].height!=h||s->history[eye].format!=d.Format||
-      s->history[eye].outputWidth!=outW||s->history[eye].outputHeight!=outH||separationMoved;
+      s->history[eye].outputWidth!=outW||s->history[eye].outputHeight!=outH||separationMoved||zoomMoved;
   float delta[9]={1,0,0,0,1,0,0,0,1},trans[3]={},transOther[3]={}; const float* pd=nullptr;const float* pt=nullptr;const float* pto=nullptr;
   float headDegrees=0;
   if(!resetHistory){
@@ -542,7 +575,7 @@ HRESULT WINAPI treat(void* p,uint64_t seq,uint32_t eye,ID3D11Texture2D* source,c
   // fix.ui_quality's door (ui_layer.h): the pass handed this eye on; the
   // layer arms for the next frame only behind a frame the pass produced.
   edvr::uiLayerNoteTemporal(seq,eye,result);
-  if(resetHistory)++s->resets;
+  if(resetHistory){++s->resets;++s->resetsEye[eye];if(zoomMoved)++s->zoomEdgeResets;}
   if(!s->engagedNoted){s->engagedNoted=true;edvr::Log::get().note("native temporal: engaged mode=%s, input=%ux%u, output=%ux%u, sequence=%llu; producer filtering before menu and shared capture.",mode(s->currentSettings),w,h,outW?outW:w,outH?outH:h,(unsigned long long)seq);}
   outBox[0]=b[0]>b[2]?1.f:0.f;outBox[2]=b[0]>b[2]?0.f:1.f;outBox[1]=b[1]>b[3]?1.f:0.f;outBox[3]=b[1]>b[3]?0.f:1.f;
   auto& hst=s->history[eye];hst.valid=true;hst.sequence=seq;hst.reference=s->reference;
@@ -550,9 +583,9 @@ HRESULT WINAPI treat(void* p,uint64_t seq,uint32_t eye,ID3D11Texture2D* source,c
   if(resetHistory)s->verdictPending[eye]=false;
   std::memcpy(hst.head,s->head,sizeof(hst.head));std::memcpy(hst.eye,s->eyes[eye],sizeof(hst.eye));
   std::memcpy(hst.otherEye,s->eyes[1-eye],sizeof(hst.otherEye));std::memcpy(hst.frustum,s->frusta[eye],sizeof(hst.frustum));
-  hst.width=w;hst.height=h;hst.outputWidth=outW;hst.outputHeight=outH;hst.format=d.Format;return S_OK;
+  hst.width=w;hst.height=h;hst.outputWidth=outW;hst.outputHeight=outH;hst.format=d.Format;hst.zoomed=zoomedHere;return S_OK;
 }
-HRESULT WINAPI invalidate(void* p){std::lock_guard<std::mutex> lock(mutex);State*s=identify(p);if(!s||!s->active||s!=current)return E_INVALIDARG;reset(*s);s->begun=false;g_recommended.store(0,std::memory_order_release);g_vertical.store(0,std::memory_order_release);g_asked.store(0,std::memory_order_release);g_trueVertical.store(0,std::memory_order_release);std::memset(s->shift,0,sizeof(s->shift));std::memset(s->renderedJitter,0,sizeof(s->renderedJitter));return S_OK;}
+HRESULT WINAPI invalidate(void* p){std::lock_guard<std::mutex> lock(mutex);State*s=identify(p);if(!s||!s->active||s!=current)return E_INVALIDARG;reset(*s);s->begun=false;g_recommended.store(0,std::memory_order_release);g_vertical.store(0,std::memory_order_release);g_asked.store(0,std::memory_order_release);g_trueVertical.store(0,std::memory_order_release);clearZoom(*s);std::memset(s->shift,0,sizeof(s->shift));std::memset(s->renderedJitter,0,sizeof(s->renderedJitter));return S_OK;}
 HRESULT WINAPI skipEye(void* p,uint64_t seq,uint32_t eye,uint32_t jumpOnly,uint32_t verdict) {
   std::lock_guard<std::mutex> lock(mutex);State* s=identify(p);
   if(!s||!s->active||s!=current||!s->begun||seq!=s->sequence||eye>1||s->treated[eye]||jumpOnly>1)return E_INVALIDARG;
@@ -575,7 +608,7 @@ HRESULT WINAPI close(void* p){
   edvr::Log::get().note("native temporal omissions: skipped=%llu, history_kept=%llu, returned_resets=%llu, unjudged_resets=%llu.",
       (unsigned long long)s->skipped,(unsigned long long)s->spared,(unsigned long long)s->returned,(unsigned long long)s->unjudged);
   reset(*s);releaseBlank(s->blank[0]);releaseBlank(s->blank[1]);s->active=false;s->begun=false;s->device=nullptr;
-  if(current==s){current=nullptr;g_recommended.store(0,std::memory_order_release);g_vertical.store(0,std::memory_order_release);g_asked.store(0,std::memory_order_release);g_trueVertical.store(0,std::memory_order_release);}return S_OK;
+  if(current==s){current=nullptr;g_recommended.store(0,std::memory_order_release);g_vertical.store(0,std::memory_order_release);g_asked.store(0,std::memory_order_release);g_trueVertical.store(0,std::memory_order_release);}clearZoom(*s);return S_OK;
 }
 }
 
@@ -683,6 +716,35 @@ bool nativeTemporalAsked(uint32_t* w, uint32_t* h) {
   if (!v) return false;
   if (w) *w = static_cast<uint32_t>(v >> 32);
   if (h) *h = static_cast<uint32_t>(v);
+  return true;
+}
+// B3: whether eye 0's frustum is the scope zoom's window in the frame begun at `sequence` (the door's frame), and both frusta ({left, right, down, up} tangents, unjittered): the
+// zoomed one the game drew eye 0 with and the one it would have been told without the zoom. False when the frame begun is another or eye 0 is not zoomed in it.
+bool nativeTemporalZoom(uint64_t sequence, float zoomed[4], float pre[4]) {
+  std::lock_guard<std::mutex> lock(g_zoomMu);
+  if (!g_zoomPub.zoomed || g_zoomPub.sequence != sequence) return false;
+  if (zoomed) std::memcpy(zoomed, g_zoomPub.zoom, 4 * sizeof(float));
+  if (pre) std::memcpy(pre, g_zoomPub.pre, 4 * sizeof(float));
+  return true;
+}
+// ... and whether the latest frame begun is zoomed (the frame thread's and the draw path's question; the sequence, when asked for, is that frame's).
+bool nativeTemporalZoomLatest(uint64_t* sequence, float zoomed[4], float pre[4]) {
+  std::lock_guard<std::mutex> lock(g_zoomMu);
+  if (!g_zoomPub.zoomed) return false;
+  if (sequence) *sequence = g_zoomPub.sequence;
+  if (zoomed) std::memcpy(zoomed, g_zoomPub.zoom, 4 * sizeof(float));
+  if (pre) std::memcpy(pre, g_zoomPub.pre, 4 * sizeof(float));
+  return true;
+}
+// B3: the temporal pass's counts since the channel opened -- the frames eye 0 was zoomed in, the DLSS history resets per eye (every reason), and the resets the zoom's edges made.
+// The press line takes the difference over a press. False before a channel.
+bool nativeTemporalZoomCounts(uint64_t* zoomFrames, uint64_t resets[2], uint64_t* zoomEdgeResets) {
+  if (t_insideTreat) return false;
+  std::lock_guard<std::mutex> lock(mutex);
+  if (!current || !current->active) return false;
+  if (zoomFrames) *zoomFrames = current->zoomFrames;
+  if (resets) { resets[0] = current->resetsEye[0]; resets[1] = current->resetsEye[1]; }
+  if (zoomEdgeResets) *zoomEdgeResets = current->zoomEdgeResets;
   return true;
 }
 // The true display frustum's vertical tangents (eye 0), lock-free; false when

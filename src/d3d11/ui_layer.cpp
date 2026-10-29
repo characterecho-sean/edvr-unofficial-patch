@@ -6621,6 +6621,17 @@ ID3D11Texture2D* uiLayerComposite(uint64_t sequence, uint32_t eye, ID3D11Texture
     // The scope lens (scope_zoom.h): the aiming (right) eye's picture inside the scope's frame, magnified by the game's zoom, after the upscaler and RCAS and before the weapons/HUD
     // composite (which must not be magnified). A frame EDVR rewrites in full every frame, or the ripple's private copy of one, is written in place; any other comes back as the lens's
     // own copy, which stands in for it from here on. The frame must be the upscaler's picture (e.doorFromPass): the lens reads its c unjittered.
+    // B3: the left eye's picture, copied for that lens before the left eye's own UI composite (the part of it the lens may read, when the left eye is drawn as the zoomed view).
+    if (eye == 0 && scopeZoomWanted()) {
+        guarded("scopeZoom.leftDoor", [&] {
+            ScopeZoomLeftArgs leftArgs;
+            leftArgs.sequence = sequence;
+            leftArgs.frame = frame;
+            leftArgs.region = region;
+            leftArgs.resolved = e.doorFromPass;
+            scopeZoomLeftDoor(leftArgs);
+        });
+    }
     if (eye == 1 && scopeZoomWanted()) {
         guarded("scopeZoom.door", [&] {
             ScopeZoomDoorArgs lensArgs;

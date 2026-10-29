@@ -25,6 +25,12 @@ void lightGridCacheNoteFrame(uint64_t frame);
 // only the jitter probe's lines read it.
 void lightGridCacheNoteJitter(uint64_t frame, float jx, float jy, const float shift[2][2]);
 
+// B3 (the scope zoom's window): whether eye 0 is drawn zoomed in the frame about to be built (the native temporal channel's begin). While it is, the first builder call of the frame at an
+// eye's size is the zoomed eye's and the cache stands aside for it: the game builds the grid and nothing is stored, so the narrowed eye's keys cannot evict the other eye's states.
+void lightGridCacheNoteZoomedFrame(bool zoomed);
+// ... and the builder calls made in frames where eye 0 was zoomed, and how many of them the cache stood aside for. Counted since the DLL loaded; the press line takes a difference.
+void lightGridCacheZoomCounts(uint64_t* calls, uint64_t* bypassed);
+
 // The detour's status ("installed", "off for this session: <why>", or why not installed).
 const char* lightGridCacheStatus();
 

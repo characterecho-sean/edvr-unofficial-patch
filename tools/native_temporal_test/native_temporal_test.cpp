@@ -16,6 +16,7 @@
 #include "../../src/d3d11/ui_surfaces.h"
 #include "../../src/d3d11/vr_camera_census.h"
 #include "../../src/d3d11/dlss_floor.h"
+#include "../../src/d3d11/scope_zoom_b3.h"   // B3: the temporal pass's word on eye 0 (nativeTemporalZoom and its neighbours)
 #include "../../src/openxr/native_temporal_client.h"
 #include "../../src/common/system_d3d11.h"
 #include "../../src/d3d11/glitch_frame.h"
@@ -100,6 +101,9 @@ namespace edvr{void terrainCullCoverNoteFrusta(const float f[2][4]){++coverNotes
 // The light grid cache's jitter probe (src/d3d11/light_grid_cache_hook.cpp), which begin() tells this frame's jitter: recorded here, asserted below.
 unsigned jitterNotes=0;float jitterLastShift[2][2]{};
 namespace edvr{void lightGridCacheNoteJitter(uint64_t,float,float,const float shift[2][2]){++jitterNotes;std::memcpy(jitterLastShift,shift,sizeof(jitterLastShift));}}
+// ... and, for B3, whether eye 0 is zoomed in the frame begin() was given.
+int zoomedFrameNotes=0;bool zoomedFrameLast=false;
+namespace edvr{void lightGridCacheNoteZoomedFrame(bool z){++zoomedFrameNotes;zoomedFrameLast=z;}}
 // The served floor's NGX query (dlaa.cpp), shaped the way the flights'
 // modes lines read (edvr_gfx_20260923_153446.log line 435): quality,
 // balanced and performance take half the output up to the output, ultra
@@ -419,6 +423,31 @@ void run(){
     check(both(5,.0246f,l,r)&&!l&&!r,"...and the next frame at the same scale keeps it");
     check(both(6,.0320f,l,r)&&l&&r,"separation: back to 100 percent resets again");
     check(both(7,.0400f,l,r)&&l&&r&&both(8,.0400f,l,r)&&!l&&!r,"separation: 80 percent (80 mm) resets, and then holds");
+    { // B3: eye 0 drawn as the scope zoom's window (the channel pool is fixed, so this runs on the separation block's channel). The frame says so (zoomed, and the frustum it would have been
+      // told without it); eye 0's history ends at both edges and eye 1's never does; what eye 0 announces to the rest of EDVR (the vertical frustum the panels are sized by) stays the frustum
+      // without the window; the door can ask whether the frame is zoomed, and the counts say.
+      auto zat=[&](uint64_t seq,bool zoomed){auto g=frame(16,seq);if(zoomed){g.zoomed=1;std::memcpy(g.preZoom,g.frusta[0],sizeof(g.preZoom));g.frusta[0][0]=-.2f;g.frusta[0][1]=.2f;g.frusta[0][2]=-.25f;g.frusta[0][3]=.25f;}return g;};
+      auto zboth=[&](uint64_t seq,bool zoomed,bool& resetLeft,bool& resetRight){
+        f=zat(seq,zoomed);begin(scaled,f);
+        const bool left=treat(scaled,seq,0,source.Get())==S_OK;resetLeft=(calls.back().flags&1)!=0;
+        const bool right=treat(scaled,seq,1,source.Get())==S_OK;resetRight=(calls.back().flags&1)!=0;return left&&right;};
+      bool zl=false,zr=false;
+      check(zboth(9,false,zl,zr)&&zl&&zr,"zoom: the frame after a change of the eyes' separation resets both histories");
+      check(zboth(10,false,zl,zr)&&!zl&&!zr&&!zoomedFrameLast,"zoom: an unzoomed frame keeps both histories, and the light grid cache is told it is not zoomed");
+      uint64_t zf0=0,zr0[2]={},ze0=0;check(edvr::nativeTemporalZoomCounts(&zf0,zr0,&ze0),"zoom: the counts are there");
+      check(zboth(11,true,zl,zr)&&zl&&!zr&&zoomedFrameLast,"zoom: the frame that starts the window resets eye 0's history and not eye 1's, and the light grid cache is told it is zoomed");
+      {float zoomed[4]={},pre[4]={};
+       check(edvr::nativeTemporalZoom(11,zoomed,pre)&&closeFloat(zoomed[1],.2f)&&closeFloat(zoomed[3],.25f)&&closeFloat(pre[1],f.preZoom[1])&&!edvr::nativeTemporalZoom(10,nullptr,nullptr)&&!edvr::nativeTemporalZoom(12,nullptr,nullptr),
+             "zoom: the door can ask whether a frame is zoomed, by its sequence, and gets the window and the frustum without it");
+       uint64_t seq=0;check(edvr::nativeTemporalZoomLatest(&seq,nullptr,nullptr)&&seq==11,"zoom: and the latest frame is zoomed");}
+      {float up=0,down=0;
+       check(edvr::nativeTemporalVerticalTangents(&up,&down)&&closeFloat(up,std::fabs(f.preZoom[2]))&&closeFloat(down,std::fabs(f.preZoom[3])),"zoom: eye 0 announces the frustum without the window (the panels' size stays true)");}
+      check(zboth(12,true,zl,zr)&&!zl&&!zr,"zoom: a second frame of the window keeps both histories");
+      check(zboth(13,false,zl,zr)&&zl&&!zr&&!zoomedFrameLast&&!edvr::nativeTemporalZoomLatest(nullptr,nullptr,nullptr),"zoom: the frame that ends the window resets eye 0's history again and not eye 1's");
+      check(zboth(14,false,zl,zr)&&!zl&&!zr,"zoom: and then holds");
+      uint64_t zf1=0,zr1[2]={},ze1=0;check(edvr::nativeTemporalZoomCounts(&zf1,zr1,&ze1)&&zf1==zf0+2&&ze1==ze0+2&&zr1[0]==zr0[0]+2&&zr1[1]==zr0[1],"zoom: two zoomed frames, two history resets of eye 0 at the edges, none of eye 1's");
+      f=zat(15,true);f.preZoom[0]=f.preZoom[1];begin(scaled,f);check(!edvr::nativeTemporalZoomLatest(nullptr,nullptr,nullptr),"zoom: a frame that says zoomed with a frustum without the window that is no frustum is not zoomed");
+    }
     check(scaled.close(scaled.context)==S_OK,"separation: close");
   }
   edvr::Config::get().set("fix.temporal_aa","on");edvr::openxr::NativeTemporalClient client;
