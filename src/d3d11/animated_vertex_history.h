@@ -223,7 +223,7 @@ public:
                     const unsigned released=it->geometry.count*32;
                     noteErased(*it,it->invalidated?HistoryErase::PressureInvalidated:HistoryErase::PressureSpent,frame);
                     bytes_-=released;++reclaimedRecords_;reclaimedBytes_+=released;
-                    it=records_.erase(it);
+                    poolBuffers(*it);it=records_.erase(it);
                 }
             }
             if(overBudget())return refuseKeyed("history-budget",HistoryLedger::RefusedBudget);
@@ -345,7 +345,7 @@ public:
             if((it->frame[0]==~0u || frame-it->frame[0]>2) && (it->frame[1]==~0u || frame-it->frame[1]>2) &&
                (!retainInvalid_ || !it->invalidated || frame-it->invalidatedAt>kInvalidKeepFrames)) {
                 noteErased(*it,it->invalidated?HistoryErase::AdvanceInvalidated:HistoryErase::AdvanceAged,frame);
-                bytes_-=it->geometry.count*32;it=records_.erase(it);
+                bytes_-=it->geometry.count*32;poolBuffers(*it);it=records_.erase(it);
             } else ++it;
     }
     // Returns the adapter's existing diagnostic reason bits: unknown / VB / IB.
@@ -517,6 +517,7 @@ private:
         Geometry geometry;Ptr<ID3D11Buffer> positions[2],identity[2];
         Ptr<ID3D11ShaderResourceView> views[2],identityViews[2];
         Ptr<ID3D11UnorderedAccessView> identityUavs[2];Ptr<ID3D11GeometryShader> capture;
+        unsigned capacity=0;         // the position buffers' size in vertices: count, or more when they came from the pool
         unsigned frame[2]={~0u,~0u};
         uint64_t mutationEpoch=0;bool invalidated=false;
         unsigned invalidReasons=0;   // the writes that invalidated it (resourceWritten's bits), until its key draws again
@@ -607,8 +608,17 @@ private:
         if(!ok)++writeStats_.allocationFailures;
         return ok;
     }
+    // A record's GPU resources. The stream-output shader comes from a live record of the same VS, the one a reclaim left, or the cache that
+    // outlives the records, and is compiled only when none has it. The position buffers and the identity set come from the pools of erased
+    // records when they hold a fit. The flight of 2026-10-29 (docs\investigation-flat-scoped-ads-stutter-2026-10-29.md) measured the scope's
+    // zoom edges spending 25 to 73 ms a frame here, making about a hundred records in a few frames, each with ten D3D objects and often a
+    // compile. A pooled buffer has an erased record's bytes in it: nothing reads a record's buffer before its own capture writes it (a prior is
+    // a record published the frame before), the same as a new buffer's undefined contents.
     bool allocateBuffers(ID3D11Device* dev,Record& r) {
         for(const auto& cached:records_)if(cached.geometry.original==r.geometry.original){r.capture=cached.capture;break;}
+        // A shader taken from a live or reclaimed record refreshes its cache entry (or makes one), so a VS still in use is the last to leave.
+        if(r.capture)rememberStreamOutput(r.geometry.original,r.capture);
+        else if((r.capture=cachedStreamOutput(r.geometry.original.Get())))++writeStats_.soFromCache;
         if(!r.capture) {
             UINT size=0;
             if(FAILED(r.geometry.original->GetPrivateData(bytecodeKey,&size,nullptr)) || !size || size>65536)return false;
@@ -616,17 +626,83 @@ private:
             if(FAILED(r.geometry.original->GetPrivateData(bytecodeKey,&size,bytes.data())))return false;
             D3D11_SO_DECLARATION_ENTRY e{0,"SV_POSITION",0,0,4,0};UINT stride=16;
             if(FAILED(dev->CreateGeometryShaderWithStreamOutput(bytes.data(),size,&e,1,&stride,1,D3D11_SO_NO_RASTERIZED_STREAM,nullptr,&r.capture)))return false;
+            ++writeStats_.soCompiled;
+            rememberStreamOutput(r.geometry.original,r.capture);
         }
-        D3D11_BUFFER_DESC b{};b.ByteWidth=r.geometry.count*16;b.BindFlags=D3D11_BIND_STREAM_OUTPUT|D3D11_BIND_SHADER_RESOURCE;
+        const unsigned count=r.geometry.count;
         D3D11_SHADER_RESOURCE_VIEW_DESC s{};s.Format=DXGI_FORMAT_R32G32B32A32_FLOAT;
-        s.ViewDimension=D3D11_SRV_DIMENSION_BUFFER;s.Buffer.NumElements=r.geometry.count;
-        for(int i=0;i<2;++i)if(FAILED(dev->CreateBuffer(&b,nullptr,&r.positions[i])) ||
-                              FAILED(dev->CreateShaderResourceView(r.positions[i].Get(),&s,&r.views[i])))return false;
-        b.ByteWidth=16;b.BindFlags=D3D11_BIND_SHADER_RESOURCE|D3D11_BIND_UNORDERED_ACCESS;
+        s.ViewDimension=D3D11_SRV_DIMENSION_BUFFER;s.Buffer.NumElements=count;
+        if(takePositions(r,count)) {
+            ++writeStats_.positionsReused;
+            for(int i=0;i<2;++i)if(!r.views[i] && FAILED(dev->CreateShaderResourceView(r.positions[i].Get(),&s,&r.views[i])))return false;
+        } else {
+            D3D11_BUFFER_DESC b{};b.ByteWidth=count*16;b.BindFlags=D3D11_BIND_STREAM_OUTPUT|D3D11_BIND_SHADER_RESOURCE;
+            for(int i=0;i<2;++i)if(FAILED(dev->CreateBuffer(&b,nullptr,&r.positions[i])) ||
+                                  FAILED(dev->CreateShaderResourceView(r.positions[i].Get(),&s,&r.views[i])))return false;
+            r.capacity=count;
+        }
+        if(takeIdentity(r)) {
+            ++writeStats_.identityReused;
+            return true;
+        }
+        D3D11_BUFFER_DESC b{};b.ByteWidth=16;b.BindFlags=D3D11_BIND_SHADER_RESOURCE|D3D11_BIND_UNORDERED_ACCESS;
         b.MiscFlags=D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;b.StructureByteStride=16;
         for(int i=0;i<2;++i)if(FAILED(dev->CreateBuffer(&b,nullptr,&r.identity[i])) ||
                               FAILED(dev->CreateShaderResourceView(r.identity[i].Get(),nullptr,&r.identityViews[i])) ||
                               FAILED(dev->CreateUnorderedAccessView(r.identity[i].Get(),nullptr,&r.identityUavs[i])))return false;
+        return true;
+    }
+    // The stream-output shader cache: one entry a VS, the least recently used going when it is full. An entry holds its VS, so the address it
+    // is keyed by cannot be reused by another shader while it is here (at most kStreamOutputs of the game's shaders kept alive past their release).
+    Ptr<ID3D11GeometryShader> cachedStreamOutput(ID3D11VertexShader* vs) {
+        for(auto& e:streamOutputs_)if(e.vs.Get()==vs){e.lastUsed=lastFrame_;return e.gs;}
+        return nullptr;
+    }
+    void rememberStreamOutput(const Ptr<ID3D11VertexShader>& vs,const Ptr<ID3D11GeometryShader>& gs) {
+        for(auto& e:streamOutputs_)if(e.vs==vs){e.gs=gs;e.lastUsed=lastFrame_;return;}
+        if(streamOutputs_.size()>=kStreamOutputs)
+            streamOutputs_.erase(std::min_element(streamOutputs_.begin(),streamOutputs_.end(),
+                [](const StreamOutput& a,const StreamOutput& b){return a.lastUsed<b.lastUsed;}));
+        streamOutputs_.push_back(StreamOutput{vs,gs,lastFrame_});
+    }
+    // An erased record's buffers and views go to the pools, oldest first out past maxRecords sets (and maxBytes of position buffers).
+    // Not a record invalidated this frame: a capture revalidates its record, so one invalidated now may have been captured earlier in this
+    // frame, and that Capture's views may still be read before the frame ends (the flat adapter holds its draws until H). Its buffers are
+    // released as before, so nothing made later this frame writes them. A record captured this frame and not invalidated is never reclaimed.
+    void poolBuffers(Record& r) {
+        if(r.invalidated && r.invalidatedAt==lastFrame_)return;
+        if(r.positions[0] && r.positions[1] && r.capacity) {
+            PooledPositions p;p.capacity=r.capacity;p.viewCount=r.geometry.count;
+            for(int i=0;i<2;++i){p.buffers[i]=std::move(r.positions[i]);p.views[i]=std::move(r.views[i]);}
+            poolBytes_+=uint64_t(p.capacity)*32;positionPool_.push_back(std::move(p));
+            while(positionPool_.size()>maxRecords || poolBytes_>maxBytes) {
+                poolBytes_-=uint64_t(positionPool_.front().capacity)*32;positionPool_.erase(positionPool_.begin());
+            }
+        }
+        if(r.identity[0] && r.identity[1] && r.identityViews[0] && r.identityViews[1] && r.identityUavs[0] && r.identityUavs[1]) {
+            PooledIdentity p;
+            for(int i=0;i<2;++i){p.buffers[i]=std::move(r.identity[i]);p.views[i]=std::move(r.identityViews[i]);p.uavs[i]=std::move(r.identityUavs[i]);}
+            identityPool_.push_back(std::move(p));
+            if(identityPool_.size()>maxRecords)identityPool_.erase(identityPool_.begin());
+        }
+    }
+    // The smallest pooled pair that holds count vertices without being more than twice the size. Its views come along when they cover exactly
+    // count vertices; otherwise the caller makes views of count over the pooled buffers.
+    bool takePositions(Record& r,unsigned count) {
+        auto best=positionPool_.end();
+        for(auto it=positionPool_.begin();it!=positionPool_.end();++it)
+            if(it->capacity>=count && uint64_t(it->capacity)<=uint64_t(count)*2 && (best==positionPool_.end() || it->capacity<best->capacity))best=it;
+        if(best==positionPool_.end())return false;
+        const bool views=best->viewCount==count;
+        for(int i=0;i<2;++i){r.positions[i]=std::move(best->buffers[i]);if(views)r.views[i]=std::move(best->views[i]);}
+        r.capacity=best->capacity;poolBytes_-=uint64_t(best->capacity)*32;positionPool_.erase(best);
+        return true;
+    }
+    bool takeIdentity(Record& r) {
+        if(identityPool_.empty())return false;
+        PooledIdentity& p=identityPool_.back();
+        for(int i=0;i<2;++i){r.identity[i]=std::move(p.buffers[i]);r.identityViews[i]=std::move(p.views[i]);r.identityUavs[i]=std::move(p.uavs[i]);}
+        identityPool_.pop_back();
         return true;
     }
     void noteTop(const void* resource,bool invalidating,bool saved) {
@@ -852,5 +928,17 @@ private:
     unsigned retainFrame_=~0u,retainNext_=0;uint64_t retainCreated_=0,retainUsed_=0;
     Ptr<ID3D11ComputeShader> identify_;Ptr<ID3D11Buffer> instance_;Ptr<ID3D11ShaderResourceView> instanceView_;
     unsigned bytes_=0,reclaimedRecords_=0,reclaimedBytes_=0;bool failed_=false;
+    // What erased records leave for the next ones (allocateBuffers): the stream-output shaders by VS, and the two buffer sets.
+    struct StreamOutput {Ptr<ID3D11VertexShader> vs;Ptr<ID3D11GeometryShader> gs;unsigned lastUsed=0;};
+    static constexpr unsigned kStreamOutputs=64;
+    std::vector<StreamOutput> streamOutputs_;
+    struct PooledPositions {unsigned capacity=0,viewCount=0;Ptr<ID3D11Buffer> buffers[2];Ptr<ID3D11ShaderResourceView> views[2];};
+    struct PooledIdentity {Ptr<ID3D11Buffer> buffers[2];Ptr<ID3D11ShaderResourceView> views[2];Ptr<ID3D11UnorderedAccessView> uavs[2];};
+    std::vector<PooledPositions> positionPool_;std::vector<PooledIdentity> identityPool_;uint64_t poolBytes_=0;
+public:
+    // The pools' and the cache's sizes (the rigs read them).
+    size_t pooledPositions() const{return positionPool_.size();}
+    size_t pooledIdentities() const{return identityPool_.size();}
+    size_t cachedStreamOutputs() const{return streamOutputs_.size();}
 };
 } // namespace edvr
