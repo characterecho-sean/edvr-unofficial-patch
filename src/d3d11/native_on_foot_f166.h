@@ -17,6 +17,14 @@
 // The pose is captured while still (the speed under 0.1 m/s for 0.25 s, then averaged over about 0.12 s), crouched and in the sights (both weights 0.9 or more), and cleared by a new
 // press, a weapon change, a skeleton change or leaving the crouch. A pilot who starts moving straight away has no still pose: the press's first crouched in-the-sights frame stands in
 // until a still one replaces it. Rotations are slerped, translations lerped.
+//
+// F168, after the flight edvr_gfx_20261028_192815 (build ebbba895): the lean the log read as written was 14 deg over the held pose's in the sights, and over the game's own animated lean
+// as well (62.0 against 58.1), so nothing after the hold took the lean off the torso: the spine bend ran at 0.2 deg (its weight is 1 less the detach weight, about 0 in the sights) and the
+// square-up and F82's torso yaw read 0. The hold replaced the spine's locals by the held ones and left the animated spine root's PARENT, the hips, as it was; the walk pitches the hips
+// forward, and the whole torso followed them. The spine root is therefore held in the model's axes: its rotation is the captured one (against the model, not against the hips), its
+// position still against the hips (the body bobs with them). The joints above it keep the locals against their held parents. The later stages that turn the torso (the bend, the square-up)
+// are scaled by yieldFactor, 1 less the hold's weight, so they cannot add a lean to a held torso; at weight 0 the factor is exactly 1. The lean in the figures is taken in the model's own
+// axes (forward is the model's +z), not along the eye's heading: the heading moves with the head and the body, and a held torso read differently at every heading.
 #pragma once
 
 #include "native_on_foot_core.h"
@@ -190,6 +198,15 @@ inline double angleDeg(const Rec& a, const Rec& b) noexcept {
     return 2.0 * std::acos(d < 1.0 ? d : 1.0) * 180.0 / 3.14159265358979323846;
 }
 
+// F168: the orientation of a model matrix as a unit quaternion (its rows normalised, so a uniform scale in the chain above it does not matter). False when the matrix is not finite.
+inline bool rotQuatOf(const float m[16], double q[4]) noexcept {
+    if (!pfzAffineElementsFinite(m)) return false;
+    float f[4];
+    pfzQuatFromMatrix(m, f);
+    for (int k = 0; k < 4; ++k) q[k] = f[k];
+    return std::isfinite(q[0]) && std::isfinite(q[1]) && std::isfinite(q[2]) && std::isfinite(q[3]);
+}
+
 // ---- the held pose and the state around it -----------------------------------------------------------------------------------------------------------------------------
 
 enum Source : uint8_t { kNone = 0, kStill = 1, kFirstFrame = 2 };
@@ -197,8 +214,13 @@ inline const char* sourceName(int s) noexcept { return s == kStill ? "a still fr
 
 struct Held {
     Source source = kNone;
+    // Per held joint: the position against its parent and the rotation against its parent.
     Rec rec[kMaxHold] = {};
-    double leanDeg = std::nan("");   // the chest's lean of the pose the record was taken from (set by the caller, who has the heading)
+    // F168: the spine root's parent (the hips) in the model's axes when the pose was taken. The spine root is held in the model's axes, not against the hips: its local rotation is
+    // corrected at every call by the hips' turn since (apply), so the hips' pitch in the walk does not reach the torso.
+    double parentQ[4] = {0.0, 0.0, 0.0, 1.0};
+    bool parentHave = false;
+    double leanDeg = std::nan("");   // the chest's lean (in the model's axes) of the pose the record was taken from (set by the caller)
     bool have() const noexcept { return source != kNone; }
     void clear() noexcept { *this = Held{}; }
     // The lean of the pose: the first capture's, then the running average's (alpha 1: replaces).
@@ -214,6 +236,8 @@ struct Held {
 inline bool capture(const Plan& pl, const float (*anim)[16], uint32_t count, Source source, double alpha, Held* held) noexcept {
     if (!pl.ok() || !held || count < pl.joints || source == kNone) return false;
     Rec now[kMaxHold];
+    double parentNow[4] = {0.0, 0.0, 0.0, 1.0};
+    bool parentNowHave = false;
     for (uint32_t k = 0; k < pl.n; ++k) {
         const uint32_t j = pl.joint[k], p = pl.parent[k];
         if (j >= count || p >= count) return false;
@@ -221,9 +245,18 @@ inline bool capture(const Plan& pl, const float (*anim)[16], uint32_t count, Sou
         if (!pfzAffineInverse(anim[p], inv)) return false;
         pfzMul(anim[j], inv, local);
         if (!recOf(local, &now[k])) return false;
+        if (pl.parentSlot[k] < 0) parentNowHave = rotQuatOf(anim[p], parentNow);   // F168: the hips' orientation beside the spine root's local (a hips matrix it cannot read: held against the hips as before)
     }
     const bool fresh = !held->have() || alpha >= 1.0 || held->source != source;
     for (uint32_t k = 0; k < pl.n; ++k) held->rec[k] = fresh ? now[k] : blendRec(held->rec[k], now[k], alpha);
+    if (fresh || !held->parentHave) {
+        for (int c = 0; c < 4; ++c) held->parentQ[c] = parentNow[c];
+        held->parentHave = parentNowHave;
+    } else if (parentNowHave) {
+        double mixed[4];
+        slerpQuat(held->parentQ, parentNow, alpha > 0.0 ? (alpha < 1.0 ? alpha : 1.0) : 0.0, mixed);
+        for (int c = 0; c < 4; ++c) held->parentQ[c] = mixed[c];
+    }
     held->source = source;
     return true;
 }
@@ -246,7 +279,33 @@ inline bool apply(const Plan& pl, const Held& held, double w, const float (*anim
         pfzMul(anim[j], invP, local);
         Rec ar;
         if (!recOf(local, &ar)) return false;
-        matOf(blendRec(ar, held.rec[k], wc), mixed);
+        Rec target = held.rec[k];
+        if (pl.parentSlot[k] < 0 && held.parentHave) {
+            // F168: the spine root is held in the model's axes: the held local, turned by what the hips have turned since the pose was taken, so that (new local) x (the hips now) is (held
+            // local) x (the hips then): R' = R_held x R_hips,then x inverse(R_hips,now). The hips' pitch in the walk does not reach the torso. The position stays against the hips, and the
+            // matrix is built on the animated hips themselves (a scale above them is kept). Where the hips' orientation cannot be read, the local is held as it was before F168.
+            Rec hipsThen, hipsNow, localRot;
+            double qNow[4];
+            if (rotQuatOf(anim[p], qNow)) {
+                for (int c = 0; c < 4; ++c) {
+                    hipsThen.q[c] = held.parentQ[c];
+                    hipsNow.q[c] = qNow[c];
+                    localRot.q[c] = held.rec[k].q[c];
+                }
+                float lh[16], ph[16], pn[16], pnInv[16], t1[16], t2[16];
+                matOf(localRot, lh);
+                matOf(hipsThen, ph);
+                matOf(hipsNow, pn);
+                Rec turned;
+                if (pfzAffineInverse(pn, pnInv)) {
+                    pfzMul(lh, ph, t1);
+                    pfzMul(t1, pnInv, t2);
+                    if (recOf(t2, &turned))
+                        for (int c = 0; c < 4; ++c) target.q[c] = turned.q[c];
+                }
+            }
+        }
+        matOf(blendRec(ar, target, wc), mixed);
         const float* parentNew = pl.parentSlot[k] >= 0 ? out[pl.joint[pl.parentSlot[k]]] : anim[p];
         pfzMul(mixed, parentNew, out[j]);
         if (!pfzAffineInverse(anim[j], inv)) return false;
@@ -271,6 +330,31 @@ inline bool apply(const Plan& pl, const Held& held, double w, const float (*anim
 
 // The hold's weight: the crouched weight x the detach weight x the moving ramp, each held to 0..1; a figure that is not a number reads 0.
 inline double holdWeight(double postureW, double detachW, double ramp) noexcept { return unit01(postureW) * unit01(detachW) * unit01(ramp); }
+
+// F168: the share of a later stage's turn of the torso (the spine bend, the square-up) that stays when the hold has the weight w: 1 less it, so the held torso is the result at 1 and the
+// stage is exactly what it was at 0 (a weight that is not a number reads 0: the stage unchanged).
+inline double yieldFactor(double holdW) noexcept { return 1.0 - unit01(holdW); }
+
+// F168: how far the spine root's parent (the hips) has turned from where it was when the held pose was taken, deg; not a number without that capture.
+inline double parentMoveDeg(const Plan& pl, const Held& held, const float (*anim)[16], uint32_t count) noexcept {
+    if (!pl.ok() || !held.parentHave || pl.n == 0 || pl.parentSlot[0] >= 0) return std::nan("");
+    const uint32_t p = pl.parent[0];
+    if (p >= count) return std::nan("");
+    Rec now, was;
+    double qNow[4];
+    if (!rotQuatOf(anim[p], qNow)) return std::nan("");
+    double nn = 0.0, nw = 0.0;
+    for (int c = 0; c < 4; ++c) {
+        nn += qNow[c] * qNow[c];
+        nw += held.parentQ[c] * held.parentQ[c];
+    }
+    if (!(nn > 1e-18) || !(nw > 1e-18)) return std::nan("");
+    for (int c = 0; c < 4; ++c) {   // the float quaternions are not exactly unit: normalised here, so the same orientation twice reads 0 and not the float noise (0.04 deg)
+        now.q[c] = qNow[c] / std::sqrt(nn);
+        was.q[c] = held.parentQ[c] / std::sqrt(nw);
+    }
+    return angleDeg(now, was);
+}
 
 // Moving as F95a files it (the AMC's speed from the walk threshold up, or its vertical speed past the air threshold); a speed that is not a number is neither moving nor still.
 inline bool movingNow(double speed, double vy) noexcept { return std::isfinite(speed) && std::isfinite(vy) && !(speed < kPinWalkMps && std::fabs(vy) <= kPinAirMps); }
@@ -357,6 +441,11 @@ inline double leanDeg(const double chest[3], const double neck[3], double hx, do
     const double r = std::atan2((v[0] * hx + v[2] * hz) / hn, v[1]) * 180.0 / 3.14159265358979323846;
     return std::isfinite(r) ? r : std::nan("");
 }
+// F168: the chest's lean in the model's own axes (forward is the model's +z), from the chest and neck matrices: the same on every heading of the eye.
+inline double leanBodyDeg(const float chest[16], const float neck[16]) noexcept {
+    const double c[3] = {chest[12], chest[13], chest[14]}, n[3] = {neck[12], neck[13], neck[14]};
+    return leanDeg(c, n, 0.0, 1.0);
+}
 // A point's offset from the eye in the heading's axes (right, up, forward; m), the point less the eye; not numbers without a heading.
 inline void offsetFromEye(const double point[3], const double eye[3], double hx, double hz, double out[3]) noexcept {
     const double hn = std::sqrt(hx * hx + hz * hz);
@@ -377,6 +466,7 @@ struct CallInfo {
     uint8_t source = kNone;    // the held pose's source after this call's capture
     double alpha = 1.0;        // the capture's weight of this call's pose
     double weight = 0.0;       // the hold's weight this call
+    double hipsDeg = std::nan("");   // F168: how far the hips have turned from the held pose's (parentMoveDeg), when the hold ran
     double preNeckY = std::nan("");
     float preM[3][16] = {};
 };
@@ -386,7 +476,8 @@ struct Sample {
     bool crouchedAds = false, moving = false, failed = false;
     double weight = 0.0;
     uint8_t source = kNone;
-    double leanWrittenDeg = std::nan(""), leanAnimDeg = std::nan(""), leanHeldDeg = std::nan("");
+    double leanWrittenDeg = std::nan(""), leanAnimDeg = std::nan(""), leanHeldDeg = std::nan("");   // F168: in the model's axes
+    double hipsDeg = std::nan("");   // F168: how far the hips have turned from the captured pose's
     double shoulderM[3] = {std::nan(""), std::nan(""), std::nan("")};   // the left upper arm joint less the eye, in the heading's axes
 };
 struct Counters {
@@ -395,6 +486,8 @@ struct Counters {
     double weightSum = 0.0;               // over the moving frames
     uint32_t leanN = 0, leanMoved = 0, leanHeld = 0;   // over the held frames with a lean: with one, the animation far from the held pose, of those the written lean near it
     double leanWrittenSum = 0.0, leanAnimSum = 0.0, leanHeldSum = 0.0;
+    uint32_t hipsN = 0;                   // F168: over the held frames with the hips' turn: how many, its sum and its largest (deg)
+    double hipsSum = 0.0, hipsMax = 0.0;
     uint32_t shN[2] = {};                 // the frames with the shoulder's offset: still, moving
     double shSum[2][3] = {};
     void add(const Sample& s) noexcept {
@@ -410,6 +503,11 @@ struct Counters {
             const bool heldFrame = std::isfinite(s.weight) && s.weight >= kHeldHalf;
             if (heldFrame) {
                 ++held;
+                if (std::isfinite(s.hipsDeg)) {
+                    ++hipsN;
+                    hipsSum += s.hipsDeg;
+                    hipsMax = s.hipsDeg > hipsMax ? s.hipsDeg : hipsMax;
+                }
                 if (std::isfinite(s.leanWrittenDeg) && std::isfinite(s.leanAnimDeg) && std::isfinite(s.leanHeldDeg)) {
                     ++leanN;
                     leanWrittenSum += s.leanWrittenDeg;
@@ -434,6 +532,7 @@ struct Counters {
         weightSum += o.weightSum;
         leanN += o.leanN; leanMoved += o.leanMoved; leanHeld += o.leanHeld;
         leanWrittenSum += o.leanWrittenSum; leanAnimSum += o.leanAnimSum; leanHeldSum += o.leanHeldSum;
+        hipsN += o.hipsN; hipsSum += o.hipsSum; hipsMax = o.hipsMax > hipsMax ? o.hipsMax : hipsMax;
         for (int i = 0; i < 2; ++i) {
             shN[i] += o.shN[i];
             for (int c = 0; c < 3; ++c) shSum[i][c] += o.shSum[i][c];
@@ -463,16 +562,16 @@ struct Seconds {
 // written lean stayed near it; the left shoulder's offset from the eye still and moving; then the seconds. The log's lines end at 1200 bytes; this one runs to about 800.
 inline int formatSummary(char* buf, size_t n, uint32_t seconds, const char* item, const Counters& c, const Seconds& s) noexcept {
     const double mn = c.moving ? static_cast<double>(c.moving) : 1.0, ln = c.leanN ? static_cast<double>(c.leanN) : 1.0;
-    const double sn0 = c.shN[0] ? static_cast<double>(c.shN[0]) : 1.0, sn1 = c.shN[1] ? static_cast<double>(c.shN[1]) : 1.0;
+    const double sn0 = c.shN[0] ? static_cast<double>(c.shN[0]) : 1.0, sn1 = c.shN[1] ? static_cast<double>(c.shN[1]) : 1.0, hn = c.hipsN ? static_cast<double>(c.hipsN) : 1.0;
     return std::snprintf(buf, n,
                          "native on foot upper body hold (F166) %u s: item %s; crouched in the sights %u frames (still %u, moving %u); on the moving frames the hold weight mean %.2f, held "
-                         "(weight 0.5 or more) in %u, the held pose from a still frame in %u, from the press's first frame in %u, none in %u; on the held frames the chest's lean as "
-                         "written %+.1f deg, animated %+.1f, the held pose's %+.1f (the animation %.0f deg or more from the held pose in %u frames, the written lean within that of "
-                         "it in %u); the left shoulder from the eye (right/up/forward, cm): still %u frames %+.1f/%+.1f/%+.1f, moving %u frames %+.1f/%+.1f/%+.1f; seconds crouched "
-                         "in the sights and moving %u, held in half or more of them %u, with the animated lean far from the held pose %u, the written lean near it in %u; "
-                         "writes refused %u",
+                         "(weight 0.5 or more) in %u, the held pose from a still frame in %u, from the press's first frame in %u, none in %u; on the held frames the chest's lean in the "
+                         "body's axes as written %+.1f deg, animated %+.1f, the held pose's %+.1f (the animation %.0f deg or more from the held pose in %u frames, the written lean "
+                         "within that of it in %u), the hips turned %.1f deg (largest %.1f) from the held pose's; the left shoulder from the eye (right/up/forward, cm): still %u frames "
+                         "%+.1f/%+.1f/%+.1f, moving %u frames %+.1f/%+.1f/%+.1f; seconds crouched in the sights and moving %u, held in half or more of them %u, with the animated lean "
+                         "far from the held pose %u, the written lean near it in %u; writes refused %u",
                          seconds, item ? item : "none", c.ads, c.still, c.moving, c.weightSum / mn, c.held, c.src[kStill], c.src[kFirstFrame], c.src[kNone],
-                         c.leanWrittenSum / ln, c.leanAnimSum / ln, c.leanHeldSum / ln, kLeanTolDeg, c.leanMoved, c.leanHeld, c.shN[0], c.shSum[0][0] * 100.0 / sn0,
+                         c.leanWrittenSum / ln, c.leanAnimSum / ln, c.leanHeldSum / ln, kLeanTolDeg, c.leanMoved, c.leanHeld, c.hipsSum / hn, c.hipsMax, c.shN[0], c.shSum[0][0] * 100.0 / sn0,
                          c.shSum[0][1] * 100.0 / sn0, c.shSum[0][2] * 100.0 / sn0, c.shN[1], c.shSum[1][0] * 100.0 / sn1, c.shSum[1][1] * 100.0 / sn1, c.shSum[1][2] * 100.0 / sn1,
                          s.moving, s.held, s.leanMoved, s.leanHeld, c.failed);
 }

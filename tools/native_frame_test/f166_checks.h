@@ -35,6 +35,8 @@ struct Pose {
     double spineRise = 0.0;     // m, the spine root raised against the hips
     bool target = false;        // put the left upper arm at `shoulder` (model axes) whatever the chain gives
     double shoulder[3] = {};
+    double hipsPitchDeg = 0.0;  // F168: the hips turned about the model's x axis (the rig's own forward-leaning sign), the spine's locals as they are
+    double hipsScale = 1.0;     // F168: a uniform scale in the hips' matrix (every joint under it carries it; the locals stay rigid)
 };
 struct Rig {
     uint16_t parent[kN];
@@ -77,7 +79,9 @@ inline Rig makeRig(const Pose& p, double leanSign) {
     Rig r;
     for (uint32_t j = 0; j < kN; ++j) setLocal(r, j, j == 0 ? 0xFFFFu : 0u, 0.0, 0.0, 0.0);
     const double a = leanSign * p.leanDeg / 3.0;
-    setLocal(r, kHips, 0, 0.0, 0.55 + p.hipRise, 0.0);
+    setLocal(r, kHips, 0, 0.0, 0.55 + p.hipRise, 0.0, leanSign * p.hipsPitchDeg);
+    for (int row = 0; row < 3; ++row)
+        for (int col = 0; col < 3; ++col) r.local[kHips][row * 4 + col] = static_cast<float>(r.local[kHips][row * 4 + col] * p.hipsScale);
     setLocal(r, kPelvis, kHips, 0.0, -0.05, 0.0);
     setLocal(r, kThighR, kPelvis, 0.09, -0.08, 0.0);
     setLocal(r, kThighL, kPelvis, -0.09, -0.08, 0.0);
@@ -583,6 +587,7 @@ inline void run166(Check&& check) {
         big.leanN = big.leanMoved = big.leanHeld = 4000000000u;
         big.shN[0] = big.shN[1] = 4000000000u;
         big.leanWrittenSum = -1.0e12; big.leanAnimSum = 1.0e12; big.leanHeldSum = -1.0e12;
+        big.hipsN = 4000000000u; big.hipsSum = -1.0e12; big.hipsMax = 1.0e12;
         for (int i = 0; i < 2; ++i) for (int k = 0; k < 3; ++k) big.shSum[i][k] = -1.0e13;
         f166::Seconds bigSec;
         bigSec.moving = bigSec.held = bigSec.leanMoved = bigSec.leanHeld = 4000000000u;
@@ -595,6 +600,137 @@ inline void run166(Check&& check) {
               "the seconds, within the log's 1200 bytes even with every figure at its worst");
         check(std::strstr(line, "the left shoulder from the eye (right/up/forward, cm): still 40 frames -11.0/-10.0/-30.0, moving 75 frames") != nullptr,
               "F166: the left shoulder's offset from the eye is printed in cm, still against moving");
+        check(std::strstr(line, "the chest's lean in the body's axes as written +49.0 deg, animated +74.0, the held pose's +48.0") != nullptr &&
+                  std::strstr(line, "the hips turned 0.0 deg (largest 0.0) from the held pose's") != nullptr,
+              "F166 (F168): the lean on the line is the one in the body's own axes, and the hips' turn from the held pose's is printed beside it");
+    }
+
+    // ---- 8. F168: the spine root held in the model's axes (the hips' turn does not reach the torso), and the later stages yielding ------------------------------------------------------
+    {
+        const double rad = 3.14159265358979323846 / 180.0;
+        // the walk with the HIPS pitched 20 deg forward and the spine's locals as they were still: the model-space lean is the hips' and the spine's together, 68 deg
+        Pose tilt = stillPose;
+        tilt.hipsPitchDeg = 20.0;
+        const Rig tilted = makeRig(tilt, leanSign);
+        const double leanStill = leanOf(still.model), leanTilted = leanOf(tilted.model);
+        check(eq(leanStill, 48.0, 1e-3) && eq(leanTilted, 68.0, 0.02), "F168: the rig's walk with the hips pitched 20 deg and the spine as it was still leans the chest 68 deg against the still 48");
+        alignas(16) float o[kN][16];
+        uint16_t t[kN];
+        uint32_t tn = 0;
+        std::memcpy(o, tilted.model, sizeof(o));
+        const bool ok1 = f166::apply(plan, held, 1.0, tilted.model, kN, o, t, &tn);
+        check(ok1 && eq(leanOf(o), 48.0, 0.05),
+              "F168: held at weight 1 the chest's lean is the still pose's 48 deg whatever the hips do: the hips' 20 deg is taken off the spine root (held against the model, not the hips)");
+        f166::Rec rootNow, rootHeld;
+        bool rootOk = f166::recOf(o[kSpine0], &rootNow) && f166::recOf(still.model[kSpine0], &rootHeld);
+        f166::Rec lr;
+        const bool localOk = localRec(o, kSpine0, kHips, &lr);
+        f166::Rec stillLocal;
+        const bool stillLocalOk = localRec(still.model, kSpine0, kHips, &stillLocal);
+        check(rootOk && localOk && stillLocalOk && f166::angleDeg(rootNow, rootHeld) < 0.1 && dist3(lr.p, stillLocal.p) < 3e-5 && f166::angleDeg(lr, stillLocal) > 19.5 && f166::angleDeg(lr, stillLocal) < 20.5,
+              "F168: the spine root's rotation in the model's axes is the captured one (within 0.1 deg) and its position against the hips is the captured one (within 0.03 mm), so its local rotation against the "
+              "turned hips is 20 deg off the captured local");
+        // the joints above follow: the neck, the left shoulder and the hand are where the still pose had them against the chest, the whole upper body rigidly turned back
+        double shHeld[3], shStill[3], hipsT[3], hipsS[3], handHeld[3], handStill[3];
+        posOf(o[kUpperL], shHeld); posOf(still.model[kUpperL], shStill); posOf(tilted.model[kHips], hipsT); posOf(still.model[kHips], hipsS);
+        posOf(o[kHandL], handHeld); posOf(still.model[kHandL], handStill);
+        double neckRelHeld[3], neckRelStill[3];
+        for (int c = 0; c < 3; ++c) {
+            neckRelHeld[c] = o[kNeck][12 + c] - o[kSpine0][12 + c];
+            neckRelStill[c] = still.model[kNeck][12 + c] - still.model[kSpine0][12 + c];
+        }
+        check(dist3(neckRelHeld, neckRelStill) < 3e-5 && dist3(shHeld, shStill) < 0.04 && dist3(handHeld, handStill) < 0.05 && std::fabs(hipsT[1] - hipsS[1]) < 1e-6,
+              "F168: the held torso's neck stands where the still pose had it over the spine root (0.03 mm), the left shoulder and hand within 4 and 5 cm of the still pose (the root's position still "
+              "follows the pitched hips, 3.5 cm)");
+        // the weight between: half way between the animated 68 and the held 48
+        std::memcpy(o, tilted.model, sizeof(o));
+        f166::apply(plan, held, 0.5, tilted.model, kN, o, t, &tn);
+        check(eq(leanOf(o), 58.0, 0.5), "F168: at weight 0.5 the lean is half way between the animated and the held one (58 deg)");
+        // weight 0 and no pose still write nothing
+        std::memset(o, 0x7F, sizeof(o));
+        float sentinel[kN][16];
+        std::memcpy(sentinel, o, sizeof(sentinel));
+        uint32_t n0 = 99;
+        check(!f166::apply(plan, held, 0.0, tilted.model, kN, o, t, &n0) && n0 == 0 && std::memcmp(o, sentinel, sizeof(o)) == 0,
+              "F168: at weight 0 the tilted walk is not touched, bit for bit");
+        // the hips' turn from the held pose's: 0 on the still pose, 20 deg on the tilted one, not a number without a captured parent or with a plan that is not ok
+        f166::Held fromTilt;
+        const bool capTilt = f166::capture(plan, tilted.model, kN, f166::kStill, 1.0, &fromTilt);
+        const double moveStill = f166::parentMoveDeg(plan, held, still.model, kN), moveTilt = f166::parentMoveDeg(plan, held, tilted.model, kN);
+        std::memcpy(o, still.model, sizeof(o));
+        const bool backOk = f166::apply(plan, fromTilt, 1.0, still.model, kN, o, t, &tn);
+        check(held.parentHave && eq(moveStill, 0.0, 0.01) && eq(moveTilt, 20.0, 0.05) && capTilt && fromTilt.parentHave && eq(f166::parentMoveDeg(plan, fromTilt, tilted.model, kN), 0.0, 0.01) &&
+                  backOk && eq(leanOf(o), 68.0, 0.05) && std::isnan(f166::parentMoveDeg(plan, f166::Held{}, still.model, kN)) && std::isnan(f166::parentMoveDeg(f166::Plan{}, held, still.model, kN)),
+              "F168: the hips' turn from the held pose's reads 0 on the pose it was taken from and 20 deg on the pitched hips; a pose taken with the hips pitched holds the chest at 68 deg even on a still hips; "
+              "without a captured parent, or without a plan, it is not a number");
+        // a pose averaged over two captures averages the hips too
+        f166::Held avg = held;
+        f166::capture(plan, tilted.model, kN, f166::kStill, 0.5, &avg);
+        check(avg.parentHave && eq(f166::parentMoveDeg(plan, avg, still.model, kN), 10.0, 0.05) && eq(f166::parentMoveDeg(plan, avg, tilted.model, kN), 10.0, 0.05),
+              "F168: a running average of the held pose averages the hips' turn with it (half way between 0 and 20 deg is 10 deg from either)");
+        // the capture of a hips matrix that is not a rotation (a doubled scale) keeps the hold, without the hips' figure
+        Rig scaledHips = still;
+        for (int c = 0; c < 3; ++c) { scaledHips.model[kHips][c] *= 2.0f; scaledHips.model[kHips][4 + c] *= 2.0f; scaledHips.model[kHips][8 + c] *= 2.0f; }
+        f166::Held noParent;
+        const bool capScaled = f166::capture(plan, scaledHips.model, kN, f166::kStill, 1.0, &noParent);
+        check(!capScaled || !noParent.parentHave, "F168: a hips matrix that is not a rotation leaves the pose without the hips' figure (or refuses the capture) and never a wrong one");
+        // a uniform scale in the hips (every model matrix under it carries it, the locals are rigid): the capture and the hold work as ever, the hips' turn is taken off, and the scale is kept
+        Pose stillS = stillPose;
+        stillS.hipsScale = 1.1;
+        Pose tiltS = stillS;
+        tiltS.hipsPitchDeg = 20.0;
+        const Rig stillScaled = makeRig(stillS, leanSign), tiltScaled = makeRig(tiltS, leanSign);
+        f166::Held heldS;
+        const bool capS = f166::capture(plan, stillScaled.model, kN, f166::kStill, 1.0, &heldS);
+        std::memcpy(o, tiltScaled.model, sizeof(o));
+        const bool okS = f166::apply(plan, heldS, 1.0, tiltScaled.model, kN, o, t, &tn);
+        const double rowLen = std::sqrt(static_cast<double>(o[kChest][0]) * o[kChest][0] + static_cast<double>(o[kChest][1]) * o[kChest][1] + static_cast<double>(o[kChest][2]) * o[kChest][2]);
+        check(capS && okS && heldS.parentHave && eq(leanOf(tiltScaled.model), 68.0, 0.05) && eq(leanOf(o), 48.0, 0.05) && eq(rowLen, 1.1, 1e-4) &&
+                  eq(f166::parentMoveDeg(plan, heldS, tiltScaled.model, kN), 20.0, 0.05),
+              "F168: with a uniform scale of 1.1 in the hips the hold still takes the hips' 20 deg off the torso (48 deg held against 68 animated), the chest keeps the scale (rows of length 1.1) and the "
+              "hips' turn reads 20 deg");
+
+        // ---- the later stages yield -------------------------------------------------------------------------------------------------------------------------------------------------
+        check(f166::yieldFactor(0.0) == 1.0 && f166::yieldFactor(1.0) == 0.0 && eq(f166::yieldFactor(0.25), 0.75, 1e-15) && f166::yieldFactor(std::nan("")) == 1.0 && f166::yieldFactor(2.0) == 0.0 &&
+                  f166::yieldFactor(-1.0) == 1.0,
+              "F168: the later stages keep 1 less the hold's weight: all of themselves at weight 0 (exactly 1), none at 1, a weight that is not a number leaves them as they were");
+        // the spine bend as the hook runs it: the pitch about the spine root turned on the chest subtree by nofoot::bendRot (weights 1/3, 2/3, 1) through ikPivot. The same pitch the ADS lean asks
+        // (8 deg) is added to a held torso and to the animated one, each scaled by the yield.
+        const auto bendLean = [&](const float (*model)[16], double pitchRad, double yield, double* leanOut) {
+            double P[3];
+            posOf(model[kSpine0], P);
+            float moved[kN][16];
+            std::memcpy(moved, model, sizeof(moved));
+            const uint32_t sq[3] = {kSpine0, kSpine1, kChest};   // the spine levels 0, 1, 2 and (level 2) what is under the chest: the neck is enough to read the lean
+            const uint32_t under[2] = {kChest, kNeck};
+            double Rl[3][9];
+            for (int l = 0; l < 3; ++l) nf::bendRot(pitchRad * yield, 0.0, nf::kIkSpineWeight[l], Rl[l]);   // a positive pitch leans the neck toward +z, as the lean's sign does
+            for (int k = 0; k < 3; ++k) {
+                float tmp[16];
+                std::memcpy(tmp, model[sq[k]], sizeof(tmp));
+                nf::ikPivot(tmp, Rl[k], P, moved[sq[k]]);
+            }
+            float tmp[16];
+            std::memcpy(tmp, model[kNeck], sizeof(tmp));
+            nf::ikPivot(tmp, Rl[2], P, moved[kNeck]);
+            (void)under;
+            *leanOut = leanOf(moved);
+        };
+        std::memcpy(o, tilted.model, sizeof(o));
+        f166::apply(plan, held, 1.0, tilted.model, kN, o, t, &tn);
+        double heldPlusBend = 0.0, heldPlusYieldedBend = 0.0, animPlusBend = 0.0, animPlusYieldedBend = 0.0;
+        bendLean(o, 8.0 * rad, 1.0, &heldPlusBend);
+        bendLean(o, 8.0 * rad, f166::yieldFactor(1.0), &heldPlusYieldedBend);
+        bendLean(tilted.model, 8.0 * rad, 1.0, &animPlusBend);
+        bendLean(tilted.model, 8.0 * rad, f166::yieldFactor(0.0), &animPlusYieldedBend);
+        check(eq(heldPlusBend, leanOf(o) + 8.0, 0.1) && eq(heldPlusYieldedBend, leanOf(o), 1e-6) && eq(leanOf(o), 48.0, 0.05),
+              "F168: a later stage adding an 8 deg lean to the held torso makes it 56 deg; scaled by the yield at weight 1 it adds nothing and the written lean stays the held 48 deg");
+        check(eq(animPlusYieldedBend, animPlusBend, 0.0) && eq(animPlusBend, leanTilted + 8.0, 0.1),
+              "F168: at weight 0 the same stage is what it was: the animated 68 deg plus its 8 deg, the yield factor exactly 1 and the result identical");
+        // the half weight: the stage keeps half of itself
+        double halfBend = 0.0;
+        bendLean(o, 8.0 * rad, f166::yieldFactor(0.5), &halfBend);
+        check(eq(halfBend, leanOf(o) + 4.0, 0.1), "F168: at weight 0.5 the stage adds half its lean (4 of the 8 deg)");
     }
 }
 
