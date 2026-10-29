@@ -355,6 +355,11 @@ struct State {
     uint32_t refusalWrite=0;
     Image color, rawOverlay, depth[2], motion, rejection, expected, output[2], outputDomain[2];
     uint32_t width=0, height=0, outWidth=0, outHeight=0, evalWidth=0, evalHeight=0, current=0;
+    // The spatial recovery's own images (spatialImages), for a frame the temporal set above does not fit: the input copy by format ([0] the
+    // copy route's RGBA8, [1] the HDR route's R11G11B10F) at the render size, and the copy route's output at the evaluation size. Each is made
+    // on first use and kept; resources() never touches them.
+    Image spatialColor[2], spatialOutput;
+    uint32_t spatialColorW[2]={0,0}, spatialColorH[2]={0,0}, spatialOutW=0, spatialOutH=0;
     // The steady-detail depth check's previous depth (FlatMonoResolveFrame::steadyDetail). TAA keeps last frame's depth in depth[current^1]
     // already; the other backends keep none, so depth[1] is made on the first frame that asks, and while frames ask, the depth the
     // backend is handed alternates between the two images: depthLast is the one the previous frame wrote (0 for every frame that did not ask).
@@ -1603,6 +1608,46 @@ static bool ensureSmaa(ID3D11Device* device,uint32_t renderW,uint32_t renderH) {
     return true;
 }
 
+// The spatial recovery's images (2026-10-29, docs\investigation-flat-scoped-ads-stutter-2026-10-29.md). resources() keys the whole temporal set on
+// the frame's identity, so a recovery that asked it for a frame of another identity tore the set down and rebuilt it, and the next resolve rebuilt
+// it back: a scoped ADS entry's one-frame copy-route recovery (hdr off, the game's output size) cost two rebuilds of every render-size texture,
+// on frames of 52 to 70 ms. The recovery now borrows the temporal set's input copy (and, on the copy route, its output[1]) when they fit its
+// frame -- the preflighted case, which so allocates nothing -- and otherwise uses its own, made once per size and format. It never calls
+// resources(), and the temporal set is never touched.
+bool spatialImages(const FlatMonoResolveFrame& f,uint32_t evalW,uint32_t evalH,Image** in,Image** out,const char** reason) {
+    const bool hdr=f.hdr;
+    *in=*out=nullptr;
+    if(g.color.texture && g.color.srv && g.hdr==hdr && g.width==f.renderWidth && g.height==f.renderHeight &&
+       (hdr || (g.output[1].texture && g.output[1].srv && g.output[1].uav && g.evalWidth==evalW && g.evalHeight==evalH))) {
+        *in=&g.color;
+        if(!hdr)*out=&g.output[1];
+        return true;
+    }
+    const size_t k=hdr?1:0;
+    Image& color=g.spatialColor[k];
+    if(!color.texture || g.spatialColorW[k]!=f.renderWidth || g.spatialColorH[k]!=f.renderHeight) {
+        color={};g.spatialColorW[k]=g.spatialColorH[k]=0;
+        if(!image(g.device.Get(),f.renderWidth,f.renderHeight,hdr?DXGI_FORMAT_R11G11B10_FLOAT:DXGI_FORMAT_R8G8B8A8_UNORM,color,false,
+                  "spatial-color")) {
+            color={};
+            return fail(reason,"flat-spatial-texture-create-failed");
+        }
+        g.spatialColorW[k]=f.renderWidth;g.spatialColorH[k]=f.renderHeight;++stats.spatialAllocations;
+    }
+    *in=&color;
+    if(hdr)return true;
+    if(!g.spatialOutput.texture || g.spatialOutW!=evalW || g.spatialOutH!=evalH) {
+        g.spatialOutput={};g.spatialOutW=g.spatialOutH=0;
+        if(!image(g.device.Get(),evalW,evalH,DXGI_FORMAT_R8G8B8A8_TYPELESS,g.spatialOutput,true,"spatial-output")) {
+            g.spatialOutput={};
+            return fail(reason,"flat-spatial-texture-create-failed");
+        }
+        g.spatialOutW=evalW;g.spatialOutH=evalH;++stats.spatialAllocations;
+    }
+    *out=&g.spatialOutput;
+    return true;
+}
+
 bool flatMonoResolveSpatialFallback(ID3D11Device* device,ID3D11DeviceContext* context,const FlatMonoResolveFrame& f,
                                     ID3D11ShaderResourceView** output,const char** reason) {
     // The HDR route's spatial recovery writes the same crumbs as its resolve (flat_hdr_crumbs.h): capture-state, copy-h,
@@ -1624,14 +1669,22 @@ bool flatMonoResolveSpatialFallback(ID3D11Device* device,ID3D11DeviceContext* co
     if(hdr && !initializeHdr(device,reason))return false;
     ComPtr<ID3D11Texture2D> color;
     if(!inputTexture(f.color,f.renderWidth,f.renderHeight,true,color,hdr))return fail(reason,"flat-spatial-input-view-mismatch");
-    if(!resources(f,reason))return false;
+    // The spatial recovery runs on the route's evaluation grid, exactly as
+    // the resolve it substitutes for (section 72's supersample routes).
+    const auto route = flatResolveRoute(f.mode, f.renderWidth, f.renderHeight, f.outputWidth, f.outputHeight);
+    const uint32_t evalW = route.refused ? f.outputWidth :
+        (f.evalWidth && f.evalHeight) ? f.evalWidth : route.evalWidth;
+    const uint32_t evalH = route.refused ? f.outputHeight :
+        (f.evalWidth && f.evalHeight) ? f.evalHeight : route.evalHeight;
+    Image* spatialIn=nullptr;Image* spatialOut=nullptr;
+    if(!spatialImages(f,evalW,evalH,&spatialIn,&spatialOut,reason))return false;
     if(hdr && !hdrTargetView(color.Get(),reason))return false;
     D3D11_SHADER_RESOURCE_VIEW_DESC colorDesc{};f.color->GetDesc(&colorDesc);
     Isolate isolated(g.context.Get(),g.isolated.Get(),g.capture);
     {
         HdrCrumbSpan copyStep(g_crumbOn,"copy-h","fmt=%s(%u) size=%ux%u",hdrCrumbFormat(static_cast<uint32_t>(colorDesc.Format)),
             static_cast<unsigned>(colorDesc.Format),f.renderWidth,f.renderHeight);
-        context->CopyResource(g.color.texture.Get(),color.Get());
+        context->CopyResource(spatialIn->texture.Get(),color.Get());
         if(hdr)++stats.hdrCopied;
     }
     if(hdr) {
@@ -1641,18 +1694,11 @@ bool flatMonoResolveSpatialFallback(ID3D11Device* device,ID3D11DeviceContext* co
         hc.size[0]=f.renderWidth;hc.size[1]=f.renderHeight;hc.size[2]=f.renderWidth;hc.size[3]=f.renderHeight;
         hc.jitter[0]=f.jitterX;hc.jitter[1]=f.jitterY;hc.route[0]=1;
         context->UpdateSubresource(g.constants.Get(),0,nullptr,&hc,0,0);
-        ID3D11ShaderResourceView* views[1]={g.color.srv.Get()};
+        ID3D11ShaderResourceView* views[1]={spatialIn->srv.Get()};
         drawHdrTarget(context,g.spatialHdr.Get(),f.renderWidth,f.renderHeight,views,1);
         ++stats.hdrSpatial;
         return true;
     }
-    // The spatial recovery runs on the route's evaluation grid, exactly as
-    // the resolve it substitutes for (section 72's supersample routes).
-    const auto route = flatResolveRoute(f.mode, f.renderWidth, f.renderHeight, f.outputWidth, f.outputHeight);
-    const uint32_t evalW = route.refused ? f.outputWidth :
-        (f.evalWidth && f.evalHeight) ? f.evalWidth : route.evalWidth;
-    const uint32_t evalH = route.refused ? f.outputHeight :
-        (f.evalWidth && f.evalHeight) ? f.evalHeight : route.evalHeight;
     // THE MAP TEMPORAL-OFF FRAMES (2026-10-10, f.easu): AMD's EASU over the bounded colour, in place of the bilinear tap below. Only a
     // copy-route frame asks (flat_runtime.cpp); an HDR frame and every other caller take the bilinear path, unchanged.
     g.lastSpatialEasu=false;
@@ -1667,7 +1713,7 @@ bool flatMonoResolveSpatialFallback(ID3D11Device* device,ID3D11DeviceContext* co
         ID3D11UnorderedAccessView* nullUav=nullptr;
         {
             // Pass 1: the colour, bounded (c / (1 + max c)), at the render size.
-            ID3D11ShaderResourceView* raw=g.color.srv.Get();
+            ID3D11ShaderResourceView* raw=spatialIn->srv.Get();
             ID3D11UnorderedAccessView* bounded=g.easuTmpUav.Get();
             context->CSSetShaderResources(1,1,&raw);
             context->CSSetUnorderedAccessViews(0,1,&bounded,nullptr);
@@ -1734,7 +1780,7 @@ bool flatMonoResolveSpatialFallback(ID3D11Device* device,ID3D11DeviceContext* co
             // Pass 2: EASU at the evaluation size, expanded back, into the output the bilinear path would have written. Its input is the
             // bounded colour, or the SMAA output when SMAA ran.
             ID3D11ShaderResourceView* bounded=easuInput;
-            ID3D11UnorderedAccessView* target=g.output[1].uav.Get();
+            ID3D11UnorderedAccessView* target=spatialOut->uav.Get();
             context->CSSetShaderResources(0,1,&bounded);
             context->CSSetSamplers(0,1,&easuSampler);
             context->CSSetConstantBuffers(0,1,&easuCb);
@@ -1745,7 +1791,7 @@ bool flatMonoResolveSpatialFallback(ID3D11Device* device,ID3D11DeviceContext* co
             context->CSSetUnorderedAccessViews(0,1,&nullUav,nullptr);
         }
         g.lastSpatialEasu=true;
-        *output=(colorDesc.Format==DXGI_FORMAT_R8G8B8A8_UNORM_SRGB?g.output[1].srgb:g.output[1].srv).Get();
+        *output=(colorDesc.Format==DXGI_FORMAT_R8G8B8A8_UNORM_SRGB?spatialOut->srgb:spatialOut->srv).Get();
         (*output)->AddRef();
         return true;
     }
@@ -1755,12 +1801,12 @@ bool flatMonoResolveSpatialFallback(ID3D11Device* device,ID3D11DeviceContext* co
     constants.jitter[0]=f.jitterX;constants.jitter[1]=f.jitterY;
     context->UpdateSubresource(g.constants.Get(),0,nullptr,&constants,0,0);
     ID3D11Buffer* cb=g.constants.Get();context->CSSetConstantBuffers(0,1,&cb);
-    ID3D11ShaderResourceView* source=g.color.srv.Get();context->CSSetShaderResources(0,1,&source);
+    ID3D11ShaderResourceView* source=spatialIn->srv.Get();context->CSSetShaderResources(0,1,&source);
     ID3D11SamplerState* sampler=g.sampler.Get();context->CSSetSamplers(0,1,&sampler);
-    ID3D11UnorderedAccessView* target=g.output[1].uav.Get();context->CSSetUnorderedAccessViews(4,1,&target,nullptr);
+    ID3D11UnorderedAccessView* target=spatialOut->uav.Get();context->CSSetUnorderedAccessViews(4,1,&target,nullptr);
     context->CSSetShader(g.spatial.Get(),nullptr,0);
     context->Dispatch((evalW+7)/8,(evalH+7)/8,1);
-    *output=(colorDesc.Format==DXGI_FORMAT_R8G8B8A8_UNORM_SRGB?g.output[1].srgb:g.output[1].srv).Get();
+    *output=(colorDesc.Format==DXGI_FORMAT_R8G8B8A8_UNORM_SRGB?spatialOut->srgb:spatialOut->srv).Get();
     (*output)->AddRef();
     return true;
 }

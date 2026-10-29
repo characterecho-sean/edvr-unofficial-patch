@@ -939,6 +939,8 @@ static HistoryWriteStats historyWindowDelta(const HistoryWriteStats& now,const H
     w.vertexUnknown=d(now.vertexUnknown,was.vertexUnknown);w.vertexInGap=d(now.vertexInGap,was.vertexInGap);
     w.vertexOutside=d(now.vertexOutside,was.vertexOutside);w.vertexGenuine=d(now.vertexGenuine,was.vertexGenuine);
     w.deferredInvalidated=d(now.deferredInvalidated,was.deferredInvalidated);w.deferredConservative=d(now.deferredConservative,was.deferredConservative);
+    w.soCompiled=d(now.soCompiled,was.soCompiled);w.soFromCache=d(now.soFromCache,was.soFromCache);
+    w.positionsReused=d(now.positionsReused,was.positionsReused);w.identityReused=d(now.identityReused,was.identityReused);
     return w;
 }
 static void reportForegroundNoCandidate(State& s,const FlatForegroundMotion::CaptureStats& captures) {

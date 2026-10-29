@@ -359,7 +359,7 @@ inline int flatRangeInvalidateWiringTests() {
                               "if((it->frame[0]==~0u||frame-it->frame[0]>2)&&(it->frame[1]==~0u||frame-it->frame[1]>2)&&"
                               "(!retainInvalid_||!it->invalidated||frame-it->invalidatedAt>kInvalidKeepFrames)){",
                               "noteErased(*it,it->invalidated?HistoryErase::AdvanceInvalidated:HistoryErase::AdvanceAged,frame);",
-                              "bytes_-=it->geometry.count*32;it=records_.erase(it);"});
+                              "bytes_-=it->geometry.count*32;poolBuffers(*it);it=records_.erase(it);"});
     };
     expect(advanceValid(advance), "the boundary erases a record that has aged out, or an invalidated one only when the policy does not retain it or the keep window has passed");
     expect(!advanceValid(replaced(advance, "&&(!retainInvalid_||!it->invalidated||frame-it->invalidatedAt>kInvalidKeepFrames)){", "){")),
@@ -385,6 +385,12 @@ inline int flatRangeInvalidateWiringTests() {
            "the history erases records in two places (the boundary and the reclaim) and notes both, so no erase is unlabelled");
     expect(count(historyCompact + compact("records_.erase(records_.begin());"), "records_.erase(") == 3,
            "mutation control: a third erase path is what the count would see");
+    expect(count(historyCompact, "poolBuffers(*it);it=records_.erase(it);") == 2,
+           "both erase paths leave the record's buffers to the pools (the scoped ADS stutter: no zoom edge creates what an erase just released)");
+    expect(count(historyCompact, "voidpoolBuffers(Record&r){if(r.invalidated&&r.invalidatedAt==lastFrame_)return;") == 1,
+           "a record invalidated this frame keeps its buffers out of the pools: a Capture of it from earlier this frame may still be read");
+    expect(count(historyCompact, "if(r.capture)rememberStreamOutput(r.geometry.original,r.capture);elseif((r.capture=cachedStreamOutput(") == 1,
+           "a stream-output shader taken from a live or reclaimed record refreshes its cache entry, so a VS in use is not the one evicted");
     const std::string erasedNote = compact(member(historySource, "void noteErased("));
     expect(has(erasedNote, "++writeStats_.erased[unsigned(why)];") && has(erasedNote, "t.key=historyKeyHash(historyKeyOf(r.geometry));t.frame=frame;") &&
                has(erasedNote, "t.cause=(why==HistoryErase::AdvanceInvalidated||why==HistoryErase::AdvanceAged)?1:2;"),
@@ -593,8 +599,8 @@ inline int flatRangeInvalidateWiringTests() {
     };
     unsigned fieldCount = 0;
     for (char c : fields) fieldCount += c == ',';
-    expect(fieldCount == 24 && carries(delta, "w.") && carries(addText, "o."),
-           "the window delta and add() each carry all twenty-four counters of the statistics struct, by name");
+    expect(fieldCount == 28 && carries(delta, "w.") && carries(addText, "o."),
+           "the window delta and add() each carry all twenty-eight counters of the statistics struct, by name");
     expect(!carries(replaced(delta, "w.extentFailed", "w.nothing"), "w.") && !carries(replaced(addText, "o.extentRead", "o.nothing"), "o.") &&
                !carries(replaced(delta, "w.allocationFailures", "w.allocations"), "w."),
            "mutation control: a delta or an add() that forgets one counter fails the check");

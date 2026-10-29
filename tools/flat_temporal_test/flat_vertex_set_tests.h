@@ -291,6 +291,7 @@ inline int flatVertexSetTests() {
         s.allocations = take(); s.allocationFailures = take();
         s.extentIssued = take(); s.extentRead = take(); s.extentFailed = take(); s.setFromCache = take(); s.setPending = take(); s.setApproximate = take(); s.setCancelled = take();
         s.vertexUnknown = take(); s.vertexInGap = take(); s.vertexOutside = take(); s.vertexGenuine = take(); s.deferredInvalidated = take(); s.deferredConservative = take();
+        s.positionsReused = take(); s.identityReused = take(); s.soCompiled = take(); s.soFromCache = take();
     };
     const auto fillAll = [&](HistoryWriteStats& s, uint64_t v) {
         for (unsigned e = 0; e < kHistoryWriteEntries; ++e) {
@@ -302,6 +303,7 @@ inline int flatVertexSetTests() {
         for (auto& x : s.erased) x = v;
         s.allocations = s.allocationFailures = s.extentIssued = s.extentRead = s.extentFailed = s.setFromCache = s.setPending = s.setApproximate = s.setCancelled = v;
         s.vertexUnknown = s.vertexInGap = s.vertexOutside = s.vertexGenuine = s.deferredInvalidated = s.deferredConservative = v;
+        s.positionsReused = s.identityReused = s.soCompiled = s.soFromCache = v;
     };
     {
         FlatHistoryWindow w;
@@ -314,7 +316,7 @@ inline int flatVertexSetTests() {
             w.top[i].resource = reinterpret_cast<const void*>(uintptr_t(0x1000) * (i + 1));
             w.top[i].touching = next += 7919; w.top[i].invalidating = next += 7919; w.top[i].saved = next += 7919;
         }
-        char want[512];
+        char want[1024];
 
         // -- the summary line --
         char line[4096];
@@ -324,11 +326,13 @@ inline int flatVertexSetTests() {
         expect(summary.rfind("flat foreground history 5s: records=111 bytes=222222 peak-records=128 peak-bytes=33333333 allocations=", 0) == 0,
                "the summary line leads with the key the log is read by and the size gauges, in the order the reader parses them");
         std::snprintf(want, sizeof(want), " allocations=%llu allocation-failures=%llu; erased: advance-invalidated=%llu pressure-invalidated=%llu pressure-spent=%llu advance-aged=%llu; "
-                      "vertex sets: requested=%llu read=%llu failed=%llu cancelled=%llu from-cache=%llu already-pending=%llu approximate=%llu",
+                      "vertex sets: requested=%llu read=%llu failed=%llu cancelled=%llu from-cache=%llu already-pending=%llu approximate=%llu; "
+                      "records made with: reused positions=%llu reused identity=%llu stream-output shaders compiled=%llu cached=%llu",
                       u(s.allocations), u(s.allocationFailures), u(s.erased[1]), u(s.erased[2]), u(s.erased[3]), u(s.erased[4]), u(s.extentIssued), u(s.extentRead),
-                      u(s.extentFailed), u(s.setCancelled), u(s.setFromCache), u(s.setPending), u(s.setApproximate));
+                      u(s.extentFailed), u(s.setCancelled), u(s.setFromCache), u(s.setPending), u(s.setApproximate), u(s.positionsReused), u(s.identityReused),
+                      u(s.soCompiled), u(s.soFromCache));
         expect(summary.find(want) != std::string::npos && summary.size() - summary.find(want) == std::strlen(want),
-               "the summary line carries the allocations, every erase path and the seven vertex-set counters, each under its own name, and ends with the last");
+               "the summary line carries the allocations, every erase path, the seven vertex-set counters and the four reuse counters, each under its own name, and ends with the last");
 
         // -- the writes lines --
         std::string parts[kFlatHistoryWriteLines];
@@ -430,7 +434,8 @@ inline int flatVertexSetTests() {
         every = every && hasNumber(s.unknownInvalidating[0]) && hasNumber(s.unknownInvalidating[1]) && hasNumber(s.sparedRecords) && hasNumber(s.allocations) &&
                 hasNumber(s.allocationFailures) && hasNumber(s.extentIssued) && hasNumber(s.extentRead) && hasNumber(s.extentFailed) && hasNumber(s.setFromCache) &&
                 hasNumber(s.setPending) && hasNumber(s.setApproximate) && hasNumber(s.setCancelled) && hasNumber(s.vertexUnknown) && hasNumber(s.vertexInGap) &&
-                hasNumber(s.vertexOutside) && hasNumber(s.vertexGenuine) && hasNumber(s.deferredInvalidated) && hasNumber(s.deferredConservative);
+                hasNumber(s.vertexOutside) && hasNumber(s.vertexGenuine) && hasNumber(s.deferredInvalidated) && hasNumber(s.deferredConservative) &&
+                hasNumber(s.positionsReused) && hasNumber(s.identityReused) && hasNumber(s.soCompiled) && hasNumber(s.soFromCache);
         for (unsigned i = 1; i < static_cast<unsigned>(HistoryErase::Count); ++i) every = every && hasNumber(s.erased[i]);
         expect(every, "every counter of the statistics appears in the five lines: nothing the window measured is dropped");
         // A counter that is not printed: the control zeroes the line's copy and the number goes missing.
@@ -451,8 +456,9 @@ inline int flatVertexSetTests() {
         flatHistoryLine(line, sizeof(line), empty);
         expect(std::string(line) ==
                    "flat foreground history 5s: records=0 bytes=0 peak-records=0 peak-bytes=0 allocations=0 allocation-failures=0; erased: advance-invalidated=0 "
-                   "pressure-invalidated=0 pressure-spent=0 advance-aged=0; vertex sets: requested=0 read=0 failed=0 cancelled=0 from-cache=0 already-pending=0 approximate=0",
-               "an empty window prints the gauges, the allocation counters, every erase path and every vertex-set counter at zero");
+                   "pressure-invalidated=0 pressure-spent=0 advance-aged=0; vertex sets: requested=0 read=0 failed=0 cancelled=0 from-cache=0 already-pending=0 approximate=0; "
+                   "records made with: reused positions=0 reused identity=0 stream-output shaders compiled=0 cached=0",
+               "an empty window prints the gauges, the allocation counters, every erase path, every vertex-set counter and the reuse counters at zero");
         bool allZero = true;
         std::string zeros;
         for (unsigned p = 0; p < kFlatHistoryWriteLines; ++p) {

@@ -419,10 +419,14 @@ inline std::vector<FlatHistoryPressureResult> flatBenchHistoryPressureTests(
         check(pressured.recordCount==cap && pressured.invalid==cap-1 && pressured.current==1 &&
               pressured.reclaimedRecords==1 && pressured.reclaimedBytes==3*32,
               "record-pressure compaction releases one invalidated slot and stops");
+        check(history.pooledPositions()==0 && history.pooledIdentities()==0,
+              "a record invalidated this frame is reclaimed without pooling its buffers, so no record made this frame writes them");
         history.advance(802);
         check(history.recordCount()==1 && history.bytes()==3*32 &&
               history.accounting(802).reclaimedRecords==0,
               "frame advance retires remaining invalidated records");
+        check(history.pooledPositions()==cap-1 && history.pooledIdentities()==cap-1,
+              "the records invalidated last frame go to the pools at the next boundary");
         check(flatHistoryPressurePositionBytes(dev,ctx,retained.currentPositions.Get())==before &&
               retained.currentIdentity && retained.instanceIndex,
               "caller-owned GPU Capture remains alive and unchanged after record retirement");
@@ -1074,6 +1078,65 @@ inline std::vector<FlatHistoryPressureResult> flatBenchHistoryPressureTests(
                   !sampler.consider(nullptr,800,current.Get(),priors,2,key,1,2),"a draw with no identity view, no candidates or no context is never sampled");
         result.captures=accepted;
         results.push_back(result);
+    }
+
+    // The scope's zoom edges (docs\investigation-flat-scoped-ads-stutter-2026-10-29.md): records made after every record of their VS has gone
+    // take its stream-output shader from the cache and the buffers the erased records left, and capture what a fresh history captures. Not a
+    // bench case: checks only, so the result list keeps its cases.
+    {
+        std::vector<UINT> indices;
+        for(unsigned t=0;t<8;++t)for(unsigned k=0;k<3;++k)indices.push_back((t+k)%4);
+        auto ib=flatHistoryPressureIndexBuffer(dev,indices);
+        ctx->IASetIndexBuffer(ib.Get(),DXGI_FORMAT_R32_UINT,0);
+        AnimatedVertexHistory history;
+        AnimatedVertexHistory::Capture capture;
+        bool admitted=true;
+        for(unsigned i=0;i<4;++i)admitted=history.capture(ctx,issue,3,1,i*3,0,0,900,capture) && admitted;
+        admitted=history.capture(ctx,issue,6,1,12,0,0,900,capture) && admitted;
+        const HistoryWriteStats first=history.writeStats();
+        check(admitted && first.soCompiled==1 && first.soFromCache==0 && first.positionsReused==0 && first.identityReused==0 &&
+                  history.cachedStreamOutputs()==1,
+              "zoom edge: five records of one VS compile its stream-output shader once and reuse nothing");
+        history.advance(904);
+        check(history.recordCount()==0 && history.pooledPositions()==5 && history.pooledIdentities()==5,
+              "zoom edge: the erased records' buffers go to the pools, not away");
+        AnimatedVertexHistory::Capture again;
+        check(history.capture(ctx,issue,3,1,18,0,0,904,again),"zoom edge: a new key after every record of its VS has gone is captured");
+        const HistoryWriteStats second=history.writeStats();
+        check(second.soCompiled==1 && second.soFromCache==1 && second.positionsReused==1 && second.identityReused==1 &&
+                  history.pooledPositions()==4 && history.pooledIdentities()==4,
+              "zoom edge: it takes the cached shader and a pooled pair and identity set, and compiles and creates nothing");
+        AnimatedVertexHistory fresh;
+        AnimatedVertexHistory::Capture reference;
+        check(fresh.capture(ctx,issue,3,1,18,0,0,904,reference),"zoom edge: the same draw in a fresh history");
+        const auto mine=flatHistoryPressurePositionBytes(dev,ctx,again.currentPositions.Get());
+        const auto theirs=flatHistoryPressurePositionBytes(dev,ctx,reference.currentPositions.Get());
+        check(mine.size()>=48 && theirs.size()==48 && std::memcmp(mine.data(),theirs.data(),48)==0,
+              "zoom edge: the reused buffers hold the positions a fresh history captures");
+        // The 6-vertex pair is the only pooled one a 3-vertex key may take after the 3-vertex pairs are gone: twice its size, with views of 3.
+        for(unsigned i=0;i<3;++i)check(history.capture(ctx,issue,3,1,(i+1)*3,0,0,904,capture),"zoom edge: three more 3-vertex keys");
+        check(history.pooledPositions()==1,"zoom edge: the 3-vertex pairs went first, the 6-vertex pair is left");
+        AnimatedVertexHistory::Capture wide;
+        check(history.capture(ctx,issue,3,1,21,0,0,904,wide) && history.pooledPositions()==0 && history.writeStats().positionsReused==5,
+              "zoom edge: a 3-vertex key takes the 6-vertex pair");
+        D3D11_SHADER_RESOURCE_VIEW_DESC vd{};wide.currentPositions->GetDesc(&vd);
+        const auto wideBytes=flatHistoryPressurePositionBytes(dev,ctx,wide.currentPositions.Get());
+        AnimatedVertexHistory::Capture wideReference;
+        check(fresh.capture(ctx,issue,3,1,21,0,0,904,wideReference),"zoom edge: the wide draw in the fresh history");
+        const auto wideTheirs=flatHistoryPressurePositionBytes(dev,ctx,wideReference.currentPositions.Get());
+        check(vd.Buffer.NumElements==3 && wideBytes.size()==96 && wideTheirs.size()==48 && std::memcmp(wideBytes.data(),wideTheirs.data(),48)==0,
+              "zoom edge: over the larger pooled buffer its view covers its own 3 vertices, and they are a fresh history's");
+        AnimatedVertexHistory::Capture tooBig;
+        const uint64_t before=history.writeStats().positionsReused;
+        check(history.capture(ctx,issue,6,1,0,0,0,904,tooBig) && history.writeStats().positionsReused==before,
+              "zoom edge: with the pool empty, new buffers are made");
+        AnimatedVertexHistory narrow;
+        check(narrow.capture(ctx,issue,12,1,0,0,0,910,capture),"zoom edge: a 12-vertex key");
+        narrow.advance(914);
+        check(narrow.capture(ctx,issue,3,1,0,0,0,914,capture) && narrow.writeStats().positionsReused==0 && narrow.pooledPositions()==1,
+              "zoom edge: a 3-vertex key never takes a pooled pair over twice its size");
+        check(narrow.capture(ctx,issue,6,1,3,0,0,914,capture) && narrow.writeStats().positionsReused==1 && narrow.pooledPositions()==0,
+              "zoom edge: a 6-vertex key takes the 12-vertex pair, exactly twice its size");
     }
 
     if(printJson) {
