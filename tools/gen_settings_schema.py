@@ -91,7 +91,7 @@ from the fixes (World scale, Intro movie, Star glow, Intro background picture, S
 `menu visual` on a row the flat table does not list is VR-only (World scale), and `menu flat_visual` is a flat-tab-only row that VR's page must not show (none today:
 Star glow was one until the headset read it, 2026-10-27). A [visual] row with no token is desktop-only, as a [fix] row is.
 
-THE DESKTOP WINDOW PAGE (2026-10-28) is `menu desktop_window`, in VR's menu only, right after the Visual page: the [visual] keys that shape Elite's desktop window
+THE DESKTOP WINDOW PAGE (2026-10-28; the menu shows it as the Mirror window tab since F173, the page id and the rows' labels unchanged) is `menu desktop_window`, in VR's menu only, right after the Visual page: the [visual] keys that shape Elite's desktop window
 (visual.desktop_window and its aspect and style), Fix tier, in the file's order, no group headings (the page is the group). No flat table lists them, so the flat panel has no row
 for them. The keys stay in [visual].
 
@@ -219,7 +219,7 @@ DEV_SECTIONS = ('advanced', 'experimental')
 # 'visual' is a page of both menus: the flat panel's Visual tab (2026-10-22) and VR's Visual page (2026-10-27); 'debug' (2026-10-16) is the flat panel's Debug tab, which VR's menu does
 # not build. 'flat_performance' (2026-10-24) and 'flat_visual' (2026-10-27) are the flat tabs' own rows, the ones that do nothing in the headset: VR's Performance page lists only
 # `menu performance` and VR's Visual page only `menu visual`, while the flat tabs list menu_flat_rows.h's kFlatPageRows and kFlatVisualRows whatever the token.
-# 'desktop_window' (2026-10-28) is VR's own Desktop window page, right after Visual: the three [visual] keys that shape Elite's desktop window; the flat panel has no such page.
+# 'desktop_window' (2026-10-28) is VR's own Desktop window page (the Mirror window tab since F173), right after Visual: the three [visual] keys that shape Elite's desktop window; the flat panel has no such page.
 MENU_PAGES = ('fixes', 'performance', 'flat_performance', 'native_on_foot', 'visual', 'desktop_window', 'flat_visual', 'debug')
 FLAT_PERFORMANCE_PAGE = 'flat_performance'
 FLAT_VISUAL_PAGE = 'flat_visual'

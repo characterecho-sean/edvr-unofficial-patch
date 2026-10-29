@@ -1,6 +1,6 @@
 // F170 checks (native on-foot VR), run170 below. Header only, run by native_frame_test.
 //
-// F170 (native_on_foot_f170.h, TEMPORARY): the crouched ADS torso squared to the aim. experimental.native_on_foot_crouch_ads_square (0..1, shipped 1) is the share of the shoulder line's
+// F170 (native_on_foot_f170.h, TEMPORARY): the crouched ADS torso squared to the aim. experimental.native_on_foot_crouch_ads_square (0..1, shipped 1 in F170 and 0 since F173; the checks set the dial they mean) is the share of the shoulder line's
 // measured blade (the square-up's phi: the yaw that squares the upper-arm line to the aim) the torso is turned out of about the vertical through the neck, while crouched (F163's weight) in the
 // sights (the detach weight): the dial x both weights. It is the square-up's machinery: the reach rule turns the shoulders it keeps within reach of the grips by it, and the written square-up
 // turns the spine levels by it, after the upper-body hold's yield (F166, F168) so it holds while walking crouched in the sights. At 0, standing and at the hip the turn is exactly 0.

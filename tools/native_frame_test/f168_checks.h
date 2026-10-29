@@ -1,6 +1,6 @@
 // F168 checks (native on-foot VR), run168 below. Header only, run by native_frame_test.
 //
-// F168 (native_on_foot_f168.h, TEMPORARY): the dial for the crouched body's distance to the gun. experimental.native_on_foot_crouch_ads_body_forward_cm (-20..+20 cm, 0 by default) moves the
+// F168 (native_on_foot_f168.h, TEMPORARY): the dial for the crouched body's distance to the gun. experimental.native_on_foot_crouch_ads_body_forward_cm (-20..+20 cm, 0 by default in F168 and 5 since F173; the checks set the dial they mean) moves the
 // third-person body along the aim's horizontal forward, relative to the eye, while crouched in the sights: the pin's target for the neck takes the move, so the body and the shoulders the arms
 // are solved from stand that far toward the gun (positive) or away from it. The move is the dial x the crouched weight (F163) x the detach weight, so it is exactly 0 standing, at the hip and
 // with the dial at 0. The figures: the dial and the move applied, the right shoulder to the gun's root, the left shoulder to the left-hand grip and from the eye, crouched in the sights,

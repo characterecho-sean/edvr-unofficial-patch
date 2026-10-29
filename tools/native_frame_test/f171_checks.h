@@ -1,6 +1,6 @@
 // F171 checks (native on-foot VR), run171 below. Header only, run by native_frame_test.
 //
-// F171 (native_on_foot_f171.h, TEMPORARY): the crouched ADS body moved to the left of the aim line. experimental.native_on_foot_crouch_ads_body_left_cm (-30..+30 cm since F172, shipped 15, positive left)
+// F171 (native_on_foot_f171.h, TEMPORARY): the crouched ADS body moved to the left of the aim line. experimental.native_on_foot_crouch_ads_body_left_cm (-30..+30 cm since F172, shipped 15 and 25 since F173; the checks set the dial they mean, positive left)
 // moves the third-person body across the aim, by the dial x the crouched weight (F163) x the detach weight, along the horizontal left of the aim; it goes into the pin's target for the neck
 // before the reach rule, so the rule keeps the left grip reachable. The rig runs the real reach rule on shoulders and grips taken from the flight edvr_gfx_20261029_043951 (the left
 // shoulder almost under the eye, the left grip 62.3 cm away, just past the reach boundary), the real heading axes for the sign, the real pin move and the counters and line.

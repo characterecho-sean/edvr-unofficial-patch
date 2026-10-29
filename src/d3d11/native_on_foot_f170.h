@@ -14,7 +14,7 @@
 // yield: its angle is measured on the pose as it is after the hold wrote it (the held torso's own blade), and it is turned onto that pose after the yield, so it is the same share of the
 // held pose's blade still and moving, and nothing accumulates (the hold rewrites the torso from the captured pose every call).
 //
-// The dial is experimental.native_on_foot_crouch_ads_square, 0..1, shipped 1. At 0, standing, at the hip and unarmed the turn is exactly 0 and every path is what it was.
+// The dial is experimental.native_on_foot_crouch_ads_square, 0..1, shipped 1 (F173: 0, the pilot's flown value: the game's pose). At 0, standing, at the hip and unarmed the turn is exactly 0 and every path is what it was.
 #pragma once
 
 #include "native_on_foot_core.h"

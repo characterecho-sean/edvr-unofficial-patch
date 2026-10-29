@@ -22,7 +22,7 @@
 //   shift, +-100 reach the edges from any default, +-50 are halfway from an off-centre default, no travel is no change, out of range is held to +-100, a sub-rect works in the
 //   texture's UVs, a flipped sub-rect moves as the viewer sees it; and the pins on the key (one whole number, -100..100, default 0, flat resets it), the call that gives it to the
 //   crop, the log lines, the ini words (0 is the default centre) and the ini order. Each check has a control that trips.
-//   THE WIRING (source pins, each with a control that trips it): the key is read as one word with the default game, the flat profile's allow-list does not carry it,
+//   THE WIRING (source pins, each with a control that trips it): the key is read as one word with the default left_eye (game until F173), the flat profile's allow-list does not carry it,
 //   the window is moved only from the thread-pool callback, the Present hook calls the feature before the census span and the real Present, the draw skip sits in the
 //   verdict and in the three thunks the verdict does not cover, the host hands the eye over after it is captured, the export and the source are built, and edvr.ini
 //   documents the key in [visual] after world_scale.
@@ -78,8 +78,8 @@ static std::string replaced(std::string text, const char* from, const char* to) 
 static void rules() {
     bool known = false;
     check(desktopWindowParse("game", &known) == DesktopWindowMode::Game && known, "game is game");
-    check(desktopWindowParse("", &known) == DesktopWindowMode::Game && known, "the empty word is the default, and known");
-    check(desktopWindowParse(nullptr, &known) == DesktopWindowMode::Game && known, "a missing word is the default, and known");
+    check(desktopWindowParse("", &known) == DesktopWindowMode::Game && known, "the empty word reads as game (the parser's own, not the key's default), and known");
+    check(desktopWindowParse(nullptr, &known) == DesktopWindowMode::Game && known, "a missing word reads as game (the parser's own, not the key's default), and known");
     check(desktopWindowParse("left_eye", &known) == DesktopWindowMode::LeftEye && known, "left_eye");
     check(desktopWindowParse("RIGHT_EYE", &known) == DesktopWindowMode::RightEye && known, "right_eye in capitals");
     check(desktopWindowParse("both_eyes", &known) == DesktopWindowMode::BothEyes && known, "both_eyes");
@@ -855,12 +855,12 @@ static void wiring(const std::string& root) {
     check(!cpp.empty() && !hook.empty() && !vscreen.empty() && !host.empty() && !build.empty() && !ini.empty() && !flatKeys.empty() && !shaderTool.empty(),
           "every file the wiring pins read is where they look");
 
-    // The key: one word, default game, read live under the configuration generation; the flat profile never reads it and does not allow it.
+    // The key: one word, default left_eye (F173; game before), read live under the configuration generation; the flat profile never reads it and does not allow it.
     auto keyRead = [](const std::string& t) {
-        return count(t, "cfg.getString(\"visual.desktop_window\", \"game\")") == 1 && at(t, "cfg.generation()") != std::string::npos && at(t, "desktopWindowParse(raw.c_str(), &known)") != std::string::npos;
+        return count(t, "cfg.getString(\"visual.desktop_window\", \"left_eye\")") == 1 && at(t, "cfg.generation()") != std::string::npos && at(t, "desktopWindowParse(raw.c_str(), &known)") != std::string::npos;
     };
-    check(keyRead(cpp), "desktop_window.cpp reads visual.desktop_window as one word, default game, under the configuration generation");
-    check(!keyRead(replaced(cpp, "\"visual.desktop_window\", \"game\"", "\"visual.desktop_window\", \"left_eye\"")), "control: a key that defaults to a mode trips the pin");
+    check(keyRead(cpp), "desktop_window.cpp reads visual.desktop_window as one word, default left_eye, under the configuration generation");
+    check(!keyRead(replaced(cpp, "\"visual.desktop_window\", \"left_eye\"", "\"visual.desktop_window\", \"game\"")), "control: a key that defaults to game (the default before F173) trips the pin");
     check(at(flatKeys, "desktop_window") == std::string::npos, "the flat profile's allow-list does not carry visual.desktop_window");
     check(at(cpp, "if (flat) {") != std::string::npos && at(cpp, "S.mode = DesktopWindowMode::Game;", at(cpp, "if (flat) {")) != std::string::npos, "the flat profile is game before any read");
 
@@ -1142,7 +1142,7 @@ static void wiring(const std::string& root) {
     // edvr.ini: [visual], after world_scale, the three keys in order, each with its ui: line on the Desktop window page, live, and the sentence the menu reads.
     const size_t visual = at(ini, "\n[visual]\n");
     const size_t world = at(ini, "\nworld_scale = 100\n", visual);
-    const size_t key = at(ini, "\ndesktop_window = game\n", world);
+    const size_t key = at(ini, "\ndesktop_window = left_eye\n", world);
     const size_t aspectKey = at(ini, "\ndesktop_window_aspect = full\n", key), cropKey = at(ini, "\ndesktop_window_crop = native\n", aspectKey);
     const size_t shiftKey = at(ini, "\ndesktop_window_vertical_shift = 0\n", cropKey);
     const size_t styleKey = at(ini, "\ndesktop_window_style = window\n", shiftKey);
@@ -1156,7 +1156,7 @@ static void wiring(const std::string& root) {
               uiCrop > aspectKey && cropKey - uiCrop < 200 && shiftKey != std::string::npos && uiShift != std::string::npos && uiShift > cropKey && shiftKey - uiShift < 200 && styleKey != std::string::npos && uiStyle != std::string::npos && uiStyle > shiftKey && styleKey - uiStyle < 160 &&
               count(ini, "\ndesktop_window = ") == 1 && count(ini, "\ndesktop_window_aspect = ") == 1 && count(ini, "\ndesktop_window_crop = ") == 1 && count(ini, "\ndesktop_window_vertical_shift = ") == 1 &&
               count(ini, "\ndesktop_window_style = ") == 1,
-          "edvr.ini: [visual], after world_scale, the five keys in order ship game, full, native, 0 and window, each with its ui: line on the Desktop window page (the crop two choices, the shift a signed number row, step 5, unit %)");
+          "edvr.ini: [visual], after world_scale, the five keys in order ship left_eye, full, native, 0 and window, each with its ui: line on the Mirror window page (its rows keep the Desktop window labels) (the crop two choices, the shift a signed number row, step 5, unit %)");
     check(ini.rfind("VR only. Live.\n# ui: Desktop window |", key) != std::string::npos && ini.rfind("VR only. Live.\n# ui: Desktop window shape |", aspectKey) != std::string::npos &&
               ini.rfind("VR only. Live.\n# ui: Desktop window crop |", cropKey) != std::string::npos && ini.rfind("VR only. Live.\n# ui: Desktop window vertical shift |", shiftKey) != std::string::npos && ini.rfind("VR only. Live.\n# ui: Desktop window style |", styleKey) != std::string::npos,
           "edvr.ini: each comment says VR only and live");

@@ -1747,10 +1747,10 @@ void buildPages() {
         s.pages.push_back(p);
     }
     {
-        // Desktop window (2026-10-28): the keys that shape Elite's desktop window, right after Visual. The rows are the `menu desktop_window` rows of edvr.ini, in file order
+        // Mirror window (2026-10-28 as "Desktop window"; renamed F173): the keys that shape Elite's window on the desktop, right after Visual. The rows are the `menu desktop_window` rows of edvr.ini, in file order
         // (what it shows, the picture's shape, the window's style); no group headings, the page is the group. VR's menu only: the flat panel has no such page.
         Page p;
-        p.name = "Desktop window";
+        p.name = "Mirror window";
         addSettingRows(p, MenuTier::Fix, "desktop_window", false);
         firstSelectable(p);
         s.pages.push_back(p);

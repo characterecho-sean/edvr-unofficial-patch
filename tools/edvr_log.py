@@ -10365,6 +10365,8 @@ H_DESKTOP_SETTING = r"desktop window: setting (?P<value>game|left_eye|right_eye|
 H_DESKTOP_SEC = (r"desktop window: 10 s: drawn=(?P<drawn>\d+) seen=(?P<seen>\d+) skipped_draws=(?P<skipped>\d+) eyes_L=(?P<left>\d+) eyes_R=(?P<right>\d+) "
                  r"stale=(?P<stale>\d+) client=(?P<cw>\d+)x(?P<ch>\d+) swap_chain=(?P<sw>\d+)x(?P<sh>\d+)(?: moves=(?P<moves>\d+) resizes=(?P<resizes>\d+))?$")
 H_DESKTOP_STOP = r"desktop window: stopped \((?P<reason>.*)\); drawn=(?P<drawn>\d+) of (?P<seen>\d+) Presents; window (?P<window>.*)$"
+H_DESKTOP_ACTIVE = r"desktop window: active #(?P<n>\d+)"   # F173: the window took the eye images (an activation): evidence that 3D was on
+H_DESKTOP_DECLINED = r"desktop window: not drawing -- (?P<why>.*)$"   # F173: the draw declined, and why
 H_DESKTOP_OTHER = r"desktop window: (?!setting |10 s: |stopped \()"
 H_F125_LABEL = "native on foot log (F125)"
 H_F125_RE = re.compile(r"native on foot log \(F125\): detail (?P<detail>on|off), summary window (?P<wl>\d+) s")
@@ -14601,7 +14603,10 @@ def _hj_desktop_window(rows, ctx):
     """The desktop window (src\\common\\desktop_window_math.h; visual.desktop_window): ran is a setting line that names a mode other than game, applied is a Present drawn,
     counted by the 10 s lines and by the line that ends an activation (a session whose 3D was on for less than 10 s has only the second). NEVER APPLIED when the setting
     asked for a mode and no line shows a Present drawn: no eye image arrived (3D was never on), or the draw declined (a "not drawing" line says why). No setting line, or only
-    game, is nothing to judge (None)."""
+    game, is nothing to judge (None).
+    F173: the shipped setting is left_eye, so a setting line no longer means the user asked for the window. A setting with no Present drawn and no sign the window ever took the
+    eye images (no activation, no 10 s line, no stopped line, no declined draw) is IDLE: 3D was never on in that log, there was nothing to draw. Any of those signs with no Present
+    drawn is NEVER APPLIED as before."""
     settings = rows.get("setting", [])
     asked = [r["value"] for r in settings if r["value"] != "game"]
     if not asked:
@@ -14609,6 +14614,9 @@ def _hj_desktop_window(rows, ctx):
     drawn = [int(r["drawn"]) for kind in ("sec", "stopped") for r in rows.get(kind, [])]
     mode = asked[-1]
     if not drawn or max(drawn) <= 0:
+        if not (rows.get("active") or rows.get("declined") or rows.get("sec") or rows.get("stopped")):
+            return ("IDLE", "the setting was %s (the shipped default since F173) and no line shows the window active, drawing or declining: 3D was never on in this log, so there was "
+                            "nothing to draw" % mode)
         return ("NEVER APPLIED", "the setting was %s but no 10 s line and no stopped line shows a Present drawn (3D was never on, or the draw declined: the log's "
                                  "'desktop window: not drawing' line says why)" % mode)
     sec = rows.get("sec", [])
@@ -15428,6 +15436,8 @@ HEALTH_RULES = (
         ("setting", H_DESKTOP_SETTING),
         ("sec", H_DESKTOP_SEC),
         ("stopped", H_DESKTOP_STOP),
+        ("active", H_DESKTOP_ACTIVE),
+        ("declined", H_DESKTOP_DECLINED),
         ("_", H_DESKTOP_OTHER),
     ), _hj_desktop_window),)
 HEALTH_BY_TAG = {}
@@ -20387,10 +20397,17 @@ def self_test_health():
               has=["the setting was right_eye but no 10 s line and no stopped line shows a Present drawn", "exit 3"])
         check("desktop window: a 10 s line with drawn=0 is NEVER APPLIED", dw_ok + [dw_setting("left_eye"), dw_sec(drawn=0, seen=300)], 3, [("NEVER APPLIED", DW)])
         check("desktop window: a drifted setting line is UNPARSED", dw_ok + [dw_setting("left_eye").replace("left_eye", "maybe")], 4, [("UNPARSED", DW)])
-        check("desktop window: a drifted 10 s line is no evidence of a draw, and is said", dw_ok + [dw_setting("left_eye"), dw_sec().replace("drawn=", "painted=")], 3, [("NEVER APPLIED", DW)],
+        check("desktop window: a drifted 10 s line is no evidence of a draw, and is said (a declined draw beside it shows the window was tried)",
+              dw_ok + [dw_setting("left_eye"), RD(dwcpp, "desktop window: not drawing -- %s", "no eye image yet"), dw_sec().replace("drawn=", "painted=")], 3, [("NEVER APPLIED", DW)],
               has=["line(s) the rule's patterns do not match"])
-        check("desktop window: the setting counts whatever --since says, the 10 s lines before it do not", dw_ok + [(1, dw_setting("left_eye")), (20, dw_sec())], 3,
-              [("NEVER APPLIED", DW)], extra=["--since", "10:01:00"])
+        check("desktop window: the setting counts whatever --since says, the 10 s lines before it do not (the setting alone, with 3D never on in the window, is idle)", dw_ok + [(1, dw_setting("left_eye")), (20, dw_sec())], 0,
+              [("IDLE", DW)], has=["no line shows the window active, drawing or declining"], extra=["--since", "10:01:00"])
+        # F173: the shipped setting is left_eye, so a setting line alone is the default, not a request
+        check("desktop window: the shipped left_eye and no sign of the window ever active (3D never on) is idle, not a failure", dw_ok + [dw_setting("left_eye")], 0, [("IDLE", DW)],
+              has=["the setting was left_eye (the shipped default since F173) and no line shows the window active, drawing or declining: 3D was never on in this log"], lacks=["NEVER APPLIED"])
+        check("desktop window: an activation and no Present drawn is NEVER APPLIED", dw_ok + [dw_setting("left_eye"), RD(dwcpp, "desktop window: active #%u", 1)], 3, [("NEVER APPLIED", DW)],
+              has=["the setting was left_eye but no 10 s line and no stopped line shows a Present drawn"], lacks=["UNPARSED"])
+        check("desktop window: a declined draw and no Present drawn is NEVER APPLIED", dw_ok + [dw_setting("left_eye"), RD(dwcpp, "desktop window: not drawing -- %s", "no eye image yet")], 3, [("NEVER APPLIED", DW)])
         check("desktop window: a 10 s line inside --since is counted", dw_ok + [(1, dw_setting("left_eye")), (70, dw_sec())], 0, [("OK", DW)], extra=["--since", "10:01:00"])
 
         # ---- the one failure line the rules read that is not in native_on_foot.cpp ----

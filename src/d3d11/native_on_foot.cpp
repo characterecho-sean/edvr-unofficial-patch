@@ -208,13 +208,13 @@ std::atomic<bool> g_adsAimKey{true};                          // the key as the 
 std::atomic<float> g_adsEyeTrimCm{0.0f};                      // F152: experimental.native_on_foot_ads_eye_offset_cm in cm (-30..30), live: added to the held weapon's ADS eye depth
 std::atomic<float> g_weaponViewOffsetCm{static_cast<float>(nofoot::kWeaponViewOffsetDefaultCm)}; // fix.native_on_foot_weapon_view_offset_cm, live
 double g_adsEyeCmLast = -1.0;                                 // the value last logged (frame thread)
-std::atomic<float> g_crouchAdsBodyCm{0.0f};                   // F168 (TEMPORARY): experimental.native_on_foot_crouch_ads_body_forward_cm in cm (-20..20), live: the crouched body's move toward the gun
+std::atomic<float> g_crouchAdsBodyCm{5.0f};                   // F168 (TEMPORARY): experimental.native_on_foot_crouch_ads_body_forward_cm in cm (-20..20), live: the crouched body's move toward the gun; F173: default 5, the pilot's flown value
 double g_crouchAdsBodyCmLast = 1e9;                           // the value last logged (frame thread; the first read always logs)
-std::atomic<float> g_pistolSprintPhase{0.0f};                 // F169 (TEMPORARY): experimental.native_on_foot_pistol_sprint_swing_phase, 0..1 of a stride, live: the pistol sprint's left arm is read this far back in the stride
+std::atomic<float> g_pistolSprintPhase{0.5f};                 // F169 (TEMPORARY): experimental.native_on_foot_pistol_sprint_swing_phase, 0..1 of a stride, live: the pistol sprint's left arm is read this far back in the stride; F173: default 0.5, the pilot's flown value
 double g_pistolSprintPhaseLast = 1e9;                         // the value last logged (frame thread; the first read always logs)
-std::atomic<float> g_crouchAdsSquare{1.0f};                   // F170 (TEMPORARY): experimental.native_on_foot_crouch_ads_square, 0..1, live: the share of the shoulder line's blade the crouched ADS torso is turned out of
+std::atomic<float> g_crouchAdsSquare{0.0f};                   // F170 (TEMPORARY): experimental.native_on_foot_crouch_ads_square, 0..1, live: the share of the shoulder line's blade the crouched ADS torso is turned out of; F173: default 0, the pilot's flown value (the game's pose)
 double g_crouchAdsSquareLast = 1e9;                           // the value last logged (frame thread; the first read always logs)
-std::atomic<float> g_crouchAdsBodyLeftCm{15.0f};              // F171 (TEMPORARY): experimental.native_on_foot_crouch_ads_body_left_cm in cm (-30..30), live: the crouched body's move to the left of the aim line
+std::atomic<float> g_crouchAdsBodyLeftCm{25.0f};              // F171 (TEMPORARY): experimental.native_on_foot_crouch_ads_body_left_cm in cm (-30..30), live: the crouched body's move to the left of the aim line; F173: default 25, the pilot's flown value
 double g_crouchAdsBodyLeftCmLast = 1e9;                       // the value last logged (frame thread; the first read always logs)
 std::atomic<float> g_f87SettleS{static_cast<float>(nofoot::f87::kSettleDefaultS)};   // F87h (TEMPORARY): fix.native_on_foot_standing_height_settle_s, live
 double g_f87SettleLast = -1.0;                                // the value last logged (frame thread)
@@ -1059,7 +1059,7 @@ void readKey() {
     // by this, cm (-20..20), times the crouched weight and the detach weight: the pin's target for the neck carries it, so the body moves with its arms and the eye and the gun stay where
     // the sight lock puts them. Positive is toward the gun. 0 moves nothing; it is exactly 0 standing and at the hip.
     {
-        const double cm = nofoot::f168::clampDialCm(static_cast<double>(cfg.getFloat("experimental.native_on_foot_crouch_ads_body_forward_cm", 0.0f)));
+        const double cm = nofoot::f168::clampDialCm(static_cast<double>(cfg.getFloat("experimental.native_on_foot_crouch_ads_body_forward_cm", 5.0f)));
         if (first || cm != g_crouchAdsBodyCmLast)
             Log::get().note("native on foot crouched ADS body dial (F168, TEMPORARY): experimental.native_on_foot_crouch_ads_body_forward_cm = %+.1f cm -- while crouched and aiming down sights the "
                             "third-person body moves this far along the aim's horizontal forward (positive toward the gun, range %.0f..%.0f), times the crouched weight and the detach weight, "
@@ -1072,7 +1072,7 @@ void readKey() {
     // (-20..20, positive left), times the crouched weight and the detach weight, along the horizontal left of the aim: the pin's target for the neck carries it before the reach rule, so
     // the left grip stays reachable. 0 moves nothing; it is exactly 0 standing and at the hip.
     {
-        const double cm = nofoot::f171::clampDialCm(static_cast<double>(cfg.getFloat("experimental.native_on_foot_crouch_ads_body_left_cm", 15.0f)));
+        const double cm = nofoot::f171::clampDialCm(static_cast<double>(cfg.getFloat("experimental.native_on_foot_crouch_ads_body_left_cm", 25.0f)));
         if (first || cm != g_crouchAdsBodyLeftCmLast)
             Log::get().note("native on foot crouched ADS body sideways dial (F171, TEMPORARY): experimental.native_on_foot_crouch_ads_body_left_cm = %+.1f cm -- while crouched and aiming down "
                             "sights the third-person body moves this far to the left of the aim line (positive left, negative right, range %.0f..%.0f), along the horizontal left of the aim, "
@@ -1085,7 +1085,7 @@ void readKey() {
     // F170 (TEMPORARY, live, the developer tier's "Crouched ADS torso square"): while crouched and aiming down sights the torso is turned about the vertical toward square to the aim: this share
     // (0..1) of the shoulder line's measured blade, times the crouched weight and the detach weight, is taken out. 1 squares it, 0 leaves the authored stance; exactly 0 standing and at the hip.
     {
-        const double square = nofoot::f170::clampDial(static_cast<double>(cfg.getFloat("experimental.native_on_foot_crouch_ads_square", 1.0f)));
+        const double square = nofoot::f170::clampDial(static_cast<double>(cfg.getFloat("experimental.native_on_foot_crouch_ads_square", 0.0f)));
         if (first || square != g_crouchAdsSquareLast)
             Log::get().note("native on foot crouched ADS torso square dial (F170, TEMPORARY): experimental.native_on_foot_crouch_ads_square = %.2f -- while crouched and aiming down sights the torso "
                             "turns about the vertical toward square to the aim, this share (range %.0f..%.0f) of the shoulder line's measured blade, times the crouched weight and the detach weight, "
@@ -1097,7 +1097,7 @@ void readKey() {
     // F169 (TEMPORARY, live, the developer tier's "Pistol sprint arm swing phase"): while a pistol sprint has let go of the left hand (F167) the left arm is the game's animated one; this
     // is how far back in the stride (0 to 1 of the measured stride period) its animated pose is read from, so the arms swing against each other. 0 reads the pose as it is: nothing moves.
     {
-        const double phase = nofoot::f169::clampPhase(static_cast<double>(cfg.getFloat("experimental.native_on_foot_pistol_sprint_swing_phase", 0.0f)));
+        const double phase = nofoot::f169::clampPhase(static_cast<double>(cfg.getFloat("experimental.native_on_foot_pistol_sprint_swing_phase", 0.5f)));
         if (first || phase != g_pistolSprintPhaseLast)
             Log::get().note("native on foot pistol sprint swing dial (F169, TEMPORARY): experimental.native_on_foot_pistol_sprint_swing_phase = %.2f of a stride -- while a pistol sprint has "
                             "let go of the left hand the left arm's animated pose is read this fraction of the measured stride period back (range %.0f..%.0f), blended in by the release "
