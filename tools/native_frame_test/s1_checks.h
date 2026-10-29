@@ -467,6 +467,7 @@ inline void runS1(Check&& check) {
         p.d.markComposite[sz::kMarkCompositeMatched] = 590;
         p.d.markComposite[sz::kMarkCompositePlain] = 4;
         p.d.markComposite[sz::kMarkCompositeNone] = 2;
+        p.d.markStandDowns = 1;
         p.d.staleC = 4;
         p.d.depthUnavailable = 3;
         p.d.formatRefused = 3;
@@ -488,10 +489,10 @@ inline void runS1(Check&& check) {
         const std::string text(line);
         check(n == static_cast<int>(text.size()) && n < static_cast<int>(sz::kLensPressLineBytes) &&
                   text.rfind("scope zoom (S1): press 3 item $wpn_m_sniper_plasma_charged_name; scope yes key on ads 15.000 deg M 4.067 h 56.3 deg; frame thread: qualified 312, no S 9, "
-                             "not an optical sight 0, left aiming eye 0, idle 40; FOV from the bare copy 0; jitter reading none 2, from another frame 5; c to the far point mean 0.500 max 0.750 deg; applied 300 of 310 qualifying frames (dispatched 303, at M 1 1); "
-                             "declined: no S 7, stale c 4, open sight 0, not an optical sight 0, left aiming eye 0, depth unavailable 3, format refused 3; picture sequence less c's: -1 1, 0 297, +1 4, +2 1, other 0; "
-                             "gunsight marks taken: L 296, R 300; armed frames 310, no mark draw 2; mark depth path: untested 0, seeded 500, seeded read-only 80, tests off 16; composites matched/plain/none 590/4/2; "
-                             "hole r min 4.01 median 5.20 max 6.42 deg, 1 of 128 rays escaped (rays read on 296 frames); "
+                             "not optical 0, left aiming eye 0, idle 40; FOV from bare copy 0; jitter none 2, other frame 5; c to far point mean 0.500 max 0.750 deg; applied 300 of 310 qualifying frames (dispatched 303, at M 1 1); "
+                             "declined: no S 7, stale c 4, open sight 0, not optical 0, left aiming eye 0, depth unavailable 3, format refused 3; picture seq less c's: -1 1, 0 297, +1 4, +2 1, other 0; "
+                             "gunsight marks taken: L 296, R 300; armed frames 310, no mark draw 2; mark depth: untested 0, seeded 500, seeded read-only 80, tests off 16; composites matched/plain/none 590/4/2; mark stand-downs 1; "
+                             "hole r min 4.01 median 5.20 max 6.42 deg, 1 of 128 rays escaped (read on 296 frames); "
                              "depth at c 0.001220 (near 0.041700); c mean (1642.5, 1990.0) px spread 0.50 px; GPU rays 0.012 ms (max 0.012), magnify 0.046 ms (max 0.046)",
                              0) == 0,
               "S1 lines: the press line carries the item, scope, key, ADS FOV, M, h, the frame thread's counts, the applied and qualifying frames with the dispatched and M = 1 split, every decline, the hole, the depth, c's mean and spread and the GPU price");
@@ -499,22 +500,24 @@ inline void runS1(Check&& check) {
         empty.refDeg = 56.3;
         sz::formatLensPress(line, sizeof(line), empty);
         const std::string e(line);
-        check(e.find("press 0 item none scope unknown key off ads none deg M none h 56.3 deg; frame thread: qualified 0, no S 0, not an optical sight 0, left aiming eye 0, idle 0; FOV from the bare copy 0; "
-                     "jitter reading none 0, from another frame 0; c to the far point mean none max none deg; applied 0 of 0 qualifying frames (dispatched 0, at M 1 0); declined: no S 0, stale c 0, open sight 0, "
-                     "not an optical sight 0, left aiming eye 0, depth unavailable 0, format refused 0; picture sequence less c's: -1 0, 0 0, +1 0, +2 0, other 0; gunsight marks taken: L 0, R 0; "
-                     "armed frames 0, no mark draw 0; mark depth path: untested 0, seeded 0, seeded read-only 0, tests off 0; composites matched/plain/none 0/0/0; ") != std::string::npos,
+        check(e.find("press 0 item none scope unknown key off ads none deg M none h 56.3 deg; frame thread: qualified 0, no S 0, not optical 0, left aiming eye 0, idle 0; FOV from bare copy 0; "
+                     "jitter none 0, other frame 0; c to far point mean none max none deg; applied 0 of 0 qualifying frames (dispatched 0, at M 1 0); declined: no S 0, stale c 0, open sight 0, "
+                     "not optical 0, left aiming eye 0, depth unavailable 0, format refused 0; picture seq less c's: -1 0, 0 0, +1 0, +2 0, other 0; gunsight marks taken: L 0, R 0; "
+                     "armed frames 0, no mark draw 0; mark depth: untested 0, seeded 0, seeded read-only 0, tests off 0; composites matched/plain/none 0/0/0; mark stand-downs 0; ") != std::string::npos,
               "S1 lines: a press with nothing in it says none for what it does not have");
-        check(e.find("hole r min none median none max none deg, 0 of 128 rays escaped (rays read on 0 frames); depth at c none (near none); c mean (none, none) px spread none px; "
+        check(e.find("hole r min none median none max none deg, 0 of 128 rays escaped (read on 0 frames); depth at c none (near none); c mean (none, none) px spread none px; "
                      "GPU rays none ms (max none), magnify none ms (max none)") != std::string::npos,
               "S1 lines: no hole, depth, c or GPU time is the word none, so a rule can read it");
         sz::formatLensPress(line, 40, p);
         check(std::strlen(line) < 40, "S1 lines: a buffer that is too small is cut, not overrun");
         check(sz::lensOtherFrames(p.d) == 6, "S1 lines: the A1 count of frames with c from another frame than the picture is the buckets but 0 (1 + 4 + 1 + 0)");
-        // the worst case: the longest item name, every counter six digits (a press of ten minutes at 90 Hz is 54000 frames), every figure at its widest. It must fit the buffer the press
-        // line is written from (kLensPressLineBytes), and the log's 1200, with its end (the GPU price) still on it.
+        // the worst case: the longest item name the held-item buffer can hold (F141Item::name is 64 bytes: 63 characters, not the longest name in the table), every counter six digits
+        // (a press of ten minutes at 90 Hz is 54000 frames), every figure at its widest. It must fit the buffer the press line is written from (kLensPressLineBytes), and the log's 1200,
+        // with its end (the GPU price) still on it.
+        const std::string longest(sz::kLensItemChars, 'W');
         sz::LensPressLine w;
         w.press = 200;
-        w.item = "$wpn_m_submachinegun_laser_fauto_name;";
+        w.item = longest.c_str();
         w.scope = "unknown";
         w.keyOn = true;
         w.adsDeg = 15.0;
@@ -526,7 +529,7 @@ inline void runS1(Check&& check) {
         for (uint32_t k = 0; k < sz::kLensGapBuckets; ++k) w.d.seqGap[k] = 999999;
         for (uint32_t k = 0; k < sz::kMarkPaths; ++k) w.d.markPath[k] = 999999;
         for (uint32_t k = 0; k < sz::kMarkComposites; ++k) w.d.markComposite[k] = 999999;
-        w.d.markRedirected[0] = w.d.markRedirected[1] = w.d.markArmedFrames = w.d.markNoDraw = 999999;
+        w.d.markRedirected[0] = w.d.markRedirected[1] = w.d.markArmedFrames = w.d.markNoDraw = w.d.markStandDowns = 999999;
         w.d.raysRead = 999999;
         w.d.holeKnown = true;
         w.d.rMinDeg = 11.99;
@@ -544,6 +547,14 @@ inline void runS1(Check&& check) {
               "S1 lines: the press line with every counter at six digits and every figure at its widest is under the press line's buffer (1168 bytes, the log's 1167 and a terminator) and keeps its end");
         std::printf("S1 lines: the worst-case press line is %d bytes (the buffer holds %u, the log keeps 1167)\n", wn, static_cast<unsigned>(sz::kLensPressLineBytes));
         check(worst.size() + 15 + 3 + 15 <= 1200, "S1 lines: the worst-case press line, with the log's stamp and truncation marker reserved, fits the log's 1200-byte line");
+        check(worst.find(" item " + longest + " scope ") != std::string::npos && worst.find("mark stand-downs 999999; ") != std::string::npos,
+              "S1 lines: the worst case names the longest item whole and the six-digit count of mark stand-downs");
+        // an item longer than the held-item buffer (it cannot be: the formatter does not rely on the caller) is cut at the buffer's size, so the bound above holds for any caller
+        const std::string beyond(200, 'X');
+        sz::LensPressLine over = w;
+        over.item = beyond.c_str();
+        const int on = sz::formatLensPress(line, sizeof(line), over);
+        check(on == wn && std::string(line).find(" item " + std::string(sz::kLensItemChars, 'X') + " scope ") != std::string::npos, "S1 lines: an item past the held-item buffer's size is cut there, and the line stays inside its bound");
     }
 }
 

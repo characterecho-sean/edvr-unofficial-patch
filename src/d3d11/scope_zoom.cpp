@@ -61,7 +61,7 @@ bool readFrame(ScopeZoomFrame* out) noexcept {
 // ---- the press's counters --------------------------------------------------------------------------------------------------------------------------------------------------
 std::mutex g_mu;
 sz::LensDoorStats g_stats;
-uint32_t g_pressId = 0;
+std::atomic<uint32_t> g_pressId{0};   // read by the draw path (the mark's stand-down), set by the frame thread
 
 template <class F>
 void count(F&& f) {
@@ -370,11 +370,16 @@ void scopeZoomNoteMarkComposite(uint32_t kind) {
     count([&](sz::LensDoorStats& s) { ++s.markComposite[kind]; });
 }
 
+void scopeZoomNoteMarkStandDown() {
+    count([](sz::LensDoorStats& s) { ++s.markStandDowns; });
+}
+
 void scopeZoomPressBegin(uint32_t press) {
     std::lock_guard<std::mutex> lock(g_mu);
     g_stats = sz::LensDoorStats{};
-    g_pressId = press;
+    g_pressId.store(press, std::memory_order_release);
 }
+uint32_t scopeZoomPressId() { return g_pressId.load(std::memory_order_acquire); }
 void scopeZoomPressTake(sz::LensDoorStats* out) {
     if (!out) return;
     std::lock_guard<std::mutex> lock(g_mu);

@@ -14608,7 +14608,8 @@ def _hj_world_scale(rows, ctx):
 # sight point as the lens centre c in each eye, once at the press's first settled frame) and the lens census (Q4: the pixel probe about c in the aiming eye, whose own closing line
 # says how many eyes and draws it saw). H_S0_DONE_WITHIN_S: how long after a run line its pixel probe closing line may come (it comes within two frames).
 H_S0_FLAT, H_S0_VR, H_S0_GEO, H_S0_CENSUS = "scope zoom (S0) flat", "scope zoom (S0) vr", "scope lens geometry (S0)", "scope lens census (S0)"
-H_S0_NOT_OPTICAL_RE = re.compile(r"press (?P<n>\d+) is not an optical sight\b")   # A3: the census skip line of a press the S1 table does not hold (scope_zoom_s0.h formatCensusNotOptical)
+# A3: the census skip line of a press the S1 table does not hold (scope_zoom_s0.h formatCensusNotOptical); written once for each item and scope a session, at the first press of it
+H_S0_NOT_OPTICAL_RE = re.compile(r"press (?P<n>\d+) is not an optical sight: item (?P<item>\S+) scope (?P<scope>yes|no|unknown),")
 H_S0_DONE_WITHIN_S = 3.0
 H_S0_FLAT_CAM_RE = re.compile(r"cam (?P<id>\d+) at 0x(?P<ptr>[0-9A-F]+) kind (?P<kind>\d+) aspect (?P<aspect>[^\s;]+) hip (?P<hip>[^\s;]+) deg ads (?P<ads>[^\s;]+) deg M (?P<m>[^\s;]+) "
                               r"ramp (?P<ramp>[\d.]+) s settled (?P<settled>[01]) \(min (?P<min>[^\s;]+) max (?P<max>[^\s;)]+) deg\)")
@@ -14739,24 +14740,27 @@ def _hj_s0_census(rows, ctx):
     broken, or all are dry, or every run was skipped; NEVER APPLIED when a run is broken and none is good, or when a scoped press settled (a geometry line with scope yes) and there
     is neither a run nor a skipped line. Closing lines with no run before them (an eye dump's) are not judged.
     A3: the census probes a press of an optical sight (the S1 table's verdict) and no other; a press of any other sight is a skip line that names the press (`press N is not an
-    optical sight`). Those skips are no failure: they are not counted as skipped runs, and the press they name is not a settled press the census never reached."""
+    optical sight`), written once for each item and scope a session, at the first press of it. Those skips are no failure: they are not counted as skipped runs, and a press of an item
+    and scope a skip line names is not a settled press the census never reached. (A --since window that starts after the first press of such a sight has its geometry lines and not the
+    skip line, and reads as a census that never ran.)"""
     runs = sorted(rows.get("run", []), key=lambda r: r["_order"])
     skips_all, dones = rows.get("skip", []), sorted(rows.get("done", []), key=lambda r: r["_order"])
-    not_optical = {}   # press number -> the skip line of a press of a sight that is not an optical sight
+    not_optical = {}   # (item, scope) -> the number of the first press of that sight that is not an optical sight
     skips = []
     for sk in skips_all:
         m = H_S0_NOT_OPTICAL_RE.match(sk["why"])
         if m:
-            not_optical[int(m.group("n"))] = sk
+            key = (m.group("item"), m.group("scope"))
+            not_optical[key] = min(int(m.group("n")), not_optical.get(key, int(m.group("n"))))
         else:
             skips.append(sk)
     if not runs and not skips:
-        scoped = [g for g in _hrows(ctx, H_S0_GEO, "geo") if g["scope"] == "yes" and int(g["n"]) not in not_optical]
+        scoped = [g for g in _hrows(ctx, H_S0_GEO, "geo") if g["scope"] == "yes" and (g["item"], g["scope"]) not in not_optical]
         if scoped:
             return ("NEVER APPLIED", "%d scoped press(es) reached a settled frame (a geometry line with scope yes) and there is neither a census run nor a skipped line: the census never ran" % len(scoped))
         if not_optical:
-            return ("IDLE", "no census run: %d press(es) of a sight that is not an optical sight (press %s) probed nothing, by design (the S1 table's verdict)" % (
-                len(not_optical), ", ".join(str(n) for n in sorted(not_optical)[:6])))
+            return ("IDLE", "no census run: %d sight(s) that is not an optical sight (first press %s) probed nothing, by design (the S1 table's verdict; the skip line is written once for each item and scope)" % (
+                len(not_optical), ", ".join(str(n) for n in sorted(not_optical.values())[:6])))
         return None
     if not runs:
         why = collections.Counter(sk["why"] for sk in skips)
@@ -14785,7 +14789,7 @@ def _hj_s0_census(rows, ctx):
         return "run %s (press %s, scope %s): eyes seen %s, %s draws into eye targets, %s changed a window" % (r["run"], r["press"], r["scope"], d["eyes"], d["draws"], d["changed"])
     text = "%d run(s)%s: %s" % (len(results), " and %d skipped" % len(skips) if skips else "", "; ".join(one(r, d) for r, d in results[:4]))
     if not_optical:
-        text += "; %d press(es) of a sight that is not an optical sight probed nothing, by design (press %s)" % (len(not_optical), ", ".join(str(n) for n in sorted(not_optical)[:6]))
+        text += "; %d sight(s) that is not an optical sight probed nothing, by design (first press %s)" % (len(not_optical), ", ".join(str(n) for n in sorted(not_optical.values())[:6]))
     if broken and not good:
         return ("NEVER APPLIED", text + "; the probe saw no eye draws or never closed (the pixel probe is not in the native stereo draw path, or its frame never closed)")
     if broken:
@@ -14807,23 +14811,26 @@ def _hj_s0_census(rows, ctx):
 # A3 (docs section 10) moves the mark into the eye's weapons layer, composited after the zoom by the tonemap difference like the weapons fire's light: the marks are `taken` (not
 # `redirected`) and the press line ends the mark's part with `composites matched/plain/none`, the eye-frames (both eyes) whose layer held a mark by how the composite served them: the
 # tonemap difference (the stock brightness), the plain add (brighter than stock), or no composite at all (the mark is then in neither the scene nor the picture).
+# The A3 review fixes add `mark stand-downs`, the times the mark's own route through the weapons layer stood down in the press (each lasts to the next press of the sights), and shorten
+# some labels (`not optical`, `jitter none`, `other frame`, `picture seq`, `mark depth`, `read on`, `FOV from bare copy`, `c to far point`) so the worst-case line, the longest item name the
+# held-item buffer can hold and every counter six digits, fits the log's 1200-byte line.
 H_S1 = "scope zoom (S1)"
 H_S1_ANNOUNCE_RE = r"scope zoom \(S1\): (?P<key>on|off), reference FOV (?P<ref>[\d.]+) deg, (?P<entries>\d+) table entries; .*$"
 H_S1_PRESS_RE = (r"scope zoom \(S1\): press (?P<n>\d+) item (?P<item>\S+) scope (?P<scope>yes|no|unknown) key (?P<key>on|off) ads (?P<ads>\S+) deg M (?P<m>\S+) h (?P<h>[\d.]+) deg; "
-                 r"frame thread: qualified (?P<fq>\d+), no S (?P<fnos>\d+), not an optical sight (?P<ftab>\d+), left aiming eye (?P<fleft>\d+), idle (?P<fidle>\d+); FOV from the bare copy (?P<fbare>\d+); "
-                 r"jitter reading none (?P<jnone>\d+), "
-                 r"from another frame (?P<jother>\d+); c to the far point mean (?P<fmean>\S+) max (?P<fmax>\S+) deg; "
+                 r"frame thread: qualified (?P<fq>\d+), no S (?P<fnos>\d+), not optical (?P<ftab>\d+), left aiming eye (?P<fleft>\d+), idle (?P<fidle>\d+); FOV from bare copy (?P<fbare>\d+); "
+                 r"jitter none (?P<jnone>\d+), "
+                 r"other frame (?P<jother>\d+); c to far point mean (?P<fmean>\S+) max (?P<fmax>\S+) deg; "
                  r"applied (?P<applied>\d+) of (?P<qual>\d+) qualifying frames \(dispatched (?P<disp>\d+), at M 1 (?P<noop>\d+)\); declined: no S (?P<nos>\d+), stale c (?P<stale>\d+), "
-                 r"open sight (?P<open>\d+), not an optical sight (?P<table>\d+), left aiming eye (?P<left>\d+), depth unavailable (?P<depth>\d+), format refused (?P<format>\d+); "
-                 r"picture sequence less c's: -1 (?P<g0>\d+), 0 (?P<g1>\d+), \+1 (?P<g2>\d+), \+2 (?P<g3>\d+), other (?P<g4>\d+); "
+                 r"open sight (?P<open>\d+), not optical (?P<table>\d+), left aiming eye (?P<left>\d+), depth unavailable (?P<depth>\d+), format refused (?P<format>\d+); "
+                 r"picture seq less c's: -1 (?P<g0>\d+), 0 (?P<g1>\d+), \+1 (?P<g2>\d+), \+2 (?P<g3>\d+), other (?P<g4>\d+); "
                  r"gunsight marks taken: L (?P<mL>\d+), R (?P<mR>\d+); armed frames (?P<marm>\d+), no mark draw (?P<mnone>\d+); "
-                 r"mark depth path: untested (?P<mp0>\d+), seeded (?P<mp1>\d+), seeded read-only (?P<mp2>\d+), tests off (?P<mp3>\d+); "
-                 r"composites matched/plain/none (?P<cm>\d+)/(?P<cp>\d+)/(?P<cn>\d+); "
-                 r"hole r min (?P<rmin>\S+) median (?P<rmed>\S+) max (?P<rmax>\S+) deg, (?P<esc>\d+) of (?P<rays>\d+) rays escaped \(rays read on (?P<read>\d+) frames\); "
+                 r"mark depth: untested (?P<mp0>\d+), seeded (?P<mp1>\d+), seeded read-only (?P<mp2>\d+), tests off (?P<mp3>\d+); "
+                 r"composites matched/plain/none (?P<cm>\d+)/(?P<cp>\d+)/(?P<cn>\d+); mark stand-downs (?P<msd>\d+); "
+                 r"hole r min (?P<rmin>\S+) median (?P<rmed>\S+) max (?P<rmax>\S+) deg, (?P<esc>\d+) of (?P<rays>\d+) rays escaped \(read on (?P<read>\d+) frames\); "
                  r"depth at c (?P<dc>\S+) \(near (?P<dn>\S+)\); c mean \((?P<cx>[^,\s]+), (?P<cy>[^)\s]+)\) px spread (?P<cs>\S+) px; "
                  r"GPU rays (?P<gr>\S+) ms \(max (?P<grm>\S+)\), magnify (?P<gm>\S+) ms \(max (?P<gmm>\S+)\)$")
 H_S1_KEYS = ("applied", "qual", "disp", "noop", "nos", "stale", "open", "table", "left", "depth", "format", "g0", "g1", "g2", "g3", "g4", "mL", "mR", "marm", "mnone", "mp0", "mp1", "mp2", "mp3",
-             "cm", "cp", "cn", "read", "fq", "fnos", "ftab", "fleft", "fidle", "fbare", "jnone", "jother")
+             "cm", "cp", "cn", "msd", "read", "fq", "fnos", "ftab", "fleft", "fidle", "fbare", "jnone", "jother")
 
 
 def _s1_mark_reason(p):
@@ -14868,6 +14875,17 @@ def _s1_mark_composite_reason(p):
     return ""
 
 
+def _s1_mark_stand_down_reason(p):
+    """Why a press's gunsight mark was back in the scene for part of it, in words; "" when its route through the weapons layer did not stand down. The stand-down is the mark's own
+    (ui_layer.cpp markStandDown: marks the layer took and no re-issue published for 30 frames in a row, or a layer, 8-bit layer or blend state the take could not make) and lasts to the
+    next press of the sights, so the mark was drawn in the scene, magnified with the world, for the rest of the press. The weapons fire is not touched by it."""
+    n = int(p["msd"])
+    if n <= 0:
+        return ""
+    return ("the mark's route through the weapons layer stood down %d time(s) in the press (its `scope zoom: the gunsight mark's route ... stands down` line names the eye, the streak and the "
+            "cause), so for the rest of the press it was drawn in the scene and magnified with the world" % n)
+
+
 def _hj_s1(rows, ctx):
     """S1, the scope lens: one `scope zoom (S1): press` line per press of the sights in native on foot, with the frame thread's own counts (the gate's verdicts per tick) beside the
     door's (the frames the passes were issued on, and each decline). A press is DUE on the frames the lens had to run: the larger of the tick's qualified + no S and the door's
@@ -14879,8 +14897,9 @@ def _hj_s1(rows, ctx):
     is no failure). A due press with the scope's gunsight mark armed on some frames (the door counted armed frames) is a PARTIAL whatever the lens did when the lens eye's (right)
     takes into the weapons layer are under 80 percent of the armed frames (none in either eye included: the mark stayed in the scene and was magnified with the world) or over 1.5 times
     them (more than one draw a frame matched: the match is too wide), and (A3) when marks were taken and the layer's composite carried them by the tonemap difference on under 80 percent
-    of the eye-frames that held one (none carried included: the mark is then in neither the scene nor the picture; the plain add is brighter than stock). The announce is not needed (a
-    --since window can cut it); with neither line the rule is not present."""
+    of the eye-frames that held one (none carried included: the mark is then in neither the scene nor the picture; the plain add is brighter than stock), and when the mark's own route
+    through the weapons layer stood down in the press (`mark stand-downs` above 0: the mark was back in the scene for the rest of the press). A press that fails more than one of these
+    names each of them. The announce is not needed (a --since window can cut it); with neither line the rule is not present."""
     announce, press = rows.get("announce", []), rows.get("press", [])
     if not announce and not press:
         return None
@@ -14924,8 +14943,11 @@ def _hj_s1(rows, ctx):
         extra += "; gunsight marks: taken L %d R %d, armed frames %d, no mark draw on %d of them" % (totals["mL"], totals["mR"], totals["marm"], totals["mnone"])
         extra += "; mark depth path: untested %d, seeded %d, seeded read-only %d, tests off %d" % (totals["mp0"], totals["mp1"], totals["mp2"], totals["mp3"])
         extra += "; mark composites: tonemap difference %d, plain %d, none %d" % (totals["cm"], totals["cp"], totals["cn"])
-    mark_bad = [(p, _s1_mark_reason(p) or _s1_mark_composite_reason(p)) for p in due_presses]
-    mark_bad = [(p, why) for p, why in mark_bad if why]
+        if totals["msd"]:
+            extra += "; mark stand-downs: %d (each put the mark back in the scene, magnified with the world, until the next press of the sights)" % totals["msd"]
+    # every reason that applies to a press, not the first alone: the takes, the composite and the stand-down are three different failures that can hold together
+    mark_bad = [(p, [why for why in (_s1_mark_reason(p), _s1_mark_composite_reason(p), _s1_mark_stand_down_reason(p)) if why]) for p in due_presses]
+    mark_bad = [(p, "; also ".join(whys)) for p, whys in mark_bad if whys]
     mark_text = ""
     if mark_bad:
         mark_text = "the gunsight mark was armed on frames of press %s and %s" % (mark_bad[0][0]["n"], mark_bad[0][1])
@@ -20918,12 +20940,24 @@ def self_test_health():
         # A3: the census probes a press of an optical sight and no other; a press of any other sight is a skip line that names the press, which is no failure
         check("S0 census: a scoped press of a sight that is not an optical sight probes nothing, by design, and is neither a missing run nor a skipped run",
               [s0_vr(n=3, item="$wpn_m_assaultrifle_kinetic_fauto_name;"), s0_geo(n=3, item="$wpn_m_assaultrifle_kinetic_fauto_name;"), s0_notopt(3)], 0, [("IDLE", SC0)],
-              has=["no census run: 1 press(es) of a sight that is not an optical sight (press 3) probed nothing, by design (the S1 table's verdict)"], lacks=["NEVER APPLIED", "PARTIAL", "UNPARSED", "every census run was skipped"])
+              has=["no census run: 1 sight(s) that is not an optical sight (first press 3) probed nothing, by design (the S1 table's verdict; the skip line is written once for each item and scope)"],
+              lacks=["NEVER APPLIED", "PARTIAL", "UNPARSED", "every census run was skipped"])
+        # the skip line is written once for each item and scope, at its first press: the later presses of that sight have geometry lines and no skip line, and are no missing run
+        check("S0 census: later presses of a sight that is not an optical sight, whose skip line was written once, are no missing run",
+              [s0_vr(n=3, item="$wpn_m_assaultrifle_kinetic_fauto_name;"), s0_geo(n=3, item="$wpn_m_assaultrifle_kinetic_fauto_name;"), s0_notopt(3),
+               s0_vr(n=4, item="$wpn_m_assaultrifle_kinetic_fauto_name;"), s0_geo(n=4, item="$wpn_m_assaultrifle_kinetic_fauto_name;"),
+               s0_vr(n=9, item="$wpn_m_assaultrifle_kinetic_fauto_name;"), s0_geo(n=9, item="$wpn_m_assaultrifle_kinetic_fauto_name;")], 0, [("IDLE", SC0)],
+              has=["no census run: 1 sight(s) that is not an optical sight (first press 3) probed nothing"], lacks=["NEVER APPLIED", "PARTIAL", "UNPARSED"])
+        check("S0 census: a skip line is for its item and scope: the same item with another scope, or another item, is still a missing run",
+              [s0_vr(n=3, item="$wpn_m_assaultrifle_kinetic_fauto_name;", scope="no"), s0_geo(n=3, item="$wpn_m_assaultrifle_kinetic_fauto_name;", scope="no"),
+               s0_notopt(3, scope="no"), s0_vr(n=4, item="$wpn_m_assaultrifle_kinetic_fauto_name;"), s0_geo(n=4, item="$wpn_m_assaultrifle_kinetic_fauto_name;"),
+               s0_vr(n=5, item="$wpn_m_shotgun_plasma_doublebarrel_name;"), s0_geo(n=5, item="$wpn_m_shotgun_plasma_doublebarrel_name;")], 3, [("NEVER APPLIED", SC0)],
+              has=["2 scoped press(es) reached a settled frame (a geometry line with scope yes) and there is neither a census run nor a skipped line"])
         check("S0 census: an optical scoped press the census never reached beside a press of another sight is still a missing run",
               [s0_vr(n=3, item="$wpn_m_assaultrifle_kinetic_fauto_name;"), s0_geo(n=3, item="$wpn_m_assaultrifle_kinetic_fauto_name;"), s0_notopt(3), s0_vr(n=4), s0_geo(n=4)], 3,
               [("NEVER APPLIED", SC0)], has=["1 scoped press(es) reached a settled frame (a geometry line with scope yes) and there is neither a census run nor a skipped line"])
         check("S0 census: a run of an optical sight beside a press of another sight is judged on the run and names the other press", [s0_vr(), s0_geo(), s0_run(), s0_done(), s0_notopt(5)], 0, [("OK", SC0)],
-              has=["1 run(s):", "1 press(es) of a sight that is not an optical sight probed nothing, by design (press 5)"], lacks=["and 1 skipped"])
+              has=["1 run(s):", "1 sight(s) that is not an optical sight probed nothing, by design (first press 5)"], lacks=["and 1 skipped"])
         check("S0 census: a skip for another reason beside a not-optical skip is still every run skipped", [s0_vr(), s0_geo(), s0_skip(), s0_notopt(5)], 0, [("PARTIAL", SC0)],
               has=["every census run was skipped (1): the pixel probe is armed already x1"])
         check("S0 census: a probe closing line with no run before it (an eye dump's) is not judged", [s0_done(), s0_done(frame=905)], 0, [],
@@ -20944,12 +20978,12 @@ def self_test_health():
         def s1_press(n=1, item=SNIPER, scope="yes", key="on", ads="15.000", m="4.067", h=56.3, disp=302, noop=1, stale=4, depth=3, fmt=0, open_=3, nos=0, table=0, other=0,
                      fq=None, fnos=None, ftab=0, fidle=40, fbare=0, jnone=0, jother=0, fmean="0.250", fmax="0.800", rmin="4.01", rmed="5.20", rmax="6.42", esc=0, read=296,
                      dc="0.001220", dn="0.041700", cx="1642.5", cy="1990.0", cs="0.50", gr="0.012", grm="0.020", gm="0.046", gmm="0.060", gap=None, mark_l=None, mark_r=None,
-                     armed=None, nodraw=0, left=0, fleft=None, mpath=None, comp=None):
+                     armed=None, nodraw=0, left=0, fleft=None, mpath=None, comp=None, msd=0):
             """A press line as the DLL emits it: the door's counts add up (qualifying = dispatched + M-1 + stale + depth + format, applied = dispatched - open) and the tick's
             qualified frames are the door's qualifying unless a fixture says otherwise. gap is the picture's sequence less c's by bucket (-1, 0, +1, +2, other; all in 0 unless `other`
             frames are asked for, which go to the -1 bucket); the gunsight marks are taken on every armed frame in both eyes unless a fixture says otherwise, each by the seeded
             depth path (mpath is the four counts: untested, seeded, seeded read-only, tests off), and every eye-frame that held one is composited by the tonemap difference (comp is the
-            three counts: matched, plain, none). left is the door's count of frames declined for the left aiming eye, fleft the tick's."""
+            three counts: matched, plain, none). left is the door's count of frames declined for the left aiming eye, fleft the tick's. msd is the mark's stand-downs in the press."""
             qual = disp + noop + stale + depth + fmt
             applied = max(disp - open_, 0)
             fq = qual if fq is None else fq
@@ -20964,7 +20998,7 @@ def self_test_health():
             return (RS1("scope zoom (S1): press %u item %s scope %s key %s ads %s deg M %s h", n, item, scope, key, ads, m, h) +
                     RS1("frame thread: qualified %u, no S %u", fq, fnos, ftab, fleft, fidle, fbare, jnone, jother, fmean, fmax) +
                     RS1("applied %u of %u qualifying frames", applied, qual, disp, noop, nos, stale, open_, table, left, depth, fmt, gap[0], gap[1], gap[2], gap[3], gap[4], mark_l, mark_r,
-                        armed, nodraw, mpath[0], mpath[1], mpath[2], mpath[3], comp[0], comp[1], comp[2]) +
+                        armed, nodraw, mpath[0], mpath[1], mpath[2], mpath[3], comp[0], comp[1], comp[2], msd) +
                     RS1("hole r min %s median", rmin, rmed, rmax, esc, 128, read, dc, dn) + RS1("c mean (%s, %s) px spread", cx, cy, cs) + RS1("GPU rays %s ms (max %s)", gr, grm, gm, gmm))
 
         def s1_nohole(**kw):
@@ -21022,6 +21056,15 @@ def self_test_health():
         check("S1: 80 percent of the eye-frames by the tonemap difference is the line", [s1_announce(), s1_press(mark_l=300, mark_r=300, armed=310, nodraw=10, comp=(480, 60, 60)),
                                                                                       s1_press(n=2, mark_l=300, mark_r=300, armed=310, nodraw=10, comp=(479, 60, 61))], 0, [("PARTIAL", S1R)],
               has=["press 2", "only 479 of 600 eye-frame(s)"], lacks=["only 480"])
+        # the mark's own stand-down: each lasts to the next press of the sights, and a press that stood it down is PARTIAL, naming every reason that applies to it
+        check("S1: a press in which the mark's route stood down is PARTIAL, with the count and the reason", [s1_announce(), s1_press(mark_l=300, mark_r=300, armed=310, nodraw=10, msd=1)], 0,
+              [("PARTIAL", S1R)], has=["mark stand-downs: 1 (each put the mark back in the scene, magnified with the world, until the next press of the sights)",
+                                       "the gunsight mark was armed on frames of press 1 and the mark's route through the weapons layer stood down 1 time(s) in the press",
+                                       "for the rest of the press it was drawn in the scene and magnified with the world"], lacks=["UNPARSED", "; also "])
+        check("S1: a press that fails the takes, the composite and the stand-down names all three", [s1_announce(), s1_press(mark_l=300, mark_r=3, armed=310, nodraw=307, comp=(0, 0, 303), msd=1)], 0,
+              [("PARTIAL", S1R)], has=["the lens eye (right) took the mark into the weapons layer on 3 of 310 armed frames", "; also the weapons layer took 303 mark draw(s) on 303 eye-frame(s) and no composite carried them",
+                                       "; also the mark's route through the weapons layer stood down 1 time(s) in the press"], lacks=["UNPARSED"])
+        check("S1: a press with no stand-down does not mention one", [s1_announce(), s1_press(mark_l=300, mark_r=300, armed=310, nodraw=10)], 0, [("OK", S1R)], lacks=["stand-down", "stood down"])
         check("S1: no mark taken is not a composite failure (the takes name that)", [s1_announce(), s1_press(mark_l=0, mark_r=0, armed=0, comp=(0, 0, 0))], 0, [("OK", S1R)], lacks=["composite", "gunsight marks:"])
         check("S1: a left aiming eye press is no failure and says so", [s1_announce(), s1_zero(table=0, fq=0, fnos=0, left=412, fleft=412)], 0, [("IDLE", S1R)],
               has=["declined: left aiming eye 412", "the left eye was the aiming eye on 412 tick(s) (fix.native_on_foot_ads_sight_eye = left): the lens is the right eye's, so there is none then, and that is no failure",
@@ -21068,7 +21111,9 @@ def self_test_health():
               "declined: no S 0, stale c 0, open sight 0, not in the table 0, depth unavailable 0, format refused 0; c from another frame than the picture 6; hole r min none median none max none deg, "
               "0 of 128 rays escaped (rays read on 0 frames); depth at c none (near none); c mean (none, none) px spread none px; GPU rays none ms (max none), magnify none ms (max none)"], 4, [("UNPARSED", S1R)])
         check("S1: A2's flown press line (marks redirected, no composites) is unparsed, not read as the new one: a build that never counted composites cannot pass as one that did",
-              [s1_press().replace("gunsight marks taken", "gunsight marks redirected").replace("composites matched/plain/none 620/0/0; ", "")], 4, [("UNPARSED", S1R)])
+              [s1_press().replace("gunsight marks taken", "gunsight marks redirected").replace("composites matched/plain/none 620/0/0; mark stand-downs 0; ", "")], 4, [("UNPARSED", S1R)])
+        check("S1: a press line with no count of mark stand-downs (A3 as first built) is unparsed, not read as the new one: a build that never counted them cannot pass as one that did",
+              [s1_press().replace("mark stand-downs 0; ", "")], 4, [("UNPARSED", S1R)])
         check("S1: the first A1 build's press line (no frame thread part) is unparsed, not read as the new one", ["scope zoom (S1): press 1 item x scope yes key on ads 15.000 deg M 4.067 h 56.3 deg; applied 5 of 6 qualifying frames; declined: no S 0, "
               "stale c 0, open sight 0, not in the table 0, depth unavailable 0, format refused 0; hole r min none median none max none deg, 0 of 128 rays escaped (rays read on 0 frames); depth at c none (near none); "
               "c mean (none, none) px spread none px; GPU rays none ms (max none), magnify none ms (max none)"], 4, [("UNPARSED", S1R)])

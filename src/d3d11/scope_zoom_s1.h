@@ -14,6 +14,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 
 #include "scope_zoom_s0.h"
@@ -372,7 +373,8 @@ struct LensDoorStats {
     uint32_t markRedirected[2] = {};  // the scope's gunsight mark draws taken out of the scene into the eye's weapons layer, per eye (0 left, 1 right), counted at the draw
     uint32_t markPath[kMarkPaths] = {};   // ... and by what the layer did with the draw's depth and stencil tests (kMarkPath*), both eyes
     uint32_t markComposite[kMarkComposites] = {};   // eye-frames (both eyes) whose weapons layer held a mark, by how the composite served them (kMarkComposite*)
-    uint32_t markArmedFrames = 0;     // right-eye frames the door saw with the family armed (the gate said qualifies) and a fresh c
+    uint32_t markStandDowns = 0;      // times the mark's route through the weapons layer stood down in the press (it then lasts to the next press: the mark is back in the scene)
+    uint32_t markArmedFrames = 0;    // right-eye frames the door saw with the family armed (the gate said qualifies) and a fresh c
     uint32_t markNoDraw = 0;          // of them, frames in which no mark draw was redirected in the right eye
     uint32_t raysRead = 0;            // of them, frames whose rays were read back
     bool holeKnown = false;           // one settled frame's rays
@@ -472,8 +474,11 @@ inline int formatLensAnnounce(char* buf, size_t n, bool keyOn, double refDeg, ui
     return finishLine(buf, n, len);
 }
 // The buffer the press line is written from. The log holds a line of 1200 bytes less its stamp and truncation marker, so the longest the line can be and still keep its end (the GPU
-// price) is 1167 bytes and the buffer holds that and its terminator; native_frame_test holds the worst case (every counter six digits) under this.
+// price) is 1167 bytes and the buffer holds that and its terminator; native_frame_test holds the worst case (the longest item the held-item buffer can name, kLensItemChars, and every
+// counter six digits) under this.
 constexpr size_t kLensPressLineBytes = 1168;
+// The longest item name the line prints: the held-item buffer (native_on_foot.cpp F141Item::name, 64 bytes) less its terminator.
+constexpr size_t kLensItemChars = 63;
 struct LensPressLine {
     uint32_t press = 0;
     const char* item = "none";
@@ -486,22 +491,24 @@ struct LensPressLine {
 inline int formatLensPress(char* buf, size_t n, const LensPressLine& p) noexcept {
     int len = 0;
     char ads[24], m[24], fmean[24], fmax[24], rmin[24], rmed[24], rmax[24], dc[24], dn[24], cx[24], cy[24], cs[24], rm[24], rx[24], mm[24], mx[24];
+    char item[kLensItemChars + 1];   // the item is cut at the held-item buffer's size, so the line's bound does not rest on the caller
+    std::snprintf(item, sizeof(item), "%s", itemText(p.item));
     double mcx, mcy, spread;
     lensCStats(p.d, &mcx, &mcy, &spread);
     const LensDoorStats& d = p.d;
-    appendf(buf, n, &len, "scope zoom (S1): press %u item %s scope %s key %s ads %s deg M %s h %.1f deg; ", p.press, itemText(p.item), p.scope ? p.scope : "unknown", p.keyOn ? "on" : "off",
+    appendf(buf, n, &len, "scope zoom (S1): press %u item %s scope %s key %s ads %s deg M %s h %.1f deg; ", p.press, item, p.scope ? p.scope : "unknown", p.keyOn ? "on" : "off",
             numText(p.adsDeg, 3, ads, sizeof(ads)), numText(p.m, 3, m, sizeof(m)), p.refDeg);
     const LensTickStats& t = p.t;
-    appendf(buf, n, &len, "frame thread: qualified %u, no S %u, not an optical sight %u, left aiming eye %u, idle %u; FOV from the bare copy %u; jitter reading none %u, from another frame %u; c to the far point mean %s max %s deg; ",
+    appendf(buf, n, &len, "frame thread: qualified %u, no S %u, not optical %u, left aiming eye %u, idle %u; FOV from bare copy %u; jitter none %u, other frame %u; c to far point mean %s max %s deg; ",
             t.qualified, t.noS, t.notOptical, t.leftAim, t.idle, t.fovFromBare, t.jitterNone, t.jitterOther, numText(t.farN ? t.farSumDeg / static_cast<double>(t.farN) : kNaN, 3, fmean, sizeof(fmean)),
             numText(t.farN ? t.farMaxDeg : kNaN, 3, fmax, sizeof(fmax)));
-    appendf(buf, n, &len, "applied %u of %u qualifying frames (dispatched %u, at M 1 %u); declined: no S %u, stale c %u, open sight %u, not an optical sight %u, left aiming eye %u, depth unavailable %u, format refused %u; "
-            "picture sequence less c's: -1 %u, 0 %u, +1 %u, +2 %u, other %u; gunsight marks taken: L %u, R %u; armed frames %u, no mark draw %u; "
-            "mark depth path: untested %u, seeded %u, seeded read-only %u, tests off %u; composites matched/plain/none %u/%u/%u; ", d.applied, d.qualifying, d.dispatched, d.noop,
+    appendf(buf, n, &len, "applied %u of %u qualifying frames (dispatched %u, at M 1 %u); declined: no S %u, stale c %u, open sight %u, not optical %u, left aiming eye %u, depth unavailable %u, format refused %u; "
+            "picture seq less c's: -1 %u, 0 %u, +1 %u, +2 %u, other %u; gunsight marks taken: L %u, R %u; armed frames %u, no mark draw %u; "
+            "mark depth: untested %u, seeded %u, seeded read-only %u, tests off %u; composites matched/plain/none %u/%u/%u; mark stand-downs %u; ", d.applied, d.qualifying, d.dispatched, d.noop,
             d.noS, d.staleC, d.openSight, d.notOptical, d.leftAim, d.depthUnavailable, d.formatRefused, d.seqGap[0], d.seqGap[1], d.seqGap[2], d.seqGap[3], d.seqGap[4], d.markRedirected[0], d.markRedirected[1],
             d.markArmedFrames, d.markNoDraw, d.markPath[kMarkPathUntested], d.markPath[kMarkPathSeeded], d.markPath[kMarkPathSeededReadOnly], d.markPath[kMarkPathTestsOff],
-            d.markComposite[kMarkCompositeMatched], d.markComposite[kMarkCompositePlain], d.markComposite[kMarkCompositeNone]);
-    appendf(buf, n, &len, "hole r min %s median %s max %s deg, %u of %u rays escaped (rays read on %u frames); depth at c %s (near %s); ", numText(d.holeKnown ? d.rMinDeg : kNaN, 2, rmin, sizeof(rmin)),
+            d.markComposite[kMarkCompositeMatched], d.markComposite[kMarkCompositePlain], d.markComposite[kMarkCompositeNone], d.markStandDowns);
+    appendf(buf, n, &len, "hole r min %s median %s max %s deg, %u of %u rays escaped (read on %u frames); depth at c %s (near %s); ", numText(d.holeKnown ? d.rMinDeg : kNaN, 2, rmin, sizeof(rmin)),
             numText(d.holeKnown ? d.rMedianDeg : kNaN, 2, rmed, sizeof(rmed)), numText(d.holeKnown ? d.rMaxDeg : kNaN, 2, rmax, sizeof(rmax)), d.holeKnown ? d.holeEscaped : 0u,
             kLensRays, d.raysRead, numText(d.holeKnown ? d.depthAtC : kNaN, 6, dc, sizeof(dc)), numText(d.depthNear, 6, dn, sizeof(dn)));
     appendf(buf, n, &len, "c mean (%s, %s) px spread %s px; ", numText(mcx, 1, cx, sizeof(cx)), numText(mcy, 1, cy, sizeof(cy)), numText(spread, 2, cs, sizeof(cs)));

@@ -46,7 +46,8 @@ game's own zoom as a magnified picture inside the scope's lens. The rest of the 
   by one frame on every frame (measured, not changed).
 - **A3 BUILT 2026-10-29, NOT FLOWN** (section 10, "As built (A3)"): the mark is drawn into the eye's additive weapons layer and composited after
   the lens by the tonemap difference (stock brightness); the weapons half governs it, the scope zoom key arms it; the S0 census probes optical
-  sights only; the press line counts `composites matched/plain/none` and `--health` makes a taken mark nothing composited a PARTIAL.
+  sights only; the press line counts `composites matched/plain/none` and `--health` makes a taken mark nothing composited a PARTIAL. Its review
+  fixes (same section) make the mark's stand-down last a press, not the session, and count it in the press line.
 - **Next, B3 for the scoped sniper only** (the maintainer, 2026-10-29, after A2's flight: the 4x lens is "a little blurry"). A keeps 1/M of
   the density, so at M 4.06 the lens shows about 90 x 50 output pixels (45 x 25 rendered) over the glass. B3 renders the unseen left eye
   (F106's both mode) as the zoomed view. Designed after A3 has flown.
@@ -683,3 +684,30 @@ Neither is the scope work's. `scope zoom (S1)` OK over 16 presses. Dumps `120515
 - **Flight card (A3), additions.** Read `--expect-build <hash> --health` first (S1 OK). Then the press lines: `composites matched/plain/none` against `gunsight marks taken` (matched near L + R), the `scope mark`
   family lines and the `sharp weapons: ... weapons layer created` lines; and the S0 census lines, which should show runs for the Executioner, the Oppressor and the Aphelion and a `not an optical sight` skip for the
   P-15 and the Karma weapons.
+
+**As built (A3 review fixes)** (2026-10-29, on A3 `655993ca` merged with main `dcfd0608`; the full local build and all its gates green, nothing flown; main's merge compiled and passed untouched). A review of A3
+found ten things. Each, in one line:
+- **1. A mark-side failure no longer stands the weapons fire down.** `weaponsTakeReady(ctx, eye, forMark)`: when the mark asks and W, E or the tonemap states cannot be made, `markStandDown` runs (the mark alone, its line
+  naming the step) and `weaponsStandDown` does not; the weapons fire's own failures stand its half down exactly as before, and it tries W for itself at its next draw.
+- **2. The mark has composite lines of its own.** Gated on the layer's mark count (`e.wMarks`), not the fire's: the first eye-frame carried by the tonemap difference, and, at most once a press, why a frame went out plain
+  (the source pass's shaders, the game's HDR input, the deferred context, the scratch, or the pass failing: read from the same checks `matchedReady` makes, in the same order). The weapons fire's lines are untouched.
+- **3. The mark's stand-down lasts the press, not the session.** `MarkStandDown` (weapons_fire.h) holds the S1 press number it was found in (`scopeZoomPressId`); the next press of the sights tries the route again, with
+  both eyes' streaks at 0. It stays global across the eyes for the rest of its press. `g_markStoodDown` became `g_markDown`.
+- **4. Each stand-down is logged and counted.** The line names the press, the eye and the streak (0 for a creation failure) and the cause; the S1 press line ends the mark's part with `mark stand-downs N`; the mark's
+  lost-layer line is one a press (it was one a session); `--health` names the stand-downs and makes the press a PARTIAL.
+- **5. The S0 census pin.** It reads the guard's block whole and requires the skip line, the once-per-sight test and then the `return`, with neither the configure nor the arm inside it. Controls: the guard that logs and falls
+  through, one that arms before it returns, a skip line on every press, no table, no skip line.
+- **6. The skip line is written once for each (item, scope) a session** (`CensusSkipNoted`, scope_zoom_s0.h: 16 pairs, then every new sight is still told, to the press line cap). `--health` matches a geometry line to its
+  skip line by item and scope and says `N sight(s) ... (first press P)`. A `--since` window that starts after a sight's first press has its geometry lines and not the skip line, and reads as a census that never ran.
+- **7. The press line's worst case is the longest item the held-item buffer can hold.** `kLensItemChars` is 63 and the formatter cuts the item there, so the bound does not rest on the caller. With 63 characters, every
+  counter six digits and the new count, the line needed about 1216 bytes against the log's 1167. Eight labels are shorter (`not optical`, `jitter none`, `other frame`, `FOV from bare copy`, `c to far point`,
+  `picture seq`, `mark depth`, `read on`): the worst case is now 1160 bytes in the 1168-byte buffer, inside the log's 1200 with its stamp and marker. `edvr_log.py` reads the new labels; a press line of an earlier build is
+  UNPARSED, as A2's and A3's first were.
+- **8. `flatUiFamilyLive` asks the one list** (`uiLayerFamilyUsesWeaponsLayer`), so the mark is the weapons half's there too. Flat still never takes it: it is not in `flatUiLayerTakesFamily` and the flat tick publishes no
+  lens. Rig: the three halves in every combination, and the take list.
+- **9. The weapons layer line names what made it** (`for the weapons fire`, `for the scope's gunsight mark`) and says both draw into it.
+- **10. `--health` names every reason, and the door pin's window is tight.** A press that fails the takes, the composite and the stand-down shows all three, joined by `; also`. scope_zoom_test reads 8300 bytes of
+  `uiLayerComposite` (8022, the function) where it read 12000.
+- **Not verified.** Nothing is flown. A creation failure at the mark's take is not driven by any rig: its source is pinned (with controls) and the stand-down's lapse and streak bookkeeping are run frame by frame against
+  the production helpers (`MarkStandDown`, `weaponsLayerLoss`), not through the draw hook. The mark's engaged and plain lines, the stand-down line and the `mark stand-downs` count have never appeared in a log. The
+  worst case leaves 7 bytes under the log's 1167: a new field in the press line needs a label cut again.

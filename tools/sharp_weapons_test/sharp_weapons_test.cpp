@@ -849,13 +849,14 @@ static bool wiredLiveness(const std::string& t) {
 }
 static bool wiredDecision(const std::string& t) {
     return has(t, "f.familyEnabled = uiLayerFamilyEnabled(family, detail::g_uiQualityLive, g_weaponsLive, g_rippleLive);") &&
-           has(t, "uiLayerFamilyUsesWeaponsLayer(family)\n                    ? weaponsTakeReady(ctx, f.eye)") &&
+           has(t, "uiLayerFamilyUsesWeaponsLayer(family)\n                    ? weaponsTakeReady(ctx, f.eye, family == UiLayerFamily::kScopeMark)") &&
            has(t, "const bool cancel = !g_draw.weapons || weaponsFireJitterCancel(g_draw.vsHash);") &&
            has(t, "g_draw.jx = cancel ? jx : 0.0f;") && has(t, "g_draw.weapons = uiLayerFamilyUsesWeaponsLayer(family);") &&
-           // the mark's stand-down of its own, after the half gate and before the decision
-           has(t, "if (family == UiLayerFamily::kScopeMark && g_markStoodDown) f.familyEnabled = false;") &&
-           before(t, "f.familyEnabled = uiLayerFamilyEnabled(", "if (family == UiLayerFamily::kScopeMark && g_markStoodDown) f.familyEnabled = false;") &&
-           before(t, "if (family == UiLayerFamily::kScopeMark && g_markStoodDown) f.familyEnabled = false;", "UiLayerDecision d = uiLayerDecide(f);");
+           // the mark's stand-down of its own, for the press it happened in, after the half gate and before the decision
+           has(t, "if (family == UiLayerFamily::kScopeMark && markStoodDown()) f.familyEnabled = false;") &&
+           has(t, "bool markStoodDown() { return g_markDown.active(scopeZoomPressId()); }") &&
+           before(t, "f.familyEnabled = uiLayerFamilyEnabled(", "if (family == UiLayerFamily::kScopeMark && markStoodDown()) f.familyEnabled = false;") &&
+           before(t, "if (family == UiLayerFamily::kScopeMark && markStoodDown()) f.familyEnabled = false;", "UiLayerDecision d = uiLayerDecide(f);");
 }
 // The interface-only parts keep fix.ui_quality's liveness.
 static bool wiredQualityOnly(const std::string& t) {
@@ -919,7 +920,9 @@ static void wiringTests() {
     check(!wiredDecision(replaced(layer, "g_draw.jx = cancel ? jx : 0.0f;", "g_draw.jx = jx;")), "control: a cancel that ignores the table trips the pin");
     check(!wiredDecision(replaced(layer, "weaponsFireJitterCancel(g_draw.vsHash)", "true")), "control: a table that is never read trips the pin");
     check(!wiredDecision(replaced(layer, "g_draw.weapons = uiLayerFamilyUsesWeaponsLayer(family);", "g_draw.weapons = family == UiLayerFamily::kWeaponsFire;")), "control: a mark that is not drawn into the weapons layer trips the pin");
-    check(!wiredDecision(replaced(layer, "if (family == UiLayerFamily::kScopeMark && g_markStoodDown) f.familyEnabled = false;", "")), "control: a mark with no stand-down of its own trips the pin");
+    check(!wiredDecision(replaced(layer, "if (family == UiLayerFamily::kScopeMark && markStoodDown()) f.familyEnabled = false;", "")), "control: a mark with no stand-down of its own trips the pin");
+    check(!wiredDecision(replaced(layer, "bool markStoodDown() { return g_markDown.active(scopeZoomPressId()); }", "bool markStoodDown() { return g_markDown.down; }")),
+          "control: a mark stand-down that does not lapse with the press trips the pin");
 
     check(wiredQualityOnly(layer), "ui_layer.cpp: the world route, the on-foot gate and the after-UI take stay fix.ui_quality's");
     check(!wiredQualityOnly(replaced(layer, "bool uiLayerLiveForWorldRoute() { return detail::g_uiQualityLive; }", "bool uiLayerLiveForWorldRoute() { return detail::g_uiLayerLive; }")),
@@ -974,7 +977,11 @@ static void flatTests() {
                 check(flatUiFamilyLive(UiLayerFamily::kShieldRipple, q != 0, w != 0, r != 0) == (r != 0), "the shield ripple is asked when its half is live, whatever else says");
                 check(flatUiFamilyLive(UiLayerFamily::kFlightHud, q != 0, w != 0, r != 0) == (q != 0), "the HUD families are asked when fix.ui_quality's half is live and not otherwise");
                 check(flatUiFamilyLive(UiLayerFamily::kMapCanvas, q != 0, w != 0, r != 0) == (q != 0), "...the System Map's too");
+                check(flatUiFamilyLive(UiLayerFamily::kScopeMark, q != 0, w != 0, r != 0) == (w != 0) &&
+                          flatUiFamilyLive(UiLayerFamily::kScopeMark, q != 0, w != 0, r != 0) == uiLayerFamilyEnabled(UiLayerFamily::kScopeMark, q != 0, w != 0, r != 0),
+                      "the scope's gunsight mark rides the weapons half in flat's liveness too, as in the VR rule (one list: uiLayerFamilyUsesWeaponsLayer)");
             }
+    check(!flatUiLayerTakesFamily(UiLayerFamily::kScopeMark), "...and flat never takes the mark: its lens is VR's, and the flat tick publishes none, so the family is never armed there");
     // No setting and no row for the weapons fire (retired 2026-10-28): the flat panel has neither it nor a Weapons blend row.
     check(!flatPageHasRow("fix", "sharp_weapons") && !flatPageHasRow("advanced", "sharp_weapons_blend"), "the flat panel has no Sharp weapons row and no Weapons blend row");
     int quality = -1, hud = -1;
@@ -1168,6 +1175,45 @@ static void dropTests() {
             for (uint64_t f = 1; f <= 90; ++f) m.frame(f, f % 2 ? 2 : 0, f % 2 ? 0 : 1, f % 2 == 0);
             check(m.fireDown && !m.markDown, "carried marks between lost weapons fire never reset the weapons fire's streak");
         }
+        {
+            // The mark's stand-down lasts the press of the sights it was found in (MarkStandDown, and ui_layer.cpp markStandDown's reset of the streaks): a press whose marks are never
+            // carried stands the route down after 30 lost frames and draws nothing more into the layer; the next press tries it again, and a press that is carried keeps it.
+            struct PressModel {
+                MarkStandDown md;
+                uint32_t press = 1, wMarks = 0, streak = 0, standDowns = 0, drawn = 0;
+                uint64_t wSeq = 0, wPubSeq = 0;
+                void frame(uint64_t f, bool carries) {
+                    if (md.active(press)) return;   // back in the scene: no draw reaches the layer
+                    if (weaponsLayerLoss(wSeq, 0, wMarks, wPubSeq).mark && ++streak >= 30) {
+                        md.stand(press);
+                        streak = 0;
+                        ++standDowns;
+                    }
+                    wSeq = f;
+                    wMarks = 1;
+                    ++drawn;
+                    if (carries) {
+                        wPubSeq = f;
+                        streak = 0;
+                    }
+                }
+            };
+            PressModel m;
+            uint64_t f = 1;
+            for (int i = 0; i < 100; ++i) m.frame(f++, false);
+            check(m.standDowns == 1 && m.drawn == 31 && m.md.active(1), "a press whose marks are never carried stands the route down once, after 30 lost frames, and draws no more into the layer");
+            m.press = 2;
+            check(!m.md.active(2), "the stand-down is over at the next press of the sights");
+            for (int i = 0; i < 100; ++i) m.frame(f++, true);
+            check(m.standDowns == 1 && m.drawn == 131 && !m.md.active(2), "a carried press after a stood-down one keeps the route: marks are drawn into the layer every frame again");
+            m.press = 3;
+            for (int i = 0; i < 100; ++i) m.frame(f++, false);
+            check(m.standDowns == 2 && m.md.active(3) && !m.md.active(4), "a later press that fails stands the route down again, for that press alone");
+            MarkStandDown d;
+            check(!d.active(0) && !d.active(7), "a route never stood down is not down at any press");
+            d.stand(7);
+            check(d.active(7) && d.active(7) && !d.active(8) && !d.active(7), "a stand-down is down for its own press only and is not back once it has lapsed");
+        }
     }
 }
 
@@ -1186,9 +1232,17 @@ static bool wiredLost(const std::string& t) {
            has(t, "if (g_lostLines >= 24) return;") && before(t, "noteToneSight(seq, seenRes, eye, 0);", "crispArm(eye, seq, hdrSlot, ta.rtvRes, hdrRes, vs, ps);") &&
            // A3: the scope mark's loss is counted, noted and stood down apart from the weapons fire's, and its draws are counted apart from the fire's
            has(t, "if (lost.fire) {\n            ++g_win.weaponsLost;") && has(t, "if (lost.mark) {\n            if (!lost.fire) noteWeaponsLost(g_draw.eye, e, g_draw.seq, true);") &&
-           has(t, "if (++e.wMarkMissStreak >= kCrispHdrMissFrames) {") && has(t, "markStandDown(why);") && has(t, "if (++e.wMissStreak >= kCrispHdrMissFrames) {") &&
+           has(t, "if (++e.wMarkMissStreak >= kCrispHdrMissFrames) {") && has(t, "markStandDown(g_draw.eye, e.wMarkMissStreak, why);") && has(t, "if (++e.wMissStreak >= kCrispHdrMissFrames) {") &&
            has(t, "                ++e.wMarks;   // the scope's gunsight mark shares the layer") && has(t, "                ++e.wFires;\n                ++g_win.weaponsTaken;") &&
-           has(t, "if (wl && g_draw.family == UiLayerFamily::kWeaponsFire && e.wFireSeq != g_draw.seq) {") && has(t, "if (hadWeapons && e.wFires) {");
+           has(t, "if (wl && g_draw.family == UiLayerFamily::kWeaponsFire && e.wFireSeq != g_draw.seq) {") && has(t, "if (hadWeapons && e.wFires) {") &&
+           // the mark's stand-down lasts the press, is logged with the eye and the streak, is counted for the press line and starts the next press's count afresh; its lost line is one a press
+           has(t, "g_markDown.stand(press);\n    g_eye[0].wMarkMissStreak = g_eye[1].wMarkMissStreak = 0;") && has(t, "scopeZoomNoteMarkStandDown();") &&
+           has(t, "(press %u, %s eye, streak %u) -- %s.") && has(t, "if (g_markLostPress == press) return;\n        g_markLostPress = press;") &&
+           // a creation failure belongs to the family that asked: the weapons fire's stands the weapons half down, the mark's the mark alone
+           has(t, "if (forMark) markStandDown(eye, g_eye[eye].wMarkMissStreak, why);\n        else weaponsStandDown(why);") &&
+           has(t, "return fail(\"the weapons layer could not be created\");") && !has(t, "weaponsStandDown(\"the weapons layer could not be created\")") &&
+           // the mark's own composite lines at the end of the bracket, for a frame that held a mark whether or not weapons fire was in it too
+           has(t, "if (hadWeapons && e.wMarks) {") && has(t, "if (plan.sourcePass && !markEngagedNoted) {") && has(t, "if (!plan.sourcePass && markPlainPress != scopeZoomPressId()) {");
 }
 static void lostPins(const std::string& layer) {
     check(wiredLost(layer), "ui_layer.cpp: a lost weapons layer prints the eye's state and the last tonemap-shaped draws, rate-limited, and every outcome of the admission is recorded");
@@ -1203,7 +1257,14 @@ static void lostPins(const std::string& layer) {
     check(!wiredLost(replaced(layer, "                ++e.wMarks;   // the scope's gunsight mark shares the layer", "                ++e.wFires;   // the scope's gunsight mark shares the layer")),
           "control: a mark counted as weapons fire trips the pin");
     check(!wiredLost(replaced(layer, "if (hadWeapons && e.wFires) {", "if (hadWeapons) {")), "control: a mark's composite counted on the weapons line trips the pin");
-    check(!wiredLost(replaced(layer, "markStandDown(why);", "weaponsStandDown(why);")), "control: a mark that stands the weapons fire down trips the pin");
+    check(!wiredLost(replaced(layer, "markStandDown(g_draw.eye, e.wMarkMissStreak, why);", "weaponsStandDown(why);")), "control: a mark that stands the weapons fire down trips the pin");
+    check(!wiredLost(replaced(layer, "if (forMark) markStandDown(eye, g_eye[eye].wMarkMissStreak, why);\n        else weaponsStandDown(why);", "weaponsStandDown(why);")),
+          "control: a mark's creation failure that stands the weapons half down for the session trips the pin");
+    check(!wiredLost(replaced(layer, "    g_eye[0].wMarkMissStreak = g_eye[1].wMarkMissStreak = 0;   // the next press counts afresh\n", "")), "control: a stand-down that leaves the streak for the next press trips the pin");
+    check(!wiredLost(replaced(layer, "    scopeZoomNoteMarkStandDown();\n", "")), "control: a stand-down the press line does not count trips the pin");
+    check(!wiredLost(replaced(layer, "if (g_markLostPress == press) return;\n        g_markLostPress = press;", "if (g_markLostPress == 0) return;\n        g_markLostPress = 0;")), "control: a lost line once a session, not a press, trips the pin");
+    check(!wiredLost(replaced(layer, "if (hadWeapons && e.wMarks) {", "if (hadWeapons && e.wFires) {")), "control: the mark's composite lines gated on weapons fire trip the pin");
+    check(!wiredLost(replaced(layer, "if (!plan.sourcePass && markPlainPress != scopeZoomPressId()) {", "if (!plan.sourcePass) {")), "control: a plain-composite reason on every frame trips the pin");
     check(!wiredLost(replaced(layer, "if (wl && g_draw.family == UiLayerFamily::kWeaponsFire && e.wFireSeq != g_draw.seq) {", "if (wl && e.wFireSeq != g_draw.seq) {")),
           "control: an eye-frame counted as having weapons draws for a mark trips the pin");
 }

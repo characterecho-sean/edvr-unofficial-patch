@@ -296,10 +296,12 @@ inline bool flatUiLayerTakesFamily(UiLayerFamily f) {
     return f == UiLayerFamily::kHolo || f == UiLayerFamily::kFlightHud || f == UiLayerFamily::kSprite ||
            f == UiLayerFamily::kMapCanvas || f == UiLayerFamily::kMapSprite || f == UiLayerFamily::kWeaponsFire || f == UiLayerFamily::kShieldRipple;
 }
-// Whether the half of the shared layer that governs the family is live: the weapons fire (a flat AA mode on) for kWeaponsFire, the ripple's
-// own half for kShieldRipple, fix.ui_quality's for every other. The three are independent, as in ui_layer_math.h's uiLayerFamilyEnabled.
+// Whether the half of the shared layer that governs the family is live: the weapons half (a flat AA mode on) for the families drawn into the weapons layer
+// (ui_layer_math.h uiLayerFamilyUsesWeaponsLayer, the one list: the weapons fire and the VR scope's gunsight mark), the ripple's own half for kShieldRipple, fix.ui_quality's for
+// every other. The three are independent, as in ui_layer_math.h's uiLayerFamilyEnabled. Flat never takes the gunsight mark: it is not in flatUiLayerTakesFamily, and the scope lens
+// that arms it is VR's (the flat tick publishes none), so the answer for it here is only the rule kept in line.
 inline bool flatUiFamilyLive(UiLayerFamily f, bool qualityLive, bool weaponsLive, bool rippleLive) {
-    return f == UiLayerFamily::kWeaponsFire ? weaponsLive : f == UiLayerFamily::kShieldRipple ? rippleLive : qualityLive;
+    return uiLayerFamilyUsesWeaponsLayer(f) ? weaponsLive : f == UiLayerFamily::kShieldRipple ? rippleLive : qualityLive;
 }
 
 // The adapter's own refusals, before the shared decision is asked. Each leaves the draw in the game's frame as stock.

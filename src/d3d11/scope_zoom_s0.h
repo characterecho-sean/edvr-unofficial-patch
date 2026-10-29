@@ -609,6 +609,26 @@ inline int formatCensusNotOptical(char* buf, size_t n, uint32_t press, const cha
             press, itemText(item), scope ? scope : "unknown");
     return finishLine(buf, n, len);
 }
+// That skip line is written once for each (item, scope) a session, at the first press of it: a rifle aimed every few seconds would otherwise write the same line press after press
+// until the press line cap. first() is true the first time a pair is asked; a pair asked after the table is full is told too (to the cap), so no sight goes unsaid.
+struct CensusSkipNoted {
+    static constexpr uint32_t kSlots = 16;
+    static constexpr size_t kItemChars = 63;   // the held-item buffer less its terminator
+    char item[kSlots][kItemChars + 1] = {};
+    int scope[kSlots] = {};
+    uint32_t n = 0;
+    bool first(const char* itemName, int scopeValue) noexcept {
+        const char* name = itemText(itemName);
+        for (uint32_t i = 0; i < n; ++i)
+            if (scope[i] == scopeValue && std::strncmp(item[i], name, kItemChars) == 0) return false;
+        if (n < kSlots) {
+            std::snprintf(item[n], sizeof(item[n]), "%s", name);
+            scope[n] = scopeValue;
+            ++n;
+        }
+        return true;
+    }
+};
 
 }  // namespace scopezoom
 }  // namespace edvr

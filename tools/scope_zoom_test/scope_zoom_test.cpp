@@ -87,7 +87,7 @@ static std::string replaced(std::string text, const std::string& from, const std
 static bool wiredDoor(const std::string& layer) {
     const size_t fn = layer.find("ID3D11Texture2D* uiLayerComposite(uint64_t sequence, uint32_t eye");
     if (fn == std::string::npos) return false;
-    const std::string body = layer.substr(fn, 12000);
+    const std::string body = layer.substr(fn, 8300);   // the function is 8022 bytes; a margin for a line or two, so a window can't reach into the next function and satisfy a pin there
     return before(body, "rippleDoor(e, eye, sequence", "scopeZoomDoor(lensArgs") && before(body, "scopeZoomDoor(lensArgs", "if (!e.srv || !e.rtv || e.compositedSeq == sequence) return handOn();") &&
            before(body, "scopeZoomDoor(lensArgs", "compositeInner(e, eye, frame") && has(body, "if (eye == 1 && scopeZoomWanted())") && has(body, "lensArgs.resolved = e.doorFromPass;");
 }
@@ -167,16 +167,31 @@ static void wiringTests() {
     // the lens declines for the left aiming eye (F162) before the gate: the tick hands the gate the key's eye
     check(before(native, "gi.leftAim = adsAimEye() == 0;", "sz::lensGate(gi)") && has(native, "case sz::LensVerdict::kLeftAim: ++s.ts.leftAim; break;"), "the tick hands the gate the aiming eye (F162) and counts its left aiming eye verdict");
     check(!(before(replaced(native, "gi.leftAim = adsAimEye() == 0;", "gi.leftAim = false;"), "gi.leftAim = adsAimEye() == 0;", "sz::lensGate(gi)")), "control: a gate that is not given the aiming eye is not the wiring");
-    // A3: the S0 census arms its pixel probe only for a press of an optical sight (the S1 table's verdict, at the reference FOV); any other press says so on a skip line and returns before the probe
+    // A3: the S0 census arms its pixel probe only for a press of an optical sight (the S1 table's verdict, at the reference FOV); any other press says so on a skip line, once for each item
+    // and scope a session, and RETURNS before the probe. The guard's block is read whole: it must hold the skip line and end in the return, in that order, with the probe's configure and
+    // arm both after it. (An order of strings alone passes a guard that logs and falls through to the arm.)
     const auto wiredCensus = [](const std::string& n) {
-        return before(n, "if (!sz::lensOpticalSight(v.item.name, v.item.scope, static_cast<double>(g_scopeZoomRefDeg.load(std::memory_order_relaxed)))) {", "pixelProbeConfigure(set.pt, set.n);") &&
-               before(n, "sz::formatCensusNotOptical(line, sizeof(line), v.press, v.item.name, loadout::scopeName(v.item.scope));", "pixelProbeConfigure(set.pt, set.n);") &&
-               before(n, "if (!sz::lensOpticalSight(v.item.name, v.item.scope, static_cast<double>(g_scopeZoomRefDeg.load(std::memory_order_relaxed)))) {", "pixelProbeArm();");
+        const std::string guard = "if (!sz::lensOpticalSight(v.item.name, v.item.scope, static_cast<double>(g_scopeZoomRefDeg.load(std::memory_order_relaxed)))) {";
+        const size_t at = n.find(guard);
+        const size_t next = at == std::string::npos ? at : n.find("    const uint32_t pe = kProbeGeometryEye;", at);   // the first statement after the guard
+        if (at == std::string::npos || next == std::string::npos) return false;
+        const std::string block = n.substr(at, next - at);
+        const size_t skip = block.find("sz::formatCensusNotOptical(line, sizeof(line), v.press, v.item.name, loadout::scopeName(v.item.scope));");
+        const size_t gate = block.find("v.notOpticalSaid.first(v.item.name, v.item.scope)");
+        const size_t ret = block.rfind("        return;\n    }\n");
+        return skip != std::string::npos && gate != std::string::npos && ret != std::string::npos && gate < skip && skip < ret && ret + std::strlen("        return;\n    }\n") == block.size() &&
+               block.find("pixelProbeArm();") == std::string::npos && block.find("pixelProbeConfigure(") == std::string::npos && before(n, guard, "pixelProbeConfigure(set.pt, set.n);") &&
+               before(n, "pixelProbeConfigure(set.pt, set.n);", "pixelProbeArm();");
     };
-    check(wiredCensus(native), "the S0 census asks the S1 table's verdict (lensOpticalSight at the reference FOV) before it configures or arms the pixel probe, and a press of any other sight is a skip line");
+    check(wiredCensus(native), "the S0 census asks the S1 table's verdict (lensOpticalSight at the reference FOV); a press of any other sight is a skip line, once for each item and scope, and the guard returns before it configures or arms the pixel probe");
     check(!wiredCensus(replaced(native, "if (!sz::lensOpticalSight(v.item.name, v.item.scope, static_cast<double>(g_scopeZoomRefDeg.load(std::memory_order_relaxed)))) {", "if (false) {")),
           "control: a census that asks no table is not the wiring");
     check(!wiredCensus(replaced(native, "sz::formatCensusNotOptical(line, sizeof(line), v.press, v.item.name, loadout::scopeName(v.item.scope));", "")), "control: a press that is declined without its skip line is not the wiring");
+    check(!wiredCensus(replaced(native, "        return;\n    }\n    const uint32_t pe = kProbeGeometryEye;", "    }\n    const uint32_t pe = kProbeGeometryEye;")),
+          "control: a guard that logs the skip line and falls through to the probe is not the wiring");
+    check(!wiredCensus(replaced(native, "if (v.press <= kPressLineCap && v.notOpticalSaid.first(v.item.name, v.item.scope)) {", "if (v.press <= kPressLineCap) {")), "control: a skip line written on every press is not the wiring");
+    check(!wiredCensus(replaced(native, "        return;\n    }\n    const uint32_t pe = kProbeGeometryEye;", "        pixelProbeArm();\n        return;\n    }\n    const uint32_t pe = kProbeGeometryEye;")),
+          "control: a guard that arms the probe before it returns is not the wiring");
 }
 
 // ============================================================================================ the scene

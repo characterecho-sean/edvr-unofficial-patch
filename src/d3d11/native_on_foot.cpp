@@ -35109,6 +35109,7 @@ struct Vr {
     // the session
     uint32_t runs = 0, scopedRuns = 0;
     bool controlRun = false;
+    sz::CensusSkipNoted notOpticalSaid;   // the (item, scope) pairs whose not-optical skip line was written
 } g_vr;
 
 // c in each eye and the numbers beside it, at the press's first settled frame. S is the game's world point, in the space P14w, E and the eyes' origins (rows' o) share: F143's toRoot subtracts p14w
@@ -35159,16 +35160,16 @@ Geometry geometryNow(const Vr& v, uint64_t nowMs) noexcept {
 }
 
 // The pixel probe about c in the left eye, for the first three scoped presses and the first unscoped one of an OPTICAL sight (A3: the S1 table's verdict, lensOpticalSight at the
-// reference FOV; a press of any other sight probes nothing, and says so on a skip line naming the press). The probe's lines are about the first-seen eye, which is the left one in
-// every logged frame, so its points come from the left eye's own geometry (the census used the right eye's before A2). Every other press that qualifies and is not probed says why
-// on a skip line.
+// reference FOV; a press of any other sight probes nothing, and says so on a skip line naming the press, once for each item and scope a session). The probe's lines are about the
+// first-seen eye, which is the left one in every logged frame, so its points come from the left eye's own geometry (the census used the right eye's before A2). Every other press
+// that qualifies and is not probed says why on a skip line.
 constexpr uint32_t kProbeGeometryEye = 0;   // the eye whose scene rows the probe's points are worked out from; the pixel probe watches the first-seen eye, 0
 void censusNow(Vr& v, const Geometry& g) noexcept {
     const bool scoped = v.item.scope == loadout::kScopeYes, unscoped = v.item.scope == loadout::kScopeNo;
     if (!((scoped && v.scopedRuns < kScopedRuns) || (unscoped && !v.controlRun))) return;
     char line[1100];
     if (!sz::lensOpticalSight(v.item.name, v.item.scope, static_cast<double>(g_scopeZoomRefDeg.load(std::memory_order_relaxed)))) {
-        if (v.press <= kPressLineCap) {
+        if (v.press <= kPressLineCap && v.notOpticalSaid.first(v.item.name, v.item.scope)) {
             sz::formatCensusNotOptical(line, sizeof(line), v.press, v.item.name, loadout::scopeName(v.item.scope));
             Log::get().note("%s", line);
         }

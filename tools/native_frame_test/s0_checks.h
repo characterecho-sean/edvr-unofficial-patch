@@ -401,6 +401,23 @@ inline void runS0(Check&& check) {
               "S0 lines: a press of a sight that is not an optical sight is skipped with a line that names the press (so --health can tell it from a settled press the census never reached)");
         sz::formatCensusNotOptical(buf, sizeof(buf), 1, nullptr, nullptr);
         check(starts("scope lens census (S0): run skipped (press 1 is not an optical sight: item none scope unknown,"), "S0 lines: the not-optical skip line with no item or scope says none and unknown");
+        // the skip line is written once for each (item, scope) a session
+        sz::CensusSkipNoted said;
+        const char* rifle = "$wpn_m_assaultrifle_kinetic_fauto_name;";
+        check(said.first(rifle, 1) && !said.first(rifle, 1) && !said.first(rifle, 1), "S0 census skip lines: a sight's first press is told and its later presses are not");
+        check(said.first(rifle, 0) && !said.first(rifle, 0), "S0 census skip lines: the same item with another scope state is another sight");
+        check(said.first("$wpn_m_shotgun_plasma_doublebarrel_name;", 1) && !said.first("$wpn_m_shotgun_plasma_doublebarrel_name;", 1) && !said.first(rifle, 1),
+              "S0 census skip lines: another item is another sight, and the first is still known");
+        check(said.first(nullptr, 1) && !said.first("", 1) && !said.first("none", 1), "S0 census skip lines: no item and an empty one are the same sight, named none (the line says none)");
+        const std::string a(sz::CensusSkipNoted::kItemChars, 'a'), b = a.substr(0, a.size() - 1) + "b", longer = a + "zzzz";
+        sz::CensusSkipNoted names;
+        check(names.first(a.c_str(), 1) && names.first(b.c_str(), 1) && !names.first(a.c_str(), 1) && !names.first(longer.c_str(), 1),
+              "S0 census skip lines: names differing in the buffer's last character are two sights, and a name past the buffer is the sight whose first characters it shares");
+        sz::CensusSkipNoted full;
+        bool allFirst = true;
+        for (uint32_t i = 0; i < sz::CensusSkipNoted::kSlots; ++i) allFirst = allFirst && full.first(("$item" + std::to_string(i)).c_str(), 1);
+        check(allFirst && full.first("$item_beyond", 1) && full.first("$item_beyond", 1) && !full.first("$item0", 1) && !full.first(("$item" + std::to_string(sz::CensusSkipNoted::kSlots - 1)).c_str(), 1),
+              "S0 census skip lines: past the table's size a new sight is still told (to the press line cap), and the sights it holds stay known");
     }
 }
 

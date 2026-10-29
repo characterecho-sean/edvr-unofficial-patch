@@ -60,8 +60,12 @@ bool scopeZoomMarkArmed();
 void scopeZoomNoteMark(uint32_t eye, uint64_t seq, uint32_t path);
 // An eye-frame whose weapons layer held a mark has been through the composite (uiLayerComposite): kind (scope_zoom_s1.h kMarkComposite*) is how the composite served it.
 void scopeZoomNoteMarkComposite(uint32_t kind);
+// The gunsight mark's route through the weapons layer stood down (ui_layer.cpp markStandDown): counted for the press line.
+void scopeZoomNoteMarkStandDown();
 // A press begins (zero the door's counters) and ends (the counters, finished, for the press line).
 void scopeZoomPressBegin(uint32_t press);
+// The press the last scopeZoomPressBegin named (0 before any): the mark's stand-down lasts until it changes.
+uint32_t scopeZoomPressId();
 void scopeZoomPressTake(scopezoom::LensDoorStats* out);
 
 struct ScopeZoomDoorArgs {

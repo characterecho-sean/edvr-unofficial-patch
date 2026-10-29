@@ -83,6 +83,21 @@ inline WeaponsLayerLoss weaponsLayerLoss(uint64_t contentSeq, uint32_t fires, ui
     return l;
 }
 
+// The scope's gunsight mark has a stand-down of its own beside the weapons half's. It lasts the press of the sights it was found in (the S1 press numbering, scope_zoom.h
+// scopeZoomPressId), not the session: the next press tries the route again, so one bad press never costs the session its mark, and the weapons fire is free all along.
+struct MarkStandDown {
+    bool down = false;
+    uint32_t press = 0;   // the press it was found in
+    bool active(uint32_t pressNow) noexcept {
+        if (down && press != pressNow) down = false;
+        return down;
+    }
+    void stand(uint32_t pressNow) noexcept {
+        down = true;
+        press = pressNow;
+    }
+};
+
 // ----------------------------------------------------------------- the tonemap re-issues
 //
 // Per eye-frame the layer re-issues the game's tonemap draw (its exposure, LUT and b2 untouched) over the 8-bit layer E once for every
