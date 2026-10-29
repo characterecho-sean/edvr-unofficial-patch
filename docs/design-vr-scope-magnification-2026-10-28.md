@@ -15,7 +15,8 @@ game's own zoom as a magnified picture inside the scope's lens. The rest of the 
   per weapon, the same at `HumanoidFOV` 56.327 and 64.752 deg: the scoped Executioner 15.000 deg, the bare one 35.000, every other weapon
   48 to 52. M therefore depends on a reference FOV that EDVR must choose: scoped 4.07 or 4.82, bare 1.70 or 2.01, the rest 1.10 to 1.42
   (from this rig's two settings). Kind 3 is the weapon's own camera (47 deg at the hip, not the option).
-- **A is now in doubt:** M 4.07 to 4.82 is past the 2.5 line (section 6, "After S0"), so B3 is the maintainer's call.
+- **A against B3 at M 4 to 5** (section 2, 2026-10-29): A gives the scoped lens 21 to 25% of its density, B3 full density at high risk.
+  Every other sight is at M 1.10 to 2.01, where A is enough, so A is built either way; B3 only if A's scope is too soft.
 - **Recommendation: option A** (section 2): after DLSS and RCAS, copy the aiming eye's picture inside the lens, magnified by the game's
   zoom M about the sight point (the shield ripple's route). Under 0.1 ms, one eye, scoped ADS only; no scene pass, no motion vectors, no
   DLSS change; F106 carries it to the left eye. The price is detail: 1/M of the output's density.
@@ -37,8 +38,8 @@ game's own zoom as a magnified picture inside the scope's lens. The rest of the 
   `analysis\decomp\verify_20261027_ads_sight_line.txt` section 1, the candidates).
 - **Next flight: none for the table.** Separate arc: a flat stutter on the scoped Executioner's ADS (2026-10-29), in its own doc,
   `docs\investigation-flat-scoped-ads-stutter-2026-10-29.md`, on its own branch.
-- **Decisions waiting on the maintainer:** A or B3 (the glass suits A, M 4 to 5 argues for B3); scopes only or every sight (section 4);
-  the reference FOV M is taken from (section 4).
+- **Decisions waiting on the maintainer:** A first, B3 as phase 2 for the scope (recommended, section 2); scopes only or every sight
+  (section 4); the reference FOV M is taken from (section 4).
 - **Key (after S0, on the maintainer's word):** `fix.native_on_foot_ads_scope_zoom` = on | off. Section 5.
 
 ## 1. Where the game keeps the zoom
@@ -118,6 +119,31 @@ share. The lens gets full render detail and no pass is added.
 - F113's eye rows, the readout pin's both-eyes pairing (F148, F151), F110's model eye and the marker fix assume two like eyes; each would
   have to skip a zoomed one, and the light-grid cache would need checking.
 - Not before A has flown and the pilot calls it too soft.
+
+**A against B3 at the measured zoom** (2026-10-29; S0's numbers, section 7; the Pimax rig above: about 33 output px and 16.5 render px a
+degree near the axis). The scoped Executioner's opening is about 11 x 6 deg, some 360 x 200 output px. At M 4.07 (from 56.327 deg) it shows
+2.7 x 1.5 deg of the world; at M 4.82 (from 64.752 deg), 2.3 x 1.2 deg.
+
+| At the scoped Executioner | A (copy after DLSS) | B3 (the left eye renders the zoom) |
+|---|---|---|
+| Detail in the lens | 89 x 49 output px (M 4.07) stretched over 360 x 200: the world at the unzoomed 33 px a degree, made 4x larger; 25% of the lens's own density (21% at 4.82); DLSS shimmer magnified 4x | the left eye's tangents divided by M (93.6 deg to 29 deg tall at 4.07): 134 output px a world degree, the lens's full density, 16 times A's pixels; 99.5% of that render is thrown away |
+| The game's chevron | magnified with the world: 3.7 deg below c at 4.07, inside the lower edge; 4.3 deg at 4.82, past it | gone: it is on the glass, part of the weapon the zoomed eye must skip |
+| Extra GPU / CPU | a 72k px copy, well under 0.1 ms (estimate) | no pass added; the narrow view may pick finer LOD at distance, as flat's 15 deg view does (the flat scoped-ADS stutter investigation bears on this) |
+| Unknowns | none new | whether the game's culling and LOD follow a narrowed eye; whether its motion vectors carry the zoom's ramp, or the left eye's history resets at each edge |
+| Touches | the shield ripple's slot | F106 (required), F113, F110, F148/F151, the marker fix and the light-grid cache, each assuming two like eyes |
+
+- B3's first unknown is answered by EDVR's own code (INFERRED): the game rebuilds each eye's projection every frame, because EDVR's
+  DLSS jitter reaches it that way (a per-eye tangent shift from `src\d3d11\native_temporal.cpp`, applied in `GetProjectionMatrix` in
+  `src\openxr\openvr_system.cpp`). Narrow tangents could ride the same route. Whether culling and LOD follow a narrowed eye is untested.
+- Shared, not a difference: on a reprojected frame the lens's content is off by (M - 1) x the head's turn since render. That is 3 times
+  the runtime's residual at M 4.07; on a late frame at 100 deg/s, about 3.4 deg across an 11 deg lens. B3 is composited after the render
+  and reprojected the same way. A mark EDVR draws at c (the impact point at every range, section 3) would serve either option and does not
+  depend on the chevron's draw.
+- **Recommendation: build A first, for every sight.** Every unscoped sight and the bare Executioner sit at M 1.10 to 2.01. There A keeps
+  50 to 90% of the detail, and B3 would carry all of its risk for little gain, so A is needed whatever the scope gets. Fly A on the scoped
+  Executioner. If it is too soft, which 25% density makes likely, B3 becomes phase 2 for M above about 2.5 only. Its first instrument
+  narrows the left eye through the jitter route and logs the frame time, the cull and the LOD. A lower reference FOV (section 4) keeps
+  M nearer 4 and the chevron inside the lens.
 
 **C: a third camera.** The game's native stereo renders exactly two views, and EDVR cannot add one without replaying the scene.
 Draw-bound passes cost about a full eye even at a small viewport, and settlements are already CPU-bound (the settlement CPU arc). Rejected on cost and feasibility.
