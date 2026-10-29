@@ -2317,7 +2317,8 @@ int main(int argc, char** argv) {
         {
             struct Case { const char* text; int percent; bool recognised; };
             const Case cases[] = {{"100", 100, true}, {"125", 125, true}, {"150", 150, true}, {"175", 175, true}, {"200", 200, true},
-                                  {"", 100, false}, {"off", 100, false}, {"110", 100, false}, {"225", 100, false}, {"150%", 100, false},
+                                  {"250", 250, true}, {"300", 300, true}, {"350", 350, true}, {"400", 400, true},
+                                  {"", 100, false}, {"off", 100, false}, {"110", 100, false}, {"225", 100, false}, {"450", 100, false}, {"150%", 100, false},
                                   {"1.5", 100, false}, {"150.0", 100, false}, {" 150", 100, false}, {"-150", 100, false}};
             for (const Case& c : cases) {
                 bool recognised = false;

@@ -1,8 +1,8 @@
 // visual.star_glow: how strong the halo around a star is, as a percentage of the halo the game's own bloom draws.
 //
-//   visual.star_glow = 100 | 125 | 150 | 175 | 200
+//   visual.star_glow = 100 | 125 | 150 | 175 | 200 | 250 | 300 | 350 | 400
 //     100  the game as it ships (the default); nothing runs
-//     125 .. 200  a stronger halo, the same strength for every star in this version
+//     125 .. 400  a stronger halo, the same strength for every star in this version
 //
 // Both profiles read it (flat_profile_keys.h lists the key for the flat one). This header is the key's reader and nothing else:
 // the mechanisms that draw the stronger halo are built apart from it (src/d3d11/flat_star_glow.h, src/d3d11/vr_star_glow.h). The key
@@ -22,12 +22,12 @@ namespace edvr {
 
 inline constexpr int kStarGlowStock = 100;
 
-// The percentage a settings value names: 100, 125, 150, 175 or 200; anything else is kStarGlowStock.
+// The percentage a settings value names: 100, 125, 150, 175, 200, 250, 300, 350 or 400; anything else is kStarGlowStock.
 inline int starGlowParse(const char* text, bool* recognised = nullptr) {
     if (recognised) *recognised = true;
     if (text) {
-        static const char* const kChoices[] = {"100", "125", "150", "175", "200"};
-        static const int kPercent[] = {100, 125, 150, 175, 200};
+        static const char* const kChoices[] = {"100", "125", "150", "175", "200", "250", "300", "350", "400"};
+        static const int kPercent[] = {100, 125, 150, 175, 200, 250, 300, 350, 400};
         for (size_t i = 0; i < sizeof(kChoices) / sizeof(kChoices[0]); ++i) {
             if (std::strcmp(text, kChoices[i]) == 0) return kPercent[i];
         }

@@ -261,7 +261,7 @@ void flatStarGlowFrame(uint64_t nextFrame, bool watched) {
         const int percent = starGlowPercent(cfg, &recognised);
         if (!recognised && !g_unrecognisedNoted) {
             g_unrecognisedNoted = true;
-            Log::get().note("flat star glow: visual.star_glow = \"%s\" is not one of 100, 125, 150, 175, 200; it is read as 100 (the game as it ships)",
+            Log::get().note("flat star glow: visual.star_glow = \"%s\" is not one of 100, 125, 150, 175, 200, 250, 300, 350, 400; it is read as 100 (the game as it ships)",
                             cfg.getString("visual.star_glow", "100").c_str());
         }
         g_percent.store(percent, std::memory_order_relaxed);
