@@ -6,15 +6,16 @@ game's own zoom as a magnified picture inside the scope's lens. The rest of the 
 
 ## Status
 
-- **State: S0 FLAT ONCE, VR TWICE** (`d90db147`, measure only, no key; section 7). Q2 settled (VR has no zoom field: flat table).
-  Q4 settled by the eye dumps: see-through glass, the world at true scale behind it, the footprint = the hole in the frame's depth.
-  Q6: a chevron and a tint on the glass, in the scene colour (no UI over the lens). No rendering code. Branch
+- **State: S0 FLAT TWICE, VR TWICE** (`d90db147`, measure only, no key; section 7). Settled: Q1 for every owned weapon, Q2 (VR has no
+  zoom field: flat table), Q3 (the ADS FOV is absolute per weapon), Q4 (see-through glass, the footprint = the hole in the frame's
+  depth), Q6 (a chevron and a tint on the glass, in the scene colour, no UI over it). No rendering code. Branch
   `claude/vr-scope-zoom-design-6ef950`.
 - ruled out: every S0 lens census so far (the probe watched the left eye at the right eye's points).
-- **Flat zoom MEASURED** (section 7, Epic 2026-10-28): the camera's FOV (+0x280) narrows from `HumanoidFOV` 56.327 deg to 15.000 deg
-  for the scoped Executioner (M 4.07) and to 35.000 deg for the bare copy (M 1.70), with a 0.8 s ramp. Open: kind 0 or kind 3 as the
-  world's camera (kind 3 rests at 47 deg with the weapon out; from there M would be 3.30 and 1.62).
-- **A is now in doubt:** M 3.3 to 4.1 is past the 2.5 line (section 6, "After S0"), so B3 is the maintainer's call.
+- **Flat zoom MEASURED** (section 7, Epic 2026-10-28 and 10-29): the world's camera (kind 0, FOV at +0x280) settles at an absolute FOV
+  per weapon, the same at `HumanoidFOV` 56.327 and 64.752 deg: the scoped Executioner 15.000 deg, the bare one 35.000, every other weapon
+  48 to 52. M therefore depends on a reference FOV that EDVR must choose: scoped 4.07 or 4.82, bare 1.70 or 2.01, the rest 1.10 to 1.42
+  (from this rig's two settings). Kind 3 is the weapon's own camera (47 deg at the hip, not the option).
+- **A is now in doubt:** M 4.07 to 4.82 is past the 2.5 line (section 6, "After S0"), so B3 is the maintainer's call.
 - **Recommendation: option A** (section 2): after DLSS and RCAS, copy the aiming eye's picture inside the lens, magnified by the game's
   zoom M about the sight point (the shield ripple's route). Under 0.1 ms, one eye, scoped ADS only; no scene pass, no motion vectors, no
   DLSS change; F106 carries it to the left eye. The price is detail: 1/M of the output's density.
@@ -26,16 +27,18 @@ game's own zoom as a magnified picture inside the scope's lens. The rest of the 
     `edvr_gfx_20261028_060723`, the scoped plasma sniper included.
   - ruled out (S0 VR, section 7): RC+0x16C/+0x17C and the refresh hook's cameras as VR zoom fields (-1, and nothing narrowed).
     Unread: the stat `ScopeMagnification`. M in VR comes from the flat table.
-- **Open questions** (each has a log line in the first flight, section 6):
+- **Questions** (each has a log line in the first flight, section 6):
   Q1 the zoom per (item, scope); Q2 which field carries it per frame (flat, VR); Q3 absolute FOV or relative to the player's FOV option;
   Q4 what is drawn in the lens (see-through glass, opaque screen, reticle); Q5 the lens's footprint and the sight point's offset in it;
-  Q6 what must stay unmagnified over it (readout, AR gunsight, HUD).
+  Q6 what must stay unmagnified over it (readout, AR gunsight, HUD). All answered for the Executioner; for the unscoped sights only Q1
+  to Q3 (no eye dump has seen their sights).
 - **ruled out (cost or brief):** a third camera pass (C), magnifying in DLSS's input (E), a whole-view FOV change (D). Section 2.
 - **Analysis hand-over FILED** (analysis `1547986`): `analysis\decomp\verify_20261028_ads_zoom_receiver.txt` (the receiver, the correction to
   `analysis\decomp\verify_20261027_ads_sight_line.txt` section 1, the candidates).
-- **Next flight: the same build**, Epic in flat mode only: the other weapons' unscoped ADS (no other scoped weapon is owned) and a
-  `HumanoidFOV` change (Q1 unscoped, Q3). Sections 4 and 7.
-- **Decision waiting on the maintainer:** A or B3 (M 4.07 for the scoped Executioner; the glass itself suits A).
+- **Next flight: none for the table.** Separate arc: a flat stutter on the scoped Executioner's ADS (2026-10-29), in its own doc,
+  `docs\investigation-flat-scoped-ads-stutter-2026-10-29.md`, on its own branch.
+- **Decisions waiting on the maintainer:** A or B3 (the glass suits A, M 4 to 5 argues for B3); scopes only or every sight (section 4);
+  the reference FOV M is taken from (section 4).
 - **Key (after S0, on the maintainer's word):** `fix.native_on_foot_ads_scope_zoom` = on | off. Section 5.
 
 ## 1. Where the game keeps the zoom
@@ -147,10 +150,15 @@ Scoped copies flown so far: the plasma sniper only. The chart expects the Execut
 An entry under 1.05 gets no lens: magnification that small would only cost detail. Unscoped ADS is measured too (Q1), in case the game
 narrows the FOV slightly without a scope.
 
-The maintainer owns no other scoped weapon (2026-10-28), so the scoped table holds the Executioner alone (15.000 deg, M 4.07; the chart's
-1.8 does not match it). Any other scoped (item, scope) gets no lens until a value is measured (S0's flat line, flown by someone who owns
-it) or the game's own value is found (Z3, the `ScopeMagnification` stat, by static RE). Unscoped ADS does narrow (the bare Executioner to
-35 deg, M 1.70), so the other weapons' unscoped presses decide whether the feature is for scopes only or for every sight with glass.
+The maintainer owns no other scoped weapon (2026-10-28), so the scoped table holds the Executioner alone (15.000 deg; the chart's 1.8
+does not match it). Any other scoped (item, scope) gets no lens until a value is measured (S0's flat line, flown by someone who owns
+it) or the game's own value is found (Z3, the `ScopeMagnification` stat, by static RE).
+
+The game stores each ADS FOV as an absolute angle (Q3, section 7, 2026-10-29), so the table holds FOVs, and M = tan(h/2) / tan(ads/2)
+against a reference h that EDVR must choose: VR has no hip option to take it from. This rig's 56.327 deg gives the scoped Executioner 4.07,
+the bare one 1.70 and the unscoped sights 1.10 to 1.20; its 64.752 deg gives 4.82, 2.01 and 1.30 to 1.42. Every unscoped weapon narrows
+(48 to 52 deg), so the 1.05 line excludes none of them. Whether the feature is for scopes only or for every sight is the maintainer's
+call, and an unscoped sight's lens would first need its own Q4: only the Executioner's glass has been seen.
 
 ## 5. Config surface
 
@@ -270,3 +278,31 @@ both settled. Dumps `173845379001` (scoped ADS), `173855469002` (bare ADS), `173
   per eye.
 - **Next:** flat only, the same build: the other weapons and a `HumanoidFOV` change (Q1, Q3, kind 0 or 3). A or B3 is the maintainer's
   call now; Q4 removed nothing from A, and M 4.07 is what argues for B3.
+
+**2026-10-29, S0 flat flight 2, every weapon** (Epic in flat mode, `edvr_gfx_20261029_052412`, `d90db147`, build matched). 38 presses:
+each owned weapon three times, the Executioner scoped (presses 33 to 35), then bare (36 to 38). Between presses 3 and 4 the hip moved
+from 56.327 to 64.752 deg: the on-foot FOV option, which Settings.xml now holds as `HumanoidFOV` 64.751938. The values are kind 4's,
+whose tracker caught every hip; kind 0 settled at the same value in every press.
+
+| ADS, the world (kind 0 = kind 4) | Items (Status.json `$wpn_..._name`) | Kind 3 in ADS | Ramp | M at 56.327 | M at 64.752 |
+|---|---|---|---|---|---|
+| 52.000 deg | `m_shotgun_plasma_doublebarrel`, `s_pistol_plasma_charged`, `s_pistol_kinetic_sauto`, `m_launcher_rocket_sauto`, `s_pistol_laser_sauto` | 30 deg | 0.15 to 0.65 s | 1.10 | 1.30 |
+| 50.000 deg | `m_submachinegun_laser_fauto`, `m_submachinegun_kinetic_fauto` | 30 deg | 0.45 s | 1.15 | 1.36 |
+| 48.000 deg | `m_assaultrifle_plasma_fauto`, `m_assaultrifle_laser_fauto`, `m_assaultrifle_kinetic_fauto` | 30 deg (laser 20) | 0.27 to 0.45 s | 1.20 | 1.42 |
+| 35.000 deg | `m_sniper_plasma_charged`, bare | 30 deg | 0.8 s | 1.70 | 2.01 |
+| 15.000 deg | `m_sniper_plasma_charged`, scoped | 15 deg | 0.8 s | 4.07 | 4.82 |
+
+- **Q3 SETTLED, absolute** (MEASURED): with the option at 64.752 deg the scoped Executioner settles at 15.000 deg and the bare one at
+  35.000 deg, as at 56.327 deg on 10-28. The game keeps an ADS FOV per weapon (and scope), not a factor, so M is that FOV against
+  whatever the hip is; section 4 has the consequence for VR.
+- **Kind 0 is the world's camera** (INFERRED, strong): kind 0 and kind 4 followed the option from 56.3 to 64.75 deg, while kind 3's
+  maximum stayed 47.000 deg in all 38 presses. Kind 3 is the weapon's own camera, at a fixed 47 deg. So the scoped M from 56.327 deg is
+  4.07, not 3.30.
+- **Q1 SETTLED for the owned weapons** (MEASURED): every one narrows the world in ADS, to 48 to 52 deg, all past section 4's 1.05 line.
+- Two presses read the previous weapon's value, each the first press after a switch: 19 (`m_submachinegun_laser_fauto` at 48, the
+  assault rifle's) and 29 (`m_submachinegun_kinetic_fauto` at 52, the launcher's). Each weapon's own value is its other presses'.
+- Instrument limit, as on 10-28: kind 0's hip field is stale from press 16 (56.249 deg, with ramps of 5 to 30 s); its maximum and kind
+  4 read 64.752.
+- Separately, the maintainer saw the scoped Executioner stutter on ADS in flat, and the bare one not; that has its own investigation
+  doc (Status block).
+- **Next:** no flight for the table. The maintainer decides A or B3, scopes only or every sight, and M's reference FOV (section 4).
