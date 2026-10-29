@@ -168,6 +168,7 @@ struct Session {
     // round 6: the picture's shape and the window's style, as the settings say now, and as the activation's window state was built for
     DesktopWindowAspect aspectOpt = DesktopWindowAspect::Full, activeAspect = DesktopWindowAspect::Full;
     DesktopWindowStyle styleOpt = DesktopWindowStyle::Window, activeStyle = DesktopWindowStyle::Window;
+    int shiftOpt = 0;                   // visual.desktop_window_vertical_shift (round 7): the crop moved up (+) or down (-), percent of the travel it has
     bool optionsLogged = false;
     bool keepHeightOnce = false;        // the picture's shape changed with the window untouched: the next correction keeps the client height
     bool noteNoFov = false;
@@ -237,6 +238,7 @@ void refreshMode(bool flat) {
         S.mode = DesktopWindowMode::Game;
         S.aspectOpt = DesktopWindowAspect::Full;
         S.styleOpt = DesktopWindowStyle::Window;
+        S.shiftOpt = 0;
         return;
     }
     {   // round 6: the picture's shape and the window's style, live like the mode; each change (and the first read) is one line
@@ -255,9 +257,15 @@ void refreshMode(bool flat) {
             if (S.optionsLogged) Log::get().note("desktop window: style %s (was %s)", desktopWindowStyleName(styleOpt), desktopWindowStyleName(S.styleOpt));
             else Log::get().note("desktop window: style %s", desktopWindowStyleName(styleOpt));
         }
+        const int shiftOpt = cfg.getIntInRange("visual.desktop_window_vertical_shift", 0, -100, 100);
+        if (!S.optionsLogged || shiftOpt != S.shiftOpt) {
+            if (S.optionsLogged) Log::get().note("desktop window: vertical shift %d (was %d)", shiftOpt, S.shiftOpt);
+            else Log::get().note("desktop window: vertical shift %d", shiftOpt);
+        }
         S.optionsLogged = true;
         S.aspectOpt = aspectOpt;
         S.styleOpt = styleOpt;
+        S.shiftOpt = shiftOpt;
     }
     const std::string raw = cfg.getString("visual.desktop_window", "game");
     bool known = true;
@@ -902,7 +910,8 @@ Outcome presentActive(IDXGISwapChain* swap, ID3D11Device* device, uint64_t now, 
         texH[eye] = d.Height;
     }
     // The picture's shape (round 6). `full`: each eye as its bounds sub-rect is. Any other value: the whole picture's shape (each eye half of it with both eyes), and each
-    // eye is cropped to its shape, centred on where it looks straight ahead and moved only as far as it takes to stay inside the image.
+    // eye is cropped to its shape, centred on the eye's default centre (its projection centre) and moved only as far as it takes to stay inside the image; the vertical shift
+    // (round 7) then moves the crop up or down from there.
     DwSize shape[2];
     desktopWindowShapes(S.aspectOpt, S.mode, eyeSize, shape);
     double aspect = 0;
@@ -927,7 +936,7 @@ Outcome presentActive(IDXGISwapChain* swap, ID3D11Device* device, uint64_t now, 
             }
         }
         desktopWindowCrop(snap.bounds[eye], texW[eye], texH[eye], ratio > 0 ? (S.mode == DesktopWindowMode::BothEyes ? ratio * 0.5 : ratio) : 0.0, fromFov[eye], centreU[eye],
-                          centreV[eye], cropBounds[eye]);
+                          centreV[eye], cropBounds[eye], S.shiftOpt);
     }
     ComPtr<ID3D11DeviceContext> ctx;
     device->GetImmediateContext(&ctx);
@@ -1039,12 +1048,12 @@ Outcome presentActive(IDXGISwapChain* swap, ID3D11Device* device, uint64_t now, 
                             sc.BufferCount, sc.Windowed ? 1 : 0, static_cast<unsigned long>(GetWindowLongPtrW(hwnd, GWL_STYLE)),
                             static_cast<unsigned long>(GetWindowLongPtrW(hwnd, GWL_EXSTYLE)), wr.left, wr.top, wr.right - wr.left, wr.bottom - wr.top, clientW, clientH,
                             mi.rcMonitor.left, mi.rcMonitor.top, mi.rcMonitor.right, mi.rcMonitor.bottom, mi.rcWork.left, mi.rcWork.top, mi.rcWork.right, mi.rcWork.bottom);
-            if (ratio > 0) {   // the crop of each eye, once per activation: where it looks straight ahead, and the bounds it was cropped to
+            if (ratio > 0) {   // the crop of each eye, once per activation: its default centre, the vertical shift, and the bounds it was cropped to
                 for (unsigned eye = 0; eye < 2; ++eye) {
                     if (!(need & (1u << eye))) continue;
-                    Log::get().note("desktop window: crop %s, %s eye: looks straight ahead at u=%.4f v=%.4f of its image (%s); crop bounds u %.4f..%.4f v %.4f..%.4f of %ux%u",
+                    Log::get().note("desktop window: crop %s, %s eye: default centre u=%.4f v=%.4f of its image (%s), vertical shift %d; crop bounds u %.4f..%.4f v %.4f..%.4f of %ux%u",
                                     desktopWindowAspectName(S.aspectOpt), eye ? "right" : "left", centreU[eye], centreV[eye], fromFov[eye] ? "from its field of view" : "no field of view: the middle",
-                                    cropBounds[eye][0], cropBounds[eye][2], cropBounds[eye][1], cropBounds[eye][3], texW[eye], texH[eye]);
+                                    S.shiftOpt, cropBounds[eye][0], cropBounds[eye][2], cropBounds[eye][1], cropBounds[eye][3], texW[eye], texH[eye]);
                 }
             }
         }

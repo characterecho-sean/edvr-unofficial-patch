@@ -12,6 +12,10 @@
 //   THE PICTURE'S SHAPE AND THE STYLE (round 6): the aspect and style words, the projection centre from a field of view, the centre crop (an off-centre centre, the clamp at an image
 //   edge, a flipped sub-rect), both eyes as halves, the borderless style and rectangle (0x94020000 and 0x14CC0000 both become 0x94000000), a shape change keeping the client height,
 //   and the pins on the page, the keys, the version 2 export and the live change.
+//   THE VERTICAL SHIFT (round 7): the crop moved up (+) or down (-) a fraction of the way from its default position to the picture's top or bottom edge: 0 is the crop without a
+//   shift, +-100 reach the edges from any default, +-50 are halfway from an off-centre default, no travel is no change, out of range is held to +-100, a sub-rect works in the
+//   texture's UVs, a flipped sub-rect moves as the viewer sees it; and the pins on the key (one whole number, -100..100, default 0, flat resets it), the call that gives it to the
+//   crop, the log lines, the ini words (0 is the default centre) and the ini order. Each check has a control that trips.
 //   THE WIRING (source pins, each with a control that trips it): the key is read as one word with the default game, the flat profile's allow-list does not carry it,
 //   the window is moved only from the thread-pool callback, the Present hook calls the feature before the census span and the real Present, the draw skip sits in the
 //   verdict and in the three thunks the verdict does not cover, the host hands the eye over after it is captured, the export and the source are built, and edvr.ini
@@ -220,7 +224,7 @@ static void shapeRules() {
           "the borderless rectangle is the whole monitor, client and all, on a monitor to the left too");
     check(!desktopWindowBorderlessPlan(0, 0, 0, 1080).ok && !desktopWindowBorderlessPlan(10, 10, 5, 20).ok, "a monitor with no size has no borderless rectangle");
 
-    // Where an eye looks straight ahead.
+    // The eye's projection centre in its image, the crop's default centre.
     double u = 0, v = 0;
     const float symmetric[4] = {-0.8f, 0.8f, 0.8f, -0.8f};
     check(desktopWindowProjectionCentre(symmetric, &u, &v) && closeTo(u, 0.5, 1e-6) && closeTo(v, 0.5, 1e-6), "a symmetric field of view looks at the middle");
@@ -262,6 +266,121 @@ static void shapeRules() {
     check(closeTo(out[0], 0.0, 1e-6) && closeTo(out[2], 1.0, 1e-6) && closeTo(out[1], 0.0, 1e-6) && closeTo(out[3], 1.0, 1e-6), "a target of the image's own shape leaves the bounds");
     desktopWindowCrop(whole, 2000, 2000, 0.0, true, 0.3, 0.3, out);
     check(out[0] == 0 && out[1] == 0 && out[2] == 1 && out[3] == 1, "a target of 0 (full) leaves the bounds as they are");
+
+    // ROUND 7, THE VERTICAL SHIFT. 2000x2000, 16:9: 2000 x 1125 pixels, so 875 rows of travel (top 0..875 = out[1] 0..0.4375). Centre v=0.3 puts the default top at 37.5 rows
+    // (0.01875), centre v=0.6 at 637.5 (0.31875). The shift moves a fraction of the way from the default to the top edge (positive) or the bottom edge (negative).
+    float shifted[4], base[4];
+    auto cropOf = [&](const float* b, uint32_t tw, uint32_t th, double target, double cu, double cv, int shift, float* o) { desktopWindowCrop(b, tw, th, target, true, cu, cv, o, shift); };
+    auto sameBits = [](const float* a, const float* b) { return a[0] == b[0] && a[1] == b[1] && a[2] == b[2] && a[3] == b[3]; };
+    // 0 changes nothing: bit for bit the crop without the argument, for an upright, a shifted-default, a sub-rect and a flipped case.
+    {
+        const float rects[4][4] = {{0, 0, 1, 1}, {0, 0, 1, 1}, {0, 0, 0.5f, 1}, {1, 1, 0, 0}};
+        const uint32_t sizes[4][2] = {{2000, 2000}, {2000, 2000}, {4000, 2000}, {1000, 2000}};
+        const double targets[4] = {16.0 / 9.0, 16.0 / 9.0, 2.0, 1.0}, centreV[4] = {0.3, 0.6, 0.4, 0.5};
+        bool identity = true, control = false;
+        for (int i = 0; i < 4; ++i) {
+            desktopWindowCrop(rects[i], sizes[i][0], sizes[i][1], targets[i], true, 0.5, centreV[i], base);
+            cropOf(rects[i], sizes[i][0], sizes[i][1], targets[i], 0.5, centreV[i], 0, shifted);
+            identity = identity && sameBits(base, shifted);
+            cropOf(rects[i], sizes[i][0], sizes[i][1], targets[i], 0.5, centreV[i], 5, shifted);
+            control = control || !sameBits(base, shifted);
+        }
+        check(identity, "a shift of 0 is the crop without a shift, bit for bit, in an upright, an off-centre, a sub-rect and a flipped case");
+        check(control, "control: a shift of 5 is not that crop (the check can tell a shift from none)");
+    }
+    // +-100 reach the edges, whatever the default was.
+    desktopWindowCrop(whole, 2000, 2000, 16.0 / 9.0, true, 0.5, 0.3, base);
+    cropOf(whole, 2000, 2000, 16.0 / 9.0, 0.5, 0.3, 100, out);
+    check(closeTo(out[1], 0.0, 1e-6) && closeTo(out[3], 0.5625, 1e-6) && closeTo(out[0], 0.0, 1e-6) && closeTo(out[2], 1.0, 1e-6), "+100 puts the crop's top edge at the picture's top (v 0..0.5625), all the width");
+    cropOf(whole, 2000, 2000, 16.0 / 9.0, 0.5, 0.3, -100, shifted);
+    check(closeTo(shifted[1], 0.4375, 1e-6) && closeTo(shifted[3], 1.0, 1e-6) && closeTo(shifted[0], 0.0, 1e-6) && closeTo(shifted[2], 1.0, 1e-6),
+          "-100 puts the crop's bottom edge at the picture's bottom (v 0.4375..1), all the width");
+    check(!closeTo(base[1], 0.0, 1e-6) && !closeTo(base[3], 1.0, 1e-6) && !closeTo(out[1], shifted[1], 1e-3), "control: the default crop is at neither edge, and +100 is not -100");
+    cropOf(whole, 2000, 2000, 16.0 / 9.0, 0.5, 0.6, 100, out);
+    cropOf(whole, 2000, 2000, 16.0 / 9.0, 0.5, 0.6, -100, shifted);
+    check(closeTo(out[1], 0.0, 1e-6) && closeTo(shifted[1], 0.4375, 1e-6) && closeTo(shifted[3], 1.0, 1e-6), "the edges are the same from another default (v=0.6)");
+    // +-50 from an off-centre default: halfway from where it is to the edge. v=0.6 -> default top 0.31875; +50 -> 0.159375; -50 -> 0.378125 (637.5 + (875 - 637.5) / 2 = 756.25 rows).
+    desktopWindowCrop(whole, 2000, 2000, 16.0 / 9.0, true, 0.5, 0.6, base);
+    cropOf(whole, 2000, 2000, 16.0 / 9.0, 0.5, 0.6, 50, out);
+    cropOf(whole, 2000, 2000, 16.0 / 9.0, 0.5, 0.6, -50, shifted);
+    check(closeTo(base[1], 0.31875, 1e-6) && closeTo(out[1], 0.159375, 1e-6) && closeTo(out[3], 0.721875, 1e-6) && closeTo(shifted[1], 0.378125, 1e-6) && closeTo(shifted[3], 0.940625, 1e-6),
+          "+50 and -50 from the default top 0.31875: halfway to the top edge (0.159375) and halfway to the bottom edge (0.378125), the height kept");
+    check(out[1] < base[1] && shifted[1] > base[1] && !closeTo(out[1], 0.21875, 1e-3),
+          "control: positive is up, negative is down, and the shift is relative to the default, not a place in the travel (+50 as a place would be 0.21875)");
+    cropOf(whole, 2000, 2000, 16.0 / 9.0, 0.5, 0.3, 50, out);
+    cropOf(whole, 2000, 2000, 16.0 / 9.0, 0.5, 0.3, -50, shifted);
+    check(closeTo(out[1], 0.009375, 1e-6) && closeTo(shifted[1], 0.228125, 1e-6) && closeTo(shifted[3] - shifted[1], 0.5625, 1e-6), "+-50 from the default top 0.01875: 0.009375 up, 0.228125 down");
+    // The horizontal position is untouched by any shift, and a crop that fills the picture's height has no travel.
+    cropOf(whole, 2000, 2000, 0.5, 0.2, 0.5, 0, base);
+    cropOf(whole, 2000, 2000, 0.5, 0.2, 0.5, 100, out);
+    cropOf(whole, 2000, 2000, 0.5, 0.2, 0.5, -100, shifted);
+    check(sameBits(base, out) && sameBits(base, shifted) && closeTo(out[0], 0.0, 1e-6) && closeTo(out[2], 0.5, 1e-6) && closeTo(out[1], 0.0, 1e-6) && closeTo(out[3], 1.0, 1e-6),
+          "a tall target (1:2) of a square fills the picture's height: no travel, so +-100 leave the crop where it was, columns included");
+    cropOf(whole, 3000, 2000, 16.0 / 9.0, 0.8, 0.5, 0, base);
+    cropOf(whole, 3000, 2000, 16.0 / 9.0, 0.8, 0.5, 100, out);
+    cropOf(whole, 3000, 2000, 16.0 / 9.0, 0.8, 0.5, -100, shifted);
+    check(closeTo(base[1], 0.078125, 1e-6) && closeTo(out[1], 0.0, 1e-6) && closeTo(out[3], 0.84375, 1e-6) && closeTo(shifted[1], 0.15625, 1e-6) && closeTo(shifted[3], 1.0, 1e-6) &&
+              closeTo(out[0], base[0], 1e-9) && closeTo(out[2], base[2], 1e-9) && closeTo(shifted[0], base[0], 1e-9) && closeTo(shifted[2], base[2], 1e-9),
+          "a 16:9 out of a 3:2 picture (312.5 rows of travel, default top 156.25): +100 is at the top, -100 at the bottom, the columns are the default's");
+    // No travel, no change: a target of the picture's own shape, and full (target 0).
+    cropOf(whole, 2000, 2000, 1.0, 0.3, 0.3, 0, base);
+    cropOf(whole, 2000, 2000, 1.0, 0.3, 0.3, 100, out);
+    cropOf(whole, 2000, 2000, 1.0, 0.3, 0.3, -100, shifted);
+    check(sameBits(base, out) && sameBits(base, shifted) && closeTo(base[1], 0.0, 1e-9) && closeTo(base[3], 1.0, 1e-9), "a target of the picture's own shape has no room up or down: +-100 change nothing");
+    cropOf(whole, 1600, 900, 16.0 / 9.0, 0.3, 0.3, 0, base);
+    cropOf(whole, 1600, 900, 16.0 / 9.0, 0.3, 0.3, 100, out);
+    cropOf(whole, 1600, 900, 16.0 / 9.0, 0.3, 0.3, -100, shifted);
+    check(closeTo(out[1], base[1], 1e-9) && closeTo(out[3], base[3], 1e-9) && closeTo(shifted[1], base[1], 1e-9) && closeTo(shifted[3], base[3], 1e-9), "the same for a 16:9 out of a 16:9 picture (to rounding)");
+    cropOf(whole, 2000, 2000, 0.0, 0.3, 0.3, 75, out);
+    check(out[0] == 0 && out[1] == 0 && out[2] == 1 && out[3] == 1, "full (target 0) with a shift leaves the bounds as they are");
+    desktopWindowCrop(whole, 2000, 2000, 16.0 / 9.0, false, 0.9, 0.9, base);
+    desktopWindowCrop(whole, 2000, 2000, 16.0 / 9.0, false, 0.9, 0.9, out, 100);
+    desktopWindowCrop(whole, 2000, 2000, 16.0 / 9.0, false, 0.9, 0.9, shifted, -100);
+    check(closeTo(base[1], 0.21875, 1e-6) && closeTo(out[1], 0.0, 1e-6) && closeTo(out[3], 0.5625, 1e-6) && closeTo(shifted[1], 0.4375, 1e-6) && closeTo(shifted[3], 1.0, 1e-6),
+          "with no centre the default is the middle (0.21875) and the shift moves it from there");
+    // Out of range is held to +-100.
+    float up100[4], down100[4], theDefault[4];
+    desktopWindowCrop(whole, 2000, 2000, 16.0 / 9.0, true, 0.5, 0.3, theDefault);
+    cropOf(whole, 2000, 2000, 16.0 / 9.0, 0.5, 0.3, 100, up100);
+    cropOf(whole, 2000, 2000, 16.0 / 9.0, 0.5, 0.3, -100, down100);
+    cropOf(whole, 2000, 2000, 16.0 / 9.0, 0.5, 0.3, 101, out);
+    cropOf(whole, 2000, 2000, 16.0 / 9.0, 0.5, 0.3, 250, shifted);
+    check(sameBits(up100, out) && sameBits(up100, shifted), "a shift of 101 or 250 is 100");
+    cropOf(whole, 2000, 2000, 16.0 / 9.0, 0.5, 0.3, 2147483647, out);
+    check(sameBits(up100, out), "the largest int is 100");
+    cropOf(whole, 2000, 2000, 16.0 / 9.0, 0.5, 0.3, -101, out);
+    cropOf(whole, 2000, 2000, 16.0 / 9.0, 0.5, 0.3, -250, shifted);
+    check(sameBits(down100, out) && sameBits(down100, shifted), "a shift of -101 or -250 is -100");
+    cropOf(whole, 2000, 2000, 16.0 / 9.0, 0.5, 0.3, -2147483647 - 1, out);
+    check(sameBits(down100, out), "the smallest int is -100");
+    check(!sameBits(up100, theDefault) && !sameBits(down100, theDefault) && !sameBits(up100, down100),
+          "control: the held shifts are neither the default crop (an out-of-range shift ignored or wrapped) nor each other");
+    // A sub-rect of a texture: the shift runs in the texture's own UVs, the columns stay. 4000x2000 texture, left half, 2:1: 2000 x 1000 pixels, 1000 rows of travel.
+    desktopWindowCrop(half, 4000, 2000, 2.0, true, 0.25, 0.5, base);
+    cropOf(half, 4000, 2000, 2.0, 0.25, 0.5, 100, out);
+    cropOf(half, 4000, 2000, 2.0, 0.25, 0.5, -100, shifted);
+    check(closeTo(base[1], 0.25, 1e-6) && closeTo(out[1], 0.0, 1e-6) && closeTo(out[3], 0.5, 1e-6) && closeTo(shifted[1], 0.5, 1e-6) && closeTo(shifted[3], 1.0, 1e-6) &&
+              closeTo(out[0], 0.0, 1e-6) && closeTo(out[2], 0.5, 1e-6) && closeTo(shifted[0], 0.0, 1e-6) && closeTo(shifted[2], 0.5, 1e-6),
+          "a sub-rect (the left half of a 4000x2000 texture): +-100 reach v 0 and v 1 in the texture's UVs, u stays 0..0.5");
+    // A flipped sub-rect: "up" is the side the draw puts at the window's top, which is where the bounds start (bounds[1], here v=1); it mirrors the upright crop.
+    const float tallWhole[4] = {0, 0, 1, 1}, tallFlipped[4] = {1, 1, 0, 0};
+    bool mirrors = true, differs = false;
+    for (int s = -100; s <= 100; s += 25) {
+        cropOf(tallWhole, 1000, 2000, 1.0, 0.5, 0.5, s, base);
+        cropOf(tallFlipped, 1000, 2000, 1.0, 0.5, 0.5, s, out);
+        mirrors = mirrors && closeTo(out[1], 1.0 - base[1], 1e-6) && closeTo(out[3], 1.0 - base[3], 1e-6) && closeTo(out[0], 1.0 - base[0], 1e-6) && closeTo(out[2], 1.0 - base[2], 1e-6);
+        differs = differs || !closeTo(out[1], base[1], 1e-3);
+    }
+    check(mirrors, "a flipped sub-rect moves the way an upright one does as the viewer sees it: every shift from -100 to 100 is the upright crop mirrored");
+    check(differs, "control: the flipped crop is not the upright one's numbers (the mirror is real)");
+    cropOf(tallFlipped, 1000, 2000, 1.0, 0.5, 0.5, 100, out);
+    cropOf(tallFlipped, 1000, 2000, 1.0, 0.5, 0.5, -100, shifted);
+    check(closeTo(out[1], 1.0, 1e-6) && closeTo(out[3], 0.5, 1e-6) && closeTo(shifted[1], 0.5, 1e-6) && closeTo(shifted[3], 0.0, 1e-6) && closeTo(out[0], 1.0, 1e-6) && closeTo(out[2], 0.0, 1e-6),
+          "a flipped 1000x2000 sub-rect: +100 starts at the bounds' start (v=1) and ends at 0.5; -100 ends at the bounds' end (v=0)");
+    // Both eyes get the same shift: the crop of two eyes with the same bounds and different centres shifts by the same rows (top edge at 0 for both at +100).
+    cropOf(whole, 2000, 2000, 16.0 / 9.0, 0.45, 0.35, 100, base);
+    cropOf(whole, 2000, 2000, 16.0 / 9.0, 0.55, 0.35, 100, out);
+    check(closeTo(base[1], 0.0, 1e-6) && closeTo(out[1], 0.0, 1e-6) && closeTo(base[3], out[3], 1e-9), "two eyes with the same shift: the same rows");
 
     // The layout: full keeps each eye's own size; a shape gives each eye its half of it.
     DwSize eyes[2] = {{1456, 1560}, {1456, 1560}}, shape[2];
@@ -755,23 +874,65 @@ static void wiring(const std::string& root) {
     const size_t visual = at(ini, "\n[visual]\n");
     const size_t world = at(ini, "\nworld_scale = 100\n", visual);
     const size_t key = at(ini, "\ndesktop_window = game\n", world);
-    const size_t aspectKey = at(ini, "\ndesktop_window_aspect = full\n", key), styleKey = at(ini, "\ndesktop_window_style = window\n", aspectKey);
+    const size_t aspectKey = at(ini, "\ndesktop_window_aspect = full\n", key), shiftKey = at(ini, "\ndesktop_window_vertical_shift = 0\n", aspectKey);
+    const size_t styleKey = at(ini, "\ndesktop_window_style = window\n", shiftKey);
     const size_t ui = ini.rfind("# ui: Desktop window | choices game=Game, left_eye=Left eye, right_eye=Right eye, both_eyes=Both eyes | live | menu desktop_window\n", key);
     const size_t uiAspect = ini.rfind("# ui: Desktop window shape | choices full=Full picture, 1:1=1:1, 4:3=4:3, 16:10=16:10, 16:9=16:9, 21:9=21:9 | live | menu desktop_window\n", aspectKey);
+    const size_t uiShift = ini.rfind("# ui: Desktop window vertical shift | range -100..100 | step 5 | unit % | signed | zero default | recommended 0 | live | menu desktop_window\n", shiftKey);
     const size_t uiStyle = ini.rfind("# ui: Desktop window style | choices window=Window, borderless=Borderless full screen | live | menu desktop_window\n", styleKey);
     check(visual != std::string::npos && world != std::string::npos && key != std::string::npos && ui != std::string::npos && ui > world && key - ui < 160 &&
-              aspectKey != std::string::npos && uiAspect != std::string::npos && uiAspect > key && aspectKey - uiAspect < 200 && styleKey != std::string::npos && uiStyle != std::string::npos &&
-              uiStyle > aspectKey && styleKey - uiStyle < 160 && count(ini, "\ndesktop_window = ") == 1 && count(ini, "\ndesktop_window_aspect = ") == 1 && count(ini, "\ndesktop_window_style = ") == 1,
-          "edvr.ini: [visual], after world_scale, the three keys ship game, full and window, each with its ui: line on the Desktop window page");
+              aspectKey != std::string::npos && uiAspect != std::string::npos && uiAspect > key && aspectKey - uiAspect < 200 && shiftKey != std::string::npos && uiShift != std::string::npos &&
+              uiShift > aspectKey && shiftKey - uiShift < 200 && styleKey != std::string::npos && uiStyle != std::string::npos && uiStyle > shiftKey && styleKey - uiStyle < 160 &&
+              count(ini, "\ndesktop_window = ") == 1 && count(ini, "\ndesktop_window_aspect = ") == 1 && count(ini, "\ndesktop_window_vertical_shift = ") == 1 &&
+              count(ini, "\ndesktop_window_style = ") == 1,
+          "edvr.ini: [visual], after world_scale, the four keys in order ship game, full, 0 and window, each with its ui: line on the Desktop window page (the shift a signed number row, step 5, unit %)");
     check(ini.rfind("VR only. Live.\n# ui: Desktop window |", key) != std::string::npos && ini.rfind("VR only. Live.\n# ui: Desktop window shape |", aspectKey) != std::string::npos &&
-              ini.rfind("VR only. Live.\n# ui: Desktop window style |", styleKey) != std::string::npos,
+              ini.rfind("VR only. Live.\n# ui: Desktop window vertical shift |", shiftKey) != std::string::npos && ini.rfind("VR only. Live.\n# ui: Desktop window style |", styleKey) != std::string::npos,
           "edvr.ini: each comment says VR only and live");
-    check(at(ini, "menu visual", key) == std::string::npos || at(ini, "menu visual", key) > styleKey, "edvr.ini: none of the three is on the Visual page");
+    check(at(ini, "menu visual", key) == std::string::npos || at(ini, "menu visual", key) > styleKey, "edvr.ini: none of the four is on the Visual page");
+    {   // the shift's words: 0 is the default centre, never "straight ahead" (the default centre may change); the shape's comment says the same
+        auto unwrapped = [](std::string s) {
+            size_t p;
+            while ((p = s.find("\n# ")) != std::string::npos) s.replace(p, 3, " ");
+            return s;
+        };
+        const size_t from = ini.rfind("\n# Moves the cut-out", shiftKey);
+        const std::string words = from == std::string::npos || shiftKey == std::string::npos ? std::string() : unwrapped(ini.substr(from, shiftKey - from));
+        const std::string shapeWords = key != std::string::npos && aspectKey > key ? unwrapped(ini.substr(key, aspectKey - key)) : std::string();
+        auto wordsOk = [](const std::string& w, const std::string& s) {
+            return !w.empty() && at(w, "0 is the default centre") != std::string::npos && at(w, "does nothing with the shape \"full\"") != std::string::npos && at(w, "straight ahead") == std::string::npos &&
+                   at(s, "default centre") != std::string::npos && at(s, "straight ahead") == std::string::npos;
+        };
+        check(wordsOk(words, shapeWords), "edvr.ini: the shift's comment says 0 is the default centre and what it does nothing for; neither it nor the shape's comment says straight ahead");
+        check(!wordsOk(replaced(words, "0 is the default centre", "0 is straight ahead"), shapeWords), "control: a shift comment that says straight ahead trips the words pin");
+        check(!wordsOk(words, replaced(shapeWords, "default centre", "straight ahead")), "control: a shape comment that says straight ahead trips the words pin");
+    }
     const std::string schemaTool = readFile(root + "\\tools\\gen_settings_schema.py");
     check(at(schemaTool, "'visual', 'desktop_window', 'flat_visual', 'debug')") != std::string::npos, "the schema generator knows the desktop_window page");
     check(at(cpp, "cfg.getString(\"visual.desktop_window_aspect\", \"full\")") != std::string::npos && at(cpp, "cfg.getString(\"visual.desktop_window_style\", \"window\")") != std::string::npos &&
               at(flatKeys, "desktop_window") == std::string::npos,
           "the two keys are read as one word each, defaults full and window, in the VR profile only (the flat profile's allow-list does not carry them)");
+
+    // Round 7: the vertical shift is one whole number, 0 by default, held to -100..100, read live with the others; the flat profile resets it before any read; the crop of both eyes is
+    // given it; its first read and each change are logged; the first-activation crop line carries it.
+    auto shiftWired = [](const std::string& t) {
+        const size_t flat = at(t, "if (flat) {");
+        const size_t flatShift = flat == std::string::npos ? flat : at(t, "S.shiftOpt = 0;\n        return;", flat);
+        const size_t read = at(t, "cfg.getIntInRange(\"visual.desktop_window_vertical_shift\", 0, -100, 100)");
+        const size_t keep = at(t, "S.shiftOpt = shiftOpt;", read);
+        return count(t, "cfg.getIntInRange(\"visual.desktop_window_vertical_shift\"") == 1 && read != std::string::npos && flatShift != std::string::npos && flatShift < read && keep != std::string::npos &&
+               count(t, "centreV[eye], cropBounds[eye], S.shiftOpt);") == 1 && at(t, "desktop window: vertical shift %d (was %d)") != std::string::npos &&
+               at(t, "desktop window: vertical shift %d\"") != std::string::npos && at(t, "default centre u=%.4f v=%.4f of its image (%s), vertical shift %d; crop bounds") != std::string::npos &&
+               at(t, "S.shiftOpt, cropBounds[eye][0]") != std::string::npos && at(t, "straight ahead") == std::string::npos;
+    };
+    check(shiftWired(cpp), "the vertical shift is read as one whole number from -100 to 100 (default 0), reset by the flat profile, passed to the crop of both eyes, and logged (first read, change, crop line)");
+    check(!shiftWired(replaced(cpp, "\"visual.desktop_window_vertical_shift\", 0, -100, 100", "\"visual.desktop_window_vertical_shift\", 0, 0, 100")), "control: a shift that cannot go below 0 trips the pin");
+    check(!shiftWired(replaced(cpp, "centreV[eye], cropBounds[eye], S.shiftOpt);", "centreV[eye], cropBounds[eye]);")), "control: a crop that is not given the shift trips the pin");
+    check(!shiftWired(replaced(cpp, "S.shiftOpt = 0;\n        return;", "return;")), "control: a flat profile that does not reset the shift trips the pin");
+    check(!shiftWired(replaced(cpp, "desktop window: vertical shift %d (was %d)", "desktop window: shift %d (was %d)")), "control: a change that is not logged trips the pin");
+    check(!shiftWired(replaced(cpp, "S.shiftOpt = shiftOpt;", "")), "control: a read that is not kept trips the pin");
+    check(!shiftWired(replaced(cpp, "default centre u=%.4f", "straight ahead u=%.4f")), "control: a crop line that says straight ahead trips the pin");
+    check(at(flatKeys, "vertical_shift") == std::string::npos, "the flat profile's allow-list does not carry visual.desktop_window_vertical_shift");
 }
 
 int main(int argc, char** argv) {

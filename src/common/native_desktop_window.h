@@ -8,7 +8,7 @@
 // that never calls it, leaves Elite's window exactly as it was.
 //
 // VERSIONS. 1: noteEye(context, eye, texture, bounds). 2 (round 6): noteEye also carries the field of view the image's pixels cover, so the graphics half can crop each eye to
-// the shape the user chose (visual.desktop_window_aspect) around where that eye looks straight ahead. The runtime asks for version 2 and falls back to 1; the graphics half
+// the shape the user chose (visual.desktop_window_aspect) around the eye's default centre. The runtime asks for version 2 and falls back to 1; the graphics half
 // answers either, with the table's `version` saying which noteEye it holds (the same slot, two signatures).
 #define EDVR_NATIVE_DESKTOP_WINDOW_VERSION_1 1u
 #define EDVR_NATIVE_DESKTOP_WINDOW_VERSION_2 2u

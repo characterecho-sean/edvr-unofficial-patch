@@ -2,18 +2,18 @@
 
 ## Status
 
-- **State (2026-10-28):** rounds 1 to 4 FLOWN OK on Steam (`edvr_gfx_20261028_161013.log`,
+- **State (2026-10-28):** **Round 7 BUILT, NOT FLOWN** (below). Rounds 1 to 4 FLOWN OK on Steam (`edvr_gfx_20261028_161013.log`,
   `_164251.log`, `_170329.log`; Sean confirmed the hidden cursor). Round 5 (the game keeps its
   mouse lock) ON MAIN d35d70bb. **Round 6 FLOWN OK, ON MAIN** (`edvr_gfx_20261028_192619.log`,
   Sean: looks good; `--health` OK): its own menu page, two new keys, the centre crop,
   borderless. Window and borderless switched live both ways; the 16:9 crop centred on the
-  field of view's straight-ahead point (right eye u 0.4108, left u 0.5892, v 0.5000 on the
-  Pimax). Tester zip `dist\edvr-desktop-window-<commit>-dlls.zip`. Three live keys in `[visual]`, all on VR's **Desktop window**
+  field of view's projection centre (right eye u 0.4108, left u 0.5892, v 0.5000 on the
+  Pimax). Tester zip `dist\edvr-desktop-window-<commit>-dlls.zip`. Four live keys in `[visual]`, all on VR's **Desktop window**
   page (right after Visual): `visual.desktop_window` (`game` | `left_eye` | `right_eye` |
   `both_eyes`, default `game`), `desktop_window_aspect` (`full` | `1:1` | `4:3` | `16:10` |
   `16:9` | `21:9`, default `full`; the ':' values pass the schema and the ini parser as they
-  are), `desktop_window_style` (`window` | `borderless`, default `window`). VR only. No
-  temporary keys.
+  are), `desktop_window_vertical_shift` (a whole number, -100 to 100, default 0),
+  `desktop_window_style` (`window` | `borderless`, default `window`). VR only. No temporary keys.
 - **What it does:** while Elite is in VR with 3D on, EDVR makes Elite's desktop window a
   framed, movable, resizable window (or, in `borderless`, the whole monitor) and fills it with
   EDVR's finished eye image, skips Elite's own drawing into it, and hides the cursor over the
@@ -22,7 +22,7 @@
 - **Round 6, the shape:** `full` is the picture as before (each eye's bounds sub-rect, both eyes
   side by side). Any other value is the whole picture's shape; with both eyes each gets half the
   width (16:9 is two 8:9 halves). Each eye is cropped to the largest rectangle of its shape inside
-  its bounds sub-rect, centred on where that eye looks straight ahead (u = -tan(left) /
+  its bounds sub-rect, centred on that eye's projection centre (u = -tan(left) /
   (tan(right) - tan(left)), v = tan(up) / (tan(up) - tan(down)) of the field of view its pixels
   cover), moved only as far as it takes to stay inside the image. The field of view comes with
   each eye: the export is now **version 2** (`noteEye` carries the four angles of
@@ -36,11 +36,22 @@
   again, the fight state is forgotten and the change is asked for. Back to `window`: the last
   settled window rect if it fits, at the current shape with its client height, clamped to the
   work area; else the largest fit, centred.
-- **First flight of round 6 must show:** the Desktop window page after Visual with three rows;
-  `aspect`/`style` lines at start and on each change; 16:9 with `left_eye` cropping around the
-  eye's centre (the `crop` line: u and v off 0.5 for an off-centre headset) and with `both_eyes`
-  two 8:9 halves; `borderless` filling the monitor; going back to `window`; the game's own mouse
-  lock and the hidden cursor still working in both styles; the restore at 3D off.
+- **Round 7, the vertical shift:** `visual.desktop_window_vertical_shift` moves the crop up (+)
+  or down (-). The default position is found first (centred on the projection centre, then kept
+  inside the image); the shift moves a fraction of the way from there to the highest position
+  (the crop's top edge at the picture's top) or the lowest (its bottom edge at the picture's
+  bottom): 0 changes nothing, +-100 reach the edges, +-50 are halfway. A crop with no room up or
+  down (`full`, or a shape as tall as the picture) does not move; the same shift goes to both
+  eyes, the horizontal position is unchanged. "Up" is the side the draw puts at the window's top,
+  which is where the eye's bounds start (`bounds[1]`); for a flipped sub-rect that is its vMin
+  as named, so it moves as the viewer sees it. Live, VR only, flat 0. The ini words say "0 is
+  the default centre", never "straight ahead". Logs: `vertical shift N` at the first read,
+  `vertical shift N (was M)` on a change, and `vertical shift N` in each `crop` line (now
+  `default centre u= v= ..., vertical shift N; crop bounds ...`).
+- **First flight of round 7 must show:** the row on the Desktop window page between shape and
+  style ("+25 %", "0 % (default)"); with 16:9 and `left_eye`, +100 putting the crop's top at
+  the picture's top and -100 its bottom at the picture's bottom, live; the `vertical shift`
+  lines; no change with `full`.
 - **Ruled out:** a stale binding shadow taking scene draws for buffer draws; H2 and H3 of
   round 3 (see "Flight history"). **Round 5:** Elite's `ClipCursor` is never touched; the
   cursor stays confined while the game holds it, so moving or resizing the window means
@@ -144,7 +155,11 @@
   they are; else height-1 halves or wholes of the chosen ratio, so both halves are exactly
   equal); `desktopWindowProjectionCentre` and `desktopWindowCrop` give each eye's crop bounds,
   which the draw hands to the existing shader as its bounds (so the filter's quarter-pixel taps
-  and the half-texel clamp work on the crop). A flipped sub-rect stays flipped. The runtime asks
+  and the half-texel clamp work on the crop). A flipped sub-rect stays flipped. The vertical
+  shift (round 7) is `desktopWindowCrop`'s last parameter: after the default top is found and
+  clamped, `top -= top * shift / 100` (shift > 0) or `top += (h - ch - top) * -shift / 100`
+  (shift < 0), clamped again, in the crop's own t-space (t = 0 is the draw's top), so both eyes
+  and a flipped sub-rect take the same rule. The runtime asks
   for version 2 of `edvrAcquireDesktopWindow` and falls back to 1; the graphics half answers
   either. `desktopWindowStyleFor(mode, gameStyle)` picks the framed style or
   `desktopWindowBorderlessStyle`; a setting change recomputes `S.ourStyle`, clears
@@ -194,6 +209,11 @@
   pushed down P`.
 - **Round 5:** the release of the game's lock was removed (see Status); the cursor line lost its
   clip counts, the install line lists three hooks.
+- **Round 6 (`edvr_gfx_20261028_192619.log`):** the Desktop window page after Visual with three
+  rows; `aspect` and `style` lines at the start and on each change; 16:9 cropped around each
+  eye's centre (right eye u 0.4108, left u 0.5892, v 0.5000) and two 8:9 halves with
+  `both_eyes`; `borderless` filling the monitor and back to `window`, live both ways; the mouse
+  lock and the hidden cursor working in both styles; restored at 3D off. `--health` OK.
 
 ## Decisions the briefs left open
 

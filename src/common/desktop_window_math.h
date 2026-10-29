@@ -309,7 +309,8 @@ inline DwCorrection desktopWindowCorrect(double aspect, int winLeft, int winTop,
 // ---- the picture's shape and the centre crop (round 6) ----
 // `visual.desktop_window_aspect`: `full` is the picture as each eye's bounds sub-rect gives it (both eyes side by side). Any other value is the shape of the WHOLE picture, and with
 // both eyes each eye gets half the width (16:9 is two 8:9 halves). Each eye is cropped to its shape: the largest rectangle of that shape inside the eye's bounds sub-rect (in
-// pixels), centred on the eye's projection centre (where that eye looks straight ahead) and moved only as far as it takes to stay inside the image.
+// pixels), centred on the eye's projection centre (the default centre) and moved only as far as it takes to stay inside the image. `visual.desktop_window_vertical_shift` then
+// moves it up or down from there (desktopWindowCrop).
 enum class DesktopWindowAspect : uint8_t { Full = 0, Square, FourThree, SixteenTen, SixteenNine, TwentyOneNine };
 inline DesktopWindowAspect desktopWindowParseAspect(const char* text, bool* known = nullptr) {
     if (known) *known = true;
@@ -356,7 +357,7 @@ inline void desktopWindowShapes(DesktopWindowAspect a, DesktopWindowMode mode, c
         }
     }
 }
-// Where an eye looks straight ahead in its image, from the field of view the image's pixels cover: angles are {left, right, up, down} in radians as OpenXR gives them (left and
+// The eye's projection centre in its image, the crop's default centre, from the field of view the image's pixels cover: angles are {left, right, up, down} in radians as OpenXR gives them (left and
 // down negative). u = -tan(left) / (tan(right) - tan(left)) from the image's left, v = tan(up) / (tan(up) - tan(down)) from its top. False when the angles are not a field of view.
 inline bool desktopWindowProjectionCentre(const float* angles, double* u, double* v) {
     if (!angles) return false;
@@ -373,7 +374,13 @@ inline bool desktopWindowProjectionCentre(const float* angles, double* u, double
 // The crop: the bounds {uMin, vMin, uMax, vMax} of the largest rectangle of the target shape (width over height, in pixels) inside the bounds sub-rect of a texW x texH texture,
 // centred on (u, v) (fractions of the sub-rect from its start, where haveCentre; else its middle) and kept inside it. A flipped sub-rect stays flipped. A target of 0 leaves the
 // bounds as they are.
-inline void desktopWindowCrop(const float bounds[4], uint32_t texW, uint32_t texH, double target, bool haveCentre, double u, double v, float out[4]) {
+//
+// THE VERTICAL SHIFT (round 7, a whole number of percent, held to -100..100). After the default position is found (centred, then kept inside), the crop moves a fraction of the
+// way from there to the highest position it can have (its top edge at the picture's top; positive values) or to the lowest (its bottom edge at the picture's bottom; negative
+// values): 0 changes nothing, +-100 reach the edges whatever the default was, and a crop that fills the picture's height has no travel and does not move. "Up" is toward the top of
+// the picture as the viewer sees it, which is where the draw puts the sub-rect's start (t = 0 is bounds[1], the vMin side, so for a flipped sub-rect the top is the side the
+// bounds' vMin names, not the texture's first row). The same shift goes to both eyes; the horizontal position is unchanged.
+inline void desktopWindowCrop(const float bounds[4], uint32_t texW, uint32_t texH, double target, bool haveCentre, double u, double v, float out[4], int verticalShift = 0) {
     for (int i = 0; i < 4; ++i) out[i] = bounds[i];
     if (!(target > 0)) return;
     const double du = static_cast<double>(bounds[2]) - bounds[0], dv = static_cast<double>(bounds[3]) - bounds[1];
@@ -385,6 +392,10 @@ inline void desktopWindowCrop(const float bounds[4], uint32_t texW, uint32_t tex
     const double cx = haveCentre ? u * w : w * 0.5, cy = haveCentre ? v * h : h * 0.5;
     double left = cx - cw * 0.5, top = cy - ch * 0.5;
     left = left < 0 ? 0 : left > w - cw ? w - cw : left;
+    top = top < 0 ? 0 : top > h - ch ? h - ch : top;
+    const int shift = verticalShift < -100 ? -100 : verticalShift > 100 ? 100 : verticalShift;
+    if (shift > 0) top -= top * (shift / 100.0);                          // toward the highest position: the top edge at the picture's top
+    else if (shift < 0) top += (h - ch - top) * (-shift / 100.0);        // toward the lowest: the bottom edge at the picture's bottom
     top = top < 0 ? 0 : top > h - ch ? h - ch : top;
     out[0] = static_cast<float>(bounds[0] + (left / w) * du);
     out[1] = static_cast<float>(bounds[1] + (top / h) * dv);
