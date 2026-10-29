@@ -1760,6 +1760,15 @@ void buildPages() {
         s.pages.push_back(p);
     }
     {
+        // Desktop window (2026-10-28): the keys that shape Elite's desktop window, right after Visual. The rows are the `menu desktop_window` rows of edvr.ini, in file order
+        // (what it shows, the picture's shape, the window's style); no group headings, the page is the group. VR's menu only: the flat panel has no such page.
+        Page p;
+        p.name = "Desktop window";
+        addSettingRows(p, MenuTier::Fix, "desktop_window", false);
+        firstSelectable(p);
+        s.pages.push_back(p);
+    }
+    {
         // Native on foot (2026-10-14): the explicitly selected native on-foot settings. The rows are the
         // `menu native_on_foot` rows of edvr.ini, in file order (the switch first, the HUD last); compatibility settings without that tag stay out of the page.
         // Grouped (F127): the headings are the ini's own heading blocks above the rows, as on the Fixes page.

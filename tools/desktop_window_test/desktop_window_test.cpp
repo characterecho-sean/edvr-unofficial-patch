@@ -9,6 +9,9 @@
 //   the cursor line; and the pins that hold the hooks to passing through everything but that one call.
 //   THE HIDDEN CURSOR (round 4): the rule (foreground and inside the client and active), the show-count protocol against a fake ShowCursor (the game sees the counts it would
 //   see without EDVR, a game "show" never leaves the real count at 0 or above while hiding is wanted, the hides are given back), and the pins on the thread check and the undo.
+//   THE PICTURE'S SHAPE AND THE STYLE (round 6): the aspect and style words, the projection centre from a field of view, the centre crop (an off-centre centre, the clamp at an image
+//   edge, a flipped sub-rect), both eyes as halves, the borderless style and rectangle (0x94020000 and 0x14CC0000 both become 0x94000000), a shape change keeping the client height,
+//   and the pins on the page, the keys, the version 2 export and the live change.
 //   THE WIRING (source pins, each with a control that trips it): the key is read as one word with the default game, the flat profile's allow-list does not carry it,
 //   the window is moved only from the thread-pool callback, the Present hook calls the feature before the census span and the real Present, the draw skip sits in the
 //   verdict and in the three thunks the verdict does not cover, the host hands the eye over after it is captured, the export and the source are built, and edvr.ini
@@ -173,6 +176,125 @@ static void rules() {
     check(!f.ok && std::strstr(f.reason, "buffer format"), "a float buffer is refused, and the reason names the buffer");
     f = desktopWindowFormats(DXGI_FORMAT_R8G8B8A8_TYPELESS, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB);
     check(f.ok && f.target == DXGI_FORMAT_R8G8B8A8_UNORM, "an sRGB-typed buffer with a UNORM eye asks for a UNORM view (the device decides whether it may)");
+}
+
+static void shapeRules() {
+    bool known = false;
+    // The words.
+    check(desktopWindowParseAspect("full", &known) == DesktopWindowAspect::Full && known && desktopWindowParseAspect("", &known) == DesktopWindowAspect::Full && known &&
+              desktopWindowParseAspect(nullptr, &known) == DesktopWindowAspect::Full && known && desktopWindowParseAspect("FULL", &known) == DesktopWindowAspect::Full && known,
+          "full is the default word, and the missing one");
+    check(desktopWindowParseAspect("1:1", &known) == DesktopWindowAspect::Square && known && desktopWindowParseAspect("4:3", &known) == DesktopWindowAspect::FourThree && known &&
+              desktopWindowParseAspect("16:10", &known) == DesktopWindowAspect::SixteenTen && known && desktopWindowParseAspect("16:9", &known) == DesktopWindowAspect::SixteenNine && known &&
+              desktopWindowParseAspect("21:9", &known) == DesktopWindowAspect::TwentyOneNine && known,
+          "the five shapes, with their colons");
+    check(desktopWindowParseAspect("16x9", &known) == DesktopWindowAspect::Full && !known && desktopWindowParseAspect("16:9 ", &known) == DesktopWindowAspect::Full && !known &&
+              desktopWindowParseAspect("off", &known) == DesktopWindowAspect::Full && !known,
+          "any other word is full and unknown (the flat profile's \"off\" included)");
+    check(!std::strcmp(desktopWindowAspectName(DesktopWindowAspect::SixteenNine), "16:9") && !std::strcmp(desktopWindowAspectName(DesktopWindowAspect::Full), "full") &&
+              !std::strcmp(desktopWindowAspectName(DesktopWindowAspect::TwentyOneNine), "21:9"),
+          "the shapes' names round-trip");
+    check(desktopWindowAspectRatio(DesktopWindowAspect::Full) == 0.0 && closeTo(desktopWindowAspectRatio(DesktopWindowAspect::SixteenNine), 16.0 / 9.0) &&
+              closeTo(desktopWindowAspectRatio(DesktopWindowAspect::SixteenTen), 1.6) && closeTo(desktopWindowAspectRatio(DesktopWindowAspect::FourThree), 4.0 / 3.0) &&
+              closeTo(desktopWindowAspectRatio(DesktopWindowAspect::Square), 1.0) && closeTo(desktopWindowAspectRatio(DesktopWindowAspect::TwentyOneNine), 21.0 / 9.0),
+          "width over height of each shape, 0 for full");
+    check(desktopWindowParseStyle("window", &known) == DesktopWindowStyle::Window && known && desktopWindowParseStyle("borderless", &known) == DesktopWindowStyle::Borderless && known &&
+              desktopWindowParseStyle("", &known) == DesktopWindowStyle::Window && known && desktopWindowParseStyle("fullscreen", &known) == DesktopWindowStyle::Window && !known &&
+              desktopWindowParseStyle("off", &known) == DesktopWindowStyle::Window && !known,
+          "the style words: window is the default, borderless the other, anything else is window and unknown");
+    check(!std::strcmp(desktopWindowStyleName(DesktopWindowStyle::Borderless), "borderless") && !std::strcmp(desktopWindowStyleName(DesktopWindowStyle::Window), "window"), "the style names round-trip");
+
+    // The borderless style and its rectangle.
+    check(desktopWindowBorderlessStyle(0x94020000u) == 0x94000000u, "the game's popup 0x94020000 becomes the bare popup 0x94000000 (the minimize box goes)");
+    check(desktopWindowBorderlessStyle(0x14CC0000u) == 0x94000000u, "the framed window 0x14CC0000 becomes 0x94000000");
+    check(desktopWindowBorderlessStyle(0x94000000u) == 0x94000000u, "the bare popup is its own fixed point");
+    check(desktopWindowBorderlessStyle(0x17CF0000u) == 0x96000000u && desktopWindowBorderlessStyle(0x16CF0000u) == 0x96000000u, "Elite's own windowed style loses its frame and boxes, keeps visible and the clip bits");
+    check(desktopWindowBorderlessStyle(0x84020000u) == 0x84000000u, "a window that is not visible stays not visible");
+    check(desktopWindowStyleFor(DesktopWindowStyle::Borderless, 0x94020000u) == 0x94000000u && desktopWindowStyleFor(DesktopWindowStyle::Window, 0x94020000u) == 0x14CC0000u,
+          "each style mode's style for the game's popup");
+    check(desktopWindowStyleIsOurs(0x94000000u, 0x94000000u) && !desktopWindowStyleIsOurs(0x94020000u, 0x94000000u) && !desktopWindowStyleIsOurs(0x14CC0000u, 0x94000000u) &&
+              !desktopWindowStyleIsOurs(0x94000000u, 0x14CC0000u),
+          "the borderless style is told from the game's popup (its minimize box) and from the framed one, both ways");
+    DwWindowPlan full = desktopWindowBorderlessPlan(-1920, 0, 0, 1080);
+    check(full.ok && full.left == -1920 && full.top == 0 && full.right == 0 && full.bottom == 1080 && full.clientWidth == 1920 && full.clientHeight == 1080,
+          "the borderless rectangle is the whole monitor, client and all, on a monitor to the left too");
+    check(!desktopWindowBorderlessPlan(0, 0, 0, 1080).ok && !desktopWindowBorderlessPlan(10, 10, 5, 20).ok, "a monitor with no size has no borderless rectangle");
+
+    // Where an eye looks straight ahead.
+    double u = 0, v = 0;
+    const float symmetric[4] = {-0.8f, 0.8f, 0.8f, -0.8f};
+    check(desktopWindowProjectionCentre(symmetric, &u, &v) && closeTo(u, 0.5, 1e-6) && closeTo(v, 0.5, 1e-6), "a symmetric field of view looks at the middle");
+    const float offCentre[4] = {static_cast<float>(std::atan(-1.0)), static_cast<float>(std::atan(1.5)), static_cast<float>(std::atan(1.2)), static_cast<float>(std::atan(-0.8))};
+    check(desktopWindowProjectionCentre(offCentre, &u, &v) && closeTo(u, 0.4, 1e-5) && closeTo(v, 0.6, 1e-5),
+          "tangents -1 to 1.5 across and 1.2 to -0.8 down: u = 1/2.5 = 0.4 from the left, v = 1.2/2.0 = 0.6 from the top");
+    const float zero[4] = {0, 0, 0, 0}, inverted[4] = {0.5f, -0.5f, 0.5f, -0.5f}, nan[4] = {-0.5f, NAN, 0.5f, -0.5f}, wide[4] = {-1.6f, 0.5f, 0.5f, -0.5f};
+    check(!desktopWindowProjectionCentre(zero, &u, &v) && !desktopWindowProjectionCentre(inverted, &u, &v) && !desktopWindowProjectionCentre(nan, &u, &v) &&
+              !desktopWindowProjectionCentre(wide, &u, &v) && !desktopWindowProjectionCentre(nullptr, &u, &v),
+          "no field of view, an inverted one, a NaN, an angle past a right angle and a null pointer give no centre");
+
+    // The crop. A 2000x2000 image, 16:9: the whole width, 1125 rows, the centre decides which.
+    const float whole[4] = {0, 0, 1, 1};
+    float out[4];
+    desktopWindowCrop(whole, 2000, 2000, 16.0 / 9.0, true, 0.5, 0.3, out);
+    check(closeTo(out[0], 0.0, 1e-6) && closeTo(out[2], 1.0, 1e-6) && closeTo(out[1], 0.01875, 1e-6) && closeTo(out[3], 0.58125, 1e-6),
+          "16:9 of a square image, centred on v=0.3: the full width and 1125 rows from 0.01875");
+    desktopWindowCrop(whole, 2000, 2000, 16.0 / 9.0, true, 0.5, 0.05, out);
+    check(closeTo(out[1], 0.0, 1e-6) && closeTo(out[3], 0.5625, 1e-6), "a centre near the top: the crop is moved down to the image's edge, no further");
+    desktopWindowCrop(whole, 2000, 2000, 16.0 / 9.0, true, 0.5, 0.95, out);
+    check(closeTo(out[1], 0.4375, 1e-6) && closeTo(out[3], 1.0, 1e-6), "a centre near the bottom: the crop is moved up to the image's edge");
+    desktopWindowCrop(whole, 2000, 2000, 16.0 / 9.0, true, 0.5, 3.0, out);
+    check(closeTo(out[1], 0.4375, 1e-6) && closeTo(out[3], 1.0, 1e-6), "a centre outside the image is held at its edge");
+    desktopWindowCrop(whole, 2000, 2000, 16.0 / 9.0, false, 0.9, 0.9, out);
+    check(closeTo(out[1], 0.21875, 1e-6) && closeTo(out[3], 0.78125, 1e-6), "no centre: the middle of the bounds");
+    desktopWindowCrop(whole, 2000, 2000, 0.5, true, 0.2, 0.5, out);
+    check(closeTo(out[0], 0.0, 1e-6) && closeTo(out[2], 0.5, 1e-6) && closeTo(out[1], 0.0, 1e-6) && closeTo(out[3], 1.0, 1e-6),
+          "a tall target (1:2) of a square image, centred on u=0.2: 1000 columns, clamped to the left edge");
+    const float half[4] = {0, 0, 0.5f, 1};
+    desktopWindowCrop(half, 4000, 1000, 1.0, true, 0.6, 0.5, out);
+    check(closeTo(out[0], 0.175, 1e-6) && closeTo(out[2], 0.425, 1e-6) && closeTo(out[1], 0.0, 1e-6) && closeTo(out[3], 1.0, 1e-6),
+          "a sub-rect of a texture: 1000x1000 of its 2000x1000, centred on u=0.6, in texture UVs");
+    desktopWindowCrop(half, 4000, 2000, 2.0, true, 0.25, 0.5, out);
+    check(closeTo(out[0], 0.0, 1e-6) && closeTo(out[2], 0.5, 1e-6) && closeTo(out[1], 0.25, 1e-6) && closeTo(out[3], 0.75, 1e-6), "a wider target than the sub-rect crops its height, in the texture's UVs");
+    const float flipped[4] = {1, 1, 0, 0};
+    desktopWindowCrop(flipped, 2000, 1000, 1.0, true, 0.25, 0.5, out);
+    check(closeTo(out[0], 1.0, 1e-6) && closeTo(out[2], 0.5, 1e-6) && closeTo(out[1], 1.0, 1e-6) && closeTo(out[3], 0.0, 1e-6), "a flipped sub-rect stays flipped, and the centre runs along the flip");
+    desktopWindowCrop(whole, 1600, 900, 16.0 / 9.0, true, 0.3, 0.3, out);
+    check(closeTo(out[0], 0.0, 1e-6) && closeTo(out[2], 1.0, 1e-6) && closeTo(out[1], 0.0, 1e-6) && closeTo(out[3], 1.0, 1e-6), "a target of the image's own shape leaves the bounds");
+    desktopWindowCrop(whole, 2000, 2000, 0.0, true, 0.3, 0.3, out);
+    check(out[0] == 0 && out[1] == 0 && out[2] == 1 && out[3] == 1, "a target of 0 (full) leaves the bounds as they are");
+
+    // The layout: full keeps each eye's own size; a shape gives each eye its half of it.
+    DwSize eyes[2] = {{1456, 1560}, {1456, 1560}}, shape[2];
+    desktopWindowShapes(DesktopWindowAspect::Full, DesktopWindowMode::BothEyes, eyes, shape);
+    check(shape[0].w == 1456 && shape[1].h == 1560, "full: each eye as it is");
+    desktopWindowShapes(DesktopWindowAspect::SixteenNine, DesktopWindowMode::BothEyes, eyes, shape);
+    double aspect = 0;
+    check(closeTo(shape[0].w, 8.0 / 9.0) && shape[0].h == 1.0 && closeTo(shape[1].w, 8.0 / 9.0) && desktopWindowAspect(DesktopWindowMode::BothEyes, shape, &aspect) && closeTo(aspect, 16.0 / 9.0),
+          "16:9 with both eyes: two 8:9 halves, one 16:9 picture");
+    desktopWindowShapes(DesktopWindowAspect::SixteenNine, DesktopWindowMode::LeftEye, eyes, shape);
+    check(closeTo(shape[0].w, 16.0 / 9.0) && desktopWindowAspect(DesktopWindowMode::LeftEye, shape, &aspect) && closeTo(aspect, 16.0 / 9.0), "16:9 with one eye: the whole picture");
+    DwSize unequal[2] = {{1000, 1000}, {400, 900}};
+    desktopWindowShapes(DesktopWindowAspect::FourThree, DesktopWindowMode::BothEyes, unequal, shape);
+    DwPixelRect rects[2];
+    unsigned idx[2];
+    const unsigned n = desktopWindowEyeRects(DesktopWindowMode::BothEyes, DwPixelRect{0, 0, 1600, 900}, shape, rects, idx);
+    check(desktopWindowAspect(DesktopWindowMode::BothEyes, shape, &aspect) && closeTo(aspect, 4.0 / 3.0) && n == 2 && rects[0].w == 800 && rects[1].w == 800 && rects[0].h == rects[1].h &&
+              rects[0].x == 0 && rects[1].x == 800,
+          "two eyes of different sizes still get exactly half the width each under a shape");
+    DwPixelRect halves[2];
+    desktopWindowShapes(DesktopWindowAspect::SixteenNine, DesktopWindowMode::BothEyes, eyes, shape);
+    desktopWindowEyeRects(DesktopWindowMode::BothEyes, DwPixelRect{0, 0, 1600, 900}, shape, halves, idx);
+    check(halves[0].w == 800 && halves[0].h == 900 && halves[1].x == 800 && halves[1].w == 800 && halves[1].h == 900, "16:9 on a 1600x900 picture: two 800x900 (8:9) halves");
+
+    // A shape change alone keeps the client height and the top-left (round 6), then clamps.
+    const DwArea work{0, 0, 1920, 1080};
+    DwCorrection c = desktopWindowCorrect(16.0 / 9.0, 100, 100, 1000, 800, 1000, 1000, 16, 39, work, kDesktopWindowMinClientHeight, true);
+    check(c.ok && c.keptHeight && c.clientHeight == 800 && c.clientWidth == 1422 && c.left == 100 && c.top == 100 && c.right == 1538 && c.bottom == 939,
+          "a shape change alone: the client height 800 stays, the width follows (1422), the top-left stays");
+    c = desktopWindowCorrect(16.0 / 9.0, 100, 100, 1008, 800, 0, 0, 16, 39, work, kDesktopWindowMinClientHeight, false);
+    check(c.ok && !c.keptHeight && c.clientWidth == 1008 && c.clientHeight == 567, "control: without the shape-change flag the width is the one kept");
+    c = desktopWindowCorrect(21.0 / 9.0, 1000, 100, 1000, 1000, 1000, 1000, 16, 39, work, kDesktopWindowMinClientHeight, true);
+    check(c.ok && c.right <= 1920 && c.bottom <= 1080 && c.left >= 0 && c.top >= 0 && c.clientHeight <= 1041, "a wider shape that would stick out is clamped to the work area");
 }
 
 static void windowRules() {
@@ -412,7 +534,7 @@ static void wiring(const std::string& root) {
     check(!movedOnlyByPool(cpp + "\nvoid f(HWND h){ SetWindowPos(h, nullptr, 0, 0, 1, 1, 0); }\n"), "control: a SetWindowPos from the hook trips the pin");
     check(!movedOnlyByPool(cpp + "\nvoid f(HWND h){ SetWindowLongPtrW(h, GWL_STYLE, 0); }\n"), "control: a SetWindowLongPtrW from the hook trips the pin");
     auto windowRulesWired = [](const std::string& t) {
-        return at(t, "desktopWindowFramedStyle(static_cast<uint32_t>(style))") != std::string::npos && at(t, "if (windowInMoveSize(hwnd)) return;") != std::string::npos &&
+        return at(t, "desktopWindowStyleFor(S.activeStyle, static_cast<uint32_t>(style))") != std::string::npos && at(t, "if (windowInMoveSize(hwnd)) return;") != std::string::npos &&
                at(t, "(info.flags & GUI_INMOVESIZE) != 0") != std::string::npos && at(t, "GetGUIThreadInfo(thread, &info)") != std::string::npos &&
                at(t, "\"AdjustWindowRectExForDpi\"") != std::string::npos && at(t, "\"GetDpiForWindow\"") != std::string::npos && at(t, "AdjustWindowRectEx(&probe") != std::string::npos &&
                at(t, "MonitorFromRect(&r, MONITOR_DEFAULTTONEAREST)") != std::string::npos && at(t, "desktopWindowPlan(aspect, work.left, work.top, work.right, work.bottom, frameDx, frameDy)") != std::string::npos &&
@@ -463,14 +585,52 @@ static void wiring(const std::string& root) {
     // The host hands the eye over after it is captured, and the provider is optional.
     auto handsOver = [](const std::string& t) {
         const size_t cap = at(t, "captured.capture(eye,selected,region,flags,true)");
-        const size_t note = at(t, "desktopWindow.noteEye(unsigned(eye),treated.Get(),treatedBounds);", cap);
+        const size_t note = at(t, "desktopWindow.noteEye(unsigned(eye),treated.Get(),treatedBounds,contentAngles);", cap);
         const size_t end = at(t, "return r;", note);
         return cap != std::string::npos && note != std::string::npos && end != std::string::npos && end - note < 200 &&
                at(t, "native_desktop_window,unavailable=") != std::string::npos && at(t, "desktopWindow.acquire(options.graphicsProvider,externalDevice,runtimeGeneration)") != std::string::npos &&
                at(t, "desktopWindow.close();") != std::string::npos;
     };
     check(handsOver(host), "the host hands each captured eye's finished texture over, acquires the provider as optional and closes it");
-    check(!handsOver(replaced(host, "desktopWindow.noteEye(unsigned(eye),treated.Get(),treatedBounds);", "")), "control: no handoff trips the pin");
+    check(!handsOver(replaced(host, "desktopWindow.noteEye(unsigned(eye),treated.Get(),treatedBounds,contentAngles);", "")), "control: no handoff trips the pin");
+    // Round 6: the export is version 2 (the field of view rides with each eye), the runtime asks for 2 then 1, the host takes the field of view from the projection the treated
+    // pixels hold, and the graphics half keeps it and crops with it.
+    const std::string exportHeader = readFile(root + "\\src\\common\\native_desktop_window.h");
+    const std::string client = readFile(root + "\\src\\openxr\\native_desktop_window_client.h");
+    auto fovWired = [&](const std::string& h, const std::string& c, const std::string& t, const std::string& w) {
+        return at(h, "#define EDVR_NATIVE_DESKTOP_WINDOW_VERSION_2 2u") != std::string::npos && at(h, "typedef HRESULT(WINAPI *EdvrNativeDesktopWindowNoteEye2)(void*, uint32_t, ID3D11Texture2D*, const float*, const float*);") != std::string::npos &&
+               at(c, "{EDVR_NATIVE_DESKTOP_WINDOW_VERSION_2, EDVR_NATIVE_DESKTOP_WINDOW_VERSION_1}") != std::string::npos && at(c, "EdvrNativeDesktopWindowNoteEye2>(table_.noteEye)") != std::string::npos &&
+               at(w, "const auto& contentFov=frameContentViews[unsigned(eye)].fov;") != std::string::npos &&
+               at(w, "const float contentAngles[4]={contentFov.angleLeft,contentFov.angleRight,contentFov.angleUp,contentFov.angleDown};") != std::string::npos &&
+               at(t, "table->version != EDVR_NATIVE_DESKTOP_WINDOW_VERSION_1 && table->version != EDVR_NATIVE_DESKTOP_WINDOW_VERSION_2") != std::string::npos &&
+               at(t, "reinterpret_cast<EdvrNativeDesktopWindowNoteEye>(&edvr::noteEye2)") != std::string::npos &&
+               at(t, "desktopWindowProjectionCentre(snap.fov[eye], &centreU[eye], &centreV[eye])") != std::string::npos && at(t, "draws[i].bounds = cropBounds[eyeIndex[i]];") != std::string::npos &&
+               at(t, "an eye image came with no field of view; its crop is centred on the middle of its bounds") != std::string::npos &&
+               at(t, "desktopWindowShapes(S.aspectOpt, S.mode, eyeSize, shape);") != std::string::npos && at(t, "desktopWindowEyeRects(S.mode, shownPx, shape, rects, eyeIndex)") != std::string::npos;
+    };
+    check(fovWired(exportHeader, client, cpp, host), "the export is version 2 with the field of view; the runtime asks for 2 then 1; the host sends the content projection; the crop and the layout use it");
+    check(!fovWired(replaced(exportHeader, "#define EDVR_NATIVE_DESKTOP_WINDOW_VERSION_2 2u", ""), client, cpp, host), "control: no version 2 trips the pin");
+    check(!fovWired(exportHeader, client, replaced(cpp, "draws[i].bounds = cropBounds[eyeIndex[i]];", "draws[i].bounds = snap.bounds[eyeIndex[i]];"), host), "control: a draw that ignores the crop trips the pin");
+    check(!fovWired(exportHeader, client, cpp, replaced(host, "const auto& contentFov=frameContentViews[unsigned(eye)].fov;", "const auto& contentFov=frameViews[unsigned(eye)].fov;")), "control: the wrong projection in the host trips the pin");
+    // Round 6: a live change of the style or the shape is not a fight; the style goes to the new target and the fight state is forgotten.
+    auto liveChange = [](const std::string& t) {
+        const size_t a = at(t, "if (S.activeStyle != S.styleOpt) {");
+        const size_t b = at(t, "S.ourStyle = static_cast<LONG_PTR>(desktopWindowStyleFor(S.activeStyle, static_cast<uint32_t>(S.gameStyle)));", a);
+        const size_t c = at(t, "S.styleSeenOurs = false;", b);
+        const size_t d = at(t, "if (S.activeAspect != S.aspectOpt) {", c);
+        const size_t e = at(t, "S.keepHeightOnce = true;", d);
+        const size_t f = at(t, "const bool borderless = S.activeStyle == DesktopWindowStyle::Borderless;");
+        return a != std::string::npos && b != std::string::npos && c != std::string::npos && d != std::string::npos && e != std::string::npos && f != std::string::npos &&
+               at(t, "desktopWindowBorderlessPlan(mi.rcMonitor.left, mi.rcMonitor.top, mi.rcMonitor.right, mi.rcMonitor.bottom)") != std::string::npos &&
+               at(t, "desktop window: aspect %s (was %s)") != std::string::npos && at(t, "desktop window: style %s (was %s)") != std::string::npos &&
+               at(t, "\"aspect %s, %s%s\"") != std::string::npos && at(t, "picture %s; window %s") != std::string::npos &&
+               at(t, "S.activeStyle == DesktopWindowStyle::Window && !desktopWindowAspectOff") != std::string::npos &&
+               at(t, "desktopWindowCorrect(aspect, S.settledRect[0], S.settledRect[1], S.settledClient[0], S.settledClient[1], 0, 0, settledDx, settledDy,") != std::string::npos;
+    };
+    check(liveChange(cpp), "a live change of the style or the shape resets the fight state and asks for the new target; borderless is the monitor's rectangle; the lines name the aspect and the style");
+    check(!liveChange(replaced(cpp, "S.styleSeenOurs = false;\n            S.pending = false;\n            S.pendingStyle = false;\n            S.havePrev = false;", "S.pending = false;\n            S.pendingStyle = false;\n            S.havePrev = false;")),
+          "control: a style change that does not forget the fight state trips the pin");
+    check(!liveChange(replaced(cpp, "S.keepHeightOnce = true;", "")), "control: a shape change that does not keep the height trips the pin");
 
     // The cursor (rounds 3 to 5): three IAT hooks on the executable that pass everything through; only ShowCursor's count is changed, and only while the cursor is hidden.
     const std::string cursor = readFile(root + "\\src\\d3d11\\desktop_window_cursor.cpp");
@@ -591,20 +751,32 @@ static void wiring(const std::string& root) {
           "build.bat exports edvrAcquireDesktopWindow, compiles desktop_window.cpp and runs this rig");
     check(at(shaderTool, "fixed_desktop_window_variants.h") != std::string::npos && at(shaderTool, "kDesktopWindowPsBytecode") != std::string::npos, "the shader build registers the two desktop window shaders");
 
-    // edvr.ini: [visual], after world_scale, one ui: line with the four choices, live, and the sentence the menu reads.
+    // edvr.ini: [visual], after world_scale, the three keys in order, each with its ui: line on the Desktop window page, live, and the sentence the menu reads.
     const size_t visual = at(ini, "\n[visual]\n");
     const size_t world = at(ini, "\nworld_scale = 100\n", visual);
     const size_t key = at(ini, "\ndesktop_window = game\n", world);
-    const size_t ui = ini.rfind("# ui: Desktop window | choices game=Game, left_eye=Left eye, right_eye=Right eye, both_eyes=Both eyes | live | menu visual\n", key);
+    const size_t aspectKey = at(ini, "\ndesktop_window_aspect = full\n", key), styleKey = at(ini, "\ndesktop_window_style = window\n", aspectKey);
+    const size_t ui = ini.rfind("# ui: Desktop window | choices game=Game, left_eye=Left eye, right_eye=Right eye, both_eyes=Both eyes | live | menu desktop_window\n", key);
+    const size_t uiAspect = ini.rfind("# ui: Desktop window shape | choices full=Full picture, 1:1=1:1, 4:3=4:3, 16:10=16:10, 16:9=16:9, 21:9=21:9 | live | menu desktop_window\n", aspectKey);
+    const size_t uiStyle = ini.rfind("# ui: Desktop window style | choices window=Window, borderless=Borderless full screen | live | menu desktop_window\n", styleKey);
     check(visual != std::string::npos && world != std::string::npos && key != std::string::npos && ui != std::string::npos && ui > world && key - ui < 160 &&
-              count(ini, "\ndesktop_window = ") == 1,
-          "edvr.ini: [visual], after world_scale, the key ships game with its ui: line");
-    const size_t says = ini.rfind("VR only. Live.\n# ui: Desktop window", key);
-    check(says != std::string::npos, "edvr.ini: the comment says VR only and live");
+              aspectKey != std::string::npos && uiAspect != std::string::npos && uiAspect > key && aspectKey - uiAspect < 200 && styleKey != std::string::npos && uiStyle != std::string::npos &&
+              uiStyle > aspectKey && styleKey - uiStyle < 160 && count(ini, "\ndesktop_window = ") == 1 && count(ini, "\ndesktop_window_aspect = ") == 1 && count(ini, "\ndesktop_window_style = ") == 1,
+          "edvr.ini: [visual], after world_scale, the three keys ship game, full and window, each with its ui: line on the Desktop window page");
+    check(ini.rfind("VR only. Live.\n# ui: Desktop window |", key) != std::string::npos && ini.rfind("VR only. Live.\n# ui: Desktop window shape |", aspectKey) != std::string::npos &&
+              ini.rfind("VR only. Live.\n# ui: Desktop window style |", styleKey) != std::string::npos,
+          "edvr.ini: each comment says VR only and live");
+    check(at(ini, "menu visual", key) == std::string::npos || at(ini, "menu visual", key) > styleKey, "edvr.ini: none of the three is on the Visual page");
+    const std::string schemaTool = readFile(root + "\\tools\\gen_settings_schema.py");
+    check(at(schemaTool, "'visual', 'desktop_window', 'flat_visual', 'debug')") != std::string::npos, "the schema generator knows the desktop_window page");
+    check(at(cpp, "cfg.getString(\"visual.desktop_window_aspect\", \"full\")") != std::string::npos && at(cpp, "cfg.getString(\"visual.desktop_window_style\", \"window\")") != std::string::npos &&
+              at(flatKeys, "desktop_window") == std::string::npos,
+          "the two keys are read as one word each, defaults full and window, in the VR profile only (the flat profile's allow-list does not carry them)");
 }
 
 int main(int argc, char** argv) {
     rules();
+    shapeRules();
     windowRules();
     cursorRules();
     hideRules();

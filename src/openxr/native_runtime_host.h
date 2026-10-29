@@ -2313,7 +2313,12 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     if(r==vr::VRCompositorError_None && copyPixels){
       ++copiedEyes;temporalFrameEyes|=1u<<unsigned(eye);
       // The eye is captured: its finished texture (after the upscaler, sharpening, the UI layer and the menu) is what visual.desktop_window shows in Elite's window.
-      desktopWindow.noteEye(unsigned(eye),treated.Get(),treatedBounds);
+      // It goes with the field of view those pixels hold: frameContentViews, the projection the treated pixels actually hold (finishCapturedEye sets it for this eye each
+      // capture, narrowed by a field-of-view trim and shifted by an untreated frame's jitter), the same one the menu is placed by. The crop to a chosen shape is centred on
+      // where the eye looks straight ahead in it.
+      const auto& contentFov=frameContentViews[unsigned(eye)].fov;
+      const float contentAngles[4]={contentFov.angleLeft,contentFov.angleRight,contentFov.angleUp,contentFov.angleDown};
+      desktopWindow.noteEye(unsigned(eye),treated.Get(),treatedBounds,contentAngles);
     }
     else { invalidateEyeTreatments(); timingInvalidate(); }
     return r;
