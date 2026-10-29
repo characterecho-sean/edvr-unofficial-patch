@@ -84,6 +84,7 @@ extern bool g_uiLayerRedirecting;
 extern bool g_uiLayerIssueBlocked;
 extern bool g_uiLayerCrispOn;
 extern bool g_uiLayerCrispPending;
+extern bool g_uiLayerHudGlowPending;
 extern bool g_uiLayerWorldReissue;
 extern bool g_uiLayerMapsOn;
 extern uint64_t g_uiLayerGateFrame;
@@ -205,6 +206,10 @@ bool uiLayerCrispNoteEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count
 // outstanding, so forwardWithVerdict must run the re-issue bracket after the
 // game's own issue.
 inline bool uiLayerCrispPending() { return detail::g_uiLayerCrispPending; }
+// One load for the headset's bloom hook (vr_star_glow.h): an eye's HDR HUD layer holds this frame's HUD light that no first-level draw has taken yet, so
+// the bloom chain's first level, when it comes, is asked for H' = H + the HUD (uiLayerHeadsetGlowFeed). Set at the first HUD draw an eye-frame takes,
+// cleared when the last waiting eye is claimed and at the frame boundary. Read and written on the render thread.
+inline bool uiLayerHudGlowPending() { return detail::g_uiLayerHudGlowPending; }
 // Around the re-issue of the admitted tonemap draw (the game's own draw,
 // re-issued by the caller between them): Begin binds the 8-bit layer, the
 // disabled RGB-only blend, the full-layer viewport and the HDR layer at the
@@ -459,12 +464,26 @@ struct UiGlowStar {
 };
 ID3D11ShaderResourceView* uiLayerGlowFeed(ID3D11DeviceContext* ctx, uint64_t frame, uint32_t slot, const void* hdr, int* verdict,
                                           UiGlowStar* star = nullptr);
-// visual.star_glow in the headset (vr_star_glow.h): the same H' = H + m * S, for the first level of an eye's bloom chain, with no HUD term (in VR the HUD is
-// not in H, and the layer's HUD feed belongs to the flat profile). It is glowFeedPass with no HUD: a copy of H, then the star pass, one command list on the
-// coverage pass's deferred context, executed with the immediate context's state restored. `star` is required (its srv and m); `hdr` is the resource the
-// first-level draw reads at `slot`. Returns H''s shader view (owned here, valid until the next call or the layer's release), or null with `verdict`
-// (UiGlowFeed as an int) and the star input's out flags saying why. The caller binds it for the one draw and puts the game's view back after.
-ID3D11ShaderResourceView* uiLayerStarFeed(ID3D11DeviceContext* ctx, uint32_t slot, const void* hdr, UiGlowStar* star, int* verdict);
+// The headset's first level (vr_star_glow.h; visual.star_glow's H' = H + m * S, and the HUD's bloom below). The flat feed above is gated on the flat profile and eye 0's HUD layer.
+// The HUD's bloom in the headset (docs/cockpit-hud-layer-design-2026-09-27.md, "2026-10-28: the HUD's bloom in the headset"). fix.ui_quality takes the cockpit's holo
+// panels, flight HUD and target sprite out of an eye's H into that eye's HDR HUD layer, and the bloom chain reads H: the HUD lost its halo in the headset exactly as
+// it did in flat. At an eye's first level (the draw vr_star_glow.cpp finds by its pixel shader, reading that eye's H at `slot`) this makes H' = H + the HUD
+// layer's premultiplied radiance by flat's pass (kUiGlowFeedPsHlsl) and, when `star` is given, + m * S (visual.star_glow) in the same texture, one command
+// list on the coverage pass's deferred context. Which eye's layer is H's is decided by identity (UiHeadsetHudEye): the layer whose HUD draws were taken
+// from `hdr`. The HUD's body stays in the layer, tonemapped once by the re-issue with the scene's bloom zeroed; H' is bound for this one draw by the caller
+// and reaches no tonemap, so the HUD's light is in the frame once as its body and once, softened, as the bloom the scene's own tonemap adds.
+// Returns H''s view (owned here, valid until the next call or the layer's release) or null, with `out` saying why. `star` may be null or hold no view: then
+// the HUD is the only input, and with no HUD either nothing is made (out->hud names which). With `star` and no HUD (no eye's layer is H's, or its content is not of this
+// frame) H' is a copy of H and m * S, as visual.star_glow made it before the HUD joined; the star input's own out flags (applied, sizeMismatch, unavailable) are set as ever.
+struct UiHeadsetGlow {
+    int hud = 1;                                 // out: the layer's verdict for this H (ui_layer_math.h's UiHeadsetHud as an int; 1 is kNoLayer)
+    int eye = -1;                                // out: the eye whose layer it is (-1: none)
+    bool hudIncluded = false;                    // out: the HUD layer's light is in H'
+    int verdict = 0;                             // out: the pass's UiGlowFeed
+};
+ID3D11ShaderResourceView* uiLayerHeadsetGlowFeed(ID3D11DeviceContext* ctx, uint32_t slot, const void* hdr, UiGlowStar* star, UiHeadsetGlow* out);
+// Eye-frames (per eye) that took HUD draws into the HDR layer since the DLL loaded: the headset hook's window line sets them beside the first levels it fed.
+uint64_t uiLayerHudEyeFrames(int eye);
 // The UiLayerDecision (as an int) the last uiLayerDecide came to: the adapter names its refusals by it.
 int uiLayerLastDecision();
 // How many decisions uiLayerDecide has come to since the DLL loaded: the blend probe (TEMPORARY) compares it before and after a draw's

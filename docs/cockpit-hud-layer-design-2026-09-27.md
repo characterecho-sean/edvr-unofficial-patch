@@ -2,19 +2,25 @@
 
 ## Status
 
-- **State (2026-10-21): the HUD's bloom halo, BUILT, NOT FLOWN.** Reported on
-  the latest release: with DLAA and `fix.ui_quality` on, the HUD has no bloom
-  (a user's UI-quality-off/on pair of the engine pips). The take puts the HUD
-  out of H, which the game's bloom chain reads, so it never had one
-  (Decision 1 accepted that). The flat adapter now binds H' = H + the HUD
-  layer's light at the chain's first level, so the game's own chain, tier and
-  tone make the halo. The user also runs an HDR monitor with RenoDX (untested
-  here). VR unaffected (flat only). See "2026-10-21: the HUD's bloom".
-  The feed now area-weights each pixel's footprint (318ca8d0, review), BUILT, NOT FLOWN.
+- **State (2026-10-28): the HUD's bloom halo in the headset, BUILT, NOT FLOWN.**
+  VR lost it the same way: the rc.3 Steam VR log (`edvr_gfx_20261028_175126`)
+  has 23.4 HUD draws a frame taken out of H into the eye's layer. At an eye's
+  bloom first level (ps 143AAE05, reading that eye's H) H' = H + that eye's HUD
+  layer is bound for that one draw, in the module that already feeds the star
+  glow. Scene tonemapped once, HUD layer once, H' by none. No key; needs Bloom
+  on. See "2026-10-28: the HUD's bloom in the headset".
+- **State (2026-10-21): the HUD's bloom halo, flat, BUILT, NOT FLOWN.** With DLAA
+  and `fix.ui_quality` on, the HUD had no bloom (a user's pair of the engine
+  pips): the take puts it out of H, which the bloom chain reads (Decision 1).
+  The flat adapter binds H' = H + the HUD layer's light at the chain's first
+  level; the game's chain, tier and tone make the halo. HDR monitor with RenoDX
+  untested. See "2026-10-21: the HUD's bloom". The feed area-weights each
+  pixel's footprint (318ca8d0), BUILT, NOT FLOWN.
 - **State (2026-10-20): bloom counted twice, FIXED, FLOWN flat** (Sean, XeSS).
   The re-issue kept the tone's bloom bound and added T(bloom) over the frame;
   the HUD's steps now read zero there, and their own source at the DoF blur
-  (not yet flown). VR unverified. See "2026-10-20: bloom counted twice".
+  (not yet flown). VR: the same rule zeroes the composite's bloom (t2 1008x1008,
+  M = N = 2.00 in the 10-28 log). See "2026-10-20: bloom counted twice".
 - **State: the census retired 2026-09-29 (code removed, 7027e549).**
   `advanced.hud_census` and hud_layer_census.cpp are deleted; Sean chose
   deletion over a compile-out switch, so there is no diagnostics build flag.
@@ -1164,3 +1170,91 @@ written.
   clamp and scale are `cb2` values only the game's draw carries, and the slot
   differs by tone variant (t2 on E894/0D43, t1 on 9270), which RenoDX replaces.
   Feeding the game's own chain needs neither.
+
+
+## 2026-10-28: the HUD's bloom in the headset
+
+Report (Sean): the flat profile got the game's bloom back under `fix.ui_quality`
+("2026-10-21: the HUD's bloom", 60829d87); bring it to VR, and do not tonemap
+everything twice.
+
+Hypothesis. `fix.ui_quality` takes the cockpit's holo panels, flight HUD and
+target sprite out of an eye's H into that eye's HDR HUD layer, and the bloom
+chain reads H, so the headset's HUD has no halo, as flat's had none.
+
+Evidence that it applies to VR (code and an existing log, nothing flown for it):
+
+- `edvr_gfx_20261028_175126` (Steam, VR, `v0.22.0-rc.3-5-gc1caa28d`): `crisp hud:
+  23.38 HUD draws a frame taken into the HDR layer, 2.00 tonemap re-issues (2.00
+  with the scene's bloom zeroed ...)`, layers 4032x4034 against an H of
+  2016x2017. The HUD is out of H in the cockpit.
+- The VR chain (star-glow doc, "the VR bloom census"): the first level is PS
+  143AAE05 reading the eye's H at t0 (H-sized, 2016x2016); the composite
+  2D78DC3F / D0A16B9E reads H at t1 and the bloom at t2. Stock had the halo: the
+  "Bloom" bullet above measured it in eye dump 123118.
+- The census was taken on foot, where the suit's HUD draws after the tone ("in
+  VR the HUD is not in H" there). The cockpit's HUD is the take above, in H.
+- The bloom-counted-twice fix already runs in VR: the same log's tone pair
+  `2D78DC3F / D0A16B9E` names `t2 1008x1008 fmt 26 ZEROED`, and M = N.
+
+Where the tone map runs today in VR, per eye per frame: the game's composite
+(D0A16B9E: LUT at t0, H at t1, bloom at t2) writes the eye's RGBA8 once. The
+layer re-issues the same VS/PS over the HUD layer into the eye's 8-bit UI layer
+once (`kSecondTonemap` declines a second), with the bloom bound as zero and the
+DoF blur replaced. The door then composites the layer over the frame.
+
+Fix. No key. In `vr_star_glow.cpp`, the module that already finds the first level
+(by its shader, per H) and binds H' for it, the HUD is a second input of the same
+H': `uiLayerHeadsetGlowFeed` (ui_layer.cpp) picks the eye by identity (the layer
+whose HUD draws were taken from the H the draw reads: `UiHeadsetHudEye`,
+ui_layer_math.h), and builds H' = H + that layer + m * S in one command list with
+flat's pass (`kUiGlowFeedPsHlsl`, area-weighted). `uiLayerStarFeed`, the
+HUD-less entry, is gone. The hook wakes at an eye's first taken HUD draw
+(`uiLayerHudGlowPending`) and sleeps when no eye waits; mode `vr_hud_glow_math.h`:
+on while the HDR take is armed and Bloom is not known off.
+
+Why the scene is tonemapped once. H' is bound at t0 of the first level for that
+one draw (it thresholds and downsamples; no tonemap reads it) and the game's view
+comes back before anything else looks. The scene's tone reads the real H and the
+bloom (which now carries the HUD's halo) once. The HUD's body is in the layer
+alone, tonemapped once by the re-issue, whose bloom stays zeroed. Nothing is
+drawn into H. The HUD's light is in the frame twice by design (its body; its
+halo) and tonemapped twice by neither. Rig pins: H' is bound in one place
+(`h-prime-once`); the feed touches none of the re-issue (`feed-touches-no-tonemap`);
+the VR tone inputs are zeroed (`ui_vr_hud_glow_test.h`, the measured t2).
+
+Approximation, as flat: the HUD's light is added, not blended over H, so behind an
+opaque panel over a bright scene the halo reads slightly bright.
+
+Flight signature (VR, cockpit, Bloom on, AA on, `fix.ui_quality` 100 or 125):
+
+- Once: `vr hud glow: on from frame N: ...`, then once `vr hud glow: the HUD's
+  light joins the game's bloom -- the first-level draw (ps 143AAE0597E2F7BF) of
+  the left|right eye reads H' = H + that eye's HUD layer ...`.
+- Every 10 s: `vr hud glow: window=10s hud-eye-frames[left,right]=a,b
+  first-levels=n fed[left,right]=c,d not-fed[no-layer,no-content,tone-done,
+  repeat]=0,0,0,0 pass-failed[...]=0,...`. Expect fed = hud-eye-frames per eye
+  (a window edge may differ by one) and first-levels = their sum.
+- Bloom applied once, tonemapped once: the `crisp hud:` 30 s line keeps M = N
+  (re-issues with the bloom zeroed) and `re-issue declines: none`; the F7 pair
+  rule of 10-20 holds: a star's halo and the cockpit's lights are as bright with
+  `fix.ui_quality` 100 as off. Brighter by about 2x would be a double count.
+- Failures: `first-levels=0` with hud-eye-frames above zero is a hook that never
+  saw the first level (shader differs, Bloom off, pending not set); `no-layer`
+  is the layer's H not being the bloom's H; `no-content` is the HUD drawn after
+  the first level; `tone-done` the first level after the re-issue; a nonzero
+  `pass-failed` names the pass's verdict, and `vr hud glow: H' could not be built`
+  says once which eye. No `vr hud glow:` line at all: the mode never came on.
+- Visual: engine pips, panels and radar with a halo as at `fix.ui_quality` off.
+
+Environment: VR, native OpenXR, any temporal mode (the layer needs one), Elite's
+Bloom on (the VR presets ship BloomQuality 0; Sean's Custom has 3), eye H
+2016x2017 R11G11B10_FLOAT. Cost: one H-sized pass an eye a frame while the cockpit
+has HUD draws, and one pixel-shader compare per owner draw between an eye's first
+HUD draw and its first level. Not flown. The GPU half of the pass is flat's.
+
+- ruled out: drawing the HUD into H as well as the layer. It would tonemap the
+  HUD twice (once in the scene's tone, once in the re-issue), the "twice" Sean
+  named.
+- ruled out: a second module with its own t0 binding. Two modules binding two
+  textures for one draw would not add; the star glow's H' and the HUD's are one.

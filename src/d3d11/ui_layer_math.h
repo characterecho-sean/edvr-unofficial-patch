@@ -1244,6 +1244,56 @@ inline const char* uiGlowFeedName(UiGlowFeed v) {
     }
 }
 
+// The headset's HUD bloom feed (ui_layer.h uiLayerHeadsetGlowFeed; docs/cockpit-hud-layer-design-2026-09-27.md, "2026-10-28: the HUD's bloom in the
+// headset"). The bloom chain's first level of an eye reads that eye's H at t0; the HUD the layer took from H lives in that eye's HDR HUD layer. Which
+// layer (if any) belongs to the H a first-level draw reads, and whether its light may join this draw's H', is a pure function of four facts per eye,
+// read by the caller. An H is the layer's by IDENTITY (the target its HUD draws were taken from), never by the eye's index or by draw order: the eyes'
+// draws interleave.
+struct UiHeadsetHudEye {
+    bool drawnFromH = false;   // the layer's HUD draws were taken from this very H (the layer's hdrTarget is the first level's t0 resource)
+    bool fresh = false;        // it holds this frame's content (its frame is the frame in progress, it has taken draws, it has a view)
+    bool toned = false;        // the tonemap re-issue already ran for that content (the bloom of this frame is made: too late to join it)
+    bool claimed = false;      // an earlier first-level draw of this frame already took the content (a second one is never fed)
+};
+enum class UiHeadsetHud : uint8_t {
+    kFeed = 0,    // the eye's layer holds this frame's unclaimed light: it joins H'
+    kNoLayer,     // no eye's layer draws from this H (the 2D screen's scene, an H nothing was taken from, the layers not made yet)
+    kNoContent,   // an eye's layer draws from this H but holds no content of this frame (no HUD was drawn before the first level)
+    kToneDone,    // ... but its content was already tonemapped (the first level came after the re-issue)
+    kRepeat,      // ... but an earlier first-level draw of the frame already took it
+    kCount
+};
+// The verdict for an H, and the eye whose layer it is (-1 for kNoLayer). Eye 0 is asked first; one H belongs to one eye.
+inline UiHeadsetHud uiHeadsetHudPick(const UiHeadsetHudEye eyes[2], int* eye) {
+    if (eye) *eye = -1;
+    for (int e = 0; e < 2; ++e) {
+        if (!eyes[e].drawnFromH) continue;
+        if (eye) *eye = e;
+        if (!eyes[e].fresh) return UiHeadsetHud::kNoContent;
+        if (eyes[e].toned) return UiHeadsetHud::kToneDone;
+        if (eyes[e].claimed) return UiHeadsetHud::kRepeat;
+        return UiHeadsetHud::kFeed;
+    }
+    return UiHeadsetHud::kNoLayer;
+}
+// Does any eye still hold a frame's HUD light that no first level has taken? The headset hook looks at first-level draws only while this is true (the pending flag),
+// so an eye-frame outside a cockpit, and an eye already claimed, cost the draw path nothing past one load.
+inline bool uiHeadsetHudWaiting(const UiHeadsetHudEye eyes[2]) {
+    for (int e = 0; e < 2; ++e)
+        if (eyes[e].fresh && !eyes[e].toned && !eyes[e].claimed) return true;
+    return false;
+}
+inline const char* uiHeadsetHudName(UiHeadsetHud v) {
+    switch (v) {
+        case UiHeadsetHud::kFeed: return "feed";
+        case UiHeadsetHud::kNoLayer: return "no-layer";
+        case UiHeadsetHud::kNoContent: return "no-content";
+        case UiHeadsetHud::kToneDone: return "tone-done";
+        case UiHeadsetHud::kRepeat: return "repeat";
+        default: return "?";
+    }
+}
+
 // The facts the draw path gathers; the decision is a pure function of them.
 struct UiLayerDrawFacts {
     UiLayerFamily family = UiLayerFamily::kNone;

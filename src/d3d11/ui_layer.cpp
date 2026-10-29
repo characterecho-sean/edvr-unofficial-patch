@@ -86,6 +86,7 @@ bool g_uiLayerRedirecting = false;
 bool g_uiLayerIssueBlocked = false;
 bool g_uiLayerCrispOn = false;      // the HDR HUD take/re-issue armed this frame (with the layer)
 bool g_uiLayerCrispPending = false; // a tonemap draw was admitted; its re-issue follows its draw
+bool g_uiLayerHudGlowPending = false; // an eye's HDR HUD layer holds this frame's light that no first-level draw has taken (headset bloom)
 bool g_uiLayerWorldReissue = false; // the VR world route: the screen composite just decided is re-issued after the game's draw
 bool g_uiLayerMapsOn = false;       // the on-foot maps gate: the layer and screen motion live -- naming decides the gate
 uint64_t g_uiLayerGateFrame = 0;    // frame boundaries the layer has seen: what a naming is attributed to (ui_layer.h)
@@ -400,6 +401,8 @@ struct Eye {
     const void* hdrTarget = nullptr;  // the HDR target those draws left (identity)
     LayerDs hdrDs;                    // its own depth-stencil, seeded the same way
     uint64_t hdrToneSeq = 0;          // the frame the tonemap re-issue ran for
+    uint64_t hdrGlowSeq = 0;          // the frame whose HUD light a first-level draw's H' has taken (uiLayerHeadsetGlowFeed)
+    uint64_t hdrEyeFrames = 0;        // eye-frames that took HUD draws into this layer, since the DLL loaded (uiLayerHudEyeFrames)
     // Consecutive content-frames no tonemap re-issue published (review R1's
     // frame deadline): counted beside hdrLost at the per-frame clear, reset
     // where a publication lands. The stand-down is at kCrispHdrMissFrames.
@@ -1226,6 +1229,7 @@ bool ensureHdrLayerFor(ID3D11DeviceContext* ctx, int eye) {
     const bool resized = e.hdrTex != nullptr;
     e.hdrW = e.hdrH = 0;
     e.hdrSeq = 0;
+    e.hdrGlowSeq = 0;
     e.hdrDraws = 0;
     Ptr<ID3D11Device> dev;
     ctx->GetDevice(&dev);
@@ -1309,6 +1313,7 @@ bool releaseLayers() {
         e.hdrSrv.Reset();
         e.hdrW = e.hdrH = 0;
         e.hdrSeq = 0;
+        e.hdrGlowSeq = 0;
         e.hdrDraws = 0;
         e.hdrTarget = nullptr;
         releaseLayerDs(e.hdrDs);
@@ -1389,6 +1394,7 @@ bool releaseQualityOnlyLayers() {
         e.hdrSrv.Reset();
         e.hdrW = e.hdrH = 0;
         e.hdrSeq = 0;
+        e.hdrGlowSeq = 0;
         e.hdrDraws = 0;
         e.hdrTarget = nullptr;
         e.hdrMissStreak = 0;
@@ -2091,6 +2097,9 @@ bool beginInner(ID3D11DeviceContext* ctx, int which) {
         e.hdrDraws = 0;
         e.hdrTarget = g_draw.targetRes;
         ++g_win.clears;
+        // The headset's bloom (uiLayerHeadsetGlowFeed): this eye now holds a frame's HUD light that its first level has not been asked about.
+        ++e.hdrEyeFrames;
+        if (!runtimeFlatProfile()) detail::g_uiLayerHudGlowPending = true;
     }
     if (which == 1 && e.mSeq != g_draw.seq) {
         const int timer = routeBegin(ctx, UiRouteStage::kMultiply, g_draw.eye, g_draw.seq);
@@ -4597,23 +4606,64 @@ ID3D11ShaderResourceView* uiLayerGlowFeed(ID3D11DeviceContext* ctx, uint64_t fra
     return out;
 }
 
-ID3D11ShaderResourceView* uiLayerStarFeed(ID3D11DeviceContext* ctx, uint32_t slot, const void* hdr, UiGlowStar* star, int* verdict) {
+// The HUD's light for the headset's bloom (ui_layer.h UiHeadsetGlow). An eye's first level reads that eye's H; the HUD the layer took out of H is in the
+// eye's HDR HUD layer, whose `hdrTarget` is that very H (the tonemap admission finds the eye the same way, by the resource its HDR slot reads). So the
+// H a first-level draw reads names its eye by identity (uiHeadsetHudPick), and the draw may be fed that eye's HUD once a frame: the claim is taken before the
+// pass runs, so a pass that fails is not retried by a second first-level draw of the same frame.
+//
+// Why the scene is tonemapped once. H' reaches ONE draw, the first level, which only thresholds and downsamples: no tonemap reads it. The scene's own
+// tonemap reads the real H and the bloom the chain made (which now carries the HUD's halo); the HUD's body is in the layer alone, tonemapped by the
+// re-issue with the scene's bloom zeroed (uiLayerCrispToneBegin: its t2 reads zero, "M with the scene's bloom zeroed"), and composited over the frame.
+// The HUD's light is therefore in the picture twice by design and never tonemapped twice: once as its own body, once, spread by the bloom, as the halo
+// the scene's tonemap adds to the scene.
+ID3D11ShaderResourceView* uiLayerHeadsetGlowFeed(ID3D11DeviceContext* ctx, uint32_t slot, const void* hdr, UiGlowStar* star, UiHeadsetGlow* out) {
     UiGlowFeed v = UiGlowFeed::kNotReady;
-    ID3D11ShaderResourceView* out = nullptr;
-    // No profile test and no HUD: the headset's first level has neither (the flat feed above is gated on the flat profile and on eye 0's HUD layer).
-    if (ctx && hdr && star && star->srv && slot < D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT) {
-        if (!guardedBudget(g_glowBudget, [&] { out = glowFeedPass(ctx, nullptr, slot, hdr, v, star); })) {
-            v = UiGlowFeed::kFault;
-            out = nullptr;
+    ID3D11ShaderResourceView* fed = nullptr;
+    UiHeadsetHud pick = UiHeadsetHud::kNoLayer;
+    int eye = -1;
+    bool hudIn = false;
+    if (ctx && hdr && slot < D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT && !runtimeFlatProfile()) {
+        uint64_t seq = 0;
+        const bool haveSeq = layerDrawJitter(0, &seq, nullptr, nullptr, nullptr, nullptr);
+        UiHeadsetHudEye facts[2];
+        for (int e = 0; e < 2; ++e) {
+            const Eye& c = g_eye[e];
+            facts[e].drawnFromH = c.hdrTarget == hdr;
+            facts[e].fresh = haveSeq && c.hdrSeq == seq && c.hdrDraws && c.hdrSrv;
+            facts[e].toned = c.hdrToneSeq == c.hdrSeq;
+            facts[e].claimed = c.hdrGlowSeq == c.hdrSeq;
         }
+        pick = uiHeadsetHudPick(facts, &eye);
+        Eye* hud = nullptr;
+        if (pick == UiHeadsetHud::kFeed) {
+            hud = &g_eye[eye];
+            hud->hdrGlowSeq = hud->hdrSeq;
+            // The eye is claimed: the hook stops asking once no eye still waits for its first level.
+            facts[eye].claimed = true;
+            detail::g_uiLayerHudGlowPending = uiHeadsetHudWaiting(facts);
+        }
+        if (!hud && !(star && star->srv)) {
+            v = UiGlowFeed::kNoHud;
+        } else if (!guardedBudget(g_glowBudget, [&] { fed = glowFeedPass(ctx, hud, slot, hdr, v, star); })) {
+            v = UiGlowFeed::kFault;
+            fed = nullptr;
+        }
+        hudIn = fed && hud;
     }
     if (star) {
-        if (!out) star->applied = false;
+        if (!fed) star->applied = false;
         star->verdict = static_cast<int>(v);
     }
-    if (verdict) *verdict = static_cast<int>(v);
-    return out;
+    if (out) {
+        out->hud = static_cast<int>(pick);
+        out->eye = eye;
+        out->hudIncluded = hudIn;
+        out->verdict = static_cast<int>(v);
+    }
+    return fed;
 }
+
+uint64_t uiLayerHudEyeFrames(int eye) { return eye >= 0 && eye < 2 ? g_eye[eye].hdrEyeFrames : 0; }
 
 // The whole dependency set a taken HUD draw needs at the tonemap,
 // established no later than the FIRST HUD take of it (review R2): the eye's
@@ -6568,6 +6618,8 @@ void uiLayerFrameBoundary(ID3D11DeviceContext* ctx) {
     // survive the frame.
     g_crispPending = CrispTonePending{};
     detail::g_uiLayerCrispPending = false;
+    // ...nor does a headset eye's wait for its first level (the next frame's first HUD draw sets it again).
+    detail::g_uiLayerHudGlowPending = false;
     // ...nor does the VR world route's pending re-issue (a screen draw the game's frame never issued).
     worldReissueReset();
     ++g_win.frames;
