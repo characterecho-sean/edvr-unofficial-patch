@@ -79,6 +79,7 @@
 #include "native_on_foot_f167.h"   // F167: the left hand lets go of the pistol while sprinting (pure parts)
 #include "native_on_foot_f168.h"   // F168 (TEMPORARY): the dial for the crouched body's distance to the gun, and the figures that judge it (pure parts)
 #include "native_on_foot_f169.h"   // F169: the stance while the aim is pitched; the pistol sprint's arm swing, its measure and its phase dial (TEMPORARY; pure parts)
+#include "native_on_foot_f170.h"   // F170 (TEMPORARY): the crouched ADS torso squared to the aim, its dial and the figures that judge it (pure parts)
 #include "xinput_watch.h"         // F135: the pad's Start and Back edges, evidence for the menu probe only
 #include "native_on_foot_f109.h"   // F109: look to aim on foot, the player's own turn in ADS, snap or smooth turning (pure parts)
 #include "native_on_foot_f129.h"   // F129: look to aim reads its turn from the player's own look processor; the look path instrument (pure parts)
@@ -208,6 +209,8 @@ std::atomic<float> g_crouchAdsBodyCm{0.0f};                   // F168 (TEMPORARY
 double g_crouchAdsBodyCmLast = 1e9;                           // the value last logged (frame thread; the first read always logs)
 std::atomic<float> g_pistolSprintPhase{0.0f};                 // F169 (TEMPORARY): experimental.native_on_foot_pistol_sprint_swing_phase, 0..1 of a stride, live: the pistol sprint's left arm is read this far back in the stride
 double g_pistolSprintPhaseLast = 1e9;                         // the value last logged (frame thread; the first read always logs)
+std::atomic<float> g_crouchAdsSquare{1.0f};                   // F170 (TEMPORARY): experimental.native_on_foot_crouch_ads_square, 0..1, live: the share of the shoulder line's blade the crouched ADS torso is turned out of
+double g_crouchAdsSquareLast = 1e9;                           // the value last logged (frame thread; the first read always logs)
 std::atomic<float> g_f87SettleS{static_cast<float>(nofoot::f87::kSettleDefaultS)};   // F87h (TEMPORARY): fix.native_on_foot_standing_height_settle_s, live
 double g_f87SettleLast = -1.0;                                // the value last logged (frame thread)
 std::atomic<float> g_f94EyeHeightCm{static_cast<float>(nofoot::f94::kEyeHeightDefaultCm)};   // F94a: fix.native_on_foot_eye_height_cm, live (the eyes over the neck)
@@ -1059,6 +1062,18 @@ void readKey() {
                             cm, nofoot::f168::kDialMinCm, nofoot::f168::kDialMaxCm);
         g_crouchAdsBodyCmLast = cm;
         g_crouchAdsBodyCm.store(static_cast<float>(cm), std::memory_order_relaxed);
+    }
+    // F170 (TEMPORARY, live, the developer tier's "Crouched ADS torso square"): while crouched and aiming down sights the torso is turned about the vertical toward square to the aim: this share
+    // (0..1) of the shoulder line's measured blade, times the crouched weight and the detach weight, is taken out. 1 squares it, 0 leaves the authored stance; exactly 0 standing and at the hip.
+    {
+        const double square = nofoot::f170::clampDial(static_cast<double>(cfg.getFloat("experimental.native_on_foot_crouch_ads_square", 1.0f)));
+        if (first || square != g_crouchAdsSquareLast)
+            Log::get().note("native on foot crouched ADS torso square dial (F170, TEMPORARY): experimental.native_on_foot_crouch_ads_square = %.2f -- while crouched and aiming down sights the torso "
+                            "turns about the vertical toward square to the aim, this share (range %.0f..%.0f) of the shoulder line's measured blade, times the crouched weight and the detach weight, "
+                            "so it is 0 standing and at the hip and 0 at 0; the reach rule sees the turned shoulders; the per-window crouched ADS torso square line names the turn and the shoulders",
+                            square, nofoot::f170::kDialMin, nofoot::f170::kDialMax);
+        g_crouchAdsSquareLast = square;
+        g_crouchAdsSquare.store(static_cast<float>(square), std::memory_order_relaxed);
     }
     // F169 (TEMPORARY, live, the developer tier's "Pistol sprint arm swing phase"): while a pistol sprint has let go of the left hand (F167) the left arm is the game's animated one; this
     // is how far back in the stride (0 to 1 of the measured stride period) its animated pose is read from, so the arms swing against each other. 0 reads the pose as it is: nothing moves.
@@ -10621,7 +10636,11 @@ struct F94TargetPub {
 };
 std::atomic<uint32_t> g_f94TgtSeq{0};
 F94TargetPub g_f94Tgt;
+// F170: the raise's target the hook last published since the on-foot camera's edge (0, the raise's own start, before any): the target in force, which F138's running reference keeps. The hook is
+// its only reader and writer.
+double g_f138HeldM = 0.0;
 void f94TargetPublish(double targetM, uint64_t ms) noexcept {
+    g_f138HeldM = targetM;
     g_f94TgtSeq.fetch_add(1, std::memory_order_acq_rel);
     g_f94Tgt.targetM = targetM;
     g_f94Tgt.ms = ms;
@@ -16320,6 +16339,9 @@ struct F98Left {
     // F168 (TEMPORARY): the crouched body's dial, the move it made, and the distances from the shoulders to the gun's root and the left-hand grip, crouched in the sights, still against moving
     // (its own line).
     nofoot::f168::Counters f168;
+    // F170 (TEMPORARY): the crouched ADS torso's turn toward square, the shoulder line's measured phi before and as written, the shoulders from the eye and the right shoulder to the gun's
+    // root, crouched in the sights, still against moving (its own line).
+    nofoot::f170::Counters f170;
 };
 std::atomic<uint32_t> g_f98Seq{0};
 F98Left g_f98;
@@ -16471,18 +16493,14 @@ PinStats g_pinStats;
 std::atomic<bool> g_pinStatReset{false};
 // ---- F138: the view holds its height over the neck while the look is pitched (nofoot::f138, native_on_foot_f138.h) ----------------------------------------------
 // The pin hook's half. g_f138 holds the stance reference (taken where the settle publishes an unarmed upright target) and adds the camera's sink to the raise's target
-// while the look is pitched; the window is what the hook saw (written under g_f138Seq by the one writer, taken once a second by f138Line on the frame thread).
+// while the look is pitched (F170: from the running reference when no stance has settled yet); the window is what the hook saw (written under the mailbox's sequence counter by the one
+// writer, taken once a second by f138Line on the frame thread).
 nofoot::f138::Tracker g_f138;
-nofoot::f138::Window g_f138Win;
-std::atomic<uint32_t> g_f138Seq{0};
-std::atomic<bool> g_f138WinReset{false};
-// One write to the window: the hook's, under the sequence counter. A reset the frame thread asked for (it took the window) clears it first.
+nofoot::f138::Mailbox g_f138Box;   // F170: the window and its sequence counter; the take reads an empty window when the hook wrote nothing since the last take
+// One write to the window: the hook's, under the sequence counter. A take the frame thread made clears it before this write.
 template <class Fn>
 void f138WinWrite(Fn&& fn) noexcept {
-    g_f138Seq.fetch_add(1, std::memory_order_acq_rel);
-    if (g_f138WinReset.exchange(false, std::memory_order_relaxed)) g_f138Win.clear();
-    fn(g_f138Win);
-    g_f138Seq.fetch_add(1, std::memory_order_release);
+    g_f138Box.write(static_cast<Fn&&>(fn));
 }
 // ---- F169: the stance while the aim is pitched (nofoot::f169, native_on_foot_f169.h) ----------------------------------------------------------------------------
 // The pin hook's half: one window of pitched calls (written under g_f169Seq by the one writer, taken once a second by f169StanceLine on the frame thread).
@@ -16604,6 +16622,9 @@ struct PinCall {
     // F169: the dial's move split around the reach rule (a negative dial rides the target, before it; a positive one is added to the written neck after it, f168Post), and the move as
     // written along the aim's forward (not a number: unmeasured): the two parts and the share of the reach rule's correction that changed with the dial.
     double f168Pre[3] = {}, f168Post[3] = {}, f168ReachDelta[3] = {}, f168Fwd[3] = {}, f168WrittenM = std::nan("");
+    // F170 (TEMPORARY): the crouched ADS torso square: the dial as read this call, the share of the shoulder line's blade it takes out (the dial x the crouched weight x the detach weight; 0 unless the
+    // written turn is the armed one), the turn written (radians, the spine's full angle) and the measured shoulder phi it was made from (radians; not a number when unmeasured).
+    double f170Dial = 0.0, f170Share = 0.0, f170Turn = 0.0, f170PhiBefore = std::nan("");
     bool localPitchValid = false, scenePitchValid = false;
     double localPitchDeg = 0.0, scenePitchDeg = 0.0, rawEyeY = 0.0, eyeYSelected = 0.0;
     uint32_t localPoseGeneration = 0, localPoseAgeMs = 0;
@@ -16995,6 +17016,11 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
                 pc.targetFromAuthoredM = std::sqrt((T[0] - N0[0]) * (T[0] - N0[0]) + (T[1] - N0[1]) * (T[1] - N0[1]) + (T[2] - N0[2]) * (T[2] - N0[2]));
             }
         }
+        // F170 (TEMPORARY): the crouched ADS torso square. The share of the shoulder line's measured blade the torso is turned out of: the dial x the crouched weight (F163) x the detach weight,
+        // only where the written turn is the armed one (sqArmed: the square-up keeps the authored stance otherwise, the unarmed path squares it whole). The reach rule below turns its shoulders by
+        // it and the written square-up (armIkAfterAnimate) turns the spine levels by it, outside the upper-body hold's yield.
+        pc.f170Dial = static_cast<double>(g_crouchAdsSquare.load(std::memory_order_relaxed));
+        pc.f170Share = sqArmed ? nofoot::f170::share(pc.f170Dial, pc.postureW, pc.detachW) : 0.0;
         // F94a: unarmed the body stands at its animated height: the neck target keeps the animated neck's height (the view's height comes from the neck instead,
         // above). F97a: armed (F88's weight w), F93's height where F93 raised the body, lowered only as far as keeps the eye at the hip the key's height over the
         // neck, blended by w (native_on_foot_f97.h). The horizontal target is the rest offset's, as before. F161: crouched (F163: the animated neck's drop), the lowering holds
@@ -17021,7 +17047,8 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
         // the frame thread holds the raise where the last settled stance put it.
         {
             if (g_f138HookReset.exchange(false, std::memory_order_relaxed)) {
-                g_f138.reset();   // F138: an edge of the on-foot camera, the shutdown
+                g_f138.reset();   // F138: an edge of the on-foot camera, the shutdown (F170: the running reference too)
+                g_f138HeldM = 0.0;   // F170: the raise starts again from 0
                 g_f160.reset();   // F160: the kept target is the last stance's, not the next scope's
             }
             bool f138Own = false;   // F138: this block published a target (ADS's zero, a settled stance): the added sink has no say this call
@@ -17103,6 +17130,12 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
             // F138: while the look is pitched the raise adds back what the game's camera has sunk against the animated neck since that stance, weighted by the pitch (the FP
             // root's pitch: up in both modes, down under mouse look only; a look down under look to aim stays as flown). The sink goes into the raise, which the P1 hook takes out of the pin's camera by the alignment serial (f94NeckForPin): E never sees it, so
             // the next call's G is the game's own camera again and nothing feeds back. The first level call after returns the stance's target once.
+            // F170: the running reference. Every call where nothing is drawn, the aim is known and under the settle's gates (si.valid is what is left of them: the target computable, no ADS,
+            // the camera not away, look to aim's 10 deg and F138's 20 deg), the stance upright (as the settle's reference needs) and not crouched (F163's weight under 0.5), and the pose
+            // valid, takes the target in force (the last one published since the edge) and G, smoothed over about 0.3 s. It is the reference of a pilot who looks up before the first
+            // settle of the session (the settle needs 0.3 s of stillness); a settled reference wins when it is usable.
+            if (si.valid && f138AimKnown && !f138Item && pc.postureW < 0.5 && (!headFinite || nofoot::pinHeadUpright(p44[1])))
+                g_f138.noteRunning(si.tS, g_f138HeldM, pc.rawEyeY, N0[1], static_cast<double>(in.localHeadY), in.localPoseGeneration, localPitchValid);
             {
                 namespace f138 = nofoot::f138;
                 f138::In fi;
@@ -17284,7 +17317,9 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
         const double fwdG[3] = {G->g[8], G->g[9], G->g[10]};
         // F75: the same authored-stance angle feeds reach and the written turn; barrel and shoulder yaw remain diagnostic measurements.
         const nofoot::SquareYaw sqy = nofoot::squareYaw(sqArmed, bd, uPos[0], uPos[1], fwdG);
-        const double phi = sqy.phi;
+        // F170 (TEMPORARY): crouched in the sights the torso is turned toward square, so the shoulders the reach rule keeps within reach of the grips are the turned ones; the share is 0 otherwise
+        // and the angle is what it was
+        const double phi = pc.f170Share > 0.0 ? sqy.phi + nofoot::f170::turnRad(pc.f170Share, sqy.haveSh, sqy.phiSh) : sqy.phi;
         const bool sqOk = sqy.ok;
         sqEval = true;
         sqRes = sqy;
@@ -19498,6 +19533,10 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
             sqY = nofoot::squareYaw(sqArmed, barrelDirs, uPre[0], uPre[1], fwdPre);
             sqPre = sqY.ok;
             sqPhi0 = sqY.phi;
+            // F170 (TEMPORARY): the shoulder line's measured phi on the pose as it stands after the upper-body hold wrote it (the held torso's own blade), and the share of it the crouched ADS
+            // torso is turned out of; the same angle the reach rule turned the shoulders by
+            pinCall.f170PhiBefore = sqY.haveSh ? sqY.phiSh : std::nan("");
+            pinCall.f170Turn = nofoot::f170::turnRad(pinCall.f170Share, sqY.haveSh, sqY.phiSh);
         }
     }
     // F58 stage 1b: the spine bend toward the head (full-3P body mode, the bend key on), after the freeze and before the square-up and the arm
@@ -19635,7 +19674,9 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
             const double sqW = (mode == 3 && writeOk) ? wSqRamp : 1.0;
             // F75: the armed torso keeps its authored stance; this shared angle is zero, with no hidden turn in the write path.
             const bool armedSq = sqArmed;   // armedNow && mode == 3 && writeOk, the same flag the angle's source was chosen by
-            sqApplied = nofoot::squareApplied(phi, armedSq, sqAmount, sqW, &sqOverOld) * f166Yield;   // F168: the held torso keeps its yaw too (armed, the angle is 0 already; the factor is exactly 1 without the hold)
+            // F168: the held torso keeps its yaw too (armed, the angle is 0 already; the factor is exactly 1 without the hold). F170: the crouched ADS torso's turn toward square is added after the
+            // yield, measured on the held pose and turned onto it: it does not vanish while the hold is on (with no turn the result is exactly what it was)
+            sqApplied = nofoot::f170::writtenYaw(nofoot::squareApplied(phi, armedSq, sqAmount, sqW, &sqOverOld), f166Yield, pinCall.f170Turn);
             if (armedSq) sqClamped = false;
             sqHave = true;
             if (sqApplied != 0.0) {
@@ -20947,6 +20988,24 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
                     }
                     for (int c = 0; c < 3; ++c) sample168.leftShoulderM[c] = sample166.shoulderM[c];
                     f.f168.add(sample168);
+                    // F170 (TEMPORARY): the crouched ADS torso square: the dial, the turn written, the shoulder line's measured phi before it (the pose as the hold left it) and as finally written
+                    // (the upper-arm joints as finally written against the aim's forward), the two shoulders from the eye as drawn and the right shoulder to the gun's root
+                    nofoot::f170::Sample sample170;
+                    sample170.moving = sample166.moving;
+                    sample170.dial = pinCall.f170Dial;
+                    sample170.turnDeg = pinCall.f170Turn * 180.0 / nofoot::kIkPi;
+                    sample170.phiBeforeDeg = std::isfinite(pinCall.f170PhiBefore) ? pinCall.f170PhiBefore * 180.0 / nofoot::kIkPi : std::nan("");
+                    {
+                        double uL[3], uR[3], phiNow = 0.0;
+                        const double aim[3] = {G.g[8], G.g[9], G.g[10]};
+                        if (armsOk && pl.ok[0] && pl.ok[1] && finalAt(pl.side[0].U, uL) && finalAt(pl.side[1].U, uR) && nofoot::ikSquareToForward(uL, uR, aim, &phiNow))
+                            sample170.phiAfterDeg = phiNow * 180.0 / nofoot::kIkPi;
+                    }
+                    for (int c = 0; c < 3; ++c) sample170.leftShoulderM[c] = sample166.shoulderM[c];
+                    if (pinCall.f97EyeDrawnOk && pl.ok[1] && finalAt(pl.side[1].U, shoulderR))
+                        nofoot::f166::offsetFromEye(shoulderR, pinCall.f97EyeDrawn, pinCall.hEye[0], pinCall.hEye[1], sample170.rightShoulderM);
+                    sample170.rightShoulderToGunM = sample168.rightShoulderToGunM;
+                    f.f170.add(sample170);
                 }
             }
             g_f98Seq.fetch_add(1, std::memory_order_release);
@@ -22113,6 +22172,12 @@ void f125ElbowClose(uint64_t now, bool keepRun = false) noexcept {
             char line168[1100];
             nofoot::f168::formatSummary(line168, sizeof(line168), w.seconds, w.item, f98.f168);
             Log::get().note("%s", line168);
+        }
+        // F170 (TEMPORARY): the crouched ADS torso square, on a line of its own, whenever a frame was crouched in the sights
+        if (f98.f170.ads) {
+            char line170[1190];
+            nofoot::f170::formatSummary(line170, sizeof(line170), w.seconds, w.item, f98.f170);
+            Log::get().note("%s", line170);
         }
     }
     const nofoot::f159::HighSeconds carried159 = w.high.next(keepRun);
@@ -23596,6 +23661,7 @@ void f138Line(uint64_t now) noexcept {
     static f138::Group bins[2][2];   // [look to aim][item drawn], merged each second, printed and cleared every 10 s
     if (g_f138LineReset.exchange(false, std::memory_order_relaxed)) {
         lineMs = binMs = 0;
+        g_f138Box.clearPending.store(true, std::memory_order_relaxed);   // F170: the window the edge left is not the next second's
         for (auto& row : bins)
             for (f138::Group& g : row) g = f138::Group{};
     }
@@ -23606,17 +23672,8 @@ void f138Line(uint64_t now) noexcept {
     }
     if (now - lineMs < 1000) return;
     f138::Window w;
-    bool got = false;
-    for (int tries = 0; tries < 2 && !got; ++tries) {
-        const uint32_t s1 = g_f138Seq.load(std::memory_order_acquire);
-        if (s1 & 1u) continue;
-        std::memcpy(&w, &g_f138Win, sizeof(w));
-        std::atomic_thread_fence(std::memory_order_acquire);
-        got = g_f138Seq.load(std::memory_order_relaxed) == s1;
-    }
-    if (!got) return;   // torn twice: the next second takes both
+    if (!g_f138Box.take(&w)) return;   // torn twice: the next second takes both
     lineMs = now;
-    g_f138WinReset.store(true, std::memory_order_relaxed);
     const uint32_t gated = g_f109SettleGated.load(std::memory_order_relaxed);
     const uint32_t ltaGate = gated - gateSeen;   // look to aim's gate (the hook counts it apart from F138's)
     gateSeen = gated;
@@ -23627,9 +23684,10 @@ void f138Line(uint64_t now) noexcept {
         if (!itemName[0] && (!journalHeldItemName(itemName, sizeof(itemName)) || !itemName[0])) std::snprintf(itemName, sizeof(itemName), "unnamed");
     };
     if (w.any()) {
-        char mode[96], why[260], item[128];
+        char mode[96], why[260], item[128], reference[96];
         w.modeText(mode, sizeof(mode));
         f138::notAppliedText(w.why, why, sizeof(why));
+        f138::referenceText(w.srcN, reference, sizeof(reference));   // F170
         if (!w.itemCalls) {
             std::snprintf(item, sizeof(item), "none");
         } else {
@@ -23640,11 +23698,11 @@ void f138Line(uint64_t now) noexcept {
         const auto mean = f138::Window::mean;
         Log::get().note("native on foot pitched view (F138) 1 s: mode %s, item %s, aim pitch %+.1f deg (min %+.1f max %+.1f), head pitch %+.1f deg; the camera's sink against the "
                         "stance %+.1f cm (max %+.1f), the head's own height since the stance %+.1f cm; w %.2f/%.2f; added %+.1f cm (max %+.1f) in %u of %u pitched calls | "
-                        "measured only: an item drawn %u calls | not applied: %s; EDVR carried up %+.1f forward %+.1f cm (the raise, F137); the view over the neck %+.1f cm; "
+                        "measured only: an item drawn %u calls | not applied: %s; reference used (F170; the calls that chose one): %s; EDVR carried up %+.1f forward %+.1f cm (the raise, F137); the view over the neck %+.1f cm; "
                         "INSIDE %u of %u; the settle refused for the aim's pitch %u calls (look to aim's gate %u); returned to the stance's raise %u times (refused %u, not needed %u)",
                         mode, item, mean(w.aimSum, w.calls), w.calls ? w.aimMin : 0.0, w.calls ? w.aimMax : 0.0, mean(w.headSum, w.headN), mean(w.sinkSum, w.sinkN),
                         w.sinkN ? w.sinkMax : 0.0, mean(w.headRiseSum, w.headRiseN), mean(w.wSum, w.consideredN), w.wMax, mean(w.addedSum, w.appliedN),
-                        w.appliedN ? w.addedMax : 0.0, w.appliedN, w.calls, w.measuredN, why, mean(w.upSum, w.calls), mean(w.fwdSum, w.calls), mean(w.viewSum, w.calls),
+                        w.appliedN ? w.addedMax : 0.0, w.appliedN, w.calls, w.measuredN, why, reference, mean(w.upSum, w.calls), mean(w.fwdSum, w.calls), mean(w.viewSum, w.calls),
                         w.inside, w.insideOf, w.settleRefusedAim, ltaGate, w.returned, w.returnRefused, w.notNeeded);
     }
     if (now - binMs >= 10000) {

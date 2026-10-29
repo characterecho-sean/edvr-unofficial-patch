@@ -15,9 +15,17 @@
 // F109 gate held the raise whatever the pitch, as flown: w is 0 there, and those calls are not the instrument's). The settle's refusal for the aim's pitch (from 20 deg
 // since F139) applies with nothing drawn only: with an item drawn the settle takes the pitched camera as it did before F138 (the armed target is an absolute height). The end of a pitched episode
 // publishes the stance's target once only when this tracker published a target during it and nothing is drawn at the edge; otherwise it publishes nothing ("not needed").
+//
+// F170, after the flight edvr_gfx_20261028_215408: a pilot who holsters and looks straight up before the first unarmed settle of the flight (it needs 0.3 s of stillness, level) has no
+// reference, so the sink is never added and the view stays inside the torso (INSIDE 90 of 90 frames, no reference on 1533 calls). The tracker now also keeps a RUNNING reference: every
+// call where nothing is drawn, the aim is under the settle's gate, the stance is upright and the pose is valid takes the raise's target in force and G, smoothed over about 0.3 s, with the
+// same stance guard. A settled reference wins when it is usable; the running one stands in when there is none or the settled one is refused (the LOCAL pose's generation moved, the stance
+// changed). It clears with the reset (the on-foot camera's edge). The 1 s line names the reference each call used: settled, running or none. And the 1 s line no longer repeats a window
+// nothing has written to since it was taken (Mailbox).
 #pragma once
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -35,6 +43,8 @@ constexpr double kSettleGateDeg = 20.0;                      // the settle refus
 constexpr double kPitchedDeg = 10.0;                         // a call at this |aim pitch| or more is the instrument's
 constexpr double kStanceGuardM = 0.03;                       // the animated neck within this of the reference's: the same stance (a crouch, the fists' hunch move it)
 constexpr double kSinkMinM = -0.40, kSinkMaxM = 0.40;        // the sink added, clamped (looking down unarmed the camera rose 12 to 17 cm over the neck)
+constexpr double kRunSmoothS = 0.3;                          // F170: the running reference follows G and the target over about this long (its 95% time)
+constexpr double kRunMaxGapS = 1.0;                          // F170: a gap between two samples longer than this starts the running reference over (the stream paused)
 
 inline double smoothstep(double lo, double hi, double x) noexcept {
     if (!std::isfinite(x)) return 0.0;
@@ -69,6 +79,15 @@ inline bool stanceHolds(double neckY, double refNeckY) noexcept { return std::is
 enum Reason : int {
     kApplied = 0, kItemDrawn = 1, kNoReference = 2, kPoseInvalid = 3, kGeneration = 4, kStance = 5, kAds = 6, kCameraAway = 7, kSettleOwned = 8, kInputs = 9, kReasons = 10
 };
+// F170: which reference a call used. Settled: the unarmed stance the settle published; running: the smoothed one taken whenever nothing was drawn and the aim was level; none.
+enum Source : int { kSrcNone = 0, kSrcSettled = 1, kSrcRunning = 2, kSources = 3 };
+inline const char* sourceName(int s) noexcept {
+    switch (s) {
+        case kSrcSettled: return "settled";
+        case kSrcRunning: return "running";
+        default: return "none";
+    }
+}
 inline const char* reasonName(int r) noexcept {
     switch (r) {
         case kApplied: return "applied";
@@ -112,6 +131,8 @@ struct Out {
     bool sinkValid = false;      // the sink was measured (applied, or measured only)
     double sinkM = 0.0;          // clamped
     double headRiseM = 0.0;      // the headset's own height since the stance (m); valid with sinkValid
+    int source = kSrcNone;       // F170: the reference this call used (meaningful with reached)
+    bool reached = false;        // F170: the call got as far as choosing a reference (applied, measured only, no reference, generation changed, stance changed)
     bool publish = false;        // the hook publishes publishM as the raise's target
     double publishM = 0.0;
     double addedM = 0.0;         // w times the sink, when applied
@@ -121,11 +142,15 @@ struct Out {
 };
 
 struct Tracker {
-    Stance ref;
+    Stance ref;             // the settled unarmed stance (noteStance)
+    Stance run;             // F170: the running reference, smoothed (noteRunning)
+    double runT = 0.0;      // F170: the time of the running reference's last sample (s)
     bool added = false;     // this tracker published a target (the sink added) during the episode: the end of it gives the stance's back
     bool episode = false;   // a pitched call (w > 0) since the last edge
     void reset() noexcept {
         ref = Stance{};
+        run = Stance{};
+        runT = 0.0;
         added = false;
         episode = false;
     }
@@ -144,6 +169,61 @@ struct Tracker {
         added = false;     // the settle published a target of its own
         episode = false;
     }
+    // F170: one call where nothing is drawn, the aim is under the settle's gate, the stance is upright and not crouched (the hook decides that): the raise's target in force, G, the
+    // animated neck and the headset's LOCAL height at time tS (s), smoothed into the running reference over about kRunSmoothS. The first sample, a new LOCAL generation, a neck that left
+    // the stance (kStanceGuardM) and a gap of kRunMaxGapS or more start it over from this sample. A pose that is not valid drops it. Nothing is taken while this tracker's own sunk
+    // target is in force (added): the target it would read is not the stance's.
+    void noteRunning(double tS, double target, double rawEyeY, double neckY, double localHeadY, uint32_t generation, bool poseValid) noexcept {
+        if (!poseValid) {
+            run = Stance{};
+            return;
+        }
+        if (added || !std::isfinite(tS) || !std::isfinite(target) || !std::isfinite(rawEyeY) || !std::isfinite(neckY) || !std::isfinite(localHeadY)) return;
+        const double g = gOf(rawEyeY, neckY, localHeadY);
+        const double dt = tS - runT;
+        if (run.have && generation == run.generation && stanceHolds(neckY, run.neckY) && dt <= kRunMaxGapS) {
+            if (!(dt > 0.0)) return;   // the same instant again: nothing to smooth
+            const double a = 1.0 - std::exp(-dt / (kRunSmoothS / 3.0));
+            run.target += a * (target - run.target);
+            run.g += a * (g - run.g);
+            run.neckY += a * (neckY - run.neckY);
+            run.localY += a * (localHeadY - run.localY);
+            runT = tS;
+            return;
+        }
+        run.have = true;
+        run.target = target;
+        run.g = g;
+        run.neckY = neckY;
+        run.localY = localHeadY;
+        run.generation = generation;
+        runT = tS;
+    }
+    // F170: the reference a call uses, and why none. The settled one when it is usable (the same LOCAL pose generation, the same stance), else the running one when that is, else none
+    // with the reason the first reference that exists was refused (no reference when neither exists).
+    const Stance* pick(uint32_t generation, double neckY, int* source, int* why) const noexcept {
+        const auto usable = [&](const Stance& s) noexcept {
+            if (!s.have) return static_cast<int>(kNoReference);
+            if (generation != s.generation) return static_cast<int>(kGeneration);   // a recentre: the reference's LOCAL height is another frame's
+            if (!stanceHolds(neckY, s.neckY)) return static_cast<int>(kStance);
+            return static_cast<int>(kApplied);
+        };
+        const int settled = usable(ref);
+        if (settled == kApplied) {
+            *source = kSrcSettled;
+            *why = kApplied;
+            return &ref;
+        }
+        const int running = usable(run);
+        if (running == kApplied) {
+            *source = kSrcRunning;
+            *why = kApplied;
+            return &run;
+        }
+        *source = kSrcNone;
+        *why = ref.have ? settled : run.have ? running : static_cast<int>(kNoReference);
+        return nullptr;
+    }
     Out step(const In& in) noexcept {
         Out o;
         if (!std::isfinite(in.aimPitchDeg)) return o;   // the aim is unknown this call (G absent): nothing changes, nothing flaps
@@ -157,9 +237,11 @@ struct Tracker {
                 episode = false;
                 if (added && !in.settleOwned && !in.itemDrawn) {
                     added = false;
-                    if (ref.have && stanceHolds(in.neckY, ref.neckY)) {
+                    // the target given back is the stance's (a recentre does not change it, so no generation test here, as before F170): the settled one's, else the running one's
+                    const Stance* use = ref.have && stanceHolds(in.neckY, ref.neckY) ? &ref : run.have && stanceHolds(in.neckY, run.neckY) ? &run : nullptr;
+                    if (use) {
                         o.publish = true;
-                        o.publishM = ref.target;
+                        o.publishM = use->target;
                         o.returned = true;
                     } else {
                         o.returnRefused = true;
@@ -178,21 +260,26 @@ struct Tracker {
         else if (in.settleOwned) o.reason = kSettleOwned;
         else if (!in.poseValid) o.reason = kPoseInvalid;
         else if (!std::isfinite(in.rawEyeY) || !std::isfinite(in.neckY) || !std::isfinite(in.localHeadY)) o.reason = kInputs;
-        else if (!ref.have) o.reason = kNoReference;
-        else if (in.generation != ref.generation) o.reason = kGeneration;   // a recentre: the reference's LOCAL height is another frame's
-        else if (!stanceHolds(in.neckY, ref.neckY)) o.reason = kStance;
         else {
-            o.sinkValid = true;
-            o.sinkM = sinkOf(ref.g, gOf(in.rawEyeY, in.neckY, in.localHeadY));
-            o.headRiseM = in.localHeadY - ref.localY;
-            if (in.itemDrawn) {
-                o.reason = kItemDrawn;   // measured only
+            int src = kSrcNone, why = kNoReference;
+            const Stance* use = pick(in.generation, in.neckY, &src, &why);   // F170: the settled reference, else the running one
+            o.reached = true;
+            o.source = src;
+            if (!use) {
+                o.reason = why;
             } else {
-                o.reason = kApplied;
-                o.publish = true;
-                o.addedM = o.w * o.sinkM;
-                o.publishM = targetOf(ref.target, o.w, o.sinkM);
-                added = true;
+                o.sinkValid = true;
+                o.sinkM = sinkOf(use->g, gOf(in.rawEyeY, in.neckY, in.localHeadY));
+                o.headRiseM = in.localHeadY - use->localY;
+                if (in.itemDrawn) {
+                    o.reason = kItemDrawn;   // measured only
+                } else {
+                    o.reason = kApplied;
+                    o.publish = true;
+                    o.addedM = o.w * o.sinkM;
+                    o.publishM = targetOf(use->target, o.w, o.sinkM);
+                    added = true;
+                }
             }
         }
         return o;
@@ -247,6 +334,7 @@ struct Window {
     uint32_t consideredN = 0;   // w > 0
     double wSum = 0.0, wMax = 0.0;
     uint32_t appliedN = 0, measuredN = 0, why[kReasons] = {};
+    uint32_t srcN[kSources] = {};   // F170: the considered calls that got as far as choosing a reference, by the reference they used (none, settled, running)
     double addedSum = 0.0, addedMax = -1e9;
     double upSum = 0.0, fwdSum = 0.0, viewSum = 0.0;
     uint32_t inside = 0, insideOf = 0;
@@ -279,6 +367,7 @@ struct Window {
             wMax = std::max(wMax, c.out.w);
             const int r = c.out.reason >= 0 && c.out.reason < kReasons ? c.out.reason : kInputs;
             ++why[r];
+            if (c.out.reached) ++srcN[c.out.source >= 0 && c.out.source < kSources ? c.out.source : kSrcNone];
             if (r == kApplied) {
                 ++appliedN;
                 addedSum += 100.0 * c.out.addedM;
@@ -332,6 +421,44 @@ inline void notAppliedText(const uint32_t why[kReasons], char* buf, size_t cap) 
     }
     if (n == 0 && cap) std::snprintf(buf, cap, "none");
 }
+// F170: the reference the second's considered calls used, always the three counts so the line reads the same every second: "settled 0, running 29, none 0" (a call that did not get
+// as far as choosing one, a camera away or ADS, is in none of them).
+inline void referenceText(const uint32_t srcN[kSources], char* buf, size_t cap) noexcept {
+    std::snprintf(buf, cap, "settled %u, running %u, none %u", srcN[kSrcSettled], srcN[kSrcRunning], srcN[kSrcNone]);
+}
+
+// F170: the window the hook adds to (one writer) and the frame thread takes once a second. Taking a window asks the writer to clear it before its next write; a second in which the writer
+// wrote nothing leaves the window as it was taken, and the next take would read it again and print the same line (the flight edvr_gfx_20261028_215408: from 21:58:40 to 21:59:00 every
+// line was the one second's "0 of 29 pitched calls | not applied: no reference 27" while the pilot looked level). A take that finds the clear still pending reads an empty window.
+// A write that lands between a take's copy and its request is dropped with the next clear (a call or two of a diagnostic; the line is never printed twice).
+struct Mailbox {
+    Window win;
+    std::atomic<uint32_t> seq{0};
+    std::atomic<bool> clearPending{false};
+    // the hook (one writer)
+    template <class Fn>
+    void write(Fn&& fn) noexcept {
+        seq.fetch_add(1, std::memory_order_acq_rel);
+        if (clearPending.exchange(false, std::memory_order_relaxed)) win.clear();
+        fn(win);
+        seq.fetch_add(1, std::memory_order_release);
+    }
+    // the frame thread: the window since the last take, empty when nothing was written since. False when the copy tore twice (nothing is asked to clear: the next take has both).
+    bool take(Window* out) noexcept {
+        for (int tries = 0; tries < 2; ++tries) {
+            const uint32_t s1 = seq.load(std::memory_order_acquire);
+            if (s1 & 1u) continue;
+            std::memcpy(out, &win, sizeof(win));
+            std::atomic_thread_fence(std::memory_order_acquire);
+            if (seq.load(std::memory_order_relaxed) != s1) continue;
+            if (clearPending.load(std::memory_order_acquire)) *out = Window{};   // nothing written since the last take: that window was printed
+            else clearPending.store(true, std::memory_order_relaxed);
+            return true;
+        }
+        return false;
+    }
+};
+
 // A group's 10 s bins: "[lo,hi) n sink up fwd head" for each bin with a call, "--" where a mean has no data. Stops before cap; returns the length (0: no bin has a call).
 inline size_t binsText(const Group& g, char* buf, size_t cap) noexcept {
     size_t n = 0;

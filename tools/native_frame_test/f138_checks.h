@@ -356,6 +356,189 @@ inline void run138(Check&& check) {
         r.clear();
         check(!r.any() && r.calls == 0 && r.aimMin == 1e9, "F138: the window is cleared after its line");
     }
+
+    // ---- F170: the running reference, for a look-up before the first settle ---------------------------------------------------------------------------------------------------------------
+    // The flight edvr_gfx_20261028_215408: holstered at 21:58:14, the item flag cleared in the second 21:58:21, the pilot looked up through 20 deg in that second and held +85 deg to 21:58:39,
+    // and the first unarmed settle of the flight came at 21:58:40: no reference on 1533 calls, INSIDE 90 of 90. The running reference is taken from every level call with nothing drawn.
+    {
+        // a level stretch of n calls at 90 Hz from t0, the held target and G of the stance (G = 0.16)
+        const auto level = [](f138::Tracker& t, double t0, int n, double target = kTarget, uint32_t gen = static_cast<uint32_t>(kGen), double sinkM = 0.0, double neck = kNeck) {
+            for (int i = 0; i < n; ++i) t.noteRunning(t0 + i / 90.0, target, kEye - sinkM, neck, kHead, gen, true);
+            return t0 + n / 90.0;
+        };
+        // 1. no settle ever, 3 level calls (the three the flight's second 21:58:21 counted at +11 to +15 deg), then the look straight up: the sink is added from the running reference
+        f138::Tracker t;
+        const double tEnd = level(t, 100.0, 3);
+        check(t.run.have && !t.ref.have && std::fabs(t.run.g - 0.16) < 1e-12 && std::fabs(t.run.target - kTarget) < 1e-12 && t.run.generation == 3, "F170: three level calls with nothing drawn are a running reference: G 0.16, the target in force");
+        (void)tEnd;
+        const f138::Out up = t.step(pitchedCall(60.0, 0.086));
+        check(up.reached && up.source == f138::kSrcRunning && up.reason == f138::kApplied && up.publish && std::fabs(up.sinkM - 0.086) < 1e-12 && std::fabs(up.publishM - (kTarget + 0.086)) < 1e-12 &&
+                  std::fabs(up.addedM - 0.086) < 1e-12 && up.sinkValid,
+              "F170: a look-up straight after a holster at level, with no settle, adds the sink (8.6 cm) from the running reference: the target is the one in force plus the sink");
+        // the same look-up with no level call at all has nothing to measure against (no default reference is built): refused, source none
+        f138::Tracker bare;
+        const f138::Out blind = bare.step(pitchedCall(60.0, 0.086));
+        check(blind.reached && blind.source == f138::kSrcNone && blind.reason == f138::kNoReference && !blind.publish && !blind.sinkValid,
+              "F170: a look-up with no level call before it has no reference: refused as 'no reference', source none (the line says so)");
+        // 2. the settled reference wins when there is one (here a different stance, G 0.20, target 0.30), and the sink and the target come from it
+        f138::Tracker both;
+        level(both, 100.0, 30, 0.05);
+        both.noteStance(0.30, 1.50, kNeck, kHead, static_cast<uint32_t>(kGen), true);   // G = 1.50 - 1.30 = 0.20
+        check(both.ref.have && both.run.have, "F170: both references exist");
+        const f138::Out wins = both.step(pitchedCall(60.0, 0.10));   // G now 0.06: against the settled G 0.20 the sink is 0.14; against the running 0.16 it would be 0.10
+        check(wins.source == f138::kSrcSettled && wins.reason == f138::kApplied && std::fabs(wins.sinkM - 0.14) < 1e-12 && std::fabs(wins.publishM - (0.30 + 0.14)) < 1e-12,
+              "F170: the settled reference takes priority when it is usable: its G and its target, not the running one's");
+        // 3. a settled reference that cannot be used (a recentre moved the LOCAL generation) gives way to a running one in the new frame
+        f138::Tracker moved = stanced();
+        level(moved, 100.0, 30, kTarget, 4u);
+        const f138::Out recentred = moved.step([&] { f138::In in = pitchedCall(60.0, 0.08); in.generation = 4; return in; }());
+        check(recentred.source == f138::kSrcRunning && recentred.reason == f138::kApplied && std::fabs(recentred.sinkM - 0.08) < 1e-12,
+              "F170: after a recentre the settled reference is refused (another LOCAL frame) and the running one, taken in the new one, stands in");
+        f138::Tracker movedOnly = stanced();
+        const f138::Out stale = movedOnly.step([&] { f138::In in = pitchedCall(60.0, 0.08); in.generation = 4; return in; }());
+        check(stale.reason == f138::kGeneration && stale.source == f138::kSrcNone && !stale.publish, "F170: with no running reference the refusal is the old one (the LOCAL pose's generation changed)");
+        // 4. the smoothing: G steps from 0.16 to 0.10 (the camera 6 cm down against the neck); 0.3 s later the running G is 95% of the way, 0.1 s in it is 63%
+        f138::Tracker sm;
+        double ts = level(sm, 100.0, 90);   // one second at G 0.16
+        const double t0 = ts;
+        for (int i = 0; i < 27; ++i) sm.noteRunning(t0 + i / 90.0, kTarget, kEye - 0.06, kNeck, kHead, 3u, true);
+        check(std::fabs(sm.run.g - (0.10 + 0.06 * std::exp(-3.0))) < 1e-9 && sm.run.g > 0.10 && sm.run.g < 0.16, "F170: the running G follows a step in 0.3 s to 95% (the residual is exp(-3) of the step)");
+        f138::Tracker sm2;
+        ts = level(sm2, 100.0, 90);
+        for (int i = 0; i < 9; ++i) sm2.noteRunning(ts + i / 90.0, kTarget, kEye - 0.06, kNeck, kHead, 3u, true);
+        check(std::fabs(sm2.run.g - (0.10 + 0.06 * std::exp(-1.0))) < 1e-9, "F170: and 63% of it in 0.1 s: one first-order filter whose 95% time is f138::kRunSmoothS");
+        // the target is smoothed with it
+        f138::Tracker sm3;
+        ts = level(sm3, 100.0, 90, 0.10);
+        for (int i = 0; i < 27; ++i) sm3.noteRunning(ts + i / 90.0, 0.20, kEye, kNeck, kHead, 3u, true);
+        check(std::fabs(sm3.run.target - (0.20 - 0.10 * std::exp(-3.0))) < 1e-9, "F170: the target in force is smoothed over the same 0.3 s");
+        // 5. the stance guard: the animated neck 5 cm away (a crouch, the fists' hunch) starts the reference over from that sample, not a blend
+        f138::Tracker guard;
+        level(guard, 100.0, 30);
+        guard.noteRunning(101.0, 0.50, kEye - 0.30, kNeck - 0.05, kHead, 3u, true);
+        check(std::fabs(guard.run.g - (1.46 - 0.30 - (1.30 - 0.05))) < 1e-12 && std::fabs(guard.run.target - 0.50) < 1e-12 && std::fabs(guard.run.neckY - (kNeck - 0.05)) < 1e-12,
+              "F170: a neck more than 3 cm from the reference's starts it over from that call (the same stance guard as the settled one)");
+        f138::Tracker guard2;
+        level(guard2, 100.0, 30);
+        guard2.noteRunning(101.0, kTarget, kEye, kNeck + 0.029, kHead, 3u, true);
+        check(guard2.run.neckY > kNeck && guard2.run.neckY < kNeck + 0.029, "F170: 2.9 cm is the same stance: smoothed, not restarted");
+        // a new LOCAL generation, a gap of a second or more and a pose that is not valid start it over, or drop it
+        f138::Tracker gen;
+        level(gen, 100.0, 30);
+        gen.noteRunning(101.0, 0.40, kEye, kNeck, kHead, 4u, true);
+        check(gen.run.generation == 4 && std::fabs(gen.run.target - 0.40) < 1e-12, "F170: a new LOCAL generation starts the reference over");
+        f138::Tracker gap;
+        level(gap, 100.0, 30);
+        gap.noteRunning(105.0, 0.40, kEye, kNeck, kHead, 3u, true);
+        check(std::fabs(gap.run.target - 0.40) < 1e-12, "F170: a gap longer than a second starts it over (the call stream paused)");
+        f138::Tracker bad;
+        level(bad, 100.0, 30);
+        bad.noteRunning(101.0, kTarget, kEye, kNeck, kHead, 3u, false);
+        check(!bad.run.have, "F170: a pose that is not valid drops the running reference (a stale one is not used)");
+        f138::Tracker nan;
+        level(nan, 100.0, 30);
+        const double gBefore = nan.run.g;
+        nan.noteRunning(101.0, kTarget, std::nan(""), kNeck, kHead, 3u, true);
+        check(nan.run.have && nan.run.g == gBefore, "F170: a call with a camera height that is not a number is skipped, the reference stays");
+        f138::Tracker same;
+        level(same, 100.0, 30);
+        const double sameG = same.run.g;
+        same.noteRunning(100.0 + 29.0 / 90.0, kTarget, kEye - 0.5, kNeck, kHead, 3u, true);
+        check(same.run.g == sameG, "F170: two samples at one instant do not move it");
+        // 6. nothing is taken while this tracker's own sunk target is in force
+        f138::Tracker inForce;
+        level(inForce, 100.0, 30);
+        inForce.step(pitchedCall(60.0, 0.086));
+        check(inForce.added, "F170: the sink was added");
+        const double targetBefore = inForce.run.target;
+        inForce.noteRunning(102.0, kTarget + 0.086, kEye, kNeck, kHead, 3u, true);
+        check(inForce.run.target == targetBefore, "F170: the running reference does not take the sunk target it published itself");
+        // 7. the end of the episode gives the running reference's target back, once
+        const f138::Out edge = inForce.step(pitchedCall(5.0, 0.0));
+        check(edge.returned && edge.publish && std::fabs(edge.publishM - kTarget) < 1e-12 && !inForce.step(pitchedCall(5.0, 0.0)).publish,
+              "F170: back to a level look the running reference's target (the one in force before the look) is published once");
+        // 8. the reset (the on-foot camera's edge) clears it
+        t.reset();
+        check(!t.run.have && !t.ref.have && t.runT == 0.0, "F170: the reset clears the running reference with the settled one");
+        // 9. with an item drawn the sink is measured on the running reference and nothing is published
+        f138::Tracker armed;
+        level(armed, 100.0, 30);
+        f138::In ai = pitchedCall(60.0, 0.09);
+        ai.itemDrawn = true;
+        const f138::Out am = armed.step(ai);
+        check(am.reason == f138::kItemDrawn && am.source == f138::kSrcRunning && am.sinkValid && !am.publish, "F170: an item drawn: measured on the running reference, nothing published");
+    }
+    {   // the window counts the references used and names them
+        f138::Tracker t;
+        for (int i = 0; i < 3; ++i) t.noteRunning(100.0 + i / 90.0, kTarget, kEye, kNeck, kHead, 3u, true);
+        f138::Window w;
+        for (int i = 0; i < 5; ++i) {
+            f138::Call c;
+            c.aimDeg = 60.0;
+            c.out = t.step(pitchedCall(60.0, 0.05));
+            w.add(c);
+        }
+        f138::Tracker none;
+        for (int i = 0; i < 2; ++i) {
+            f138::Call c;
+            c.aimDeg = 60.0;
+            c.out = none.step(pitchedCall(60.0, 0.05));
+            w.add(c);
+        }
+        f138::Tracker away;
+        {
+            f138::Call c;
+            c.aimDeg = 60.0;
+            f138::In in = pitchedCall(60.0, 0.05);
+            in.cameraAway = true;
+            c.out = away.step(in);   // a camera away: no reference chosen, counted nowhere
+            w.add(c);
+        }
+        char text[96];
+        f138::referenceText(w.srcN, text, sizeof(text));
+        check(w.srcN[f138::kSrcRunning] == 5 && w.srcN[f138::kSrcNone] == 2 && w.srcN[f138::kSrcSettled] == 0 && w.calls == 8 && std::strcmp(text, "settled 0, running 5, none 2") == 0,
+              "F170: the window counts the considered calls that chose a reference by the one they used; the line reads 'settled 0, running 5, none 2' (a camera away chose none)");
+        f138::Window empty;
+        f138::referenceText(empty.srcN, text, sizeof(text));
+        check(std::strcmp(text, "settled 0, running 0, none 0") == 0 && std::strcmp(f138::sourceName(f138::kSrcSettled), "settled") == 0 && std::strcmp(f138::sourceName(f138::kSrcRunning), "running") == 0 &&
+                  std::strcmp(f138::sourceName(f138::kSrcNone), "none") == 0,
+              "F170: an empty window reads zeros; the three sources are named settled, running, none");
+    }
+
+    // ---- F170: the window is not read twice ------------------------------------------------------------------------------------------------------------------------------------------------
+    // The flight edvr_gfx_20261028_215408, 21:58:40 to 21:59:00: every F138 1 s line was the same ("aim pitch +56.3 ... 0 of 29 pitched calls | not applied: no reference 27") while the pilot looked
+    // level. The frame thread asked the hook to clear the window after each take, and the hook cleared it at its next write, which only a pitched call makes.
+    {
+        f138::Mailbox box;
+        const auto writeOne = [&](double aim) {
+            box.write([&](f138::Window& win) {
+                f138::Call c;
+                c.aimDeg = aim;
+                c.out.pitched = true;
+                win.add(c);
+            });
+        };
+        f138::Window got;
+        check(box.take(&got) && !got.any(), "F170: a take before any write reads an empty window");
+        for (int i = 0; i < 29; ++i) writeOne(56.0);
+        check(box.take(&got) && got.calls == 29 && got.any(), "F170: a take after 29 pitched calls reads 29");
+        // the pilot looks level: the hook writes nothing; the next 20 takes (20 s) read nothing, where the old window was printed 20 times
+        int printed = 0;
+        for (int s = 0; s < 20; ++s) printed += box.take(&got) && got.any() ? 1 : 0;
+        check(printed == 0 && got.calls == 0 && got.aimMin == 1e9, "F170: twenty seconds with no pitched call print nothing (the old window was read again each second)");
+        // a pitched call again: only that call is read, not the 29 before it
+        writeOne(40.0);
+        check(box.take(&got) && got.calls == 1 && got.aimMin == 40.0 && got.aimMax == 40.0, "F170: the next pitched call reads alone, without the window it follows");
+        check(box.take(&got) && !got.any(), "F170: and the second after it reads empty again");
+        // a second with writes between two quiet ones
+        for (int i = 0; i < 3; ++i) writeOne(30.0);
+        const bool first = box.take(&got) && got.calls == 3;
+        const bool quiet = box.take(&got) && !got.any();
+        writeOne(35.0);
+        writeOne(35.0);
+        const bool again = box.take(&got) && got.calls == 2 && got.aimMin == 35.0;
+        check(first && quiet && again, "F170: writes, a quiet second, writes: 3, nothing, 2 (each second its own)");
+    }
 }
 
 }  // namespace f138test
