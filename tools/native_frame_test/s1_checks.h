@@ -129,6 +129,14 @@ inline void runS1(Check&& check) {
         check(without([](sz::LensGateIn& x) { x.optical = false; x.sFresh = false; }) == sz::LensVerdict::kNotOptical,
               "S1 gate: a weapon that is not an optical sight is not counted as a missing S (the table is asked first)");
         check(!sz::lensFresh(50001) && sz::lensFresh(50000) && sz::lensFresh(0), "S1 gate: the door takes a c no older than 50 ms");
+        // F162: the lens is the right eye's, so the sights up with the left eye aiming (fix.native_on_foot_ads_sight_eye = left) is its own decline, whatever else holds
+        check(without([](sz::LensGateIn& x) { x.leftAim = true; }) == sz::LensVerdict::kLeftAim && without([](sz::LensGateIn& x) { x.leftAim = true; x.optical = false; }) == sz::LensVerdict::kLeftAim &&
+                  without([](sz::LensGateIn& x) { x.leftAim = true; x.sFresh = false; }) == sz::LensVerdict::kLeftAim,
+              "S1 gate: the left eye aiming is counted as the left aiming eye, ahead of the optical sight and S tests (the lens is the right eye's)");
+        check(without([](sz::LensGateIn& x) { x.leftAim = true; x.keyOn = false; }) == sz::LensVerdict::kIdle && without([](sz::LensGateIn& x) { x.leftAim = true; x.adsActive = false; }) == sz::LensVerdict::kIdle &&
+                  without([](sz::LensGateIn& x) { x.leftAim = true; x.onFoot = false; }) == sz::LensVerdict::kIdle && without([](sz::LensGateIn& x) { x.leftAim = true; x.wFull = false; }) == sz::LensVerdict::kIdle,
+              "S1 gate: the left eye aiming asks nothing of the lens while the key is off or the sights are not up (idle, nothing counted)");
+        check(sz::LensVerdict::kLeftAim != sz::LensVerdict::kQualifies && static_cast<uint32_t>(sz::LensVerdict::kLeftAim) == 4, "S1 gate: the left aiming verdict is not a qualifying one (the gunsight mark's family is armed on kQualifies alone)");
     }
     {
         check(near1(sz::lensEase(4.07, 0.0), 1.0, 1e-12) && near1(sz::lensEase(4.07, -1.0), 1.0, 1e-12), "S1 ease: M is 1 at the first qualifying frame (and for a time before it)");
@@ -387,7 +395,7 @@ inline void runS1(Check&& check) {
         }
     }
     {
-        char line[1100];
+        char line[sz::kLensPressLineBytes];
         sz::formatLensAnnounce(line, sizeof(line), true, 56.3, sz::lensTableEntries());
         check(std::string(line).rfind("scope zoom (S1): on, reference FOV 56.3 deg, 7 table entries;", 0) == 0, "S1 lines: the announce says the key, the reference FOV and the table's size");
         sz::formatLensAnnounce(line, sizeof(line), false, 64.8, 7);
@@ -422,6 +430,9 @@ inline void runS1(Check&& check) {
         p.d.markRedirected[1] = 300;
         p.d.markArmedFrames = 310;
         p.d.markNoDraw = 2;
+        p.d.markPath[sz::kMarkPathSeeded] = 500;
+        p.d.markPath[sz::kMarkPathSeededReadOnly] = 80;
+        p.d.markPath[sz::kMarkPathTestsOff] = 16;
         p.d.staleC = 4;
         p.d.depthUnavailable = 3;
         p.d.formatRefused = 3;
@@ -441,11 +452,12 @@ inline void runS1(Check&& check) {
         sz::lensNoteGpu(&p.d, 0.0123, 0.0456);
         const int n = sz::formatLensPress(line, sizeof(line), p);
         const std::string text(line);
-        check(n == static_cast<int>(text.size()) && n < 1100 &&
+        check(n == static_cast<int>(text.size()) && n < static_cast<int>(sz::kLensPressLineBytes) &&
                   text.rfind("scope zoom (S1): press 3 item $wpn_m_sniper_plasma_charged_name; scope yes key on ads 15.000 deg M 4.067 h 56.3 deg; frame thread: qualified 312, no S 9, "
-                             "not an optical sight 0, idle 40; FOV from the bare copy 0; jitter reading none 2, from another frame 5; c to the far point mean 0.500 max 0.750 deg; applied 300 of 310 qualifying frames (dispatched 303, at M 1 1); "
-                             "declined: no S 7, stale c 4, open sight 0, not an optical sight 0, depth unavailable 3, format refused 3; picture sequence less c's: -1 1, 0 297, +1 4, +2 1, other 0; "
-                             "gunsight marks redirected: L 296, R 300; armed frames 310, no mark draw 2; hole r min 4.01 median 5.20 max 6.42 deg, 1 of 128 rays escaped (rays read on 296 frames); "
+                             "not an optical sight 0, left aiming eye 0, idle 40; FOV from the bare copy 0; jitter reading none 2, from another frame 5; c to the far point mean 0.500 max 0.750 deg; applied 300 of 310 qualifying frames (dispatched 303, at M 1 1); "
+                             "declined: no S 7, stale c 4, open sight 0, not an optical sight 0, left aiming eye 0, depth unavailable 3, format refused 3; picture sequence less c's: -1 1, 0 297, +1 4, +2 1, other 0; "
+                             "gunsight marks redirected: L 296, R 300; armed frames 310, no mark draw 2; mark depth path: untested 0, seeded 500, seeded read-only 80, tests off 16; "
+                             "hole r min 4.01 median 5.20 max 6.42 deg, 1 of 128 rays escaped (rays read on 296 frames); "
                              "depth at c 0.001220 (near 0.041700); c mean (1642.5, 1990.0) px spread 0.50 px; GPU rays 0.012 ms (max 0.012), magnify 0.046 ms (max 0.046)",
                              0) == 0,
               "S1 lines: the press line carries the item, scope, key, ADS FOV, M, h, the frame thread's counts, the applied and qualifying frames with the dispatched and M = 1 split, every decline, the hole, the depth, c's mean and spread and the GPU price");
@@ -453,10 +465,10 @@ inline void runS1(Check&& check) {
         empty.refDeg = 56.3;
         sz::formatLensPress(line, sizeof(line), empty);
         const std::string e(line);
-        check(e.find("press 0 item none scope unknown key off ads none deg M none h 56.3 deg; frame thread: qualified 0, no S 0, not an optical sight 0, idle 0; FOV from the bare copy 0; jitter reading none 0, "
-                     "from another frame 0; c to the far point mean none max none deg; applied 0 of 0 qualifying frames (dispatched 0, at M 1 0); declined: no S 0, stale c 0, open sight 0, "
-                     "not an optical sight 0, depth unavailable 0, format refused 0; picture sequence less c's: -1 0, 0 0, +1 0, +2 0, other 0; gunsight marks redirected: L 0, R 0; "
-                     "armed frames 0, no mark draw 0; ") != std::string::npos,
+        check(e.find("press 0 item none scope unknown key off ads none deg M none h 56.3 deg; frame thread: qualified 0, no S 0, not an optical sight 0, left aiming eye 0, idle 0; FOV from the bare copy 0; "
+                     "jitter reading none 0, from another frame 0; c to the far point mean none max none deg; applied 0 of 0 qualifying frames (dispatched 0, at M 1 0); declined: no S 0, stale c 0, open sight 0, "
+                     "not an optical sight 0, left aiming eye 0, depth unavailable 0, format refused 0; picture sequence less c's: -1 0, 0 0, +1 0, +2 0, other 0; gunsight marks redirected: L 0, R 0; "
+                     "armed frames 0, no mark draw 0; mark depth path: untested 0, seeded 0, seeded read-only 0, tests off 0; ") != std::string::npos,
               "S1 lines: a press with nothing in it says none for what it does not have");
         check(e.find("hole r min none median none max none deg, 0 of 128 rays escaped (rays read on 0 frames); depth at c none (near none); c mean (none, none) px spread none px; "
                      "GPU rays none ms (max none), magnify none ms (max none)") != std::string::npos,
@@ -464,8 +476,8 @@ inline void runS1(Check&& check) {
         sz::formatLensPress(line, 40, p);
         check(std::strlen(line) < 40, "S1 lines: a buffer that is too small is cut, not overrun");
         check(sz::lensOtherFrames(p.d) == 6, "S1 lines: the A1 count of frames with c from another frame than the picture is the buckets but 0 (1 + 4 + 1 + 0)");
-        // the worst case: the longest item name, every counter six digits (a press of ten minutes at 90 Hz is 54000 frames), every figure at its widest. It must fit the 1100 bytes the press
-        // line is written from, and the log's 1200, with its end (the GPU price) still on it.
+        // the worst case: the longest item name, every counter six digits (a press of ten minutes at 90 Hz is 54000 frames), every figure at its widest. It must fit the buffer the press
+        // line is written from (kLensPressLineBytes), and the log's 1200, with its end (the GPU price) still on it.
         sz::LensPressLine w;
         w.press = 200;
         w.item = "$wpn_m_submachinegun_laser_fauto_name;";
@@ -474,10 +486,11 @@ inline void runS1(Check&& check) {
         w.adsDeg = 15.0;
         w.m = 4.0670;
         w.refDeg = 56.3;
-        w.t.qualified = w.t.noS = w.t.notOptical = w.t.idle = w.t.fovFromBare = w.t.jitterNone = w.t.jitterOther = 999999;
+        w.t.qualified = w.t.noS = w.t.notOptical = w.t.leftAim = w.t.idle = w.t.fovFromBare = w.t.jitterNone = w.t.jitterOther = 999999;
         sz::lensNoteFar(&w.t, 123.456);
-        w.d.applied = w.d.qualifying = w.d.dispatched = w.d.noop = w.d.noS = w.d.staleC = w.d.openSight = w.d.notOptical = w.d.depthUnavailable = w.d.formatRefused = 999999;
+        w.d.applied = w.d.qualifying = w.d.dispatched = w.d.noop = w.d.noS = w.d.staleC = w.d.openSight = w.d.notOptical = w.d.leftAim = w.d.depthUnavailable = w.d.formatRefused = 999999;
         for (uint32_t k = 0; k < sz::kLensGapBuckets; ++k) w.d.seqGap[k] = 999999;
+        for (uint32_t k = 0; k < sz::kMarkPaths; ++k) w.d.markPath[k] = 999999;
         w.d.markRedirected[0] = w.d.markRedirected[1] = w.d.markArmedFrames = w.d.markNoDraw = 999999;
         w.d.raysRead = 999999;
         w.d.holeKnown = true;
@@ -491,8 +504,10 @@ inline void runS1(Check&& check) {
         sz::lensNoteGpu(&w.d, 12.345, 12.345);
         const int wn = sz::formatLensPress(line, sizeof(line), w);
         const std::string worst(line);
-        check(wn == static_cast<int>(worst.size()) && wn < 1100 && worst.rfind("magnify 12.345 ms (max 12.345)") == worst.size() - std::strlen("magnify 12.345 ms (max 12.345)"),
-              "S1 lines: the press line with every counter at six digits and every figure at its widest is under 1100 bytes and keeps its end");
+        check(wn == static_cast<int>(worst.size()) && wn < static_cast<int>(sz::kLensPressLineBytes) &&
+                  worst.rfind("magnify 12.345 ms (max 12.345)") == worst.size() - std::strlen("magnify 12.345 ms (max 12.345)"),
+              "S1 lines: the press line with every counter at six digits and every figure at its widest is under the press line's buffer (1160 bytes, inside the log's 1167) and keeps its end");
+        check(worst.size() + 15 + 3 + 15 <= 1200, "S1 lines: the worst-case press line, with the log's stamp and truncation marker reserved, fits the log's 1200-byte line");
     }
 }
 

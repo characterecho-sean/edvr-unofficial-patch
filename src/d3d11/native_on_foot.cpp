@@ -1208,7 +1208,7 @@ void readKey() {
         if (first || zoomOn != g_scopeZoomKey.load(std::memory_order_relaxed))
             Log::get().note("native on foot ADS scope zoom (A1): fix.native_on_foot_ads_scope_zoom is %s -- %s", zoomOn ? "on" : "off",
                             zoomOn ? "while you aim down sights through a weapon in the table, the right eye's picture inside the scope's frame is magnified by the game's own zoom (M from the "
-                                     "reference FOV below), after the upscaler and sharpening; the left eye follows with the sight in both eyes"
+                                     "reference FOV below), after the upscaler and sharpening; with fix.native_on_foot_ads_sight_eye at both the left eye follows with the same picture, and with left there is no lens"
                                    : "no lens: the scope shows the world at true scale");
         if (first || static_cast<float>(ref) != g_scopeZoomRefDeg.load(std::memory_order_relaxed))
             Log::get().note("native on foot ADS scope zoom (A1, TEMPORARY): experimental.native_on_foot_ads_scope_zoom_fov = %.1f deg (range %.0f..%.0f) -- the reference FOV M is measured "
@@ -35113,7 +35113,8 @@ struct Vr {
 
 // c in each eye and the numbers beside it, at the press's first settled frame. S is the game's world point, in the space P14w, E and the eyes' origins (rows' o) share: F143's toRoot subtracts p14w
 // from S as it is, adsSightTick's sightPointNdc takes p14w and the same o, and eyeFromRows puts the rendered eye in that world (within 0.5 m of the job camera), so S needs no transform. c is
-// S through each eye's scene rows (sightPointNdc at a distance of 0 along any direction). The right eye (eye index 1: eyeIndexFor's order, temporal_pass.h) is the aiming eye.
+// S through each eye's scene rows (sightPointNdc at a distance of 0 along any direction). The right eye (eye index 1: eyeIndexFor's order, temporal_pass.h) is the aiming eye with
+// fix.native_on_foot_ads_sight_eye = both or right; with left it is the left eye, and the lens (S1) is not made.
 struct Geometry {
     sz::LensEye eye[2];
     const char* why[2] = {"no scene rows published", "no scene rows published"};
@@ -35316,7 +35317,7 @@ void s0VrNoteSample(const F141Sample& s, uint64_t now) noexcept {
 
 // ---- A1: the scope lens, the frame thread's half (scope_zoom_s1.h, scope_zoom.h; docs\design-vr-scope-magnification-2026-10-28.md, section 8) ---------------------------------------------
 // Each frame in native on foot VR the tick answers one question: does the lens run on the picture this frame draws (fix.native_on_foot_ads_scope_zoom on; the sights up, the game's w at
-// 1.0; the held item and scope an optical sight in the table with M >= 1.05; S fresh, so c through the right eye's scene rows)? It publishes the answer with c (corrected for the draw's jitter by the
+// 1.0; the aiming eye the right one (F162: not fix.native_on_foot_ads_sight_eye = left); the held item and scope an optical sight in the table with M >= 1.05; S fresh, so c through the right eye's scene rows)? It publishes the answer with c (corrected for the draw's jitter by the
 // door, which owns the output's size), M after its ease and the tangents of the render, by seqlock, for the door on the draw thread. It borrows S0's geometry (the rows it projected
 // through) and the samples S0 keeps from F141's drain (w, S, E); nothing is written to a game object. c is the game's line E -> S (the shots go along it, F143) projected at the far
 // impact point, kFarM along it past S, not S itself: S is 17 to 28 cm away, so an eye a millimetre off the line would put S 0.3 degrees from the far target and the lens would
@@ -35363,7 +35364,7 @@ void endPress(State& s) noexcept {
     pl.refDeg = s.refDeg;
     pl.t = s.ts;
     scopeZoomPressTake(&pl.d);
-    char line[1100];
+    char line[sz::kLensPressLineBytes];
     sz::formatLensPress(line, sizeof(line), pl);
     Log::get().note("%s", line);
 }
@@ -35423,6 +35424,7 @@ void tick(uint64_t nowMs) noexcept {
     gi.onFoot = onFoot;
     gi.adsActive = g_adsState == kAdsActive;
     gi.wFull = v.wSeen && s0::freshMs(nowMs, v.wMs) && std::isfinite(v.w) && v.w >= 1.0f;
+    gi.leftAim = adsAimEye() == 0;   // F162: fix.native_on_foot_ads_sight_eye = left aims with the left eye; the lens is the right eye's (the door's eye 1, its depth, rows and jitter)
     double adsDeg = std::numeric_limits<double>::quiet_NaN();
     bool fromBare = false;
     gi.optical = sz::lensAdsDeg(s.item.name, s.item.scope, &adsDeg, &fromBare);
@@ -35454,6 +35456,7 @@ void tick(uint64_t nowMs) noexcept {
         case sz::LensVerdict::kQualifies: ++s.ts.qualified; break;
         case sz::LensVerdict::kNoS: ++s.ts.noS; break;
         case sz::LensVerdict::kNotOptical: ++s.ts.notOptical; break;
+        case sz::LensVerdict::kLeftAim: ++s.ts.leftAim; break;
         default: ++s.ts.idle; break;
     }
     if (verdict == sz::LensVerdict::kQualifies) {

@@ -56,8 +56,8 @@ bool scopeZoomWanted();
 // reads it. Asked by the draw path for the mark's one pair, so the family is named only for a sight the lens magnifies.
 bool scopeZoomMarkArmed();
 // The layer took a mark draw out of the scene for an eye (0 left, 1 right) in the temporal sequence seq: counted for the press line, and the right eye's sequence is what the door
-// compares its own against to count the armed frames that had no mark draw.
-void scopeZoomNoteMark(uint32_t eye, uint64_t seq);
+// compares its own against to count the armed frames that had no mark draw. path (scope_zoom_s1.h kMarkPath*) is what the layer did with the draw's depth and stencil tests.
+void scopeZoomNoteMark(uint32_t eye, uint64_t seq, uint32_t path);
 // A press begins (zero the door's counters) and ends (the counters, finished, for the press line).
 void scopeZoomPressBegin(uint32_t press);
 void scopeZoomPressTake(scopezoom::LensDoorStats* out);

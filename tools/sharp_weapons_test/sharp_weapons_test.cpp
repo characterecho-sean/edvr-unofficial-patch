@@ -42,6 +42,7 @@
 #include <DirectXPackedVector.h>
 #include <wrl/client.h>
 
+#include "../../src/d3d11/draw_state_describe.h"
 #include "../../src/d3d11/flat_ui_layer_math.h"
 #include "../../src/d3d11/menu_flat_rows.h"
 #include "../../src/d3d11/menu_schema.h"
@@ -85,11 +86,14 @@ static void scopeMarkTests() {
     f.scopeMark = true;
     check(uiLayerFamilyFor(f) == UiLayerFamily::kScopeMark, "the pair with the lens armed, the shape and the atlas is the scope mark on the HDR target");
     for (int bit = 0; bit < 64; bit += 9) {
-        check(uiLayerFamilyFor(hdrFacts(kUiVsScopeMark ^ (1ull << bit), kUiPsScopeMark)) != UiLayerFamily::kScopeMark, "a one-bit change of the vertex shader is not the family");
+        UiFamilyFacts v = hdrFacts(kUiVsScopeMark ^ (1ull << bit), kUiPsScopeMark);
+        v.scopeMark = true;   // the flag the hook would have set: without it the mutant could never name the family, and the check would hold for any rule
+        check(uiLayerFamilyFor(v) != UiLayerFamily::kScopeMark, "a one-bit change of the vertex shader is not the family, with every other fact true");
         UiFamilyFacts g = hdrFacts(kUiVsScopeMark, kUiPsScopeMark ^ (1ull << bit));
         g.scopeMark = true;
         check(uiLayerFamilyFor(g) != UiLayerFamily::kScopeMark, "a one-bit change of the pixel shader is not the family, armed or not");
     }
+    check(!weaponsFireVs(kUiVsScopeMark), "the mark's vertex shader is not a weapons-fire one (the hook's earlier branch would otherwise take the draw first)");
     UiFamilyFacts other = hdrFacts(kUiVsScopeMark, 0xC5A5C7E8216CB9AFull);
     other.scopeMark = true;
     check(uiLayerFamilyFor(other) != UiLayerFamily::kScopeMark, "the same vertex shader with the material's pixel shader is not the family");
@@ -106,6 +110,143 @@ static void scopeMarkTests() {
     check(uiScopeMarkShape('X', 6, 1) && uiScopeMarkShape('I', 6, 1) && !uiScopeMarkShape('X', 18, 1) && !uiScopeMarkShape('X', 6, 2) && !uiScopeMarkShape('D', 6, 1) && !uiScopeMarkShape('N', 6, 1) &&
               !uiScopeMarkShape('X', 0, 0),
           "the draw shape is 6 indices in 1 instance, indexed: the material's draws (18 indices, several instances) are not it");
+
+    // THE GATE, driven behaviourally: uiScopeMarkFacts is the rule vscreen.cpp's uiLayerFamilyOf asks with the real reads (the vertex shader, the draw's shape, whether the lens is
+    // armed, the pixel shader's hash, whether a learned interface surface is bound). Each condition alone must refuse, all together must name the family, and a refusal must stop
+    // before the reads that follow it (an ordinary draw reads no hash).
+    struct Probe {
+        uint64_t vs = kUiVsScopeMark;
+        char kind = 'X';
+        uint32_t indices = 6, instances = 1;
+        bool armed = true, surface = true;
+        uint64_t ps = kUiPsScopeMark;
+        mutable int armedCalls = 0, psCalls = 0, surfaceCalls = 0;
+        UiLayerFamily family() const {
+            uint64_t readPs = 0;
+            UiFamilyFacts facts = hdrFacts(vs, 0);
+            facts.scopeMark = uiScopeMarkFacts(vs, kind, indices, instances, [&] { ++armedCalls; return armed; }, [&] { ++psCalls; return ps; }, [&] { ++surfaceCalls; return surface; }, &readPs);
+            facts.ps = readPs;
+            return uiLayerFamilyFor(facts);
+        }
+    };
+    {
+        Probe all;
+        check(all.family() == UiLayerFamily::kScopeMark && all.armedCalls == 1 && all.psCalls == 1 && all.surfaceCalls == 1, "the gate: the pair, 6 indices in 1 instance, the lens armed, the pixel shader and a learned surface together name the family");
+        Probe idx;
+        idx.kind = 'I';
+        check(idx.family() == UiLayerFamily::kScopeMark, "the gate: an indexed draw of kind I matches as kind X does");
+        const auto refuses = [&](Probe p, int armedCalls, int psCalls, int surfaceCalls, const char* why) {
+            check(p.family() != UiLayerFamily::kScopeMark && p.armedCalls == armedCalls && p.psCalls == psCalls && p.surfaceCalls == surfaceCalls, why);
+        };
+        Probe p;
+        p.indices = 5;
+        refuses(p, 0, 0, 0, "the gate: 5 indices alone refuses, before the lens, the hash or the surface is asked");
+        p = Probe();
+        p.indices = 12;
+        refuses(p, 0, 0, 0, "the gate: 12 indices alone refuses, before anything is asked");
+        p = Probe();
+        p.instances = 2;
+        refuses(p, 0, 0, 0, "the gate: 2 instances alone refuses, before anything is asked");
+        p = Probe();
+        p.kind = 'D';
+        refuses(p, 0, 0, 0, "the gate: a draw that is not indexed alone refuses, before anything is asked");
+        p = Probe();
+        p.vs = kUiVsScopeMark ^ 1;
+        refuses(p, 0, 0, 0, "the gate: another vertex shader alone refuses, before anything is asked");
+        p = Probe();
+        p.armed = false;
+        refuses(p, 1, 0, 0, "the gate: the lens not armed alone refuses, before the pixel shader's hash is read");
+        p = Probe();
+        p.ps = 0xC5A5C7E8216CB9AFull;
+        refuses(p, 1, 1, 0, "the gate: the material's pixel shader in place of the mark's alone refuses, before the surface is asked");
+        p = Probe();
+        p.surface = false;
+        refuses(p, 1, 1, 1, "the gate: no learned surface alone refuses");
+        // and the facts it hands the rule are the ones the rule's own flag reads: with the hash read and the flag false the pair alone is not the family
+        UiFamilyFacts bare = hdrFacts(kUiVsScopeMark, kUiPsScopeMark);
+        check(uiLayerFamilyFor(bare) == UiLayerFamily::kNone, "the gate: the pair with the flag unset is no family");
+    }
+
+    // THE ARMING OF THE FIRST-SEEN LINE: not-armed is structural for the scope mark alone (the lens-armed family that was never taken because its eye's layer was not armed is the one
+    // reason its flight cannot lose); late and not-UI stay transient for it; every other family keeps its rule
+    {
+        check(uiLayerDecisionIsStructural(UiLayerFamily::kScopeMark, UiLayerDecision::kNotArmed) && !uiLayerDecisionIsStructural(UiLayerFamily::kScopeMark, UiLayerDecision::kLate) &&
+                  !uiLayerDecisionIsStructural(UiLayerFamily::kScopeMark, UiLayerDecision::kNotUi) && uiLayerDecisionIsStructural(UiLayerFamily::kScopeMark, UiLayerDecision::kBlendRefused),
+              "not-armed gets a first-seen line for the scope mark; late and not-UI do not");
+        check(!uiLayerDecisionIsStructural(UiLayerFamily::kScreen, UiLayerDecision::kNotArmed) && !uiLayerDecisionIsStructural(UiLayerFamily::kWeaponsFire, UiLayerDecision::kNotArmed) &&
+                  !uiLayerDecisionIsStructural(UiLayerFamily::kFlightHud, UiLayerDecision::kNotArmed) && uiLayerDecisionIsStructural(UiLayerFamily::kScreen, UiLayerDecision::kMrt),
+              "no other family's not-armed gets a line, and the structural decisions are as they were");
+        UiFamilySeenTable<4> seen;
+        check(seen.wanted(UiLayerFamily::kScopeMark, UiLayerDecision::kNotArmed, 1, 2) && seen.record(UiLayerFamily::kScopeMark, UiLayerDecision::kNotArmed, 1, 2) &&
+                  !seen.wanted(UiLayerFamily::kScopeMark, UiLayerDecision::kNotArmed, 1, 2) && !seen.record(UiLayerFamily::kScopeMark, UiLayerDecision::kNotArmed, 1, 2) &&
+                  !seen.wanted(UiLayerFamily::kScreen, UiLayerDecision::kNotArmed, 1, 2) && seen.count == 1,
+              "the scope mark's not-armed prints once for its pair, and another family's does not print");
+    }
+
+    // THE DEPTH PATH. The draw tests depth (GEQUAL) and stencil against a reference and writes neither (the dump census); the view it is drawn against may be bound read-only.
+    {
+        UiDsState gt;
+        gt.depthEnable = true;
+        gt.depthFunc = 7;   // GREATER_EQUAL
+        gt.depthWriteAll = false;
+        gt.stencilEnable = true;
+        gt.readMask = 0xFF;
+        gt.writeMask = 0x00;
+        gt.front.func = 3;   // EQUAL (reference 4)
+        gt.back.func = 3;
+        const UiDsEffect tests = uiLayerDsEffect(gt, true);
+        check(tests.depthTest && tests.stencilTest && !tests.writes() && uiScopeMarkWritesNothing(gt), "the mark's draw state tests depth and stencil and writes nothing");
+        check(uiScopeMarkDepth(tests, gt, true) == UiMarkDepth::kSeeded, "tests the layer can reproduce on a writable view: the seeded copy");
+        UiDsState ro = gt;
+        ro.readOnlyDepth = ro.readOnlyStencil = true;
+        check(uiScopeMarkDepth(uiLayerDsEffect(ro, true), ro, true) == UiMarkDepth::kSeededReadOnly, "the same on a view bound read-only, reproduced: the seeded copy, named read-only");
+        ro.readOnlyStencil = false;
+        check(uiScopeMarkDepth(uiLayerDsEffect(ro, true), ro, true) == UiMarkDepth::kSeededReadOnly, "a view read-only in depth alone is read-only too (the view's flags are either)");
+        check(uiScopeMarkDepth(tests, gt, false) == UiMarkDepth::kTestsOff, "tests the layer cannot reproduce, the draw writing nothing: redrawn with the tests off");
+        check(uiScopeMarkDepth(uiLayerDsEffect(ro, true), ro, false) == UiMarkDepth::kTestsOff, "a read-only view that could not be reproduced is dropped the same way");
+        UiDsState none;
+        check(uiScopeMarkDepth(uiLayerDsEffect(none, true), none, true) == UiMarkDepth::kUntested && uiScopeMarkDepth(uiLayerDsEffect(none, false), none, false) == UiMarkDepth::kUntested,
+              "a draw that tests neither, or with no depth target bound, is untested");
+        UiDsState wd = gt;
+        wd.depthWriteAll = true;
+        check(!uiScopeMarkWritesNothing(wd) && uiScopeMarkDepth(uiLayerDsEffect(wd, true), wd, false) == UiMarkDepth::kRefused && uiScopeMarkDepth(uiLayerDsEffect(wd, true), wd, true) == UiMarkDepth::kSeeded,
+              "a draw that writes depth is never accepted on a read-only view and, when its tests cannot be reproduced, keeps the ordinary refusal");
+        UiDsState wr = gt;
+        wr.writeMask = 0xFF;
+        wr.front.pass = wr.back.pass = 3;   // REPLACE
+        check(!uiScopeMarkWritesNothing(wr) && uiScopeMarkDepth(uiLayerDsEffect(wr, true), wr, false) == UiMarkDepth::kRefused, "a stencil write under a write mask is a write");
+        UiDsState masked = wr;
+        masked.writeMask = 0x00;
+        UiDsState keep = wr;
+        keep.front.pass = keep.back.pass = uids::kKeep;
+        check(uiScopeMarkWritesNothing(masked) && uiScopeMarkWritesNothing(keep), "a stencil operation under a zero write mask, or every operation KEEP, writes nothing");
+        UiDsState masking = wd;   // a read-only view masks the write the state asks for: the state's potential is what is judged, not the view's flags
+        masking.readOnlyDepth = masking.readOnlyStencil = true;
+        check(!uiScopeMarkWritesNothing(masking) && !uiLayerDsEffect(masking, true).writes(), "a depth write the read-only view masks is still the state's potential to write (the layer's copy is writable)");
+
+        // end to end through the pure decision: a test the layer cannot reproduce refuses a family's draw; for the mark it is dropped and the draw is redirected; a writer keeps the refusal
+        UiLayerDrawFacts d;
+        d.family = UiLayerFamily::kScopeMark;
+        d.eyeTarget = true;
+        d.ldrView = false;
+        d.crispHdr = true;
+        d.eye = 1;
+        d.armed = true;
+        d.blend = UiBlendShape::kAdditive;
+        d.ds = tests;
+        d.dsReproducible = false;
+        check(uiLayerDecide(d) == UiLayerDecision::kDepthStencilTest, "a test the layer cannot reproduce is refused by the ordinary decision");
+        UiLayerDrawFacts dropped = d;
+        if (uiScopeMarkDepth(dropped.ds, gt, dropped.dsReproducible) == UiMarkDepth::kTestsOff) dropped.ds.depthTest = dropped.ds.stencilTest = false;
+        check(uiLayerDecide(dropped) == UiLayerDecision::kRedirect, "with the mark's tests dropped the draw is redirected into the layer");
+        UiLayerDrawFacts writer = d;
+        writer.ds = uiLayerDsEffect(wd, true);
+        if (uiScopeMarkDepth(writer.ds, wd, writer.dsReproducible) == UiMarkDepth::kTestsOff) writer.ds.depthTest = writer.ds.stencilTest = false;
+        check(uiLayerDecide(writer) == UiLayerDecision::kDepthStencilTest, "a mark draw that writes depth keeps the refusal");
+        check(std::strcmp(uiMarkDepthName(UiMarkDepth::kUntested), "untested") == 0 && std::strcmp(uiMarkDepthName(UiMarkDepth::kSeeded), "seeded") == 0 &&
+                  std::strcmp(uiMarkDepthName(UiMarkDepth::kSeededReadOnly), "seeded read-only") == 0 && std::strcmp(uiMarkDepthName(UiMarkDepth::kTestsOff), "tests off") == 0,
+              "the paths' names are the press line's labels (tools\\edvr_log.py reads them)");
+    }
 
     // the decision: ONE, DEST_ALPHA (the dump census, bl=12,7,1/2,7,1) is refused as it stands and additive on an alpha-less target
     UiBlendRt game;
@@ -1342,6 +1483,18 @@ static void destAlphaReproduction(Fx& f) {
         f.ctx->OMSetRenderTargets(0, nullptr, nullptr);
         return t;
     };
+    // shapeOf, the hook's read of the bound blend, on the real state: the rewrite is what the layer converts (*rtOut), and the game's own factors are what a log line prints (*gameOut)
+    {
+        UiBlendRt rewritten, own, plain;
+        check(shapeOf(bs.Get(), &rewritten, true, &own) == UiBlendShape::kAdditive && rewritten.src == uiblend::kOne && rewritten.dst == uiblend::kOne && own.src == uiblend::kOne &&
+                  own.dst == uiblend::kDestAlpha && own.srcA == uiblend::kOne && own.dstA == uiblend::kDestAlpha,
+              "shapeOf with destination alpha read as 1: the rewritten blend is ONE, ONE and the game's own factors are ONE, DEST_ALPHA");
+        char text[96];
+        describeBlend(own, text, sizeof(text));
+        check(std::strcmp(text, "bl=12,7,1/2,7,1 bm=F") == 0, "the game's blend as a decline prints it is the census's own text for ONE, DEST_ALPHA (bl=12,7,1/2,7,1)");
+        check(shapeOf(bs.Get(), &plain, false, &own) == UiBlendShape::kRefused && plain.dst == uiblend::kDestAlpha && own.dst == uiblend::kDestAlpha, "without the rewrite the blend is refused as it stands, and both outputs are the game's");
+        check(shapeOf(nullptr, &plain, true, &own) == UiBlendShape::kOpaque && !own.enable && !plain.enable, "no blend state bound is the default, opaque, in both outputs");
+    }
     const float clear[4] = {0.25f, 0.5f, 0.125f, 0.0f};
     const std::vector<uint8_t> packed = f.read8(draw(DXGI_FORMAT_R11G11B10_FLOAT, clear).Get());
     uint32_t px = 0;

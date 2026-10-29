@@ -4100,10 +4100,10 @@ __declspec(noinline) UiLayerFamily uiLayerFamilyOf(State* s, char kind, UINT cou
     else if (f.targetKind == 1 && (weaponsFireVs(f.vs) || shieldRefractVs(f.vs)))  // The weapons fire: the pair is the key too
         f.ps = bindingShaderHash(BindSlot::Ps);
     // A2: the scope's gunsight mark. Its pair is also the weapon and tool material, so the key is the pair drawing 6 indices in 1 instance with a learned interface surface (the readout
-    // atlas) sampled, and only while the scope lens is armed for the frame. The cheap tests come first: the hash of an ordinary draw is not read.
-    else if (f.targetKind == 1 && f.vs == kUiVsScopeMark && uiScopeMarkShape(kind, count, instances) && scopeZoomMarkArmed()) {
-        f.ps = bindingShaderHash(BindSlot::Ps);
-        f.scopeMark = f.ps == kUiPsScopeMark && uiDepthSampledSurfaceSlot() >= 0;
+    // atlas) sampled, and only while the scope lens is armed for the frame. The cheap tests come first: the hash of an ordinary draw is not read (uiScopeMarkFacts, the rule the rig drives).
+    else if (f.targetKind == 1 && f.vs == kUiVsScopeMark) {
+        f.scopeMark = uiScopeMarkFacts(
+            f.vs, kind, count, instances, [] { return scopeZoomMarkArmed(); }, [] { return bindingShaderHash(BindSlot::Ps); }, [] { return uiDepthSampledSurfaceSlot() >= 0; }, &f.ps);
     }
     if (f.targetKind == 2) {
         // ui_depth's exclude list (the null-output mesh B018D143700AB803,

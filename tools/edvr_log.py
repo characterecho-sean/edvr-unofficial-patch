@@ -14786,21 +14786,43 @@ def _hj_s0_census(rows, ctx):
 # A2 (docs section 9) adds to the press line: the decline `not an optical sight` (the table holds optical sights only), `FOV from the bare copy` (ticks that took an unmeasured scoped
 # copy's FOV from its bare copy), the histogram of the picture's temporal sequence less c's (the A1 count of c from another frame is every bucket but 0), and the scope's gunsight
 # mark: draws redirected out of the scene per eye, and the armed right-eye frames with no mark draw.
+# The A2 review fixes add the decline `left aiming eye` (fix.native_on_foot_ads_sight_eye = left: the lens is the right eye's; not a failure) and the mark's depth path, the count of the
+# redirected mark draws by what the layer did with their depth and stencil tests (untested, seeded, seeded read-only, tests off).
 H_S1 = "scope zoom (S1)"
 H_S1_ANNOUNCE_RE = r"scope zoom \(S1\): (?P<key>on|off), reference FOV (?P<ref>[\d.]+) deg, (?P<entries>\d+) table entries; .*$"
 H_S1_PRESS_RE = (r"scope zoom \(S1\): press (?P<n>\d+) item (?P<item>\S+) scope (?P<scope>yes|no|unknown) key (?P<key>on|off) ads (?P<ads>\S+) deg M (?P<m>\S+) h (?P<h>[\d.]+) deg; "
-                 r"frame thread: qualified (?P<fq>\d+), no S (?P<fnos>\d+), not an optical sight (?P<ftab>\d+), idle (?P<fidle>\d+); FOV from the bare copy (?P<fbare>\d+); "
+                 r"frame thread: qualified (?P<fq>\d+), no S (?P<fnos>\d+), not an optical sight (?P<ftab>\d+), left aiming eye (?P<fleft>\d+), idle (?P<fidle>\d+); FOV from the bare copy (?P<fbare>\d+); "
                  r"jitter reading none (?P<jnone>\d+), "
                  r"from another frame (?P<jother>\d+); c to the far point mean (?P<fmean>\S+) max (?P<fmax>\S+) deg; "
                  r"applied (?P<applied>\d+) of (?P<qual>\d+) qualifying frames \(dispatched (?P<disp>\d+), at M 1 (?P<noop>\d+)\); declined: no S (?P<nos>\d+), stale c (?P<stale>\d+), "
-                 r"open sight (?P<open>\d+), not an optical sight (?P<table>\d+), depth unavailable (?P<depth>\d+), format refused (?P<format>\d+); "
+                 r"open sight (?P<open>\d+), not an optical sight (?P<table>\d+), left aiming eye (?P<left>\d+), depth unavailable (?P<depth>\d+), format refused (?P<format>\d+); "
                  r"picture sequence less c's: -1 (?P<g0>\d+), 0 (?P<g1>\d+), \+1 (?P<g2>\d+), \+2 (?P<g3>\d+), other (?P<g4>\d+); "
                  r"gunsight marks redirected: L (?P<mL>\d+), R (?P<mR>\d+); armed frames (?P<marm>\d+), no mark draw (?P<mnone>\d+); "
+                 r"mark depth path: untested (?P<mp0>\d+), seeded (?P<mp1>\d+), seeded read-only (?P<mp2>\d+), tests off (?P<mp3>\d+); "
                  r"hole r min (?P<rmin>\S+) median (?P<rmed>\S+) max (?P<rmax>\S+) deg, (?P<esc>\d+) of (?P<rays>\d+) rays escaped \(rays read on (?P<read>\d+) frames\); "
                  r"depth at c (?P<dc>\S+) \(near (?P<dn>\S+)\); c mean \((?P<cx>[^,\s]+), (?P<cy>[^)\s]+)\) px spread (?P<cs>\S+) px; "
                  r"GPU rays (?P<gr>\S+) ms \(max (?P<grm>\S+)\), magnify (?P<gm>\S+) ms \(max (?P<gmm>\S+)\)$")
-H_S1_KEYS = ("applied", "qual", "disp", "noop", "nos", "stale", "open", "table", "depth", "format", "g0", "g1", "g2", "g3", "g4", "mL", "mR", "marm", "mnone", "read", "fq", "fnos", "ftab", "fidle",
-             "fbare", "jnone", "jother")
+H_S1_KEYS = ("applied", "qual", "disp", "noop", "nos", "stale", "open", "table", "left", "depth", "format", "g0", "g1", "g2", "g3", "g4", "mL", "mR", "marm", "mnone", "mp0", "mp1", "mp2", "mp3",
+             "read", "fq", "fnos", "ftab", "fleft", "fidle", "fbare", "jnone", "jother")
+
+
+def _s1_mark_reason(p):
+    """Why a press's gunsight mark is not the one-redirect-per-armed-frame the lens needs, in words; "" when it is. The mark is redirected in the lens (right) eye on every armed frame, so
+    the right eye's redirects (R) should be close to the armed frames: under 80 percent of them and the mark stayed in the scene, magnified with the world, on the rest; over 1.5 times
+    them and more than one draw a frame matched (the match is too wide: something else drawn by the pair was taken out of the scene). No armed frame is nothing to judge."""
+    armed, left, right = int(p["marm"]), int(p["mL"]), int(p["mR"])
+    if armed <= 0:
+        return ""
+    if left + right == 0:
+        return ("no mark draw was redirected in either eye (the pair's 6-index draw with the readout atlas did not match, or fix.ui_quality is off or its crisp HUD take stood down, or the layer "
+                "declined it: the layer's family census names why), so the mark stayed in the scene and was magnified with the world")
+    if right * 5 < armed * 4:
+        return ("the lens eye (right) redirected the mark on %d of %d armed frames (under 80 percent; the left eye %d), so on the rest it stayed in the scene and was magnified with the "
+                "world (the draw did not match in that eye, or the layer declined it: the family census names why)" % (right, armed, left))
+    if right * 2 > armed * 3:
+        return ("the lens eye (right) redirected %d mark draws on %d armed frames (over 1.5 times them): more than one draw a frame matched, so the match is too wide and something other "
+                "than the gunsight mark was taken out of the scene" % (right, armed))
+    return ""
 
 
 def _hj_s1(rows, ctx):
@@ -14810,9 +14832,10 @@ def _hj_s1(rows, ctx):
     was open (open sight = rays read, both above 0) is not due: the player was not looking through a closed frame, and it is neither applied nor a failure.
     NEVER APPLIED when presses were due and the lens applied on none of them (the counts say why: the door never reached, no S, a stale c, no depth at the door, a frame format or route
     the passes refuse); PARTIAL when some due press applied on none of its frames or on under half of them; OK otherwise. OPEN SIGHT when the only presses with anything to judge were
-    open ones. IDLE when no press was due (the announce alone, the key off, only weapons that are not optical sights). A due press with the scope's gunsight mark armed on some frames
-    (the door counted armed frames) and none redirected in either eye is a PARTIAL whatever the lens did: the lens ran, but the mark stayed in the scene and was magnified with the
-    world. The announce is not needed (a --since window can cut it); with neither line the rule is not present."""
+    open ones. IDLE when no press was due (the announce alone, the key off, only weapons that are not optical sights, or the left eye aiming: the lens is the right eye's, and that
+    is no failure). A due press with the scope's gunsight mark armed on some frames (the door counted armed frames) is a PARTIAL whatever the lens did when the lens eye's (right)
+    redirects are under 80 percent of the armed frames (none in either eye included: the mark stayed in the scene and was magnified with the world) or over 1.5 times them (more than
+    one draw a frame matched: the match is too wide). The announce is not needed (a --since window can cut it); with neither line the rule is not present."""
     announce, press = rows.get("announce", []), rows.get("press", [])
     if not announce and not press:
         return None
@@ -14838,7 +14861,7 @@ def _hj_s1(rows, ctx):
             weak.append(p)
     totals["other"] = totals["g0"] + totals["g2"] + totals["g3"] + totals["g4"]   # A1's count: frames with c from another frame than the picture
     declines = ", ".join("%s %d" % (name, totals[k]) for name, k in (("no S", "nos"), ("stale c", "stale"), ("open sight", "open"), ("not an optical sight", "table"),
-                                                                       ("depth unavailable", "depth"), ("format refused", "format")) if totals[k])
+                                                                       ("left aiming eye", "left"), ("depth unavailable", "depth"), ("format refused", "format")) if totals[k])
     base = "%d press line(s) (%s), the tick qualified %d frame(s), the door applied %d of %d qualifying%s" % (len(press), head, totals["fq"], totals["applied"], totals["qual"],
                                                                                                          "; declined: " + declines if declines else "")
     extra = ""
@@ -14849,18 +14872,26 @@ def _hj_s1(rows, ctx):
             totals["other"], totals["g0"], totals["g1"], totals["g2"], totals["g3"], totals["g4"])
     if totals["fbare"]:
         extra += "; FOV from the bare copy on %d tick(s) (an unmeasured scoped copy: a flat S0 press of it measures the value)" % totals["fbare"]
+    if totals["fleft"] or totals["left"]:
+        extra += ("; the left eye was the aiming eye on %d tick(s) (fix.native_on_foot_ads_sight_eye = left): the lens is the right eye's, so there is none then, and that is no failure; "
+                  "a later build may support the left eye" % max(totals["fleft"], totals["left"]))
     if totals["marm"] or totals["mL"] or totals["mR"]:
         extra += "; gunsight marks: redirected L %d R %d, armed frames %d, no mark draw on %d of them" % (totals["mL"], totals["mR"], totals["marm"], totals["mnone"])
-    mark_none = [p for p in due_presses if int(p["marm"]) > 0 and int(p["mL"]) + int(p["mR"]) == 0]
-    mark_text = ("the gunsight mark was armed on frames of press %s and no mark draw was redirected in either eye (the pair's 6-index draw with the readout atlas did not match, or "
-                 "fix.ui_quality is off, or the layer declined it: the layer's family census names why), so the mark stayed in the scene and was magnified with the world" %
-                 ", ".join(p["n"] for p in mark_none[:6])) if mark_none else ""
+        extra += "; mark depth path: untested %d, seeded %d, seeded read-only %d, tests off %d" % (totals["mp0"], totals["mp1"], totals["mp2"], totals["mp3"])
+    mark_bad = [(p, _s1_mark_reason(p)) for p in due_presses]
+    mark_bad = [(p, why) for p, why in mark_bad if why]
+    mark_text = ""
+    if mark_bad:
+        mark_text = "the gunsight mark was armed on frames of press %s and %s" % (mark_bad[0][0]["n"], mark_bad[0][1])
+        if len(mark_bad) > 1:
+            mark_text += "; the same check failed in press %s" % ", ".join(p["n"] for p, _ in mark_bad[1:6])
     if not due_presses:
         if open_presses:
             return ("OPEN SIGHT", base + extra + "; every ray read back said the sight was open in press %s (the player was not looking through a closed frame; no lens by design)" %
                     ", ".join(p["n"] for p in open_presses[:6]))
         keys = collections.Counter(p["key"] for p in press)
-        return ("IDLE", base + extra + "; the lens was due on no press (key %s; a weapon that is not an optical sight is no failure)" % ", ".join("%s %d" % (k, n) for k, n in keys.most_common()))
+        return ("IDLE", base + extra + "; the lens was due on no press (key %s; a weapon that is not an optical sight, or the left eye aiming, is no failure)" %
+                ", ".join("%s %d" % (k, n) for k, n in keys.most_common()))
     if len(none_applied) == len(due_presses):
         text = base + extra + "; the lens applied on none of the %d press(es) it was due on (press %s)" % (len(due_presses), ", ".join(p["n"] for p in none_applied[:6]))
         unreached = [p for p in none_applied if int(p["qual"]) + int(p["nos"]) == 0]
@@ -20852,22 +20883,25 @@ def self_test_health():
         def s1_press(n=1, item=SNIPER, scope="yes", key="on", ads="15.000", m="4.067", h=56.3, disp=302, noop=1, stale=4, depth=3, fmt=0, open_=3, nos=0, table=0, other=0,
                      fq=None, fnos=None, ftab=0, fidle=40, fbare=0, jnone=0, jother=0, fmean="0.250", fmax="0.800", rmin="4.01", rmed="5.20", rmax="6.42", esc=0, read=296,
                      dc="0.001220", dn="0.041700", cx="1642.5", cy="1990.0", cs="0.50", gr="0.012", grm="0.020", gm="0.046", gmm="0.060", gap=None, mark_l=None, mark_r=None,
-                     armed=None, nodraw=0):
+                     armed=None, nodraw=0, left=0, fleft=None, mpath=None):
             """A press line as the DLL emits it: the door's counts add up (qualifying = dispatched + M-1 + stale + depth + format, applied = dispatched - open) and the tick's
             qualified frames are the door's qualifying unless a fixture says otherwise. gap is the picture's sequence less c's by bucket (-1, 0, +1, +2, other; all in 0 unless `other`
-            frames are asked for, which go to the -1 bucket); the gunsight marks are redirected on every armed frame in both eyes unless a fixture says otherwise."""
+            frames are asked for, which go to the -1 bucket); the gunsight marks are redirected on every armed frame in both eyes unless a fixture says otherwise, each by the seeded
+            depth path (mpath is the four counts: untested, seeded, seeded read-only, tests off). left is the door's count of frames declined for the left aiming eye, fleft the tick's."""
             qual = disp + noop + stale + depth + fmt
             applied = max(disp - open_, 0)
             fq = qual if fq is None else fq
             fnos = nos if fnos is None else fnos
+            fleft = left if fleft is None else fleft
             gap = (other, max(disp - other, 0), 0, 0, 0) if gap is None else gap
             armed = qual + nos if armed is None else armed
             mark_l = armed if mark_l is None else mark_l
             mark_r = armed if mark_r is None else mark_r
+            mpath = (0, mark_l + mark_r, 0, 0) if mpath is None else mpath
             return (RS1("scope zoom (S1): press %u item %s scope %s key %s ads %s deg M %s h", n, item, scope, key, ads, m, h) +
-                    RS1("frame thread: qualified %u, no S %u", fq, fnos, ftab, fidle, fbare, jnone, jother, fmean, fmax) +
-                    RS1("applied %u of %u qualifying frames", applied, qual, disp, noop, nos, stale, open_, table, depth, fmt, gap[0], gap[1], gap[2], gap[3], gap[4], mark_l, mark_r,
-                        armed, nodraw) +
+                    RS1("frame thread: qualified %u, no S %u", fq, fnos, ftab, fleft, fidle, fbare, jnone, jother, fmean, fmax) +
+                    RS1("applied %u of %u qualifying frames", applied, qual, disp, noop, nos, stale, open_, table, left, depth, fmt, gap[0], gap[1], gap[2], gap[3], gap[4], mark_l, mark_r,
+                        armed, nodraw, mpath[0], mpath[1], mpath[2], mpath[3]) +
                     RS1("hole r min %s median", rmin, rmed, rmax, esc, 128, read, dc, dn) + RS1("c mean (%s, %s) px spread", cx, cy, cs) + RS1("GPU rays %s ms (max %s)", gr, grm, gm, gmm))
 
         def s1_nohole(**kw):
@@ -20895,7 +20929,25 @@ def self_test_health():
         check("S1: marks armed on a press and none redirected is PARTIAL with the reason, the lens having applied", [s1_announce(), s1_press(mark_l=0, mark_r=0, armed=310, nodraw=310)], 0, [("PARTIAL", S1R)],
               has=["the gunsight mark was armed on frames of press 1 and no mark draw was redirected in either eye", "the mark stayed in the scene and was magnified with the world",
                    "the door applied 299 of 310 qualifying"], lacks=["UNPARSED"])
-        check("S1: a mark redirected in the left eye only is not the none-redirected case", [s1_announce(), s1_press(mark_l=300, mark_r=0, armed=310, nodraw=310)], 0, [("OK", S1R)], lacks=["stayed in the scene"])
+        # the lens eye's (right) redirects against the armed frames: under 80 percent, or over 1.5 times, is PARTIAL with the reason; close to the armed count is OK
+        check("S1: a mark redirected in the left eye only leaves the lens eye's mark in the scene: PARTIAL with the reason", [s1_announce(), s1_press(mark_l=300, mark_r=0, armed=310, nodraw=310)], 0,
+              [("PARTIAL", S1R)], has=["the gunsight mark was armed on frames of press 1 and the lens eye (right) redirected the mark on 0 of 310 armed frames (under 80 percent; the left eye 300)",
+                                       "on the rest it stayed in the scene and was magnified with the world"], lacks=["UNPARSED"])
+        check("S1: the lens eye redirecting 3 of 310 armed frames is PARTIAL", [s1_announce(), s1_press(mark_l=300, mark_r=3, armed=310, nodraw=307)], 0, [("PARTIAL", S1R)],
+              has=["the lens eye (right) redirected the mark on 3 of 310 armed frames (under 80 percent; the left eye 300)"])
+        check("S1: the lens eye redirecting 600 mark draws on 310 armed frames is PARTIAL: the match is too wide", [s1_announce(), s1_press(mark_l=300, mark_r=600, armed=310, nodraw=0)], 0,
+              [("PARTIAL", S1R)], has=["the lens eye (right) redirected 600 mark draws on 310 armed frames (over 1.5 times them): more than one draw a frame matched, so the match is too wide"],
+              lacks=["stayed in the scene"])
+        check("S1: the lens eye redirecting close to the armed count is OK (96 percent, and 1.4 times)", [s1_announce(), s1_press(mark_l=300, mark_r=298, armed=310, nodraw=12)], 0, [("OK", S1R)],
+              lacks=["UNPARSED", "the lens eye (right)", "stayed in the scene"])
+        check("S1: the edges of the band are inside it (80 percent and 1.5 times)", [s1_announce(), s1_press(mark_l=0, mark_r=248, armed=310, nodraw=62), s1_press(n=2, mark_l=0, mark_r=465, armed=310, nodraw=0)],
+              0, [("OK", S1R)], lacks=["the lens eye (right)"])
+        check("S1: just under 80 percent is PARTIAL", [s1_announce(), s1_press(mark_l=0, mark_r=247, armed=310, nodraw=63)], 0, [("PARTIAL", S1R)], has=["redirected the mark on 247 of 310 armed frames"])
+        check("S1: the mark's depth path is stated beside the redirects", [s1_announce(), s1_press(mark_l=300, mark_r=300, armed=310, nodraw=10, mpath=(0, 100, 450, 50))], 0, [("OK", S1R)],
+              has=["mark depth path: untested 0, seeded 100, seeded read-only 450, tests off 50"], lacks=["UNPARSED"])
+        check("S1: a left aiming eye press is no failure and says so", [s1_announce(), s1_zero(table=0, fq=0, fnos=0, left=412, fleft=412)], 0, [("IDLE", S1R)],
+              has=["declined: left aiming eye 412", "the left eye was the aiming eye on 412 tick(s) (fix.native_on_foot_ads_sight_eye = left): the lens is the right eye's, so there is none then, and that is no failure",
+                   "or the left eye aiming, is no failure"], lacks=["UNPARSED", "NEVER APPLIED", "PARTIAL"])
         check("S1: marks never armed (a door that saw no armed frame) are not a missing mark", [s1_announce(), s1_press(mark_l=0, mark_r=0, armed=0)], 0, [("OK", S1R)], lacks=["stayed in the scene", "gunsight marks:"])
         check("S1: marks lost beside a press that never applied keeps NEVER APPLIED and names the mark", [s1_announce(), s1_nohole(disp=0, noop=1, stale=0, depth=200, open_=0, mark_l=0, mark_r=0, armed=201)], 3,
               [("NEVER APPLIED", S1R)], has=["the lens applied on none of the 1 press(es) it was due on (press 1)", "no mark draw was redirected in either eye"])
@@ -20910,9 +20962,9 @@ def self_test_health():
               has=["the tick qualified 200 frame(s), the door applied 0 of 0 qualifying", "the door counted no frame at all in press 1 although the tick qualified 200 (uiLayerComposite never ran for the right eye"])
         check("S1: S never there (no S, counted by both sides) is a lens that never ran", [s1_announce(), s1_zero(nos=90)], 3, [("NEVER APPLIED", S1R)], has=["declined: no S 90"])
         check("S1: a press that is only its first frame at M 1 is not due", [s1_announce(), s1_nohole(disp=0, noop=1, stale=0, depth=0, open_=0)], 0, [("IDLE", S1R)],
-              has=["the lens was due on no press (key on 1; a weapon that is not an optical sight is no failure)"], lacks=["NEVER APPLIED"])
+              has=["the lens was due on no press (key on 1; a weapon that is not an optical sight, or the left eye aiming, is no failure)"], lacks=["NEVER APPLIED"])
         check("S1: a press whose weapon is not an optical sight is no failure, and its press line is read", [s1_announce(), s1_zero(table=412, fq=0, fnos=0, ftab=412)], 0, [("IDLE", S1R)],
-              has=["declined: not an optical sight 412", "the lens was due on no press (key on 1; a weapon that is not an optical sight is no failure)"], lacks=["UNPARSED"])
+              has=["declined: not an optical sight 412", "the lens was due on no press (key on 1; a weapon that is not an optical sight, or the left eye aiming, is no failure)"], lacks=["UNPARSED"])
         check("S1: presses with the key off are idle", [s1_announce("off"), s1_zero(key="off", fq=0, fnos=0)], 0, [("IDLE", S1R)], has=["off, reference FOV 56.3 deg", "(key off 1;"])
         check("S1: the announce alone is idle", [s1_announce()], 0, [("IDLE", S1R)], has=["on, reference FOV 56.3 deg, 7 table entries; no press of the sights in this window"])
         check("S1: S never there on the tick's side only (the door counted none) is also due", [s1_announce(), s1_zero(fnos=60)], 3, [("NEVER APPLIED", S1R)],

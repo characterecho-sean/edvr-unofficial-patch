@@ -504,6 +504,7 @@ struct Draw {
     uint64_t vsHash = 0;   // the decided draw's vertex shader (the weapons-fire pair table's key)
     bool ripple = false;   // the shield ripple: with hdr, the draw goes into the eye's displacement layer D, blend off, t0 swapped for the UV ramp
     bool destAlphaOne = false;  // the scope mark: the target has no alpha channel, so the game's destination-alpha blend factors are read as 1 and 0 (uiLayerBlendDestAlphaOne)
+    uint32_t markPath = 0;      // the scope mark: what the layer did with the draw's depth and stencil tests (UiMarkDepth, scope_zoom_s1.h kMarkPath*)
     ID3D11ShaderResourceView* rippleSrv0 = nullptr;  // the game's t0, held while the ramp is bound (put back at restore)
     bool rippleSwapped = false;                      // the ramp is bound in its place
     bool reissue = false;  // the VR world route's re-issue of the 2D screen (the game's own draw lands in its eye): not a take
@@ -1497,9 +1498,10 @@ bool ensureSeeder(ID3D11Device* dev) {
     }
 }
 
-// Can the layer reproduce this draw's tests against its own seeded copy?
+// Can the layer reproduce this draw's tests against its own seeded copy? A view bound read-only is refused, unless allowReadOnly: the draw writes nothing, so the copy (read from the
+// game's texture, not through its view, and bound writable in the layer) is tested exactly as the game's read-only view was. Only the scope mark asks for it.
 bool dsReproducible(ID3D11DeviceContext* ctx, ID3D11DepthStencilView* dsv, uint32_t targetW,
-                    uint32_t targetH, char* why, size_t whyN) {
+                    uint32_t targetH, char* why, size_t whyN, bool allowReadOnly = false) {
     if (!dsv) return false;
     D3D11_DEPTH_STENCIL_VIEW_DESC vd{};
     dsv->GetDesc(&vd);
@@ -1508,7 +1510,7 @@ bool dsReproducible(ID3D11DeviceContext* ctx, ID3D11DepthStencilView* dsv, uint3
         _snprintf_s(why, whyN, _TRUNCATE, "the depth target is not a single 2D level");
         return false;
     }
-    if (vd.Flags != 0) {
+    if (vd.Flags != 0 && !allowReadOnly) {
         _snprintf_s(why, whyN, _TRUNCATE, "the depth target is bound read-only");
         return false;
     }
@@ -2300,7 +2302,7 @@ bool beginInner(ID3D11DeviceContext* ctx, int which) {
         ++g_win.redirected;
         ++g_sessionRedirected;
         noteTaken(g_draw.family, g_draw.eye, layerW, layerH);
-        if (g_draw.family == UiLayerFamily::kScopeMark) scopeZoomNoteMark(static_cast<uint32_t>(g_draw.eye), g_draw.seq);   // the press line's marks per eye
+        if (g_draw.family == UiLayerFamily::kScopeMark) scopeZoomNoteMark(static_cast<uint32_t>(g_draw.eye), g_draw.seq, g_draw.markPath);   // the press line's marks per eye and path
         // The on-foot maps gate gave the layer the 2D screen (a TAKE; the route's re-issue, where the game's own draw lands in
         // its eye, is not): this eye's picture is the layer's, and the door may run layer-only for it (uiLayerDoorLayerOnly).
         if (g_draw.family == UiLayerFamily::kScreen && !g_draw.hdr && !g_draw.reissue && detail::g_uiLayerMapsOn) {
@@ -2322,10 +2324,13 @@ bool beginInner(ID3D11DeviceContext* ctx, int which) {
     if (!familyEngaged && g_draw.vpCount && which == 0) {
         familyEngaged = true;
         const D3D11_VIEWPORT& gv = g_draw.vp[0];
-        // The scope mark is not in the weapons-fire jitter table, so it takes the cancel every other over-blend family takes (the decision's g_draw.jx): its vertex shader reads the
-        // scene camera rows the jitter is in (flat_projection_recipes.h gives the pair's material draw the camera at b1 row 270), which a flight's eye dump confirms.
+        // The scope mark is not in the weapons-fire jitter table, so it takes the cancel every other over-blend family takes (the decision's g_draw.jx). That its matrices carry the
+        // eye's jitter is INFERRED, not shown: flat_projection_recipes.h keys its recipe by (vs 025B, ps C5A5C7E8216CB9AF), the glass tint's pair, which puts the camera at b1 row 270
+        // (the scene camera rows the weapons pairs' matrices were shown to equal); the mark's pixel shader 46F9 has no recipe. The inference rests on the mark sharing that vertex shader,
+        // and so reading its camera from the same constant-buffer row. A flight's eye dump shows whether the mark sits on c.
         const char* markJitter = g_draw.family == UiLayerFamily::kScopeMark
-                                     ? " Jitter: cancelled as for every over-blend family (the pair is not in the weapons-fire table); its matrices are taken to carry the eye's jitter."
+                                     ? " Jitter: cancelled as for every over-blend family (the pair is not in the weapons-fire table); that its matrices carry the eye's jitter is INFERRED, not shown "
+                                       "(the recipe at the scene camera row, b1 row 270, is for vertex shader 025B with the glass tint's pixel shader, not this pair's); the eye dump settles it."
                                      : "";
         Log::get().note(
             "ui quality: layer: first %s draw in the %s eye's layer -- the game's viewport "
@@ -3873,7 +3878,50 @@ void worldRestoreSources(ID3D11DeviceContext* ctx, const WorldReissue& plan) {
     ctx->PSSetSamplers(0, 1, &smp);
 }
 
+// The scope mark's identification evidence for its first-seen line, whatever the decision came to (a decline's too): the readout atlas the family's key found, by size and PS slot (the
+// flight checks it against 3525x3133 in slot 2; no code depends on the size), the blend as the game states it with a note where the target's lack of alpha read destination alpha as
+// 1, and the path its depth and stencil tests took. gameBlend is null, and pathKnown false, for a draw declined before those were read.
+void appendScopeMarkIdentity(char* detail, size_t cap, const UiBlendRt* gameBlend, bool blendRewritten, bool pathKnown, UiMarkDepth depth, const char* dsWhy) {
+    const auto add = [&](const char* text) {
+        const size_t at = std::strlen(detail);
+        if (at + 1 < cap) _snprintf_s(detail + at, cap - at, _TRUNCATE, "%s%s", at ? "; " : "", text);
+    };
+    char piece[320];
+    const int slot = uiDepthSampledSurfaceSlot();
+    static const BindSlot kSrv[4] = {BindSlot::PsSrv0, BindSlot::PsSrv1, BindSlot::PsSrv2, BindSlot::PsSrv3};
+    ResourceInfo atlas;
+    if (slot >= 0 && bindingResolve(bindingGet(kSrv[slot]), &atlas))
+        _snprintf_s(piece, _TRUNCATE, "the readout atlas %ux%u in PS slot %d (a learned interface surface)", atlas.a, atlas.b, slot);
+    else
+        _snprintf_s(piece, _TRUNCATE, "no learned interface surface resolved in PS slots 0..3 at this line");
+    add(piece);
+    if (gameBlend) {
+        char bl[64];
+        describeBlend(*gameBlend, bl, sizeof(bl));
+        _snprintf_s(piece, _TRUNCATE, "the game's blend %s%s", bl, blendRewritten ? " (destination alpha read as 1 on the alpha-less target)" : "");
+        add(piece);
+    }
+    if (pathKnown) {
+        switch (depth) {
+            case UiMarkDepth::kSeededReadOnly:
+                _snprintf_s(piece, _TRUNCATE, "depth path: %s (the game's view is bound read-only and the draw writes nothing, so its tests run against the layer's seeded copy)", uiMarkDepthName(depth));
+                break;
+            case UiMarkDepth::kTestsOff:
+                _snprintf_s(piece, _TRUNCATE, "depth path: %s (the layer could not reproduce them%s%s: the mark lies on the sight glass in front of the world, so it is redrawn without them)",
+                            uiMarkDepthName(depth), dsWhy && *dsWhy ? ": " : "", dsWhy ? dsWhy : "");
+                break;
+            default: _snprintf_s(piece, _TRUNCATE, "depth path: %s", uiMarkDepthName(depth)); break;
+        }
+        add(piece);
+    }
+}
+
 }  // namespace
+
+static_assert(static_cast<uint32_t>(UiMarkDepth::kUntested) == scopezoom::kMarkPathUntested && static_cast<uint32_t>(UiMarkDepth::kSeeded) == scopezoom::kMarkPathSeeded &&
+                  static_cast<uint32_t>(UiMarkDepth::kSeededReadOnly) == scopezoom::kMarkPathSeededReadOnly && static_cast<uint32_t>(UiMarkDepth::kTestsOff) == scopezoom::kMarkPathTestsOff &&
+                  static_cast<uint32_t>(UiMarkDepth::kRefused) == scopezoom::kMarkPaths,
+              "the press line's mark depth paths are the layer's");
 
 bool uiLayerDecide(ID3D11DeviceContext* ctx, int familyInt, bool verdictForwards,
                    bool substituted, int knownEye) {
@@ -3884,6 +3932,7 @@ bool uiLayerDecide(ID3D11DeviceContext* ctx, int familyInt, bool verdictForwards
     g_draw.weapons = false;
     g_draw.ripple = false;
     g_draw.destAlphaOne = false;
+    g_draw.markPath = 0;
     g_draw.vsHash = 0;
     g_draw.reissue = false;
     g_draw.holoPsHash = 0; g_draw.holoOriginal = nullptr; g_draw.holoPatched = nullptr;
@@ -3974,7 +4023,7 @@ bool uiLayerDecide(ID3D11DeviceContext* ctx, int familyInt, bool verdictForwards
     // The cheap facts first; the state reads only when none of them refused.
     f.blend = UiBlendShape::kOpaque;
     UiLayerDecision d = uiLayerDecide(f);
-    char detail[320] = "";
+    char detail[640] = "";
     // Every detail text below is read by noteFamily alone: it is built only when that line will print (familyLineWanted -- the
     // decision is final here, and nothing between this and noteFamily binds a shader or writes the table).
     if (d == UiLayerDecision::kNoDensityGain && familyLineWanted(family, d)) {
@@ -3982,6 +4031,13 @@ bool uiLayerDecide(ID3D11DeviceContext* ctx, int familyInt, bool verdictForwards
                     sceneLayerW, sceneLayerH, g_tc.info.a, g_tc.info.b);
     }
     UiDsState dsState;
+    // The blend as the game states it (the lines that name a blend print these factors; the layer converts the rewritten ones of a family that reads destination alpha as 1), and the
+    // scope mark's evidence for its first-seen line (appendScopeMarkIdentity), whatever the decision: whether the target's lack of alpha rewrote the blend, and the path its depth and
+    // stencil tests took (known only to a draw that got as far as that decision).
+    UiBlendRt gameBlend;
+    bool markBlendKnown = false, markBlendRewritten = false, markPathKnown = false;
+    UiMarkDepth markDepth = UiMarkDepth::kUntested;
+    char dsWhy[160] = "";
     if (d == UiLayerDecision::kRedirect) {
         // A second render target, or pixel-shader UAVs (which the layer's
         // raw OMSetRenderTargets would not carry across), refuse the draw.
@@ -4002,18 +4058,30 @@ bool uiLayerDecide(ID3D11DeviceContext* ctx, int familyInt, bool verdictForwards
         DXGI_FORMAT dsFmt = DXGI_FORMAT_UNKNOWN;
         dsState = dsStateOfNoted(ctx, dsv, &ref, &dsFmt);
         f.ds = uiLayerDsEffect(dsState, dsv != nullptr);
-        char dsWhy[160] = "";
+        const bool markFamily = family == UiLayerFamily::kScopeMark;
         if (f.ds.tests()) {
-            f.dsReproducible = dsReproducible(ctx, dsv, g_tc.info.a, g_tc.info.b, dsWhy, sizeof(dsWhy));
+            // The scope mark alone may test a view bound read-only, and only when the draw writes nothing (uiScopeMarkWritesNothing): its copy is then tested as the game's view was.
+            f.dsReproducible = dsReproducible(ctx, dsv, g_tc.info.a, g_tc.info.b, dsWhy, sizeof(dsWhy), markFamily && uiScopeMarkWritesNothing(dsState));
+        }
+        if (markFamily) {
+            // A test the layer cannot reproduce is dropped for the mark, which lies on the sight glass in front of the world and inside the lens, where nothing nearer is drawn: it is
+            // redrawn in the layer with its depth and stencil tests off (the layer binds no depth target for it) instead of being left in the scene to be magnified.
+            markDepth = uiScopeMarkDepth(f.ds, dsState, f.dsReproducible);
+            markPathKnown = true;
+            if (markDepth == UiMarkDepth::kTestsOff) f.ds.depthTest = f.ds.stencilTest = false;
+            g_draw.markPath = static_cast<uint32_t>(markDepth);
         }
         ID3D11BlendState* bs = nullptr;
         FLOAT factor[4];
         UINT mask = 0;
         ctx->OMGetBlendState(&bs, factor, &mask);
         UiBlendRt game;
-        // The scope mark's blend reads destination alpha, which its alpha-less target gives as 1 (uiLayerBlendDestAlphaOne); no other family's blend is rewritten.
-        const bool destAlphaOne = family == UiLayerFamily::kScopeMark && !uiLayerFormatHasAlpha(g_tc.info.fmt);
-        f.blend = shapeOf(bs, &game, destAlphaOne);
+        // The scope mark's blend reads destination alpha, which its alpha-less target gives as 1 (uiLayerBlendDestAlphaOne); no other family's blend is rewritten. The lines that name
+        // the blend print the game's own factors (gameBlend), not the rewritten ones the layer converts (game).
+        const bool destAlphaOne = markFamily && !uiLayerFormatHasAlpha(g_tc.info.fmt);
+        f.blend = shapeOf(bs, &game, destAlphaOne, &gameBlend);
+        markBlendKnown = true;
+        markBlendRewritten = destAlphaOne;
         g_draw.destAlphaOne = destAlphaOne;
         if (bs) bs->Release();
         // A multiply is drawn twice (the layer, then its transmittance): a
@@ -4088,7 +4156,7 @@ bool uiLayerDecide(ID3D11DeviceContext* ctx, int familyInt, bool verdictForwards
         // final here; see the kNoDensityGain text above).
         if (familyLineWanted(family, d)) {
             char bl[64], ds[256];
-            describeBlend(game, bl, sizeof(bl));
+            describeBlend(gameBlend, bl, sizeof(bl));   // the game's own factors, as bound
             describeDs(dsState, ref, dsFmt, ds, sizeof(ds));
             if (d == UiLayerDecision::kBlendRefused) {
                 _snprintf_s(detail, _TRUNCATE, "%s%s", bl,
@@ -4110,21 +4178,16 @@ bool uiLayerDecide(ID3D11DeviceContext* ctx, int familyInt, bool verdictForwards
                                           : "",
                             (f.ds.tests() || f.ds.writes()) ? (std::string(" (") + ds + ")").c_str()
                                                             : "");
-                if (family == UiLayerFamily::kScopeMark) {   // the atlas the key found, once
-                    const int slot = uiDepthSampledSurfaceSlot();
-                    static const BindSlot kSrv[4] = {BindSlot::PsSrv0, BindSlot::PsSrv1, BindSlot::PsSrv2, BindSlot::PsSrv3};
-                    ResourceInfo atlas;
-                    const size_t at = std::strlen(detail);
-                    if (slot >= 0 && bindingResolve(bindingGet(kSrv[slot]), &atlas) && at + 1 < sizeof(detail))
-                        _snprintf_s(detail + at, sizeof(detail) - at, _TRUNCATE, "; the readout atlas %ux%u in PS slot %d (a learned interface surface), %s",
-                                    atlas.a, atlas.b, slot, destAlphaOne ? "ONE, DEST_ALPHA read as ONE, ONE on the alpha-less target" : "blend as the game's");
-                }
             }
         }
         for (auto* r : rtvs)
             if (r) r->Release();
         if (dsv) dsv->Release();
     }
+    // The scope mark's identification evidence goes on its first-seen line whatever the decision came to, a decline included (a draw the cheap facts declined has no blend or depth
+    // path to report): the lens is armed and the key found a learned surface, and this says which texture that was.
+    if (family == UiLayerFamily::kScopeMark && familyLineWanted(family, d))
+        appendScopeMarkIdentity(detail, sizeof(detail), markBlendKnown ? &gameBlend : nullptr, markBlendRewritten, markPathKnown, markDepth, dsWhy);
     g_lastDecision = static_cast<int>(d);
     ++g_decisionCount;
     if (family == UiLayerFamily::kWeaponsFire) noteWeaponPair(bindingShaderHash(BindSlot::Vs), bindingShaderHash(BindSlot::Ps), d);

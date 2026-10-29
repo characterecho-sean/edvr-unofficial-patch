@@ -42,7 +42,9 @@ game's own zoom as a magnified picture inside the scope's lens. The rest of the 
 - **A2 BUILT, NOT FLOWN** (section 9, "As built (A2)"): the table holds optical sights only, on the pilot's word; the AR gunsight quad (VS
   `025B4B9F...` / PS `46F92DC7...`, 6 indices, the readout atlas) is the layer family `kScopeMark`, composited after the lens; the probe is on the left
   eye. Departure: the quad's blend is ONE, DEST_ALPHA (not an over), read as additive on its alpha-less target. Open: that this quad is the chevron
-  (the flight's probe checks), and its jitter (default cancel, INFERRED).
+  (the flight's probe checks), and its jitter (default cancel, INFERRED). The A2 review's nine fixes are built with it (section 9, "As built
+  (A2 review fixes)"): the lens declines for the left aiming eye (`fix.native_on_foot_ads_sight_eye = left`; the left eye is a later build), and the mark
+  is redrawn with its depth tests off when the layer cannot reproduce them.
 - Keys: `fix.native_on_foot_ads_scope_zoom` (off until flown OK) and the temporary `experimental.native_on_foot_ads_scope_zoom_fov` (the
   reference FOV, 56.3 by default).
 - Separate arc: a flat stutter on the scoped Executioner's ADS (2026-10-29), in its own doc,
@@ -528,7 +530,8 @@ scope):
   (the census had it in slot 2), so the flight checks the identification; no code depends on the size.
 - **The route** is the generic HDR HUD take: the draw goes into the eye's HDR layer, the game's tonemap draw re-issued over it publishes the 8-bit layer, and `uiLayerComposite`
   lays that over the picture after the lens (`scopeZoomDoor` for Submit's eye 1, then `compositeInner`; scope_zoom_test pins the order). The left eye takes the same route into its
-  own layer with no lens; F106 then covers the left eye from the right eye's finished picture, so the mark in the covered part is the right eye's, at true size.
+  own layer with no lens; F106 then covers the left eye from the right eye's finished picture (in the `both` mode of `fix.native_on_foot_ads_sight_eye` only, F162), so the mark in the
+  covered part is the right eye's, at true size. With `right` each eye keeps its own view and the left eye's mark is its own redirected one.
 - **Departure, the blend.** The census blend is ONE, DEST_ALPHA (`bl=12,7,1/2,7,1`), not an over. `uiLayerBlendShape` refuses destination-alpha factors, so the pair would have been
   refused. The target is R11G11B10_FLOAT, which has no alpha: the output merger reads destination alpha as 1 there (reproduced on WARP by sharp_weapons_test's
   `destAlphaReproduction`), so the draw adds the mark's light, as ONE, ONE does. The family's blend is read that way (`uiLayerBlendDestAlphaOne`, this family and a format without
@@ -536,9 +539,10 @@ scope):
 - **Departure, the governing half.** The family follows fix.ui_quality's half, as the other HUD families do, so with the layer off the mark stays in the scene. The press line shows
   it (`gunsight marks redirected: L 0, R 0` beside armed frames), and `--health` calls it PARTIAL with that reason.
 - **Jitter.** Every non-weapons family cancels the eye's jitter: `uiLayerDecide` sets `g_draw.jx = jx` unless the weapons-fire table marks a pair unjittered, and this pair is not in
-  that table, so it needed no entry. That the pair's matrices carry the jitter is INFERRED: flat_projection_recipes.h gives this vertex shader the camera at b1 row 270, the scene
-  camera rows the weapons pairs' matrices were shown to equal (weapons_fire.h, W3). The family's first-seen line says `Jitter: cancelled as for every over-blend family`. If the eye
-  dump puts the mark off c by the jitter, the pair goes into a table as the weapons-fire pairs do.
+  that table, so it needed no entry. That the pair's matrices carry the jitter is INFERRED, and the first citation of it was wrong (corrected in the review fixes below):
+  flat_projection_recipes.h:68 is keyed by (VS 025B, PS C5A5C7E8216CB9AF), the glass tint's pair, which puts the camera at b1 row 270, the scene camera rows the weapons pairs' matrices
+  were shown to equal (weapons_fire.h, W3); the mark's PS 46F9 has no recipe. The inference rests on the mark sharing VS 025B and so reading its camera from the same constant-buffer
+  row. The family's first-seen line says the cancel is inferred, not shown. If the eye dump puts the mark off c by the jitter, the pair goes into a table as the weapons-fire pairs do.
 - **Instruments.** The S1 press line carries `not an optical sight`, `FOV from the bare copy`, the histogram of the picture's sequence less c's (`-1, 0, +1, +2, other`; A1's count of
   c from another frame is every bucket but 0, and `--health` prints it as such), and `gunsight marks redirected: L, R; armed frames, no mark draw`. A mark is counted where the layer
   takes the draw. The door counts a right-eye frame as armed when the verdict qualifies, and as without a mark draw when no mark was redirected in the picture's own sequence. The
@@ -553,3 +557,46 @@ scope):
   unmeasured. (3) The brightness: the layer tonemaps the mark's light alone and adds it, where stock tonemapped it with the scene. (4) The jitter, by the eye dump: the quad should
   change no window in the scene and sit on c. (5) A draw the layer did not take that stock drew after the mark now falls under it (the HDR phase's known limit). (6) `armed frames`
   against `no mark draw` in a settled press: near 0 is the pass. (7) That the quad is the chevron at all: the probe's four points on the left eye (the chevron's is 0.9 below c).
+
+**As built (A2 review fixes)** (2026-10-29, on A2 `cf292810` merged with main `562759c0`; the full local build and all its gates green, nothing flown). A review of A2 found eight
+things, and the merge a ninth. Each, in one line:
+- **`--health` and a mark left in the lens eye.** A due press with armed frames is PARTIAL when the right eye's redirects are under 80 percent of them (none in either eye
+  included, and the left eye redirecting alone) or over 1.5 times them (more than one draw a frame matched: the match is too wide); the verdict names the counts. Rig: R 0 of 310 with
+  L 300, R 3, R 247 of 310 PARTIAL; R 600 PARTIAL; R 298, 248 and 465 of 310 OK.
+- **The vacuous rig check.** The one-bit vertex-shader mutants of the family are now built with the flag set, so they can differ from the real thing in the vertex shader alone. The
+  rule the hook asks became a function, `uiScopeMarkFacts` (ui_layer_math.h), which vscreen.cpp calls with the real reads and sharp_weapons_test drives with stand-ins: 5 and 12 indices,
+  2 instances, a draw that is not indexed, the lens not armed, PS C5A5C7E8216CB9AF, no learned surface each refuse alone; all together name the family; a refusal stops before the reads
+  after it. scope_zoom_test keeps only the wiring (the hook hands the rule its three real reads).
+- **The jitter citation.** Corrected above and in the code: the recipe at flat_projection_recipes.h:68 is for (VS 025B, PS C5A5C7E8216CB9AF); the inference is the shared vertex shader.
+  The family's first-seen line says the cancel is INFERRED, not shown.
+- **The depth decision, for the mark alone.** The layer seeds its own depth-stencil copy from the game's TEXTURE (shader views over it, or a copy; never through the game's view) at the
+  layer's size with the frame's jitter cancelled, and binds it writable with the game's own depth-stencil state; `dsReproducible` refused any view with a flag set because a writing draw
+  against a read-only view would change the copy. The mark's draw tests depth GEQUAL and stencil (ref 4) and writes neither. Now: (a) if the state cannot write (depth write off or depth
+  off; no stencil operation that changes the stencil under a write mask: the state's potential, whatever the view's flags say) a read-only view is accepted when the rest of the
+  reproduction holds (format, size, the seed available): path `seeded read-only`; (b) a test the layer cannot reproduce for any other reason is dropped, and the mark is redrawn in the
+  layer with the depth and stencil tests off (no depth target bound), because it lies on the sight glass in front of the world, inside the lens, where nothing nearer is drawn:
+  path `tests off`; (c) a mark that tests AND writes and cannot be reproduced keeps the ordinary refusal. Each redirected mark is counted by path in the press line (`mark depth
+  path: untested, seeded, seeded read-only, tests off`), and the first-seen line names the path of the first (with the reason for tests off).
+- **Identification evidence on a decline.** The first-seen line of every decision of the family carries the readout atlas by size and PS slot (or says no learned surface resolved),
+  the game's blend, and, once the depth decision was made, the path. `not armed` gets a first-seen line for this family (the other families keep theirs transient); late and not-UI do
+  not. The detail buffer grew from 320 to 640 bytes (the old redirect text could be cut before the atlas). No new per-press line: the S1 press line is capped at 200 a session.
+- **The game's blend, not the rewritten one.** `shapeOf` takes a fourth output, the game's own factors; the declines print those (`bl=12,7,1/2,7,1` for ONE, DEST_ALPHA) and the
+  first-seen line says where the target's lack of alpha read destination alpha as 1. The layer still converts the rewritten blend. Rig: `shapeOf` on a real blend state on WARP.
+- **edvr.ini.** The scope zoom key's text says the mark stays at its own size over the magnified picture only while UI quality is on (any value but off; the default is 100) and that it
+  stays in the scene, magnified, without it; `--health` says so. There is no separate crisp UI option: the crisp HUD take comes with UI quality and stands down only on a failure of
+  its own, which the log names.
+- **Armed frames after the freshness test.** The door counts a frame as armed, and as with no mark draw, after the stale-c test; a stale-c frame is neither. Rig: a stale c is counted
+  stale and not armed.
+- **The left aiming eye (the merge).** Main's F162 replaced F106's key with `fix.native_on_foot_ads_sight_eye = both | right | left`: the aiming eye is the right eye for `both` and
+  `right` and the left eye for `left`; F106's share runs in `both` only. The lens is the right eye's (the door's `eye != 1`, the right eye's depth, scene rows and jitter), so the gate
+  has a verdict, `kLeftAim`, after the idle tests and before the optical-sight test: the press line counts `left aiming eye` (the tick's and the door's), the lens does nothing, and the
+  gunsight mark's family is not armed (it is armed on `qualifies` alone). `--health` calls it no failure: the press is not due, and the verdict text says the left eye aiming gets no
+  lens and that a later build may support it. Supporting the left eye is a later build: it needs the left eye's depth slot, scene rows and jitter in the door and the lens. The other
+  uses of the right eye in S0 and S1 are the lens's own (the rows `g.eye[1]`, the jitter of eye 1, the door's eye 1) and mean what they did; the sentence in the A2 route paragraph
+  about F106 covering the left eye is now true of `both` only. The merge also moved the scope zoom FOV key in edvr.ini behind main's crouched ADS keys: the Hotkeys page rig wants
+  the first of them right after `ADS eye forward / back`.
+- **The press line** is now written from a buffer of 1160 bytes (`kLensPressLineBytes`): the worst case, every counter six digits, is 1119 bytes, inside the log's 1200-byte line with its
+  stamp and truncation marker reserved.
+- **Not verified, still for the flight.** Everything in the A2 list above, and: which depth path the mark takes (the press line's counts and the first-seen line say); that the
+  seeded read-only path reproduces the game's test (the mark's position against the sight glass is the check, with an eye dump); whether the mark then sits on the glass with its
+  tests off (the same dump); the left eye aiming (a press with `left` should show `left aiming eye` and no lens, and no mark redirected, so nothing in the scope is magnified).
