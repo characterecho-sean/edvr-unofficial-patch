@@ -39,7 +39,7 @@ game's own zoom as a magnified picture inside the scope's lens. The rest of the 
 - **A1 FLOWN 2026-10-29** (`5a47ad8f`, Epic VR; section 8): the lens ran on the bare and scoped Executioner, the Oppressor and the
   Aphelion; depth, eye numbering and cost (0.07 ms) as planned. The pilot: "a really cool effect where it makes sense"; the chevron is
   magnified with the world (Q6's prediction), and only optical sights should zoom.
-- **A2 BUILT, NOT FLOWN** (section 9, "As built (A2)"): the table holds optical sights only, on the pilot's word; the AR gunsight quad (VS
+- **A2 BUILT, INSTALLED ON EPIC (both), NOT FLOWN** (`ce3f9bac`, main merged at `40d7409b`; section 9, "As built (A2)"): the table holds optical sights only, on the pilot's word; the AR gunsight quad (VS
   `025B4B9F...` / PS `46F92DC7...`, 6 indices, the readout atlas) is the layer family `kScopeMark`, composited after the lens; the probe is on the left
   eye. Departure: the quad's blend is ONE, DEST_ALPHA (not an over), read as additive on its alpha-less target. Open: that this quad is the chevron
   (the flight's probe checks), and its jitter (default cancel, INFERRED). The A2 review's nine fixes are built with it (section 9, "As built
@@ -514,7 +514,7 @@ scope):
 - The scoped Executioner in ADS: 10 s still, then 10 s turning the head, with an eye dump (INSERT) while still.
 - The bare Executioner in ADS, with a dump. Then the Oppressor and the Aphelion in ADS.
 - One Karma weapon in ADS: no lens, and the reflex sight unchanged.
-- Read `--expect-build <A2> --health` first, then the S1 lines and the probe's lines.
+- Read `--expect-build ce3f9bac --health` first, then the S1 lines and the probe's lines.
 
 **As built (A2)** (2026-10-29, from `114c05ba`; the full local build and all its gates green, nothing flown).
 - **The table** (`scope_zoom_s1.h`): four rows, 7 entries. The Executioner bare 35.0 and scoped 15.0; the Oppressor and the Aphelion bare 48.0, their scoped copies standing in at
