@@ -395,6 +395,12 @@ inline void runS0(Check&& check) {
         check(!has("the probe keeps these points"), "S0 lines: only the first census run line says the probe keeps its points");
         sz::formatCensusSkip(buf, sizeof(buf), "c missing");
         check(std::strcmp(buf, "scope lens census (S0): run skipped (c missing)") == 0, "S0 lines: the census skip line");
+        sz::formatCensusNotOptical(buf, sizeof(buf), 7, "$wpn_m_assaultrifle_kinetic_fauto_name;", "yes");
+        check(starts("scope lens census (S0): run skipped (press 7 is not an optical sight: item $wpn_m_assaultrifle_kinetic_fauto_name; scope yes, and the S1 table holds optical sights only") &&
+                  has(", so the pixel probe stays off for it)") && std::strlen(buf) < sizeof(buf) - 1,
+              "S0 lines: a press of a sight that is not an optical sight is skipped with a line that names the press (so --health can tell it from a settled press the census never reached)");
+        sz::formatCensusNotOptical(buf, sizeof(buf), 1, nullptr, nullptr);
+        check(starts("scope lens census (S0): run skipped (press 1 is not an optical sight: item none scope unknown,"), "S0 lines: the not-optical skip line with no item or scope says none and unknown");
     }
 }
 

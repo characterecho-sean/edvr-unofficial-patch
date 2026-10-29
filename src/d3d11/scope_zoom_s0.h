@@ -601,6 +601,14 @@ inline int formatCensusSkip(char* buf, size_t n, const char* why) noexcept {
     appendf(buf, n, &len, "scope lens census (S0): run skipped (%s)", why ? why : "unknown");
     return finishLine(buf, n, len);
 }
+// A press of a sight that is not an optical sight (scope_zoom_s1.h lensOpticalSight: the S1 table holds optical sights only) is not probed: its skip line names the press, so --health can
+// tell it from a settled press the census never reached.
+inline int formatCensusNotOptical(char* buf, size_t n, uint32_t press, const char* item, const char* scope) noexcept {
+    int len = 0;
+    appendf(buf, n, &len, "scope lens census (S0): run skipped (press %u is not an optical sight: item %s scope %s, and the S1 table holds optical sights only, so the pixel probe stays off for it)",
+            press, itemText(item), scope ? scope : "unknown");
+    return finishLine(buf, n, len);
+}
 
 }  // namespace scopezoom
 }  // namespace edvr

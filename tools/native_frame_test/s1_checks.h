@@ -11,6 +11,7 @@
 
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -137,6 +138,36 @@ inline void runS1(Check&& check) {
                   without([](sz::LensGateIn& x) { x.leftAim = true; x.onFoot = false; }) == sz::LensVerdict::kIdle && without([](sz::LensGateIn& x) { x.leftAim = true; x.wFull = false; }) == sz::LensVerdict::kIdle,
               "S1 gate: the left eye aiming asks nothing of the lens while the key is off or the sights are not up (idle, nothing counted)");
         check(sz::LensVerdict::kLeftAim != sz::LensVerdict::kQualifies && static_cast<uint32_t>(sz::LensVerdict::kLeftAim) == 4, "S1 gate: the left aiming verdict is not a qualifying one (the gunsight mark's family is armed on kQualifies alone)");
+        // A3: the S0 census probes a press of an optical sight and no other. lensOpticalSight is the table's verdict the census asks, and it is the gate's kNotOptical read the other way: for
+        // every (item, scope) of the table and a sample of the weapons that are not in it, at two reference FOVs, the gate over the table's own numbers says kNotOptical exactly when the
+        // census's question says no.
+        static const char* const kItems[] = {"$wpn_m_sniper_plasma_charged_name;", "$wpn_m_assaultrifle_plasma_fauto_name;", "$wpn_m_assaultrifle_laser_fauto_name;", "$wpn_m_submachinegun_laser_fauto_name;",
+                                             "$wpn_m_assaultrifle_kinetic_fauto_name;", "$wpn_m_shotgun_plasma_doublebarrel_name;", "$wpn_s_pistol_plasma_charged_name;", "$wpn_m_mining_laser_name;", "none", ""};
+        static const int kScopes[] = {sz::kLensScopeUnknown, sz::kLensScopeNo, sz::kLensScopeYes};
+        bool agrees = true;
+        uint32_t optical = 0;
+        for (const double ref : {56.3, 64.752}) {
+            for (const char* item : kItems) {
+                for (const int scope : kScopes) {
+                    sz::LensGateIn x = g;
+                    double ads = sz::kNaN;
+                    x.optical = sz::lensAdsDeg(item, scope, &ads);
+                    x.m = x.optical ? sz::lensZoom(ref, ads) : sz::kNaN;
+                    const bool gateSaysOptical = sz::lensGate(x) != sz::LensVerdict::kNotOptical;
+                    const bool census = sz::lensOpticalSight(item, scope, ref);
+                    agrees = agrees && gateSaysOptical == census;
+                    optical += census ? 1u : 0u;
+                }
+            }
+        }
+        check(agrees && optical == 14, "S1 gate: the census's question (lensOpticalSight) is the gate's optical-sight verdict, for the table's seven entries at two reference FOVs and for the weapons outside it");
+        check(sz::lensOpticalSight("$wpn_m_sniper_plasma_charged_name;", sz::kLensScopeYes, 56.3) && sz::lensOpticalSight("$wpn_m_sniper_plasma_charged_name;", sz::kLensScopeNo, 56.3) &&
+                  !sz::lensOpticalSight("$wpn_m_submachinegun_laser_fauto_name;", sz::kLensScopeNo, 56.3) && !sz::lensOpticalSight("$wpn_m_assaultrifle_kinetic_fauto_name;", sz::kLensScopeYes, 56.3) &&
+                  !sz::lensOpticalSight("$wpn_m_sniper_plasma_charged_name;", sz::kLensScopeUnknown, 56.3) && !sz::lensOpticalSight(nullptr, sz::kLensScopeNo, 56.3),
+              "S1 census: the Executioner is an optical sight both ways, the unscoped Eclipse, a Karma weapon, an unknown scope state and no item are not");
+        check(!sz::lensOpticalSight("$wpn_m_assaultrifle_plasma_fauto_name;", sz::kLensScopeNo, 46.0) && sz::lensOpticalSight("$wpn_m_assaultrifle_plasma_fauto_name;", sz::kLensScopeNo, 56.3) &&
+                  !sz::lensOpticalSight("$wpn_m_sniper_plasma_charged_name;", sz::kLensScopeYes, sz::kNaN),
+              "S1 census: an entry whose M falls under 1.05 at the reference FOV, or at no reference, is not an optical sight, as the gate says");
     }
     {
         check(near1(sz::lensEase(4.07, 0.0), 1.0, 1e-12) && near1(sz::lensEase(4.07, -1.0), 1.0, 1e-12), "S1 ease: M is 1 at the first qualifying frame (and for a time before it)");
@@ -433,6 +464,9 @@ inline void runS1(Check&& check) {
         p.d.markPath[sz::kMarkPathSeeded] = 500;
         p.d.markPath[sz::kMarkPathSeededReadOnly] = 80;
         p.d.markPath[sz::kMarkPathTestsOff] = 16;
+        p.d.markComposite[sz::kMarkCompositeMatched] = 590;
+        p.d.markComposite[sz::kMarkCompositePlain] = 4;
+        p.d.markComposite[sz::kMarkCompositeNone] = 2;
         p.d.staleC = 4;
         p.d.depthUnavailable = 3;
         p.d.formatRefused = 3;
@@ -456,7 +490,7 @@ inline void runS1(Check&& check) {
                   text.rfind("scope zoom (S1): press 3 item $wpn_m_sniper_plasma_charged_name; scope yes key on ads 15.000 deg M 4.067 h 56.3 deg; frame thread: qualified 312, no S 9, "
                              "not an optical sight 0, left aiming eye 0, idle 40; FOV from the bare copy 0; jitter reading none 2, from another frame 5; c to the far point mean 0.500 max 0.750 deg; applied 300 of 310 qualifying frames (dispatched 303, at M 1 1); "
                              "declined: no S 7, stale c 4, open sight 0, not an optical sight 0, left aiming eye 0, depth unavailable 3, format refused 3; picture sequence less c's: -1 1, 0 297, +1 4, +2 1, other 0; "
-                             "gunsight marks redirected: L 296, R 300; armed frames 310, no mark draw 2; mark depth path: untested 0, seeded 500, seeded read-only 80, tests off 16; "
+                             "gunsight marks taken: L 296, R 300; armed frames 310, no mark draw 2; mark depth path: untested 0, seeded 500, seeded read-only 80, tests off 16; composites matched/plain/none 590/4/2; "
                              "hole r min 4.01 median 5.20 max 6.42 deg, 1 of 128 rays escaped (rays read on 296 frames); "
                              "depth at c 0.001220 (near 0.041700); c mean (1642.5, 1990.0) px spread 0.50 px; GPU rays 0.012 ms (max 0.012), magnify 0.046 ms (max 0.046)",
                              0) == 0,
@@ -467,8 +501,8 @@ inline void runS1(Check&& check) {
         const std::string e(line);
         check(e.find("press 0 item none scope unknown key off ads none deg M none h 56.3 deg; frame thread: qualified 0, no S 0, not an optical sight 0, left aiming eye 0, idle 0; FOV from the bare copy 0; "
                      "jitter reading none 0, from another frame 0; c to the far point mean none max none deg; applied 0 of 0 qualifying frames (dispatched 0, at M 1 0); declined: no S 0, stale c 0, open sight 0, "
-                     "not an optical sight 0, left aiming eye 0, depth unavailable 0, format refused 0; picture sequence less c's: -1 0, 0 0, +1 0, +2 0, other 0; gunsight marks redirected: L 0, R 0; "
-                     "armed frames 0, no mark draw 0; mark depth path: untested 0, seeded 0, seeded read-only 0, tests off 0; ") != std::string::npos,
+                     "not an optical sight 0, left aiming eye 0, depth unavailable 0, format refused 0; picture sequence less c's: -1 0, 0 0, +1 0, +2 0, other 0; gunsight marks taken: L 0, R 0; "
+                     "armed frames 0, no mark draw 0; mark depth path: untested 0, seeded 0, seeded read-only 0, tests off 0; composites matched/plain/none 0/0/0; ") != std::string::npos,
               "S1 lines: a press with nothing in it says none for what it does not have");
         check(e.find("hole r min none median none max none deg, 0 of 128 rays escaped (rays read on 0 frames); depth at c none (near none); c mean (none, none) px spread none px; "
                      "GPU rays none ms (max none), magnify none ms (max none)") != std::string::npos,
@@ -491,6 +525,7 @@ inline void runS1(Check&& check) {
         w.d.applied = w.d.qualifying = w.d.dispatched = w.d.noop = w.d.noS = w.d.staleC = w.d.openSight = w.d.notOptical = w.d.leftAim = w.d.depthUnavailable = w.d.formatRefused = 999999;
         for (uint32_t k = 0; k < sz::kLensGapBuckets; ++k) w.d.seqGap[k] = 999999;
         for (uint32_t k = 0; k < sz::kMarkPaths; ++k) w.d.markPath[k] = 999999;
+        for (uint32_t k = 0; k < sz::kMarkComposites; ++k) w.d.markComposite[k] = 999999;
         w.d.markRedirected[0] = w.d.markRedirected[1] = w.d.markArmedFrames = w.d.markNoDraw = 999999;
         w.d.raysRead = 999999;
         w.d.holeKnown = true;
@@ -506,7 +541,8 @@ inline void runS1(Check&& check) {
         const std::string worst(line);
         check(wn == static_cast<int>(worst.size()) && wn < static_cast<int>(sz::kLensPressLineBytes) &&
                   worst.rfind("magnify 12.345 ms (max 12.345)") == worst.size() - std::strlen("magnify 12.345 ms (max 12.345)"),
-              "S1 lines: the press line with every counter at six digits and every figure at its widest is under the press line's buffer (1160 bytes, inside the log's 1167) and keeps its end");
+              "S1 lines: the press line with every counter at six digits and every figure at its widest is under the press line's buffer (1168 bytes, the log's 1167 and a terminator) and keeps its end");
+        std::printf("S1 lines: the worst-case press line is %d bytes (the buffer holds %u, the log keeps 1167)\n", wn, static_cast<unsigned>(sz::kLensPressLineBytes));
         check(worst.size() + 15 + 3 + 15 <= 1200, "S1 lines: the worst-case press line, with the log's stamp and truncation marker reserved, fits the log's 1200-byte line");
     }
 }

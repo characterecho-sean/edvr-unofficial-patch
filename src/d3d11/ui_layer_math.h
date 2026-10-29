@@ -670,8 +670,9 @@ enum class UiLayerFamily : uint8_t {
                     // re-issued through the HDR layer route into the eye's R32G32_FLOAT displacement layer D (t0 swapped for a UV ramp), applied at the door after RCAS.
                     // Governed by its own half of the layer, beside the weapons fire's.
     kScopeMark,     // the optical scope's AR gunsight mark (A2, docs\design-vr-scope-magnification-2026-10-28.md section 9): vs 025B4B9FF54622ED with ps 46F92DC71BF8DFA5 drawing 6 indices
-                    // in 1 instance with the readout atlas bound, named only while the scope lens is armed for the frame (UiFamilyFacts.scopeMark). Taken out of the scene into the
-                    // eye's HDR HUD layer, which the composite lays over the picture after the lens, so the mark keeps its own size. fix.ui_quality's half governs it. Last in the enum.
+                    // in 1 instance with the readout atlas bound, named only while the scope lens is armed for the frame (UiFamilyFacts.scopeMark). A3 (section 10): taken out of the scene
+                    // into the eye's additive weapons layer, with the weapons fire (uiLayerFamilyUsesWeaponsLayer), whose tonemap-difference composite lays it over the picture after the
+                    // lens, so the mark keeps its own size and the brightness the game's additive blend gave it. The weapons fire's half governs it. Last in the enum.
     kCount
 };
 
@@ -713,12 +714,19 @@ inline bool uiLayerFamilyTakesHdr(UiLayerFamily f) {
            f == UiLayerFamily::kWeaponsFire || f == UiLayerFamily::kShieldRipple || f == UiLayerFamily::kScopeMark;
 }
 
+// The families drawn into the eye's additive weapons layer W (the weapons fire's light and the scope's gunsight mark, which the game blends additively too) and so
+// composited by the same tonemap difference, T(F_up + L) - T(F_up), after the upscale. The ONE list: the decision, the layer's draw path and the rigs' routing model ask it.
+inline bool uiLayerFamilyUsesWeaponsLayer(UiLayerFamily f) {
+    return f == UiLayerFamily::kWeaponsFire || f == UiLayerFamily::kScopeMark;
+}
+
 // Which half governs a family: the weapons fire is its own half, and so is the shield ripple (as a half of its own: `rippleOn` is its live state, with
-// the ripple's own stand-down), every other family is fix.ui_quality's. The halves are
+// the ripple's own stand-down), every other family is fix.ui_quality's. The scope's gunsight mark rides the weapons layer, so it is the weapons half's (its arming is the
+// scope zoom key, in the draw hook's facts). The halves are
 // independent (the four combinations are the sharp_weapons_test rig's): fix.ui_quality off takes no interface, a stood-down weapons half takes no
-// weapons fire, whatever the other says. `qualityOn` and `weaponsOn` are the halves' LIVE states (the layer not stood down).
+// weapons fire and no mark, whatever the other says. `qualityOn` and `weaponsOn` are the halves' LIVE states (the layer not stood down).
 inline bool uiLayerFamilyEnabled(UiLayerFamily f, bool qualityOn, bool weaponsOn, bool rippleOn = true) {
-    return f == UiLayerFamily::kWeaponsFire ? weaponsOn : f == UiLayerFamily::kShieldRipple ? rippleOn : qualityOn;
+    return uiLayerFamilyUsesWeaponsLayer(f) ? weaponsOn : f == UiLayerFamily::kShieldRipple ? rippleOn : qualityOn;
 }
 
 // The two families that are scene geometry rather than interface: the layer takes them for DENSITY alone (their lines

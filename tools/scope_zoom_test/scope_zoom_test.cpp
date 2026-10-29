@@ -87,7 +87,7 @@ static std::string replaced(std::string text, const std::string& from, const std
 static bool wiredDoor(const std::string& layer) {
     const size_t fn = layer.find("ID3D11Texture2D* uiLayerComposite(uint64_t sequence, uint32_t eye");
     if (fn == std::string::npos) return false;
-    const std::string body = layer.substr(fn, 9000);
+    const std::string body = layer.substr(fn, 12000);
     return before(body, "rippleDoor(e, eye, sequence", "scopeZoomDoor(lensArgs") && before(body, "scopeZoomDoor(lensArgs", "if (!e.srv || !e.rtv || e.compositedSeq == sequence) return handOn();") &&
            before(body, "scopeZoomDoor(lensArgs", "compositeInner(e, eye, frame") && has(body, "if (eye == 1 && scopeZoomWanted())") && has(body, "lensArgs.resolved = e.doorFromPass;");
 }
@@ -124,7 +124,11 @@ static bool wiredMark(const std::string& layer, const std::string& vscreen) {
            has(layer, "describeBlend(gameBlend, bl, sizeof(bl));") &&
            has(layer, "dsReproducible(ctx, dsv, g_tc.info.a, g_tc.info.b, dsWhy, sizeof(dsWhy), markFamily && uiScopeMarkWritesNothing(dsState));") &&
            has(layer, "markDepth = uiScopeMarkDepth(f.ds, dsState, f.dsReproducible);") && has(layer, "if (markDepth == UiMarkDepth::kTestsOff) f.ds.depthTest = f.ds.stencilTest = false;") &&
-           has(layer, "if (family == UiLayerFamily::kScopeMark && familyLineWanted(family, d))");
+           has(layer, "if (family == UiLayerFamily::kScopeMark && familyLineWanted(family, d))") &&
+           // A3: the mark rides the weapons layer. It is counted there per eye-frame at the door, however uiLayerComposite returns, as the re-issue that carried it (the tonemap
+           // difference or the plain add) or none, and the layer is composited after the lens in the same call (wiredDoor).
+           has(layer, "g_draw.weapons = uiLayerFamilyUsesWeaponsLayer(family);") && has(layer, "} markFrame{e, sequence};") && has(layer, "markFrame.composited = result != nullptr;") &&
+           has(layer, "e.wPubMatched = plan.sourcePass;") && has(layer, "scopeZoomNoteMarkComposite(!composited || e.wPubSeq != sequence ? scopezoom::kMarkCompositeNone");
 }
 static void wiringTests() {
     const std::string layer = readFile("src/d3d11/ui_layer.cpp"), temporal = readFile("src/d3d11/temporal_pass.cpp"), native = readFile("src/d3d11/native_on_foot.cpp"), ini = readFile("edvr.ini");
@@ -154,12 +158,25 @@ static void wiringTests() {
     check(!wiredMark(replaced(layer, "const UiBlendShape shape = shapeOf(bs, &game, g_draw.destAlphaOne);", "const UiBlendShape shape = shapeOf(bs, &game);"), vscreen), "control: a blend read differently at the issue than at the decision is not the wiring");
     check(!wiredMark(replaced(layer, "describeBlend(gameBlend, bl, sizeof(bl));", "describeBlend(game, bl, sizeof(bl));"), vscreen), "control: a decline that prints the rewritten blend as the game's is not the wiring");
     check(!wiredMark(replaced(layer, "scopeZoomNoteMark(static_cast<uint32_t>(g_draw.eye), g_draw.seq, g_draw.markPath);", ""), vscreen), "control: marks not counted at the layer are not the wiring");
+    check(!wiredMark(replaced(layer, "g_draw.weapons = uiLayerFamilyUsesWeaponsLayer(family);", "g_draw.weapons = family == UiLayerFamily::kWeaponsFire;"), vscreen), "control: a mark that is not drawn into the weapons layer is not the wiring");
+    check(!wiredMark(replaced(layer, "markFrame.composited = result != nullptr;", ""), vscreen), "control: a composite the door does not report to the mark's count is not the wiring");
+    check(!wiredMark(replaced(layer, "e.wPubMatched = plan.sourcePass;", ""), vscreen), "control: a re-issue that does not say whether it composited by the tonemap difference is not the wiring");
     check(!wiredMark(replaced(layer, "dsWhy, sizeof(dsWhy), markFamily && uiScopeMarkWritesNothing(dsState));", "dsWhy, sizeof(dsWhy), markFamily);"), vscreen),
           "control: a read-only view accepted for the mark whatever the draw writes is not the wiring");
     check(!wiredMark(replaced(layer, "if (markDepth == UiMarkDepth::kTestsOff) f.ds.depthTest = f.ds.stencilTest = false;", ""), vscreen), "control: a mark whose unreproducible tests are not dropped is not the wiring");
     // the lens declines for the left aiming eye (F162) before the gate: the tick hands the gate the key's eye
     check(before(native, "gi.leftAim = adsAimEye() == 0;", "sz::lensGate(gi)") && has(native, "case sz::LensVerdict::kLeftAim: ++s.ts.leftAim; break;"), "the tick hands the gate the aiming eye (F162) and counts its left aiming eye verdict");
     check(!(before(replaced(native, "gi.leftAim = adsAimEye() == 0;", "gi.leftAim = false;"), "gi.leftAim = adsAimEye() == 0;", "sz::lensGate(gi)")), "control: a gate that is not given the aiming eye is not the wiring");
+    // A3: the S0 census arms its pixel probe only for a press of an optical sight (the S1 table's verdict, at the reference FOV); any other press says so on a skip line and returns before the probe
+    const auto wiredCensus = [](const std::string& n) {
+        return before(n, "if (!sz::lensOpticalSight(v.item.name, v.item.scope, static_cast<double>(g_scopeZoomRefDeg.load(std::memory_order_relaxed)))) {", "pixelProbeConfigure(set.pt, set.n);") &&
+               before(n, "sz::formatCensusNotOptical(line, sizeof(line), v.press, v.item.name, loadout::scopeName(v.item.scope));", "pixelProbeConfigure(set.pt, set.n);") &&
+               before(n, "if (!sz::lensOpticalSight(v.item.name, v.item.scope, static_cast<double>(g_scopeZoomRefDeg.load(std::memory_order_relaxed)))) {", "pixelProbeArm();");
+    };
+    check(wiredCensus(native), "the S0 census asks the S1 table's verdict (lensOpticalSight at the reference FOV) before it configures or arms the pixel probe, and a press of any other sight is a skip line");
+    check(!wiredCensus(replaced(native, "if (!sz::lensOpticalSight(v.item.name, v.item.scope, static_cast<double>(g_scopeZoomRefDeg.load(std::memory_order_relaxed)))) {", "if (false) {")),
+          "control: a census that asks no table is not the wiring");
+    check(!wiredCensus(replaced(native, "sz::formatCensusNotOptical(line, sizeof(line), v.press, v.item.name, loadout::scopeName(v.item.scope));", "")), "control: a press that is declined without its skip line is not the wiring");
 }
 
 // ============================================================================================ the scene
@@ -675,6 +692,21 @@ void lensTests(Fx& f) {
         check(marks.markRedirected[0] == 1 && marks.markRedirected[1] == 4, "marks redirected are counted per eye (an eye that is neither is ignored)");
         check(marks.markPath[sz::kMarkPathSeeded] == 1 && marks.markPath[sz::kMarkPathSeededReadOnly] == 1 && marks.markPath[sz::kMarkPathTestsOff] == 1 && marks.markPath[sz::kMarkPathUntested] == 1,
               "marks redirected are counted by the path their depth and stencil tests took (a path that is none is not counted)");
+        // the weapons layer's composite of an eye-frame that held a mark (A3), counted by how it served the frame: the tonemap difference, the plain add, or not at all
+        scopeZoomPressBegin(78);
+        scopeZoomNoteMarkComposite(sz::kMarkCompositeMatched);
+        scopeZoomNoteMarkComposite(sz::kMarkCompositeMatched);
+        scopeZoomNoteMarkComposite(sz::kMarkCompositePlain);
+        scopeZoomNoteMarkComposite(sz::kMarkCompositeNone);
+        scopeZoomNoteMarkComposite(sz::kMarkComposites);   // a kind that is none is not counted
+        sz::LensDoorStats comps;
+        scopeZoomPressTake(&comps);
+        check(comps.markComposite[sz::kMarkCompositeMatched] == 2 && comps.markComposite[sz::kMarkCompositePlain] == 1 && comps.markComposite[sz::kMarkCompositeNone] == 1,
+              "mark composites are counted by kind (the tonemap difference, the plain add, none), a kind that is none is not counted");
+        scopeZoomPressBegin(79);
+        sz::LensDoorStats fresh;
+        scopeZoomPressTake(&fresh);
+        check(fresh.markComposite[0] == 0 && fresh.markComposite[1] == 0 && fresh.markComposite[2] == 0, "a press begins with no mark composite counted");
     }
 
     // ---- the reasons that decline a frame, each counted and each leaving the frame alone ----

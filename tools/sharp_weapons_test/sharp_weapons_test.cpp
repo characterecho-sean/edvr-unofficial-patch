@@ -104,7 +104,16 @@ static void scopeMarkTests() {
     check(uiLayerFamilyFor(ldr) == UiLayerFamily::kNone, "no eye target, no family");
     check(uiLayerFamilyTakesHdr(UiLayerFamily::kScopeMark) && !uiLayerFamilyIsSceneLines(UiLayerFamily::kScopeMark), "taken by the HDR route, exempt from the density rule");
     check(std::strcmp(uiLayerFamilyName(UiLayerFamily::kScopeMark), "scope mark") == 0, "the family's name is the log's");
-    check(uiLayerFamilyEnabled(UiLayerFamily::kScopeMark, true, false) && !uiLayerFamilyEnabled(UiLayerFamily::kScopeMark, false, true), "fix.ui_quality's half governs it, the weapons fire's does not");
+    // A3: the mark rides the weapons layer, so the weapons half governs it (its arming is the scope zoom key, in the draw hook's facts) and fix.ui_quality's does not
+    check(!uiLayerFamilyEnabled(UiLayerFamily::kScopeMark, true, false) && uiLayerFamilyEnabled(UiLayerFamily::kScopeMark, false, true),
+          "the weapons fire's half governs the mark (a stood-down weapons layer leaves it in the scene), fix.ui_quality's does not");
+    check(uiLayerFamilyUsesWeaponsLayer(UiLayerFamily::kScopeMark) && uiLayerFamilyUsesWeaponsLayer(UiLayerFamily::kWeaponsFire), "the mark and the weapons fire are drawn into the weapons layer");
+    bool others = true;
+    for (size_t i = 1; i < static_cast<size_t>(UiLayerFamily::kCount); ++i) {
+        const UiLayerFamily fam = static_cast<UiLayerFamily>(i);
+        if (fam != UiLayerFamily::kScopeMark && fam != UiLayerFamily::kWeaponsFire) others = others && !uiLayerFamilyUsesWeaponsLayer(fam);
+    }
+    check(others, "no other family is drawn into the weapons layer (the HUD's families and the shield ripple keep their own)");
 
     // the shape: 6 indices in 1 instance, an indexed kind
     check(uiScopeMarkShape('X', 6, 1) && uiScopeMarkShape('I', 6, 1) && !uiScopeMarkShape('X', 18, 1) && !uiScopeMarkShape('X', 6, 2) && !uiScopeMarkShape('D', 6, 1) && !uiScopeMarkShape('N', 6, 1) &&
@@ -363,7 +372,8 @@ static void keyTests() {
             for (size_t f = 1; f < static_cast<size_t>(UiLayerFamily::kCount); ++f) {
                 const UiLayerFamily fam = static_cast<UiLayerFamily>(f);
                 const bool on = uiLayerFamilyEnabled(fam, q != 0, s != 0);
-                check(on == (fam == UiLayerFamily::kWeaponsFire ? s != 0 : fam == UiLayerFamily::kShieldRipple ? true : q != 0), "a family is enabled by its own half and by no other (the ripple, asked without its half, defaults on)");
+                check(on == (fam == UiLayerFamily::kWeaponsFire || fam == UiLayerFamily::kScopeMark ? s != 0 : fam == UiLayerFamily::kShieldRipple ? true : q != 0),
+                      "a family is enabled by its own half and by no other (the scope mark rides the weapons layer, so it is the weapons half's; the ripple, asked without its half, defaults on)");
                 UiLayerDrawFacts d;
                 d.family = fam;
                 d.familyEnabled = on;
@@ -417,6 +427,11 @@ static void keyTests() {
             h.blend = UiBlendShape::kPremulOver;
             check((uiLayerDecide(w) == UiLayerDecision::kRedirect) == (s != 0), "the weapons fire is taken iff its half is live");
             check((uiLayerDecide(h) == UiLayerDecision::kRedirect) == (q != 0), "the flight HUD is taken iff fix.ui_quality is on");
+            UiLayerDrawFacts m = w;
+            m.family = UiLayerFamily::kScopeMark;
+            m.familyEnabled = uiLayerFamilyEnabled(m.family, q != 0, s != 0);
+            m.blend = UiBlendShape::kAdditive;
+            check((uiLayerDecide(m) == UiLayerDecision::kRedirect) == (s != 0), "the scope mark is taken iff the weapons half is live, whatever fix.ui_quality says");
         }
     }
 }
@@ -834,10 +849,13 @@ static bool wiredLiveness(const std::string& t) {
 }
 static bool wiredDecision(const std::string& t) {
     return has(t, "f.familyEnabled = uiLayerFamilyEnabled(family, detail::g_uiQualityLive, g_weaponsLive, g_rippleLive);") &&
-           has(t, "family == UiLayerFamily::kWeaponsFire\n                    ? weaponsTakeReady(ctx, f.eye)") &&
+           has(t, "uiLayerFamilyUsesWeaponsLayer(family)\n                    ? weaponsTakeReady(ctx, f.eye)") &&
            has(t, "const bool cancel = !g_draw.weapons || weaponsFireJitterCancel(g_draw.vsHash);") &&
-           has(t, "g_draw.jx = cancel ? jx : 0.0f;") && has(t, "g_draw.weapons = family == UiLayerFamily::kWeaponsFire;") &&
-           before(t, "f.familyEnabled = uiLayerFamilyEnabled(", "UiLayerDecision d = uiLayerDecide(f);");
+           has(t, "g_draw.jx = cancel ? jx : 0.0f;") && has(t, "g_draw.weapons = uiLayerFamilyUsesWeaponsLayer(family);") &&
+           // the mark's stand-down of its own, after the half gate and before the decision
+           has(t, "if (family == UiLayerFamily::kScopeMark && g_markStoodDown) f.familyEnabled = false;") &&
+           before(t, "f.familyEnabled = uiLayerFamilyEnabled(", "if (family == UiLayerFamily::kScopeMark && g_markStoodDown) f.familyEnabled = false;") &&
+           before(t, "if (family == UiLayerFamily::kScopeMark && g_markStoodDown) f.familyEnabled = false;", "UiLayerDecision d = uiLayerDecide(f);");
 }
 // The interface-only parts keep fix.ui_quality's liveness.
 static bool wiredQualityOnly(const std::string& t) {
@@ -900,6 +918,8 @@ static void wiringTests() {
           "control: a ui_quality gate that reads the union trips the pin");
     check(!wiredDecision(replaced(layer, "g_draw.jx = cancel ? jx : 0.0f;", "g_draw.jx = jx;")), "control: a cancel that ignores the table trips the pin");
     check(!wiredDecision(replaced(layer, "weaponsFireJitterCancel(g_draw.vsHash)", "true")), "control: a table that is never read trips the pin");
+    check(!wiredDecision(replaced(layer, "g_draw.weapons = uiLayerFamilyUsesWeaponsLayer(family);", "g_draw.weapons = family == UiLayerFamily::kWeaponsFire;")), "control: a mark that is not drawn into the weapons layer trips the pin");
+    check(!wiredDecision(replaced(layer, "if (family == UiLayerFamily::kScopeMark && g_markStoodDown) f.familyEnabled = false;", "")), "control: a mark with no stand-down of its own trips the pin");
 
     check(wiredQualityOnly(layer), "ui_layer.cpp: the world route, the on-foot gate and the after-UI take stay fix.ui_quality's");
     check(!wiredQualityOnly(replaced(layer, "bool uiLayerLiveForWorldRoute() { return detail::g_uiQualityLive; }", "bool uiLayerLiveForWorldRoute() { return detail::g_uiLayerLive; }")),
@@ -1089,6 +1109,66 @@ static void dropTests() {
     check(!weaponsLayerDropped(0, 0, 0) && !weaponsLayerDropped(5, 0, 0) && !weaponsLayerDropped(0, 3, 0) && !weaponsLayerDropped(7, 2, 7) && weaponsLayerDropped(7, 2, 6) &&
               weaponsLayerDropped(7, 2, 0),
           "weaponsLayerDropped: an empty layer, a never-used layer and a carried layer are not drops; a layer carried at another frame, or never, is");
+
+    // A3: the scope's gunsight mark shares the layer, so a drop is judged for the whole layer and attributed by kind: the weapons fire's loss and streak are the fire's alone
+    {
+        const WeaponsLayerLoss fire = weaponsLayerLoss(7, 3, 0, 6), mark = weaponsLayerLoss(7, 0, 2, 6), both = weaponsLayerLoss(7, 3, 2, 6);
+        check(fire.fire && !fire.mark && !mark.fire && mark.mark && both.fire && both.mark, "a dropped layer is lost as the kinds it held: fire, mark or both");
+        const WeaponsLayerLoss carried = weaponsLayerLoss(7, 3, 2, 7), empty = weaponsLayerLoss(7, 0, 0, 6), fresh = weaponsLayerLoss(0, 0, 2, 0);
+        check(!carried.fire && !carried.mark && !empty.fire && !empty.mark && !fresh.fire && !fresh.mark, "a carried, an empty and a never-used layer lose nothing, of either kind");
+        // the production bookkeeping frame by frame, both streaks and both stand-downs (ui_layer.cpp beginInner and uiLayerCrispToneEnd)
+        struct KindModel {
+            uint64_t wSeq = 0, wPubSeq = 0;
+            uint32_t wFires = 0, wMarks = 0, fireStreak = 0, markStreak = 0;
+            bool fireDown = false, markDown = false;
+            unsigned fireLost = 0, markLost = 0;
+            void frame(uint64_t f, uint32_t fires, uint32_t marks, bool carries) {
+                if (!fires && !marks) return;
+                const WeaponsLayerLoss l = weaponsLayerLoss(wSeq, wFires, wMarks, wPubSeq);
+                if (l.fire) {
+                    ++fireLost;
+                    if (++fireStreak >= 30) fireDown = true;
+                }
+                if (l.mark) {
+                    ++markLost;
+                    if (++markStreak >= 30) markDown = true;
+                }
+                wSeq = f;
+                wFires = fires;
+                wMarks = marks;
+                if (carries) {
+                    wPubSeq = f;
+                    if (wFires) fireStreak = 0;
+                    if (wMarks) markStreak = 0;
+                }
+            }
+        };
+        {
+            KindModel m;   // a mark every frame of a press and no re-issue ever carries it: the mark stands down, the weapons fire is never touched
+            for (uint64_t f = 1; f <= 100; ++f) m.frame(f, 0, 1, false);
+            check(m.markDown && !m.fireDown && m.markLost == 99 && m.fireLost == 0, "marks lost in a row stand the mark down and never the weapons fire (nor count as its losses)");
+        }
+        {
+            KindModel m;   // the weapons fire lost in a row, no mark: the weapons fire stands down as it always did, the mark is not touched
+            for (uint64_t f = 1; f <= 100; ++f) m.frame(f, 2, 0, false);
+            check(m.fireDown && !m.markDown && m.fireLost == 99 && m.markLost == 0, "weapons fire lost in a row stands the weapons fire down, as before, and not the mark");
+        }
+        {
+            KindModel m;   // both kinds in every frame and no re-issue carries them: each kind is counted on its own
+            for (uint64_t f = 1; f <= 100; ++f) m.frame(f, 1, 1, false);
+            check(m.fireDown && m.markDown, "a layer holding both, lost in a row, stands each kind down on its own count");
+        }
+        {
+            KindModel m;   // the press interleaved with a quiet fire frame that is carried: marks carried every frame never stand anything down
+            for (uint64_t f = 1; f <= 200; ++f) m.frame(f, f % 7 == 0 ? 2 : 0, 1, true);
+            check(!m.markDown && !m.fireDown && m.markLost == 0 && m.fireLost == 0, "marks and weapons fire carried by every re-issue lose nothing");
+        }
+        {
+            KindModel m;   // a mark frame that is carried between lost fire frames must not reset the fire's streak (it did not carry fire)
+            for (uint64_t f = 1; f <= 90; ++f) m.frame(f, f % 2 ? 2 : 0, f % 2 ? 0 : 1, f % 2 == 0);
+            check(m.fireDown && !m.markDown, "carried marks between lost weapons fire never reset the weapons fire's streak");
+        }
+    }
 }
 
 static bool wiredLost(const std::string& t) {
@@ -1100,9 +1180,15 @@ static bool wiredLost(const std::string& t) {
     }
     return loss != std::string::npos && sights == 4 && has(t, "void noteToneSight(uint64_t seq, const void* res, int eye, uint8_t outcome) {") &&
            has(t, "if (e.wTarget != g_draw.targetRes) ++e.wOtherTargets;") && has(t, "e.wOtherTargets = 0;") && has(t, "if (!seenRes) seenRes = r.Get();") &&
-           has(t, "if (weaponsLayerDropped(e.wSeq, e.wDraws, e.wPubSeq)) {") &&
-           has(t, "    if (hadWeapons) {\n        // Stamped ONLY by a bracket that carried the weapons layer's content") && has(t, "        e.wPubSeq = seq;\n        e.wMissStreak = 0;") &&
-           has(t, "if (g_lostLines >= 24) return;") && before(t, "noteToneSight(seq, seenRes, eye, 0);", "crispArm(eye, seq, hdrSlot, ta.rtvRes, hdrRes, vs, ps);");
+           has(t, "const WeaponsLayerLoss lost = weaponsLayerLoss(e.wSeq, e.wFires, e.wMarks, e.wPubSeq);") &&
+           has(t, "    if (hadWeapons) {\n        // Stamped ONLY by a bracket that carried the weapons layer's content") &&
+           has(t, "        e.wPubSeq = seq;\n        e.wPubMatched = plan.sourcePass;\n        if (e.wFires) e.wMissStreak = 0;\n        if (e.wMarks) e.wMarkMissStreak = 0;") &&
+           has(t, "if (g_lostLines >= 24) return;") && before(t, "noteToneSight(seq, seenRes, eye, 0);", "crispArm(eye, seq, hdrSlot, ta.rtvRes, hdrRes, vs, ps);") &&
+           // A3: the scope mark's loss is counted, noted and stood down apart from the weapons fire's, and its draws are counted apart from the fire's
+           has(t, "if (lost.fire) {\n            ++g_win.weaponsLost;") && has(t, "if (lost.mark) {\n            if (!lost.fire) noteWeaponsLost(g_draw.eye, e, g_draw.seq, true);") &&
+           has(t, "if (++e.wMarkMissStreak >= kCrispHdrMissFrames) {") && has(t, "markStandDown(why);") && has(t, "if (++e.wMissStreak >= kCrispHdrMissFrames) {") &&
+           has(t, "                ++e.wMarks;   // the scope's gunsight mark shares the layer") && has(t, "                ++e.wFires;\n                ++g_win.weaponsTaken;") &&
+           has(t, "if (wl && g_draw.family == UiLayerFamily::kWeaponsFire && e.wFireSeq != g_draw.seq) {") && has(t, "if (hadWeapons && e.wFires) {");
 }
 static void lostPins(const std::string& layer) {
     check(wiredLost(layer), "ui_layer.cpp: a lost weapons layer prints the eye's state and the last tonemap-shaped draws, rate-limited, and every outcome of the admission is recorded");
@@ -1110,9 +1196,16 @@ static void lostPins(const std::string& layer) {
     check(!wiredLost(replaced(layer, "        noteToneSight(seq, seenRes, eye, 3);\n", "")), "control: an unrecorded outcome trips the pin");
     check(!wiredLost(replaced(layer, "    noteToneSight(seq, seenRes, eye, 0);\n", "")), "control: an unrecorded admission trips the pin");
     check(!wiredLost(replaced(layer, "if (g_lostLines >= 24) return;", "")), "control: an unlimited line trips the pin");
-    check(!wiredLost(replaced(layer, "if (weaponsLayerDropped(e.wSeq, e.wDraws, e.wPubSeq)) {", "if (e.wSeq && e.wDraws && e.wToneSeq != e.wSeq) {")),
+    check(!wiredLost(replaced(layer, "weaponsLayerLoss(e.wSeq, e.wFires, e.wMarks, e.wPubSeq)", "WeaponsLayerLoss{e.wSeq && e.wDraws && e.wToneSeq != e.wSeq, false}")),
           "control: the frozen drop test (against the latest tonemap's frame) trips the pin");
     check(!wiredLost(replaced(layer, "    if (hadWeapons) {\n        // Stamped ONLY", "    {\n        // Stamped ONLY")), "control: a publication stamped by every re-issue trips the pin");
+    check(!wiredLost(replaced(layer, "if (e.wFires) e.wMissStreak = 0;", "e.wMissStreak = 0;")), "control: a frame that held a mark alone resetting the weapons fire's streak trips the pin");
+    check(!wiredLost(replaced(layer, "                ++e.wMarks;   // the scope's gunsight mark shares the layer", "                ++e.wFires;   // the scope's gunsight mark shares the layer")),
+          "control: a mark counted as weapons fire trips the pin");
+    check(!wiredLost(replaced(layer, "if (hadWeapons && e.wFires) {", "if (hadWeapons) {")), "control: a mark's composite counted on the weapons line trips the pin");
+    check(!wiredLost(replaced(layer, "markStandDown(why);", "weaponsStandDown(why);")), "control: a mark that stands the weapons fire down trips the pin");
+    check(!wiredLost(replaced(layer, "if (wl && g_draw.family == UiLayerFamily::kWeaponsFire && e.wFireSeq != g_draw.seq) {", "if (wl && e.wFireSeq != g_draw.seq) {")),
+          "control: an eye-frame counted as having weapons draws for a mark trips the pin");
 }
 
 // ============================================================================================ the composite (WARP)

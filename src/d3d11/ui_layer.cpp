@@ -200,14 +200,25 @@ void crispStandDown(const char* why) {
         why ? why : "a refusal");
 }
 
-// The weapons fire's own failure: the weapons layer, its source pass or its re-issue could not be trusted. The weapons fire goes back to
-// the scene exactly as stock; the HUD, the rest of the layer and every other family are unaffected.
+// The weapons layer's own failure: the layer, its source pass or its re-issue could not be trusted. The weapons fire, and the scope's gunsight mark that rides the layer,
+// go back to the scene exactly as stock; the HUD, the rest of the layer and every other family are unaffected.
 void weaponsStandDown(const char* why) {
     if (g_weaponsStoodDown) return;
     g_weaponsStoodDown = true;
     refreshLive();
-    Log::get().note("sharp weapons: stands down for the rest of the session -- %s. The weapons fire is drawn in the scene as it always was (the "
+    Log::get().note("sharp weapons: stands down for the rest of the session -- %s. The weapons fire (and the scope's gunsight mark) is drawn in the scene as it always was (the "
                     "rest of the layer is unaffected). It stays down until the game is restarted.",
+                    why ? why : "a refusal");
+}
+
+// The scope's gunsight mark rides the weapons layer (A3) but fails alone: marks the layer took and no re-issue published for kCrispHdrMissFrames frames in a row take the mark back to
+// the scene, magnified with the world as before the arc. The weapons fire, the HUD and the rest of the layer are unaffected, and so is the weapons half's own stand-down above.
+bool g_markStoodDown = false;
+void markStandDown(const char* why) {
+    if (g_markStoodDown) return;
+    g_markStoodDown = true;
+    Log::get().note("scope zoom: the gunsight mark's route through the weapons layer stands down for the rest of the session -- %s. The mark is drawn in the scene as it always was, "
+                    "magnified with the world (the weapons fire and the rest of the layer are unaffected). It stays down until the game is restarted.",
                     why ? why : "a refusal");
 }
 
@@ -420,6 +431,13 @@ struct Eye {
     uint64_t wPubSeq = 0;            // the last frame a re-issue carried THIS layer's content (weaponsLayerDropped asks it)
     uint32_t wMissStreak = 0;        // consecutive content-frames no re-issue published
     uint32_t wOtherTargets = 0;      // this frame's weapons draws made into another HDR target than wTarget (the instrument below)
+    // What the layer's draws of the frame wSeq are: the weapons fire's (wFires) and the scope's gunsight marks (wMarks, A3), which share the layer and its composite. The drop test,
+    // the missing-consumer streaks and the weapons line's counts are kept apart by kind, so a mark never stands the weapons fire down or counts as weapons fire.
+    uint32_t wFires = 0, wMarks = 0;
+    uint64_t wFireSeq = 0;           // the last frame whose first weapons-fire draw was counted as a content frame (the weapons line's eye-frames)
+    uint32_t wMarkMissStreak = 0;    // consecutive frames whose marks no re-issue published
+    bool wPubMatched = false;        // the re-issue that stamped wPubSeq composited by the tonemap difference (false: the plain add)
+    uint64_t wMarkNotedSeq = 0;      // the last frame whose mark the door counted (scopeZoomNoteMarkComposite), once an eye-frame
 
     // The shield ripple's displacement layer D (R32G32_FLOAT, the HDR layers' size): the game's own uv_jit + d where the shield-strike refraction drew this
     // frame, cleared far outside [0, 1] elsewhere. Made at the first 820E draw, released after kShieldRippleIdleFrames frames without one. dJx/dJy: the jitter its
@@ -1054,9 +1072,16 @@ void noteToneSight(uint64_t seq, const void* res, int eye, uint8_t outcome) {
     t.outcome = outcome;
 }
 uint32_t g_lostLines = 0;
-void noteWeaponsLost(int eye, const Eye& e, uint64_t nextSeq) {
-    if (g_lostLines >= 24) return;
-    ++g_lostLines;
+// A layer whose frame held the scope's gunsight mark and no weapons fire is lost as a mark (A3): its first line says so, and the weapons fire's 24 lines are not spent on it.
+bool g_markLostNoted = false;
+void noteWeaponsLost(int eye, const Eye& e, uint64_t nextSeq, bool markOnly = false) {
+    if (markOnly) {
+        if (g_markLostNoted) return;
+        g_markLostNoted = true;
+    } else {
+        if (g_lostLines >= 24) return;
+        ++g_lostLines;
+    }
     static const char* const kOutcome[] = {"admitted", "no eye's content matched", "the 8-bit layer was busy", "a second tonemap for the eye"};
     char sights[900];
     sights[0] = 0;
@@ -1069,11 +1094,14 @@ void noteWeaponsLost(int eye, const Eye& e, uint64_t nextSeq) {
         if (w < 0) break;
         used += static_cast<size_t>(w);
     }
+    char label[96];
+    if (markOnly) _snprintf_s(label, _TRUNCATE, "of the scope's gunsight mark alone (the first of the session)");
+    else _snprintf_s(label, _TRUNCATE, "%u (of the first 24 lines)", g_lostLines);
     Log::get().note(
-        "sharp weapons: lost layer %u (of the first 24 lines): the %s eye's weapons content is frame %llu (%u draws, first into %p, %u of them into another "
-        "target) and no tonemap published it; its HUD layer holds frame %llu (%u draws, tonemapped for frame %llu); the next weapons draw is frame %llu; "
+        "sharp weapons: lost layer %s: the %s eye's %s content is frame %llu (%u draws, first into %p, %u of them into another "
+        "target) and no tonemap published it; its HUD layer holds frame %llu (%u draws, tonemapped for frame %llu); the next draw into the layer is frame %llu; "
         "the last tonemap-shaped draws seen, newest first: %s.",
-        g_lostLines, eye == 0 ? "left" : "right", static_cast<unsigned long long>(e.wSeq), e.wDraws, e.wTarget, e.wOtherTargets,
+        label, eye == 0 ? "left" : "right", markOnly ? "gunsight mark" : "weapons", static_cast<unsigned long long>(e.wSeq), e.wDraws, e.wTarget, e.wOtherTargets,
         static_cast<unsigned long long>(e.hdrSeq), e.hdrDraws, static_cast<unsigned long long>(e.hdrToneSeq),
         static_cast<unsigned long long>(nextSeq), n ? sights : "none yet");
 }
@@ -1191,7 +1219,7 @@ bool ensureSharpScratch(ID3D11DeviceContext* ctx, uint32_t w, uint32_t h) {
     return true;
 }
 
-// The weapons fire's layer, at the HUD layer's size (the door's output x the target; 100 when fix.ui_quality is off).
+// The weapons layer (the weapons fire's, and the scope's gunsight mark's), at the HUD layer's size (the door's output x the target; 100 when fix.ui_quality is off).
 bool ensureWeaponsLayerFor(ID3D11DeviceContext* ctx, int eye) {
     Eye& e = g_eye[eye];
     const UiLayerSize s = uiLayerSize(e.door.fullW, e.door.fullH, layerTarget());
@@ -1201,6 +1229,7 @@ bool ensureWeaponsLayerFor(ID3D11DeviceContext* ctx, int eye) {
     e.wW = e.wH = 0;
     e.wSeq = 0;
     e.wDraws = 0;
+    e.wFires = e.wMarks = 0;
     Ptr<ID3D11Device> dev;
     ctx->GetDevice(&dev);
     if (!dev || !makeTarget(dev.Get(), s.w, s.h, DXGI_FORMAT_R16G16B16A16_FLOAT, &e.wTex, &e.wRtv, &e.wSrv)) {
@@ -1324,10 +1353,14 @@ bool releaseLayers() {
         e.wW = e.wH = 0;
         e.wSeq = 0;
         e.wDraws = 0;
+        e.wFires = e.wMarks = 0;
+        e.wFireSeq = e.wMarkNotedSeq = 0;
         e.wTarget = nullptr;
         e.wToneSeq = 0;
         e.wPubSeq = 0;
+        e.wPubMatched = false;
         e.wMissStreak = 0;
+        e.wMarkMissStreak = 0;
         e.dsCopy.Reset();
         e.dsCopyDepth.Reset();
         e.dsCopyStencil.Reset();
@@ -2037,7 +2070,10 @@ bool beginInner(ID3D11DeviceContext* ctx, int which) {
         ++g_win.clears;
     }
     if (wl && e.wSeq != g_draw.seq) {
-        if (weaponsLayerDropped(e.wSeq, e.wDraws, e.wPubSeq)) {
+        // The frame's content lost, by kind (weaponsLayerLoss): the weapons fire's is counted and stood down as it always was; the scope's gunsight mark (A3) has its own count and
+        // streak, so a frame that held a mark alone never counts as weapons fire or stands the weapons fire down.
+        const WeaponsLayerLoss lost = weaponsLayerLoss(e.wSeq, e.wFires, e.wMarks, e.wPubSeq);
+        if (lost.fire) {
             ++g_win.weaponsLost;
             noteWeaponsLost(g_draw.eye, e, g_draw.seq);
             // The missing-consumer deadline, as the HUD layer's: content no tonemap re-issue published for a streak of frames says
@@ -2050,15 +2086,30 @@ bool beginInner(ID3D11DeviceContext* ctx, int which) {
                 weaponsStandDown(why);
             }
         }
+        if (lost.mark) {
+            if (!lost.fire) noteWeaponsLost(g_draw.eye, e, g_draw.seq, true);
+            if (++e.wMarkMissStreak >= kCrispHdrMissFrames) {
+                char why[200];
+                _snprintf_s(why, _TRUNCATE,
+                            "the gunsight mark's weapons-layer content reached no tonemap for %u consecutive frames (the mark was taken out of the scene but never came back)",
+                            kCrispHdrMissFrames);
+                markStandDown(why);
+            }
+        }
         const int timer = routeBegin(ctx, UiRouteStage::kHdrClear, g_draw.eye, g_draw.seq);
         vScreenClearRenderTargetViewRaw(ctx, e.wRtv.Get(), kUiLayerClear);
         routeEnd(ctx, timer);
         e.wSeq = g_draw.seq;
         e.wDraws = 0;
-        ++g_win.weaponsContentFrames;
+        e.wFires = e.wMarks = 0;
         e.wOtherTargets = 0;
         e.wTarget = g_draw.targetRes;
         ++g_win.clears;
+    }
+    // The weapons line's eye-frames with weapons draws: the first weapons-fire draw of an eye-frame, whether or not a mark began the frame's layer.
+    if (wl && g_draw.family == UiLayerFamily::kWeaponsFire && e.wFireSeq != g_draw.seq) {
+        e.wFireSeq = g_draw.seq;
+        ++g_win.weaponsContentFrames;
     }
     if (which == 0 && g_draw.hdr && !g_draw.weapons && !g_draw.ripple && e.hdrSeq != g_draw.seq) {
         if (e.hdrSeq && e.hdrDraws && e.hdrToneSeq != e.hdrSeq) {
@@ -2289,9 +2340,14 @@ bool beginInner(ID3D11DeviceContext* ctx, int which) {
         } else if (g_draw.weapons) {
             ++e.wDraws;
             if (e.wTarget != g_draw.targetRes) ++e.wOtherTargets;
-            ++g_win.weaponsTaken;
-            const int pair = weaponPairIndexByVs(g_draw.vsHash);
-            if (pair >= 0) ++g_win.weaponsPair[pair];
+            if (g_draw.family == UiLayerFamily::kScopeMark) {
+                ++e.wMarks;   // the scope's gunsight mark shares the layer (A3) and is counted by the press line, not by the weapons line
+            } else {
+                ++e.wFires;
+                ++g_win.weaponsTaken;
+                const int pair = weaponPairIndexByVs(g_draw.vsHash);
+                if (pair >= 0) ++g_win.weaponsPair[pair];
+            }
         } else if (g_draw.hdr) {
             ++e.hdrDraws;
             ++g_win.hdrRedirected;
@@ -2324,13 +2380,13 @@ bool beginInner(ID3D11DeviceContext* ctx, int which) {
     if (!familyEngaged && g_draw.vpCount && which == 0) {
         familyEngaged = true;
         const D3D11_VIEWPORT& gv = g_draw.vp[0];
-        // The scope mark is not in the weapons-fire jitter table, so it takes the cancel every other over-blend family takes (the decision's g_draw.jx). That its matrices carry the
-        // eye's jitter is INFERRED, not shown: flat_projection_recipes.h keys its recipe by (vs 025B, ps C5A5C7E8216CB9AF), the glass tint's pair, which puts the camera at b1 row 270
-        // (the scene camera rows the weapons pairs' matrices were shown to equal); the mark's pixel shader 46F9 has no recipe. The inference rests on the mark sharing that vertex shader,
-        // and so reading its camera from the same constant-buffer row. A flight's eye dump shows whether the mark sits on c.
+        // The scope mark is not in the weapons-fire jitter table, so it takes that table's default for a vertex shader it does not name, the cancel (weaponsFireJitterCancel at the
+        // decision's g_draw.jx). That its matrices carry the eye's jitter is INFERRED, not shown: flat_projection_recipes.h keys its recipe by (vs 025B, ps C5A5C7E8216CB9AF), the glass
+        // tint's pair, which puts the camera at b1 row 270 (the scene camera rows the weapons pairs' matrices were shown to equal); the mark's pixel shader 46F9 has no recipe. The
+        // inference rests on the mark sharing that vertex shader, and so reading its camera from the same constant-buffer row. A flight's eye dump shows whether the mark sits on c.
         const char* markJitter = g_draw.family == UiLayerFamily::kScopeMark
-                                     ? " Jitter: cancelled as for every over-blend family (the pair is not in the weapons-fire table); that its matrices carry the eye's jitter is INFERRED, not shown "
-                                       "(the recipe at the scene camera row, b1 row 270, is for vertex shader 025B with the glass tint's pixel shader, not this pair's); the eye dump settles it."
+                                     ? " Jitter: cancelled, the weapons-fire table's default for a vertex shader it does not name (the pair is not in it); that its matrices carry the eye's jitter is "
+                                       "INFERRED, not shown (the recipe at the scene camera row, b1 row 270, is for vertex shader 025B with the glass tint's pixel shader, not this pair's); the eye dump settles it."
                                      : "";
         Log::get().note(
             "ui quality: layer: first %s draw in the %s eye's layer -- the game's viewport "
@@ -3964,6 +4020,8 @@ bool uiLayerDecide(ID3D11DeviceContext* ctx, int familyInt, bool verdictForwards
     f.worldRoute = family == UiLayerFamily::kScreen && vrWorldRouteLayerMayTake();
     // The two halves are independent: the weapons fire is its own, every other family fix.ui_quality's.
     f.familyEnabled = uiLayerFamilyEnabled(family, detail::g_uiQualityLive, g_weaponsLive, g_rippleLive);
+    // The scope's gunsight mark has a stand-down of its own beside the weapons half's (a mark the layer took and no re-issue published): the mark goes back to the scene alone.
+    if (family == UiLayerFamily::kScopeMark && g_markStoodDown) f.familyEnabled = false;
     // The ripple's first-draw checks (R1): until both pass the 820E draw stays in the scene, and a failure stands the ripple down to stock.
     if (family == UiLayerFamily::kShieldRipple && f.familyEnabled) f.familyEnabled = rippleR1Allows(ctx);
     if (family == UiLayerFamily::kScreen) ++g_win.screenAsked;
@@ -4109,7 +4167,7 @@ bool uiLayerDecide(ID3D11DeviceContext* ctx, int familyInt, bool verdictForwards
             f.layerReady =
                 family == UiLayerFamily::kShieldRipple
                     ? rippleTakeReady(ctx, f.eye, g_tc.info.a, g_tc.info.b)
-                : family == UiLayerFamily::kWeaponsFire
+                : uiLayerFamilyUsesWeaponsLayer(family)
                     ? weaponsTakeReady(ctx, f.eye)
                 : f.crispHdr
                     ? crispTakeReady(ctx, f.eye)
@@ -4211,7 +4269,7 @@ bool uiLayerDecide(ID3D11DeviceContext* ctx, int familyInt, bool verdictForwards
     g_draw.eye = f.eye;
     g_draw.family = family;
     g_draw.hdr = f.crispHdr;
-    g_draw.weapons = family == UiLayerFamily::kWeaponsFire;
+    g_draw.weapons = uiLayerFamilyUsesWeaponsLayer(family);
     g_draw.ripple = family == UiLayerFamily::kShieldRipple;
     g_draw.vsHash = bindingShaderHash(BindSlot::Vs);
     g_draw.seq = seq;
@@ -5885,15 +5943,19 @@ void uiLayerCrispToneEnd(ID3D11DeviceContext* ctx) {
     if (runtimeFlatProfile()) flatUiTrailNoteReissue(seq, FlatUiTrailReissue::kPublished, 0, seq);
     e.hdrMissStreak = 0;  // a publication landed: the R1 deadline's streak resets
     if (hadWeapons) {
-        // Stamped ONLY by a bracket that carried the weapons layer's content: the drop test (weaponsLayerDropped) compares it with the content's frame.
+        // Stamped ONLY by a bracket that carried the weapons layer's content: the drop test (weaponsLayerDropped) compares it with the content's frame. The streaks reset by kind: the
+        // weapons fire's by a frame that held weapons fire, the scope mark's (A3) by a frame that held a mark. wPubMatched is how the door counts a mark's composite.
         e.wPubSeq = seq;
-        e.wMissStreak = 0;
+        e.wPubMatched = plan.sourcePass;
+        if (e.wFires) e.wMissStreak = 0;
+        if (e.wMarks) e.wMarkMissStreak = 0;
     }
     g_lastRedirectSeq = seq;
     detail::g_uiLayerWatching = true;
     ++g_win.hdrReissued;
-    if (hadWeapons) {
-        // The eye-frame's weapons composite, by kind: the matched difference, the plain add, or the plain add a matched frame fell back to.
+    if (hadWeapons && e.wFires) {
+        // The eye-frame's weapons composite, by kind: the matched difference, the plain add, or the plain add a matched frame fell back to. A frame that held a gunsight mark alone is the
+        // press line's (scopeZoomNoteMarkComposite, at the door), not the weapons line's.
         const bool matched = plan.sourcePass;
         if (matched) ++g_win.weaponsEyeMatched;
         else ++g_win.weaponsEyeFallback;
@@ -6493,6 +6555,20 @@ ID3D11Texture2D* uiLayerComposite(uint64_t sequence, uint32_t eye, ID3D11Texture
     if (eye > 1 || !frame || !region || !layerUv) return nullptr;
     g_seedCensus.door(eye, sequence);
     Eye& e = g_eye[eye];
+    // The scope's gunsight mark (A3): an eye-frame whose weapons layer held a mark is counted once, as the composite below served it -- the tonemap difference, the plain add, or not
+    // at all (the layer's content never reached the picture) -- whichever way this function returns. The press line states the three counts.
+    struct MarkFrame {
+        Eye& e;
+        uint64_t sequence;
+        bool composited = false;
+        ~MarkFrame() {
+            if (!e.wMarks || e.wSeq != sequence || e.wMarkNotedSeq == sequence) return;
+            e.wMarkNotedSeq = sequence;
+            scopeZoomNoteMarkComposite(!composited || e.wPubSeq != sequence ? scopezoom::kMarkCompositeNone
+                                       : e.wPubMatched                      ? scopezoom::kMarkCompositeMatched
+                                                                            : scopezoom::kMarkCompositePlain);
+        }
+    } markFrame{e, sequence};
     // The shield ripple: the picture is rewritten over the bubble's coverage BEFORE the weapons/HUD composite below (the ripple must not touch them). A frame
     // that is not EDVR's own comes back rewritten in EDVR's copy of it, which stands in for it from here on.
     Ptr<ID3D11Texture2D> rewritten;
@@ -6592,6 +6668,7 @@ ID3D11Texture2D* uiLayerComposite(uint64_t sequence, uint32_t eye, ID3D11Texture
     const bool ran = guardedBudget(g_compositeBudget, [&] {
         result = compositeInner(e, eye, frame, region, layerUv, useMult, ownedFrame, &why, smooth);
     });
+    markFrame.composited = result != nullptr;
     if (!result) {
         ++g_win.compositeRefused;
         // The UI of this frame is in the layer and will not reach the eye:

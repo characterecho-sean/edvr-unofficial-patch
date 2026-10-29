@@ -100,6 +100,12 @@ inline double lensZoom(double refDeg, double adsDeg) noexcept {
     if (!(std::isfinite(refDeg) && std::isfinite(adsDeg) && refDeg > 0.0 && adsDeg > 0.0)) return kNaN;
     return zoomFromFov(refDeg / kDeg, adsDeg / kDeg);
 }
+// Whether the held (item, scope) is an optical sight the lens would magnify at the reference FOV: an entry of the table whose M reaches kLensMinM. The gate's kNotOptical (lensGate) is
+// its opposite for a press whose key, foot and sights are up, and the S0 census asks it too, so a press of any other sight probes nothing.
+inline bool lensOpticalSight(const char* itemName, int scope, double refDeg) noexcept {
+    double ads = kNaN;
+    return lensAdsDeg(itemName, scope, &ads) && lensZoom(refDeg, ads) >= kLensMinM;
+}
 
 // ---- 2. the gate and the ease ------------------------------------------------------------------------------------------------------------------------------------------------
 // What a frame of the frame thread's tick came to. kIdle is every frame that asks nothing of the lens (the key off, not on foot, not in the sights, w under 1.0): nothing is counted.
@@ -345,6 +351,9 @@ inline uint32_t lensGapBucket(uint64_t pictureSeq, uint64_t cSeq) noexcept {
 // What the layer did with a gunsight mark draw's depth and stencil tests, as it counts the draw (ui_layer_math.h UiMarkDepth is these numbers): the draw tests neither; its tests run
 // against the layer's seeded copy of the game's depth-stencil; the same with the game's view bound read-only (the draw writes nothing); its tests are off in the layer.
 constexpr uint32_t kMarkPathUntested = 0, kMarkPathSeeded = 1, kMarkPathSeededReadOnly = 2, kMarkPathTestsOff = 3, kMarkPaths = 4;
+// How the weapons layer's composite served an eye-frame whose layer held a gunsight mark (A3), counted at the door once an eye-frame: the tonemap difference T(F_up + L) - T(F_up)
+// carried it, the plain add did (the composite fell back: brighter than stock), or no composite put it on the picture (the mark is then neither in the scene nor on the picture).
+constexpr uint32_t kMarkCompositeMatched = 0, kMarkCompositePlain = 1, kMarkCompositeNone = 2, kMarkComposites = 3;
 
 // What the door counted in a press, plus what the frame thread knows of it. The door adds to it per right-eye frame it is called on; the frame thread takes it at the press's end.
 struct LensDoorStats {
@@ -360,8 +369,9 @@ struct LensDoorStats {
     uint32_t dispatched = 0;          // frames the passes were issued on
     uint32_t noop = 0;                // qualifying frames at M = 1 (the first of the ease) that the door would otherwise have run on: nothing to do, nothing issued, not applied
     uint32_t seqGap[kLensGapBuckets] = {};   // frames (applied or not) with a c reading, by the picture's temporal sequence less the sequence c's draws were made in: -1, 0, +1, +2, other
-    uint32_t markRedirected[2] = {};  // the scope's gunsight mark draws taken out of the scene into the eye's layer, per eye (0 left, 1 right), counted at the draw
+    uint32_t markRedirected[2] = {};  // the scope's gunsight mark draws taken out of the scene into the eye's weapons layer, per eye (0 left, 1 right), counted at the draw
     uint32_t markPath[kMarkPaths] = {};   // ... and by what the layer did with the draw's depth and stencil tests (kMarkPath*), both eyes
+    uint32_t markComposite[kMarkComposites] = {};   // eye-frames (both eyes) whose weapons layer held a mark, by how the composite served them (kMarkComposite*)
     uint32_t markArmedFrames = 0;     // right-eye frames the door saw with the family armed (the gate said qualifies) and a fresh c
     uint32_t markNoDraw = 0;          // of them, frames in which no mark draw was redirected in the right eye
     uint32_t raysRead = 0;            // of them, frames whose rays were read back
@@ -462,8 +472,8 @@ inline int formatLensAnnounce(char* buf, size_t n, bool keyOn, double refDeg, ui
     return finishLine(buf, n, len);
 }
 // The buffer the press line is written from. The log holds a line of 1200 bytes less its stamp and truncation marker, so the longest the line can be and still keep its end (the GPU
-// price) is below 1167; native_frame_test holds the worst case (every counter six digits) under this.
-constexpr size_t kLensPressLineBytes = 1160;
+// price) is 1167 bytes and the buffer holds that and its terminator; native_frame_test holds the worst case (every counter six digits) under this.
+constexpr size_t kLensPressLineBytes = 1168;
 struct LensPressLine {
     uint32_t press = 0;
     const char* item = "none";
@@ -486,10 +496,11 @@ inline int formatLensPress(char* buf, size_t n, const LensPressLine& p) noexcept
             t.qualified, t.noS, t.notOptical, t.leftAim, t.idle, t.fovFromBare, t.jitterNone, t.jitterOther, numText(t.farN ? t.farSumDeg / static_cast<double>(t.farN) : kNaN, 3, fmean, sizeof(fmean)),
             numText(t.farN ? t.farMaxDeg : kNaN, 3, fmax, sizeof(fmax)));
     appendf(buf, n, &len, "applied %u of %u qualifying frames (dispatched %u, at M 1 %u); declined: no S %u, stale c %u, open sight %u, not an optical sight %u, left aiming eye %u, depth unavailable %u, format refused %u; "
-            "picture sequence less c's: -1 %u, 0 %u, +1 %u, +2 %u, other %u; gunsight marks redirected: L %u, R %u; armed frames %u, no mark draw %u; "
-            "mark depth path: untested %u, seeded %u, seeded read-only %u, tests off %u; ", d.applied, d.qualifying, d.dispatched, d.noop,
+            "picture sequence less c's: -1 %u, 0 %u, +1 %u, +2 %u, other %u; gunsight marks taken: L %u, R %u; armed frames %u, no mark draw %u; "
+            "mark depth path: untested %u, seeded %u, seeded read-only %u, tests off %u; composites matched/plain/none %u/%u/%u; ", d.applied, d.qualifying, d.dispatched, d.noop,
             d.noS, d.staleC, d.openSight, d.notOptical, d.leftAim, d.depthUnavailable, d.formatRefused, d.seqGap[0], d.seqGap[1], d.seqGap[2], d.seqGap[3], d.seqGap[4], d.markRedirected[0], d.markRedirected[1],
-            d.markArmedFrames, d.markNoDraw, d.markPath[kMarkPathUntested], d.markPath[kMarkPathSeeded], d.markPath[kMarkPathSeededReadOnly], d.markPath[kMarkPathTestsOff]);
+            d.markArmedFrames, d.markNoDraw, d.markPath[kMarkPathUntested], d.markPath[kMarkPathSeeded], d.markPath[kMarkPathSeededReadOnly], d.markPath[kMarkPathTestsOff],
+            d.markComposite[kMarkCompositeMatched], d.markComposite[kMarkCompositePlain], d.markComposite[kMarkCompositeNone]);
     appendf(buf, n, &len, "hole r min %s median %s max %s deg, %u of %u rays escaped (rays read on %u frames); depth at c %s (near %s); ", numText(d.holeKnown ? d.rMinDeg : kNaN, 2, rmin, sizeof(rmin)),
             numText(d.holeKnown ? d.rMedianDeg : kNaN, 2, rmed, sizeof(rmed)), numText(d.holeKnown ? d.rMaxDeg : kNaN, 2, rmax, sizeof(rmax)), d.holeKnown ? d.holeEscaped : 0u,
             kLensRays, d.raysRead, numText(d.holeKnown ? d.depthAtC : kNaN, 6, dc, sizeof(dc)), numText(d.depthNear, 6, dn, sizeof(dn)));

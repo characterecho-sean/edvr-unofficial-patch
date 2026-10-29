@@ -35158,14 +35158,23 @@ Geometry geometryNow(const Vr& v, uint64_t nowMs) noexcept {
     return g;
 }
 
-// The pixel probe about c in the left eye, for the first three scoped presses and the first unscoped one. The probe's lines are about the first-seen eye, which is the left one in every
-// logged frame, so its points come from the left eye's own geometry (the census used the right eye's before A2). Every press that qualifies and is not probed says why on a skip line.
+// The pixel probe about c in the left eye, for the first three scoped presses and the first unscoped one of an OPTICAL sight (A3: the S1 table's verdict, lensOpticalSight at the
+// reference FOV; a press of any other sight probes nothing, and says so on a skip line naming the press). The probe's lines are about the first-seen eye, which is the left one in
+// every logged frame, so its points come from the left eye's own geometry (the census used the right eye's before A2). Every other press that qualifies and is not probed says why
+// on a skip line.
 constexpr uint32_t kProbeGeometryEye = 0;   // the eye whose scene rows the probe's points are worked out from; the pixel probe watches the first-seen eye, 0
 void censusNow(Vr& v, const Geometry& g) noexcept {
     const bool scoped = v.item.scope == loadout::kScopeYes, unscoped = v.item.scope == loadout::kScopeNo;
     if (!((scoped && v.scopedRuns < kScopedRuns) || (unscoped && !v.controlRun))) return;
-    const uint32_t pe = kProbeGeometryEye;
     char line[1100];
+    if (!sz::lensOpticalSight(v.item.name, v.item.scope, static_cast<double>(g_scopeZoomRefDeg.load(std::memory_order_relaxed)))) {
+        if (v.press <= kPressLineCap) {
+            sz::formatCensusNotOptical(line, sizeof(line), v.press, v.item.name, loadout::scopeName(v.item.scope));
+            Log::get().note("%s", line);
+        }
+        return;
+    }
+    const uint32_t pe = kProbeGeometryEye;
     const char* why = nullptr;
     sz::ProbeSet set;
     if (!g.eye[pe].ok) why = g.why[pe];

@@ -44,8 +44,9 @@ game's own zoom as a magnified picture inside the scope's lens. The rest of the 
   The pilot: "the chevron looks much clearer now"; it is brighter than stock (tonemapped alone, T(F) + T(M) against stock's T(F + M)).
   The lens declines for the left aiming eye (`fix.native_on_foot_ads_sight_eye = left`; the left eye is a later build). c lags the picture
   by one frame on every frame (measured, not changed).
-- **A3 DESIGNED** (section 10): the mark moves to the sharp-weapons additive layer and its tonemap-difference composite (stock brightness);
-  the S0 census only for optical sights.
+- **A3 BUILT 2026-10-29, NOT FLOWN** (section 10, "As built (A3)"): the mark is drawn into the eye's additive weapons layer and composited after
+  the lens by the tonemap difference (stock brightness); the weapons half governs it, the scope zoom key arms it; the S0 census probes optical
+  sights only; the press line counts `composites matched/plain/none` and `--health` makes a taken mark nothing composited a PARTIAL.
 - Keys: `fix.native_on_foot_ads_scope_zoom` (off until flown OK) and the temporary `experimental.native_on_foot_ads_scope_zoom_fov` (the
   reference FOV, 56.3 by default).
 - Separate arc: a flat stutter on the scoped Executioner's ADS (2026-10-29), in its own doc,
@@ -634,3 +635,48 @@ Neither is the scope work's. `scope zoom (S1)` OK over 16 presses. Dumps `120515
 - **Flight card (A3, Epic in VR):** the scoped Executioner and the Aphelion in ADS, an eye dump in each, judged against stock: switch "ADS:
   scope zoom" off in the same press for the stock chevron (the lens goes too), then on. Then the P-15 in ADS with the key off and on: if its
   sight looks the same both ways, the scope work is not what blurs it.
+
+**As built (A3)** (2026-10-29, from `1094408d`; the full local build and all its gates green, nothing flown).
+- **The route.** `uiLayerFamilyUsesWeaponsLayer` (ui_layer_math.h) is the one list of the families drawn into the eye's additive weapons layer W: the weapons fire and the scope mark. For the mark `uiLayerDecide`
+  asks `weaponsTakeReady` (W, the 8-bit layer E, the tonemap states) in place of the HUD's `crispTakeReady` and sets `g_draw.weapons`, so `beginInner` draws it as it draws a weapons-fire draw: into W, tested against
+  the HUD's seeded depth-stencil copy, through the viewport remap and the jitter cancel (the weapons-fire table does not name vertex shader 025B, so its default, cancel, applies: the same inferred cancel as A2).
+  Everything A2 decided is untouched: the match (shape, learned surface, pixel shader), the arming (`scopeZoomMarkArmed`), the three depth paths, the destination-alpha rewrite, the counters and the first-seen
+  evidence. Neither the tonemap re-issue nor the composite changed: they read W by its draw count, so a frame with a mark and no weapons fire gets the weapons-only plan (clear E, source pass, base, lit) and
+  E = T(F_up + M) - T(F_up), with F_up the scene without the mark. The HUD layer takes no mark now.
+- **After the lens, in both eyes (read in the code).** `uiLayerComposite` runs `rippleDoor`, then the lens for eye 1, then `compositeInner`, which adds E, the 8-bit layer the re-issue made from W. The left eye's
+  call is the same without the lens, from its own W and E. scope_zoom_test pins the order (the lens before `compositeInner`, in the one call).
+- **What governs it: the weapons half, with the scope zoom key arming it.** The weapons layer has no key of its own. `uiLayerWeaponsLiveFor(temporal, jitterAsShipped, stoodDown)`: a temporal mode on (the Performance
+  page's Anti-aliasing, not off), the layer and the weapons path not stood down, VR (the flat profile has its own adapter). `uiLayerFamilyEnabled` maps the mark to that half and the scope zoom key arms it
+  (`scopeZoomMarkArmed`, in the draw hook's facts). Not fix.ui_quality's half: the mark is no longer an interface draw, and with UI quality off A2 left it in the scene, magnified with the world, for a reason that is
+  gone. Not the scope zoom key alone: the key says the lens is wanted, not that W and its tonemap states exist, and a weapons layer that stood down must give the mark back to the scene. The lens needs a temporal mode
+  too (its picture is the upscaler's), so the mark and the lens are live together. edvr.ini's text for the key said UI quality and now says Anti-aliasing.
+- **The blend rewrite stays, scoped to the mark.** `uiLayerBlendShape` refuses destination-alpha factors and W's blends come through the same conversion; W's alpha is the clear's 1 and additive draws leave it, so
+  ONE, DEST_ALPHA read as ONE, ONE (what the alpha-less game target gave) is still the right input. `destAlphaOne = markFamily && !uiLayerFormatHasAlpha(fmt)`, at the decision and at the issue.
+- **The weapons fire is not touched by the mark.** The layer counts its draws by kind (`wFires`, `wMarks`) and `weaponsLayerLoss` (weapons_fire.h) attributes a dropped layer by kind. Each kind has its own loss count,
+  streak and stand-down: the fire's `weaponsStandDown` (which also returns the mark to the scene, the layer being gone), and the mark's `markStandDown` (the mark alone, after 30 frames lost in a row, with a line of
+  its own). A frame that held a mark alone is not a weapons content frame, a weapons composite or a weapons loss: the 30 s weapons line counts weapons fire exactly as before (the content frame at the first fire draw,
+  the matched and plain kinds for frames with fire, the lost lines for fire; the mark's first lost frame prints one labelled line). sharp_weapons_test runs the bookkeeping frame by frame (marks lost never stand the fire
+  down, fire lost never stands the mark down, carried marks between lost fire frames do not reset the fire's streak) and pins the source of each.
+- **S0 census.** `censusNow` asks `lensOpticalSight` (scope_zoom_s1.h: the table's entry with M >= 1.05 at the reference FOV, which native_frame_test shows is the gate's `kNotOptical` read the other way) before it
+  configures or arms the pixel probe. A press of any other sight writes `scope lens census (S0): run skipped (press N is not an optical sight: ...)` and probes nothing. `--health` reads that as no failure (IDLE when it
+  is all there is) and keeps NEVER APPLIED for an optical scoped press the census never reached.
+- **Instruments.** The S1 press line says `gunsight marks taken: L, R` (the draws W took; it said `redirected`), keeps `armed frames, no mark draw` and the depth paths, and ends the mark's part with
+  `composites matched/plain/none`: the eye-frames, both eyes, whose W held a mark, counted at the door by how the composite served them (`MarkFrame` in `uiLayerComposite`, whichever way it returns): the tonemap
+  difference, the plain add (the re-issue fell back), or none (no composite reached the picture). `--health` makes a due press with marks taken a PARTIAL when matched is under 80 percent of the eye-frames counted,
+  naming plain (brighter than stock) and none (no mark anywhere), and when marks were taken and no eye-frame was counted at all (the door's count never reached). A2's press line no longer parses (UNPARSED), so an old
+  build cannot pass as this one. The worst-case line (every counter six digits) is 1166 bytes; the buffer is 1168 (it was 1160: the log keeps 1167 and the line needed 47 bytes), and the bound with the log's stamp
+  and marker inside 1200 holds.
+- **If it did not work, the log says which way.** The mark never reaches W (the shape, arming or atlas test fails; the weapons half or the mark's route is down; the layer declines it): `taken L 0, R 0` beside armed
+  frames above 0, composites 0/0/0, `--health` PARTIAL "no mark draw was taken into the weapons layer", and the family census names the decision (a stood-down half is `the key that governs this family is off`). Taken and
+  never composited: `none` high, PARTIAL "no composite carried them", the mark in neither the scene nor the picture, and after 30 frames in a row the mark's stand-down line puts it back in the scene. Taken and
+  composited plain: `plain` high, "brighter than stock". Taken and the composite note never run: composites 0/0/0 beside marks taken, PARTIAL with its own reason.
+- **Departures.** (1) The mark's own stand-down, `g_markStoodDown`: not in the brief; it is what lets a mark that never comes back return to the scene without standing the weapons fire down. (2) The press line's
+  buffer, 1160 to 1168. (3) A press of another sight writes a census skip line (the brief: probes nothing); the line is what lets `--health` tell it from a settled press the census never reached.
+- **Not verified, for the flight.** (1) The brightness against stock, by the card above (with the key off the chevron is the stock one). (2) That the matched composite serves the mark: `composites matched` near
+  L + R taken, in both eyes. (3) The mark's position and sharpness on c (the jitter cancel is still inferred). (4) The cost: in a scoped ADS press the weapons composite (the source pass at the layer's size, two
+  tonemap draws, the clear) now runs every frame in both eyes, where it ran only while weapons fired, and W (R16G16B16A16_FLOAT at the layer's size; `sharp weapons: ... weapons layer created` prints the MB) is made at
+  the first scoped ADS; neither is measured. (5) The mark no longer blooms: it is in neither the scene's bloom input nor the HUD layer's feed (W2's accepted limit, now the mark's too). (6) The left eye aiming
+  (`fix.native_on_foot_ads_sight_eye = left`) still gets no lens and no mark take.
+- **Flight card (A3), additions.** Read `--expect-build <hash> --health` first (S1 OK). Then the press lines: `composites matched/plain/none` against `gunsight marks taken` (matched near L + R), the `scope mark`
+  family lines and the `sharp weapons: ... weapons layer created` lines; and the S0 census lines, which should show runs for the Executioner, the Oppressor and the Aphelion and a `not an optical sight` skip for the
+  P-15 and the Karma weapons.

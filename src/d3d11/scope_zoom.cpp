@@ -365,6 +365,11 @@ void scopeZoomNoteMark(uint32_t eye, uint64_t seq, uint32_t path) {
     });
 }
 
+void scopeZoomNoteMarkComposite(uint32_t kind) {
+    if (kind >= sz::kMarkComposites) return;
+    count([&](sz::LensDoorStats& s) { ++s.markComposite[kind]; });
+}
+
 void scopeZoomPressBegin(uint32_t press) {
     std::lock_guard<std::mutex> lock(g_mu);
     g_stats = sz::LensDoorStats{};

@@ -69,6 +69,20 @@ inline bool weaponsLayerDropped(uint64_t contentSeq, uint32_t draws, uint64_t pu
     return contentSeq != 0 && draws != 0 && publishedSeq != contentSeq;
 }
 
+// The scope's gunsight mark rides the weapons layer (A3), so a dropped layer may hold weapons fire, marks or both. What it lost is counted by kind: the weapons fire's loss, its
+// count and the stand-down its streak leads to are the fire's alone, and the mark's the mark's, so a frame that held a mark and no fire never counts toward the weapons fire's
+// stand-down. `fires` and `marks` are the draws of each kind the layer holds for frame contentSeq.
+struct WeaponsLayerLoss {
+    bool fire = false, mark = false;
+};
+inline WeaponsLayerLoss weaponsLayerLoss(uint64_t contentSeq, uint32_t fires, uint32_t marks, uint64_t publishedSeq) {
+    WeaponsLayerLoss l;
+    if (!weaponsLayerDropped(contentSeq, fires + marks, publishedSeq)) return l;
+    l.fire = fires != 0;
+    l.mark = marks != 0;
+    return l;
+}
+
 // ----------------------------------------------------------------- the tonemap re-issues
 //
 // Per eye-frame the layer re-issues the game's tonemap draw (its exposure, LUT and b2 untouched) over the 8-bit layer E once for every

@@ -21,7 +21,8 @@
   (a fix that always helps gets no toggle). Entries below that name the key are the journal of when it was built.
   The blend A/B showed no difference live (log edvr_gfx_20261016_095256). W3 SETTLED: all three pairs carry the eye's jitter (dump 100257), the cancel table says cancel for each. The 0.5 to 5 percent "layers'
   content never reached a tonemap" was an accounting artifact (one false count per burst end), nothing was dropped; the corrected count
-  ("The never-tonemapped frames: found") is merged but NOT yet flown.
+  ("The never-tonemapped frames: found") is merged but NOT yet flown. The weapons layer also carries the scope zoom's gunsight mark (A3, built 2026-10-29;
+  docs\design-vr-scope-magnification-2026-10-28.md section 10), counted apart from the weapons fire.
 - **Sixth case, SRV driving (2026-10-14): ROOT CAUSE, fix BUILT, NOT FLOWN** (`claude/srv-split`). Terrain 5 to 8 m from an SRV took the head
   path because the ship's 10 m cockpit radius applied to the SRV; now 3.5 m in a seated SRV. Not one of the five elements; see
   docs/per-object-motion.md "The split in an SRV, 2026-10-14". The same question for a docking slot inside 10 m of a ship cockpit is open and unmeasured.
