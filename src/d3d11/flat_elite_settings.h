@@ -311,8 +311,9 @@ private:
 };
 
 // ---- the words -------------------------------------------------------------------------
-// Ten lines: the flat page has seven rows (UI quality joined it 2026-10-09, Optimized stations 2026-10-14, Sharp weapons 2026-10-16, HUD Anti-Aliasing
-// 2026-10-24; the Intro movie, a row from 2026-10-14, went to the Visual tab 2026-10-22), so a blank line and ten of these are the card's eighteen
+// Ten lines: the flat page has six rows (UI quality joined it 2026-10-09, Optimized stations 2026-10-14, HUD Anti-Aliasing
+// 2026-10-24; the Intro movie, a row from 2026-10-14, went to the Visual tab 2026-10-22; Sharp weapons, a row from 2026-10-16, was retired 2026-10-28),
+// so a blank line and ten of these are the card's seventeen of its eighteen
 // (menu_panel.h's kMenuMaxLines; menu.cpp static_asserts it). The two paragraphs take up to six at the
 // panel's width (40 characters a line in the rig's ruler), the third (EDVR's TAA above the output) four more: ten at worst. There is
 // no spare line now (it was the eleventh, kept for a ruler wider than the rig's); a wider ruler cuts the last line of a paragraph. Another row on

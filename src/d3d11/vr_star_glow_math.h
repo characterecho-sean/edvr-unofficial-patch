@@ -2,7 +2,8 @@
 //
 // WHAT IT IS. The flat mechanism (flat_star_glow_math.h), per eye. A star draws as a handful of passes into the eye's HDR target H; each pass the gates
 // let through is issued once more into a layer S of that H, and the bloom chain's first level reads H' = H + m * S instead of H for its one draw (m = k - 1,
-// k = the setting over 100). The exposure reduction and the composite read the real H. In the headset the HUD is not in H, so there is no HUD term.
+// k = the setting over 100). The exposure reduction and the composite read the real H. The star light is one term of H': the eye's HDR HUD layer is the other
+// (vr_hud_glow_math.h), and the pass that makes H' adds both; the rules in this header are the star light's alone.
 //
 // WHAT IS DIFFERENT FROM FLAT, and why this header exists:
 //   - Everything is keyed by the H a draw writes. VR renders two eyes with two separate H textures and their draws interleave in submission order, so

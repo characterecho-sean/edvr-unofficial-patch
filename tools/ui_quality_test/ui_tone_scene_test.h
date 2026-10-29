@@ -103,18 +103,17 @@ void testSteps() {
     // Every plan: no step that reads the HUD keeps the scene's images; a plan's base and lit terms agree.
     for (int hud = 0; hud < 2; ++hud)
         for (int weapons = 0; weapons < 2; ++weapons)
-            for (int mode = 0; mode < 2; ++mode)
-                for (int ready = 0; ready < 2; ++ready) {
-                    const TonePlan p = sharpTonePlan(hud != 0, weapons != 0, mode ? SharpBlend::kPlain : SharpBlend::kMatched, ready != 0);
-                    int base = -1, lit = -1;
-                    for (uint8_t i = 0; i < p.count; ++i) {
-                        if (toneStepSource(p.steps[i]) == ToneSource::kHud)
-                            check(!toneStepKeepsSceneImages(p.steps[i]), "no plan's HUD step keeps the scene's images");
-                        if (p.steps[i] == ToneStep::kWeaponsBase) base = toneStepKeepsSceneImages(p.steps[i]) ? 1 : 0;
-                        if (p.steps[i] == ToneStep::kWeaponsLit) lit = toneStepKeepsSceneImages(p.steps[i]) ? 1 : 0;
-                    }
-                    check(base == lit, "a plan's matched base and lit terms bind the scene's images alike");
+            for (int ready = 0; ready < 2; ++ready) {
+                const TonePlan p = sharpTonePlan(hud != 0, weapons != 0, ready != 0);
+                int base = -1, lit = -1;
+                for (uint8_t i = 0; i < p.count; ++i) {
+                    if (toneStepSource(p.steps[i]) == ToneSource::kHud)
+                        check(!toneStepKeepsSceneImages(p.steps[i]), "no plan's HUD step keeps the scene's images");
+                    if (p.steps[i] == ToneStep::kWeaponsBase) base = toneStepKeepsSceneImages(p.steps[i]) ? 1 : 0;
+                    if (p.steps[i] == ToneStep::kWeaponsLit) lit = toneStepKeepsSceneImages(p.steps[i]) ? 1 : 0;
                 }
+                check(base == lit, "a plan's matched base and lit terms bind the scene's images alike");
+            }
 }
 
 struct Pin {

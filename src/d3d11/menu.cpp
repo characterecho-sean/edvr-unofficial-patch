@@ -460,23 +460,10 @@ bool sharpenRowDisabled() {
                              temporalModeEnabled(Config::get().requestedTemporalMode()));
 }
 
-// fix.sharp_weapons (the Sharp weapons row: On, On (plain blend), Off (stock)). The weapons fire and the shield-strike ripple are laid over the
-// temporal pass's output, so with anti-aliasing off the row stays on the page, dimmed, and stops responding. The same in VR and flat; the profile's own reading
-// of fix.temporal_aa decides, live, every time the page is drawn or a row is touched.
-bool isWeaponsRow(const MenuRowDef& d) {
-    return strcmp(d.section, "fix") == 0 && strcmp(d.key, "sharp_weapons") == 0;
-}
-
-bool weaponsRowDisabled() {
-    const bool flat = runtimeFlatProfile();
-    const Config& cfg = Config::get();
-    return weaponsRowDim(temporalModeEnabledFor(flat ? cfg.requestedTemporalMode() : cfg.getString("fix.temporal_aa", "off"), flat));
-}
-
 // fix.hud_antialiasing (the HUD Anti-Aliasing row, 2026-10-24; the flat panel only: its `menu flat_performance` page is one VR's menu builds none of). It smooths
 // the HUD layer, which is live only while fix.ui_quality is not off AND the flat anti-aliasing is on (flat_ui_layer.cpp), so with either off the row stays on the
 // page, dimmed, and stops responding. UI quality is read as the layer reads it (uiQualityParse, the shipped 100 for a missing line) and the anti-aliasing as
-// weaponsRowDisabled's flat branch reads it (the row is flat only), live, every time the page is drawn or a row is touched. The hint and the refused step name
+// the flat profile reads it, live, every time the page is drawn or a row is touched. The hint and the refused step name
 // the cause that applies: UI quality first when it is off, else the anti-aliasing.
 bool isHudAntiAliasingRow(const MenuRowDef& d) {
     return strcmp(d.section, "fix") == 0 && strcmp(d.key, "hud_antialiasing") == 0;
@@ -2429,11 +2416,9 @@ void buildContent(MenuContent& c) {
             const bool noteOnThis = hotkeyRow && s.noteDef == e.def && s.noteUntilMs > s.tickMs;
             const bool dlssRow = isDlssPresetRow(d);
             const bool sharpenRow = isSharpenRow(d);
-            const bool weaponsRow = isWeaponsRow(d);
             const bool hudAaRow = isHudAntiAliasingRow(d);
             const bool dim = (dlssRow && dlssPresetDisabled()) ||
                              (sharpenRow && sharpenRowDisabled()) ||
-                             (weaponsRow && weaponsRowDisabled()) ||
                              (hudAaRow && hudAntiAliasingRowDisabled());
             l.dim = dim;
             strncpy(l.left, d.label, sizeof(l.left) - 1);
@@ -2503,9 +2488,7 @@ void buildContent(MenuContent& c) {
                       : hi        ? kMenuRowHi
                       : dim       ? kMenuDim
                                   : kMenuRow;
-            if (hi && dim && weaponsRow)
-                snprintf(c.hint, sizeof(c.hint), "%s", "Needs temporal AA: turn anti-aliasing on to use it.");
-            else if (hi && dim && hudAaRow)
+            if (hi && dim && hudAaRow)
                 snprintf(c.hint, sizeof(c.hint), "%s", hudAntiAliasingHint());
             else if (hi && dim && runtimeFlatProfile())
                 snprintf(c.hint, sizeof(c.hint), "%s",
@@ -2963,11 +2946,6 @@ void stepRow(int defIndex, int dir, int mult) {
         g_s.contentDirty = true;
         return;
     }
-    if (isWeaponsRow(d) && weaponsRowDisabled()) {
-        g_s.lastWrite = "Needs temporal AA: turn anti-aliasing on above first.";
-        g_s.contentDirty = true;
-        return;
-    }
     if (isHudAntiAliasingRow(d) && hudAntiAliasingRowDisabled()) {
         g_s.lastWrite = hudAntiAliasingRefusal();
         g_s.contentDirty = true;
@@ -3323,11 +3301,6 @@ void beginEdit(int entryIndex, int defIndex) {
     // neither (stepRow says why).
     if (isSharpenRow(kMenuRows[defIndex]) && sharpenRowDisabled()) {
         s.lastWrite = "Sharpening is inactive: turn anti-aliasing on above first.";
-        s.contentDirty = true;
-        return;
-    }
-    if (isWeaponsRow(kMenuRows[defIndex]) && weaponsRowDisabled()) {
-        s.lastWrite = "Needs temporal AA: turn anti-aliasing on above first.";
         s.contentDirty = true;
         return;
     }

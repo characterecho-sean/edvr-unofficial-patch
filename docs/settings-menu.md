@@ -2,9 +2,9 @@
 
 ## Status
 
+- **2026-10-28: the Sharp weapons setting is RETIRED** (`fix.sharp_weapons`; its VR menu row and its flat F8 row are gone): the weapons fire is always on. The rig note below is history.
 - **2026-10-17 pre-RC3 R1:** separate add-on save completions; failures retain
-  session state and report uncertain persistence. Focused checks 131/0,
-  mutation proof 42/42. Full build PASS, 170.6 s; dated entry below.
+  session state and report uncertain persistence. Focused checks 131/0, mutation proof 42/42. Full build PASS, 170.6 s; dated entry below.
 - **Current code state (2026-10-08; dated notes in Status detail):**
   - Visual page (2026-10-27, `menu visual`): VR's menu has one now, beside the flat panel's Visual tab; World scale (`visual.world_scale`), the intro settings and the screen curve are on it; BUILT, NOT FLOWN. The Desktop window page (2026-10-28, `menu desktop_window`, docs\desktop-window.md) follows it: `visual.desktop_window` and its aspect and style keys. Sections "What it shows" and "Visual tab" below.
   - Flat F8 panel: a Visual tab between Performance and Debug (2026-10-22, `menu visual`), a flat-only HUD Anti-Aliasing row (2026-10-24, `menu flat_performance`); sections below.
