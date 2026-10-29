@@ -13590,6 +13590,68 @@ def _hj_f166_hold(rows, ctx):
     return ("OK", text)
 
 
+# F167: the left hand lets go of the pistol while sprinting (formatSummary in src/d3d11/native_on_foot_f167.h). The release is a factor on the off hand's weight; a sprint here is the
+# AMC's low-passed speed at 4.6 m/s or more, and "released" the release weight at 0.5 or more.
+H167_LABEL = "native on foot pistol sprint release (F167)"
+H167_RE = (r"native on foot pistol sprint release \(F167\) (?P<wl>\d+) s: item (?P<item>\S+); armed pistol calls (?P<pistol>\d+), at sprint speed \((?P<thr>[\d.]+) m/s or more\) "
+           r"(?P<fast>\d+), speed mean (?P<smean>[\d.]+) max (?P<smax>[\d.]+) m/s; at the hip (?P<hip>\d+): release weight mean (?P<rmean>[\d.]+), 0\.5 or more in (?P<rel>\d+), "
+           r"fully in (?P<full>\d+) \(the left arm still solved above weight 0\.05 in (?P<grip>\d+)\), the left arm's weight mean (?P<lw>[\d.]+); in the sights (?P<ads>\d+): "
+           r"grip held in (?P<held>\d+), released past the sights' hold in (?P<past>\d+); seconds sprinting at the hip (?P<secs>\d+), released in half or more of them (?P<secr>\d+)")
+
+
+def _hj_f167_sprint(rows, ctx):
+    """F167: the left hand lets go of the pistol while the body sprints (the AMC's low-passed speed at 4.6 m/s or more), so the game's own arm swings; the sights hold the grip. Per
+    item: the armed pistol calls, those at sprint speed and, of those at the hip, the release weight's mean, the calls released (0.5 or more) and fully, and the left arm's weight; in the
+    sights, the calls with the grip held. 30 or more sprint calls at the hip with none released is NEVER APPLIED (the code never ran: the sprint was there and the release was not); released
+    in under half of them, a left arm still solved above weight 0.05 at full release, and a release past what the sights allow are PARTIAL. A pistol held with no call at sprint speed, and under
+    30 sprint calls at the hip, are IDLE; a log with no pistol line has no verdict."""
+    sec = rows.get("sec", [])
+    if not sec:
+        return None
+    items = collections.OrderedDict()
+    for r in sec:
+        items.setdefault(r["item"], []).append(r)
+    parts, never, thin, notes = [], [], [], []
+    for item, rs in items.items():
+        g = lambda k, rr=rs: sum(int(r[k]) for r in rr)
+        pistol, fast, hip = g("pistol"), g("fast"), g("hip")
+        if not pistol:
+            continue
+        if not fast:
+            parts.append("%s %d s: %d armed pistol calls, none at sprint speed (%s m/s or more)" % (item, _hsecs(rs), pistol, rs[-1]["thr"]))
+            continue
+        smean = sum(int(r["fast"]) * float(r["smean"]) for r in rs) / fast
+        smax = max(float(r["smax"]) for r in rs)
+        rmean = sum(int(r["hip"]) * float(r["rmean"]) for r in rs) / hip if hip else 0.0
+        lwmean = sum(int(r["hip"]) * float(r["lw"]) for r in rs) / hip if hip else 0.0
+        rel, full, grip, ads, held, past = g("rel"), g("full"), g("grip"), g("ads"), g("held"), g("past")
+        parts.append("%s %d s: %d armed pistol calls, %d at sprint speed (%s m/s or more; mean %.1f, max %.1f), %d at the hip: release weight mean %.2f, released (0.5 or more) in %d (%.0f%%), "
+                     "fully in %d, the left arm's weight mean %.2f; %d in the sights, the grip held in %d; %d s sprinting at the hip, released in half or more of them in %d s" % (
+                         item, _hsecs(rs), pistol, fast, rs[-1]["thr"], smean, smax, hip, rmean, rel, 100.0 * rel / hip if hip else 0.0, full, lwmean, ads, held, g("secs"), g("secr")))
+        if hip >= 30 and rel == 0:
+            never.append("the release reached 0.5 in none of %d sprint calls at the hip with %s (the left hand kept its grip while the body sprinted)" % (hip, item))
+        elif hip >= 30 and rel * 2 < hip:
+            thin.append("%s: released in %d of %d sprint calls at the hip" % (item, rel, hip))
+        if grip:
+            notes.append("the left arm was still solved above weight 0.05 in %d call(s) fully released with %s (the release did not reach the arm's weight)" % (grip, item))
+        if past:
+            notes.append("%d call(s) in the sights released past what the sights allow with %s (the grip should be held there)" % (past, item))
+    if not parts:
+        return None
+    text = "; ".join(parts)
+    if thin:
+        notes.insert(0, "the release was thin (%s)" % "; ".join(thin))
+    if never:
+        return ("NEVER APPLIED", text + "; " + "; ".join(never + notes))
+    if notes:
+        return ("PARTIAL", text + "; " + "; ".join(notes))
+    if not sum(int(r["fast"]) for r in sec):
+        return ("IDLE", text + "; no pistol sprint")
+    if sum(int(r["hip"]) for r in sec) < 30:
+        return ("IDLE", text + "; under 30 sprint calls at the hip: little for the release to do")
+    return ("OK", text)
+
+
 def _hj_f99a_draw(rows, ctx):
     """F99a: one line per draw (the game's selection of an item while Status.json named none): when Status.json named it, where the hands' authority came from
     and when, when the armed ramp was full, all from the game's selection. A draw the game selected 100 ms or more before Status.json named it whose hands waited
@@ -14744,6 +14806,9 @@ HEALTH_RULES = (
         ("sec", H166_RE),
         ("plan", H166_PLAN_RE),
     ), _hj_f166_hold),
+    _hrule("pistol sprint release (F167)", ("F167",), (H167_LABEL,), (
+        ("sec", H167_RE),
+    ), _hj_f167_sprint),
     _hrule("draw onset (F99a)", ("F99a",), ("native on foot draw onset (F99a)",), (
         ("sec", r"native on foot draw onset \(F99a\): item (?P<item>\S+); the game's selection (?P<sel>id [0-9A-F]{8}|not seen); body (?P<body>moving|still); Status\.json "
                 r"named it (?P<status>at \+\d+ ms|never); the hands' authority from (?P<src>the game's selection|the native primary selection|Status\.json) "
@@ -15733,6 +15798,7 @@ def self_test_health():
     f160_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f160.h")
     f161_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f161.h")
     f166_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f166.h")
+    f167_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f167.h")
     f154_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f154.h")
     try:
         source, swap, f90src, f91src = read_text(src_path), read_text(swap_path), read_text(f90_path), read_text(f91_path)
@@ -15751,6 +15817,7 @@ def self_test_health():
         f160src = read_text(f160_path)
         f161src = read_text(f161_path)
         f166src = read_text(f166_path)
+        f167src = read_text(f167_path)
         hooks_src = read_text(os.path.join(repo_root(), "src", "d3d11", "native_on_foot_hooks.cpp"))
         f154src = read_text(f154_path)
     except OSError as e:
@@ -15846,6 +15913,15 @@ def self_test_health():
             fmts[key] = health_c_format(f166src, needle) or health_c_format(hooks_src, needle)
         if fmts[key] is None:
             raise AssertionError("native_on_foot_f166.h and native_on_foot_hooks.cpp have no format holding %r: the --health rule that reads it is out of date" % needle)
+        return health_render(fmts[key], vals)
+
+    def R167(needle, *vals):
+        """F167's window line (formatSummary in native_on_foot_f167.h), from its own format literal."""
+        key = "f167:" + needle
+        if key not in fmts:
+            fmts[key] = health_c_format(f167src, needle)
+        if fmts[key] is None:
+            raise AssertionError("native_on_foot_f167.h has no format holding %r: the --health rule that reads it is out of date" % needle)
         return health_render(fmts[key], vals)
 
     def R105(needle, *vals):
@@ -17187,6 +17263,44 @@ def self_test_health():
         check("F166 hold: a plan line that drifted from its pattern is unparsed", ["native on foot upper body hold plan (F166): X=1 something else"], 4, [("UNPARSED", F166)])
         check("F166 hold: a window line that drifted beside a good one is counted beside the verdict", [plan166(), hold166(), "native on foot upper body hold (F166) 10 s: something else"], 0,
               [("OK", F166)], has=["[+1 line(s) the rule's patterns do not match: "])
+
+        # ---- F167: the left hand lets go of the pistol while sprinting ----
+        F167 = "pistol sprint release (F167)"
+        PISTOL167 = "$wpn_s_pistol_kinetic_sauto_name;"
+
+        def sprint167(item=PISTOL167, wl=10, pistol=900, fast=300, smean=6.4, smax=8.1, hip=280, rmean=0.93, rel=260, full=240, grip=0, lw=0.01, ads=20, held=20, past=0, secs=3, secr=3):
+            """F167's window line, from the DLL's own format (formatSummary, native_on_foot_f167.h)."""
+            return R167("native on foot pistol sprint release (F167) %u s: item %s", wl, item, pistol, 4.6, fast, smean, smax, hip, rmean, rel, full, grip, lw, ads, held, past, secs, secr)
+
+        check("F167 release: a pistol sprint released in nine in ten of the calls at the hip, the grip held in the sights", [sprint167()], 0, [("OK", F167)],
+              has=[PISTOL167 + " 10 s: 900 armed pistol calls, 300 at sprint speed (4.6 m/s or more; mean 6.4, max 8.1), 280 at the hip: release weight mean 0.93, released (0.5 or more) in 260 "
+                   "(93%), fully in 240, the left arm's weight mean 0.01; 20 in the sights, the grip held in 20; 3 s sprinting at the hip, released in half or more of them in 3 s"],
+              lacks=["UNPARSED", "was thin", "still solved", "past what the sights allow"])
+        check("F167 release: sprint speed and 120 calls at the hip with none released is a release that never ran",
+              [sprint167(fast=120, hip=120, rmean=0.0, rel=0, full=0, lw=1.0, ads=0, held=0, secs=2, secr=0)], 3, [("NEVER APPLIED", F167)],
+              has=["the release reached 0.5 in none of 120 sprint calls at the hip with " + PISTOL167], lacks=["UNPARSED"])
+        check("F167 release: released in a quarter of the calls at the hip is thin", [sprint167(hip=400, rel=100, full=60, rmean=0.3)], 0, [("PARTIAL", F167)],
+              has=["the release was thin (" + PISTOL167 + ": released in 100 of 400 sprint calls at the hip)"], lacks=["UNPARSED", "still solved"])
+        check("F167 release: under 30 sprint calls at the hip is too few to call the release absent",
+              [sprint167(fast=29, hip=29, rmean=0.0, rel=0, full=0, ads=0, held=0, secs=0, secr=0)], 0, [("IDLE", F167)],
+              has=["under 30 sprint calls at the hip: little for the release to do"], lacks=["UNPARSED", "never", "was thin"])
+        check("F167 release: a pistol held and never at sprint speed is idle",
+              [sprint167(fast=0, smean=0.0, smax=0.0, hip=0, rmean=0.0, rel=0, full=0, lw=0.0, ads=0, held=0, secs=0, secr=0)], 0, [("IDLE", F167)],
+              has=[PISTOL167 + " 10 s: 900 armed pistol calls, none at sprint speed (4.6 m/s or more); no pistol sprint"], lacks=["UNPARSED"])
+        check("F167 release: a left arm still solved at full release is PARTIAL", [sprint167(grip=12, lw=0.2)], 0, [("PARTIAL", F167)],
+              has=["the left arm was still solved above weight 0.05 in 12 call(s) fully released with " + PISTOL167], lacks=["UNPARSED"])
+        check("F167 release: a release past what the sights allow is PARTIAL", [sprint167(past=4)], 0, [("PARTIAL", F167)],
+              has=["4 call(s) in the sights released past what the sights allow with " + PISTOL167], lacks=["UNPARSED"])
+        check("F167 release: two windows add up, the means weighted by their calls",
+              [sprint167(fast=100, smean=6.0, smax=7.0, hip=100, rmean=1.0, rel=100, full=90, lw=0.0, ads=0, held=0, secs=1, secr=1),
+               sprint167(fast=300, smean=7.0, smax=9.0, hip=300, rmean=0.5, rel=200, full=100, lw=0.2, ads=10, held=10, secs=3, secr=2)], 0, [("OK", F167)],
+              has=["20 s: 1800 armed pistol calls, 400 at sprint speed (4.6 m/s or more; mean 6.8, max 9.0), 400 at the hip: release weight mean 0.62, released (0.5 or more) in 300 (75%), "
+                   "fully in 190, the left arm's weight mean 0.15; 10 in the sights, the grip held in 10; 4 s sprinting at the hip, released in half or more of them in 3 s"], lacks=["UNPARSED"])
+        check("F167 release: another pistol is its own item", [sprint167(), sprint167(item="$wpn_s_pistol_plasma_charged_name;", hip=100, fast=100, rel=0, full=0, rmean=0.0)], 3,
+              [("NEVER APPLIED", F167)], has=["with $wpn_s_pistol_plasma_charged_name;", PISTOL167 + " 10 s"], lacks=["UNPARSED"])
+        check("F167 release: a window line that drifted from its pattern is unparsed", ["native on foot pistol sprint release (F167) 10 s: something else"], 4, [("UNPARSED", F167)])
+        check("F167 release: a window line that drifted beside a good one is counted beside the verdict", [sprint167(), "native on foot pistol sprint release (F167) 10 s: something else"], 0,
+              [("OK", F167)], has=["[+1 line(s) the rule's patterns do not match: "])
 
         # ---- draw onset (F99a): a drawn item's hands from the game's own selection ----
         F99 = "draw onset (F99a)"

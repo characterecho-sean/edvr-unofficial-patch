@@ -76,6 +76,7 @@
 #include "native_on_foot_f163.h"   // F163: the crouched stance from the animated neck's drop, which holds in the sights (pure parts)
 #include "native_on_foot_f165.h"   // F165: the left elbow's body-down pole blended in while crouched in the sights, for every two-handed gun (pure parts)
 #include "native_on_foot_f166.h"   // F166: the upper body held at its still crouched-ADS pose while walking crouched in the sights (pure parts)
+#include "native_on_foot_f167.h"   // F167: the left hand lets go of the pistol while sprinting (pure parts)
 #include "xinput_watch.h"         // F135: the pad's Start and Back edges, evidence for the menu probe only
 #include "native_on_foot_f109.h"   // F109: look to aim on foot, the player's own turn in ADS, snap or smooth turning (pure parts)
 #include "native_on_foot_f129.h"   // F129: look to aim reads its turn from the player's own look processor; the look path instrument (pure parts)
@@ -18083,10 +18084,11 @@ void pinRecord(const PinCall& pc, const double resFinal[3]) noexcept {
 // 1 s old); the solve weight is 1 once the armed ramp is; no per-call cap on the hand or the assist; the authored torso stance is preserved. Only a
 // missing plan or a fault skips the solve, and the second's line says which. This window counts the invariants (written by the hook under the
 // sequence counter, read once a second by the frame thread).
-enum F67fWhy : int { kF67fPlan = 0, kF67fNoWrite, kF67fRefused, kF67fInputs, kF67fWeight, kF67fOther, kF67fOffHand, kF67fWhyKinds };
+enum F67fWhy : int { kF67fPlan = 0, kF67fNoWrite, kF67fRefused, kF67fInputs, kF67fWeight, kF67fOther, kF67fOffHand, kF67fSprint, kF67fWhyKinds };
 const char* const kF67fWhyText[kF67fWhyKinds] = {"no arm plan for the side", "the IK's writes are stood down or the mode does not write", "the solve was refused (a singular matrix)",
                                                  "the FP snapshot or G is unusable (none yet, or torn)", "the solve weight was 0", "other",
-                                                 "the off hand is free (F69h): the game's own 3P arm, the FP left hand is not on the item"};
+                                                 "the off hand is free (F69h): the game's own 3P arm, the FP left hand is not on the item",
+                                                 "the pistol sprint released the left hand (F167): the game's own 3P arm swings"};
 struct F67fWin {
     uint64_t calls = 0, armedFull = 0, staleFp = 0, staleG = 0;
     uint64_t solved[2] = {}, notSolved[2] = {}, why[2][kF67fWhyKinds] = {};
@@ -18107,6 +18109,11 @@ std::atomic<uint32_t> g_f67fSeq{0};
 F67fWin g_f67f;
 std::atomic<bool> g_f67fReset{false};
 std::atomic<bool> g_ikGateOk{false};   // the frame thread's gate for the arm IK with the snapshot's and G's age left out (F67f)
+// F167: the pistol sprint release (native_on_foot_f167.h). The hook adds one sample per armed pistol call under the sequence counter (one writer); the frame thread takes the second's
+// counters and resets them once a second (f167Line).
+std::atomic<uint32_t> g_f167Seq{0};
+nofoot::f167::Counters g_f167;
+std::atomic<bool> g_f167Reset{false};
 
 // ---- F69g (TEMPORARY instrument, no behaviour): the grip frames per item and side ---------------------------------------------------------------------
 // The hook posts, every armed call, the grip frame of each hand as the FP rig has it (Gamma_fp = A_fp x inv(H_fp): 51/52 in 44/37) and as the 3P animation has it
@@ -19168,6 +19175,33 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
             static_cast<double>(armedW), currentArmedEnvelope * offOut.w, effectiveLeft, effectiveRight);
     }
     const double bodyDetachForCall = pinWanted ? nofoot::unit01(static_cast<double>(g_bodyDetachW.load(std::memory_order_relaxed))) : 0.0;
+    // F167: the pistol sprint release (native_on_foot_f167.h). A pistol drawn and the body sprinting (the pin's low-passed AMC speed): the left hand lets go of the grip. Its solve weight is
+    // offW times the armed envelope, so a factor of 1 less the release weight on offW takes the side from the grip (1) to not solved and not written (0), where the game's own animated
+    // arm draws with its swing; in between the hand target, the swivel and the reach assist blend from the animation to the grip. The right hand stays. The sights hold the grip (the
+    // release is capped at 1 less the detach weight). Any other item and an unarmed call have release 0: offW is multiplied by exactly 1 and nothing else here runs.
+    const double offWBeforeSprint = offW;
+    const bool f167Pistol = armedNow && profileReadableForCall && nofoot::supportItem(profileNameForCall) == nofoot::kSupportPistol;
+    bool f167SpeedFresh = false;
+    nofoot::f167::Step f167Step;
+    {
+        static nofoot::f167::State s_f167;
+        static uint64_t s_f167Qpc = 0;
+        const uint64_t q = f30Qpc();
+        f167SpeedFresh = pinWanted && g_pinMotion.have && g_pinMotion.qpc != 0 && f30QpcUs(q > g_pinMotion.qpc ? q - g_pinMotion.qpc : 0) <= nofoot::f167::kMaxSpeedAgeUs;
+        nofoot::f167::In in;
+        in.pistol = f167Pistol;
+        in.armed = armedNow;
+        in.speedFresh = f167SpeedFresh;
+        in.speed = g_pinMotion.speed;
+        in.detachW = bodyDetachForCall;
+        in.dtSec = s_f167Qpc && q > s_f167Qpc ? static_cast<double>(f30QpcUs(q - s_f167Qpc)) * 1e-6 : 0.0;
+        in.item = itemSerialForCall;
+        s_f167Qpc = f167Pistol ? q : 0;
+        f167Step = s_f167.step(in);
+        offW *= nofoot::f167::gripFactor(f167Step.release);
+    }
+    const double f167Release = f167Step.release;
+    const bool f167Gone = f167Release >= 1.0 && offWBeforeSprint > 0.0;   // the left arm is not solved because of the release (the off hand was gripping)
     const bool rifleStableAuthority = pinWanted && physicalPoleActive && nofoot::ikRifleQualityKeepsPhysicalPole(
         exactRifleForCall, rifleQualityWeight, bodyDetachForCall, s_physicalPole.side[0].valid);
     if (physicalPoleActive) {
@@ -20112,6 +20146,10 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
                     float blended[16];
                     if (nofoot::handBlendRigid(local3, desired, offW, blended)) std::memcpy(desired, blended, sizeof(blended));
                 }
+                if (side == 0 && f167Release > 0.0 && wSolve < 1.0) {   // F167: the left fingers leave the grip and return to it with the arm, not ahead of it
+                    float armBlended[16];
+                    if (nofoot::handBlendRigid(local3, desired, wSolve, armBlended)) std::memcpy(desired, armBlended, sizeof(desired));
+                }
                 if (supportCup && side == 0 && poseSource == 1) {
                     uint16_t baseSourceSlot = 0xFFFFu;
                     for (uint16_t candidate = 1; candidate < fpHands.rig[0].count; ++candidate)
@@ -20561,8 +20599,9 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
                 }
             }
         }
-        // F98a: the left arm's figures of this call (a weapon drawn, the left arm solved)
-        if (armedNow && so[0].hOk) {
+        // F98a: the left arm's figures of this call (a weapon drawn, the left arm solved). Not while the pistol sprint has let go of it (F167): that side is the game's own arm and its probe
+        // solve says nothing of the grip's elbow (a legacy swivel and a step from the last gripped one would read as a defect).
+        if (armedNow && so[0].hOk && !f167Gone) {
             static double s_prevRadial[3] = {};
             static bool s_prevHave = false;
             static uint32_t s_prevItem = 0, s_prevP1 = 0;
@@ -20697,6 +20736,21 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
         }
         pinRecord(pinCall, res);
     }
+    // F167: this armed pistol call. The speed is the pin's own (not a number when stale) and judged on its own, apart from the release state, so a release that never ran shows as a
+    // sprint with no release; the left arm's weight is the one the call wrote (0 when the side was not written).
+    {
+        g_f167Seq.fetch_add(1, std::memory_order_acq_rel);
+        if (g_f167Reset.exchange(false, std::memory_order_relaxed)) g_f167 = nofoot::f167::Counters{};
+        if (f167Pistol) {
+            nofoot::f167::Sample sample167;
+            if (f167SpeedFresh) sample167.speed = g_pinMotion.speed;
+            sample167.release = f167Release;
+            sample167.detachW = bodyDetachForCall;
+            sample167.leftW = pl.ok[0] && so[0].wrote ? so[0].wArm : 0.0;
+            g_f167.add(sample167);
+        }
+        g_f167Seq.fetch_add(1, std::memory_order_release);
+    }
     // F67f: the armed invariants of this call, and F67e's record (the frame thread decides whether an event is running).
     {
         g_f67fSeq.fetch_add(1, std::memory_order_acq_rel);
@@ -20753,7 +20807,7 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
                 } else {
                     ++fw.notSolved[side];
                     const int why = !armsOk ? kF67fInputs : (!(mode == 2 || mode == 3) || g_ikWriteDown.load(std::memory_order_relaxed)) ? kF67fNoWrite
-                                  : (side == 0 && offW <= 0.0) ? kF67fOffHand : !o.solved ? kF67fRefused : !(o.wArm > 0.0) ? kF67fWeight : kF67fOther;
+                                  : (side == 0 && offW <= 0.0) ? (f167Gone ? kF67fSprint : kF67fOffHand) : !o.solved ? kF67fRefused : !(o.wArm > 0.0) ? kF67fWeight : kF67fOther;
                     ++fw.why[side][why];
                 }
             }
@@ -20786,7 +20840,7 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
             a.state = o.wrote ? 1 : o.solved ? 2 : 3;
             if (!o.wrote) {
                 const int why = !armsOk ? kF67fInputs : (!(mode == 2 || mode == 3) || g_ikWriteDown.load(std::memory_order_relaxed)) ? kF67fNoWrite
-                              : (side == 0 && offW <= 0.0) ? kF67fOffHand : !o.solved ? kF67fRefused : !(o.wArm > 0.0) ? kF67fWeight : kF67fOther;
+                              : (side == 0 && offW <= 0.0) ? (f167Gone ? kF67fSprint : kF67fOffHand) : !o.solved ? kF67fRefused : !(o.wArm > 0.0) ? kF67fWeight : kF67fOther;
                 a.reason = static_cast<uint8_t>(why + 1);
             }
             a.w = static_cast<float>(o.wArm);
@@ -21035,7 +21089,7 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
         std::memcpy(sample.pinReach, pinCall.reach, sizeof(sample.pinReach));
         if (!so[0].wrote) {
             const int why = !armsOk ? kF67fInputs : (!(mode == 2 || mode == 3) || g_ikWriteDown.load(std::memory_order_relaxed)) ? kF67fNoWrite
-                          : offW <= 0.0 ? kF67fOffHand : !so[0].solved ? kF67fRefused : !(so[0].wArm > 0.0) ? kF67fWeight : kF67fOther;
+                          : offW <= 0.0 ? (f167Gone ? kF67fSprint : kF67fOffHand) : !so[0].solved ? kF67fRefused : !(so[0].wArm > 0.0) ? kF67fWeight : kF67fOther;
             sample.leftReason = static_cast<uint8_t>(why + 1);
         }
         const uint64_t freq = f66QpcFreq();
@@ -22087,7 +22141,7 @@ void f66gLine(uint64_t now) noexcept {
 // the 3P root yaw, the square-up wanted and applied, the pin's horizontal move, and per arm the IK state, weight, reach ratio, the hand-to-grip error
 // before and after the solve, the shortfall and the animated hand's displacement since the previous call. No behaviour changes here.
 const char* aimArmState(const AimArm& a, char* buf, size_t cap) noexcept {
-    static const char* const kShort[kF67fWhyKinds] = {"plan", "nowrite", "refused", "inputs", "weight", "other", "offhand"};
+    static const char* const kShort[kF67fWhyKinds] = {"plan", "nowrite", "refused", "inputs", "weight", "other", "offhand", "sprint"};
     const char* why = a.reason > 0 && a.reason <= kF67fWhyKinds ? kShort[a.reason - 1] : "";
     if (a.state == 0) std::snprintf(buf, cap, "no side");
     else if (a.state == 1) std::snprintf(buf, cap, "solved w %.2f reach %.2f hand-grip %.1f -> %.1f cm short %.1f anim-hand %.1f", static_cast<double>(a.w), static_cast<double>(a.reach),
@@ -22257,6 +22311,56 @@ void f67fLine(uint64_t now) noexcept {
                         nm, static_cast<unsigned long long>(w.offN), static_cast<unsigned long long>(w.offUnread), w.offDistSum / on, w.offDistMin, w.offDistMax,
                         100.0 * nofoot::kOffHandMaxM, w.offChangeMax, nofoot::kOffHandSteadyFrames, nofoot::kOffHandSteadyDeg, static_cast<unsigned long long>(w.offTwo),
                         static_cast<unsigned long long>(w.offFree), static_cast<unsigned long long>(w.offRamp), static_cast<unsigned long long>(w.offFlips), w.offWSum / on);
+    }
+}
+// F167 (frame thread): the pistol sprint release, once a second take the hook's counters and add them to the window; the window prints when it is full (the summary window of the log),
+// when the second had no armed pistol call, or when the held item changed, so a line describes one stretch of one pistol in hand. The hook resets its counters at its next call, so a
+// second with no call is not taken twice (the sequence gate). The line is written in the default log too: the health rule reads it.
+void f167Line(uint64_t now) noexcept {
+    struct Window {
+        nofoot::f167::Counters sum;
+        nofoot::f167::Seconds seconds;
+        uint32_t folded = 0, serial = 0;   // the seconds folded in (each had armed pistol calls), the held item's serial
+        char item[64] = "none";
+    };
+    static Window w;
+    static uint64_t lineMs = 0;
+    static nofoot::f124::SeqPrintGate gate;
+    if (!nofoot::logwin::second(lineMs, now)) return;
+    nofoot::f167::Counters second;
+    bool got = false;
+    uint32_t seq = 0;
+    for (int tries = 0; tries < 2 && !got; ++tries) {
+        const uint32_t s1 = g_f167Seq.load(std::memory_order_acquire);
+        if (s1 & 1u) continue;
+        std::memcpy(&second, &g_f167, sizeof(second));
+        std::atomic_thread_fence(std::memory_order_acquire);
+        got = g_f167Seq.load(std::memory_order_relaxed) == s1;
+        seq = s1;
+    }
+    g_f167Reset.store(true, std::memory_order_relaxed);
+    if (!gate.take(got, seq)) second = nofoot::f167::Counters{};   // a torn second, or one with no hook call since the last, is empty
+    char item[64] = "none";
+    uint32_t serial = 0;
+    if (second.pistol && (!opticItemRead(&serial, item) || !item[0])) std::snprintf(item, sizeof(item), "none");
+    const auto closeWindow = [&]() noexcept {
+        if (w.folded) {
+            char line[1100];
+            nofoot::f167::formatSummary(line, sizeof(line), w.folded, w.item, w.sum, w.seconds);
+            Log::get().note("%s", line);
+        }
+        w = Window{};
+    };
+    if (w.folded && (!second.pistol || serial != w.serial)) closeWindow();
+    if (second.pistol) {
+        if (!w.folded) {
+            w.serial = serial;
+            std::snprintf(w.item, sizeof(w.item), "%s", item);
+        }
+        w.sum.merge(second);
+        w.seconds.fold(second);
+        ++w.folded;
+        if (nofoot::logwin::due(w.folded)) closeWindow();
     }
 }
 // F69g (frame thread): the steady window per side; the line is printed once per item (the held item's serial) and side.
@@ -22495,6 +22599,7 @@ void armIkTick(uint64_t now) noexcept {
     f85Drain(now);         // F85a: the pin-step trace (an event's lines, and a 1 s line while on foot)
     poseDeviationDrain();  // F76: independent bounded late-pose deviation trace
     f67fLine(now);         // F67f: the armed invariants, once a second (and F69h's off hand line)
+    f167Line(now);         // F167: the pistol sprint release, once a second into a summary window
     gripTick();            // F69g: the grip frames, once per item and side after 0.5 s steady
     f68cLine(now);         // F68c: how G was built (same-frame pairs), once a second
     f126Line(now);         // F126: the eye pairs refused and the arm IK calls refused for an earlier FP rig, every 10 s

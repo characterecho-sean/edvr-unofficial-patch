@@ -59,6 +59,7 @@
 #include "f163_checks.h"    // F163: the crouched stance from the animated neck's drop (the flights' necks, standing ADS bit for bit, the continuity through a crouch and a stand)
 #include "f165_checks.h"    // F165: the left elbow's body-down pole blended in while crouched in the sights (the weight, the wrap-aware angle, the flight's aim on the real solver, the clamp, the line)
 #include "f166_checks.h"    // F166: the upper body held at its still crouched-ADS pose while walking crouched in the sights (the plan, the capture rules, the ramp, the slerp blend, the onset replayed, the line)
+#include "f167_checks.h"    // F167: the left hand lets go of the pistol while sprinting (the sprint signal from the flight's speeds, the dead band, the weight by item and speed, the ramps, the continuity, the sights holding the grip, the line)
 #include "f151_checks.h"    // F151: the weapon readout's draw bound by its place (the ordinals, each guard, one bind per key, the lost-frame count) and the held copy's scope from the selected slot
 #include "f110_checks.h"    // F110: the ADS sight lock's model right eye (the left-eye job camera plus the IPD)
 #include "f111_checks.h"    // F111: the panel pointer instrument's statistics and verdict
@@ -7594,6 +7595,11 @@ int wmain(int argc, wchar_t** argv) {
     // the hip and still: nothing written, bit for bit), the slerp blend, the walk's onset replayed (the shoulder 23 cm up and 12 cm forward animated, on the still value held), the
     // stance read from the game's neck so the hold cannot keep itself on, the counters, the seconds and the line within the log's limit.
     f166test::run166(check);
+    // F167: the pistol sprint release: the sprint from the AMC's low-passed speed (the flights' sprint plateaus 5.4 to 8.6 m/s, their runs under 3.0; begins at 4.6, ends under 3.9, the
+    // dead band between), the release weight (0 for any other item at any speed, for a pistol walking, running, unarmed or on a stale speed; 1 for a pistol sprinting), the 0.2 s release and
+    // 0.25 s return ramps, the continuity through a scripted run, the sights holding the grip (the cap at 1 less the detach weight), another or put-away pistol starting over, the factor
+    // on the off hand's weight (1 at release 0 bit for bit, the left arm's weight exactly 0 at release 1), the counters, the seconds and the line within the log's limit.
+    f167test::run167(check);
     // F110: the ADS sight lock's model right eye from the left-eye job camera and from a solved left eye, the fallback, the IPD's sign.
     f110test::run110(check);
     // F111: the panel pointer instrument names the stage that turns a move the other way (K1 to K5, one at a time), the camera getters' decoding.
