@@ -701,7 +701,7 @@ python tools\compile_cache.py --prune --keep thunks.obj --keep weapon_ui_getter_
     "src\d3d11\wake_pulse.cpp" "src\d3d11\vr_ssaa_gate.cpp" "src\d3d11\vr_ssaa_hold.cpp" "src\d3d11\vr_display_observer.cpp" "src\d3d11\vr_window_trampolines.cpp" ^
     "src\d3d11\mode_watch.cpp" ^
     "src\d3d11\ui_depth.cpp" ^
-    "src\d3d11\ui_layer.cpp" "src\d3d11\ui_surfaces.cpp" "src\d3d11\ui_panel_scale.cpp" "src\d3d11\orbital_width.cpp" "src\d3d11\supercruise_bars.cpp" ^
+    "src\d3d11\ui_layer.cpp" "src\d3d11\scope_zoom.cpp" "src\d3d11\ui_surfaces.cpp" "src\d3d11\ui_panel_scale.cpp" "src\d3d11\orbital_width.cpp" "src\d3d11\supercruise_bars.cpp" ^
     "third_party\dxbc_hash\DxilHash.cpp" ^
     "src\d3d11\backdrop_fix.cpp" ^
     "src\d3d11\scrim_fix.cpp" ^
@@ -3701,7 +3701,7 @@ if not exist "%OBJ%\uilayerworld" mkdir "%OBJ%\uilayerworld"
 %CC% /I"%GEN%" /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
     /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE ^
     /Fo"%OBJ%\uilayerworld\\" /Fe"%OBJ%\uilayerworld\ui_layer_world_test.exe" ^
-    "tools\ui_layer_world_test\ui_layer_world_test.cpp" "src\d3d11\ui_layer.cpp" "src\d3d11\map_smaa.cpp" ^
+    "tools\ui_layer_world_test\ui_layer_world_test.cpp" "src\d3d11\ui_layer.cpp" "src\d3d11\scope_zoom.cpp" "src\d3d11\map_smaa.cpp" ^
     "src\common\config.cpp" "src\common\log.cpp" "src\common\guard.cpp" ^
     "third_party\dxbc_hash\DxilHash.cpp" ^
     /link /INCREMENTAL:NO d3dcompiler.lib user32.lib
@@ -3724,7 +3724,7 @@ if not exist "%OBJ%\uilayerdevice" mkdir "%OBJ%\uilayerdevice"
 %CC% /I"%GEN%" /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
     /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE ^
     /Fo"%OBJ%\uilayerdevice\\" /Fe"%OBJ%\uilayerdevice\ui_layer_device_test.exe" ^
-    "tools\ui_layer_device_test\ui_layer_device_test.cpp" "tools\ui_layer_device_test\ui_layer_device_bridge.cpp" "src\d3d11\map_smaa.cpp" ^
+    "tools\ui_layer_device_test\ui_layer_device_test.cpp" "tools\ui_layer_device_test\ui_layer_device_bridge.cpp" "src\d3d11\scope_zoom.cpp" "src\d3d11\map_smaa.cpp" ^
     "src\common\config.cpp" "src\common\log.cpp" "src\common\guard.cpp" ^
     "third_party\dxbc_hash\DxilHash.cpp" ^
     /link /INCREMENTAL:NO d3dcompiler.lib user32.lib
@@ -4209,7 +4209,7 @@ if not exist "%OBJ%\flatweaponadmit" mkdir "%OBJ%\flatweaponadmit"
 %CC% /I"%GEN%" /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
     /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /utf-8 ^
     /Fo"%OBJ%\flatweaponadmit\\" /Fe"%OBJ%\flatweaponadmit\flat_weapon_admission_test.exe" ^
-    "tools\sharp_weapons_test\flat_weapon_admission_test.cpp" "tools\sharp_weapons_test\flat_weapon_bridge.cpp" "src\d3d11\map_smaa.cpp" ^
+    "tools\sharp_weapons_test\flat_weapon_admission_test.cpp" "tools\sharp_weapons_test\flat_weapon_bridge.cpp" "src\d3d11\scope_zoom.cpp" "src\d3d11\map_smaa.cpp" ^
     "src\d3d11\flat_ui_layer.cpp" "src\common\config.cpp" "src\common\log.cpp" "src\common\guard.cpp" ^
     "third_party\dxbc_hash\DxilHash.cpp" ^
     /link /INCREMENTAL:NO d3dcompiler.lib user32.lib
@@ -4234,6 +4234,26 @@ if not exist "%OBJ%\shieldripple" mkdir "%OBJ%\shieldripple"
 if errorlevel 1 ( echo [edvr] ERROR: shield ripple test build failed & exit /b 1 )
 "%OBJ%\shieldripple\shield_ripple_test.exe" --dry-run || exit /b 1
 "%OBJ%\shieldripple\shield_ripple_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_scope_zoom_test
+echo [edvr] === scope_zoom_test.exe ===
+REM The scope lens (docs\design-vr-scope-magnification-2026-10-28.md, section 8): the production door (src\d3d11\scope_zoom.cpp linked as shipped, the build's two compute passes, the
+REM production parameter blocks) on WARP with the debug layer, over a synthetic frame whose depth is a near hexagonal ring about c: inside the ring the frame is sampled at c + d / M
+REM within one code of the reference built from scope_zoom_s1.h's own functions, the ring and everything outside are untouched byte for byte, the mask ends on the ring's inner edge,
+REM a two-ray gap keeps its lens, an open ring and a frame of another format are left alone and counted, a frame EDVR may not write comes back as the lens's copy, and each reason a
+REM frame is declined is counted; the rays read back give the reference march's hole; three mutants of the comparator are caught. Source scans of the wiring, each with a control.
+REM Built outside build\ so its device is System32's; runs at the repo root (the scans read sources).
+if not exist "%OBJ%\scopezoom" mkdir "%OBJ%\scopezoom"
+%CC% /I"%GEN%" /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
+    /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS /utf-8 ^
+    /Fo"%OBJ%\scopezoom\\" /Fe"%OBJ%\scopezoom\scope_zoom_test.exe" ^
+    "tools\scope_zoom_test\scope_zoom_test.cpp" "src\d3d11\scope_zoom.cpp" ^
+    "src\common\config.cpp" "src\common\log.cpp" "src\common\guard.cpp" ^
+    /link /INCREMENTAL:NO d3d11.lib user32.lib
+if errorlevel 1 ( echo [edvr] ERROR: scope zoom test build failed & exit /b 1 )
+"%OBJ%\scopezoom\scope_zoom_test.exe" --dry-run || exit /b 1
+"%OBJ%\scopezoom\scope_zoom_test.exe" --self-test || exit /b 1
 exit /b 0
 
 :rig_menu_pad_test

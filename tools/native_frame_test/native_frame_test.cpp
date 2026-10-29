@@ -55,6 +55,7 @@
 #include "f159_checks.h"    // F159: the left elbow's stable pole reseeded at the shoulder's height (the condition, the gate, the real solver's raised elbow), the seed births and their lines
 #include "f160_checks.h"    // F160: the neck reference's raise blended through the ADS release (the decision, the kept target, the counts, the flight's release replayed on the real parts), the holster line
 #include "s0_checks.h"      // S0: the scope zoom instrument (measure only): the projection decode, the press tracker, the camera table, the probe points, the line formats
+#include "s1_checks.h"      // S1/A1: the scope lens: the table and M, the gate and the ease, the rays over the depth, the open-sight rule, r(theta), the mask, the window, the line formats
 #include "f151_checks.h"    // F151: the weapon readout's draw bound by its place (the ordinals, each guard, one bind per key, the lost-frame count) and the held copy's scope from the selected slot
 #include "f110_checks.h"    // F110: the ADS sight lock's model right eye (the left-eye job camera plus the IPD)
 #include "f111_checks.h"    // F111: the panel pointer instrument's statistics and verdict
@@ -7570,6 +7571,10 @@ int wmain(int argc, wchar_t** argv) {
     // the late flag (with and without the flat lag guard) and a quick second press; the camera table's slots, drops and staleness; the probe points and the lens centre in pixels;
     // the four lines the DLL writes.
     s0test::runS0(check);
+    // S1/A1 (the scope lens): the table of the game's ADS FOV per (item, scope) and M from the reference FOV; the gate's verdicts and the ease; the reference march over a hexagonal
+    // frame (and the speck, the open sight, the picture's edge, the angle stop and the escaped ray's clamp); r(theta), the mask, the source of a magnified pixel and Catmull-Rom; the
+    // window and the box; the rays buffer's layout; the accumulators and the two lines the DLL writes.
+    s1test::runS1(check);
     // F110: the ADS sight lock's model right eye from the left-eye job camera and from a solved left eye, the fallback, the IPD's sign.
     f110test::run110(check);
     // F111: the panel pointer instrument names the stage that turns a move the other way (K1 to K5, one at a time), the camera getters' decoding.

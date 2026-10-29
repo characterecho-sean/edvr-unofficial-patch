@@ -1,0 +1,403 @@
+// S1/A1 checks (the scope lens), runS1 below. Header only, run by native_frame_test.
+//
+// A1 (src\d3d11\scope_zoom_s1.h): the pure parts of the lens. The table holds the game's ADS FOV per (item, scope) and M is tan(h / 2) / tan(ads / 2) against the reference FOV; the gate
+// says when there is a lens and under which reason a frame has none; the ease takes M from 1 to its value over 0.25 s; the rays march from c over the depth for the hole of the scope's
+// frame (the shader's text mirrors the reference march step for step, tools\scope_zoom_test runs the two against each other); the open-sight rule, r(theta), the mask, the source
+// of a magnified pixel, the window and the box are the passes' arithmetic; the accumulators and the two lines are the DLL's own, which tools\edvr_log.py renders its --health
+// fixtures from.
+#pragma once
+
+#include "../../src/d3d11/scope_zoom_s1.h"
+
+#include <cmath>
+#include <cstdint>
+#include <cstring>
+#include <string>
+#include <vector>
+
+namespace s1test {
+
+namespace sz = edvr::scopezoom;
+
+inline bool near1(double a, double b, double tol) { return std::fabs(a - b) <= tol; }
+inline double kNaNd() { return sz::kNaN; }
+
+// A convex hexagonal frame of apothem a about (hx, hy): six half planes with the normals at 0, 60, ..., 300 degrees (rotated by rot). The frame is the band of width w outside it.
+struct Hex {
+    double hx, hy, a, w, rot;
+    double metric(double x, double y) const {
+        double m = -1.0e30;
+        for (int i = 0; i < 6; ++i) {
+            const double ang = rot + i * (sz::kPi / 3.0);
+            m = std::fmax(m, (x - hx) * std::cos(ang) + (y - hy) * std::sin(ang));
+        }
+        return m;
+    }
+    bool frame(double x, double y) const { const double m = metric(x, y); return m >= a && m <= a + w; }
+    // The distance along a ray from a point inside to the hexagon's inner edge.
+    double cast(double cx, double cy, double dx, double dy) const {
+        double t = 1.0e30;
+        for (int i = 0; i < 6; ++i) {
+            const double ang = rot + i * (sz::kPi / 3.0);
+            const double nx = std::cos(ang), ny = std::sin(ang);
+            const double along = nx * dx + ny * dy;
+            if (along <= 1.0e-12) continue;
+            t = std::fmin(t, (a - ((cx - hx) * nx + (cy - hy) * ny)) / along);
+        }
+        return t;
+    }
+};
+
+template <class Check>
+inline void runS1(Check&& check) {
+    // ---- the table: the stem, the entries, M ----------------------------------------------------------------------------------------------------------------------------------
+    {
+        char stem[64];
+        check(sz::lensStem("$wpn_m_sniper_plasma_charged_name;", stem, sizeof(stem)) && std::strcmp(stem, "m_sniper_plasma_charged") == 0,
+              "S1 table: Status.json's name is reduced to its stem ($, wpn_, _name and ; taken off)");
+        check(sz::lensStem("wpn_m_sniper_plasma_charged", stem, sizeof(stem)) && std::strcmp(stem, "m_sniper_plasma_charged") == 0, "S1 table: the journal's module name is the same stem");
+        check(sz::lensStem("$WPN_M_Sniper_Plasma_Charged_NAME;", stem, sizeof(stem)) && std::strcmp(stem, "m_sniper_plasma_charged") == 0, "S1 table: the stem is read without case");
+        check(!sz::lensStem(nullptr, stem, sizeof(stem)) && !sz::lensStem("", stem, sizeof(stem)) && !sz::lensStem("$wpn__name;", stem, sizeof(stem)) && !sz::lensStem("none", nullptr, 0),
+              "S1 table: no name, an empty name and a name with no stem left have none");
+        check(!sz::lensStem("$wpn_m_sniper_plasma_charged_name;", stem, 8), "S1 table: a stem that does not fit its buffer is refused, not cut");
+        check(sz::lensTableEntries() == 12, "S1 table: twelve (item, scope) entries: the Executioner both ways and ten unscoped sights");
+        struct Want { const char* item; int scope; double deg; };
+        static const Want want[] = {
+            {"$wpn_m_sniper_plasma_charged_name;", sz::kLensScopeYes, 15.0}, {"$wpn_m_sniper_plasma_charged_name;", sz::kLensScopeNo, 35.0},
+            {"$wpn_m_assaultrifle_plasma_fauto_name;", sz::kLensScopeNo, 48.0}, {"$wpn_m_assaultrifle_laser_fauto_name;", sz::kLensScopeNo, 48.0},
+            {"$wpn_m_assaultrifle_kinetic_fauto_name;", sz::kLensScopeNo, 48.0}, {"$wpn_m_submachinegun_laser_fauto_name;", sz::kLensScopeNo, 50.0},
+            {"$wpn_m_submachinegun_kinetic_fauto_name;", sz::kLensScopeNo, 50.0}, {"$wpn_m_shotgun_plasma_doublebarrel_name;", sz::kLensScopeNo, 52.0},
+            {"$wpn_s_pistol_plasma_charged_name;", sz::kLensScopeNo, 52.0}, {"$wpn_s_pistol_kinetic_sauto_name;", sz::kLensScopeNo, 52.0},
+            {"$wpn_m_launcher_rocket_sauto_name;", sz::kLensScopeNo, 52.0}, {"$wpn_s_pistol_laser_sauto_name;", sz::kLensScopeNo, 52.0},
+        };
+        bool all = true;
+        for (const Want& w : want) {
+            double deg = 0.0;
+            all = all && sz::lensAdsDeg(w.item, w.scope, &deg) && near1(deg, w.deg, 1e-12);
+        }
+        check(all, "S1 table: every measured (item, scope) of the flat flights gives its ADS FOV (section 7: 15 and 35, 48, 50, 52)");
+        double deg = 0.0;
+        check(sz::lensAdsDeg("wpn_m_sniper_plasma_charged", sz::kLensScopeYes, &deg) && near1(deg, 15.0, 1e-12), "S1 table: the journal's name finds the entry as Status.json's does");
+        check(!sz::lensAdsDeg("$wpn_m_assaultrifle_plasma_fauto_name;", sz::kLensScopeYes, &deg) && std::isnan(deg), "S1 table: a scoped copy of an item measured unscoped only has no lens (and the FOV reads NaN)");
+        check(!sz::lensAdsDeg("$wpn_m_sniper_plasma_charged_name;", sz::kLensScopeUnknown, &deg) && !sz::lensAdsDeg("$wpn_m_assaultrifle_plasma_fauto_name;", sz::kLensScopeUnknown, &deg),
+              "S1 table: an unknown scope state is not in the table, whatever the item");
+        check(!sz::lensAdsDeg("$wpn_m_mining_laser_name;", sz::kLensScopeNo, &deg) && !sz::lensAdsDeg("none", sz::kLensScopeNo, &deg) && !sz::lensAdsDeg(nullptr, sz::kLensScopeNo, nullptr),
+              "S1 table: an unmeasured item and 'none' have no lens");
+        // M against this rig's two on-foot FOV options (section 7): 56.327 and 64.752 deg
+        check(near1(sz::lensZoom(56.327, 15.0), 4.07, 0.01) && near1(sz::lensZoom(56.327, 35.0), 1.70, 0.01) && near1(sz::lensZoom(56.327, 52.0), 1.10, 0.01) &&
+                  near1(sz::lensZoom(56.327, 48.0), 1.20, 0.01) && near1(sz::lensZoom(56.327, 50.0), 1.15, 0.01),
+              "S1 M: from 56.327 deg the scoped Executioner is 4.07, the bare one 1.70, the unscoped sights 1.10 to 1.20 (section 7's table)");
+        check(near1(sz::lensZoom(64.752, 15.0), 4.82, 0.01) && near1(sz::lensZoom(64.752, 35.0), 2.01, 0.01) && near1(sz::lensZoom(64.752, 52.0), 1.30, 0.01) &&
+                  near1(sz::lensZoom(64.752, 48.0), 1.42, 0.01),
+              "S1 M: from 64.752 deg the same weapons are 4.82, 2.01, 1.30 and 1.42");
+        check(near1(sz::lensZoom(56.3, 56.3), 1.0, 1e-12) && sz::lensZoom(56.3, 90.0) < 1.0, "S1 M: an ADS FOV equal to the reference is 1 and a wider one is under 1");
+        check(std::isnan(sz::lensZoom(kNaNd(), 15.0)) && std::isnan(sz::lensZoom(56.3, 0.0)) && std::isnan(sz::lensZoom(0.0, 15.0)) && std::isnan(sz::lensZoom(56.3, kNaNd())) &&
+                  std::isnan(sz::lensZoom(180.0, 15.0)),
+              "S1 M: an input that is not an angle (NaN, zero, a straight angle) is NaN");
+        check(near1(sz::lensClampRefDeg(56.3), 56.3, 1e-12) && near1(sz::lensClampRefDeg(10.0), sz::kLensRefMinDeg, 1e-12) && near1(sz::lensClampRefDeg(200.0), sz::kLensRefMaxDeg, 1e-12) &&
+                  near1(sz::lensClampRefDeg(kNaNd()), sz::kLensRefDefaultDeg, 1e-12),
+              "S1 M: the reference FOV is held to 30..90 and a value that is no number reads as the default 56.3");
+    }
+
+    // ---- the gate and the ease --------------------------------------------------------------------------------------------------------------------------------------------------
+    {
+        sz::LensGateIn g;
+        g.keyOn = g.onFoot = g.adsActive = g.wFull = g.tableHit = g.sFresh = g.cUsable = true;
+        g.m = 4.07;
+        check(sz::lensGate(g) == sz::LensVerdict::kQualifies, "S1 gate: the key on, on foot, the sights up at w 1.0, in the table with M 4.07, S fresh and c usable: the lens runs");
+        auto without = [&](auto edit) {
+            sz::LensGateIn x = g;
+            edit(x);
+            return sz::lensGate(x);
+        };
+        check(without([](sz::LensGateIn& x) { x.keyOn = false; }) == sz::LensVerdict::kIdle, "S1 gate: the key off asks nothing of the lens (idle, nothing counted)");
+        check(without([](sz::LensGateIn& x) { x.onFoot = false; }) == sz::LensVerdict::kIdle && without([](sz::LensGateIn& x) { x.adsActive = false; }) == sz::LensVerdict::kIdle &&
+                  without([](sz::LensGateIn& x) { x.wFull = false; }) == sz::LensVerdict::kIdle,
+              "S1 gate: not on foot, the sights not up and w under 1.0 are idle");
+        check(without([](sz::LensGateIn& x) { x.tableHit = false; }) == sz::LensVerdict::kNotInTable, "S1 gate: an item or scope not in the table is counted as not in the table");
+        check(without([](sz::LensGateIn& x) { x.m = 1.04; }) == sz::LensVerdict::kNotInTable && without([](sz::LensGateIn& x) { x.m = 1.05; }) == sz::LensVerdict::kQualifies &&
+                  without([](sz::LensGateIn& x) { x.m = kNaNd(); }) == sz::LensVerdict::kNotInTable,
+              "S1 gate: M under 1.05 (or no number) is as good as no entry; 1.05 is the line");
+        check(without([](sz::LensGateIn& x) { x.sFresh = false; }) == sz::LensVerdict::kNoS && without([](sz::LensGateIn& x) { x.cUsable = false; }) == sz::LensVerdict::kNoS,
+              "S1 gate: S stale or c not usable is counted as no S");
+        check(without([](sz::LensGateIn& x) { x.tableHit = false; x.sFresh = false; }) == sz::LensVerdict::kNotInTable,
+              "S1 gate: a weapon not in the table is not counted as a missing S (the table is asked first)");
+        check(!sz::lensFresh(50001) && sz::lensFresh(50000) && sz::lensFresh(0), "S1 gate: the door takes a c no older than 50 ms");
+    }
+    {
+        check(near1(sz::lensEase(4.07, 0.0), 1.0, 1e-12) && near1(sz::lensEase(4.07, -1.0), 1.0, 1e-12), "S1 ease: M is 1 at the first qualifying frame (and for a time before it)");
+        check(near1(sz::lensEase(4.07, 0.25), 4.07, 1e-12) && near1(sz::lensEase(4.07, 3.0), 4.07, 1e-12), "S1 ease: M is its value at 0.25 s and after");
+        double prev = 1.0;
+        bool mono = true;
+        for (int i = 1; i <= 25; ++i) {
+            const double m = sz::lensEase(4.07, i * 0.01);
+            mono = mono && m >= prev - 1e-12 && m <= 4.07 + 1e-12;
+            prev = m;
+        }
+        check(mono, "S1 ease: M only grows from 1 to its value");
+        const double half = sz::lensEase(4.0, 0.125);
+        check(near1(half, 2.0, 1e-9), "S1 ease: halfway through it is the geometric middle (the zoom grows evenly in size, not in factor)");
+        check(near1(sz::lensEase(1.0, 0.1), 1.0, 1e-12) && near1(sz::lensEase(sz::kNaN, 0.1), 1.0, 1e-12) && near1(sz::lensEase(0.5, 0.3), 0.5, 1e-12),
+              "S1 ease: a target of 1, no number or under 1 has nothing to ease");
+    }
+
+    // ---- the rays: the reference march over a hexagonal frame ----------------------------------------------------------------------------------------------------------------
+    {
+        const int W = 2016, H = 2017;
+        const float tan4[4] = {-1.17f, 0.95f, -1.01f, 1.07f};
+        const double nearDepth = 0.0417;                              // the reverse-Z depth of 0.6 m (0.025 / 0.6)
+        const Hex hex{1000.3, 1010.7, 100.0, 12.0, 0.2};         // the frame: a band 12 px wide, apothem 100 px
+        const auto depth = [&](int x, int y) { return hex.frame(x + 0.5, y + 0.5) ? 0.14 : 0.00122; };
+        const double cx = 1000.3 + 17.0, cy = 1010.7 - 9.0;     // c a little off the frame's centre
+        sz::LensRay rays[sz::kLensRays];
+        double worst = 0.0;
+        uint32_t escapedN = 0;
+        for (uint32_t k = 0; k < sz::kLensRays; ++k) {
+            rays[k] = sz::lensMarchRef(depth, W, H, cx, cy, k, tan4, nearDepth);
+            double dx, dy;
+            sz::lensRayDir(k, &dx, &dy);
+            worst = std::fmax(worst, std::fabs(rays[k].rPx - hex.cast(cx, cy, dx, dy)));
+            escapedN += rays[k].escaped ? 1 : 0;
+        }
+        check(escapedN == 0 && worst <= 2.6, "S1 rays: all 128 rays stop at the frame's inner edge, within 2.6 render px of the exact hexagon (the run of 3 px reports the first)");
+        float rpx[sz::kLensRays];
+        sz::lensClampEscaped(rays, rpx);
+        bool same = true;
+        for (uint32_t k = 0; k < sz::kLensRays; ++k) same = same && rpx[k] == static_cast<float>(rays[k].rPx);
+        check(same, "S1 rays: with no ray escaped the radii the mask uses are the rays' own");
+        // the hole in degrees: the frame's apothem is about 100 px of 951 px a unit of tangent, a little under 6 degrees at its flats
+        double rmin, rmed, rmax;
+        sz::LensReadback rb;
+        for (uint32_t k = 0; k < sz::kLensRays; ++k) { rb.rPx[k] = static_cast<float>(rays[k].rPx); rb.rDeg[k] = static_cast<float>(rays[k].rDeg); }
+        rb.escaped = 0;
+        check(sz::lensHoleStats(rb, &rmin, &rmed, &rmax) && rmin > 3.5 && rmax < 9.0 && rmin <= rmed && rmed <= rmax, "S1 rays: the hole is some 4 to 8 degrees across at the eye, min <= median <= max");
+        // a ray whose first 2 px of frame are a speck (under the run of 3) goes through it
+        const auto speck = [&](int x, int y) { return hex.frame(x + 0.5, y + 0.5) || (x >= 1060 && x < 1062 && y >= 1000 && y < 1020) ? 0.14 : 0.00122; };
+        const sz::LensRay thru = sz::lensMarchRef(speck, W, H, 1000.3, 1010.7, 0, tan4, nearDepth);
+        const sz::LensRay plain = sz::lensMarchRef(depth, W, H, 1000.3, 1010.7, 0, tan4, nearDepth);
+        check(!thru.escaped && near1(thru.rPx, plain.rPx, 0.5), "S1 rays: a speck of frame 2 px wide is not the frame (the run is 3 px)");
+        // no frame at all: every ray escapes at the angle (12 deg) and the sight is open
+        const auto empty = [](int, int) { return 0.00122; };
+        uint32_t esc = 0;
+        double minDeg = 100.0;
+        for (uint32_t k = 0; k < sz::kLensRays; ++k) {
+            const sz::LensRay r = sz::lensMarchRef(empty, W, H, 1000.0, 1000.0, k, tan4, nearDepth);
+            esc += r.escaped ? 1 : 0;
+            minDeg = std::fmin(minDeg, r.rDeg);
+        }
+        check(esc == sz::kLensRays && near1(minDeg, 12.0, 1e-9) && sz::lensOpenSight(esc), "S1 rays: with no frame every ray escapes at 12 degrees and the sight is open");
+        // c near the picture's edge: the rays that leave the image escape there
+        const sz::LensRay edgeRay = sz::lensMarchRef(empty, W, H, 30.0, 1000.0, 64, tan4, nearDepth);   // ray 64 points to -x
+        check(edgeRay.escaped && near1(edgeRay.rPx, 31.0, 1.001) && edgeRay.rDeg < 12.0, "S1 rays: a ray that leaves the image escapes at its edge, short of 12 degrees");
+        // the 12 degree stop is the angle at the eye in the tangent plane, not a pixel count
+        const sz::LensRay right = sz::lensMarchRef(empty, W, H, 1000.0, 1000.0, 0, tan4, nearDepth), left = sz::lensMarchRef(empty, W, H, 1000.0, 1000.0, 64, tan4, nearDepth);
+        check(right.escaped && left.escaped && right.rPx > 150.0 && left.rPx > 150.0 && std::fabs(right.rPx - left.rPx) > 3.0, "S1 rays: the 12 degree stop is the angle at the eye (an off-axis c reaches it at different px each way)");
+        // the open rule and the clamp of an escaped ray
+        check(!sz::lensOpenSight(0) && !sz::lensOpenSight(2) && sz::lensOpenSight(3), "S1 rays: more than 2 escaped rays is an open sight; 2 is a gap in the frame");
+        sz::LensRay gap[sz::kLensRays];
+        for (uint32_t k = 0; k < sz::kLensRays; ++k) { gap[k].rPx = 100.0 + k % 3; gap[k].escaped = false; }
+        gap[10].escaped = true; gap[10].rPx = 280.0;
+        gap[11].escaped = true; gap[11].rPx = 285.0;
+        gap[40].escaped = true; gap[40].rPx = 290.0;
+        float clamped[sz::kLensRays];
+        sz::lensClampEscaped(gap, clamped);
+        check(clamped[10] == static_cast<float>(gap[9].rPx) && clamped[11] == static_cast<float>(gap[12].rPx) && clamped[10] < 150.0f && clamped[40] == std::fmin(static_cast<float>(gap[39].rPx), static_cast<float>(gap[41].rPx)) &&
+                  clamped[0] == static_cast<float>(gap[0].rPx),
+              "S1 rays: an escaped ray takes the smaller radius of its nearest rays that did not escape (a run of two takes its two ends'), the others are as they are");
+        sz::LensRay all[sz::kLensRays];
+        for (uint32_t k = 0; k < sz::kLensRays; ++k) { all[k].rPx = 200.0 + k; all[k].escaped = true; }
+        sz::lensClampEscaped(all, clamped);
+        check(clamped[5] == 205.0f && clamped[127] == 327.0f, "S1 rays: with every ray escaped there is nothing to clamp to, and the radii stay as the rays ended");
+    }
+
+    // ---- r(theta), the mask, the source, Catmull-Rom ----------------------------------------------------------------------------------------------------------------------------
+    {
+        float r[sz::kLensRays];
+        for (uint32_t k = 0; k < sz::kLensRays; ++k) r[k] = 100.0f + static_cast<float>(k);
+        const double step = 2.0 * sz::kPi / sz::kLensRays;
+        check(near1(sz::lensRadiusAt(r, 0.0), 100.0, 1e-9) && near1(sz::lensRadiusAt(r, 3 * step), 103.0, 1e-9), "S1 r(theta): at a ray's angle it is that ray's radius");
+        check(near1(sz::lensRadiusAt(r, 3.5 * step), 103.5, 1e-9) && near1(sz::lensRadiusAt(r, 3.25 * step), 103.25, 1e-9), "S1 r(theta): between two rays it is interpolated");
+        check(near1(sz::lensRadiusAt(r, 127.5 * step), (227.0 + 100.0) / 2.0, 1e-6), "S1 r(theta): past the last ray it wraps to the first");
+        check(near1(sz::lensRadiusAt(r, -0.5 * step), (100.0 + 227.0) / 2.0, 1e-6) && near1(sz::lensRadiusAt(r, 2.0 * sz::kPi + 3 * step), 103.0, 1e-6),
+              "S1 r(theta): an angle below zero or past a turn is the same angle (atan2 returns -pi..pi)");
+        check(near1(sz::lensWeight(2.0), 1.0, 1e-12) && near1(sz::lensWeight(5.0), 1.0, 1e-12) && near1(sz::lensWeight(1.0), 0.5, 1e-12) && sz::lensWeight(0.0) == 0.0 && sz::lensWeight(-3.0) == 0.0,
+              "S1 mask: the lens is whole 2 output px inside the hole's edge, half at 1 px, and gone at the edge and outside it");
+        const double c[2] = {1000.0, 800.0}, p[2] = {1100.0, 760.0};
+        double s[2];
+        sz::lensSourceOf(c, 4.0, p, s);
+        check(near1(s[0], 1025.0, 1e-12) && near1(s[1], 790.0, 1e-12), "S1 source: a pixel 100 px right and 40 px up of c is read from 25 px right and 10 px up of it at M 4");
+        sz::lensSourceOf(c, 4.0, c, s);
+        check(s[0] == c[0] && s[1] == c[1], "S1 source: c reads c");
+        sz::lensSourceOf(c, 1.0, p, s);
+        check(s[0] == p[0] && s[1] == p[1], "S1 source: M 1 reads the pixel itself");
+        double w[4];
+        sz::lensCatmullRom(0.0, w);
+        check(near1(w[0], 0.0, 1e-12) && near1(w[1], 1.0, 1e-12) && near1(w[2], 0.0, 1e-12) && near1(w[3], 0.0, 1e-12), "S1 Catmull-Rom: at a texel centre it is that texel");
+        sz::lensCatmullRom(1.0, w);
+        check(near1(w[1], 0.0, 1e-12) && near1(w[2], 1.0, 1e-12), "S1 Catmull-Rom: one texel on it is the next texel");
+        bool sums = true, linear = true;
+        for (int i = 0; i <= 20; ++i) {
+            const double f = i / 20.0;
+            sz::lensCatmullRom(f, w);
+            sums = sums && near1(w[0] + w[1] + w[2] + w[3], 1.0, 1e-12);
+            linear = linear && near1(-1.0 * w[0] + 0.0 * w[1] + 1.0 * w[2] + 2.0 * w[3], f, 1e-12);   // it reproduces a straight line
+        }
+        check(sums && linear, "S1 Catmull-Rom: the four weights sum to 1 and reproduce a straight ramp");
+    }
+
+    // ---- the window, the box, the buffer ------------------------------------------------------------------------------------------------------------------------------------
+    {
+        const uint32_t region[4] = {0, 0, 4032, 4034};
+        const sz::LensWindow w = sz::lensWindow(1642.0, 1990.0, -0.10, -0.01, 1894.0, 1894.0, region);
+        check(!w.empty() && w.x0 >= 0 && w.y0 >= 0 && w.x1 <= 4032 && w.y1 <= 4034 && w.x0 < 1642 && w.x1 > 1642 && w.y0 < 1990 && w.y1 > 1990,
+              "S1 window: the box about c inside the picture");
+        check((w.x1 - w.x0) > 800 && (w.x1 - w.x0) < 1100 && (w.y1 - w.y0) > 800 && (w.y1 - w.y0) < 1100,
+              "S1 window: 12 degrees at 1894 px a unit of tangent is a window some 900 px across, not the picture's 4032");
+        const sz::LensWindow edge = sz::lensWindow(40.0, 30.0, -1.0, 0.9, 1894.0, 1894.0, region);
+        check(!edge.empty() && edge.x0 == 0 && edge.y0 == 0 && edge.x1 > 40 && edge.y1 > 30, "S1 window: c near the picture's corner has the window cut to the picture");
+        const uint32_t cut[4] = {100, 200, 900, 800};
+        const sz::LensWindow inCut = sz::lensWindow(500.0, 500.0, 0.0, 0.0, 1894.0, 1894.0, cut);
+        check(inCut.x0 == 100 && inCut.y0 == 200 && inCut.x1 == 900 && inCut.y1 == 800, "S1 window: a region that is not the whole texture cuts the window to itself");
+        check(sz::lensWindow(-5000.0, 100.0, 0.0, 0.0, 1894.0, 1894.0, region).empty() && sz::lensWindow(sz::kNaN, 100.0, 0.0, 0.0, 1894.0, 1894.0, region).empty(),
+              "S1 window: a c far outside the picture, or no number, is an empty window");
+        const sz::LensWindow box = sz::lensBox(1642.0, 1990.0, 105.0, 2.0, 2.0, w);
+        check(box.x0 >= w.x0 && box.y0 >= w.y0 && box.x1 <= w.x1 && box.y1 <= w.y1 && box.x1 - box.x0 >= 2 * 210 && box.x1 - box.x0 <= 2 * 215 + 4, "S1 box: the farthest ray (105 render px, 210 output px) plus 4 px each way, inside the window");
+        const sz::LensWindow narrow = sz::lensBox(1642.0, 1990.0, 5000.0, 2.0, 2.0, w);
+        check(narrow.x0 == w.x0 && narrow.x1 == w.x1 && narrow.y0 == w.y0 && narrow.y1 == w.y1, "S1 box: a ray longer than the window is cut to the window");
+        // the buffer's layout: the shader and the readback must agree
+        check(sz::kLensOffRadiusPx == 64 && sz::kLensOffRadiusDeg == 576 && sz::kLensBufferBytes == 1088 && sz::kLensOffBox == 12 && sz::kLensOffEscaped == 28 && sz::kLensOffDepthAtC == 32,
+              "S1 buffer: the offsets the shaders store and load at (arguments 0, box 12, escaped 28, depth 32, radii 64, degrees 576, 1088 bytes)");
+        std::vector<unsigned char> bytes(sz::kLensBufferBytes, 0);
+        const uint32_t args[3] = {7, 9, 1}, boxv[4] = {10, 20, 224, 70};
+        const uint32_t esc = 3;
+        const float depthC = 0.00123f;
+        std::memcpy(&bytes[sz::kLensOffArgs], args, sizeof(args));
+        std::memcpy(&bytes[sz::kLensOffBox], boxv, sizeof(boxv));
+        std::memcpy(&bytes[sz::kLensOffEscaped], &esc, sizeof(esc));
+        std::memcpy(&bytes[sz::kLensOffDepthAtC], &depthC, sizeof(depthC));
+        for (uint32_t k = 0; k < sz::kLensRays; ++k) {
+            const float a = 100.0f + k, b = 5.0f + 0.01f * k;
+            std::memcpy(&bytes[sz::kLensOffRadiusPx + 4 * k], &a, 4);
+            std::memcpy(&bytes[sz::kLensOffRadiusDeg + 4 * k], &b, 4);
+        }
+        sz::LensReadback rb;
+        check(sz::lensDecode(bytes.data(), bytes.size(), &rb) && rb.args[0] == 7 && rb.args[1] == 9 && rb.box[2] == 224 && rb.escaped == 3 && rb.depthAtC == depthC && rb.rPx[100] == 200.0f &&
+                  near1(rb.rDeg[50], 5.5, 1e-6) && !sz::lensDecode(bytes.data(), bytes.size() - 4, &rb) && !sz::lensDecode(nullptr, 0, &rb),
+              "S1 buffer: the readback decodes the arguments, the box, the escaped count, the depth at c and both radius arrays, and refuses a short buffer");
+        // the hole's statistics skip the rays that escaped (12 degrees)
+        sz::LensReadback h;
+        for (uint32_t k = 0; k < sz::kLensRays; ++k) h.rDeg[k] = 5.0f;
+        h.rDeg[0] = 12.0f;
+        h.rDeg[1] = 12.0f;
+        h.rDeg[2] = 3.0f;
+        h.rDeg[3] = 8.0f;
+        double lo, mid, hi;
+        check(sz::lensHoleStats(h, &lo, &mid, &hi) && near1(lo, 3.0, 1e-6) && near1(mid, 5.0, 1e-6) && near1(hi, 8.0, 1e-6), "S1 hole: min, median and max over the rays that did not escape");
+        for (uint32_t k = 0; k < sz::kLensRays; ++k) h.rDeg[k] = 12.0f;
+        check(!sz::lensHoleStats(h, &lo, &mid, &hi), "S1 hole: every ray escaped has no hole to report");
+    }
+
+    // ---- the instrument: the accumulators and the lines -----------------------------------------------------------------------------------------------------------------------
+    {
+        sz::LensDoorStats s;
+        sz::lensNoteC(&s, 100.0, 200.0);
+        sz::lensNoteC(&s, 102.0, 200.0);
+        sz::lensNoteC(&s, 100.0, 204.0);
+        sz::lensNoteC(&s, sz::kNaN, 1.0);
+        double mx, my, sp;
+        sz::lensCStats(s, &mx, &my, &sp);
+        check(s.cN == 3 && near1(mx, 100.6666667, 1e-6) && near1(my, 201.3333333, 1e-6) && near1(sp, std::sqrt(0.8888889 + 3.5555556), 1e-6), "S1 stats: c's mean and spread over the frames (a NaN is not counted)");
+        sz::LensDoorStats none;
+        sz::lensCStats(none, &mx, &my, &sp);
+        check(std::isnan(mx) && std::isnan(my) && std::isnan(sp), "S1 stats: no frame has no mean and no spread");
+        sz::lensNoteGpu(&s, 0.020, 0.040);
+        sz::lensNoteGpu(&s, 0.030, 0.050);
+        sz::lensNoteGpu(&s, sz::kNaN, 0.050);
+        check(s.gpuN == 2 && near1(s.raysMsSum, 0.05, 1e-12) && near1(s.magMsMax, 0.05, 1e-12) && near1(s.raysMsMax, 0.03, 1e-12), "S1 stats: the GPU time of the two passes, the mean's sum and the maxima");
+        // the press: 100 qualifying frames, 4 declined by the door, 3 of the rest found open, the first 2 at M 1
+        sz::LensDoorStats p;
+        p.noop = 2;
+        p.dispatched = 94;
+        p.staleC = 1;
+        p.depthUnavailable = 2;
+        p.formatRefused = 1;
+        sz::LensReadback ok;
+        for (uint32_t k = 0; k < sz::kLensRays; ++k) ok.rDeg[k] = 5.0f + 0.01f * k;
+        ok.escaped = 0;
+        ok.depthAtC = 0.00122f;
+        sz::LensReadback open = ok;
+        open.escaped = 128;
+        for (uint32_t k = 0; k < sz::kLensRays; ++k) open.rDeg[k] = 12.0f;
+        sz::lensNoteRays(&p, open, false);
+        sz::lensNoteRays(&p, open, true);
+        sz::lensNoteRays(&p, ok, false);
+        check(p.openSight == 2 && p.raysRead == 3 && !p.holeKnown, "S1 stats: rays read back count open sights, and an open sight (every ray at 12 degrees) has no hole to take");
+        sz::LensDoorStats q;
+        sz::lensNoteRays(&q, ok, false);
+        check(!q.holeKnown, "S1 stats: the hole is taken from a settled frame, not the ease's");
+        sz::lensNoteRays(&q, ok, true);
+        check(q.holeKnown && near1(q.rMinDeg, 5.0, 1e-6) && q.holeEscaped == 0 && near1(q.depthAtC, 0.00122, 1e-9) && q.raysRead == 2, "S1 stats: the first settled frame gives the hole and the depth at c");
+        sz::LensReadback later = ok;
+        for (uint32_t k = 0; k < sz::kLensRays; ++k) later.rDeg[k] = 9.0f;
+        sz::lensNoteRays(&q, later, true);
+        check(near1(q.rMinDeg, 5.0, 1e-6), "S1 stats: only one frame's hole a press");
+        sz::lensFinish(&p);
+        check(p.applied == 94 - 2 + 2 && p.qualifying == 94 + 2 + 1 + 2 + 1, "S1 stats: applied is the dispatched less the open plus the M = 1 frames, qualifying adds the door's declines");
+    }
+    {
+        char line[1100];
+        sz::formatLensAnnounce(line, sizeof(line), true, 56.3, sz::lensTableEntries());
+        check(std::string(line).rfind("scope zoom (S1): on, reference FOV 56.3 deg, 12 table entries;", 0) == 0, "S1 lines: the announce says the key, the reference FOV and the table's size");
+        sz::formatLensAnnounce(line, sizeof(line), false, 64.8, 12);
+        check(std::string(line).rfind("scope zoom (S1): off, reference FOV 64.8 deg, 12 table entries;", 0) == 0, "S1 lines: the announce after the key went off");
+        sz::LensPressLine p;
+        p.press = 3;
+        p.item = "$wpn_m_sniper_plasma_charged_name;";
+        p.scope = "yes";
+        p.keyOn = true;
+        p.adsDeg = 15.0;
+        p.m = 4.0670;
+        p.refDeg = 56.3;
+        p.d.applied = 300;
+        p.d.qualifying = 310;
+        p.d.staleC = 4;
+        p.d.depthUnavailable = 3;
+        p.d.formatRefused = 3;
+        p.d.noS = 7;
+        p.d.notInTable = 0;
+        p.d.openSight = 0;
+        p.d.raysRead = 296;
+        p.d.holeKnown = true;
+        p.d.rMinDeg = 4.01;
+        p.d.rMedianDeg = 5.2;
+        p.d.rMaxDeg = 6.42;
+        p.d.holeEscaped = 1;
+        p.d.depthAtC = 0.00122;
+        p.d.depthNear = 0.0417;
+        sz::lensNoteC(&p.d, 1642.0, 1990.0);
+        sz::lensNoteC(&p.d, 1643.0, 1990.0);
+        sz::lensNoteGpu(&p.d, 0.0123, 0.0456);
+        const int n = sz::formatLensPress(line, sizeof(line), p);
+        const std::string text(line);
+        check(n == static_cast<int>(text.size()) && n < 1100 &&
+                  text.rfind("scope zoom (S1): press 3 item $wpn_m_sniper_plasma_charged_name; scope yes key on ads 15.000 deg M 4.067 h 56.3 deg; applied 300 of 310 qualifying frames; declined: "
+                             "no S 7, stale c 4, open sight 0, not in the table 0, depth unavailable 3, format refused 3; hole r min 4.01 median 5.20 max 6.42 deg, 1 of 128 rays escaped (rays read on 296 frames); "
+                             "depth at c 0.001220 (near 0.041700); c mean (1642.5, 1990.0) px spread 0.50 px; GPU rays 0.012 ms (max 0.012), magnify 0.046 ms (max 0.046)",
+                             0) == 0,
+              "S1 lines: the press line carries the item, scope, key, ADS FOV, M, h, the applied and qualifying frames, every decline, the hole, the depth, c's mean and spread and the GPU price");
+        sz::LensPressLine empty;
+        empty.refDeg = 56.3;
+        sz::formatLensPress(line, sizeof(line), empty);
+        const std::string e(line);
+        check(e.find("press 0 item none scope unknown key off ads none deg M none h 56.3 deg; applied 0 of 0 qualifying frames; declined: no S 0, stale c 0, open sight 0, not in the table 0, "
+                     "depth unavailable 0, format refused 0; ") != std::string::npos,
+              "S1 lines: a press with nothing in it says none for what it does not have");
+        check(e.find("hole r min none median none max none deg, 0 of 128 rays escaped (rays read on 0 frames); depth at c none (near none); c mean (none, none) px spread none px; "
+                     "GPU rays none ms (max none), magnify none ms (max none)") != std::string::npos,
+              "S1 lines: no hole, depth, c or GPU time is the word none, so a rule can read it");
+        sz::formatLensPress(line, 40, p);
+        check(std::strlen(line) < 40, "S1 lines: a buffer that is too small is cut, not overrun");
+    }
+}
+
+}  // namespace s1test

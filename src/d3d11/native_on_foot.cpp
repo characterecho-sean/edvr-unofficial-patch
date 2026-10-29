@@ -72,6 +72,8 @@
 #include "native_on_foot_f159.h"   // F159: the left elbow's stable pole reseeded at the shoulder's height, its seeds' births counted and logged (pure parts)
 #include "native_on_foot_f160.h"   // F160: the neck reference's raise blended through the ADS release; the holster bridge's line (pure parts)
 #include "scope_zoom_s0.h"   // S0: the scope zoom instrument, measure only (pure parts)
+#include "scope_zoom_s1.h"   // S1/A1: the scope lens's table, gate, ease and lines (pure parts)
+#include "scope_zoom.h"      // S1/A1: the lens's frame record for the door (scopeZoomPublish)
 #include "flat_camera_inject.h"   // S0: flatCameraInjectObserveStatus, the refresh hook's state for the flat announce
 #include "pixel_probe.h"   // S0: the pixel probe's points and its armed state, for the lens census
 #include "xinput_watch.h"         // F135: the pad's Start and Back edges, evidence for the menu probe only
@@ -243,6 +245,10 @@ std::atomic<float> g_f88WPub{0.0f};
 // F106: fix.native_on_foot_ads_sight_both_eyes (live): while the sights are up the left eye shows the right (aiming) eye's image, turned into its own view, by the ADS
 // lock's weight. A USER key, default on. It replaced F89's left eye close (its key retired: retiredKeysNote).
 std::atomic<bool> g_f106SightBothKey{true};
+// A1 (live): fix.native_on_foot_ads_scope_zoom, the scope lens (scope_zoom.h): while the sights are up the right eye's picture inside the scope's frame is magnified by the game's
+// own zoom. A USER key, off until the lens has flown; the reference FOV M is measured from is experimental.native_on_foot_ads_scope_zoom_fov (TEMPORARY, degrees, live).
+std::atomic<bool> g_scopeZoomKey{false};
+std::atomic<float> g_scopeZoomRefDeg{static_cast<float>(edvr::scopezoom::kLensRefDefaultDeg)};
 // F93b (TEMPORARY A/B, live): fix.native_on_foot_ads_eye_steady. on (the default): the ADS sight lock's target is the shift the measured eye was rendered with plus the
 // error measured on it (nofoot::f93::sightTarget); off: F70's, the shift published now plus that error.
 std::atomic<bool> g_f93SteadyKey{true};
@@ -1110,6 +1116,24 @@ void readKey() {
                                  "it comes in with the sight lock (0.15 s) and goes with it (0.3 s); depth flattens while you aim; never outside ADS"
                                : "each eye keeps its own view while you aim down sights (normal stereo)");
         g_f106SightBothKey.store(on, std::memory_order_relaxed);
+    }
+    // A1 (live, the Native on foot page's "ADS: scope zoom"; the developer tier's "ADS: scope zoom FOV (experimental)"): the scope lens. The key is a user key, off until the lens has
+    // flown; the reference FOV is the h of M = tan(h / 2) / tan(ads / 2), the game's ADS FOV being absolute per weapon. One line at the first read and one at each change; the
+    // instrument's own announce (scope zoom (S1)) follows from the frame tick.
+    {
+        namespace sz = edvr::scopezoom;
+        const bool zoomOn = cfg.getString("fix.native_on_foot_ads_scope_zoom", "off") == "on";
+        const double ref = sz::lensClampRefDeg(static_cast<double>(cfg.getFloat("experimental.native_on_foot_ads_scope_zoom_fov", static_cast<float>(sz::kLensRefDefaultDeg))));
+        if (first || zoomOn != g_scopeZoomKey.load(std::memory_order_relaxed))
+            Log::get().note("native on foot ADS scope zoom (A1): fix.native_on_foot_ads_scope_zoom is %s -- %s", zoomOn ? "on" : "off",
+                            zoomOn ? "while you aim down sights through a weapon in the table, the right eye's picture inside the scope's frame is magnified by the game's own zoom (M from the "
+                                     "reference FOV below), after the upscaler and sharpening; the left eye follows with the sight in both eyes"
+                                   : "no lens: the scope shows the world at true scale");
+        if (first || static_cast<float>(ref) != g_scopeZoomRefDeg.load(std::memory_order_relaxed))
+            Log::get().note("native on foot ADS scope zoom (A1, TEMPORARY): experimental.native_on_foot_ads_scope_zoom_fov = %.1f deg (range %.0f..%.0f) -- the reference FOV M is measured "
+                            "from: M = tan(h / 2) / tan(the weapon's ADS FOV / 2)", ref, sz::kLensRefMinDeg, sz::kLensRefMaxDeg);
+        g_scopeZoomKey.store(zoomOn, std::memory_order_relaxed);
+        g_scopeZoomRefDeg.store(static_cast<float>(ref), std::memory_order_relaxed);
     }
     // F93b (TEMPORARY A/B, live): the ADS sight lock's input (fix.native_on_foot_ads_eye_steady).
     {
@@ -34344,6 +34368,144 @@ void s0VrNoteSample(const F141Sample& s, uint64_t now) noexcept {
         v.haveS = true;
     }
 }
+
+// ---- A1: the scope lens, the frame thread's half (scope_zoom_s1.h, scope_zoom.h; docs\design-vr-scope-magnification-2026-10-28.md, section 8) ---------------------------------------------
+// Each frame in native on foot VR the tick answers one question: does the lens run on the picture this frame draws (fix.native_on_foot_ads_scope_zoom on; the sights up, the game's w at
+// 1.0; the held item and scope in the table with M >= 1.05; S fresh, so c through the right eye's scene rows)? It publishes the answer with c (corrected for the draw's jitter by the
+// door, which owns the output's size), M after its ease and the tangents of the render, by seqlock, for the door on the draw thread. It borrows S0's geometry and the samples S0 keeps
+// from F141's drain (w, S); nothing is written to a game object. A press of the sights writes one `scope zoom (S1)` line at its end, from the door's counters. Frame thread only.
+namespace s1 {
+namespace sz = edvr::scopezoom;
+static_assert(sz::kLensScopeUnknown == loadout::kScopeUnknown && sz::kLensScopeNo == loadout::kScopeNo && sz::kLensScopeYes == loadout::kScopeYes,
+              "the lens table's scope numbers are the loadout's");
+
+constexpr uint32_t kPressLineCap = 200;   // press lines a session; later presses are counted by the door and not written
+constexpr uint64_t kItemRetryMs = 250;    // an item whose scope is not known yet is asked again this often
+
+struct State {
+    bool announced = false, announcedKey = false, open = false, keyNow = false;
+    double announcedRef = std::numeric_limits<double>::quiet_NaN();
+    uint32_t press = 0;
+    double lastT = 0.0, easeS = 0.0;
+    F141Item item;
+    uint32_t heldSerial = 0;
+    uint64_t itemMs = 0;
+    double adsDeg = std::numeric_limits<double>::quiet_NaN(), targetM = std::numeric_limits<double>::quiet_NaN(), refDeg = std::numeric_limits<double>::quiet_NaN();
+} g_s1;
+
+void announce(State& s, bool key, double ref) noexcept {
+    char line[512];
+    sz::formatLensAnnounce(line, sizeof(line), key, ref, sz::lensTableEntries());
+    Log::get().note("%s", line);
+    s.announced = true;
+    s.announcedKey = key;
+    s.announcedRef = ref;
+}
+void endPress(State& s) noexcept {
+    if (s.press > kPressLineCap) return;
+    sz::LensPressLine pl;
+    pl.press = s.press;
+    pl.item = s.item.name;
+    pl.scope = loadout::scopeName(s.item.scope);
+    pl.keyOn = s.keyNow;
+    pl.adsDeg = s.adsDeg;
+    pl.m = s.targetM;
+    pl.refDeg = s.refDeg;
+    scopeZoomPressTake(&pl.d);
+    char line[1100];
+    sz::formatLensPress(line, sizeof(line), pl);
+    Log::get().note("%s", line);
+}
+
+void tick(uint64_t nowMs) noexcept {
+    State& s = g_s1;
+    s0::Vr& v = s0::g_vr;
+    ScopeZoomFrame out;   // verdict kIdle: nothing asked of the lens
+    if (g_install != InstallState::Armed || runtimeFlatProfile()) {
+        s.open = false;
+        s.lastT = 0.0;
+        s.easeS = 0.0;
+        scopeZoomPublish(out);
+        return;
+    }
+    const bool key = g_scopeZoomKey.load(std::memory_order_relaxed);
+    const double ref = static_cast<double>(g_scopeZoomRefDeg.load(std::memory_order_relaxed));
+    if (!s.announced || key != s.announcedKey || ref != s.announcedRef) announce(s, key, ref);   // said when the tick first runs (so --health can tell a build that never ran S1) and at each change
+    const bool onFoot = nativeOnFootActive();
+    const bool ads = onFoot && g_adsState != kAdsIdle;
+    const double t = s0::seconds();
+    const double dt = s.lastT > 0.0 ? std::fmin(std::fmax(t - s.lastT, 0.0), 0.25) : 0.0;
+    s.lastT = t;
+    if (ads && !s.open) {   // the press begins (S0's numbering: its tick ran just before this one)
+        s.open = true;
+        s.press = v.press;
+        s.item = f141Item();
+        s.heldSerial = g_heldItemSerial.load(std::memory_order_acquire);
+        s.itemMs = nowMs;
+        s.easeS = 0.0;
+        s.adsDeg = s.targetM = std::numeric_limits<double>::quiet_NaN();
+        scopeZoomPressBegin(s.press);
+    }
+    if (!ads) {
+        if (s.open) {   // the press ended: the door's counters, one line
+            scopeZoomPublish(out);
+            endPress(s);
+            s.open = false;
+        }
+        s.easeS = 0.0;
+        scopeZoomPublish(out);
+        return;
+    }
+    s.keyNow = key;
+    s.refDeg = ref;
+    // the held item and its scope, asked again when the item changes and, while the scope state is unknown, every 250 ms
+    const uint32_t heldNow = g_heldItemSerial.load(std::memory_order_acquire);
+    if (heldNow != s.heldSerial || ((!s.item.coherent || s.item.scope == loadout::kScopeUnknown) && nowMs - s.itemMs >= kItemRetryMs)) {
+        s.heldSerial = heldNow;
+        s.item = f141Item();
+        s.itemMs = nowMs;
+    }
+    sz::LensGateIn gi;
+    gi.keyOn = key;
+    gi.onFoot = onFoot;
+    gi.adsActive = g_adsState == kAdsActive;
+    gi.wFull = v.wSeen && s0::freshMs(nowMs, v.wMs) && std::isfinite(v.w) && v.w >= 1.0f;
+    double adsDeg = std::numeric_limits<double>::quiet_NaN();
+    gi.tableHit = sz::lensAdsDeg(s.item.name, s.item.scope, &adsDeg);
+    gi.m = gi.tableHit ? sz::lensZoom(ref, adsDeg) : std::numeric_limits<double>::quiet_NaN();
+    s.adsDeg = adsDeg;
+    s.targetM = gi.m;
+    s0::Geometry g;
+    if (gi.keyOn && gi.onFoot && gi.adsActive && gi.wFull && gi.tableHit && gi.m >= sz::kLensMinM) {
+        g = s0::geometryNow(v, nowMs);   // c: the sight point S through the right eye's scene rows (S0's math, its conditions)
+        gi.sFresh = v.haveS && s0::freshMs(nowMs, v.sMs);
+        gi.cUsable = g.eye[1].ok && g.tanOk[1];   // c needs the rows and their tangents; the lens works in uv, so the scene target's size does not matter
+    }
+    const sz::LensVerdict verdict = sz::lensGate(gi);
+    out.verdict = static_cast<uint32_t>(verdict);
+    out.press = s.press;
+    out.mTarget = static_cast<float>(gi.m);
+    if (verdict == sz::LensVerdict::kQualifies) {
+        const double easeT = s.easeS;
+        s.easeS += dt;
+        out.m = static_cast<float>(sz::lensEase(gi.m, easeT));
+        out.uv[0] = static_cast<float>((g.eye[1].ndc[0] + 1.0) * 0.5);
+        out.uv[1] = static_cast<float>((1.0 - g.eye[1].ndc[1]) * 0.5);
+        // the draw's jitter for this eye: the door's picture is unjittered, c through the rows is where the game put S
+        uint64_t jseq = 0;
+        float jx = 0.0f, jy = 0.0f;
+        uint32_t jw = 0, jh = 0;
+        if (nativeTemporalDrawJitter(1, &jseq, &jx, &jy, &jw, &jh) && jw && jh) {
+            out.jitterUv[0] = jx / static_cast<float>(jw);
+            out.jitterUv[1] = jy / static_cast<float>(jh);
+        }
+        std::memcpy(out.tan4, g.tan[1], sizeof(out.tan4));
+    } else {
+        s.easeS = 0.0;   // the lens drops to 1 on the first frame that does not qualify
+    }
+    scopeZoomPublish(out);
+}
+}  // namespace s1
 }  // namespace
 
 void nativeOnFootFrameBoundary(uint32_t frameNo) {
@@ -34536,6 +34698,7 @@ void nativeOnFootFrameBoundary(uint32_t frameNo) {
     alignTick(GetTickCount64());   // F33: the body align (TEMPORARY, live)
     f141Tick(GetTickCount64());    // F141: the game's ADS sight point against P14 (the source of the ADS eye's shift since F143), the readout's anchor (an instrument); after the ADS lock's tick, on the same snapshots
     s0::vrTick(GetTickCount64());  // S0: scope zoom, measure only (VR, native on foot armed): the press line, the lens geometry and the pixel probe's census; after F141's drain
+    s1::tick(GetTickCount64());    // A1: the scope lens: its verdict, c and M for the door; after S0's tick, whose press number and samples it takes
     rotCalTick(GetTickCount64());  // F61: the rotation calibration (TEMPORARY, live; publishes zero while its key is off)
     f44::f119Boundary(frameNo, GetTickCount64());   // F119: the head containment instrument's depth grid and its line, after alignTick took the frame's head offset; F123: the leash and the wall contact
     {   // F123: the comfort fade is the max of F109's snap fade and the containment's, sent once a frame

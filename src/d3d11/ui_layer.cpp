@@ -28,6 +28,7 @@
 #include "ui_layer_seed_timing.h"
 #include "ui_layer_smaa.h"  // the flat profile's HUD edge smoothing: SMAA 1x over the layer before the composite
 #include "shield_ripple_shaders.h"  // the shield ripple's door pass
+#include "scope_zoom.h"  // the scope lens: right after the ripple at the door
 #include "sharp_weapons.h"  // the weapons layer's source pass, blend states and step bindings
 #include "temporal_shader_bytecode.h"
 #include "draw_state_describe.h"  // viewName, describeBlend/describeDs, shapeOf, dsStateOf
@@ -6422,6 +6423,27 @@ ID3D11Texture2D* uiLayerComposite(uint64_t sequence, uint32_t eye, ID3D11Texture
         frame = rewritten.Get();
         ownedFrame = false;
     }
+    // The scope lens (scope_zoom.h): the aiming (right) eye's picture inside the scope's frame, magnified by the game's zoom, after the upscaler and RCAS and before the weapons/HUD
+    // composite (which must not be magnified). A frame EDVR rewrites in full every frame, or the ripple's private copy of one, is written in place; any other comes back as the lens's
+    // own copy, which stands in for it from here on. The frame must be the upscaler's picture (e.doorFromPass): the lens reads its c unjittered.
+    if (eye == 1 && scopeZoomWanted()) {
+        guarded("scopeZoom.door", [&] {
+            ScopeZoomDoorArgs lensArgs;
+            lensArgs.eye = eye;
+            lensArgs.sequence = sequence;
+            lensArgs.frame = frame;
+            lensArgs.region = region;
+            lensArgs.inPlace = ownedFrame || rewritten;
+            lensArgs.resolved = e.doorFromPass;
+            Ptr<ID3D11Texture2D> lensCopy;
+            scopeZoomDoor(lensArgs, &lensCopy);
+            if (lensCopy) {
+                rewritten = lensCopy;
+                frame = rewritten.Get();
+                ownedFrame = false;
+            }
+        });
+    }
     if (!e.srv || !e.rtv || e.compositedSeq == sequence) return handOn();
     const bool hasUi = e.seq == sequence && e.draws;
     if (!hasUi) return handOn();
@@ -6737,6 +6759,7 @@ void releaseDeviceObjects() {
     }
     g_rip.csTried = false;
     g_rip.stage.Reset();
+    scopeZoomRelease();   // the scope lens's passes, buffers and copies (scope_zoom.cpp)
     g_rip.check = 0;
     g_rip.filter = 0;
     g_rip.gainZ = g_rip.gainY = 0.0f;

@@ -36,8 +36,9 @@ game's own zoom as a magnified picture inside the scope's lens. The rest of the 
 - **ruled out (cost or brief):** a third camera pass (C), magnifying in DLSS's input (E), a whole-view FOV change (D). Section 2.
 - **Analysis hand-over FILED** (analysis `1547986`): `analysis\decomp\verify_20261028_ads_zoom_receiver.txt` (the receiver, the correction to
   `analysis\decomp\verify_20261027_ads_sight_line.txt` section 1, the candidates).
-- **A1 BUILDING** (section 8; decided 2026-10-29): A for every sight in the table, B3 only if the scope is too soft. Temporary key:
-  `experimental.native_on_foot_ads_scope_zoom_fov` (the reference FOV, 56.3 by default). Next flight: A1's card, Epic in VR.
+- **A1 BUILT, NOT FLOWN** (branch `claude/scope-zoom-a1`; section 8, "As built"; decided 2026-10-29): A for every sight in the table, B3 only if the scope
+  is too soft. Keys: `fix.native_on_foot_ads_scope_zoom` (off until flown) and the temporary `experimental.native_on_foot_ads_scope_zoom_fov` (the
+  reference FOV, 56.3 by default). Next flight: A1's card, Epic in VR, with the user key turned on in the menu first.
 - Separate arc: a flat stutter on the scoped Executioner's ADS (2026-10-29), in its own doc,
   `docs\investigation-flat-scoped-ads-stutter-2026-10-29.md`, on its own branch.
 - **Key (after S0, on the maintainer's word):** `fix.native_on_foot_ads_scope_zoom` = on | off. Section 5.
@@ -385,7 +386,29 @@ with `tools\native_frame_test\s1_checks.h`. A GPU rig in the pattern of `tools\s
 whose depth is a near hexagonal ring about c, far inside and out. It checks that inside the ring the frame is sampled at c + d/M, that
 the ring and everything outside are unchanged, that an open ring leaves the frame alone, and that another format is refused.
 
+**As built** (2026-10-29, branch `claude/scope-zoom-a1`; the full local build and all its gates green, nothing flown).
+- Pure parts: `src\d3d11\scope_zoom_s1.h` (table, M, gate, ease, the reference march, r(theta), mask, window, the rays buffer's layout, the accumulators and the two
+  lines), checked by `tools\native_frame_test\s1_checks.h`. The passes: `src\d3d11\scope_zoom_shaders.h` (registered in
+  `tools\temporal_shader_build\fixed_scope_zoom_variants.h`) and the door, `src\d3d11\scope_zoom.cpp`, linked as shipped by the GPU rig
+  `tools\scope_zoom_test` (WARP, debug layer; R8G8B8A8 and B8G8R8A8 in place, a copy for a frame EDVR may not write, a gap of two rays, an open sight, a refused format,
+  every decline reason, three mutants of the comparator). The frame thread's half is `s1::tick` in `native_on_foot.cpp`, after `s0::vrTick`.
+- The depth is the view the temporal pass makes for the upscaler (`scopeZoomDepthSet` in `temporal_pass.cpp`, cleared at the top of each eye's treat), so the door
+  reads exactly what DLSS read, and the output merger's depth target is unbound around pass 1. Only the right eye's door (Submit's eye 1) is called.
+- c is published as a uv of the render with the draw's jitter in uv; the door puts it on the region (c less the jitter, unjittered) and on the depth (as drawn). A c older than
+  50 ms is `stale c`. The window the passes touch is the 12 degrees about c (at most ~1000 px square), so the region copy does not grow with the output.
+- Departures from the plan above, each on purpose: (1) an escaped ray (at most two; more is an open sight) takes the smaller radius of its nearest rays that did not escape, so a
+  gap in the frame does not draw a spike of lens; (2) the open-sight rule runs on the GPU (pass 2's groups are 0) and the CPU learns it from the rays read back, a few frames
+  late, so `open sight` and `applied` lag by the ring and rays not yet read count as applied; (3) `not in the table` also counts an M under 1.05, and `format refused` also counts
+  the other ways the frame route can refuse (a picture that is not the upscaler's, a view, a copy, a shader); (4) the user key is off by default ("default on once flown OK");
+  (5) the experimental key''s row is in the developer tier, where the generator puts every `[experimental]` key (the section decides the page); (6) the GPU census item is
+  named `lens` in the census line, to keep its worst-case line under the 1150 characters `gpu_census_test` holds; (7) the ease is a smoothstep of the exponent, so the zoom grows
+  evenly in size.
+- Not verified, for the flight: that the depth is intact at the door (the S1 line says: `depth at c` far, `hole r` 4 to 8 degrees for the Executioner, `depth unavailable` 0);
+  the eye numbering (S1''s `c mean` for the scoped Executioner should be near S0''s geometry px (821, 995) of 2016x2017, that is about (1642, 1990) of the 4032 picture, less the
+  jitter); that the bounds the door gets are never flipped (the lens maps the eye''s uv onto the region as given); that the frame thread and the draw thread are one (the jitter
+  is read with `nativeTemporalDrawJitter` on the frame thread); the raw indirect-argument buffer and the typed stores on a real GPU (the rig ran on WARP).
 **Flight card (A1, Epic in VR):**
+- Turn "ADS: scope zoom" on in the Native on foot page first (the key is off until flown).
 - The scoped Executioner in ADS: 10 s still, then 10 s turning the head.
 - The bare Executioner, and two unscoped weapons (a 48 deg rifle and a 52 deg pistol).
 - In one scoped ADS: switch the key off and back on, and move the reference FOV row to 64.8 and back.
