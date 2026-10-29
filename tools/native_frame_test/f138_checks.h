@@ -366,15 +366,26 @@ inline void run138(Check&& check) {
             for (int i = 0; i < n; ++i) t.noteRunning(t0 + i / 90.0, target, kEye - sinkM, neck, kHead, gen, true);
             return t0 + n / 90.0;
         };
-        // 1. no settle ever, 3 level calls (the three the flight's second 21:58:21 counted at +11 to +15 deg), then the look straight up: the sink is added from the running reference
+        // 1. no settle ever, 3 level calls (the three the flight's second 21:58:21 counted at +11 to +15 deg), then the look straight up: the sink is MEASURED on the running reference and nothing
+        // is published (F171: the flight edvr_gfx_20261029_043951 ran the raise to its clamp on a running reference's sink)
         f138::Tracker t;
         const double tEnd = level(t, 100.0, 3);
         check(t.run.have && !t.ref.have && std::fabs(t.run.g - 0.16) < 1e-12 && std::fabs(t.run.target - kTarget) < 1e-12 && t.run.generation == 3, "F170: three level calls with nothing drawn are a running reference: G 0.16, the target in force");
         (void)tEnd;
         const f138::Out up = t.step(pitchedCall(60.0, 0.086));
-        check(up.reached && up.source == f138::kSrcRunning && up.reason == f138::kApplied && up.publish && std::fabs(up.sinkM - 0.086) < 1e-12 && std::fabs(up.publishM - (kTarget + 0.086)) < 1e-12 &&
-                  std::fabs(up.addedM - 0.086) < 1e-12 && up.sinkValid,
-              "F170: a look-up straight after a holster at level, with no settle, adds the sink (8.6 cm) from the running reference: the target is the one in force plus the sink");
+        check(up.reached && up.source == f138::kSrcRunning && up.reason == f138::kRunningMeasured && !up.publish && up.sinkValid && std::fabs(up.sinkM - 0.086) < 1e-12 && up.addedM == 0.0 && !t.added,
+              "F171: a look-up straight after a holster at level, with no settle, measures the sink (8.6 cm) on the running reference and publishes nothing: its own reason, 'running reference, measured only', and the tracker has added nothing");
+        check(std::strcmp(f138::reasonName(f138::kRunningMeasured), "running reference, measured only") == 0 && f138::kReasons == 11 && f138::kRunningMeasured == 10,
+              "F171: the reason is named 'running reference, measured only'");
+        // the settled path is as it was: the same look-up on a settled reference adds the sink and publishes the target plus it
+        f138::Tracker settledOnly = stanced();
+        const f138::Out settledUp = settledOnly.step(pitchedCall(60.0, 0.086));
+        check(settledUp.source == f138::kSrcSettled && settledUp.reason == f138::kApplied && settledUp.publish && std::fabs(settledUp.publishM - (kTarget + 0.086)) < 1e-12 && std::fabs(settledUp.addedM - 0.086) < 1e-12 &&
+                  settledOnly.added,
+              "F171: the settled reference is unchanged: it adds the sink (8.6 cm) and publishes the target plus it");
+        // a running-only episode ends with nothing to give back (it published nothing)
+        const f138::Out runningEnd = t.step(pitchedCall(5.0, 0.0));
+        check(!runningEnd.publish && !runningEnd.returned && !runningEnd.returnRefused && runningEnd.notNeeded, "F171: and its end gives nothing back: not needed");
         // the same look-up with no level call at all has nothing to measure against (no default reference is built): refused, source none
         f138::Tracker bare;
         const f138::Out blind = bare.step(pitchedCall(60.0, 0.086));
@@ -392,8 +403,8 @@ inline void run138(Check&& check) {
         f138::Tracker moved = stanced();
         level(moved, 100.0, 30, kTarget, 4u);
         const f138::Out recentred = moved.step([&] { f138::In in = pitchedCall(60.0, 0.08); in.generation = 4; return in; }());
-        check(recentred.source == f138::kSrcRunning && recentred.reason == f138::kApplied && std::fabs(recentred.sinkM - 0.08) < 1e-12,
-              "F170: after a recentre the settled reference is refused (another LOCAL frame) and the running one, taken in the new one, stands in");
+        check(recentred.source == f138::kSrcRunning && recentred.reason == f138::kRunningMeasured && !recentred.publish && std::fabs(recentred.sinkM - 0.08) < 1e-12,
+              "F170: after a recentre the settled reference is refused (another LOCAL frame) and the running one, taken in the new one, stands in (F171: for the measurement; it publishes nothing)");
         f138::Tracker movedOnly = stanced();
         const f138::Out stale = movedOnly.step([&] { f138::In in = pitchedCall(60.0, 0.08); in.generation = 4; return in; }());
         check(stale.reason == f138::kGeneration && stale.source == f138::kSrcNone && !stale.publish, "F170: with no running reference the refusal is the old one (the LOCAL pose's generation changed)");
@@ -445,18 +456,18 @@ inline void run138(Check&& check) {
         const double sameG = same.run.g;
         same.noteRunning(100.0 + 29.0 / 90.0, kTarget, kEye - 0.5, kNeck, kHead, 3u, true);
         check(same.run.g == sameG, "F170: two samples at one instant do not move it");
-        // 6. nothing is taken while this tracker's own sunk target is in force
-        f138::Tracker inForce;
+        // 6. nothing is taken while this tracker's own sunk target is in force (F171: only the settled reference publishes one now; the running reference beside it still stands aside)
+        f138::Tracker inForce = stanced();
         level(inForce, 100.0, 30);
         inForce.step(pitchedCall(60.0, 0.086));
-        check(inForce.added, "F170: the sink was added");
+        check(inForce.added, "F170: the sink was added (from the settled reference)");
         const double targetBefore = inForce.run.target;
         inForce.noteRunning(102.0, kTarget + 0.086, kEye, kNeck, kHead, 3u, true);
         check(inForce.run.target == targetBefore, "F170: the running reference does not take the sunk target it published itself");
-        // 7. the end of the episode gives the running reference's target back, once
+        // 7. the end of the episode gives the stance's target back, once
         const f138::Out edge = inForce.step(pitchedCall(5.0, 0.0));
         check(edge.returned && edge.publish && std::fabs(edge.publishM - kTarget) < 1e-12 && !inForce.step(pitchedCall(5.0, 0.0)).publish,
-              "F170: back to a level look the running reference's target (the one in force before the look) is published once");
+              "F170: back to a level look the stance's target (the one in force before the look) is published once");
         // 8. the reset (the on-foot camera's edge) clears it
         t.reset();
         check(!t.run.have && !t.ref.have && t.runT == 0.0, "F170: the reset clears the running reference with the settled one");
@@ -503,6 +514,102 @@ inline void run138(Check&& check) {
         check(std::strcmp(text, "settled 0, running 0, none 0") == 0 && std::strcmp(f138::sourceName(f138::kSrcSettled), "settled") == 0 && std::strcmp(f138::sourceName(f138::kSrcRunning), "running") == 0 &&
                   std::strcmp(f138::sourceName(f138::kSrcNone), "none") == 0,
               "F170: an empty window reads zeros; the three sources are named settled, running, none");
+    }
+
+    // ---- F171: the running reference measures only; the reference's figures on the line -----------------------------------------------------------------------------------------------------
+    // The flight edvr_gfx_20261029_043951, 04:44:25 to 04:44:35: unarmed, mouse look, aim +52 to +85 deg, the reference used "running" on every applied call, the sink -25.9 to -40.0 cm (negative),
+    // the raise it added ran to -50 cm on 90 of 90 ticks. The window says why nothing was added, and what the reference was.
+    {
+        f138::Tracker t;
+        for (int i = 0; i < 3; ++i) t.noteRunning(100.0 + i / 90.0, kTarget, kEye, kNeck, kHead, 3u, true);
+        f138::Window w;
+        for (int i = 0; i < 6; ++i) {
+            f138::Call c;
+            c.aimDeg = 60.0;
+            f138::In in = pitchedCall(60.0, 0.05);
+            in.tS = 102.0 + i / 90.0;
+            c.out = t.step(in);
+            w.add(c);
+        }
+        char why[260];
+        f138::notAppliedText(w.why, why, sizeof(why));
+        check(w.appliedN == 0 && w.why[f138::kRunningMeasured] == 6 && w.consideredN == 6 && w.sinkN == 6 && w.pubN == 0 && std::strcmp(why, "running reference, measured only 6") == 0,
+              "F171: six pitched calls on the running reference are considered, measured (the sink is in the window), added none and published none; the line's not-applied list names 'running reference, measured only 6'");
+        // the reference's figures: the running one started over at 100.0 (the first sample), so its age at 102.0 is 2.0 s, its target 12 cm, its G 16 cm; G now 11 cm
+        char detail[240];
+        f138::referenceDetailText(w, detail, sizeof(detail));
+        check(w.refN == 6 && std::strcmp(f138::sourceName(w.refSrcLast), "running") == 0 &&
+                  std::strstr(detail, "reference detail (F171; the calls that had one 6): last source running, age 2.0 s, target +12.0 cm, G +16.0 cm, G now +11.0 cm; target published +0.0 cm in 0 calls") != nullptr,
+              "F171: the line gives the reference's source, age (s since it started over), target and G, G now, and the mean target published (none: +0.0 cm in 0 calls)");
+        // a settled reference taken at 100.0 and used at 103.5: age 3.5 s, and it publishes: the mean target published is its target plus the sink
+        f138::Tracker s;
+        s.noteStance(0.10, kEye, kNeck, kHead, static_cast<uint32_t>(kGen), true, 100.0);
+        f138::Window ws;
+        for (int i = 0; i < 4; ++i) {
+            f138::Call c;
+            c.aimDeg = 60.0;
+            f138::In in = pitchedCall(60.0, 0.04);
+            in.tS = 103.5;
+            c.out = s.step(in);
+            ws.add(c);
+        }
+        f138::referenceDetailText(ws, detail, sizeof(detail));
+        check(ws.appliedN == 4 && ws.pubN == 4 && std::strstr(detail, "last source settled, age 3.5 s, target +10.0 cm, G +16.0 cm, G now +12.0 cm; target published +14.0 cm in 4 calls") != nullptr,
+              "F171: a settled reference taken at 100.0 and used at 103.5 reads age 3.5 s, and what it published is its target plus the 4 cm sink: +14.0 cm in 4 calls");
+        // a tracker with no time: the age is unknown, counted for none (0.0 s on the line, 0 of the calls it is a mean of)
+        f138::Tracker noTime = stanced();
+        f138::Window wn;
+        f138::Call cn;
+        cn.aimDeg = 60.0;
+        cn.out = noTime.step(pitchedCall(60.0, 0.04));
+        wn.add(cn);
+        check(wn.refN == 1 && wn.refAgeN == 0 && std::isnan(cn.out.refAgeS), "F171: without a time the age is not a number and is not counted");
+        // no reference at all: the detail reads zeros and source none
+        f138::Window wz;
+        f138::referenceDetailText(wz, detail, sizeof(detail));
+        check(std::strstr(detail, "the calls that had one 0): last source none, age 0.0 s, target +0.0 cm, G +0.0 cm, G now +0.0 cm; target published +0.0 cm in 0 calls") != nullptr, "F171: an empty window reads zeros and source none");
+        // the whole line, at its worst, inside the log's 1200 bytes
+        f138::Window big;
+        for (int i = 0; i < 90; ++i) {
+            f138::Call c;
+            c.aimDeg = i % 2 ? 85.0 : -85.0;
+            c.lookToAim = i % 3 == 0;
+            c.itemDrawn = i % 5 == 0;
+            c.headValid = true;
+            c.headDeg = -89.9;
+            c.carriedUpCm = -50.0;
+            c.carriedFwdCm = -50.0;
+            c.viewOverNeckCm = -50.0;
+            c.out.pitched = true;
+            c.out.considered = true;
+            c.out.w = 1.0;
+            c.out.reason = i % 11;
+            c.out.reached = true;
+            c.out.source = i % 3;
+            c.out.sinkValid = true;
+            c.out.sinkM = -0.40;
+            c.out.headRiseM = -0.40;
+            c.out.refValid = true;
+            c.out.refAgeS = 99999.9;
+            c.out.refTargetM = -0.50;
+            c.out.refGM = -0.50;
+            c.out.gNowM = -0.50;
+            c.out.publish = true;
+            c.out.publishM = -0.50;
+            c.out.addedM = -0.40;
+            big.add(c);
+        }
+        big.returned = big.returnRefused = big.notNeeded = 99;
+        char line[1300];
+        const int len = f138::formatPitched(line, sizeof(line), big, "$wpn_m_shotgun_plasma_doublebarrel_name_with_a_long_tail in 18 of 90 calls", 99);
+        // a realistic second: one reason, the running reference, a rifle's name
+        char typical[1300];
+        const int typicalLen = f138::formatPitched(typical, sizeof(typical), w, "none", 0);
+        char msg[300];
+        std::snprintf(msg, sizeof(msg), "F171: the 1 s line is inside the log's 1166 bytes (1200 less its stamp and truncation marker) with every figure at its worst (%d bytes; a typical second %d)", len, typicalLen);
+        check(len > 0 && len < 1166 && typicalLen > 0 && typicalLen < 1000 && std::strstr(typical, "not applied: running reference, measured only 6; reference used (F170; the calls that chose one): settled 0, running 6, none 0; reference detail (F171;") != nullptr &&
+                  std::strstr(typical, "; EDVR carried up ") != nullptr,
+              msg);
     }
 
     // ---- F170: the window is not read twice ------------------------------------------------------------------------------------------------------------------------------------------------

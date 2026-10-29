@@ -63,6 +63,7 @@
 #include "f168_checks.h"    // F168: the crouched body's dial (TEMPORARY): the range, the move scaled by the crouched and detach weights (exactly 0 standing and at the hip), its vector along the aim's horizontal forward, the pin's move, the counters and the line; F169: a positive dial past the reach rule, the move as written
 #include "f169_checks.h"    // F169: the stance while the aim is pitched (w_c capped under the animated neck's posture weight, the replays, the window and its line); the pistol sprint's arm swing (TEMPORARY): the plan, the ring, the stride's period, the delay, the measure and the line
 #include "f170_checks.h"    // F170: the crouched ADS torso squared to the aim (TEMPORARY): the dial, the share, the turn on the real square-up and reach functions (29 deg to 0 at 1, 14.5 at 0.5), the hold not taking it off, the line
+#include "f171_checks.h"    // F171: the crouched ADS body moved to the left of the aim line (TEMPORARY): the dial, the left axis and its sign against the eye's right, the move through the real reach rule, the counters and the line; the raise's carriage (slopes, pairs, window, line); F170's line reaching the log (logpin::elbow's merges against F98Left)
 #include "f151_checks.h"    // F151: the weapon readout's draw bound by its place (the ordinals, each guard, one bind per key, the lost-frame count) and the held copy's scope from the selected slot
 #include "f110_checks.h"    // F110: the ADS sight lock's model right eye (the left-eye job camera plus the IPD)
 #include "f111_checks.h"    // F111: the panel pointer instrument's statistics and verdict
@@ -7617,6 +7618,11 @@ int wmain(int argc, wchar_t** argv) {
     // reach rule keeping the left shoulder within reach of the foregrip with the shoulders turned, the counters and the line within the log's limit. And (in F138's checks) the running reference for a look-up
     // before any settle and the window not read twice.
     f170test::run170(check);
+    // F171: the crouched ADS body moved to the left of the aim line: the dial and the move (exactly 0 at the dial's 0, standing and at the hip), the left axis and its sign against the eye's right at every
+    // heading, the move through the real reach rule on shoulders and grips from the flight (13.9 of 15 cm survive, the left grip still reached), the counters and the line within the log's limit; the raise's
+    // carriage (the slopes 1, 0 and -1 on synthetic pairs, the pairing rules, the window and its mailbox, the line); and F170's line reaching the log (a window built through logpin::elbow carries every
+    // counters member of F98Left, read from the source).
+    f171test::run171(check);
     // F110: the ADS sight lock's model right eye from the left-eye job camera and from a solved left eye, the fallback, the IPD's sign.
     f110test::run110(check);
     // F111: the panel pointer instrument names the stage that turns a move the other way (K1 to K5, one at a time), the camera getters' decoding.

@@ -22,6 +22,12 @@
 // same stance guard. A settled reference wins when it is usable; the running one stands in when there is none or the settled one is refused (the LOCAL pose's generation moved, the stance
 // changed). It clears with the reset (the on-foot camera's edge). The 1 s line names the reference each call used: settled, running or none. And the 1 s line no longer repeats a window
 // nothing has written to since it was taken (Mailbox).
+//
+// F171, after the flight edvr_gfx_20261029_043951 (build d64b85ac): the running reference drove the raise to its clamp. Unarmed, mouse look, aim +52 to +85 deg, the reference used was
+// "running" on every applied call, the sink read -25.9 to -40.0 cm (negative), the raise it added ran to -50.0 cm on 90 of 90 ticks, and the game's camera over the neck read +14 to +40 cm
+// against it. A call whose reference is the running one now MEASURES the sink and publishes nothing (it does not set `added`): its own reason, "running reference, measured only". The
+// settled path is unchanged. The line also says the reference's age, target and G, G now, and the mean target published (referenceDetailText). Why the camera moved against the raise is
+// F171's other instrument (native_on_foot_f171c.h).
 #pragma once
 
 #include <algorithm>
@@ -75,9 +81,10 @@ inline double sinkOf(double refG, double gNow) noexcept { return clampSink(refG 
 inline double targetOf(double refTarget, double w, double sinkM) noexcept { return refTarget + w * sinkM; }
 inline bool stanceHolds(double neckY, double refNeckY) noexcept { return std::isfinite(neckY) && std::isfinite(refNeckY) && std::fabs(neckY - refNeckY) <= kStanceGuardM; }
 
-// Why a pitched call (w > 0) did not add the sink; kApplied added it, kItemDrawn measured it and published nothing.
+// Why a pitched call (w > 0) did not add the sink; kApplied added it, kItemDrawn measured it and published nothing. F171: kRunningMeasured also measured it and published nothing: the
+// reference was the running one.
 enum Reason : int {
-    kApplied = 0, kItemDrawn = 1, kNoReference = 2, kPoseInvalid = 3, kGeneration = 4, kStance = 5, kAds = 6, kCameraAway = 7, kSettleOwned = 8, kInputs = 9, kReasons = 10
+    kApplied = 0, kItemDrawn = 1, kNoReference = 2, kPoseInvalid = 3, kGeneration = 4, kStance = 5, kAds = 6, kCameraAway = 7, kSettleOwned = 8, kInputs = 9, kRunningMeasured = 10, kReasons = 11
 };
 // F170: which reference a call used. Settled: the unarmed stance the settle published; running: the smoothed one taken whenever nothing was drawn and the aim was level; none.
 enum Source : int { kSrcNone = 0, kSrcSettled = 1, kSrcRunning = 2, kSources = 3 };
@@ -100,6 +107,7 @@ inline const char* reasonName(int r) noexcept {
         case kCameraAway: return "camera away";
         case kSettleOwned: return "the settle published";
         case kInputs: return "an input is not a number";
+        case kRunningMeasured: return "running reference, measured only";
         default: return "?";
     }
 }
@@ -111,8 +119,10 @@ struct Stance {
     double neckY = 0.0;        // the animated neck's height
     double localY = 0.0;       // the headset's LOCAL height
     uint32_t generation = 0;   // the LOCAL pose's generation
+    double tS = std::nan("");  // F171: when it was taken (s, the call's clock; not a number: unknown). The running one: when it started over, not its last sample
 };
 struct In {
+    double tS = std::nan("");            // F171: the call's time (s), for the reference's age
     double aimPitchDeg = std::nan("");   // the FP root's pitch, nose up + (not a number: unknown this call)
     bool settleOwned = false;            // the existing code published a target this call (the settle's, or ADS's zero): it owns the raise
     bool lookToAim = false;              // look to aim drives the aim (engaged and not held): a look down stays as flown
@@ -133,6 +143,9 @@ struct Out {
     double headRiseM = 0.0;      // the headset's own height since the stance (m); valid with sinkValid
     int source = kSrcNone;       // F170: the reference this call used (meaningful with reached)
     bool reached = false;        // F170: the call got as far as choosing a reference (applied, measured only, no reference, generation changed, stance changed)
+    bool refValid = false;       // F171: a reference was chosen: the next four are its figures
+    double refAgeS = std::nan("");   // F171: s since it was taken (not a number: unknown)
+    double refTargetM = 0.0, refGM = 0.0, gNowM = 0.0;   // F171: its target and G, and G as this call forms it
     bool publish = false;        // the hook publishes publishM as the raise's target
     double publishM = 0.0;
     double addedM = 0.0;         // w times the sink, when applied
@@ -155,7 +168,7 @@ struct Tracker {
         episode = false;
     }
     // A settled unarmed upright stance was published (the hook calls this beside f94TargetPublish). A pose that is not valid drops the reference: a stale one must not be used.
-    void noteStance(double target, double rawEyeY, double neckY, double localHeadY, uint32_t generation, bool poseValid) noexcept {
+    void noteStance(double target, double rawEyeY, double neckY, double localHeadY, uint32_t generation, bool poseValid, double tS = std::nan("")) noexcept {
         Stance s;
         s.have = poseValid && std::isfinite(target) && std::isfinite(rawEyeY) && std::isfinite(neckY) && std::isfinite(localHeadY);
         if (s.have) {
@@ -164,6 +177,7 @@ struct Tracker {
             s.neckY = neckY;
             s.localY = localHeadY;
             s.generation = generation;
+            s.tS = tS;   // F171: the reference's age is read against it
         }
         ref = s;
         added = false;     // the settle published a target of its own
@@ -197,6 +211,7 @@ struct Tracker {
         run.neckY = neckY;
         run.localY = localHeadY;
         run.generation = generation;
+        run.tS = tS;   // F171: the age of a running reference counts from here, where it started over
         runT = tS;
     }
     // F170: the reference a call uses, and why none. The settled one when it is usable (the same LOCAL pose generation, the same stance), else the running one when that is, else none
@@ -269,10 +284,17 @@ struct Tracker {
                 o.reason = why;
             } else {
                 o.sinkValid = true;
-                o.sinkM = sinkOf(use->g, gOf(in.rawEyeY, in.neckY, in.localHeadY));
+                o.gNowM = gOf(in.rawEyeY, in.neckY, in.localHeadY);
+                o.sinkM = sinkOf(use->g, o.gNowM);
                 o.headRiseM = in.localHeadY - use->localY;
+                o.refValid = true;   // F171: the reference's figures
+                o.refTargetM = use->target;
+                o.refGM = use->g;
+                o.refAgeS = std::isfinite(in.tS) && std::isfinite(use->tS) ? in.tS - use->tS : std::nan("");
                 if (in.itemDrawn) {
                     o.reason = kItemDrawn;   // measured only
+                } else if (src == kSrcRunning) {
+                    o.reason = kRunningMeasured;   // F171: measured only. The flight edvr_gfx_20261029_043951 ran the raise to its clamp on a running reference's sink; nothing is published, `added` stays as it was
                 } else {
                     o.reason = kApplied;
                     o.publish = true;
@@ -340,6 +362,11 @@ struct Window {
     uint32_t inside = 0, insideOf = 0;
     uint32_t settleRefusedAim = 0;
     uint32_t returned = 0, returnRefused = 0, notNeeded = 0;
+    // F171: the reference the considered calls chose, as figures: the calls that had one, its age (s; the calls it was known for), target and G (cm), G as the call formed it (cm), the
+    // source of the last one, and the target the hook published (cm; the calls that published, an episode's return among them)
+    uint32_t refN = 0, refAgeN = 0, pubN = 0;
+    int refSrcLast = kSrcNone;
+    double refAgeSum = 0.0, refTargetSum = 0.0, refGSum = 0.0, gNowSum = 0.0, pubSum = 0.0;
     Group group[2][2];   // [look to aim][item drawn]
     void clear() noexcept { *this = Window{}; }
     void add(const Call& c) noexcept {
@@ -368,6 +395,17 @@ struct Window {
             const int r = c.out.reason >= 0 && c.out.reason < kReasons ? c.out.reason : kInputs;
             ++why[r];
             if (c.out.reached) ++srcN[c.out.source >= 0 && c.out.source < kSources ? c.out.source : kSrcNone];
+            if (c.out.refValid) {   // F171
+                ++refN;
+                refSrcLast = c.out.source >= 0 && c.out.source < kSources ? c.out.source : kSrcNone;
+                refTargetSum += 100.0 * c.out.refTargetM;
+                refGSum += 100.0 * c.out.refGM;
+                gNowSum += 100.0 * c.out.gNowM;
+                if (std::isfinite(c.out.refAgeS)) {
+                    ++refAgeN;
+                    refAgeSum += c.out.refAgeS;
+                }
+            }
             if (r == kApplied) {
                 ++appliedN;
                 addedSum += 100.0 * c.out.addedM;
@@ -375,6 +413,10 @@ struct Window {
             } else if (r == kItemDrawn) {
                 ++measuredN;
             }
+        }
+        if (c.out.publish) {   // F171: what the hook published this call (the sunk target, or the stance's given back)
+            ++pubN;
+            pubSum += 100.0 * c.out.publishM;
         }
         upSum += c.carriedUpCm;
         fwdSum += c.carriedFwdCm;
@@ -426,6 +468,14 @@ inline void notAppliedText(const uint32_t why[kReasons], char* buf, size_t cap) 
 inline void referenceText(const uint32_t srcN[kSources], char* buf, size_t cap) noexcept {
     std::snprintf(buf, cap, "settled %u, running %u, none %u", srcN[kSrcSettled], srcN[kSrcRunning], srcN[kSrcNone]);
 }
+// F171: the reference's figures over the second's considered calls that had one (the means of its age, target and G, and of G as the calls formed it), the source of the last of them, and
+// the mean target the hook published in the second (an episode's return among them) with the calls that published. Always every field, so the line reads the same every second.
+inline void referenceDetailText(const Window& w, char* buf, size_t cap) noexcept {
+    const auto mean = [](double sum, uint32_t n) noexcept { return n ? sum / static_cast<double>(n) : 0.0; };
+    std::snprintf(buf, cap, "reference detail (F171; the calls that had one %u): last source %s, age %.1f s, target %+.1f cm, G %+.1f cm, G now %+.1f cm; target published %+.1f cm in %u calls", w.refN,
+                  sourceName(w.refN ? w.refSrcLast : kSrcNone), mean(w.refAgeSum, w.refAgeN), mean(w.refTargetSum, w.refN), mean(w.refGSum, w.refN), mean(w.gNowSum, w.refN),
+                  mean(w.pubSum, w.pubN), w.pubN);
+}
 
 // F170: the window the hook adds to (one writer) and the frame thread takes once a second. Taking a window asks the writer to clear it before its next write; a second in which the writer
 // wrote nothing leaves the window as it was taken, and the next take would read it again and print the same line (the flight edvr_gfx_20261028_215408: from 21:58:40 to 21:59:00 every
@@ -458,6 +508,28 @@ struct Mailbox {
         return false;
     }
 };
+
+// The 1 s line of a window with a pitched call (or an episode's end): the look, the camera's sink, what the raise added or why not, the reference each call used (F170) and its figures
+// (F171), what EDVR carried, INSIDE and the settle's refusals. item is the item's name as the line should say it; ltaGate is look to aim's own gate count for the second. The log's lines
+// end at 1200 bytes, 1166 of them the message: a typical second runs to about 870 and the rig's worst one (every figure at its limit, a 74-character item) to 1163.
+inline int formatPitched(char* buf, size_t n, const Window& w, const char* item, uint32_t ltaGate) noexcept {
+    char mode[96], why[260], reference[96], detail[200];
+    w.modeText(mode, sizeof(mode));
+    notAppliedText(w.why, why, sizeof(why));
+    referenceText(w.srcN, reference, sizeof(reference));
+    referenceDetailText(w, detail, sizeof(detail));
+    const auto mean = Window::mean;
+    return std::snprintf(buf, n,
+                         "native on foot pitched view (F138) 1 s: mode %s, item %s, aim pitch %+.1f deg (min %+.1f max %+.1f), head pitch %+.1f deg; the camera's sink against the "
+                         "stance %+.1f cm (max %+.1f), the head's own height since the stance %+.1f cm; w %.2f/%.2f; added %+.1f cm (max %+.1f) in %u of %u pitched calls | "
+                         "measured only: an item drawn %u calls | not applied: %s; reference used (F170; the calls that chose one): %s; %s; EDVR carried up %+.1f forward %+.1f cm (the raise, F137); "
+                         "the view over the neck %+.1f cm; INSIDE %u of %u; the settle refused for the aim's pitch %u calls (look to aim's gate %u); returned to the stance's raise %u times "
+                         "(refused %u, not needed %u)",
+                         mode, item ? item : "none", mean(w.aimSum, w.calls), w.calls ? w.aimMin : 0.0, w.calls ? w.aimMax : 0.0, mean(w.headSum, w.headN), mean(w.sinkSum, w.sinkN),
+                         w.sinkN ? w.sinkMax : 0.0, mean(w.headRiseSum, w.headRiseN), mean(w.wSum, w.consideredN), w.wMax, mean(w.addedSum, w.appliedN), w.appliedN ? w.addedMax : 0.0,
+                         w.appliedN, w.calls, w.measuredN, why, reference, detail, mean(w.upSum, w.calls), mean(w.fwdSum, w.calls), mean(w.viewSum, w.calls), w.inside, w.insideOf,
+                         w.settleRefusedAim, ltaGate, w.returned, w.returnRefused, w.notNeeded);
+}
 
 // A group's 10 s bins: "[lo,hi) n sink up fwd head" for each bin with a call, "--" where a mean has no data. Stops before cap; returns the length (0: no bin has a call).
 inline size_t binsText(const Group& g, char* buf, size_t cap) noexcept {
