@@ -400,16 +400,14 @@ void scopeZoomDoor(const ScopeZoomDoorArgs& a, Ptr<ID3D11Texture2D>* copy) {
         count([](sz::LensDoorStats& s) { ++s.staleC; });
         return;
     }
-    if (!(f.m >= 1.001f)) {   // the first frame of the ease: M is 1 and there is nothing to do
-        count([](sz::LensDoorStats& s) { ++s.noop; });
-        return;
-    }
+    // c from the draws of another frame than the picture (the jitter's sequence is the frame the rows were drawn in): counted, and the lens still applies.
+    if (f.jitterSeq != 0 && a.sequence != f.jitterSeq) count([](sz::LensDoorStats& s) { ++s.otherFrame; });
     if (!a.resolved) {   // the game's own picture, not the upscaler's: the frame route refuses it
         count([](sz::LensDoorStats& s) { ++s.formatRefused; });
         return;
     }
     const ScopeZoomDepth depth = g_scopeZoomDepth[1];
-    if (!depth.srv || !depth.w || !depth.h || !(depth.nearDepth > 0.0f)) {
+    if (!depth.srv || !depth.w || !depth.h || !(depth.nearDepth > 0.0f) || !depth.covers) {   // none, or one a uv of the picture does not map onto
         count([](sz::LensDoorStats& s) { ++s.depthUnavailable; });
         return;
     }
@@ -418,8 +416,10 @@ void scopeZoomDoor(const ScopeZoomDoorArgs& a, Ptr<ID3D11Texture2D>* copy) {
     a.frame->GetDesc(&fd);
     const DXGI_FORMAT view = uiLayerFrameView(fd.Format);
     const uint32_t* region = a.region;
-    if (view == DXGI_FORMAT_UNKNOWN || fd.SampleDesc.Count != 1 || fd.ArraySize != 1 || fd.MipLevels != 1 || region[2] <= region[0] || region[3] <= region[1] ||
-        region[2] > fd.Width || region[3] > fd.Height || !ensureDevice(dev.Get(), ctx.Get())) {
+    // The region must be the whole texture, in place or not (the ripple's own rule for a frame that is not owned, and the lens's mapping of a uv of the eye onto the picture): a
+    // sub-rectangle would need its offset in c, and the copy route hands the whole texture back.
+    if (view == DXGI_FORMAT_UNKNOWN || fd.SampleDesc.Count != 1 || fd.ArraySize != 1 || fd.MipLevels != 1 || region[0] != 0 || region[1] != 0 || region[2] != fd.Width ||
+        region[3] != fd.Height || !ensureDevice(dev.Get(), ctx.Get())) {
         count([](sz::LensDoorStats& s) { ++s.formatRefused; });
         return;
     }
@@ -485,6 +485,12 @@ void scopeZoomDoor(const ScopeZoomDoorArgs& a, Ptr<ID3D11Texture2D>* copy) {
         g_s.rcW = w;
         g_s.rcH = h;
         g_s.rcFmt = fd.Format;
+    }
+    // The first frame of the ease, M = 1: everything the passes need is in hand and there is nothing to do. Counted only here, after every decline above, so a press that is declined
+    // on each frame is never made to look applied by it.
+    if (!(f.m >= 1.001f)) {
+        count([](sz::LensDoorStats& s) { ++s.noop; });
+        return;
     }
 
     ScopeZoomRaysParams p1{};

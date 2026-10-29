@@ -188,7 +188,17 @@ inline void runS1(Check&& check) {
         check(esc == sz::kLensRays && near1(minDeg, 12.0, 1e-9) && sz::lensOpenSight(esc), "S1 rays: with no frame every ray escapes at 12 degrees and the sight is open");
         // c near the picture's edge: the rays that leave the image escape there
         const sz::LensRay edgeRay = sz::lensMarchRef(empty, W, H, 30.0, 1000.0, 64, tan4, nearDepth);   // ray 64 points to -x
-        check(edgeRay.escaped && near1(edgeRay.rPx, 31.0, 1.001) && edgeRay.rDeg < 12.0, "S1 rays: a ray that leaves the image escapes at its edge, short of 12 degrees");
+        check(edgeRay.escaped && near1(edgeRay.rPx, 31.0, 1.001) && edgeRay.rDeg == sz::kLensMaxDeg, "S1 rays: a ray that leaves the image escapes at its edge and reads as the 12 degree sentinel, not the angle it had reached");
+        {   // a hole with one ray off the image and one that took every step: neither is a hit in the statistics
+            sz::LensReadback hr;
+            for (uint32_t k = 0; k < sz::kLensRays; ++k) hr.rDeg[k] = 5.0f;
+            hr.rDeg[7] = static_cast<float>(edgeRay.rDeg);
+            const sz::LensRay capped = sz::lensMarchRef([](int, int) { return 0.00122; }, 100000, 100000, 50000.0, 50000.0, 0, tan4, nearDepth);   // 768 steps and the angle never reaches 12 degrees
+            hr.rDeg[8] = static_cast<float>(capped.rDeg);
+            double lo, mid, hi;
+            check(capped.escaped && capped.rPx == sz::kLensStepCap && capped.rDeg == sz::kLensMaxDeg, "S1 rays: a ray that takes every step escapes at the step cap and reads as the sentinel");
+            check(sz::lensHoleStats(hr, &lo, &mid, &hi) && near1(lo, 5.0, 1e-6) && near1(hi, 5.0, 1e-6), "S1 hole: rays that left the image or took every step are kept out of r min, median and max");
+        }
         // the 12 degree stop is the angle at the eye in the tangent plane, not a pixel count
         const sz::LensRay right = sz::lensMarchRef(empty, W, H, 1000.0, 1000.0, 0, tan4, nearDepth), left = sz::lensMarchRef(empty, W, H, 1000.0, 1000.0, 64, tan4, nearDepth);
         check(right.escaped && left.escaped && right.rPx > 150.0 && left.rPx > 150.0 && std::fabs(right.rPx - left.rPx) > 3.0, "S1 rays: the 12 degree stop is the angle at the eye (an off-axis c reaches it at different px each way)");
@@ -342,7 +352,33 @@ inline void runS1(Check&& check) {
         sz::lensNoteRays(&q, later, true);
         check(near1(q.rMinDeg, 5.0, 1e-6), "S1 stats: only one frame's hole a press");
         sz::lensFinish(&p);
-        check(p.applied == 94 - 2 + 2 && p.qualifying == 94 + 2 + 1 + 2 + 1, "S1 stats: applied is the dispatched less the open plus the M = 1 frames, qualifying adds the door's declines");
+        check(p.applied == 94 - 2 && p.qualifying == 94 + 2 + 1 + 2 + 1, "S1 stats: applied is the dispatched less the open; the M = 1 frames are qualifying and not applied, and the door's declines add to the qualifying");
+        {   // a press the door declined on every frame but the first (depth null): the first frame is at M 1. It is not applied, so the press cannot read as one that applied.
+            sz::LensDoorStats d;
+            d.noop = 1;
+            d.depthUnavailable = 200;
+            sz::lensFinish(&d);
+            check(d.applied == 0 && d.qualifying == 201, "S1 stats: a press with its depth missing on 200 frames and the first at M 1 is applied 0 of 201");
+            sz::LensDoorStats d2;
+            d2.noop = 1;
+            sz::lensFinish(&d2);
+            check(d2.applied == 0 && d2.qualifying == 1, "S1 stats: a press that is one frame at M 1 is applied 0 of 1");
+        }
+        {   // the frame thread's counts: c through S against c at the far point
+            sz::LensTickStats t;
+            sz::lensNoteFar(&t, 0.30);
+            sz::lensNoteFar(&t, 0.50);
+            sz::lensNoteFar(&t, sz::kNaN);
+            check(t.farN == 2 && near1(t.farSumDeg / t.farN, 0.40, 1e-12) && near1(t.farMaxDeg, 0.50, 1e-12), "S1 tick stats: the angle between c through S and the far c, its mean and its max (a NaN is not counted)");
+            const float tan4[4] = {-0.5f, 0.5f, -0.5f, 0.5f};
+            const double a[2] = {0.0, 0.0}, b[2] = {0.0, 0.0}, c[2] = {0.2, 0.0};
+            const double tc = 0.2 * 0.5;   // ndc 0.2 across a half-width of 0.5 is tangent 0.1
+            check(near1(sz::lensNdcAngleDeg(a, b, tan4), 0.0, 1e-9) && near1(sz::lensNdcAngleDeg(a, c, tan4), std::atan(tc) * sz::kDeg, 1e-9) &&
+                      std::isnan(sz::lensNdcAngleDeg(a, nullptr, tan4)) && std::isnan(sz::lensNdcAngleDeg(a, c, nullptr)),
+                  "S1 tick stats: the angle at the eye between two NDC points is the angle of their rays (0.1 of tangent from the axis is 5.71 degrees), NaN with a point or the tangents missing");
+            const double one[2] = {1.0, 1.0};
+            check(sz::lensNdcAngleDeg(a, one, tan4) > sz::lensNdcAngleDeg(a, c, tan4), "S1 tick stats: the angle grows with the distance between the points");
+        }
     }
     {
         char line[1100];
@@ -358,8 +394,19 @@ inline void runS1(Check&& check) {
         p.adsDeg = 15.0;
         p.m = 4.0670;
         p.refDeg = 56.3;
+        p.t.qualified = 312;
+        p.t.noS = 9;
+        p.t.notInTable = 0;
+        p.t.idle = 40;
+        p.t.jitterNone = 2;
+        p.t.jitterOther = 5;
+        sz::lensNoteFar(&p.t, 0.25);
+        sz::lensNoteFar(&p.t, 0.75);
         p.d.applied = 300;
         p.d.qualifying = 310;
+        p.d.dispatched = 303;
+        p.d.noop = 1;
+        p.d.otherFrame = 6;
         p.d.staleC = 4;
         p.d.depthUnavailable = 3;
         p.d.formatRefused = 3;
@@ -380,17 +427,19 @@ inline void runS1(Check&& check) {
         const int n = sz::formatLensPress(line, sizeof(line), p);
         const std::string text(line);
         check(n == static_cast<int>(text.size()) && n < 1100 &&
-                  text.rfind("scope zoom (S1): press 3 item $wpn_m_sniper_plasma_charged_name; scope yes key on ads 15.000 deg M 4.067 h 56.3 deg; applied 300 of 310 qualifying frames; declined: "
-                             "no S 7, stale c 4, open sight 0, not in the table 0, depth unavailable 3, format refused 3; hole r min 4.01 median 5.20 max 6.42 deg, 1 of 128 rays escaped (rays read on 296 frames); "
+                  text.rfind("scope zoom (S1): press 3 item $wpn_m_sniper_plasma_charged_name; scope yes key on ads 15.000 deg M 4.067 h 56.3 deg; frame thread: qualified 312, no S 9, "
+                             "not in the table 0, idle 40; jitter reading none 2, from another frame 5; c to the far point mean 0.500 max 0.750 deg; applied 300 of 310 qualifying frames (dispatched 303, at M 1 1); "
+                             "declined: no S 7, stale c 4, open sight 0, not in the table 0, depth unavailable 3, format refused 3; c from another frame than the picture 6; hole r min 4.01 median 5.20 max 6.42 deg, 1 of 128 rays escaped (rays read on 296 frames); "
                              "depth at c 0.001220 (near 0.041700); c mean (1642.5, 1990.0) px spread 0.50 px; GPU rays 0.012 ms (max 0.012), magnify 0.046 ms (max 0.046)",
                              0) == 0,
-              "S1 lines: the press line carries the item, scope, key, ADS FOV, M, h, the applied and qualifying frames, every decline, the hole, the depth, c's mean and spread and the GPU price");
+              "S1 lines: the press line carries the item, scope, key, ADS FOV, M, h, the frame thread's counts, the applied and qualifying frames with the dispatched and M = 1 split, every decline, the hole, the depth, c's mean and spread and the GPU price");
         sz::LensPressLine empty;
         empty.refDeg = 56.3;
         sz::formatLensPress(line, sizeof(line), empty);
         const std::string e(line);
-        check(e.find("press 0 item none scope unknown key off ads none deg M none h 56.3 deg; applied 0 of 0 qualifying frames; declined: no S 0, stale c 0, open sight 0, not in the table 0, "
-                     "depth unavailable 0, format refused 0; ") != std::string::npos,
+        check(e.find("press 0 item none scope unknown key off ads none deg M none h 56.3 deg; frame thread: qualified 0, no S 0, not in the table 0, idle 0; jitter reading none 0, from another frame 0; "
+                     "c to the far point mean none max none deg; applied 0 of 0 qualifying frames (dispatched 0, at M 1 0); declined: no S 0, stale c 0, open sight 0, not in the table 0, "
+                     "depth unavailable 0, format refused 0; c from another frame than the picture 0; ") != std::string::npos,
               "S1 lines: a press with nothing in it says none for what it does not have");
         check(e.find("hole r min none median none max none deg, 0 of 128 rays escaped (rays read on 0 frames); depth at c none (near none); c mean (none, none) px spread none px; "
                      "GPU rays none ms (max none), magnify none ms (max none)") != std::string::npos,

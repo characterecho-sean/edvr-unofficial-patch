@@ -14084,20 +14084,26 @@ def _hj_s0_census(rows, ctx):
 H_S1 = "scope zoom (S1)"
 H_S1_ANNOUNCE_RE = r"scope zoom \(S1\): (?P<key>on|off), reference FOV (?P<ref>[\d.]+) deg, (?P<entries>\d+) table entries; .*$"
 H_S1_PRESS_RE = (r"scope zoom \(S1\): press (?P<n>\d+) item (?P<item>\S+) scope (?P<scope>yes|no|unknown) key (?P<key>on|off) ads (?P<ads>\S+) deg M (?P<m>\S+) h (?P<h>[\d.]+) deg; "
-                 r"applied (?P<applied>\d+) of (?P<qual>\d+) qualifying frames; declined: no S (?P<nos>\d+), stale c (?P<stale>\d+), open sight (?P<open>\d+), "
-                 r"not in the table (?P<table>\d+), depth unavailable (?P<depth>\d+), format refused (?P<format>\d+); "
+                 r"frame thread: qualified (?P<fq>\d+), no S (?P<fnos>\d+), not in the table (?P<ftab>\d+), idle (?P<fidle>\d+); jitter reading none (?P<jnone>\d+), "
+                 r"from another frame (?P<jother>\d+); c to the far point mean (?P<fmean>\S+) max (?P<fmax>\S+) deg; "
+                 r"applied (?P<applied>\d+) of (?P<qual>\d+) qualifying frames \(dispatched (?P<disp>\d+), at M 1 (?P<noop>\d+)\); declined: no S (?P<nos>\d+), stale c (?P<stale>\d+), "
+                 r"open sight (?P<open>\d+), not in the table (?P<table>\d+), depth unavailable (?P<depth>\d+), format refused (?P<format>\d+); "
+                 r"c from another frame than the picture (?P<other>\d+); "
                  r"hole r min (?P<rmin>\S+) median (?P<rmed>\S+) max (?P<rmax>\S+) deg, (?P<esc>\d+) of (?P<rays>\d+) rays escaped \(rays read on (?P<read>\d+) frames\); "
                  r"depth at c (?P<dc>\S+) \(near (?P<dn>\S+)\); c mean \((?P<cx>[^,\s]+), (?P<cy>[^)\s]+)\) px spread (?P<cs>\S+) px; "
                  r"GPU rays (?P<gr>\S+) ms \(max (?P<grm>\S+)\), magnify (?P<gm>\S+) ms \(max (?P<gmm>\S+)\)$")
+H_S1_KEYS = ("applied", "qual", "disp", "noop", "nos", "stale", "open", "table", "depth", "format", "other", "read", "fq", "fnos", "ftab", "fidle", "jnone", "jother")
 
 
 def _hj_s1(rows, ctx):
-    """S1, the scope lens: one `scope zoom (S1): press` line per press of the sights in native on foot. A press is DUE when the lens had to run: its qualifying frames (the gate
-    passed: the key on, the sights up at w 1.0, the item and scope in the table with M >= 1.05, S fresh) plus the frames the gate refused only for want of S (no S). Frames for a
-    weapon not in the table, or with the key off, are no failure and are not due. NEVER APPLIED when presses were due and the lens applied on none of them (the decline counts say
-    why: no S, a stale c, no depth at the door, a frame format or route the passes refuse, an open sight); PARTIAL when some due press applied on none of its frames or on under
-    half of them; OK otherwise, with the hole, the depth at c and the price. IDLE when no press was due (the announce alone, the key off, or only weapons the table does not
-    hold). The announce is not needed to judge (a --since window can cut it); with neither line the rule is not present."""
+    """S1, the scope lens: one `scope zoom (S1): press` line per press of the sights in native on foot, with the frame thread's own counts (the gate's verdicts per tick) beside the
+    door's (the frames the passes were issued on, and each decline). A press is DUE on the frames the lens had to run: the larger of the tick's qualified + no S and the door's
+    qualifying + no S (so a door that is never reached still leaves the press due), less the frames at M 1, which have nothing to do. A press in which every ray read back said the sight
+    was open (open sight = rays read, both above 0) is not due: the player was not looking through a closed frame, and it is neither applied nor a failure.
+    NEVER APPLIED when presses were due and the lens applied on none of them (the counts say why: the door never reached, no S, a stale c, no depth at the door, a frame format or route
+    the passes refuse); PARTIAL when some due press applied on none of its frames or on under half of them; OK otherwise. OPEN SIGHT when the only presses with anything to judge were
+    open ones. IDLE when no press was due (the announce alone, the key off, only weapons the table does not hold). The announce is not needed (a --since window can cut it); with
+    neither line the rule is not present."""
     announce, press = rows.get("announce", []), rows.get("press", [])
     if not announce and not press:
         return None
@@ -14106,12 +14112,15 @@ def _hj_s1(rows, ctx):
     if not press:
         return ("IDLE", "%s; no press of the sights in this window" % head)
     totals = collections.Counter()
-    due_presses, none_applied, weak = [], [], []
+    due_presses, none_applied, weak, open_presses = [], [], [], []
     for p in press:
-        for k in ("applied", "qual", "nos", "stale", "open", "table", "depth", "format", "read"):
+        for k in H_S1_KEYS:
             totals[k] += int(p[k])
-        due = int(p["qual"]) + int(p["nos"])
-        if not due:
+        if int(p["open"]) > 0 and int(p["read"]) > 0 and int(p["open"]) >= int(p["read"]):
+            open_presses.append(p)
+            continue
+        due = max(int(p["fq"]) + int(p["fnos"]), int(p["qual"]) + int(p["nos"])) - int(p["noop"])
+        if due <= 0:
             continue
         due_presses.append(p)
         if int(p["applied"]) == 0:
@@ -14120,12 +14129,26 @@ def _hj_s1(rows, ctx):
             weak.append(p)
     declines = ", ".join("%s %d" % (name, totals[k]) for name, k in (("no S", "nos"), ("stale c", "stale"), ("open sight", "open"), ("not in the table", "table"),
                                                                        ("depth unavailable", "depth"), ("format refused", "format")) if totals[k])
-    base = "%d press line(s) (%s), applied %d of %d qualifying frame(s)%s" % (len(press), head, totals["applied"], totals["qual"], "; declined: " + declines if declines else "")
+    base = "%d press line(s) (%s), the tick qualified %d frame(s), the door applied %d of %d qualifying%s" % (len(press), head, totals["fq"], totals["applied"], totals["qual"],
+                                                                                                         "; declined: " + declines if declines else "")
+    extra = ""
+    if totals["jnone"] or totals["jother"]:
+        extra += "; jitter: no reading on %d frame(s), taken in another frame than the rows on %d" % (totals["jnone"], totals["jother"])
+    if totals["other"]:
+        extra += "; c from another frame than the picture on %d frame(s)" % totals["other"]
     if not due_presses:
+        if open_presses:
+            return ("OPEN SIGHT", base + extra + "; every ray read back said the sight was open in press %s (the player was not looking through a closed frame; no lens by design)" %
+                    ", ".join(p["n"] for p in open_presses[:6]))
         keys = collections.Counter(p["key"] for p in press)
-        return ("IDLE", base + "; the lens was due on no press (key %s; a weapon not in the table is no failure)" % ", ".join("%s %d" % (k, n) for k, n in keys.most_common()))
+        return ("IDLE", base + extra + "; the lens was due on no press (key %s; a weapon not in the table is no failure)" % ", ".join("%s %d" % (k, n) for k, n in keys.most_common()))
     if len(none_applied) == len(due_presses):
-        return ("NEVER APPLIED", base + "; the lens applied on none of the %d press(es) it was due on (press %s)" % (len(due_presses), ", ".join(p["n"] for p in none_applied[:6])))
+        text = base + extra + "; the lens applied on none of the %d press(es) it was due on (press %s)" % (len(due_presses), ", ".join(p["n"] for p in none_applied[:6]))
+        unreached = [p for p in none_applied if int(p["qual"]) + int(p["nos"]) == 0]
+        if unreached:
+            text += "; the door counted no frame at all in press %s although the tick qualified %s (uiLayerComposite never ran for the right eye, or the lens was not asked for)" % (
+                ", ".join(p["n"] for p in unreached[:6]), ", ".join(p["fq"] for p in unreached[:6]))
+        return ("NEVER APPLIED", text)
     good = [p for p in due_presses if p not in none_applied and p not in weak]
     if none_applied or weak:
         parts = []
@@ -14133,14 +14156,17 @@ def _hj_s1(rows, ctx):
             parts.append("applied on no frame of press %s" % ", ".join(p["n"] for p in none_applied[:6]))
         if weak:
             parts.append("on under half the frames of press %s" % ", ".join(p["n"] for p in weak[:6]))
-        return ("PARTIAL", base + "; " + "; ".join(parts))
+        return ("PARTIAL", base + extra + "; " + "; ".join(parts))
     best = good[-1]
-    text = base + "; last press %s: item %s scope %s, ads %s deg, M %s" % (best["n"], best["item"], best["scope"], best["ads"], best["m"])
+    text = base + extra + "; last press %s: item %s scope %s, ads %s deg, M %s" % (best["n"], best["item"], best["scope"], best["ads"], best["m"])
     if best["rmin"] != "none":
         text += "; hole r min %s median %s max %s deg (%s of %s rays escaped), depth at c %s against near %s" % (best["rmin"], best["rmed"], best["rmax"], best["esc"], best["rays"], best["dc"], best["dn"])
     else:
         text += "; no settled frame's rays were read (rays read on %s frame(s))" % best["read"]
-    text += "; c mean (%s, %s) px spread %s px; GPU rays %s ms, magnify %s ms" % (best["cx"], best["cy"], best["cs"], best["gr"], best["gm"])
+    text += "; c mean (%s, %s) px spread %s px, c through S to the far point mean %s max %s deg; GPU rays %s ms, magnify %s ms" % (
+        best["cx"], best["cy"], best["cs"], best["fmean"], best["fmax"], best["gr"], best["gm"])
+    if open_presses:
+        text += "; %d press(es) were open sights (press %s)" % (len(open_presses), ", ".join(p["n"] for p in open_presses[:6]))
     return ("OK", text)
 
 def _hj_desktop_window(rows, ctx):
@@ -15180,7 +15206,7 @@ def health_report(scan, window="", rules=None):
     drift = [rule.name for rule, status, _ in verdicts if status == "UNPARSED"]
     counts = collections.Counter(status for _, status, _ in verdicts)
     lines.append("[edvr] health: %s%s%s; exit %d" % (
-        ", ".join("%d %s" % (counts[s], s) for s in ("OK", "PARTIAL", "NEVER APPLIED", "IDLE", "UNPARSED") if counts[s]) or "no rule had a line",
+        ", ".join("%d %s" % (counts[s], s) for s in ("OK", "PARTIAL", "NEVER APPLIED", "OPEN SIGHT", "IDLE", "UNPARSED") if counts[s]) or "no rule had a line",
         "; %d not present" % len(absent) if absent else "", "; %d not judged (detail log off)" % len(unjudged) if unjudged else "",
         3 if bad else 4 if drift else 0))
     return lines, (3 if bad else 4 if drift else 0)
@@ -19385,39 +19411,71 @@ def self_test_health():
         def s1_announce(key="on", ref=56.3, entries=12):
             return RS1("scope zoom (S1): %s, reference FOV", key, ref, entries)
 
-        def s1_press(n=1, item=SNIPER, scope="yes", key="on", ads="15.000", m="4.067", h=56.3, applied=300, qual=310, nos=0, stale=4, open_=3, table=0, depth=3, fmt=0,
-                     rmin="4.01", rmed="5.20", rmax="6.42", esc=0, read=296, dc="0.001220", dn="0.041700", cx="1642.5", cy="1990.0", cs="0.50", gr="0.012", grm="0.020",
-                     gm="0.046", gmm="0.060"):
+        def s1_press(n=1, item=SNIPER, scope="yes", key="on", ads="15.000", m="4.067", h=56.3, disp=302, noop=1, stale=4, depth=3, fmt=0, open_=3, nos=0, table=0, other=0,
+                     fq=None, fnos=None, ftab=0, fidle=40, jnone=0, jother=0, fmean="0.250", fmax="0.800", rmin="4.01", rmed="5.20", rmax="6.42", esc=0, read=296,
+                     dc="0.001220", dn="0.041700", cx="1642.5", cy="1990.0", cs="0.50", gr="0.012", grm="0.020", gm="0.046", gmm="0.060"):
+            """A press line as the DLL emits it: the door's counts add up (qualifying = dispatched + M-1 + stale + depth + format, applied = dispatched - open) and the tick's
+            qualified frames are the door's qualifying unless a fixture says otherwise."""
+            qual = disp + noop + stale + depth + fmt
+            applied = max(disp - open_, 0)
+            fq = qual if fq is None else fq
+            fnos = nos if fnos is None else fnos
             return (RS1("scope zoom (S1): press %u item %s scope %s key %s ads %s deg M %s h", n, item, scope, key, ads, m, h) +
-                    RS1("applied %u of %u qualifying frames", applied, qual, nos, stale, open_, table, depth, fmt) +
+                    RS1("frame thread: qualified %u, no S %u", fq, fnos, ftab, fidle, jnone, jother, fmean, fmax) +
+                    RS1("applied %u of %u qualifying frames", applied, qual, disp, noop, nos, stale, open_, table, depth, fmt, other) +
                     RS1("hole r min %s median", rmin, rmed, rmax, esc, 128, read, dc, dn) + RS1("c mean (%s, %s) px spread", cx, cy, cs) + RS1("GPU rays %s ms (max %s)", gr, grm, gm, gmm))
 
-        def s1_none_hole(**kw):
-            return s1_press(rmin="none", rmed="none", rmax="none", dc="none", read=0, cx="none", cy="none", cs="none", gr="none", grm="none", gm="none", gmm="none", **kw)
+        def s1_nohole(**kw):
+            """A press with no hole, depth, c or price to report (the rays were not read, or the lens never dispatched); a keyword overrides any of them."""
+            none = dict(rmin="none", rmed="none", rmax="none", dc="none", read=0, cx="none", cy="none", cs="none", gr="none", grm="none", gm="none", gmm="none", fmean="none", fmax="none")
+            none.update(kw)
+            return s1_press(**none)
+
+        def s1_zero(**kw):
+            """A press the lens was never asked for: nothing counted on either side."""
+            return s1_nohole(disp=0, noop=0, stale=0, depth=0, open_=0, fidle=40, **kw)
 
         check("S1: a press the lens applied on, with its hole, depth, c and price", [s1_announce(), s1_press()], 0, [("OK", S1R)],
-              has=["1 press line(s) (on, reference FOV 56.3 deg, 12 table entries), applied 300 of 310 qualifying frame(s); declined: stale c 4, open sight 3, depth unavailable 3",
+              has=["1 press line(s) (on, reference FOV 56.3 deg, 12 table entries), the tick qualified 310 frame(s), the door applied 299 of 310 qualifying; declined: stale c 4, open sight 3, depth unavailable 3",
                    "last press 1: item " + SNIPER + " scope yes, ads 15.000 deg, M 4.067", "hole r min 4.01 median 5.20 max 6.42 deg (0 of 128 rays escaped), depth at c 0.001220 against near 0.041700",
-                   "c mean (1642.5, 1990.0) px spread 0.50 px; GPU rays 0.012 ms, magnify 0.046 ms"], lacks=["UNPARSED"])
-        check("S1: a press with no hole read (the rays were not read back in time) is still OK and says so", [s1_announce(), s1_none_hole()], 0, [("OK", S1R)],
+                   "c mean (1642.5, 1990.0) px spread 0.50 px, c through S to the far point mean 0.250 max 0.800 deg; GPU rays 0.012 ms, magnify 0.046 ms"], lacks=["UNPARSED", "jitter:"])
+        check("S1: jitter readings missing or from another frame, and a c from another frame than the picture, are named", [s1_announce(), s1_press(jnone=2, jother=5, other=6)], 0, [("OK", S1R)],
+              has=["jitter: no reading on 2 frame(s), taken in another frame than the rows on 5; c from another frame than the picture on 6 frame(s)"], lacks=["UNPARSED"])
+        check("S1: a press with no hole read (the rays were not read back in time) is still OK and says so", [s1_announce(), s1_nohole()], 0, [("OK", S1R)],
               has=["no settled frame's rays were read (rays read on 0 frame(s))"], lacks=["UNPARSED"])
-        check("S1: a press whose weapon is not in the table is no failure, and its press line is read", [s1_announce(), s1_press(applied=0, qual=0, stale=0, open_=0, depth=0, table=412)], 0, [("IDLE", S1R)],
+        # the first frame of every press is at M 1: it is qualifying and not applied, so a press the door declined on every other frame is applied 0
+        check("S1: the depth null on every frame and the first at M 1 is applied 0 of 201 and NEVER APPLIED", [s1_announce(), s1_nohole(disp=0, noop=1, stale=0, depth=200, open_=0)], 3, [("NEVER APPLIED", S1R)],
+              has=["the door applied 0 of 201 qualifying; declined: depth unavailable 200", "the lens applied on none of the 1 press(es) it was due on (press 1)"], lacks=["the door counted no frame at all"])
+        check("S1: the tick qualified and the door never ran is NEVER APPLIED", [s1_announce(), s1_nohole(disp=0, noop=0, stale=0, depth=0, open_=0, fq=200)], 3, [("NEVER APPLIED", S1R)],
+              has=["the tick qualified 200 frame(s), the door applied 0 of 0 qualifying", "the door counted no frame at all in press 1 although the tick qualified 200 (uiLayerComposite never ran for the right eye"])
+        check("S1: S never there (no S, counted by both sides) is a lens that never ran", [s1_announce(), s1_zero(nos=90)], 3, [("NEVER APPLIED", S1R)], has=["declined: no S 90"])
+        check("S1: a press that is only its first frame at M 1 is not due", [s1_announce(), s1_nohole(disp=0, noop=1, stale=0, depth=0, open_=0)], 0, [("IDLE", S1R)],
+              has=["the lens was due on no press (key on 1; a weapon not in the table is no failure)"], lacks=["NEVER APPLIED"])
+        check("S1: a press whose weapon is not in the table is no failure, and its press line is read", [s1_announce(), s1_zero(table=412, fq=0, fnos=0, ftab=412)], 0, [("IDLE", S1R)],
               has=["declined: not in the table 412", "the lens was due on no press (key on 1; a weapon not in the table is no failure)"], lacks=["UNPARSED"])
-        check("S1: presses with the key off are idle", [s1_announce("off"), s1_press(key="off", applied=0, qual=0, stale=0, open_=0, depth=0)], 0, [("IDLE", S1R)],
-              has=["off, reference FOV 56.3 deg", "(key off 1;"])
+        check("S1: presses with the key off are idle", [s1_announce("off"), s1_zero(key="off", fq=0, fnos=0)], 0, [("IDLE", S1R)], has=["off, reference FOV 56.3 deg", "(key off 1;"])
         check("S1: the announce alone is idle", [s1_announce()], 0, [("IDLE", S1R)], has=["on, reference FOV 56.3 deg, 12 table entries; no press of the sights in this window"])
-        check("S1: qualifying frames and none applied", [s1_announce(), s1_press(applied=0, qual=200, stale=0, open_=0, depth=200)], 3, [("NEVER APPLIED", S1R)],
-              has=["applied 0 of 200 qualifying frame(s); declined: depth unavailable 200", "the lens applied on none of the 1 press(es) it was due on (press 1)"])
-        check("S1: S never there (no S) is a lens that never ran", [s1_announce(), s1_press(applied=0, qual=0, nos=90, stale=0, open_=0, depth=0)], 3, [("NEVER APPLIED", S1R)],
-              has=["declined: no S 90"])
-        check("S1: one press applied and the next never did", [s1_announce(), s1_press(1), s1_press(2, applied=0, qual=100, stale=100, open_=0, depth=0)], 0, [("PARTIAL", S1R)],
+        check("S1: S never there on the tick's side only (the door counted none) is also due", [s1_announce(), s1_zero(fnos=60)], 3, [("NEVER APPLIED", S1R)],
+              has=["the lens applied on none of the 1 press(es) it was due on (press 1)"])
+        check("S1: one press applied and the next never did", [s1_announce(), s1_press(1), s1_nohole(n=2, disp=0, noop=1, stale=100, depth=0, open_=0)], 0, [("PARTIAL", S1R)],
               has=["applied on no frame of press 2"])
-        check("S1: under half the qualifying frames applied", [s1_announce(), s1_press(applied=100, qual=400, stale=0, open_=300, depth=0)], 0, [("PARTIAL", S1R)],
+        check("S1: under half the due frames applied", [s1_announce(), s1_press(disp=400, noop=1, stale=0, depth=0, open_=300, read=400)], 0, [("PARTIAL", S1R)],
               has=["on under half the frames of press 1", "open sight 300"])
-        check("S1: half applied is not partial", [s1_announce(), s1_press(applied=200, qual=400, stale=0, open_=200, depth=0)], 0, [("OK", S1R)])
+        check("S1: half applied is not partial", [s1_announce(), s1_press(disp=400, noop=1, stale=0, depth=0, open_=200, read=400)], 0, [("OK", S1R)])
+        # an open sight: every ray read back said so. It is no failure (item 5), its own verdict
+        check("S1: a press whose dispatched frames were all open sights has its own verdict, not PARTIAL", [s1_announce(), s1_nohole(disp=200, noop=1, stale=0, depth=0, open_=196, read=196)], 0, [("OPEN SIGHT", S1R)],
+              has=["every ray read back said the sight was open in press 1"], lacks=["PARTIAL", "NEVER APPLIED"])
+        check("S1: an open-sight press beside a press that applied is OK and names it", [s1_announce(), s1_press(1), s1_nohole(n=2, disp=200, noop=1, stale=0, depth=0, open_=196, read=196)], 0, [("OK", S1R)],
+              has=["1 press(es) were open sights (press 2)"])
+        check("S1: an open-sight press beside a press that never applied is still NEVER APPLIED", [s1_announce(), s1_nohole(n=1, disp=200, noop=1, stale=0, depth=0, open_=196, read=196),
+                                                                                              s1_nohole(n=2, disp=0, noop=1, stale=0, depth=200, open_=0)], 3, [("NEVER APPLIED", S1R)],
+              has=["(press 2)"])
         check("S1: a press line in a window that cut the announce is still judged", [s1_press()], 0, [("OK", S1R)], has=["no announce line in this window"])
         check("S1: no S1 line leaves the rule not present (a build without the lens, or a window outside it)", [inst141(), s0_watch()], 0, [], has=["not present", S1R], lacks=["UNPARSED"])
         check("S1: a press line that drifted from its pattern is unparsed", ["scope zoom (S1): press x item y"], 4, [("UNPARSED", S1R)])
+        check("S1: the first A1 build's press line (no frame thread part) is unparsed, not read as the new one", ["scope zoom (S1): press 1 item x scope yes key on ads 15.000 deg M 4.067 h 56.3 deg; applied 5 of 6 qualifying frames; declined: no S 0, "
+              "stale c 0, open sight 0, not in the table 0, depth unavailable 0, format refused 0; hole r min none median none max none deg, 0 of 128 rays escaped (rays read on 0 frames); depth at c none (near none); "
+              "c mean (none, none) px spread none px; GPU rays none ms (max none), magnify none ms (max none)"], 4, [("UNPARSED", S1R)])
         check("S1: an announce that drifted from its pattern is unparsed", ["scope zoom (S1): maybe, reference FOV 56.3 deg"], 4, [("UNPARSED", S1R)])
         check("S1: its tag is listed with --health-all and S0's rules are untouched by it", [s1_announce(), s1_press(), s0_watch(), s0_vr(settled=0)], 0, [("OK", S1R), ("OK", SV0)],
               has=["every tag (* has a rule above):", "S1", "S0"], extra=["--health-all"])

@@ -16,7 +16,7 @@ namespace edvr {
 namespace {
 
 constexpr size_t kSections = static_cast<size_t>(GpuCensusSection::Count);
-// DoorTemporalWhole .. DoorScopeZoom are indices 0..13; the in-frame sections
+// DoorTemporalWhole .. DoorScopeZoom are indices 0..12; the in-frame sections
 // start at FrameHologramPasses. Both ranges are contiguous by construction
 // (gpu_census.h), so a single index split is enough.
 constexpr size_t kDoorSections = static_cast<size_t>(GpuCensusSection::FrameHologramPasses);
@@ -31,7 +31,7 @@ unsigned occurrenceCapFor(GpuCensusSection section) noexcept {
 }
 
 // The door's parenthetical breakdown, DoorUpscaler..DoorScopeZoom (indices
-// 1..13) -- DoorTemporalWhole (index 0) has no slot of its own; it is the
+// 1..12) -- DoorTemporalWhole (index 0) has no slot of its own; it is the
 // "whole" that five of these nest inside (see gpuCensusLogLine). "sky ring -"
 // in a line means the diag.sky_ring dispatch never ran in the window (key off);
 // "lens -", that the scope lens ran in no frame of it (not in the scope's sights; the name is short because the worst-case census line is held under 1150 characters).

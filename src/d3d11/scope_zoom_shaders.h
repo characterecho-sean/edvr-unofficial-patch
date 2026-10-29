@@ -25,7 +25,8 @@ static_assert(sizeof(ScopeZoomMagnifyParams) == 48, "the magnify pass's constant
 
 // Pass 1: one group of 128 threads, one ray each. Z: the eye's depth at the render's size, the depth channel of the game's R32G8X24 texture (reverse-Z: larger is nearer). Lens: the
 // raw buffer scope_zoom_s1.h lays out (the indirect arguments of pass 2 first). A ray marches from c in 1 px steps along its direction in render px; the frame is the first run of
-// three px nearer than the depth of 0.6 m; the ray escapes at 12 degrees at the eye, off the image or at the step cap. An escaped ray takes the smaller radius of its nearest rays
+// three px nearer than the depth of 0.6 m; the ray escapes at 12 degrees at the eye, off the image or at the step cap, and an escaped ray stores 12 degrees whichever way it
+// ended (the sentinel the instrument's hole statistics skip). An escaped ray takes the smaller radius of its nearest rays
 // that did not escape; the largest radius gives the box of pass 2, and more than two escaped rays (an open sight) make the groups of pass 2 zero.
 constexpr char kScopeZoomRaysCsHlsl[] = R"HLSL(
 cbuffer P : register(b0) {
@@ -91,6 +92,7 @@ void main(uint3 tid : SV_GroupThreadID) {
             break;
         }
     }
+    if (esc) rDeg = 12.0;   // a ray that left the image or took every step reads as the escape sentinel, whatever angle it reached
     gR[k] = rPx;
     gEsc[k] = esc ? 1u : 0u;
     if (esc) InterlockedAdd(gEscCount, 1u);

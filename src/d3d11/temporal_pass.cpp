@@ -3703,12 +3703,14 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
             depthSrv = e.depthSrv;
             if (depthSrv) {
                 // The scope lens's rays march this very depth at the door: the reverse-Z depth of 0.6 m from the scene projection row the pass decodes with (A + B / z), and the
-                // texture's own size (the render's).
+                // texture's own size (the render's). The lens maps a uv of the eye's picture onto the depth as a uv of the whole texture, so it is told whether that holds: the Submit
+                // region is the whole source and the depth is the source's size.
                 D3D11_TEXTURE2D_DESC dd{};
                 dtex->GetDesc(&dd);
                 float lensA = 0.0f, lensB = 0.0f;
                 temporalSceneProjection(g_curProj[0], g_curProj[1], g_lastNear, &lensA, &lensB);
-                scopeZoomDepthSet(eye, depthSrv, dd.Width, dd.Height, lensB > 0.0f ? lensA + lensB / static_cast<float>(scopezoom::kLensNearM) : 0.0f);
+                const bool lensCovers = region[0] == 0 && region[1] == 0 && region[2] == sd.Width && region[3] == sd.Height && dd.Width == sd.Width && dd.Height == sd.Height;
+                scopeZoomDepthSet(eye, depthSrv, dd.Width, dd.Height, lensB > 0.0f ? lensA + lensB / static_cast<float>(scopezoom::kLensNearM) : 0.0f, lensCovers);
             }
         }
     }

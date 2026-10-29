@@ -170,7 +170,7 @@ inline void lensRayDir(uint32_t k, double* dx, double* dy) noexcept {
 struct LensRay {
     double rPx = 0.0;       // render px from c to the first px of the frame, or to where the ray ended
     double rDeg = 0.0;      // the same in degrees at the eye
-    bool escaped = true;    // it went kLensMaxDeg (or off the image, or kLensStepCap steps) without meeting the frame
+    bool escaped = true;    // it went kLensMaxDeg (or off the image, or kLensStepCap steps) without meeting the frame; rDeg is then kLensMaxDeg, whichever way it ended
 };
 // The reference march of the first pass (the shader's text mirrors it step for step): from c in steps of 1 render px along ray k. depthAt(x, y) is the reverse-Z depth of a render px
 // (larger is nearer); nearDepth is the depth of kLensNearM. The frame is the first run of kLensRunPx px nearer than nearDepth; its first px is the ray's end.
@@ -183,18 +183,14 @@ inline LensRay lensMarchRef(DepthAt&& depthAt, int w, int h, double cx, double c
     lensTangentAtUv(tan4, cx / w, cy / h, tc);
     const double cosMax = std::cos(kLensMaxDeg / kDeg);
     uint32_t run = 0;
-    double lastX = cx, lastY = cy;
     for (uint32_t i = 1; i <= kLensStepCap; ++i) {
         const double px = cx + dx * i, py = cy + dy * i;
-        lastX = px;
-        lastY = py;
         const int qx = static_cast<int>(std::floor(px)), qy = static_cast<int>(std::floor(py));
         double t[2];
         lensTangentAtUv(tan4, px / w, py / h, t);
-        const double angle = lensAngleDeg(tc[0], tc[1], t[0], t[1]);
         if (qx < 0 || qy < 0 || qx >= w || qy >= h) {
             out.rPx = i;
-            out.rDeg = angle;
+            out.rDeg = kLensMaxDeg;   // an escape of any kind reads as the sentinel, so it is never counted as a hit in the hole's statistics
             return out;
         }
         const double cosT = (1.0 + tc[0] * t[0] + tc[1] * t[1]) / std::sqrt((1.0 + tc[0] * tc[0] + tc[1] * tc[1]) * (1.0 + t[0] * t[0] + t[1] * t[1]));
@@ -214,10 +210,8 @@ inline LensRay lensMarchRef(DepthAt&& depthAt, int w, int h, double cx, double c
             return out;
         }
     }
-    double t[2];
-    lensTangentAtUv(tan4, lastX / w, lastY / h, t);
     out.rPx = kLensStepCap;
-    out.rDeg = lensAngleDeg(tc[0], tc[1], t[0], t[1]);
+    out.rDeg = kLensMaxDeg;
     return out;
 }
 // More than kLensMaxEscaped rays reaching the end without meeting the frame: the sight is open (a hip view, a red dot with no frame, the weapon lowered), and there is no lens.
@@ -351,7 +345,8 @@ struct LensDoorStats {
     uint32_t depthUnavailable = 0;    // no depth for the eye at the door, or not at the size c was worked out for
     uint32_t formatRefused = 0;       // the frame route: a format that is not R8G8B8A8 or B8G8R8A8 UNORM, a region, a view, a copy or a shader that could not be had
     uint32_t dispatched = 0;          // frames the passes were issued on
-    uint32_t noop = 0;                // qualifying frames at M = 1 (the first of the ease), which have nothing to do and nothing issued
+    uint32_t noop = 0;                // qualifying frames at M = 1 (the first of the ease) that the door would otherwise have run on: nothing to do, nothing issued, not applied
+    uint32_t otherFrame = 0;          // frames (applied or not) whose c was worked out from the draws of another frame than the picture's (the jitter's sequence is not the door's)
     uint32_t raysRead = 0;            // of them, frames whose rays were read back
     bool holeKnown = false;           // one settled frame's rays
     double rMinDeg = kNaN, rMedianDeg = kNaN, rMaxDeg = kNaN;
@@ -405,13 +400,36 @@ inline void lensNoteRays(LensDoorStats* s, const LensReadback& r, bool settled) 
         }
     }
 }
-// The press's totals, once the door has stopped counting: the frames the lens was applied on are those the passes were issued on less the ones whose rays said the sight is open,
-// plus the frames at M = 1 (nothing to do); rays not read back yet count as applied (they are the last few frames of a press). The qualifying frames are the applied ones and the
-// door's own declines.
+// The press's totals, once the door has stopped counting: the frames the lens was applied on are those the passes were issued on less the ones whose rays said the sight is open
+// (rays not read back yet count as applied: they are the last few frames of a press). A frame at M = 1 has nothing to do and is not applied, so a press that never gets past its
+// first frame, or whose every other frame the door declined, has applied 0. The qualifying frames are the dispatched, the M = 1 ones and the door's own declines.
 inline void lensFinish(LensDoorStats* s) noexcept {
     if (!s) return;
-    s->applied = (s->dispatched >= s->openSight ? s->dispatched - s->openSight : 0u) + s->noop;
+    s->applied = s->dispatched >= s->openSight ? s->dispatched - s->openSight : 0u;
     s->qualifying = s->dispatched + s->noop + s->staleC + s->depthUnavailable + s->formatRefused;
+}
+
+// What the frame thread counted in the press, from its own gate: the verdicts of the ticks (so a door that is never reached still leaves a press line that says the lens was due), the
+// jitter readings it could not get or got from another frame than the rows, and the angle between c through S and c at the far impact point (the lens uses the far one).
+struct LensTickStats {
+    uint32_t qualified = 0, noS = 0, notInTable = 0, idle = 0;   // the gate's verdicts, one per tick of the press
+    uint32_t jitterNone = 0, jitterOther = 0;                     // qualifying ticks with no jitter reading at the draw, or one taken in another frame than the rows
+    uint32_t farN = 0;
+    double farSumDeg = 0.0, farMaxDeg = 0.0;
+};
+inline void lensNoteFar(LensTickStats* s, double deg) noexcept {
+    if (!s || !std::isfinite(deg)) return;
+    ++s->farN;
+    s->farSumDeg += deg;
+    s->farMaxDeg = std::max(s->farMaxDeg, deg);
+}
+// The angle at the eye between the rays through two NDC points of an eye whose NDC square spans the tangents {L, R, D, U}; NaN when a point or the tangents are not usable.
+inline double lensNdcAngleDeg(const double a[2], const double b[2], const float tan4[4]) noexcept {
+    if (!a || !b || !tangentsUsable(tan4) || !std::isfinite(a[0]) || !std::isfinite(a[1]) || !std::isfinite(b[0]) || !std::isfinite(b[1])) return kNaN;
+    double ta[2], tb[2];
+    tangentOfNdc(a, tan4, ta);
+    tangentOfNdc(b, tan4, tb);
+    return lensAngleDeg(ta[0], ta[1], tb[0], tb[1]);
 }
 
 // The announce: once when the tick first runs in native on foot, and at every change of the key or the reference FOV.
@@ -427,18 +445,23 @@ struct LensPressLine {
     const char* scope = "unknown";
     bool keyOn = false;
     double adsDeg = kNaN, m = kNaN, refDeg = kNaN;
-    LensDoorStats d;
+    LensTickStats t;   // the frame thread's counts
+    LensDoorStats d;   // the door's
 };
 inline int formatLensPress(char* buf, size_t n, const LensPressLine& p) noexcept {
     int len = 0;
-    char ads[24], m[24], rmin[24], rmed[24], rmax[24], dc[24], dn[24], cx[24], cy[24], cs[24], rm[24], rx[24], mm[24], mx[24];
+    char ads[24], m[24], fmean[24], fmax[24], rmin[24], rmed[24], rmax[24], dc[24], dn[24], cx[24], cy[24], cs[24], rm[24], rx[24], mm[24], mx[24];
     double mcx, mcy, spread;
     lensCStats(p.d, &mcx, &mcy, &spread);
     const LensDoorStats& d = p.d;
     appendf(buf, n, &len, "scope zoom (S1): press %u item %s scope %s key %s ads %s deg M %s h %.1f deg; ", p.press, itemText(p.item), p.scope ? p.scope : "unknown", p.keyOn ? "on" : "off",
             numText(p.adsDeg, 3, ads, sizeof(ads)), numText(p.m, 3, m, sizeof(m)), p.refDeg);
-    appendf(buf, n, &len, "applied %u of %u qualifying frames; declined: no S %u, stale c %u, open sight %u, not in the table %u, depth unavailable %u, format refused %u; ", d.applied,
-            d.qualifying, d.noS, d.staleC, d.openSight, d.notInTable, d.depthUnavailable, d.formatRefused);
+    const LensTickStats& t = p.t;
+    appendf(buf, n, &len, "frame thread: qualified %u, no S %u, not in the table %u, idle %u; jitter reading none %u, from another frame %u; c to the far point mean %s max %s deg; ", t.qualified, t.noS,
+            t.notInTable, t.idle, t.jitterNone, t.jitterOther, numText(t.farN ? t.farSumDeg / static_cast<double>(t.farN) : kNaN, 3, fmean, sizeof(fmean)),
+            numText(t.farN ? t.farMaxDeg : kNaN, 3, fmax, sizeof(fmax)));
+    appendf(buf, n, &len, "applied %u of %u qualifying frames (dispatched %u, at M 1 %u); declined: no S %u, stale c %u, open sight %u, not in the table %u, depth unavailable %u, format refused %u; "
+            "c from another frame than the picture %u; ", d.applied, d.qualifying, d.dispatched, d.noop, d.noS, d.staleC, d.openSight, d.notInTable, d.depthUnavailable, d.formatRefused, d.otherFrame);
     appendf(buf, n, &len, "hole r min %s median %s max %s deg, %u of %u rays escaped (rays read on %u frames); depth at c %s (near %s); ", numText(d.holeKnown ? d.rMinDeg : kNaN, 2, rmin, sizeof(rmin)),
             numText(d.holeKnown ? d.rMedianDeg : kNaN, 2, rmed, sizeof(rmed)), numText(d.holeKnown ? d.rMaxDeg : kNaN, 2, rmax, sizeof(rmax)), d.holeKnown ? d.holeEscaped : 0u,
             kLensRays, d.raysRead, numText(d.holeKnown ? d.depthAtC : kNaN, 6, dc, sizeof(dc)), numText(d.depthNear, 6, dn, sizeof(dn)));

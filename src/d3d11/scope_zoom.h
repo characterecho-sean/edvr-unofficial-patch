@@ -22,6 +22,7 @@ struct ScopeZoomFrame {
     float mTarget = 1.0f;            // M the ease is going to
     float uv[2] = {};                // c as a uv of the render (0..1, y down), as the game drew it (the jitter in)
     float jitterUv[2] = {};          // the draw's jitter in the uv of the render's size (the game's content sits this far right and down of its unjittered place)
+    uint64_t jitterSeq = 0;          // the temporal sequence of the frame that jitter, and the rows c came from, were drawn in (0: no jitter reading); the door's sequence is the picture's
     float tan4[4] = {};              // the tangents {L, R, D, U} the render's NDC square spans
     uint64_t stampUs = 0;            // set by scopeZoomPublish
 };
@@ -32,17 +33,19 @@ struct ScopeZoomDepth {
     ID3D11ShaderResourceView* srv = nullptr;
     uint32_t w = 0, h = 0;           // the depth texture's size (the render's size)
     float nearDepth = 0.0f;          // the reverse-Z depth of scopezoom::kLensNearM from the scene's projection row
+    bool covers = false;             // the Submit region is the whole source and the depth texture is the source's size: a uv of the render is a uv of the depth
 };
 inline ScopeZoomDepth g_scopeZoomDepth[2];
 inline void scopeZoomDepthClear(int eye) noexcept {
     if (eye >= 0 && eye <= 1) g_scopeZoomDepth[eye] = ScopeZoomDepth{};
 }
-inline void scopeZoomDepthSet(int eye, ID3D11ShaderResourceView* srv, uint32_t w, uint32_t h, float nearDepth) noexcept {
+inline void scopeZoomDepthSet(int eye, ID3D11ShaderResourceView* srv, uint32_t w, uint32_t h, float nearDepth, bool covers) noexcept {
     if (eye < 0 || eye > 1) return;
     g_scopeZoomDepth[eye].srv = srv;
     g_scopeZoomDepth[eye].w = w;
     g_scopeZoomDepth[eye].h = h;
     g_scopeZoomDepth[eye].nearDepth = nearDepth;
+    g_scopeZoomDepth[eye].covers = covers;
 }
 
 // The frame thread: publish this frame's lens (the verdict kIdle for a frame that asks nothing of it). The microsecond clock is the door's.
@@ -58,7 +61,7 @@ struct ScopeZoomDoorArgs {
     uint64_t sequence = 0;
     ID3D11Texture2D* frame = nullptr;
     const uint32_t* region = nullptr;   // x0, y0, x1, y1 in the frame's pixels
-    bool inPlace = false;               // the frame is EDVR's own and is rewritten in full every frame: the passes may write it
+    bool inPlace = false;               // the frame is EDVR's own and is rewritten in full every frame: the passes may write it. The region must be the whole texture either way
     bool resolved = false;              // the frame is the upscaler's picture (unjittered)
 };
 // The door, called with the frame the weapons/HUD composite is about to take. Rewrites the right eye's picture in place, or, for a frame it may not write (or whose format has no

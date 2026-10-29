@@ -11561,6 +11561,50 @@ struct EyeRowsPub {
     float o[4] = {};
 };
 EyeRowsPub g_eyeRowsPub[2];
+// A1: the draw's jitter for the right eye, read at the moment its scene rows are published (the render thread, at the draw: the frame the native temporal channel's beginFrame opened
+// is the frame these rows belong to, as the shield ripple takes its jitter at its draw), with that frame's temporal sequence. Taken only while the scope lens's key is on. A seqlock; the
+// reader never waits. ok is false when the channel had no answer (before its first frame, or closed) or gave no size.
+struct EyeJitterPub {
+    std::atomic<uint32_t> seq{0};
+    bool ok = false;
+    uint32_t frame = ~0u, w = 0, h = 0;
+    uint64_t tseq = 0;
+    float jx = 0.0f, jy = 0.0f;
+};
+EyeJitterPub g_eyeJitterPub;
+void eyeJitterPublish(uint32_t frame) noexcept {
+    uint64_t tseq = 0;
+    float jx = 0.0f, jy = 0.0f;
+    uint32_t w = 0, h = 0;
+    const bool got = nativeTemporalDrawJitter(1, &tseq, &jx, &jy, &w, &h) && w && h && std::isfinite(jx) && std::isfinite(jy);
+    EyeJitterPub& q = g_eyeJitterPub;
+    q.seq.fetch_add(1, std::memory_order_acq_rel);
+    q.ok = got;
+    q.frame = frame;
+    q.tseq = tseq;
+    q.jx = jx;
+    q.jy = jy;
+    q.w = w;
+    q.h = h;
+    q.seq.fetch_add(1, std::memory_order_release);
+}
+bool eyeJitterRead(bool* ok, uint32_t* frame, uint64_t* tseq, float* jx, float* jy, uint32_t* w, uint32_t* h) noexcept {
+    EyeJitterPub& q = g_eyeJitterPub;
+    for (int tries = 0; tries < 2; ++tries) {
+        const uint32_t s1 = q.seq.load(std::memory_order_acquire);
+        if (s1 & 1u || s1 == 0) continue;
+        *ok = q.ok;
+        *frame = q.frame;
+        *tseq = q.tseq;
+        *jx = q.jx;
+        *jy = q.jy;
+        *w = q.w;
+        *h = q.h;
+        std::atomic_thread_fence(std::memory_order_acquire);
+        if (q.seq.load(std::memory_order_relaxed) == s1) return true;
+    }
+    return false;
+}
 void eyeRowsPublish(int e, uint32_t frame, const float rows[16], const float o[4]) noexcept {
     if (e < 0 || e > 1) return;
     EyeRowsPub& q = g_eyeRowsPub[e];
@@ -11570,6 +11614,7 @@ void eyeRowsPublish(int e, uint32_t frame, const float rows[16], const float o[4
     std::memcpy(q.rows, rows, sizeof(q.rows));
     std::memcpy(q.o, o, sizeof(q.o));
     q.seq.fetch_add(1, std::memory_order_release);
+    if (e == 1 && g_scopeZoomKey.load(std::memory_order_relaxed)) eyeJitterPublish(frame);   // A1: the jitter this eye's rows were drawn with
 }
 bool eyeRowsRead(int e, uint32_t* frame, float rows[16], float o[4], uint64_t* qpc) noexcept {
     if (e < 0 || e > 1) return false;
@@ -34185,6 +34230,10 @@ struct Geometry {
     float tan[2][4] = {};
     bool tanOk[2] = {false, false};
     double eMinusSCm = kNaN, eyeRToSCm = kNaN;
+    // The rows c was worked out from, kept for A1 (the lens projects a second point through the very same snapshot): each eye's frame, scene rows and origin. Not in S0's line.
+    uint32_t rowsFrame[2] = {~0u, ~0u};
+    float rows[2][16] = {};
+    float o[2][4] = {};
 };
 Geometry geometryNow(const Vr& v, uint64_t nowMs) noexcept {
     Geometry g;
@@ -34200,6 +34249,9 @@ Geometry geometryNow(const Vr& v, uint64_t nowMs) noexcept {
         float rows[16], o[4];
         if (!eyeRowsRead(e, &rf, rows, o, nullptr)) continue;
         if (!nofoot::sceneRowsFreshForLock(rf, g_f44Frame.load(std::memory_order_relaxed))) { g.why[e] = "scene rows not this frame's"; continue; }
+        g.rowsFrame[e] = rf;
+        std::memcpy(g.rows[e], rows, sizeof(rows));
+        std::memcpy(g.o[e], o, sizeof(o));
         if (!sFresh) { g.why[e] = "no sight point S this frame"; continue; }
         const double od[3] = {o[0], o[1], o[2]};
         double ndc[2];
@@ -34372,8 +34424,10 @@ void s0VrNoteSample(const F141Sample& s, uint64_t now) noexcept {
 // ---- A1: the scope lens, the frame thread's half (scope_zoom_s1.h, scope_zoom.h; docs\design-vr-scope-magnification-2026-10-28.md, section 8) ---------------------------------------------
 // Each frame in native on foot VR the tick answers one question: does the lens run on the picture this frame draws (fix.native_on_foot_ads_scope_zoom on; the sights up, the game's w at
 // 1.0; the held item and scope in the table with M >= 1.05; S fresh, so c through the right eye's scene rows)? It publishes the answer with c (corrected for the draw's jitter by the
-// door, which owns the output's size), M after its ease and the tangents of the render, by seqlock, for the door on the draw thread. It borrows S0's geometry and the samples S0 keeps
-// from F141's drain (w, S); nothing is written to a game object. A press of the sights writes one `scope zoom (S1)` line at its end, from the door's counters. Frame thread only.
+// door, which owns the output's size), M after its ease and the tangents of the render, by seqlock, for the door on the draw thread. It borrows S0's geometry (the rows it projected
+// through) and the samples S0 keeps from F141's drain (w, S, E); nothing is written to a game object. c is the game's line E -> S (the shots go along it, F143) projected at the far
+// impact point, kFarM along it past S, not S itself: S is 17 to 28 cm away, so an eye a millimetre off the line would put S 0.3 degrees from the far target and the lens would
+// magnify about the wrong point. A press of the sights writes one `scope zoom (S1)` line at its end, from the tick's own counts and the door's. Frame thread only.
 namespace s1 {
 namespace sz = edvr::scopezoom;
 static_assert(sz::kLensScopeUnknown == loadout::kScopeUnknown && sz::kLensScopeNo == loadout::kScopeNo && sz::kLensScopeYes == loadout::kScopeYes,
@@ -34381,6 +34435,8 @@ static_assert(sz::kLensScopeUnknown == loadout::kScopeUnknown && sz::kLensScopeN
 
 constexpr uint32_t kPressLineCap = 200;   // press lines a session; later presses are counted by the door and not written
 constexpr uint64_t kItemRetryMs = 250;    // an item whose scope is not known yet is asked again this often
+constexpr double kFarM = 100.0;           // metres along the line E -> S past S: where the lens's c is taken
+constexpr double kMinLineM = 0.01;        // |S - E| under 1 cm gives the line no direction
 
 struct State {
     bool announced = false, announcedKey = false, open = false, keyNow = false;
@@ -34391,6 +34447,7 @@ struct State {
     uint32_t heldSerial = 0;
     uint64_t itemMs = 0;
     double adsDeg = std::numeric_limits<double>::quiet_NaN(), targetM = std::numeric_limits<double>::quiet_NaN(), refDeg = std::numeric_limits<double>::quiet_NaN();
+    sz::LensTickStats ts;   // this press: the gate's verdicts per tick, the jitter readings, the angle between c through S and c at the far point
 } g_s1;
 
 void announce(State& s, bool key, double ref) noexcept {
@@ -34411,6 +34468,7 @@ void endPress(State& s) noexcept {
     pl.adsDeg = s.adsDeg;
     pl.m = s.targetM;
     pl.refDeg = s.refDeg;
+    pl.t = s.ts;
     scopeZoomPressTake(&pl.d);
     char line[1100];
     sz::formatLensPress(line, sizeof(line), pl);
@@ -34421,11 +34479,12 @@ void tick(uint64_t nowMs) noexcept {
     State& s = g_s1;
     s0::Vr& v = s0::g_vr;
     ScopeZoomFrame out;   // verdict kIdle: nothing asked of the lens
-    if (g_install != InstallState::Armed || runtimeFlatProfile()) {
+    if (g_install != InstallState::Armed || runtimeFlatProfile()) {   // not armed, or the flat profile: a press still open ends here, with its line
+        scopeZoomPublish(out);
+        if (s.open) endPress(s);
         s.open = false;
         s.lastT = 0.0;
         s.easeS = 0.0;
-        scopeZoomPublish(out);
         return;
     }
     const bool key = g_scopeZoomKey.load(std::memory_order_relaxed);
@@ -34444,6 +34503,7 @@ void tick(uint64_t nowMs) noexcept {
         s.itemMs = nowMs;
         s.easeS = 0.0;
         s.adsDeg = s.targetM = std::numeric_limits<double>::quiet_NaN();
+        s.ts = sz::LensTickStats{};
         scopeZoomPressBegin(s.press);
     }
     if (!ads) {
@@ -34476,28 +34536,51 @@ void tick(uint64_t nowMs) noexcept {
     s.adsDeg = adsDeg;
     s.targetM = gi.m;
     s0::Geometry g;
+    double ndcFar[2] = {0.0, 0.0}, farDeg = std::numeric_limits<double>::quiet_NaN();
     if (gi.keyOn && gi.onFoot && gi.adsActive && gi.wFull && gi.tableHit && gi.m >= sz::kLensMinM) {
-        g = s0::geometryNow(v, nowMs);   // c: the sight point S through the right eye's scene rows (S0's math, its conditions)
+        g = s0::geometryNow(v, nowMs);   // the right eye's scene rows with S through them (S0's math, its conditions)
         gi.sFresh = v.haveS && s0::freshMs(nowMs, v.sMs);
-        gi.cUsable = g.eye[1].ok && g.tanOk[1];   // c needs the rows and their tangents; the lens works in uv, so the scene target's size does not matter
+        gi.cUsable = g.eye[1].ok && g.tanOk[1];   // the rows and their tangents; the lens works in uv, so the scene target's size does not matter
+        if (gi.cUsable) {
+            // c is the far impact point: the point kFarM along the game's line E -> S past S, through the same rows. fwd in geometryNow is a dummy (S is projected at distance 0); the
+            // line's direction is S - E, the pair F141 took in one sample (the shots go along it).
+            const double S[3] = {v.S[0], v.S[1], v.S[2]};
+            const double dir[3] = {S[0] - v.Epos[0], S[1] - v.Epos[1], S[2] - v.Epos[2]};
+            const double od[3] = {g.o[1][0], g.o[1][1], g.o[1][2]};
+            gi.cUsable = nofoot::ikLen(dir) > kMinLineM && nofoot::sightPointNdc(g.rows[1], od, S, dir, kFarM, ndcFar);
+            if (gi.cUsable) farDeg = sz::lensNdcAngleDeg(g.eye[1].ndc, ndcFar, g.tan[1]);
+        }
     }
     const sz::LensVerdict verdict = sz::lensGate(gi);
     out.verdict = static_cast<uint32_t>(verdict);
     out.press = s.press;
     out.mTarget = static_cast<float>(gi.m);
+    switch (verdict) {   // this press's count of the gate's verdicts, beside the door's own
+        case sz::LensVerdict::kQualifies: ++s.ts.qualified; break;
+        case sz::LensVerdict::kNoS: ++s.ts.noS; break;
+        case sz::LensVerdict::kNotInTable: ++s.ts.notInTable; break;
+        default: ++s.ts.idle; break;
+    }
     if (verdict == sz::LensVerdict::kQualifies) {
         const double easeT = s.easeS;
         s.easeS += dt;
         out.m = static_cast<float>(sz::lensEase(gi.m, easeT));
-        out.uv[0] = static_cast<float>((g.eye[1].ndc[0] + 1.0) * 0.5);
-        out.uv[1] = static_cast<float>((1.0 - g.eye[1].ndc[1]) * 0.5);
-        // the draw's jitter for this eye: the door's picture is unjittered, c through the rows is where the game put S
-        uint64_t jseq = 0;
+        out.uv[0] = static_cast<float>((ndcFar[0] + 1.0) * 0.5);
+        out.uv[1] = static_cast<float>((1.0 - ndcFar[1]) * 0.5);
+        sz::lensNoteFar(&s.ts, farDeg);
+        // the jitter this eye's rows were drawn with, taken when they were published (the door's picture is unjittered; c through the rows is where the game put the point). No
+        // reading, or one taken in another frame than the rows, is counted; the lens still runs on what there is.
+        bool jOk = false;
+        uint32_t jFrame = ~0u, jw = 0, jh = 0;
+        uint64_t jSeq = 0;
         float jx = 0.0f, jy = 0.0f;
-        uint32_t jw = 0, jh = 0;
-        if (nativeTemporalDrawJitter(1, &jseq, &jx, &jy, &jw, &jh) && jw && jh) {
+        if (!eyeJitterRead(&jOk, &jFrame, &jSeq, &jx, &jy, &jw, &jh) || !jOk || !jw || !jh) {
+            ++s.ts.jitterNone;
+        } else {
             out.jitterUv[0] = jx / static_cast<float>(jw);
             out.jitterUv[1] = jy / static_cast<float>(jh);
+            out.jitterSeq = jSeq;
+            if (jFrame != g.rowsFrame[1]) ++s.ts.jitterOther;
         }
         std::memcpy(out.tan4, g.tan[1], sizeof(out.tan4));
     } else {

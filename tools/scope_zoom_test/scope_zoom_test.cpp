@@ -98,7 +98,9 @@ static bool wiredTemporal(const std::string& t) {
 static bool wiredFrame(const std::string& n) {
     return before(n, "s0::vrTick(GetTickCount64());", "s1::tick(GetTickCount64());") && has(n, "scopeZoomPublish(out);") && has(n, "scopeZoomPressBegin(s.press);") && has(n, "scopeZoomPressTake(&pl.d);") &&
            has(n, "cfg.getString(\"fix.native_on_foot_ads_scope_zoom\", \"off\")") && has(n, "cfg.getFloat(\"experimental.native_on_foot_ads_scope_zoom_fov\"") &&
-           has(n, "sz::lensGate(gi)") && has(n, "nativeTemporalDrawJitter(1, &jseq");
+           has(n, "sz::lensGate(gi)") && has(n, "nativeTemporalDrawJitter(1, &tseq, &jx, &jy, &w, &h)") && has(n, "if (e == 1 && g_scopeZoomKey.load(std::memory_order_relaxed)) eyeJitterPublish(frame);") &&
+           has(n, "nofoot::sightPointNdc(g.rows[1], od, S, dir, kFarM, ndcFar)") && has(n, "const double dir[3] = {S[0] - v.Epos[0], S[1] - v.Epos[1], S[2] - v.Epos[2]};") &&
+           has(n, "if (s.open) endPress(s);");
 }
 static bool wiredIni(const std::string& ini) {
     const size_t fixAt = ini.find("native_on_foot_ads_scope_zoom = off"), expAt = ini.find("native_on_foot_ads_scope_zoom_fov = 56.3");
@@ -116,6 +118,8 @@ static void wiringTests() {
     check(!wiredTemporal(replaced(temporal, "scopeZoomDepthClear(eye);", "")), "control: no clear is not the wiring");
     check(wiredFrame(native), "the frame tick follows S0's, publishes, takes the door's counters at the press's end, and the two keys are read by their literal names");
     check(!wiredFrame(replaced(native, "s1::tick(GetTickCount64());", "")), "control: no tick is not the wiring");
+    check(!wiredFrame(replaced(native, "nofoot::sightPointNdc(g.rows[1], od, S, dir, kFarM, ndcFar)", "nofoot::sightPointNdc(g.rows[1], od, S, dir, 0.0, ndcFar)")), "control: c taken at S itself, not at the far point along the line E -> S, is not the wiring");
+    check(!wiredFrame(replaced(native, "if (s.open) endPress(s);", "")), "control: a press left open by the flat profile or an unarmed tick with no line is not the wiring");
     check(!wiredFrame(replaced(native, "cfg.getString(\"fix.native_on_foot_ads_scope_zoom\", \"off\")", "cfg.getString(\"fix.native_on_foot_ads_zoom\", \"off\")")), "control: a key read by another name is not the wiring");
     check(wiredIni(ini), "the ini states both keys with their rows: the user key on the Native on foot page, the experimental one in the developer tier");
     check(!wiredIni(replaced(ini, "native_on_foot_ads_scope_zoom = off", "native_on_foot_ads_scope_zoom = on")), "control: the user key on by default is not the shipped default");
@@ -175,6 +179,7 @@ Image makeOrig() {
 
 struct Scene {
     bool ring = true;
+    double cRen[2] = {kCRen[0], kCRen[1]};     // c in render px (the scene's rays start here)
     int gapRay = -1;                           // two rays wide: the frame is cut away between rays gapRay and gapRay + 1
     std::vector<float> depth = std::vector<float>(static_cast<size_t>(kRenW) * kRenH);
     double depthAt(int x, int y) const { return depth[static_cast<size_t>(y) * kRenW + x]; }
@@ -369,7 +374,9 @@ struct Run {
 };
 struct RunIn {
     DXGI_FORMAT fmt = DXGI_FORMAT_R8G8B8A8_UNORM;
-    bool inPlace = true, resolved = true, hasDepth = true;
+    bool inPlace = true, resolved = true, hasDepth = true, covers = true;
+    uint32_t regionTrim = 0;       // the region handed to the door is this many px narrower than the texture
+    int jitterSeqDelta = 0;        // the record's jitter sequence differs from the door's sequence by this
     sz::LensVerdict verdict = sz::LensVerdict::kQualifies;
     double m = 2.5;
     uint32_t sleepMs = 0;          // between the publish and the door: a c this old is stale
@@ -382,7 +389,7 @@ Run runDoor(Fx& f, const Scene& sc, const Image& orig, const RunIn& in) {
     const UINT bind = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
     ComPtr<ID3D11Texture2D> frame = f.frameTex(in.fmt, orig, bind);
     scopeZoomDepthClear(1);
-    if (in.hasDepth) scopeZoomDepthSet(1, srv.Get(), kRenW, kRenH, static_cast<float>(kNearDepth));
+    if (in.hasDepth) scopeZoomDepthSet(1, srv.Get(), kRenW, kRenH, static_cast<float>(kNearDepth), in.covers);
     static uint32_t press = 0;   // a press of its own each run: the rays still in flight from the run before belong to that one and are dropped
     ++press;
     scopeZoomPressBegin(press);
@@ -391,19 +398,23 @@ Run runDoor(Fx& f, const Scene& sc, const Image& orig, const RunIn& in) {
     rec.press = press;
     rec.m = static_cast<float>(in.m);
     rec.mTarget = static_cast<float>(in.m);
-    rec.uv[0] = static_cast<float>(kCRen[0] / kRenW);
-    rec.uv[1] = static_cast<float>(kCRen[1] / kRenH);
+    rec.uv[0] = static_cast<float>(sc.cRen[0] / kRenW);
+    rec.uv[1] = static_cast<float>(sc.cRen[1] / kRenH);
     rec.jitterUv[0] = static_cast<float>(kJitterPx[0] / kRenW);
     rec.jitterUv[1] = static_cast<float>(kJitterPx[1] / kRenH);
+    rec.jitterSeq = static_cast<uint64_t>(100 + in.jitterSeqDelta);
     std::memcpy(rec.tan4, kTan4, sizeof(kTan4));
     scopeZoomPublish(rec);
     if (in.sleepMs) Sleep(in.sleepMs);
-    const bool wait = in.hasDepth && in.verdict == sz::LensVerdict::kQualifies && in.m >= 1.001 && !in.sleepMs && in.resolved;
-    const uint32_t region[4] = {0, 0, kOutW, kOutH};
+    const bool wait = in.hasDepth && in.covers && in.verdict == sz::LensVerdict::kQualifies && in.m >= 1.001 && !in.sleepMs && in.resolved && !in.regionTrim;
+    const uint32_t region[4] = {0, 0, kOutW - in.regionTrim, kOutH};
     ComPtr<ID3D11Texture2D> copy;
     Run out;
     for (uint32_t i = 0; i < (wait ? 400u : 1u); ++i) {
-        if (i) scopeZoomPublish(rec);
+        if (i) {
+            rec.jitterSeq = static_cast<uint64_t>(100 + i + in.jitterSeqDelta);
+            scopeZoomPublish(rec);
+        }
         f.upload(frame.Get(), in.fmt, orig);
         ScopeZoomDoorArgs a;
         a.eye = 1;
@@ -532,6 +543,29 @@ void lensTests(Fx& f) {
               "and the rays read back say open sight, with no hole to report");
     }
 
+    // ---- an open sight with c near the picture's edge: the rays that leave the image are escapes (the sentinel), not hits in the hole's statistics ----
+    {
+        Scene edge = makeScene(false, -1);
+        edge.cRen[0] = 20.0;
+        edge.cRen[1] = 128.0;
+        RunIn in;
+        const Run r = runDoor(f, edge, orig, in);
+        check(sameImage(r.image, orig) && r.stats.raysRead >= 1 && r.stats.openSight == r.stats.raysRead && !r.stats.holeKnown,
+              "an open sight whose rays leave the image on one side reports no hole: an off-image ray is an escape, not a hit with an angle under 12 degrees");
+    }
+
+    // ---- a c from the draws of another frame than the picture is counted, and the lens still applies ----
+    {
+        RunIn in;
+        in.jitterSeqDelta = 1;
+        const Run r = runDoor(f, ring, orig, in);
+        const Verdict v = compare(r.image, orig, expectedLens(ring, orig, in.m, cx, cy, 1.0, 0.0), 1);
+        check(r.stats.otherFrame >= 1 && r.stats.otherFrame == r.stats.dispatched && v.insideBad == 0 && v.outsideBad == 0 && v.insideChanged * 10 > v.inside * 9,
+              "a c whose jitter sequence is not the picture's is counted and the lens still runs on it");
+        const Run same = runDoor(f, ring, orig, RunIn{});
+        check(same.stats.otherFrame == 0, "a c from the picture's own frame is not counted");
+    }
+
     // ---- the reasons that decline a frame, each counted and each leaving the frame alone ----
     {
         RunIn in;
@@ -544,7 +578,7 @@ void lensTests(Fx& f) {
         d.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
         ComPtr<ID3D11Texture2D> half;
         hr(f.dev->CreateTexture2D(&d, nullptr, &half), "a half-float frame");
-        scopeZoomDepthSet(1, srv.Get(), kRenW, kRenH, static_cast<float>(kNearDepth));
+        scopeZoomDepthSet(1, srv.Get(), kRenW, kRenH, static_cast<float>(kNearDepth), true);
         scopeZoomPressBegin(1);
         ScopeZoomFrame rec;
         rec.verdict = static_cast<uint32_t>(sz::LensVerdict::kQualifies);
@@ -576,6 +610,11 @@ void lensTests(Fx& f) {
             {"the gate's verdict not in the table", [] { RunIn i; i.verdict = sz::LensVerdict::kNotInTable; return i; }()},
             {"the idle verdict", [] { RunIn i; i.verdict = sz::LensVerdict::kIdle; return i; }()},
             {"M at 1 (the first frame of the ease)", [] { RunIn i; i.m = 1.0; return i; }()},
+            {"no depth for the eye on the first frame of the ease", [] { RunIn i; i.hasDepth = false; i.m = 1.0; return i; }()},
+            {"a picture that is not the upscaler's on the first frame of the ease", [] { RunIn i; i.resolved = false; i.m = 1.0; return i; }()},
+            {"a depth that does not cover the render", [] { RunIn i; i.covers = false; return i; }()},
+            {"a region that is not the whole texture, in place", [] { RunIn i; i.regionTrim = 8; return i; }()},
+            {"a region that is not the whole texture, on the copy route", [] { RunIn i; i.regionTrim = 8; i.inPlace = false; return i; }()},
         };
         for (const auto& c : cases) {
             const Run r = runDoor(f, ring, orig, c.in);
@@ -588,7 +627,12 @@ void lensTests(Fx& f) {
             else if (what == "the gate's verdict no S") check(s.noS == 1 && s.qualifying == 0, "the gate's no S is counted and asks nothing of the passes");
             else if (what == "the gate's verdict not in the table") check(s.notInTable == 1 && s.qualifying == 0, "the gate's not in the table is counted and asks nothing of the passes");
             else if (what == "the idle verdict") check(s.noS + s.notInTable + s.staleC + s.dispatched + s.noop + s.formatRefused + s.depthUnavailable == 0, "the idle verdict counts nothing");
-            else check(s.noop == 1 && s.dispatched == 0 && s.applied == 1 && s.qualifying == 1, "M at 1 is counted as applied with nothing issued");
+            else if (what == "no depth for the eye on the first frame of the ease") check(s.depthUnavailable == 1 && s.noop == 0 && s.applied == 0 && s.qualifying == 1, "the first frame at M 1 with no depth is depth unavailable, not a frame with nothing to do");
+            else if (what == "a picture that is not the upscaler's on the first frame of the ease") check(s.formatRefused == 1 && s.noop == 0 && s.applied == 0 && s.qualifying == 1, "the first frame at M 1 over a picture that is not the upscaler's is refused, not a frame with nothing to do");
+            else if (what == "a depth that does not cover the render") check(s.depthUnavailable == 1 && s.dispatched == 0 && s.applied == 0, "a depth the picture's uv does not map onto is counted depth unavailable and the frame is left alone");
+            else if (what == "a region that is not the whole texture, in place") check(s.formatRefused == 1 && s.dispatched == 0 && s.applied == 0, "a region that is not the whole texture is refused in place (the mapping of c needs the whole picture)");
+            else if (what == "a region that is not the whole texture, on the copy route") check(s.formatRefused == 1 && s.dispatched == 0 && !r.gotCopy, "a region that is not the whole texture is refused on the copy route too, and no copy is handed back");
+            else check(s.noop == 1 && s.dispatched == 0 && s.applied == 0 && s.qualifying == 1, "M at 1 is counted as qualifying, nothing is issued and it is not applied");
         }
     }
     // the eye that is not the aiming one is not called, and a call with no frame does nothing

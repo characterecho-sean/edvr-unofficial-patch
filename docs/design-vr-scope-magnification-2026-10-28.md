@@ -386,27 +386,45 @@ with `tools\native_frame_test\s1_checks.h`. A GPU rig in the pattern of `tools\s
 whose depth is a near hexagonal ring about c, far inside and out. It checks that inside the ring the frame is sampled at c + d/M, that
 the ring and everything outside are unchanged, that an open ring leaves the frame alone, and that another format is refused.
 
-**As built** (2026-10-29, branch `claude/scope-zoom-a1`; the full local build and all its gates green, nothing flown).
+**As built** (2026-10-29, branch `claude/scope-zoom-a1`; the full local build and all its gates green, nothing flown; the review fixes below are the second commit).
 - Pure parts: `src\d3d11\scope_zoom_s1.h` (table, M, gate, ease, the reference march, r(theta), mask, window, the rays buffer's layout, the accumulators and the two
   lines), checked by `tools\native_frame_test\s1_checks.h`. The passes: `src\d3d11\scope_zoom_shaders.h` (registered in
   `tools\temporal_shader_build\fixed_scope_zoom_variants.h`) and the door, `src\d3d11\scope_zoom.cpp`, linked as shipped by the GPU rig
   `tools\scope_zoom_test` (WARP, debug layer; R8G8B8A8 and B8G8R8A8 in place, a copy for a frame EDVR may not write, a gap of two rays, an open sight, a refused format,
   every decline reason, three mutants of the comparator). The frame thread's half is `s1::tick` in `native_on_foot.cpp`, after `s0::vrTick`.
 - The depth is the view the temporal pass makes for the upscaler (`scopeZoomDepthSet` in `temporal_pass.cpp`, cleared at the top of each eye's treat), so the door
-  reads exactly what DLSS read, and the output merger's depth target is unbound around pass 1. Only the right eye's door (Submit's eye 1) is called.
+  reads exactly what DLSS read, and the output merger's depth target is unbound around pass 1. Only the right eye's door (Submit's eye 1) is called. The pass tells the lens whether
+  the Submit region is the whole source and the depth the source's size; a depth that does not cover the render is `depth unavailable`.
 - c is published as a uv of the render with the draw's jitter in uv; the door puts it on the region (c less the jitter, unjittered) and on the depth (as drawn). A c older than
-  50 ms is `stale c`. The window the passes touch is the 12 degrees about c (at most ~1000 px square), so the region copy does not grow with the output.
+  50 ms is `stale c`. The region must be the whole texture, in place or on the copy route (a sub-rectangle is `format refused`: its offset is not in c). The window the passes touch is
+  the 12 degrees about c (at most ~1000 px square), so the region copy does not grow with the output.
+- **c is the far impact point, not S** (review fix 4). The game's shots go along the line E -> S (F143: E the eye matrix's position, S the sight point, one F141 sample), so the
+  lens projects the point 100 m along S - E past S through the right eye's rows, and keeps c through S only for the line. `fwd` in S0's `geometryNow` is a dummy: S is projected at distance
+  0, where the direction does not matter, so it is not the line's direction and was not used; the direction is S - E from `s0::g_vr`. The press line prints the angle between the two, mean and
+  max. S0's geometry line is unchanged (`geometryNow` only keeps the rows it projected through).
+- **The jitter is taken at the draw** (review fix 3): `eyeRowsPublish` reads `nativeTemporalDrawJitter` for the right eye as the rows are published (the render thread, the frame
+  the channel's beginFrame opened), with that frame's temporal sequence, while the key is on. The tick counts qualifying frames with no reading and with a reading from another frame than
+  the rows; the door counts frames whose c was drawn in another sequence than the picture's (`c from another frame than the picture`) and applies the lens all the same.
+- **Counts that add up** (review fixes 1 and 2). A frame at M = 1 has nothing to do and is counted as `at M 1`, after every decline the door can make, and is not applied; `applied` is
+  the dispatched frames less the open sights. The press line also carries the frame thread's own counts of the gate's verdicts (qualified, no S, not in the table, idle), so a door
+  that is never reached shows as qualified N, qualifying 0.
+- `--health` (review fixes 1, 2 and 5): a press is due on the larger of the tick's qualified + no S and the door's qualifying + no S, less the M = 1 frames. Presses due with the lens applied on
+  none: NEVER APPLIED (the text says when the door counted no frame at all although the tick qualified). A press in which every ray read back said open is no failure: the verdict
+  `OPEN SIGHT` when it is all there is to judge, a note beside an OK otherwise.
+- Hole statistics (review fix 6): every ray that escapes (the 12 degree stop, off the image, the step cap) stores 12 degrees, so none is a hit in r min, median and max.
+- A press still open when the tick finds the profile flat or the install not armed gets its line (review fix 9). Leaving native on foot was already closed: `ads` includes on foot.
 - Departures from the plan above, each on purpose: (1) an escaped ray (at most two; more is an open sight) takes the smaller radius of its nearest rays that did not escape, so a
   gap in the frame does not draw a spike of lens; (2) the open-sight rule runs on the GPU (pass 2's groups are 0) and the CPU learns it from the rays read back, a few frames
   late, so `open sight` and `applied` lag by the ring and rays not yet read count as applied; (3) `not in the table` also counts an M under 1.05, and `format refused` also counts
-  the other ways the frame route can refuse (a picture that is not the upscaler's, a view, a copy, a shader); (4) the user key is off by default ("default on once flown OK");
-  (5) the experimental key''s row is in the developer tier, where the generator puts every `[experimental]` key (the section decides the page); (6) the GPU census item is
-  named `lens` in the census line, to keep its worst-case line under the 1150 characters `gpu_census_test` holds; (7) the ease is a smoothstep of the exponent, so the zoom grows
-  evenly in size.
+  the other ways the frame route can refuse (a picture that is not the upscaler's, a region that is not the whole texture, a view, a copy, a shader); (4) the user key is off by default
+  ("default on once flown OK"); (5) the experimental key's row is in the developer tier, where the generator puts every `[experimental]` key (the section decides the page); (6) the GPU
+  census item is named `lens` in the census line, to keep its worst-case line under the 1150 characters `gpu_census_test` holds; (7) the ease is a smoothstep of the exponent, so the
+  zoom grows evenly in size.
 - Not verified, for the flight: that the depth is intact at the door (the S1 line says: `depth at c` far, `hole r` 4 to 8 degrees for the Executioner, `depth unavailable` 0);
-  the eye numbering (S1''s `c mean` for the scoped Executioner should be near S0''s geometry px (821, 995) of 2016x2017, that is about (1642, 1990) of the 4032 picture, less the
-  jitter); that the bounds the door gets are never flipped (the lens maps the eye''s uv onto the region as given); that the frame thread and the draw thread are one (the jitter
-  is read with `nativeTemporalDrawJitter` on the frame thread); the raw indirect-argument buffer and the typed stores on a real GPU (the rig ran on WARP).
+  the eye numbering (S1's `c mean` for the scoped Executioner should be near S0's geometry px (821, 995) of 2016x2017, that is about (1642, 1990) of the 4032 picture, less the
+  jitter, and further by the far point's offset from c through S, which the line prints); that the bounds the door gets are never flipped (the lens maps the eye's uv onto the region as
+  given); whether c from the frame tick belongs to the picture's frame (`c from another frame than the picture` says how often not); the raw indirect-argument buffer and the typed
+  stores on a real GPU (the rig ran on WARP).
 **Flight card (A1, Epic in VR):**
 - Turn "ADS: scope zoom" on in the Native on foot page first (the key is off until flown).
 - The scoped Executioner in ADS: 10 s still, then 10 s turning the head.
