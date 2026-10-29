@@ -44,7 +44,7 @@ game's own zoom as a magnified picture inside the scope's lens. The rest of the 
   The pilot: "the chevron looks much clearer now"; it is brighter than stock (tonemapped alone, T(F) + T(M) against stock's T(F + M)).
   The lens declines for the left aiming eye (`fix.native_on_foot_ads_sight_eye = left`; the left eye is a later build). c lags the picture
   by one frame on every frame (measured, not changed).
-- **A3 BUILT 2026-10-29, NOT FLOWN** (section 10, "As built (A3)"): the mark is drawn into the eye's additive weapons layer and composited after
+- **A3 BUILT 2026-10-29, INSTALLED ON EPIC (both), NOT FLOWN** (`c738e367`, main merged at `dcfd0608`; section 10, "As built (A3)"): the mark is drawn into the eye's additive weapons layer and composited after
   the lens by the tonemap difference (stock brightness); the weapons half governs it, the scope zoom key arms it; the S0 census probes optical
   sights only; the press line counts `composites matched/plain/none` and `--health` makes a taken mark nothing composited a PARTIAL. Its review
   fixes (same section) make the mark's stand-down last a press, not the session, and count it in the press line.
@@ -681,7 +681,7 @@ Neither is the scope work's. `scope zoom (S1)` OK over 16 presses. Dumps `120515
   tonemap draws, the clear) now runs every frame in both eyes, where it ran only while weapons fired, and W (R16G16B16A16_FLOAT at the layer's size; `sharp weapons: ... weapons layer created` prints the MB) is made at
   the first scoped ADS; neither is measured. (5) The mark no longer blooms: it is in neither the scene's bloom input nor the HUD layer's feed (W2's accepted limit, now the mark's too). (6) The left eye aiming
   (`fix.native_on_foot_ads_sight_eye = left`) still gets no lens and no mark take.
-- **Flight card (A3), additions.** Read `--expect-build <hash> --health` first (S1 OK). Then the press lines: `composites matched/plain/none` against `gunsight marks taken` (matched near L + R), the `scope mark`
+- **Flight card (A3), additions.** Read `--expect-build c738e367 --health` first (S1 OK). Then the press lines: `composites matched/plain/none` against `gunsight marks taken` (matched near L + R), the `scope mark`
   family lines and the `sharp weapons: ... weapons layer created` lines; and the S0 census lines, which should show runs for the Executioner, the Oppressor and the Aphelion and a `not an optical sight` skip for the
   P-15 and the Karma weapons.
 
