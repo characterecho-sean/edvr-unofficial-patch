@@ -56,6 +56,8 @@ constexpr unsigned kActivationLogCap = 8;
 struct Held {
     ID3D11Texture2D* texture = nullptr;
     float bounds[4] = {0, 0, 1, 1};
+    float fov[4] = {};          // {angleLeft, angleRight, angleUp, angleDown}, radians: the field of view the pixels cover (version 2 of the export)
+    bool haveFov = false;
     uint64_t serial = 0;
 };
 std::mutex g_mutex;
@@ -74,11 +76,13 @@ DesktopWindowCensus g_census;                  // the skipped draws of the curre
 FaultBudget g_sampleBudget("desktopWindowSample", 3);
 int g_contextToken = 0;                        // the table's context: any address that is ours
 
-HRESULT WINAPI noteEye(void* context, uint32_t eye, ID3D11Texture2D* texture, const float* bounds) {
+HRESULT noteEyeWith(void* context, uint32_t eye, ID3D11Texture2D* texture, const float* bounds, const float* fov) {
     if (context != &g_contextToken || eye > 1 || !texture || !bounds) return E_INVALIDARG;
     for (int i = 0; i < 4; ++i) {
         if (!std::isfinite(bounds[i])) return E_INVALIDARG;
     }
+    bool haveFov = fov != nullptr;
+    for (int i = 0; haveFov && i < 4; ++i) haveFov = std::isfinite(fov[i]);
     if (!(g_wantMask.load(std::memory_order_relaxed) & (1u << eye))) return S_FALSE;
     texture->AddRef();
     ID3D11Texture2D* spill = nullptr;
@@ -91,6 +95,8 @@ HRESULT WINAPI noteEye(void* context, uint32_t eye, ID3D11Texture2D* texture, co
         }
         h.texture = texture;
         std::memcpy(h.bounds, bounds, sizeof h.bounds);
+        h.haveFov = haveFov;
+        if (haveFov) std::memcpy(h.fov, fov, sizeof h.fov);
         h.serial = ++g_serial;
         g_retirePending.store(g_retiredCount, std::memory_order_relaxed);
     }
@@ -100,6 +106,10 @@ HRESULT WINAPI noteEye(void* context, uint32_t eye, ID3D11Texture2D* texture, co
     if (spill) spill->Release();
     return S_OK;
 }
+
+// Version 1 of the export: no field of view. Version 2: with it.
+HRESULT WINAPI noteEye(void* context, uint32_t eye, ID3D11Texture2D* texture, const float* bounds) { return noteEyeWith(context, eye, texture, bounds, nullptr); }
+HRESULT WINAPI noteEye2(void* context, uint32_t eye, ID3D11Texture2D* texture, const float* bounds, const float* fov) { return noteEyeWith(context, eye, texture, bounds, fov); }
 
 HRESULT WINAPI closeProvider(void* context) {
     if (context != &g_contextToken) return E_INVALIDARG;
@@ -155,6 +165,12 @@ struct Session {
     uint32_t modeGeneration = 0;
     DesktopWindowMode mode = DesktopWindowMode::Game;
     bool settingLogged = false;
+    // round 6: the picture's shape and the window's style, as the settings say now, and as the activation's window state was built for
+    DesktopWindowAspect aspectOpt = DesktopWindowAspect::Full, activeAspect = DesktopWindowAspect::Full;
+    DesktopWindowStyle styleOpt = DesktopWindowStyle::Window, activeStyle = DesktopWindowStyle::Window;
+    bool optionsLogged = false;
+    bool keepHeightOnce = false;        // the picture's shape changed with the window untouched: the next correction keeps the client height
+    bool noteNoFov = false;
     // the pipeline
     Pipe pipe;
     SrvEntry srv[kSrvCache];
@@ -177,7 +193,7 @@ struct Session {
     bool haveGame = false;                       // the game's style and rect, remembered at the first look of an activation, to put back
     int gameRect[4] = {};
     LONG_PTR gameStyle = 0, gameExStyle = 0;
-    LONG_PTR ourStyle = 0;                       // desktopWindowFramedStyle of the game's
+    LONG_PTR ourStyle = 0;                       // desktopWindowStyleFor(activeStyle, the game's)
     bool styleSeenOurs = false;                  // our style has been seen on the window since it was last asked for; losing it after that is the game's doing
     bool pending = false, pendingStyle = false;  // a request of ours is in flight (and it asked for the style)
     int target[4] = {};                          // the rectangle of the request in flight
@@ -219,7 +235,29 @@ void refreshMode(bool flat) {
     S.modeFlat = flat;
     if (flat) {   // the flat profile never runs it, and says nothing about it
         S.mode = DesktopWindowMode::Game;
+        S.aspectOpt = DesktopWindowAspect::Full;
+        S.styleOpt = DesktopWindowStyle::Window;
         return;
+    }
+    {   // round 6: the picture's shape and the window's style, live like the mode; each change (and the first read) is one line
+        const std::string rawAspect = cfg.getString("visual.desktop_window_aspect", "full");
+        const std::string rawStyle = cfg.getString("visual.desktop_window_style", "window");
+        bool aspectKnown = true, styleKnown = true;
+        const DesktopWindowAspect aspectOpt = desktopWindowParseAspect(rawAspect.c_str(), &aspectKnown);
+        const DesktopWindowStyle styleOpt = desktopWindowParseStyle(rawStyle.c_str(), &styleKnown);
+        if (!aspectKnown) Log::get().note("desktop window: unknown aspect \"%.40s\" (it is full, 1:1, 4:3, 16:10, 16:9 or 21:9); treated as full", rawAspect.c_str());
+        if (!styleKnown) Log::get().note("desktop window: unknown style \"%.40s\" (it is window or borderless); treated as window", rawStyle.c_str());
+        if (!S.optionsLogged || aspectOpt != S.aspectOpt) {
+            if (S.optionsLogged) Log::get().note("desktop window: aspect %s (was %s)", desktopWindowAspectName(aspectOpt), desktopWindowAspectName(S.aspectOpt));
+            else Log::get().note("desktop window: aspect %s", desktopWindowAspectName(aspectOpt));
+        }
+        if (!S.optionsLogged || styleOpt != S.styleOpt) {
+            if (S.optionsLogged) Log::get().note("desktop window: style %s (was %s)", desktopWindowStyleName(styleOpt), desktopWindowStyleName(S.styleOpt));
+            else Log::get().note("desktop window: style %s", desktopWindowStyleName(styleOpt));
+        }
+        S.optionsLogged = true;
+        S.aspectOpt = aspectOpt;
+        S.styleOpt = styleOpt;
     }
     const std::string raw = cfg.getString("visual.desktop_window", "game");
     bool known = true;
@@ -257,6 +295,8 @@ void releaseHeld() {
 struct Snap {
     ComPtr<ID3D11Texture2D> texture[2];
     float bounds[2][4] = {};
+    float fov[2][4] = {};
+    bool haveFov[2] = {};
     uint64_t serial[2] = {};
 };
 void snapshot(Snap& s, unsigned need) {
@@ -265,6 +305,8 @@ void snapshot(Snap& s, unsigned need) {
         if (!(need & (1u << eye)) || !g_held[eye].texture) continue;
         s.texture[eye] = g_held[eye].texture;   // ComPtr copy: its own reference
         std::memcpy(s.bounds[eye], g_held[eye].bounds, sizeof s.bounds[eye]);
+        std::memcpy(s.fov[eye], g_held[eye].fov, sizeof s.fov[eye]);
+        s.haveFov[eye] = g_held[eye].haveFov;
         s.serial[eye] = g_held[eye].serial;
     }
 }
@@ -430,14 +472,17 @@ void issue(HWND hwnd, const int cur[4], int curClientW, int curClientH, const As
     ++S.requests;
     const bool queued = requestWindow(hwnd, a.rect, a.setStyle, a.toStyle);
     if (S.requests <= kRequestLogCap)
-        Log::get().note("desktop window: reshape request %u%s (%s): window %d,%d %dx%d -> %d,%d %dx%d (client %dx%d now, %dx%d wanted); style 0x%08lX -> 0x%08lX%s", S.requests,
+        Log::get().note("desktop window: reshape request %u%s (%s): window %d,%d %dx%d -> %d,%d %dx%d (client %dx%d now, %dx%d wanted); style 0x%08lX -> 0x%08lX; "
+                        "aspect %s, %s%s", S.requests,
                         S.requests == kRequestLogCap ? " (the last one logged)" : "", a.why, cur[0], cur[1], cur[2] - cur[0], cur[3] - cur[1], a.rect[0], a.rect[1],
                         a.rect[2] - a.rect[0], a.rect[3] - a.rect[1], curClientW, curClientH, a.clientW, a.clientH, static_cast<unsigned long>(a.fromStyle),
-                        static_cast<unsigned long>(a.toStyle), queued ? "" : " -- NOT QUEUED (the thread pool refused it)");
+                        static_cast<unsigned long>(a.toStyle), desktopWindowAspectName(S.activeAspect), desktopWindowStyleName(S.activeStyle),
+                        queued ? "" : " -- NOT QUEUED (the thread pool refused it)");
 }
 
-// Where the window starts (round 2): where it last had the picture's shape this session, if that still lies inside a monitor's work area; else the largest window of the
-// picture's shape the work area of the window's monitor holds, centred. False when nothing fits.
+// Where the (framed) window starts: where it last had the picture's shape this session, if that still lies inside a monitor's work area, reshaped to the current shape keeping
+// its client height and clamped to the work area (round 6; with the shape unchanged that is the same window); else the largest window of the picture's shape the work area of
+// the window's monitor holds, centred. False when nothing fits.
 bool startRect(const RECT& work, double aspect, int frameDx, int frameDy, Ask& out) {
     if (S.haveSettled) {
         const RECT r = {S.settledRect[0], S.settledRect[1], S.settledRect[2], S.settledRect[3]};
@@ -445,10 +490,16 @@ bool startRect(const RECT& work, double aspect, int frameDx, int frameDy, Ask& o
         mi.cbSize = sizeof mi;
         const HMONITOR monitor = MonitorFromRect(&r, MONITOR_DEFAULTTONEAREST);
         if (monitor && GetMonitorInfoW(monitor, &mi) && desktopWindowRectInside(S.settledRect, areaOf(mi.rcWork))) {
-            std::memcpy(out.rect, S.settledRect, sizeof out.rect);
-            out.clientW = out.rect[2] - out.rect[0] - frameDx;
-            out.clientH = out.rect[3] - out.rect[1] - frameDy;
-            return true;
+            // The frame it had (the window's size less its client's) is measured, not predicted: it is the same style.
+            const int settledDx = S.settledRect[2] - S.settledRect[0] - S.settledClient[0], settledDy = S.settledRect[3] - S.settledRect[1] - S.settledClient[1];
+            const DwCorrection fit = desktopWindowCorrect(aspect, S.settledRect[0], S.settledRect[1], S.settledClient[0], S.settledClient[1], 0, 0, settledDx, settledDy,
+                                                          areaOf(mi.rcWork), kDesktopWindowMinClientHeight, true);
+            if (fit.ok) {
+                out.rect[0] = fit.left; out.rect[1] = fit.top; out.rect[2] = fit.right; out.rect[3] = fit.bottom;
+                out.clientW = fit.clientWidth;
+                out.clientH = fit.clientHeight;
+                return true;
+            }
         }
     }
     const DwWindowPlan plan = desktopWindowPlan(aspect, work.left, work.top, work.right, work.bottom, frameDx, frameDy);
@@ -498,9 +549,32 @@ void evaluateWindow(IDXGISwapChain* swap, HWND hwnd, double aspect, uint64_t now
         std::memcpy(S.gameRect, cur, sizeof S.gameRect);
         S.gameStyle = style;
         S.gameExStyle = exStyle;
-        S.ourStyle = static_cast<LONG_PTR>(desktopWindowFramedStyle(static_cast<uint32_t>(style)));
+        S.activeStyle = S.styleOpt;
+        S.activeAspect = S.aspectOpt;
+        S.ourStyle = static_cast<LONG_PTR>(desktopWindowStyleFor(S.activeStyle, static_cast<uint32_t>(style)));
         S.haveGame = true;
+    } else {
+        // A live change of the style or the shape is not a fight (round 6): our style is worked out again for the new target, what the fight detection knew is forgotten, and the
+        // change is asked for now. A shape change alone keeps the window's client height and top-left.
+        if (S.activeStyle != S.styleOpt) {
+            S.activeStyle = S.styleOpt;
+            S.ourStyle = static_cast<LONG_PTR>(desktopWindowStyleFor(S.activeStyle, static_cast<uint32_t>(S.gameStyle)));
+            S.styleSeenOurs = false;
+            S.pending = false;
+            S.pendingStyle = false;
+            S.havePrev = false;
+            S.unsettled = 0;
+            S.lastRequestMs = 0;
+        }
+        if (S.activeAspect != S.aspectOpt) {
+            S.activeAspect = S.aspectOpt;
+            S.keepHeightOnce = true;
+            S.pending = false;
+            S.pendingStyle = false;
+            S.lastRequestMs = 0;
+        }
     }
+    const bool borderless = S.activeStyle == DesktopWindowStyle::Borderless;
     const bool ours = desktopWindowStyleIsOurs(static_cast<uint32_t>(style), static_cast<uint32_t>(S.ourStyle));
 
     // A request of ours in flight: did it land? One that has not after kRequestEveryMs did not.
@@ -541,24 +615,52 @@ void evaluateWindow(IDXGISwapChain* swap, HWND hwnd, double aspect, uint64_t now
     }
     if (!ours) {
         if (now - S.lastRequestMs < kRequestEveryMs) return;
-        int frameDx = 0, frameDy = 0;
-        if (!predictFrame(hwnd, S.ourStyle, exStyle, &frameDx, &frameDy)) return;
         Ask ask;
         ask.setStyle = true;
         ask.fromStyle = style;
         ask.toStyle = S.ourStyle;
-        ask.why = S.fights ? "the game's style came back" : "framed window";
-        if (!startRect(mi.rcWork, aspect, frameDx, frameDy, ask)) {
-            if (!S.noteShape) {
-                S.noteShape = true;
-                Log::get().note("desktop window: the monitor's work area cannot hold a window of this shape (aspect %.4f); the window is not reshaped", aspect);
+        S.keepHeightOnce = false;   // the style request carries its own rectangle (a shape change alone is for the correction below)
+        if (borderless) {   // the whole monitor the window is on, no frame
+            const DwWindowPlan full = desktopWindowBorderlessPlan(mi.rcMonitor.left, mi.rcMonitor.top, mi.rcMonitor.right, mi.rcMonitor.bottom);
+            if (!full.ok) return;
+            ask.rect[0] = full.left; ask.rect[1] = full.top; ask.rect[2] = full.right; ask.rect[3] = full.bottom;
+            ask.clientW = full.clientWidth;
+            ask.clientH = full.clientHeight;
+            ask.why = S.fights ? "the game's style came back" : "full-screen borderless";
+        } else {
+            int frameDx = 0, frameDy = 0;
+            if (!predictFrame(hwnd, S.ourStyle, exStyle, &frameDx, &frameDy)) return;
+            ask.why = S.fights ? "the game's style came back" : "framed window";
+            if (!startRect(mi.rcWork, aspect, frameDx, frameDy, ask)) {
+                if (!S.noteShape) {
+                    S.noteShape = true;
+                    Log::get().note("desktop window: the monitor's work area cannot hold a window of this shape (aspect %.4f); the window is not reshaped", aspect);
+                }
+                return;
             }
-            return;
         }
         issue(hwnd, cur, clientW, clientH, ask, now);
         return;
     }
     S.styleSeenOurs = true;
+
+    // Full-screen borderless (round 6): the whole monitor the window is on. No snapping and no user moves; the picture is fitted inside with black bars, which the draw does.
+    if (borderless) {
+        const DwWindowPlan full = desktopWindowBorderlessPlan(mi.rcMonitor.left, mi.rcMonitor.top, mi.rcMonitor.right, mi.rcMonitor.bottom);
+        std::memcpy(S.prevRect, cur, sizeof S.prevRect);
+        S.havePrev = true;
+        S.keepHeightOnce = false;   // a shape change meant for the framed window does not outlive it
+        const int want[4] = {full.left, full.top, full.right, full.bottom};
+        if (!full.ok || desktopWindowRectsNear(cur, want, kNearPx) || now - S.lastRequestMs < kRequestEveryMs) return;
+        Ask ask;
+        std::memcpy(ask.rect, want, sizeof ask.rect);
+        ask.clientW = full.clientWidth;
+        ask.clientH = full.clientHeight;
+        ask.fromStyle = ask.toStyle = style;
+        ask.why = "the monitor's rectangle";
+        issue(hwnd, cur, clientW, clientH, ask, now);
+        return;
+    }
 
     // Ours. The user's moves and resizes, counted (a drag is one: the loop above kept the rect from changing under us); a position alone is never corrected.
     if (S.havePrev && !desktopWindowRectsNear(cur, S.prevRect, kNearPx)) {
@@ -580,7 +682,7 @@ void evaluateWindow(IDXGISwapChain* swap, HWND hwnd, double aspect, uint64_t now
     }
     if (now - S.lastRequestMs < kRequestEveryMs) return;
     const DwCorrection fix = desktopWindowCorrect(aspect, cur[0], cur[1], clientW, clientH, S.haveSettled ? S.settledClient[0] : 0, S.haveSettled ? S.settledClient[1] : 0,
-                                                  outerW - clientW, outerH - clientH, work);
+                                                  outerW - clientW, outerH - clientH, work, kDesktopWindowMinClientHeight, S.keepHeightOnce);
     if (!fix.ok) return;
     Ask ask;
     ask.rect[0] = fix.left; ask.rect[1] = fix.top; ask.rect[2] = fix.right; ask.rect[3] = fix.bottom;
@@ -588,6 +690,7 @@ void evaluateWindow(IDXGISwapChain* swap, HWND hwnd, double aspect, uint64_t now
     ask.clientH = fix.clientHeight;
     ask.fromStyle = ask.toStyle = style;
     ask.why = off ? (fix.keptHeight ? "the shape, keeping the height" : "the shape, keeping the width") : "larger than the work area";
+    S.keepHeightOnce = false;   // asked for (or nothing to ask): the next correction is the user's again
     if (desktopWindowRectsNear(cur, ask.rect, kNearPx)) return;   // the clamp leaves it where it is
     issue(hwnd, cur, clientW, clientH, ask, now);
 }
@@ -606,7 +709,7 @@ void restoreWindow(char* out, size_t size) {
         const bool gamesOwn = desktopWindowStyleIsOurs(static_cast<uint32_t>(style), static_cast<uint32_t>(S.gameStyle));
         if (ours) {
             // Where a later activation starts, if the window was at the picture's shape just now.
-            if (!desktopWindowAspectOff(cr.right - cr.left, cr.bottom - cr.top, S.aspect, kNearPx) && !windowInMoveSize(S.hwnd)) {
+            if (S.activeStyle == DesktopWindowStyle::Window && !desktopWindowAspectOff(cr.right - cr.left, cr.bottom - cr.top, S.aspect, kNearPx) && !windowInMoveSize(S.hwnd)) {
                 std::memcpy(S.settledRect, cur, sizeof S.settledRect);
                 S.haveSettled = true;
             }
@@ -780,6 +883,7 @@ Outcome presentActive(IDXGISwapChain* swap, ID3D11Device* device, uint64_t now, 
     }
     SrvUse use[2];
     DwSize eyeSize[2];
+    uint32_t texW[2] = {}, texH[2] = {};
     for (unsigned eye = 0; eye < 2; ++eye) {
         if (!(need & (1u << eye))) continue;
         if (!snap.texture[eye]) {
@@ -794,11 +898,36 @@ Outcome presentActive(IDXGISwapChain* swap, ID3D11Device* device, uint64_t now, 
         D3D11_TEXTURE2D_DESC d{};
         snap.texture[eye]->GetDesc(&d);
         eyeSize[eye] = desktopWindowEyeSize(d.Width, d.Height, snap.bounds[eye]);
+        texW[eye] = d.Width;
+        texH[eye] = d.Height;
     }
+    // The picture's shape (round 6). `full`: each eye as its bounds sub-rect is. Any other value: the whole picture's shape (each eye half of it with both eyes), and each
+    // eye is cropped to its shape, centred on where it looks straight ahead and moved only as far as it takes to stay inside the image.
+    DwSize shape[2];
+    desktopWindowShapes(S.aspectOpt, S.mode, eyeSize, shape);
     double aspect = 0;
-    if (!desktopWindowAspect(S.mode, eyeSize, &aspect)) {
+    if (!desktopWindowAspect(S.mode, shape, &aspect)) {
         std::snprintf(why, whySize, "the eye image has no size inside its bounds");
         return Outcome::Declined;
+    }
+    const double ratio = desktopWindowAspectRatio(S.aspectOpt);
+    float cropBounds[2][4] = {};
+    double centreU[2] = {0.5, 0.5}, centreV[2] = {0.5, 0.5};
+    bool fromFov[2] = {};
+    for (unsigned eye = 0; eye < 2; ++eye) {
+        if (!(need & (1u << eye))) continue;
+        if (ratio > 0) {
+            fromFov[eye] = snap.haveFov[eye] && desktopWindowProjectionCentre(snap.fov[eye], &centreU[eye], &centreV[eye]);
+            if (!fromFov[eye]) {
+                centreU[eye] = centreV[eye] = 0.5;
+                if (!S.noteNoFov) {
+                    S.noteNoFov = true;
+                    Log::get().note("desktop window: an eye image came with no field of view; its crop is centred on the middle of its bounds");
+                }
+            }
+        }
+        desktopWindowCrop(snap.bounds[eye], texW[eye], texH[eye], ratio > 0 ? (S.mode == DesktopWindowMode::BothEyes ? ratio * 0.5 : ratio) : 0.0, fromFov[eye], centreU[eye],
+                          centreV[eye], cropBounds[eye]);
     }
     ComPtr<ID3D11DeviceContext> ctx;
     device->GetImmediateContext(&ctx);
@@ -870,7 +999,7 @@ Outcome presentActive(IDXGISwapChain* swap, ID3D11Device* device, uint64_t now, 
     const DwPixelRect shownPx = desktopWindowSnap(shown, static_cast<int>(bd.Width), static_cast<int>(bd.Height));
     DwPixelRect rects[2];
     unsigned eyeIndex[2];
-    const unsigned count = desktopWindowEyeRects(S.mode, shownPx, eyeSize, rects, eyeIndex);
+    const unsigned count = desktopWindowEyeRects(S.mode, shownPx, shape, rects, eyeIndex);
     if (!count) {
         std::snprintf(why, whySize, "the picture has no pixels in the swap chain's buffer");
         return Outcome::Declined;
@@ -903,13 +1032,21 @@ Outcome presentActive(IDXGISwapChain* swap, ID3D11Device* device, uint64_t now, 
                 std::snprintf(eyes, sizeof eyes, "eyes %.0fx%.0f and %.0fx%.0f", eyeSize[0].w, eyeSize[0].h, eyeSize[1].w, eyeSize[1].h);
             else
                 std::snprintf(eyes, sizeof eyes, "%s eye %.0fx%.0f", S.mode == DesktopWindowMode::LeftEye ? "left" : "right", eyeSize[eyeIndex[0]].w, eyeSize[eyeIndex[0]].h);
-            Log::get().note("desktop window: active #%u (%s): %s, aspect %.4f; swap chain %ux%u DXGI format %d swap effect %d scaling %s buffers %u windowed %d; "
+            Log::get().note("desktop window: active #%u (%s; picture %s; window %s): %s, aspect %.4f; swap chain %ux%u DXGI format %d swap effect %d scaling %s buffers %u windowed %d; "
                             "window style 0x%08lX exstyle 0x%08lX rect %ld,%ld %ldx%ld client %dx%d; monitor %ld,%ld,%ld,%ld work %ld,%ld,%ld,%ld",
-                            S.activations, desktopWindowModeName(S.mode), eyes, aspect, bd.Width, bd.Height, static_cast<int>(sc.BufferDesc.Format),
+                            S.activations, desktopWindowModeName(S.mode), desktopWindowAspectName(S.aspectOpt), desktopWindowStyleName(S.styleOpt), eyes, aspect, bd.Width, bd.Height, static_cast<int>(sc.BufferDesc.Format),
                             static_cast<int>(sc.SwapEffect), S.scaling == DwScaling::None ? "none" : S.scaling == DwScaling::AspectRatio ? "aspect_ratio_stretch" : "stretch",
                             sc.BufferCount, sc.Windowed ? 1 : 0, static_cast<unsigned long>(GetWindowLongPtrW(hwnd, GWL_STYLE)),
                             static_cast<unsigned long>(GetWindowLongPtrW(hwnd, GWL_EXSTYLE)), wr.left, wr.top, wr.right - wr.left, wr.bottom - wr.top, clientW, clientH,
                             mi.rcMonitor.left, mi.rcMonitor.top, mi.rcMonitor.right, mi.rcMonitor.bottom, mi.rcWork.left, mi.rcWork.top, mi.rcWork.right, mi.rcWork.bottom);
+            if (ratio > 0) {   // the crop of each eye, once per activation: where it looks straight ahead, and the bounds it was cropped to
+                for (unsigned eye = 0; eye < 2; ++eye) {
+                    if (!(need & (1u << eye))) continue;
+                    Log::get().note("desktop window: crop %s, %s eye: looks straight ahead at u=%.4f v=%.4f of its image (%s); crop bounds u %.4f..%.4f v %.4f..%.4f of %ux%u",
+                                    desktopWindowAspectName(S.aspectOpt), eye ? "right" : "left", centreU[eye], centreV[eye], fromFov[eye] ? "from its field of view" : "no field of view: the middle",
+                                    cropBounds[eye][0], cropBounds[eye][2], cropBounds[eye][1], cropBounds[eye][3], texW[eye], texH[eye]);
+                }
+            }
         }
     }
     if (bd.Width != S.chainW || bd.Height != S.chainH) {
@@ -941,7 +1078,7 @@ Outcome presentActive(IDXGISwapChain* swap, ID3D11Device* device, uint64_t now, 
     EyeDraw draws[2];
     for (unsigned i = 0; i < count; ++i) {
         draws[i].view = use[eyeIndex[i]].view.Get();
-        draws[i].bounds = snap.bounds[eyeIndex[i]];
+        draws[i].bounds = cropBounds[eyeIndex[i]];
         draws[i].rect = rects[i];
     }
     drawEyes(ctx.Get(), rtv.Get(), draws, count);
@@ -1049,13 +1186,15 @@ bool desktopWindowPresent(IDXGISwapChain* swap, ID3D11Device* device, unsigned p
 }  // namespace edvr
 
 extern "C" HRESULT WINAPI edvrAcquireDesktopWindow(const EdvrNativeDesktopWindowRequest* request, EdvrNativeDesktopWindowTable* table) {
-    if (!table || table->size != sizeof(*table) || table->version != EDVR_NATIVE_DESKTOP_WINDOW_VERSION_1) return E_INVALIDARG;
-    *table = {sizeof(*table), EDVR_NATIVE_DESKTOP_WINDOW_VERSION_1};
-    if (!request || request->size != sizeof(*request) || request->version != EDVR_NATIVE_DESKTOP_WINDOW_VERSION_1 || !request->gameDevice ||
-        !request->generation)
+    // Version 1 (no field of view) or 2 (with it); the table answers with the version asked, and its noteEye slot holds that version's function.
+    if (!table || table->size != sizeof(*table) ||
+        (table->version != EDVR_NATIVE_DESKTOP_WINDOW_VERSION_1 && table->version != EDVR_NATIVE_DESKTOP_WINDOW_VERSION_2))
         return E_INVALIDARG;
+    const uint32_t version = table->version;
+    *table = {sizeof(*table), version};
+    if (!request || request->size != sizeof(*request) || request->version != version || !request->gameDevice || !request->generation) return E_INVALIDARG;
     table->context = &edvr::g_contextToken;
-    table->noteEye = edvr::noteEye;
+    table->noteEye = version == EDVR_NATIVE_DESKTOP_WINDOW_VERSION_2 ? reinterpret_cast<EdvrNativeDesktopWindowNoteEye>(&edvr::noteEye2) : &edvr::noteEye;
     table->close = edvr::closeProvider;
     return S_OK;
 }

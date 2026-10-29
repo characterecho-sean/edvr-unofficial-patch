@@ -226,6 +226,25 @@ inline bool desktopWindowStyleIsOurs(uint32_t style, uint32_t ours) {
     constexpr uint32_t managed = kDwWsPopup | kDwWsMaximizeBox | kDwWsMinimizeBox | kDwWsCaption | kDwWsSysMenu | kDwWsThickFrame;
     return (style & managed) == (ours & managed);
 }
+// Round 6, `visual.desktop_window_style = borderless`: full-screen borderless, a bare popup. No caption, sizing frame, system menu or boxes; WS_VISIBLE, WS_CLIPSIBLINGS and
+// WS_CLIPCHILDREN stay as the game had them. Both 0x94020000 (the game's popup) and 0x14CC0000 (the framed window) become 0x94000000.
+inline uint32_t desktopWindowBorderlessStyle(uint32_t style) {
+    return (style & ~(kDwWsCaption | kDwWsThickFrame | kDwWsSysMenu | kDwWsMaximizeBox | kDwWsMinimizeBox | kDwWsMaximize | kDwWsMinimize)) | kDwWsPopup;
+}
+enum class DesktopWindowStyle : uint8_t { Window = 0, Borderless = 1 };
+// The key's words: `window` (the default and every unknown word) or `borderless`.
+inline DesktopWindowStyle desktopWindowParseStyle(const char* text, bool* known = nullptr) {
+    if (known) *known = true;
+    if (!text || !*text || dwdetail::sameWord(text, "window")) return DesktopWindowStyle::Window;
+    if (dwdetail::sameWord(text, "borderless")) return DesktopWindowStyle::Borderless;
+    if (known) *known = false;
+    return DesktopWindowStyle::Window;
+}
+inline const char* desktopWindowStyleName(DesktopWindowStyle style) { return style == DesktopWindowStyle::Borderless ? "borderless" : "window"; }
+// The style EDVR puts on the game's window for a mode.
+inline uint32_t desktopWindowStyleFor(DesktopWindowStyle mode, uint32_t gameStyle) {
+    return mode == DesktopWindowStyle::Borderless ? desktopWindowBorderlessStyle(gameStyle) : desktopWindowFramedStyle(gameStyle);
+}
 
 // The client's shape is the picture's when neither axis is off by more than the tolerance (pixels) against what the other axis implies.
 inline bool desktopWindowAspectOff(int clientW, int clientH, double aspect, int tolerance) {
@@ -245,7 +264,8 @@ inline bool desktopWindowTooLarge(int outerW, int outerH, const DwArea& a) { ret
 constexpr int kDesktopWindowMinClientHeight = 240;
 
 // The user owns the window's position and size; EDVR keeps only the shape. When the client is off the picture's shape (or the window is larger than the work area) this
-// gives the window to ask for: keep the dimension the user changed more, relative to the last settled client size (the width when there is none), set the other from the
+// gives the window to ask for: keep the dimension the user changed more, relative to the last settled client size (the width when there is none; the height when
+// forceKeepHeight says the shape itself changed), set the other from the
 // shape, keep the window's top-left, then clamp: shrink to the work area if it is larger, hold a minimum client height, and slide the window inside the work area. The frame
 // (the window's size less its client's) is measured by the caller.
 struct DwCorrection {
@@ -254,11 +274,11 @@ struct DwCorrection {
     int clientWidth = 0, clientHeight = 0;
 };
 inline DwCorrection desktopWindowCorrect(double aspect, int winLeft, int winTop, int clientW, int clientH, int settledW, int settledH, int frameDx, int frameDy,
-                                         const DwArea& work, int minClientH = kDesktopWindowMinClientHeight) {
+                                         const DwArea& work, int minClientH = kDesktopWindowMinClientHeight, bool forceKeepHeight = false) {
     DwCorrection c;
     if (!(aspect > 0) || clientW < 1 || clientH < 1) return c;
-    bool keepHeight = false;
-    if (settledW > 0 && settledH > 0) {
+    bool keepHeight = forceKeepHeight;   // the picture's shape changed and the user did not touch the window (round 6): the height stays, the width follows
+    if (!forceKeepHeight && settledW > 0 && settledH > 0) {
         const double relW = std::fabs(static_cast<double>(clientW - settledW)) / settledW, relH = std::fabs(static_cast<double>(clientH - settledH)) / settledH;
         keepHeight = relH > relW;
     }
@@ -284,6 +304,102 @@ inline DwCorrection desktopWindowCorrect(double aspect, int winLeft, int winTop,
     c.left = left; c.top = top; c.right = left + outerW; c.bottom = top + outerH;
     c.clientWidth = cw; c.clientHeight = ch;
     return c;
+}
+
+// ---- the picture's shape and the centre crop (round 6) ----
+// `visual.desktop_window_aspect`: `full` is the picture as each eye's bounds sub-rect gives it (both eyes side by side). Any other value is the shape of the WHOLE picture, and with
+// both eyes each eye gets half the width (16:9 is two 8:9 halves). Each eye is cropped to its shape: the largest rectangle of that shape inside the eye's bounds sub-rect (in
+// pixels), centred on the eye's projection centre (where that eye looks straight ahead) and moved only as far as it takes to stay inside the image.
+enum class DesktopWindowAspect : uint8_t { Full = 0, Square, FourThree, SixteenTen, SixteenNine, TwentyOneNine };
+inline DesktopWindowAspect desktopWindowParseAspect(const char* text, bool* known = nullptr) {
+    if (known) *known = true;
+    if (!text || !*text || dwdetail::sameWord(text, "full")) return DesktopWindowAspect::Full;
+    if (dwdetail::sameWord(text, "1:1")) return DesktopWindowAspect::Square;
+    if (dwdetail::sameWord(text, "4:3")) return DesktopWindowAspect::FourThree;
+    if (dwdetail::sameWord(text, "16:10")) return DesktopWindowAspect::SixteenTen;
+    if (dwdetail::sameWord(text, "16:9")) return DesktopWindowAspect::SixteenNine;
+    if (dwdetail::sameWord(text, "21:9")) return DesktopWindowAspect::TwentyOneNine;
+    if (known) *known = false;
+    return DesktopWindowAspect::Full;
+}
+inline const char* desktopWindowAspectName(DesktopWindowAspect a) {
+    switch (a) {
+        case DesktopWindowAspect::Square: return "1:1";
+        case DesktopWindowAspect::FourThree: return "4:3";
+        case DesktopWindowAspect::SixteenTen: return "16:10";
+        case DesktopWindowAspect::SixteenNine: return "16:9";
+        case DesktopWindowAspect::TwentyOneNine: return "21:9";
+        default: return "full";
+    }
+}
+// Width over height of the whole picture; 0 for `full`.
+inline double desktopWindowAspectRatio(DesktopWindowAspect a) {
+    switch (a) {
+        case DesktopWindowAspect::Square: return 1.0;
+        case DesktopWindowAspect::FourThree: return 4.0 / 3.0;
+        case DesktopWindowAspect::SixteenTen: return 16.0 / 10.0;
+        case DesktopWindowAspect::SixteenNine: return 16.0 / 9.0;
+        case DesktopWindowAspect::TwentyOneNine: return 21.0 / 9.0;
+        default: return 0.0;
+    }
+}
+// The sizes the layout works with, for the eyes the mode draws: `full` keeps each eye's own size in pixels; any other value gives each eye its half (both eyes) or the whole
+// (one eye) of the picture's shape, as a size of height 1, so the two halves are exactly equal.
+inline void desktopWindowShapes(DesktopWindowAspect a, DesktopWindowMode mode, const DwSize eyes[2], DwSize out[2]) {
+    const double ratio = desktopWindowAspectRatio(a);
+    for (unsigned i = 0; i < 2; ++i) {
+        if (ratio > 0 && (desktopWindowEyeMask(mode) & (1u << i))) {
+            out[i].w = mode == DesktopWindowMode::BothEyes ? ratio * 0.5 : ratio;
+            out[i].h = 1.0;
+        } else {
+            out[i] = eyes[i];
+        }
+    }
+}
+// Where an eye looks straight ahead in its image, from the field of view the image's pixels cover: angles are {left, right, up, down} in radians as OpenXR gives them (left and
+// down negative). u = -tan(left) / (tan(right) - tan(left)) from the image's left, v = tan(up) / (tan(up) - tan(down)) from its top. False when the angles are not a field of view.
+inline bool desktopWindowProjectionCentre(const float* angles, double* u, double* v) {
+    if (!angles) return false;
+    for (int i = 0; i < 4; ++i) {
+        if (!std::isfinite(angles[i]) || std::fabs(angles[i]) >= 1.5707) return false;
+    }
+    const double l = std::tan(static_cast<double>(angles[0])), r = std::tan(static_cast<double>(angles[1]));
+    const double t = std::tan(static_cast<double>(angles[2])), b = std::tan(static_cast<double>(angles[3]));
+    if (!(r > l) || !(t > b)) return false;
+    *u = -l / (r - l);
+    *v = t / (t - b);
+    return std::isfinite(*u) && std::isfinite(*v);
+}
+// The crop: the bounds {uMin, vMin, uMax, vMax} of the largest rectangle of the target shape (width over height, in pixels) inside the bounds sub-rect of a texW x texH texture,
+// centred on (u, v) (fractions of the sub-rect from its start, where haveCentre; else its middle) and kept inside it. A flipped sub-rect stays flipped. A target of 0 leaves the
+// bounds as they are.
+inline void desktopWindowCrop(const float bounds[4], uint32_t texW, uint32_t texH, double target, bool haveCentre, double u, double v, float out[4]) {
+    for (int i = 0; i < 4; ++i) out[i] = bounds[i];
+    if (!(target > 0)) return;
+    const double du = static_cast<double>(bounds[2]) - bounds[0], dv = static_cast<double>(bounds[3]) - bounds[1];
+    const double w = std::fabs(du) * texW, h = std::fabs(dv) * texH;
+    if (!(w > 0) || !(h > 0)) return;
+    double cw = w, ch = h;
+    if (w / h > target) cw = h * target;
+    else ch = w / target;
+    const double cx = haveCentre ? u * w : w * 0.5, cy = haveCentre ? v * h : h * 0.5;
+    double left = cx - cw * 0.5, top = cy - ch * 0.5;
+    left = left < 0 ? 0 : left > w - cw ? w - cw : left;
+    top = top < 0 ? 0 : top > h - ch ? h - ch : top;
+    out[0] = static_cast<float>(bounds[0] + (left / w) * du);
+    out[1] = static_cast<float>(bounds[1] + (top / h) * dv);
+    out[2] = static_cast<float>(bounds[0] + ((left + cw) / w) * du);
+    out[3] = static_cast<float>(bounds[1] + ((top + ch) / h) * dv);
+}
+// The borderless window's rectangle: the whole monitor, client and all. Not ok when the monitor has no size.
+inline DwWindowPlan desktopWindowBorderlessPlan(int monLeft, int monTop, int monRight, int monBottom) {
+    DwWindowPlan p;
+    if (monRight <= monLeft || monBottom <= monTop) return p;
+    p.ok = true;
+    p.left = monLeft; p.top = monTop; p.right = monRight; p.bottom = monBottom;
+    p.clientWidth = monRight - monLeft;
+    p.clientHeight = monBottom - monTop;
+    return p;
 }
 
 // ---- the cursor (rounds 3 to 5) ----

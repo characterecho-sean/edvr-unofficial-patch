@@ -3,52 +3,46 @@
 ## Status
 
 - **State (2026-10-28):** rounds 1 to 4 FLOWN OK on Steam (`edvr_gfx_20261028_161013.log`,
-  `_164251.log`, `_170329.log`; round 4, the cursor hidden over the window while it has
-  focus, confirmed by Sean). ON MAIN; tester zip
-  `dist\edvr-desktop-window-<commit>-dlls.zip` in this worktree. The cost against `game`
-  is not measured (fps sits at the 90 Hz cap and the log carries no game-side busy
-  figure); EDVR's own Present-hook work is 0.01-0.07 ms. One live key, `visual.desktop_window` (`game` |
-  `left_eye` | `right_eye` | `both_eyes`, default `game`), on the Visual page of the
-  in-headset menu. VR only. No temporary keys.
-- **What it does:** while Elite is in VR with 3D on, EDVR makes Elite's desktop
-  window a framed, sizable, movable window of the eye image's shape, fills it with
-  EDVR's finished eye image, skips Elite's own drawing into it, and (round 4) hides
-  the cursor over the picture. At 3D off it restores the window.
-- **Round 3 results (the mouse lock):** the four cursor hooks all patched. **H1
-  confirmed:** the game confines the cursor with `ClipCursor` to the client rect
-  (1357x1358 at 904,45); releasing it worked and the cursor left the window (round 5
-  removes that release).
-  **H3 ruled out:** the game's DirectInput mouse is `0x0000000A` (nonexclusive,
-  background). **H2 ruled out:** `SetCursorPos` was 0 in every window, so there is no
-  re-centring (suppressing it was never needed). The game calls `ShowCursor` about 50 to
-  200 times a second while focused, its last a hide that returned display count 0, so
-  the cursor stays visible; none while unfocused. The game's window belongs to the
-  render thread: the window-mode request ran on thread 23680, the same thread as Present.
-  The 13 fps stretch from 17:04:30 to 17:05:50 was the headset asleep, not a finding.
-- **Round 4, the hidden cursor** (design below): hidden when the game's window is the
-  foreground window and EDVR's own `GetCursorPos` is inside the client area; visible over
-  the title bar or frame, over another window, or when not foreground. Runs only when
-  the window's thread is the Present thread (else `the cursor is not hidden -- the window
-  belongs to thread X, Present runs on Y`, once).
-- **What round 4's flight was to show** (Sean: it works): the cursor gone while over the picture with
-  focus, back over the title bar and edges and when another window has focus; the cursor
-  line's tail `hidden on N of M Presents, offset now K, pushed down P` (N near M while
-  the cursor sits over the picture, K a small negative number, P in the hundreds a
-  second only if the game's `ShowCursor(TRUE)` calls keep coming); no flash of the cursor
-  on the game's own shows; the cursor back (offset 0) after 3D off; mouse flight
-  unchanged (the game still sees the counts it would have).
-- **Round 5, the mouse lock goes back** (BUILT; ON MAIN once merged). Sean: the game's
-  mouse lock (`ClipCursor` to the client rect) is needed for on-foot VR, so round 5 removes
-  the release; the cursor stays confined while the game holds it, so moving or resizing
-  the window means switching away from the game first. Elite's `ClipCursor` is now
-  untouched in every state: no hook on it, no call, no clip counts in the cursor line
-  (`clip released ..., clip passed N, ` is gone). Kept: the `ShowCursor` hook and the
-  round 4 hide, the `SetCursorPos` and `GetCursorPos` counts, the DirectInput
-  cooperative-level line. The install line now lists the three hooks and says only
-  `ShowCursor`'s count is changed, while the cursor is hidden.
-- **Ruled out:** a stale binding shadow taking scene draws for buffer draws (the
-  context named the buffer on every sampled skipped draw); H2 and H3 above.
-- Older flights, the skipped-draw census and the round 3 hypotheses are under "Flight
+  `_164251.log`, `_170329.log`; Sean confirmed the hidden cursor). Round 5 (the game keeps its
+  mouse lock) ON MAIN d35d70bb. **Round 6 BUILT, NOT FLOWN:** its own menu page, two new keys,
+  the centre crop, borderless. Three live keys in `[visual]`, all on VR's **Desktop window**
+  page (right after Visual): `visual.desktop_window` (`game` | `left_eye` | `right_eye` |
+  `both_eyes`, default `game`), `desktop_window_aspect` (`full` | `1:1` | `4:3` | `16:10` |
+  `16:9` | `21:9`, default `full`; the ':' values pass the schema and the ini parser as they
+  are), `desktop_window_style` (`window` | `borderless`, default `window`). VR only. No
+  temporary keys.
+- **What it does:** while Elite is in VR with 3D on, EDVR makes Elite's desktop window a
+  framed, movable, resizable window (or, in `borderless`, the whole monitor) and fills it with
+  EDVR's finished eye image, skips Elite's own drawing into it, and hides the cursor over the
+  picture while the window has focus. The game's mouse lock is untouched. At 3D off the window
+  is restored.
+- **Round 6, the shape:** `full` is the picture as before (each eye's bounds sub-rect, both eyes
+  side by side). Any other value is the whole picture's shape; with both eyes each gets half the
+  width (16:9 is two 8:9 halves). Each eye is cropped to the largest rectangle of its shape inside
+  its bounds sub-rect, centred on where that eye looks straight ahead (u = -tan(left) /
+  (tan(right) - tan(left)), v = tan(up) / (tan(up) - tan(down)) of the field of view its pixels
+  cover), moved only as far as it takes to stay inside the image. The field of view comes with
+  each eye: the export is now **version 2** (`noteEye` carries the four angles of
+  `frameContentViews[eye].fov`, the projection the treated pixels hold, narrowed by any trim); no
+  field of view (or a version 1 pair) centres the crop on the middle of the bounds, said once.
+- **Round 6, the style:** `window` is as before, snapping to the chosen shape (a shape change
+  alone keeps the client height and top-left, then clamps). `borderless` is full-screen
+  borderless: popup style (`0x94020000` and `0x14CC0000` both become `0x94000000`), the whole
+  `rcMonitor` of the window's monitor, no snapping and no user moves, the picture fitted inside
+  with black bars. A live change of style or shape is not a fight: our style is worked out
+  again, the fight state is forgotten and the change is asked for. Back to `window`: the last
+  settled window rect if it fits, at the current shape with its client height, clamped to the
+  work area; else the largest fit, centred.
+- **First flight of round 6 must show:** the Desktop window page after Visual with three rows;
+  `aspect`/`style` lines at start and on each change; 16:9 with `left_eye` cropping around the
+  eye's centre (the `crop` line: u and v off 0.5 for an off-centre headset) and with `both_eyes`
+  two 8:9 halves; `borderless` filling the monitor; going back to `window`; the game's own mouse
+  lock and the hidden cursor still working in both styles; the restore at 3D off.
+- **Ruled out:** a stale binding shadow taking scene draws for buffer draws; H2 and H3 of
+  round 3 (see "Flight history"). **Round 5:** Elite's `ClipCursor` is never touched; the
+  cursor stays confined while the game holds it, so moving or resizing the window means
+  switching away from the game first.
+- Flights 1 to 4, the skipped-draw census and the round 3 and 4 detail are under "Flight
   history" below the design.
 
 ## Design
@@ -142,6 +136,21 @@
   hiding stops being wanted and in `leave()`. The cursor line ends `hidden on N of M
   Presents, offset now K, pushed down P`.
 
+- **The picture and the style (round 6)** (`desktop_window.cpp`, `desktop_window_math.h`).
+  `desktopWindowShapes` turns the eyes' pixel sizes into the sizes the layout uses (`full`: as
+  they are; else height-1 halves or wholes of the chosen ratio, so both halves are exactly
+  equal); `desktopWindowProjectionCentre` and `desktopWindowCrop` give each eye's crop bounds,
+  which the draw hands to the existing shader as its bounds (so the filter's quarter-pixel taps
+  and the half-texel clamp work on the crop). A flipped sub-rect stays flipped. The runtime asks
+  for version 2 of `edvrAcquireDesktopWindow` and falls back to 1; the graphics half answers
+  either. `desktopWindowStyleFor(mode, gameStyle)` picks the framed style or
+  `desktopWindowBorderlessStyle`; a setting change recomputes `S.ourStyle`, clears
+  `styleSeenOurs`, drops a request in flight and asks at once (`activeStyle`/`activeAspect`
+  against the settings). Borderless asks for `desktopWindowBorderlessPlan(rcMonitor)` and
+  keeps it there; it never updates the settled rect. The cursor hide, the restore and the
+  mouse lock are as before. The menu page is `menu desktop_window` (VR only: no flat table
+  lists it), built right after Visual from the Fix-tier rows of that page, in file order.
+
 ## Flight history
 
 - **Round 1:** `left_eye` 4032x4034; the popup 0,0 3840x2160 became 840,0 2159x2160;
@@ -165,6 +174,24 @@
   imports user32 `ClipCursor`, `SetCursorPos`, `GetCursorPos`, `ShowCursor`, `SetCursor`,
   `GetCursorInfo`, `ClientToScreen`, `ScreenToClient` and `DirectInput8Create`.
 
+- **Round 3 results (the mouse lock):** the four cursor hooks all patched. **H1 confirmed:**
+  the game confines the cursor with `ClipCursor` to the client rect (1357x1358 at 904,45);
+  releasing it worked and the cursor left the window (round 5 removed that release). **H3 ruled
+  out:** the game's DirectInput mouse is `0x0000000A` (nonexclusive, background). **H2 ruled
+  out:** `SetCursorPos` was 0 in every window. The game calls `ShowCursor` about 50 to 200 times
+  a second while focused, its last a hide that returned display count 0, so the cursor stays
+  visible; none while unfocused. The game's window belongs to the render thread: the window-mode
+  request ran on thread 23680, the same thread as Present. The 13 fps stretch from 17:04:30 to
+  17:05:50 was the headset asleep, not a finding.
+- **Round 4, the hidden cursor:** hidden when the game's window is the foreground window and
+  EDVR's own `GetCursorPos` is inside the client area; visible over the title bar or frame, over
+  another window, or when not foreground. Runs only when the window's thread is the Present
+  thread (else `the cursor is not hidden -- the window belongs to thread X, Present runs on Y`,
+  once). Sean: it works. The cursor line's tail is `hidden on N of M Presents, offset now K,
+  pushed down P`.
+- **Round 5:** the release of the game's lock was removed (see Status); the cursor line lost its
+  clip counts, the install line lists three hooks.
+
 ## Decisions the briefs left open
 
 - `ASPECT_RATIO_STRETCH` fits the picture into the buffer's own shape.
@@ -175,3 +202,8 @@
 - The census also asks the context for render target 0 on one skipped draw in 32.
 - `SetCursorPos` is never suppressed (round 3 ruled out H2: it is never called).
 - The DirectInput mouse is observed only in a VR-scope install, on the first table.
+- `desktop_window_aspect`'s ':' values were kept (they pass the schema generator and the ini
+  parser); a `16x9` spelling would have been the fallback.
+- A shape or style change while the game has fought the window too often (`gaveUp`) is not acted
+  on until the next session.
+- In `borderless` the cursor hide uses the whole monitor as the client area.
