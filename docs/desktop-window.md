@@ -4,8 +4,11 @@
 
 - **State (2026-10-28):** rounds 1 to 4 FLOWN OK on Steam (`edvr_gfx_20261028_161013.log`,
   `_164251.log`, `_170329.log`; Sean confirmed the hidden cursor). Round 5 (the game keeps its
-  mouse lock) ON MAIN d35d70bb. **Round 6 BUILT, NOT FLOWN:** its own menu page, two new keys,
-  the centre crop, borderless. Three live keys in `[visual]`, all on VR's **Desktop window**
+  mouse lock) ON MAIN d35d70bb. **Round 6 FLOWN OK, ON MAIN** (`edvr_gfx_20261028_192619.log`,
+  Sean: looks good; `--health` OK): its own menu page, two new keys, the centre crop,
+  borderless. Window and borderless switched live both ways; the 16:9 crop centred on the
+  field of view's straight-ahead point (right eye u 0.4108, left u 0.5892, v 0.5000 on the
+  Pimax). Tester zip `dist\edvr-desktop-window-<commit>-dlls.zip`. Three live keys in `[visual]`, all on VR's **Desktop window**
   page (right after Visual): `visual.desktop_window` (`game` | `left_eye` | `right_eye` |
   `both_eyes`, default `game`), `desktop_window_aspect` (`full` | `1:1` | `4:3` | `16:10` |
   `16:9` | `21:9`, default `full`; the ':' values pass the schema and the ini parser as they
