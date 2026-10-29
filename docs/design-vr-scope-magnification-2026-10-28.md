@@ -36,10 +36,10 @@ game's own zoom as a magnified picture inside the scope's lens. The rest of the 
 - **ruled out (cost or brief):** a third camera pass (C), magnifying in DLSS's input (E), a whole-view FOV change (D). Section 2.
 - **Analysis hand-over FILED** (analysis `1547986`): `analysis\decomp\verify_20261028_ads_zoom_receiver.txt` (the receiver, the correction to
   `analysis\decomp\verify_20261027_ads_sight_line.txt` section 1, the candidates).
-- **Next flight: none for the table.** Separate arc: a flat stutter on the scoped Executioner's ADS (2026-10-29), in its own doc,
+- **A1 BUILDING** (section 8; decided 2026-10-29): A for every sight in the table, B3 only if the scope is too soft. Temporary key:
+  `experimental.native_on_foot_ads_scope_zoom_fov` (the reference FOV, 56.3 by default). Next flight: A1's card, Epic in VR.
+- Separate arc: a flat stutter on the scoped Executioner's ADS (2026-10-29), in its own doc,
   `docs\investigation-flat-scoped-ads-stutter-2026-10-29.md`, on its own branch.
-- **Decisions waiting on the maintainer:** A first, B3 as phase 2 for the scope (recommended, section 2); scopes only or every sight
-  (section 4); the reference FOV M is taken from (section 4).
 - **Key (after S0, on the maintainer's word):** `fix.native_on_foot_ads_scope_zoom` = on | off. Section 5.
 
 ## 1. Where the game keeps the zoom
@@ -190,7 +190,10 @@ call, and an unscoped sight's lens would first need its own Q4: only the Executi
 
 - `fix.native_on_foot_ads_scope_zoom` = on | off, live, menu "ADS: scope zoom" under "Aiming down sights". It names what the player gets.
   It is a user key, not a test key: magnified motion under "ADS: aim with head" is a comfort choice. Default on once flown OK.
-- There is no strength slider: M is the game's value. S0 itself is measure only, with no key, as F141 was.
+- `experimental.native_on_foot_ads_scope_zoom_fov` = the reference FOV in degrees, 56.3 by default, live, a menu row "ADS: scope zoom
+  FOV (experimental)" (the maintainer's word, 2026-10-29). M = tan(h/2) / tan(ads/2) from it. Temporary: when a value settles it becomes the
+  behaviour, and removing the key is proposed (AGENTS.md).
+- There is no other strength control: the ADS FOV is the game's. S0 itself is measure only, with no key, as F141 was.
 
 ## 6. The first flight: S0 (measure only, no rendering code)
 
@@ -332,3 +335,58 @@ whose tracker caught every hip; kind 0 settled at the same value in every press.
 - Separately, the maintainer saw the scoped Executioner stutter on ADS in flat, and the bare one not; that has its own investigation
   doc (Status block).
 - **Next:** no flight for the table. The maintainer decides A or B3, scopes only or every sight, and M's reference FOV (section 4).
+
+**2026-10-29, the maintainer's decisions:** A first, for every sight; B3 later and only if the scope is too soft. The reference FOV
+starts at 56.3 deg, set by an experimental menu row. The build is A1 (section 8).
+
+## 8. A1: the first build of option A
+
+**Behaviour.**
+- Keys (section 5): `fix.native_on_foot_ads_scope_zoom` = on | off; `experimental.native_on_foot_ads_scope_zoom_fov` = the reference FOV h.
+- The lens runs in native on-foot VR when all of these hold: in ADS; the game's w at 1.0 with S fresh (S0's `geometryNow` conditions); the
+  held (item, scope) in the table; M >= 1.05. Otherwise there is no lens, and the frame is counted under its reason. An unknown scope
+  state counts as "not in the table".
+- The table holds the ADS FOV per (item, scope), from section 7. Items match on the stem, so `$wpn_m_sniper_plasma_charged_name;` and
+  `wpn_m_sniper_plasma_charged` are one:
+  - `m_sniper_plasma_charged`: scoped 15.000, bare 35.000.
+  - 48.000: `m_assaultrifle_plasma_fauto`, `m_assaultrifle_laser_fauto`, `m_assaultrifle_kinetic_fauto`.
+  - 50.000: `m_submachinegun_laser_fauto`, `m_submachinegun_kinetic_fauto`.
+  - 52.000: `m_shotgun_plasma_doublebarrel`, `s_pistol_plasma_charged`, `s_pistol_kinetic_sauto`, `m_launcher_rocket_sauto`,
+    `s_pistol_laser_sauto`.
+  - Every other item, and every other scoped copy, is unmeasured: no lens.
+- M = tan(h/2) / tan(ads/2). It eases from 1 to M over 0.25 s, from the first qualifying frame of a press. It drops to 1 on the first
+  frame that does not qualify.
+- **Where:** the right eye's picture at the door, after RCAS. It goes right after `rippleDoor` in `uiLayerComposite`, before the UI
+  composite, and takes the frame through the same route (owned UAV, or the copy for a frame that is not EDVR's; R8G8B8A8 or B8G8R8A8
+  UNORM only). F106 then carries it to the left eye; with F106 off the left eye stays unmagnified.
+- **c:** the right eye's c from S0's `geometryNow` math, worked out each qualifying frame on the frame thread and corrected for that
+  eye's draw jitter (the output is unjittered). It is published with M and a sequence by seqlock (the `EyeRowsPub` pattern). The door
+  uses a c no older than 50 ms.
+- **The footprint is the hole in the depth** (Q4). Pass 1 is a compute pass that marches 128 rays from c over the right eye's
+  render-res depth (the game's depth, viewed in place, with the DSV unbound around it). Each ray stops at the first run of 3 render px
+  nearer than 0.6 m (metres from the eye's projection rows), or at 12 deg. More than 2 rays reaching 12 deg means an open sight: no lens
+  that frame. Pass 2 runs over the box of the largest ray: out(p) = in(c + (p - c) / M), Catmull-Rom from a region copy, inside r(theta)
+  (interpolated between rays) less a 2 output px feather. The scaling is linear in output px about c: the eye image is planar in
+  tangent, and c is within 2 deg of the axis. Nothing is read back to the CPU except the instrument's rays, asynchronously.
+- Cost, to be measured: 128 x 200 depth loads and a copy of at most 800 x 800 px a frame, in scoped ADS only.
+
+**Instrument** (tag S1; `--health` rules):
+- `scope zoom (S1): on|off, reference FOV h deg, N table entries`, once at arm and on every key change.
+- One line per press: item, scope, ads, target M, h; frames applied of qualifying frames; frames declined by reason (no S, stale c, open
+  sight, not in the table, depth unavailable, format refused); the hole from one settled frame's rays (r min, median and max in deg, and
+  the rays that escaped); the spread of c in output px; GPU ms of each pass (a `GpuTimer`, as sharpen does, and a GPU census door
+  section).
+- Health: NEVER APPLIED when a press qualified with the key on and no frame applied; PARTIAL when under half its qualifying frames
+  applied; IDLE with no press.
+- If the code never runs, there is no announce line, so `--health` can tell that from a run with no press.
+
+**Rigs:** the pure parts (the table, M, the ease, the gate, the open-sight rule, r(theta), the mask, the source mapping) in a header
+with `tools\native_frame_test\s1_checks.h`. A GPU rig in the pattern of `tools\shield_ripple_test` runs both passes on a synthetic frame
+whose depth is a near hexagonal ring about c, far inside and out. It checks that inside the ring the frame is sampled at c + d/M, that
+the ring and everything outside are unchanged, that an open ring leaves the frame alone, and that another format is refused.
+
+**Flight card (A1, Epic in VR):**
+- The scoped Executioner in ADS: 10 s still, then 10 s turning the head.
+- The bare Executioner, and two unscoped weapons (a 48 deg rifle and a 52 deg pistol).
+- In one scoped ADS: switch the key off and back on, and move the reference FOV row to 64.8 and back.
+- Read `--health` first, then the S1 lines.
