@@ -36,7 +36,7 @@ game's own zoom as a magnified picture inside the scope's lens. The rest of the 
 - **ruled out (cost or brief):** a third camera pass (C), magnifying in DLSS's input (E), a whole-view FOV change (D). Section 2.
 - **Analysis hand-over FILED** (analysis `1547986`): `analysis\decomp\verify_20261028_ads_zoom_receiver.txt` (the receiver, the correction to
   `analysis\decomp\verify_20261027_ads_sight_line.txt` section 1, the candidates).
-- **A1 BUILT, NOT FLOWN** (branch `claude/scope-zoom-a1`; section 8, "As built"; decided 2026-10-29): A for every sight in the table, B3 only if the scope
+- **A1 BUILT, INSTALLED ON EPIC, NOT FLOWN** (`5a47ad8f`, on this branch; section 8, "As built"; decided 2026-10-29): A for every sight in the table, B3 only if the scope
   is too soft. Keys: `fix.native_on_foot_ads_scope_zoom` (off until flown) and the temporary `experimental.native_on_foot_ads_scope_zoom_fov` (the
   reference FOV, 56.3 by default). Next flight: A1's card, Epic in VR, with the user key turned on in the menu first.
 - Separate arc: a flat stutter on the scoped Executioner's ADS (2026-10-29), in its own doc,
@@ -429,5 +429,6 @@ the ring and everything outside are unchanged, that an open ring leaves the fram
 - Turn "ADS: scope zoom" on in the Native on foot page first (the key is off until flown).
 - The scoped Executioner in ADS: 10 s still, then 10 s turning the head.
 - The bare Executioner, and two unscoped weapons (a 48 deg rifle and a 52 deg pistol).
-- In one scoped ADS: switch the key off and back on, and move the reference FOV row to 64.8 and back.
-- Read `--health` first, then the S1 lines.
+- In one scoped ADS: switch the key off and back on, and move the reference FOV row to 64.8 and back (the row is on the Experimental
+  page, which shows with the menu's Developer mode on).
+- Read `edvr_log.py --expect-build 5a47ad8f --health` first, then the S1 lines.
