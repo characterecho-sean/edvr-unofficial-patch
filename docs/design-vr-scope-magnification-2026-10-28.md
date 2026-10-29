@@ -39,12 +39,13 @@ game's own zoom as a magnified picture inside the scope's lens. The rest of the 
 - **A1 FLOWN 2026-10-29** (`5a47ad8f`, Epic VR; section 8): the lens ran on the bare and scoped Executioner, the Oppressor and the
   Aphelion; depth, eye numbering and cost (0.07 ms) as planned. The pilot: "a really cool effect where it makes sense"; the chevron is
   magnified with the world (Q6's prediction), and only optical sights should zoom.
-- **A2 BUILT, INSTALLED ON EPIC (both), NOT FLOWN** (`ce3f9bac`, main merged at `40d7409b`; section 9, "As built (A2)"): the table holds optical sights only, on the pilot's word; the AR gunsight quad (VS
-  `025B4B9F...` / PS `46F92DC7...`, 6 indices, the readout atlas) is the layer family `kScopeMark`, composited after the lens; the probe is on the left
-  eye. Departure: the quad's blend is ONE, DEST_ALPHA (not an over), read as additive on its alpha-less target. Open: that this quad is the chevron
-  (the flight's probe checks), and its jitter (default cancel, INFERRED). The A2 review's nine fixes are built with it (section 9, "As built
-  (A2 review fixes)"): the lens declines for the left aiming eye (`fix.native_on_foot_ads_sight_eye = left`; the left eye is a later build), and the mark
-  is redrawn with its depth tests off when the layer cannot reproduce them.
+- **A2 FLOWN 2026-10-29** (`ce3f9bac`, main merged at `40d7409b`; section 9): optical sights only; the AR gunsight quad (VS `025B4B9F...` /
+  PS `46F92DC7...`, 6 indices, the readout atlas) is the layer family `kScopeMark`, drawn after the lens, one a frame an eye, depth seeded.
+  The pilot: "the chevron looks much clearer now"; it is brighter than stock (tonemapped alone, T(F) + T(M) against stock's T(F + M)).
+  The lens declines for the left aiming eye (`fix.native_on_foot_ads_sight_eye = left`; the left eye is a later build). c lags the picture
+  by one frame on every frame (measured, not changed).
+- **A3 DESIGNED** (section 10): the mark moves to the sharp-weapons additive layer and its tonemap-difference composite (stock brightness);
+  the S0 census only for optical sights.
 - Keys: `fix.native_on_foot_ads_scope_zoom` (off until flown OK) and the temporary `experimental.native_on_foot_ads_scope_zoom_fov` (the
   reference FOV, 56.3 by default).
 - Separate arc: a flat stutter on the scoped Executioner's ADS (2026-10-29), in its own doc,
@@ -600,3 +601,36 @@ things, and the merge a ninth. Each, in one line:
 - **Not verified, still for the flight.** Everything in the A2 list above, and: which depth path the mark takes (the press line's counts and the first-seen line say); that the
   seeded read-only path reproduces the game's test (the mark's position against the sight glass is the check, with an eye dump); whether the mark then sits on the glass with its
   tests off (the same dump); the left eye aiming (a press with `left` should show `left aiming eye` and no lens, and no mark redirected, so nothing in the scope is magnified).
+
+**2026-10-29, A2 VR flight** (Epic in VR, `edvr_gfx_20261029_120218`, `ce3f9bac`, build matched). `--health` exit 3: F85c as always; F91 (every readout
+part read mesh 0.00 x 0.00, the icon table's luck, the native on-foot arc's; A1's flight already had 6 such parts) and F87p (a prompt came up this time).
+Neither is the scope work's. `scope zoom (S1)` OK over 16 presses. Dumps `120515630001` (Oppressor), `120719527003` (scoped Executioner),
+`120858916005` (Aphelion), `120958373007` (Karma P-15), `121016259008` (unscoped Eclipse); 002, 004 and 006 at the hip or between presses.
+- **The lens and the mark:** applied on 6971 of 7041 qualifying frames; marks redirected L 7007, R 6994 against 6985 armed frames (one a frame
+  an eye), none missing on 3; depth path seeded on all 14001 (no read-only view, no test dropped). Every non-optical press (shotgun, Tormentor,
+  AR-50, P-15, the unscoped Eclipse) declined as `not an optical sight` on every frame, with no ray, lens or mark.
+- **c is one frame older than the picture on every frame** (the gap histogram: +1 on 6985, nothing else). In ADS the sight holds still on
+  screen, so the lens moves little; not yet changed.
+- **The pilot:** "the chevron looks much clearer now". The dump agrees: in 003 the chevron sits at true size just under c, on the magnified
+  drone. Two points:
+  - The P-15's sight looks blurrier than remembered. The log shows nothing of the scope work ran on it (1069 frames declined at the gate, before
+    any GPU work); no earlier VR dump of the P-15 in ADS exists to compare. Star glow (main's `562759c0`) adds choices only; the live value is 200.
+  - The marks are brighter than stock. Cause (from the code, and the arithmetic): the mark goes through the HUD's over-blend family, which
+    tonemaps it alone and lays it on the finished picture, T(F) + T(M). Stock adds it in HDR first: T(F + M). Over the bright glass,
+    T(F) + T(M) is well above T(F + M). The quad's blend (ONE, DEST_ALPHA on an alpha-less target) is additive, which is the sharp-weapons
+    layer's case, and that layer already matches stock by the tonemap difference (`dlss-blur-elements-2026-10-14.md`, "A2, the brightness fix
+    (matched)", flown).
+
+## 10. A3: the marks at stock brightness
+
+- **The mark moves to the additive weapons layer.** kScopeMark joins the weapons-fire route: the eye's additive HDR layer, composited after the
+  upscale and after the lens by the tonemap difference, T(F_up + L) - T(F_up), with the game's own tonemap re-issued. Its gate stays as A2's
+  (the key, native on foot, ADS with an optical sight; the quad's shape and the learned surface), as do its jitter cancel and its depth paths.
+  The HUD over-blend family stops taking it.
+- **Nothing for sights that are not optical:** the S0 census (the pixel probe) runs only for an optical sight's press. S0's own per-press reads
+  are CPU only and stay until the arc closes.
+- **Instruments:** the press line counts the marks the weapons layer took and its tonemap-difference composites for them; `--health` checks
+  the marks reach that layer.
+- **Flight card (A3, Epic in VR):** the scoped Executioner and the Aphelion in ADS, an eye dump in each, judged against stock: switch "ADS:
+  scope zoom" off in the same press for the stock chevron (the lens goes too), then on. Then the P-15 in ADS with the key off and on: if its
+  sight looks the same both ways, the scope work is not what blurs it.
