@@ -1942,7 +1942,8 @@ void testLegacyOnFootRowsStayOutOfMenu() {
 }
 
 // ---------------------------------------------------------------------------
-// 7b. The Visual page of VR's menu (2026-10-27): how the world looks, apart from the fixes. World scale is a whole-percent number from 50 to 200, live; the intro settings and the
+// 7b. The Visual page of VR's menu (2026-10-27): how the world looks, apart from the fixes. World scale is a whole-percent number from 50 to 200, live; Desktop window (visual.desktop_window,
+// what Elite's window on the desktop shows: game, left_eye, right_eye or both_eyes) sits under it; the intro settings and the
 // screen curve moved onto it from the Fixes page; Star glow, which both profiles read, is on it too; and a live edvr.ini without the world_scale line takes
 // the first change from the menu as an appended line.
 
@@ -1954,6 +1955,7 @@ void testVisualPage() {
         {"fix", "panel_curvature", "The on-foot screen"},
         {"fix", "intro_backdrop", "The intro"},
         {"visual", "world_scale", "World scale"},
+        {"visual", "desktop_window", "The desktop window"},
         {"visual", "intro_video", "The launch movie"},
         {"visual", "star_glow", "Stars"},
     };
@@ -1972,7 +1974,7 @@ void testVisualPage() {
         if (strcmp(kMenuRows[i].key, "world_scale") == 0) world = i;
         ++at;
     }
-    check(inOrder && at == kWant, "VR's Visual page is Screen curve, Intro background picture, World scale, Intro movie and Star glow, Fix tier, in edvr.ini order under their headings");
+    check(inOrder && at == kWant, "VR's Visual page is Screen curve, Intro background picture, World scale, Desktop window, Intro movie and Star glow, Fix tier, in edvr.ini order under their headings");
     for (int i = 0; i < kCount; ++i) {
         const bool moved = strcmp(kMenuRows[i].key, "panel_curvature") == 0 || strcmp(kMenuRows[i].key, "intro_backdrop") == 0 || strcmp(kMenuRows[i].key, "intro_video") == 0;
         if (moved && strcmp(kMenuRows[i].section, "advanced") != 0) checkf(strcmp(kMenuRows[i].page, "fixes") != 0, "%s.%s is no longer on the Fixes page", kMenuRows[i].section, kMenuRows[i].key);

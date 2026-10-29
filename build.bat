@@ -451,6 +451,7 @@ python "tools\gen_exports.py" --source "%SystemRoot%\System32\d3d11.dll" ^
     --extra-export edvrAcquireNativeSharpen ^
     --extra-export edvrAcquireNativeFrame ^
     --extra-export edvrAcquireNativeTiming ^
+    --extra-export edvrAcquireDesktopWindow ^
     --extra-export edvrReadNativePresentTrace ^
     --extra-export "edvrNativeStartupRouting DATA" ^
     --extra-export edvrQueryOculusRouting ^
@@ -658,6 +659,7 @@ python tools\compile_cache.py --prune --keep thunks.obj --keep weapon_ui_getter_
     "src\d3d11\flat_runtime.cpp" "src\d3d11\flat_mono_resolve.cpp" "src\d3d11\xess_engine.cpp" "src\d3d11\map_easu.cpp" "src\d3d11\map_smaa.cpp" "src\d3d11\flat_projection_scope.cpp" "src\d3d11\flat_projection_runtime.cpp" ^
     "src\d3d11\flat_camera_producer_probe.cpp" "src\d3d11\flat_camera_inject.cpp" "src\d3d11\flat_stationary_camera_capture.cpp" ^
     "src\d3d11\vr_world_route.cpp" "src\d3d11\vr_world_mips.cpp" "src\d3d11\vr_camera_census.cpp" "src\d3d11\vr_star_glow.cpp" ^
+    "src\d3d11\desktop_window.cpp" "src\d3d11\desktop_window_cursor.cpp" ^
     "src\d3d11\native_sharpen.cpp" ^
     "src\d3d11\native_frame.cpp" ^
     "src\d3d11\native_timing.cpp" ^
@@ -1045,7 +1047,7 @@ if not exist "%OBJ%\native_menu" mkdir "%OBJ%\native_menu"
     /Fo"%OBJ%\native_menu\\" /Fe"%BUILD%\native_menu_test.exe" ^
     "tools\native_menu_test\native_menu_test.cpp" "src\d3d11\native_menu.cpp" ^
     "src\openxr\eye_capture.cpp" "src\openxr\shared_texture_transfer.cpp" "src\openxr\producer_gpu_timing.cpp" ^
-    "src\d3d11\input_gate.cpp" "src\d3d11\joy_watch.cpp" "src\d3d11\menu_panel.cpp" ^
+    "src\d3d11\input_gate.cpp" "src\d3d11\desktop_window_cursor.cpp" "src\d3d11\joy_watch.cpp" "src\d3d11\menu_panel.cpp" ^
     "src\d3d11\gpu_timing.cpp" "src\d3d11\gpu_span_d3d11.cpp" ^
     "src\d3d11\menu_keys.cpp" "src\d3d11\shader_swap.cpp" ^
     "src\common\iat_hook.cpp" "src\common\iniedit.cpp" ^
@@ -1890,7 +1892,7 @@ if not exist "%OBJ%\inputgatetest" mkdir "%OBJ%\inputgatetest"
 %CC% /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\inputgatetest"\ ^
     /Fe"%BUILD%\input_gate_test.exe" "tools\input_gate_test\input_gate_test.cpp" ^
-    "src\d3d11\joy_watch.cpp" "src\common\iat_hook.cpp" "src\common\vtable_hook.cpp" ^
+    "src\d3d11\joy_watch.cpp" "src\d3d11\desktop_window_cursor.cpp" "src\common\iat_hook.cpp" "src\common\vtable_hook.cpp" ^
     "src\common\hotkey.cpp" "src\common\config.cpp" "src\common\log.cpp" ^
     "src\common\guard.cpp" "src\common\frame_flag.cpp" "src\common\proxy.cpp" ^
     /link /INCREMENTAL:NO kernel32.lib user32.lib version.lib dinput8.lib xinput9_1_0.lib
@@ -2209,6 +2211,19 @@ if not exist "%OBJ%\identityfusion" mkdir "%OBJ%\identityfusion"
     /link /INCREMENTAL:NO d3dcompiler.lib dxguid.lib || exit /b 1
 "%OBJ%\identityfusion\identity_fusion_test.exe" --self-test || exit /b 1
 python "tools\identity_fusion_capture.py" --self-test || exit /b 1
+exit /b 0
+
+:rig_desktop_window_test
+echo [edvr] === desktop_window_test (visual.desktop_window) ===
+REM The pure rules (the setting's words, the picture's shape, where it goes in the buffer under each scaling, the window's plan, the formats, the log lines) and the source
+REM pins that wire the feature (the key, the export, the draw skip, the Present call, the host's handoff). No device and no window.
+if not exist "%OBJ%\desktopwindow" mkdir "%OBJ%\desktopwindow"
+%CC% /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
+    /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
+    /Fo"%OBJ%\desktopwindow\\" /Fe"%OBJ%\desktopwindow\desktop_window_test.exe" ^
+    "tools\desktop_window_test\desktop_window_test.cpp" ^
+    /link /INCREMENTAL:NO || exit /b 1
+"%OBJ%\desktopwindow\desktop_window_test.exe" "%ROOT%" || exit /b 1
 exit /b 0
 
 :rig_night_vision

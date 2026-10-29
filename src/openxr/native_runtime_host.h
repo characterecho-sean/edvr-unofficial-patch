@@ -35,6 +35,7 @@
 #include "native_menu_client.h"
 #include "native_temporal_client.h"
 #include "native_sharpen_client.h"
+#include "native_desktop_window_client.h"
 #include "native_frame_client.h"
 #include "native_fov_trim.h"
 #include "native_timing_client.h"
@@ -288,6 +289,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   NativeMenuClient menu;
   NativeTemporalClient temporal;
   NativeSharpenClient sharpen;
+  NativeDesktopWindowClient desktopWindow;   // visual.desktop_window: each captured eye's finished texture, for Elite's desktop window (optional)
   NativeTimingClient timing;
   DeviceGpuTiming deviceTiming;
   bool deviceTimingReady=false;
@@ -2308,7 +2310,11 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     if(transferClock&&transferClockEnd) timingFrame.transferMs[unsigned(eye)]=elapsedMs(transferBegan,transferEnded);
     if(r==vr::VRCompositorError_None&&menuTreated&&menuEyes[unsigned(eye)]++==0)
       nativeTracePrintf("native_menu,first_captured_eye=%u\n",unsigned(eye));
-    if(r==vr::VRCompositorError_None && copyPixels){++copiedEyes;temporalFrameEyes|=1u<<unsigned(eye);}
+    if(r==vr::VRCompositorError_None && copyPixels){
+      ++copiedEyes;temporalFrameEyes|=1u<<unsigned(eye);
+      // The eye is captured: its finished texture (after the upscaler, sharpening, the UI layer and the menu) is what visual.desktop_window shows in Elite's window.
+      desktopWindow.noteEye(unsigned(eye),treated.Get(),treatedBounds);
+    }
     else { invalidateEyeTreatments(); timingInvalidate(); }
     return r;
   }
@@ -3937,6 +3943,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     producerTiming.shutdown(); // Same contract: release only, safe off the render thread.
     const auto timingClosed=timing.close();
     if(FAILED(timingClosed)) nativeTracePrintf("native_timing,close_failure=%08lx\n",(unsigned long)timingClosed);
+    desktopWindow.close(); // CPU only: the graphics half lets the held eye images go at its next Present
     if(FAILED(temporal.close()))return clean=false;
     if(FAILED(sharpen.close()))return clean=false;
     if(FAILED(features.close()))return clean=false;
@@ -4310,6 +4317,10 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
           nativeTracePrintf("native_device_timing,initialized=%u,source=EDVR_on_XR_device,compositor=0\n",unsigned(deviceTimingReady));
         }
       }
+      // Optional, like the timing above: a graphics half without the export leaves Elite's window as it was.
+      acquired=desktopWindow.acquire(options.graphicsProvider,externalDevice,runtimeGeneration);
+      if(acquired!=S_OK) nativeTracePrintf("native_desktop_window,unavailable=%08lx\n",(unsigned long)acquired);
+      else nativeTracePuts("native_desktop_window,provider_acquired=1");
     }
     startupSteps.other=stepMs(step);
     return runtimeGeneration!=0&&compositorGeneration!=0;

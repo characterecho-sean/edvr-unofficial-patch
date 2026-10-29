@@ -116,6 +116,7 @@ struct LegacyContract {
 #include "fixed_shield_ripple_variants.h"
 #include "fixed_glow_feed_variants.h"
 #include "fixed_visor_axis_variants.h"
+#include "fixed_desktop_window_variants.h"
 
 static bool compile(CompileFn fn, const char* source, Variant& v, bool quiet = false) {
     v.bytes.clear();
@@ -339,6 +340,8 @@ static std::vector<Variant> fixedVariants(const std::string& core) {
     variants.insert(variants.end(), glowFeed.begin(), glowFeed.end());
     const auto visorAxis = visorAxisVariants();
     variants.insert(variants.end(), visorAxis.begin(), visorAxis.end());
+    const auto desktopWindow = desktopWindowVariants();
+    variants.insert(variants.end(), desktopWindow.begin(), desktopWindow.end());
     return variants;
 }
 
@@ -624,8 +627,8 @@ static void selfTest() {
     coreLegacy.insert(coreLegacy.end(), originalCore.begin(), originalCore.end());
     coreLegacy.insert(coreLegacy.end(), originalExtra.begin(), originalExtra.end());
     auto coreFixed = fixedVariants(extractCore(edvr::kTemporalCsHlsl));
-    check(originalCore.size() == 28 && originalExtra.size() == 12 && coreFixed.size() == 74 && coreLegacy.size() + 27 == coreFixed.size(),
-          "all original fixed shader contracts, three bounded diagnostics, six flat foreground shaders, the supercruise bars' geometry shader, the foreground map's four sibling-pass compute shaders (donor, fit and the shadow's two), the sky ring's compute shader, the UI layer's in-place composite, the explosion billboards' five facing transcriptions the sharp weapons' two source-pass shaders, the shield ripple's door pass, the HUD bloom feed pass, the star light pass and the visor's axis-centred vertex shader are registered");
+    check(originalCore.size() == 28 && originalExtra.size() == 12 && coreFixed.size() == 76 && coreLegacy.size() + 29 == coreFixed.size(),
+          "all original fixed shader contracts, three bounded diagnostics, six flat foreground shaders, the supercruise bars' geometry shader, the foreground map's four sibling-pass compute shaders (donor, fit and the shadow's two), the sky ring's compute shader, the UI layer's in-place composite, the explosion billboards' five facing transcriptions the sharp weapons' two source-pass shaders, the shield ripple's door pass, the HUD bloom feed pass, the star light pass, the visor's axis-centred vertex shader and the desktop window's two draw shaders are registered");
     for(size_t i=0;i<coreFixed.size();++i)for(size_t j=0;j<i;++j)
         check(std::strcmp(coreFixed[i].symbol,coreFixed[j].symbol)!=0,"generated shader symbols do not collide");
     using ReflectFn = HRESULT(WINAPI*)(LPCVOID, SIZE_T, REFIID, void**);
@@ -1066,6 +1069,46 @@ static void selfTest() {
             D3D11_SHADER_INPUT_BIND_DESC colour{};
             ok = ok && SUCCEEDED(reflection->GetResourceBindingDescByName("T0", &colour)) && colour.Type == D3D_SIT_STRUCTURED && colour.BindPoint == 0;
             check(ok, "the visor's axis-centred vertex shader keeps the game's b1[91] and b2[2] and the colour buffer at t0, and ours at b3[1], and binds nothing else");
+        }
+    }
+
+    // visual.desktop_window's draw (src/d3d11/desktop_window_shaders.h): new, held to its own contract -- the symbols, source names, entry, profile and flags, the text
+    // each compiles, the vertex stage (SV_VertexID in, position and UV out, no resource) and the pixel stage (the eye texture at t0, a sampler at s0 and the one
+    // constant buffer Shown at b0 holding the bounds and the destination pixel's step, 32 bytes).
+    {
+        struct Src { const char* symbol; const char* sourceName; const char* source; const char* profile; };
+        const Src src[2] = {{"kDesktopWindowVsBytecode", "desktop_window_vs", edvr::kDesktopWindowVsHlsl, "vs_5_0"},
+                            {"kDesktopWindowPsBytecode", "desktop_window_ps", edvr::kDesktopWindowPsHlsl, "ps_5_0"}};
+        for (size_t i = 0; i < 2; ++i) {
+            auto& shader = coreFixed[coreLegacy.size() + 27 + i];
+            check(!std::strcmp(shader.symbol, src[i].symbol) && !std::strcmp(shader.sourceName, src[i].sourceName) &&
+                  !std::strcmp(shader.entry, "main") && !std::strcmp(shader.profile, src[i].profile) && shader.alternate == src[i].source &&
+                  shader.macros == nullptr && !shader.flags1 && !shader.flags2,
+                  "each desktop window shader has its distinct symbol and exact source/stage contract");
+            check(compile(compiler.fn, shader.alternate, shader, true) && shader.bytes.size() > 4 && !std::memcmp(shader.bytes.data(), "DXBC", 4),
+                  "each desktop window shader compiles to fixed DXBC");
+            if (reflect && !shader.bytes.empty()) {
+                ComPtr<ID3D11ShaderReflection> reflection;
+                D3D11_SHADER_DESC desc{};
+                const HRESULT hr = reflect(shader.bytes.data(), shader.bytes.size(), __uuidof(ID3D11ShaderReflection),
+                                           reinterpret_cast<void**>(reflection.GetAddressOf()));
+                const D3D11_SHADER_VERSION_TYPE want = i == 0 ? D3D11_SHVER_VERTEX_SHADER : D3D11_SHVER_PIXEL_SHADER;
+                bool ok = SUCCEEDED(hr) && reflection && SUCCEEDED(reflection->GetDesc(&desc)) &&
+                          D3D11_SHVER_GET_TYPE(desc.Version) == want && D3D11_SHVER_GET_MAJOR(desc.Version) == 5;
+                if (i == 0) {
+                    ok = ok && desc.ConstantBuffers == 0 && desc.BoundResources == 0;
+                } else if (ok) {
+                    D3D11_SHADER_INPUT_BIND_DESC eye{}, smp{}, cb{};
+                    D3D11_SHADER_BUFFER_DESC bufferDesc{};
+                    ID3D11ShaderReflectionConstantBuffer* cbuffer = reflection->GetConstantBufferByName("Shown");
+                    ok = desc.ConstantBuffers == 1 && desc.BoundResources == 3 &&
+                         SUCCEEDED(reflection->GetResourceBindingDescByName("Eye", &eye)) && eye.Type == D3D_SIT_TEXTURE && eye.BindPoint == 0 &&
+                         SUCCEEDED(reflection->GetResourceBindingDescByName("Linear", &smp)) && smp.Type == D3D_SIT_SAMPLER && smp.BindPoint == 0 &&
+                         SUCCEEDED(reflection->GetResourceBindingDescByName("Shown", &cb)) && cb.Type == D3D_SIT_CBUFFER && cb.BindPoint == 0 &&
+                         cbuffer && SUCCEEDED(cbuffer->GetDesc(&bufferDesc)) && bufferDesc.Size == 32;
+                }
+                check(ok, "the desktop window shaders: the vertex shader binds nothing, the pixel shader reads the eye at t0 with a sampler at s0 and the 32-byte Shown buffer at b0");
+            }
         }
     }
 

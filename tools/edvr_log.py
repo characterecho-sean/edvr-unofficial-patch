@@ -281,6 +281,9 @@ gate on it), 4 when a rule is UNPARSED and none is NEVER APPLIED, 2 for a wrong 
 The one rule that is not read from the graphics log is world scale (visual.world_scale): its lines are the runtime's, so --health also reads the paired runtime log
 (the one --runtime-file names, else the edvr_openxr_*.log that opened nearest) for it, whole: --since and --until do not cut it. It says OK when the runtime latched a
 value and Elite read its eye transform at that value afterwards, NEVER APPLIED when it did not (a change that needs a restart), and nothing at all when the value stayed 100.
+The desktop window (visual.desktop_window) is the other rule whose lines carry no build tag: the graphics log's "desktop window:" lines. It says OK when a 10 s line (or the line
+that ends an activation) shows a Present drawn, NEVER APPLIED when a "desktop window: setting" line named a mode other than game and no line shows one, and nothing at all when
+the setting is game or absent.
 
 Exit 0 when a log was read, 1 when none was found (or --camera-census found no
 census line, or --vscreen-fit no auto-fit line, or --flat-upscale no flat line, or
@@ -10353,11 +10356,21 @@ H_WORLD_LABEL = "world_scale:"
 # The runtime's two lines (src\common\world_scale.h worldScaleChangeLine, worldScaleReadLine): a latched value with the two eye separations, and Elite's first read at one.
 H_WORLD_CHANGE = r"world_scale: (?P<pct>\d+)% located_icd=(?P<located>[\d.]+)mm elite_icd=(?P<elite>[\d.]+)mm$"
 H_WORLD_READ = r"world_scale: elite read eye transform at (?P<pct>\d+)% \(geometry sequence (?P<seq>\d+)\)$"
+# The desktop window (src\common\desktop_window_math.h: desktopWindowSettingLine, desktopWindowStatsLine, desktopWindowStoppedLine): lines of the graphics log with no build tag.
+# The setting is state, so health_scan keeps every setting line whatever --since says; the 10 s and stopped lines are events and are cut by the window. The other
+# "desktop window:" lines (an activation, a reshape request, a decline, the window moved off its target) are the instrument's story: matched by the "_" pattern and not counted.
+H_DESKTOP = "desktop window"
+H_DESKTOP_LABEL = "desktop window:"
+H_DESKTOP_SETTING = r"desktop window: setting (?P<value>game|left_eye|right_eye|both_eyes)(?: \(was (?P<was>game|left_eye|right_eye|both_eyes)\))?$"
+H_DESKTOP_SEC = (r"desktop window: 10 s: drawn=(?P<drawn>\d+) seen=(?P<seen>\d+) skipped_draws=(?P<skipped>\d+) eyes_L=(?P<left>\d+) eyes_R=(?P<right>\d+) "
+                 r"stale=(?P<stale>\d+) client=(?P<cw>\d+)x(?P<ch>\d+) swap_chain=(?P<sw>\d+)x(?P<sh>\d+)(?: moves=(?P<moves>\d+) resizes=(?P<resizes>\d+))?$")
+H_DESKTOP_STOP = r"desktop window: stopped \((?P<reason>.*)\); drawn=(?P<drawn>\d+) of (?P<seen>\d+) Presents; window (?P<window>.*)$"
+H_DESKTOP_OTHER = r"desktop window: (?!setting |10 s: |stopped \()"
 H_F125_LABEL = "native on foot log (F125)"
 H_F125_RE = re.compile(r"native on foot log \(F125\): detail (?P<detail>on|off), summary window (?P<wl>\d+) s")
 # Rules whose absence says nothing about a feature, so a log without their lines does not list them as not present: every log written before F125 has no F125
 # line, and its report stays as it was.
-HEALTH_QUIET_WHEN_ABSENT = frozenset((H_F125, H_WORLD))   # world scale writes nothing while the value stays 100
+HEALTH_QUIET_WHEN_ABSENT = frozenset((H_F125, H_WORLD, H_DESKTOP))   # world scale writes nothing while the value stays 100; the desktop window nothing while the setting is game
 
 # ---- F125: summary windows (the on-foot log diet) ----
 # By default an on-foot summary line covers a window of 10 s, 1 s with log.on_foot_detail = on, and 1 to 10 s when a window is flushed early (a held-item change,
@@ -14115,6 +14128,34 @@ def _hj_world_scale(rows, ctx):
     return ("OK", text + "; Elite read its eye transform at each value (%d read line(s), the last at geometry sequence %s)" % (len(reads), reads[-1]["seq"]))
 
 
+def _hj_desktop_window(rows, ctx):
+    """The desktop window (src\\common\\desktop_window_math.h; visual.desktop_window): ran is a setting line that names a mode other than game, applied is a Present drawn,
+    counted by the 10 s lines and by the line that ends an activation (a session whose 3D was on for less than 10 s has only the second). NEVER APPLIED when the setting
+    asked for a mode and no line shows a Present drawn: no eye image arrived (3D was never on), or the draw declined (a "not drawing" line says why). No setting line, or only
+    game, is nothing to judge (None)."""
+    settings = rows.get("setting", [])
+    asked = [r["value"] for r in settings if r["value"] != "game"]
+    if not asked:
+        return None
+    drawn = [int(r["drawn"]) for kind in ("sec", "stopped") for r in rows.get(kind, [])]
+    mode = asked[-1]
+    if not drawn or max(drawn) <= 0:
+        return ("NEVER APPLIED", "the setting was %s but no 10 s line and no stopped line shows a Present drawn (3D was never on, or the draw declined: the log's "
+                                 "'desktop window: not drawing' line says why)" % mode)
+    sec = rows.get("sec", [])
+    stopped = rows.get("stopped", [])
+    last = sec[-1] if sec else None
+    text = "setting %s; %d Present(s) drawn" % (mode, max(drawn))
+    if last:
+        text += ", %s Elite draw(s) skipped, eye images handed over L %s R %s, %s stale Present(s), client %sx%s, swap chain %sx%s (the last 10 s line)" % (
+            last["skipped"], last["left"], last["right"], last["stale"], last["cw"], last["ch"], last["sw"], last["sh"])
+        if last.get("moves") is not None:   # the user's changes since each line, from the second round's lines on
+            text += "; the user moved the window %d time(s) and resized it %d time(s)" % (sum(int(r["moves"] or 0) for r in sec), sum(int(r["resizes"] or 0) for r in sec))
+    if stopped:
+        text += "; %d activation(s) ended, the last with the window %s" % (len(stopped), stopped[-1]["window"])
+    return ("OK", text)
+
+
 def _hrule(name, tags, labels, kinds, judge, needs_detail=False):
     return HealthRule(name, tuple(tags), tuple(labels), tuple((k, re.compile(rx)) for k, rx in kinds), judge, needs_detail)
 
@@ -14889,7 +14930,14 @@ HEALTH_RULES = (
     _hrule(H_WORLD, (), (H_WORLD_LABEL,), (
         ("change", H_WORLD_CHANGE),
         ("read", H_WORLD_READ),
-    ), _hj_world_scale),)
+    ), _hj_world_scale),
+    # The desktop window: lines of the graphics log that carry no build tag (health_scan reads them before it drops the untagged lines).
+    _hrule(H_DESKTOP, (), (H_DESKTOP_LABEL,), (
+        ("setting", H_DESKTOP_SETTING),
+        ("sec", H_DESKTOP_SEC),
+        ("stopped", H_DESKTOP_STOP),
+        ("_", H_DESKTOP_OTHER),
+    ), _hj_desktop_window),)
 HEALTH_BY_TAG = {}
 for _rule in HEALTH_RULES:
     for _tag in _rule.tags:
@@ -14933,7 +14981,24 @@ def health_scan(text, since=None, until=None):
         ("visor census (F121b)", re.compile(r"native on foot visor axis \(F121b\): (?P<to>on|off) \(TEMPORARY")),
         ("head containment (F119)", re.compile(r"head containment \(F119\): report context: reference (?P<reference>\d+) \((?P<known>known|not read)\), epoch (?P<epoch>\d+), (?P<context>steady|mixed rest)$")),
     )
+    desktop = next(r for r in HEALTH_RULES if r.name == H_DESKTOP)
     for raw in text.splitlines():
+        if H_DESKTOP_LABEL in raw:
+            # The desktop window's lines carry no build tag. The setting is state, so every setting line is kept; the rest are events and are cut by the window.
+            sm = HEALTH_STAMP_RE.match(raw)
+            tod = int(sm.group(1)) * 3600 + int(sm.group(2)) * 60 + int(sm.group(3)) + int(sm.group(4)) / 1000.0 if sm else None
+            body = raw[sm.end():] if sm else raw
+            for kind, rx in desktop.kinds:
+                g = rx.search(body)
+                if g:
+                    if kind != "_" and (kind == "setting" or _health_in_window(tod, since, until)):
+                        rows[H_DESKTOP].setdefault(kind, []).append(dict(g.groupdict(), _t=tod))
+                    break
+            else:
+                u = unparsed[H_DESKTOP]
+                u[0] += 1
+                u[1] = u[1] or raw.strip()[:160]
+            continue
         if "(F" not in raw:
             continue
         m = HEALTH_TAG_RE.search(raw)
@@ -19347,6 +19412,65 @@ def self_test_health():
         if rc != 1 or "no such runtime log" not in out:
             print("health world scale: a --runtime-file that is not there did not stop (rc=%d):\n%s" % (rc, out))
             ok = False
+
+        # ---- the desktop window: the graphics log's untagged lines, rendered from the C format strings in src\common\desktop_window_math.h and src\d3d11\desktop_window.cpp ----
+        dwsrc = read_text(os.path.join(repo_root(), "src", "common", "desktop_window_math.h"))
+        dwcpp = read_text(os.path.join(repo_root(), "src", "d3d11", "desktop_window.cpp"))
+        dwcensus = read_text(os.path.join(repo_root(), "src", "common", "desktop_window_census.h"))
+        dwcursor = read_text(os.path.join(repo_root(), "src", "d3d11", "desktop_window_cursor.cpp"))
+
+        def RD(source, needle, *vals):
+            key = "dw:" + needle
+            if key not in fmts:
+                fmts[key] = health_c_format(source, needle)
+            if fmts[key] is None:
+                raise AssertionError("desktop window: no log format holds %r: the --health rule that reads it is out of date" % needle)
+            return health_render(fmts[key], vals)
+
+        def dw_setting(value, was=None):
+            if was:
+                return RD(dwsrc, "desktop window: setting %s (was %s)", value, was)
+            return RD(dwsrc, 'desktop window: setting %s", value', value)
+
+        def dw_sec(drawn=600, seen=610, skipped=1200, left=610, right=610, stale=3, cw=972, ch=1041, sw=1920, sh=1080, moves=2, resizes=1):
+            return RD(dwsrc, "desktop window: 10 s: drawn=%llu", drawn, seen, skipped, left, right, stale, cw, ch, sw, sh, moves, resizes)
+
+        def dw_stop(drawn=400, seen=410, window="restored to 100,100 1280x720", reason="no eye image for 500 ms (3D is off, or no frames arrive)"):
+            return RD(dwsrc, "desktop window: stopped (%s)", reason, drawn, seen, window)
+
+        def dw_story():
+            return [RD(dwcpp, "desktop window: reshape request %u", 1, "", "framed window", 0, 0, 3840, 2160, 840, 0, 2175, 2199, 3840, 2160, 2159, 2160, 0x94020000, 0x14CC0000, ""),
+                    RD(dwcpp, "desktop window: the game changed the window's style away from ours", 0x94020000, 1),
+                    RD(dwcensus, "desktop window: skipped by shader (10 s): %s", "0000000000000001/0000000000000002 x5", 0, 1, "", 5, 0, 5, 0, 0, 0, 0, 2, 1),
+                    RD(dwcpp, "desktop window: not drawing -- %s", "the window's client area is empty (minimized)"),
+                    RD(dwcpp, "desktop window: swap chain now %ux%u", 1920, 1080, 1280, 720, 12),
+                    # round 3: the cursor lines (the untagged story lines the rule matches and does not count)
+                    RD(dwcursor, "desktop window: cursor hooks in the executable's import table", "patched", "patched", "patched"),
+                    RD(dwsrc, "desktop window: cursor (10 s): setpos %u", 580, 575, 590, 2, "hide, display count -1", 54, 60, -2, 7),
+                    RD(dwcursor, "desktop window: the cursor is not hidden -- the window belongs to thread", 23680, 4242),
+                    RD(dwcursor, "desktop window: the game's DirectInput mouse cooperative level", 0x6, "nonexclusive, foreground", 0)]
+
+        DW, dw_ok = H_DESKTOP, [f90_part()]
+        check("desktop window: no line at all, nothing said", dw_ok, 0, [("OK", F90S)], lacks=["desktop window", "NEVER APPLIED"])
+        check("desktop window: the setting is game, nothing said", dw_ok + [dw_setting("game")], 0, [("OK", F90S)], lacks=["desktop window", "NEVER APPLIED"])
+        check("desktop window: left_eye and a 10 s line that drew", dw_ok + [dw_setting("left_eye")] + dw_story() + [dw_sec()], 0, [("OK", DW)],
+              has=["setting left_eye; 600 Present(s) drawn, 1200 Elite draw(s) skipped", "client 972x1041, swap chain 1920x1080"])
+        check("desktop window: both_eyes and only the line that ends an activation", dw_ok + [dw_setting("both_eyes")] + dw_story() + [dw_stop()], 0, [("OK", DW)],
+              has=["setting both_eyes; 400 Present(s) drawn", "1 activation(s) ended, the last with the window restored to 100,100 1280x720"])
+        check("desktop window: the user's moves and resizes are read from the 10 s line", dw_ok + [dw_setting("left_eye"), dw_sec(moves=3, resizes=2), dw_sec(moves=1, resizes=0)], 0,
+              [("OK", DW)], has=["the user moved the window 4 time(s) and resized it 2 time(s)"])
+        check("desktop window: a 10 s line without moves and resizes (the first flight's) still parses", dw_ok + [dw_setting("left_eye"), dw_sec().replace(" moves=2 resizes=1", "")], 0,
+              [("OK", DW)], lacks=["UNPARSED", "the user moved"])
+        check("desktop window: game, then left_eye live, then it drew", dw_ok + [dw_setting("game"), dw_setting("left_eye", "game"), dw_sec()], 0, [("OK", DW)], has=["setting left_eye"])
+        check("desktop window: a mode asked for and no Present drawn is NEVER APPLIED", dw_ok + [dw_setting("right_eye")] + dw_story(), 3, [("NEVER APPLIED", DW)],
+              has=["the setting was right_eye but no 10 s line and no stopped line shows a Present drawn", "exit 3"])
+        check("desktop window: a 10 s line with drawn=0 is NEVER APPLIED", dw_ok + [dw_setting("left_eye"), dw_sec(drawn=0, seen=300)], 3, [("NEVER APPLIED", DW)])
+        check("desktop window: a drifted setting line is UNPARSED", dw_ok + [dw_setting("left_eye").replace("left_eye", "maybe")], 4, [("UNPARSED", DW)])
+        check("desktop window: a drifted 10 s line is no evidence of a draw, and is said", dw_ok + [dw_setting("left_eye"), dw_sec().replace("drawn=", "painted=")], 3, [("NEVER APPLIED", DW)],
+              has=["line(s) the rule's patterns do not match"])
+        check("desktop window: the setting counts whatever --since says, the 10 s lines before it do not", dw_ok + [(1, dw_setting("left_eye")), (20, dw_sec())], 3,
+              [("NEVER APPLIED", DW)], extra=["--since", "10:01:00"])
+        check("desktop window: a 10 s line inside --since is counted", dw_ok + [(1, dw_setting("left_eye")), (70, dw_sec())], 0, [("OK", DW)], extra=["--since", "10:01:00"])
 
         # ---- the one failure line the rules read that is not in native_on_foot.cpp ----
         checks += 1
