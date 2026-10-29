@@ -36,9 +36,14 @@ game's own zoom as a magnified picture inside the scope's lens. The rest of the 
 - **ruled out (cost or brief):** a third camera pass (C), magnifying in DLSS's input (E), a whole-view FOV change (D). Section 2.
 - **Analysis hand-over FILED** (analysis `1547986`): `analysis\decomp\verify_20261028_ads_zoom_receiver.txt` (the receiver, the correction to
   `analysis\decomp\verify_20261027_ads_sight_line.txt` section 1, the candidates).
-- **A1 BUILT, INSTALLED ON EPIC, NOT FLOWN** (`5a47ad8f`, on this branch; section 8, "As built"; decided 2026-10-29): A for every sight in the table, B3 only if the scope
-  is too soft. Keys: `fix.native_on_foot_ads_scope_zoom` (off until flown) and the temporary `experimental.native_on_foot_ads_scope_zoom_fov` (the
-  reference FOV, 56.3 by default). Next flight: A1's card, Epic in VR, with the user key turned on in the menu first.
+- **A1 FLOWN 2026-10-29** (`5a47ad8f`, Epic VR; section 8): the lens ran on the bare and scoped Executioner, the Oppressor and the
+  Aphelion; depth, eye numbering and cost (0.07 ms) as planned. The pilot: "a really cool effect where it makes sense"; the chevron is
+  magnified with the world (Q6's prediction), and only optical sights should zoom.
+- **A2 DESIGNED** (section 9): the table holds optical sights only, on the pilot's word; the AR gunsight quad (VS `025B4B9F...` / PS
+  `46F92DC7...`, 6 indices, the readout atlas) moves into a UI layer family composited after the lens; the probe moves to the left eye.
+  Open: that this quad is the chevron (the flight's probe checks), and its jitter.
+- Keys: `fix.native_on_foot_ads_scope_zoom` (off until flown OK) and the temporary `experimental.native_on_foot_ads_scope_zoom_fov` (the
+  reference FOV, 56.3 by default).
 - Separate arc: a flat stutter on the scoped Executioner's ADS (2026-10-29), in its own doc,
   `docs\investigation-flat-scoped-ads-stutter-2026-10-29.md`, on its own branch.
 - **Key (after S0, on the maintainer's word):** `fix.native_on_foot_ads_scope_zoom` = on | off. Section 5.
@@ -432,3 +437,78 @@ the ring and everything outside are unchanged, that an open ring leaves the fram
 - In one scoped ADS: switch the key off and back on, and move the reference FOV row to 64.8 and back (the row is on the Experimental
   page, which shows with the menu's Developer mode on).
 - Read `edvr_log.py --expect-build 5a47ad8f --health` first, then the S1 lines.
+
+**2026-10-29, A1 VR flight** (Epic in VR, `edvr_gfx_20261029_093933`, `5a47ad8f`, build matched; the key on from 09:40:56). `--health` exit 3 for
+F85c only, as on every flight of this line; `scope zoom (S1)` PARTIAL, 19 presses. Dumps `094209717001` (scoped Executioner, ADS), `094230243002`
+(bare, ADS), `094507077004` (Oppressor, ADS), `094606467006` (Aphelion, ADS); 003, 005 and 007 near a release.
+- **Applied wherever the sight is a closed frame:** the scoped Executioner 1846 of 1865 frames (M 4.06), the bare one 971 of 987 (M 1.70), the
+  M Oppressor 971 of 986 and the TK Aphelion 707 of 729 over three presses (M 1.20). Every other weapon (Tormentor, AR-50, P-15, Eclipse,
+  Intimidator, C-44, Zenith, L-6) was an open sight on every frame read: 26 to 108 of 128 rays escaped.
+- **Verified:** the depth is intact at the door (`depth unavailable` 0 on every press, `depth at c` 0.00016); the eye numbering (the scoped
+  `c mean` (1658, 2013) against this flight's S0 geometry, px (832, 1005) of 2016, that is (1664, 2010)); `hole r` median 4.1 deg scoped, 4.4 bare,
+  3.0 Oppressor, 2.4 to 4.7 Aphelion; GPU: rays 0.03 to 0.11 ms, magnify 0.017 ms.
+- **Unknown:** `c from another frame than the picture` on every applied frame. The count does not say by how many frames. c moved 2 to 7 px
+  over a press, so in ADS the sight holds still on screen and a lag of one frame would move the lens little. The next build logs the gap.
+- **The pilot:** "a really cool effect where it makes sense". Two issues:
+  - (1) The centre chevron is "incredibly distorted" with the scoped Executioner, less with the bare one. The dumps show why, as Q6 said: the
+    chevron is in the scene, so it is magnified with the world about c. A copy M times its size lands at the lens's lower edge: a teal wedge
+    behind the pink bars (scoped), a white roof across the bottom (bare). The pilot asks for the cyan-green scope marks at true size over the
+    magnified picture.
+  - (2) The zoom makes sense only with an optical scope attached; iron and holo sights get none. The pilot's reference is a community chart
+    (flat, 150 m, every weapon without and with the scope). Read side by side: with the scope fitted, the Executioner magnifies strongly and
+    the Aphelion a little. The Eclipse, Oppressor and Zenith look the same either way. The Karma weapons, Intimidator and Tormentor get a
+    reflex or holo sight.
+- ruled out: the chevron in EDVR's holo or UI layer, because in dump 002 the holo coverage is empty over the sight and the UI mask is 0 (as Q6).
+
+## 9. A2: optical scopes only, the scope's marks at true size
+
+**The gate (the maintainer, 2026-10-29).** Iron and holo sights get no zoom. The bare Executioner and the Oppressor have optical sights and
+zoom. The unscoped Eclipse does not, and its scope mod fits the Aphelion's base scope. The table holds optical sights only, keyed by (item,
+scope):
+- `m_sniper_plasma_charged` (M Executioner): bare 35.0 deg and scoped 15.0 deg, both measured.
+- `m_assaultrifle_plasma_fauto` (M Oppressor): bare 48.0 deg measured; scoped unmeasured (the same frame in the chart).
+- `m_assaultrifle_laser_fauto` (TK Aphelion): the base sight is the ring scope. Bare 48.0 deg measured; scoped unmeasured.
+- `m_submachinegun_laser_fauto` (TK Eclipse): scoped only, the Aphelion's base scope. Unmeasured.
+- An unmeasured scoped copy takes its bare copy's ADS FOV as a stand-in (the chart shows the scoped Eclipse's and Oppressor's targets at
+  their bare size), and the press line says so (`FOV from the bare copy`), so one flat S0 press can replace it.
+- Every other copy has no entry and no lens: the Karma weapons (iron sights bare, reflex scoped), the Zenith, the unscoped Eclipse, and the
+  Intimidator and Tormentor (open bare; their scoped frames not yet classed). Their FOVs stay in section 7 as data. The press line's `not in
+  the table` becomes `not an optical sight`. The open-sight rule stays as a guard.
+- In A1's flight the lens ran on exactly the bare and scoped Executioner, the Oppressor and the Aphelion, so A2 changes no sight that flew;
+  what it removes is a lens on a closed reflex frame (a scoped Karma weapon) that A1 would have drawn.
+
+**The scope's marks at true size (the pilot: the cyan-green marks over the magnified picture, at their own size).**
+- **The draw (named by research, INFERRED for the chevron).** The readout's one world-space part (space 0, `+0x19` 1; parts 29232, 29959
+  and 29221 for the scoped Executioner in A1's log) is the AR gunsight glyph, bound at the `Ui_AR_*_ADS_Gunsight` locator. It is drawn as a
+  quad, 6 indices and 1 instance, by VS `025B4B9FF54622ED` / PS `46F92DC71BF8DFA5`, sampling the readout atlas (3525x3133; `DC #3914` in
+  the census of `edvr_gfx_20261028_173510`), into the eye's scene HDR target before DLSS, with no depth write. The same pair's issued draw,
+  read before and after, adds the rifle's white dot (`design-native-onfoot-vr-2026-10-13.md`, the rifle dot). Nothing in EDVR moves it:
+  `f85bTagSubmit` returns for any part not in space 1, and the layer census lists the pair as "no family", about 1.35 draws a frame.
+- **The key must be narrower than the pair.** Flat's weapon footprint uses the same pair as the weapon and tool material
+  (`flat_weapon_footprint.h`). The mark is the pair drawing 6 indices, 1 instance, with the readout atlas bound (the texture the space-1
+  parts sample).
+- **The route: a UI layer over-blend family.** These families take an HDR scene draw out of the scene and redraw it into the eye's layer,
+  which `compositeInner` lays over the picture after the magnify (`uiLayerComposite`: `rippleDoor`, then the lens, then `compositeInner`).
+  Not the weapons-fire layer: it is additive only, and the mark is alpha-blended. The family is armed only while the scope zoom key is on,
+  on foot in VR, ADS with a held (item, scope) in the optical table, so no other sight changes. A frame that redirects and then declines the
+  lens still shows the mark where the game drew it, so a frame of lag at a press's edges costs nothing.
+- **Jitter.** The mark must land where the unjittered DLSS output has it. Whether this pair's matrices carry the eye's jitter is open (the
+  weapons-fire table records it per pair). The build reads how the over-blend families treat jitter, cancels it for this pair if they do
+  not, and says which in the family's first-seen line.
+- **The tint stays in the scene** (the glass's own draws, PS `C5A5C7E8216CB9AF`, run before the quad) and is magnified. A flat tint looks
+  the same either way. Its honeycomb at the glass's top edge would grow M times; it moves after the door next, if the pilot wants it.
+- Unchanged: the mark sits 0.9 deg (scoped) or 1.2 deg (bare) below c from EDVR's nearer eye (section 7, Q6). That is F150's eye depth.
+
+**Instruments.**
+- **The probe on the left eye's own points.** It watches the first-seen eye, the left one in every logged frame, so S0's census gives it
+  the left eye's c. Points: c, 0.9 deg below (the chevron), 1.5 deg above (glass only), 4 deg beside (the frame). Its line prints the
+  probe's eye beside the physical eye. With the family armed, the quad should change no window in the scene.
+- **The family's counts** in the S1 press line: marks redirected per eye, and armed frames with no matching draw.
+- **The gap between the picture and c:** the picture's sequence less c's, as a histogram (-1, 0, +1, +2, other).
+- The press line names `not an optical sight` and `FOV from the bare copy`; `--health` reads both.
+
+**Flight card (A2, Epic in VR, the key on):**
+- The scoped Executioner in ADS: 10 s still, then 10 s turning the head, with an eye dump (INSERT) while still.
+- The bare Executioner in ADS, with a dump. Then the Oppressor and the Aphelion in ADS.
+- One Karma weapon in ADS: no lens, and the reflex sight unchanged.
+- Read `--expect-build <A2> --health` first, then the S1 lines and the probe's lines.
