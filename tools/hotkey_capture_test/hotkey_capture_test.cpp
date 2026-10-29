@@ -1957,7 +1957,8 @@ void testLegacyOnFootRowsStayOutOfMenu() {
               "Crouched ADS body forward / back (F168, TEMPORARY) is one [experimental] number row right after ADS eye forward / back, on its page and under its heading: -20..20 cm, step 0.5, signed, live, shipped 0.0");
     }
     // F171 (TEMPORARY): "Crouched ADS body left / right" is the seventh number row of the developer tier's native on foot rows, right after "Crouched ADS body forward / back" on the same page and
-    // under the same heading: -20..20 cm in steps of 0.5 (the forward row's range), signed, live, shipped 15.0 (positive is left of the aim line), labelled without (test). It carries no old value over.
+    // under the same heading: -30..30 cm in steps of 0.5 (F172: widened from the forward row's -20..20), signed, live, shipped 15.0 (positive is left of the aim line), labelled without (test). It
+    // carries no old value over.
     {
         int bodyRow = -1, leftRow = -1, found = 0;
         bool shaped = true;
@@ -1967,13 +1968,13 @@ void testLegacyOnFootRowsStayOutOfMenu() {
             if (strcmp(d.section, "experimental") != 0 || strcmp(d.key, "native_on_foot_crouch_ads_body_left_cm") != 0) continue;
             leftRow = i;
             ++found;
-            shaped = shaped && d.kind == MenuKind::Number && d.tier == MenuTier::Experimental && strcmp(d.label, "Crouched ADS body left / right") == 0 && strcmp(d.lo, "-20") == 0 &&
-                     strcmp(d.hi, "20") == 0 && strcmp(d.step, "0.5") == 0 && strcmp(d.unit, "cm") == 0 && d.showSign && d.applies == 1 && strcmp(d.shipped, "15.0") == 0;
+            shaped = shaped && d.kind == MenuKind::Number && d.tier == MenuTier::Experimental && strcmp(d.label, "Crouched ADS body left / right") == 0 && strcmp(d.lo, "-30") == 0 &&
+                     strcmp(d.hi, "30") == 0 && strcmp(d.step, "0.5") == 0 && strcmp(d.unit, "cm") == 0 && d.showSign && d.applies == 1 && strcmp(d.shipped, "15.0") == 0;
         }
         const bool beside = bodyRow >= 0 && leftRow == bodyRow + 1 && strcmp(kMenuRows[leftRow].page, kMenuRows[bodyRow].page) == 0 &&
                             strcmp(kMenuRows[leftRow].group, kMenuRows[bodyRow].group) == 0;
         check(found == 1 && shaped && beside,
-              "Crouched ADS body left / right (F171, TEMPORARY) is one [experimental] number row right after Crouched ADS body forward / back, on its page and under its heading: -20..20 cm, step 0.5, signed, live, shipped 15.0");
+              "Crouched ADS body left / right (F171, TEMPORARY) is one [experimental] number row right after Crouched ADS body forward / back, on its page and under its heading: -30..30 cm (F172: was -20..20), step 0.5, signed, live, shipped 15.0");
     }
     // F170 (TEMPORARY): "Crouched ADS torso square" is the eighth number row of the developer tier's native on foot rows (the seventh before F171 put "Crouched ADS body left / right" between), right
     // after that row on the same page and under the same heading: 0..1 of the shoulder line's blade in steps of 0.05, not signed, live, shipped 1.0 (the turn is on), labelled without (test). It

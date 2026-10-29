@@ -64,6 +64,7 @@
 #include "f169_checks.h"    // F169: the stance while the aim is pitched (w_c capped under the animated neck's posture weight, the replays, the window and its line); the pistol sprint's arm swing (TEMPORARY): the plan, the ring, the stride's period, the delay, the measure and the line
 #include "f170_checks.h"    // F170: the crouched ADS torso squared to the aim (TEMPORARY): the dial, the share, the turn on the real square-up and reach functions (29 deg to 0 at 1, 14.5 at 0.5), the hold not taking it off, the line
 #include "f171_checks.h"    // F171: the crouched ADS body moved to the left of the aim line (TEMPORARY): the dial, the left axis and its sign against the eye's right, the move through the real reach rule, the counters and the line; the raise's carriage (slopes, pairs, window, line); F170's line reaching the log (logpin::elbow's merges against F98Left)
+#include "f172_checks.h"    // F172: the neck raise published pre-turned by the mouse-look aim pitch: the game's turn modelled (R(a) body_in), the slopes it gives unturned and turned, the unturned cases bit for bit, the readers that cancel the z share, the source pins
 #include "f151_checks.h"    // F151: the weapon readout's draw bound by its place (the ordinals, each guard, one bind per key, the lost-frame count) and the held copy's scope from the selected slot
 #include "f110_checks.h"    // F110: the ADS sight lock's model right eye (the left-eye job camera plus the IPD)
 #include "f111_checks.h"    // F111: the panel pointer instrument's statistics and verdict
@@ -7623,6 +7624,10 @@ int wmain(int argc, wchar_t** argv) {
     // carriage (the slopes 1, 0 and -1 on synthetic pairs, the pairing rules, the window and its mailbox, the line); and F170's line reaching the log (a window built through logpin::elbow carries every
     // counters member of F98Left, read from the source).
     f171test::run171(check);
+    // F172: the game turns the eye alignment with the aim's pitch under mouse look (R(a) body_in): the unturned raise reads k_up cos a and k_fwd -sin a (the flight's -0.09 and -1.04 at 85 deg), published turned by
+    // -a it lands at up R, forward 0 at 30, 60, 85 and -60 deg and the carriage slopes come out 1, 0, 0; a = 0, look to aim, a stale aim, the camera external and no raise leave the alignment bit for bit; F119's
+    // whole-vector physical head and the y feeds cancel the z share; the record under the serial stays the unturned seatedY (source pins).
+    f172test::run172(check);
     // F110: the ADS sight lock's model right eye from the left-eye job camera and from a solved left eye, the fallback, the IPD's sign.
     f110test::run110(check);
     // F111: the panel pointer instrument names the stage that turns a move the other way (K1 to K5, one at a time), the camera getters' decoding.

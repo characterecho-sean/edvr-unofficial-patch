@@ -6,7 +6,7 @@
 // under the eye), the right shoulder to the gun's root 45.9 cm, the left shoulder to the left grip 57.2 cm. The body has to stand about 15 to 20 cm to the left of the aim line for the stock to
 // meet the right shoulder.
 //
-// The move: the dial (experimental.native_on_foot_crouch_ads_body_left_cm, -20..+20 cm, positive to the LEFT of the aim line) x F163's posture weight x the detach weight, along the horizontal
+// The move: the dial (experimental.native_on_foot_crouch_ads_body_left_cm, -30..+30 cm, positive to the LEFT of the aim line) x F163's posture weight x the detach weight, along the horizontal
 // left of the aim's forward (perpendicular to it in the horizontal plane, none vertical). It goes into the pin's target for the neck BEFORE the reach rule, as F168's negative dial does, so the
 // reach rule keeps the left grip reachable and gives back what the grip needs; a sideways move barely lengthens the line from the left shoulder to the grip, so most of it should survive. The
 // move as written is measured against the same call with the dial at 0 (the real reach rule run both ways), and what the reach rule took back is the difference to the move asked.
@@ -25,7 +25,7 @@ namespace edvr {
 namespace nofoot {
 namespace f171 {
 
-constexpr double kDialMinCm = -20.0, kDialMaxCm = 20.0;   // the key's range
+constexpr double kDialMinCm = -30.0, kDialMaxCm = 30.0;   // the key's range (F172: was -20..+20; the pilot held the +20 end and wanted 5 to 10 cm more)
 constexpr double kMinForwardXz = 0.1;                      // an aim whose horizontal part is under this has no forward to be left of
 constexpr uint32_t kMinFrames = 30;                        // the health rule: fewer crouched-in-the-sights frames than this are too few to judge
 

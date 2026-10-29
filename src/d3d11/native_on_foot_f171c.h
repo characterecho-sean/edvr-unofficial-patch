@@ -185,9 +185,9 @@ inline int formatSummary(char* buf, size_t n, uint32_t seconds, const Window& w)
     cellsText(w, cells, sizeof(cells));
     const double sn = w.samples ? static_cast<double>(w.samples) : 1.0;
     return std::snprintf(buf, n,
-                         "native on foot raise carriage (F171) %u s: consecutive pin calls whose carried raise changed 2 mm or more, per look mode and band of |aim pitch|: %s | slope of the change "
-                         "against the carried raise's change (1: carries it, 0: does not): k_up the game's camera as read before any removal, up from the animated neck; k_fwd the same forward; "
-                         "c G as F138 forms it; k_eye the eye as drawn, up from the neck as written; samples %u, F137 carried up %+.1f forward %+.1f cm (mean per sample)",
+                         "native on foot raise carriage (F171) %u s: pin-call pairs (carried raise changed 2 mm or more) per look mode and |aim pitch| band: %s | slopes of the change "
+                         "against the carried raise's (1: carries it, 0: not): k_up the camera as read before any removal, up from the animated neck, k_fwd forward, "
+                         "c G as F138 forms it, k_eye the eye as drawn, up from the neck as written; samples %u, F137 carried up %+.1f forward %+.1f cm (mean)",
                          seconds, cells, w.samples, w.f137UpSum / sn * 100.0, w.f137FwdSum / sn * 100.0);
 }
 

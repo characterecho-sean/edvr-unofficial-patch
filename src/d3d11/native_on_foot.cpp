@@ -82,6 +82,7 @@
 #include "native_on_foot_f170.h"   // F170 (TEMPORARY): the crouched ADS torso squared to the aim, its dial and the figures that judge it (pure parts)
 #include "native_on_foot_f171.h"   // F171 (TEMPORARY): the crouched ADS body moved to the left of the aim line, its dial and the figures that judge it (pure parts)
 #include "native_on_foot_f171c.h"  // F171: the raise's carriage, measured: slopes of the camera's, G's and the drawn eye's changes against the carried raise's (pure parts)
+#include "native_on_foot_f172.h"   // F172: the neck raise published pre-turned by the mouse-look aim pitch, so the game's turn lands it straight up (pure parts)
 #include "xinput_watch.h"         // F135: the pad's Start and Back edges, evidence for the menu probe only
 #include "native_on_foot_f109.h"   // F109: look to aim on foot, the player's own turn in ADS, snap or smooth turning (pure parts)
 #include "native_on_foot_f129.h"   // F129: look to aim reads its turn from the player's own look processor; the look path instrument (pure parts)
@@ -213,7 +214,7 @@ std::atomic<float> g_pistolSprintPhase{0.0f};                 // F169 (TEMPORARY
 double g_pistolSprintPhaseLast = 1e9;                         // the value last logged (frame thread; the first read always logs)
 std::atomic<float> g_crouchAdsSquare{1.0f};                   // F170 (TEMPORARY): experimental.native_on_foot_crouch_ads_square, 0..1, live: the share of the shoulder line's blade the crouched ADS torso is turned out of
 double g_crouchAdsSquareLast = 1e9;                           // the value last logged (frame thread; the first read always logs)
-std::atomic<float> g_crouchAdsBodyLeftCm{15.0f};              // F171 (TEMPORARY): experimental.native_on_foot_crouch_ads_body_left_cm in cm (-20..20), live: the crouched body's move to the left of the aim line
+std::atomic<float> g_crouchAdsBodyLeftCm{15.0f};              // F171 (TEMPORARY): experimental.native_on_foot_crouch_ads_body_left_cm in cm (-30..30), live: the crouched body's move to the left of the aim line
 double g_crouchAdsBodyLeftCmLast = 1e9;                       // the value last logged (frame thread; the first read always logs)
 std::atomic<float> g_f87SettleS{static_cast<float>(nofoot::f87::kSettleDefaultS)};   // F87h (TEMPORARY): fix.native_on_foot_standing_height_settle_s, live
 double g_f87SettleLast = -1.0;                                // the value last logged (frame thread)
@@ -14268,6 +14269,8 @@ F94Tick f94Tick(uint64_t now, double dt, bool pin, double weaponW) noexcept {
 // alignment is recorded with it under its serial (g_f137Hist) and the P1 hook takes it out of the pin's camera again (f137ForPin, ikPublishG). The head containment reads
 // the physical head as the pose's render plus the alignment that pose carried (f119::physicalOffset), in which it cancels.
 nofoot::f137::VirtualNeck g_f137;
+// F172: the second's ticks that carried a neck raise, and those that published it turned by the aim pitch (frame thread only: alignTick adds, f138Line prints and clears)
+nofoot::f172::Counters g_f172Turned;
 struct F137State {
     nofoot::f137::Second sec;
     uint64_t lineMs = 0, waitMs = 0;
@@ -15399,12 +15402,22 @@ void alignTick(uint64_t now) noexcept {   // F66b: dt from QPC inside (g_alignCl
         // gets zero, so the suite's camera takes the head as it is; the terms keep running and come back whole on the first first-person tick.
         const bool camExternal = nativeOnFootCameraExternal();
         const bool onFoot = g_f115CameraOn;   // F115: off the on-foot camera every term is an exact zero from the edge's frame on, not ramped out
+        // F172: under mouse look the game turns the eye alignment with the aim's pitch (the carriage line of the flight edvr_gfx_20261029_054640: at 40 deg and over a published raise landed
+        // at k_up -0.09, k_fwd -1.04), so the neck raise goes out turned by -a in the (forward, up) plane and the game's turn lands it straight up: y += seatedY cos a, z += -seatedY sin a.
+        // a is F137's aim pitch (the pin hook's FP root elevation, fresh within F137's age). Look to aim driving the aim, a stale aim, the camera external, off the on-foot camera, no raise or
+        // a = 0: the raise goes out as it did. The record under the serial for the hook's removal (g_f94NeckSeatedPub, below) stays the unturned seatedY: the camera now carries it straight up.
+        const uint64_t aimRootMs = g_f109RootMs.load(std::memory_order_acquire);
+        const bool aimFresh = aimRootMs != 0 && now >= aimRootMs && now - aimRootMs <= nofoot::f137::kAimMaxAgeMs;
+        const double aimRad = static_cast<double>(g_f109RootPitch.load(std::memory_order_relaxed)) * nofoot::kAdsDeg;
+        const nofoot::f172::Raise neckRaise = nofoot::f172::publish(neckRef.out.seatedY, g_ltaDrop.load(std::memory_order_relaxed), aimFresh, aimRad, onFoot && !camExternal);
+        if (onFoot && !camExternal && neckRef.out.seatedY != 0.0) g_f172Turned.add(neckRaise);
         for (size_t i = 0; i < 3; ++i) {
             // F62b: the ADS head-aim's position lock; F63: the ADS sight lock (both zero outside ADS)
             eye[i] = g_align.applied[i] + g_adsLock[i] + g_adsSight.applied[i] + weaponView.seated[i];
             if (i == 1) eye[i] = nofoot::f87::eyeAlignY(g_align.applied[i], g_adsLock[i], g_adsSight.applied[i], weaponView.seated[i], hold.eyeY);   // F87h
             eye[i] += weaponEye.out.seated[i];   // F88: w O, after the hold's term; the hold measured the head's posture without it (devOf), so it never sees it
-            if (i == 1) eye[i] += neckRef.out.seatedY;   // F94a/F98c: the neck reference's raise (with and without an item); the P1 hook takes it back out by serial
+            if (i == 1) eye[i] += neckRaise.y;   // F94a/F98c: the neck reference's raise (with and without an item); the P1 hook takes it back out by serial. F172: turned by the aim's pitch under mouse look (y = seatedY cos a)
+            if (i == 2 && neckRaise.turned) eye[i] += neckRaise.z;   // F172: and its share along the aim's turn (z = -seatedY sin a); not touched when unturned
             eye[i] += virtualNeck.seated[i];   // F137: the virtual neck (the view only: the P1 hook takes it back out by serial, the physical head offset cancels it)
             if (camExternal) eye[i] = 0.0;
             eye[i] = nofoot::f115::gate(onFoot, eye[i]);
@@ -23809,11 +23822,15 @@ void f138Line(uint64_t now) noexcept {
     lineMs = now;
     // F171: the raise's carriage (nofoot::f171c, native_on_foot_f171c.h): the second's pairs of consecutive pin calls, per look mode and band of the aim's pitch. Said in any second with a pair,
     // pitched or level (the level band is the control); a second without one prints nothing.
+    // F172: the same line says whether the raise went out turned by the aim's pitch (the alignment ticks of the second: those with a raise and those that turned it, the mean pitch and z share).
     {
+        const nofoot::f172::Counters turned = g_f172Turned;   // the frame thread's own: alignTick adds, this takes and clears
+        g_f172Turned = nofoot::f172::Counters{};
         nofoot::f171c::Window cw;
         if (g_f171cBox.take(&cw) && cw.any()) {
             char carriage[1200];
             nofoot::f171c::formatSummary(carriage, sizeof(carriage), 1, cw);
+            nofoot::f172::appendTurned(carriage, sizeof(carriage), turned);
             Log::get().note("%s", carriage);
         }
     }

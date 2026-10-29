@@ -13946,10 +13946,10 @@ def _hj_f171_sideways(rows, ctx):
 # F171: the raise's carriage (formatSummary in src/d3d11/native_on_foot_f171c.h): per look mode and band of |aim pitch|, the slopes of the game's camera as the job read it before any removal
 # (k_up, k_fwd), of G as F138 forms it (c) and of the eye as drawn (k_eye) against the carried raise, over consecutive pin calls whose carried raise changed 2 mm or more.
 H171C_LABEL = "native on foot raise carriage (F171)"
-H171C_RE = (r"native on foot raise carriage \(F171\) (?P<wl>\d+) s: consecutive pin calls whose carried raise changed 2 mm or more, per look mode and band of \|aim pitch\|: (?P<cells>.+?) \| "
-            r"slope of the change against the carried raise's change \(1: carries it, 0: does not\): k_up the game's camera as read before any removal, up from the animated neck; "
-            r"k_fwd the same forward; c G as F138 forms it; k_eye the eye as drawn, up from the neck as written; samples (?P<samples>\d+), F137 carried up (?P<f137up>%s) forward (?P<f137fwd>%s) cm "
-            r"\(mean per sample\)" % ((_HN,) * 2))
+H171C_RE = (r"native on foot raise carriage \(F171\) (?P<wl>\d+) s: pin-call pairs \(carried raise changed 2 mm or more\) per look mode and \|aim pitch\| band: (?P<cells>.+?) \| "
+            r"slopes of the change against the carried raise's \(1: carries it, 0: not\): k_up the camera as read before any removal, up from the animated neck, k_fwd forward, "
+            r"c G as F138 forms it, k_eye the eye as drawn, up from the neck as written; samples (?P<samples>\d+), F137 carried up (?P<f137up>%s) forward (?P<f137fwd>%s) cm "
+            r"\(mean\)(?:; turned by the aim pitch \(F172\): (?P<tturned>\d+) of (?P<tticks>\d+) ticks with a raise, mean aim pitch (?P<tpitch>%s) deg, mean z share (?P<tz>%s) cm)?" % ((_HN,) * 4))
 H171C_CELL = re.compile(r"(?P<mode>mouse look|look to aim) (?P<band>under 10|10-40|40\+) deg: (?P<n>\d+) pairs, raise (?P<lo>%s)\.\.(?P<hi>%s) cm, k_up (?P<kup>%s), k_fwd (?P<kfwd>%s), "
                         r"c (?P<c>%s), k_eye (?P<keye>%s)" % ((_HN,) * 6))
 H171C_BANDS = ("under 10", "10-40", "40+")
@@ -13964,7 +13964,11 @@ def _hj_f171_carriage(rows, ctx):
     eye's up (k_eye). Predicted if the hook's camera carries the raise and G is clear of it: k_up about 1, c about 0; if the camera does not carry it but it is removed anyway: k_up about
     0, c about -1. The report prints the slopes by band, pair-weighted over the seconds, with the pair counts and the raise's range; it flags "the raise is not in the hook's camera" (PARTIAL)
     when the 40 deg and over band has 20 or more pairs and k_up is under 0.3. The level band (under 10 deg) is the control. IDLE when the log has pitched seconds from a build with this
-    instrument and no second had a pair; no line and no pitched second: not present."""
+    instrument and no second had a pair; no line and no pitched second: not present.
+    F172: the flight edvr_gfx_20261029_054640 read k_up +0.99 / k_fwd +0.11 / c -0.01 under 10 deg and k_up -0.09 / k_fwd -1.04 / c -1.09 from 40 deg: under mouse look the game turns the
+    eye alignment with the aim's pitch (a raise R up lands at forward -R sin a, up R cos a). From the F172 build the neck raise is published turned by -a, and the line carries the ticks it
+    was turned in; the report says "raise turned by the aim pitch" (more than half the ticks with a raise turned) or "raise not turned" (and "a log from before F172" when the line has no
+    such clause) beside the slopes. The prediction for a turned raise is k_up about 1, k_fwd about 0 and c about 0 in every mouse-look band; the flag keeps its meaning."""
     sec = rows.get("sec", [])
     if not sec:
         pitched = ctx.get("pitched view (F138)", {}).get("sec", [])
@@ -13994,7 +13998,17 @@ def _hj_f171_carriage(rows, ctx):
     for mode, band in order:
         n, up, fwd, g, eye, lo, hi, secs = cells[(mode, band)]
         parts.append("%s %s deg: %d pairs in %d s, raise %+.1f..%+.1f cm, k_up %+.2f, k_fwd %+.2f, c %+.2f, k_eye %+.2f" % (mode, band, n, secs, lo, hi, up / n, fwd / n, g / n, eye / n))
-    text = "slopes of the camera's, G's and the eye's changes against the carried raise's (1: carries it, 0: does not); " + "; ".join(parts)
+    # F172: the raise is published turned by the aim pitch under mouse look (the clause is on the line from the F172 build; an earlier log has none)
+    turned_rows = [r for r in sec if r.get("tticks") is not None]
+    if turned_rows:
+        tturned, tticks = sum(int(r["tturned"]) for r in turned_rows), sum(int(r["tticks"]) for r in turned_rows)
+        tpitch = sum(int(r["tturned"]) * float(r["tpitch"]) for r in turned_rows) / tturned if tturned else 0.0
+        tz = sum(int(r["tturned"]) * float(r["tz"]) for r in turned_rows) / tturned if tturned else 0.0
+        label = ("raise turned by the aim pitch (F172): turned in %d of %d ticks with a raise, mean aim pitch %+.1f deg, mean z share %+.1f cm" % (tturned, tticks, tpitch, tz) if tturned * 2 > tticks
+                 else "raise not turned (F172): turned in %d of %d ticks with a raise" % (tturned, tticks))
+    else:
+        label = "raise not turned (a log from before F172)"
+    text = "slopes of the camera's, G's and the eye's changes against the carried raise's (1: carries it, 0: does not), %s; " % label + "; ".join(parts)
     samples = sum(int(r["samples"]) for r in sec)
     if samples:
         text += "; %d samples, F137 carried up %+.1f forward %+.1f cm (mean)" % (samples, sum(int(r["samples"]) * float(r["f137up"]) for r in sec) / samples,
@@ -16347,6 +16361,7 @@ def self_test_health():
     f170_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f170.h")
     f171_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f171.h")
     f171c_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f171c.h")
+    f172_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f172.h")
     f138_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f138.h")
     f154_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f154.h")
     try:
@@ -16372,6 +16387,7 @@ def self_test_health():
         f170src = read_text(f170_path)
         f171src = read_text(f171_path)
         f171csrc = read_text(f171c_path)
+        f172src = read_text(f172_path)
         f138src = read_text(f138_path)
         hooks_src = read_text(os.path.join(repo_root(), "src", "d3d11", "native_on_foot_hooks.cpp"))
         f154src = read_text(f154_path)
@@ -16522,6 +16538,15 @@ def self_test_health():
             fmts[key] = health_c_format(f171csrc, needle)
         if fmts[key] is None:
             raise AssertionError("native_on_foot_f171c.h has no format holding %r: the --health rule that reads it is out of date" % needle)
+        return health_render(fmts[key], vals)
+
+    def R172(needle, *vals):
+        """F172's clause on the raise carriage line (appendTurned in native_on_foot_f172.h), from its own format literal."""
+        key = "f172:" + needle
+        if key not in fmts:
+            fmts[key] = health_c_format(f172src, needle)
+        if fmts[key] is None:
+            raise AssertionError("native_on_foot_f172.h has no format holding %r: the --health rule that reads it is out of date" % needle)
         return health_render(fmts[key], vals)
 
     def R138(needle, *vals):
@@ -18080,11 +18105,13 @@ def self_test_health():
         # ---- F171: the raise's carriage ----
         C171 = "raise carriage (F171)"
 
-        def car171(*cells, wl=1, samples=90, f137=(-5.0, 2.0)):
+        def car171(*cells, wl=1, samples=90, f137=(-5.0, 2.0), turned=None):
             """The carriage line, from the DLL's own formats (formatSummary, cellsText in native_on_foot_f171c.h); a cell: (mode, band, pairs, raise lo, raise hi, k_up, k_fwd, c, k_eye);
-            the second's samples and the virtual neck they carried (up, forward; cm)."""
+            the second's samples and the virtual neck they carried (up, forward; cm); F172's clause (appendTurned in native_on_foot_f172.h) from turned: (ticks turned, ticks with a raise, mean
+            aim pitch deg, mean z share cm), none for a log from before F172."""
             text = "".join(R171c("deg: %u pairs, raise", "" if i == 0 else "; ", *cell) for i, cell in enumerate(cells))
-            return R171c("native on foot raise carriage (F171) %u s:", wl, text, samples, f137[0], f137[1])
+            line = R171c("native on foot raise carriage (F171) %u s:", wl, text, samples, f137[0], f137[1])
+            return line if turned is None else line + R172("turned by the aim pitch (F172): %u of", *turned)
 
         LEVEL171 = ("mouse look", "under 10", 22, -12.0, -3.0, 0.98, 0.01, -0.02, 0.97)
         STEEP_ABSENT = ("mouse look", "40+", 37, -50.0, -12.3, 0.02, -0.05, -0.98, 0.01)
@@ -18109,6 +18136,21 @@ def self_test_health():
         check("F171 carriage: the same weighted steep band at 0.20 is flagged", [car171(("mouse look", "40+", 30, -50.0, -10.0, 0.6, 0.0, 0.0, 1.0), ("look to aim", "40+", 30, -40.0, -9.0, -0.2, 0.0, -1.0, 0.0))], 0,
               [("PARTIAL", C171)], has=["the 40 deg and over band has 60 pairs and k_up +0.20 (under 0.3), c -0.50"], lacks=["UNPARSED"])
         check("F171 carriage: only the level band: OK, nothing to flag", [car171(LEVEL171)], 0, [("OK", C171)], has=["mouse look under 10 deg: 22 pairs"], lacks=["UNPARSED", "not in the hook's camera"])
+        # F172: the raise published turned by the aim pitch (the flight edvr_gfx_20261029_054640 read k_up -0.09, k_fwd -1.04, c -1.09 from 40 deg unturned)
+        check("F172 turned: a turned raise with the slopes the next flight predicts (k_up 1, k_fwd 0, c 0 in every band) says 'turned' beside them",
+              [car171(LEVEL171, ("mouse look", "10-40", 30, -20.0, -4.0, 0.97, 0.0, -0.02, 0.96), STEEP_CARRIED, turned=(90, 90, 70.0, 28.0))], 0, [("OK", C171)],
+              has=["raise turned by the aim pitch (F172): turned in 90 of 90 ticks with a raise, mean aim pitch +70.0 deg, mean z share +28.0 cm"], lacks=["UNPARSED", "not in the hook's camera", "not turned"])
+        check("F172 turned: the flown unturned pattern (k_up -0.09, k_fwd -1.04 from 40 deg) with the raise not turned is flagged and says 'not turned'",
+              [car171(("mouse look", "under 10", 31, -12.0, -3.0, 0.99, 0.11, -0.01, 0.73), ("mouse look", "40+", 103, -50.0, -12.3, -0.09, -1.04, -1.09, 0.05), turned=(0, 90, 0.0, 0.0))], 0, [("PARTIAL", C171)],
+              has=["raise not turned (F172): turned in 0 of 90 ticks with a raise", "the raise is not in the hook's camera: the 40 deg and over band has 103 pairs and k_up -0.09 (under 0.3), c -1.09"], lacks=["UNPARSED"])
+        check("F172 turned: a turned raise that still reads k_up under 0.3 in the steep band keeps the flag (the turn did not land it)",
+              [car171(("mouse look", "40+", 60, -50.0, -12.3, 0.05, -0.50, -0.50, 0.05), turned=(90, 90, 80.0, 29.0))], 0, [("PARTIAL", C171)],
+              has=["raise turned by the aim pitch (F172)", "the raise is not in the hook's camera"], lacks=["UNPARSED", "not turned"])
+        check("F172 turned: two seconds, one turned and one not, weigh by their ticks: 90 of 180 is not more than half",
+              [car171(LEVEL171, turned=(90, 90, 70.0, 28.0)), car171(LEVEL171, turned=(0, 90, 0.0, 0.0))], 0, [("OK", C171)],
+              has=["raise not turned (F172): turned in 90 of 180 ticks with a raise"], lacks=["UNPARSED"])
+        check("F172 turned: a log from before the clause reads 'not turned (a log from before F172)'", [car171(LEVEL171)], 0, [("OK", C171)],
+              has=["raise not turned (a log from before F172)"], lacks=["UNPARSED"])
         check("F171 carriage: a line that drifted from its pattern is unparsed", ["native on foot raise carriage (F171) 1 s: something else"], 4, [("UNPARSED", C171)])
         check("F171 carriage: a line that drifted beside a good one is counted beside the verdict", [car171(LEVEL171), "native on foot raise carriage (F171) 1 s: something else"], 0, [("OK", C171)],
               has=["[+1 line(s) the rule's patterns do not match: "])

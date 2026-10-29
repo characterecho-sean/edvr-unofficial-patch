@@ -1,6 +1,6 @@
 // F171 checks (native on-foot VR), run171 below. Header only, run by native_frame_test.
 //
-// F171 (native_on_foot_f171.h, TEMPORARY): the crouched ADS body moved to the left of the aim line. experimental.native_on_foot_crouch_ads_body_left_cm (-20..+20 cm, shipped 15, positive left)
+// F171 (native_on_foot_f171.h, TEMPORARY): the crouched ADS body moved to the left of the aim line. experimental.native_on_foot_crouch_ads_body_left_cm (-30..+30 cm since F172, shipped 15, positive left)
 // moves the third-person body across the aim, by the dial x the crouched weight (F163) x the detach weight, along the horizontal left of the aim; it goes into the pin's target for the neck
 // before the reach rule, so the rule keeps the left grip reachable. The rig runs the real reach rule on shoulders and grips taken from the flight edvr_gfx_20261029_043951 (the left
 // shoulder almost under the eye, the left grip 62.3 cm away, just past the reach boundary), the real heading axes for the sign, the real pin move and the counters and line.
@@ -68,13 +68,14 @@ inline void run171(Check&& check) {
 
     // ---- 1. the key's range and the move ---------------------------------------------------------------------------------------------------------------------------------------------
     {
-        check(f171::clampDialCm(7.5) == 7.5 && f171::clampDialCm(-25.0) == -20.0 && f171::clampDialCm(25.0) == 20.0 && f171::clampDialCm(-20.0) == -20.0 && f171::clampDialCm(20.0) == 20.0 &&
-                  f171::clampDialCm(std::nan("")) == 0.0 && f171::clampDialCm(std::numeric_limits<double>::infinity()) == 0.0 && f171::kDialMinCm == -20.0 && f171::kDialMaxCm == 20.0,
-              "F171: the dial is held to -20..+20 cm; a value that is not a number reads 0");
+        check(f171::clampDialCm(7.5) == 7.5 && f171::clampDialCm(-35.0) == -30.0 && f171::clampDialCm(35.0) == 30.0 && f171::clampDialCm(-30.0) == -30.0 && f171::clampDialCm(30.0) == 30.0 &&
+                  f171::clampDialCm(-25.0) == -25.0 && f171::clampDialCm(25.0) == 25.0 && f171::clampDialCm(std::nan("")) == 0.0 &&
+                  f171::clampDialCm(std::numeric_limits<double>::infinity()) == 0.0 && f171::kDialMinCm == -30.0 && f171::kDialMaxCm == 30.0,
+              "F171 (F172: the range widened): the dial is held to -30..+30 cm; a value that is not a number reads 0");
         check(f171::shiftM(0.0, 1.0, 1.0) == 0.0 && f171::shiftM(15.0, 0.0, 1.0) == 0.0 && f171::shiftM(15.0, 1.0, 0.0) == 0.0 && f171::shiftM(15.0, 0.0, 0.0) == 0.0 &&
                   f171::shiftM(-15.0, 0.0, 1.0) == 0.0 && f171::shiftM(15.0, std::nan(""), 1.0) == 0.0 && f171::shiftM(15.0, 1.0, std::nan("")) == 0.0 && f171::shiftM(std::nan(""), 1.0, 1.0) == 0.0,
               "F171: the move is exactly 0 with the dial at 0, standing (the crouched weight 0), at the hip (the detach weight 0) and for a weight or a dial that is not a number");
-        check(eq(f171::shiftM(15.0, 1.0, 1.0), 0.15, 1e-15) && eq(f171::shiftM(-20.0, 1.0, 1.0), -0.20, 1e-15) && eq(f171::shiftM(50.0, 1.0, 1.0), 0.20, 1e-15) &&
+        check(eq(f171::shiftM(15.0, 1.0, 1.0), 0.15, 1e-15) && eq(f171::shiftM(-30.0, 1.0, 1.0), -0.30, 1e-15) && eq(f171::shiftM(25.0, 1.0, 1.0), 0.25, 1e-15) && eq(f171::shiftM(50.0, 1.0, 1.0), 0.30, 1e-15) &&
                   eq(f171::shiftM(15.0, 0.5, 0.5), 0.0375, 1e-15) && eq(f171::shiftM(15.0, 2.0, 2.0), 0.15, 1e-15) && f171::shiftM(15.0, -1.0, 1.0) == 0.0,
               "F171: the move is the dial in metres x the crouched weight x the detach weight, each held to 0..1: 15 cm crouched in the sights is 0.15 m, half and half is 3.75 cm, the dial is clamped first");
         double last = -1.0;
@@ -249,6 +250,23 @@ inline void run171(Check&& check) {
         const double deltaN[3] = {fullN[0] - full0[0], fullN[1] - full0[1], fullN[2] - full0[2]};
         const double writtenN = f171::writtenLeftM(shiftN, deltaN, fwd);
         check(writtenN < -0.135 && eq(writtenN, -(thN[0] - th0[0]), 1e-9) && dist(0, thN) <= R[0] + 1e-9, "F171: a -15 cm dial moves the written neck 13.5+ cm to the right of the aim and the left grip is still reached");
+        // F172: the widened ends. +30 to the left writes 25.8 cm with the left grip still reached; -30 to the right is stopped by the right arm's own reach (the right shoulder is then 58.0 cm
+        // from the gun's root, its limit): the rule gives 11.2 cm of it back and both arms are within reach.
+        {
+            double s30[3], th30[3], full30[3], sm30[3], thm30[3], fullm30[3];
+            f171::shiftVector(30.0, 1.0, 1.0, fwd, s30);
+            reached(s30, th30, full30, nullptr);
+            const double d30[3] = {full30[0] - full0[0], full30[1] - full0[1], full30[2] - full0[2]};
+            const double w30 = f171::writtenLeftM(s30, d30, fwd);
+            f171::shiftVector(-30.0, 1.0, 1.0, fwd, sm30);
+            reached(sm30, thm30, fullm30, nullptr);
+            const double dm30[3] = {fullm30[0] - full0[0], fullm30[1] - full0[1], fullm30[2] - full0[2]};
+            const double wm30 = f171::writtenLeftM(sm30, dm30, fwd);
+            std::snprintf(msg, sizeof(msg), "F172: at the new ends the reach rule keeps both arms within reach: +30 cm writes %.2f cm to the left (left shoulder %.1f cm from its grip), -30 cm writes %.2f cm to the right (right shoulder %.1f cm from the gun's root)",
+                          100.0 * w30, 100.0 * dist(0, th30), -100.0 * wm30, 100.0 * dist(1, thm30));
+            check(eq(s30[0], -0.30, 1e-15) && w30 > 0.25 && w30 < 0.27 && dist(0, th30) <= R[0] + 1e-9 && dist(1, th30) <= R[1] + 1e-9 && wm30 < -0.17 && wm30 > -0.20 &&
+                      dist(0, thm30) <= R[0] + 1e-9 && dist(1, thm30) <= R[1] + 1e-9, msg);
+        }
         // the move as written with a reach rule that gives half back (the arm is at its reach on the sideways line): the figure is the real change
         const double halfBack[3] = {0.5 * 0.15, 0.0, 0.0};   // the correction's change, model x: back toward the aim line by half
         check(eq(f171::writtenLeftM(shift, halfBack, fwd), 0.075, 1e-12), "F171: a reach rule that gives half of the move back leaves 7.5 cm as written");
@@ -469,7 +487,7 @@ inline void run171(Check&& check) {
         const int tl = f171c::formatSummary(text, sizeof(text), 1, lw);
         check(tl > 0 && std::strstr(text, "native on foot raise carriage (F171) 1 s:") != nullptr &&
                   std::strstr(text, "mouse look 40+ deg: 37 pairs, raise -50.0..-12.3 cm, k_up +0.02, k_fwd -0.05, c -0.98, k_eye +0.01") != nullptr &&
-                  std::strstr(text, "samples 90, F137 carried up -5.0 forward +2.0 cm (mean per sample)") != nullptr && lw.samples == 90,
+                  std::strstr(text, "samples 90, F137 carried up -5.0 forward +2.0 cm (mean)") != nullptr && lw.samples == 90,
               "F171: the carriage line names the look mode, the band, the pairs, the carried raise's range and the four slopes, and the samples with the virtual neck they carried, as the log reads them");
         // a second with samples and no pair is not a line (the window has samples, not pairs): the code ran, there was nothing to pair
         f171c::Window samplesOnly;
