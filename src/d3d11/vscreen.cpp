@@ -1,6 +1,7 @@
 #include "vscreen.h"
 #include "gpu_timing.h"
 #include "optimized_station.h"   // the station's sun skip while sealed (optimized_station.cpp)
+#include "desktop_window.h"      // visual.desktop_window: Elite's draws into the swap chain's buffer are skipped while the eye image is drawn there
 #include "station_draw_mask.h"   // the flat sun draw issued with every write masked (built 2026-10-21)
 #include "gpu_frame_timing.h"
 #include "gpu_census.h"       // issue #38: the per-feature GPU cost census
@@ -1837,6 +1838,19 @@ __forceinline const ResourceInfo* rtv0Resolved(State* s) {
     return &s->rtv0Info;
 }
 
+// visual.desktop_window (desktop_window.h): a draw whose render target 0 is the swap chain's buffer 0 is Elite's own desktop mirror, which the feature replaces while it
+// draws the eye image there. The cost on the draw path is one relaxed load while the feature is off; while it draws, the compare reads the answer the binding shadow already
+// holds for this binding generation (rtv0Resolved). The buffer's identity is a raw pointer used only for this compare; nothing holds a reference to the buffer.
+// A skipped draw is also counted by its shader pair, kind and depth view for the census (desktop_window_census.h): kind is the hook's letter (D I N X Y Z A).
+__forceinline bool desktopWindowSkipsDraw(State* s, ID3D11DeviceContext* self, char kind) {
+    void* back = desktopWindowBackIdentity();
+    if (!back) return false;
+    const ResourceInfo* rt = rtv0Resolved(s);
+    if (!rt || rt->resource != back) return false;
+    desktopWindowNoteSkippedDraw(self, kind, bindingShaderHash(BindSlot::Vs), bindingShaderHash(BindSlot::Ps), bindingGet(BindSlot::Dsv0) != nullptr);
+    return true;
+}
+
 // advanced.pixel_probe: resolves this draw's eye once more (the rtv0Eye
 // pattern again) and hands the identity to pixel_probe.h, which decides
 // on its own whether a run is armed and this is its frame. Unconfigured
@@ -2031,6 +2045,8 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     // The optimized station's sun skip: while the ship is sealed in a hangar, the sun pair is not drawn. It sits after the foreign-context return,
     // because the bindings are the immediate context's.
     if (optimizedStationSkipsDraw(bindingShaderHash(BindSlot::Vs), bindingShaderHash(BindSlot::Ps))) return DrawVerdict::kSkip;
+    // visual.desktop_window: Elite's own draw into the swap chain's buffer, while the eye image is drawn there instead (the other draw thunks ask the same, below).
+    if (desktopWindowSkipsDraw(s, self, kind)) return DrawVerdict::kSkip;
     // F157: the coat outfit's pack, a draw of the local body, is left out of both eyes while the coat outfit is armed (native on foot active, Gear_Back decided as the outer garment).
     // Not armed, this is the one relaxed load. It asks before the gate below, whose answer says nothing about native on foot, so the eye memo is refreshed here on Rtv0's generation
     // (the same refresh the eye gate makes further down, and the same answer). The index count and instance count are checked first, from the call's own arguments.
@@ -3965,7 +3981,7 @@ __declspec(noinline) void crispHudTonemapReissue(ID3D11DeviceContext* self, char
         GpuCensusScope census(self, GpuCensusSection::FrameUiLayerReissues);
         census.markIssued();   // the tonemap re-issue: its scope opens only when the begin admitted the draw
         pureDrawReissue(self, kind, count, instances, args);
-        // fix.sharp_weapons: the weapons' light is re-issued through the same draw before the HUD's (and, matched, twice: the scene alone,
+        // The weapons fire: the weapons' light is re-issued through the same draw before the HUD's (and, matched, twice: the scene alone,
         // then the scene with the light); the layer binds each step's HDR source and blend, and says when no step is left.
         while (uiLayerCrispToneNext(self)) pureDrawReissue(self, kind, count, instances, args);
         uiLayerCrispToneEnd(self);
@@ -4067,7 +4083,7 @@ __declspec(noinline) void curvedScreenSwallowed(ID3D11DeviceContext* self, DrawV
 __declspec(noinline) UiLayerFamily uiLayerFamilyOf(State* s, char kind, UINT count) {
     UiFamilyFacts f;
     f.targetKind = uiLayerTargetKind();
-    // fix.ui_quality off with fix.sharp_weapons on: the layer is live for the weapons fire alone, which is drawn into the lit HDR target
+    // fix.ui_quality off with the weapons fire on: the layer is live for the weapons fire alone, which is drawn into the lit HDR target
     // (kind 1). The post-tonemap target's interface rules (and their facts, probes and census) belong to fix.ui_quality.
     if (f.targetKind == 2 && !uiLayerQualityLive()) return UiLayerFamily::kNone;
     f.vs = bindingShaderHash(BindSlot::Vs);
@@ -4080,7 +4096,7 @@ __declspec(noinline) UiLayerFamily uiLayerFamilyOf(State* s, char kind, UINT cou
     // F26: the on-foot HUD's two vertex shaders are named by their pixel shader too (uiOnFootHudMatch), only while native stereo is on foot.
     else if (f.targetKind == 1 && f.nativeOnFoot && uiOnFootHudVs(f.vs))
         f.ps = bindingShaderHash(BindSlot::Ps);
-    else if (f.targetKind == 1 && (weaponsFireVs(f.vs) || shieldRefractVs(f.vs)))  // fix.sharp_weapons: the pair is the key too
+    else if (f.targetKind == 1 && (weaponsFireVs(f.vs) || shieldRefractVs(f.vs)))  // The weapons fire: the pair is the key too
         f.ps = bindingShaderHash(BindSlot::Ps);
     if (f.targetKind == 2) {
         // ui_depth's exclude list (the null-output mesh B018D143700AB803,
@@ -4715,6 +4731,7 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstancedIndirect(
         return;
     }
     if (g_vrWorldInternal) { g_state->realDrawIndexedInstancedIndirect(self, args, off); return; }
+    if (self == g_state->ownerCtx && desktopWindowSkipsDraw(g_state, self, 'Z')) return;   // visual.desktop_window
     if (self == g_state->ownerCtx && uiLayerIssueBlocked()) return;
     gpuFrameCommandIfLive(self);
     // F45 (TEMPORARY instrument): an indirect draw's instance range is on the GPU; the marker probe only counts it.
@@ -4749,6 +4766,7 @@ void STDMETHODCALLTYPE hookedDrawInstancedIndirect(ID3D11DeviceContext* self,
         return;
     }
     if (g_vrWorldInternal) { g_state->realDrawInstancedIndirect(self, args, off); return; }
+    if (self == g_state->ownerCtx && desktopWindowSkipsDraw(g_state, self, 'Y')) return;   // visual.desktop_window
     if (self == g_state->ownerCtx && uiLayerIssueBlocked()) return;
     gpuFrameCommandIfLive(self);
     // F45 (TEMPORARY instrument): an indirect draw's instance range is on the GPU; the marker probe only counts it.
@@ -5162,6 +5180,7 @@ void STDMETHODCALLTYPE hookedDrawAuto(ID3D11DeviceContext* self) {
         return;
     }
     if (g_vrWorldInternal) { g_state->realDrawAuto(self); return; }
+    if (self == g_state->ownerCtx && desktopWindowSkipsDraw(g_state, self, 'A')) return;   // visual.desktop_window
     if (self == g_state->ownerCtx && uiLayerIssueBlocked()) return;
     gpuFrameCommandIfLive(self);
     // No verdict on this path: the fast path's decision is the gate and the AA alone (draw_fast_path.h).

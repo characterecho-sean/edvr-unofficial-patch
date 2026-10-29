@@ -1,12 +1,13 @@
-// fix.sharp_weapons, in the build's gate (docs/dlss-blur-elements-2026-10-14.md, "Built, 2026-10-16: weapons fire in the HDR layer").
+// The weapons fire, in the build's gate (docs/dlss-blur-elements-2026-10-14.md, "Built, 2026-10-16: weapons fire in the HDR layer"). The weapons
+// fire is always on: its setting was retired 2026-10-28, so there is no key to test, only the behaviour it always had.
 //
 //   THE RULE (pure). The weapons-fire family is the exact pair (never the vertex shader alone): the three pairs name kWeaponsFire on the HDR branch of the
 //   production uiLayerFamilyFor and nothing else does (one-token mutants of each pair, a post-tonemap target, the refracting partner 820E/6EAA). It is
-//   taken into the HDR layer and exempt from the density rule. The jitter-cancel table defaults to cancel and is read per pair. The A/B key's words.
-//   THE TWO KEYS (pure). fix.ui_quality and fix.sharp_weapons are independent: for each of the four combinations the family gate, the decisions of every
-//   family and the liveness of the layer's two halves. The layer's machinery runs when either half is live; the interface-only parts (the world route,
-//   the on-foot gate, the after-UI take) when ui_quality's is.
-//   THE PLAN (pure). The tonemap re-issues of an eye-frame (weapons_fire.h sharpTonePlan) for every (HUD, weapons, mode, matched-ready) combination
+//   taken into the HDR layer and exempt from the density rule. The jitter-cancel table defaults to cancel and is read per pair.
+//   THE TWO HALVES (pure). fix.ui_quality and the weapons fire are independent: for each of the four combinations of their live states the family gate, the
+//   decisions of every family and the liveness of the layer's two halves. The layer's machinery runs when either half is live; the interface-only parts (the
+//   world route, the on-foot gate, the after-UI take) when ui_quality's is.
+//   THE PLAN (pure). The tonemap re-issues of an eye-frame (weapons_fire.h sharpTonePlan) for every (HUD, weapons, matched-ready) combination
 //   against a frozen reference table, and the invariants a plan must hold, with mutants of the plan caught by them.
 //   THE CENSUS (pure). Three recorded census frames of the 2026-10-16 flight (log edvr_gfx_20261016_070029: censuses 1, 3 and 4, frame 0; 346, 626 and 719
 //   draw rows) through the production rule and decision as they were before this arc (a frozen copy) and as they are: exactly the weapon rows change
@@ -97,7 +98,7 @@ static void ruleTests() {
         check(uiLayerFamilyFor(ldr) == UiLayerFamily::kNone, "no eye target, no family");
     }
     // The shield's refracting partner (820E/6EAA) is NOT a weapons-fire row and never goes into the weapons layer (it samples the pre-DLSS eye HDR copy at the
-    // screen UV); since the shield ripple arc it is the family kShieldRipple, taken into its own displacement layer under fix.sharp_weapons (shield_ripple_test).
+    // screen UV); since the shield ripple arc it is the family kShieldRipple, taken into its own displacement layer (shield_ripple_test).
     check(uiLayerFamilyFor(hdrFacts(0x820E5C131B99361Dull, 0x6EAA86EFE135B2D4ull)) == UiLayerFamily::kShieldRipple,
           "the shield's refracting partner (820E/6EAA) is the shield-ripple family, not weapons fire");
     check(weaponPairIndex(0x820E5C131B99361Dull, 0x6EAA86EFE135B2D4ull) < 0, "...and not in the weapons-fire pair table");
@@ -144,35 +145,17 @@ static void ruleTests() {
               "an unjittered pair set false in the table takes no cancel and leaves the others alone");
     }
 
-    // The key's words: on | plain | off, the old spellings of on and off, and the mapping onto the composite and the route.
-    bool known = true;
-    check(sharpWeaponsParse("on", &known) == SharpWeapons::kOn && known, "on");
-    check(sharpWeaponsParse("plain", &known) == SharpWeapons::kPlain && known, "plain");
-    check(sharpWeaponsParse("off", &known) == SharpWeapons::kOff && known, "off");
-    check(sharpWeaponsParse("true", &known) == SharpWeapons::kOn && known && sharpWeaponsParse("Yes", &known) == SharpWeapons::kOn && known && sharpWeaponsParse("1", &known) == SharpWeapons::kOn && known,
-          "the old spellings of on (true, yes, 1, any case) stay on, silently");
-    check(sharpWeaponsParse("false", &known) == SharpWeapons::kOff && known && sharpWeaponsParse("NO", &known) == SharpWeapons::kOff && known && sharpWeaponsParse("0", &known) == SharpWeapons::kOff && known,
-          "the old spellings of off (false, no, 0) stay off, silently");
-    check(sharpWeaponsParse("matched", &known) == SharpWeapons::kOn && !known, "anything else (the old blend word included) reads as on, and says it was not recognised");
-    check(sharpWeaponsParse("", &known) == SharpWeapons::kOn && !known, "an empty value reads as on");
-    check(sharpWeaponsParse(nullptr, &known) == SharpWeapons::kOn && !known, "no value reads as on");
-    check(sharpWeaponsTakes(SharpWeapons::kOn) && sharpWeaponsTakes(SharpWeapons::kPlain) && !sharpWeaponsTakes(SharpWeapons::kOff),
-          "on and plain take the weapons fire (and the ripple); off leaves all of it in the scene");
-    check(sharpWeaponsBlend(SharpWeapons::kOn) == SharpBlend::kMatched && sharpWeaponsBlend(SharpWeapons::kPlain) == SharpBlend::kPlain,
-          "on is the matched composite, plain the plain add");
-    check(std::strcmp(sharpBlendName(SharpBlend::kMatched), "matched") == 0 && std::strcmp(sharpBlendName(SharpBlend::kPlain), "plain") == 0,
-          "the words the log prints are the composite's");
 }
 
-// ============================================================================================ the two keys
+// ============================================================================================ the two halves
 static void keyTests() {
-    // The family gate over the four combinations, every family: the weapons fire follows fix.sharp_weapons alone, every other family fix.ui_quality alone.
+    // The family gate over the four combinations, every family: the weapons fire follows its own half alone, every other family fix.ui_quality alone.
     for (int q = 0; q < 2; ++q) {
         for (int s = 0; s < 2; ++s) {
             for (size_t f = 1; f < static_cast<size_t>(UiLayerFamily::kCount); ++f) {
                 const UiLayerFamily fam = static_cast<UiLayerFamily>(f);
                 const bool on = uiLayerFamilyEnabled(fam, q != 0, s != 0);
-                check(on == (fam == UiLayerFamily::kWeaponsFire ? s != 0 : fam == UiLayerFamily::kShieldRipple ? true : q != 0), "a family is enabled by its own key and by no other (the ripple, asked without its key, defaults on)");
+                check(on == (fam == UiLayerFamily::kWeaponsFire ? s != 0 : fam == UiLayerFamily::kShieldRipple ? true : q != 0), "a family is enabled by its own half and by no other (the ripple, asked without its half, defaults on)");
                 UiLayerDrawFacts d;
                 d.family = fam;
                 d.familyEnabled = on;
@@ -199,19 +182,17 @@ static void keyTests() {
     }
     // Liveness: the layer's machinery runs when either half is live; the interface-only parts follow fix.ui_quality.
     for (int q = 0; q < 2; ++q) {
-        for (int s = 0; s < 2; ++s) {
-            for (int t = 0; t < 2; ++t) {
-                const float target = q ? 1.0f : 0.0f;
-                const bool quality = uiLayerLiveFor(target, t != 0, true, false);
-                const bool weapons = uiLayerWeaponsLiveFor(s != 0, t != 0, true, false);
-                check(quality == (q && t), "fix.ui_quality's half is live for its key and a temporal mode, whatever fix.sharp_weapons says");
-                check(weapons == (s && t), "fix.sharp_weapons' half is live for its key and a temporal mode, whatever fix.ui_quality says");
-                check(uiLayerMachineryLive(quality, weapons) == ((q || s) && t), "the machinery runs when either half is live");
-                check(!uiLayerWeaponsLiveFor(s != 0, t != 0, true, true), "a stood-down layer is not live for the weapons");
-            }
+        for (int t = 0; t < 2; ++t) {
+            const float target = q ? 1.0f : 0.0f;
+            const bool quality = uiLayerLiveFor(target, t != 0, true, false);
+            const bool weapons = uiLayerWeaponsLiveFor(t != 0, true, false);
+            check(quality == (q && t), "fix.ui_quality's half is live for its key and a temporal mode, whatever the weapons fire says");
+            check(weapons == (t != 0), "the weapons fire's half is live for a temporal mode, whatever fix.ui_quality says");
+            check(uiLayerMachineryLive(quality, weapons) == (t != 0), "the machinery runs when either half is live");
+            check(!uiLayerWeaponsLiveFor(t != 0, true, true), "a stood-down layer is not live for the weapons");
         }
     }
-    // The four combinations end to end on the pure rules: the weapons rows are redirected iff fix.sharp_weapons is on, a HUD row iff fix.ui_quality is.
+    // The four combinations end to end on the pure rules: the weapons rows are redirected iff the weapons half is live, a HUD row iff fix.ui_quality is.
     for (int q = 0; q < 2; ++q) {
         for (int s = 0; s < 2; ++s) {
             UiLayerDrawFacts w;
@@ -226,7 +207,7 @@ static void keyTests() {
             h.family = UiLayerFamily::kFlightHud;
             h.familyEnabled = uiLayerFamilyEnabled(h.family, q != 0, s != 0);
             h.blend = UiBlendShape::kPremulOver;
-            check((uiLayerDecide(w) == UiLayerDecision::kRedirect) == (s != 0), "the weapons fire is taken iff fix.sharp_weapons is on");
+            check((uiLayerDecide(w) == UiLayerDecision::kRedirect) == (s != 0), "the weapons fire is taken iff its half is live");
             check((uiLayerDecide(h) == UiLayerDecision::kRedirect) == (q != 0), "the flight HUD is taken iff fix.ui_quality is on");
         }
     }
@@ -235,7 +216,6 @@ static void keyTests() {
 // ============================================================================================ the plan
 struct PlanRef {
     bool hud, weapons;
-    SharpBlend mode;
     bool ready;
     uint8_t count;
     ToneStep steps[3];
@@ -243,21 +223,15 @@ struct PlanRef {
 };
 static const PlanRef kPlanRef[] = {
     // the HUD alone is the one replace it always was; nothing at all is nothing
-    {false, false, SharpBlend::kMatched, true, 0, {}, false, false, false},
-    {false, false, SharpBlend::kPlain, false, 0, {}, false, false, false},
-    {true, false, SharpBlend::kMatched, true, 1, {ToneStep::kHudReplace}, false, false, true},
-    {true, false, SharpBlend::kPlain, false, 1, {ToneStep::kHudReplace}, false, false, true},
-    {true, false, SharpBlend::kMatched, false, 1, {ToneStep::kHudReplace}, false, false, true},
-    // weapons alone
-    {false, true, SharpBlend::kMatched, true, 2, {ToneStep::kWeaponsBase, ToneStep::kWeaponsLit}, true, true, false},
-    {false, true, SharpBlend::kMatched, false, 1, {ToneStep::kWeaponsReplace}, true, false, false},
-    {false, true, SharpBlend::kPlain, true, 1, {ToneStep::kWeaponsReplace}, true, false, false},
-    {false, true, SharpBlend::kPlain, false, 1, {ToneStep::kWeaponsReplace}, true, false, false},
+    {false, false, true, 0, {}, false, false, false},
+    {true, false, true, 1, {ToneStep::kHudReplace}, false, false, true},
+    {true, false, false, 1, {ToneStep::kHudReplace}, false, false, true},
+    // weapons alone: the matched composite when its source pass is ready, the plain add (the fallback) when it is not
+    {false, true, true, 2, {ToneStep::kWeaponsBase, ToneStep::kWeaponsLit}, true, true, false},
+    {false, true, false, 1, {ToneStep::kWeaponsReplace}, true, false, false},
     // weapons first, the HUD added after
-    {true, true, SharpBlend::kMatched, true, 3, {ToneStep::kWeaponsBase, ToneStep::kWeaponsLit, ToneStep::kHudAdd}, true, true, true},
-    {true, true, SharpBlend::kMatched, false, 2, {ToneStep::kWeaponsReplace, ToneStep::kHudAdd}, true, false, true},
-    {true, true, SharpBlend::kPlain, true, 2, {ToneStep::kWeaponsReplace, ToneStep::kHudAdd}, true, false, true},
-    {true, true, SharpBlend::kPlain, false, 2, {ToneStep::kWeaponsReplace, ToneStep::kHudAdd}, true, false, true},
+    {true, true, true, 3, {ToneStep::kWeaponsBase, ToneStep::kWeaponsLit, ToneStep::kHudAdd}, true, true, true},
+    {true, true, false, 2, {ToneStep::kWeaponsReplace, ToneStep::kHudAdd}, true, false, true},
 };
 
 static bool planMatches(const TonePlan& p, const PlanRef& r) {
@@ -268,7 +242,7 @@ static bool planMatches(const TonePlan& p, const PlanRef& r) {
 }
 
 // The invariants a plan holds, independent of the table above: a mutant of the plan must fail one of them.
-static bool planInvariants(const TonePlan& p, bool hud, bool weapons, SharpBlend mode, bool ready) {
+static bool planInvariants(const TonePlan& p, bool hud, bool weapons, bool ready) {
     if (p.count > 3) return false;
     if (!hud && !weapons) return p.count == 0 && !p.clearEye && !p.sourcePass && !p.coverage;
     if (p.count == 0) return false;
@@ -295,7 +269,7 @@ static bool planInvariants(const TonePlan& p, bool hud, bool weapons, SharpBlend
     }
     if (sawHud != hud) return false;
     if (weapons) {
-        const bool matched = mode == SharpBlend::kMatched && ready;
+        const bool matched = ready;
         if (matched != (sawBase && sawLit) || matched == sawReplaceW) return false;
         if (p.sourcePass != matched || !p.clearEye) return false;
         if (toneStepWrite(ToneStep::kWeaponsLit) != ToneWrite::kSubtract || toneStepWrite(ToneStep::kWeaponsBase) != ToneWrite::kReplace) return false;
@@ -308,25 +282,23 @@ static bool planInvariants(const TonePlan& p, bool hud, bool weapons, SharpBlend
 
 static void planTests() {
     for (const PlanRef& r : kPlanRef) {
-        const TonePlan p = sharpTonePlan(r.hud, r.weapons, r.mode, r.ready);
+        const TonePlan p = sharpTonePlan(r.hud, r.weapons, r.ready);
         check(planMatches(p, r), "the plan equals the frozen table");
-        check(planInvariants(p, r.hud, r.weapons, r.mode, r.ready), "the plan holds its invariants");
+        check(planInvariants(p, r.hud, r.weapons, r.ready), "the plan holds its invariants");
     }
-    // Every (hud, weapons, mode, ready) combination holds the invariants (the table above is a subset).
+    // Every (hud, weapons, ready) combination holds the invariants (the table above is a subset).
     for (int h = 0; h < 2; ++h)
         for (int w = 0; w < 2; ++w)
-            for (int m = 0; m < 2; ++m)
-                for (int rdy = 0; rdy < 2; ++rdy)
-                    check(planInvariants(sharpTonePlan(h != 0, w != 0, m ? SharpBlend::kPlain : SharpBlend::kMatched, rdy != 0), h != 0, w != 0,
-                                         m ? SharpBlend::kPlain : SharpBlend::kMatched, rdy != 0),
-                          "every combination holds the plan's invariants");
+            for (int rdy = 0; rdy < 2; ++rdy)
+                check(planInvariants(sharpTonePlan(h != 0, w != 0, rdy != 0), h != 0, w != 0, rdy != 0),
+                      "every combination holds the plan's invariants");
     // The plan's mutants, each caught by an invariant (the matched weapons-and-HUD plan, mutated one token at a time).
-    const TonePlan base = sharpTonePlan(true, true, SharpBlend::kMatched, true);
-    check(planInvariants(base, true, true, SharpBlend::kMatched, true), "control: the real plan passes");
+    const TonePlan base = sharpTonePlan(true, true, true);
+    check(planInvariants(base, true, true, true), "control: the real plan passes");
     auto mut = [&](auto edit) {
         TonePlan p = base;
         edit(p);
-        return planInvariants(p, true, true, SharpBlend::kMatched, true);
+        return planInvariants(p, true, true, true);
     };
     check(!mut([](TonePlan& p) { p.steps[2] = ToneStep::kHudReplace; }), "mutant: the HUD replaces the weapons' light after them");
     check(!mut([](TonePlan& p) { std::swap(p.steps[0], p.steps[1]); }), "mutant: the lit term before the base term");
@@ -495,7 +467,7 @@ struct Tweak {
     int kind = -1;
     bool dsUnreproducible = false;
     bool lateTone = false;
-    bool qualityOn = true, sharpOn = true;
+    bool qualityOn = true, weaponsOn = true;
 };
 struct Verdict {
     UiLayerFamily family = UiLayerFamily::kNone;
@@ -525,7 +497,7 @@ static Verdict verdictOf(const Census& c, const Row& r, bool production, const T
     g.eye = 0;
     g.armed = true;
     g.lateTone = t.lateTone && g.crispHdr;
-    g.familyEnabled = production ? uiLayerFamilyEnabled(v.family, t.qualityOn, t.sharpOn) : true;
+    g.familyEnabled = production ? uiLayerFamilyEnabled(v.family, t.qualityOn, t.weaponsOn) : true;
     const UiDsEffect effect = uiLayerDsEffect(dsStateOf(r, dsv), dsv != nullptr);
     g.ds = effect;
     g.dsReproducible = !t.dsUnreproducible;
@@ -592,20 +564,20 @@ static void censusTests(const char* path, unsigned weaponRows, unsigned partnerR
         t.lateTone = true;
         check(verdictOf(c, *w, true, t).decision == UiLayerDecision::kToneLate, "mutant: a late tonemap is refused");
         t = Tweak{};
-        t.sharpOn = false;
-        check(verdictOf(c, *w, true, t).decision == UiLayerDecision::kFamilyOff, "mutant: fix.sharp_weapons off is refused for its key");
+        t.weaponsOn = false;
+        check(verdictOf(c, *w, true, t).decision == UiLayerDecision::kFamilyOff, "mutant: a weapons fire whose half is not live is refused for its half");
         t = Tweak{};
         t.qualityOn = false;
         check(verdictOf(c, *w, true, t).decision == UiLayerDecision::kRedirect, "fix.ui_quality off does not refuse the weapons fire");
     }
 
-    // The four key combinations over the whole frame: the weapons rows follow fix.sharp_weapons, every other row fix.ui_quality (a row another family names
-    // is redirected exactly when it was, iff fix.ui_quality is on; with it off it is refused for the key).
+    // The four combinations of the two halves' live states over the whole frame: the weapons rows follow their own half, every other row fix.ui_quality (a row
+    // another family names is redirected exactly when it was, iff fix.ui_quality is on; with it off it is refused for its half).
     for (int q = 0; q < 2; ++q) {
         for (int s = 0; s < 2; ++s) {
             Tweak t;
             t.qualityOn = q != 0;
-            t.sharpOn = s != 0;
+            t.weaponsOn = s != 0;
             for (const Row& r : c.rows) {
                 const Verdict base = verdictOf(c, r, true);
                 const Verdict v = verdictOf(c, r, true, t);
@@ -613,11 +585,11 @@ static void censusTests(const char* path, unsigned weaponRows, unsigned partnerR
                     check(v.decision == UiLayerDecision::kNotUi, "a row no family names is not UI under any key");
                 } else if (v.family == UiLayerFamily::kWeaponsFire) {
                     check((v.decision == UiLayerDecision::kRedirect) == (s != 0) && (v.decision == UiLayerDecision::kFamilyOff) == (s == 0),
-                          "a weapons row is redirected iff fix.sharp_weapons is on, and refused for the key iff it is off");
+                          "a weapons row is redirected iff its half is live, and refused for the half iff it is not");
                 } else if (v.family == UiLayerFamily::kShieldRipple) {
-                    check(v.decision == UiLayerDecision::kRedirect, "the shield-refraction rows follow the ripple's own half (fix.sharp_weapons's, stood down alone), not fix.ui_quality's, whatever the two say here");
+                    check(v.decision == UiLayerDecision::kRedirect, "the shield-refraction rows follow the ripple's own half (stood down alone), not fix.ui_quality's, whatever the two say here");
                 } else if (q) {
-                    check(v.decision == base.decision, "with fix.ui_quality on every other row is decided as it was, whatever fix.sharp_weapons says");
+                    check(v.decision == base.decision, "with fix.ui_quality on every other row is decided as it was, whatever the weapons half says");
                 } else {
                     check(v.decision == UiLayerDecision::kFamilyOff || base.decision == UiLayerDecision::kVerdict, "with fix.ui_quality off every other family is refused for its key");
                 }
@@ -638,14 +610,17 @@ static bool before(const std::string& t, const std::string& a, const std::string
     return i != std::string::npos && j != std::string::npos && i < j;
 }
 
-static bool wiredKeys(const std::string& t) {
-    return has(t, "cfg.getString(\"fix.sharp_weapons\", \"on\")") && has(t, "const SharpWeapons sharpMode = sharpWeaponsParse(sharpText.c_str(), &sharpKnown);") &&
-           has(t, "const bool sharp = sharpWeaponsTakes(sharpMode);") && has(t, "const SharpBlend blend = sharpWeaponsBlend(sharpMode);") && !has(t, "advanced.sharp_weapons_blend\", ");
+// The weapons fire has no setting: no read of a key for it, no parse, no off or plain branch, and no second key. The layer's weapons half is live with
+// a temporal mode alone.
+static bool wiredNoKey(const std::string& t) {
+    return has(t, "bool g_weaponsLive = false;") && !has(t, "fix.sharp_weapons") && !has(t, "advanced.sharp_weapons_blend") && !has(t, "sharpWeaponsParse") &&
+           !has(t, "sharpWeaponsTakes") && !has(t, "sharpWeaponsBlend") && !has(t, "SharpWeapons::") && !has(t, "SharpBlend") && !has(t, "g_sharpWeapons") &&
+           !has(t, "g_sharpBlend") && !has(t, "sharpBlendName");
 }
-// The two halves are computed apart: fix.ui_quality's from its key alone, the weapons' from fix.sharp_weapons alone; the machinery is their union.
+// The two halves are computed apart: fix.ui_quality's from its key alone, the weapons' from a temporal mode alone; the machinery is their union.
 static bool wiredLiveness(const std::string& t) {
     return has(t, "const bool quality = uiLayerLiveFor(g_target, g_temporal, g_jitterAsShipped, g_stoodDown);") &&
-           has(t, "g_weaponsLive = uiLayerWeaponsLiveFor(g_sharpWeapons, g_temporal, g_jitterAsShipped, g_stoodDown || g_weaponsStoodDown);") &&
+           has(t, "g_weaponsLive = uiLayerWeaponsLiveFor(g_temporal, g_jitterAsShipped, g_stoodDown || g_weaponsStoodDown);") &&
            has(t, "detail::g_uiQualityLive = quality;") && has(t, "detail::g_uiLayerLive = uiLayerMachineryLive(quality, g_weaponsLive || g_rippleLive);") &&
            before(t, "const bool quality = uiLayerLiveFor(", "detail::g_uiLayerLive = uiLayerMachineryLive(");
 }
@@ -689,8 +664,7 @@ static bool wiredSnapshot(const std::string& t) {
     return true;
 }
 static bool wiredIni(const std::string& t) {
-    return has(t, "\nsharp_weapons = on\n") && has(t, "# ui: Sharp weapons | choices on=On, plain=On (plain blend), off=Off (stock) | live | menu performance") &&
-           !has(t, "sharp_weapons_blend = ") && !has(t, "shield_ripple");
+    return !has(t, "sharp_weapons") && !has(t, "Sharp weapons") && !has(t, "shield_ripple");
 }
 
 static void lostPins(const std::string& layer);   // below, with the instrument it pins
@@ -699,23 +673,21 @@ static void wiringTests() {
                       ini = readFile("edvr.ini");
     check(layer.size() > 100000 && vscreen.size() > 100000 && snap.size() > 1000 && ini.size() > 10000, "the sources are readable from the repo root");
 
-    check(wiredKeys(layer), "ui_layer.cpp reads fix.sharp_weapons as one word (default on), on = matched, plain = plain, off = stock, and no second key");
-    check(!wiredKeys(replaced(layer, "cfg.getString(\"fix.sharp_weapons\", \"on\")", "cfg.getString(\"fix.sharp_weapons\", \"off\")")), "control: a key that defaults off trips the pin");
-    check(!wiredKeys(replaced(layer, "const SharpBlend blend = sharpWeaponsBlend(sharpMode);", "const SharpBlend blend = SharpBlend::kMatched;")), "control: a plain that is never plain trips the pin");
-    check(!wiredKeys(replaced(layer, "const bool sharp = sharpWeaponsTakes(sharpMode);", "const bool sharp = true;")), "control: an off that is never off trips the pin");
-    check(!wiredKeys(layer + "\ncfg.getString(\"advanced.sharp_weapons_blend\", \"matched\");"), "control: a surviving second key trips the pin");
+    check(wiredNoKey(layer), "ui_layer.cpp: the weapons fire has no key, no parse and no off or plain branch");
+    check(!wiredNoKey(layer + "\ncfg.getString(\"fix.sharp_weapons\", \"on\");"), "control: a surviving key read trips the pin");
+    check(!wiredNoKey(layer + "\ncfg.getString(\"advanced.sharp_weapons_blend\", \"matched\");"), "control: a surviving second key trips the pin");
 
     check(wiredLiveness(layer), "ui_layer.cpp: fix.ui_quality's half and the weapons' half are computed apart and the machinery is their union");
     check(!wiredLiveness(replaced(layer, "const bool quality = uiLayerLiveFor(g_target, g_temporal, g_jitterAsShipped, g_stoodDown);",
-                                  "const bool quality = uiLayerLiveFor(g_sharpWeapons ? 1.0f : g_target, g_temporal, g_jitterAsShipped, g_stoodDown);")),
-          "control: a ui_quality half that follows the weapons' key trips the pin");
+                                  "const bool quality = uiLayerLiveFor(g_weaponsLive ? 1.0f : g_target, g_temporal, g_jitterAsShipped, g_stoodDown);")),
+          "control: a ui_quality half that follows the weapons' half trips the pin");
     check(!wiredLiveness(replaced(layer, "detail::g_uiLayerLive = uiLayerMachineryLive(quality, g_weaponsLive || g_rippleLive);", "detail::g_uiLayerLive = quality;")),
           "control: a machinery that ignores the weapons' half trips the pin");
     check(!wiredLiveness(replaced(layer, "detail::g_uiQualityLive = quality;", "detail::g_uiQualityLive = detail::g_uiLayerLive;")),
           "control: a quality flag that is the union trips the pin");
 
-    check(wiredDecision(layer), "ui_layer.cpp: the decision gates each family by its own key, takes the weapons through their own readiness and cancels by the table");
-    check(!wiredDecision(replaced(layer, "f.familyEnabled = uiLayerFamilyEnabled(family, detail::g_uiQualityLive, g_weaponsLive, g_rippleLive);", "f.familyEnabled = true;")), "control: no key gate trips the pin");
+    check(wiredDecision(layer), "ui_layer.cpp: the decision gates each family by its own half, takes the weapons through their own readiness and cancels by the table");
+    check(!wiredDecision(replaced(layer, "f.familyEnabled = uiLayerFamilyEnabled(family, detail::g_uiQualityLive, g_weaponsLive, g_rippleLive);", "f.familyEnabled = true;")), "control: no half gate trips the pin");
     check(!wiredDecision(replaced(layer, "uiLayerFamilyEnabled(family, detail::g_uiQualityLive, g_weaponsLive, g_rippleLive)", "uiLayerFamilyEnabled(family, detail::g_uiLayerLive, g_weaponsLive, g_rippleLive)")),
           "control: a ui_quality gate that reads the union trips the pin");
     check(!wiredDecision(replaced(layer, "g_draw.jx = cancel ? jx : 0.0f;", "g_draw.jx = jx;")), "control: a cancel that ignores the table trips the pin");
@@ -736,21 +708,14 @@ static void wiringTests() {
     check(!wiredSnapshot(replaced(snap, "case 0x939D01F28D1FEEA8ull: // multicannon rounds\n", "")), "control: an unwatched pair trips the pin");
 
     lostPins(layer);
-    {
-        const size_t at = ini.find("\nsharp_weapons = on\n");
-        const size_t from = ini.rfind("# Draw the ships' weapons fire sharp.", at);
-        const std::string seg = (at != std::string::npos && from != std::string::npos) ? ini.substr(from, at - from) : std::string();
-        check(!seg.empty() && has(seg, "shield-strike ripple"), "edvr.ini: fix.sharp_weapons says it covers the shield-strike ripple");
-        check(has(seg, "plain shades the light alone") && has(seg, "off leaves all of it"), "...and says what on, plain and off do");
-    }
-    check(wiredIni(ini), "edvr.ini documents fix.sharp_weapons (on | plain | off, with one menu row), no second key and no ripple key");
-    check(!wiredIni(replaced(ini, "\nsharp_weapons = on\n", "\nsharp_weapons = off\n")), "control: a key that ships off trips the pin");
+    check(wiredIni(ini), "edvr.ini has no weapons fire setting (retired: always on), no second key and no ripple key");
+    check(!wiredIni(ini + "\nsharp_weapons = off\n"), "control: a setting line trips the pin");
 }
 
 // ============================================================================================ the flat profile
-// fix.sharp_weapons covers both profiles (2026-10-16): the flat adapter (flat_ui_layer.cpp) asks the shared decision for the weapons fire and the shield
+// The weapons fire covers both profiles (2026-10-16): the flat adapter (flat_ui_layer.cpp) asks the shared decision for the weapons fire and the shield
 // refraction when their half of the layer is live, whatever fix.ui_quality says, leaves the HUD alone when only the weapons are live, runs the tone bracket's
-// steps, and hands the door the fact that the picture is EDVR's resolve. The key is on flat's allow-list and its row sits under UI quality on the flat panel.
+// steps, and hands the door the fact that the picture is EDVR's resolve. The weapons fire has no flat allow-list entry or panel row (retired 2026-10-28).
 static bool wiredFlat(const std::string& adapter, const std::string& runtimeH, const std::string& keys) {
     return has(adapter, "if (!flatUiFamilyLive(family, uiLayerQualityLive(), uiLayerWeaponsLive(), uiLayerRippleLive())) return g_lastAsk;") &&
            before(adapter, "if (!flatUiLayerTakesFamily(family)) return g_lastAsk;", "if (!flatUiFamilyLive(family,") &&
@@ -758,7 +723,7 @@ static bool wiredFlat(const std::string& adapter, const std::string& runtimeH, c
            has(adapter, "uiLayerComposite(frame, 0, picture.Get(), region, uv, false, treated)") &&
            has(adapter, "bool flatUiLayerToneNext(ID3D11DeviceContext* ctx) {") && has(adapter, "return uiLayerCrispToneNext(ctx);") &&
            has(runtimeH, "if (uiTone && flatUiLayerToneBegin(ctx)) { issue(); while (flatUiLayerToneNext(ctx)) issue(); flatUiLayerToneEnd(ctx); }") &&
-           has(keys, "std::strcmp(key, \"fix.sharp_weapons\") == 0");
+           !has(keys, "fix.sharp_weapons");
 }
 static void flatTests() {
     // The family rule.
@@ -782,17 +747,15 @@ static void flatTests() {
                 check(flatUiFamilyLive(UiLayerFamily::kFlightHud, q != 0, w != 0, r != 0) == (q != 0), "the HUD families are asked when fix.ui_quality's half is live and not otherwise");
                 check(flatUiFamilyLive(UiLayerFamily::kMapCanvas, q != 0, w != 0, r != 0) == (q != 0), "...the System Map's too");
             }
-    // The key and its row.
-    check(flatPageHasRow("fix", "sharp_weapons") && !flatPageHasRow("advanced", "sharp_weapons_blend"), "the flat panel has the Sharp weapons row and no Weapons blend row");
-    int quality = -1, hud = -1, sharp = -1;
+    // No setting and no row for the weapons fire (retired 2026-10-28): the flat panel has neither it nor a Weapons blend row.
+    check(!flatPageHasRow("fix", "sharp_weapons") && !flatPageHasRow("advanced", "sharp_weapons_blend"), "the flat panel has no Sharp weapons row and no Weapons blend row");
+    int quality = -1, hud = -1;
     for (size_t i = 0; i < kFlatPageRowCount; ++i) {
         if (std::strcmp(kFlatPageRows[i].key, "ui_quality") == 0) quality = static_cast<int>(i);
         if (std::strcmp(kFlatPageRows[i].key, "hud_antialiasing") == 0) hud = static_cast<int>(i);
-        if (std::strcmp(kFlatPageRows[i].key, "sharp_weapons") == 0) sharp = static_cast<int>(i);
     }
-    check(quality >= 0 && hud == quality + 1 && sharp == hud + 1,
-          "...under UI quality and the flat-only HUD Anti-Aliasing row (VR's page, which has no such row, has it directly under UI quality: menuTests)");
-    check(sharp >= 0 && kFlatPageRows[sharp].read == FlatRowRead::Allowlist, "...read through the allow-listed getters (flat_profile_keys.h names the key)");
+    check(quality >= 0 && hud == quality + 1,
+          "...the flat page has HUD Anti-Aliasing directly under UI quality (VR's page, which has no such row, has UI quality: menuTests)");
     const std::string adapter = readFile("src/d3d11/flat_ui_layer.cpp"), runtimeH = readFile("src/d3d11/flat_runtime.h"), keys = readFile("src/common/flat_profile_keys.h");
     check(adapter.size() > 10000 && runtimeH.size() > 1000 && keys.size() > 500, "the flat sources are readable from the repo root");
     check(wiredFlat(adapter, runtimeH, keys), "flat: the adapter asks the half that governs the family, the tone bracket runs its steps, the door is told the picture is resolved, the key is allow-listed");
@@ -800,65 +763,41 @@ static void flatTests() {
           "control: an adapter that asks the HUD with fix.ui_quality off (or the weapons with them off) trips the pin");
     check(!wiredFlat(replaced(adapter, "uv, false, treated)", "uv)"), runtimeH, keys), "control: a door never told whether the picture is resolved trips the pin");
     check(!wiredFlat(adapter, replaced(runtimeH, "while (flatUiLayerToneNext(ctx)) issue(); ", ""), keys), "control: a tone bracket with no steps (the matched composite would be one issue short) trips the pin");
-    check(!wiredFlat(adapter, runtimeH, replaced(keys, "std::strcmp(key, \"fix.sharp_weapons\") == 0 ||", "")), "control: a key flat's gate refuses (getString answers off) trips the pin");
+    check(!wiredFlat(adapter, runtimeH, keys + "\nstd::strcmp(key, \"fix.sharp_weapons\") == 0 ||"), "control: a surviving key on flat's allow-list trips the pin");
 }
 
 // ============================================================================================ the menu rows
-// The one Sharp weapons row (On, On (plain blend), Off (stock)): Fix tier, the Performance page, live, under UI quality in the table the build generated
-// from the real edvr.ini (directly under it on VR's page; the flat-only HUD Anti-Aliasing row, on the page VR does not build, sits between them in the table);
-// there is no Weapons blend row. Dimmed, and refusing steps and typing, with anti-aliasing off.
 static int rowIndex(const char* section, const char* key) {
     const int count = static_cast<int>(sizeof(kMenuRows) / sizeof(kMenuRows[0]));
     for (int i = 0; i < count; ++i)
         if (std::strcmp(kMenuRows[i].section, section) == 0 && std::strcmp(kMenuRows[i].key, key) == 0) return i;
     return -1;
 }
-// menu.cpp's gating of the two rows: one function decides, the page draws them dimmed, a step and a typed value are refused, and the profile's own reading of
-// fix.temporal_aa is the one asked.
+// The weapons fire has no menu row and menu.cpp has no gate for one (retired 2026-10-28): no row in the generated table in any tier, no dimming, no refused
+// steps or typing. A gate left behind would name a row the table no longer has.
 static bool gatedMenu(const std::string& t) {
-    return has(t, "bool isWeaponsRow(const MenuRowDef& d) {") && has(t, "strcmp(d.key, \"sharp_weapons\") == 0") &&
-           has(t, "return weaponsRowDim(temporalModeEnabledFor(flat ? cfg.requestedTemporalMode() : cfg.getString(\"fix.temporal_aa\", \"off\"), flat));") &&
-           has(t, "(weaponsRow && weaponsRowDisabled())") && has(t, "if (isWeaponsRow(d) && weaponsRowDisabled()) {") &&
-           has(t, "if (isWeaponsRow(kMenuRows[defIndex]) && weaponsRowDisabled()) {") && has(t, "Needs temporal AA");
+    return has(t, "isWeaponsRow") || has(t, "weaponsRowDisabled") || has(t, "weaponsRowDim") || has(t, "sharp_weapons");
 }
 static void menuTests() {
     const int count = static_cast<int>(sizeof(kMenuRows) / sizeof(kMenuRows[0]));
     check(count > 10, "the generated menu table is there");
-    const int quality = rowIndex("fix", "ui_quality"), sharp = rowIndex("fix", "sharp_weapons"), hud = rowIndex("fix", "hud_antialiasing");
-    check(quality >= 0 && sharp >= 0 && hud >= 0, "UI quality, HUD Anti-Aliasing and Sharp weapons are rows");
-    check(hud == quality + 1 && sharp == hud + 1, "the table has HUD Anti-Aliasing directly under UI quality and Sharp weapons directly under it");
-    // VR's Performance page is the Fix-tier rows whose page is "performance" (menu.cpp addSettingRows); on it Sharp weapons is directly under UI quality, as it
-    // was before the HUD row, because that row is on the page VR does not build.
+    const int quality = rowIndex("fix", "ui_quality"), hud = rowIndex("fix", "hud_antialiasing");
+    check(quality >= 0 && hud >= 0, "UI quality and HUD Anti-Aliasing are rows");
+    check(hud == quality + 1, "the table has HUD Anti-Aliasing directly under UI quality");
+    check(rowIndex("fix", "sharp_weapons") < 0 && rowIndex("advanced", "sharp_weapons_blend") < 0,
+          "there is no Sharp weapons row and no Weapons blend row, in any tier (the setting is retired)");
+    // VR's Performance page is the Fix-tier rows whose page is "performance" (menu.cpp addSettingRows); UI quality is on it.
     {
-        int pos = 0, qualityPos = -1, sharpPos = -1;
-        for (int i = 0; i < count; ++i) {
-            if (kMenuRows[i].tier != MenuTier::Fix || std::strcmp(kMenuRows[i].page, "performance") != 0) continue;
-            if (i == quality) qualityPos = pos;
-            if (i == sharp) sharpPos = pos;
-            ++pos;
-        }
-        check(qualityPos >= 0 && sharpPos == qualityPos + 1, "on VR's Performance page Sharp weapons is directly under UI quality");
-    }
-    check(rowIndex("advanced", "sharp_weapons_blend") < 0, "there is no Weapons blend row (and so no second one in the developer tier)");
-    if (sharp >= 0) {
-        const MenuRowDef& r = kMenuRows[sharp];
-        check(r.tier == MenuTier::Fix && std::strcmp(r.page, "performance") == 0, "Sharp weapons is a Fix-tier row on the Performance page");
-        check(r.kind == MenuKind::Choice && r.applies == 1 && std::strcmp(r.shipped, "on") == 0, "...a live choice that ships on");
-        check(std::strcmp(r.label, "Sharp weapons") == 0, "...labelled plainly");
-        check(std::strcmp(r.choices, "on=On|plain=On (plain blend)|off=Off (stock)") == 0, "...with On, On (plain blend) and Off (stock) as its choices");
+        bool onPage = false;
+        for (int i = 0; i < count; ++i)
+            if (kMenuRows[i].tier == MenuTier::Fix && std::strcmp(kMenuRows[i].page, "performance") == 0 && i == quality) onPage = true;
+        check(onPage, "UI quality is on VR's Performance page");
     }
 
-    // The gate: with anti-aliasing off both rows are dimmed; on, neither. The same table in both profiles (the caller passes the profile's own reading).
-    check(weaponsRowDim(false) && !weaponsRowDim(true), "the weapons row dims exactly when anti-aliasing is off");
     const std::string menu = readFile("src/d3d11/menu.cpp");
     check(menu.size() > 100000, "menu.cpp is readable from the repo root");
-    check(gatedMenu(menu), "menu.cpp dims, refuses steps and refuses typing on the row, asking each profile's own reading of fix.temporal_aa");
-    check(!gatedMenu(replaced(menu, "(weaponsRow && weaponsRowDisabled())", "false")), "control: a row that never dims is caught");
-    check(!gatedMenu(replaced(menu, "if (isWeaponsRow(d) && weaponsRowDisabled()) {", "if (false) {")), "control: a dimmed row that still takes a step is caught");
-    check(!gatedMenu(replaced(menu, "if (isWeaponsRow(kMenuRows[defIndex]) && weaponsRowDisabled()) {", "if (false) {")), "control: a dimmed row that still takes typing is caught");
-    check(!gatedMenu(replaced(menu, "flat ? cfg.requestedTemporalMode() : cfg.getString(\"fix.temporal_aa\", \"off\"), flat)", "cfg.getString(\"fix.temporal_aa\", \"off\"), false)")),
-          "control: a flat profile read as the VR one (it would miss a requested mode the allow-list hides) is caught");
-    check(!gatedMenu(replaced(menu, "strcmp(d.key, \"sharp_weapons\") == 0", "false")), "control: the row left out of the gate is caught");
+    check(!gatedMenu(menu), "menu.cpp has no gate for a Sharp weapons row");
+    check(gatedMenu(menu + "\nbool isWeaponsRow(const MenuRowDef& d) {}"), "control: a surviving row gate trips the pin");
 }
 
 // ============================================================================================ the lost-layer instrument
@@ -1331,7 +1270,7 @@ static void gpuTests() {
         f.ctx->RSSetViewports(1, &vp);
         f.ctx->VSSetShader(f.toneVs.Get(), nullptr, 0);
         f.ctx->PSSetShader(f.tonePs.Get(), nullptr, 0);
-        const TonePlan matched = sharpTonePlan(false, true, SharpBlend::kMatched, true);
+        const TonePlan matched = sharpTonePlan(false, true, true);
         // the source pass alone first, to read S and W
         f.clearEye();
         check(sharpSourcePass(f.ctx.Get(), f.deferred.Get(), f.srcVs.Get(), f.srcPs.Get(), f.states, f.fSrv.Get(), f.sRtv.Get(), f.wRtv.Get(), kLw, kLh,
@@ -1393,25 +1332,25 @@ static void gpuTests() {
 
     // ---- the plain sequence (the A/B key, and the matched composite's fall-back)
     f.freshLayers();
-    f.runPlan(sharpTonePlan(false, true, SharpBlend::kPlain, false), f.states);
+    f.runPlan(sharpTonePlan(false, true, false), f.states);
     {
         const std::vector<uint8_t> E = f.read8(f.eTex.Get());
         check(maxDiff(E, TL, 0, kLw, false) <= 1, "the plain sequence leaves T(L) in the 8-bit layer");
     }
     f.freshLayers();
-    f.runPlan(sharpTonePlan(false, true, SharpBlend::kMatched, false), f.states);
+    f.runPlan(sharpTonePlan(false, true, false), f.states);
     check(maxDiff(f.read8(f.eTex.Get()), TL, 0, kLw, false) <= 1, "a matched frame that is not ready is the plain sequence");
 
     // ---- the HUD: alone it is T(H) as it always was; with the weapons it is added to their contribution
     {
         const float junk[4] = {0.3f, 0.6f, 0.9f, 0.5f};
         f.ctx->ClearRenderTargetView(f.eRtv.Get(), junk);
-        f.runPlan(sharpTonePlan(true, false, SharpBlend::kMatched, true), f.states);
+        f.runPlan(sharpTonePlan(true, false, true), f.states);
         const std::vector<uint8_t> E = f.read8(f.eTex.Get());
         check(maxDiff(E, TH, 0, kLw, false) <= 1, "the HUD alone: T(H) replaces the target, as it always has");
         check(std::abs(static_cast<int>(E[3]) - static_cast<int>(std::lround(0.5f * 255.0f))) <= 1, "the HUD alone leaves the alpha to the coverage pass (colour channels only)");
         f.freshLayers();
-        f.runPlan(sharpTonePlan(true, true, SharpBlend::kMatched, true), f.states);
+        f.runPlan(sharpTonePlan(true, true, true), f.states);
         const std::vector<uint8_t> both = f.read8(f.eTex.Get());
         std::vector<uint8_t> want(X.size());
         for (size_t i = 0; i < X.size(); ++i) {
@@ -1442,7 +1381,7 @@ static void gpuTests() {
         st.sourceBlend.Reset();
         hr(f.dev->CreateBlendState(&m, &st.sourceBlend), "a mutant blend");
         f.freshLayers();
-        f.runPlan(sharpTonePlan(false, true, SharpBlend::kMatched, true), st);
+        f.runPlan(sharpTonePlan(false, true, true), st);
         const int e = litError(f.read8(f.eTex.Get()));
         check(e > 15, "mutant: a source pass that replaces W instead of adding to it is caught");
         std::printf("mutant source pass without its add: lit error %d\n", e);
@@ -1450,12 +1389,12 @@ static void gpuTests() {
         SharpPassStates st2 = f.states;
         st2.toneSubtract = st2.toneReplace;
         f.freshLayers();
-        f.runPlan(sharpTonePlan(false, true, SharpBlend::kMatched, true), st2);
+        f.runPlan(sharpTonePlan(false, true, true), st2);
         const int e2 = litError(f.read8(f.eTex.Get()));
         check(e2 > 15, "mutant: a lit step that replaces instead of subtracting is caught");
         std::printf("mutant lit step replacing: lit error %d\n", e2);
         // 3. the base step missing: the target holds nothing to subtract
-        TonePlan p = sharpTonePlan(false, true, SharpBlend::kMatched, true);
+        TonePlan p = sharpTonePlan(false, true, true);
         p.steps[0] = p.steps[1];
         p.count = 1;
         f.freshLayers();
@@ -1464,7 +1403,7 @@ static void gpuTests() {
         check(e3 > 15, "mutant: a missing base step is caught");
         std::printf("mutant missing base step: lit error %d\n", e3);
         // 4. the lit step reading the scratch instead of the weapons layer: the difference is zero
-        TonePlan q = sharpTonePlan(false, true, SharpBlend::kMatched, true);
+        TonePlan q = sharpTonePlan(false, true, true);
         q.steps[1] = ToneStep::kWeaponsBase;
         f.freshLayers();
         f.runPlan(q, f.states);
@@ -1473,7 +1412,7 @@ static void gpuTests() {
         std::printf("mutant lit step reading the scratch: lit error %d\n", e4);
         // control: the real sequence passes the very comparator the mutants fail
         f.freshLayers();
-        f.runPlan(sharpTonePlan(false, true, SharpBlend::kMatched, true), f.states);
+        f.runPlan(sharpTonePlan(false, true, true), f.states);
         check(litError(f.read8(f.eTex.Get())) <= 3, "control: the real sequence passes the comparator");
     }
 

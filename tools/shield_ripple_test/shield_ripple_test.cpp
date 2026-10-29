@@ -1,7 +1,7 @@
-// The shield ripple under fix.sharp_weapons, in the build's gate (docs/dlss-blur-elements-2026-10-14.md, "Built, 2026-10-16: the shield refraction after the upscale").
+// The shield ripple, in the build's gate (docs/dlss-blur-elements-2026-10-14.md, "Built, 2026-10-16: the shield refraction after the upscale").
 //
 //   THE RULE (pure). The exact pair 820E/6EAA is the family kShieldRipple on the HDR branch of the production uiLayerFamilyFor and nothing else is; the ripple's own half (live iff
-//   fix.sharp_weapons, a temporal mode, not stood down, not flat); the first-draw checks (gain 1 within 1e-6, a linear s0); D's coverage test; the jitter arithmetic.
+//   a temporal mode, not stood down, not flat); the first-draw checks (gain 1 within 1e-6, a linear s0); D's coverage test; the jitter arithmetic.
 //   THE GAME'S SHADER (WARP). The real ps_6EAA (fixtures\ps_6EAA86EFE135B2D4.dxbc, from edvr_logs\shaders) drawn on the UV ramp writes the game's own uv_jit + d:
 //   compared with the analytic value for a 2016-wide ramp (the size the flights run) within 1e-6.
 //   THE ROUTE (WARP). The whole chain with the production pieces: the production remap and jitter cancel (ui_layer_math.h) for the draw into D, depth GEQUAL
@@ -71,17 +71,17 @@ static void ruleTests() {
     check(std::strcmp(uiLayerFamilyName(UiLayerFamily::kShieldRipple), "shield ripple") == 0, "the family's name is the log's");
     check(shieldRefractVs(kUiVsShieldRefract) && !shieldRefractVs(0x1234ull), "the draw hook reads the pixel shader for the vertex shader");
 
-    // The family gate: the shield ripple follows its own half (fix.sharp_weapons's, with its own stand-down), whatever fix.ui_quality says; the others ignore it.
+    // The family gate: the shield ripple follows its own half (with its own stand-down), whatever fix.ui_quality says; the others ignore it.
     for (int q = 0; q < 2; ++q)
         for (int s = 0; s < 2; ++s)
             for (int r = 0; r < 2; ++r) {
                 check(uiLayerFamilyEnabled(UiLayerFamily::kShieldRipple, q != 0, s != 0, r != 0) == (r != 0), "the shield ripple follows its own half alone");
-                check(uiLayerFamilyEnabled(UiLayerFamily::kWeaponsFire, q != 0, s != 0, r != 0) == (s != 0), "the weapons fire still follows fix.sharp_weapons alone");
+                check(uiLayerFamilyEnabled(UiLayerFamily::kWeaponsFire, q != 0, s != 0, r != 0) == (s != 0), "the weapons fire still follows its own half alone");
                 check(uiLayerFamilyEnabled(UiLayerFamily::kFlightHud, q != 0, s != 0, r != 0) == (q != 0), "the interface still follows fix.ui_quality alone");
             }
-    check(uiLayerRippleLiveFor(true, true, true, false) && !uiLayerRippleLiveFor(false, true, true, false) && !uiLayerRippleLiveFor(true, false, true, false) &&
-              !uiLayerRippleLiveFor(true, true, true, true),
-          "the ripple is live for fix.sharp_weapons on, a temporal mode, not stood down, in either profile");
+    check(uiLayerRippleLiveFor(true, true, false) && !uiLayerRippleLiveFor(false, true, false) && !uiLayerRippleLiveFor(true, false, false) &&
+              !uiLayerRippleLiveFor(true, true, true),
+          "the ripple is live for a temporal mode, the jitter as shipped, not stood down, in either profile");
     check(uiLayerMachineryLive(false, true) && !uiLayerMachineryLive(false, false), "the machinery runs for the ripple as it does for the weapons (their union is passed)");
     check(static_cast<int>(UiLayerFamily::kShieldRipple) + 1 == static_cast<int>(UiLayerFamily::kCount), "the family is last in its enum");
     UiLayerDrawFacts d;
@@ -92,7 +92,7 @@ static void ruleTests() {
     d.armed = true;
     d.blend = UiBlendShape::kOver;
     d.familyEnabled = false;
-    check(uiLayerDecide(d) == UiLayerDecision::kFamilyOff, "a ripple that is off (fix.sharp_weapons off, or stood down) is refused for its key");
+    check(uiLayerDecide(d) == UiLayerDecision::kFamilyOff, "a ripple that is not live (stood down) is refused for its half");
     d.familyEnabled = true;
     check(uiLayerDecide(d) == UiLayerDecision::kRedirect, "the 820E facts (blend over, depth tested, no write) are redirected");
 
@@ -137,15 +137,15 @@ static bool wiredLayer(const std::string& t) {
         has(t, "if (converted && rp) layerBlend = g_rip.blend.Get();") && has(t, "ID3D11ShaderResourceView* ramp = g_rip.rampSrv.Get();\n        vScreenPSSetShaderResourcesRaw(ctx, 0, 1, &ramp);") &&
         has(t, "if (g_draw.rippleSwapped) {") && has(t, "g_draw.rippleSwapped = false;") &&
         // the ripple is its own half of the layer, with the jitter subtracted from D at the door
-        has(t, "g_rippleLive = uiLayerRippleLiveFor(g_sharpWeapons, g_temporal, g_jitterAsShipped, g_stoodDown || g_rippleStoodDown);") &&
+        has(t, "g_rippleLive = uiLayerRippleLiveFor(g_temporal, g_jitterAsShipped, g_stoodDown || g_rippleStoodDown);") &&
         has(t, "shieldRippleJitterUv(e.dJx, e.dJy, static_cast<float>(e.dRenderW), static_cast<float>(e.dRenderH), p.jitterUv);") &&
         has(t, "if (family == UiLayerFamily::kShieldRipple && f.familyEnabled) f.familyEnabled = rippleR1Allows(ctx);") &&
         // the first-draw checks
         has(t, "shieldRippleGainOk(row[2], row[1])") && has(t, "shieldRippleFilterOk(g_rip.filter)") && has(t, "rippleStandDown(why);") &&
         // the idle release
         has(t, "if (g_rip.frame - e.dLastFrame > kShieldRippleIdleFrames) {") &&
-        // no key of its own: the ripple follows fix.sharp_weapons, and a change of that key re-arms a stood-down ripple and asks the first-draw checks again
-        !has(t, "advanced.shield_ripple") && has(t, "if (g_rippleNoted && sharp != g_rippleNotedOn) {\n        g_rippleStoodDown = false;\n        g_rip.check = 0;");
+        // no key of its own, and none for the weapons fire either: the ripple is a half of the layer, live with a temporal mode, and a stand-down lasts the session
+        !has(t, "advanced.shield_ripple") && !has(t, "fix.sharp_weapons") && !has(t, "g_rippleNotedOn");
 }
 static bool wiredHook(const std::string& v) {
     return has(v, "(weaponsFireVs(f.vs) || shieldRefractVs(f.vs))") && !has(v, "shieldProbe") && !has(v, "advanced.shield_ripple");
@@ -171,8 +171,8 @@ static void wiringTests() {
     check(!wiredHook(replaced(vscreen, "(weaponsFireVs(f.vs) || shieldRefractVs(f.vs))", "weaponsFireVs(f.vs)")), "control: no pixel shader read for 820E trips the pin");
     check(has(snap, "case 0x820E5C131B99361Dull: // the shield's refracting bubble"), "eye_draw_snapshot.h: the next eye dump watches 820E (VS b0/b1/b2)");
     check(!has(replaced(snap, "case 0x820E5C131B99361Dull: // the shield's refracting bubble\n", ""), "case 0x820E5C131B99361Dull"), "control: an unwatched 820E trips the pin");
-    // edvr.ini: no key of its own (sharp_weapons_test holds that fix.sharp_weapons says it covers the ripple).
-    check(!has(ini, "shield_ripple"), "edvr.ini: the temporary key is gone");
+    // edvr.ini: no key of its own, and no weapons fire key either (the setting is retired; the weapons fire is always on).
+    check(!has(ini, "shield_ripple") && !has(ini, "sharp_weapons"), "edvr.ini: the temporary key is gone, and so is the weapons fire setting");
 }
 
 // ============================================================================================ WARP

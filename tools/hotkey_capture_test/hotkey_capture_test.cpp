@@ -1521,6 +1521,14 @@ void testCaptureWiringPins(const char* root) {
         const size_t developer = pages.find("if (s.developer) {");
         check(at != std::string::npos && rows != std::string::npos && rows - at < 300 && developer != std::string::npos && at < developer,
               "menu.cpp: buildPages makes the Native on foot page from the Fix-tier rows of the native_on_foot page, grouped under the ini's headings (F127), for everyone, before the developer pages");
+        {   // The Desktop window page (2026-10-28): built right after Visual and before Native on foot, for everyone, from the Fix-tier rows of its own page.
+            const size_t visual = pages.find("p.name = \"Visual\";"), page = pages.find("p.name = \"Desktop window\";"), native = pages.find("p.name = \"Native on foot\";");
+            const size_t rows = page == std::string::npos ? page : pages.find("addSettingRows(p, MenuTier::Fix, \"desktop_window\", false);", page);
+            check(visual != std::string::npos && page != std::string::npos && native != std::string::npos && visual < page && page < native && rows != std::string::npos && rows - page < 200,
+                  "menu.cpp: buildPages makes the Desktop window page from the Fix-tier rows of the desktop_window page, right after Visual and before Native on foot");
+            check(visual == std::string::npos || pages.find("addSettingRows(p, MenuTier::Fix, \"visual\", true);", visual) != std::string::npos,
+                  "menu.cpp: the Visual page is still built from the visual rows");
+        }
         check(bodyOf("std::string displayValue(const MenuRowDef& d, const std::string& v) {").find("menuFormatNumber(d, atof(v.c_str()))") !=
                   std::string::npos,
               "menu.cpp: a number row is shown by menuFormatNumber (\"+0.15 m\", \"0 ms (exact)\")");
@@ -1927,9 +1935,59 @@ void testLegacyOnFootRowsStayOutOfMenu() {
 }
 
 // ---------------------------------------------------------------------------
-// 7b. The Visual page of VR's menu (2026-10-27): how the world looks, apart from the fixes. World scale is a whole-percent number from 50 to 200, live; the intro settings and the
+// 7b. The Visual page of VR's menu (2026-10-27): how the world looks, apart from the fixes. World scale is a whole-percent number from 50 to 200, live; Desktop window (visual.desktop_window,
+// what Elite's window on the desktop shows) was on it until 2026-10-28, when it and its two new keys moved to the Desktop window page (testDesktopWindowPage); the intro settings and the
 // screen curve moved onto it from the Fixes page; Star glow, which both profiles read, is on it too; and a live edvr.ini without the world_scale line takes
 // the first change from the menu as an appended line.
+
+// 7c. The Desktop window page of VR's menu (2026-10-28), right after Visual: what the window shows, the picture's shape, how far up or down it is cut (round 7: a signed whole-percent
+// number row; round 8: how the shape is cut, native or center) and the window's style, the five [visual] keys, Fix tier, in edvr.ini order, no group headings needed (the page is the group), choices in the words the file gives them.
+void testDesktopWindowPage() {
+    printf("desktop window page\n");
+    constexpr int kCount = static_cast<int>(sizeof(kMenuRows) / sizeof(kMenuRows[0]));
+    struct Want { const char* key; const char* label; const char* choices; };   // an empty choices is the number row
+    static const Want want[] = {
+        {"desktop_window", "Desktop window", "game=Game|left_eye=Left eye|right_eye=Right eye|both_eyes=Both eyes"},
+        {"desktop_window_aspect", "Desktop window shape", "full=Full picture|1:1=1:1|4:3=4:3|16:10=16:10|16:9=16:9|21:9=21:9"},
+        {"desktop_window_crop", "Desktop window crop", "native=Same as the game's mirror|center=Centre"},
+        {"desktop_window_vertical_shift", "Desktop window vertical shift", ""},
+        {"desktop_window_style", "Desktop window style", "window=Window|borderless=Borderless full screen"},
+    };
+    constexpr int kWant = static_cast<int>(sizeof(want) / sizeof(want[0]));
+    int at = 0, shift = -1;
+    bool inOrder = true;
+    for (int i = 0; i < kCount; ++i) {
+        if (strcmp(kMenuRows[i].page, "desktop_window") != 0) continue;
+        const bool number = at < kWant && want[at].choices[0] == '\0';
+        const bool match = at < kWant && strcmp(kMenuRows[i].section, "visual") == 0 && strcmp(kMenuRows[i].key, want[at].key) == 0 && strcmp(kMenuRows[i].label, want[at].label) == 0 &&
+                           kMenuRows[i].tier == MenuTier::Fix && kMenuRows[i].kind == (number ? MenuKind::Number : MenuKind::Choice) && kMenuRows[i].applies == 1 &&
+                           strcmp(kMenuRows[i].choices, want[at].choices) == 0;
+        if (!match) {
+            printf("  page row %d is %s.%s \"%s\" [%s]; wanted visual.%s \"%s\" [%s]\n", at, kMenuRows[i].section, kMenuRows[i].key, kMenuRows[i].label, kMenuRows[i].choices,
+                   at < kWant ? want[at].key : "(none)", at < kWant ? want[at].label : "", at < kWant ? want[at].choices : "");
+            inOrder = false;
+        }
+        if (strcmp(kMenuRows[i].key, "desktop_window_vertical_shift") == 0) shift = i;
+        ++at;
+    }
+    check(inOrder && at == kWant, "VR's Desktop window page is Desktop window, Desktop window shape, Desktop window crop, Desktop window vertical shift and Desktop window style, [visual] Fix-tier rows (the shift a number, the rest choices), live, in edvr.ini order");
+    for (int i = 0; i < kCount; ++i) {
+        if (strncmp(kMenuRows[i].key, "desktop_window", 14) == 0 && strcmp(kMenuRows[i].section, "visual") == 0)
+            checkf(strcmp(kMenuRows[i].page, "desktop_window") == 0, "visual.%s is on the Desktop window page, not on the Visual page", kMenuRows[i].key);
+    }
+    if (shift < 0) {
+        check(false, "the Desktop window page has a vertical shift row");
+        return;
+    }
+    const MenuRowDef& d = kMenuRows[shift];
+    check(strcmp(d.shipped, "0") == 0 && strcmp(d.lo, "-100") == 0 && strcmp(d.hi, "100") == 0 && d.precision == 0 && !d.percent && strcmp(d.step, "5") == 0 && strcmp(d.unit, "%") == 0 &&
+              strcmp(d.zero, "default") == 0 && d.showSign,
+          "the vertical shift ships at 0 and is a signed whole number from -100 to 100 in steps of 5, in %, a zero reading (default)");
+    check(menuFormatNumber(d, 25.0) == "+25 %" && menuFormatNumber(d, -25.0) == "-25 %" && menuFormatNumber(d, 0.0) == "0 % (default)", "it reads +25 %, -25 % and 0 % (default)");
+    check(menuSteppedNumber(d, 0.0, 1, 1) == 5.0 && menuSteppedNumber(d, 0.0, -1, 1) == -5.0 && menuSteppedNumber(d, 100.0, 1, 1) == 100.0 && menuSteppedNumber(d, -100.0, -1, 1) == -100.0,
+          "a press steps by 5 either side of 0 and the ends hold at -100 and 100");
+    check(strstr(d.detail, "straight ahead") == nullptr && strstr(d.detail, "0 is the default centre") != nullptr, "its tooltip says 0 is the default centre, not straight ahead");
+}
 
 void testVisualPage() {
     printf("visual page\n");
@@ -1957,7 +2015,7 @@ void testVisualPage() {
         if (strcmp(kMenuRows[i].key, "world_scale") == 0) world = i;
         ++at;
     }
-    check(inOrder && at == kWant, "VR's Visual page is Screen curve, Intro background picture, World scale, Intro movie and Star glow, Fix tier, in edvr.ini order under their headings");
+    check(inOrder && at == kWant, "VR's Visual page is Screen curve, Intro background picture, World scale, Intro movie and Star glow, Fix tier, in edvr.ini order under their headings (the desktop window rows moved to their own page, 2026-10-28)");
     for (int i = 0; i < kCount; ++i) {
         const bool moved = strcmp(kMenuRows[i].key, "panel_curvature") == 0 || strcmp(kMenuRows[i].key, "intro_backdrop") == 0 || strcmp(kMenuRows[i].key, "intro_video") == 0;
         if (moved && strcmp(kMenuRows[i].section, "advanced") != 0) checkf(strcmp(kMenuRows[i].page, "fixes") != 0, "%s.%s is no longer on the Fixes page", kMenuRows[i].section, kMenuRows[i].key);
@@ -2067,6 +2125,7 @@ int main(int argc, char** argv) {
     testNumberRows();
     testLegacyOnFootRowsStayOutOfMenu();
     testVisualPage();
+    testDesktopWindowPage();
     if (failures) {
         printf("hotkey_capture_test: %d of %d checks FAILED\n", failures, checks);
         return 1;

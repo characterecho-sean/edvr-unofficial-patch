@@ -97,6 +97,9 @@ class SystemSource {
   virtual void notePropertyQuery(unsigned,vr::TrackedDeviceIndex_t,
       vr::ETrackedDeviceProperty,vr::ETrackedPropertyError) noexcept {}
   virtual void noteHiddenMesh(unsigned,uint64_t,uint32_t,const char*,uint32_t) noexcept {}
+  // Every answer that carried a mesh (non-null vertex data, a triangle count above zero) for the eye: the game's own test for "a hidden-area mesh was served" reads the
+  // counts it stored from such answers. Unlike noteHiddenMesh it is not rate limited; it must stay cheap and must not wait.
+  virtual void noteHiddenMeshServed(unsigned) noexcept {}
   virtual void unsupported(unsigned slot) noexcept=0;
 };
 }

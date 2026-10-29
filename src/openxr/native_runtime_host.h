@@ -35,6 +35,7 @@
 #include "native_menu_client.h"
 #include "native_temporal_client.h"
 #include "native_sharpen_client.h"
+#include "native_desktop_window_client.h"
 #include "native_frame_client.h"
 #include "native_fov_trim.h"
 #include "native_timing_client.h"
@@ -288,6 +289,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   NativeMenuClient menu;
   NativeTemporalClient temporal;
   NativeSharpenClient sharpen;
+  NativeDesktopWindowClient desktopWindow;   // visual.desktop_window: each captured eye's finished texture, for Elite's desktop window (optional)
   NativeTimingClient timing;
   DeviceGpuTiming deviceTiming;
   bool deviceTimingReady=false;
@@ -882,6 +884,12 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     nativeTracePrintf("property_query,slot=%u,index=%u,property=%u,error=%u,game_frames=%u,game_rvas=%s\n",
       slot,index,unsigned(property),unsigned(error),stack.gameFrames,stack.rvas);
   }
+  // Every answer to the game's GetHiddenAreaMesh that carried a mesh (not the rate-limited trace below): the eye's bit is set and stays set, as Elite's own count for
+  // the eye does once it holds a non-empty mesh (RVA 0x4E4910 stores the count only when vertex data comes back; 0x4E45A0 tests either eye's count).
+  void noteHiddenMeshServed(unsigned eye) noexcept override {
+    if(eye<2)hiddenMeshServedEyes.fetch_or(1u<<eye,std::memory_order_release);
+  }
+  std::atomic<unsigned> hiddenMeshServedEyes{0};
   void noteHiddenMesh(unsigned eye,uint64_t revision,uint32_t triangles,const char* reason,uint32_t dropped) noexcept override {
     const auto stack=edvr::captureGameCallStack();
     nativeTracePrintf("hidden_mesh_query,eye=%u,revision=%llu,triangles=%u,dropped=%u,reason=%s,game_frames=%u,game_rvas=%s\n",
@@ -2308,7 +2316,13 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     if(transferClock&&transferClockEnd) timingFrame.transferMs[unsigned(eye)]=elapsedMs(transferBegan,transferEnded);
     if(r==vr::VRCompositorError_None&&menuTreated&&menuEyes[unsigned(eye)]++==0)
       nativeTracePrintf("native_menu,first_captured_eye=%u\n",unsigned(eye));
-    if(r==vr::VRCompositorError_None && copyPixels){++copiedEyes;temporalFrameEyes|=1u<<unsigned(eye);}
+    if(r==vr::VRCompositorError_None && copyPixels){
+      ++copiedEyes;temporalFrameEyes|=1u<<unsigned(eye);
+      // The eye is captured: its finished texture (after the upscaler, sharpening, the UI layer and the menu) is what visual.desktop_window shows in Elite's window.
+      // It goes with whether this runtime has served the game a hidden-area mesh, the test Elite's own mirror makes (either eye's mesh non-empty, kept once served, as the
+      // game keeps its counts): the crop rule visual.desktop_window_crop = native zooms when it has. No query answered yet is no mesh.
+      desktopWindow.noteEye(unsigned(eye),treated.Get(),treatedBounds,(hiddenMeshServedEyes.load(std::memory_order_acquire)&3u)!=0);
+    }
     else { invalidateEyeTreatments(); timingInvalidate(); }
     return r;
   }
@@ -3937,6 +3951,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     producerTiming.shutdown(); // Same contract: release only, safe off the render thread.
     const auto timingClosed=timing.close();
     if(FAILED(timingClosed)) nativeTracePrintf("native_timing,close_failure=%08lx\n",(unsigned long)timingClosed);
+    desktopWindow.close(); // CPU only: the graphics half lets the held eye images go at its next Present
     if(FAILED(temporal.close()))return clean=false;
     if(FAILED(sharpen.close()))return clean=false;
     if(FAILED(features.close()))return clean=false;
@@ -4310,6 +4325,10 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
           nativeTracePrintf("native_device_timing,initialized=%u,source=EDVR_on_XR_device,compositor=0\n",unsigned(deviceTimingReady));
         }
       }
+      // Optional, like the timing above: a graphics half without the export leaves Elite's window as it was.
+      acquired=desktopWindow.acquire(options.graphicsProvider,externalDevice,runtimeGeneration);
+      if(acquired!=S_OK) nativeTracePrintf("native_desktop_window,unavailable=%08lx\n",(unsigned long)acquired);
+      else nativeTracePuts("native_desktop_window,provider_acquired=1");
     }
     startupSteps.other=stepMs(step);
     return runtimeGeneration!=0&&compositorGeneration!=0;

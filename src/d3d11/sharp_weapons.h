@@ -1,4 +1,4 @@
-// fix.sharp_weapons' GPU pieces that the DLL (ui_layer.cpp) and the WARP rig (tools/sharp_weapons_test) must run identically: the blend
+// The weapons fire's GPU pieces that the DLL (ui_layer.cpp) and the WARP rig (tools/sharp_weapons_test) must run identically: the blend
 // states of the tonemap re-issues, the source pass's recorder, and the mapping from a plan step (weapons_fire.h) to the HDR source and the
 // blend it is issued with. Header-only; no game state, no Log.
 #pragma once

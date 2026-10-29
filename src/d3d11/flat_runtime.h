@@ -191,7 +191,7 @@ struct FlatRuntimeDrawScope {
         if (uiTaken && flatUiLayerWriteBackBegin(ctx)) { issue(); flatUiLayerWriteBackEnd(ctx); }
         // visual.star_glow: a star pass the game just issued into H is issued once more into the star layer, with the game's own state (the hook's real call).
         if (starReplay && flatStarGlowReplayBegin(ctx, starRole, starW, starH)) { issue(); flatStarGlowReplayEnd(ctx); }
-        // The weapons' light is re-issued through the same draw before the HUD's (fix.sharp_weapons: the layer binds each step's source and blend and says when
+        // The weapons' light is re-issued through the same draw before the HUD's (the weapons fire: the layer binds each step's source and blend and says when
         // none is left); with only the HUD in the layer the plan is one step and the loop never runs.
         if (uiTone && flatUiLayerToneBegin(ctx)) { issue(); while (flatUiLayerToneNext(ctx)) issue(); flatUiLayerToneEnd(ctx); }
     }

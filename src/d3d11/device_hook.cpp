@@ -55,6 +55,7 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 #include "vr_ssaa_gate.h"   // the step-1 Supersampling gate instruments (log only)
 #include "vr_ssaa_hold.h"   // the Supersampling hold's shutdown (the loader slot goes back)
 #include "vr_display_observer.h"  // the game window's state (read only) and its handle
+#include "desktop_window.h"  // visual.desktop_window: the eye image drawn into Elite's desktop window at its Present
 #include "mode_watch.h"     // modeWatchFrameBoundary: the 3D mode watch's commit, at the frame boundary
 
 #include <intrin.h>         // _ReturnAddress: the caller of each observed call
@@ -1813,6 +1814,10 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
     // reads below, which time the call alone. The gate is one relaxed load.
     const bool routeCrumbs = hdrCrumbPresentSide();
     if (routeCrumbs) hdrCrumbWrite("present", "begin");
+    // visual.desktop_window (desktop_window.h): while the eye image is wanted in Elite's desktop window, the window is shaped and the eye is drawn into the buffer
+    // about to be presented, Elite's own draws into it having been skipped this frame. The setting off (game, the default) and the flat profile: a few loads and a return.
+    // Before the GPU work span closes below, so its draw is inside the frame's span and its tick is named.
+    if (dev && desktopWindowPresent(self, dev, flags, runtimeFlatProfile())) frameTick("desktop_window");
     // The frame's GPU work span ends here (2026-10-14, gpu_census.cpp): EDVR's door work is done and the real Present is next, on
     // the game's own context. Before this call, so the pair is still inside the census scope that the boundary after the Present closes.
     if (dev && gpuCensusFrameWorkOpen()) {

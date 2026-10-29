@@ -45,7 +45,7 @@
 
 #include "holo_families.h"  // the crisp take's eight hologram VS hashes: kHoloGeneric's match list
 #include "supercruise_lines.h"  // the orbit lines' and the supercruise bars' shader pairs
-#include "weapons_fire.h"  // the weapons-fire pairs (fix.sharp_weapons)
+#include "weapons_fire.h"  // the weapons-fire pairs
 #include "shield_ripple.h"  // the shield refraction pair
 #include "holo_material.h"  // the cockpit holo panels' second vertex shader (Disable GUI effects)
 
@@ -663,12 +663,12 @@ enum class UiLayerFamily : uint8_t {
                  // pixel shaders (uiOnFootHudMatch), named only while the facts say native stereo is on foot (UiFamilyFacts.nativeOnFoot)
     kWeaponsFire,  // the weapons fire (weapons_fire.h: beams and bolts, multicannon rounds and the shield strike's additive part, by
                    // their exact vertex/pixel PAIRS): additive world light taken into the eye's OWN additive HDR layer, separate from
-                   // the HUD's over-blend one, and added onto the upscaled picture after the tonemap. Governed by fix.sharp_weapons,
-                   // NOT fix.ui_quality (uiLayerFamilyEnabled). Not a scene LINE: exempt from the density rule. Last in the enum so
+                   // the HUD's over-blend one, and added onto the upscaled picture after the tonemap. Governed by the weapons fire's own
+                   // half, NOT fix.ui_quality (uiLayerFamilyEnabled). Not a scene LINE: exempt from the density rule. Last in the enum so
                    // no older family's number moves (kOnFootHud, the on-foot HUD's, sits ahead of it).
     kShieldRipple,  // the shield-strike refraction (shield_ripple.h: vs 820E5C131B99361D with ps 6EAA86EFE135B2D4): the game's own draw, taken out of the scene and
                     // re-issued through the HDR layer route into the eye's R32G32_FLOAT displacement layer D (t0 swapped for a UV ramp), applied at the door after RCAS.
-                    // Governed by fix.sharp_weapons, as a half of the layer of its own. Last in the enum.
+                    // Governed by its own half of the layer, beside the weapons fire's. Last in the enum.
     kCount
 };
 
@@ -709,12 +709,12 @@ inline bool uiLayerFamilyTakesHdr(UiLayerFamily f) {
            f == UiLayerFamily::kWeaponsFire || f == UiLayerFamily::kShieldRipple;
 }
 
-// Which key governs a family: the weapons fire is fix.sharp_weapons's, and so is the shield ripple (as a half of its own: `rippleOn` is the key with the ripple's own
-// stand-down), every other family is fix.ui_quality's. The two keys are
-// independent (the four combinations are the sharp_weapons_test rig's): fix.ui_quality off takes no interface, fix.sharp_weapons off
-// takes no weapons fire, whatever the other says. `qualityOn` and `sharpOn` are the keys' LIVE states (the layer not stood down).
-inline bool uiLayerFamilyEnabled(UiLayerFamily f, bool qualityOn, bool sharpOn, bool rippleOn = true) {
-    return f == UiLayerFamily::kWeaponsFire ? sharpOn : f == UiLayerFamily::kShieldRipple ? rippleOn : qualityOn;
+// Which half governs a family: the weapons fire is its own half, and so is the shield ripple (as a half of its own: `rippleOn` is its live state, with
+// the ripple's own stand-down), every other family is fix.ui_quality's. The halves are
+// independent (the four combinations are the sharp_weapons_test rig's): fix.ui_quality off takes no interface, a stood-down weapons half takes no
+// weapons fire, whatever the other says. `qualityOn` and `weaponsOn` are the halves' LIVE states (the layer not stood down).
+inline bool uiLayerFamilyEnabled(UiLayerFamily f, bool qualityOn, bool weaponsOn, bool rippleOn = true) {
+    return f == UiLayerFamily::kWeaponsFire ? weaponsOn : f == UiLayerFamily::kShieldRipple ? rippleOn : qualityOn;
 }
 
 // The two families that are scene geometry rather than interface: the layer takes them for DENSITY alone (their lines
@@ -1145,7 +1145,7 @@ enum class UiLayerDecision : uint8_t {
                      // made, or the game has a geometry shader of its own bound): the draw
                      // stays in the scene, and the module's line says which
     kLayerFailed,    // the layer (or its depth target) could not be created
-    kFamilyOff,      // the key that governs the family is off (fix.sharp_weapons for the weapons fire, fix.ui_quality for the rest):
+    kFamilyOff,      // the half that governs the family is off (the weapons fire's own half, fix.ui_quality for the rest):
                      // tested right after the verdict, so an off key is the reason whatever else holds. Last in the enum so no older
                      // decision's number moves.
     kCount
@@ -1244,6 +1244,56 @@ inline const char* uiGlowFeedName(UiGlowFeed v) {
     }
 }
 
+// The headset's HUD bloom feed (ui_layer.h uiLayerHeadsetGlowFeed; docs/cockpit-hud-layer-design-2026-09-27.md, "2026-10-28: the HUD's bloom in the
+// headset"). The bloom chain's first level of an eye reads that eye's H at t0; the HUD the layer took from H lives in that eye's HDR HUD layer. Which
+// layer (if any) belongs to the H a first-level draw reads, and whether its light may join this draw's H', is a pure function of four facts per eye,
+// read by the caller. An H is the layer's by IDENTITY (the target its HUD draws were taken from), never by the eye's index or by draw order: the eyes'
+// draws interleave.
+struct UiHeadsetHudEye {
+    bool drawnFromH = false;   // the layer's HUD draws were taken from this very H (the layer's hdrTarget is the first level's t0 resource)
+    bool fresh = false;        // it holds this frame's content (its frame is the frame in progress, it has taken draws, it has a view)
+    bool toned = false;        // the tonemap re-issue already ran for that content (the bloom of this frame is made: too late to join it)
+    bool claimed = false;      // an earlier first-level draw of this frame already took the content (a second one is never fed)
+};
+enum class UiHeadsetHud : uint8_t {
+    kFeed = 0,    // the eye's layer holds this frame's unclaimed light: it joins H'
+    kNoLayer,     // no eye's layer draws from this H (the 2D screen's scene, an H nothing was taken from, the layers not made yet)
+    kNoContent,   // an eye's layer draws from this H but holds no content of this frame (no HUD was drawn before the first level)
+    kToneDone,    // ... but its content was already tonemapped (the first level came after the re-issue)
+    kRepeat,      // ... but an earlier first-level draw of the frame already took it
+    kCount
+};
+// The verdict for an H, and the eye whose layer it is (-1 for kNoLayer). Eye 0 is asked first; one H belongs to one eye.
+inline UiHeadsetHud uiHeadsetHudPick(const UiHeadsetHudEye eyes[2], int* eye) {
+    if (eye) *eye = -1;
+    for (int e = 0; e < 2; ++e) {
+        if (!eyes[e].drawnFromH) continue;
+        if (eye) *eye = e;
+        if (!eyes[e].fresh) return UiHeadsetHud::kNoContent;
+        if (eyes[e].toned) return UiHeadsetHud::kToneDone;
+        if (eyes[e].claimed) return UiHeadsetHud::kRepeat;
+        return UiHeadsetHud::kFeed;
+    }
+    return UiHeadsetHud::kNoLayer;
+}
+// Does any eye still hold a frame's HUD light that no first level has taken? The headset hook looks at first-level draws only while this is true (the pending flag),
+// so an eye-frame outside a cockpit, and an eye already claimed, cost the draw path nothing past one load.
+inline bool uiHeadsetHudWaiting(const UiHeadsetHudEye eyes[2]) {
+    for (int e = 0; e < 2; ++e)
+        if (eyes[e].fresh && !eyes[e].toned && !eyes[e].claimed) return true;
+    return false;
+}
+inline const char* uiHeadsetHudName(UiHeadsetHud v) {
+    switch (v) {
+        case UiHeadsetHud::kFeed: return "feed";
+        case UiHeadsetHud::kNoLayer: return "no-layer";
+        case UiHeadsetHud::kNoContent: return "no-content";
+        case UiHeadsetHud::kToneDone: return "tone-done";
+        case UiHeadsetHud::kRepeat: return "repeat";
+        default: return "?";
+    }
+}
+
 // The facts the draw path gathers; the decision is a pure function of them.
 struct UiLayerDrawFacts {
     UiLayerFamily family = UiLayerFamily::kNone;
@@ -1292,7 +1342,7 @@ struct UiLayerDrawFacts {
     // test (eye known, armed, not late, no MRT/UAV, the seeded depth-stencil,
     // the blend) applies exactly as for the LDR take.
     bool crispHdr = false;
-    // The key that governs the family is on (uiLayerFamilyEnabled): fix.sharp_weapons for the weapons fire, fix.ui_quality for every
+    // The half that governs the family is on (uiLayerFamilyEnabled): the weapons fire's own half, fix.ui_quality for every
     // other family. True by default, so a caller that never asks decides exactly as it always did.
     bool familyEnabled = true;
 };
@@ -1486,18 +1536,18 @@ inline int uiWorldFormatRefusal(char* out, size_t size, int eye, uint16_t id) {
 inline bool uiLayerLiveFor(float target, bool temporal, bool jitterAsShipped, bool stoodDown) {
     return target > 0.0f && temporal && jitterAsShipped && !stoodDown;
 }
-// The weapons-fire half of the layer is live under its own key, whatever fix.ui_quality says: fix.sharp_weapons on, a temporal mode on
-// (the layer composites onto the AA output), the jitter as shipped, not stood down, and not the flat profile (VR only). The
-// layer's machinery (the door, the HDR tonemap re-issue, the composite) runs when EITHER half is live; the UI-quality-only parts (the
-// 2D screen, the maps gate, the VR world route, the after-UI take) run on the first alone.
-inline bool uiLayerWeaponsLiveFor(bool sharp, bool temporal, bool jitterAsShipped, bool stoodDown) {
-    return sharp && temporal && jitterAsShipped && !stoodDown;
+// The weapons-fire half of the layer is live whatever fix.ui_quality says: a temporal mode on (the layer composites onto the AA output), the
+// jitter as shipped, not stood down, and not the flat profile (VR only). The layer's machinery (the door, the HDR tonemap re-issue, the
+// composite) runs when EITHER half is live; the UI-quality-only parts (the 2D screen, the maps gate, the VR world route, the after-UI take)
+// run on the first alone.
+inline bool uiLayerWeaponsLiveFor(bool temporal, bool jitterAsShipped, bool stoodDown) {
+    return temporal && jitterAsShipped && !stoodDown;
 }
 inline bool uiLayerMachineryLive(bool qualityLive, bool weaponsLive) { return qualityLive || weaponsLive; }
-// The shield ripple's half: fix.sharp_weapons is on, a temporal mode is on (the door composites over its output), the jitter as shipped, and not stood
-// down (the layer's or the ripple's own). Both profiles. The machinery runs when it is live too (uiLayerMachineryLive of the union).
-inline bool uiLayerRippleLiveFor(bool taking, bool temporal, bool jitterAsShipped, bool stoodDown) {
-    return taking && temporal && jitterAsShipped && !stoodDown;
+// The shield ripple's half: a temporal mode is on (the door composites over its output), the jitter as shipped, and not stood down (the layer's
+// or the ripple's own). Both profiles. The machinery runs when it is live too (uiLayerMachineryLive of the union).
+inline bool uiLayerRippleLiveFor(bool temporal, bool jitterAsShipped, bool stoodDown) {
+    return temporal && jitterAsShipped && !stoodDown;
 }
 inline const char* uiLayerNotLiveReasonFor(float target, bool temporal, bool jitterAsShipped, bool stoodDown) {
     if (!(target > 0.0f)) return "fix.ui_quality is off";

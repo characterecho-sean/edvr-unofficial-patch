@@ -222,7 +222,7 @@ public:
         case 0xB12F7A618E1BDE98ull:
         case 0x203DF51758AADC4Dull:
         case 0xC7FA0C0F5DD49180ull: // six 8194-vertex instances beside the bodies
-        // The weapons fire (weapons_fire.h; fix.sharp_weapons, docs/dlss-blur-elements-2026-10-14.md W3/A1): an eye dump holds each pair's VS
+        // The weapons fire (weapons_fire.h; docs/dlss-blur-elements-2026-10-14.md W3/A1): an eye dump holds each pair's VS
         // b0/b1/b2, so 1F17's CB1[41..48] and 939D's and 5C1D's CB0 rows 4-7 can be compared with the jittered scene camera's matrix of the
         // SAME frame (done 2026-10-16: all three carry the jitter; the jitter-cancel table says cancel for each).
         case 0x1F17BF54DB6EE407ull: // beams and bolts
