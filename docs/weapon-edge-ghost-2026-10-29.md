@@ -34,8 +34,9 @@
   `clean_weapon_edges` line, so the key is on; it is the developer-tier menu
   row "Clean weapon edges (test)". Brief: fast swings at the hip over textured
   ground; `hotkey.dump_eyes` during a swing with the key on, then off, then on;
-  check the gun against the hand and arm too. Read: `edvr_log.py --expect-build
-  HEAD --grep "weapon edges"` (rim passes non-zero on foot), then `--rim` on
+  check the gun against the hand and arm too. Read: `edvr_log.py --target
+  frontier --expect-build abd7b82c --grep "weapon edges"` (rim passes non-zero
+  on foot; HEAD is a later doc-only commit), then `--rim` on
   each dump. With the fix on, `first_frame_mv` should show
   `foreground_rim_sentinel` above 0 (today's dump: 0 of 3175), the ring's
   `foreground_vector` share should fall to near 0, and the foreground rim's
