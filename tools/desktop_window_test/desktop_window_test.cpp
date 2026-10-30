@@ -30,6 +30,7 @@
 #include "../../src/common/desktop_window_census.h"
 #include "../../src/common/desktop_window_math.h"
 #include "../../src/openxr/native_desktop_window_client.h"
+#include "../../src/d3d11/desktop_vsync.h"
 
 #include <cmath>
 #include <cstdio>
@@ -1214,7 +1215,38 @@ static void wiring(const std::string& root) {
     check(at(flatKeys, "vertical_shift") == std::string::npos, "the flat profile's allow-list does not carry visual.desktop_window_vertical_shift");
 }
 
+// The desktop window's vertical sync (desktop_vsync.h): VR presents with 0 whatever Elite asks, flat as Elite asks; one line per change, never per frame. The wiring: the
+// Present hook calls the real Present with the decided value on Elite's own swapchain, and the trace keeps the value Elite asked for. Each pin has a control that trips.
+static void vsyncRules() {
+    check(desktopVsyncPresented(false, 1) == 0 && desktopVsyncPresented(false, 2) == 0 && desktopVsyncPresented(false, 0) == 0, "vsync: VR presents with 0 whatever Elite asks");
+    check(desktopVsyncPresented(true, 1) == 1 && desktopVsyncPresented(true, 0) == 0 && desktopVsyncPresented(true, 4) == 4, "vsync: flat presents Elite's own interval");
+    DesktopVsyncNote n;
+    const bool first = n.changed(false, 1), again = n.changed(false, 1), asked = n.changed(false, 0), toFlat = n.changed(true, 0), same = n.changed(true, 0);
+    check(first && !again && asked && toFlat && !same, "vsync: a line on the first Present and at each change of Elite's value or the profile, none per frame");
+    char line[200];
+    formatDesktopVsync(line, sizeof(line), false, 1);
+    check(std::strstr(line, "desktop vsync (VR): Elite asked sync interval 1; presented with 0") == line, "vsync: the VR override's line names what Elite asked and the 0 presented");
+    formatDesktopVsync(line, sizeof(line), false, 0);
+    check(std::strcmp(line, "desktop vsync (VR): Elite asks sync interval 0; nothing to override") == 0, "vsync: a VR Present already at 0 says so, so a log tells the code ran");
+    formatDesktopVsync(line, sizeof(line), true, 1);
+    check(std::strstr(line, "desktop vsync: the flat profile") == line && std::strstr(line, "presented as asked") != nullptr, "vsync: the flat line says Elite's interval stands");
+}
+static void vsyncWiring(const std::string& root) {
+    const std::string hook = readFile(root + "\\src\\d3d11\\device_hook.cpp");
+    auto wired = [](const std::string& t) {
+        const size_t mine = at(t, "if (self != g_state->swapChain) {\n        return g_state->realPresent(self, syncInterval, flags);");
+        const size_t decide = at(t, "const UINT presentSync = desktopVsyncPresented(flatProfileNow, syncInterval);");
+        const size_t call = at(t, "const HRESULT hr = g_state->realPresent(self, presentSync, flags);");
+        return mine != std::string::npos && decide != std::string::npos && call != std::string::npos && mine < decide && decide < call &&
+               count(t, "g_state->realPresent(self, syncInterval, flags)") == 1 && at(t, "GetCurrentThreadId(), syncInterval, flags, static_cast<int32_t>(hr)};") != std::string::npos;
+    };
+    check(!hook.empty() && wired(hook), "vsync wiring: another swapchain's Present is forwarded as asked; Elite's is presented with the decided interval; the trace keeps Elite's value");
+    check(!wired(replaced(hook, "g_state->realPresent(self, presentSync, flags);", "g_state->realPresent(self, syncInterval, flags);")), "vsync control: a real Present given Elite's value trips the pin");
+    check(!wired(replaced(hook, "GetCurrentThreadId(), syncInterval, flags,", "GetCurrentThreadId(), presentSync, flags,")), "vsync control: a trace that records the presented value trips the pin");
+}
+
 int main(int argc, char** argv) {
+    vsyncRules();
     rules();
     shapeRules();
     windowRules();
@@ -1222,8 +1254,12 @@ int main(int argc, char** argv) {
     hideRules();
     lines();
     handoff();
-    if (argc > 1) wiring(argv[1]);
-    else check(false, "argv[1] is the repository root");
+    if (argc > 1) {
+        wiring(argv[1]);
+        vsyncWiring(argv[1]);
+    } else {
+        check(false, "argv[1] is the repository root");
+    }
     std::printf("desktop_window_test: %u checks, %u failed\n", g_checks, g_failed);
     return g_failed ? 1 : 0;
 }
