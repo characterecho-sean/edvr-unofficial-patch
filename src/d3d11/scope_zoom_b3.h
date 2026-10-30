@@ -284,7 +284,6 @@ struct B3StepIn {
     bool shareMode = false, qualifies = false, sightsFull = false, leftOk = false;   // b3Gate's facts
     double share = 0.0, dt = 0.0, m = kNaN;
     double tcNow[2] = {kNaN, kNaN};         // the left eye's direction to the far point c on this tick (what the window latches)
-    uint32_t edge = 0;                      // what fills the left eye's strip while the zoom stands (scopewin::kEdge*)
 };
 struct B3StepOut {
     scopewin::Request request;              // published to the provider this tick
@@ -324,17 +323,15 @@ inline B3StepOut b3Step(B3Loop& loop, const B3StepIn& in) noexcept {
     o.request.tc[0] = static_cast<float>(loop.tc[0]);
     o.request.tc[1] = static_cast<float>(loop.tc[1]);
     o.request.strip = static_cast<float>(loop.strip.fade);
-    o.request.edge = in.edge < scopewin::kEdgeModes ? in.edge : scopewin::kEdgeBlack;
     o.frameAsked = in.qualifies && o.asked && now;
     return o;
 }
 // Outside the sights: no window is held and the strip comes back (it is still published until it has).
-inline scopewin::Request b3IdleStep(B3Loop& loop, double dt, uint32_t edge = scopewin::kEdgeBlack) noexcept {
+inline scopewin::Request b3IdleStep(B3Loop& loop, double dt) noexcept {
     loop.latched = false;
     b3StripStep(loop.strip, false, dt);
     scopewin::Request rq;
     rq.strip = static_cast<float>(loop.strip.fade);
-    rq.edge = edge < scopewin::kEdgeModes ? edge : scopewin::kEdgeBlack;
     return rq;
 }
 // Not armed, or the flat profile: nothing is held and the strip is gone at once.
@@ -420,8 +417,6 @@ struct B3Press {
     // outside, and the fraction of the lens area outside summed and at its largest
     uint32_t outN = 0, outFrames = 0;
     double outSum = 0.0, outMax = 0.0;
-    // what fills the strip (scopewin::kEdge*)
-    uint32_t edge = 0;
     // the draw path
     uint32_t drawFrames[2] = {};
     uint64_t draws[2][2] = {};   // [eye][inside, outside]: draws summed over the frames
@@ -468,8 +463,8 @@ inline int formatB3Press(char* buf, size_t n, const B3Press& p) noexcept {
         numText(b3Mean(p.ftSum[e], p.ftN[e]), 2, fm[e], sizeof(fm[e]));
         numText(p.ftN[e] ? p.ftMax[e] : kNaN, 2, fx[e], sizeof(fx[e]));
     }
-    appendf(buf, n, &len, "scope zoom (B3): press %u key %s edge %s; asked %u, held %u, zoom asked %u ticks, no left rows %u; zoomed frames %s; tc (%s, %s) M %s, window drift mean %s max %s deg; "
-            "DLSS resets L %s R %s (zoom edge %s); ", p.press, p.keyOn ? "on" : "off", scopewin::edgeName(p.edge), p.askedTicks, p.heldTicks, p.requestTicks, p.noLeftRows, zf,
+    appendf(buf, n, &len, "scope zoom (B3): press %u key %s; asked %u, held %u, zoom asked %u ticks, no left rows %u; zoomed frames %s; tc (%s, %s) M %s, window drift mean %s max %s deg; "
+            "DLSS resets L %s R %s (zoom edge %s); ", p.press, p.keyOn ? "on" : "off", p.askedTicks, p.heldTicks, p.requestTicks, p.noLeftRows, zf,
             numText(p.tc[0], 4, tcx, sizeof(tcx)), numText(p.tc[1], 4, tcy, sizeof(tcy)), numText(p.m, 3, mm, sizeof(mm)), numText(b3Mean(p.driftSumDeg, p.driftN), 3, dm, sizeof(dm)),
             numText(p.driftN ? p.driftMaxDeg : kNaN, 3, dx, sizeof(dx)), rl, rr, ed);
     appendf(buf, n, &len, "lens source: zoomed %u, A: not asked %u, not zoomed %u, no copy %u, stale %u, no matrices %u, no shader %u; copies %u; parallax at c mean %s max %s px; lens outside the copy on %u of %u frames, area mean %s max %s; ",
@@ -504,7 +499,7 @@ inline const char* b3Callers(const EdvrNativeScopeZoomReport& r, char* buf, size
 }
 inline int formatB3Runtime(char* buf, size_t n, const EdvrNativeScopeZoomReport& r) noexcept {
     int len = 0;
-    char rs[24], ms[24], ratio[24], callers[96], ams[24], rot[24];
+    char rs[24], ms[24], ratio[24], callers[96], mw[24];
     const double rawSpan = r.rawSpan > 0.f ? static_cast<double>(r.rawSpan) : kNaN, matrixSpan = r.matrixSpan > 0.f ? static_cast<double>(r.matrixSpan) : kNaN;
     appendf(buf, n, &len,
             "scope zoom (B3) runtime: zoomed frames %u over %.2f s, peak narrowing %.3f; refused: answer not version 11 %u, share not at full weight %u, share not drawn %u, geometry %u; "
@@ -518,11 +513,8 @@ inline int formatB3Runtime(char* buf, size_t n, const EdvrNativeScopeZoomReport&
             "span ratio raw over matrix %s; raw getter callers (RVA in the game's executable: reads) %s, other callers %u",
             r.rawReads, numText(rawSpan, 4, rs, sizeof(rs)), r.matrixReads, numText(matrixSpan, 4, ms, sizeof(ms)),
             numText(std::isfinite(rawSpan) && std::isfinite(matrixSpan) ? rawSpan / matrixSpan : kNaN, 3, ratio, sizeof(ratio)), b3Callers(r, callers, sizeof(callers)), r.rawCallerOther);
-    appendf(buf, n, &len,
-            "; edge fill %s: frames black %u, world %u, view %u, stretched %u; held copies %u, black for want of a held picture %u, held age at the end %u frames %s ms, largest world turn %s deg; "
-            "passed past a share not drawn %u",
-            scopewin::edgeName(r.edgeMode), r.fillFrames[0], r.fillFrames[1], r.fillFrames[2], r.fillFrames[3], r.heldCopies, r.heldMissing, r.heldAgeFrames,
-            numText(r.heldAgeMs, 1, ams, sizeof(ams)), numText(r.heldRotationMaxDeg, 2, rot, sizeof(rot)), r.shareNotDrawnPassed);
+    appendf(buf, n, &len, "; right-eye mirror strip on %u frames, widest %s of its width; passed past a share not drawn %u", r.mirrorFrames, numText(r.mirrorFrames ? static_cast<double>(r.mirrorWidthMax) : kNaN, 3, mw, sizeof(mw)),
+            r.shareNotDrawnPassed);
     return finishLine(buf, n, len);
 }
 

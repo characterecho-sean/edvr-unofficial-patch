@@ -598,58 +598,7 @@ inline void runB3(Check&& check) {
         nan.rawSpan = std::nanf("");
         check(!sw::reportReadable(&cut) && !sw::reportReadable(&later) && !sw::reportReadable(&nan) && !sw::reportReadable(nullptr), "B3 report: a report cut short, from a later version, with a number that is none, or absent is not");
     }
-    // ---- the strip's fill: its mode on the wire, through the tick, and the lens's reach outside the copy ---------------------------------------------------------------------------------------
-    {
-        namespace sw2 = edvr::scopewin;
-        for (uint32_t mode = 0; mode < sw2::kEdgeModes; ++mode) {
-            sw2::Request r;
-            r.zoom = true;
-            r.m = 4.0f;
-            r.tc[0] = 0.01f;
-            r.strip = 1.0f;
-            r.edge = mode;
-            uint32_t w[sw2::kWords];
-            sw2::toWords(r, w);
-            sw2::Request back = sw2::fromWords(w);
-            sw2::Request stripOnly;
-            stripOnly.strip = 0.5f;
-            stripOnly.edge = mode;
-            uint32_t w2[sw2::kWords];
-            sw2::toWords(stripOnly, w2);
-            const sw2::Request back2 = sw2::fromWords(w2);
-            check(back.edge == mode && back.zoom && back2.edge == mode && !back2.zoom && back2.strip == 0.5f, "B3 edge wire: every fill mode crosses with the zoom and with the strip alone");
-        }
-        sw2::Request none;
-        none.edge = sw2::kEdgeWorld;
-        uint32_t w3[sw2::kWords];
-        sw2::toWords(none, w3);
-        check(w3[0] == 0 && sw2::fromWords(w3).edge == sw2::kEdgeBlack, "B3 edge wire: no zoom and no strip is five zeros whatever the mode, which an older reader and a newer one read the same");
-        sw2::Request big;
-        big.strip = 1.0f;
-        big.edge = 7;
-        uint32_t w4[sw2::kWords];
-        sw2::toWords(big, w4);
-        check(sw2::fromWords(w4).edge == sw2::kEdgeBlack, "B3 edge wire: a mode out of range reads as black");
-        uint32_t old[sw2::kWords] = {sw2::kMagic | sw2::kFlagZoom, sw2::bitsOf(4.0f), sw2::bitsOf(0.01f), sw2::bitsOf(0.0f), sw2::bitsOf(1.0f)};
-        check(sw2::fromWords(old).edge == sw2::kEdgeBlack && sw2::fromWords(old).zoom, "B3 edge wire: the words of B3-1 (no mode) read as black");
-        check(!std::strcmp(sw2::edgeName(0), "black") && !std::strcmp(sw2::edgeName(1), "world") && !std::strcmp(sw2::edgeName(2), "view") && !std::strcmp(sw2::edgeName(3), "stretched") &&
-                  !std::strcmp(sw2::edgeName(9), "black"),
-              "B3 edge: the four mode names, and black for anything else");
-        sz::B3Loop loop;
-        sz::B3StepIn in;
-        in.keyOn = in.rendered = in.shareMode = in.qualifies = in.sightsFull = in.leftOk = true;
-        in.share = 1.0;
-        in.dt = 0.011;
-        in.m = 4.0;
-        in.tcNow[0] = 0.01;
-        in.tcNow[1] = 0.0;
-        in.edge = sw2::kEdgeView;
-        check(sz::b3Step(loop, in).request.edge == sw2::kEdgeView && sz::b3IdleStep(loop, 0.011, sw2::kEdgeStretched).edge == sw2::kEdgeStretched && sz::b3IdleStep(loop, 0.011).edge == sw2::kEdgeBlack &&
-                  sz::b3OffStep(loop).edge == sw2::kEdgeBlack,
-              "B3 edge: the tick publishes the mode with the window, the idle ticks keep it while the strip comes back, and the off step drops it");
-        in.edge = 9;
-        check(sz::b3Step(loop, in).request.edge == sw2::kEdgeBlack, "B3 edge: a mode out of range is black before it is published");
-    }
+    // ---- the lens's reach outside the copy ---------------------------------------------------------------------------------------------------------------------------------------------------
     {
         // the lens's reach outside the window copy. The copy: 6 degrees about the window's centre in the zoomed picture, here the tangent range tc +- tan(6 deg) less the filter's margin.
         const double zoomTan[4] = {-0.20, 0.22, -0.20, 0.22};
@@ -729,7 +678,6 @@ inline void runB3(Check&& check) {
         p.parN = 100;
         p.parSumPx = 12000.0;
         p.parMaxPx = 190.0;
-        p.edge = sw::kEdgeWorld;
         p.outN = 240;
         p.outFrames = 12;
         p.outSum = 240 * 0.021;
@@ -763,7 +711,7 @@ inline void runB3(Check&& check) {
         char line[sz::kB3PressLineBytes];
         const int len = sz::formatB3Press(line, sizeof(line), p);
         const std::string s(line);
-        check(len > 0 && static_cast<size_t>(len) == s.size() && s.rfind("scope zoom (B3): press 7 key on edge world; asked 900, held 880, zoom asked 860 ticks, no left rows 2; zoomed frames 850; tc (0.0006, -0.0001) M 4.067, window drift mean 0.010 max 0.080 deg; "
+        check(len > 0 && static_cast<size_t>(len) == s.size() && s.rfind("scope zoom (B3): press 7 key on; asked 900, held 880, zoom asked 860 ticks, no left rows 2; zoomed frames 850; tc (0.0006, -0.0001) M 4.067, window drift mean 0.010 max 0.080 deg; "
                                                                       "DLSS resets L 2 R 1 (zoom edge 2); lens source: zoomed 800, A: not asked 0, not zoomed 30, no copy 1, stale 0, no matrices 0, no shader 0; copies 810; "
                                                                       "parallax at c mean 120.0 max 190.0 px; lens outside the copy on 12 of 240 frames, area mean 0.021 max 0.350; ", 0) == 0,
               "B3 line: the first parts, in the order --health reads them");
@@ -774,7 +722,7 @@ inline void runB3(Check&& check) {
         char eline[sz::kB3PressLineBytes];
         sz::formatB3Press(eline, sizeof(eline), empty);
         const std::string es(eline);
-        check(es.find("tc (none, none) M none, window drift mean none max none deg") != std::string::npos && es.find("parallax at c mean none max none px; lens outside the copy on 0 of 0 frames, area mean none max none; ") != std::string::npos && es.find("key off edge black;") != std::string::npos &&
+        check(es.find("tc (none, none) M none, window drift mean none max none deg") != std::string::npos && es.find("parallax at c mean none max none px; lens outside the copy on 0 of 0 frames, area mean none max none; ") != std::string::npos && es.find("key off;") != std::string::npos &&
                   es.find("draws a frame in/out L none/none R none/none (frames 0/0)") != std::string::npos && es.find("frame ms in/out none/none (max none/none)") != std::string::npos,
               "B3 line: a press that measured nothing says none, so a rule can read it");
         // the longest the line can be: every counter six digits (the convention of the S1 line), then ten digits
@@ -790,7 +738,6 @@ inline void runB3(Check&& check) {
         worst.driftMaxDeg = 180.0;
         worst.parSumPx = 9.0e9;
         worst.parMaxPx = 99999.9;
-        worst.edge = sw::kEdgeStretched;
         worst.outN = worst.outFrames = 999999;
         worst.outSum = 999999.0;
         worst.outMax = 1.0;
@@ -869,14 +816,8 @@ inline void runB3(Check&& check) {
         r.rawCallerRva[2] = 0xFFFFFFFFu;
         r.rawCallerReads[2] = 3u;
         r.rawCallerOther = 2;
-        r.edgeMode = sw::kEdgeWorld;
-        r.fillFrames[1] = 258;
-        r.fillFrames[0] = 2;
-        r.heldCopies = 22;
-        r.heldMissing = 1;
-        r.heldAgeFrames = 250;
-        r.heldAgeMs = 2272.7f;
-        r.heldRotationMaxDeg = 3.214f;
+        r.mirrorFrames = 272;
+        r.mirrorWidthMax = 0.0834f;
         r.shareNotDrawnPassed = 1;
         check(sw::reportReadable(&r), "B3 runtime line: the report is readable");
         char line[sz::kB3RuntimeLineBytes];
@@ -889,18 +830,19 @@ inline void runB3(Check&& check) {
         check(s.find("the game's reads of eye 0's projection while it stood: raw getter 260 (its UI scale reads it; vertical tangent span answered 1.7000), matrix getter 130 (the picture is drawn with it; "
                      "span 0.4200), span ratio raw over matrix 4.048; raw getter callers (RVA in the game's executable: reads) 0x4E3C93:200 0x2842AE3:55 outside:3, other callers 2") != std::string::npos,
               "B3 runtime line: what each getter answered (the span), their ratio, and who read the raw getter with the rest counted as other");
-        check(s.find("; edge fill world: frames black 2, world 258, view 0, stretched 0; held copies 22, black for want of a held picture 1, held age at the end 250 frames 2272.7 ms, largest world turn 3.21 deg; "
-                     "passed past a share not drawn 1") != std::string::npos && s.rfind("passed past a share not drawn 1") == s.size() - std::strlen("passed past a share not drawn 1"),
-              "B3 runtime line: the fill's frames by mode, the held copies, the frames drawn black for want of a held picture, the held picture's age, the largest turn and the frames passed, at the end");
+        check(s.find("; right-eye mirror strip on 272 frames, widest 0.083 of its width; passed past a share not drawn 1") != std::string::npos &&
+                  s.rfind("passed past a share not drawn 1") == s.size() - std::strlen("passed past a share not drawn 1"),
+              "B3 runtime line: the right eye's mirror strip (frames drawn with it, the widest share of the eye's width it covered) and the frames passed, at the end");
         EdvrNativeScopeZoomReport ranNot = r;
-        std::memset(ranNot.fillFrames, 0, sizeof(ranNot.fillFrames));
-        ranNot.heldCopies = ranNot.heldMissing = ranNot.heldAgeFrames = ranNot.shareNotDrawnPassed = 0;
-        ranNot.heldAgeMs = ranNot.heldRotationMaxDeg = 0.f;
+        ranNot.mirrorFrames = ranNot.shareNotDrawnPassed = 0;
+        ranNot.mirrorWidthMax = 0.f;
         char rline[sz::kB3RuntimeLineBytes];
         sz::formatB3Runtime(rline, sizeof(rline), ranNot);
-        check(std::strstr(rline, "; edge fill world: frames black 0, world 0, view 0, stretched 0; held copies 0, black for want of a held picture 0, held age at the end 0 frames 0.0 ms, largest world turn 0.00 deg; "
-                                 "passed past a share not drawn 0") != nullptr,
-              "B3 runtime line: a press where the fill never ran says zero for every count, so it reads as one that did not run and not as one with no counts");
+        check(std::strstr(rline, "; right-eye mirror strip on 0 frames, widest none of its width; passed past a share not drawn 0") != nullptr,
+              "B3 runtime line: a press where the mirror strip never ran says zero frames and none, so it reads as one that did not run and not as one with no counts");
+        EdvrNativeScopeZoomReport nanMirror = r;
+        nanMirror.mirrorWidthMax = std::nanf("");
+        check(!sw::reportReadable(&nanMirror), "B3 runtime line: a mirror width that is no number is not a readable report");
         check(s.find("deg vertical") == std::string::npos, "B3 runtime line: no angle sum (it is not 1 / M for a window off the axis)");
         EdvrNativeScopeZoomReport none = r;
         none.rawReads = 0;
@@ -920,14 +862,12 @@ inline void runB3(Check&& check) {
         char hline[sz::kB3RuntimeLineBytes];
         sz::formatB3Runtime(hline, sizeof(hline), half);
         check(std::strstr(hline, "(the picture is drawn with it; span none), span ratio raw over matrix none;") != nullptr, "B3 runtime line: one span missing leaves no ratio");
-        // the longest it can be: every count six digits (a press does not last a million frames), four callers of the longest address, a long press, tangents and spans inside 100, the longest edge name
+        // the longest it can be: every count six digits (a press does not last a million frames), four callers of the longest address, a long press, tangents and spans inside 100
         EdvrNativeScopeZoomReport worst = r;
         worst.frames = worst.stripFrames = worst.meshWithheld = worst.rawReads = worst.matrixReads = worst.rawCallerOther = 999999u;
-        worst.heldCopies = worst.heldMissing = worst.heldAgeFrames = worst.shareNotDrawnPassed = 999999u;
-        worst.edgeMode = sw::kEdgeStretched;
+        worst.mirrorFrames = worst.shareNotDrawnPassed = 999999u;
         for (int i = 0; i < 4; ++i) {
             worst.refused[i] = 999999u;
-            worst.fillFrames[i] = 999999u;
             worst.trueTan[i] = -99.9999f;
             worst.zoomTan[i] = 99.9999f;
             worst.rawCallerRva[i] = 0xFFFFFFFEu;
@@ -936,12 +876,11 @@ inline void runB3(Check&& check) {
         worst.seconds = 99999.99f;
         worst.peakM = 8.0f;
         worst.rawSpan = worst.matrixSpan = 99.9999f;
-        worst.heldAgeMs = 99999999.0f;
-        worst.heldRotationMaxDeg = 180.0f;
+        worst.mirrorWidthMax = 1.0f;
         char wline[sz::kB3RuntimeLineBytes];
         const int wlen = sz::formatB3Runtime(wline, sizeof(wline), worst);
         check(wlen > 0 && static_cast<size_t>(wlen) < sz::kB3RuntimeLineBytes - 1 && wlen <= 1167 && std::strstr(wline, "passed past a share not drawn 999999") != nullptr,
-              "B3 runtime line: the worst case (six-digit counts, four callers, the fill's segment) keeps its end and fits the log's 1200 bytes with its stamp and marker");
+              "B3 runtime line: the worst case (six-digit counts, four callers, the mirror strip's segment) keeps its end and fits the log's 1200 bytes with its stamp and marker");
         EdvrNativeScopeZoomReport tenDigits = worst;
         tenDigits.shareNotDrawnPassed = 4294967295u;
         char tdline[sz::kB3RuntimeLineBytes];

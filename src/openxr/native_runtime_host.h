@@ -293,8 +293,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   ScopeZoomCallers zoomCallers;
   bool zoomAppliedNow=false,previousZoomed=false;   // eye 0 was told the window for this frame / for the kept pair a replay draws
   float zoomStripNow=0.f;
-  uint32_t zoomEdgeNow=0;          // B3-2: what fills the left eye's strip this frame (scopewin::kEdge*)
-  ScopeZoomFillTally zoomFill;     // B3-2: what the compositor drew into it, over the run of the strip
+  ScopeZoomMirrorTally zoomMirror; // B3-3: the right eye's mirror of the left eye's strip as the compositor drew it, over the run of the strip
   std::atomic<bool> zoomReadsOn{false};
   std::atomic<uint32_t> zoomRawReads{0},zoomMatrixReads{0};
   std::atomic<float> zoomRawSpan{0.f},zoomMatrixSpan{0.f};
@@ -2691,12 +2690,11 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       if(masks){const auto& m=masks->eyes[1];hidden={m.vertices.data(),uint32_t(m.vertices.size()),m.indices.data(),uint32_t(m.indices.size()),masks->revision};}
     }
     const auto r=frameWithheld?stereo.renderCaptured(previousViews,previousSpace,previousPair,layer,observer,nullptr,previousPlacement,fade,
-                                                     previousHeadValid?&previousHeadPose:nullptr,leftShare,&hidden,zoomStripNow,previousZoomed,zoomEdgeNow):
-      stereo.renderCaptured(frameViews,frameSpace,captured,layer,observer,&wall,framePlacement,fade,locatedHeadPose(),leftShare,&hidden,zoomStripNow,zoomAppliedNow,zoomEdgeNow);
-    {   // B3-2: what the strip was filled with on this frame, counted over the run of the strip
-      const StereoShareFacts& fillFacts=stereo.shareFacts();
-      zoomFill.note(zoomStripNow,frameWithheld?previousZoomed:zoomAppliedNow,fillFacts.drawn,fillFacts.fillMode,fillFacts.heldCopied,fillFacts.heldMissing,
-                    fillFacts.heldAgeFrames,fillFacts.heldAgeMs,fillFacts.heldRotationDeg);
+                                                     previousHeadValid?&previousHeadPose:nullptr,leftShare,&hidden,zoomStripNow,previousZoomed):
+      stereo.renderCaptured(frameViews,frameSpace,captured,layer,observer,&wall,framePlacement,fade,locatedHeadPose(),leftShare,&hidden,zoomStripNow,zoomAppliedNow);
+    {   // B3-3: whether the right eye's mirror of the strip was drawn on this frame, and how wide, counted over the run of the strip
+      const StereoShareFacts& mirrorFacts=stereo.shareFacts();
+      zoomMirror.note(zoomStripNow,frameWithheld?previousZoomed:zoomAppliedNow,mirrorFacts.mirrorDrawn,mirrorFacts.mirrorWidth);
     }
     sharePress(leftShare,r==XR_SUCCESS,frameWithheld);
     submitSample.xrAcquireMs=wall.acquire;submitSample.xrWaitMs=wall.wait;
@@ -2809,7 +2807,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     if(out.why==ScopeZoomWhy::kApplied&&!(fovToRaw(in.base,preRaw)&&fovToRaw(game.views[1].fov,toldRaw[1])&&fovToRaw(out.fov,zoomRaw))) {
       out=ScopeZoomOutput{};out.fov=in.base;out.why=ScopeZoomWhy::kGeometry;
     }
-    zoomStripNow=out.strip;zoomEdgeNow=out.edge;
+    zoomStripNow=out.strip;
     const bool applied=out.why==ScopeZoomWhy::kApplied;
     if(applied) {
       toldRaw[0]=preRaw;
@@ -2818,7 +2816,6 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     // The press's opening, its ending and the refusals it carries are scope_zoom_state.h's (ScopeZoomRun); this traces them and tells the d3d11 half.
     const ScopeZoomEvents ev=zoomRun.frame(out,frameCycleUs());
     if(ev.opened) {
-      zoomRun.press.edgeMode=out.edge;
       beginScopeZoomReads();
       nativeTracePrintf("scope_zoom,state=on,narrowing=%.3f,true_tan=%.4f/%.4f/%.4f/%.4f,zoom_tan=%.4f/%.4f/%.4f/%.4f,told_span_true=%.4f,told_span_zoomed=%.4f,strip=%.2f,share=%.3f\n",
         out.narrowing,out.trueTan[0],out.trueTan[1],out.trueTan[2],out.trueTan[3],out.zoomTan[0],out.zoomTan[1],out.zoomTan[2],out.zoomTan[3],
@@ -2842,7 +2839,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   }
   // The frame has no provider answer or no located geometry: nothing is narrowed, and a press that was open ends.
   void noteScopeZoomAbsent() {
-    zoomStripNow=0.f;zoomEdgeNow=0;zoomAppliedNow=false;
+    zoomStripNow=0.f;zoomAppliedNow=false;
     if(const char* ended=zoomRun.absent())closeScopeZoomPress(ended);
   }
   void closeScopeZoomPress(const char* ended) {
@@ -2851,7 +2848,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     press.rawReads=zoomRawReads.load(std::memory_order_relaxed);press.matrixReads=zoomMatrixReads.load(std::memory_order_relaxed);
     press.rawSpan=zoomRawSpan.load(std::memory_order_relaxed);press.matrixSpan=zoomMatrixSpan.load(std::memory_order_relaxed);
     zoomCallers.top(press.callerRva,press.callerReads,press.callerOther);
-    press.takeFill(zoomFill,press.edgeMode);
+    press.takeMirror(zoomMirror);
     press.open=false;
     EdvrNativeScopeZoomReport report{};press.fill(report);
     HRESULT told=S_FALSE;
@@ -2867,13 +2864,12 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       used+=(std::min)(size_t(n),sizeof(callers)-used);
     }
     nativeTracePrintf("scope_zoom_press,frames=%u,refused=%u/%u/%u/%u,strip_frames=%u,mesh_withheld=%u,seconds=%.3f,peak_narrowing=%.3f,true_tan=%.4f/%.4f/%.4f/%.4f,"
-                      "zoom_tan=%.4f/%.4f/%.4f/%.4f,raw_reads=%u,matrix_reads=%u,raw_getter_span=%.4f,matrix_getter_span=%.4f,span_ratio=%.3f,raw_callers=%s,raw_callers_other=%u,edge=%s,fill_frames=%u/%u/%u/%u,held_copies=%u,held_missing=%u,held_age=%u/%.1f,held_rotation_max=%.2f,not_drawn_passed=%u,ended=%s,told_graphics=%s\n",
+                      "zoom_tan=%.4f/%.4f/%.4f/%.4f,raw_reads=%u,matrix_reads=%u,raw_getter_span=%.4f,matrix_getter_span=%.4f,span_ratio=%.3f,raw_callers=%s,raw_callers_other=%u,mirror_frames=%u,mirror_width_max=%.3f,not_drawn_passed=%u,ended=%s,told_graphics=%s\n",
       report.frames,report.refused[0],report.refused[1],report.refused[2],report.refused[3],report.stripFrames,report.meshWithheld,double(report.seconds),double(report.peakM),
       double(report.trueTan[0]),double(report.trueTan[1]),double(report.trueTan[2]),double(report.trueTan[3]),double(report.zoomTan[0]),double(report.zoomTan[1]),
       double(report.zoomTan[2]),double(report.zoomTan[3]),report.rawReads,report.matrixReads,double(report.rawSpan),double(report.matrixSpan),
       report.rawSpan>0.f&&report.matrixSpan>0.f?double(report.rawSpan)/double(report.matrixSpan):0.0,callers,report.rawCallerOther,
-      scopewin::edgeName(report.edgeMode),report.fillFrames[0],report.fillFrames[1],report.fillFrames[2],report.fillFrames[3],report.heldCopies,report.heldMissing,report.heldAgeFrames,
-      double(report.heldAgeMs),double(report.heldRotationMaxDeg),report.shareNotDrawnPassed,ended,
+      report.mirrorFrames,double(report.mirrorWidthMax),report.shareNotDrawnPassed,ended,
       told==S_OK?"yes":told==S_FALSE?"no_export":"refused");
   }
   SystemRead read() const override {return geometry.read();}

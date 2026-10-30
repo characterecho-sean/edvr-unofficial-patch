@@ -37,15 +37,10 @@ struct EdvrNativeScopeZoomReport {
     uint32_t rawCallerRva[EDVR_NATIVE_SCOPE_ZOOM_REPORT_CALLERS];     // the busiest callers of the raw getter while the zoom stood, most first: the return address as an RVA in the game's executable (0xFFFFFFFF: outside it)
     uint32_t rawCallerReads[EDVR_NATIVE_SCOPE_ZOOM_REPORT_CALLERS];   // their reads; 0 in a slot no caller filled
     uint32_t rawCallerOther;    // the raw getter's reads by every other caller
-    // B3-2: what filled the left eye's strip while the zoom stood. The fill counts are those of the run of the strip (from the strip coming up to its going), taken at the press's end.
-    uint32_t edgeMode;          // what was asked to fill the strip at the press's last frame (scopewin::kEdge*)
-    uint32_t fillFrames[4];     // frames composed with the strip up or the left eye narrowed, by the fill drawn: black, world, view, stretched (a narrowed frame with no held picture counts as black)
-    uint32_t heldCopies;        // copies of the left eye's picture made to hold (a frame that was not narrowed, with the strip up)
-    uint32_t heldMissing;       // narrowed frames with no held picture of this run, drawn black
-    uint32_t heldAgeFrames;     // frames composed since the held picture was copied, as of the press's last frame
-    float heldAgeMs;            // ... and the time, ms
-    float heldRotationMaxDeg;   // the largest turn of the left view against the held picture's that the world fill applied, degrees
-    uint32_t shareNotDrawnPassed;   // frames the narrowing went on past a share that was not drawn the frame before (one in a row, scopewin note in scope_zoom_state.h)
+    // B3-3: the right eye's mirror of the left eye's strip (the directions of its view the left view does not see, black with the same edge band), counted over the run of the strip
+    uint32_t mirrorFrames;      // right-eye frames composed with the mirror strip drawn (the strip up or the left eye narrowed, with a share drawn)
+    float mirrorWidthMax;       // the largest share of the right eye's width it covered on one frame: the columns of its middle row at least half black, 0..1
+    uint32_t shareNotDrawnPassed;   // frames the narrowing went on past a share that was not drawn the frame before (one in a row)
 };
 // The export's type, spelled without windows.h (HRESULT is long, WINAPI is __stdcall): a rig that cannot include windows.h reads the runtime's headers.
 typedef long(__stdcall* EdvrNoteNativeScopeZoom)(const EdvrNativeScopeZoomReport*);
@@ -58,10 +53,6 @@ namespace scopewin {
 constexpr uint32_t kWords = 5;
 constexpr uint32_t kMagic = 0x5C0E0000u;   // the high half of the first word; the low half is flags
 constexpr uint32_t kFlagZoom = 1u;
-// B3-2: what fills the left eye's strip while the zoom stands (experimental.native_on_foot_ads_scope_zoom_full_detail_edge), two bits of the first word's low half.
-constexpr uint32_t kEdgeBlack = 0u, kEdgeWorld = 1u, kEdgeView = 2u, kEdgeStretched = 3u, kEdgeModes = 4u;
-constexpr uint32_t kEdgeShift = 4u;
-inline const char* edgeName(uint32_t mode) { return mode == kEdgeWorld ? "world" : mode == kEdgeView ? "view" : mode == kEdgeStretched ? "stretched" : "black"; }
 constexpr uint64_t kStaleHoldMs = 200;
 constexpr uint64_t kStaleDecayMs = 200;
 constexpr float kMinM = 1.05f, kMaxM = 8.0f;
@@ -71,8 +62,7 @@ struct Request {
     bool zoom = false;
     float m = 1.0f;
     float tc[2] = {0.0f, 0.0f};
-    float strip = 0.0f;   // how far the left eye's uncovered strip is taken over by the fill, 0..1 (black in B3-1)
-    uint32_t edge = 0;    // what fills it: kEdge*
+    float strip = 0.0f;   // how black the left eye's uncovered strip is, 0..1
 };
 
 inline uint32_t bitsOf(float v) { uint32_t b = 0; std::memcpy(&b, &v, 4); return b; }
@@ -83,7 +73,6 @@ inline float clamp01(float v) { return v == v ? (v < 0.0f ? 0.0f : v > 1.0f ? 1.
 inline Request sanitize(const Request& r) {
     Request o;
     o.strip = clamp01(r.strip);
-    o.edge = r.edge < kEdgeModes ? r.edge : kEdgeBlack;
     const bool ok = r.zoom && std::isfinite(r.m) && r.m >= kMinM && r.m <= kMaxM && std::isfinite(r.tc[0]) && std::isfinite(r.tc[1]) && std::fabs(r.tc[0]) <= kMaxTc && std::fabs(r.tc[1]) <= kMaxTc;
     if (!ok) return o;
     o.zoom = true;
@@ -97,7 +86,7 @@ inline void toWords(const Request& request, uint32_t w[kWords]) {
     const Request r = sanitize(request);
     for (uint32_t i = 0; i < kWords; ++i) w[i] = 0;
     if (!r.zoom && !(r.strip > 0.0f)) return;
-    w[0] = kMagic | (r.zoom ? kFlagZoom : 0u) | (r.edge << kEdgeShift);
+    w[0] = kMagic | (r.zoom ? kFlagZoom : 0u);
     w[1] = bitsOf(r.zoom ? r.m : 1.0f);
     w[2] = bitsOf(r.zoom ? r.tc[0] : 0.0f);
     w[3] = bitsOf(r.zoom ? r.tc[1] : 0.0f);
@@ -113,7 +102,6 @@ inline Request fromWords(const uint32_t w[kWords]) {
     r.tc[0] = floatOf(w[2]);
     r.tc[1] = floatOf(w[3]);
     r.strip = floatOf(w[4]);
-    r.edge = (w[0] >> kEdgeShift) & 3u;
     return sanitize(r);
 }
 
@@ -182,7 +170,7 @@ inline void clear() {
 // A report the d3d11 half can read: its own size and version, and every figure finite.
 inline bool reportReadable(const EdvrNativeScopeZoomReport* r) {
     if (!r || r->size < sizeof(EdvrNativeScopeZoomReport) || r->version != EDVR_NATIVE_SCOPE_ZOOM_REPORT_VERSION_1) return false;
-    const float values[] = {r->seconds, r->peakM, r->trueTan[0], r->trueTan[1], r->trueTan[2], r->trueTan[3], r->zoomTan[0], r->zoomTan[1], r->zoomTan[2], r->zoomTan[3], r->rawSpan, r->matrixSpan, r->heldAgeMs, r->heldRotationMaxDeg};
+    const float values[] = {r->seconds, r->peakM, r->trueTan[0], r->trueTan[1], r->trueTan[2], r->trueTan[3], r->zoomTan[0], r->zoomTan[1], r->zoomTan[2], r->zoomTan[3], r->rawSpan, r->matrixSpan, r->mirrorWidthMax};
     for (float v : values)
         if (!(v == v) || v > 1e9f || v < -1e9f) return false;
     return true;

@@ -52,12 +52,14 @@ game's own zoom as a magnified picture inside the scope's lens. The rest of the 
   (told frustum = its tangents / M about c, tangents only, set in WaitGetPoses after the trim); the lens samples its post-RCAS picture, each pixel at the place its world point is drawn at in that eye
   (the right eye's depth, T = inverse(A_R) A_L). The raw getter (the UI scale) keeps the true frustum; DLSS resets at both edges; the strip goes black; the light grid cache and the readout pin
   step aside. Three log lines: `scope zoom (B3)` announce and press, `scope zoom (B3) runtime`. Review fixes done 2026-10-29 (section 11, items 1 to 8; the hidden-area mesh per eye left).
-- **B3-2 BUILT 2026-10-29, INSTALLED on Epic (both) as `c92b5107`, NOT FLOWN** (from `5656e455`; section 11, "B3-2"): what fills the strip while the zoom stands, to A/B against the black. Four modes in one press: `world` (the left eye's last unzoomed
-  picture, held from before the zoom and turned to the head's view now), `view` (the same picture fixed in the view), `stretched` (the right eye's picture at the fade's inner edge, stretched out along
-  the row), `black` (B3-1 exactly, pinned bit for bit by hash). The press line counts the lens reading outside the window copy; one withheld share frame no longer ends the zoom. Next: the flight, then the maintainer's verdict on the fill and on the keys.
-- Keys: `fix.native_on_foot_ads_scope_zoom` (default on since A3 flew OK, the maintainer 2026-10-29) and the temporary `experimental.native_on_foot_ads_scope_zoom_fov` (the
-  reference FOV, 56.3 by default) and `experimental.native_on_foot_ads_scope_zoom_full_detail` (TEMPORARY, B3: on | off, live, default off; goes when B3 is judged) and `experimental.native_on_foot_ads_scope_zoom_full_detail_edge`
-  (TEMPORARY, B3-2: world | view | stretched | black, live, default world; goes when the fill is judged).
+- **B3-2 FLOWN 2026-10-29 (`c92b5107`, Epic), verdict: symmetric black** (section 11, "2026-10-29, B3-2 VR flight"): `world` and `view` never drew, `stretched` drew on two presses, the maintainer saw the black strip as best and asked
+  for it symmetrical. **B3-3 BUILT 2026-10-29, NOT INSTALLED, NOT FLOWN** (from `d526ee75`; section 11, "B3-3"): black is the behaviour; the edge key, the fills and the held picture are removed; the right eye gets the mirror of the
+  left eye's strip (same band, the left strip's weight, full on a narrowed frame, also on a replayed pair). The lens-outside-the-copy count and the one withheld frame stay. Next: the flight.
+- ruled out: the both-mode share as the cause of the weapon-edge double image, because it shows in the right eye alone at sight eye `right` (maintainer, 2026-10-29); it has its own arc, "Weapon edge ghosting under DLSS".
+- ruled out: a fill for the left eye's strip (B3-2: world and view never drew), and zoom-to-fill (the left eye's copy shifted about 10 degrees or magnified about 43% against the right eye's, which eyes cannot fuse).
+- Keys: `fix.native_on_foot_ads_scope_zoom` (default on since A3 flew OK, the maintainer 2026-10-29), the temporary `experimental.native_on_foot_ads_scope_zoom_fov` (the reference FOV, 56.3 by default), and
+  `experimental.native_on_foot_ads_scope_zoom_full_detail` (on | off, live, default off, Experimental page): the maintainer's choice per scope, no longer temporary (on: the optic at full detail with an equal black edge in both
+  eyes' outer view; off: the digital zoom, no edge). `..._full_detail_edge` (B3-2, TEMPORARY) is removed.
 - Separate arc: a flat stutter on the scoped Executioner's ADS (2026-10-29), in its own doc,
   `docs\investigation-flat-scoped-ads-stutter-2026-10-29.md`, on its own branch.
 - **Key (after S0, on the maintainer's word):** `fix.native_on_foot_ads_scope_zoom` = on | off. Section 5.
@@ -928,3 +930,44 @@ that the right eye's share cannot cover, black while eye 0 is narrowed. B3-2 put
     `right`, the artifact means a render-side edge (DLSS) that both mode makes visible; otherwise it comes from both mode. The share stays at full weight through held ADS with no replays (F106
     press lines: 1440 of 1478 frames in press 2), and EDVR sends the runtime no depth or motion vectors. Ruled out: the left eye's own weapon leaking through the share, a replayed frame, and
     a depth mismatch in the headset runtime's reprojection.
+
+**2026-10-29, B3-2 VR flight (Epic, Pimax, `c92b5107`; log `edvr_gfx_20261029_193916.log`).**
+- **`world` and `view` never showed.** Every narrowed frame drew black for want of a held picture: press 1, 717 of 1118; presses 2, 3, 6 and 7, 147 of 147, 706 of 707, 320 of 320 and 254 of 254. The cause was not chased: the
+  fill is removed.
+- **`stretched` drew** on 1925 and 671 frames (presses 4 and 8). `black` covered presses 5 and 9 to 11.
+- **Lens outside the copy.** Press 3: 299 of 695 frames, area mean 0.296, max 1.000. Press 8: 228 of 648, mean 0.125. Press 1: 134 of 1106, mean 0.093. A press held still read 0. Turning the head away from the gun drops part or
+  all of the lens to A, as the estimate said it would.
+- **No share-not-drawn frame was passed this flight** (`passed past a share not drawn` 0 in every report), so the withheld-frame path did not run in the air.
+- **Weapon edges, ruled out:** the both-mode share as the cause of the weapon-edge double image, because it shows in the right eye alone at sight eye `right` (maintainer, 2026-10-29). Eye dump `194734935001` (the Oppressor at hip,
+  swinging, sight eye right) shows background smear and a dotted trail of the old edge at the gun's outline across its 16 frames. It has moved to its own session and arc, "Weapon edge ghosting under DLSS"; nothing to build for it here.
+- **Decision (maintainer, 2026-10-29): symmetric black.** He saw the black strip as best and asked for it symmetrical. Removing the edge key was asked with the key quoted
+  (`experimental.native_on_foot_ads_scope_zoom_full_detail_edge`, world | view | stretched | black, TEMPORARY, live, default world) and approved. Zoom-to-fill is rejected: the left eye's copy would need shifting about 10
+  degrees or magnifying about 43% against the right eye's, and the eyes cannot fuse that. The full-detail key stays as his per-scope choice: the crisp optic with the edge, or A without it.
+
+**B3-3** (2026-10-29, from `d526ee75`; the full local build and all its gates green, nothing installed or flown). Black is the behaviour, in both eyes. Design, then as built, one line each.
+1. **Removed.** The edge key (reader, atomic, `# ui:` row, ini entry, `docs\settings-menu.md` row, the key's change line, the announce and press-line word), the two bits of the window request's first word (`kEdgeShift`,
+   `edgeName`: the five words are B3-1's again), the shader's fill code (world, view, stretched: the `fill[]` constants and the third resource), the held picture (`heldTexture_`, its copy, validity, space and rotation; the tally
+   fields `fillFrames`, `held*`), the `--health` fill rules and the rig cases for all of it. The left eye's black is B3-1's arithmetic: the stereo rig hashes B3-1's renders (every share, strip and narrowed combination with a
+   share) against the hash B3-1's own shader made, srgb and unorm, owned and deferred, and still passes.
+2. **Kept from B3-2.** The lens-outside-the-copy count (`b3OutsideFraction`; the press line's `lens outside the copy on N of N frames, area mean X max X`), and the one withheld frame (`decideScopeZoom`: a standing zoom
+   goes on past ONE `share not drawn` frame, never past a refused share, never at entry) with its safety: a narrowed frame either has the share draw every uncovered pixel black or has the left eye cleared to black.
+3. **The mirror strip** (`D3D11Stereo::renderCaptured`, `kStereoShareHlsl` in a mirror mode). While the left eye's strip is up or its frame is narrowed, and the share is drawn, the right eye gets the strip's mirror: the
+   directions of the right view the left view does not see go black with the same edge band (`kEdgeMarginDeg` + `kBandDeg`), by the left strip's weight (`strip`, and 1 on a narrowed frame), so both edges rise, hold
+   and fall together through the entry ramp and the exit hold. It is the share shader run with the eyes exchanged (`makeMapping` of the right view against the left) and `misc.w` = 1: no sampling, black with alpha
+   `weight (1 - cover)`, over the right eye's own image just drawn, before the fade; no new shader, binding or constant size. A replayed pair is drawn with `previousZoomed` and so gets the mirror too. With the strip at
+   0 and no narrowed frame no pass is drawn at all, so the right eye is byte for byte today's (rig: the render equals the no-share one, no mirror in the facts, vertex work unchanged; with the strip up the vertex work is
+   exactly one more triangle in the right eye). Plain both mode (B3 off) draws neither eye differently. With no share drawn there is no mirror: that frame's narrowed left eye is already cleared to black.
+4. **The full-detail key's text** (`edvr.ini`, `docs\settings-menu.md`, the key's change line in the log): "TEMPORARY" and "it goes when the lens has been judged" are gone. It says what the user chooses: on, the scoped
+   Executioner's optic at full detail with an equal black edge in both eyes' outer view while the zoom stands; off, the digital zoom with no edge. Under `[experimental]`, `# ui:` row, default off, live, as before.
+5. **Instruments.** Runtime line: `...; right-eye mirror strip on N frames, widest X of its width; passed past a share not drawn N` (frames the compositor drew the right eye's mirror strip on; the widest share of the
+   right eye's middle row it took, columns at least half black; `none` with no frame). Press line: `press N key on; asked ...` (no edge word). Announce: `scope zoom (B3): full detail on; for the table's ...`. The trace line
+   carries `mirror_frames` and `mirror_width_max`. `edvr_log.py --health`: a press with the zoom and the runtime's report but no mirror-strip frame is PARTIAL (`the right eye's mirror strip drew on no frame while the left
+   eye was zoomed for N frame(s): the right eye's outer view stayed lit against the left eye's black edge`); a press with no runtime report cannot be judged on it. A report in B3-2's form (the fill's counts), a press line
+   or an announce with the edge word is UNPARSED. Both lines fit the log's 1167 bytes with every count six digits (rig).
+6. **Rig.** `openxr_stereo_test`: the mirror at strip 0 / NaN / 0.5 / 1, narrowed (at share 1 and 0.5), with no share; corners black, interior bit for bit; asymmetric canted displays against the rig's own arithmetic with the eyes
+   exchanged. `openxr_system_test`: the mirror tally over a run, the press taking it, the strip reaching the runtime on the ramp. `openxr_native_test`: the host's close takes it. `native_frame_test`, `scope_zoom_test`,
+   `edvr_log.py --self-test`: the lines, the wiring (no edge anywhere) and the health rules.
+- **Not verified, for the flight.** How the right eye's edge reads against the left's (whether the two edges fuse as one dark rim or the right one is noticed on its own); its width on this Pimax (`widest` in the runtime
+  line); the cost of the one more triangle in the right eye; whether the lens reaching outside the copy on a head turn is judged enough to need a larger copy.
+- **Flight card (B3-3, Epic in VR).** Read `edvr_log.py --expect-build <build> --health` first, then each press's `lens outside the copy` and the runtime line's `right-eye mirror strip`. Scoped Executioner in ADS, full
+  detail on, sight eye both: hold still, then turn your head left and right inside the scope, and judge the two outer edges together. Then full detail off for one press: no edge in either eye.

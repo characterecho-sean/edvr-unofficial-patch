@@ -274,12 +274,10 @@ int adsAimEye() noexcept { return nofoot::f162::aimingEye(g_adsSightEyeKey.load(
 // own zoom. A USER key, default on since A3 flew OK (2026-10-29); the reference FOV M is measured from is experimental.native_on_foot_ads_scope_zoom_fov (TEMPORARY, degrees, live).
 std::atomic<bool> g_scopeZoomKey{true};
 std::atomic<float> g_scopeZoomRefDeg{static_cast<float>(edvr::scopezoom::kLensRefDefaultDeg)};
-// B3 (live, TEMPORARY): experimental.native_on_foot_ads_scope_zoom_full_detail, on | off, default off. On: for the scoped Executioner (the table's rendered entry) with fix.native_on_foot_ads_scope_zoom
-// on and the sight eye at both, the game draws the LEFT eye as the zoomed view and the lens samples that picture (scope_zoom_b3.h); off: the lens is the digital zoom of the right eye (A).
+// B3 (live): experimental.native_on_foot_ads_scope_zoom_full_detail, on | off, default off: the user's choice of the scoped Executioner's lens. On: for the scoped Executioner (the table's rendered
+// entry) with fix.native_on_foot_ads_scope_zoom on and the sight eye at both, the game draws the LEFT eye as the zoomed view and the lens samples that picture (scope_zoom_b3.h), with a black edge
+// in each eye's outer view while the zoom stands; off: the lens is the digital zoom of the right eye (A), with no edge.
 std::atomic<bool> g_scopeZoomFullKey{false};
-// B3-2 (live, TEMPORARY): experimental.native_on_foot_ads_scope_zoom_full_detail_edge, world | view | stretched | black, default world: what fills the left eye's strip (the part of it the right
-// eye's cover does not reach) while the zoom stands. Only meaningful with the key above on; a value that is none of the four reads as world. scopewin::kEdge* numbers.
-std::atomic<uint32_t> g_scopeZoomEdgeKey{edvr::scopewin::kEdgeWorld};
 // B3's instruments, written by the draw/render thread and read by the frame thread at a press's end: a press with B3 asked is open (the draw path counts the eyes' draws, the constants buffer's
 // shadow keeps the shadow constants); the eye-sized draws into each eye since the frame thread's last tick; the readout pin's frames taken on one eye, and refused for want of a pair
 // while eye 0 was zoomed; the shadow constants' rows (cb1 298 to 326) changed from the eye's last frame, and between the eyes, inside the zoomed span (0) and outside it (1).
@@ -1234,28 +1232,15 @@ void readKey() {
                             "from: M = tan(h / 2) / tan(the weapon's ADS FOV / 2)", ref, sz::kLensRefMinDeg, sz::kLensRefMaxDeg);
         g_scopeZoomKey.store(zoomOn, std::memory_order_relaxed);
         g_scopeZoomRefDeg.store(static_cast<float>(ref), std::memory_order_relaxed);
-        // B3 (live, TEMPORARY): the full-detail lens, for the scoped Executioner only.
+        // B3 (live): the full-detail lens, for the scoped Executioner only.
         const bool full = cfg.getString("experimental.native_on_foot_ads_scope_zoom_full_detail", "off") == "on";
         if (first || full != g_scopeZoomFullKey.load(std::memory_order_relaxed))
-            Log::get().note("native on foot ADS scope zoom full detail (B3, TEMPORARY): experimental.native_on_foot_ads_scope_zoom_full_detail is %s -- %s", full ? "on" : "off",
+            Log::get().note("native on foot ADS scope zoom full detail (B3): experimental.native_on_foot_ads_scope_zoom_full_detail is %s -- %s", full ? "on" : "off",
                             full ? "while you aim down sights through the scoped Executioner, with the scope zoom on and ADS: sight eye at both, the game draws the LEFT eye as the zoomed view (its frustum "
-                                   "narrowed by the zoom, about the sight line, no pose change) and the scope's lens shows that picture; the left eye is covered by the right eye's view, and the part of it "
-                                   "the cover does not reach goes black meanwhile"
-                                 : "the scope's lens is the digital zoom of the right eye's picture (A)");
+                                   "narrowed by the zoom, about the sight line, no pose change) and the scope's lens shows that picture at full detail; the left eye is covered by the right eye's view, and "
+                                   "an equal black edge takes the outer part of each eye's view meanwhile"
+                                 : "the scope's lens is the digital zoom of the right eye's picture (A), with no edge");
         g_scopeZoomFullKey.store(full, std::memory_order_relaxed);
-        // B3-2 (live, TEMPORARY): what fills the left eye's strip while the zoom stands.
-        const std::string edgeText = cfg.getString("experimental.native_on_foot_ads_scope_zoom_full_detail_edge", "world");
-        const uint32_t edge = edgeText == "black" ? edvr::scopewin::kEdgeBlack : edgeText == "view" ? edvr::scopewin::kEdgeView : edgeText == "stretched" ? edvr::scopewin::kEdgeStretched
-                                                                                                                                                      : edvr::scopewin::kEdgeWorld;
-        if (first || edge != g_scopeZoomEdgeKey.load(std::memory_order_relaxed))
-            Log::get().note("native on foot ADS scope zoom full detail edge (B3-2, TEMPORARY): experimental.native_on_foot_ads_scope_zoom_full_detail_edge is %s -- %s",
-                            edvr::scopewin::edgeName(edge),
-                            edge == edvr::scopewin::kEdgeWorld ? "while the zoom stands, the part of the left eye the right eye's view does not reach shows the left eye's last picture from before the zoom, turned to your head's "
-                                                                  "view now, so it stays put in the world as you turn"
-                            : edge == edvr::scopewin::kEdgeView ? "the same picture held in the view, like a helmet"
-                            : edge == edvr::scopewin::kEdgeStretched ? "that part shows the right eye's picture at the inner edge of the cover, stretched outward along the row"
-                                                                      : "that part goes black (B3)");
-        g_scopeZoomEdgeKey.store(edge, std::memory_order_relaxed);
     }
     // F93b (TEMPORARY A/B, live): the ADS sight lock's input (fix.native_on_foot_ads_eye_steady).
     {
@@ -35459,23 +35444,21 @@ void announce(State& s, bool key, double ref) noexcept {
 // for the lens (b3Matrices) from the rows of one frame, once the left rows describe the window the runtime told the game.
 struct B3State {
     bool announced = false, announcedKey = false, pressKey = false;
-    uint32_t announcedEdge = 0;
     sz::B3Loop loop;   // the window's latch (its centre and narrowing) and the strip's ramp: scope_zoom_b3.h b3Step
     sz::B3Press p;   // this press's figures from the tick, the draw path and the shadow constants; the door's, the temporal pass's and the light grid's are added at its end
     uint64_t zoomFrames0 = 0, resets0[2] = {}, edge0 = 0, lgCalls0 = 0, lgBypass0 = 0;
     bool temporalBase = false;   // the temporal pass's totals were read at the press's start (a press that began with no channel has no baseline: its figures are n/a)
 } g_b3s;
 
-void announceB3(State& s, bool keyOn, uint32_t edge) noexcept {
+void announceB3(State& s, bool keyOn) noexcept {
     B3State& b = g_b3s;
-    if (b.announced && b.announcedKey == keyOn && b.announcedEdge == edge) return;
+    if (b.announced && b.announcedKey == keyOn) return;
     b.announced = true;
     b.announcedKey = keyOn;
-    b.announcedEdge = edge;
     (void)s;
-    Log::get().note("scope zoom (B3): full detail %s, edge %s; for the table's rendered entries (the scoped Executioner) with the scope zoom on and ADS: sight eye at both, the left eye is drawn as the zoomed "
-                    "view and the lens shows it, and the part of the left eye the right eye does not cover is filled by the edge setting; one line a press with it asked follows, and the runtime's report after it.",
-                    keyOn ? "on" : "off", edvr::scopewin::edgeName(edge));
+    Log::get().note("scope zoom (B3): full detail %s; for the table's rendered entries (the scoped Executioner) with the scope zoom on and ADS: sight eye at both, the left eye is drawn as the zoomed view and the "
+                    "lens shows it; one line a press with it asked follows, and the runtime's report after it.",
+                    keyOn ? "on" : "off");
 }
 void beginB3Press(State& s) noexcept {
     B3State& b = g_b3s;
@@ -35542,7 +35525,6 @@ void endB3Press(State& s) noexcept {
     }
     p.press = s.press;
     p.keyOn = g_scopeZoomFullKey.load(std::memory_order_relaxed);
-    p.edge = g_scopeZoomEdgeKey.load(std::memory_order_relaxed);
     char line[sz::kB3PressLineBytes];
     sz::formatB3Press(line, sizeof(line), p);
     Log::get().note("%s", line);
@@ -35550,7 +35532,7 @@ void endB3Press(State& s) noexcept {
 // Outside the sights, or not armed: no window is held, and the strip comes back (it is still published until it has).
 void b3Idle(double dt, uint64_t nowMs) noexcept {
     g_b3Counting.store(false, std::memory_order_relaxed);
-    scopewin::publish(sz::b3IdleStep(g_b3s.loop, dt, g_scopeZoomEdgeKey.load(std::memory_order_relaxed)), nowMs);
+    scopewin::publish(sz::b3IdleStep(g_b3s.loop, dt), nowMs);
 }
 void b3Off(uint64_t nowMs) noexcept {
     g_b3Counting.store(false, std::memory_order_relaxed);
@@ -35596,7 +35578,6 @@ void b3Tick(State& s, const sz::LensGateIn& gi, sz::LensVerdict verdict, const s
     si.m = gi.m;
     si.tcNow[0] = tcNow[0];
     si.tcNow[1] = tcNow[1];
-    si.edge = g_scopeZoomEdgeKey.load(std::memory_order_relaxed);
     const sz::B3StepOut so = sz::b3Step(b.loop, si);
     if (so.askedTick) ++b.p.askedTicks;
     if (so.noLeftRowsTick) ++b.p.noLeftRows;
@@ -35699,7 +35680,7 @@ void tick(uint64_t nowMs) noexcept {
     const bool key = g_scopeZoomKey.load(std::memory_order_relaxed);
     const double ref = static_cast<double>(g_scopeZoomRefDeg.load(std::memory_order_relaxed));
     if (!s.announced || key != s.announcedKey || ref != s.announcedRef) announce(s, key, ref);   // said when the tick first runs (so --health can tell a build that never ran S1) and at each change
-    announceB3(s, g_scopeZoomFullKey.load(std::memory_order_relaxed), g_scopeZoomEdgeKey.load(std::memory_order_relaxed));   // B3: the same for the full-detail key and the edge fill
+    announceB3(s, g_scopeZoomFullKey.load(std::memory_order_relaxed));   // B3: the same for the full-detail key
     scopeZoomSetTemporalZoom(&nativeTemporalZoom);   // B3: the doors ask the temporal pass whether eye 0 is zoomed in their frame (a pointer store; the door links without the pass)
     const bool onFoot = nativeOnFootActive();
     const bool ads = onFoot && g_adsState != kAdsIdle;
