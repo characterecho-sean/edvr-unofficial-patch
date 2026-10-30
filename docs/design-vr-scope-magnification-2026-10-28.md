@@ -48,10 +48,10 @@ game's own zoom as a magnified picture inside the scope's lens. The rest of the 
   the lens by the tonemap difference (stock brightness); the weapons half governs it, the scope zoom key arms it; the S0 census probes optical
   sights only; the press line counts `composites matched/plain/none` and `--health` makes a taken mark nothing composited a PARTIAL. Its review
   fixes (same section) make the mark's stand-down last a press, not the session, and count it in the press line.
-- **B3-1 BUILT 2026-10-29, INSTALLED on Epic (both) as `9faeadb9`, NOT FLOWN** (from `4a4a17b6`; section 11, "As built (B3-1)"): the scoped Executioner's lens at full detail. The left eye (F162's both mode) is drawn as the zoomed view
+- **B3-1 FLOWN 2026-10-29 (`9faeadb9`, Epic): "looked good"; one artifact, the strip's black (a dark line on the left periphery). Section 11, the flight entry. Next: B3-2 fills the strip** (from `4a4a17b6`; section 11, "As built (B3-1)"): the scoped Executioner's lens at full detail. The left eye (F162's both mode) is drawn as the zoomed view
   (told frustum = its tangents / M about c, tangents only, set in WaitGetPoses after the trim); the lens samples its post-RCAS picture, each pixel at the place its world point is drawn at in that eye
   (the right eye's depth, T = inverse(A_R) A_L). The raw getter (the UI scale) keeps the true frustum; DLSS resets at both edges; the strip goes black; the light grid cache and the readout pin
-  step aside. Three log lines: `scope zoom (B3)` announce and press, `scope zoom (B3) runtime`. Review fixes done 2026-10-29 (section 11, items 1 to 8; the hidden-area mesh per eye left). Next: the flight (A then B3 in one press), then the maintainer's verdict on the key.
+  step aside. Three log lines: `scope zoom (B3)` announce and press, `scope zoom (B3) runtime`. Review fixes done 2026-10-29 (section 11, items 1 to 8; the hidden-area mesh per eye left). Next: B3-2 (the strip filled from the left eye's last unzoomed picture), then the maintainer's verdict on the key.
 - Keys: `fix.native_on_foot_ads_scope_zoom` (default on since A3 flew OK, the maintainer 2026-10-29) and the temporary `experimental.native_on_foot_ads_scope_zoom_fov` (the
   reference FOV, 56.3 by default) and `experimental.native_on_foot_ads_scope_zoom_full_detail` (TEMPORARY, B3: on | off, live, default off; goes when B3 is judged).
 - Separate arc: a flat stutter on the scoped Executioner's ADS (2026-10-29), in its own doc,
@@ -865,3 +865,23 @@ look for the lens's detail, the chevron's place, the HUD's size, shadows, the le
 
 **Installed (B3-1)** (2026-10-29): `9faeadb9` (`build.bat --dll-only` on the clean tree) on Epic, `--scope both --xess`, `--verify-only` passed. The live `edvr.ini` there had no
 `native_on_foot_ads_scope_zoom_full_detail` line; it was added under `[experimental]` at `off` with the Edit tool (diffed: three lines added, nothing else changed), so the key can be switched in one press.
+
+**2026-10-29, B3-1 VR flight (Epic, Pimax, `9faeadb9`, `--expect-build` matched).** The maintainer: "It looked good with the full zoom on both eyes, the only artifact I noticed was a dark line on my
+left periphery." Log `edvr_gfx_20261029_181913.log`:
+- **The zoom ran.** Three presses asked it (2, 3, 7): zoomed frames 1359, 436 and 364; the lens drew from the left eye on 1358, 415 and 363 (A otherwise: not zoomed 7/6/3, no matrices 1/2/1). Presses 5 and
+  6 were at sight eye `right` (F162 switched at 18:23:54) and were not asked, as the gate says. The key was on from before press 2, so this flight has no A/B within one press; press 1 was A.
+- **The runtime.** Span ratio raw over matrix 4.064 = M on every report, so the matrix getter alone narrowed and the HUD stayed true. Raw getter callers during the window: only `0x4E3045`; the slot 28
+  helper (`0x4E3C93`) never read while the zoom stood. One refusal (`share not drawn`, press 3, at an eye dump's 250 ms hitch) split that press's runtime report in two (374 + 62 frames) and cost two
+  extra DLSS resets (L 4).
+- **Cull, shadows, cost.** Draws a frame inside and outside the window: L 244/227, 7436/6991, 8762/8857. The narrowed eye draws as much as the true one, so the game culls it with the true frustum
+  (the raw getter feeds the eye camera setter); nothing is saved and nothing is lost. Shadow rows L against R 0.00 to 0.03. Frame ms in/out 11.22/11.56, 22.81/43.18 (the dump's hitch), 19.91/21.10.
+- **Window drift.** c moved off the press's latched window by a mean of 1.3, 0.8 and 9.2 degrees (max 5.5, 2.5, 28.3). Press 7's `parallax at c` (mean 238, max 2610 px) measures that drift, not parallax.
+  Presses 2 and 3 read 1.8 and 6.3 px. Lens pixels that fall outside the copy go to A one pixel at a time and are not counted.
+- **Eye dump `182222244001` (press 3).** The left eye is the zoomed view. The right eye's lens shows the same crates, the figure and the green target dot in the same arrangement as the left picture
+  at c, so the parallax removal holds on a real scene. The marks are at true size.
+- **The dark line is the strip.** `strip darkened` matches zoomed frames on every press. The unzoomed left eye in dump `182231287002` shows what the strip normally holds: the left eye's tangents
+  -1.2543 to about -0.8746, the outer roughly 10 degrees and 18% of the image's width. That is the helmet visor's rim, then the world past it.
+- `--health` exit 3 comes from F91, F85c and F87p NEVER APPLIED. All three show the same in the A3 flight's log (`c738e367`), so they belong to the native on-foot arc, not to B3.
+
+Next, B3-2, proposed: fill the strip with the left eye's last unzoomed picture, kept at the zoom's start and mapped to the current view the way the share maps the right eye's picture. Count the lens
+pixels that fall back to A outside the copy, and let one withheld frame pass without ending the zoom.
