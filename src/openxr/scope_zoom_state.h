@@ -27,23 +27,38 @@ struct ScopeZoomInput {
     bool shareDrawn = false;        // the renderer drew the share in its last compose
     bool shareRefused = false;      // ... or refused it (views it could not map)
     XrFovf base{};                  // eye 0's told frustum without the zoom (the trim's, or the located one)
+    // B3-2: a zoom that stands (the last frame was narrowed) goes on past ONE frame in a row of a share that was not drawn and not refused. notDrawnRun is how many such frames in a row
+    // it has gone on past already. See decideScopeZoom for why that is safe: renderCaptured blacks the left eye on a narrowed frame whose share it does not draw.
+    bool standing = false;
+    uint32_t notDrawnRun = 0;
 };
 struct ScopeZoomOutput {
     ScopeZoomWhy why = ScopeZoomWhy::kNotAsked;
     XrFovf fov{};                   // the told frustum with the zoom (the base when it is not applied)
     double trueTan[4] = {}, zoomTan[4] = {};   // left, right, down, up tangents
     double narrowing = 1.0;         // the true vertical span over the zoomed one
-    float strip = 0.f;              // how black the left eye's uncovered strip is this frame
+    float strip = 0.f;              // how far the left eye's uncovered strip is taken over by the fill this frame
+    uint32_t edge = 0;              // what fills it (scopewin::kEdge*)
+    bool passedUnshared = false;    // the frame was applied past a share that was not drawn (B3-2)
 };
 inline ScopeZoomOutput decideScopeZoom(const ScopeZoomInput& in) {
     ScopeZoomOutput o;
     o.fov = in.base;
     o.strip = in.answerCarries ? scopewin::clamp01(in.request.strip) : 0.f;
+    o.edge = in.answerCarries ? in.request.edge : scopewin::kEdgeBlack;
     if (!in.answerCarries) { o.why = in.request.zoom ? ScopeZoomWhy::kVersion : ScopeZoomWhy::kNotAsked; return o; }
     if (!in.request.zoom) return o;   // kNotAsked
     // the share must wholly cover the left eye, and have been drawn the frame before: a zoomed picture that could be seen is never made
     if (!(in.share >= 0.999f)) { o.why = ScopeZoomWhy::kShare; return o; }
-    if (!in.shareDrawn || in.shareRefused) { o.why = ScopeZoomWhy::kShareNotDrawn; return o; }
+    // A share that was not drawn the frame before ends a zoom that does not stand, and one that does after a single such frame in a row. A narrowed picture is never shown uncovered even then:
+    // D3D11Stereo::renderCaptured, on a frame drawn with eye 0 narrowed (leftZoomed) in which it draws no share (no share asked, views it cannot map, a mask it cannot build), clears the
+    // left eye to black in place of its own picture, and with the share drawn the shader makes every uncovered pixel of such a frame the fill. So the frame that passes, and the one after,
+    // are covered whether or not their own share is drawn. A share the renderer REFUSED is not passed: its cause (views it cannot map) does not clear on its own.
+    if (!in.shareDrawn || in.shareRefused) {
+        const bool pass = in.standing && !in.shareDrawn && !in.shareRefused && in.notDrawnRun == 0;
+        if (!pass) { o.why = ScopeZoomWhy::kShareNotDrawn; return o; }
+        o.passedUnshared = true;
+    }
     RawFov raw{};
     if (!fovToRaw(in.base, raw)) { o.why = ScopeZoomWhy::kGeometry; return o; }
     const double trueTan[4] = {raw.left, raw.right, raw.top, raw.bottom};   // RawFov: top is the -Y ray (down), bottom the +Y ray (up)
@@ -127,12 +142,16 @@ struct ScopeZoomPress {
     uint32_t rawReads = 0, matrixReads = 0;
     float rawSpan = 0.f, matrixSpan = 0.f;
     uint32_t callerRva[EDVR_NATIVE_SCOPE_ZOOM_REPORT_CALLERS] = {}, callerReads[EDVR_NATIVE_SCOPE_ZOOM_REPORT_CALLERS] = {}, callerOther = 0;
+    // B3-2: what filled the strip (ScopeZoomFillTally, taken at the press's end) and the frames the narrowing went on past a share that was not drawn
+    uint32_t edgeMode = 0, fillFrames[4] = {}, heldCopies = 0, heldMissing = 0, heldAgeFrames = 0, notDrawnPassed = 0;
+    float heldAgeMs = 0.f, heldRotationMaxDeg = 0.f;
     void begin(uint64_t nowUs) { *this = ScopeZoomPress{}; open = true; firstUs = lastUs = nowUs; }
     void applied(const ScopeZoomOutput& o, uint64_t nowUs, bool stripDrawn, bool meshWithheldNow) {
         ++frames;
         lastUs = nowUs;
         if (stripDrawn) ++stripFrames;
         if (meshWithheldNow) ++meshWithheld;
+        if (o.passedUnshared) ++notDrawnPassed;
         if (static_cast<float>(o.narrowing) > peakM) peakM = static_cast<float>(o.narrowing);
         for (int i = 0; i < 4; ++i) { trueTan[i] = o.trueTan[i]; zoomTan[i] = o.zoomTan[i]; }
     }
@@ -152,6 +171,45 @@ struct ScopeZoomPress {
         r.meshWithheld = meshWithheld;
         for (unsigned i = 0; i < EDVR_NATIVE_SCOPE_ZOOM_REPORT_CALLERS; ++i) { r.rawCallerRva[i] = callerRva[i]; r.rawCallerReads[i] = callerReads[i]; }
         r.rawCallerOther = callerOther;
+        r.edgeMode = edgeMode;
+        for (unsigned i = 0; i < 4; ++i) r.fillFrames[i] = fillFrames[i];
+        r.heldCopies = heldCopies;
+        r.heldMissing = heldMissing;
+        r.heldAgeFrames = heldAgeFrames;
+        r.heldAgeMs = heldAgeMs;
+        r.heldRotationMaxDeg = heldRotationMaxDeg;
+        r.shareNotDrawnPassed = notDrawnPassed;
+    }
+    // The tally of the fill (below) as of now, into this press.
+    template <class Tally>
+    void takeFill(const Tally& t, uint32_t edge) {
+        edgeMode = edge;
+        for (unsigned i = 0; i < 4; ++i) fillFrames[i] = t.frames[i];
+        heldCopies = t.copies;
+        heldMissing = t.missing;
+        heldAgeFrames = t.ageFrames;
+        heldAgeMs = t.ageMs;
+        heldRotationMaxDeg = t.rotationMaxDeg;
+    }
+};
+
+// What the compositor drew into the left eye's strip, counted over a run of the strip: from the first composed frame with the strip up (or the left eye narrowed) to the first without.
+// A press that opens inside the run reports the whole run, so the copies made through the entry ramp are in it. fillMode is the fill the frame drew (scopewin::kEdge*; a narrowed
+// frame with no held picture of the run is black and `missing`), copied whether this frame made a held copy, and the age and rotation are the renderer's own (StereoShareFacts).
+struct ScopeZoomFillTally {
+    bool active = false;
+    uint32_t frames[4] = {}, copies = 0, missing = 0, ageFrames = 0;
+    float ageMs = 0.f, rotationMaxDeg = 0.f;
+    void note(float strip, bool zoomed, bool drawn, uint32_t fillMode, bool copied, bool missingHeld, uint32_t age, float ageMsNow, float rotationDeg) {
+        if (!(strip > 0.f) && !zoomed) { active = false; return; }
+        if (!active) { *this = ScopeZoomFillTally{}; active = true; }
+        if (!drawn) return;
+        if (fillMode < 4) ++frames[fillMode];
+        if (copied) ++copies;
+        if (missingHeld) ++missing;
+        ageFrames = age;
+        ageMs = ageMsNow;
+        if (rotationDeg == rotationDeg && rotationDeg > rotationMaxDeg) rotationMaxDeg = rotationDeg;
     }
 };
 
@@ -167,8 +225,11 @@ struct ScopeZoomRun {
     ScopeZoomPress press;
     ScopeZoomWhy whyNoted = ScopeZoomWhy::kNotAsked;
     uint32_t pending[4] = {};     // refusals of the run of asks in progress that no press has taken
+    uint32_t notDrawnRun = 0;     // frames in a row the narrowing went on past a share that was not drawn (the next decision's ScopeZoomInput::notDrawnRun)
+    bool standing() const { return press.open; }
     ScopeZoomEvents frame(const ScopeZoomOutput& out, uint64_t nowUs) {
         ScopeZoomEvents ev;
+        notDrawnRun = (out.why == ScopeZoomWhy::kApplied && out.passedUnshared) ? notDrawnRun + 1u : 0u;
         if (out.why == ScopeZoomWhy::kApplied) {
             if (!press.open) {
                 press.begin(nowUs);

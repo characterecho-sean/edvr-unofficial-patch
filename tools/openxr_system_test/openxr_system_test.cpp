@@ -576,6 +576,16 @@ void scopeZoomTest() {
   { auto x=in;x.answerCarries=false;x.request.zoom=false;no(x,ScopeZoomWhy::kNotAsked,"scope zoom: ... and nothing when it did not ask"); }
   { auto x=in;x.share=0.95f;no(x,ScopeZoomWhy::kShare,"scope zoom: the right eye's picture must cover the left wholly (a share under full weight refuses)"); }
   { auto x=in;x.shareDrawn=false;no(x,ScopeZoomWhy::kShareNotDrawn,"scope zoom: and the share must have been drawn the frame before"); }
+  { auto x=in;x.shareDrawn=false;x.standing=true;x.notDrawnRun=0;const auto o=decideScopeZoom(x);
+    check(o.why==ScopeZoomWhy::kApplied&&o.passedUnshared&&near(float(o.narrowing),4.f,1e-3f),"scope zoom: ... but a zoom that stands goes on past one frame of a share not drawn");
+    x.notDrawnRun=1;no(x,ScopeZoomWhy::kShareNotDrawn,"scope zoom: ... not past a second in a row");
+    x.notDrawnRun=0;x.standing=false;no(x,ScopeZoomWhy::kShareNotDrawn,"scope zoom: ... and not when it does not stand yet");
+    x.standing=true;x.shareRefused=true;no(x,ScopeZoomWhy::kShareNotDrawn,"scope zoom: ... and not past a share that was refused");
+    x.shareRefused=false;x.share=0.95f;no(x,ScopeZoomWhy::kShare,"scope zoom: ... and the share must still be at full weight");
+    const auto drawn=decideScopeZoom(in);check(drawn.why==ScopeZoomWhy::kApplied&&!drawn.passedUnshared,"scope zoom: a drawn share passes nothing"); }
+  { auto x=in;x.request.edge=edvr::scopewin::kEdgeStretched;check(decideScopeZoom(x).edge==edvr::scopewin::kEdgeStretched,"scope zoom: the fill mode comes out with the decision");
+    x.request.zoom=false;check(decideScopeZoom(x).edge==edvr::scopewin::kEdgeStretched,"scope zoom: ... and with the strip alone");
+    x.answerCarries=false;check(decideScopeZoom(x).edge==edvr::scopewin::kEdgeBlack,"scope zoom: ... but not from an answer that carries nothing"); }
   { auto x=in;x.shareRefused=true;no(x,ScopeZoomWhy::kShareNotDrawn,"scope zoom: ... and not refused"); }
   { auto x=in;x.request.tc[0]=1.5f;no(x,ScopeZoomWhy::kGeometry,"scope zoom: a centre outside the eye's span makes no window"); }
   { auto x=in;x.base={0.1f,0.1f,0.5f,-0.4f};no(x,ScopeZoomWhy::kGeometry,"scope zoom: an unusable frustum makes no window"); }
@@ -722,9 +732,10 @@ struct ZoomPipe {
   edvr::scopezoom::B3StepIn in;
   edvr::openxr::ScopeZoomRun run;
   uint64_t ms=100000;
-  bool runtimeFirst=false,carries=true,shareDrawn=true;
+  bool runtimeFirst=false,carries=true,shareDrawn=true,shareRefused=false;
+  uint32_t edge=edvr::scopewin::kEdgeWorld;
   XrFovf base{-0.6f,0.7f,0.5f,-0.4f};
-  struct Frame {bool applied=false,askedByTick=false;float strip=0.f;edvr::openxr::ScopeZoomWhy why=edvr::openxr::ScopeZoomWhy::kNotAsked;const char* closed=nullptr;bool opened=false;};
+  struct Frame {bool applied=false,askedByTick=false,passed=false;uint32_t edge=0;float strip=0.f;edvr::openxr::ScopeZoomWhy why=edvr::openxr::ScopeZoomWhy::kNotAsked;const char* closed=nullptr;bool opened=false;};
   std::vector<Frame> frames;
   ZoomPipe() {
     edvr::scopewin::clear();
@@ -738,10 +749,11 @@ struct ZoomPipe {
     edvr::openxr::ScopeZoomInput zi;
     zi.answerCarries=carries;
     if(carries)zi.request=sw::fromWords(words);
-    zi.share=float(in.share);zi.shareDrawn=shareDrawn;zi.base=base;
+    zi.share=float(in.share);zi.shareDrawn=shareDrawn;zi.shareRefused=shareRefused;zi.base=base;
+    zi.standing=run.standing();zi.notDrawnRun=run.notDrawnRun;
     const auto out=edvr::openxr::decideScopeZoom(zi);
     const auto ev=run.frame(out,ms*1000);
-    f.applied=out.why==edvr::openxr::ScopeZoomWhy::kApplied;f.strip=out.strip;f.why=out.why;f.closed=ev.closed;f.opened=ev.opened;
+    f.applied=out.why==edvr::openxr::ScopeZoomWhy::kApplied;f.strip=out.strip;f.why=out.why;f.closed=ev.closed;f.opened=ev.opened;f.edge=out.edge;f.passed=out.passedUnshared;
     if(ev.closed)run.press.open=false;   // the host's close
   }
   // One game frame. sightsDown: the tick is the sights-down one (b3IdleStep); stalled: the frame thread does not tick (a lost tick, or a stall) but the runtime still asks.
@@ -749,8 +761,8 @@ struct ZoomPipe {
     Frame f;ms+=11;
     if(runtimeFirst)runtime(f);
     if(!stalled) {
-      if(sightsDown)edvr::scopewin::publish(edvr::scopezoom::b3IdleStep(loop,in.dt),ms);
-      else {const auto out=edvr::scopezoom::b3Step(loop,in);f.askedByTick=out.request.zoom;edvr::scopewin::publish(out.request,ms);}
+      if(sightsDown)edvr::scopewin::publish(edvr::scopezoom::b3IdleStep(loop,in.dt,edge),ms);
+      else {in.edge=edge;const auto out=edvr::scopezoom::b3Step(loop,in);f.askedByTick=out.request.zoom;edvr::scopewin::publish(out.request,ms);}
     }
     if(!runtimeFirst)runtime(f);
     frames.push_back(f);
@@ -861,6 +873,86 @@ void scopeZoomPipelineTest() {
       p.go(14);
       check(p.frames.back().applied&&p.run.press.open&&p.run.press.refused[1]==0u&&p.run.press.frames>0u,say("the second press opens with none of the first's refusals"));
     }
+  }
+  // B3-2: one frame in a row of a share that was not drawn does not end the zoom; two do; a share that was refused (not merely not drawn) does; and entering needs a drawn share
+  for(int variant=0;variant<2;++variant) {
+    const char* tag=variant?"asked before the tick":"asked after the tick";
+    auto say=[&](const char* text){static char buffer[400];std::snprintf(buffer,sizeof(buffer),"scope zoom pipeline (%s, withheld share): %s",tag,text);return buffer;};
+    {
+      ZoomPipe p;p.runtimeFirst=variant==1;
+      p.go(14);
+      const unsigned before=p.run.press.frames;
+      p.shareDrawn=false;
+      const auto held=p.frame();
+      p.shareDrawn=true;
+      p.go(4);
+      check(held.applied&&held.passed&&!held.closed&&p.run.press.open&&p.run.press.frames==before+5&&p.run.press.notDrawnPassed==1u&&p.frames.back().applied&&!p.frames.back().passed,
+            say("one frame of a share not drawn passes without ending the zoom: one press, no split, the pass counted"));
+      p.shareDrawn=false;p.frame();p.shareDrawn=true;p.go(1);p.shareDrawn=false;const auto again=p.frame();
+      check(again.applied&&again.passed&&p.run.press.notDrawnPassed==3u&&!again.closed,say("and again after a drawn frame between (the run is one frame at a time)"));
+    }
+    {
+      ZoomPipe p;p.runtimeFirst=variant==1;
+      p.go(14);
+      p.shareDrawn=false;
+      const auto first=p.frame();
+      const auto second=p.frame();
+      check(first.applied&&first.passed&&!second.applied&&second.why==edvr::openxr::ScopeZoomWhy::kShareNotDrawn&&second.closed&&std::strcmp(second.closed,"refused")==0,
+            say("two frames in a row end the zoom on the second: the left eye is narrowed on no frame beyond that"));
+      p.shareDrawn=true;
+      p.go(3);
+      check(p.frames.back().applied&&p.run.press.open&&p.run.press.refused[2]==1u,say("and the zoom comes back with the share, the second press carrying its refusal"));
+    }
+    {
+      ZoomPipe p;p.runtimeFirst=variant==1;
+      p.go(14);
+      p.shareDrawn=false;p.shareRefused=true;
+      const auto f=p.frame();
+      check(!f.applied&&f.why==edvr::openxr::ScopeZoomWhy::kShareNotDrawn&&f.closed,say("a share the renderer refused (views it could not map) is not passed"));
+    }
+    {
+      ZoomPipe p;p.runtimeFirst=variant==1;
+      p.go(8);
+      p.shareDrawn=false;
+      const int during=p.go(4);
+      p.shareDrawn=true;
+      const bool later=p.go(3)>0;
+      check(during==0&&p.frames[11].why==edvr::openxr::ScopeZoomWhy::kShareNotDrawn&&!p.frames[11].passed&&later,say("before the zoom stands a share not drawn is refused, not passed, and the zoom starts when it is drawn"));
+    }
+    {   // the mode crosses with the strip before the zoom, with the zoom, and after it; an answer that is not version 11 carries none
+      ZoomPipe p;p.runtimeFirst=variant==1;p.edge=edvr::scopewin::kEdgeView;
+      p.frame();
+      const auto first=p.frame();
+      p.go(14);
+      const auto zoomed=p.frames.back();
+      const auto down=p.frame(true);
+      check(first.edge==edvr::scopewin::kEdgeView&&zoomed.applied&&zoomed.edge==edvr::scopewin::kEdgeView&&down.edge==edvr::scopewin::kEdgeView,say("the fill mode reaches the runtime on the entry ramp, while the zoom stands and on the way out"));
+      ZoomPipe q;q.runtimeFirst=variant==1;q.edge=edvr::scopewin::kEdgeStretched;q.carries=false;
+      q.go(14);
+      check(q.frames.back().edge==edvr::scopewin::kEdgeBlack,say("an answer that is not version 11 carries no mode: black"));
+    }
+  }
+  // the compositor's fill, counted over a run of the strip
+  {
+    edvr::openxr::ScopeZoomFillTally t;
+    using edvr::scopewin::kEdgeWorld;using edvr::scopewin::kEdgeBlack;
+    t.note(0.f,false,true,0,false,false,0,0.f,0.f);
+    check(!t.active&&t.frames[0]==0u,"scope zoom fill: no strip and no narrowing is no run, and counts nothing");
+    t.note(0.3f,false,true,kEdgeWorld,true,false,0,0.f,0.f);t.note(0.6f,false,true,kEdgeWorld,true,false,0,0.f,0.f);
+    t.note(1.f,true,true,kEdgeWorld,false,false,1,11.f,1.5f);t.note(1.f,true,true,kEdgeWorld,false,false,2,22.f,4.25f);t.note(1.f,true,true,kEdgeBlack,false,true,3,33.f,0.f);
+    check(t.active&&t.frames[kEdgeWorld]==4u&&t.frames[kEdgeBlack]==1u&&t.copies==2u&&t.missing==1u&&t.ageFrames==3u&&near(t.ageMs,33.f,1e-3f)&&near(t.rotationMaxDeg,4.25f,1e-4f),
+          "scope zoom fill: the frames by the fill drawn, the held copies made on the ramp, the narrowed frame black for want of a held picture, the held picture's age as of the last frame, and the largest turn");
+    t.note(1.f,true,false,0,false,false,9,99.f,50.f);
+    check(t.frames[kEdgeWorld]==4u&&t.ageFrames==3u&&t.rotationMaxDeg<5.f,"scope zoom fill: a frame with no share drawn counts nothing");
+    t.note(0.f,false,true,0,false,false,0,0.f,0.f);
+    check(!t.active&&t.frames[kEdgeWorld]==4u,"scope zoom fill: the run ends with the first frame with neither, and what it counted stays for the press's report");
+    t.note(0.2f,false,true,kEdgeWorld,true,false,0,0.f,0.f);
+    check(t.active&&t.frames[kEdgeWorld]==1u&&t.copies==1u&&t.missing==0u&&t.rotationMaxDeg==0.f,"scope zoom fill: the next run starts from nothing");
+    edvr::openxr::ScopeZoomPress press;
+    press.begin(1000);press.takeFill(t,kEdgeWorld);
+    EdvrNativeScopeZoomReport report{};press.fill(report);
+    check(report.edgeMode==kEdgeWorld&&report.fillFrames[1]==1u&&report.heldCopies==1u&&report.heldMissing==0u&&report.heldAgeFrames==t.ageFrames&&edvr::scopewin::reportReadable(&report),
+          "scope zoom fill: the press takes the tally into its report");
   }
   // the report a press ends with is built from the run's press, and is what the d3d11 half is told
   {

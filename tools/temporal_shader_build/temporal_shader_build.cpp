@@ -1201,7 +1201,7 @@ static void selfTest() {
                   "stereo payload reflects its stage and SM5");
         }
         // F106's share shader: new, so held to what d3d11_stereo.cpp binds rather than to a former call. Its own symbol, source name and text; ps_5_0 with the
-        // strictness flag and no macros; the share's constants at b0, the right eye's capture at t0, the hidden-area mask at t1, the blit's sampler at s0, and nothing else.
+        // strictness flag and no macros; the share's constants at b0, the right eye's capture at t0, the hidden-area mask at t1, B3-2's held left picture at t2, the blit's sampler at s0, and nothing else.
         if (stereo.size() == 5) {
             auto& share = stereo[4];
             for (size_t j = 0; j < 4; ++j) check(std::strcmp(stereo[j].symbol, share.symbol) != 0, "stereo symbols do not collide");
@@ -1214,15 +1214,16 @@ static void selfTest() {
             D3D11_SHADER_DESC desc{};
             bool ok = SUCCEEDED(reflect(share.bytes.data(), share.bytes.size(), __uuidof(ID3D11ShaderReflection), reinterpret_cast<void**>(reflection.GetAddressOf()))) &&
                       reflection && SUCCEEDED(reflection->GetDesc(&desc)) && D3D11_SHVER_GET_TYPE(desc.Version) == D3D11_SHVER_PIXEL_SHADER &&
-                      D3D11_SHVER_GET_MAJOR(desc.Version) == 5 && desc.ConstantBuffers == 1 && desc.BoundResources == 4;
-            D3D11_SHADER_INPUT_BIND_DESC cb{}, right{}, mask{}, sampler{};
+                      D3D11_SHVER_GET_MAJOR(desc.Version) == 5 && desc.ConstantBuffers == 1 && desc.BoundResources == 5;
+            D3D11_SHADER_INPUT_BIND_DESC cb{}, right{}, mask{}, held{}, sampler{};
             ok = ok && SUCCEEDED(reflection->GetResourceBindingDescByName("Share", &cb)) && cb.Type == D3D_SIT_CBUFFER && cb.BindPoint == 0 &&
                  SUCCEEDED(reflection->GetResourceBindingDescByName("rightEye", &right)) && right.Type == D3D_SIT_TEXTURE && right.BindPoint == 0 &&
                  SUCCEEDED(reflection->GetResourceBindingDescByName("hiddenMask", &mask)) && mask.Type == D3D_SIT_TEXTURE && mask.BindPoint == 1 &&
+                 SUCCEEDED(reflection->GetResourceBindingDescByName("heldEye", &held)) && held.Type == D3D_SIT_TEXTURE && held.BindPoint == 2 &&
                  SUCCEEDED(reflection->GetResourceBindingDescByName("linearSampler", &sampler)) && sampler.Type == D3D_SIT_SAMPLER && sampler.BindPoint == 0;
             D3D11_SHADER_BUFFER_DESC cbDesc{};
-            ok = ok && reflection->GetConstantBufferByName("Share") && SUCCEEDED(reflection->GetConstantBufferByName("Share")->GetDesc(&cbDesc)) && cbDesc.Size == 192;
-            check(ok, "F106: the share shader is SM5 pixel, binds the share's 192-byte constants at b0, the right eye at t0, the mask at t1 and the sampler at s0, and nothing else");
+            ok = ok && reflection->GetConstantBufferByName("Share") && SUCCEEDED(reflection->GetConstantBufferByName("Share")->GetDesc(&cbDesc)) && cbDesc.Size == 320;
+            check(ok, "F106: the share shader is SM5 pixel, binds the share's 320-byte constants at b0, the right eye at t0, the mask at t1, the held left picture at t2 and the sampler at s0, and nothing else");
         }
         // The text really is the old call's: a one-byte edit of either changes the hash (the control for the hashes above), and the two texts differ.
         Fnv1a64 edited; std::string tweaked = edvr::openxr::kStereoBlitHlsl; tweaked[tweaked.size() / 2] ^= 1; edited.add(tweaked.data(), tweaked.size());

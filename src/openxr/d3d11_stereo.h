@@ -49,6 +49,13 @@ struct StereoShareFacts {
   float leftTangents[4]{}, rightTangents[4]{};
   float coverage = 0.0f, coverageWhole = 0.0f;
   uint32_t hiddenTriangles = 0;   // the mask's triangles (0: no mask)
+  // B3-2 (the scope zoom's strip fill): what the last call did. fillInUse: the strip was up or the left eye narrowed, with a share drawn, so a fill could show. fillMode: the fill drawn
+  // (0 black, 1 world, 2 view, 3 stretched; a mode asked and not available is black). heldCopied: the left eye's picture was copied to hold on this call. heldMissing: the left eye
+  // was narrowed and a held fill was asked but this run has no held picture, so black was drawn. leftBlacked: narrowed with no share drawn, so the left eye was cleared instead of drawn.
+  // heldAgeFrames / heldAgeMs: calls and time since the held picture was copied (0 when none). heldRotationDeg: the turn of the left view against the held picture's, when the world fill was drawn.
+  bool fillInUse = false, heldCopied = false, heldMissing = false, leftBlacked = false;
+  uint32_t fillMode = 0, heldAgeFrames = 0;
+  float heldAgeMs = 0.0f, heldRotationDeg = 0.0f;
 };
 
 struct StereoDispatch {
@@ -108,12 +115,18 @@ class D3D11Stereo final {
                           StereoWallTimes* times = nullptr,
                           const StereoPlacement* placement = nullptr,
                           float fade = 0.0f, const XrPosef* headPose = nullptr, float leftEyeShare = 0.0f,
-                          const StereoHiddenArea* rightHidden = nullptr, float leftStripBlack = 0.0f, bool leftZoomed = false);
+                          const StereoHiddenArea* rightHidden = nullptr, float leftStripBlack = 0.0f, bool leftZoomed = false, uint32_t leftEdgeFill = 0);
   // leftStripBlack, 0..1 (B3, the scope zoom's window, scope_zoom_window.h): with a share drawn, the part of the left eye the right eye does not cover (its outer strip, and the fade
   // band to it: the geometry alone, however far the share's weight has fallen) is blended toward black by that much, so the left eye's own picture, which the zoom has narrowed, is
   // not seen there. 0 (or anything that is not a number) draws the share exactly as before; with no share drawn it does nothing, the left eye's whole picture being its own.
   // leftZoomed: the pair being drawn was rendered with eye 0 narrowed (a fresh frame the runtime told the window, or a kept pair it replays). Then all of the left eye's own picture
-  // goes black under the share, so the narrowed picture cannot show through in a frame where the weight has already fallen; false leaves the interior as the share draws it.
+  // goes to the fill under the share, so the narrowed picture cannot show through in a frame where the weight has already fallen; false leaves the interior as the share draws it. A
+  // narrowed frame in which no share is drawn (none asked, views it cannot map, a mask it cannot build) has the left eye cleared to black in place of its own picture: it is never shown.
+  // leftEdgeFill (B3-2, scopewin::kEdge* in scope_zoom_window.h): what the part of the left eye taken over by leftStripBlack or leftZoomed is filled with instead of black: 1 the left eye's
+  // picture held from the last frame that was not narrowed (copied on every such frame with leftStripBlack above 0, so refreshed through the entry ramp and frozen from the first narrowed
+  // frame), turned from its view to this frame's; 2 the same picture at the same place in the view; 3 the right eye's picture at the inner edge of the share's fade, stretched out along
+  // the row; 0 black (B3-1 exactly). The held picture is valid for one run of the strip: a frame with no strip and not narrowed ends it, a narrowed frame with none draws black and says so
+  // (heldMissing), and a picture of an earlier run is never shown. A replay of a kept pair (leftZoomed) uses the held picture too.
   const StereoShareFacts& shareFacts() const { return shareFacts_; }
   XrResult renderSkybox(const XrView (&)[2], XrSpace, const SkyboxCapture&,
                         XrCompositionLayerProjection&, float fade = 0.0f);
@@ -194,6 +207,17 @@ class D3D11Stereo final {
   bool shareCoverageKnown_ = false;
   bool ensureShareMask(const XrFovf& rightFov, const StereoHiddenArea* hidden, bool& rebuilt);
   StereoShareFacts shareFacts_{};
+  // B3-2: the left eye's picture held for the strip's fill, with the view, placement and crop it was captured with, and the run it belongs to.
+  Microsoft::WRL::ComPtr<ID3D11Texture2D> heldTexture_;
+  Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> heldView_;
+  D3D11_TEXTURE2D_DESC heldDesc_{};
+  bool heldValid_ = false;
+  XrView heldEyeView_{};
+  XrSpace heldSpace_ = XR_NULL_HANDLE;
+  double heldPlace_[4]{};
+  float heldBounds_[4]{}, heldClamp_[4]{};
+  uint32_t heldAgeFrames_ = 0;
+  double heldCopiedMs_ = 0.0;
   Microsoft::WRL::ComPtr<ID3D11VertexShader> skyboxVertexShader_;
   Microsoft::WRL::ComPtr<ID3D11PixelShader> skyboxPixelShader_;
   Microsoft::WRL::ComPtr<ID3D11Buffer> skyboxConstants_;

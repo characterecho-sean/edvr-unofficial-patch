@@ -54,9 +54,14 @@ struct ShareConstants {
   float rightPlace[4];           // the right eye's viewport as fractions of its swapchain image: u0, v0, u1, v1
   float rightAng[4];             // that rectangle as axis angles: x min, x max, y min, y max (radians)
   float leftSize[4];             // the left swapchain image: width, height
-  float band[4];                 // the margin inside the edge, 1 / the band (radians), the strip's black, 1 in a frame drawn with eye 0 narrowed (B3)
+  float band[4];                 // the margin inside the edge, 1 / the band (radians), the strip's weight, 1 in a frame drawn with eye 0 narrowed (B3)
+  float heldBounds[4], heldClamp[4];   // B3-2: the held left picture's crop and clamp
+  float heldRot[3][4];           // a direction of this left view to the held frame's left view, row-major
+  float heldTan[4];              // the held frame's left view: left, right, up, down
+  float heldPlace[4];            // its drawn image within its swapchain image: u0, v0, u1, v1
+  float fill[4];                 // the strip's fill (0 black, 1 world, 2 view, 3 stretched), the stretched fill's step down the column (radians)
 };
-static_assert(sizeof(ShareConstants)==192,"share HLSL constant-buffer packing");
+static_assert(sizeof(ShareConstants)==320,"share HLSL constant-buffer packing");
 struct SkyConstants { float orient[3][4]; float tangents[4]; float encode=0, pad[3]{}; };
 static_assert(sizeof(SkyConstants)==80,"skybox HLSL constant-buffer packing");
 template<class T,class F> XrResult enumerate(F call,std::vector<T>& out,T initial=T{}) {
@@ -173,6 +178,7 @@ XrResult D3D11Stereo::shutdown() {
   blitConstants_.Reset();blitSampler_.Reset();skyboxConstants_.Reset();skyboxSampler_.Reset();blitPixelShader_.Reset();blitVertexShader_.Reset();skyboxPixelShader_.Reset();skyboxVertexShader_.Reset();rasterizer_.Reset();depth_.Reset();fadeBlend_.Reset();
   sharePixelShader_.Reset();shareConstants_.Reset();shareBlend_.Reset();shareMask_.Reset();shareMaskCpu_=shareview::HiddenMask{};shareMaskRevision_=0;shareMaskFov_={};
   shareMaskPixels_[0]=shareMaskPixels_[1]=0;shareCoverageKnown_=false;shareFacts_={};
+  heldView_.Reset();heldTexture_.Reset();heldDesc_={};heldValid_=false;heldSpace_=XR_NULL_HANDLE;heldAgeFrames_=0;
   for(auto& eye:eyes_){
     eye.rtvs.clear();eye.images.clear();
     if(eye.swapchain && dispatch_.destroySwapchain){const XrResult r=dispatch_.destroySwapchain(eye.swapchain);if(r!=XR_SUCCESS && first==XR_SUCCESS)first=r;}
@@ -330,7 +336,7 @@ bool D3D11Stereo::ensureShareMask(const XrFovf& fov,const StereoHiddenArea* hidd
 XrResult D3D11Stereo::renderCaptured(const XrView (&views)[2],XrSpace space,const EyeCapture& capture,
                                    XrCompositionLayerProjection& layer, GpuWorkObserver* observer,
                                    StereoWallTimes* times, const StereoPlacement* placement, float fade,
-                                   const XrPosef* headPose, float leftEyeShare, const StereoHiddenArea* rightHidden, float leftStripBlack, bool leftZoomed) {
+                                   const XrPosef* headPose, float leftEyeShare, const StereoHiddenArea* rightHidden, float leftStripBlack, bool leftZoomed, uint32_t leftEdgeFill) {
   layer={XR_TYPE_COMPOSITION_LAYER_PROJECTION};
   fade=comfort::sanitize(fade);
   leftEyeShare=comfort::sanitize(leftEyeShare);
@@ -409,6 +415,7 @@ XrResult D3D11Stereo::renderCaptured(const XrView (&views)[2],XrSpace space,cons
       share.band[0]=float(m.marginRad);share.band[1]=float(1.0/m.bandRad);
       share.band[2]=leftStripBlack;   // B3: the part of the left eye the right eye does not cover goes toward black by this much (the shader's band.z; 0 is the share as it always was)
       share.band[3]=leftZoomed?1.f:0.f;   // ... and all of its own picture under the share in a frame drawn with eye 0 narrowed (band.w)
+      share.fill[1]=float((m.ang[3]-m.ang[2])/(std::max)(1.0,double(viewports[1].Height))*2.0);   // B3-2: the stretched fill's step down the column, two of the right eye's pixels
       shareOn=true;
       double ypr[3];shareview::yawPitchRollDeg(m.rot,ypr);
       for(int k=0;k<3;++k)shareFacts_.rotationDeg[k]=float(ypr[k]);
@@ -430,6 +437,67 @@ XrResult D3D11Stereo::renderCaptured(const XrView (&views)[2],XrSpace space,cons
       }
     }
   }
+  // B3-2: the fill of the part of the left eye the strip or the narrowing takes over. The held picture belongs to one run of the strip: it is copied on every frame that is not narrowed
+  // while the strip is up, frozen on the narrowed ones, and ended by a frame with neither. A narrowed frame with no held picture of this run draws black and says so.
+  shareFacts_.fillInUse=shareFacts_.heldCopied=shareFacts_.heldMissing=shareFacts_.leftBlacked=false;
+  shareFacts_.fillMode=shareFacts_.heldAgeFrames=0;shareFacts_.heldAgeMs=shareFacts_.heldRotationDeg=0.f;
+  const bool stripUp=leftStripBlack>0.f;
+  if(!stripUp&&!leftZoomed)heldValid_=false;
+  const uint32_t askedFill=leftEdgeFill<4?leftEdgeFill:0u;
+  const bool heldFill=askedFill==1||askedFill==2;
+  bool copyHeld=false;
+  if(shareOn) {
+    shareFacts_.fillInUse=stripUp||leftZoomed;
+    uint32_t fillUsed=0;
+    if(askedFill==3)fillUsed=3;
+    if(heldFill&&fade<1.f) {
+      if(!leftZoomed&&stripUp) {
+        // this frame's left picture is the one to hold: the texture it is copied to, and the view, placement and crop it was drawn with
+        D3D11_TEXTURE2D_DESC ld{};capture.texture(vr::Eye_Left)->GetDesc(&ld);
+        heldValid_=false;
+        if(!heldTexture_||heldDesc_.Width!=ld.Width||heldDesc_.Height!=ld.Height||heldDesc_.Format!=ld.Format) {
+          heldView_.Reset();heldTexture_.Reset();
+          D3D11_TEXTURE2D_DESC hd=ld;hd.BindFlags=D3D11_BIND_SHADER_RESOURCE;hd.MiscFlags=0;hd.Usage=D3D11_USAGE_DEFAULT;hd.CPUAccessFlags=0;
+          D3D11_SHADER_RESOURCE_VIEW_DESC sd{};srvs[0]->GetDesc(&sd);
+          if(SUCCEEDED(device_->CreateTexture2D(&hd,nullptr,&heldTexture_))&&SUCCEEDED(device_->CreateShaderResourceView(heldTexture_.Get(),&sd,&heldView_)))heldDesc_=hd;
+          else {heldView_.Reset();heldTexture_.Reset();heldDesc_={};}
+        }
+        if(heldTexture_&&heldView_) {
+          heldEyeView_=views[0];heldSpace_=space;
+          heldPlace_[0]=double(viewports[0].TopLeftX)/eyes_[0].width;heldPlace_[1]=double(viewports[0].TopLeftY)/eyes_[0].height;
+          heldPlace_[2]=double(viewports[0].TopLeftX+viewports[0].Width)/eyes_[0].width;heldPlace_[3]=double(viewports[0].TopLeftY+viewports[0].Height)/eyes_[0].height;
+          std::memcpy(heldBounds_,constants[0].bounds,sizeof(heldBounds_));std::memcpy(heldClamp_,constants[0].clampUV,sizeof(heldClamp_));
+          copyHeld=true;
+        }
+      }
+      const bool have=(copyHeld||(heldValid_&&leftZoomed))&&heldTexture_&&heldView_&&heldSpace_==space;
+      if(have) {
+        std::memcpy(share.heldBounds,heldBounds_,sizeof(share.heldBounds));std::memcpy(share.heldClamp,heldClamp_,sizeof(share.heldClamp));
+        if(askedFill==1) {
+          const shareview::Mapping hm=shareview::makeMapping(views[0].fov,views[0].pose.orientation,heldEyeView_.fov,heldEyeView_.pose.orientation,heldPlace_);
+          if(hm.valid) {
+            for(int r=0;r<3;++r)for(int c=0;c<3;++c)share.heldRot[r][c]=float(hm.rot[r][c]);
+            share.heldTan[0]=float(hm.right.left);share.heldTan[1]=float(hm.right.right);share.heldTan[2]=float(hm.right.up);share.heldTan[3]=float(hm.right.down);
+            for(int k=0;k<4;++k)share.heldPlace[k]=float(hm.place[k]);
+            const XrQuaternionf& qa=views[0].pose.orientation;const XrQuaternionf& qb=heldEyeView_.pose.orientation;
+            const double dot=(std::min)(1.0,std::fabs(double(qa.x)*qb.x+double(qa.y)*qb.y+double(qa.z)*qb.z+double(qa.w)*qb.w));
+            shareFacts_.heldRotationDeg=float(2.0*std::acos(dot)*180.0/3.14159265358979323846);
+            fillUsed=1;
+          }
+        } else fillUsed=2;
+      }
+      if(fillUsed==0&&leftZoomed)shareFacts_.heldMissing=true;   // narrowed, a held fill asked, none of this run (or none that maps): black, counted
+    }
+    share.fill[0]=float(fillUsed);
+    shareFacts_.fillMode=fillUsed;
+  } else if(leftZoomed&&fade<1.f)shareFacts_.leftBlacked=true;   // narrowed with no share drawn: the left eye is cleared, never drawn (below)
+  shareFacts_.heldCopied=copyHeld;
+  if(heldValid_||copyHeld) {
+    if(!copyHeld)++heldAgeFrames_;
+    shareFacts_.heldAgeFrames=copyHeld?0u:heldAgeFrames_;
+    shareFacts_.heldAgeMs=copyHeld?0.f:float(std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count()-heldCopiedMs_);
+  }
+  const bool blackLeft=shareFacts_.leftBlacked;
   auto failed=[&](XrResult r){ready_=false;lastResult_=r;return r;};
   auto* drawContext=ownedImmediateScene_?immediateContext_.Get():context_.Get();
   for(unsigned i=0;i<2;++i) {
@@ -470,22 +538,32 @@ XrResult D3D11Stereo::renderCaptured(const XrView (&views)[2],XrSpace space,cons
       if(clearFirst[i]){const float black[]={0,0,0,1};drawContext->ClearRenderTargetView(rtv,black);}
       drawContext->RSSetViewports(1,&viewports[i]);
       drawContext->PSSetShaderResources(0,1,srvs[i].GetAddressOf());
-      drawContext->UpdateSubresource(blitConstants_.Get(),0,nullptr,&constants[i],0,0);drawContext->Draw(3,0);
+      if(i==0&&copyHeld) {
+        // B3-2: the picture to hold, copied before anything is drawn over the capture's use; valid for this run from here
+        drawContext->CopyResource(heldTexture_.Get(),capture.texture(vr::Eye_Left));heldValid_=true;
+        heldCopiedMs_=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count();heldAgeFrames_=0;
+      }
+      if(i==0&&blackLeft) {
+        // narrowed, and no share to cover it: the left eye is black, never its own (zoomed) picture
+        const float black[]={0,0,0,1};drawContext->ClearRenderTargetView(rtv,black);
+      } else {
+        drawContext->UpdateSubresource(blitConstants_.Get(),0,nullptr,&constants[i],0,0);drawContext->Draw(3,0);
+      }
       // F106 (native on foot, fix.native_on_foot_ads_sight_eye = both): the LEFT eye takes the RIGHT eye's image, turned into the left view, by the share times its
       // coverage, over the left eye's own image just drawn. The source is the right eye's capture (srvs[1]): complete before this call (both eyes are captured and
       // any shared transfer completed before compose), never written by it (the passes here write only the swapchain images), and it already holds the scene, the HUD
       // and the menu. Same viewport as the left eye's own image, so a trimmed border stays black; the fade and the plugins' overlay below apply over it.
       if(i==0&&shareOn) {
-        ID3D11ShaderResourceView* shareViews[2]={srvs[1].Get(),shareMask_.Get()};
+        ID3D11ShaderResourceView* shareViews[3]={srvs[1].Get(),shareMask_.Get(),share.fill[0]==1.f||share.fill[0]==2.f?heldView_.Get():nullptr};
         drawContext->PSSetShader(sharePixelShader_.Get(),nullptr,0);
-        drawContext->PSSetShaderResources(0,2,shareViews);
+        drawContext->PSSetShaderResources(0,3,shareViews);
         drawContext->PSSetConstantBuffers(0,1,shareConstants_.GetAddressOf());
         drawContext->UpdateSubresource(shareConstants_.Get(),0,nullptr,&share,0,0);
         drawContext->OMSetBlendState(shareBlend_.Get(),nullptr,~0u);drawContext->Draw(3,0);
         drawContext->OMSetBlendState(nullptr,nullptr,~0u);
         drawContext->PSSetShader(blitPixelShader_.Get(),nullptr,0);
         drawContext->PSSetConstantBuffers(0,1,blitConstants_.GetAddressOf());
-        ID3D11ShaderResourceView* ownViews[2]={srvs[i].Get(),nullptr};drawContext->PSSetShaderResources(0,2,ownViews);
+        ID3D11ShaderResourceView* ownViews[3]={srvs[i].Get(),nullptr,nullptr};drawContext->PSSetShaderResources(0,3,ownViews);
         shareFacts_.drawn=true;
       }
       if(fade>0.f) {

@@ -33,9 +33,15 @@ template<class Check> void runScopeZoomHostCases(Check check) {
   for(int i=0;i<3;++i)h.noteProjectionRead(0,false,true,0.32f,kA);   // the matrix getter's reads (its callers are not tallied)
   check(h.zoomRawReads.load()==15u&&h.zoomMatrixReads.load()==3u,"scope zoom host: eye 0's reads are counted per getter");
   check(h.zoomRawSpan.load()==1.28f&&h.zoomMatrixSpan.load()==0.32f,"scope zoom host: each getter's last answered span is kept, and a read that answered nothing does not erase it");
+  // what the compositor drew into the strip over the run, as compose() notes it, goes into the press at its close along with the mode the press opened with
+  h.zoomRun.press.edgeMode=edvr::scopewin::kEdgeWorld;
+  h.zoomFill.note(0.6f,false,true,edvr::scopewin::kEdgeWorld,true,false,0,0.f,0.f);
+  h.zoomFill.note(1.f,true,true,edvr::scopewin::kEdgeWorld,false,false,3,33.f,2.5f);
   h.zoomRun.frame(applied,2000000);
   h.closeScopeZoomPress("test");
   const ScopeZoomPress& p=h.zoomRun.press;
+  check(p.edgeMode==edvr::scopewin::kEdgeWorld&&p.fillFrames[edvr::scopewin::kEdgeWorld]==2u&&p.heldCopies==1u&&p.heldMissing==0u&&p.heldAgeFrames==3u&&p.heldAgeMs==33.f&&p.heldRotationMaxDeg==2.5f,
+        "scope zoom host: the press takes the fill's tally and the mode it opened with at its close");
   check(!p.open&&!h.zoomReadsOn.load()&&p.rawReads==15u&&p.matrixReads==3u&&p.rawSpan==1.28f&&p.matrixSpan==0.32f&&std::fabs(p.rawSpan/p.matrixSpan-4.0f)<1e-4f,
         "scope zoom host: the press takes the counts and the spans, which are in the ratio of the narrowing, and the reads stop counting");
   check(p.callerRva[0]==kA&&p.callerReads[0]==5u&&p.callerRva[1]==kB&&p.callerReads[1]==2u&&p.callerRva[2]==0x100u&&p.callerReads[2]==2u&&p.callerRva[3]==kOutside&&p.callerReads[3]==1u,

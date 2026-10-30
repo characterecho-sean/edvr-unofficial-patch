@@ -19,6 +19,7 @@ struct ScopeZoomB3Frame {
     uint32_t asked = 0;      // 1: the full-detail key is on and the held entry is a rendered one, on a frame the lens qualifies for: the left door copies the zoomed picture's window and the lens reads it
     uint32_t matOk = 0;      // 1: T and u are made from the two eyes' rows of one frame, and the left rows describe the window the runtime told the game
     float tc[2] = {};        // the window's centre, in the left eye's tangent plane
+    float tcNow[2] = {};     // the left eye's tangent of the lens's far point on this tick (NaN when the left rows gave none): the door's estimate of the lens outside the copy
     float T[16] = {};        // a point of the right eye's clip space, as a row (ndc x, ndc y, depth, 1), to the left eye's: b3Matrices
     float u[4] = {};
 };

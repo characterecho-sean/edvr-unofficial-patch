@@ -48,12 +48,16 @@ game's own zoom as a magnified picture inside the scope's lens. The rest of the 
   the lens by the tonemap difference (stock brightness); the weapons half governs it, the scope zoom key arms it; the S0 census probes optical
   sights only; the press line counts `composites matched/plain/none` and `--health` makes a taken mark nothing composited a PARTIAL. Its review
   fixes (same section) make the mark's stand-down last a press, not the session, and count it in the press line.
-- **B3-1 FLOWN 2026-10-29 (`9faeadb9`, Epic): "looked good"; one artifact, the strip's black (a dark line on the left periphery). Section 11, the flight entry. Next: B3-2 fills the strip** (from `4a4a17b6`; section 11, "As built (B3-1)"): the scoped Executioner's lens at full detail. The left eye (F162's both mode) is drawn as the zoomed view
+- **B3-1 FLOWN 2026-10-29 (`9faeadb9`, Epic): "looked good"; one artifact, the strip's black (a dark line on the left periphery). Section 11, the flight entry.** (from `4a4a17b6`; section 11, "As built (B3-1)"): the scoped Executioner's lens at full detail. The left eye (F162's both mode) is drawn as the zoomed view
   (told frustum = its tangents / M about c, tangents only, set in WaitGetPoses after the trim); the lens samples its post-RCAS picture, each pixel at the place its world point is drawn at in that eye
   (the right eye's depth, T = inverse(A_R) A_L). The raw getter (the UI scale) keeps the true frustum; DLSS resets at both edges; the strip goes black; the light grid cache and the readout pin
-  step aside. Three log lines: `scope zoom (B3)` announce and press, `scope zoom (B3) runtime`. Review fixes done 2026-10-29 (section 11, items 1 to 8; the hidden-area mesh per eye left). Next: B3-2 (the strip filled from the left eye's last unzoomed picture), then the maintainer's verdict on the key.
+  step aside. Three log lines: `scope zoom (B3)` announce and press, `scope zoom (B3) runtime`. Review fixes done 2026-10-29 (section 11, items 1 to 8; the hidden-area mesh per eye left).
+- **B3-2 BUILT 2026-10-29, NOT FLOWN** (from `5656e455`; section 11, "B3-2"): what fills the strip while the zoom stands, to A/B against the black. Four modes in one press: `world` (the left eye's last unzoomed
+  picture, held from before the zoom and turned to the head's view now), `view` (the same picture fixed in the view), `stretched` (the right eye's picture at the fade's inner edge, stretched out along
+  the row), `black` (B3-1 exactly, pinned bit for bit by hash). The press line counts the lens reading outside the window copy; one withheld share frame no longer ends the zoom. Next: the flight, then the maintainer's verdict on the fill and on the keys.
 - Keys: `fix.native_on_foot_ads_scope_zoom` (default on since A3 flew OK, the maintainer 2026-10-29) and the temporary `experimental.native_on_foot_ads_scope_zoom_fov` (the
-  reference FOV, 56.3 by default) and `experimental.native_on_foot_ads_scope_zoom_full_detail` (TEMPORARY, B3: on | off, live, default off; goes when B3 is judged).
+  reference FOV, 56.3 by default) and `experimental.native_on_foot_ads_scope_zoom_full_detail` (TEMPORARY, B3: on | off, live, default off; goes when B3 is judged) and `experimental.native_on_foot_ads_scope_zoom_full_detail_edge`
+  (TEMPORARY, B3-2: world | view | stretched | black, live, default world; goes when the fill is judged).
 - Separate arc: a flat stutter on the scoped Executioner's ADS (2026-10-29), in its own doc,
   `docs\investigation-flat-scoped-ads-stutter-2026-10-29.md`, on its own branch.
 - **Key (after S0, on the maintainer's word):** `fix.native_on_foot_ads_scope_zoom` = on | off. Section 5.
@@ -885,3 +889,28 @@ left periphery." Log `edvr_gfx_20261029_181913.log`:
 
 Next, B3-2, proposed: fill the strip with the left eye's last unzoomed picture, kept at the zoom's start and mapped to the current view the way the share maps the right eye's picture. Count the lens
 pixels that fall back to A outside the copy, and let one withheld frame pass without ending the zoom.
+
+**B3-2** (2026-10-29, from `5656e455`; the full local build and all its gates green, nothing flown). The flight's one artifact is the strip: the left eye's outer ~10 degrees (tangents about -1.2543 to -0.8746 on this Pimax)
+that the right eye's share cannot cover, black while eye 0 is narrowed. B3-2 puts a fill there, behind a temporary key to A/B. Design, then as built, one line each.
+1. **The key.** `experimental.native_on_foot_ads_scope_zoom_full_detail_edge` = `world | view | stretched | black`, TEMPORARY, live, default `world`, next to the full-detail key with a `# ui:` row (the Experimental page; `docs\settings-menu.md`).
+   It does nothing with full detail off: no strip, no copy, no fill. A value that is none of the four reads as `world`. The mode crosses in two bits of the window request's first word (`scopewin::kEdgeShift`, the five words
+   unchanged), also with the strip alone; `native_on_foot.cpp` logs it at each change (`native on foot ADS scope zoom full detail edge (B3-2, TEMPORARY): ...` and the announce `scope zoom (B3): full detail on, edge world; ...`).
+2. **The shader** (`kStereoShareHlsl`). The strip's "dim to black" is "blend to the fill": unzoomed, dest = lerp(own, fill, s (1 - cover)); narrowed (`band.w`), dest = fill; out = R a + dest (1 - a). `black` runs none of the
+   fill code and is B3-1's arithmetic: the stereo rig hashes B3-1's renders (every share, strip and narrowed combination with a share) and requires the hash B3-1's own shader made of them, srgb and unorm, owned and deferred.
+   `world` turns the held picture by `heldRot` (`shareview::makeMapping` of this left view against the held one, the way the right eye's picture is turned into the left view); `view` samples it at the same pixel;
+   `stretched` clamps the direction inside the right eye's drawn rectangle by margin + band (the fade's inner edge), takes three taps down the column, and leaves out any tap whose hidden-area mask is under 1.
+3. **The held picture** (`D3D11Stereo::renderCaptured`). Copied (`CopyResource`, with the left view, placement and crop) on every frame with the strip up that is not narrowed, so refreshed through the entry ramp and frozen from
+   the first narrowed frame. Valid for one run of the strip: a frame with neither the strip nor the narrowing ends it, and so does another reference space. A narrowed frame with none draws black and says so
+   (`heldMissing`); an earlier press's picture is never shown. A replayed pair is narrowed by `previousZoomed` and uses the held picture too. The tick, the strip's ramp and the request's timing are B3-1's.
+4. **Lens outside the copy** (`b3OutsideFraction`, `scope_zoom.cpp pollRays`). At far depth the lens pixel at angle rho along ray k reads the left eye at tcNow + tan(rho) / M along the same direction; it is outside when that is beyond the
+   copy's tangents (`b3CopyTangents`, less the filter's margin). The rays' radii are the hole the first pass already reads back, so there is no new readback; counted per press once the lens has eased in: frames estimated, frames with
+   part outside, the area outside (mean and max) in the press line.
+5. **One withheld frame** (`decideScopeZoom`, `ScopeZoomRun`). A zoom that stands goes on past ONE `share not drawn` frame in a row (not a refused share; entering still needs a drawn share). Safe because `renderCaptured` never shows a
+   narrowed left picture uncovered: with the share drawn the shader makes every uncovered pixel of a narrowed frame the fill, and with no share drawn it clears the left eye to black in place of its own picture (this build; rig:
+   `narrowed with no share`). So the frame that passes, and the one after, are covered whatever their own share does.
+6. **Instruments.** The runtime line ends `; edge fill M: frames black B, world W, view V, stretched S; held copies N, black for want of a held picture N, held age at the end N frames X ms, largest world turn X deg; passed past a
+   share not drawn N` (`formatB3Runtime`); the press line carries `edge M` and `lens outside the copy on N of N frames, area mean X max X`; `edvr_log.py --health` reads all three with exact-text rules: PARTIAL when the
+   fill asked drew on no frame (a press with the counts at zero is one that did not run it), a world or view fill with no held copy, more than a tenth of the narrowed frames black for want of a held picture, or the lens outside
+   the copy on most frames. Both lines fit the log's 1167 bytes with every count six digits.
+- **Not verified, for the flight.** How the held picture looks (frozen HUD or weapon in the strip, edge extension past the held image when the head turns); `stretched` against the visor's rim; the held copy's cost (one eye-sized
+  copy a frame through the ramp and the exit hold); the estimate against the pixels the shader really sends to A; `world` at a large turn. Read `--health`, the `edge` of the press line, then the runtime line's fill counts.

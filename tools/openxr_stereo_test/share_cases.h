@@ -10,6 +10,8 @@
 // black, the coverage figure the renderer computes on the CPU matches what the GPU drew, and the pure parts (the relative rotation, the mask) on their own.
 #pragma once
 
+// B3-2: the hash of B3-1's black-strip renders per format (srgb, unorm), made with B3-1's shader (the one of 9faeadb9) and this renderer, in owned and deferred mode alike. See the B3-2 black check.
+constexpr uint64_t kB3GoldenSrgb = 0x1e62f587e22276d3ull, kB3GoldenUnorm = 0x403f4c9b47b5980full;
 double decodeSrgb(double e){return e<=.04045?e/12.92:std::pow((e+.055)/1.055,2.4);}
 ComPtr<ID3D11Texture2D> shareTexture(Fixture& f,const std::function<uint32_t(unsigned,unsigned)>& rgba) {
   D3D11_TEXTURE2D_DESC d{};d.Width=d.Height=size;d.MipLevels=d.ArraySize=1;d.Format=DXGI_FORMAT_R8G8B8A8_UNORM;d.SampleDesc.Count=1;
@@ -114,9 +116,9 @@ void shareSelfTest(bool owned) {
       EyeCapture grayCapture;check(SUCCEEDED(grayCapture.initialize(f.runtime.device.Get())),"strip capture owner");
       const vr::Texture_t gl{gray.Get(),vr::API_DirectX,vr::ColorSpace_Linear},rt2{right.Get(),vr::API_DirectX,vr::ColorSpace_Linear};
       check(grayCapture.capture(vr::Eye_Left,&gl)==vr::VRCompositorError_None&&grayCapture.capture(vr::Eye_Right,&rt2)==vr::VRCompositorError_None,"strip capture");
-      const auto strip=[&](float share,float black,bool zoomed=false) {
+      const auto strip=[&](float share,float black,bool zoomed=false,uint32_t edge=0) {
         XrCompositionLayerProjection layer{};const unsigned image=f.runtime.eyes[0].calls%2;
-        check(f.renderer.renderCaptured(f.views,space,grayCapture,layer,nullptr,nullptr,nullptr,0.f,nullptr,share,nullptr,black,zoomed)==XR_SUCCESS,"strip render");
+        check(f.renderer.renderCaptured(f.views,space,grayCapture,layer,nullptr,nullptr,nullptr,0.f,nullptr,share,nullptr,black,zoomed,edge)==XR_SUCCESS,"strip render");
         return readWhole(f,0,image);
       };
       const auto sum=[&](uint32_t p){unsigned r=0,g=0,b=0;channels(p,r,g,b);return r+g+b;};
@@ -140,10 +142,111 @@ void shareSelfTest(bool owned) {
       check(sum(at(hStrip,0,0))<=3&&sum(at(h0,0,0))>3*150,what);
       std::snprintf(what,sizeof(what),"B3 strip (%s, %s): in a frame drawn with eye 0 narrowed the left eye's own picture is gone under the share (a share of 0.5 shows half the right eye's pixel over black), and the corner is black whatever the strip",mode,kind);
       check(sum(at(hZoomed,64,64))+3*40<sum(at(h0,64,64))&&sum(at(hZoomed,64,64))>3&&sum(at(hZoomed,0,0))<=3&&hZoomedStrip==hZoomed,what);
-      std::snprintf(what,sizeof(what),"B3 strip (%s, %s): at full weight a narrowed frame's covered interior is still the right eye's own pixel, bit for bit, and with no share a narrowed frame draws nothing",mode,kind);
-      bool zCovered=true;
+      std::snprintf(what,sizeof(what),"B3 strip (%s, %s): at full weight a narrowed frame's covered interior is still the right eye's own pixel, bit for bit, and with no share a narrowed frame has the left eye cleared to black, never its own picture",mode,kind);
+      bool zCovered=true,zBlack=true;
       for(unsigned y=16;y<112;++y)for(unsigned x=16;x<112;++x)zCovered=zCovered&&at(zFull,x,y)==at(base.eye[1],x,y);
-      check(zCovered&&zNoShare==noShare0,what);
+      for(uint32_t pixel:zNoShare)zBlack=zBlack&&sum(pixel)<=3;
+      check(zCovered&&zBlack&&zNoShare!=noShare0,what);
+      // B3-2: black is B3-1 exactly. The left eye's images of B3-1's cases (every share, strip and narrowed combination that has a share), hashed, against the hashes the previous build's shader made
+      // of the same renders (taken with that shader and this renderer, so it is the shader's arithmetic that is pinned).
+      {
+        uint64_t hash=1469598103934665603ull;
+        const float shares[]={1.f,.5f},strips[]={0.f,.25f,.5f,1.f};
+        for(float sh:shares)for(float st:strips)for(bool z:{false,true})for(uint32_t pixel:strip(sh,st,z,0))hash=(hash^pixel)*1099511628211ull;
+        for(uint32_t pixel:strip(0.f,1.f,false,0))hash=(hash^pixel)*1099511628211ull;
+        static const uint64_t golden[2]={kB3GoldenSrgb,kB3GoldenUnorm};
+        std::snprintf(what,sizeof(what),"B3-2 black (%s, %s): the fill black reproduces B3-1 bit for bit: the hash of its renders is %016llx, B3-1's %016llx",mode,kind,static_cast<unsigned long long>(hash),static_cast<unsigned long long>(golden[unorm?1:0]));
+        check(hash==golden[unorm?1:0],what);
+        strip(1.f,0.f,false,0);   // leave the last render one with a share drawn, as the checks after this block read its facts
+      }
+    }
+    { // B3-2: the strip's fill. The left eye's own picture (the zoomed view, which must not be seen) is replaced under the share by the fill: world, the left eye's picture held from before the
+      // zoom and turned to the head's view now; view, the same picture fixed in the view; stretched, the right eye's picture at the inner edge of the fade stretched out along the row; black,
+      // as in B3-1. The held picture belongs to one run of the strip: copied on every frame with the strip up that is not narrowed, frozen on the narrowed ones, ended by a frame with neither.
+      // The left eye's pictures: A, a ramp (red 60 + 3x, green 60 + 2y, blue 20) held before the zoom, and B, the zoomed view, plain blue. Pixels are read at the left strip, x 0 to 2.
+      const auto heldA=shareTexture(f,[](unsigned x,unsigned y){return rgbaOf((std::min)(255u,60u+3*x),(std::min)(255u,60u+2*y),20);});
+      const auto zoomB=shareTexture(f,[](unsigned,unsigned){return rgbaOf(20,20,220);});
+      EyeCapture capA,capB;
+      check(SUCCEEDED(capA.initialize(f.runtime.device.Get()))&&SUCCEEDED(capB.initialize(f.runtime.device.Get())),"fill capture owners");
+      const vr::Texture_t ta{heldA.Get(),vr::API_DirectX,vr::ColorSpace_Linear},tb{zoomB.Get(),vr::API_DirectX,vr::ColorSpace_Linear},tr{right.Get(),vr::API_DirectX,vr::ColorSpace_Linear};
+      check(capA.capture(vr::Eye_Left,&ta)==vr::VRCompositorError_None&&capA.capture(vr::Eye_Right,&tr)==vr::VRCompositorError_None&&
+            capB.capture(vr::Eye_Left,&tb)==vr::VRCompositorError_None&&capB.capture(vr::Eye_Right,&tr)==vr::VRCompositorError_None,"fill captures");
+      struct Fill {std::vector<uint32_t> img;StereoShareFacts facts;};
+      // yaw turns both eyes' views together, as the head does: the share's own mapping stays the same and only the held picture's turn changes
+      const auto go=[&](const EyeCapture& cap,float share,float strip,bool zoomed,uint32_t edge,double yaw=0.0,XrSpace sp=space,const StereoHiddenArea* hiddenArea=nullptr) {
+        XrView v[2]={f.views[0],f.views[1]};v[0].pose.orientation=v[1].pose.orientation=yawQuat(yaw);
+        XrCompositionLayerProjection layer{};const unsigned image=f.runtime.eyes[0].calls%2;
+        check(f.renderer.renderCaptured(v,sp,cap,layer,nullptr,nullptr,nullptr,0.f,nullptr,share,hiddenArea,strip,zoomed,edge)==XR_SUCCESS,"fill render");
+        Fill o;o.img=readWhole(f,0,image);o.facts=f.renderer.shareFacts();return o;
+      };
+      const auto ch=[&](const Fill& o,unsigned x,unsigned y,unsigned c){unsigned r=0,g=0,b=0;channels(at(o.img,x,y),r,g,b);return int(c==0?r:c==1?g:b);};
+      const auto sumOf=[&](const Fill& o){int t=0;for(uint32_t pixel:o.img){unsigned r=0,g=0,b=0;channels(pixel,r,g,b);t+=int(r+g+b);}return t;};
+      constexpr uint32_t K=0,Wd=1,Vw=2,St=3;
+      const auto enc=[](double byteValue){return int(encode(byteValue/255.0));};   // what the readback gives for a texel of that byte captured as linear (the swapchain's encoding)
+      go(capA,1.f,0.f,false,Wd);   // a frame with neither the strip nor the narrowing: no run
+      const Fill rampBlack=go(capA,1.f,1.f,false,K);   // the same frame with the strip black, for the colour it replaces
+      const Fill ramp=go(capA,1.f,1.f,false,Wd);
+      std::snprintf(what,sizeof(what),"B3-2 world (%s, %s): on a frame with the strip up that is not narrowed the left eye's picture is copied to hold, and the fill is that same picture, so nothing changes in the strip",mode,kind);
+      check(ramp.facts.heldCopied&&ramp.facts.fillInUse&&ramp.facts.fillMode==Wd&&!ramp.facts.heldMissing&&ramp.facts.heldAgeFrames==0u&&ch(ramp,0,64,0)>=ch(rampBlack,0,64,0)+80&&std::abs(ch(ramp,0,64,0)-enc(60))<=12,what);
+      const Fill zw=go(capB,1.f,1.f,true,Wd);
+      std::snprintf(what,sizeof(what),"B3-2 world (%s, %s): on the narrowed frame the left eye's own (zoomed) picture is not shown: the strip is the held picture (red %d, blue %d; the zoomed picture is blue 239), nothing is copied, and it is one frame old",mode,kind,ch(zw,0,64,0),ch(zw,0,64,2));
+      check(!zw.facts.heldCopied&&zw.facts.fillMode==Wd&&!zw.facts.heldMissing&&zw.facts.heldAgeFrames==1u&&ch(zw,0,64,0)>=enc(60)-12&&ch(zw,0,64,2)<=140,what);
+      bool zwInterior=true;
+      for(unsigned y=16;y<112;++y)for(unsigned x=16;x<112;++x)zwInterior=zwInterior&&at(zw.img,x,y)==at(base.eye[1],x,y);
+      std::snprintf(what,sizeof(what),"B3-2 world (%s, %s): and the covered interior of the narrowed frame is the right eye's own pixel, bit for bit",mode,kind);
+      check(zwInterior,what);
+      const Fill turnIn=go(capB,1.f,1.f,true,Wd,10.0),turnOut=go(capB,1.f,1.f,true,Wd,-10.0);
+      const int dRed=(std::max)(ch(turnIn,0,64,0),ch(turnOut,0,64,0))-ch(zw,0,64,0),dLow=(std::min)(ch(turnIn,0,64,0),ch(turnOut,0,64,0))-ch(zw,0,64,0);
+      std::snprintf(what,sizeof(what),"B3-2 world (%s, %s): turning the head 10 degrees moves the held picture in the strip with it (red up by %d one way and by %d the other, which runs off the picture and keeps its edge), and the facts say 10 degrees (%.2f, %.2f)",
+                    mode,kind,dRed,dLow,double(turnIn.facts.heldRotationDeg),double(turnOut.facts.heldRotationDeg));
+      check(dRed>=20&&dLow<=8&&dLow>=-8&&std::fabs(turnIn.facts.heldRotationDeg-10.f)<0.05f&&std::fabs(turnOut.facts.heldRotationDeg-10.f)<0.05f&&turnIn.facts.fillMode==Wd,what);
+      const Fill vz=go(capB,1.f,1.f,true,Vw),vIn=go(capB,1.f,1.f,true,Vw,10.0);
+      std::snprintf(what,sizeof(what),"B3-2 view (%s, %s): the same held picture sampled at the same pixel: it does not move when the head turns (red %d and %d), and it is the held picture, not the zoomed one",mode,kind,ch(vz,0,64,0),ch(vIn,0,64,0));
+      check(vz.facts.fillMode==Vw&&vIn.facts.fillMode==Vw&&std::abs(ch(vz,0,64,0)-ch(vIn,0,64,0))<=1&&ch(vz,0,64,0)>=enc(60)-12&&ch(vz,0,64,2)<=140&&vIn.facts.heldRotationDeg==0.f,what);
+      const Fill st=go(capB,1.f,1.f,true,St),stBlack=go(capB,1.f,1.f,true,K);
+      std::snprintf(what,sizeof(what),"B3-2 stretched (%s, %s): the strip shows the right eye's picture at the fade's inner edge stretched out along the row: bright blue where black has none (%d against %d), the row's green follows the row (%d at 40, %d at 90, %d at 64), and red does not change along the strip (%d, %d, %d)",
+                    mode,kind,ch(st,0,64,2),ch(stBlack,0,64,2),ch(st,0,40,1),ch(st,0,90,1),ch(st,0,64,1),ch(st,0,64,0),ch(st,1,64,0),ch(st,2,64,0));
+      check(st.facts.fillMode==St&&!st.facts.heldCopied&&ch(st,0,64,2)>=200&&ch(stBlack,0,64,2)<=10&&ch(st,0,90,1)-ch(st,0,40,1)>=40&&std::abs(ch(st,0,64,1)-enc(128))<=14&&
+            std::abs(ch(st,0,64,0)-ch(st,2,64,0))<=12&&ch(st,1,64,0)>=30&&ch(st,1,64,0)<=100,what);
+      {
+        const XrVector2f hv[3]={{-1.f,1.f},{-.2f,1.f},{-1.f,.2f}};const uint32_t hi[3]={0,1,2};const StereoHiddenArea hiddenTri{hv,3,hi,3,11};
+        const Fill withMask=go(capB,1.f,1.f,true,St,0.0,space,&hiddenTri),noMask=go(capB,1.f,1.f,true,St);
+        std::snprintf(what,sizeof(what),"B3-2 stretched (%s, %s): it never samples the right eye's hidden area: where the stretch would read the hidden corner the strip is black (%d), and where it reads the visible picture it is not (%d at the bottom left; %d with no mask at the corner)",
+                      mode,kind,ch(withMask,1,10,2),ch(withMask,1,100,2),ch(noMask,1,10,2));
+        check(ch(withMask,1,10,0)+ch(withMask,1,10,1)+ch(withMask,1,10,2)<=6&&ch(withMask,1,100,2)>=200&&ch(noMask,1,10,2)>=200,what);
+      }
+      // black ignores the held picture and the right eye's: with a held picture of the run it is the image it is with none
+      go(capA,1.f,1.f,false,Wd);   // a held picture of this run
+      const Fill blackHeld=go(capB,1.f,1.f,true,K);
+      go(capA,1.f,0.f,false,K);    // the run ends
+      const Fill blackNone=go(capB,1.f,1.f,true,K);
+      std::snprintf(what,sizeof(what),"B3-2 black (%s, %s): with the held picture there and with none the black fill draws the same image, bit for bit, and says it drew black",mode,kind);
+      check(blackHeld.img==blackNone.img&&blackHeld.facts.fillMode==K&&!blackHeld.facts.heldMissing&&ch(blackNone,0,64,2)<=10,what);
+      // a held picture belongs to its run. A: copied; the run ends; a narrowed frame has none and draws black, counted, and never the picture of the run before
+      go(capA,1.f,1.f,false,Wd);
+      go(capA,1.f,0.f,false,Wd);
+      const Fill missing=go(capB,1.f,1.f,true,Wd);
+      std::snprintf(what,sizeof(what),"B3-2 held (%s, %s): after the run ended a narrowed frame has no held picture: it draws black, says so, and is the image the black fill makes, not the earlier run's picture",mode,kind);
+      check(missing.facts.heldMissing&&missing.facts.fillMode==K&&!missing.facts.heldCopied&&missing.img==blackNone.img&&ch(missing,0,64,0)<=10,what);
+      go(capA,1.f,1.f,false,Wd);
+      const Fill elsewhere=go(capB,1.f,1.f,true,Wd,0.0,reinterpret_cast<XrSpace>(uintptr_t(0x77)));
+      std::snprintf(what,sizeof(what),"B3-2 held (%s, %s): a held picture of another reference space (the origin moved) is not used: black, counted",mode,kind);
+      check(elsewhere.facts.heldMissing&&elsewhere.facts.fillMode==K&&elsewhere.img==blackNone.img,what);
+      go(capA,1.f,0.f,false,Wd);
+      const Fill viewMissing=go(capB,1.f,1.f,true,Vw);
+      std::snprintf(what,sizeof(what),"B3-2 held (%s, %s): the view fill has the same rule as the world's",mode,kind);
+      check(viewMissing.facts.heldMissing&&viewMissing.facts.fillMode==K&&viewMissing.img==blackNone.img,what);
+      // a narrowed frame with no share drawn has the left eye cleared to black: never its own picture
+      go(capA,1.f,1.f,false,Wd);
+      const Fill noShareZoomed=go(capB,0.f,1.f,true,Wd),noShareOwn=go(capB,0.f,0.f,false,K);
+      std::snprintf(what,sizeof(what),"B3-2 narrowed with no share (%s, %s): the left eye is cleared to black (sum %d), never its own zoomed picture, and the facts say so; the same call not narrowed draws the left eye's own picture (sum %d)",mode,kind,sumOf(noShareZoomed),sumOf(noShareOwn));
+      check(noShareZoomed.facts.leftBlacked&&!noShareZoomed.facts.drawn&&sumOf(noShareZoomed)<=3&&!noShareOwn.facts.leftBlacked&&sumOf(noShareOwn)>10000,what);
+      // the mode out of range is black; the ordinary share afterwards, unrotated and with no mask, for the facts the checks below read
+      go(capA,1.f,0.f,false,K);
+      const Fill wild=go(capB,1.f,1.f,true,9);
+      std::snprintf(what,sizeof(what),"B3-2 mode (%s, %s): a fill mode that is none of the four is black",mode,kind);
+      check(wild.facts.fillMode==K&&!wild.facts.heldMissing&&wild.img==blackNone.img,what);
+      go(capB,1.f,0.f,false,K);
     }
     {
       bool interior=true;

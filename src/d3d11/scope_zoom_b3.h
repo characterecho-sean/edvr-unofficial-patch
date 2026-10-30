@@ -159,6 +159,74 @@ inline double b3ParallaxPx(const float T[16], const float u[4], const double cNd
     return std::hypot(pa[0] - pb[0], pa[1] - pb[1]);
 }
 
+// The tangents the window copy holds, less kB3EdgePx on each side: the copy's pixel rect (b3CopyRect) over the left picture of w x h, whose pixels span the zoomed tangents {L, R, D, U}.
+// lo and hi are {x, y} in the tangent plane (y up). False when the rect or the picture is empty or the margin leaves nothing.
+inline bool b3CopyTangents(const double zoomTan[4], const int rect[4], uint32_t w, uint32_t h, double lo[2], double hi[2]) noexcept {
+    if (!w || !h || !(rect[2] > rect[0]) || !(rect[3] > rect[1])) return false;
+    const double sx = zoomTan[1] - zoomTan[0], sy = zoomTan[3] - zoomTan[2];
+    if (!(sx > 0.0 && sy > 0.0)) return false;
+    lo[0] = zoomTan[0] + (static_cast<double>(rect[0]) + kB3EdgePx) / static_cast<double>(w) * sx;
+    hi[0] = zoomTan[0] + (static_cast<double>(rect[2]) - kB3EdgePx) / static_cast<double>(w) * sx;
+    lo[1] = zoomTan[3] - (static_cast<double>(rect[3]) - kB3EdgePx) / static_cast<double>(h) * sy;
+    hi[1] = zoomTan[3] - (static_cast<double>(rect[1]) + kB3EdgePx) / static_cast<double>(h) * sy;
+    return lo[0] < hi[0] && lo[1] < hi[1] && std::isfinite(lo[0]) && std::isfinite(hi[0]) && std::isfinite(lo[1]) && std::isfinite(hi[1]);
+}
+// The part of the lens whose picture is read from outside the window copy, 0..1 (B3-2), estimated at far depth from the geometry the lens already has and no readback of its own. The
+// lens is the hole the first pass measured: ray k (lensRayDir) runs from c to rDeg[k] degrees, and a lens pixel at angle rho along it takes its picture from the left eye at
+// tcNow + tan(rho) / m along the same direction (far depth: no parallax, so only the direction counts). That is outside when it is beyond the copy's tangents lo..hi. The area is the
+// polar one, summed over kB3OutsideSteps radii on each of the rays; a ray that escaped takes the smaller radius of the nearest rays that did not, as the lens does. False when the sight
+// was open (no ray ended), or an input is no number.
+constexpr uint32_t kB3OutsideSteps = 12;
+inline bool b3OutsideFraction(const float rDeg[kLensRays], double m, const double tcNow[2], const double lo[2], const double hi[2], double* fraction) noexcept {
+    if (!(m >= 1.0) || !std::isfinite(m) || !std::isfinite(tcNow[0]) || !std::isfinite(tcNow[1])) return false;
+    double r[kLensRays];
+    const double escaped = kLensMaxDeg - 1.0e-3;
+    bool any = false;
+    for (uint32_t k = 0; k < kLensRays; ++k) {
+        r[k] = std::isfinite(rDeg[k]) ? static_cast<double>(rDeg[k]) : kLensMaxDeg;
+        any = any || r[k] < escaped;
+    }
+    if (!any) return false;
+    double used[kLensRays];
+    for (uint32_t k = 0; k < kLensRays; ++k) {
+        used[k] = r[k];
+        if (r[k] < escaped) continue;
+        double best = kLensMaxDeg;
+        for (uint32_t j = 1; j < kLensRays; ++j) {
+            const double a = r[(k + j) % kLensRays];
+            if (a < escaped) {
+                best = a;
+                break;
+            }
+        }
+        for (uint32_t j = 1; j < kLensRays; ++j) {
+            const double a = r[(k + kLensRays - j) % kLensRays];
+            if (a < escaped) {
+                best = std::fmin(best, a);
+                break;
+            }
+        }
+        used[k] = best;
+    }
+    double total = 0.0, outside = 0.0;
+    for (uint32_t k = 0; k < kLensRays; ++k) {
+        double dx, dy;
+        lensRayDir(k, &dx, &dy);
+        const double dr = used[k] / static_cast<double>(kB3OutsideSteps);
+        for (uint32_t i = 0; i < kB3OutsideSteps; ++i) {
+            const double rho = (static_cast<double>(i) + 0.5) * dr;
+            const double tau = std::tan(rho / kDeg) / m;
+            const double sx = tcNow[0] + tau * dx, sy = tcNow[1] - tau * dy;   // render px y runs down, the tangent plane's y up
+            const double w = rho * dr;
+            total += w;
+            if (sx < lo[0] || sx > hi[0] || sy < lo[1] || sy > hi[1]) outside += w;
+        }
+    }
+    if (!(total > 0.0)) return false;
+    *fraction = outside / total;
+    return true;
+}
+
 // ---- 3. the decisions ---------------------------------------------------------------------------------------------------------------------------------------------------------
 // The gate of the window. startOk: the window may be latched (it is, once, at the first such frame): the full-detail key on, the lens's gate qualifying, the held entry a rendered one,
 // the aiming mode the one that shares the right eye's picture with the left (both), the share at full weight, and the left eye's rows usable. holdOk: the window stays while the key,
@@ -216,6 +284,7 @@ struct B3StepIn {
     bool shareMode = false, qualifies = false, sightsFull = false, leftOk = false;   // b3Gate's facts
     double share = 0.0, dt = 0.0, m = kNaN;
     double tcNow[2] = {kNaN, kNaN};         // the left eye's direction to the far point c on this tick (what the window latches)
+    uint32_t edge = 0;                      // what fills the left eye's strip while the zoom stands (scopewin::kEdge*)
 };
 struct B3StepOut {
     scopewin::Request request;              // published to the provider this tick
@@ -255,15 +324,17 @@ inline B3StepOut b3Step(B3Loop& loop, const B3StepIn& in) noexcept {
     o.request.tc[0] = static_cast<float>(loop.tc[0]);
     o.request.tc[1] = static_cast<float>(loop.tc[1]);
     o.request.strip = static_cast<float>(loop.strip.fade);
+    o.request.edge = in.edge < scopewin::kEdgeModes ? in.edge : scopewin::kEdgeBlack;
     o.frameAsked = in.qualifies && o.asked && now;
     return o;
 }
 // Outside the sights: no window is held and the strip comes back (it is still published until it has).
-inline scopewin::Request b3IdleStep(B3Loop& loop, double dt) noexcept {
+inline scopewin::Request b3IdleStep(B3Loop& loop, double dt, uint32_t edge = scopewin::kEdgeBlack) noexcept {
     loop.latched = false;
     b3StripStep(loop.strip, false, dt);
     scopewin::Request rq;
     rq.strip = static_cast<float>(loop.strip.fade);
+    rq.edge = edge < scopewin::kEdgeModes ? edge : scopewin::kEdgeBlack;
     return rq;
 }
 // Not armed, or the flat profile: nothing is held and the strip is gone at once.
@@ -345,6 +416,12 @@ struct B3Press {
     uint32_t copies = 0;
     uint32_t parN = 0;
     double parSumPx = 0.0, parMaxPx = 0.0;
+    // the lens's reach outside the window copy (b3OutsideFraction), over the frames whose rays were read back once the lens had eased in: frames estimated, those with part of the lens
+    // outside, and the fraction of the lens area outside summed and at its largest
+    uint32_t outN = 0, outFrames = 0;
+    double outSum = 0.0, outMax = 0.0;
+    // what fills the strip (scopewin::kEdge*)
+    uint32_t edge = 0;
     // the draw path
     uint32_t drawFrames[2] = {};
     uint64_t draws[2][2] = {};   // [eye][inside, outside]: draws summed over the frames
@@ -379,7 +456,7 @@ inline int formatB3Press(char* buf, size_t n, const B3Press& p) noexcept {
     b3Count(p.temporalKnown, p.zoomEdgeResets, ed, sizeof(ed));
     b3Count(p.lightGridKnown, p.lgBypass, lgb, sizeof(lgb));
     b3Count(p.lightGridKnown, p.lgCalls, lgc, sizeof(lgc));
-    char tcx[24], tcy[24], mm[24], dm[24], dx[24], pm[24], px[24];
+    char tcx[24], tcy[24], mm[24], dm[24], dx[24], pm[24], px[24], om[24], ox[24];
     char dl[2][2][24], sh[2][2][24], pr[2][24], fm[2][24], fx[2][24];
     const uint64_t dn[2] = {p.drawFrames[0], p.drawFrames[1]};
     for (int e = 0; e < 2; ++e) {
@@ -391,14 +468,15 @@ inline int formatB3Press(char* buf, size_t n, const B3Press& p) noexcept {
         numText(b3Mean(p.ftSum[e], p.ftN[e]), 2, fm[e], sizeof(fm[e]));
         numText(p.ftN[e] ? p.ftMax[e] : kNaN, 2, fx[e], sizeof(fx[e]));
     }
-    appendf(buf, n, &len, "scope zoom (B3): press %u key %s; asked %u, held %u, zoom asked %u ticks, no left rows %u; zoomed frames %s; tc (%s, %s) M %s, window drift mean %s max %s deg; "
-            "DLSS resets L %s R %s (zoom edge %s); ", p.press, p.keyOn ? "on" : "off", p.askedTicks, p.heldTicks, p.requestTicks, p.noLeftRows, zf,
+    appendf(buf, n, &len, "scope zoom (B3): press %u key %s edge %s; asked %u, held %u, zoom asked %u ticks, no left rows %u; zoomed frames %s; tc (%s, %s) M %s, window drift mean %s max %s deg; "
+            "DLSS resets L %s R %s (zoom edge %s); ", p.press, p.keyOn ? "on" : "off", scopewin::edgeName(p.edge), p.askedTicks, p.heldTicks, p.requestTicks, p.noLeftRows, zf,
             numText(p.tc[0], 4, tcx, sizeof(tcx)), numText(p.tc[1], 4, tcy, sizeof(tcy)), numText(p.m, 3, mm, sizeof(mm)), numText(b3Mean(p.driftSumDeg, p.driftN), 3, dm, sizeof(dm)),
             numText(p.driftN ? p.driftMaxDeg : kNaN, 3, dx, sizeof(dx)), rl, rr, ed);
-    appendf(buf, n, &len, "lens source: zoomed %u, A: not asked %u, not zoomed %u, no copy %u, stale %u, no matrices %u, no shader %u; copies %u; parallax at c mean %s max %s px; ",
+    appendf(buf, n, &len, "lens source: zoomed %u, A: not asked %u, not zoomed %u, no copy %u, stale %u, no matrices %u, no shader %u; copies %u; parallax at c mean %s max %s px; lens outside the copy on %u of %u frames, area mean %s max %s; ",
             p.source[static_cast<uint32_t>(B3Source::kZoomed)], p.source[static_cast<uint32_t>(B3Source::kNotAsked)], p.source[static_cast<uint32_t>(B3Source::kNotZoomed)],
             p.source[static_cast<uint32_t>(B3Source::kNoCopy)], p.source[static_cast<uint32_t>(B3Source::kStale)], p.source[static_cast<uint32_t>(B3Source::kNoMatrices)],
-            p.source[static_cast<uint32_t>(B3Source::kNoShader)], p.copies, numText(b3Mean(p.parSumPx, p.parN), 1, pm, sizeof(pm)), numText(p.parN ? p.parMaxPx : kNaN, 1, px, sizeof(px)));
+            p.source[static_cast<uint32_t>(B3Source::kNoShader)], p.copies, numText(b3Mean(p.parSumPx, p.parN), 1, pm, sizeof(pm)), numText(p.parN ? p.parMaxPx : kNaN, 1, px, sizeof(px)), p.outFrames, p.outN,
+            numText(b3Mean(p.outSum, p.outN), 3, om, sizeof(om)), numText(p.outN ? p.outMax : kNaN, 3, ox, sizeof(ox)));
     appendf(buf, n, &len, "draws a frame in/out L %s/%s R %s/%s (frames %u/%u); light grid bypass %s of %s calls; shadow rows changed a frame in/out L %s/%s R %s/%s, L vs R %s/%s; "
             "frame ms in/out %s/%s (max %s/%s); readout pin solo %u, no pair %u", dl[0][0], dl[0][1], dl[1][0], dl[1][1], p.drawFrames[0], p.drawFrames[1], lgb, lgc,
             sh[0][0], sh[0][1], sh[1][0], sh[1][1], pr[0], pr[1], fm[0], fm[1], fx[0], fx[1], p.pinSolo, p.pinNoPair);
@@ -426,7 +504,7 @@ inline const char* b3Callers(const EdvrNativeScopeZoomReport& r, char* buf, size
 }
 inline int formatB3Runtime(char* buf, size_t n, const EdvrNativeScopeZoomReport& r) noexcept {
     int len = 0;
-    char rs[24], ms[24], ratio[24], callers[96];
+    char rs[24], ms[24], ratio[24], callers[96], ams[24], rot[24];
     const double rawSpan = r.rawSpan > 0.f ? static_cast<double>(r.rawSpan) : kNaN, matrixSpan = r.matrixSpan > 0.f ? static_cast<double>(r.matrixSpan) : kNaN;
     appendf(buf, n, &len,
             "scope zoom (B3) runtime: zoomed frames %u over %.2f s, peak narrowing %.3f; refused: answer not version 11 %u, share not at full weight %u, share not drawn %u, geometry %u; "
@@ -440,6 +518,11 @@ inline int formatB3Runtime(char* buf, size_t n, const EdvrNativeScopeZoomReport&
             "span ratio raw over matrix %s; raw getter callers (RVA in the game's executable: reads) %s, other callers %u",
             r.rawReads, numText(rawSpan, 4, rs, sizeof(rs)), r.matrixReads, numText(matrixSpan, 4, ms, sizeof(ms)),
             numText(std::isfinite(rawSpan) && std::isfinite(matrixSpan) ? rawSpan / matrixSpan : kNaN, 3, ratio, sizeof(ratio)), b3Callers(r, callers, sizeof(callers)), r.rawCallerOther);
+    appendf(buf, n, &len,
+            "; edge fill %s: frames black %u, world %u, view %u, stretched %u; held copies %u, black for want of a held picture %u, held age at the end %u frames %s ms, largest world turn %s deg; "
+            "passed past a share not drawn %u",
+            scopewin::edgeName(r.edgeMode), r.fillFrames[0], r.fillFrames[1], r.fillFrames[2], r.fillFrames[3], r.heldCopies, r.heldMissing, r.heldAgeFrames,
+            numText(r.heldAgeMs, 1, ams, sizeof(ams)), numText(r.heldRotationMaxDeg, 2, rot, sizeof(rot)), r.shareNotDrawnPassed);
     return finishLine(buf, n, len);
 }
 

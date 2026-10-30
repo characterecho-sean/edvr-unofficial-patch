@@ -155,8 +155,9 @@ struct EdvrNativeFrameOutput {
     // look compensation included) exactly, and never stores it as the seat. A runtime from before F123 reads a word it does not look at; a provider from before it
     // leaves it zero. Offset, size and type unchanged; the other 20 words are the retired guard's.
     uint32_t positionRecentre;
-    // B3 (experimental.native_on_foot_ads_scope_zoom_full_detail, scope_zoom_window.h): in a version 11 answer only, the first five of these 19 words carry the scope zoom's window: the magic and a flag,
-    // the narrowing M, the window's centre in the left eye's tangent plane (x, y), and how black the left eye's uncovered strip is (floats' bits). All zero when there is none; offset, size and
+    // B3 (experimental.native_on_foot_ads_scope_zoom_full_detail, scope_zoom_window.h): in a version 11 answer only, the first five of these 19 words carry the scope zoom's window: the magic and the flags (the zoom's, and
+    // in bits 4 and 5 what fills the left eye's strip: B3-2, scopewin::kEdge*), the narrowing M, the window's centre in the left eye's tangent plane (x, y), and how far the left eye's uncovered strip is
+    // taken over by the fill (floats' bits). All zero when there is none; offset, size and
     // type unchanged, and the other 14 words are the retired guard's.
     uint32_t reservedTerrainGuard[19];
     // World scale (visual.world_scale, docs\world-scale.md), in a version 11 answer only: the percent the runtime moves the two eye origins Elite is told about by,

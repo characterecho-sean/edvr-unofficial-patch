@@ -929,7 +929,9 @@ they were there (flown 2026-09-07).
      lens, `fix.native_on_foot_ads_scope_zoom`, on by default since it flew OK; its
      reference FOV is the developer tier's `experimental.native_on_foot_ads_scope_zoom_fov`
      row, and the temporary `experimental.native_on_foot_ads_scope_zoom_full_detail` row, on | off, default off, switches B3: the scoped
-     Executioner's lens taken from the left eye drawn as the zoomed view); **Body and
+     Executioner's lens taken from the left eye drawn as the zoomed view, and the temporary
+     `experimental.native_on_foot_ads_scope_zoom_full_detail_edge` row, world | view | stretched | black, default world, what fills the left eye's outer
+     strip while B3's zoom stands); **Body and
      view** (Eye height, Weapon view offset, Weapon eye forward, Visor in
      breathable air); **HUD** (HUD distance, HUD size, HUD
      element scale, HUD spread, HUD follow). The headings are the ini's own

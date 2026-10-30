@@ -97,6 +97,9 @@ struct StageSlot {
     float T[16] = {}, u[4] = {};
     double cNdc[2] = {}, nearDepth = 0.0;
     uint32_t leftW = 0, leftH = 0;
+    // B3-2: what the lens's reach outside the window copy is worked out from when the rays come back (the hole's radii are theirs): M, the left eye's far point, and the copy's tangents
+    bool outside = false;
+    double m = 1.0, tcNow[2] = {}, lo[2] = {}, hi[2] = {};
 };
 struct TimerSlot {
     GpuTimer t[2];
@@ -269,6 +272,18 @@ void pollRays(ID3D11DeviceContext* ctx) {
             if (press == g_pressId) sz::lensNoteRays(&st, rb, settled);
         });
         // B3: where the target at c is drawn in the left picture against where the far point is -- the parallax the lens takes out -- from the rays' depth at c, once the press has settled.
+        // B3-2: the part of the lens that reads outside the window copy, from the hole the rays measured (no readback of its own), once the lens has eased in
+        if (s.outside && settled && !sz::lensOpenSight(rb.escaped)) {
+            double frac = 0.0;
+            if (sz::b3OutsideFraction(rb.rDeg, s.m, s.tcNow, s.lo, s.hi, &frac))
+                countB3([&](sz::B3Press& b) {
+                    if (press != g_pressId) return;
+                    ++b.outN;
+                    if (frac > 0.0) ++b.outFrames;
+                    b.outSum += frac;
+                    b.outMax = std::max(b.outMax, frac);
+                });
+        }
         if (s.par && settled) {
             const double px = sz::b3ParallaxPx(s.T, s.u, s.cNdc, static_cast<double>(rb.depthAtC), s.nearDepth, s.leftW, s.leftH);
             if (std::isfinite(px))
@@ -665,6 +680,8 @@ void scopeZoomDoor(const ScopeZoomDoorArgs& a, Ptr<ID3D11Texture2D>* copy) {
     // B3: where this frame's lens takes its picture from. The plain lens (the aiming eye's own picture) is the fall-back for every reason the left eye's zoomed picture is not there; the
     // reason is counted. The constants of the pass that samples the left picture are made here, and written only when it is the one to run.
     sz::B3Source b3src = sz::B3Source::kNotAsked;
+    bool outOk = false;   // B3-2: the copy's tangents for the lens-outside estimate
+    double outLo[2] = {}, outHi[2] = {};
     if (f.b3.asked) {
         float zt[4], pre[4];
         sz::B3SourceIn si;
@@ -676,6 +693,8 @@ void scopeZoomDoor(const ScopeZoomDoorArgs& a, Ptr<ID3D11Texture2D>* copy) {
         si.shaderOk = g_s.b3Ok && g_s.leftSrv;
         b3src = sz::b3SourceOf(si);
         if (b3src == sz::B3Source::kZoomed) {
+            const double zt64[4] = {zt[0], zt[1], zt[2], zt[3]};
+            outOk = std::isfinite(f.b3.tcNow[0]) && std::isfinite(f.b3.tcNow[1]) && sz::b3CopyTangents(zt64, g_s.left.rect, g_s.left.picW, g_s.left.picH, outLo, outHi);
             ScopeZoomMagnifyB3Params p3{};
             std::memcpy(p3.cM, p2.cM, sizeof(p3.cM));
             std::memcpy(p3.win, p2.win, sizeof(p3.win));
@@ -739,6 +758,16 @@ void scopeZoomDoor(const ScopeZoomDoorArgs& a, Ptr<ID3D11Texture2D>* copy) {
                 st->nearDepth = depth.nearDepth;
                 st->leftW = g_s.left.picW;
                 st->leftH = g_s.left.picH;
+            }
+            st->outside = outOk;
+            if (outOk) {
+                st->m = f.m;
+                st->tcNow[0] = f.b3.tcNow[0];
+                st->tcNow[1] = f.b3.tcNow[1];
+                for (int i = 0; i < 2; ++i) {
+                    st->lo[i] = outLo[i];
+                    st->hi[i] = outHi[i];
+                }
             }
             g_inflight.fetch_add(1, std::memory_order_relaxed);
         }

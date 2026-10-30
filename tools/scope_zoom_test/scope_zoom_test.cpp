@@ -135,7 +135,7 @@ static bool wiredFrame(const std::string& n) {
 static bool wiredB3Frame(const std::string& n) {
     return has(n, "cfg.getString(\"experimental.native_on_foot_ads_scope_zoom_full_detail\", \"off\") == \"on\"") && has(n, "std::atomic<bool> g_scopeZoomFullKey{false};") &&
            before(n, "b3Tick(s, gi, verdict, g, dt, nowMs, out);", "    scopeZoomPublish(out);\n}\n}  // namespace s1") && has(n, "scopewin::publish(so.request, nowMs);") && has(n, "const sz::B3StepOut so = sz::b3Step(b.loop, si);") &&
-           has(n, "scopewin::publish(sz::b3IdleStep(g_b3s.loop, dt), nowMs);") && has(n, "scopewin::publish(sz::b3OffStep(g_b3s.loop), nowMs);") && has(n, "if (!so.frameAsked) return;") &&
+           has(n, "scopewin::publish(sz::b3IdleStep(g_b3s.loop, dt, g_scopeZoomEdgeKey.load(std::memory_order_relaxed)), nowMs);") && has(n, "scopewin::publish(sz::b3OffStep(g_b3s.loop), nowMs);") && has(n, "if (!so.frameAsked) return;") &&
            has(n, "p.temporalKnown = sz::b3Since(b.temporalBase, temporalNow,") && has(n, "p.lightGridKnown = sz::b3Since(true, true, b.lgCalls0, calls, &p.lgCalls)") &&
            has(n, "void endPress(State& s) noexcept {\n    endB3Press(s);") && has(n, "sz::formatB3Press(line, sizeof(line), p);") && has(n, "edvr::scopezoom::formatB3Runtime(line, sizeof(line), *r);") &&
            has(n, "scopeZoomB3Take(&door);") && has(n, "nativeTemporalZoomCounts(&zf, rs, &edge)") && has(n, "lightGridCacheZoomCounts(&calls, &bypassed);") && has(n, "        b3Idle(dt, nowMs);\n        return;") &&
@@ -148,7 +148,7 @@ static bool wiredB3Frame(const std::string& n) {
 static bool wiredB3Halves(const std::string& frame, const std::string& host, const std::string& temporal, const std::string& stereo, const std::string& vscreen, const std::string& system) {
     return has(frame, "if (carried) edvr::scopewin::toWords(edvr::scopewin::read(GetTickCount64()), result.reservedTerrainGuard);") &&
            before(host, "zoomApplied=applyScopeZoom(gameGeometry,zoomPreRaw,zoomToldRaw);", "geometry.publish(gameGeometry,false,false,frameTangentShift,hiddenMeshCompatible()&&!zoomApplied,zoomApplied?zoomToldRaw:nullptr)") &&
-           has(host, "zoomApplied?&zoomPreRaw:nullptr);") && has(host, "locatedHeadPose(),leftShare,&hidden,zoomStripNow,zoomAppliedNow)") && has(host, "leftShare,&hidden,zoomStripNow,previousZoomed)") && has(host, "previousZoomed=zoomAppliedNow;") &&
+           has(host, "zoomApplied?&zoomPreRaw:nullptr);") && has(host, "locatedHeadPose(),leftShare,&hidden,zoomStripNow,zoomAppliedNow,zoomEdgeNow)") && has(host, "leftShare,&hidden,zoomStripNow,previousZoomed,zoomEdgeNow)") && has(host, "previousZoomed=zoomAppliedNow;") &&
            has(host, "const ScopeZoomEvents ev=zoomRun.frame(out,frameCycleUs());") && has(host, "if(raw)zoomCallers.note(caller);") && has(host, "zoomCallers.top(press.callerRva,press.callerReads,press.callerOther);") &&
            has(system, "source_.noteProjectionRead(eye,true,s.toldRawSet&&liveGeometry,rawSpanV(out),frameRva(exe_,reinterpret_cast<uintptr_t>(_ReturnAddress())));") &&
            has(system, "source_.noteProjectionRead(eye,false,s.toldRawSet&&liveGeometry,accepted?matrixSpanV(out):0.0f,frameRva(exe_,reinterpret_cast<uintptr_t>(_ReturnAddress())));") &&
@@ -257,6 +257,45 @@ static void wiringTests() {
                   has(ini, "# TEMPORARY (B3): ADS: scope zoom full detail:"),
               "B3: the ini states the key off, in the experimental section after the reference FOV, marked TEMPORARY, with its row");
         check(!(ini.find("native_on_foot_ads_scope_zoom_full_detail = on") != std::string::npos), "B3: the key is not on in the shipped file");
+    }
+    {   // B3-2: the strip's fill. The key (live, TEMPORARY, default world), the mode through the tick and the announce, the renderer's held picture, the runtime's tally, the door's estimate
+        const std::string stereo2 = readFile("src/openxr/d3d11_stereo.cpp"), host2 = readFile("src/openxr/native_runtime_host.h"), door2 = readFile("src/d3d11/scope_zoom.cpp");
+        const std::string keyLit = "cfg.getString(\"experimental.native_on_foot_ads_scope_zoom_full_detail_edge\", \"world\")";
+        auto wiredKey = [&](const std::string& nat, const std::string& ini2) {
+            const size_t full = ini2.find("native_on_foot_ads_scope_zoom_full_detail = off"), edge = ini2.find("native_on_foot_ads_scope_zoom_full_detail_edge = world");
+            return has(nat, keyLit) && has(nat, "std::atomic<uint32_t> g_scopeZoomEdgeKey{edvr::scopewin::kEdgeWorld};") && has(nat, "si.edge = g_scopeZoomEdgeKey.load(std::memory_order_relaxed);") &&
+                   has(nat, "scopewin::publish(sz::b3IdleStep(g_b3s.loop, dt, g_scopeZoomEdgeKey.load(std::memory_order_relaxed)), nowMs);") &&
+                   has(nat, "announceB3(s, g_scopeZoomFullKey.load(std::memory_order_relaxed), g_scopeZoomEdgeKey.load(std::memory_order_relaxed));") &&
+                   has(nat, "p.edge = g_scopeZoomEdgeKey.load(std::memory_order_relaxed);") && has(nat, "Log::get().note(\"scope zoom (B3): full detail %s, edge %s; for the table's") &&
+                   has(nat, "edvr::scopewin::edgeName(edge),") && has(nat, "p.outN = door.outN;") && has(nat, "out.b3.tcNow[0] = leftOk ?") &&
+                   full != std::string::npos && edge != std::string::npos && full < edge && before(ini2, "[experimental]", "native_on_foot_ads_scope_zoom_full_detail_edge = world") &&
+                   has(ini2, "# ui: ADS: scope zoom full detail edge (experimental) | choices world, view, stretched, black | recommended world | live") &&
+                   has(ini2, "# TEMPORARY (B3-2): ADS: scope zoom full detail edge:");
+        };
+        check(wiredKey(native, ini), "B3-2: the edge key is read by its literal name (world unless the file says otherwise), live, TEMPORARY, after the full-detail key with its row, and goes through the tick, the announce and the press line");
+        check(!wiredKey(replaced(native, keyLit, "cfg.getString(\"experimental.native_on_foot_ads_scope_zoom_full_detail_edge\", \"black\")"), ini), "control: the reader's fallback black is not the shipped default");
+        check(!wiredKey(replaced(native, "std::atomic<uint32_t> g_scopeZoomEdgeKey{edvr::scopewin::kEdgeWorld};", "std::atomic<uint32_t> g_scopeZoomEdgeKey{edvr::scopewin::kEdgeBlack};"), ini),
+              "control: the atomic's start value black is not the shipped default");
+        check(!wiredKey(replaced(native, "    si.edge = g_scopeZoomEdgeKey.load(std::memory_order_relaxed);\n", ""), ini), "control: a tick that never publishes the mode with the window is not the wiring");
+        check(!wiredKey(replaced(native, "scopewin::publish(sz::b3IdleStep(g_b3s.loop, dt, g_scopeZoomEdgeKey.load(std::memory_order_relaxed)), nowMs);", "scopewin::publish(sz::b3IdleStep(g_b3s.loop, dt), nowMs);"), ini),
+              "control: an idle tick that drops the mode while the strip comes back is not the wiring");
+        check(!wiredKey(native, replaced(ini, "native_on_foot_ads_scope_zoom_full_detail_edge = world", "native_on_foot_ads_scope_zoom_full_detail_edge = black")), "control: the shipped file with black is not the default");
+        auto wiredFill = [&](const std::string& st, const std::string& ho, const std::string& dr) {
+            return has(st, "share.fill[0]=float(fillUsed);") && has(st, "drawContext->CopyResource(heldTexture_.Get(),capture.texture(vr::Eye_Left));heldValid_=true;") && has(st, "if(i==0&&blackLeft) {") &&
+                   has(st, "if(!stripUp&&!leftZoomed)heldValid_=false;") && has(st, "const bool have=(copyHeld||(heldValid_&&leftZoomed))&&heldTexture_&&heldView_&&heldSpace_==space;") &&
+                   has(st, "if(fillUsed==0&&leftZoomed)shareFacts_.heldMissing=true;") && has(st, "ID3D11ShaderResourceView* shareViews[3]=") &&
+                   has(ho, "zoomFill.note(zoomStripNow,frameWithheld?previousZoomed:zoomAppliedNow,fillFacts.drawn,fillFacts.fillMode,fillFacts.heldCopied,fillFacts.heldMissing,") &&
+                   has(ho, "in.standing=zoomRun.standing();in.notDrawnRun=zoomRun.notDrawnRun;") && has(ho, "zoomStripNow=out.strip;zoomEdgeNow=out.edge;") &&
+                   has(ho, "press.takeFill(zoomFill,press.edgeMode);") && has(ho, "zoomRun.press.edgeMode=out.edge;") &&
+                   has(dr, "if (s.outside && settled && !sz::lensOpenSight(rb.escaped)) {") && has(dr, "sz::b3OutsideFraction(rb.rDeg, s.m, s.tcNow, s.lo, s.hi, &frac)");
+        };
+        check(wiredFill(stereo2, host2, door2), "B3-2: the renderer holds the left picture per run and clears the left eye of a narrowed frame with no share, the host tallies the fill and tells the decision whether a zoom stands, the door estimates the lens outside the copy");
+        check(!wiredFill(replaced(stereo2, "if(!stripUp&&!leftZoomed)heldValid_=false;", ""), host2, door2), "control: a held picture that no frame with neither the strip nor the narrowing ends is not the wiring");
+        check(!wiredFill(replaced(stereo2, "heldSpace_==space;", "true;"), host2, door2), "control: a held picture used in another reference space is not the wiring");
+        check(!wiredFill(replaced(stereo2, "if(i==0&&blackLeft) {", "if(false) {"), host2, door2), "control: a narrowed frame with no share whose left eye is drawn, not cleared, is not the wiring");
+        check(!wiredFill(stereo2, replaced(host2, "in.standing=zoomRun.standing();in.notDrawnRun=zoomRun.notDrawnRun;", ""), door2), "control: a decision that is not told whether a zoom stands is not the wiring");
+        check(!wiredFill(stereo2, replaced(host2, "press.takeFill(zoomFill,press.edgeMode);", ""), door2), "control: a press that does not take the fill's tally is not the wiring");
+        check(!wiredFill(stereo2, host2, replaced(door2, "if (s.outside && settled && !sz::lensOpenSight(rb.escaped)) {", "if (false) {")), "control: a door that never estimates the lens outside the copy is not the wiring");
     }
     check(!wiredIni(replaced(ini, "native_on_foot_ads_scope_zoom = on", "native_on_foot_ads_scope_zoom = off")), "control: the user key off by default is not the shipped default");
 
