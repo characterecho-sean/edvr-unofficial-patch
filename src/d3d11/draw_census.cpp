@@ -265,9 +265,9 @@ uint32_t g_frameOrdinal = 0;     // 0-based frame within the running census
 uint32_t g_draws = 0;            // draws recorded (kept counting past the cap)
 uint32_t g_drawsThisFrame = 0;
 uint32_t g_lines = 0;            // lines written, of every kind
-// C1b: the eye draws ("DC": the lit eye's whole frame, the glass and the reticle among them) have a budget of their own, equal to the cap, and every other line (offscreen draws, copies,
+// The eye draws ("DC": the lit eye's whole frame, the glass and the reticle among them) have a budget of their own, equal to the cap, and every other line (offscreen draws, copies,
 // clears, dispatches) is capped by the same number on its own. Offscreen draws once spent the shared 16384 lines and evicted the eye draws of the later frames (truncated=4704 and 5730 in
-// the sight census of 2026-10-29), which are the ones a sight census is taken for.
+// the ADS censuses of 2026-10-29), which are the ones a census of the sights is taken for.
 uint32_t g_eyeLines = 0;         // lines written for eye draws
 uint32_t g_drawLines = 0;        // ... and for draws of every kind, against g_draws for the end line's truncated=
 bool otherLinesSpent() { return g_lines - g_eyeLines >= g_maxLines; }

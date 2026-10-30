@@ -3,16 +3,13 @@
 // C1a, the crisp reticle: the arming gate (crisp_reticle.h) driven as a truth table (the hip never, the sights' edges, the lens' own sights), the door side of the arming
 // (scope_zoom.cpp: publish, freshness, the eye-frame counts, the press's reset), the press and announce lines, and the wiring: the family's arming asks the lens and then the crisp gate,
 // the frame thread publishes the gate every tick and down on every other path, the composite counts the eye-frames, and the retired key (experimental.native_on_foot_ads_crisp_reticle) is read nowhere.
-// C1b, the withhold cycle (sight_withhold.h): the candidates, the cycle's order, the draw path's decision (a vertex shader first, the pixel shader only for a candidate's), the records, and the
-// wiring that keeps it inside a manual dump: armed in one place, by the eye dump key, never by the airborne companion.
+// The draw census' own line budgets (the eye draws' and the other lines') are scanned in the wiring too. The sight census' withhold cycle (a manual eye dump with the sights up leaving one candidate
+// sight-effect draw out of each frame) is retired: its header is gone, and so are its draw-path hook, its arming at the dump key and its records in the dump's json.
 #pragma once
-
-#include "../../src/d3d11/sight_withhold.h"
 
 namespace c1cases {
 
 namespace cr = edvr::crisp;
-namespace sw = edvr::sightwithhold;
 
 inline size_t countOf(const std::string& text, const std::string& what) {
     size_t n = 0, at = 0;
@@ -165,74 +162,10 @@ inline void doorTests() {
     scopeZoomCrispPublish(false);
 }
 
-inline void withholdTests() {
-    const uint64_t vs = sw::kVsMaterial, ps5 = 0xC5A5C7E8216CB9AFull;
-    check(sw::kCount == 11, "C1b: eleven candidates: five C5A5 shapes, the Intimidator's, four pixel shaders and the control");
-    bool unique = true;
-    for (uint32_t i = 0; i < sw::kCount; ++i)
-        for (uint32_t j = i + 1; j < sw::kCount; ++j) unique = unique && std::strcmp(sw::kCandidates[i].name, sw::kCandidates[j].name) != 0;
-    check(unique, "C1b: the candidates' names are distinct (the json names them)");
-    // what each is
-    check(sw::match(vs, ps5, 18, 1) == 0 && sw::match(vs, ps5, 6, 5) == 1 && sw::match(vs, ps5, 6, 2) == 2 && sw::match(vs, ps5, 9, 1) == 3 && sw::match(vs, ps5, 12, 2) == 4 && sw::match(vs, ps5, 6, 1) == 5,
-          "C1b: the C5A5 draws are told apart by their shape");
-    check(sw::match(vs, ps5, 24, 1) == -1 && sw::match(vs, ps5, 9, 2) == -1, "C1b: a C5A5 draw of another shape is no candidate");
-    check(sw::match(vs, 0x0925AA1BD7A95BBAull, 360, 1) == 6 && sw::match(vs, 0x0925AA1BD7A95BBAull, 3, 9) == 6, "C1b: a pixel shader candidate is any shape");
-    check(sw::match(0x98397963AAEC45D3ull, 0x66B08F89E4926C01ull, 24, 2) == 7 && sw::match(0xF512712C40D93C12ull, 0xAFED1D4B087E18A9ull, 12, 1) == 8 &&
-              sw::match(0x94D5C556DFD6D705ull, 0x912477AEF6958379ull, 6, 38) == 9,
-          "C1b: the unidentified pairs of the same pass are candidates");
-    check(sw::match(vs, 0x46F92DC71BF8DFA5ull, 6, 1) == 10 && sw::match(vs, 0x46F92DC71BF8DFA5ull, 18, 1) == -1, "C1b: the gunsight quad is the control, by its shape");
-    check(sw::match(vs ^ 1, ps5, 18, 1) == -1 && sw::match(vs, ps5 ^ 1, 18, 1) == -1, "C1b: the pair must be the pair");
-    check(sw::vsIsCandidate(vs) && sw::vsIsCandidate(0x94D5C556DFD6D705ull) && !sw::vsIsCandidate(0x1234ull), "C1b: the vertex shader is asked first");
-    // the cycle: nothing for the key press' frame and before, then the list in order, one a frame
-    check(sw::cycleIndex(100, 100) == -1 && sw::cycleIndex(99, 100) == -1 && sw::cycleIndex(101, 100) == 0 && sw::cycleIndex(111, 100) == 10 && sw::cycleIndex(112, 100) == 0 && sw::cycleIndex(116, 100) == 4,
-          "C1b: the cycle starts the frame after the key press, one candidate a frame, in the list's order, and wraps");
-    check(std::strcmp(sw::name(0), "C5A5_n18_i1") == 0 && std::strcmp(sw::name(-1), "none") == 0 && std::strcmp(sw::name(11), "none") == 0, "C1b: the names, none for no candidate");
-    // the draw path
-    sw::disarm();
-    sw::publishAdsUp(false);
-    check(!sw::arm(100) && !sw::live(), "C1b: a dump begun with the sights down arms nothing");
-    sw::publishAdsUp(true);
-    check(sw::arm(100) && sw::live(), "C1b: a dump begun with the sights up arms the cycle");
-    int psCalls = 0;
-    const auto ps = [&] { ++psCalls; return ps5; };
-    check(!sw::skips(100, 0, vs, 18, 1, ps), "C1b: the frame of the key press is untouched");
-    psCalls = 0;
-    check(sw::skips(101, 0, vs, 18, 1, ps) && psCalls == 1, "C1b: frame 101 leaves out candidate 0 (C5A5 n18 i1): the eye 0 draw is skipped");
-    check(!sw::skips(101, 0, vs, 6, 5, ps) && !sw::skips(101, 0, 0x1234ull, 18, 1, ps), "C1b: the other C5A5 shapes and other vertex shaders are drawn");
-    check(psCalls == 2, "C1b: the pixel shader is read only for a draw whose vertex shader is a candidate's (2 reads for 3 draws, one of them another vertex shader)");
-    check(sw::skips(101, 1, vs, 18, 1, ps), "C1b: the same candidate is left out of eye 1");
-    sw::noteCapture(1);
-    sw::Record r1 = sw::record(1);
-    check(r1.have && r1.frame == 101 && r1.candidate == 0 && r1.draws[0] == 1 && r1.draws[1] == 1, "C1b: the capture's record has the frame, the candidate and the draws left out per eye");
-    check(!sw::skips(102, 0, vs, 18, 1, ps) && sw::skips(102, 0, vs, 6, 5, ps), "C1b: the next frame leaves out the next candidate");
-    sw::noteCapture(2);
-    check(sw::record(2).candidate == 1 && sw::record(2).draws[0] == 1 && sw::record(2).draws[1] == 0, "C1b: the next record names it");
-    // a frame in which the candidate is not drawn still has its record (the phase starts at the first eye 0 draw)
-    check(!sw::skips(103, 0, 0x1234ull, 5, 5, ps), "C1b: a draw that is no candidate is drawn");
-    sw::noteCapture(3);
-    check(sw::record(3).have && sw::record(3).candidate == 2 && sw::record(3).draws[0] == 0 && sw::record(3).frame == 103, "C1b: a frame whose candidate was not drawn is recorded with 0 draws");
-    // the sights down: nothing is left out and the record says none
-    sw::publishAdsUp(false);
-    check(!sw::skips(104, 0, vs, 9, 1, ps), "C1b: with the sights down nothing is left out, even the frame's candidate");
-    sw::noteCapture(4);
-    check(sw::record(4).candidate == -1 && sw::record(4).draws[0] == 0, "C1b: and the record says none");
-    sw::publishAdsUp(true);
-    // a cycle that was not written ends itself
-    check(sw::live() && !sw::skips(100 + sw::kMaxFrames + 1, 0, vs, 18, 1, ps) && !sw::live(), "C1b: a cycle ends itself after kMaxFrames frames whatever happened to the dump");
-    check(!sw::skips(105, 0, vs, 18, 1, ps), "C1b: and nothing is left out after that");
-    sw::noteCapture(99);
-    check(!sw::record(99).have, "C1b: a capture number out of the run is ignored");
-    sw::disarm();
-    check(sw::arm(300) && sw::record(1).have == false, "C1b: arming starts the records from nothing");
-    sw::disarm();
-    sw::publishAdsUp(false);
-    check(!sw::skips(301, 0, vs, 18, 1, ps), "C1b: disarmed, the draw path leaves nothing out");
-}
-
 inline void wiringTests() {
     const std::string vscreen = readFile("src/d3d11/vscreen.cpp"), layer = readFile("src/d3d11/ui_layer.cpp"), native = readFile("src/d3d11/native_on_foot.cpp"),
-                      temporal = readFile("src/d3d11/temporal_pass.cpp"), census = readFile("src/d3d11/draw_census.cpp"), ini = readFile("edvr.ini"), device = readFile("src/d3d11/device_hook.cpp");
-    check(!vscreen.empty() && !layer.empty() && !native.empty() && !temporal.empty() && !census.empty() && !ini.empty() && !device.empty(), "C1 wiring: the sources the scans read are readable");
+                      temporal = readFile("src/d3d11/temporal_pass.cpp"), census = readFile("src/d3d11/draw_census.cpp"), ini = readFile("edvr.ini");
+    check(!vscreen.empty() && !layer.empty() && !native.empty() && !temporal.empty() && !census.empty() && !ini.empty(), "C1 wiring: the sources the scans read are readable");
 
     // C1a: the family's arming, the frame thread, the composite
     auto wiredArming = [&](const std::string& vs, const std::string& ly, const std::string& nat) {
@@ -240,7 +173,7 @@ inline void wiringTests() {
                before(ly, "g_seedCensus.door(eye, sequence);", "if (scopeZoomCrispArmed()) scopeZoomNoteCrispFrame(eye, e.wMarks != 0 && e.wSeq == sequence);") &&
                has(nat, "scopeZoomCrispPublish(armedNow);") && has(nat, "cg.adsUp = true;   // past the check above") && has(nat, "cg.lensKeyOn = key;") &&
                has(nat, "cg.lensOwned = gi.optical && gi.m >= sz::kLensMinM;") && has(nat, "cg.itemKnown = s.item.coherent && s.item.scope != loadout::kScopeUnknown;") &&
-               has(nat, "scopeZoomCrispPublish(false);   // C1a: no press of the sights, no arming") && has(nat, "        scopeZoomCrispPublish(false);\n        nativeOnFootPublishAdsUp(false);") &&
+               has(nat, "scopeZoomCrispPublish(false);   // C1a: no press of the sights, no arming") && has(nat, "        scopeZoomCrispPublish(false);\n        scopeZoomPublish(out);") &&
                has(nat, "if (!s.crispAnnounced) announceCrisp(s);") && has(nat, "if (s.crispSeen) {") &&
                has(nat, "edvr::crisp::formatPress(crispLine, sizeof(crispLine), cl);") && has(nat, "        if (eligible) {\n            s.crispSeen = true;") && has(nat, "        if (armedNow) ++s.crispArmedTicks;") &&
                has(nat, "scopeZoomCrispTake(&cl.door);") && has(nat, "cl.taken[0] = pl.d.markRedirected[0];");
@@ -252,7 +185,7 @@ inline void wiringTests() {
     check(!wiredArming(vscreen, layer, replaced(native, "if (!s.crispAnnounced) announceCrisp(s);", "")), "control: a frame thread that never announces the crisp reticle is not the wiring");
     check(!wiredArming(vscreen, layer, replaced(native, "cg.lensOwned = gi.optical && gi.m >= sz::kLensMinM;", "cg.lensOwned = false;")), "control: a gate that never leaves the lens its own sights is not the wiring");
     check(!wiredArming(vscreen, layer, replaced(native, "scopeZoomCrispPublish(false);   // C1a: no press of the sights, no arming", "")), "control: an arming not dropped when the press ends is not the wiring");
-    check(!wiredArming(vscreen, layer, replaced(native, "        scopeZoomCrispPublish(false);\n        nativeOnFootPublishAdsUp(false);", "        nativeOnFootPublishAdsUp(false);")),
+    check(!wiredArming(vscreen, layer, replaced(native, "        scopeZoomCrispPublish(false);\n        scopeZoomPublish(out);", "        scopeZoomPublish(out);")),
           "control: an arming left up when native on foot is not armed or the flat profile runs is not the wiring");
     check(!wiredArming(vscreen, layer, replaced(native, "        if (armedNow) ++s.crispArmedTicks;", "        ++s.crispArmedTicks;")), "control: armed ticks counted when the gate was not armed is not the wiring");
     check(!wiredArming(vscreen, layer, replaced(native, "edvr::crisp::formatPress(crispLine, sizeof(crispLine), cl);", "")), "control: a press that writes no crisp line is not the wiring");
@@ -268,40 +201,31 @@ inline void wiringTests() {
         check(!noKey(native, ini, gateHeader + "\n    bool keyOn = false;"), "control: a gate that carries a key field again is not the wiring");
     }
 
-    // C1b: the draw path, the census order, the dump
-    auto wiredWithhold = [&](const std::string& vs, const std::string& nat, const std::string& tp, const std::string& dev) {
-        return before(vs, "drawCensusEyeDraw(self, kind, count, instances, s->eyeDrawsThisFrame, args);", "if (nativeOnFootSightWithholdLive()) {") &&
-               before(vs, "if (nativeOnFootSightWithholdLive()) {", "if (s->censusSkipCount) {") &&
-               has(vs, "if (nativeOnFootSightWithholdSkips(self, kind, count, instances, withholdRt ? withholdRt->resource : nullptr)) return DrawVerdict::kSkip;") &&
-               has(nat, "return sightwithhold::skips(frame, eye, bindingShaderHash(BindSlot::Vs), count, instances, [] { return bindingShaderHash(BindSlot::Ps); });") &&
-               has(nat, "if (!sightwithhold::arm(frame)) return false;") &&
-               has(tp, "g_eyeRunWithhold = !companion && nativeOnFootSightWithholdArm();") && has(tp, "sightwithhold::disarm();   // C1b: a cycle left over from a run that never wrote ends here") &&
-               has(tp, "if (g_eyeRunWithhold) sightwithhold::noteCapture(static_cast<uint32_t>(g_eyeRunTaken));") && has(tp, "if(g_eyeRunWithhold)sightwithhold::noteCapture(static_cast<uint32_t>(k));") &&
-               has(tp, "if (g_eyeRunWithhold) sightwithhold::disarm();") && has(tp, "if (g_eyeRunWithhold) writeWithholdHeaderJson(f);") && has(tp, "if (g_eyeRunWithhold) writeWithholdFrameJson(f, k);") &&
-               has(tp, "writeWithholdRecord(dir);") && has(nat, "nativeOnFootPublishAdsUp(ads);") &&
-               // armed in one place: one call in the native module, one in the dump's begin, none in the device hook's key handler or the draw path
-               has(dev, "temporalPassArmEyeDump") && countOf(nat, "sightwithhold::arm(") == 1 && countOf(tp, "nativeOnFootSightWithholdArm()") == 1 && countOf(vs, "sightwithhold::arm(") == 0 &&
-               countOf(dev, "sightwithhold::arm(") == 0 && countOf(dev, "nativeOnFootSightWithholdArm") == 0;
-    };
-    check(wiredWithhold(vscreen, native, temporal, device),
-          "C1b wiring: the draw path asks after the census and before the suppression probe; the cycle is armed in one place, by a manual dump (never the companion's), ended before the files are written, and recorded in the json");
-    check(!wiredWithhold(replaced(vscreen, "if (nativeOnFootSightWithholdLive()) {", "if (false) {"), native, temporal, device), "control: a draw path that never asks is not the wiring");
-    check(!wiredWithhold(vscreen, native, replaced(temporal, "g_eyeRunWithhold = !companion && nativeOnFootSightWithholdArm();", "g_eyeRunWithhold = nativeOnFootSightWithholdArm();"), device),
-          "control: a cycle the airborne companion's dump may arm is not the wiring");
-    check(!wiredWithhold(vscreen, native, replaced(temporal, "if (g_eyeRunWithhold) sightwithhold::disarm();", ""), device), "control: a cycle that outlives the dump's capture is not the wiring");
-    check(!wiredWithhold(vscreen, native + "\nsightwithhold::arm(7);", temporal, device), "control: a second place that arms the cycle is not the wiring");
-    check(!wiredWithhold(vscreen, native, temporal, device + "\nnativeOnFootSightWithholdArm();"), "control: the key handler arming the cycle without a dump is not the wiring");
-    check(!wiredWithhold(vscreen, native, replaced(temporal, "if (g_eyeRunWithhold) writeWithholdFrameJson(f, k);", ""), device), "control: a json that does not say which candidate a frame left out is not the wiring");
-
-    // C1b: the census' own budgets
+    // the draw census' own budgets
     auto wiredCensus = [&](const std::string& c) {
         return has(c, "bool otherLinesSpent() { return g_lines - g_eyeLines >= g_maxLines; }") && has(c, "if (tag[2] == '\\0') {   // \"DC\": an eye draw, under its own budget") &&
                has(c, "if (g_eyeLines >= g_maxLines) return;") && countOf(c, "if (g_lines >= g_maxLines) return;") == 0 && has(c, "unseen=%u eye_lines=%u lines=%u interned=%u overflow=%u truncated=%u") &&
                has(c, "g_draws > g_drawLines ? g_draws - g_drawLines : 0") && has(c, "        g_eyeLines = 0;\n        g_drawLines = 0;");
     };
-    check(wiredCensus(census), "C1b wiring: the eye draws have a line budget of their own, every other line is capped on its own, the end line says both, and a census starts both from nothing");
+    check(wiredCensus(census), "census wiring: the eye draws have a line budget of their own, every other line is capped on its own, the end line says both, and a census starts both from nothing");
     check(!wiredCensus(replaced(census, "if (g_eyeLines >= g_maxLines) return;", "if (g_lines >= g_maxLines) return;")), "control: eye draws under the shared cap are not the wiring");
     check(!wiredCensus(census + "\n    if (g_lines >= g_maxLines) return;"), "control: another line kind under the shared cap is not the wiring");
+
+    {   // the sight census' withhold cycle is retired: its header does not exist, and the draw path, the native module, the dump's begin and its json carry nothing of it, so a manual eye dump with the sights up is a plain dump
+        const std::string nativeHeader = readFile("src/d3d11/native_on_foot.h");
+        auto noWithhold = [&](bool headerExists, const std::string& nat, const std::string& natHdr, const std::string& vs, const std::string& tp) {
+            if (headerExists) return false;
+            for (const std::string* t : {&nat, &natHdr, &vs, &tp})
+                if (has(*t, "nativeOnFootSightWithhold") || has(*t, "sight census (C1b)") || has(*t, "sight_withhold") || has(*t, "sightwithhold::") || has(*t, "g_eyeRunWithhold")) return false;
+            return true;
+        };
+        const bool headerExists = std::ifstream("src/d3d11/sight_withhold.h", std::ios::binary).is_open();
+        check(!nativeHeader.empty() && noWithhold(headerExists, native, nativeHeader, vscreen, temporal),
+              "C1b retired: sight_withhold.h does not exist, and the native module, its header, the draw path and the eye dump carry no withhold hook, arming, log line, record or json key");
+        check(!noWithhold(true, native, nativeHeader, vscreen, temporal), "control: a sight_withhold.h that exists again is not the wiring");
+        check(!noWithhold(false, native + "\nbool nativeOnFootSightWithholdArm();", nativeHeader, vscreen, temporal), "control: a native module that arms the cycle again is not the wiring");
+        check(!noWithhold(false, native, nativeHeader, vscreen, temporal + "\nfprintf(f, \"  \\\"sight_withhold\\\": {\");"), "control: a dump whose json carries the withhold record again is not the wiring");
+    }
 }
 
 }  // namespace c1cases

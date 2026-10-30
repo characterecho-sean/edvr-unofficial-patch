@@ -1267,8 +1267,6 @@ ID3D11Texture2D* g_eyeDecisionStaging[kEyeRun] = {};
 ID3D11Texture2D* g_eyePreUiStaging[kEyeRun] = {};
 int              g_eyeRunLeft = 0;    // captures still to take
 int              g_eyeRunTaken = 0;
-bool             g_eyeRunWithhold = false;   // C1b: this run is a manual dump taken with the sights up, and each of its frames left one candidate draw of the sight's effects out (sight_withhold.h)
-bool             g_eyeAlphaWritten[16] = {};   // ... and the alpha plane of its raw crop k was written (eye_<stamp>_CA<k>.bmp)
 wchar_t          g_eyeRunStamp[16] = L"";
 uint32_t g_eyeStampSerial=0;
 bool             g_eyeRunReady = false;
@@ -1547,79 +1545,6 @@ bool writeEyeBmp(ID3D11DeviceContext* ctx, ID3D11Texture2D* st, const D3D11_TEXT
     Log::get().note("temporal aa: eye %d dumped to %ls -- %ux%u, DXGI format %d, the treated frame as the "
                     "compositor receives it%s.",
                     eye, path, w, h, static_cast<int>(d.Format), ok ? "" : " (the write FAILED)");
-    return ok;
-}
-
-// C1b: the alpha plane of a staged crop as a grey 24-bit BMP. The raw crops of the dump are written without it (writeEyeBmp drops it), and the sight census reports a candidate's change in alpha
-// beside its change in colour. False, and nothing written, for a format with no alpha channel.
-bool writeEyeAlphaBmp(ID3D11DeviceContext* ctx, ID3D11Texture2D* st, const D3D11_TEXTURE2D_DESC& d, const wchar_t* path) {
-    switch (d.Format) {
-        case DXGI_FORMAT_R8G8B8A8_TYPELESS: case DXGI_FORMAT_R8G8B8A8_UNORM: case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:
-        case DXGI_FORMAT_B8G8R8A8_TYPELESS: case DXGI_FORMAT_B8G8R8A8_UNORM: case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB:
-        case DXGI_FORMAT_R10G10B10A2_TYPELESS: case DXGI_FORMAT_R10G10B10A2_UNORM:
-        case DXGI_FORMAT_R16G16B16A16_TYPELESS: case DXGI_FORMAT_R16G16B16A16_FLOAT:
-        case DXGI_FORMAT_R32G32B32A32_FLOAT:
-            break;
-        default:
-            return false;
-    }
-    D3D11_MAPPED_SUBRESOURCE ms{};
-    if (FAILED(ctx->Map(st, 0, D3D11_MAP_READ, 0, &ms))) return false;
-    const uint32_t w = d.Width, h = d.Height;
-    const uint32_t rowBytes = (w * 3u + 3u) & ~3u;
-    std::vector<uint8_t> out(static_cast<size_t>(rowBytes) * h);
-    for (uint32_t y = 0; y < h; ++y) {
-        const uint8_t* src = static_cast<const uint8_t*>(ms.pData) + static_cast<size_t>(y) * ms.RowPitch;
-        uint8_t* dst = out.data() + static_cast<size_t>(h - 1u - y) * rowBytes;   // BMP rows run bottom-up
-        for (uint32_t x = 0; x < w; ++x) {
-            float a = 0.0f;
-            switch (d.Format) {
-                case DXGI_FORMAT_R10G10B10A2_TYPELESS:
-                case DXGI_FORMAT_R10G10B10A2_UNORM: {
-                    uint32_t v = 0;
-                    memcpy(&v, src + x * 4, 4);
-                    a = static_cast<float>(v >> 30) / 3.0f;
-                    break;
-                }
-                case DXGI_FORMAT_R16G16B16A16_TYPELESS:
-                case DXGI_FORMAT_R16G16B16A16_FLOAT: {
-                    uint16_t hv = 0;
-                    memcpy(&hv, src + x * 8 + 6, 2);
-                    a = halfToFloat(hv);
-                    break;
-                }
-                case DXGI_FORMAT_R32G32B32A32_FLOAT:
-                    memcpy(&a, src + x * 16 + 12, 4);
-                    break;
-                default:
-                    a = static_cast<float>(src[x * 4 + 3]) / 255.0f;
-                    break;
-            }
-            const uint8_t v = dumpByte(a, false);
-            dst[x * 3 + 0] = dst[x * 3 + 1] = dst[x * 3 + 2] = v;
-        }
-    }
-    ctx->Unmap(st, 0);
-    HANDLE f = CreateFileW(path, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (f == INVALID_HANDLE_VALUE) return false;
-    const uint32_t bytes = rowBytes * h;
-    BITMAPFILEHEADER fh{};
-    BITMAPINFOHEADER ih{};
-    fh.bfType = 0x4D42;
-    fh.bfOffBits = sizeof(fh) + sizeof(ih);
-    fh.bfSize = fh.bfOffBits + bytes;
-    ih.biSize = sizeof(ih);
-    ih.biWidth = static_cast<LONG>(w);
-    ih.biHeight = static_cast<LONG>(h);
-    ih.biPlanes = 1;
-    ih.biBitCount = 24;
-    ih.biCompression = BI_RGB;
-    ih.biSizeImage = bytes;
-    DWORD wrote = 0;
-    bool ok = WriteFile(f, &fh, sizeof(fh), &wrote, nullptr) != 0;
-    if (ok) ok = WriteFile(f, &ih, sizeof(ih), &wrote, nullptr) != 0;
-    if (ok) ok = WriteFile(f, out.data(), bytes, &wrote, nullptr) != 0;
-    CloseHandle(f);
     return ok;
 }
 
@@ -2401,50 +2326,6 @@ bool writeEyeDecisionBin(ID3D11DeviceContext* ctx, ID3D11Texture2D* texture,
     return ok;
 }
 
-// C1b: the sight census's record of a withhold run, in the dump's json (decisions.json when the run is treated, and eye_<stamp>_withhold.json always). The header names the cycle
-// (the frame the key was pressed in, the candidates in order); each frame names the candidate its eye 0 draws left out ("none" for the frame of the key press and the ones before it, and for
-// a frame drawn with the sights down), the draws of it left out per eye, the game frame, and the file of the raw crop's alpha plane. tools\\sight_candidates.py reads it.
-void writeWithholdHeaderJson(FILE* f) {
-    fprintf(f, "  \"sight_withhold\": {\"armed_frame\": %u, \"candidates\": [", sightwithhold::armFrame());
-    for (uint32_t i = 0; i < sightwithhold::kCount; ++i) fprintf(f, "%s\"%s\"", i ? ", " : "", sightwithhold::name(static_cast<int>(i)));
-    fputs("]},\n", f);
-}
-void writeWithholdFrameJson(FILE* f, int k) {
-    const sightwithhold::Record r = sightwithhold::record(static_cast<uint32_t>(k));
-    if (k >= 0 && k < 16 && g_eyeAlphaWritten[k])
-        fprintf(f, "\"withheld\": \"%s\", \"withheld_draws\": [%u, %u], \"withheld_frame\": %u, \"alpha_file\": \"eye_%ls_CA%02d.bmp\", ", sightwithhold::name(r.have ? r.candidate : -1),
-                r.draws[0], r.draws[1], r.frame, g_eyeRunStamp, k);
-    else
-        fprintf(f, "\"withheld\": \"%s\", \"withheld_draws\": [%u, %u], \"withheld_frame\": %u, \"alpha_file\": null, ", sightwithhold::name(r.have ? r.candidate : -1), r.draws[0], r.draws[1],
-                r.frame);
-}
-void writeWithholdRecord(const std::wstring& dir) {
-    wchar_t path[MAX_PATH];
-    _snwprintf_s(path, MAX_PATH, _TRUNCATE, L"%s\\eye_%s_withhold.json", dir.c_str(), g_eyeRunStamp);
-    FILE* f = nullptr;
-    if (_wfopen_s(&f, path, L"wb") || !f) {
-        Log::get().note("sight census (C1b): could not write %ls.", path);
-        return;
-    }
-    fprintf(f, "{\n  \"schema\": 1,\n  \"stamp\": \"%ls\",\n", g_eyeRunStamp);
-    writeWithholdHeaderJson(f);
-    fputs("  \"frames\": [\n", f);
-    char names[512] = {};
-    size_t len = 0;
-    for (int k = 0; k < g_eyeRunTaken; ++k) {
-        fprintf(f, "    {\"index\": %d, ", k);
-        writeWithholdFrameJson(f, k);
-        if (g_eyeRawWritten[k] || (g_eyeRunUntreated && g_eyeRawTaken[k])) fprintf(f, "\"raw_file\": \"eye_%ls_C%02d.bmp\"}%s\n", g_eyeRunStamp, k, k + 1 == g_eyeRunTaken ? "" : ",");   // AA off writes the raw crops in the first loop
-        else fprintf(f, "\"raw_file\": null}%s\n", k + 1 == g_eyeRunTaken ? "" : ",");
-        const sightwithhold::Record r = sightwithhold::record(static_cast<uint32_t>(k));
-        const int n = _snprintf_s(names + len, sizeof(names) - len, _TRUNCATE, "%s%d:%s(%u)", len ? " " : "", k, sightwithhold::name(r.have ? r.candidate : -1), r.draws[0]);
-        if (n > 0) len += static_cast<size_t>(n);
-    }
-    fputs("  ]\n}\n", f);
-    const bool ok = !ferror(f) && fclose(f) == 0;
-    Log::get().note("sight census (C1b): eye run %ls: the frames' withheld candidate (eye 0 draws left out): %s -- %ls, %s.", g_eyeRunStamp, names, path, ok ? "written" : "write FAILED");
-}
-
 void writeEyeDecisionArtifacts(ID3D11DeviceContext* ctx, const std::wstring& dir) {
     for (int k = 0; k < g_eyeRunTaken; ++k) {
         EyeDecisionFrame& d = g_eyeDecisions[k];
@@ -2490,7 +2371,6 @@ void writeEyeDecisionArtifacts(ID3D11DeviceContext* ctx, const std::wstring& dir
         if (markerHave[k] && firstBoth < 0 && markerBound[k][0] > 0 && markerBound[k][1] > 0) firstBoth = k;
     }
     fprintf(f, "{\n  \"schema\": 1,\n  \"engine_kind_shift\": 12,\n  \"engine_kind_mask\": 7,\n  \"stamp\": \"%ls\",\n  \"requested\": %d,\n", g_eyeRunStamp, kEyeRun);
-    if (g_eyeRunWithhold) writeWithholdHeaderJson(f);
     if (firstBoth >= 0) fprintf(f, "  \"first_frame_both_eyes_bound\": %d,\n", firstBoth);
     else fputs("  \"first_frame_both_eyes_bound\": null,\n", f);
     fputs("  \"frames\": [\n", f);
@@ -2523,7 +2403,6 @@ void writeEyeDecisionArtifacts(ID3D11DeviceContext* ctx, const std::wstring& dir
         else fputs("\"pre_ui_file\": null, ", f);
         if (g_eyeRawWritten[k]) fprintf(f, "\"raw_file\": \"eye_%ls_C%02d.bmp\", ", g_eyeRunStamp, k);
         else fputs("\"raw_file\": null, ", f);
-        if (g_eyeRunWithhold) writeWithholdFrameJson(f, k);
         if (g_eyeTreatedWritten[k]) fprintf(f, "\"treated_file\": \"eye_%ls_T%02d.bmp\", ", g_eyeRunStamp, k);
         else fputs("\"treated_file\": null, ", f);
         fprintf(f, "\"ui_mode\": \"%s\", \"dlss_success\": %s, \"dlss_history\": %s, "
@@ -2687,7 +2566,6 @@ void writeEyeRun(ID3D11DeviceContext* ctx, uint32_t cw, uint32_t ch) {
         CreateDirectoryW(dir.c_str(), nullptr);
     }
     const bool paired = !g_eyeRunUntreated;
-    if (g_eyeRunWithhold) sightwithhold::disarm();   // C1b: every frame of the run is captured; the cycle ends before anything is written
     writeEyeInputs(ctx,dir);
     const bool treated = !g_eyeRunUntreated;
     ID3D11Texture2D** ring = treated ? g_eyeTreatedStaging : g_eyeRawStaging;
@@ -2712,11 +2590,6 @@ void writeEyeRun(ID3D11DeviceContext* ctx, uint32_t cw, uint32_t ch) {
             g_eyeRawWritten[i] = writeEyeBmp(ctx, g_eyeRawStaging[i], sd, 0, path);
             if (g_eyeRawWritten[i]) ++wroteTreated;
             else g_eyeDecisions[i].error="raw_write_failed";
-            if (g_eyeRunWithhold && g_eyeRawWritten[i] && i < 16) {   // C1b: the alpha plane beside it, for the footprint report
-                wchar_t alphaPath[MAX_PATH];
-                _snwprintf_s(alphaPath, MAX_PATH, _TRUNCATE, L"%s\\eye_%s_CA%02d.bmp", dir.c_str(), g_eyeRunStamp, i);
-                g_eyeAlphaWritten[i] = writeEyeAlphaBmp(ctx, g_eyeRawStaging[i], sd, alphaPath);
-            }
         }
     }
     if (g_eyeRunStaging[0]) {
@@ -2751,10 +2624,6 @@ void writeEyeRun(ID3D11DeviceContext* ctx, uint32_t cw, uint32_t ch) {
                         "Copies were taken together; files written after both eyes completed.",
                         g_eyeRunStamp, wrote, g_eyeRunTaken - 1, cw, ch, wroteTreated, g_eyeRunStamp);
     }
-    if (g_eyeRunWithhold) {
-        writeWithholdRecord(dir);
-        g_eyeRunWithhold = false;
-    }
     g_eyeRunTaken = 0;
     if(g_eyeFinalRun.complete())writeFinalEyeRun(ctx,"complete");
 }
@@ -2781,7 +2650,6 @@ void captureUntreatedEye(ID3D11Texture2D* tex,int eye,const float* bounds) {
         const int k=g_eyeRunTaken;
         if(stageEyeCrop(ctx,tex,&g_eyeRawStaging[k],&cw,&ch,region)) {
             g_eyeRawTaken[k]=true;g_eyeRawInputW[k]=w;g_eyeRawInputH[k]=h;
-            if(g_eyeRunWithhold)sightwithhold::noteCapture(static_cast<uint32_t>(k));   // C1b
             g_eyeRunFrames[k]=g_rowsFrame;objectProbeLedgerMark(k);
             g_eyeFinalRun.schedule(unsigned(k),g_eyeFinalClock.epoch,g_rowsFrame,nativeOnFootRenderFrame());
             ++g_eyeRunTaken;--g_eyeRunLeft;
@@ -4353,7 +4221,6 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                 g_eyeRawInputW[g_eyeRunTaken]=w; g_eyeRawInputH[g_eyeRunTaken]=h;
                 EyeDecisionFrame& decision = g_eyeDecisions[g_eyeRunTaken];
                 decision = {};
-                if (g_eyeRunWithhold) sightwithhold::noteCapture(static_cast<uint32_t>(g_eyeRunTaken));   // C1b: the candidate the frame just drawn left out
                 decision.frame = g_rowsFrame;
                 decision.renderFrame = nativeOnFootRenderFrame();   // F86h
                 g_eyeRunFrames[g_eyeRunTaken] = g_rowsFrame;
@@ -6902,9 +6769,6 @@ static bool beginEyeRun(bool companion,const edvr::NativeOnFootAirborneSnapshot*
     nativeOnFootOpticCaptureBegin(g_eyeFinalStamp);
     g_eyeRunTaken = 0;
     g_eyeRunLeft = kEyeRun;
-    sightwithhold::disarm();   // C1b: a cycle left over from a run that never wrote ends here
-    g_eyeRunWithhold = !companion && nativeOnFootSightWithholdArm();   // C1b: a manual dump with the sights up withholds one candidate draw per frame; the airborne companion never does
-    memset(g_eyeAlphaWritten, 0, sizeof(g_eyeAlphaWritten));
     applyEngineMotionDiagnostics();   // the census runs for the run
     g_eyeMotionTraceCount = 0;
     g_eyeInputsFrame=0;

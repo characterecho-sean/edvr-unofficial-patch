@@ -721,7 +721,7 @@ def self_test():
     if compare(dco[0], dco[1]) != 0:
         print('self-test: compare() refused a parsed pair')
         return 1
-    # The end line the DLL writes now: eye_lines= (C1b: the eye draws' own line budget) among the key=int tokens before lines=, and capture_id= (the eye dump's stamp, empty when none)
+    # The end line the DLL writes now: eye_lines= (the eye draws' own line budget) among the key=int tokens before lines=, and capture_id= (the eye dump's stamp, empty when none)
     # after truncated=. Both parse; the draws counted are the declared draws.
     for tail in (' capture_id=120515630001', ' capture_id=', ''):
         got = parse_dc_lines([m.group(1) for m in map(LINE_RE.match, dc([

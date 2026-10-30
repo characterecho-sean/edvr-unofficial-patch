@@ -3243,7 +3243,7 @@ REM column added to the emitter that swallowed a neighbour fails here, not in th
 REM match LedgerDraw in src\d3d11\object_probe.cpp byte for byte; install_edvr's --dry-run must write NOTHING (not a copy, not a backup, not a
 REM directory) and its backup naming is one string in one place; edvr_log's version regex must match the line Log::note() really writes,
 REM timestamp prefix and all; reflow_notes must leave fenced code, tables and long URLs alone, be idempotent and write UTF-8 with no BOM; the
-REM desk scripts (compile_variants .. eye_run_spin, sight_candidates) need no build products, only numpy and Pillow.
+REM desk scripts (compile_variants .. eye_run_spin) need no build products, only numpy and Pillow.
 REM --jobs 4, not every core: this group runs beside up to fifteen other rigs. At every core (2026-10-14) its gates summed 546 s
 REM against 26 s alone, and run_openxr_frontier's self-test timed out the 10 s it gives a child python to start.
 python tools\run_jobs.py --jobs 4 ^
@@ -3277,8 +3277,7 @@ python tools\run_jobs.py --jobs 4 ^
     --gate "tools\diff_eye_dump.py --self-test" ^
     --gate "tools\eye_run_fit.py --self-test" ^
     --gate "tools\eye_run_shimmer.py --self-test" ^
-    --gate "tools\eye_run_spin.py --self-test" ^
-    --gate "tools\sight_candidates.py --self-test" || exit /b 1
+    --gate "tools\eye_run_spin.py --self-test" || exit /b 1
 
 REM Only profiling builds require the optional local .NET/TraceEvent analyzer.
 REM Its parser tests must pass before this build can be flown for CPU capture.

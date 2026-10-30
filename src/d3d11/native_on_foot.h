@@ -36,7 +36,6 @@
 #include "native_on_foot_f157.h"   // F157: the coat's pack draw, the cheap match the draw path asks first (pure parts)
 #include "native_on_foot_f166.h"   // F166: the upper body held at its still crouched-ADS pose while walking (the plan of the held joints rides the arm plan)
 #include "native_on_foot_f169.h"   // F169: the pistol sprint's arm swing (the plan of the left arm's chain rides the arm plan)
-#include "sight_withhold.h"        // C1b: the sight census's withhold cycle (a manual eye dump in ADS)
 
 struct ID3D11DeviceContext;   // the F18 body cull's Begin/End (d3d11.h is not needed by the rigs that include this header)
 struct ID3D11Resource;        // F44: the marker probe's Map/Unmap tees
@@ -342,14 +341,6 @@ inline bool nativeOnFootCoatPackLive() { return g_nativeOnFootCoatPackLive.load(
 // Draw thread, owner context, an indexed draw into an eye-sized target (eyeTarget; rtvResource is its resource, for the eye's name in the counts, and may be null). True when the draw
 // is the coat's pack (the index count and instance count, the shaders bound, stencil ref 21): the caller returns kSkip.
 bool nativeOnFootCoatPackSkips(ID3D11DeviceContext* ctx, uint32_t indexCount, uint32_t instances, bool eyeTarget, const void* rtvResource);   // native_on_foot.cpp
-
-// C1b (sight_withhold.h): during a MANUAL eye dump taken with the sights up, one candidate draw of the sight's effects is left out of each of the dump's frames, cycling through the list. The
-// draw path's cost outside a dump is the one relaxed load in nativeOnFootSightWithholdLive(); while it is true beginPanelOverride (vscreen.cpp) asks nativeOnFootSightWithholdSkips for each eye
-// draw, after the census has recorded it. The frame thread publishes whether the sights are up every tick; temporal_pass.cpp arms the cycle at the dump's key press.
-inline bool nativeOnFootSightWithholdLive() { return sightwithhold::live(); }
-inline void nativeOnFootPublishAdsUp(bool up) { sightwithhold::publishAdsUp(up); }
-bool nativeOnFootSightWithholdSkips(ID3D11DeviceContext* ctx, char kind, uint32_t count, uint32_t instances, const void* rtvResource);   // native_on_foot.cpp
-bool nativeOnFootSightWithholdArm();   // native_on_foot.cpp: arm the cycle for a manual dump begun now; false (nothing armed) unless the sights are up
 
 // B3 (scope_zoom_b3.h): a press with the scope zoom's full-detail lens asked is open. The frame thread publishes here every frame; the draw path's cost with it false is the one relaxed load in
 // nativeOnFootB3Counting(); while it is true vscreen.cpp calls nativeOnFootB3NoteEyeDraw for each eye-sized draw, which counts it for the eye it is drawn into (the press line's draws a frame).

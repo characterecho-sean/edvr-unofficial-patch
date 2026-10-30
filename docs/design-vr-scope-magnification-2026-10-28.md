@@ -50,8 +50,8 @@ game's own zoom as a magnified picture inside the scope's lens. The rest of the 
 - ruled out: a fill for the left eye's strip (B3-2: world and view never drew), and zoom-to-fill (the left eye's copy shifted about 10 degrees or magnified about 43% against the right eye's, which eyes cannot fuse).
 - **C1a FLOWN OK 2026-10-30 (`25502c36`, Epic): "looks good on all counts"** (from `f2aed451`; section 12, "Crisp sights", and its flight entry): the maintainer found the holo sights and scope effects still too washed out and asked for them crisp without bloom.
   C1a: the gunsight quad (the one pair every weapon draws) of every weapon the scope lens does not name is taken out of the scene into the sharp weapons layer for the whole press of the sights, as the optical
-  chevron is; flown on nine weapons with the key's A/B in one press. C1b, NOT RUN: a manual eye dump in ADS leaves one candidate sight-effect draw out of each frame (11 candidates) and says which; `tools\sight_candidates.py` reports each one's footprint; the census gives eye draws
-  their own line budget. No dump was taken. Next: one dump a weapon held still in ADS, then the scope glass's own path.
+  chevron is; flown on nine weapons with the key's A/B in one press. **C1b REMOVED 2026-10-30, never run**: the maintainer judged the scope glass fine ("Glass looks fine"), so the withhold cycle (a manual ADS
+  dump leaving one candidate sight-effect draw out of each frame) and `tools\sight_candidates.py` are gone and an ADS dump is a plain dump again; the census's own line budget for eye draws stays. Section 12, "C1b removed".
 - Keys: `fix.native_on_foot_ads_scope_zoom` (default on since A3 flew OK, the maintainer 2026-10-29), the temporary `experimental.native_on_foot_ads_scope_zoom_fov` (the reference FOV, 56.3 by default),
   `experimental.native_on_foot_ads_scope_zoom_full_detail` (on | off, live, default off, Experimental page; the maintainer's choice per scope, not temporary: on is the optic at full detail with an equal black
   edge in both eyes' outer view, off the digital zoom). `experimental.native_on_foot_ads_crisp_reticle` (C1a) was RETIRED 2026-10-30 on the maintainer's word, its on now the behaviour (section 12, "the crisp reticle key retired").
@@ -1072,3 +1072,10 @@ session and neither line names a key (formats above). Rigs: `scope_zoom_test` ch
 `sharp_weapons_test`'s key-off case became a sight the lens names; `edvr_log.py --self-test` reads the keyed formats as UNPARSED. A stale `native_on_foot_ads_crisp_reticle` line in a live `edvr.ini` is read by nothing. Built `1418cc88` (full build, all gates; `--dll-only` on the clean
 tree), installed on Epic `--scope both --xess`, `--verify-only` passed; the live Epic `edvr.ini` lost its two crisp reticle lines (the comment and the key, edited with the Edit tool, diffed: two deletions). Not flown; the
 behaviour is the flown on.
+
+**2026-10-30, C1b removed** (the maintainer, asked whether the scope glass still wanted to come out of the anti-aliasing: "Glass looks fine"). The census never ran (no ADS dump was taken on `25502c36`), and its only
+purpose was to name the glass's draws for that second half, so it is taken out rather than kept: `sight_withhold.h`, the draw path's hook in `beginPanelOverride`, the frame thread's sights-up signal (read by
+nothing else), the dump's withhold records (`"sight_withhold"`, the per-frame `withheld` fields, `eye_<stamp>_withhold.json`, the `CA<k>` alpha images, the two `sight census (C1b)` lines), `tools\sight_candidates.py` and
+its `build.bat` gate. `temporal_pass.cpp`, `native_on_foot.h` and `build.bat` are byte for byte as before C1. A manual eye dump in ADS is a plain dump again, so the weapon-edge arc's ADS dumps need no allowance on a
+merge. Kept: the draw census's own line budget for eye draws and the end line's `eye_lines=` and `capture_id=` (a census fix, not the cycle). Rigs: the withhold cases are gone; `scope_zoom_test` checks the cycle is
+nowhere (the header absent, none of its names in the four sources), with controls that put the header, the arming and the json record back. The scope glass stays in the scene, through the upscaler, as the game draws it.

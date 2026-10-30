@@ -1236,7 +1236,7 @@ void infoCheck(Fx& f) {
 }
 }  // namespace
 
-#include "crisp_sights_cases.h"   // C1: the crisp reticle's gate and wiring, the sight census' withhold cycle
+#include "crisp_sights_cases.h"   // C1: the crisp reticle's gate and wiring, the draw census' line budgets
 
 int main(int argc, char** argv) {
     if (argc > 1 && std::strcmp(argv[1], "--dry-run") == 0) {
@@ -1253,7 +1253,6 @@ int main(int argc, char** argv) {
         c1cases::gateTests();
         c1cases::lineTests();
         c1cases::doorTests();
-        c1cases::withholdTests();
         c1cases::wiringTests();
         scopeZoomSetTemporalZoom(&nativeTemporalZoom);
         Fx f(hardware);

@@ -2527,12 +2527,6 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     if (drawCensusArmed()) {
         drawCensusEyeDraw(self, kind, count, instances, s->eyeDrawsThisFrame, args);
     }
-    // C1b (sight_withhold.h): a manual eye dump taken with the sights up leaves one candidate draw of the sight's effects out of each frame. After the census, which lists what the game
-    // submitted; one relaxed load outside a dump.
-    if (nativeOnFootSightWithholdLive()) {
-        const ResourceInfo* withholdRt = rtv0Resolved(s);
-        if (nativeOnFootSightWithholdSkips(self, kind, count, instances, withholdRt ? withholdRt->resource : nullptr)) return DrawVerdict::kSkip;
-    }
     // the crisp-HUD half of fix.ui_quality (ui_layer.h): admit the game's tonemap draw for its
     // re-issue, which tonemaps the HDR HUD layer into the eye's 8-bit layer
     // right after the draw's own issue (crispHudTonemapReissue below). One

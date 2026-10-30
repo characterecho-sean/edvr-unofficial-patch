@@ -34326,34 +34326,6 @@ bool nativeOnFootCoatPackSkips(ID3D11DeviceContext* ctx, uint32_t indexCount, ui
     return true;
 }
 
-// ---- C1b: the sight census's withhold cycle (sight_withhold.h) ---------------------------------------------------------------------------------------------------------------------------
-// Draw thread, owner context, an eye draw, only while a manual eye dump taken with the sights up has the cycle live: true when this draw is the candidate the frame's cycle names. Called after
-// the draw census recorded the draw, so a census taken with the dump still lists what the game submitted.
-bool nativeOnFootSightWithholdSkips(ID3D11DeviceContext* ctx, char kind, uint32_t count, uint32_t instances, const void* rtvResource) {
-    (void)ctx;
-    (void)kind;
-    if (!sightwithhold::live() || !nativeOnFootActive()) return false;
-    const uint32_t frame = g_f44Frame.load(std::memory_order_relaxed);
-    int eye = f44::eyeOfDraw(frame);
-    if (eye != 0 && eye != 1) {
-        char src = 0;
-        eye = f44::targetEye(rtvResource, &src);
-        if (eye != 0 && eye != 1) eye = -1;
-    }
-    return sightwithhold::skips(frame, eye, bindingShaderHash(BindSlot::Vs), count, instances, [] { return bindingShaderHash(BindSlot::Ps); });
-}
-
-// The eye dump key's job (temporal_pass.cpp beginEyeRun, a manual dump only): the cycle starts with the next frame, only while the sights are up.
-bool nativeOnFootSightWithholdArm() {
-    if (!nativeOnFootActive()) return false;
-    const uint32_t frame = g_f44Frame.load(std::memory_order_relaxed);
-    if (!sightwithhold::arm(frame)) return false;
-    Log::get().note("sight census (C1b): a manual eye dump with the sights up: from frame %u on, each of the dump's frames leaves one candidate draw of the sight's effects out of the scene "
-                    "(%u candidates, in order; the frame of the key press and the ones before it are untouched); the dump's json records which, and tools\\sight_candidates.py reads it.",
-                    frame, sightwithhold::kCount);
-    return true;
-}
-
 // ---- F158 (MEASURE ONLY): the local body's draws over the first 30 s on foot ----------------------------------------------------------------------------------------------------
 // F157 leaves the coat's full-detail pack out from the first second it is armed, yet the pack was in view for the first seconds after spawning: the game drew it another way at first.
 // A window of 30 s opens when native on foot begins and when F144 decides the coat outfit (native_on_foot_f158.h has the rules). While it runs, the draw path lists every kind of draw the
@@ -35729,7 +35701,6 @@ void tick(uint64_t nowMs) noexcept {
     ScopeZoomFrame out;   // verdict kIdle: nothing asked of the lens
     if (g_install != InstallState::Armed || runtimeFlatProfile()) {   // not armed, or the flat profile: a press still open ends here, with its line
         scopeZoomCrispPublish(false);
-        nativeOnFootPublishAdsUp(false);
         scopeZoomPublish(out);
         if (s.open) endPress(s);
         b3Off(nowMs);
@@ -35763,7 +35734,6 @@ void tick(uint64_t nowMs) noexcept {
         scopeZoomPressBegin(s.press);
         beginB3Press(s);
     }
-    nativeOnFootPublishAdsUp(ads);   // C1b: the sights are up (the eye dump's withhold runs only then)
     if (!ads) {
         scopeZoomCrispPublish(false);   // C1a: no press of the sights, no arming
         if (s.open) {   // the press ended: the door's counters, one line
