@@ -2,52 +2,42 @@
 
 ## Status
 
-- **State: v1 FLOWN 2026-10-30 on Frontier. The ring no longer follows the
-  gun, but the barrel end looks "a little pixelated" (Sean). v2 (`3b564f21`)
-  is BUILT and INSTALLED on Frontier, NOT FLOWN.** Issue #146. A second defect
-  found in the first dumps is #147. Branch `claude/weapon-edge-ghost-4a079e`.
-- **Cause:** DLSS gives the background texels beside the weapon the weapon's
-  motion vector. For each output pixel it takes the vector of the nearest-depth
-  texel around it, so the ring of terrain one texel outside the silhouette
-  fetches its history along the gun's motion instead of its own. That terrain
-  is dragged along with the gun, and the gun's dark edge passes the colour
-  clamp: the smear and the dotted trail. EDVR's inputs are right. Its
-  hidden-history sentinel works from two texels out but never reaches the one
-  texel that DLSS reads.
-- **Numbers** (dump `194734935001`, left eye, 15 pairs, `eye_decisions.py
-  --rim`): on the one-texel ring that EDVR marked hidden, the weapon's vector
-  explains DLSS's output in 48 to 84 % of discriminating pixels in the 12
-  frames with valid background vectors and a ring. The unmoved history
-  explains at most 8 %, and the texel's own vector at most 6 %. In the band
-  two to three texels out, the current frame explains 75 to 96 %. The weapon's
-  own rim keeps its own vector (52 to 89 %).
+- **State: v2 (`3b564f21`) FLOWN 2026-10-30 on Frontier. Sean: "the gun
+  still seems to lose DLSS at the edges". The dumps found a second cause, in
+  EDVR's own hidden test. v3 is PROPOSED, NOT BUILT.** Issue #146. #147 is a
+  separate defect. Branch `claude/weapon-edge-ghost-4a079e`.
+- **Cause 1, DLSS's dilation:** for each output pixel DLSS takes the vector of
+  the nearest-depth texel in its 3x3. The terrain one texel outside the gun
+  therefore fetches history along the gun's motion (48 to 84 % of the hidden
+  ring in dump `194734935001`), and the gun's dark edge passes the colour
+  clamp. EDVR's sentinel works from two texels out but never reaches that ring.
+- **Cause 2, EDVR's hidden test (flight 2):** `backgroundHistoryHidden` says
+  "hid nothing" whenever a surface at least as near as last frame's occluder
+  is still within about two texels of the pixel now
+  (`temporal_shader_source.h`, the `nearestDepthNow` exemption). That rule
+  holds for a still edge, such as a rock beside terrain. A held gun stays
+  beside the pixel while the terrain sweeps behind it. Of the terrain texels
+  one or two out that the test kept, 9 to 44 % land on four of four gun
+  texels in the previous frame (dumps `062518187001` and `062529570002`, ten
+  frames). Those texels are 36 to 86 % of the dark output pixels there: the
+  dotted line along the gun's edge.
 - **Ruled out:** see "Ruled out" below. The weapon's vectors, its jitter or
-  projection, and the background's own vectors are all right.
-- **v1, built and flown (`abd7b82c`):** the sentinel goes into the weapon's
-  outermost texels wherever the background beside them moves more than half a
-  texel differently, or is hidden (the `weaponEdges` entry, right after `mv`).
-  "Flight 1, 2026-10-30" below has the result. The hidden ring's gun-vector
-  share fell from 48 to 84 % to 0 to 29 %. But v1 also resets terrain that was
-  visible last frame (2708 of 3311 ring texels in dump `054813060001`). It
-  also resets the gun's own pixels wherever a rim texel is the nearest in its
-  own 3x3. There are 261 such texels, densest at the muzzle's thin parts: the
-  pixelated barrel end.
-- **v2, built (`3b564f21`):** rewrite only the rim texels that no gun pixel
-  reads. Each takes the terrain's own vector, or the sentinel where that
-  terrain was uncovered. Modelled on dump `054813060001`: the ring gets the
-  right vector in 3227 of 3311 texels (v1: 603). Gun texels left without a gun
-  vector: 791 (no fix 749, v1 1945). The same key switches it.
-- **Next flight: INSTALLED Frontier 2026-10-30 06:20,
-  `v0.22.0-rc.3-57-g3b564f21` (`--scope both --xess`, verified), NOT FLOWN.**
-  The live ini sets `clean_weapon_edges = on` (line 3032, written by the menu
-  row). Brief: fast swings at the hip over textured ground, and watch the
-  barrel end. Take one `hotkey.dump_eyes` with the key on and one with it off
-  in the same flight. Read: `edvr_log.py --target frontier --expect-build
-  3b564f21 --grep "weapon edges"`, which should show `on (v2)` and rim passes
-  above 0. Then run `--rim` on each dump. On the key-on dump, `first_frame_mv`
-  should show `foreground_rim_rewritten` above 0. Its `dilation` should give
-  `ring_kept_own` near `ring_texels - ring_hidden`, `ring_hidden_sentinel`
-  near `ring_hidden`, and `foreground_off_vector` near the key-off dump's.
+  projection, and the background's vectors are right.
+- **v1 (`abd7b82c`, flown):** the sentinel on every gun rim texel next to
+  differently moving terrain. It fixed the ring, but it reset terrain that was
+  visible last frame and the gun's own pixels at the thin muzzle parts (the
+  pixelated barrel end).
+- **v2 (`3b564f21`, flown, installed):** it rewrites only the rim texels that
+  no gun pixel reads, with the terrain's own vector, or the sentinel where the
+  terrain was hidden. It takes "hidden" from the test that cause 2 breaks.
+- **v3, proposed:** in `backgroundHistoryHidden`, before that exemption: if
+  all four texels of last frame's depth around the reprojected point are
+  nearer than the pixel's predicted depth by the 3 % margin, the point was
+  covered, so it is hidden. A still edge never meets this, because the pixel's
+  own texel was background then. It is behind the same key, on foot only.
+- **Next flight:** v2 is on Frontier (`v0.22.0-rc.3-57-g3b564f21`, key on).
+  v3 needs a build and Sean's go. Brief: fast swings and head turns at the
+  hip, with one eye dump with the key on and one with it off.
 - **Temporary keys:** `experimental.clean_weapon_edges` (`on` / `off`, default
   `on`), the A/B of this fix. When the flights settle it, ship the winner as
   the behaviour and propose removing the key.
@@ -55,7 +45,9 @@
   frames 3 and 4: every world vector reads zero while the terrain moved 48
   to 91 px. Dump 2, frames 2, 3 and 12 to 15: the parked ship gets 250 to 830
   px, the world path under-reports, and up to 47 % of the crop is marked
-  hidden. This is a separate investigation.
+  hidden. Again on Frontier at v2, dump `062518187001`: 8 of 15 pairs carry
+  zero world vectors while the terrain moved 8 to 78 px. This is a separate
+  investigation.
 
 ## The report
 
@@ -153,6 +145,8 @@ wins 0.40 to 0.56, the current frame 0.03 to 0.19 and its own vector 0.33 to
 - ruled out: the ADS both-eye share (F162), because the effect shows with sight eye `right`.
 - ruled out: the runtime's reprojection, because EDVR sends it no depth or motion.
 - ruled out: nudging the depth handed to DLSS so that the gun's own edge pixels read an inner texel, because in DLSS's depth the inner texels are already nearer than 3255 of the 3269 marked rim texels that have one (dump `054813060001`, frame 0).
+- ruled out: v2's winner test leaving the gun's top edge unfixed (the dotted line of flight 2), because in frame 0's depth it skips 16 of the 100 rim texels on that edge (5 % over the whole gun), and the inner texels there are nearer than the rim (dump `062518187001`).
+- ruled out: the gun rim's `own_vector` share as a measure of lost history, because it reads 0.22 to 0.61 in every dump since flight 1, including dump `062518187001`, whose first frame has 0 gun texels off their vector.
 - ruled out: a sentinel on every marked rim texel (v1) as the final rule, because it also resets terrain that was visible last frame (2708 of 3311 ring texels) and the gun's own pixels at the thin muzzle parts (flight 1).
 
 ## Proposed fix
@@ -296,3 +290,58 @@ gun texels without a gun vector; v1 left 4397, and no fix 2079.
 - **Build:** the full build is green and `--dll-only` gave
   `v0.22.0-rc.3-57-g3b564f21`. Installed on Frontier with `--scope both
   --xess` and verified.
+
+## Flight 2, 2026-10-30 (v2, Frontier)
+
+Sean: "the gun still seems to lose DLSS at the edges." The log is
+`edvr_gfx_20261030_062207.log`, its build matches `3b564f21`, and it shows
+`on (v2)` with 379 to 1800 rim passes per 10 s. There are two dumps, both with
+the key on: `062518187001` and `062529570002`.
+
+- **The pass:** in dump 1's first frame, v2 rewrote 13 of 3340 rim texels;
+  little moved relative to the gun in that frame. `dilation` gives 0 gun
+  texels off their vector, ring 3293 of 3293 kept on its own vector. In dump
+  2: 788 rewritten, 15 gun texels off their vector, ring hidden 3 of 3
+  sentinel, kept own 2180 of 2182.
+- **The look:** a crop of the gun's top edge in dump 1 is smooth in frames 3,
+  5, 7, 8, 10 and 12. Frames 6 and 9 carry a broken dark line one to two
+  texels above the edge, at render-resolution steps. Those are the two frames
+  in which the terrain's vector is large and correct (-63 and -42 px) while
+  the gun barely moves.
+- **#147 again:** phase correlation on a terrain window of dump 1 puts the
+  terrain's motion at 8 to 78 px in pairs 2 to 5, 7, 8, 10 and 11. In every
+  one of those pairs, every world vector reads exactly zero. The edge looks
+  clean in those frames, because the gun and the terrain then carry the same
+  zero vector, and the pass does nothing.
+- **Not the winner test:** frame 0's depth along that top edge has the inner
+  texels nearer than the rim (0.0539 against 0.0526). The test skips 16 of the
+  100 rim texels there. A depth push behind the inner neighbour changes
+  nothing (`062518187001`, `062529570002` and `054813060001` alike).
+- **The hidden test:** in the top-edge box (D 990..1070, 725..790), the
+  terrain at distance 1 from the gun is 0 % hidden in frames 6 and 9, distance
+  2 is 42 and 56 %, and distances 3 and 4 are 100 %. Every dark pixel (P - C
+  below -30 luma) is a kept texel at distance 1 or 2. At distance 2, kept
+  texels read -31 and -24 luma against the render and hidden ones about 0.
+- **Where the kept texels land:** p plus D's vector in the previous frame's
+  decisions. Of the kept terrain texels at distance 1 to 2, 9 to 44 % land on
+  four of four gun texels, over ten frames of the two dumps. 1 to 3 of four is
+  rare (4 to 370). Beyond distance 2, none does, because the test marks them.
+  These texels are 36 to 86 % of the dark pixels at distance 1 to 2.
+- **Why:** `backgroundHistoryHidden` returns "hid nothing" when
+  `nearestDepthNow`, the nearest depth within the directed 4x4 about the pixel
+  now, is at least as near as the occluder at the reprojected point. That keeps
+  a still silhouette from shimmering, because there the history's filtered
+  colour holds the same edge. A held gun breaks it: the gun is beside the
+  pixel now, but the terrain has swept 30 to 60 texels behind it, so the
+  reprojected point lies inside the gun. v2 then gives the ring the terrain's
+  "kept" vector, which fetches the gun.
+
+**v3:** before the exemption, read last frame's depth at the four texels
+around the reprojected point. If all four are nearer than the pixel's
+predicted depth by the 3 % margin, return hidden. A still edge never meets
+this: the pixel's own texel was background in the previous frame, and it lies
+within the four. It sits behind `clean_weapon_edges`, through a constant-buffer
+bit set when the pass is wanted (on foot, engine motion bound), so the A/B
+stays one key. Signature for the flight: a reader count of the kept terrain at
+distance 1 to 2 that lands on four of four foreground texels in the previous
+frame, which should fall to near 0 with the key on.
