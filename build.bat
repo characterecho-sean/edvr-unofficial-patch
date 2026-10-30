@@ -3277,6 +3277,7 @@ python tools\run_jobs.py --jobs 4 ^
     --gate "tools\diff_eye_dump.py --self-test" ^
     --gate "tools\eye_run_fit.py --self-test" ^
     --gate "tools\eye_run_shimmer.py --self-test" ^
+    --gate "tools\eye_decisions.py --self-test --rim" ^
     --gate "tools\eye_run_spin.py --self-test" || exit /b 1
 
 REM Only profiling builds require the optional local .NET/TraceEvent analyzer.

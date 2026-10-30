@@ -3319,7 +3319,6 @@ bool ensureDecisionTexture(ID3D11Device* dev, EyeState& e, uint32_t w, uint32_t 
     return false;
 }
 
-
 // The mask NVIDIA is handed is R8_UNORM written from a compute shader,
 // which needs typed unordered access to that format -- checked once, and
 // its absence only loses NVIDIA's copy of the mask, never the own pass's.
@@ -4778,6 +4777,13 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     // Bit 16384 and t23: the skinned characters' exact previous position (the second skin).
                     if (engineBound && engineSkinSrv)
                         p.probe[3] = static_cast<float>(static_cast<uint32_t>(p.probe[3]) | 16384u);
+                    // Bit 512 (#146, docs/weapon-edge-ghost-2026-10-29.md): backgroundHistoryHidden also hides background whose reprojected point was
+                    // covered on all four texels of last frame's depth, so ground a held weapon was swept past starts afresh instead of showing the
+                    // weapon's old image. On foot, VR profile only (the profile read per eye-frame, one relaxed load, as eyeTargetRuleOn does),
+                    // with engine-record motion bound. For this dispatch only: probe[3] is rebuilt from uiFlags() at every dispatch, and no other
+                    // entry reads the bit.
+                    if (g_foot.on && engineBound && !runtimeFlatProfile())
+                        p.probe[3] = static_cast<float>(static_cast<uint32_t>(p.probe[3]) | 512u);
                     engineCounted = engineBound && diagnostics;
                     // A masked engine pixel sets the bias mask too, for the
                     // presets and FSR that read it (modern DLSS honours the
