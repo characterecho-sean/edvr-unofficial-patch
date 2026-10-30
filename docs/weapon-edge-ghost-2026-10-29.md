@@ -28,8 +28,18 @@
   right after `mv`). DLSS's dilation then carries "no history" into the ring.
   Fly it with an eye dump each way and read both with `--rim`; the build's
   log lines are in "Build, 2026-10-29" below.
-- **Next flight:** none booked. The installs are shared: ask Sean before
-  installing or flying.
+- **Next flight: INSTALLED Frontier 2026-10-29 20:49, `v0.22.0-rc.3-53-gabd7b82c`
+  (`--scope both --xess`, verified), NOT FLOWN.** It replaced the F175 view-roll
+  measure build (`rc.3-47-g5676d82c`). The live ini has no
+  `clean_weapon_edges` line, so the key is on; it is the developer-tier menu
+  row "Clean weapon edges (test)". Brief: fast swings at the hip over textured
+  ground; `hotkey.dump_eyes` during a swing with the key on, then off, then on;
+  check the gun against the hand and arm too. Read: `edvr_log.py --expect-build
+  HEAD --grep "weapon edges"` (rim passes non-zero on foot), then `--rim` on
+  each dump. With the fix on, `first_frame_mv` should show
+  `foreground_rim_sentinel` above 0 (today's dump: 0 of 3175), the ring's
+  `foreground_vector` share should fall to near 0, and the foreground rim's
+  `own_vector` share should hold.
 - **Temporary keys:** `experimental.clean_weapon_edges` (`on` / `off`, default
   `on`), the A/B of this fix. When the flights settle it, ship the winner as
   the behaviour and propose removing the key.
