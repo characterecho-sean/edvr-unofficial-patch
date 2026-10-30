@@ -7,21 +7,26 @@
 // tells srvTurretNotePublished what it published. Applied at once, with no ramp: the game itself cuts the camera on a view switch.
 //
 // PART 2, THE HUD. While the turret view is on and the gap key is above 0 the draw gate is open (srvTurretHudWantsDraws), forwardWithVerdict opens a scope for every
-// draw, and a draw of the targeting sprite's shader pair into an eye target is issued through the private geometry shader, for EVERY issue the draw path makes of
-// it (the game's own, the UI layer's, the interface depth's): the scope spans the whole function and puts the game's geometry stage back on every way out.
+// draw, and a draw of one of the two hologram families' shader pairs (srv_turret_math.h: vs 1989E6D3B405FDE0 + ps EAB8A1C95A13FFBE, vs 2CECEC3065EF0D4A + ps A4D03619D631B186;
+// they draw the near HUD layer from records 0.41 to 0.47 m out and the target information and SYSTEMS panels from records about 1.39 m out) into an eye target is issued
+// through that family's private geometry shader, for EVERY issue the draw path makes of it (the game's own, the UI layer's, the interface depth's): the scope spans the whole
+// function and puts the game's geometry stage back on every way out. Only a vertex in the deep band moves. (The reticle's sprite, vs E508648660A352B2, is not a panel: an
+// earlier build targeted it, at about 500 m, and moved nothing.)
 //
 // WHAT THE LOG SHOWS (a flight in the turret view must tell "never ran" from "ran"):
 //   "srv turret settings: ..."        the two keys, at the first frame and at each change.
 //   "srv turret view: on|off at frame N (Status.json Flags 0x........, seat kind 0x.)"      each edge of the turret view.
 //   "srv turret camera: back X m published (serial N)" / "srv turret camera: back cleared (serial N)"      each change of what alignTick published.
-//   "srv turret hud: precompiled geometry shader ... created|FAILED" (shader_swap.cpp), once, at the first draw that asks for it.
-//   "srv turret hud: first draw ..." once; "srv turret hud: refused a draw (reason) ..." once per reason.
-//   "srv turret hud: gap=... draws[L,R]=.. bound=.. refused[...]=.." every 10 s while the turret view was on at any point of the window.
-//   THE GPU INSTRUMENT (whether the shader RAN, and what it wrote): once a second per eye, while the pass is bound, one matched draw is issued through a stream-output twin of the
-//   shader (the same bytecode and constants, still rasterized) with a pipeline-statistics query and a stream-output-statistics query around the scope (Begin right after the bind,
-//   End right before the restore). Read back without a stall (DONOTFLUSH, a staging copy mapped DO_NOT_WAIT) on later frames, given up after 8:
-//   "srv turret hud stats: eye=E issues=N ia_prims=.. vs=.. gs=.. gs_prims=.. c_inv=.. c_prims=.. ps=.. (lost N) draw=K"   gs=0 with ia_prims>0: the shader never ran.
-//   "srv turret hud capture: eye=E draw=K so_prims=.. vertices=.. in_window=.. w=[..] ndc_x=[..] ndc_y=[..] shift_clip=[..] s=.. gap=.."   the vertices the shader wrote.
+//   "srv turret hud: precompiled geometry shader ... created|FAILED" (shader_swap.cpp), once for each family, at the first draw that asks for them.
+//   "srv turret hud: first draw of family F ..." once for each family; "srv turret hud: refused a draw (reason) ..." once per reason.
+//   "srv turret hud: gap=... draws[L,R]=.. bound=.. refused[...]=.. families[1989E6D3,2CECEC30]=.." every 10 s while the turret view was on at any point of the window.
+//   THE GPU INSTRUMENT (whether the shader RAN, and what it wrote): once a second per eye and family, while the pass is bound, one matched draw (the frame's draws of the family
+//   rotate) is issued through a stream-output twin of the shader (the same bytecode and constants, still rasterized) with a pipeline-statistics query and a stream-output-statistics
+//   query around the scope (Begin right after the bind, End right before the restore). Read back without a stall (DONOTFLUSH, a staging copy mapped DO_NOT_WAIT) on later frames,
+//   given up after 8:
+//   "srv turret hud stats: eye=E issues=N ia_prims=.. vs=.. gs=.. gs_prims=.. c_inv=.. c_prims=.. ps=.. (lost N) draw=K family=F"   gs=0 with ia_prims>0: the shader never ran.
+//   "srv turret hud capture: family=F eye=E draw=K so_prims=.. vertices=.. in_window=.. w=[..] ndc_x=[..] ndc_y=[..] shift_clip=[..] s=.. gap=.."   the vertices the shader wrote:
+//   the near layer's draws read in_window 0 at w about 0.4 m, the deep panels' in_window above 0 at w about 1.3 to 1.4 m.
 #pragma once
 
 #include <atomic>
@@ -54,9 +59,10 @@ double srvTurretBackSeatedZ();
 // alignTick, right after it published an alignment: the z it added and the serial it published under. Said in the log when it changed. Frame thread.
 void srvTurretNotePublished(double seatedZ, uint32_t serial);
 
-// Part 2, the draw path (vscreen.cpp, the render thread). Begin: the game's bindings are its own; eye is the draw's eye (0 left, 1 right, -1 unknown). True when the
-// private shader is bound for the issues that follow; End puts the game's geometry stage and constant slot back and is called only after a true Begin.
-bool srvTurretHudBegin(ID3D11DeviceContext* ctx, int eye);
+// Part 2, the draw path (vscreen.cpp, the render thread). Begin: the game's bindings are its own; family is the draw's shader pair's family (srv_turret_math.h familyOf), eye
+// the draw's eye (0 left, 1 right, -1 unknown). True when the family's private shader is bound for the issues that follow; End puts the game's geometry stage and constant
+// slot back and is called only after a true Begin.
+bool srvTurretHudBegin(ID3D11DeviceContext* ctx, int family, int eye);
 void srvTurretHudEnd(ID3D11DeviceContext* ctx);
 // Once a frame, render thread (vScreenFrameBoundary): settles a binding that did not restore.
 void srvTurretHudFrameBoundary(ID3D11DeviceContext* ctx);

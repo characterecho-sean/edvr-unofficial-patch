@@ -1,21 +1,26 @@
-// The SRV turret view (issue 140; src/d3d11/srv_turret*.h, srv_turret.cpp). The build's own bytecode of the HUD's pass-through geometry shader (kSrvTurretHudGsBytecode: the
-// build compiles srv_turret_hud_shader.h's HLSL, and this rig checks the bytes are that text's) and the production binding, constants and maths run on WARP, with the D3D
-// debug layer when the machine has it, in front of a stand-in for the game's vertex shader E508648660A352B2 -- the same output signature (TEXCOORD 0 xy at register 0,
-// SV_POSITION at register 1; reflection compares the two), the same clip rows (o1.x = dp4(cb0[4], r0), o1.y = dp4(cb0[5], r0), o1.w = dp4(cb0[7], r0), o1.z = |o1.w|).
+// The SRV turret view (issue 140; src/d3d11/srv_turret*.h, srv_turret.cpp). The build's own bytecode of the HUD's two pass-through geometry shaders (kSrvTurretHudGsABytecode and
+// kSrvTurretHudGsBBytecode: the build compiles srv_turret_hud_shader.h's HLSL, and this rig checks the bytes are that text's) and the production binding, constants and maths run on
+// WARP, with the D3D debug layer when the machine has it, in front of stand-ins for the two hologram families' vertex and pixel shaders (family A: vs 1989E6D3B405FDE0 with ps
+// EAB8A1C95A13FFBE; family B: vs 2CECEC3065EF0D4A with ps A4D03619D631B186; they draw the near HUD layer at w 0.41 to 0.47 m and the target information and SYSTEMS panels at about
+// 1.39 m). Each stand-in has the game's output signature (A: TEXCOORD0 xyzw, TEXCOORD6 xyz, SV_POSITION at registers 0, 1, 2; B: TEXCOORD0 xyzw, TEXCOORD7 xy, SV_POSITION; read from
+// the fxc disassembly of the dumps' bytecode; reflection compares the two) and the same clip rows (o.x = dp4(cb0[4], r0), o.y = dp4(cb0[5], r0), o.w = dp4(cb0[7], r0)), and the
+// pixel stand-ins read what the game's pixel shaders read (B also SV_POSITION.xy). The reticle's sprite (vs E508648660A352B2), at about 500 m, is not one of them.
 //
-//   THE SHIFT. A quad at view depth w = 1.5 with the gap 1.02 m and s = +0.0259 (Sean's Pimax: P00 0.940, Elite's eye separation 55.1 mm, the left eye) lands shifted by the
-//   formula's amount, measured in pixels from the texture-coordinate gradient (sub-pixel): clip x + s gap / (w - gap). The right eye (s = -0.0259) shifts the other way.
+//   THE SHIFT. A quad at view depth w = 1.4 (a deep panel) with the default gap of 0.96 m and s = +0.0259 (Sean's Pimax: P00 0.940, Elite's eye separation 55.1 mm, the left eye)
+//   lands shifted by the formula's amount, measured in pixels from the texture-coordinate gradient (sub-pixel): clip x + s gap / (w - gap). The right eye shifts the other way.
 //   THE GEOMETRY. The same shift is what a quad truly moved `gap` metres nearer along its ray from the head centre looks like to each eye, rendered with the plain shader
 //   and Elite's off-centre projection: the two images agree to a hundredth of a pixel, the quad's size unchanged (the cyclopean direction is kept).
-//   THE WINDOW. A vertex at w = 50 is unchanged, as is one at 5 m (the reticle is far) and one nearer than gap + 0.10; with the gap at 0 nothing changes; a mixed draw moves only
-//   the quad in range. The texture coordinates are untouched (an integer-pixel translation reproduces the plain image shifted).
-//   THE LINKAGE. The shader links against the stand-in under the debug layer with no message; a vertex shader without TEXCOORD 0 is reported by it (the control that the
-//   layer really checks).
+//   THE WINDOW. A vertex at w = 500 (the reticle), 50, 5 or 4 m, or nearer than gap + 0.10 (1.0 m, and the near layer's 0.42 m), is unchanged; with the gap at 0 nothing changes;
+//   a mixed draw moves only the quad in range. The texture coordinates are untouched (an integer-pixel translation reproduces the plain image shifted).
+//   THE LINKAGE. Each shader links against its stand-in under the debug layer with no message, its input is the vertex shader's output element for element and its output the same
+//   again, the pixel shader's inputs are a subset of it; a vertex shader without the texture coordinates is reported by the layer (the control that it really checks).
 //   THE BINDING (the production class, on a real context): in and out for one draw with the game's geometry stage and constant slot exactly as they were and no reference leaked or
 //   kept; a geometry shader of the game's own refused with nothing touched; the restore that fails twice, the settle at the boundary and the state the game rebound; the
 //   geometry stage empty after the issue. THE CONSTANTS: made once per device, rewritten only when a number changes, refused when not finite or not a window.
-//   THE MUTANTS, each run through the same cases and each caught: no window, the sign, the divisor, the wrong axis, the far end of the window; and the binding whose restore
-//   does nothing. --wiring scans the sources that connect all this to the game, with controls that edit a copy and must trip the pin.
+//   THE INSTRUMENT: the pipeline statistics (gs 0 for a plain draw, 2 for a quad through a shader), the stream-output twin of each family (its record is the vertex whole) and the
+//   capture summary: a quad at 1.4 m reads in_window 6, the near layer's 0.42 m and the reticle's 500 m read in_window 0 with the picture unchanged.
+//   THE MUTANTS, each run through the same cases in both families' text and each caught: no window, the sign, the divisor, the wrong axis, both ends of the window; and the
+//   binding whose restore does nothing. --wiring scans the sources that connect all this to the game, with controls that edit a copy and must trip the pin.
 #include <windows.h>
 #include <d3d11.h>
 #include <d3dcompiler.h>
@@ -107,15 +112,20 @@ static ComPtr<ID3D11Buffer> makeBuffer(UINT bytes, UINT bind, const void* data) 
     return b;
 }
 
-// ---------------------------------------------------------------- the game's vertex shader, as a stand-in with its output signature and clip rows
-static const char* kGameVs = R"HLSL(
+// ---------------------------------------------------------------- the game's shader pairs, as stand-ins with their signatures and clip rows
+// The two hologram families (srv_turret_math.h): the vertex shaders take the same inputs and write TEXCOORD0 xyzw (register 0), an extra interpolant (TEXCOORD6 xyz for
+// family 0, TEXCOORD7 xy for family 1; register 1) and SV_POSITION (register 2) with o.x = dp4(cb0[4], r0), o.y = dp4(cb0[5], r0), o.w = dp4(cb0[7], r0). The pixel shaders
+// read what the fxc disassembly of the game's says they read: family 0 TEXCOORD0 xyzw and TEXCOORD6 xyz, family 1 TEXCOORD0 xyzw, TEXCOORD7 xy and SV_POSITION xy.
+static std::string standInVs(int fam) {
+    std::string text = R"HLSL(
 cbuffer C0 : register(b0) { float4 cb0[8]; };
-struct VIn { float4 p : POSITION; float2 uv : TEXCOORD0; };
-struct VOut { float2 uv : TEXCOORD0; float4 pos : SV_Position; };
+struct VIn { float4 p : POSITION; float4 t0 : TEXCOORD0; float4 t1 : TEXCOORD1; };
+struct VOut { float4 t0 : TEXCOORD0; EXTRA_DECL float4 pos : SV_Position; };
 VOut main(VIn i) {
     float4 r0 = float4(i.p.xyz, 1.0);
     VOut o;
-    o.uv = i.uv;
+    o.t0 = i.t0;
+    EXTRA_ASSIGN
     o.pos.x = dot(cb0[4], r0);
     o.pos.y = dot(cb0[5], r0);
     o.pos.w = dot(cb0[7], r0);
@@ -123,28 +133,46 @@ VOut main(VIn i) {
     return o;
 }
 )HLSL";
-// The pixel stage: the texture coordinate as the colour (the sub-pixel measure), alpha 1.
-static const char* kGamePs = "float4 main(float2 uv : TEXCOORD0) : SV_Target { return float4(uv, 0.0, 1.0); }\n";
-// A vertex shader WITHOUT the texture coordinate: the linkage control.
+    const std::string decl = fam == 0 ? "float3 t6 : TEXCOORD6;" : "float2 t7 : TEXCOORD7;";
+    const std::string assign = fam == 0 ? "o.t6 = i.t1.xyz;" : "o.t7 = i.t1.xy;";
+    text.replace(text.find("EXTRA_DECL"), 10, decl);
+    text.replace(text.find("EXTRA_ASSIGN"), 12, assign);
+    return text;
+}
+// The pixel stage: the texture coordinate as the colour (the sub-pixel measure: red is u, green is v), the extra interpolant in blue, alpha 1 (family 1: from SV_POSITION.x).
+static const char* standInPs(int fam) {
+    static const char* kPs0 = R"HLSL(
+float4 main(float4 t0 : TEXCOORD0, float3 t6 : TEXCOORD6) : SV_Target { return float4(t0.x, t0.y, t6.x, 1.0); }
+)HLSL";
+    static const char* kPs1 = R"HLSL(
+float4 main(float4 t0 : TEXCOORD0, float2 t7 : TEXCOORD7, float4 sp : SV_Position) : SV_Target { return float4(t0.x, t0.y, t7.x, step(0.0, sp.x)); }
+)HLSL";
+    return fam == 0 ? kPs0 : kPs1;
+}
+// A vertex shader WITHOUT the texture coordinates: the linkage control.
 static const char* kBadVs = R"HLSL(
 cbuffer C0 : register(b0) { float4 cb0[8]; };
 float4 main(float4 p : POSITION) : SV_Position { float4 r0 = float4(p.xyz, 1.0); return float4(dot(cb0[4], r0), dot(cb0[5], r0), abs(dot(cb0[7], r0)), dot(cb0[7], r0)); }
 )HLSL";
 
-static ComPtr<ID3DBlob> g_vsCode, g_psCode;
-static ComPtr<ID3D11VertexShader> g_vs;
-static ComPtr<ID3D11PixelShader> g_ps;
+static ComPtr<ID3DBlob> g_vsCode[2], g_psCode[2];
+static ComPtr<ID3D11VertexShader> g_vs[2];
+static ComPtr<ID3D11PixelShader> g_ps[2];
 static ComPtr<ID3D11InputLayout> g_layout;
 static ComPtr<ID3D11RasterizerState> g_rs;   // no culling: the stand-in quads are wound either way, as the game's state does not cull its panels
+static int g_fam = 0;                        // the family the cases are running: render() draws it with that family's stand-in pair
 
 static void setupGamePair() {
-    g_vsCode = compileHlsl(kGameVs, "vs_5_0");
-    g_psCode = compileHlsl(kGamePs, "ps_5_0");
-    ck(g_dev->CreateVertexShader(g_vsCode->GetBufferPointer(), g_vsCode->GetBufferSize(), nullptr, &g_vs), "CreateVertexShader");
-    ck(g_dev->CreatePixelShader(g_psCode->GetBufferPointer(), g_psCode->GetBufferSize(), nullptr, &g_ps), "CreatePixelShader");
-    const D3D11_INPUT_ELEMENT_DESC elements[2] = {{"POSITION", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0},
-                                                  {"TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 16, D3D11_INPUT_PER_VERTEX_DATA, 0}};
-    ck(g_dev->CreateInputLayout(elements, 2, g_vsCode->GetBufferPointer(), g_vsCode->GetBufferSize(), &g_layout), "CreateInputLayout");
+    for (int f = 0; f < 2; ++f) {
+        g_vsCode[f] = compileHlsl(standInVs(f), "vs_5_0");
+        g_psCode[f] = compileHlsl(standInPs(f), "ps_5_0");
+        ck(g_dev->CreateVertexShader(g_vsCode[f]->GetBufferPointer(), g_vsCode[f]->GetBufferSize(), nullptr, &g_vs[f]), "CreateVertexShader");
+        ck(g_dev->CreatePixelShader(g_psCode[f]->GetBufferPointer(), g_psCode[f]->GetBufferSize(), nullptr, &g_ps[f]), "CreatePixelShader");
+    }
+    const D3D11_INPUT_ELEMENT_DESC elements[3] = {{"POSITION", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0},
+                                                  {"TEXCOORD", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 16, D3D11_INPUT_PER_VERTEX_DATA, 0},
+                                                  {"TEXCOORD", 1, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 32, D3D11_INPUT_PER_VERTEX_DATA, 0}};
+    ck(g_dev->CreateInputLayout(elements, 3, g_vsCode[0]->GetBufferPointer(), g_vsCode[0]->GetBufferSize(), &g_layout), "CreateInputLayout");
     D3D11_RASTERIZER_DESC rd{};
     rd.FillMode = D3D11_FILL_SOLID;
     rd.CullMode = D3D11_CULL_NONE;
@@ -155,7 +183,8 @@ static void setupGamePair() {
 // ---------------------------------------------------------------- one drawn frame
 struct Vtx {
     float p[4];
-    float uv[2];
+    float t0[4];   // TEXCOORD0: u, v, 0, 1
+    float t1[4];   // the extra interpolant (TEXCOORD6 xyz, or TEXCOORD7 xy)
 };
 struct Frame {
     UINT w = 0, h = 0;
@@ -218,7 +247,7 @@ static ComPtr<ID3D11Buffer> cameraBuffer(const Cam& c) {
 static void addQuad(std::vector<Vtx>& v, float x0, float x1, float y0, float y1, float w, float ex, float k = 1.0f) {
     auto vert = [&](float x, float y, float u, float t) {
         const float X = x * k - ex, Y = y * k, Z = -w * k;
-        v.push_back(Vtx{{X, Y, Z, 1.0f}, {u, t}});
+        v.push_back(Vtx{{X, Y, Z, 1.0f}, {u, t, 0.0f, 1.0f}, {0.25f, 0.5f, 0.75f, 0.0f}});
     };
     vert(x0, y0, 0, 0);
     vert(x1, y0, 1, 0);
@@ -259,9 +288,9 @@ static Frame render(const std::vector<Vtx>& verts, const Cam& cam, ID3D11Geometr
     g_ctx->IASetVertexBuffers(0, 1, vbs, &stride, &offset);
     g_ctx->IASetInputLayout(g_layout.Get());
     g_ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    g_ctx->VSSetShader(g_vs.Get(), nullptr, 0);
+    g_ctx->VSSetShader(g_vs[g_fam].Get(), nullptr, 0);
     g_ctx->VSSetConstantBuffers(0, 1, cb0.GetAddressOf());
-    g_ctx->PSSetShader(g_ps.Get(), nullptr, 0);
+    g_ctx->PSSetShader(g_ps[g_fam].Get(), nullptr, 0);
     t.clear();
     st::Binding binding;
     bool bound = false;
@@ -400,14 +429,30 @@ static void mathCases() {
               std::strcmp(st::refuseName(st::Refuse::kTopology), "topology") == 0 && std::strcmp(st::refuseName(st::Refuse::kNotReady), "not-ready") == 0 &&
               std::strcmp(st::refuseName(st::Refuse::kNoGeometry), "no-geometry") == 0,
           "five refusal reasons, in the order the 10 s line prints them");
-    check(st::kSpriteVs == 0xE508648660A352B2ull && st::kSpritePs == 0x63ABD86359B57D01ull, "the targeting sprite's shader pair");
+    // the two families: the pairs, their records, and that the reticle's sprite is not among them
+    check(st::kFamilyCount == 2 && st::kFamilies[0].vs == 0x1989E6D3B405FDE0ull && st::kFamilies[0].ps == 0xEAB8A1C95A13FFBEull && st::kFamilies[1].vs == 0x2CECEC3065EF0D4Aull &&
+              st::kFamilies[1].ps == 0xA4D03619D631B186ull && !std::strcmp(st::kFamilies[0].name, "1989E6D3") && !std::strcmp(st::kFamilies[1].name, "2CECEC30"),
+          "the two families: vs 1989E6D3B405FDE0 with ps EAB8A1C95A13FFBE, and vs 2CECEC3065EF0D4A with ps A4D03619D631B186");
+    check(st::familyOf(0x1989E6D3B405FDE0ull, 0xEAB8A1C95A13FFBEull) == 0 && st::familyOf(0x2CECEC3065EF0D4Aull, 0xA4D03619D631B186ull) == 1 &&
+              st::familyOf(0x1989E6D3B405FDE0ull, 0xA4D03619D631B186ull) == -1 && st::familyOf(0x2CECEC3065EF0D4Aull, 0xEAB8A1C95A13FFBEull) == -1 && st::familyOf(0, 0) == -1,
+          "a draw is a family's only when BOTH shaders of the pair match");
+    check(st::familyOf(0xE508648660A352B2ull, 0x63ABD86359B57D01ull) == -1, "the reticle's sprite (vs E508648660A352B2, ps 63ABD86359B57D01) is not a family: it is at about 500 m and is left alone");
+    check(st::kFamilies[0].strideBytes == 44 && st::kFamilies[0].posFloat == 7 && st::kFamilies[1].strideBytes == 40 && st::kFamilies[1].posFloat == 6 &&
+              st::kFamilies[0].posFloat * 4 + 16 == st::kFamilies[0].strideBytes && st::kFamilies[1].posFloat * 4 + 16 == st::kFamilies[1].strideBytes,
+          "the stream-output records: (4 + 3 + 4) floats and (4 + 2 + 4) floats, the clip position last");
+    // the measured depths: the deep panels at 1.39 m move at the default gap, the near layer at 0.41 to 0.47 m and the reticle at 500 m do not
+    const st::TurretParams d = st::paramsFor(sL, st::kGapDefaultCm / 100.0f);
+    check(st::kGapDefaultCm == 96 && std::fabs(d.wMin - 1.06f) < 1e-6f && st::clipXShift(d, 1.39f) > 0.05f && st::clipXShift(d, 1.4f) > 0.0f && st::clipXShift(d, 0.42f) == 0.0f &&
+              st::clipXShift(d, 0.41f) == 0.0f && st::clipXShift(d, 0.47f) == 0.0f && st::clipXShift(d, 500.0f) == 0.0f,
+          "at the default gap (96 cm): the deep band is 1.06 to 4.0 m; w = 1.39 moves, w = 0.41 to 0.47 (the near layer) and 500 m (the reticle) do not");
+    check(std::fabs((1.39f - d.gap) - 0.43f) < 1e-5f, "...and the panel lands at 0.43 m, where the near layer is");
 }
 
 // ---------------------------------------------------------------- the geometry, run on the production shader and on each mutant
 static void geometryCases(ID3D11GeometryShader* gs, Fails& f) {
     const Cam cam;
-    const float ipd = 0.0551f, gap = 1.02f;
-    const float w0 = 1.5f, qx0 = -0.30f, qx1 = 0.30f, qy0 = -0.20f, qy1 = 0.20f;
+    const float ipd = 0.0551f, gap = st::kGapDefaultCm / 100.0f;   // the default gap, and a deep panel's depth
+    const float w0 = 1.4f, qx0 = -0.30f, qx1 = 0.30f, qy0 = -0.20f, qy1 = 0.20f;
     for (int eye = 0; eye < 2; ++eye) {
         const float hx = st::eyeHx(eye, ipd), ex = -hx;   // the eye's place against the head centre
         const float s = cam.p00 * hx;
@@ -426,7 +471,7 @@ static void geometryCases(ID3D11GeometryShader* gs, Fails& f) {
         f.expect(std::fabs(expectPx) > 3.0 && std::fabs(expectPx) < 8.0, "the case is a shift of several pixels");
         f.expect((eye == 0) == (em.xl > ep.xl), "the left eye's image shifts towards the right, the right eye's towards the left");
         f.expect(std::fabs((em.xl - ep.xl) - expectPx) < 0.03 && std::fabs((em.xr - ep.xr) - expectPx) < 0.03,
-                 "a quad at w = 1.5 lands shifted by s gap / (w - gap) / w half-widths of the target: the formula's pixels");
+                 "a quad at w = 1.4 with the default gap (96 cm) lands shifted by s gap / (w - gap) / w half-widths of the target: the formula's pixels");
         f.expect(std::fabs((em.xr - em.xl) - (ep.xr - ep.xl)) < 0.03, "...with its size unchanged (a translation: the cyclopean direction is kept)");
         f.expect(std::fabs(em.xl - er.xl) < 0.03 && std::fabs(em.xr - er.xr) < 0.03 && std::fabs((er.xr - er.xl) - (ep.xr - ep.xl)) < 0.03,
                  "...and it is where the geometry truly moved `gap` nearer along its ray from the head centre is seen from that eye, with Elite's off-centre projection");
@@ -445,7 +490,7 @@ static void geometryCases(ID3D11GeometryShader* gs, Fails& f) {
     {   // the window: far, reticle-far, near, the gap at 0, a mixed draw
         const float hx = st::eyeHx(0, ipd), ex = -hx;
         const st::TurretParams loud = st::paramsFor(3.0f, gap);   // a big s, so a vertex wrongly moved at w = 50 would show
-        for (float w : {50.0f, 5.0f, 4.0f, 1.0f, 1.11f}) {
+        for (float w : {500.0f, 50.0f, 5.0f, 4.0f, 1.0f, 0.42f}) {
             std::vector<Vtx> v;
             addQuad(v, -0.3f * w / 1.5f, 0.3f * w / 1.5f, -0.2f * w / 1.5f, 0.2f * w / 1.5f, w, ex);   // the same size on the screen at any depth
             const Frame plain = render(v, cam, nullptr, loud);
@@ -500,27 +545,52 @@ static void geometryCases(ID3D11GeometryShader* gs, Fails& f) {
 }
 
 // ---------------------------------------------------------------- the linkage, with the signatures compared
-static void linkageCases(ID3D11GeometryShader* gs) {
-    ComPtr<ID3D11ShaderReflection> vsr, gsr;
-    ck(D3DReflect(g_vsCode->GetBufferPointer(), g_vsCode->GetBufferSize(), __uuidof(ID3D11ShaderReflection), reinterpret_cast<void**>(vsr.GetAddressOf())), "reflect the vertex shader");
-    {
-        // the production bytes: the rig has them as the array
-        ck(D3DReflect(edvr::kSrvTurretHudGsBytecode, sizeof(edvr::kSrvTurretHudGsBytecode), __uuidof(ID3D11ShaderReflection), reinterpret_cast<void**>(gsr.GetAddressOf())),
-           "reflect the production geometry shader");
-    }
-    D3D11_SHADER_DESC vd{}, gd{};
+// The production bytes of each family's geometry shader, as the build generates them, and the HLSL text they are the compile of.
+struct FamilyBytes {
+    const unsigned char* data;
+    size_t size;
+    const char* text;
+};
+static const FamilyBytes kBytes[2] = {{edvr::kSrvTurretHudGsABytecode, sizeof(edvr::kSrvTurretHudGsABytecode), edvr::kSrvTurretHudGsA},
+                                      {edvr::kSrvTurretHudGsBBytecode, sizeof(edvr::kSrvTurretHudGsBBytecode), edvr::kSrvTurretHudGsB}};
+
+static void linkageCases(int fam, ID3D11GeometryShader* gs) {
+    ComPtr<ID3D11ShaderReflection> vsr, psr, gsr;
+    ck(D3DReflect(g_vsCode[fam]->GetBufferPointer(), g_vsCode[fam]->GetBufferSize(), __uuidof(ID3D11ShaderReflection), reinterpret_cast<void**>(vsr.GetAddressOf())), "reflect the vertex shader");
+    ck(D3DReflect(g_psCode[fam]->GetBufferPointer(), g_psCode[fam]->GetBufferSize(), __uuidof(ID3D11ShaderReflection), reinterpret_cast<void**>(psr.GetAddressOf())), "reflect the pixel shader");
+    ck(D3DReflect(kBytes[fam].data, kBytes[fam].size, __uuidof(ID3D11ShaderReflection), reinterpret_cast<void**>(gsr.GetAddressOf())), "reflect the production geometry shader");
+    D3D11_SHADER_DESC vd{}, pd{}, gd{};
     vsr->GetDesc(&vd);
+    psr->GetDesc(&pd);
     gsr->GetDesc(&gd);
-    check(vd.OutputParameters == 2 && gd.InputParameters == 2, "two signature elements each: the texture coordinate and the position");
-    for (UINT i = 0; i < 2; ++i) {
-        D3D11_SIGNATURE_PARAMETER_DESC o{}, in{};
+    check(vd.OutputParameters == 3 && gd.InputParameters == 3 && gd.OutputParameters == 3, "three signature elements each: TEXCOORD0, the family's extra interpolant and the position");
+    const UINT extraIndex = fam == 0 ? 6u : 7u, extraMask = fam == 0 ? 7u : 3u;
+    for (UINT i = 0; i < 3; ++i) {
+        D3D11_SIGNATURE_PARAMETER_DESC o{}, in{}, out{};
         ck(vsr->GetOutputParameterDesc(i, &o), "output element");
         ck(gsr->GetInputParameterDesc(i, &in), "input element");
+        ck(gsr->GetOutputParameterDesc(i, &out), "geometry shader output element");
         check(!std::strcmp(o.SemanticName, in.SemanticName) && o.SemanticIndex == in.SemanticIndex && o.Register == in.Register && o.Mask == in.Mask &&
                   o.ComponentType == in.ComponentType && o.SystemValueType == in.SystemValueType,
               "the geometry shader's input element is the vertex shader's output element: semantic, index, register, mask and type");
-        if (i == 0) check(!std::strcmp(o.SemanticName, "TEXCOORD") && o.Register == 0 && o.Mask == 3, "register 0 is TEXCOORD0 xy");
-        if (i == 1) check(!std::strcmp(o.SemanticName, "SV_Position") && o.Register == 1 && o.Mask == 15, "register 1 is SV_Position xyzw");
+        check(!std::strcmp(o.SemanticName, out.SemanticName) && o.SemanticIndex == out.SemanticIndex && o.Register == out.Register && o.Mask == out.Mask,
+              "...and its output element is the same again: a pass-through of the signature");
+        if (i == 0) check(!std::strcmp(o.SemanticName, "TEXCOORD") && o.SemanticIndex == 0 && o.Register == 0 && o.Mask == 15, "register 0 is TEXCOORD0 xyzw");
+        if (i == 1) check(!std::strcmp(o.SemanticName, "TEXCOORD") && o.SemanticIndex == extraIndex && o.Register == 1 && o.Mask == extraMask, "register 1 is the family's extra TEXCOORD (6 xyz, 7 xy)");
+        if (i == 2) check(!std::strcmp(o.SemanticName, "SV_Position") && o.Register == 2 && o.Mask == 15, "register 2 is SV_Position xyzw");
+    }
+    // the pixel shader's inputs are a subset of what the geometry shader writes (SV_Position is the rasterizer's)
+    for (UINT i = 0; i < pd.InputParameters; ++i) {
+        D3D11_SIGNATURE_PARAMETER_DESC in{};
+        ck(psr->GetInputParameterDesc(i, &in), "pixel shader input element");
+        if (!std::strcmp(in.SemanticName, "SV_Position")) continue;
+        bool found = false;
+        for (UINT j = 0; j < gd.OutputParameters; ++j) {
+            D3D11_SIGNATURE_PARAMETER_DESC out{};
+            ck(gsr->GetOutputParameterDesc(j, &out), "geometry shader output element");
+            found = found || (!std::strcmp(in.SemanticName, out.SemanticName) && in.SemanticIndex == out.SemanticIndex && (in.Mask & ~out.Mask) == 0);
+        }
+        check(found, "each input of the pixel shader is written by the geometry shader (a subset of its output)");
     }
     check(gsr->GetGSInputPrimitive() == D3D_PRIMITIVE_TRIANGLE && gd.GSOutputTopology == D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP && gd.GSMaxOutputVertexCount == 3,
           "the geometry shader takes triangles and emits at most three vertices");
@@ -543,7 +613,11 @@ static void linkageCases(ID3D11GeometryShader* gs) {
             }
         }
         check(errors == 0, "the shader links against the stand-in for the game's vertex shader under the debug layer with no error");
-        // the control: a vertex shader without TEXCOORD0 is reported
+        if (fam != 0) {
+            g_ctx->ClearState();
+            return;
+        }
+        // the control (once): a vertex shader without the texture coordinates is reported
         g_messages->ClearStoredMessages();
         ComPtr<ID3D11VertexShader> bad;
         const auto badCode = compileHlsl(kBadVs, "vs_5_0");
@@ -772,24 +846,25 @@ static void constantsCases() {
     c.reset();
     check(c.buffer() == nullptr && !c.failed(), "reset releases the buffer");
     // the production arrays also carry the key defaults the module reads
-    check(st::kBackDefaultCm == 60 && st::kGapDefaultCm == 102, "the keys' defaults");
+    check(st::kBackDefaultCm == 60 && st::kGapDefaultCm == 96, "the keys' defaults: 60 cm back, a 96 cm gap");
 }
 
 // ---------------------------------------------------------------- the GPU instrument (srv_turret.cpp's probe*): the same calls, on WARP
-static void instrumentCases(ID3D11GeometryShader* gs) {
-    // the twin, made as the module makes it: the production bytecode, two stream-output entries, stream 0 rasterized as well
+static void instrumentCases(int fam, ID3D11GeometryShader* gs) {
+    const st::Family& F = st::kFamilies[fam];
+    // the twin, made as the module makes it: the family's bytecode, its signature's stream-output entries, stream 0 rasterized as well
     ComPtr<ID3D11GeometryShader> twin;
-    const D3D11_SO_DECLARATION_ENTRY decl[2] = {{0, "TEXCOORD", 0, 0, 2, 0}, {0, "SV_Position", 0, 0, 4, 0}};
-    const UINT stride = st::kCaptureStrideBytes;
-    ck(g_dev->CreateGeometryShaderWithStreamOutput(edvr::kSrvTurretHudGsBytecode, sizeof(edvr::kSrvTurretHudGsBytecode), decl, 2, &stride, 1, 0, nullptr, &twin),
-       "the stream-output twin is made from the production bytecode");
+    const D3D11_SO_DECLARATION_ENTRY decl[3] = {{0, "TEXCOORD", 0, 0, 4, 0}, {0, "TEXCOORD", fam == 0 ? 6u : 7u, 0, fam == 0 ? 3u : 2u, 0}, {0, "SV_Position", 0, 0, 4, 0}};
+    const UINT stride = F.strideBytes;
+    ck(g_dev->CreateGeometryShaderWithStreamOutput(kBytes[fam].data, kBytes[fam].size, decl, 3, &stride, 1, 0, nullptr, &twin), "the stream-output twin is made from the family's bytecode");
     const Cam cam;
-    const float ipd = 0.0551f, gap = 1.02f, w0 = 1.5f;
+    const float ipd = 0.0551f, gap = st::kGapDefaultCm / 100.0f, w0 = 1.4f;   // the default gap and a deep panel's depth
     const float hx = st::eyeHx(0, ipd), ex = -hx;
     const st::TurretParams params = st::paramsFor(cam.p00 * hx, gap);
     std::vector<Vtx> quad;
     addQuad(quad, -0.30f, 0.30f, -0.20f, 0.20f, w0, ex);
     DrawOpts base;
+    const uint32_t strideFloats = F.strideBytes / 4;
 
     // a plain draw: the vertex shader ran, the geometry shader did not (gs = 0 with ia_prims above 0 is how a flight reads "never ran")
     Sample plain;
@@ -817,38 +892,59 @@ static void instrumentCases(ID3D11GeometryShader* gs) {
           "through the twin: two invocations, two primitives written to the stream-output target, none lost");
     check(maxDiff(prodFrame, twinFrame) == 0.0, "...and it rasterizes exactly as the production shader does (the instrument does not change the picture)");
     check(!cap.soTargetAfter && !cap.gsAfter, "...and the stream-output target and the geometry stage are empty after the scope");
-    const st::CaptureSummary c = st::summarizeCapture(cap.records.data(), 6, params);
-    check(c.vertices == 6 && c.inWindow == 6 && std::fabs(c.wMin - w0) < 1e-4f && std::fabs(c.wMax - w0) < 1e-4f, "the six captured vertices lie at view depth 1.5 and in the window");
+    const st::CaptureSummary c = st::summarizeCapture(cap.records.data(), 6, strideFloats, F.posFloat, params);
+    check(c.vertices == 6 && c.inWindow == 6 && std::fabs(c.wMin - w0) < 1e-4f && std::fabs(c.wMax - w0) < 1e-4f, "the six captured vertices lie at view depth 1.4 (a deep panel) and in the window");
     const float shift = st::clipXShift(params, w0);
-    check(std::fabs(c.shiftMin - shift) < 1e-6f && std::fabs(c.shiftMax - shift) < 1e-6f && std::fabs(shift - 0.05504f) < 0.0002f, "...and the shift the rule gives them is s gap / (w - gap)");
+    check(std::fabs(c.shiftMin - shift) < 1e-6f && std::fabs(c.shiftMax - shift) < 1e-6f && shift > 0.05f, "...and the shift the rule gives them is s gap / (w - gap)");
     // the captured NDC x is the shifted position: (P00 X + offX w + shift) / w for the quad's left and right edges
     const float xl = (cam.p00 * (-0.30f - ex) + cam.offX * w0 + shift) / w0, xr = (cam.p00 * (0.30f - ex) + cam.offX * w0 + shift) / w0;
     check(std::fabs(c.ndcXMin - xl) < 1e-5f && std::fabs(c.ndcXMax - xr) < 1e-5f, "...and the streamed clip x / w is the shifted edge: the shader wrote the position the rule says");
-    // the unshifted position of the same quad from the plain draw's own capture: the difference is the shift
+    // the captured record is the vertex whole: the interpolants as the vertex shader wrote them, not only the position (the first vertex is u = 0, v = 0, 0, 1 and the extra
+    // element 0.25, 0.5 ...; the second vertex starts with u = 1)
+    check(std::fabs(cap.records[0] - 0.0f) < 1e-6f && std::fabs(cap.records[3] - 1.0f) < 1e-6f && std::fabs(cap.records[4] - 0.25f) < 1e-6f &&
+              std::fabs(cap.records[strideFloats] - 1.0f) < 1e-6f,
+          "...with the interpolants intact in the record (TEXCOORD0 = u, v, 0, 1 and the extra element): the shader passes them through");
+    // the unshifted position of the same quad from the twin with s = 0: the difference is the shift
     Sample capPlain;
     DrawOpts op = base;
     op.sample = &capPlain;
     op.soTarget = true;
     (void)render(quad, cam, twin.Get(), st::paramsFor(0.0f, gap), 256, 256, op);   // s = 0: the twin writes the game's own positions
-    const st::CaptureSummary c0 = st::summarizeCapture(capPlain.records.data(), 6, st::paramsFor(0.0f, gap));
+    const st::CaptureSummary c0 = st::summarizeCapture(capPlain.records.data(), 6, strideFloats, F.posFloat, st::paramsFor(0.0f, gap));
     check(std::fabs((c.ndcXMin - c0.ndcXMin) - shift / w0) < 1e-5f && std::fabs(c.ndcYMin - c0.ndcYMin) < 1e-6f && std::fabs(c.wMin - c0.wMin) < 1e-6f,
           "the captured positions differ from the unshifted ones by the shift in x only (y and w are the game's)");
 
-    // a draw whose depth lies outside the window: the shader RUNS (gs = 2) and moves nothing, and the capture says why (in_window = 0, the depth range)
-    std::vector<Vtx> farQuad;
-    addQuad(farQuad, -4.0f, 4.0f, -3.0f, 3.0f, 20.0f, ex);
-    Sample farCap;
-    DrawOpts of = base;
-    of.sample = &farCap;
-    of.soTarget = true;
-    (void)render(farQuad, cam, twin.Get(), params, 256, 256, of);
-    const st::CaptureSummary cf = st::summarizeCapture(farCap.records.data(), 6, params);
-    check(farCap.stats.GSInvocations == 2 && cf.vertices == 6 && cf.inWindow == 0 && std::fabs(cf.wMin - 20.0f) < 1e-3f && cf.shiftMin == 0.0f && cf.shiftMax == 0.0f,
-          "a quad at 20 m: the geometry shader ran twice and the capture reads in_window 0 with the depth range: the signature of a window that misses the draw");
+    // the near layer (w = 0.42) and the reticle's depth (500 m): the shader RUNS (gs = 2) and moves nothing, the pixels are the plain draw's, and the capture says why
+    // (in_window 0 and the depth range): this is what a flight reads for the near layer's draws
+    for (const float depth : {0.42f, 500.0f}) {
+        std::vector<Vtx> outside;
+        const float scale = depth / w0;   // the same size on the screen at any depth
+        addQuad(outside, -0.30f * scale, 0.30f * scale, -0.20f * scale, 0.20f * scale, depth, ex);
+        Sample outCap, outPlain;
+        DrawOpts oo = base;
+        oo.sample = &outCap;
+        oo.soTarget = true;
+        const Frame twinOut = render(outside, cam, twin.Get(), params, 256, 256, oo);
+        DrawOpts ob = base;
+        ob.sample = &outPlain;
+        const Frame plainOut = render(outside, cam, nullptr, params, 256, 256, ob);
+        const st::CaptureSummary co = st::summarizeCapture(outCap.records.data(), 6, strideFloats, F.posFloat, params);
+        char what[220];
+        std::snprintf(what, sizeof(what), "a quad at %.2f m: the geometry shader ran twice, the capture reads in_window 0 and w = %.2f, and the picture is the plain draw's bit for bit", double(depth),
+                      double(depth));
+        check(outCap.stats.GSInvocations == 2 && co.vertices == 6 && co.inWindow == 0 && std::fabs(co.wMin - depth) < depth * 1e-3f && co.shiftMin == 0.0f && co.shiftMax == 0.0f &&
+                  maxDiff(twinOut, plainOut) == 0.0 && covered(twinOut) > 1000,
+              what);
+    }
     // the summary's own edges
-    const float junk[12] = {0, 0, NAN, 0, 0, 1, 0, 0, 0, 0, 0, -1};
-    const st::CaptureSummary cj = st::summarizeCapture(junk, 2, params);
-    check(cj.vertices == 1 && cj.inWindow == 0 && st::summarizeCapture(nullptr, 6, params).vertices == 0, "the summary skips a vertex that is not finite and reads nothing from nothing");
+    std::vector<float> junk(2 * strideFloats, 0.0f);
+    junk[F.posFloat] = NAN;
+    junk[F.posFloat + 3] = 1.0f;
+    junk[strideFloats + F.posFloat + 3] = -1.0f;
+    const st::CaptureSummary cj = st::summarizeCapture(junk.data(), 2, strideFloats, F.posFloat, params);
+    check(cj.vertices == 1 && cj.inWindow == 0 && st::summarizeCapture(nullptr, 6, strideFloats, F.posFloat, params).vertices == 0 &&
+              st::summarizeCapture(junk.data(), 2, 3, F.posFloat, params).vertices == 0,
+          "the summary skips a vertex that is not finite, reads nothing from nothing and refuses a stride too short for the position");
     g_ctx->ClearState();
 }
 
@@ -892,51 +988,61 @@ int main(int argc, char** argv) {
         std::printf("srv_turret_hud_test: WARP%s\n", SUCCEEDED(made) ? " with the debug layer" : "");
         setupGamePair();
 
-        // The shader: the build's bytes are the HLSL text's compile, and the device takes them.
-        const auto compiled = compileHlsl(edvr::kSrvTurretHudGs, "gs_5_0");
-        check(compiled->GetBufferSize() == sizeof(edvr::kSrvTurretHudGsBytecode) &&
-                  !std::memcmp(compiled->GetBufferPointer(), edvr::kSrvTurretHudGsBytecode, sizeof(edvr::kSrvTurretHudGsBytecode)),
-              "the build's bytecode is exactly the compile of srv_turret_hud_shader.h's text");
-        ComPtr<ID3D11GeometryShader> gs;
-        ck(g_dev->CreateGeometryShader(edvr::kSrvTurretHudGsBytecode, sizeof(edvr::kSrvTurretHudGsBytecode), nullptr, &gs), "the device takes the production shader");
+        // The shaders: the build's bytes are each HLSL text's compile, and the device takes them.
+        ComPtr<ID3D11GeometryShader> gsOf[2];
+        for (int fam = 0; fam < 2; ++fam) {
+            const auto compiled = compileHlsl(kBytes[fam].text, "gs_5_0");
+            check(compiled->GetBufferSize() == kBytes[fam].size && !std::memcmp(compiled->GetBufferPointer(), kBytes[fam].data, kBytes[fam].size),
+                  "the build's bytecode of each family's shader is exactly the compile of srv_turret_hud_shader.h's text");
+            ck(g_dev->CreateGeometryShader(kBytes[fam].data, kBytes[fam].size, nullptr, &gsOf[fam]), "the device takes the production shader");
+        }
 
         constantsCases();
-        linkageCases(gs.Get());
-        instrumentCases(gs.Get());
-
         Fails production;
-        geometryCases(gs.Get(), production);
-        bindingCases(gs.Get(), production, true);
-        afterIssueCases(gs.Get(), production, false);
+        for (int fam = 0; fam < 2; ++fam) {
+            g_fam = fam;
+            linkageCases(fam, gsOf[fam].Get());
+            instrumentCases(fam, gsOf[fam].Get());
+            geometryCases(gsOf[fam].Get(), production);
+        }
+        g_fam = 0;
+        bindingCases(gsOf[0].Get(), production, true);
+        afterIssueCases(gsOf[0].Get(), production, false);
         if (production.n) std::printf("first failing production check: %s (%u failed)\n", production.first.c_str(), production.n);
-        check(production.n == 0, "the production shader and binding pass every geometry, binding and issue-end case");
+        check(production.n == 0, "the production shaders and binding pass every geometry, binding and issue-end case, for both families");
 
-        // THE MUTANTS: each through the same cases, each must fail at least one.
-        const std::string text = edvr::kSrvTurretHudGs;
+        // THE MUTANTS: each through the same cases, each must fail at least one, in each family's text.
         struct Mutant {
             const char* name;
-            std::string text;
+            const char* from;
+            const char* to;
         };
         const Mutant mutants[] = {
-            {"no depth window", replaceAll(text, "if (w > wMin && w < wMax) o.pos.x +=", "o.pos.x +=")},
-            {"the sign flipped", replaceAll(text, "o.pos.x += s * gap / (w - gap)", "o.pos.x -= s * gap / (w - gap)")},
-            {"the divisor w, not w - gap", replaceAll(text, "s * gap / (w - gap)", "s * gap / w")},
-            {"the wrong axis", replaceAll(text, "o.pos.x += s * gap / (w - gap)", "o.pos.y += s * gap / (w - gap)")},
-            {"the far end of the window ignored", replaceAll(text, "w < wMax", "w < 1000.0")},
-            {"the near end of the window ignored", replaceAll(text, "w > wMin &&", "w > 0.0 &&")},
+            {"no depth window", "if (w > wMin && w < wMax) o.pos.x +=", "o.pos.x +="},
+            {"the sign flipped", "o.pos.x += s * gap / (w - gap)", "o.pos.x -= s * gap / (w - gap)"},
+            {"the divisor w, not w - gap", "s * gap / (w - gap)", "s * gap / w"},
+            {"the wrong axis", "o.pos.x += s * gap / (w - gap)", "o.pos.y += s * gap / (w - gap)"},
+            {"the far end of the window ignored", "w < wMax", "w < 1000.0"},
+            {"the near end of the window ignored", "w > wMin &&", "w > 0.0 &&"},
         };
-        for (const Mutant& m : mutants) {
-            check(m.text != text, "a mutant differs from the production text");
-            const auto mg = gsFromText(m.text);
-            Fails fails;
-            geometryCases(mg.Get(), fails);
-            char what[160];
-            std::snprintf(what, sizeof(what), "the mutant \"%s\" is caught by the geometry cases", m.name);
-            check(fails.n > 0, what);
+        for (int fam = 0; fam < 2; ++fam) {
+            g_fam = fam;
+            const std::string text = kBytes[fam].text;
+            for (const Mutant& m : mutants) {
+                const std::string mutated = replaceAll(text, m.from, m.to);
+                check(mutated != text, "a mutant differs from the production text");
+                const auto mg = gsFromText(mutated);
+                Fails fails;
+                geometryCases(mg.Get(), fails);
+                char what[200];
+                std::snprintf(what, sizeof(what), "the mutant \"%s\" of family %d's shader is caught by the geometry cases", m.name, fam);
+                check(fails.n > 0, what);
+            }
         }
+        g_fam = 0;
         {
             Fails fails;
-            afterIssueCases(gs.Get(), fails, true);
+            afterIssueCases(gsOf[0].Get(), fails, true);
             check(fails.n > 0, "the mutant \"a restore that does nothing\" is caught (the geometry stage stays bound)");
         }
         g_ctx->ClearState();
@@ -955,7 +1061,7 @@ int main(int argc, char** argv) {
             }
         }
         wiringCases();
-        std::printf("PASS srv_turret_hud_test: %u checks; the turret shader, binding, constants and maths on WARP, six shader mutants and one binding mutant caught\n", g_checks);
+        std::printf("PASS srv_turret_hud_test: %u checks; the turret shader, binding, constants and maths on WARP, six shader mutants in each of two families and one binding mutant caught\n", g_checks);
         return 0;
     } catch (const std::exception& e) {
         std::printf("FAIL %s (%u checks)\n", e.what(), g_checks);

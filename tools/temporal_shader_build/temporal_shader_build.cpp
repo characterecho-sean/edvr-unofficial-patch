@@ -633,8 +633,8 @@ static void selfTest() {
     coreLegacy.insert(coreLegacy.end(), originalCore.begin(), originalCore.end());
     coreLegacy.insert(coreLegacy.end(), originalExtra.begin(), originalExtra.end());
     auto coreFixed = fixedVariants(extractCore(edvr::kTemporalCsHlsl));
-    check(originalCore.size() == 28 && originalExtra.size() == 12 && coreFixed.size() == 80 && coreLegacy.size() + 33 == coreFixed.size(),
-          "all original fixed shader contracts, three bounded diagnostics, six flat foreground shaders, the supercruise bars' geometry shader, the foreground map's four sibling-pass compute shaders (donor, fit and the shadow's two), the sky ring's compute shader, the UI layer's in-place composite, the explosion billboards' five facing transcriptions the sharp weapons' two source-pass shaders, the shield ripple's door pass, the HUD bloom feed pass, the star light pass, the visor's axis-centred vertex shader, the desktop window's two draw shaders, the scope lens's three compute passes and the SRV turret HUD's geometry shader are registered");
+    check(originalCore.size() == 28 && originalExtra.size() == 12 && coreFixed.size() == 81 && coreLegacy.size() + 34 == coreFixed.size(),
+          "all original fixed shader contracts, three bounded diagnostics, six flat foreground shaders, the supercruise bars' geometry shader, the foreground map's four sibling-pass compute shaders (donor, fit and the shadow's two), the sky ring's compute shader, the UI layer's in-place composite, the explosion billboards' five facing transcriptions the sharp weapons' two source-pass shaders, the shield ripple's door pass, the HUD bloom feed pass, the star light pass, the visor's axis-centred vertex shader, the desktop window's two draw shaders, the scope lens's three compute passes and the SRV turret HUD's two geometry shaders are registered");
     for(size_t i=0;i<coreFixed.size();++i)for(size_t j=0;j<i;++j)
         check(std::strcmp(coreFixed[i].symbol,coreFixed[j].symbol)!=0,"generated shader symbols do not collide");
     using ReflectFn = HRESULT(WINAPI*)(LPCVOID, SIZE_T, REFIID, void**);
@@ -1164,41 +1164,51 @@ static void selfTest() {
         }
     }
 
-    // The SRV turret HUD's pass-through geometry shader (src/d3d11/srv_turret_hud_shader.h; issue 140): new, so held to its own contract -- the symbol, source name, entry, profile
-    // and flags, the text it compiles, and what its DXBC reflects: a Shader Model 5 geometry shader that takes triangles, emits at most three vertices as a triangle strip, takes
-    // the game's vertex shader's output signature (TEXCOORD0 at register 0, SV_Position at register 1, in that order) and reads one 16-byte constant buffer, Turret at b0
-    // (srv_turret_math.h's TurretParams). A change to any of them fails here, in the build.
+    // The SRV turret HUD's two pass-through geometry shaders (src/d3d11/srv_turret_hud_shader.h; issue 140): new, so held to their own contract -- the symbol, source name, entry,
+    // profile and flags, the text each compiles, and what its DXBC reflects: a Shader Model 5 geometry shader that takes triangles, emits at most three vertices as a triangle
+    // strip, takes the output signature of one hologram family's vertex shader (A, vs 1989E6D3B405FDE0: TEXCOORD0 xyzw at register 0, TEXCOORD6 xyz at register 1,
+    // SV_Position xyzw at register 2; B, vs 2CECEC3065EF0D4A: TEXCOORD0 xyzw, TEXCOORD7 xy, SV_Position, the same registers; both read from the fxc disassembly of the dumps'
+    // bytecode) and reads one 16-byte constant buffer, Turret at b0 (srv_turret_math.h's TurretParams). A change to any of them fails here, in the build.
     {
-        auto& shader = coreFixed[coreLegacy.size() + 32];
-        check(!std::strcmp(shader.symbol, "kSrvTurretHudGsBytecode") && !std::strcmp(shader.sourceName, "srv turret hud pass-through") &&
-              !std::strcmp(shader.entry, "main") && !std::strcmp(shader.profile, "gs_5_0") && shader.alternate == edvr::kSrvTurretHudGs &&
-              shader.macros == nullptr && !shader.flags1 && !shader.flags2,
-              "the SRV turret HUD's geometry shader has its distinct symbol and exact source/stage contract");
-        check(compile(compiler.fn, shader.alternate, shader, true) && shader.bytes.size() > 4 && !std::memcmp(shader.bytes.data(), "DXBC", 4),
-              "the SRV turret HUD's geometry shader compiles to fixed DXBC");
-        if (reflect && !shader.bytes.empty()) {
-            ComPtr<ID3D11ShaderReflection> reflection;
-            D3D11_SHADER_DESC desc{};
-            const HRESULT hr = reflect(shader.bytes.data(), shader.bytes.size(), __uuidof(ID3D11ShaderReflection),
-                                       reinterpret_cast<void**>(reflection.GetAddressOf()));
-            check(SUCCEEDED(hr) && reflection && SUCCEEDED(reflection->GetDesc(&desc)) &&
-                  D3D11_SHVER_GET_TYPE(desc.Version) == D3D11_SHVER_GEOMETRY_SHADER && D3D11_SHVER_GET_MAJOR(desc.Version) == 5,
-                  "the turret HUD shader reflects as a Shader Model 5 geometry shader");
-            check(reflection && reflection->GetGSInputPrimitive() == D3D_PRIMITIVE_TRIANGLE &&
-                  desc.GSOutputTopology == D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP && desc.GSMaxOutputVertexCount == 3 && desc.InputParameters == 2,
-                  "...taking triangles and emitting at most three vertices as a triangle strip, over two input elements");
-            D3D11_SIGNATURE_PARAMETER_DESC uv{}, position{};
-            check(reflection && SUCCEEDED(reflection->GetInputParameterDesc(0, &uv)) && SUCCEEDED(reflection->GetInputParameterDesc(1, &position)) &&
-                  !std::strcmp(uv.SemanticName, "TEXCOORD") && uv.SemanticIndex == 0 && uv.Register == 0 && uv.Mask == 3 &&
-                  !std::strcmp(position.SemanticName, "SV_Position") && position.Register == 1 && position.Mask == 15,
-                  "...its input is the game's vertex shader's output signature: TEXCOORD0 xy at register 0, SV_Position xyzw at register 1");
-            D3D11_SHADER_INPUT_BIND_DESC bind{};
-            ID3D11ShaderReflectionConstantBuffer* cbuffer = reflection ? reflection->GetConstantBufferByName("Turret") : nullptr;
-            D3D11_SHADER_BUFFER_DESC bufferDesc{};
-            check(reflection && SUCCEEDED(reflection->GetResourceBindingDescByName("Turret", &bind)) && bind.Type == D3D_SIT_CBUFFER &&
-                  bind.BindPoint == 0 && bind.BindCount == 1 && cbuffer && SUCCEEDED(cbuffer->GetDesc(&bufferDesc)) && bufferDesc.Size == 16 &&
-                  desc.ConstantBuffers == 1 && desc.BoundResources == 1,
-                  "...reading one 16-byte constant buffer, Turret at b0, and nothing else");
+        struct TurretContract { const char* symbol; const char* name; const char* source; UINT index; UINT extraMask; };
+        const TurretContract contracts[2] = {
+            {"kSrvTurretHudGsABytecode", "srv turret hud pass-through A", edvr::kSrvTurretHudGsA, 6, 7},
+            {"kSrvTurretHudGsBBytecode", "srv turret hud pass-through B", edvr::kSrvTurretHudGsB, 7, 3},
+        };
+        for (size_t i = 0; i < 2; ++i) {
+            auto& shader = coreFixed[coreLegacy.size() + 32 + i];
+            check(!std::strcmp(shader.symbol, contracts[i].symbol) && !std::strcmp(shader.sourceName, contracts[i].name) &&
+                  !std::strcmp(shader.entry, "main") && !std::strcmp(shader.profile, "gs_5_0") && shader.alternate == contracts[i].source &&
+                  shader.macros == nullptr && !shader.flags1 && !shader.flags2,
+                  "each SRV turret HUD geometry shader has its distinct symbol and exact source/stage contract");
+            check(compile(compiler.fn, shader.alternate, shader, true) && shader.bytes.size() > 4 && !std::memcmp(shader.bytes.data(), "DXBC", 4),
+                  "each SRV turret HUD geometry shader compiles to fixed DXBC");
+            if (reflect && !shader.bytes.empty()) {
+                ComPtr<ID3D11ShaderReflection> reflection;
+                D3D11_SHADER_DESC desc{};
+                const HRESULT hr = reflect(shader.bytes.data(), shader.bytes.size(), __uuidof(ID3D11ShaderReflection),
+                                           reinterpret_cast<void**>(reflection.GetAddressOf()));
+                check(SUCCEEDED(hr) && reflection && SUCCEEDED(reflection->GetDesc(&desc)) &&
+                      D3D11_SHVER_GET_TYPE(desc.Version) == D3D11_SHVER_GEOMETRY_SHADER && D3D11_SHVER_GET_MAJOR(desc.Version) == 5,
+                      "the turret HUD shaders reflect as Shader Model 5 geometry shaders");
+                check(reflection && reflection->GetGSInputPrimitive() == D3D_PRIMITIVE_TRIANGLE &&
+                      desc.GSOutputTopology == D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP && desc.GSMaxOutputVertexCount == 3 && desc.InputParameters == 3,
+                      "...taking triangles and emitting at most three vertices as a triangle strip, over three input elements");
+                D3D11_SIGNATURE_PARAMETER_DESC t0{}, extra{}, position{};
+                check(reflection && SUCCEEDED(reflection->GetInputParameterDesc(0, &t0)) && SUCCEEDED(reflection->GetInputParameterDesc(1, &extra)) &&
+                      SUCCEEDED(reflection->GetInputParameterDesc(2, &position)) &&
+                      !std::strcmp(t0.SemanticName, "TEXCOORD") && t0.SemanticIndex == 0 && t0.Register == 0 && t0.Mask == 15 &&
+                      !std::strcmp(extra.SemanticName, "TEXCOORD") && extra.SemanticIndex == contracts[i].index && extra.Register == 1 && extra.Mask == contracts[i].extraMask &&
+                      !std::strcmp(position.SemanticName, "SV_Position") && position.Register == 2 && position.Mask == 15,
+                      "...its input is the family's vertex shader's output signature, element for element and register for register");
+                D3D11_SHADER_INPUT_BIND_DESC bind{};
+                ID3D11ShaderReflectionConstantBuffer* cbuffer = reflection ? reflection->GetConstantBufferByName("Turret") : nullptr;
+                D3D11_SHADER_BUFFER_DESC bufferDesc{};
+                check(reflection && SUCCEEDED(reflection->GetResourceBindingDescByName("Turret", &bind)) && bind.Type == D3D_SIT_CBUFFER &&
+                      bind.BindPoint == 0 && bind.BindCount == 1 && cbuffer && SUCCEEDED(cbuffer->GetDesc(&bufferDesc)) && bufferDesc.Size == 16 &&
+                      desc.ConstantBuffers == 1 && desc.BoundResources == 1,
+                      "...reading one 16-byte constant buffer, Turret at b0, and nothing else");
+            }
         }
     }
 

@@ -48,13 +48,14 @@ static bool wiredVscreenScope(const std::string& t) {
 static bool wiredVscreenBegin(const std::string& t) {
     const size_t fn = t.find("bool srvTurretHudBeginDraw(State* s, ID3D11DeviceContext* self) {");
     if (!found(fn)) return false;
-    const size_t vs = t.find("bindingShaderHash(BindSlot::Vs) != srv_turret::kSpriteVs", fn);
-    const size_t ps = t.find("bindingShaderHash(BindSlot::Ps) != srv_turret::kSpritePs", fn);
+    const size_t vs0 = t.find("vs != srv_turret::kFamilies[0].vs && vs != srv_turret::kFamilies[1].vs", fn);
+    const size_t family = t.find("srv_turret::familyOf(vs, bindingShaderHash(BindSlot::Ps))", fn);
     const size_t eyeLayer = t.find("uiLayerEyeOfGameTarget(info->resource)", fn);
     const size_t eyeTable = t.find("uiDepthEyeOfTargetReadOnly(info->resource)", fn);
     const size_t eyeReg = t.find("uiDepthEyeOfTarget(info->resource, info->a, info->b, info->fmt)", fn);
-    const size_t call = t.find("return srvTurretHudBegin(self, eye);", fn);
-    return found(vs) && found(ps) && found(eyeLayer) && found(eyeTable) && found(eyeReg) && found(call) && vs < ps && ps < eyeLayer && eyeLayer < eyeTable && eyeTable < eyeReg && eyeReg < call;
+    const size_t call = t.find("return srvTurretHudBegin(self, family, eye);", fn);
+    return found(vs0) && found(family) && found(eyeLayer) && found(eyeTable) && found(eyeReg) && found(call) && vs0 < family && family < eyeLayer && eyeLayer < eyeTable &&
+           eyeTable < eyeReg && eyeReg < call;
 }
 static bool wiredVscreenGate(const std::string& t) {
     const size_t fn = t.find("bool drawGateSubscribed(State* s) {");
@@ -92,11 +93,11 @@ static bool wiredNativeOnFoot(const std::string& t) {
 
 // srv_turret.cpp.
 static bool wiredModule(const std::string& t) {
-    const size_t made = t.find("g_gs = shaderSwapCreateGs(ctx, kSrvTurretHudGsBytecode, sizeof(kSrvTurretHudGsBytecode),");
-    const size_t begin = t.find("g_binding.begin(ctx, twin ? g_soGs : g_gs, constants)");
+    const size_t made = t.find("g_gs[f] = shaderSwapCreateGs(ctx, kShader[f].bytecode, kShader[f].size, kShader[f].name, \"srv turret hud\")");
+    const size_t begin = t.find("g_binding.begin(ctx, twin ? g_soGs[family] : g_gs[family], constants)");
     const size_t finish = t.find("const auto done = g_binding.finish(ctx);");
     const size_t back = t.find("cfg.getIntInRange(\"fix.srv_turret_camera_back\", 60, 0, 150)");
-    const size_t gap = t.find("cfg.getIntInRange(\"fix.srv_turret_hud_gap\", 102, 0, 200)");
+    const size_t gap = t.find("cfg.getIntInRange(\"fix.srv_turret_hud_gap\", 96, 0, 200)");
     const size_t edge = t.find("\"srv turret view: %s at frame %u (Status.json Flags 0x%08X, seat kind 0x%X)\"");
     const size_t camera = t.find("\"srv turret camera: back %.2f m published (serial %u)\"");
     const size_t cleared = t.find("\"srv turret camera: back cleared (serial %u)\"");
@@ -130,25 +131,25 @@ static bool wiredInstrument(const std::string& vscreen, const std::string& t) {
     const size_t observedEnd = found(observed) ? vscreen.find("return issued;", observed) : std::string::npos;
     if (!found(reissueCount) || !found(reissueSwitch) || reissueCount > reissueSwitch || counts != 5 || !found(observed) || !found(observedEnd) ||
         found(vscreen.substr(observed, observedEnd - observed).find("srvTurretHudCountIssue"))) return false;
-    const size_t begin = t.find("g_binding.begin(ctx, twin ? g_soGs : g_gs, constants)");
-    const size_t probeBegin = found(begin) ? t.find("if (sample) probeBegin(ctx, eye, ordinal, twin, params);", begin) : std::string::npos;
+    const size_t begin = t.find("g_binding.begin(ctx, twin ? g_soGs[family] : g_gs[family], constants)");
+    const size_t probeBegin = found(begin) ? t.find("if (sample) probeBegin(ctx, eye, family, ordinal, twin, params);", begin) : std::string::npos;
     const size_t end = t.find("void srvTurretHudEnd(ID3D11DeviceContext* ctx) {");
     const size_t probeEnd = found(end) ? t.find("probeEnd(ctx);", end) : std::string::npos;
     const size_t finish = found(probeEnd) ? t.find("const auto done = g_binding.finish(ctx);", probeEnd) : std::string::npos;
     const size_t probeFinish = found(finish) ? t.find("probeFinish(ctx);", finish) : std::string::npos;
     const size_t boundary = t.find("void srvTurretHudFrameBoundary(ID3D11DeviceContext* ctx) {");
-    const size_t read = found(boundary) ? t.find("probeRead(ctx, eye);", boundary) : std::string::npos;
+    const size_t read = found(boundary) ? t.find("probeRead(ctx, eye, family);", boundary) : std::string::npos;
     const bool queries = found(t.find("D3D11_QUERY_PIPELINE_STATISTICS")) && found(t.find("D3D11_QUERY_SO_STATISTICS")) && found(t.find("D3D11_ASYNC_GETDATA_DONOTFLUSH")) &&
-                         found(t.find("D3D11_MAP_FLAG_DO_NOT_WAIT")) && found(t.find("kProbeGiveUpFrames = 8,")) && found(t.find("CreateGeometryShaderWithStreamOutput(kSrvTurretHudGsBytecode"));
-    const bool lines = found(t.find("\"srv turret hud stats: eye=%d issues=%u ia_prims=%llu vs=%llu gs=%llu gs_prims=%llu c_inv=%llu c_prims=%llu ps=%llu (lost %u) draw=%u\"")) &&
-                       found(t.find("\"srv turret hud capture: eye=%d draw=%u so_prims=%llu needed=%llu vertices=%u in_window=%u w=[%.3f,%.3f] ndc_x=[%.3f,%.3f] ndc_y=[%.3f,%.3f] \""));
+                         found(t.find("D3D11_MAP_FLAG_DO_NOT_WAIT")) && found(t.find("kProbeGiveUpFrames = 8,")) && found(t.find("CreateGeometryShaderWithStreamOutput(kShader[f].bytecode"));
+    const bool lines = found(t.find("\"srv turret hud stats: eye=%d issues=%u ia_prims=%llu vs=%llu gs=%llu gs_prims=%llu c_inv=%llu c_prims=%llu ps=%llu (lost %u) draw=%u family=%s\"")) &&
+                       found(t.find("\"srv turret hud capture: family=%s eye=%d draw=%u so_prims=%llu needed=%llu vertices=%u in_window=%u w=[%.3f,%.3f] ndc_x=[%.3f,%.3f] \""));
     return found(probeBegin) && found(end) && found(probeEnd) && found(finish) && found(probeFinish) && probeEnd < finish && finish < probeFinish && found(read) && queries && lines;
 }
 
 // edvr.ini and the flat allow-list.
 static bool wiredKeys(const std::string& ini, const std::string& flatKeys) {
     const size_t fix = ini.find("\n[fix]\n"), visual = ini.find("\n[visual]\n");
-    const size_t back = ini.find("\nsrv_turret_camera_back = 60\n"), gap = ini.find("\nsrv_turret_hud_gap = 102\n");
+    const size_t back = ini.find("\nsrv_turret_camera_back = 60\n"), gap = ini.find("\nsrv_turret_hud_gap = 96\n");
     if (!found(fix) || !found(visual) || !found(back) || !found(gap)) return false;
     const bool inFix = back > fix && back < visual && gap > fix && gap < visual;
     const size_t backUi = ini.rfind("# ui: SRV turret camera back |", back), gapUi = ini.rfind("# ui: SRV turret HUD gap |", gap);
@@ -162,7 +163,8 @@ static bool wiredKeys(const std::string& ini, const std::string& flatKeys) {
 static bool wiredTables(const std::string& shaderBuild, const std::string& variants) {
     return found(shaderBuild.find("#include \"fixed_srv_turret_variants.h\"")) && found(shaderBuild.find("const auto srvTurret = srvTurretHudVariants();")) &&
            found(shaderBuild.find("variants.insert(variants.end(), srvTurret.begin(), srvTurret.end());")) &&
-           found(variants.find("{\"kSrvTurretHudGsBytecode\",\"srv turret hud pass-through\",\"main\",nullptr,{},false,edvr::kSrvTurretHudGs,\"gs_5_0\"}")) &&
+           found(variants.find("{\"kSrvTurretHudGsABytecode\",\"srv turret hud pass-through A\",\"main\",nullptr,{},false,edvr::kSrvTurretHudGsA,\"gs_5_0\"}")) &&
+           found(variants.find("{\"kSrvTurretHudGsBBytecode\",\"srv turret hud pass-through B\",\"main\",nullptr,{},false,edvr::kSrvTurretHudGsB,\"gs_5_0\"}")) &&
            found(variants.find("#include \"../../src/d3d11/srv_turret_hud_shader.h\""));
 }
 static bool wiredBuild(const std::string& t) {
@@ -187,7 +189,7 @@ static void wiringCases() {
           "control: a scope that opens after the layer's bracket (just before the game's issue) trips the pin");
     check(!wiredVscreenScope(replaced(vscreen, "if (owner && srvTurretHudWantsDraws()) turretHud.bound", "if (srvTurretHudWantsDraws()) turretHud.bound")), "control: begun on a foreign context trips the pin");
     check(wiredVscreenBegin(vscreen), "vscreen.cpp: the draw is matched on BOTH shaders of the pair, then the eye is the layer's, the table's read-only form, then the registering form");
-    check(!wiredVscreenBegin(replaced(vscreen, "|| bindingShaderHash(BindSlot::Ps) != srv_turret::kSpritePs", "")), "control: the vertex shader alone trips the pin");
+    check(!wiredVscreenBegin(replaced(vscreen, "srv_turret::familyOf(vs, bindingShaderHash(BindSlot::Ps))", "0")), "control: the vertex shader alone (no pair match) trips the pin");
     check(!wiredVscreenBegin(replaced(vscreen, "uiLayerEyeOfGameTarget(info->resource);\n            if (eye != 0 && eye != 1) eye = uiDepthEyeOfTargetReadOnly(info->resource);", "-1;")), "control: no eye lookup trips the pin");
     check(wiredVscreenGate(vscreen), "vscreen.cpp: the pass is a term of the draw gate (the AA-off fast path would otherwise skip forwardWithVerdict)");
     check(!wiredVscreenGate(replaced(vscreen, "        srvTurretHudWantsDraws() || // issue 140", "        false || // issue 140")), "control: a gate without the term trips the pin");
@@ -204,10 +206,10 @@ static void wiringCases() {
     check(!wiredNativeOnFoot(replaced(onFoot, "srvTurretNotePublished(turretBackZ, g_align.serial);", "")), "control: nothing told to the module trips the pin");
 
     check(wiredModule(module), "srv_turret.cpp: the shader from the build's bytecode, the binding class alone, the literal key reads, the host's geometry, the log lines");
-    check(!wiredModule(replaced(module, "shaderSwapCreateGs(ctx, kSrvTurretHudGsBytecode", "shaderSwapCreateGs(ctx, kSupercruiseBarsGsBytecode")), "control: another shader's bytecode trips the pin");
-    check(!wiredModule(replaced(module, "const auto begun = g_binding.begin(ctx, twin ? g_soGs : g_gs, constants);", "ctx->GSSetShader(g_gs, nullptr, 0); const auto begun = g_binding.begin(ctx, twin ? g_soGs : g_gs, constants);")),
+    check(!wiredModule(replaced(module, "shaderSwapCreateGs(ctx, kShader[f].bytecode", "shaderSwapCreateGs(ctx, kSupercruiseBarsGsBytecode")), "control: another shader's bytecode trips the pin");
+    check(!wiredModule(replaced(module, "const auto begun = g_binding.begin(ctx, twin ? g_soGs[family] : g_gs[family], constants);", "ctx->GSSetShader(g_gs[family], nullptr, 0); const auto begun = g_binding.begin(ctx, twin ? g_soGs[family] : g_gs[family], constants);")),
           "control: a raw geometry-stage set outside the binding trips the pin");
-    check(!wiredModule(replaced(module, "\"fix.srv_turret_hud_gap\", 102, 0, 200", "\"fix.srv_turret_hud_gap\", 100, 0, 200")), "control: a drifted default trips the pin");
+    check(!wiredModule(replaced(module, "\"fix.srv_turret_hud_gap\", 96, 0, 200", "\"fix.srv_turret_hud_gap\", 100, 0, 200")), "control: a drifted default trips the pin");
     check(!wiredModule(without(module, "refuse(st::Refuse::kNoGeometry)")), "control: a draw with no geometry that is not refused trips the pin");
     check(wiredInstrument(vscreen, module), "the GPU instrument: issues counted at the game's issue and the re-issues; the queries begin after the bind and end before the restore; read once a frame; the log lines");
     check(!wiredInstrument(replaced(vscreen, "    srvTurretHudCountIssue();   // issue 140's GPU instrument: a re-issue", "    // issue 140's GPU instrument: a re-issue"), module), "control: a re-issue that is not counted trips the pin");
@@ -220,7 +222,7 @@ static void wiringCases() {
     check(wiredAccessors(journal, temporal, journalH), "journal_watch and native_temporal: the turret bit and the eye separation accessors");
     check(!wiredAccessors(replaced(journal, "srv_turret::turretViewFromFlags(peek(g_v.flags))", "false"), temporal, journalH), "control: an accessor that answers false trips the pin");
     check(wiredKeys(ini, flatKeys), "edvr.ini: both keys in [fix] with their menu rows; the flat profile's allow-list names neither");
-    check(!wiredKeys(replaced(ini, "\nsrv_turret_hud_gap = 102\n", "\nsrv_turret_hud_gap = 100\n"), flatKeys), "control: a drifted shipped default trips the pin");
+    check(!wiredKeys(replaced(ini, "\nsrv_turret_hud_gap = 96\n", "\nsrv_turret_hud_gap = 100\n"), flatKeys), "control: a drifted shipped default trips the pin");
     check(!wiredKeys(ini, flatKeys + "\nsrv_turret_hud_gap\n"), "control: the key on the flat allow-list trips the pin");
     check(wiredTables(shaderBuild, variants), "temporal_shader_build: the HLSL is included and the variant is registered as a gs_5_0");
     check(!wiredTables(shaderBuild, replaced(variants, "\"gs_5_0\"", "\"vs_5_0\"")), "control: a vertex-shader profile trips the pin");
