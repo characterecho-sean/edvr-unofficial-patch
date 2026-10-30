@@ -1158,6 +1158,51 @@ R"HLSL(
         if (gCount[flushed] != 0) InterlockedAdd(Stats[flushed < 48u ? flushed : flushed + 2u], gCount[flushed]);
 #endif
 }
+// The history-invalid vector on a held weapon's own rim (#146, experimental.clean_weapon_edges,
+// docs/weapon-edge-ghost-2026-10-29.md). DLSS takes, for each output pixel, the motion vector of the nearest-depth texel
+// around it, so a background texel one texel outside the weapon's silhouette gets the WEAPON's vector and its history is
+// dragged along with the gun (eye dump 194734935001: the weapon's vector explains 48 to 84 % of the hidden ring's output).
+// mv already writes the history-invalid vector (size * 2) into background whose history was hidden, and DLSS honours it two
+// texels out, but at the one-texel ring its dilation reads the foreground texel's vector instead. Here a tracked foreground
+// texel (the engine record's own motion, enginePixelZ kind 1, decision path 11) that sits beside a FARTHER texel whose vector
+// differs by more than half a texel, or is itself history-invalid, takes the history-invalid vector too, so the dilation
+// carries "no history" into the ring; the foreground's interior keeps its vector. Runs right after mv with the same views,
+// on a copy of mv's vectors (MVW, t5) so every texel judges its neighbours' vectors as mv wrote them. The call to
+// enginePixelZ touches no counter: mv's are counted after its own call, and the statics it sets are private to the thread.
+Texture2D<float2> MVW : register(t5);
+[numthreads(8, 8, 1)]
+void weaponEdges(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
+    int2 local = int2(gi & 7u, gi >> 3u);
+    int2 origin = int2(id.xy) - local;
+    for (uint k = gi; k < 144; k += 64) {
+        int2 q = clamp(origin + int2(k % 12, k / 12) - 2, int2(0,0), size - 1);
+        mvDepthTile[k] = zSceneAt(region.xy + q);
+    }
+    GroupMemoryBarrierWithGroupSync();
+    if (id.x >= (uint)size.x || id.y >= (uint)size.y) return;
+    const int2 texel = int2(id.xy);
+    const float zRaw = mvDepthTile[(local.y + 2) * 12 + local.x + 2];
+    const float zHere = zRaw - knobs.x;
+    if (zHere <= 0.0) return;
+    const float2 vHere = MVW.Load(int3(texel, 0));
+    if (vHere.x >= float(size.x)) return;
+    bool candidate = false;
+    [unroll] for (int dy = -1; dy <= 1; ++dy) {
+        [unroll] for (int dx = -1; dx <= 1; ++dx) {
+            if (dx != 0 || dy != 0) {
+                // Farther by the same relative margin backgroundHistoryHidden uses; the far plane (no depth) is farther.
+                const float zBeside = mvDepthTile[(local.y + 2 + dy) * 12 + local.x + 2 + dx] - knobs.x;
+                if (zBeside * 1.03 < zHere) {
+                    const float2 vBeside = MVW.Load(int3(clamp(texel + int2(dx, dy), int2(0, 0), size - 1), 0));
+                    if (vBeside.x >= float(size.x) || length(vBeside - vHere) > 0.5) candidate = true;
+                }
+            }
+        }
+    }
+    if (!candidate) return;
+    float2 engineP; float engineZ;
+    if (enginePixelZ(float2(texel), 0, true, zRaw, engineP, engineZ) == 1u) MV[id.xy] = float2(size) * 2.0;
+}
 )HLSL"
 // (adjacent literals: MSVC caps one at 16 KB)
 R"HLSL(

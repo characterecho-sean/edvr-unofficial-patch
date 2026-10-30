@@ -2,9 +2,9 @@
 
 ## Status
 
-- **State: DIAGNOSED from two eye dumps; no fix built, nothing flown.** Issue
-  #146. A second defect found in the same dumps is #147. Branch
-  `claude/weapon-edge-ghost-4a079e`.
+- **State: DIAGNOSED from two eye dumps; the fix is BUILT behind a temporary
+  key (2026-10-29), nothing flown.** Issue #146. A second defect found in the
+  same dumps is #147. Branch `claude/weapon-edge-ghost-4a079e`.
 - **Cause:** DLSS gives the background texels beside the weapon the weapon's
   motion vector. For each output pixel it takes the vector of the nearest-depth
   texel around it, so the ring of terrain one texel outside the silhouette
@@ -22,14 +22,17 @@
   own rim keeps its own vector (52 to 89 %).
 - **Ruled out:** see "Ruled out" below. The weapon's vectors, its jitter or
   projection, and the background's own vectors are all right.
-- **Proposal (needs Sean's go-ahead):** where the background beside the
-  weapon's outermost texels moves more than half a texel differently, or is
-  hidden, write the sentinel into those outermost texels. DLSS's dilation then
-  carries "no history" into the ring. Fly it behind a temporary on/off key with
-  an eye dump each way, and read both with `--rim`.
+- **Fix, built:** where the background beside the weapon's outermost texels
+  moves more than half a texel differently, or is hidden, the sentinel is
+  written into those outermost texels (the `weaponEdges` entry, run on foot
+  right after `mv`). DLSS's dilation then carries "no history" into the ring.
+  Fly it with an eye dump each way and read both with `--rim`; the build's
+  log lines are in "Build, 2026-10-29" below.
 - **Next flight:** none booked. The installs are shared: ask Sean before
   installing or flying.
-- **Temporary keys:** none yet. The proposal adds one, to be listed here.
+- **Temporary keys:** `experimental.clean_weapon_edges` (`on` / `off`, default
+  `on`), the A/B of this fix. When the flights settle it, ship the winner as
+  the behaviour and propose removing the key.
 - **Found in passing (#147):** bursts of wrong vectors in fast turns. Dump 1,
   frames 3 and 4: every world vector reads zero while the terrain moved 48
   to 91 px. Dump 2, frames 2, 3 and 12 to 15: the parked ship gets 250 to 830
@@ -160,3 +163,26 @@ with the key on and one with it off. Read both with `--rim`. With the fix, the
 ring's `foreground_vector` share should fall to near zero and its `current`
 share rise, and the foreground rim's `own_vector` share should hold. Sean
 judges the silhouette.
+
+## Build, 2026-10-29
+
+- **Where:** `weaponEdges` in `src\d3d11\temporal_shader_source.h`, compiled as
+  `kTemporalWeaponEdgesBytecode` by `tools\temporal_shader_build`. It reads a
+  copy of the vectors `mv` wrote (`MVW`, t5; a per-eye R16G16_FLOAT texture,
+  `dlMvCopy`) and a depth tile filled as `mv` fills its own. A texel takes the
+  sentinel when `enginePixelZ` says kind 1 (decision path 11), it has a
+  depth, its own vector is valid, and one of its eight neighbours is farther
+  by the hidden test's 3 % margin and either carries the sentinel or a vector
+  more than half a texel from the texel's own. The dispatch is in
+  `temporal_pass.cpp` straight after the `mv` dispatch, inside the prep's Mv
+  part and before b1 and b2 are put back, so `stageEyeInputs` (which stages
+  `dlMv` into an eye dump's `MV.bin`) sees what DLSS gets; an `--rim` read of a
+  dump with the key on counts the sentinel on the foreground's own rim.
+- **Wanted when:** the key is on, the journal says on foot (`g_foot.on`), the
+  trained path's `mv` ran and engine-record motion is bound. It runs for every
+  trained engine (DLSS, XeSS, FSR) because all three dilate by depth; only
+  DLSS was measured.
+- **Log:** the key's state at start and on each change, and every 10 s while
+  on foot with the key on, `weapon edges (#146) 10 s: rim passes <n>
+  (eye-frames), not run <m> [no engine binding <a>, not trained <b>]`. A log
+  with the key on, on foot and no such line is a build without the pass.
