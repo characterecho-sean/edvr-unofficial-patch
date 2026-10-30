@@ -86,6 +86,7 @@
 #include "native_on_foot_f179.h"   // F179: the body stays up in standing ADS (the standing raise), and the neck guard that keeps the eye 10 cm ahead of the chest (pure parts)
 #include "native_on_foot_f180.h"   // F180: the left elbow hangs standing in ADS; the spine straighten dial (TEMPORARY); the neck guard's distance (pure parts)
 #include "native_on_foot_f181.h"   // F181: the left elbow's swivel capped at the hip with a two-handed gun (TEMPORARY dial; pure parts)
+#include "native_on_foot_f185.h"   // F185: the left arm keeps a bend in the sights, the shoulder first (TEMPORARY dial; pure parts)
 #include "native_on_foot_f182.h"   // F182: the left hand stays on a two-handed gun aimed steeply up (the stored grip point in the item's frame; pure parts)
 #include "native_on_foot_f176.h"   // F176: in the sights with the head aiming, the mouse and the stick hold their pitch (pure parts)
 #include "native_on_foot_f175.h"   // F175 (measure only): the view's roll and pitch against the headset's, by look mode and item (pure parts)
@@ -240,6 +241,8 @@ double g_standAdsSpineLast = 1e9;                             // the value last 
 std::atomic<float> g_neckGuardCm{static_cast<float>(nofoot::f179::kNeckGuardDefaultCm)};   // F180c (TEMPORARY): experimental.native_on_foot_neck_guard_cm, 0..20 cm, live: how far ahead of the chest the neck guard keeps the eye; 0 turns it off; F181: default 2, the pilot's flown value (F179's first was 10)
 double g_neckGuardCmLast = 1e9;                               // the value last logged (frame thread; the first read always logs)
 std::atomic<float> g_hipElbowSwivelMaxDeg{static_cast<float>(nofoot::f181::kCapDefaultDeg)};   // F181a (TEMPORARY): experimental.native_on_foot_hip_elbow_swivel_max_deg, 0..90, live: the most the left elbow swings off the stance's plane at the hip with a two-handed gun; 90 leaves the pose; default 25
+std::atomic<float> g_adsLeftReach{static_cast<float>(nofoot::f185::kDialDefault)};   // F185 (TEMPORARY): experimental.native_on_foot_ads_left_reach, 0.80..1.00, live: in the sights with a two-handed gun the left shoulder is kept within this share of the left arm's full length of the grip; 1.00 is today's; default 0.92
+double g_adsLeftReachLast = 1e9;                              // the value last logged (frame thread; the first read always logs)
 double g_hipElbowSwivelMaxDegLast = 1e9;                      // the value last logged (frame thread; the first read always logs)
 std::atomic<float> g_f87SettleS{static_cast<float>(nofoot::f87::kSettleDefaultS)};   // F87h (TEMPORARY): fix.native_on_foot_standing_height_settle_s, live
 double g_f87SettleLast = -1.0;                                // the value last logged (frame thread)
@@ -1191,6 +1194,19 @@ void readKey() {
                             deg, nofoot::f181::kCapMinDeg, nofoot::f181::kCapMaxDeg, nofoot::f181::kCapMaxDeg);
         g_hipElbowSwivelMaxDegLast = deg;
         g_hipElbowSwivelMaxDeg.store(static_cast<float>(deg), std::memory_order_relaxed);
+    }
+    // F185 (TEMPORARY, live, the developer tier's "ADS left arm reach"): in the sights with a two-handed gun the left shoulder is kept within this share of the left arm's full length of the left-hand grip
+    // (the clavicle first, up to 15 deg, then the reach rule's body move), so the elbow keeps a bend; 1.00 is today's (the grip just reachable). Weighted by the detach weight, both stances.
+    {
+        const double reach = nofoot::f185::clampDial(static_cast<double>(cfg.getFloat("experimental.native_on_foot_ads_left_reach", static_cast<float>(nofoot::f185::kDialDefault))));
+        if (first || reach != g_adsLeftReachLast)
+            Log::get().note("native on foot ADS left arm reach dial (F185, TEMPORARY): experimental.native_on_foot_ads_left_reach = %.2f -- in the sights with a two-handed gun the left shoulder is kept "
+                            "within this share (range %.2f..%.2f, %.2f is today's: the grip just reachable) of the left arm's full length (upper arm + forearm) of the left-hand grip, so the elbow keeps "
+                            "a bend: the clavicle turns forward first (at most %.0f deg), then the reach rule takes the rest from the body's move; times the detach weight, both stances; the hip, pistols "
+                            "and tools are untouched; the per-window ADS left arm bend line names the turn and the reach ratio",
+                            reach, nofoot::f185::kDialMin, nofoot::f185::kDialMax, nofoot::f185::kDialMax, nofoot::f185::kMaxTurnDeg);
+        g_adsLeftReachLast = reach;
+        g_adsLeftReach.store(static_cast<float>(reach), std::memory_order_relaxed);
     }
     // F170 (TEMPORARY, live, the developer tier's "Crouched ADS torso square"): while crouched and aiming down sights the torso is turned about the vertical toward square to the aim: this share
     // (0..1) of the shoulder line's measured blade, times the crouched weight and the detach weight, is taken out. 1 squares it, 0 leaves the authored stance; exactly 0 standing and at the hip.
@@ -16642,6 +16658,8 @@ struct F98Left {
     nofoot::f180::Counters f180;
     // F181a (TEMPORARY): the left hand's two-handed solves at the hip, those the swivel cap turned, the plane angle cut and the solves still over the cap after it (the F98a line's ending).
     nofoot::f181::Counters f181;
+    // F185 (TEMPORARY): the left arm's two-handed solves in the sights (the dial at 1.00 included): the target distance, the clavicle's turn and the shoulder's move, what the reach rule took, the reach ratio (its own line).
+    nofoot::f185::Counters f185;
 };
 std::atomic<uint32_t> g_f98Seq{0};
 F98Left g_f98;
@@ -16988,6 +17006,9 @@ struct PinCall {
     double f86LocalY = 0.0, f86CamOverF = 0.0, f86FModelY = 0.0, f86NeckY = 0.0, f86AimPitch = 0.0;
     double hEye[2] = {};   // the eye's heading (x, z); F69d's axes. F183: the stable heading (nofoot::f183::stableHeading): the eye's while the view is level-ish
     nofoot::f183::Info f183;   // F183: what the stable heading did this call (valid with an eye; changed: the body's forward blended in or replacing it)
+    // F185: the left arm's reach in the sights: the pin's reach rule took this much of the body's move (cm) for the dial, and the target distance (m) of the arm's full length this call
+    double f185TookCm = 0.0, f185TargetM = std::nan("");
+    bool f185Gate = false;
     bool f179Bounded = false, f179BiasReset = false;   // F183: a guard push held to the distance plus 10 cm this call; the filtered error reset by the stable heading turning over 20 deg
     // F69d: the pre-pin feet test (both animated feet over kPinFeetHighM), and the eye against the joints as finally written (eye minus joint, the eye's
     // heading axes: right, up, forward; metres): neck 34, chest 24, clavicles 35 and 36, upper arms (plan U of the left and right sides).
@@ -17794,7 +17815,7 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
     double sqShoulderMoveMaxCm = 0.0;
     if (refusal == kPinRefKinds && armedW > 0.0 && G && fpm && pl.ok[0] && pl.ok[1] && pl.sqOk && pl.side[0].U < count && pl.side[1].U < count &&
         pl.side[0].F < count && pl.side[1].F < count && pl.side[0].H < count && pl.side[1].H < count) {
-        double uPos[2][3], tA[2][3], armLen[2];
+        double uPos[2][3], tA[2][3], armLen[2], clavLen[2] = {0.0, 0.0};
         bool have[2] = {true, true};
         for (int side = 0; side < 2; ++side) {
             const nofoot::IkArm& a = pl.side[side];
@@ -17808,6 +17829,12 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
             at(a.U, uPos[side]);
             at(a.F, f0);
             at(a.H, h0);
+            if (a.C < count) {   // F185: the clavicle's length (joint to shoulder joint), for what a protraction can give
+                double cPos[3];
+                at(a.C, cPos);
+                const double cu[3] = {uPos[side][0] - cPos[0], uPos[side][1] - cPos[1], uPos[side][2] - cPos[2]};
+                clavLen[side] = nofoot::ikLen(cu);
+            }
             const double l1v[3] = {f0[0] - uPos[side][0], f0[1] - uPos[side][1], f0[2] - uPos[side][2]}, l2v[3] = {h0[0] - f0[0], h0[1] - f0[1], h0[2] - f0[2]};
             armLen[side] = nofoot::ikLen(l1v) + nofoot::ikLen(l2v);
             float legacy[16];
@@ -17835,7 +17862,12 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
         if (have[0] && have[1] && sqOk) {
             // The square-up as it is written when armed (F67f: phi itself); the share of the spine level the upper-arm joint sits at.
             const double sqApplied = nofoot::squareApplied(phi, true, sqAmount, wSqRamp, nullptr);
-            double v[2][3], R[2], candidate[3] = {}, full[3] = {};
+            double v[2][3], R[2], RToday[2] = {0.0, 0.0}, candidate[3] = {}, full[3] = {};
+            // F185: in the sights with a two-handed gun the left shoulder is kept within the dial's share of the arm's length of the grip: the clavicle takes the first of it in the arm solve (up to
+            // 15 deg), this rule the rest, to the target distance plus the clavicle's chord in place of the arm's length less 2 cm (nofoot::f185::reachRadiusM); 1.00 and the hip leave today's radius.
+            const double f185Dial = static_cast<double>(g_adsLeftReach.load(std::memory_order_relaxed));
+            pc.f185Gate = physicalPoleActive && (stableSupportPolicy || rifleStableAuthority);
+            bool f185Differs = false;
             for (int side = 0; side < 2; ++side) {
                 double share = 0.0;
                 for (uint32_t k = 0; k < pl.sq.n; ++k)
@@ -17848,6 +17880,15 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
                 v[side][1] = us[1] + mv.delta - tA[side][1];
                 v[side][2] = us[2] + d0[2] - tA[side][2];
                 R[side] = side == 0 ? nofoot::ikOffHandReachRadius(armLen[side], offW) : armLen[side] - nofoot::kReachMarginM;
+                RToday[side] = R[side];
+                if (side == 0 && pc.f185Gate && !nofoot::f185::off(f185Dial)) {
+                    pc.f185TargetM = nofoot::f185::targetM(armLen[0], f185Dial, pc.detachW);
+                    const double rn = nofoot::f185::reachRadiusM(R[0], armLen[0], clavLen[0], f185Dial, pc.detachW);
+                    if (rn != R[0]) {
+                        R[0] = rn;
+                        f185Differs = true;
+                    }
+                }
                 pc.reachRadiusM[side] = R[side];
             }
             bool feasible = true;
@@ -17860,6 +17901,12 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
             pc.reachInfeasible = !feasible;
             pc.reachRejected = !feasible;
             const double w = armedW > 1.0 ? 1.0 : armedW;
+            if (f185Differs) {   // F185: what the rule took of the body's move for the dial: this call's correction less the one with today's radius
+                double candidateToday[3] = {}, fullToday[3] = {};
+                bool feasibleToday = true;
+                nofoot::reachLimitDeltaFeasibleOnly(v, RToday, have, candidateToday, fullToday, &feasibleToday);
+                pc.f185TookCm = 100.0 * w * std::sqrt((full[0] - fullToday[0]) * (full[0] - fullToday[0]) + (full[2] - fullToday[2]) * (full[2] - fullToday[2]));
+            }
             for (int i = 0; i < 3; ++i) {
                 pc.reachCandidate[i] = candidate[i];
                 mv.th[i] += w * full[i];
@@ -19762,6 +19809,10 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
         // F181a: this solve was the left hand's with a two-handed gun at the hip (the cap's solves), the cap turned the swivel, and the plane angle it cut (deg)
         bool f181Hip = false, f181Capped = false;
         double f181CutDeg = 0.0;
+        // F185: this solve was the left hand's with a two-handed gun in the sights (the dial at 1.00 included), the clavicle turned the shoulder (deg; cm moved), the full turn was not enough, and the
+        // hand target's reach ratio over the arm's length before the clavicle's turn
+        bool f185Gate = false, f185Turned = false, f185Capped = false;
+        double f185TurnDeg = 0.0, f185MoveCm = 0.0, f185TargetM = 0.0, f185ReachBefore = std::nan("");
         double poseHand[3] = {}, poseTarget[3] = {}, posePreferred[3] = {}, poseAxis[3] = {}, poseRadial[3] = {}, poseWeight = 0.0, poseViolationM = 0.0;
         double poseOutSign = 1.0, poseElbowOutM = nofoot::kIkElbowOutM;
         bool poseActualValid = false;
@@ -20577,6 +20628,46 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
         // asked to move toward the target by min(excess + 3 cm, 10 cm); in ADS the shoulder raise and forward push are added; times the
         // per-arm weight, capped at 5 cm a call while writing. The groups gU, gF, gH turn rigidly about the clavicle C (25 deg at most); S,
         // F0, H0 and the bones are read again. M0 is saved first and put back when the side is not written (the spine write never carries it).
+        // F185: the left shoulder kept within the dial's share of the arm's length of the hand target, the clavicle first: the groups turn about the up axis through the clavicle joint (protraction) by
+        // what brings the hand target within the target distance, at most 15 deg. Before the assist below, which then works from the protracted shoulder (M0 is saved once, here, for both).
+        // Only the left hand's stable-pole solve with a two-handed gun (the gate F165, F180a and F181a use), written, in the sights; the dial at 1.00 and the hip skip it bit for bit.
+        if (side == 0 && doSolveWrite && C < count && pinWanted && pinCall.valid && physicalPoleActive && physicalPoleAttempted[0] && !authoredPistolSupport &&
+            bodyDetachForCall >= nofoot::f185::kSettledDetach) {
+            o.f185Gate = true;
+            o.f185ReachBefore = o.reach;   // the hand target over the arm's length, before the clavicle (F56's figure)
+            const double f185Dial = static_cast<double>(g_adsLeftReach.load(std::memory_order_relaxed));
+            if (!nofoot::f185::off(f185Dial)) {
+                double Cp185[3];
+                ikPos(g_ikM0[C], Cp185);
+                o.f185TargetM = nofoot::f185::targetM(l1 + l2, f185Dial, bodyDetachForCall);
+                const nofoot::f185::Turn turn = nofoot::f185::protract(Cp185, S, target, o.f185TargetM);
+                if (turn.applied) {
+                    double Rc185[9];
+                    nofoot::f185::turnMatrix(turn.angleRad, Rc185);
+                    for (int g = 0; g < 3; ++g)
+                        for (uint32_t k = 0; k < counts[g]; ++k) {
+                            const uint32_t j = lists[g][k];
+                            if (j >= count) continue;
+                            float cur[16];
+                            std::memcpy(cur, g_ikM0[j], 64);
+                            if (!o.saved) std::memcpy(g_ikM0Save[j], cur, 64);
+                            nofoot::ikPivot(cur, Rc185, Cp185, g_ikM0[j]);
+                        }
+                    o.saved = true;
+                    ikPos(g_ikM0[U], S);
+                    ikPos(g_ikM0[F], F0);
+                    ikPos(g_ikM0[H], H0);
+                    for (int i = 0; i < 3; ++i) {
+                        uf[i] = F0[i] - S[i];
+                        fh[i] = H0[i] - F0[i];
+                    }
+                    o.f185Turned = true;
+                    o.f185Capped = turn.capped;
+                    o.f185TurnDeg = turn.angleRad * 180.0 / nofoot::kIkPi;
+                    o.f185MoveCm = turn.moveM * 100.0;
+                }
+            }
+        }
         if (mode != 2 && C < count) {
             double Cp[3], excess = 0.0;
             ikPos(g_ikM0[C], Cp);
@@ -20604,8 +20695,10 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
                     for (uint32_t k = 0; k < counts[g]; ++k) {
                         const uint32_t j = lists[g][k];
                         if (j >= count) continue;
-                        std::memcpy(g_ikM0Save[j], g_ikM0[j], 64);
-                        nofoot::ikPivot(g_ikM0Save[j], Rc, Cp, g_ikM0[j]);
+                        float cur[16];   // F185: the pose as it stands (the clavicle's protraction may have turned it first); the save keeps the one from before the first turn
+                        std::memcpy(cur, g_ikM0[j], 64);
+                        if (!o.saved) std::memcpy(g_ikM0Save[j], cur, 64);
+                        nofoot::ikPivot(cur, Rc, Cp, g_ikM0[j]);
                     }
                 o.saved = true;
                 ikPos(g_ikM0[U], S);
@@ -21771,6 +21864,21 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
                 if (pinCall.f97EyeDrawnOk && pl.ok[0] && finalAt(pl.side[0].U, shoulder166))
                     nofoot::f166::offsetFromEye(shoulder166, pinCall.f97EyeDrawn, pinCall.hEye[0], pinCall.hEye[1], sample166.shoulderM);
                 f.f166.add(sample166);
+                // F185 (TEMPORARY): the left arm's two-handed solves in the sights, both stances (the dial at 1.00 included: the before picture): the target distance, the clavicle's turn and the
+                // shoulder's move, what the reach rule took of the body's move for it, and the hand target's reach ratio over the arm's length before the clavicle and after the solve's assist
+                if (pl.ok[0] && so[0].f185Gate) {
+                    nofoot::f185::Sample s185;
+                    s185.dial = nofoot::f185::clampDial(static_cast<double>(g_adsLeftReach.load(std::memory_order_relaxed)));
+                    s185.targetM = std::isfinite(so[0].f185TargetM) && so[0].f185TargetM > 0.0 ? so[0].f185TargetM : so[0].armLen;
+                    s185.turned = so[0].f185Turned;
+                    s185.capped = so[0].f185Capped;
+                    s185.turnDeg = so[0].f185TurnDeg;
+                    s185.moveCm = so[0].f185MoveCm;
+                    s185.tookCm = pinCall.f185TookCm;
+                    s185.reachBefore = so[0].f185ReachBefore;
+                    s185.reachAfter = so[0].reachA;
+                    f.f185.add(s185);
+                }
                 // F168 (TEMPORARY): the crouched body's dial and the distances it is judged by, crouched in the sights, still against moving: the move asked of the body, the right shoulder
                 // (the upper arm joint as finally written) to the gun's root (the FP right handAttach 51 through G, the arm solve's own target T_A; the butt is not a joint the code reads), the
                 // left shoulder to the left-hand grip (the FP left handAttach 52 through G), and the left shoulder from the eye as F166 has it.
@@ -23126,6 +23234,12 @@ void f125ElbowClose(uint64_t now, bool keepRun = false) noexcept {
             char line178[1190];
             nofoot::f178::formatSummary(line178, sizeof(line178), w.seconds, w.item, f98.f178);
             Log::get().note("%s", line178);
+        }
+        // F185 (TEMPORARY): the left arm's bend in the sights, on a line of its own, whenever a two-handed ADS solve was counted (both stances; the dial at 1.00 included: the before picture)
+        if (f98.f185.frames) {
+            char line185[1190];
+            nofoot::f185::formatSummary(line185, sizeof(line185), w.seconds, w.item, f98.f185);
+            Log::get().note("%s", line185);
         }
         // F180b (TEMPORARY): the standing ADS spine straighten, on a line of its own, whenever a frame was standing in the sights (the dial at 0 included: the before picture)
         if (f98.f180.frames) {

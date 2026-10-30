@@ -14959,6 +14959,47 @@ def _hj_f183_heading(rows, ctx):
             len(dead), H183_AIM_OVER, H183_EYE_OVER, max(float(r["amax"]) for r in dead)))
     return ("OK", text)
 
+# F185 (TEMPORARY): the left arm keeps a bend in the sights (experimental.native_on_foot_ads_left_reach) and the figures that judge it (formatSummary in src/d3d11/native_on_foot_f185.h).
+H185_LABEL = "native on foot ADS left arm bend (F185, TEMPORARY)"
+H185_RE = (r"native on foot ADS left arm bend \(F185, TEMPORARY\) (?P<wl>\d+) s: item (?P<item>\S+); two-handed ADS solves (?P<n>\d+), the dial experimental\.native_on_foot_ads_left_reach mean "
+           r"(?P<dial>[\d.]+); the target shoulder to hand distance mean (?P<tgt>[\d.]+) cm; the clavicle turned in (?P<turned>\d+) \(the turn mean (?P<tm>[\d.]+) deg, largest (?P<tx>[\d.]+); "
+           r"the shoulder moved mean (?P<mm>[\d.]+) cm, largest (?P<mx>[\d.]+); the full (?P<lim>\d+) deg not enough in (?P<capped>\d+)\); the reach rule took mean (?P<took>[\d.]+) cm of the "
+           r"body's move for it \(largest (?P<tookx>[\d.]+)\); the left arm's reach ratio before the clavicle mean (?P<rb>[\d.]+), after it mean (?P<ra>[\d.]+) "
+           r"\(min (?P<ramin>[\d.]+) max (?P<ramax>[\d.]+)\)")
+H185_TOL = 0.03          # the reach ratio after the clavicle within this of the dial
+H185_MIN_SOLVES = 30     # fewer two-handed ADS solves than this are too few to judge
+
+
+def _hj_f185_arm_bend(rows, ctx):
+    """F185 (TEMPORARY): the left arm keeps a bend in the sights. The flight edvr_gfx_20261030_134445 (the plasma shotgun, standing in the sights) had the left arm locked straight: the left
+    shoulder 61.5 to 62.5 cm from the grip on a 59.2 cm arm (F56's reach ratio 1.04, up to 3.7 cm short, the swivel clamped in every solve). The dial keeps the left shoulder within its share
+    of the arm's full length of the grip in the sights with a two-handed gun (both stances, by the detach weight): the clavicle turns forward first (at most 15 deg), then the reach rule takes
+    the rest from the body's move. Reads the window line: the two-handed ADS solves, the dial, the target distance, the clavicle's turn and the shoulder's move, what the reach rule took, and the
+    left arm's reach ratio (the hand target over the arm's length) before the clavicle and after it. IDLE under 30 solves; the dial at 1.00 is the baseline (OK, today's reach); OK when the reach
+    ratio after the clavicle is within 0.03 of the dial (F56's reach figures then read about the dial); PARTIAL otherwise, saying how often the clavicle's full turn was not enough. No line, no
+    verdict."""
+    sec = rows.get("sec", [])
+    if not sec:
+        return None
+    n = sum(int(r["n"]) for r in sec)
+    if not n:
+        return None
+    mean = lambda k: sum(int(r["n"]) * float(r[k]) for r in sec) / n
+    dial, tgt, ra, rb, took = mean("dial"), mean("tgt"), mean("ra"), mean("rb"), mean("took")
+    turned, capped = sum(int(r["turned"]) for r in sec), sum(int(r["capped"]) for r in sec)
+    tm = sum(int(r["turned"]) * float(r["tm"]) for r in sec) / turned if turned else 0.0
+    mm = sum(int(r["turned"]) * float(r["mm"]) for r in sec) / turned if turned else 0.0
+    text = ("%d s: %d two-handed ADS solves, the dial %.2f, the target shoulder to hand distance %.1f cm; the clavicle turned in %d (%.1f deg mean, the shoulder %.1f cm; the full 15 deg not enough in %d); "
+            "the reach rule took %.1f cm of the body's move for it; the left arm's reach ratio %.3f before the clavicle, %.3f after (min %.3f, max %.3f)" % (
+                _hsecs(sec), n, dial, tgt, turned, tm, mm, capped, took, rb, ra, min(float(r["ramin"]) for r in sec), max(float(r["ramax"]) for r in sec)))
+    if n < H185_MIN_SOLVES:
+        return ("IDLE", text + "; under %d two-handed ADS solves: little to judge" % H185_MIN_SOLVES)
+    if dial >= 0.995:
+        return ("OK", text + "; the dial was 1.00: these are the baseline figures (today's reach rule, no clavicle turn)")
+    if abs(ra - dial) <= H185_TOL:
+        return ("OK", text)
+    return ("PARTIAL", text + "; the reach ratio after the clavicle is %.3f against the dial %.2f (more than %.2f off; the clavicle's full turn was not enough in %d of %d solves)" % (ra, dial, H185_TOL, capped, n))
+
 def _hj_f95c_head_shadow(rows, ctx):
     """F95c: the head kept in the shadows. Per second: the local avatar's visibility calls, how many ran the head as shadow-only, the (head instance, view) pairs
     after the call in the shadow views and in the main or other views, and the fade hook's keeps against its zeroes. A head hide that only zeroed, a swap the fade
@@ -16545,6 +16586,9 @@ HEALTH_RULES = (
         ("sec", H180B_RE),
         ("dial", H180B_DIAL_RE),
     ), _hj_f180b_spine),
+    _hrule("ADS left arm bend (F185)", ("F185",), (H185_LABEL,), (
+        ("sec", H185_RE),
+    ), _hj_f185_arm_bend),
     _hrule("stable heading (F183)", ("F183",), (H183_LABEL,), (
         ("sec", H183_RE),
     ), _hj_f183_heading),
@@ -17695,6 +17739,7 @@ def self_test_health():
     f181_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f181.h")
     f182_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f182.h")
     f183_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f183.h")
+    f185_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f185.h")
     f172_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f172.h")
     f175_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f175.h")
     f176_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f176.h")
@@ -17735,6 +17780,7 @@ def self_test_health():
         f181src = read_text(f181_path)
         f182src = read_text(f182_path)
         f183src = read_text(f183_path)
+        f185src = read_text(f185_path)
         f172src = read_text(f172_path)
         f175src = read_text(f175_path)
         f176src = read_text(f176_path)
@@ -17912,6 +17958,15 @@ def self_test_health():
             fmts[key] = health_c_format(f181src, needle)
         if fmts[key] is None:
             raise AssertionError("native_on_foot_f181.h has no format holding %r: the --health rule that reads it is out of date" % needle)
+        return health_render(fmts[key], vals)
+
+    def R185(needle, *vals):
+        """F185's window line (formatSummary in native_on_foot_f185.h), from its own format literal."""
+        key = "f185:" + needle
+        if key not in fmts:
+            fmts[key] = health_c_format(f185src, needle)
+        if fmts[key] is None:
+            raise AssertionError("native_on_foot_f185.h has no format holding %r: the --health rule that reads it is out of date" % needle)
         return health_render(fmts[key], vals)
 
     def R183(needle, *vals):
@@ -19249,6 +19304,27 @@ def self_test_health():
         check("F183 guard: and the unarmed hip's measuring line", [meas179(bnd=5, rst=1), guard179()], 0, [("OK", F179B)], has=["F183: 5 bounded push(es), 1 filtered-error reset(s)"], lacks=["UNPARSED"])
         check("F183 guard: a line from a build before F183 (no ending) still parses and says nothing of it", [guard179(old=True), meas179(old=True)], 0, [("OK", F179B)], lacks=["UNPARSED", "F183:", "bounded"])
 
+        # ---- F185 (TEMPORARY): the left arm keeps a bend in the sights ----
+        F185 = "ADS left arm bend (F185)"
+
+        def bend185(item=RIFLE97, wl=10, n=800, dial=0.92, tgt=54.5, turned=700, tm=9.5, tx=15.0, mm=3.8, mx=5.1, capped=40, took=1.2, tookx=6.0, rb=1.040, ra=0.925, ramin=0.90, ramax=0.97):
+            """F185's window line, from the DLL's own format (formatSummary, native_on_foot_f185.h)."""
+            return R185("native on foot ADS left arm bend (F185, TEMPORARY) %u s: item %s", wl, item, n, dial, tgt, turned, tm, tx, mm, mx, 15.0, capped, took, tookx, rb, ra, ramin, ramax)
+
+        check("F185 arm bend: the reach ratio after the clavicle within 0.03 of the dial is OK, with the figures",
+              [bend185(), bend185()], 0, [("OK", F185)],
+              has=["20 s: 1600 two-handed ADS solves, the dial 0.92, the target shoulder to hand distance 54.5 cm; the clavicle turned in 1400 (9.5 deg mean, the shoulder 3.8 cm; the full 15 deg not enough in 80); "
+                   "the reach rule took 1.2 cm of the body's move for it; the left arm's reach ratio 1.040 before the clavicle, 0.925 after (min 0.900, max 0.970)"], lacks=["UNPARSED", "NEVER", "PARTIAL"])
+        check("F185 arm bend: the arm left at 1.04 against a dial of 0.92 (the flight's locked arm) is partial and says how often the clavicle ran out",
+              [bend185(ra=1.04, capped=500)], 0, [("PARTIAL", F185)],
+              has=["the reach ratio after the clavicle is 1.040 against the dial 0.92 (more than 0.03 off; the clavicle's full turn was not enough in 500 of 800 solves)"], lacks=["UNPARSED", "NEVER"])
+        check("F185 arm bend: the dial at 1.00 is the baseline, OK (today's reach)", [bend185(dial=1.0, tgt=59.2, turned=0, tm=0.0, tx=0.0, mm=0.0, mx=0.0, capped=0, took=0.0, tookx=0.0, ra=1.04)], 0, [("OK", F185)],
+              has=["the dial was 1.00: these are the baseline figures"], lacks=["UNPARSED", "PARTIAL"])
+        check("F185 arm bend: under 30 two-handed ADS solves is too few to judge", [bend185(n=10, ra=1.04)], 0, [("IDLE", F185)], has=["under 30 two-handed ADS solves: little to judge"], lacks=["UNPARSED", "PARTIAL"])
+        check("F185 arm bend: another weighting: two windows add up by their solves", [bend185(n=100, ra=0.90), bend185(n=300, ra=0.94)], 0, [("OK", F185)], has=["400 two-handed ADS solves"], lacks=["UNPARSED", "PARTIAL"])
+        check("F185 arm bend: no line at all is not present (no verdict row)", [f90_part()], 0, [("OK", F90S)],
+              lacks=[row("OK", F185), row("IDLE", F185), row("PARTIAL", F185), row("UNPARSED", F185), row("NEVER APPLIED", F185)])
+        check("F185 arm bend: a line that drifted from its pattern is unparsed", ["native on foot ADS left arm bend (F185, TEMPORARY) 10 s: something else"], 4, [("UNPARSED", F185)])
         # ---- F183: the pin's stable horizontal heading ----
         F183 = "stable heading (F183)"
 
