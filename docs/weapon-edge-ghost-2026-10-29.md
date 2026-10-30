@@ -26,37 +26,37 @@
   dotted line along the gun's edge.
 - **Ruled out:** see "Ruled out" below. The weapon's vectors, its jitter or
   projection, and the background's vectors are right.
-- **v1 (`abd7b82c`, flown):** the sentinel on every gun rim texel next to
-  differently moving terrain. It fixed the ring, but it reset terrain that was
-  visible last frame and the gun's own pixels at the thin muzzle parts (the
-  pixelated barrel end).
-- **v2 (`3b564f21`, flown, installed):** it rewrites only the rim texels that
-  no gun pixel reads, with the terrain's own vector, or the sentinel where the
-  terrain was hidden. It takes "hidden" from the test that cause 2 breaks.
-- **v3 (`26767fd3`), built:** in `backgroundHistoryHidden`, before that
-  exemption: if all four texels of last frame's depth around the reprojected
-  point are nearer than the pixel's predicted depth by the 3 % margin, the
-  point was covered, so it is hidden. A still edge never meets this, because
-  the pixel's own texel was background then. It is behind the same key, on
-  foot only, through `probe.w` bit 512, which is set for the mv dispatch.
-- **Next flight: v4 INSTALLED Epic 2026-10-30, `v0.22.0-rc.3-115-gd97ef7a8`
-  (`--scope both --xess`, verified), NOT FLOWN.** The key is on, because
-  Epic's ini has no `clean_weapon_edges` line. Brief: fast swings and head
-  turns at the hip, with one eye dump with the key on and one with it off
-  (menu row "Clean weapon edges (test)"). Read: `edvr_log.py --target "<Epic
-  dir>" --expect-build d97ef7a8 --grep "weapon edges"`, which should show
-  `on (v4)`. Then run `--rim`: `background_kept_on_old_foreground` should be
-  near 0 at distances 1 and 2 with the key on (v3: 2 to 46 % at distance 1)
-  and back up with it off.
-- **Temporary keys:** `experimental.clean_weapon_edges` (`on` / `off`, default
-  `on`), the A/B of this fix. When the flights settle it, ship the winner as
-  the behaviour and propose removing the key.
-- **Found in passing (#147):** bursts of wrong vectors in fast turns. Dump 1,
-  frames 3 and 4: every world vector reads zero while the terrain moved 48
-  to 91 px. Dump 2, frames 2, 3 and 12 to 15: the parked ship gets 250 to 830
-  px, the world path under-reports, and up to 47 % of the crop is marked
-  hidden. Again on Frontier at v2, dump `062518187001`: 8 of 15 pairs carry
-  zero world vectors while the terrain moved 8 to 78 px. This is a separate
+- **Versions, all flown:**
+  - v1 put the sentinel on every rim texel.
+  - v2 (cause 1) writes the terrain's vector, or the sentinel, only into rim
+    texels that no gun pixel reads.
+  - v3 (cause 2) treats a pixel as hidden when last frame's depth was nearer
+    on all four texels around its reprojected point.
+  - v4 judges that against the pixel's own depth.
+
+  The journal entries below hold each flight.
+- **Next flight: the split-key build, BUILDING for Epic.** Brief: ADS and
+  hip, fast swings and head turns, in four states. Sean judges each, with one
+  eye dump per state:
+  - both rows off (main);
+  - "Weapon outline (test)" alone;
+  - "Weapon uncovered ground (test)" alone;
+  - both on.
+
+  The log tells each key's state at every change (`--grep "weapon edges"`).
+  The both-off ADS dump is the first look at main's own muzzle shimmer.
+- **Temporary keys** (both `on` / `off`, default `on`, live, VR only):
+  - `experimental.clean_weapon_edges`, the menu row "Weapon outline (test)":
+    the rim pass (cause 1).
+  - `experimental.weapon_uncovered_ground`, the row "Weapon uncovered ground
+    (test)": the hidden test's covered rule (cause 2).
+
+  Both off is main's behaviour. When the flights settle them, ship the winner
+  as the behaviour and propose removing both keys.
+- **Found in passing (#147):** bursts of wrong vectors in fast turns. The
+  world vectors read zero while the terrain moves 8 to 91 px (dumps
+  `194734935001` and `062518187001`). The parked ship gets 54 to 830 px while
+  it stands still (`194749437002` and `080754384002`). This is a separate
   investigation.
 
 ## The report

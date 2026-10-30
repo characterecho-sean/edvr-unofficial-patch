@@ -324,7 +324,7 @@ cbuffer P : register(b0) {
     float4 tvCand;      // xyz the same for the instrument's swapped-eyes candidate
     float4 tvCam;       // xyz the translation term for the camera rows (the world path); w 1 = the world path is on
     float4 split;       // x the ship's radius in metres (nearer: the head's delta; farther and the far plane: the camera's); yzw unused
-    float4 probe;       // x history scale, y registration probes, z coverage bound; w bits: 1 fixed bias, 2 prior UI valid, 4 adaptive UI, 8 (retired 2026-10-01: terrain), 16 holo, 32 screen, 64 t6 (the smoke's depth) not bound, 128 the scanner's screen is up (its interface takes the head's path), 256 t7 (the private UI depth) not bound (until 319c1c5a, 2026-09-23, 256 was the retired per-object motion's bit: an eye dump older than that means that by it), 512 the weapon edges' pass follows this mv dispatch (#146: on foot, engine-record motion bound, experimental.clean_weapon_edges on), so backgroundHistoryHidden also hides a point that was covered on all four texels of last frame's depth, 8192 the celestial records are bound (t15)
+    float4 probe;       // x history scale, y registration probes, z coverage bound; w bits: 1 fixed bias, 2 prior UI valid, 4 adaptive UI, 8 (retired 2026-10-01: terrain), 16 holo, 32 screen, 64 t6 (the smoke's depth) not bound, 128 the scanner's screen is up (its interface takes the head's path), 256 t7 (the private UI depth) not bound (until 319c1c5a, 2026-09-23, 256 was the retired per-object motion's bit: an eye dump older than that means that by it), 512 the uncovered-ground rule (#146: on foot, engine-record motion bound, experimental.weapon_uncovered_ground on), so backgroundHistoryHidden also hides a point that was covered on all four texels of last frame's depth, 8192 the celestial records are bound (t15)
     float4 holoJitter; // current minus previous raster jitter; z = consecutive treated frames; w = valid DLSS depth history
 };
 float3 rgbToYcocg(float3 c) {
@@ -691,7 +691,8 @@ bool backgroundHistoryHidden(int2 local,float2 p,float2 motion,float zraw,float 
     // the point was behind something, and its history hid it, whatever stands
     // beside the pixel now: the terrain a held weapon is swept past, the weapon
     // two texels away while the terrain moved thirty to sixty (#146, probe.w
-    // bit 512 = experimental.clean_weapon_edges, on foot with the rim pass).
+    // bit 512 = experimental.weapon_uncovered_ground, on foot, engine-record
+    // motion bound).
     // A still edge never meets this: the pixel's own texel was background then.
     // Judged against the pixel's OWN depth, not zPred: the world path takes
     // zPred from the nearest depth of its 3x3, so one texel from the weapon it

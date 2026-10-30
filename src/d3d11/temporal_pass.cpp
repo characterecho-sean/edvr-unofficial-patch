@@ -1080,13 +1080,16 @@ bool                       g_csEyeJumpLatticeTried = false;
 // #146, the held weapon's edges (docs/weapon-edge-ghost-2026-10-29.md; experimental.clean_weapon_edges, a TEMPORARY A/B key, default on). On foot, with
 // engine-record motion bound, the weaponEdges entry (temporal_shader_source.h) runs right after mv and gives a tracked foreground texel that sits beside
 // a farther texel moving differently, and that no foreground pixel takes as its nearest-depth neighbour, the farther texel's vector (the history-invalid
-// vector where that texel is hidden), so DLSS's nearest-depth dilation hands the ring around the gun the background's own history; and mv, via probe.w
-// bit 512, hides background whose reprojected point was covered on all four texels of last frame's depth, judged against the pixel's own depth (v4).
-// The key is read live in temporalPassConfigure (any thread); the counts belong to the render thread. The 10 s line is told from the eye treat, only
-// while on foot with the key on, and says what the C++ side did, so a log with no line is a build without the pass or a session not on foot.
+// vector where that texel is hidden), so DLSS's nearest-depth dilation hands the ring around the gun the background's own history. Separately, under
+// experimental.weapon_uncovered_ground (TEMPORARY, default on), mv, via probe.w bit 512, hides background whose reprojected point was covered on all four
+// texels of last frame's depth, judged against the pixel's own depth. Two keys so the flights can judge each apart; both off is main's behaviour.
+// The keys are read live in temporalPassConfigure (any thread); the counts belong to the render thread. The 10 s line is told from the eye treat, only
+// while on foot with the rim key on, and says what the C++ side did, so a log with no line is a build without the pass or a session not on foot.
 struct WeaponEdgesState {
     std::atomic<bool> keyOn{true};
+    std::atomic<bool> uncoveredOn{true};     // experimental.weapon_uncovered_ground
     bool              keyTold = false;       // the state at the first read is told, then every change
+    bool              uncoveredTold = false;
     uint32_t          passes = 0;            // eye-frames the pass was dispatched, in this window
     uint32_t          noEngine = 0;          // ...wanted, but engine-record motion was not bound
     uint32_t          notTrained = 0;        // ...wanted, but the trained path's mv did not run
@@ -4675,6 +4678,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         // #146: the weapon-edges pass is wanted on foot with experimental.clean_weapon_edges on (footSplitNow, above, set g_foot for this eye-frame).
         // The trained block below says whether its mv ran; the counts and the 10 s line follow it.
         const bool weaponEdgesWanted = g_weaponEdges.keyOn.load(std::memory_order_relaxed) && g_foot.on;
+        const bool uncoveredGroundWanted = g_weaponEdges.uncoveredOn.load(std::memory_order_relaxed) && g_foot.on;
         bool weaponEdgesMvRan = false;
         if ((flags & 2u) != 0 && fmtIndex == 0) {
             warmNoteFirstTreat();   // before NGX's first ask, below
@@ -4861,10 +4865,10 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     // Bit 16384 and t23: the skinned characters' exact previous position (the second skin).
                     if (engineBound && engineSkinSrv)
                         p.probe[3] = static_cast<float>(static_cast<uint32_t>(p.probe[3]) | 16384u);
-                    // Bit 512 (#146, v3): the weapon edges' pass follows this dispatch (the same three conditions as the dispatch below), so
-                    // backgroundHistoryHidden also hides background whose reprojected point was covered on all four texels of last frame's depth.
+                    // Bit 512 (#146, experimental.weapon_uncovered_ground): on foot with engine-record motion bound, backgroundHistoryHidden also
+                    // hides background whose reprojected point was covered on all four texels of last frame's depth.
                     // Set here for this dispatch only: probe[3] is rebuilt from uiFlags() at every mv and own-path dispatch, and no other entry reads the bit.
-                    if (weaponEdgesWanted && engineBound)
+                    if (uncoveredGroundWanted && engineBound)
                         p.probe[3] = static_cast<float>(static_cast<uint32_t>(p.probe[3]) | 512u);
                     engineCounted = engineBound && diagnostics;
                     // A masked engine pixel sets the bias mask too, for the
@@ -5765,8 +5769,9 @@ void temporalPassConfigure(Config& cfg) {
         }
         skyRingConfigure(cfg.getString("diag.sky_ring", "off") == "on");
     }
-    // #146 (docs/weapon-edge-ghost-2026-10-29.md): experimental.clean_weapon_edges, a TEMPORARY A/B key, default on, live (this runs on every config
-    // reload), VR only: the flat allow-list does not list it, so flat reads off and says nothing. The state at the first read is told, then every change.
+    // #146 (docs/weapon-edge-ghost-2026-10-29.md): experimental.clean_weapon_edges (the rim pass) and experimental.weapon_uncovered_ground (the
+    // hidden test's covered rule), TEMPORARY A/B keys, default on, live (this runs on every config reload), VR only: the flat allow-list does not
+    // list them, so flat reads off and says nothing. Each key's state at the first read is told, then every change.
     {
         const bool asked = cfg.getString("experimental.clean_weapon_edges", "on") == "on";
         const bool changed = asked != g_weaponEdges.keyOn.load(std::memory_order_relaxed);
@@ -5775,14 +5780,23 @@ void temporalPassConfigure(Config& cfg) {
             g_weaponEdges.keyTold = true;
             if (asked) {
                 Log::get().note(
-                    "weapon edges (#146): on (v4) -- on foot, a tracked foreground texel beside a farther texel whose vector differs by more than half a "
+                    "weapon edges (#146): rim on -- on foot, a tracked foreground texel beside a farther texel whose vector differs by more than half a "
                     "texel, or is hidden, and that no level-or-nearer texel takes as its nearest-depth neighbour, carries the farthest such texel's vector "
                     "(the history-invalid vector when one is hidden), so DLSS's nearest-depth dilation hands the ring around the weapon the background's "
-                    "own history; and background whose reprojected point was covered on all four texels of last frame's depth, nearer than the pixel's own "
-                    "depth, counts as hidden even with the weapon still beside it.");
+                    "own history.");
             } else {
-                Log::get().note("weapon edges (#146): off -- the mv pass's vectors go to DLSS as written.");
+                Log::get().note("weapon edges (#146): rim off -- the mv pass's vectors go to DLSS as written.");
             }
+        }
+        const bool uncovered = cfg.getString("experimental.weapon_uncovered_ground", "on") == "on";
+        const bool uncoveredChanged = uncovered != g_weaponEdges.uncoveredOn.load(std::memory_order_relaxed);
+        g_weaponEdges.uncoveredOn.store(uncovered, std::memory_order_relaxed);
+        if (!runtimeFlatProfile() && (!g_weaponEdges.uncoveredTold || uncoveredChanged)) {
+            g_weaponEdges.uncoveredTold = true;
+            Log::get().note(uncovered
+                ? "weapon edges (#146): uncovered ground on -- on foot, background whose reprojected point was covered on all four texels of last frame's "
+                  "depth, nearer than the pixel's own depth, counts as hidden even with the weapon still beside it."
+                : "weapon edges (#146): uncovered ground off -- the hidden test is main's.");
         }
     }
     // The same test native_temporal.cpp's Settings::dlaa makes (flags bit 1
