@@ -381,10 +381,9 @@ struct State {
     bool     aimPromptShown = false;       // it opened once this session: never again
     bool     aimPromptPicked = false;      // a choice was made, so the close says so and not "later"
     bool     aimPromptNoted = false;       // the "not shown" reason was said
-    bool     aimPromptGaveUp = false;      // the open failed kRetryMax times
+    bool     aimPromptGaveUp = false;      // the open failed kRetryMax times after the first rendered scene
     int      aimPromptReturnPage = 0;      // the page the menu showed before it
-    int      aimPromptTries = 0;
-    uint64_t aimPromptSceneMs = 0;         // when the menu first saw the first rendered scene
+    int      aimPromptFailedAfterScene = 0;   // open attempts that failed after the game's first rendered scene (none counted before it)
     uint64_t aimPromptNextTryMs = 0;
 
     // The reset-to-shipped arm.
@@ -4424,17 +4423,28 @@ void aimPromptNoteNotShown(const char* reason) {
     Log::get().note("%s", line);
 }
 
-// F177: once a session, in the headset, the menu opens itself on the aiming choice page (menu_aim_prompt.h decides; the facts are the menu's own).
+// Seconds since the game's process was created, for the line that says when the page opened.
+double secondsSinceProcessStart() {
+    FILETIME created{}, exited{}, kernel{}, user{}, nowFt{};
+    if (!GetProcessTimes(GetCurrentProcess(), &created, &exited, &kernel, &user)) return 0.0;
+    GetSystemTimeAsFileTime(&nowFt);
+    ULARGE_INTEGER a{}, b{};
+    a.LowPart = created.dwLowDateTime;
+    a.HighPart = created.dwHighDateTime;
+    b.LowPart = nowFt.dwLowDateTime;
+    b.HighPart = nowFt.dwHighDateTime;
+    return b.QuadPart > a.QuadPart ? static_cast<double>(b.QuadPart - a.QuadPart) / 1.0e7 : 0.0;
+}
+
+// F177, F188: once a session, in the headset, the menu opens itself on the aiming choice page (menu_aim_prompt.h decides; the facts are the menu's own). It opens on the earliest frame the panel can
+// be drawn in: the door is the first Submit of Elite's eye frames (the compositor consumer's or the native menu's pose), which comes with the splash, before the game's first rendered scene.
 void aimPromptTick(uint64_t now) {
     State& s = g_s;
     if (s.aimPromptShown || s.aimPromptGaveUp) return;
-    if (!s.aimPromptSceneMs && sceneArrived()) s.aimPromptSceneMs = now;
     aimprompt::Trigger t;
     t.vr = !runtimeFlatProfile();
     t.keyOn = s.aimPromptKeyOn;
     t.nativeOnFoot = s.nativeOnFootKeyOn;
-    t.scenePast = s.aimPromptSceneMs != 0;
-    t.settled = t.scenePast && now - s.aimPromptSceneMs >= aimprompt::kSettleMs;
     t.menuOpen = s.open;
     t.shownThisSession = s.aimPromptShown;
     t.focused = gameHasFocus();
@@ -4445,15 +4455,26 @@ void aimPromptTick(uint64_t now) {
     }
     if (d.verdict != aimprompt::Verdict::Show || now < s.aimPromptNextTryMs) return;
     s.aimPromptNextTryMs = now + aimprompt::kRetryMs;
-    if (openAimPrompt(now)) {
-        s.aimPromptShown = true;
-        s.aimPromptNoted = true;   // it showed: no "not shown" line follows
-        Log::get().note("%s", aimprompt::kLogShown);
-        return;
-    }
-    if (++s.aimPromptTries >= aimprompt::kRetryMax) {
-        s.aimPromptGaveUp = true;
-        aimPromptNoteNotShown("the menu could not open (no compositor door or head pose in 10 s)");
+    // The door is asked first, so a try before the first Submit says nothing: openMenu would note a menu key press that never happened.
+    float headNow[12];
+    const bool doorReady = (glitchConsumerPresent() || nativeMenuAvailable()) && headPose(headNow);
+    const bool scenePast = sceneArrived();
+    const bool opened = doorReady && openAimPrompt(now);
+    switch (aimprompt::afterAttempt(opened, scenePast, &s.aimPromptFailedAfterScene)) {
+        case aimprompt::Retry::Opened: {
+            s.aimPromptShown = true;
+            s.aimPromptNoted = true;   // it showed: no "not shown" line follows
+            char line[160];
+            aimprompt::formatShown(line, sizeof(line), scenePast, secondsSinceProcessStart());
+            Log::get().note("%s", line);
+            break;
+        }
+        case aimprompt::Retry::GiveUp:
+            s.aimPromptGaveUp = true;
+            aimPromptNoteNotShown("the menu could not open (no compositor door or head pose in 10 s after the first scene)");
+            break;
+        case aimprompt::Retry::TryAgain:
+            break;
     }
 }
 

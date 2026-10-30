@@ -14264,7 +14264,7 @@ def _hj_f176_pitch_held(rows, ctx):
 # F177: the aiming choice at start (src/d3d11/menu_aim_prompt.h): the VR menu opens itself once a session on a page that asks for look to aim or mouse aim. Its lines print on every log, in the
 # menu and not on foot: shown, then picked and saved (or write failed), or later; or one line saying why it was not shown.
 H177_LABEL = "aim choice prompt (F177)"
-H177_SHOWN = r"aim choice prompt \(F177\): shown\s*$"
+H177_SHOWN = r"aim choice prompt \(F177\): shown(?: (?P<frame>during the splash|after the first scene), (?P<secs>[\d.]+) s after the game started)?\s*$"   # F188 added the frame and the seconds; a log from F177 has neither
 H177_PICKED = r"aim choice prompt \(F177\): picked (?P<choice>mouse aim|look to aim)\s*$"
 H177_LATER = r"aim choice prompt \(F177\): later\s*$"
 H177_SAVED = r"aim choice prompt \(F177\): saved (?P<k1>\S+) = (?P<v1>\S+) and (?P<k2>\S+) = (?P<v2>\S+) to (?P<file>.+?)\s*$"
@@ -14281,6 +14281,8 @@ def _hj_f177_aim_choice(rows, ctx):
     not at all yet; IDLE when the only line is why it was not shown (the key is off, native on foot is off, the flat profile). No line at all is a log from a build without the page (None)."""
     shown, picked, later = rows.get("shown", []), rows.get("picked", []), rows.get("later", [])
     saved, failed, notshown = rows.get("saved", []), rows.get("failed", []), rows.get("notshown", [])
+    # F188: where the page opened (the frame and the seconds since the game started); a log from the F177 build has only "shown"
+    when = (" %s, %s s after the game started" % (shown[-1]["frame"], shown[-1]["secs"])) if shown and shown[-1].get("frame") else ""
     if not (shown or picked or later or saved or failed or notshown):
         return None
     if not (shown or picked or later or saved or failed):
@@ -14294,10 +14296,10 @@ def _hj_f177_aim_choice(rows, ctx):
         s = saved[-1]
         if s["k1"] != "fix.native_on_foot_look_to_aim" or s["v1"] != H177_WANT[choice] or s["k2"] != "menu.aim_choice_prompt" or s["v2"] != "off":
             return ("NEVER APPLIED", "picked %s but the file was given %s = %s and %s = %s: the pick and the write disagree" % (choice, s["k1"], s["v1"], s["k2"], s["v2"]))
-        return ("OK", "shown; picked %s; saved %s = %s and %s = %s to %s" % (choice, s["k1"], s["v1"], s["k2"], s["v2"], s["file"]))
+        return ("OK", "shown%s; picked %s; saved %s = %s and %s = %s to %s" % (when, choice, s["k1"], s["v1"], s["k2"], s["v2"], s["file"]))
     if later:
-        return ("OK", "shown; the player chose Ask me next time or pressed Esc (nothing written, it asks again at the next start)")
-    return ("OK", "shown; no answer in this log (the game quit with the page up, or the log ends first)")
+        return ("OK", "shown%s; the player chose Ask me next time or pressed Esc (nothing written, it asks again at the next start)" % when)
+    return ("OK", "shown%s; no answer in this log (the game quit with the page up, or the log ends first)" % when)
 
 
 # F169: the stance while the aim is pitched (formatStance in src/d3d11/native_on_foot_f169.h). The camera sinks as the aim pitches up and w_c read the sink as a crouch; the cap holds w_c
@@ -20199,8 +20201,8 @@ def self_test_health():
         # ---- F177: the aiming choice at start ----
         H177 = "aim choice prompt (F177)"
 
-        def a177_shown():
-            return R177("aim choice prompt (F177): shown")
+        def a177_shown(frame="during the splash", secs=5.8):
+            return R177("aim choice prompt (F177): shown %s", frame, secs)
 
         def a177_picked(choice="look to aim"):
             return R177("aim choice prompt (F177): picked look to aim" if choice == "look to aim" else "aim choice prompt (F177): picked mouse aim")
@@ -20209,7 +20211,11 @@ def self_test_health():
             return R177("aim choice prompt (F177): saved %s = %s and %s = %s to %s", k1, v1, k2, v2, "edvr.ini")
 
         check("F177 aim choice: shown, picked look to aim and saved with both pairs is OK", [a177_shown(), a177_picked(), a177_saved()], 0, [("OK", H177)],
-              has=["shown; picked look to aim; saved fix.native_on_foot_look_to_aim = on and menu.aim_choice_prompt = off to edvr.ini"], lacks=["UNPARSED", "NEVER"])
+              has=["shown during the splash, 5.8 s after the game started; picked look to aim; saved fix.native_on_foot_look_to_aim = on and menu.aim_choice_prompt = off to edvr.ini"], lacks=["UNPARSED", "NEVER"])
+        check("F188 aim choice: shown after the first scene says so, with the seconds", [a177_shown("after the first scene", 28.0), a177_picked("mouse aim"), a177_saved(v1="off")], 0, [("OK", H177)],
+              has=["shown after the first scene, 28.0 s after the game started; picked mouse aim"], lacks=["UNPARSED", "NEVER"])
+        check("F188 aim choice: the F177 build's bare shown line is still read (no frame, no seconds)", ["aim choice prompt (F177): shown", a177_picked(), a177_saved()], 0, [("OK", H177)],
+              has=["shown; picked look to aim"], lacks=["UNPARSED", "after the game started"])
         check("F177 aim choice: shown, picked mouse aim and saved off and off is OK", [a177_shown(), a177_picked("mouse aim"), a177_saved(v1="off")], 0, [("OK", H177)],
               has=["picked mouse aim; saved fix.native_on_foot_look_to_aim = off and menu.aim_choice_prompt = off"], lacks=["UNPARSED", "NEVER"])
         check("F177 aim choice: a pick whose write failed is NEVER APPLIED, with the error", [a177_shown(), a177_picked(), R177("aim choice prompt (F177): write failed: %s", "edvr.ini: access denied")], 3,
@@ -20220,7 +20226,7 @@ def self_test_health():
               has=["picked look to aim but the file was given fix.native_on_foot_look_to_aim = off and menu.aim_choice_prompt = off: the pick and the write disagree"], lacks=["UNPARSED"])
         check("F177 aim choice: a pick that left the page on is NEVER APPLIED too", [a177_shown(), a177_picked(), a177_saved(v2="on")], 3, [("NEVER APPLIED", H177)], has=["the pick and the write disagree"])
         check("F177 aim choice: shown and Ask me next time is OK, nothing written", [a177_shown(), R177("aim choice prompt (F177): later")], 0, [("OK", H177)],
-              has=["the player chose Ask me next time or pressed Esc (nothing written, it asks again at the next start)"], lacks=["UNPARSED", "NEVER"])
+              has=["shown during the splash, 5.8 s after the game started; the player chose Ask me next time or pressed Esc (nothing written, it asks again at the next start)"], lacks=["UNPARSED", "NEVER"])
         check("F177 aim choice: shown with no answer is OK and says so", [a177_shown()], 0, [("OK", H177)], has=["no answer in this log"], lacks=["UNPARSED", "NEVER"])
         check("F177 aim choice: only why it was not shown is IDLE, with the reason", [R177("aim choice prompt (F177): not shown: %s", "menu.aim_choice_prompt is off")], 0, [("IDLE", H177)],
               has=["the page was not shown: menu.aim_choice_prompt is off"], lacks=["UNPARSED", "NEVER"])
