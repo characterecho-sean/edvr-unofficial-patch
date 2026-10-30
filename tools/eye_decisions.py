@@ -401,25 +401,69 @@ def rim_pair(np, d, cur, prev, out, prev_out, input_size, output_size, dc, oc):
     return report
 
 
-def rim_first_frame(np, mv_path, d, input_size, dc):
+def _rim_capture(np, path, label, dtype, fmt, channels, input_size, dc):
+    """A whole-render EDVRTEX1 capture (4 bytes a texel), cropped to the decision crop: (h, w, channels)."""
+    data = Path(path).read_bytes()
+    if data[:8] != b'EDVRTEX1' or len(data) < 44:
+        raise ValueError(f'{label} input: not an EDVRTEX1 capture')
+    version, w, h, got, row = struct.unpack_from('<5I', data, 8)
+    if version != 1 or got != fmt or [w, h] != list(input_size) or row != w * 4 or len(data) != 44 + row * h:
+        raise ValueError(f'{label} input: not the render-size capture of the expected format')
+    image = np.frombuffer(data, dtype, count=w * h * channels, offset=44).reshape(h, w, channels)
+    return image[dc[1]:dc[1] + dc[3], dc[0]:dc[0] + dc[2]].astype(np.float32)
+
+
+def _rim_dilation(np, mv, z, d, render_width):
+    """Models DLSS's vector dilation over the decision crop: each texel takes the MV input's vector of the texel
+    of greatest Z (reversed-Z: nearest) in its 3x3, the crop's outside not present, a tie going to the first in
+    row-major order. Counts what the ring (a background texel beside the foreground) and the foreground receive."""
+    flags = d[..., 3].astype(np.int64)
+    fg = ((flags & 15) == RIM_FOREGROUND) & ((flags & 512) != 0)
+    bg = (flags & 15) == RIM_BACKGROUND
+    hidden = (flags & 16) != 0
+    h, w = z.shape
+    padded = np.pad(z, 1, constant_values=-np.inf)
+    best = np.full((h, w), -np.inf, np.float32)
+    step_y = np.zeros((h, w), np.int64)
+    step_x = np.zeros((h, w), np.int64)
+    for dy in (-1, 0, 1):
+        for dx in (-1, 0, 1):
+            candidate = padded[1 + dy:1 + dy + h, 1 + dx:1 + dx + w]
+            take = candidate > best
+            best = np.where(take, candidate, best)
+            step_y[take] = dy
+            step_x[take] = dx
+    ty, tx = np.mgrid[0:h, 0:w]
+    received = mv[ty + step_y, tx + step_x]
+    sentinel = received[..., 0] >= render_width
+    off = np.hypot(received[..., 0] - d[..., 0], received[..., 1] - d[..., 1]) > 1.0
+    ring = bg & (_rim_nearest(np, fg, 1)[0] == 1)
+    return {'ring_texels': int(ring.sum()), 'ring_hidden': int((ring & hidden).sum()),
+            'ring_hidden_sentinel': int((ring & hidden & sentinel).sum()),
+            'ring_kept_own': int((ring & ~hidden & ~sentinel & ~off).sum()),
+            'ring_kept_reset': int((ring & ~hidden & sentinel).sum()),
+            'ring_dragged': int((ring & ~sentinel & off).sum()),
+            'foreground_texels': int(fg.sum()), 'foreground_off_vector': int((fg & (sentinel | off)).sum())}
+
+
+def rim_first_frame(np, mv_path, d, input_size, dc, z_path=None):
     """The first frame's MV input (eye_<stamp>_MV.bin, RG16_FLOAT over the whole render) against frame 0's
     decisions: how many foreground texels, and how many on the foreground's rim (a background texel in the
-    3x3), carry the size*2 history-invalid sentinel. Zero rim sentinels means no pass wrote one there."""
-    data = Path(mv_path).read_bytes()
-    if data[:8] != b'EDVRTEX1' or len(data) < 44:
-        raise ValueError('MV input: not an EDVRTEX1 capture')
-    version, w, h, fmt, row = struct.unpack_from('<5I', data, 8)
-    if version != 1 or fmt != 34 or [w, h] != list(input_size) or row != w * 4 or len(data) != 44 + row * h:
-        raise ValueError('MV input: not the RG16_FLOAT render-size capture')
-    mv = np.frombuffer(data, np.float16, count=w * h * 2, offset=44).reshape(h, w, 2)
-    mv = mv[dc[1]:dc[1] + dc[3], dc[0]:dc[0] + dc[2]].astype(np.float32)
+    3x3), carry the size*2 history-invalid sentinel, and how many rim texels hold a vector other than the
+    decision's (the pass ran). With eye_<stamp>_Z.bin (R32_FLOAT, the depth DLSS gets) it adds `dilation`,
+    what each ring and foreground texel receives under the nearest-depth rule; None without it."""
+    mv = _rim_capture(np, mv_path, 'MV', np.float16, 34, 2, input_size, dc)
     flags = d[..., 3].astype(np.int64)
     fg = ((flags & 15) == RIM_FOREGROUND) & ((flags & 512) != 0)
     bg = (flags & 15) == RIM_BACKGROUND
     rim = fg & (_rim_nearest(np, bg, 1)[0] == 1)
-    sentinel = mv[..., 0] >= w
+    sentinel = mv[..., 0] >= input_size[0]
+    rewritten = sentinel | (np.hypot(mv[..., 0] - d[..., 0], mv[..., 1] - d[..., 1]) > 0.5)
     return {'foreground_texels': int(fg.sum()), 'foreground_sentinel': int((fg & sentinel).sum()),
-            'foreground_rim_texels': int(rim.sum()), 'foreground_rim_sentinel': int((rim & sentinel).sum())}
+            'foreground_rim_texels': int(rim.sum()), 'foreground_rim_sentinel': int((rim & sentinel).sum()),
+            'foreground_rim_rewritten': int((rim & rewritten).sum()),
+            'dilation': (_rim_dilation(np, mv, _rim_capture(np, z_path, 'Z', np.float32, 41, 1, input_size, dc)[..., 0], d, input_size[0])
+                         if z_path is not None else None)}
 
 
 def rim_report(manifest_path):
@@ -440,7 +484,11 @@ def rim_report(manifest_path):
                                 'foreground_vector winning at the ring while current wins in the band: NVIDIA dilated the '
                                 'foreground vector over the background texel, defeating its own vector or the sentinel. '
                                 'vector_fit near 1.000 with motion in the picture: that path\'s vectors were zero. '
-                                'jitter_residual foreground unlike background: the foreground carries its own jitter or projection.'}
+                                'jitter_residual foreground unlike background: the foreground carries its own jitter or projection. '
+                                'first_frame_mv.dilation gives each texel the MV input\'s vector of the nearest texel (Z.bin) in its 3x3, as DLSS does: '
+                                'ring_kept_own and ring_hidden_sentinel are ring texels left with their own vector or none, ring_dragged ring '
+                                'texels taken along with another vector, ring_kept_reset visible ring texels reset anyway, foreground_off_vector '
+                                'weapon texels that read a vector other than their own.'}
     previous = None
     for index, entry in enumerate(frames):
         input_size = integers(entry.get('input_size'), 2, 'input size', True)
@@ -454,7 +502,8 @@ def rim_report(manifest_path):
                    'p': _rim_luma(np, capture_file(manifest_path.parent, entry.get('pre_ui_file'), f'{prefix}P{index:02}.bmp'), oc[2:])}
         if index == 0:
             mv_path = manifest_path.parent / f'{prefix}MV.bin'
-            result['first_frame_mv'] = (rim_first_frame(np, mv_path, current['d'], input_size, dc)
+            z_path = manifest_path.parent / f'{prefix}Z.bin'
+            result['first_frame_mv'] = (rim_first_frame(np, mv_path, current['d'], input_size, dc, z_path if z_path.exists() else None)
                                         if mv_path.exists() else {'unavailable': True})
         if previous and previous['frame'] + 1 == current['frame'] and previous['geometry'] == current['geometry']:
             pair = {'index': index, 'frame': current['frame']}
@@ -514,16 +563,44 @@ def rim_self_test():
         path = base / f'eye_{stamp}_decisions.json'
         path.write_text(json.dumps(dict(schema=1, stamp=stamp, requested=16, frames=frames)), encoding='utf-8')
         assert rim_report(path)['first_frame_mv'] == {'unavailable': True}
-        # Frame 0's decisions as frame 1's, and an MV input with the sentinel on the foreground's left column
-        # (a rim texel) and inside it (not a rim texel).
+        # Frame 0's decisions as frame 1's, and an MV input that is the decisions' vectors except: the sentinel on
+        # the foreground's left column (a rim texel) and inside it (not a rim texel), the right column (rim) set to
+        # the background's vector as the pass writes it, and an inner column (not rim) on its own vector, -4.
         (base / frames[0]['decision_file']).write_bytes(b'EDVRTEX1' + struct.pack('<9I', 1, w, h, 2, w * 16, 100, 0, 0, 0) + d.tobytes())
         mv = np.zeros((h, w, 2), np.float16)
+        mv[..., 0] = d[..., 0]
         mv[10:40, 20, 0] = 2 * w
         mv[20, 25, 0] = 2 * w
+        mv[10:40, 35, 0] = 6.0
+        mv[11:39, 34, 0] = -4.0
         (base / f'eye_{stamp}_MV.bin').write_bytes(b'EDVRTEX1' + struct.pack('<9I', 1, w, h, 34, w * 4, 100, 0, 0, 0) + mv.tobytes())
         first = rim_report(path)['first_frame_mv']
         assert first == {'foreground_texels': 480, 'foreground_sentinel': 31,
-                         'foreground_rim_texels': 88, 'foreground_rim_sentinel': 30}, first
+                         'foreground_rim_texels': 88, 'foreground_rim_sentinel': 30,
+                         'foreground_rim_rewritten': 60, 'dilation': None}, first
+        # The depth DLSS gets: reversed-Z, the foreground nearer than the background and nearer toward low x and
+        # high y (no ties), so a texel's nearest neighbour is the one up-left in x and down in y. Then the
+        # ring on the left column reads the sentinel (hidden: 30), the ring on the right column reads the
+        # background's own vector (kept: 30 + 2 corners), the top and bottom rings read the row beside them
+        # (3 + 3 reset by the sentinel column, 14 + 14 dragged along the foreground's -2), and the foreground's
+        # left two columns read that same sentinel column (60), its right column the inner -4 column (28, the
+        # last two rows reading a -2 row), plus the one texel up-right of the interior sentinel.
+        zz = np.ones((h, w), np.float32)
+        zy, zx = np.mgrid[0:h, 0:w]
+        zz[fg] = (2.0 - 0.001 * (zx - 20) + 0.0001 * (zy - 10))[fg]
+        z_path = base / f'eye_{stamp}_Z.bin'
+        z_path.write_bytes(b'EDVRTEX1' + struct.pack('<9I', 1, w, h, 41, w * 4, 100, 0, 0, 0) + zz.tobytes())
+        dilation = rim_report(path)['first_frame_mv']['dilation']
+        assert dilation == {'ring_texels': 96, 'ring_hidden': 30, 'ring_hidden_sentinel': 30, 'ring_kept_own': 32,
+                            'ring_kept_reset': 6, 'ring_dragged': 28, 'foreground_texels': 480, 'foreground_off_vector': 89}, dilation
+        z_path.write_bytes(b'EDVRTEX1' + struct.pack('<9I', 1, w, h, 34, w * 4, 100, 0, 0, 0) + zz.tobytes())
+        try:
+            rim_report(path)
+            raise AssertionError('a Z capture of the wrong format must be refused')
+        except ValueError:
+            pass
+        z_path.unlink()
+        assert rim_report(path)['first_frame_mv']['dilation'] is None
         pair = rim_report(path)['pairs'][0]
         assert pair['foreground_vector'] == [-2.0, 0.0] and pair['background_vector'] == [6.0, 0.0], pair
         assert pair['background_ring_hidden']['best']['foreground_vector'] >= .95, pair['background_ring_hidden']

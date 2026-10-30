@@ -1165,10 +1165,12 @@ R"HLSL(
 // mv already writes the history-invalid vector (size * 2) into background whose history was hidden, and DLSS honours it two
 // texels out, but at the one-texel ring its dilation reads the foreground texel's vector instead. Here a tracked foreground
 // texel (the engine record's own motion, enginePixelZ kind 1, decision path 11) that sits beside a FARTHER texel whose vector
-// differs by more than half a texel, or is itself history-invalid, takes the history-invalid vector too, so the dilation
-// carries "no history" into the ring; the foreground's interior keeps its vector. Runs right after mv with the same views,
-// on a copy of mv's vectors (MVW, t5) so every texel judges its neighbours' vectors as mv wrote them. The call to
-// enginePixelZ touches no counter: mv's are counted after its own call, and the statics it sets are private to the thread.
+// differs by more than half a texel, or is itself history-invalid, and that no foreground pixel takes as its nearest-depth
+// neighbour, takes the vector of the farthest texel beside it (the history-invalid vector when one of them is), so the
+// dilation hands the ring the background's own history, or none where it was uncovered; every other texel keeps its vector.
+// Runs right after mv with the same views, on a copy of mv's vectors (MVW, t5) so every texel judges its neighbours' vectors
+// as mv wrote them. The call to enginePixelZ touches no counter: mv's are counted after its own call, and the statics it
+// sets are private to the thread.
 Texture2D<float2> MVW : register(t5);
 [numthreads(8, 8, 1)]
 void weaponEdges(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
@@ -1187,6 +1189,9 @@ void weaponEdges(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
     const float2 vHere = MVW.Load(int3(texel, 0));
     if (vHere.x >= float(size.x)) return;
     bool candidate = false;
+    bool hidden = false;
+    float zFar = zHere;
+    float2 vFar = vHere;
     [unroll] for (int dy = -1; dy <= 1; ++dy) {
         [unroll] for (int dx = -1; dx <= 1; ++dx) {
             if (dx != 0 || dy != 0) {
@@ -1194,14 +1199,34 @@ void weaponEdges(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
                 const float zBeside = mvDepthTile[(local.y + 2 + dy) * 12 + local.x + 2 + dx] - knobs.x;
                 if (zBeside * 1.03 < zHere) {
                     const float2 vBeside = MVW.Load(int3(clamp(texel + int2(dx, dy), int2(0, 0), size - 1), 0));
-                    if (vBeside.x >= float(size.x) || length(vBeside - vHere) > 0.5) candidate = true;
+                    if (vBeside.x >= float(size.x)) { candidate = true; hidden = true; }
+                    else if (length(vBeside - vHere) > 0.5) candidate = true;
+                    if (zBeside < zFar) { zFar = zBeside; vFar = vBeside; }
                 }
             }
         }
     }
     if (!candidate) return;
+    // Only a texel no foreground pixel reads. DLSS gives each pixel the vector of the nearest-depth texel in its 3x3 of the
+    // raw depth above, so a texel that is the nearest (ties included) in the 3x3 of any pixel that is not 3 % farther than
+    // it, itself included, feeds that pixel -- the gun's own edge -- and keeps its vector. One that no such pixel takes feeds
+    // only the ring around the weapon, and there the background's own vector (the farthest beside it) is the right one;
+    // the history-invalid vector where the background was uncovered.
+    [unroll] for (int fy = -1; fy <= 1; ++fy) {
+        [unroll] for (int fx = -1; fx <= 1; ++fx) {
+            const int2 fIdx = local + 2 + int2(fx, fy);
+            if (mvDepthTile[fIdx.y * 12 + fIdx.x] * 1.03 >= zRaw) {
+                float zMax = 0.0;
+                [unroll] for (int ey = -1; ey <= 1; ++ey) {
+                    [unroll] for (int ex = -1; ex <= 1; ++ex)
+                        zMax = max(zMax, mvDepthTile[(fIdx.y + ey) * 12 + fIdx.x + ex]);
+                }
+                if (zMax <= zRaw) return;
+            }
+        }
+    }
     float2 engineP; float engineZ;
-    if (enginePixelZ(float2(texel), 0, true, zRaw, engineP, engineZ) == 1u) MV[id.xy] = float2(size) * 2.0;
+    if (enginePixelZ(float2(texel), 0, true, zRaw, engineP, engineZ) == 1u) MV[id.xy] = hidden ? float2(size) * 2.0 : vFar;
 }
 )HLSL"
 // (adjacent literals: MSVC caps one at 16 KB)

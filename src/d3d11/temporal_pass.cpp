@@ -1078,7 +1078,8 @@ bool                       g_csEyeJumpLatticeTried = false;
 
 // #146, the held weapon's edges (docs/weapon-edge-ghost-2026-10-29.md; experimental.clean_weapon_edges, a TEMPORARY A/B key, default on). On foot, with
 // engine-record motion bound, the weaponEdges entry (temporal_shader_source.h) runs right after mv and gives a tracked foreground texel that sits beside
-// a farther texel moving differently the history-invalid vector, so DLSS's nearest-depth dilation carries no history into the ring around the gun.
+// a farther texel moving differently, and that no foreground pixel takes as its nearest-depth neighbour, the farther texel's vector (the history-invalid
+// vector where that texel is hidden), so DLSS's nearest-depth dilation hands the ring around the gun the background's own history.
 // The key is read live in temporalPassConfigure (any thread); the counts belong to the render thread. The 10 s line is told from the eye treat, only
 // while on foot with the key on, and says what the C++ side did, so a log with no line is a build without the pass or a session not on foot.
 struct WeaponEdgesState {
@@ -5755,8 +5756,10 @@ void temporalPassConfigure(Config& cfg) {
             g_weaponEdges.keyTold = true;
             if (asked) {
                 Log::get().note(
-                    "weapon edges (#146): on -- on foot, a tracked foreground texel beside a farther texel whose vector differs by more than half a "
-                    "texel, or is hidden, takes the history-invalid vector, so DLSS's nearest-depth dilation carries no history into the ring around it.");
+                    "weapon edges (#146): on (v2) -- on foot, a tracked foreground texel beside a farther texel whose vector differs by more than half a "
+                    "texel, or is hidden, and that no level-or-nearer texel takes as its nearest-depth neighbour, carries the farthest such texel's vector "
+                    "(the history-invalid vector when one is hidden), so DLSS's nearest-depth dilation hands the ring around the weapon the background's "
+                    "own history.");
             } else {
                 Log::get().note("weapon edges (#146): off -- the mv pass's vectors go to DLSS as written.");
             }
