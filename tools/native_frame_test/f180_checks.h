@@ -523,7 +523,7 @@ inline void run180(Check&& check) {
         check(hooks.find("plan.f180 = nofoot::f180::buildPlan(g_pfzParents, joints);") != std::string::npos && hdr.find("nofoot::f166::Plan f180;") != std::string::npos,
               "F180b: the plan of the spine and the neck rides the arm plan");
         // F180b: the raise made after: it reads the neck from g_pfzAnim, which the stage has written
-        check(has("const float* nk = froze && g_ikFzSlot[34] != 0xFFFFu ? g_pfzChain[g_ikFzSlot[34]] : g_pfzAnim[34];") && has("pc.f179StandRaise = nofoot::f179::standingRaiseM(N0[1],"),
+        check(has("const float* nk = froze && g_ikFzSlot[34] != 0xFFFFu ? g_pfzChain[g_ikFzSlot[34]] : g_pfzAnim[34];") && has("pc.f179StandRaise = nofoot::f179::legsRaiseAskedM(legsRoomM,"),
               "F180b: F179a's raise and the guard read the neck 34 and the chest 24 from g_pfzAnim in the pin, after the stage has written it");
         // F180c: the key, the geometry off at 0, the measuring context, the three acting sites gated, the window closing on a change
         check(has("std::atomic<float> g_neckGuardCm{static_cast<float>(nofoot::f179::kNeckGuardDefaultCm)};") &&
@@ -531,7 +531,7 @@ inline void run180(Check&& check) {
                   has("if (first || cm != g_neckGuardCmLast)") && has("native on foot neck guard distance (F180c, TEMPORARY): experimental.native_on_foot_neck_guard_cm = %.1f cm") &&
                   has("g_neckGuardCm.store(static_cast<float>(cm), std::memory_order_relaxed);"),
               "F180c (F181: the pilot's value): the key is read from [experimental] with the default 2 (was 10), held to 0..20, logged at the first read and at each change, and stored for the pin");
-        check(has("if (!(pc.f179DistM > 0.0)) g179 = nofoot::f179::Geometry{};") && has("pc.f179Measure = pc.f179Ctx == nofoot::f179::kHipUnarmed;") &&
+        check(has("if (!(pc.f179DistM > 0.0)) g179 = nofoot::f179::Geometry{};") && has("pc.f179Measure = !nofoot::f179::guardActs(pc.f179Ctx);") &&
                   has("if (!pc.f179Measure) pc.f179PushPre = nofoot::f179::guardTarget(g179, N0, pc.f179Bias, T, pc.f179DistM, &pc.f179Bounded);") && has("if (g179.ok && !pc.f179Measure) pc.f179PushPre = nofoot::f179::guardTarget(g179, N0, pc.f179Bias, physicalTarget, pc.f179DistM, &pc.f179Bounded,") &&
                   has("if (g179.ok && !pc.f179Measure) {\n        const double thWithPost[3]") && has("if (g179.ok && !pc.f179Measure) {\n            const nofoot::PinMove formed = nofoot::pinMove(N0, desiredNeck);") &&
                   has("if (pc.f179Measure) pc.f179Would = nofoot::f179::deficitBoundedM(pc.f179PredRaw + pc.f179Bias, pc.f179DistM, &pc.f179Bounded);") && has("gs.wouldM = pc.f179Would;"),

@@ -17015,6 +17015,26 @@ uint32_t g_pinEyeCalRefGen = 0;
 bool g_pinEyeCalRefGenHave = false;
 std::atomic<uint32_t> g_pinEyeCalDone{0};   // the frame thread logs the calibration once per completion
 // Returns false only when a span write faulted (the caller stands the IK down); every other outcome lets the stages after it run.
+// F97a's cap and F184's standing raise: what the legs give a raise before a foot would lift (nofoot::f97::legRaiseRoom on the animated hip, knee and foot of each leg; the smaller of the two).
+// Not a number without legs or with no readable leg.
+double legsRaiseRoomM(const pfz::ArmPlan& pl, uint32_t count) noexcept {
+    if (!pl.legOk) return std::nan("");
+    double room = std::numeric_limits<double>::infinity();
+    for (int k = 0; k < 2; ++k) {
+        const nofoot::IkArm& g = pl.leg[k];
+        if (g.U >= count || g.F >= count || g.H >= count) continue;
+        double hip0[3], knee0[3], foot0[3];
+        for (int i = 0; i < 3; ++i) {
+            hip0[i] = g_pfzAnim[g.U][12 + i];
+            knee0[i] = g_pfzAnim[g.F][12 + i];
+            foot0[i] = g_pfzAnim[g.H][12 + i];
+        }
+        const double hk[3] = {knee0[0] - hip0[0], knee0[1] - hip0[1], knee0[2] - hip0[2]}, kf[3] = {foot0[0] - knee0[0], foot0[1] - knee0[1], foot0[2] - knee0[2]},
+                     hf[3] = {foot0[0] - hip0[0], foot0[1] - hip0[1], foot0[2] - hip0[2]};
+        room = std::min(room, nofoot::f97::legRaiseRoom(hip0[1], foot0[1], nofoot::ikLen(hk), nofoot::ikLen(kf), nofoot::ikLen(hf), nofoot::kStandReach));
+    }
+    return std::isfinite(room) ? room : std::nan("");
+}
 bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t now, const IkGData* G, const float (*fpm)[16], bool armed, double armedW,
                uint32_t itemSerialForCall, bool exactRifleForCall, double rifleQualityWeight, const nofoot::IkPhysicalPoleSet* physicalPole,
                bool physicalPoleActive, bool stableSupportPolicy, bool rifleStableAuthority, double detachForCall, const double adsPush[3], double wBase, bool solveWrite,
@@ -17060,6 +17080,7 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
     nofoot::PinMove mv;
     double E[3] = {}, T[3] = {}, N0[3] = {}, d0[3] = {};
     nofoot::f179::Geometry g179;   // F179b: the eye as drawn, the chest as animated and the eye's heading (ok when all three are readable); set before the first move is formed
+    double legsRoomM = std::nan("");   // F184: what the legs give a raise (the standing raise's ask in the sights; no eye in it)
     double f97W = 0.0, f97EyeOverE = 0.0, f97H = nofoot::f94::kEyeHeightDefaultCm * 0.01;   // F97a: F88's weight, the eye at the hip over the pin's eye (m), the key (m)
     const bool heldRifle = exactRifleForCall;
     bool neckYawEligible = false, neckYawInputsHave = false;
@@ -17427,8 +17448,11 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
             // F179a: standing in the sights the body keeps a raise: the neck at the eye as drawn at the hip less the eye height key (vertical only, a raise), by the standing share (F178's weight:
             // (1 - the crouched weight) x the detach weight), in place of F97a's release with the detach. The BODY's neck target (the pin's T, capped by the legs below); the eye, the sight
             // lock, the grips' targets and the eye alignment raise F138 and F172 publish for the camera are not touched. 0 crouched, at the hip and unarmed: the earlier value bit for bit.
+            // F184: the raise is asked of the legs directly (their room, F97a's cap, by the standing share): the eye is not read, so the body the camera rides on does not feed itself (the loop that sat
+            // at the legs' cap in 4347 of 4395 calls). At the hip and crouched the standing share is 0 and so is the ask.
+            legsRoomM = legsRaiseRoomM(pl, count);
             pc.f179StandW = nofoot::f178::weight(pc.postureW, pc.detachW);
-            pc.f179StandRaise = nofoot::f179::standingRaiseM(N0[1], pc.eyeYSelected + f97EyeOverE, f97H, pc.postureW, pc.detachW);
+            pc.f179StandRaise = nofoot::f179::legsRaiseAskedM(legsRoomM, pc.postureW, pc.detachW);
             at = nofoot::f179::withStandingRaise(at, N0[1], f97W, pc.f179StandRaise);
             T[1] = at.y;
             pc.f97W = f97W;
@@ -17668,7 +17692,7 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
             g179 = nofoot::f179::makeGeometry(pc.f97EyeDrawnOk, pc.f97EyeDrawn, pc.hEye[0], pc.hEye[1], chestOk, chest0);
             if (!(pc.f179DistM > 0.0)) g179 = nofoot::f179::Geometry{};
             pc.f179Ctx = nofoot::f179::contextOf(armed, pc.detachW, pc.postureW);
-            pc.f179Measure = pc.f179Ctx == nofoot::f179::kHipUnarmed;
+            pc.f179Measure = !nofoot::f179::guardActs(pc.f179Ctx);   // F184: the guard acts at the hip armed alone; unarmed and in the sights it measures only
             pc.f179Ms = now;
             // F183: and when the stable heading turns over 20 deg between calls the error was measured on another geometry: reset (counted)
             const double lastH[2] = {g_f179Bias.hx, g_f179Bias.hz};
@@ -17956,7 +17980,7 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
             // F179a: and the standing raise, as on the legacy target above
             physicalTarget[1] = nofoot::f179::withStandingRaise(
                 nofoot::f97::armedNeckTarget(N0[1], physicalTarget[1], pc.eyeYSelected + f97EyeOverE, f97H, pc.detachW, f97W, pc.postureW, restBeforeDetachY + neckViewShift[1]), N0[1], f97W,
-                nofoot::f179::standingRaiseM(N0[1], pc.eyeYSelected + f97EyeOverE, f97H, pc.postureW, pc.detachW)).y;
+                nofoot::f179::legsRaiseAskedM(legsRoomM, pc.postureW, pc.detachW)).y;   // F184: the legs' room, not the eye
             // F179b: the neck guard on this target, as on the legacy one above (this target replaces it)
             if (g179.ok && !pc.f179Measure) pc.f179PushPre = nofoot::f179::guardTarget(g179, N0, pc.f179Bias, physicalTarget, pc.f179DistM, &pc.f179Bounded,
                                                                                          nofoot::f179::budgetLeftM(pc.f179DistM, pc.f179OffPost));
@@ -18208,19 +18232,8 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
         // F97a: a raise is capped where a leg would have to lift its foot (legPlant's own reach over the planted foot), so the feet stay on the ground
         if (mv.delta > 0.0 && pl.legOk) {
             double room = mv.delta;
-            for (int k = 0; k < 2; ++k) {
-                const nofoot::IkArm& g = pl.leg[k];
-                if (g.U >= count || g.F >= count || g.H >= count) continue;
-                double hip0[3], knee0[3], foot0[3];
-                for (int i = 0; i < 3; ++i) {
-                    hip0[i] = g_pfzAnim[g.U][12 + i];
-                    knee0[i] = g_pfzAnim[g.F][12 + i];
-                    foot0[i] = g_pfzAnim[g.H][12 + i];
-                }
-                const double hk[3] = {knee0[0] - hip0[0], knee0[1] - hip0[1], knee0[2] - hip0[2]}, kf[3] = {foot0[0] - knee0[0], foot0[1] - knee0[1], foot0[2] - knee0[2]},
-                             hf[3] = {foot0[0] - hip0[0], foot0[1] - hip0[1], foot0[2] - hip0[2]};
-                room = std::min(room, nofoot::f97::legRaiseRoom(hip0[1], foot0[1], nofoot::ikLen(hk), nofoot::ikLen(kf), nofoot::ikLen(hf), nofoot::kStandReach));
-            }
+            const double legsRoom = legsRaiseRoomM(pl, count);   // F184: one function for the cap and the standing raise's ask
+            if (std::isfinite(legsRoom)) room = std::min(room, legsRoom);
             if (room < mv.delta) {
                 pc.f97Capped = true;
                 mv.delta = room > 0.0 ? room : 0.0;
@@ -24351,8 +24364,8 @@ void f125PinPrint(const F125PinWindow& w) noexcept {
                 const PinStats::F97Bin& f = st.f97[sb];
                 if (!f.n) continue;
                 const double n97 = static_cast<double>(f.n), gn97 = f.legsN ? static_cast<double>(f.legsN) : 1.0, cn97 = f.clrN ? static_cast<double>(f.clrN) : 1.0;
-                char tail97[120] = "";
-                if (nofoot::f97::binInSights(sb)) std::snprintf(tail97, sizeof(tail97), "; the standing share (F179a) mean %.2f, its raise asked %+.1f cm", f.ssSum / n97, f.srSum / n97);
+                char tail97[168] = "";
+                if (nofoot::f97::binInSights(sb)) std::snprintf(tail97, sizeof(tail97), "; the standing share (F179a) mean %.2f, its raise asked %+.1f cm, source: the legs' room, not the eye", f.ssSum / n97, f.srSum / n97);
                 Log::get().note("native on foot armed body (F97a) %u s: item %s; %s %u calls: weapon weight %.2f; the neck raised %+.1f cm (min %+.1f max %+.1f; asked %+.1f; "
                                 "capped by the legs %u), written %.3f m against animated %.3f m; the eye as drawn over the clavicle line %+.1f cm (min %+.1f), ahead of the "
                                 "chest %+.1f cm (min %+.1f), INSIDE %u of %u; legs hip to foot over the leg: animated %.3f, written %.3f (min %.3f), feet lifted %u%s",

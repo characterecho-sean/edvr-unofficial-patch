@@ -245,7 +245,7 @@ inline void run183(Check&& check) {
         m.merge(c);
         m.merge(c);
         char line[1300], meas[1300];
-        const int len = f179::formatContext(line, sizeof(line), 10, "$wpn_m_shotgun_plasma_doublebarrel_name;", f179::kAdsStanding, c.c[f179::kAdsStanding], 4.0);
+        const int len = f179::formatContext(line, sizeof(line), 10, "$wpn_m_shotgun_plasma_doublebarrel_name;", f179::kHipArmed, c.c[f179::kAdsStanding], 4.0);   // F184: the acting format is the hip armed's (the counters are any context's)
         f179::Sample mm;
         mm.ctx = f179::kHipUnarmed;
         mm.wouldM = 0.02;

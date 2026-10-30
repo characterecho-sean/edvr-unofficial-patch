@@ -22,6 +22,15 @@
 // reachable); one that only the post-reach add (F169, and F178's forward dial) would cause is taken off that add first; what is left after it, the reach rule's own, is taken off the move
 // last (the guard has the last word). The prediction is a translation; the torso's bend and turns are not in it, so the error measured on the call before (measured less predicted, filtered)
 // is added to the next prediction. The measured figure after the writes is the line's; "held" is read from it.
+//
+// ---- F184: in the sights nothing that moves the body reads the drawn eye
+// The flight edvr_gfx_20261030_134445 (build d7e918d1): engaged level and then raised to the +85.2 clamp the view held (0.2-0.6 mm rms, the guard idle); engaged at the clamp from the hip the
+// guard pushed at its bound (14 cm) in every second, the sight lock's e-perpendicular after the lock 21-24 cm, the arms 20-24 cm short, the view 4.5-67 mm rms. In the sights the body feeds
+// the camera the eye is read from (F94a: the game's camera +28 to +30 cm over the neck in every second, bad and good), the gun's sight line is fixed to that camera and the lock puts the drawn
+// eye on it: anything that moves the body from the eye closes a loop. Two readers did: the guard (the eye ahead of the chest: a push moves the chest and the eye with it, so the deficit never
+// closes) and the standing raise (the neck at the eye less the eye height: a raise lifts the eye; it sat at the legs' cap in 4347 of 4395 calls). Now (a) the guard acts at the hip armed alone
+// and measures only everywhere else (unarmed, and in the sights: guardActs) -- the push it would make is counted, nothing moves; (b) the standing raise in the sights is asked of the legs
+// directly (legsRaiseAskedM: the legs' room, F97a's cap, by the standing share): the steady state the loop reached at the cap, with no eye in it.
 #pragma once
 
 #include "native_on_foot_core.h"
@@ -41,7 +50,13 @@ namespace f179 {
 
 // ---- F179a ----------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
-// The standing raise asked, m (>= 0): the neck at the eye as drawn at the hip less the eye height key, over the animated neck, times the standing weight. 0 for any figure that is not a number,
+// F184: what the legs give a raise before a foot would lift (F97a's cap: nofoot::f97::legRaiseRoom on the animated hips, knees and feet, the smaller of the two legs') is the standing raise asked in
+// the sights, times the standing weight (m, >= 0; 0 for a room that is not a number, crouched and at the hip). No eye in it: the loop the eye-based figure below closed (the pin no longer uses it).
+inline double legsRaiseAskedM(double roomM, double postureW, double detachW) noexcept {
+    if (!std::isfinite(roomM)) return 0.0;
+    return (roomM > 0.0 ? roomM : 0.0) * f178::weight(postureW, detachW);
+}
+// The standing raise asked from the eye (before F184), m (>= 0): the neck at the eye as drawn at the hip less the eye height key, over the animated neck, times the standing weight. 0 for any figure that is not a number,
 // when the animated neck is already that high, crouched (the standing share 0) and at the hip (the detach weight 0).
 inline double standingRaiseM(double n0y, double eyeHipLevelY, double eyeHeightM, double postureW, double detachW) noexcept {
     if (!std::isfinite(n0y) || !std::isfinite(eyeHipLevelY) || !std::isfinite(eyeHeightM)) return 0.0;
@@ -80,6 +95,8 @@ constexpr uint32_t kMinFrames = 30;                               // the health 
 
 // The contexts the guard is reported in.
 enum Ctx : int { kHipUnarmed = 0, kHipArmed = 1, kAdsStanding = 2, kAdsCrouched = 3, kCtxN = 4 };
+// F184: the guard moves the body at the hip armed alone; unarmed and in the sights it measures only (the push it would make is counted, nothing is moved).
+inline bool guardActs(int ctx) noexcept { return ctx == kHipArmed; }
 inline const char* ctxName(int c) noexcept {
     return c == kHipUnarmed ? "hip unarmed" : c == kHipArmed ? "hip armed" : c == kAdsStanding ? "ADS standing" : "ADS crouched";
 }
@@ -266,13 +283,13 @@ struct Counters {
 // the part taken off the post-reach dial add (frames, mean and largest, cm); the eye ahead of the chest before the guard (as the pose and dials would put it: predicted; min and mean), after
 // it as measured (the frames it was measured on, min and mean), the prediction of that figure (mean), and the measured frames under 9 cm. cm throughout. Under the log's 1200 bytes.
 //
-// F180c: the line says the guard's distance (guardCm, the key's value: experimental.native_on_foot_neck_guard_cm). Unarmed at the hip the guard measures only and nothing is moved, so that
-// context's line says "would push" (the frames the push it would have made was over 0, its mean over those and largest) in place of the pushes and the post-reach add, and has no frames
+// F180c: the line says the guard's distance (guardCm, the key's value: experimental.native_on_foot_neck_guard_cm). Unarmed at the hip (and, F184, in the sights) the guard measures only and
+// nothing is moved, so those contexts' lines say "would push" (the frames the push it would have made was over 0, its mean over those and largest) in place of the pushes and the post-reach add, and has no frames
 // under the distance (the rule never reads it PARTIAL).
 inline int formatContext(char* buf, size_t n, uint32_t seconds, const char* item, int ctx, const Ctx1& k, double guardCm = kNeckGuardAheadCm) noexcept {
     const auto mean = [](double sum, uint32_t cnt) noexcept { return cnt ? sum / static_cast<double>(cnt) : 0.0; };
     const int cx = Counters::clampCtx(ctx);
-    if (cx == kHipUnarmed)
+    if (!guardActs(cx))   // F184: the contexts that only measure: unarmed at the hip (F180c) and the sights
         return std::snprintf(buf, n,
                              "native on foot neck guard (F179b) %u s: item %s; %s %u frames, the guard at %.1f cm, measuring only (nothing is moved): would push %u frames, the push mean %.1f cm (largest %.1f); "
                              "the eye ahead of the chest (as the pose puts it) min %+.1f mean %+.1f cm, as measured (%u frames) min %+.1f mean %+.1f, predicted mean %+.1f, bounded pushes %u, error resets %u",

@@ -375,8 +375,9 @@ inline void run179(Check&& check) {
                   eq(m.c[f179::kAdsStanding].afterMin, 0.08, 1e-15) && m.c[f179::kHipUnarmed].frames == 100 && eq(m.c[f179::kAdsStanding].beforeSum, 2.0 * ads.beforeSum, 1e-12),
               "F179b: two windows add up");
         char line[1400];
-        const int len = f179::formatContext(line, sizeof(line), 10, "$wpn_m_shotgun_plasma_doublebarrel_name;", f179::kAdsStanding, ads);
-        check(len > 0 && std::strstr(line, "native on foot neck guard (F179b) 10 s: item $wpn_m_shotgun_plasma_doublebarrel_name;; ADS standing 100 frames, the guard at 10.0 cm: pushed 20, the push mean 4.0 cm (largest 4.0); "
+        // F184: the acting format belongs to the hip armed alone (the sights measure only: F184's rig); the figures are the same ones, named for the context that acts
+        const int len = f179::formatContext(line, sizeof(line), 10, "$wpn_m_shotgun_plasma_doublebarrel_name;", f179::kHipArmed, ads);
+        check(len > 0 && std::strstr(line, "native on foot neck guard (F179b) 10 s: item $wpn_m_shotgun_plasma_doublebarrel_name;; hip armed 100 frames, the guard at 10.0 cm: pushed 20, the push mean 4.0 cm (largest 4.0); "
                                            "off the post-reach dial add 10 frames, mean 2.0 cm (largest 2.0); the eye ahead of the chest before the guard (as the pose and dials would put it) min +6.0 mean +17.2 cm, "
                                            "after it as measured (100 frames) min +8.0 mean +9.8, predicted after mean +18.0, under 9 cm 10") != nullptr,
               "F179b: the context's line names the tag, the item, the context, the frames, the pushes (mean over the pushed, largest), the add taken off, the eye ahead of the chest before and after, the prediction and the frames under 9 cm");
@@ -426,7 +427,7 @@ inline void run179(Check&& check) {
         const auto has = [&](const std::string& needle) { return cpp.find(needle) != std::string::npos; };
         const auto at = [&](const std::string& needle) { return cpp.find(needle); };
         // F179a: the body's neck target (T), right after F97a's, and the rest path's; the eye alignment raise is not touched by it
-        check(has("at = nofoot::f179::withStandingRaise(at, N0[1], f97W, pc.f179StandRaise);") && has("pc.f179StandRaise = nofoot::f179::standingRaiseM(N0[1], pc.eyeYSelected + f97EyeOverE, f97H, pc.postureW, pc.detachW);") &&
+        check(has("at = nofoot::f179::withStandingRaise(at, N0[1], f97W, pc.f179StandRaise);") && has("pc.f179StandRaise = nofoot::f179::legsRaiseAskedM(legsRoomM, pc.postureW, pc.detachW);") &&
                   has("physicalTarget[1] = nofoot::f179::withStandingRaise(") && has("T[1] = at.y;"),
               "F179a: the standing raise is made on the body's neck target T (right after F97a's armed target, before T[1] is set) and on the rest path's physical target, from the eye as drawn at the hip less the key");
         const size_t armed = at("nofoot::f97::ArmedTarget at = nofoot::f97::armedNeckTarget("), wrap = at("at = nofoot::f179::withStandingRaise(at, N0[1]"), setT = at("T[1] = at.y;"),
