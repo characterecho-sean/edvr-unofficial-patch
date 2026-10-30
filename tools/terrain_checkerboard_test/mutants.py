@@ -64,7 +64,8 @@ RUN_TIMEOUT = 180.0
 # The files a temp tree holds for each kind (a mutation edits one of them; the rest are copies). Relative paths inside it are the repo's, so the
 # sources' relative includes resolve inside the temp tree.
 HEADER_FILES = [NOTICE, READER, BLOOM, BLOOM_READER, FLAT_SETTINGS, "src/d3d11/flat_mono_frame.h", "src/d3d11/flat_temporal_model.h", "src/common/elite_graphics_folder.h"]
-WORKER_FILES = HEADER_FILES + [WORKER, WORKER_H, "src/common/config.h", "src/common/ini_name.h", "src/common/runtime_profile.h", "src/common/guard.h", "src/common/log.h"]
+WORKER_FILES = HEADER_FILES + [WORKER, WORKER_H, "src/common/config.h", "src/common/ini_name.h", "src/common/runtime_profile.h", "src/common/flat_profile_keys.h", "src/common/install_scope.h", "src/common/stereo_mode.h", "src/common/guard.h",
+                                                                   "src/common/log.h", "src/common/log_reserve.h"]
 PIN_FILES = [NOTICE, READER, BLOOM, BLOOM_READER, WORKER, WORKER_H, FLAT_SETTINGS, MENU, FLAT_RUNTIME, PROXY, HOOK]
 CODE_TARGETS = (NOTICE, READER, BLOOM, BLOOM_READER)   # the headers a code mutation edits; the header flavour of the rig runs the rules below
 CODE_RULES = ("T1", "T2", "T3", "T4", "T7")
