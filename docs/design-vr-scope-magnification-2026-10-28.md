@@ -1069,4 +1069,6 @@ good on all counts". `--health` exits 3 on F91 and F85c NEVER APPLIED, both alre
 **2026-10-30, the crisp reticle key retired** (the maintainer: "Yes, retire it", asked with the key quoted). `experimental.native_on_foot_ads_crisp_reticle` (on | off, live, default on) is gone and its on is the behaviour:
 the reader, the atomic, the gate's key field (`crisp::GateIn::keyOn`), the startup note `native on foot ADS crisp reticle (C1, TEMPORARY)`, the ini entry and its Experimental page row are removed. The announce is written once a
 session and neither line names a key (formats above). Rigs: `scope_zoom_test` checks that the key is read nowhere (the source, `edvr.ini`, `crisp_reticle.h`), with controls that put the read, the ini entry and the field back;
-`sharp_weapons_test`'s key-off case became a sight the lens names; `edvr_log.py --self-test` reads the keyed formats as UNPARSED. A stale `native_on_foot_ads_crisp_reticle` line in a live `edvr.ini` is read by nothing.
+`sharp_weapons_test`'s key-off case became a sight the lens names; `edvr_log.py --self-test` reads the keyed formats as UNPARSED. A stale `native_on_foot_ads_crisp_reticle` line in a live `edvr.ini` is read by nothing. Built `1418cc88` (full build, all gates; `--dll-only` on the clean
+tree), installed on Epic `--scope both --xess`, `--verify-only` passed; the live Epic `edvr.ini` lost its two crisp reticle lines (the comment and the key, edited with the Edit tool, diffed: two deletions). Not flown; the
+behaviour is the flown on.
