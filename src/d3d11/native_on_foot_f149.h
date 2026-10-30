@@ -11,7 +11,7 @@
 //   base   the game's unscoped ADS camera depth for the item (kAdsCameraDepths): a measurement, one value per item whatever the scope state. The game backs the camera off with a
 //          scope because it zooms at the same time (the scoped plasma sniper's is 5.0, the unscoped one's 16.0); VR cannot zoom, so following the scoped camera would make the
 //          scope view smaller than the unscoped one, and the unscoped camera is the base for both.
-//   offset the baked back-off from that camera (kAdsBackOffs): 0 for an item without a row. Only the two weapons whose camera puts the eye inside the gun have one. A flown value
+//   offset the baked offset from that camera (kAdsBackOffs; negative is back, positive forward): 0 for an item without a row. Only the weapons whose camera puts the eye off its place have one. A flown value
 //          changes this table and no other.
 //   trim   the live setting in the experimental menu (-30..+30 cm, 0 adds nothing), added to the held weapon's depth, whatever the weapon.
 // An item without a row in kAdsCameraDepths (the TK Aphelion has no measurement) takes its settled line's E forward as the base when the held copy is known unscoped (the settled line
@@ -72,8 +72,13 @@ constexpr int kAdsCameraDepthCount = static_cast<int>(sizeof(kAdsCameraDepths) /
 // edvr_gfx_20261028_050843) and he dialled 6 cm with the trim and held it 55 s (flight edvr_gfx_20261028_073013, from 07:33:22): -19.0 from the camera; in flight
 // edvr_gfx_20261028_090045 he swept the trim to +21 and back and settled at 0, so 6 cm stands. The laser SMG's -3.0 (12 cm) is the pilot's too: the first guess was -5.0 (10 cm), and in
 // flight edvr_gfx_20261028_090045 he dialled +2.0 from it and held that 38 s, from 09:08:26. An item without a row has offset 0.
+// F182a: the plasma shotgun's is +9.5, FORWARD of the camera (a positive offset is forward, a negative one back; the two before it are back): the shotgun's camera (0.01) puts the eye 9.5 cm
+// too far back. The pilot dialled the trim to 9.5 and held it over the ADS seconds of 11:57:05 to 11:57:07 in the flight edvr_gfx_20261030_115059 (F152's line: depth 9.51 = camera 0.01 +
+// baked 0 + the trim 9.50), which also gave the plasma assault rifle the same +9.50 from the trim (11:57:13): the pilot wants it for the shotgun only, so it is baked here and the trim
+// goes back to 0 (the shotgun's depth is 9.51 at trim 0).
 constexpr ItemCm kAdsBackOffs[] = {
     {"$wpn_m_assaultrifle_kinetic_fauto_name;", -19.0},
+    {"$wpn_m_shotgun_plasma_doublebarrel_name;", 9.5},
     {"$wpn_m_submachinegun_laser_fauto_name;", -3.0},
 };
 constexpr int kAdsBackOffCount = static_cast<int>(sizeof(kAdsBackOffs) / sizeof(kAdsBackOffs[0]));

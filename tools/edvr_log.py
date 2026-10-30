@@ -14801,18 +14801,21 @@ H180B_RE = (r"native on foot standing ADS spine \(F180b, TEMPORARY\) (?P<wl>\d+)
             r"the reference: hip frames (?P<s1>\d+), the press's first frame (?P<s2>\d+), none (?P<s0>\d+); lean about the body's right axis \(deg, forward positive\) animated/reference/written: "
             r"spine 16 (?P<a0>%s)/(?P<r0>%s)/(?P<w0>%s), spine 21 (?P<a1>%s)/(?P<r1>%s)/(?P<w1>%s), chest 24 (?P<a2>%s)/(?P<r2>%s)/(?P<w2>%s), neck 34 (?P<a3>%s)/(?P<r3>%s)/(?P<w3>%s); "
             r"the neck from the eye \(right/up/forward, cm\) after (?P<nar>%s)/(?P<nau>%s)/(?P<naf>%s), before (?P<nbr>%s)/(?P<nbu>%s)/(?P<nbf>%s); the left shoulder from the eye after "
-            r"(?P<sar>%s)/(?P<sau>%s)/(?P<saf>%s), before (?P<sbr>%s)/(?P<sbu>%s)/(?P<sbf>%s); F179a's leg raise asked mean (?P<raise>%s) cm" % ((_HN,) * 25))
+            r"(?P<sar>%s)/(?P<sau>%s)/(?P<saf>%s), before (?P<sbr>%s)/(?P<sbu>%s)/(?P<sbf>%s); F179a's leg raise asked mean (?P<raise>%s) cm"
+            # F182b: the one-sided rule's frames left as animated per bone (builds before F182 print none)
+            r"(?:; left as animated, leaning back of the reference \(frames\): spine 16 (?P<l0>\d+), spine 21 (?P<l1>\d+), chest 24 (?P<l2>\d+), neck 34 (?P<l3>\d+))?" % ((_HN,) * 25))
 H180B_DIAL_RE = (r"native on foot standing ADS spine dial \(F180b, TEMPORARY\): experimental\.native_on_foot_stand_ads_spine_straighten = (?P<val>[\d.]+) -- ")
 
 
 def _hj_f180b_spine(rows, ctx):
     """F180b (TEMPORARY): the standing ADS spine straighten. Standing in the sights the game's aiming animation hunches the upper spine (levels 16, 21, 24) and the neck (34) forward (the flight
-    edvr_gfx_20261030_10xxxx: the chest's lean +23.4 deg as written, the neck cannot be brought under the headset, the spine still looks curved). The dial takes the share given back out: each
-    level's local rotation is slerp(animated, reference, dial x the standing share x the detach weight), the reference being the same item's levels on the last standing hip frames (the press's first
-    frame when there were none). Per item: the frames, the dial, the share, the frames the levels were written in, the reference's source, the four bones' lean animated / reference / written,
-    the neck and the left shoulder from the eye after the writes and before the straighten, F179a's leg raise asked. NEVER APPLIED when 30 or more frames stood in the sights with the dial at
-    0.1 or more and no level was written in any; PARTIAL when the levels were written in under half of those frames; the dial at 0 is the baseline: OK. Under 30 frames is IDLE, and so is a log
-    whose only F180b lines are the dial's own note (the key was read, no standing ADS frame came). No line, no verdict."""
+    edvr_gfx_20261030_10xxxx: the chest's lean +23.4 deg as written, the neck cannot be brought under the headset, the spine still looks curved). The dial takes the share given back out, one-sided
+    since F182b: of each bone's lean about the body's right axis, only the forward bend BEYOND the reference is taken back (written = animated - share x max(0, animated - reference)); a bone
+    that leans back of the reference (looking up leans the torso back) is left as animated. The reference is the same item's levels on the last standing hip frames (the press's first frame when
+    there were none). Per item: the frames, the dial, the share, the frames the rule was made in ("written" counts a frame whose bones were all left as animated), the reference's source, the four
+    bones' lean animated / reference / written, the neck and the left shoulder from the eye after the writes and before the straighten, F179a's leg raise asked, and (F182b) per bone the frames it was
+    left as animated. NEVER APPLIED when 30 or more frames stood in the sights with the dial at 0.1 or more and the rule was made in none; PARTIAL when it was made in under half of those frames;
+    the dial at 0 is the baseline: OK. Under 30 frames is IDLE, and so is a log whose only F180b lines are the dial's own note (the key was read, no standing ADS frame came). No line, no verdict."""
     sec, notes_dial = rows.get("sec", []), rows.get("dial", [])
     if not sec:
         if not notes_dial:
@@ -14838,6 +14841,9 @@ def _hj_f180b_spine(rows, ctx):
                          item, _hsecs(rs), frames, mean("dial"), dialmax, mean("share"), wrote, src1, src2, src0,
                          mean("a0"), mean("r0"), mean("w0"), mean("a1"), mean("r1"), mean("w1"), mean("a2"), mean("r2"), mean("w2"), mean("a3"), mean("r3"), mean("w3"),
                          mean("nar"), mean("nau"), mean("naf"), mean("nbr"), mean("nbu"), mean("nbf"), mean("sar"), mean("sau"), mean("saf"), mean("sbr"), mean("sbu"), mean("sbf"), mean("raise")))
+        if any(r.get("l0") is not None for r in rs):   # F182b: the one-sided rule's frames left as animated per bone (a build before F182 prints none)
+            lv = [sum(int(r["l%d" % k]) for r in rs if r.get("l%d" % k) is not None) for k in range(4)]
+            parts[-1] += ("; left as animated (the bone leaned back of the reference, frames): spine 16 %d, spine 21 %d, chest 24 %d, neck 34 %d" % tuple(lv))
         if frames >= 30 and dialmax >= 0.1:
             if not wrote:
                 never.append("the dial reached %.2f and no level was written in any of %d frames standing in the sights with %s (the reference: hip frames %d, the press's first frame %d, none %d)" % (
@@ -14855,6 +14861,54 @@ def _hj_f180b_spine(rows, ctx):
         return ("IDLE", text + "; under 30 frames standing in the sights: little to judge")
     if dial_seen < 0.01:
         return ("OK", text + "; the dial was 0: these are the baseline figures")
+    return ("OK", text)
+
+
+# F182c: the left hand stays on a two-handed gun aimed steeply up (formatClause in src/d3d11/native_on_foot_f182.h, the ending of the F67f line). The ending is printed only for a window with a
+# steep two-handed ADS call, so the F67f line without it (any window of a flat or hip flight, or a build before F182) is a "plain" row: it tells an idle flight from a rule that no longer matches.
+# The F67f line is the detail log's (needs_detail), as F69h's is.
+H182C_LABEL = "native on foot armed arms (F67f)"
+H182C_RE = (r"native on foot armed arms \(F67f\): .*?; steep two-handed ADS \(F182c\): (?P<steep>\d+) calls \(the sights, the aim pitch 45 deg or more up\), F69h freed the off hand in (?P<freed>\d+), "
+            r"held on the item by F182c (?P<held>\d+) \(the pitch over 45 deg\), its grip point age mean (?P<agem>[\d.]+) max (?P<agex>[\d.]+) ms, hand-to-grip error of the held calls "
+            r"mean (?P<errm>[\d.]+) max (?P<errx>[\d.]+) cm, ended by the (?P<lims>[\d.]+) s limit (?P<limit>\d+)")
+H182C_PLAIN_RE = r"native on foot armed arms \(F67f\): (?!.*F182c)"   # an ending that names F182c and does not match the pattern above is neither: unparsed
+H182C_MIN_STEEP = 30       # fewer steep two-handed ADS calls than this are too few to judge
+H182C_MIN_FREED = 5        # F69h freed the hand in this many steep calls and the hold held none: the hold never applied
+H182C_HELD_CM = 1.0        # the held calls' mean hand-to-grip error under this is a hand on the point
+
+
+def _hj_f182c_steep_grip(rows, ctx):
+    """F182c: the left hand stays on a two-handed gun aimed steeply up. The flight edvr_gfx_20261030_115059 (the plasma shotgun, aim pitch +74.6) had F69h free the off hand in 4 to 9 calls of every
+    window (the FP pair 31.1 cm apart and steady all the while: the input was unreadable, the FP snapshot older than 100 ms in the game's stalls and EDVR's own 1.15 s dump ticks, and 11 fresh
+    frames are needed to take the hand back). In the sights (detach 0.5 or more) with the aim pitch 45 deg or more up and a grip point stored from F69h's last full two-handed call on the item,
+    the left grip target is that point, kept in the right target's frame, while F69h does not hold the pair (at most 3 s of hook time, counted). Reads the ending of the F67f line: the steep
+    two-handed ADS calls, those F69h freed the hand in, those held, the stored point's age (mean, largest), the held calls' hand-to-grip error (mean, largest) and the holds the 3 s limit ended.
+    IDLE with no steep call (an F67f line without the ending is not a verdict) and under 30 steep calls; NEVER APPLIED when F69h freed the hand in 5 or more steep calls and none was held; PARTIAL
+    when the held calls' mean error is 1 cm or more or the limit ended a hold; OK otherwise (a hand F69h never freed needed no hold)."""
+    sec, plain = rows.get("sec", []), rows.get("plain", [])
+    if not sec:
+        if not plain:
+            return None
+        return ("IDLE", "no steep two-handed ADS call (the sights, the aim pitch 45 deg or more up) in %d F67f window(s): nothing to hold" % len(plain))
+    steep, freed, held, limit = (sum(int(r[k]) for r in sec) for k in ("steep", "freed", "held", "limit"))
+    errm = sum(int(r["held"]) * float(r["errm"]) for r in sec) / held if held else 0.0
+    agem = sum(int(r["held"]) * float(r["agem"]) for r in sec) / held if held else 0.0
+    errx, agex = max(float(r["errx"]) for r in sec), max(float(r["agex"]) for r in sec)
+    text = ("%d s: %d steep two-handed ADS calls; F69h freed the off hand in %d; the left hand held on the item by F182c in %d (its grip point age mean %.0f max %.0f ms), hand-to-grip error "
+            "of the held calls mean %.2f max %.2f cm; the 3 s limit ended %d hold(s)" % (_hsecs(sec), steep, freed, held, agem, agex, errm, errx, limit))
+    if freed >= H182C_MIN_FREED and not held:
+        return ("NEVER APPLIED", text + "; F69h freed the off hand in %d steep calls and the hold held none (no stored grip point, or the right target was made another way)" % freed)
+    if steep < H182C_MIN_STEEP:
+        return ("IDLE", text + "; under %d steep two-handed ADS calls: little to judge" % H182C_MIN_STEEP)
+    bad = []
+    if held and errm >= H182C_HELD_CM:
+        bad.append("the held calls' hand-to-grip error averaged %.2f cm (1 cm or more: the arm does not reach the held point)" % errm)
+    if limit:
+        bad.append("the 3 s limit ended %d hold(s) (F69h did not take the hand back in 3 s)" % limit)
+    if bad:
+        return ("PARTIAL", text + "; " + "; ".join(bad))
+    if not held:
+        return ("OK", text + "; the off hand was never freed in these calls: the hold had nothing to do")
     return ("OK", text)
 
 
@@ -16444,6 +16498,10 @@ HEALTH_RULES = (
         ("sec", H180B_RE),
         ("dial", H180B_DIAL_RE),
     ), _hj_f180b_spine),
+    _hrule("steep ADS grip (F182c)", ("F67f",), (H182C_LABEL,), (
+        ("sec", H182C_RE),
+        ("plain", H182C_PLAIN_RE),
+    ), _hj_f182c_steep_grip, needs_detail=True),
     _hrule("left elbow (F98a)", ("F98a", "F159"), ("native on foot left elbow (F98a)", "native on foot left elbow pole (F159)", "native on foot left elbow seed (F159)"), (
         ("sec", H98A_SEC_RE),
         # F159: the left elbow's stable pole in the same window (a line of its own: F98a's has no room under the log's 1200 bytes), and each seed's birth
@@ -17585,6 +17643,7 @@ def self_test_health():
     f179_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f179.h")
     f180_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f180.h")
     f181_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f181.h")
+    f182_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f182.h")
     f172_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f172.h")
     f175_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f175.h")
     f176_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f176.h")
@@ -17623,6 +17682,7 @@ def self_test_health():
         f179src = read_text(f179_path)
         f180src = read_text(f180_path)
         f181src = read_text(f181_path)
+        f182src = read_text(f182_path)
         f172src = read_text(f172_path)
         f175src = read_text(f175_path)
         f176src = read_text(f176_path)
@@ -17800,6 +17860,15 @@ def self_test_health():
             fmts[key] = health_c_format(f181src, needle)
         if fmts[key] is None:
             raise AssertionError("native_on_foot_f181.h has no format holding %r: the --health rule that reads it is out of date" % needle)
+        return health_render(fmts[key], vals)
+
+    def R182(needle, *vals):
+        """F182c's ending of the F67f line (formatClause in native_on_foot_f182.h), from its own format literal."""
+        key = "f182:" + needle
+        if key not in fmts:
+            fmts[key] = health_c_format(f182src, needle)
+        if fmts[key] is None:
+            raise AssertionError("native_on_foot_f182.h has no format holding %r: the --health rule that reads it is out of date" % needle)
         return health_render(fmts[key], vals)
 
     def R180(needle, *vals):
@@ -19098,14 +19167,15 @@ def self_test_health():
         # ---- F180b (TEMPORARY): the standing ADS spine straighten ----
         F180B = "standing ADS spine (F180b)"
 
-        def spine180(item=RIFLE97, wl=10, frames=800, dial=0.5, dialmax=0.5, share=0.5, wrote=800, s1=800, s2=0, s0=0, lean=None, neck=None, shoulder=None, raise_=9.0):
+        def spine180(item=RIFLE97, wl=10, frames=800, dial=0.5, dialmax=0.5, share=0.5, wrote=800, s1=800, s2=0, s0=0, lean=None, neck=None, shoulder=None, raise_=9.0, left=(0, 0, 0, 0), old=False):
             """F180b's window line, from the DLL's own format (formatSummary, native_on_foot_f180.h); lean: 4 levels of (animated, reference, written) deg; neck, shoulder: (after, before) as
-            (right, up, forward) cm; raise_: F179a's leg raise asked, cm."""
+            (right, up, forward) cm; raise_: F179a's leg raise asked, cm; left: F182b's frames left as animated per bone; old: the line of a build before F182 (no such ending)."""
             lean = lean or [(30.0, 12.0, 21.0), (25.0, 10.0, 17.0), (23.0, 15.0, 19.0), (20.0, 5.0, 12.0)]
             neck = neck or ((1.0, -9.0, 8.0), (1.0, -14.0, 11.0))
             shoulder = shoulder or ((-14.0, -3.0, 4.0), (-14.0, -6.0, 6.0))
             flat = [v for lv in lean for v in lv]
-            return R180("native on foot standing ADS spine (F180b, TEMPORARY) %u s: item %s", wl, item, frames, dial, dialmax, share, wrote, s1, s2, s0, *flat, *neck[0], *neck[1], *shoulder[0], *shoulder[1], raise_)
+            line = R180("native on foot standing ADS spine (F180b, TEMPORARY) %u s: item %s", wl, item, frames, dial, dialmax, share, wrote, s1, s2, s0, *flat, *neck[0], *neck[1], *shoulder[0], *shoulder[1], raise_, *left)
+            return line.rsplit("; left as animated, leaning back of the reference", 1)[0] if old else line
 
         def dial180(v=0.5):
             """F180b's dial note line (native_on_foot.cpp), logged at the first read and at each change."""
@@ -19140,6 +19210,43 @@ def self_test_health():
         check("F180b spine: a line that drifted from its pattern is unparsed", ["native on foot standing ADS spine (F180b, TEMPORARY) 10 s: something else"], 4, [("UNPARSED", F180B)])
         check("F180b spine: a line that drifted beside a good one is counted beside the verdict", [spine180(), "native on foot standing ADS spine (F180b, TEMPORARY) 10 s: something else"], 0, [("OK", F180B)],
               has=["[+1 line(s) the rule's patterns do not match: "])
+        # F182b: the one-sided rule's frames left as animated per bone, appended to the line (a looking-up flight leaves every bone as animated and writes nothing)
+        spine182 = lambda left, **kw: spine180(left=left, **kw)
+        check("F182b spine: the frames left as animated per bone ride the line; a looking-up flight (every bone left, the rule made in every frame) is OK",
+              [spine182((800, 800, 800, 800), lean=[(-4.3, 29.7, -4.3), (-14.7, 28.7, -14.7), (-26.3, 38.4, -26.3), (-6.9, 55.6, -6.9)])], 0, [("OK", F180B)],
+              has=["lean animated/reference/written (deg): spine 16 -4.3/+29.7/-4.3", "; left as animated (the bone leaned back of the reference, frames): spine 16 800, spine 21 800, chest 24 800, neck 34 800"],
+              lacks=["UNPARSED", "NEVER"])
+        check("F182b spine: two windows add the left-as-animated frames per bone",
+              [spine182((10, 20, 30, 40), frames=100, wrote=100, s1=100), spine182((1, 2, 3, 4), frames=300, wrote=300, s1=300)], 0, [("OK", F180B)],
+              has=["; left as animated (the bone leaned back of the reference, frames): spine 16 11, spine 21 22, chest 24 33, neck 34 44"], lacks=["UNPARSED"])
+        check("F182b spine: a line from a build before F182 (no ending) still parses and says nothing of it", [spine180(old=True)], 0, [("OK", F180B)], lacks=["UNPARSED", "left as animated"])
+
+        # ---- F182c: the left hand stays on a two-handed gun aimed steeply up (the ending of the F67f line) ----
+        F182C = "steep ADS grip (F182c)"
+
+        def f67f182(steep=None, freed=0, held=0, agem=40.0, agex=120.0, errm=0.4, errx=0.9, limit=0):
+            """F67f's line from the DLL's own format, with F182c's ending (formatClause, native_on_foot_f182.h) when steep is given (None: a window with no steep call, the ending empty)."""
+            clause = "" if steep is None else R182("; steep two-handed ADS (F182c): %llu calls", steep, freed, held, agem, agex, errm, errx, 3.0, limit)
+            return R("native on foot armed arms (F67f): %llu armed calls (ramp complete)", 90, 90, 90, 0, "", 90, 0, "", 0.4, 0.9, 0.3, 0.6, 0.0, 0.0, 0, 0, 90, 0, 0.0, 0.0, 0, 16.0, 0, 16.0, clause)
+
+        check("F182c grip: the hold held the left hand in the steep calls F69h freed it in, the held error under 1 cm",
+              [f67f182(60, 10, 10), f67f182(60, 12, 12, errm=0.6, errx=0.95)], 0, [("OK", F182C)],
+              has=["2 s: 120 steep two-handed ADS calls; F69h freed the off hand in 22; the left hand held on the item by F182c in 22 (its grip point age mean 40 max 120 ms), hand-to-grip error of the "
+                   "held calls mean 0.51 max 0.95 cm; the 3 s limit ended 0 hold(s)"], lacks=["UNPARSED", "NEVER", "PARTIAL"])
+        check("F182c grip: F67f lines with no steep call are idle (the ending is empty: nothing to hold)", [f67f182(), f67f182()], 0, [("IDLE", F182C)],
+              has=["no steep two-handed ADS call (the sights, the aim pitch 45 deg or more up) in 2 F67f window(s): nothing to hold"], lacks=["UNPARSED", "NEVER"])
+        check("F182c grip: F69h freed the hand in 20 steep calls and none was held never applied", [f67f182(60, 20, 0, agem=0.0, agex=0.0, errm=0.0, errx=0.0)], 3, [("NEVER APPLIED", F182C)],
+              has=["F69h freed the off hand in 20 steep calls and the hold held none"], lacks=["UNPARSED"])
+        check("F182c grip: the held calls' error of 3.9 cm (the arm does not reach the point) is partial", [f67f182(60, 10, 10, errm=3.9, errx=5.0)], 0, [("PARTIAL", F182C)],
+              has=["the held calls' hand-to-grip error averaged 3.90 cm (1 cm or more: the arm does not reach the held point)"], lacks=["UNPARSED", "NEVER"])
+        check("F182c grip: a hold the 3 s limit ended is partial", [f67f182(60, 10, 10, limit=1)], 0, [("PARTIAL", F182C)],
+              has=["the 3 s limit ended 1 hold(s) (F69h did not take the hand back in 3 s)"], lacks=["UNPARSED", "NEVER"])
+        check("F182c grip: steep calls F69h never freed the hand in need no hold (OK, said so)", [f67f182(60, 0, 0, agem=0.0, agex=0.0, errm=0.0, errx=0.0)], 0, [("OK", F182C)],
+              has=["the off hand was never freed in these calls: the hold had nothing to do"], lacks=["UNPARSED", "NEVER", "PARTIAL"])
+        check("F182c grip: under 30 steep calls is too few to judge", [f67f182(10, 2, 2)], 0, [("IDLE", F182C)], has=["under 30 steep two-handed ADS calls: little to judge"], lacks=["UNPARSED", "NEVER"])
+        check("F182c grip: an ending that drifted from its pattern is unparsed (not read as a plain window)", [f67f182(60, 10, 10).replace("held on the item by F182c", "kept on the item by F182c")], 4, [("UNPARSED", F182C)])
+        check("F182c grip: no F67f line at all is not present (no verdict row)", [f90_part()], 0, [("OK", F90S)],
+              lacks=[row("OK", F182C), row("IDLE", F182C), row("PARTIAL", F182C), row("UNPARSED", F182C), row("NEVER APPLIED", F182C)])
 
         # ---- left elbow (F98a): the left arm with a weapon drawn ----
         F98 = "left elbow (F98a)"

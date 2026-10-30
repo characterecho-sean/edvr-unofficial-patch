@@ -508,9 +508,9 @@ inline void run180(Check&& check) {
                      f169Def = at("bool f169Stage(const pfz::ArmPlan& pl");
         check(f166Call != std::string::npos && f166Call < f180Call && f180Call < f169Call && f169Call < pinCallAt && stageDef != std::string::npos && stageDef < f169Def,
               "F180b: the order in the hook is F166's hold, the spine straighten, F169's swing, then the pin (the reach rule, F179a's raise and the neck guard read the straightened pose from g_pfzAnim, then the bend and the arm IK)");
-        check(has("nofoot::f166::capture(pl.f180, g_pfzAnim, count, src, st.alpha, &g_f180.held)") && has("g_f180.held.parentHave = false;") && has("nofoot::f166::apply(pl.f180, g_f180.held, st.share, g_pfzAnim, count, g_f180Out, g_f180Touched, &touchedN)") &&
+        check(has("nofoot::f166::capture(pl.f180, g_pfzAnim, count, src, st.alpha, &g_f180.held)") && has("g_f180.held.parentHave = false;") && has("nofoot::f180::applyOneSided(pl.f180, os.cum, g_pfzAnim, count, g_f180Out, g_f180Touched, &touchedN)") &&
                   has("std::memcpy(g_pfzAnim[g_f180Touched[i]], g_f180Out[g_f180Touched[i]], 64);") && has("nofoot::f180::planHasNeck(pl.f180)"),
-              "F180b: the levels are written with F166's capture and apply on the plan of the spine and the neck, into the span and g_pfzAnim, the reference's root held as a local");
+              "F180b: the reference is captured with F166's capture on the plan of the spine and the neck (its root held as a local); since F182b the levels are written one-sided (nofoot::f180::applyOneSided), into the span and g_pfzAnim");
         check(has("std::max(pinCall.f166.ran ? pinCall.f166.weight : 0.0, pinCall.f180.ran ? pinCall.f180.weight : 0.0)"), "F180b: the bend and the square-up yield to the straightened torso as to the held one (the larger weight; F166's factor exactly at the dial 0)");
         const size_t sample178 = at("f.f178.add(sample178);"), sample180 = at("f.f180.add(s180);");
         check(sample178 != std::string::npos && sample178 < sample180 && has("nofoot::f180::Counters f180;") && has("if (f98.f180.frames) {") && has("nofoot::f180::formatSummary(line180, sizeof(line180), w.seconds, w.item, f98.f180);") &&

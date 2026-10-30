@@ -64,7 +64,7 @@ inline void run149(Check&& check) {
         check(f149::tableDepthCm(kKineticSmg, &base, &off) && base == 20.0 && off == 0.0, "F150: the kinetic SMG's base is 20 cm, no offset");
         check(f149::tableDepthCm(kRocket, &base, &off) && base == 21.98 && off == 0.0, "F150: the rocket launcher's base is 21.98 cm, no offset");
         check(f149::tableDepthCm(kPlasmaRifle, &base, &off) && base == 12.99 && off == 0.0, "F150: the plasma assault rifle's base is 12.99 cm, no offset");
-        check(f149::tableDepthCm(kShotgun, &base, &off) && base == 0.01 && off == 0.0, "F150: the plasma shotgun's base is 0.01 cm, no offset");
+        check(f149::tableDepthCm(kShotgun, &base, &off) && base == 0.01 && off == 9.5, "F150: the plasma shotgun's base is 0.01 cm; F182a: its baked offset is +9.5 cm, forward of the camera");
         check(f149::tableDepthCm(kSniper, &base, &off) && base == 16.0 && off == 0.0, "F150: the plasma sniper's base is its unscoped camera, 16 cm (the scoped 5 cm is not in the table), no offset");
         check(f149::tableDepthCm(kKineticPistol, &base, &off) && base == -2.5 && off == 0.0 && f149::tableDepthCm(kLaserPistol, &base, &off) && base == -2.47 && off == 0.0 &&
                   f149::tableDepthCm(kPlasmaPistol, &base, &off) && base == -7.51 && off == 0.0,
@@ -85,12 +85,12 @@ inline void run149(Check&& check) {
         for (int i = 0; i < f149::kAdsBackOffCount; ++i) {
             const f149::ItemCm& o = f149::kAdsBackOffs[i];
             double b = 0.0;
-            offsetsOk = offsetsOk && f149::rowCm(f149::kAdsCameraDepths, f149::kAdsCameraDepthCount, o.item, &b) && std::isfinite(o.cm) && o.cm <= 0.0 && o.cm > -30.0;
+            offsetsOk = offsetsOk && f149::rowCm(f149::kAdsCameraDepths, f149::kAdsCameraDepthCount, o.item, &b) && std::isfinite(o.cm) && o.cm < 30.0 && o.cm > -30.0;
             for (int j = i + 1; j < f149::kAdsBackOffCount; ++j) offsetsOk = offsetsOk && std::strcmp(o.item, f149::kAdsBackOffs[j].item) != 0;
         }
         check(f149::kAdsCameraDepthCount == 10 && known && weapons && unique && finite,
               "F150: the ten base rows each name a weapon the readout table knows (a typo would be a miss), once, with a plausible depth");
-        check(f149::kAdsBackOffCount == 2 && offsetsOk, "F150: two baked offsets, each on a base row, once, backwards (never above 0) and under 30 cm");
+        check(f149::kAdsBackOffCount == 3 && offsetsOk, "F150 (F182a: the shotgun's forward 9.5 is the third): three baked offsets, each on a base row, once, within 30 cm either way (negative back, positive forward)");
         check(f149::kTrimMinCm == -30.0 && f149::kTrimMaxCm == 30.0 && f149::kAdsFallbackBaseCm == 21.0 && f149::clampTrimCm(45.0) == 30.0 && f149::clampTrimCm(-45.0) == -30.0 &&
                   f149::clampTrimCm(7.5) == 7.5 && f149::clampTrimCm(std::numeric_limits<double>::quiet_NaN()) == 0.0 && f149::clampTrimCm(std::numeric_limits<double>::infinity()) == 0.0,
               "F152: the trim is -30..30 cm; one that is not a number reads 0; the fallback base is the old setting's 21 cm");
@@ -108,8 +108,8 @@ inline void run149(Check&& check) {
         const f149::EyeDepth ksmg = f149::eyeDepth(0.0, true, kKineticSmg, ls::kScopeNo, nullptr);
         const f149::EyeDepth plasmaRifle = f149::eyeDepth(0.0, true, kPlasmaRifle, ls::kScopeNo, nullptr);
         const f149::EyeDepth shotgun = f149::eyeDepth(0.0, true, kShotgun, ls::kScopeNo, nullptr);
-        check(ksmg.askedCm == 20.0 && plasmaRifle.askedCm == 12.99 && shotgun.askedCm == 0.01,
-              "F150: the kinetic SMG goes to 20 cm, the plasma assault rifle to 12.99 and the plasma shotgun to 0.01");
+        check(ksmg.askedCm == 20.0 && plasmaRifle.askedCm == 12.99 && near149(shotgun.askedCm, 9.51) && near149(shotgun.depthCm, 9.51) && shotgun.offsetCm == 9.5 && shotgun.baseCm == 0.01,
+              "F150: the kinetic SMG goes to 20 cm, the plasma assault rifle to 12.99 (no offset: the pilot's 9.5 trim no longer reaches it) and F182a: the plasma shotgun to 9.51 (0.01 + 9.5 forward) at trim 0");
         // the trim: added to any weapon, moves it both ways, the result clamped to 0..30
         const f149::EyeDepth smgForward = f149::eyeDepth(5.0, true, kLaserSmg, ls::kScopeNo, nullptr);
         const f149::EyeDepth smgForward20 = f149::eyeDepth(20.0, true, kLaserSmg, ls::kScopeNo, nullptr);
