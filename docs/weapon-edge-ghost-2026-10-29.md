@@ -35,7 +35,8 @@
   - v4 judges that against the pixel's own depth.
 
   The journal entries below hold each flight.
-- **Next flight: the split-key build, BUILDING for Epic.** Brief: ADS and
+- **Next flight: split keys INSTALLED Epic, `v0.22.0-rc.3-118-gccb0b651`
+  (`ccb0b651`, verified; both keys start on), NOT FLOWN.** Brief: ADS and
   hip, fast swings and head turns, in four states. Sean judges each, with one
   eye dump per state:
   - both rows off (main);
