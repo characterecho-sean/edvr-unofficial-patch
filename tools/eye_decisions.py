@@ -237,6 +237,276 @@ def analyze(manifest_path, requested_roi=None):
     return result
 
 
+# --rim: what DLSS did at a tracked foreground's silhouette (the held weapon on foot), from the same run.
+# Needs numpy; the plain report and its self-test stay stdlib. For each consecutive pair it asks which
+# history best explains NVIDIA's output P_k at background texels beside the foreground, against four
+# candidates: the current input C_k upsampled (what an honoured history-invalid sentinel leaves), P_{k-1}
+# fetched along the nearest foreground texel's vector (what nearest-depth vector dilation hands DLSS),
+# P_{k-1} unmoved, and P_{k-1} along the texel's own vector. Only informative output pixels count: where the
+# foreground fetch differs from both the current input and the unmoved history by more than RIM_CONTRAST.
+RIM_FOREGROUND = 11          # decision path: engine-record motion
+RIM_BACKGROUND = 2           # decision path: world (camera rows through depth)
+RIM_CONTRAST = 25.0          # luma levels (0-255) two candidates must differ by for a pixel to discriminate
+RIM_WINDOW = 40              # texels per side of a jitter-residual window
+
+
+def _rim_luma(np, path, extent):
+    data, offset, stride, signed_height = read_bmp(path, extent)
+    w, h = extent
+    rows = np.frombuffer(data, np.uint8, count=stride * h, offset=offset).reshape(h, stride)[:, :w * 3]
+    bgr = rows.reshape(h, w, 3).astype(np.float32)
+    if signed_height > 0:
+        bgr = bgr[::-1]
+    return bgr[..., 2] * 0.299 + bgr[..., 1] * 0.587 + bgr[..., 0] * 0.114
+
+
+def _rim_bilinear(np, image, x, y):
+    h, w = image.shape
+    x = np.clip(x, 0, w - 1.001)
+    y = np.clip(y, 0, h - 1.001)
+    x0 = np.floor(x).astype(np.int64)
+    y0 = np.floor(y).astype(np.int64)
+    fx, fy = x - x0, y - y0
+    return (image[y0, x0] * (1 - fx) * (1 - fy) + image[y0, x0 + 1] * fx * (1 - fy) +
+            image[y0 + 1, x0] * (1 - fx) * fy + image[y0 + 1, x0 + 1] * fx * fy)
+
+
+def _rim_nearest(np, mask, reach):
+    """Chebyshev distance to the nearest True texel (reach + 1 past reach), and that texel's coordinates."""
+    h, w = mask.shape
+    dist = np.full((h, w), reach + 1, np.int32)
+    ny, nx = np.mgrid[0:h, 0:w]
+    ys, xs = ny.copy(), nx.copy()
+    dist[mask] = 0
+    padded = np.pad(mask, reach, constant_values=False)
+    for d in range(1, reach + 1):
+        for dy in range(-d, d + 1):
+            for dx in range(-d, d + 1):
+                if max(abs(dx), abs(dy)) != d:
+                    continue
+                take = padded[reach + dy:reach + dy + h, reach + dx:reach + dx + w] & (dist > d)
+                dist[take] = d
+                ny[take] = ys[take] + dy
+                nx[take] = xs[take] + dx
+    return dist, ny, nx
+
+
+def _rim_erode(np, mask, r):
+    h, w = mask.shape
+    padded = np.pad(mask, r, constant_values=False)
+    out = mask.copy()
+    for dy in range(-r, r + 1):
+        for dx in range(-r, r + 1):
+            out &= padded[r + dy:r + dy + h, r + dx:r + dx + w]
+    return out
+
+
+def _rim_residual_shift(np, cur, prev, mvx, mvy, ys, xs):
+    """Sub-pixel s with cur(x) ~ prev(x + mv + s): what is left after the vectors, i.e. the jitter step."""
+    s = np.zeros(2)
+    for _ in range(3):
+        wx, wy = xs + mvx + s[0], ys + mvy + s[1]
+        gx = _rim_bilinear(np, prev, wx + 0.5, wy) - _rim_bilinear(np, prev, wx - 0.5, wy)
+        gy = _rim_bilinear(np, prev, wx, wy + 0.5) - _rim_bilinear(np, prev, wx, wy - 0.5)
+        r = cur[ys, xs] - _rim_bilinear(np, prev, wx, wy)
+        a = np.array([[np.sum(gx * gx), np.sum(gx * gy)], [np.sum(gx * gy), np.sum(gy * gy)]])
+        if np.linalg.cond(a) > 50:
+            return None
+        s += np.linalg.solve(a, np.array([np.sum(gx * r), np.sum(gy * r)]))
+    return s if np.all(np.abs(s) < 2.5) else None
+
+
+def _rim_texels(np, output_extent, input_size, output_size, dc, oc):
+    """Output-crop pixel grid, its centres in D-crop texel coordinates (texel centres on integers), and each
+    pixel's nearest texel. The eye runs' output crop starts on an odd row (617), so output rows pair with
+    texel rows one row late: rows 0, 1, 2, 3 read texels 0, 1, 1, 2."""
+    ow, oh = output_extent
+    ox, oy = np.meshgrid(np.arange(ow, dtype=np.float64), np.arange(oh, dtype=np.float64))
+    ix = (ox + oc[0] + 0.5) * input_size[0] / output_size[0] - dc[0] - 0.5
+    iy = (oy + oc[1] + 0.5) * input_size[1] / output_size[1] - dc[1] - 0.5
+    tix = np.clip(np.floor(ix + 0.5).astype(np.int64), 0, dc[2] - 1)
+    tiy = np.clip(np.floor(iy + 0.5).astype(np.int64), 0, dc[3] - 1)
+    return ox, oy, ix, iy, tix, tiy
+
+
+def _rim_best(np, errors, informative, labels):
+    n = int(informative.sum())
+    if not n:
+        return {'pixels': 0}
+    best = np.argmin(np.stack([e[informative] for e in errors]), axis=0)
+    return {'pixels': n, 'best': {label: round(float(np.mean(best == i)), 3) for i, label in enumerate(labels)},
+            'median_error': {label: round(float(np.median(e[informative])), 1) for label, e in zip(labels, errors)}}
+
+
+def rim_pair(np, d, cur, prev, out, prev_out, input_size, output_size, dc, oc):
+    """One consecutive pair: d is frame k's decisions (h, w, 4) over the D crop, cur/prev the C luma of k and
+    k-1 over the same crop, out/prev_out the P luma of k and k-1 over the output crop."""
+    flags = d[..., 3].astype(np.int64)
+    path = flags & 15
+    fg = (path == RIM_FOREGROUND) & ((flags & 512) != 0)
+    bg = path == RIM_BACKGROUND
+    hidden = (flags & 16) != 0
+    mvx, mvy = d[..., 0], d[..., 1]
+    h, w = fg.shape
+    report = {'foreground_texels': int(fg.sum()), 'background_texels': int(bg.sum())}
+    for label, m in (('foreground', fg), ('background', bg)):
+        report[label + '_vector'] = [round(float(np.median(mvx[m])), 2), round(float(np.median(mvy[m])), 2)] if m.any() else None
+    # How well each path's vectors explain C_k from C_{k-1}: compensated over uncompensated mean error. Well
+    # under 1 when the scene moved and the vectors are right; 1.000 exactly when they are all zero.
+    ty, tx = np.mgrid[0:h, 0:w]
+    warped = _rim_bilinear(np, prev, tx + mvx, ty + mvy)
+    fit = {}
+    for label, m in (('foreground', _rim_erode(np, fg, 2)), ('background', _rim_erode(np, bg, 2))):
+        plain = float(np.mean(np.abs(cur[m] - prev[m]))) if m.any() else 0.0
+        fit[label] = round(float(np.mean(np.abs(cur[m] - warped[m]))) / plain, 3) if plain > 0 else None
+    report['vector_fit'] = fit
+    # Hypothesis 3's signature: a foreground drawn with its own jitter or projection leaves a residual shift
+    # unlike the background's. Same jitter: the two residuals agree to the vectors' own error.
+    shifts = {'foreground': [], 'background': []}
+    masks = {'foreground': _rim_erode(np, fg, 3), 'background': _rim_erode(np, bg & ~hidden, 3)}
+    for y0 in range(0, h - RIM_WINDOW + 1, RIM_WINDOW):
+        for x0 in range(0, w - RIM_WINDOW + 1, RIM_WINDOW):
+            for label, m in masks.items():
+                if not m[y0:y0 + RIM_WINDOW, x0:x0 + RIM_WINDOW].all() or np.std(cur[y0:y0 + RIM_WINDOW, x0:x0 + RIM_WINDOW]) < 6:
+                    continue
+                ys, xs = np.mgrid[y0:y0 + RIM_WINDOW, x0:x0 + RIM_WINDOW]
+                ys, xs = ys.ravel(), xs.ravel()
+                s = _rim_residual_shift(np, cur, prev, mvx[ys, xs], mvy[ys, xs], ys, xs)
+                if s is not None:
+                    shifts[label].append(s)
+    report['jitter_residual'] = {label: ({'windows': len(v), 'median': [round(float(x), 3) for x in np.median(np.array(v), axis=0)]}
+                                         if v else {'windows': 0}) for label, v in shifts.items()}
+    ox, oy, ix, iy, tix, tiy = _rim_texels(np, out.shape[::-1], input_size, output_size, dc, oc)
+    sx, sy = input_size[0] / output_size[0], input_size[1] / output_size[1]
+    current = _rim_bilinear(np, cur, ix, iy)
+    def fetch(vx, vy):
+        return _rim_bilinear(np, prev_out, ox + vx / sx, oy + vy / sy)
+    dist_fg, fny, fnx = _rim_nearest(np, fg, 3)
+    dist_bg, bny, bnx = _rim_nearest(np, bg, 1)
+    gy, gx = fny[tiy, tix], fnx[tiy, tix]
+    by, bx = bny[tiy, tix], bnx[tiy, tix]
+    along_fg = fetch(mvx[gy, gx], mvy[gy, gx])
+    along_own = fetch(mvx[tiy, tix], mvy[tiy, tix])
+    along_bg = fetch(mvx[by, bx], mvy[by, bx])
+    e_cur, e_fg, e_zero, e_own, e_bg = (np.abs(out - c) for c in (current, along_fg, prev_out, along_own, along_bg))
+    discriminating = (np.abs(along_fg - current) > RIM_CONTRAST) & (np.abs(along_fg - prev_out) > RIM_CONTRAST)
+    d_fg, at_bg, at_fg, at_hidden = dist_fg[tiy, tix], bg[tiy, tix], fg[tiy, tix], hidden[tiy, tix]
+    labels = ('current', 'foreground_vector', 'unmoved', 'own_vector')
+    errors = (e_cur, e_fg, e_zero, e_own)
+    report['background_ring_hidden'] = _rim_best(np, errors, at_bg & at_hidden & (d_fg == 1) & discriminating, labels)
+    report['background_ring_kept'] = _rim_best(np, errors, at_bg & ~at_hidden & (d_fg == 1) & discriminating, labels)
+    report['background_band_hidden'] = _rim_best(np, errors, at_bg & at_hidden & (d_fg >= 2) & (d_fg <= 3) & discriminating, labels)
+    report['foreground_rim'] = _rim_best(np, (e_cur, e_own, e_bg), at_fg & (dist_bg[tiy, tix] == 1) &
+                                         (np.abs(along_own - along_bg) > RIM_CONTRAST), ('current', 'own_vector', 'background_vector'))
+    return report
+
+
+def rim_report(manifest_path):
+    import numpy as np
+    manifest_path = Path(manifest_path)
+    manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
+    if not isinstance(manifest, dict) or manifest.get('schema') != 1:
+        raise ValueError('unsupported decision manifest schema')
+    stamp = manifest.get('stamp')
+    if not isinstance(stamp, str) or len(stamp) not in (6, 12) or not stamp.isdigit() or manifest_path.name != f'eye_{stamp}_decisions.json':
+        raise ValueError('invalid capture stamp or manifest filename')
+    frames = manifest.get('frames')
+    if not isinstance(frames, list) or not 2 <= len(frames) <= 16:
+        raise ValueError('a rim report needs two to sixteen frames')
+    prefix = f'eye_{stamp}_'
+    result = {'stamp': stamp, 'contrast': RIM_CONTRAST, 'pairs': [],
+              'interpretation': 'Background ring texels touch the foreground (Chebyshev 1), the band is 2-3 texels out. '
+                                'foreground_vector winning at the ring while current wins in the band: NVIDIA dilated the '
+                                'foreground vector over the background texel, defeating its own vector or the sentinel. '
+                                'vector_fit near 1.000 with motion in the picture: that path\'s vectors were zero. '
+                                'jitter_residual foreground unlike background: the foreground carries its own jitter or projection.'}
+    previous = None
+    for index, entry in enumerate(frames):
+        input_size = integers(entry.get('input_size'), 2, 'input size', True)
+        output_size = integers(entry.get('output_size'), 2, 'output size', True)
+        dc = crop_rect(entry.get('decision_crop'), input_size, 'decision crop')
+        oc = crop_rect(entry.get('output_crop'), output_size, 'output crop')
+        data = read_decisions(capture_file(manifest_path.parent, entry.get('decision_file'), f'{prefix}D{index:02}.bin'), entry.get('frame'), dc[2:])
+        current = {'frame': entry.get('frame'), 'geometry': (tuple(input_size), tuple(output_size), dc, oc),
+                   'd': np.frombuffer(data, np.float32, count=dc[2] * dc[3] * 4, offset=44).reshape(dc[3], dc[2], 4),
+                   'c': _rim_luma(np, capture_file(manifest_path.parent, entry.get('raw_file'), f'{prefix}C{index:02}.bmp'), dc[2:]),
+                   'p': _rim_luma(np, capture_file(manifest_path.parent, entry.get('pre_ui_file'), f'{prefix}P{index:02}.bmp'), oc[2:])}
+        if previous and previous['frame'] + 1 == current['frame'] and previous['geometry'] == current['geometry']:
+            pair = {'index': index, 'frame': current['frame']}
+            pair.update(rim_pair(np, current['d'], current['c'], previous['c'], current['p'], previous['p'], input_size, output_size, dc, oc))
+            result['pairs'].append(pair)
+        previous = current
+    return result
+
+
+def rim_self_test():
+    import numpy as np
+    import tempfile
+    rng = np.random.default_rng(7)
+    w = h = 48
+    flags = np.full((h, w), float(RIM_BACKGROUND | 1024), np.float32)
+    fg = np.zeros((h, w), bool)
+    fg[10:40, 20:36] = True
+    flags[fg] = RIM_FOREGROUND | 512 | 1024
+    flags[10:40, 14:20] = RIM_BACKGROUND | 1024 | 16           # the disoccluded band left of the foreground
+    d = np.zeros((h, w, 4), np.float32)
+    d[..., 0] = np.where(fg, -2.0, 6.0)
+    d[..., 3] = flags
+    cur, prev = (np.rint(rng.uniform(0, 255, (h, w))).astype(np.float32) for _ in range(2))
+    prev_out = np.rint(rng.uniform(0, 255, (2 * h, 2 * w))).astype(np.float32)
+    # Build P_k the way the measured DLSS behaves: the background ring takes the foreground's vector, the
+    # hidden band the current input, the foreground its own vector; then the same through BMP files.
+    geometry = ([w, h], [2 * w, 2 * h], (0, 0, w, h), (0, 0, 2 * w, 2 * h))
+    ox, oy, ix, iy, tix, tiy = _rim_texels(np, (2 * w, 2 * h), *geometry)
+    rows = _rim_texels(np, (4, 4), [2016, 2017], [4032, 4034], (308, 308, 1400, 1400), (616, 617, 2800, 2800))[5][:, 0]
+    assert rows.tolist() == [0, 1, 1, 2], rows
+    dist, ny, nx = _rim_nearest(np, fg, 3)
+    current = _rim_bilinear(np, cur, ix, iy)
+    along_fg = _rim_bilinear(np, prev_out, ox + 2 * d[ny[tiy, tix], nx[tiy, tix], 0], oy)
+    along_own = _rim_bilinear(np, prev_out, ox + 2 * d[tiy, tix, 0], oy)
+    ring = (dist[tiy, tix] == 1) & ~fg[tiy, tix]
+    out = np.where(ring, along_fg, np.where(fg[tiy, tix], along_own, current))
+    with tempfile.TemporaryDirectory() as directory:
+        base = Path(directory)
+        stamp = '654321'
+        def bmp(name, luma):
+            px = np.clip(np.rint(luma), 0, 255).astype(np.uint8)[::-1]
+            hh, ww = px.shape
+            stride = (ww * 3 + 3) & ~3
+            rows = np.zeros((hh, stride), np.uint8)
+            rows[:, :ww * 3] = np.repeat(px, 3, axis=1)
+            payload = rows.tobytes()
+            (base / name).write_bytes(b'BM' + struct.pack('<IHHI', 54 + len(payload), 0, 0, 54) +
+                                      struct.pack('<IiiHHIIiiII', 40, ww, hh, 1, 24, 0, len(payload), 0, 0, 0, 0) + payload)
+        frames = []
+        for k, (c, p, dd) in enumerate(((prev, prev_out, np.zeros_like(d)), (cur, out, d))):
+            names = dict(decision_file=f'eye_{stamp}_D{k:02}.bin', raw_file=f'eye_{stamp}_C{k:02}.bmp', pre_ui_file=f'eye_{stamp}_P{k:02}.bmp')
+            (base / names['decision_file']).write_bytes(b'EDVRTEX1' + struct.pack('<9I', 1, w, h, 2, w * 16, 100 + k, 0, 0, 0) + dd.tobytes())
+            bmp(names['raw_file'], c)
+            bmp(names['pre_ui_file'], p)
+            frames.append(dict(index=k, frame=100 + k, input_size=geometry[0], output_size=geometry[1],
+                               decision_crop=list(geometry[2]), output_crop=list(geometry[3]), **names))
+        path = base / f'eye_{stamp}_decisions.json'
+        path.write_text(json.dumps(dict(schema=1, stamp=stamp, requested=16, frames=frames)), encoding='utf-8')
+        pair = rim_report(path)['pairs'][0]
+        assert pair['foreground_vector'] == [-2.0, 0.0] and pair['background_vector'] == [6.0, 0.0], pair
+        assert pair['background_ring_hidden']['best']['foreground_vector'] >= .95, pair['background_ring_hidden']
+        assert pair['background_ring_kept']['best']['foreground_vector'] >= .95, pair['background_ring_kept']
+        assert pair['background_band_hidden']['best']['current'] >= .95, pair['background_band_hidden']
+        assert pair['foreground_rim']['best']['own_vector'] >= .95, pair['foreground_rim']
+        # An unrelated picture pair: the vectors explain nothing, so neither fit is under 1 by much.
+        assert all(v > .9 for v in pair['vector_fit'].values()), pair['vector_fit']
+        assert _rim_nearest(np, np.array([[False, True]]), 1)[0].tolist() == [[1, 0]]
+        frames[1]['output_crop'] = [0, 1, 2 * w, 2 * h - 1]
+        path.write_text(json.dumps(dict(schema=1, stamp=stamp, requested=16, frames=frames)), encoding='utf-8')
+        try:
+            rim_report(path)
+            raise AssertionError('a BMP that no longer matches its crop must be refused')
+        except ValueError:
+            pass
+    print('eye_decisions: rim self-test passed')
+
+
 def self_test():
     import copy
     import tempfile
@@ -369,14 +639,20 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('manifest', nargs='?')
     parser.add_argument('--roi', nargs=4, type=int, metavar=('X', 'Y', 'WIDTH', 'HEIGHT'))
+    parser.add_argument('--rim', action='store_true',
+                        help='report what DLSS did beside a tracked foreground (the held weapon): needs numpy; '
+                             'with --self-test, test that report instead of the stdlib one')
     parser.add_argument('--self-test', action='store_true')
     args = parser.parse_args()
     if args.self_test:
-        self_test()
+        rim_self_test() if args.rim else self_test()
         return 0
     if not args.manifest:
         parser.error('a decision manifest is required')
     try:
+        if args.rim:
+            print(json.dumps(rim_report(args.manifest), indent=1, allow_nan=False))
+            return 0
         report = analyze(args.manifest, args.roi)
         print(json.dumps(report, indent=2, allow_nan=False))
         return 0 if report['complete'] else 2
