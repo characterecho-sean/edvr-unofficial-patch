@@ -2,13 +2,16 @@
 
 ## Status
 
-- **State: v4 FLOWN 2026-10-30 on Epic. Sean: "objectively worse ... more
-  of the gun shimmers now, rather than just the muzzle under ADS" than main.
-  Not merged; nothing ships from this branch as it stands. Next: split the
-  key so the rim pass and the hidden-test fix can be judged apart, with main's
-  behaviour as the third state (flight 4 below).** Issue #146. #147 is a
-  separate defect. Branch `claude/weapon-edge-ghost-4a079e`. Testing is on
-  Epic from now on (Sean).
+- **State: SHIPPED to main 2026-10-30 (`9627ce06`), the cause-2 fix only, no
+  key. CLOSED.** Sean flew the split-key A/B on Epic: "Weapon uncovered ground
+  only fixes the issue, let's ship that as on and remove the experimental
+  settings." Issue #146 (closed by the commit). #147 is a separate defect.
+  Testing is on Epic (Sean).
+- **What runs:** `backgroundHistoryHidden` hides background whose reprojected
+  point was covered on all four texels of last frame's depth, judged against
+  the pixel's own depth. It runs on foot in the VR profile with engine-record
+  motion bound (`probe.w` bit 512, set for the mv dispatch). The rim pass
+  (cause 1) and both test keys are removed.
 - **Cause 1, DLSS's dilation:** for each output pixel DLSS takes the vector of
   the nearest-depth texel in its 3x3. The terrain one texel outside the gun
   therefore fetches history along the gun's motion (48 to 84 % of the hidden
@@ -34,26 +37,18 @@
     on all four texels around its reprojected point.
   - v4 judges that against the pixel's own depth.
 
-  The journal entries below hold each flight.
-- **Next flight: split keys INSTALLED Epic, `v0.22.0-rc.3-118-gccb0b651`
-  (`ccb0b651`, verified; both keys start on), NOT FLOWN.** Brief: ADS and
-  hip, fast swings and head turns, in four states. Sean judges each, with one
-  eye dump per state:
-  - both rows off (main);
-  - "Weapon outline (test)" alone;
-  - "Weapon uncovered ground (test)" alone;
-  - both on.
-
-  The log tells each key's state at every change (`--grep "weapon edges"`).
-  The both-off ADS dump is the first look at main's own muzzle shimmer.
-- **Temporary keys** (both `on` / `off`, default `on`, live, VR only):
-  - `experimental.clean_weapon_edges`, the menu row "Weapon outline (test)":
-    the rim pass (cause 1).
-  - `experimental.weapon_uncovered_ground`, the row "Weapon uncovered ground
-    (test)": the hidden test's covered rule (cause 2).
-
-  Both off is main's behaviour. When the flights settle them, ship the winner
-  as the behaviour and propose removing both keys.
+  The split-key flight settled them: cause 2's rule alone fixed the shimmer,
+  and the rim pass did not help. Each flight is in the journal below.
+- **Lesson:** reader metrics from dumps taken with the key on improved
+  with every version, while the headset got no better. Every A/B needs a
+  key-off state in the same flight, and Sean's verdict decides.
+- **Temporary keys:** none left. `experimental.clean_weapon_edges` and
+  `experimental.weapon_uncovered_ground` were removed in `9627ce06`. A live
+  ini written by the menu row may still name them, and they are ignored.
+- **Open, not this arc:** the dilated `zPred` also reprojects the terrain one
+  texel from the gun as a point at the gun's distance. It costs under 1 px in
+  head turns, and it is untested under head translation. The
+  `scope_zoom_test` flake is #150.
 - **Found in passing (#147):** bursts of wrong vectors in fast turns. The
   world vectors read zero while the terrain moves 8 to 91 px (dumps
   `194734935001` and `062518187001`). The parked ship gets 54 to 830 px while
@@ -467,3 +462,21 @@ Sean judges each state, with one eye dump per state. Before that, the current
 build already gives one free check: with the key off it is main's behaviour.
 If the extra shimmer stays with the key off, the cause is on main since
 `3d2944fc`, not this branch.
+
+## Flight 5 and ship, 2026-10-30 (split keys, Epic)
+
+The split-key build `ccb0b651` (`v0.22.0-rc.3-118-gccb0b651`) flew on Epic.
+Sean judged the four states and said: "Weapon uncovered ground only fixes
+the issue, let's ship that as on and remove the experimental settings."
+
+- **Shipped:** `9627ce06` (`v0.22.0-rc.3-135-g9627ce06`, main merged at
+  `4a7b88bf` first).
+  - The bit-512 covered rule now runs with no key. The condition is
+    `g_foot.on && engineBound && !runtimeFlatProfile()`, which is the scope it
+    was flown in.
+  - The `weaponEdges` entry and its dispatch are removed, along with the MV
+    copy, the counters and the 10 s line.
+  - Both keys are removed from `edvr.ini`. The build's config contract reads
+    260 keys, all documented, and the generated menu schema lists neither row.
+- **Kept:** the `eye_decisions.py --rim` reader. Its
+  `background_kept_on_old_foreground` count is the signature of this fix.
