@@ -52,7 +52,7 @@ game's own zoom as a magnified picture inside the scope's lens. The rest of the 
   (told frustum = its tangents / M about c, tangents only, set in WaitGetPoses after the trim); the lens samples its post-RCAS picture, each pixel at the place its world point is drawn at in that eye
   (the right eye's depth, T = inverse(A_R) A_L). The raw getter (the UI scale) keeps the true frustum; DLSS resets at both edges; the strip goes black; the light grid cache and the readout pin
   step aside. Three log lines: `scope zoom (B3)` announce and press, `scope zoom (B3) runtime`. Review fixes done 2026-10-29 (section 11, items 1 to 8; the hidden-area mesh per eye left).
-- **B3-2 BUILT 2026-10-29, NOT FLOWN** (from `5656e455`; section 11, "B3-2"): what fills the strip while the zoom stands, to A/B against the black. Four modes in one press: `world` (the left eye's last unzoomed
+- **B3-2 BUILT 2026-10-29, INSTALLED on Epic (both) as `c92b5107`, NOT FLOWN** (from `5656e455`; section 11, "B3-2"): what fills the strip while the zoom stands, to A/B against the black. Four modes in one press: `world` (the left eye's last unzoomed
   picture, held from before the zoom and turned to the head's view now), `view` (the same picture fixed in the view), `stretched` (the right eye's picture at the fade's inner edge, stretched out along
   the row), `black` (B3-1 exactly, pinned bit for bit by hash). The press line counts the lens reading outside the window copy; one withheld share frame no longer ends the zoom. Next: the flight, then the maintainer's verdict on the fill and on the keys.
 - Keys: `fix.native_on_foot_ads_scope_zoom` (default on since A3 flew OK, the maintainer 2026-10-29) and the temporary `experimental.native_on_foot_ads_scope_zoom_fov` (the
@@ -914,3 +914,17 @@ that the right eye's share cannot cover, black while eye 0 is narrowed. B3-2 put
    the copy on most frames. Both lines fit the log's 1167 bytes with every count six digits.
 - **Not verified, for the flight.** How the held picture looks (frozen HUD or weapon in the strip, edge extension past the held image when the head turns); `stretched` against the visor's rim; the held copy's cost (one eye-sized
   copy a frame through the ramp and the exit hold); the estimate against the pixels the shader really sends to A; `world` at a large turn. Read `--health`, the `edge` of the press line, then the runtime line's fill counts.
+- **Reviewed and installed (B3-2)** (2026-10-29). The shader diff was read: with the strip and the narrowing both 0, no new branch runs, so plain both mode is untouched. The blend works out to
+  R a + (own (1 - dim) + fill dim)(1 - a). Installed as `c92b5107` (`--dll-only` on the clean tree) on Epic, `--scope both --xess`, and `--verify-only` passed. The live `edvr.ini` had
+  `native_on_foot_ads_scope_zoom_full_detail = on` (the maintainer's) and no edge line, so `..._edge = world` was added under it with the Edit tool (diffed: two lines added). A narrowed frame
+  whose share is not drawn now blacks the left eye for that frame (item 5), where B3-1 left the zoomed picture uncovered; expect it only at a hitch such as an eye dump.
+- **Flight card (B3-2, Epic in VR).**
+  - Read `edvr_log.py --expect-build c92b5107 --health` first, then the press lines' `edge` and the runtime line's fill counts.
+  - Fill: the scoped Executioner in ADS with full detail on, sight eye both. Switch the edge key through `world`, `view`, `stretched` and `black` across one or two presses. Hold still, then
+    turn your head left and right inside the scope. Judge the far-left strip in each mode: a dark line, a visible seam, a smear, a frozen or swimming visor rim.
+  - Lens reach: turn your head away from the gun while scoped. `lens outside the copy` counts it.
+  - Weapon edges, a separate symptom of both mode (2026-10-29: a double image along the weapon's edges, only while swinging fast in held ADS, not with sight eye `right`). Swing fast in ADS:
+    at sight eye `right` with the left eye closed; at `both` with the left eye closed; then at `both` with the right eye closed. Take one eye dump mid-swing at `both`. In the right eye alone at
+    `right`, the artifact means a render-side edge (DLSS) that both mode makes visible; otherwise it comes from both mode. The share stays at full weight through held ADS with no replays (F106
+    press lines: 1440 of 1478 frames in press 2), and EDVR sends the runtime no depth or motion vectors. Ruled out: the left eye's own weapon leaking through the share, a replayed frame, and
+    a depth mismatch in the headset runtime's reprojection.
