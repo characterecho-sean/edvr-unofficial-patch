@@ -2,10 +2,12 @@
 
 ## Status
 
-- **State: v2 (`3b564f21`) FLOWN 2026-10-30 on Frontier. Sean: "the gun
-  still seems to lose DLSS at the edges". The dumps found a second cause, in
-  EDVR's own hidden test. v3 is PROPOSED, NOT BUILT.** Issue #146. #147 is a
-  separate defect. Branch `claude/weapon-edge-ghost-4a079e`.
+- **State: v2 FLOWN 2026-10-30 on Frontier. Sean: "the gun still seems to
+  lose DLSS at the edges". The dumps found a second cause, in EDVR's own
+  hidden test. v3 (`26767fd3`, with main merged as `dab85b3a`) is BUILT and
+  INSTALLED on Epic, NOT FLOWN.** Issue #146. #147 is a separate defect.
+  Branch `claude/weapon-edge-ghost-4a079e`. Testing is on Epic from now on
+  (Sean).
 - **Cause 1, DLSS's dilation:** for each output pixel DLSS takes the vector of
   the nearest-depth texel in its 3x3. The terrain one texel outside the gun
   therefore fetches history along the gun's motion (48 to 84 % of the hidden
@@ -30,14 +32,22 @@
 - **v2 (`3b564f21`, flown, installed):** it rewrites only the rim texels that
   no gun pixel reads, with the terrain's own vector, or the sentinel where the
   terrain was hidden. It takes "hidden" from the test that cause 2 breaks.
-- **v3, proposed:** in `backgroundHistoryHidden`, before that exemption: if
-  all four texels of last frame's depth around the reprojected point are
-  nearer than the pixel's predicted depth by the 3 % margin, the point was
-  covered, so it is hidden. A still edge never meets this, because the pixel's
-  own texel was background then. It is behind the same key, on foot only.
-- **Next flight:** v2 is on Frontier (`v0.22.0-rc.3-57-g3b564f21`, key on).
-  v3 needs a build and Sean's go. Brief: fast swings and head turns at the
-  hip, with one eye dump with the key on and one with it off.
+- **v3 (`26767fd3`), built:** in `backgroundHistoryHidden`, before that
+  exemption: if all four texels of last frame's depth around the reprojected
+  point are nearer than the pixel's predicted depth by the 3 % margin, the
+  point was covered, so it is hidden. A still edge never meets this, because
+  the pixel's own texel was background then. It is behind the same key, on
+  foot only, through `probe.w` bit 512, which is set for the mv dispatch.
+- **Next flight: INSTALLED Epic 2026-10-30 07:10,
+  `v0.22.0-rc.3-113-gdab85b3a` (`--scope both --xess`, verified), NOT
+  FLOWN.** Epic's `edvr.ini` has no `clean_weapon_edges` line, so the key is
+  on; the scope zoom key stays on. Brief: fast swings and head turns at the
+  hip, with one eye dump with the key on and one with it off (menu row "Clean
+  weapon edges (test)"). Read: `edvr_log.py --target "<Epic dir>"
+  --expect-build dab85b3a --grep "weapon edges"`, which should show `on (v3)`.
+  Then run `--rim` on each dump: `background_kept_on_old_foreground` should be
+  near 0 with the key on (9 to 44 % of kept at v2) and unchanged with it off,
+  and the dotted line should be gone from the gun's edge.
 - **Temporary keys:** `experimental.clean_weapon_edges` (`on` / `off`, default
   `on`), the A/B of this fix. When the flights settle it, ship the winner as
   the behaviour and propose removing the key.
@@ -345,3 +355,26 @@ bit set when the pass is wanted (on foot, engine motion bound), so the A/B
 stays one key. Signature for the flight: a reader count of the kept terrain at
 distance 1 to 2 that lands on four of four foreground texels in the previous
 frame, which should fall to near 0 with the key on.
+
+## Build v3, 2026-10-30
+
+- **What changed:** `26767fd3`.
+  - The test is in `backgroundHistoryHidden`. It runs only when
+    `probe.w` bit 512 is set, it skips `zPred <= 0` as the final rule does,
+    and it subtracts `knobs.x` per texel.
+  - `temporal_pass.cpp` sets the bit for the mv dispatch only when the pass
+    is wanted (key on, on foot) and engine motion is bound. `probe[3]` is
+    rebuilt from `uiFlags()` at every mv dispatch, and no other entry reads
+    the bit.
+  - The log's on line reads `weapon edges (#146): on (v3) -- ...`.
+- **The reader:** `eye_decisions.py --rim` gives each pair
+  `background_kept_on_old_foreground`. For kept terrain at distances 1 and 2
+  it counts how many land on four of four foreground texels of frame k-1. On
+  dump `062518187001` it equals the scratch script: pair 6 gives 891 of 3208,
+  pair 9 1555 of 4934, pair 14 1491 of 3374.
+- **Main merged:** `dab85b3a` brings in `origin/main` `22ead26a`, which
+  includes the VR scope zoom. The full build failed once at
+  `scope_zoom_test`: the lens pass changed no pixel, "0 changed". The test
+  passed three times alone, and the full build rerun passed. Filed as #150.
+- **Install:** the version is `v0.22.0-rc.3-113-gdab85b3a`, built from a clean
+  tree. Installed on Epic with `--scope both --xess` and verified.
