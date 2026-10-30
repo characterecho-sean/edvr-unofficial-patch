@@ -2,7 +2,7 @@
 
 ## Status
 
-- **State (2026-10-28):** rounds 1 to 8 ON MAIN. **Round 8 FLOWN OK on the Pimax**
+- **Release (2026-10-30):** Rounds 1 to 8, the Mirror window page and the VR sync-interval-0 Present are in v0.22.0-rc.4 (draft pre-release, `ab1955de`, 2026-10-30). **State (2026-10-28):** rounds 1 to 8 ON MAIN. **Round 8 FLOWN OK on the Pimax**
   (`edvr_gfx_20261028_215040.log`): the rule switched live 22 times, `hidden-area mesh served
   no, as the game, no mesh`, so native equals center there, as expected. OPEN: native's mesh
   path (1.32x at u 0.515) is flown on no headset; a tester with a mesh headset compares it with

@@ -6,6 +6,7 @@ census design. This doc records what EDVR's review made of it and what was built
 
 ## Status
 
+- **Release (2026-10-30):** The HUD layer repeat-seed depth skip (6716f875) is in v0.22.0-rc.4 (draft pre-release, `ab1955de`, 2026-10-30).
 - **State:** RocketsProjects' read-only audit (EDVR-001, 42 findings, source pinned at 74081399,
   received 2026-10-22) was checked against HEAD c16a46b3. The 23 active findings plus the smoke-depth
   reads (G09) each got a source review. Eight became changes on branch
