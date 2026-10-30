@@ -627,12 +627,13 @@ Run runDoor(Fx& f, const Scene& sc, const Image& orig, const RunIn& in) {
     const uint32_t region[4] = {0, 0, kOutW - in.regionTrim, kOutH};
     ComPtr<ID3D11Texture2D> copy;
     Run out;
+    uint32_t dispatchedBefore = 0;
     for (uint32_t i = 0; i < (wait ? 400u : 1u); ++i) {
-        if (i) {
+        f.upload(frame.Get(), in.fmt, orig);
+        if (i) {   // published right before the door: c must be under 50 ms old when it is read
             rec.jitterSeq = static_cast<uint64_t>(100 + i + in.jitterSeqDelta);
             scopeZoomPublish(rec);
         }
-        f.upload(frame.Get(), in.fmt, orig);
         ScopeZoomDoorArgs a;
         a.eye = 1;
         a.sequence = 100 + i;
@@ -646,7 +647,19 @@ Run runDoor(Fx& f, const Scene& sc, const Image& orig, const RunIn& in) {
         if (!wait) break;
         sz::LensDoorStats peek;
         scopeZoomPressTake(&peek);
-        if (peek.raysRead >= 1) break;
+        // A machine that held the door past c's 50 ms (the rigs run in parallel, CI runners are shared) makes that frame stale: it wrote nothing, and it is no part of this press. The press
+        // starts again under a new id, so what is counted and compared is the frames the lens ran on (#150).
+        if (peek.staleC) {
+            ++press;
+            scopeZoomPressBegin(press);
+            rec.press = press;
+            dispatchedBefore = 0;
+            continue;
+        }
+        // The door also polls the rays before it checks c's age, so a stale frame still counts a read: stop on a frame the door wrote.
+        const bool wrote = peek.dispatched > dispatchedBefore;
+        dispatchedBefore = peek.dispatched;
+        if (peek.raysRead >= 1 && wrote) break;
         Sleep(1);
     }
     out.gotCopy = copy != nullptr;
@@ -1065,11 +1078,8 @@ B3Run runLensB3(Fx& f, const B3In& in) {
     const uint32_t region[4] = {0, 0, kOutW, kOutH}, leftRegion[4] = {0, 0, kLeftW, kLeftH};
     B3Run out;
     ComPtr<ID3D11Texture2D> copy;
+    uint32_t dispatchedBefore = 0;
     for (uint32_t i = 0; i < 400u; ++i) {
-        if (i) {
-            rec.jitterSeq = static_cast<uint64_t>(100 + i);
-            scopeZoomPublish(rec);
-        }
         f.upload(frame.Get(), DXGI_FORMAT_R8G8B8A8_UNORM, orig);
         if (in.makeLeftCopy) {
             ScopeZoomLeftArgs la;
@@ -1078,6 +1088,10 @@ B3Run runLensB3(Fx& f, const B3In& in) {
             la.region = leftRegion;
             la.resolved = true;
             scopeZoomLeftDoor(la);
+        }
+        if (i) {   // published right before the door: c must be under 50 ms old when it is read
+            rec.jitterSeq = static_cast<uint64_t>(100 + i);
+            scopeZoomPublish(rec);
         }
         ScopeZoomDoorArgs a;
         a.eye = 1;
@@ -1091,7 +1105,16 @@ B3Run runLensB3(Fx& f, const B3In& in) {
         f.ctx->Flush();
         sz::LensDoorStats peek;
         scopeZoomPressTake(&peek);
-        if (peek.raysRead >= 2) break;
+        if (peek.staleC) {   // see runDoor: a stale frame writes nothing; the press starts again under a new id
+            ++press;
+            scopeZoomPressBegin(press);
+            rec.press = press;
+            dispatchedBefore = 0;
+            continue;
+        }
+        const bool wrote = peek.dispatched > dispatchedBefore;
+        dispatchedBefore = peek.dispatched;
+        if (peek.raysRead >= 2 && wrote) break;
         Sleep(1);
     }
     out.gotCopy = copy != nullptr;
