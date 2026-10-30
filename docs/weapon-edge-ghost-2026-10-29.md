@@ -2,11 +2,11 @@
 
 ## Status
 
-- **State: v3 FLOWN 2026-10-30 on Epic. Sean: "still seeing edge shimmer".
-  v3 cleared the terrain two texels out but not one texel out, because there
-  the world path's dilated depth is the gun's (flight 3 below). v4
-  (`d97ef7a8`) compares against the pixel's own depth. It is INSTALLED on
-  Epic, NOT FLOWN.** Issue #146. #147 is a
+- **State: v4 FLOWN 2026-10-30 on Epic. Sean: "objectively worse ... more
+  of the gun shimmers now, rather than just the muzzle under ADS" than main.
+  Not merged; nothing ships from this branch as it stands. Next: split the
+  key so the rim pass and the hidden-test fix can be judged apart, with main's
+  behaviour as the third state (flight 4 below).** Issue #146. #147 is a
   separate defect. Branch `claude/weapon-edge-ghost-4a079e`. Testing is on
   Epic from now on (Sean).
 - **Cause 1, DLSS's dilation:** for each output pixel DLSS takes the vector of
@@ -155,6 +155,8 @@ wins 0.40 to 0.56, the current frame 0.03 to 0.19 and its own vector 0.33 to
 - ruled out: the ADS both-eye share (F162), because the effect shows with sight eye `right`.
 - ruled out: the runtime's reprojection, because EDVR sends it no depth or motion.
 - ruled out: nudging the depth handed to DLSS so that the gun's own edge pixels read an inner texel, because in DLSS's depth the inner texels are already nearer than 3255 of the 3269 marked rim texels that have one (dump `054813060001`, frame 0).
+- ruled out: v3 or v4 resetting the gun's own texels through the hidden test, because the gun is fully tracked in all seven dumps from v1 to v4 (0 untracked texels at its depth) and no gun texel is flagged hidden. The only gun texels carrying the sentinel are the rim pass's own.
+- ruled out (as evidence): reader metrics from key-on dumps alone, as a judge of what Sean sees, because v2 to v4 each did what the metrics asked and each flight was judged no better or worse. Every flight from now on needs a key-off dump, and Sean's verdict decides.
 - ruled out: the one-texel terrain that v3 leaves unhidden being the gun's own texels claimed by the world path, because they carry terrain depth (0 of 3378 within 3 % of the gun) and engine kind `unavailable`, like the terrain beyond them (dump `074347679001`, frame 0).
 - ruled out: v2's winner test leaving the gun's top edge unfixed (the dotted line of flight 2), because in frame 0's depth it skips 16 of the 100 rim texels on that edge (5 % over the whole gun), and the inner texels there are nearer than the rim (dump `062518187001`).
 - ruled out: the gun rim's `own_vector` share as a measure of lost history, because it reads 0.22 to 0.61 in every dump since flight 1, including dump `062518187001`, whose first frame has 0 gun texels off their vector.
@@ -420,3 +422,47 @@ depth, `(zraw - knobs.x) * 1.03`, instead of the dilated `zPred`. Over one
 frame the pixel's own depth moves far less than the 3 % margin. It uses the
 same bit and the same key. Signature: distance-1 `on_old_foreground` near 0
 with the key on.
+
+## Flight 4, 2026-10-30 (v4, Epic)
+
+Sean: "The effect of the changes on this branch is objectively worse (more of
+the gun shimmers now, rather than just the muzzle under ADS) than what is on
+main."
+
+The log is `edvr_gfx_20261030_080441.log`, its build matches `d97ef7a8`, it
+shows `on (v4)`, and the key stayed on all flight. There are two dumps, both
+at the hip with the key on: `080738606001` (head turns, gun nearly still) and
+`080754384002` (under the parked ship).
+
+- **v4 did its job.** In dump 1, `background_kept_on_old_foreground` at
+  distance 1 is 1 to 81 a pair, and 459 in pair 15, against 65 to 955 at v3.
+- **The gun's interior is not reset.** In every dump from v1 to v4, the gun is
+  fully tracked (0 untracked texels at its depth) and no gun texel is flagged
+  hidden. The only gun texels with the sentinel are the rim pass's own: 25 and
+  620 in frame 0.
+- **#147 again:** in dump 2, pairs 5 to 8, the parked ship (the engine path)
+  carries -54 to -387 px a frame while the terrain moves 25 to 33 px.
+- **Output stability:** this is the median frame-to-frame change of DLSS's
+  output along each texel's own vector, in pairs where the gun moves under
+  8 px. On the gun's outermost texels it reads v4 5.0 luma (26 % above 12),
+  v3 8.4 (40 %) and v2 9.1 (41 %). Inner texels are 1 to 3 in all three.
+  The scenes differ and every dump is from the hip with the key on, so this
+  says nothing against Sean's ADS view against main.
+
+What the four flights say: every version that writes into the gun's
+outermost texels (v1 to v4), or resets the terrain right at its silhouette
+(v3, v4), was judged no better or worse in the headset. Meanwhile the reader's
+metrics improved each time. The 3x3 nearest-depth model of DLSS predicted
+that the rim writes reach no gun pixel. The headset disagrees, so either the
+model is wrong for preset K, or the reset silhouette reads as shimmer. The two
+mechanisms ship behind one key, so the flights cannot tell them apart.
+
+**Next:** split the key into two temporary keys:
+- the rim pass (cause 1);
+- the hidden-test fix (cause 2), which touches only background texels.
+
+Both off is main's behaviour. One flight, ADS and hip, toggling each live, and
+Sean judges each state, with one eye dump per state. Before that, the current
+build already gives one free check: with the key off it is main's behaviour.
+If the extra shimmer stays with the key off, the cause is on main since
+`3d2944fc`, not this branch.
