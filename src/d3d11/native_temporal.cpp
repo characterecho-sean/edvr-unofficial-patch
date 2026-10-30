@@ -668,6 +668,16 @@ bool nativeTemporalEyeGeometry(uint32_t eye, uint64_t* sequence, float frustum[4
   if (shift) { shift[0] = s.shift[eye][0]; shift[1] = s.shift[eye][1]; }
   return true;
 }
+// The distance between the two eye origins the host gave this frame (the pair Elite is told, world scale included), metres; the same rules as the geometry above.
+bool nativeTemporalEyeSeparation(float* metres) {
+  if (t_insideTreat) return false;
+  std::lock_guard<std::mutex> lock(mutex);
+  if (!current || !current->active || !current->begun) return false;
+  const float d = eyeSeparationOf(current->eyes[0], current->eyes[1]);
+  if (!std::isfinite(d) || !(d > 0.0f)) return false;
+  if (metres) *metres = d;
+  return true;
+}
 // The omission counters the close() summary prints, for the current channel (temporal_pass.h): skipped counts one per
 // omitted EYE per omitted frame; history_kept (spared) counts once per resolved omission RUN per eye. FOR TESTS and the
 // glue rig: a flight is judged on unjudged_resets == 0 and on runs per eye, not on held frames == history_kept.

@@ -232,6 +232,11 @@ constexpr bool journalAdsFromFlags2(uint32_t flags2) {
 bool journalAdsKnown();
 bool journalAds();
 uint32_t journalFlags2();   // the last Flags2 read (0 when not in the file); for the logs
+// Built issue 140 (the SRV turret view, srv_turret.h): Status.json Flags bit 13 (0x2000, "SRV using turret view") while the same word says the commander is in an
+// SRV (Flags bit 26). False in flat, with the watcher off, and whenever Flags is not in the file. The watcher polls Status.json every 500 ms (the game rewrites the
+// file about once a second) and the answer changes at the frame boundary after the worker's pass, so a switch of view is seen up to about half a second after the
+// game has written it. Any thread.
+bool journalSrvTurretView();
 
 // F66a (native on foot, the armed flag): Status.json's "SelectedWeapon" while on foot. The game writes the item the commander has in hand;
 // "$humanoid_fists_name;" means nothing (fists). ASSUMPTION, verified by the flight's `armed (F66a)` lines: holstering writes fists.

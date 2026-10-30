@@ -19,6 +19,7 @@
 #include "../common/log.h"
 #include "../common/periodic_work.h"
 #include "journal_loadout_reader.h"   // F140: the suit loadout's weapon slots (their own reader of the current journal; journal_loadout.h parses)
+#include "srv_turret_math.h"          // issue 140: the turret view's Flags bit (journalSrvTurretView)
 
 namespace edvr {
 namespace {
@@ -1210,6 +1211,7 @@ JournalAdsStatus journalAdsStatus() {
     return r;
 }
 uint32_t journalFlags2() { return peek(g_v.flags2); }
+bool journalSrvTurretView() { return !runtimeFlatProfile() && srv_turret::turretViewFromFlags(peek(g_v.flags)); }
 bool journalDockedKnown() { return journalWatchActive() && peek(g_v.dockedKnown); }
 bool journalStatusDockedKnown() { return g_v.active.load(std::memory_order_acquire) && peek(g_v.dockedKnown); }
 bool journalStatusDocked() { return peek(g_v.docked); }

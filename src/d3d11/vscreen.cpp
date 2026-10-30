@@ -72,6 +72,8 @@
 #include "celestial_motion.h"   // the planet patch constants' CPU shadow: the write tees, the draw capture, the boundary tick
 #include "orbital_width.h"      // fix.ui_quality: the orbit lines' half-width, scaled in the game's own draw of their shader
 #include "supercruise_bars.h"   // fix.ui_quality: the supercruise bars' private geometry-shader pass, bound around the layered issue
+#include "srv_turret.h"         // issue 140: the SRV turret view's HUD, a private geometry-shader pass bound around every issue of the targeting sprite's draw
+#include "srv_turret_math.h"    // issue 140: the targeting sprite's shader pair
 #include "engine_velocity.h"
 #include "vr_world_route.h"
 #include "vr_camera_census.h"
@@ -1792,6 +1794,7 @@ bool drawGateSubscribed(State* s) {
         sunglareWantsDraws() ||
         drawCensusArmed() ||
         blendProbeWantsDraws() ||   // TEMPORARY, the blend probe (blend_probe.h): it reads each eye draw's verdict and routing, so the ladder must run
+        srvTurretHudWantsDraws() || // issue 140 (TEMPORARY): the SRV turret view's HUD (srv_turret.h): its scope opens in forwardWithVerdict, which the AA-off fast path skips
 
         objectProbeWantsDraws() ||
         panelCurveWants() || particleWantsDraws() || backdropWantsDraws() ||
@@ -4172,6 +4175,38 @@ void uiLayerSecondIssues(ID3D11DeviceContext* self, char kind, UINT count, UINT 
     }
 }
 
+// Issue 140 (TEMPORARY, fix.srv_turret_hud_gap; srv_turret.h): in the SRV's turret view the targeting sprite's draws (the target info panel, the SYSTEMS panel and the
+// reticle: vs E508648660A352B2 with ps 63ABD86359B57D01) are issued through a private geometry shader that brings the panels forward to the near HUD layer's depth. Asked
+// per draw while the pass is wanted (the gate's term, srvTurretHudWantsDraws): two hash compares reject every other draw. The draw's eye is the UI layer's own mapping of the
+// bound target, else ui depth's frame table, read only, and last the table's registering form (what the layer's decision and the pixel probe make at the same draw: a
+// sprite is never the first draw into an eye's target in a frame). Refused when the eye is unknown. NOINLINE: the draw path pays this call only while the pass is wanted.
+__declspec(noinline) bool srvTurretHudBeginDraw(State* s, ID3D11DeviceContext* self) {
+    if (bindingShaderHash(BindSlot::Vs) != srv_turret::kSpriteVs || bindingShaderHash(BindSlot::Ps) != srv_turret::kSpritePs) return false;
+    int eye = -1;
+    if (s->rtv0Eye) {
+        const ResourceInfo* info = rtv0Resolved(s);
+        if (info) {
+            eye = uiLayerEyeOfGameTarget(info->resource);
+            if (eye != 0 && eye != 1) eye = uiDepthEyeOfTargetReadOnly(info->resource);
+            if (eye != 0 && eye != 1) eye = uiDepthEyeOfTarget(info->resource, info->a, info->b, info->fmt);
+        }
+    }
+    return srvTurretHudBegin(self, eye);
+}
+
+// The scope that spans every issue of such a draw: forwardWithVerdict's own (the game's, the UI layer's, the interface depth's and the hologram passes' re-issues all run
+// inside it, with the game's vertex shader and so the shader's input signature), and the game's geometry stage and constant slot 0 go back on every way out of the function.
+struct SrvTurretHudScope {
+    ID3D11DeviceContext* ctx;
+    bool bound = false;
+    explicit SrvTurretHudScope(ID3D11DeviceContext* c) : ctx(c) {}
+    ~SrvTurretHudScope() {
+        if (bound) srvTurretHudEnd(ctx);
+    }
+    SrvTurretHudScope(const SrvTurretHudScope&) = delete;
+    SrvTurretHudScope& operator=(const SrvTurretHudScope&) = delete;
+};
+
 // The shared tail of all four draw thunks: run the wrapped fix's begin,
 // the real draw, the matching end. One function so the fifth verdict cannot
 // be added to three thunks and forgotten in the fourth -- kRemlok's plumbing
@@ -4236,6 +4271,10 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
                                 blendDecisionsBefore);
         return;
     }
+    // Issue 140: the SRV turret view's HUD. After kSkip (a skipped draw is not issued at all), before anything issues: the scope spans every issue of a matched draw below and
+    // puts the game's geometry stage back on every way out. Off, this is one relaxed load.
+    SrvTurretHudScope turretHud(self);
+    if (owner && srvTurretHudWantsDraws()) turretHud.bound = srvTurretHudBeginDraw(g_state, self);
     // fix.ui_quality, the UI layer (ui_layer.h): decided once for this draw
     // and applied around EVERY issue of it below -- the loader panel's and
     // the curved screen's substitutions draw the composite themselves, so
@@ -6290,6 +6329,7 @@ EDVR_BOUNDARY_TICK(tkUiDepth, "ui_depth");
 EDVR_BOUNDARY_TICK(tkUiLayer, "ui_layer");
 EDVR_BOUNDARY_TICK(tkOrbitalWidth, "orbital_width");
 EDVR_BOUNDARY_TICK(tkSupercruiseBars, "supercruise_bars");
+EDVR_BOUNDARY_TICK(tkSrvTurretHud, "srv_turret_hud");
 EDVR_BOUNDARY_TICK(tkVrWorldRoute, "vr_world_route");
 EDVR_BOUNDARY_TICK(tkVrCameraCensus, "vr_camera_census");
 EDVR_BOUNDARY_TICK(tkVScreenFootprint, "vscreen_footprint");
@@ -6362,6 +6402,8 @@ void vScreenFrameBoundary() {
         tkOrbitalWidth.run([&] { orbitalWidthFrameBoundary(g_state->ownerCtx); });
         // The supercruise bars' private pass (supercruise_bars.h): settles a binding the last issue could not restore.
         tkSupercruiseBars.run([&] { supercruiseBarsFrameBoundary(g_state->ownerCtx); });
+        // The SRV turret view's HUD pass (srv_turret.h, issue 140): settles a binding the last issue could not restore.
+        tkSrvTurretHud.run([&] { srvTurretHudFrameBoundary(g_state->ownerCtx); });
         // The VR world route (docs section 82) reads the world-screen gate the layer's boundary just computed, accounts the
         // frame that ended, steps its ownership machine and arms its detector; the camera census runs after it. With
         // the census off each returns at its first test when the route has nothing to do.
@@ -7558,6 +7600,7 @@ void shutdownVScreenFixes() {
     uiLayerShutdown();
     orbitalWidthShutdown();
     supercruiseBarsShutdown();
+    srvTurretShutdown();
     screenMotionShutdown();
     celestialMotionShutdown();
     nightVisionShutdown();

@@ -702,7 +702,7 @@ python tools\compile_cache.py --prune --keep thunks.obj --keep weapon_ui_getter_
     "src\d3d11\wake_pulse.cpp" "src\d3d11\vr_ssaa_gate.cpp" "src\d3d11\vr_ssaa_hold.cpp" "src\d3d11\vr_display_observer.cpp" "src\d3d11\vr_window_trampolines.cpp" ^
     "src\d3d11\mode_watch.cpp" ^
     "src\d3d11\ui_depth.cpp" ^
-    "src\d3d11\ui_layer.cpp" "src\d3d11\scope_zoom.cpp" "src\d3d11\ui_surfaces.cpp" "src\d3d11\ui_panel_scale.cpp" "src\d3d11\orbital_width.cpp" "src\d3d11\supercruise_bars.cpp" ^
+    "src\d3d11\ui_layer.cpp" "src\d3d11\scope_zoom.cpp" "src\d3d11\ui_surfaces.cpp" "src\d3d11\ui_panel_scale.cpp" "src\d3d11\orbital_width.cpp" "src\d3d11\supercruise_bars.cpp" "src\d3d11\srv_turret.cpp" ^
     "third_party\dxbc_hash\DxilHash.cpp" ^
     "src\d3d11\backdrop_fix.cpp" ^
     "src\d3d11\scrim_fix.cpp" ^
@@ -4136,6 +4136,25 @@ if not exist "%OBJ%\supercruisebars" mkdir "%OBJ%\supercruisebars"
 if errorlevel 1 ( echo [edvr] ERROR: supercruise bars test build failed & exit /b 1 )
 "%OBJ%\supercruisebars\supercruise_bars_test.exe" --dry-run || exit /b 1
 "%OBJ%\supercruisebars\supercruise_bars_test.exe" --self-test || exit /b 1
+exit /b 0
+
+REM Rig: the SRV turret view's HUD (src\d3d11\srv_turret*.h, srv_turret.cpp; issue 140): the build's own bytecode of the pass-through geometry shader (kSrvTurretHudGsBytecode,
+REM compiled from srv_turret_hud_shader.h's HLSL by tools\temporal_shader_build and checked here to be that text's compile), the production binding, constants and maths, run on WARP
+REM (with the D3D debug layer when the machine has it) in front of a stand-in for the game's vs E508648660A352B2 with its output signature and clip rows: a quad at w = 1.5 shifted by
+REM the formula's pixels in each eye (and where the truly nearer geometry is seen), a vertex at w = 50 or 5 or nearer than the window unchanged, the gap at 0 a copy, the linkage
+REM under the debug layer with its control, the binding's in-and-out with the game's geometry stage and constant slot exactly back, the constants; the mutants, each caught.
+REM --wiring scans the sources that connect it to the game. Built outside build\ and without d3d11.lib, like the supercruise bars' rig: its device is System32's.
+:rig_srv_turret_hud_test
+echo [edvr] === srv_turret_hud_test.exe ===
+if not exist "%OBJ%\srvturrethud" mkdir "%OBJ%\srvturrethud"
+%CC% /I"%GEN%" /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
+    /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS /utf-8 ^
+    /Fo"%OBJ%\srvturrethud\\" /Fe"%OBJ%\srvturrethud\srv_turret_hud_test.exe" ^
+    "tools\srv_turret_hud_test\srv_turret_hud_test.cpp" "src\common\guard.cpp" ^
+    /link /INCREMENTAL:NO d3dcompiler.lib
+if errorlevel 1 ( echo [edvr] ERROR: srv turret hud test build failed & exit /b 1 )
+"%OBJ%\srvturrethud\srv_turret_hud_test.exe" --dry-run || exit /b 1
+"%OBJ%\srvturrethud\srv_turret_hud_test.exe" --self-test || exit /b 1
 exit /b 0
 
 :rig_orbit_layer_test

@@ -284,6 +284,10 @@ value and Elite read its eye transform at that value afterwards, NEVER APPLIED w
 The desktop window (visual.desktop_window) is the other rule whose lines carry no build tag: the graphics log's "desktop window:" lines. It says OK when a 10 s line (or the line
 that ends an activation) shows a Present drawn, NEVER APPLIED when a "desktop window: setting" line named a mode other than game and no line shows one, and nothing at all when
 the setting is game or absent.
+The SRV turret view (fix.srv_turret_camera_back, fix.srv_turret_hud_gap) is the third: the graphics log's "srv turret ..." lines. The settings lines are kept whatever --since says. It
+judges the camera half (a "camera: back ... published" line) and the HUD half (a first-draw line or a 10 s line with draws bound) on the keys in force: NEVER APPLIED when a key is above 0
+and the log proves the turret view was on with nothing from that half, or when the geometry shader could not be made; PARTIAL when under 90% of the HUD draws were bound or some were
+refused for the geometry, the readiness or a game geometry shader; IDLE when the turret view was never entered or the keys are 0; and nothing at all with no line.
 
 Exit 0 when a log was read, 1 when none was found (or --camera-census found no
 census line, or --vscreen-fit no auto-fit line, or --flat-upscale no flat line, or
@@ -10373,11 +10377,30 @@ H_DESKTOP_STOP = r"desktop window: stopped \((?P<reason>.*)\); drawn=(?P<drawn>\
 H_DESKTOP_ACTIVE = r"desktop window: active #(?P<n>\d+)"   # F173: the window took the eye images (an activation): evidence that 3D was on
 H_DESKTOP_DECLINED = r"desktop window: not drawing -- (?P<why>.*)$"   # F173: the draw declined, and why
 H_DESKTOP_OTHER = r"desktop window: (?!setting |10 s: |stopped \()"
+# The SRV turret view (issue 140; src\d3d11\srv_turret.cpp, and the geometry shader's creation line in shader_swap.cpp, shaderSwapCreateGs, called with who "srv turret hud"): lines of the
+# graphics log with no build tag, read the way the desktop window's are. The settings line is state, so health_scan keeps every one whatever --since says; the rest are events and are
+# cut by the window. Every kind of line the DLL writes has a pattern of its own, so a labelled line that none matches is counted as unparsed (a format that drifted).
+H_SRV_TURRET = "srv turret view"
+H_SRV_TURRET_LABELS = ("srv turret view:", "srv turret camera:", "srv turret hud:", "srv turret settings:")
+H_SRV_TURRET_SETTING = r"srv turret settings: camera back (?P<back>\d+) cm, hud gap (?P<gap>\d+) cm \(live; "
+H_SRV_TURRET_VIEW = r"srv turret view: (?P<state>on|off) at frame (?P<frame>\d+) \(Status\.json Flags 0x(?P<flags>[0-9A-Fa-f]+), seat kind 0x(?P<seat>[0-9A-Fa-f]+)\)$"
+H_SRV_TURRET_PUBLISHED = r"srv turret camera: back (?P<back>[\d.]+) m published \(serial (?P<serial>\d+)\)$"
+H_SRV_TURRET_CLEARED = r"srv turret camera: back cleared \(serial (?P<serial>\d+)\)$"
+H_SRV_TURRET_HUD = (r"srv turret hud: gap=(?P<gap>[\d.]+) m wMin=(?P<wmin>-?[\d.]+) wMax=(?P<wmax>-?[\d.]+) s\[L,R\]=(?P<sl>[+-][\d.]+),(?P<sr>[+-][\d.]+) "
+                    r"ipd_elite=(?P<ipd>-?[\d.]+)mm P00\[L,R\]=(?P<pl>-?[\d.]+),(?P<pr>-?[\d.]+) draws\[L,R\]=(?P<dl>\d+),(?P<dr>\d+) bound=(?P<bound>\d+) "
+                    r"refused\[no-eye,game-gs,topology,not-ready,no-geometry\]=(?P<r0>\d+)/(?P<r1>\d+)/(?P<r2>\d+)/(?P<r3>\d+)/(?P<r4>\d+)$")
+# shaderSwapCreateGs: "<who>: precompiled geometry shader <name> <outcome> (0x<HRESULT>, <ms> ms)." with the outcome created, creation FAILED; standing down, or creation faulted/refused; standing down.
+H_SRV_TURRET_GS = (r"srv turret hud: precompiled geometry shader (?P<name>.+?) (?P<outcome>created|creation FAILED; standing down|creation faulted/refused; standing down) "
+                   r"\(0x(?P<hr>[0-9A-Fa-f]{8}), (?P<ms>[\d.]+) ms\)\.$")
+H_SRV_TURRET_FIRST = r"srv turret hud: first draw through the shader \(frame (?P<frame>\d+), eye (?P<eye>-?\d+)\)"
+H_SRV_TURRET_REFUSED = r"srv turret hud: refused a draw \((?P<reason>no-eye|game-gs|topology|not-ready|no-geometry)\) -- the draw went on as the game made it\."
+H_SRV_TURRET_UNRESTORED = r"srv turret hud: the game's geometry stage could not be put back after an issue;"
+H_SRV_TURRET_RESTORED = r"srv turret hud: the game's geometry stage and constant slot were put back at the frame boundary\.$"
 H_F125_LABEL = "native on foot log (F125)"
 H_F125_RE = re.compile(r"native on foot log \(F125\): detail (?P<detail>on|off), summary window (?P<wl>\d+) s")
 # Rules whose absence says nothing about a feature, so a log without their lines does not list them as not present: every log written before F125 has no F125
 # line, and its report stays as it was.
-HEALTH_QUIET_WHEN_ABSENT = frozenset((H_F125, H_WORLD, H_DESKTOP))   # world scale writes nothing while the value stays 100; the desktop window nothing while the setting is game
+HEALTH_QUIET_WHEN_ABSENT = frozenset((H_F125, H_WORLD, H_DESKTOP, H_SRV_TURRET))   # world scale writes nothing while the value stays 100; the desktop window nothing while the setting is game; the SRV turret view nothing in a log with no VR profile
 
 # ---- F125: summary windows (the on-foot log diet) ----
 # By default an on-foot summary line covers a window of 10 s, 1 s with log.on_foot_detail = on, and 1 to 10 s when a window is flushed early (a held-item change,
@@ -15431,6 +15454,107 @@ def _hj_desktop_window(rows, ctx):
     return ("OK", text)
 
 
+SRV_TURRET_REFUSE_NAMES = ("no-eye", "game-gs", "topology", "not-ready", "no-geometry")   # the order of the 10 s line's refused[...] counts (srv_turret_math.h refuseName)
+SRV_TURRET_HUD_MIN_SECS = 12.0   # the turret view this long with no 10 s line and no first draw: the HUD half never ran (a 10 s line is due within 10 s of the view going on, and the first draw within a frame)
+SRV_TURRET_BOUND_MIN = 0.9       # the share of the 10 s lines' HUD draws that must go through the shader
+
+
+def _hj_srv_turret(rows, ctx):
+    """The SRV turret view (issue 140; src\\d3d11\\srv_turret.cpp; fix.srv_turret_camera_back, fix.srv_turret_hud_gap), two halves judged on the keys in force (the last settings line):
+    the camera half is applied by a 'camera: back X m published' line; the HUD half by the first-draw line or a 10 s line with draws bound. No line but settings: IDLE (the turret view
+    was not entered). A geometry shader that could not be made is NEVER APPLIED whatever else the log says. A key above 0 whose half shows nothing is NEVER APPLIED once the log proves
+    the turret view was on: for the camera, at least one 'on' edge; for the HUD, a 10 s line with nothing bound, or the view on for SRV_TURRET_HUD_MIN_SECS or more with no 10 s line and
+    no first draw (a shorter stay has no 10 s line due yet and is IDLE). A key at 0 is that half off by key, IDLE. PARTIAL: applied, but under SRV_TURRET_BOUND_MIN of the HUD draws
+    bound, or draws refused for the geometry, the readiness or a game geometry shader. The status is the worst of the two halves; a log with the keys unread (no settings line) judges
+    the camera half on nothing (a key it cannot see) and the HUD half on the 10 s line's own gap. No line at all is nothing to judge (None)."""
+    if not any(rows.values()):
+        return None
+    settings, views = rows.get("setting", []), rows.get("view", [])
+    published, secs, firsts, gss = rows.get("published", []), rows.get("hud", []), rows.get("first", []), rows.get("gs", [])
+    back = int(settings[-1]["back"]) if settings else None
+    gap = int(settings[-1]["gap"]) if settings else None
+    keys = "camera back %s, hud gap %s" % tuple("unknown" if v is None else "%d cm" % v for v in (back, gap))
+    bad_gs = [r for r in gss if r["outcome"] != "created"]
+    if bad_gs:
+        return ("NEVER APPLIED", "the geometry shader could not be made: %s (0x%s, %s ms)" % (bad_gs[0]["outcome"], bad_gs[0]["hr"], bad_gs[0]["ms"]))
+    if not any(v for k, v in rows.items() if k != "setting"):
+        return ("IDLE", "the turret view was not entered in this window (%s)" % keys)
+    ons = [r for r in views if r["state"] == "on"]
+    n = len(ons)
+    times = [r["_t"] for k, v in rows.items() if k != "setting" for r in v if r.get("_t") is not None]
+    last_t = max(times) if times else None
+    on_secs, start, is_on = 0.0, None, False   # the seconds the turret view was on: on edge to off edge, the last stay running to the window's last turret row
+    for r in views:
+        if r["state"] == "on":
+            if not is_on:
+                is_on, start = True, r["_t"]
+        elif is_on:
+            if start is not None and r["_t"] is not None:
+                on_secs += (r["_t"] - start) % 86400.0
+            is_on = False
+    if is_on and start is not None and last_t is not None:
+        on_secs += max(0.0, last_t - start)
+    # the camera half
+    if published:
+        cam = ("OK", "camera back %s m published %d time(s)" % (published[-1]["back"], len(published)))
+    elif back == 0:
+        cam = ("IDLE", "camera off by key")
+    elif back is None:
+        cam = None
+    elif n:
+        cam = ("NEVER APPLIED", "the turret view was on %d time(s), the camera key was %d cm, and no 'camera: back ... published' line shows it" % (n, back))
+    else:
+        cam = ("IDLE", "camera key %d cm and no 'on' edge in this window" % back)
+    # the HUD half
+    bound = sum(int(r["bound"]) for r in secs)
+    dl, dr = sum(int(r["dl"]) for r in secs), sum(int(r["dr"]) for r in secs)
+    refused = [sum(int(r["r%d" % i]) for r in secs) for i in range(len(SRV_TURRET_REFUSE_NAMES))]
+    why = ", ".join("%s %d" % (name, count) for name, count in zip(SRV_TURRET_REFUSE_NAMES, refused))
+    if gap is None and secs:
+        gap = int(round(float(secs[-1]["gap"]) * 100.0))
+    last = secs[-1] if secs else None
+    if firsts or bound > 0:
+        text = "hud bound %d of %d draws (L %d, R %d)" % (bound, dl + dr, dl, dr)
+        if firsts:
+            text += ", first draw at frame %s eye %s" % (firsts[0]["frame"], firsts[0]["eye"])
+        if last:
+            text += "; s[L,R] %s,%s, ipd_elite %s mm, P00[L,R] %s,%s (the last 10 s line)" % (last["sl"], last["sr"], last["ipd"], last["pl"], last["pr"])
+        problems = []
+        if dl + dr and bound < SRV_TURRET_BOUND_MIN * (dl + dr):
+            problems.append("only %d of %d draws went through the shader (under %d%%); refused: %s" % (bound, dl + dr, round(SRV_TURRET_BOUND_MIN * 100), why))
+        stuck = [(name, count) for name, count in zip(SRV_TURRET_REFUSE_NAMES, refused) if count and name in ("game-gs", "not-ready", "no-geometry")]
+        if stuck:
+            problems.append("draws refused for " + ", ".join("%s %d" % nc for nc in stuck))
+        hud = ("PARTIAL", text + "; " + "; ".join(problems)) if problems else ("OK", text)
+    elif gap == 0:
+        hud = ("IDLE", "hud off by key")
+    elif gap is None:
+        hud = None
+    elif secs:
+        hud = ("NEVER APPLIED", "the hud gap key was %d cm and the %d 10 s line(s) show nothing bound: draws[L,R] %d,%d, refused %s" % (gap, len(secs), dl, dr, why))
+    elif on_secs >= SRV_TURRET_HUD_MIN_SECS:
+        hud = ("NEVER APPLIED", "the hud gap key was %d cm, the turret view was on for %.0f s, and no first-draw line and no 10 s line shows a draw through the shader" % (gap, on_secs))
+    elif n:
+        hud = ("IDLE", "hud: turret view on under %d s: no 10 s line yet" % SRV_TURRET_HUD_MIN_SECS)
+    else:
+        hud = ("IDLE", "hud: gap key %d cm and no 'on' edge, 10 s line or first draw in this window" % gap)
+    halves = [("camera", cam), ("hud", hud)]
+    states = [h[0] for _, h in halves if h]
+    status = ("NEVER APPLIED" if "NEVER APPLIED" in states else "PARTIAL" if "PARTIAL" in states
+              else "IDLE" if all(s == "IDLE" for s in states) else "OK")
+    text = "turret view on %d time(s), %.0f s in all (%s)" % (n, on_secs, keys)
+    for _, h in halves:
+        if h:
+            text += "; " + h[1]
+    if gss:
+        text += "; geometry shader %s created in %s ms" % (gss[-1]["name"], gss[-1]["ms"])
+    if rows.get("refused"):
+        text += "; draw(s) refused, said once per reason: " + ", ".join(r["reason"] for r in rows["refused"])
+    if rows.get("unrestored"):
+        text += "; the game's geometry stage could not be put back after an issue" + (" (put back at the frame boundary)" if rows.get("restored") else " (no frame-boundary line follows in this window)")
+    return (status, text)
+
+
 def _hrule(name, tags, labels, kinds, judge, needs_detail=False):
     return HealthRule(name, tuple(tags), tuple(labels), tuple((k, re.compile(rx)) for k, rx in kinds), judge, needs_detail)
 
@@ -16294,7 +16418,20 @@ HEALTH_RULES = (
         ("active", H_DESKTOP_ACTIVE),
         ("declined", H_DESKTOP_DECLINED),
         ("_", H_DESKTOP_OTHER),
-    ), _hj_desktop_window),)
+    ), _hj_desktop_window),
+    # The SRV turret view (issue 140): lines of the graphics log that carry no build tag (health_scan reads them, as it reads the desktop window's, before it drops the untagged lines).
+    _hrule(H_SRV_TURRET, (), H_SRV_TURRET_LABELS, (
+        ("setting", H_SRV_TURRET_SETTING),
+        ("view", H_SRV_TURRET_VIEW),
+        ("published", H_SRV_TURRET_PUBLISHED),
+        ("cleared", H_SRV_TURRET_CLEARED),
+        ("hud", H_SRV_TURRET_HUD),
+        ("gs", H_SRV_TURRET_GS),
+        ("first", H_SRV_TURRET_FIRST),
+        ("refused", H_SRV_TURRET_REFUSED),
+        ("unrestored", H_SRV_TURRET_UNRESTORED),
+        ("restored", H_SRV_TURRET_RESTORED),
+    ), _hj_srv_turret),)
 HEALTH_BY_TAG = {}
 for _rule in HEALTH_RULES:
     for _tag in _rule.tags:
@@ -16339,7 +16476,24 @@ def health_scan(text, since=None, until=None):
         ("head containment (F119)", re.compile(r"head containment \(F119\): report context: reference (?P<reference>\d+) \((?P<known>known|not read)\), epoch (?P<epoch>\d+), (?P<context>steady|mixed rest)$")),
     )
     desktop = next(r for r in HEALTH_RULES if r.name == H_DESKTOP)
+    turret = next(r for r in HEALTH_RULES if r.name == H_SRV_TURRET)
     for raw in text.splitlines():
+        if "srv turret " in raw and any(label in raw for label in H_SRV_TURRET_LABELS):
+            # The SRV turret view's lines carry no build tag either. The settings line is state, so every one is kept; the rest are events and are cut by the window.
+            sm = HEALTH_STAMP_RE.match(raw)
+            tod = int(sm.group(1)) * 3600 + int(sm.group(2)) * 60 + int(sm.group(3)) + int(sm.group(4)) / 1000.0 if sm else None
+            body = raw[sm.end():] if sm else raw
+            for kind, rx in turret.kinds:
+                g = rx.search(body)
+                if g:
+                    if kind == "setting" or _health_in_window(tod, since, until):
+                        rows[H_SRV_TURRET].setdefault(kind, []).append(dict(g.groupdict(), _t=tod))
+                    break
+            else:
+                u = unparsed[H_SRV_TURRET]
+                u[0] += 1
+                u[1] = u[1] or raw.strip()[:160]
+            continue
         if H_DESKTOP_LABEL in raw:
             # The desktop window's lines carry no build tag. The setting is state, so every setting line is kept; the rest are events and are cut by the window.
             sm = HEALTH_STAMP_RE.match(raw)
@@ -22010,6 +22164,114 @@ def self_test_health():
               has=["the setting was left_eye but no 10 s line and no stopped line shows a Present drawn"], lacks=["UNPARSED"])
         check("desktop window: a declined draw and no Present drawn is NEVER APPLIED", dw_ok + [dw_setting("left_eye"), RD(dwcpp, "desktop window: not drawing -- %s", "no eye image yet")], 3, [("NEVER APPLIED", DW)])
         check("desktop window: a 10 s line inside --since is counted", dw_ok + [(1, dw_setting("left_eye")), (70, dw_sec())], 0, [("OK", DW)], extra=["--since", "10:01:00"])
+
+        # ---- the SRV turret view: the graphics log's untagged lines, rendered from the C format strings in src\d3d11\srv_turret.cpp and (the geometry shader's creation line) shader_swap.cpp ----
+        stsrc = read_text(os.path.join(repo_root(), "src", "d3d11", "srv_turret.cpp"))
+
+        def RT(source, needle, *vals):
+            key = "st:" + needle
+            if key not in fmts:
+                fmts[key] = health_c_format(source, needle)
+            if fmts[key] is None:
+                raise AssertionError("srv turret: no log format holds %r: the --health rule that reads it is out of date" % needle)
+            return health_render(fmts[key], vals)
+
+        def st_set(back=60, gap=102):
+            return RT(stsrc, "srv turret settings: camera back %d cm", back, gap)
+
+        def st_view(on=True, frame=4100, flags=0x4000000, seat=0x2):
+            return RT(stsrc, "srv turret view: %s at frame %u", "on" if on else "off", frame, flags, seat)
+
+        def st_cam(back=0.60, serial=3):
+            if back:
+                return RT(stsrc, "srv turret camera: back %.2f m published", back, serial)
+            return RT(stsrc, "srv turret camera: back cleared", serial)
+
+        def st_gs(outcome="created", hr=0, ms=0.412):
+            return RT(swap, "%s: precompiled geometry shader %s %s (0x%08X", "srv turret hud", "turret shift", outcome, hr, ms)
+
+        def st_first(frame=4102, eye=0):
+            return RT(stsrc, "srv turret hud: first draw through the shader (frame %u, eye %d)", frame, eye, 1.02, 0.45, 1.47, 0.0412, 0.912, 63.5)
+
+        def st_refused(reason="not-ready"):
+            return RT(stsrc, "srv turret hud: refused a draw (%s)", reason)
+
+        def st_sec(gap=1.02, left=240, right=240, bound=480, refused=(0, 0, 0, 0, 0), s=(0.0412, -0.0412), ipd=63.5, p00=(0.912, 0.915)):
+            return RT(stsrc, "srv turret hud: gap=%.2f", gap, 0.45, 1.47, s[0], s[1], ipd, p00[0], p00[1], left, right, bound, *refused)
+
+        def st_flight(back=60, gap=102, hud=True, cam=True):
+            """A turret visit as the DLL writes it: the keys, the view on, the camera published, the geometry shader, the first draw, a 10 s line, the view off, the camera cleared."""
+            out = [(1, st_set(back, gap)), (2, st_view())]
+            if cam:
+                out.append((3, st_cam()))
+            if hud:
+                out += [(4, st_gs()), (5, st_first()), (12, st_sec())]
+            return out + [(14, st_view(False))] + ([st_cam(0)] if cam else [])
+
+        ST, st_ok = H_SRV_TURRET, [f90_part()]
+        check("srv turret: no line at all, nothing said", st_ok, 0, [("OK", F90S)], lacks=["srv turret", "NEVER APPLIED"])
+        check("srv turret: the settings alone are idle: the turret view was not entered", st_ok + [st_set()], 0, [("IDLE", ST)],
+              has=["the turret view was not entered in this window (camera back 60 cm, hud gap 102 cm)"], lacks=["NEVER APPLIED", "UNPARSED"])
+        check("srv turret: a healthy flight is OK, and its lines are no build-tagged lines", st_ok + st_flight(), 0, [("OK", ST)],
+              has=["turret view on 1 time(s), 12 s in all (camera back 60 cm, hud gap 102 cm)", "camera back 0.60 m published 1 time(s)",
+                   "hud bound 480 of 480 draws (L 240, R 240), first draw at frame 4102 eye 0", "s[L,R] +0.0412,-0.0412, ipd_elite 63.5 mm, P00[L,R] 0.912,0.915 (the last 10 s line)",
+                   "geometry shader turret shift created in 0.412 ms", "1 build-tagged lines"], lacks=["UNPARSED", "NEVER APPLIED", "PARTIAL", "exit 3"])
+        check("srv turret: the camera key above 0 and no 'published' line is NEVER APPLIED", st_ok + st_flight(cam=False), 3, [("NEVER APPLIED", ST)],
+              has=["the turret view was on 1 time(s), the camera key was 60 cm, and no 'camera: back ... published' line shows it", "hud bound 480 of 480 draws"])
+        check("srv turret: the camera key at 0 is off by key, not a failure", st_ok + st_flight(back=0, cam=False), 0, [("OK", ST)], has=["camera off by key", "hud bound 480 of 480 draws"],
+              lacks=["NEVER APPLIED"])
+        check("srv turret: a 10 s line with nothing bound is NEVER APPLIED, and names the refusals", st_ok + [(1, st_set()), (2, st_view()), (3, st_cam()), (12, st_sec(bound=0, refused=(0, 0, 0, 3, 477)))], 3,
+              [("NEVER APPLIED", ST)], has=["the hud gap key was 102 cm and the 1 10 s line(s) show nothing bound: draws[L,R] 240,240, refused no-eye 0, game-gs 0, topology 0, not-ready 3, no-geometry 477", "exit 3"])
+        check("srv turret: the 10 s lines' draws and refusals are summed", st_ok + [(1, st_set()), (2, st_view()), (3, st_cam()), (12, st_sec(left=100, right=90, bound=0, refused=(0, 0, 0, 0, 190))),
+              (22, st_sec(left=10, right=20, bound=0, refused=(1, 0, 2, 0, 27)))], 3, [("NEVER APPLIED", ST)],
+              has=["the 2 10 s line(s) show nothing bound: draws[L,R] 110,110, refused no-eye 1, game-gs 0, topology 2, not-ready 0, no-geometry 217"])
+        check("srv turret: the gap key above 0, the view on for 20 s and no 10 s line and no first draw is NEVER APPLIED", st_ok + [(1, st_set()), (2, st_view()), (3, st_cam()), (22, st_view(False))], 3,
+              [("NEVER APPLIED", ST)], has=["the hud gap key was 102 cm, the turret view was on for 20 s, and no first-draw line and no 10 s line shows a draw through the shader"])
+        check("srv turret: a stay still open runs to the window's last turret line", st_ok + [(1, st_set()), (2, st_view()), (3, st_cam()), (30, st_refused("no-geometry"))], 3,
+              [("NEVER APPLIED", ST)], has=["the turret view was on for 28 s", "draw(s) refused, said once per reason: no-geometry"])
+        check("srv turret: the view on for 5 s and no 10 s line yet is idle for the hud, and no failure", st_ok + [(1, st_set()), (2, st_view()), (3, st_cam()), (7, st_view(False))], 0, [("OK", ST)],
+              has=["camera back 0.60 m published 1 time(s)", "hud: turret view on under 12 s: no 10 s line yet"], lacks=["NEVER APPLIED"])
+        check("srv turret: the camera off by key and the hud idle under 12 s is idle", st_ok + [(1, st_set(0, 102)), (2, st_view()), (7, st_view(False))], 0, [("IDLE", ST)],
+              has=["camera off by key", "hud: turret view on under 12 s: no 10 s line yet"], lacks=["NEVER APPLIED"])
+        check("srv turret: both keys at 0 is idle", st_ok + [(1, st_set(0, 0)), (2, st_view()), (20, st_view(False))], 0, [("IDLE", ST)],
+              has=["(camera back 0 cm, hud gap 0 cm)", "camera off by key", "hud off by key"], lacks=["NEVER APPLIED"])
+        check("srv turret: the last settings line is the one in force", st_ok + [(1, st_set(60, 102)), (2, st_set(0, 0)), (3, st_view()), (20, st_view(False))], 0, [("IDLE", ST)],
+              has=["(camera back 0 cm, hud gap 0 cm)", "camera off by key", "hud off by key"])
+        check("srv turret: a geometry shader that could not be made is NEVER APPLIED whatever else the log says", st_ok + [(1, st_set()), (2, st_view()), (3, st_cam()),
+              (4, st_gs("creation FAILED; standing down", 0x80004005, 1.2)), (5, st_refused("not-ready")), (12, st_sec())], 3,
+              [("NEVER APPLIED", ST)], has=["the geometry shader could not be made: creation FAILED; standing down (0x80004005, 1.200 ms)"])
+        check("srv turret: a geometry shader creation that faulted or was refused is NEVER APPLIED too", st_ok + [(1, st_set()), (2, st_gs("creation faulted/refused; standing down", 0x80004005, 0.5))], 3,
+              [("NEVER APPLIED", ST)], has=["the geometry shader could not be made: creation faulted/refused; standing down (0x80004005, 0.500 ms)"])
+        check("srv turret: only a drifted 10 s line is UNPARSED, not a quiet rule", st_ok + [st_sec().replace("srv turret hud: gap", "srv turret hud: gaps")], 4, [("UNPARSED", ST)], has=["exit 4"])
+        check("srv turret: a drifted camera line is UNPARSED", st_ok + [st_cam().replace("camera: back", "camera: backed")], 4, [("UNPARSED", ST)])
+        check("srv turret: a drifted view line is UNPARSED", st_ok + [st_view().replace("at frame", "by frame")], 4, [("UNPARSED", ST)])
+        check("srv turret: a refusal reason the rule does not know is UNPARSED", st_ok + [st_refused("not-ready").replace("not-ready", "elsewhere")], 4, [("UNPARSED", ST)])
+        check("srv turret: a drifted 10 s line beside a flight is said in the detail, and the first draw still shows the hud applied",
+              st_ok + [(1, st_set()), (2, st_view()), (3, st_cam()), (4, st_gs()), (5, st_first()), (12, st_sec().replace("draws[L,R]", "draws[A,B]")), (14, st_view(False))], 0, [("OK", ST)],
+              has=["[+1 line(s) the rule's patterns do not match: "], lacks=["NEVER APPLIED"])
+        check("srv turret: under 90% of the draws bound is PARTIAL, naming how many were refused and why", st_ok + [(1, st_set()), (2, st_view()), (3, st_cam()), (4, st_gs()), (5, st_first()),
+              (12, st_sec(bound=300, refused=(0, 0, 180, 0, 0))), (14, st_view(False))], 0, [("PARTIAL", ST)],
+              has=["only 300 of 480 draws went through the shader (under 90%); refused: no-eye 0, game-gs 0, topology 180, not-ready 0, no-geometry 0"], lacks=["NEVER APPLIED"])
+        check("srv turret: exactly 90% of the draws bound is not partial", st_ok + [(1, st_set()), (2, st_view()), (3, st_cam()), (4, st_gs()), (5, st_first()),
+              (12, st_sec(bound=432, refused=(0, 0, 48, 0, 0))), (14, st_view(False))], 0, [("OK", ST)], lacks=["PARTIAL", "went through the shader"])
+        check("srv turret: draws refused for the readiness are PARTIAL even when most were bound", st_ok + [(1, st_set()), (2, st_view()), (3, st_cam()), (4, st_gs()), (5, st_first()),
+              (12, st_sec(bound=470, refused=(0, 0, 0, 10, 0))), (14, st_view(False))], 0, [("PARTIAL", ST)], has=["draws refused for not-ready 10"], lacks=["went through the shader"])
+        check("srv turret: draws refused because the game has its own geometry shader are PARTIAL", st_ok + [(1, st_set()), (2, st_view()), (3, st_cam()), (4, st_gs()), (5, st_first()),
+              (12, st_sec(bound=480, refused=(0, 5, 0, 0, 0))), (14, st_view(False))], 0, [("PARTIAL", ST)], has=["draws refused for game-gs 5"])
+        check("srv turret: a camera that never applied outranks a partial hud", st_ok + [(1, st_set()), (2, st_view()), (4, st_gs()), (5, st_first()), (12, st_sec(bound=300, refused=(0, 0, 180, 0, 0))),
+              (14, st_view(False))], 3, [("NEVER APPLIED", ST)], has=["no 'camera: back ... published' line shows it", "only 300 of 480 draws"])
+        check("srv turret: the rare lines (a refusal, the stage not put back, put back at the boundary) are read, not unparsed", st_ok + st_flight() + [
+              (20, st_refused("no-geometry")), (21, RT(stsrc, "srv turret hud: the game's geometry stage could not be put back after an issue")),
+              (22, RT(stsrc, "srv turret hud: the game's geometry stage and constant slot were put back at the frame boundary"))], 0, [("OK", ST)],
+              has=["draw(s) refused, said once per reason: no-geometry", "the game's geometry stage could not be put back after an issue (put back at the frame boundary)"], lacks=["UNPARSED", "NEVER APPLIED"])
+        check("srv turret: a window that opens with the turret view already on judges the hud on its 10 s line, the camera on nothing", st_ok + [(1, st_set()), (30, st_sec())], 0, [("OK", ST)],
+              has=["camera key 60 cm and no 'on' edge in this window", "hud bound 480 of 480 draws"], lacks=["NEVER APPLIED"])
+        check("srv turret: no settings line, the 10 s line's own gap is the hud key in force", st_ok + [(2, st_view()), (3, st_cam()), (12, st_sec(bound=0, refused=(0, 0, 0, 0, 480)))], 3,
+              [("NEVER APPLIED", ST)], has=["the hud gap key was 102 cm", "(camera back unknown, hud gap unknown)"])
+        check("srv turret: --since cuts the events and keeps the settings", st_ok + [(1, st_set()), (20, st_view()), (21, st_cam()), (22, st_gs()), (23, st_first()), (30, st_sec())], 0,
+              [("IDLE", ST)], has=["the turret view was not entered in this window (camera back 60 cm, hud gap 102 cm)"], lacks=["NEVER APPLIED"], extra=["--since", "10:01:00"])
+        check("srv turret: events inside --since are counted", st_ok + [(1, st_set())] + [(70 + i, m) for i, m in enumerate((st_view(), st_cam(), st_gs(), st_first(), st_sec(), st_view(False)))], 0,
+              [("OK", ST)], has=["hud bound 480 of 480 draws"], extra=["--since", "10:01:00"])
 
         # ---- the one failure line the rules read that is not in native_on_foot.cpp ----
         checks += 1
