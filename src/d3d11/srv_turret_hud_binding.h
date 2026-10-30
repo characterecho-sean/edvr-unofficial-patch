@@ -25,6 +25,14 @@ namespace srv_turret {
 
 inline constexpr uint32_t kGsSlot = 0;   // the geometry stage's constant buffer slot the shader reads (the game binds none)
 
+// The stream-output declaration of an output signature, for the GPU instrument's twin of its shader (srv_turret.cpp makeTwins, and the rig's twin): one entry for each element, in the
+// signature's order, into stream 0 and output slot 0, so a vertex is written out as sigFloats floats with the clip position last. Returns the entries; `out` holds kMaxSigElements.
+inline UINT soDeclaration(uint32_t sig, D3D11_SO_DECLARATION_ENTRY (&out)[kMaxSigElements]) {
+    const Signature& s = kSignatures[sig];
+    for (uint32_t i = 0; i < s.count; ++i) out[i] = D3D11_SO_DECLARATION_ENTRY{0, s.el[i].name, s.el[i].index, 0, static_cast<BYTE>(s.el[i].comps), 0};
+    return s.count;
+}
+
 template <class T>
 inline void release(T*& value) {
     T* p = value;

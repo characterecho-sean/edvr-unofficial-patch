@@ -1,26 +1,34 @@
-// The SRV turret view (issue 140; src/d3d11/srv_turret*.h, srv_turret.cpp). The build's own bytecode of the HUD's two pass-through geometry shaders (kSrvTurretHudGsABytecode and
-// kSrvTurretHudGsBBytecode: the build compiles srv_turret_hud_shader.h's HLSL, and this rig checks the bytes are that text's) and the production binding, constants and maths run on
-// WARP, with the D3D debug layer when the machine has it, in front of stand-ins for the two hologram families' vertex and pixel shaders (family A: vs 1989E6D3B405FDE0 with ps
-// EAB8A1C95A13FFBE; family B: vs 2CECEC3065EF0D4A with ps A4D03619D631B186; they draw the near HUD layer at w 0.41 to 0.47 m and the target information and SYSTEMS panels at about
-// 1.39 m). Each stand-in has the game's output signature (A: TEXCOORD0 xyzw, TEXCOORD6 xyz, SV_POSITION at registers 0, 1, 2; B: TEXCOORD0 xyzw, TEXCOORD7 xy, SV_POSITION; read from
-// the fxc disassembly of the dumps' bytecode; reflection compares the two) and the same clip rows (o.x = dp4(cb0[4], r0), o.y = dp4(cb0[5], r0), o.w = dp4(cb0[7], r0)), and the
-// pixel stand-ins read what the game's pixel shaders read (B also SV_POSITION.xy). The reticle's sprite (vs E508648660A352B2), at about 500 m, is not one of them.
+// The SRV turret view (issue 140; src/d3d11/srv_turret*.h, srv_turret.cpp, journal_vehicle_latch.h). The build's own bytecode of the HUD's nine pass-through geometry shaders
+// (kSrvTurretHudGsABytecode to kSrvTurretHudGsIBytecode: the build compiles srv_turret_hud_shader.h's HLSL, and this rig checks the bytes are that text's) and the production
+// binding, constants and maths run on WARP, with the D3D debug layer when the machine has it, in front of stand-ins for the ten families' vertex and pixel shaders. A family is a
+// shader pair (srv_turret_math.h kFamilies: the two hologram families 1989E6D3 and 2CECEC30, the radar-named billboards DF3503CD, 44DDCDEB, 9B34C331, 9611A454 and B932058F, the target
+// hologram sphere 5559BD94 with either of its pixel shaders, and the flight HUD's strokes B7790CBF); there is one geometry shader for each distinct vertex-shader OUTPUT SIGNATURE
+// (kSignatures, nine). Each stand-in has the game's output signature, element for element (read from the fxc disassembly of the dumps' bytecode, the `__USER_...` semantics
+// included; reflection compares the two) and the same clip rows (o.x = dp4(cb0[4], r0), o.y = dp4(cb0[5], r0), o.w = dp4(cb0[7], r0)), and the pixel stand-ins read what the game's
+// pixel shaders read (some also SV_POSITION.xy). The reticle's sprite (vs E508648660A352B2), at about 500 m, is not one of them, nor are the 5334-index shells (at gigametres) or the
+// glare sprite (a constant clip w of 1).
 //
 //   THE SHIFT. A quad at view depth w = 1.4 (a deep panel) with the default gap of 0.96 m and s = +0.0259 (Sean's Pimax: P00 0.940, Elite's eye separation 55.1 mm, the left eye)
 //   lands shifted by the formula's amount, measured in pixels from the texture-coordinate gradient (sub-pixel): clip x + s gap / (w - gap). The right eye shifts the other way.
 //   THE GEOMETRY. The same shift is what a quad truly moved `gap` metres nearer along its ray from the head centre looks like to each eye, rendered with the plain shader
 //   and Elite's off-centre projection: the two images agree to a hundredth of a pixel, the quad's size unchanged (the cyclopean direction is kept).
 //   THE WINDOW. A vertex at w = 500 (the reticle), 50, 5 or 4 m, or nearer than gap + 0.10 (1.0 m, and the near layer's 0.42 m), is unchanged; with the gap at 0 nothing changes;
-//   a mixed draw moves only the quad in range. The texture coordinates are untouched (an integer-pixel translation reproduces the plain image shifted).
+//   a mixed draw moves only the quad in range. The texture coordinates are untouched (an integer-pixel translation reproduces the plain image shifted). All of it for every signature.
+//   THE STRIPS. A quad as a triangle strip (the flight HUD's strokes are drawn as one) is the plain strip bit for bit with the gap at 0 under every culling mode (the winding is kept),
+//   and lands where the same quad as a list lands at the default gap.
 //   THE LINKAGE. Each shader links against its stand-in under the debug layer with no message, its input is the vertex shader's output element for element and its output the same
 //   again, the pixel shader's inputs are a subset of it; a vertex shader without the texture coordinates is reported by the layer (the control that it really checks).
 //   THE BINDING (the production class, on a real context): in and out for one draw with the game's geometry stage and constant slot exactly as they were and no reference leaked or
 //   kept; a geometry shader of the game's own refused with nothing touched; the restore that fails twice, the settle at the boundary and the state the game rebound; the
 //   geometry stage empty after the issue. THE CONSTANTS: made once per device, rewritten only when a number changes, refused when not finite or not a window.
-//   THE INSTRUMENT: the pipeline statistics (gs 0 for a plain draw, 2 for a quad through a shader), the stream-output twin of each family (its record is the vertex whole) and the
-//   capture summary: a quad at 1.4 m reads in_window 6, the near layer's 0.42 m and the reticle's 500 m read in_window 0 with the picture unchanged.
-//   THE MUTANTS, each run through the same cases in both families' text and each caught: no window, the sign, the divisor, the wrong axis, both ends of the window; and the
-//   binding whose restore does nothing. --wiring scans the sources that connect all this to the game, with controls that edit a copy and must trip the pin.
+//   THE INSTRUMENT: the pipeline statistics (gs 0 for a plain draw, 2 for a quad through a shader), the stream-output twin of each signature (its record is the vertex whole, from
+//   the signature table) and the capture summary: a quad at 1.4 m reads in_window 6, the near layer's 0.42 m and the reticle's 500 m read in_window 0 with the picture unchanged.
+//   THE SCORPION LATCH (journal_vehicle_latch.h, no device): LoadGame's Ship and LaunchSRV's SRVType set it for combat_multicrew_srv_01 in any case and clear it for anything
+//   else; the main menu's music, DockSRV, SRVDestroyed and Shutdown clear it; a localised name, a missing, escaped, shorter, longer or too distant field is unknown, which is
+//   false; a session fed in two pieces cut at every byte and byte by byte gives the same changes; a new file resets it; the state has no room for a line.
+//   THE MUTANTS, each run through the same cases in every signature's text and each caught: no window, the sign, the divisor, the wrong axis, both ends of the window, and a
+//   pass-through that reverses the winding (caught by the strip cases); and the binding whose restore does nothing. --wiring scans the sources that connect all this to the game,
+//   with controls that edit a copy and must trip the pin.
 #include <windows.h>
 #include <d3d11.h>
 #include <d3dcompiler.h>
@@ -39,6 +47,7 @@
 
 #include "../../src/common/log.h"
 #include "../../src/common/system_d3d11.h"
+#include "../../src/d3d11/journal_vehicle_latch.h"
 #include "../../src/d3d11/srv_turret_hud_binding.h"
 #include "../../src/d3d11/srv_turret_hud_shader.h"
 #include "../../src/d3d11/srv_turret_math.h"
@@ -46,6 +55,7 @@
 
 using Microsoft::WRL::ComPtr;
 namespace st = edvr::srv_turret;
+namespace jv = edvr::journal_vehicle;
 
 namespace edvr {
 Log& Log::get() {
@@ -113,41 +123,42 @@ static ComPtr<ID3D11Buffer> makeBuffer(UINT bytes, UINT bind, const void* data) 
 }
 
 // ---------------------------------------------------------------- the game's shader pairs, as stand-ins with their signatures and clip rows
-// The two hologram families (srv_turret_math.h): the vertex shaders take the same inputs and write TEXCOORD0 xyzw (register 0), an extra interpolant (TEXCOORD6 xyz for
-// family 0, TEXCOORD7 xy for family 1; register 1) and SV_POSITION (register 2) with o.x = dp4(cb0[4], r0), o.y = dp4(cb0[5], r0), o.w = dp4(cb0[7], r0). The pixel shaders
-// read what the fxc disassembly of the game's says they read: family 0 TEXCOORD0 xyzw and TEXCOORD6 xyz, family 1 TEXCOORD0 xyzw, TEXCOORD7 xy and SV_POSITION xy.
-static std::string standInVs(int fam) {
-    std::string text = R"HLSL(
-cbuffer C0 : register(b0) { float4 cb0[8]; };
-struct VIn { float4 p : POSITION; float4 t0 : TEXCOORD0; float4 t1 : TEXCOORD1; };
-struct VOut { float4 t0 : TEXCOORD0; EXTRA_DECL float4 pos : SV_Position; };
-VOut main(VIn i) {
-    float4 r0 = float4(i.p.xyz, 1.0);
-    VOut o;
-    o.t0 = i.t0;
-    EXTRA_ASSIGN
-    o.pos.x = dot(cb0[4], r0);
-    o.pos.y = dot(cb0[5], r0);
-    o.pos.w = dot(cb0[7], r0);
-    o.pos.z = abs(o.pos.w);
-    return o;
+// One stand-in pair for each output signature (srv_turret_math.h kSignatures, the vertex shaders' outputs from the fxc disassembly of the dumps' bytecode): the vertex stand-in
+// declares exactly that signature, element for element (the game's `__USER_...` semantics included) and writes o.x = dp4(cb0[4], r0), o.y = dp4(cb0[5], r0), o.w = dp4(cb0[7], r0);
+// the pixel stand-in reads every interpolant (the real pixel shaders read a subset of the vertex shader's output, in every pair all of it) and, for the signatures whose pixel
+// shader does, SV_POSITION.xy. The first element carries the texture coordinate (u, v), the second the extra interpolant's first value, which the colour shows.
+static std::string semanticOf(const st::SigElement& e) { return e.index ? std::string(e.name) + std::to_string(e.index) : std::string(e.name); }
+static const char* const kTypeOf[5] = {"", "float", "float2", "float3", "float4"};
+static const char* const kSwizzleOf[5] = {"", ".x", ".xy", ".xyz", ".xyzw"};
+static std::string standInVs(uint32_t sig) {
+    const st::Signature& S = st::kSignatures[sig];
+    std::string decl, assign;
+    for (uint32_t e = 0; e + 1 < S.count; ++e) {
+        decl += std::string("    ") + kTypeOf[S.el[e].comps] + " e" + std::to_string(e) + " : " + semanticOf(S.el[e]) + ";\n";
+        assign += "    o.e" + std::to_string(e) + " = i." + (e == 0 ? "t0" : "t1") + kSwizzleOf[S.el[e].comps] + ";\n";
+    }
+    return "cbuffer C0 : register(b0) { float4 cb0[8]; };\n"
+           "struct VIn { float4 p : POSITION; float4 t0 : TEXCOORD0; float4 t1 : TEXCOORD1; };\n"
+           "struct VOut {\n" + decl + "    float4 pos : SV_Position;\n};\n"
+           "VOut main(VIn i) {\n"
+           "    float4 r0 = float4(i.p.xyz, 1.0);\n"
+           "    VOut o;\n" + assign +
+           "    o.pos.x = dot(cb0[4], r0);\n"
+           "    o.pos.y = dot(cb0[5], r0);\n"
+           "    o.pos.w = dot(cb0[7], r0);\n"
+           "    o.pos.z = abs(o.pos.w);\n"
+           "    return o;\n"
+           "}\n";
 }
-)HLSL";
-    const std::string decl = fam == 0 ? "float3 t6 : TEXCOORD6;" : "float2 t7 : TEXCOORD7;";
-    const std::string assign = fam == 0 ? "o.t6 = i.t1.xyz;" : "o.t7 = i.t1.xy;";
-    text.replace(text.find("EXTRA_DECL"), 10, decl);
-    text.replace(text.find("EXTRA_ASSIGN"), 12, assign);
-    return text;
-}
-// The pixel stage: the texture coordinate as the colour (the sub-pixel measure: red is u, green is v), the extra interpolant in blue, alpha 1 (family 1: from SV_POSITION.x).
-static const char* standInPs(int fam) {
-    static const char* kPs0 = R"HLSL(
-float4 main(float4 t0 : TEXCOORD0, float3 t6 : TEXCOORD6) : SV_Target { return float4(t0.x, t0.y, t6.x, 1.0); }
-)HLSL";
-    static const char* kPs1 = R"HLSL(
-float4 main(float4 t0 : TEXCOORD0, float2 t7 : TEXCOORD7, float4 sp : SV_Position) : SV_Target { return float4(t0.x, t0.y, t7.x, step(0.0, sp.x)); }
-)HLSL";
-    return fam == 0 ? kPs0 : kPs1;
+// The pixel stage: the texture coordinate as the colour (the sub-pixel measure: red is u, green is v), the second element's first value in blue, alpha 1 (a pixel shader that
+// reads SV_POSITION: alpha from SV_POSITION.x).
+static std::string standInPs(uint32_t sig) {
+    const st::Signature& S = st::kSignatures[sig];
+    std::string args;
+    for (uint32_t e = 0; e + 1 < S.count; ++e) args += std::string(kTypeOf[S.el[e].comps]) + " e" + std::to_string(e) + " : " + semanticOf(S.el[e]) + ", ";
+    if (S.psReadsPosition) args += "float4 sp : SV_Position, ";
+    args.resize(args.size() - 2);
+    return "float4 main(" + args + ") : SV_Target { return float4(e0.x, e0.y, " + (S.count > 2 ? "e1.x" : "0.0") + ", " + (S.psReadsPosition ? "step(0.0, sp.x)" : "1.0") + "); }\n";
 }
 // A vertex shader WITHOUT the texture coordinates: the linkage control.
 static const char* kBadVs = R"HLSL(
@@ -155,15 +166,15 @@ cbuffer C0 : register(b0) { float4 cb0[8]; };
 float4 main(float4 p : POSITION) : SV_Position { float4 r0 = float4(p.xyz, 1.0); return float4(dot(cb0[4], r0), dot(cb0[5], r0), abs(dot(cb0[7], r0)), dot(cb0[7], r0)); }
 )HLSL";
 
-static ComPtr<ID3DBlob> g_vsCode[2], g_psCode[2];
-static ComPtr<ID3D11VertexShader> g_vs[2];
-static ComPtr<ID3D11PixelShader> g_ps[2];
+static ComPtr<ID3DBlob> g_vsCode[st::kSignatureCount], g_psCode[st::kSignatureCount];
+static ComPtr<ID3D11VertexShader> g_vs[st::kSignatureCount];
+static ComPtr<ID3D11PixelShader> g_ps[st::kSignatureCount];
 static ComPtr<ID3D11InputLayout> g_layout;
-static ComPtr<ID3D11RasterizerState> g_rs;   // no culling: the stand-in quads are wound either way, as the game's state does not cull its panels
-static int g_fam = 0;                        // the family the cases are running: render() draws it with that family's stand-in pair
+static ComPtr<ID3D11RasterizerState> g_rsOf[3];   // no culling (the stand-in quads are wound either way, as the game's state does not cull its panels), back-face culling, front-face culling
+static int g_fam = 0;                             // the signature the cases are running: render() draws it with that signature's stand-in pair
 
 static void setupGamePair() {
-    for (int f = 0; f < 2; ++f) {
+    for (uint32_t f = 0; f < st::kSignatureCount; ++f) {
         g_vsCode[f] = compileHlsl(standInVs(f), "vs_5_0");
         g_psCode[f] = compileHlsl(standInPs(f), "ps_5_0");
         ck(g_dev->CreateVertexShader(g_vsCode[f]->GetBufferPointer(), g_vsCode[f]->GetBufferSize(), nullptr, &g_vs[f]), "CreateVertexShader");
@@ -173,11 +184,14 @@ static void setupGamePair() {
                                                   {"TEXCOORD", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 16, D3D11_INPUT_PER_VERTEX_DATA, 0},
                                                   {"TEXCOORD", 1, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 32, D3D11_INPUT_PER_VERTEX_DATA, 0}};
     ck(g_dev->CreateInputLayout(elements, 3, g_vsCode[0]->GetBufferPointer(), g_vsCode[0]->GetBufferSize(), &g_layout), "CreateInputLayout");
-    D3D11_RASTERIZER_DESC rd{};
-    rd.FillMode = D3D11_FILL_SOLID;
-    rd.CullMode = D3D11_CULL_NONE;
-    rd.DepthClipEnable = TRUE;
-    ck(g_dev->CreateRasterizerState(&rd, &g_rs), "CreateRasterizerState");
+    const D3D11_CULL_MODE modes[3] = {D3D11_CULL_NONE, D3D11_CULL_BACK, D3D11_CULL_FRONT};
+    for (int i = 0; i < 3; ++i) {
+        D3D11_RASTERIZER_DESC rd{};
+        rd.FillMode = D3D11_FILL_SOLID;
+        rd.CullMode = modes[i];
+        rd.DepthClipEnable = TRUE;
+        ck(g_dev->CreateRasterizerState(&rd, &g_rsOf[i]), "CreateRasterizerState");
+    }
 }
 
 // ---------------------------------------------------------------- one drawn frame
@@ -270,6 +284,8 @@ struct Sample {
 struct DrawOpts {
     int eye = 0;                 // which constants buffer
     bool skipRestore = false;    // MUTANT: a restore that does nothing
+    D3D11_PRIMITIVE_TOPOLOGY topology = D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST;   // the draw's topology
+    int cull = 0;                // 0 no culling, 1 back faces culled, 2 front faces culled
     Sample* sample = nullptr;    // the instrument: queries around the scope (and, with soTarget, the stream-output target of the twin)
     bool soTarget = false;
 };
@@ -282,12 +298,12 @@ static Frame render(const std::vector<Vtx>& verts, const Cam& cam, ID3D11Geometr
     g_ctx->OMSetRenderTargets(1, t.rtv.GetAddressOf(), nullptr);
     const D3D11_VIEWPORT vp{0.0f, 0.0f, float(w), float(h), 0.0f, 1.0f};
     g_ctx->RSSetViewports(1, &vp);
-    g_ctx->RSSetState(g_rs.Get());
+    g_ctx->RSSetState(g_rsOf[o.cull].Get());
     const UINT stride = sizeof(Vtx), offset = 0;
     ID3D11Buffer* vbs[1] = {vb.Get()};
     g_ctx->IASetVertexBuffers(0, 1, vbs, &stride, &offset);
     g_ctx->IASetInputLayout(g_layout.Get());
-    g_ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    g_ctx->IASetPrimitiveTopology(o.topology);
     g_ctx->VSSetShader(g_vs[g_fam].Get(), nullptr, 0);
     g_ctx->VSSetConstantBuffers(0, 1, cb0.GetAddressOf());
     g_ctx->PSSetShader(g_ps[g_fam].Get(), nullptr, 0);
@@ -429,17 +445,50 @@ static void mathCases() {
               std::strcmp(st::refuseName(st::Refuse::kTopology), "topology") == 0 && std::strcmp(st::refuseName(st::Refuse::kNotReady), "not-ready") == 0 &&
               std::strcmp(st::refuseName(st::Refuse::kNoGeometry), "no-geometry") == 0,
           "five refusal reasons, in the order the 10 s line prints them");
-    // the two families: the pairs, their records, and that the reticle's sprite is not among them
-    check(st::kFamilyCount == 2 && st::kFamilies[0].vs == 0x1989E6D3B405FDE0ull && st::kFamilies[0].ps == 0xEAB8A1C95A13FFBEull && st::kFamilies[1].vs == 0x2CECEC3065EF0D4Aull &&
-              st::kFamilies[1].ps == 0xA4D03619D631B186ull && !std::strcmp(st::kFamilies[0].name, "1989E6D3") && !std::strcmp(st::kFamilies[1].name, "2CECEC30"),
-          "the two families: vs 1989E6D3B405FDE0 with ps EAB8A1C95A13FFBE, and vs 2CECEC3065EF0D4A with ps A4D03619D631B186");
-    check(st::familyOf(0x1989E6D3B405FDE0ull, 0xEAB8A1C95A13FFBEull) == 0 && st::familyOf(0x2CECEC3065EF0D4Aull, 0xA4D03619D631B186ull) == 1 &&
-              st::familyOf(0x1989E6D3B405FDE0ull, 0xA4D03619D631B186ull) == -1 && st::familyOf(0x2CECEC3065EF0D4Aull, 0xEAB8A1C95A13FFBEull) == -1 && st::familyOf(0, 0) == -1,
-          "a draw is a family's only when BOTH shaders of the pair match");
-    check(st::familyOf(0xE508648660A352B2ull, 0x63ABD86359B57D01ull) == -1, "the reticle's sprite (vs E508648660A352B2, ps 63ABD86359B57D01) is not a family: it is at about 500 m and is left alone");
-    check(st::kFamilies[0].strideBytes == 44 && st::kFamilies[0].posFloat == 7 && st::kFamilies[1].strideBytes == 40 && st::kFamilies[1].posFloat == 6 &&
-              st::kFamilies[0].posFloat * 4 + 16 == st::kFamilies[0].strideBytes && st::kFamilies[1].posFloat * 4 + 16 == st::kFamilies[1].strideBytes,
-          "the stream-output records: (4 + 3 + 4) floats and (4 + 2 + 4) floats, the clip position last");
+    // the families: the pairs, their records, and that the reticle's sprite and the excluded families are not among them
+    check(st::kFamilyCount == 10 && st::kSignatureCount == 9, "ten families (shader pairs) over nine output signatures");
+    struct Pair {
+        uint64_t vs, ps;
+        const char* name;
+        uint32_t sig;
+    };
+    const Pair pairs[10] = {
+        {0x1989E6D3B405FDE0ull, 0xEAB8A1C95A13FFBEull, "1989E6D3", 0},         {0x2CECEC3065EF0D4Aull, 0xA4D03619D631B186ull, "2CECEC30", 1},
+        {0xDF3503CD07F9B10Cull, 0x8C08EB252B0F6095ull, "DF3503CD", 2},         {0x44DDCDEBAEA137D8ull, 0xCB53257EFE8B1696ull, "44DDCDEB", 3},
+        {0x9B34C331902DC1EDull, 0x3B3433E4FEBBC37Bull, "9B34C331", 4},         {0x9611A454527F7FEBull, 0x1E1C49DC51C0E509ull, "9611A454", 5},
+        {0xB932058F26B76691ull, 0x65861AC394D51526ull, "B932058F", 6},         {0x5559BD94B6852E83ull, 0xEA02FAC2BD6C643Cull, "5559BD94.EA02FAC2", 7},
+        {0x5559BD94B6852E83ull, 0xE95634B0F61D218Full, "5559BD94.E95634B0", 7}, {0xB7790CBFC6554097ull, 0x8DEF46452FA459F5ull, "B7790CBF", 8},
+    };
+    bool pairsOk = true, crossOk = true;
+    for (uint32_t i = 0; i < 10; ++i) {
+        pairsOk = pairsOk && st::kFamilies[i].vs == pairs[i].vs && st::kFamilies[i].ps == pairs[i].ps && !std::strcmp(st::kFamilies[i].name, pairs[i].name) &&
+                  st::kFamilies[i].sig == pairs[i].sig && st::familyOf(pairs[i].vs, pairs[i].ps) == int(i) && st::isFamilyVs(pairs[i].vs);
+        for (uint32_t j = 0; j < 10; ++j)
+            if (i != j && pairs[i].vs != pairs[j].vs) crossOk = crossOk && st::familyOf(pairs[i].vs, pairs[j].ps) == -1;
+    }
+    check(pairsOk, "the ten families: the shader pairs of the dumps, in the table's order, each found by BOTH of its shaders, its vertex shader found by isFamilyVs");
+    check(crossOk && st::familyOf(pairs[7].vs, pairs[8].ps) == 8 && st::familyOf(pairs[8].vs, pairs[7].ps) == 7 && st::familyOf(0, 0) == -1,
+          "a draw is a family's only when BOTH shaders of the pair match (a vertex shader with another family's pixel shader is none; the sphere's two pixel shaders are two families)");
+    check(st::familyOf(0xE508648660A352B2ull, 0x63ABD86359B57D01ull) == -1 && !st::isFamilyVs(0xE508648660A352B2ull),
+          "the reticle's sprite (vs E508648660A352B2, ps 63ABD86359B57D01) is not a family: it is at about 500 m and is left alone");
+    check(!st::isFamilyVs(0xB12F7A618E1BDE98ull) && !st::isFamilyVs(0x203DF51758AADC4Dull) && !st::isFamilyVs(0x94D5C556DFD6D705ull) && st::familyOf(0xB12F7A618E1BDE98ull, 0x42AC0CACC9CDF72Bull) == -1 &&
+              st::familyOf(0x94D5C556DFD6D705ull, 0x912477AEF6958379ull) == -1,
+          "the excluded families (the 5334-index shells B12F7A61 and 203DF517 at gigametres, the glare sprite 94D5C556 with a constant clip w of 1) are not in the table");
+    {   // the stream-output records: every family's equals its signature's
+        const uint32_t expectBytes[9] = {44, 40, 24, 52, 44, 36, 28, 36, 164}, expectPos[9] = {7, 6, 2, 9, 7, 5, 3, 5, 37};
+        bool ok = true;
+        for (uint32_t s = 0; s < 9; ++s) ok = ok && st::sigFloats(s) * 4 == expectBytes[s] && st::sigPosFloat(s) == expectPos[s] && st::sigPosFloat(s) * 4 + 16 == expectBytes[s];
+        for (uint32_t i = 0; i < 10; ++i) ok = ok && st::kFamilies[i].strideBytes == expectBytes[st::kFamilies[i].sig] && st::kFamilies[i].posFloat == expectPos[st::kFamilies[i].sig];
+        check(ok, "the stream-output records: each signature's floats in order, the clip position last (44, 40, 24, 52, 44, 36, 28, 36 and 164 bytes), and each family's are its signature's");
+    }
+    {   // the topologies: lists and strips, nothing else
+        static_assert(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST == 4 && D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP == 5, "the topology constants srv_turret_math.h carries are D3D11's");
+        bool ok = st::topologyCarried(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST) && st::topologyCarried(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+        for (int t : {int(D3D11_PRIMITIVE_TOPOLOGY_UNDEFINED), int(D3D11_PRIMITIVE_TOPOLOGY_POINTLIST), int(D3D11_PRIMITIVE_TOPOLOGY_LINELIST), int(D3D11_PRIMITIVE_TOPOLOGY_LINESTRIP),
+                      int(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST_ADJ), int(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP_ADJ), int(D3D11_PRIMITIVE_TOPOLOGY_3_CONTROL_POINT_PATCHLIST), -1, 99})
+            ok = ok && !st::topologyCarried(t);
+        check(ok, "triangle lists and triangle strips are carried; points, lines, adjacency, patches and anything else are refused");
+    }
     // the measured depths: the deep panels at 1.39 m move at the default gap, the near layer at 0.41 to 0.47 m and the reticle at 500 m do not
     const st::TurretParams d = st::paramsFor(sL, st::kGapDefaultCm / 100.0f);
     check(st::kGapDefaultCm == 96 && std::fabs(d.wMin - 1.06f) < 1e-6f && st::clipXShift(d, 1.39f) > 0.05f && st::clipXShift(d, 1.4f) > 0.0f && st::clipXShift(d, 0.42f) == 0.0f &&
@@ -545,16 +594,19 @@ static void geometryCases(ID3D11GeometryShader* gs, Fails& f) {
 }
 
 // ---------------------------------------------------------------- the linkage, with the signatures compared
-// The production bytes of each family's geometry shader, as the build generates them, and the HLSL text they are the compile of.
-struct FamilyBytes {
+// The production bytes of each signature's geometry shader, as the build generates them, and the HLSL text they are the compile of.
+struct SigBytes {
     const unsigned char* data;
     size_t size;
     const char* text;
 };
-static const FamilyBytes kBytes[2] = {{edvr::kSrvTurretHudGsABytecode, sizeof(edvr::kSrvTurretHudGsABytecode), edvr::kSrvTurretHudGsA},
-                                      {edvr::kSrvTurretHudGsBBytecode, sizeof(edvr::kSrvTurretHudGsBBytecode), edvr::kSrvTurretHudGsB}};
+#define EDVR_RIG_SIG_BYTES(L) {edvr::kSrvTurretHudGs##L##Bytecode, sizeof(edvr::kSrvTurretHudGs##L##Bytecode), edvr::kSrvTurretHudGs##L}
+static const SigBytes kBytes[st::kSignatureCount] = {EDVR_RIG_SIG_BYTES(A), EDVR_RIG_SIG_BYTES(B), EDVR_RIG_SIG_BYTES(C), EDVR_RIG_SIG_BYTES(D), EDVR_RIG_SIG_BYTES(E),
+                                                     EDVR_RIG_SIG_BYTES(F), EDVR_RIG_SIG_BYTES(G), EDVR_RIG_SIG_BYTES(H), EDVR_RIG_SIG_BYTES(I)};
+#undef EDVR_RIG_SIG_BYTES
 
 static void linkageCases(int fam, ID3D11GeometryShader* gs) {
+    const st::Signature& S = st::kSignatures[fam];
     ComPtr<ID3D11ShaderReflection> vsr, psr, gsr;
     ck(D3DReflect(g_vsCode[fam]->GetBufferPointer(), g_vsCode[fam]->GetBufferSize(), __uuidof(ID3D11ShaderReflection), reinterpret_cast<void**>(vsr.GetAddressOf())), "reflect the vertex shader");
     ck(D3DReflect(g_psCode[fam]->GetBufferPointer(), g_psCode[fam]->GetBufferSize(), __uuidof(ID3D11ShaderReflection), reinterpret_cast<void**>(psr.GetAddressOf())), "reflect the pixel shader");
@@ -563,9 +615,8 @@ static void linkageCases(int fam, ID3D11GeometryShader* gs) {
     vsr->GetDesc(&vd);
     psr->GetDesc(&pd);
     gsr->GetDesc(&gd);
-    check(vd.OutputParameters == 3 && gd.InputParameters == 3 && gd.OutputParameters == 3, "three signature elements each: TEXCOORD0, the family's extra interpolant and the position");
-    const UINT extraIndex = fam == 0 ? 6u : 7u, extraMask = fam == 0 ? 7u : 3u;
-    for (UINT i = 0; i < 3; ++i) {
+    check(vd.OutputParameters == S.count && gd.InputParameters == S.count && gd.OutputParameters == S.count, "the signature's elements, the same number in the vertex shader's output and the geometry shader's input and output");
+    for (UINT i = 0; i < S.count; ++i) {
         D3D11_SIGNATURE_PARAMETER_DESC o{}, in{}, out{};
         ck(vsr->GetOutputParameterDesc(i, &o), "output element");
         ck(gsr->GetInputParameterDesc(i, &in), "input element");
@@ -575,9 +626,8 @@ static void linkageCases(int fam, ID3D11GeometryShader* gs) {
               "the geometry shader's input element is the vertex shader's output element: semantic, index, register, mask and type");
         check(!std::strcmp(o.SemanticName, out.SemanticName) && o.SemanticIndex == out.SemanticIndex && o.Register == out.Register && o.Mask == out.Mask,
               "...and its output element is the same again: a pass-through of the signature");
-        if (i == 0) check(!std::strcmp(o.SemanticName, "TEXCOORD") && o.SemanticIndex == 0 && o.Register == 0 && o.Mask == 15, "register 0 is TEXCOORD0 xyzw");
-        if (i == 1) check(!std::strcmp(o.SemanticName, "TEXCOORD") && o.SemanticIndex == extraIndex && o.Register == 1 && o.Mask == extraMask, "register 1 is the family's extra TEXCOORD (6 xyz, 7 xy)");
-        if (i == 2) check(!std::strcmp(o.SemanticName, "SV_Position") && o.Register == 2 && o.Mask == 15, "register 2 is SV_Position xyzw");
+        check(!std::strcmp(o.SemanticName, S.el[i].name) && o.SemanticIndex == S.el[i].index && o.Register == i && o.Mask == ((1u << S.el[i].comps) - 1u),
+              "...and each element is what srv_turret_math.h's signature table says (the semantic the game's shaders spell, the register in order, the components written)");
     }
     // the pixel shader's inputs are a subset of what the geometry shader writes (SV_Position is the rasterizer's)
     for (UINT i = 0; i < pd.InputParameters; ++i) {
@@ -849,14 +899,50 @@ static void constantsCases() {
     check(st::kBackDefaultCm == 60 && st::kGapDefaultCm == 96, "the keys' defaults: 60 cm back, a 96 cm gap");
 }
 
+// ---------------------------------------------------------------- triangle strips (the flight HUD's strokes are drawn as one)
+// A quad as a four-vertex strip. The input assembler hands the geometry shader's `triangle` input each strip triangle in the winding the rasterizer would have used, and the
+// shader emits each as a strip of its own, so: (1) with the gap at 0 the picture is the plain strip's bit for bit under every culling mode, and in the mode that shows the strip
+// the other mode shows nothing (the winding is consistent, the control that the odd triangle is not turned inside out); (2) with the default gap the strip lands exactly where the
+// same quad as a list lands.
+static void stripCases(ID3D11GeometryShader* gs, Fails& f) {
+    const Cam cam;
+    const float ipd = 0.0551f, gap = st::kGapDefaultCm / 100.0f, w0 = 1.4f;
+    const float hx = st::eyeHx(0, ipd), ex = -hx;
+    std::vector<Vtx> list, strip;
+    addQuad(list, -0.30f, 0.30f, -0.20f, 0.20f, w0, ex);
+    strip = {list[0], list[1], list[2], list[4]};   // (x0,y0) (x1,y0) (x0,y1) (x1,y1)
+    const st::TurretParams p = st::paramsFor(cam.p00 * hx, gap), zero = st::paramsFor(cam.p00 * hx, 0.0f);
+    double shown[3] = {};
+    for (int cull = 0; cull < 3; ++cull) {
+        DrawOpts o;
+        o.cull = cull;
+        o.topology = D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP;
+        const Frame plain = render(strip, cam, nullptr, zero, 256, 256, o);
+        const Frame copy = render(strip, cam, gs, zero, 256, 256, o);
+        shown[cull] = covered(plain);
+        f.expect(maxDiff(plain, copy) == 0.0, "a triangle strip through the shader with the gap at 0 is the plain strip, bit for bit, under every culling mode");
+        DrawOpts ol = o;
+        ol.topology = D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
+        const Frame moved = render(strip, cam, gs, p, 256, 256, o);
+        const Frame listMoved = render(list, cam, gs, p, 256, 256, ol);
+        f.expect(maxDiff(moved, listMoved) == 0.0, "a strip quad at the default gap lands exactly where the same quad as a list lands");
+        const Frame plainList = render(list, cam, nullptr, p, 256, 256, ol);
+        f.expect(cull != 0 || (covered(moved) > 1500 && maxDiff(moved, plainList) > 0.05), "...and it is shifted (the picture is not the plain quad's)");
+    }
+    f.expect(shown[0] > 1500 && ((shown[1] > 1500) != (shown[2] > 1500)) && (shown[1] < 1.0 || shown[2] < 1.0),
+             "the control: the plain strip is whole with no culling and with one facing culled, and gone with the other (both triangles share a winding)");
+}
+
 // ---------------------------------------------------------------- the GPU instrument (srv_turret.cpp's probe*): the same calls, on WARP
 static void instrumentCases(int fam, ID3D11GeometryShader* gs) {
-    const st::Family& F = st::kFamilies[fam];
-    // the twin, made as the module makes it: the family's bytecode, its signature's stream-output entries, stream 0 rasterized as well
+    const st::Signature& S = st::kSignatures[fam];
+    const uint32_t strideFloats = st::sigFloats(fam), posFloat = st::sigPosFloat(fam);
+    // the twin, made as the module makes it: the signature's bytecode, its stream-output entries, stream 0 rasterized as well
     ComPtr<ID3D11GeometryShader> twin;
-    const D3D11_SO_DECLARATION_ENTRY decl[3] = {{0, "TEXCOORD", 0, 0, 4, 0}, {0, "TEXCOORD", fam == 0 ? 6u : 7u, 0, fam == 0 ? 3u : 2u, 0}, {0, "SV_Position", 0, 0, 4, 0}};
-    const UINT stride = F.strideBytes;
-    ck(g_dev->CreateGeometryShaderWithStreamOutput(kBytes[fam].data, kBytes[fam].size, decl, 3, &stride, 1, 0, nullptr, &twin), "the stream-output twin is made from the family's bytecode");
+    D3D11_SO_DECLARATION_ENTRY decl[st::kMaxSigElements] = {};
+    const UINT entries = st::soDeclaration(fam, decl);
+    const UINT stride = strideFloats * 4;
+    ck(g_dev->CreateGeometryShaderWithStreamOutput(kBytes[fam].data, kBytes[fam].size, decl, entries, &stride, 1, 0, nullptr, &twin), "the stream-output twin is made from the signature's bytecode");
     const Cam cam;
     const float ipd = 0.0551f, gap = st::kGapDefaultCm / 100.0f, w0 = 1.4f;   // the default gap and a deep panel's depth
     const float hx = st::eyeHx(0, ipd), ex = -hx;
@@ -864,7 +950,6 @@ static void instrumentCases(int fam, ID3D11GeometryShader* gs) {
     std::vector<Vtx> quad;
     addQuad(quad, -0.30f, 0.30f, -0.20f, 0.20f, w0, ex);
     DrawOpts base;
-    const uint32_t strideFloats = F.strideBytes / 4;
 
     // a plain draw: the vertex shader ran, the geometry shader did not (gs = 0 with ia_prims above 0 is how a flight reads "never ran")
     Sample plain;
@@ -892,25 +977,26 @@ static void instrumentCases(int fam, ID3D11GeometryShader* gs) {
           "through the twin: two invocations, two primitives written to the stream-output target, none lost");
     check(maxDiff(prodFrame, twinFrame) == 0.0, "...and it rasterizes exactly as the production shader does (the instrument does not change the picture)");
     check(!cap.soTargetAfter && !cap.gsAfter, "...and the stream-output target and the geometry stage are empty after the scope");
-    const st::CaptureSummary c = st::summarizeCapture(cap.records.data(), 6, strideFloats, F.posFloat, params);
+    const st::CaptureSummary c = st::summarizeCapture(cap.records.data(), 6, strideFloats, posFloat, params);
     check(c.vertices == 6 && c.inWindow == 6 && std::fabs(c.wMin - w0) < 1e-4f && std::fabs(c.wMax - w0) < 1e-4f, "the six captured vertices lie at view depth 1.4 (a deep panel) and in the window");
     const float shift = st::clipXShift(params, w0);
     check(std::fabs(c.shiftMin - shift) < 1e-6f && std::fabs(c.shiftMax - shift) < 1e-6f && shift > 0.05f, "...and the shift the rule gives them is s gap / (w - gap)");
     // the captured NDC x is the shifted position: (P00 X + offX w + shift) / w for the quad's left and right edges
     const float xl = (cam.p00 * (-0.30f - ex) + cam.offX * w0 + shift) / w0, xr = (cam.p00 * (0.30f - ex) + cam.offX * w0 + shift) / w0;
     check(std::fabs(c.ndcXMin - xl) < 1e-5f && std::fabs(c.ndcXMax - xr) < 1e-5f, "...and the streamed clip x / w is the shifted edge: the shader wrote the position the rule says");
-    // the captured record is the vertex whole: the interpolants as the vertex shader wrote them, not only the position (the first vertex is u = 0, v = 0, 0, 1 and the extra
-    // element 0.25, 0.5 ...; the second vertex starts with u = 1)
-    check(std::fabs(cap.records[0] - 0.0f) < 1e-6f && std::fabs(cap.records[3] - 1.0f) < 1e-6f && std::fabs(cap.records[4] - 0.25f) < 1e-6f &&
-              std::fabs(cap.records[strideFloats] - 1.0f) < 1e-6f,
-          "...with the interpolants intact in the record (TEXCOORD0 = u, v, 0, 1 and the extra element): the shader passes them through");
+    // the captured record is the vertex whole: the interpolants as the vertex shader wrote them, not only the position (the first vertex is u = 0, v = 0, and the second element
+    // starts with 0.25; the second vertex starts with u = 1)
+    bool whole = std::fabs(cap.records[0] - 0.0f) < 1e-6f && std::fabs(cap.records[1] - 0.0f) < 1e-6f && std::fabs(cap.records[strideFloats] - 1.0f) < 1e-6f;
+    if (S.el[0].comps == 4) whole = whole && std::fabs(cap.records[3] - 1.0f) < 1e-6f;
+    if (S.count > 2) whole = whole && std::fabs(cap.records[S.el[0].comps] - 0.25f) < 1e-6f;
+    check(whole, "...with the interpolants intact in the record (the texture coordinate and the second element): the shader passes them through");
     // the unshifted position of the same quad from the twin with s = 0: the difference is the shift
     Sample capPlain;
     DrawOpts op = base;
     op.sample = &capPlain;
     op.soTarget = true;
     (void)render(quad, cam, twin.Get(), st::paramsFor(0.0f, gap), 256, 256, op);   // s = 0: the twin writes the game's own positions
-    const st::CaptureSummary c0 = st::summarizeCapture(capPlain.records.data(), 6, strideFloats, F.posFloat, st::paramsFor(0.0f, gap));
+    const st::CaptureSummary c0 = st::summarizeCapture(capPlain.records.data(), 6, strideFloats, posFloat, st::paramsFor(0.0f, gap));
     check(std::fabs((c.ndcXMin - c0.ndcXMin) - shift / w0) < 1e-5f && std::fabs(c.ndcYMin - c0.ndcYMin) < 1e-6f && std::fabs(c.wMin - c0.wMin) < 1e-6f,
           "the captured positions differ from the unshifted ones by the shift in x only (y and w are the game's)");
 
@@ -928,7 +1014,7 @@ static void instrumentCases(int fam, ID3D11GeometryShader* gs) {
         DrawOpts ob = base;
         ob.sample = &outPlain;
         const Frame plainOut = render(outside, cam, nullptr, params, 256, 256, ob);
-        const st::CaptureSummary co = st::summarizeCapture(outCap.records.data(), 6, strideFloats, F.posFloat, params);
+        const st::CaptureSummary co = st::summarizeCapture(outCap.records.data(), 6, strideFloats, posFloat, params);
         char what[220];
         std::snprintf(what, sizeof(what), "a quad at %.2f m: the geometry shader ran twice, the capture reads in_window 0 and w = %.2f, and the picture is the plain draw's bit for bit", double(depth),
                       double(depth));
@@ -938,14 +1024,143 @@ static void instrumentCases(int fam, ID3D11GeometryShader* gs) {
     }
     // the summary's own edges
     std::vector<float> junk(2 * strideFloats, 0.0f);
-    junk[F.posFloat] = NAN;
-    junk[F.posFloat + 3] = 1.0f;
-    junk[strideFloats + F.posFloat + 3] = -1.0f;
-    const st::CaptureSummary cj = st::summarizeCapture(junk.data(), 2, strideFloats, F.posFloat, params);
-    check(cj.vertices == 1 && cj.inWindow == 0 && st::summarizeCapture(nullptr, 6, strideFloats, F.posFloat, params).vertices == 0 &&
-              st::summarizeCapture(junk.data(), 2, 3, F.posFloat, params).vertices == 0,
+    junk[posFloat] = NAN;
+    junk[posFloat + 3] = 1.0f;
+    junk[strideFloats + posFloat + 3] = -1.0f;
+    const st::CaptureSummary cj = st::summarizeCapture(junk.data(), 2, strideFloats, posFloat, params);
+    check(cj.vertices == 1 && cj.inWindow == 0 && st::summarizeCapture(nullptr, 6, strideFloats, posFloat, params).vertices == 0 &&
+              st::summarizeCapture(junk.data(), 2, 3, posFloat, params).vertices == 0,
           "the summary skips a vertex that is not finite, reads nothing from nothing and refuses a stride too short for the position");
     g_ctx->ClearState();
+}
+
+// ---------------------------------------------------------------- the Scorpion latch (journal_vehicle_latch.h; no device)
+struct LatchRun {
+    jv::Latch latch;
+    std::vector<std::pair<bool, jv::Event>> changes;
+    void feed(const std::string& text) {
+        latch.feed(text.data(), uint32_t(text.size()), [this](bool scorpion, jv::Event cause) { changes.emplace_back(scorpion, cause); });
+    }
+};
+static std::string line(const std::string& event, const std::string& fields) {
+    return "{ \"timestamp\":\"2026-10-30T16:13:52Z\", \"event\":\"" + event + "\"" + (fields.empty() ? "" : ", " + fields) + " }\n";
+}
+static std::string loadGame(const std::string& ship) {
+    return line("LoadGame", "\"FID\":\"F1234567\", \"Commander\":\"Cmdr Test\", \"Horizons\":true, \"Odyssey\":true, \"Ship\":\"" + ship + "\", \"Ship_Localised\":\"" + ship + " (localised)\", \"ShipID\":4, "
+                            "\"ShipName\":\"\", \"ShipIdent\":\"\", \"FuelLevel\":16.0, \"FuelCapacity\":16.0, \"GameMode\":\"Open\", \"Credits\":1234567, \"Loan\":0");
+}
+static std::string launchSrv(const std::string& type) {
+    return line("LaunchSRV", "\"Loadout\":\"starter\", \"ID\":1, \"SRVType\":\"" + type + "\", \"SRVType_Localised\":\"" + type + " (localised)\", \"PlayerControlled\":true");
+}
+static std::string music(const std::string& track) { return line("Music", "\"MusicTrack\":\"" + track + "\""); }
+
+static void latchCases() {
+    const std::string kScorpion = "Combat_Multicrew_SRV_01";
+    {   // the Scorpion loaded, the Scorpion launched, the Scarab launched, the other ships
+        LatchRun r;
+        check(!r.latch.scorpion(), "a new latch is false: unknown is not the Scorpion");
+        r.feed(loadGame(kScorpion));
+        check(r.latch.scorpion() && r.changes.size() == 1 && r.changes[0].first && r.changes[0].second == jv::Event::kLoadGame, "LoadGame into Combat_Multicrew_SRV_01 sets the latch, once, naming the event");
+        r.feed(loadGame(kScorpion));
+        check(r.latch.scorpion() && r.changes.size() == 1, "...and the same value again is no change (each change is said once)");
+        r.feed(loadGame("Anaconda"));
+        check(!r.latch.scorpion() && r.changes.size() == 2 && !r.changes[1].first && r.changes[1].second == jv::Event::kLoadGame, "a LoadGame of any other ship clears it");
+        r.feed(launchSrv("combat_multicrew_srv_01"));
+        check(r.latch.scorpion() && r.changes.back().second == jv::Event::kLaunchSrv, "LaunchSRV with combat_multicrew_srv_01 (lower case) sets it");
+        r.feed(launchSrv("testbuggy"));
+        check(!r.latch.scorpion() && !r.changes.back().first, "LaunchSRV with testbuggy (the Scarab) clears it");
+        const size_t n = r.changes.size();
+        r.feed(launchSrv("testbuggy"));
+        check(r.changes.size() == n, "...and a second Scarab is no change");
+        r.feed(launchSrv("COMBAT_MULTICREW_SRV_01"));
+        check(r.latch.scorpion(), "the comparison is case-insensitive");
+    }
+    {   // what clears it
+        const std::pair<std::string, jv::Event> clears[] = {
+            {music("MainMenu"), jv::Event::kMusic}, {line("DockSRV", "\"SRVType\":\"combat_multicrew_srv_01\", \"ID\":1"), jv::Event::kDockSrv},
+            {line("SRVDestroyed", "\"SRVType\":\"combat_multicrew_srv_01\", \"ID\":1"), jv::Event::kSrvDestroyed}, {line("Shutdown", ""), jv::Event::kShutdown}};
+        for (const auto& c : clears) {
+            LatchRun r;
+            r.feed(launchSrv("combat_multicrew_srv_01"));
+            r.feed(c.first);
+            char what[160];
+            std::snprintf(what, sizeof(what), "%s clears the latch, naming the event", jv::eventName(c.second));
+            check(!r.latch.scorpion() && r.changes.size() == 2 && !r.changes[1].first && r.changes[1].second == c.second, what);
+        }
+        LatchRun r;
+        r.feed(launchSrv("combat_multicrew_srv_01"));
+        r.feed(music("Combat_Unknown") + music("Exploration") + music("NoTrack") + music("mainmenuX") + music("Main"));
+        check(r.latch.scorpion() && r.changes.size() == 1, "any other music track, and a name that only starts like the main menu's, leave it alone");
+        r.feed(music("mainmenu"));
+        check(!r.latch.scorpion(), "the track name is compared case-insensitively too");
+    }
+    {   // fields that are not the field: a localised name, a missing field, a field too far on, a value that is only a prefix or has more
+        LatchRun r;
+        r.feed(line("LoadGame", "\"FID\":\"F1\", \"Ship_Localised\":\"combat_multicrew_srv_01\", \"ShipID\":4"));
+        check(!r.latch.scorpion() && r.changes.empty(), "a LoadGame with only Ship_Localised (no Ship) is not the Scorpion");
+        r.feed(launchSrv("combat_multicrew_srv_01"));
+        r.feed(line("LaunchSRV", "\"SRVType_Localised\":\"combat_multicrew_srv_01\", \"ID\":1"));
+        check(!r.latch.scorpion(), "a LaunchSRV with a localised name and no SRVType is unknown: the latch clears");
+        r.feed(launchSrv("combat_multicrew_srv_01"));
+        r.feed(line("LoadGame", "\"FID\":\"F1\", \"Commander\":\"X\", \"Horizons\":true"));
+        check(!r.latch.scorpion(), "a LoadGame line that ends without its Ship clears the latch");
+        r.feed(launchSrv("combat_multicrew_srv_01"));
+        r.feed(line("LaunchSRV", "\"Pad\":\"" + std::string(600, 'x') + "\", \"SRVType\":\"combat_multicrew_srv_01\""));
+        check(!r.latch.scorpion(), "a field further than 512 bytes from the event's name is out of reach: unknown");
+        r.feed(launchSrv("combat_multicrew_srv_0"));
+        check(!r.latch.scorpion(), "a value that is only a prefix of the Scorpion's is not the Scorpion");
+        r.feed(launchSrv("combat_multicrew_srv_01"));
+        r.feed(launchSrv("combat_multicrew_srv_011"));
+        check(!r.latch.scorpion(), "a value with a character more is not the Scorpion");
+        r.feed(launchSrv("combat_multicrew_srv_01"));
+        r.feed(launchSrv("combat_multicrew_srv_0\\u0031"));
+        check(!r.latch.scorpion(), "a value with an escape in it is not the Scorpion");
+        r.feed(launchSrv("combat_multicrew_srv_01"));
+        r.feed(line("Died", "\"SRVType\":\"testbuggy\"") + line("Touchdown", "\"Ship\":\"Anaconda\"") + line("Docked", "\"StationName\":\"X\""));
+        check(r.latch.scorpion(), "events that are not the five (Died, Touchdown, Docked) are skipped, whatever fields they carry");
+        r.feed("garbage \"event\":\"LoadGame\" without a newline and \"Ship\":\"Anaconda\"\n");
+        check(!r.latch.scorpion(), "the event token is found wherever it stands in a line");
+        r.feed("\"event\":\"LoadGame\", \"Ship\":\"Combat_Multicrew_SRV_01\"\r\n");
+        check(r.latch.scorpion(), "a CRLF line ends like an LF line");
+    }
+    {   // the stream: a whole session fed in every split gives the same changes as fed whole
+        const std::string session = line("Fileheader", "\"part\":1, \"language\":\"English\\\\UK\", \"gameversion\":\"4.0.0.1\"") + loadGame("Cobra") + launchSrv("testbuggy") +
+                                    launchSrv("combat_multicrew_srv_01") + line("DockSRV", "\"ID\":1") + loadGame(kScorpion) + music("MainMenu") + loadGame("TestBuggy") + launchSrv("Combat_Multicrew_SRV_01") +
+                                    line("Shutdown", "");
+        LatchRun whole;
+        whole.feed(session);
+        check(whole.changes.size() == 6 && !whole.latch.scorpion(), "the sample session: set, cleared, set, cleared, set and cleared by the shutdown (six changes)");
+        bool allSame = true;
+        for (size_t cut = 0; cut <= session.size(); ++cut) {
+            LatchRun split;
+            split.feed(session.substr(0, cut));
+            split.feed(session.substr(cut));
+            allSame = allSame && split.changes == whole.changes;
+        }
+        check(allSame, "fed in two pieces cut at EVERY byte, the session gives the same changes (a read can end inside a name, a key, a value)");
+        LatchRun bytes;
+        for (char ch : session) bytes.feed(std::string(1, ch));
+        check(bytes.changes == whole.changes, "...and fed one byte at a time too");
+    }
+    {   // a new file: the stream's place and the latch are forgotten
+        LatchRun r;
+        r.feed(launchSrv("combat_multicrew_srv_01"));
+        check(r.latch.scorpion() && r.latch.reset() && !r.latch.scorpion(), "reset clears the latch and says it was set");
+        check(!r.latch.reset(), "...and says nothing when it was not");
+        r.feed("{ \"event\":\"LaunchSRV\", \"SRVType\":\"combat_mul");
+        r.latch.reset();
+        r.feed("ticrew_srv_01\" }\n");
+        check(!r.latch.scorpion(), "a half-read line does not carry into the next file");
+        r.feed(std::string("{ \"event\":\"LaunchSRV\", \"SRVType\":\"combat_multicrew_srv_01\" }\n"));
+        check(r.latch.scorpion(), "...and the next file's lines are read afresh");
+    }
+    {   // privacy: of a line the latch keeps an event name and a bool, not the vehicle's name or anything else
+        check(sizeof(jv::Latch) <= 40, "the latch is a few bytes of state (an event name of at most 15 bytes, a bool, counters): it has no room to keep a line or a value");
+        check(!std::strcmp(jv::eventName(jv::Event::kLoadGame), "LoadGame") && !std::strcmp(jv::eventName(jv::Event::kLaunchSrv), "LaunchSRV") && !std::strcmp(jv::eventName(jv::Event::kMusic), "Music") &&
+                  !std::strcmp(jv::eventName(jv::Event::kDockSrv), "DockSRV") && !std::strcmp(jv::eventName(jv::Event::kSrvDestroyed), "SRVDestroyed") &&
+                  !std::strcmp(jv::eventName(jv::Event::kShutdown), "Shutdown") && !std::strcmp(jv::eventName(jv::Event::kNewJournal), "NewJournal"),
+              "the log names the event that moved the latch, by the journal's own event names");
+    }
 }
 
 // ---------------------------------------------------------------- the mutants
@@ -981,6 +1196,7 @@ int main(int argc, char** argv) {
         }
         check(argc == 2 && !std::strcmp(argv[1], "--self-test"), "usage: srv_turret_hud_test --self-test | --wiring | --dry-run");
         mathCases();
+        latchCases();
         const HRESULT made = edvr::systemD3D11CreateDevice()(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, D3D11_CREATE_DEVICE_DEBUG, nullptr, 0, D3D11_SDK_VERSION, &g_dev, nullptr, &g_ctx);
         if (FAILED(made))
             ck(edvr::systemD3D11CreateDevice()(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, nullptr, 0, D3D11_SDK_VERSION, &g_dev, nullptr, &g_ctx), "device");
@@ -989,29 +1205,30 @@ int main(int argc, char** argv) {
         setupGamePair();
 
         // The shaders: the build's bytes are each HLSL text's compile, and the device takes them.
-        ComPtr<ID3D11GeometryShader> gsOf[2];
-        for (int fam = 0; fam < 2; ++fam) {
+        ComPtr<ID3D11GeometryShader> gsOf[st::kSignatureCount];
+        for (uint32_t fam = 0; fam < st::kSignatureCount; ++fam) {
             const auto compiled = compileHlsl(kBytes[fam].text, "gs_5_0");
             check(compiled->GetBufferSize() == kBytes[fam].size && !std::memcmp(compiled->GetBufferPointer(), kBytes[fam].data, kBytes[fam].size),
-                  "the build's bytecode of each family's shader is exactly the compile of srv_turret_hud_shader.h's text");
+                  "the build's bytecode of each signature's shader is exactly the compile of srv_turret_hud_shader.h's text");
             ck(g_dev->CreateGeometryShader(kBytes[fam].data, kBytes[fam].size, nullptr, &gsOf[fam]), "the device takes the production shader");
         }
 
         constantsCases();
         Fails production;
-        for (int fam = 0; fam < 2; ++fam) {
-            g_fam = fam;
-            linkageCases(fam, gsOf[fam].Get());
-            instrumentCases(fam, gsOf[fam].Get());
+        for (uint32_t fam = 0; fam < st::kSignatureCount; ++fam) {
+            g_fam = int(fam);
+            linkageCases(int(fam), gsOf[fam].Get());
+            instrumentCases(int(fam), gsOf[fam].Get());
             geometryCases(gsOf[fam].Get(), production);
+            stripCases(gsOf[fam].Get(), production);
         }
         g_fam = 0;
         bindingCases(gsOf[0].Get(), production, true);
         afterIssueCases(gsOf[0].Get(), production, false);
         if (production.n) std::printf("first failing production check: %s (%u failed)\n", production.first.c_str(), production.n);
-        check(production.n == 0, "the production shaders and binding pass every geometry, binding and issue-end case, for both families");
+        check(production.n == 0, "the production shaders and binding pass every geometry, strip, binding and issue-end case, for all nine signatures");
 
-        // THE MUTANTS: each through the same cases, each must fail at least one, in each family's text.
+        // THE MUTANTS: each through the same cases, each must fail at least one, in each signature's text.
         struct Mutant {
             const char* name;
             const char* from;
@@ -1025,8 +1242,8 @@ int main(int argc, char** argv) {
             {"the far end of the window ignored", "w < wMax", "w < 1000.0"},
             {"the near end of the window ignored", "w > wMin &&", "w > 0.0 &&"},
         };
-        for (int fam = 0; fam < 2; ++fam) {
-            g_fam = fam;
+        for (uint32_t fam = 0; fam < st::kSignatureCount; ++fam) {
+            g_fam = int(fam);
             const std::string text = kBytes[fam].text;
             for (const Mutant& m : mutants) {
                 const std::string mutated = replaceAll(text, m.from, m.to);
@@ -1035,7 +1252,17 @@ int main(int argc, char** argv) {
                 Fails fails;
                 geometryCases(mg.Get(), fails);
                 char what[200];
-                std::snprintf(what, sizeof(what), "the mutant \"%s\" of family %d's shader is caught by the geometry cases", m.name, fam);
+                std::snprintf(what, sizeof(what), "the mutant \"%s\" of signature %u's shader is caught by the geometry cases", m.name, fam);
+                check(fails.n > 0, what);
+            }
+            {   // a pass-through that reverses every triangle's winding (what a shader that did not keep the input assembler's order would do to a strip): caught by the strip cases
+                const std::string flipped = replaceAll(text, "Vertex o = v[i];", "Vertex o = v[(i == 0) ? 0 : (3 - i)];");
+                check(flipped != text, "the winding mutant differs from the production text");
+                const auto mg = gsFromText(flipped);
+                Fails fails;
+                stripCases(mg.Get(), fails);
+                char what[200];
+                std::snprintf(what, sizeof(what), "the mutant \"a pass-through that reverses the winding\" of signature %u's shader is caught by the strip cases", fam);
                 check(fails.n > 0, what);
             }
         }
@@ -1061,7 +1288,7 @@ int main(int argc, char** argv) {
             }
         }
         wiringCases();
-        std::printf("PASS srv_turret_hud_test: %u checks; the turret shader, binding, constants and maths on WARP, six shader mutants in each of two families and one binding mutant caught\n", g_checks);
+        std::printf("PASS srv_turret_hud_test: %u checks; the turret shaders, binding, constants, maths and Scorpion latch on WARP, six shader mutants in each of nine signatures and one binding mutant caught\n", g_checks);
         return 0;
     } catch (const std::exception& e) {
         std::printf("FAIL %s (%u checks)\n", e.what(), g_checks);

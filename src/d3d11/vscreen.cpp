@@ -72,8 +72,8 @@
 #include "celestial_motion.h"   // the planet patch constants' CPU shadow: the write tees, the draw capture, the boundary tick
 #include "orbital_width.h"      // fix.ui_quality: the orbit lines' half-width, scaled in the game's own draw of their shader
 #include "supercruise_bars.h"   // fix.ui_quality: the supercruise bars' private geometry-shader pass, bound around the layered issue
-#include "srv_turret.h"         // issue 140: the SRV turret view's HUD, a private geometry-shader pass bound around every issue of the two hologram families' draws
-#include "srv_turret_math.h"    // issue 140: the two families' shader pairs
+#include "srv_turret.h"         // issue 140: the SRV turret view's HUD, a private geometry-shader pass bound around every issue of the HUD families' draws
+#include "srv_turret_math.h"    // issue 140: the HUD families' shader pairs
 #include "engine_velocity.h"
 #include "vr_world_route.h"
 #include "vr_camera_census.h"
@@ -4176,18 +4176,20 @@ void uiLayerSecondIssues(ID3D11DeviceContext* self, char kind, UINT count, UINT 
     }
 }
 
-// Issue 140 (TEMPORARY, fix.srv_turret_hud_gap; srv_turret.h): in the SRV's turret view the HUD's two hologram families (vs 1989E6D3B405FDE0 with ps EAB8A1C95A13FFBE, and vs
-// 2CECEC3065EF0D4A with ps A4D03619D631B186) draw both the near layer, from records 0.41 to 0.47 m out, and the target information and SYSTEMS panels, from records about
-// 1.39 m out. Their draws are issued through the family's private geometry shader, which brings a vertex in the deep band forward to the near layer's depth and leaves every
-// other vertex alone. (The targeting sprite, vs E508648660A352B2 with ps 63ABD86359B57D01, is the reticle's three layers at about 500 m, not the panels: an earlier build
-// targeted it and moved nothing. Known gap: with "Disable GUI effects" OFF the holo panel family is vs 81216C77F90DEDD6, ps A2965EC2931A39C8, whose output has SV_Position at
-// o5; there is no bytecode for it in the dumps and it is not covered.) Asked per draw while the pass is wanted (the gate's term, srvTurretHudWantsDraws): one vertex shader
-// hash compare rejects every other draw, the pixel shader's is read only on a vertex shader of the two. The draw's eye is the UI layer's own mapping of the bound target, else
-// ui depth's frame table, read only, and last the table's registering form (what the layer's decision and the pixel probe make at the same draw; the first interface draw of a
-// frame registers its target, the left eye's first). Refused when the eye is unknown. NOINLINE: the draw path pays this call only while the pass is wanted.
+// Issue 140 (TEMPORARY, fix.srv_turret_hud_gap; srv_turret.h): in the Scorpion's turret view the HUD is drawn by ten shader pairs (srv_turret_math.h kFamilies): the two hologram
+// families (vs 1989E6D3B405FDE0 with ps EAB8A1C95A13FFBE, and vs 2CECEC3065EF0D4A with ps A4D03619D631B186) that draw the near layer, from records 0.41 to 0.47 m out, and the upper
+// message panels from records about 1.39 m out, and the radar-named billboard families, the target hologram sphere and the flight HUD's strokes, among which the target information
+// and SYSTEMS panels below the centre are drawn. Their draws are issued through the signature's private geometry shader, which brings a vertex in the deep band forward to the near
+// layer's depth and leaves every other vertex alone. (The targeting sprite, vs E508648660A352B2 with ps 63ABD86359B57D01, is the reticle's three layers at about 500 m, not the
+// panels: an earlier build targeted it and moved nothing. Known gap: with "Disable GUI effects" OFF the holo panel family is vs 81216C77F90DEDD6, ps A2965EC2931A39C8, whose output
+// has SV_Position at o5; there is no bytecode for it in the dumps and it is not covered.) Asked per draw while the pass is wanted (the gate's term, srvTurretHudWantsDraws): a
+// compare of the vertex shader's hash with the families' rejects every other draw, the pixel shader's is read only on a vertex shader of a family. The draw's eye is the UI layer's
+// own mapping of the bound target, else ui depth's frame table, read only, and last the table's registering form (what the layer's decision and the pixel probe make at the same
+// draw; the first interface draw of a frame registers its target, the left eye's first). Refused when the eye is unknown. NOINLINE: the draw path pays this call only while the
+// pass is wanted.
 __declspec(noinline) bool srvTurretHudBeginDraw(State* s, ID3D11DeviceContext* self) {
     const uint64_t vs = bindingShaderHash(BindSlot::Vs);
-    if (vs != srv_turret::kFamilies[0].vs && vs != srv_turret::kFamilies[1].vs) return false;
+    if (!srv_turret::isFamilyVs(vs)) return false;
     const int family = srv_turret::familyOf(vs, bindingShaderHash(BindSlot::Ps));
     if (family < 0) return false;
     int eye = -1;

@@ -7,11 +7,13 @@
 //     gate (the AA-off fast path skips forwardWithVerdict); the boundary tick and the shutdown are there.
 //   * native_on_foot.cpp: the frame tick runs just before alignTick; alignTick adds the camera term AFTER the on-foot gate and before the change test, and tells the module what
 //     it published right after the one publisher's call.
-//   * srv_turret.cpp: the shader is made from the build's bytecode through shaderSwapCreateGs; the module changes no state of the game's but through the binding class; the two
-//     keys are read with the literal ranges and defaults the settings generator reads.
-//   * journal_watch.cpp, native_temporal.cpp: the accessors.
+//   * srv_turret.cpp: the shaders are made from the build's bytecode through shaderSwapCreateGs (one for each signature, a missing one standing down only its own families); the
+//     module changes no state of the game's but through the binding class; both parts act on the turret view AND the Scorpion latch (and say the view without it); triangle lists
+//     and strips are carried; the two keys are read with the literal ranges and defaults the settings generator reads.
+//   * journal_watch.cpp, native_temporal.cpp: the accessors; the Scorpion latch is fed the tail's new bytes once (not the stitched head the scan reads twice), reset with the
+//     file, published to its accessor, and each change said once with its event.
 //   * edvr.ini: both keys live in [fix] with their ui: lines; the flat profile's allow-list names neither (VR only).
-//   * the shader tables (tools/temporal_shader_build): the HLSL's header is included and the variant is registered as a gs_5_0.
+//   * the shader tables (tools/temporal_shader_build): the HLSL's header is included and the nine variants are registered as gs_5_0, each with its contract row.
 //   * build.bat: the module is in the DLL's compile list and this rig has its label.
 // Each pin has controls: an edited copy of the real text must trip it.
 #pragma once
@@ -48,7 +50,7 @@ static bool wiredVscreenScope(const std::string& t) {
 static bool wiredVscreenBegin(const std::string& t) {
     const size_t fn = t.find("bool srvTurretHudBeginDraw(State* s, ID3D11DeviceContext* self) {");
     if (!found(fn)) return false;
-    const size_t vs0 = t.find("vs != srv_turret::kFamilies[0].vs && vs != srv_turret::kFamilies[1].vs", fn);
+    const size_t vs0 = t.find("if (!srv_turret::isFamilyVs(vs)) return false;", fn);
     const size_t family = t.find("srv_turret::familyOf(vs, bindingShaderHash(BindSlot::Ps))", fn);
     const size_t eyeLayer = t.find("uiLayerEyeOfGameTarget(info->resource)", fn);
     const size_t eyeTable = t.find("uiDepthEyeOfTargetReadOnly(info->resource)", fn);
@@ -94,7 +96,7 @@ static bool wiredNativeOnFoot(const std::string& t) {
 // srv_turret.cpp.
 static bool wiredModule(const std::string& t) {
     const size_t made = t.find("g_gs[f] = shaderSwapCreateGs(ctx, kShader[f].bytecode, kShader[f].size, kShader[f].name, \"srv turret hud\")");
-    const size_t begin = t.find("g_binding.begin(ctx, twin ? g_soGs[family] : g_gs[family], constants)");
+    const size_t begin = t.find("g_binding.begin(ctx, twin ? g_soGs[sig] : g_gs[sig], constants)");
     const size_t finish = t.find("const auto done = g_binding.finish(ctx);");
     const size_t back = t.find("cfg.getIntInRange(\"fix.srv_turret_camera_back\", 60, 0, 150)");
     const size_t gap = t.find("cfg.getIntInRange(\"fix.srv_turret_hud_gap\", 96, 0, 200)");
@@ -106,8 +108,40 @@ static bool wiredModule(const std::string& t) {
     const bool rawSet = found(t.find("GSSetShader(")) || found(t.find("GSSetConstantBuffers(")) || found(t.find("UpdateSubresource("));
     // the geometry comes from the host's own frustum and eye pair, and a draw with none is refused, counted
     const bool geometry = found(t.find("nativeTemporalEyeSeparation(&ipd)")) && found(t.find("nativeTemporalEyeGeometry(e, &sequence, tan, nullptr)")) && found(t.find("refuse(st::Refuse::kNoGeometry)"));
-    return found(made) && found(begin) && found(finish) && found(back) && found(gap) && found(edge) && found(camera) && found(cleared) && found(line) && !rawSet && geometry &&
-           found(t.find("#include \"temporal_shader_bytecode.h\""));
+    // the Scorpion only: both parts act on the turret view AND the latch (`on` is what g_backSeatedZ, the gate and the view edges are made from), and the view without it is said
+    const size_t tick = t.find("void srvTurretFrameTick(uint32_t frameNo) {");
+    const size_t turret = found(tick) ? t.find("const bool turret = journalSrvTurretView();", tick) : std::string::npos;
+    const size_t on = found(turret) ? t.find("const bool on = turret && journalSrvScorpion();", turret) : std::string::npos;
+    const size_t backZ = found(on) ? t.find("g_backSeatedZ = st::backSeatedZ(on, backCm);", on) : std::string::npos;
+    const size_t wanted = found(backZ) ? t.find("const bool wanted = on && gapCm > 0;", backZ) : std::string::npos;
+    const size_t ignored = found(wanted) ? t.find("\"srv turret view: not the Scorpion at frame %u (Status.json Flags 0x%08X, seat kind 0x%X): the turret view is on in an SRV the journal does not call the Scorpion, so the \"", on) : std::string::npos;
+    const bool scorpion = found(turret) && found(on) && found(backZ) && found(wanted) && found(ignored);
+    // lists and strips are carried, one signature's shader missing leaves the others' families bound
+    const bool strips = found(t.find("!st::topologyCarried(static_cast<int>(topology))")) && found(t.find("bool ensureGs(ID3D11DeviceContext* ctx, uint32_t sig) {")) &&
+                        found(t.find("return sig < kSigN && g_gs[sig] != nullptr;")) && found(t.find("const uint32_t sig = st::kFamilies[family].sig;"));
+    return found(made) && found(begin) && found(finish) && found(back) && found(gap) && found(edge) && found(camera) && found(cleared) && found(line) && !rawSet && geometry && scorpion &&
+           strips && found(t.find("#include \"temporal_shader_bytecode.h\""));
+}
+// journal_watch.cpp / .h: the Scorpion latch is fed every byte the tail reads, once (not from the stitched head scanEvents also scans), reset with the file, published to the
+// accessor, and each change is said once with the event that caused it.
+static bool wiredLatch(const std::string& journal, const std::string& journalH) {
+    const size_t scan = journal.find("void scanEvents(Session& s, const char* data, uint32_t len) {");
+    const size_t ranges = found(scan) ? journal.find("scanRange(s, data, len);", scan) : std::string::npos;
+    const size_t feed = found(ranges) ? journal.find("s.vehicle.feed(data, len, [&s](bool scorpion, journal_vehicle::Event cause) { noteVehicle(s, scorpion, cause); });", ranges) : std::string::npos;
+    const size_t carry = found(feed) ? journal.find("memcpy(s.carry, data + (len - keep), keep);", feed) : std::string::npos;
+    const size_t close = journal.find("void closeFile(Session& s) {");
+    const size_t reset = found(close) ? journal.find("if (s.vehicle.reset()) noteVehicle(s, false, journal_vehicle::Event::kNewJournal);", close) : std::string::npos;
+    const size_t note = journal.find("void noteVehicle(Session& s, bool scorpion, journal_vehicle::Event cause) {");
+    const size_t say = found(note) ? journal.find("Log::get().note(\"srv turret: the vehicle is %s (event %s)\", scorpion ? \"the Scorpion\" : \"not the Scorpion\", journal_vehicle::eventName(cause));", note) : std::string::npos;
+    const size_t publish = found(note) ? journal.find("s.pub.srvScorpion = scorpion;", note) : std::string::npos;
+    const bool applied = found(journal.find("g_v.srvScorpion.store(p.srvScorpion, kRelaxed);"));
+    const bool accessor = found(journal.find("bool journalSrvScorpion() { return !runtimeFlatProfile() && peek(g_v.srvScorpion); }")) && found(journalH.find("bool journalSrvScorpion();"));
+    // the latch reads the bytes themselves: no line, no value is copied anywhere else (the one include of the pure header; the six names only live in it)
+    const bool include = found(journal.find("#include \"journal_vehicle_latch.h\""));
+    // each byte once: the stitched head (the carry and the next read's first bytes, which scanEvents scans again) is never fed
+    const bool once = !found(journal.find("s.vehicle.feed(stitched"));
+    return found(ranges) && found(feed) && found(carry) && ranges < feed && feed < carry && found(close) && found(reset) && found(note) && found(say) && found(publish) && publish < say &&
+           applied && accessor && include && once;
 }
 static bool wiredAccessors(const std::string& journal, const std::string& temporal, const std::string& journalH) {
     return found(journal.find("bool journalSrvTurretView() { return !runtimeFlatProfile() && srv_turret::turretViewFromFlags(peek(g_v.flags)); }")) &&
@@ -131,7 +165,7 @@ static bool wiredInstrument(const std::string& vscreen, const std::string& t) {
     const size_t observedEnd = found(observed) ? vscreen.find("return issued;", observed) : std::string::npos;
     if (!found(reissueCount) || !found(reissueSwitch) || reissueCount > reissueSwitch || counts != 5 || !found(observed) || !found(observedEnd) ||
         found(vscreen.substr(observed, observedEnd - observed).find("srvTurretHudCountIssue"))) return false;
-    const size_t begin = t.find("g_binding.begin(ctx, twin ? g_soGs[family] : g_gs[family], constants)");
+    const size_t begin = t.find("g_binding.begin(ctx, twin ? g_soGs[sig] : g_gs[sig], constants)");
     const size_t probeBegin = found(begin) ? t.find("if (sample) probeBegin(ctx, eye, family, ordinal, twin, params);", begin) : std::string::npos;
     const size_t end = t.find("void srvTurretHudEnd(ID3D11DeviceContext* ctx) {");
     const size_t probeEnd = found(end) ? t.find("probeEnd(ctx);", end) : std::string::npos;
@@ -161,10 +195,15 @@ static bool wiredKeys(const std::string& ini, const std::string& flatKeys) {
 
 // the shader tables and build.bat.
 static bool wiredTables(const std::string& shaderBuild, const std::string& variants) {
-    return found(shaderBuild.find("#include \"fixed_srv_turret_variants.h\"")) && found(shaderBuild.find("const auto srvTurret = srvTurretHudVariants();")) &&
-           found(shaderBuild.find("variants.insert(variants.end(), srvTurret.begin(), srvTurret.end());")) &&
-           found(variants.find("{\"kSrvTurretHudGsABytecode\",\"srv turret hud pass-through A\",\"main\",nullptr,{},false,edvr::kSrvTurretHudGsA,\"gs_5_0\"}")) &&
-           found(variants.find("{\"kSrvTurretHudGsBBytecode\",\"srv turret hud pass-through B\",\"main\",nullptr,{},false,edvr::kSrvTurretHudGsB,\"gs_5_0\"}")) &&
+    bool all = true;
+    for (const char letter : std::string("ABCDEFGHI")) {
+        const std::string row = std::string("{\"kSrvTurretHudGs") + letter + "Bytecode\",\"srv turret hud pass-through " + letter + "\",\"main\",nullptr,{},false,edvr::kSrvTurretHudGs" + letter +
+                                ",\"gs_5_0\"}";
+        const std::string contract = std::string("{\"kSrvTurretHudGs") + letter + "Bytecode\", \"srv turret hud pass-through " + letter + "\", edvr::kSrvTurretHudGs" + letter + "}";
+        all = all && found(variants.find(row)) && found(shaderBuild.find(contract));
+    }
+    return all && found(shaderBuild.find("#include \"fixed_srv_turret_variants.h\"")) && found(shaderBuild.find("const auto srvTurret = srvTurretHudVariants();")) &&
+           found(shaderBuild.find("variants.insert(variants.end(), srvTurret.begin(), srvTurret.end());")) && found(shaderBuild.find("const TurretContract contracts[stm::kSignatureCount] = {")) &&
            found(variants.find("#include \"../../src/d3d11/srv_turret_hud_shader.h\""));
 }
 static bool wiredBuild(const std::string& t) {
@@ -207,10 +246,23 @@ static void wiringCases() {
 
     check(wiredModule(module), "srv_turret.cpp: the shader from the build's bytecode, the binding class alone, the literal key reads, the host's geometry, the log lines");
     check(!wiredModule(replaced(module, "shaderSwapCreateGs(ctx, kShader[f].bytecode", "shaderSwapCreateGs(ctx, kSupercruiseBarsGsBytecode")), "control: another shader's bytecode trips the pin");
-    check(!wiredModule(replaced(module, "const auto begun = g_binding.begin(ctx, twin ? g_soGs[family] : g_gs[family], constants);", "ctx->GSSetShader(g_gs[family], nullptr, 0); const auto begun = g_binding.begin(ctx, twin ? g_soGs[family] : g_gs[family], constants);")),
+    check(!wiredModule(replaced(module, "const auto begun = g_binding.begin(ctx, twin ? g_soGs[sig] : g_gs[sig], constants);", "ctx->GSSetShader(g_gs[sig], nullptr, 0); const auto begun = g_binding.begin(ctx, twin ? g_soGs[sig] : g_gs[sig], constants);")),
           "control: a raw geometry-stage set outside the binding trips the pin");
     check(!wiredModule(replaced(module, "\"fix.srv_turret_hud_gap\", 96, 0, 200", "\"fix.srv_turret_hud_gap\", 100, 0, 200")), "control: a drifted default trips the pin");
     check(!wiredModule(without(module, "refuse(st::Refuse::kNoGeometry)")), "control: a draw with no geometry that is not refused trips the pin");
+    check(!wiredModule(replaced(module, "const bool on = turret && journalSrvScorpion();", "const bool on = turret;")), "control: both parts acting on the turret view alone (the Scarab's too) trips the pin");
+    check(!wiredModule(replaced(module, "g_backSeatedZ = st::backSeatedZ(on, backCm);", "g_backSeatedZ = st::backSeatedZ(turret, backCm);")), "control: a camera term made from the turret view, not the Scorpion's, trips the pin");
+    check(!wiredModule(replaced(module, "const bool wanted = on && gapCm > 0;", "const bool wanted = turret && gapCm > 0;")), "control: a HUD pass made from the turret view, not the Scorpion's, trips the pin");
+    check(!wiredModule(replaced(module, "!st::topologyCarried(static_cast<int>(topology))", "topology != D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST")), "control: lists only (a strip refused) trips the pin");
+    check(!wiredModule(replaced(module, "return sig < kSigN && g_gs[sig] != nullptr;", "return g_gs[0] != nullptr && g_gs[sig] != nullptr;")), "control: every family stood down by one signature's missing shader trips the pin");
+    check(wiredLatch(journal, journalH), "journal_watch: the Scorpion latch is fed the tail's bytes once, reset with the file, published, and each change is said with its event");
+    check(!wiredLatch(replaced(journal, "    s.vehicle.feed(data, len, [&s](bool scorpion, journal_vehicle::Event cause) { noteVehicle(s, scorpion, cause); });\n", ""), journalH), "control: a latch that is never fed trips the pin");
+    check(!wiredLatch(replaced(journal, "scanRange(s, stitched, stitchedLen);\n    scanRange(s, data, len);\n    // Issue 140", "scanRange(s, stitched, stitchedLen);\n    s.vehicle.feed(stitched, stitchedLen, [&s](bool scorpion, journal_vehicle::Event cause) { noteVehicle(s, scorpion, cause); });\n    scanRange(s, data, len);\n    // Issue 140"), journalH),
+          "control: the stitched head (bytes the next read feeds again) fed to the latch trips the pin");
+    check(!wiredLatch(replaced(journal, "if (s.vehicle.reset()) noteVehicle(s, false, journal_vehicle::Event::kNewJournal);", ""), journalH), "control: a latch that survives a file change trips the pin");
+    check(!wiredLatch(replaced(journal, "g_v.srvScorpion.store(p.srvScorpion, kRelaxed);", ""), journalH), "control: a latch that is never published trips the pin");
+    check(!wiredLatch(replaced(journal, "\"srv turret: the vehicle is %s (event %s)\"", "\"srv turret: the vehicle changed\""), journalH), "control: a change said without the event trips the pin");
+    check(!wiredLatch(journal, replaced(journalH, "bool journalSrvScorpion();", "")), "control: no accessor declared trips the pin");
     check(wiredInstrument(vscreen, module), "the GPU instrument: issues counted at the game's issue and the re-issues; the queries begin after the bind and end before the restore; read once a frame; the log lines");
     check(!wiredInstrument(replaced(vscreen, "    srvTurretHudCountIssue();   // issue 140's GPU instrument: a re-issue", "    // issue 140's GPU instrument: a re-issue"), module), "control: a re-issue that is not counted trips the pin");
     check(!wiredInstrument(replaced(vscreen, "        srvTurretHudCountIssue();   // issue 140's GPU instrument: the game's own issue", "        // issue 140's GPU instrument: the game's own issue"), module), "control: a thunk that does not count the game's own issue trips the pin");

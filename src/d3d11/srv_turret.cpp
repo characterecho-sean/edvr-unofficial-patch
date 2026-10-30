@@ -1,4 +1,4 @@
-// The SRV turret view (issue 140): the module. srv_turret.h says what it does and what the log shows; srv_turret_math.h has the maths, the two families and the two TEMPORARY
+// The SRV turret view (issue 140): the module. srv_turret.h says what it does and what the log shows; srv_turret_math.h has the maths, the families and the two TEMPORARY
 // keys; srv_turret_hud_binding.h holds the constants and the binding, which tools/srv_turret_hud_test runs on WARP; srv_turret_hud_shader.h is the geometry shaders' HLSL,
 // compiled at build time.
 #include "srv_turret.h"
@@ -40,13 +40,14 @@ namespace {
 
 static_assert(st::kBackDefaultCm == 60 && st::kBackMaxCm == 150 && st::kGapDefaultCm == 96 && st::kGapMaxCm == 200,
               "the literals in the two reads below are these, written as numbers for tools/gen_settings_schema.py");
-constexpr uint32_t kFamilies = st::kFamilyCount;
+constexpr uint32_t kFamilyN = st::kFamilyCount, kSigN = st::kSignatureCount;   // the draws' families, and the geometry shaders (one for each distinct output signature)
 
 // ---- the frame thread's state ----------------------------------------------------------------------------------------------------------------------------------
 bool g_keysRead = false;
 uint32_t g_keysGeneration = 0;
 std::atomic<int> g_backCm{0}, g_gapCm{0};   // TEMPORARY keys, as last read (the gap is read by the draw path too)
-bool g_on = false;                          // the turret view, as the frame tick last saw it
+bool g_on = false;                          // the Scorpion's turret view, as the frame tick last saw it
+bool g_ignored = false;                     // the turret view is on but the vehicle is not the Scorpion: said once for each stay
 double g_backSeatedZ = 0.0;                 // what alignTick adds
 double g_loggedBackM = 0.0;                 // what the log last said was published
 bool g_windowSeen = false;                  // the turret view was on at some point of the 10 s window
@@ -62,30 +63,31 @@ EyeGeometry g_eyeGeo[2];
 std::atomic<float> g_ipd{0.0f};
 
 // ---- the draw path's state (the render thread; the window's counters are read by the frame tick) -------------------------------------------------------------
-// The build's bytecode of each family's geometry shader, and the stream-output declaration of its signature (the instrument's twin streams the vertex out in this order).
-struct FamilyShader {
+// The build's bytecode of each signature's geometry shader (srv_turret_math.h kSignatures, in that order; the stream-output declaration of the instrument's twin comes from the
+// same table, st::soDeclaration).
+struct SigShader {
     const unsigned char* bytecode;
     size_t size;
     const char* name;
-    D3D11_SO_DECLARATION_ENTRY decl[3];
 };
-const FamilyShader kShader[kFamilies] = {
-    {kSrvTurretHudGsABytecode, sizeof(kSrvTurretHudGsABytecode), "turret shift 1989E6D3",
-     {{0, "TEXCOORD", 0, 0, 4, 0}, {0, "TEXCOORD", 6, 0, 3, 0}, {0, "SV_Position", 0, 0, 4, 0}}},
-    {kSrvTurretHudGsBBytecode, sizeof(kSrvTurretHudGsBBytecode), "turret shift 2CECEC30",
-     {{0, "TEXCOORD", 0, 0, 4, 0}, {0, "TEXCOORD", 7, 0, 2, 0}, {0, "SV_Position", 0, 0, 4, 0}}},
+#define EDVR_SRV_TURRET_SHADER(letter, hex) {kSrvTurretHudGs##letter##Bytecode, sizeof(kSrvTurretHudGs##letter##Bytecode), "turret shift " hex}
+const SigShader kShader[kSigN] = {
+    EDVR_SRV_TURRET_SHADER(A, "1989E6D3"), EDVR_SRV_TURRET_SHADER(B, "2CECEC30"), EDVR_SRV_TURRET_SHADER(C, "DF3503CD"),
+    EDVR_SRV_TURRET_SHADER(D, "44DDCDEB"), EDVR_SRV_TURRET_SHADER(E, "9B34C331"), EDVR_SRV_TURRET_SHADER(F, "9611A454"),
+    EDVR_SRV_TURRET_SHADER(G, "B932058F"), EDVR_SRV_TURRET_SHADER(H, "5559BD94"), EDVR_SRV_TURRET_SHADER(I, "B7790CBF"),
 };
-ID3D11GeometryShader* g_gs[kFamilies] = {};
+#undef EDVR_SRV_TURRET_SHADER
+ID3D11GeometryShader* g_gs[kSigN] = {};
 ID3D11Device* g_gsDevice = nullptr;   // identity only: the shaders hold their device alive
 bool g_gsTried = false;
 st::Constants g_constants[2];
 st::Binding g_binding;
 std::atomic<uint32_t> g_draws[2] = {};
-std::atomic<uint32_t> g_familyDraws[kFamilies] = {};
+std::atomic<uint32_t> g_familyDraws[kFamilyN] = {};
 std::atomic<uint32_t> g_bound{0};
 std::atomic<uint32_t> g_refused[static_cast<size_t>(st::Refuse::kCount)] = {};
 uint32_t g_saidRefuse = 0;
-bool g_firstNoted[kFamilies] = {}, g_restoreNoted = false, g_settleNoted = false;
+bool g_firstNoted[kFamilyN] = {}, g_restoreNoted = false, g_settleNoted = false;
 uint32_t g_frame = 0;
 
 void refuse(st::Refuse r) {
@@ -96,12 +98,12 @@ void refuse(st::Refuse r) {
     Log::get().note("srv turret hud: refused a draw (%s) -- the draw went on as the game made it. Said once per reason; the 10 s line counts every one.", st::refuseName(r));
 }
 
-// The instrument's stream-output twin of each family's shader (the same bytecode; it also streams the vertices it writes out), made with the shaders and released with them.
-ID3D11GeometryShader* g_soGs[kFamilies] = {};
+// The instrument's stream-output twin of each signature's shader (the same bytecode; it also streams the vertices it writes out), made with the shaders and released with them.
+ID3D11GeometryShader* g_soGs[kSigN] = {};
 bool g_soTried = false;
 
 void releaseGs() {
-    for (uint32_t f = 0; f < kFamilies; ++f) {
+    for (uint32_t f = 0; f < kSigN; ++f) {
         st::release(g_gs[f]);
         st::release(g_soGs[f]);
     }
@@ -109,30 +111,33 @@ void releaseGs() {
     g_gsDevice = nullptr;
 }
 
-// The twins: stream 0 is both streamed out (every signature element in order, st::Family::strideBytes a vertex) and rasterized, so a draw issued through one looks exactly as
-// one through the shader itself. A failure is said once and leaves the instrument to its statistics alone.
+// The twins: stream 0 is both streamed out (every signature element in order, sigFloats floats a vertex) and rasterized, so a draw issued through one looks exactly as one through
+// the shader itself. A failure is said once and leaves the instrument to its statistics alone.
 void makeTwins(ID3D11DeviceContext* ctx) {
     g_soTried = true;
-    for (uint32_t f = 0; f < kFamilies; ++f) {
+    for (uint32_t f = 0; f < kSigN; ++f) {
         ID3D11Device* d = nullptr;
         HRESULT hr = E_FAIL;
         const bool ran = guarded("srv.turret.twin", [&] {
             ctx->GetDevice(&d);
             if (!d) return;
-            const UINT stride = st::kFamilies[f].strideBytes;
-            hr = d->CreateGeometryShaderWithStreamOutput(kShader[f].bytecode, kShader[f].size, kShader[f].decl, 3, &stride, 1, 0, nullptr, &g_soGs[f]);
+            D3D11_SO_DECLARATION_ENTRY decl[st::kMaxSigElements] = {};
+            const UINT entries = st::soDeclaration(f, decl);
+            const UINT stride = st::sigFloats(f) * 4;
+            hr = d->CreateGeometryShaderWithStreamOutput(kShader[f].bytecode, kShader[f].size, decl, entries, &stride, 1, 0, nullptr, &g_soGs[f]);
         });
         st::release(d);
         if (!ran || FAILED(hr)) st::release(g_soGs[f]);
-        Log::get().note("srv turret hud: stream-output twin of the %s shader (the GPU instrument's capture) %s (0x%08X); %s", st::kFamilies[f].name,
+        Log::get().note("srv turret hud: stream-output twin of the %s shader (the GPU instrument's capture) %s (0x%08X); %s", st::kSignatures[f].name,
                         g_soGs[f] ? "created" : "NOT made", static_cast<unsigned>(hr),
-                        g_soGs[f] ? "one draw a second per eye is issued through it" : "the instrument keeps to its statistics");
+                        g_soGs[f] ? "one draw a second per eye and family is issued through it" : "the instrument keeps to its statistics");
     }
 }
 
 // The shaders, made from the build's bytecode once per device (a device that comes and goes re-makes them; a failure is not retried on the same device).
-// shaderSwapCreateGs is guarded and says each outcome in the log. True when every family's shader is there: a draw is never bound for a family whose shader is missing.
-bool ensureGs(ID3D11DeviceContext* ctx) {
+// shaderSwapCreateGs is guarded and says each outcome in the log. True when the signature's shader is there: a draw is never bound for a family whose shader is missing, and
+// one signature's failing leaves the others' families bound.
+bool ensureGs(ID3D11DeviceContext* ctx, uint32_t sig) {
     ID3D11Device* d = nullptr;
     if (!guarded("srv.turret.device", [&] { ctx->GetDevice(&d); }) || !d) {
         st::release(d);
@@ -146,12 +151,10 @@ bool ensureGs(ID3D11DeviceContext* ctx) {
     st::release(d);
     if (!g_gsTried) {
         g_gsTried = true;
-        for (uint32_t f = 0; f < kFamilies; ++f) g_gs[f] = shaderSwapCreateGs(ctx, kShader[f].bytecode, kShader[f].size, kShader[f].name, "srv turret hud");
+        for (uint32_t f = 0; f < kSigN; ++f) g_gs[f] = shaderSwapCreateGs(ctx, kShader[f].bytecode, kShader[f].size, kShader[f].name, "srv turret hud");
     }
-    bool all = true;
-    for (uint32_t f = 0; f < kFamilies; ++f) all = all && g_gs[f] != nullptr;
-    if (all && !g_soTried) makeTwins(ctx);
-    return all;
+    if (!g_soTried) makeTwins(ctx);
+    return sig < kSigN && g_gs[sig] != nullptr;
 }
 
 // The two keys, read when the configuration changes (Config::generation()) and not on every frame; said in the log at the first read and at each change.
@@ -196,15 +199,24 @@ void windowLine(uint64_t nowMs) {
     for (size_t i = 0; i < static_cast<size_t>(st::Refuse::kCount); ++i) refused[i] = g_refused[i].exchange(0, std::memory_order_relaxed);
     const uint32_t left = g_draws[0].exchange(0, std::memory_order_relaxed), right = g_draws[1].exchange(0, std::memory_order_relaxed);
     const uint32_t bound = g_bound.exchange(0, std::memory_order_relaxed);
-    const uint32_t famA = g_familyDraws[0].exchange(0, std::memory_order_relaxed), famB = g_familyDraws[1].exchange(0, std::memory_order_relaxed);
+    // The matched draws of each family in the window, as two comma-separated lists in the table's order: the names, then the counts.
+    char names[512] = {}, counts[256] = {};
+    size_t nn = 0, nc = 0;
+    for (uint32_t f = 0; f < kFamilyN; ++f) {
+        const uint32_t n = g_familyDraws[f].exchange(0, std::memory_order_relaxed);
+        const int a = std::snprintf(names + nn, sizeof(names) - nn, "%s%s", f ? "," : "", st::kFamilies[f].name);
+        const int b = std::snprintf(counts + nc, sizeof(counts) - nc, "%s%u", f ? "," : "", n);
+        if (a > 0 && static_cast<size_t>(a) < sizeof(names) - nn) nn += static_cast<size_t>(a);
+        if (b > 0 && static_cast<size_t>(b) < sizeof(counts) - nc) nc += static_cast<size_t>(b);
+    }
     (void)nowMs;
     Log::get().note("srv turret hud: gap=%.2f m wMin=%.2f wMax=%.2f s[L,R]=%+.4f,%+.4f ipd_elite=%.1fmm P00[L,R]=%.3f,%.3f draws[L,R]=%u,%u bound=%u "
-                    "refused[no-eye,game-gs,topology,not-ready,no-geometry]=%u/%u/%u/%u/%u families[%s,%s]=%u,%u",
+                    "refused[no-eye,game-gs,topology,not-ready,no-geometry]=%u/%u/%u/%u/%u families[%s]=%s",
                     static_cast<double>(gap), static_cast<double>(p.wMin), static_cast<double>(p.wMax),
                     static_cast<double>(g_eyeGeo[0].s.load(std::memory_order_relaxed)), static_cast<double>(g_eyeGeo[1].s.load(std::memory_order_relaxed)),
                     1000.0 * static_cast<double>(g_ipd.load(std::memory_order_relaxed)),
                     static_cast<double>(g_eyeGeo[0].p00.load(std::memory_order_relaxed)), static_cast<double>(g_eyeGeo[1].p00.load(std::memory_order_relaxed)),
-                    left, right, bound, refused[0], refused[1], refused[2], refused[3], refused[4], st::kFamilies[0].name, st::kFamilies[1].name, famA, famB);
+                    left, right, bound, refused[0], refused[1], refused[2], refused[3], refused[4], names, counts);
 }
 
 // ---- THE GPU INSTRUMENT ------------------------------------------------------------------------------------------------------------------------------------------------
@@ -231,7 +243,7 @@ struct Probe {
     uint64_t lastMs = 0;
     st::TurretParams params;          // the constants the sampled draw ran with
 };
-Probe g_probe[2][kFamilies];          // by eye and family
+Probe g_probe[2][kFamilyN];           // by eye and family
 Probe* g_sample = nullptr;            // the probe of the draw whose scope is open and sampled
 int g_sampleEye = -1, g_sampleFamily = -1;
 bool g_sampleTwin = false;            // ... and whether it was issued through the twin with its stream-output target
@@ -269,7 +281,7 @@ bool probeEnsure(ID3D11DeviceContext* ctx, int eye, int family) {
     }
     HRESULT hr = S_OK;
     const char* what = nullptr;
-    const bool twinMade = g_soGs[family] != nullptr;
+    const bool twinMade = g_soGs[st::kFamilies[family].sig] != nullptr;
     const bool ran = guarded("srv.turret.probe.make", [&] {
         if (!p.stats) {
             const D3D11_QUERY_DESC qd{D3D11_QUERY_PIPELINE_STATISTICS, 0};
@@ -456,11 +468,20 @@ void srvTurretFrameTick(uint32_t frameNo) {
     if (!runtimeVrProfile()) return;   // flat (or not yet decided): every state stays at its zero, alignTick adds an exact 0
     readKeys();
     const int backCm = g_backCm.load(std::memory_order_relaxed), gapCm = g_gapCm.load(std::memory_order_relaxed);
-    const bool on = journalSrvTurretView();
+    // The Scorpion only: the turret view bit is the Scarab's too, and the journal says which SRV this is (journalSrvScorpion; unknown is "not the Scorpion"). `on` is what both parts act on.
+    const bool turret = journalSrvTurretView();
+    const bool on = turret && journalSrvScorpion();
     if (on != g_on) {
         g_on = on;
         Log::get().note("srv turret view: %s at frame %u (Status.json Flags 0x%08X, seat kind 0x%X)", on ? "on" : "off", frameNo, static_cast<unsigned>(journalStatusFlags()),
                         static_cast<unsigned>(journalSeatKind()));
+    }
+    if (turret && !on && !g_ignored) {
+        g_ignored = true;
+        Log::get().note("srv turret view: not the Scorpion at frame %u (Status.json Flags 0x%08X, seat kind 0x%X): the turret view is on in an SRV the journal does not call the Scorpion, so the "
+                        "camera and the HUD stay the game's own", frameNo, static_cast<unsigned>(journalStatusFlags()), static_cast<unsigned>(journalSeatKind()));
+    } else if (!turret) {
+        g_ignored = false;
     }
     g_backSeatedZ = st::backSeatedZ(on, backCm);
     const bool wanted = on && gapCm > 0;
@@ -497,7 +518,7 @@ void srvTurretNotePublished(double seatedZ, uint32_t serial) {
 }
 
 bool srvTurretHudBegin(ID3D11DeviceContext* ctx, int family, int eye) {
-    if (!ctx || family < 0 || family >= static_cast<int>(kFamilies)) return false;
+    if (!ctx || family < 0 || family >= static_cast<int>(kFamilyN)) return false;
     if (eye != 0 && eye != 1) {
         refuse(st::Refuse::kNoEye);
         return false;
@@ -513,11 +534,12 @@ bool srvTurretHudBegin(ID3D11DeviceContext* ctx, int family, int eye) {
         return false;
     }
     D3D11_PRIMITIVE_TOPOLOGY topology = D3D11_PRIMITIVE_TOPOLOGY_UNDEFINED;
-    if (!guarded("srv.turret.topology", [&] { ctx->IAGetPrimitiveTopology(&topology); }) || topology != D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST) {
+    if (!guarded("srv.turret.topology", [&] { ctx->IAGetPrimitiveTopology(&topology); }) || !st::topologyCarried(static_cast<int>(topology))) {   // triangle lists and strips
         refuse(st::Refuse::kTopology);
         return false;
     }
-    if (g_binding.needsRestore() || !ensureGs(ctx)) {
+    const uint32_t sig = st::kFamilies[family].sig;
+    if (g_binding.needsRestore() || !ensureGs(ctx, sig)) {
         refuse(st::Refuse::kNotReady);
         return false;
     }
@@ -530,8 +552,8 @@ bool srvTurretHudBegin(ID3D11DeviceContext* ctx, int family, int eye) {
     // THE GPU INSTRUMENT: once a second per eye and family this draw goes through the stream-output twin (when there is one) with the queries around its scope.
     const bool sample = probeDue(ctx, eye, family, ordinal);
     const Probe& probe = g_probe[eye][family];
-    const bool twin = sample && g_soGs[family] && probe.soBuf && probe.soStats && probe.staging;
-    const auto begun = g_binding.begin(ctx, twin ? g_soGs[family] : g_gs[family], constants);
+    const bool twin = sample && g_soGs[sig] && probe.soBuf && probe.soStats && probe.staging;
+    const auto begun = g_binding.begin(ctx, twin ? g_soGs[sig] : g_gs[sig], constants);
     if (begun == st::Binding::Begin::kGameHasGs) {
         refuse(st::Refuse::kGameGs);
         return false;
@@ -566,7 +588,7 @@ void srvTurretHudEnd(ID3D11DeviceContext* ctx) {
 void srvTurretHudFrameBoundary(ID3D11DeviceContext* ctx) {
     ++g_frame;
     for (int eye = 0; eye < 2; ++eye) {
-        for (int family = 0; family < static_cast<int>(kFamilies); ++family) {
+        for (int family = 0; family < static_cast<int>(kFamilyN); ++family) {
             Probe& p = g_probe[eye][family];
             probeRead(ctx, eye, family);
             // A frame with fewer matched draws than the wanted ordinal would never be sampled: start again from the first.

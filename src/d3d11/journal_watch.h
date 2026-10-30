@@ -237,6 +237,10 @@ uint32_t journalFlags2();   // the last Flags2 read (0 when not in the file); fo
 // file about once a second) and the answer changes at the frame boundary after the worker's pass, so a switch of view is seen up to about half a second after the
 // game has written it. Any thread.
 bool journalSrvTurretView();
+// Built issue 140: the journal says the player's SRV is the Scorpion (journal_vehicle_latch.h): LoadGame's Ship or LaunchSRV's SRVType is combat_multicrew_srv_01. Unknown is false (a
+// training scenario writes no journal), and the main menu's music, a shutdown, DockSRV, SRVDestroyed and a load or launch of anything else clear it. The turret view's camera and HUD
+// act only while this and journalSrvTurretView() are both true. False in flat. Any thread.
+bool journalSrvScorpion();
 
 // F66a (native on foot, the armed flag): Status.json's "SelectedWeapon" while on foot. The game writes the item the commander has in hand;
 // "$humanoid_fists_name;" means nothing (fists). ASSUMPTION, verified by the flight's `armed (F66a)` lines: holstering writes fists.
