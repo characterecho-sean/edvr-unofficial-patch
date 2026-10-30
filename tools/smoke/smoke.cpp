@@ -38,6 +38,49 @@ int fail(const char* what) {
     return 1;
 }
 
+// Copy a 1x1 pixel of `tex` at (x, y) into a staging texture and read it back.
+//
+// A CPU readback can race the GPU: on the certain cards and drivers,
+// the FIRST copy+Map of targets over a certain size reads the staging
+// texture before the GPU has finished the copy, and returns 0,0,0.
+// A second copy reads the correct colour, ans smaller targets work on the first try.
+// This waits for the GPU to finish before Map by re-reading until two consecutive copies agree.
+// Value-neutral, so it also works for the arbitrary colours the temporal/sharpen checks read.
+// Returns false if it never settled (the readback itself failed every attempt).
+bool readPixelStable(ID3D11Device* device, ID3D11DeviceContext* ctx,
+                     ID3D11Texture2D* tex, UINT x, UINT y, unsigned char out[4]) {
+    D3D11_TEXTURE2D_DESC sd{};
+    sd.Width = 1; sd.Height = 1; sd.MipLevels = 1; sd.ArraySize = 1;
+    sd.Format = DXGI_FORMAT_R8G8B8A8_UNORM; sd.SampleDesc.Count = 1;
+    sd.Usage = D3D11_USAGE_STAGING; sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    ID3D11Texture2D* stage = nullptr;
+    if (FAILED(device->CreateTexture2D(&sd, nullptr, &stage)) || !stage) return false;
+    D3D11_BOX box{x, y, 0, x + 1, y + 1, 1};
+    unsigned char prev[4] = {0xFF, 0xFF, 0xFF, 0xFF}, cur[4];
+    bool ok = false;
+    for (int attempt = 0; attempt < 8; ++attempt) {
+        ctx->CopySubresourceRegion(stage, 0, 0, 0, 0, tex, 0, &box);
+        ctx->Flush();
+        D3D11_MAPPED_SUBRESOURCE m{};
+        if (FAILED(ctx->Map(stage, 0, D3D11_MAP_READ, 0, &m))) break;
+        const unsigned char* px = static_cast<const unsigned char*>(m.pData);
+        cur[0] = px[0]; cur[1] = px[1]; cur[2] = px[2]; cur[3] = px[3];
+        ctx->Unmap(stage, 0);
+        // Settled when the GPU's result is stable across two reads.
+        if (attempt > 0 && cur[0] == prev[0] && cur[1] == prev[1] &&
+            cur[2] == prev[2] && cur[3] == prev[3]) {
+            ok = true;
+            break;
+        }
+        prev[0] = cur[0]; prev[1] = cur[1]; prev[2] = cur[2]; prev[3] = cur[3];
+    }
+    if (ok) {
+        out[0] = cur[0]; out[1] = cur[1]; out[2] = cur[2]; out[3] = cur[3];
+    }
+    stage->Release();
+    return ok;
+}
+
 // Clear a freshly made w*h target to Elite's grey and read one pixel back.
 //
 // Everything is created and destroyed inside, which is the point of the second
@@ -61,24 +104,10 @@ bool clearGreyReadBack(ID3D11Device* device, ID3D11DeviceContext* ctx, UINT w, U
     const float grey[4] = {32.0f / 255.0f, 32.0f / 255.0f, 32.0f / 255.0f, 1.0f};
     ctx->ClearRenderTargetView(rtv, grey);
 
-    D3D11_TEXTURE2D_DESC sd = td;
-    sd.Width = 1; sd.Height = 1;
-    sd.Usage = D3D11_USAGE_STAGING;
-    sd.BindFlags = 0;
-    sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-    bool ok = false;
-    ID3D11Texture2D* stage = nullptr;
-    if (SUCCEEDED(device->CreateTexture2D(&sd, nullptr, &stage)) && stage) {
-        D3D11_BOX box{0, 0, 0, 1, 1, 1};
-        ctx->CopySubresourceRegion(stage, 0, 0, 0, 0, tex, 0, &box);
-        D3D11_MAPPED_SUBRESOURCE m{};
-        if (SUCCEEDED(ctx->Map(stage, 0, D3D11_MAP_READ, 0, &m))) {
-            const unsigned char* px = static_cast<const unsigned char*>(m.pData);
-            out[0] = px[0]; out[1] = px[1]; out[2] = px[2];
-            ok = true;
-            ctx->Unmap(stage, 0);
-        }
-        stage->Release();
+    unsigned char rgba[4];
+    bool ok = readPixelStable(device, ctx, tex, 0, 0, rgba);
+    if (ok) {
+        out[0] = rgba[0]; out[1] = rgba[1]; out[2] = rgba[2];
     }
     rtv->Release();
     tex->Release();
@@ -110,27 +139,10 @@ bool makeSolidSrc(ID3D11Device* device, ID3D11DeviceContext* ctx, UINT w, UINT h
     return true;
 }
 
-// Read back one pixel of an R8G8B8A8_UNORM texture.
+// Read back one pixel of an R8G8B8A8_UNORM texture, waiting for the GPU's result to settle.
 bool readPixelRgba8(ID3D11Device* device, ID3D11DeviceContext* ctx,
                     ID3D11Texture2D* tex, UINT x, UINT y, unsigned char out[4]) {
-    D3D11_TEXTURE2D_DESC sd{};
-    sd.Width = 1; sd.Height = 1; sd.MipLevels = 1; sd.ArraySize = 1;
-    sd.Format = DXGI_FORMAT_R8G8B8A8_UNORM; sd.SampleDesc.Count = 1;
-    sd.Usage = D3D11_USAGE_STAGING; sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-    ID3D11Texture2D* stage = nullptr;
-    if (FAILED(device->CreateTexture2D(&sd, nullptr, &stage)) || !stage) return false;
-    D3D11_BOX box{x, y, 0, x + 1, y + 1, 1};
-    ctx->CopySubresourceRegion(stage, 0, 0, 0, 0, tex, 0, &box);
-    D3D11_MAPPED_SUBRESOURCE m{};
-    bool ok = false;
-    if (SUCCEEDED(ctx->Map(stage, 0, D3D11_MAP_READ, 0, &m))) {
-        const unsigned char* px = static_cast<const unsigned char*>(m.pData);
-        out[0] = px[0]; out[1] = px[1]; out[2] = px[2]; out[3] = px[3];
-        ok = true;
-        ctx->Unmap(stage, 0);
-    }
-    stage->Release();
-    return ok;
+    return readPixelStable(device, ctx, tex, x, y, out);
 }
 
 // The resolve's result, checked: an ID3D11Texture2D of the expected size
