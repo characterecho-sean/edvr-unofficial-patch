@@ -14149,6 +14149,45 @@ def _hj_f176_pitch_held(rows, ctx):
     return ("OK", text)
 
 
+# F177: the aiming choice at start (src/d3d11/menu_aim_prompt.h): the VR menu opens itself once a session on a page that asks for look to aim or mouse aim. Its lines print on every log, in the
+# menu and not on foot: shown, then picked and saved (or write failed), or later; or one line saying why it was not shown.
+H177_LABEL = "aim choice prompt (F177)"
+H177_SHOWN = r"aim choice prompt \(F177\): shown\s*$"
+H177_PICKED = r"aim choice prompt \(F177\): picked (?P<choice>mouse aim|look to aim)\s*$"
+H177_LATER = r"aim choice prompt \(F177\): later\s*$"
+H177_SAVED = r"aim choice prompt \(F177\): saved (?P<k1>\S+) = (?P<v1>\S+) and (?P<k2>\S+) = (?P<v2>\S+) to (?P<file>.+?)\s*$"
+H177_FAILED = r"aim choice prompt \(F177\): write failed: (?P<err>.+?)\s*$"
+H177_NOTSHOWN = r"aim choice prompt \(F177\): not shown: (?P<reason>.+?)\s*$"
+H177_WANT = {"mouse aim": "off", "look to aim": "on"}   # what each pick must have written for fix.native_on_foot_look_to_aim
+
+
+def _hj_f177_aim_choice(rows, ctx):
+    """F177: the aiming choice at start. The VR menu opens itself once a session, after the first rendered scene, on a page that asks for look to aim or mouse aim. A pick writes the choice
+    and the hide of the page in one job; the saved line says the write landed with both pairs, the write failed line that it did not (the settings stay as they were and the page asks again at
+    the next start). NEVER APPLIED when a pick has a write failed line, or when the saved pairs are not what the pick says (look to aim on for look to aim, off for mouse aim, and the page
+    hidden); PARTIAL when a pick has neither line (the writer had not reported); OK when the page was shown and answered with a saved pick, with Ask me next time or Esc (nothing written), or
+    not at all yet; IDLE when the only line is why it was not shown (the key is off, native on foot is off, the flat profile). No line at all is a log from a build without the page (None)."""
+    shown, picked, later = rows.get("shown", []), rows.get("picked", []), rows.get("later", [])
+    saved, failed, notshown = rows.get("saved", []), rows.get("failed", []), rows.get("notshown", [])
+    if not (shown or picked or later or saved or failed or notshown):
+        return None
+    if not (shown or picked or later or saved or failed):
+        return ("IDLE", "the page was not shown: %s" % "; ".join(sorted(set(r["reason"] for r in notshown))))
+    if picked:
+        choice = picked[-1]["choice"]
+        if failed:
+            return ("NEVER APPLIED", "picked %s but the write failed: %s; the settings are unchanged and the page asks again at the next start" % (choice, failed[-1]["err"]))
+        if not saved:
+            return ("PARTIAL", "picked %s but no saved or write failed line followed (the writer had not reported when the log ended)" % choice)
+        s = saved[-1]
+        if s["k1"] != "fix.native_on_foot_look_to_aim" or s["v1"] != H177_WANT[choice] or s["k2"] != "menu.aim_choice_prompt" or s["v2"] != "off":
+            return ("NEVER APPLIED", "picked %s but the file was given %s = %s and %s = %s: the pick and the write disagree" % (choice, s["k1"], s["v1"], s["k2"], s["v2"]))
+        return ("OK", "shown; picked %s; saved %s = %s and %s = %s to %s" % (choice, s["k1"], s["v1"], s["k2"], s["v2"], s["file"]))
+    if later:
+        return ("OK", "shown; the player chose Ask me next time or pressed Esc (nothing written, it asks again at the next start)")
+    return ("OK", "shown; no answer in this log (the game quit with the page up, or the log ends first)")
+
+
 # F169: the stance while the aim is pitched (formatStance in src/d3d11/native_on_foot_f169.h). The camera sinks as the aim pitches up and w_c read the sink as a crouch; the cap holds w_c
 # under the animated neck's posture weight from 20 deg of aim pitch. The dial's own note line and the swing's lines carry other labels.
 H169S_LABEL = "native on foot pitched stance (F169)"
@@ -15470,6 +15509,14 @@ HEALTH_RULES = (
     _hrule("ADS pitch held (F176)", ("F176",), (H176_LABEL,), (
         ("sec", H176_RE),
     ), _hj_f176_pitch_held),
+    _hrule("aim choice prompt (F177)", ("F177",), (H177_LABEL,), (
+        ("shown", H177_SHOWN),
+        ("picked", H177_PICKED),
+        ("later", H177_LATER),
+        ("saved", H177_SAVED),
+        ("failed", H177_FAILED),
+        ("notshown", H177_NOTSHOWN),
+    ), _hj_f177_aim_choice),
     _hrule("pitched stance (F169)", ("F169",), (H169S_LABEL,), (
         ("sec", H169S_RE),
     ), _hj_f169_stance),
@@ -16501,6 +16548,7 @@ def self_test_health():
     f172_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f172.h")
     f175_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f175.h")
     f176_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f176.h")
+    f177_path = os.path.join(repo_root(), "src", "d3d11", "menu_aim_prompt.h")
     f138_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f138.h")
     f154_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f154.h")
     try:
@@ -16529,6 +16577,7 @@ def self_test_health():
         f172src = read_text(f172_path)
         f175src = read_text(f175_path)
         f176src = read_text(f176_path)
+        f177src = read_text(f177_path)
         f138src = read_text(f138_path)
         hooks_src = read_text(os.path.join(repo_root(), "src", "d3d11", "native_on_foot_hooks.cpp"))
         f154src = read_text(f154_path)
@@ -16679,6 +16728,15 @@ def self_test_health():
             fmts[key] = health_c_format(f171csrc, needle)
         if fmts[key] is None:
             raise AssertionError("native_on_foot_f171c.h has no format holding %r: the --health rule that reads it is out of date" % needle)
+        return health_render(fmts[key], vals)
+
+    def R177(needle, *vals):
+        """F177's lines (menu_aim_prompt.h), from their own literals and formats."""
+        key = "f177:" + needle
+        if key not in fmts:
+            fmts[key] = health_c_format(f177src, needle)
+        if fmts[key] is None:
+            raise AssertionError("menu_aim_prompt.h has no format holding %r: the --health rule that reads it is out of date" % needle)
         return health_render(fmts[key], vals)
 
     def R176(needle, *vals):
@@ -18379,6 +18437,40 @@ def self_test_health():
               lacks=[row("OK", H176), row("IDLE", H176), row("PARTIAL", H176), row("UNPARSED", H176), row("NEVER APPLIED", H176)])
         check("F176 pitch held: a line that drifted from its pattern is unparsed", ["native on foot ADS pitch held (F176) press 1: something else"], 4, [("UNPARSED", H176)])
         check("F176 pitch held: a drifted line beside a good one is counted beside the verdict", [ph176(), "native on foot ADS pitch held (F176) press 2: something else"], 0, [("OK", H176)],
+              has=["[+1 line(s) the rule's patterns do not match: "])
+
+        # ---- F177: the aiming choice at start ----
+        H177 = "aim choice prompt (F177)"
+
+        def a177_shown():
+            return R177("aim choice prompt (F177): shown")
+
+        def a177_picked(choice="look to aim"):
+            return R177("aim choice prompt (F177): picked look to aim" if choice == "look to aim" else "aim choice prompt (F177): picked mouse aim")
+
+        def a177_saved(v1="on", v2="off", k1="fix.native_on_foot_look_to_aim", k2="menu.aim_choice_prompt"):
+            return R177("aim choice prompt (F177): saved %s = %s and %s = %s to %s", k1, v1, k2, v2, "edvr.ini")
+
+        check("F177 aim choice: shown, picked look to aim and saved with both pairs is OK", [a177_shown(), a177_picked(), a177_saved()], 0, [("OK", H177)],
+              has=["shown; picked look to aim; saved fix.native_on_foot_look_to_aim = on and menu.aim_choice_prompt = off to edvr.ini"], lacks=["UNPARSED", "NEVER"])
+        check("F177 aim choice: shown, picked mouse aim and saved off and off is OK", [a177_shown(), a177_picked("mouse aim"), a177_saved(v1="off")], 0, [("OK", H177)],
+              has=["picked mouse aim; saved fix.native_on_foot_look_to_aim = off and menu.aim_choice_prompt = off"], lacks=["UNPARSED", "NEVER"])
+        check("F177 aim choice: a pick whose write failed is NEVER APPLIED, with the error", [a177_shown(), a177_picked(), R177("aim choice prompt (F177): write failed: %s", "edvr.ini: access denied")], 3,
+              [("NEVER APPLIED", H177)], has=["picked look to aim but the write failed: edvr.ini: access denied; the settings are unchanged and the page asks again at the next start"], lacks=["UNPARSED"])
+        check("F177 aim choice: a pick with neither a saved nor a write failed line is PARTIAL", [a177_shown(), a177_picked("mouse aim")], 0, [("PARTIAL", H177)],
+              has=["picked mouse aim but no saved or write failed line followed"], lacks=["UNPARSED"])
+        check("F177 aim choice: look to aim picked but off written is NEVER APPLIED (the pick and the write disagree)", [a177_shown(), a177_picked(), a177_saved(v1="off")], 3, [("NEVER APPLIED", H177)],
+              has=["picked look to aim but the file was given fix.native_on_foot_look_to_aim = off and menu.aim_choice_prompt = off: the pick and the write disagree"], lacks=["UNPARSED"])
+        check("F177 aim choice: a pick that left the page on is NEVER APPLIED too", [a177_shown(), a177_picked(), a177_saved(v2="on")], 3, [("NEVER APPLIED", H177)], has=["the pick and the write disagree"])
+        check("F177 aim choice: shown and Ask me next time is OK, nothing written", [a177_shown(), R177("aim choice prompt (F177): later")], 0, [("OK", H177)],
+              has=["the player chose Ask me next time or pressed Esc (nothing written, it asks again at the next start)"], lacks=["UNPARSED", "NEVER"])
+        check("F177 aim choice: shown with no answer is OK and says so", [a177_shown()], 0, [("OK", H177)], has=["no answer in this log"], lacks=["UNPARSED", "NEVER"])
+        check("F177 aim choice: only why it was not shown is IDLE, with the reason", [R177("aim choice prompt (F177): not shown: %s", "menu.aim_choice_prompt is off")], 0, [("IDLE", H177)],
+              has=["the page was not shown: menu.aim_choice_prompt is off"], lacks=["UNPARSED", "NEVER"])
+        check("F177 aim choice: no line is not present (no verdict row)", [f90_part()], 0, [("OK", F90S)],
+              lacks=[row("OK", H177), row("IDLE", H177), row("PARTIAL", H177), row("UNPARSED", H177), row("NEVER APPLIED", H177)])
+        check("F177 aim choice: a line that drifted from its pattern is unparsed", ["aim choice prompt (F177): showing the page"], 4, [("UNPARSED", H177)])
+        check("F177 aim choice: a drifted line beside a good one is counted beside the verdict", [a177_shown(), a177_picked(), a177_saved(), "aim choice prompt (F177): saved nothing"], 0, [("OK", H177)],
               has=["[+1 line(s) the rule's patterns do not match: "])
 
         # ---- F169: the stance while the aim is pitched ----

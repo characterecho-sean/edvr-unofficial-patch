@@ -43,6 +43,7 @@
 #include "joy_watch.h"
 #include "menu_edit_hold.h"
 #include "menu_write.h"
+#include "menu_aim_prompt.h"    // F177: the aiming choice at start: the page's words, the trigger, the writes
 #include "menu_flat_rows.h"
 #include "menu_keys.h"
 #include "menu_pad.h"
@@ -114,7 +115,7 @@ constexpr uint64_t kMonitorRefreshMs = 250;
 // R twice within this long resets a row to its shipped value.
 constexpr uint64_t kResetArmMs = 3000;
 
-enum class EntryKind { Setting, Action, Heading, PluginSetting, Approval };
+enum class EntryKind { Setting, Action, Heading, PluginSetting, Approval, AimChoice };
 
 struct Entry {
     EntryKind   kind = EntryKind::Setting;
@@ -123,6 +124,8 @@ struct Entry {
     int         pluginSetting = -1; // index into g_pluginRows.rows() for PluginSetting
     uint32_t    candidateId = 0;    // plugin manager candidate id for Approval; looked up when drawn and when activated
     const char* text = "";       // for Heading
+    bool        note = false;    // a Heading drawn as a line of small text (F177's page), not as a group heading
+    int         choice = -1;     // for AimChoice: the row of menu_aim_prompt.h (F177)
 };
 
 struct Page {
@@ -132,6 +135,8 @@ struct Page {
     int                scroll = 0;
     bool               status = false;    // an information page: no rows to pick
     bool               monitor = false;   // ...and this one is the performance monitor
+    bool               prompt = false;    // F177: the aiming choice page, which exists only while it is up
+    int                visibleRows = 0;   // rows drawn at once; 0 is kVisibleRows
 };
 
 struct Action {
@@ -366,6 +371,21 @@ struct State {
     bool snapshotTaken = false;
     std::string lastWrite;
     std::string menuWroteDotted;   // the change the menu itself made, so its reload does not toast
+    std::string menuWroteDotted2;  // ...and the second key of a two-key write (F177)
+
+    // F177: the aiming choice at start (menu_aim_prompt.h). The two settings it reads are cached at each configure, the rest is the page's own life.
+    bool     aimPromptKeyOn = true;        // menu.aim_choice_prompt
+    bool     nativeOnFootKeyOn = true;     // fix.native_on_foot
+    bool     aimPromptUp = false;          // the page is the one on screen
+    bool     aimPromptWide = false;        // its card is still on screen (it stays through the fade-out, so the geometry and the raster agree)
+    bool     aimPromptShown = false;       // it opened once this session: never again
+    bool     aimPromptPicked = false;      // a choice was made, so the close says so and not "later"
+    bool     aimPromptNoted = false;       // the "not shown" reason was said
+    bool     aimPromptGaveUp = false;      // the open failed kRetryMax times
+    int      aimPromptReturnPage = 0;      // the page the menu showed before it
+    int      aimPromptTries = 0;
+    uint64_t aimPromptSceneMs = 0;         // when the menu first saw the first rendered scene
+    uint64_t aimPromptNextTryMs = 0;
 
     // The reset-to-shipped arm.
     int      resetArmedEntry = -1;
@@ -1302,7 +1322,7 @@ bool g_backedUp = false;
 bool g_mirrorNoted = false;
 bool g_mirrorFailNoted = false;
 
-bool menuIniWrite(const std::string& dotted, const std::string& value, std::string* err) {
+bool menuIniWritePairs(const std::vector<std::pair<std::string, std::string>>& pairs, std::string* err) {
     const std::wstring path = Config::get().path();
     // The file this process reads and this write replaces: edvr-flat.ini under the
     // flat profile, edvr.ini otherwise (Config::iniName names it for the messages).
@@ -1330,7 +1350,7 @@ bool menuIniWrite(const std::string& dotted, const std::string& value, std::stri
         }
     }
     MergeReport report;
-    const std::string updated = mergeIni(source, source, &source, {{dotted, value}}, &report);
+    const std::string updated = mergeIni(source, source, &source, pairs, &report);
     // Atomic, through the one writer iniedit owns (the whole new file beside the
     // old one, flushed, then one replace that is tried again while a reader has
     // the file for a moment), so config.cpp's size check never meets half a save
@@ -1367,6 +1387,10 @@ bool menuIniWrite(const std::string& dotted, const std::string& value, std::stri
     return true;
 }
 
+bool menuIniWrite(const std::string& dotted, const std::string& value, std::string* err) {
+    return menuIniWritePairs({{dotted, value}}, err);
+}
+
 // THE WRITE RUNS OFF THE FRAME THREAD. The first build did the read, the
 // merge, the write, the replace, the mirror copy and the backup copy on
 // the render thread -- a several-millisecond hitch on every change, which
@@ -1399,12 +1423,12 @@ void writerMain() {
             if (g_writer.queue.empty()) return;
             jobs.swap(g_writer.queue);
         }
-        // Coalesce: the last value for each key is the one that matters.
+        // Coalesce: the last value for each key is the one that matters. A job with several keys (F177) is written whole, never folded into another.
         std::vector<WriteJob> last;
         for (size_t i = 0; i < jobs.size(); ++i) {
             bool later = false;
             for (size_t j = i + 1; j < jobs.size(); ++j) {
-                if (jobs[j].dotted == jobs[i].dotted) {
+                if (jobs[i].pairs.empty() && jobs[j].pairs.empty() && jobs[j].dotted == jobs[i].dotted) {
                     later = true;
                     break;
                 }
@@ -1414,7 +1438,7 @@ void writerMain() {
         for (const WriteJob& job : last) {
             WriteDone d = runMenuWrite(job, [](const WriteJob& write, std::string* err) {
                 bool ok = false;
-                guarded("menu/write", [&] { ok = menuIniWrite(write.dotted, write.value, err); });
+                guarded("menu/write", [&] { ok = write.pairs.empty() ? menuIniWrite(write.dotted, write.value, err) : menuIniWritePairs(write.pairs, err); });
                 return ok;
             });
             std::lock_guard<std::mutex> lock(g_writer.m);
@@ -1648,6 +1672,53 @@ void buildPluginsPage(Page& p) {
     }
 }
 
+// F177: the Aiming choice row sits right under Look to aim on the Native on foot page. Its key is in [menu], at the end of the file, so the page's file order puts it last.
+void moveRowAfter(Page& p, const char* section, const char* key, const char* afterSection, const char* afterKey) {
+    auto find = [&](const char* sec, const char* k) {
+        for (size_t i = 0; i < p.entries.size(); ++i) {
+            const Entry& e = p.entries[i];
+            if (e.kind != EntryKind::Setting) continue;
+            const MenuRowDef& d = kMenuRows[e.def];
+            if (strcmp(d.section, sec) == 0 && strcmp(d.key, k) == 0) return static_cast<int>(i);
+        }
+        return -1;
+    };
+    const int from = find(section, key), after = find(afterSection, afterKey);
+    if (from < 0 || after < 0 || from == after + 1) return;
+    const Entry moved = p.entries[from];
+    p.entries.erase(p.entries.begin() + from);
+    p.entries.insert(p.entries.begin() + (from < after ? after : after + 1), moved);
+}
+
+// F177: the aiming choice page (menu_aim_prompt.h): the heading, the words as lines of small text, the three rows. The row lit is the player's current setting.
+Page makeAimPromptPage() {
+    Page p;
+    p.name = aimprompt::kPageName;
+    p.prompt = true;
+    p.visibleRows = aimprompt::kPageLines;
+    Entry h;
+    h.kind = EntryKind::Heading;
+    h.text = aimprompt::kHeading;
+    p.entries.push_back(h);
+    for (int i = 0; i < aimprompt::kNoteCount; ++i) {
+        Entry n;
+        n.kind = EntryKind::Heading;
+        n.note = true;
+        n.text = aimprompt::kNotes[i];
+        p.entries.push_back(n);
+    }
+    const int firstRow = static_cast<int>(p.entries.size());
+    for (int c = 0; c < aimprompt::kChoiceCount; ++c) {
+        Entry e;
+        e.kind = EntryKind::AimChoice;
+        e.choice = c;
+        p.entries.push_back(e);
+    }
+    const bool lookOn = _stricmp(Config::get().getString("fix.native_on_foot_look_to_aim", "off").c_str(), "on") == 0;
+    p.highlight = firstRow + aimprompt::highlightFor(lookOn);
+    return p;
+}
+
 void buildPages() {
     State& s = g_s;
     const int keepPage = s.page;
@@ -1762,6 +1833,7 @@ void buildPages() {
         Page p;
         p.name = "Native on foot";
         addSettingRows(p, MenuTier::Fix, "native_on_foot", true);
+        moveRowAfter(p, "menu", "aim_choice_prompt", "fix", "native_on_foot_look_to_aim");   // F177
         firstSelectable(p);
         s.pages.push_back(p);
     }
@@ -1833,7 +1905,9 @@ void buildPages() {
         }
     }
     s.developerBuilt = s.developer;
-    s.page = keepPage < static_cast<int>(s.pages.size()) ? keepPage : 0;
+    // F177: while the aiming choice is up its page is the last, and the one shown.
+    if (s.aimPromptUp) s.pages.push_back(makeAimPromptPage());
+    s.page = s.aimPromptUp ? static_cast<int>(s.pages.size()) - 1 : keepPage < static_cast<int>(s.pages.size()) ? keepPage : 0;
     // Same page, same rows: put the highlight and the scroll back. A page
     // whose rows changed (an action registered on Instruments) starts at
     // its first row as before.
@@ -2140,7 +2214,11 @@ void buildMonitor(MenuContent& c) {
 // one comes and goes -- and the whole bitmap is SLID along its own surface
 // so the CARD lands where the user was looking rather than the bitmap's
 // middle.
-bool tooltipsOn() { return g_s.tooltipDelayS > 0.0f; }
+// F177's page has no tooltip strip beside it: it is wide enough to hold its words and has no rows with a tooltip.
+bool tooltipsOn() { return g_s.tooltipDelayS > 0.0f && !g_s.aimPromptWide; }
+
+// The card's width in degrees: the player's width_degrees, or the aiming choice page's own while its card is on screen.
+float cardWidthDeg() { return g_s.aimPromptWide ? aimprompt::kWidthDeg : g_s.widthDeg; }
 
 // The panel's half-width in METRES: the card exactly as wide as
 // width_degrees asks, plus the strip beside it. Scaled in metres and not in
@@ -2209,7 +2287,21 @@ void buildContent(MenuContent& c) {
     State& s = g_s;
     memset(&c, 0, sizeof(c));
     c.popupLine = -1;
-    sizeContent(c, s.widthDeg, s.textDeg, tooltipsOn());
+    // F177: the aiming choice page has its own, wider card, with no strip beside it, and its text is shrunk (never grown) until its widest line fits that card.
+    const bool promptPage = s.aimPromptUp && !s.pages.empty() && s.pages[s.page].prompt;
+    if (promptPage) {
+        sizeContent(c, aimprompt::kWidthDeg, s.textDeg, false);
+        static double widestEm = 0.0;   // the face is fixed, so the measure is taken once
+        if (!(widestEm > 0.0)) {
+            for (int i = 0; i < aimprompt::kNoteCount; ++i) {
+                const double em = menuPanelMeasureLine(aimprompt::kNotes[i], 100) / 100.0;
+                if (em > widestEm) widestEm = em;
+            }
+        }
+        c.capPx = aimprompt::fitCapPx(c.cardPx, c.capPx, widestEm);
+    } else {
+        sizeContent(c, s.widthDeg, s.textDeg, tooltipsOn());
+    }
 
     // If the FPS overlay is locked to the menu, show the same readout at the
     // top of the menu panel so both are visible for A/B testing.
@@ -2228,6 +2320,7 @@ void buildContent(MenuContent& c) {
         const int total = static_cast<int>(s.pages.size());
         const int pad = c.capPx * 8 / 10;
         const int gap = c.capPx / 2;
+        const bool single = promptPage;   // F177: the page is the only tab while it is up
         const int arrow = c.capPx;    // the room an arrow takes at either end
         // The panel's own estimate of a tab's width, the raster's formula.
         auto tabWidth = [&](int i) {
@@ -2239,7 +2332,7 @@ void buildContent(MenuContent& c) {
         // before the arrows that say what is left over.
         first = last = s.page;
         room -= tabWidth(s.page);
-        for (bool grew = true; grew;) {
+        for (bool grew = true; grew && !single;) {
             grew = false;
             if (last + 1 < total) {
                 const int need = tabWidth(last + 1) + gap + (last + 2 < total ? arrow : 0);
@@ -2263,8 +2356,8 @@ void buildContent(MenuContent& c) {
             strncpy(c.tabs[c.tabCount++], s.pages[i].name, sizeof(c.tabs[0]) - 1);
         }
         c.activeTab = s.page - first;
-        c.tabMoreLeft = first > 0;
-        c.tabMoreRight = last < total - 1;
+        c.tabMoreLeft = first > 0 && !single;
+        c.tabMoreRight = last < total - 1 && !single;
     }
     Page& p = s.pages[s.page];
     const int pendingN = pendingRestartCount();
@@ -2319,22 +2412,29 @@ void buildContent(MenuContent& c) {
             tooltipsOn() &&
             s.tickMs >= s.highlightSinceMs + static_cast<uint64_t>(s.tooltipDelayS * 1000.0f);
         // Keep the highlight in the window.
+        const int visibleRows = p.visibleRows > 0 ? p.visibleRows : kVisibleRows;
+        if (p.prompt) c.compact = true;   // F177: fifteen lines in the height guard
         const int total = static_cast<int>(p.entries.size());
         if (p.highlight >= total) p.highlight = total ? total - 1 : 0;
         if (p.highlight < p.scroll) p.scroll = p.highlight;
-        if (p.highlight >= p.scroll + kVisibleRows) p.scroll = p.highlight - kVisibleRows + 1;
+        if (p.highlight >= p.scroll + visibleRows) p.scroll = p.highlight - visibleRows + 1;
         if (p.scroll < 0) p.scroll = 0;
-        for (int i = p.scroll; i < total && c.lineCount < kVisibleRows; ++i) {
+        for (int i = p.scroll; i < total && c.lineCount < visibleRows; ++i) {
             const Entry& e = p.entries[i];
             MenuLine& l = c.lines[c.lineCount++];
             l.badge = kBadgeNone;
             l.dim = false;
             if (e.kind == EntryKind::Heading) {
                 strncpy(l.left, e.text, sizeof(l.left) - 1);
-                l.style = kMenuHeading;
+                l.style = e.note ? kMenuNote : kMenuHeading;
                 continue;
             }
             const bool hi = (i == p.highlight);
+            if (e.kind == EntryKind::AimChoice) {
+                strncpy(l.left, aimprompt::kRows[e.choice], sizeof(l.left) - 1);
+                l.style = hi ? kMenuRowHi : kMenuRow;
+                continue;
+            }
             if (e.kind == EntryKind::Action) {
                 const Action& a = g_actions[e.action];
                 strncpy(l.left, a.label.c_str(), sizeof(l.left) - 1);
@@ -2696,6 +2796,11 @@ void buildContent(MenuContent& c) {
     // THE GAME had never been visible -- the likeliest root of "how do I
     // change tabs". The width is the card less the raster's pad either
     // side (menu_panel.cpp: pad = cap * 8 / 10).
+    if (promptPage) {
+        // F177: the page says how to answer it, and nothing else; the pending count and the legend of the other pages are not its business.
+        snprintf(c.footer, sizeof(c.footer), "%s", aimprompt::kFooter);
+        return;
+    }
     if (runtimeFlatProfile()) {
         const char* status = "";
         if (s.lastWrite.compare(0, 7, "FAILED:") == 0) status = " | write failed";
@@ -2914,6 +3019,8 @@ bool applyResolutionChange(int defIndex, const ResolutionView& v, uint32_t width
 // The worker's results, on the frame thread: the log line, the Status
 // page's last-write, the reload request for each landed write, and the
 // row put back to what the file says when a write failed.
+void aimPromptWriteDone(const WriteDone& w);   // F177, below with the keys
+
 void drainWrites() {
     State& s = g_s;
     std::vector<WriteDone> done;
@@ -2923,6 +3030,10 @@ void drainWrites() {
         done.swap(g_writer.done);
     }
     for (const WriteDone& w : done) {
+        if (w.job.destination == WriteDestination::Pairs) {   // F177: the aiming choice, no row owns it
+            aimPromptWriteDone(w);
+            continue;
+        }
         completeMenuWrite(w, s, kMenuRows, g_rows, kRowDefCount,
                           [](const MenuRowDef& d) { return rowValue(d); },
                           [](const MenuRowDef& d, const std::string& value, const std::string& snapshot) {
@@ -3003,11 +3114,61 @@ void commitEdit();
 // Capturing a hotkey, defined after the keys.
 void beginCapture(int entryIndex, int defIndex);
 
+// F177: a row of the aiming choice page was chosen. A choice is one write job holding both pairs, then the page closes; "Ask me next time" closes it and writes nothing.
+void closeMenu(const char* why);
+void aimPromptPick(int choice) {
+    State& s = g_s;
+    if (choice == aimprompt::kLater) {
+        closeMenu("aim choice: ask next time");
+        return;
+    }
+    const aimprompt::Writes w = aimprompt::writesFor(choice);
+    if (w.count != 2) {
+        closeMenu("aim choice: no such row");
+        return;
+    }
+    WriteJob job;
+    job.destination = WriteDestination::Pairs;
+    job.dotted = w.pair[0].key;
+    job.value = w.pair[0].value;
+    for (int i = 0; i < w.count; ++i) job.pairs.emplace_back(w.pair[i].key, w.pair[i].value);
+    s.aimPromptPicked = true;
+    s.menuWroteDotted = w.pair[0].key;    // the reload that applies the write is the menu's own change, not an outside edit to toast
+    s.menuWroteDotted2 = w.pair[1].key;
+    enqueueWrite(job);
+    Log::get().note("%s", choice == aimprompt::kLookToAim ? aimprompt::kLogPickedLookToAim : aimprompt::kLogPickedMouse);
+    closeMenu("aim choice");
+}
+
+// The write of a pick came back (drainWrites). The line that says it landed, or that it did not: a failed write leaves both settings as they were and the page on, and a toast says so.
+void aimPromptWriteDone(const WriteDone& w) {
+    State& s = g_s;
+    char line[400];
+    if (w.ok) {
+        aimprompt::Writes wr;
+        wr.count = static_cast<int>(w.job.pairs.size()) == 2 ? 2 : 0;
+        for (int i = 0; i < wr.count; ++i) wr.pair[i] = {w.job.pairs[static_cast<size_t>(i)].first.c_str(), w.job.pairs[static_cast<size_t>(i)].second.c_str()};
+        aimprompt::formatSaved(line, sizeof(line), wr, Config::get().iniName());
+        s.lastWrite = w.job.dotted + " = " + w.job.value;
+        s.pollRequest = true;
+    } else {
+        aimprompt::formatWriteFailed(line, sizeof(line), w.err.c_str());
+        s.lastWrite = "FAILED: " + w.err;
+        if (s.toasts) s.toastQueue.push_back("Aiming choice not saved (see the log)");
+    }
+    Log::get().note("%s", line);
+    s.contentDirty = true;
+}
+
 void activateEntry() {
     State& s = g_s;
     Page& p = s.pages[s.page];
     if (p.status || p.entries.empty()) return;
     const Entry& e = p.entries[p.highlight];
+    if (e.kind == EntryKind::AimChoice) {
+        aimPromptPick(e.choice);   // the page closes and is rebuilt away: nothing below may use p or e
+        return;
+    }
     if (e.kind == EntryKind::Approval) {
         const uint32_t id = e.candidateId;   // copied: the rebuild below frees the entry
         std::string why;
@@ -3088,7 +3249,7 @@ void moveHighlight(int dir) {
 void changePage(int dir) {
     State& s = g_s;
     const int n = static_cast<int>(s.pages.size());
-    if (n == 0) return;
+    if (n == 0 || s.aimPromptUp) return;   // F177: the aiming choice page is the only page while it is up
     s.page = ((s.page + dir) % n + n) % n;
     s.resetArmedEntry = -1;
     noteHighlightMoved();
@@ -4035,7 +4196,7 @@ void handleAim(uint64_t now) {
     if (!(aspect > 0.0f)) return;
     // The whole panel, strip included: the hit test works in the bitmap's
     // own coordinates, and menuPanelLineAt rejects the strip itself.
-    const float halfW = panelHalfW(s.widthDeg, tooltipsOn());
+    const float halfW = panelHalfW(cardWidthDeg(), tooltipsOn());
     const float halfH = halfW * aspect;
     const float shift = panelShift(halfW, tooltipsOn());
     float su = 0.0f, sv = 0.0f;
@@ -4160,6 +4321,7 @@ void openMenu(uint64_t now) {
         }
         return;
     }
+    if (!s.aimPromptUp) s.aimPromptWide = false;   // F177: an ordinary open while the wide card was fading takes the player's own width back
     latchAnchor(0.0f, 0.0f);
     if (!s.anchorValid) {
         if (!s.noPoseNoted) {
@@ -4206,6 +4368,8 @@ void openMenu(uint64_t now) {
                     static_cast<double>(s.distance), s.privateWanted ? "private" : "shared");
 }
 
+void aimPromptClosed();   // F177, below
+
 void closeMenu(const char* why) {
     State& s = g_s;
     g_held.flush(EditFlush::Close);   // a held edit is written now, open or not: a close is never the end of an edit
@@ -4220,6 +4384,77 @@ void closeMenu(const char* why) {
     if (runtimeFlatProfile()) hotkeysPrimeAll(); // a held navigation key must not become a hotkey on close
     perfMonitorNoteEvent(kEvMenu);
     Log::get().note("menu: closed (%s).", why);
+    if (s.aimPromptUp) aimPromptClosed();
+}
+
+// F177: the aiming choice page leaves with the menu. A close that was not a pick (Esc, the menu key, idle, a tracking change) says "later" and writes nothing; the page is rebuilt away and the menu
+// goes back to the page it had shown before it.
+void aimPromptClosed() {
+    State& s = g_s;
+    s.aimPromptUp = false;   // aimPromptWide stays until the card has faded, so the geometry and the raster agree
+    if (!s.aimPromptPicked) Log::get().note("%s", aimprompt::kLogLater);
+    buildPages();
+    s.page = s.aimPromptReturnPage >= 0 && s.aimPromptReturnPage < static_cast<int>(s.pages.size()) ? s.aimPromptReturnPage : 0;
+    s.contentDirty = true;
+}
+
+// F177: opens the menu on the aiming choice page; false when the menu could not open (no compositor door yet, no head pose), with the pages as they were.
+bool openAimPrompt(uint64_t now) {
+    State& s = g_s;
+    s.aimPromptReturnPage = s.page;
+    s.aimPromptUp = true;
+    s.aimPromptWide = true;
+    buildPages();
+    openMenu(now);
+    if (s.open) return true;
+    s.aimPromptUp = false;
+    s.aimPromptWide = false;
+    buildPages();
+    s.page = s.aimPromptReturnPage >= 0 && s.aimPromptReturnPage < static_cast<int>(s.pages.size()) ? s.aimPromptReturnPage : 0;
+    return false;
+}
+
+// F177: the reason the page will not open, said once a session.
+void aimPromptNoteNotShown(const char* reason) {
+    State& s = g_s;
+    if (s.aimPromptNoted) return;
+    s.aimPromptNoted = true;
+    char line[200];
+    aimprompt::formatNotShown(line, sizeof(line), reason);
+    Log::get().note("%s", line);
+}
+
+// F177: once a session, in the headset, the menu opens itself on the aiming choice page (menu_aim_prompt.h decides; the facts are the menu's own).
+void aimPromptTick(uint64_t now) {
+    State& s = g_s;
+    if (s.aimPromptShown || s.aimPromptGaveUp) return;
+    if (!s.aimPromptSceneMs && sceneArrived()) s.aimPromptSceneMs = now;
+    aimprompt::Trigger t;
+    t.vr = !runtimeFlatProfile();
+    t.keyOn = s.aimPromptKeyOn;
+    t.nativeOnFoot = s.nativeOnFootKeyOn;
+    t.scenePast = s.aimPromptSceneMs != 0;
+    t.settled = t.scenePast && now - s.aimPromptSceneMs >= aimprompt::kSettleMs;
+    t.menuOpen = s.open;
+    t.shownThisSession = s.aimPromptShown;
+    t.focused = gameHasFocus();
+    const aimprompt::Decision d = aimprompt::decide(t);
+    if (d.verdict == aimprompt::Verdict::NotShown) {
+        aimPromptNoteNotShown(d.reason);
+        return;
+    }
+    if (d.verdict != aimprompt::Verdict::Show || now < s.aimPromptNextTryMs) return;
+    s.aimPromptNextTryMs = now + aimprompt::kRetryMs;
+    if (openAimPrompt(now)) {
+        s.aimPromptShown = true;
+        s.aimPromptNoted = true;   // it showed: no "not shown" line follows
+        Log::get().note("%s", aimprompt::kLogShown);
+        return;
+    }
+    if (++s.aimPromptTries >= aimprompt::kRetryMax) {
+        s.aimPromptGaveUp = true;
+        aimPromptNoteNotShown("the menu could not open (no compositor door or head pose in 10 s)");
+    }
 }
 
 }  // namespace
@@ -4423,6 +4658,8 @@ void menuConfigure(Config& cfg) {
     s.widthDeg = w;
     s.tooltipsWere = s.tooltipDelayS > 0.0f;
     s.toasts = cfg.getBool("menu.toasts", true);
+    s.aimPromptKeyOn = cfg.getBool("menu.aim_choice_prompt", true);   // F177
+    s.nativeOnFootKeyOn = _stricmp(cfg.getString("fix.native_on_foot", "on").c_str(), "on") == 0;
     {
         const bool ov = cfg.getBool("menu.fps_overlay", false);
         const bool ovLock = cfg.getBool("menu.fps_overlay_lock", false);
@@ -4462,6 +4699,8 @@ void menuConfigure(Config& cfg) {
                         kRowDefCount,
                         static_cast<int>(s.pages[0].entries.size() + s.pages[1].entries.size()),
                         key.c_str());
+        // F177: the flat profile has no aiming choice page; the log says so once.
+        if (runtimeFlatProfile()) aimPromptNoteNotShown("the flat profile has no such page");
     }
 }
 
@@ -4524,7 +4763,7 @@ void menuNoteConfigReloaded() {
         if (g_held.pending() && g_held.def() == i) continue;
         const std::string v = rowValue(d);
         const std::string dotted = dottedOf(d);
-        const bool byMenu = (s.menuWroteDotted == dotted);
+        const bool byMenu = (s.menuWroteDotted == dotted) || (!s.menuWroteDotted2.empty() && s.menuWroteDotted2 == dotted);
         const bool openxrScaleRow = isOpenxrRenderScaleRow(d);
         if (v != r.value) {
             const std::string was = r.value;
@@ -4577,6 +4816,7 @@ void menuNoteConfigReloaded() {
         }
     }
     s.menuWroteDotted.clear();
+    s.menuWroteDotted2.clear();
     if (!changed.empty()) s.contentDirty = true;
     if (s.toasts && !s.open) {
         for (size_t i = 0; i < changed.size() && i < 3; ++i) s.toastQueue.push_back(changed[i]);
@@ -4877,6 +5117,9 @@ void menuTick(ID3D11Device* dev) {
             }
         }
 
+        // F177: the aiming choice at start, once a session.
+        aimPromptTick(now);
+
         // The summon key: EDVR's own, focus-gated. With Shift, recentre. While a hotkey row
         // waits for its input the key is a candidate for the capture (the menu key can be
         // rebound to itself, or taken for another row and refused), not a command: the
@@ -4981,6 +5224,7 @@ void menuTick(ID3D11Device* dev) {
             const float rate = dt > 0 ? static_cast<float>(dt) / static_cast<float>(kFadeMs) : 1.0f;
             if (s.alpha < target) s.alpha = s.alpha + rate > target ? target : s.alpha + rate;
             else if (s.alpha > target) s.alpha = s.alpha - rate < target ? target : s.alpha - rate;
+            if (!s.open && s.alpha <= 0.0f) s.aimPromptWide = false;   // F177: the wide card is gone
         }
 
         // Toasts, when the menu is down; the overlay when nothing else is up.
@@ -5099,7 +5343,7 @@ void menuTick(ID3D11Device* dev) {
         // no strip, so they take no shift.
         const bool menuBranch = !s.toastUp && !showingOverlay;
         const float widthDeg =
-            s.toastUp ? kToastWidthDeg : showingOverlay ? kOverlayWidthDeg : s.widthDeg;
+            s.toastUp ? kToastWidthDeg : showingOverlay ? kOverlayWidthDeg : cardWidthDeg();
         g.halfW = panelHalfW(widthDeg, menuBranch && tooltipsOn());
         g.shift = panelShift(g.halfW, menuBranch && tooltipsOn());
         g.alpha = s.toastUp ? s.toastAlpha : showingOverlay ? s.overlayAlpha : s.alpha;
