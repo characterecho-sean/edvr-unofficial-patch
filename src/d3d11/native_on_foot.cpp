@@ -86,6 +86,7 @@
 #include "native_on_foot_f179.h"   // F179: the body stays up in standing ADS (the standing raise), and the neck guard that keeps the eye 10 cm ahead of the chest (pure parts)
 #include "native_on_foot_f180.h"   // F180: the left elbow hangs standing in ADS; the spine straighten dial (TEMPORARY); the neck guard's distance (pure parts)
 #include "native_on_foot_f181.h"   // F181: the left elbow's swivel capped at the hip with a two-handed gun (TEMPORARY dial; pure parts)
+#include "native_on_foot_f186.h"   // F186: the ADS terms pre-turned by the aim pitch (TEMPORARY A/B), the sight lock's response measured, a stability stop (pure parts)
 #include "native_on_foot_f185.h"   // F185: the left arm keeps a bend in the sights, the shoulder first (TEMPORARY dial; pure parts)
 #include "native_on_foot_f182.h"   // F182: the left hand stays on a two-handed gun aimed steeply up (the stored grip point in the item's frame; pure parts)
 #include "native_on_foot_f176.h"   // F176: in the sights with the head aiming, the mouse and the stick hold their pitch (pure parts)
@@ -241,6 +242,9 @@ double g_standAdsSpineLast = 1e9;                             // the value last 
 std::atomic<float> g_neckGuardCm{static_cast<float>(nofoot::f179::kNeckGuardDefaultCm)};   // F180c (TEMPORARY): experimental.native_on_foot_neck_guard_cm, 0..20 cm, live: how far ahead of the chest the neck guard keeps the eye; 0 turns it off; F181: default 2, the pilot's flown value (F179's first was 10)
 double g_neckGuardCmLast = 1e9;                               // the value last logged (frame thread; the first read always logs)
 std::atomic<float> g_hipElbowSwivelMaxDeg{static_cast<float>(nofoot::f181::kCapDefaultDeg)};   // F181a (TEMPORARY): experimental.native_on_foot_hip_elbow_swivel_max_deg, 0..90, live: the most the left elbow swings off the stance's plane at the hip with a two-handed gun; 90 leaves the pose; default 25
+std::atomic<bool> g_adsPreturn{true};                          // F186 (TEMPORARY A/B): experimental.native_on_foot_ads_preturn, on | off, live: under mouse look the ADS terms of the eye alignment go out turned by -a in the (forward, up) plane (F172's turn); default on
+bool g_adsPreturnLast = true;                                 // the value last logged (frame thread)
+bool g_adsPreturnLogged = false;
 std::atomic<float> g_adsLeftReach{static_cast<float>(nofoot::f185::kDialDefault)};   // F185 (TEMPORARY): experimental.native_on_foot_ads_left_reach, 0.80..1.00, live: in the sights with a two-handed gun the left shoulder is kept within this share of the left arm's full length of the grip; 1.00 is today's; default 0.92
 double g_adsLeftReachLast = 1e9;                              // the value last logged (frame thread; the first read always logs)
 double g_hipElbowSwivelMaxDegLast = 1e9;                      // the value last logged (frame thread; the first read always logs)
@@ -1194,6 +1198,19 @@ void readKey() {
                             deg, nofoot::f181::kCapMinDeg, nofoot::f181::kCapMaxDeg, nofoot::f181::kCapMaxDeg);
         g_hipElbowSwivelMaxDegLast = deg;
         g_hipElbowSwivelMaxDeg.store(static_cast<float>(deg), std::memory_order_relaxed);
+    }
+    // F186 (TEMPORARY A/B, live): experimental.native_on_foot_ads_preturn. on (the default): under mouse look the ADS terms of the eye alignment (the position lock, the sight lock, the weapon eye offset) go
+    // out turned by -a in the (forward, up) plane, a the aim's pitch, as F172 turns the neck raise, so the game's own turn lands them where they were meant; off: today's.
+    {
+        const bool preturnOn = cfg.getString("experimental.native_on_foot_ads_preturn", "on") != "off";
+        if (first || preturnOn != g_adsPreturnLast || !g_adsPreturnLogged)
+            Log::get().note("native on foot ADS pre-turn (F186, TEMPORARY A/B): experimental.native_on_foot_ads_preturn is %s -- %s", preturnOn ? "on" : "off",
+                            preturnOn ? "under mouse look (look to aim not driving the aim, the aim fresh, the on-foot camera) the ADS terms of the eye alignment (the position lock, the sight lock, the weapon eye "
+                                 "offset) go out turned by -a in the (forward, up) plane, a the aim's pitch, so the game's own turn lands them where they were meant; the F70 shift and F119's sums stay unturned"
+                               : "the ADS terms go out as they did: unturned, the game's turn lands them rotated by the aim pitch under mouse look");
+        g_adsPreturnLast = preturnOn;
+        g_adsPreturnLogged = true;
+        g_adsPreturn.store(preturnOn, std::memory_order_relaxed);
     }
     // F185 (TEMPORARY, live, the developer tier's "ADS left arm reach"): in the sights with a two-handed gun the left shoulder is kept within this share of the left arm's full length of the left-hand grip
     // (the clavicle first, up to 15 deg, then the reach rule's body move), so the elbow keeps a bend; 1.00 is today's (the grip just reachable). Weighted by the detach weight, both stances.
@@ -11926,6 +11943,10 @@ bool retNdcRead(int e, uint32_t* frame, double ndc[2], double* depth) noexcept {
     return false;
 }
 AdsSightWin g_adsSightWin;
+// F186: the sight lock's response (pairs of the shift commanded and the error's change at the serial lag, by aim-pitch bin), the pairing state and the stability stop (frame thread only).
+nofoot::f186::Response g_f186Win;
+nofoot::f186::Pairer g_f186Pairer;
+nofoot::f186::StopGuard g_f186Stop;
 // F143: the game's sight line E -> S as the frame thread's F141 drain publishes it (the filtered pair, its time, the item and scope); adsSightTick reads it on the same thread.
 // F144: the settled sight lines of the session (the F141 drain feeds them with settled samples; the sight lock reads them from a press's first frame), the press's settle gate and
 // the blend from the table's shift to a line that first becomes usable mid-press.
@@ -12157,7 +12178,15 @@ void adsSightTick(uint64_t now, double dt, const EyeSample& s) noexcept {
     context = nofoot::adslog::mix(context, g_cfgGeneration);
     context = nofoot::adslog::mix(context, loadout::publishedGeneration());   // F140: a loadout change (a scope fitted) closes the window: one line, one scope state
     g_adsSightLogWindow.poll(now, nativeOnFootActive() && (engaged || nofoot::ikLen(g_adsSight.applied) >= 1e-5), context,
-        []() noexcept {}, [&](uint32_t seconds) noexcept { adsSightLog(seconds, lastSteady, lastHold, g_adsSightLogWindow.detailed); });
+        []() noexcept {}, [&](uint32_t seconds) noexcept {
+            adsSightLog(seconds, lastSteady, lastHold, g_adsSightLogWindow.detailed);
+            if (g_f186Win.lockFrames) {   // F186: the lock's response by aim-pitch bin, the pre-turn's state and the stops, whenever the lock ran in the window
+                char line186[1190];
+                nofoot::f186::formatResponse(line186, sizeof(line186), seconds, g_adsPreturn.load(std::memory_order_relaxed), g_f186Win);
+                Log::get().note("%s", line186);
+            }
+            g_f186Win = nofoot::f186::Response{};
+        });
     lastSteady = logSteady; lastHold = g_adsHoldThisPress;
     AdsSightWin& w = g_adsSightWin;
     // F162: the aiming eye for this tick (0 left, 1 right): the sight lock, the measures of the ADS eye and the reticle all take it. Both and right are 1, which is what every one of them
@@ -12533,7 +12562,38 @@ void adsSightTick(uint64_t now, double dt, const EyeSample& s) noexcept {
             Log::get().note("native on foot ADS steady eye (F93b): %s (live; in ADS: %s)", steady ? "on" : "off", active ? "yes" : "no");
         }
         const nofoot::f93::Target tg = nofoot::f93::sightTarget(steady, have, f93Solved, frameKnown, word, g_f93Sight, g_adsSight.pos, err);
+        // F186a (measure only): the lock's response. The shift the measured eye was rendered with (the meant shift under the serial: the target less the error plus the shift now) and the error measured on
+        // it; consecutive rendered frames give the change commanded and the response at the serial lag, binned by the aim's pitch.
+        if (active && have && f93Solved && tg.have && tg.source == nofoot::f93::kMatched) {
+            double vRendered[3], dv[3], de[3];
+            for (int i = 0; i < 3; ++i) vRendered[i] = tg.err[i] - err[i] + beforePos[i];
+            const uint64_t aimRootMs = g_f109RootMs.load(std::memory_order_acquire);
+            const bool aimFresh = aimRootMs != 0 && now >= aimRootMs && now - aimRootMs <= nofoot::f137::kAimMaxAgeMs;
+            if (g_f186Pairer.step(f93RowsFrame, vRendered, err, dv, de) && aimFresh) g_f186Win.addPair(static_cast<double>(g_f109RootPitch.load(std::memory_order_relaxed)), dv[1], dv[2], de[1], de[2]);
+        } else {
+            g_f186Pairer.reset();
+        }
         nofoot::adsEyeStep(g_adsSight.pos, g_adsSight.vel, g_adsSight.target, tg.err, tg.have, active, g_adsSightTripped, dt);
+        // F186c: the stability stop. The lock's e after the lock over 10 cm, or its applied vector at its clamp, for 0.3 s: the lock is released (ramped to zero over 0.15 s) and acquired again from
+        // zero. Counted and named; it must be rare.
+        {
+            const nofoot::f186::StopGuard::Out stop = g_f186Stop.step(now, active && !g_adsSightTripped, have, E.perpNorm, nofoot::ikLen(g_adsSight.pos), nofoot::kAdsSightClampM, g_adsSight.pos);
+            if (stop.stopped) {
+                ++g_f186Win.stops;
+                const uint64_t aimRootMs = g_f109RootMs.load(std::memory_order_acquire);
+                const bool aimFresh = aimRootMs != 0 && now >= aimRootMs && now - aimRootMs <= nofoot::f137::kAimMaxAgeMs;
+                char stopLine[420];
+                nofoot::f186::formatStop(stopLine, sizeof(stopLine), stop.reason, 100.0 * E.perpNorm, 100.0 * nofoot::ikLen(g_adsSight.pos), 100.0 * nofoot::kAdsSightClampM, aimFresh,
+                                         static_cast<double>(g_f109RootPitch.load(std::memory_order_relaxed)), g_adsPreturn.load(std::memory_order_relaxed), g_f186Stop.stops);
+                Log::get().note("%s", stopLine);
+            }
+            if (stop.ramping || stop.zeroNow)
+                for (int i = 0; i < 3; ++i) {
+                    g_adsSight.pos[i] = stop.zeroNow ? 0.0 : g_f186Stop.start[i] * stop.scale;
+                    g_adsSight.vel[i] = 0.0;
+                    g_adsSight.target[i] = 0.0;
+                }
+        }
         {   // F93b: the eye chain, per frame (this tick's figures for the trace) and summed for the 1 s line, while ADS is active
             F93Frame& q = g_f93Frame;
             const double head[3] = {g_adsHeadNow[0], g_adsHeadNow[1], g_adsHeadNow[2]};
@@ -12593,6 +12653,7 @@ void adsSightTick(uint64_t now, double dt, const EyeSample& s) noexcept {
         const double lockBody[3] = {-g_adsSight.applied[0], -g_adsSight.applied[1], g_adsSight.applied[2]};
         for (size_t i = 0; i < 3; ++i) before[i] = E.eFullBody[i] + lockBody[i];
         ++w.driving;
+        ++g_f186Win.lockFrames;   // F186: a lock frame (the window's line)
         w.kWantedSum += adsDepth.askedCm / 100.0;   // F70, F149/F150/F152: the weapon's depth plus the trim, clamped
         w.kTrimSum[adsDepth.source] += adsDepth.trimCm / 100.0;
         w.kDepthSum[adsDepth.source] += adsDepth.askedCm / 100.0;
@@ -12625,7 +12686,10 @@ void adsSightTick(uint64_t now, double dt, const EyeSample& s) noexcept {
         g_adsSightGrowth = nofoot::AdsSightGrowth{};
         if (!engaged) ++w.idle;
     }
-    if (!g_adsSightLogWindow.open) w = AdsSightWin{};
+    if (!g_adsSightLogWindow.open) {
+        w = AdsSightWin{};
+        g_f186Win = nofoot::f186::Response{};
+    }
 }
 
 // ---- F68a / F67b: the ADS guard and the ADS instruments (frame thread, alignTick, after the sight lock) ------------------------------------------
@@ -15685,6 +15749,15 @@ void alignTick(uint64_t now) noexcept {   // F66b: dt from QPC inside (g_alignCl
         const double aimRad = static_cast<double>(g_f109RootPitch.load(std::memory_order_relaxed)) * nofoot::kAdsDeg;
         const nofoot::f172::Raise neckRaise = nofoot::f172::publish(neckRef.out.seatedY, g_ltaDrop.load(std::memory_order_relaxed), aimFresh, aimRad, onFoot && !camExternal);
         if (onFoot && !camExternal && neckRef.out.seatedY != 0.0) g_f172Turned.add(neckRaise);
+        // F186 (TEMPORARY A/B: experimental.native_on_foot_ads_preturn): the same turn for the ADS terms. Under mouse look the game applies the whole seated alignment in the aim-pitched frame, not the neck
+        // raise alone; the position lock, the sight lock and the weapon eye offset (which carries the ADS eye depth) went out unturned, so at a steep aim the sight lock's correction landed rotated by the pitch
+        // and its loop (the controller adds the error each frame) grew from 60 deg. They go out turned by -a in the (forward, up) plane (y += y cos a + z sin a - y, z += z cos a - y sin a - z), F172's
+        // conditions; the F70 shift (adsShiftPublish below), F93b's record of the lock's part and F119's sums stay the unturned vectors they were meant to be. weaponView.seated (the manual weapon view
+        // bias, a right-only vector) and F87h's height hold are not ADS terms and stay as they were.
+        const double adsTerms[3] = {g_adsLock[0] + g_adsSight.applied[0] + weaponEye.out.seated[0], g_adsLock[1] + g_adsSight.applied[1] + weaponEye.out.seated[1],
+                                    g_adsLock[2] + g_adsSight.applied[2] + weaponEye.out.seated[2]};
+        const nofoot::f186::Turned adsTurn = nofoot::f186::turnAds(adsTerms, g_adsPreturn.load(std::memory_order_relaxed), g_ltaDrop.load(std::memory_order_relaxed), aimFresh, aimRad, onFoot && !camExternal);
+        if (adsTurn.turned) ++g_f186Win.turnedFrames;
         for (size_t i = 0; i < 3; ++i) {
             // F62b: the ADS head-aim's position lock; F63: the ADS sight lock (both zero outside ADS)
             eye[i] = g_align.applied[i] + g_adsLock[i] + g_adsSight.applied[i] + weaponView.seated[i];
@@ -15692,6 +15765,8 @@ void alignTick(uint64_t now) noexcept {   // F66b: dt from QPC inside (g_alignCl
             eye[i] += weaponEye.out.seated[i];   // F88: w O, after the hold's term; the hold measured the head's posture without it (devOf), so it never sees it
             if (i == 1) eye[i] += neckRaise.y;   // F94a/F98c: the neck reference's raise (with and without an item); the P1 hook takes it back out by serial. F172: turned by the aim's pitch under mouse look (y = seatedY cos a)
             if (i == 2 && neckRaise.turned) eye[i] += neckRaise.z;   // F172: and its share along the aim's turn (z = -seatedY sin a); not touched when unturned
+            if (adsTurn.turned && i == 1) eye[i] += adsTurn.dy;   // F186: the ADS terms' turn (their y and z shares); not touched when unturned
+            if (adsTurn.turned && i == 2) eye[i] += adsTurn.dz;
             eye[i] += virtualNeck.seated[i];   // F137: the virtual neck (the view only: the P1 hook takes it back out by serial, the physical head offset cancels it)
             if (camExternal) eye[i] = 0.0;
             eye[i] = nofoot::f115::gate(onFoot, eye[i]);

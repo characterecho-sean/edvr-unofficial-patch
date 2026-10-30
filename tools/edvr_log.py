@@ -15000,6 +15000,75 @@ def _hj_f185_arm_bend(rows, ctx):
         return ("OK", text)
     return ("PARTIAL", text + "; the reach ratio after the clavicle is %.3f against the dial %.2f (more than %.2f off; the clavicle's full turn was not enough in %d of %d solves)" % (ra, dial, H185_TOL, capped, n))
 
+# F186: the ADS sight lock's response, the ADS terms' pre-turn (TEMPORARY A/B: experimental.native_on_foot_ads_preturn) and the lock's stability stop (formatResponse, formatStop in
+# src/d3d11/native_on_foot_f186.h). The window line is printed whenever the lock ran; each stop has a line of its own.
+H186_LABELS = ("native on foot ADS lock response (F186)", "native on foot ADS lock stop (F186)")
+H186_RESP_RE = (r"native on foot ADS lock response \(F186\) (?P<wl>\d+) s: pre-turn (?P<pre>on|off) \(the ADS terms turned in (?P<turned>\d+) of (?P<frames>\d+) lock frames\); lock stops (?P<stops>\d+); "
+                r"response of the measured error to the lock's change \(a correct loop reads gain 1\.00 angle \+0\.0 deg, the game's turn the aim pitch\): (?P<bins>.+)$")
+H186_BIN_RE = re.compile(r"aim (?P<bin>under 30|30-60|60-75|over 75) deg: (?P<n>\d+) pairs, gain (?P<gain>[\d.]+), angle (?P<angle>[+-]?\d+\.\d) deg, corr (?P<corr>[\d.]+), mean aim (?P<aim>[+-]?\d+\.\d) deg")
+H186_STOP_RE = (r"native on foot ADS lock stop \(F186\): the sight lock held over its limit for (?P<hold>[\d.]+) s \((?P<why>[^;]+); e after the lock (?P<perp>[\d.]+) cm, applied (?P<app>[\d.]+) cm of "
+                r"(?P<clamp>\d+)\) and is released over (?P<ramp>[\d.]+) s and acquired again from zero; aim pitch (?P<aim>[+-]?\d+\.\d) deg(?: \(not fresh\))?; pre-turn (?P<pre>on|off); stops this session (?P<total>\d+)")
+H186_BINS = ("under 30", "30-60", "60-75", "over 75")
+H186_MIN_PAIRS = 20        # fewer pairs than this in a bin are too few to judge
+H186_ANGLE_FLAG = 30.0     # a bin whose angle is further than this from a correct loop's 0
+
+
+def _hj_f186_response(rows, ctx):
+    """F186: the ADS sight lock's response to its own commands. The flight edvr_gfx_20261030_144707 (engaging ADS at the +85 aim clamp from the hip) had the applied lock's (up, forward) part rotate at
+    near-constant size, the signature of a loop whose response is turned: under mouse look the game applies the eye alignment in the aim-pitched frame (F172), the sight lock assumed it lands as
+    meant, and the loop's factor 1 - e^{ia} grows from a = 60 deg. Per aim-pitch bin the line fits the map from the change the lock commanded (the shift each eye was rendered with, frame to frame)
+    to the change of the error measured on it, at the serial lag: gain and angle (a correct loop reads gain 1 angle 0; the game's turn reads the aim pitch). With the ADS terms pre-turned (the key
+    on) the angle is expected near 0, and a bin of 20 or more pairs whose angle is over 30 deg from it is PARTIAL; with the key off the turn is the expected (informational). IDLE without lock
+    frames; OK with the figures. No line, no verdict."""
+    sec = rows.get("sec", [])
+    if not sec:
+        return None
+    frames, turned = sum(int(r["frames"]) for r in sec), sum(int(r["turned"]) for r in sec)
+    pre_on = sum(int(r["frames"]) for r in sec if r["pre"] == "on")
+    agg = {b: [0, 0.0, 0.0, 0.0, 0.0] for b in H186_BINS}   # pairs, sum n*gain, sum n*angle, sum n*corr, sum n*aim
+    for r in sec:
+        for m in H186_BIN_RE.finditer(r["bins"]):
+            n = int(m.group("n"))
+            a = agg[m.group("bin")]
+            a[0] += n
+            a[1] += n * float(m.group("gain"))
+            a[2] += n * float(m.group("angle"))
+            a[3] += n * float(m.group("corr"))
+            a[4] += n * float(m.group("aim"))
+    parts, flagged = [], []
+    for b in H186_BINS:
+        n, g, an, co, ai = agg[b]
+        if not n:
+            continue
+        parts.append("aim %s deg: %d pairs, gain %.2f, angle %+.1f, corr %.2f (mean aim %+.1f)" % (b, n, g / n, an / n, co / n, ai / n))
+        if n >= H186_MIN_PAIRS and abs(an / n) > H186_ANGLE_FLAG:
+            flagged.append("%s deg (%+.1f deg at %d pairs)" % (b, an / n, n))
+    text = "%d s: %d lock frames, the ADS terms turned in %d (pre-turn %s); response of the error to the lock's change: %s" % (
+        _hsecs(sec), frames, turned, "on" if pre_on == frames else ("off" if not pre_on else "on in part"), "; ".join(parts) if parts else "no pairs")
+    if not frames:
+        return ("IDLE", text + "; no lock frame")
+    if flagged and pre_on:
+        return ("PARTIAL", text + "; the response is turned %s from a correct loop in: %s%s" % (">30 deg", ", ".join(flagged), "" if pre_on == frames else " (part of the window ran with the pre-turn off)"))
+    if flagged:
+        return ("OK", text + "; with the pre-turn off the response is turned by the aim pitch (%s): the expected of an unturned lock" % ", ".join(flagged))
+    return ("OK", text)
+
+
+def _hj_f186_stops(rows, ctx):
+    """F186: the lock's stability stop. If the sight lock's e after the lock stays over 10 cm, or its applied vector sits at its clamp, for 0.3 s, the lock is released (ramped to zero over 0.15 s)
+    and acquired again from zero: a guard against a loop nobody has proven closed, which must be rare. OK with no stop in the lock frames the window lines report; PARTIAL with any, naming the
+    aim pitch and the pre-turn's state of each. IDLE without lock frames. No line, no verdict."""
+    sec, stop = rows.get("sec", []), rows.get("stop", [])
+    if not sec and not stop:
+        return None
+    frames = sum(int(r["frames"]) for r in sec)
+    stops = max(sum(int(r["stops"]) for r in sec), len(stop))
+    text = "%d s, %d lock frames, %d stop(s)" % (_hsecs(sec), frames, stops)
+    if not stops:
+        return ("IDLE", text + "; no lock frame") if not frames else ("OK", text)
+    named = "; ".join("aim %+.1f deg, pre-turn %s, %s (e %.1f cm, applied %.1f cm)" % (float(r["aim"]), r["pre"], r["why"], float(r["perp"]), float(r["app"])) for r in stop) or "no stop line in the window"
+    return ("PARTIAL", text + ": " + named)
+
 def _hj_f95c_head_shadow(rows, ctx):
     """F95c: the head kept in the shadows. Per second: the local avatar's visibility calls, how many ran the head as shadow-only, the (head instance, view) pairs
     after the call in the shadow views and in the main or other views, and the fade hook's keeps against its zeroes. A head hide that only zeroed, a swap the fade
@@ -16586,6 +16655,14 @@ HEALTH_RULES = (
         ("sec", H180B_RE),
         ("dial", H180B_DIAL_RE),
     ), _hj_f180b_spine),
+    _hrule("ADS lock response (F186)", ("F186",), H186_LABELS, (
+        ("sec", H186_RESP_RE),
+        ("stop", H186_STOP_RE),
+    ), _hj_f186_response),
+    _hrule("ADS lock stops (F186)", ("F186",), H186_LABELS, (
+        ("sec", H186_RESP_RE),
+        ("stop", H186_STOP_RE),
+    ), _hj_f186_stops),
     _hrule("ADS left arm bend (F185)", ("F185",), (H185_LABEL,), (
         ("sec", H185_RE),
     ), _hj_f185_arm_bend),
@@ -17740,6 +17817,7 @@ def self_test_health():
     f182_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f182.h")
     f183_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f183.h")
     f185_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f185.h")
+    f186_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f186.h")
     f172_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f172.h")
     f175_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f175.h")
     f176_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f176.h")
@@ -17781,6 +17859,7 @@ def self_test_health():
         f182src = read_text(f182_path)
         f183src = read_text(f183_path)
         f185src = read_text(f185_path)
+        f186src = read_text(f186_path)
         f172src = read_text(f172_path)
         f175src = read_text(f175_path)
         f176src = read_text(f176_path)
@@ -17958,6 +18037,15 @@ def self_test_health():
             fmts[key] = health_c_format(f181src, needle)
         if fmts[key] is None:
             raise AssertionError("native_on_foot_f181.h has no format holding %r: the --health rule that reads it is out of date" % needle)
+        return health_render(fmts[key], vals)
+
+    def R186(needle, *vals):
+        """F186's lines (formatResponse, formatStop in native_on_foot_f186.h), from their own format literals."""
+        key = "f186:" + needle
+        if key not in fmts:
+            fmts[key] = health_c_format(f186src, needle)
+        if fmts[key] is None:
+            raise AssertionError("native_on_foot_f186.h has no format holding %r: the --health rule that reads it is out of date" % needle)
         return health_render(fmts[key], vals)
 
     def R185(needle, *vals):
@@ -19325,6 +19413,37 @@ def self_test_health():
         check("F185 arm bend: no line at all is not present (no verdict row)", [f90_part()], 0, [("OK", F90S)],
               lacks=[row("OK", F185), row("IDLE", F185), row("PARTIAL", F185), row("UNPARSED", F185), row("NEVER APPLIED", F185)])
         check("F185 arm bend: a line that drifted from its pattern is unparsed", ["native on foot ADS left arm bend (F185, TEMPORARY) 10 s: something else"], 4, [("UNPARSED", F185)])
+        # ---- F186: the ADS sight lock's response, the pre-turn's state and the stops ----
+        F186R, F186S = "ADS lock response (F186)", "ADS lock stops (F186)"
+
+        def bins186(*bins):
+            """The bins part of F186's window line from the DLL's own format: each (name, pairs, gain, angle, corr, aim)."""
+            return "; ".join(R186("aim %s deg: %u pairs", "", name, n, gain, angle, corr, aim) for (name, n, gain, angle, corr, aim) in bins)
+
+        def resp186(wl=1, pre="on", turned=90, frames=90, stops=0, bins=None):
+            bins = bins if bins is not None else [("under 30", 60, 1.0, 0.4, 0.95, 5.0), ("over 75", 40, 0.98, -3.0, 0.9, 84.0)]
+            return R186("native on foot ADS lock response (F186) %u s: pre-turn %s (the ADS terms turned in", wl, pre, turned, frames, stops) + (bins186(*bins) if bins else "no pairs")
+
+        def stop186(why=3, perp=21.5, app=40.0, aim=81.9, pre="on", total=1):
+            return R186("native on foot ADS lock stop (F186): the sight lock held over its limit for", 0.3, "e over 10 cm and the lock at its clamp", perp, app, 40.0, 0.15, aim, "", pre, total)
+
+        check("F186 response: a pre-turned lock reads gain 1 and angle 0 in every bin: OK with the figures",
+              [resp186(), resp186()], 0, [("OK", F186R), ("OK", F186S)],
+              has=["2 s: 180 lock frames, the ADS terms turned in 180 (pre-turn on); response of the error to the lock's change: aim under 30 deg: 120 pairs, gain 1.00, angle +0.4, corr 0.95 (mean aim +5.0); "
+                   "aim over 75 deg: 80 pairs, gain 0.98, angle -3.0, corr 0.90 (mean aim +84.0)", "2 s, 180 lock frames, 0 stop(s)"], lacks=["UNPARSED", "NEVER", "PARTIAL"])
+        check("F186 response: the unturned lock at a steep aim reads the aim's turn: with the pre-turn on a bin 85 deg off is flagged",
+              [resp186(bins=[("over 75", 60, 1.0, 84.6, 0.9, 85.2)])], 0, [("PARTIAL", F186R), ("OK", F186S)], has=["over 75 deg (+84.6 deg at 60 pairs)"], lacks=["UNPARSED"])
+        check("F186 response: with the pre-turn off the turned response is the expected of an unturned lock: OK, said so",
+              [resp186(pre="off", turned=0, bins=[("over 75", 60, 1.0, 84.6, 0.9, 85.2)])], 0, [("OK", F186R)], has=["with the pre-turn off the response is turned by the aim pitch (over 75 deg (+84.6 deg at 60 pairs))"],
+              lacks=["UNPARSED", "PARTIAL"])
+        check("F186 response: a bin with under 20 pairs is too few to flag", [resp186(bins=[("over 75", 10, 1.0, 84.6, 0.5, 85.2)])], 0, [("OK", F186R)], lacks=["UNPARSED", "PARTIAL"])
+        check("F186 response: a window with no pairs still prints and reads no pairs", [resp186(bins=[])], 0, [("OK", F186R)], has=["response of the error to the lock's change: no pairs"], lacks=["UNPARSED"])
+        check("F186 stops: a stop names the aim pitch and the A/B state: partial", [resp186(stops=1, bins=[]), stop186()], 0, [("PARTIAL", F186S), ("OK", F186R)],
+              has=["1 stop(s): aim +81.9 deg, pre-turn on, e over 10 cm and the lock at its clamp (e 21.5 cm, applied 40.0 cm)"], lacks=["UNPARSED"])
+        check("F186: no line at all is not present (no verdict row)", [f90_part()], 0, [("OK", F90S)],
+              lacks=[row("OK", F186R), row("OK", F186S), row("PARTIAL", F186R), row("PARTIAL", F186S), row("UNPARSED", F186R), row("UNPARSED", F186S)])
+        check("F186: lines that drifted from their patterns are unparsed", ["native on foot ADS lock response (F186) 1 s: something else", "native on foot ADS lock stop (F186): something else"], 4,
+              [("UNPARSED", F186R), ("UNPARSED", F186S)])
         # ---- F183: the pin's stable horizontal heading ----
         F183 = "stable heading (F183)"
 
