@@ -54,7 +54,7 @@ game's own zoom as a magnified picture inside the scope's lens. The rest of the 
   their own line budget. No dump was taken. Next: one dump a weapon held still in ADS, then the scope glass's own path.
 - Keys: `fix.native_on_foot_ads_scope_zoom` (default on since A3 flew OK, the maintainer 2026-10-29), the temporary `experimental.native_on_foot_ads_scope_zoom_fov` (the reference FOV, 56.3 by default),
   `experimental.native_on_foot_ads_scope_zoom_full_detail` (on | off, live, default off, Experimental page; the maintainer's choice per scope, not temporary: on is the optic at full detail with an equal black
-  edge in both eyes' outer view, off the digital zoom) and the TEMPORARY `experimental.native_on_foot_ads_crisp_reticle` (C1a, on | off, live, default on; judged OK 2026-10-30, its removal with on as the behaviour put to the maintainer).
+  edge in both eyes' outer view, off the digital zoom). `experimental.native_on_foot_ads_crisp_reticle` (C1a) was RETIRED 2026-10-30 on the maintainer's word, its on now the behaviour (section 12, "the crisp reticle key retired").
 - Separate arc: a flat stutter on the scoped Executioner's ADS (2026-10-29), in its own doc,
   `docs\investigation-flat-scoped-ads-stutter-2026-10-29.md`, on its own branch.
 - **Key (after S0, on the maintainer's word):** `fix.native_on_foot_ads_scope_zoom` = on | off. Section 5.
@@ -1022,12 +1022,12 @@ question (the scope effects) is answered from one eye dump a weapon, not from a 
   hip, the edges, the key off, the door's counts and freshness, the lines, the withhold cycle's order and records, the wiring scans with controls), `sharp_weapons_test` (the family named by the crisp gate), `diff_draw_census.py`.
 
 **Log lines and fields (exact).**
-- Announce, once and at each change: `crisp reticle (C1): key on; the gunsight quad of every weapon the scope lens does not name is drawn into the sharp weapons layer for the whole press of the sights (from the raise to the end of
-  the lower, never at the hip), composited at the game's tonemap and out of the bloom input; one line a press of those follows` (`key off` likewise).
-- Press, for each press of the sights the key was on and the gate eligible in, after the S1 line: `crisp reticle (C1): press N item I scope S key on; eligible ticks E, armed ticks A; armed eye-frames L a R b, with no quad
+- Announce, once a session (since the key's retirement, 2026-10-30; before it, `key on; ` or `key off; ` followed the tag and it was written at each change): `crisp reticle (C1): the gunsight quad of every weapon the scope lens
+  does not name is drawn into the sharp weapons layer for the whole press of the sights (from the raise to the end of the lower, never at the hip), composited at the game's tonemap and out of the bloom input; one line a press of those follows`.
+- Press, for each press of the sights the gate was eligible in, after the S1 line (before the retirement, ` key on` followed the scope): `crisp reticle (C1): press N item I scope S; eligible ticks E, armed ticks A; armed eye-frames L a R b, with no quad
   taken L c R d; quad taken L e R f (depth path seeded g read-only h tests off i untested j); composited matched k plain l none m; stood down n`. `--health` (rule `crisp reticle (C1)`): PARTIAL when E is 10 or more and A is 0,
-  when A is 10 or more and e + f is 0 (armed and no quad taken), when quads were taken and `none` exceeds matched + plain, when quads were taken and the composite counted no armed eye-frame, or when every composite was the plain add; a shorter press is OK with its counts. The key off
-  writes the announce and no press line.
+  when A is 10 or more and e + f is 0 (armed and no quad taken), when quads were taken and `none` exceeds matched + plain, when quads were taken and the composite counted no armed eye-frame, or when every composite was the plain add; a shorter press is OK with its counts. The keyed
+  formats of the builds before the retirement read UNPARSED.
 - The dump: `decisions.json` gets, after `"requested"`, `"sight_withhold": {"armed_frame": F, "candidates": ["C5A5_n18_i1", ...]}` and, in each frame after `"raw_file"`, `"withheld": "<candidate or none>",
   "withheld_draws": [eye 0, eye 1], "withheld_frame": F, "alpha_file": "eye_<stamp>_CA<k>.bmp" or null`; `eye_<stamp>_withhold.json` carries the same under `frames`. Log: `sight census (C1b): a manual eye dump with the sights up: from
   frame F on, each of the dump's frames leaves one candidate draw of the sight's effects out of the scene (11 candidates, in order; ...)` and, when the run is written, `sight census (C1b): eye run <stamp>: the frames'
@@ -1065,3 +1065,8 @@ good on all counts". `--health` exits 3 on F91 and F85c NEVER APPLIED, both alre
   armed eye-frames an eye with no quad taken (others 0), in a press held through the weapon's holster and redraw (F93a: item none to pistol at 05:35:59 and 05:36:02), when no quad is drawn; press 15 (the
   Oppressor, a lens-owned sight at M 1.202) is eligible for 11 ticks and armed for 3, and its 581 quads an eye are the lens's marks (the press line takes the layer's counts whoever armed the mark).
 - C1b: no eye dump was taken, so the census has not run and the scope glass draws are not named. The withhold cycle stays in manual ADS dumps until they are.
+
+**2026-10-30, the crisp reticle key retired** (the maintainer: "Yes, retire it", asked with the key quoted). `experimental.native_on_foot_ads_crisp_reticle` (on | off, live, default on) is gone and its on is the behaviour:
+the reader, the atomic, the gate's key field (`crisp::GateIn::keyOn`), the startup note `native on foot ADS crisp reticle (C1, TEMPORARY)`, the ini entry and its Experimental page row are removed. The announce is written once a
+session and neither line names a key (formats above). Rigs: `scope_zoom_test` checks that the key is read nowhere (the source, `edvr.ini`, `crisp_reticle.h`), with controls that put the read, the ini entry and the field back;
+`sharp_weapons_test`'s key-off case became a sight the lens names; `edvr_log.py --self-test` reads the keyed formats as UNPARSED. A stale `native_on_foot_ads_crisp_reticle` line in a live `edvr.ini` is read by nothing.

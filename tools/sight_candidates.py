@@ -12,7 +12,7 @@ key was pressed in, is untouched: it is the run's baseline.
 
 THE SCENE BEFORE DLSS is the raw crop C00..C15: the picture the game hands the upscaler, 1400 px square about the render's centre, before any history, saved by the dump as 24-bit
 BMPs. (D00..D15 are the decision maps and DlssBeforeUi the model's output before the UI cleanup: neither is the scene. T and P are after DLSS. FinalCrisp_L00..L15 are the final picture,
-with the weapons layer composited in: the one to read for a draw the sharp weapons layer carries, such as the gunsight quad when the crisp reticle is on; --kind FinalCrisp.) When a
+with the weapons layer composited in: the one to read for a draw the sharp weapons layer carries, such as the gunsight quad of a weapon the scope lens does not name; --kind FinalCrisp.) When a
 withhold run is dumped the alpha plane of each raw crop is saved too (CA00..CA15, grey BMPs; a format with no alpha writes none, and the report says n/a).
 
 The method: the reference is the per-pixel median of all the frames (each candidate is left out of one or two of sixteen, so it holds every draw). A frame's footprint is the pixels

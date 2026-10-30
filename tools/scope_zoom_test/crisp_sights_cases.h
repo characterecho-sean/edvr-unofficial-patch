@@ -1,8 +1,8 @@
 // C1: the crisp sights (docs\design-vr-scope-magnification-2026-10-28.md, section 12), included by scope_zoom_test.cpp after its helpers (check, has, before, replaced, readFile).
 //
-// C1a, the crisp reticle: the arming gate (crisp_reticle.h) driven as a truth table (the hip never, the sights' edges, the lens' own sights, the key off), the door side of the arming
+// C1a, the crisp reticle: the arming gate (crisp_reticle.h) driven as a truth table (the hip never, the sights' edges, the lens' own sights), the door side of the arming
 // (scope_zoom.cpp: publish, freshness, the eye-frame counts, the press's reset), the press and announce lines, and the wiring: the family's arming asks the lens and then the crisp gate,
-// the frame thread publishes the gate every tick and down on every other path, the composite counts the eye-frames, the key is read by its literal name and ships on.
+// the frame thread publishes the gate every tick and down on every other path, the composite counts the eye-frames, and the retired key (experimental.native_on_foot_ads_crisp_reticle) is read nowhere.
 // C1b, the withhold cycle (sight_withhold.h): the candidates, the cycle's order, the draw path's decision (a vertex shader first, the pixel shader only for a candidate's), the records, and the
 // wiring that keeps it inside a manual dump: armed in one place, by the eye dump key, never by the airborne companion.
 #pragma once
@@ -25,13 +25,13 @@ inline size_t countOf(const std::string& text, const std::string& what) {
 
 inline void gateTests() {
     cr::GateIn g;
-    g.keyOn = g.onFoot = g.adsUp = true;
+    g.onFoot = g.adsUp = true;
     g.lensKeyOn = true;
     g.itemKnown = true;
     g.lensOwned = false;
     g.wFresh = true;
     g.w = 1.0;
-    check(cr::eligible(g) && cr::armed(g), "C1 gate: the key on, on foot, the sights up, a weapon the lens does not name, the weight 1: eligible and armed");
+    check(cr::eligible(g) && cr::armed(g), "C1 gate: on foot, the sights up, a weapon the lens does not name, the weight 1: eligible and armed");
     // the hip never: no press of the sights, whatever else is true
     cr::GateIn hip = g;
     hip.adsUp = false;
@@ -73,11 +73,10 @@ inline void gateTests() {
     check(!cr::eligible(unknown) && !cr::armed(unknown), "C1 gate: with the scope zoom on, an item whose entry is not known yet waits (an optical sight must not move to this path for a tick)");
     unknown.lensKeyOn = false;
     check(cr::armed(unknown), "C1 gate: with the scope zoom off the entry does not matter");
-    // the key off: nothing arms or is eligible whatever the other six facts are
-    bool off = true, never = true, exactlyOn = true;
+    // every combination of the seven facts
+    bool never = true, exactlyOn = true;
     for (unsigned bits = 0; bits < 128; ++bits) {
         cr::GateIn t;
-        t.keyOn = false;
         t.onFoot = bits & 1u;
         t.adsUp = bits & 2u;
         t.lensKeyOn = bits & 4u;
@@ -85,8 +84,6 @@ inline void gateTests() {
         t.lensOwned = bits & 16u;
         t.wFresh = bits & 32u;
         t.w = (bits & 64u) ? 1.0 : 0.0;
-        off = off && !cr::eligible(t) && !cr::armed(t);
-        t.keyOn = true;
         // the lens and this gate never both arm the quad: a sight the lens owns is never armed here
         never = never && !(t.lensKeyOn && t.lensOwned && cr::armed(t));
         // and the gate is exactly: on foot, the sights up, and the lens not the owner (or no lens)
@@ -94,7 +91,6 @@ inline void gateTests() {
         const bool atHip = t.wFresh && !(t.w > 0.0);
         exactlyOn = exactlyOn && cr::eligible(t) == (t.onFoot && t.adsUp && lensServes) && cr::armed(t) == (t.onFoot && t.adsUp && lensServes && !atHip);
     }
-    check(off, "C1 gate: with the key off the gate is false for every combination of the other facts: with it off nothing new runs");
     check(never, "C1 gate: no combination arms the quad here for a sight the scope lens owns");
     check(exactlyOn, "C1 gate: over all 128 combinations the gate is exactly on foot, the sights up, the lens not the owner, and not at the hip");
 }
@@ -123,7 +119,7 @@ inline void lineTests() {
     p.standDowns = 0;
     const int n = cr::formatPress(line, sizeof(line), p);
     check(n > 0 && static_cast<size_t>(n) == std::strlen(line) &&
-              std::strcmp(line, "crisp reticle (C1): press 7 item $wpn_m_assaultrifle_kinetic_fauto_name; scope no key on; eligible ticks 300, armed ticks 280; armed eye-frames L 270 R 271, "
+              std::strcmp(line, "crisp reticle (C1): press 7 item $wpn_m_assaultrifle_kinetic_fauto_name; scope no; eligible ticks 300, armed ticks 280; armed eye-frames L 270 R 271, "
                                 "with no quad taken L 10 R 11; quad taken L 260 R 261 (depth path seeded 521 read-only 0 tests off 0 untested 0); composited matched 521 plain 0 none 0; stood down 0") == 0,
           "C1 line: the press line's exact text");
     // the longest it can be: a long item name and ten digit counts, in a buffer the log's 1167 bytes also holds
@@ -134,10 +130,12 @@ inline void lineTests() {
     const int wn = cr::formatPress(line, sizeof(line), w);
     check(wn > 0 && static_cast<size_t>(wn) < sizeof(line) - 1 && wn <= 1167, "C1 line: the worst case (ten digit counts, a long item) fits its buffer and the log's 1167 bytes");
     char ann[512];
-    const int an = cr::formatAnnounce(ann, sizeof(ann), true);
-    check(an > 0 && static_cast<size_t>(an) < sizeof(ann) - 1 && std::strncmp(ann, "crisp reticle (C1): key on; ", 28) == 0, "C1 line: the announce says the key on, with room to spare in its buffer");
-    cr::formatAnnounce(ann, sizeof(ann), false);
-    check(std::strncmp(ann, "crisp reticle (C1): key off; ", 29) == 0, "C1 line: and the key off");
+    const int an = cr::formatAnnounce(ann, sizeof(ann));
+    check(an > 0 && static_cast<size_t>(an) < sizeof(ann) - 1 && static_cast<size_t>(an) == std::strlen(ann) &&
+              std::strcmp(ann, "crisp reticle (C1): the gunsight quad of every weapon the scope lens does not name is drawn into the sharp weapons layer for the whole press of the sights "
+                               "(from the raise to the end of the lower, never at the hip), composited at the game's tonemap and out of the bloom input; one line a press of those follows") == 0,
+          "C1 line: the announce's exact text, with room to spare in its buffer");
+    check(std::strstr(ann, "key") == nullptr && std::strstr(line, " key ") == nullptr, "C1 line: neither the announce nor the press line names a key (the key is retired)");
 }
 
 // The door side of the arming (scope_zoom.cpp), the production functions.
@@ -240,35 +238,34 @@ inline void wiringTests() {
     auto wiredArming = [&](const std::string& vs, const std::string& ly, const std::string& nat) {
         return has(vs, "f.vs, kind, count, instances, [] { return scopeZoomMarkArmed() || scopeZoomCrispArmed(); },") &&
                before(ly, "g_seedCensus.door(eye, sequence);", "if (scopeZoomCrispArmed()) scopeZoomNoteCrispFrame(eye, e.wMarks != 0 && e.wSeq == sequence);") &&
-               has(nat, "std::atomic<bool> g_crispReticleKey{true};") &&
-               has(nat, "cfg.getString(\"experimental.native_on_foot_ads_crisp_reticle\", \"on\") == \"on\"") &&
                has(nat, "scopeZoomCrispPublish(armedNow);") && has(nat, "cg.adsUp = true;   // past the check above") && has(nat, "cg.lensKeyOn = key;") &&
                has(nat, "cg.lensOwned = gi.optical && gi.m >= sz::kLensMinM;") && has(nat, "cg.itemKnown = s.item.coherent && s.item.scope != loadout::kScopeUnknown;") &&
                has(nat, "scopeZoomCrispPublish(false);   // C1a: no press of the sights, no arming") && has(nat, "        scopeZoomCrispPublish(false);\n        nativeOnFootPublishAdsUp(false);") &&
-               has(nat, "if (!s.crispAnnounced || crispKey != s.crispAnnouncedKey) announceCrisp(s, crispKey);") && has(nat, "if (s.crispSeen) {") &&
+               has(nat, "if (!s.crispAnnounced) announceCrisp(s);") && has(nat, "if (s.crispSeen) {") &&
                has(nat, "edvr::crisp::formatPress(crispLine, sizeof(crispLine), cl);") && has(nat, "        if (eligible) {\n            s.crispSeen = true;") && has(nat, "        if (armedNow) ++s.crispArmedTicks;") &&
                has(nat, "scopeZoomCrispTake(&cl.door);") && has(nat, "cl.taken[0] = pl.d.markRedirected[0];");
     };
-    check(wiredArming(vscreen, layer, native), "C1a wiring: the family asks the lens and then the crisp gate; the tick publishes the gate each tick and down on every other path; the composite counts the eye-frames; the key ships on");
+    check(wiredArming(vscreen, layer, native), "C1a wiring: the family asks the lens and then the crisp gate; the tick publishes the gate each tick and down on every other path; the composite counts the eye-frames");
     check(!wiredArming(replaced(vscreen, "[] { return scopeZoomMarkArmed() || scopeZoomCrispArmed(); },", "[] { return scopeZoomMarkArmed(); },"), layer, native), "control: a family that never asks the crisp gate is not the wiring");
     check(!wiredArming(replaced(vscreen, "scopeZoomMarkArmed() || scopeZoomCrispArmed()", "scopeZoomCrispArmed() && scopeZoomMarkArmed()"), layer, native), "control: both armings required is not the wiring");
     check(!wiredArming(vscreen, replaced(layer, "if (scopeZoomCrispArmed()) scopeZoomNoteCrispFrame(", "if (false) scopeZoomNoteCrispFrame("), native), "control: a composite that counts no eye-frame is not the wiring");
-    check(!wiredArming(vscreen, layer, replaced(native, "cfg.getString(\"experimental.native_on_foot_ads_crisp_reticle\", \"on\") == \"on\"", "cfg.getString(\"experimental.native_on_foot_ads_crisp_reticle\", \"off\") == \"on\"")),
-          "control: the reader's fallback off is not the shipped default");
-    check(!wiredArming(vscreen, layer, replaced(native, "std::atomic<bool> g_crispReticleKey{true};", "std::atomic<bool> g_crispReticleKey{false};")), "control: the atomic's start value off is not the shipped default");
+    check(!wiredArming(vscreen, layer, replaced(native, "if (!s.crispAnnounced) announceCrisp(s);", "")), "control: a frame thread that never announces the crisp reticle is not the wiring");
     check(!wiredArming(vscreen, layer, replaced(native, "cg.lensOwned = gi.optical && gi.m >= sz::kLensMinM;", "cg.lensOwned = false;")), "control: a gate that never leaves the lens its own sights is not the wiring");
     check(!wiredArming(vscreen, layer, replaced(native, "scopeZoomCrispPublish(false);   // C1a: no press of the sights, no arming", "")), "control: an arming not dropped when the press ends is not the wiring");
     check(!wiredArming(vscreen, layer, replaced(native, "        scopeZoomCrispPublish(false);\n        nativeOnFootPublishAdsUp(false);", "        nativeOnFootPublishAdsUp(false);")),
           "control: an arming left up when native on foot is not armed or the flat profile runs is not the wiring");
     check(!wiredArming(vscreen, layer, replaced(native, "        if (armedNow) ++s.crispArmedTicks;", "        ++s.crispArmedTicks;")), "control: armed ticks counted when the gate was not armed is not the wiring");
     check(!wiredArming(vscreen, layer, replaced(native, "edvr::crisp::formatPress(crispLine, sizeof(crispLine), cl);", "")), "control: a press that writes no crisp line is not the wiring");
-    // the shipped file
-    {
-        const size_t full = ini.find("native_on_foot_ads_scope_zoom_full_detail = off"), key = ini.find("native_on_foot_ads_crisp_reticle = on");
-        check(full != std::string::npos && key != std::string::npos && full < key && before(ini, "[experimental]", "native_on_foot_ads_crisp_reticle = on") &&
-                  has(ini, "# ui: ADS: crisp reticle (experimental) | choices on, off | recommended on | live") && has(ini, "# TEMPORARY (C1a): ADS: crisp reticle:"),
-              "C1a wiring: the ini states the key on, in the experimental section after the full-detail key, marked TEMPORARY, with its row");
-        check(!has(ini, "native_on_foot_ads_crisp_reticle = off"), "C1a wiring: the key is not off in the shipped file");
+    {   // C1a: on is the behaviour. No key (experimental.native_on_foot_ads_crisp_reticle: its reader, atomic, gate field and ini entry are gone, and so is the startup note that named it)
+        const std::string gateHeader = readFile("src/d3d11/crisp_reticle.h");
+        auto noKey = [&](const std::string& nat, const std::string& ini2, const std::string& hdr) {
+            return !has(nat, "native_on_foot_ads_crisp_reticle") && !has(ini2, "native_on_foot_ads_crisp_reticle") && !has(hdr, "native_on_foot_ads_crisp_reticle") && !has(nat, "g_crispReticleKey") &&
+                   !has(nat, "crispKey") && !has(nat, "crispAnnouncedKey") && !has(nat, "cg.keyOn") && !has(hdr, "keyOn") && !has(nat, "ADS crisp reticle (C1, TEMPORARY)") && has(hdr, "inline bool eligible(");
+        };
+        check(noKey(native, ini, gateHeader), "C1a: the crisp reticle key is gone: no reader, atomic, gate field, ini entry or startup note, and the gate is the one function");
+        check(!noKey(native + "\nconst bool crispOn = cfg.getString(\"experimental.native_on_foot_ads_crisp_reticle\", \"on\") == \"on\";", ini, gateHeader), "control: a source that reads the crisp reticle key again is not the wiring");
+        check(!noKey(native, ini + "\nnative_on_foot_ads_crisp_reticle = on\n", gateHeader), "control: an ini that carries the crisp reticle key again is not the wiring");
+        check(!noKey(native, ini, gateHeader + "\n    bool keyOn = false;"), "control: a gate that carries a key field again is not the wiring");
     }
 
     // C1b: the draw path, the census order, the dump

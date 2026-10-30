@@ -15178,13 +15178,12 @@ def _hj_b3(rows, ctx):
 
 
 # ---- C1a: the crisp reticle (src\d3d11\crisp_reticle.h formatAnnounce and formatPress; src\d3d11\native_on_foot.cpp s1::tick and endPress; docs\design-vr-scope-magnification-2026-10-28.md section 12) ----
-# Two lines, both tagged (C1): the announce (once, and at every change of experimental.native_on_foot_ads_crisp_reticle) and one press line for each press of the sights the key was on and the
-# gate eligible in (the weapon is not one the scope lens names). The gate arms the gunsight quad's take into the sharp weapons layer for the whole press (from the raise to the end of the
-# lower); the press line carries the frame thread's ticks (eligible, armed), the weapons composite's eye-frames with the arming up and those with no quad taken, the quad draws taken per eye
-# and by which depth path, and how the layer's content was composited. A key off writes the announce and no press line.
+# Two lines, both tagged (C1): the announce (once a session) and one press line for each press of the sights the gate was eligible in (the weapon is not one the scope lens names). The gate
+# arms the gunsight quad's take into the sharp weapons layer for the whole press (from the raise to the end of the lower); the press line carries the frame thread's ticks (eligible, armed),
+# the weapons composite's eye-frames with the arming up and those with no quad taken, the quad draws taken per eye and by which depth path, and how the layer's content was composited.
 H_C1 = "crisp reticle (C1)"
-H_C1_ANNOUNCE_RE = r"crisp reticle \(C1\): key (?P<key>on|off); .*$"
-H_C1_PRESS_RE = (r"crisp reticle \(C1\): press (?P<n>\d+) item (?P<item>\S+) scope (?P<scope>yes|no|unknown) key on; eligible ticks (?P<elig>\d+), armed ticks (?P<armt>\d+); "
+H_C1_ANNOUNCE_RE = r"crisp reticle \(C1\): the gunsight quad of every weapon .*$"
+H_C1_PRESS_RE = (r"crisp reticle \(C1\): press (?P<n>\d+) item (?P<item>\S+) scope (?P<scope>yes|no|unknown); eligible ticks (?P<elig>\d+), armed ticks (?P<armt>\d+); "
                  r"armed eye-frames L (?P<al>\d+) R (?P<ar>\d+), with no quad taken L (?P<nl>\d+) R (?P<nr>\d+); "
                  r"quad taken L (?P<tl>\d+) R (?P<tr>\d+) \(depth path seeded (?P<ps>\d+) read-only (?P<pr>\d+) tests off (?P<pt>\d+) untested (?P<pu>\d+)\); "
                  r"composited matched (?P<cm>\d+) plain (?P<cp>\d+) none (?P<cn>\d+); stood down (?P<sd>\d+)$")
@@ -15217,15 +15216,15 @@ def _c1_press_verdict(p):
 
 
 def _hj_c1(rows, ctx):
-    """C1a, the crisp reticle: the announce and one press line a press of the sights the key was on in and the gate eligible in. Each press has a verdict (_c1_press_verdict); the rule is
-    PARTIAL when any press is, OK otherwise. IDLE with the announce alone (the key off, or no press of a weapon the scope lens does not name). The announce is not needed (a --since window
-    can cut it); with neither line the rule is not present."""
+    """C1a, the crisp reticle: the announce and one press line a press of the sights the gate was eligible in. Each press has a verdict (_c1_press_verdict); the rule is PARTIAL when any
+    press is, OK otherwise. IDLE with the announce alone (no press of a weapon the scope lens does not name). The announce is not needed (a --since window can cut it); with neither line
+    the rule is not present."""
     announce, press = (rows.get(k, []) for k in ("announce", "press"))
     if not announce and not press:
         return None
-    head = "key %s" % announce[-1]["key"] if announce else "no announce line in this window"
+    head = "announced" if announce else "no announce line in this window"
     if not press:
-        return ("IDLE", "%s; no press line in this window (the key off, or no press of the sights of a weapon the scope lens does not name)" % head)
+        return ("IDLE", "%s; no press line in this window (no press of the sights of a weapon the scope lens does not name)" % head)
     verdicts = [(p,) + _c1_press_verdict(p) for p in press]
     taken = sum(int(p["tl"]) + int(p["tr"]) for p in press)
     base = "%s; %d press line(s), %d quad draw(s) taken in all" % (head, len(press), taken)
@@ -21588,8 +21587,8 @@ def self_test_health():
         # ---- the crisp reticle (C1a), rendered from crisp_reticle.h's own format literals ----
         C1R = H_C1
 
-        def c1_announce(key="on"):
-            return RC1("crisp reticle (C1): key %s; the gunsight", key)
+        def c1_announce():
+            return RC1("crisp reticle (C1): the gunsight")
 
         def c1_press(n=1, item="$wpn_m_assaultrifle_kinetic_fauto_name;", scope="no", elig=300, armt=280, al=270, ar=270, nl=10, nr=10, tl=260, tr=260, seeded=520, ro=0, off=0,
                      untested=0, matched=520, plain=0, none=0, sd=0):
@@ -21597,7 +21596,7 @@ def self_test_health():
             return RC1("crisp reticle (C1): press %u item %s scope %s", n, item, scope, elig, armt, al, ar, nl, nr, tl, tr, seeded, ro, off, untested, matched, plain, none, sd)
 
         check("C1: a press with the quad taken in both eyes and composited by the tonemap difference is OK", [c1_announce(), c1_press()], 0, [("OK", C1R)],
-              has=["key on; 1 press line(s), 520 quad draw(s) taken in all", "eligible ticks 300, armed ticks 280", "quad taken L 260 R 260", "composited matched 520 plain 0 none 0"], lacks=["UNPARSED"])
+              has=["announced; 1 press line(s), 520 quad draw(s) taken in all", "eligible ticks 300, armed ticks 280", "quad taken L 260 R 260", "composited matched 520 plain 0 none 0"], lacks=["UNPARSED"])
         check("C1: armed on 120 ticks and no quad taken in either eye is PARTIAL", [c1_announce(), c1_press(armt=120, tl=0, tr=0, seeded=0, matched=0, nl=100, nr=100)], 0, [("PARTIAL", C1R)],
               has=["press 1 PARTIAL: armed on 120 ticks and no gunsight quad was taken out of the scene (taken L 0 R 0; armed eye-frames L 270 R 270, with no quad L 100 R 100; stood down 0)"], lacks=["UNPARSED"])
         check("C1: a quad taken in one eye only is not a failure (the other eye's frames are counted beside it)", [c1_announce(), c1_press(tl=0, nl=270)], 0, [("OK", C1R)])
@@ -21614,12 +21613,14 @@ def self_test_health():
         check("C1: the tests-off depth path is a count in the line and no failure", [c1_announce(), c1_press(seeded=0, off=520)], 0, [("OK", C1R)], has=["tests off 520"])
         check("C1: a bad press beside a good one is PARTIAL and names the last good press", [c1_announce(), c1_press(n=1), c1_press(n=2, armt=90, tl=0, tr=0, seeded=0, matched=0)], 0, [("PARTIAL", C1R)],
               has=["press 2 PARTIAL", "last press 1:"])
-        check("C1: the announce alone with the key off is IDLE", [c1_announce("off")], 0, [("IDLE", C1R)], has=["key off; no press line in this window"])
+        check("C1: the announce alone (no press of a weapon the lens does not name) is IDLE", [c1_announce()], 0, [("IDLE", C1R)], has=["announced; no press line in this window"])
         check("C1: a press line with no announce (a --since window) is judged", [c1_press()], 0, [("OK", C1R)], has=["no announce line in this window"])
         check("C1: a press line that drifted from its pattern is unparsed", ["crisp reticle (C1): press x item y"], 4, [("UNPARSED", C1R)])
         check("C1: a press line without the depth path is unparsed", [c1_press().replace(" (depth path seeded 520 read-only 0 tests off 0 untested 0)", "")], 4, [("UNPARSED", C1R)])
-        check("C1: an announce that drifted from its pattern is unparsed", ["crisp reticle (C1): key maybe; the gunsight"], 4, [("UNPARSED", C1R)])
-        check("C1: no C1 line leaves the rule not present (the key off writes no press line; a build without it, or a window outside it)", [inst141(), s0_watch()], 0, [], has=["not present", C1R],
+        check("C1: an announce that drifted from its pattern is unparsed", ["crisp reticle (C1): the gunsight quad drifted"], 4, [("UNPARSED", C1R)])
+        check("C1: the keyed announce and press formats of the build that had the key are unparsed (a log from that build is not this build's)",
+              ["crisp reticle (C1): key on; the gunsight quad of every weapon the scope lens does not name", c1_press().replace("; eligible ticks", " key on; eligible ticks")], 4, [("UNPARSED", C1R)])
+        check("C1: no C1 line leaves the rule not present (a build without it, or a window outside it)", [inst141(), s0_watch()], 0, [], has=["not present", C1R],
               lacks=["UNPARSED"])
         check("C1: its tag is listed with --health-all, after the B tags, and B3's rule is untouched by it", [b3_announce(), b3_press(), c1_announce(), c1_press()], 0, [("OK", B3R), ("OK", C1R)],
               has=["every tag (* has a rule above):", "B3", "C1"], extra=["--health-all"])

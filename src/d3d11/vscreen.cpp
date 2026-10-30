@@ -4108,7 +4108,7 @@ __declspec(noinline) UiLayerFamily uiLayerFamilyOf(State* s, char kind, UINT cou
         f.ps = bindingShaderHash(BindSlot::Ps);
     // A2: the scope's gunsight mark. Its pair is also the weapon and tool material, so the key is the pair drawing 6 indices in 1 instance with a learned interface surface (the readout
     // atlas) sampled, and only while the scope lens is armed for the frame, or (C1a, crisp_reticle.h) while the frame thread's gate has the sights of a weapon the lens does not name up. The
-    // cheap tests come first: the hash of an ordinary draw is not read (uiScopeMarkFacts, the rule the rig drives). With the C1a key off the second arming is never published: one more load.
+    // cheap tests come first: the hash of an ordinary draw is not read (uiScopeMarkFacts, the rule the rig drives). Outside a press of the sights the second arming is down: one more load.
     else if (f.targetKind == 1 && f.vs == kUiVsScopeMark) {
         f.scopeMark = uiScopeMarkFacts(
             f.vs, kind, count, instances, [] { return scopeZoomMarkArmed() || scopeZoomCrispArmed(); }, [] { return bindingShaderHash(BindSlot::Ps); }, [] { return uiDepthSampledSurfaceSlot() >= 0; }, &f.ps);

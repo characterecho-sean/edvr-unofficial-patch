@@ -17,7 +17,6 @@ namespace crisp {
 
 // What the frame thread knows on a tick of a press of the sights (native_on_foot.cpp s1::tick).
 struct GateIn {
-    bool keyOn = false;       // experimental.native_on_foot_ads_crisp_reticle
     bool onFoot = false;      // native on foot is active
     bool adsUp = false;       // a press of the sights is open: the game's ADS flag up, through the release (the frame thread's g_adsState is not idle)
     bool lensKeyOn = false;   // fix.native_on_foot_ads_scope_zoom
@@ -27,10 +26,10 @@ struct GateIn {
     double w = 0.0;           // ... and is this (0 at the hip, 1 with the sights fully up)
 };
 
-// The press is one this gate may serve: the key on, native on foot, the sights up, and the lens not the owner of the quad. With the scope zoom key on, an item whose entry is not
+// The press is one this gate may serve: native on foot, the sights up, and the lens not the owner of the quad. With the scope zoom key on, an item whose entry is not
 // known yet waits (an optical sight must not move to this path for the first ticks of a press); with it off there is no lens and every sight is served.
 inline bool eligible(const GateIn& g) noexcept {
-    if (!g.keyOn || !g.onFoot || !g.adsUp) return false;
+    if (!g.onFoot || !g.adsUp) return false;
     if (g.lensKeyOn && (!g.itemKnown || g.lensOwned)) return false;
     return true;
 }
@@ -64,17 +63,16 @@ struct PressLine {
 };
 constexpr size_t kPressLineBytes = 640;
 
-// The tagged lines, built here so the --health rule's fixtures read their format literals (tools\edvr_log.py). The press line is written for every press of the sights the gate was
-// eligible in with the key on: armed ticks 0 beside eligible ticks above 0 says the gate never armed, taken 0 beside armed ticks says the quad never reached the layer.
-inline int formatAnnounce(char* buf, size_t n, bool keyOn) {
+// The tagged lines, built here so the --health rule's fixtures read their format literals (tools\edvr_log.py). The announce is written once a session. The press line is written for every
+// press of the sights the gate was eligible in: armed ticks 0 beside eligible ticks above 0 says the gate never armed, taken 0 beside armed ticks says the quad never reached the layer.
+inline int formatAnnounce(char* buf, size_t n) {
     return std::snprintf(buf, n,
-                         "crisp reticle (C1): key %s; the gunsight quad of every weapon the scope lens does not name is drawn into the sharp weapons layer for the whole press of the sights "
-                         "(from the raise to the end of the lower, never at the hip), composited at the game's tonemap and out of the bloom input; one line a press of those follows",
-                         keyOn ? "on" : "off");
+                         "crisp reticle (C1): the gunsight quad of every weapon the scope lens does not name is drawn into the sharp weapons layer for the whole press of the sights "
+                         "(from the raise to the end of the lower, never at the hip), composited at the game's tonemap and out of the bloom input; one line a press of those follows");
 }
 inline int formatPress(char* buf, size_t n, const PressLine& p) {
     return std::snprintf(buf, n,
-                         "crisp reticle (C1): press %u item %s scope %s key on; eligible ticks %u, armed ticks %u; armed eye-frames L %u R %u, with no quad taken L %u R %u; "
+                         "crisp reticle (C1): press %u item %s scope %s; eligible ticks %u, armed ticks %u; armed eye-frames L %u R %u, with no quad taken L %u R %u; "
                          "quad taken L %u R %u (depth path seeded %u read-only %u tests off %u untested %u); composited matched %u plain %u none %u; stood down %u",
                          p.press, p.item, p.scope, p.eligibleTicks, p.armedTicks, p.door.armed[0], p.door.armed[1], p.door.noQuad[0], p.door.noQuad[1], p.taken[0], p.taken[1],
                          p.pathSeeded, p.pathReadOnly, p.pathTestsOff, p.pathUntested, p.matched, p.plain, p.none, p.standDowns);

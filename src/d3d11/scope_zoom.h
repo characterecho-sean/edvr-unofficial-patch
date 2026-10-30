@@ -69,7 +69,7 @@ bool scopeZoomWanted();
 bool scopeZoomMarkArmed();
 // C1a (crisp_reticle.h): the frame thread publishes each tick whether the gunsight quad is to be taken out of the scene for the sights that are up (a weapon the scope lens does not
 // name); the draw path asks scopeZoomCrispArmed for the quad's one pair, beside scopeZoomMarkArmed, and gets true while the last tick said so and is no older than the lens takes a c.
-// Published false (and never true) with the key off, so with it off the only cost is the relaxed load the draw path makes after the lens's own answer was no.
+// Published false whenever no press of the sights is open, so outside a press the only cost is the relaxed load the draw path makes after the lens's own answer was no.
 void scopeZoomCrispPublish(bool armed);
 bool scopeZoomCrispArmed();
 // An eye-frame has reached the weapons composite (uiLayerComposite) while the crisp arming was up: counted for the press line, with whether a quad draw had been taken into the eye's

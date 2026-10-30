@@ -181,7 +181,7 @@ static void scopeMarkTests() {
     // same weapons layer, composited the same way. vscreen.cpp asks scopeZoomMarkArmed() || scopeZoomCrispArmed() (scope_zoom_test scans it); here the rule behind the second answer drives the facts.
     {
         edvr::crisp::GateIn cg;
-        cg.keyOn = cg.onFoot = cg.adsUp = true;   // the scope zoom off: no lens, every sight served
+        cg.onFoot = cg.adsUp = true;   // the scope zoom off: no lens, every sight served
         cg.wFresh = true;
         cg.w = 1.0;
         Probe viaCrisp;
@@ -195,10 +195,10 @@ static void scopeMarkTests() {
         hip.armed = edvr::crisp::armed(cg);
         check(hip.family() != UiLayerFamily::kScopeMark && hip.psCalls == 0, "C1a gate: at the hip the gate is down: the family is not named and the pixel shader's hash is not read");
         cg.adsUp = true;
-        cg.keyOn = false;
-        Probe off;
-        off.armed = edvr::crisp::armed(cg);
-        check(off.family() != UiLayerFamily::kScopeMark && off.psCalls == 0, "C1a gate: with the key off the gate is down and the family is named for the lens' sights alone, as before C1");
+        cg.lensKeyOn = cg.itemKnown = cg.lensOwned = true;   // the scope lens names this sight: its quad is the lens' to arm
+        Probe lens;
+        lens.armed = edvr::crisp::armed(cg);
+        check(lens.family() != UiLayerFamily::kScopeMark && lens.psCalls == 0, "C1a gate: a sight the lens names leaves the crisp gate down and the family is named for the lens' arming alone, as before C1");
     }
 
     // THE ARMING OF THE FIRST-SEEN LINE: not-armed is structural for the scope mark alone (the lens-armed family that was never taken because its eye's layer was not armed is the one
