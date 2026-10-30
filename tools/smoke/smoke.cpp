@@ -20,6 +20,7 @@
 #include <d3d11.h>
 
 #include <cstdio>
+#include <string>
 #include <vector>
 
 #include "../../src/common/temporal_math.h"
@@ -242,6 +243,50 @@ bool presentIsHookedBy(IDXGISwapChain* swapchain, HMODULE mod) {
     return owner == mod;
 }
 
+// Whether one of this process's own arguments already is `sw`.
+bool hasSwitch(int argc, char** argv, const char* sw) {
+    for (int i = 1; i < argc; ++i) if (strcmp(argv[i], sw) == 0) return true;
+    return false;
+}
+
+// Re-run this very exe, with every existing argument kept and `sw` appended,
+// and return the child's exit code.
+//
+// The proxy decides its profile from the game's Settings.xml (flat vs VR) the
+// same way the game does, so this test's answer depends on whichever profile
+// this machine's game is set to. The fixes the default mode and --warp test --
+// the black void, the eye-sized clear, the scene counter -- are VR fixes: in
+// the flat profile the void fix does not act (a cleared eye-sized target stays
+// Elite's grey) and the draw thunk takes the flat branch and returns before the
+// counter is even reached, so both read as "the fix is broken" when it is only
+// that the game is set to flat. Forcing the VR profile the way the game's own
+// /vr switch does (the proxy reads it from this process's command line) makes
+// the test verify what it is written to verify on any machine, and a re-exec
+// here cannot loop: the child sees /vr among its arguments and skips this.
+int reexecWith(int argc, char** argv, const char* sw) {
+    char exe[MAX_PATH];
+    if (!GetModuleFileNameA(nullptr, exe, MAX_PATH)) return 1;
+    std::string cmd;
+    cmd.reserve(MAX_PATH);
+    cmd += '"'; cmd += exe; cmd += '"';
+    for (int i = 1; i < argc; ++i) {
+        cmd += ' ';
+        cmd += '"'; cmd += argv[i]; cmd += '"';
+    }
+    cmd += ' '; cmd += sw;
+    STARTUPINFOA si{}; si.cb = sizeof(si);
+    PROCESS_INFORMATION pi{};
+    std::vector<char> cmdBuf(cmd.begin(), cmd.end()); cmdBuf.push_back('\0');
+    if (!CreateProcessA(nullptr, cmdBuf.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi))
+        return 1;
+    WaitForSingleObject(pi.hProcess, INFINITE);
+    DWORD code = 1;
+    GetExitCodeProcess(pi.hProcess, &code);
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+    return static_cast<int>(code);
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -252,6 +297,16 @@ int main(int argc, char** argv) {
     const bool offCheck = argc > 2 && strcmp(argv[2], "--fixes-off-device") == 0;
     const bool warpCheck = offCheck || (argc > 2 && strcmp(argv[2], "--warp") == 0);
     const bool disabledCheck = recoveryCheck || offCheck;
+    // The default and --warp modes test VR fixes, but the proxy takes its
+    // profile from the game's Settings.xml, so on a flat-configured machine
+    // they would be testing the flat profile. Force the VR profile with the
+    // same /vr switch the game uses, re-executing once so the proxy (a fresh
+    // process) sees it on its command line. This must run BEFORE the sentinel
+    // is cleared below: the child inherits the run's state and must not wipe
+    // it. The three focused modes are profile-agnostic and never re-exec.
+    if (!disabledCheck && !foreignCheck && !hasSwitch(argc, argv, "/vr")) {
+        return reexecWith(argc, argv, "/vr");
+    }
     printf("edvr smoke\nproxy: %s\n\n", proxy);
 
     char full[MAX_PATH];
