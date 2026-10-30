@@ -178,7 +178,7 @@ std::atomic<bool> g_lookWantRead{false};       // the P2 hook reads list B now (
 std::atomic<bool> g_lookKeyOn{false};          // fix.native_on_foot_look_to_aim is on, as the frame thread last read it (F109: the head is the look on foot)
 std::atomic<uintptr_t> g_lookComp{0};          // the processor's comp, as the processor hook last saw it
 std::atomic<uint32_t> g_lookGameFrame{0};      // processor calls so far: the game frame index the look total is stamped with
-std::atomic<int> g_lookSmoothMs{150};          // fix.native_on_foot_look_to_aim_smoothing_ms, live (0..1000): the body's catch-up with nothing drawn
+std::atomic<int> g_lookSmoothMs{50};           // fix.native_on_foot_look_to_aim_smoothing_ms, live (0..1000): the body's catch-up with nothing drawn
 // F109 (the update hook's side, game thread readers; the frame thread writes): the turn style (fix.native_on_foot_turn_style), the snap's step
 // (fix.native_on_foot_snap_turn_deg), whether the player's look is dropped now (look to aim engaged), and the snap's input queued for the next update (game input
 // units, the player's own turn: the split leaves it out of the cancel).
@@ -1405,7 +1405,7 @@ void readKey() {
     // key is spelled out in its own call (the generator scans).
     const bool lookOn = cfg.getString("fix.native_on_foot_look_to_aim", "off") == "on";
     g_lookKeyOn.store(lookOn, std::memory_order_relaxed);
-    int lookSmooth = cfg.getInt("fix.native_on_foot_look_to_aim_smoothing_ms", 150);
+    int lookSmooth = cfg.getInt("fix.native_on_foot_look_to_aim_smoothing_ms", 50);
     if (lookSmooth < 0) lookSmooth = 0;
     if (lookSmooth > 1000) lookSmooth = 1000;
     g_lookSmoothMs.store(lookSmooth, std::memory_order_relaxed);

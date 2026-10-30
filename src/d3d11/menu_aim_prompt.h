@@ -23,23 +23,25 @@ constexpr const char* kPageName = "Aiming";
 constexpr const char* kHeading = "Aiming on foot";
 
 // The page's words, one line each (a blank string is a blank line). Indented lines keep their two leading spaces. A line holds at most kLineChars characters (MenuLine.left is 96 bytes).
+// The last line is blank: it keeps the choices apart from the words above them.
 constexpr const char* kNotes[] = {
     "Two ways to aim on foot. You can change this any time: Native on foot page, Look to aim.",
     "",
-    "Mouse aim (the game's own):",
+    "Mouse/controller aim (the game's own):",
     "  The mouse and right stick aim as in the flat game. Your head looks around on its own.",
-    "  In the sights your head aims and the mouse only turns you (ADS: aim with head).",
+    "  In the sights your head aims; mouse and stick only turn you (ADS: aim with head).",
     "  Precise and familiar. Where you look and where you point can differ.",
     "",
     "Look to aim:",
     "  Your head aims. Where you look is where you face, walk and point, sights included.",
     "  The mouse and stick no longer look up or down; they turn you in steps or smoothly.",
     "  Aiming means moving your head. For a big turn, snap turn or turn your chair.",
+    "",
 };
 constexpr int kNoteCount = static_cast<int>(sizeof(kNotes) / sizeof(kNotes[0]));
 
 enum Choice : int { kMouseAim = 0, kLookToAim = 1, kLater = 2, kChoiceCount = 3 };
-constexpr const char* kRows[kChoiceCount] = {"Use mouse aim", "Use look to aim", "Ask me next time"};
+constexpr const char* kRows[kChoiceCount] = {"Use mouse/controller aim", "Use look to aim", "Ask me next time"};
 constexpr const char* kFooter = "Up/Down to choose, Enter or UI Select to confirm. Esc asks next time.";
 
 constexpr int kLineChars = 95;      // MenuLine.left holds 95 characters and the terminator

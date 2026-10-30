@@ -27,8 +27,8 @@ inline void run177(Check&& check) {
     // ---- 1. the page's words --------------------------------------------------------------------------------------------------------------------------------------------------------------------
     static_assert(ap::kLineChars + 1 == sizeof(edvr::MenuLine::left), "the line holds what MenuLine.left holds");
     static_assert(ap::kPageLinesMax == edvr::kMenuMaxLines, "the page limit is the raster's");
-    check(ap::kNoteCount == 11 && ap::kPageLines == 1 + 11 + 3 && ap::kPageLines <= ap::kPageLinesMax,
-          "F177: the page is the heading, eleven lines and three rows (15), inside the 18 lines one raster holds");
+    check(ap::kNoteCount == 12 && ap::kPageLines == 1 + 12 + 3 && ap::kPageLines <= ap::kPageLinesMax,
+          "F177: the page is the heading, twelve lines (the last blank, between the words and the rows) and three rows (16), inside the 18 lines one raster holds");
     bool lengthsOk = true;
     size_t longest = 0;
     for (int i = 0; i < ap::kNoteCount; ++i) {
@@ -40,12 +40,13 @@ inline void run177(Check&& check) {
     check(lengthsOk && longest > 80, msg);
     check(std::strcmp(ap::kHeading, "Aiming on foot") == 0, "F177: the heading reads Aiming on foot");
     check(std::strcmp(ap::kNotes[0], "Two ways to aim on foot. You can change this any time: Native on foot page, Look to aim.") == 0 && std::strlen(ap::kNotes[1]) == 0 &&
-              std::strcmp(ap::kNotes[2], "Mouse aim (the game's own):") == 0 && std::strlen(ap::kNotes[6]) == 0 && std::strcmp(ap::kNotes[7], "Look to aim:") == 0,
-          "F177: the opening line, the two blank lines and the two section lines are the words given");
+              std::strcmp(ap::kNotes[2], "Mouse/controller aim (the game's own):") == 0 && std::strlen(ap::kNotes[6]) == 0 && std::strcmp(ap::kNotes[7], "Look to aim:") == 0 &&
+              std::strlen(ap::kNotes[11]) == 0,
+          "F177: the opening line, the three blank lines (the last before the rows) and the two section lines are the words given");
     check(std::strcmp(ap::kNotes[3], "  The mouse and right stick aim as in the flat game. Your head looks around on its own.") == 0 &&
-              std::strcmp(ap::kNotes[4], "  In the sights your head aims and the mouse only turns you (ADS: aim with head).") == 0 &&
+              std::strcmp(ap::kNotes[4], "  In the sights your head aims; mouse and stick only turn you (ADS: aim with head).") == 0 &&
               std::strcmp(ap::kNotes[5], "  Precise and familiar. Where you look and where you point can differ.") == 0,
-          "F177: the three lines under mouse aim are the words given");
+          "F177: the three lines under mouse/controller aim are the words given");
     check(std::strcmp(ap::kNotes[8], "  Your head aims. Where you look is where you face, walk and point, sights included.") == 0 &&
               std::strcmp(ap::kNotes[9], "  The mouse and stick no longer look up or down; they turn you in steps or smoothly.") == 0 &&
               std::strcmp(ap::kNotes[10], "  Aiming means moving your head. For a big turn, snap turn or turn your chair.") == 0,
@@ -54,9 +55,9 @@ inline void run177(Check&& check) {
     for (int i : {3, 4, 5, 8, 9, 10}) indentsOk = indentsOk && ap::kNotes[i][0] == ' ' && ap::kNotes[i][1] == ' ' && ap::kNotes[i][2] != ' ';
     for (int i : {0, 2, 7}) indentsOk = indentsOk && ap::kNotes[i][0] != ' ';
     check(indentsOk, "F177: the indented lines keep exactly two leading spaces and the others none");
-    check(std::strcmp(ap::kRows[ap::kMouseAim], "Use mouse aim") == 0 && std::strcmp(ap::kRows[ap::kLookToAim], "Use look to aim") == 0 && std::strcmp(ap::kRows[ap::kLater], "Ask me next time") == 0 &&
+    check(std::strcmp(ap::kRows[ap::kMouseAim], "Use mouse/controller aim") == 0 && std::strcmp(ap::kRows[ap::kLookToAim], "Use look to aim") == 0 && std::strcmp(ap::kRows[ap::kLater], "Ask me next time") == 0 &&
               ap::kMouseAim == 0 && ap::kLookToAim == 1 && ap::kLater == 2 && ap::kChoiceCount == 3,
-          "F177: the three rows are Use mouse aim, Use look to aim, Ask me next time, in that order");
+          "F177: the three rows are Use mouse/controller aim, Use look to aim, Ask me next time, in that order");
     check(std::strcmp(ap::kFooter, "Up/Down to choose, Enter or UI Select to confirm. Esc asks next time.") == 0 && std::strlen(ap::kFooter) < 160,
           "F177: the footer is the words given and fits the footer buffer (160)");
 
