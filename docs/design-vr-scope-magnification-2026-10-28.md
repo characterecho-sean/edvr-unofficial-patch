@@ -44,17 +44,17 @@ game's own zoom as a magnified picture inside the scope's lens. The rest of the 
   mode) is drawn as the zoomed view (told frustum narrowed by M about c, set in WaitGetPoses); the lens samples its post-RCAS picture at the place its world point is drawn in that eye; the raw getter keeps
   the true frustum; DLSS resets at both edges. Lines: `scope zoom (B3)` announce and press, `scope zoom (B3) runtime`. Review fixes done (section 11, items 1 to 8).
 - **B3-2 FLOWN 2026-10-29 (`c92b5107`, Epic), verdict: symmetric black** (section 11, "2026-10-29, B3-2 VR flight"): `world` and `view` never drew, `stretched` drew on two presses, the maintainer saw the black strip as best and asked
-  for it symmetrical. **B3-3 BUILT 2026-10-29, INSTALLED on Epic with C1 as `25502c36`, NOT FLOWN** (from `d526ee75`; section 11, "B3-3"): black is the behaviour; the edge key, the fills and the held picture are removed; the right eye gets the mirror of the
-  left eye's strip (same band, the left strip's weight, full on a narrowed frame, also on a replayed pair). The lens-outside-the-copy count and the one withheld frame stay. Next: the flight.
+  for it symmetrical. **B3-3 FLOWN OK 2026-10-30 (`25502c36`, Epic): "looks good on all counts"** (section 11, "B3-3"; the flight in section 12, "2026-10-30"): black is the behaviour; the edge key, the fills and the held picture are removed; the right eye gets the mirror of the
+  left eye's strip (same band, the left strip's weight, full on a narrowed frame, also on a replayed pair). The lens-outside-the-copy count and the one withheld frame stay. Open: the window drift while turning (the lens falls back to A), not exercised by this flight.
 - ruled out: the both-mode share as the cause of the weapon-edge double image, because it shows in the right eye alone at sight eye `right` (maintainer, 2026-10-29); it has its own arc, "Weapon edge ghosting under DLSS".
 - ruled out: a fill for the left eye's strip (B3-2: world and view never drew), and zoom-to-fill (the left eye's copy shifted about 10 degrees or magnified about 43% against the right eye's, which eyes cannot fuse).
-- **C1 BUILT 2026-10-29, INSTALLED on Epic as `25502c36`, NOT FLOWN** (from `f2aed451`; section 12, "Crisp sights"): the maintainer found the holo sights and scope effects still too washed out and asked for them crisp without bloom.
+- **C1a FLOWN OK 2026-10-30 (`25502c36`, Epic): "looks good on all counts"** (from `f2aed451`; section 12, "Crisp sights", and its flight entry): the maintainer found the holo sights and scope effects still too washed out and asked for them crisp without bloom.
   C1a: the gunsight quad (the one pair every weapon draws) of every weapon the scope lens does not name is taken out of the scene into the sharp weapons layer for the whole press of the sights, as the optical
-  chevron is. C1b: a manual eye dump in ADS leaves one candidate sight-effect draw out of each frame (11 candidates) and says which; `tools\sight_candidates.py` reports each one's footprint; the census gives eye draws
-  their own line budget. Next: the flight (A/B in one press), then the footprint report per weapon.
+  chevron is; flown on nine weapons with the key's A/B in one press. C1b, NOT RUN: a manual eye dump in ADS leaves one candidate sight-effect draw out of each frame (11 candidates) and says which; `tools\sight_candidates.py` reports each one's footprint; the census gives eye draws
+  their own line budget. No dump was taken. Next: one dump a weapon held still in ADS, then the scope glass's own path.
 - Keys: `fix.native_on_foot_ads_scope_zoom` (default on since A3 flew OK, the maintainer 2026-10-29), the temporary `experimental.native_on_foot_ads_scope_zoom_fov` (the reference FOV, 56.3 by default),
   `experimental.native_on_foot_ads_scope_zoom_full_detail` (on | off, live, default off, Experimental page; the maintainer's choice per scope, not temporary: on is the optic at full detail with an equal black
-  edge in both eyes' outer view, off the digital zoom) and the TEMPORARY `experimental.native_on_foot_ads_crisp_reticle` (C1a, on | off, live, default on; goes when the reticle has been judged).
+  edge in both eyes' outer view, off the digital zoom) and the TEMPORARY `experimental.native_on_foot_ads_crisp_reticle` (C1a, on | off, live, default on; judged OK 2026-10-30, its removal with on as the behaviour put to the maintainer).
 - Separate arc: a flat stutter on the scoped Executioner's ADS (2026-10-29), in its own doc,
   `docs\investigation-flat-scoped-ads-stutter-2026-10-29.md`, on its own branch.
 - **Key (after S0, on the maintainer's word):** `fix.native_on_foot_ads_scope_zoom` = on | off. Section 5.
@@ -1053,3 +1053,15 @@ Edit tool and diffed (two comment lines and one key changed, line count unchange
 states the user's choice, and `native_on_foot_ads_crisp_reticle = on` was added under it. The maintainer's `native_on_foot_ads_scope_zoom_full_detail = on` was kept. Read the flight with
 `--expect-build 25502c36`. The same flight covers B3-3: with full detail on, the scoped Executioner in ADS should show an equal black edge on the outer side of each eye while the zoom stands, and the
 runtime line reports the right eye's mirror strip (frames, widest share of its width).
+
+**2026-10-30, B3-3 and C1 VR flight** (Epic, Pimax, both profile, DLSS; `edvr_gfx_20261030_053002.log`, 05:30:02 to 05:40:17, build `v0.22.0-rc.3-87-g25502c36` matched). The maintainer: "that looks
+good on all counts". `--health` exits 3 on F91 and F85c NEVER APPLIED, both already so in the `c738e367` log before this arc's builds; every scope zoom row and the `crisp reticle (C1)` row are OK.
+- B3-3: presses 1 and 2 of the scoped Executioner were at sight eye `right` (B3 correctly not asked, A drew); the menu moved it to `both` at 05:32:58, and presses 3 and 4 drew the zoomed left eye (1374 and 1642
+  frames, narrowing 4.064, the span ratio 4.064, one raw getter caller 0x4E3045, lens source zoomed 1373 and 1641). The right eye's mirror strip drew on 1651 frames, at its widest 0.203 of the right eye's width;
+  0 frames passed a share not drawn; the lens outside the copy on 0 of 1309 and 0 of 1628 frames. The head was held fairly still: window drift max 4.5 deg (press 3) and 0.36 deg (press 4), so the
+  turning case of B3-2 (lens outside the copy up to 43%) was not exercised. Press 3's parallax at c reached 2663 px (mean 203) with c on a near surface; press 4 mean 40, max 53.
+- C1a: 11 press lines (presses 6 to 16): the Tormentor (three presses), AR-50, P-15, Eclipse, C-44, L-6, Zenith, Intimidator, and the Oppressor. Every take went through the seeded depth path and composited
+  matched; stood down 0. The A/B was done in the live ini: off at 05:35:54 and on at 05:35:58 inside press 6, off and on again between presses 6 and 7. Two counts read odd and are not faults: press 6 has 76
+  armed eye-frames an eye with no quad taken (others 0), in a press held through the weapon's holster and redraw (F93a: item none to pistol at 05:35:59 and 05:36:02), when no quad is drawn; press 15 (the
+  Oppressor, a lens-owned sight at M 1.202) is eligible for 11 ticks and armed for 3, and its 581 quads an eye are the lens's marks (the press line takes the layer's counts whoever armed the mark).
+- C1b: no eye dump was taken, so the census has not run and the scope glass draws are not named. The withhold cycle stays in manual ADS dumps until they are.
