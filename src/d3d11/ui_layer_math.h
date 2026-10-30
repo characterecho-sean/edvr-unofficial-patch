@@ -497,6 +497,9 @@ struct UiDsState {
 // WRITE). Neither with no target bound: D3D11 passes both tests then.
 struct UiDsEffect {
     bool depthTest = false, stencilTest = false, depthWrite = false, stencilWrite = false;
+    // The stencil bits the draw may change (D3D11's StencilWriteMask). All
+    // bits by default, so an effect built by hand stays conservative.
+    uint8_t stencilWriteMask = 0xFF;
     bool tests() const { return depthTest || stencilTest; }
     bool writes() const { return depthWrite || stencilWrite; }
 };
@@ -518,10 +521,21 @@ inline UiDsEffect uiLayerDsEffect(const UiDsState& s, bool dsvBound) {
     e.stencilTest = s.stencilEnable && s.stencilPlane && (faceTests(s.front) || faceTests(s.back));
     e.stencilWrite = s.stencilEnable && s.stencilPlane && s.writeMask != 0 && !s.readOnlyStencil &&
                      (faceWrites(s.front) || faceWrites(s.back));
+    e.stencilWriteMask = s.writeMask;
     return e;
 }
 
-// A stencil-only game write cannot change an unmodified depth-only seed.
+// Whether a game draw that writes the depth-stencil target a seed copied has
+// made the layer's copy stale. A draw that writes nothing never does. A
+// stencil-only writer (no depth write) changes only the stencil bits in its
+// D3D11 StencilWriteMask, whatever the stencil operation, and never the
+// depth; so when none of those bits is a bit the seed holds (seededMask) the
+// layer's copy is still the game's, for depth and for every bit it claims,
+// and the seed stays fresh. A seed that holds nothing (no depth, no bits) has
+// nothing to keep, and a seed with every bit (seededMask 0xFF, the full seed
+// of a GPU whose pixel shader writes the stencil reference) overlaps any
+// write mask, so both invalidate. A bit the seed does not hold needs no
+// protection: the next draw that tests it is short of that bit and seeds again.
 // Keep the legacy whole-seed refresh for every other writer. In particular,
 // any private depth-writing interaction in this frame retains it across all
 // eyes/layers: its fine-grid depth or another cache's raw source may differ
@@ -529,8 +543,12 @@ inline UiDsEffect uiLayerDsEffect(const UiDsState& s, bool dsvBound) {
 // guard with actual differing depth/colour, not just predicate arithmetic.
 inline bool uiLayerSeedWriterInvalidates(const UiDsEffect& writer, uint8_t seededMask,
                                         bool seededDepth, bool privateDepthWriteThisFrame) {
-    return writer.writes() && !(writer.stencilWrite && !writer.depthWrite &&
-        seededDepth && !seededMask && !privateDepthWriteThisFrame);
+    if (!writer.writes()) return false;
+    const bool holdsSomething = seededDepth || seededMask != 0;
+    const bool preserved = writer.stencilWrite && !writer.depthWrite &&
+        !privateDepthWriteThisFrame && holdsSomething &&
+        (writer.stencilWriteMask & seededMask) == 0;
+    return !preserved;
 }
 
 struct UiLayerPrivateDepthGuard {

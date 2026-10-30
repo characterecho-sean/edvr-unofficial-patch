@@ -17,6 +17,34 @@ void testSeedWriterRule() {
           "all depth and mixed writers retain legacy invalidation");
     check(!uiLayerSeedWriterInvalidates(UiDsEffect{}, 255, true, true),
           "read-only and KEEP no-writer effects remain no invalidation");
+    // The write mask decides what a stencil-only writer can touch: D3D11 masks every stencil write by StencilWriteMask.
+    check(UiDsEffect{}.stencilWriteMask == 0xFF, "an effect built by hand writes every stencil bit");
+    D3D11_DEPTH_STENCIL_DESC bitDesc{};
+    bitDesc.StencilEnable = TRUE; bitDesc.StencilReadMask = 0xFF; bitDesc.StencilWriteMask = 0x04;
+    bitDesc.FrontFace = {D3D11_STENCIL_OP_KEEP, D3D11_STENCIL_OP_KEEP, D3D11_STENCIL_OP_REPLACE,
+                         D3D11_COMPARISON_ALWAYS};
+    bitDesc.BackFace = bitDesc.FrontFace;
+    const UiDsEffect fromDesc = uiLayerDsEffect(uiLayerDsStateFrom(&bitDesc, 0), true);
+    check(fromDesc.stencilWrite && !fromDesc.depthWrite && fromDesc.stencilWriteMask == 0x04,
+          "the effect of a depth-off REPLACE state carries its StencilWriteMask");
+    UiDsEffect bit4 = stencil; bit4.stencilWriteMask = 0x04;
+    UiDsEffect bit4Depth = bit4; bit4Depth.depthWrite = true;
+    check(!uiLayerSeedWriterInvalidates(bit4, 0x02, true, false),
+          "a stencil-only writer whose mask misses the seed's bits keeps a depth-and-bits seed");
+    check(uiLayerSeedWriterInvalidates(bit4, 0x06, true, false),
+          "the same writer against a seed holding a bit it writes invalidates");
+    check(uiLayerSeedWriterInvalidates(bit4Depth, 0x02, true, false),
+          "a mask-disjoint writer that also writes depth invalidates");
+    check(uiLayerSeedWriterInvalidates(bit4, 0x02, true, true),
+          "a mask-disjoint writer under the private depth guard retains legacy refresh");
+    check(!uiLayerSeedWriterInvalidates(bit4, 0x02, false, false),
+          "a mask-disjoint writer keeps a bits-only seed that holds no depth");
+    check(uiLayerSeedWriterInvalidates(bit4, 0, false, false),
+          "a seed holding neither depth nor bits is never kept");
+    check(uiLayerSeedWriterInvalidates(bit4, 0xFF, true, false),
+          "a full-mask seed (the specified-reference seed) overlaps every write mask");
+    check(!uiLayerSeedWriterInvalidates(bit4, 0, true, false),
+          "a depth-only seed is kept by a narrow-mask stencil writer too");
     UiLayerPrivateDepthGuard guard;
     check(guard.active(0) && !guard.active(71), "sequence zero/bootstrap remains conservative");
     guard.note(71, true);
@@ -298,8 +326,145 @@ void testReadOnlyPrivateDepthProof(Gpu& g) {
     compareFreshWorlds(legacy, guarded, 1, 0);
 }
 
+// A depth-off stencil writer under a given write mask (ALWAYS / REPLACE; the harness's reference is 4, so REPLACE writes
+// 4 & mask: a mask of 0x04 sets bit 0x04, a mask of 0x02 clears bit 0x02). depthWrite adds a depth write (quad z = 0).
+D3D11_DEPTH_STENCIL_DESC disjointStencilWriter(uint8_t writeMask, bool depthWrite = false) {
+    D3D11_DEPTH_STENCIL_DESC d{};
+    d.DepthEnable = depthWrite ? TRUE : FALSE;
+    d.DepthWriteMask = depthWrite ? D3D11_DEPTH_WRITE_MASK_ALL : D3D11_DEPTH_WRITE_MASK_ZERO;
+    d.DepthFunc = D3D11_COMPARISON_ALWAYS;
+    d.StencilEnable = TRUE; d.StencilReadMask = 0xFF; d.StencilWriteMask = writeMask;
+    d.FrontFace = {D3D11_STENCIL_OP_KEEP, D3D11_STENCIL_OP_KEEP, D3D11_STENCIL_OP_REPLACE,
+                   D3D11_COMPARISON_ALWAYS}; d.BackFace = d.FrontFace;
+    return d;
+}
+// The game's stencil before any seed: bit 0x02 set everywhere except a window (left of x = 0.5, the whole height) where a
+// stencil-only game draw cleared it. A layer test on bit 0x02 is lit only inside the window, and only where the game's
+// depth is 0 (the constructor's quad, columns 1..10 and rows 1..6 of the 12 x 8 buffer). No seed exists yet, so the draw
+// invalidates nothing.
+void disjointPrime(FreshWorld& w, unsigned game) {
+    w.gpu.ctx->ClearDepthStencilView(w.games[game].dsv.Get(), D3D11_CLEAR_STENCIL, 0.0f, 0x02);
+    const float window[4] = {-.99f, -.99f, .5f, .99f};
+    w.gameWriter(game, disjointStencilWriter(0x02), window);
+}
+unsigned litPixels(const std::vector<uint8_t>& rgba) {
+    unsigned n = 0;
+    for (size_t i = 3; i < rgba.size(); i += 4) n += rgba[i] != 0;
+    return n;
+}
+
+// A stencil-only game writer whose StencilWriteMask misses every bit a seed holds leaves the layer's copy what a fresh
+// seed would copy, so the optimized world skips the re-seed and still draws exactly what the legacy world (every write
+// re-seeds) draws. A writer that overlaps the held bits, writes depth, or meets the private-depth guard does not: the
+// optimized world re-seeds like legacy, and a world that is never told of the write (the stale seed) draws something else.
+void testBitDisjointSeedReplay(Gpu& g) {
+    const float lateral[4] = {-.1f, -.99f, .99f, .99f};   // right half of the buffer, beyond the clear window's edge
+    const float everywhere[4] = {-1.1f, -1.1f, 1.1f, 1.1f};
+    {
+        FreshWorld old(g, false), opt(g, true);
+        // A seed that holds every stencil bit (the specified-reference seed, AMD/Intel) overlaps any write mask.
+        const bool fullSeed = opt.seeder.usesSpecifiedStencilRef();
+        disjointPrime(old, 0); disjointPrime(opt, 0);
+        check(old.consume(0, 0, 0x02) && opt.consume(0, 0, 0x02), "disjoint writer: bit 0x02 seeds complete");
+        compareFreshWorlds(old, opt, 0, 0, 0x02);
+        const auto lit0 = readBack(g, opt.caches[0].colour);
+        check(litPixels(lit0) > 0 && litPixels(lit0) < unsigned(lit0.size() / 4),
+              "the bit 0x02 test is lit in the clear window only (the rig discriminates)");
+        const auto gameBefore = readBackDs(g, opt.games[0]);
+        old.gameWriter(0, disjointStencilWriter(0x04), lateral);
+        opt.gameWriter(0, disjointStencilWriter(0x04), lateral);
+        const auto gameAfter = readBackDs(g, opt.games[0]);
+        bool depthEqual = true, stencilChanged = false, bit2Equal = true;
+        for (size_t p = 0; p < gameBefore.size(); p += 4) {
+            depthEqual = depthEqual && std::memcmp(&gameBefore[p], &gameAfter[p], 3) == 0;
+            stencilChanged = stencilChanged || gameBefore[p + 3] != gameAfter[p + 3];
+            bit2Equal = bit2Equal && ((gameBefore[p + 3] ^ gameAfter[p + 3]) & 0x02) == 0;
+        }
+        check(depthEqual && stencilChanged && bit2Equal,
+              "the actual stencil 0x04 writer changes stencil bit 0x04 only and leaves every depth byte");
+        check(old.consume(0, 0, 0x02) && opt.consume(0, 0, 0x02), "bit 0x02 consumers after the 0x04 writer complete");
+        compareFreshWorlds(old, opt, 0, 0, 0x02);
+        if (!fullSeed) {
+            check(old.seeds == 2 && opt.seeds == 1 && old.preserved == 0 && opt.preserved == 1,
+                  "the 0x04 writer re-seeds the legacy world and leaves the optimized seed in place");
+            check(old.seedCopies == 2 && opt.seedCopies == 1 && opt.seedDraws * 2 == old.seedDraws &&
+                  opt.seedClears * 2 == old.seedClears,
+                  "the skipped re-seed is one fewer full copy, draw set and clear");
+        } else {
+            check(opt.seeds == old.seeds && opt.preserved == 0,
+                  "a full-mask seed overlaps the 0x04 writer: the optimized world re-seeds like legacy");
+        }
+        // Growth to the written bit: the seed is short of 0x04 in both worlds, so both copy the game's current bits.
+        check(old.consume(0, 0, 0x04) && opt.consume(0, 0, 0x04), "bit 0x04 consumers after the writer complete");
+        compareFreshWorlds(old, opt, 0, 0, 0x06);
+        const auto lit4 = readBack(g, opt.caches[0].colour);
+        check(litPixels(lit4) > 0, "the bit 0x04 test sees the writer's new bit");
+        check(readBack(g, old.caches[0].colour) == lit4, "bit 0x04 consumer colour matches the legacy world's");
+        if (!fullSeed)
+            check(old.seeds == 3 && opt.seeds == 2, "the growth re-seed picks up the writer's bit in both worlds");
+        else
+            check(opt.seeds == old.seeds, "full-mask seeds grow no further");
+    }
+    {
+        // A writer that overlaps the held bit (mask 0x06 clears bit 0x02 on the right) is seen by the layer's next test.
+        FreshWorld old(g, false), opt(g, true), unseen(g, true);
+        for (FreshWorld* w : {&old, &opt, &unseen}) {
+            disjointPrime(*w, 0);
+            check(w->consume(0, 0, 0x02), "overlap: bit 0x02 seed completes");
+        }
+        old.gameWriter(0, disjointStencilWriter(0x06), lateral);
+        opt.gameWriter(0, disjointStencilWriter(0x06), lateral);
+        // The same draw with the freshness bookkeeping bypassed: the stale seed an overlapping rule would leave.
+        unseen.draw(unseen.games[0].dsv.Get(), nullptr, unseen.dsState(disjointStencilWriter(0x06)).Get(), lateral,
+                    12, 8, 0, 0);
+        check(old.consume(0, 0, 0x02) && opt.consume(0, 0, 0x02) && unseen.consume(0, 0, 0x02),
+              "overlap: consumers after the 0x06 writer complete");
+        compareFreshWorlds(old, opt, 0, 0, 0x02);
+        check(opt.seeds == old.seeds && opt.preserved == 0 && opt.seeds == 2,
+              "an overlapping writer re-seeds the optimized world exactly as legacy");
+        check(unseen.seeds == 1 && readBack(g, unseen.caches[0].colour) != readBack(g, old.caches[0].colour),
+              "the stale seed an unseen overlapping writer leaves draws a different image (the overlap is real)");
+    }
+    {
+        // A mask-disjoint writer that also writes depth: the copied depth is stale where it wrote.
+        FreshWorld old(g, false), opt(g, true), unseen(g, true);
+        for (FreshWorld* w : {&old, &opt, &unseen}) {
+            disjointPrime(*w, 0);
+            check(w->consume(0, 0, 0x02), "depth writer: bit 0x02 seed completes");
+        }
+        const auto depthWriter = disjointStencilWriter(0x04, true);
+        old.gameWriter(0, depthWriter, everywhere);
+        opt.gameWriter(0, depthWriter, everywhere);
+        unseen.draw(unseen.games[0].dsv.Get(), nullptr, unseen.dsState(depthWriter).Get(), everywhere, 12, 8, 0, 0);
+        check(old.consume(0, 0, 0x02) && opt.consume(0, 0, 0x02) && unseen.consume(0, 0, 0x02),
+              "depth writer: consumers after the writer complete");
+        compareFreshWorlds(old, opt, 0, 0, 0x02);
+        check(opt.seeds == old.seeds && opt.preserved == 0 && opt.seeds == 2,
+              "a mask-disjoint writer that writes depth re-seeds the optimized world as legacy");
+        check(unseen.seeds == 1 && readBack(g, unseen.caches[0].colour) != readBack(g, old.caches[0].colour),
+              "the stale depth an unseen depth writer leaves draws a different image (the depth write is real)");
+    }
+    {
+        // A private depth write earlier in the frame: the guard keeps the legacy refresh across both layers.
+        FreshWorld old(g, false), opt(g, true);
+        disjointPrime(old, 0); disjointPrime(opt, 0);
+        for (unsigned c = 0; c < 2; ++c)
+            check(old.consume(c, 0, 0x02) && opt.consume(c, 0, 0x02), "guard: bit 0x02 seeds complete");
+        old.privateWriter(1, 0, true); opt.privateWriter(1, 0, true);
+        old.gameWriter(0, disjointStencilWriter(0x04), lateral);
+        opt.gameWriter(0, disjointStencilWriter(0x04), lateral);
+        for (unsigned c = 0; c < 2; ++c) {
+            check(old.consume(c, 0, 0x02) && opt.consume(c, 0, 0x02), "guard: consumers after the writer complete");
+            compareFreshWorlds(old, opt, c, 0, 0x02);
+        }
+        check(opt.seeds == old.seeds && opt.preserved == 0,
+              "the private depth guard retains the legacy refresh for a mask-disjoint writer");
+    }
+}
+
 void testSeedFreshnessGpu(Gpu& g) {
     testReadOnlyPrivateDepthProof(g);
+    testBitDisjointSeedReplay(g);
     const float writes[3][4] = {{-.7f, -.6f, -.1f, .6f}, {-.1f, -.6f, .4f, .6f}, {.4f, -.6f, .7f, .6f}};
     const auto observed = freshnessStencilWriter();
     FreshWorld old(g, false), opt(g, true);
