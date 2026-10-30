@@ -2,9 +2,9 @@
 
 ## Status
 
-- **State (2026-10-27): DESIGN ONLY.** Nothing built, keyed or flown. From
-  OFXR-Bridge `d7fcca72` (v0.3.1) and EDVR `6b8ef374`; the 2026-10-27 entry
-  adds AFW and the flat profile. No issue is filed yet.
+- **State (2026-10-30): DESIGN ONLY.** Nothing built, keyed or flown. From
+  OFXR-Bridge `d7fcca72` and EDVR `6b8ef374`; dated entries add AFW and the
+  flat profile (10-27) and VectorXR (10-30). No issue is filed yet.
 - **Recommendation:** take OFXR-Bridge's frame loop, not its synthesizer. Elite
   renders at half the headset rate and EDVR's runtime presents every display
   period. The frame in between is **extrapolated** from Elite's newest frame,
@@ -36,29 +36,29 @@
     by enough to pay for its latency. Expected false.
   - H5: synthesis on the game device costs at most 1.5 ms a pair at the
     flown sizes.
-  - H6: a head pose predicted about two periods ahead leaves no visible
-    error after the compositor's own rotation correction.
+  - H6: the head pose predicted for the slot misses by little after the
+    compositor's rotation correction. PiOpenXR may predict only about 20 ms
+    ahead (VectorXR), so a velocity fallback is designed.
   - H7: the runtime stays at full rate while EDVR submits every period.
     VDXR's sticky half rate is the risk.
   - H8: one eye rebuilt from the other at the same moment (AFW's stereo warp)
     leaves little that neither eye saw, and no HUD doubling off the UI path.
   - H9: settlements are GPU-limited, and one eye is a large share of the GPU
     frame. Only then would alternate-eye rendering pay.
-- **Phase 0 (no EDVR code):** fly stock OFXR-Bridge (colour-only route) over
-  EDVR at a bright settlement and in space, with each runtime's own smoothing
-  off and then on. This is the visual reference to beat.
+- **Phase 0 (no EDVR code):** fly stock OFXR-Bridge and VectorXR (colour-only
+  routes) over EDVR at a bright settlement and in space, with each runtime's
+  own smoothing off and then on. This is the visual reference to beat.
 - **Next flight: Phase 1, measure only.** It flies the shadow scorer (H2-H4 by
   pixel class), the stereo score (H8), the surface classifier, the frame GPU
-  span while armed (H1), the per-eye GPU share (H9) and the pose prediction
-  error (H6). Nothing shown in the headset changes.
+  span while armed (H1), the per-eye GPU share (H9) and the eye-position miss
+  (H6). Nothing shown in the headset changes.
 - **Temporary key (proposed, not built):** `fix.frame_generation_shadow`
   (off | on), Phase 1 only. The user key `fix.frame_generation` (off | auto)
   comes with Phase 2. Its `on` value (forced, ignoring the gate's performance
   terms) is temporary, for A/B flights.
 - **Declined in design (re-open on new evidence):** ## Declined, including AFW
   as a replacement and flat-profile frame generation (2026-10-27).
-- **Open:** ## Open questions (canopy depth, early swapchain acquire, vendor
-  half-rate stickiness, refresh-rate switching as an alternative).
+- **Open:** ## Open questions.
 
 ## The ask
 
@@ -301,13 +301,20 @@ motion shader's code, not a second copy of it.
    Then forward-splat B's depth into S's grid using each pixel's class
    transform. The nearest pixel wins: a UAV atomic max on reversed-Z depth,
    then a pass that records each winner's source. The result names, for every
-   pixel of S, the pixel of B it came from.
+   pixel of S, the pixel of B it came from. Where a winner's offset would read
+   something nearer than its source (the edge of what stood in front of it),
+   the pixel reads the source itself. Without that guard VectorXR saw "sky took
+   the colour of the cockpit wall it had been next to"
+   ([`framegen.hlsl:4187-4194`](https://github.com/DienerTech/vectorxr/blob/87e575fb21cde8ad9ef87763c67471b7d0b7ee0a/layer/shaders/framegen.hlsl)).
 2. **Holes (render size).** A disocclusion is filled first from the other eye's
    real frame B, carried to S by the same class transforms and depth-tested.
    What the head's sideways motion uncovers behind a cockpit strut is often in
    the other eye's view. This is AFW's stereo warp (2026-10-27 entry). Only
    what neither eye saw is filled from its farther neighbour (background pull),
-   never from the nearer one.
+   never from the nearer one. The fill takes its colour a few pixels into that
+   surface, not from the edge pixel: an edge pixel blends both surfaces, and
+   stretched across the gap it streaks the near edge's colour (VectorXR,
+   [`framegen.hlsl:4306-4320`](https://github.com/DienerTech/vectorxr/blob/87e575fb21cde8ad9ef87763c67471b7d0b7ee0a/layer/shaders/framegen.hlsl)).
 3. **Resample (output size).** Read B's upscaled colour (the DLSS, FSR, XeSS or
    TAA output, before the UI layer) at the mapped positions. S's pixels pass
    through one more resample than B's, so the filter must be sharp enough that
@@ -342,6 +349,18 @@ On the game device, in the temporal pass, right after B's output is published:
   the frame input. `EdvrNativeFrameInput` is versioned and only ever extended
   at the end (`src/common/native_frame.h`). The compositor's own correction
   takes the remaining rotation at display, and H6 measures what is left.
+- **The runtime may not predict that far.** VectorXR does not ask the runtime
+  where the eyes will be, because "Pimax returns about the current pose for any
+  later time"
+  ([`framegen_presenter.cpp:5625-5627`](https://github.com/DienerTech/vectorxr/blob/87e575fb21cde8ad9ef87763c67471b7d0b7ee0a/layer/src/framegen/framegen_presenter.cpp)),
+  and PiOpenXR predicts the head about 20 ms past the moment it is asked
+  ([`head_prediction.h:14-18`](https://github.com/DienerTech/vectorxr/blob/87e575fb21cde8ad9ef87763c67471b7d0b7ee0a/layer/include/depthxr/head_prediction.h)).
+  T_S is about 1.5 to 2 periods past the temporal pass, 17-22 ms at 90 Hz,
+  right at that limit. So the runtime's answer has a fallback, measured beside
+  it in Phase 1: the eye position carried forward at its velocity between the
+  last two real frames, and the rotation carried at the runtime's own angular
+  velocity, from two locates inside its limit (VectorXR's method,
+  `head_prediction.h:20-24`).
 - **Cost:** S adds its GPU time to every real frame it is made for. In Lock
   that is against a two-period budget.
 
@@ -365,6 +384,10 @@ slot its frame will be shown in.
   its own views), counted as `late_real`.
 - **S missing:** B is replayed with its own pose, and the compositor turns it.
   Counted as `late_s`.
+- **When S's GPU work ran:** its start and finish against the release of the
+  slot's frame wait, as medians and maxima, so a late S can be told from a slow
+  one. VectorXR logs the same pair as `gpuStartMs` and `gpuDoneMs`
+  ([`docs/usage.md:789-799`](https://github.com/DienerTech/vectorxr/blob/87e575fb21cde8ad9ef87763c67471b7d0b7ee0a/docs/usage.md)).
 - **Entering or leaving Lock** happens on a slot boundary. The predicted times
   stay monotonic through the floor `FrameBoundary` already applies.
 - **Fail-open:** with no projection layer (menus, loads), Elite is paced and
@@ -471,7 +494,9 @@ Space is where flow is worst and geometry is best:
   `docs/troubleshooting.md` gets the per-runtime steps: SteamVR per-app Motion
   Smoothing, Virtual Desktop SSW, Pimax Smart Smoothing, and Meta ASW in the
   Oculus Debug Tool. While engaged, a halved predicted period is logged and
-  disengages Lock.
+  disengages Lock. After a few seconds of it, the user is told which runtime
+  settings to check, as VectorXR does
+  ([`docs/usage.md:941-950`](https://github.com/DienerTech/vectorxr/blob/87e575fb21cde8ad9ef87763c67471b7d0b7ee0a/docs/usage.md)).
 - **The synthesizer's inputs are `XR_EXT_frame_synthesis`'s inputs.** Per view,
   the extension takes a motion image, a depth image with near/far and a
   reversed flag, and an app-space delta pose. Its motion runs from previous to
@@ -480,7 +505,10 @@ Space is where flow is worst and geometry is best:
   a Windows runtime advertises the extension, EDVR can submit those images and
   let the runtime synthesize, keeping its own synthesizer as the fallback.
   EDVR's seated space is the cockpit, so the delta pose is identity, and the
-  ship's motion is in the vectors.
+  ship's motion is in the vectors. A layer could consume them too: VectorXR has
+  a research path for `XR_FB_space_warp` and `XR_EXT_frame_synthesis` vectors.
+  It is off by default, D3D12 only, and never runs through its D3D11 bridge
+  ([`openxr_layer.cpp:16296-16316`](https://github.com/DienerTech/vectorxr/blob/87e575fb21cde8ad9ef87763c67471b7d0b7ee0a/layer/src/openxr_layer.cpp)).
 
 ## Failure classes and their signatures
 
@@ -500,6 +528,7 @@ luma error, against the floor.
 | 8 | Timing | the GPU saturated, Elite over budget, vendor halving | `late_real`, `late_s`, halved-period counts | the gate |
 | 9 | Stereo mismatch | any class | per-eye residual difference | the same transform for both eyes |
 | 10 | Jitter | DLSS input jitter left in depth and motion | a static-scene residual above the floor | remove the Halton offset when mapping render to output pixels |
+| 11 | Pose prediction shortfall | PiOpenXR past about 20 ms; possibly other runtimes | the eye-position miss (mm, degrees) against the lead time; unrendered area at the edge the head turns toward | the velocity fallback (## Where it runs) |
 
 ## Budget
 
@@ -538,10 +567,17 @@ luma error, against the floor.
      interior.
    - EDVR's frame-cycle windows at 22.2 ms show the layer engaged under
      EDVR's session.
-   - Then fly the same scenes without OFXR and with each runtime's own
+   - Then VectorXR v0.20.0 on the same scenes, with only its Frame
+     Generation module enabled. Over EDVR it runs through its D3D11 bridge,
+     where the depth "stays private"
+     ([`framegen_d3d11_bridge.h:35-37`](https://github.com/DienerTech/vectorxr/blob/87e575fb21cde8ad9ef87763c67471b7d0b7ee0a/layer/include/depthxr/framegen_d3d11_bridge.h)),
+     so it is colour flow with head rotation removed. It was tested on the
+     same headset, a Pimax Crystal Super on PiOpenXR
+     ([`docs/usage.md:683-687`](https://github.com/DienerTech/vectorxr/blob/87e575fb21cde8ad9ef87763c67471b7d0b7ee0a/docs/usage.md)).
+   - Then fly the same scenes with neither layer and with each runtime's own
      smoothing on.
-   - **Gate:** none. It sets the bar the bespoke work must clear. If the
-     layer does not load under EDVR, record why: it is a reference, not a
+   - **Gate:** none. It sets the bar the bespoke work must clear. If a layer
+     does not load under EDVR, record why: it is a reference, not a
      dependency.
 2. **Phase 1, measure only (`fix.frame_generation_shadow = on`).**
    - The scorer: every real frame, at quarter size and per class, it
@@ -550,12 +586,17 @@ luma error, against the floor.
    - The floor: measured with the head still while docked.
    - The surface classifier.
    - The frame GPU span while armed, without the per-draw queries.
-   - The pose prediction error: S's views at synthesis time against the
-     views located for T_S.
+   - The eye-position miss (H6): the runtime's predicted views for T_S and
+     the velocity fallback's, each against the views located for T_S, in mm
+     and degrees.
    - The stereo score (H8): every real frame, B's right eye rebuilt from B's
      left eye with depth, against the real right eye, per class, with the
      share of pixels neither eye saw. It prices AFW-style reconstruction in
      Elite, HUD doubling included, without building alternate-eye rendering.
+     It also answers the canopy question (## Open questions): stars that line
+     up between the eyes as infinitely far, at pixels whose depth says near,
+     are scenery behind glass written to depth. VectorXR's depth check scores
+     exactly that case ([`docs/architecture.md:194-195`](https://github.com/DienerTech/vectorxr/blob/87e575fb21cde8ad9ef87763c67471b7d0b7ee0a/docs/architecture.md)).
    - The GPU pass profiler (`hotkey.gpu_pass_profile`, built, not flown) at a
      settlement, for one eye's share of Elite's GPU frame (H9).
    - A `frame generation (shadow)` line once a second, with an
@@ -589,8 +630,8 @@ luma error, against the floor.
 
 - **A synthesis-math rig.** A CPU reference of each class transform against
   synthetic scenes with known head, rig and object motion, to under 0.1 px. It
-  covers a reversed-Z far-plane case, the 1 mm on-foot split, and jitter
-  removal.
+  covers a reversed-Z far-plane case, the 1 mm on-foot split, jitter removal,
+  the splat winner's guard and the fill's inset.
 - **The gate as a pure function,** table-driven: engage, each disengage reason,
   the dwell, a cut, and fail-open.
 - **The presenter's slot schedule,** in the style of `native_frame_test`:
@@ -604,7 +645,9 @@ luma error, against the floor.
 These are declined in design, not by flight. Each one names what would re-open
 it.
 
-- **Copying OFXR-Bridge code or shaders:** the licence.
+- **Copying OFXR-Bridge or VectorXR code or shaders:** the licences.
+  OFXR-Bridge is GPL-3.0, and VectorXR is MPL-2.0, whose copyleft holds per
+  file.
 - **Optical-flow-first synthesis:** flow is weak on space content, and EDVR has
   better motion. Re-open if Phase 1 shows classes 3 and 5 dominate on surfaces.
 - **Interpolation as the default:** the latency. Re-open if H4 holds by a clear
@@ -612,6 +655,12 @@ it.
 - **3:1:** extrapolating two periods ahead from a game below a third of the
   rate is out of scope.
 - **Synthesis on the XR device at the slot:** see ## Where it runs.
+- **A high-priority D3D12 queue for synthesis (VectorXR's):** it suits optical
+  flow, which is heavy. VectorXR measured a stall of about 7 ms with flow on
+  the game's queue
+  ([`docs/architecture.md:163-171`](https://github.com/DienerTech/vectorxr/blob/87e575fb21cde8ad9ef87763c67471b7d0b7ee0a/docs/architecture.md)).
+  This design's frame has no flow and is made on the game device. Re-open if H5
+  fails.
 - **A brightness gate:** brightness is flow's proxy for prediction quality, and
   the gate measures prediction quality directly.
 - **Depth submission to the vendor as the fix:** it was set aside on
@@ -631,7 +680,8 @@ it.
 
 ## Open questions
 
-1. Does the canopy write depth (## Space)? Answer from an eye dump.
+1. Does the canopy write depth (## Space)? Phase 1's stereo score answers it.
+   An eye dump would too.
 2. Can S's swapchain images be acquired early, so the copy happens when S
    arrives rather than at its slot? This needs the OpenXR swapchain acquire
    rules checked.
@@ -794,3 +844,55 @@ ghosting, but the edges of some objects shimmer in fast movement.
 - **Decision: declined for now** (## Declined). In VR the runtime fills a
   missed slot anyway, so a better filler is pure gain. In flat a missed frame
   is only a lower frame rate.
+
+### 2026-10-30: VectorXR
+
+What was read:
+[DienerTech/vectorxr](https://github.com/DienerTech/vectorxr/tree/87e575fb21cde8ad9ef87763c67471b7d0b7ee0a)
+at `87e575fb` (v0.20.0, 2026-10-29), not built or run. Its issues could not be
+read from this session. Paths below are in that repository.
+
+- **What it is.** An OpenXR API layer with five modules, frame generation among
+  them (`README.md:3-28`). Frame generation first landed on 2026-10-04 and
+  shipped as experimental in v0.19.0 on 2026-10-13. It was tested on an RTX
+  5090 with a Pimax Crystal Super on PiOpenXR and on SteamVR
+  (`docs/usage.md:683-687`). The licence is MPL-2.0 (`LICENSE`), copyleft per
+  file, so its ideas can be used but not its code.
+- **What it confirms.**
+  - Extrapolation reads only the newest frame and adds no latency. Uncertain
+    motion "shrinks toward a still image instead of blending two positions,
+    which would ghost" (`layer/shaders/framegen.hlsl:2212-2214`).
+  - Its head-movement shift is this design's splat: the nearest pixel wins, the
+    winner's source is recorded, and holes are filled by stretching the
+    background (`framegen.hlsl:4187-4194`, `:4306-4320`).
+  - Its engagement is adaptive. Auto steps up when more than 30% of a second's
+    frames miss, and probes back down after five steady seconds
+    (`docs/architecture.md:98-103`).
+  - Cost: 3.1 ms per real frame for both eyes at 6240x6280 per eye, 4x
+    Extrapolate at Balanced flow quality on D3D12 on a 5090, and 3.8 ms at
+    Quality. "slower GPUs and Direct3D 11 and Vulkan take more"
+    (`docs/usage.md:1003-1006`). That includes optical flow, so H5's 1.5 ms
+    target for a flow-free pass at smaller sizes stands.
+- **Where it falls short for Elite.**
+  - Motion is estimated from colour: it "does not use game motion vectors yet"
+    (`docs/usage.md:996-998`). Its engine-vector path is research and D3D12
+    only (`layer/src/openxr_layer.cpp:16296-16316`).
+  - A D3D11 game's "depth stays private and never reaches the runtime"
+    (`layer/include/depthxr/framegen_d3d11_bridge.h:35-37`). Over EDVR it would
+    be colour flow with head rotation removed.
+  - "There is no HUD masking yet" (`docs/usage.md:999`).
+  - Its cockpit and world classes (head-fixed nearer than 4 m, world from 30 m,
+    no model between) are research and off by default
+    (`layer/include/depthxr/framegen_plan.h:955-959`).
+  - The other eye checks depth but supplies no colour for holes
+    (`docs/architecture.md:185-199`).
+- **Taken into the design.**
+  - H6's risk, its fallback and failure class 11 (## Where it runs). EDVR has
+    never measured how far PiOpenXR predicts.
+  - The splat winner's guard and the fill's inset (## The synthesis pass).
+  - The start and finish of each S's GPU work (## Pacing: Lock and Fill).
+  - The half-rate report with the settings to check (## Vendor smoothing, and
+    the forward path).
+  - The canopy answer from the stereo score (Phase 1).
+  - VectorXR as a second Phase 0 reference.
+- **Not taken:** its high-priority D3D12 queue (## Declined).
