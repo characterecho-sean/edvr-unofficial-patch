@@ -6591,6 +6591,9 @@ ID3D11Texture2D* uiLayerComposite(uint64_t sequence, uint32_t eye, ID3D11Texture
     if (eye > 1 || !frame || !region || !layerUv) return nullptr;
     g_seedCensus.door(eye, sequence);
     Eye& e = g_eye[eye];
+    // C1a (crisp_reticle.h): while the crisp arming is up, each eye-frame reaching the composite is counted for the press line, with whether a gunsight quad had been taken into the eye's
+    // weapons layer in that frame (the test the mark's composite count below makes). With the key off the arming is never up: one relaxed load.
+    if (scopeZoomCrispArmed()) scopeZoomNoteCrispFrame(eye, e.wMarks != 0 && e.wSeq == sequence);
     // The scope's gunsight mark (A3): an eye-frame whose weapons layer held a mark is counted once, as the composite below served it -- the tonemap difference, the plain add, or not
     // at all (the layer's content never reached the picture) -- whichever way this function returns. The press line states the three counts.
     struct MarkFrame {

@@ -10338,8 +10338,8 @@ _HN =r"[+-]?\d+(?:\.\d+)?"
 # F<n> tags are the on-foot arc's features; S<n> (S0: scope zoom, measure only, src\d3d11\scope_zoom_s0.h) is the scope zoom arc's. The S0 census rule also reads the pixel
 # probe's own closing line, which carries no tag (H_S0_PROBE_RE): health_scan hands it to the S0 rules. B<n> (B3: the scoped sniper's lens at full detail,
 # src\d3d11\scope_zoom_b3.h) is the scope zoom arc's second family; a B tag closes at once, (B3), so a format name such as (B8G8R8A8 and a parenthesis that only says (B8 = 0) in words
-# (the visor override's line) are not read as tags.
-HEALTH_TAG_RE = re.compile(r"\((F\d+[a-z]?(?:/F\d+[a-z]?)*|S\d+|B\d+(?=\)))(?![0-9A-Za-z])")
+# (the visor override's line) are not read as tags. C<n> (C1: crisp sights, src\d3d11\crisp_reticle.h) is the third, and closes at once the same way.
+HEALTH_TAG_RE = re.compile(r"\((F\d+[a-z]?(?:/F\d+[a-z]?)*|S\d+|[BC]\d+(?=\)))(?![0-9A-Za-z])")
 H_S0_PROBE_RE = re.compile(r"pixel probe: frame \d+ done -- ")
 HEALTH_STAMP_RE = re.compile(r"^\[(\d{2}):(\d{2}):(\d{2})\.(\d{3})\]\s*")
 HEALTH_TIME_RE = re.compile(r"^(\d{1,2}):(\d{2})(?::(\d{2})(?:\.(\d{1,3}))?)?$")
@@ -15177,6 +15177,67 @@ def _hj_b3(rows, ctx):
     return ("OK", base + "; last press %s: %s" % (good[-1][0]["n"], good[-1][3]) + tail)
 
 
+# ---- C1a: the crisp reticle (src\d3d11\crisp_reticle.h formatAnnounce and formatPress; src\d3d11\native_on_foot.cpp s1::tick and endPress; docs\design-vr-scope-magnification-2026-10-28.md section 12) ----
+# Two lines, both tagged (C1): the announce (once, and at every change of experimental.native_on_foot_ads_crisp_reticle) and one press line for each press of the sights the key was on and the
+# gate eligible in (the weapon is not one the scope lens names). The gate arms the gunsight quad's take into the sharp weapons layer for the whole press (from the raise to the end of the
+# lower); the press line carries the frame thread's ticks (eligible, armed), the weapons composite's eye-frames with the arming up and those with no quad taken, the quad draws taken per eye
+# and by which depth path, and how the layer's content was composited. A key off writes the announce and no press line.
+H_C1 = "crisp reticle (C1)"
+H_C1_ANNOUNCE_RE = r"crisp reticle \(C1\): key (?P<key>on|off); .*$"
+H_C1_PRESS_RE = (r"crisp reticle \(C1\): press (?P<n>\d+) item (?P<item>\S+) scope (?P<scope>yes|no|unknown) key on; eligible ticks (?P<elig>\d+), armed ticks (?P<armt>\d+); "
+                 r"armed eye-frames L (?P<al>\d+) R (?P<ar>\d+), with no quad taken L (?P<nl>\d+) R (?P<nr>\d+); "
+                 r"quad taken L (?P<tl>\d+) R (?P<tr>\d+) \(depth path seeded (?P<ps>\d+) read-only (?P<pr>\d+) tests off (?P<pt>\d+) untested (?P<pu>\d+)\); "
+                 r"composited matched (?P<cm>\d+) plain (?P<cp>\d+) none (?P<cn>\d+); stood down (?P<sd>\d+)$")
+C1_MIN_TICKS = 10   # a press shorter than this many armed ticks (about a tenth of a second) is a tap: a frame or two of pipeline delay at its edges can leave it with no quad
+
+
+def _c1_press_verdict(p):
+    """(status, reasons, note) for one press line. PARTIAL, with every reason that applies, when the gate was eligible on at least C1_MIN_TICKS ticks and never armed; when it was armed on
+    at least that many ticks and no gunsight quad was taken out of the scene in either eye; when quads were taken and the layer's content never reached the picture (composited none above
+    matched and plain together); or when every composite was the plain add (brighter than stock). A shorter press is judged OK with its counts in the note: its edges can lose a frame."""
+    def n(k):
+        return int(p[k])
+    taken = n("tl") + n("tr")
+    note = ("item %s scope %s; eligible ticks %d, armed ticks %d; armed eye-frames L %d R %d, with no quad L %d R %d; quad taken L %d R %d (depth path seeded %d, read-only %d, tests off %d, untested %d); "
+            "composited matched %d plain %d none %d; stood down %d" % (p["item"], p["scope"], n("elig"), n("armt"), n("al"), n("ar"), n("nl"), n("nr"), n("tl"), n("tr"), n("ps"), n("pr"), n("pt"),
+                                                                       n("pu"), n("cm"), n("cp"), n("cn"), n("sd")))
+    reasons = []
+    if n("elig") >= C1_MIN_TICKS and n("armt") == 0:
+        reasons.append("the gate was eligible on %d ticks and never armed (the game's ADS weight read 0 throughout, or the weapon's entry was never known): the quad stayed in the scene" % n("elig"))
+    elif n("armt") >= C1_MIN_TICKS and taken == 0:
+        reasons.append("armed on %d ticks and no gunsight quad was taken out of the scene (taken L 0 R 0; armed eye-frames L %d R %d, with no quad L %d R %d; stood down %d): the quad stayed in the scene, "
+                       "or the sharp weapons layer is not up (no temporal anti-aliasing mode) or stood down" % (n("armt"), n("al"), n("ar"), n("nl"), n("nr"), n("sd")))
+    if taken > 0 and n("armt") >= C1_MIN_TICKS and n("al") + n("ar") == 0:
+        reasons.append("the weapons composite never saw the arming (armed eye-frames L 0 R 0 against %d armed ticks) though %d quad draw(s) were taken: the press line's door counts did not run" % (n("armt"), taken))
+    if taken > 0 and n("cn") > n("cm") + n("cp"):
+        reasons.append("the layer's content never reached the picture on most eye-frames (composited none %d against matched %d, plain %d)" % (n("cn"), n("cm"), n("cp")))
+    if n("cp") > 0 and n("cm") == 0:
+        reasons.append("every composite was the plain add (plain %d, matched 0): the reticle is brighter than the game draws it" % n("cp"))
+    return ("PARTIAL" if reasons else "OK", reasons, note)
+
+
+def _hj_c1(rows, ctx):
+    """C1a, the crisp reticle: the announce and one press line a press of the sights the key was on in and the gate eligible in. Each press has a verdict (_c1_press_verdict); the rule is
+    PARTIAL when any press is, OK otherwise. IDLE with the announce alone (the key off, or no press of a weapon the scope lens does not name). The announce is not needed (a --since window
+    can cut it); with neither line the rule is not present."""
+    announce, press = (rows.get(k, []) for k in ("announce", "press"))
+    if not announce and not press:
+        return None
+    head = "key %s" % announce[-1]["key"] if announce else "no announce line in this window"
+    if not press:
+        return ("IDLE", "%s; no press line in this window (the key off, or no press of the sights of a weapon the scope lens does not name)" % head)
+    verdicts = [(p,) + _c1_press_verdict(p) for p in press]
+    taken = sum(int(p["tl"]) + int(p["tr"]) for p in press)
+    base = "%s; %d press line(s), %d quad draw(s) taken in all" % (head, len(press), taken)
+    bad = [v for v in verdicts if v[1] != "OK"]
+    good = [v for v in verdicts if v[1] == "OK"]
+    if bad:
+        text = base + "; " + "; ".join("press %s PARTIAL: %s" % (v[0]["n"], "; ".join(v[2])) for v in bad[:6])
+        text += "; last press %s: %s" % ((good[-1] if good else bad[-1])[0]["n"], (good[-1] if good else bad[-1])[3])
+        return ("PARTIAL", text)
+    return ("OK", base + "; last press %s: %s" % (good[-1][0]["n"], good[-1][3]))
+
+
 def _hj_desktop_window(rows, ctx):
     """The desktop window (src\\common\\desktop_window_math.h; visual.desktop_window): ran is a setting line that names a mode other than game, applied is a Present drawn,
     counted by the 10 s lines and by the line that ends an activation (a session whose 3D was on for less than 10 s has only the second). NEVER APPLIED when the setting
@@ -16042,6 +16103,11 @@ HEALTH_RULES = (
         ("press", H_B3_PRESS_RE),
         ("runtime", H_B3_RUNTIME_RE),
     ), _hj_b3),
+    # C1 (crisp sights; src\d3d11\crisp_reticle.h, native_on_foot.cpp): the announce and one press line a press of the sights the gate was eligible in, both tagged (C1).
+    _hrule(H_C1, ("C1",), (H_C1,), (
+        ("announce", H_C1_ANNOUNCE_RE),
+        ("press", H_C1_PRESS_RE),
+    ), _hj_c1),
     # World scale: lines of the runtime log, which carry no build tag (health_scan_runtime reads them); no graphics-log tag dispatches to this rule.
     _hrule(H_WORLD, (), (H_WORLD_LABEL,), (
         ("change", H_WORLD_CHANGE),
@@ -16117,7 +16183,7 @@ def health_scan(text, since=None, until=None):
                 u[0] += 1
                 u[1] = u[1] or raw.strip()[:160]
             continue
-        if "(F" not in raw and "(S" not in raw and "(B" not in raw and "pixel probe: frame " not in raw:
+        if "(F" not in raw and "(S" not in raw and "(B" not in raw and "(C" not in raw and "pixel probe: frame " not in raw:
             continue
         m = HEALTH_TAG_RE.search(raw)
         if not m and not H_S0_PROBE_RE.search(raw):   # an untagged line is read only when it is the pixel probe's closing line (the S0 census rule's)
@@ -16254,9 +16320,9 @@ def health_report(scan, window="", rules=None):
     if unjudged:
         lines.append("  not judged (detail log off)  %s" % ", ".join(unjudged))
     covered = {t for rule in HEALTH_RULES for t in rule.tags}
-    def tag_key(t):   # F tags newest first as before, then the S tags, then the B tags
-        parts = re.match(r"([FSB])(\d+)", t)
-        return ("FSB".index(parts.group(1)), -int(parts.group(2)), t)
+    def tag_key(t):   # F tags newest first as before, then the S tags, then the B tags, then the C tags
+        parts = re.match(r"([FSBC])(\d+)", t)
+        return ("FSBC".index(parts.group(1)), -int(parts.group(2)), t)
     order = sorted(census, key=tag_key)
     shown = [t for t in order if t not in covered] if not scan.get("all") else order
     if scan.get("all"):
@@ -16996,6 +17062,7 @@ def self_test_health():
     s0_path = os.path.join(repo_root(), "src", "d3d11", "scope_zoom_s0.h")
     s1_path = os.path.join(repo_root(), "src", "d3d11", "scope_zoom_s1.h")
     b3_path = os.path.join(repo_root(), "src", "d3d11", "scope_zoom_b3.h")
+    c1_path = os.path.join(repo_root(), "src", "d3d11", "crisp_reticle.h")
     probe_path = os.path.join(repo_root(), "src", "d3d11", "pixel_probe.cpp")
     try:
         source, swap, f90src, f91src = read_text(src_path), read_text(swap_path), read_text(f90_path), read_text(f91_path)
@@ -17027,6 +17094,7 @@ def self_test_health():
         s0src = read_text(s0_path)
         s1src = read_text(s1_path)
         b3src = read_text(b3_path)
+        c1src = read_text(c1_path)
         probesrc = read_text(probe_path)
     except OSError as e:
         print("health: the DLL source the self-test reads its log formats from is not where it looks (%s)" % e)
@@ -17310,6 +17378,15 @@ def self_test_health():
                 fmts[key] = health_c_format(source, needle)
         if fmts[key] is None:
             raise AssertionError("neither scope_zoom_b3.h nor native_on_foot.cpp has a format holding %r: the --health rule that reads it is out of date" % needle)
+        return health_render(fmts[key], vals)
+
+    def RC1(needle, *vals):
+        """C1's lines (crisp_reticle.h builds both: formatAnnounce and formatPress), from their own format literals."""
+        key = "c1:" + needle
+        if key not in fmts:
+            fmts[key] = health_c_format(c1src, needle)
+        if fmts[key] is None:
+            raise AssertionError("crisp_reticle.h has no format holding %r: the --health rule that reads it is out of date" % needle)
         return health_render(fmts[key], vals)
 
     def RPROBE(needle, *vals):
@@ -21508,6 +21585,46 @@ def self_test_health():
               has=["1 build-tagged lines, 1 tags"], lacks=["UNPARSED"])
         check("B3: the visor override's own line, which says (B8 = 0) in words, is no B tag (a tag closes at once: B3)", [R("EliteDangerous64.exe+0x%llX 0 -> 1 (B8 = 0)", 0x1A2B3C), b3_announce()], 0,
               [("IDLE", B3R)], has=["1 build-tagged lines, 1 tags"], lacks=["UNPARSED"])
+        # ---- the crisp reticle (C1a), rendered from crisp_reticle.h's own format literals ----
+        C1R = H_C1
+
+        def c1_announce(key="on"):
+            return RC1("crisp reticle (C1): key %s; the gunsight", key)
+
+        def c1_press(n=1, item="$wpn_m_assaultrifle_kinetic_fauto_name;", scope="no", elig=300, armt=280, al=270, ar=270, nl=10, nr=10, tl=260, tr=260, seeded=520, ro=0, off=0,
+                     untested=0, matched=520, plain=0, none=0, sd=0):
+            """A press line as the DLL emits it: by default a 280-tick press of a weapon the lens does not name, a quad taken in each eye on every armed eye-frame but ten, and every composite matched."""
+            return RC1("crisp reticle (C1): press %u item %s scope %s", n, item, scope, elig, armt, al, ar, nl, nr, tl, tr, seeded, ro, off, untested, matched, plain, none, sd)
+
+        check("C1: a press with the quad taken in both eyes and composited by the tonemap difference is OK", [c1_announce(), c1_press()], 0, [("OK", C1R)],
+              has=["key on; 1 press line(s), 520 quad draw(s) taken in all", "eligible ticks 300, armed ticks 280", "quad taken L 260 R 260", "composited matched 520 plain 0 none 0"], lacks=["UNPARSED"])
+        check("C1: armed on 120 ticks and no quad taken in either eye is PARTIAL", [c1_announce(), c1_press(armt=120, tl=0, tr=0, seeded=0, matched=0, nl=100, nr=100)], 0, [("PARTIAL", C1R)],
+              has=["press 1 PARTIAL: armed on 120 ticks and no gunsight quad was taken out of the scene (taken L 0 R 0; armed eye-frames L 270 R 270, with no quad L 100 R 100; stood down 0)"], lacks=["UNPARSED"])
+        check("C1: a quad taken in one eye only is not a failure (the other eye's frames are counted beside it)", [c1_announce(), c1_press(tl=0, nl=270)], 0, [("OK", C1R)])
+        check("C1: eligible on 150 ticks and never armed is PARTIAL", [c1_announce(), c1_press(elig=150, armt=0, al=0, ar=0, nl=0, nr=0, tl=0, tr=0, seeded=0, matched=0)], 0, [("PARTIAL", C1R)],
+              has=["the gate was eligible on 150 ticks and never armed"])
+        check("C1: a tap of the sights (3 armed ticks, no quad) is OK, its counts in the line", [c1_announce(), c1_press(elig=4, armt=3, al=2, ar=2, nl=2, nr=2, tl=0, tr=0, seeded=0, matched=0)], 0, [("OK", C1R)],
+              has=["armed ticks 3"])
+        check("C1: quads taken with no armed eye-frame counted is PARTIAL (the door's counts did not run)", [c1_announce(), c1_press(al=0, ar=0, nl=0, nr=0)], 0, [("PARTIAL", C1R)],
+              has=["the weapons composite never saw the arming (armed eye-frames L 0 R 0 against 280 armed ticks) though 520 quad draw(s) were taken"])
+        check("C1: quads taken and nothing composited is PARTIAL", [c1_announce(), c1_press(matched=0, plain=0, none=520)], 0, [("PARTIAL", C1R)],
+              has=["the layer's content never reached the picture on most eye-frames (composited none 520 against matched 0, plain 0)"])
+        check("C1: every composite the plain add is PARTIAL", [c1_announce(), c1_press(matched=0, plain=520)], 0, [("PARTIAL", C1R)],
+              has=["every composite was the plain add (plain 520, matched 0)"])
+        check("C1: the tests-off depth path is a count in the line and no failure", [c1_announce(), c1_press(seeded=0, off=520)], 0, [("OK", C1R)], has=["tests off 520"])
+        check("C1: a bad press beside a good one is PARTIAL and names the last good press", [c1_announce(), c1_press(n=1), c1_press(n=2, armt=90, tl=0, tr=0, seeded=0, matched=0)], 0, [("PARTIAL", C1R)],
+              has=["press 2 PARTIAL", "last press 1:"])
+        check("C1: the announce alone with the key off is IDLE", [c1_announce("off")], 0, [("IDLE", C1R)], has=["key off; no press line in this window"])
+        check("C1: a press line with no announce (a --since window) is judged", [c1_press()], 0, [("OK", C1R)], has=["no announce line in this window"])
+        check("C1: a press line that drifted from its pattern is unparsed", ["crisp reticle (C1): press x item y"], 4, [("UNPARSED", C1R)])
+        check("C1: a press line without the depth path is unparsed", [c1_press().replace(" (depth path seeded 520 read-only 0 tests off 0 untested 0)", "")], 4, [("UNPARSED", C1R)])
+        check("C1: an announce that drifted from its pattern is unparsed", ["crisp reticle (C1): key maybe; the gunsight"], 4, [("UNPARSED", C1R)])
+        check("C1: no C1 line leaves the rule not present (the key off writes no press line; a build without it, or a window outside it)", [inst141(), s0_watch()], 0, [], has=["not present", C1R],
+              lacks=["UNPARSED"])
+        check("C1: its tag is listed with --health-all, after the B tags, and B3's rule is untouched by it", [b3_announce(), b3_press(), c1_announce(), c1_press()], 0, [("OK", B3R), ("OK", C1R)],
+              has=["every tag (* has a rule above):", "B3", "C1"], extra=["--health-all"])
+        check("C1: (C words, a format name and a C tag with a letter after it are no tag", ["pipeline (C16 chosen (C words) (C1x)", c1_announce()], 0, [("IDLE", C1R)],
+              has=["1 build-tagged lines, 1 tags"], lacks=["UNPARSED"])
         # ---- the desktop window: the graphics log's untagged lines, rendered from the C format strings in src\common\desktop_window_math.h and src\d3d11\desktop_window.cpp ----
         dwsrc = read_text(os.path.join(repo_root(), "src", "common", "desktop_window_math.h"))
         dwcpp = read_text(os.path.join(repo_root(), "src", "d3d11", "desktop_window.cpp"))

@@ -278,6 +278,9 @@ std::atomic<float> g_scopeZoomRefDeg{static_cast<float>(edvr::scopezoom::kLensRe
 // entry) with fix.native_on_foot_ads_scope_zoom on and the sight eye at both, the game draws the LEFT eye as the zoomed view and the lens samples that picture (scope_zoom_b3.h), with a black edge
 // in each eye's outer view while the zoom stands; off: the lens is the digital zoom of the right eye (A), with no edge.
 std::atomic<bool> g_scopeZoomFullKey{false};
+// C1a (live, TEMPORARY): experimental.native_on_foot_ads_crisp_reticle, on | off, default on: the gunsight quad of every weapon the scope lens does not name is taken out of the scene into
+// the sharp weapons layer for the whole press of the sights (crisp_reticle.h). Off: today's behaviour, nothing new runs.
+std::atomic<bool> g_crispReticleKey{true};
 // B3's instruments, written by the draw/render thread and read by the frame thread at a press's end: a press with B3 asked is open (the draw path counts the eyes' draws, the constants buffer's
 // shadow keeps the shadow constants); the eye-sized draws into each eye since the frame thread's last tick; the readout pin's frames taken on one eye, and refused for want of a pair
 // while eye 0 was zoomed; the shadow constants' rows (cb1 298 to 326) changed from the eye's last frame, and between the eyes, inside the zoomed span (0) and outside it (1).
@@ -1241,6 +1244,14 @@ void readKey() {
                                    "an equal black edge takes the outer part of each eye's view meanwhile"
                                  : "the scope's lens is the digital zoom of the right eye's picture (A), with no edge");
         g_scopeZoomFullKey.store(full, std::memory_order_relaxed);
+        // C1a (live, TEMPORARY): the crisp reticle, for every weapon the lens does not name. One line at the first read and one at each change; the tick's announce (crisp reticle (C1)) follows.
+        const bool crispOn = cfg.getString("experimental.native_on_foot_ads_crisp_reticle", "on") == "on";
+        if (first || crispOn != g_crispReticleKey.load(std::memory_order_relaxed))
+            Log::get().note("native on foot ADS crisp reticle (C1, TEMPORARY): experimental.native_on_foot_ads_crisp_reticle is %s -- %s", crispOn ? "on" : "off",
+                            crispOn ? "while you aim down sights the gunsight quad of every weapon the scope lens does not name is drawn into the sharp weapons layer and composited at the game's "
+                                      "tonemap, out of the bloom input, from the raise to the end of the lower (never at the hip)"
+                                    : "the gunsight quad is drawn in the scene as the game draws it (the scope lens still takes the optical sights' quad)");
+        g_crispReticleKey.store(crispOn, std::memory_order_relaxed);
     }
     // F93b (TEMPORARY A/B, live): the ADS sight lock's input (fix.native_on_foot_ads_eye_steady).
     {
@@ -34326,6 +34337,34 @@ bool nativeOnFootCoatPackSkips(ID3D11DeviceContext* ctx, uint32_t indexCount, ui
     return true;
 }
 
+// ---- C1b: the sight census's withhold cycle (sight_withhold.h) ---------------------------------------------------------------------------------------------------------------------------
+// Draw thread, owner context, an eye draw, only while a manual eye dump taken with the sights up has the cycle live: true when this draw is the candidate the frame's cycle names. Called after
+// the draw census recorded the draw, so a census taken with the dump still lists what the game submitted.
+bool nativeOnFootSightWithholdSkips(ID3D11DeviceContext* ctx, char kind, uint32_t count, uint32_t instances, const void* rtvResource) {
+    (void)ctx;
+    (void)kind;
+    if (!sightwithhold::live() || !nativeOnFootActive()) return false;
+    const uint32_t frame = g_f44Frame.load(std::memory_order_relaxed);
+    int eye = f44::eyeOfDraw(frame);
+    if (eye != 0 && eye != 1) {
+        char src = 0;
+        eye = f44::targetEye(rtvResource, &src);
+        if (eye != 0 && eye != 1) eye = -1;
+    }
+    return sightwithhold::skips(frame, eye, bindingShaderHash(BindSlot::Vs), count, instances, [] { return bindingShaderHash(BindSlot::Ps); });
+}
+
+// The eye dump key's job (temporal_pass.cpp beginEyeRun, a manual dump only): the cycle starts with the next frame, only while the sights are up.
+bool nativeOnFootSightWithholdArm() {
+    if (!nativeOnFootActive()) return false;
+    const uint32_t frame = g_f44Frame.load(std::memory_order_relaxed);
+    if (!sightwithhold::arm(frame)) return false;
+    Log::get().note("sight census (C1b): a manual eye dump with the sights up: from frame %u on, each of the dump's frames leaves one candidate draw of the sight's effects out of the scene "
+                    "(%u candidates, in order; the frame of the key press and the ones before it are untouched); the dump's json records which, and tools\\sight_candidates.py reads it.",
+                    frame, sightwithhold::kCount);
+    return true;
+}
+
 // ---- F158 (MEASURE ONLY): the local body's draws over the first 30 s on foot ----------------------------------------------------------------------------------------------------
 // F157 leaves the coat's full-detail pack out from the first second it is armed, yet the pack was in view for the first seconds after spawning: the game drew it another way at first.
 // A window of 30 s opens when native on foot begins and when F144 decides the coat outfit (native_on_foot_f158.h has the rules). While it runs, the draw path lists every kind of draw the
@@ -35425,6 +35464,9 @@ struct State {
     uint64_t itemMs = 0;
     double adsDeg = std::numeric_limits<double>::quiet_NaN(), targetM = std::numeric_limits<double>::quiet_NaN(), refDeg = std::numeric_limits<double>::quiet_NaN();
     sz::LensTickStats ts;   // this press: the gate's verdicts per tick, the jitter readings, the angle between c through S and c at the far point
+    bool crispAnnounced = false, crispAnnouncedKey = false;
+    bool crispSeen = false;                     // C1a: the key was on and the gate eligible on some tick of this press (the press line is written)
+    uint32_t crispEligibleTicks = 0, crispArmedTicks = 0;   // ... and the ticks of this press it was eligible, and armed
 } g_s1;
 
 void announce(State& s, bool key, double ref) noexcept {
@@ -35434,6 +35476,13 @@ void announce(State& s, bool key, double ref) noexcept {
     s.announced = true;
     s.announcedKey = key;
     s.announcedRef = ref;
+}
+void announceCrisp(State& s, bool key) noexcept {
+    char line[512];
+    edvr::crisp::formatAnnounce(line, sizeof(line), key);
+    Log::get().note("%s", line);
+    s.crispAnnounced = true;
+    s.crispAnnouncedKey = key;
 }
 // ---- B3: the left eye drawn as the zoomed view (scope_zoom_b3.h; docs\design-vr-scope-magnification-2026-10-28.md, section 11) ------------------------------------------------------------
 // The frame thread decides, once a tick: whether the window is held (b3Gate: the key, the lens's gate, a rendered entry, the sight eye at both, the share at full weight, the left eye's rows),
@@ -35662,6 +35711,28 @@ void endPress(State& s) noexcept {
     char line[sz::kLensPressLineBytes];
     sz::formatLensPress(line, sizeof(line), pl);
     Log::get().note("%s", line);
+    if (s.crispSeen) {   // C1a: the crisp reticle's line, for a press the key was on and the gate eligible in (the layer counts the quad the same way whoever armed it)
+        edvr::crisp::PressLine cl;
+        cl.press = s.press;
+        cl.item = s.item.name;
+        cl.scope = loadout::scopeName(s.item.scope);
+        cl.eligibleTicks = s.crispEligibleTicks;
+        cl.armedTicks = s.crispArmedTicks;
+        scopeZoomCrispTake(&cl.door);
+        cl.taken[0] = pl.d.markRedirected[0];
+        cl.taken[1] = pl.d.markRedirected[1];
+        cl.pathSeeded = pl.d.markPath[sz::kMarkPathSeeded];
+        cl.pathReadOnly = pl.d.markPath[sz::kMarkPathSeededReadOnly];
+        cl.pathTestsOff = pl.d.markPath[sz::kMarkPathTestsOff];
+        cl.pathUntested = pl.d.markPath[sz::kMarkPathUntested];
+        cl.matched = pl.d.markComposite[sz::kMarkCompositeMatched];
+        cl.plain = pl.d.markComposite[sz::kMarkCompositePlain];
+        cl.none = pl.d.markComposite[sz::kMarkCompositeNone];
+        cl.standDowns = pl.d.markStandDowns;
+        char crispLine[edvr::crisp::kPressLineBytes];
+        edvr::crisp::formatPress(crispLine, sizeof(crispLine), cl);
+        Log::get().note("%s", crispLine);
+    }
 }
 
 void tick(uint64_t nowMs) noexcept {
@@ -35669,6 +35740,8 @@ void tick(uint64_t nowMs) noexcept {
     s0::Vr& v = s0::g_vr;
     ScopeZoomFrame out;   // verdict kIdle: nothing asked of the lens
     if (g_install != InstallState::Armed || runtimeFlatProfile()) {   // not armed, or the flat profile: a press still open ends here, with its line
+        scopeZoomCrispPublish(false);
+        nativeOnFootPublishAdsUp(false);
         scopeZoomPublish(out);
         if (s.open) endPress(s);
         b3Off(nowMs);
@@ -35681,6 +35754,8 @@ void tick(uint64_t nowMs) noexcept {
     const double ref = static_cast<double>(g_scopeZoomRefDeg.load(std::memory_order_relaxed));
     if (!s.announced || key != s.announcedKey || ref != s.announcedRef) announce(s, key, ref);   // said when the tick first runs (so --health can tell a build that never ran S1) and at each change
     announceB3(s, g_scopeZoomFullKey.load(std::memory_order_relaxed));   // B3: the same for the full-detail key
+    const bool crispKey = g_crispReticleKey.load(std::memory_order_relaxed);
+    if (!s.crispAnnounced || crispKey != s.crispAnnouncedKey) announceCrisp(s, crispKey);   // C1a: the same for the crisp reticle key
     scopeZoomSetTemporalZoom(&nativeTemporalZoom);   // B3: the doors ask the temporal pass whether eye 0 is zoomed in their frame (a pointer store; the door links without the pass)
     const bool onFoot = nativeOnFootActive();
     const bool ads = onFoot && g_adsState != kAdsIdle;
@@ -35696,10 +35771,14 @@ void tick(uint64_t nowMs) noexcept {
         s.easeS = 0.0;
         s.adsDeg = s.targetM = std::numeric_limits<double>::quiet_NaN();
         s.ts = sz::LensTickStats{};
+        s.crispSeen = false;
+        s.crispEligibleTicks = s.crispArmedTicks = 0;
         scopeZoomPressBegin(s.press);
         beginB3Press(s);
     }
+    nativeOnFootPublishAdsUp(ads);   // C1b: the sights are up (the eye dump's withhold runs only then)
     if (!ads) {
+        scopeZoomCrispPublish(false);   // C1a: no press of the sights, no arming
         if (s.open) {   // the press ended: the door's counters, one line
             scopeZoomPublish(out);
             endPress(s);
@@ -35749,6 +35828,24 @@ void tick(uint64_t nowMs) noexcept {
         }
     }
     const sz::LensVerdict verdict = sz::lensGate(gi);
+    {   // C1a: the crisp reticle's gate (crisp_reticle.h), published every tick of a press. With the key off it publishes down and counts nothing.
+        edvr::crisp::GateIn cg;
+        cg.keyOn = crispKey;
+        cg.onFoot = onFoot;
+        cg.adsUp = true;   // past the check above: a press of the sights is open
+        cg.lensKeyOn = key;
+        cg.itemKnown = s.item.coherent && s.item.scope != loadout::kScopeUnknown;
+        cg.lensOwned = gi.optical && gi.m >= sz::kLensMinM;
+        cg.wFresh = v.wSeen && s0::freshMs(nowMs, v.wMs);
+        cg.w = v.w;
+        const bool eligible = edvr::crisp::eligible(cg), armedNow = edvr::crisp::armed(cg);
+        if (eligible) {
+            s.crispSeen = true;
+            ++s.crispEligibleTicks;
+        }
+        if (armedNow) ++s.crispArmedTicks;
+        scopeZoomCrispPublish(armedNow);
+    }
     out.verdict = static_cast<uint32_t>(verdict);
     out.press = s.press;
     out.mTarget = static_cast<float>(gi.m);

@@ -64,6 +64,8 @@ bool readFrame(ScopeZoomFrame* out) noexcept {
 // ---- the press's counters --------------------------------------------------------------------------------------------------------------------------------------------------
 std::mutex g_mu;
 sz::LensDoorStats g_stats;
+crisp::DoorStats g_crisp;                 // C1a: the press's eye-frames with the crisp arming up, and those with no quad taken (g_mu)
+std::atomic<uint64_t> g_crispStampUs{0};   // C1a: when the frame thread last published the crisp arming up (0: down)
 std::atomic<uint32_t> g_pressId{0};   // read by the draw path (the mark's stand-down), set by the frame thread
 
 sz::B3Press g_b3;   // the door's half of the B3 press line (under g_mu)
@@ -407,6 +409,28 @@ void scopeZoomPublish(const ScopeZoomFrame& frame) {
 
 bool scopeZoomWanted() { return g_active.load(std::memory_order_relaxed) || g_inflight.load(std::memory_order_relaxed) > 0; }
 
+void scopeZoomCrispPublish(bool armed) { g_crispStampUs.store(armed ? nowUs() : 0, std::memory_order_relaxed); }
+
+bool scopeZoomCrispArmed() {
+    const uint64_t stamp = g_crispStampUs.load(std::memory_order_relaxed);
+    if (!stamp) return false;
+    const uint64_t t = nowUs();
+    return t >= stamp && sz::lensFresh(t - stamp);
+}
+
+void scopeZoomNoteCrispFrame(uint32_t eye, bool quadTaken) {
+    if (eye > 1) return;
+    std::lock_guard<std::mutex> lock(g_mu);
+    ++g_crisp.armed[eye];
+    if (!quadTaken) ++g_crisp.noQuad[eye];
+}
+
+void scopeZoomCrispTake(crisp::DoorStats* out) {
+    if (!out) return;
+    std::lock_guard<std::mutex> lock(g_mu);
+    *out = g_crisp;
+}
+
 bool scopeZoomMarkArmed() {
     if (!g_active.load(std::memory_order_relaxed)) return false;
     ScopeZoomFrame f;
@@ -437,6 +461,7 @@ void scopeZoomPressBegin(uint32_t press) {
     std::lock_guard<std::mutex> lock(g_mu);
     g_stats = sz::LensDoorStats{};
     g_b3 = sz::B3Press{};
+    g_crisp = crisp::DoorStats{};
     g_pressId.store(press, std::memory_order_release);
 }
 void scopeZoomSetTemporalZoom(ScopeZoomTemporalFn fn) { g_temporalZoom.store(fn, std::memory_order_release); }

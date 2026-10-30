@@ -42,6 +42,7 @@
 #include <DirectXPackedVector.h>
 #include <wrl/client.h>
 
+#include "../../src/d3d11/crisp_reticle.h"   // C1a: the crisp reticle's arming gate (pure)
 #include "../../src/d3d11/draw_state_describe.h"
 #include "../../src/d3d11/flat_ui_layer_math.h"
 #include "../../src/d3d11/menu_flat_rows.h"
@@ -174,6 +175,30 @@ static void scopeMarkTests() {
         // and the facts it hands the rule are the ones the rule's own flag reads: with the hash read and the flag false the pair alone is not the family
         UiFamilyFacts bare = hdrFacts(kUiVsScopeMark, kUiPsScopeMark);
         check(uiLayerFamilyFor(bare) == UiLayerFamily::kNone, "the gate: the pair with the flag unset is no family");
+    }
+
+    // C1a: THE SAME GATE, ARMED BY THE CRISP RETICLE'S GATE (crisp_reticle.h) in place of the lens': a weapon the scope lens does not name has its quad named the same family, taken the same way into the
+    // same weapons layer, composited the same way. vscreen.cpp asks scopeZoomMarkArmed() || scopeZoomCrispArmed() (scope_zoom_test scans it); here the rule behind the second answer drives the facts.
+    {
+        edvr::crisp::GateIn cg;
+        cg.keyOn = cg.onFoot = cg.adsUp = true;   // the scope zoom off: no lens, every sight served
+        cg.wFresh = true;
+        cg.w = 1.0;
+        Probe viaCrisp;
+        viaCrisp.armed = edvr::crisp::armed(cg);
+        check(viaCrisp.family() == UiLayerFamily::kScopeMark && viaCrisp.armedCalls == 1 && viaCrisp.psCalls == 1 && viaCrisp.surfaceCalls == 1,
+              "C1a gate: a sight the crisp gate arms names the family exactly as the lens' arming does (the pair, 6 indices in 1 instance, the pixel shader, a learned surface)");
+        check(uiLayerFamilyUsesWeaponsLayer(UiLayerFamily::kScopeMark) && uiLayerFamilyTakesHdr(UiLayerFamily::kScopeMark) && uiLayerFamilyEnabled(UiLayerFamily::kScopeMark, false, true),
+              "C1a gate: and it is the weapons layer's family, taken by the HDR route, governed by the weapons half, whoever armed it");
+        cg.adsUp = false;   // the hip
+        Probe hip;
+        hip.armed = edvr::crisp::armed(cg);
+        check(hip.family() != UiLayerFamily::kScopeMark && hip.psCalls == 0, "C1a gate: at the hip the gate is down: the family is not named and the pixel shader's hash is not read");
+        cg.adsUp = true;
+        cg.keyOn = false;
+        Probe off;
+        off.armed = edvr::crisp::armed(cg);
+        check(off.family() != UiLayerFamily::kScopeMark && off.psCalls == 0, "C1a gate: with the key off the gate is down and the family is named for the lens' sights alone, as before C1");
     }
 
     // THE ARMING OF THE FIRST-SEEN LINE: not-armed is structural for the scope mark alone (the lens-armed family that was never taken because its eye's layer was not armed is the one

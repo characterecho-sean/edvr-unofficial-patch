@@ -175,7 +175,7 @@ static bool wiredMark(const std::string& layer, const std::string& vscreen) {
     // The rule itself (the shape, the arming, the pixel shader and the atlas, each alone refusing) is driven behaviourally by sharp_weapons_test; here the hook is only shown to hand the
     // rule the real reads, the pixel shader's hash into f.ps, and to count and blend as the rule's neighbours do.
     return weapons != std::string::npos && mark != std::string::npos && facts != std::string::npos && tail != std::string::npos && weapons < mark && mark < facts && facts < tail &&
-           has(vscreen, "uiLayerFamilyOf(g_state, kind, count, instances)") && has(vscreen, "f.vs, kind, count, instances, [] { return scopeZoomMarkArmed(); }, [] { return bindingShaderHash(BindSlot::Ps); }, "
+           has(vscreen, "uiLayerFamilyOf(g_state, kind, count, instances)") && has(vscreen, "f.vs, kind, count, instances, [] { return scopeZoomMarkArmed() || scopeZoomCrispArmed(); }, [] { return bindingShaderHash(BindSlot::Ps); }, "
                                                                                               "[] { return uiDepthSampledSurfaceSlot() >= 0; }, &f.ps);") &&
            has(layer, "scopeZoomNoteMark(static_cast<uint32_t>(g_draw.eye), g_draw.seq, g_draw.markPath);") && has(layer, "f.blend = shapeOf(bs, &game, destAlphaOne, &gameBlend);") &&
            has(layer, "const UiBlendShape shape = shapeOf(bs, &game, g_draw.destAlphaOne);") && has(layer, "const bool destAlphaOne = markFamily && !uiLayerFormatHasAlpha(g_tc.info.fmt);") &&
@@ -300,7 +300,7 @@ static void wiringTests() {
     const std::string vscreen = readFile("src/d3d11/vscreen.cpp");
     check(vscreen.size() > 100000, "vscreen.cpp is readable from the repository root");
     check(wiredMark(layer, vscreen), "the mark is named for the pair's shape, only while armed, with the atlas test, after the weapons-fire read; the layer counts it and reads its blend with destination alpha as 1 at both places");
-    check(!wiredMark(layer, replaced(vscreen, "[] { return scopeZoomMarkArmed(); }", "[] { return true; }")), "control: a mark named whether or not the lens is armed is not the wiring");
+    check(!wiredMark(layer, replaced(vscreen, "[] { return scopeZoomMarkArmed() || scopeZoomCrispArmed(); }", "[] { return true; }")), "control: a mark named whether or not the lens is armed is not the wiring");
     check(!wiredMark(layer, replaced(vscreen, "[] { return uiDepthSampledSurfaceSlot() >= 0; }", "[] { return true; }")), "control: a mark named without the atlas bound is not the wiring");
     check(!wiredMark(layer, replaced(vscreen, "[] { return bindingShaderHash(BindSlot::Ps); }", "[&] { return f.ps; }")), "control: a pixel shader not read from the binding is not the wiring");
     check(!wiredMark(replaced(layer, "const UiBlendShape shape = shapeOf(bs, &game, g_draw.destAlphaOne);", "const UiBlendShape shape = shapeOf(bs, &game);"), vscreen), "control: a blend read differently at the issue than at the decision is not the wiring");
@@ -1236,6 +1236,8 @@ void infoCheck(Fx& f) {
 }
 }  // namespace
 
+#include "crisp_sights_cases.h"   // C1: the crisp reticle's gate and wiring, the sight census' withhold cycle
+
 int main(int argc, char** argv) {
     if (argc > 1 && std::strcmp(argv[1], "--dry-run") == 0) {
         std::puts("scope_zoom_test: dry-run (no device, no files)");
@@ -1248,6 +1250,11 @@ int main(int argc, char** argv) {
     }
     try {
         wiringTests();
+        c1cases::gateTests();
+        c1cases::lineTests();
+        c1cases::doorTests();
+        c1cases::withholdTests();
+        c1cases::wiringTests();
         scopeZoomSetTemporalZoom(&nativeTemporalZoom);
         Fx f(hardware);
         lensTests(f);

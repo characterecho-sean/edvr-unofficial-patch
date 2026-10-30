@@ -930,7 +930,9 @@ they were there (flown 2026-09-07).
      reference FOV is the developer tier's `experimental.native_on_foot_ads_scope_zoom_fov`
      row, and the `experimental.native_on_foot_ads_scope_zoom_full_detail` row, on | off, default off, the user's choice of the scoped
      Executioner's optic: on takes the lens from the left eye drawn as the zoomed view, at full detail, with an equal black edge in each eye's outer view
-     while the zoom stands; off is the digital zoom with no edge); **Body and
+     while the zoom stands; off is the digital zoom with no edge), and the temporary `experimental.native_on_foot_ads_crisp_reticle` row, on | off, default on
+     (C1a): the gunsight quad of every weapon the scope lens does not name is drawn into the sharp weapons layer for the whole press of the sights, crisp and out of the bloom;
+     off is the game's own draw in the scene); **Body and
      view** (Eye height, Weapon view offset, Weapon eye forward, Visor in
      breathable air); **HUD** (HUD distance, HUD size, HUD
      element scale, HUD spread, HUD follow). The headings are the ini's own

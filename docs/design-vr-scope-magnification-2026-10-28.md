@@ -36,30 +36,25 @@ game's own zoom as a magnified picture inside the scope's lens. The rest of the 
 - **ruled out (cost or brief):** a third camera pass (C), magnifying in DLSS's input (E), a whole-view FOV change (D). Section 2.
 - **Analysis hand-over FILED** (analysis `1547986`): `analysis\decomp\verify_20261028_ads_zoom_receiver.txt` (the receiver, the correction to
   `analysis\decomp\verify_20261027_ads_sight_line.txt` section 1, the candidates).
-- **A1 FLOWN 2026-10-29** (`5a47ad8f`, Epic VR; section 8): the lens ran on the bare and scoped Executioner, the Oppressor and the
-  Aphelion; depth, eye numbering and cost (0.07 ms) as planned. The pilot: "a really cool effect where it makes sense"; the chevron is
-  magnified with the world (Q6's prediction), and only optical sights should zoom.
-- **A2 FLOWN 2026-10-29** (`ce3f9bac`, main merged at `40d7409b`; section 9): optical sights only; the AR gunsight quad (VS `025B4B9F...` /
-  PS `46F92DC7...`, 6 indices, the readout atlas) is the layer family `kScopeMark`, drawn after the lens, one a frame an eye, depth seeded.
-  The pilot: "the chevron looks much clearer now"; it is brighter than stock (tonemapped alone, T(F) + T(M) against stock's T(F + M)).
-  The lens declines for the left aiming eye (`fix.native_on_foot_ads_sight_eye = left`; the left eye is a later build). c lags the picture
-  by one frame on every frame (measured, not changed).
-- **A3 FLOWN OK 2026-10-29** ("both scopes look good, back to stock colors"; `c738e367`, main merged at `dcfd0608`; section 10): the mark is drawn into the eye's additive weapons layer and composited after
-  the lens by the tonemap difference (stock brightness); the weapons half governs it, the scope zoom key arms it; the S0 census probes optical
-  sights only; the press line counts `composites matched/plain/none` and `--health` makes a taken mark nothing composited a PARTIAL. Its review
-  fixes (same section) make the mark's stand-down last a press, not the session, and count it in the press line.
-- **B3-1 FLOWN 2026-10-29 (`9faeadb9`, Epic): "looked good"; one artifact, the strip's black (a dark line on the left periphery). Section 11, the flight entry.** (from `4a4a17b6`; section 11, "As built (B3-1)"): the scoped Executioner's lens at full detail. The left eye (F162's both mode) is drawn as the zoomed view
-  (told frustum = its tangents / M about c, tangents only, set in WaitGetPoses after the trim); the lens samples its post-RCAS picture, each pixel at the place its world point is drawn at in that eye
-  (the right eye's depth, T = inverse(A_R) A_L). The raw getter (the UI scale) keeps the true frustum; DLSS resets at both edges; the strip goes black; the light grid cache and the readout pin
-  step aside. Three log lines: `scope zoom (B3)` announce and press, `scope zoom (B3) runtime`. Review fixes done 2026-10-29 (section 11, items 1 to 8; the hidden-area mesh per eye left).
+- **A1 FLOWN** (`5a47ad8f`, section 8): the lens ran on the bare and scoped Executioner, the Oppressor and the Aphelion; depth, eye numbering and cost (0.07 ms) as planned. **A2 FLOWN** (`ce3f9bac`,
+  section 9): optical sights only; the AR gunsight quad (VS `025B4B9F...` / PS `46F92DC7...`, 6 indices, the readout atlas) is the layer family `kScopeMark`, one a frame an eye, depth seeded.
+  **A3 FLOWN OK 2026-10-29** ("both scopes look good, back to stock colors"; `c738e367`, section 10): the mark is drawn into the eye's additive weapons layer and composited after the lens by the
+  tonemap difference (stock brightness); `--health` makes a taken mark nothing composited a PARTIAL; the mark's stand-down lasts a press and is counted.
+- **B3-1 FLOWN 2026-10-29 (`9faeadb9`, Epic): "looked good"; one artifact, the strip's black (a dark line on the left periphery).** The scoped Executioner's lens at full detail: the left eye (F162's both
+  mode) is drawn as the zoomed view (told frustum narrowed by M about c, set in WaitGetPoses); the lens samples its post-RCAS picture at the place its world point is drawn in that eye; the raw getter keeps
+  the true frustum; DLSS resets at both edges. Lines: `scope zoom (B3)` announce and press, `scope zoom (B3) runtime`. Review fixes done (section 11, items 1 to 8).
 - **B3-2 FLOWN 2026-10-29 (`c92b5107`, Epic), verdict: symmetric black** (section 11, "2026-10-29, B3-2 VR flight"): `world` and `view` never drew, `stretched` drew on two presses, the maintainer saw the black strip as best and asked
   for it symmetrical. **B3-3 BUILT 2026-10-29, NOT INSTALLED, NOT FLOWN** (from `d526ee75`; section 11, "B3-3"): black is the behaviour; the edge key, the fills and the held picture are removed; the right eye gets the mirror of the
   left eye's strip (same band, the left strip's weight, full on a narrowed frame, also on a replayed pair). The lens-outside-the-copy count and the one withheld frame stay. Next: the flight.
 - ruled out: the both-mode share as the cause of the weapon-edge double image, because it shows in the right eye alone at sight eye `right` (maintainer, 2026-10-29); it has its own arc, "Weapon edge ghosting under DLSS".
 - ruled out: a fill for the left eye's strip (B3-2: world and view never drew), and zoom-to-fill (the left eye's copy shifted about 10 degrees or magnified about 43% against the right eye's, which eyes cannot fuse).
-- Keys: `fix.native_on_foot_ads_scope_zoom` (default on since A3 flew OK, the maintainer 2026-10-29), the temporary `experimental.native_on_foot_ads_scope_zoom_fov` (the reference FOV, 56.3 by default), and
-  `experimental.native_on_foot_ads_scope_zoom_full_detail` (on | off, live, default off, Experimental page): the maintainer's choice per scope, no longer temporary (on: the optic at full detail with an equal black edge in both
-  eyes' outer view; off: the digital zoom, no edge). `..._full_detail_edge` (B3-2, TEMPORARY) is removed.
+- **C1 BUILT 2026-10-29, NOT INSTALLED, NOT FLOWN** (from `f2aed451`; section 12, "Crisp sights"): the maintainer found the holo sights and scope effects still too washed out and asked for them crisp without bloom.
+  C1a: the gunsight quad (the one pair every weapon draws) of every weapon the scope lens does not name is taken out of the scene into the sharp weapons layer for the whole press of the sights, as the optical
+  chevron is. C1b: a manual eye dump in ADS leaves one candidate sight-effect draw out of each frame (11 candidates) and says which; `tools\sight_candidates.py` reports each one's footprint; the census gives eye draws
+  their own line budget. Next: the flight (A/B in one press), then the footprint report per weapon.
+- Keys: `fix.native_on_foot_ads_scope_zoom` (default on since A3 flew OK, the maintainer 2026-10-29), the temporary `experimental.native_on_foot_ads_scope_zoom_fov` (the reference FOV, 56.3 by default),
+  `experimental.native_on_foot_ads_scope_zoom_full_detail` (on | off, live, default off, Experimental page; the maintainer's choice per scope, not temporary: on is the optic at full detail with an equal black
+  edge in both eyes' outer view, off the digital zoom) and the TEMPORARY `experimental.native_on_foot_ads_crisp_reticle` (C1a, on | off, live, default on; goes when the reticle has been judged).
 - Separate arc: a flat stutter on the scoped Executioner's ADS (2026-10-29), in its own doc,
   `docs\investigation-flat-scoped-ads-stutter-2026-10-29.md`, on its own branch.
 - **Key (after S0, on the maintainer's word):** `fix.native_on_foot_ads_scope_zoom` = on | off. Section 5.
@@ -971,3 +966,84 @@ that the right eye's share cannot cover, black while eye 0 is narrowed. B3-2 put
   line); the cost of the one more triangle in the right eye; whether the lens reaching outside the copy on a head turn is judged enough to need a larger copy.
 - **Flight card (B3-3, Epic in VR).** Read `edvr_log.py --expect-build <build> --health` first, then each press's `lens outside the copy` and the runtime line's `right-eye mirror strip`. Scoped Executioner in ADS, full
   detail on, sight eye both: hold still, then turn your head left and right inside the scope, and judge the two outer edges together. Then full detail off for one press: no edge in either eye.
+
+## 12. Crisp sights (C1)
+
+The maintainer (2026-10-29): "I think we maybe want to pull the holo sights and the scope effects out of the AA pass again. They look too washed out still, anyway we can do that without making them bloom? I want them to
+be crisp." C1 is one build in two halves: C1a takes the reticles out of the scene (the A3 route, for every weapon), and C1b is a census that says which draw of the scope's glass paints what, so the second half of the
+question (the scope effects) is answered from one eye dump a weapon, not from a pilot's eye.
+
+**Evidence** (a read-only search of the logs, 2026-10-29):
+- **Every weapon draws one gunsight quad per eye.** It is the chevron's own pair, VS `025B4B9FF54622ED` / PS `46F92DC71BF8DFA5`: n6 i1, space 0, the learned atlas 3525x3133, additive `bl=12,7,1/2,7,1`. Only the per-weapon
+  `instance_scale` varies: scoped Executioner 0.05, bare 0.037, Oppressor 0.038, Aphelion 0.044, Eclipse 0.092, Intimidator 0.14, P-15 and Tormentor 0.185. Evidence: the P-15 ADS census at Epic
+  `edvr_logs\edvr_gfx_20261029_120218.log` line 128049 (eye 1 at 128165) and the chevron at `edvr_gfx_20261028_173510.log` line 21535. For the non-optical sights this is very likely the holo or reflex reticle.
+  The `kScopeMark` matcher (`ui_layer_math.h`, `uiScopeMarkShape`) already keys on this shape; `scopeZoomMarkArmed` armed it for optical sights only.
+- **The scope glass effects are another pair, VS `025B4B9FF54622ED` / PS `C5A5C7E8216CB9AF`.** On the Executioner they are six draws per eye, alpha over `bl=15,6,1/5,6,1`, `tex1024x1024f70,f83`: n18 i1, n6 i5, n6 i2, n9 i1, n9 i1,
+  n12 i2 (`edvr_gfx_20261028_173510.log` lines 20903-20928). Nothing ties a draw to the tint, the ticks or the honeycomb edge. C5A5 is a general world-space GUI material (`flat_projection_recipes.h`); the Intimidator has one
+  n6 i1 C5A5 draw. Unidentified draws in the same pass (full hashes from the same logs): VS `025B4B9F...` with PS `0925AA1BD7A95BBA` (over, tex512, n360 i1 in the P-15's census), VS `98397963AAEC45D3` / PS
+  `66B08F89E4926C01` (additive, five draws, also at the hip), VS `F512712C40D93C12` / PS `AFED1D4B087E18A9` (n333, dual-source), VS `94D5C556DFD6D705` / PS `912477AEF6958379` (n6, i25-47).
+- **The census loses the lit-eye tail.** The offscreen DCO lines spent the 16384-line cap that the eye draws (DC) shared (`truncated=4704` and `5730`).
+
+**Design.**
+1. **C1a, the crisp reticle.** The take is A3's, unchanged: the quad is drawn into the eye's weapons layer W and composited after the upscaler by the tonemap difference, the game's tonemap re-issued (stock brightness), out of
+   the bloom input. What changes is who arms it. `crisp_reticle.h` holds the gate, pure: the key `experimental.native_on_foot_ads_crisp_reticle` on, native on foot, a press of the sights open (the frame thread's ADS
+   state, from the raise to the end of the lower), the scope lens not the owner of the quad, and not at the hip. The lens owns the quad of an optical sight of its table (M at least the floor) while the scope zoom key is on, so
+   optical presses behave exactly as before; with the scope zoom key off there is no lens and every sight is served. The hip is excluded by the game's ADS weight: once it is read and is 0 (the tick before the raise has
+   moved it, the end of the lower) the gate is down, because the quad is large there. A weight that was not read this tick, or is no number, says nothing and the press decides. The gate does not read the lens' verdict,
+   the S1 qualification or `fix.native_on_foot_ads_scope_zoom`'s state beyond who owns the quad.
+2. **No frame with the quad in both places.** The arming is read once per draw, in the family rule (`uiScopeMarkFacts`): a draw the rule names is taken out of the scene (the game's draw is not issued into the scene
+   target), and a draw it does not name stays in the scene. There is no second issue. At the edges the draw reads the last tick's answer (published every tick, no older than the lens' 50 ms), so a frame can be drawn
+   in the scene (the arming not yet up, or just down), never in both. A take the layer cannot serve stands the mark down for the press (`markStandDown`, counted): the quad is then in the scene, still never in both.
+3. **Off is today.** With the key off the gate is false for every combination of its facts, the tick publishes the arming down and counts nothing, and the draw path pays the one relaxed load behind the lens' own answer.
+4. **C1b, the census.** (a) The eye draws (`DC`) have a line budget of their own, equal to `advanced.census_lines`; every other line (offscreen draws, copies, clears, dispatches) is capped by the same number on its own, so the
+   offscreen ones cannot evict the lit eye. (b) During a MANUAL eye dump (the key; never the airborne companion's) taken with the sights up, each of the dump's frames leaves one candidate draw out of the scene, cycling
+   through eleven: the C5A5 shapes n18 i1, n6 i5, n6 i2, n9 i1 (both draws of the shape), n12 i2 and n6 i1 (the Intimidator's), the pixel shaders 0925AA1B, 66B08F89, AFED1D4B and 912477AE, and the gunsight quad as the
+   control. The frame the key was pressed in and the ones before it are never touched: the run's baseline. The cycle ends when the dump is captured, or after 600 frames whatever happens; nothing is left out while the sights are down.
+   (c) The dump's json records which candidate each frame left out and how many draws of it per eye. (d) `tools\sight_candidates.py` differences the frames and reports each candidate's footprint.
+5. **Which image is the scene before DLSS.** The raw crops `C00..C15` (eye_<stamp>_C%02d.bmp): the picture the game hands the upscaler, 1400 px square about the render's centre, before any history, from the game's own
+   consecutive frames, 24-bit BMPs. `D00..D15` are the decision maps, `DlssBeforeUi` is the model's output before the UI cleanup (one frame, the model's, not the scene), `T` and `P` are after DLSS. The raw crop has no alpha
+   (the BMP drops it), so a withhold run also saves each crop's alpha plane (`CA00..CA15`, grey BMPs; none for a format without alpha, and the report says n/a). A draw the sharp weapons layer carries (the gunsight quad
+   with C1a on) is not in C at all: read `--kind FinalCrisp` (the final picture) for it. The method: the reference is the per-pixel median of the sixteen frames, which holds every draw (each candidate is out of one or two of
+   sixteen); a frame's footprint is the pixels that differ from it by more than 10 of 255 in any channel and keep at least 3 changed pixels in their 3x3 neighbourhood; the report gives the candidate, the draws left out, the
+   pixels, the bounding box in the crop and in the render, and the mean colour and alpha change (present minus withheld). The frames that left nothing out give the noise floor.
+
+**As built.**
+- `src\d3d11\crisp_reticle.h`: `crisp::eligible` and `crisp::armed` (the gate), `DoorStats`, `PressLine`, `formatAnnounce`, `formatPress`. `src\d3d11\scope_zoom.cpp`: `scopeZoomCrispPublish`, `scopeZoomCrispArmed` (stamped, down after the
+  lens' freshness), `scopeZoomNoteCrispFrame` and `scopeZoomCrispTake` (counts reset by `scopeZoomPressBegin`). `src\d3d11\native_on_foot.cpp`: `g_crispReticleKey` (read by its literal name, default on, live; its change line
+  `native on foot ADS crisp reticle (C1, TEMPORARY): ...`), `s1::tick` (the gate every tick of a press, down on every other path), `s1::announceCrisp`, `s1::endPress` (the crisp line). `src\d3d11\vscreen.cpp`:
+  `uiLayerFamilyOf` asks `scopeZoomMarkArmed() || scopeZoomCrispArmed()`. `src\d3d11\ui_layer.cpp`: `uiLayerComposite` counts the eye-frames with the arming up and whether a quad had been taken in them.
+- `src\d3d11\sight_withhold.h`: the candidates, `match`, `cycleIndex`, `skips` (a vertex shader first, the pixel shader only for a candidate's), `noteCapture`, `record`. `native_on_foot.cpp`:
+  `nativeOnFootSightWithholdSkips` (the eye of the draw as the coat pack's skip finds it), `nativeOnFootSightWithholdArm`, the sights-up flag published by the tick. `vscreen.cpp`: the skip, after the draw census has recorded
+  the draw and before the suppression probe. `temporal_pass.cpp`: `beginEyeRun` arms (`!companion`), both capture sites note the capture, `writeEyeRun` ends the cycle before anything is written and writes the alpha planes
+  (`writeEyeAlphaBmp`) and `eye_<stamp>_withhold.json` (`writeWithholdRecord`), `writeEyeDecisionArtifacts` puts the same fields in `decisions.json`.
+- `src\d3d11\draw_census.cpp`: `otherLinesSpent`, the eye budget in `recordDraw`, `eye_lines=` and a `truncated=` that counts the draws that got no line. `tools\diff_draw_census.py`: its end-line pattern takes `capture_id=`
+  (the line has carried it since the capture ids) and the new token.
+- `tools\sight_candidates.py` (numpy; `--self-test` in `build.bat`'s desk group), `tools\edvr_log.py` (`--health` rule `crisp reticle (C1)`, tag `C1`), rigs: `scope_zoom_test` (`crisp_sights_cases.h`: the gate as a truth table, the
+  hip, the edges, the key off, the door's counts and freshness, the lines, the withhold cycle's order and records, the wiring scans with controls), `sharp_weapons_test` (the family named by the crisp gate), `diff_draw_census.py`.
+
+**Log lines and fields (exact).**
+- Announce, once and at each change: `crisp reticle (C1): key on; the gunsight quad of every weapon the scope lens does not name is drawn into the sharp weapons layer for the whole press of the sights (from the raise to the end of
+  the lower, never at the hip), composited at the game's tonemap and out of the bloom input; one line a press of those follows` (`key off` likewise).
+- Press, for each press of the sights the key was on and the gate eligible in, after the S1 line: `crisp reticle (C1): press N item I scope S key on; eligible ticks E, armed ticks A; armed eye-frames L a R b, with no quad
+  taken L c R d; quad taken L e R f (depth path seeded g read-only h tests off i untested j); composited matched k plain l none m; stood down n`. `--health` (rule `crisp reticle (C1)`): PARTIAL when E is 10 or more and A is 0,
+  when A is 10 or more and e + f is 0 (armed and no quad taken), when quads were taken and `none` exceeds matched + plain, when quads were taken and the composite counted no armed eye-frame, or when every composite was the plain add; a shorter press is OK with its counts. The key off
+  writes the announce and no press line.
+- The dump: `decisions.json` gets, after `"requested"`, `"sight_withhold": {"armed_frame": F, "candidates": ["C5A5_n18_i1", ...]}` and, in each frame after `"raw_file"`, `"withheld": "<candidate or none>",
+  "withheld_draws": [eye 0, eye 1], "withheld_frame": F, "alpha_file": "eye_<stamp>_CA<k>.bmp" or null`; `eye_<stamp>_withhold.json` carries the same under `frames`. Log: `sight census (C1b): a manual eye dump with the sights up: from
+  frame F on, each of the dump's frames leaves one candidate draw of the sight's effects out of the scene (11 candidates, in order; ...)` and, when the run is written, `sight census (C1b): eye run <stamp>: the frames'
+  withheld candidate (eye 0 draws left out): 0:none(0) 1:C5A5_n18_i1(3) ...`.
+- The census end line: `DC end census=N draws=D off=O copies=C disp=P unseen=U eye_lines=E lines=L interned=I overflow=V truncated=T capture_id=X`; `truncated` is now the draws that got no line.
+
+**Not verified, for the flight.** Whether the take looks crisp on the holo and reflex sights and stays stock bright (the bloom halo gone); the raise and the lower (no frame where the hip's large quad shows or the quad is missing);
+the depth path of the quad on a holo sight (`tests off` would draw it through anything nearer: the line counts it); that `eligible ticks` and `armed ticks` agree with the composite's `armed eye-frames`; the footprints (the
+glass draws may share pixels, and the median reference holds only if each candidate is out of at most a few frames); that the raw crop holds the glass at all. A manual dump taken with the sights up now loses a candidate draw a frame, so the
+weapon-edge arc's ADS dumps differ from a plain dump by exactly the candidates their json names; a dump taken at the hip is untouched.
+
+**Flight card (C1, Epic or Frontier in VR).**
+- Read `edvr_log.py --target <game> --expect-build <build> --health` first: the `crisp reticle (C1)` row, then the press lines. Fly the non-optical weapons: P-15, Tormentor, Intimidator, the bare Eclipse, and the optical ones
+  with the scope zoom key on (their lines should be absent: the lens owns them) and off (they are served).
+- A/B in one press: edit `experimental.native_on_foot_ads_crisp_reticle` in the live `edvr.ini` (on / off, live) during one ADS press and look at the reticle both ways: crispness, brightness against stock, a bloom halo,
+  a pop at the raise or the lower.
+- Footprints: in ADS, hold still (head, weapon, no movement), press the eye dump key once per weapon (AA on, DLSS), then `python tools\sight_candidates.py --target <game dir>`; add `--kind FinalCrisp` for the
+  gunsight quad when the crisp reticle is on. The report's noise floor should be near 0; if it warns that the scene moved, or that no draw of any candidate was left out, take the dump again held still with the sights up. One dump a weapon: Executioner scoped (the glass), Oppressor, Aphelion,
+  Eclipse, Intimidator, P-15.

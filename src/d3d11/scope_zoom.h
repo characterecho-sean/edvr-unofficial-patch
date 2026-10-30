@@ -10,6 +10,7 @@
 
 #include <cstdint>
 
+#include "crisp_reticle.h"
 #include "scope_zoom_b3.h"
 
 namespace edvr {
@@ -66,6 +67,16 @@ bool scopeZoomWanted();
 // The scope's gunsight mark (ui_layer_math.h kScopeMark): true while the last published frame qualifies for the lens and is no older than the door takes a c, which is how the door
 // reads it. Asked by the draw path for the mark's one pair, so the family is named only for a sight the lens magnifies.
 bool scopeZoomMarkArmed();
+// C1a (crisp_reticle.h): the frame thread publishes each tick whether the gunsight quad is to be taken out of the scene for the sights that are up (a weapon the scope lens does not
+// name); the draw path asks scopeZoomCrispArmed for the quad's one pair, beside scopeZoomMarkArmed, and gets true while the last tick said so and is no older than the lens takes a c.
+// Published false (and never true) with the key off, so with it off the only cost is the relaxed load the draw path makes after the lens's own answer was no.
+void scopeZoomCrispPublish(bool armed);
+bool scopeZoomCrispArmed();
+// An eye-frame has reached the weapons composite (uiLayerComposite) while the crisp arming was up: counted for the press line, with whether a quad draw had been taken into the eye's
+// weapons layer in that frame. Not called while it is down.
+void scopeZoomNoteCrispFrame(uint32_t eye, bool quadTaken);
+// The press's counts (zeroed at scopeZoomPressBegin).
+void scopeZoomCrispTake(crisp::DoorStats* out);
 // The layer took a mark draw out of the scene into an eye's weapons layer (0 left, 1 right) in the temporal sequence seq: counted for the press line, and the right eye's sequence is
 // what the door compares its own against to count the armed frames that had no mark draw. path (scope_zoom_s1.h kMarkPath*) is what the layer did with the draw's depth and stencil tests.
 void scopeZoomNoteMark(uint32_t eye, uint64_t seq, uint32_t path);
