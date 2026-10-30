@@ -320,6 +320,8 @@ struct LayerDs {
     const void* source = nullptr;  // the game's depth texture it was seeded from
     uint8_t seededMask = 0;        // stencil bits seeded
     bool seededDepth = false;
+    // The eye's jitter the depth was last copied with (uiLayerSeedKeepsDepth: a repeat seed keeps the depth only at this jitter).
+    float seedJx = 0.0f, seedJy = 0.0f;
 };
 
 struct Eye {
@@ -669,6 +671,8 @@ struct Window {
     uint64_t afterFollowed = 0;
     uint64_t eyeMatched = 0, eyeSwapped = 0, eyeUntold = 0, seedStale = 0;
     uint64_t depthOnlySeedPreservedWriters = 0;
+    // Repeat seeds that kept the layer's depth and copied stencil bits only (uiLayerSeedKeepsDepth).
+    uint64_t seedDepthKept = 0;
     // seedWritersCheck's resolve of the bound depth view: answered from the memo, or by the guarded resolve (a miss, a failure included).
     uint64_t dsvMemoHits = 0, dsvMemoMisses = 0;
     uint64_t privateDepthPotentialBegins = 0;
@@ -1316,6 +1320,7 @@ void releaseLayerDs(LayerDs& l) {
     l.source = nullptr;
     l.seededMask = 0;
     l.seededDepth = false;
+    l.seedJx = l.seedJy = 0.0f;
 }
 
 // Every layer, transmittance, depth target and composite output released
@@ -1590,10 +1595,14 @@ uint32_t dsBytesPerPixel(DXGI_FORMAT f) { return f == DXGI_FORMAT_D32_FLOAT_S8X2
 // pixel p to the game pixel floor(p * game / layer + jitter), which is the
 // redirected viewport's own map inverted. `l` is the layer's own target
 // (the 8-bit layer's ds, or the HDR HUD layer's hdrDs) at outW x outH; the
-// copy of the game's buffer the seed reads is the eye's, shared.
+// copy of the game's buffer the seed reads is the eye's, shared. `keepDepth`
+// says the layer's depth plane is already what a fresh copy would write
+// (uiLayerSeedKeepsDepth), so `needDepth` is false and the depth pass is
+// skipped; the layer still counts as holding depth.
 bool seedLayerDepth(ID3D11DeviceContext* ctx, Eye& e, LayerDs& l, int eye, uint32_t outW,
                     uint32_t outH, ID3D11DepthStencilView* gameDsv, uint8_t stencilMask,
-                    bool needDepth, UiRouteStage stage, const char* who, const UiSeedPlan& seedPlan) {
+                    bool needDepth, UiRouteStage stage, const char* who, const UiSeedPlan& seedPlan,
+                    bool keepDepth) {
     if (!gameDsv || !g_seeder || !g_deferred) return false;
     Ptr<ID3D11Resource> res;
     gameDsv->GetResource(&res);
@@ -1698,6 +1707,8 @@ bool seedLayerDepth(ID3D11DeviceContext* ctx, Eye& e, LayerDs& l, int eye, uint3
     }
     // The layer's own target, at the layer's size, in the game's format.
     if (!l.tex || l.w != outW || l.h != outH || l.viewFmt != vd.Format) {
+        // A layer made anew here holds no depth to keep (the callers only keep it for a current layer): copy it.
+        if (keepDepth) { needDepth = true; keepDepth = false; }
         l.tex.Reset();
         l.dsv.Reset();
         l.w = l.h = 0;
@@ -1797,7 +1808,10 @@ bool seedLayerDepth(ID3D11DeviceContext* ctx, Eye& e, LayerDs& l, int eye, uint3
     l.seq = g_draw.seq;
     l.source = tex.Get();
     l.seededMask = full ? 0xFF : (hasStencil ? stencilMask : 0);
-    l.seededDepth = needDepth || full;
+    l.seededDepth = needDepth || full || keepDepth;
+    // The jitter the depth was copied with; a kept depth keeps the jitter it has.
+    if (needDepth || full) { l.seedJx = g_draw.jx; l.seedJy = g_draw.jy; }
+    if (keepDepth) ++g_win.seedDepthKept;
     ++g_win.seeds;
     return true;
 }
@@ -2237,6 +2251,13 @@ bool beginInner(ID3D11DeviceContext* ctx, int which) {
             const uint8_t mask =
                 static_cast<uint8_t>(wantMask | (stale ? 0 : lds.seededMask));
             const bool depth = g_draw.ds.depthTest || (!stale && lds.seededDepth);
+            // A repeat seed whose layer depth is still exactly what a fresh copy would write copies the stencil bits
+            // only (uiLayerSeedKeepsDepth). The guard is read before this draw's own note below: this draw writes
+            // after its seed. The freshness rule is unchanged.
+            const bool keepDepth = uiLayerSeedKeepsDepth(stale, lds.seededDepth,
+                g_seeder && g_seeder->usesSpecifiedStencilRef(), g_privateDepthGuard.active(g_draw.seq),
+                lds.seedJx == g_draw.jx && lds.seedJy == g_draw.jy);
+            const bool copyDepth = depth && !keepDepth;
             UiSeedPlan seedPlan;
             if (g_seedCensus.enabled) {
                 D3D11_DEPTH_STENCIL_VIEW_DESC vd{};
@@ -2244,12 +2265,12 @@ bool beginInner(ID3D11DeviceContext* ctx, int which) {
                 DXGI_FORMAT tf, df, sf;
                 const bool stencil = dsFormats(vd.Format, &tf, &df, &sf) && sf != DXGI_FORMAT_UNKNOWN;
                 seedPlan = g_seedCensus.plan(g_draw.eye, g_draw.hdr, g_draw.seq, gameDs,
-                    layerW, layerH, stale, shortDepth, shortBits, mask, depth,
+                    layerW, layerH, stale, shortDepth, shortBits, mask, copyDepth,
                     g_seeder && g_seeder->usesSpecifiedStencilRef(), stencil);
             }
-            const bool seeded = seedLayerDepth(ctx, e, lds, g_draw.eye, layerW, layerH, g_draw.dsv, mask, depth,
+            const bool seeded = seedLayerDepth(ctx, e, lds, g_draw.eye, layerW, layerH, g_draw.dsv, mask, copyDepth,
                                 g_draw.hdr ? UiRouteStage::kHdrSeed : UiRouteStage::kSeed,
-                                g_draw.hdr ? "a cockpit HUD draw" : "a UI draw", seedPlan);
+                                g_draw.hdr ? "a cockpit HUD draw" : "a UI draw", seedPlan, keepDepth);
             if (g_seedCensus.enabled) g_seedCensus.seed(g_draw.eye, g_draw.hdr, g_draw.seq,
                 gameDs, layerW, layerH, seedPlan, seeded);
             if (g_seedCensus.enabled && seeded) noteSeedCounts(g_draw.seq, static_cast<int>(g_draw.eye), g_draw.hdr, seedPlan);
@@ -3455,9 +3476,11 @@ void logTotals(double seconds) {
         "ui quality: layer seed preservation: %llu stencil-only game writers kept an unmodified "
         "depth-only seed; matched layer/eye events, not avoided-seed count; %llu first-issue attempts "
         "with raw depth-enabled/write-ALL state activated a conservative whole-frame guard "
-        "across both eyes/layers (potential writes, including no private DSV or original read-only view).",
+        "across both eyes/layers (potential writes, including no private DSV or original read-only view)"
+        "; %llu repeat seeds kept the layer's depth and copied stencil bits only.",
         static_cast<unsigned long long>(g_win.depthOnlySeedPreservedWriters),
-        static_cast<unsigned long long>(g_win.privateDepthPotentialBegins));
+        static_cast<unsigned long long>(g_win.privateDepthPotentialBegins),
+        static_cast<unsigned long long>(g_win.seedDepthKept));
     logDsvMemo();
     Log::get().note(
         "ui quality: layer: %.0f s, %llu frames, %ux%u per eye + composite output %ux%u; %.2f draws "
