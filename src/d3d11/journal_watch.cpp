@@ -1100,9 +1100,8 @@ JournalHeldItem journalHeldItem() {
     const uint8_t k = peek(g_v.heldKind);
     return k == kHeldNone ? kHeldNone : k == kHeldItem ? kHeldItem : kHeldUnknown;
 }
-bool journalHeldItemName(char* out, size_t cap) {
-    if (out && cap) out[0] = '\0';
-    if (!out || !cap || runtimeFlatProfile() || peek(g_v.heldKind) == kHeldUnknown) return false;
+// The held item's name under the seqlock the worker publishes it with; false after four torn reads. cap is above 0 and out is not null.
+static bool copyHeldName(char* out, size_t cap) {
     for (int tries = 0; tries < 4; ++tries) {
         const uint32_t s1 = g_v.heldSeq.load(std::memory_order_acquire);
         if (s1 & 1u) continue;
@@ -1118,6 +1117,28 @@ bool journalHeldItemName(char* out, size_t cap) {
         return true;
     }
     return false;
+}
+bool journalHeldItemName(char* out, size_t cap) {
+    if (out && cap) out[0] = '\0';
+    if (!out || !cap || runtimeFlatProfile() || peek(g_v.heldKind) == kHeldUnknown) return false;
+    return copyHeldName(out, cap);
+}
+// S0 (scope zoom, measure only): the flat profile's readers of the on-foot bit, the ADS bit and the held item, on journalFlatGuiFocus's pattern. Every accessor above answers flat
+// with a stopped watcher's value, and still does; these answer only in flat, with the watcher running, and only for a field the last Status.json sample carried.
+bool journalFlatOnFoot(bool* onFoot) {
+    if (!runtimeFlatProfile() || !g_v.active.load(std::memory_order_acquire) || !peek(g_v.onFootKnown)) return false;
+    if (onFoot) *onFoot = peek(g_v.onFoot);
+    return true;
+}
+bool journalFlatAds(bool* ads) {
+    if (!runtimeFlatProfile() || !g_v.active.load(std::memory_order_acquire) || !peek(g_v.adsKnown)) return false;
+    if (ads) *ads = peek(g_v.ads);
+    return true;
+}
+bool journalFlatHeldItemName(char* out, size_t cap) {
+    if (out && cap) out[0] = '\0';
+    if (!out || !cap || !runtimeFlatProfile() || !g_v.active.load(std::memory_order_acquire) || peek(g_v.heldKind) == kHeldUnknown) return false;
+    return copyHeldName(out, cap);
 }
 void journalWatchSetEagerStatusOnFoot(bool eager) {
     if (g_eagerOnFoot.exchange(eager, std::memory_order_relaxed) == eager) return;

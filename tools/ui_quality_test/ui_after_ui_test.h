@@ -819,7 +819,7 @@ void testCpuPathWiring(const std::string& layerText, const std::string& layerSqu
     const std::string d = squeeze(decideRaw);
     check(occurrences(d, "describeBlend(") == 1 && occurrences(d, "describeDs(") == 1,
           "CPU-02: uiLayerDecide calls describeBlend and describeDs once each");
-    const char* const kGuard = "if(familyLineWanted(family,d)){charbl[64],ds[256];describeBlend(game,bl,sizeof(bl));describeDs(dsState,ref,dsFmt,ds,sizeof(ds));";
+    const char* const kGuard = "if(familyLineWanted(family,d)){charbl[64],ds[256];describeBlend(gameBlend,bl,sizeof(bl));describeDs(dsState,ref,dsFmt,ds,sizeof(ds));";
     const size_t guard = d.find(kGuard);
     check(guard != std::string::npos && occurrences(d, kGuard) == 1,
           "CPU-02: describeBlend and describeDs open one block, guarded by familyLineWanted(family, d)");

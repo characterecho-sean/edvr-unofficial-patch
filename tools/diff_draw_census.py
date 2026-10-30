@@ -155,7 +155,7 @@ ID_UNK_RE = re.compile(r'^DC id @(\d+) \?$')
 END_RE = re.compile(r'^DC end census=(\d+) draws=(\d+)(?: off=(\d+))?'
                     r'(?: \S+=\d+)*? '
                     r'lines=(\d+) interned=(\d+) overflow=(\d+) '
-                    r'truncated=(\d+)$')
+                    r'truncated=(\d+)(?: capture_id=\S*)?$')
 
 
 class Census(object):
@@ -721,6 +721,19 @@ def self_test():
     if compare(dco[0], dco[1]) != 0:
         print('self-test: compare() refused a parsed pair')
         return 1
+    # The end line the DLL writes now: eye_lines= (the eye draws' own line budget) among the key=int tokens before lines=, and capture_id= (the eye dump's stamp, empty when none)
+    # after truncated=. Both parse; the draws counted are the declared draws.
+    for tail in (' capture_id=120515630001', ' capture_id=', ''):
+        got = parse_dc_lines([m.group(1) for m in map(LINE_RE.match, dc([
+            'DC begin census=7 frames=1 frame=7000 offscreen=yes',
+            'DCO 0 #0 I n=6 i=1 r=@0 d=- c=@2 s=-,-,-,-',
+            'DC frame 0 draws=0 off=1 copies=0 disp=0 clears=0 unseen=0',
+            'DC id @0 tex 64x64 fmt=87', 'DC id @2 buf 256',
+            'DC end census=7 draws=0 off=1 copies=0 disp=0 unseen=0 eye_lines=0 lines=1 '
+            'interned=2 overflow=0 truncated=0' + tail])) if m], 'self-test-eye-lines')
+        if len(got) != 1 or not got[0].complete or got[0].declared_draws != 0 or got[0].declared_off != 1:
+            print('self-test: the end line with eye_lines= and capture_id=%r did not parse as a complete census' % tail)
+            return 1
     print()
     print('self-test: ok')
     return 0

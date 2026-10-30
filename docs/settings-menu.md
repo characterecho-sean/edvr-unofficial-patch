@@ -925,7 +925,12 @@ they were there (flown 2026-09-07).
      in `edvr.ini` order, the switch first and the HUD last: **Native on foot VR**
      (the feature switch, `fix.native_on_foot`); **Look and aim** (Look to aim,
      Turn style, Snap turn step, Look to aim smoothing); **Aiming down sights**
-     (ADS eye distance, ADS: sight in both eyes, ADS: aim with head); **Body and
+     (ADS: sight in both eyes, ADS: aim with head, ADS: scope zoom, A1: the scope
+     lens, `fix.native_on_foot_ads_scope_zoom`, on by default since it flew OK; its
+     reference FOV is the developer tier's `experimental.native_on_foot_ads_scope_zoom_fov`
+     row, and the `experimental.native_on_foot_ads_scope_zoom_full_detail` row, on | off, default off, the user's choice of the scoped
+     Executioner's optic: on takes the lens from the left eye drawn as the zoomed view, at full detail, with an equal black edge in each eye's outer view
+     while the zoom stands; off is the digital zoom with no edge); **Body and
      view** (Eye height, Weapon view offset, Weapon eye forward, Visor in
      breathable air); **HUD** (HUD distance, HUD size, HUD
      element scale, HUD spread, HUD follow). The headings are the ini's own

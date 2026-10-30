@@ -745,10 +745,13 @@ int main(int argc, char** argv) {
         check(occurrencesLive(device, "terrainCullCoverInstall(!runtimeScopeIncludesVr());") == 1 && precedes(device, "vertexResyncInstall();", "terrainCullCoverInstall(!runtimeScopeIncludesVr());"),
               "C7.a device_hook.cpp installs the cover once, with the install scope, in the startup block");
         check(occurrencesLive(device, "terrainCullCoverPoll(stampMs());") == 1 && precedes(device, "vScreenRefreshConfig();", "terrainCullCoverPoll(stampMs());"), "C7.b ...and polls it once a second after the config reload");
-        check(occurrencesLive(temporal, "edvr::terrainCullCoverNoteFrusta(s->frusta);") == 1 &&
-                  precedes(temporal, "std::memcpy(s->frusta,f->frusta,sizeof(s->frusta));", "edvr::terrainCullCoverNoteFrusta(s->frusta);") &&
-                  precedes(temporal, "edvr::terrainCullCoverNoteFrusta(s->frusta);", "g_vertical.store("),
-              "C7.c native_temporal.cpp's begin() tells the cover the frusta right after it takes them");
+        // B3: the frusta the cover is told are the announced ones -- s->frusta with eye 0's put back to the frustum without the scope zoom's window while the window stands (the raw getter
+        // the game's culler is built from keeps it true too), so the cover never narrows to the zoomed eye. They are s->frusta exactly whenever eye 0 is not zoomed.
+        check(occurrencesLive(temporal, "edvr::terrainCullCoverNoteFrusta(s->announced);") == 1 &&
+                  precedes(temporal, "std::memcpy(s->frusta,f->frusta,sizeof(s->frusta));", "std::memcpy(s->announced,s->frusta,sizeof(s->announced));") &&
+                  precedes(temporal, "std::memcpy(s->announced,s->frusta,sizeof(s->announced));", "edvr::terrainCullCoverNoteFrusta(s->announced);") &&
+                  precedes(temporal, "edvr::terrainCullCoverNoteFrusta(s->announced);", "g_vertical.store("),
+              "C7.c native_temporal.cpp's begin() tells the cover the frusta right after it takes them (the announced ones: the zoom's window not in them)");
         check(occurrences(hook, "return forward(a, b, c, d, r.vfov, r.aspect);") == 1 && occurrences(hook, "BuilderFn = uintptr_t (__fastcall*)(uintptr_t, uintptr_t, uintptr_t, uintptr_t, float, float);") == 1,
               "C7.d the detour forwards the four register arguments untouched and only the two floats it computed");
         check(!has(hook, "Config::") && !has(hook, "getBool(") && !has(hook, "getString(") && !has(core, "terrain_cull_cover =") && !has(ini, "terrain_cull_cover"),

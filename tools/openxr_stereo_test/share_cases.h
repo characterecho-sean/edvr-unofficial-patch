@@ -10,6 +10,8 @@
 // black, the coverage figure the renderer computes on the CPU matches what the GPU drew, and the pure parts (the relative rotation, the mask) on their own.
 #pragma once
 
+// B3-3: the hash of B3-1's black-strip renders per format (srgb, unorm), made with B3-1's shader (the one of 9faeadb9) and this renderer, in owned and deferred mode alike. See the B3-3 golden check.
+constexpr uint64_t kB3GoldenSrgb = 0x1e62f587e22276d3ull, kB3GoldenUnorm = 0x403f4c9b47b5980full;
 double decodeSrgb(double e){return e<=.04045?e/12.92:std::pow((e+.055)/1.055,2.4);}
 ComPtr<ID3D11Texture2D> shareTexture(Fixture& f,const std::function<uint32_t(unsigned,unsigned)>& rgba) {
   D3D11_TEXTURE2D_DESC d{};d.Width=d.Height=size;d.MipLevels=d.ArraySize=1;d.Format=DXGI_FORMAT_R8G8B8A8_UNORM;d.SampleDesc.Count=1;
@@ -108,6 +110,84 @@ void shareSelfTest(bool owned) {
       check(same,what);
     }
     const Out full=render(capture,1.f,nullptr,nullptr,true);
+    { // B3: while the scope zoom's window stands the left eye's own picture is the zoomed view, so the part of it the share does not cover (the corner here, inside the edge margin) goes
+      // toward black by the strip's weight; the covered interior is the right eye's pixel whatever the strip is, no strip is the share exactly as it was, and no share draws no strip.
+      auto gray=shareTexture(f,[](unsigned,unsigned){return rgbaOf(180,180,180);});
+      EyeCapture grayCapture;check(SUCCEEDED(grayCapture.initialize(f.runtime.device.Get())),"strip capture owner");
+      const vr::Texture_t gl{gray.Get(),vr::API_DirectX,vr::ColorSpace_Linear},rt2{right.Get(),vr::API_DirectX,vr::ColorSpace_Linear};
+      check(grayCapture.capture(vr::Eye_Left,&gl)==vr::VRCompositorError_None&&grayCapture.capture(vr::Eye_Right,&rt2)==vr::VRCompositorError_None,"strip capture");
+      const auto strip=[&](float share,float black,bool zoomed=false) {
+        XrCompositionLayerProjection layer{};const unsigned image=f.runtime.eyes[0].calls%2;
+        check(f.renderer.renderCaptured(f.views,space,grayCapture,layer,nullptr,nullptr,nullptr,0.f,nullptr,share,nullptr,black,zoomed)==XR_SUCCESS,"strip render");
+        return readWhole(f,0,image);
+      };
+      const auto sum=[&](uint32_t p){unsigned r=0,g=0,b=0;channels(p,r,g,b);return r+g+b;};
+      const std::vector<uint32_t> s0=strip(1.f,0.f),sHalf=strip(1.f,.5f),s1=strip(1.f,1.f),noShare=strip(0.f,1.f),noShare0=strip(0.f,0.f),nan=strip(1.f,std::numeric_limits<float>::quiet_NaN());
+      std::snprintf(what,sizeof(what),"B3 strip (%s, %s): the corner the share does not cover is the left eye's own picture with no strip, half toward black with half a strip, and black with a whole one",mode,kind);
+      check(sum(at(s0,0,0))>3*150&&sum(at(sHalf,0,0))<sum(at(s0,0,0))&&sum(at(sHalf,0,0))>sum(at(s1,0,0))&&sum(at(s1,0,0))<=3&&sum(at(s1,0,0))<sum(at(sHalf,0,0)),what);
+      bool covered=true;
+      for(unsigned y=16;y<112;++y)for(unsigned x=16;x<112;++x)covered=covered&&at(s1,x,y)==at(base.eye[1],x,y)&&at(sHalf,x,y)==at(base.eye[1],x,y);
+      std::snprintf(what,sizeof(what),"B3 strip (%s, %s): inside the coverage the pixel is the right eye's own, bit for bit, whatever the strip is",mode,kind);
+      check(covered,what);
+      std::snprintf(what,sizeof(what),"B3 strip (%s, %s): no strip (and a strip that is no number) is the share exactly as it was, and with no share the strip draws nothing",mode,kind);
+      check(s0==nan&&noShare==noShare0,what);
+      // The share's weight falling at the end of a press (a = 0.5 here) with the strip still black: the left eye's own picture is dimmed only in the strip the right eye does not cover, or in a
+      // frame drawn with eye 0 narrowed; the covered interior of an unnarrowed frame is not dimmed by the strip however far the weight has fallen. Inside = the interior, outside = the corner.
+      const std::vector<uint32_t> h0=strip(.5f,0.f),hStrip=strip(.5f,1.f),hZoomed=strip(.5f,0.f,true),hZoomedStrip=strip(.5f,1.f,true),zNoShare=strip(0.f,0.f,true),zFull=strip(1.f,0.f,true);   // the last render is one with a share drawn: the facts the checks after this block read are its
+      std::snprintf(what,sizeof(what),"B3 strip (%s, %s): at a share of 0.5 in a frame that is not narrowed, a black strip leaves the covered interior exactly as it is with no strip (it must not dim the whole left eye while the share releases)",mode,kind);
+      bool interiorUndimmed=true;
+      for(unsigned y=16;y<112;++y)for(unsigned x=16;x<112;++x)interiorUndimmed=interiorUndimmed&&at(hStrip,x,y)==at(h0,x,y);
+      check(interiorUndimmed&&sum(at(h0,64,64))>3*100,what);
+      std::snprintf(what,sizeof(what),"B3 strip (%s, %s): ... and the corner the right eye does not cover is black with the strip black, and the left eye's own picture without it",mode,kind);
+      check(sum(at(hStrip,0,0))<=3&&sum(at(h0,0,0))>3*150,what);
+      std::snprintf(what,sizeof(what),"B3 strip (%s, %s): in a frame drawn with eye 0 narrowed the left eye's own picture is gone under the share (a share of 0.5 shows half the right eye's pixel over black), and the corner is black whatever the strip",mode,kind);
+      check(sum(at(hZoomed,64,64))+3*40<sum(at(h0,64,64))&&sum(at(hZoomed,64,64))>3&&sum(at(hZoomed,0,0))<=3&&hZoomedStrip==hZoomed,what);
+      std::snprintf(what,sizeof(what),"B3 strip (%s, %s): at full weight a narrowed frame's covered interior is still the right eye's own pixel, bit for bit, and with no share a narrowed frame has the left eye cleared to black, never its own picture",mode,kind);
+      bool zCovered=true,zBlack=true;
+      for(unsigned y=16;y<112;++y)for(unsigned x=16;x<112;++x)zCovered=zCovered&&at(zFull,x,y)==at(base.eye[1],x,y);
+      for(uint32_t pixel:zNoShare)zBlack=zBlack&&sum(pixel)<=3;
+      check(zCovered&&zBlack&&zNoShare!=noShare0,what);
+      // B3-3: the left eye's black is B3-1 exactly, whatever the right eye now does. The left eye's images of B3-1's cases (every share, strip and narrowed combination that has a share), hashed, against the hashes the previous build's shader made
+      // of the same renders (taken with that shader and this renderer, so it is the shader's arithmetic that is pinned).
+      {
+        uint64_t hash=1469598103934665603ull;
+        const float shares[]={1.f,.5f},strips[]={0.f,.25f,.5f,1.f};
+        for(float sh:shares)for(float st:strips)for(bool z:{false,true})for(uint32_t pixel:strip(sh,st,z))hash=(hash^pixel)*1099511628211ull;
+        for(uint32_t pixel:strip(0.f,1.f,false))hash=(hash^pixel)*1099511628211ull;
+        static const uint64_t golden[2]={kB3GoldenSrgb,kB3GoldenUnorm};
+        std::snprintf(what,sizeof(what),"B3-3 golden (%s, %s): the left eye's black reproduces B3-1 bit for bit: the hash of its renders is %016llx, B3-1's %016llx",mode,kind,static_cast<unsigned long long>(hash),static_cast<unsigned long long>(golden[unorm?1:0]));
+        check(hash==golden[unorm?1:0],what);
+      }
+      // B3-3: the right eye's mirror of the left eye's strip. While the left eye's outer strip is black (the strip up) or the left eye is narrowed, with the share drawn, the directions of the
+      // right view the left view does not see go black in the right eye the same way: same edge band, same weight, full on a narrowed frame. Neither: the right eye is exactly as it was.
+      {
+        struct Pair {std::vector<uint32_t> l,r;StereoShareFacts facts;};
+        const auto pair=[&](float share,float black,bool zoomed) {
+          XrCompositionLayerProjection layer{};const unsigned image=f.runtime.eyes[0].calls%2;
+          check(f.renderer.renderCaptured(f.views,space,grayCapture,layer,nullptr,nullptr,nullptr,0.f,nullptr,share,nullptr,black,zoomed)==XR_SUCCESS,"mirror render");
+          Pair o;o.l=readWhole(f,0,image);o.r=readWhole(f,1,image);o.facts=f.renderer.shareFacts();return o;
+        };
+        const float nanF=std::numeric_limits<float>::quiet_NaN();
+        const Pair m0=pair(1.f,0.f,false),mNan=pair(1.f,nanF,false),mHalf=pair(1.f,.5f,false),m1=pair(1.f,1.f,false),mZoom=pair(1.f,0.f,true),mZoomHalf=pair(.5f,0.f,true),
+                   mNoShare=pair(0.f,1.f,false),mZoomNoShare=pair(0.f,0.f,true);
+        std::snprintf(what,sizeof(what),"B3-3 mirror (%s, %s): with no strip and no narrowing (and a strip that is no number) the right eye is exactly as it was and no mirror was drawn",mode,kind);
+        check(m0.r==base.eye[1]&&mNan.r==base.eye[1]&&!m0.facts.mirrorDrawn&&!mNan.facts.mirrorDrawn&&m0.facts.mirrorWidth==0.f&&m0.facts.drawn,what);
+        const unsigned corners[4][2]={{0,0},{size-1,0},{0,size-1},{size-1,size-1}};
+        bool black=true,own=true,half=true;
+        for(const auto& c:corners){black=black&&sum(at(m1.r,c[0],c[1]))<=3;own=own&&sum(at(base.eye[1],c[0],c[1]))>100;half=half&&sum(at(mHalf.r,c[0],c[1]))<sum(at(base.eye[1],c[0],c[1]))&&sum(at(mHalf.r,c[0],c[1]))>sum(at(m1.r,c[0],c[1]));}
+        bool interior=true;
+        for(unsigned y=16;y<112;++y)for(unsigned x=16;x<112;++x)interior=interior&&at(m1.r,x,y)==at(base.eye[1],x,y)&&at(mHalf.r,x,y)==at(base.eye[1],x,y);
+        std::snprintf(what,sizeof(what),"B3-3 mirror (%s, %s): with the strip up the right eye's four corners (outside the left view's edge band) are black at a whole strip and part way at half a strip, and the interior is its own pixel bit for bit",mode,kind);
+        check(m1.facts.mirrorDrawn&&own&&black&&half&&interior,what);
+        std::snprintf(what,sizeof(what),"B3-3 mirror (%s, %s): the width it covered on the right eye's middle row is a few degrees at each side (%.3f of the width) and narrower at half a strip (%.3f)",mode,kind,double(m1.facts.mirrorWidth),double(mHalf.facts.mirrorWidth));
+        check(m1.facts.mirrorWidth>.05f&&m1.facts.mirrorWidth<.25f&&mHalf.facts.mirrorWidth<=m1.facts.mirrorWidth&&mHalf.facts.mirrorDrawn,what);
+        std::snprintf(what,sizeof(what),"B3-3 mirror (%s, %s): a narrowed frame has the mirror at full weight whatever the strip and the share's weight: the same right eye as a whole strip",mode,kind);
+        check(mZoom.facts.mirrorDrawn&&mZoom.r==m1.r&&mZoomHalf.facts.mirrorDrawn&&mZoomHalf.r==m1.r,what);
+        std::snprintf(what,sizeof(what),"B3-3 mirror (%s, %s): with no share drawn there is no mirror, narrowed or not: the right eye is as it was, and the narrowed left eye is cleared to black",mode,kind);
+        check(mNoShare.r==base.eye[1]&&!mNoShare.facts.mirrorDrawn&&mZoomNoShare.r==base.eye[1]&&!mZoomNoShare.facts.mirrorDrawn&&mZoomNoShare.facts.leftBlacked&&!mNoShare.facts.leftBlacked,what);
+        strip(1.f,0.f,false);   // leave the last render one with a share drawn, as the checks after this block read its facts
+      }
+    }
     {
       bool interior=true;
       for(unsigned y=16;y<112;++y)for(unsigned x=16;x<112;++x)interior=interior&&at(full.eye[0],x,y)==at(base.eye[1],x,y);
@@ -134,9 +214,11 @@ void shareSelfTest(bool owned) {
         check(f.renderer.renderCaptured(f.views,space,capture,l,nullptr,nullptr,nullptr,0.f,nullptr,0.f)==XR_SUCCESS,"share work render");});
       const PassWork half=measurePass(f,[&]{XrCompositionLayerProjection l{};
         check(f.renderer.renderCaptured(f.views,space,capture,l,nullptr,nullptr,nullptr,0.f,nullptr,.5f)==XR_SUCCESS,"share work render");});
-      std::snprintf(what,sizeof(what),"F106 (d) (%s, %s) share 0 runs no extra pass (the same vertex and pixel work as a plain frame); a share above 0 draws one more triangle, one eye's worth",
-                    mode,kind);
-      check(plain.ok&&zero.ok&&half.ok&&zero.vs==plain.vs&&zero.ps==plain.ps&&half.vs==plain.vs+plain.vs/2,what);
+      const PassWork mirror=measurePass(f,[&]{XrCompositionLayerProjection l{};
+        check(f.renderer.renderCaptured(f.views,space,capture,l,nullptr,nullptr,nullptr,0.f,nullptr,.5f,nullptr,1.f,false)==XR_SUCCESS,"share work render");});
+      std::snprintf(what,sizeof(what),"F106 (d) (%s, %s) share 0 runs no extra pass (the same vertex and pixel work as a plain frame); a share above 0 draws one more triangle, one eye's worth; "
+                    "with no strip and no narrowing the right eye gets none, and with the strip up it gets one (B3-3)",mode,kind);
+      check(plain.ok&&zero.ok&&half.ok&&mirror.ok&&zero.vs==plain.vs&&zero.ps==plain.ps&&half.vs==plain.vs+plain.vs/2&&mirror.vs==plain.vs*2,what);
     }
     {   // a trimmed placement: the left border stays black, the share draws inside the left image only
       const StereoPlacement place[2]={{.25f,.25f,.75f,.75f},{.25f,.25f,.75f,.75f}};
@@ -191,6 +273,25 @@ void shareSelfTest(bool owned) {
                     double(facts.rotationDeg[0]),double(facts.rotationDeg[1]),double(facts.rotationDeg[2]),double(facts.coverage));
       check(facts.drawn&&std::fabs(facts.rotationDeg[0]-21.5f)<1e-3f&&std::fabs(facts.rotationDeg[1])<1e-3f&&std::fabs(facts.rotationDeg[2])<1e-3f&&
             facts.coverage>.3f&&facts.coverage<.9f,what);
+    }
+    {   // B3-3: the right eye's mirror with canted displays and asymmetric fovs, against the rig's own arithmetic with the eyes exchanged: a right pixel whose direction the left view sees
+        // beyond the edge band is its own pixel, one outside the left view (or behind it) is black
+      XrCompositionLayerProjection layer{};const unsigned image=f.runtime.eyes[0].calls%2;
+      check(f.renderer.renderCaptured(f.views,space,capture,layer,nullptr,nullptr,nullptr,0.f,nullptr,1.f,nullptr,1.f,false)==XR_SUCCESS,"mirror canted render");
+      const std::vector<uint32_t> mirrored=readWhole(f,1,image);
+      const XrView swapped[2]={f.views[1],f.views[0]};
+      unsigned inner=0,innerOwn=0,outer=0,outerBlack=0;
+      for(unsigned y=2;y<size;y+=5)for(unsigned x=2;x<size;x+=5) {
+        double su=0,sv=0,edge=0;
+        const bool mapped=rigMap(swapped,x,y,su,sv,edge);
+        unsigned r=0,g=0,b=0;channels(at(mirrored,x,y),r,g,b);
+        if(mapped&&edge>3.6){++inner;if(at(mirrored,x,y)==at(cBase.eye[1],x,y))++innerOwn;}
+        else if(!mapped||edge<-.05){++outer;if(r+g+b<=3)++outerBlack;}
+      }
+      std::snprintf(what,sizeof(what),"B3-3 mirror (%s, %s): CANTED +-10.75 DEG, ASYMMETRIC FOVS: of %u right pixels the left view sees well inside, %u are the right eye's own; of %u it does not see, %u are black",
+                    mode,kind,inner,innerOwn,outer,outerBlack);
+      check(inner>100&&innerOwn==inner&&outer>100&&outerBlack==outer&&f.renderer.shareFacts().mirrorDrawn,what);
+      render(capture,1.f,nullptr,nullptr,true);   // the share as the checks after this read it
     }
     {   // (c) outside the right fov the left eye keeps its own image; a band of about 3 deg between
       bool own=true;unsigned outside=0;

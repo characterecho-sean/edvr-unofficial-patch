@@ -69,6 +69,10 @@ inline bool pixelProbeConfigured() { return detail::g_pixelProbePointCount != 0;
 // points configured, is left alone.
 void pixelProbeArm();
 
+// A run is armed and has not closed yet (the frame it watches has not been reported). pixelProbeConfigure drops an armed run, so a caller that sets the points itself (scope
+// zoom S0, scope_zoom_s0.h) asks first.
+bool pixelProbeArmed();
+
 // The frame edge: called every frame, beside objectProbeFrameBoundary.
 // Closes and reports the probed frame once it has fully elapsed (Map once,
 // diff, log, release); a no-op otherwise, and cheap when unarmed.

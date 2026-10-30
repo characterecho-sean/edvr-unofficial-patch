@@ -42,6 +42,8 @@
 #include <DirectXPackedVector.h>
 #include <wrl/client.h>
 
+#include "../../src/d3d11/crisp_reticle.h"   // C1a: the crisp reticle's arming gate (pure)
+#include "../../src/d3d11/draw_state_describe.h"
 #include "../../src/d3d11/flat_ui_layer_math.h"
 #include "../../src/d3d11/menu_flat_rows.h"
 #include "../../src/d3d11/menu_schema.h"
@@ -76,6 +78,245 @@ static UiFamilyFacts hdrFacts(uint64_t vs, uint64_t ps) {
     f.vs = vs;
     f.ps = ps;
     return f;
+}
+
+// The scope's gunsight mark (A2): the pair's draw of 6 indices in 1 instance with the readout atlas bound, named only while the scope lens is armed, and the blend it is taken with.
+static void scopeMarkTests() {
+    UiFamilyFacts f = hdrFacts(kUiVsScopeMark, kUiPsScopeMark);
+    check(uiLayerFamilyFor(f) == UiLayerFamily::kNone, "the pair alone is not the scope mark (it is the weapon and tool material too)");
+    f.scopeMark = true;
+    check(uiLayerFamilyFor(f) == UiLayerFamily::kScopeMark, "the pair with the lens armed, the shape and the atlas is the scope mark on the HDR target");
+    for (int bit = 0; bit < 64; bit += 9) {
+        UiFamilyFacts v = hdrFacts(kUiVsScopeMark ^ (1ull << bit), kUiPsScopeMark);
+        v.scopeMark = true;   // the flag the hook would have set: without it the mutant could never name the family, and the check would hold for any rule
+        check(uiLayerFamilyFor(v) != UiLayerFamily::kScopeMark, "a one-bit change of the vertex shader is not the family, with every other fact true");
+        UiFamilyFacts g = hdrFacts(kUiVsScopeMark, kUiPsScopeMark ^ (1ull << bit));
+        g.scopeMark = true;
+        check(uiLayerFamilyFor(g) != UiLayerFamily::kScopeMark, "a one-bit change of the pixel shader is not the family, armed or not");
+    }
+    check(!weaponsFireVs(kUiVsScopeMark), "the mark's vertex shader is not a weapons-fire one (the hook's earlier branch would otherwise take the draw first)");
+    UiFamilyFacts other = hdrFacts(kUiVsScopeMark, 0xC5A5C7E8216CB9AFull);
+    other.scopeMark = true;
+    check(uiLayerFamilyFor(other) != UiLayerFamily::kScopeMark, "the same vertex shader with the material's pixel shader is not the family");
+    UiFamilyFacts ldr = f;
+    ldr.targetKind = 2;
+    check(uiLayerFamilyFor(ldr) != UiLayerFamily::kScopeMark, "the post-tonemap target never names it");
+    ldr.targetKind = 0;
+    check(uiLayerFamilyFor(ldr) == UiLayerFamily::kNone, "no eye target, no family");
+    check(uiLayerFamilyTakesHdr(UiLayerFamily::kScopeMark) && !uiLayerFamilyIsSceneLines(UiLayerFamily::kScopeMark), "taken by the HDR route, exempt from the density rule");
+    check(std::strcmp(uiLayerFamilyName(UiLayerFamily::kScopeMark), "scope mark") == 0, "the family's name is the log's");
+    // A3: the mark rides the weapons layer, so the weapons half governs it (its arming is the scope zoom key, in the draw hook's facts) and fix.ui_quality's does not
+    check(!uiLayerFamilyEnabled(UiLayerFamily::kScopeMark, true, false) && uiLayerFamilyEnabled(UiLayerFamily::kScopeMark, false, true),
+          "the weapons fire's half governs the mark (a stood-down weapons layer leaves it in the scene), fix.ui_quality's does not");
+    check(uiLayerFamilyUsesWeaponsLayer(UiLayerFamily::kScopeMark) && uiLayerFamilyUsesWeaponsLayer(UiLayerFamily::kWeaponsFire), "the mark and the weapons fire are drawn into the weapons layer");
+    bool others = true;
+    for (size_t i = 1; i < static_cast<size_t>(UiLayerFamily::kCount); ++i) {
+        const UiLayerFamily fam = static_cast<UiLayerFamily>(i);
+        if (fam != UiLayerFamily::kScopeMark && fam != UiLayerFamily::kWeaponsFire) others = others && !uiLayerFamilyUsesWeaponsLayer(fam);
+    }
+    check(others, "no other family is drawn into the weapons layer (the HUD's families and the shield ripple keep their own)");
+
+    // the shape: 6 indices in 1 instance, an indexed kind
+    check(uiScopeMarkShape('X', 6, 1) && uiScopeMarkShape('I', 6, 1) && !uiScopeMarkShape('X', 18, 1) && !uiScopeMarkShape('X', 6, 2) && !uiScopeMarkShape('D', 6, 1) && !uiScopeMarkShape('N', 6, 1) &&
+              !uiScopeMarkShape('X', 0, 0),
+          "the draw shape is 6 indices in 1 instance, indexed: the material's draws (18 indices, several instances) are not it");
+
+    // THE GATE, driven behaviourally: uiScopeMarkFacts is the rule vscreen.cpp's uiLayerFamilyOf asks with the real reads (the vertex shader, the draw's shape, whether the lens is
+    // armed, the pixel shader's hash, whether a learned interface surface is bound). Each condition alone must refuse, all together must name the family, and a refusal must stop
+    // before the reads that follow it (an ordinary draw reads no hash).
+    struct Probe {
+        uint64_t vs = kUiVsScopeMark;
+        char kind = 'X';
+        uint32_t indices = 6, instances = 1;
+        bool armed = true, surface = true;
+        uint64_t ps = kUiPsScopeMark;
+        mutable int armedCalls = 0, psCalls = 0, surfaceCalls = 0;
+        UiLayerFamily family() const {
+            uint64_t readPs = 0;
+            UiFamilyFacts facts = hdrFacts(vs, 0);
+            facts.scopeMark = uiScopeMarkFacts(vs, kind, indices, instances, [&] { ++armedCalls; return armed; }, [&] { ++psCalls; return ps; }, [&] { ++surfaceCalls; return surface; }, &readPs);
+            facts.ps = readPs;
+            return uiLayerFamilyFor(facts);
+        }
+    };
+    {
+        Probe all;
+        check(all.family() == UiLayerFamily::kScopeMark && all.armedCalls == 1 && all.psCalls == 1 && all.surfaceCalls == 1, "the gate: the pair, 6 indices in 1 instance, the lens armed, the pixel shader and a learned surface together name the family");
+        Probe idx;
+        idx.kind = 'I';
+        check(idx.family() == UiLayerFamily::kScopeMark, "the gate: an indexed draw of kind I matches as kind X does");
+        const auto refuses = [&](Probe p, int armedCalls, int psCalls, int surfaceCalls, const char* why) {
+            check(p.family() != UiLayerFamily::kScopeMark && p.armedCalls == armedCalls && p.psCalls == psCalls && p.surfaceCalls == surfaceCalls, why);
+        };
+        Probe p;
+        p.indices = 5;
+        refuses(p, 0, 0, 0, "the gate: 5 indices alone refuses, before the lens, the hash or the surface is asked");
+        p = Probe();
+        p.indices = 12;
+        refuses(p, 0, 0, 0, "the gate: 12 indices alone refuses, before anything is asked");
+        p = Probe();
+        p.instances = 2;
+        refuses(p, 0, 0, 0, "the gate: 2 instances alone refuses, before anything is asked");
+        p = Probe();
+        p.kind = 'D';
+        refuses(p, 0, 0, 0, "the gate: a draw that is not indexed alone refuses, before anything is asked");
+        p = Probe();
+        p.vs = kUiVsScopeMark ^ 1;
+        refuses(p, 0, 0, 0, "the gate: another vertex shader alone refuses, before anything is asked");
+        p = Probe();
+        p.armed = false;
+        refuses(p, 1, 0, 0, "the gate: the lens not armed alone refuses, before the pixel shader's hash is read");
+        p = Probe();
+        p.ps = 0xC5A5C7E8216CB9AFull;
+        refuses(p, 1, 1, 0, "the gate: the material's pixel shader in place of the mark's alone refuses, before the surface is asked");
+        p = Probe();
+        p.surface = false;
+        refuses(p, 1, 1, 1, "the gate: no learned surface alone refuses");
+        // and the facts it hands the rule are the ones the rule's own flag reads: with the hash read and the flag false the pair alone is not the family
+        UiFamilyFacts bare = hdrFacts(kUiVsScopeMark, kUiPsScopeMark);
+        check(uiLayerFamilyFor(bare) == UiLayerFamily::kNone, "the gate: the pair with the flag unset is no family");
+    }
+
+    // C1a: THE SAME GATE, ARMED BY THE CRISP RETICLE'S GATE (crisp_reticle.h) in place of the lens': a weapon the scope lens does not name has its quad named the same family, taken the same way into the
+    // same weapons layer, composited the same way. vscreen.cpp asks scopeZoomMarkArmed() || scopeZoomCrispArmed() (scope_zoom_test scans it); here the rule behind the second answer drives the facts.
+    {
+        edvr::crisp::GateIn cg;
+        cg.onFoot = cg.adsUp = true;   // the scope zoom off: no lens, every sight served
+        cg.wFresh = true;
+        cg.w = 1.0;
+        Probe viaCrisp;
+        viaCrisp.armed = edvr::crisp::armed(cg);
+        check(viaCrisp.family() == UiLayerFamily::kScopeMark && viaCrisp.armedCalls == 1 && viaCrisp.psCalls == 1 && viaCrisp.surfaceCalls == 1,
+              "C1a gate: a sight the crisp gate arms names the family exactly as the lens' arming does (the pair, 6 indices in 1 instance, the pixel shader, a learned surface)");
+        check(uiLayerFamilyUsesWeaponsLayer(UiLayerFamily::kScopeMark) && uiLayerFamilyTakesHdr(UiLayerFamily::kScopeMark) && uiLayerFamilyEnabled(UiLayerFamily::kScopeMark, false, true),
+              "C1a gate: and it is the weapons layer's family, taken by the HDR route, governed by the weapons half, whoever armed it");
+        cg.adsUp = false;   // the hip
+        Probe hip;
+        hip.armed = edvr::crisp::armed(cg);
+        check(hip.family() != UiLayerFamily::kScopeMark && hip.psCalls == 0, "C1a gate: at the hip the gate is down: the family is not named and the pixel shader's hash is not read");
+        cg.adsUp = true;
+        cg.lensKeyOn = cg.itemKnown = cg.lensOwned = true;   // the scope lens names this sight: its quad is the lens' to arm
+        Probe lens;
+        lens.armed = edvr::crisp::armed(cg);
+        check(lens.family() != UiLayerFamily::kScopeMark && lens.psCalls == 0, "C1a gate: a sight the lens names leaves the crisp gate down and the family is named for the lens' arming alone, as before C1");
+    }
+
+    // THE ARMING OF THE FIRST-SEEN LINE: not-armed is structural for the scope mark alone (the lens-armed family that was never taken because its eye's layer was not armed is the one
+    // reason its flight cannot lose); late and not-UI stay transient for it; every other family keeps its rule
+    {
+        check(uiLayerDecisionIsStructural(UiLayerFamily::kScopeMark, UiLayerDecision::kNotArmed) && !uiLayerDecisionIsStructural(UiLayerFamily::kScopeMark, UiLayerDecision::kLate) &&
+                  !uiLayerDecisionIsStructural(UiLayerFamily::kScopeMark, UiLayerDecision::kNotUi) && uiLayerDecisionIsStructural(UiLayerFamily::kScopeMark, UiLayerDecision::kBlendRefused),
+              "not-armed gets a first-seen line for the scope mark; late and not-UI do not");
+        check(!uiLayerDecisionIsStructural(UiLayerFamily::kScreen, UiLayerDecision::kNotArmed) && !uiLayerDecisionIsStructural(UiLayerFamily::kWeaponsFire, UiLayerDecision::kNotArmed) &&
+                  !uiLayerDecisionIsStructural(UiLayerFamily::kFlightHud, UiLayerDecision::kNotArmed) && uiLayerDecisionIsStructural(UiLayerFamily::kScreen, UiLayerDecision::kMrt),
+              "no other family's not-armed gets a line, and the structural decisions are as they were");
+        UiFamilySeenTable<4> seen;
+        check(seen.wanted(UiLayerFamily::kScopeMark, UiLayerDecision::kNotArmed, 1, 2) && seen.record(UiLayerFamily::kScopeMark, UiLayerDecision::kNotArmed, 1, 2) &&
+                  !seen.wanted(UiLayerFamily::kScopeMark, UiLayerDecision::kNotArmed, 1, 2) && !seen.record(UiLayerFamily::kScopeMark, UiLayerDecision::kNotArmed, 1, 2) &&
+                  !seen.wanted(UiLayerFamily::kScreen, UiLayerDecision::kNotArmed, 1, 2) && seen.count == 1,
+              "the scope mark's not-armed prints once for its pair, and another family's does not print");
+    }
+
+    // THE DEPTH PATH. The draw tests depth (GEQUAL) and stencil against a reference and writes neither (the dump census); the view it is drawn against may be bound read-only.
+    {
+        UiDsState gt;
+        gt.depthEnable = true;
+        gt.depthFunc = 7;   // GREATER_EQUAL
+        gt.depthWriteAll = false;
+        gt.stencilEnable = true;
+        gt.readMask = 0xFF;
+        gt.writeMask = 0x00;
+        gt.front.func = 3;   // EQUAL (reference 4)
+        gt.back.func = 3;
+        const UiDsEffect tests = uiLayerDsEffect(gt, true);
+        check(tests.depthTest && tests.stencilTest && !tests.writes() && uiScopeMarkWritesNothing(gt), "the mark's draw state tests depth and stencil and writes nothing");
+        check(uiScopeMarkDepth(tests, gt, true) == UiMarkDepth::kSeeded, "tests the layer can reproduce on a writable view: the seeded copy");
+        UiDsState ro = gt;
+        ro.readOnlyDepth = ro.readOnlyStencil = true;
+        check(uiScopeMarkDepth(uiLayerDsEffect(ro, true), ro, true) == UiMarkDepth::kSeededReadOnly, "the same on a view bound read-only, reproduced: the seeded copy, named read-only");
+        ro.readOnlyStencil = false;
+        check(uiScopeMarkDepth(uiLayerDsEffect(ro, true), ro, true) == UiMarkDepth::kSeededReadOnly, "a view read-only in depth alone is read-only too (the view's flags are either)");
+        check(uiScopeMarkDepth(tests, gt, false) == UiMarkDepth::kTestsOff, "tests the layer cannot reproduce, the draw writing nothing: redrawn with the tests off");
+        check(uiScopeMarkDepth(uiLayerDsEffect(ro, true), ro, false) == UiMarkDepth::kTestsOff, "a read-only view that could not be reproduced is dropped the same way");
+        UiDsState none;
+        check(uiScopeMarkDepth(uiLayerDsEffect(none, true), none, true) == UiMarkDepth::kUntested && uiScopeMarkDepth(uiLayerDsEffect(none, false), none, false) == UiMarkDepth::kUntested,
+              "a draw that tests neither, or with no depth target bound, is untested");
+        UiDsState wd = gt;
+        wd.depthWriteAll = true;
+        check(!uiScopeMarkWritesNothing(wd) && uiScopeMarkDepth(uiLayerDsEffect(wd, true), wd, false) == UiMarkDepth::kRefused && uiScopeMarkDepth(uiLayerDsEffect(wd, true), wd, true) == UiMarkDepth::kSeeded,
+              "a draw that writes depth is never accepted on a read-only view and, when its tests cannot be reproduced, keeps the ordinary refusal");
+        UiDsState wr = gt;
+        wr.writeMask = 0xFF;
+        wr.front.pass = wr.back.pass = 3;   // REPLACE
+        check(!uiScopeMarkWritesNothing(wr) && uiScopeMarkDepth(uiLayerDsEffect(wr, true), wr, false) == UiMarkDepth::kRefused, "a stencil write under a write mask is a write");
+        UiDsState masked = wr;
+        masked.writeMask = 0x00;
+        UiDsState keep = wr;
+        keep.front.pass = keep.back.pass = uids::kKeep;
+        check(uiScopeMarkWritesNothing(masked) && uiScopeMarkWritesNothing(keep), "a stencil operation under a zero write mask, or every operation KEEP, writes nothing");
+        UiDsState masking = wd;   // a read-only view masks the write the state asks for: the state's potential is what is judged, not the view's flags
+        masking.readOnlyDepth = masking.readOnlyStencil = true;
+        check(!uiScopeMarkWritesNothing(masking) && !uiLayerDsEffect(masking, true).writes(), "a depth write the read-only view masks is still the state's potential to write (the layer's copy is writable)");
+
+        // end to end through the pure decision: a test the layer cannot reproduce refuses a family's draw; for the mark it is dropped and the draw is redirected; a writer keeps the refusal
+        UiLayerDrawFacts d;
+        d.family = UiLayerFamily::kScopeMark;
+        d.eyeTarget = true;
+        d.ldrView = false;
+        d.crispHdr = true;
+        d.eye = 1;
+        d.armed = true;
+        d.blend = UiBlendShape::kAdditive;
+        d.ds = tests;
+        d.dsReproducible = false;
+        check(uiLayerDecide(d) == UiLayerDecision::kDepthStencilTest, "a test the layer cannot reproduce is refused by the ordinary decision");
+        UiLayerDrawFacts dropped = d;
+        if (uiScopeMarkDepth(dropped.ds, gt, dropped.dsReproducible) == UiMarkDepth::kTestsOff) dropped.ds.depthTest = dropped.ds.stencilTest = false;
+        check(uiLayerDecide(dropped) == UiLayerDecision::kRedirect, "with the mark's tests dropped the draw is redirected into the layer");
+        UiLayerDrawFacts writer = d;
+        writer.ds = uiLayerDsEffect(wd, true);
+        if (uiScopeMarkDepth(writer.ds, wd, writer.dsReproducible) == UiMarkDepth::kTestsOff) writer.ds.depthTest = writer.ds.stencilTest = false;
+        check(uiLayerDecide(writer) == UiLayerDecision::kDepthStencilTest, "a mark draw that writes depth keeps the refusal");
+        check(std::strcmp(uiMarkDepthName(UiMarkDepth::kUntested), "untested") == 0 && std::strcmp(uiMarkDepthName(UiMarkDepth::kSeeded), "seeded") == 0 &&
+                  std::strcmp(uiMarkDepthName(UiMarkDepth::kSeededReadOnly), "seeded read-only") == 0 && std::strcmp(uiMarkDepthName(UiMarkDepth::kTestsOff), "tests off") == 0,
+              "the paths' names are the press line's labels (tools\\edvr_log.py reads them)");
+    }
+
+    // the decision: ONE, DEST_ALPHA (the dump census, bl=12,7,1/2,7,1) is refused as it stands and additive on an alpha-less target
+    UiBlendRt game;
+    game.enable = true;
+    game.src = uiblend::kOne;
+    game.dst = uiblend::kDestAlpha;
+    game.srcA = uiblend::kOne;
+    game.dstA = uiblend::kDestAlpha;
+    check(uiLayerBlendShape(game) == UiBlendShape::kRefused, "the game's ONE, DEST_ALPHA is refused as it stands (the layer's alpha is not the frame's)");
+    check(!uiLayerFormatHasAlpha(26) && !uiLayerFormatHasAlpha(67) && uiLayerFormatHasAlpha(28) && uiLayerFormatHasAlpha(10) && uiLayerFormatHasAlpha(2),
+          "R11G11B10_FLOAT and the shared-exponent format have no alpha; R8G8B8A8, R16G16B16A16 and R32G32B32A32 do");
+    const UiBlendRt one = uiLayerBlendDestAlphaOne(game);
+    check(one.src == uiblend::kOne && one.dst == uiblend::kOne && uiLayerBlendShape(one) == UiBlendShape::kAdditive, "read as 1 on an alpha-less target it is ONE, ONE: additive");
+    UiBlendRt conv;
+    check(uiLayerConvertBlend(one, &conv) && conv.src == uiblend::kOne && conv.dst == uiblend::kOne && conv.srcA == uiblend::kZero && conv.dstA == uiblend::kOne,
+          "and converts to the layer's additive blend, which keeps the layer's transmittance");
+    UiBlendRt inv = game;
+    inv.dst = uiblend::kInvDestAlpha;
+    check(uiLayerBlendDestAlphaOne(inv).dst == uiblend::kZero, "INV_DEST_ALPHA reads as 0");
+    UiBlendRt untouched = game;
+    untouched.src = uiblend::kSrcAlpha;
+    untouched.dst = uiblend::kInvSrcAlpha;
+    check(uiLayerBlendShape(uiLayerBlendDestAlphaOne(untouched)) == UiBlendShape::kOver, "a blend with no destination-alpha factor is not changed");
+
+    UiLayerDrawFacts d;
+    d.family = UiLayerFamily::kScopeMark;
+    d.eyeTarget = true;
+    d.ldrView = false;
+    d.crispHdr = true;
+    d.eye = 1;
+    d.armed = true;
+    d.blend = UiBlendShape::kAdditive;
+    d.ds.depthTest = true;
+    check(uiLayerDecide(d) == UiLayerDecision::kRedirect, "the mark's draw, read as additive, depth-tested and reproducible, is redirected into the HDR layer");
+    d.blend = uiLayerBlendShape(game);
+    check(uiLayerDecide(d) == UiLayerDecision::kBlendRefused, "the same draw with the blend as the game states it is refused: the rewrite is the family's alone");
 }
 
 static void ruleTests() {
@@ -122,8 +363,9 @@ static void ruleTests() {
     // Last in the enums: no older number moved.
     check(static_cast<int>(UiLayerFamily::kWeaponsFire) == static_cast<int>(UiLayerFamily::kOnFootHud) + 1 &&
               static_cast<int>(UiLayerFamily::kShieldRipple) == static_cast<int>(UiLayerFamily::kWeaponsFire) + 1 &&
-              static_cast<int>(UiLayerFamily::kShieldRipple) + 1 == static_cast<int>(UiLayerFamily::kCount),
-          "the family is last but one in its enum, the shield ripple last, straight after the on-foot HUD (no older number moved)");
+              static_cast<int>(UiLayerFamily::kScopeMark) == static_cast<int>(UiLayerFamily::kShieldRipple) + 1 &&
+              static_cast<int>(UiLayerFamily::kScopeMark) + 1 == static_cast<int>(UiLayerFamily::kCount),
+          "the weapons fire, the shield ripple and the scope mark follow the on-foot HUD in that order, the scope mark last (no older number moved)");
     check(static_cast<int>(UiLayerDecision::kFamilyOff) == static_cast<int>(UiLayerDecision::kLayerFailed) + 1 &&
               static_cast<int>(UiLayerDecision::kFamilyOff) + 1 == static_cast<int>(UiLayerDecision::kCount) && static_cast<int>(UiLayerDecision::kCount) <= 24,
           "the new decision is last in its enum and the 24-wide tables hold it");
@@ -155,7 +397,8 @@ static void keyTests() {
             for (size_t f = 1; f < static_cast<size_t>(UiLayerFamily::kCount); ++f) {
                 const UiLayerFamily fam = static_cast<UiLayerFamily>(f);
                 const bool on = uiLayerFamilyEnabled(fam, q != 0, s != 0);
-                check(on == (fam == UiLayerFamily::kWeaponsFire ? s != 0 : fam == UiLayerFamily::kShieldRipple ? true : q != 0), "a family is enabled by its own half and by no other (the ripple, asked without its half, defaults on)");
+                check(on == (fam == UiLayerFamily::kWeaponsFire || fam == UiLayerFamily::kScopeMark ? s != 0 : fam == UiLayerFamily::kShieldRipple ? true : q != 0),
+                      "a family is enabled by its own half and by no other (the scope mark rides the weapons layer, so it is the weapons half's; the ripple, asked without its half, defaults on)");
                 UiLayerDrawFacts d;
                 d.family = fam;
                 d.familyEnabled = on;
@@ -209,6 +452,11 @@ static void keyTests() {
             h.blend = UiBlendShape::kPremulOver;
             check((uiLayerDecide(w) == UiLayerDecision::kRedirect) == (s != 0), "the weapons fire is taken iff its half is live");
             check((uiLayerDecide(h) == UiLayerDecision::kRedirect) == (q != 0), "the flight HUD is taken iff fix.ui_quality is on");
+            UiLayerDrawFacts m = w;
+            m.family = UiLayerFamily::kScopeMark;
+            m.familyEnabled = uiLayerFamilyEnabled(m.family, q != 0, s != 0);
+            m.blend = UiBlendShape::kAdditive;
+            check((uiLayerDecide(m) == UiLayerDecision::kRedirect) == (s != 0), "the scope mark is taken iff the weapons half is live, whatever fix.ui_quality says");
         }
     }
 }
@@ -626,10 +874,14 @@ static bool wiredLiveness(const std::string& t) {
 }
 static bool wiredDecision(const std::string& t) {
     return has(t, "f.familyEnabled = uiLayerFamilyEnabled(family, detail::g_uiQualityLive, g_weaponsLive, g_rippleLive);") &&
-           has(t, "family == UiLayerFamily::kWeaponsFire\n                    ? weaponsTakeReady(ctx, f.eye)") &&
+           has(t, "uiLayerFamilyUsesWeaponsLayer(family)\n                    ? weaponsTakeReady(ctx, f.eye, family == UiLayerFamily::kScopeMark)") &&
            has(t, "const bool cancel = !g_draw.weapons || weaponsFireJitterCancel(g_draw.vsHash);") &&
-           has(t, "g_draw.jx = cancel ? jx : 0.0f;") && has(t, "g_draw.weapons = family == UiLayerFamily::kWeaponsFire;") &&
-           before(t, "f.familyEnabled = uiLayerFamilyEnabled(", "UiLayerDecision d = uiLayerDecide(f);");
+           has(t, "g_draw.jx = cancel ? jx : 0.0f;") && has(t, "g_draw.weapons = uiLayerFamilyUsesWeaponsLayer(family);") &&
+           // the mark's stand-down of its own, for the press it happened in, after the half gate and before the decision
+           has(t, "if (family == UiLayerFamily::kScopeMark && markStoodDown()) f.familyEnabled = false;") &&
+           has(t, "bool markStoodDown() { return g_markDown.active(scopeZoomPressId()); }") &&
+           before(t, "f.familyEnabled = uiLayerFamilyEnabled(", "if (family == UiLayerFamily::kScopeMark && markStoodDown()) f.familyEnabled = false;") &&
+           before(t, "if (family == UiLayerFamily::kScopeMark && markStoodDown()) f.familyEnabled = false;", "UiLayerDecision d = uiLayerDecide(f);");
 }
 // The interface-only parts keep fix.ui_quality's liveness.
 static bool wiredQualityOnly(const std::string& t) {
@@ -640,7 +892,7 @@ static bool wiredQualityOnly(const std::string& t) {
            before(t, "    seedWritersCheck(ctx, count, instances, verdict, drawKind);\n", "    if (!detail::g_uiQualityLive) return false;\n    if (!taken[0] && !taken[1]) return false;");
 }
 static bool wiredVscreen(const std::string& t) {
-    const size_t fn = t.find("UiLayerFamily uiLayerFamilyOf(State* s, char kind, UINT count) {");
+    const size_t fn = t.find("UiLayerFamily uiLayerFamilyOf(State* s, char kind, UINT count, UINT instances) {");
     if (fn == std::string::npos) return false;
     const size_t skip = t.find("if (f.targetKind == 2 && !uiLayerQualityLive()) return UiLayerFamily::kNone;", fn);
     const size_t vs = t.find("f.vs = bindingShaderHash(BindSlot::Vs);", fn);
@@ -692,6 +944,10 @@ static void wiringTests() {
           "control: a ui_quality gate that reads the union trips the pin");
     check(!wiredDecision(replaced(layer, "g_draw.jx = cancel ? jx : 0.0f;", "g_draw.jx = jx;")), "control: a cancel that ignores the table trips the pin");
     check(!wiredDecision(replaced(layer, "weaponsFireJitterCancel(g_draw.vsHash)", "true")), "control: a table that is never read trips the pin");
+    check(!wiredDecision(replaced(layer, "g_draw.weapons = uiLayerFamilyUsesWeaponsLayer(family);", "g_draw.weapons = family == UiLayerFamily::kWeaponsFire;")), "control: a mark that is not drawn into the weapons layer trips the pin");
+    check(!wiredDecision(replaced(layer, "if (family == UiLayerFamily::kScopeMark && markStoodDown()) f.familyEnabled = false;", "")), "control: a mark with no stand-down of its own trips the pin");
+    check(!wiredDecision(replaced(layer, "bool markStoodDown() { return g_markDown.active(scopeZoomPressId()); }", "bool markStoodDown() { return g_markDown.down; }")),
+          "control: a mark stand-down that does not lapse with the press trips the pin");
 
     check(wiredQualityOnly(layer), "ui_layer.cpp: the world route, the on-foot gate and the after-UI take stay fix.ui_quality's");
     check(!wiredQualityOnly(replaced(layer, "bool uiLayerLiveForWorldRoute() { return detail::g_uiQualityLive; }", "bool uiLayerLiveForWorldRoute() { return detail::g_uiLayerLive; }")),
@@ -746,7 +1002,11 @@ static void flatTests() {
                 check(flatUiFamilyLive(UiLayerFamily::kShieldRipple, q != 0, w != 0, r != 0) == (r != 0), "the shield ripple is asked when its half is live, whatever else says");
                 check(flatUiFamilyLive(UiLayerFamily::kFlightHud, q != 0, w != 0, r != 0) == (q != 0), "the HUD families are asked when fix.ui_quality's half is live and not otherwise");
                 check(flatUiFamilyLive(UiLayerFamily::kMapCanvas, q != 0, w != 0, r != 0) == (q != 0), "...the System Map's too");
+                check(flatUiFamilyLive(UiLayerFamily::kScopeMark, q != 0, w != 0, r != 0) == (w != 0) &&
+                          flatUiFamilyLive(UiLayerFamily::kScopeMark, q != 0, w != 0, r != 0) == uiLayerFamilyEnabled(UiLayerFamily::kScopeMark, q != 0, w != 0, r != 0),
+                      "the scope's gunsight mark rides the weapons half in flat's liveness too, as in the VR rule (one list: uiLayerFamilyUsesWeaponsLayer)");
             }
+    check(!flatUiLayerTakesFamily(UiLayerFamily::kScopeMark), "...and flat never takes the mark: its lens is VR's, and the flat tick publishes none, so the family is never armed there");
     // No setting and no row for the weapons fire (retired 2026-10-28): the flat panel has neither it nor a Weapons blend row.
     check(!flatPageHasRow("fix", "sharp_weapons") && !flatPageHasRow("advanced", "sharp_weapons_blend"), "the flat panel has no Sharp weapons row and no Weapons blend row");
     int quality = -1, hud = -1;
@@ -881,6 +1141,105 @@ static void dropTests() {
     check(!weaponsLayerDropped(0, 0, 0) && !weaponsLayerDropped(5, 0, 0) && !weaponsLayerDropped(0, 3, 0) && !weaponsLayerDropped(7, 2, 7) && weaponsLayerDropped(7, 2, 6) &&
               weaponsLayerDropped(7, 2, 0),
           "weaponsLayerDropped: an empty layer, a never-used layer and a carried layer are not drops; a layer carried at another frame, or never, is");
+
+    // A3: the scope's gunsight mark shares the layer, so a drop is judged for the whole layer and attributed by kind: the weapons fire's loss and streak are the fire's alone
+    {
+        const WeaponsLayerLoss fire = weaponsLayerLoss(7, 3, 0, 6), mark = weaponsLayerLoss(7, 0, 2, 6), both = weaponsLayerLoss(7, 3, 2, 6);
+        check(fire.fire && !fire.mark && !mark.fire && mark.mark && both.fire && both.mark, "a dropped layer is lost as the kinds it held: fire, mark or both");
+        const WeaponsLayerLoss carried = weaponsLayerLoss(7, 3, 2, 7), empty = weaponsLayerLoss(7, 0, 0, 6), fresh = weaponsLayerLoss(0, 0, 2, 0);
+        check(!carried.fire && !carried.mark && !empty.fire && !empty.mark && !fresh.fire && !fresh.mark, "a carried, an empty and a never-used layer lose nothing, of either kind");
+        // the production bookkeeping frame by frame, both streaks and both stand-downs (ui_layer.cpp beginInner and uiLayerCrispToneEnd)
+        struct KindModel {
+            uint64_t wSeq = 0, wPubSeq = 0;
+            uint32_t wFires = 0, wMarks = 0, fireStreak = 0, markStreak = 0;
+            bool fireDown = false, markDown = false;
+            unsigned fireLost = 0, markLost = 0;
+            void frame(uint64_t f, uint32_t fires, uint32_t marks, bool carries) {
+                if (!fires && !marks) return;
+                const WeaponsLayerLoss l = weaponsLayerLoss(wSeq, wFires, wMarks, wPubSeq);
+                if (l.fire) {
+                    ++fireLost;
+                    if (++fireStreak >= 30) fireDown = true;
+                }
+                if (l.mark) {
+                    ++markLost;
+                    if (++markStreak >= 30) markDown = true;
+                }
+                wSeq = f;
+                wFires = fires;
+                wMarks = marks;
+                if (carries) {
+                    wPubSeq = f;
+                    if (wFires) fireStreak = 0;
+                    if (wMarks) markStreak = 0;
+                }
+            }
+        };
+        {
+            KindModel m;   // a mark every frame of a press and no re-issue ever carries it: the mark stands down, the weapons fire is never touched
+            for (uint64_t f = 1; f <= 100; ++f) m.frame(f, 0, 1, false);
+            check(m.markDown && !m.fireDown && m.markLost == 99 && m.fireLost == 0, "marks lost in a row stand the mark down and never the weapons fire (nor count as its losses)");
+        }
+        {
+            KindModel m;   // the weapons fire lost in a row, no mark: the weapons fire stands down as it always did, the mark is not touched
+            for (uint64_t f = 1; f <= 100; ++f) m.frame(f, 2, 0, false);
+            check(m.fireDown && !m.markDown && m.fireLost == 99 && m.markLost == 0, "weapons fire lost in a row stands the weapons fire down, as before, and not the mark");
+        }
+        {
+            KindModel m;   // both kinds in every frame and no re-issue carries them: each kind is counted on its own
+            for (uint64_t f = 1; f <= 100; ++f) m.frame(f, 1, 1, false);
+            check(m.fireDown && m.markDown, "a layer holding both, lost in a row, stands each kind down on its own count");
+        }
+        {
+            KindModel m;   // the press interleaved with a quiet fire frame that is carried: marks carried every frame never stand anything down
+            for (uint64_t f = 1; f <= 200; ++f) m.frame(f, f % 7 == 0 ? 2 : 0, 1, true);
+            check(!m.markDown && !m.fireDown && m.markLost == 0 && m.fireLost == 0, "marks and weapons fire carried by every re-issue lose nothing");
+        }
+        {
+            KindModel m;   // a mark frame that is carried between lost fire frames must not reset the fire's streak (it did not carry fire)
+            for (uint64_t f = 1; f <= 90; ++f) m.frame(f, f % 2 ? 2 : 0, f % 2 ? 0 : 1, f % 2 == 0);
+            check(m.fireDown && !m.markDown, "carried marks between lost weapons fire never reset the weapons fire's streak");
+        }
+        {
+            // The mark's stand-down lasts the press of the sights it was found in (MarkStandDown, and ui_layer.cpp markStandDown's reset of the streaks): a press whose marks are never
+            // carried stands the route down after 30 lost frames and draws nothing more into the layer; the next press tries it again, and a press that is carried keeps it.
+            struct PressModel {
+                MarkStandDown md;
+                uint32_t press = 1, wMarks = 0, streak = 0, standDowns = 0, drawn = 0;
+                uint64_t wSeq = 0, wPubSeq = 0;
+                void frame(uint64_t f, bool carries) {
+                    if (md.active(press)) return;   // back in the scene: no draw reaches the layer
+                    if (weaponsLayerLoss(wSeq, 0, wMarks, wPubSeq).mark && ++streak >= 30) {
+                        md.stand(press);
+                        streak = 0;
+                        ++standDowns;
+                    }
+                    wSeq = f;
+                    wMarks = 1;
+                    ++drawn;
+                    if (carries) {
+                        wPubSeq = f;
+                        streak = 0;
+                    }
+                }
+            };
+            PressModel m;
+            uint64_t f = 1;
+            for (int i = 0; i < 100; ++i) m.frame(f++, false);
+            check(m.standDowns == 1 && m.drawn == 31 && m.md.active(1), "a press whose marks are never carried stands the route down once, after 30 lost frames, and draws no more into the layer");
+            m.press = 2;
+            check(!m.md.active(2), "the stand-down is over at the next press of the sights");
+            for (int i = 0; i < 100; ++i) m.frame(f++, true);
+            check(m.standDowns == 1 && m.drawn == 131 && !m.md.active(2), "a carried press after a stood-down one keeps the route: marks are drawn into the layer every frame again");
+            m.press = 3;
+            for (int i = 0; i < 100; ++i) m.frame(f++, false);
+            check(m.standDowns == 2 && m.md.active(3) && !m.md.active(4), "a later press that fails stands the route down again, for that press alone");
+            MarkStandDown d;
+            check(!d.active(0) && !d.active(7), "a route never stood down is not down at any press");
+            d.stand(7);
+            check(d.active(7) && d.active(7) && !d.active(8) && !d.active(7), "a stand-down is down for its own press only and is not back once it has lapsed");
+        }
+    }
 }
 
 static bool wiredLost(const std::string& t) {
@@ -892,9 +1251,23 @@ static bool wiredLost(const std::string& t) {
     }
     return loss != std::string::npos && sights == 4 && has(t, "void noteToneSight(uint64_t seq, const void* res, int eye, uint8_t outcome) {") &&
            has(t, "if (e.wTarget != g_draw.targetRes) ++e.wOtherTargets;") && has(t, "e.wOtherTargets = 0;") && has(t, "if (!seenRes) seenRes = r.Get();") &&
-           has(t, "if (weaponsLayerDropped(e.wSeq, e.wDraws, e.wPubSeq)) {") &&
-           has(t, "    if (hadWeapons) {\n        // Stamped ONLY by a bracket that carried the weapons layer's content") && has(t, "        e.wPubSeq = seq;\n        e.wMissStreak = 0;") &&
-           has(t, "if (g_lostLines >= 24) return;") && before(t, "noteToneSight(seq, seenRes, eye, 0);", "crispArm(eye, seq, hdrSlot, ta.rtvRes, hdrRes, vs, ps);");
+           has(t, "const WeaponsLayerLoss lost = weaponsLayerLoss(e.wSeq, e.wFires, e.wMarks, e.wPubSeq);") &&
+           has(t, "    if (hadWeapons) {\n        // Stamped ONLY by a bracket that carried the weapons layer's content") &&
+           has(t, "        e.wPubSeq = seq;\n        e.wPubMatched = plan.sourcePass;\n        if (e.wFires) e.wMissStreak = 0;\n        if (e.wMarks) e.wMarkMissStreak = 0;") &&
+           has(t, "if (g_lostLines >= 24) return;") && before(t, "noteToneSight(seq, seenRes, eye, 0);", "crispArm(eye, seq, hdrSlot, ta.rtvRes, hdrRes, vs, ps);") &&
+           // A3: the scope mark's loss is counted, noted and stood down apart from the weapons fire's, and its draws are counted apart from the fire's
+           has(t, "if (lost.fire) {\n            ++g_win.weaponsLost;") && has(t, "if (lost.mark) {\n            if (!lost.fire) noteWeaponsLost(g_draw.eye, e, g_draw.seq, true);") &&
+           has(t, "if (++e.wMarkMissStreak >= kCrispHdrMissFrames) {") && has(t, "markStandDown(g_draw.eye, e.wMarkMissStreak, why);") && has(t, "if (++e.wMissStreak >= kCrispHdrMissFrames) {") &&
+           has(t, "                ++e.wMarks;   // the scope's gunsight mark shares the layer") && has(t, "                ++e.wFires;\n                ++g_win.weaponsTaken;") &&
+           has(t, "if (wl && g_draw.family == UiLayerFamily::kWeaponsFire && e.wFireSeq != g_draw.seq) {") && has(t, "if (hadWeapons && e.wFires) {") &&
+           // the mark's stand-down lasts the press, is logged with the eye and the streak, is counted for the press line and starts the next press's count afresh; its lost line is one a press
+           has(t, "g_markDown.stand(press);\n    g_eye[0].wMarkMissStreak = g_eye[1].wMarkMissStreak = 0;") && has(t, "scopeZoomNoteMarkStandDown();") &&
+           has(t, "(press %u, %s eye, streak %u) -- %s.") && has(t, "if (g_markLostPress == press) return;\n        g_markLostPress = press;") &&
+           // a creation failure belongs to the family that asked: the weapons fire's stands the weapons half down, the mark's the mark alone
+           has(t, "if (forMark) markStandDown(eye, g_eye[eye].wMarkMissStreak, why);\n        else weaponsStandDown(why);") &&
+           has(t, "return fail(\"the weapons layer could not be created\");") && !has(t, "weaponsStandDown(\"the weapons layer could not be created\")") &&
+           // the mark's own composite lines at the end of the bracket, for a frame that held a mark whether or not weapons fire was in it too
+           has(t, "if (hadWeapons && e.wMarks) {") && has(t, "if (plan.sourcePass && !markEngagedNoted) {") && has(t, "if (!plan.sourcePass && markPlainPress != scopeZoomPressId()) {");
 }
 static void lostPins(const std::string& layer) {
     check(wiredLost(layer), "ui_layer.cpp: a lost weapons layer prints the eye's state and the last tonemap-shaped draws, rate-limited, and every outcome of the admission is recorded");
@@ -902,9 +1275,23 @@ static void lostPins(const std::string& layer) {
     check(!wiredLost(replaced(layer, "        noteToneSight(seq, seenRes, eye, 3);\n", "")), "control: an unrecorded outcome trips the pin");
     check(!wiredLost(replaced(layer, "    noteToneSight(seq, seenRes, eye, 0);\n", "")), "control: an unrecorded admission trips the pin");
     check(!wiredLost(replaced(layer, "if (g_lostLines >= 24) return;", "")), "control: an unlimited line trips the pin");
-    check(!wiredLost(replaced(layer, "if (weaponsLayerDropped(e.wSeq, e.wDraws, e.wPubSeq)) {", "if (e.wSeq && e.wDraws && e.wToneSeq != e.wSeq) {")),
+    check(!wiredLost(replaced(layer, "weaponsLayerLoss(e.wSeq, e.wFires, e.wMarks, e.wPubSeq)", "WeaponsLayerLoss{e.wSeq && e.wDraws && e.wToneSeq != e.wSeq, false}")),
           "control: the frozen drop test (against the latest tonemap's frame) trips the pin");
     check(!wiredLost(replaced(layer, "    if (hadWeapons) {\n        // Stamped ONLY", "    {\n        // Stamped ONLY")), "control: a publication stamped by every re-issue trips the pin");
+    check(!wiredLost(replaced(layer, "if (e.wFires) e.wMissStreak = 0;", "e.wMissStreak = 0;")), "control: a frame that held a mark alone resetting the weapons fire's streak trips the pin");
+    check(!wiredLost(replaced(layer, "                ++e.wMarks;   // the scope's gunsight mark shares the layer", "                ++e.wFires;   // the scope's gunsight mark shares the layer")),
+          "control: a mark counted as weapons fire trips the pin");
+    check(!wiredLost(replaced(layer, "if (hadWeapons && e.wFires) {", "if (hadWeapons) {")), "control: a mark's composite counted on the weapons line trips the pin");
+    check(!wiredLost(replaced(layer, "markStandDown(g_draw.eye, e.wMarkMissStreak, why);", "weaponsStandDown(why);")), "control: a mark that stands the weapons fire down trips the pin");
+    check(!wiredLost(replaced(layer, "if (forMark) markStandDown(eye, g_eye[eye].wMarkMissStreak, why);\n        else weaponsStandDown(why);", "weaponsStandDown(why);")),
+          "control: a mark's creation failure that stands the weapons half down for the session trips the pin");
+    check(!wiredLost(replaced(layer, "    g_eye[0].wMarkMissStreak = g_eye[1].wMarkMissStreak = 0;   // the next press counts afresh\n", "")), "control: a stand-down that leaves the streak for the next press trips the pin");
+    check(!wiredLost(replaced(layer, "    scopeZoomNoteMarkStandDown();\n", "")), "control: a stand-down the press line does not count trips the pin");
+    check(!wiredLost(replaced(layer, "if (g_markLostPress == press) return;\n        g_markLostPress = press;", "if (g_markLostPress == 0) return;\n        g_markLostPress = 0;")), "control: a lost line once a session, not a press, trips the pin");
+    check(!wiredLost(replaced(layer, "if (hadWeapons && e.wMarks) {", "if (hadWeapons && e.wFires) {")), "control: the mark's composite lines gated on weapons fire trip the pin");
+    check(!wiredLost(replaced(layer, "if (!plan.sourcePass && markPlainPress != scopeZoomPressId()) {", "if (!plan.sourcePass) {")), "control: a plain-composite reason on every frame trips the pin");
+    check(!wiredLost(replaced(layer, "if (wl && g_draw.family == UiLayerFamily::kWeaponsFire && e.wFireSeq != g_draw.seq) {", "if (wl && e.wFireSeq != g_draw.seq) {")),
+          "control: an eye-frame counted as having weapons draws for a mark trips the pin");
 }
 
 // ============================================================================================ the composite (WARP)
@@ -1240,8 +1627,70 @@ static std::vector<uint8_t> addClamped(const std::vector<uint8_t>& a, const std:
     return out;
 }
 
+// The reproduction behind uiLayerBlendDestAlphaOne: ONE, DEST_ALPHA (the scope mark's blend) into an R11G11B10_FLOAT target adds the source to what the target holds, as ONE, ONE does,
+// because the format has no alpha and the output merger reads its destination alpha as 1. The same blend into an R16G16B16A16_FLOAT target whose alpha is 0 adds nothing of the target.
+static void destAlphaReproduction(Fx& f) {
+    auto vs = f.compile(kToneVs, "vs_5_0");
+    auto ps = f.compile("float4 main(float4 p : SV_POSITION, float2 uv : TEXCOORD0) : SV_TARGET { return float4(0.5, 0.25, 0.5, 0.0); }", "ps_5_0");
+    ComPtr<ID3D11VertexShader> v;
+    ComPtr<ID3D11PixelShader> p;
+    hr(f.dev->CreateVertexShader(vs->GetBufferPointer(), vs->GetBufferSize(), nullptr, &v), "the reproduction's VS");
+    hr(f.dev->CreatePixelShader(ps->GetBufferPointer(), ps->GetBufferSize(), nullptr, &p), "the reproduction's PS");
+    D3D11_BLEND_DESC bd{};
+    bd.RenderTarget[0].BlendEnable = TRUE;
+    bd.RenderTarget[0].SrcBlend = bd.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ONE;
+    bd.RenderTarget[0].DestBlend = bd.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_DEST_ALPHA;
+    bd.RenderTarget[0].BlendOp = bd.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
+    bd.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+    ComPtr<ID3D11BlendState> bs;
+    hr(f.dev->CreateBlendState(&bd, &bs), "the reproduction's blend");
+    const auto draw = [&](DXGI_FORMAT fmt, const float clear[4]) {
+        ComPtr<ID3D11Texture2D> t = f.texture(4, 4, fmt, D3D11_BIND_RENDER_TARGET, nullptr, 0);
+        ComPtr<ID3D11RenderTargetView> rtv = f.rtvOf(t.Get());
+        f.ctx->ClearRenderTargetView(rtv.Get(), clear);
+        const D3D11_VIEWPORT vp{0, 0, 4, 4, 0, 1};
+        f.ctx->RSSetViewports(1, &vp);
+        ID3D11RenderTargetView* r = rtv.Get();
+        f.ctx->OMSetRenderTargets(1, &r, nullptr);
+        const float factor[4] = {};
+        f.ctx->OMSetBlendState(bs.Get(), factor, 0xFFFFFFFFu);
+        f.ctx->IASetInputLayout(nullptr);
+        f.ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        f.ctx->VSSetShader(v.Get(), nullptr, 0);
+        f.ctx->PSSetShader(p.Get(), nullptr, 0);
+        f.ctx->Draw(3, 0);
+        f.ctx->OMSetRenderTargets(0, nullptr, nullptr);
+        return t;
+    };
+    // shapeOf, the hook's read of the bound blend, on the real state: the rewrite is what the layer converts (*rtOut), and the game's own factors are what a log line prints (*gameOut)
+    {
+        UiBlendRt rewritten, own, plain;
+        check(shapeOf(bs.Get(), &rewritten, true, &own) == UiBlendShape::kAdditive && rewritten.src == uiblend::kOne && rewritten.dst == uiblend::kOne && own.src == uiblend::kOne &&
+                  own.dst == uiblend::kDestAlpha && own.srcA == uiblend::kOne && own.dstA == uiblend::kDestAlpha,
+              "shapeOf with destination alpha read as 1: the rewritten blend is ONE, ONE and the game's own factors are ONE, DEST_ALPHA");
+        char text[96];
+        describeBlend(own, text, sizeof(text));
+        check(std::strcmp(text, "bl=12,7,1/2,7,1 bm=F") == 0, "the game's blend as a decline prints it is the census's own text for ONE, DEST_ALPHA (bl=12,7,1/2,7,1)");
+        check(shapeOf(bs.Get(), &plain, false, &own) == UiBlendShape::kRefused && plain.dst == uiblend::kDestAlpha && own.dst == uiblend::kDestAlpha, "without the rewrite the blend is refused as it stands, and both outputs are the game's");
+        check(shapeOf(nullptr, &plain, true, &own) == UiBlendShape::kOpaque && !own.enable && !plain.enable, "no blend state bound is the default, opaque, in both outputs");
+    }
+    const float clear[4] = {0.25f, 0.5f, 0.125f, 0.0f};
+    const std::vector<uint8_t> packed = f.read8(draw(DXGI_FORMAT_R11G11B10_FLOAT, clear).Get());
+    uint32_t px = 0;
+    std::memcpy(&px, packed.data(), sizeof(px));
+    const auto f11 = [](uint32_t b) { return std::ldexp(1.0 + (b & 63u) / 64.0, static_cast<int>((b >> 6) & 31u) - 15); };
+    const auto f10 = [](uint32_t b) { return std::ldexp(1.0 + (b & 31u) / 32.0, static_cast<int>((b >> 5) & 31u) - 15); };
+    check(std::fabs(f11(px & 2047u) - 0.75) < 1e-6 && std::fabs(f11((px >> 11) & 2047u) - 0.75) < 1e-6 && std::fabs(f10((px >> 22) & 1023u) - 0.625) < 1e-6,
+          "ONE, DEST_ALPHA into R11G11B10_FLOAT adds the source to the target (0.25 + 0.5, 0.5 + 0.25, 0.125 + 0.5): the destination alpha reads as 1");
+    const std::vector<float> half = f.readHalf(draw(DXGI_FORMAT_R16G16B16A16_FLOAT, clear).Get());
+    check(std::fabs(half[0] - 0.5f) < 1e-3f && std::fabs(half[1] - 0.25f) < 1e-3f && std::fabs(half[2] - 0.5f) < 1e-3f,
+          "control: the same blend into R16G16B16A16_FLOAT with alpha 0 adds nothing of the target (so the rewrite is for the alpha-less format alone)");
+    f.ctx->ClearState();
+}
+
 static void gpuTests() {
     Fx f;
+    destAlphaReproduction(f);
     // Sentinel state on the immediate context, to see the source pass put it back.
     ComPtr<ID3D11Texture2D> sentinelTex = f.texture(4, 4, DXGI_FORMAT_R8G8B8A8_UNORM, D3D11_BIND_RENDER_TARGET, nullptr, 0);
     ComPtr<ID3D11RenderTargetView> sentinelRtv = f.rtvOf(sentinelTex.Get());
@@ -1448,6 +1897,7 @@ int main(int argc, char** argv) {
     }
     try {
         ruleTests();
+        scopeMarkTests();
         keyTests();
         planTests();
         censusTests("tools/sharp_weapons_test/fixtures/census_070029_c1_f0.txt", 2, 0);

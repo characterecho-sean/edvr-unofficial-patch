@@ -1,0 +1,839 @@
+// The scope lens's door (scope_zoom.h; docs\design-vr-scope-magnification-2026-10-28.md, section 8). Two compute passes over the aiming eye's picture after the upscaler and RCAS:
+//   1. scopeZoomRays: 128 rays from c over the eye's depth find the hole of the scope's frame, and write the radii, the box and pass 2's indirect arguments into one raw buffer;
+//   2. scopeZoomMagnify, dispatched indirectly over the box: a pixel inside the hole takes the Catmull-Rom sample of a copy of the window at c + (p - c) / M.
+// B3 (scope_zoom_b3.h; experimental.native_on_foot_ads_scope_zoom_full_detail, the scoped Executioner): the left eye is drawn as the zoomed view and its door (scopeZoomLeftDoor) copies the part
+// of its picture the lens may read; pass 2 then takes each lens pixel from that copy, at the place the pixel's world point is drawn at in the left eye (scopeZoomMagnifyB3), and falls back to
+// the plain sample for the frame, counted by reason, when that picture is not there.
+// Nothing is read back to the CPU except that buffer, a ring of staging copies mapped without waiting, for the press line.
+#include "scope_zoom.h"
+
+#include <windows.h>
+
+#include <algorithm>
+#include <atomic>
+#include <cmath>
+#include <cstdio>
+#include <cstring>
+#include <mutex>
+
+#include "../common/log.h"
+#include "gpu_census.h"
+#include "gpu_timing.h"
+#include "scope_zoom_shaders.h"
+#include "shader_swap.h"
+#include "temporal_shader_bytecode.h"
+#include "ui_layer_shaders.h"   // uiLayerFrameView: the 8-bit families a pass can run over
+
+namespace edvr {
+namespace {
+
+namespace sz = scopezoom;
+template <class T>
+using Ptr = Microsoft::WRL::ComPtr<T>;
+
+// ---- the frame thread's record, by seqlock ----------------------------------------------------------------------------------------------------------------------------------
+struct Pub {
+    std::atomic<uint32_t> seq{0};
+    ScopeZoomFrame f;
+};
+Pub g_pub;
+std::atomic<bool> g_active{false};       // the last published verdict was not kIdle
+std::atomic<int> g_inflight{0};          // rays in flight to the CPU
+std::atomic<uint64_t> g_markSeq[2];      // the temporal sequence of each eye's last redirected gunsight mark draw (0: none)
+
+uint64_t nowUs() noexcept {
+    static const double perUs = [] {
+        LARGE_INTEGER f;
+        return QueryPerformanceFrequency(&f) && f.QuadPart > 0 ? static_cast<double>(f.QuadPart) / 1.0e6 : 1.0;
+    }();
+    LARGE_INTEGER c;
+    QueryPerformanceCounter(&c);
+    return static_cast<uint64_t>(static_cast<double>(c.QuadPart) / perUs);
+}
+bool readFrame(ScopeZoomFrame* out) noexcept {
+    for (int tries = 0; tries < 3; ++tries) {
+        const uint32_t s1 = g_pub.seq.load(std::memory_order_acquire);
+        if ((s1 & 1u) || s1 == 0) continue;
+        *out = g_pub.f;
+        std::atomic_thread_fence(std::memory_order_acquire);
+        if (g_pub.seq.load(std::memory_order_relaxed) == s1) return true;
+    }
+    return false;
+}
+
+// ---- the press's counters --------------------------------------------------------------------------------------------------------------------------------------------------
+std::mutex g_mu;
+sz::LensDoorStats g_stats;
+crisp::DoorStats g_crisp;                 // C1a: the press's eye-frames with the crisp arming up, and those with no quad taken (g_mu)
+std::atomic<uint64_t> g_crispStampUs{0};   // C1a: when the frame thread last published the crisp arming up (0: down)
+std::atomic<uint32_t> g_pressId{0};   // read by the draw path (the mark's stand-down), set by the frame thread
+
+sz::B3Press g_b3;   // the door's half of the B3 press line (under g_mu)
+std::atomic<ScopeZoomTemporalFn> g_temporalZoom{nullptr};
+bool temporalZoom(uint64_t sequence, float zoomed[4], float pre[4]) {
+    const ScopeZoomTemporalFn fn = g_temporalZoom.load(std::memory_order_acquire);
+    return fn && fn(sequence, zoomed, pre);
+}
+
+template <class F>
+void count(F&& f) {
+    std::lock_guard<std::mutex> lock(g_mu);
+    f(g_stats);
+}
+template <class F>
+void countB3(F&& f) {
+    std::lock_guard<std::mutex> lock(g_mu);
+    f(g_b3);
+}
+
+// ---- device children --------------------------------------------------------------------------------------------------------------------------------------------------------
+constexpr int kStage = 4;    // staging copies of the rays buffer in flight
+constexpr int kTimers = 6;   // GPU timer slots (a pair each: the rays pass, the magnify pass)
+
+struct StageSlot {
+    Ptr<ID3D11Buffer> buf;
+    bool inUse = false, settled = false;
+    uint32_t press = 0;
+    // B3: what the parallax at c is worked out from when the rays come back (the depth at c is theirs)
+    bool par = false;
+    float T[16] = {}, u[4] = {};
+    double cNdc[2] = {}, nearDepth = 0.0;
+    uint32_t leftW = 0, leftH = 0;
+    // B3-2: what the lens's reach outside the window copy is worked out from when the rays come back (the hole's radii are theirs): M, the left eye's far point, and the copy's tangents
+    bool outside = false;
+    double m = 1.0, tcNow[2] = {}, lo[2] = {}, hi[2] = {};
+};
+struct TimerSlot {
+    GpuTimer t[2];
+    bool inUse = false;
+    int state[2] = {0, 0};   // 0 untimed, 1 pending, 2 ready, 3 invalid
+    double ms[2] = {0.0, 0.0};
+};
+struct State {
+    Ptr<ID3D11Device> dev;
+    Ptr<ID3D11ComputeShader> csRays, csMag, csMagB3;
+    bool csTried = false, csOk = false, b3Ok = false;
+    Ptr<ID3D11Buffer> cbRays, cbMag, cbMagB3;
+    Ptr<ID3D11Texture2D> leftTex;            // B3: the part of the left eye's zoomed picture the lens may read, copied at the left door
+    Ptr<ID3D11ShaderResourceView> leftSrv;
+    uint32_t leftTexW = 0, leftTexH = 0;
+    DXGI_FORMAT leftTexFmt = DXGI_FORMAT_UNKNOWN;
+    struct Left {
+        bool valid = false;
+        uint64_t seq = 0;
+        int rect[4] = {};                    // the copy's window in the left picture's px
+        uint32_t picW = 0, picH = 0;         // the left picture's size
+    } left;
+    Ptr<ID3D11SamplerState> lin;
+    Ptr<ID3D11Buffer> lens;
+    Ptr<ID3D11UnorderedAccessView> lensUav;
+    Ptr<ID3D11ShaderResourceView> lensSrv;
+    StageSlot stage[kStage];
+    Ptr<ID3D11Texture2D> rcTex;
+    Ptr<ID3D11ShaderResourceView> rcSrv;
+    uint32_t rcW = 0, rcH = 0;
+    DXGI_FORMAT rcFmt = DXGI_FORMAT_UNKNOWN;
+    Ptr<ID3D11Texture2D> ownTex;
+    Ptr<ID3D11UnorderedAccessView> ownUav;
+    uint32_t ownW = 0, ownH = 0;
+    DXGI_FORMAT ownFmt = DXGI_FORMAT_UNKNOWN;
+    void* frameUavRes = nullptr;
+    Ptr<ID3D11UnorderedAccessView> frameUav;
+    DXGI_FORMAT frameUavView = DXGI_FORMAT_UNKNOWN;
+    Ptr<ID3D11Texture2D> frameUavHold;
+};
+State g_s;
+TimerSlot g_timers[kTimers];   // apart from State: a GpuTimer is never moved
+bool g_firstNoted = false, g_failNoted = false, g_b3Noted = false;
+
+void releaseAll(ID3D11DeviceContext* ctx) {
+    for (TimerSlot& t : g_timers) {
+        t.t[0].reset(ctx);
+        t.t[1].reset(ctx);
+        t.inUse = false;
+        t.state[0] = t.state[1] = 0;
+    }
+    g_inflight.store(0, std::memory_order_relaxed);
+    g_s = State{};
+    g_firstNoted = false;
+    g_b3Noted = false;
+}
+
+void failOnce(const char* what) {
+    if (g_failNoted) return;
+    g_failNoted = true;
+    Log::get().note("scope lens: %s; the lens is declined on every frame it would have run (counted as format refused in the press lines).", what);
+}
+
+bool makeCb(ID3D11Device* dev, UINT bytes, Ptr<ID3D11Buffer>* out) {
+    D3D11_BUFFER_DESC bd{};
+    bd.ByteWidth = bytes;
+    bd.Usage = D3D11_USAGE_DYNAMIC;
+    bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+    bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+    return SUCCEEDED(dev->CreateBuffer(&bd, nullptr, out->ReleaseAndGetAddressOf()));
+}
+
+bool ensureDevice(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
+    if (g_s.dev.Get() != dev) {
+        releaseAll(ctx);
+        g_s.dev = dev;
+    }
+    if (!g_s.csTried) {
+        g_s.csTried = true;
+        g_s.csRays.Attach(shaderSwapCreateCs(ctx, kScopeZoomRaysBytecode, sizeof(kScopeZoomRaysBytecode), "scope_zoom_rays_cs", "scope zoom"));
+        g_s.csMag.Attach(shaderSwapCreateCs(ctx, kScopeZoomMagnifyBytecode, sizeof(kScopeZoomMagnifyBytecode), "scope_zoom_magnify_cs", "scope zoom"));
+        D3D11_SAMPLER_DESC sd{};
+        sd.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+        sd.AddressU = sd.AddressV = sd.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+        sd.MaxLOD = D3D11_FLOAT32_MAX;
+        D3D11_BUFFER_DESC bd{};
+        bd.ByteWidth = sz::kLensBufferBytes;
+        bd.Usage = D3D11_USAGE_DEFAULT;
+        bd.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
+        bd.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS | D3D11_RESOURCE_MISC_DRAWINDIRECT_ARGS;
+        D3D11_UNORDERED_ACCESS_VIEW_DESC ud{};
+        ud.Format = DXGI_FORMAT_R32_TYPELESS;
+        ud.ViewDimension = D3D11_UAV_DIMENSION_BUFFER;
+        ud.Buffer.NumElements = sz::kLensBufferBytes / 4;
+        ud.Buffer.Flags = D3D11_BUFFER_UAV_FLAG_RAW;
+        D3D11_SHADER_RESOURCE_VIEW_DESC vd{};
+        vd.Format = DXGI_FORMAT_R32_TYPELESS;
+        vd.ViewDimension = D3D11_SRV_DIMENSION_BUFFEREX;
+        vd.BufferEx.NumElements = sz::kLensBufferBytes / 4;
+        vd.BufferEx.Flags = D3D11_BUFFEREX_SRV_FLAG_RAW;
+        g_s.csMagB3.Attach(shaderSwapCreateCs(ctx, kScopeZoomMagnifyB3Bytecode, sizeof(kScopeZoomMagnifyB3Bytecode), "scope_zoom_magnify_b3_cs", "scope zoom"));
+        g_s.b3Ok = g_s.csMagB3 && makeCb(dev, sizeof(ScopeZoomMagnifyB3Params), &g_s.cbMagB3);
+        bool ok = g_s.csRays && g_s.csMag && makeCb(dev, sizeof(ScopeZoomRaysParams), &g_s.cbRays) && makeCb(dev, sizeof(ScopeZoomMagnifyParams), &g_s.cbMag) &&
+                  SUCCEEDED(dev->CreateSamplerState(&sd, g_s.lin.ReleaseAndGetAddressOf())) && SUCCEEDED(dev->CreateBuffer(&bd, nullptr, g_s.lens.ReleaseAndGetAddressOf())) &&
+                  SUCCEEDED(dev->CreateUnorderedAccessView(g_s.lens.Get(), &ud, g_s.lensUav.ReleaseAndGetAddressOf())) &&
+                  SUCCEEDED(dev->CreateShaderResourceView(g_s.lens.Get(), &vd, g_s.lensSrv.ReleaseAndGetAddressOf()));
+        D3D11_BUFFER_DESC st{};
+        st.ByteWidth = sz::kLensBufferBytes;
+        st.Usage = D3D11_USAGE_STAGING;
+        st.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        for (StageSlot& s : g_s.stage) ok = ok && SUCCEEDED(dev->CreateBuffer(&st, nullptr, s.buf.ReleaseAndGetAddressOf()));
+        g_s.csOk = ok;
+        if (!ok) failOnce("the passes' shaders, buffers or sampler could not be made");
+    }
+    return g_s.csOk;
+}
+
+// ---- the GPU price ------------------------------------------------------------------------------------------------------------------------------------------------------------
+void pollTimers(ID3D11DeviceContext* ctx) {
+    if (!gpuTimingOwns(ctx)) return;
+    for (TimerSlot& t : g_timers) {
+        if (!t.inUse) continue;
+        for (int i = 0; i < 2; ++i) {
+            if (t.state[i] != 1) continue;
+            double ms = 0.0;
+            const GpuTimerPoll r = t.t[i].poll(ctx, ms);
+            if (r == GpuTimerPoll::Pending) continue;
+            t.state[i] = r == GpuTimerPoll::Ready ? 2 : 3;
+            t.ms[i] = ms;
+        }
+        if (t.state[0] == 1 || t.state[1] == 1) continue;
+        if (t.state[0] == 2 && t.state[1] == 2) count([&](sz::LensDoorStats& s) { sz::lensNoteGpu(&s, t.ms[0], t.ms[1]); });
+        t.inUse = false;
+        t.state[0] = t.state[1] = 0;
+    }
+}
+TimerSlot* acquireTimer(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
+    if (!gpuTimingAccepts(ctx) && !gpuTimingBind(dev, ctx)) return nullptr;
+    for (TimerSlot& t : g_timers) {
+        if (t.inUse) continue;
+        t.inUse = true;
+        t.state[0] = t.state[1] = 0;
+        return &t;
+    }
+    return nullptr;
+}
+void beginTimer(TimerSlot* t, int i, ID3D11Device* dev, ID3D11DeviceContext* ctx) {
+    if (t && t->t[i].begin(dev, ctx)) t->state[i] = 1;
+}
+void endTimer(TimerSlot* t, int i, ID3D11DeviceContext* ctx) {
+    if (t && t->state[i] == 1 && !t->t[i].end(ctx)) t->state[i] = 3;
+}
+
+// ---- the rays, read back ------------------------------------------------------------------------------------------------------------------------------------------------------
+void pollRays(ID3D11DeviceContext* ctx) {
+    for (StageSlot& s : g_s.stage) {
+        if (!s.inUse) continue;
+        D3D11_MAPPED_SUBRESOURCE m{};
+        const HRESULT hr = ctx->Map(s.buf.Get(), 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &m);
+        if (hr == DXGI_ERROR_WAS_STILL_DRAWING) continue;
+        sz::LensReadback rb;
+        const bool got = SUCCEEDED(hr) && m.pData && sz::lensDecode(m.pData, sz::kLensBufferBytes, &rb);
+        if (SUCCEEDED(hr)) ctx->Unmap(s.buf.Get(), 0);
+        const uint32_t press = s.press;
+        const bool settled = s.settled;
+        s.inUse = false;
+        g_inflight.fetch_sub(1, std::memory_order_relaxed);
+        if (!got) continue;
+        count([&](sz::LensDoorStats& st) {
+            if (press == g_pressId) sz::lensNoteRays(&st, rb, settled);
+        });
+        // B3: where the target at c is drawn in the left picture against where the far point is -- the parallax the lens takes out -- from the rays' depth at c, once the press has settled.
+        // B3-2: the part of the lens that reads outside the window copy, from the hole the rays measured (no readback of its own), once the lens has eased in
+        if (s.outside && settled && !sz::lensOpenSight(rb.escaped)) {
+            double frac = 0.0;
+            if (sz::b3OutsideFraction(rb.rDeg, s.m, s.tcNow, s.lo, s.hi, &frac))
+                countB3([&](sz::B3Press& b) {
+                    if (press != g_pressId) return;
+                    ++b.outN;
+                    if (frac > 0.0) ++b.outFrames;
+                    b.outSum += frac;
+                    b.outMax = std::max(b.outMax, frac);
+                });
+        }
+        if (s.par && settled) {
+            const double px = sz::b3ParallaxPx(s.T, s.u, s.cNdc, static_cast<double>(rb.depthAtC), s.nearDepth, s.leftW, s.leftH);
+            if (std::isfinite(px))
+                countB3([&](sz::B3Press& b) {
+                    if (press != g_pressId) return;
+                    ++b.parN;
+                    b.parSumPx += px;
+                    b.parMaxPx = std::max(b.parMaxPx, px);
+                });
+        }
+    }
+}
+StageSlot* freeStage() {
+    for (StageSlot& s : g_s.stage)
+        if (!s.inUse) return &s;
+    return nullptr;
+}
+
+// ---- the frame's route --------------------------------------------------------------------------------------------------------------------------------------------------------
+bool makeTex(ID3D11Device* dev, uint32_t w, uint32_t h, DXGI_FORMAT texFmt, DXGI_FORMAT viewFmt, UINT bind, Ptr<ID3D11Texture2D>* tex, Ptr<ID3D11ShaderResourceView>* srv,
+             Ptr<ID3D11UnorderedAccessView>* uav) {
+    D3D11_TEXTURE2D_DESC td{};
+    td.Width = w;
+    td.Height = h;
+    td.MipLevels = td.ArraySize = 1;
+    td.Format = texFmt;
+    td.SampleDesc.Count = 1;
+    td.Usage = D3D11_USAGE_DEFAULT;
+    td.BindFlags = bind;
+    if (FAILED(dev->CreateTexture2D(&td, nullptr, tex->ReleaseAndGetAddressOf()))) return false;
+    if (srv) {
+        D3D11_SHADER_RESOURCE_VIEW_DESC sd{};
+        sd.Format = viewFmt;
+        sd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+        sd.Texture2D.MipLevels = 1;
+        if (FAILED(dev->CreateShaderResourceView(tex->Get(), &sd, srv->ReleaseAndGetAddressOf()))) return false;
+    }
+    if (uav) {
+        D3D11_UNORDERED_ACCESS_VIEW_DESC ud{};
+        ud.Format = viewFmt;
+        ud.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2D;
+        if (FAILED(dev->CreateUnorderedAccessView(tex->Get(), &ud, uav->ReleaseAndGetAddressOf()))) return false;
+    }
+    return true;
+}
+
+// The CS stage's slot 0 and the output merger's targets, saved and put back around the passes (the ripple's idiom, and temporal_pass.cpp's for the depth: a shader view over a
+// texture a depth-stencil view still has bound is nulled by D3D without a word).
+struct StageSave {
+    ID3D11ComputeShader* cs = nullptr;
+    ID3D11ShaderResourceView* srv[4] = {};
+    ID3D11UnorderedAccessView* uav = nullptr;
+    ID3D11Buffer* cb = nullptr;
+    ID3D11SamplerState* smp = nullptr;
+    ID3D11RenderTargetView* rtv[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT] = {};
+    ID3D11DepthStencilView* dsv = nullptr;
+    bool om = false;
+    void save(ID3D11DeviceContext* ctx, bool saveOm) {
+        ctx->CSGetShader(&cs, nullptr, nullptr);
+        ctx->CSGetShaderResources(0, 4, srv);
+        ctx->CSGetUnorderedAccessViews(0, 1, &uav);
+        ctx->CSGetConstantBuffers(0, 1, &cb);
+        ctx->CSGetSamplers(0, 1, &smp);
+        om = saveOm;
+        if (saveOm) ctx->OMGetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, rtv, &dsv);
+    }
+    void restore(ID3D11DeviceContext* ctx) {
+        ID3D11ShaderResourceView* nullSrv[4] = {};
+        ID3D11UnorderedAccessView* nullUav = nullptr;
+        ctx->CSSetShaderResources(0, 4, nullSrv);
+        ctx->CSSetUnorderedAccessViews(0, 1, &nullUav, nullptr);
+        ctx->CSSetShader(cs, nullptr, 0);
+        ctx->CSSetShaderResources(0, 4, srv);
+        ctx->CSSetUnorderedAccessViews(0, 1, &uav, nullptr);
+        ctx->CSSetConstantBuffers(0, 1, &cb);
+        ctx->CSSetSamplers(0, 1, &smp);
+        if (om) {
+            ctx->OMSetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, rtv, dsv);
+            for (auto* v : rtv)
+                if (v) v->Release();
+            if (dsv) dsv->Release();
+        }
+        if (cs) cs->Release();
+        for (auto* s : srv)
+            if (s) s->Release();
+        if (uav) uav->Release();
+        if (cb) cb->Release();
+        if (smp) smp->Release();
+    }
+};
+
+// The door census's span for the lens (gpu_census.h DoorScopeZoom): the two passes, timed on the section's turn.
+struct CensusSpan {
+    explicit CensusSpan(ID3D11DeviceContext* ctx) : ctx_(ctx) { gpuCensusBegin(ctx_, GpuCensusSection::DoorScopeZoom); }
+    ~CensusSpan() { gpuCensusEnd(ctx_, GpuCensusSection::DoorScopeZoom); }
+    CensusSpan(const CensusSpan&) = delete;
+    CensusSpan& operator=(const CensusSpan&) = delete;
+
+private:
+    ID3D11DeviceContext* ctx_;
+};
+
+bool writeCb(ID3D11DeviceContext* ctx, ID3D11Buffer* cb, const void* data, size_t bytes) {
+    D3D11_MAPPED_SUBRESOURCE m{};
+    if (FAILED(ctx->Map(cb, 0, D3D11_MAP_WRITE_DISCARD, 0, &m)) || !m.pData) return false;
+    std::memcpy(m.pData, data, bytes);
+    ctx->Unmap(cb, 0);
+    return true;
+}
+
+}  // namespace
+
+// ---- the public side ------------------------------------------------------------------------------------------------------------------------------------------------------------
+void scopeZoomPublish(const ScopeZoomFrame& frame) {
+    g_pub.seq.fetch_add(1, std::memory_order_acq_rel);
+    g_pub.f = frame;
+    g_pub.f.stampUs = nowUs();
+    g_pub.seq.fetch_add(1, std::memory_order_release);
+    g_active.store(frame.verdict != static_cast<uint32_t>(sz::LensVerdict::kIdle), std::memory_order_relaxed);
+}
+
+bool scopeZoomWanted() { return g_active.load(std::memory_order_relaxed) || g_inflight.load(std::memory_order_relaxed) > 0; }
+
+void scopeZoomCrispPublish(bool armed) { g_crispStampUs.store(armed ? nowUs() : 0, std::memory_order_relaxed); }
+
+bool scopeZoomCrispArmed() {
+    const uint64_t stamp = g_crispStampUs.load(std::memory_order_relaxed);
+    if (!stamp) return false;
+    const uint64_t t = nowUs();
+    return t >= stamp && sz::lensFresh(t - stamp);
+}
+
+void scopeZoomNoteCrispFrame(uint32_t eye, bool quadTaken) {
+    if (eye > 1) return;
+    std::lock_guard<std::mutex> lock(g_mu);
+    ++g_crisp.armed[eye];
+    if (!quadTaken) ++g_crisp.noQuad[eye];
+}
+
+void scopeZoomCrispTake(crisp::DoorStats* out) {
+    if (!out) return;
+    std::lock_guard<std::mutex> lock(g_mu);
+    *out = g_crisp;
+}
+
+bool scopeZoomMarkArmed() {
+    if (!g_active.load(std::memory_order_relaxed)) return false;
+    ScopeZoomFrame f;
+    if (!readFrame(&f) || f.verdict != static_cast<uint32_t>(sz::LensVerdict::kQualifies)) return false;
+    const uint64_t t = nowUs();
+    return t >= f.stampUs && sz::lensFresh(t - f.stampUs);
+}
+
+void scopeZoomNoteMark(uint32_t eye, uint64_t seq, uint32_t path) {
+    if (eye > 1) return;
+    g_markSeq[eye].store(seq, std::memory_order_relaxed);
+    count([&](sz::LensDoorStats& s) {
+        ++s.markRedirected[eye];
+        if (path < sz::kMarkPaths) ++s.markPath[path];
+    });
+}
+
+void scopeZoomNoteMarkComposite(uint32_t kind) {
+    if (kind >= sz::kMarkComposites) return;
+    count([&](sz::LensDoorStats& s) { ++s.markComposite[kind]; });
+}
+
+void scopeZoomNoteMarkStandDown() {
+    count([](sz::LensDoorStats& s) { ++s.markStandDowns; });
+}
+
+void scopeZoomPressBegin(uint32_t press) {
+    std::lock_guard<std::mutex> lock(g_mu);
+    g_stats = sz::LensDoorStats{};
+    g_b3 = sz::B3Press{};
+    g_crisp = crisp::DoorStats{};
+    g_pressId.store(press, std::memory_order_release);
+}
+void scopeZoomSetTemporalZoom(ScopeZoomTemporalFn fn) { g_temporalZoom.store(fn, std::memory_order_release); }
+void scopeZoomB3Take(sz::B3Press* out) {
+    if (!out) return;
+    std::lock_guard<std::mutex> lock(g_mu);
+    *out = g_b3;
+}
+uint32_t scopeZoomPressId() { return g_pressId.load(std::memory_order_acquire); }
+void scopeZoomPressTake(sz::LensDoorStats* out) {
+    if (!out) return;
+    std::lock_guard<std::mutex> lock(g_mu);
+    *out = g_stats;
+    sz::lensFinish(out);
+}
+
+void scopeZoomRelease() {
+    ID3D11DeviceContext* ctx = nullptr;
+    if (g_s.dev) g_s.dev->GetImmediateContext(&ctx);
+    releaseAll(ctx);
+    if (ctx) ctx->Release();
+    g_active.store(false, std::memory_order_relaxed);
+}
+
+void scopeZoomLeftDoor(const ScopeZoomLeftArgs& a) {
+    g_s.left.valid = false;
+    if (!a.frame || !a.region || !a.resolved) return;
+    ScopeZoomFrame f;
+    if (!readFrame(&f) || f.verdict != static_cast<uint32_t>(sz::LensVerdict::kQualifies) || !f.b3.asked) return;
+    float zoomed[4], pre[4];
+    if (!temporalZoom(a.sequence, zoomed, pre)) return;   // eye 0 is not drawn with the window in this frame: nothing to copy
+    Ptr<ID3D11Device> dev;
+    a.frame->GetDevice(&dev);
+    Ptr<ID3D11DeviceContext> ctx;
+    if (dev) dev->GetImmediateContext(&ctx);
+    if (!dev || !ctx) return;
+    D3D11_TEXTURE2D_DESC fd{};
+    a.frame->GetDesc(&fd);
+    const DXGI_FORMAT view = uiLayerFrameView(fd.Format);
+    if (view == DXGI_FORMAT_UNKNOWN || fd.SampleDesc.Count != 1 || fd.ArraySize != 1 || fd.MipLevels != 1 || a.region[0] != 0 || a.region[1] != 0 || a.region[2] != fd.Width ||
+        a.region[3] != fd.Height || !ensureDevice(dev.Get(), ctx.Get()) || !g_s.b3Ok)
+        return;
+    const double zt[4] = {zoomed[0], zoomed[1], zoomed[2], zoomed[3]}, tc[2] = {f.b3.tc[0], f.b3.tc[1]};
+    int rect[4];
+    if (!sz::b3CopyRect(zt, tc, fd.Width, fd.Height, rect)) return;
+    const uint32_t w = static_cast<uint32_t>(rect[2] - rect[0]), h = static_cast<uint32_t>(rect[3] - rect[1]);
+    if (!g_s.leftTex || g_s.leftTexW < w || g_s.leftTexH < h || g_s.leftTexFmt != fd.Format) {
+        const bool same = g_s.leftTexFmt == fd.Format;
+        const uint32_t tw = (std::max(w, same ? g_s.leftTexW : 0u) + 63u) & ~63u, th = (std::max(h, same ? g_s.leftTexH : 0u) + 63u) & ~63u;
+        g_s.leftTexW = g_s.leftTexH = 0;
+        if (!makeTex(dev.Get(), tw, th, fd.Format, view, D3D11_BIND_SHADER_RESOURCE, &g_s.leftTex, &g_s.leftSrv, nullptr)) {
+            g_s.leftTex.Reset();
+            g_s.leftSrv.Reset();
+            return;
+        }
+        g_s.leftTexW = tw;
+        g_s.leftTexH = th;
+        g_s.leftTexFmt = fd.Format;
+    }
+    const D3D11_BOX box{static_cast<UINT>(rect[0]), static_cast<UINT>(rect[1]), 0, static_cast<UINT>(rect[2]), static_cast<UINT>(rect[3]), 1};
+    ctx->CopySubresourceRegion(g_s.leftTex.Get(), 0, 0, 0, 0, a.frame, 0, &box);
+    g_s.left.valid = true;
+    g_s.left.seq = a.sequence;
+    for (int i = 0; i < 4; ++i) g_s.left.rect[i] = rect[i];
+    g_s.left.picW = fd.Width;
+    g_s.left.picH = fd.Height;
+    countB3([](sz::B3Press& b) { ++b.copies; });
+}
+
+void scopeZoomDoor(const ScopeZoomDoorArgs& a, Ptr<ID3D11Texture2D>* copy) {
+    if (copy) copy->Reset();
+    if (a.eye != 1 || !a.frame || !a.region) return;
+    Ptr<ID3D11Device> dev;
+    a.frame->GetDevice(&dev);
+    Ptr<ID3D11DeviceContext> ctx;
+    if (dev) dev->GetImmediateContext(&ctx);
+    if (!dev || !ctx) return;
+    if (g_s.dev.Get() == dev.Get()) {
+        pollTimers(ctx.Get());
+        pollRays(ctx.Get());
+    }
+    ScopeZoomFrame f;
+    if (!readFrame(&f)) return;
+    const auto verdict = static_cast<sz::LensVerdict>(f.verdict);
+    if (verdict == sz::LensVerdict::kIdle) return;
+    if (verdict == sz::LensVerdict::kNoS) {
+        count([](sz::LensDoorStats& s) { ++s.noS; });
+        return;
+    }
+    if (verdict == sz::LensVerdict::kNotOptical) {
+        count([](sz::LensDoorStats& s) { ++s.notOptical; });
+        return;
+    }
+    if (verdict == sz::LensVerdict::kLeftAim) {   // the aiming eye is the left one: the lens is the right eye's, so there is none (and the gunsight mark's family is not armed)
+        count([](sz::LensDoorStats& s) { ++s.leftAim; });
+        return;
+    }
+    // Its c must be this young and on the picture.
+    const uint64_t t = nowUs();
+    const bool young = t >= f.stampUs && sz::lensFresh(t - f.stampUs);
+    const bool usable = std::isfinite(f.uv[0]) && std::isfinite(f.uv[1]) && std::isfinite(f.jitterUv[0]) && std::isfinite(f.jitterUv[1]) && std::isfinite(f.m) && f.m > 0.0f &&
+                        f.uv[0] >= 0.0f && f.uv[0] <= 1.0f && f.uv[1] >= 0.0f && f.uv[1] <= 1.0f && sz::tangentsUsable(f.tan4);
+    if (!young || !usable) {
+        count([](sz::LensDoorStats& s) { ++s.staleC; });
+        return;
+    }
+    // A qualifying frame with a fresh c, the frames the family that takes the scope's gunsight mark out of the scene is armed for (scopeZoomMarkArmed reads the same verdict and age): a
+    // right-eye frame in which it redirected none is counted. A frame the door declined for a stale c is neither.
+    const uint64_t markSeq = g_markSeq[1].load(std::memory_order_relaxed);
+    const bool markDrawn = markSeq != 0 && markSeq == a.sequence;
+    count([&](sz::LensDoorStats& s) {
+        ++s.markArmedFrames;
+        if (!markDrawn) ++s.markNoDraw;
+    });
+    // c's frame against the picture's (the jitter's sequence is the frame the rows were drawn in): the gap is counted by bucket, and the lens still applies.
+    if (f.jitterSeq != 0) count([&](sz::LensDoorStats& s) { ++s.seqGap[sz::lensGapBucket(a.sequence, f.jitterSeq)]; });
+    if (!a.resolved) {   // the game's own picture, not the upscaler's: the frame route refuses it
+        count([](sz::LensDoorStats& s) { ++s.formatRefused; });
+        return;
+    }
+    const ScopeZoomDepth depth = g_scopeZoomDepth[1];
+    if (!depth.srv || !depth.w || !depth.h || !(depth.nearDepth > 0.0f) || !depth.covers) {   // none, or one a uv of the picture does not map onto
+        count([](sz::LensDoorStats& s) { ++s.depthUnavailable; });
+        return;
+    }
+
+    D3D11_TEXTURE2D_DESC fd{};
+    a.frame->GetDesc(&fd);
+    const DXGI_FORMAT view = uiLayerFrameView(fd.Format);
+    const uint32_t* region = a.region;
+    // The region must be the whole texture, in place or not (the ripple's own rule for a frame that is not owned, and the lens's mapping of a uv of the eye onto the picture): a
+    // sub-rectangle would need its offset in c, and the copy route hands the whole texture back.
+    if (view == DXGI_FORMAT_UNKNOWN || fd.SampleDesc.Count != 1 || fd.ArraySize != 1 || fd.MipLevels != 1 || region[0] != 0 || region[1] != 0 || region[2] != fd.Width ||
+        region[3] != fd.Height || !ensureDevice(dev.Get(), ctx.Get())) {
+        count([](sz::LensDoorStats& s) { ++s.formatRefused; });
+        return;
+    }
+    const double regionW = region[2] - region[0], regionH = region[3] - region[1];
+    const double cx = region[0] + (static_cast<double>(f.uv[0]) - f.jitterUv[0]) * regionW;
+    const double cy = region[1] + (static_cast<double>(f.uv[1]) - f.jitterUv[1]) * regionH;
+    double tc[2];
+    sz::lensTangentAtUv(f.tan4, f.uv[0], f.uv[1], tc);
+    const double pxPerTanX = regionW / (static_cast<double>(f.tan4[1]) - f.tan4[0]), pxPerTanY = regionH / (static_cast<double>(f.tan4[3]) - f.tan4[2]);
+    const sz::LensWindow wnd = sz::lensWindow(cx, cy, tc[0], tc[1], pxPerTanX, pxPerTanY, region);
+    if (wnd.empty() || !(cx >= region[0] && cx < region[2] && cy >= region[1] && cy < region[3])) {   // c is not on the picture
+        count([](sz::LensDoorStats& s) { ++s.staleC; });
+        return;
+    }
+    const uint32_t winW = static_cast<uint32_t>(wnd.x1 - wnd.x0), winH = static_cast<uint32_t>(wnd.y1 - wnd.y0);
+
+    // The destination: the frame itself through its UAV, or EDVR's own copy of it.
+    const bool inPlace = a.inPlace && (fd.BindFlags & D3D11_BIND_UNORDERED_ACCESS);
+    ID3D11UnorderedAccessView* destUav = nullptr;
+    if (inPlace) {
+        if (g_s.frameUavRes != static_cast<void*>(a.frame) || !g_s.frameUav || g_s.frameUavView != view) {
+            g_s.frameUav.Reset();
+            g_s.frameUavHold.Reset();
+            g_s.frameUavRes = nullptr;
+            D3D11_UNORDERED_ACCESS_VIEW_DESC ud{};
+            ud.Format = view;
+            ud.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2D;
+            if (FAILED(dev->CreateUnorderedAccessView(a.frame, &ud, g_s.frameUav.ReleaseAndGetAddressOf())) || !g_s.frameUav) {
+                g_s.frameUav.Reset();
+                count([](sz::LensDoorStats& s) { ++s.formatRefused; });
+                return;
+            }
+            g_s.frameUavRes = a.frame;
+            g_s.frameUavHold = a.frame;
+            g_s.frameUavView = view;
+        }
+        destUav = g_s.frameUav.Get();
+    } else {
+        if (!g_s.ownTex || g_s.ownW != fd.Width || g_s.ownH != fd.Height || g_s.ownFmt != fd.Format) {
+            g_s.ownW = g_s.ownH = 0;
+            if (!makeTex(dev.Get(), fd.Width, fd.Height, fd.Format, view, D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS, &g_s.ownTex, nullptr, &g_s.ownUav)) {
+                g_s.ownTex.Reset();
+                g_s.ownUav.Reset();
+                count([](sz::LensDoorStats& s) { ++s.formatRefused; });
+                return;
+            }
+            g_s.ownW = fd.Width;
+            g_s.ownH = fd.Height;
+            g_s.ownFmt = fd.Format;
+        }
+        destUav = g_s.ownUav.Get();
+    }
+    // The copy of the window: the one image pass 2 reads. Its texture only grows.
+    if (!g_s.rcTex || g_s.rcW < winW || g_s.rcH < winH || g_s.rcFmt != fd.Format) {
+        const uint32_t w = (std::max(winW, g_s.rcFmt == fd.Format ? g_s.rcW : 0u) + 63u) & ~63u, h = (std::max(winH, g_s.rcFmt == fd.Format ? g_s.rcH : 0u) + 63u) & ~63u;
+        g_s.rcW = g_s.rcH = 0;
+        if (!makeTex(dev.Get(), w, h, fd.Format, view, D3D11_BIND_SHADER_RESOURCE, &g_s.rcTex, &g_s.rcSrv, nullptr)) {
+            g_s.rcTex.Reset();
+            g_s.rcSrv.Reset();
+            count([](sz::LensDoorStats& s) { ++s.formatRefused; });
+            return;
+        }
+        g_s.rcW = w;
+        g_s.rcH = h;
+        g_s.rcFmt = fd.Format;
+    }
+    // The first frame of the ease, M = 1: everything the passes need is in hand and there is nothing to do. Counted only here, after every decline above, so a press that is declined
+    // on each frame is never made to look applied by it.
+    if (!(f.m >= 1.001f)) {
+        count([](sz::LensDoorStats& s) { ++s.noop; });
+        return;
+    }
+
+    ScopeZoomRaysParams p1{};
+    p1.cRen[0] = static_cast<float>(f.uv[0] * depth.w);
+    p1.cRen[1] = static_cast<float>(f.uv[1] * depth.h);
+    p1.cRen[2] = static_cast<float>(depth.w);
+    p1.cRen[3] = static_cast<float>(depth.h);
+    p1.cOut[0] = static_cast<float>(cx);
+    p1.cOut[1] = static_cast<float>(cy);
+    p1.cOut[2] = static_cast<float>(regionW);
+    p1.cOut[3] = static_cast<float>(regionH);
+    std::memcpy(p1.tanE, f.tan4, sizeof(p1.tanE));
+    p1.win[0] = static_cast<float>(wnd.x0);
+    p1.win[1] = static_cast<float>(wnd.y0);
+    p1.win[2] = static_cast<float>(wnd.x1);
+    p1.win[3] = static_cast<float>(wnd.y1);
+    p1.knobs[0] = depth.nearDepth;
+    p1.knobs[1] = static_cast<float>(std::cos(sz::kLensMaxDeg / sz::kDeg));
+    p1.knobs[2] = static_cast<float>(sz::kLensMaxEscaped);
+    p1.knobs[3] = static_cast<float>(sz::kLensStepCap);
+    ScopeZoomMagnifyParams p2{};
+    p2.cM[0] = static_cast<float>(cx);
+    p2.cM[1] = static_cast<float>(cy);
+    p2.cM[2] = f.m;
+    p2.cM[3] = static_cast<float>(sz::kLensFeatherPx);
+    p2.win[0] = static_cast<float>(wnd.x0);
+    p2.win[1] = static_cast<float>(wnd.y0);
+    p2.win[2] = static_cast<float>(winW);
+    p2.win[3] = static_cast<float>(winH);
+    p2.scale[0] = static_cast<float>(regionW / depth.w);
+    p2.scale[1] = static_cast<float>(regionH / depth.h);
+    if (!writeCb(ctx.Get(), g_s.cbRays.Get(), &p1, sizeof(p1)) || !writeCb(ctx.Get(), g_s.cbMag.Get(), &p2, sizeof(p2))) {
+        count([](sz::LensDoorStats& s) { ++s.formatRefused; });
+        return;
+    }
+    // B3: where this frame's lens takes its picture from. The plain lens (the aiming eye's own picture) is the fall-back for every reason the left eye's zoomed picture is not there; the
+    // reason is counted. The constants of the pass that samples the left picture are made here, and written only when it is the one to run.
+    sz::B3Source b3src = sz::B3Source::kNotAsked;
+    bool outOk = false;   // B3-2: the copy's tangents for the lens-outside estimate
+    double outLo[2] = {}, outHi[2] = {};
+    if (f.b3.asked) {
+        float zt[4], pre[4];
+        sz::B3SourceIn si;
+        si.asked = true;
+        si.zoomedFrame = temporalZoom(a.sequence, zt, pre);
+        si.copyMade = g_s.left.valid;
+        si.copySameFrame = g_s.left.valid && g_s.left.seq == a.sequence;
+        si.matricesOk = f.b3.matOk != 0;
+        si.shaderOk = g_s.b3Ok && g_s.leftSrv;
+        b3src = sz::b3SourceOf(si);
+        if (b3src == sz::B3Source::kZoomed) {
+            const double zt64[4] = {zt[0], zt[1], zt[2], zt[3]};
+            outOk = std::isfinite(f.b3.tcNow[0]) && std::isfinite(f.b3.tcNow[1]) && sz::b3CopyTangents(zt64, g_s.left.rect, g_s.left.picW, g_s.left.picH, outLo, outHi);
+            ScopeZoomMagnifyB3Params p3{};
+            std::memcpy(p3.cM, p2.cM, sizeof(p3.cM));
+            std::memcpy(p3.win, p2.win, sizeof(p3.win));
+            std::memcpy(p3.scale, p2.scale, sizeof(p3.scale));
+            p3.rgn[0] = static_cast<float>(regionW);
+            p3.rgn[1] = static_cast<float>(regionH);
+            p3.rgn[2] = static_cast<float>(depth.w);
+            p3.rgn[3] = static_cast<float>(depth.h);
+            p3.jit[0] = f.jitterUv[0];
+            p3.jit[1] = f.jitterUv[1];
+            p3.jit[2] = depth.nearDepth;
+            p3.jit[3] = static_cast<float>(sz::b3SkyDepth(depth.nearDepth));
+            p3.lwin[0] = static_cast<float>(g_s.left.rect[0]);
+            p3.lwin[1] = static_cast<float>(g_s.left.rect[1]);
+            p3.lwin[2] = static_cast<float>(g_s.left.rect[2] - g_s.left.rect[0]);
+            p3.lwin[3] = static_cast<float>(g_s.left.rect[3] - g_s.left.rect[1]);
+            p3.lsz[0] = static_cast<float>(g_s.left.picW);
+            p3.lsz[1] = static_cast<float>(g_s.left.picH);
+            p3.lsz[2] = static_cast<float>(sz::kB3EdgePx);
+            std::memcpy(p3.tm, f.b3.T, sizeof(p3.tm));
+            std::memcpy(p3.uv4, f.b3.u, sizeof(p3.uv4));
+            if (!writeCb(ctx.Get(), g_s.cbMagB3.Get(), &p3, sizeof(p3))) b3src = sz::B3Source::kNoShader;
+        }
+    }
+
+    {
+        CensusSpan census(ctx.Get());
+        TimerSlot* timer = acquireTimer(dev.Get(), ctx.Get());
+        StageSave saved;
+        saved.save(ctx.Get(), true);
+        ID3D11ShaderResourceView* nullSrv[4] = {};
+        ID3D11UnorderedAccessView* nullUav = nullptr;
+        // Pass 1. The game's depth target may still be bound at the output merger, and D3D nulls a shader view over a bound target: the stage is cleared for the dispatch.
+        ctx->OMSetRenderTargets(0, nullptr, nullptr);
+        ctx->CSSetShaderResources(0, 4, nullSrv);
+        ctx->CSSetUnorderedAccessViews(0, 1, &nullUav, nullptr);
+        beginTimer(timer, 0, dev.Get(), ctx.Get());
+        ctx->CSSetShader(g_s.csRays.Get(), nullptr, 0);
+        ID3D11Buffer* cb1 = g_s.cbRays.Get();
+        ctx->CSSetConstantBuffers(0, 1, &cb1);
+        ID3D11ShaderResourceView* zSrv[2] = {depth.srv, nullptr};
+        ctx->CSSetShaderResources(0, 2, zSrv);
+        ID3D11UnorderedAccessView* lensUav = g_s.lensUav.Get();
+        ctx->CSSetUnorderedAccessViews(0, 1, &lensUav, nullptr);
+        ctx->Dispatch(1, 1, 1);
+        ctx->CSSetShaderResources(0, 2, nullSrv);
+        ctx->CSSetUnorderedAccessViews(0, 1, &nullUav, nullptr);
+        endTimer(timer, 0, ctx.Get());
+        // The rays, for the press line: a staging copy mapped later without waiting.
+        if (StageSlot* st = freeStage()) {
+            ctx->CopyResource(st->buf.Get(), g_s.lens.Get());
+            st->inUse = true;
+            st->press = f.press;
+            st->settled = f.m >= f.mTarget * 0.999f;
+            st->par = b3src == sz::B3Source::kZoomed;
+            if (st->par) {
+                std::memcpy(st->T, f.b3.T, sizeof(st->T));
+                std::memcpy(st->u, f.b3.u, sizeof(st->u));
+                st->cNdc[0] = 2.0 * cx / regionW - 1.0;
+                st->cNdc[1] = 1.0 - 2.0 * cy / regionH;
+                st->nearDepth = depth.nearDepth;
+                st->leftW = g_s.left.picW;
+                st->leftH = g_s.left.picH;
+            }
+            st->outside = outOk;
+            if (outOk) {
+                st->m = f.m;
+                st->tcNow[0] = f.b3.tcNow[0];
+                st->tcNow[1] = f.b3.tcNow[1];
+                for (int i = 0; i < 2; ++i) {
+                    st->lo[i] = outLo[i];
+                    st->hi[i] = outHi[i];
+                }
+            }
+            g_inflight.fetch_add(1, std::memory_order_relaxed);
+        }
+        // Pass 2. The window of the picture is copied (and, for a frame EDVR may not write, the whole of it into the copy pass 2 writes).
+        beginTimer(timer, 1, dev.Get(), ctx.Get());
+        const D3D11_BOX box{static_cast<UINT>(wnd.x0), static_cast<UINT>(wnd.y0), 0, static_cast<UINT>(wnd.x1), static_cast<UINT>(wnd.y1), 1};
+        ctx->CopySubresourceRegion(g_s.rcTex.Get(), 0, 0, 0, 0, a.frame, 0, &box);
+        if (!inPlace) ctx->CopyResource(g_s.ownTex.Get(), a.frame);
+        const bool fromLeft = b3src == sz::B3Source::kZoomed;
+        ctx->CSSetShader(fromLeft ? g_s.csMagB3.Get() : g_s.csMag.Get(), nullptr, 0);
+        ID3D11Buffer* cb2 = fromLeft ? g_s.cbMagB3.Get() : g_s.cbMag.Get();
+        ctx->CSSetConstantBuffers(0, 1, &cb2);
+        ID3D11SamplerState* smp = g_s.lin.Get();
+        ctx->CSSetSamplers(0, 1, &smp);
+        ID3D11ShaderResourceView* mSrv[4] = {g_s.rcSrv.Get(), g_s.lensSrv.Get(), fromLeft ? depth.srv : nullptr, fromLeft ? g_s.leftSrv.Get() : nullptr};
+        ctx->CSSetShaderResources(0, 4, mSrv);
+        ctx->CSSetUnorderedAccessViews(0, 1, &destUav, nullptr);
+        ctx->DispatchIndirect(g_s.lens.Get(), sz::kLensOffArgs);
+        ctx->CSSetShaderResources(0, 4, nullSrv);
+        ctx->CSSetUnorderedAccessViews(0, 1, &nullUav, nullptr);
+        endTimer(timer, 1, ctx.Get());
+        saved.restore(ctx.Get());
+    }
+    if (!inPlace && copy) *copy = g_s.ownTex;
+    count([&](sz::LensDoorStats& s) {
+        ++s.dispatched;
+        sz::lensNoteC(&s, cx, cy);
+        s.depthNear = depth.nearDepth;
+    });
+    countB3([&](sz::B3Press& b) { ++b.source[static_cast<uint32_t>(b3src)]; });
+    if (!g_firstNoted) {
+        g_firstNoted = true;
+        Log::get().note("scope lens: the right eye's picture (%ux%u, DXGI format %d) is magnified %s, M %.2f about c (%.1f, %.1f) px, the depth the upscaler used (%ux%u) read for the hole.",
+                        fd.Width, fd.Height, static_cast<int>(fd.Format), inPlace ? "in place" : "in EDVR's copy of it", static_cast<double>(f.m), cx, cy, depth.w, depth.h);
+    }
+    if (!g_b3Noted && b3src == sz::B3Source::kZoomed) {
+        g_b3Noted = true;
+        Log::get().note("scope lens (B3): the lens takes its picture from the left eye's zoomed picture (a %dx%d window of the %ux%u picture, copied before the left eye's UI composite), each pixel "
+                        "at the place its world point is drawn at in that eye (the right eye's depth through the eyes' matrices); a point outside the window takes the aiming eye's own sample.",
+                        g_s.left.rect[2] - g_s.left.rect[0], g_s.left.rect[3] - g_s.left.rect[1], g_s.left.picW, g_s.left.picH);
+    }
+}
+
+}  // namespace edvr

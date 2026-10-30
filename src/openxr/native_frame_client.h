@@ -107,6 +107,8 @@ class NativeFrameClient final {
     if(r!=S_OK||out.version<EDVR_NATIVE_FRAME_VERSION_10) out.leftEyeShare=0;
     // F123: the position-only recentre ask is none unless a version 10 answer carried it.
     if(r!=S_OK||out.version<EDVR_NATIVE_FRAME_VERSION_10) out.positionRecentre=0;
+    // B3: the scope zoom's window (five of the retired guard's words) is none unless a version 11 answer carried it; a word set that is no window reads as none whatever the version.
+    if(r!=S_OK||out.version<EDVR_NATIVE_FRAME_VERSION_11)for(unsigned i=0;i<5;++i)out.reservedTerrainGuard[i]=0;
     // World scale: Elite's own scale (100) unless a version 11 answer carried a percent; a zero or an out-of-range word is held to the range (common/world_scale.h).
     out.worldScalePercent=(r==S_OK&&out.version>=EDVR_NATIVE_FRAME_VERSION_11)?edvr::worldScaleClamp(out.worldScalePercent):edvr::kWorldScaleDefault;
     return r;

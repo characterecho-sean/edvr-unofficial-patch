@@ -98,6 +98,13 @@ bool journalFlatGuiFocus(uint32_t* focus);
 // for the planet patch motion's gate (tickCelestialStatus). Known is false when
 // the watcher is off or Flags is absent; flat only.
 bool journalFlatSupercruise(bool* supercruise);
+// S0 (scope zoom, measure only; scope_zoom_s0.h): the flat profile's readers of Status.json's on-foot bit (Flags2 bit 0), ADS bit (Flags2 bit 5) and SelectedWeapon. Each answers
+// only in flat, with the watcher running and the field in the last sample (Flags2 for the bits, SelectedWeapon for the name; false in a menu or loading screen); the accessors
+// above still answer flat with a stopped watcher's value. Status.json is reread every 100 ms in flat (the FSS latch's request, device_hook.cpp), but the game rewrites it about once
+// a second, so a flag can be late.
+bool journalFlatOnFoot(bool* onFoot);
+bool journalFlatAds(bool* ads);
+bool journalFlatHeldItemName(char* out, size_t cap);
 
 // DIAGNOSTIC, ungated by profile: what the watcher holds right now, for the flat map line's 5 s report (flat_runtime.cpp). Not a consumer's
 // answer: the accessors above are the answers. active is the watcher's own state; statusSamples counts Status.json reads that parsed;

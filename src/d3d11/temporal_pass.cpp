@@ -54,6 +54,7 @@
 #include "draw_record_tag.h"   // F62c: the waypoint series' crop rule (markerCropPick, markerCropCentre, cropOrigin)
 #include "journal_watch.h"   // the ship split on foot: Status.json's word on whether the commander is on foot (temporal_mode.h)
 #include "perf_monitor.h"
+#include "scope_zoom.h"   // the scope lens: the depth view this treat made for the eye, for the door's rays (scopeZoomDepthSet)
 #include "shader_swap.h"
 #include "gpu_timing.h"
 #include "gpu_census.h"   // issue #38: the per-feature GPU cost census
@@ -3741,6 +3742,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
     // game's own texture, held by the probe. Wanted by the depth motion
     // and by the instrument's two depth candidates alike.
     ID3D11ShaderResourceView* depthSrv = nullptr;
+    scopeZoomDepthClear(eye);   // the scope lens (scope_zoom.h) reads the view below at this eye's door, straight after this treat; none from an earlier one
     if (ok && nearZ > 0.0f && farZ > nearZ) {
         g_lastNear = nearZ;
         g_lastFar = farZ;
@@ -3778,6 +3780,17 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                 }
             }
             depthSrv = e.depthSrv;
+            if (depthSrv) {
+                // The scope lens's rays march this very depth at the door: the reverse-Z depth of 0.6 m from the scene projection row the pass decodes with (A + B / z), and the
+                // texture's own size (the render's). The lens maps a uv of the eye's picture onto the depth as a uv of the whole texture, so it is told whether that holds: the Submit
+                // region is the whole source and the depth is the source's size.
+                D3D11_TEXTURE2D_DESC dd{};
+                dtex->GetDesc(&dd);
+                float lensA = 0.0f, lensB = 0.0f;
+                temporalSceneProjection(g_curProj[0], g_curProj[1], g_lastNear, &lensA, &lensB);
+                const bool lensCovers = region[0] == 0 && region[1] == 0 && region[2] == sd.Width && region[3] == sd.Height && dd.Width == sd.Width && dd.Height == sd.Height;
+                scopeZoomDepthSet(eye, depthSrv, dd.Width, dd.Height, lensB > 0.0f ? lensA + lensB / static_cast<float>(scopezoom::kLensNearM) : 0.0f, lensCovers);
+            }
         }
     }
     if (depthSrv && (!g_depthNoted || !g_depthHeld)) {

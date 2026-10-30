@@ -2,6 +2,8 @@
 #include "../../src/openxr/system_source.h"
 #include "../../src/openxr/geometry_snapshot.h"
 #include "../../src/openxr/system_publication.h"
+#include "../../src/openxr/scope_zoom_state.h"   // B3: the runtime's decision to narrow eye 0's told frustum
+#include "../../src/d3d11/scope_zoom_b3.h"      // B3: the frame thread's half of the same window (b3Step), for the two halves driven together
 
 #include <atomic>
 #include <cmath>
@@ -11,6 +13,7 @@
 #include <mutex>
 #include <utility>
 #include <thread>
+#include <vector>
 extern "C" vr::IVRSystem* openxrAbiCaller(vr::IVRSystem*);
 // (windows.h stays out of this rig: its `near` macro breaks the headers the rig includes.)
 extern "C" __declspec(dllimport) unsigned long __stdcall GetCurrentThreadId(void);
@@ -69,6 +72,13 @@ struct FakeSource final : SystemSource {
   // Every answer that carried a mesh, not rate limited (visual.desktop_window_crop = native zooms when the game was served one).
   std::atomic<unsigned> servedMask{0},servedNotes{0};
   void noteHiddenMeshServed(unsigned eye) noexcept override {servedMask.fetch_or(1u<<eye);++servedNotes;}
+  // B3: the game's reads of the projection (raw: GetProjectionRaw), the ones that were eye 0's with the scope zoom held back from the raw getter, the span each answered and who asked.
+  std::atomic<unsigned> reads[2][2]{},heldReads{0};
+  std::atomic<float> lastSpan[2][2]{};std::atomic<uint32_t> lastCaller[2][2]{};
+  void noteProjectionRead(unsigned eye,bool raw,bool zoomHeld,float span,uint32_t caller) noexcept override {
+    if(eye<2){reads[eye][raw?1:0].fetch_add(1);lastSpan[eye][raw?1:0].store(span);lastCaller[eye][raw?1:0].store(caller);}
+    if(eye==0&&zoomHeld)heldReads.fetch_add(1);
+  }
   void noteFrequencyQuery(const SystemRead&,vr::TrackedDeviceIndex_t,vr::ETrackedPropertyError error,
       float value,unsigned) noexcept override {
     std::lock_guard<std::mutex> lock(mutex);++frequencyNotes;frequencyError=error;frequencyValue=value;
@@ -540,7 +550,417 @@ __declspec(noinline) void headPoseTests(vr::IVRSystem* system, FakeSource& sourc
     concrete.useExeModule(realExe);
   }
 }
+// Two call sites of the raw getter, for the caller the scope zoom's report names (not folded into one: their bodies differ).
+__declspec(noinline) float rawReadSiteA(edvr::openxr::OpenVRSystem& system) {float l=0,r=0,t=0,b=0;system.GetProjectionRaw(vr::Eye_Left,&l,&r,&t,&b);return l;}
+volatile float g_rawReadSink=0.f;
+__declspec(noinline) void rawReadSiteB(edvr::openxr::OpenVRSystem& system) {float l=0,r=0,t=0,b=0;system.GetProjectionRaw(vr::Eye_Left,&l,&r,&t,&b);g_rawReadSink=t+b;}
+// B3, the scope zoom's window (scope_zoom_state.h, system_publication.h): eye 0's told frustum is narrowed, the projection matrix getter answers the narrowed one, the raw getter (which the game's
+// UI scale reads) the frustum without the zoom, eye 1 is untouched, the hidden-area mesh is cut for the true frustum, and the runtime decides to narrow only in the cases it should.
+void scopeZoomTest() {
+  using edvr::openxr::ScopeZoomInput;using edvr::openxr::ScopeZoomOutput;using edvr::openxr::ScopeZoomWhy;using edvr::openxr::decideScopeZoom;using edvr::openxr::RawFov;using edvr::openxr::SystemPublication;
+  namespace sw=edvr::scopewin;
+  ScopeZoomInput in;
+  in.answerCarries=true;in.share=1.f;in.shareDrawn=true;in.base={-0.6f,0.7f,0.5f,-0.4f};
+  in.request.zoom=true;in.request.m=4.f;in.request.tc[0]=0.001f;in.request.tc[1]=-0.02f;
+  auto out=decideScopeZoom(in);
+  RawFov trueRaw{};edvr::openxr::fovToRaw(in.base,trueRaw);
+  const double spanX=double(trueRaw.right)-trueRaw.left,spanY=double(trueRaw.bottom)-trueRaw.top;
+  check(out.why==ScopeZoomWhy::kApplied&&near(float(out.narrowing),4.f,1e-3f),"scope zoom: asked, covered and drawn, the told frustum narrows by M");
+  check(std::fabs((out.zoomTan[1]-out.zoomTan[0])-spanX/4.0)<1e-5&&std::fabs((out.zoomTan[3]-out.zoomTan[2])-spanY/4.0)<1e-5&&
+        std::fabs((out.zoomTan[0]+out.zoomTan[1])*0.5-0.001)<1e-5&&std::fabs((out.zoomTan[2]+out.zoomTan[3])*0.5+0.02)<1e-5,"scope zoom: the window is the eye's span over M, centred on the asked direction");
+  check(out.fov.angleLeft<out.fov.angleRight&&out.fov.angleDown<out.fov.angleUp&&out.fov.angleLeft>=in.base.angleLeft&&out.fov.angleRight<=in.base.angleRight&&
+        out.fov.angleDown>=in.base.angleDown&&out.fov.angleUp<=in.base.angleUp,"scope zoom: and lies inside the frustum it narrows");
+  auto no=[&](ScopeZoomInput x,ScopeZoomWhy why,const char* text){const auto o=decideScopeZoom(x);check(o.why==why&&std::memcmp(&o.fov,&x.base,sizeof(x.base))==0,text);};
+  { auto x=in;x.request.zoom=false;no(x,ScopeZoomWhy::kNotAsked,"scope zoom: not asked leaves the frustum alone"); }
+  { auto x=in;x.answerCarries=false;no(x,ScopeZoomWhy::kVersion,"scope zoom: an answer that is not version 11 carries no zoom, and says so when it asked"); }
+  { auto x=in;x.answerCarries=false;x.request.zoom=false;no(x,ScopeZoomWhy::kNotAsked,"scope zoom: ... and nothing when it did not ask"); }
+  { auto x=in;x.share=0.95f;no(x,ScopeZoomWhy::kShare,"scope zoom: the right eye's picture must cover the left wholly (a share under full weight refuses)"); }
+  { auto x=in;x.shareDrawn=false;no(x,ScopeZoomWhy::kShareNotDrawn,"scope zoom: and the share must have been drawn the frame before"); }
+  { auto x=in;x.shareDrawn=false;x.standing=true;x.notDrawnRun=0;const auto o=decideScopeZoom(x);
+    check(o.why==ScopeZoomWhy::kApplied&&o.passedUnshared&&near(float(o.narrowing),4.f,1e-3f),"scope zoom: ... but a zoom that stands goes on past one frame of a share not drawn");
+    x.notDrawnRun=1;no(x,ScopeZoomWhy::kShareNotDrawn,"scope zoom: ... not past a second in a row");
+    x.notDrawnRun=0;x.standing=false;no(x,ScopeZoomWhy::kShareNotDrawn,"scope zoom: ... and not when it does not stand yet");
+    x.standing=true;x.shareRefused=true;no(x,ScopeZoomWhy::kShareNotDrawn,"scope zoom: ... and not past a share that was refused");
+    x.shareRefused=false;x.share=0.95f;no(x,ScopeZoomWhy::kShare,"scope zoom: ... and the share must still be at full weight");
+    const auto drawn=decideScopeZoom(in);check(drawn.why==ScopeZoomWhy::kApplied&&!drawn.passedUnshared,"scope zoom: a drawn share passes nothing"); }
+  { auto x=in;x.request.strip=0.6f;x.request.zoom=false;check(near(decideScopeZoom(x).strip,0.6f,1e-6f),"scope zoom: the strip comes out with the decision, with the zoom not asked");
+    x.answerCarries=false;check(decideScopeZoom(x).strip==0.f,"scope zoom: ... but not from an answer that carries nothing"); }
+  { auto x=in;x.shareRefused=true;no(x,ScopeZoomWhy::kShareNotDrawn,"scope zoom: ... and not refused"); }
+  { auto x=in;x.request.tc[0]=1.5f;no(x,ScopeZoomWhy::kGeometry,"scope zoom: a centre outside the eye's span makes no window"); }
+  { auto x=in;x.base={0.1f,0.1f,0.5f,-0.4f};no(x,ScopeZoomWhy::kGeometry,"scope zoom: an unusable frustum makes no window"); }
+  { auto x=in;x.request.strip=0.7f;check(decideScopeZoom(x).strip==0.7f,"scope zoom: the strip crosses with the zoom");x.request.zoom=false;check(decideScopeZoom(x).strip==0.7f,"scope zoom: ... and without it (the strip is black before the zoom is asked for)");
+    x.answerCarries=false;check(decideScopeZoom(x).strip==0.f,"scope zoom: ... but not from an answer that carries nothing"); }
+  // the press as the runtime counts it, and its report: a refused frame before the press is carried into it, the frames are counted, and the press ends when a frame is not applied
+  edvr::openxr::ScopeZoomRun run;
+  ScopeZoomOutput refusedShare;refusedShare.why=ScopeZoomWhy::kShare;
+  auto ev=run.frame(refusedShare,900000);
+  check(!ev.opened&&!ev.closed&&ev.whyChanged&&!run.press.open&&run.pending[1]==1u,"scope zoom run: a refusal before any press is counted and said once");
+  ev=run.frame(refusedShare,950000);
+  check(!ev.whyChanged&&run.pending[1]==2u,"scope zoom run: ... and not said again for the same reason");
+  ev=run.frame(out,1000000);
+  check(ev.opened&&!ev.closed&&run.press.open&&run.press.refused[1]==2u&&run.pending[1]==0u,"scope zoom run: the first applied frame opens the press, which takes the refusals of the run of asks before it");
+  { auto x=in;x.request.strip=1.f;ev=run.frame(decideScopeZoom(x),1500000); }   // one frame with the strip black
+  ev=run.frame(out,2000000);
+  check(!ev.opened&&!ev.closed&&run.press.frames==3u,"scope zoom run: the frames of a press are counted and none opens it again");
+  run.press.rawReads=12;run.press.matrixReads=34;run.press.rawSpan=edvr::openxr::rawSpanV(trueRaw);run.press.matrixSpan=run.press.rawSpan/4.f;
+  run.press.callerRva[0]=0x4E3C93u;run.press.callerReads[0]=9u;run.press.callerRva[1]=0x2842AE3u;run.press.callerReads[1]=3u;run.press.callerOther=0;
+  EdvrNativeScopeZoomReport report{};run.press.fill(report);
+  check(report.frames==3&&report.refused[1]==2&&report.refused[0]==0&&report.stripFrames==1&&report.meshWithheld==3&&near(report.seconds,1.f,1e-4f)&&near(report.peakM,4.f,1e-3f)&&
+        report.rawReads==12&&report.matrixReads==34&&sw::reportReadable(&report)&&near(report.rawSpan/report.matrixSpan,4.f,1e-4f)&&report.rawCallerRva[0]==0x4E3C93u&&report.rawCallerReads[1]==3u&&report.rawCallerOther==0u,
+        "scope zoom: a press counts its frames, its refusals by reason, the strip's and the mesh's frames, what the game read and who read the raw getter, and the report is readable");
+  ScopeZoomOutput askedOff;
+  ev=run.frame(askedOff,2500000);
+  check(ev.closed&&std::strcmp(ev.closed,"asked_off")==0&&!ev.opened&&run.press.open,"scope zoom run: a frame no longer asked for ends the press (the host reports it and closes it)");
+  run.press.open=false;
+  ev=run.frame(refusedShare,2600000);run.frame(refusedShare,2700000);
+  ev=run.frame(askedOff,2800000);
+  check(run.pending[1]==0u&&!ev.closed,"scope zoom run: the refusals of a run of asks that ended are not carried into the next press");
+  run.frame(refusedShare,3000000);
+  ev=run.frame(out,3100000);
+  check(ev.opened&&run.press.refused[1]==1u&&run.press.frames==1u,"scope zoom run: a press counts only the refusals of its own run of asks, and its own frames");
+  ScopeZoomOutput geom;geom.why=ScopeZoomWhy::kGeometry;
+  ev=run.frame(geom,3200000);
+  check(ev.closed&&std::strcmp(ev.closed,"refused")==0&&ev.whyChanged&&run.pending[3]==1u,"scope zoom run: a refusal ends an open press, is said, and counts toward the next one of its run");
+  run.press.open=false;
+  run.frame(refusedShare,3300000);
+  check(run.absent()==nullptr&&run.pending[1]==0u&&run.pending[3]==0u,"scope zoom run: a frame with no answer or no geometry ends the run of asks");
+  run.frame(out,3400000);
+  check(run.absent()!=nullptr&&std::strcmp(run.absent(),"no_geometry")==0,"scope zoom run: ... and says so when a press was open");
+  // who read the raw getter: a fixed table of the first callers and the rest counted as other, lock-free
+  edvr::openxr::ScopeZoomCallers callers;
+  uint32_t rva[EDVR_NATIVE_SCOPE_ZOOM_REPORT_CALLERS]{},reads[EDVR_NATIVE_SCOPE_ZOOM_REPORT_CALLERS]{},other=7;
+  callers.top(rva,reads,other);
+  check(reads[0]==0u&&other==0u,"scope zoom callers: none read, none named");
+  for(int i=0;i<4;++i)callers.note(0x4E3C93u);
+  for(int i=0;i<2;++i)callers.note(0x2842AE3u);
+  callers.note(0xFFFFFFFFu);
+  for(uint32_t i=0;i<7;++i)callers.note(0x100u+i);
+  callers.top(rva,reads,other);
+  check(rva[0]==0x4E3C93u&&reads[0]==4u&&rva[1]==0x2842AE3u&&reads[1]==2u&&rva[2]==0xFFFFFFFFu&&reads[2]==1u&&rva[3]==0x100u&&reads[3]==1u&&other==6u&&
+        reads[0]+reads[1]+reads[2]+reads[3]+other==14u,
+        "scope zoom callers: the four busiest by reads, ties by first seen, every other read counted as other (nine callers for a table of eight), and the total is the reads");
+  callers.reset();callers.top(rva,reads,other);
+  check(reads[0]==0u&&reads[3]==0u&&other==0u,"scope zoom callers: a reset forgets them all");
+  {
+    std::thread a([&]{for(int i=0;i<20000;++i)callers.note(0x10u+uint32_t(i%3));});
+    std::thread b([&]{for(int i=0;i<20000;++i)callers.note(0x10u+uint32_t(i%5));});
+    a.join();b.join();callers.top(rva,reads,other);
+    check(uint64_t(reads[0])+reads[1]+reads[2]+reads[3]+other==40000u,"scope zoom callers: two threads reading at once lose no read");
+  }
+  // the publication: matrix getter narrowed, raw getter true
+  SystemPublication publication;SystemRead metadata{};metadata.connected=true;
+  const auto generation=publication.begin(metadata);
+  GeometryInput g=geometry(generation,1);
+  RawFov told[2]{};edvr::openxr::fovToRaw(g.views[0].fov,told[0]);edvr::openxr::fovToRaw(g.views[1].fov,told[1]);
+  GeometryInput narrowed=geometry(generation,2);narrowed.views[0].fov={-0.15f,0.19f,0.13f,-0.1f};
+  check(publication.publish(narrowed,false,false,nullptr,false,told),"scope zoom: a frame with eye 0 narrowed publishes");
+  FakeSource source;source.state=publication.read();edvr::openxr::OpenVRSystem system(source);
+  float l,r,t0,b;
+  system.GetProjectionRaw(vr::Eye_Left,&l,&r,&t0,&b);
+  check(near(l,told[0].left)&&near(r,told[0].right)&&near(t0,told[0].top)&&near(b,told[0].bottom),"scope zoom: the raw getter, which the game's UI scale reads, answers eye 0's frustum without the zoom");
+  const auto matrix=system.GetProjectionMatrix(vr::Eye_Left,.025f,50000.f,vr::API_DirectX);
+  RawFov zoomRaw{};edvr::openxr::fovToRaw(narrowed.views[0].fov,zoomRaw);
+  check(near(matrix.m[0][0],2.f/(zoomRaw.right-zoomRaw.left),1e-2f)&&near(matrix.m[1][1],2.f/(zoomRaw.bottom-zoomRaw.top),1e-2f)&&matrix.m[0][0]>2.f*(2.f/(told[0].right-told[0].left)),
+        "scope zoom: the projection matrix getter, which the picture is drawn with, answers the narrowed frustum");
+  float l1,r1,t1,b1;system.GetProjectionRaw(vr::Eye_Right,&l1,&r1,&t1,&b1);
+  const auto matrix1=system.GetProjectionMatrix(vr::Eye_Right,.025f,50000.f,vr::API_DirectX);
+  check(near(l1,told[1].left)&&near(r1,told[1].right)&&near(matrix1.m[0][0],2.f/(told[1].right-told[1].left),1e-2f),"scope zoom: eye 1 is untouched in both getters");
+  check(source.reads[0][1].load()==1&&source.reads[0][0].load()==1&&source.reads[1][1].load()==1&&source.reads[1][0].load()==1&&source.heldReads.load()==2,
+        "scope zoom: the reads of each getter are noted per eye, and eye 0's two are noted as held back from the raw getter");
+  // what each getter ANSWERED, as the span the game was given (the matrix getter's from the matrix itself), not the frusta the runtime told: their ratio is the narrowing exactly
+  {
+    const float rawSpan=source.lastSpan[0][1].load(),matrixSpan=source.lastSpan[0][0].load();
+    const double toldNarrowing=(double(told[0].bottom)-told[0].top)/(double(zoomRaw.bottom)-zoomRaw.top);
+    check(rawSpan>0.f&&matrixSpan>0.f&&near(rawSpan,told[0].bottom-told[0].top,1e-5f)&&near(matrixSpan,zoomRaw.bottom-zoomRaw.top,1e-5f)&&std::fabs(double(rawSpan)/double(matrixSpan)-toldNarrowing)<1e-4*toldNarrowing,
+          "scope zoom: each getter reports the vertical tangent span it answered eye 0 with, and their ratio is the narrowing told");
+    check(near(edvr::openxr::matrixSpanV(matrix),zoomRaw.bottom-zoomRaw.top,1e-5f)&&near(edvr::openxr::rawSpanV(told[0]),told[0].bottom-told[0].top,1e-6f)&&edvr::openxr::matrixSpanV(vr::HmdMatrix44_t{})==0.f&&
+          edvr::openxr::rawSpanV(RawFov{})==0.f,"scope zoom: the span of a frustum and of the matrix made from it agree, and an unusable one is 0");
+    // an off-axis window: the angle sum the first build logged is not 1 / M, the tangent span is
+    const double M=4.0;const double hx=0.5*(double(told[0].bottom)-told[0].top)/M;
+    const double top=double(told[0].bottom)-2.0*hx,bot=double(told[0].bottom);   // a window against the frustum's upper edge
+    const double angleTrue=std::atan(std::fabs(double(told[0].top)))+std::atan(std::fabs(double(told[0].bottom)));
+    const double angleZoom=std::atan(std::fabs(top))+std::atan(std::fabs(bot));
+    check(std::fabs(angleTrue/angleZoom-M)>0.05*M&&std::fabs((double(told[0].bottom)-told[0].top)/(bot-top)-M)<1e-9,
+          "scope zoom: for a window off the axis the angle sum is not 1 / M, and the tangent span is");
+  }
+  // who asked: the caller's RVA, from the system object's own record of the game's image (exe_module.h frameRva), for the raw getter and the matrix getter alike
+  {
+    rawReadSiteA(system);
+    const uint32_t rvaA=source.lastCaller[0][1].load();
+    rawReadSiteB(system);
+    const uint32_t rvaB=source.lastCaller[0][1].load();
+    rawReadSiteA(system);
+    check(rvaA!=rvaB&&rvaA!=edvr::openxr::kFrameOutside&&rvaB!=edvr::openxr::kFrameOutside&&rvaA<system.exeModule().size&&rvaB<system.exeModule().size&&source.lastCaller[0][1].load()==rvaA,
+          "scope zoom: the raw getter says who read it, as an RVA in the game's image: two call sites differ and one site is the same twice");
+    system.GetProjectionMatrix(vr::Eye_Left,.025f,50000.f,vr::API_DirectX);
+    const uint32_t rvaM=source.lastCaller[0][0].load();
+    check(rvaM!=edvr::openxr::kFrameOutside&&rvaM<system.exeModule().size,"scope zoom: the matrix getter says who read it too");
+    const edvr::openxr::ExeModule realExe=system.exeModule();
+    system.useExeModule(edvr::openxr::ExeModule{reinterpret_cast<uintptr_t>(&rawReadSiteA)-0x10,0x1000,0,0});
+    rawReadSiteA(system);
+    const uint32_t mapped=source.lastCaller[0][1].load();
+    check(mapped>=0x10u&&mapped<0x400u,"scope zoom: the RVA is the return address less the image's base (a synthetic image mapped over the call site)");
+    system.useExeModule(edvr::openxr::ExeModule{});
+    rawReadSiteA(system);
+    check(source.lastCaller[0][1].load()==edvr::openxr::kFrameOutside,"scope zoom: with no image to judge against, or a caller outside it, the RVA is the outside marker");
+    system.useExeModule(realExe);
+  }
+  check(!source.state.hiddenMasksCompatible,"scope zoom: the hidden-area mesh is withheld (published as not compatible)");
+  // optics keep the true frustum, so a frame without tracking cannot serve the narrowed one
+  publication.invalidate(generation);source.state=publication.read();
+  float lo,ro,to,bo;system.GetProjectionRaw(vr::Eye_Left,&lo,&ro,&to,&bo);
+  const auto matrixOptics=system.GetProjectionMatrix(vr::Eye_Left,.025f,50000.f,vr::API_DirectX);
+  check(near(lo,told[0].left)&&near(ro,told[0].right)&&near(matrixOptics.m[0][0],2.f/(told[0].right-told[0].left),1e-2f),"scope zoom: the cached optics hold the true frustum for both getters when the geometry is gone");
+  // the next frame without the zoom publishes both getters alike again
+  SystemPublication publication2;const auto gen2=publication2.begin(metadata);
+  check(publication2.publish(geometry(gen2,1),false,false,nullptr,true,told),"scope zoom: a frame");
+  check(publication2.publish(geometry(gen2,2),false,false,nullptr,true),"scope zoom: the next frame without the zoom");
+  FakeSource source2;source2.state=publication2.read();edvr::openxr::OpenVRSystem system2(source2);
+  float l2,r2,t2,b2;system2.GetProjectionRaw(vr::Eye_Left,&l2,&r2,&t2,&b2);
+  check(!source2.state.toldRawSet&&near(l2,told[0].left)&&near(r2,told[0].right),"scope zoom: without the zoom the raw getter answers the game's geometry, as before");
+  system2.GetProjectionMatrix(vr::Eye_Left,.025f,50000.f,vr::API_DirectX);
+  check(source2.heldReads.load()==0,"scope zoom: and no read is noted as held back");
+}
+// B3, the two halves together. The frame thread's tick (scope_zoom_b3.h b3Step and b3IdleStep, which native_on_foot.cpp's tick calls) publishes the window once a tick; the provider's
+// beginFrame reads it as the five words of a version 11 answer (scope_zoom_window.h); the runtime decides from them and the share (decideScopeZoom) and keeps the press (ScopeZoomRun).
+// Driven frame by frame at 90 Hz with the game's WaitGetPoses after the frame boundary's tick, and before it (the one-frame latency the design states): ADS entry and exit, the share
+// dropping, the key toggled and the weapon switched mid-press, a stalled frame thread, a lost tick, an answer that is not version 11, and a second press after a refused one. What must hold
+// in all of them: the left eye is told the window only with the strip already black, within the latency of the request ending, and never from a request that went stale.
+struct ZoomPipe {
+  edvr::scopezoom::B3Loop loop;
+  edvr::scopezoom::B3StepIn in;
+  edvr::openxr::ScopeZoomRun run;
+  uint64_t ms=100000;
+  bool runtimeFirst=false,carries=true,shareDrawn=true,shareRefused=false;
+  XrFovf base{-0.6f,0.7f,0.5f,-0.4f};
+  struct Frame {bool applied=false,askedByTick=false,passed=false;float strip=0.f;edvr::openxr::ScopeZoomWhy why=edvr::openxr::ScopeZoomWhy::kNotAsked;const char* closed=nullptr;bool opened=false;};
+  std::vector<Frame> frames;
+  ZoomPipe() {
+    edvr::scopewin::clear();
+    in.keyOn=in.rendered=in.shareMode=in.qualifies=in.sightsFull=in.leftOk=true;
+    in.share=1.0;in.dt=0.011;in.m=4.067;in.tcNow[0]=0.01;in.tcNow[1]=-0.02;
+  }
+  void runtime(Frame& f) {
+    namespace sw=edvr::scopewin;
+    uint32_t words[sw::kWords];
+    sw::toWords(sw::read(ms+4),words);   // the provider's beginFrame: the frame thread's request, none once it is stale
+    edvr::openxr::ScopeZoomInput zi;
+    zi.answerCarries=carries;
+    if(carries)zi.request=sw::fromWords(words);
+    zi.share=float(in.share);zi.shareDrawn=shareDrawn;zi.shareRefused=shareRefused;zi.base=base;
+    zi.standing=run.standing();zi.notDrawnRun=run.notDrawnRun;
+    const auto out=edvr::openxr::decideScopeZoom(zi);
+    const auto ev=run.frame(out,ms*1000);
+    f.applied=out.why==edvr::openxr::ScopeZoomWhy::kApplied;f.strip=out.strip;f.why=out.why;f.closed=ev.closed;f.opened=ev.opened;f.passed=out.passedUnshared;
+    if(ev.closed)run.press.open=false;   // the host's close
+  }
+  // One game frame. sightsDown: the tick is the sights-down one (b3IdleStep); stalled: the frame thread does not tick (a lost tick, or a stall) but the runtime still asks.
+  Frame frame(bool sightsDown=false,bool stalled=false) {
+    Frame f;ms+=11;
+    if(runtimeFirst)runtime(f);
+    if(!stalled) {
+      if(sightsDown)edvr::scopewin::publish(edvr::scopezoom::b3IdleStep(loop,in.dt),ms);
+      else {const auto out=edvr::scopezoom::b3Step(loop,in);f.askedByTick=out.request.zoom;edvr::scopewin::publish(out.request,ms);}
+    }
+    if(!runtimeFirst)runtime(f);
+    frames.push_back(f);
+    return f;
+  }
+  int go(int n,bool down=false,bool stalled=false) {int applied=0;for(int i=0;i<n;++i)applied+=frame(down,stalled).applied?1:0;return applied;}
+};
+
+void scopeZoomPipelineTest() {
+  using edvr::openxr::ScopeZoomWhy;
+  for(int variant=0;variant<2;++variant) {   // 0: the game asks after the tick (the zoom reaches it the same frame); 1: before (a frame later)
+    const char* tag=variant?"asked before the tick":"asked after the tick";
+    const int late=variant;
+    auto say=[&](const char* text){static char buffer[400];std::snprintf(buffer,sizeof(buffer),"scope zoom pipeline (%s): %s",tag,text);return buffer;};
+    // ADS entry: black strip first, then the zoom, within a frame of the tick that asked
+    {
+      ZoomPipe p;p.runtimeFirst=variant==1;
+      int firstApplied=-1,firstAsked=-1;bool stripBlack=true;
+      for(int i=0;i<24;++i) {
+        const auto f=p.frame();
+        if(f.askedByTick&&firstAsked<0)firstAsked=i;
+        if(f.applied&&firstApplied<0)firstApplied=i;
+        if(f.applied)stripBlack=stripBlack&&f.strip>=0.999f;
+      }
+      check(firstAsked>=9&&firstAsked<=10&&firstApplied==firstAsked+late&&stripBlack,say("the zoom reaches the game on the frame the tick asked (a frame later when it asked before), with the strip black"));
+      check(p.frames.back().applied&&p.run.press.open&&p.run.press.frames==unsigned(24-firstApplied),say("and stays applied, in one press"));
+      // ADS exit: the sights come down. The request ends with the tick; the runtime stops within the latency
+      int stillApplied=0;
+      for(int i=0;i<6;++i)stillApplied+=p.frame(true).applied?1:0;
+      check(stillApplied<=late&&!p.frames.back().applied&&p.run.press.frames>0,say("the sights down end the zoom at once (within the latency), and no frame after that is applied"));
+      check(!p.frames[p.frames.size()-3].applied&&p.frames[p.frames.size()-1].why==ScopeZoomWhy::kNotAsked,say("the runtime reads nothing asked from then on"));
+    }
+    // the share between 0.9 and 0.999 while the window is held: the runtime refuses (the left eye keeps its own view), the window is not dropped, and it applies again when the share is full
+    {
+      ZoomPipe p;p.runtimeFirst=variant==1;
+      p.go(14);
+      p.in.share=0.95;
+      int applied=p.go(5);
+      check(applied<=late&&p.frames.back().why==ScopeZoomWhy::kShare&&p.loop.latched,say("a share at 0.95 refuses the narrowing (not at full weight) while the window stays held"));
+      p.in.share=1.0;
+      p.go(3);
+      check(p.frames.back().applied,say("and the narrowing returns when the share is full again"));
+    }
+    // the share under 0.9: the window ends, the request ends
+    {
+      ZoomPipe p;p.runtimeFirst=variant==1;
+      p.go(14);
+      p.in.share=0.8;
+      p.go(4);
+      check(!p.frames.back().applied&&!p.loop.latched,say("a share under 0.9 ends the window and the zoom"));
+    }
+    // the key toggled mid-press, a weapon switch mid-press
+    {
+      ZoomPipe p;p.runtimeFirst=variant==1;
+      p.go(14);
+      p.in.keyOn=false;
+      p.go(4);
+      check(!p.frames.back().applied&&p.frames.back().why==ScopeZoomWhy::kNotAsked,say("the key off mid-press ends the zoom"));
+      ZoomPipe w;w.runtimeFirst=variant==1;
+      w.go(14);
+      w.in.rendered=false;
+      w.go(4);
+      check(!w.frames.back().applied,say("a weapon switch to an entry that is not rendered ends the zoom"));
+    }
+    // a stalled frame thread: the request is read for 200 ms and not after; the strip decays after that
+    {
+      ZoomPipe p;p.runtimeFirst=variant==1;
+      p.go(14);
+      int appliedWhileStalled=0,lastApplied=-1;float stripAtEnd=1.f;
+      for(int i=0;i<40;++i) {
+        const auto f=p.frame(false,true);
+        if(f.applied){++appliedWhileStalled;lastApplied=i;}
+        stripAtEnd=f.strip;
+      }
+      const int silenceMs=(lastApplied+1)*11;
+      check(appliedWhileStalled>=15&&appliedWhileStalled<=19&&silenceMs<=210&&!p.frames.back().applied&&stripAtEnd==0.f,
+            say("a stalled frame thread leaves the zoom told for 200 ms of silence, then none at once, and the strip gone by 400 ms: no stalled tick can leave the left eye zoomed"));
+    }
+    // one tick lost: the last request stands
+    {
+      ZoomPipe p;p.runtimeFirst=variant==1;
+      p.go(14);
+      p.frame(false,true);
+      p.frame(false,true);
+      check(p.frames.back().applied&&p.frames[p.frames.size()-2].applied,say("a tick or two lost between ticks leaves the zoom applied"));
+    }
+    // an answer that is not version 11 carries nothing, and the strip with it
+    {
+      ZoomPipe p;p.runtimeFirst=variant==1;p.carries=false;
+      const int applied=p.go(24);
+      check(applied==0&&p.frames.back().strip==0.f&&p.run.press.frames==0u,say("an answer that is not version 11 is never narrowed, and darkens no strip"));
+    }
+    // a share the renderer did not draw: refused, whatever was asked
+    {
+      ZoomPipe p;p.runtimeFirst=variant==1;p.shareDrawn=false;
+      const int applied=p.go(24);
+      check(applied==0&&p.frames.back().why==ScopeZoomWhy::kShareNotDrawn,say("a share not drawn is never narrowed over"));
+    }
+    // two presses, the first ended by a refusal: the second reports only its own refusals
+    {
+      ZoomPipe p;p.runtimeFirst=variant==1;
+      p.go(14);
+      p.in.share=0.95;
+      p.go(4);   // refused while held
+      p.go(8,true);   // the sights come down: nothing asked, the run of asks ends
+      check(p.run.pending[1]==0u&&p.run.pending[0]==0u&&p.run.pending[2]==0u&&p.run.pending[3]==0u,say("the sights down end the run of asks: the refusals of the press that was refused are not carried"));
+      p.in.share=1.0;
+      p.go(14);
+      check(p.frames.back().applied&&p.run.press.open&&p.run.press.refused[1]==0u&&p.run.press.frames>0u,say("the second press opens with none of the first's refusals"));
+    }
+  }
+  // B3-2: one frame in a row of a share that was not drawn does not end the zoom; two do; a share that was refused (not merely not drawn) does; and entering needs a drawn share
+  for(int variant=0;variant<2;++variant) {
+    const char* tag=variant?"asked before the tick":"asked after the tick";
+    auto say=[&](const char* text){static char buffer[400];std::snprintf(buffer,sizeof(buffer),"scope zoom pipeline (%s, withheld share): %s",tag,text);return buffer;};
+    {
+      ZoomPipe p;p.runtimeFirst=variant==1;
+      p.go(14);
+      const unsigned before=p.run.press.frames;
+      p.shareDrawn=false;
+      const auto held=p.frame();
+      p.shareDrawn=true;
+      p.go(4);
+      check(held.applied&&held.passed&&!held.closed&&p.run.press.open&&p.run.press.frames==before+5&&p.run.press.notDrawnPassed==1u&&p.frames.back().applied&&!p.frames.back().passed,
+            say("one frame of a share not drawn passes without ending the zoom: one press, no split, the pass counted"));
+      p.shareDrawn=false;p.frame();p.shareDrawn=true;p.go(1);p.shareDrawn=false;const auto again=p.frame();
+      check(again.applied&&again.passed&&p.run.press.notDrawnPassed==3u&&!again.closed,say("and again after a drawn frame between (the run is one frame at a time)"));
+    }
+    {
+      ZoomPipe p;p.runtimeFirst=variant==1;
+      p.go(14);
+      p.shareDrawn=false;
+      const auto first=p.frame();
+      const auto second=p.frame();
+      check(first.applied&&first.passed&&!second.applied&&second.why==edvr::openxr::ScopeZoomWhy::kShareNotDrawn&&second.closed&&std::strcmp(second.closed,"refused")==0,
+            say("two frames in a row end the zoom on the second: the left eye is narrowed on no frame beyond that"));
+      p.shareDrawn=true;
+      p.go(3);
+      check(p.frames.back().applied&&p.run.press.open&&p.run.press.refused[2]==1u,say("and the zoom comes back with the share, the second press carrying its refusal"));
+    }
+    {
+      ZoomPipe p;p.runtimeFirst=variant==1;
+      p.go(14);
+      p.shareDrawn=false;p.shareRefused=true;
+      const auto f=p.frame();
+      check(!f.applied&&f.why==edvr::openxr::ScopeZoomWhy::kShareNotDrawn&&f.closed,say("a share the renderer refused (views it could not map) is not passed"));
+    }
+    {
+      ZoomPipe p;p.runtimeFirst=variant==1;
+      p.go(8);
+      p.shareDrawn=false;
+      const int during=p.go(4);
+      p.shareDrawn=true;
+      const bool later=p.go(3)>0;
+      check(during==0&&p.frames[11].why==edvr::openxr::ScopeZoomWhy::kShareNotDrawn&&!p.frames[11].passed&&later,say("before the zoom stands a share not drawn is refused, not passed, and the zoom starts when it is drawn"));
+    }
+    {   // the strip crosses to the runtime before the zoom, with the zoom, and after it (the right eye's mirror of it is drawn from it); an answer that is not version 11 carries none
+      ZoomPipe p;p.runtimeFirst=variant==1;
+      p.frame();
+      const auto first=p.frame();
+      p.go(14);
+      const auto zoomed=p.frames.back();
+      const auto down=p.frame(true);
+      check(first.strip>0.f&&zoomed.applied&&zoomed.strip>=.99f&&down.strip>0.f&&down.strip<=zoomed.strip,say("the strip reaches the runtime on the entry ramp, while the zoom stands and on the way out"));
+      ZoomPipe q;q.runtimeFirst=variant==1;q.carries=false;
+      q.go(14);
+      check(q.frames.back().strip==0.f,say("an answer that is not version 11 carries no strip"));
+    }
+  }
+  // the right eye's mirror of the left eye's strip, counted over a run of the strip
+  {
+    edvr::openxr::ScopeZoomMirrorTally t;
+    t.note(0.f,false,true,0.f);
+    check(!t.active&&t.frames==0u&&t.widthMax==0.f,"scope zoom mirror: no strip and no narrowing is no run, and counts nothing");
+    t.note(0.3f,false,true,0.05f);t.note(0.6f,false,true,0.08f);
+    t.note(1.f,true,true,0.12f);t.note(1.f,true,false,0.f);t.note(1.f,true,true,0.11f);
+    check(t.active&&t.frames==4u&&near(t.widthMax,0.12f,1e-6f),"scope zoom mirror: the frames it was drawn on over the run (the ramp and the narrowed frames), the widest share of the eye's width, and a frame without it counted not");
+    t.note(1.f,true,true,std::nanf(""));
+    check(t.frames==5u&&near(t.widthMax,0.12f,1e-6f),"scope zoom mirror: a width that is no number counts the frame and leaves the widest as it was");
+    t.note(0.f,false,true,0.5f);
+    check(!t.active&&t.frames==5u&&near(t.widthMax,0.12f,1e-6f),"scope zoom mirror: the run ends with the first frame with neither, and what it counted stays for the press's report");
+    t.note(0.2f,false,false,0.f);
+    check(t.active&&t.frames==0u&&t.widthMax==0.f,"scope zoom mirror: the next run starts from nothing, and a run in which the mirror is never drawn counts no frame");
+    t.note(0.2f,false,true,0.03f);
+    edvr::openxr::ScopeZoomPress press;
+    press.begin(1000);press.takeMirror(t);
+    EdvrNativeScopeZoomReport report{};press.fill(report);
+    check(report.mirrorFrames==1u&&near(report.mirrorWidthMax,0.03f,1e-6f)&&edvr::scopewin::reportReadable(&report),"scope zoom mirror: the press takes the tally into its report");
+  }
+  // the report a press ends with is built from the run's press, and is what the d3d11 half is told
+  {
+    ZoomPipe p;
+    p.go(14);
+    EdvrNativeScopeZoomReport report{};p.run.press.fill(report);
+    check(report.frames>=3u&&report.peakM>3.9f&&edvr::scopewin::reportReadable(&report),"scope zoom pipeline: the press the frames made fills a readable report");
+  }
+}
 int selfTest() {
+  scopeZoomTest();
+  scopeZoomPipelineTest();
   publicationTest();
   oddRecommendationTest();
   capabilityTests();

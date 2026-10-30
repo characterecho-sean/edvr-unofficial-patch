@@ -49,6 +49,10 @@ struct StereoShareFacts {
   float leftTangents[4]{}, rightTangents[4]{};
   float coverage = 0.0f, coverageWhole = 0.0f;
   uint32_t hiddenTriangles = 0;   // the mask's triangles (0: no mask)
+  // B3: leftBlacked: the left eye was narrowed and no share was drawn, so it was cleared to black instead of drawn. mirrorDrawn (B3-3): the right eye's mirror of the left eye's strip was drawn,
+  // and mirrorWidth the share of the right eye's width it covered on its middle row (the columns at least half black), 0..1.
+  bool leftBlacked = false, mirrorDrawn = false;
+  float mirrorWidth = 0.0f;
 };
 
 struct StereoDispatch {
@@ -108,7 +112,16 @@ class D3D11Stereo final {
                           StereoWallTimes* times = nullptr,
                           const StereoPlacement* placement = nullptr,
                           float fade = 0.0f, const XrPosef* headPose = nullptr, float leftEyeShare = 0.0f,
-                          const StereoHiddenArea* rightHidden = nullptr);
+                          const StereoHiddenArea* rightHidden = nullptr, float leftStripBlack = 0.0f, bool leftZoomed = false);
+  // leftStripBlack, 0..1 (B3, the scope zoom's window, scope_zoom_window.h): with a share drawn, the part of the left eye the right eye does not cover (its outer strip, and the fade
+  // band to it: the geometry alone, however far the share's weight has fallen) is blended toward black by that much, so the left eye's own picture, which the zoom has narrowed, is
+  // not seen there. 0 (or anything that is not a number) draws the share exactly as before; with no share drawn it does nothing, the left eye's whole picture being its own.
+  // leftZoomed: the pair being drawn was rendered with eye 0 narrowed (a fresh frame the runtime told the window, or a kept pair it replays). Then all of the left eye's own picture
+  // goes black under the share, so the narrowed picture cannot show through in a frame where the weight has already fallen; false leaves the interior as the share draws it. A narrowed
+  // frame in which no share is drawn (none asked, views it cannot map, a mask it cannot build) has the left eye cleared to black in place of its own picture: it is never shown.
+  // B3-3: with a share drawn and the strip up (leftStripBlack above 0) or the left eye narrowed, the RIGHT eye gets the mirror of the left eye's strip: the directions of its view that
+  // the left view does not see go toward black, with the same edge band the share uses, by leftStripBlack (1 when leftZoomed), drawn over its own image. Neither: no pass, the right eye
+  // is the image it always was. The weight is the left strip's, so both edges come and go together.
   const StereoShareFacts& shareFacts() const { return shareFacts_; }
   XrResult renderSkybox(const XrView (&)[2], XrSpace, const SkyboxCapture&,
                         XrCompositionLayerProjection&, float fade = 0.0f);

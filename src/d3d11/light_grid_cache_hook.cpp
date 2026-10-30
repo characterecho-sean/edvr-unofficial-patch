@@ -12,6 +12,7 @@
 #include "../common/game_build.h"
 #include "../common/log.h"
 #include "light_grid_cache_core.h"
+#include "scope_zoom_b3.h"   // B3: b3LightGridBypass
 
 namespace edvr {
 namespace {
@@ -48,6 +49,11 @@ std::atomic<uint32_t> g_ownerThread{0};   // the first thread to call
 std::atomic<uint64_t> g_otherThreadCalls{0};
 std::atomic<uint64_t> g_frame{0};
 std::atomic<uint64_t> g_callsEver{0};
+// B3: eye 0 is zoomed in the frame being built; the render thread's count of the eye-sized builder calls so far in this frame, and the totals the press line differences.
+std::atomic<bool> g_zoomedFrame{false};
+uint64_t g_zoomCallFrame = ~0ull;
+uint32_t g_zoomEyeCalls = 0;
+std::atomic<uint64_t> g_zoomCalls{0}, g_zoomBypassed{0};
 std::atomic<uint64_t> g_installedMs{0};
 std::atomic<bool> g_silenceSaid{false};
 uint64_t g_windowFrame0 = 0;              // the render thread's
@@ -316,6 +322,21 @@ __declspec(noinline) uintptr_t __fastcall builderDetour(void* self, void* a2, vo
         fwd();
         return result;
     }
+    if (g_zoomedFrame.load(std::memory_order_relaxed)) {   // B3: the first eye-sized call of a frame in which eye 0 is zoomed is that eye's: the game builds it, the cache keeps out of it
+        const uint64_t frameNow = g_frame.load(std::memory_order_relaxed);
+        if (frameNow != g_zoomCallFrame) {
+            g_zoomCallFrame = frameNow;
+            g_zoomEyeCalls = 0;
+        }
+        g_zoomCalls.fetch_add(1, std::memory_order_relaxed);
+        const bool bypass = scopezoom::b3LightGridBypass(true, g_zoomEyeCalls, width, height);
+        if (width >= 1024 && height >= 1024) ++g_zoomEyeCalls;
+        if (bypass) {
+            g_zoomBypassed.fetch_add(1, std::memory_order_relaxed);
+            fwd();
+            return result;
+        }
+    }
     lg::CallInputs in;
     if (!readInputs(a2, a4, width, height, &in)) {
         ++g_cache.stats.calls;
@@ -489,6 +510,12 @@ void installOnce() noexcept {
 }  // namespace
 
 void lightGridCacheInstall() { installOnce(); }
+
+void lightGridCacheNoteZoomedFrame(bool zoomed) { g_zoomedFrame.store(zoomed, std::memory_order_relaxed); }
+void lightGridCacheZoomCounts(uint64_t* calls, uint64_t* bypassed) {
+    if (calls) *calls = g_zoomCalls.load(std::memory_order_relaxed);
+    if (bypassed) *bypassed = g_zoomBypassed.load(std::memory_order_relaxed);
+}
 
 void lightGridCachePoll(uint64_t nowMsStamp) {
     (void)nowMsStamp;
