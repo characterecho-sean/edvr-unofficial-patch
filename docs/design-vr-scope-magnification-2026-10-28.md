@@ -6,6 +6,8 @@ game's own zoom as a magnified picture inside the scope's lens. The rest of the 
 
 ## Status
 
+- **ON MAIN `28359a00` (2026-10-30, the maintainer's word; full build of the merged tree, all gates):** A3, B3-3 and C1a as flown, the crisp reticle key retired, C1b removed. Open: B3's window drift while
+  turning (the lens falls back to A) and the temporary `experimental.native_on_foot_ads_scope_zoom_fov`.
 - **State: S0 FLAT TWICE, VR TWICE** (`d90db147`, measure only, no key; section 7). Settled: Q1 for every owned weapon, Q2 (VR has no
   zoom field: flat table), Q3 (the ADS FOV is absolute per weapon), Q4 (see-through glass, the footprint = the hole in the frame's
   depth), Q6 (a chevron and a tint on the glass, in the scene colour, no UI over it). No rendering code. Branch
