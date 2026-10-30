@@ -57,6 +57,10 @@ census design. This doc records what EDVR's review made of it and what was built
 - **Issue 131 (2026-10-24, RocketsProjects):** a closed form for `engineStaleStampKind`'s 64-round
   search. Proven exact (each round is a bijection). Built on main, no key. The WARP rig holds it to
   the loop on 4,704 cases with 0 mismatches. Not flown. See "Issue 131" below.
+- **HUD layer seed (2026-10-30, Epic, RTX 5090):**
+  - G03 was measured with the seed census and ruled out: it saves no seeds.
+  - The repeat-seed depth skip is flown and on main (6716f875).
+  - See "2026-10-30: HUD layer seed" below.
 
 ## What was built
 
@@ -149,6 +153,68 @@ Bench (RTX 5090, 2016² for one eye, RocketsProjects' method, outputs byte-check
 - How often the layers are absent in live VR is still unmeasured. The presence line answers that on
   the first flight.
 
+## 2026-10-30: HUD layer seed
+
+### Where the copies come from
+
+A Steam Frame tester's SRV log raised the question. That log came from v0.22.0-rc.3 on an RTX 4090
+with DLSS quality, 1800 to 2400, and UI quality 150. It showed the HDR HUD depth-stencil seed
+running 6 times an eye in the SRV, 3 of them stale, at 0.37 ms an eye. In the cockpit it ran 3
+times an eye.
+
+A census build armed the seed census (`g_hdrDrawTimingOn`; cd4c91c4 on
+`claude/seed-census-measure`). Sean flew it on Epic: RTX 5090, 2016² eyes, a 4032² layer, gfx log
+`20261030_124737`. Per eye, every frame starts with one seed of depth only, reason "new frame".
+After it:
+
+- **Cockpit:** the repeats are "stale draw".
+- **SRV:** the repeats are "missing stencil". The game writes stencil bits 02 and 04 with
+  stencil-only draws, which the 09-28 preservation keeps fresh, and then a HUD draw reads 02.
+- **The G03 case:** the stencil-only writer vs 2CECEC3065EF0D4A / ps A4D03619D631B186 (write mask
+  04) invalidated a seed holding bit 02 2,563 times in 30 s (12:52:38).
+
+### G03 (bit-aware stencil freshness): built, flown twice, not merged
+
+- **Branches:** c221b4a6 on `claude/hud-seed-trim`; the main candidate is 39ba6dc9 on
+  `claude/hud-seed-trim-main`.
+- **Result:** in the SRV, "stale draw" fell to 0 and 45,000-72,000 writers a window were kept by
+  the bit rule. Seeds stayed at 6.0 a frame. The draws after a disjoint writer need bits the seed
+  does not hold, so each stale seed avoided becomes a missing-stencil seed.
+
+### A GPU hang, not attributed
+
+- **When:** at the end of the first G03 flight, 13:20:23, on the census build.
+- **What:** `nvlddmkm` event 153, then DXGI_ERROR_DEVICE_HUNG. Elite's next CreateTexture2D was
+  refused and its device-lost path wrote to null at +0x34CC1A2.
+- **Since:** it was the only `nvlddmkm` event in 30 days. Two later SRV flights, of about 4 and 2.5
+  minutes, ran builds without the census and did not hang.
+
+### Built and merged: a repeat seed keeps the layer's depth when it is exact
+
+- **Commit:** 6716f875. The rule is `uiLayerSeedKeepsDepth` in ui_layer_math.h.
+- **Conditions:**
+  - the seed is not stale;
+  - the layer holds depth;
+  - no private depth-write potential this frame (`UiLayerPrivateDepthGuard`);
+  - the same jitter;
+  - the per-bit Seeder.
+- **Effect:** the Seeder clears only stencil and writes depth in its first pass alone. Skipping that
+  pass leaves the depth a fresh copy would write.
+- **Proof:** `ui_seed_freshness_test`. Scenarios a-e match legacy byte for byte. Scenario (a) needs
+  2 seed draws against legacy's 3.
+- **Flight** (Epic, gfx `20261030_143504`, SRV at 12 seeds a frame, 4 of them stale):
+  - 4,946-5,882 seeds a window kept their depth, about 2.4 a frame.
+  - The private-depth guard never fired.
+  - HUD occlusion looked unchanged.
+- **Saving:** about 0.15 ms a frame. This is the 10-14 bench figure (0.067 ms a depth pass at
+  4032² on the 5090) multiplied out. There is no same-scene A/B: this SRV ran 12 seeds a frame,
+  the earlier flights 6.
+- **Counter:** the end of the seed preservation line, "N repeat seeds kept the layer's depth and
+  copied stencil bits only".
+- **Left:**
+  - About 3.6 a frame are missing-depth repeats after a stale seed that took stencil only.
+  - The 4 stale seeds a frame have real depth writers behind them.
+
 ## Measure first (real, not built)
 
 - **G08, in-place UI resolve** (P1 in gpu-trims).
@@ -165,11 +231,6 @@ Bench (RTX 5090, 2016² for one eye, RocketsProjects' method, outputs byte-check
   - Fix: take r0 and `realCall` around `realDrawIndexedInstanced` only.
   - It is a measurement fix, not a speedup. It was held out of this batch so the line stays
     comparable across it.
-- **G03, bit-aware stencil freshness.** Sound for a stencil-only writer whose writeMask is disjoint
-  from seededMask, but the measured hangar is already 2 seeds a frame (mask 00). Record
-  `l->seededMask` in `g_seedCensus.event` and fly the late target-sprite storm
-  (dlss-performance-review-2026-09-28.md) with diagnostics on; close if the residual reseeds are not
-  disjoint-writer cases.
 - **`dsReproducible` per-frame memo.**
   - About 8 COM calls on each of 62-93 tested takes per frame, all a function of the bound DSV.
   - The memo must handle a device reset.
@@ -271,5 +332,8 @@ pixels are across waves (one such pixel holds its whole wave in the loop), and o
   modules, and quantization exactness is per adapter.
 - ruled out: G01 (OpenXR transfer), because it is already measured and closed in
   openxr-performance-review-2026-09-14.md, and frame_end_overlap defaults on.
+- ruled out: G03 (bit-aware stencil freshness), because the draws after a disjoint stencil-only
+  writer need bits the seed does not hold. Each stale seed it avoids becomes a missing-stencil seed,
+  so the SRV ran 6.0 seeds a frame either way (2026-10-30, two flights).
 - The 19 findings the audit itself marked NO-GO (CPU-07/08/11/14/16/18/21, G02/04/05/06/07/10/11/12/
   14/15/16/18) were not reopened. G01, G19, G20 and G21 are measurement prerequisites, not changes.
