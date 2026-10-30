@@ -82,6 +82,7 @@
 #include "native_on_foot_f170.h"   // F170 (TEMPORARY): the crouched ADS torso squared to the aim, its dial and the figures that judge it (pure parts)
 #include "native_on_foot_f171.h"   // F171 (TEMPORARY): the crouched ADS body moved to the left of the aim line, its dial and the figures that judge it (pure parts)
 #include "native_on_foot_f171c.h"  // F171: the raise's carriage, measured: slopes of the camera's, G's and the drawn eye's changes against the carried raise's (pure parts)
+#include "native_on_foot_f176.h"   // F176: in the sights with the head aiming, the mouse and the stick hold their pitch (pure parts)
 #include "native_on_foot_f175.h"   // F175 (measure only): the view's roll and pitch against the headset's, by look mode and item (pure parts)
 #include "native_on_foot_f172.h"   // F172: the neck raise published pre-turned by the mouse-look aim pitch, so the game's turn lands it straight up (pure parts)
 #include "xinput_watch.h"         // F135: the pad's Start and Back edges, evidence for the menu probe only
@@ -276,6 +277,12 @@ std::atomic<float> g_f140TrimCm[4]{};   // static storage: zero
 double g_f140TrimLast[4] = {};   // forward, left, up, toward eye: the values last logged (frame thread)
 std::atomic<int> g_adsYawSign{1}, g_adsPitchSign{1};          // the sign keys (TEMPORARY): 1, -1 or 0 (that axis off)
 std::atomic<bool> g_adsHookOn{false};                         // the update hook takes the F62b path (the frame thread: engaged or releasing)
+// F176: the mouse's and the stick's pitch are held while the head aims in the sights in mouse look (nofoot::f176::holds; the frame thread publishes it once a tick and clears it wherever it
+// clears g_adsHookOn; the look update reads it with the hook flag). The counters are the game thread's: the look updates it held in, those with a pitch to drop, the |pitch| dropped.
+std::atomic<bool> g_adsPitchHeld{false};
+std::atomic<uint32_t> g_f176Calls{0}, g_f176Input{0};
+std::atomic<double> g_f176Mouse{0.0}, g_f176Stick{0.0};
+nofoot::f176::Press g_f176Press;   // the ADS press's account (the frame thread)
 std::atomic<float> g_adsInYaw{0.0f}, g_adsInPitch{0.0f};      // the input queued for the next look update; the update hook takes it whole
 std::atomic<double> g_adsAppYaw{0.0}, g_adsAppPitch{0.0};     // the game's deltas from our input, cumulative (radians, the game's sign)
 std::atomic<double> g_adsUserYaw{0.0}, g_adsUserPitch{0.0};   // ...and the player's own share of the same calls
@@ -7037,7 +7044,13 @@ void lookUpdateRun(void* act, F22UpdateFn original) noexcept {
     const float iy = hookOn ? g_adsInYaw.exchange(0.0f, std::memory_order_relaxed) : 0.0f;
     const float ip = hookOn ? g_adsInPitch.exchange(0.0f, std::memory_order_relaxed) : 0.0f;
     const float snap = drop ? g_snapIn.exchange(0.0f, std::memory_order_relaxed) : 0.0f;
-    const nofoot::f109::Feed f = nofoot::f109::feed(drop, style, oldSY, oldSP, oldY, oldP, snap);
+    nofoot::f109::Feed f = nofoot::f109::feed(drop, style, oldSY, oldSP, oldY, oldP, snap);
+    // F176: in the sights with the head aiming in mouse look (published by the frame thread, with the hook on) the mouse's and the stick's pitch are held: only the rate input is dropped, the
+    // yaws are untouched, the head aim's own ask (ip) is added below as always. Look to aim has dropped them already (drop), and a trip or any stop clears the flag.
+    const bool pitchHeld = hookOn && !drop && g_adsPitchHeld.load(std::memory_order_relaxed);
+    const nofoot::f176::Pitches held = nofoot::f176::apply(pitchHeld, f.mousePitch, f.stickPitch);
+    f.mousePitch = held.mouse;
+    f.stickPitch = held.stick;
     const float wantY = static_cast<float>(f.mouseYaw) + iy, wantP = static_cast<float>(f.mousePitch) + ip;
     const float wantSY = static_cast<float>(f.stickYaw), wantSP = static_cast<float>(f.stickPitch);
     bool wY = false, wP = false, wSY = false, wSP = false, refused = false;
@@ -7052,7 +7065,7 @@ void lookUpdateRun(void* act, F22UpdateFn original) noexcept {
     if (wSY && !guardedWriteFloat(stickYawAct + kLookActValueOff, oldSY)) restored = false;
     if (wSP && !guardedWriteFloat(stickPitchAct + kLookActValueOff, oldSP)) restored = false;
     if (!restored) {
-        g_adsHookOn.store(false, std::memory_order_relaxed);   // no more writes until the frame thread has stood the head aim down
+        g_adsHookOn.store(false, std::memory_order_relaxed); g_adsPitchHeld.store(false, std::memory_order_relaxed);   // no more writes until the frame thread has stood the head aim down
         g_ltaDrop.store(false, std::memory_order_relaxed);     // ... and look to aim (the frame thread trips it)
         g_adsRestoreFailed.store(true, std::memory_order_relaxed);
         g_adsRefusals.fetch_add(1, std::memory_order_relaxed);
@@ -7068,6 +7081,13 @@ void lookUpdateRun(void* act, F22UpdateFn original) noexcept {
         if (wSY || wSP) g_f109StickDropped.fetch_add(1, std::memory_order_relaxed);
         if (oldY != 0.0f && style != nofoot::f109::kSmooth && wY) g_f109MouseDropped.fetch_add(1, std::memory_order_relaxed);
         if ((oldP != 0.0f && wP) || (oldSP != 0.0f && wSP)) g_f109PitchDropped.fetch_add(1, std::memory_order_relaxed);
+    }
+    if (pitchHeld) {   // F176: the update the pitch was held in, and what was dropped of it (only a value that was written as 0 or the head aim's ask counts: a refused write ran as the game's own)
+        g_f176Calls.fetch_add(1, std::memory_order_relaxed);
+        const bool droppedMouse = wP && held.droppedMouse > 0.0, droppedStick = wSP && held.droppedStick > 0.0;
+        if (droppedMouse || droppedStick) g_f176Input.fetch_add(1, std::memory_order_relaxed);
+        if (droppedMouse) atomicAddDouble(g_f176Mouse, held.droppedMouse);
+        if (droppedStick) atomicAddDouble(g_f176Stick, held.droppedStick);
     }
     F109Pend p;
     p.valid = true;
@@ -7856,6 +7876,21 @@ void adsLineReset() noexcept {
     for (int i = 0; i < 2; ++i) g_adsSumHead[i] = g_adsSumIn[i] = g_adsSumQueued[i] = g_adsSumApplied[i] = g_adsSumUser[i] = g_adsSumCancel[i] = 0.0;
     g_adsResid.clearWindow();
 }
+// F176: an ADS press's account. Begun at each engage (from idle, or from the release), ticked once a frame while it is active, and ended with one line when the game's ADS flag falls or
+// the feature stops; the line prints without log.on_foot_detail. A press never begun (an engage that did not run here) prints nothing.
+void f176PressBegin(uint64_t now) noexcept {
+    static uint32_t presses = 0;
+    g_f176Press.begin(++presses, now, g_f176Calls.load(std::memory_order_relaxed), g_f176Input.load(std::memory_order_relaxed), g_f176Mouse.load(std::memory_order_relaxed),
+                      g_f176Stick.load(std::memory_order_relaxed));
+}
+void f176PressEnd(uint64_t now, const char* how, bool guardTripped) noexcept {
+    if (!g_f176Press.open) return;
+    char line[600];
+    nofoot::f176::formatPress(line, sizeof(line), g_f176Press, now, g_f176Calls.load(std::memory_order_relaxed), g_f176Input.load(std::memory_order_relaxed), g_f176Mouse.load(std::memory_order_relaxed),
+                              g_f176Stick.load(std::memory_order_relaxed), guardTripped, how);
+    Log::get().note("%s", line);
+    g_f176Press.open = false;
+}
 // Stops the feature at once: the seated rotation returns to zero (the yaw through the reset serial: the runtime turns its look compensation back to
 // zero, the carried yaw included), the lock goes to zero, the hook writes nothing, the queue and the in-flight account are dropped. holdOff: off until the
 // ADS flag falls (a trip, or a look value that could not be restored); the next press starts clean.
@@ -7863,7 +7898,12 @@ void adsStop(const char* why, bool holdOff) noexcept {
     const double carriedDeg = g_adsMap.yawCarried / nofoot::kAdsDeg, pitchDeg = g_adsMap.pitchSeat / nofoot::kAdsDeg;
     const double lockCm = 100.0 * std::sqrt(g_adsLock[0] * g_adsLock[0] + g_adsLock[1] * g_adsLock[1] + g_adsLock[2] * g_adsLock[2]);
     const int was = g_adsState;
-    g_adsHookOn.store(false, std::memory_order_relaxed);
+    g_adsHookOn.store(false, std::memory_order_relaxed); g_adsPitchHeld.store(false, std::memory_order_relaxed);
+    {   // F176: the press ends here, whichever way the feature stopped; a hold-off is a guard trip (or a look value that could not be restored): the pitch is the player's again
+        char how[160];
+        _snprintf_s(how, sizeof(how), _TRUNCATE, "stopped (%s)", why ? why : "?");
+        f176PressEnd(GetTickCount64(), how, holdOff);
+    }
     g_adsInYaw.store(0.0f, std::memory_order_relaxed);
     g_adsInPitch.store(0.0f, std::memory_order_relaxed);
     if (g_adsMap.yawToReset()) g_lookResetSerial.fetch_add(1, std::memory_order_relaxed);   // F25's serial: the runtime re-bases to zero
@@ -8735,7 +8775,7 @@ void adsAimTick(uint64_t now, bool session) noexcept {
             Log::get().note("native on foot ADS head aim (F62b): aiming down sights but not engaged: %s",
                             off ? off : "held off for the rest of this press (a guard trip or a look value that could not be restored); the next press re-arms");
         }
-        g_adsHookOn.store(false, std::memory_order_relaxed);
+        g_adsHookOn.store(false, std::memory_order_relaxed); g_adsPitchHeld.store(false, std::memory_order_relaxed);
         g_adsW = 0.0;
         g_adsHavePrev = false;
         return;
@@ -8757,6 +8797,7 @@ void adsAimTick(uint64_t now, bool session) noexcept {
     if (g_adsState == kAdsIdle && adsNext == kAdsActive) {
         entered = true;
         g_adsState = kAdsActive;
+        f176PressBegin(now);   // F176
         g_adsEyeOnset = AdsEyeOnset{};
         g_adsEntryValid = false;
         if (g_adsSightTripped) Log::get().note("native on foot ADS sight lock (F63): guard cleared (a new ADS engage)");
@@ -8803,6 +8844,8 @@ void adsAimTick(uint64_t now, bool session) noexcept {
     } else if (g_adsState == kAdsActive && adsNext == kAdsReleasing) {
         g_adsState = kAdsReleasing;
         g_adsRelMs = now;
+        g_adsPitchHeld.store(false, std::memory_order_relaxed);   // F176: the release is not held (the head aim's unwind rides the same hook)
+        f176PressEnd(now, "released", false);
         if (g_adsCentre.pending || g_adsMap.centre.active) {   // F69i: ADS ended before the snap was done: stop it, say so (the cone is the usual cause)
             if (nofoot::logwin::detail()) Log::get().note("native on foot ADS centre (F69i): press %u: the game's ADS flag fell %.2f s %s (the weapon's yaw offset from the body %+.1f deg at the last "
                             "measurement, the cone is %.0f deg): the snap is stopped; the release unwinds what was injected (yaw %+.2f pitch %+.2f deg carried)",
@@ -8830,6 +8873,7 @@ void adsAimTick(uint64_t now, bool session) noexcept {
     } else if (g_adsState == kAdsReleasing && adsNext == kAdsActive) {
         entered = true;
         g_adsState = kAdsActive;
+        f176PressBegin(now);   // F176: an engage from the release is a press too
         g_adsPressMs = now;
         g_adsEyeOnset = AdsEyeOnset{};
         if (!g_lta.engaged) {   // F109: inside look to aim the map runs on
@@ -8849,7 +8893,7 @@ void adsAimTick(uint64_t now, bool session) noexcept {
                             g_adsMap.pitchSeat / nofoot::kAdsDeg);
     }
     if (g_adsState == kAdsIdle && !g_lta.engaged && !g_lta.unwinding) {
-        g_adsHookOn.store(false, std::memory_order_relaxed);
+        g_adsHookOn.store(false, std::memory_order_relaxed); g_adsPitchHeld.store(false, std::memory_order_relaxed);
         g_adsW = 0.0;
         g_adsLock[0] = g_adsLock[1] = g_adsLock[2] = 0.0;
         g_adsHavePrev = false;
@@ -8887,6 +8931,11 @@ void adsAimTick(uint64_t now, bool session) noexcept {
                             "and the body stay with the press", g_adsMap.yawCarried / nofoot::kAdsDeg, g_adsMap.pitchSeat / nofoot::kAdsDeg, g_adsMap.relDur);
         }
         g_adsAimMode = ae.mode;
+    }
+    {   // F176: the mouse's and the stick's pitch are held while the head aims in the sights in mouse look: published here, once a tick, from the state this tick settled on
+        const bool held = nofoot::f176::holds(g_adsState == kAdsActive, g_adsAimMode == nofoot::f92::kAimOn, g_lta.engaged, g_lta.unwinding, true, false);
+        g_adsPitchHeld.store(held, std::memory_order_relaxed);
+        if (g_adsState == kAdsActive) g_f176Press.tick(dt, held, g_lta.engaged, g_adsAimMode == nofoot::f92::kAimOn);
     }
     // The headset (frame input version 3: the head in natural LOCAL, untouched by the seated space's turns).
     EdvrNativeNowPose np{};
@@ -9068,7 +9117,7 @@ void adsAimTick(uint64_t now, bool session) noexcept {
         g_adsInYaw.store(0.0f, std::memory_order_relaxed);
         g_adsInPitch.store(0.0f, std::memory_order_relaxed);
         g_lta.unwinding = false;
-        if (g_adsState == kAdsIdle) g_adsHookOn.store(false, std::memory_order_relaxed);
+        if (g_adsState == kAdsIdle) g_adsHookOn.store(false, std::memory_order_relaxed); g_adsPitchHeld.store(false, std::memory_order_relaxed);
         const bool clean = std::fabs(leftYaw) <= nofoot::kAdsUnwindDoneRad && std::fabs(leftPitch) <= nofoot::kAdsUnwindDoneRad;
         Log::get().note("native on foot look to aim (F109): unwound after %.2f s: yaw %.3f deg and pitch %.3f deg left; %s (%s)",
                         static_cast<double>(now - g_lta.unwindMs) / 1000.0, leftYaw / nofoot::kAdsDeg, leftPitch / nofoot::kAdsDeg,
@@ -9093,7 +9142,7 @@ void adsAimTick(uint64_t now, bool session) noexcept {
         adsPublishPitch();
         g_adsState = kAdsIdle;
         g_adsAimMode = nofoot::f92::kAimOff;
-        g_adsHookOn.store(false, std::memory_order_relaxed);
+        g_adsHookOn.store(false, std::memory_order_relaxed); g_adsPitchHeld.store(false, std::memory_order_relaxed);
         g_adsInYaw.store(0.0f, std::memory_order_relaxed);
         g_adsInPitch.store(0.0f, std::memory_order_relaxed);
         g_adsLock[0] = g_adsLock[1] = g_adsLock[2] = 0.0;
@@ -35098,7 +35147,7 @@ void nativeOnFootShutdown() {
     edvr::comfort::publish(0.0f, GetTickCount64());
     g_weaponUiSubmitGate.store(false, std::memory_order_relaxed);
     nativeFrameSetRotCalibrate(0.0f, 0.0f);   // F61: no calibration rotation past shutdown
-    g_adsHookOn.store(false, std::memory_order_relaxed);   // F62b: no more ADS head-aim input; no pitch past shutdown
+    g_adsHookOn.store(false, std::memory_order_relaxed); g_adsPitchHeld.store(false, std::memory_order_relaxed);   // F62b: no more ADS head-aim input; no pitch past shutdown
     g_adsInYaw.store(0.0f, std::memory_order_relaxed);
     g_adsInPitch.store(0.0f, std::memory_order_relaxed);
     nativeFrameSetAdsPitch(0.0f);
@@ -35129,7 +35178,7 @@ void nativeOnFootShutdown() {
     nativeOnFootHybridTick(GetTickCount64(), false, "the game is shutting down");            // F21
     nativeOnFootBodyClipTick(GetTickCount64(), false, false, "the game is shutting down");   // F19
     bodyModeShutdown();                                                                    // F20
-    g_adsHookOn.store(false, std::memory_order_relaxed);                                   // F22/F109: no more input, nothing dropped; the hooks pass through
+    g_adsHookOn.store(false, std::memory_order_relaxed); g_adsPitchHeld.store(false, std::memory_order_relaxed);                                   // F22/F109: no more input, nothing dropped; the hooks pass through
     g_ltaDrop.store(false, std::memory_order_relaxed);
     g_snapIn.store(0.0f, std::memory_order_relaxed);
     g_lookWantRead.store(false, std::memory_order_relaxed);

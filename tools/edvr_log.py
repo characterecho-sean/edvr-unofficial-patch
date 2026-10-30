@@ -14102,6 +14102,53 @@ def _hj_f175_view_roll(rows, ctx):
     return ("OK", text)
 
 
+# F176: in the sights with the head aiming (fix.native_on_foot_ads_head_aim on, look to aim off) the mouse's and the stick's pitch are held (formatPress in src/d3d11/native_on_foot_f176.h):
+# one line per ADS press when it ends, on every log (no log.on_foot_detail).
+H176_LABEL = "native on foot ADS pitch held (F176)"
+H176_RE = (r"native on foot ADS pitch held \(F176\) press (?P<press>\d+) \((?P<mode>mouse look|look to aim), head aim (?P<aim>on|off)\): lasted (?P<lasted>[\d.]+) s; the mouse's and the "
+           r"stick's pitch held for (?P<held>[\d.]+) s \((?P<ticks>\d+) ticks\) of it; the game's look updates it was held in (?P<calls>\d+), of them with a pitch to drop (?P<input>\d+); "
+           r"mouse \|pitch\| dropped (?P<mouse>[\d.]+), stick \|pitch\| dropped (?P<stick>[\d.]+) \(game input units\); guard tripped (?P<tripped>yes|no); ended (?P<ended>.+)$")
+H176_MIN_HELD_S = 0.5   # a press held this long with head aim on in mouse look must have run in the game's look update
+
+
+def _hj_f176_pitch_held(rows, ctx):
+    """F176: aiming down sights with the head aim on and look to aim off (mouse look), the mouse's and the stick's pitch are held: the head looks up and down, the mouse and the stick
+    still turn the player sideways. One line per ADS press when it ends says how long the pitch was held, the game's look updates it was held in, those with a mouse or stick pitch to
+    drop and the sums of the |pitch| dropped (game input units), and whether the guard tripped (a trip gives the pitch back for the rest of the press). The report counts the presses by
+    kind. NEVER APPLIED when the mouse look presses with the head aim on that held the pitch for 0.5 s or more show 0 look updates in every one (the hold was published and the game's
+    look update never ran with it); PARTIAL when only some of them show 0; IDLE with no such press (or no press at all, beside lines that show the pin ran). A press where it ran and the
+    mouse was still reads held with updates and 0 to drop, which is OK."""
+    sec = rows.get("sec", [])
+    if not sec:
+        if ctx.get("raise carriage (F171)", {}).get("sec") or ctx.get("view roll (F175)", {}).get("sec"):
+            return ("IDLE", "no ADS press ended in this log (the pin ran: raise carriage or view roll lines)")
+        return None
+    mouse_on = [r for r in sec if r["mode"] == "mouse look" and r["aim"] == "on" and float(r["held"]) >= H176_MIN_HELD_S]
+    others = [r for r in sec if r not in mouse_on]
+    calls = sum(int(r["calls"]) for r in mouse_on)
+    withinput = sum(int(r["input"]) for r in mouse_on)
+    mouse = sum(float(r["mouse"]) for r in mouse_on)
+    stick = sum(float(r["stick"]) for r in mouse_on)
+    held = sum(float(r["held"]) for r in mouse_on)
+    tripped = [r for r in sec if r["tripped"] == "yes"]
+    text = ("%d ADS press(es): %d in mouse look with the head aim on and the pitch held 0.5 s or more (held %.1f s in all, %d look updates, %d with a pitch to drop, mouse |pitch| dropped %.3f, "
+            "stick |pitch| dropped %.3f game input units); %d other (look to aim, the head aim off, or held under 0.5 s: %s)" % (
+                len(sec), len(mouse_on), held, calls, withinput, mouse, stick, len(others),
+                ", ".join(sorted(set("press %s %s head aim %s held %.2f s" % (r["press"], r["mode"], r["aim"], float(r["held"])) for r in others))[:3]) or "none"))
+    if tripped:
+        text += "; the guard tripped in %d press(es) (%s): the pitch came back for the rest of each" % (len(tripped), ", ".join("press " + r["press"] for r in tripped))
+    if not mouse_on:
+        return ("IDLE", text + "; no mouse look press with the head aim on held the pitch: nothing for the hold to do")
+    dead = [r for r in mouse_on if int(r["calls"]) == 0]
+    if len(dead) == len(mouse_on):
+        return ("NEVER APPLIED", text + "; every one of them shows 0 look updates: the hold was published for %.1f s and the game's look update never ran with it" % held)
+    if dead:
+        return ("PARTIAL", text + "; %d of them (%s) show 0 look updates although the hold was published" % (len(dead), ", ".join("press " + r["press"] for r in dead)))
+    if not withinput:
+        return ("OK", text + "; the mouse and the stick were still (nothing to drop) in every press: the hold ran")
+    return ("OK", text)
+
+
 # F169: the stance while the aim is pitched (formatStance in src/d3d11/native_on_foot_f169.h). The camera sinks as the aim pitches up and w_c read the sink as a crouch; the cap holds w_c
 # under the animated neck's posture weight from 20 deg of aim pitch. The dial's own note line and the swing's lines carry other labels.
 H169S_LABEL = "native on foot pitched stance (F169)"
@@ -15420,6 +15467,9 @@ HEALTH_RULES = (
     _hrule("view roll (F175)", ("F175",), (H175_LABEL,), (
         ("sec", H175_RE),
     ), _hj_f175_view_roll),
+    _hrule("ADS pitch held (F176)", ("F176",), (H176_LABEL,), (
+        ("sec", H176_RE),
+    ), _hj_f176_pitch_held),
     _hrule("pitched stance (F169)", ("F169",), (H169S_LABEL,), (
         ("sec", H169S_RE),
     ), _hj_f169_stance),
@@ -16450,6 +16500,7 @@ def self_test_health():
     f171c_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f171c.h")
     f172_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f172.h")
     f175_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f175.h")
+    f176_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f176.h")
     f138_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f138.h")
     f154_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f154.h")
     try:
@@ -16477,6 +16528,7 @@ def self_test_health():
         f171csrc = read_text(f171c_path)
         f172src = read_text(f172_path)
         f175src = read_text(f175_path)
+        f176src = read_text(f176_path)
         f138src = read_text(f138_path)
         hooks_src = read_text(os.path.join(repo_root(), "src", "d3d11", "native_on_foot_hooks.cpp"))
         f154src = read_text(f154_path)
@@ -16627,6 +16679,15 @@ def self_test_health():
             fmts[key] = health_c_format(f171csrc, needle)
         if fmts[key] is None:
             raise AssertionError("native_on_foot_f171c.h has no format holding %r: the --health rule that reads it is out of date" % needle)
+        return health_render(fmts[key], vals)
+
+    def R176(needle, *vals):
+        """F176's press line (formatPress in native_on_foot_f176.h), from its own format literal."""
+        key = "f176:" + needle
+        if key not in fmts:
+            fmts[key] = health_c_format(f176src, needle)
+        if fmts[key] is None:
+            raise AssertionError("native_on_foot_f176.h has no format holding %r: the --health rule that reads it is out of date" % needle)
         return health_render(fmts[key], vals)
 
     def R175(needle, *vals):
@@ -18288,6 +18349,36 @@ def self_test_health():
         check("F175 view roll: no line and no carriage line is not present (no verdict row)", [f90_part()], 0, [("OK", F90S)], lacks=[row("OK", V175), row("IDLE", V175), row("PARTIAL", V175), row("UNPARSED", V175)])
         check("F175 view roll: a line that drifted from its pattern is unparsed", ["native on foot view roll (F175) 1 s: something else"], 4, [("UNPARSED", V175)])
         check("F175 view roll: a line that drifted beside a good one is counted beside the verdict", [vr175(), "native on foot view roll (F175) 1 s: something else"], 0, [("OK", V175)],
+              has=["[+1 line(s) the rule's patterns do not match: "])
+
+        # ---- F176: in the sights with the head aiming, the mouse and the stick hold their pitch ----
+        H176 = "ADS pitch held (F176)"
+
+        def ph176(press=1, mode="mouse look", aim="on", lasted=2.31, held=2.25, ticks=200, calls=135, inp=40, mouse=3.2, stick=0.6, tripped="no", ended="released"):
+            """F176's line, from the DLL's own format (formatPress, native_on_foot_f176.h)."""
+            return R176("native on foot ADS pitch held (F176) press %u", press, mode, aim, lasted, held, ticks, calls, inp, mouse, stick, tripped, ended)
+
+        check("F176 pitch held: a mouse look press with the head aim on, held, updates and a pitch dropped, is OK", [ph176(), ph176(press=2)], 0, [("OK", H176)],
+              has=["2 ADS press(es): 2 in mouse look with the head aim on and the pitch held 0.5 s or more (held 4.5 s in all, 270 look updates, 80 with a pitch to drop, mouse |pitch| dropped 6.400, "
+                   "stick |pitch| dropped 1.200 game input units); 0 other"], lacks=["UNPARSED", "NEVER", "tripped"])
+        check("F176 pitch held: a press where it ran and the mouse was still is OK and says so", [ph176(inp=0, mouse=0.0, stick=0.0)], 0, [("OK", H176)],
+              has=["the mouse and the stick were still (nothing to drop) in every press: the hold ran"], lacks=["UNPARSED", "NEVER"])
+        check("F176 pitch held: held for 2.25 s with 0 look updates in every press is NEVER APPLIED (the game's look update never ran with the hold)",
+              [ph176(calls=0, inp=0, mouse=0.0, stick=0.0), ph176(press=2, calls=0, inp=0, mouse=0.0, stick=0.0)], 3, [("NEVER APPLIED", H176)],
+              has=["every one of them shows 0 look updates: the hold was published for 4.5 s and the game's look update never ran with it"], lacks=["UNPARSED"])
+        check("F176 pitch held: some of the presses with 0 look updates is PARTIAL", [ph176(), ph176(press=2, calls=0, inp=0, mouse=0.0, stick=0.0)], 0, [("PARTIAL", H176)],
+              has=["1 of them (press 2) show 0 look updates although the hold was published"], lacks=["UNPARSED"])
+        check("F176 pitch held: the head aim off, look to aim and a short press are other presses; with none of the first kind it is idle",
+              [ph176(aim="off", held=0.0, ticks=0, calls=0, inp=0, mouse=0.0, stick=0.0), ph176(press=2, mode="look to aim", held=0.0, ticks=0, calls=0, inp=0, mouse=0.0, stick=0.0), ph176(press=3, held=0.3, ticks=27)], 0,
+              [("IDLE", H176)], has=["3 ADS press(es): 0 in mouse look with the head aim on", "no mouse look press with the head aim on held the pitch: nothing for the hold to do"], lacks=["UNPARSED", "NEVER"])
+        check("F176 pitch held: a guard trip is named, the press ended stopped, and a tripped press with calls is still OK",
+              [ph176(), ph176(press=2, held=1.1, ticks=99, calls=60, inp=20, mouse=1.0, stick=0.0, tripped="yes", ended="stopped (the guard tripped)")], 0, [("OK", H176)],
+              has=["the guard tripped in 1 press(es) (press 2): the pitch came back for the rest of each"], lacks=["UNPARSED", "NEVER"])
+        check("F176 pitch held: the pin ran (raise carriage lines) and no press ended is idle", [car171(LEVEL171)], 0, [("IDLE", H176)], has=["no ADS press ended in this log"], lacks=["UNPARSED"])
+        check("F176 pitch held: no line and no sign the pin ran is not present (no verdict row)", [f90_part()], 0, [("OK", F90S)],
+              lacks=[row("OK", H176), row("IDLE", H176), row("PARTIAL", H176), row("UNPARSED", H176), row("NEVER APPLIED", H176)])
+        check("F176 pitch held: a line that drifted from its pattern is unparsed", ["native on foot ADS pitch held (F176) press 1: something else"], 4, [("UNPARSED", H176)])
+        check("F176 pitch held: a drifted line beside a good one is counted beside the verdict", [ph176(), "native on foot ADS pitch held (F176) press 2: something else"], 0, [("OK", H176)],
               has=["[+1 line(s) the rule's patterns do not match: "])
 
         # ---- F169: the stance while the aim is pitched ----
