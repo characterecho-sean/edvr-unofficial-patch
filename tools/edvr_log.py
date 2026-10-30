@@ -14618,6 +14618,118 @@ def _hj_f97a_body(rows, ctx):
     return ("OK", text)
 
 
+# The F97a line (f125PinPrint in native_on_foot.cpp). F179a: the stance is one of the four at the hip or the same four "in the sights" (the detach weight from 0.05); a bin in the sights ends with
+# the standing share's mean and the standing raise asked (F178's weight: (1 - the crouched weight) x the detach weight).
+H97_RE = (r"native on foot armed body \(F97a\) (?P<wl>\d+) s: item (?P<item>\S+); (?P<stance>(?:standing|crouched|moving crouched|moving)(?: in the sights)?) (?P<n>\d+) calls: weapon weight "
+          r"(?P<w>[\d.]+); the neck raised (?P<raise>%s) cm \(min %s max %s; asked (?P<asked>%s); capped by the legs (?P<capped>\d+)\), written (?P<neckw>[\d.]+) m "
+          r"against animated (?P<necka>[\d.]+) m; the eye as drawn over the clavicle line (?P<clav>%s) cm \(min (?P<clavmin>%s)\), ahead of the chest (?P<chest>%s) cm "
+          r"\(min (?P<chestmin>%s)\), INSIDE (?P<inside>\d+) of (?P<clr>\d+); legs hip to foot over the leg: animated (?P<la>[\d.]+), written (?P<lw>[\d.]+) "
+          r"\(min (?P<lmin>[\d.]+)\), feet lifted (?P<lifted>\d+)"
+          r"(?:; the standing share \(F179a\) mean (?P<ss>[\d.]+), its raise asked (?P<sr>%s) cm)?" % ((_HN,) * 9))
+
+
+def _hj_f179a_height(rows, ctx):
+    """F179a: the body stays up in standing ADS. The flight edvr_gfx_20261030_095038 (the plasma shotgun, standing in the sights, F178's dials at 0): the neck was written 1.290 m = the animated
+    neck (F97a's raise was released with the ADS detach), the eye +32.6 cm over the clavicle line, the legs hip to foot over the leg 0.895: the game's ADS hunch. With the standing share
+    ((1 - F163's crouched weight) x the detach weight) the neck target keeps the raise of the hip's rule (the neck at the eye as drawn less the eye height key, vertical, a raise only), capped
+    by the legs' room as F97a caps it. Reads the F97a line's 'standing in the sights' bins (armed, weight 1): OK when standing ADS frames have a raise written; NEVER APPLIED when 30 or more
+    of them with room left in the legs (written under 0.97) have none (under 0.5 cm); IDLE under 30 frames. The hip's and the crouched bins are the F97a rule's. No such bin, no verdict."""
+    sec = [r for r in rows.get("sec", []) if r["stance"] == "standing in the sights"]
+    if not sec:
+        return None
+    parts, never, total = [], [], 0
+    items = collections.OrderedDict()
+    for r in sec:
+        items.setdefault(r["item"], []).append(r)
+    for item, rs in items.items():
+        n = sum(int(r["n"]) for r in rs)
+        if not n:
+            continue
+        total += n
+        mean = lambda k, rr=rs, nn=n: sum(int(r["n"]) * float(r[k]) for r in rr) / nn
+        raise_, asked, lw, la = mean("raise"), mean("asked"), mean("lw"), mean("la")
+        ss = mean("ss") if all(r.get("ss") is not None for r in rs) else None
+        sr = mean("sr") if all(r.get("sr") is not None for r in rs) else None
+        cap = sum(int(r["capped"]) for r in rs)
+        parts.append("%s standing in the sights %d s, %d calls: standing share %s, raise written %+.1f cm (asked %+.1f%s, capped by the legs %d), neck written %.3f m against animated %.3f, "
+                     "legs %.3f -> %.3f, the eye over the clavicles %+.1f cm" % (
+                         item, _hsecs(rs), n, ("%.2f" % ss) if ss is not None else "not said", raise_, asked, (", standing raise %+.1f" % sr) if sr is not None else "", cap,
+                         mean("neckw"), mean("necka"), la, lw, mean("clav")))
+        armed = [r for r in rs if float(r["w"]) >= 0.99 and item != "mixed"]
+        an = sum(int(r["n"]) for r in armed)
+        if an >= 30:
+            ar = sum(int(r["n"]) * float(r["raise"]) for r in armed) / an
+            al = sum(int(r["n"]) * float(r["lw"]) for r in armed) / an
+            if ar < 0.5 and al < 0.97:
+                never.append("%d armed standing ADS calls with %s wrote no raise (%+.1f cm) with room left in the legs (written %.3f, under 0.97)" % (an, item, ar, al))
+    if not parts:
+        return None
+    text = "; ".join(parts)
+    if never:
+        return ("NEVER APPLIED", text + "; " + "; ".join(never))
+    if total < 30:
+        return ("IDLE", text + "; under 30 standing ADS calls: little to judge")
+    return ("OK", text)
+
+
+# F179b: the neck guard (formatContext in src/d3d11/native_on_foot_f179.h), one line per context that had frames the guard ran in.
+H179B_LABEL = "native on foot neck guard (F179b)"
+H179B_RE = (r"native on foot neck guard \(F179b\) (?P<wl>\d+) s: item (?P<item>\S+); (?P<ctx>hip unarmed|hip armed|ADS standing|ADS crouched) (?P<frames>\d+) frames: pushed (?P<pushed>\d+), "
+            r"the push mean (?P<pm>[\d.]+) cm \(largest (?P<px>[\d.]+)\); off the post-reach dial add (?P<on>\d+) frames, mean (?P<om>[\d.]+) cm \(largest (?P<ox>[\d.]+)\); "
+            r"the eye ahead of the chest before the guard \(as the pose and dials would put it\) min (?P<bmin>%s) mean (?P<bmean>%s) cm, after it as measured \((?P<an>\d+) frames\) "
+            r"min (?P<amin>%s) mean (?P<amean>%s), predicted after mean (?P<pred>%s), under 9 cm (?P<u9>\d+)" % ((_HN,) * 5))
+H179B_CTXS = ("hip unarmed", "hip armed", "ADS standing", "ADS crouched")
+
+
+def _hj_f179b_guard(rows, ctx):
+    """F179b: the neck guard. Whenever the full third-person body is drawn on foot the eye as drawn is kept at least 10 cm ahead of the chest (F97a's measure: the eye as drawn less the chest
+    joint 24 along the eye's horizontal heading): a deficit predicted from the body's move is taken off the neck target before the reach rule, off F169's and F178's post-reach forward add
+    next, and off the move last. The flight edvr_gfx_20261030_095038 put the eye 6.6 cm ahead of the chest (min 5.5) with F178's dials +14.5 forward, +24.5 left, and looking down showed the
+    open neck. Per context (hip unarmed, hip armed, ADS standing, ADS crouched): the frames, those pushed and the push (mean over the pushed, largest), what came off the post-reach add, the
+    eye ahead of the chest before the guard (predicted without it) and after it as measured. A push is fine. PARTIAL when the measured figure after the guard reads under 9 cm in more than
+    1% of the frames it was measured on (the guard did not hold); IDLE under 30 frames. No line, no verdict."""
+    sec = rows.get("sec", [])
+    if not sec:
+        return None
+    by = collections.OrderedDict()
+    for r in sec:
+        by.setdefault(r["ctx"], []).append(r)
+    parts, notes, total, an_all, u9_all, bad = [], [], 0, 0, 0, []
+    for name in H179B_CTXS:
+        rs = by.get(name)
+        if not rs:
+            continue
+        g = lambda k, rr=rs: sum(int(r[k]) for r in rr)
+        frames, pushed, an, u9 = g("frames"), g("pushed"), g("an"), g("u9")
+        total += frames
+        an_all += an
+        u9_all += u9
+        pm = sum(int(r["pushed"]) * float(r["pm"]) for r in rs) / pushed if pushed else 0.0
+        px = max(float(r["px"]) for r in rs)
+        on = g("on")
+        om = sum(int(r["on"]) * float(r["om"]) for r in rs) / on if on else 0.0
+        bmean = sum(int(r["frames"]) * float(r["bmean"]) for r in rs) / frames if frames else 0.0
+        bmin = min(float(r["bmin"]) for r in rs)
+        amean = sum(int(r["an"]) * float(r["amean"]) for r in rs) / an if an else 0.0
+        amin = min((float(r["amin"]) for r in rs if int(r["an"])), default=0.0)
+        parts.append("%s %d s: %d frames, pushed %d (%.0f%%; mean %.1f cm, largest %.1f), %d frames with %.1f cm off the post-reach add; the eye ahead of the chest before the guard min %+.1f mean %+.1f "
+                     "cm, after as measured (%d frames) min %+.1f mean %+.1f, under 9 cm in %d" % (name, _hsecs(rs), frames, pushed, 100.0 * pushed / frames if frames else 0.0, pm, px, on, om,
+                                                                                                         bmin, bmean, an, amin, amean, u9))
+        if an and u9 > 0.01 * an:
+            bad.append("%s %d of %d" % (name, u9, an))
+        if name == "hip unarmed" and frames and pushed > 0.03 * frames:
+            notes.append("the guard pushed in %d%% of the unarmed hip frames (unarmed has not shown the problem before)" % round(100.0 * pushed / frames))
+    if not parts:
+        return None
+    text = "; ".join(parts)
+    if bad:
+        return ("PARTIAL", text + "; the eye was measured under 9 cm ahead of the chest after the guard in more than 1%% of the frames (the guard did not hold): %s" % ", ".join(bad) +
+                ("; " + "; ".join(notes) if notes else ""))
+    if total < 30:
+        return ("IDLE", text + "; under 30 frames: little to judge")
+    return ("OK", text + ("; " + "; ".join(notes) if notes else ""))
+
+
 def _hj_f95c_head_shadow(rows, ctx):
     """F95c: the head kept in the shadows. Per second: the local avatar's visibility calls, how many ran the head as shadow-only, the (head instance, view) pairs
     after the call in the shadow views and in the main or other views, and the fade hook's keeps against its zeroes. A head hide that only zeroed, a swap the fade
@@ -16191,12 +16303,14 @@ HEALTH_RULES = (
                     r"HUD moving \[(?P<hm>[\d.,]*)\]; settled (?P<settled_s>\d+) of (?P<ws>\d+) s$"),
     ), _hj_f95a_motion),
     _hrule("armed body (F97a)", ("F97a",), ("native on foot armed body (F97a)",), (
-        ("sec", r"native on foot armed body \(F97a\) (?P<wl>\d+) s: item (?P<item>\S+); (?P<stance>standing|crouched|moving crouched|moving) (?P<n>\d+) calls: weapon weight "
-                r"(?P<w>[\d.]+); the neck raised (?P<raise>%s) cm \(min %s max %s; asked (?P<asked>%s); capped by the legs (?P<capped>\d+)\), written (?P<neckw>[\d.]+) m "
-                r"against animated (?P<necka>[\d.]+) m; the eye as drawn over the clavicle line (?P<clav>%s) cm \(min (?P<clavmin>%s)\), ahead of the chest (?P<chest>%s) cm "
-                r"\(min (?P<chestmin>%s)\), INSIDE (?P<inside>\d+) of (?P<clr>\d+); legs hip to foot over the leg: animated (?P<la>[\d.]+), written (?P<lw>[\d.]+) "
-                r"\(min (?P<lmin>[\d.]+)\), feet lifted (?P<lifted>\d+)" % ((_HN,) * 8)),
+        ("sec", H97_RE),
     ), _hj_f97a_body),
+    _hrule("standing ADS height (F179a)", ("F97a",), ("native on foot armed body (F97a)",), (
+        ("sec", H97_RE),
+    ), _hj_f179a_height),
+    _hrule("neck guard (F179b)", ("F179b",), (H179B_LABEL,), (
+        ("sec", H179B_RE),
+    ), _hj_f179b_guard),
     _hrule("left elbow (F98a)", ("F98a", "F159"), ("native on foot left elbow (F98a)", "native on foot left elbow pole (F159)", "native on foot left elbow seed (F159)"), (
         ("sec", r"native on foot left elbow \(F98a\) (?P<wl>\d+) s: item (?P<item>\S+); (?P<n>\d+) solves: the game's aim pitch (?P<aim>%s) deg \(min %s max %s\); the chest's lean as "
                 r"written (?P<lean>%s) deg \(animated (?P<leanAnim>%s)\); F82's torso yaw (?P<yaw>%s) deg \(largest [\d.]+\); the elbow's swivel from the stance's plane "
@@ -17341,6 +17455,7 @@ def self_test_health():
     f171_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f171.h")
     f171c_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f171c.h")
     f178_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f178.h")
+    f179_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f179.h")
     f172_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f172.h")
     f175_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f175.h")
     f176_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f176.h")
@@ -17376,6 +17491,7 @@ def self_test_health():
         f171src = read_text(f171_path)
         f171csrc = read_text(f171c_path)
         f178src = read_text(f178_path)
+        f179src = read_text(f179_path)
         f172src = read_text(f172_path)
         f175src = read_text(f175_path)
         f176src = read_text(f176_path)
@@ -17535,6 +17651,15 @@ def self_test_health():
             fmts[key] = health_c_format(f178src, needle) or health_c_format(source, needle)
         if fmts[key] is None:
             raise AssertionError("native_on_foot_f178.h and native_on_foot.cpp have no format holding %r: the --health rule that reads it is out of date" % needle)
+        return health_render(fmts[key], vals)
+
+    def R179(needle, *vals):
+        """F179b's neck guard line (formatContext in native_on_foot_f179.h), from its own format literal."""
+        key = "f179:" + needle
+        if key not in fmts:
+            fmts[key] = health_c_format(f179src, needle)
+        if fmts[key] is None:
+            raise AssertionError("native_on_foot_f179.h has no format holding %r: the --health rule that reads it is out of date" % needle)
         return health_render(fmts[key], vals)
 
     def R171c(needle, *vals):
@@ -18743,9 +18868,11 @@ def self_test_health():
         RIFLE97 = "$wpn_m_assaultrifle_laser_fauto_name;"
 
         def body97(item=RIFLE97, stance="standing", w=1.0, raise_=8.2, asked=8.4, capped=0, clav=18.2, clavmin=15.0, chest=28.0, chestmin=20.0, inside=0, clr=90,
-                   la=0.894, lw=0.985, lifted=0, wl=1):
+                   la=0.894, lw=0.985, lifted=0, wl=1, ss=None, sr=0.0):
+            """F97a's window line, from the DLL's own format; a bin in the sights (F179a) ends with the standing share's mean ss and the standing raise asked sr (cm)."""
+            tail = "" if ss is None else "; the standing share (F179a) mean %.2f, its raise asked %+.1f cm" % (ss, sr)
             return R("native on foot armed body (F97a) %u s: item %s", wl, item, stance, 90, w, raise_, raise_ - 1.0, raise_ + 1.0, asked, capped, 1.300 + raise_ / 100.0, 1.300,
-                     clav, clavmin, chest, chestmin, inside, clr, la, lw, lw - 0.01, lifted)
+                     clav, clavmin, chest, chestmin, inside, clr, la, lw, lw - 0.01, lifted, tail)
 
         check("F97a body: the rifle raised upright, the eye clear", [body97()] * 2 + [body97(stance="crouched", raise_=-6.8, asked=-6.8, clav=14.0, clavmin=12.0)] * 2, 0,
               [("OK", F97)], has=[RIFLE97 + " standing 2 s: weight 1.00, neck raised +8.2 cm (asked +8.4, capped 0)", RIFLE97 + " crouched 2 s"], lacks=["UNPARSED"])
@@ -18755,6 +18882,56 @@ def self_test_health():
               has=["the raise was asked and never written with " + RIFLE97 + " standing"])
         check("F97a body: a foot lifted", [body97(lifted=3)] * 2, 0, [("PARTIAL", F97)], has=["feet lifted (" + RIFLE97 + " standing 6)"])
         check("F97a body: fists only", [body97("$humanoid_fists_name;", w=0.0, raise_=0.0, asked=0.0, clav=10.0)] * 2, 0, [("IDLE", F97)], has=["no armed second"])
+        # F179a: the bins in the sights. A raise held in the sights is not a fault of the F97a rule; the standing ADS height rule judges it.
+        F179A = "standing ADS height (F179a)"
+        check("F97a body: a standing bin in the sights holding a raise is OK for the F97a rule, with the hip's bin beside it",
+              [body97(), body97(stance="standing in the sights", raise_=9.0, asked=9.0, clav=23.0, clavmin=21.0, la=0.895, lw=0.985, ss=1.0, sr=9.0)] * 2, 0, [("OK", F97), ("OK", F179A)],
+              has=[RIFLE97 + " standing in the sights 2 s: weight 1.00, neck raised +9.0 cm (asked +9.0, capped 0)", RIFLE97 + " standing 2 s"], lacks=["UNPARSED", "PARTIAL"])
+        check("F179a height: standing ADS calls with a raise written are OK, and the figures are said",
+              [body97(stance="standing in the sights", raise_=9.0, asked=9.0, clav=23.0, clavmin=21.0, la=0.895, lw=0.985, ss=1.0, sr=15.5, capped=0, wl=10)] * 2, 0, [("OK", F179A)],
+              has=[RIFLE97 + " standing in the sights 20 s, 180 calls: standing share 1.00, raise written +9.0 cm (asked +9.0, standing raise +15.5, capped by the legs 0), neck written 1.390 m against animated 1.300",
+                   "legs 0.895 -> 0.985, the eye over the clavicles +23.0 cm"], lacks=["UNPARSED", "NEVER"])
+        check("F179a height: 90 standing ADS calls with room left in the legs and no raise written is the release it replaces",
+              [body97(stance="standing in the sights", raise_=0.0, asked=0.0, clav=32.6, clavmin=32.4, la=0.895, lw=0.895, ss=1.0, sr=15.5)], 3, [("NEVER APPLIED", F179A)],
+              has=["90 armed standing ADS calls with " + RIFLE97 + " wrote no raise (+0.0 cm) with room left in the legs (written 0.895, under 0.97)"], lacks=["UNPARSED"])
+        check("F179a height: no raise with the legs already straight (nothing to give) is OK",
+              [body97(stance="standing in the sights", raise_=0.0, asked=0.0, la=0.99, lw=0.99, ss=1.0, sr=0.0)], 0, [("OK", F179A)], lacks=["UNPARSED", "NEVER"])
+        check("F179a height: under 30 standing ADS calls is too few to judge",
+              [body97(stance="standing in the sights", raise_=0.0, asked=0.0, la=0.895, lw=0.895, ss=1.0, sr=15.5).replace("standing in the sights 90 calls", "standing in the sights 20 calls")], 0, [("IDLE", F179A)],
+              has=["under 30 standing ADS calls: little to judge"], lacks=["UNPARSED", "NEVER"])
+        check("F179a height: the crouched bin in the sights is the F97a rule's, not this one's (no verdict row from it)",
+              [body97(stance="crouched in the sights", raise_=-6.0, asked=-6.0, clav=20.0, clavmin=18.0, ss=0.0, sr=0.0)], 0, [("OK", F97)], lacks=["UNPARSED", row("OK", F179A), row("NEVER APPLIED", F179A)])
+        check("F179a height: a log from before it (no bin in the sights) has no verdict row", [body97()], 0, [("OK", F97)],
+              lacks=[row("OK", F179A), row("IDLE", F179A), row("PARTIAL", F179A), row("NEVER APPLIED", F179A), row("UNPARSED", F179A)])
+        check("F179a height: a line that drifted from its pattern is unparsed by both rules", ["native on foot armed body (F97a) 1 s: something else"], 4, [("UNPARSED", F97), ("UNPARSED", F179A)])
+
+        # ---- F179b: the neck guard ----
+        F179B = "neck guard (F179b)"
+
+        def guard179(item=RIFLE97, wl=10, ctx="ADS standing", frames=800, pushed=120, pm=3.0, px=6.5, on=40, om=2.0, ox=4.0, bmin=4.0, bmean=14.0, an=800, amin=10.4, amean=18.0, pred=18.5, u9=0):
+            """F179b's line for one context, from the DLL's own format (formatContext, native_on_foot_f179.h); the push, the part off the post-reach add and the eye ahead of the chest in cm."""
+            return R179("native on foot neck guard (F179b) %u s: item %s", wl, item, ctx, frames, pushed, pm, px, on, om, ox, bmin, bmean, an, amin, amean, pred, 9.0, u9)
+
+        check("F179b guard: pushes that held the eye 10 cm ahead of the chest are OK, with the contexts named",
+              [guard179(), guard179(ctx="hip armed", frames=600, pushed=0, pm=0.0, px=0.0, on=0, om=0.0, ox=0.0, bmin=30.0, bmean=34.0, amin=29.0, amean=33.0, pred=33.0, an=600)], 0, [("OK", F179B)],
+              has=["ADS standing 10 s: 800 frames, pushed 120 (15%; mean 3.0 cm, largest 6.5), 40 frames with 2.0 cm off the post-reach add; the eye ahead of the chest before the guard "
+                   "min +4.0 mean +14.0 cm, after as measured (800 frames) min +10.4 mean +18.0, under 9 cm in 0", "hip armed 10 s: 600 frames, pushed 0 (0%; mean 0.0 cm, largest 0.0)"],
+              lacks=["UNPARSED", "did not hold"])
+        check("F179b guard: a window with no push still says the guard ran", [guard179(pushed=0, pm=0.0, px=0.0, on=0, om=0.0, ox=0.0, bmin=30.0, bmean=33.0, amin=29.0, amean=33.0, pred=33.0)], 0,
+              [("OK", F179B)], has=["pushed 0 (0%; mean 0.0 cm, largest 0.0)"], lacks=["UNPARSED"])
+        check("F179b guard: the measured figure under 9 cm in more than 1% of the frames is a guard that did not hold",
+              [guard179(amin=5.5, amean=11.0, u9=40)], 0, [("PARTIAL", F179B)], has=["(the guard did not hold): ADS standing 40 of 800"], lacks=["UNPARSED"])
+        check("F179b guard: under 9 cm in 1% of the frames or fewer is held", [guard179(amin=8.0, u9=8)], 0, [("OK", F179B)], lacks=["UNPARSED", "did not hold"])
+        check("F179b guard: under 30 frames is too few to judge", [guard179(frames=20, pushed=2, an=20, u9=0)], 0, [("IDLE", F179B)], has=["under 30 frames: little to judge"], lacks=["UNPARSED"])
+        check("F179b guard: unarmed pushes in more than 3% of the hip frames are named",
+              [guard179(ctx="hip unarmed", frames=500, pushed=40, pm=2.0, px=3.0, on=0, om=0.0, ox=0.0, bmin=8.0, bmean=20.0, amin=10.2, amean=21.0, pred=21.0, an=500)], 0, [("OK", F179B)],
+              has=["the guard pushed in 8% of the unarmed hip frames (unarmed has not shown the problem before)"], lacks=["UNPARSED"])
+        check("F179b guard: two windows add up, the push weighted by the pushed frames, the figures by their frames",
+              [guard179(frames=100, pushed=10, pm=2.0, px=3.0, an=100), guard179(frames=300, pushed=30, pm=4.0, px=9.0, an=300)], 0, [("OK", F179B)],
+              has=["20 s: 400 frames, pushed 40 (10%; mean 3.5 cm, largest 9.0)"], lacks=["UNPARSED"])
+        check("F179b guard: a line that drifted from its pattern is unparsed", ["native on foot neck guard (F179b) 10 s: something else"], 4, [("UNPARSED", F179B)])
+        check("F179b guard: a line that drifted beside a good one is counted beside the verdict", [guard179(), "native on foot neck guard (F179b) 10 s: something else"], 0, [("OK", F179B)],
+              has=["[+1 line(s) the rule's patterns do not match: "])
 
         # ---- left elbow (F98a): the left arm with a weapon drawn ----
         F98 = "left elbow (F98a)"

@@ -64,6 +64,7 @@
 #include "f169_checks.h"    // F169: the stance while the aim is pitched (w_c capped under the animated neck's posture weight, the replays, the window and its line); the pistol sprint's arm swing (TEMPORARY): the plan, the ring, the stride's period, the delay, the measure and the line
 #include "f170_checks.h"    // F170: the crouched ADS torso squared to the aim (TEMPORARY): the dial, the share, the turn on the real square-up and reach functions (29 deg to 0 at 1, 14.5 at 0.5), the hold not taking it off, the line
 #include "f171_checks.h"    // F171: the crouched ADS body moved to the left of the aim line (TEMPORARY): the dial, the left axis and its sign against the eye's right, the move through the real reach rule, the counters and the line; the raise's carriage (slopes, pairs, window, line); F170's line reaching the log (logpin::elbow's merges against F98Left)
+#include "f179_checks.h"    // F179: the body stays up in standing ADS (the standing raise: the eye less the key, capped by the legs' room, crouched/hip/unarmed unchanged) and the neck guard (the eye kept 10 cm ahead of the chest: the deficit, the axis, the order target / post-reach add / move, the last word over random scenes, the filtered error, the contexts, the line), the F97a bins in the sights, the source sites
 #include "f178_checks.h"    // F178: the standing ADS body dials (TEMPORARY), the crouched ones mirrored: the weights (standing whole at crouched weight 0, crouched pair and standing pair adding up at every crouch), the clamps, the axes, the crouched pair untouched, the real reach rule, the counters and the line, the source sites
 #include "f177_checks.h"    // F177: the aiming choice at start: the page's words and their fit, what each choice writes, the trigger over every input, the log's lines, the source pins and the key's declaration
 #include "f176_checks.h"    // F176: in the sights with the head aiming, the mouse and the stick hold their pitch: the decision, the values a look update runs with, the press's account and line, the source pins
@@ -7663,6 +7664,10 @@ int wmain(int argc, wchar_t** argv) {
     // none crouched, half at half a crouch, the two pairs adding up to the dial at every crouch), the clamps, the vectors bit for bit the crouched ones' at the crouched weight 1, the axes at every yaw, the
     // crouched pair untouched, the real reach rule on the mirrored move, the counters and the line within the log's limit, and the source sites.
     f178test::run178(check);
+    // F179: the standing raise (the eye as drawn less the eye height key over the animated neck, by the standing share; the legs' room caps it; crouched, at the hip and unarmed the earlier target bit for
+    // bit) and the neck guard (a chest 6 cm behind the eye pushes 4 cm along the heading at every yaw; the target first, the post-reach add next, the move last; over 4000 scenes the eye ends 10 cm ahead;
+    // the prediction error filtered), the contexts, the line within the log's limit, the F97a line's bins in the sights, and the source sites.
+    f179test::run179(check);
     // F110: the ADS sight lock's model right eye from the left-eye job camera and from a solved left eye, the fallback, the IPD's sign.
     f110test::run110(check);
     // F111: the panel pointer instrument names the stage that turns a move the other way (K1 to K5, one at a time), the camera getters' decoding.

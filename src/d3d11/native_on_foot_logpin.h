@@ -69,6 +69,8 @@ template<class T> inline void body(T& d, const T& s) noexcept {
     d.neckAnimSum += s.neckAnimSum;
     d.clavSum += s.clavSum;
     d.chestSum += s.chestSum;
+    d.ssSum += s.ssSum;   // F179a: the standing share's sum and the standing raise asked (cm)
+    d.srSum += s.srSum;
     d.raiseMin = std::min(d.raiseMin, s.raiseMin);
     d.legMin = std::min(d.legMin, s.legMin);
     d.clavMin = std::min(d.clavMin, s.clavMin);
@@ -106,6 +108,7 @@ template<class T> inline void pin(T& d, const T& s) noexcept {
         d.f98Have[i] = s.f98Have[i]; d.f98Neck[i] = s.f98Neck[i];
     }
     for (uint32_t i = 0; i < sizeof(d.f97) / sizeof(d.f97[0]); ++i) body(d.f97[i], s.f97[i]);
+    d.f179.merge(s.f179);   // F179b: the neck guard's counters per context
 }
 template<class T> inline void elbow(T& d, const T& s) noexcept {
     d.n += s.n;
