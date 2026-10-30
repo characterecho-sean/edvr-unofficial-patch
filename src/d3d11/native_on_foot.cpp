@@ -9117,7 +9117,7 @@ void adsAimTick(uint64_t now, bool session) noexcept {
         g_adsInYaw.store(0.0f, std::memory_order_relaxed);
         g_adsInPitch.store(0.0f, std::memory_order_relaxed);
         g_lta.unwinding = false;
-        if (g_adsState == kAdsIdle) g_adsHookOn.store(false, std::memory_order_relaxed); g_adsPitchHeld.store(false, std::memory_order_relaxed);
+        if (g_adsState == kAdsIdle) { g_adsHookOn.store(false, std::memory_order_relaxed); g_adsPitchHeld.store(false, std::memory_order_relaxed); }
         const bool clean = std::fabs(leftYaw) <= nofoot::kAdsUnwindDoneRad && std::fabs(leftPitch) <= nofoot::kAdsUnwindDoneRad;
         Log::get().note("native on foot look to aim (F109): unwound after %.2f s: yaw %.3f deg and pitch %.3f deg left; %s (%s)",
                         static_cast<double>(now - g_lta.unwindMs) / 1000.0, leftYaw / nofoot::kAdsDeg, leftPitch / nofoot::kAdsDeg,
