@@ -82,6 +82,8 @@
 #include "native_on_foot_f170.h"   // F170 (TEMPORARY): the crouched ADS torso squared to the aim, its dial and the figures that judge it (pure parts)
 #include "native_on_foot_f171.h"   // F171 (TEMPORARY): the crouched ADS body moved to the left of the aim line, its dial and the figures that judge it (pure parts)
 #include "native_on_foot_f171c.h"  // F171: the raise's carriage, measured: slopes of the camera's, G's and the drawn eye's changes against the carried raise's (pure parts)
+#include "native_on_foot_f176.h"   // F176: in the sights with the head aiming, the mouse and the stick hold their pitch (pure parts)
+#include "native_on_foot_f175.h"   // F175 (measure only): the view's roll and pitch against the headset's, by look mode and item (pure parts)
 #include "native_on_foot_f172.h"   // F172: the neck raise published pre-turned by the mouse-look aim pitch, so the game's turn lands it straight up (pure parts)
 #include "scope_zoom_s0.h"   // S0: the scope zoom instrument, measure only (pure parts)
 #include "scope_zoom_s1.h"   // S1/A1: the scope lens's table, gate, ease and lines (pure parts)
@@ -301,6 +303,12 @@ std::atomic<float> g_f140TrimCm[4]{};   // static storage: zero
 double g_f140TrimLast[4] = {};   // forward, left, up, toward eye: the values last logged (frame thread)
 std::atomic<int> g_adsYawSign{1}, g_adsPitchSign{1};          // the sign keys (TEMPORARY): 1, -1 or 0 (that axis off)
 std::atomic<bool> g_adsHookOn{false};                         // the update hook takes the F62b path (the frame thread: engaged or releasing)
+// F176: the mouse's and the stick's pitch are held while the head aims in the sights in mouse look (nofoot::f176::holds; the frame thread publishes it once a tick and clears it wherever it
+// clears g_adsHookOn; the look update reads it with the hook flag). The counters are the game thread's: the look updates it held in, those with a pitch to drop, the |pitch| dropped.
+std::atomic<bool> g_adsPitchHeld{false};
+std::atomic<uint32_t> g_f176Calls{0}, g_f176Input{0};
+std::atomic<double> g_f176Mouse{0.0}, g_f176Stick{0.0};
+nofoot::f176::Press g_f176Press;   // the ADS press's account (the frame thread)
 std::atomic<float> g_adsInYaw{0.0f}, g_adsInPitch{0.0f};      // the input queued for the next look update; the update hook takes it whole
 std::atomic<double> g_adsAppYaw{0.0}, g_adsAppPitch{0.0};     // the game's deltas from our input, cumulative (radians, the game's sign)
 std::atomic<double> g_adsUserYaw{0.0}, g_adsUserPitch{0.0};   // ...and the player's own share of the same calls
@@ -7116,7 +7124,13 @@ void lookUpdateRun(void* act, F22UpdateFn original) noexcept {
     const float iy = hookOn ? g_adsInYaw.exchange(0.0f, std::memory_order_relaxed) : 0.0f;
     const float ip = hookOn ? g_adsInPitch.exchange(0.0f, std::memory_order_relaxed) : 0.0f;
     const float snap = drop ? g_snapIn.exchange(0.0f, std::memory_order_relaxed) : 0.0f;
-    const nofoot::f109::Feed f = nofoot::f109::feed(drop, style, oldSY, oldSP, oldY, oldP, snap);
+    nofoot::f109::Feed f = nofoot::f109::feed(drop, style, oldSY, oldSP, oldY, oldP, snap);
+    // F176: in the sights with the head aiming in mouse look (published by the frame thread, with the hook on) the mouse's and the stick's pitch are held: only the rate input is dropped, the
+    // yaws are untouched, the head aim's own ask (ip) is added below as always. Look to aim has dropped them already (drop), and a trip or any stop clears the flag.
+    const bool pitchHeld = hookOn && !drop && g_adsPitchHeld.load(std::memory_order_relaxed);
+    const nofoot::f176::Pitches held = nofoot::f176::apply(pitchHeld, f.mousePitch, f.stickPitch);
+    f.mousePitch = held.mouse;
+    f.stickPitch = held.stick;
     const float wantY = static_cast<float>(f.mouseYaw) + iy, wantP = static_cast<float>(f.mousePitch) + ip;
     const float wantSY = static_cast<float>(f.stickYaw), wantSP = static_cast<float>(f.stickPitch);
     bool wY = false, wP = false, wSY = false, wSP = false, refused = false;
@@ -7131,7 +7145,7 @@ void lookUpdateRun(void* act, F22UpdateFn original) noexcept {
     if (wSY && !guardedWriteFloat(stickYawAct + kLookActValueOff, oldSY)) restored = false;
     if (wSP && !guardedWriteFloat(stickPitchAct + kLookActValueOff, oldSP)) restored = false;
     if (!restored) {
-        g_adsHookOn.store(false, std::memory_order_relaxed);   // no more writes until the frame thread has stood the head aim down
+        g_adsHookOn.store(false, std::memory_order_relaxed); g_adsPitchHeld.store(false, std::memory_order_relaxed);   // no more writes until the frame thread has stood the head aim down
         g_ltaDrop.store(false, std::memory_order_relaxed);     // ... and look to aim (the frame thread trips it)
         g_adsRestoreFailed.store(true, std::memory_order_relaxed);
         g_adsRefusals.fetch_add(1, std::memory_order_relaxed);
@@ -7147,6 +7161,13 @@ void lookUpdateRun(void* act, F22UpdateFn original) noexcept {
         if (wSY || wSP) g_f109StickDropped.fetch_add(1, std::memory_order_relaxed);
         if (oldY != 0.0f && style != nofoot::f109::kSmooth && wY) g_f109MouseDropped.fetch_add(1, std::memory_order_relaxed);
         if ((oldP != 0.0f && wP) || (oldSP != 0.0f && wSP)) g_f109PitchDropped.fetch_add(1, std::memory_order_relaxed);
+    }
+    if (pitchHeld) {   // F176: the update the pitch was held in, and what was dropped of it (only a value that was written as 0 or the head aim's ask counts: a refused write ran as the game's own)
+        g_f176Calls.fetch_add(1, std::memory_order_relaxed);
+        const bool droppedMouse = wP && held.droppedMouse > 0.0, droppedStick = wSP && held.droppedStick > 0.0;
+        if (droppedMouse || droppedStick) g_f176Input.fetch_add(1, std::memory_order_relaxed);
+        if (droppedMouse) atomicAddDouble(g_f176Mouse, held.droppedMouse);
+        if (droppedStick) atomicAddDouble(g_f176Stick, held.droppedStick);
     }
     F109Pend p;
     p.valid = true;
@@ -7935,6 +7956,21 @@ void adsLineReset() noexcept {
     for (int i = 0; i < 2; ++i) g_adsSumHead[i] = g_adsSumIn[i] = g_adsSumQueued[i] = g_adsSumApplied[i] = g_adsSumUser[i] = g_adsSumCancel[i] = 0.0;
     g_adsResid.clearWindow();
 }
+// F176: an ADS press's account. Begun at each engage (from idle, or from the release), ticked once a frame while it is active, and ended with one line when the game's ADS flag falls or
+// the feature stops; the line prints without log.on_foot_detail. A press never begun (an engage that did not run here) prints nothing.
+void f176PressBegin(uint64_t now) noexcept {
+    static uint32_t presses = 0;
+    g_f176Press.begin(++presses, now, g_f176Calls.load(std::memory_order_relaxed), g_f176Input.load(std::memory_order_relaxed), g_f176Mouse.load(std::memory_order_relaxed),
+                      g_f176Stick.load(std::memory_order_relaxed));
+}
+void f176PressEnd(uint64_t now, const char* how, bool guardTripped) noexcept {
+    if (!g_f176Press.open) return;
+    char line[600];
+    nofoot::f176::formatPress(line, sizeof(line), g_f176Press, now, g_f176Calls.load(std::memory_order_relaxed), g_f176Input.load(std::memory_order_relaxed), g_f176Mouse.load(std::memory_order_relaxed),
+                              g_f176Stick.load(std::memory_order_relaxed), guardTripped, how);
+    Log::get().note("%s", line);
+    g_f176Press.open = false;
+}
 // Stops the feature at once: the seated rotation returns to zero (the yaw through the reset serial: the runtime turns its look compensation back to
 // zero, the carried yaw included), the lock goes to zero, the hook writes nothing, the queue and the in-flight account are dropped. holdOff: off until the
 // ADS flag falls (a trip, or a look value that could not be restored); the next press starts clean.
@@ -7942,7 +7978,12 @@ void adsStop(const char* why, bool holdOff) noexcept {
     const double carriedDeg = g_adsMap.yawCarried / nofoot::kAdsDeg, pitchDeg = g_adsMap.pitchSeat / nofoot::kAdsDeg;
     const double lockCm = 100.0 * std::sqrt(g_adsLock[0] * g_adsLock[0] + g_adsLock[1] * g_adsLock[1] + g_adsLock[2] * g_adsLock[2]);
     const int was = g_adsState;
-    g_adsHookOn.store(false, std::memory_order_relaxed);
+    g_adsHookOn.store(false, std::memory_order_relaxed); g_adsPitchHeld.store(false, std::memory_order_relaxed);
+    {   // F176: the press ends here, whichever way the feature stopped; a hold-off is a guard trip (or a look value that could not be restored): the pitch is the player's again
+        char how[160];
+        _snprintf_s(how, sizeof(how), _TRUNCATE, "stopped (%s)", why ? why : "?");
+        f176PressEnd(GetTickCount64(), how, holdOff);
+    }
     g_adsInYaw.store(0.0f, std::memory_order_relaxed);
     g_adsInPitch.store(0.0f, std::memory_order_relaxed);
     if (g_adsMap.yawToReset()) g_lookResetSerial.fetch_add(1, std::memory_order_relaxed);   // F25's serial: the runtime re-bases to zero
@@ -8814,7 +8855,7 @@ void adsAimTick(uint64_t now, bool session) noexcept {
             Log::get().note("native on foot ADS head aim (F62b): aiming down sights but not engaged: %s",
                             off ? off : "held off for the rest of this press (a guard trip or a look value that could not be restored); the next press re-arms");
         }
-        g_adsHookOn.store(false, std::memory_order_relaxed);
+        g_adsHookOn.store(false, std::memory_order_relaxed); g_adsPitchHeld.store(false, std::memory_order_relaxed);
         g_adsW = 0.0;
         g_adsHavePrev = false;
         return;
@@ -8836,6 +8877,7 @@ void adsAimTick(uint64_t now, bool session) noexcept {
     if (g_adsState == kAdsIdle && adsNext == kAdsActive) {
         entered = true;
         g_adsState = kAdsActive;
+        f176PressBegin(now);   // F176
         g_adsEyeOnset = AdsEyeOnset{};
         g_adsEntryValid = false;
         if (g_adsSightTripped) Log::get().note("native on foot ADS sight lock (F63): guard cleared (a new ADS engage)");
@@ -8882,6 +8924,8 @@ void adsAimTick(uint64_t now, bool session) noexcept {
     } else if (g_adsState == kAdsActive && adsNext == kAdsReleasing) {
         g_adsState = kAdsReleasing;
         g_adsRelMs = now;
+        g_adsPitchHeld.store(false, std::memory_order_relaxed);   // F176: the release is not held (the head aim's unwind rides the same hook)
+        f176PressEnd(now, "released", false);
         if (g_adsCentre.pending || g_adsMap.centre.active) {   // F69i: ADS ended before the snap was done: stop it, say so (the cone is the usual cause)
             if (nofoot::logwin::detail()) Log::get().note("native on foot ADS centre (F69i): press %u: the game's ADS flag fell %.2f s %s (the weapon's yaw offset from the body %+.1f deg at the last "
                             "measurement, the cone is %.0f deg): the snap is stopped; the release unwinds what was injected (yaw %+.2f pitch %+.2f deg carried)",
@@ -8909,6 +8953,7 @@ void adsAimTick(uint64_t now, bool session) noexcept {
     } else if (g_adsState == kAdsReleasing && adsNext == kAdsActive) {
         entered = true;
         g_adsState = kAdsActive;
+        f176PressBegin(now);   // F176: an engage from the release is a press too
         g_adsPressMs = now;
         g_adsEyeOnset = AdsEyeOnset{};
         if (!g_lta.engaged) {   // F109: inside look to aim the map runs on
@@ -8928,7 +8973,7 @@ void adsAimTick(uint64_t now, bool session) noexcept {
                             g_adsMap.pitchSeat / nofoot::kAdsDeg);
     }
     if (g_adsState == kAdsIdle && !g_lta.engaged && !g_lta.unwinding) {
-        g_adsHookOn.store(false, std::memory_order_relaxed);
+        g_adsHookOn.store(false, std::memory_order_relaxed); g_adsPitchHeld.store(false, std::memory_order_relaxed);
         g_adsW = 0.0;
         g_adsLock[0] = g_adsLock[1] = g_adsLock[2] = 0.0;
         g_adsHavePrev = false;
@@ -8966,6 +9011,11 @@ void adsAimTick(uint64_t now, bool session) noexcept {
                             "and the body stay with the press", g_adsMap.yawCarried / nofoot::kAdsDeg, g_adsMap.pitchSeat / nofoot::kAdsDeg, g_adsMap.relDur);
         }
         g_adsAimMode = ae.mode;
+    }
+    {   // F176: the mouse's and the stick's pitch are held while the head aims in the sights in mouse look: published here, once a tick, from the state this tick settled on
+        const bool held = nofoot::f176::holds(g_adsState == kAdsActive, g_adsAimMode == nofoot::f92::kAimOn, g_lta.engaged, g_lta.unwinding, true, false);
+        g_adsPitchHeld.store(held, std::memory_order_relaxed);
+        if (g_adsState == kAdsActive) g_f176Press.tick(dt, held, g_lta.engaged, g_adsAimMode == nofoot::f92::kAimOn);
     }
     // The headset (frame input version 3: the head in natural LOCAL, untouched by the seated space's turns).
     EdvrNativeNowPose np{};
@@ -9147,7 +9197,7 @@ void adsAimTick(uint64_t now, bool session) noexcept {
         g_adsInYaw.store(0.0f, std::memory_order_relaxed);
         g_adsInPitch.store(0.0f, std::memory_order_relaxed);
         g_lta.unwinding = false;
-        if (g_adsState == kAdsIdle) g_adsHookOn.store(false, std::memory_order_relaxed);
+        if (g_adsState == kAdsIdle) { g_adsHookOn.store(false, std::memory_order_relaxed); g_adsPitchHeld.store(false, std::memory_order_relaxed); }
         const bool clean = std::fabs(leftYaw) <= nofoot::kAdsUnwindDoneRad && std::fabs(leftPitch) <= nofoot::kAdsUnwindDoneRad;
         Log::get().note("native on foot look to aim (F109): unwound after %.2f s: yaw %.3f deg and pitch %.3f deg left; %s (%s)",
                         static_cast<double>(now - g_lta.unwindMs) / 1000.0, leftYaw / nofoot::kAdsDeg, leftPitch / nofoot::kAdsDeg,
@@ -9172,7 +9222,7 @@ void adsAimTick(uint64_t now, bool session) noexcept {
         adsPublishPitch();
         g_adsState = kAdsIdle;
         g_adsAimMode = nofoot::f92::kAimOff;
-        g_adsHookOn.store(false, std::memory_order_relaxed);
+        g_adsHookOn.store(false, std::memory_order_relaxed); g_adsPitchHeld.store(false, std::memory_order_relaxed);
         g_adsInYaw.store(0.0f, std::memory_order_relaxed);
         g_adsInPitch.store(0.0f, std::memory_order_relaxed);
         g_adsLock[0] = g_adsLock[1] = g_adsLock[2] = 0.0;
@@ -10568,6 +10618,8 @@ struct PinIn {
     uint32_t localPoseGeneration = 0;
     uint64_t localPoseFrame = 0, localPoseQpc = 0;
     float localHeadY = 0.0f;   // F86g: the headset's height in natural LOCAL (m), with the pitch's validity
+    float local[12] = {}, render[12] = {};   // F175: the headset in natural LOCAL (with localFull) and the render head in the seated space, the reported head (with renderFull), as the pose of this call had them
+    bool localFull = false, renderFull = false;
     float f94SeatedY = 0.0f;   // F94a: the neck reference's seated y the camera carried (taken out of cam), and where it came from (nofoot::f94::Source)
     uint8_t f94Source = nofoot::f94::kSrcLegacy;
     float f137SeatedY = 0.0f, f137SeatedZ = 0.0f;   // F137: the virtual neck's seated y and z the camera carried (taken out of cam), and where they came from
@@ -10617,6 +10669,10 @@ void pinInPublish(const float cam[3], const float camRaw[3], const float weaponV
     g_pinIn.localPoseFrame = localPoseFrame;
     g_pinIn.localPoseQpc = localPoseQpc;
     g_pinIn.localHeadY = localHeadY;
+    g_pinIn.localFull = localPitchValid;   // F175: the whole LOCAL pose, when the pitch above was read from it
+    if (localPitchValid) std::memcpy(g_pinIn.local, np.local, sizeof(g_pinIn.local));
+    g_pinIn.renderFull = havePose && np.renderValid;
+    if (g_pinIn.renderFull) std::memcpy(g_pinIn.render, np.render, sizeof(g_pinIn.render));
     g_pinIn.f94SeatedY = static_cast<float>(f94SeatedY);
     g_pinIn.f94Source = f94Source;
     g_pinIn.f137SeatedY = static_cast<float>(f137Seated[1]);
@@ -16667,6 +16723,10 @@ void f138WinWrite(Fn&& fn) noexcept {
 // same hook as F138's; f138Line takes the window once a second.
 nofoot::f171c::Mailbox<nofoot::f171c::Window> g_f171cBox;
 nofoot::f171c::Pairing g_f171cPair;
+// F175 (measure only): the view's roll and pitch against the headset's (nofoot::f175, native_on_foot_f175.h). The pin hook forms one frame's figures per fresh call and adds them to the window
+// (one writer, the same hook as F138's); f138Line takes the window once a second. g_f175Rate is the hook's: the headset's angular rate from consecutive LOCAL poses.
+nofoot::f171c::Mailbox<nofoot::f175::Window> g_f175Box;
+nofoot::f175::RateTracker g_f175Rate;
 // ---- F169: the stance while the aim is pitched (nofoot::f169, native_on_foot_f169.h) ----------------------------------------------------------------------------
 // The pin hook's half: one window of pitched calls (written under g_f169Seq by the one writer, taken once a second by f169StanceLine on the frame thread).
 nofoot::f169::Window g_f169Win;
@@ -17234,6 +17294,7 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
             if (g_f138HookReset.exchange(false, std::memory_order_relaxed)) {
                 g_f138.reset();   // F138: an edge of the on-foot camera, the shutdown (F170: the running reference too)
                 g_f171cPair.reset();   // F171: and the carriage's last sample
+                g_f175Rate.reset();    // F175: and the headset's last LOCAL pose for the rate
                 g_f138HeldM = 0.0;   // F170: the raise starts again from 0
                 g_f160.reset();   // F160: the kept target is the last stance's, not the next scope's
             }
@@ -17370,6 +17431,46 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
                 pc.f171cCamUpM = pc.f97EyeDrawn[1] - N0[1];
                 pc.f171cCamFwdM = pc.f97EyeDrawn[2] - N0[2];
                 pc.f171cGM = nofoot::f138::gOf(pc.rawEyeY, N0[1], static_cast<double>(in.localHeadY));
+            }
+            // F175 (measure only): the view's roll and pitch against the headset's. Per pin call, because this is where the camera the eyes were RENDERED with is in hand: pinCycloUpdate read the
+            // two eyes' scene rows of one game frame (F126's pairing; kCycRows, not the cache), and fwdM and upM are their mean forward and up taken to the 3P model's axes (x right, y up, z
+            // forward) by the AMC's inverse: the rotation actually drawn, not the aim. The headset is the pose of this call in natural LOCAL (in.local) and, for the reported head's lead over the
+            // aim, the render head in the seated space (in.render, F109's adsHeadAngles). A frame is measured when the input is fresh, the eye rows are this frame's, the pose is whole, the
+            // camera is the commander's and the sights are not up (the sight lock owns the eye there); by look to aim or mouse look and armed or not. The rate is worked out on every fresh call
+            // (consecutive LOCAL poses that differ), so a pose that was not measured still keeps it current.
+            {
+                namespace f175 = nofoot::f175;
+                double speedDeg = 0.0, yawDeg = 0.0;
+                bool rateOk = false;
+                if (freshIn && in.localFull)
+                    rateOk = g_f175Rate.step(in.local, static_cast<double>(f30QpcUs(in.localPoseQpc)) * 1e-6, static_cast<double>(f30QpcUs(in.qpc)) * 1e-6, in.localPoseGeneration, &speedDeg, &yawDeg);
+                if (freshIn && cycSrc == kCycRows && upMOk && in.localFull && refusal != kPinRefCameraAway && !(pc.detachW > 0.0)) {
+                    f175::Sample fs;
+                    fs.mode = g_ltaDrop.load(std::memory_order_relaxed) ? 1 : 0;
+                    fs.item = armed ? 1 : 0;
+                    const double worldUp[3] = {0.0, 1.0, 0.0};
+                    double viewRoll = 0.0, headRoll = 0.0, viewElev = 0.0, headElev = 0.0;
+                    if (f175::viewRoll(fwdM, upM, worldUp, &viewRoll) && f175::localRoll(in.local, &headRoll)) {
+                        fs.rollOk = true;
+                        fs.rollErrRad = f175::wrapPi(viewRoll - headRoll);
+                    }
+                    const bool aimKnown = pc.f86Ok && std::isfinite(pc.f86AimPitch);
+                    if (f175::viewElevation(fwdM, worldUp, &viewElev) && f175::localElevation(in.local, &headElev) && (fs.mode || aimKnown)) {
+                        fs.pitchOk = true;
+                        fs.pitchErrRad = viewElev - (fs.mode ? headElev : headElev + pc.f86AimPitch * nofoot::kAdsDeg);   // look to aim: the headset's elevation; mouse look: plus the aim's pitch
+                    }
+                    fs.rateOk = rateOk;
+                    fs.speedDegS = speedDeg;
+                    fs.yawDegS = yawDeg;
+                    double leadYaw = 0.0, leadPitch = 0.0;
+                    if (aimKnown && in.renderFull && nofoot::adsHeadAngles(in.render, &leadYaw, &leadPitch)) {
+                        fs.leadOk = true;
+                        fs.aimPitchRad = pc.f86AimPitch * nofoot::kAdsDeg;
+                        fs.yawLeadRad = leadYaw;
+                        fs.pitchLeadRad = leadPitch;
+                    }
+                    g_f175Box.write([&](nofoot::f175::Window& win) noexcept { win.add(fs); });
+                }
             }
         }
         // F68e: the animated legs' reach (hip to foot over thigh + calf, mean of both), before anything moves: the crouch test.
@@ -23934,6 +24035,7 @@ void f138Line(uint64_t now) noexcept {
         lineMs = binMs = 0;
         g_f138Box.clearPending.store(true, std::memory_order_relaxed);   // F170: the window the edge left is not the next second's
         g_f171cBox.clearPending.store(true, std::memory_order_relaxed);  // F171: nor the raise carriage's
+        g_f175Box.clearPending.store(true, std::memory_order_relaxed);   // F175: nor the view roll's
         for (auto& row : bins)
             for (f138::Group& g : row) g = f138::Group{};
     }
@@ -23958,6 +24060,20 @@ void f138Line(uint64_t now) noexcept {
             nofoot::f171c::formatSummary(carriage, sizeof(carriage), 1, cw);
             nofoot::f172::appendTurned(carriage, sizeof(carriage), turned);
             Log::get().note("%s", carriage);
+        }
+    }
+    // F175 (measure only): the view's roll and pitch against the headset's, a line for each look mode and item with frames in the second; a second with none prints nothing.
+    {
+        nofoot::f175::Window vw;
+        if (g_f175Box.take(&vw) && vw.any()) {
+            const bool f61On = g_rotCalKey.load(std::memory_order_relaxed);
+            for (int m = 0; m < 2; ++m)
+                for (int i = 0; i < 2; ++i) {
+                    if (!vw.g[m][i].frames) continue;
+                    char viewRoll[1200];
+                    nofoot::f175::formatGroup(viewRoll, sizeof(viewRoll), 1, m, i, vw.g[m][i], f61On);
+                    Log::get().note("%s", viewRoll);
+                }
         }
     }
     const uint32_t gated = g_f109SettleGated.load(std::memory_order_relaxed);
@@ -36065,7 +36181,7 @@ void nativeOnFootShutdown() {
     edvr::comfort::publish(0.0f, GetTickCount64());
     g_weaponUiSubmitGate.store(false, std::memory_order_relaxed);
     nativeFrameSetRotCalibrate(0.0f, 0.0f);   // F61: no calibration rotation past shutdown
-    g_adsHookOn.store(false, std::memory_order_relaxed);   // F62b: no more ADS head-aim input; no pitch past shutdown
+    g_adsHookOn.store(false, std::memory_order_relaxed); g_adsPitchHeld.store(false, std::memory_order_relaxed);   // F62b: no more ADS head-aim input; no pitch past shutdown
     g_adsInYaw.store(0.0f, std::memory_order_relaxed);
     g_adsInPitch.store(0.0f, std::memory_order_relaxed);
     nativeFrameSetAdsPitch(0.0f);
@@ -36096,7 +36212,7 @@ void nativeOnFootShutdown() {
     nativeOnFootHybridTick(GetTickCount64(), false, "the game is shutting down");            // F21
     nativeOnFootBodyClipTick(GetTickCount64(), false, false, "the game is shutting down");   // F19
     bodyModeShutdown();                                                                    // F20
-    g_adsHookOn.store(false, std::memory_order_relaxed);                                   // F22/F109: no more input, nothing dropped; the hooks pass through
+    g_adsHookOn.store(false, std::memory_order_relaxed); g_adsPitchHeld.store(false, std::memory_order_relaxed);                                   // F22/F109: no more input, nothing dropped; the hooks pass through
     g_ltaDrop.store(false, std::memory_order_relaxed);
     g_snapIn.store(0.0f, std::memory_order_relaxed);
     g_lookWantRead.store(false, std::memory_order_relaxed);

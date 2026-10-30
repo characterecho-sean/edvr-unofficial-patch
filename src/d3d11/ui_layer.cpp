@@ -116,13 +116,13 @@ constexpr uint32_t kCrispHdrMissFrames = 30;
 
 float g_target = 0.0f;     // 0 off, 1.0 (the file's 100), 1.25 (125), 1.5 (150), 2.0 (200)
 // The weapons fire goes into its own additive HDR layer, composited after the upscale, always (no setting). INDEPENDENT of
-// fix.ui_quality: g_weaponsLive is the weapons half with everything it needs (a temporal mode, not stood down, not the flat
-// profile). The layer's machinery runs when either half is live (refreshLive); the interface families are taken only while
+// fix.ui_quality: g_weaponsLive is the weapons half with everything it needs (a temporal mode, not stood down), in both profiles
+// (flat through its mono adapter, flat_ui_layer.cpp). The layer's machinery runs when either half is live (refreshLive); the interface families are taken only while
 // fix.ui_quality's half is (detail::g_uiQualityLive), the weapons fire only while this one is.
 bool g_weaponsLive = false;
 bool g_weaponsStoodDown = false;  // the weapons path alone (a failure of its own); the HUD and the rest of the layer stay
 // The shield-strike refraction after the upscale (shield_ripple.h) is the same: g_rippleLive is its half with everything the ripple needs (a temporal
-// mode, not stood down, not the flat profile). It is a half of the layer of its own, so a ripple that stands itself down leaves the weapons fire running.
+// mode, not stood down), in both profiles. It is a half of the layer of its own, so a ripple that stands itself down leaves the weapons fire running.
 bool g_rippleLive = false;
 bool g_rippleStoodDown = false;  // the ripple alone (a failed first-draw check, or a failure of its own); the rest of the layer stays
 bool g_rippleNoted = false;

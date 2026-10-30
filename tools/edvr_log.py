@@ -14033,6 +14033,166 @@ def _hj_f171_carriage(rows, ctx):
     return ("OK", text)
 
 
+# F175 (measure only): the view's roll and pitch against the headset's (formatGroup in src/d3d11/native_on_foot_f175.h), a line a second for each look mode and item with frames.
+H175_LABEL = "native on foot view roll (F175)"
+H175_RE = (r"native on foot view roll \(F175\) (?P<wl>\d+) s: mode (?P<mode>mouse look|look to aim), item (?P<item>armed|unarmed), F61 rig (?P<rig>ON|off); (?P<frames>\d+) frames "
+           r"\(roll: about the view's forward against the character's up, \+ the right side up; error = the view's less the headset's in LOCAL\); roll error mean (?P<rmean>%s) rms (?P<rrms>[\d.]+) "
+           r"max (?P<rmax>[\d.]+) deg, over 2 deg in (?P<over>\d+) frames; head still \(under 10 deg/s\) (?P<sn>\d+) frames mean (?P<smean>%s) rms (?P<srms>[\d.]+) max (?P<smax>[\d.]+); "
+           r"head turning \(yaw over 30 deg/s\) (?P<tn>\d+) frames mean (?P<tmean>%s) rms (?P<trms>[\d.]+) max (?P<tmax>[\d.]+); pitch error \(the view's elevation less (?P<pexp>[^)]+)\) "
+           r"(?P<pn>\d+) frames mean (?P<pmean>%s) rms (?P<prms>[\d.]+) max (?P<pmax>[\d.]+) deg; slope of the roll error against aim pitch x the head's yaw lead (?P<slope>%s) over "
+           r"(?P<pairs>\d+) frames \(x rms (?P<xrms>[\d.]+) rad\); head speed mean (?P<speed>[\d.]+) deg/s; aim pitch mean (?P<aim>%s) deg; reported head lead over the aim yaw (?P<yawlead>%s) "
+           r"pitch (?P<pitchlead>%s) deg" % ((_HN,) * 8))
+H175_FLAG_RMS, H175_FLAG_SECONDS = 1.5, 2   # nofoot::f175::kFlagRmsDeg and kFlagSeconds
+
+
+def _hj_f175_view_roll(rows, ctx):
+    """F175 (measure only): the view's roll and pitch against the headset's. A tester, in a combat zone with look to aim on: "a really unpleasant tilting motion to your view when looking
+    horizontally". By design the view is the headset's, with no roll added, and nothing in the log measured that. Per pin call, with this frame's eye rows (the camera the eyes were rendered
+    with), the sights down and the commander's camera: the view's roll about its forward against the character's up (positive: the right side up) less the headset's roll in LOCAL, the
+    view's elevation less the expected one (look to aim: the headset's in LOCAL; mouse look: plus the aim's pitch), the headset's rate (still under 10 deg/s, turning over 30 deg/s of
+    yaw), and the slope of the roll error against (aim pitch x the reported head's yaw lead over the aim). The report gives the figures by look mode, pooled over the seconds and the
+    items. It flags "the view rolls against the headset" (PARTIAL) when a mode's roll error rms is over 1.5 deg across 2 s or more of frames, naming whether it is with the head still,
+    turning, or both. What separates the readings: a slope near +-1 with the aim pitched and the head leading says EDVR's cancel adds the roll; a roll error with the head still, or in mouse
+    look too, says the game's own camera rolls; a roll error near 0 with a pitch error says the tilt is a nod, not a roll; F61's rig ON is named. IDLE when the log has the raise
+    carriage lines (the pin ran on this build) and no second with frames; no line and no carriage line: not present."""
+    sec = rows.get("sec", [])
+    if not sec:
+        if ctx.get("raise carriage (F171)", {}).get("sec"):
+            return ("IDLE", "the pin ran (raise carriage lines) and no second had a frame with the view's roll measured: no mouse look or look to aim frame with this frame's eye rows, the "
+                            "sights down and a whole LOCAL pose")
+        return None
+    modes = collections.OrderedDict()
+    for r in sec:
+        modes.setdefault(r["mode"], []).append(r)
+    parts, flags = [], []
+    rig_on = any(r["rig"] == "ON" for r in sec)
+    for mode, rs in modes.items():
+        secs = _hsecs(rs)
+        frames = sum(int(r["frames"]) for r in rs)
+        if not frames:
+            continue
+
+        def pooled(n_key, rms_key, rr=rs):
+            n = sum(int(r[n_key]) for r in rr)
+            return n, (sum(int(r[n_key]) * float(r[rms_key]) ** 2 for r in rr) / n) ** 0.5 if n else 0.0
+        rn, rms = frames, (sum(int(r["frames"]) * float(r["rrms"]) ** 2 for r in rs) / frames) ** 0.5
+        mean = sum(int(r["frames"]) * float(r["rmean"]) for r in rs) / frames
+        rmax = max(float(r["rmax"]) for r in rs)
+        over = sum(int(r["over"]) for r in rs)
+        sn, srms = pooled("sn", "srms")
+        tn, trms = pooled("tn", "trms")
+        pn, prms = pooled("pn", "prms")
+        pmean = (sum(int(r["pn"]) * float(r["pmean"]) for r in rs) / pn) if pn else 0.0
+        weight = sum(int(r["pairs"]) * float(r["xrms"]) ** 2 for r in rs)   # sxx of each line: pairs x the input's rms squared
+        slope = (sum(int(r["pairs"]) * float(r["xrms"]) ** 2 * float(r["slope"]) for r in rs) / weight) if weight > 1e-12 else 0.0
+        pairs = sum(int(r["pairs"]) for r in rs)
+        aim = sum(int(r["frames"]) * float(r["aim"]) for r in rs) / frames
+        yawlead = sum(int(r["frames"]) * float(r["yawlead"]) for r in rs) / frames
+        items = ", ".join(sorted(set(r["item"] for r in rs)))
+        parts.append("%s (%s) %d s, %d frames: roll error mean %+.2f rms %.2f max %.2f deg, over 2 deg in %d (%.0f%%); head still %d frames rms %.2f, head turning %d frames rms %.2f; pitch error (%s) "
+                     "mean %+.2f rms %.2f over %d frames; slope against aim pitch x yaw lead %+.3f over %d pairs; aim pitch mean %+.1f deg, reported head yaw lead mean %+.1f deg" % (
+                         mode, items, secs, frames, mean, rms, rmax, over, 100.0 * over / frames, sn, srms, tn, trms, rs[0]["pexp"], pmean, prms, pn, slope, pairs, aim, yawlead))
+        if secs >= H175_FLAG_SECONDS and rms > H175_FLAG_RMS:
+            where = ("with the head still" if srms > H175_FLAG_RMS and trms <= H175_FLAG_RMS else "with the head turning" if trms > H175_FLAG_RMS and srms <= H175_FLAG_RMS else
+                     "with the head still and turning" if srms > H175_FLAG_RMS and trms > H175_FLAG_RMS else "in the frames between still and turning")
+            hint = ("the slope %+.2f against aim pitch x yaw lead is near +-1: EDVR's cancel adds the roll" % slope if abs(slope) >= 0.5 and pairs >= 30 else
+                    "the head was still: the game's own camera rolls" if srms > H175_FLAG_RMS and sn >= 30 else "the slope does not follow aim pitch x yaw lead")
+            flags.append("the view rolls against the headset in %s: roll error rms %.2f deg over %d s of frames, %s (%s)" % (mode, rms, secs, where, hint))
+    if not parts:
+        return None
+    text = "view roll error = the view's roll (about its forward against the character's up, + the right side up) less the headset's; " + "; ".join(parts) + \
+           ("; F61's rotation calibration rig was ON in this log" if rig_on else "; F61's rig off")
+    if flags:
+        return ("PARTIAL", text + "; " + "; ".join(flags))
+    return ("OK", text)
+
+
+# F176: in the sights with the head aiming (fix.native_on_foot_ads_head_aim on, look to aim off) the mouse's and the stick's pitch are held (formatPress in src/d3d11/native_on_foot_f176.h):
+# one line per ADS press when it ends, on every log (no log.on_foot_detail).
+H176_LABEL = "native on foot ADS pitch held (F176)"
+H176_RE = (r"native on foot ADS pitch held \(F176\) press (?P<press>\d+) \((?P<mode>mouse look|look to aim), head aim (?P<aim>on|off)\): lasted (?P<lasted>[\d.]+) s; the mouse's and the "
+           r"stick's pitch held for (?P<held>[\d.]+) s \((?P<ticks>\d+) ticks\) of it; the game's look updates it was held in (?P<calls>\d+), of them with a pitch to drop (?P<input>\d+); "
+           r"mouse \|pitch\| dropped (?P<mouse>[\d.]+), stick \|pitch\| dropped (?P<stick>[\d.]+) \(game input units\); guard tripped (?P<tripped>yes|no); ended (?P<ended>.+)$")
+H176_MIN_HELD_S = 0.5   # a press held this long with head aim on in mouse look must have run in the game's look update
+
+
+def _hj_f176_pitch_held(rows, ctx):
+    """F176: aiming down sights with the head aim on and look to aim off (mouse look), the mouse's and the stick's pitch are held: the head looks up and down, the mouse and the stick
+    still turn the player sideways. One line per ADS press when it ends says how long the pitch was held, the game's look updates it was held in, those with a mouse or stick pitch to
+    drop and the sums of the |pitch| dropped (game input units), and whether the guard tripped (a trip gives the pitch back for the rest of the press). The report counts the presses by
+    kind. NEVER APPLIED when the mouse look presses with the head aim on that held the pitch for 0.5 s or more show 0 look updates in every one (the hold was published and the game's
+    look update never ran with it); PARTIAL when only some of them show 0; IDLE with no such press (or no press at all, beside lines that show the pin ran). A press where it ran and the
+    mouse was still reads held with updates and 0 to drop, which is OK."""
+    sec = rows.get("sec", [])
+    if not sec:
+        if ctx.get("raise carriage (F171)", {}).get("sec") or ctx.get("view roll (F175)", {}).get("sec"):
+            return ("IDLE", "no ADS press ended in this log (the pin ran: raise carriage or view roll lines)")
+        return None
+    mouse_on = [r for r in sec if r["mode"] == "mouse look" and r["aim"] == "on" and float(r["held"]) >= H176_MIN_HELD_S]
+    others = [r for r in sec if r not in mouse_on]
+    calls = sum(int(r["calls"]) for r in mouse_on)
+    withinput = sum(int(r["input"]) for r in mouse_on)
+    mouse = sum(float(r["mouse"]) for r in mouse_on)
+    stick = sum(float(r["stick"]) for r in mouse_on)
+    held = sum(float(r["held"]) for r in mouse_on)
+    tripped = [r for r in sec if r["tripped"] == "yes"]
+    text = ("%d ADS press(es): %d in mouse look with the head aim on and the pitch held 0.5 s or more (held %.1f s in all, %d look updates, %d with a pitch to drop, mouse |pitch| dropped %.3f, "
+            "stick |pitch| dropped %.3f game input units); %d other (look to aim, the head aim off, or held under 0.5 s: %s)" % (
+                len(sec), len(mouse_on), held, calls, withinput, mouse, stick, len(others),
+                ", ".join(sorted(set("press %s %s head aim %s held %.2f s" % (r["press"], r["mode"], r["aim"], float(r["held"])) for r in others))[:3]) or "none"))
+    if tripped:
+        text += "; the guard tripped in %d press(es) (%s): the pitch came back for the rest of each" % (len(tripped), ", ".join("press " + r["press"] for r in tripped))
+    if not mouse_on:
+        return ("IDLE", text + "; no mouse look press with the head aim on held the pitch: nothing for the hold to do")
+    dead = [r for r in mouse_on if int(r["calls"]) == 0]
+    if len(dead) == len(mouse_on):
+        return ("NEVER APPLIED", text + "; every one of them shows 0 look updates: the hold was published for %.1f s and the game's look update never ran with it" % held)
+    if dead:
+        return ("PARTIAL", text + "; %d of them (%s) show 0 look updates although the hold was published" % (len(dead), ", ".join("press " + r["press"] for r in dead)))
+    if not withinput:
+        return ("OK", text + "; the mouse and the stick were still (nothing to drop) in every press: the hold ran")
+    return ("OK", text)
+
+
+# F177: the aiming choice at start (src/d3d11/menu_aim_prompt.h): the VR menu opens itself once a session on a page that asks for look to aim or mouse aim. Its lines print on every log, in the
+# menu and not on foot: shown, then picked and saved (or write failed), or later; or one line saying why it was not shown.
+H177_LABEL = "aim choice prompt (F177)"
+H177_SHOWN = r"aim choice prompt \(F177\): shown\s*$"
+H177_PICKED = r"aim choice prompt \(F177\): picked (?P<choice>mouse aim|look to aim)\s*$"
+H177_LATER = r"aim choice prompt \(F177\): later\s*$"
+H177_SAVED = r"aim choice prompt \(F177\): saved (?P<k1>\S+) = (?P<v1>\S+) and (?P<k2>\S+) = (?P<v2>\S+) to (?P<file>.+?)\s*$"
+H177_FAILED = r"aim choice prompt \(F177\): write failed: (?P<err>.+?)\s*$"
+H177_NOTSHOWN = r"aim choice prompt \(F177\): not shown: (?P<reason>.+?)\s*$"
+H177_WANT = {"mouse aim": "off", "look to aim": "on"}   # what each pick must have written for fix.native_on_foot_look_to_aim
+
+
+def _hj_f177_aim_choice(rows, ctx):
+    """F177: the aiming choice at start. The VR menu opens itself once a session, after the first rendered scene, on a page that asks for look to aim or mouse aim. A pick writes the choice
+    and the hide of the page in one job; the saved line says the write landed with both pairs, the write failed line that it did not (the settings stay as they were and the page asks again at
+    the next start). NEVER APPLIED when a pick has a write failed line, or when the saved pairs are not what the pick says (look to aim on for look to aim, off for mouse aim, and the page
+    hidden); PARTIAL when a pick has neither line (the writer had not reported); OK when the page was shown and answered with a saved pick, with Ask me next time or Esc (nothing written), or
+    not at all yet; IDLE when the only line is why it was not shown (the key is off, native on foot is off, the flat profile). No line at all is a log from a build without the page (None)."""
+    shown, picked, later = rows.get("shown", []), rows.get("picked", []), rows.get("later", [])
+    saved, failed, notshown = rows.get("saved", []), rows.get("failed", []), rows.get("notshown", [])
+    if not (shown or picked or later or saved or failed or notshown):
+        return None
+    if not (shown or picked or later or saved or failed):
+        return ("IDLE", "the page was not shown: %s" % "; ".join(sorted(set(r["reason"] for r in notshown))))
+    if picked:
+        choice = picked[-1]["choice"]
+        if failed:
+            return ("NEVER APPLIED", "picked %s but the write failed: %s; the settings are unchanged and the page asks again at the next start" % (choice, failed[-1]["err"]))
+        if not saved:
+            return ("PARTIAL", "picked %s but no saved or write failed line followed (the writer had not reported when the log ended)" % choice)
+        s = saved[-1]
+        if s["k1"] != "fix.native_on_foot_look_to_aim" or s["v1"] != H177_WANT[choice] or s["k2"] != "menu.aim_choice_prompt" or s["v2"] != "off":
+            return ("NEVER APPLIED", "picked %s but the file was given %s = %s and %s = %s: the pick and the write disagree" % (choice, s["k1"], s["v1"], s["k2"], s["v2"]))
+        return ("OK", "shown; picked %s; saved %s = %s and %s = %s to %s" % (choice, s["k1"], s["v1"], s["k2"], s["v2"], s["file"]))
+    if later:
+        return ("OK", "shown; the player chose Ask me next time or pressed Esc (nothing written, it asks again at the next start)")
+    return ("OK", "shown; no answer in this log (the game quit with the page up, or the log ends first)")
+
+
 # F169: the stance while the aim is pitched (formatStance in src/d3d11/native_on_foot_f169.h). The camera sinks as the aim pitches up and w_c read the sink as a crouch; the cap holds w_c
 # under the animated neck's posture weight from 20 deg of aim pitch. The dial's own note line and the swing's lines carry other labels.
 H169S_LABEL = "native on foot pitched stance (F169)"
@@ -15981,6 +16141,20 @@ HEALTH_RULES = (
     _hrule("raise carriage (F171)", ("F171",), (H171C_LABEL,), (
         ("sec", H171C_RE),
     ), _hj_f171_carriage),
+    _hrule("view roll (F175)", ("F175",), (H175_LABEL,), (
+        ("sec", H175_RE),
+    ), _hj_f175_view_roll),
+    _hrule("ADS pitch held (F176)", ("F176",), (H176_LABEL,), (
+        ("sec", H176_RE),
+    ), _hj_f176_pitch_held),
+    _hrule("aim choice prompt (F177)", ("F177",), (H177_LABEL,), (
+        ("shown", H177_SHOWN),
+        ("picked", H177_PICKED),
+        ("later", H177_LATER),
+        ("saved", H177_SAVED),
+        ("failed", H177_FAILED),
+        ("notshown", H177_NOTSHOWN),
+    ), _hj_f177_aim_choice),
     _hrule("pitched stance (F169)", ("F169",), (H169S_LABEL,), (
         ("sec", H169S_RE),
     ), _hj_f169_stance),
@@ -17056,6 +17230,9 @@ def self_test_health():
     f171_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f171.h")
     f171c_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f171c.h")
     f172_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f172.h")
+    f175_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f175.h")
+    f176_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f176.h")
+    f177_path = os.path.join(repo_root(), "src", "d3d11", "menu_aim_prompt.h")
     f138_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f138.h")
     f154_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f154.h")
     s0_path = os.path.join(repo_root(), "src", "d3d11", "scope_zoom_s0.h")
@@ -17087,6 +17264,9 @@ def self_test_health():
         f171src = read_text(f171_path)
         f171csrc = read_text(f171c_path)
         f172src = read_text(f172_path)
+        f175src = read_text(f175_path)
+        f176src = read_text(f176_path)
+        f177src = read_text(f177_path)
         f138src = read_text(f138_path)
         hooks_src = read_text(os.path.join(repo_root(), "src", "d3d11", "native_on_foot_hooks.cpp"))
         f154src = read_text(f154_path)
@@ -17242,6 +17422,33 @@ def self_test_health():
             fmts[key] = health_c_format(f171csrc, needle)
         if fmts[key] is None:
             raise AssertionError("native_on_foot_f171c.h has no format holding %r: the --health rule that reads it is out of date" % needle)
+        return health_render(fmts[key], vals)
+
+    def R177(needle, *vals):
+        """F177's lines (menu_aim_prompt.h), from their own literals and formats."""
+        key = "f177:" + needle
+        if key not in fmts:
+            fmts[key] = health_c_format(f177src, needle)
+        if fmts[key] is None:
+            raise AssertionError("menu_aim_prompt.h has no format holding %r: the --health rule that reads it is out of date" % needle)
+        return health_render(fmts[key], vals)
+
+    def R176(needle, *vals):
+        """F176's press line (formatPress in native_on_foot_f176.h), from its own format literal."""
+        key = "f176:" + needle
+        if key not in fmts:
+            fmts[key] = health_c_format(f176src, needle)
+        if fmts[key] is None:
+            raise AssertionError("native_on_foot_f176.h has no format holding %r: the --health rule that reads it is out of date" % needle)
+        return health_render(fmts[key], vals)
+
+    def R175(needle, *vals):
+        """F175's view roll line (formatGroup in native_on_foot_f175.h), from its own format literal."""
+        key = "f175:" + needle
+        if key not in fmts:
+            fmts[key] = health_c_format(f175src, needle)
+        if fmts[key] is None:
+            raise AssertionError("native_on_foot_f175.h has no format holding %r: the --health rule that reads it is out of date" % needle)
         return health_render(fmts[key], vals)
 
     def R172(needle, *vals):
@@ -18905,6 +19112,107 @@ def self_test_health():
               has=["raise not turned (a log from before F172)"], lacks=["UNPARSED"])
         check("F171 carriage: a line that drifted from its pattern is unparsed", ["native on foot raise carriage (F171) 1 s: something else"], 4, [("UNPARSED", C171)])
         check("F171 carriage: a line that drifted beside a good one is counted beside the verdict", [car171(LEVEL171), "native on foot raise carriage (F171) 1 s: something else"], 0, [("OK", C171)],
+              has=["[+1 line(s) the rule's patterns do not match: "])
+
+        # ---- F175 (measure only): the view's roll and pitch against the headset's ----
+        V175 = "view roll (F175)"
+
+        def vr175(mode="look to aim", item="armed", rig="off", wl=1, frames=90, roll=(0.1, 0.6, 1.9, 0), still=(60, 0.1, 0.5, 1.2), turning=(20, 0.2, 0.8, 1.9), pitch=(90, 0.1, 0.4, 1.0),
+                  slope=(0.02, 90, 0.05), speed=12.0, aim=5.0, lead=(1.0, -0.5)):
+            """F175's line, from the DLL's own format (formatGroup, native_on_foot_f175.h): the pitch error's expected-pitch words are the mode's; roll: (mean, rms, max, frames over 2 deg);
+            still, turning, pitch: (frames, mean, rms, max); slope: (slope, pairs, x rms); lead: (yaw, pitch) in deg."""
+            return R175("native on foot view roll (F175) %u s", wl, mode, item, rig, frames, roll[0], roll[1], roll[2], roll[3], still[0], still[1], still[2], still[3], turning[0], turning[1], turning[2],
+                        turning[3], "the headset's in LOCAL" if mode == "look to aim" else "the headset's in LOCAL plus the aim's pitch", pitch[0], pitch[1], pitch[2], pitch[3], slope[0], slope[1], slope[2],
+                        speed, aim, lead[0], lead[1])
+
+        check("F175 view roll: look to aim over 3 s with an error well under 1.5 deg is OK, the figures by mode", [vr175(), vr175(), vr175()], 0, [("OK", V175)],
+              has=["look to aim (armed) 3 s, 270 frames: roll error mean +0.10 rms 0.60 max 1.90 deg, over 2 deg in 0 (0%)", "F61's rig off", "slope against aim pitch x yaw lead +0.020 over 270 pairs"],
+              lacks=["UNPARSED", "the view rolls against the headset"])
+        check("F175 view roll: an error rms of 2.4 deg across 3 s with the head still is flagged, with the head still named, and the slope that does not follow the composition",
+              [vr175(roll=(0.5, 2.4, 5.0, 40), still=(60, 0.5, 2.5, 5.0), turning=(20, 0.5, 1.0, 2.0)), vr175(roll=(0.5, 2.4, 5.0, 40), still=(60, 0.5, 2.5, 5.0), turning=(20, 0.5, 1.0, 2.0)),
+               vr175(roll=(0.5, 2.4, 5.0, 40), still=(60, 0.5, 2.5, 5.0), turning=(20, 0.5, 1.0, 2.0))], 0, [("PARTIAL", V175)],
+              has=["the view rolls against the headset in look to aim: roll error rms 2.40 deg over 3 s of frames, with the head still", "the head was still: the game's own camera rolls"], lacks=["UNPARSED"])
+        check("F175 view roll: the roll grows with aim pitch x yaw lead (slope +1.0 over 90 pairs) while the head turns: flagged as EDVR's cancel adding the roll",
+              [vr175(roll=(1.0, 2.0, 6.0, 50), still=(10, 0.1, 0.4, 0.8), turning=(70, 1.1, 2.2, 6.0), slope=(1.0, 90, 0.05)), vr175(roll=(1.0, 2.0, 6.0, 50), still=(10, 0.1, 0.4, 0.8), turning=(70, 1.1, 2.2, 6.0), slope=(1.0, 90, 0.05))], 0,
+              [("PARTIAL", V175)], has=["in look to aim: roll error rms 2.00 deg over 2 s of frames, with the head turning", "the slope +1.00 against aim pitch x yaw lead is near +-1: EDVR's cancel adds the roll"], lacks=["UNPARSED"])
+        check("F175 view roll: one second of error is too little to flag", [vr175(roll=(1.0, 3.0, 8.0, 60))], 0, [("OK", V175)], lacks=["UNPARSED", "the view rolls against the headset"])
+        check("F175 view roll: mouse look is its own mode, with its own expected pitch, beside look to aim",
+              [vr175(), vr175(mode="mouse look", item="unarmed", roll=(0.0, 0.3, 0.9, 0), pitch=(90, 1.0, 2.0, 5.0))], 0, [("OK", V175)],
+              has=["mouse look (unarmed) 1 s, 90 frames", "pitch error (the headset's in LOCAL plus the aim's pitch) mean +1.00 rms 2.00 over 90 frames", "pitch error (the headset's in LOCAL) mean"], lacks=["UNPARSED"])
+        check("F175 view roll: a mode's items are pooled", [vr175(item="armed"), vr175(item="unarmed")], 0, [("OK", V175)], has=["look to aim (armed, unarmed) 2 s, 180 frames"], lacks=["UNPARSED"])
+        check("F175 view roll: F61's rig ON is named", [vr175(rig="ON")], 0, [("OK", V175)], has=["F61's rotation calibration rig was ON in this log"], lacks=["UNPARSED"])
+        check("F175 view roll: a second with frames and an error of 0 is a line of zeros, OK (the code ran and measured nothing wrong)",
+              [vr175(roll=(0.0, 0.0, 0.0, 0), still=(90, 0.0, 0.0, 0.0), turning=(0, 0.0, 0.0, 0.0), pitch=(90, 0.0, 0.0, 0.0), slope=(0.0, 90, 0.0), lead=(0.0, 0.0))], 0, [("OK", V175)],
+              has=["roll error mean +0.00 rms 0.00 max 0.00 deg"], lacks=["UNPARSED"])
+        check("F175 view roll: the raise carriage lines (the pin ran) and no line with frames is idle, said apart from a log that never had the code",
+              [car171(LEVEL171)], 0, [("IDLE", V175)], has=["the pin ran (raise carriage lines) and no second had a frame with the view's roll measured"], lacks=["UNPARSED"])
+        check("F175 view roll: no line and no carriage line is not present (no verdict row)", [f90_part()], 0, [("OK", F90S)], lacks=[row("OK", V175), row("IDLE", V175), row("PARTIAL", V175), row("UNPARSED", V175)])
+        check("F175 view roll: a line that drifted from its pattern is unparsed", ["native on foot view roll (F175) 1 s: something else"], 4, [("UNPARSED", V175)])
+        check("F175 view roll: a line that drifted beside a good one is counted beside the verdict", [vr175(), "native on foot view roll (F175) 1 s: something else"], 0, [("OK", V175)],
+              has=["[+1 line(s) the rule's patterns do not match: "])
+
+        # ---- F176: in the sights with the head aiming, the mouse and the stick hold their pitch ----
+        H176 = "ADS pitch held (F176)"
+
+        def ph176(press=1, mode="mouse look", aim="on", lasted=2.31, held=2.25, ticks=200, calls=135, inp=40, mouse=3.2, stick=0.6, tripped="no", ended="released"):
+            """F176's line, from the DLL's own format (formatPress, native_on_foot_f176.h)."""
+            return R176("native on foot ADS pitch held (F176) press %u", press, mode, aim, lasted, held, ticks, calls, inp, mouse, stick, tripped, ended)
+
+        check("F176 pitch held: a mouse look press with the head aim on, held, updates and a pitch dropped, is OK", [ph176(), ph176(press=2)], 0, [("OK", H176)],
+              has=["2 ADS press(es): 2 in mouse look with the head aim on and the pitch held 0.5 s or more (held 4.5 s in all, 270 look updates, 80 with a pitch to drop, mouse |pitch| dropped 6.400, "
+                   "stick |pitch| dropped 1.200 game input units); 0 other"], lacks=["UNPARSED", "NEVER", "tripped"])
+        check("F176 pitch held: a press where it ran and the mouse was still is OK and says so", [ph176(inp=0, mouse=0.0, stick=0.0)], 0, [("OK", H176)],
+              has=["the mouse and the stick were still (nothing to drop) in every press: the hold ran"], lacks=["UNPARSED", "NEVER"])
+        check("F176 pitch held: held for 2.25 s with 0 look updates in every press is NEVER APPLIED (the game's look update never ran with the hold)",
+              [ph176(calls=0, inp=0, mouse=0.0, stick=0.0), ph176(press=2, calls=0, inp=0, mouse=0.0, stick=0.0)], 3, [("NEVER APPLIED", H176)],
+              has=["every one of them shows 0 look updates: the hold was published for 4.5 s and the game's look update never ran with it"], lacks=["UNPARSED"])
+        check("F176 pitch held: some of the presses with 0 look updates is PARTIAL", [ph176(), ph176(press=2, calls=0, inp=0, mouse=0.0, stick=0.0)], 0, [("PARTIAL", H176)],
+              has=["1 of them (press 2) show 0 look updates although the hold was published"], lacks=["UNPARSED"])
+        check("F176 pitch held: the head aim off, look to aim and a short press are other presses; with none of the first kind it is idle",
+              [ph176(aim="off", held=0.0, ticks=0, calls=0, inp=0, mouse=0.0, stick=0.0), ph176(press=2, mode="look to aim", held=0.0, ticks=0, calls=0, inp=0, mouse=0.0, stick=0.0), ph176(press=3, held=0.3, ticks=27)], 0,
+              [("IDLE", H176)], has=["3 ADS press(es): 0 in mouse look with the head aim on", "no mouse look press with the head aim on held the pitch: nothing for the hold to do"], lacks=["UNPARSED", "NEVER"])
+        check("F176 pitch held: a guard trip is named, the press ended stopped, and a tripped press with calls is still OK",
+              [ph176(), ph176(press=2, held=1.1, ticks=99, calls=60, inp=20, mouse=1.0, stick=0.0, tripped="yes", ended="stopped (the guard tripped)")], 0, [("OK", H176)],
+              has=["the guard tripped in 1 press(es) (press 2): the pitch came back for the rest of each"], lacks=["UNPARSED", "NEVER"])
+        check("F176 pitch held: the pin ran (raise carriage lines) and no press ended is idle", [car171(LEVEL171)], 0, [("IDLE", H176)], has=["no ADS press ended in this log"], lacks=["UNPARSED"])
+        check("F176 pitch held: no line and no sign the pin ran is not present (no verdict row)", [f90_part()], 0, [("OK", F90S)],
+              lacks=[row("OK", H176), row("IDLE", H176), row("PARTIAL", H176), row("UNPARSED", H176), row("NEVER APPLIED", H176)])
+        check("F176 pitch held: a line that drifted from its pattern is unparsed", ["native on foot ADS pitch held (F176) press 1: something else"], 4, [("UNPARSED", H176)])
+        check("F176 pitch held: a drifted line beside a good one is counted beside the verdict", [ph176(), "native on foot ADS pitch held (F176) press 2: something else"], 0, [("OK", H176)],
+              has=["[+1 line(s) the rule's patterns do not match: "])
+
+        # ---- F177: the aiming choice at start ----
+        H177 = "aim choice prompt (F177)"
+
+        def a177_shown():
+            return R177("aim choice prompt (F177): shown")
+
+        def a177_picked(choice="look to aim"):
+            return R177("aim choice prompt (F177): picked look to aim" if choice == "look to aim" else "aim choice prompt (F177): picked mouse aim")
+
+        def a177_saved(v1="on", v2="off", k1="fix.native_on_foot_look_to_aim", k2="menu.aim_choice_prompt"):
+            return R177("aim choice prompt (F177): saved %s = %s and %s = %s to %s", k1, v1, k2, v2, "edvr.ini")
+
+        check("F177 aim choice: shown, picked look to aim and saved with both pairs is OK", [a177_shown(), a177_picked(), a177_saved()], 0, [("OK", H177)],
+              has=["shown; picked look to aim; saved fix.native_on_foot_look_to_aim = on and menu.aim_choice_prompt = off to edvr.ini"], lacks=["UNPARSED", "NEVER"])
+        check("F177 aim choice: shown, picked mouse aim and saved off and off is OK", [a177_shown(), a177_picked("mouse aim"), a177_saved(v1="off")], 0, [("OK", H177)],
+              has=["picked mouse aim; saved fix.native_on_foot_look_to_aim = off and menu.aim_choice_prompt = off"], lacks=["UNPARSED", "NEVER"])
+        check("F177 aim choice: a pick whose write failed is NEVER APPLIED, with the error", [a177_shown(), a177_picked(), R177("aim choice prompt (F177): write failed: %s", "edvr.ini: access denied")], 3,
+              [("NEVER APPLIED", H177)], has=["picked look to aim but the write failed: edvr.ini: access denied; the settings are unchanged and the page asks again at the next start"], lacks=["UNPARSED"])
+        check("F177 aim choice: a pick with neither a saved nor a write failed line is PARTIAL", [a177_shown(), a177_picked("mouse aim")], 0, [("PARTIAL", H177)],
+              has=["picked mouse aim but no saved or write failed line followed"], lacks=["UNPARSED"])
+        check("F177 aim choice: look to aim picked but off written is NEVER APPLIED (the pick and the write disagree)", [a177_shown(), a177_picked(), a177_saved(v1="off")], 3, [("NEVER APPLIED", H177)],
+              has=["picked look to aim but the file was given fix.native_on_foot_look_to_aim = off and menu.aim_choice_prompt = off: the pick and the write disagree"], lacks=["UNPARSED"])
+        check("F177 aim choice: a pick that left the page on is NEVER APPLIED too", [a177_shown(), a177_picked(), a177_saved(v2="on")], 3, [("NEVER APPLIED", H177)], has=["the pick and the write disagree"])
+        check("F177 aim choice: shown and Ask me next time is OK, nothing written", [a177_shown(), R177("aim choice prompt (F177): later")], 0, [("OK", H177)],
+              has=["the player chose Ask me next time or pressed Esc (nothing written, it asks again at the next start)"], lacks=["UNPARSED", "NEVER"])
+        check("F177 aim choice: shown with no answer is OK and says so", [a177_shown()], 0, [("OK", H177)], has=["no answer in this log"], lacks=["UNPARSED", "NEVER"])
+        check("F177 aim choice: only why it was not shown is IDLE, with the reason", [R177("aim choice prompt (F177): not shown: %s", "menu.aim_choice_prompt is off")], 0, [("IDLE", H177)],
+              has=["the page was not shown: menu.aim_choice_prompt is off"], lacks=["UNPARSED", "NEVER"])
+        check("F177 aim choice: no line is not present (no verdict row)", [f90_part()], 0, [("OK", F90S)],
+              lacks=[row("OK", H177), row("IDLE", H177), row("PARTIAL", H177), row("UNPARSED", H177), row("NEVER APPLIED", H177)])
+        check("F177 aim choice: a line that drifted from its pattern is unparsed", ["aim choice prompt (F177): showing the page"], 4, [("UNPARSED", H177)])
+        check("F177 aim choice: a drifted line beside a good one is counted beside the verdict", [a177_shown(), a177_picked(), a177_saved(), "aim choice prompt (F177): saved nothing"], 0, [("OK", H177)],
               has=["[+1 line(s) the rule's patterns do not match: "])
 
         # ---- F169: the stance while the aim is pitched ----

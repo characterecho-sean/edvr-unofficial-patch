@@ -2,16 +2,21 @@
 #pragma once
 #include <cstdint>
 #include <string>
+#include <utility>
+#include <vector>
 
 namespace edvr {
 
-enum class WriteDestination : uint8_t { BuiltinRow, PluginSetting, AddonApproval };
+// Pairs: several dotted keys written in one replace of the file (F177: the aiming choice and the hide of its page), which no row owns.
+enum class WriteDestination : uint8_t { BuiltinRow, PluginSetting, AddonApproval, Pairs };
 
 struct WriteJob {
     WriteDestination destination = WriteDestination::BuiltinRow;
     int         def = -1;
     std::string dotted;
     std::string value;
+    // Pairs only: every {dotted, value} to write, together. `dotted` and `value` name the first, for the log and the last-write line.
+    std::vector<std::pair<std::string, std::string>> pairs;
     std::string before;
     // Per-headset rows only: the worn headset's key and the values either
     // side, so the log and the last-write line name what changed rather than

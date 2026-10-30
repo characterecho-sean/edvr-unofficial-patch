@@ -1848,14 +1848,15 @@ void testLegacyOnFootRowsStayOutOfMenu() {
     int nativePageRows = 0;
     for (int i = 0; i < kCount; ++i)
         if (strcmp(kMenuRows[i].page, "native_on_foot") == 0) ++nativePageRows;
-    check(nativePageRows == 17, "the Native on foot page has 17 rows (A1: ADS: scope zoom joined Aiming down sights; F127: 21 rows went to edvr.ini and the installer's window, and Reticle follows was retired; "
+    check(nativePageRows == 18, "the Native on foot page has 18 rows (F177: Aiming choice at start, the [menu] key menu.aim_choice_prompt, which the page shows under Look to aim; "
+                                "A1: ADS: scope zoom joined Aiming down sights; F127: 21 rows went to edvr.ini and the installer's window, and Reticle follows was retired; "
                                 "F128: Visor axis (test) was retired with the correction always on; the panel cursor's F155 retired its F154's Panel cursor (test) row with the "
                                 "drawn placement shipped; F146: the ADS sight switch, the two ADS sight trims and the full outfit switch were retired, and the four Weapon UI trims "
-                                "went to [experimental]; F152: ADS eye distance was retired, its per-weapon trim is an [experimental] row)");
+                                "went to [experimental]; F152: ADS eye distance was retired, its per-weapon trim is an [experimental] row)");   // the page's own order under Look to aim: the F177 pins in native_frame_test
     // F127: the page's order and its five headings. The switch is always first; look and aim, then aiming down sights, then body and view, the HUD last. kMenuRows is in
     // edvr.ini order; the group is the ini's heading block above the key, which the page shows as a heading.
     {
-        struct Want { const char* key; const char* group; };
+        struct Want { const char* key; const char* group; const char* section = "fix"; };
         static const Want want[] = {
             {"native_on_foot", "Native on foot VR"},
             {"native_on_foot_look_to_aim", "Look and aim"},
@@ -1874,22 +1875,24 @@ void testLegacyOnFootRowsStayOutOfMenu() {
             {"native_on_foot_hud_element_scale", "HUD"},
             {"native_on_foot_hud_spread", "HUD"},
             {"native_on_foot_hud_follow", "HUD"},
+            // F177: the [menu] key is the last row of the table (the ini's order) and has no group; the page moves it under Look to aim when it builds
+            {"aim_choice_prompt", "", "menu"},
         };
         constexpr int kWant = static_cast<int>(sizeof(want) / sizeof(want[0]));
         int at = 0;
         bool inOrder = true;
         for (int i = 0; i < kCount; ++i) {
             if (strcmp(kMenuRows[i].page, "native_on_foot") != 0) continue;
-            const bool match = at < kWant && strcmp(kMenuRows[i].section, "fix") == 0 && strcmp(kMenuRows[i].key, want[at].key) == 0 &&
+            const bool match = at < kWant && strcmp(kMenuRows[i].section, want[at].section) == 0 && strcmp(kMenuRows[i].key, want[at].key) == 0 &&
                                strcmp(kMenuRows[i].group, want[at].group) == 0;
             if (!match) {
-                printf("  page row %d is fix.%s under \"%s\"; wanted %s under \"%s\"\n", at, kMenuRows[i].key, kMenuRows[i].group, at < kWant ? want[at].key : "(none)",
+                printf("  page row %d is %s.%s under \"%s\"; wanted %s under \"%s\"\n", at, kMenuRows[i].section, kMenuRows[i].key, kMenuRows[i].group, at < kWant ? want[at].key : "(none)",
                        at < kWant ? want[at].group : "");
                 inOrder = false;
             }
             ++at;
         }
-        check(inOrder && at == kWant, "the Native on foot page keeps its order and headings: Native on foot VR first, then Look and aim, Aiming down sights, Body and view, and the HUD last");
+        check(inOrder && at == kWant, "the Native on foot page keeps its order and headings: Native on foot VR first, then Look and aim, Aiming down sights, Body and view, the HUD, and the [menu] key last");
         int firstPageRow = -1;
         for (int i = 0; i < kCount && firstPageRow < 0; ++i)
             if (strcmp(kMenuRows[i].page, "native_on_foot") == 0) firstPageRow = i;
@@ -1911,6 +1914,20 @@ void testLegacyOnFootRowsStayOutOfMenu() {
         }
         check(found == 1 && oldRows == 0 && shaped,
               "ADS: sight eye is one Native on foot row under Aiming down sights: a choice of both, right and left, live, shipped both; the old sight in both eyes key has no row (F162)");
+    }
+    // F177: Aiming choice at start is the [menu] key menu.aim_choice_prompt: one on/off row of the Native on foot page, live, shipped on, in the VR menu only (the flat tabs list their rows by table and
+    // do not name it; the key is not in src/common/flat_profile_keys.h, pinned in native_frame_test). The page shows it under Look to aim (menu.cpp moveRowAfter, pinned in native_frame_test).
+    {
+        int found = 0;
+        bool shaped = true;
+        for (int i = 0; i < kCount; ++i) {
+            const MenuRowDef& d = kMenuRows[i];
+            if (strcmp(d.section, "menu") != 0 || strcmp(d.key, "aim_choice_prompt") != 0) continue;
+            ++found;
+            shaped = shaped && d.kind == MenuKind::Choice && strcmp(d.label, "Aiming choice at start") == 0 && strcmp(d.choices, "on|off") == 0 && strcmp(d.shipped, "on") == 0 && d.applies == 1 &&
+                     d.tier == MenuTier::Fix && strcmp(d.page, "native_on_foot") == 0;
+        }
+        check(found == 1 && shaped, "Aiming choice at start is one Native on foot row, the [menu] key aim_choice_prompt: a choice of on and off, live, shipped on (F177)");
     }
     for (const char* key : keys) {
         bool found = false;
