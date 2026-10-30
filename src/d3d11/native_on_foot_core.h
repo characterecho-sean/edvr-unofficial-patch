@@ -5382,6 +5382,9 @@ struct GripSteady {
 // across kOffHandSteadyFrames prior samples. Once acquired, valid same-identity attaches retain authority through orientation motion; the off-arm
 // IK weight ramps on release over kOffHandRampSec.
 constexpr double kOffHandMaxM = 0.40, kOffHandSteadyDeg = 5.0, kOffHandRampSec = 0.15;
+// F182c: an input that is invalid only because the FP snapshot is stale (older than kIkPoseDeviationMaxGapMs, in the game's stalls) keeps the decision and the history for up to this much hook
+// time (a call counts at most 0.1 s), instead of releasing the hand and needing kOffHandSteadyFrames + 1 fresh frames to take it back. See OffHand::step.
+constexpr double kOffHandStaleKeepSec = 3.0;
 // F84's same-pass rifle quality activation. Identity/generation changes hard-reset;
 // loss of an otherwise known source releases smoothly. Repeated or old frames never
 // advance the ramp, so draw-follow handoff cannot pop even when contact was already set.
@@ -5432,9 +5435,11 @@ struct OffHand {
     uint32_t lastFrame = 0, item = 0, rigGeneration = 0, fpGeneration = 0, syntheticFrame = 0;
     uint64_t fpRig = 0, nativeEpoch = 0;
     bool haveFrame = false, haveIdentity = false, attached = false, releasing = false, lastSteady = false, lastQualified = false;
+    double staleSec = 0.0;   // F182c: the hook time of the stale stretch the decision has been kept through
     struct Out {
         bool two = false, ok = false, historyReady = false, withinDistance = false, steady = false, allowed = false, qualified = false;
         bool duplicate = false, gapReset = false, identityReset = false, reversed = false, stablePolicy = false;
+        bool kept = false, staleLimit = false;   // F182c: the decision was kept through a stale input this call (ok is false); the stale stretch hit kOffHandStaleKeepSec and the hand is released
         uint8_t historySamples = 0;
         double w = 0.0, dist = 0.0, changeDeg = 0.0;
     };
@@ -5454,7 +5459,10 @@ struct OffHand {
     // explicit one-hand policy, separation limit, disarm or identity change releases it. History advances only on unique P1 frames.
     Out step(double dt, bool armed, bool ok, const float a51[16], const float a52[16], bool allowTwoHand = true,
              uint32_t frame = 0xFFFFFFFFu, uint32_t itemId = 0, uint32_t rigGen = 0, uint64_t fpRigId = 0, uint32_t fpGen = 0,
-             uint64_t acceptedNativeEpoch = 0, bool sourceSuspended = false) noexcept {
+             uint64_t acceptedNativeEpoch = 0, bool sourceSuspended = false, bool staleOnly = false) noexcept {
+        // staleOnly (F182c): ok is false only because the FP snapshot is older than the gap (the pair, the generation and the rig are otherwise readable). An attached hand keeps its decision and its history
+        // through such calls, for up to kOffHandStaleKeepSec of hook time; a fresh call resumes the rule below from the kept history, and a pair that really changed (past kOffHandMaxM, the explicit
+        // one-hand policy, an identity change) releases as it always did once fresh frames show it.
         Out o;
         if (!armed) {
             if (sourceSuspended && acceptedNativeEpoch != 0 && haveIdentity && nativeEpoch == acceptedNativeEpoch &&
@@ -5509,7 +5517,17 @@ struct OffHand {
         }
         if (uniqueFrame) { lastFrame = frame; haveFrame = true; }
         const double d = !uniqueFrame || !(dt > 0.0) ? 0.0 : dt > 0.1 ? 0.1 : dt;
-        if (!allowTwoHand || !ok) clearHistory();
+        bool keepNow = staleOnly && !ok && attached && allowTwoHand;
+        if (keepNow) {
+            staleSec += d;
+            if (staleSec > kOffHandStaleKeepSec) {
+                keepNow = false;   // the stretch is too long to trust the decision: released below, as an unreadable input releases
+                o.staleLimit = true;
+            }
+        } else if (ok || !attached) {
+            staleSec = 0.0;
+        }
+        if (!allowTwoHand || (!ok && !keepNow)) clearHistory();
         o.allowed = allowTwoHand;
         bool steadyNow = false, closeEnough = false;
         if (ok) {
@@ -5553,7 +5571,9 @@ struct OffHand {
             }
         }
         // Invalid inputs, explicit free-hand policy and excess separation release and forget acquisition. The 5-degree check only decides acquisition.
-        if (!o.ok || !allowTwoHand || !closeEnough) {
+        if (keepNow) {
+            o.kept = true;   // F182c: neither released nor re-decided: the decision, the history and the weight's target stand
+        } else if (!o.ok || !allowTwoHand || !closeEnough) {
             if (attached) releasing = true;
             attached = false;
             clearHistory();

@@ -4,8 +4,9 @@
 // spine straighten is one-sided per bone about the body's right axis: written lean = animated - share x max(0, animated - reference), the level's other components as animated, a bone at or
 // behind the reference (looking up) as animated; the rig runs oneSided and applyOneSided on a toy skeleton with a roll and a forward offset in every level (so the bones have x and z parts), on the
 // flight's numbers (all written = animated), on a forward-hunched case, on a mixed case (a turned bone above a bone left as animated), at share 0, then the counters, the line and the stage's
-// source sites. F182c (native_on_foot_f182.h): the left hand stays on a two-handed gun aimed steeply up: the gate (sights, two-handed, pitch >= 45), the held point in the item's frame under an item
-// move, the 3 s limit, the release, nothing outside the gate, the counters and the F67f line's ending, and the source sites.
+// source sites. F182c (native_on_foot_core.h OffHand::step, native_on_foot_f182.h): F69h keeps the left hand on the item through a stale first-person snapshot: a stale-only call keeps the decision and
+// the history (a fresh unchanged pair stays on with no 11 frames to wait for), 3 s of hook time releases (counted), a fresh changed pair frees as before, nothing is kept for what was not on the item;
+// while kept, the left grip target is the last grip point in the item's frame (it moves with the item); the counters and the F67f line's ending, and the source sites.
 #pragma once
 
 #include "../../src/d3d11/journal_loadout.h"
@@ -320,200 +321,252 @@ inline void run182(Check&& check) {
         check(worstLen > 0 && worstLen < 1166 && len < 1166, msg);
     }
 
-    // ---- F182c 1. the gate and the held point ---------------------------------------------------------------------------------------------------------------------------------------------
+    // ---- F182c 1. F69h keeps the decision through a stale snapshot ----------------------------------------------------------------------------------------------------------------------------------
     {
-        check(f182::steepSights(0.5, 45.0) && f182::steepSights(1.0, 74.6) && !f182::steepSights(0.49, 74.6) && !f182::steepSights(1.0, 44.9) && !f182::steepSights(0.0, 90.0) &&
-                  !f182::steepSights(std::nan(""), 60.0) && !f182::steepSights(1.0, std::nan("")) && f182::kSteepDeg == 45.0 && f182::kDetachMin == 0.5 && f182::kHoldMaxSec == 3.0 && f182::kMinSteepCalls == 30,
-              "F182c: the gate is the sights (detach weight 0.5 or more) and the aim pitch 45 deg or more up; a value that is not a number is neither; 3 s of hook time, 30 calls to judge");
-        float g[16] = {};
-        g[9] = static_cast<float>(std::sin(74.6 * kPi / 180.0));
-        g[10] = static_cast<float>(std::cos(74.6 * kPi / 180.0));
-        float gDown[16] = {};
-        gDown[9] = static_cast<float>(-std::sin(23.9 * kPi / 180.0));
-        gDown[10] = static_cast<float>(std::cos(23.9 * kPi / 180.0));
-        float gZero[16] = {};
-        check(eq(f182::aimPitchDeg(g), 74.6, 1e-3) && eq(f182::aimPitchDeg(gDown), -23.9, 1e-3) && std::isnan(f182::aimPitchDeg(gZero)),
-              "F182c: the aim's pitch is read from G's forward row (up positive), as the pin's: +74.6 and -23.9 deg, not a number for a zero row");
+        float a51[16], a52[16], a52far[16], a52turned[16];
+        rigid(0.0, 0.0, 0.30, 1.30, 0.20, a51);
+        rigid(0.0, 0.0, 0.30 + 0.311, 1.30, 0.20, a52);       // the rifle's pair: 31.1 cm apart, a steady relative orientation
+        rigid(0.0, 0.0, 0.30 + 0.60, 1.30, 0.20, a52far);     // the left hand 60 cm away (a reload)
+        rigid(0.0, 45.0, 0.30 + 0.311, 1.30, 0.20, a52turned);   // 311 mm apart, the orientation turned 45 deg against the right's
+        struct Rig {
+            nf::OffHand st;
+            uint32_t frame = 1;
+            const float* a51p = nullptr;
+            nf::OffHand::Out step(bool ok, const float* l, bool stale, double dt = 0.011, uint32_t item = 7, bool allow = true) {
+                return st.step(dt, true, ok, a51p, l, allow, frame++, item, 3, 5ull, 5, 0, false, stale);
+            }
+        };
+        Rig r;
+        r.a51p = a51;
+        // acquired after 11 fresh frames, as always
+        int acquiredAt = 0;
+        nf::OffHand::Out o;
+        for (int i = 1; i <= 60; ++i) {
+            o = r.step(true, a52, false);
+            if (o.two && !acquiredAt) acquiredAt = i;
+        }
+        check(acquiredAt == 11 && o.two && o.w == 1.0 && !o.kept && o.ok && o.historySamples == 11, "F182c: fresh frames acquire the pair after 11 steady frames and the weight rises to 1, as before (nothing kept, nothing stale)");
 
-        float L0[16], R0[16], rel[16], back[16];
+        // a stale call: invalid ONLY for the snapshot's age: the decision, the weight and the history stand
+        const nf::OffHand::Out s1 = r.step(false, a52, true);
+        check(s1.two && s1.kept && !s1.ok && s1.w == 1.0 && s1.stablePolicy && s1.historySamples == 11 && !s1.staleLimit,
+              "F182c: a call invalid only because the FP snapshot is stale keeps the decision (two-handed, weight 1, the stable policy) and the history (11 samples); it is not read (ok false) and counted as kept");
+        // a fresh unchanged pair right after: stays on at once, with no 11 frames to wait for
+        const nf::OffHand::Out f1 = r.step(true, a52, false);
+        check(f1.two && f1.ok && !f1.kept && f1.w == 1.0 && f1.historySamples == 11 && f1.steady, "F182c: a fresh unchanged pair after the stale call stays two-handed at weight 1 at once, the history intact (no 11 frames to wait for)");
+
+        // the old behaviour, for the record: the same call as unreadable for another reason (staleOnly false) releases the hand and needs 11 fresh frames to take it back
+        Rig old;
+        old.a51p = a51;
+        for (int i = 0; i < 60; ++i) old.step(true, a52, false);
+        const nf::OffHand::Out u1 = old.step(false, a52, false);
+        int backAt = 0;
+        for (int i = 1; i <= 30 && !backAt; ++i)
+            if (old.step(true, a52, false).two) backAt = i;
+        check(!u1.two && !u1.kept && u1.historySamples == 0 && backAt == 11,
+              "F182c: an input unreadable for any other reason (not the snapshot's age alone) releases the hand and clears the history as before; taking it back needs 11 fresh frames");
+
+        // the 3 s limit: stale calls of 0.1 s keep it for 3 s of hook time, counted once; then the hand is released; a 5 s freeze counts 0.1 s only
+        Rig lim;
+        lim.a51p = a51;
+        for (int i = 0; i < 60; ++i) lim.step(true, a52, false);
+        const nf::OffHand::Out frz = lim.step(false, a52, true, 5.0);
+        int limitAt = 0, limits = 0, keptCalls = frz.kept ? 1 : 0;
+        nf::OffHand::Out l;
+        for (int i = 1; i <= 50; ++i) {
+            l = lim.step(false, a52, true, 0.1);
+            if (l.staleLimit) { ++limits; if (!limitAt) limitAt = i; }
+            if (l.kept) ++keptCalls;
+        }
+        std::snprintf(msg, sizeof(msg), "F182c: stale calls keep the decision for 3 s of hook time (a call counts at most 0.1 s: a 5 s freeze counted 0.1), %d kept calls, the release counted once at call %d, then the hand is free (two %d)",
+                      keptCalls, limitAt, l.two ? 1 : 0);
+        check(frz.kept && limits == 1 && limitAt >= 29 && limitAt <= 31 && keptCalls >= 29 && keptCalls <= 31 && !l.two && !l.kept, msg);
+        // after the release a fresh call with the pair still there takes it back only through the 11 steady frames
+        int relBack = 0;
+        for (int i = 1; i <= 30 && !relBack; ++i)
+            if (lim.step(true, a52, false).two) relBack = i;
+        check(relBack == 11, "F182c: after the 3 s release the normal rule takes the hand back: 11 fresh steady frames");
+
+        // a fresh changed pair frees as it always did: the left hand leaving the item (60 cm), once fresh frames show it; and an orientation change alone keeps the authority, as before
+        Rig chg;
+        chg.a51p = a51;
+        for (int i = 0; i < 60; ++i) chg.step(true, a52, false);
+        chg.step(false, a52, true);
+        const nf::OffHand::Out gone = chg.step(true, a52far, false);
+        Rig turn;
+        turn.a51p = a51;
+        for (int i = 0; i < 60; ++i) turn.step(true, a52, false);
+        turn.step(false, a52, true);
+        const nf::OffHand::Out turned = turn.step(true, a52turned, false);
+        check(!gone.two && !gone.kept && gone.ok && turned.two && turned.ok,
+              "F182c: after a stale call a fresh pair 60 cm apart frees the hand (a reload), and a fresh pair turned 45 deg stays two-handed (the rule's authority through orientation motion, unchanged)");
+
+        // nothing is kept for a hand that was not on the item: never acquired (a pistol's 55 cm pair), another item or rig, the one-hand policy, disarmed
+        float a52pistol[16];
+        rigid(0.0, 0.0, 0.30 + 0.55, 1.30, 0.20, a52pistol);
+        Rig pis;
+        pis.a51p = a51;
+        for (int i = 0; i < 40; ++i) pis.step(true, a52pistol, false);
+        const nf::OffHand::Out p1 = pis.step(false, a52pistol, true);
+        Rig oth;
+        oth.a51p = a51;
+        for (int i = 0; i < 60; ++i) oth.step(true, a52, false);
+        const nf::OffHand::Out i1 = oth.step(false, a52, true, 0.011, 8);   // another item: the identity change resets
+        Rig pol;
+        pol.a51p = a51;
+        for (int i = 0; i < 60; ++i) pol.step(true, a52, false);
+        const nf::OffHand::Out w1 = pol.step(false, a52, true, 0.011, 7, false);   // the explicit one-hand policy
+        check(!p1.two && !p1.kept && !i1.two && !i1.kept && !w1.two && !w1.kept, "F182c: nothing is kept for a pistol's pair, another item, or the one-hand policy: those release or never acquire as before");
+        // the constant
+        check(nf::kOffHandStaleKeepSec == 3.0, "F182c: the stale keep is 3 s of hook time");
+    }
+
+    // ---- F182c 2. the held grip point in the item's frame --------------------------------------------------------------------------------------------------------------------------------------------
+    {
+        float L0[16], R0[16], rel[16], back[16], zeroM[16] = {};
         rigid(-15.0, 5.0, 0.12, 1.28, 0.45, L0);
         rigid(20.0, -10.0, 0.30, 1.30, 0.20, R0);
-        check(f182::relativeOf(L0, R0, rel) && (f182::leftFrom(rel, R0, back), maxAbsDiff(back, L0) < 1e-5), "F182c: the left target kept in the right target's frame comes back as it was (left = relative x right)");
-        float zeroM[16] = {};
-        check(!f182::relativeOf(L0, zeroM, rel), "F182c: a singular right target makes no relative");
+        check(f182::relativeOf(L0, R0, rel) && (f182::leftFrom(rel, R0, back), maxAbsDiff(back, L0) < 1e-5) && !f182::relativeOf(L0, zeroM, rel),
+              "F182c: the left target kept in the right target's frame comes back as it was (left = relative x right); a singular right target makes no relative");
 
+        float Lstale[16];
+        rigid(80.0, 30.0, 0.9, 1.0, -0.5, Lstale);   // where a stalled frame's left target ends up: nowhere near the gun
         const auto mk = [&](const float* left, const float* right) {
             f182::In in;
             in.armed = in.gun = in.liveOk = true;
+            in.fresh = true;
             in.two = true;
             in.offW = 1.0;
-            in.detachW = 1.0;
-            in.pitchDeg = 74.6;
-            in.dtSec = 0.011;
             in.nowMs = 1000;
             in.item = 7; in.planGen = 3; in.fpGen = 5; in.epoch = 0;
             in.modeLeft = 1; in.modeRight = 1;
             in.left = left; in.right = right;
             return in;
         };
-        const auto freeIn = [&](f182::In in) {
-            in.two = false;
-            in.offW = 0.0;
+        const auto kept = [&](f182::In in) {   // F69h kept the decision through a stale input
+            in.fresh = false;
+            in.kept = true;
+            in.staleAgeMs = 2200.0;
             return in;
         };
 
-        // two-handed calls store the point; steep, not freed, not held
+        // fresh two-handed calls store the point; nothing is held on a fresh call
         f182::State st;
         f182::Out o;
-        bool storedAll = true, steepAll = true, notHeld = true;
+        bool storedAll = true, notHeld = true;
         for (int i = 0; i < 20; ++i) {
             f182::In in = mk(L0, R0);
             in.nowMs = 1000 + 11 * i;
             o = st.step(in);
             storedAll = storedAll && o.stored;
-            steepAll = steepAll && o.steep && !o.freed;
-            notHeld = notHeld && !o.held && o.w == 0.0 && !o.limit;
+            notHeld = notHeld && !o.held && !o.kept && !o.limit;
         }
-        check(storedAll && steepAll && notHeld && st.have, "F182c: while F69h holds the pair at weight 1 the point is stored on every call, the call is steep and not freed, and nothing is held");
+        check(storedAll && notHeld && st.have, "F182c: while F69h reads the pair and holds it at weight 1 the point is stored on every call and nothing is held");
 
-        // F69h lets go (an unreadable input): held on the first call, whole weight, at the stored point, 40 ms old
-        f182::In fin = freeIn(mk(L0, R0));
-        fin.offW = 0.85;   // its ramp falling
-        fin.two = false;
-        fin.nowMs = 1000 + 11 * 19 + 40;
-        o = st.step(fin);
-        check(o.steep && o.freed && o.held && o.w == 1.0 && !o.limit && !o.stored && maxAbsDiff(o.left, L0) < 1e-5 && eq(o.ageMs, 40.0, 1e-9),
-              "F182c: the call F69h lets go of the hand in is held at once: the left target is the stored point at weight 1, the point 40 ms old; the call is counted steep and freed");
+        // a kept call: the left target is the stored point, not the stale snapshot's left target; the point is 40 ms old; it is not overwritten by the stale call
+        f182::In k = kept(mk(Lstale, R0));
+        k.nowMs = 1000 + 11 * 19 + 40;
+        o = st.step(k);
+        check(o.kept && o.held && !o.stored && maxAbsDiff(o.left, L0) < 1e-5 && maxAbsDiff(o.left, Lstale) > 0.5 && eq(o.pointAgeMs, 40.0, 1e-9) && eq(o.staleAgeMs, 2200.0, 1e-9),
+              "F182c: on a call F69h kept through a stale snapshot the left target is the stored grip point (the stale snapshot's left target, far from the gun, does not drag the hand), 40 ms old, the snapshot 2200 ms old");
 
-        // the item moves (the right target and the live left both unreliable): the held left follows the right in the item's frame
+        // the item moves while the snapshot is stale (the right target by a rigid move): the held left follows it, in the item's frame
         float T[16], R1[16], expectL[16];
         rigid(30.0, 8.0, 0.20, -0.10, 0.40, T);
         nf::pfzMul(R0, T, R1);
         nf::pfzMul(L0, T, expectL);
-        f182::In moved = freeIn(mk(L0, R1));
-        moved.nowMs = fin.nowMs + 11;
+        f182::In moved = kept(mk(Lstale, R1));
         o = st.step(moved);
         std::snprintf(msg, sizeof(msg), "F182c: the item moves (the right target by a rigid move): the held left target moves with it, in the item's frame (max element difference %.2e from the left target moved the same way)", maxAbsDiff(o.left, expectL));
         check(o.held && maxAbsDiff(o.left, expectL) < 1e-4 && maxAbsDiff(o.left, L0) > 0.05, msg);
 
-        // the 3 s limit: a freeze does not spend it (a step is held to 0.1 s), 0.1 s steps do; once, then released over 0.15 s and not taken again while the condition holds
-        f182::State s2;
-        for (int i = 0; i < 5; ++i) s2.step(mk(L0, R0));
-        f182::In big = freeIn(mk(L0, R0));
-        big.dtSec = 5.0;
-        o = s2.step(big);
-        f182::In slow = freeIn(mk(L0, R0));
-        slow.dtSec = 0.1;
-        int limitAt = 0, limits = 0, heldAfterLimit = 0;
-        bool heldBefore = o.held;
-        for (int i = 1; i <= 60; ++i) {
-            o = s2.step(slow);
-            if (o.limit) { ++limits; if (!limitAt) limitAt = i; }
-            if (limitAt && i > limitAt && o.held) ++heldAfterLimit;
-        }
-        std::snprintf(msg, sizeof(msg), "F182c: the 3 s limit ends the hold once (at call %d of 0.1 s after a 5 s freeze that counted 0.1 s), the hold falls over the next call (%d held after it) and is not taken again while F69h stays off", limitAt, heldAfterLimit);
-        check(heldBefore && limits == 1 && limitAt >= 29 && limitAt <= 31 && heldAfterLimit <= 2 && !o.held && o.w == 0.0, msg);
-        // F69h taking the pair back ends the stretch: a later release is held again
-        f182::In two = mk(L0, R0);
-        o = s2.step(two);
-        const f182::Out again = s2.step(freeIn(mk(L0, R0)));
-        check(!o.held && o.w == 0.0 && again.held && again.w == 1.0 && !again.limit, "F182c: F69h holding the pair again ends the hold at once (weight 0), and the next release is held afresh");
+        // the point is the last fresh full call's: a later fresh pair with another relative (the hand re-gripped) replaces it
+        float L2[16];
+        rigid(-15.0, 5.0, 0.12, 1.28, 0.55, L2);
+        f182::In regrip = mk(L2, R0);
+        regrip.nowMs = 5000;
+        st.step(regrip);
+        o = st.step(kept(mk(Lstale, R0)));
+        check(o.held && maxAbsDiff(o.left, L2) < 1e-5 && maxAbsDiff(o.left, L0) > 0.05, "F182c: the stored point is the last fresh two-handed call's");
 
-        // the release: the pitch falls under 45 deg while F69h is still off: the weight falls over 0.15 s, the left target still the point's meanwhile
-        f182::State s3;
-        for (int i = 0; i < 5; ++i) s3.step(mk(L0, R0));
-        for (int i = 0; i < 3; ++i) s3.step(freeIn(mk(L0, R0)));
-        f182::In level = freeIn(mk(L0, R0));
-        level.pitchDeg = 30.0;
-        level.dtSec = 0.05;
-        f182::In level3 = level;
-        level3.dtSec = 0.06;
-        const f182::Out r1 = s3.step(level), r2 = s3.step(level), r3 = s3.step(level3);
-        check(r1.held && eq(r1.w, 1.0 - 0.05 / 0.15, 1e-9) && !r1.steep && r2.held && eq(r2.w, 1.0 - 2.0 * 0.05 / 0.15, 1e-9) && !r3.held && r3.w == 0.0,
-              "F182c: when the pitch falls under 45 deg the hold lets go over 0.15 s (weight 1 -> 0.67 -> 0.33 -> 0), the point still the left target while it falls");
+        // no gate on the pitch or the detach weight: the type has neither input; hip or sights, the hold is the same (a kept call is all it needs)
+        check(!o.limit && o.staleAgeMs == 2200.0, "F182c: no pitch or detach gate (the hold needs only the kept decision): the same call at the hip and in the sights holds");
 
-        // nothing outside the gate: a level aim, a detach under 0.5, no sights at all
-        bool outside = true;
-        for (int variant = 0; variant < 3; ++variant) {
-            f182::State s4;
-            for (int i = 0; i < 5; ++i) s4.step(mk(L0, R0));
-            for (int i = 0; i < 20; ++i) {
-                f182::In in = freeIn(mk(L0, R0));
-                if (variant == 0) in.pitchDeg = 20.0;
-                else if (variant == 1) in.detachW = 0.3;
-                else in.detachW = 0.0;
-                const f182::Out q = s4.step(in);
-                outside = outside && !q.held && !q.steep && !q.freed && q.w == 0.0 && !q.limit;
-            }
-        }
-        check(outside, "F182c: a level aim (20 deg), a detach weight under 0.5 and the hip never hold: F69h's decision is the only one, as it was");
+        // the limit the decision's release reports is echoed for the count
+        f182::In lim = kept(mk(Lstale, R0));
+        lim.kept = false;
+        lim.staleLimit = true;
+        o = st.step(lim);
+        check(o.limit && !o.held && !o.kept, "F182c: the call F69h released for staleness after 3 s is counted and not held");
 
-        // a pistol or tool (gun false), unarmed, a hand that was never two-handed, another item or rig, a right target made another way, no right target
-        bool never = true;
+        // not kept: no point; never stored; another item or rig; a right target made another way; no right target; a pistol, tool or unarmed (the point is dropped)
+        f182::State fresh1;
+        o = fresh1.step(kept(mk(Lstale, R0)));
+        check(o.kept && !o.held, "F182c: a kept decision with no stored point (F69h acquired and was stale at once) is kept but not held: the snapshot's own target stands");
+        bool dropped = true;
         {
-            f182::State s5;   // never two-handed: the first acquisition is F69h's alone
-            f182::In in = freeIn(mk(L0, R0));
-            for (int i = 0; i < 10; ++i) {
-                const f182::Out q = s5.step(in);
-                never = never && !q.held && !q.steep && !q.freed;
-            }
+            f182::State s;
+            for (int i = 0; i < 5; ++i) s.step(mk(L0, R0));
+            f182::In other = kept(mk(Lstale, R0));
+            other.item = 8;
+            dropped = dropped && !s.step(other).held;
         }
-        f182::State s6;
-        for (int i = 0; i < 5; ++i) s6.step(mk(L0, R0));
-        f182::In pistol = freeIn(mk(L0, R0));
-        pistol.gun = false;
-        const f182::Out p1 = s6.step(pistol);
-        const f182::Out p2 = s6.step(freeIn(mk(L0, R0)));   // the point was dropped with the gun: nothing to hold
-        f182::State s7;
-        for (int i = 0; i < 5; ++i) s7.step(mk(L0, R0));
-        f182::In unarmed = freeIn(mk(L0, R0));
-        unarmed.armed = false;
-        const f182::Out u1 = s7.step(unarmed);
-        const f182::Out u2 = s7.step(freeIn(mk(L0, R0)));
-        f182::State s8;
-        for (int i = 0; i < 5; ++i) s8.step(mk(L0, R0));
-        f182::In otherItem = freeIn(mk(L0, R0));
-        otherItem.item = 8;
-        const f182::Out i1 = s8.step(otherItem);
-        f182::State s9;
-        for (int i = 0; i < 5; ++i) s9.step(mk(L0, R0));
-        f182::In otherRig = freeIn(mk(L0, R0));
-        otherRig.fpGen = 6;
-        const f182::Out g1 = s9.step(otherRig);
-        f182::State s10;
-        for (int i = 0; i < 5; ++i) s10.step(mk(L0, R0));
-        f182::In otherMode = freeIn(mk(L0, R0));
-        otherMode.modeRight = 3;
-        const f182::Out m1 = s10.step(otherMode);
-        f182::In noRight = freeIn(mk(L0, R0));
-        noRight.liveOk = false;
-        const f182::Out n1 = s10.step(noRight);
-        check(never && !p1.held && !p1.steep && !p2.held && !p2.steep && !u1.held && !u2.held && !i1.held && !i1.steep && !g1.held && !m1.held && !n1.held && m1.w == 0.0 && n1.w == 0.0,
-              "F182c: a pistol or tool, unarmed, a hand never two-handed on this item, another item or rig (the point is dropped), a right target made another way and no right target are never held");
+        {
+            f182::State s;
+            for (int i = 0; i < 5; ++i) s.step(mk(L0, R0));
+            f182::In other = kept(mk(Lstale, R0));
+            other.fpGen = 6;
+            dropped = dropped && !s.step(other).held;
+        }
+        {
+            f182::State s;
+            for (int i = 0; i < 5; ++i) s.step(mk(L0, R0));
+            f182::In other = kept(mk(Lstale, R0));
+            other.modeRight = 3;
+            const bool a = !s.step(other).held;
+            f182::In none = kept(mk(Lstale, R0));
+            none.liveOk = false;
+            dropped = dropped && a && !s.step(none).held;
+        }
+        {
+            f182::State s;
+            for (int i = 0; i < 5; ++i) s.step(mk(L0, R0));
+            f182::In pistol = kept(mk(Lstale, R0));
+            pistol.gun = false;
+            const bool a = !s.step(pistol).held;
+            dropped = dropped && a && !s.step(kept(mk(Lstale, R0))).held;   // the point went with the gun
+            f182::State u;
+            for (int i = 0; i < 5; ++i) u.step(mk(L0, R0));
+            f182::In unarmed = kept(mk(Lstale, R0));
+            unarmed.armed = false;
+            dropped = dropped && !u.step(unarmed).held && !u.step(kept(mk(Lstale, R0))).held;
+        }
+        check(dropped, "F182c: another item or rig, a right target made another way, no right target, a pistol or tool and unarmed are never held (and drop the point)");
     }
 
-    // ---- F182c 2. the counters and the F67f line's ending -------------------------------------------------------------------------------------------------------------------------------------
+    // ---- F182c 3. the counters and the F67f line's ending -------------------------------------------------------------------------------------------------------------------------------------
     {
         f182::Counters c;
         char clause[600];
-        check(f182::formatClause(clause, sizeof(clause), c) == 0 && clause[0] == '\0', "F182c: a window with no steep call has no ending on the F67f line");
-        f182::Out steepOnly, freed, held;
-        steepOnly.steep = true;
-        freed.steep = freed.freed = true;
-        held.steep = held.freed = held.held = true;
-        held.ageMs = 40.0;
-        for (int i = 0; i < 60; ++i) c.add(steepOnly);
-        for (int i = 0; i < 20; ++i) c.add(freed);
-        for (int i = 0; i < 20; ++i) { held.ageMs = 20.0 + 2.0 * i; c.add(held); c.addError(0.30 + 0.02 * i); }
+        check(f182::formatClause(clause, sizeof(clause), c, 0.0, 0) == 0 && clause[0] == '\0', "F182c: a window with no kept call and no release has no ending on the F67f line");
+        f182::Out keptOnly, held;
+        keptOnly.kept = true;
+        keptOnly.staleAgeMs = 100.0;
+        held.kept = held.held = true;
+        for (int i = 0; i < 10; ++i) { keptOnly.staleAgeMs = 100.0 + 10.0 * i; c.add(keptOnly); }
+        for (int i = 0; i < 30; ++i) { held.staleAgeMs = 2000.0 + 20.0 * i; c.add(held); c.addError(0.30 + 0.02 * i); }
         f182::Out lim;
         lim.limit = true;
         c.add(lim);
-        const int n = f182::formatClause(clause, sizeof(clause), c);
-        std::snprintf(msg, sizeof(msg), "F182c: the F67f line's ending names the steep calls (100), those F69h freed the hand in (40), those held (20), the point's age mean/max, the held calls' hand-to-grip error and the limit (%d bytes)", n);
-        check(n > 0 && n < 420 && std::strstr(clause, "; steep two-handed ADS (F182c): 100 calls (the sights, the aim pitch 45 deg or more up), F69h freed the off hand in 40, held on the item by F182c 20 (the pitch over 45 deg), "
-                                                    "its grip point age mean 39 max 58 ms, hand-to-grip error of the held calls mean 0.49 max 0.68 cm, ended by the 3 s limit 1") != nullptr,
+        const int n = f182::formatClause(clause, sizeof(clause), c, 3.9, 500);
+        std::snprintf(msg, sizeof(msg), "F182c: the F67f line's ending names the calls kept through a stale input (40) and the snapshot's age, the releases after 3 s, the calls on the held point, their error against the unheld calls' (%d bytes)", n);
+        check(n > 0 && n < 420 && std::strstr(clause, "; stale grip hold (F182c): kept through a stale FP input 40 calls (stale age mean 1754 max 2580 ms), released for staleness after 3 s 1; the left hand on the held grip point in 30 calls, "
+                                                    "their hand-to-grip error mean 0.59 max 0.88 cm against 3.90 cm on the 500 unheld calls") != nullptr,
               msg);
-        check(c.steep == 100 && c.freed == 40 && c.held == 20 && c.limit == 1 && c.errN == 20, "F182c: the counters keep the steep, freed and held calls, the limit's endings and the error samples");
+        check(c.kept == 40 && c.limit == 1 && c.held == 30 && c.errN == 30, "F182c: the counters keep the kept calls, the releases, the held calls and the error samples");
+        f182::Counters limitOnly;
+        limitOnly.add(lim);
+        check(f182::formatClause(clause, sizeof(clause), limitOnly, 0.0, 0) > 0 && std::strstr(clause, "kept through a stale FP input 0 calls") != nullptr, "F182c: a window with only a release still prints the ending");
         f182::Counters bad;
         bad.addError(std::nan(""));
         check(bad.errN == 0, "F182c: an error that is not a number is not counted");
@@ -521,29 +574,34 @@ inline void run182(Check&& check) {
 
     // ---- sources: the stage and the hook -------------------------------------------------------------------------------------------------------------------------------------------------------
     {
-        const std::string cpp = slurp("src/d3d11/native_on_foot.cpp");
+        const std::string cpp = slurp("src/d3d11/native_on_foot.cpp"), core = slurp("src/d3d11/native_on_foot_core.h");
         const auto has = [&](const std::string& needle) { return cpp.find(needle) != std::string::npos; };
         const auto at = [&](const std::string& needle) { return cpp.find(needle); };
         check(has("const nofoot::f180::OneSided os = nofoot::f180::oneSided(ci.animLean, g_f180.refLean, st.share);") && has("for (int k = 0; k < nofoot::f180::kLevels; ++k) ci.leftAsIs[k] = os.left[k];") &&
                   has("    if (os.any) {") && has("nofoot::f180::applyOneSided(pl.f180, os.cum, g_pfzAnim, count, g_f180Out, g_f180Touched, &touchedN)") && has("    ci.ran = true;\n    ci.weight = os.any ? st.share : 0.0;") &&
                   has("s180.leftAsIs[k] = c180.ran && c180.leftAsIs[k];") && has("if (!(st.share > 0.0) || !g_f180.held.have()) return true;"),
               "F182b: the stage returns at the share 0 or with no reference before the rule; the rule is one-sided (oneSided, applyOneSided), writes nothing when every bone is left as animated, counts the frame as made, and the bend yields only to a straighten that moved something");
-        const size_t bodyDetach = at("const double bodyDetachForCall = pinWanted ?"), block = at("nofoot::f182::Out f182Out;"), sprint = at("const double offWBeforeSprint = offW;"),
-                     stable = at("const bool leftStablePolicy = (offOut.ok && offOut.stablePolicy) || f182Out.held;");
-        check(bodyDetach != std::string::npos && bodyDetach < block && block < stable && stable < sprint && has("static nofoot::f182::State s_f182;") && has("f182Out = s_f182.step(in);") &&
-                  has("in.pitchDeg = in.armed ? nofoot::f182::aimPitchDeg(G.g) : std::nan(\"\");") && has("in.gun = in.armed && offOut.allowed && supportKindForCall == nofoot::kSupportNone && !authoredPistolSupport && !supportCup && !primaryDrawWrite") &&
-                  has("in.two = offOut.ok && offOut.two;") && has("in.offW = offOut.w;") && has("in.detachW = bodyDetachForCall;") && has("std::memcpy(effectiveHand[0], f182Out.left, sizeof(effectiveHand[0]));") &&
-                  has("offW = std::max(offW, f182Out.w);"),
-              "F182c: the hold sits after the sights' detach weight is known and before F167's release: F69h's weight and the left target are replaced only by a held point (gun, two-handed, detach and pitch gates)");
-        check(has("physicalPoleActive, leftStablePolicy, rifleStableAuthority, bodyDetachForCall,") && has("leftStablePolicy);") && !has("offOut.ok && offOut.stablePolicy);") &&
-                  !has("physicalPoleActive, offOut.ok && offOut.stablePolicy,"),
-              "F182c: a hand held on the item keeps the stable pole it had: both users of F69h's stable policy read the held one too");
-        check(has("const bool offInputValid = armsOk && fpHandsGenerationOk && fpHands.valid[0] && fpHands.valid[1] && fpAge <= nofoot::kIkPoseDeviationMaxGapMs;") &&
-                  has("offOut = s_off.step(dtOff, armedNow, offInputValid, fpm[0], fpm[1], !(relaxLeftArmForItem && !f83JournalPolicyHold), poseFrame,") && has("double offW = armedNow ? offOut.w : 1.0;"),
-              "F182c: F69h's own decision (its input, the step, the weight) is unchanged: the hold only replaces what it frees");
-        check(has("fw.f182.add(f182Out);") && has("if (side == 0 && f182Out.held) fw.f182.addError(o.gripErr);") && has("nofoot::f182::formatClause(f182Clause, sizeof(f182Clause), w.f182);") &&
-                  has("G %llu (oldest %.0f ms)%s\",") && has("w.staleG), w.gAgeMax, f182Clause);") && has("nofoot::f182::Counters f182;") && has("#include \"native_on_foot_f182.h\""),
-              "F182c: the F67f window counts the steep, freed and held calls and the held calls' error, and the line ends with the clause");
+        check(has("const bool offStaleOnly = armsOk && fpHandsGenerationOk && fpHands.valid[0] && fpHands.valid[1] && fpAge > nofoot::kIkPoseDeviationMaxGapMs;") &&
+                  has("const bool offInputValid = armsOk && fpHandsGenerationOk && fpHands.valid[0] && fpHands.valid[1] && fpAge <= nofoot::kIkPoseDeviationMaxGapMs;") &&
+                  has("f83NativeEpochIdentity ? f83SelectionForCall.epoch : 0, f83SelectionSuspended, offStaleOnly);") && has("double offW = armedNow ? offOut.w : 1.0;"),
+              "F182c: F69h is given the snapshot's staleness apart from its other reasons for an unreadable input (offStaleOnly: the pair, the generation and the rig readable, the age over the gap)");
+        check(has("const bool offReadable = offOut.ok || offOut.kept;") && has("exactRifleForCall && offReadable && offOut.stablePolicy && !primaryDrawWrite ?") && has("const bool leftStablePolicy = offReadable && offOut.stablePolicy;") &&
+                  has("sample.leftStablePolicy = offReadable && offOut.stablePolicy;") && has("leftStablePolicy);") && !has("offOut.ok && offOut.stablePolicy);") && !has("physicalPoleActive, offOut.ok && offOut.stablePolicy,"),
+              "F182c: a decision kept through a stale input keeps the stable pole and the rifle's quality it had (the pole's eligibility, the pin's stable policy, the rifle quality and the sample read offReadable)");
+        const size_t offStep = at("offOut = s_off.step(dtOff"), block = at("nofoot::f182::Out f182Out;"), sprint = at("const double offWBeforeSprint = offW;"), stable = at("const bool leftStablePolicy = offReadable");
+        check(offStep != std::string::npos && offStep < block && block < stable && stable < sprint && has("static nofoot::f182::State s_f182;") && has("f182Out = s_f182.step(in);") &&
+                  has("in.gun = in.armed && offOut.allowed && supportKindForCall == nofoot::kSupportNone && !authoredPistolSupport && !supportCup && !primaryDrawWrite") && has("in.fresh = offOut.ok;") &&
+                  has("in.two = offOut.two;") && has("in.kept = offOut.kept;") && has("in.staleLimit = offOut.staleLimit;") && has("in.staleAgeMs = static_cast<double>(fpAge);") &&
+                  has("std::memcpy(effectiveHand[0], f182Out.left, sizeof(effectiveHand[0]));") && !has("nofoot::f182::aimPitchDeg") && !has("steepSights") && !has("offW = std::max(offW, f182Out.w);"),
+              "F182c: the hold sits after F69h's step and before F167's release, takes F69h's decision (kept, fresh, two-handed), replaces only the left target on a kept call, and has no pitch or detach gate");
+        check(has("fw.f182.add(f182Out);") && has("if (side == 0 && f182Out.held) fw.f182.addError(o.gripErr);") && has("const uint64_t f182UnheldN = w.errN[0] > w.f182.errN ? w.errN[0] - w.f182.errN : 0;") &&
+                  has("nofoot::f182::formatClause(f182Clause, sizeof(f182Clause), w.f182, f182UnheldN ?") && has("G %llu (oldest %.0f ms)%s\",") && has("w.staleG), w.gAgeMax, f182Clause);") &&
+                  has("nofoot::f182::Counters f182;") && has("#include \"native_on_foot_f182.h\""),
+              "F182c: the F67f window counts the kept calls, the releases, the held calls and their error against the unheld calls', and the line ends with the clause");
+        check(core.find("constexpr double kOffHandStaleKeepSec = 3.0;") != std::string::npos && core.find("bool sourceSuspended = false, bool staleOnly = false) noexcept {") != std::string::npos &&
+                  core.find("bool keepNow = staleOnly && !ok && attached && allowTwoHand;") != std::string::npos && core.find("if (!allowTwoHand || (!ok && !keepNow)) clearHistory();") != std::string::npos &&
+                  core.find("        if (keepNow) {\n            o.kept = true;") != std::string::npos && core.find("} else if (!o.ok || !allowTwoHand || !closeEnough) {") != std::string::npos,
+              "F182c: OffHand::step keeps an attached decision and its history through a stale-only input (up to 3 s), and releases for every other unreadable input, a pair past 40 cm or the one-hand policy as before");
     }
 }
 

@@ -14864,53 +14864,46 @@ def _hj_f180b_spine(rows, ctx):
     return ("OK", text)
 
 
-# F182c: the left hand stays on a two-handed gun aimed steeply up (formatClause in src/d3d11/native_on_foot_f182.h, the ending of the F67f line). The ending is printed only for a window with a
-# steep two-handed ADS call, so the F67f line without it (any window of a flat or hip flight, or a build before F182) is a "plain" row: it tells an idle flight from a rule that no longer matches.
-# The F67f line is the detail log's (needs_detail), as F69h's is.
+# F182c: F69h keeps the left hand on the item through a stale first-person snapshot (formatClause in src/d3d11/native_on_foot_f182.h, the ending of the F67f line). The ending is printed only for a window
+# with a call kept through a stale input (or a release for staleness), so the F67f line without it (any window without one, or a build before F182) is a "plain" row: it tells an idle flight from a
+# rule that no longer matches. The F67f line is the detail log's (needs_detail), as F69h's is.
 H182C_LABEL = "native on foot armed arms (F67f)"
-H182C_RE = (r"native on foot armed arms \(F67f\): .*?; steep two-handed ADS \(F182c\): (?P<steep>\d+) calls \(the sights, the aim pitch 45 deg or more up\), F69h freed the off hand in (?P<freed>\d+), "
-            r"held on the item by F182c (?P<held>\d+) \(the pitch over 45 deg\), its grip point age mean (?P<agem>[\d.]+) max (?P<agex>[\d.]+) ms, hand-to-grip error of the held calls "
-            r"mean (?P<errm>[\d.]+) max (?P<errx>[\d.]+) cm, ended by the (?P<lims>[\d.]+) s limit (?P<limit>\d+)")
+H182C_RE = (r"native on foot armed arms \(F67f\): .*?; stale grip hold \(F182c\): kept through a stale FP input (?P<kept>\d+) calls \(stale age mean (?P<agem>[\d.]+) max (?P<agex>[\d.]+) ms\), "
+            r"released for staleness after (?P<lims>[\d.]+) s (?P<limit>\d+); the left hand on the held grip point in (?P<held>\d+) calls, their hand-to-grip error mean (?P<errm>[\d.]+) "
+            r"max (?P<errx>[\d.]+) cm against (?P<unm>[\d.]+) cm on the (?P<unn>\d+) unheld calls")
 H182C_PLAIN_RE = r"native on foot armed arms \(F67f\): (?!.*F182c)"   # an ending that names F182c and does not match the pattern above is neither: unparsed
-H182C_MIN_STEEP = 30       # fewer steep two-handed ADS calls than this are too few to judge
-H182C_MIN_FREED = 5        # F69h freed the hand in this many steep calls and the hold held none: the hold never applied
-H182C_HELD_CM = 1.0        # the held calls' mean hand-to-grip error under this is a hand on the point
+H182C_TOL_CM = 2.0         # the held calls' mean hand-to-grip error within this of the unheld calls' mean is a hand on the point
+H182C_MIN_KEPT = 5         # the decision was kept in this many calls and the held point was the target in none: the hold did nothing
 
 
-def _hj_f182c_steep_grip(rows, ctx):
-    """F182c: the left hand stays on a two-handed gun aimed steeply up. The flight edvr_gfx_20261030_115059 (the plasma shotgun, aim pitch +74.6) had F69h free the off hand in 4 to 9 calls of every
-    window (the FP pair 31.1 cm apart and steady all the while: the input was unreadable, the FP snapshot older than 100 ms in the game's stalls and EDVR's own 1.15 s dump ticks, and 11 fresh
-    frames are needed to take the hand back). In the sights (detach 0.5 or more) with the aim pitch 45 deg or more up and a grip point stored from F69h's last full two-handed call on the item,
-    the left grip target is that point, kept in the right target's frame, while F69h does not hold the pair (at most 3 s of hook time, counted). Reads the ending of the F67f line: the steep
-    two-handed ADS calls, those F69h freed the hand in, those held, the stored point's age (mean, largest), the held calls' hand-to-grip error (mean, largest) and the holds the 3 s limit ended.
-    IDLE with no steep call (an F67f line without the ending is not a verdict) and under 30 steep calls; NEVER APPLIED when F69h freed the hand in 5 or more steep calls and none was held; PARTIAL
-    when the held calls' mean error is 1 cm or more or the limit ended a hold; OK otherwise (a hand F69h never freed needed no hold)."""
+def _hj_f182c_stale_grip(rows, ctx):
+    """F182c: F69h keeps the left hand on the item through a stale first-person snapshot. The flight edvr_gfx_20261030_115059 (the plasma shotgun) had F69h free the off hand in 4 to 9 calls of every
+    window while the FP pair read 31.1 cm apart and steady: the input was unreadable only because the FP snapshot was older than 100 ms (the game's stalls and EDVR's own 1.15 s dump ticks), and
+    11 fresh frames are needed to take the hand back. An input invalid only for the snapshot's age now keeps the decision and the history for up to 3 s of hook time, and while it does the left grip
+    target is the last grip point the hand had on the item, kept in the item's frame. Reads the ending of the F67f line: the calls kept (and the snapshot's age), the releases after 3 s, the calls on
+    the held point, their hand-to-grip error (mean, largest) and the same windows' unheld solved left calls' mean to judge it against. IDLE with no stale call kept (an F67f line without the ending
+    is not a verdict); OK when the held calls' mean error is within 2 cm of the unheld mean; PARTIAL when it is more, or when 5 or more calls were kept and the held point was the target in none."""
     sec, plain = rows.get("sec", []), rows.get("plain", [])
     if not sec:
         if not plain:
             return None
-        return ("IDLE", "no steep two-handed ADS call (the sights, the aim pitch 45 deg or more up) in %d F67f window(s): nothing to hold" % len(plain))
-    steep, freed, held, limit = (sum(int(r[k]) for r in sec) for k in ("steep", "freed", "held", "limit"))
+        return ("IDLE", "no call kept the off hand through a stale FP snapshot in %d F67f window(s): nothing to hold" % len(plain))
+    kept, limit, held, unn = (sum(int(r[k]) for r in sec) for k in ("kept", "limit", "held", "unn"))
     errm = sum(int(r["held"]) * float(r["errm"]) for r in sec) / held if held else 0.0
-    agem = sum(int(r["held"]) * float(r["agem"]) for r in sec) / held if held else 0.0
+    unm = sum(int(r["unn"]) * float(r["unm"]) for r in sec) / unn if unn else 0.0
+    agem = sum(int(r["kept"]) * float(r["agem"]) for r in sec) / kept if kept else 0.0
     errx, agex = max(float(r["errx"]) for r in sec), max(float(r["agex"]) for r in sec)
-    text = ("%d s: %d steep two-handed ADS calls; F69h freed the off hand in %d; the left hand held on the item by F182c in %d (its grip point age mean %.0f max %.0f ms), hand-to-grip error "
-            "of the held calls mean %.2f max %.2f cm; the 3 s limit ended %d hold(s)" % (_hsecs(sec), steep, freed, held, agem, agex, errm, errx, limit))
-    if freed >= H182C_MIN_FREED and not held:
-        return ("NEVER APPLIED", text + "; F69h freed the off hand in %d steep calls and the hold held none (no stored grip point, or the right target was made another way)" % freed)
-    if steep < H182C_MIN_STEEP:
-        return ("IDLE", text + "; under %d steep two-handed ADS calls: little to judge" % H182C_MIN_STEEP)
-    bad = []
-    if held and errm >= H182C_HELD_CM:
-        bad.append("the held calls' hand-to-grip error averaged %.2f cm (1 cm or more: the arm does not reach the held point)" % errm)
-    if limit:
-        bad.append("the 3 s limit ended %d hold(s) (F69h did not take the hand back in 3 s)" % limit)
-    if bad:
-        return ("PARTIAL", text + "; " + "; ".join(bad))
-    if not held:
-        return ("OK", text + "; the off hand was never freed in these calls: the hold had nothing to do")
+    text = ("%d s: F69h kept the off hand through a stale FP input in %d calls (stale age mean %.0f max %.0f ms), released for staleness after 3 s %d time(s); the left hand on the held grip point in "
+            "%d calls, their hand-to-grip error mean %.2f max %.2f cm against %.2f cm on %d unheld calls" % (_hsecs(sec), kept, agem, agex, limit, held, errm, errx, unm, unn))
+    if not kept:
+        return ("IDLE", text + "; no call was kept (only a release was logged)")
+    if kept >= H182C_MIN_KEPT and not held:
+        return ("PARTIAL", text + "; the decision was kept in %d calls and the held grip point was the target in none (no stored point, or the right target was made another way)" % kept)
+    if held and unn and errm > unm + H182C_TOL_CM:
+        return ("PARTIAL", text + "; the held calls' hand-to-grip error averaged %.2f cm, more than %.0f cm over the unheld calls' %.2f cm (the arm does not reach the held point)" % (errm, H182C_TOL_CM, unm))
+    if held and not unn:
+        return ("OK", text + "; no unheld solved left call in these windows to compare with")
     return ("OK", text)
-
 
 def _hj_f95c_head_shadow(rows, ctx):
     """F95c: the head kept in the shadows. Per second: the local avatar's visibility calls, how many ran the head as shadow-only, the (head instance, view) pairs
@@ -16498,10 +16491,10 @@ HEALTH_RULES = (
         ("sec", H180B_RE),
         ("dial", H180B_DIAL_RE),
     ), _hj_f180b_spine),
-    _hrule("steep ADS grip (F182c)", ("F67f",), (H182C_LABEL,), (
+    _hrule("stale grip hold (F182c)", ("F67f",), (H182C_LABEL,), (
         ("sec", H182C_RE),
         ("plain", H182C_PLAIN_RE),
-    ), _hj_f182c_steep_grip, needs_detail=True),
+    ), _hj_f182c_stale_grip, needs_detail=True),
     _hrule("left elbow (F98a)", ("F98a", "F159"), ("native on foot left elbow (F98a)", "native on foot left elbow pole (F159)", "native on foot left elbow seed (F159)"), (
         ("sec", H98A_SEC_RE),
         # F159: the left elbow's stable pole in the same window (a line of its own: F98a's has no room under the log's 1200 bytes), and each seed's birth
@@ -19221,33 +19214,33 @@ def self_test_health():
               has=["; left as animated (the bone leaned back of the reference, frames): spine 16 11, spine 21 22, chest 24 33, neck 34 44"], lacks=["UNPARSED"])
         check("F182b spine: a line from a build before F182 (no ending) still parses and says nothing of it", [spine180(old=True)], 0, [("OK", F180B)], lacks=["UNPARSED", "left as animated"])
 
-        # ---- F182c: the left hand stays on a two-handed gun aimed steeply up (the ending of the F67f line) ----
-        F182C = "steep ADS grip (F182c)"
+        # ---- F182c: F69h keeps the left hand on the item through a stale first-person snapshot (the ending of the F67f line) ----
+        F182C = "stale grip hold (F182c)"
 
-        def f67f182(steep=None, freed=0, held=0, agem=40.0, agex=120.0, errm=0.4, errx=0.9, limit=0):
-            """F67f's line from the DLL's own format, with F182c's ending (formatClause, native_on_foot_f182.h) when steep is given (None: a window with no steep call, the ending empty)."""
-            clause = "" if steep is None else R182("; steep two-handed ADS (F182c): %llu calls", steep, freed, held, agem, agex, errm, errx, 3.0, limit)
+        def f67f182(kept=None, agem=900.0, agex=2500.0, limit=0, held=0, errm=0.5, errx=0.9, unm=0.6, unn=80):
+            """F67f's line from the DLL's own format, with F182c's ending (formatClause, native_on_foot_f182.h) when kept is given (None: a window with no stale call, the ending empty)."""
+            clause = "" if kept is None else R182("; stale grip hold (F182c): kept through a stale FP input %llu calls", kept, agem, agex, 3.0, limit, held, errm, errx, unm, unn)
             return R("native on foot armed arms (F67f): %llu armed calls (ramp complete)", 90, 90, 90, 0, "", 90, 0, "", 0.4, 0.9, 0.3, 0.6, 0.0, 0.0, 0, 0, 90, 0, 0.0, 0.0, 0, 16.0, 0, 16.0, clause)
 
-        check("F182c grip: the hold held the left hand in the steep calls F69h freed it in, the held error under 1 cm",
-              [f67f182(60, 10, 10), f67f182(60, 12, 12, errm=0.6, errx=0.95)], 0, [("OK", F182C)],
-              has=["2 s: 120 steep two-handed ADS calls; F69h freed the off hand in 22; the left hand held on the item by F182c in 22 (its grip point age mean 40 max 120 ms), hand-to-grip error of the "
-                   "held calls mean 0.51 max 0.95 cm; the 3 s limit ended 0 hold(s)"], lacks=["UNPARSED", "NEVER", "PARTIAL"])
-        check("F182c grip: F67f lines with no steep call are idle (the ending is empty: nothing to hold)", [f67f182(), f67f182()], 0, [("IDLE", F182C)],
-              has=["no steep two-handed ADS call (the sights, the aim pitch 45 deg or more up) in 2 F67f window(s): nothing to hold"], lacks=["UNPARSED", "NEVER"])
-        check("F182c grip: F69h freed the hand in 20 steep calls and none was held never applied", [f67f182(60, 20, 0, agem=0.0, agex=0.0, errm=0.0, errx=0.0)], 3, [("NEVER APPLIED", F182C)],
-              has=["F69h freed the off hand in 20 steep calls and the hold held none"], lacks=["UNPARSED"])
-        check("F182c grip: the held calls' error of 3.9 cm (the arm does not reach the point) is partial", [f67f182(60, 10, 10, errm=3.9, errx=5.0)], 0, [("PARTIAL", F182C)],
-              has=["the held calls' hand-to-grip error averaged 3.90 cm (1 cm or more: the arm does not reach the held point)"], lacks=["UNPARSED", "NEVER"])
-        check("F182c grip: a hold the 3 s limit ended is partial", [f67f182(60, 10, 10, limit=1)], 0, [("PARTIAL", F182C)],
-              has=["the 3 s limit ended 1 hold(s) (F69h did not take the hand back in 3 s)"], lacks=["UNPARSED", "NEVER"])
-        check("F182c grip: steep calls F69h never freed the hand in need no hold (OK, said so)", [f67f182(60, 0, 0, agem=0.0, agex=0.0, errm=0.0, errx=0.0)], 0, [("OK", F182C)],
-              has=["the off hand was never freed in these calls: the hold had nothing to do"], lacks=["UNPARSED", "NEVER", "PARTIAL"])
-        check("F182c grip: under 30 steep calls is too few to judge", [f67f182(10, 2, 2)], 0, [("IDLE", F182C)], has=["under 30 steep two-handed ADS calls: little to judge"], lacks=["UNPARSED", "NEVER"])
-        check("F182c grip: an ending that drifted from its pattern is unparsed (not read as a plain window)", [f67f182(60, 10, 10).replace("held on the item by F182c", "kept on the item by F182c")], 4, [("UNPARSED", F182C)])
-        check("F182c grip: no F67f line at all is not present (no verdict row)", [f90_part()], 0, [("OK", F90S)],
+        check("F182c stale hold: the held calls' error within 2 cm of the unheld calls' (0.6 against 0.5) is OK",
+              [f67f182(8, held=8), f67f182(6, held=6, errm=0.7, errx=1.4)], 0, [("OK", F182C)],
+              has=["2 s: F69h kept the off hand through a stale FP input in 14 calls (stale age mean 900 max 2500 ms), released for staleness after 3 s 0 time(s); the left hand on the held grip point in 14 calls, "
+                   "their hand-to-grip error mean 0.59 max 1.40 cm against 0.60 cm on 160 unheld calls"], lacks=["UNPARSED", "NEVER", "PARTIAL"])
+        check("F182c stale hold: F67f lines with no stale call kept are idle (the ending is empty: nothing to hold)", [f67f182(), f67f182()], 0, [("IDLE", F182C)],
+              has=["no call kept the off hand through a stale FP snapshot in 2 F67f window(s): nothing to hold"], lacks=["UNPARSED", "NEVER"])
+        check("F182c stale hold: the same arm reaches the held point as badly as the unheld ones (3.9 against 3.9) is OK: the judge is against the window's normal, not a fixed 1 cm",
+              [f67f182(8, held=8, errm=3.9, errx=4.5, unm=3.9)], 0, [("OK", F182C)], lacks=["UNPARSED", "NEVER", "PARTIAL"])
+        check("F182c stale hold: held calls 6.5 cm off against 3.9 on the unheld (over 2 cm worse) is partial", [f67f182(8, held=8, errm=6.5, errx=8.0, unm=3.9)], 0, [("PARTIAL", F182C)],
+              has=["the held calls' hand-to-grip error averaged 6.50 cm, more than 2 cm over the unheld calls' 3.90 cm (the arm does not reach the held point)"], lacks=["UNPARSED", "NEVER"])
+        check("F182c stale hold: calls kept and the held point the target in none is partial", [f67f182(9, held=0, errm=0.0, errx=0.0)], 0, [("PARTIAL", F182C)],
+              has=["the decision was kept in 9 calls and the held grip point was the target in none"], lacks=["UNPARSED", "NEVER"])
+        check("F182c stale hold: a release after 3 s is counted in the text and does not change an OK", [f67f182(30, limit=1, held=30)], 0, [("OK", F182C)],
+              has=["released for staleness after 3 s 1 time(s)"], lacks=["UNPARSED", "NEVER", "PARTIAL"])
+        check("F182c stale hold: held calls with no unheld solved call in the window have nothing to compare with (OK, said so)", [f67f182(8, held=8, unm=0.0, unn=0)], 0, [("OK", F182C)],
+              has=["no unheld solved left call in these windows to compare with"], lacks=["UNPARSED", "NEVER", "PARTIAL"])
+        check("F182c stale hold: an ending that drifted from its pattern is unparsed (not read as a plain window)", [f67f182(8, held=8).replace("kept through a stale FP input", "carried through a stale FP input")], 4, [("UNPARSED", F182C)])
+        check("F182c stale hold: no F67f line at all is not present (no verdict row)", [f90_part()], 0, [("OK", F90S)],
               lacks=[row("OK", F182C), row("IDLE", F182C), row("PARTIAL", F182C), row("UNPARSED", F182C), row("NEVER APPLIED", F182C)])
-
         # ---- left elbow (F98a): the left arm with a weapon drawn ----
         F98 = "left elbow (F98a)"
 

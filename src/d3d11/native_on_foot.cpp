@@ -18813,7 +18813,7 @@ struct F67fWin {
     // relative to 51 over the last 10 frames (deg), calls two-handed (decision), ramping (weight between 0 and 1), free (weight 0), decision flips, the weight's sum.
     uint64_t offN = 0, offTwo = 0, offRamp = 0, offFree = 0, offFlips = 0, offUnread = 0;
     double offDistSum = 0.0, offDistMin = 0.0, offDistMax = 0.0, offChangeMax = 0.0, offWSum = 0.0;
-    nofoot::f182::Counters f182;   // F182c: the steep two-handed ADS calls, those F69h freed the hand in, those held on the item, the stored point's age and the held calls' hand-to-grip error
+    nofoot::f182::Counters f182;   // F182c: the calls F69h kept the off hand through a stale FP input (and the snapshot's age), the stretches released after 3 s, the calls on the held grip point and their hand-to-grip error
 };
 std::atomic<uint32_t> g_f67fSeq{0};
 F67fWin g_f67f;
@@ -19791,9 +19791,11 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
         const double dtOff = s_offQpc && q > s_offQpc ? static_cast<double>(q - s_offQpc) / static_cast<double>(f66QpcFreq()) : 0.0;
         s_offQpc = q;
         const bool offInputValid = armsOk && fpHandsGenerationOk && fpHands.valid[0] && fpHands.valid[1] && fpAge <= nofoot::kIkPoseDeviationMaxGapMs;
+        // F182c: invalid ONLY for the snapshot's age (the game's stall): F69h keeps its decision and history through it for up to 3 s of hook time instead of releasing the hand
+        const bool offStaleOnly = armsOk && fpHandsGenerationOk && fpHands.valid[0] && fpHands.valid[1] && fpAge > nofoot::kIkPoseDeviationMaxGapMs;
         offOut = s_off.step(dtOff, armedNow, offInputValid, fpm[0], fpm[1], !(relaxLeftArmForItem && !f83JournalPolicyHold), poseFrame,
                             itemSerialForCall, pl.generation, fpHands.x, fpHands.generation,
-                            f83NativeEpochIdentity ? f83SelectionForCall.epoch : 0, f83SelectionSuspended);
+                            f83NativeEpochIdentity ? f83SelectionForCall.epoch : 0, f83SelectionSuspended, offStaleOnly);
         if (!armedNow) s_offTwoPrev = false;
     }
     const bool physicalPoleActive = armedNow && armsOk && mode == 3 && writeOk;
@@ -19806,6 +19808,7 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
             s_f159Poles.gone(beginWhy, now);
     }
     double offW = armedNow ? offOut.w : 1.0;
+    const bool offReadable = offOut.ok || offOut.kept;   // F182c: a decision kept through a stale input is as good as a read one for the pole and the rifle's quality
     const bool offFlip = armedNow && offOut.ok && offOut.two != s_offTwoPrev;
     if (armedNow && offOut.ok) s_offTwoPrev = offOut.two;
     const nofoot::SupportItem supportKind = supportKindForCall;
@@ -19999,7 +20002,7 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
     double rifleQualityDt = 0.0;
     if (s_rifleQualityQpc && rifleQualityQpc > s_rifleQualityQpc)
         rifleQualityDt = std::min(0.05, static_cast<double>(f30QpcUs(rifleQualityQpc - s_rifleQualityQpc)) * 1e-6);
-    const double wantedRifleQuality = pinWanted && exactRifleForCall && offOut.ok && offOut.stablePolicy && !primaryDrawWrite ? nofoot::unit01(offOut.w) : 0.0;
+    const double wantedRifleQuality = pinWanted && exactRifleForCall && offReadable && offOut.stablePolicy && !primaryDrawWrite ? nofoot::unit01(offOut.w) : 0.0;
     const double rifleQualityWeight = s_rifleQuality.step(rifleQualityIdentityKnown, itemSerialForCall, rifleQualityEpochKnown, rifleQualityEpoch,
                                                            pl.generation, fpHands.generation, poseFrame, rifleQualityDt, wantedRifleQuality);
     if (poseFrame != 0xFFFFFFFFu && poseFrame != rifleQualityPriorFrame && s_rifleQuality.lastFrame == poseFrame)
@@ -20045,25 +20048,23 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
             static_cast<double>(armedW), currentArmedEnvelope * offOut.w, effectiveLeft, effectiveRight);
     }
     const double bodyDetachForCall = pinWanted ? nofoot::unit01(static_cast<double>(g_bodyDetachW.load(std::memory_order_relaxed))) : 0.0;
-    // F182c: the left hand stays on a two-handed gun aimed steeply up. In the sights (detach 0.5 or more) with the aim pitch at 45 deg or more up, where F69h does not hold the pair fully (its input
-    // was unreadable: the FP snapshot older than the gap in a stall, see native_on_foot_f182.h) the left grip target is the last one F69h held, kept in the right target's frame (the item's), and the
-    // off hand's weight is the larger of F69h's and the hold's. Elsewhere (the hip, a level aim, pistols, tools, the draw, the cup) nothing here changes: F69h rules, bit for bit.
+    // F182c: F69h kept the off hand through a stale FP snapshot (offOut.kept: the decision stands, OffHand::step). While it did, the left grip target is the last one F69h held on the item, kept in the
+    // right target's frame (the item's), so the game's stalled frame does not drag the hand off the gun. Any two-handed gun, hip or sights; F69h's weight is its own (attached, 1). Pistols, tools,
+    // the draw and the cup are not touched, and a call F69h read fresh is not either: nothing here changes then, bit for bit.
     nofoot::f182::Out f182Out;
     {
         static nofoot::f182::State s_f182;
-        static uint64_t s_f182Qpc = 0;
-        const uint64_t q = f30Qpc();
         nofoot::f182::In in;
-        in.dtSec = s_f182Qpc && q > s_f182Qpc ? static_cast<double>(q - s_f182Qpc) / static_cast<double>(f66QpcFreq()) : 0.0;
-        s_f182Qpc = q;
         in.armed = armedNow && armsOk && G.g[15] != 0.0f;
         in.gun = in.armed && offOut.allowed && supportKindForCall == nofoot::kSupportNone && !authoredPistolSupport && !supportCup && !primaryDrawWrite && !f83SelectionSuspended &&
                  targetMode[0] != 2 && targetMode[0] != 3;
         in.liveOk = effectiveHandOk[0] && effectiveHandOk[1];
-        in.two = offOut.ok && offOut.two;
+        in.fresh = offOut.ok;
+        in.two = offOut.two;
+        in.kept = offOut.kept;
+        in.staleLimit = offOut.staleLimit;
         in.offW = offOut.w;
-        in.detachW = bodyDetachForCall;
-        in.pitchDeg = in.armed ? nofoot::f182::aimPitchDeg(G.g) : std::nan("");
+        in.staleAgeMs = static_cast<double>(fpAge);
         in.nowMs = now;
         in.item = itemSerialForCall;
         in.planGen = pl.generation;
@@ -20077,11 +20078,9 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
         if (f182Out.held) {
             std::memcpy(effectiveHand[0], f182Out.left, sizeof(effectiveHand[0]));
             effectiveHandOk[0] = ikMatrixSane(effectiveHand[0]);
-            offW = std::max(offW, f182Out.w);
         }
     }
-    const bool leftStablePolicy = (offOut.ok && offOut.stablePolicy) || f182Out.held;   // F182c: a hand held on the item keeps the stable pole it had
-    // F167: the pistol sprint release (native_on_foot_f167.h). A pistol drawn and the body sprinting (the pin's low-passed AMC speed): the left hand lets go of the grip. Its solve weight is
+    const bool leftStablePolicy = offReadable && offOut.stablePolicy;   // F182c: a decision kept through a stale input keeps the stable pole it had    // F167: the pistol sprint release (native_on_foot_f167.h). A pistol drawn and the body sprinting (the pin's low-passed AMC speed): the left hand lets go of the grip. Its solve weight is
     // offW times the armed envelope, so a factor of 1 less the release weight on offW takes the side from the grip (1) to not solved and not written (0), where the game's own animated
     // arm draws with its swing; in between the hand target, the swivel and the reach assist blend from the animation to the grip. The right hand stays. The sights hold the grip (the
     // release is capped at 1 less the detach weight). Any other item and an unarmed call have release 0: offW is multiplied by exactly 1 and nothing else here runs.
@@ -22298,7 +22297,7 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
         sample.targetMode[1] = targetMode[1];
         sample.leftWrote = so[0].wrote;
         sample.rightWrote = so[1].wrote;
-        sample.leftStablePolicy = offOut.ok && offOut.stablePolicy;
+        sample.leftStablePolicy = offReadable && offOut.stablePolicy;
         sample.leftSolveWeight = so[0].wArm;
         sample.reachMeasured = pinCall.reachMeasured;
         sample.reachActive = pinCall.reachActive;
@@ -23543,8 +23542,9 @@ void f67fLine(uint64_t now) noexcept {
     }
     const double en0 = w.errN[0] ? static_cast<double>(w.errN[0]) : 1.0, en1 = w.errN[1] ? static_cast<double>(w.errN[1]) : 1.0;
     const double sn = w.shortN ? static_cast<double>(w.shortN) : 1.0;
-    char f182Clause[480];   // F182c: the steep two-handed ADS calls and the hold, empty when the window had none
-    nofoot::f182::formatClause(f182Clause, sizeof(f182Clause), w.f182);
+    char f182Clause[480];   // F182c: the stale-kept calls and the held grip point, empty when the window had none; the held calls' error against the window's other solved L calls
+    const uint64_t f182UnheldN = w.errN[0] > w.f182.errN ? w.errN[0] - w.f182.errN : 0;
+    nofoot::f182::formatClause(f182Clause, sizeof(f182Clause), w.f182, f182UnheldN ? (w.errSum[0] - w.f182.errSum) / static_cast<double>(f182UnheldN) : 0.0, f182UnheldN);
     Log::get().note("native on foot armed arms (F67f): %llu armed calls (ramp complete) of %llu hook calls; L solved %llu not solved %llu%s, R solved %llu not solved %llu%s; "
                     "hand-to-grip error after the solve (cm, the proof: 0.0-0.5) L mean %.2f max %.2f, R mean %.2f max %.2f; shortfall after the assist mean %.2f max %.2f cm, "
                     "calls over 1 cm %llu (each a defect); calls with a written side below weight 1: %llu; square-up: %llu armed calls with a measure, phi over the old 50 deg "
