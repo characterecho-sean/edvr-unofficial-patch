@@ -15,7 +15,7 @@
 //   are: exactly the six supercruise rows change decision, from "not UI" to redirected, and the other 238 are decided as before; against the rule
 //   with the orbit lines and the bars but not the dust, only the two dust rows change. The frozen copies are held to the production rule where
 //   they must agree (the whole frame, with the dust included).
-//   THE SEEDS. The layer's depth-stencil seed rules (stale after a game write that is not a preserved stencil-only one, short of depth or stencil
+//   THE SEEDS. The layer's depth-stencil seed rules (stale after a game write that is not a preserved stencil-only one, i.e. one whose write mask misses the seed's bits, short of depth or stencil
 //   bits, ui_layer.cpp beginInner and uiLayerNoteOther, with ui_layer_math.h's uiLayerSeedWriterInvalidates) replayed over the frame's rows per
 //   eye, with the families main takes and with the three more: the seeds a frame needs before and after, on a GPU with the pixel shader's stencil
 //   reference (one pass copies depth and every stencil bit) and without (one pass per bit asked). Printed; the flight's 30 s line counts the
@@ -262,7 +262,8 @@ static Verdict verdictOf(const Census& c, const Row& r, int set, const Tweak& t 
 // seeds when the layer's copy is not this frame's (stale: the first draw, or after a game write that invalidated it), lacks the depth the test needs,
 // or lacks stencil bits the draw reads (wantMask = the read mask when the stencil is tested); a seed copies the depth and the bits asked, and on a GPU
 // whose pixel shader can write the stencil reference every bit and the depth in one pass. A game draw that is NOT taken and writes the same depth
-// target invalidates the copy unless it writes stencil only into a depth-only seed (uiLayerSeedWriterInvalidates). A taken draw's own write lands in
+// target invalidates the copy unless it writes stencil only (no depth) and none of the bits in its write mask is a bit the seed holds
+// (uiLayerSeedWriterInvalidates; a depth-only seed holds none, a full-mask seed holds all). A taken draw's own write lands in
 // the layer's copy as well (the layer's depth-stencil is bound for it) and in the game's buffer by the colourless re-issue: nothing goes stale.
 struct SeedModel {
     bool specified = true;

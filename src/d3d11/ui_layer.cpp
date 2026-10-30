@@ -668,7 +668,9 @@ struct Window {
     // in a HUD frame says the follow never ran.
     uint64_t afterFollowed = 0;
     uint64_t eyeMatched = 0, eyeSwapped = 0, eyeUntold = 0, seedStale = 0;
-    uint64_t depthOnlySeedPreservedWriters = 0;
+    // Stencil-only game writers a seed survived (seedWritersCheck): into a seed holding no stencil bits, and into one holding bits the
+    // writer's write mask does not touch.
+    uint64_t depthOnlySeedPreservedWriters = 0, bitDisjointSeedPreservedWriters = 0;
     // seedWritersCheck's resolve of the bound depth view: answered from the memo, or by the guarded resolve (a miss, a failure included).
     uint64_t dsvMemoHits = 0, dsvMemoMisses = 0;
     uint64_t privateDepthPotentialBegins = 0;
@@ -3453,10 +3455,12 @@ void logTotals(double seconds) {
     const Eye& l = g_eye[0];
     Log::get().note(
         "ui quality: layer seed preservation: %llu stencil-only game writers kept an unmodified "
-        "depth-only seed; matched layer/eye events, not avoided-seed count; %llu first-issue attempts "
+        "depth-only seed and %llu kept a seed whose stencil bits they do not write; matched "
+        "layer/eye events, not avoided-seed count; %llu first-issue attempts "
         "with raw depth-enabled/write-ALL state activated a conservative whole-frame guard "
         "across both eyes/layers (potential writes, including no private DSV or original read-only view).",
         static_cast<unsigned long long>(g_win.depthOnlySeedPreservedWriters),
+        static_cast<unsigned long long>(g_win.bitDisjointSeedPreservedWriters),
         static_cast<unsigned long long>(g_win.privateDepthPotentialBegins));
     logDsvMemo();
     Log::get().note(
@@ -6303,7 +6307,10 @@ void seedWritersCheck(ID3D11DeviceContext* ctx, uint32_t count, uint32_t instanc
             const UiDsEffect writer = uiLayerDsEffect(ds, true);
             const bool invalidated = matchingFresh && uiLayerSeedWriterInvalidates(writer,
                 l->seededMask, l->seededDepth, g_privateDepthGuard.active(g_lastRedirectSeq));
-            if (matchingFresh && writer.writes() && !invalidated) ++g_win.depthOnlySeedPreservedWriters;
+            if (matchingFresh && writer.writes() && !invalidated) {
+                if (l->seededMask == 0) ++g_win.depthOnlySeedPreservedWriters;
+                else ++g_win.bitDisjointSeedPreservedWriters;
+            }
             if (matchingDiagnostic) {
                 const UiSeedKey key = uiSeedDrawKey(ds, count, instances, verdict,
                     bindingShaderHash(BindSlot::Vs), bindingShaderHash(BindSlot::Ps), ref,
