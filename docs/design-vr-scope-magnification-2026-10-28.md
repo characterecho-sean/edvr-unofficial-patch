@@ -44,11 +44,11 @@ game's own zoom as a magnified picture inside the scope's lens. The rest of the 
   mode) is drawn as the zoomed view (told frustum narrowed by M about c, set in WaitGetPoses); the lens samples its post-RCAS picture at the place its world point is drawn in that eye; the raw getter keeps
   the true frustum; DLSS resets at both edges. Lines: `scope zoom (B3)` announce and press, `scope zoom (B3) runtime`. Review fixes done (section 11, items 1 to 8).
 - **B3-2 FLOWN 2026-10-29 (`c92b5107`, Epic), verdict: symmetric black** (section 11, "2026-10-29, B3-2 VR flight"): `world` and `view` never drew, `stretched` drew on two presses, the maintainer saw the black strip as best and asked
-  for it symmetrical. **B3-3 BUILT 2026-10-29, NOT INSTALLED, NOT FLOWN** (from `d526ee75`; section 11, "B3-3"): black is the behaviour; the edge key, the fills and the held picture are removed; the right eye gets the mirror of the
+  for it symmetrical. **B3-3 BUILT 2026-10-29, INSTALLED on Epic with C1 as `25502c36`, NOT FLOWN** (from `d526ee75`; section 11, "B3-3"): black is the behaviour; the edge key, the fills and the held picture are removed; the right eye gets the mirror of the
   left eye's strip (same band, the left strip's weight, full on a narrowed frame, also on a replayed pair). The lens-outside-the-copy count and the one withheld frame stay. Next: the flight.
 - ruled out: the both-mode share as the cause of the weapon-edge double image, because it shows in the right eye alone at sight eye `right` (maintainer, 2026-10-29); it has its own arc, "Weapon edge ghosting under DLSS".
 - ruled out: a fill for the left eye's strip (B3-2: world and view never drew), and zoom-to-fill (the left eye's copy shifted about 10 degrees or magnified about 43% against the right eye's, which eyes cannot fuse).
-- **C1 BUILT 2026-10-29, NOT INSTALLED, NOT FLOWN** (from `f2aed451`; section 12, "Crisp sights"): the maintainer found the holo sights and scope effects still too washed out and asked for them crisp without bloom.
+- **C1 BUILT 2026-10-29, INSTALLED on Epic as `25502c36`, NOT FLOWN** (from `f2aed451`; section 12, "Crisp sights"): the maintainer found the holo sights and scope effects still too washed out and asked for them crisp without bloom.
   C1a: the gunsight quad (the one pair every weapon draws) of every weapon the scope lens does not name is taken out of the scene into the sharp weapons layer for the whole press of the sights, as the optical
   chevron is. C1b: a manual eye dump in ADS leaves one candidate sight-effect draw out of each frame (11 candidates) and says which; `tools\sight_candidates.py` reports each one's footprint; the census gives eye draws
   their own line budget. Next: the flight (A/B in one press), then the footprint report per weapon.
@@ -1047,3 +1047,9 @@ weapon-edge arc's ADS dumps differ from a plain dump by exactly the candidates t
 - Footprints: in ADS, hold still (head, weapon, no movement), press the eye dump key once per weapon (AA on, DLSS), then `python tools\sight_candidates.py --target <game dir>`; add `--kind FinalCrisp` for the
   gunsight quad when the crisp reticle is on. The report's noise floor should be near 0; if it warns that the scene moved, or that no draw of any candidate was left out, take the dump again held still with the sights up. One dump a weapon: Executioner scoped (the glass), Oppressor, Aphelion,
   Eclipse, Intimidator, P-15.
+
+**Installed (B3-3 and C1)** (2026-10-29): `25502c36` (`build.bat --dll-only` on the clean tree) on Epic, `--scope both --xess`, `--verify-only` passed. In the live Epic `edvr.ini`, edited with the
+Edit tool and diffed (two comment lines and one key changed, line count unchanged): the removed `native_on_foot_ads_scope_zoom_full_detail_edge` line was taken out, the full-detail comment now
+states the user's choice, and `native_on_foot_ads_crisp_reticle = on` was added under it. The maintainer's `native_on_foot_ads_scope_zoom_full_detail = on` was kept. Read the flight with
+`--expect-build 25502c36`. The same flight covers B3-3: with full detail on, the scoped Executioner in ADS should show an equal black edge on the outer side of each eye while the zoom stands, and the
+runtime line reports the right eye's mirror strip (frames, widest share of its width).
