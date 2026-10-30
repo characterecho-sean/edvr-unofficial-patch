@@ -287,6 +287,9 @@ struct FlatMonoResolveStats {
     uint64_t calls = 0;
     uint64_t initializations = 0, contextPointerMismatches = 0;
     uint64_t allocations = 0, fullResets = 0, invalidations = 0;
+    // The spatial recovery's own images (spatialImages, flat_mono_resolve.cpp), made when the temporal set does not fit its frame; never counted
+    // in allocations, which is the temporal set's rebuilds alone.
+    uint64_t spatialAllocations = 0;
     uint64_t acceptedResets = 0, acceptedContinues = 0;
     uint64_t requestedResets = 0, lostHistory = 0, frameGaps = 0;
     uint64_t invalidPreviousCameras = 0, formatChanges = 0, cameraCuts = 0;

@@ -25,6 +25,9 @@ struct FlatSourceSpellWindow {
     // Source-free frames (FlatMonoFrame::sourceFree): the scene held no pool draw and was treated from the camera term alone. Counted at
     // the Present, whether the resolver ran on them or not; the overlay count is the weapon glow passes admitted while no world was named.
     uint64_t sourceFreeFrames = 0, sourceFreeTreated = 0, overlaysUnnamed = 0;
+    // The first-person path (2026-10-29: a tool in hand over bare terrain): the overlays above it admitted, the frames that held one, and
+    // those of them the resolver ran on.
+    uint64_t overlaysFirstPerson = 0, firstPersonFrames = 0, firstPersonTreated = 0;
     bool inSpell = false;
     uint64_t openSpell = 0;
 };
@@ -57,7 +60,10 @@ public:
     // A frame the selector took with no motion source (the view is the camera term alone), and whether the resolver treated it.
     void sourceFreeFrame(bool treated) { ++w_.sourceFreeFrames; if (treated) ++w_.sourceFreeTreated; }
     // A weapon glow pass admitted as an overlay although no draw had named the world: the HDR target's own first camera was the world's.
-    void overlayUnnamed() { ++w_.overlaysUnnamed; }
+    // firstPerson: admitted on the first-person path (a first person in the frame, the first camera the last world's by its shape).
+    void overlayUnnamed(bool firstPerson = false) { ++w_.overlaysUnnamed; if (firstPerson) ++w_.overlaysFirstPerson; }
+    // A frame that held a first-person-path admission, and whether the resolver treated it.
+    void firstPersonUnnamedFrame(bool treated) { ++w_.firstPersonFrames; if (treated) ++w_.firstPersonTreated; }
     // The window since the last take (the state, an open spell and a warm-up in progress, carries over).
     FlatSourceSpellWindow take() {
         FlatSourceSpellWindow out = w_;
@@ -105,7 +111,7 @@ inline int flatSourceSpellLine(char* out, size_t n, const FlatSourceSpellWindow&
     return std::snprintf(out, n,
         "flat source 5s: frames=%llu no-source-frames=%llu spells=%llu longest-spell=%llu open-spell=%llu recoveries=%llu abandoned=%llu "
         "warm-ups-done=%llu warm-frames-total=%llu warm-frames-max=%llu warm-ups-aborted=%llu source-free-frames=%llu source-free-treated=%llu "
-        "overlays-without-named-world=%llu; last no-source frame=%llu: "
+        "overlays-without-named-world=%llu first-person-path=%llu first-person-frames=%llu first-person-treated=%llu; last no-source frame=%llu: "
         "records-on-scene-depth=%u draws=%u same-camera-draws=%u pool-kind-records=%u distinct-pairs=%u; top pairs in the next line",
         static_cast<unsigned long long>(w.frames), static_cast<unsigned long long>(w.noSourceFrames),
         static_cast<unsigned long long>(w.spells), static_cast<unsigned long long>(w.longestSpell),
@@ -114,6 +120,8 @@ inline int flatSourceSpellLine(char* out, size_t n, const FlatSourceSpellWindow&
         static_cast<unsigned long long>(w.warmFrames), static_cast<unsigned long long>(w.warmMax),
         static_cast<unsigned long long>(w.warmAborted), static_cast<unsigned long long>(w.sourceFreeFrames),
         static_cast<unsigned long long>(w.sourceFreeTreated), static_cast<unsigned long long>(w.overlaysUnnamed),
+        static_cast<unsigned long long>(w.overlaysFirstPerson), static_cast<unsigned long long>(w.firstPersonFrames),
+        static_cast<unsigned long long>(w.firstPersonTreated),
         static_cast<unsigned long long>(lastFrame),
         last.records, last.draws, last.sameCameraDraws, last.poolRecords, last.distinctPairs);
 }

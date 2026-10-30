@@ -2,6 +2,7 @@
 
 ## Status
 
+- **State (2026-10-29, a tool in hand over bare terrain, issue #145):** a tester's `edvr_gfx_20261029_180522` (v0.22.0-rc.3, Steam, DLSS, copy route): on foot, scanner out, panned to bare terrain: 238 frames refused `hdr-camera-changed`, the tool's glow pass (025B4B9F/46F92DC7, first-person camera) against the terrain's first camera. The October pool-less admission needs no source and no first-person draw, and a tool is both (`sources=1 first-person=3`; `overlays-without-named-world=0` all flight). Fix `ebd8c755` on branch `claude/aa-terrain-disengagement-793fa4`: admit when the target's first camera is the last world's and the drawing camera is not. FLOWN OK 2026-10-29 16:29 on Steam (`edvr_gfx_20261029_162800`): 1,478 frames on the path, all treated and selected source-free on the world camera, zero `hdr-camera-changed`. Last entry.
 - **State (2026-10-24, whole-camera repair refuses 4 of 8 phases):** a user's `edvr_gfx_20261024_134658` (v0.21.0, RTX 4060, 2560x1440 DLAA, in a station): from 13:55:57 one frame in four is refused `deferred-inverse-unproven`, all 107 captured failures `forward-mismatch`; the `6b8f62c1` repair accepts phases 1, 5, 6, 8 of the 8 and refuses 2, 3, 4, 7 with no line saying which check fails. FLOWN with the probe `396bce13` (`edvr_gfx_20261024_151628`, `_151924`): all 85 refusals are `stage=dephase check=translation row=0 col=3`; the donor camera carries the jitter at 1.0001x the requested phase, which the translation bound (tiny when the camera is near the world origin) refuses. The translation allowance now follows the world multiply (`9fdf4c32`): FLOWN by the reporter, the cycle is gone (last entry). Left: a flicker on head-look toggle plus movement (nothing in the log), and 60 fps.
 - **State (2026-10-22, scanners):** `edvr_gfx_20261022_101031`: in the Detailed Surface Scanner the source-free camera witness opened on the star's depth-only pre-pass (VS 0EE43D81E394E70C, PS null, no b1), so every jittered frame was refused `deferred-inverse-unproven` and a 4-frame cycle ran (refused, `engine-source-not-ready`, two warm-ups); the Full System Scanner had the same signature. Fix: the pair joins `flatProjectionB1Unread`; the witness line now names the entry's first writer and the writer that raised the conflict. FLOWN 11:25 (`edvr_gfx_20261022_112019`, d4abc498): not enough, the G-buffer holds no camera-bearing writer at all (`why=no-witness-entry`), same cycle (403 and 473 `door-refused-untreated` per 30 s). Rule: a lighting pass over a G-buffer the game cleared and nothing wrote since is neither verified nor failed (`why=empty-gbuffer`). FLOWN 13:07 (`edvr_gfx_20261022_130004`, a7a5f5ac): panels steady; that body had a witness, so the rule ran only on entry/exit frames: still to be seen on a body with none.
 - **State (2026-10-22 3D main menu, render below output):** FLOWN with the cause logger (`edvr_gfx_20261022_121507`): the stand-down is `missing-depth-or-dsv`, the DoF composite `20F383BB/BF2302BC` writing the f26 image the tone reads with no depth; DoF off fixed it (user). MERGED (CI green, 618f1454): the composite taken as the scene HDR's alias (`dofCompositeVerified`, `flat dof composite:` line); the user reports it works with DoF on (no log read yet). See "2026-10-22: the 3D main menu at render below output".
@@ -56,9 +57,7 @@
 - **10-14 BUILT, NOT FLOWN:** flat `visual.intro_video = skip` (intro-video.md); AA comparison key F7 (last entry).
 - **10-17 RC3 scope fix PASS:** Steam flat `c7c14898`, probe off, main-menu and carrier on-foot F7 comparisons visibly fixed. Nonzero phases/history recover with zero stable phase/backend failures; user approved merge (last entry).
 - **10-17 F1 flat PASS:** `942cfeb3`; steadier stationary edges, seven normal-space ambiguity resets recovered cleanly. Temporary `diag.flat_origin_capture = off`.
-- **10-16 flat Debug tab, BUILT, NOT FLOWN:** the flat F8 panel has two tabs, Performance and Debug. Debug holds the MOTION SOURCE VIEW,
-  `advanced.flat_refusal_view` (this is the flat view that survived the 2026-10-09 cull of VR's `temporal_aa_debug`; green exact engine record,
-  blue camera term, the refusals in the eye path's colours; section below) and `advanced.flat_cpu_timing`. Both live, off by default.
+- **10-16 flat Debug tab, BUILT, NOT FLOWN:** F8 > Debug: `advanced.flat_refusal_view` (the motion source view) and `advanced.flat_cpu_timing`, both off by default (section below).
 
 ## Status detail (moved out of Status 2026-09-29)
 
@@ -18738,3 +18737,59 @@ Sean: the on-foot Galaxy Map ghosts slightly and the ship's does not; later, the
 Fix (branch claude/onfoot-map-gate): while GuiFocus is absent, a frame is a map frame when the canvas pair drew into the HDR target within the last 8 frames (`FlatUiMapCanvasLatch`, flat_ui_layer_math.h; noted at the draw site before any UI decision, answered at the frame boundary after the watcher's own read; GuiFocus present is never overridden). The answer is focus 6: the three maps behave alike. Temporal AA goes off, the map families open. The first canvas frame still runs with jitter (the answer is the next frame's), and the map releases within the hold after the canvas stops. Log: `flat map aa: temporal AA off on a map (GuiFocus absent, as on foot: recognised by its canvas draw)`, and the `flat map focus 5s` line gains `canvas-draws=` and `canvas-inferred-frames=`.
 
 Not proven: that the on-foot System Map draws the canvas (only the Galaxy Map was censused); the flight reads `canvas-inferred-frames` on the System Map. Not covered: the Orrery and the Full System Scanner on foot, which have no sign of their own.
+## 2026-10-29: a tool in hand over bare terrain (issue #145)
+
+A tester's report through Sean: flat, on foot with a scanner tool out, panning to bare terrain with no structure, ship or SRV in view makes AA stand down. `edvr_gfx_20261029_180522.log`, v0.22.0-rc.3 (build 6AE2556F), Steam flat, DLSS, render 1664x702 into 2560x1080, the copy route (`hdr-route-needs-render-at-least-output`).
+
+What the log holds. Across the flight 818 of about 227,000 frames refused. Two families:
+
+- `no-known-tone-pass` (`the-copy-source-is-not-written-by-one-pass`), 1 to 231 a window at 18:18, 18:22 and 18:56: supercruise entry and exit, a second or four each. Not this report.
+- `conflicting-hdr-target-or-camera`, 238 frames at 18:58:46 to 18:58:50 (`flat runtime conflict 5s: cause=hdr-camera-changed count=238`), two and a half minutes after the 18:56 drop. This is the report.
+
+The conflict line names the pair: the reference is the HDR target's first camera draw (VS 7E38A6AA, PS 7CECABDE, q 1047, camera F2754D4F, the terrain pass ACE405F4's own camera, near 0.025), the conflicting draw the tool's glow pass VS 025B4B9FF54622ED / PS 46F92DC71BF8DFA5 (q 1083, camera D8A6FFD7, near 0.0675, rows 270 to 272 1.28 times the scale): the first person's camera against the world's, the same pair as the 2026-10-07 entry. `flat overlay admission refused` at frame 227957 passes every gate but one: `world-named=0 depth-is-named=0 pool-less-so-far=0 (sources=1 first-person=3 stock-family=0)`. The window's 358 frames split exactly: 120 admitted the glow (`alternate-glow-draws=120`), 238 refused, so every frame either had the world named or refused. `overlays-without-named-world` reads 0 in all 656 windows: the 2026-10-07 relaxation never engaged in this flight.
+
+The cause. Section 104's pool-less admission (`unnamedWorldDepth`) took the HDR target's first camera for the world's only when nothing seen so far was a source, a first-person cohort draw or a stock family draw. That held for the empty-handed view it was built for. A tool in hand puts first-person draws (and a source) into every frame, so the admission never holds while the tool is out, and a view with no structure names no world. With a structure in view the world is named and the glow pass is judged against it, which is why only bare terrain shows it.
+
+ruled out: the 2026-10-07 source-less family (no-supported-motion-source-pair) as this report, because `no-source-frames` is 0 in every window and the refusal is `conflicting-hdr-target-or-camera`.
+
+ruled out: the deferred `forward-mismatch` family (2026-10-21, 10-24) as this report, because the jitter failure census reads `failed-frames=0` throughout and the refusal names the HDR's camera change.
+
+The fix (branch `claude/aa-terrain-disengagement-793fa4`). A third path beside the named world and the pool-less view, `unnamedFirstPerson`: no world named, the pool-less counts do not hold, and no stock family draw. A target is admitted on it when its first camera is the last named world's (near plane and both projection scales within 10%, `flatDomainPredictsWorld` against `worldReference`) and the drawing camera is not (`flatDomainHdrFirstCameraIsWorld`, flat_domain_admission.h). The draw's prediction is the draw scope's one lazy prediction, so the predicate still has one caller there. Every other gate is unchanged, including the same-pose, same-phase pair test and the clean forward-columns classification after it. No reference (no world named this session) admits nothing.
+
+Instruments:
+
+```text
+flat source 5s: ... overlays-without-named-world=N first-person-path=P
+  first-person-frames=F first-person-treated=T; ...
+flat first-person unnamed: frame=.. selection=<reason> source-free=.
+  supported-draws=.. unsupported-draws=.. mixed-camera=. camera=..
+  near=.. selected-camera-world=. reference-near=.. sources=..
+  first-person=..
+flat overlay admission refused: ...
+  fp-path/reference/draw-world/first-world=./././. ...
+```
+
+The detail line is six at most, ten seconds apart, at the copy route's verdict on a frame whose glow pass the new path admitted.
+
+Open, and what the flight decides. Admitting the glow pass removes the camera conflict. Whether the selector then treats the frame is not known, because `sources=1` is a supported pool record that named no world, and the log does not say which draw. If it is on the HDR's depth under the world camera the selector takes it as the source. If it is under the first-person camera it refuses `ambiguous-source`. The flight reads:
+
+- PASS: `first-person-frames` close to the frames of the stare, `first-person-treated` equal to it, `selection=selected` with `selected-camera-world=1`, and no `hdr-camera-changed` refusals.
+- Moved refusal: `selection=` names another reason, `first-person-treated` 0. The next step follows that reason.
+- Inert: `first-person-path=0` while `hdr-camera-changed` persists. Then the refused line's `fp-path/reference/draw-world/first-world` says which part failed.
+
+Flight: Steam flat, on foot, a scanner tool out. Pan from a structure to bare terrain, hold 10 s, back to the structure, then again with the tool aimed.
+
+Rig: `flat_domain_admission_tests.h` takes the flight's rows 270 to 275 for both cameras (from the `flat untrusted H bucket rows` lines) and admits the frame. The roles swapped, a drawing camera predicted as the world's, no reference and a first camera at 1.28 times the scale admit nothing. `flat_source_free_tests.h` pins the wiring with mutation controls and the counters, and `flat_log_line_tests.h` the line's new fields.
+### 2026-10-29, the flight: FLOWN OK (Sean, Steam)
+
+`edvr_gfx_20261029_162800.log`, `v0.22.0-rc.3-49-gebd8c755` (build 6AE3C7F7; `--expect-build HEAD` matches), Steam flat, DLSS, output 3840x2160, the copy route (`hdr-route-needs-render-at-least-output`), the tester's route. Sean, on foot with a scanner tool out, panned between structures and bare terrain and could not reproduce the stand-down.
+
+The log says why: the new path ran and every frame on it was treated.
+
+- `flat source 5s`, 16:29:22 to 16:29:42 and 16:30:07 to 16:30:12: `first-person-frames` 134, 279, 265, 241, 162, 221 and 176 (1,478 frames), `first-person-treated` equal in every window. In the windows between them (16:29:47 to 16:30:02), `first-person-path=0` while `overlays-without-named-world` reads 1,571 to 2,245: the October empty-handed path.
+- `flat first-person unnamed:` (four lines): `selection=observed-mono-input-candidate` (Selected), `source-free=1`, `supported-draws=0`, `selected-camera-world=1`, near 0.025 against a reference of 0.025. Three of them read `sources=1 first-person=0`, one `sources=0 first-person=7`, so both of the October counts' vetoes are covered.
+- No `hdr-camera-changed` and no `conflicting-hdr-target-or-camera` all flight. 48 refusals in 6,177 frames: `no-3d-scene` at load, `engine-source-not-ready` (3, one frame each) and `no-known-tone-pass` (27) at the exit.
+
+The open question from the entry above is answered: the selector takes these frames source-free on the world camera. The `sources=1` record is not one the selector counts (`supported-draws=0`): another depth or another extent.
+
+The instruments stay: the 5 s fields cost nothing, and the detail line is six lines a session at most.

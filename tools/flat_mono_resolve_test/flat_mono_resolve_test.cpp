@@ -512,11 +512,29 @@ int main(int argc,char** argv) {
     }
     backendFail=true;++f.frame;run(false);backendFail=false;
     bindOriginal();ComPtr<ID3D11ShaderResourceView> recovered;const char* fallbackReason=nullptr;
+    const auto beforeRecovery=edvr::flatMonoResolveStats();
     check(edvr::flatMonoResolveSpatialFallback(device.Get(),context.Get(),f,recovered.GetAddressOf(),&fallbackReason) &&
           recovered && restored() && pixel(recovered.Get())==0xff0000ff &&
-          edvr::flatMonoResolveStats().allocations==preflightAllocations,
+          edvr::flatMonoResolveStats().allocations==preflightAllocations &&
+          edvr::flatMonoResolveStats().spatialAllocations==beforeRecovery.spatialAllocations,
           "preflighted spatial fallback restores state and displays current jittered frame after SDK refusal without allocation");
+    // A recovery whose frame the temporal set does not fit (2026-10-29: a scoped ADS entry's one-frame copy-route recovery, hdr off at the game's
+    // output size, while the set was the HDR route's) uses the recovery's own images and leaves the set alone: no rebuild then, none at the next
+    // resolve. Before, both rebuilt every render-size texture (docs\investigation-flat-scoped-ads-stutter-2026-10-29.md).
+    auto unfit=f;unfit.outputWidth=unfit.outputHeight=w;   // native: the route evaluates at 16x16, not the set's 32x32
+    bindOriginal();ComPtr<ID3D11ShaderResourceView> unfitOut;
+    check(edvr::flatMonoResolveSpatialFallback(device.Get(),context.Get(),unfit,unfitOut.GetAddressOf(),&fallbackReason) &&
+          unfitOut && restored() && pixel(unfitOut.Get(),8,8)==0xff0000ff &&
+          edvr::flatMonoResolveStats().allocations==beforeRecovery.allocations &&
+          edvr::flatMonoResolveStats().spatialAllocations==beforeRecovery.spatialAllocations+2,
+          "a spatial fallback the temporal set does not fit makes its own two images and rebuilds nothing");
+    bindOriginal();ComPtr<ID3D11ShaderResourceView> unfitAgain;
+    check(edvr::flatMonoResolveSpatialFallback(device.Get(),context.Get(),unfit,unfitAgain.GetAddressOf(),&fallbackReason) &&
+          unfitAgain && restored() && edvr::flatMonoResolveStats().spatialAllocations==beforeRecovery.spatialAllocations+2,
+          "a second such spatial fallback reuses its own images");
     ++f.frame;run(true);check(backendReset,"backend failure and fallback invalidate history");
+    check(edvr::flatMonoResolveStats().allocations==beforeRecovery.allocations,
+          "the resolve after an unfit spatial fallback finds the temporal set as it was and rebuilds nothing");
     stats=edvr::flatMonoResolveStats();check(stats.backendFailures==1 && stats.currentContinueRun==0,
         "backend failure and following accepted reset are visible in cumulative statistics");
     f.mode=edvr::FlatMonoResolveMode::Taa;f.reset=true;++f.frame;auto taa=run(true);

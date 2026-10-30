@@ -48,13 +48,16 @@ inline int flatHistoryLine(char* out, size_t n, const FlatHistoryWindow& w) {
     }
     return std::snprintf(out, n,
         "flat foreground history 5s: records=%u bytes=%u peak-records=%u peak-bytes=%u allocations=%llu allocation-failures=%llu; erased:%s; "
-        "vertex sets: requested=%llu read=%llu failed=%llu cancelled=%llu from-cache=%llu already-pending=%llu approximate=%llu",
+        "vertex sets: requested=%llu read=%llu failed=%llu cancelled=%llu from-cache=%llu already-pending=%llu approximate=%llu; "
+        "records made with: reused positions=%llu reused identity=%llu stream-output shaders compiled=%llu cached=%llu",
         w.records, w.bytes, w.peakRecords, w.peakBytes, static_cast<unsigned long long>(s.allocations),
         static_cast<unsigned long long>(s.allocationFailures), erased,
         static_cast<unsigned long long>(s.extentIssued), static_cast<unsigned long long>(s.extentRead),
         static_cast<unsigned long long>(s.extentFailed), static_cast<unsigned long long>(s.setCancelled),
         static_cast<unsigned long long>(s.setFromCache), static_cast<unsigned long long>(s.setPending),
-        static_cast<unsigned long long>(s.setApproximate));
+        static_cast<unsigned long long>(s.setApproximate), static_cast<unsigned long long>(s.positionsReused),
+        static_cast<unsigned long long>(s.identityReused), static_cast<unsigned long long>(s.soCompiled),
+        static_cast<unsigned long long>(s.soFromCache));
 }
 
 // The write entries of one line: [firstEntry, lastEntry). The legend is in the line: touching and invalidating read vertices-gap / vertices-window /

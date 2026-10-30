@@ -548,6 +548,41 @@ inline int flatDomainWorldPredictionTests() {
         float fast[6][4]; std::memcpy(fast, previousWorld, sizeof(fast)); scaled(fast, 1.09, 1.09);
         check(withScale(fast), "a world draw 9% off its reference (a fast zoom) is still predicted");
     }
+
+    // ---- the HDR's first camera with a first person in hand (2026-10-29) ------------------------------------------------------------
+    // edvr_gfx_20261029_180522, frame 227957: on foot, a scanner tool out, bare terrain. The HDR target's first camera F2754D4F (the terrain
+    // pass's, near 0.025) and the glow pass's D8A6FFD7 (near 0.0675, 1.28 times the scale), rows 270..275 as the untrusted H bucket lines
+    // printed them. No draw named the world, the tool's draws were a source and first-person draws, and every frame refused.
+    {
+        const auto rowsOf = [](const uint32_t (&w)[24], float (&rows)[6][4]) { std::memcpy(rows, w, sizeof(rows)); };
+        const uint32_t terrainWords[24] = {0xBE87B778,0xBFD15F00,0x00000000,0xBE5DC18D, 0xBD0BA99E,0xBEC5FCE6,0x00000000,0x3F79C424,
+                                           0xBF356768,0x3F216749,0x00000000,0x3D0E8E84, 0x00000000,0x00000000,0x3CCCCCCD,0x00000000,
+                                           0xBE5DC18D,0x3F79C424,0x3D0E8E84,0x00000000, 0xC27442E0,0x42A7871E,0xC218C568,0x00000000};
+        const uint32_t toolWords[24] = {0xBEADE353,0xC0061EEE,0x00000000,0xBE5DC18D, 0xBD32560B,0xBEFD7E73,0x00000000,0x3F79C424,
+                                        0xBF6866E2,0x3F4EC85C,0x00000000,0x3D0E8E84, 0x00000000,0x00000000,0x3D8A3D71,0x00000000,
+                                        0xBE5DC18D,0x3F79C424,0x3D0E8E84,0x00000000, 0xC27442E0,0x42A7871E,0xC218C568,0x00000000};
+        float terrain[6][4], tool[6][4];
+        rowsOf(terrainWords, terrain); rowsOf(toolWords, tool);
+        // The reference the last named world left: the same camera (a structure in view a moment before named it).
+        const FlatDomainWorldReference ref = flatDomainWorldReference(terrain);
+        check(ref.valid() && ref.nearPlane == 0.025f, "the flight's terrain camera leaves a reference at the world's near plane");
+        const bool toolPredicted = flatDomainPredictsWorld(tool, ref);
+        check(!toolPredicted, "the flight's glow pass camera is not predicted to be the world's");
+        check(flatDomainHdrFirstCameraIsWorld(terrain, toolPredicted, ref),
+              "the flight's frame: the HDR's first camera is the last world's and the glow pass's is not, so the target is admitted");
+        check(!flatDomainHdrFirstCameraIsWorld(tool, flatDomainPredictsWorld(terrain, ref), ref),
+              "the roles swapped (a first-person camera first, the world drawing over it) admit nothing");
+        check(!flatDomainHdrFirstCameraIsWorld(terrain, true, ref),
+              "a drawing camera that is itself predicted to be the world's admits nothing on this path");
+        check(!flatDomainHdrFirstCameraIsWorld(terrain, toolPredicted, FlatDomainWorldReference{}),
+              "no reference (no world named this session) admits nothing");
+        float zoomed[6][4]; std::memcpy(zoomed, terrain, sizeof(zoomed)); scaled(zoomed, 1.28, 1.28);
+        check(!flatDomainHdrFirstCameraIsWorld(zoomed, toolPredicted, ref),
+              "a first camera at the world's near plane but 1.28 times its scale (a weapon camera aiming down sights) admits nothing");
+        float zooming[6][4]; std::memcpy(zooming, terrain, sizeof(zooming)); scaled(zooming, 1.038, 1.038);
+        check(flatDomainHdrFirstCameraIsWorld(zooming, toolPredicted, ref),
+              "the world a frame into a zoom (3.8%) is still the world's first camera");
+    }
     return failures;
 }
 

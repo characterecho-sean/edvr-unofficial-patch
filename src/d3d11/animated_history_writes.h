@@ -121,6 +121,10 @@ struct HistoryWriteStats {
     // read), the write fell inside the envelope but between the vertices (spared), outside the envelope (spared), or on a vertex (a genuine
     // rewrite: invalidated). deferred*: records invalidated when their set was read, because a write spared while it was unknown met it.
     uint64_t vertexUnknown = 0, vertexInGap = 0, vertexOutside = 0, vertexGenuine = 0, deferredInvalidated = 0, deferredConservative = 0;
+    // A record made: its stream-output shader compiled, or taken from the cache that outlives the records; its position buffers and its identity
+    // set taken from an erased record's (the pools) rather than created (the scoped ADS stutter, 2026-10-29: a zoom edge made about a hundred
+    // records in a few frames, each four buffers, six views and often a compile).
+    uint64_t soCompiled = 0, soFromCache = 0, positionsReused = 0, identityReused = 0;
     void add(const HistoryWriteStats& o) {
         for (unsigned e = 0; e < kHistoryWriteEntries; ++e) {
             observed[e] += o.observed[e]; recordsInvalidated[e] += o.recordsInvalidated[e];
@@ -138,6 +142,7 @@ struct HistoryWriteStats {
         setFromCache += o.setFromCache; setPending += o.setPending; setApproximate += o.setApproximate; setCancelled += o.setCancelled;
         vertexUnknown += o.vertexUnknown; vertexInGap += o.vertexInGap; vertexOutside += o.vertexOutside; vertexGenuine += o.vertexGenuine;
         deferredInvalidated += o.deferredInvalidated; deferredConservative += o.deferredConservative;
+        soCompiled += o.soCompiled; soFromCache += o.soFromCache; positionsReused += o.positionsReused; identityReused += o.identityReused;
     }
 };
 

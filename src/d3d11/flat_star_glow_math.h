@@ -8,7 +8,7 @@
 // tonemap still reads the original H: only the bloom's input changes.
 //
 // WHAT IS HERE.
-//   - the percentage snapped to its five choices, k and m;
+//   - the percentage snapped to its nine choices, k and m;
 //   - the pair table: which (vertex shader, pixel shader) pair is which pass of a star;
 //   - the run machine: for each pair the scope sees, whether to replay it into S, or which reason refuses it. The gates are the frame's
 //     pre-pass (a real star frame: a frame marker, drawn into whatever target the game draws it into -- the G-buffer phase's format-23 target
@@ -29,12 +29,18 @@
 namespace edvr {
 
 // ---- the setting --------------------------------------------------------------------------------------------------------------
-// The percentage, snapped to the nearest of 100, 125, 150, 175, 200 (the setting reads only those; a caller that holds another number gets
-// the nearest choice, and anything under 100 is the stock 100).
+// The percentage, snapped to the nearest of 100, 125, 150, 175, 200, 250, 300, 350, 400 (the setting reads only those; a caller that holds
+// another number gets the nearest choice, halves up, and anything under 100 is the stock 100).
 inline int flatStarGlowSnap(int percent) {
+    static constexpr int kChoices[] = {100, 125, 150, 175, 200, 250, 300, 350, 400};
+    constexpr size_t kCount = sizeof(kChoices) / sizeof(kChoices[0]);
     if (percent <= 100) return 100;
-    if (percent >= 200) return 200;
-    return 100 + ((percent - 100 + 12) / 25) * 25;
+    if (percent >= 400) return 400;
+    for (size_t i = 0; i + 1 < kCount; ++i) {
+        const int lo = kChoices[i], hi = kChoices[i + 1];
+        if (percent < hi) return 2 * (percent - lo) >= hi - lo ? hi : lo;
+    }
+    return 400;
 }
 inline double flatStarGlowK(int percent) { return flatStarGlowSnap(percent) / 100.0; }
 // The star layer's weight in the first level's input: k - 1.

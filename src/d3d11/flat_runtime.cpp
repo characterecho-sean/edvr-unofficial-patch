@@ -349,6 +349,11 @@ struct State {
     FlatMonoSourceless sourceFreeLast;
     uint64_t sourceFreeLastFrame=0, sourceFreeSeenWindow=0, sourceFreeEmptyWindow=0, sourceFreeHoloOnlyWindow=0, sourceFreeOtherWindow=0, blankSceneDeclinedWindow=0;
     bool frameSourceFree=false;   // this frame's selection took no motion source and named the world from itself (nameSourceFree)
+    // This frame admitted a glow pass on the first-person path (unnamedFirstPerson, 2026-10-29): its verdict is counted on the source line
+    // and the first frames' selections are described (firstPersonUnnamedLines, six at most, ten seconds apart).
+    bool frameFirstPersonUnnamed=false;
+    uint32_t firstPersonUnnamedLines=0;
+    uint64_t firstPersonUnnamedLastMs=0;
     uint32_t admissionLines=0;uint64_t lastAdmissionMs=0;   // the overlay admission trace's line budget (see beginActualDraw)
     const void* foregroundSelectedDepth=nullptr;
     struct DomainHReceipt {
@@ -939,6 +944,8 @@ static HistoryWriteStats historyWindowDelta(const HistoryWriteStats& now,const H
     w.vertexUnknown=d(now.vertexUnknown,was.vertexUnknown);w.vertexInGap=d(now.vertexInGap,was.vertexInGap);
     w.vertexOutside=d(now.vertexOutside,was.vertexOutside);w.vertexGenuine=d(now.vertexGenuine,was.vertexGenuine);
     w.deferredInvalidated=d(now.deferredInvalidated,was.deferredInvalidated);w.deferredConservative=d(now.deferredConservative,was.deferredConservative);
+    w.soCompiled=d(now.soCompiled,was.soCompiled);w.soFromCache=d(now.soFromCache,was.soFromCache);
+    w.positionsReused=d(now.positionsReused,was.positionsReused);w.identityReused=d(now.identityReused,was.identityReused);
     return w;
 }
 static void reportForegroundNoCandidate(State& s,const FlatForegroundMotion::CaptureStats& captures) {
@@ -4655,6 +4662,7 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
         }
     }
     if (s.frameSourceFree) s.sourceSpell.sourceFreeFrame(s.treated && SUCCEEDED(hr));
+    if (s.frameFirstPersonUnnamed) s.sourceSpell.firstPersonUnnamedFrame(s.treated && SUCCEEDED(hr));
     if (!s.treated || FAILED(hr)) reset();
     Ptr<ID3D11Texture2D> output; if (FAILED(swap->GetBuffer(0, IID_PPV_ARGS(&output)))) {expireDeferredFailure(s,"output-unavailable");return;}
     // Swapchain image rotation does not change render scale. Resize/device
@@ -4760,7 +4768,7 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
         else if(++s.namingVetoStreak>=kFlatNamingVetoFrames){s.worldReference=FlatDomainWorldReference{};s.namingVetoStreak=0;++s.namingVetoReleases;}
         s.namingVetoedThisFrame=false;
     } else s.namingVetoStreak=0;
-    s.namedDepth = s.namedConstants = nullptr;s.namedWorldQ=0; s.treated = false;s.frameSourceFree=false;
+    s.namedDepth = s.namedConstants = nullptr;s.namedWorldQ=0; s.treated = false;s.frameSourceFree=false;s.frameFirstPersonUnnamed=false;
     s.producerRun.armed = false;
     flatHdrBeginFrame(s.hdr, d.Width, d.Height); if (flatOriginCaptureEnabled()) s.passiveScene.reset(); s.hdrTreated = false;
     s.observingQualifiedHandoff = false;
@@ -6272,15 +6280,25 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
     // world's, and the glow pass is judged against it with the depth the target was drawn with (the search below), as a pool-bearing frame's
     // is against the named one. Without this the pass was a second camera in the HDR, and every frame of such a view was refused as
     // conflicting-hdr-target-or-camera.
+    // The same view with a first person in hand (unnamedFirstPerson; 2026-10-29: on foot, a scanner tool out, panned to bare terrain; the
+    // flight's line read world-named=0 pool-less-so-far=0 sources=1 first-person=3, and 238 frames refused hdr-camera-changed). The tool's
+    // draws are a source and first-person draws, so the counts of unnamedWorldDepth never hold while it is out. The target is admitted
+    // instead when its first camera is the last world's and this draw's camera is not (flatDomainHdrFirstCameraIsWorld, asked of each target
+    // below); a stock family draw still refuses.
     const bool unnamedWorldDepth=!s.namedDepth && s.prefix.sourcesUsed==0 && s.prefix.firstPersonDraws==0 &&
         s.prefix.unsupportedFamilyDraws==0;
+    const bool unnamedFirstPerson=!s.namedDepth && !unnamedWorldDepth && s.prefix.unsupportedFamilyDraws==0;
+    const auto firstCameraWorld=[&](const FlatRuntimeTarget& t) {
+        float firstRows[6][4];std::memcpy(firstRows,t.tone.camera,sizeof(firstRows));
+        return flatDomainHdrFirstCameraIsWorld(firstRows,worldPredicted().predicted,s.worldReference);
+    };
     const FlatRuntimeTarget* overlayTarget=nullptr;
     if(s.work==FlatWork::Full && (s.hdrKey==FlatHdrKey::Auto || copyWeapon()) && s.projection &&
        !s.phase.failed && s.frameCoverage &&
        flatCameraInjectUpstreamOwns() && !foreignWork.load(std::memory_order_acquire) &&
        !s.prefix.uncertain && !d.supported && !tone && !copy &&
        k.format==26 && k.color && k.depth && k.dsv && k.camera &&
-       (k.depth==s.namedDepth || unnamedWorldDepth) && flat_mono_detail::hdrViewport(k,k.width,k.height) &&
+       (k.depth==s.namedDepth || unnamedWorldDepth || unnamedFirstPerson) && flat_mono_detail::hdrViewport(k,k.width,k.height) &&
        !flatHdrCouldConsume(s.hdr,k) &&
        flatRuntimeCameraCurrent(d,s.prefix.sequence+1,s.prefix.frame)) {
         for(uint32_t i=0;i<s.prefix.targetsUsed;++i) {
@@ -6289,7 +6307,8 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
                !t.hdrLayoutChanged && !t.menuInherited && t.writes.key.format==26 &&
                t.writes.key.depth==k.depth && t.writes.key.dsv==k.dsv &&
                flat_mono_detail::cameraCurrent(t.tone,s.prefix.frame) &&
-               !flatRuntimeSameCamera(t.tone,d)) { overlayTarget=&t; break; }
+               !flatRuntimeSameCamera(t.tone,d) &&
+               (!unnamedFirstPerson || firstCameraWorld(t))) { overlayTarget=&t; break; }
         }
     }
     // D3D's null depth-stencil state is the default depth-write state. Query
@@ -6323,7 +6342,8 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
             if((pair.vs==FlatVsProjectionClass::ForwardColumns ||
                 pair.vs==FlatVsProjectionClass::ForwardDp4) &&
                 pair.ps==FlatPsProjectionSafety::Clean) {
-                if(!s.namedDepth)s.sourceSpell.overlayUnnamed();
+                if(!s.namedDepth)s.sourceSpell.overlayUnnamed(unnamedFirstPerson);
+                if(!s.namedDepth && unnamedFirstPerson)s.frameFirstPersonUnnamed=true;
                 if(copyWeapon()) {
                     // The copy route resolves after the game's post chain, so the glow is in the picture the SDK is handed and
                     // there is no clean H to restore: no private MRT bracket, no open suffix, nothing to seal or to fail.
@@ -6453,6 +6473,7 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
             Log::get().note("flat overlay admission refused: frame=%llu seq=%u VS=%016llX PS=%016llX route=%s key-auto=%u copy-weapon=%u work-full=%u projection=%u "
                 "jitter-wanted=%u phase-ok=%u frame-coverage=%u injector-owns=%u foreign-work=%u uncertain=%u supported=%u color-depth-dsv-camera=%u "
                 "viewport=%u hdr-could-consume=%u camera-current=%u world-named=%u depth-is-named=%u pool-less-so-far=%u (sources=%u first-person=%u stock-family=%u) "
+                "fp-path/reference/draw-world/first-world=%u/%u/%u/%u "
                 "target-hdr-camera=%u target-drawn=%u target-layout-changed=%u target-menu=%u target-depth-same=%u target-dsv-same=%u target-tone-current=%u "
                 "overlay-target-found=%u depth-write=%u stencil-write=%u stencil-mask-04=%u phase-applied-or-zero=%u; the model made this draw the HDR's first second camera, "
                 "so none of the admissions took it",
@@ -6463,6 +6484,7 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
                 flag(flat_mono_detail::hdrViewport(k,k.width,k.height)),flag(flatHdrCouldConsume(s.hdr,k)),
                 flag(flatRuntimeCameraCurrent(d,s.prefix.sequence,s.prefix.frame)),flag(s.namedDepth!=nullptr),flag(k.depth==s.namedDepth),
                 flag(unnamedWorldDepth),s.prefix.sourcesUsed,s.prefix.firstPersonDraws,s.prefix.unsupportedFamilyDraws,
+                flag(unnamedFirstPerson),flag(s.worldReference.valid()),flag(worldPredicted().predicted),flag(hdrCamera && firstCameraWorld(target)),
                 flag(hdrCamera),flag(drawn),flag(target.hdrLayoutChanged),flag(target.menuInherited),flag(target.writes.key.depth==k.depth),
                 flag(target.writes.key.dsv==k.dsv),flag(flat_mono_detail::cameraCurrent(target.tone,s.prefix.frame)),flag(overlayTarget!=nullptr),
                 flag(d.effectiveDepthWrite),flag(d.effectiveStencilWrite),flag(effectiveDepth.StencilWriteMask==0x04u),flag(!nonzeroPhase(s) || s.phase.applied));
@@ -6505,6 +6527,19 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
         // What the view held when it had no motion source (section 104); the line names it.
         if (selected.reason == FlatMonoReason::NoSupportedSource) { s.sourcelessLast = selected.sourceless; s.sourcelessLastFrame = s.prefix.frame; }
         noteSourceFreeContent(s, selected);
+        // What the selector made of a frame whose glow pass the first-person path admitted (2026-10-29): selected or why not, whether it
+        // took a source, and whether the camera it took is the world's. Six lines at most, ten seconds apart.
+        if (s.frameFirstPersonUnnamed && s.firstPersonUnnamedLines < 6 && GetTickCount64() - s.firstPersonUnnamedLastMs >= 10000) {
+            ++s.firstPersonUnnamedLines; s.firstPersonUnnamedLastMs = GetTickCount64();
+            Log::get().note("flat first-person unnamed: frame=%llu selection=%s source-free=%u supported-draws=%u unsupported-draws=%u "
+                "mixed-camera=%u camera=%016llX near=%.9g selected-camera-world=%u reference-near=%.9g sources=%u first-person=%u; "
+                "a glow pass was admitted against the HDR's first camera with a first person in hand and no world named",
+                (unsigned long long)s.prefix.frame, flatMonoReasonName(selected.reason), selected.sourceFree ? 1u : 0u,
+                selected.supportedDraws, selected.unsupportedDraws, selected.mixedCamera ? 1u : 0u,
+                (unsigned long long)selected.cameraHash, selected.nearPlane,
+                selected.selected() && flatDomainHdrFirstCameraIsWorld(selected.camera, false, s.worldReference) ? 1u : 0u,
+                s.worldReference.nearPlane, s.prefix.sourcesUsed, s.prefix.firstPersonDraws);
+        }
         // A frame with no 3D scene gets the spatial recovery at this copy (flat_noscene_spatial.h), on a Probe frame as on a Full one.
         // The flag the stood-down frames ask follows this copy: up only while the recovery treated it.
         noSceneDone = selected.reason == FlatMonoReason::NoScene && !s.hdrTreated && treatNoScene(false);

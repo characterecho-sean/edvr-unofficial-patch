@@ -46,7 +46,7 @@ inline constexpr size_t kFlatPageRowCount = sizeof(kFlatPageRows) / sizeof(kFlat
 // The Visual tab (2026-10-22): the [visual] options that do something in flat, for every flat user (Fix tier). Both are choices, both live:
 //   intro_video  Intro movie  skip, or the game's own movie (flat, 2026-10-14). On the Performance tab until 2026-10-22, as fix.intro_video.
 //                             Its `menu visual` token is the page VR's menu builds too (2026-10-27), so the row is on both Visual pages.
-//   star_glow    Star glow    100 to 200 percent of the halo the game's own bloom draws around a star. Its `menu visual` token (2026-10-27) is the page
+//   star_glow    Star glow    100 to 400 percent of the halo the game's own bloom draws around a star. Its `menu visual` token (2026-10-27) is the page
 //                             VR's menu builds too: the headset reads the key since the VR port, so the row is on both Visual pages. A row only this tab
 //                             should show would be `menu flat_visual`, a page VR builds none of, as `menu flat_performance` is for the Performance tab.
 // The other `menu visual` rows (World scale, Intro background picture, Screen curve) are VR's: the flat gate (flat_profile_keys.h) refuses their keys, so a
