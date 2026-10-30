@@ -64,6 +64,7 @@
 #include "f169_checks.h"    // F169: the stance while the aim is pitched (w_c capped under the animated neck's posture weight, the replays, the window and its line); the pistol sprint's arm swing (TEMPORARY): the plan, the ring, the stride's period, the delay, the measure and the line
 #include "f170_checks.h"    // F170: the crouched ADS torso squared to the aim (TEMPORARY): the dial, the share, the turn on the real square-up and reach functions (29 deg to 0 at 1, 14.5 at 0.5), the hold not taking it off, the line
 #include "f171_checks.h"    // F171: the crouched ADS body moved to the left of the aim line (TEMPORARY): the dial, the left axis and its sign against the eye's right, the move through the real reach rule, the counters and the line; the raise's carriage (slopes, pairs, window, line); F170's line reaching the log (logpin::elbow's merges against F98Left)
+#include "f178_checks.h"    // F178: the standing ADS body dials (TEMPORARY), the crouched ones mirrored: the weights (standing whole at crouched weight 0, crouched pair and standing pair adding up at every crouch), the clamps, the axes, the crouched pair untouched, the real reach rule, the counters and the line, the source sites
 #include "f177_checks.h"    // F177: the aiming choice at start: the page's words and their fit, what each choice writes, the trigger over every input, the log's lines, the source pins and the key's declaration
 #include "f176_checks.h"    // F176: in the sights with the head aiming, the mouse and the stick hold their pitch: the decision, the values a look update runs with, the press's account and line, the source pins
 #include "f175_checks.h"    // F175 (measure only): the view's roll and pitch against the headset's: the roll and elevation on synthetic rotations (5 deg reads 5, yaw and pitch alone 0, the sign, the model's axes against LOCAL's), the angular rate and its holding, the window's statistics and slope, the line
@@ -7658,6 +7659,10 @@ int wmain(int argc, wchar_t** argv) {
     // update runs with (the yaws untouched), the press's line (a press where it never ran reads differently from one where the mouse was still), and the source pins.
     f176test::run176(check);
     f177test::run177(check);
+    // F178: the standing ADS body dials (TEMPORARY), F168's forward and F171's left with the standing weight (1 - the crouched weight) x the detach weight: the weights (standing whole at the crouched weight 0,
+    // none crouched, half at half a crouch, the two pairs adding up to the dial at every crouch), the clamps, the vectors bit for bit the crouched ones' at the crouched weight 1, the axes at every yaw, the
+    // crouched pair untouched, the real reach rule on the mirrored move, the counters and the line within the log's limit, and the source sites.
+    f178test::run178(check);
     // F110: the ADS sight lock's model right eye from the left-eye job camera and from a solved left eye, the fallback, the IPD's sign.
     f110test::run110(check);
     // F111: the panel pointer instrument names the stage that turns a move the other way (K1 to K5, one at a time), the camera getters' decoding.

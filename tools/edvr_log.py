@@ -13950,6 +13950,113 @@ def _hj_f171_sideways(rows, ctx):
     return ("OK", text)
 
 
+# F178 (TEMPORARY): the standing ADS body dials (experimental.native_on_foot_stand_ads_body_forward_cm and _left_cm), F168's forward move and F171's left move with the standing weight
+# ((1 - the crouched weight) x the detach weight), and the figures that judge them (formatSummary in src/d3d11/native_on_foot_f178.h). The window line is printed for every window with a
+# frame standing in the sights with a two-handed gun, the dials at 0 included (the before picture). The dials' own note lines (read at start and at each change) carry a different label ("body
+# dial"), so they are not window lines; the rule reads them as its "dial" rows, which tell an idle flight (the build has the instrument and the keys were read) from a log of a build without it.
+H178_LABEL = "native on foot standing ADS body (F178, TEMPORARY)"
+H178_RE = (r"native on foot standing ADS body \(F178, TEMPORARY\) (?P<wl>\d+) s: item (?P<item>\S+); standing in the sights (?P<ads>\d+) frames \(still (?P<still>\d+), moving (?P<mv>\d+)\), "
+           r"the standing weight \(\(1 - the crouched weight\) x the detach weight\) mean (?P<wt>[\d.]+); "
+           r"forward dial experimental\.native_on_foot_stand_ads_body_forward_cm mean (?P<fdial>%s) cm \(largest (?P<fdialmax>[\d.]+); positive is toward the gun\), the move made in (?P<fmade>\d+), "
+           r"asked (?P<fask>%s) cm, as written \(after the reach rule; (?P<fwn>\d+) frames\) (?P<fwr>%s), the reach rule took back (?P<fbk>%s); "
+           r"left dial experimental\.native_on_foot_stand_ads_body_left_cm mean (?P<ldial>%s) cm \(largest (?P<ldialmax>[\d.]+); positive is left of the aim\), the move made in (?P<lmade>\d+), "
+           r"asked (?P<lask>%s) cm, as written \(after the reach rule; (?P<lwn>\d+) frames\) (?P<lwr>%s), the reach rule took back (?P<lbk>%s); "
+           r"right shoulder from the eye \(right/up/forward, cm\): still (?P<rn0>\d+) frames (?P<r0r>%s)/(?P<r0u>%s)/(?P<r0f>%s), moving (?P<rn1>\d+) frames (?P<r1r>%s)/(?P<r1u>%s)/(?P<r1f>%s); "
+           r"left shoulder from the eye: still (?P<ln0>\d+) frames (?P<l0r>%s)/(?P<l0u>%s)/(?P<l0f>%s), moving (?P<ln1>\d+) frames (?P<l1r>%s)/(?P<l1u>%s)/(?P<l1f>%s); "
+           r"right shoulder to the gun's root (?P<gn0>\d+) frames still (?P<gd0>[\d.]+) cm, (?P<gn1>\d+) moving (?P<gd1>[\d.]+); left shoulder to the left-hand grip "
+           r"(?P<kn0>\d+) frames still (?P<kd0>[\d.]+) cm, (?P<kn1>\d+) moving (?P<kd1>[\d.]+)" % ((_HN,) * 20))
+H178_DIAL_RE = (r"native on foot standing ADS body dial \(F178, TEMPORARY\): experimental\.native_on_foot_stand_ads_body_(?P<which>forward|left)_cm = (?P<val>%s) cm" % _HN)
+
+
+def _hj_f178_standing(rows, ctx):
+    """F178 (TEMPORARY): the standing ADS body dials. While standing in the sights (the crouched weight under 0.5, the detach weight from 0.05) with a two-handed gun the body moves by
+    each dial x the standing weight, (1 - F163's crouched weight) x the detach weight, F168's forward move (positive toward the gun; a negative one rides the pin's target before the reach rule,
+    a positive one is added to the written neck after it) and F171's left move (positive left of the aim; before the reach rule), so the stock can be dialled into the right shoulder standing
+    as it is crouched. Both ship at 0: a window with the dials at 0 is the before picture, with the shoulders and the distances to the gun and the left grip. Per item: the frames, the
+    standing weight, each dial's mean and largest value, the frames its move was made in, the move asked, as written (the neck's change from the same body with the dial at 0, after the reach
+    rule) and what the reach rule took back, both shoulders from the eye, the right shoulder to the gun's root and the left shoulder to the left grip (still and moving). NEVER APPLIED when 30
+    or more frames stood in the sights with a dial at 0.5 cm or more (either way) and its move was made in none of them (the target never took it), or was made and written as 0 in every window
+    (the neck never moved); PARTIAL when the move as written is under half of the move asked (the reach rule took most of it back) or was not measured. Both dials at 0 is the baseline: OK.
+    Under 30 frames standing in the sights is IDLE, and so is a log whose only F178 lines are the dials' own notes (the keys were read, no standing ADS frame came); no such line, no verdict."""
+    sec = rows.get("sec", [])
+    notes_dial = rows.get("dial", [])
+    if not sec:
+        if not notes_dial:
+            return None
+        last = {}
+        for r in notes_dial:
+            last[r["which"]] = float(r["val"])
+        return ("IDLE", "the standing ADS body dials were read (forward %s, left %s as last logged) and no frame stood in the sights with a two-handed gun in the window: nothing to judge" % (
+            ("%+.1f cm" % last["forward"]) if "forward" in last else "not logged", ("%+.1f cm" % last["left"]) if "left" in last else "not logged"))
+    items = collections.OrderedDict()
+    for r in sec:
+        items.setdefault(r["item"], []).append(r)
+    parts, never, notes = [], [], []
+    total, dial_seen = 0, 0.0
+    for item, rs in items.items():
+        g = lambda k, rr=rs: sum(int(r[k]) for r in rr)
+        ads, still, mv = g("ads"), g("still"), g("mv")
+        if not ads:
+            continue
+        total += ads
+        weight = sum(int(r["ads"]) * float(r["wt"]) for r in rs) / ads
+        right0, right1 = [(sum(int(r["rn0"]) * float(r["r0" + k]) for r in rs), g("rn0")) for k in ("r", "u", "f")], [(sum(int(r["rn1"]) * float(r["r1" + k]) for r in rs), g("rn1")) for k in ("r", "u", "f")]
+        left0, left1 = [(sum(int(r["ln0"]) * float(r["l0" + k]) for r in rs), g("ln0")) for k in ("r", "u", "f")], [(sum(int(r["ln1"]) * float(r["l1" + k]) for r in rs), g("ln1")) for k in ("r", "u", "f")]
+
+        def mean(val, cnt, rr=rs):
+            n = sum(int(r[cnt]) for r in rr)
+            return (sum(int(r[cnt]) * float(r[val]) for r in rr) / n) if n else 0.0, n
+
+        def avg(pairs):
+            return (pairs[0] / pairs[1]) if pairs[1] else 0.0
+        gun0, gun1 = mean("gd0", "gn0"), mean("gd1", "gn1")
+        grip0, grip1 = mean("kd0", "kn0"), mean("kd1", "kn1")
+        chan = {}
+        for name, p in (("forward", "f"), ("left", "l")):
+            dial = sum(int(r["ads"]) * float(r[p + "dial"]) for r in rs) / ads
+            dialmax = max(float(r[p + "dialmax"]) for r in rs)
+            made = g(p + "made")
+            asked = sum(int(r["ads"]) * float(r[p + "ask"]) for r in rs) / ads
+            wr, wn = mean(p + "wr", p + "wn")
+            bk = mean(p + "bk", p + "wn")[0]
+            zero_throughout = all(abs(float(r[p + "wr"])) < 0.05 for r in rs if int(r[p + "wn"]))
+            chan[name] = (dial, dialmax, made, asked, wr, wn, bk, zero_throughout)
+            dial_seen = max(dial_seen, dialmax)
+        fd, ld = chan["forward"], chan["left"]
+        parts.append("%s %d s: standing in the sights %d frames (still %d, moving %d), standing weight mean %.2f; forward dial mean %+.1f cm (largest %.1f; positive is toward the gun), the move made "
+                     "in %d, asked %+.1f cm, as written (after the reach rule) %+.1f (%d frames), the reach rule took back %+.1f; left dial mean %+.1f cm (largest %.1f; positive is left of the aim), "
+                     "the move made in %d, asked %+.1f cm, as written %+.1f (%d frames), the reach rule took back %+.1f; the right shoulder from the eye (right/up/forward, cm) still "
+                     "%+.1f/%+.1f/%+.1f (%d frames), moving %+.1f/%+.1f/%+.1f (%d); the left shoulder from the eye still %+.1f/%+.1f/%+.1f (%d), moving %+.1f/%+.1f/%+.1f (%d); right shoulder to the "
+                     "gun's root still %.1f cm (%d frames), moving %.1f (%d); left shoulder to the left-hand grip still %.1f cm (%d), moving %.1f (%d)" % (
+                         item, _hsecs(rs), ads, still, mv, weight, fd[0], fd[1], fd[2], fd[3], fd[4], fd[5], fd[6], ld[0], ld[1], ld[2], ld[3], ld[4], ld[5], ld[6],
+                         avg(right0[0]), avg(right0[1]), avg(right0[2]), right0[0][1], avg(right1[0]), avg(right1[1]), avg(right1[2]), right1[0][1],
+                         avg(left0[0]), avg(left0[1]), avg(left0[2]), left0[0][1], avg(left1[0]), avg(left1[1]), avg(left1[2]), left1[0][1],
+                         gun0[0], gun0[1], gun1[0], gun1[1], grip0[0], grip0[1], grip1[0], grip1[1]))
+        for name, (dial, dialmax, made, asked, written, wn, bk, zero_throughout) in chan.items():
+            if ads < 30 or dialmax < 0.5:
+                continue
+            if not made:
+                never.append("the %s dial reached %.1f cm and its move was made in none of %d frames standing in the sights with %s (the pin's target never took it)" % (name, dialmax, ads, item))
+            elif wn and zero_throughout and abs(asked) >= 0.5:
+                never.append("the %s dial asked %+.1f cm and none of it was written in %d frames standing in the sights with %s (the neck never moved)" % (name, asked, ads, item))
+            elif not wn:
+                notes.append("the %s move as written was not measured in any of %d frames standing in the sights with %s (the aim had no horizontal forward, or the figure is missing)" % (name, ads, item))
+            elif abs(asked) >= 0.5 and abs(written) < 0.5 * abs(asked):
+                notes.append("the reach rule took back most of the %s move with %s: %+.1f cm asked, %+.1f cm written (the left shoulder is at its reach)" % (name, item, asked, written))
+    if not parts:
+        return None
+    text = "; ".join(parts)
+    if never:
+        return ("NEVER APPLIED", text + "; " + "; ".join(never + notes))
+    if notes:
+        return ("PARTIAL", text + "; " + "; ".join(notes))
+    if total < 30:
+        return ("IDLE", text + "; under 30 frames standing in the sights: little to judge")
+    if dial_seen < 0.05:
+        return ("OK", text + "; both dials were 0: these are the baseline figures")
+    return ("OK", text)
+
+
 # F171: the raise's carriage (formatSummary in src/d3d11/native_on_foot_f171c.h): per look mode and band of |aim pitch|, the slopes of the game's camera as the job read it before any removal
 # (k_up, k_fwd), of G as F138 forms it (c) and of the eye as drawn (k_eye) against the carried raise, over consecutive pin calls whose carried raise changed 2 mm or more.
 H171C_LABEL = "native on foot raise carriage (F171)"
@@ -16138,6 +16245,10 @@ HEALTH_RULES = (
     _hrule("crouched ADS body sideways (F171)", ("F171",), (H171_LABEL,), (
         ("sec", H171_RE),
     ), _hj_f171_sideways),
+    _hrule("standing ADS body (F178)", ("F178",), (H178_LABEL,), (
+        ("sec", H178_RE),
+        ("dial", H178_DIAL_RE),
+    ), _hj_f178_standing),
     _hrule("raise carriage (F171)", ("F171",), (H171C_LABEL,), (
         ("sec", H171C_RE),
     ), _hj_f171_carriage),
@@ -17229,6 +17340,7 @@ def self_test_health():
     f170_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f170.h")
     f171_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f171.h")
     f171c_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f171c.h")
+    f178_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f178.h")
     f172_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f172.h")
     f175_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f175.h")
     f176_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f176.h")
@@ -17263,6 +17375,7 @@ def self_test_health():
         f170src = read_text(f170_path)
         f171src = read_text(f171_path)
         f171csrc = read_text(f171c_path)
+        f178src = read_text(f178_path)
         f172src = read_text(f172_path)
         f175src = read_text(f175_path)
         f176src = read_text(f176_path)
@@ -17413,6 +17526,15 @@ def self_test_health():
             fmts[key] = health_c_format(f171src, needle)
         if fmts[key] is None:
             raise AssertionError("native_on_foot_f171.h has no format holding %r: the --health rule that reads it is out of date" % needle)
+        return health_render(fmts[key], vals)
+
+    def R178(needle, *vals):
+        """F178's window line (formatSummary in native_on_foot_f178.h), from its own format literal; the dials' note lines (native_on_foot.cpp), from theirs."""
+        key = "f178:" + needle
+        if key not in fmts:
+            fmts[key] = health_c_format(f178src, needle) or health_c_format(source, needle)
+        if fmts[key] is None:
+            raise AssertionError("native_on_foot_f178.h and native_on_foot.cpp have no format holding %r: the --health rule that reads it is out of date" % needle)
         return health_render(fmts[key], vals)
 
     def R171c(needle, *vals):
@@ -19060,6 +19182,84 @@ def self_test_health():
         check("F171 sideways: a window line that drifted from its pattern is unparsed", ["native on foot crouched ADS body sideways (F171, TEMPORARY) 10 s: something else"], 4, [("UNPARSED", F171)])
         check("F171 sideways: a window line that drifted beside a good one is counted beside the verdict",
               [side171(), "native on foot crouched ADS body sideways (F171, TEMPORARY) 10 s: something else"], 0, [("OK", F171)], has=["[+1 line(s) the rule's patterns do not match: "])
+
+        # ---- F178 (TEMPORARY): the standing ADS body dials ----
+        F178 = "standing ADS body (F178)"
+
+        def stand178(item=SHOTGUN168, wl=10, ads=400, still=150, mv=250, wt=1.0, fdial=6.0, fdialmax=6.0, fmade=400, fask=6.0, fwn=None, fwr=6.0, fbk=None,
+                     ldial=15.0, ldialmax=15.0, lmade=400, lask=15.0, lwn=None, lwr=13.9, lbk=None,
+                     right0=(150, 17.0, -14.6, -4.0), right1=(240, 18.0, -13.0, -5.0), left0=(150, -16.0, -14.6, -4.0), left1=(240, -15.0, -13.0, -5.0), gun0=(150, 31.0), gun1=(240, 30.0),
+                     grip0=(150, 60.0), grip1=(240, 61.0)):
+            """F178's window line, from the DLL's own format (formatSummary, native_on_foot_f178.h); fask/lask: the move asked, fwr/lwr: as written (the frames each is a mean of: fwn/lwn),
+            fbk/lbk: what the reach rule took back (asked less written when not given); the shoulders from the eye: (frames, right, up, forward) in cm; gun, grip: (frames, cm)."""
+            fwn = ads if fwn is None else fwn
+            lwn = ads if lwn is None else lwn
+            fbk = fask - fwr if fbk is None else fbk
+            lbk = lask - lwr if lbk is None else lbk
+            return R178("native on foot standing ADS body (F178, TEMPORARY) %u s: item %s", wl, item, ads, still, mv, wt, fdial, fdialmax, fmade, fask, fwn, fwr, fbk,
+                        ldial, ldialmax, lmade, lask, lwn, lwr, lbk, right0[0], right0[1], right0[2], right0[3], right1[0], right1[1], right1[2], right1[3],
+                        left0[0], left0[1], left0[2], left0[3], left1[0], left1[1], left1[2], left1[3], gun0[0], gun0[1], gun1[0], gun1[1], grip0[0], grip0[1], grip1[0], grip1[1])
+
+        def dial178(which="forward", cm=6.0):
+            """F178's dial note line (native_on_foot.cpp), logged at the first read and at each change."""
+            if which == "forward":
+                return R178("native on foot standing ADS body dial (F178, TEMPORARY): experimental.native_on_foot_stand_ads_body_forward_cm = %+.1f", cm, -20.0, 20.0)
+            return R178("native on foot standing ADS body dial (F178, TEMPORARY): experimental.native_on_foot_stand_ads_body_left_cm = %+.1f", cm, -30.0, 30.0)
+
+        zero178 = dict(fdial=0.0, fdialmax=0.0, fmade=0, fask=0.0, fwr=0.0, ldial=0.0, ldialmax=0.0, lmade=0, lask=0.0, lwr=0.0)
+        check("F178 standing: dials of 6 cm forward and 15 cm left that moved the body and the figures to judge it by", [stand178()], 0, [("OK", F178)],
+              has=[SHOTGUN168 + " 10 s: standing in the sights 400 frames (still 150, moving 250), standing weight mean 1.00; forward dial mean +6.0 cm (largest 6.0; positive is toward the gun), "
+                   "the move made in 400, asked +6.0 cm, as written (after the reach rule) +6.0 (400 frames), the reach rule took back +0.0; left dial mean +15.0 cm (largest 15.0; positive is left "
+                   "of the aim), the move made in 400, asked +15.0 cm, as written +13.9 (400 frames), the reach rule took back +1.1; the right shoulder from the eye (right/up/forward, cm) still "
+                   "+17.0/-14.6/-4.0 (150 frames), moving +18.0/-13.0/-5.0 (240); the left shoulder from the eye still -16.0/-14.6/-4.0 (150), moving -15.0/-13.0/-5.0 (240); right shoulder to the "
+                   "gun's root still 31.0 cm (150 frames), moving 30.0 (240); left shoulder to the left-hand grip still 60.0 cm (150), moving 61.0 (240)"],
+              lacks=["UNPARSED", "baseline", "NEVER", "took back most"])
+        check("F178 standing: both dials at 0 is the baseline, OK, with the shoulders and distances (the before picture)", [stand178(**zero178)], 0, [("OK", F178)],
+              has=["both dials were 0: these are the baseline figures", "forward dial mean +0.0 cm (largest 0.0; positive is toward the gun), the move made in 0, asked +0.0 cm",
+                   "the right shoulder from the eye (right/up/forward, cm) still +17.0/-14.6/-4.0 (150 frames)", "left shoulder to the left-hand grip still 60.0 cm (150)"], lacks=["UNPARSED", "NEVER"])
+        check("F178 standing: a left dial of 15 cm and the move made in none of 400 frames standing in the sights is a target that never took it",
+              [stand178(**dict(zero178, ldial=15.0, ldialmax=15.0))], 3, [("NEVER APPLIED", F178)],
+              has=["the left dial reached 15.0 cm and its move was made in none of 400 frames standing in the sights with " + SHOTGUN168 + " (the pin's target never took it)"], lacks=["UNPARSED", "the forward dial"])
+        check("F178 standing: a forward dial of 6 cm made in 400 frames and written as 0 in every window is a neck that never moved",
+              [stand178(fwr=0.0, fbk=6.0)], 3, [("NEVER APPLIED", F178)],
+              has=["the forward dial asked +6.0 cm and none of it was written in 400 frames standing in the sights with " + SHOTGUN168 + " (the neck never moved)"], lacks=["UNPARSED", "the left dial"])
+        check("F178 standing: written 0 in one window and 6 cm in the other is not 0 throughout",
+              [stand178(fwr=0.0, fbk=6.0), stand178(fwr=6.0)], 0, [("OK", F178)], lacks=["UNPARSED", "NEVER"])
+        check("F178 standing: the reach rule took back most of the left move: written 5 of 15 cm is PARTIAL", [stand178(lwr=5.0)], 0, [("PARTIAL", F178)],
+              has=["the reach rule took back most of the left move with " + SHOTGUN168 + ": +15.0 cm asked, +5.0 cm written (the left shoulder is at its reach)"], lacks=["UNPARSED", "NEVER"])
+        check("F178 standing: a move made and never measured as written is named, not passed", [stand178(lwn=0, lwr=0.0, lbk=0.0)], 0, [("PARTIAL", F178)],
+              has=["as written +0.0 (0 frames), the reach rule took back +0.0", "the left move as written was not measured in any of 400 frames standing in the sights with " + SHOTGUN168],
+              lacks=["UNPARSED", "NEVER", "took back most"])
+        check("F178 standing: negative dials with the moves made are the same machinery the other way",
+              [stand178(fdial=-6.0, fdialmax=6.0, fask=-6.0, fwr=-6.0, ldial=-15.0, ldialmax=15.0, lask=-15.0, lwr=-14.1)], 0, [("OK", F178)],
+              has=["forward dial mean -6.0 cm (largest 6.0; positive is toward the gun)", "left dial mean -15.0 cm (largest 15.0; positive is left of the aim)", "asked -15.0 cm, as written -14.1 (400 frames)"],
+              lacks=["UNPARSED", "NEVER", "took back most"])
+        check("F178 standing: under 30 frames standing in the sights is too few to judge",
+              [stand178(ads=20, still=8, mv=12, fmade=20, lmade=20, fwn=20, lwn=20, gun0=(8, 31.0), gun1=(12, 30.0), grip0=(8, 60.0), grip1=(12, 61.0), right0=(8, 17.0, -14.6, -4.0),
+                        right1=(12, 18.0, -13.0, -5.0), left0=(8, -16.0, -14.6, -4.0), left1=(12, -15.0, -13.0, -5.0))], 0, [("IDLE", F178)],
+              has=["under 30 frames standing in the sights: little to judge"], lacks=["UNPARSED", "NEVER"])
+        check("F178 standing: only the dials' note lines (the keys were read, no standing ADS frame) is idle and says what was read", [dial178("forward", 6.0), dial178("left", 15.0), dial178("left", 12.5)], 0,
+              [("IDLE", F178)], has=["the standing ADS body dials were read (forward +6.0 cm, left +12.5 cm as last logged) and no frame stood in the sights with a two-handed gun in the window"],
+              lacks=["UNPARSED", "NEVER"])
+        check("F178 standing: one dial note line says the other was not logged", [dial178("forward", 0.0)], 0, [("IDLE", F178)], has=["(forward +0.0 cm, left not logged as last logged)"], lacks=["UNPARSED"])
+        check("F178 standing: the dials' note lines beside a window line are not unparsed and do not make it idle", [dial178("forward", 6.0), dial178("left", 15.0), stand178()], 0, [("OK", F178)],
+              lacks=["UNPARSED", "IDLE", "were read"])
+        check("F178 standing: no line at all is not present (no verdict row)", [f90_part()], 0, [("OK", F90S)],
+              lacks=[row("OK", F178), row("IDLE", F178), row("PARTIAL", F178), row("UNPARSED", F178), row("NEVER APPLIED", F178)])
+        check("F178 standing: a figure not measured (no frames) prints 0.0 and does not break the rule",
+              [stand178(gun0=(0, 0.0), gun1=(0, 0.0), grip0=(0, 0.0), grip1=(0, 0.0), right0=(0, 0.0, 0.0, 0.0), right1=(0, 0.0, 0.0, 0.0), left0=(0, 0.0, 0.0, 0.0), left1=(0, 0.0, 0.0, 0.0))], 0,
+              [("OK", F178)], has=["still 0.0 cm (0 frames), moving 0.0 (0)"], lacks=["UNPARSED", "NEVER"])
+        check("F178 standing: two windows add up, the dials and the figures weighted by their frames",
+              [stand178(ads=100, still=40, mv=60, fmade=100, lmade=100, wt=1.0, fdial=2.0, fdialmax=2.0, fask=2.0, fwr=2.0, ldial=5.0, ldialmax=5.0, lask=5.0, lwr=5.0, gun0=(40, 30.0), gun1=(60, 20.0)),
+               stand178(ads=300, still=100, mv=200, fmade=300, lmade=300, wt=0.8, fdial=6.0, fdialmax=6.0, fask=6.0, fwr=6.0, ldial=15.0, ldialmax=15.0, lask=15.0, lwr=14.0, gun0=(100, 30.0), gun1=(200, 30.0))],
+              0, [("OK", F178)],
+              has=["20 s: standing in the sights 400 frames (still 140, moving 260), standing weight mean 0.85; forward dial mean +5.0 cm (largest 6.0; positive is toward the gun), the move made in 400, "
+                   "asked +5.0 cm", "left dial mean +12.5 cm (largest 15.0; positive is left of the aim), the move made in 400, asked +12.5 cm, as written +11.8 (400 frames)"], lacks=["UNPARSED"])
+        check("F178 standing: another item is its own item", [stand178(), stand178(item="$wpn_m_sniper_plasma_charged_name;", **dict(zero178, ldial=15.0, ldialmax=15.0))], 3,
+              [("NEVER APPLIED", F178)], has=["with $wpn_m_sniper_plasma_charged_name;", SHOTGUN168 + " 10 s"], lacks=["UNPARSED"])
+        check("F178 standing: a window line that drifted from its pattern is unparsed", ["native on foot standing ADS body (F178, TEMPORARY) 10 s: something else"], 4, [("UNPARSED", F178)])
+        check("F178 standing: a window line that drifted beside a good one is counted beside the verdict",
+              [stand178(), "native on foot standing ADS body (F178, TEMPORARY) 10 s: something else"], 0, [("OK", F178)], has=["[+1 line(s) the rule's patterns do not match: "])
 
         # ---- F171: the raise's carriage ----
         C171 = "raise carriage (F171)"

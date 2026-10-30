@@ -82,6 +82,7 @@
 #include "native_on_foot_f170.h"   // F170 (TEMPORARY): the crouched ADS torso squared to the aim, its dial and the figures that judge it (pure parts)
 #include "native_on_foot_f171.h"   // F171 (TEMPORARY): the crouched ADS body moved to the left of the aim line, its dial and the figures that judge it (pure parts)
 #include "native_on_foot_f171c.h"  // F171: the raise's carriage, measured: slopes of the camera's, G's and the drawn eye's changes against the carried raise's (pure parts)
+#include "native_on_foot_f178.h"   // F178 (TEMPORARY): the standing ADS body dials, the crouched ones mirrored for the standing stance, and the figures that judge them (pure parts)
 #include "native_on_foot_f176.h"   // F176: in the sights with the head aiming, the mouse and the stick hold their pitch (pure parts)
 #include "native_on_foot_f175.h"   // F175 (measure only): the view's roll and pitch against the headset's, by look mode and item (pure parts)
 #include "native_on_foot_f172.h"   // F172: the neck raise published pre-turned by the mouse-look aim pitch, so the game's turn lands it straight up (pure parts)
@@ -226,6 +227,10 @@ std::atomic<float> g_crouchAdsSquare{0.0f};                   // F170 (TEMPORARY
 double g_crouchAdsSquareLast = 1e9;                           // the value last logged (frame thread; the first read always logs)
 std::atomic<float> g_crouchAdsBodyLeftCm{25.0f};              // F171 (TEMPORARY): experimental.native_on_foot_crouch_ads_body_left_cm in cm (-30..30), live: the crouched body's move to the left of the aim line; F173: default 25, the pilot's flown value
 double g_crouchAdsBodyLeftCmLast = 1e9;                       // the value last logged (frame thread; the first read always logs)
+std::atomic<float> g_standAdsBodyCm{0.0f};                    // F178 (TEMPORARY): experimental.native_on_foot_stand_ads_body_forward_cm in cm (-20..20), live: the standing body's move toward the gun (F168's, with the standing weight); default 0
+double g_standAdsBodyCmLast = 1e9;                            // the value last logged (frame thread; the first read always logs)
+std::atomic<float> g_standAdsBodyLeftCm{0.0f};                // F178 (TEMPORARY): experimental.native_on_foot_stand_ads_body_left_cm in cm (-30..30), live: the standing body's move to the left of the aim line (F171's, with the standing weight); default 0
+double g_standAdsBodyLeftCmLast = 1e9;                        // the value last logged (frame thread; the first read always logs)
 std::atomic<float> g_f87SettleS{static_cast<float>(nofoot::f87::kSettleDefaultS)};   // F87h (TEMPORARY): fix.native_on_foot_standing_height_settle_s, live
 double g_f87SettleLast = -1.0;                                // the value last logged (frame thread)
 std::atomic<float> g_f94EyeHeightCm{static_cast<float>(nofoot::f94::kEyeHeightDefaultCm)};   // F94a: fix.native_on_foot_eye_height_cm, live (the eyes over the neck)
@@ -1115,6 +1120,32 @@ void readKey() {
                             cm, nofoot::f171::kDialMinCm, nofoot::f171::kDialMaxCm);
         g_crouchAdsBodyLeftCmLast = cm;
         g_crouchAdsBodyLeftCm.store(static_cast<float>(cm), std::memory_order_relaxed);
+    }
+    // F178 (TEMPORARY, live, the developer tier's "Standing ADS body forward / back" and "Standing ADS body left / right"): the crouched pair above, for the standing stance. While standing and
+    // aiming down sights the third-person body moves toward the gun by the first (cm, -20..20, positive toward the gun) and to the LEFT of the aim line by the second (cm, -30..30, positive
+    // left), each times the standing weight (1 less the crouched weight, times the detach weight), in the same places in the pin as the crouched pair. Both default to 0: nothing moves until
+    // the pilot moves them. A crouch blends the standing pair into the crouched one.
+    {
+        const double cm = nofoot::f178::clampForwardCm(static_cast<double>(cfg.getFloat("experimental.native_on_foot_stand_ads_body_forward_cm", 0.0f)));
+        if (first || cm != g_standAdsBodyCmLast)
+            Log::get().note("native on foot standing ADS body dial (F178, TEMPORARY): experimental.native_on_foot_stand_ads_body_forward_cm = %+.1f cm -- while standing and aiming down sights the "
+                            "third-person body moves this far along the aim's horizontal forward (positive toward the gun, range %.0f..%.0f), times the standing weight (1 less the crouched weight, "
+                            "times the detach weight), so it is 0 crouched and at the hip; the eye and the gun stay where the sight lock puts them; the per-window standing ADS body line names the "
+                            "moves asked and as written and the shoulders",
+                            cm, nofoot::f178::kForwardMinCm, nofoot::f178::kForwardMaxCm);
+        g_standAdsBodyCmLast = cm;
+        g_standAdsBodyCm.store(static_cast<float>(cm), std::memory_order_relaxed);
+    }
+    {
+        const double cm = nofoot::f178::clampLeftCm(static_cast<double>(cfg.getFloat("experimental.native_on_foot_stand_ads_body_left_cm", 0.0f)));
+        if (first || cm != g_standAdsBodyLeftCmLast)
+            Log::get().note("native on foot standing ADS body dial (F178, TEMPORARY): experimental.native_on_foot_stand_ads_body_left_cm = %+.1f cm -- while standing and aiming down sights the "
+                            "third-person body moves this far to the left of the aim line (positive left, negative right, range %.0f..%.0f), along the horizontal left of the aim, times the standing "
+                            "weight (1 less the crouched weight, times the detach weight), so it is 0 crouched and at the hip; the reach rule keeps the left grip within reach of it; the eye and the "
+                            "gun stay where the sight lock puts them; the per-window standing ADS body line names the moves asked and as written and the shoulders",
+                            cm, nofoot::f178::kLeftMinCm, nofoot::f178::kLeftMaxCm);
+        g_standAdsBodyLeftCmLast = cm;
+        g_standAdsBodyLeftCm.store(static_cast<float>(cm), std::memory_order_relaxed);
     }
     // F170 (TEMPORARY, live, the developer tier's "Crouched ADS torso square"): while crouched and aiming down sights the torso is turned about the vertical toward square to the aim: this share
     // (0..1) of the shoulder line's measured blade, times the crouched weight and the detach weight, is taken out. 1 squares it, 0 leaves the authored stance; exactly 0 standing and at the hip.
@@ -16558,6 +16589,9 @@ struct F98Left {
     // F171 (TEMPORARY): the crouched ADS body moved to the left of the aim line: the dial, the move asked and as written, what the reach rule took back, both shoulders from the eye, the right
     // shoulder to the gun's root and the left shoulder to the left-hand grip, crouched in the sights, still against moving (its own line).
     nofoot::f171::Counters f171;
+    // F178 (TEMPORARY): the standing ADS body dials (F168's forward and F171's left with the standing weight): the dials, the moves asked and as written, what the reach rule took back, both
+    // shoulders from the eye, the right shoulder to the gun's root and the left shoulder to the left-hand grip, standing in the sights, still against moving (its own line).
+    nofoot::f178::Counters f178;
 };
 std::atomic<uint32_t> g_f98Seq{0};
 F98Left g_f98;
@@ -16854,6 +16888,12 @@ struct PinCall {
     // standing, at the hip or the aim has no horizontal forward), the aim's forward it is left of, the share of the reach rule's correction that changed with the move (scaled as the pin scales
     // it) and the move as written along the left of the aim (m, left positive; not a number: unmeasured).
     double f171DialCm = 0.0, f171Shift[3] = {}, f171Fwd[3] = {}, f171ReachDelta[3] = {}, f171WrittenM = std::nan("");
+    // F178 (TEMPORARY): the standing ADS body dials, F168's and F171's moves with the standing weight: the forward dial as read this call (cm), its move (the model's axes, m) split around the
+    // reach rule as F169 splits the crouched one (f178FwdPre rides the target, f178FwdPost is added to the written neck), the share of the reach rule's correction that changed with it, and the
+    // move as written along the aim's forward (m; not a number: unmeasured); the same for the left dial (its move always rides the target; written along the left of the aim). The aim's
+    // forward they are along is f168Fwd / f171Fwd (the same vector).
+    double f178FwdDialCm = 0.0, f178FwdShift[3] = {}, f178FwdPre[3] = {}, f178FwdPost[3] = {}, f178FwdReachDelta[3] = {}, f178FwdWrittenM = std::nan("");
+    double f178LeftDialCm = 0.0, f178LeftShift[3] = {}, f178LeftReachDelta[3] = {}, f178LeftWrittenM = std::nan("");
     // F171: the raise's carriage: this call is a sample (fresh input, the aim known, nothing in the sights, the camera on the commander, the LOCAL pose valid), its look mode and band of the aim's
     // pitch, the carried raise (the neck reference's, what f94NeckForPin takes out of the pin's camera), the camera as the job read it before any removal and G as F138 forms it (up and forward
     // from the animated neck, model axes, m), and the eye as drawn up from the neck as finally written (m; the close completes it, not a number until then).
@@ -17259,6 +17299,22 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
         std::memcpy(pc.f171Fwd, fwdM, sizeof(pc.f171Fwd));
         if (nofoot::f171::shiftVector(pc.f171DialCm, pc.postureW, pc.detachW, fwdM, pc.f171Shift)) {
             nofoot::weaponViewOffsetTarget(T, pc.f171Shift);
+            pc.targetFromAuthoredM = std::sqrt((T[0] - N0[0]) * (T[0] - N0[0]) + (T[1] - N0[1]) * (T[1] - N0[1]) + (T[2] - N0[2]) * (T[2] - N0[2]));
+        }
+        // F178 (TEMPORARY): the standing ADS body dials: the two moves above (F168's forward and F171's left) with the STANDING weight, 1 less the crouched weight (F163) x the detach weight, in
+        // place of the crouched one (nofoot::f178: the same functions, handed the standing share). Applied exactly as the crouched pair is: the forward dial before the reach rule when
+        // negative and after it when positive (F169), the left dial before it. A crouch blends one pair into the other. Exactly nothing at both dials 0 (the default), crouched, or at the hip.
+        pc.f178FwdDialCm = static_cast<double>(g_standAdsBodyCm.load(std::memory_order_relaxed));
+        pc.f178LeftDialCm = static_cast<double>(g_standAdsBodyLeftCm.load(std::memory_order_relaxed));
+        if (nofoot::f178::forwardVector(pc.f178FwdDialCm, pc.postureW, pc.detachW, fwdM, pc.f178FwdShift)) {
+            nofoot::f168::splitShift(pc.f178FwdDialCm, pc.f178FwdShift, pc.f178FwdPre, pc.f178FwdPost);
+            if (!nofoot::f168::afterReach(pc.f178FwdDialCm)) {
+                nofoot::weaponViewOffsetTarget(T, pc.f178FwdPre);
+                pc.targetFromAuthoredM = std::sqrt((T[0] - N0[0]) * (T[0] - N0[0]) + (T[1] - N0[1]) * (T[1] - N0[1]) + (T[2] - N0[2]) * (T[2] - N0[2]));
+            }
+        }
+        if (nofoot::f178::leftVector(pc.f178LeftDialCm, pc.postureW, pc.detachW, fwdM, pc.f178LeftShift)) {
+            nofoot::weaponViewOffsetTarget(T, pc.f178LeftShift);
             pc.targetFromAuthoredM = std::sqrt((T[0] - N0[0]) * (T[0] - N0[0]) + (T[1] - N0[1]) * (T[1] - N0[1]) + (T[2] - N0[2]) * (T[2] - N0[2]));
         }
         // F170 (TEMPORARY): the crouched ADS torso square. The share of the shoulder line's measured blade the torso is turned out of: the dial x the crouched weight (F163) x the detach weight,
@@ -17683,13 +17739,32 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
                 nofoot::reachLimitDeltaFeasibleOnly(vBase, R, have, candidateBase, fullBase, &feasibleBase);
                 for (int i = 0; i < 3; ++i) pc.f171ReachDelta[i] = w * (full[i] - fullBase[i]);
             }
+            // F178: the same for the standing pair's moves, each taken out of the shoulders' offsets from their grips on its own (the crouched blocks above do the same with theirs). Evaluated only
+            // with the move made, which needs a standing dial other than 0; nothing else here changes.
+            const auto reachDeltaWithout = [&](const double move[3], double out[3]) noexcept {
+                double vBase[2][3], candidateBase[3] = {}, fullBase[3] = {};
+                bool feasibleBase = true;
+                for (int side = 0; side < 2; ++side) {
+                    vBase[side][0] = v[side][0] - move[0];
+                    vBase[side][1] = v[side][1];
+                    vBase[side][2] = v[side][2] - move[2];
+                }
+                nofoot::reachLimitDeltaFeasibleOnly(vBase, R, have, candidateBase, fullBase, &feasibleBase);
+                for (int i = 0; i < 3; ++i) out[i] = w * (full[i] - fullBase[i]);
+            };
+            if (pc.f178FwdPre[0] != 0.0 || pc.f178FwdPre[2] != 0.0) reachDeltaWithout(pc.f178FwdPre, pc.f178FwdReachDelta);
+            if (pc.f178LeftShift[0] != 0.0 || pc.f178LeftShift[2] != 0.0) reachDeltaWithout(pc.f178LeftShift, pc.f178LeftReachDelta);
             reachCorr = w * std::sqrt(full[0] * full[0] + full[2] * full[2]);
         }
     }
     // F169: a positive dial's move, after the reach rule: on top of the written horizontal move, which is the reach boundary where the rule is active. The reach correction the bend and the
     // torso yaw aim at (pc.reach) takes it too, so they see the neck where it is written. Zero for a negative dial, at the hip, standing and at dial 0: nothing is added. F82's path below
     // re-forms the neck from the target and the detach-scaled reach, and adds the same move to it; the move is already scaled by the detach weight.
-    const double f168Post[3] = {pc.f168Post[0], pc.f168Post[1], pc.f168Post[2]};
+    // F178: the standing forward dial's positive move is added the same way, with the crouched one's (summed only when it is made, so with the standing dial at 0 the crouched pair's vector is
+    // copied as it was).
+    double f168Post[3] = {pc.f168Post[0], pc.f168Post[1], pc.f168Post[2]};
+    if (pc.f178FwdPost[0] != 0.0 || pc.f178FwdPost[2] != 0.0)
+        for (int i = 0; i < 3; ++i) f168Post[i] += pc.f178FwdPost[i];
     nofoot::f168::addAfterReach(mv.th, pc.reach, f168Post);
     // F82: compute the legacy reach proposal first, then use its exact detached endpoint. At full detachment the
     // original body path above remains byte-for-byte in control; before that endpoint the new solve targets
@@ -17721,6 +17796,8 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
             nofoot::weaponViewOffsetTarget(physicalTarget, neckViewShift);
             nofoot::weaponViewOffsetTarget(physicalTarget, pc.f168Pre);   // F168 (TEMPORARY): the crouched body's dial, as on the legacy target above (the shift is scaled by the detach weight); F169: a negative dial's part only, a positive one is added to the neck below
             nofoot::weaponViewOffsetTarget(physicalTarget, pc.f171Shift);   // F171 (TEMPORARY): the sideways move, as on the legacy target above (also scaled by the detach weight)
+            nofoot::weaponViewOffsetTarget(physicalTarget, pc.f178FwdPre);   // F178 (TEMPORARY): the standing pair, as the crouched one is (a negative forward dial's part, then the left move; a positive forward dial's is in f168Post)
+            nofoot::weaponViewOffsetTarget(physicalTarget, pc.f178LeftShift);
             // F94a/F97a: the rifle's physical rest target takes the same height rule (the animated neck's unarmed, F93's raise and the eye's lowering armed; F161: crouched, the
             // lowering holds through the detach)
             physicalTarget[1] = nofoot::f97::armedNeckTarget(N0[1], physicalTarget[1], pc.eyeYSelected + f97EyeOverE, f97H, pc.detachW, f97W, pc.postureW,
@@ -17740,6 +17817,8 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
         }
         for (int i = 0; i < 3; ++i) pc.f168ReachDelta[i] *= pc.detachW;   // F169: the reach correction is scaled by the detach weight on this path (a refusal below gives the legacy neck back; the figure is then a little off)
         for (int i = 0; i < 3; ++i) pc.f171ReachDelta[i] *= pc.detachW;   // F171: and the sideways move's the same way
+        for (int i = 0; i < 3; ++i) pc.f178FwdReachDelta[i] *= pc.detachW;   // F178: and the standing pair's
+        for (int i = 0; i < 3; ++i) pc.f178LeftReachDelta[i] *= pc.detachW;
         mv = nofoot::pinMove(N0, desiredNeck);
         if (neckYawInputsHave) {
             const double shift[3] = {mv.th[0] - neckYawBaseMove.th[0], mv.delta - neckYawBaseMove.delta,
@@ -17837,8 +17916,10 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
     const double authoredDelta[3] = {T[0] - N0[0], T[1] - N0[1], T[2] - N0[2]};
     pc.targetFromAuthoredM = nofoot::ikLen(authoredDelta);
     for (int i = 0; i < 3; ++i) pc.neckYawTarget[i] = T[i] + pc.reach[i];
-    pc.f168WrittenM = nofoot::f168::writtenAlongM(pc.f168Pre, f168Post, pc.f168ReachDelta, pc.f168Fwd);   // F169: the dial's move as written, for the F168 line
+    pc.f168WrittenM = nofoot::f168::writtenAlongM(pc.f168Pre, pc.f168Post, pc.f168ReachDelta, pc.f168Fwd);   // F169: the dial's move as written, for the F168 line (F178: the crouched dial's own part, not the sum with the standing one's)
     pc.f171WrittenM = nofoot::f171::writtenLeftM(pc.f171Shift, pc.f171ReachDelta, pc.f171Fwd);   // F171: the sideways move as written along the left of the aim, for the F171 line
+    pc.f178FwdWrittenM = nofoot::f168::writtenAlongM(pc.f178FwdPre, pc.f178FwdPost, pc.f178FwdReachDelta, pc.f168Fwd);   // F178: the standing forward dial's move as written, for the F178 line
+    pc.f178LeftWrittenM = nofoot::f171::writtenLeftM(pc.f178LeftShift, pc.f178LeftReachDelta, pc.f171Fwd);   // F178: and the standing left dial's
     // 2. Apply: the horizontal move to every joint, then the vertical move and the legs.
     bool writeFault = false;
     nofoot::LegSolve ls[2];
@@ -21340,6 +21421,36 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
                     sample171.leftShoulderToGripM = sample168.leftShoulderToGripM;
                     f.f171.add(sample171);
                 }
+                // F178 (TEMPORARY): the standing ADS body dials, on the frames standing in the sights (the crouched weight under 0.5, the complement of the crouched sample's gate) with a two-handed
+                // gun (this block's gate: the left hand solved). Every such frame is filed, the dials at 0 included: that is the before picture. The same measures as F171 files: both shoulders
+                // from the eye as drawn, the right shoulder to the gun's root and the left shoulder to the left-hand grip; the moves asked (the dial x the standing weight, signed) and as
+                // written (after the reach rule).
+                if (nofoot::f178::standingAds(pinCall.postureW, pinCall.detachW)) {
+                    nofoot::f178::Sample sample178;
+                    sample178.moving = sample166.moving;
+                    sample178.weight = nofoot::f178::weight(pinCall.postureW, pinCall.detachW);
+                    sample178.forwardDialCm = pinCall.f178FwdDialCm;
+                    sample178.leftDialCm = pinCall.f178LeftDialCm;
+                    sample178.forwardMade = pinCall.f178FwdShift[0] != 0.0 || pinCall.f178FwdShift[2] != 0.0;
+                    sample178.leftMade = pinCall.f178LeftShift[0] != 0.0 || pinCall.f178LeftShift[2] != 0.0;
+                    sample178.forwardAskedM = nofoot::f178::forwardShiftM(pinCall.f178FwdDialCm, pinCall.postureW, pinCall.detachW);
+                    sample178.leftAskedM = nofoot::f178::leftShiftM(pinCall.f178LeftDialCm, pinCall.postureW, pinCall.detachW);
+                    sample178.forwardWrittenM = pinCall.f178FwdWrittenM;
+                    sample178.leftWrittenM = pinCall.f178LeftWrittenM;
+                    double shoulderR[3], shoulderL[3];
+                    if (pl.ok[1] && so[1].fitOk && finalAt(pl.side[1].U, shoulderR)) {
+                        const double d[3] = {shoulderR[0] - so[1].tA[0], shoulderR[1] - so[1].tA[1], shoulderR[2] - so[1].tA[2]};
+                        sample178.rightShoulderToGunM = nofoot::ikLen(d);
+                    }
+                    if (pl.ok[0] && so[0].fitOk && finalAt(pl.side[0].U, shoulderL)) {
+                        const double d[3] = {shoulderL[0] - so[0].tA[0], shoulderL[1] - so[0].tA[1], shoulderL[2] - so[0].tA[2]};
+                        sample178.leftShoulderToGripM = nofoot::ikLen(d);
+                    }
+                    for (int c = 0; c < 3; ++c) sample178.leftShoulderM[c] = sample166.shoulderM[c];
+                    if (pinCall.f97EyeDrawnOk && pl.ok[1] && finalAt(pl.side[1].U, shoulderR))
+                        nofoot::f166::offsetFromEye(shoulderR, pinCall.f97EyeDrawn, pinCall.hEye[0], pinCall.hEye[1], sample178.rightShoulderM);
+                    f.f178.add(sample178);
+                }
             }
             g_f98Seq.fetch_add(1, std::memory_order_release);
         }
@@ -22550,6 +22661,12 @@ void f125ElbowClose(uint64_t now, bool keepRun = false) noexcept {
             char line171[1190];
             nofoot::f171::formatSummary(line171, sizeof(line171), w.seconds, w.item, f98.f171);
             Log::get().note("%s", line171);
+        }
+        // F178 (TEMPORARY): the standing ADS body dials, on a line of its own, whenever a frame was standing in the sights (the dials at 0 included: the before picture)
+        if (f98.f178.ads) {
+            char line178[1190];
+            nofoot::f178::formatSummary(line178, sizeof(line178), w.seconds, w.item, f98.f178);
+            Log::get().note("%s", line178);
         }
     }
     const nofoot::f159::HighSeconds carried159 = w.high.next(keepRun);

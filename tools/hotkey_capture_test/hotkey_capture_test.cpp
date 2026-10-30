@@ -1994,15 +1994,45 @@ void testLegacyOnFootRowsStayOutOfMenu() {
         check(found == 1 && shaped && beside,
               "Crouched ADS body left / right (F171, TEMPORARY) is one [experimental] number row right after Crouched ADS body forward / back, on its page and under its heading: -30..30 cm (F172: was -20..20), step 0.5, signed, live, shipped 25.0 (F173; 15.0 before)");
     }
-    // F170 (TEMPORARY): "Crouched ADS torso square" is the eighth number row of the developer tier's native on foot rows (the seventh before F171 put "Crouched ADS body left / right" between), right
-    // after that row on the same page and under the same heading: 0..1 of the shoulder line's blade in steps of 0.05, not signed, live, shipped 0.0 since F173 (1.0 before: the turn was on), labelled without (test). It
-    // carries no old value over.
+    // F178 (TEMPORARY): the standing mirrors of the two crouched body dials are the eighth and ninth number rows of the developer tier's native on foot rows, right after "Crouched ADS body left / right" on
+    // the same page and under the same heading, in the crouched pair's order: "Standing ADS body forward / back" (-20..20 cm, step 0.5, signed, live, shipped 0.0) and "Standing ADS body left / right"
+    // (-30..30 cm, step 0.5, signed, live, shipped 0.0; positive is left of the aim line), labelled without (test). They carry no old value over.
+    {
+        int leftRow = -1, standFwdRow = -1, standLeftRow = -1, foundFwd = 0, foundLeft = 0;
+        bool shaped = true;
+        for (int i = 0; i < kCount; ++i) {
+            const MenuRowDef& d = kMenuRows[i];
+            if (strcmp(d.section, "experimental") == 0 && strcmp(d.key, "native_on_foot_crouch_ads_body_left_cm") == 0) leftRow = i;
+            if (strcmp(d.section, "experimental") != 0) continue;
+            if (strcmp(d.key, "native_on_foot_stand_ads_body_forward_cm") == 0) {
+                standFwdRow = i;
+                ++foundFwd;
+                shaped = shaped && d.kind == MenuKind::Number && d.tier == MenuTier::Experimental && strcmp(d.label, "Standing ADS body forward / back") == 0 && strcmp(d.lo, "-20") == 0 &&
+                         strcmp(d.hi, "20") == 0 && strcmp(d.step, "0.5") == 0 && strcmp(d.unit, "cm") == 0 && d.showSign && d.applies == 1 && strcmp(d.shipped, "0.0") == 0;
+            }
+            if (strcmp(d.key, "native_on_foot_stand_ads_body_left_cm") == 0) {
+                standLeftRow = i;
+                ++foundLeft;
+                shaped = shaped && d.kind == MenuKind::Number && d.tier == MenuTier::Experimental && strcmp(d.label, "Standing ADS body left / right") == 0 && strcmp(d.lo, "-30") == 0 &&
+                         strcmp(d.hi, "30") == 0 && strcmp(d.step, "0.5") == 0 && strcmp(d.unit, "cm") == 0 && d.showSign && d.applies == 1 && strcmp(d.shipped, "0.0") == 0;
+            }
+        }
+        const bool beside = leftRow >= 0 && standFwdRow == leftRow + 1 && standLeftRow == standFwdRow + 1 && strcmp(kMenuRows[standFwdRow].page, kMenuRows[leftRow].page) == 0 &&
+                            strcmp(kMenuRows[standFwdRow].group, kMenuRows[leftRow].group) == 0 && strcmp(kMenuRows[standLeftRow].page, kMenuRows[leftRow].page) == 0 &&
+                            strcmp(kMenuRows[standLeftRow].group, kMenuRows[leftRow].group) == 0;
+        check(foundFwd == 1 && foundLeft == 1 && shaped && beside,
+              "Standing ADS body forward / back and left / right (F178, TEMPORARY) are one [experimental] number row each, right after Crouched ADS body left / right in that order, on its page and under its heading: "
+              "-20..20 and -30..30 cm, step 0.5, signed, live, shipped 0.0");
+    }
+    // F170 (TEMPORARY): "Crouched ADS torso square" is the tenth number row of the developer tier's native on foot rows (the eighth before F178 put the two "Standing ADS body" rows between, the seventh before
+    // F171 put "Crouched ADS body left / right" before that), right after the standing left row on the same page and under the same heading: 0..1 of the shoulder line's blade in steps of 0.05, not signed,
+    // live, shipped 0.0 since F173 (1.0 before: the turn was on), labelled without (test). It carries no old value over.
     {
         int leftRow = -1, squareRow = -1, found = 0;
         bool shaped = true;
         for (int i = 0; i < kCount; ++i) {
             const MenuRowDef& d = kMenuRows[i];
-            if (strcmp(d.section, "experimental") == 0 && strcmp(d.key, "native_on_foot_crouch_ads_body_left_cm") == 0) leftRow = i;
+            if (strcmp(d.section, "experimental") == 0 && strcmp(d.key, "native_on_foot_stand_ads_body_left_cm") == 0) leftRow = i;
             if (strcmp(d.section, "experimental") != 0 || strcmp(d.key, "native_on_foot_crouch_ads_square") != 0) continue;
             squareRow = i;
             ++found;
@@ -2012,10 +2042,10 @@ void testLegacyOnFootRowsStayOutOfMenu() {
         const bool beside = leftRow >= 0 && squareRow == leftRow + 1 && strcmp(kMenuRows[squareRow].page, kMenuRows[leftRow].page) == 0 &&
                             strcmp(kMenuRows[squareRow].group, kMenuRows[leftRow].group) == 0;
         check(found == 1 && shaped && beside,
-              "Crouched ADS torso square (F170, TEMPORARY) is one [experimental] number row right after Crouched ADS body left / right, on its page and under its heading: 0..1, step 0.05, unsigned, live, shipped 0.0 (F173; 1.0 before)");
+              "Crouched ADS torso square (F170, TEMPORARY) is one [experimental] number row right after Standing ADS body left / right (F178; Crouched ADS body left / right before), on its page and under its heading: 0..1, step 0.05, unsigned, live, shipped 0.0 (F173; 1.0 before)");
     }
-    // F169 (TEMPORARY): "Pistol sprint arm swing phase" is the ninth number row of the developer tier's native on foot rows (the seventh before F170 put "Crouched ADS torso square" between, the eighth
-    // before F171 put "Crouched ADS body left / right" before that), right after the torso square row on the same page and under the same heading: 0..1 of a stride in steps of 0.05, not signed,
+    // F169 (TEMPORARY): "Pistol sprint arm swing phase" is the eleventh number row of the developer tier's native on foot rows (the seventh before F170 put "Crouched ADS torso square" between, the eighth
+    // before F171 put "Crouched ADS body left / right" before that, the ninth before F178 put the two "Standing ADS body" rows before that), right after the torso square row on the same page and under the same heading: 0..1 of a stride in steps of 0.05, not signed,
     // live, shipped 0.5 since F173 (0.0 before), labelled without (test). It carries no old value over.
     {
         int squareRow = -1, swingRow = -1, found = 0;
