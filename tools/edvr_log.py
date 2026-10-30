@@ -14674,10 +14674,14 @@ def _hj_f179a_height(rows, ctx):
 
 # F179b: the neck guard (formatContext in src/d3d11/native_on_foot_f179.h), one line per context that had frames the guard ran in.
 H179B_LABEL = "native on foot neck guard (F179b)"
-H179B_RE = (r"native on foot neck guard \(F179b\) (?P<wl>\d+) s: item (?P<item>\S+); (?P<ctx>hip unarmed|hip armed|ADS standing|ADS crouched) (?P<frames>\d+) frames: pushed (?P<pushed>\d+), "
-            r"the push mean (?P<pm>[\d.]+) cm \(largest (?P<px>[\d.]+)\); off the post-reach dial add (?P<on>\d+) frames, mean (?P<om>[\d.]+) cm \(largest (?P<ox>[\d.]+)\); "
-            r"the eye ahead of the chest before the guard \(as the pose and dials would put it\) min (?P<bmin>%s) mean (?P<bmean>%s) cm, after it as measured \((?P<an>\d+) frames\) "
-            r"min (?P<amin>%s) mean (?P<amean>%s), predicted after mean (?P<pred>%s), under 9 cm (?P<u9>\d+)" % ((_HN,) * 5))
+H179B_RE = (r"native on foot neck guard \(F179b\) (?P<wl>\d+) s: item (?P<item>\S+); (?P<ctx>hip armed|ADS standing|ADS crouched) (?P<frames>\d+) frames, the guard at (?P<dist>[\d.]+) cm: "
+            r"pushed (?P<pushed>\d+), the push mean (?P<pm>[\d.]+) cm \(largest (?P<px>[\d.]+)\); off the post-reach dial add (?P<on>\d+) frames, mean (?P<om>[\d.]+) cm "
+            r"\(largest (?P<ox>[\d.]+)\); the eye ahead of the chest before the guard \(as the pose and dials would put it\) min (?P<bmin>%s) mean (?P<bmean>%s) cm, after it as measured "
+            r"\((?P<an>\d+) frames\) min (?P<amin>%s) mean (?P<amean>%s), predicted after mean (?P<pred>%s), under (?P<held>[\d.]+) cm (?P<u9>\d+)" % ((_HN,) * 5))
+# F180c: unarmed at the hip the guard measures only: the push it would make, nothing moved (no frames under the distance)
+H179B_MEAS_RE = (r"native on foot neck guard \(F179b\) (?P<wl>\d+) s: item (?P<item>\S+); (?P<ctx>hip unarmed) (?P<frames>\d+) frames, the guard at (?P<dist>[\d.]+) cm, measuring only "
+                 r"\(nothing is moved\): would push (?P<would>\d+) frames, the push mean (?P<wm>[\d.]+) cm \(largest (?P<wx>[\d.]+)\); the eye ahead of the chest \(as the pose puts it\) "
+                 r"min (?P<bmin>%s) mean (?P<bmean>%s) cm, as measured \((?P<an>\d+) frames\) min (?P<amin>%s) mean (?P<amean>%s), predicted mean (?P<pred>%s)" % ((_HN,) * 5))
 H179B_CTXS = ("hip unarmed", "hip armed", "ADS standing", "ADS crouched")
 
 
@@ -14687,47 +14691,122 @@ def _hj_f179b_guard(rows, ctx):
     next, and off the move last. The flight edvr_gfx_20261030_095038 put the eye 6.6 cm ahead of the chest (min 5.5) with F178's dials +14.5 forward, +24.5 left, and looking down showed the
     open neck. Per context (hip unarmed, hip armed, ADS standing, ADS crouched): the frames, those pushed and the push (mean over the pushed, largest), what came off the post-reach add, the
     eye ahead of the chest before the guard (predicted without it) and after it as measured. A push is fine. PARTIAL when the measured figure after the guard reads under 9 cm in more than
-    1% of the frames it was measured on (the guard did not hold); IDLE under 30 frames. No line, no verdict."""
-    sec = rows.get("sec", [])
-    if not sec:
+    1% of the frames it was measured on (the guard did not hold); IDLE under 30 frames. No line, no verdict.
+    F180c: the distance is the experimental.native_on_foot_neck_guard_cm key's (the line says it; 'under' is 1 cm below it), and unarmed at the hip the guard measures only: that context's
+    line says the push it would make and moves nothing, so it is never judged held or not held."""
+    sec, meas = rows.get("sec", []), rows.get("meas", [])
+    if not (sec or meas):
         return None
     by = collections.OrderedDict()
-    for r in sec:
+    for r in sec + meas:
         by.setdefault(r["ctx"], []).append(r)
-    parts, notes, total, an_all, u9_all, bad = [], [], 0, 0, 0, []
+    parts, notes, total, bad = [], [], 0, []
     for name in H179B_CTXS:
         rs = by.get(name)
         if not rs:
             continue
         g = lambda k, rr=rs: sum(int(r[k]) for r in rr)
-        frames, pushed, an, u9 = g("frames"), g("pushed"), g("an"), g("u9")
+        frames, an = g("frames"), g("an")
         total += frames
-        an_all += an
-        u9_all += u9
-        pm = sum(int(r["pushed"]) * float(r["pm"]) for r in rs) / pushed if pushed else 0.0
-        px = max(float(r["px"]) for r in rs)
-        on = g("on")
-        om = sum(int(r["on"]) * float(r["om"]) for r in rs) / on if on else 0.0
         bmean = sum(int(r["frames"]) * float(r["bmean"]) for r in rs) / frames if frames else 0.0
         bmin = min(float(r["bmin"]) for r in rs)
         amean = sum(int(r["an"]) * float(r["amean"]) for r in rs) / an if an else 0.0
         amin = min((float(r["amin"]) for r in rs if int(r["an"])), default=0.0)
-        parts.append("%s %d s: %d frames, pushed %d (%.0f%%; mean %.1f cm, largest %.1f), %d frames with %.1f cm off the post-reach add; the eye ahead of the chest before the guard min %+.1f mean %+.1f "
-                     "cm, after as measured (%d frames) min %+.1f mean %+.1f, under 9 cm in %d" % (name, _hsecs(rs), frames, pushed, 100.0 * pushed / frames if frames else 0.0, pm, px, on, om,
-                                                                                                         bmin, bmean, an, amin, amean, u9))
+        dists = sorted(set(float(r["dist"]) for r in rs))
+        dtext = ("%.1f cm" % dists[0]) if len(dists) == 1 else ("%.1f to %.1f cm" % (dists[0], dists[-1]))
+        if name == "hip unarmed":
+            would = g("would")
+            wm = sum(int(r["would"]) * float(r["wm"]) for r in rs) / would if would else 0.0
+            wx = max(float(r["wx"]) for r in rs)
+            parts.append("%s %d s (the guard at %s, measuring only: nothing moved): %d frames, would push %d (%.0f%%; mean %.1f cm, largest %.1f); the eye ahead of the chest min %+.1f mean %+.1f cm, as "
+                         "measured (%d frames) min %+.1f mean %+.1f" % (name, _hsecs(rs), dtext, frames, would, 100.0 * would / frames if frames else 0.0, wm, wx, bmin, bmean, an, amin, amean))
+            if frames and would > 0.03 * frames:
+                notes.append("the unarmed hip would be pushed in %d%% of its frames (measured only: unarmed moves nothing)" % round(100.0 * would / frames))
+            continue
+        pushed, u9, on = g("pushed"), g("u9"), g("on")
+        pm = sum(int(r["pushed"]) * float(r["pm"]) for r in rs) / pushed if pushed else 0.0
+        px = max(float(r["px"]) for r in rs)
+        om = sum(int(r["on"]) * float(r["om"]) for r in rs) / on if on else 0.0
+        parts.append("%s %d s (the guard at %s): %d frames, pushed %d (%.0f%%; mean %.1f cm, largest %.1f), %d frames with %.1f cm off the post-reach add; the eye ahead of the chest before the guard "
+                     "min %+.1f mean %+.1f cm, after as measured (%d frames) min %+.1f mean %+.1f, under the distance less 1 cm in %d" % (
+                         name, _hsecs(rs), dtext, frames, pushed, 100.0 * pushed / frames if frames else 0.0, pm, px, on, om, bmin, bmean, an, amin, amean, u9))
         if an and u9 > 0.01 * an:
             bad.append("%s %d of %d" % (name, u9, an))
-        if name == "hip unarmed" and frames and pushed > 0.03 * frames:
-            notes.append("the guard pushed in %d%% of the unarmed hip frames (unarmed has not shown the problem before)" % round(100.0 * pushed / frames))
     if not parts:
         return None
     text = "; ".join(parts)
     if bad:
-        return ("PARTIAL", text + "; the eye was measured under 9 cm ahead of the chest after the guard in more than 1%% of the frames (the guard did not hold): %s" % ", ".join(bad) +
+        return ("PARTIAL", text + "; the eye was measured more than 1 cm under the distance ahead of the chest after the guard in more than 1%% of the frames (the guard did not hold): %s" % ", ".join(bad) +
                 ("; " + "; ".join(notes) if notes else ""))
     if total < 30:
         return ("IDLE", text + "; under 30 frames: little to judge")
     return ("OK", text + ("; " + "; ".join(notes) if notes else ""))
+
+
+# F180b (TEMPORARY): the standing ADS spine straighten (experimental.native_on_foot_stand_ads_spine_straighten) and the figures that judge it (formatSummary in
+# src/d3d11/native_on_foot_f180.h). The window line is printed for every window with a frame standing in the sights with a two-handed gun, the dial at 0 included (the before picture). The
+# dial's own note line carries a different label ("spine dial"); the rule reads it as its "dial" row, which tells an idle flight from a log of a build without the instrument.
+H180B_LABEL = "native on foot standing ADS spine (F180b, TEMPORARY)"
+H180B_RE = (r"native on foot standing ADS spine \(F180b, TEMPORARY\) (?P<wl>\d+) s: item (?P<item>\S+); standing in the sights (?P<frames>\d+) frames; the dial "
+            r"experimental\.native_on_foot_stand_ads_spine_straighten mean (?P<dial>[\d.]+) \(largest (?P<dialmax>[\d.]+)\); the straighten share mean (?P<share>[\d.]+); written in (?P<wrote>\d+) frames; "
+            r"the reference: hip frames (?P<s1>\d+), the press's first frame (?P<s2>\d+), none (?P<s0>\d+); lean about the body's right axis \(deg, forward positive\) animated/reference/written: "
+            r"spine 16 (?P<a0>%s)/(?P<r0>%s)/(?P<w0>%s), spine 21 (?P<a1>%s)/(?P<r1>%s)/(?P<w1>%s), chest 24 (?P<a2>%s)/(?P<r2>%s)/(?P<w2>%s), neck 34 (?P<a3>%s)/(?P<r3>%s)/(?P<w3>%s); "
+            r"the neck from the eye \(right/up/forward, cm\) after (?P<nar>%s)/(?P<nau>%s)/(?P<naf>%s), before (?P<nbr>%s)/(?P<nbu>%s)/(?P<nbf>%s); the left shoulder from the eye after "
+            r"(?P<sar>%s)/(?P<sau>%s)/(?P<saf>%s), before (?P<sbr>%s)/(?P<sbu>%s)/(?P<sbf>%s); F179a's leg raise asked mean (?P<raise>%s) cm" % ((_HN,) * 25))
+H180B_DIAL_RE = (r"native on foot standing ADS spine dial \(F180b, TEMPORARY\): experimental\.native_on_foot_stand_ads_spine_straighten = (?P<val>[\d.]+) -- ")
+
+
+def _hj_f180b_spine(rows, ctx):
+    """F180b (TEMPORARY): the standing ADS spine straighten. Standing in the sights the game's aiming animation hunches the upper spine (levels 16, 21, 24) and the neck (34) forward (the flight
+    edvr_gfx_20261030_10xxxx: the chest's lean +23.4 deg as written, the neck cannot be brought under the headset, the spine still looks curved). The dial takes the share given back out: each
+    level's local rotation is slerp(animated, reference, dial x the standing share x the detach weight), the reference being the same item's levels on the last standing hip frames (the press's first
+    frame when there were none). Per item: the frames, the dial, the share, the frames the levels were written in, the reference's source, the four bones' lean animated / reference / written,
+    the neck and the left shoulder from the eye after the writes and before the straighten, F179a's leg raise asked. NEVER APPLIED when 30 or more frames stood in the sights with the dial at
+    0.1 or more and no level was written in any; PARTIAL when the levels were written in under half of those frames; the dial at 0 is the baseline: OK. Under 30 frames is IDLE, and so is a log
+    whose only F180b lines are the dial's own note (the key was read, no standing ADS frame came). No line, no verdict."""
+    sec, notes_dial = rows.get("sec", []), rows.get("dial", [])
+    if not sec:
+        if not notes_dial:
+            return None
+        return ("IDLE", "the standing ADS spine dial was read (%s as last logged) and no frame stood in the sights with a two-handed gun in the window: nothing to judge" % notes_dial[-1]["val"])
+    items = collections.OrderedDict()
+    for r in sec:
+        items.setdefault(r["item"], []).append(r)
+    parts, never, thin, total, dial_seen = [], [], [], 0, 0.0
+    for item, rs in items.items():
+        frames = sum(int(r["frames"]) for r in rs)
+        if not frames:
+            continue
+        total += frames
+        mean = lambda k, rr=rs, nn=frames: sum(int(r["frames"]) * float(r[k]) for r in rr) / nn
+        wrote = sum(int(r["wrote"]) for r in rs)
+        dialmax = max(float(r["dialmax"]) for r in rs)
+        dial_seen = max(dial_seen, dialmax)
+        src1, src2, src0 = (sum(int(r[k]) for r in rs) for k in ("s1", "s2", "s0"))
+        parts.append("%s %d s: standing in the sights %d frames, dial mean %.2f (largest %.2f), share mean %.2f, the levels written in %d (the reference: hip frames %d, the press's first frame %d, none %d); "
+                     "lean animated/reference/written (deg): spine 16 %+.1f/%+.1f/%+.1f, spine 21 %+.1f/%+.1f/%+.1f, chest 24 %+.1f/%+.1f/%+.1f, neck 34 %+.1f/%+.1f/%+.1f; the neck from the eye "
+                     "(right/up/forward, cm) after %+.1f/%+.1f/%+.1f before %+.1f/%+.1f/%+.1f; the left shoulder from the eye after %+.1f/%+.1f/%+.1f before %+.1f/%+.1f/%+.1f; F179a's leg raise asked %+.1f cm" % (
+                         item, _hsecs(rs), frames, mean("dial"), dialmax, mean("share"), wrote, src1, src2, src0,
+                         mean("a0"), mean("r0"), mean("w0"), mean("a1"), mean("r1"), mean("w1"), mean("a2"), mean("r2"), mean("w2"), mean("a3"), mean("r3"), mean("w3"),
+                         mean("nar"), mean("nau"), mean("naf"), mean("nbr"), mean("nbu"), mean("nbf"), mean("sar"), mean("sau"), mean("saf"), mean("sbr"), mean("sbu"), mean("sbf"), mean("raise")))
+        if frames >= 30 and dialmax >= 0.1:
+            if not wrote:
+                never.append("the dial reached %.2f and no level was written in any of %d frames standing in the sights with %s (the reference: hip frames %d, the press's first frame %d, none %d)" % (
+                    dialmax, frames, item, src1, src2, src0))
+            elif wrote < 0.5 * frames:
+                thin.append("the levels were written in %d of %d frames standing in the sights with %s" % (wrote, frames, item))
+    if not parts:
+        return None
+    text = "; ".join(parts)
+    if never:
+        return ("NEVER APPLIED", text + "; " + "; ".join(never + thin))
+    if thin:
+        return ("PARTIAL", text + "; " + "; ".join(thin))
+    if total < 30:
+        return ("IDLE", text + "; under 30 frames standing in the sights: little to judge")
+    if dial_seen < 0.01:
+        return ("OK", text + "; the dial was 0: these are the baseline figures")
+    return ("OK", text)
 
 
 def _hj_f95c_head_shadow(rows, ctx):
@@ -16310,7 +16389,12 @@ HEALTH_RULES = (
     ), _hj_f179a_height),
     _hrule("neck guard (F179b)", ("F179b",), (H179B_LABEL,), (
         ("sec", H179B_RE),
+        ("meas", H179B_MEAS_RE),
     ), _hj_f179b_guard),
+    _hrule("standing ADS spine (F180b)", ("F180b",), (H180B_LABEL,), (
+        ("sec", H180B_RE),
+        ("dial", H180B_DIAL_RE),
+    ), _hj_f180b_spine),
     _hrule("left elbow (F98a)", ("F98a", "F159"), ("native on foot left elbow (F98a)", "native on foot left elbow pole (F159)", "native on foot left elbow seed (F159)"), (
         ("sec", r"native on foot left elbow \(F98a\) (?P<wl>\d+) s: item (?P<item>\S+); (?P<n>\d+) solves: the game's aim pitch (?P<aim>%s) deg \(min %s max %s\); the chest's lean as "
                 r"written (?P<lean>%s) deg \(animated (?P<leanAnim>%s)\); F82's torso yaw (?P<yaw>%s) deg \(largest [\d.]+\); the elbow's swivel from the stance's plane "
@@ -17456,6 +17540,7 @@ def self_test_health():
     f171c_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f171c.h")
     f178_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f178.h")
     f179_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f179.h")
+    f180_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f180.h")
     f172_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f172.h")
     f175_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f175.h")
     f176_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f176.h")
@@ -17492,6 +17577,7 @@ def self_test_health():
         f171csrc = read_text(f171c_path)
         f178src = read_text(f178_path)
         f179src = read_text(f179_path)
+        f180src = read_text(f180_path)
         f172src = read_text(f172_path)
         f175src = read_text(f175_path)
         f176src = read_text(f176_path)
@@ -17660,6 +17746,15 @@ def self_test_health():
             fmts[key] = health_c_format(f179src, needle)
         if fmts[key] is None:
             raise AssertionError("native_on_foot_f179.h has no format holding %r: the --health rule that reads it is out of date" % needle)
+        return health_render(fmts[key], vals)
+
+    def R180(needle, *vals):
+        """F180b's window line (formatSummary in native_on_foot_f180.h), from its own format literal; the dial's note line (native_on_foot.cpp), from its own."""
+        key = "f180:" + needle
+        if key not in fmts:
+            fmts[key] = health_c_format(f180src, needle) or health_c_format(source, needle)
+        if fmts[key] is None:
+            raise AssertionError("native_on_foot_f180.h and native_on_foot.cpp have no format holding %r: the --health rule that reads it is out of date" % needle)
         return health_render(fmts[key], vals)
 
     def R171c(needle, *vals):
@@ -18905,32 +19000,91 @@ def self_test_health():
               lacks=[row("OK", F179A), row("IDLE", F179A), row("PARTIAL", F179A), row("NEVER APPLIED", F179A), row("UNPARSED", F179A)])
         check("F179a height: a line that drifted from its pattern is unparsed by both rules", ["native on foot armed body (F97a) 1 s: something else"], 4, [("UNPARSED", F97), ("UNPARSED", F179A)])
 
-        # ---- F179b: the neck guard ----
+        # ---- F179b: the neck guard (F180c: the distance in the line, unarmed at the hip measures only) ----
         F179B = "neck guard (F179b)"
 
-        def guard179(item=RIFLE97, wl=10, ctx="ADS standing", frames=800, pushed=120, pm=3.0, px=6.5, on=40, om=2.0, ox=4.0, bmin=4.0, bmean=14.0, an=800, amin=10.4, amean=18.0, pred=18.5, u9=0):
-            """F179b's line for one context, from the DLL's own format (formatContext, native_on_foot_f179.h); the push, the part off the post-reach add and the eye ahead of the chest in cm."""
-            return R179("native on foot neck guard (F179b) %u s: item %s", wl, item, ctx, frames, pushed, pm, px, on, om, ox, bmin, bmean, an, amin, amean, pred, 9.0, u9)
+        def guard179(item=RIFLE97, wl=10, ctx="ADS standing", frames=800, dist=10.0, pushed=120, pm=3.0, px=6.5, on=40, om=2.0, ox=4.0, bmin=4.0, bmean=14.0, an=800, amin=10.4, amean=18.0, pred=18.5,
+                     u9=0):
+            """F179b's line for one acting context, from the DLL's own format (formatContext, native_on_foot_f179.h); the push, the part off the post-reach add and the eye ahead of the chest in cm; dist:
+            the guard's distance (the key's value), the frames under it less 1 cm: u9."""
+            return R179("native on foot neck guard (F179b) %u s: item %s; %s %u frames, the guard at %.1f cm: pushed", wl, item, ctx, frames, dist, pushed, pm, px, on, om, ox, bmin, bmean, an, amin, amean,
+                        pred, max(dist - 1.0, 0.0), u9)
+
+        def meas179(item=RIFLE97, wl=10, frames=500, dist=10.0, would=40, wm=2.4, wx=9.2, bmin=-0.3, bmean=21.0, an=500, amin=-0.3, amean=21.0, pred=21.0):
+            """F180c's line for the unarmed hip, which measures only (the same formatContext, its other format)."""
+            return R179("native on foot neck guard (F179b) %u s: item %s; %s %u frames, the guard at %.1f cm, measuring only", wl, item, "hip unarmed", frames, dist, would, wm, wx, bmin, bmean, an, amin, amean, pred)
 
         check("F179b guard: pushes that held the eye 10 cm ahead of the chest are OK, with the contexts named",
               [guard179(), guard179(ctx="hip armed", frames=600, pushed=0, pm=0.0, px=0.0, on=0, om=0.0, ox=0.0, bmin=30.0, bmean=34.0, amin=29.0, amean=33.0, pred=33.0, an=600)], 0, [("OK", F179B)],
-              has=["ADS standing 10 s: 800 frames, pushed 120 (15%; mean 3.0 cm, largest 6.5), 40 frames with 2.0 cm off the post-reach add; the eye ahead of the chest before the guard "
-                   "min +4.0 mean +14.0 cm, after as measured (800 frames) min +10.4 mean +18.0, under 9 cm in 0", "hip armed 10 s: 600 frames, pushed 0 (0%; mean 0.0 cm, largest 0.0)"],
+              has=["ADS standing 10 s (the guard at 10.0 cm): 800 frames, pushed 120 (15%; mean 3.0 cm, largest 6.5), 40 frames with 2.0 cm off the post-reach add; the eye ahead of the chest before the guard "
+                   "min +4.0 mean +14.0 cm, after as measured (800 frames) min +10.4 mean +18.0, under the distance less 1 cm in 0", "hip armed 10 s (the guard at 10.0 cm): 600 frames, pushed 0 (0%; mean 0.0 cm, largest 0.0)"],
               lacks=["UNPARSED", "did not hold"])
         check("F179b guard: a window with no push still says the guard ran", [guard179(pushed=0, pm=0.0, px=0.0, on=0, om=0.0, ox=0.0, bmin=30.0, bmean=33.0, amin=29.0, amean=33.0, pred=33.0)], 0,
               [("OK", F179B)], has=["pushed 0 (0%; mean 0.0 cm, largest 0.0)"], lacks=["UNPARSED"])
-        check("F179b guard: the measured figure under 9 cm in more than 1% of the frames is a guard that did not hold",
+        check("F179b guard: the measured figure under the distance less 1 cm in more than 1% of the frames is a guard that did not hold",
               [guard179(amin=5.5, amean=11.0, u9=40)], 0, [("PARTIAL", F179B)], has=["(the guard did not hold): ADS standing 40 of 800"], lacks=["UNPARSED"])
-        check("F179b guard: under 9 cm in 1% of the frames or fewer is held", [guard179(amin=8.0, u9=8)], 0, [("OK", F179B)], lacks=["UNPARSED", "did not hold"])
+        check("F179b guard: under the distance in 1% of the frames or fewer is held", [guard179(amin=8.0, u9=8)], 0, [("OK", F179B)], lacks=["UNPARSED", "did not hold"])
         check("F179b guard: under 30 frames is too few to judge", [guard179(frames=20, pushed=2, an=20, u9=0)], 0, [("IDLE", F179B)], has=["under 30 frames: little to judge"], lacks=["UNPARSED"])
-        check("F179b guard: unarmed pushes in more than 3% of the hip frames are named",
-              [guard179(ctx="hip unarmed", frames=500, pushed=40, pm=2.0, px=3.0, on=0, om=0.0, ox=0.0, bmin=8.0, bmean=20.0, amin=10.2, amean=21.0, pred=21.0, an=500)], 0, [("OK", F179B)],
-              has=["the guard pushed in 8% of the unarmed hip frames (unarmed has not shown the problem before)"], lacks=["UNPARSED"])
+        check("F180c guard: the distance is the key's: 14 cm says so, and 'under' is 1 cm below it",
+              [guard179(dist=14.0, amin=11.0, amean=16.0, u9=0)], 0, [("OK", F179B)], has=["ADS standing 10 s (the guard at 14.0 cm): 800 frames"], lacks=["UNPARSED", "did not hold"])
+        check("F180c guard: two windows at two distances name both", [guard179(dist=10.0), guard179(dist=14.0)], 0, [("OK", F179B)], has=["(the guard at 10.0 to 14.0 cm)"], lacks=["UNPARSED"])
+        check("F180c guard: unarmed at the hip measures only: the push it would make, nothing moved, and the figure is never judged held or not",
+              [meas179(), guard179()], 0, [("OK", F179B)],
+              has=["hip unarmed 10 s (the guard at 10.0 cm, measuring only: nothing moved): 500 frames, would push 40 (8%; mean 2.4 cm, largest 9.2); the eye ahead of the chest min -0.3 mean +21.0 cm, as measured "
+                   "(500 frames) min -0.3 mean +21.0", "the unarmed hip would be pushed in 8% of its frames (measured only: unarmed moves nothing)"], lacks=["UNPARSED", "did not hold", "PARTIAL"])
+        check("F180c guard: unarmed at the hip measured far under the distance is still not PARTIAL", [meas179(bmin=-4.0, amin=-4.0, amean=2.0, would=500)], 0, [("OK", F179B)], lacks=["UNPARSED", "did not hold"])
+        check("F180c guard: the unarmed line alone under 30 frames is idle", [meas179(frames=20, would=0, wm=0.0, wx=0.0, an=20)], 0, [("IDLE", F179B)], lacks=["UNPARSED"])
         check("F179b guard: two windows add up, the push weighted by the pushed frames, the figures by their frames",
               [guard179(frames=100, pushed=10, pm=2.0, px=3.0, an=100), guard179(frames=300, pushed=30, pm=4.0, px=9.0, an=300)], 0, [("OK", F179B)],
-              has=["20 s: 400 frames, pushed 40 (10%; mean 3.5 cm, largest 9.0)"], lacks=["UNPARSED"])
+              has=["20 s (the guard at 10.0 cm): 400 frames, pushed 40 (10%; mean 3.5 cm, largest 9.0)"], lacks=["UNPARSED"])
         check("F179b guard: a line that drifted from its pattern is unparsed", ["native on foot neck guard (F179b) 10 s: something else"], 4, [("UNPARSED", F179B)])
         check("F179b guard: a line that drifted beside a good one is counted beside the verdict", [guard179(), "native on foot neck guard (F179b) 10 s: something else"], 0, [("OK", F179B)],
+              has=["[+1 line(s) the rule's patterns do not match: "])
+
+        # ---- F180b (TEMPORARY): the standing ADS spine straighten ----
+        F180B = "standing ADS spine (F180b)"
+
+        def spine180(item=RIFLE97, wl=10, frames=800, dial=0.5, dialmax=0.5, share=0.5, wrote=800, s1=800, s2=0, s0=0, lean=None, neck=None, shoulder=None, raise_=9.0):
+            """F180b's window line, from the DLL's own format (formatSummary, native_on_foot_f180.h); lean: 4 levels of (animated, reference, written) deg; neck, shoulder: (after, before) as
+            (right, up, forward) cm; raise_: F179a's leg raise asked, cm."""
+            lean = lean or [(30.0, 12.0, 21.0), (25.0, 10.0, 17.0), (23.0, 15.0, 19.0), (20.0, 5.0, 12.0)]
+            neck = neck or ((1.0, -9.0, 8.0), (1.0, -14.0, 11.0))
+            shoulder = shoulder or ((-14.0, -3.0, 4.0), (-14.0, -6.0, 6.0))
+            flat = [v for lv in lean for v in lv]
+            return R180("native on foot standing ADS spine (F180b, TEMPORARY) %u s: item %s", wl, item, frames, dial, dialmax, share, wrote, s1, s2, s0, *flat, *neck[0], *neck[1], *shoulder[0], *shoulder[1], raise_)
+
+        def dial180(v=0.5):
+            """F180b's dial note line (native_on_foot.cpp), logged at the first read and at each change."""
+            return R180("native on foot standing ADS spine dial (F180b, TEMPORARY): experimental.native_on_foot_stand_ads_spine_straighten = %.2f", v, 0.0, 1.0)
+
+        zero180 = dict(dial=0.0, dialmax=0.0, share=0.0, wrote=0, lean=[(30.0, 30.0, 30.0)] * 4)
+        check("F180b spine: a dial of 0.5 that wrote the levels and the figures to judge it by", [spine180()], 0, [("OK", F180B)],
+              has=[RIFLE97 + " 10 s: standing in the sights 800 frames, dial mean 0.50 (largest 0.50), share mean 0.50, the levels written in 800 (the reference: hip frames 800, the press's first frame 0, none 0); "
+                   "lean animated/reference/written (deg): spine 16 +30.0/+12.0/+21.0, spine 21 +25.0/+10.0/+17.0, chest 24 +23.0/+15.0/+19.0, neck 34 +20.0/+5.0/+12.0; the neck from the eye "
+                   "(right/up/forward, cm) after +1.0/-9.0/+8.0 before +1.0/-14.0/+11.0; the left shoulder from the eye after -14.0/-3.0/+4.0 before -14.0/-6.0/+6.0; F179a's leg raise asked +9.0 cm"],
+              lacks=["UNPARSED", "baseline", "NEVER"])
+        check("F180b spine: the dial at 0 is the baseline, OK (the before picture)", [spine180(**zero180)], 0, [("OK", F180B)], has=["the dial was 0: these are the baseline figures"], lacks=["UNPARSED", "NEVER"])
+        check("F180b spine: a dial of 0.5 and no level written in 800 frames (no reference) never applied", [spine180(wrote=0, s1=0, s0=800)], 3, [("NEVER APPLIED", F180B)],
+              has=["the dial reached 0.50 and no level was written in any of 800 frames standing in the sights with " + RIFLE97 + " (the reference: hip frames 0, the press's first frame 0, none 800)"],
+              lacks=["UNPARSED"])
+        check("F180b spine: the dial at 0.05 is under the rule's 0.1: nothing to call absent", [spine180(dial=0.05, dialmax=0.05, share=0.05, wrote=0, s1=0, s0=800)], 0, [("OK", F180B)], lacks=["UNPARSED", "NEVER"])
+        check("F180b spine: written in 300 of 800 frames is thin", [spine180(wrote=300)], 0, [("PARTIAL", F180B)],
+              has=["the levels were written in 300 of 800 frames standing in the sights with " + RIFLE97], lacks=["UNPARSED", "NEVER"])
+        check("F180b spine: the press's first frame as the reference is a reference", [spine180(s1=0, s2=800)], 0, [("OK", F180B)], has=["hip frames 0, the press's first frame 800, none 0"], lacks=["UNPARSED", "NEVER"])
+        check("F180b spine: under 30 frames standing in the sights is too few to judge", [spine180(frames=20, wrote=20, s1=20)], 0, [("IDLE", F180B)], has=["under 30 frames standing in the sights: little to judge"],
+              lacks=["UNPARSED", "NEVER"])
+        check("F180b spine: only the dial's note line (the key was read, no standing ADS frame) is idle and says what was read", [dial180(0.25), dial180(0.5)], 0, [("IDLE", F180B)],
+              has=["the standing ADS spine dial was read (0.50 as last logged)"], lacks=["UNPARSED", "NEVER"])
+        check("F180b spine: the dial's note line beside a window line is not unparsed and does not make it idle", [dial180(0.5), spine180()], 0, [("OK", F180B)], lacks=["UNPARSED", "were read", "IDLE"])
+        check("F180b spine: no line at all is not present (no verdict row)", [f90_part()], 0, [("OK", F90S)],
+              lacks=[row("OK", F180B), row("IDLE", F180B), row("PARTIAL", F180B), row("UNPARSED", F180B), row("NEVER APPLIED", F180B)])
+        check("F180b spine: two windows add up, the dial and the figures weighted by their frames",
+              [spine180(frames=100, dial=0.2, dialmax=0.2, share=0.2, wrote=100, s1=100), spine180(frames=300, dial=0.6, dialmax=0.6, share=0.6, wrote=300, s1=300)], 0, [("OK", F180B)],
+              has=["20 s: standing in the sights 400 frames, dial mean 0.50 (largest 0.60), share mean 0.50, the levels written in 400"], lacks=["UNPARSED"])
+        check("F180b spine: another item is its own item", [spine180(), spine180(item="$wpn_m_sniper_plasma_charged_name;", wrote=0, s1=0, s0=800)], 3, [("NEVER APPLIED", F180B)],
+              has=["with $wpn_m_sniper_plasma_charged_name;", RIFLE97 + " 10 s"], lacks=["UNPARSED"])
+        check("F180b spine: a line that drifted from its pattern is unparsed", ["native on foot standing ADS spine (F180b, TEMPORARY) 10 s: something else"], 4, [("UNPARSED", F180B)])
+        check("F180b spine: a line that drifted beside a good one is counted beside the verdict", [spine180(), "native on foot standing ADS spine (F180b, TEMPORARY) 10 s: something else"], 0, [("OK", F180B)],
               has=["[+1 line(s) the rule's patterns do not match: "])
 
         # ---- left elbow (F98a): the left arm with a weapon drawn ----

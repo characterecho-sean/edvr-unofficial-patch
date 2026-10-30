@@ -282,6 +282,9 @@ struct ArmPlan {
     HandRig hand[2];
     // F166: the held joints of the upper body (the spine 16, 21, 24, both clavicles and upper arms) and the joints that come with them, from the parents; why != 0 refuses the hold alone.
     nofoot::f166::Plan f166;
+    // F180b: the spine 16, 21, 24 and the neck 34 as held joints (F166's plan type: native_on_foot_f180.h builds it) and the joints that come with them, for the standing ADS spine straighten
+    // dial; why != 0 refuses it alone.
+    nofoot::f166::Plan f180;
     // F169: the left arm's chain (clavicle, upper arm, forearm, hand) and the joints that come with it, for the pistol sprint's delayed swing; why != 0 refuses it alone.
     nofoot::f169::Plan f169;
 };

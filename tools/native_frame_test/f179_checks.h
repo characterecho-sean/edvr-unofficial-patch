@@ -51,20 +51,20 @@ struct Result {
     bool ok = false;
     double pre = 0.0, offPost = 0.0, residual = 0.0, aheadBefore = 0.0, aheadAfter = 0.0, thFinal[3] = {}, targetOut[3] = {};
 };
-inline Result runScene(const Scene& s) {
+inline Result runScene(const Scene& s, double distM = f179::kNeckGuardAheadM) {
     Result r;
     const f179::Geometry g = f179::makeGeometry(true, s.eye, s.hx, s.hz, true, s.chest);
     r.ok = g.ok;
     if (!g.ok) return r;
     double t[3] = {s.target[0], s.target[1], s.target[2]};
-    r.pre = f179::guardTarget(g, s.n0, s.bias, t);
+    r.pre = f179::guardTarget(g, s.n0, s.bias, t, distM);
     for (int i = 0; i < 3; ++i) r.targetOut[i] = t[i];
     const nf::PinMove mv = nf::pinMove(s.n0, t);
     double th[3] = {mv.th[0] + s.reach[0], 0.0, mv.th[2] + s.reach[2]};
     double post[3] = {s.post[0], 0.0, s.post[2]};
     const double withPost[3] = {th[0] + post[0], 0.0, th[2] + post[2]};
     r.aheadBefore = g.aheadWith(withPost) + s.bias - 0.0;
-    const double deficit = f179::deficitM(g.aheadWith(withPost) + s.bias);
+    const double deficit = f179::deficitM(g.aheadWith(withPost) + s.bias, distM);
     double res[3] = {};
     if (deficit > 0.0) {
         const f179::Trim tr = f179::trimPost(post, g.h, deficit);
@@ -372,14 +372,14 @@ inline void run179(Check&& check) {
               "F179b: two windows add up");
         char line[1400];
         const int len = f179::formatContext(line, sizeof(line), 10, "$wpn_m_shotgun_plasma_doublebarrel_name;", f179::kAdsStanding, ads);
-        check(len > 0 && std::strstr(line, "native on foot neck guard (F179b) 10 s: item $wpn_m_shotgun_plasma_doublebarrel_name;; ADS standing 100 frames: pushed 20, the push mean 4.0 cm (largest 4.0); "
+        check(len > 0 && std::strstr(line, "native on foot neck guard (F179b) 10 s: item $wpn_m_shotgun_plasma_doublebarrel_name;; ADS standing 100 frames, the guard at 10.0 cm: pushed 20, the push mean 4.0 cm (largest 4.0); "
                                            "off the post-reach dial add 10 frames, mean 2.0 cm (largest 2.0); the eye ahead of the chest before the guard (as the pose and dials would put it) min +6.0 mean +17.2 cm, "
                                            "after it as measured (100 frames) min +8.0 mean +9.8, predicted after mean +18.0, under 9 cm 10") != nullptr,
               "F179b: the context's line names the tag, the item, the context, the frames, the pushes (mean over the pushed, largest), the add taken off, the eye ahead of the chest before and after, the prediction and the frames under 9 cm");
         // a window with no push still prints: the guard ran
         char quiet[1400];
-        f179::formatContext(quiet, sizeof(quiet), 1, "x", f179::kHipUnarmed, hip);
-        check(std::strstr(quiet, "hip unarmed 50 frames: pushed 0, the push mean 0.0 cm (largest 0.0); off the post-reach dial add 0 frames, mean 0.0 cm (largest 0.0); the eye ahead of the chest before the guard "
+        f179::formatContext(quiet, sizeof(quiet), 1, "x", f179::kHipArmed, hip);   // F180c: the unarmed hip's own line measures only (F180's rig); the same figures as an acting context's
+        check(std::strstr(quiet, "hip armed 50 frames, the guard at 10.0 cm: pushed 0, the push mean 0.0 cm (largest 0.0); off the post-reach dial add 0 frames, mean 0.0 cm (largest 0.0); the eye ahead of the chest before the guard "
                                   "(as the pose and dials would put it) min +34.0 mean +34.0 cm, after it as measured (50 frames) min +33.0 mean +33.0, predicted after mean +34.0, under 9 cm 0") != nullptr,
               "F179b: a window with no push still prints its figures (the guard ran)");
         // the worst a window holds, and counts no window could hold
@@ -432,19 +432,19 @@ inline void run179(Check&& check) {
         check(!(has("f94TargetPublish(pc.f179") || has("f94TargetPublish(nofoot::f179") || has("g_f138HeldM = pc.f179") || has("g_f138HeldM += pc.f179")),
               "F179a: nothing of F179a reaches the eye alignment raise F138 and F172 publish");
         // F179b: the guard on the target (legacy and rest path), the post-reach add, the formed neck, the prediction, the stats and the bias
-        check(has("pc.f179PushPre = nofoot::f179::guardTarget(g179, N0, pc.f179Bias, T);") && has("if (g179.ok) pc.f179PushPre = nofoot::f179::guardTarget(g179, N0, pc.f179Bias, physicalTarget);") &&
+        check(has("pc.f179PushPre = nofoot::f179::guardTarget(g179, N0, pc.f179Bias, T, pc.f179DistM);") && has("if (g179.ok && !pc.f179Measure) pc.f179PushPre = nofoot::f179::guardTarget(g179, N0, pc.f179Bias, physicalTarget, pc.f179DistM);") &&
                   has("g179 = nofoot::f179::makeGeometry(pc.f97EyeDrawnOk, pc.f97EyeDrawn, pc.hEye[0], pc.hEye[1], chestOk, chest0);") && has("const uint32_t chestJ = nofoot::kIkSpine[2];"),
               "F179b: the guard reads the eye as drawn, the chest 24 as animated (kIkSpine[2]) and F97a's heading, and pushes the target back before the reach rule on the legacy target and the rest path's");
-        const size_t guardPre = at("pc.f179PushPre = nofoot::f179::guardTarget(g179, N0, pc.f179Bias, T);"), formMove = at("mv = nofoot::pinMove(N0, T);"), reachRule = at("const bool active = nofoot::reachLimitDeltaFeasibleOnly(v, R, have, candidate, full, &feasible);"),
+        const size_t guardPre = at("pc.f179PushPre = nofoot::f179::guardTarget(g179, N0, pc.f179Bias, T, pc.f179DistM);"), formMove = at("mv = nofoot::pinMove(N0, T);"), reachRule = at("const bool active = nofoot::reachLimitDeltaFeasibleOnly(v, R, have, candidate, full, &feasible);"),
                      postTrim = at("nofoot::f179::trimPost(f168Post, g179.h, deficit)"), addPost = at("nofoot::f168::addAfterReach(mv.th, pc.reach, f168Post);"), addRes = at("nofoot::f168::addAfterReach(mv.th, pc.reach, guardRes);");
         check(guardPre != std::string::npos && guardPre < formMove && formMove < reachRule && reachRule < postTrim && postTrim < addPost && addPost < addRes,
               "F179b: the order in the pin is the guard on the target, the move formed, the reach rule, the post-reach add trimmed, the add made, the residual taken off last");
         check(has("pc.f168Post[i] *= trim.scale;") && has("pc.f178FwdPost[i] *= trim.scale;") && has("pc.f179OffPost += trim.takenM;") && has("nofoot::f179::pushBack(guardRes, g179.h, trim.residualM);") &&
-                  has("const double reachOnly = legacyReach[i] - f168Post[i] - guardRes[i];") && has("const double deficit = nofoot::f179::deficitM(g179.aheadWith(formed.th) + pc.f179Bias);"),
+                  has("const double reachOnly = legacyReach[i] - f168Post[i] - guardRes[i];") && has("const double deficit = nofoot::f179::deficitM(g179.aheadWith(formed.th) + pc.f179Bias, pc.f179DistM);"),
               "F179b: the add taken off is scaled out of the crouched and the standing forward dial's post vectors (their 'as written' figures see it), the residual is its own vector, and the rest path looks again at the neck it forms");
         check(has("pc.f179PredRaw = g179.aheadWith(mv.th);") && has("pc.f179Before = pc.f179PredRaw - (pc.f179PushPre + pc.f179OffPost + pc.f179PushRes);") && has("st.f179.addGuard(gs);") &&
-                  has("st.f179.addMeasured(pc.f179Ctx, pc.f97ChestFwd);") && has("g_f179Bias.m = nofoot::f179::nextBias(g_f179Bias.m, pinCall.f97ChestFwd - pinCall.f179PredRaw);") &&
-                  has("nofoot::f179::formatContext(line179, sizeof(line179), ws, w.item, cx, k);") && has("if (!k.frames) continue;"),
+                  has("st.f179.addMeasured(pc.f179Ctx, pc.f97ChestFwd, nofoot::f179::heldBelowM(pc.f179DistM));") && has("g_f179Bias.m = nofoot::f179::nextBias(g_f179Bias.m, pinCall.f97ChestFwd - pinCall.f179PredRaw);") &&
+                  has("nofoot::f179::formatContext(line179, sizeof(line179), ws, w.item, cx, k, nofoot::f179::clampGuardCm(static_cast<double>(w.guardKey)));") && has("if (!k.frames) continue;"),
               "F179b: the prediction after the guard and the figure before it are taken from the move as formed, the guard's call and the measured figure are filed, the error feeds the filter, and each context with frames is printed");
         check(logpin.find("d.f179.merge(s.f179);") != std::string::npos && logpin.find("d.ssSum += s.ssSum;") != std::string::npos && logpin.find("d.srSum += s.srSum;") != std::string::npos,
               "F179: logpin merges the neck guard's counters and the standing share's sums into the window");
@@ -452,8 +452,7 @@ inline void run179(Check&& check) {
                   has("; the standing share (F179a) mean %.2f, its raise asked %+.1f cm") && has("f.ssSum += pc.f179StandW;") && has("} f97[nofoot::f97::kBinN];"),
               "F179a: the F97a line's bins are the stance and whether in the sights (the detach weight from 0.05), a standing call in the sights is told from a hip call by its bin's name, and the sights' bins say the standing share and its raise");
         // no new keys
-        check(ini.find("f179") == std::string::npos && ini.find("F179") == std::string::npos && ini.find("neck_guard") == std::string::npos && ini.find("stand_ads_raise") == std::string::npos &&
-                  cpp.find("experimental.native_on_foot_neck") == std::string::npos,
+        check(ini.find("f179") == std::string::npos && ini.find("F179") == std::string::npos && ini.find("stand_ads_raise") == std::string::npos ,
               "F179: both are behaviour: edvr.ini has no new key");
     }
 }

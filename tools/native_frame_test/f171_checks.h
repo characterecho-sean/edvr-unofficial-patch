@@ -20,6 +20,7 @@
 #include "../../src/d3d11/native_on_foot_f171.h"
 #include "../../src/d3d11/native_on_foot_f171c.h"
 #include "../../src/d3d11/native_on_foot_f178.h"
+#include "../../src/d3d11/native_on_foot_f180.h"
 #include "../../src/d3d11/native_on_foot_logpin.h"
 
 #include <cmath>
@@ -54,6 +55,7 @@ struct ElbowProbe {
     nf::f170::Counters f170;
     nf::f171::Counters f171;
     nf::f178::Counters f178;   // F178: logpin::elbow merges it too
+    nf::f180::Counters f180;   // F180b: and this one
 };
 
 inline std::string slurp(const char* path) {

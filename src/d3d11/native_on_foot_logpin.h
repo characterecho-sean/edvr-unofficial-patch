@@ -143,6 +143,7 @@ template<class T> inline void elbow(T& d, const T& s) noexcept {
     d.f170.merge(s.f170);   // F171: F170's was missing, so its line (printed when f98.f170.ads is nonzero) never printed in a window built here (the flight edvr_gfx_20261029_043951)
     d.f171.merge(s.f171);
     d.f178.merge(s.f178);   // F178: the standing ADS body dials' counters, in the same second
+    d.f180.merge(s.f180);   // F180b: the standing ADS spine straighten's counters
     if (s.downStepMax > d.downStepMax) {
         d.downStepMax = s.downStepMax; d.downStepAng = s.downStepAng; d.downStepTwist = s.downStepTwist;
     }

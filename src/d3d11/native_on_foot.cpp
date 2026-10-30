@@ -84,6 +84,7 @@
 #include "native_on_foot_f171c.h"  // F171: the raise's carriage, measured: slopes of the camera's, G's and the drawn eye's changes against the carried raise's (pure parts)
 #include "native_on_foot_f178.h"   // F178 (TEMPORARY): the standing ADS body dials, the crouched ones mirrored for the standing stance, and the figures that judge them (pure parts)
 #include "native_on_foot_f179.h"   // F179: the body stays up in standing ADS (the standing raise), and the neck guard that keeps the eye 10 cm ahead of the chest (pure parts)
+#include "native_on_foot_f180.h"   // F180: the left elbow hangs standing in ADS; the spine straighten dial (TEMPORARY); the neck guard's distance (pure parts)
 #include "native_on_foot_f176.h"   // F176: in the sights with the head aiming, the mouse and the stick hold their pitch (pure parts)
 #include "native_on_foot_f175.h"   // F175 (measure only): the view's roll and pitch against the headset's, by look mode and item (pure parts)
 #include "native_on_foot_f172.h"   // F172: the neck raise published pre-turned by the mouse-look aim pitch, so the game's turn lands it straight up (pure parts)
@@ -232,6 +233,10 @@ std::atomic<float> g_standAdsBodyCm{0.0f};                    // F178 (TEMPORARY
 double g_standAdsBodyCmLast = 1e9;                            // the value last logged (frame thread; the first read always logs)
 std::atomic<float> g_standAdsBodyLeftCm{0.0f};                // F178 (TEMPORARY): experimental.native_on_foot_stand_ads_body_left_cm in cm (-30..30), live: the standing body's move to the left of the aim line (F171's, with the standing weight); default 0
 double g_standAdsBodyLeftCmLast = 1e9;                        // the value last logged (frame thread; the first read always logs)
+std::atomic<float> g_standAdsSpine{0.0f};                     // F180b (TEMPORARY): experimental.native_on_foot_stand_ads_spine_straighten, 0..1, live: the share of the ADS hunch of the upper spine and the neck taken back out standing in the sights; default 0
+double g_standAdsSpineLast = 1e9;                             // the value last logged (frame thread; the first read always logs)
+std::atomic<float> g_neckGuardCm{static_cast<float>(nofoot::f179::kNeckGuardAheadCm)};   // F180c (TEMPORARY): experimental.native_on_foot_neck_guard_cm, 0..20 cm, live: how far ahead of the chest the neck guard keeps the eye; 0 turns it off; default 10 (F179's)
+double g_neckGuardCmLast = 1e9;                               // the value last logged (frame thread; the first read always logs)
 std::atomic<float> g_f87SettleS{static_cast<float>(nofoot::f87::kSettleDefaultS)};   // F87h (TEMPORARY): fix.native_on_foot_standing_height_settle_s, live
 double g_f87SettleLast = -1.0;                                // the value last logged (frame thread)
 std::atomic<float> g_f94EyeHeightCm{static_cast<float>(nofoot::f94::kEyeHeightDefaultCm)};   // F94a: fix.native_on_foot_eye_height_cm, live (the eyes over the neck)
@@ -1147,6 +1152,29 @@ void readKey() {
                             cm, nofoot::f178::kLeftMinCm, nofoot::f178::kLeftMaxCm);
         g_standAdsBodyLeftCmLast = cm;
         g_standAdsBodyLeftCm.store(static_cast<float>(cm), std::memory_order_relaxed);
+    }
+    // F180b (TEMPORARY, live, the developer tier's "Standing ADS spine straighten"): while standing and aiming down sights the share of the game's ADS hunch of the upper spine (levels 16, 21, 24)
+    // and the neck (34) taken back out, toward the same item's pose at the hip just before the press. 0 (the default) changes nothing; 1 puts the levels at the reference.
+    {
+        const double v = nofoot::f180::clampDial(static_cast<double>(cfg.getFloat("experimental.native_on_foot_stand_ads_spine_straighten", 0.0f)));
+        if (first || v != g_standAdsSpineLast)
+            Log::get().note("native on foot standing ADS spine dial (F180b, TEMPORARY): experimental.native_on_foot_stand_ads_spine_straighten = %.2f -- while standing and aiming down sights this "
+                            "share (range %.0f..%.0f) of the game's ADS hunch of the upper spine (levels 16, 21, 24) and the neck (34) is taken back out, toward the same item's pose at the hip just "
+                            "before the press (the last standing hip frames; the press's first frame when there were none), times the standing weight (1 less the crouched weight, times the detach "
+                            "weight); 0 changes nothing; the per-window standing ADS spine line names the leans and the reference", v, nofoot::f180::kDialMin, nofoot::f180::kDialMax);
+        g_standAdsSpineLast = v;
+        g_standAdsSpine.store(static_cast<float>(v), std::memory_order_relaxed);
+    }
+    // F180c (TEMPORARY, live, the developer tier's "Neck guard distance"): how far ahead of the chest (cm, 0..20) F179b's neck guard keeps the eye as drawn; 0 turns the guard off. Armed it acts at
+    // this distance; unarmed at the hip it measures only (counts the push it would make) and moves nothing.
+    {
+        const double cm = nofoot::f179::clampGuardCm(static_cast<double>(cfg.getFloat("experimental.native_on_foot_neck_guard_cm", static_cast<float>(nofoot::f179::kNeckGuardAheadCm))));
+        if (first || cm != g_neckGuardCmLast)
+            Log::get().note("native on foot neck guard distance (F180c, TEMPORARY): experimental.native_on_foot_neck_guard_cm = %.1f cm -- the neck guard keeps the eye as drawn at least this far ahead "
+                            "of the chest along its heading (range %.0f..%.0f, 0 turns the guard off); armed it moves the neck target, the post-reach forward add and the move to hold it; unarmed at "
+                            "the hip it only measures the push it would make; the per-window neck guard lines name the figures", cm, nofoot::f179::kNeckGuardMinCm, nofoot::f179::kNeckGuardMaxCm);
+        g_neckGuardCmLast = cm;
+        g_neckGuardCm.store(static_cast<float>(cm), std::memory_order_relaxed);
     }
     // F170 (TEMPORARY, live, the developer tier's "Crouched ADS torso square"): while crouched and aiming down sights the torso is turned about the vertical toward square to the aim: this share
     // (0..1) of the shoulder line's measured blade, times the crouched weight and the detach weight, is taken out. 1 squares it, 0 leaves the authored stance; exactly 0 standing and at the hip.
@@ -16593,6 +16621,9 @@ struct F98Left {
     // F178 (TEMPORARY): the standing ADS body dials (F168's forward and F171's left with the standing weight): the dials, the moves asked and as written, what the reach rule took back, both
     // shoulders from the eye, the right shoulder to the gun's root and the left shoulder to the left-hand grip, standing in the sights, still against moving (its own line).
     nofoot::f178::Counters f178;
+    // F180b (TEMPORARY): the standing ADS spine straighten: the dial, the share, whether the levels were written, the reference's source, the four bones' leans animated / reference / written, the
+    // neck and the left shoulder from the eye after and before, F179a's leg raise asked, standing in the sights (its own line).
+    nofoot::f180::Counters f180;
 };
 std::atomic<uint32_t> g_f98Seq{0};
 F98Left g_f98;
@@ -16912,9 +16943,13 @@ struct PinCall {
     // F179b: the neck guard ran in this call (the eye, the chest and the heading were readable), its context, the filtered prediction error it used, the push made before the reach rule, the part
     // taken off the post-reach add, the residual taken off the move last (m, along the heading), and the eye ahead of the chest as predicted with the guard (raw, without the error) and as it
     // would have stood without it (m; not a number: unmeasured).
-    bool f179Ran = false;
+    // F180c: the distance asked (m, the key's value), and whether this call only measured (unarmed at the hip: nothing moved) and the push it would have made (m; not a number when it acted).
+    bool f179Ran = false, f179Measure = false;
     int f179Ctx = 0;
     uint64_t f179Ms = 0;
+    double f179DistM = nofoot::f179::kNeckGuardAheadM, f179Would = std::nan("");
+    // F180b (TEMPORARY): the spine straighten stage's account of this call.
+    nofoot::f180::CallInfo f180;
     double f179Bias = 0.0, f179PushPre = 0.0, f179OffPost = 0.0, f179PushRes = 0.0, f179PredRaw = std::nan(""), f179Before = std::nan("");
     // F171: the raise's carriage: this call is a sample (fresh input, the aim known, nothing in the sights, the camera on the commander, the LOCAL pose valid), its look mode and band of the aim's
     // pitch, the carried raise (the neck reference's, what f94NeckForPin takes out of the pin's camera), the camera as the job read it before any removal and G as F138 forms it (up and forward
@@ -17597,14 +17632,18 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
                 const float* cm = froze && g_ikFzSlot[chestJ] != 0xFFFFu ? g_pfzChain[g_ikFzSlot[chestJ]] : g_pfzAnim[chestJ];
                 for (int i = 0; i < 3; ++i) chest0[i] = static_cast<double>(cm[12 + i]);
             }
+            // F180c: the distance is the key's (cm, 0 turns the guard off: no geometry, nothing measured); unarmed at the hip the guard measures only and moves nothing.
+            pc.f179DistM = nofoot::f179::clampGuardCm(static_cast<double>(g_neckGuardCm.load(std::memory_order_relaxed))) * 0.01;
             g179 = nofoot::f179::makeGeometry(pc.f97EyeDrawnOk, pc.f97EyeDrawn, pc.hEye[0], pc.hEye[1], chestOk, chest0);
+            if (!(pc.f179DistM > 0.0)) g179 = nofoot::f179::Geometry{};
             pc.f179Ctx = nofoot::f179::contextOf(armed, pc.detachW, pc.postureW);
+            pc.f179Measure = pc.f179Ctx == nofoot::f179::kHipUnarmed;
             pc.f179Ms = now;
             if (g_f179Bias.ctx != pc.f179Ctx || now < g_f179Bias.ms || now - g_f179Bias.ms > 300) g_f179Bias = F179Bias{};
             pc.f179Bias = g_f179Bias.m;
             if (g179.ok) {
                 pc.f179Ran = true;
-                pc.f179PushPre = nofoot::f179::guardTarget(g179, N0, pc.f179Bias, T);
+                if (!pc.f179Measure) pc.f179PushPre = nofoot::f179::guardTarget(g179, N0, pc.f179Bias, T, pc.f179DistM);
             }
         }
         mv = nofoot::pinMove(N0, T);
@@ -17821,9 +17860,9 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
     // and what the add cannot give, the reach rule's own, is taken off the move last (as a negative add, along the heading: guardRes). A deficit found before the reach rule was taken off the
     // target there.
     double guardRes[3] = {};
-    if (g179.ok) {
+    if (g179.ok && !pc.f179Measure) {
         const double thWithPost[3] = {mv.th[0] + f168Post[0], 0.0, mv.th[2] + f168Post[2]};
-        const double deficit = nofoot::f179::deficitM(g179.aheadWith(thWithPost) + pc.f179Bias);
+        const double deficit = nofoot::f179::deficitM(g179.aheadWith(thWithPost) + pc.f179Bias, pc.f179DistM);
         if (deficit > 0.0) {
             const nofoot::f179::Trim trim = nofoot::f179::trimPost(f168Post, g179.h, deficit);
             if (trim.takenM > 0.0) {
@@ -17881,7 +17920,7 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
                 nofoot::f97::armedNeckTarget(N0[1], physicalTarget[1], pc.eyeYSelected + f97EyeOverE, f97H, pc.detachW, f97W, pc.postureW, restBeforeDetachY + neckViewShift[1]), N0[1], f97W,
                 nofoot::f179::standingRaiseM(N0[1], pc.eyeYSelected + f97EyeOverE, f97H, pc.postureW, pc.detachW)).y;
             // F179b: the neck guard on this target, as on the legacy one above (this target replaces it)
-            if (g179.ok) pc.f179PushPre = nofoot::f179::guardTarget(g179, N0, pc.f179Bias, physicalTarget);
+            if (g179.ok && !pc.f179Measure) pc.f179PushPre = nofoot::f179::guardTarget(g179, N0, pc.f179Bias, physicalTarget, pc.f179DistM);
             std::memcpy(pc.neckRestTarget, physicalTarget, sizeof(physicalTarget));
             std::memcpy(T, physicalTarget, sizeof(physicalTarget));
         } else {
@@ -17897,9 +17936,9 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
             pc.reach[i] = pc.detachW * reachOnly + f168Post[i];
         }
         // F179b: the neck as it is about to be formed: any deficit comes off it last (and off the reach correction the bend aims at). The residual of this path replaces the legacy proposal's.
-        if (g179.ok) {
+        if (g179.ok && !pc.f179Measure) {
             const nofoot::PinMove formed = nofoot::pinMove(N0, desiredNeck);
-            const double deficit = nofoot::f179::deficitM(g179.aheadWith(formed.th) + pc.f179Bias);
+            const double deficit = nofoot::f179::deficitM(g179.aheadWith(formed.th) + pc.f179Bias, pc.f179DistM);
             pc.f179PushRes = deficit;
             if (deficit > 0.0) {
                 nofoot::f179::pushBack(desiredNeck, g179.h, deficit);
@@ -18009,6 +18048,8 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
     if (g179.ok) {
         pc.f179PredRaw = g179.aheadWith(mv.th);
         pc.f179Before = pc.f179PredRaw - (pc.f179PushPre + pc.f179OffPost + pc.f179PushRes);
+        // F180c: a call that only measured (unarmed at the hip) moved nothing: the push it would have made is the deficit of the move as formed
+        if (pc.f179Measure) pc.f179Would = nofoot::f179::deficitM(pc.f179PredRaw + pc.f179Bias, pc.f179DistM);
     }
     const double authoredDelta[3] = {T[0] - N0[0], T[1] - N0[1], T[2] - N0[2]};
     pc.targetFromAuthoredM = nofoot::ikLen(authoredDelta);
@@ -18532,6 +18573,7 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
                 gs.offPostM = pc.f179OffPost;
                 gs.beforeM = pc.f179Before;
                 gs.predM = pc.f179PredRaw;
+                gs.wouldM = pc.f179Would;   // F180c: unarmed at the hip: the push it would have made (nothing moved)
                 st.f179.addGuard(gs);
             }
             const double rc = 100.0 * mv.delta;
@@ -18707,7 +18749,7 @@ void pinRecord(const PinCall& pc, const double resFinal[3]) noexcept {
         b.thAbsMax[0] = std::max(b.thAbsMax[0], std::fabs(100.0 * pc.th[0]));
         b.thAbsMax[1] = std::max(b.thAbsMax[1], std::fabs(100.0 * pc.th[2]));
     }
-    if (pc.f179Ran && pc.f97ClrOk) st.f179.addMeasured(pc.f179Ctx, pc.f97ChestFwd);   // F179b: the eye ahead of the chest as written, the figure the guard is held to
+    if (pc.f179Ran && pc.f97ClrOk) st.f179.addMeasured(pc.f179Ctx, pc.f97ChestFwd, nofoot::f179::heldBelowM(pc.f179DistM));   // F179b: the eye ahead of the chest as written, the figure the guard is held to
     if (pc.f97ClrOk && pc.f97Stance >= 0 && pc.f97Stance < nofoot::f97::kBinN) {   // F97a: the drawn eye's clearance
         PinStats::F97Bin& f = st.f97[pc.f97Stance];
         ++f.clrN;
@@ -19298,6 +19340,91 @@ bool f166Stage(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, bool armed
     }
     for (uint32_t i = 0; i < touchedN; ++i) std::memcpy(g_pfzAnim[g_f166Touched[i]], g_f166Out[g_f166Touched[i]], 64);
     ci.ran = true;
+    return true;
+}
+
+// ---- F180b (TEMPORARY): the standing ADS spine straighten ------------------------------------------------------------------------------------------------------------------------
+// The hook's state (one writer, under g_pfzBusy): the reference (the item's spine levels and neck at the hip), its leans, and the clock of the last call; the new matrices of the written joints.
+nofoot::f180::State g_f180;
+alignas(16) float g_f180Out[nofoot::kPfzMaxJoints][16];
+uint16_t g_f180Touched[nofoot::kPfzMaxJoints];
+uint64_t g_f180Qpc = 0;
+// Runs after F166's hold and before the pin, the reach rule, the bend and the arm solve, on the animated pose in g_pfzAnim and the span: at the hip (standing, armed) it keeps the item's spine
+// levels 16, 21, 24 and the neck 34 as local rotations (a running average over about 0.12 s), and in the sights standing, with the dial above 0, it writes each level's local rotation as
+// slerp(animated, reference, dial x the standing share x the detach weight), every joint under them (the clavicles and arms, the head) carried unchanged against its level (F166's capture and apply).
+// The matrices go into the span and into g_pfzAnim, which every later stage reads: the pin's neck and chest, F179a's raise and the neck guard, the reach rule and the arm IK see the straightened
+// body. Nothing is written at share 0 (dial 0, crouched, at the hip), unarmed, with the pose freeze writing, on a refused plan or with no reference. Returns false only when a span write faulted
+// (the caller stands the IK down); every other outcome lets the stages after it run.
+bool f180Stage(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, bool armedNow, uint32_t itemSerial, double detachW, PinCall& pc) noexcept {
+    nofoot::f180::CallInfo& ci = pc.f180;
+    const uint32_t count = sp.count;
+    if (froze || !armedNow || !nofoot::f180::planHasNeck(pl.f180) || count <= 44 || count < pl.f180.joints) {
+        g_f180.reset();
+        g_f180Qpc = 0;
+        return true;
+    }
+    nofoot::f166::CallInfo& pre = pc.f166;
+    if (!pre.preValid) {   // F166's stage did not keep the game's own chest, neck and head (its plan was refused): they are kept here, as it keeps them, before this stage writes
+        static constexpr uint32_t kPre[3] = {24, 34, 44};
+        pre.preValid = true;
+        for (int k = 0; k < 3; ++k) {
+            std::memcpy(pre.preM[k], g_pfzAnim[kPre[k]], sizeof(pre.preM[k]));
+            pre.preValid = ikMatrixSane(pre.preM[k]) && pre.preValid;
+        }
+        pre.preNeckY = pre.preValid ? static_cast<double>(g_pfzAnim[34][13]) : std::nan("");
+    }
+    const uint64_t nowQ = f30Qpc();
+    const double dtSec = g_f180Qpc && nowQ > g_f180Qpc ? static_cast<double>(f30QpcUs(nowQ - g_f180Qpc)) * 1e-6 : 0.0;
+    g_f180Qpc = nowQ;
+    nofoot::f180::In in;
+    in.dial = static_cast<double>(g_standAdsSpine.load(std::memory_order_relaxed));
+    in.postureW = pre.preValid ? nofoot::f163::postureWeight(nofoot::f163::neckDrop(g_f98Eye.have[nofoot::f94::kClassStanding], g_f98Eye.neckY[nofoot::f94::kClassStanding], pre.preNeckY)) : 0.0;
+    in.detachW = detachW;
+    in.dtSec = dtSec;
+    in.item = itemSerial;
+    in.planKey = pl.generation;
+    const nofoot::f180::Step st = g_f180.step(in);
+    ci.valid = true;
+    ci.dial = nofoot::f180::clampDial(in.dial);
+    ci.share = st.share;
+    // the four bones' leans as animated, before any write of this stage (the neck 34 and the left shoulder's place too)
+    double at[nofoot::f180::kLevels + 1][3];
+    for (int k = 0; k <= nofoot::f180::kLevels; ++k) {
+        const uint32_t j = k < nofoot::f180::kLevels ? nofoot::f180::kLevelJoint[k] : nofoot::f180::kLevelNext[nofoot::f180::kLevels - 1];
+        for (int i = 0; i < 3; ++i) at[k][i] = static_cast<double>(g_pfzAnim[j][12 + i]);
+    }
+    for (int k = 0; k < nofoot::f180::kLevels; ++k) ci.animLean[k] = nofoot::f180::boneLeanDeg(at[k], at[k + 1]);
+    double shoulderBefore[3] = {};
+    const bool shoulderRead = pl.ok[0] && pl.side[0].U < count;
+    if (shoulderRead)
+        for (int i = 0; i < 3; ++i) shoulderBefore[i] = static_cast<double>(g_pfzAnim[pl.side[0].U][12 + i]);
+    if (st.action != nofoot::f180::kNothing) {
+        const nofoot::f166::Source src = st.action == nofoot::f180::kCaptureFirst ? nofoot::f166::kFirstFrame : nofoot::f166::kStill;
+        ci.captured = nofoot::f166::capture(pl.f180, g_pfzAnim, count, src, st.alpha, &g_f180.held);
+        if (ci.captured) {
+            g_f180.held.parentHave = false;   // the root is held as a local against the hips: the reference is the item's levels' local rotations, not the root in the model's axes (F168's hold)
+            g_f180.noteLeans(ci.animLean, st.alpha);
+        }
+    }
+    ci.source = g_f180.held.source;
+    if (!(st.share > 0.0) || !g_f180.held.have()) return true;
+    uint32_t touchedN = 0;
+    if (!nofoot::f166::apply(pl.f180, g_f180.held, st.share, g_pfzAnim, count, g_f180Out, g_f180Touched, &touchedN)) {
+        ci.failed = true;
+        return true;
+    }
+    for (uint32_t i = 0; i < touchedN; ++i) {
+        const uint32_t j = g_f180Touched[i];
+        if (!guardedWriteFloats16(sp.buf + static_cast<uint64_t>(j) * 64u, g_f180Out[j])) return false;
+    }
+    for (uint32_t i = 0; i < touchedN; ++i) std::memcpy(g_pfzAnim[g_f180Touched[i]], g_f180Out[g_f180Touched[i]], 64);
+    ci.ran = true;
+    ci.weight = st.share;
+    for (int i = 0; i < 3; ++i) {
+        ci.neckMove[i] = static_cast<double>(g_pfzAnim[nofoot::f180::kNeck][12 + i]) - at[3][i];
+        ci.shoulderMove[i] = shoulderRead ? static_cast<double>(g_pfzAnim[pl.side[0].U][12 + i]) - shoulderBefore[i] : std::nan("");
+    }
+    ci.movesOk = true;
     return true;
 }
 
@@ -19961,6 +20088,18 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
         g_f166.reset();
         g_f166Qpc = 0;
     }
+    // F180b (TEMPORARY): the spine straighten, after F166's hold and before the pin, the reach rule, the bend and the arm solve, which then work on the straightened shoulders; F179a's raise and
+    // the neck guard (in the pin) are made from the straightened neck and chest
+    if (pinWanted && !g_ikWriteDown.load(std::memory_order_relaxed)) {
+        if (!f180Stage(pl, sp, froze, armedNow, itemSerialForCall, bodyDetachForCall, pinCall)) {
+            resetPhysicalPole(nofoot::f159::kWhyRefused);
+            g_ikWriteDown.store(true, std::memory_order_relaxed);
+            return ikRefuse(kIkRefWrite);
+        }
+    } else {
+        g_f180.reset();
+        g_f180Qpc = 0;
+    }
     // F169 (TEMPORARY): the pistol sprint's left arm read back in the stride (the dial), before the pin, the bend and the arm solve; it also records the animated arm and the stride for the measure
     if (pinWanted && !g_ikWriteDown.load(std::memory_order_relaxed)) {
         if (!f169Stage(pl, sp, froze, f167Pistol, f167Step.sprinting, f167Release, pinCall)) {
@@ -20059,7 +20198,8 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
     // F168: the stages below that turn the torso (the bend and the square-up) yield to the upper body's hold by 1 less its weight: a torso held at its still pose is the result, the stage
     // cannot add a lean to it. At weight 0 (standing, at the hip, unarmed, still, a refused plan) the factor is exactly 1 and the stages are what they were. The bend's own state keeps
     // following its target at the full strength, so its resume after the hold is not a start from nothing.
-    const double f166Yield = nofoot::f166::yieldFactor(pinCall.f166.ran ? pinCall.f166.weight : 0.0);
+    // F180b: the straightened torso yields to the bend and the square-up as the held one does (the larger of the two weights; with the dial at 0 this is F166's factor exactly)
+    const double f166Yield = nofoot::f166::yieldFactor(std::max(pinCall.f166.ran ? pinCall.f166.weight : 0.0, pinCall.f180.ran ? pinCall.f180.weight : 0.0));
     bool bendHave = false, bendWrite = false;
     double bendResW = 1.0;
     nofoot::BendClamp bendCl;
@@ -20553,8 +20693,11 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
                 // theta as it was, bit for bit. The seed (axis, reference) is not touched: leaving the sights or standing up returns along the pole's own angle. F159's reseed cannot fight
                 // this: it replaces the pole's swivel with ikPistolDownSwivel's (the same function and arguments as blendPole's), and a blend of that angle toward itself is itself.
                 // The model-X half-space is waived as in those paths (o.poseOutWaived); the ceiling stays (blendPole's clamp).
+                // F180a: the weight is the crouched share PLUS F178's standing share (nofoot::f180::elbowBlendWeight): the detach weight whatever the stance, so standing in the sights the elbow
+                // hangs as crouched (the flight 10:41:30: the swivel 40.8 deg off the stance's plane, the pole from the stable pole's seed in 60 of 60 solves, body-down 0). Crouched it is
+                // F165's weight bit for bit; at the hip 0.
                 if (side == 0 && pinWanted && pinCall.valid) {
-                    const double w165 = nofoot::f165::blendWeight(pinCall.postureW, pinCall.detachW);
+                    const double w165 = nofoot::f180::elbowBlendWeight(pinCall.postureW, pinCall.detachW);
                     o.f165W = w165;
                     if (w165 > 0.0) {
                         const nofoot::f165::Blend mix = nofoot::f165::blendPole(tb, poleTheta165, w165, seed.previous, outSign, elbowOutM, trimRad);
@@ -21559,6 +21702,44 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
                     if (pinCall.f97EyeDrawnOk && pl.ok[1] && finalAt(pl.side[1].U, shoulderR))
                         nofoot::f166::offsetFromEye(shoulderR, pinCall.f97EyeDrawn, pinCall.hEye[0], pinCall.hEye[1], sample178.rightShoulderM);
                     f.f178.add(sample178);
+                    // F180b (TEMPORARY): the standing ADS spine straighten, on the same frames (standing in the sights with a two-handed gun; the dial at 0 included: the before picture): the dial, the
+                    // share, whether the levels were written, the reference's source, the four bones' leans (16 to 21, 21 to 24, 24 to 34, 34 to 44; the model's axes, forward positive) as animated,
+                    // as the reference has them and as finally written, the neck and the left shoulder from the eye after the writes and before the straighten (after less what it moved), and
+                    // F179a's leg raise asked.
+                    {
+                        const nofoot::f180::CallInfo& c180 = pinCall.f180;
+                        nofoot::f180::Sample s180;
+                        s180.dial = c180.valid ? c180.dial : nofoot::f180::clampDial(static_cast<double>(g_standAdsSpine.load(std::memory_order_relaxed)));
+                        s180.share = c180.valid ? c180.share : 0.0;
+                        s180.wrote = c180.ran;
+                        s180.source = c180.source < 3 ? c180.source : 0;
+                        s180.raiseAskedM = pinCall.f179StandRaise;
+                        for (int k = 0; k < nofoot::f180::kLevels; ++k) {
+                            s180.animLean[k] = c180.valid ? c180.animLean[k] : std::nan("");
+                            s180.refLean[k] = c180.source != nofoot::f166::kNone ? g_f180.refLean[k] : std::nan("");
+                        }
+                        double bone[nofoot::f180::kLevels + 1][3];
+                        bool boneOk = true;
+                        for (int t = 0; t <= nofoot::f180::kLevels; ++t)
+                            boneOk = finalAt(t < nofoot::f180::kLevels ? nofoot::f180::kLevelJoint[t] : nofoot::f180::kLevelNext[nofoot::f180::kLevels - 1], bone[t]) && boneOk;
+                        if (boneOk) {
+                            for (int k = 0; k < nofoot::f180::kLevels; ++k) s180.writtenLean[k] = nofoot::f180::boneLeanDeg(bone[k], bone[k + 1]);
+                            if (pinCall.f97EyeDrawnOk) {
+                                nofoot::f166::offsetFromEye(bone[3], pinCall.f97EyeDrawn, pinCall.hEye[0], pinCall.hEye[1], s180.neckAfter);
+                                double neckWas[3];
+                                for (int i = 0; i < 3; ++i) neckWas[i] = bone[3][i] - (c180.movesOk ? c180.neckMove[i] : 0.0);
+                                nofoot::f166::offsetFromEye(neckWas, pinCall.f97EyeDrawn, pinCall.hEye[0], pinCall.hEye[1], s180.neckBefore);
+                            }
+                        }
+                        double shoulderNow[3];
+                        if (pinCall.f97EyeDrawnOk && pl.ok[0] && finalAt(pl.side[0].U, shoulderNow)) {
+                            nofoot::f166::offsetFromEye(shoulderNow, pinCall.f97EyeDrawn, pinCall.hEye[0], pinCall.hEye[1], s180.shoulderAfter);
+                            double shoulderWas[3];
+                            for (int i = 0; i < 3; ++i) shoulderWas[i] = shoulderNow[i] - (c180.movesOk && std::isfinite(c180.shoulderMove[i]) ? c180.shoulderMove[i] : 0.0);
+                            nofoot::f166::offsetFromEye(shoulderWas, pinCall.f97EyeDrawn, pinCall.hEye[0], pinCall.hEye[1], s180.shoulderBefore);
+                        }
+                        f.f180.add(s180);
+                    }
                 }
             }
             g_f98Seq.fetch_add(1, std::memory_order_release);
@@ -22784,6 +22965,12 @@ void f125ElbowClose(uint64_t now, bool keepRun = false) noexcept {
             nofoot::f178::formatSummary(line178, sizeof(line178), w.seconds, w.item, f98.f178);
             Log::get().note("%s", line178);
         }
+        // F180b (TEMPORARY): the standing ADS spine straighten, on a line of its own, whenever a frame was standing in the sights (the dial at 0 included: the before picture)
+        if (f98.f180.frames) {
+            char line180[1190];
+            nofoot::f180::formatSummary(line180, sizeof(line180), w.seconds, w.item, f98.f180);
+            Log::get().note("%s", line180);
+        }
     }
     const nofoot::f159::HighSeconds carried159 = w.high.next(keepRun);
     w = F125ElbowWindow{};
@@ -23889,6 +24076,7 @@ struct F125PinWindow {
     int stance = 2;
     bool scope = false, detail = false, standKey = false, ads = false;
     double eyeKey = 0.0;
+    float guardKey = 0.0f;   // F180c: the neck guard's distance (cm) the window was taken at: a change closes the window, so each line's distance is the one its figures were made at
 };
 F125PinWindow g_f125Pin;
 nofoot::logpin::ContextSecond g_f125PinContext;
@@ -24026,7 +24214,7 @@ void f125PinPrint(const F125PinWindow& w) noexcept {
             const nofoot::f179::Ctx1& k = st.f179.c[cx];
             if (!k.frames) continue;
             char line179[1190];
-            nofoot::f179::formatContext(line179, sizeof(line179), ws, w.item, cx, k);
+            nofoot::f179::formatContext(line179, sizeof(line179), ws, w.item, cx, k, nofoot::f179::clampGuardCm(static_cast<double>(w.guardKey)));
             Log::get().note("%s", line179);
         }
 
@@ -24059,7 +24247,7 @@ void f67cPinLine(uint64_t now, bool scope) noexcept {
     if (pending.seconds && (pending.scope != scope || pending.detail != nofoot::logwin::detail() ||
         pending.serial != g_heldItemSerial.load(std::memory_order_relaxed) || pending.stance != g_f119StancePub.load(std::memory_order_relaxed) ||
         pending.standKey != g_standKeyOn.load(std::memory_order_relaxed) || pending.eyeKey != g_f94EyeHeightCm.load(std::memory_order_relaxed) ||
-        (pending.ads && !adsNow))) {
+        pending.guardKey != g_neckGuardCm.load(std::memory_order_relaxed) || (pending.ads && !adsNow))) {
         f125PinClose(); f125CpuClose();
     }
     if (g_f125Cpu.seconds && (g_f125Cpu.scope != scope || g_f125Cpu.detail != nofoot::logwin::detail())) f125CpuClose();
@@ -24245,6 +24433,7 @@ void f67cPinLine(uint64_t now, bool scope) noexcept {
         w.stance = g_f119StancePub.load(std::memory_order_relaxed);
         w.scope = scope; w.detail = nofoot::logwin::detail(); w.standKey = g_standKeyOn.load(std::memory_order_relaxed);
         w.eyeKey = g_f94EyeHeightCm.load(std::memory_order_relaxed); w.ads = journalAds() || g_adsState == kAdsActive; w.weightSig = weightSig;
+        w.guardKey = g_neckGuardCm.load(std::memory_order_relaxed);
     }
     namespace lp = nofoot::logpin;
     lp::pin(w.pin, st); lp::frame(w.frame, fs); lp::hud(w.hud, hud);

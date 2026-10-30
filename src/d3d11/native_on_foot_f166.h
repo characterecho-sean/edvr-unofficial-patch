@@ -82,6 +82,43 @@ struct Plan {
     bool ok() const noexcept { return why == kOk; }
 };
 
+// F180b: the two steps buildPlan is made of, for a plan of other joints (the spine and the neck: native_on_foot_f180.h). planAdd appends joint j to the held joints with its parent's slot among
+// them (-1: the parent is not held, its model matrix is the animated one); the caller keeps n under kMaxHold. planCarry finds every other joint under a held one, with its nearest held
+// ancestor's slot (it comes with that joint unchanged against it), and sets why: kOk, or kBadTree for a parent out of range or a cycle.
+inline void planAdd(Plan& p, const uint16_t* parents, uint32_t j) noexcept {
+    p.joint[p.n] = static_cast<uint16_t>(j);
+    p.parent[p.n] = parents[j];
+    p.parentSlot[p.n] = -1;
+    for (uint32_t k = 0; k < p.n; ++k)
+        if (p.joint[k] == parents[j]) p.parentSlot[p.n] = static_cast<int8_t>(k);
+    ++p.n;
+}
+inline void planCarry(Plan& p, const uint16_t* parents, uint32_t joints) noexcept {
+    // Every other joint under a held one comes with its nearest held ancestor.
+    for (uint32_t j = 0; j < joints; ++j) {
+        bool isHeld = false;
+        for (uint32_t k = 0; k < p.n; ++k) isHeld = isHeld || p.joint[k] == j;
+        if (isHeld) continue;
+        int slot = -1;
+        uint32_t a = parents[j], steps = 0;
+        while (a != 0xFFFFu) {
+            if (a >= joints || ++steps > joints) {
+                p.why = kBadTree;
+                return;
+            }
+            for (uint32_t k = 0; k < p.n && slot < 0; ++k)
+                if (p.joint[k] == a) slot = static_cast<int>(k);
+            if (slot >= 0) break;
+            a = parents[a];
+        }
+        if (slot < 0) continue;
+        p.carried[p.carriedN] = static_cast<uint16_t>(j);
+        p.owner[p.carriedN] = static_cast<uint8_t>(slot);
+        ++p.carriedN;
+    }
+    p.why = kOk;
+}
+
 // parents: the pose's parent array (0xFFFF the root); clav and upper: the arm plan's clavicle and upper-arm joints per side (0xFFFF when the side's arm plan was refused). A side whose
 // clavicle is not a direct child of the chest 24, or whose upper arm is not a direct child of the clavicle, is left out; the spine alone is required.
 inline Plan buildPlan(const uint16_t* parents, uint32_t joints, const uint32_t clav[2], const uint32_t upper[2]) noexcept {
@@ -96,45 +133,15 @@ inline Plan buildPlan(const uint16_t* parents, uint32_t joints, const uint32_t c
         p.why = kBadSpineParent;
         return p;
     }
-    auto add = [&](uint32_t j) noexcept {
-        p.joint[p.n] = static_cast<uint16_t>(j);
-        p.parent[p.n] = parents[j];
-        p.parentSlot[p.n] = -1;
-        for (uint32_t k = 0; k < p.n; ++k)
-            if (p.joint[k] == parents[j]) p.parentSlot[p.n] = static_cast<int8_t>(k);
-        ++p.n;
-    };
-    for (uint32_t k = 0; k < 3; ++k) add(kIkSpine[k]);
+    for (uint32_t k = 0; k < 3; ++k) planAdd(p, parents, kIkSpine[k]);
     for (int side = 0; side < 2; ++side) {
         const uint32_t c = clav[side], u = upper[side];
         if (c >= joints || u >= joints || parents[c] != kIkSpine[2] || parents[u] != c) continue;
-        add(c);
-        add(u);
+        planAdd(p, parents, c);
+        planAdd(p, parents, u);
         p.arms |= static_cast<uint8_t>(1u << side);
     }
-    // Every other joint under a held one comes with its nearest held ancestor.
-    for (uint32_t j = 0; j < joints; ++j) {
-        bool isHeld = false;
-        for (uint32_t k = 0; k < p.n; ++k) isHeld = isHeld || p.joint[k] == j;
-        if (isHeld) continue;
-        int slot = -1;
-        uint32_t a = parents[j], steps = 0;
-        while (a != 0xFFFFu) {
-            if (a >= joints || ++steps > joints) {
-                p.why = kBadTree;
-                return p;
-            }
-            for (uint32_t k = 0; k < p.n && slot < 0; ++k)
-                if (p.joint[k] == a) slot = static_cast<int>(k);
-            if (slot >= 0) break;
-            a = parents[a];
-        }
-        if (slot < 0) continue;
-        p.carried[p.carriedN] = static_cast<uint16_t>(j);
-        p.owner[p.carriedN] = static_cast<uint8_t>(slot);
-        ++p.carriedN;
-    }
-    p.why = kOk;
+    planCarry(p, parents, joints);
     return p;
 }
 
