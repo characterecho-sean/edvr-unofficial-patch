@@ -1626,7 +1626,8 @@ inline bool uiLayerLiveFor(float target, bool temporal, bool jitterAsShipped, bo
     return target > 0.0f && temporal && jitterAsShipped && !stoodDown;
 }
 // The weapons-fire half of the layer is live whatever fix.ui_quality says: a temporal mode on (the layer composites onto the AA output), the
-// jitter as shipped, not stood down, and not the flat profile (VR only). The layer's machinery (the door, the HDR tonemap re-issue, the
+// jitter as shipped, and not stood down. Both profiles: in flat the temporal mode is the flat anti-aliasing and the draws come through flat's
+// mono adapter (flat_ui_layer.cpp); the retired fix.sharp_weapons was on in both. The layer's machinery (the door, the HDR tonemap re-issue, the
 // composite) runs when EITHER half is live; the UI-quality-only parts (the 2D screen, the maps gate, the VR world route, the after-UI take)
 // run on the first alone.
 inline bool uiLayerWeaponsLiveFor(bool temporal, bool jitterAsShipped, bool stoodDown) {
