@@ -401,6 +401,27 @@ def rim_pair(np, d, cur, prev, out, prev_out, input_size, output_size, dc, oc):
     return report
 
 
+def rim_first_frame(np, mv_path, d, input_size, dc):
+    """The first frame's MV input (eye_<stamp>_MV.bin, RG16_FLOAT over the whole render) against frame 0's
+    decisions: how many foreground texels, and how many on the foreground's rim (a background texel in the
+    3x3), carry the size*2 history-invalid sentinel. Zero rim sentinels means no pass wrote one there."""
+    data = Path(mv_path).read_bytes()
+    if data[:8] != b'EDVRTEX1' or len(data) < 44:
+        raise ValueError('MV input: not an EDVRTEX1 capture')
+    version, w, h, fmt, row = struct.unpack_from('<5I', data, 8)
+    if version != 1 or fmt != 34 or [w, h] != list(input_size) or row != w * 4 or len(data) != 44 + row * h:
+        raise ValueError('MV input: not the RG16_FLOAT render-size capture')
+    mv = np.frombuffer(data, np.float16, count=w * h * 2, offset=44).reshape(h, w, 2)
+    mv = mv[dc[1]:dc[1] + dc[3], dc[0]:dc[0] + dc[2]].astype(np.float32)
+    flags = d[..., 3].astype(np.int64)
+    fg = ((flags & 15) == RIM_FOREGROUND) & ((flags & 512) != 0)
+    bg = (flags & 15) == RIM_BACKGROUND
+    rim = fg & (_rim_nearest(np, bg, 1)[0] == 1)
+    sentinel = mv[..., 0] >= w
+    return {'foreground_texels': int(fg.sum()), 'foreground_sentinel': int((fg & sentinel).sum()),
+            'foreground_rim_texels': int(rim.sum()), 'foreground_rim_sentinel': int((rim & sentinel).sum())}
+
+
 def rim_report(manifest_path):
     import numpy as np
     manifest_path = Path(manifest_path)
@@ -431,6 +452,10 @@ def rim_report(manifest_path):
                    'd': np.frombuffer(data, np.float32, count=dc[2] * dc[3] * 4, offset=44).reshape(dc[3], dc[2], 4),
                    'c': _rim_luma(np, capture_file(manifest_path.parent, entry.get('raw_file'), f'{prefix}C{index:02}.bmp'), dc[2:]),
                    'p': _rim_luma(np, capture_file(manifest_path.parent, entry.get('pre_ui_file'), f'{prefix}P{index:02}.bmp'), oc[2:])}
+        if index == 0:
+            mv_path = manifest_path.parent / f'{prefix}MV.bin'
+            result['first_frame_mv'] = (rim_first_frame(np, mv_path, current['d'], input_size, dc)
+                                        if mv_path.exists() else {'unavailable': True})
         if previous and previous['frame'] + 1 == current['frame'] and previous['geometry'] == current['geometry']:
             pair = {'index': index, 'frame': current['frame']}
             pair.update(rim_pair(np, current['d'], current['c'], previous['c'], current['p'], previous['p'], input_size, output_size, dc, oc))
@@ -488,6 +513,17 @@ def rim_self_test():
                                decision_crop=list(geometry[2]), output_crop=list(geometry[3]), **names))
         path = base / f'eye_{stamp}_decisions.json'
         path.write_text(json.dumps(dict(schema=1, stamp=stamp, requested=16, frames=frames)), encoding='utf-8')
+        assert rim_report(path)['first_frame_mv'] == {'unavailable': True}
+        # Frame 0's decisions as frame 1's, and an MV input with the sentinel on the foreground's left column
+        # (a rim texel) and inside it (not a rim texel).
+        (base / frames[0]['decision_file']).write_bytes(b'EDVRTEX1' + struct.pack('<9I', 1, w, h, 2, w * 16, 100, 0, 0, 0) + d.tobytes())
+        mv = np.zeros((h, w, 2), np.float16)
+        mv[10:40, 20, 0] = 2 * w
+        mv[20, 25, 0] = 2 * w
+        (base / f'eye_{stamp}_MV.bin').write_bytes(b'EDVRTEX1' + struct.pack('<9I', 1, w, h, 34, w * 4, 100, 0, 0, 0) + mv.tobytes())
+        first = rim_report(path)['first_frame_mv']
+        assert first == {'foreground_texels': 480, 'foreground_sentinel': 31,
+                         'foreground_rim_texels': 88, 'foreground_rim_sentinel': 30}, first
         pair = rim_report(path)['pairs'][0]
         assert pair['foreground_vector'] == [-2.0, 0.0] and pair['background_vector'] == [6.0, 0.0], pair
         assert pair['background_ring_hidden']['best']['foreground_vector'] >= .95, pair['background_ring_hidden']
