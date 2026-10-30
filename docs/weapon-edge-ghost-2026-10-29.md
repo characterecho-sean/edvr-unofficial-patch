@@ -4,8 +4,9 @@
 
 - **State: v3 FLOWN 2026-10-30 on Epic. Sean: "still seeing edge shimmer".
   v3 cleared the terrain two texels out but not one texel out, because there
-  the world path's dilated depth is the gun's (flight 3 below). v4 compares
-  against the pixel's own depth and is BUILDING.** Issue #146. #147 is a
+  the world path's dilated depth is the gun's (flight 3 below). v4
+  (`d97ef7a8`) compares against the pixel's own depth. It is INSTALLED on
+  Epic, NOT FLOWN.** Issue #146. #147 is a
   separate defect. Branch `claude/weapon-edge-ghost-4a079e`. Testing is on
   Epic from now on (Sean).
 - **Cause 1, DLSS's dilation:** for each output pixel DLSS takes the vector of
@@ -38,16 +39,15 @@
   point was covered, so it is hidden. A still edge never meets this, because
   the pixel's own texel was background then. It is behind the same key, on
   foot only, through `probe.w` bit 512, which is set for the mv dispatch.
-- **Next flight: INSTALLED Epic 2026-10-30 07:10,
-  `v0.22.0-rc.3-113-gdab85b3a` (`--scope both --xess`, verified), NOT
-  FLOWN.** Epic's `edvr.ini` has no `clean_weapon_edges` line, so the key is
-  on; the scope zoom key stays on. Brief: fast swings and head turns at the
-  hip, with one eye dump with the key on and one with it off (menu row "Clean
-  weapon edges (test)"). Read: `edvr_log.py --target "<Epic dir>"
-  --expect-build dab85b3a --grep "weapon edges"`, which should show `on (v3)`.
-  Then run `--rim` on each dump: `background_kept_on_old_foreground` should be
-  near 0 with the key on (9 to 44 % of kept at v2) and unchanged with it off,
-  and the dotted line should be gone from the gun's edge.
+- **Next flight: v4 INSTALLED Epic 2026-10-30, `v0.22.0-rc.3-115-gd97ef7a8`
+  (`--scope both --xess`, verified), NOT FLOWN.** The key is on, because
+  Epic's ini has no `clean_weapon_edges` line. Brief: fast swings and head
+  turns at the hip, with one eye dump with the key on and one with it off
+  (menu row "Clean weapon edges (test)"). Read: `edvr_log.py --target "<Epic
+  dir>" --expect-build d97ef7a8 --grep "weapon edges"`, which should show
+  `on (v4)`. Then run `--rim`: `background_kept_on_old_foreground` should be
+  near 0 at distances 1 and 2 with the key on (v3: 2 to 46 % at distance 1)
+  and back up with it off.
 - **Temporary keys:** `experimental.clean_weapon_edges` (`on` / `off`, default
   `on`), the A/B of this fix. When the flights settle it, ship the winner as
   the behaviour and propose removing the key.
