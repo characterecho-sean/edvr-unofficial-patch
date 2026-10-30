@@ -413,7 +413,7 @@ inline int flatHdrCrumbWiringTests() {
     // -- the real Present ---------------------------------------------------------------------------------------------------
     const std::string hooked = body(hook, "HRESULT STDMETHODCALLTYPE hookedPresent(");
     ordered(hooked, {"const bool routeCrumbs = hdrCrumbPresentSide();", "hdrCrumbWrite(\"present\", \"begin\");", "const int64_t presentT0 = qpcNow();",
-                     "g_state->realPresent(self, syncInterval, flags);", "const int64_t presentT1 = qpcNow();",
+                     "g_state->realPresent(self, presentSync, flags);", "const int64_t presentT1 = qpcNow();",
                      "hdrCrumbWrite(\"present\", \"end\", \"hr=0x%08X removed=0x%08X\"", "flatRuntimePresent(self, g_state->frameCounter, hr, flags);"},
             "the real Present is bracketed by its crumbs, outside the clock reads that time it, and before the runtime's frame end");
 

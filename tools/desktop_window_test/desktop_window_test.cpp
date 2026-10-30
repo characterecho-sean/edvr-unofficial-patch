@@ -896,7 +896,7 @@ static void wiring(const std::string& root) {
         const size_t fn = at(t, "HRESULT STDMETHODCALLTYPE hookedPresent(");
         const size_t call = at(t, "desktopWindowPresent(self, dev, flags, runtimeFlatProfile())", fn);
         const size_t span = at(t, "gpuCensusFrameWorkEnd(workContext)", fn);
-        const size_t real = at(t, "g_state->realPresent(self, syncInterval, flags);", span);   // the first one is the other swap chains' early return, before the feature
+        const size_t real = at(t, "g_state->realPresent(self, presentSync, flags);", span);   // Elite's own; the other swap chains' early return forwards syncInterval (desktop_vsync.h)
         return fn != std::string::npos && call != std::string::npos && span != std::string::npos && real != std::string::npos && call < span && span < real &&
                at(t, "frameTick(\"desktop_window\")", fn) != std::string::npos;
     };

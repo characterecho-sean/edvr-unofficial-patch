@@ -8,7 +8,10 @@
   path (1.32x at u 0.515) is flown on no headset; a tester with a mesh headset compares it with
   the game's own mirror. Rounds 1 to 7 FLOWN OK. **2026-10-29 (Sean's word):** default
   `left_eye` (F173); the page is **Mirror window** (F173), its rows Image, Shape, Crop, Vertical
-  shift, Style (F174). Five live keys in `[visual]`: `visual.desktop_window` (`game` | `left_eye`
+  shift, Style (F174). **2026-10-30 (Sean's word):** in VR Elite's desktop Present goes out
+  with sync interval 0 whatever Elite asks (`desktop_vsync.h`; the headset paces the frame, a
+  monitor's vertical sync could hold it to 60 Hz and the runtime to half rate); flat keeps Elite's
+  own; no key. Elite already asked 0 in Sean's last five Frontier flights. Line `desktop vsync`. Five live keys in `[visual]`: `visual.desktop_window` (`game` | `left_eye`
   | `right_eye` | `both_eyes`, default `left_eye`), `desktop_window_aspect` (`full` | `1:1` |
   `4:3` | `16:10` | `16:9` | `21:9`, default `full`), `desktop_window_crop` (`native` | `center`,
   default `native`), `desktop_window_vertical_shift` (-100 to 100, default 0),
