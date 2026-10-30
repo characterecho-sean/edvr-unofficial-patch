@@ -2,12 +2,12 @@
 
 ## Status
 
-- **State: v2 FLOWN 2026-10-30 on Frontier. Sean: "the gun still seems to
-  lose DLSS at the edges". The dumps found a second cause, in EDVR's own
-  hidden test. v3 (`26767fd3`, with main merged as `dab85b3a`) is BUILT and
-  INSTALLED on Epic, NOT FLOWN.** Issue #146. #147 is a separate defect.
-  Branch `claude/weapon-edge-ghost-4a079e`. Testing is on Epic from now on
-  (Sean).
+- **State: v3 FLOWN 2026-10-30 on Epic. Sean: "still seeing edge shimmer".
+  v3 cleared the terrain two texels out but not one texel out, because there
+  the world path's dilated depth is the gun's (flight 3 below). v4 compares
+  against the pixel's own depth and is BUILDING.** Issue #146. #147 is a
+  separate defect. Branch `claude/weapon-edge-ghost-4a079e`. Testing is on
+  Epic from now on (Sean).
 - **Cause 1, DLSS's dilation:** for each output pixel DLSS takes the vector of
   the nearest-depth texel in its 3x3. The terrain one texel outside the gun
   therefore fetches history along the gun's motion (48 to 84 % of the hidden
@@ -155,6 +155,7 @@ wins 0.40 to 0.56, the current frame 0.03 to 0.19 and its own vector 0.33 to
 - ruled out: the ADS both-eye share (F162), because the effect shows with sight eye `right`.
 - ruled out: the runtime's reprojection, because EDVR sends it no depth or motion.
 - ruled out: nudging the depth handed to DLSS so that the gun's own edge pixels read an inner texel, because in DLSS's depth the inner texels are already nearer than 3255 of the 3269 marked rim texels that have one (dump `054813060001`, frame 0).
+- ruled out: the one-texel terrain that v3 leaves unhidden being the gun's own texels claimed by the world path, because they carry terrain depth (0 of 3378 within 3 % of the gun) and engine kind `unavailable`, like the terrain beyond them (dump `074347679001`, frame 0).
 - ruled out: v2's winner test leaving the gun's top edge unfixed (the dotted line of flight 2), because in frame 0's depth it skips 16 of the 100 rim texels on that edge (5 % over the whole gun), and the inner texels there are nearer than the rim (dump `062518187001`).
 - ruled out: the gun rim's `own_vector` share as a measure of lost history, because it reads 0.22 to 0.61 in every dump since flight 1, including dump `062518187001`, whose first frame has 0 gun texels off their vector.
 - ruled out: a sentinel on every marked rim texel (v1) as the final rule, because it also resets terrain that was visible last frame (2708 of 3311 ring texels) and the gun's own pixels at the thin muzzle parts (flight 1).
@@ -378,3 +379,44 @@ frame, which should fall to near 0 with the key on.
   passed three times alone, and the full build rerun passed. Filed as #150.
 - **Install:** the version is `v0.22.0-rc.3-113-gdab85b3a`, built from a clean
   tree. Installed on Epic with `--scope both --xess` and verified.
+
+## Flight 3, 2026-10-30 (v3, Epic)
+
+Sean: "still seeing edge shimmer on the weapon". The log is
+`edvr_gfx_20261030_074055.log`. Its build matches `dab85b3a`, it shows
+`on (v3)`, and the pass ran 436 to 1627 rim passes per 10 s. There are two
+dumps, both with the key on:
+
+- `074347679001`: head turns of 26 to 47 px, with the gun nearly still on
+  screen.
+- `074355067002`: its foreground is something about 9 m away, not the gun.
+  Pairs 1 to 4 again carry zero world vectors (#147), and pair 3 a gun vector
+  of -960 px.
+
+- **v3 two texels out:** `background_kept_on_old_foreground` at distance 2 in
+  dump 1 is 0 to 20 a pair. At v2 the same count was 9 to 44 % of kept.
+- **v3 one texel out:** at distance 1 the count is 65 to 955 a pair, 2 to
+  46 % of kept. The dark pixels (P - C below -30) among kept terrain one or two
+  out are 33 to 75 % of these (frames 4, 6, 11, 14 and 15).
+- **Not the gun's texels:** those distance-1 texels carry terrain depth in
+  `Z.bin`. None is within 3 % of the gun, and their engine kind is
+  `unavailable`.
+- **The dilated depth:** D's Z channel is `zPred`, the predicted depth last
+  frame that the world path used. In dump 1 it is 0.23 m on the gun, 0.33 to
+  0.36 m at distance 1, and 2.19 to 2.35 m at distances 2 and 3. The world
+  path takes the nearest depth of the 3x3 for its motion and its `zPred`
+  (`temporal_shader_source.h`, `zr = max(zr, zs)` in the mv entry). One texel
+  from the gun, that is the gun. So v3's test compares last frame's gun with
+  the gun's own depth, and it cannot fire.
+- **Vectors beside the gun:** the same dilation reprojects the distance-1
+  terrain as a world-fixed point at the gun's distance. In these head turns
+  that costs little: the median difference from the distance-3 terrain
+  within 2 texels is 0.2 to 0.7 px, and none is above 4 px. A head that
+  translates would show more parallax at 0.33 m than at 2.2 m. That is a
+  candidate for later, not measured here.
+
+**v4:** v3's covered test compares last frame's depth with the pixel's OWN
+depth, `(zraw - knobs.x) * 1.03`, instead of the dilated `zPred`. Over one
+frame the pixel's own depth moves far less than the 3 % margin. It uses the
+same bit and the same key. Signature: distance-1 `on_old_foreground` near 0
+with the key on.

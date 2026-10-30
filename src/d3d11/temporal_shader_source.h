@@ -693,8 +693,13 @@ bool backgroundHistoryHidden(int2 local,float2 p,float2 motion,float zraw,float 
     // two texels away while the terrain moved thirty to sixty (#146, probe.w
     // bit 512 = experimental.clean_weapon_edges, on foot with the rim pass).
     // A still edge never meets this: the pixel's own texel was background then.
-    if((uint(probe.w+.5)&512u)!=0u && (zraw<=knobs.x || zPred>0)) {
-        const float lim=zraw<=knobs.x?0.0:knobs.z/zPred*1.03;
+    // Judged against the pixel's OWN depth, not zPred: the world path takes
+    // zPred from the nearest depth of its 3x3, so one texel from the weapon it
+    // is the weapon's (0.33 m against the terrain's 2.2 m, eye run 2026-10-30
+    // 07:43), and nothing reads nearer than that. One frame moves the pixel's
+    // own depth far less than the 3 % margin, so its depth now stands in.
+    if((uint(probe.w+.5)&512u)!=0u) {
+        const float lim=zraw<=knobs.x?0.0:(zraw-knobs.x)*1.03;
         const int2 b=int2(floor(pp));
         float nearest4=1e30;
         [unroll]for(int cy=0;cy<=1;++cy) [unroll]for(int cx=0;cx<=1;++cx)
