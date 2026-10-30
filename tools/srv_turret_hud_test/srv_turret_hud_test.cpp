@@ -231,9 +231,18 @@ static void addQuad(std::vector<Vtx>& v, float x0, float x1, float y0, float y1,
 static st::Constants g_constants[2];
 static void noopSetGs(ID3D11DeviceContext*, ID3D11GeometryShader*, ID3D11ClassInstance* const*, uint32_t) {}
 
+// What the GPU instrument reads back for a sampled draw: the pipeline statistics, the stream-output statistics and the records the twin streamed out.
+struct Sample {
+    D3D11_QUERY_DATA_PIPELINE_STATISTICS stats{};
+    D3D11_QUERY_DATA_SO_STATISTICS so{};
+    std::vector<float> records;   // kCaptureBufferBytes / 4 floats
+    bool soTargetAfter = true, gsAfter = true;
+};
 struct DrawOpts {
     int eye = 0;                 // which constants buffer
     bool skipRestore = false;    // MUTANT: a restore that does nothing
+    Sample* sample = nullptr;    // the instrument: queries around the scope (and, with soTarget, the stream-output target of the twin)
+    bool soTarget = false;
 };
 // One frame of `verts` through the stand-in pair and, when gs is given, the production binding with `params` (null gs: the plain shader alone).
 static Frame render(const std::vector<Vtx>& verts, const Cam& cam, ID3D11GeometryShader* gs, const st::TurretParams& params, UINT w = 256, UINT h = 256, const DrawOpts& o = DrawOpts{}) {
@@ -262,8 +271,59 @@ static Frame render(const std::vector<Vtx>& verts, const Cam& cam, ID3D11Geometr
         bound = binding.begin(g_ctx.Get(), gs, cb) == st::Binding::Begin::kBound;
         check(bound, "the production binding binds the shader");
     }
+    ComPtr<ID3D11Query> statsQ, soQ;
+    ComPtr<ID3D11Buffer> soBuf, staging;
+    if (o.sample) {   // Begin right after the bind
+        const D3D11_QUERY_DESC qd{D3D11_QUERY_PIPELINE_STATISTICS, 0}, sd{D3D11_QUERY_SO_STATISTICS, 0};
+        ck(g_dev->CreateQuery(&qd, &statsQ), "the pipeline-statistics query");
+        if (o.soTarget) {
+            ck(g_dev->CreateQuery(&sd, &soQ), "the stream-output-statistics query");
+            D3D11_BUFFER_DESC bd{};
+            bd.ByteWidth = st::kCaptureBufferBytes;
+            bd.BindFlags = D3D11_BIND_STREAM_OUTPUT;
+            ck(g_dev->CreateBuffer(&bd, nullptr, &soBuf), "the stream-output buffer");
+            bd.BindFlags = 0;
+            bd.Usage = D3D11_USAGE_STAGING;
+            bd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+            ck(g_dev->CreateBuffer(&bd, nullptr, &staging), "the staging buffer");
+            ID3D11Buffer* target = soBuf.Get();
+            const UINT zero = 0;
+            g_ctx->SOSetTargets(1, &target, &zero);
+        }
+        g_ctx->Begin(statsQ.Get());
+        if (o.soTarget) g_ctx->Begin(soQ.Get());
+    }
     g_ctx->Draw(UINT(verts.size()), 0);
+    if (o.sample) {   // End right before the restore
+        g_ctx->End(statsQ.Get());
+        if (o.soTarget) {
+            g_ctx->End(soQ.Get());
+            g_ctx->SOSetTargets(0, nullptr, nullptr);
+        }
+    }
     if (bound) binding.finish(g_ctx.Get(), o.skipRestore ? noopSetGs : st::directSetGs);
+    if (o.sample) {
+        g_ctx->Flush();
+        for (int i = 0; i < 2000 && g_ctx->GetData(statsQ.Get(), &o.sample->stats, sizeof(o.sample->stats), 0) != S_OK; ++i) Sleep(1);
+        check(g_ctx->GetData(statsQ.Get(), &o.sample->stats, sizeof(o.sample->stats), 0) == S_OK, "the pipeline statistics come back");
+        if (o.soTarget) {
+            for (int i = 0; i < 2000 && g_ctx->GetData(soQ.Get(), &o.sample->so, sizeof(o.sample->so), 0) != S_OK; ++i) Sleep(1);
+            check(g_ctx->GetData(soQ.Get(), &o.sample->so, sizeof(o.sample->so), 0) == S_OK, "the stream-output statistics come back");
+            g_ctx->CopyResource(staging.Get(), soBuf.Get());
+            D3D11_MAPPED_SUBRESOURCE m{};
+            ck(g_ctx->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &m), "Map the stream-output copy");
+            o.sample->records.resize(st::kCaptureBufferBytes / 4);
+            std::memcpy(o.sample->records.data(), m.pData, st::kCaptureBufferBytes);
+            g_ctx->Unmap(staging.Get(), 0);
+        }
+        ComPtr<ID3D11GeometryShader> now;
+        g_ctx->GSGetShader(&now, nullptr, nullptr);
+        o.sample->gsAfter = now != nullptr;
+        ID3D11Buffer* so[1] = {};
+        g_ctx->SOGetTargets(1, so);
+        o.sample->soTargetAfter = so[0] != nullptr;
+        if (so[0]) so[0]->Release();
+    }
     return t.read();
 }
 
@@ -715,6 +775,83 @@ static void constantsCases() {
     check(st::kBackDefaultCm == 60 && st::kGapDefaultCm == 102, "the keys' defaults");
 }
 
+// ---------------------------------------------------------------- the GPU instrument (srv_turret.cpp's probe*): the same calls, on WARP
+static void instrumentCases(ID3D11GeometryShader* gs) {
+    // the twin, made as the module makes it: the production bytecode, two stream-output entries, stream 0 rasterized as well
+    ComPtr<ID3D11GeometryShader> twin;
+    const D3D11_SO_DECLARATION_ENTRY decl[2] = {{0, "TEXCOORD", 0, 0, 2, 0}, {0, "SV_Position", 0, 0, 4, 0}};
+    const UINT stride = st::kCaptureStrideBytes;
+    ck(g_dev->CreateGeometryShaderWithStreamOutput(edvr::kSrvTurretHudGsBytecode, sizeof(edvr::kSrvTurretHudGsBytecode), decl, 2, &stride, 1, 0, nullptr, &twin),
+       "the stream-output twin is made from the production bytecode");
+    const Cam cam;
+    const float ipd = 0.0551f, gap = 1.02f, w0 = 1.5f;
+    const float hx = st::eyeHx(0, ipd), ex = -hx;
+    const st::TurretParams params = st::paramsFor(cam.p00 * hx, gap);
+    std::vector<Vtx> quad;
+    addQuad(quad, -0.30f, 0.30f, -0.20f, 0.20f, w0, ex);
+    DrawOpts base;
+
+    // a plain draw: the vertex shader ran, the geometry shader did not (gs = 0 with ia_prims above 0 is how a flight reads "never ran")
+    Sample plain;
+    DrawOpts o = base;
+    o.sample = &plain;
+    const Frame plainFrame = render(quad, cam, nullptr, params, 256, 256, o);
+    check(plain.stats.IAPrimitives == 2 && plain.stats.VSInvocations >= 4 && plain.stats.GSInvocations == 0 && plain.stats.GSPrimitives == 0 && plain.stats.PSInvocations > 1000,
+          "a quad drawn with no geometry shader: two primitives in, vertex shader and pixel shader ran, the geometry shader's invocation count is 0");
+
+    // through the production shader: it ran once for each triangle
+    Sample prod;
+    o.sample = &prod;
+    const Frame prodFrame = render(quad, cam, gs, params, 256, 256, o);
+    check(prod.stats.IAPrimitives == 2 && prod.stats.GSInvocations == 2 && prod.stats.GSPrimitives == 2 && prod.stats.CInvocations >= 2 && prod.stats.PSInvocations > 1000 &&
+              !prod.gsAfter,
+          "...and through the production shader: two primitives in, the geometry shader ran twice and emitted two, and the context's geometry stage is empty after");
+    check(plain.stats.PSInvocations != prod.stats.PSInvocations || maxDiff(plainFrame, prodFrame) > 0.01, "...and the statistics see the shift: the pixels differ from the plain draw");
+
+    // through the twin with its stream-output target: the same statistics, the same pixels, and the records of what the shader wrote
+    Sample cap;
+    o.sample = &cap;
+    o.soTarget = true;
+    const Frame twinFrame = render(quad, cam, twin.Get(), params, 256, 256, o);
+    check(cap.stats.GSInvocations == 2 && cap.stats.GSPrimitives == 2 && cap.stats.IAPrimitives == 2 && cap.so.NumPrimitivesWritten == 2 && cap.so.PrimitivesStorageNeeded == 2,
+          "through the twin: two invocations, two primitives written to the stream-output target, none lost");
+    check(maxDiff(prodFrame, twinFrame) == 0.0, "...and it rasterizes exactly as the production shader does (the instrument does not change the picture)");
+    check(!cap.soTargetAfter && !cap.gsAfter, "...and the stream-output target and the geometry stage are empty after the scope");
+    const st::CaptureSummary c = st::summarizeCapture(cap.records.data(), 6, params);
+    check(c.vertices == 6 && c.inWindow == 6 && std::fabs(c.wMin - w0) < 1e-4f && std::fabs(c.wMax - w0) < 1e-4f, "the six captured vertices lie at view depth 1.5 and in the window");
+    const float shift = st::clipXShift(params, w0);
+    check(std::fabs(c.shiftMin - shift) < 1e-6f && std::fabs(c.shiftMax - shift) < 1e-6f && std::fabs(shift - 0.05504f) < 0.0002f, "...and the shift the rule gives them is s gap / (w - gap)");
+    // the captured NDC x is the shifted position: (P00 X + offX w + shift) / w for the quad's left and right edges
+    const float xl = (cam.p00 * (-0.30f - ex) + cam.offX * w0 + shift) / w0, xr = (cam.p00 * (0.30f - ex) + cam.offX * w0 + shift) / w0;
+    check(std::fabs(c.ndcXMin - xl) < 1e-5f && std::fabs(c.ndcXMax - xr) < 1e-5f, "...and the streamed clip x / w is the shifted edge: the shader wrote the position the rule says");
+    // the unshifted position of the same quad from the plain draw's own capture: the difference is the shift
+    Sample capPlain;
+    DrawOpts op = base;
+    op.sample = &capPlain;
+    op.soTarget = true;
+    (void)render(quad, cam, twin.Get(), st::paramsFor(0.0f, gap), 256, 256, op);   // s = 0: the twin writes the game's own positions
+    const st::CaptureSummary c0 = st::summarizeCapture(capPlain.records.data(), 6, st::paramsFor(0.0f, gap));
+    check(std::fabs((c.ndcXMin - c0.ndcXMin) - shift / w0) < 1e-5f && std::fabs(c.ndcYMin - c0.ndcYMin) < 1e-6f && std::fabs(c.wMin - c0.wMin) < 1e-6f,
+          "the captured positions differ from the unshifted ones by the shift in x only (y and w are the game's)");
+
+    // a draw whose depth lies outside the window: the shader RUNS (gs = 2) and moves nothing, and the capture says why (in_window = 0, the depth range)
+    std::vector<Vtx> farQuad;
+    addQuad(farQuad, -4.0f, 4.0f, -3.0f, 3.0f, 20.0f, ex);
+    Sample farCap;
+    DrawOpts of = base;
+    of.sample = &farCap;
+    of.soTarget = true;
+    (void)render(farQuad, cam, twin.Get(), params, 256, 256, of);
+    const st::CaptureSummary cf = st::summarizeCapture(farCap.records.data(), 6, params);
+    check(farCap.stats.GSInvocations == 2 && cf.vertices == 6 && cf.inWindow == 0 && std::fabs(cf.wMin - 20.0f) < 1e-3f && cf.shiftMin == 0.0f && cf.shiftMax == 0.0f,
+          "a quad at 20 m: the geometry shader ran twice and the capture reads in_window 0 with the depth range: the signature of a window that misses the draw");
+    // the summary's own edges
+    const float junk[12] = {0, 0, NAN, 0, 0, 1, 0, 0, 0, 0, 0, -1};
+    const st::CaptureSummary cj = st::summarizeCapture(junk, 2, params);
+    check(cj.vertices == 1 && cj.inWindow == 0 && st::summarizeCapture(nullptr, 6, params).vertices == 0, "the summary skips a vertex that is not finite and reads nothing from nothing");
+    g_ctx->ClearState();
+}
+
 // ---------------------------------------------------------------- the mutants
 static std::string replaceAll(std::string text, const std::string& from, const std::string& to) {
     size_t at = 0;
@@ -765,6 +902,7 @@ int main(int argc, char** argv) {
 
         constantsCases();
         linkageCases(gs.Get());
+        instrumentCases(gs.Get());
 
         Fails production;
         geometryCases(gs.Get(), production);

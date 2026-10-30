@@ -100,5 +100,51 @@ inline const char* refuseName(Refuse r) {
     }
 }
 
+// ---- the GPU instrument (srv_turret.cpp): what a sampled draw's geometry shader wrote ----------------------------------------------------------------------------------
+// Once a second per eye one matched draw is issued through a stream-output twin of the shader (the same bytecode, the same constants, still rasterized) with a pipeline-statistics
+// query around it. The records the twin streamed out are 24 bytes a vertex: the texture coordinate (2 floats) and the clip position (4 floats), AFTER the shift. This summarizes them:
+// how many vertices lie in the window (the ones the shader moves), the view depth range they have, where they landed in NDC, and the shift the shader's rule gives them.
+inline constexpr uint32_t kCaptureStrideBytes = 24;
+inline constexpr uint32_t kCaptureBufferBytes = 4096;
+inline constexpr uint32_t kCaptureMaxVertices = kCaptureBufferBytes / kCaptureStrideBytes;
+struct CaptureSummary {
+    uint32_t vertices = 0, inWindow = 0;
+    float wMin = 0.0f, wMax = 0.0f;           // clip w over all vertices
+    float ndcXMin = 0.0f, ndcXMax = 0.0f;     // clip x / w over the vertices with w > 0, after the shift
+    float ndcYMin = 0.0f, ndcYMax = 0.0f;
+    float shiftMin = 0.0f, shiftMax = 0.0f;   // the shader's rule over the in-window vertices (0 and 0 when none)
+};
+inline CaptureSummary summarizeCapture(const float* records, uint32_t vertices, const TurretParams& p) {
+    CaptureSummary s;
+    if (!records) return s;
+    if (vertices > kCaptureMaxVertices) vertices = kCaptureMaxVertices;
+    bool haveW = false, haveNdc = false, haveShift = false;
+    for (uint32_t i = 0; i < vertices; ++i) {
+        const float* r = records + 6 * i;   // u, v, x, y, z, w
+        const float x = r[2], y = r[3], w = r[5];
+        if (!std::isfinite(w) || !std::isfinite(x) || !std::isfinite(y)) continue;
+        ++s.vertices;
+        if (!haveW || w < s.wMin) s.wMin = w;
+        if (!haveW || w > s.wMax) s.wMax = w;
+        haveW = true;
+        if (w > 1.0e-6f) {
+            const float nx = x / w, ny = y / w;
+            if (!haveNdc || nx < s.ndcXMin) s.ndcXMin = nx;
+            if (!haveNdc || nx > s.ndcXMax) s.ndcXMax = nx;
+            if (!haveNdc || ny < s.ndcYMin) s.ndcYMin = ny;
+            if (!haveNdc || ny > s.ndcYMax) s.ndcYMax = ny;
+            haveNdc = true;
+        }
+        if (w > p.wMin && w < p.wMax) {
+            ++s.inWindow;
+            const float shift = clipXShift(p, w);
+            if (!haveShift || shift < s.shiftMin) s.shiftMin = shift;
+            if (!haveShift || shift > s.shiftMax) s.shiftMax = shift;
+            haveShift = true;
+        }
+    }
+    return s;
+}
+
 }  // namespace srv_turret
 }  // namespace edvr

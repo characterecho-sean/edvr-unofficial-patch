@@ -17,6 +17,11 @@
 //   "srv turret hud: precompiled geometry shader ... created|FAILED" (shader_swap.cpp), once, at the first draw that asks for it.
 //   "srv turret hud: first draw ..." once; "srv turret hud: refused a draw (reason) ..." once per reason.
 //   "srv turret hud: gap=... draws[L,R]=.. bound=.. refused[...]=.." every 10 s while the turret view was on at any point of the window.
+//   THE GPU INSTRUMENT (whether the shader RAN, and what it wrote): once a second per eye, while the pass is bound, one matched draw is issued through a stream-output twin of the
+//   shader (the same bytecode and constants, still rasterized) with a pipeline-statistics query and a stream-output-statistics query around the scope (Begin right after the bind,
+//   End right before the restore). Read back without a stall (DONOTFLUSH, a staging copy mapped DO_NOT_WAIT) on later frames, given up after 8:
+//   "srv turret hud stats: eye=E issues=N ia_prims=.. vs=.. gs=.. gs_prims=.. c_inv=.. c_prims=.. ps=.. (lost N) draw=K"   gs=0 with ia_prims>0: the shader never ran.
+//   "srv turret hud capture: eye=E draw=K so_prims=.. vertices=.. in_window=.. w=[..] ndc_x=[..] ndc_y=[..] shift_clip=[..] s=.. gap=.."   the vertices the shader wrote.
 #pragma once
 
 #include <atomic>
@@ -29,7 +34,15 @@ namespace edvr {
 namespace detail {
 // Asked per draw with no call: the build has no /GL to fold a cross-TU getter (target_sharp.h's reason).
 extern std::atomic<bool> g_srvTurretHudWanted;
+// The GPU instrument's issue count: true only inside the scope of the one draw a second that is sampled (srv_turret.cpp).
+extern std::atomic<bool> g_srvTurretHudCounting;
+extern std::atomic<uint32_t> g_srvTurretHudIssues;
 }  // namespace detail
+
+// vscreen.cpp, at each place that issues the matched draw (the game's own issue and pureDrawReissue's re-issues): counts it while the sampled scope is open. One relaxed load otherwise.
+inline void srvTurretHudCountIssue() {
+    if (detail::g_srvTurretHudCounting.load(std::memory_order_relaxed)) detail::g_srvTurretHudIssues.fetch_add(1, std::memory_order_relaxed);
+}
 
 // True while the turret view is on (VR) and fix.srv_turret_hud_gap is above 0. Also a term of the draw gate (vscreen.cpp drawGateSubscribed).
 inline bool srvTurretHudWantsDraws() { return detail::g_srvTurretHudWanted.load(std::memory_order_relaxed); }

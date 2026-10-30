@@ -3910,6 +3910,7 @@ static_assert(alteredFixOf(DrawVerdict::kPanel) == AlteredFix::Panel && alteredF
 // calls with the same arguments.
 __declspec(noinline) void pureDrawReissue(ID3D11DeviceContext* self, char kind, UINT count,
                                           UINT instances, const DrawArgs& args) {
+    srvTurretHudCountIssue();   // issue 140's GPU instrument: a re-issue inside the sampled scope is a draw call on the context (one relaxed load otherwise)
     switch(kind) {
     case 'D':g_state->realDraw(self,count,UINT(args.base));break;
     case 'I':g_state->realDrawIndexed(self,count,args.start,args.base);break;
@@ -5209,6 +5210,7 @@ void STDMETHODCALLTYPE hookedDraw(ID3D11DeviceContext* self, UINT count, UINT st
             GpuCensusAlteredScope timed(self, altered);   // the game's own draw, and only it (gpu_census.h)
             g_state->realDraw(self, count, start);
         }
+        srvTurretHudCountIssue();   // issue 140's GPU instrument: the game's own issue (one relaxed load outside a sampled scope)
         if (clock.on) clock.realCall(r0);
         return true;
     });
@@ -5291,6 +5293,7 @@ void STDMETHODCALLTYPE hookedDrawIndexed(ID3D11DeviceContext* self, UINT count,
             GpuCensusAlteredScope timed(self, altered);   // the game's own draw, and only it (gpu_census.h)
             g_state->realDrawIndexed(self, count, startIndex, baseVertex);
         }
+        srvTurretHudCountIssue();   // issue 140's GPU instrument: the game's own issue (one relaxed load outside a sampled scope)
         if (clock.on) clock.realCall(r0);
         return true;
     });
@@ -5381,6 +5384,7 @@ void STDMETHODCALLTYPE hookedDrawInstanced(ID3D11DeviceContext* self, UINT perIn
             g_state->realDrawInstanced(self, perInstance, drawn, startVertex,
                                        startInstance);
         }
+        srvTurretHudCountIssue();   // issue 140's GPU instrument: the game's own issue (one relaxed load outside a sampled scope)
         if (clock.on) clock.realCall(r0);
         return true;
     });
@@ -5472,6 +5476,7 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
             g_state->realDrawIndexedInstanced(self, perInstance, instances, startIndex,
                                               baseVertex, startInstance);
         }
+        srvTurretHudCountIssue();   // issue 140's GPU instrument: the game's own issue (one relaxed load outside a sampled scope)
         // The weapon's temporal-AA motion vectors, from the pool the draw just read.
         if (self == g_state->ownerCtx && !g_state->rtv0Eye &&
             weaponMotionWants(bindingShaderHash(BindSlot::Vs))) {

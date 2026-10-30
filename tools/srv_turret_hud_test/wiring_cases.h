@@ -93,7 +93,7 @@ static bool wiredNativeOnFoot(const std::string& t) {
 // srv_turret.cpp.
 static bool wiredModule(const std::string& t) {
     const size_t made = t.find("g_gs = shaderSwapCreateGs(ctx, kSrvTurretHudGsBytecode, sizeof(kSrvTurretHudGsBytecode),");
-    const size_t begin = t.find("g_binding.begin(ctx, g_gs, constants)");
+    const size_t begin = t.find("g_binding.begin(ctx, twin ? g_soGs : g_gs, constants)");
     const size_t finish = t.find("const auto done = g_binding.finish(ctx);");
     const size_t back = t.find("cfg.getIntInRange(\"fix.srv_turret_camera_back\", 60, 0, 150)");
     const size_t gap = t.find("cfg.getIntInRange(\"fix.srv_turret_hud_gap\", 102, 0, 200)");
@@ -112,6 +112,37 @@ static bool wiredAccessors(const std::string& journal, const std::string& tempor
     return found(journal.find("bool journalSrvTurretView() { return !runtimeFlatProfile() && srv_turret::turretViewFromFlags(peek(g_v.flags)); }")) &&
            found(journalH.find("bool journalSrvTurretView();")) && found(temporal.find("bool nativeTemporalEyeSeparation(float* metres) {")) &&
            found(temporal.find("eyeSeparationOf(current->eyes[0], current->eyes[1])"));
+}
+
+// The GPU instrument: the issues are counted at the game's own issue and at the re-issues; the queries begin right after the bind and end right before the restore; the
+// results are read once a frame at the boundary; the lines are the ones tools/edvr_log.py --health reads.
+static bool wiredInstrument(const std::string& vscreen, const std::string& t) {
+    const size_t reissue = vscreen.find("void pureDrawReissue(ID3D11DeviceContext* self, char kind, UINT count,");
+    const size_t reissueCount = found(reissue) ? vscreen.find("srvTurretHudCountIssue();", reissue) : std::string::npos;
+    const size_t reissueSwitch = found(reissue) ? vscreen.find("switch(kind) {", reissue) : std::string::npos;
+    // the game's own issue is counted in the four draw thunks' lambdas (after the real call), not in observedDraw, whose text other rigs pin
+    size_t counts = 0, at = 0;
+    while (found(at = vscreen.find("srvTurretHudCountIssue();", at))) {
+        ++counts;
+        ++at;
+    }
+    const size_t observed = vscreen.find("auto observedDraw = [&](AlteredDraw altered) {");
+    const size_t observedEnd = found(observed) ? vscreen.find("return issued;", observed) : std::string::npos;
+    if (!found(reissueCount) || !found(reissueSwitch) || reissueCount > reissueSwitch || counts != 5 || !found(observed) || !found(observedEnd) ||
+        found(vscreen.substr(observed, observedEnd - observed).find("srvTurretHudCountIssue"))) return false;
+    const size_t begin = t.find("g_binding.begin(ctx, twin ? g_soGs : g_gs, constants)");
+    const size_t probeBegin = found(begin) ? t.find("if (sample) probeBegin(ctx, eye, ordinal, twin, params);", begin) : std::string::npos;
+    const size_t end = t.find("void srvTurretHudEnd(ID3D11DeviceContext* ctx) {");
+    const size_t probeEnd = found(end) ? t.find("probeEnd(ctx);", end) : std::string::npos;
+    const size_t finish = found(probeEnd) ? t.find("const auto done = g_binding.finish(ctx);", probeEnd) : std::string::npos;
+    const size_t probeFinish = found(finish) ? t.find("probeFinish(ctx);", finish) : std::string::npos;
+    const size_t boundary = t.find("void srvTurretHudFrameBoundary(ID3D11DeviceContext* ctx) {");
+    const size_t read = found(boundary) ? t.find("probeRead(ctx, eye);", boundary) : std::string::npos;
+    const bool queries = found(t.find("D3D11_QUERY_PIPELINE_STATISTICS")) && found(t.find("D3D11_QUERY_SO_STATISTICS")) && found(t.find("D3D11_ASYNC_GETDATA_DONOTFLUSH")) &&
+                         found(t.find("D3D11_MAP_FLAG_DO_NOT_WAIT")) && found(t.find("kProbeGiveUpFrames = 8,")) && found(t.find("CreateGeometryShaderWithStreamOutput(kSrvTurretHudGsBytecode"));
+    const bool lines = found(t.find("\"srv turret hud stats: eye=%d issues=%u ia_prims=%llu vs=%llu gs=%llu gs_prims=%llu c_inv=%llu c_prims=%llu ps=%llu (lost %u) draw=%u\"")) &&
+                       found(t.find("\"srv turret hud capture: eye=%d draw=%u so_prims=%llu needed=%llu vertices=%u in_window=%u w=[%.3f,%.3f] ndc_x=[%.3f,%.3f] ndc_y=[%.3f,%.3f] \""));
+    return found(probeBegin) && found(end) && found(probeEnd) && found(finish) && found(probeFinish) && probeEnd < finish && finish < probeFinish && found(read) && queries && lines;
 }
 
 // edvr.ini and the flat allow-list.
@@ -174,10 +205,18 @@ static void wiringCases() {
 
     check(wiredModule(module), "srv_turret.cpp: the shader from the build's bytecode, the binding class alone, the literal key reads, the host's geometry, the log lines");
     check(!wiredModule(replaced(module, "shaderSwapCreateGs(ctx, kSrvTurretHudGsBytecode", "shaderSwapCreateGs(ctx, kSupercruiseBarsGsBytecode")), "control: another shader's bytecode trips the pin");
-    check(!wiredModule(replaced(module, "const auto begun = g_binding.begin(ctx, g_gs, constants);", "ctx->GSSetShader(g_gs, nullptr, 0); const auto begun = g_binding.begin(ctx, g_gs, constants);")),
+    check(!wiredModule(replaced(module, "const auto begun = g_binding.begin(ctx, twin ? g_soGs : g_gs, constants);", "ctx->GSSetShader(g_gs, nullptr, 0); const auto begun = g_binding.begin(ctx, twin ? g_soGs : g_gs, constants);")),
           "control: a raw geometry-stage set outside the binding trips the pin");
     check(!wiredModule(replaced(module, "\"fix.srv_turret_hud_gap\", 102, 0, 200", "\"fix.srv_turret_hud_gap\", 100, 0, 200")), "control: a drifted default trips the pin");
     check(!wiredModule(without(module, "refuse(st::Refuse::kNoGeometry)")), "control: a draw with no geometry that is not refused trips the pin");
+    check(wiredInstrument(vscreen, module), "the GPU instrument: issues counted at the game's issue and the re-issues; the queries begin after the bind and end before the restore; read once a frame; the log lines");
+    check(!wiredInstrument(replaced(vscreen, "    srvTurretHudCountIssue();   // issue 140's GPU instrument: a re-issue", "    // issue 140's GPU instrument: a re-issue"), module), "control: a re-issue that is not counted trips the pin");
+    check(!wiredInstrument(replaced(vscreen, "        srvTurretHudCountIssue();   // issue 140's GPU instrument: the game's own issue", "        // issue 140's GPU instrument: the game's own issue"), module), "control: a thunk that does not count the game's own issue trips the pin");
+    check(!wiredInstrument(replaced(vscreen, "        const bool issued = draw(altered);\n", "        const bool issued = draw(altered);\n        srvTurretHudCountIssue();\n"), module),
+          "control: a count inside observedDraw (whose text other rigs pin) trips the pin");
+    check(!wiredInstrument(vscreen, replaced(module, "probeEnd(ctx);   // the queries end", "// the queries end")), "control: queries that never end trip the pin");
+    check(!wiredInstrument(vscreen, replaced(module, "kProbeGiveUpFrames = 8,", "kProbeGiveUpFrames = 80,")), "control: a readback that never gives up trips the pin");
+    check(!wiredInstrument(vscreen, replaceAll(module, "D3D11_ASYNC_GETDATA_DONOTFLUSH", "0")), "control: a readback that flushes trips the pin");
     check(wiredAccessors(journal, temporal, journalH), "journal_watch and native_temporal: the turret bit and the eye separation accessors");
     check(!wiredAccessors(replaced(journal, "srv_turret::turretViewFromFlags(peek(g_v.flags))", "false"), temporal, journalH), "control: an accessor that answers false trips the pin");
     check(wiredKeys(ini, flatKeys), "edvr.ini: both keys in [fix] with their menu rows; the flat profile's allow-list names neither");

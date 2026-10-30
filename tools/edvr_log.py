@@ -287,7 +287,9 @@ the setting is game or absent.
 The SRV turret view (fix.srv_turret_camera_back, fix.srv_turret_hud_gap) is the third: the graphics log's "srv turret ..." lines. The settings lines are kept whatever --since says. It
 judges the camera half (a "camera: back ... published" line) and the HUD half (a first-draw line or a 10 s line with draws bound) on the keys in force: NEVER APPLIED when a key is above 0
 and the log proves the turret view was on with nothing from that half, or when the geometry shader could not be made; PARTIAL when under 90% of the HUD draws were bound or some were
-refused for the geometry, the readiness or a game geometry shader; IDLE when the turret view was never entered or the keys are 0; and nothing at all with no line.
+refused for the geometry, the readiness or a game geometry shader; IDLE when the turret view was never entered or the keys are 0; and nothing at all with no line. Its GPU instrument's
+"srv turret hud stats:" and "srv turret hud capture:" lines (one sampled draw a second per eye) are the hardest evidence: NEVER APPLIED when sampled draws had input and the geometry
+shader never ran, or when it wrote vertices and none lies in its window; OK, with the figures, when it ran and moved vertices.
 
 Exit 0 when a log was read, 1 when none was found (or --camera-census found no
 census line, or --vscreen-fit no auto-fit line, or --flat-upscale no flat line, or
@@ -10381,7 +10383,7 @@ H_DESKTOP_OTHER = r"desktop window: (?!setting |10 s: |stopped \()"
 # graphics log with no build tag, read the way the desktop window's are. The settings line is state, so health_scan keeps every one whatever --since says; the rest are events and are
 # cut by the window. Every kind of line the DLL writes has a pattern of its own, so a labelled line that none matches is counted as unparsed (a format that drifted).
 H_SRV_TURRET = "srv turret view"
-H_SRV_TURRET_LABELS = ("srv turret view:", "srv turret camera:", "srv turret hud:", "srv turret settings:")
+H_SRV_TURRET_LABELS = ("srv turret view", "srv turret camera", "srv turret settings", "srv turret hud")   # no colon: "hud" covers the stats and capture lines, and a label whose own text drifted still counts
 H_SRV_TURRET_SETTING = r"srv turret settings: camera back (?P<back>\d+) cm, hud gap (?P<gap>\d+) cm \(live; "
 H_SRV_TURRET_VIEW = r"srv turret view: (?P<state>on|off) at frame (?P<frame>\d+) \(Status\.json Flags 0x(?P<flags>[0-9A-Fa-f]+), seat kind 0x(?P<seat>[0-9A-Fa-f]+)\)$"
 H_SRV_TURRET_PUBLISHED = r"srv turret camera: back (?P<back>[\d.]+) m published \(serial (?P<serial>\d+)\)$"
@@ -10396,6 +10398,17 @@ H_SRV_TURRET_FIRST = r"srv turret hud: first draw through the shader \(frame (?P
 H_SRV_TURRET_REFUSED = r"srv turret hud: refused a draw \((?P<reason>no-eye|game-gs|topology|not-ready|no-geometry)\) -- the draw went on as the game made it\."
 H_SRV_TURRET_UNRESTORED = r"srv turret hud: the game's geometry stage could not be put back after an issue;"
 H_SRV_TURRET_RESTORED = r"srv turret hud: the game's geometry stage and constant slot were put back at the frame boundary\.$"
+# The GPU instrument (srv_turret.cpp probeRead / makeTwin / probeEnsure): once a second per eye one sampled draw goes through a stream-output twin of the shader with queries around it.
+# The stats line is that draw's pipeline statistics (gs is the geometry shader's invocation count), the capture line what the twin streamed out (w is the clip w range of the vertices the
+# shader wrote, in_window how many of vertices lie in the shader's window, the ones it moves). Their lines read "srv turret hud stats:" and "srv turret hud capture:", so the label is "srv turret hud".
+H_SRV_TURRET_STATS = (r"srv turret hud stats: eye=(?P<eye>-?\d+) issues=(?P<issues>\d+) ia_prims=(?P<ia>\d+) vs=(?P<vs>\d+) gs=(?P<gs>\d+) gs_prims=(?P<gsp>\d+) "
+                      r"c_inv=(?P<cinv>\d+) c_prims=(?P<cp>\d+) ps=(?P<ps>\d+) \(lost (?P<lost>\d+)\) draw=(?P<draw>\d+)$")
+H_SRV_TURRET_CAPTURE = (r"srv turret hud capture: eye=(?P<eye>-?\d+) draw=(?P<draw>\d+) so_prims=(?P<so>\d+) needed=(?P<needed>\d+) vertices=(?P<vertices>\d+) in_window=(?P<inw>\d+) "
+                        r"w=\[(?P<wlo>-?[\d.]+),(?P<whi>-?[\d.]+)\] ndc_x=\[(?P<xlo>-?[\d.]+),(?P<xhi>-?[\d.]+)\] ndc_y=\[(?P<ylo>-?[\d.]+),(?P<yhi>-?[\d.]+)\] "
+                        r"shift_clip=\[(?P<klo>[+-][\d.]+),(?P<khi>[+-][\d.]+)\] s=(?P<s>[+-][\d.]+) gap=(?P<gap>[\d.]+)$")
+H_SRV_TURRET_TWIN = r"srv turret hud: stream-output twin of the shader \(the GPU instrument's capture\) (?P<outcome>created|NOT made) \(0x(?P<hr>[0-9A-Fa-f]{8})\); "
+H_SRV_TURRET_INSTRUMENT = r"srv turret hud: the GPU instrument could not be made for eye (?P<eye>-?\d+) \((?P<what>.*), 0x(?P<hr>[0-9A-Fa-f]{8})\); the pass itself is unaffected\.$"
+H_SRV_TURRET_SKIP = r"srv turret hud: the GPU instrument skips a draw: the game has a stream-output target bound \(said once\)\.$"
 H_F125_LABEL = "native on foot log (F125)"
 H_F125_RE = re.compile(r"native on foot log \(F125\): detail (?P<detail>on|off), summary window (?P<wl>\d+) s")
 # Rules whose absence says nothing about a feature, so a log without their lines does not list them as not present: every log written before F125 has no F125
@@ -15466,7 +15479,11 @@ def _hj_srv_turret(rows, ctx):
     the turret view was on: for the camera, at least one 'on' edge; for the HUD, a 10 s line with nothing bound, or the view on for SRV_TURRET_HUD_MIN_SECS or more with no 10 s line and
     no first draw (a shorter stay has no 10 s line due yet and is IDLE). A key at 0 is that half off by key, IDLE. PARTIAL: applied, but under SRV_TURRET_BOUND_MIN of the HUD draws
     bound, or draws refused for the geometry, the readiness or a game geometry shader. The status is the worst of the two halves; a log with the keys unread (no settings line) judges
-    the camera half on nothing (a key it cannot see) and the HUD half on the 10 s line's own gap. No line at all is nothing to judge (None)."""
+    the camera half on nothing (a key it cannot see) and the HUD half on the 10 s line's own gap. No line at all is nothing to judge (None).
+    The GPU instrument's stats and capture lines are a third judgement and the hardest evidence (it comes first in the detail): sampled draws with input (ia_prims) and no geometry shader
+    invocation, or streamed-out vertices and none in the shader's window, are NEVER APPLIED whatever the other lines say; a gs count above 0, or a vertex in the window, is OK and the
+    figures go into the detail. The twin, instrument and skip lines are notes only. The stats and capture lines are rows like any other, so they make the rule present in a window with
+    no 'on' edge."""
     if not any(rows.values()):
         return None
     settings, views = rows.get("setting", []), rows.get("view", [])
@@ -15538,7 +15555,46 @@ def _hj_srv_turret(rows, ctx):
         hud = ("IDLE", "hud: turret view on under %d s: no 10 s line yet" % SRV_TURRET_HUD_MIN_SECS)
     else:
         hud = ("IDLE", "hud: gap key %d cm and no 'on' edge, 10 s line or first draw in this window" % gap)
+    # the GPU instrument: what a sampled draw's pipeline statistics and the twin's streamed-out vertices say, whatever the first-draw and 10 s lines do
+    stats, caps = rows.get("stats", []), rows.get("capture", [])
+    gpu = None
+    if stats or caps:
+        ia, gsn = sum(int(r["ia"]) for r in stats), sum(int(r["gs"]) for r in stats)
+        eyes = [sum(1 for r in stats if int(r["eye"]) == e) for e in (0, 1)]
+        verts, inw = sum(int(r["vertices"]) for r in caps), sum(int(r["inw"]) for r in caps)
+        seen, movers = [r for r in caps if int(r["vertices"]) > 0], [r for r in caps if int(r["inw"]) > 0]
+        wrange = "%.3f..%.3f" % (min(float(r["wlo"]) for r in seen), max(float(r["whi"]) for r in seen)) if seen else "none"
+        clause = []
+        if stats:
+            clause.append("%d samples, gs %d" % (len(stats), gsn))
+        if caps:
+            clause.append("in_window %d of %d vertices" % (inw, verts))
+        if seen:
+            clause.append("clip w %s" % wrange)
+        if movers:
+            clause.append("shift_clip %+.4f..%+.4f" % (min(float(r["klo"]) for r in movers), max(float(r["khi"]) for r in movers)))
+        never = []
+        if ia > 0 and gsn == 0:
+            never.append("the geometry shader never ran: %d sampled draw(s) with ia_prims %d and gs invocations 0 (eye L %d, R %d)" % (len(stats), ia, eyes[0], eyes[1]))
+        if verts > 0 and inw == 0:
+            never.append("the shader ran but no sampled vertex lies in its window: clip w %s over %d vertices against the window (gap + 0.10 m to 4.0 m)" % (wrange, verts))
+        if never:
+            gpu = ("NEVER APPLIED", "; ".join(never))
+        elif gsn > 0 or inw > 0:
+            gpu = ("OK", "gpu: " + ", ".join(clause))
+        else:
+            gpu = ("IDLE", "gpu: " + ", ".join(clause) + " (no sampled draw had input)")
+        last_by_eye = {}
+        for r in stats:
+            last_by_eye[int(r["eye"])] = int(r["lost"])   # the line's lost is that eye's running count
+        lost = sum(last_by_eye.values())
+        if stats and lost and 2 * lost >= len(stats):
+            gpu = (gpu[0], gpu[1] + " (the instrument was losing readbacks: lost %d against %d samples read)" % (lost, len(stats)))
     halves = [("camera", cam), ("hud", hud)]
+    if gpu and gpu[0] == "NEVER APPLIED":
+        halves.insert(0, ("gpu", gpu))
+    elif gpu:
+        halves.append(("gpu", gpu))
     states = [h[0] for _, h in halves if h]
     status = ("NEVER APPLIED" if "NEVER APPLIED" in states else "PARTIAL" if "PARTIAL" in states
               else "IDLE" if all(s == "IDLE" for s in states) else "OK")
@@ -15552,6 +15608,13 @@ def _hj_srv_turret(rows, ctx):
         text += "; draw(s) refused, said once per reason: " + ", ".join(r["reason"] for r in rows["refused"])
     if rows.get("unrestored"):
         text += "; the game's geometry stage could not be put back after an issue" + (" (put back at the frame boundary)" if rows.get("restored") else " (no frame-boundary line follows in this window)")
+    for r in rows.get("twin", []):
+        if r["outcome"] != "created":
+            text += "; the stream-output twin was NOT made (0x%s): the GPU instrument keeps to its statistics" % r["hr"]
+    for r in rows.get("instrument", []):
+        text += "; the GPU instrument could not be made for eye %s (%s, 0x%s)" % (r["eye"], r["what"], r["hr"])
+    if rows.get("skip"):
+        text += "; the GPU instrument skipped a draw: the game has a stream-output target bound"
     return (status, text)
 
 
@@ -16431,6 +16494,11 @@ HEALTH_RULES = (
         ("refused", H_SRV_TURRET_REFUSED),
         ("unrestored", H_SRV_TURRET_UNRESTORED),
         ("restored", H_SRV_TURRET_RESTORED),
+        ("stats", H_SRV_TURRET_STATS),
+        ("capture", H_SRV_TURRET_CAPTURE),
+        ("twin", H_SRV_TURRET_TWIN),
+        ("instrument", H_SRV_TURRET_INSTRUMENT),
+        ("skip", H_SRV_TURRET_SKIP),
     ), _hj_srv_turret),)
 HEALTH_BY_TAG = {}
 for _rule in HEALTH_RULES:
@@ -22199,13 +22267,37 @@ def self_test_health():
         def st_sec(gap=1.02, left=240, right=240, bound=480, refused=(0, 0, 0, 0, 0), s=(0.0412, -0.0412), ipd=63.5, p00=(0.912, 0.915)):
             return RT(stsrc, "srv turret hud: gap=%.2f", gap, 0.45, 1.47, s[0], s[1], ipd, p00[0], p00[1], left, right, bound, *refused)
 
-        def st_flight(back=60, gap=102, hud=True, cam=True):
-            """A turret visit as the DLL writes it: the keys, the view on, the camera published, the geometry shader, the first draw, a 10 s line, the view off, the camera cleared."""
+        def st_stats(eye=0, issues=3, ia=1200, vs=1200, gs=400, gsp=400, cinv=400, cp=400, ps=90000, lost=0, draw=17):
+            return RT(stsrc, "srv turret hud stats: eye=%d issues=%u", eye, issues, ia, vs, gs, gsp, cinv, cp, ps, lost, draw)
+
+        def st_capture(eye=0, draw=17, so=400, needed=400, vertices=12, inw=12, w=(0.512, 3.842), ndcx=(-0.8, 0.8), ndcy=(-0.5, 0.5), shift=(-0.031, 0.045), s=0.0412, gap=1.02):
+            return RT(stsrc, "srv turret hud capture: eye=%d draw=%u so_prims=%llu", eye, draw, so, needed, vertices, inw, w[0], w[1], ndcx[0], ndcx[1], ndcy[0], ndcy[1], shift[0], shift[1], s, gap)
+
+        def st_twin(made=True, hr=0):
+            return RT(stsrc, "stream-output twin of the shader (the GPU instrument's capture) %s", "created" if made else "NOT made", hr,
+                      "one draw a second per eye is issued through it" if made else "the instrument keeps to its statistics")
+
+        def st_instrument(eye=1, what="the staging buffer", hr=0x8007000E):
+            return RT(stsrc, "srv turret hud: the GPU instrument could not be made for eye %d", eye, what, hr)
+
+        def st_skip():
+            return RT(stsrc, "srv turret hud: the GPU instrument skips a draw")
+
+        def st_gpu(t=6, stats0=None, stats1=None, cap0=None, cap1=None):
+            """The GPU instrument's lines as the DLL writes them: the twin made, then each eye's sampled draw (the statistics line, then the capture line); the dicts override a line's fields."""
+            out = [(t, st_twin())]
+            for eye, a, b in ((0, stats0, cap0), (1, stats1, cap1)):
+                out += [(t + 1 + eye, st_stats(eye, **(a or {}))), (t + 1 + eye, st_capture(eye, **(b or {})))]
+            return out
+
+        def st_flight(back=60, gap=102, hud=True, cam=True, gpu=()):
+            """A turret visit as the DLL writes it: the keys, the view on, the camera published, the geometry shader, the first draw, the GPU instrument's lines (gpu), a 10 s line, the view off,
+            the camera cleared."""
             out = [(1, st_set(back, gap)), (2, st_view())]
             if cam:
                 out.append((3, st_cam()))
             if hud:
-                out += [(4, st_gs()), (5, st_first()), (12, st_sec())]
+                out += [(4, st_gs()), (5, st_first())] + list(gpu) + [(12, st_sec())]
             return out + [(14, st_view(False))] + ([st_cam(0)] if cam else [])
 
         ST, st_ok = H_SRV_TURRET, [f90_part()]
@@ -22272,6 +22364,48 @@ def self_test_health():
               [("IDLE", ST)], has=["the turret view was not entered in this window (camera back 60 cm, hud gap 102 cm)"], lacks=["NEVER APPLIED"], extra=["--since", "10:01:00"])
         check("srv turret: events inside --since are counted", st_ok + [(1, st_set())] + [(70 + i, m) for i, m in enumerate((st_view(), st_cam(), st_gs(), st_first(), st_sec(), st_view(False)))], 0,
               [("OK", ST)], has=["hud bound 480 of 480 draws"], extra=["--since", "10:01:00"])
+        # the GPU instrument: the pipeline statistics and the streamed-out vertices of one sampled draw a second per eye
+        check("srv turret gpu: a healthy flight whose shader ran and moved vertices is OK, with the figures", st_ok + st_flight(gpu=st_gpu(stats1=dict(gs=380))), 0, [("OK", ST)],
+              has=["gpu: 2 samples, gs 780, in_window 24 of 24 vertices, clip w 0.512..3.842, shift_clip -0.0310..+0.0450", "hud bound 480 of 480 draws"],
+              lacks=["UNPARSED", "NEVER APPLIED", "PARTIAL", "NOT made", "losing readbacks"])
+        check("srv turret gpu: sampled draws with input and no geometry shader invocation are NEVER APPLIED, whatever the first draw and the 10 s line say",
+              st_ok + st_flight(gpu=st_gpu(stats0=dict(gs=0, gsp=0), stats1=dict(gs=0, gsp=0), cap0=dict(so=0, needed=0, vertices=0, inw=0, w=(0.0, 0.0)),
+                                           cap1=dict(so=0, needed=0, vertices=0, inw=0, w=(0.0, 0.0)))), 3, [("NEVER APPLIED", ST)],
+              has=["the geometry shader never ran: 2 sampled draw(s) with ia_prims 2400 and gs invocations 0 (eye L 1, R 1)", "hud bound 480 of 480 draws", "exit 3"], lacks=["UNPARSED", "no sampled vertex"])
+        check("srv turret gpu: the eyes' samples are counted apart in the verdict", st_ok + [(1, st_set()), (2, st_view())] + [(3 + i, st_stats(i % 2, gs=0)) for i in range(3)], 3, [("NEVER APPLIED", ST)],
+              has=["3 sampled draw(s) with ia_prims 3600 and gs invocations 0 (eye L 2, R 1)"])
+        check("srv turret gpu: streamed-out vertices and none in the shader's window are NEVER APPLIED, naming the w range over every row",
+              st_ok + st_flight(gpu=st_gpu(cap0=dict(vertices=6, inw=0, w=(0.050, 0.080)), cap1=dict(vertices=6, inw=0, w=(0.040, 0.100)))), 3, [("NEVER APPLIED", ST)],
+              has=["the shader ran but no sampled vertex lies in its window: clip w 0.040..0.100 over 12 vertices against the window (gap + 0.10 m to 4.0 m)", "hud bound 480 of 480 draws"],
+              lacks=["UNPARSED", "never ran"])
+        check("srv turret gpu: a capture row with no vertex says nothing of the window", st_ok + st_flight(gpu=st_gpu(cap0=dict(vertices=0, inw=0, w=(0.0, 0.0)))), 0, [("OK", ST)],
+              has=["gpu: 2 samples, gs 800, in_window 12 of 12 vertices, clip w 0.512..3.842"], lacks=["NEVER APPLIED"])
+        check("srv turret gpu: the twin NOT made is read, not unparsed, and the statistics still judge", st_ok + st_flight(gpu=[(6, st_twin(False, 0x80004005)), (7, st_stats(0))]), 0, [("OK", ST)],
+              has=["the stream-output twin was NOT made (0x80004005): the GPU instrument keeps to its statistics", "gpu: 1 samples, gs 400"], lacks=["UNPARSED", "NEVER APPLIED"])
+        check("srv turret gpu: the twin NOT made and the statistics showing no geometry shader invocation is NEVER APPLIED", st_ok + st_flight(gpu=[(6, st_twin(False, 0x80004005)), (7, st_stats(0, gs=0))]), 3,
+              [("NEVER APPLIED", ST)], has=["the geometry shader never ran: 1 sampled draw(s) with ia_prims 1200 and gs invocations 0 (eye L 1, R 0)", "the stream-output twin was NOT made"])
+        check("srv turret gpu: an instrument that could not be made and a skipped draw are read, not unparsed", st_ok + st_flight(gpu=[(6, st_twin()), (7, st_instrument()), (8, st_skip()), (9, st_stats(0))]), 0,
+              [("OK", ST)], has=["the GPU instrument could not be made for eye 1 (the staging buffer, 0x8007000E)", "the GPU instrument skipped a draw: the game has a stream-output target bound"],
+              lacks=["UNPARSED", "NEVER APPLIED", "NOT made"])
+        check("srv turret gpu: statistics of draws with no input are idle for the instrument, and no failure", st_ok + st_flight(gpu=[(6, st_stats(0, ia=0, vs=0, gs=0, gsp=0))]), 0, [("OK", ST)],
+              has=["gpu: 1 samples, gs 0 (no sampled draw had input)"], lacks=["NEVER APPLIED"])
+        check("srv turret gpu: lost readbacks of at least half the samples are said, and change nothing", st_ok + st_flight(gpu=[(6, st_stats(0, lost=1)), (7, st_stats(1, lost=1))]), 0, [("OK", ST)],
+              has=["the instrument was losing readbacks: lost 2 against 2 samples read"], lacks=["NEVER APPLIED"])
+        check("srv turret gpu: fewer lost readbacks than half the samples are not said", st_ok + st_flight(gpu=[(6, st_stats(0, lost=0)), (7, st_stats(0, lost=0)), (8, st_stats(0, lost=1)), (9, st_stats(1))]), 0,
+              [("OK", ST)], has=["gpu: 4 samples, gs 1600"], lacks=["losing readbacks"])
+        check("srv turret gpu: a drifted statistics line beside a healthy flight is said in the detail", st_ok + st_flight(gpu=[(6, st_stats(0)), (7, st_stats(1).replace("stats:", "statz:"))]), 0, [("OK", ST)],
+              has=["[+1 line(s) the rule's patterns do not match: ", "gpu: 1 samples, gs 400"], lacks=["NEVER APPLIED"])
+        check("srv turret gpu: a drifted statistics line alone is UNPARSED", st_ok + [st_stats(0).replace("stats:", "statz:")], 4, [("UNPARSED", ST)], has=["exit 4"])
+        check("srv turret gpu: a drifted capture line alone is UNPARSED", st_ok + [st_capture(0).replace("in_window=", "inside=")], 4, [("UNPARSED", ST)])
+        check("srv turret gpu: the statistics make the rule present in a window with no 'on' edge, and a shader that ran is OK", st_ok + [(1, st_set()), (30, st_stats(0)), (30, st_capture(0))], 0, [("OK", ST)],
+              has=["gpu: 1 samples, gs 400, in_window 12 of 12 vertices", "camera key 60 cm and no 'on' edge in this window"], lacks=["NEVER APPLIED"])
+        check("srv turret gpu: the statistics alone, with no setting line and no 'on' edge, and no geometry shader invocation are NEVER APPLIED", st_ok + [(30, st_stats(0, gs=0))], 3, [("NEVER APPLIED", ST)],
+              has=["the geometry shader never ran: 1 sampled draw(s)"])
+        check("srv turret gpu: the figures go into a PARTIAL detail too", st_ok + [(1, st_set()), (2, st_view()), (3, st_cam()), (4, st_gs()), (5, st_first()), (6, st_stats(0)), (12, st_sec(bound=300, refused=(0, 0, 180, 0, 0))),
+              (14, st_view(False))], 0, [("PARTIAL", ST)], has=["only 300 of 480 draws went through the shader", "gpu: 1 samples, gs 400"])
+        check("srv turret gpu: --since cuts the statistics like the other events", st_ok + [(1, st_set()), (20, st_view()), (21, st_stats(0, gs=0))], 0, [("IDLE", ST)],
+              has=["the turret view was not entered in this window (camera back 60 cm, hud gap 102 cm)"], lacks=["NEVER APPLIED"], extra=["--since", "10:01:00"])
+        check("srv turret gpu: statistics inside --since are counted", st_ok + [(1, st_set()), (70, st_stats(0, gs=0))], 3, [("NEVER APPLIED", ST)], has=["the geometry shader never ran"], extra=["--since", "10:01:00"])
 
         # ---- the one failure line the rules read that is not in native_on_foot.cpp ----
         checks += 1
