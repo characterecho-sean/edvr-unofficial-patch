@@ -82,16 +82,22 @@ inline int flatSourceFreeTests() {
         FlatSourceSpell spell;
         spell.sourceFreeFrame(true); spell.sourceFreeFrame(true); spell.sourceFreeFrame(false);
         spell.overlayUnnamed(); spell.overlayUnnamed();
+        spell.overlayUnnamed(true); spell.overlayUnnamed(true); spell.overlayUnnamed(true);
+        spell.firstPersonUnnamedFrame(true); spell.firstPersonUnnamedFrame(false);
         const FlatSourceSpellWindow w = spell.take();
-        expect(w.sourceFreeFrames == 3 && w.sourceFreeTreated == 2 && w.overlaysUnnamed == 2,
+        expect(w.sourceFreeFrames == 3 && w.sourceFreeTreated == 2 && w.overlaysUnnamed == 5,
                "source-free frames, those the resolver ran on, and overlays admitted without a named world are counted");
+        expect(w.overlaysFirstPerson == 3 && w.firstPersonFrames == 2 && w.firstPersonTreated == 1,
+               "the first-person path's overlays, its frames and those the resolver ran on are counted apart (2026-10-29)");
         const FlatSourceSpellWindow again = spell.take();
-        expect(again.sourceFreeFrames == 0 && again.sourceFreeTreated == 0 && again.overlaysUnnamed == 0, "and the window is taken");
+        expect(again.sourceFreeFrames == 0 && again.sourceFreeTreated == 0 && again.overlaysUnnamed == 0 &&
+                   again.overlaysFirstPerson == 0 && again.firstPersonFrames == 0 && again.firstPersonTreated == 0, "and the window is taken");
         char line[3072]{};
         const FlatMonoSourceless none{};
         const FlatSourcelessPairNote notes[4]{};
         flatSourceSpellLine(line, sizeof(line), w, none, 0, notes);
-        expect(std::strstr(line, "source-free-frames=3 source-free-treated=2 overlays-without-named-world=2;") != nullptr,
+        expect(std::strstr(line, "source-free-frames=3 source-free-treated=2 overlays-without-named-world=5 first-person-path=3 "
+                                 "first-person-frames=2 first-person-treated=1;") != nullptr,
                "the 5 s line prints them");
         expect(std::strncmp(line, "flat source 5s: frames=", 23) == 0, "the first part keeps the key the log is read by");
         // The line is two parts (kFlatSourceLineParts): the fields, then the top pairs. The runtime prints each into 3072 bytes with the four pairs
@@ -99,7 +105,7 @@ inline int flatSourceFreeTests() {
         FlatSourceSpellWindow widest;
         widest.frames = widest.noSourceFrames = widest.spells = widest.recoveries = widest.abandoned = widest.warmDone = widest.warmFrames = ~0ull;
         widest.warmMax = widest.warmAborted = widest.longestSpell = widest.openSpell = widest.sourceFreeFrames = widest.sourceFreeTreated = ~0ull;
-        widest.overlaysUnnamed = ~0ull;
+        widest.overlaysUnnamed = widest.overlaysFirstPerson = widest.firstPersonFrames = widest.firstPersonTreated = ~0ull;
         FlatMonoSourceless busy;
         busy.records = busy.draws = busy.sameCameraDraws = busy.poolRecords = busy.distinctPairs = ~0u;
         busy.topCount = 4;
@@ -220,21 +226,51 @@ inline int flatSourceFreeWiringTests() {
     // -- the overlay is admitted against the HDR's own camera when no draw has named the world --
     const std::string unnamed =
         "constboolunnamedWorldDepth=!s.namedDepth&&s.prefix.sourcesUsed==0&&s.prefix.firstPersonDraws==0&&"
-        "s.prefix.unsupportedFamilyDraws==0;constFlatRuntimeTarget*overlayTarget=nullptr;";
+        "s.prefix.unsupportedFamilyDraws==0;";
+    const std::string unnamedFirstPerson =
+        "constboolunnamedFirstPerson=!s.namedDepth&&!unnamedWorldDepth&&s.prefix.unsupportedFamilyDraws==0;";
+    const std::string firstCamera =
+        "constautofirstCameraWorld=[&](constFlatRuntimeTarget&t){floatfirstRows[6][4];std::memcpy(firstRows,t.tone.camera,sizeof(firstRows));"
+        "returnflatDomainHdrFirstCameraIsWorld(firstRows,worldPredicted().predicted,s.worldReference);};";
     const auto overlayValid = [&](const std::string& text) {
-        return ordered(text, {unnamed.c_str(), "(k.depth==s.namedDepth||unnamedWorldDepth)&&flat_mono_detail::hdrViewport(k,k.width,k.height)",
-                              "if(!s.namedDepth)s.sourceSpell.overlayUnnamed();", "if(copyWeapon()){"});
+        return ordered(text, {unnamed.c_str(), unnamedFirstPerson.c_str(), firstCamera.c_str(), "constFlatRuntimeTarget*overlayTarget=nullptr;",
+                              "(k.depth==s.namedDepth||unnamedWorldDepth||unnamedFirstPerson)&&flat_mono_detail::hdrViewport(k,k.width,k.height)",
+                              "!flatRuntimeSameCamera(t.tone,d)&&(!unnamedFirstPerson||firstCameraWorld(t))){overlayTarget=&t;break;}",
+                              "if(!s.namedDepth)s.sourceSpell.overlayUnnamed(unnamedFirstPerson);",
+                              "if(!s.namedDepth&&unnamedFirstPerson)s.frameFirstPersonUnnamed=true;", "if(copyWeapon()){"});
     };
     expect(overlayValid(runtime), "the weapon's glow pass is judged against the HDR's own camera when nothing has named the world, and counted");
-    expect(!overlayValid(replaced(runtime, "(k.depth==s.namedDepth||unnamedWorldDepth)&&flat_mono_detail::hdrViewport",
+    expect(!overlayValid(replaced(runtime, "(k.depth==s.namedDepth||unnamedWorldDepth||unnamedFirstPerson)&&flat_mono_detail::hdrViewport",
                                   "k.depth==s.namedDepth&&flat_mono_detail::hdrViewport")),
            "mutation control: an overlay still bound to a named world fails the wiring");
-    expect(!overlayValid(without(runtime, "&&s.prefix.unsupportedFamilyDraws==0;constFlatRuntimeTarget*overlayTarget=nullptr;")) &&
-               !overlayValid(replaced(runtime, "&&s.prefix.unsupportedFamilyDraws==0;constFlatRuntimeTarget*overlayTarget=nullptr;",
-                                      ";constFlatRuntimeTarget*overlayTarget=nullptr;")),
+    expect(!overlayValid(without(runtime, "&&s.prefix.unsupportedFamilyDraws==0;constboolunnamedFirstPerson")) &&
+               !overlayValid(replaced(runtime, "&&s.prefix.unsupportedFamilyDraws==0;constboolunnamedFirstPerson",
+                                      ";constboolunnamedFirstPerson")),
            "mutation control: an unnamed world that ignores a stock family draw, or a source, fails the wiring");
-    expect(!overlayValid(without(runtime, "if(!s.namedDepth)s.sourceSpell.overlayUnnamed();")),
+    expect(!overlayValid(without(runtime, "if(!s.namedDepth)s.sourceSpell.overlayUnnamed(unnamedFirstPerson);")),
            "mutation control: an admission the line never hears of fails the wiring");
+    // -- 2026-10-29, the same view with a first person in hand: admitted by the cameras, not by the counts --
+    expect(!overlayValid(replaced(runtime, "&&(!unnamedFirstPerson||firstCameraWorld(t))){overlayTarget=&t;break;}",
+                                  "){overlayTarget=&t;break;}")),
+           "mutation control: a first-person path that takes any target, whatever its first camera, fails the wiring");
+    expect(!overlayValid(replaced(runtime, "s.prefix.unsupportedFamilyDraws==0;constautofirstCameraWorld",
+                                  "true;constautofirstCameraWorld")),
+           "mutation control: a first-person path that ignores a stock family draw fails the wiring");
+    expect(!overlayValid(replaced(runtime, "returnflatDomainHdrFirstCameraIsWorld(firstRows,worldPredicted().predicted,s.worldReference);",
+                                  "returnflatDomainHdrFirstCameraIsWorld(firstRows,false,s.worldReference);")),
+           "mutation control: a first camera judged without asking whether the drawing camera is the world's fails the wiring");
+    expect(!overlayValid(without(runtime, "if(!s.namedDepth&&unnamedFirstPerson)s.frameFirstPersonUnnamed=true;")),
+           "mutation control: a first-person admission the frame's verdict never hears of fails the wiring");
+    expect(ordered(runtime, {"if(s.frameFirstPersonUnnamed)s.sourceSpell.firstPersonUnnamedFrame(s.treated&&SUCCEEDED(hr));",
+                             "if(!s.treated||FAILED(hr))reset();", "s.frameSourceFree=false;s.frameFirstPersonUnnamed=false;"}),
+           "a frame that held a first-person admission is counted with the resolver's verdict, then the flag is cleared for the next frame");
+    expect(!ordered(without(runtime, "s.frameSourceFree=false;s.frameFirstPersonUnnamed=false;"),
+                    {"if(s.frameFirstPersonUnnamed)s.sourceSpell.firstPersonUnnamedFrame(s.treated&&SUCCEEDED(hr));",
+                     "if(!s.treated||FAILED(hr))reset();", "s.frameSourceFree=false;s.frameFirstPersonUnnamed=false;"}),
+           "mutation control: a flag never cleared fails the wiring");
+    expect(ordered(runtime, {"noteSourceFreeContent(s,selected);", "if(s.frameFirstPersonUnnamed&&s.firstPersonUnnamedLines<6",
+                             "\"flatfirst-personunnamed:frame=%lluselection=%s"}),
+           "the copy route's verdict on such a frame is described, rate-limited, after the source-free note");
 
     // -- the draw scope flags the stock family draw, and the model counts it before the colour test --
     const std::string flagged =

@@ -224,7 +224,8 @@ inline std::vector<Case> buildCases() {
                {{"frames=", 'q', false}, {"no-source-frames=", 'q', false}, {"spells=", 'q', false}, {"longest-spell=", 'q', false}, {"open-spell=", 'q', false},
                 {"recoveries=", 'q', false}, {"abandoned=", 'q', false}, {"warm-ups-done=", 'q', false}, {"warm-frames-total=", 'q', false},
                 {"warm-frames-max=", 'q', false}, {"warm-ups-aborted=", 'q', false}, {"source-free-frames=", 'q', false},
-                {"source-free-treated=", 'q', false}, {"overlays-without-named-world=", 'q', false}, {"last no-source frame=", 'q', false},
+                {"source-free-treated=", 'q', false}, {"overlays-without-named-world=", 'q', false}, {"first-person-path=", 'q', false},
+                {"first-person-frames=", 'q', false}, {"first-person-treated=", 'q', false}, {"last no-source frame=", 'q', false},
                 {"records-on-scene-depth=", 'd', false}, {"same-camera-draws=", 'd', false}, {"pool-kind-records=", 'd', false},
                 {"distinct-pairs=", 'd', false}, {"[VS=", 'n', true}, {" PS=", 'n', true}, {"same-camera=", 'n', true}, {"pool-kind=", 'n', true},
                 {"family-vs=", 'n', true}, {"recipe=", 'n', true}},
@@ -233,6 +234,7 @@ inline std::vector<Case> buildCases() {
                    const uint64_t v = levelQ(l);
                    w.frames = w.noSourceFrames = w.spells = w.recoveries = w.abandoned = w.warmDone = w.warmFrames = w.warmMax = w.warmAborted = v;
                    w.longestSpell = w.openSpell = w.sourceFreeFrames = w.sourceFreeTreated = w.overlaysUnnamed = v;
+                   w.overlaysFirstPerson = w.firstPersonFrames = w.firstPersonTreated = v;
                    FlatMonoSourceless busy;
                    FlatSourcelessPairNote notes[4];
                    if (l != kZero) {
