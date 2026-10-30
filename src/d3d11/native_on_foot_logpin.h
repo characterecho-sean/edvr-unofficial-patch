@@ -144,6 +144,7 @@ template<class T> inline void elbow(T& d, const T& s) noexcept {
     d.f171.merge(s.f171);
     d.f178.merge(s.f178);   // F178: the standing ADS body dials' counters, in the same second
     d.f180.merge(s.f180);   // F180b: the standing ADS spine straighten's counters
+    d.f181.merge(s.f181);   // F181a: the hip swivel cap's counters
     if (s.downStepMax > d.downStepMax) {
         d.downStepMax = s.downStepMax; d.downStepAng = s.downStepAng; d.downStepTwist = s.downStepTwist;
     }

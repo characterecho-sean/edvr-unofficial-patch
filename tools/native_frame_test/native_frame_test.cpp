@@ -64,6 +64,7 @@
 #include "f169_checks.h"    // F169: the stance while the aim is pitched (w_c capped under the animated neck's posture weight, the replays, the window and its line); the pistol sprint's arm swing (TEMPORARY): the plan, the ring, the stride's period, the delay, the measure and the line
 #include "f170_checks.h"    // F170: the crouched ADS torso squared to the aim (TEMPORARY): the dial, the share, the turn on the real square-up and reach functions (29 deg to 0 at 1, 14.5 at 0.5), the hold not taking it off, the line
 #include "f171_checks.h"    // F171: the crouched ADS body moved to the left of the aim line (TEMPORARY): the dial, the left axis and its sign against the eye's right, the move through the real reach rule, the counters and the line; the raise's carriage (slopes, pairs, window, line); F170's line reaching the log (logpin::elbow's merges against F98Left)
+#include "f181_checks.h"    // F181: the left elbow's swivel capped at the hip with a two-handed gun (TEMPORARY): the dial, the targets from the hip share, capSwivel on synthetic plane angles (the same side, the wrap, the hip share through the press), the counters and the F98a line's ending, the pilot's values as the defaults of eight dials, the source sites
 #include "f180_checks.h"    // F180: the left elbow hangs standing in ADS (the blend weight), the spine straighten dial (TEMPORARY: the plan of the spine and the neck, F166's capture and apply on a toy skeleton: slerp share, the reference store, the line), the neck guard's distance (TEMPORARY) and the unarmed guard measuring only, the source sites
 #include "f179_checks.h"    // F179: the body stays up in standing ADS (the standing raise: the eye less the key, capped by the legs' room, crouched/hip/unarmed unchanged) and the neck guard (the eye kept 10 cm ahead of the chest: the deficit, the axis, the order target / post-reach add / move, the last word over random scenes, the filtered error, the contexts, the line), the F97a bins in the sights, the source sites
 #include "f178_checks.h"    // F178: the standing ADS body dials (TEMPORARY), the crouched ones mirrored: the weights (standing whole at crouched weight 0, crouched pair and standing pair adding up at every crouch), the clamps, the axes, the crouched pair untouched, the real reach rule, the counters and the line, the source sites
@@ -7673,6 +7674,9 @@ int wmain(int argc, wchar_t** argv) {
     // neck 34; F166's capture and apply on a toy skeleton: dial 1 puts the levels at the reference, 0.5 halfway, the clavicles and head carried; the reference store: hip frames, the press's first frame, per item;
     // the line within the log's limit), the neck guard's distance (0..20, 0 off; F179's scenes at four distances; unarmed at the hip counted, not moved) and the source sites.
     f180test::run180(check);
+    // F181: the hip swivel cap (53 deg off the plane at the cap 25 is brought to 25 on the same side; the shotgun's 18.5 untouched; the hip share lets go with the detach weight; the cap at 90 off),
+    // the counters and the F98a line's ending, the pilot's values as the defaults of the eight experimental dials (the atomic, the fallback and the shipped line), and the source sites.
+    f181test::run181(check);
     // F110: the ADS sight lock's model right eye from the left-eye job camera and from a solved left eye, the fallback, the IPD's sign.
     f110test::run110(check);
     // F111: the panel pointer instrument names the stage that turns a move the other way (K1 to K5, one at a time), the camera getters' decoding.

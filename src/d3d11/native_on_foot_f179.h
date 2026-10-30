@@ -62,13 +62,14 @@ inline f97::ArmedTarget withStandingRaise(const f97::ArmedTarget& base, double n
 
 // ---- F179b ----------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
-constexpr double kNeckGuardAheadCm = 10.0;                       // the least the eye stands ahead of the chest along its heading (F180c: the key's default; the key sets it, 0 turns the guard off)
+constexpr double kNeckGuardAheadCm = 10.0;                       // F179b's own distance: the pure functions' default argument (the rig's scenes are made at it); the key sets the distance the pin uses
+constexpr double kNeckGuardDefaultCm = 2.0;                      // F181: the key's default (the pilot's flown value); F179 shipped 10
 constexpr double kNeckGuardAheadM = kNeckGuardAheadCm * 0.01;
 constexpr double kNeckGuardMinCm = 0.0, kNeckGuardMaxCm = 20.0;   // F180c: experimental.native_on_foot_neck_guard_cm's range
 constexpr double kHeldBelowCm = 9.0;                              // the health rule: a measured "ahead of the chest" under this after the guard is a guard that did not hold (at the default distance)
 
-// F180c: the key's value held to its range (cm); a value that is not a number reads the default distance.
-inline double clampGuardCm(double cm) noexcept { return !std::isfinite(cm) ? kNeckGuardAheadCm : cm < kNeckGuardMinCm ? kNeckGuardMinCm : cm > kNeckGuardMaxCm ? kNeckGuardMaxCm : cm; }
+// F180c: the key's value held to its range (cm); a value that is not a number reads the key's default (F181: 2).
+inline double clampGuardCm(double cm) noexcept { return !std::isfinite(cm) ? kNeckGuardDefaultCm : cm < kNeckGuardMinCm ? kNeckGuardMinCm : cm > kNeckGuardMaxCm ? kNeckGuardMaxCm : cm; }
 // A measured "ahead of the chest" under this after the guard (m) is a guard that did not hold: 1 cm under the distance asked.
 inline double heldBelowM(double distM) noexcept { return distM > 0.01 ? distM - 0.01 : 0.0; }
 constexpr double kMinHeadingXz = 0.5;                             // F97a's: a heading whose horizontal part is under this is not read

@@ -14672,6 +14672,55 @@ def _hj_f179a_height(rows, ctx):
     return ("OK", text)
 
 
+H98A_SEC_RE = (r"native on foot left elbow \(F98a\) (?P<wl>\d+) s: item (?P<item>\S+); (?P<n>\d+) solves: the game's aim pitch (?P<aim>%s) deg \(min %s max %s\); the chest's lean as "
+                r"written (?P<lean>%s) deg \(animated (?P<leanAnim>%s)\); F82's torso yaw (?P<yaw>%s) deg \(largest [\d.]+\); the elbow's swivel from the stance's plane "
+                r"(?P<plane>[\d.]+) deg \(max [\d.]+, over 45 deg in (?P<over45>\d+)\); its step a frame (?P<step>[\d.]+) deg rms \(max [\d.]+, over 10 deg (?P<over10>\d+), "
+                r"of (?P<steps>\d+) steps\); the swivel from the stable pole's seed (?P<seed>\d+) \(the arm [\d.]+ deg from the seed's axis, max [\d.]+\), a body-down "
+                r"pole (?P<down>\d+), the legacy swivel (?P<legacy>\d+); hand twist at the forearm's limit (?P<twist>\d+)"
+                # F124: on a second with body-down solves, the arm's closest approach to the body's down and the largest step's angle and twist limit
+                r"(?:; on (?P<dn>\d+) body-down solves the arm's axis came within (?P<dmin>[\d.]+) deg of the body's down; "
+                r"(?:at the largest step \((?P<dstep>[\d.]+) deg\) the axis was (?P<dang>[\d.]+) deg from down, the twist limit (?P<dtwist>hit|not hit)"
+                r"|no elbow step was measured))?"
+                r"(?:; seconds mostly over 45 deg (?P<swung_s>\d+); flip seconds (?P<flip_s>\d+) \(near vertical (?P<near_s>\d+), twist limit (?P<twist_s>\d+), near with twist (?P<near_twist_s>\d+)\))?"
+                # F181a: the hip swivel cap's solves, appended to the line (builds before F181 print none)
+                r"(?:; capped (?P<cap_n>\d+) of (?P<cap_m>\d+) solves \(the cut mean (?P<cap_cut>[\d.]+) deg, largest (?P<cap_cutmax>[\d.]+); the cap (?P<cap_deg>[\d.]+) deg; "
+                r"still (?P<cap_tol>[\d.]+) deg or more over it after: (?P<cap_over>\d+)\))?" % ((_HN,) * 6))
+def _hj_f181a_hip_cap(rows, ctx):
+    """F181a (TEMPORARY): the left elbow's swivel capped at the hip with a two-handed gun (experimental.native_on_foot_hip_elbow_swivel_max_deg). The flight edvr_gfx_20261030_111627 put the
+    swivel from the stance's plane at 52 to 55 deg at the hip with the plasma assault rifle (over 45 deg in every solve), the forearm climbing steeply to the foregrip. A solve over the cap is
+    brought to the plane angle p - (hip share) x (p - cap) by turning the pole about the shoulder-to-hand axis toward the plane, on the side it was on. Reads the F98a line's ending: the
+    two-handed hip solves, those capped, the cut (mean, largest), the cap, and the solves still 2 deg or more over the cap after it. Per item. NEVER APPLIED when 30 or more two-handed hip
+    solves were still 2 deg or more over the cap after it (the cap did not hold); IDLE under 30 two-handed hip solves (none included); OK with the figures. A line without the ending (a build
+    before F181) gives no verdict."""
+    sec = [r for r in rows.get("sec", []) if r.get("cap_n") is not None]
+    if not sec:
+        return None
+    items = collections.OrderedDict()
+    for r in sec:
+        items.setdefault(r["item"], []).append(r)
+    parts, never, total = [], [], 0
+    for item, rs in items.items():
+        hip = sum(int(r["cap_m"]) for r in rs)
+        capped = sum(int(r["cap_n"]) for r in rs)
+        over = sum(int(r["cap_over"]) for r in rs)
+        total += hip
+        cut = sum(int(r["cap_n"]) * float(r["cap_cut"]) for r in rs) / capped if capped else 0.0
+        cutmax = max(float(r["cap_cutmax"]) for r in rs)
+        capdeg = sorted(set(float(r["cap_deg"]) for r in rs))
+        capt = ("%.0f deg%s" % (capdeg[0], " (off)" if capdeg[0] >= 90.0 else "")) if len(capdeg) == 1 else ("%.0f to %.0f deg" % (capdeg[0], capdeg[-1]))
+        plane = sum(int(r["n"]) * float(r["plane"]) for r in rs) / sum(int(r["n"]) for r in rs) if sum(int(r["n"]) for r in rs) else 0.0
+        parts.append("%s %d s: %d two-handed hip solves, capped %d (%.0f%%; the cut mean %.1f deg, largest %.1f), the cap %s, %d still 2 deg or more over it after; the swivel from the stance's plane "
+                     "over all this item's solves %.1f deg" % (item, _hsecs(rs), hip, capped, 100.0 * capped / hip if hip else 0.0, cut, cutmax, capt, over, plane))
+        if hip >= 30 and over >= 30:
+            never.append("%d of %d two-handed hip solves with %s were still 2 deg or more over the cap after it (the cap did not hold)" % (over, hip, item))
+    text = "; ".join(parts)
+    if never:
+        return ("NEVER APPLIED", text + "; " + "; ".join(never))
+    if total < 30:
+        return ("IDLE", text + "; under 30 two-handed hip solves: little to judge" if total else text + "; no two-handed hip solve")
+    return ("OK", text)
+
+
 # F179b: the neck guard (formatContext in src/d3d11/native_on_foot_f179.h), one line per context that had frames the guard ran in.
 H179B_LABEL = "native on foot neck guard (F179b)"
 H179B_RE = (r"native on foot neck guard \(F179b\) (?P<wl>\d+) s: item (?P<item>\S+); (?P<ctx>hip armed|ADS standing|ADS crouched) (?P<frames>\d+) frames, the guard at (?P<dist>[\d.]+) cm: "
@@ -16396,16 +16445,7 @@ HEALTH_RULES = (
         ("dial", H180B_DIAL_RE),
     ), _hj_f180b_spine),
     _hrule("left elbow (F98a)", ("F98a", "F159"), ("native on foot left elbow (F98a)", "native on foot left elbow pole (F159)", "native on foot left elbow seed (F159)"), (
-        ("sec", r"native on foot left elbow \(F98a\) (?P<wl>\d+) s: item (?P<item>\S+); (?P<n>\d+) solves: the game's aim pitch (?P<aim>%s) deg \(min %s max %s\); the chest's lean as "
-                r"written (?P<lean>%s) deg \(animated (?P<leanAnim>%s)\); F82's torso yaw (?P<yaw>%s) deg \(largest [\d.]+\); the elbow's swivel from the stance's plane "
-                r"(?P<plane>[\d.]+) deg \(max [\d.]+, over 45 deg in (?P<over45>\d+)\); its step a frame (?P<step>[\d.]+) deg rms \(max [\d.]+, over 10 deg (?P<over10>\d+), "
-                r"of (?P<steps>\d+) steps\); the swivel from the stable pole's seed (?P<seed>\d+) \(the arm [\d.]+ deg from the seed's axis, max [\d.]+\), a body-down "
-                r"pole (?P<down>\d+), the legacy swivel (?P<legacy>\d+); hand twist at the forearm's limit (?P<twist>\d+)"
-                # F124: on a second with body-down solves, the arm's closest approach to the body's down and the largest step's angle and twist limit
-                r"(?:; on (?P<dn>\d+) body-down solves the arm's axis came within (?P<dmin>[\d.]+) deg of the body's down; "
-                r"(?:at the largest step \((?P<dstep>[\d.]+) deg\) the axis was (?P<dang>[\d.]+) deg from down, the twist limit (?P<dtwist>hit|not hit)"
-                r"|no elbow step was measured))?"
-                r"(?:; seconds mostly over 45 deg (?P<swung_s>\d+); flip seconds (?P<flip_s>\d+) \(near vertical (?P<near_s>\d+), twist limit (?P<twist_s>\d+), near with twist (?P<near_twist_s>\d+)\))?" % ((_HN,) * 6)),
+        ("sec", H98A_SEC_RE),
         # F159: the left elbow's stable pole in the same window (a line of its own: F98a's has no room under the log's 1200 bytes), and each seed's birth
         ("pole", r"native on foot left elbow pole \(F159\) (?P<wl>\d+) s: item (?P<item>\S+); (?P<n>\d+) solves with the stable pole \((?P<hipn>\d+) at the hip\): the solved elbow "
                  r"(?P<solved>%s) cm over the shoulder \(min (?P<smin>%s) max (?P<smax>%s)\), within 1 cm of the shoulder's height or above in (?P<high>\d+) \((?P<hiphigh>\d+) at the hip\); "
@@ -16424,6 +16464,9 @@ HEALTH_RULES = (
                   r"(?:; the pole it replaced put the elbow (?P<was>%s) cm over the shoulder with the arm (?P<off>[\d.]+) cm off its axis)?"
                   r"(?:; (?P<skipped>\d+) earlier seed\(s\) not logged \(one line in 0\.5 s\))?" % ((_HN,) * 5)),
     ), _hj_f98a_elbow),
+    _hrule("hip elbow cap (F181a)", ("F98a",), ("native on foot left elbow (F98a)",), (
+        ("sec", H98A_SEC_RE),
+    ), _hj_f181a_hip_cap),
     _hrule("left arm to the eye (F161)", ("F161",), (H161_LABEL,), (
         ("sec", H161_RE),
     ), _hj_f161_arm_eye),
@@ -17541,6 +17584,7 @@ def self_test_health():
     f178_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f178.h")
     f179_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f179.h")
     f180_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f180.h")
+    f181_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f181.h")
     f172_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f172.h")
     f175_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f175.h")
     f176_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f176.h")
@@ -17578,6 +17622,7 @@ def self_test_health():
         f178src = read_text(f178_path)
         f179src = read_text(f179_path)
         f180src = read_text(f180_path)
+        f181src = read_text(f181_path)
         f172src = read_text(f172_path)
         f175src = read_text(f175_path)
         f176src = read_text(f176_path)
@@ -17746,6 +17791,15 @@ def self_test_health():
             fmts[key] = health_c_format(f179src, needle)
         if fmts[key] is None:
             raise AssertionError("native_on_foot_f179.h has no format holding %r: the --health rule that reads it is out of date" % needle)
+        return health_render(fmts[key], vals)
+
+    def R181(needle, *vals):
+        """F181a's ending of the F98a line (appendSummary in native_on_foot_f181.h), from its own format literal."""
+        key = "f181:" + needle
+        if key not in fmts:
+            fmts[key] = health_c_format(f181src, needle)
+        if fmts[key] is None:
+            raise AssertionError("native_on_foot_f181.h has no format holding %r: the --health rule that reads it is out of date" % needle)
         return health_render(fmts[key], vals)
 
     def R180(needle, *vals):
@@ -19090,10 +19144,15 @@ def self_test_health():
         # ---- left elbow (F98a): the left arm with a weapon drawn ----
         F98 = "left elbow (F98a)"
 
-        def elbow98(item=RIFLE97, aim=-23.9, plane=8.0, over45=0, step=0.4, over10=0, seed=76, down=0, legacy=0, n=76, tail="", wl=1):
+        def elbow98(item=RIFLE97, aim=-23.9, plane=8.0, over45=0, step=0.4, over10=0, seed=76, down=0, legacy=0, n=76, tail="", wl=1, cap=None):
+            """F98a's line, from the DLL's own format; cap: (hip solves, capped, cut mean, cut largest, the cap, still over by 2 deg after) for the F181a ending (None: a build before it)."""
             line = R("native on foot left elbow (F98a) %u s: item %s", wl, item, n, aim, aim - 0.5, aim + 0.5, 2.0, 1.5, 3.0, 7.0, plane, plane + 4.0, over45, step, step * 3,
                      over10, n - 1, seed, 25.0, 31.0, down, legacy, 0, tail)
-            return line.rsplit("; seconds mostly over 45 deg", 1)[0]
+            line = line.rsplit("; seconds mostly over 45 deg", 1)[0]
+            if cap is not None:
+                hip, capped, cut, cutmax, capdeg, over = cap
+                line += R181("; capped %u of %u solves", capped, hip, cut, cutmax, capdeg, 2.0, over)
+            return line
 
         PISTOL98 = "$wpn_m_pistol_laser_name;"
 
@@ -19205,6 +19264,28 @@ def self_test_health():
                elbow98(SHOTGUN165), pole159(SHOTGUN165, n=400, hipn=400) + blend165(w=1.0, adsn=300, adsapp=300, adsplane=10.0, adsmax=18.0, restn=100, restapp=0, restplane=30.0, restmax=44.0)], 0,
               [("OK", F98)], has=["weight mean 0.75, crouched in the sights 400 solves (400 blended) with the elbow 12.5 deg off the stance's plane (max 25.0), the rest 400 solves (0 blended) 15.0 deg (max 44.0)"],
               lacks=["UNPARSED"])
+
+        # ---- F181a (TEMPORARY): the left elbow's swivel capped at the hip with a two-handed gun ----
+        F181A = "hip elbow cap (F181a)"
+        RIFLE181 = "$wpn_m_assaultrifle_plasma_fauto_name;"
+        check("F181a cap: a rifle's hip solves brought to the cap: 900 of 900 capped, the cut 28 deg, none still over", [elbow98(RIFLE181, plane=25.0, n=900, cap=(900, 900, 28.0, 31.0, 25.0, 0))], 0, [("OK", F98), ("OK", F181A)],
+              has=[RIFLE181 + " 1 s: 900 two-handed hip solves, capped 900 (100%; the cut mean 28.0 deg, largest 31.0), the cap 25 deg, 0 still 2 deg or more over it after"], lacks=["UNPARSED", "NEVER"])
+        check("F181a cap: the shotgun under the cap is not touched: 0 of 900 capped", [elbow98("$wpn_m_shotgun_plasma_doublebarrel_name;", plane=18.5, n=900, cap=(900, 0, 0.0, 0.0, 25.0, 0))], 0,
+              [("OK", F181A)], has=["two-handed hip solves, capped 0 (0%; the cut mean 0.0 deg, largest 0.0)"], lacks=["UNPARSED", "NEVER"])
+        check("F181a cap: a cap that did not hold: 40 of 900 hip solves still 2 deg or more over it after is never applied", [elbow98(RIFLE181, n=900, cap=(900, 860, 20.0, 30.0, 25.0, 40))], 3,
+              [("NEVER APPLIED", F181A)], has=["40 of 900 two-handed hip solves with " + RIFLE181 + " were still 2 deg or more over the cap after it (the cap did not hold)"], lacks=["UNPARSED"])
+        check("F181a cap: 29 solves still over is not yet 30", [elbow98(RIFLE181, n=900, cap=(900, 860, 20.0, 30.0, 25.0, 29))], 0, [("OK", F181A)], lacks=["UNPARSED", "NEVER"])
+        check("F181a cap: under 30 two-handed hip solves is too few to judge", [elbow98(RIFLE181, n=20, cap=(20, 20, 25.0, 30.0, 25.0, 0))], 0, [("IDLE", F181A)],
+              has=["under 30 two-handed hip solves: little to judge"], lacks=["UNPARSED"])
+        check("F181a cap: no two-handed hip solve (the sights, or a pistol) is idle and says so", [elbow98(RIFLE181, n=300, cap=(0, 0, 0.0, 0.0, 25.0, 0))], 0, [("IDLE", F181A)],
+              has=["no two-handed hip solve"], lacks=["UNPARSED"])
+        check("F181a cap: the cap at 90 is off and says so", [elbow98(RIFLE181, n=900, cap=(900, 0, 0.0, 0.0, 90.0, 0))], 0, [("OK", F181A)], has=["the cap 90 deg (off)"], lacks=["UNPARSED"])
+        check("F181a cap: a line from a build before F181 (no ending) has no verdict row from it and is not unparsed", [elbow98(RIFLE181, n=900)], 0, [("OK", F98)],
+              lacks=[row("OK", F181A), row("IDLE", F181A), row("NEVER APPLIED", F181A), row("UNPARSED", F181A), "UNPARSED"])
+        check("F181a cap: two windows add up, the cut weighted by the capped solves",
+              [elbow98(RIFLE181, n=100, cap=(100, 100, 20.0, 25.0, 25.0, 0)), elbow98(RIFLE181, n=300, cap=(300, 300, 30.0, 35.0, 25.0, 0))], 0, [("OK", F181A)],
+              has=["2 s: 400 two-handed hip solves, capped 400 (100%; the cut mean 27.5 deg, largest 35.0)"], lacks=["UNPARSED"])
+        check("F181a cap: a line that drifted from its pattern is unparsed by the F98a rules", ["native on foot left elbow (F98a) 1 s: something else"], 4, [("UNPARSED", F98), ("UNPARSED", F181A)])
 
         # ---- F161: the left arm's distance to the eye, per context (the hip or ADS, standing or crouched) ----
         F161 = "left arm to the eye (F161)"

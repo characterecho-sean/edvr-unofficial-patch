@@ -408,10 +408,10 @@ inline void run178(Check&& check) {
         const auto has = [&](const std::string& needle) { return cpp.find(needle) != std::string::npos; };
         const auto at = [&](const std::string& needle) { return cpp.find(needle); };
         // both keys: the atomic, the read with its fallback, the clamp, the first-read-and-change log line, the store
-        check(has("std::atomic<float> g_standAdsBodyCm{0.0f};") && has("std::atomic<float> g_standAdsBodyLeftCm{0.0f};") &&
-                  has("nofoot::f178::clampForwardCm(static_cast<double>(cfg.getFloat(\"experimental.native_on_foot_stand_ads_body_forward_cm\", 0.0f)))") &&
-                  has("nofoot::f178::clampLeftCm(static_cast<double>(cfg.getFloat(\"experimental.native_on_foot_stand_ads_body_left_cm\", 0.0f)))"),
-              "F178: both keys are read from [experimental] with the default 0 (the atomic, the fallback) and held to their ranges");
+        check(has("std::atomic<float> g_standAdsBodyCm{4.0f};") && has("std::atomic<float> g_standAdsBodyLeftCm{23.0f};") &&
+                  has("nofoot::f178::clampForwardCm(static_cast<double>(cfg.getFloat(\"experimental.native_on_foot_stand_ads_body_forward_cm\", 4.0f)))") &&
+                  has("nofoot::f178::clampLeftCm(static_cast<double>(cfg.getFloat(\"experimental.native_on_foot_stand_ads_body_left_cm\", 23.0f)))"),
+              "F178 (F181: the pilot's values): both keys are read from [experimental] with the defaults 4 and 23 (was 0 and 0: the atomic, the fallback) and held to their ranges");
         check(has("if (first || cm != g_standAdsBodyCmLast)") && has("if (first || cm != g_standAdsBodyLeftCmLast)") &&
                   has("native on foot standing ADS body dial (F178, TEMPORARY): experimental.native_on_foot_stand_ads_body_forward_cm = %+.1f cm") &&
                   has("native on foot standing ADS body dial (F178, TEMPORARY): experimental.native_on_foot_stand_ads_body_left_cm = %+.1f cm") &&
@@ -449,14 +449,14 @@ inline void run178(Check&& check) {
         check(has("if (sample166.crouchedAds) {") && has("sample171.askedM = nofoot::f171::shiftM(pinCall.f171DialCm, pinCall.postureW, pinCall.detachW);"),
               "F178: the crouched samples are filed as before (the crouched weight, not the standing share)");
         // the ini: both keys beside the crouched pair, TEMPORARY, with their ui rows and the default 0
-        const size_t crouchedLeftKey = ini.find("\nnative_on_foot_crouch_ads_body_left_cm = "), standFwdKey = ini.find("\nnative_on_foot_stand_ads_body_forward_cm = 0.0\n"),
-                     standLeftKey = ini.find("\nnative_on_foot_stand_ads_body_left_cm = 0.0\n"), squareKey = ini.find("\nnative_on_foot_crouch_ads_square = ");
+        const size_t crouchedLeftKey = ini.find("\nnative_on_foot_crouch_ads_body_left_cm = "), standFwdKey = ini.find("\nnative_on_foot_stand_ads_body_forward_cm = 4.0\n"),
+                     standLeftKey = ini.find("\nnative_on_foot_stand_ads_body_left_cm = 23.0\n"), squareKey = ini.find("\nnative_on_foot_crouch_ads_square = ");
         check(crouchedLeftKey != std::string::npos && standFwdKey != std::string::npos && standLeftKey != std::string::npos && squareKey != std::string::npos && crouchedLeftKey < standFwdKey &&
                   standFwdKey < standLeftKey && standLeftKey < squareKey &&
                   ini.find("# TEMPORARY (F178): Standing ADS body forward / back") != std::string::npos && ini.find("# TEMPORARY (F178): Standing ADS body left / right") != std::string::npos &&
                   ini.find("# ui: Standing ADS body forward / back | range -20..20 | step 0.5 | unit cm | signed | live\n") != std::string::npos &&
                   ini.find("# ui: Standing ADS body left / right | range -30..30 | step 0.5 | unit cm | signed | live\n") != std::string::npos,
-              "F178: edvr.ini has both keys at 0.0, TEMPORARY, each with its ui: row (-20..20 and -30..30 cm, step 0.5, signed, live), between the crouched left dial and the torso square");
+              "F178 (F181: the pilot's values): edvr.ini has both keys at 4.0 and 23.0 (were 0.0), TEMPORARY, each with its ui: row (-20..20 and -30..30 cm, step 0.5, signed, live), between the crouched left dial and the torso square");
     }
 }
 

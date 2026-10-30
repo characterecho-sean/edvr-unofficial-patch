@@ -13,7 +13,7 @@
 // stable-pole branch, so a gun the left hand does not hold (a pistol) has no solve to blend.
 //
 // ---- F180b: the spine straighten dial (TEMPORARY)
-// experimental.native_on_foot_stand_ads_spine_straighten, 0..1, default 0. The share of the game's ADS hunch of the upper spine and the neck taken back out, standing in the sights: the written
+// experimental.native_on_foot_stand_ads_spine_straighten, 0..1, default 0 (F181: 0.9, the pilot's flown value). The share of the game's ADS hunch of the upper spine and the neck taken back out, standing in the sights: the written
 // local rotation of each level (the spine 16, 21, 24 and the neck 34, which is a child of the chest 24) is slerp(animated, reference, dial x the standing share x the detach weight). The
 // reference is the same item's levels at the hip: the local rotations on the last standing hip frames (the detach weight under 0.05, the crouched weight under 0.5), a running average over
 // about 0.12 s, kept per item and plan; none yet (the item came out in the sights), the press's first frame in the sights stands in until a hip frame replaces it, as F166's capture does.

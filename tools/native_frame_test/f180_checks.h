@@ -388,8 +388,8 @@ inline void run180(Check&& check) {
     // ---- F180c 1. the distance ----------------------------------------------------------------------------------------------------------------------------------------------------------------
     {
         check(f179::clampGuardCm(10.0) == 10.0 && f179::clampGuardCm(0.0) == 0.0 && f179::clampGuardCm(-3.0) == 0.0 && f179::clampGuardCm(25.0) == 20.0 && f179::clampGuardCm(20.0) == 20.0 &&
-                  f179::clampGuardCm(std::nan("")) == 10.0 && f179::kNeckGuardMinCm == 0.0 && f179::kNeckGuardMaxCm == 20.0 && f179::kNeckGuardAheadCm == 10.0,
-              "F180c: the distance is held to 0..20 cm, 10 is F179's, 0 stays 0 (the guard off) and a value that is not a number reads the default 10");
+                  f179::clampGuardCm(std::nan("")) == 2.0 && f179::kNeckGuardMinCm == 0.0 && f179::kNeckGuardMaxCm == 20.0 && f179::kNeckGuardAheadCm == 10.0 && f179::kNeckGuardDefaultCm == 2.0,
+              "F180c: the distance is held to 0..20 cm, 10 is F179's own (the pure functions' default argument), 0 stays 0 (the guard off) and a value that is not a number reads the key's default 2 (F181)");
         check(eq(f179::heldBelowM(0.10), 0.09, 1e-15) && eq(f179::heldBelowM(0.05), 0.04, 1e-15) && f179::heldBelowM(0.005) == 0.0 && f179::heldBelowM(0.0) == 0.0 && eq(f179::heldBelowM(0.20), 0.19, 1e-15),
               "F180c: a guard that did not hold is a measured figure more than 1 cm under the distance asked: 9 cm at 10, 4 at 5, 19 at 20, never at 1 cm or less");
         check(eq(f179::deficitM(0.06), 0.04, 1e-12) && eq(f179::deficitM(0.06, 0.15), 0.09, 1e-12) && eq(f179::deficitM(0.06, 0.05), 0.0, 1e-12) && f179::deficitM(0.06, 0.0) == 0.0 && f179::deficitM(-0.05, 0.0) == 0.05 &&
@@ -495,11 +495,11 @@ inline void run180(Check&& check) {
         const auto has = [&](const std::string& needle) { return cpp.find(needle) != std::string::npos; };
         const auto at = [&](const std::string& needle) { return cpp.find(needle); };
         // F180a: the weight in the left hand's blend, in the branch that is the left hand's stable pole (a one-handed gun has no such solve)
-        const size_t branch = at("if (side == 0 && pinWanted && pinCall.valid) {\n                    const double w165 = nofoot::f180::elbowBlendWeight(pinCall.postureW, pinCall.detachW);");
+        const size_t branch = at("if (side == 0 && pinWanted && pinCall.valid) {\n                    f181Eligible = true;   // F181a: the same gate: every two-handed gun, the left hand's stable pole\n                    const double w165 = nofoot::f180::elbowBlendWeight(pinCall.postureW, pinCall.detachW);");
         check(branch != std::string::npos && !has("const double w165 = nofoot::f165::blendWeight(") && has("const nofoot::f165::Blend mix = nofoot::f165::blendPole(tb, poleTheta165, w165,"),
               "F180a: the F165 blend's weight is nofoot::f180::elbowBlendWeight, in the left hand's stable-pole branch (the blend itself is F165's blendPole as it was)");
         // F180b: the key read and logged, the stage before the pin, the bend yielding to it, the sample and the line
-        check(has("std::atomic<float> g_standAdsSpine{0.0f};") && has("nofoot::f180::clampDial(static_cast<double>(cfg.getFloat(\"experimental.native_on_foot_stand_ads_spine_straighten\", 0.0f)))") &&
+        check(has("std::atomic<float> g_standAdsSpine{0.9f};") && has("nofoot::f180::clampDial(static_cast<double>(cfg.getFloat(\"experimental.native_on_foot_stand_ads_spine_straighten\", 0.9f)))") &&
                   has("if (first || v != g_standAdsSpineLast)") && has("native on foot standing ADS spine dial (F180b, TEMPORARY): experimental.native_on_foot_stand_ads_spine_straighten = %.2f") &&
                   has("g_standAdsSpine.store(static_cast<float>(v), std::memory_order_relaxed);"),
               "F180b: the key is read from [experimental] with the default 0, held to its range, logged at the first read and at each change, and stored for the stage");
@@ -522,11 +522,11 @@ inline void run180(Check&& check) {
         check(has("const float* nk = froze && g_ikFzSlot[34] != 0xFFFFu ? g_pfzChain[g_ikFzSlot[34]] : g_pfzAnim[34];") && has("pc.f179StandRaise = nofoot::f179::standingRaiseM(N0[1],"),
               "F180b: F179a's raise and the guard read the neck 34 and the chest 24 from g_pfzAnim in the pin, after the stage has written it");
         // F180c: the key, the geometry off at 0, the measuring context, the three acting sites gated, the window closing on a change
-        check(has("std::atomic<float> g_neckGuardCm{static_cast<float>(nofoot::f179::kNeckGuardAheadCm)};") &&
-                  has("nofoot::f179::clampGuardCm(static_cast<double>(cfg.getFloat(\"experimental.native_on_foot_neck_guard_cm\", static_cast<float>(nofoot::f179::kNeckGuardAheadCm))))") &&
+        check(has("std::atomic<float> g_neckGuardCm{static_cast<float>(nofoot::f179::kNeckGuardDefaultCm)};") &&
+                  has("nofoot::f179::clampGuardCm(static_cast<double>(cfg.getFloat(\"experimental.native_on_foot_neck_guard_cm\", static_cast<float>(nofoot::f179::kNeckGuardDefaultCm))))") &&
                   has("if (first || cm != g_neckGuardCmLast)") && has("native on foot neck guard distance (F180c, TEMPORARY): experimental.native_on_foot_neck_guard_cm = %.1f cm") &&
                   has("g_neckGuardCm.store(static_cast<float>(cm), std::memory_order_relaxed);"),
-              "F180c: the key is read from [experimental] with the default 10, held to 0..20, logged at the first read and at each change, and stored for the pin");
+              "F180c (F181: the pilot's value): the key is read from [experimental] with the default 2 (was 10), held to 0..20, logged at the first read and at each change, and stored for the pin");
         check(has("if (!(pc.f179DistM > 0.0)) g179 = nofoot::f179::Geometry{};") && has("pc.f179Measure = pc.f179Ctx == nofoot::f179::kHipUnarmed;") &&
                   has("if (!pc.f179Measure) pc.f179PushPre = nofoot::f179::guardTarget(g179, N0, pc.f179Bias, T, pc.f179DistM);") && has("if (g179.ok && !pc.f179Measure) pc.f179PushPre = nofoot::f179::guardTarget(g179, N0, pc.f179Bias, physicalTarget, pc.f179DistM);") &&
                   has("if (g179.ok && !pc.f179Measure) {\n        const double thWithPost[3]") && has("if (g179.ok && !pc.f179Measure) {\n            const nofoot::PinMove formed = nofoot::pinMove(N0, desiredNeck);") &&
@@ -535,13 +535,13 @@ inline void run180(Check&& check) {
         check(has("float guardKey = 0.0f;") && has("pending.guardKey != g_neckGuardCm.load(std::memory_order_relaxed)") && has("w.guardKey = g_neckGuardCm.load(std::memory_order_relaxed);"),
               "F180c: a change of the distance closes the window, so each line's distance is the one its figures were made at");
         // the ini: both keys beside the standing dials, TEMPORARY, ui rows, defaults 0.0 and 10.0, before the torso square
-        const size_t standLeft = ini.find("\nnative_on_foot_stand_ads_body_left_cm = "), spineKey = ini.find("\nnative_on_foot_stand_ads_spine_straighten = 0.0\n"), guardKey = ini.find("\nnative_on_foot_neck_guard_cm = 10.0\n"),
+        const size_t standLeft = ini.find("\nnative_on_foot_stand_ads_body_left_cm = "), spineKey = ini.find("\nnative_on_foot_stand_ads_spine_straighten = 0.9\n"), guardKey = ini.find("\nnative_on_foot_neck_guard_cm = 2.0\n"),
                      squareKey = ini.find("\nnative_on_foot_crouch_ads_square = ");
         check(standLeft != std::string::npos && spineKey != std::string::npos && guardKey != std::string::npos && squareKey != std::string::npos && standLeft < spineKey && spineKey < guardKey && guardKey < squareKey &&
                   ini.find("# TEMPORARY (F180): Standing ADS spine straighten") != std::string::npos && ini.find("# TEMPORARY (F180): Neck guard distance") != std::string::npos &&
                   ini.find("# ui: Standing ADS spine straighten | range 0..1 | step 0.05 | live\n") != std::string::npos &&
                   ini.find("# ui: Neck guard distance | range 0..20 | step 0.5 | unit cm | live\n") != std::string::npos,
-              "F180: edvr.ini has both keys (the spine straighten at 0.0, the neck guard distance at 10.0), TEMPORARY, each with its ui: row, between the standing left dial and the torso square");
+              "F180 (F181: the pilot's values): edvr.ini has both keys (the spine straighten at 0.9, the neck guard distance at 2.0; were 0.0 and 10.0), TEMPORARY, each with its ui: row, between the standing left dial and the torso square");
     }
 }
 

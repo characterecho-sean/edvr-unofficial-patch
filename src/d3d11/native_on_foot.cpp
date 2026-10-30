@@ -85,6 +85,7 @@
 #include "native_on_foot_f178.h"   // F178 (TEMPORARY): the standing ADS body dials, the crouched ones mirrored for the standing stance, and the figures that judge them (pure parts)
 #include "native_on_foot_f179.h"   // F179: the body stays up in standing ADS (the standing raise), and the neck guard that keeps the eye 10 cm ahead of the chest (pure parts)
 #include "native_on_foot_f180.h"   // F180: the left elbow hangs standing in ADS; the spine straighten dial (TEMPORARY); the neck guard's distance (pure parts)
+#include "native_on_foot_f181.h"   // F181: the left elbow's swivel capped at the hip with a two-handed gun (TEMPORARY dial; pure parts)
 #include "native_on_foot_f176.h"   // F176: in the sights with the head aiming, the mouse and the stick hold their pitch (pure parts)
 #include "native_on_foot_f175.h"   // F175 (measure only): the view's roll and pitch against the headset's, by look mode and item (pure parts)
 #include "native_on_foot_f172.h"   // F172: the neck raise published pre-turned by the mouse-look aim pitch, so the game's turn lands it straight up (pure parts)
@@ -221,22 +222,24 @@ std::atomic<bool> g_adsAimKey{true};                          // the key as the 
 std::atomic<float> g_adsEyeTrimCm{0.0f};                      // F152: experimental.native_on_foot_ads_eye_offset_cm in cm (-30..30), live: added to the held weapon's ADS eye depth
 std::atomic<float> g_weaponViewOffsetCm{static_cast<float>(nofoot::kWeaponViewOffsetDefaultCm)}; // fix.native_on_foot_weapon_view_offset_cm, live
 double g_adsEyeCmLast = -1.0;                                 // the value last logged (frame thread)
-std::atomic<float> g_crouchAdsBodyCm{5.0f};                   // F168 (TEMPORARY): experimental.native_on_foot_crouch_ads_body_forward_cm in cm (-20..20), live: the crouched body's move toward the gun; F173: default 5, the pilot's flown value
+std::atomic<float> g_crouchAdsBodyCm{1.0f};                   // F168 (TEMPORARY): experimental.native_on_foot_crouch_ads_body_forward_cm in cm (-20..20), live: the crouched body's move toward the gun; F173: default 5, F181: default 1, the pilot's flown value
 double g_crouchAdsBodyCmLast = 1e9;                           // the value last logged (frame thread; the first read always logs)
 std::atomic<float> g_pistolSprintPhase{0.5f};                 // F169 (TEMPORARY): experimental.native_on_foot_pistol_sprint_swing_phase, 0..1 of a stride, live: the pistol sprint's left arm is read this far back in the stride; F173: default 0.5, the pilot's flown value
 double g_pistolSprintPhaseLast = 1e9;                         // the value last logged (frame thread; the first read always logs)
 std::atomic<float> g_crouchAdsSquare{0.0f};                   // F170 (TEMPORARY): experimental.native_on_foot_crouch_ads_square, 0..1, live: the share of the shoulder line's blade the crouched ADS torso is turned out of; F173: default 0, the pilot's flown value (the game's pose)
 double g_crouchAdsSquareLast = 1e9;                           // the value last logged (frame thread; the first read always logs)
-std::atomic<float> g_crouchAdsBodyLeftCm{25.0f};              // F171 (TEMPORARY): experimental.native_on_foot_crouch_ads_body_left_cm in cm (-30..30), live: the crouched body's move to the left of the aim line; F173: default 25, the pilot's flown value
+std::atomic<float> g_crouchAdsBodyLeftCm{23.0f};              // F171 (TEMPORARY): experimental.native_on_foot_crouch_ads_body_left_cm in cm (-30..30), live: the crouched body's move to the left of the aim line; F173: default 25, F181: default 23, the pilot's flown value
 double g_crouchAdsBodyLeftCmLast = 1e9;                       // the value last logged (frame thread; the first read always logs)
-std::atomic<float> g_standAdsBodyCm{0.0f};                    // F178 (TEMPORARY): experimental.native_on_foot_stand_ads_body_forward_cm in cm (-20..20), live: the standing body's move toward the gun (F168's, with the standing weight); default 0
+std::atomic<float> g_standAdsBodyCm{4.0f};                    // F178 (TEMPORARY): experimental.native_on_foot_stand_ads_body_forward_cm in cm (-20..20), live: the standing body's move toward the gun (F168's, with the standing weight); F181: default 4, the pilot's flown value
 double g_standAdsBodyCmLast = 1e9;                            // the value last logged (frame thread; the first read always logs)
-std::atomic<float> g_standAdsBodyLeftCm{0.0f};                // F178 (TEMPORARY): experimental.native_on_foot_stand_ads_body_left_cm in cm (-30..30), live: the standing body's move to the left of the aim line (F171's, with the standing weight); default 0
+std::atomic<float> g_standAdsBodyLeftCm{23.0f};                // F178 (TEMPORARY): experimental.native_on_foot_stand_ads_body_left_cm in cm (-30..30), live: the standing body's move to the left of the aim line (F171's, with the standing weight); F181: default 23, the pilot's flown value
 double g_standAdsBodyLeftCmLast = 1e9;                        // the value last logged (frame thread; the first read always logs)
-std::atomic<float> g_standAdsSpine{0.0f};                     // F180b (TEMPORARY): experimental.native_on_foot_stand_ads_spine_straighten, 0..1, live: the share of the ADS hunch of the upper spine and the neck taken back out standing in the sights; default 0
+std::atomic<float> g_standAdsSpine{0.9f};                     // F180b (TEMPORARY): experimental.native_on_foot_stand_ads_spine_straighten, 0..1, live: the share of the ADS hunch of the upper spine and the neck taken back out standing in the sights; F181: default 0.9, the pilot's flown value
 double g_standAdsSpineLast = 1e9;                             // the value last logged (frame thread; the first read always logs)
-std::atomic<float> g_neckGuardCm{static_cast<float>(nofoot::f179::kNeckGuardAheadCm)};   // F180c (TEMPORARY): experimental.native_on_foot_neck_guard_cm, 0..20 cm, live: how far ahead of the chest the neck guard keeps the eye; 0 turns it off; default 10 (F179's)
+std::atomic<float> g_neckGuardCm{static_cast<float>(nofoot::f179::kNeckGuardDefaultCm)};   // F180c (TEMPORARY): experimental.native_on_foot_neck_guard_cm, 0..20 cm, live: how far ahead of the chest the neck guard keeps the eye; 0 turns it off; F181: default 2, the pilot's flown value (F179's first was 10)
 double g_neckGuardCmLast = 1e9;                               // the value last logged (frame thread; the first read always logs)
+std::atomic<float> g_hipElbowSwivelMaxDeg{static_cast<float>(nofoot::f181::kCapDefaultDeg)};   // F181a (TEMPORARY): experimental.native_on_foot_hip_elbow_swivel_max_deg, 0..90, live: the most the left elbow swings off the stance's plane at the hip with a two-handed gun; 90 leaves the pose; default 25
+double g_hipElbowSwivelMaxDegLast = 1e9;                      // the value last logged (frame thread; the first read always logs)
 std::atomic<float> g_f87SettleS{static_cast<float>(nofoot::f87::kSettleDefaultS)};   // F87h (TEMPORARY): fix.native_on_foot_standing_height_settle_s, live
 double g_f87SettleLast = -1.0;                                // the value last logged (frame thread)
 std::atomic<float> g_f94EyeHeightCm{static_cast<float>(nofoot::f94::kEyeHeightDefaultCm)};   // F94a: fix.native_on_foot_eye_height_cm, live (the eyes over the neck)
@@ -1104,7 +1107,7 @@ void readKey() {
     // by this, cm (-20..20), times the crouched weight and the detach weight: the pin's target for the neck carries it, so the body moves with its arms and the eye and the gun stay where
     // the sight lock puts them. Positive is toward the gun. 0 moves nothing; it is exactly 0 standing and at the hip.
     {
-        const double cm = nofoot::f168::clampDialCm(static_cast<double>(cfg.getFloat("experimental.native_on_foot_crouch_ads_body_forward_cm", 5.0f)));
+        const double cm = nofoot::f168::clampDialCm(static_cast<double>(cfg.getFloat("experimental.native_on_foot_crouch_ads_body_forward_cm", 1.0f)));
         if (first || cm != g_crouchAdsBodyCmLast)
             Log::get().note("native on foot crouched ADS body dial (F168, TEMPORARY): experimental.native_on_foot_crouch_ads_body_forward_cm = %+.1f cm -- while crouched and aiming down sights the "
                             "third-person body moves this far along the aim's horizontal forward (positive toward the gun, range %.0f..%.0f), times the crouched weight and the detach weight, "
@@ -1117,7 +1120,7 @@ void readKey() {
     // (-20..20, positive left), times the crouched weight and the detach weight, along the horizontal left of the aim: the pin's target for the neck carries it before the reach rule, so
     // the left grip stays reachable. 0 moves nothing; it is exactly 0 standing and at the hip.
     {
-        const double cm = nofoot::f171::clampDialCm(static_cast<double>(cfg.getFloat("experimental.native_on_foot_crouch_ads_body_left_cm", 25.0f)));
+        const double cm = nofoot::f171::clampDialCm(static_cast<double>(cfg.getFloat("experimental.native_on_foot_crouch_ads_body_left_cm", 23.0f)));
         if (first || cm != g_crouchAdsBodyLeftCmLast)
             Log::get().note("native on foot crouched ADS body sideways dial (F171, TEMPORARY): experimental.native_on_foot_crouch_ads_body_left_cm = %+.1f cm -- while crouched and aiming down "
                             "sights the third-person body moves this far to the left of the aim line (positive left, negative right, range %.0f..%.0f), along the horizontal left of the aim, "
@@ -1132,7 +1135,7 @@ void readKey() {
     // left), each times the standing weight (1 less the crouched weight, times the detach weight), in the same places in the pin as the crouched pair. Both default to 0: nothing moves until
     // the pilot moves them. A crouch blends the standing pair into the crouched one.
     {
-        const double cm = nofoot::f178::clampForwardCm(static_cast<double>(cfg.getFloat("experimental.native_on_foot_stand_ads_body_forward_cm", 0.0f)));
+        const double cm = nofoot::f178::clampForwardCm(static_cast<double>(cfg.getFloat("experimental.native_on_foot_stand_ads_body_forward_cm", 4.0f)));
         if (first || cm != g_standAdsBodyCmLast)
             Log::get().note("native on foot standing ADS body dial (F178, TEMPORARY): experimental.native_on_foot_stand_ads_body_forward_cm = %+.1f cm -- while standing and aiming down sights the "
                             "third-person body moves this far along the aim's horizontal forward (positive toward the gun, range %.0f..%.0f), times the standing weight (1 less the crouched weight, "
@@ -1143,7 +1146,7 @@ void readKey() {
         g_standAdsBodyCm.store(static_cast<float>(cm), std::memory_order_relaxed);
     }
     {
-        const double cm = nofoot::f178::clampLeftCm(static_cast<double>(cfg.getFloat("experimental.native_on_foot_stand_ads_body_left_cm", 0.0f)));
+        const double cm = nofoot::f178::clampLeftCm(static_cast<double>(cfg.getFloat("experimental.native_on_foot_stand_ads_body_left_cm", 23.0f)));
         if (first || cm != g_standAdsBodyLeftCmLast)
             Log::get().note("native on foot standing ADS body dial (F178, TEMPORARY): experimental.native_on_foot_stand_ads_body_left_cm = %+.1f cm -- while standing and aiming down sights the "
                             "third-person body moves this far to the left of the aim line (positive left, negative right, range %.0f..%.0f), along the horizontal left of the aim, times the standing "
@@ -1156,7 +1159,7 @@ void readKey() {
     // F180b (TEMPORARY, live, the developer tier's "Standing ADS spine straighten"): while standing and aiming down sights the share of the game's ADS hunch of the upper spine (levels 16, 21, 24)
     // and the neck (34) taken back out, toward the same item's pose at the hip just before the press. 0 (the default) changes nothing; 1 puts the levels at the reference.
     {
-        const double v = nofoot::f180::clampDial(static_cast<double>(cfg.getFloat("experimental.native_on_foot_stand_ads_spine_straighten", 0.0f)));
+        const double v = nofoot::f180::clampDial(static_cast<double>(cfg.getFloat("experimental.native_on_foot_stand_ads_spine_straighten", 0.9f)));
         if (first || v != g_standAdsSpineLast)
             Log::get().note("native on foot standing ADS spine dial (F180b, TEMPORARY): experimental.native_on_foot_stand_ads_spine_straighten = %.2f -- while standing and aiming down sights this "
                             "share (range %.0f..%.0f) of the game's ADS hunch of the upper spine (levels 16, 21, 24) and the neck (34) is taken back out, toward the same item's pose at the hip just "
@@ -1168,13 +1171,25 @@ void readKey() {
     // F180c (TEMPORARY, live, the developer tier's "Neck guard distance"): how far ahead of the chest (cm, 0..20) F179b's neck guard keeps the eye as drawn; 0 turns the guard off. Armed it acts at
     // this distance; unarmed at the hip it measures only (counts the push it would make) and moves nothing.
     {
-        const double cm = nofoot::f179::clampGuardCm(static_cast<double>(cfg.getFloat("experimental.native_on_foot_neck_guard_cm", static_cast<float>(nofoot::f179::kNeckGuardAheadCm))));
+        const double cm = nofoot::f179::clampGuardCm(static_cast<double>(cfg.getFloat("experimental.native_on_foot_neck_guard_cm", static_cast<float>(nofoot::f179::kNeckGuardDefaultCm))));
         if (first || cm != g_neckGuardCmLast)
             Log::get().note("native on foot neck guard distance (F180c, TEMPORARY): experimental.native_on_foot_neck_guard_cm = %.1f cm -- the neck guard keeps the eye as drawn at least this far ahead "
                             "of the chest along its heading (range %.0f..%.0f, 0 turns the guard off); armed it moves the neck target, the post-reach forward add and the move to hold it; unarmed at "
                             "the hip it only measures the push it would make; the per-window neck guard lines name the figures", cm, nofoot::f179::kNeckGuardMinCm, nofoot::f179::kNeckGuardMaxCm);
         g_neckGuardCmLast = cm;
         g_neckGuardCm.store(static_cast<float>(cm), std::memory_order_relaxed);
+    }
+    // F181a (TEMPORARY, live, the developer tier's "Hip elbow swivel max"): with a two-handed gun at the hip the left elbow swings at most this many degrees off the stance's plane (the plane F98a
+    // measures its swivel from); 90 leaves the game's pose as it is. Weighted by the hip share (1 less the detach weight): none in the sights, where F180a's body-down blend rules.
+    {
+        const double deg = nofoot::f181::clampCapDeg(static_cast<double>(cfg.getFloat("experimental.native_on_foot_hip_elbow_swivel_max_deg", static_cast<float>(nofoot::f181::kCapDefaultDeg))));
+        if (first || deg != g_hipElbowSwivelMaxDegLast)
+            Log::get().note("native on foot hip elbow swivel cap dial (F181a, TEMPORARY): experimental.native_on_foot_hip_elbow_swivel_max_deg = %.1f deg -- with a two-handed gun at the hip the left elbow "
+                            "swings at most this far off the stance's plane (the plane F98a measures its swivel from; range %.0f..%.0f, %.0f leaves the game's pose as it is), times the hip share (1 less the "
+                            "detach weight), so there is no cap in the sights; the elbow keeps its side of the plane; pistols, tools and unarmed are untouched; the F98a line names the solves capped",
+                            deg, nofoot::f181::kCapMinDeg, nofoot::f181::kCapMaxDeg, nofoot::f181::kCapMaxDeg);
+        g_hipElbowSwivelMaxDegLast = deg;
+        g_hipElbowSwivelMaxDeg.store(static_cast<float>(deg), std::memory_order_relaxed);
     }
     // F170 (TEMPORARY, live, the developer tier's "Crouched ADS torso square"): while crouched and aiming down sights the torso is turned about the vertical toward square to the aim: this share
     // (0..1) of the shoulder line's measured blade, times the crouched weight and the detach weight, is taken out. 1 squares it, 0 leaves the authored stance; exactly 0 standing and at the hip.
@@ -16624,6 +16639,8 @@ struct F98Left {
     // F180b (TEMPORARY): the standing ADS spine straighten: the dial, the share, whether the levels were written, the reference's source, the four bones' leans animated / reference / written, the
     // neck and the left shoulder from the eye after and before, F179a's leg raise asked, standing in the sights (its own line).
     nofoot::f180::Counters f180;
+    // F181a (TEMPORARY): the left hand's two-handed solves at the hip, those the swivel cap turned, the plane angle cut and the solves still over the cap after it (the F98a line's ending).
+    nofoot::f181::Counters f181;
 };
 std::atomic<uint32_t> g_f98Seq{0};
 F98Left g_f98;
@@ -16947,7 +16964,7 @@ struct PinCall {
     bool f179Ran = false, f179Measure = false;
     int f179Ctx = 0;
     uint64_t f179Ms = 0;
-    double f179DistM = nofoot::f179::kNeckGuardAheadM, f179Would = std::nan("");
+    double f179DistM = nofoot::f179::kNeckGuardDefaultCm * 0.01, f179Would = std::nan("");
     // F180b (TEMPORARY): the spine straighten stage's account of this call.
     nofoot::f180::CallInfo f180;
     double f179Bias = 0.0, f179PushPre = 0.0, f179OffPost = 0.0, f179PushRes = 0.0, f179PredRaw = std::nan(""), f179Before = std::nan("");
@@ -19694,6 +19711,9 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
         // F165 (the left arm's non-pistol stable pole): the blend weight toward the body-down pole (crouched weight x ADS detach weight) and whether the blend was applied
         bool f165Applied = false;
         double f165W = 0.0;
+        // F181a: this solve was the left hand's with a two-handed gun at the hip (the cap's solves), the cap turned the swivel, and the plane angle it cut (deg)
+        bool f181Hip = false, f181Capped = false;
+        double f181CutDeg = 0.0;
         double poseHand[3] = {}, poseTarget[3] = {}, posePreferred[3] = {}, poseAxis[3] = {}, poseRadial[3] = {}, poseWeight = 0.0, poseViolationM = 0.0;
         double poseOutSign = 1.0, poseElbowOutM = nofoot::kIkElbowOutM;
         bool poseActualValid = false;
@@ -20558,6 +20578,7 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
         bool rifleQualityPoleApplied = false;
         bool stablePoleHadReference = false;
         bool stablePoleFallback = false;
+        bool f181Eligible = false;   // F181a: the left hand's stable-pole solve with a two-handed gun (F165's and F180a's gate): set in that branch
         double stablePoleReferenceTheta = baseTheta;
         if (stablePoleSide) {
             physicalPoleAttempted[side] = true;
@@ -20697,6 +20718,7 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
                 // hangs as crouched (the flight 10:41:30: the swivel 40.8 deg off the stance's plane, the pole from the stable pole's seed in 60 of 60 solves, body-down 0). Crouched it is
                 // F165's weight bit for bit; at the hip 0.
                 if (side == 0 && pinWanted && pinCall.valid) {
+                    f181Eligible = true;   // F181a: the same gate: every two-handed gun, the left hand's stable pole
                     const double w165 = nofoot::f180::elbowBlendWeight(pinCall.postureW, pinCall.detachW);
                     o.f165W = w165;
                     if (w165 > 0.0) {
@@ -20766,6 +20788,54 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
         if (!hs.ok) {
             ikRefuse(kIkRefSingular);
             continue;
+        }
+        // F181a (TEMPORARY): the hip swivel cap. With a two-handed gun (the left hand's stable pole: f181Eligible) a solve whose swivel from the stance's plane (hs.planeDeg, the figure F98a prints) is
+        // over the cap is brought to the plane angle p - hipShare x (p - cap) by turning the pole about the shoulder-to-hand axis toward the plane, from where it is, to the first swivel with that
+        // plane angle (nofoot::f181::capSwivel: it cannot pass through the plane, so the elbow keeps its side). The hip share is 1 less the detach weight: the cap whole at the hip, none in the sights.
+        // A plane angle at or under the cap, the cap at 90, the sights: nothing here runs past the comparison and the solve is exactly what it was. The pole's seed is not touched. The ceiling
+        // (the elbow over the shoulder where the pole's was not) is held as blendPole holds it.
+        if (f181Eligible) {
+            const double capDeg = static_cast<double>(g_hipElbowSwivelMaxDeg.load(std::memory_order_relaxed));
+            o.f181Hip = nofoot::f159::atHip(pinCall.detachW);
+            const double planeBefore = hs.planeDeg;
+            const double target = nofoot::f181::targetDeg(planeBefore, capDeg, nofoot::f181::hipShare(pinCall.detachW));
+            if (target < planeBefore) {
+                const auto planeAt = [&](double th) noexcept {
+                    double Ec[3];
+                    tb.elbowAt(th, Ec);
+                    const nofoot::HingeSwings c = nofoot::ikHingeSwings(S, F0, H0, Ec, tb.hand, useRow ? rowN0 : nullptr, hl.lastValid && now - hl.lastMs < 200 ? hl.last : nullptr);
+                    return c.ok ? c.planeDeg : 180.0;
+                };
+                const nofoot::f181::Cap cap = nofoot::f181::capSwivel(theta, planeBefore, target, planeAt);
+                if (cap.applied) {
+                    double capped = cap.theta;
+                    const auto over = [&](double th) noexcept {
+                        double Ec[3];
+                        tb.elbowAt(th, Ec);
+                        return Ec[1] - tb.S[1];
+                    };
+                    if (over(capped) > nofoot::f165::kCeilingEpsM && over(capped) > over(theta) + nofoot::f165::kCeilingEpsM) {
+                        bool clamped = false;
+                        capped = nofoot::ikSwivelClamp(tb, capped, outSign, &clamped, nofoot::f165::kNoOutwardM);
+                    }
+                    const double ceTheta = theta;
+                    theta = capped;
+                    tb.elbowAt(theta, E);
+                    for (int i = 0; i < 3; ++i) { se[i] = E[i] - S[i]; ht[i] = tb.hand[i] - E[i]; }
+                    const nofoot::HingeSwings hsCapped = nofoot::ikHingeSwings(S, F0, H0, E, tb.hand, useRow ? rowN0 : nullptr, hl.lastValid && now - hl.lastMs < 200 ? hl.last : nullptr);
+                    if (hsCapped.ok && nofoot::ikUnit(se, ue) && nofoot::ikUnit(ht, eT)) {
+                        hs = hsCapped;
+                        o.f181Capped = true;
+                        o.f181CutDeg = planeBefore - hs.planeDeg;
+                    } else {   // the capped swivel cannot be measured: the pole's own stands
+                        theta = ceTheta;
+                        tb.elbowAt(theta, E);
+                        for (int i = 0; i < 3; ++i) { se[i] = E[i] - S[i]; ht[i] = tb.hand[i] - E[i]; }
+                        nofoot::ikUnit(se, ue);
+                        nofoot::ikUnit(ht, eT);
+                    }
+                }
+            }
         }
         // F76 armed full-grip solving follows a transported physical pole. Other paths keep F75's wrist-swing objective.
         {
@@ -21532,6 +21602,7 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
             f.yawMax = std::max(f.yawMax, std::fabs(yawDeg));
             f.planeSum += so[0].hPlane;
             f.planeMax = std::max(f.planeMax, so[0].hPlane);
+            if (so[0].f181Hip) f.f181.add(so[0].f181Capped, so[0].f181CutDeg, so[0].hPlane, static_cast<double>(g_hipElbowSwivelMaxDeg.load(std::memory_order_relaxed)));   // F181a: the cap's solves
             if (so[0].hPlane > 45.0) f.planeOver45 += 1.0;
             if (step >= 0.0) {
                 ++f.steps;
@@ -22914,14 +22985,19 @@ void f125ElbowClose(uint64_t now, bool keepRun = false) noexcept {
                 std::snprintf(at98, sizeof(at98), "no elbow step was measured");
             std::snprintf(down98, sizeof(down98), "; on %u body-down solves the arm's axis came within %.1f deg of the body's down; %s", f98.downN, f98.downMin, at98);
         }
-        Log::get().note("native on foot left elbow (F98a) %u s: item %s; %u solves: the game's aim pitch %+.1f deg (min %+.1f max %+.1f); the chest's lean as written %+.1f deg "
-                        "(animated %+.1f); F82's torso yaw %+.1f deg (largest %.1f); the elbow's swivel from the stance's plane %.1f deg (max %.1f, over 45 deg in %u); its step a "
-                        "frame %.2f deg rms (max %.1f, over 10 deg %u, of %u steps); the swivel from the stable pole's seed %u (the arm %.1f deg from the seed's axis, max %.1f), "
-                        "a body-down pole %u, the legacy swivel %u; hand twist at the forearm's limit %u%s; seconds mostly over 45 deg %u; flip seconds %u (near vertical %u, twist limit %u, near with twist %u)",
-                        w.seconds, w.item, f98.n, f98.aimSum / an, f98.aimN ? f98.aimMin : 0.0, f98.aimN ? f98.aimMax : 0.0, f98.leanSum / ln, f98.leanAnimSum / ln, f98.yawSum / n98,
-                        f98.yawMax, f98.planeSum / n98, f98.planeMax, static_cast<unsigned>(f98.planeOver45), f98.steps ? std::sqrt(f98.stepSq / f98.steps) : 0.0,
-                        f98.stepMax, f98.stepsOver10, f98.steps, f98.src[1], f98.spanN ? f98.spanSum / f98.spanN : 0.0, f98.spanMax, f98.src[2], f98.src[0],
-                        f98.twistLimited, down98, w.swung, w.flips, w.nearCount, w.twisted, w.nearTwisted);
+        char line98[1190];
+        std::snprintf(line98, sizeof(line98),
+                      "native on foot left elbow (F98a) %u s: item %s; %u solves: the game's aim pitch %+.1f deg (min %+.1f max %+.1f); the chest's lean as written %+.1f deg "
+                      "(animated %+.1f); F82's torso yaw %+.1f deg (largest %.1f); the elbow's swivel from the stance's plane %.1f deg (max %.1f, over 45 deg in %u); its step a "
+                      "frame %.2f deg rms (max %.1f, over 10 deg %u, of %u steps); the swivel from the stable pole's seed %u (the arm %.1f deg from the seed's axis, max %.1f), "
+                      "a body-down pole %u, the legacy swivel %u; hand twist at the forearm's limit %u%s; seconds mostly over 45 deg %u; flip seconds %u (near vertical %u, twist limit %u, near with twist %u)",
+                      w.seconds, w.item, f98.n, f98.aimSum / an, f98.aimN ? f98.aimMin : 0.0, f98.aimN ? f98.aimMax : 0.0, f98.leanSum / ln, f98.leanAnimSum / ln, f98.yawSum / n98,
+                      f98.yawMax, f98.planeSum / n98, f98.planeMax, static_cast<unsigned>(f98.planeOver45), f98.steps ? std::sqrt(f98.stepSq / f98.steps) : 0.0,
+                      f98.stepMax, f98.stepsOver10, f98.steps, f98.src[1], f98.spanN ? f98.spanSum / f98.spanN : 0.0, f98.spanMax, f98.src[2], f98.src[0],
+                      f98.twistLimited, down98, w.swung, w.flips, w.nearCount, w.twisted, w.nearTwisted);
+        // F181a (TEMPORARY): the hip swivel cap's solves, on the same line (the worst of the line without it is about 1000 bytes of the 1166 the log keeps)
+        nofoot::f181::appendSummary(line98, sizeof(line98), f98.f181, static_cast<double>(g_hipElbowSwivelMaxDeg.load(std::memory_order_relaxed)));
+        Log::get().note("%s", line98);
         // F159: the left elbow's stable pole in the same window, on a line of its own (F98a's has no room left under the log's 1200 bytes)
         if (f98.f159.n) {
             char line159[1180];

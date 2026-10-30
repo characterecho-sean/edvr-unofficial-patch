@@ -1956,7 +1956,7 @@ void testLegacyOnFootRowsStayOutOfMenu() {
         check(found == 5 && shaped, "the four Weapon UI trims and the ADS eye trim are [experimental] number rows: -30..30 cm, step 0.5, signed, live, shipped 0.0, labelled without (test)");
     }
     // F168 (TEMPORARY): "Crouched ADS body forward / back" is the sixth number row of the developer tier's native on foot rows, right after "ADS eye forward / back" on the same page and under the same
-    // heading: -20..20 cm (a narrower range than the eye's -30..30), step 0.5, signed, live, shipped 5.0 since F173 (0.0 before), labelled without (test). It carries no old value over.
+    // heading: -20..20 cm (a narrower range than the eye's -30..30), step 0.5, signed, live, shipped 1.0 since F181 (5.0 under F173, 0.0 before), labelled without (test). It carries no old value over.
     {
         int adsEyeRow = -1, bodyRow = -1, found = 0;
         bool shaped = true;
@@ -1967,15 +1967,15 @@ void testLegacyOnFootRowsStayOutOfMenu() {
             bodyRow = i;
             ++found;
             shaped = shaped && d.kind == MenuKind::Number && d.tier == MenuTier::Experimental && strcmp(d.label, "Crouched ADS body forward / back") == 0 && strcmp(d.lo, "-20") == 0 &&
-                     strcmp(d.hi, "20") == 0 && strcmp(d.step, "0.5") == 0 && strcmp(d.unit, "cm") == 0 && d.showSign && d.applies == 1 && strcmp(d.shipped, "5.0") == 0;
+                     strcmp(d.hi, "20") == 0 && strcmp(d.step, "0.5") == 0 && strcmp(d.unit, "cm") == 0 && d.showSign && d.applies == 1 && strcmp(d.shipped, "1.0") == 0;
         }
         const bool beside = adsEyeRow >= 0 && bodyRow == adsEyeRow + 1 && strcmp(kMenuRows[bodyRow].page, kMenuRows[adsEyeRow].page) == 0 &&
                             strcmp(kMenuRows[bodyRow].group, kMenuRows[adsEyeRow].group) == 0;
         check(found == 1 && shaped && beside,
-              "Crouched ADS body forward / back (F168, TEMPORARY) is one [experimental] number row right after ADS eye forward / back, on its page and under its heading: -20..20 cm, step 0.5, signed, live, shipped 5.0 (F173; 0.0 before)");
+              "Crouched ADS body forward / back (F168, TEMPORARY) is one [experimental] number row right after ADS eye forward / back, on its page and under its heading: -20..20 cm, step 0.5, signed, live, shipped 1.0 (F181; 5.0 under F173)");
     }
     // F171 (TEMPORARY): "Crouched ADS body left / right" is the seventh number row of the developer tier's native on foot rows, right after "Crouched ADS body forward / back" on the same page and
-    // under the same heading: -30..30 cm in steps of 0.5 (F172: widened from the forward row's -20..20), signed, live, shipped 25.0 since F173 (15.0 before; positive is left of the aim line), labelled without (test). It
+    // under the same heading: -30..30 cm in steps of 0.5 (F172: widened from the forward row's -20..20), signed, live, shipped 23.0 since F181 (25.0 under F173, 15.0 before; positive is left of the aim line), labelled without (test). It
     // carries no old value over.
     {
         int bodyRow = -1, leftRow = -1, found = 0;
@@ -1987,16 +1987,16 @@ void testLegacyOnFootRowsStayOutOfMenu() {
             leftRow = i;
             ++found;
             shaped = shaped && d.kind == MenuKind::Number && d.tier == MenuTier::Experimental && strcmp(d.label, "Crouched ADS body left / right") == 0 && strcmp(d.lo, "-30") == 0 &&
-                     strcmp(d.hi, "30") == 0 && strcmp(d.step, "0.5") == 0 && strcmp(d.unit, "cm") == 0 && d.showSign && d.applies == 1 && strcmp(d.shipped, "25.0") == 0;
+                     strcmp(d.hi, "30") == 0 && strcmp(d.step, "0.5") == 0 && strcmp(d.unit, "cm") == 0 && d.showSign && d.applies == 1 && strcmp(d.shipped, "23.0") == 0;
         }
         const bool beside = bodyRow >= 0 && leftRow == bodyRow + 1 && strcmp(kMenuRows[leftRow].page, kMenuRows[bodyRow].page) == 0 &&
                             strcmp(kMenuRows[leftRow].group, kMenuRows[bodyRow].group) == 0;
         check(found == 1 && shaped && beside,
-              "Crouched ADS body left / right (F171, TEMPORARY) is one [experimental] number row right after Crouched ADS body forward / back, on its page and under its heading: -30..30 cm (F172: was -20..20), step 0.5, signed, live, shipped 25.0 (F173; 15.0 before)");
+              "Crouched ADS body left / right (F171, TEMPORARY) is one [experimental] number row right after Crouched ADS body forward / back, on its page and under its heading: -30..30 cm (F172: was -20..20), step 0.5, signed, live, shipped 23.0 (F181; 25.0 under F173)");
     }
     // F178 (TEMPORARY): the standing mirrors of the two crouched body dials are the eighth and ninth number rows of the developer tier's native on foot rows, right after "Crouched ADS body left / right" on
-    // the same page and under the same heading, in the crouched pair's order: "Standing ADS body forward / back" (-20..20 cm, step 0.5, signed, live, shipped 0.0) and "Standing ADS body left / right"
-    // (-30..30 cm, step 0.5, signed, live, shipped 0.0; positive is left of the aim line), labelled without (test). They carry no old value over.
+    // the same page and under the same heading, in the crouched pair's order: "Standing ADS body forward / back" (-20..20 cm, step 0.5, signed, live, shipped 4.0 since F181, 0.0 before) and "Standing ADS body left / right"
+    // (-30..30 cm, step 0.5, signed, live, shipped 23.0 since F181, 0.0 before; positive is left of the aim line), labelled without (test). They carry no old value over.
     {
         int leftRow = -1, standFwdRow = -1, standLeftRow = -1, foundFwd = 0, foundLeft = 0;
         bool shaped = true;
@@ -2008,13 +2008,13 @@ void testLegacyOnFootRowsStayOutOfMenu() {
                 standFwdRow = i;
                 ++foundFwd;
                 shaped = shaped && d.kind == MenuKind::Number && d.tier == MenuTier::Experimental && strcmp(d.label, "Standing ADS body forward / back") == 0 && strcmp(d.lo, "-20") == 0 &&
-                         strcmp(d.hi, "20") == 0 && strcmp(d.step, "0.5") == 0 && strcmp(d.unit, "cm") == 0 && d.showSign && d.applies == 1 && strcmp(d.shipped, "0.0") == 0;
+                         strcmp(d.hi, "20") == 0 && strcmp(d.step, "0.5") == 0 && strcmp(d.unit, "cm") == 0 && d.showSign && d.applies == 1 && strcmp(d.shipped, "4.0") == 0;
             }
             if (strcmp(d.key, "native_on_foot_stand_ads_body_left_cm") == 0) {
                 standLeftRow = i;
                 ++foundLeft;
                 shaped = shaped && d.kind == MenuKind::Number && d.tier == MenuTier::Experimental && strcmp(d.label, "Standing ADS body left / right") == 0 && strcmp(d.lo, "-30") == 0 &&
-                         strcmp(d.hi, "30") == 0 && strcmp(d.step, "0.5") == 0 && strcmp(d.unit, "cm") == 0 && d.showSign && d.applies == 1 && strcmp(d.shipped, "0.0") == 0;
+                         strcmp(d.hi, "30") == 0 && strcmp(d.step, "0.5") == 0 && strcmp(d.unit, "cm") == 0 && d.showSign && d.applies == 1 && strcmp(d.shipped, "23.0") == 0;
             }
         }
         const bool beside = leftRow >= 0 && standFwdRow == leftRow + 1 && standLeftRow == standFwdRow + 1 && strcmp(kMenuRows[standFwdRow].page, kMenuRows[leftRow].page) == 0 &&
@@ -2022,11 +2022,11 @@ void testLegacyOnFootRowsStayOutOfMenu() {
                             strcmp(kMenuRows[standLeftRow].group, kMenuRows[leftRow].group) == 0;
         check(foundFwd == 1 && foundLeft == 1 && shaped && beside,
               "Standing ADS body forward / back and left / right (F178, TEMPORARY) are one [experimental] number row each, right after Crouched ADS body left / right in that order, on its page and under its heading: "
-              "-20..20 and -30..30 cm, step 0.5, signed, live, shipped 0.0");
+              "-20..20 and -30..30 cm, step 0.5, signed, live, shipped 4.0 and 23.0 (F181; 0.0 before)");
     }
     // F180 (TEMPORARY): "Standing ADS spine straighten" and "Neck guard distance" are the tenth and eleventh number rows of the developer tier's native on foot rows, right after "Standing ADS body left /
-    // right" on the same page and under the same heading, in that order: the straighten 0..1 in steps of 0.05, not signed, live, shipped 0.0; the guard 0..20 cm in steps of 0.5, not signed, live, shipped
-    // 10.0 (F179's distance; 0 turns it off). They carry no old value over.
+    // right" on the same page and under the same heading, in that order: the straighten 0..1 in steps of 0.05, not signed, live, shipped 0.9 since F181 (0.0 before); the guard 0..20 cm in steps of 0.5, not signed, live, shipped
+    // 2.0 since F181 (10.0 before; 0 turns it off). They carry no old value over.
     {
         int standLeft = -1, spineRow = -1, guardRow = -1, foundSpine = 0, foundGuard = 0;
         bool shaped = true;
@@ -2038,13 +2038,13 @@ void testLegacyOnFootRowsStayOutOfMenu() {
                 spineRow = i;
                 ++foundSpine;
                 shaped = shaped && d.kind == MenuKind::Number && d.tier == MenuTier::Experimental && strcmp(d.label, "Standing ADS spine straighten") == 0 && strcmp(d.lo, "0") == 0 && strcmp(d.hi, "1") == 0 &&
-                         strcmp(d.step, "0.05") == 0 && !d.showSign && d.applies == 1 && strcmp(d.shipped, "0.0") == 0;
+                         strcmp(d.step, "0.05") == 0 && !d.showSign && d.applies == 1 && strcmp(d.shipped, "0.9") == 0;
             }
             if (strcmp(d.key, "native_on_foot_neck_guard_cm") == 0) {
                 guardRow = i;
                 ++foundGuard;
                 shaped = shaped && d.kind == MenuKind::Number && d.tier == MenuTier::Experimental && strcmp(d.label, "Neck guard distance") == 0 && strcmp(d.lo, "0") == 0 && strcmp(d.hi, "20") == 0 &&
-                         strcmp(d.step, "0.5") == 0 && strcmp(d.unit, "cm") == 0 && !d.showSign && d.applies == 1 && strcmp(d.shipped, "10.0") == 0;
+                         strcmp(d.step, "0.5") == 0 && strcmp(d.unit, "cm") == 0 && !d.showSign && d.applies == 1 && strcmp(d.shipped, "2.0") == 0;
             }
         }
         const bool beside = standLeft >= 0 && spineRow == standLeft + 1 && guardRow == spineRow + 1 && strcmp(kMenuRows[spineRow].page, kMenuRows[standLeft].page) == 0 &&
@@ -2052,17 +2052,37 @@ void testLegacyOnFootRowsStayOutOfMenu() {
                             strcmp(kMenuRows[guardRow].group, kMenuRows[standLeft].group) == 0;
         check(foundSpine == 1 && foundGuard == 1 && shaped && beside,
               "Standing ADS spine straighten and Neck guard distance (F180, TEMPORARY) are one [experimental] number row each, right after Standing ADS body left / right in that order, on its page and under its heading: "
-              "0..1 step 0.05 shipped 0.0, and 0..20 cm step 0.5 shipped 10.0, both live and unsigned");
+              "0..1 step 0.05 shipped 0.9, and 0..20 cm step 0.5 shipped 2.0 (F181; 0.0 and 10.0 before), both live and unsigned");
     }
-    // F170 (TEMPORARY): "Crouched ADS torso square" is the twelfth number row of the developer tier's native on foot rows (the tenth before F180 put the two rows of its own between, the eighth before F178 put the two "Standing ADS body" rows between, the seventh before
-    // F171 put "Crouched ADS body left / right" before that), right after the neck guard distance row on the same page and under the same heading: 0..1 of the shoulder line's blade in steps of 0.05, not signed,
+    // F181 (TEMPORARY): "Hip elbow swivel max" is the twelfth number row of the developer tier's native on foot rows, right after "Neck guard distance" on the same page and under the same heading: 0..90 degrees
+    // in steps of 1, not signed, live, shipped 25.0 (90 leaves the game's pose). It carries no old value over.
+    {
+        int guardRow = -1, hipRow = -1, found = 0;
+        bool shaped = true;
+        for (int i = 0; i < kCount; ++i) {
+            const MenuRowDef& d = kMenuRows[i];
+            if (strcmp(d.section, "experimental") != 0) continue;
+            if (strcmp(d.key, "native_on_foot_neck_guard_cm") == 0) guardRow = i;
+            if (strcmp(d.key, "native_on_foot_hip_elbow_swivel_max_deg") == 0) {
+                hipRow = i;
+                ++found;
+                shaped = shaped && d.kind == MenuKind::Number && d.tier == MenuTier::Experimental && strcmp(d.label, "Hip elbow swivel max") == 0 && strcmp(d.lo, "0") == 0 && strcmp(d.hi, "90") == 0 &&
+                         strcmp(d.step, "1") == 0 && strcmp(d.unit, "deg") == 0 && !d.showSign && d.applies == 1 && strcmp(d.shipped, "25.0") == 0;
+            }
+        }
+        const bool beside = guardRow >= 0 && hipRow == guardRow + 1 && strcmp(kMenuRows[hipRow].page, kMenuRows[guardRow].page) == 0 && strcmp(kMenuRows[hipRow].group, kMenuRows[guardRow].group) == 0;
+        check(found == 1 && shaped && beside,
+              "Hip elbow swivel max (F181, TEMPORARY) is one [experimental] number row right after Neck guard distance, on its page and under its heading: 0..90 deg, step 1, unsigned, live, shipped 25.0");
+    }
+    // F170 (TEMPORARY): "Crouched ADS torso square" is the thirteenth number row of the developer tier's native on foot rows (the twelfth before F181 put "Hip elbow swivel max" before it, the tenth before F180 put the two rows of its own between, the eighth before F178 put the two "Standing ADS body" rows between, the seventh before
+    // F171 put "Crouched ADS body left / right" before that), right after the hip elbow swivel row on the same page and under the same heading: 0..1 of the shoulder line's blade in steps of 0.05, not signed,
     // live, shipped 0.0 since F173 (1.0 before: the turn was on), labelled without (test). It carries no old value over.
     {
         int leftRow = -1, squareRow = -1, found = 0;
         bool shaped = true;
         for (int i = 0; i < kCount; ++i) {
             const MenuRowDef& d = kMenuRows[i];
-            if (strcmp(d.section, "experimental") == 0 && strcmp(d.key, "native_on_foot_neck_guard_cm") == 0) leftRow = i;
+            if (strcmp(d.section, "experimental") == 0 && strcmp(d.key, "native_on_foot_hip_elbow_swivel_max_deg") == 0) leftRow = i;
             if (strcmp(d.section, "experimental") != 0 || strcmp(d.key, "native_on_foot_crouch_ads_square") != 0) continue;
             squareRow = i;
             ++found;
@@ -2072,9 +2092,9 @@ void testLegacyOnFootRowsStayOutOfMenu() {
         const bool beside = leftRow >= 0 && squareRow == leftRow + 1 && strcmp(kMenuRows[squareRow].page, kMenuRows[leftRow].page) == 0 &&
                             strcmp(kMenuRows[squareRow].group, kMenuRows[leftRow].group) == 0;
         check(found == 1 && shaped && beside,
-              "Crouched ADS torso square (F170, TEMPORARY) is one [experimental] number row right after Neck guard distance (F180; Standing ADS body left / right before F180), on its page and under its heading: 0..1, step 0.05, unsigned, live, shipped 0.0 (F173; 1.0 before)");
+              "Crouched ADS torso square (F170, TEMPORARY) is one [experimental] number row right after Hip elbow swivel max (F181; Neck guard distance before F181), on its page and under its heading: 0..1, step 0.05, unsigned, live, shipped 0.0 (F173; 1.0 before)");
     }
-    // F169 (TEMPORARY): "Pistol sprint arm swing phase" is the thirteenth number row of the developer tier's native on foot rows (the eleventh before F180 put two rows before the torso square, the seventh before F170 put "Crouched ADS torso square" between, the eighth
+    // F169 (TEMPORARY): "Pistol sprint arm swing phase" is the fourteenth number row of the developer tier's native on foot rows (the eleventh before F180 put two rows before the torso square, the seventh before F170 put "Crouched ADS torso square" between, the eighth
     // before F171 put "Crouched ADS body left / right" before that, the ninth before F178 put the two "Standing ADS body" rows before that), right after the torso square row on the same page and under the same heading: 0..1 of a stride in steps of 0.05, not signed,
     // live, shipped 0.5 since F173 (0.0 before), labelled without (test). It carries no old value over.
     {

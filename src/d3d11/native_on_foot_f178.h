@@ -3,7 +3,7 @@
 //
 // The pilot, after F173: the crouched fix (the body put to the left of the gun so the stock sits in the right shoulder, not the left) is wanted standing too, with rifles. Two dials in
 // experimental, so the standing pose can be dialled in the headset and the values baked later: experimental.native_on_foot_stand_ads_body_forward_cm (-20..+20 cm, positive toward the
-// gun) and experimental.native_on_foot_stand_ads_body_left_cm (-30..+30 cm, positive to the left of the aim line). Both ship at 0, so nothing changes until the pilot moves them.
+// gun) and experimental.native_on_foot_stand_ads_body_left_cm (-30..+30 cm, positive to the left of the aim line). Both shipped at 0 (nothing changed until the pilot moved them); F181 made the pilot's flown values the defaults: 4 cm forward and 23 cm left.
 //
 // They are the crouched pair's moves with the STANDING weight in place of the crouched one: (1 - F163's crouched weight) x the ADS detach weight. So a crouch blends one pair into the
 // other: at the crouched weight 0 the standing pair is whole and the crouched pair is 0, at 1 the reverse, at 0.5 each is half; at the hip (detach 0) both are 0. The move itself is F168's
