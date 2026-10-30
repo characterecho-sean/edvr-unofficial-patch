@@ -324,7 +324,7 @@ cbuffer P : register(b0) {
     float4 tvCand;      // xyz the same for the instrument's swapped-eyes candidate
     float4 tvCam;       // xyz the translation term for the camera rows (the world path); w 1 = the world path is on
     float4 split;       // x the ship's radius in metres (nearer: the head's delta; farther and the far plane: the camera's); yzw unused
-    float4 probe;       // x history scale, y registration probes, z coverage bound; w bits: 1 fixed bias, 2 prior UI valid, 4 adaptive UI, 8 (retired 2026-10-01: terrain), 16 holo, 32 screen, 64 t6 (the smoke's depth) not bound, 128 the scanner's screen is up (its interface takes the head's path), 256 t7 (the private UI depth) not bound (until 319c1c5a, 2026-09-23, 256 was the retired per-object motion's bit: an eye dump older than that means that by it), 512 the uncovered-ground rule (#146: on foot, engine-record motion bound, experimental.weapon_uncovered_ground on), so backgroundHistoryHidden also hides a point that was covered on all four texels of last frame's depth, 8192 the celestial records are bound (t15)
+    float4 probe;       // x history scale, y registration probes, z coverage bound; w bits: 1 fixed bias, 2 prior UI valid, 4 adaptive UI, 8 (retired 2026-10-01: terrain), 16 holo, 32 screen, 64 t6 (the smoke's depth) not bound, 128 the scanner's screen is up (its interface takes the head's path), 256 t7 (the private UI depth) not bound (until 319c1c5a, 2026-09-23, 256 was the retired per-object motion's bit: an eye dump older than that means that by it), 512 the uncovered-ground rule (#146: set on foot in VR with engine-record motion bound), so backgroundHistoryHidden also hides a point that was covered on all four texels of last frame's depth, 8192 the celestial records are bound (t15)
     float4 holoJitter; // current minus previous raster jitter; z = consecutive treated frames; w = valid DLSS depth history
 };
 float3 rgbToYcocg(float3 c) {
@@ -691,8 +691,7 @@ bool backgroundHistoryHidden(int2 local,float2 p,float2 motion,float zraw,float 
     // the point was behind something, and its history hid it, whatever stands
     // beside the pixel now: the terrain a held weapon is swept past, the weapon
     // two texels away while the terrain moved thirty to sixty (#146, probe.w
-    // bit 512 = experimental.weapon_uncovered_ground, on foot, engine-record
-    // motion bound).
+    // bit 512, set on foot in VR with engine-record motion bound).
     // A still edge never meets this: the pixel's own texel was background then.
     // Judged against the pixel's OWN depth, not zPred: the world path takes
     // zPred from the nearest depth of its 3x3, so one texel from the weapon it
@@ -1179,76 +1178,6 @@ R"HLSL(
     for (uint flushed = gi; flushed < 88u; flushed += 64u)
         if (gCount[flushed] != 0) InterlockedAdd(Stats[flushed < 48u ? flushed : flushed + 2u], gCount[flushed]);
 #endif
-}
-// The history-invalid vector on a held weapon's own rim (#146, experimental.clean_weapon_edges,
-// docs/weapon-edge-ghost-2026-10-29.md). DLSS takes, for each output pixel, the motion vector of the nearest-depth texel
-// around it, so a background texel one texel outside the weapon's silhouette gets the WEAPON's vector and its history is
-// dragged along with the gun (eye dump 194734935001: the weapon's vector explains 48 to 84 % of the hidden ring's output).
-// mv already writes the history-invalid vector (size * 2) into background whose history was hidden, and DLSS honours it two
-// texels out, but at the one-texel ring its dilation reads the foreground texel's vector instead. Here a tracked foreground
-// texel (the engine record's own motion, enginePixelZ kind 1, decision path 11) that sits beside a FARTHER texel whose vector
-// differs by more than half a texel, or is itself history-invalid, and that no foreground pixel takes as its nearest-depth
-// neighbour, takes the vector of the farthest texel beside it (the history-invalid vector when one of them is), so the
-// dilation hands the ring the background's own history, or none where it was uncovered; every other texel keeps its vector.
-// Runs right after mv with the same views, on a copy of mv's vectors (MVW, t5) so every texel judges its neighbours' vectors
-// as mv wrote them. The call to enginePixelZ touches no counter: mv's are counted after its own call, and the statics it
-// sets are private to the thread.
-Texture2D<float2> MVW : register(t5);
-[numthreads(8, 8, 1)]
-void weaponEdges(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
-    int2 local = int2(gi & 7u, gi >> 3u);
-    int2 origin = int2(id.xy) - local;
-    for (uint k = gi; k < 144; k += 64) {
-        int2 q = clamp(origin + int2(k % 12, k / 12) - 2, int2(0,0), size - 1);
-        mvDepthTile[k] = zSceneAt(region.xy + q);
-    }
-    GroupMemoryBarrierWithGroupSync();
-    if (id.x >= (uint)size.x || id.y >= (uint)size.y) return;
-    const int2 texel = int2(id.xy);
-    const float zRaw = mvDepthTile[(local.y + 2) * 12 + local.x + 2];
-    const float zHere = zRaw - knobs.x;
-    if (zHere <= 0.0) return;
-    const float2 vHere = MVW.Load(int3(texel, 0));
-    if (vHere.x >= float(size.x)) return;
-    bool candidate = false;
-    bool hidden = false;
-    float zFar = zHere;
-    float2 vFar = vHere;
-    [unroll] for (int dy = -1; dy <= 1; ++dy) {
-        [unroll] for (int dx = -1; dx <= 1; ++dx) {
-            if (dx != 0 || dy != 0) {
-                // Farther by the same relative margin backgroundHistoryHidden uses; the far plane (no depth) is farther.
-                const float zBeside = mvDepthTile[(local.y + 2 + dy) * 12 + local.x + 2 + dx] - knobs.x;
-                if (zBeside * 1.03 < zHere) {
-                    const float2 vBeside = MVW.Load(int3(clamp(texel + int2(dx, dy), int2(0, 0), size - 1), 0));
-                    if (vBeside.x >= float(size.x)) { candidate = true; hidden = true; }
-                    else if (length(vBeside - vHere) > 0.5) candidate = true;
-                    if (zBeside < zFar) { zFar = zBeside; vFar = vBeside; }
-                }
-            }
-        }
-    }
-    if (!candidate) return;
-    // Only a texel no foreground pixel reads. DLSS gives each pixel the vector of the nearest-depth texel in its 3x3 of the
-    // raw depth above, so a texel that is the nearest (ties included) in the 3x3 of any pixel that is not 3 % farther than
-    // it, itself included, feeds that pixel -- the gun's own edge -- and keeps its vector. One that no such pixel takes feeds
-    // only the ring around the weapon, and there the background's own vector (the farthest beside it) is the right one;
-    // the history-invalid vector where the background was uncovered.
-    [unroll] for (int fy = -1; fy <= 1; ++fy) {
-        [unroll] for (int fx = -1; fx <= 1; ++fx) {
-            const int2 fIdx = local + 2 + int2(fx, fy);
-            if (mvDepthTile[fIdx.y * 12 + fIdx.x] * 1.03 >= zRaw) {
-                float zMax = 0.0;
-                [unroll] for (int ey = -1; ey <= 1; ++ey) {
-                    [unroll] for (int ex = -1; ex <= 1; ++ex)
-                        zMax = max(zMax, mvDepthTile[(fIdx.y + ey) * 12 + fIdx.x + ex]);
-                }
-                if (zMax <= zRaw) return;
-            }
-        }
-    }
-    float2 engineP; float engineZ;
-    if (enginePixelZ(float2(texel), 0, true, zRaw, engineP, engineZ) == 1u) MV[id.xy] = hidden ? float2(size) * 2.0 : vFar;
 }
 )HLSL"
 // (adjacent literals: MSVC caps one at 16 KB)

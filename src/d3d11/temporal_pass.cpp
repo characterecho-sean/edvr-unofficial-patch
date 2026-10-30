@@ -187,10 +187,6 @@ struct EyeState {
     ID3D11Texture2D*           dlMv = nullptr;
     ID3D11UnorderedAccessView* dlMvUav = nullptr;
     ID3D11ShaderResourceView*  dlMvSrv = nullptr;
-    // #146: a copy of the vectors mv wrote, which the weapon-edges entry reads (t5) while it overwrites the weapon's rim in dlMv.
-    // Made on the first frame that runs the entry, at dlMv's size; gone with the set it was copied from.
-    ID3D11Texture2D*           dlMvCopy = nullptr;
-    ID3D11ShaderResourceView*  dlMvCopySrv = nullptr;
     // Exists only while an explicit eye run asks for the capture-only mv
     // variant (its u7 decision texture).
     ID3D11Texture2D*           dlDecision = nullptr;
@@ -284,8 +280,6 @@ void releaseDl(EyeState& e) {
     e.uiMaskRes = nullptr;
     if (e.dlColourSrv) { e.dlColourSrv->Release(); e.dlColourSrv = nullptr; }
     if (e.dlMvSrv) { e.dlMvSrv->Release(); e.dlMvSrv = nullptr; }
-    if (e.dlMvCopySrv) { e.dlMvCopySrv->Release(); e.dlMvCopySrv = nullptr; }
-    if (e.dlMvCopy) { e.dlMvCopy->Release(); e.dlMvCopy = nullptr; }
     if (e.dlDepthSrv) { e.dlDepthSrv->Release(); e.dlDepthSrv = nullptr; }
     if (e.dlMvUav) { e.dlMvUav->Release(); e.dlMvUav = nullptr; }
     if (e.dlDecisionUav) { e.dlDecisionUav->Release(); e.dlDecisionUav = nullptr; }
@@ -1076,38 +1070,6 @@ ID3D11ComputeShader*       g_csMvTrace = nullptr;
 bool                       g_csMvTraceTried = false;
 ID3D11ComputeShader*       g_csEyeJumpLattice = nullptr;
 bool                       g_csEyeJumpLatticeTried = false;
-
-// #146, the held weapon's edges (docs/weapon-edge-ghost-2026-10-29.md; experimental.clean_weapon_edges, a TEMPORARY A/B key, default on). On foot, with
-// engine-record motion bound, the weaponEdges entry (temporal_shader_source.h) runs right after mv and gives a tracked foreground texel that sits beside
-// a farther texel moving differently, and that no foreground pixel takes as its nearest-depth neighbour, the farther texel's vector (the history-invalid
-// vector where that texel is hidden), so DLSS's nearest-depth dilation hands the ring around the gun the background's own history. Separately, under
-// experimental.weapon_uncovered_ground (TEMPORARY, default on), mv, via probe.w bit 512, hides background whose reprojected point was covered on all four
-// texels of last frame's depth, judged against the pixel's own depth. Two keys so the flights can judge each apart; both off is main's behaviour.
-// The keys are read live in temporalPassConfigure (any thread); the counts belong to the render thread. The 10 s line is told from the eye treat, only
-// while on foot with the rim key on, and says what the C++ side did, so a log with no line is a build without the pass or a session not on foot.
-struct WeaponEdgesState {
-    std::atomic<bool> keyOn{true};
-    std::atomic<bool> uncoveredOn{true};     // experimental.weapon_uncovered_ground
-    bool              keyTold = false;       // the state at the first read is told, then every change
-    bool              uncoveredTold = false;
-    uint32_t          passes = 0;            // eye-frames the pass was dispatched, in this window
-    uint32_t          noEngine = 0;          // ...wanted, but engine-record motion was not bound
-    uint32_t          notTrained = 0;        // ...wanted, but the trained path's mv did not run
-    uint32_t          notMade = 0;           // ...wanted, bound and trained, but the shader or the copy could not be made
-    ULONGLONG         lineMs = 0;            // when the 10 s line last printed
-    bool              notMadeNoted = false;
-};
-WeaponEdgesState g_weaponEdges;
-ID3D11ComputeShader*       g_csWeaponEdges = nullptr;
-bool                       g_csWeaponEdgesTried = false;
-ID3D11ComputeShader* weaponEdgesShader(ID3D11DeviceContext* ctx) {
-    if (!g_csWeaponEdges && !g_csWeaponEdgesTried) {
-        g_csWeaponEdgesTried = true;
-        g_csWeaponEdges = shaderSwapCreateCs(ctx, kTemporalWeaponEdgesBytecode, sizeof(kTemporalWeaponEdgesBytecode),
-                                             "temporal_weapon_edges_cs", "temporal aa");
-    }
-    return g_csWeaponEdges;
-}
 
 ID3D11ComputeShader* motionShader(ID3D11DeviceContext* ctx, bool diagnostics) {
     auto*& shader = diagnostics ? g_csMv : g_csMvFast;
@@ -3357,51 +3319,6 @@ bool ensureDecisionTexture(ID3D11Device* dev, EyeState& e, uint32_t w, uint32_t 
     return false;
 }
 
-// #146: the copy of mv's vectors that the weapon-edges entry reads, at dlMv's size and format. Made on the first frame that runs the entry and kept
-// (releaseDl drops it with the set it copies); a size that no longer matches is remade.
-bool ensureMvCopy(ID3D11Device* dev, EyeState& e, uint32_t w, uint32_t h) {
-    if (e.dlMvCopy && e.dlMvCopySrv) {
-        D3D11_TEXTURE2D_DESC d{}; e.dlMvCopy->GetDesc(&d);
-        if (d.Width == w && d.Height == h) return true;
-    }
-    if (e.dlMvCopySrv) { e.dlMvCopySrv->Release(); e.dlMvCopySrv = nullptr; }
-    if (e.dlMvCopy) { e.dlMvCopy->Release(); e.dlMvCopy = nullptr; }
-    if (makeTex(dev, w, h, DXGI_FORMAT_R16G16_FLOAT, DXGI_FORMAT_R16G16_FLOAT, D3D11_BIND_SHADER_RESOURCE,
-                &e.dlMvCopy, &e.dlMvCopySrv, nullptr)) return true;
-    if (e.dlMvCopySrv) { e.dlMvCopySrv->Release(); e.dlMvCopySrv = nullptr; }
-    if (e.dlMvCopy) { e.dlMvCopy->Release(); e.dlMvCopy = nullptr; }
-    return false;
-}
-
-// #146: the weapon-edges entry, straight after the mv dispatch with the same views, constants and sampler still bound (the caller keeps b1 and b2 up
-// until it restores them). u3 is taken off dlMv for the copy, the copy goes to t5, and u3 comes back as the only unordered view: the entry overwrites
-// the weapon's rim in dlMv and reads nothing from it. False when the shader or the copy could not be made, nothing dispatched.
-bool dispatchWeaponEdges(ID3D11Device* dev, ID3D11DeviceContext* ctx, EyeState& e, uint32_t w, uint32_t h, bool traceReady) {
-    ID3D11ComputeShader* cs = weaponEdgesShader(ctx);
-    if (!cs || !e.dlMv || !e.dlMvUav || !ensureMvCopy(dev, e, w, h)) return false;
-    ID3D11UnorderedAccessView* none[8] = {};
-    ctx->CSSetUnorderedAccessViews(0, traceReady ? 8 : 7, none, nullptr);
-    ctx->CopyResource(e.dlMvCopy, e.dlMv);
-    ctx->CSSetShaderResources(5, 1, &e.dlMvCopySrv);
-    ctx->CSSetUnorderedAccessViews(3, 1, &e.dlMvUav, nullptr);
-    ctx->CSSetShader(cs, nullptr, 0);
-    ctx->Dispatch((w + 7) / 8, (h + 7) / 8, 1);
-    return true;
-}
-
-// #146: the 10 s line, from the eye treat, only while the pass is wanted (on foot, key on). Counts are the C++ side's, so a line proves what ran.
-void weaponEdgesTick() {
-    const ULONGLONG now = GetTickCount64();
-    if (g_weaponEdges.lineMs == 0) { g_weaponEdges.lineMs = now; return; }
-    if (now - g_weaponEdges.lineMs < 10000) return;
-    Log::get().note("weapon edges (#146) 10 s: rim passes %u (eye-frames), not run %u [no engine binding %u, not trained %u]",
-                    g_weaponEdges.passes, g_weaponEdges.noEngine + g_weaponEdges.notTrained + g_weaponEdges.notMade,
-                    g_weaponEdges.noEngine, g_weaponEdges.notTrained);
-    g_weaponEdges.passes = g_weaponEdges.noEngine = g_weaponEdges.notTrained = g_weaponEdges.notMade = 0;
-    g_weaponEdges.lineMs = now;
-}
-
-
 // The mask NVIDIA is handed is R8_UNORM written from a compute shader,
 // which needs typed unordered access to that format -- checked once, and
 // its absence only loses NVIDIA's copy of the mask, never the own pass's.
@@ -4675,11 +4592,6 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
             }
             return true;
         };
-        // #146: the weapon-edges pass is wanted on foot with experimental.clean_weapon_edges on (footSplitNow, above, set g_foot for this eye-frame).
-        // The trained block below says whether its mv ran; the counts and the 10 s line follow it.
-        const bool weaponEdgesWanted = g_weaponEdges.keyOn.load(std::memory_order_relaxed) && g_foot.on;
-        const bool uncoveredGroundWanted = g_weaponEdges.uncoveredOn.load(std::memory_order_relaxed) && g_foot.on;
-        bool weaponEdgesMvRan = false;
         if ((flags & 2u) != 0 && fmtIndex == 0) {
             warmNoteFirstTreat();   // before NGX's first ask, below
             const char* why = "";
@@ -4865,10 +4777,12 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     // Bit 16384 and t23: the skinned characters' exact previous position (the second skin).
                     if (engineBound && engineSkinSrv)
                         p.probe[3] = static_cast<float>(static_cast<uint32_t>(p.probe[3]) | 16384u);
-                    // Bit 512 (#146, experimental.weapon_uncovered_ground): on foot with engine-record motion bound, backgroundHistoryHidden also
-                    // hides background whose reprojected point was covered on all four texels of last frame's depth.
-                    // Set here for this dispatch only: probe[3] is rebuilt from uiFlags() at every mv and own-path dispatch, and no other entry reads the bit.
-                    if (uncoveredGroundWanted && engineBound)
+                    // Bit 512 (#146, docs/weapon-edge-ghost-2026-10-29.md): backgroundHistoryHidden also hides background whose reprojected point was
+                    // covered on all four texels of last frame's depth, so ground a held weapon was swept past starts afresh instead of showing the
+                    // weapon's old image. On foot, VR profile only (the profile read per eye-frame, one relaxed load, as eyeTargetRuleOn does),
+                    // with engine-record motion bound. For this dispatch only: probe[3] is rebuilt from uiFlags() at every dispatch, and no other
+                    // entry reads the bit.
+                    if (g_foot.on && engineBound && !runtimeFlatProfile())
                         p.probe[3] = static_cast<float>(static_cast<uint32_t>(p.probe[3]) | 512u);
                     engineCounted = engineBound && diagnostics;
                     // A masked engine pixel sets the bias mask too, for the
@@ -4920,23 +4834,6 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     gpuCensusBegin(ctx, GpuCensusSection::DoorMotionPrep);
                     beginPart(qs, PrepPart::Mv, dev, ctx);
                     ctx->Dispatch((w + 7) / 8, (h + 7) / 8, 1);
-                    weaponEdgesMvRan = true;
-                    // #146: on foot, the weapon's rim takes the history-invalid vector. Inside the Mv part, so the prep price includes it, and
-                    // before b1 and b2 are put back (the entry needs b0, b1, b2 and mv's views) and before stageEyeInputs copies dlMv for a dump.
-                    if (weaponEdgesWanted) {
-                        if (!engineBound) {
-                            ++g_weaponEdges.noEngine;
-                        } else if (dispatchWeaponEdges(dev, ctx, e, w, h, traceReady)) {
-                            ++g_weaponEdges.passes;
-                        } else {
-                            ++g_weaponEdges.notMade;
-                            if (!g_weaponEdges.notMadeNoted) {
-                                g_weaponEdges.notMadeNoted = true;
-                                Log::get().note("weapon edges (#146): the pass could not be made (the shader or the %ux%u copy of the vectors); "
-                                                "the mv pass's vectors go to the upscaler as written.", w, h);
-                            }
-                        }
-                    }
                     endPart(qs, PrepPart::Mv, ctx);
                     gpuCensusEnd(ctx, GpuCensusSection::DoorMotionPrep);
                     if (engineBound) {
@@ -5223,16 +5120,6 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     }
                 }
             }
-        }
-
-        // #146: an eye-frame where the pass was wanted and the trained path's mv never ran (the pass's own history, a format the trained path
-        // refuses, no engine) counts as not trained; off foot or with the key off the window is dropped, so the line always covers 10 s on foot.
-        if (weaponEdgesWanted) {
-            if (!weaponEdgesMvRan) ++g_weaponEdges.notTrained;
-            weaponEdgesTick();
-        } else {
-            g_weaponEdges.lineMs = 0;
-            g_weaponEdges.passes = g_weaponEdges.noEngine = g_weaponEdges.notTrained = g_weaponEdges.notMade = 0;
         }
 
         if (viaCopy && !usedDlaa) {
@@ -5768,36 +5655,6 @@ void temporalPassConfigure(Config& cfg) {
                                         : "");
         }
         skyRingConfigure(cfg.getString("diag.sky_ring", "off") == "on");
-    }
-    // #146 (docs/weapon-edge-ghost-2026-10-29.md): experimental.clean_weapon_edges (the rim pass) and experimental.weapon_uncovered_ground (the
-    // hidden test's covered rule), TEMPORARY A/B keys, default on, live (this runs on every config reload), VR only: the flat allow-list does not
-    // list them, so flat reads off and says nothing. Each key's state at the first read is told, then every change.
-    {
-        const bool asked = cfg.getString("experimental.clean_weapon_edges", "on") == "on";
-        const bool changed = asked != g_weaponEdges.keyOn.load(std::memory_order_relaxed);
-        g_weaponEdges.keyOn.store(asked, std::memory_order_relaxed);
-        if (!runtimeFlatProfile() && (!g_weaponEdges.keyTold || changed)) {
-            g_weaponEdges.keyTold = true;
-            if (asked) {
-                Log::get().note(
-                    "weapon edges (#146): rim on -- on foot, a tracked foreground texel beside a farther texel whose vector differs by more than half a "
-                    "texel, or is hidden, and that no level-or-nearer texel takes as its nearest-depth neighbour, carries the farthest such texel's vector "
-                    "(the history-invalid vector when one is hidden), so DLSS's nearest-depth dilation hands the ring around the weapon the background's "
-                    "own history.");
-            } else {
-                Log::get().note("weapon edges (#146): rim off -- the mv pass's vectors go to DLSS as written.");
-            }
-        }
-        const bool uncovered = cfg.getString("experimental.weapon_uncovered_ground", "on") == "on";
-        const bool uncoveredChanged = uncovered != g_weaponEdges.uncoveredOn.load(std::memory_order_relaxed);
-        g_weaponEdges.uncoveredOn.store(uncovered, std::memory_order_relaxed);
-        if (!runtimeFlatProfile() && (!g_weaponEdges.uncoveredTold || uncoveredChanged)) {
-            g_weaponEdges.uncoveredTold = true;
-            Log::get().note(uncovered
-                ? "weapon edges (#146): uncovered ground on -- on foot, background whose reprojected point was covered on all four texels of last frame's "
-                  "depth, nearer than the pixel's own depth, counts as hidden even with the weapon still beside it."
-                : "weapon edges (#146): uncovered ground off -- the hidden test is main's.");
-        }
     }
     // The same test native_temporal.cpp's Settings::dlaa makes (flags bit 1
     // at the treat): only an external engine (dlaa, dlss, fsr) touches NGX
@@ -7019,11 +6876,6 @@ void temporalPassShutdown() {
     if (g_csMvFast) { g_csMvFast->Release(); g_csMvFast = nullptr; }
     if (g_csMvTrace) { g_csMvTrace->Release(); g_csMvTrace = nullptr; }
     g_csMvTraceTried = false;
-    if (g_csWeaponEdges) { g_csWeaponEdges->Release(); g_csWeaponEdges = nullptr; }
-    g_csWeaponEdgesTried = false;
-    g_weaponEdges.passes = g_weaponEdges.noEngine = g_weaponEdges.notTrained = g_weaponEdges.notMade = 0;
-    g_weaponEdges.lineMs = 0;
-    g_weaponEdges.notMadeNoted = false;
     if (g_passDevice) { g_passDevice->Release(); g_passDevice = nullptr; }
     if (g_csUiResolve) { g_csUiResolve->Release(); g_csUiResolve=nullptr; }
     g_csUiResolveTried=g_uiResolveNoted=false;

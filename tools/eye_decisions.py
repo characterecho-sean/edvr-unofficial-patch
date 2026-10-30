@@ -512,8 +512,8 @@ def rim_report(manifest_path):
                                 'weapon texels that read a vector other than their own. '
                                 'background_kept_on_old_foreground: the background texels not marked hidden at distance 1 and 2 from the weapon '
                                 '(kept), and how many (on_old_foreground) have p + their vector land on four of four weapon texels of the previous '
-                                'frame\'s decisions: history kept from behind the weapon, which weapon-edges v3 marks hidden; it should fall to near 0 '
-                                'with v3 on.'}
+                                'frame\'s decisions: history kept from behind the weapon, which the uncovered-ground rule (#146) marks hidden; it should fall to near 0 '
+                                'in a VR on-foot dump with engine-record motion bound.'}
     previous = None
     for index, entry in enumerate(frames):
         input_size = integers(entry.get('input_size'), 2, 'input size', True)

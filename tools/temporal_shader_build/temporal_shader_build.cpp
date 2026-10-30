@@ -467,8 +467,6 @@ static int generateTemporal(const Options& o) {
         {"kTemporalMvFastBytecode", "temporal_mv_fast_cs", "mv", fast, {}},
         {"kTemporalMvBytecode", "temporal_mv_cs", "mv", diagnostic, {}},
         {"kTemporalMvTraceBytecode", "temporal_mv_trace_cs", "mv", trace, {}},
-        // #146: the weapon's rim, after mv (experimental.clean_weapon_edges). One variant: it counts nothing and writes no decision, so the diagnostic and trace macros change nothing in it.
-        {"kTemporalWeaponEdgesBytecode", "temporal_weapon_edges_cs", "weaponEdges", fast, {}},
         {"kTemporalAaBytecode", "temporal_aa_cs", "main", diagnostic, {}},
         {"kTemporalAaFastBytecode", "temporal_aa_fast_cs", "main", fast, {}},
         {"kFlatMonoPrepBytecode", "flat_mono_prep_cs", "prep", nullptr, {}, true},
