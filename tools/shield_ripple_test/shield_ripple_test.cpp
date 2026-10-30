@@ -83,7 +83,8 @@ static void ruleTests() {
               !uiLayerRippleLiveFor(true, true, true),
           "the ripple is live for a temporal mode, the jitter as shipped, not stood down, in either profile");
     check(uiLayerMachineryLive(false, true) && !uiLayerMachineryLive(false, false), "the machinery runs for the ripple as it does for the weapons (their union is passed)");
-    check(static_cast<int>(UiLayerFamily::kShieldRipple) + 1 == static_cast<int>(UiLayerFamily::kCount), "the family is last in its enum");
+    check(static_cast<int>(UiLayerFamily::kShieldRipple) + 1 == static_cast<int>(UiLayerFamily::kScopeMark) && static_cast<int>(UiLayerFamily::kScopeMark) + 1 == static_cast<int>(UiLayerFamily::kCount),
+          "the family is last but one in its enum, the scope mark after it");
     UiLayerDrawFacts d;
     d.family = UiLayerFamily::kShieldRipple;
     d.eyeTarget = true;

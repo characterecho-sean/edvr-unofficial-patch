@@ -1848,7 +1848,8 @@ void testLegacyOnFootRowsStayOutOfMenu() {
     int nativePageRows = 0;
     for (int i = 0; i < kCount; ++i)
         if (strcmp(kMenuRows[i].page, "native_on_foot") == 0) ++nativePageRows;
-    check(nativePageRows == 17, "the Native on foot page has 17 rows (F177: Aiming choice at start, the [menu] key menu.aim_choice_prompt, which the page shows under Look to aim; F127: 21 rows went to edvr.ini and the installer's window, and Reticle follows was retired; "
+    check(nativePageRows == 18, "the Native on foot page has 18 rows (F177: Aiming choice at start, the [menu] key menu.aim_choice_prompt, which the page shows under Look to aim; "
+                                "A1: ADS: scope zoom joined Aiming down sights; F127: 21 rows went to edvr.ini and the installer's window, and Reticle follows was retired; "
                                 "F128: Visor axis (test) was retired with the correction always on; the panel cursor's F155 retired its F154's Panel cursor (test) row with the "
                                 "drawn placement shipped; F146: the ADS sight switch, the two ADS sight trims and the full outfit switch were retired, and the four Weapon UI trims "
                                 "went to [experimental]; F152: ADS eye distance was retired, its per-weapon trim is an [experimental] row)");   // the page's own order under Look to aim: the F177 pins in native_frame_test
@@ -1864,6 +1865,7 @@ void testLegacyOnFootRowsStayOutOfMenu() {
             {"native_on_foot_look_to_aim_smoothing_ms", "Look and aim"},
             {"native_on_foot_ads_sight_eye", "Aiming down sights"},
             {"native_on_foot_ads_head_aim", "Aiming down sights"},
+            {"native_on_foot_ads_scope_zoom", "Aiming down sights"},
             {"native_on_foot_eye_height_cm", "Body and view"},
             {"native_on_foot_weapon_view_offset_cm", "Body and view"},
             {"native_on_foot_weapon_eye_forward_cm", "Body and view"},

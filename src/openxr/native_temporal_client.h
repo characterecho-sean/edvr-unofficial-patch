@@ -7,6 +7,11 @@
 #include <wrl/client.h>
 
 namespace edvr::openxr {
+// The size begin() sends its frame at: the whole struct when eye 0 is drawn with the scope zoom's window (B3), else the size from before B3 appended its fields (the provider
+// takes either; a d3d11.dll from before B3 takes only that one).
+inline uint32_t temporalFrameSize(bool zoomed) {
+  return zoomed ? static_cast<uint32_t>(sizeof(EdvrNativeTemporalFrame)) : EDVR_NATIVE_TEMPORAL_FRAME_SIZE_NO_ZOOM;
+}
 // Unlike the menu, projection notes arrive on the game's system-query callers.
 // Fence the table's lifetime independently of the XR owner's serialization.
 // Provider begin/note/invalidate/close do CPU work only; treat is dispatched
@@ -36,13 +41,15 @@ class NativeTemporalClient final {
   // geometry's own widths are what the frame was rendered for); 0 unknown.
   HRESULT begin(const GeometryInput& geometry, uint64_t referenceGeneration, float (&shift)[2][2],
       const vr::HmdMatrix34_t* renderedHead = nullptr, uint32_t askedWidth = 0, uint32_t askedHeight = 0,
-      float trueUp = 0.0f, float trueDown = 0.0f) {
+      float trueUp = 0.0f, float trueDown = 0.0f, const RawFov* preZoomEye0 = nullptr) {
     std::memset(shift, 0, sizeof(shift));
     GeometrySnapshot snapshot{};
     if (!makeGeometrySnapshot(geometry, snapshot) || !referenceGeneration) { invalidate(); return E_INVALIDARG; }
     std::lock_guard<std::mutex> lock(mutex_);
     if (!table_.context) return S_FALSE;
-    EdvrNativeTemporalFrame frame{sizeof(frame), EDVR_NATIVE_TEMPORAL_VERSION_1};
+    // A frame with no zoom is sent at the size from before B3 appended its fields, so the key-off wire form is the parent's byte for byte and an older d3d11.dll (which requires
+    // exactly that size) still begins it.
+    EdvrNativeTemporalFrame frame{temporalFrameSize(preZoomEye0 != nullptr), EDVR_NATIVE_TEMPORAL_VERSION_1};
     frame.generation = generation_; frame.referenceGeneration = referenceGeneration; frame.sequence = geometry.sequence;
     std::memcpy(frame.head, snapshot.headToLocal.m, sizeof(frame.head));
     if (renderedHead) std::memcpy(frame.head, renderedHead->m, sizeof(frame.head));
@@ -58,6 +65,11 @@ class NativeTemporalClient final {
     frame.askedHeight = askedHeight;
     frame.trueUp = trueUp;
     frame.trueDown = trueDown;
+    if (preZoomEye0) {
+      frame.zoomed = 1u;
+      frame.preZoom[0] = preZoomEye0->left; frame.preZoom[1] = preZoomEye0->right;
+      frame.preZoom[2] = preZoomEye0->top; frame.preZoom[3] = preZoomEye0->bottom;
+    }
     EdvrNativeTemporalProjection output{sizeof(output), EDVR_NATIVE_TEMPORAL_VERSION_1};
     const auto result = table_.beginFrame(table_.context, &frame, &output);
     if (result != S_OK) return result;

@@ -49,7 +49,7 @@ static bool wiredVscreenBars(const std::string& t) {
     return found(t.substr(begin, 120).find("layered && barsDecided"));
 }
 static bool wiredGatherer(const std::string& t) {
-    const size_t fn = t.find("UiLayerFamily uiLayerFamilyOf(State* s, char kind, UINT count) {");
+    const size_t fn = t.find("UiLayerFamily uiLayerFamilyOf(State* s, char kind, UINT count, UINT instances) {");
     if (!found(fn)) return false;
     const size_t read = t.find("if (f.targetKind == 1 && (f.vs == kHoloTargetSphere || f.vs == kUiVsOrbitLines || f.vs == kUiVsSupercruiseBars || f.vs == kUiVsSpaceDust))", fn);
     const size_t ps = t.find("f.ps = bindingShaderHash(BindSlot::Ps);", fn);

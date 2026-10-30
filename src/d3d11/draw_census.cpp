@@ -264,7 +264,13 @@ uint32_t g_censusNo = 0;         // numbers the begin/end lines, so the diff
 uint32_t g_frameOrdinal = 0;     // 0-based frame within the running census
 uint32_t g_draws = 0;            // draws recorded (kept counting past the cap)
 uint32_t g_drawsThisFrame = 0;
-uint32_t g_lines = 0;
+uint32_t g_lines = 0;            // lines written, of every kind
+// The eye draws ("DC": the lit eye's whole frame, the glass and the reticle among them) have a budget of their own, equal to the cap, and every other line (offscreen draws, copies,
+// clears, dispatches) is capped by the same number on its own. Offscreen draws once spent the shared 16384 lines and evicted the eye draws of the later frames (truncated=4704 and 5730 in
+// the ADS censuses of 2026-10-29), which are the ones a census of the sights is taken for.
+uint32_t g_eyeLines = 0;         // lines written for eye draws
+uint32_t g_drawLines = 0;        // ... and for draws of every kind, against g_draws for the end line's truncated=
+bool otherLinesSpent() { return g_lines - g_eyeLines >= g_maxLines; }
 uint32_t g_overflow = 0;         // intern-table misses
 Interned g_tab[kMaxInterned];
 uint32_t g_tabCount = 0;
@@ -703,10 +709,10 @@ void dumpInternTable() {
 void finish() {
     dumpInternTable();
     Log::get().note("DC end census=%u draws=%u off=%u copies=%u disp=%u "
-                    "unseen=%u lines=%u interned=%u overflow=%u truncated=%u capture_id=%ls",
+                    "unseen=%u eye_lines=%u lines=%u interned=%u overflow=%u truncated=%u capture_id=%ls",
                     g_censusNo, g_draws, g_offDraws, g_copies, g_dispatches,
-                    g_unseen, g_lines, g_tabCount, g_overflow,
-                    g_draws > g_lines ? g_draws - g_lines : 0,detail::g_drawCensusCaptureIdActive?detail::g_drawCensusCaptureId:L"");
+                    g_unseen, g_eyeLines, g_lines, g_tabCount, g_overflow,
+                    g_draws > g_drawLines ? g_draws - g_drawLines : 0,detail::g_drawCensusCaptureIdActive?detail::g_drawCensusCaptureId:L"");
     if (g_unseen) {
         Log::get().note(
             "DC unseen: %u draws this census returned from the verdict chain "
@@ -797,8 +803,15 @@ static void recordDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
     // line cap -- a capped census keeps truthful q values on whatever lines
     // it does write, instead of renumbering the survivors.
     const uint32_t q = g_seq++;
-    if (g_lines >= g_maxLines) return;
-    ++g_lines;
+    if (tag[2] == '\0') {   // "DC": an eye draw, under its own budget
+        if (g_eyeLines >= g_maxLines) return;
+        ++g_eyeLines;
+        ++g_drawLines;
+        ++g_lines;
+    } else {
+        if (otherLinesSpent()) return;
+        ++g_lines;
+    }
 
     char rb[24], db[24], cb[24], s0b[24], s1b[24], s2b[24], s3b[24];
     const char* r = bindingToken(bindingGet(BindSlot::Rtv0), Kind::kView, rb, sizeof(rb));
@@ -1179,8 +1192,9 @@ void drawCensusDrawDirect(ID3D11DeviceContext* ctx, char kind, uint32_t count,
     ++g_draws;
     ++g_drawsThisFrame;
     const uint32_t q = g_seq++;
-    if (g_lines >= g_maxLines) return;
+    if (otherLinesSpent()) return;
     ++g_lines;
+    ++g_drawLines;
 
     ID3D11RenderTargetView* rtv = nullptr;
     ID3D11DepthStencilView* dsv = nullptr;
@@ -1254,7 +1268,7 @@ void drawCensusStructCount(void* dst, uint32_t dstOff, void* srcView,
     ++g_copies;
     ++g_copiesThisFrame;
     const uint32_t q = g_seq++;
-    if (g_lines >= g_maxLines) return;
+    if (otherLinesSpent()) return;
     ++g_lines;
     // The one call that moves a GPU-side element count into an argument
     // buffer -- the write that arms every DrawIndirect/DispatchIndirect
@@ -1277,7 +1291,7 @@ void drawCensusCopy(char kind, void* dst, uint32_t dstSub, uint32_t dstX,
     ++g_copies;
     ++g_copiesThisFrame;
     const uint32_t q = g_seq++;
-    if (g_lines >= g_maxLines) return;
+    if (otherLinesSpent()) return;
     ++g_lines;
 
     // Resources, not views: both arguments arrive as ID3D11Resource*, which is
@@ -1304,7 +1318,7 @@ void drawCensusResolve(void* dst, uint32_t dstSub, void* src, uint32_t srcSub,
     ++g_copies;
     ++g_copiesThisFrame;
     const uint32_t q = g_seq++;
-    if (g_lines >= g_maxLines) return;
+    if (otherLinesSpent()) return;
     ++g_lines;
 
     char db[24], sb[24];
@@ -1326,7 +1340,7 @@ void drawCensusClearColor(void* rtv, const float c[4], bool foreignCtx) {
     ++g_clears;
     ++g_clearsThisFrame;
     const uint32_t q = g_seq++;
-    if (g_lines >= g_maxLines) return;
+    if (otherLinesSpent()) return;
     ++g_lines;
     char rb[24];
     const char* r = bindingToken(rtv, Kind::kView, rb, sizeof(rb));
@@ -1341,7 +1355,7 @@ void drawCensusClearDepth(void* dsv, uint32_t flags, float depth,
     ++g_clears;
     ++g_clearsThisFrame;
     const uint32_t q = g_seq++;
-    if (g_lines >= g_maxLines) return;
+    if (otherLinesSpent()) return;
     ++g_lines;
     char db[24];
     const char* d = bindingToken(dsv, Kind::kView, db, sizeof(db));
@@ -1360,7 +1374,7 @@ void drawCensusQuery(char kind, void* async, bool foreignCtx) {
     ++g_clears;
     ++g_clearsThisFrame;
     const uint32_t q = g_seq++;
-    if (g_lines >= g_maxLines) return;
+    if (otherLinesSpent()) return;
     ++g_lines;
     char ab[24];
     const char* a = bindingToken(async, Kind::kOpaque, ab, sizeof(ab));
@@ -1427,7 +1441,7 @@ void drawCensusDispatch(ID3D11DeviceContext* ctx, uint32_t x, uint32_t y,
     ++g_dispatches;
     ++g_dispThisFrame;
     const uint32_t q = g_seq++;
-    if (g_lines >= g_maxLines) return;
+    if (otherLinesSpent()) return;
     ++g_lines;
 
     // What this dispatch can WRITE: UAV slots 0-7, read straight off the
@@ -1673,6 +1687,8 @@ void drawCensusFrameBoundary(uint32_t frameNo) {
         g_draws = 0;
         g_drawsThisFrame = 0;
         g_lines = 0;
+        g_eyeLines = 0;
+        g_drawLines = 0;
         g_overflow = 0;
         g_tabCount = 0;
         g_offThisFrame = 0;

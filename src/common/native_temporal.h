@@ -1,6 +1,7 @@
 #pragma once
 #include <windows.h>
 #include <d3d11.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #define EDVR_NATIVE_TEMPORAL_VERSION_1 1u
@@ -30,7 +31,13 @@ struct EdvrNativeTemporalFrame {
   // told. fix.ui_quality's engine-side panel sizing takes
   // its untrimmed k from it. 0 when the host does not say.
   float trueUp, trueDown;
+  // B3 (the scope zoom): 1 when eye 0's frustum in `frusta` is the zoomed window this frame, and then eye 0's frustum without it, {left,right,down,up} as `frusta`. The announced
+  // frusta (the panels' size, the terrain cull's cover, the menu, the visor) stay these; DLSS, the jitter and the history follow `frusta`. 0 and zeros: eye 0 is not zoomed.
+  uint32_t zoomed;
+  float preZoom[4];
 };
+// The size of the frame before B3 appended its fields: a runtime from before them sends it, and begin() takes it (with no zoom). The two DLLs are copied apart by hand.
+#define EDVR_NATIVE_TEMPORAL_FRAME_SIZE_NO_ZOOM ((uint32_t)offsetof(EdvrNativeTemporalFrame, zoomed))
 struct EdvrNativeTemporalProjection {
   uint32_t size, version;
   float tangentShift[2][2]; // per-eye {dx,dy}, added to both endpoints on each axis

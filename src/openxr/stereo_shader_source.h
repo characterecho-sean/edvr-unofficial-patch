@@ -67,17 +67,23 @@ float4 ps(O o):SV_TARGET {
 // The left eye's share (F106). A left pixel's centre is a direction in the left view; rot turns it into the right view, where it lands on the right swapchain image (su);
 // the right eye's blit mapping (rightPlace: its viewport as fractions of that image; bounds and clampUV: the capture's crop) takes it to the capture's texel. a is the
 // weight times the edge band of what the right eye drew times the hidden-area mask; where a is 0 the pixel is left as the left eye's own (discard), so no texel behind
-// the right view, outside it or in its hidden area is ever read. The output merger blends rgb by a and keeps the left image's alpha. Same arithmetic as eye_share.h.
+// the right view, outside it or in its hidden area is ever read (B3: unless the left eye's own picture is to be dimmed there, below). The output merger blends rgb by a and keeps the left image's alpha. Same arithmetic as eye_share.h.
+// B3 (the scope zoom's window): the left eye's own picture is the zoomed view, which must not be seen. dim is how much of it goes toward black: the strip weight band.z over the part the right
+// eye does not cover (1 - cover, the geometry alone: the edge band and the hidden-area mask, not the share weight), and all of it (band.w = 1) in a frame drawn with eye 0 narrowed. With
+// the weight falling at the end of a press and no narrowed frame, the covered interior is left as it was; with band.z and band.w 0 the share is exactly as it was.
+// B3-3: with misc.w = 1 the same shader draws the RIGHT eye's mirror of that strip: the constants are the right eye's as "this" and the left eye's as the "other" (rot turns a right view
+// direction into the left view, rightAng is the left eye's drawn rectangle), and the output is black with the alpha s (1 - cover): the directions of the right view that the left view does
+// not see, with the same edge band, taken toward black by the strip's weight (band.z). It samples nothing.
 inline constexpr char kStereoShareHlsl[] = R"(
 cbuffer Share : register(b0) {
   float4 bounds; float4 clampUV;
-  float4 misc; // x: encode sRGB, y: the share weight, z: 1 with a hidden-area mask
+  float4 misc; // x: encode sRGB, y: the share weight, z: 1 with a hidden-area mask, w: 1 for the right eye's mirror of the strip (B3-3)
   row_major float3x4 rot;
   float4 leftTan; float4 rightTan; // left, right, up, down
   float4 rightPlace; // u0, v0, u1, v1
   float4 rightAng; // x min, x max, y min, y max (radians)
   float4 leftSize; // the left swapchain image's width, height
-  float4 band; // x: margin inside the edge, y: 1 / band (radians)
+  float4 band; // x: margin inside the edge, y: 1 / band (radians), z: how black the part the right eye does not cover goes (B3, the scope zoom's window), w: 1 in a frame drawn with eye 0 narrowed, else 0
 };
 Texture2D rightEye : register(t0); Texture2D hiddenMask : register(t1); SamplerState linearSampler : register(s0);
 struct O { float4 position:SV_POSITION; float2 uv:TEXCOORD; };
@@ -86,18 +92,33 @@ float4 ps(O v):SV_TARGET {
   float2 lp=v.position.xy/leftSize.xy;
   float3 d=float3(lerp(leftTan.x,leftTan.y,lp.x),lerp(leftTan.z,leftTan.w,lp.y),-1);
   float3 r=mul(rot,float4(d,0));
-  if(!(r.z<-1e-6)) discard;
+  if(misc.w>0.5) {
+    if(!(r.z<-1e-6)) return float4(0,0,0,band.z);
+    float mx=atan2(r.x,-r.z),my=atan2(r.y,-r.z);
+    float medge=min(min(mx-rightAng.x,rightAng.y-mx),min(my-rightAng.z,rightAng.w-my));
+    float mdim=band.z*(1-saturate((medge-band.x)*band.y));
+    if(!(mdim>0)) discard;
+    return float4(0,0,0,mdim);
+  }
+  float sb=band.z,zf=band.w;
+  if(!(r.z<-1e-6)) { float dm=max(sb,zf); if(dm>0) return float4(0,0,0,dm); discard; }
   float ax=atan2(r.x,-r.z),ay=atan2(r.y,-r.z);
   float edge=min(min(ax-rightAng.x,rightAng.y-ax),min(ay-rightAng.z,rightAng.w-ay));
-  float a=saturate((edge-band.x)*band.y)*misc.y;
+  float cover=saturate((edge-band.x)*band.y);
+  float a=cover*misc.y;
   float2 t=r.xy/(-r.z);
   float2 su=float2((t.x-rightTan.x)/(rightTan.y-rightTan.x),(rightTan.z-t.y)/(rightTan.z-rightTan.w));
-  if(misc.z>0.5) a*=hiddenMask.SampleLevel(linearSampler,su,0).r;
-  if(!(a>0)) discard;
+  if(misc.z>0.5) { float mk=hiddenMask.SampleLevel(linearSampler,su,0).r; a*=mk; cover*=mk; }
+  float dm=max(sb*(1-cover),zf);
+  if(!(a>0)) { if(dm>0) return float4(0,0,0,dm); discard; }
   float2 vp=(su-rightPlace.xy)/(rightPlace.zw-rightPlace.xy);
   float2 uv=clamp(bounds.xy+vp*(bounds.zw-bounds.xy),clampUV.xy,clampUV.zw);
   float4 c=rightEye.SampleLevel(linearSampler,uv,0);
-  return float4(misc.x>0.5?srgb(c.rgb):c.rgb,a);
+  float3 rgb=misc.x>0.5?srgb(c.rgb):c.rgb;
+  // With dim above 0 the left eye's own image under the share is dimmed by (1 - dim): the blend src * alpha + dest * (1 - alpha) at alpha a + dim (1 - a) and rgb * a / alpha leaves
+  // rgb * a + dest * (1 - a) * (1 - dim).
+  if(dm>0) { float a2=a+dm*(1-a); return float4(rgb*(a/a2),a2); }
+  return float4(rgb,a);
 }
 )";
 

@@ -28,6 +28,7 @@
 #include "ui_layer_seed_timing.h"
 #include "ui_layer_smaa.h"  // the flat profile's HUD edge smoothing: SMAA 1x over the layer before the composite
 #include "shield_ripple_shaders.h"  // the shield ripple's door pass
+#include "scope_zoom.h"  // the scope lens: right after the ripple at the door
 #include "sharp_weapons.h"  // the weapons layer's source pass, blend states and step bindings
 #include "temporal_shader_bytecode.h"
 #include "draw_state_describe.h"  // viewName, describeBlend/describeDs, shapeOf, dsStateOf
@@ -199,13 +200,13 @@ void crispStandDown(const char* why) {
         why ? why : "a refusal");
 }
 
-// The weapons fire's own failure: the weapons layer, its source pass or its re-issue could not be trusted. The weapons fire goes back to
-// the scene exactly as stock; the HUD, the rest of the layer and every other family are unaffected.
+// The weapons layer's own failure: the layer, its source pass or its re-issue could not be trusted. The weapons fire, and the scope's gunsight mark that rides the layer,
+// go back to the scene exactly as stock; the HUD, the rest of the layer and every other family are unaffected.
 void weaponsStandDown(const char* why) {
     if (g_weaponsStoodDown) return;
     g_weaponsStoodDown = true;
     refreshLive();
-    Log::get().note("sharp weapons: stands down for the rest of the session -- %s. The weapons fire is drawn in the scene as it always was (the "
+    Log::get().note("sharp weapons: stands down for the rest of the session -- %s. The weapons fire (and the scope's gunsight mark) is drawn in the scene as it always was (the "
                     "rest of the layer is unaffected). It stays down until the game is restarted.",
                     why ? why : "a refusal");
 }
@@ -419,6 +420,13 @@ struct Eye {
     uint64_t wPubSeq = 0;            // the last frame a re-issue carried THIS layer's content (weaponsLayerDropped asks it)
     uint32_t wMissStreak = 0;        // consecutive content-frames no re-issue published
     uint32_t wOtherTargets = 0;      // this frame's weapons draws made into another HDR target than wTarget (the instrument below)
+    // What the layer's draws of the frame wSeq are: the weapons fire's (wFires) and the scope's gunsight marks (wMarks, A3), which share the layer and its composite. The drop test,
+    // the missing-consumer streaks and the weapons line's counts are kept apart by kind, so a mark never stands the weapons fire down or counts as weapons fire.
+    uint32_t wFires = 0, wMarks = 0;
+    uint64_t wFireSeq = 0;           // the last frame whose first weapons-fire draw was counted as a content frame (the weapons line's eye-frames)
+    uint32_t wMarkMissStreak = 0;    // consecutive frames whose marks no re-issue published
+    bool wPubMatched = false;        // the re-issue that stamped wPubSeq composited by the tonemap difference (false: the plain add)
+    uint64_t wMarkNotedSeq = 0;      // the last frame whose mark the door counted (scopeZoomNoteMarkComposite), once an eye-frame
 
     // The shield ripple's displacement layer D (R32G32_FLOAT, the HDR layers' size): the game's own uv_jit + d where the shield-strike refraction drew this
     // frame, cleared far outside [0, 1] elsewhere. Made at the first 820E draw, released after kShieldRippleIdleFrames frames without one. dJx/dJy: the jitter its
@@ -481,6 +489,23 @@ struct Eye {
 };
 Eye g_eye[2];
 
+// The scope's gunsight mark rides the weapons layer (A3) but fails alone, and only for the press of the sights it failed in: marks the layer took and no re-issue published for
+// kCrispHdrMissFrames frames in a row, or a layer, 8-bit layer or blend state the mark's take could not make, take the mark back to the scene, magnified with the world as before the
+// arc, until the next press (scopeZoomPressId). The weapons fire, the HUD and the rest of the layer are unaffected, and so is the weapons half's own stand-down above: a creation
+// failure found by the mark never stands the weapons fire down, which tries for itself when it next draws.
+MarkStandDown g_markDown;
+bool markStoodDown() { return g_markDown.active(scopeZoomPressId()); }
+void markStandDown(int eye, uint32_t streak, const char* why) {
+    const uint32_t press = scopeZoomPressId();
+    if (g_markDown.active(press)) return;
+    g_markDown.stand(press);
+    g_eye[0].wMarkMissStreak = g_eye[1].wMarkMissStreak = 0;   // the next press counts afresh
+    scopeZoomNoteMarkStandDown();
+    Log::get().note("scope zoom: the gunsight mark's route through the weapons layer stands down until the next press of the sights (press %u, %s eye, streak %u) -- %s. The mark is drawn in the "
+                    "scene as it always was, magnified with the world, until then (the weapons fire and the rest of the layer are unaffected).",
+                    press, eye == 0 ? "left" : "right", streak, why ? why : "a refusal");
+}
+
 // ------------------------------------------------------------ the draw path
 
 // The target Rtv0 names, once per binding generation.
@@ -502,6 +527,8 @@ struct Draw {
     bool weapons = false;  // the weapons layer: with hdr, the draw goes to the eye's weapons layer instead of the HUD's
     uint64_t vsHash = 0;   // the decided draw's vertex shader (the weapons-fire pair table's key)
     bool ripple = false;   // the shield ripple: with hdr, the draw goes into the eye's displacement layer D, blend off, t0 swapped for the UV ramp
+    bool destAlphaOne = false;  // the scope mark: the target has no alpha channel, so the game's destination-alpha blend factors are read as 1 and 0 (uiLayerBlendDestAlphaOne)
+    uint32_t markPath = 0;      // the scope mark: what the layer did with the draw's depth and stencil tests (UiMarkDepth, scope_zoom_s1.h kMarkPath*)
     ID3D11ShaderResourceView* rippleSrv0 = nullptr;  // the game's t0, held while the ramp is bound (put back at restore)
     bool rippleSwapped = false;                      // the ramp is bound in its place
     bool reissue = false;  // the VR world route's re-issue of the 2D screen (the game's own draw lands in its eye): not a take
@@ -1051,9 +1078,17 @@ void noteToneSight(uint64_t seq, const void* res, int eye, uint8_t outcome) {
     t.outcome = outcome;
 }
 uint32_t g_lostLines = 0;
-void noteWeaponsLost(int eye, const Eye& e, uint64_t nextSeq) {
-    if (g_lostLines >= 24) return;
-    ++g_lostLines;
+// A layer whose frame held the scope's gunsight mark and no weapons fire is lost as a mark (A3): one line a press of the sights says so, and the weapons fire's 24 lines are not spent on it.
+uint32_t g_markLostPress = ~0u;   // the press whose mark-only line was written
+void noteWeaponsLost(int eye, const Eye& e, uint64_t nextSeq, bool markOnly = false) {
+    const uint32_t press = scopeZoomPressId();
+    if (markOnly) {
+        if (g_markLostPress == press) return;
+        g_markLostPress = press;
+    } else {
+        if (g_lostLines >= 24) return;
+        ++g_lostLines;
+    }
     static const char* const kOutcome[] = {"admitted", "no eye's content matched", "the 8-bit layer was busy", "a second tonemap for the eye"};
     char sights[900];
     sights[0] = 0;
@@ -1066,11 +1101,14 @@ void noteWeaponsLost(int eye, const Eye& e, uint64_t nextSeq) {
         if (w < 0) break;
         used += static_cast<size_t>(w);
     }
+    char label[96];
+    if (markOnly) _snprintf_s(label, _TRUNCATE, "of the scope's gunsight mark alone (press %u of the sights; one line a press)", press);
+    else _snprintf_s(label, _TRUNCATE, "%u (of the first 24 lines)", g_lostLines);
     Log::get().note(
-        "sharp weapons: lost layer %u (of the first 24 lines): the %s eye's weapons content is frame %llu (%u draws, first into %p, %u of them into another "
-        "target) and no tonemap published it; its HUD layer holds frame %llu (%u draws, tonemapped for frame %llu); the next weapons draw is frame %llu; "
+        "sharp weapons: lost layer %s: the %s eye's %s content is frame %llu (%u draws, first into %p, %u of them into another "
+        "target) and no tonemap published it; its HUD layer holds frame %llu (%u draws, tonemapped for frame %llu); the next draw into the layer is frame %llu; "
         "the last tonemap-shaped draws seen, newest first: %s.",
-        g_lostLines, eye == 0 ? "left" : "right", static_cast<unsigned long long>(e.wSeq), e.wDraws, e.wTarget, e.wOtherTargets,
+        label, eye == 0 ? "left" : "right", markOnly ? "gunsight mark" : "weapons", static_cast<unsigned long long>(e.wSeq), e.wDraws, e.wTarget, e.wOtherTargets,
         static_cast<unsigned long long>(e.hdrSeq), e.hdrDraws, static_cast<unsigned long long>(e.hdrToneSeq),
         static_cast<unsigned long long>(nextSeq), n ? sights : "none yet");
 }
@@ -1188,8 +1226,9 @@ bool ensureSharpScratch(ID3D11DeviceContext* ctx, uint32_t w, uint32_t h) {
     return true;
 }
 
-// The weapons fire's layer, at the HUD layer's size (the door's output x the target; 100 when fix.ui_quality is off).
-bool ensureWeaponsLayerFor(ID3D11DeviceContext* ctx, int eye) {
+// The weapons layer (the weapons fire's, and the scope's gunsight mark's), at the HUD layer's size (the door's output x the target; 100 when fix.ui_quality is off). `madeFor` names the
+// family whose first draw made it, for the log: the layer is made at the first draw of either, and the scoped ADS that arms the mark comes first in a session of no weapons fire.
+bool ensureWeaponsLayerFor(ID3D11DeviceContext* ctx, int eye, const char* madeFor) {
     Eye& e = g_eye[eye];
     const UiLayerSize s = uiLayerSize(e.door.fullW, e.door.fullH, layerTarget());
     if (!s.w || !s.h) return false;
@@ -1198,6 +1237,7 @@ bool ensureWeaponsLayerFor(ID3D11DeviceContext* ctx, int eye) {
     e.wW = e.wH = 0;
     e.wSeq = 0;
     e.wDraws = 0;
+    e.wFires = e.wMarks = 0;
     Ptr<ID3D11Device> dev;
     ctx->GetDevice(&dev);
     if (!dev || !makeTarget(dev.Get(), s.w, s.h, DXGI_FORMAT_R16G16B16A16_FLOAT, &e.wTex, &e.wRtv, &e.wSrv)) {
@@ -1208,9 +1248,9 @@ bool ensureWeaponsLayerFor(ID3D11DeviceContext* ctx, int eye) {
     }
     e.wW = s.w;
     e.wH = s.h;
-    Log::get().note("sharp weapons: %s eye's weapons layer %s at %ux%u (R16G16B16A16_FLOAT, %.1f MB) -- the weapons fire is drawn into it and "
+    Log::get().note("sharp weapons: %s eye's weapons layer %s at %ux%u (R16G16B16A16_FLOAT, %.1f MB) for %s -- the weapons fire and the scope's gunsight mark are drawn into it and "
                     "composited after the upscale.",
-                    eye == 0 ? "left" : "right", resized ? "re-created" : "created", s.w, s.h, uiLayerMB(uiLayerBytes(s.w, s.h, 8)));
+                    eye == 0 ? "left" : "right", resized ? "re-created" : "created", s.w, s.h, uiLayerMB(uiLayerBytes(s.w, s.h, 8)), madeFor);
     return true;
 }
 
@@ -1321,10 +1361,14 @@ bool releaseLayers() {
         e.wW = e.wH = 0;
         e.wSeq = 0;
         e.wDraws = 0;
+        e.wFires = e.wMarks = 0;
+        e.wFireSeq = e.wMarkNotedSeq = 0;
         e.wTarget = nullptr;
         e.wToneSeq = 0;
         e.wPubSeq = 0;
+        e.wPubMatched = false;
         e.wMissStreak = 0;
+        e.wMarkMissStreak = 0;
         e.dsCopy.Reset();
         e.dsCopyDepth.Reset();
         e.dsCopyStencil.Reset();
@@ -1495,9 +1539,10 @@ bool ensureSeeder(ID3D11Device* dev) {
     }
 }
 
-// Can the layer reproduce this draw's tests against its own seeded copy?
+// Can the layer reproduce this draw's tests against its own seeded copy? A view bound read-only is refused, unless allowReadOnly: the draw writes nothing, so the copy (read from the
+// game's texture, not through its view, and bound writable in the layer) is tested exactly as the game's read-only view was. Only the scope mark asks for it.
 bool dsReproducible(ID3D11DeviceContext* ctx, ID3D11DepthStencilView* dsv, uint32_t targetW,
-                    uint32_t targetH, char* why, size_t whyN) {
+                    uint32_t targetH, char* why, size_t whyN, bool allowReadOnly = false) {
     if (!dsv) return false;
     D3D11_DEPTH_STENCIL_VIEW_DESC vd{};
     dsv->GetDesc(&vd);
@@ -1506,7 +1551,7 @@ bool dsReproducible(ID3D11DeviceContext* ctx, ID3D11DepthStencilView* dsv, uint3
         _snprintf_s(why, whyN, _TRUNCATE, "the depth target is not a single 2D level");
         return false;
     }
-    if (vd.Flags != 0) {
+    if (vd.Flags != 0 && !allowReadOnly) {
         _snprintf_s(why, whyN, _TRUNCATE, "the depth target is bound read-only");
         return false;
     }
@@ -1994,7 +2039,7 @@ bool beginInner(ID3D11DeviceContext* ctx, int which) {
     ctx->OMGetBlendState(&bs, factor, &sampleMask);
     UiBlendRt game, conv;
     ID3D11BlendState* layerBlend = nullptr;
-    const UiBlendShape shape = shapeOf(bs, &game);
+    const UiBlendShape shape = shapeOf(bs, &game, g_draw.destAlphaOne);
     const bool converted = shape == g_draw.shape &&
                            (which ? uiLayerMultiplyBlend(game, &conv) : uiLayerConvertBlend(game, &conv));
     if (converted && rp) layerBlend = g_rip.blend.Get();   // D takes the game's own value: an overwrite, every channel, whatever the game's blend was
@@ -2033,7 +2078,10 @@ bool beginInner(ID3D11DeviceContext* ctx, int which) {
         ++g_win.clears;
     }
     if (wl && e.wSeq != g_draw.seq) {
-        if (weaponsLayerDropped(e.wSeq, e.wDraws, e.wPubSeq)) {
+        // The frame's content lost, by kind (weaponsLayerLoss): the weapons fire's is counted and stood down as it always was; the scope's gunsight mark (A3) has its own count and
+        // streak, so a frame that held a mark alone never counts as weapons fire or stands the weapons fire down.
+        const WeaponsLayerLoss lost = weaponsLayerLoss(e.wSeq, e.wFires, e.wMarks, e.wPubSeq);
+        if (lost.fire) {
             ++g_win.weaponsLost;
             noteWeaponsLost(g_draw.eye, e, g_draw.seq);
             // The missing-consumer deadline, as the HUD layer's: content no tonemap re-issue published for a streak of frames says
@@ -2046,15 +2094,30 @@ bool beginInner(ID3D11DeviceContext* ctx, int which) {
                 weaponsStandDown(why);
             }
         }
+        if (lost.mark) {
+            if (!lost.fire) noteWeaponsLost(g_draw.eye, e, g_draw.seq, true);
+            if (++e.wMarkMissStreak >= kCrispHdrMissFrames) {
+                char why[200];
+                _snprintf_s(why, _TRUNCATE,
+                            "the gunsight mark's weapons-layer content reached no tonemap for %u consecutive frames (the mark was taken out of the scene but never came back)",
+                            kCrispHdrMissFrames);
+                markStandDown(g_draw.eye, e.wMarkMissStreak, why);
+            }
+        }
         const int timer = routeBegin(ctx, UiRouteStage::kHdrClear, g_draw.eye, g_draw.seq);
         vScreenClearRenderTargetViewRaw(ctx, e.wRtv.Get(), kUiLayerClear);
         routeEnd(ctx, timer);
         e.wSeq = g_draw.seq;
         e.wDraws = 0;
-        ++g_win.weaponsContentFrames;
+        e.wFires = e.wMarks = 0;
         e.wOtherTargets = 0;
         e.wTarget = g_draw.targetRes;
         ++g_win.clears;
+    }
+    // The weapons line's eye-frames with weapons draws: the first weapons-fire draw of an eye-frame, whether or not a mark began the frame's layer.
+    if (wl && g_draw.family == UiLayerFamily::kWeaponsFire && e.wFireSeq != g_draw.seq) {
+        e.wFireSeq = g_draw.seq;
+        ++g_win.weaponsContentFrames;
     }
     if (which == 0 && g_draw.hdr && !g_draw.weapons && !g_draw.ripple && e.hdrSeq != g_draw.seq) {
         if (e.hdrSeq && e.hdrDraws && e.hdrToneSeq != e.hdrSeq) {
@@ -2285,9 +2348,14 @@ bool beginInner(ID3D11DeviceContext* ctx, int which) {
         } else if (g_draw.weapons) {
             ++e.wDraws;
             if (e.wTarget != g_draw.targetRes) ++e.wOtherTargets;
-            ++g_win.weaponsTaken;
-            const int pair = weaponPairIndexByVs(g_draw.vsHash);
-            if (pair >= 0) ++g_win.weaponsPair[pair];
+            if (g_draw.family == UiLayerFamily::kScopeMark) {
+                ++e.wMarks;   // the scope's gunsight mark shares the layer (A3) and is counted by the press line, not by the weapons line
+            } else {
+                ++e.wFires;
+                ++g_win.weaponsTaken;
+                const int pair = weaponPairIndexByVs(g_draw.vsHash);
+                if (pair >= 0) ++g_win.weaponsPair[pair];
+            }
         } else if (g_draw.hdr) {
             ++e.hdrDraws;
             ++g_win.hdrRedirected;
@@ -2298,6 +2366,7 @@ bool beginInner(ID3D11DeviceContext* ctx, int which) {
         ++g_win.redirected;
         ++g_sessionRedirected;
         noteTaken(g_draw.family, g_draw.eye, layerW, layerH);
+        if (g_draw.family == UiLayerFamily::kScopeMark) scopeZoomNoteMark(static_cast<uint32_t>(g_draw.eye), g_draw.seq, g_draw.markPath);   // the press line's marks per eye and path
         // The on-foot maps gate gave the layer the 2D screen (a TAKE; the route's re-issue, where the game's own draw lands in
         // its eye, is not): this eye's picture is the layer's, and the door may run layer-only for it (uiLayerDoorLayerOnly).
         if (g_draw.family == UiLayerFamily::kScreen && !g_draw.hdr && !g_draw.reissue && detail::g_uiLayerMapsOn) {
@@ -2319,16 +2388,24 @@ bool beginInner(ID3D11DeviceContext* ctx, int which) {
     if (!familyEngaged && g_draw.vpCount && which == 0) {
         familyEngaged = true;
         const D3D11_VIEWPORT& gv = g_draw.vp[0];
+        // The scope mark is not in the weapons-fire jitter table, so it takes that table's default for a vertex shader it does not name, the cancel (weaponsFireJitterCancel at the
+        // decision's g_draw.jx). That its matrices carry the eye's jitter is INFERRED, not shown: flat_projection_recipes.h keys its recipe by (vs 025B, ps C5A5C7E8216CB9AF), the glass
+        // tint's pair, which puts the camera at b1 row 270 (the scene camera rows the weapons pairs' matrices were shown to equal); the mark's pixel shader 46F9 has no recipe. The
+        // inference rests on the mark sharing that vertex shader, and so reading its camera from the same constant-buffer row. A flight's eye dump shows whether the mark sits on c.
+        const char* markJitter = g_draw.family == UiLayerFamily::kScopeMark
+                                     ? " Jitter: cancelled, the weapons-fire table's default for a vertex shader it does not name (the pair is not in it); that its matrices carry the eye's jitter is "
+                                       "INFERRED, not shown (the recipe at the scene camera row, b1 row 270, is for vertex shader 025B with the glass tint's pixel shader, not this pair's); the eye dump settles it."
+                                     : "";
         Log::get().note(
             "ui quality: layer: first %s draw in the %s eye's layer -- the game's viewport "
             "(%.1f, %.1f) %.1fx%.1f became (%.3f, %.3f) %.1fx%.1f, a jitter cancel of (%.3f, "
-            "%.3f) layer pixels.",
+            "%.3f) layer pixels.%s",
             uiLayerFamilyName(g_draw.family), g_draw.eye == 0 ? "left" : "right",
             static_cast<double>(gv.TopLeftX), static_cast<double>(gv.TopLeftY),
             static_cast<double>(gv.Width), static_cast<double>(gv.Height),
             static_cast<double>(vp[0].TopLeftX), static_cast<double>(vp[0].TopLeftY),
             static_cast<double>(vp[0].Width), static_cast<double>(vp[0].Height),
-            static_cast<double>(cx), static_cast<double>(cy));
+            static_cast<double>(cx), static_cast<double>(cy), markJitter);
     }
     if (!g_engageNoted && which == 0) {
         g_engageNoted = true;
@@ -3576,8 +3653,9 @@ void uiLayerRememberHoloPs(ID3D11PixelShader* shader, uint64_t hash,
 // The crisp take's whole dependency set, established no later than the first
 // HUD take (review R2) -- defined beside the coverage machinery, below.
 bool crispTakeReady(ID3D11DeviceContext* ctx, int eye);
-// The weapons fire's counterpart: the weapons layer, the 8-bit layer and the blend states the re-issue needs (defined beside it).
-bool weaponsTakeReady(ID3D11DeviceContext* ctx, int eye);
+// The weapons fire's counterpart: the weapons layer, the 8-bit layer and the blend states the re-issue needs (defined beside it). forMark: the caller is the scope's gunsight mark,
+// whose failure stands the mark down alone (markStandDown) and never the weapons half.
+bool weaponsTakeReady(ID3D11DeviceContext* ctx, int eye, bool forMark = false);
 // The shield ripple's counterparts (defined beside it): D and the shared pieces for a take, and the first-draw checks.
 bool rippleTakeReady(ID3D11DeviceContext* ctx, int eye, uint32_t targetW, uint32_t targetH);
 bool rippleR1Allows(ID3D11DeviceContext* ctx);
@@ -3865,7 +3943,50 @@ void worldRestoreSources(ID3D11DeviceContext* ctx, const WorldReissue& plan) {
     ctx->PSSetSamplers(0, 1, &smp);
 }
 
+// The scope mark's identification evidence for its first-seen line, whatever the decision came to (a decline's too): the readout atlas the family's key found, by size and PS slot (the
+// flight checks it against 3525x3133 in slot 2; no code depends on the size), the blend as the game states it with a note where the target's lack of alpha read destination alpha as
+// 1, and the path its depth and stencil tests took. gameBlend is null, and pathKnown false, for a draw declined before those were read.
+void appendScopeMarkIdentity(char* detail, size_t cap, const UiBlendRt* gameBlend, bool blendRewritten, bool pathKnown, UiMarkDepth depth, const char* dsWhy) {
+    const auto add = [&](const char* text) {
+        const size_t at = std::strlen(detail);
+        if (at + 1 < cap) _snprintf_s(detail + at, cap - at, _TRUNCATE, "%s%s", at ? "; " : "", text);
+    };
+    char piece[320];
+    const int slot = uiDepthSampledSurfaceSlot();
+    static const BindSlot kSrv[4] = {BindSlot::PsSrv0, BindSlot::PsSrv1, BindSlot::PsSrv2, BindSlot::PsSrv3};
+    ResourceInfo atlas;
+    if (slot >= 0 && bindingResolve(bindingGet(kSrv[slot]), &atlas))
+        _snprintf_s(piece, _TRUNCATE, "the readout atlas %ux%u in PS slot %d (a learned interface surface)", atlas.a, atlas.b, slot);
+    else
+        _snprintf_s(piece, _TRUNCATE, "no learned interface surface resolved in PS slots 0..3 at this line");
+    add(piece);
+    if (gameBlend) {
+        char bl[64];
+        describeBlend(*gameBlend, bl, sizeof(bl));
+        _snprintf_s(piece, _TRUNCATE, "the game's blend %s%s", bl, blendRewritten ? " (destination alpha read as 1 on the alpha-less target)" : "");
+        add(piece);
+    }
+    if (pathKnown) {
+        switch (depth) {
+            case UiMarkDepth::kSeededReadOnly:
+                _snprintf_s(piece, _TRUNCATE, "depth path: %s (the game's view is bound read-only and the draw writes nothing, so its tests run against the layer's seeded copy)", uiMarkDepthName(depth));
+                break;
+            case UiMarkDepth::kTestsOff:
+                _snprintf_s(piece, _TRUNCATE, "depth path: %s (the layer could not reproduce them%s%s: the mark lies on the sight glass in front of the world, so it is redrawn without them)",
+                            uiMarkDepthName(depth), dsWhy && *dsWhy ? ": " : "", dsWhy ? dsWhy : "");
+                break;
+            default: _snprintf_s(piece, _TRUNCATE, "depth path: %s", uiMarkDepthName(depth)); break;
+        }
+        add(piece);
+    }
+}
+
 }  // namespace
+
+static_assert(static_cast<uint32_t>(UiMarkDepth::kUntested) == scopezoom::kMarkPathUntested && static_cast<uint32_t>(UiMarkDepth::kSeeded) == scopezoom::kMarkPathSeeded &&
+                  static_cast<uint32_t>(UiMarkDepth::kSeededReadOnly) == scopezoom::kMarkPathSeededReadOnly && static_cast<uint32_t>(UiMarkDepth::kTestsOff) == scopezoom::kMarkPathTestsOff &&
+                  static_cast<uint32_t>(UiMarkDepth::kRefused) == scopezoom::kMarkPaths,
+              "the press line's mark depth paths are the layer's");
 
 bool uiLayerDecide(ID3D11DeviceContext* ctx, int familyInt, bool verdictForwards,
                    bool substituted, int knownEye) {
@@ -3875,6 +3996,8 @@ bool uiLayerDecide(ID3D11DeviceContext* ctx, int familyInt, bool verdictForwards
     g_draw.hdr = false;
     g_draw.weapons = false;
     g_draw.ripple = false;
+    g_draw.destAlphaOne = false;
+    g_draw.markPath = 0;
     g_draw.vsHash = 0;
     g_draw.reissue = false;
     g_draw.holoPsHash = 0; g_draw.holoOriginal = nullptr; g_draw.holoPatched = nullptr;
@@ -3906,6 +4029,8 @@ bool uiLayerDecide(ID3D11DeviceContext* ctx, int familyInt, bool verdictForwards
     f.worldRoute = family == UiLayerFamily::kScreen && vrWorldRouteLayerMayTake();
     // The two halves are independent: the weapons fire is its own, every other family fix.ui_quality's.
     f.familyEnabled = uiLayerFamilyEnabled(family, detail::g_uiQualityLive, g_weaponsLive, g_rippleLive);
+    // The scope's gunsight mark has a stand-down of its own beside the weapons half's, for the press of the sights it happened in: the mark goes back to the scene alone.
+    if (family == UiLayerFamily::kScopeMark && markStoodDown()) f.familyEnabled = false;
     // The ripple's first-draw checks (R1): until both pass the 820E draw stays in the scene, and a failure stands the ripple down to stock.
     if (family == UiLayerFamily::kShieldRipple && f.familyEnabled) f.familyEnabled = rippleR1Allows(ctx);
     if (family == UiLayerFamily::kScreen) ++g_win.screenAsked;
@@ -3965,7 +4090,7 @@ bool uiLayerDecide(ID3D11DeviceContext* ctx, int familyInt, bool verdictForwards
     // The cheap facts first; the state reads only when none of them refused.
     f.blend = UiBlendShape::kOpaque;
     UiLayerDecision d = uiLayerDecide(f);
-    char detail[320] = "";
+    char detail[640] = "";
     // Every detail text below is read by noteFamily alone: it is built only when that line will print (familyLineWanted -- the
     // decision is final here, and nothing between this and noteFamily binds a shader or writes the table).
     if (d == UiLayerDecision::kNoDensityGain && familyLineWanted(family, d)) {
@@ -3973,6 +4098,13 @@ bool uiLayerDecide(ID3D11DeviceContext* ctx, int familyInt, bool verdictForwards
                     sceneLayerW, sceneLayerH, g_tc.info.a, g_tc.info.b);
     }
     UiDsState dsState;
+    // The blend as the game states it (the lines that name a blend print these factors; the layer converts the rewritten ones of a family that reads destination alpha as 1), and the
+    // scope mark's evidence for its first-seen line (appendScopeMarkIdentity), whatever the decision: whether the target's lack of alpha rewrote the blend, and the path its depth and
+    // stencil tests took (known only to a draw that got as far as that decision).
+    UiBlendRt gameBlend;
+    bool markBlendKnown = false, markBlendRewritten = false, markPathKnown = false;
+    UiMarkDepth markDepth = UiMarkDepth::kUntested;
+    char dsWhy[160] = "";
     if (d == UiLayerDecision::kRedirect) {
         // A second render target, or pixel-shader UAVs (which the layer's
         // raw OMSetRenderTargets would not carry across), refuse the draw.
@@ -3993,16 +4125,31 @@ bool uiLayerDecide(ID3D11DeviceContext* ctx, int familyInt, bool verdictForwards
         DXGI_FORMAT dsFmt = DXGI_FORMAT_UNKNOWN;
         dsState = dsStateOfNoted(ctx, dsv, &ref, &dsFmt);
         f.ds = uiLayerDsEffect(dsState, dsv != nullptr);
-        char dsWhy[160] = "";
+        const bool markFamily = family == UiLayerFamily::kScopeMark;
         if (f.ds.tests()) {
-            f.dsReproducible = dsReproducible(ctx, dsv, g_tc.info.a, g_tc.info.b, dsWhy, sizeof(dsWhy));
+            // The scope mark alone may test a view bound read-only, and only when the draw writes nothing (uiScopeMarkWritesNothing): its copy is then tested as the game's view was.
+            f.dsReproducible = dsReproducible(ctx, dsv, g_tc.info.a, g_tc.info.b, dsWhy, sizeof(dsWhy), markFamily && uiScopeMarkWritesNothing(dsState));
+        }
+        if (markFamily) {
+            // A test the layer cannot reproduce is dropped for the mark, which lies on the sight glass in front of the world and inside the lens, where nothing nearer is drawn: it is
+            // redrawn in the layer with its depth and stencil tests off (the layer binds no depth target for it) instead of being left in the scene to be magnified.
+            markDepth = uiScopeMarkDepth(f.ds, dsState, f.dsReproducible);
+            markPathKnown = true;
+            if (markDepth == UiMarkDepth::kTestsOff) f.ds.depthTest = f.ds.stencilTest = false;
+            g_draw.markPath = static_cast<uint32_t>(markDepth);
         }
         ID3D11BlendState* bs = nullptr;
         FLOAT factor[4];
         UINT mask = 0;
         ctx->OMGetBlendState(&bs, factor, &mask);
         UiBlendRt game;
-        f.blend = shapeOf(bs, &game);
+        // The scope mark's blend reads destination alpha, which its alpha-less target gives as 1 (uiLayerBlendDestAlphaOne); no other family's blend is rewritten. The lines that name
+        // the blend print the game's own factors (gameBlend), not the rewritten ones the layer converts (game).
+        const bool destAlphaOne = markFamily && !uiLayerFormatHasAlpha(g_tc.info.fmt);
+        f.blend = shapeOf(bs, &game, destAlphaOne, &gameBlend);
+        markBlendKnown = true;
+        markBlendRewritten = destAlphaOne;
+        g_draw.destAlphaOne = destAlphaOne;
         if (bs) bs->Release();
         // A multiply is drawn twice (the layer, then its transmittance): a
         // depth or stencil WRITE would then land twice in the layer's copy.
@@ -4029,8 +4176,8 @@ bool uiLayerDecide(ID3D11DeviceContext* ctx, int familyInt, bool verdictForwards
             f.layerReady =
                 family == UiLayerFamily::kShieldRipple
                     ? rippleTakeReady(ctx, f.eye, g_tc.info.a, g_tc.info.b)
-                : family == UiLayerFamily::kWeaponsFire
-                    ? weaponsTakeReady(ctx, f.eye)
+                : uiLayerFamilyUsesWeaponsLayer(family)
+                    ? weaponsTakeReady(ctx, f.eye, family == UiLayerFamily::kScopeMark)
                 : f.crispHdr
                     ? crispTakeReady(ctx, f.eye)
                     : ensureLayerFor(ctx, f.eye) &&
@@ -4076,7 +4223,7 @@ bool uiLayerDecide(ID3D11DeviceContext* ctx, int familyInt, bool verdictForwards
         // final here; see the kNoDensityGain text above).
         if (familyLineWanted(family, d)) {
             char bl[64], ds[256];
-            describeBlend(game, bl, sizeof(bl));
+            describeBlend(gameBlend, bl, sizeof(bl));   // the game's own factors, as bound
             describeDs(dsState, ref, dsFmt, ds, sizeof(ds));
             if (d == UiLayerDecision::kBlendRefused) {
                 _snprintf_s(detail, _TRUNCATE, "%s%s", bl,
@@ -4104,6 +4251,10 @@ bool uiLayerDecide(ID3D11DeviceContext* ctx, int familyInt, bool verdictForwards
             if (r) r->Release();
         if (dsv) dsv->Release();
     }
+    // The scope mark's identification evidence goes on its first-seen line whatever the decision came to, a decline included (a draw the cheap facts declined has no blend or depth
+    // path to report): the lens is armed and the key found a learned surface, and this says which texture that was.
+    if (family == UiLayerFamily::kScopeMark && familyLineWanted(family, d))
+        appendScopeMarkIdentity(detail, sizeof(detail), markBlendKnown ? &gameBlend : nullptr, markBlendRewritten, markPathKnown, markDepth, dsWhy);
     g_lastDecision = static_cast<int>(d);
     ++g_decisionCount;
     if (family == UiLayerFamily::kWeaponsFire) noteWeaponPair(bindingShaderHash(BindSlot::Vs), bindingShaderHash(BindSlot::Ps), d);
@@ -4127,7 +4278,7 @@ bool uiLayerDecide(ID3D11DeviceContext* ctx, int familyInt, bool verdictForwards
     g_draw.eye = f.eye;
     g_draw.family = family;
     g_draw.hdr = f.crispHdr;
-    g_draw.weapons = family == UiLayerFamily::kWeaponsFire;
+    g_draw.weapons = uiLayerFamilyUsesWeaponsLayer(family);
     g_draw.ripple = family == UiLayerFamily::kShieldRipple;
     g_draw.vsHash = bindingShaderHash(BindSlot::Vs);
     g_draw.seq = seq;
@@ -4322,6 +4473,7 @@ struct CrispToneSave {
     TonePlan plan;
     uint8_t step = 0;
     bool hud = false, weapons = false, fellBack = false, faulted = false;
+    const char* plainWhy = nullptr;   // why the matched composite was not made when fellBack (a literal), for the mark's reason line
 };
 CrispToneSave g_crispSave;
 FaultBudget g_crispToneBudget("uiLayer.crispTone", 4);
@@ -4663,19 +4815,17 @@ bool crispTakeReady(ID3D11DeviceContext* ctx, int eye) {
     return true;
 }
 
-bool weaponsTakeReady(ID3D11DeviceContext* ctx, int eye) {
-    if (!ensureWeaponsLayerFor(ctx, eye)) {
-        weaponsStandDown("the weapons layer could not be created");
+bool weaponsTakeReady(ID3D11DeviceContext* ctx, int eye, bool forMark) {
+    // A creation failure belongs to the family that asked: the weapons fire's stands the weapons half down for the session, as it always did; the mark's stands the mark down alone, for the
+    // press (markStandDown), and leaves the weapons half untouched, so the weapons fire tries for itself at its next draw.
+    const auto fail = [&](const char* why) {
+        if (forMark) markStandDown(eye, g_eye[eye].wMarkMissStreak, why);
+        else weaponsStandDown(why);
         return false;
-    }
-    if (!ensureLayerFor(ctx, eye)) {
-        weaponsStandDown("the eye's 8-bit layer (the tonemap re-issue's target) could not be created");
-        return false;
-    }
-    if (!ensureSharpStates(ctx)) {
-        weaponsStandDown("the tonemap re-issue's blend states could not be created");
-        return false;
-    }
+    };
+    if (!ensureWeaponsLayerFor(ctx, eye, forMark ? "the scope's gunsight mark" : "the weapons fire")) return fail("the weapons layer could not be created");
+    if (!ensureLayerFor(ctx, eye)) return fail("the eye's 8-bit layer (the tonemap re-issue's target) could not be created");
+    if (!ensureSharpStates(ctx)) return fail("the tonemap re-issue's blend states could not be created");
     return true;
 }
 
@@ -5628,9 +5778,15 @@ bool uiLayerCrispToneBegin(ID3D11DeviceContext* ctx) {
         // The plan (weapons_fire.h): the HUD alone is the one replace it always was. With weapons content the matched composite needs
         // the source pass's shaders, the scratch and the deferred context; a frame that has not got them is composited plain (counted).
         bool matchedReady = false;
+        const char* plainWhy = nullptr;
         if (wpnC) {
             compileSharpSourceOnce(ctx);
-            matchedReady = g_srcVs && g_srcPs && gameHdr && crispCoverageContextReady(ctx) && ensureSharpScratch(ctx, e.wW, e.wH);
+            // The same checks in the same order as one conjunction; the first to fail is the reason a plain composite is named for.
+            if (!g_srcVs || !g_srcPs) plainWhy = "the source pass's shaders could not be compiled";
+            else if (!gameHdr) plainWhy = "the game's HDR input was not bound at the tonemap's slot";
+            else if (!crispCoverageContextReady(ctx)) plainWhy = "no deferred context for the source pass";
+            else if (!ensureSharpScratch(ctx, e.wW, e.wH)) plainWhy = "the source pass's scratch could not be made";
+            matchedReady = !plainWhy;
         }
         TonePlan plan = sharpTonePlan(hudC, wpnC, matchedReady);
         if (plan.clearEye) vScreenClearRenderTargetViewRaw(ctx, e.rtv.Get(), kUiLayerClear);
@@ -5640,10 +5796,12 @@ bool uiLayerCrispToneBegin(ID3D11DeviceContext* ctx) {
                              e.wRtv.Get(), e.wW, e.wH, vScreenExecuteCommandListRaw)) {
             plan = sharpTonePlan(hudC, wpnC, false);
             fellBack = true;
+            plainWhy = "the source pass failed";
         }
         g_crispSave.plan = plan;
         g_crispSave.step = 0;
         g_crispSave.fellBack = fellBack;
+        g_crispSave.plainWhy = plainWhy;
         crispFindSceneImages(ctx, gameHdr.Get(), p.hdrSlot, p.vs, p.ps);
         crispBindStep(ctx, plan.steps[0]);
         g_crispSave.routeSlot = routeBegin(ctx, UiRouteStage::kHdrTonemap, p.eye, p.seq);
@@ -5715,6 +5873,7 @@ void uiLayerCrispToneEnd(ID3D11DeviceContext* ctx) {
     const uint64_t vs = g_crispSave.vs, ps = g_crispSave.ps;
     const TonePlan plan = g_crispSave.plan;
     const bool hadWeapons = g_crispSave.weapons, fellBack = g_crispSave.fellBack, faulted = g_crispSave.faulted;
+    const char* plainWhy = g_crispSave.plainWhy;
     routeEnd(ctx, g_crispSave.routeSlot);
     g_crispSave.routeSlot = -1;
     // Everything the game had, put back through the raw entry points.
@@ -5801,15 +5960,19 @@ void uiLayerCrispToneEnd(ID3D11DeviceContext* ctx) {
     if (runtimeFlatProfile()) flatUiTrailNoteReissue(seq, FlatUiTrailReissue::kPublished, 0, seq);
     e.hdrMissStreak = 0;  // a publication landed: the R1 deadline's streak resets
     if (hadWeapons) {
-        // Stamped ONLY by a bracket that carried the weapons layer's content: the drop test (weaponsLayerDropped) compares it with the content's frame.
+        // Stamped ONLY by a bracket that carried the weapons layer's content: the drop test (weaponsLayerDropped) compares it with the content's frame. The streaks reset by kind: the
+        // weapons fire's by a frame that held weapons fire, the scope mark's (A3) by a frame that held a mark. wPubMatched is how the door counts a mark's composite.
         e.wPubSeq = seq;
-        e.wMissStreak = 0;
+        e.wPubMatched = plan.sourcePass;
+        if (e.wFires) e.wMissStreak = 0;
+        if (e.wMarks) e.wMarkMissStreak = 0;
     }
     g_lastRedirectSeq = seq;
     detail::g_uiLayerWatching = true;
     ++g_win.hdrReissued;
-    if (hadWeapons) {
-        // The eye-frame's weapons composite, by kind: the matched difference, the plain add, or the plain add a matched frame fell back to.
+    if (hadWeapons && e.wFires) {
+        // The eye-frame's weapons composite, by kind: the matched difference, the plain add, or the plain add a matched frame fell back to. A frame that held a gunsight mark alone is the
+        // press line's (scopeZoomNoteMarkComposite, at the door), not the weapons line's.
         const bool matched = plan.sourcePass;
         if (matched) ++g_win.weaponsEyeMatched;
         else ++g_win.weaponsEyeFallback;
@@ -5825,6 +5988,25 @@ void uiLayerCrispToneEnd(ID3D11DeviceContext* ctx) {
             fallbackNoted = true;
             Log::get().note("sharp weapons: a matched composite fell back to the plain add this frame (the source pass's shaders, the scratch "
                             "or the deferred context were not available, or the pass failed); counted in the 30 s line.");
+        }
+    }
+    if (hadWeapons && e.wMarks) {
+        // The scope's gunsight mark has lines of its own, for a frame that held a mark whether or not weapons fire was in the layer too (the composite is the layer's, and the weapons
+        // lines above say it for the fire): the first eye-frame it was carried by the tonemap difference, and, at most once a press of the sights, why a frame was composited plain.
+        // The press line counts both (composites matched/plain/none).
+        static bool markEngagedNoted = false;
+        static uint32_t markPlainPress = ~0u;
+        if (plan.sourcePass && !markEngagedNoted) {
+            markEngagedNoted = true;
+            Log::get().note("scope zoom: the gunsight mark in the %s eye's weapons layer was composited by tonemap difference -- T(F_up + M) - T(F_up) through the game's own tonemap draw, "
+                            "%ux%u, the stock brightness.",
+                            eye == 0 ? "left" : "right", e.w, e.h);
+        }
+        if (!plan.sourcePass && markPlainPress != scopeZoomPressId()) {
+            markPlainPress = scopeZoomPressId();
+            Log::get().note("scope zoom: the gunsight mark in the %s eye's weapons layer was composited by the plain add in press %u of the sights (brighter than stock) -- %s; counted in the "
+                            "press line (composites matched/plain/none), one line a press.",
+                            eye == 0 ? "left" : "right", markPlainPress, plainWhy ? plainWhy : "the matched composite was not planned for the frame");
         }
     }
     if (!crispToneSeenBefore(static_cast<uint8_t>(CrispToneDecline::kCount), vs, ps)) {
@@ -6409,6 +6591,23 @@ ID3D11Texture2D* uiLayerComposite(uint64_t sequence, uint32_t eye, ID3D11Texture
     if (eye > 1 || !frame || !region || !layerUv) return nullptr;
     g_seedCensus.door(eye, sequence);
     Eye& e = g_eye[eye];
+    // C1a (crisp_reticle.h): while the crisp arming is up, each eye-frame reaching the composite is counted for the press line, with whether a gunsight quad had been taken into the eye's
+    // weapons layer in that frame (the test the mark's composite count below makes). Outside a press of the sights the arming is down: one relaxed load.
+    if (scopeZoomCrispArmed()) scopeZoomNoteCrispFrame(eye, e.wMarks != 0 && e.wSeq == sequence);
+    // The scope's gunsight mark (A3): an eye-frame whose weapons layer held a mark is counted once, as the composite below served it -- the tonemap difference, the plain add, or not
+    // at all (the layer's content never reached the picture) -- whichever way this function returns. The press line states the three counts.
+    struct MarkFrame {
+        Eye& e;
+        uint64_t sequence;
+        bool composited = false;
+        ~MarkFrame() {
+            if (!e.wMarks || e.wSeq != sequence || e.wMarkNotedSeq == sequence) return;
+            e.wMarkNotedSeq = sequence;
+            scopeZoomNoteMarkComposite(!composited || e.wPubSeq != sequence ? scopezoom::kMarkCompositeNone
+                                       : e.wPubMatched                      ? scopezoom::kMarkCompositeMatched
+                                                                            : scopezoom::kMarkCompositePlain);
+        }
+    } markFrame{e, sequence};
     // The shield ripple: the picture is rewritten over the bubble's coverage BEFORE the weapons/HUD composite below (the ripple must not touch them). A frame
     // that is not EDVR's own comes back rewritten in EDVR's copy of it, which stands in for it from here on.
     Ptr<ID3D11Texture2D> rewritten;
@@ -6421,6 +6620,38 @@ ID3D11Texture2D* uiLayerComposite(uint64_t sequence, uint32_t eye, ID3D11Texture
     if (rewritten) {
         frame = rewritten.Get();
         ownedFrame = false;
+    }
+    // The scope lens (scope_zoom.h): the aiming (right) eye's picture inside the scope's frame, magnified by the game's zoom, after the upscaler and RCAS and before the weapons/HUD
+    // composite (which must not be magnified). A frame EDVR rewrites in full every frame, or the ripple's private copy of one, is written in place; any other comes back as the lens's
+    // own copy, which stands in for it from here on. The frame must be the upscaler's picture (e.doorFromPass): the lens reads its c unjittered.
+    // B3: the left eye's picture, copied for that lens before the left eye's own UI composite (the part of it the lens may read, when the left eye is drawn as the zoomed view).
+    if (eye == 0 && scopeZoomWanted()) {
+        guarded("scopeZoom.leftDoor", [&] {
+            ScopeZoomLeftArgs leftArgs;
+            leftArgs.sequence = sequence;
+            leftArgs.frame = frame;
+            leftArgs.region = region;
+            leftArgs.resolved = e.doorFromPass;
+            scopeZoomLeftDoor(leftArgs);
+        });
+    }
+    if (eye == 1 && scopeZoomWanted()) {
+        guarded("scopeZoom.door", [&] {
+            ScopeZoomDoorArgs lensArgs;
+            lensArgs.eye = eye;
+            lensArgs.sequence = sequence;
+            lensArgs.frame = frame;
+            lensArgs.region = region;
+            lensArgs.inPlace = ownedFrame || rewritten;
+            lensArgs.resolved = e.doorFromPass;
+            Ptr<ID3D11Texture2D> lensCopy;
+            scopeZoomDoor(lensArgs, &lensCopy);
+            if (lensCopy) {
+                rewritten = lensCopy;
+                frame = rewritten.Get();
+                ownedFrame = false;
+            }
+        });
     }
     if (!e.srv || !e.rtv || e.compositedSeq == sequence) return handOn();
     const bool hasUi = e.seq == sequence && e.draws;
@@ -6487,6 +6718,7 @@ ID3D11Texture2D* uiLayerComposite(uint64_t sequence, uint32_t eye, ID3D11Texture
     const bool ran = guardedBudget(g_compositeBudget, [&] {
         result = compositeInner(e, eye, frame, region, layerUv, useMult, ownedFrame, &why, smooth);
     });
+    markFrame.composited = result != nullptr;
     if (!result) {
         ++g_win.compositeRefused;
         // The UI of this frame is in the layer and will not reach the eye:
@@ -6737,6 +6969,7 @@ void releaseDeviceObjects() {
     }
     g_rip.csTried = false;
     g_rip.stage.Reset();
+    scopeZoomRelease();   // the scope lens's passes, buffers and copies (scope_zoom.cpp)
     g_rip.check = 0;
     g_rip.filter = 0;
     g_rip.gainZ = g_rip.gainY = 0.0f;

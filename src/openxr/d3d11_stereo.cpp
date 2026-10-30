@@ -54,7 +54,7 @@ struct ShareConstants {
   float rightPlace[4];           // the right eye's viewport as fractions of its swapchain image: u0, v0, u1, v1
   float rightAng[4];             // that rectangle as axis angles: x min, x max, y min, y max (radians)
   float leftSize[4];             // the left swapchain image: width, height
-  float band[4];                 // the margin inside the edge, 1 / the band (radians)
+  float band[4];                 // the margin inside the edge, 1 / the band (radians), the strip's black, 1 in a frame drawn with eye 0 narrowed (B3)
 };
 static_assert(sizeof(ShareConstants)==192,"share HLSL constant-buffer packing");
 struct SkyConstants { float orient[3][4]; float tangents[4]; float encode=0, pad[3]{}; };
@@ -330,11 +330,13 @@ bool D3D11Stereo::ensureShareMask(const XrFovf& fov,const StereoHiddenArea* hidd
 XrResult D3D11Stereo::renderCaptured(const XrView (&views)[2],XrSpace space,const EyeCapture& capture,
                                    XrCompositionLayerProjection& layer, GpuWorkObserver* observer,
                                    StereoWallTimes* times, const StereoPlacement* placement, float fade,
-                                   const XrPosef* headPose, float leftEyeShare, const StereoHiddenArea* rightHidden) {
+                                   const XrPosef* headPose, float leftEyeShare, const StereoHiddenArea* rightHidden, float leftStripBlack, bool leftZoomed) {
   layer={XR_TYPE_COMPOSITION_LAYER_PROJECTION};
   fade=comfort::sanitize(fade);
   leftEyeShare=comfort::sanitize(leftEyeShare);
+  leftStripBlack=comfort::sanitize(leftStripBlack);
   shareFacts_.drawn=shareFacts_.refused=false;
+  shareFacts_.leftBlacked=shareFacts_.mirrorDrawn=false;shareFacts_.mirrorWidth=0.f;
   if(ownedImmediateScene_&&GetCurrentThreadId()!=sceneOwnerThread_)return XR_ERROR_CALL_ORDER_INVALID;
   if(!ready_)return lastResult_==XR_SUCCESS?XR_ERROR_CALL_ORDER_INVALID:lastResult_;
   if(!space)return XR_ERROR_HANDLE_INVALID;
@@ -406,6 +408,8 @@ XrResult D3D11Stereo::renderCaptured(const XrView (&views)[2],XrSpace space,cons
       for(int k=0;k<4;++k){share.leftTan[k]=float(lt[k]);share.rightTan[k]=float(rt[k]);share.rightPlace[k]=float(m.place[k]);share.rightAng[k]=float(m.ang[k]);}
       share.leftSize[0]=float(eyes_[0].width);share.leftSize[1]=float(eyes_[0].height);
       share.band[0]=float(m.marginRad);share.band[1]=float(1.0/m.bandRad);
+      share.band[2]=leftStripBlack;   // B3: the part of the left eye the right eye does not cover goes toward black by this much (the shader's band.z; 0 is the share as it always was)
+      share.band[3]=leftZoomed?1.f:0.f;   // ... and all of its own picture under the share in a frame drawn with eye 0 narrowed (band.w)
       shareOn=true;
       double ypr[3];shareview::yawPitchRollDeg(m.rot,ypr);
       for(int k=0;k<3;++k)shareFacts_.rotationDeg[k]=float(ypr[k]);
@@ -425,6 +429,36 @@ XrResult D3D11Stereo::renderCaptured(const XrView (&views)[2],XrSpace space,cons
         shareFacts_.coverage=float(c.mean);shareFacts_.coverageWhole=float(c.whole);
         std::memcpy(shareCoverageKey_,key,sizeof(key));shareCoverageKnown_=true;
       }
+    }
+  }
+  // B3: a frame drawn with eye 0 narrowed in which no share is drawn (none asked, views it cannot map, a mask it cannot build) has the left eye cleared to black in place of its own
+  // picture: the narrowed picture is never shown uncovered, whatever the share does.
+  const bool blackLeft=leftZoomed&&!shareOn&&fade<1.f;
+  shareFacts_.leftBlacked=blackLeft;
+  // B3-3: the right eye's mirror of the left eye's strip. While the left eye's outer strip is taken toward black (the strip up, or the left eye narrowed, with the share drawn) the
+  // directions of the right view that the left view does not see go toward black the same way, with the same edge band, by the same weight (full on a narrowed frame, as the left
+  // strip is), so the two edges come and go together. The constants are the share's with the eyes exchanged. Neither the strip nor the narrowing: no pass at all.
+  ShareConstants mirror{};bool mirrorOn=false;
+  if(shareOn&&(leftStripBlack>0.f||leftZoomed)) {
+    const double leftPlace[4]={double(viewports[0].TopLeftX)/eyes_[0].width,double(viewports[0].TopLeftY)/eyes_[0].height,
+                               double(viewports[0].TopLeftX+viewports[0].Width)/eyes_[0].width,double(viewports[0].TopLeftY+viewports[0].Height)/eyes_[0].height};
+    const shareview::Mapping mm=shareview::makeMapping(views[1].fov,views[1].pose.orientation,views[0].fov,views[0].pose.orientation,leftPlace);
+    if(mm.valid) {
+      const float weight=leftZoomed?1.f:leftStripBlack;
+      for(int r=0;r<3;++r)for(int c=0;c<3;++c)mirror.rot[r][c]=float(mm.rot[r][c]);
+      const double lt[4]={mm.left.left,mm.left.right,mm.left.up,mm.left.down},rt[4]={mm.right.left,mm.right.right,mm.right.up,mm.right.down};
+      for(int k=0;k<4;++k){mirror.leftTan[k]=float(lt[k]);mirror.rightTan[k]=float(rt[k]);mirror.rightPlace[k]=float(mm.place[k]);mirror.rightAng[k]=float(mm.ang[k]);}
+      mirror.leftSize[0]=float(eyes_[1].width);mirror.leftSize[1]=float(eyes_[1].height);
+      mirror.band[0]=float(mm.marginRad);mirror.band[1]=float(1.0/mm.bandRad);mirror.band[2]=weight;
+      mirror.misc[3]=1.f;
+      mirrorOn=true;
+      // how much of the right eye's width the strip takes on its middle row: the columns at least half black, by the same arithmetic as the shader (eye_share.h lookup)
+      const unsigned columns=128;unsigned taken=0;
+      for(unsigned i=0;i<columns;++i) {
+        const shareview::Lookup k=shareview::lookup(mm,(i+.5)/columns,.5);
+        if(double(weight)*(1.0-(k.ahead?k.fov:0.0))>=.5)++taken;
+      }
+      shareFacts_.mirrorWidth=float(taken)/float(columns);
     }
   }
   auto failed=[&](XrResult r){ready_=false;lastResult_=r;return r;};
@@ -467,7 +501,8 @@ XrResult D3D11Stereo::renderCaptured(const XrView (&views)[2],XrSpace space,cons
       if(clearFirst[i]){const float black[]={0,0,0,1};drawContext->ClearRenderTargetView(rtv,black);}
       drawContext->RSSetViewports(1,&viewports[i]);
       drawContext->PSSetShaderResources(0,1,srvs[i].GetAddressOf());
-      drawContext->UpdateSubresource(blitConstants_.Get(),0,nullptr,&constants[i],0,0);drawContext->Draw(3,0);
+      if(i==0&&blackLeft) {const float black[]={0,0,0,1};drawContext->ClearRenderTargetView(rtv,black);}   // narrowed, and no share to cover it: never the left eye's own (zoomed) picture
+      else {drawContext->UpdateSubresource(blitConstants_.Get(),0,nullptr,&constants[i],0,0);drawContext->Draw(3,0);}
       // F106 (native on foot, fix.native_on_foot_ads_sight_eye = both): the LEFT eye takes the RIGHT eye's image, turned into the left view, by the share times its
       // coverage, over the left eye's own image just drawn. The source is the right eye's capture (srvs[1]): complete before this call (both eyes are captured and
       // any shared transfer completed before compose), never written by it (the passes here write only the swapchain images), and it already holds the scene, the HUD
@@ -484,6 +519,17 @@ XrResult D3D11Stereo::renderCaptured(const XrView (&views)[2],XrSpace space,cons
         drawContext->PSSetConstantBuffers(0,1,blitConstants_.GetAddressOf());
         ID3D11ShaderResourceView* ownViews[2]={srvs[i].Get(),nullptr};drawContext->PSSetShaderResources(0,2,ownViews);
         shareFacts_.drawn=true;
+      }
+      // B3-3: the right eye's mirror of the left eye's strip, over its own image just drawn (the share shader in its mirror mode: black with an alpha, nothing sampled)
+      if(i==1&&mirrorOn) {
+        drawContext->PSSetShader(sharePixelShader_.Get(),nullptr,0);
+        drawContext->PSSetConstantBuffers(0,1,shareConstants_.GetAddressOf());
+        drawContext->UpdateSubresource(shareConstants_.Get(),0,nullptr,&mirror,0,0);
+        drawContext->OMSetBlendState(shareBlend_.Get(),nullptr,~0u);drawContext->Draw(3,0);
+        drawContext->OMSetBlendState(nullptr,nullptr,~0u);
+        drawContext->PSSetShader(blitPixelShader_.Get(),nullptr,0);
+        drawContext->PSSetConstantBuffers(0,1,blitConstants_.GetAddressOf());
+        shareFacts_.mirrorDrawn=true;
       }
       if(fade>0.f) {
         // The same triangle again under the fade blend: the source is multiplied by zero, so what it samples does not matter, and the destination keeps 1-fade.

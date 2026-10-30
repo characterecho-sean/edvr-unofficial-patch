@@ -18,6 +18,7 @@
 #include "steam_identity_cases.h"
 #include "comfort_fade_cases.h"
 #include "canted_display_cases.h"
+#include "scope_zoom_host_cases.h"   // B3: the scope zoom window's getter reads counted at the host, by caller
 #include "parallel_projection_notice_cases.h"
 #include "head_pose_cases.h"
 #include "seat_order_cases.h"
@@ -699,6 +700,7 @@ int selfTest() {
   edvr::openxr::test::runSteamIdentityCases(check);
   edvr::openxr::test::runComfortFadeCases(check);
   edvr::openxr::test::runCantedDisplayCases(check);
+  edvr::openxr::test::runScopeZoomHostCases(check);
   edvr::openxr::test::runParallelProjectionNoticeCases(check);
   edvr::openxr::test::runWorldScaleCases(check);
   edvr::openxr::test::runHeadPoseCases(check);

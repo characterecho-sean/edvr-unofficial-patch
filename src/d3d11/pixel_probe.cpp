@@ -305,6 +305,8 @@ void pixelProbeArm() {
                     g_targetFrame, list, kWindow, kWindow);
 }
 
+bool pixelProbeArmed() { return g_armed; }
+
 void pixelProbeFrameBoundary(ID3D11DeviceContext* ctx) {
     if (g_armed && g_frame + 1 >= g_targetFrame) {
         if (ctx) closeProbedFrame(ctx);

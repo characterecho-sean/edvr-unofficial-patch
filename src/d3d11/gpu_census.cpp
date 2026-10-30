@@ -16,7 +16,7 @@ namespace edvr {
 namespace {
 
 constexpr size_t kSections = static_cast<size_t>(GpuCensusSection::Count);
-// DoorTemporalWhole .. DoorSkyRing are indices 0..9; the in-frame sections
+// DoorTemporalWhole .. DoorScopeZoom are indices 0..12; the in-frame sections
 // start at FrameHologramPasses. Both ranges are contiguous by construction
 // (gpu_census.h), so a single index split is enough.
 constexpr size_t kDoorSections = static_cast<size_t>(GpuCensusSection::FrameHologramPasses);
@@ -30,13 +30,14 @@ unsigned occurrenceCapFor(GpuCensusSection section) noexcept {
     return isDoorSection(section) ? kDoorOccurrenceCap : kFrameOccurrenceCap;
 }
 
-// The door's parenthetical breakdown, DoorUpscaler..DoorSkyRing (indices
+// The door's parenthetical breakdown, DoorUpscaler..DoorScopeZoom (indices
 // 1..12) -- DoorTemporalWhole (index 0) has no slot of its own; it is the
 // "whole" that five of these nest inside (see gpuCensusLogLine). "sky ring -"
-// in a line means the diag.sky_ring dispatch never ran in the window (key off).
+// in a line means the diag.sky_ring dispatch never ran in the window (key off);
+// "lens -", that the scope lens ran in no frame of it (not in the scope's sights; the name is short because the worst-case census line is held under 1150 characters).
 constexpr const char* kDoorBreakdownNames[] = {
     "upscaler", "motion prep", "hologram resolve", "hologram depth copy", "hologram near-light", "hologram resolve draw",
-    "UI resolve", "sharpen", "menu", "UI layer composite", "sky ring"
+    "UI resolve", "sharpen", "menu", "UI layer composite", "sky ring", "lens"
 };
 constexpr size_t kDoorBreakdownCount = sizeof(kDoorBreakdownNames) / sizeof(kDoorBreakdownNames[0]);
 // The three hologram sub-sections sit right after the umbrella (index DoorHologramResolve); the umbrella's line item carries them in brackets.
@@ -221,9 +222,12 @@ uint64_t turnOccurrences(GpuCensusSection owner) noexcept {
     for (size_t i = 0; i < static_cast<size_t>(kAlteredFixCount); ++i) total += g_section[kAlteredFixFirst + i].occurrences;
     return total;
 }
-// A world-route, FSS reveal or second-skin section has no turn until it has been called this window (its first call counts whether or not it is on turn).
+// The scope lens's door section (gpu_census.h) is a door item that runs only in the right eye's scoped ADS: like the world route's, it has no turn until called this window.
+constexpr size_t kScopeZoomSection = static_cast<size_t>(GpuCensusSection::DoorScopeZoom);
+// A world-route, FSS reveal, second-skin or scope lens section has no turn until it has been called this window (its first call counts whether or not it is on turn).
 bool hasNoTurnYet(size_t i) noexcept {
-    return ((i >= kWorldFirst && i < kWorldFirst + kWorldSections) || i == kFssFirst || (i >= kSkinFirst && i < kSkinFirst + kSkinSections)) && g_section[i].occurrences == 0;
+    return ((i >= kWorldFirst && i < kWorldFirst + kWorldSections) || i == kFssFirst || (i >= kSkinFirst && i < kSkinFirst + kSkinSections) || i == kScopeZoomSection) &&
+           g_section[i].occurrences == 0;
 }
 // The next section to hold a turn: the fix sections after the first are not turns of their own, and a world-route, FSS reveal or second-skin
 // section has none until it has been called this window.
@@ -350,7 +354,7 @@ void logAndResetWindow(uint64_t now) {
         const Snapshot s = snapshotOf(g_section[1 + i], frames);
         appendItem(doorItems, kDoorBreakdownNames[i], s);
         if (section == GpuCensusSection::DoorSharpen || section == GpuCensusSection::DoorMenu ||
-            section == GpuCensusSection::DoorUiLayerComposite) {
+            section == GpuCensusSection::DoorUiLayerComposite || section == GpuCensusSection::DoorScopeZoom) {
             doorTotal += s.msPerFrame;
         }
     }

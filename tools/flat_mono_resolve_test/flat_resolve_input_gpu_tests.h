@@ -1,5 +1,6 @@
 #pragma once
 #include "../../src/d3d11/flat_resolve_input_capture.h"
+#include <atomic>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
@@ -134,11 +135,21 @@ inline int flatResolveInputGpuTests(ID3D11Device* device,ID3D11DeviceContext* co
     const auto heldManifest=fs::path(held.directory())/"inputs_frame_61200_1.json";
     HANDLE hold=CreateFileW(heldManifest.c_str(),GENERIC_READ,FILE_SHARE_READ|FILE_SHARE_WRITE,nullptr,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr);
     expect(hold!=INVALID_HANDLE_VALUE && text(heldManifest).find("\"status\":\"queued\"")!=std::string::npos,"queued body exists to be held");
-    std::thread release([&hold] {Sleep(50);if(hold!=INVALID_HANDLE_VALUE)CloseHandle(hold);});
-    for(unsigned n=0;n<30;++n) {held.poll(context,f.frame+1);Sleep(1);}
-    release.join();
-    for(unsigned n=0;n<200 && text(heldManifest).find("\"status\":\"queued\"")!=std::string::npos;++n) {held.poll(context,f.frame+1);Sleep(1);}
+    // The hold is let go once the publish has been refused (its own attempt count), then 20 ms later: a hold timed from the thread's start against the publish's retry budget
+    // (5 tries, 20 ms apart) failed once in a full build (#139) when the thread ran late. The publish runs inside poll(), so polling goes on while the thread waits.
+    const int attemptsBefore=edvr::posixReplaceAttempts()+edvr::classicReplaceAttempts();
+    std::atomic<bool> pollingDone{false};
+    std::thread release([&hold,&pollingDone,attemptsBefore] {
+        while(!pollingDone.load() && edvr::posixReplaceAttempts()+edvr::classicReplaceAttempts()<=attemptsBefore)Sleep(1);
+        Sleep(20);
+        if(hold!=INVALID_HANDLE_VALUE)CloseHandle(hold);
+    });
+    const ULONGLONG heldDeadline=GetTickCount64()+20000;   // the capture's own 5 s timeout ends its sample before this
+    while(text(heldManifest).find("\"status\":\"queued\"")!=std::string::npos && GetTickCount64()<heldDeadline) {held.poll(context,f.frame+1);Sleep(1);}
+    pollingDone=true;release.join();
     const auto heldBody=text(heldManifest);
+    if(heldBody.find("\"complete\":true")==std::string::npos)
+        std::printf("info: held manifest publish: %d replace attempts, body: %.300s\n",edvr::posixReplaceAttempts()+edvr::classicReplaceAttempts()-attemptsBefore,heldBody.c_str());
     expect(heldBody.find("\"complete\":true")!=std::string::npos && heldBody.find("\"status\":\"queued\"")==std::string::npos && !fs::exists(heldManifest.wstring()+L".tmp"),"manifest publication survives a handle held for 50 ms and leaves no .tmp");held.cancel();
 
     // Exercise the actual resolver arm/capture/refusal/poll path for every SDK.

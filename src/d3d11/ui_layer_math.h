@@ -668,7 +668,11 @@ enum class UiLayerFamily : uint8_t {
                    // no older family's number moves (kOnFootHud, the on-foot HUD's, sits ahead of it).
     kShieldRipple,  // the shield-strike refraction (shield_ripple.h: vs 820E5C131B99361D with ps 6EAA86EFE135B2D4): the game's own draw, taken out of the scene and
                     // re-issued through the HDR layer route into the eye's R32G32_FLOAT displacement layer D (t0 swapped for a UV ramp), applied at the door after RCAS.
-                    // Governed by its own half of the layer, beside the weapons fire's. Last in the enum.
+                    // Governed by its own half of the layer, beside the weapons fire's.
+    kScopeMark,     // the optical scope's AR gunsight mark (A2, docs\design-vr-scope-magnification-2026-10-28.md section 9): vs 025B4B9FF54622ED with ps 46F92DC71BF8DFA5 drawing 6 indices
+                    // in 1 instance with the readout atlas bound, named only while the scope lens is armed for the frame (UiFamilyFacts.scopeMark). A3 (section 10): taken out of the scene
+                    // into the eye's additive weapons layer, with the weapons fire (uiLayerFamilyUsesWeaponsLayer), whose tonemap-difference composite lays it over the picture after the
+                    // lens, so the mark keeps its own size and the brightness the game's additive blend gave it. The weapons fire's half governs it. Last in the enum.
     kCount
 };
 
@@ -692,6 +696,7 @@ inline const char* uiLayerFamilyName(UiLayerFamily f) {
         case UiLayerFamily::kOnFootHud: return "on-foot HUD";
         case UiLayerFamily::kWeaponsFire: return "weapons fire";
         case UiLayerFamily::kShieldRipple: return "shield ripple";
+        case UiLayerFamily::kScopeMark: return "scope mark";
         default: return "none";
     }
 }
@@ -706,15 +711,22 @@ inline bool uiLayerFamilyTakesHdr(UiLayerFamily f) {
            f == UiLayerFamily::kHoloGeneric || f == UiLayerFamily::kOrbitLines ||
            f == UiLayerFamily::kSupercruiseBars || f == UiLayerFamily::kSpaceDust ||
            f == UiLayerFamily::kMapCanvas || f == UiLayerFamily::kMapSprite || f == UiLayerFamily::kOnFootHud ||
-           f == UiLayerFamily::kWeaponsFire || f == UiLayerFamily::kShieldRipple;
+           f == UiLayerFamily::kWeaponsFire || f == UiLayerFamily::kShieldRipple || f == UiLayerFamily::kScopeMark;
+}
+
+// The families drawn into the eye's additive weapons layer W (the weapons fire's light and the scope's gunsight mark, which the game blends additively too) and so
+// composited by the same tonemap difference, T(F_up + L) - T(F_up), after the upscale. The ONE list: the decision, the layer's draw path and the rigs' routing model ask it.
+inline bool uiLayerFamilyUsesWeaponsLayer(UiLayerFamily f) {
+    return f == UiLayerFamily::kWeaponsFire || f == UiLayerFamily::kScopeMark;
 }
 
 // Which half governs a family: the weapons fire is its own half, and so is the shield ripple (as a half of its own: `rippleOn` is its live state, with
-// the ripple's own stand-down), every other family is fix.ui_quality's. The halves are
+// the ripple's own stand-down), every other family is fix.ui_quality's. The scope's gunsight mark rides the weapons layer, so it is the weapons half's (its arming is the
+// scope zoom key, in the draw hook's facts). The halves are
 // independent (the four combinations are the sharp_weapons_test rig's): fix.ui_quality off takes no interface, a stood-down weapons half takes no
-// weapons fire, whatever the other says. `qualityOn` and `weaponsOn` are the halves' LIVE states (the layer not stood down).
+// weapons fire and no mark, whatever the other says. `qualityOn` and `weaponsOn` are the halves' LIVE states (the layer not stood down).
 inline bool uiLayerFamilyEnabled(UiLayerFamily f, bool qualityOn, bool weaponsOn, bool rippleOn = true) {
-    return f == UiLayerFamily::kWeaponsFire ? weaponsOn : f == UiLayerFamily::kShieldRipple ? rippleOn : qualityOn;
+    return uiLayerFamilyUsesWeaponsLayer(f) ? weaponsOn : f == UiLayerFamily::kShieldRipple ? rippleOn : qualityOn;
 }
 
 // The two families that are scene geometry rather than interface: the layer takes them for DENSITY alone (their lines
@@ -881,6 +893,76 @@ inline bool uiOnFootHudMatch(uint64_t vs, uint64_t ps) {
     return false;
 }
 
+// A2: the scope's AR gunsight mark. The pair is the weapon and tool material's too (flat_weapon_footprint.h), so the pair is not the key: the mark is that pair drawing kScopeMarkIndices
+// indices in one instance (kind X or I) with the readout atlas bound. The atlas is the texture the weapon readout's composite (vs B10B032BDFD46700) samples: a learned interface
+// surface (ui_depth.cpp learns every texture the GUI renderer draws into), 3525x3133 in the dump census of edvr_gfx_20261028_173510, where the material samples BC-compressed
+// 1024x1024 textures. The family is named only while the scope lens is armed for the frame (scopeZoomMarkArmed).
+constexpr uint64_t kUiVsScopeMark = 0x025B4B9FF54622EDull, kUiPsScopeMark = 0x46F92DC71BF8DFA5ull;
+constexpr uint32_t kScopeMarkIndices = 6, kScopeMarkInstances = 1;
+inline bool uiScopeMarkShape(char kind, uint32_t indices, uint32_t instances) {
+    return (kind == 'X' || kind == 'I') && indices == kScopeMarkIndices && instances == kScopeMarkInstances;
+}
+// The facts gate of the family (vscreen.cpp's uiLayerFamilyOf asks it; sharp_weapons_test drives this very function with stand-ins for what the hook reads): the pair's vertex shader
+// drawing the mark's shape, the lens armed for the frame, then the pixel shader and a learned interface surface bound. The tests are in that order and each is a call the next
+// waits on, so an ordinary draw reads no hash and asks nothing of the lens. *psOut receives the pixel shader's hash once it has been read.
+template <class Armed, class PsHash, class Surface>
+inline bool uiScopeMarkFacts(uint64_t vs, char kind, uint32_t indices, uint32_t instances, Armed&& armed, PsHash&& psHash, Surface&& surfaceBound, uint64_t* psOut = nullptr) {
+    if (vs != kUiVsScopeMark || !uiScopeMarkShape(kind, indices, instances) || !armed()) return false;
+    const uint64_t ps = psHash();
+    if (psOut) *psOut = ps;
+    return ps == kUiPsScopeMark && surfaceBound();
+}
+// The mark's blend is ONE, DEST_ALPHA (the dump census, bl=12,7,1/2,7,1) into the lit R11G11B10_FLOAT eye target. That format has no alpha channel, so D3D11 reads its
+// destination alpha as 1 (tools\sharp_weapons_test destAlphaReproduction runs the blend on WARP) and the blend adds the mark's light to the scene; the layer's alpha is
+// transmittance, so the factor is rewritten to what the game's target gave it, here and nowhere else (every other family keeps destination-alpha factors refused).
+inline bool uiLayerFormatHasAlpha(uint32_t dxgiFormat) {
+    return dxgiFormat != 26 /* R11G11B10_FLOAT */ && dxgiFormat != 67 /* R9G9B9E5_SHAREDEXP */;
+}
+inline UiBlendRt uiLayerBlendDestAlphaOne(UiBlendRt b) {
+    const auto one = [](uint8_t& f) {
+        if (f == uiblend::kDestAlpha) f = uiblend::kOne;
+        else if (f == uiblend::kInvDestAlpha) f = uiblend::kZero;
+    };
+    one(b.src);
+    one(b.dst);
+    return b;
+}
+
+// What the layer does with the scope mark's depth and stencil tests (the draw tests depth GEQUAL and stencil against a reference, writing neither, in the dump census). The mark lies
+// on the sight glass, in front of the world and inside the lens, where nothing nearer is drawn, so a test the layer cannot reproduce is dropped and the mark is still redrawn in
+// the layer, rather than left in the scene to be magnified with the world. The numbers are scope_zoom_s1.h's kMarkPath*.
+enum class UiMarkDepth : uint8_t {
+    kUntested = 0,       // the draw tests neither depth nor stencil
+    kSeeded = 1,         // it tests, against the layer's seeded copy of the game's depth-stencil
+    kSeededReadOnly = 2, // the same, the game's view bound read-only (the draw writes nothing: a read-only view is accepted for the mark alone)
+    kTestsOff = 3,       // the copy could not be made or reproduced: the mark is redrawn with the tests off
+    kRefused = 4         // it tests and writes, and the copy cannot be had: the ordinary refusal
+};
+// The state's potential to write, whatever the view's read-only flags say: depth enabled with the write mask on, or a stencil operation that changes the stencil under a write
+// mask. A read-only view is accepted for the mark only when this is false, so the layer's writable copy cannot be changed by the draw either.
+inline bool uiScopeMarkWritesNothing(const UiDsState& s) {
+    const auto faceWrites = [](const UiDsFace& f) { return f.pass != uids::kKeep || f.fail != uids::kKeep || f.depthFail != uids::kKeep; };
+    const bool depthWrite = s.depthEnable && s.depthWriteAll;
+    const bool stencilWrite = s.stencilEnable && s.writeMask != 0 && (faceWrites(s.front) || faceWrites(s.back));
+    return !depthWrite && !stencilWrite;
+}
+// The path the mark's draw takes: e is what it does with the bound target, reproducible whether the layer could reproduce it (a read-only view counted as reproducible only where
+// uiScopeMarkWritesNothing allowed it), s the state (for the view's flags).
+inline UiMarkDepth uiScopeMarkDepth(const UiDsEffect& e, const UiDsState& s, bool reproducible) {
+    if (!e.tests()) return UiMarkDepth::kUntested;
+    if (reproducible) return (s.readOnlyDepth || s.readOnlyStencil) ? UiMarkDepth::kSeededReadOnly : UiMarkDepth::kSeeded;
+    return e.writes() ? UiMarkDepth::kRefused : UiMarkDepth::kTestsOff;
+}
+inline const char* uiMarkDepthName(UiMarkDepth p) {   // the press line's labels
+    switch (p) {
+        case UiMarkDepth::kUntested: return "untested";
+        case UiMarkDepth::kSeeded: return "seeded";
+        case UiMarkDepth::kSeededReadOnly: return "seeded read-only";
+        case UiMarkDepth::kTestsOff: return "tests off";
+        default: return "refused";
+    }
+}
+
 struct UiFamilyFacts {
     int targetKind = 0;           // uiLayerTargetKind: 0 no eye target, 1 not 8-bit UNORM, 2 post-tonemap
     uint64_t vs = 0, ps = 0;      // the bound shaders' hashes (ps asked only where the rule needs it)
@@ -888,6 +970,7 @@ struct UiFamilyFacts {
     bool panelSized = false;      // srv0IsPanelSized: the 2D screen's composite
     bool learnedSurface = false;  // a learned interface surface in PS slots 0..3
     bool nativeOnFoot = false;    // F26: fix.native_on_foot_sharp_hud is on, VR, and native stereo on foot (only VR's on-foot path sets it)
+    bool scopeMark = false;       // A2: the scope lens is armed for the frame and this draw is 6 indices in 1 instance with a learned surface (the readout atlas) bound
 };
 
 // How the rule reached its answer, for the family census (ui_layer.cpp).
@@ -958,6 +1041,7 @@ inline UiLayerFamily uiLayerFamilyFor(const UiFamilyFacts& f, UiFamilyWhy* why =
                   (f.ps == 0xEA02FAC2BD6C643Cull || f.ps == 0xE95634B0F61D218Full)))
                   ? UiLayerFamily::kHoloGeneric
               : (f.nativeOnFoot && uiOnFootHudMatch(f.vs, f.ps)) ? UiLayerFamily::kOnFootHud
+              : (f.scopeMark && f.vs == kUiVsScopeMark && f.ps == kUiPsScopeMark) ? UiLayerFamily::kScopeMark
               : UiLayerFamily::kNone;
         if (out != UiLayerFamily::kNone) w = UiFamilyWhy::kDirect;
     } else if (f.excluded) {
@@ -1190,6 +1274,11 @@ inline const char* uiLayerDecisionName(UiLayerDecision d) {
 inline bool uiLayerDecisionIsStructural(UiLayerDecision d) {
     return d != UiLayerDecision::kNotArmed && d != UiLayerDecision::kLate && d != UiLayerDecision::kNotUi;
 }
+// The scope mark's gets one for not-armed too: the family is named only for a sight the lens magnifies, so a mark the layer never took because its eye's layer was not armed is the
+// one reason its flight cannot afford to lose (the other families reach this decision on their first frames and leave it at the totals line).
+inline bool uiLayerDecisionIsStructural(UiLayerFamily f, UiLayerDecision d) {
+    return uiLayerDecisionIsStructural(d) || (f == UiLayerFamily::kScopeMark && d == UiLayerDecision::kNotArmed);
+}
 
 // The first-seen table behind ui_layer.cpp's noteFamily: one line per (family, decision, vertex shader, pixel shader), a structural
 // decision only, at most Cap lines. wanted() is the whole rule and record() is built on it, so a caller that formats a line's detail text
@@ -1205,7 +1294,7 @@ struct UiFamilySeenTable {
     uint32_t count = 0;
 
     bool wanted(UiLayerFamily f, UiLayerDecision d, uint64_t vs, uint64_t ps) const {
-        if (!uiLayerDecisionIsStructural(d)) return false;
+        if (!uiLayerDecisionIsStructural(f, d)) return false;
         for (uint32_t i = 0; i < count; ++i) {
             const Entry& s = entries[i];
             if (s.family == uint8_t(f) && s.decision == uint8_t(d) && s.vs == vs && s.ps == ps) return false;

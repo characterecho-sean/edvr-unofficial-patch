@@ -45,6 +45,9 @@ enum class GpuCensusSection : uint8_t {
     DoorMenu,                 // menu_panel.cpp's dispatch
     DoorUiLayerComposite,     // ui_layer.cpp's kComposite dispatch
     DoorSkyRing,              // sky_ring.cpp's dispatch (diag.sky_ring, TEMPORARY; docs/sky-flicker-2026-10-13.md) -- nested inside DoorTemporalWhole, so not a top-level door item
+    DoorScopeZoom,            // scope_zoom.cpp's two passes (the scope lens, fix.native_on_foot_ads_scope_zoom; docs/design-vr-scope-magnification-2026-10-28.md section 8): a top-level
+                              // door item, in the door total, called only in the right eye's scoped ADS -- it has no turn in the rotation until called this window, so with the key off the
+                              // census samples exactly as it did before this section existed
     // In-frame: per game draw. K = 8 while active.
     FrameHologramPasses,      // the two hologram/icon depth reissues
     FrameUiDepthCoverage,     // the UI-depth family reissue (UiContent::prepare, stellar coverage nest inside)

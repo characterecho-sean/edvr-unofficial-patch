@@ -2429,11 +2429,11 @@ void testSupercruiseLines() {
                                fam == UiLayerFamily::kHoloGeneric || fam == UiLayerFamily::kOrbitLines ||
                                fam == UiLayerFamily::kSupercruiseBars || fam == UiLayerFamily::kSpaceDust ||
                                fam == UiLayerFamily::kMapCanvas || fam == UiLayerFamily::kMapSprite || fam == UiLayerFamily::kOnFootHud ||
-                               fam == UiLayerFamily::kWeaponsFire || fam == UiLayerFamily::kShieldRipple;
+                               fam == UiLayerFamily::kWeaponsFire || fam == UiLayerFamily::kShieldRipple || fam == UiLayerFamily::kScopeMark;
         takesHdr = takesHdr && uiLayerFamilyTakesHdr(fam) == expectHdr;
         sceneLines = sceneLines && uiLayerFamilyIsSceneLines(fam) == (fam == UiLayerFamily::kOrbitLines || fam == UiLayerFamily::kSupercruiseBars);
     }
-    check(takesHdr, "SC3a: uiLayerFamilyTakesHdr is exactly the holo panels, flight HUD, sprite, holograms, orbit lines, bars, space dust, the two map families, the on-foot HUD (F26), the weapons fire and the shield ripple");
+    check(takesHdr, "SC3a: uiLayerFamilyTakesHdr is exactly the holo panels, flight HUD, sprite, holograms, orbit lines, bars, space dust, the two map families, the on-foot HUD (F26), the weapons fire, the shield ripple and the scope mark");
     check(sceneLines, "SC3b: uiLayerFamilyIsSceneLines is exactly the orbit lines and the bars (the space dust has no width to give: it is exempt from the density rule)");
     check(uiLayerWiderThanRender(5040, 4873, 2016, 1949) && uiLayerWiderThanRender(4032, 3898, 2016, 1949) &&
               !uiLayerWiderThanRender(2016, 1949, 2016, 1949) && !uiLayerWiderThanRender(4032, 1949, 4032, 1949) &&

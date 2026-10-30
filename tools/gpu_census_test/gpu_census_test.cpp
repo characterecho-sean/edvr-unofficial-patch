@@ -163,10 +163,11 @@ void rotationAndRealTimerCase(Device& d) {
     check(gpuTimingBind(d.dev.Get(), d.ctx.Get()), "bind canonical WARP timer owner");
     check(occurrenceCapFor(GpuCensusSection::DoorSharpen) == 4, "K cap: a door section caps at 4 (both eyes, two occurrences each)");
     check(occurrenceCapFor(GpuCensusSection::FrameUiLayerReissues) == 8, "K cap: a per-draw section caps at 8");
-    check(isDoorSection(GpuCensusSection::DoorUiLayerComposite) && isDoorSection(GpuCensusSection::DoorSkyRing),
-          "section split: the last door section (the sky ring's) is still door");
-    check(static_cast<size_t>(GpuCensusSection::DoorSkyRing) + 1 == static_cast<size_t>(GpuCensusSection::FrameHologramPasses),
-          "section split: the sky ring is the last door section, nested inside the whole and in no top-level door total");
+    check(isDoorSection(GpuCensusSection::DoorUiLayerComposite) && isDoorSection(GpuCensusSection::DoorSkyRing) && isDoorSection(GpuCensusSection::DoorScopeZoom),
+          "section split: the last door section (the scope lens's) is still door");
+    check(static_cast<size_t>(GpuCensusSection::DoorSkyRing) + 1 == static_cast<size_t>(GpuCensusSection::DoorScopeZoom) &&
+              static_cast<size_t>(GpuCensusSection::DoorScopeZoom) + 1 == static_cast<size_t>(GpuCensusSection::FrameHologramPasses),
+          "section split: the scope lens (a top-level door item, in the door total) is the last door section, after the sky ring (nested inside the whole and in no top-level door total)");
     check(!isDoorSection(GpuCensusSection::FrameHologramPasses), "section split: the first in-frame section is not door");
 
     ComPtr<ID3D11RenderTargetView> rtv;
@@ -356,7 +357,8 @@ void rotationAndRealTimerCase(Device& d) {
     bool ownersVisited = true, membersSkipped = true, idleWorldSkipped = true;
     for (size_t i = 0; i < kSections; ++i) {
         // The VR world route's and the second skin's sections are turns only once called this window (nextTurnOwner): none was here.
-        if ((i >= kWorldFirst && i < kWorldFirst + kWorldSections) || i == kFssFirst || (i >= kSkinFirst && i < kSkinFirst + kSkinSections)) { idleWorldSkipped = idleWorldSkipped && !visited[i]; continue; }
+        // The scope lens's door section (A1) is the same: a turn only once called this window.
+        if ((i >= kWorldFirst && i < kWorldFirst + kWorldSections) || i == kFssFirst || (i >= kSkinFirst && i < kSkinFirst + kSkinSections) || i == kScopeZoomSection) { idleWorldSkipped = idleWorldSkipped && !visited[i]; continue; }
         if (turnOwnerOf(static_cast<GpuCensusSection>(i)) == static_cast<GpuCensusSection>(i)) ownersVisited = ownersVisited && visited[i];
         else membersSkipped = membersSkipped && !visited[i];
     }
@@ -803,8 +805,8 @@ void alteredFixCases() {
         ++cycle;
         onlyOwners = onlyOwners && turnOwnerOf(static_cast<GpuCensusSection>(at)) == static_cast<GpuCensusSection>(at);
     } while (at != 0 && cycle < 200);
-    check(onlyOwners && cycle == static_cast<unsigned>(kSections) - kAlteredFixCount + 1 - static_cast<unsigned>(kWorldSections) - 1 /* the FSS reveal's */ - static_cast<unsigned>(kSkinSections) && cycle == 24,
-          "turns: the rotation lands only on turn owners, and a cycle is one turn for each section but the later fix ones and the idle world-route, FSS reveal and second-skin ones (24: the 20 there were after the terrain's two sections went, 2026-10-01, plus the three hologram sub-sections and the moved HDR HUD draw, 2026-10-13, and the sky ring's door section, 2026-10-13, less the FSS heal's door section, removed 2026-10-15; the key off changes nothing)");
+    check(onlyOwners && cycle == static_cast<unsigned>(kSections) - kAlteredFixCount + 1 - static_cast<unsigned>(kWorldSections) - 1 /* the FSS reveal's */ - static_cast<unsigned>(kSkinSections) - 1 /* the scope lens's */ && cycle == 24,
+          "turns: the rotation lands only on turn owners, and a cycle is one turn for each section but the later fix ones and the idle world-route, FSS reveal, second-skin and scope lens ones (24: the 20 there were after the terrain's two sections went, 2026-10-01, plus the three hologram sub-sections and the moved HDR HUD draw, 2026-10-13, and the sky ring's door section, 2026-10-13, less the FSS heal's door section, removed 2026-10-15; the key off changes nothing)");
     // The same cycle once the VR world route's three sections have been called this window: they take turns, 27.
     for (size_t i = kWorldFirst; i < kWorldFirst + kWorldSections; ++i) g_section[i].occurrences = 1;
     at = 0;
@@ -1503,7 +1505,7 @@ void instrumentCases() {
           "instruments: the hologram sub-sections sit between the resolve umbrella and UI resolve");
     check(isDoorSection(GpuCensusSection::DoorHoloNearLight), "instruments: the hologram sub-sections are door sections (K=4)");
     check(occurrenceCapFor(GpuCensusSection::DoorHoloResolveDraw) == 4, "instruments: a hologram sub-section caps at the door's 4");
-    check(kDoorBreakdownCount == 11, "instruments: eleven door items after the temporal whole (the profiler's ten, then the sky ring)");
+    check(kDoorBreakdownCount == 12, "instruments: twelve door items after the temporal whole (the profiler's ten, then the sky ring and the scope lens)");
     check(GpuCensusSection::AlteredHdrHud > GpuCensusSection::AlteredUiLayer && GpuCensusSection::AlteredHdrHud < GpuCensusSection::AlteredFixFirst,
           "instruments: the moved HDR draw is an altered class, before the fix sections");
     check(kAlteredClassSections == 3 && std::strstr(kAlteredNames[2], "HDR HUD") != nullptr, "instruments: the altered class has its name");

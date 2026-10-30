@@ -70,13 +70,17 @@ inline void describeDs(const UiDsState& s, UINT ref, DXGI_FORMAT viewFmt, char* 
                 s.readOnlyStencil ? " read-only stencil" : "");
 }
 
-// The shape of a bound blend state, alpha-to-coverage and logic ops refused.
-inline UiBlendShape shapeOf(ID3D11BlendState* bs, UiBlendRt* rtOut) {
+// The shape of a bound blend state, alpha-to-coverage and logic ops refused. destAlphaOne: the target has no alpha channel and the family reads destination-alpha factors as
+// what D3D11 gives them there (ui_layer_math.h uiLayerBlendDestAlphaOne); *rtOut is then the rewritten blend, the one the layer converts. *gameOut, when asked for, is the game's own
+// factors, as bound: what a log line that speaks of the game's blend prints.
+inline UiBlendShape shapeOf(ID3D11BlendState* bs, UiBlendRt* rtOut, bool destAlphaOne = false, UiBlendRt* gameOut = nullptr) {
     UiBlendRt rt;  // null state: D3D11's default -- blending off, all written
     if (bs) {
         D3D11_BLEND_DESC d{};
         bs->GetDesc(&d);
         rt = uiLayerBlendRtFrom(d.RenderTarget[0]);
+        if (gameOut) *gameOut = rt;
+        if (destAlphaOne) rt = uiLayerBlendDestAlphaOne(rt);
         if (rtOut) *rtOut = rt;
         if (d.AlphaToCoverageEnable) return UiBlendShape::kRefused;
         Microsoft::WRL::ComPtr<ID3D11BlendState1> bs1;
@@ -87,8 +91,9 @@ inline UiBlendShape shapeOf(ID3D11BlendState* bs, UiBlendRt* rtOut) {
             bs1->GetDesc1(&d1);
             if (d1.RenderTarget[0].LogicOpEnable) return UiBlendShape::kRefused;
         }
-    } else if (rtOut) {
-        *rtOut = rt;
+    } else {
+        if (gameOut) *gameOut = rt;
+        if (rtOut) *rtOut = rt;
     }
     return uiLayerBlendShape(rt);
 }
