@@ -16792,12 +16792,15 @@ struct PinStats {
     } f97[nofoot::f97::kBinN];
     // F179b: the neck guard per context (hip unarmed, hip armed, ADS standing, ADS crouched): the frames it ran in, the pushes, the post-reach add taken off, the eye ahead of the chest before and after.
     nofoot::f179::Counters f179;
+    nofoot::f183::Counters f183;   // F183: the stable heading's calls, blended, replaced (past vertical), the largest angle and the pitch ranges
 };
 // F179b: the neck guard's filtered prediction error (measured less predicted "ahead of the chest", m), the context it was taken in and when (ms): the pin hook is its one writer.
 struct F179Bias {
     double m = 0.0;
     int ctx = -1;
     uint64_t ms = 0;
+    double hx = 0.0, hz = 0.0;   // F183: the stable heading of the last call (x, z); the filtered error is reset when it turns over 20 deg between calls
+    bool hHave = false;
 };
 F179Bias g_f179Bias;
 std::atomic<uint32_t> g_pinStatSeq{0};
@@ -16983,7 +16986,9 @@ struct PinCall {
     // model, the animated neck's height and the aim's pitch (F_root's forward against the body's up), when G is in.
     bool f86Ok = false, f86LocalOk = false;
     double f86LocalY = 0.0, f86CamOverF = 0.0, f86FModelY = 0.0, f86NeckY = 0.0, f86AimPitch = 0.0;
-    double hEye[2] = {};   // the eye's heading (x, z); F69d's axes
+    double hEye[2] = {};   // the eye's heading (x, z); F69d's axes. F183: the stable heading (nofoot::f183::stableHeading): the eye's while the view is level-ish
+    nofoot::f183::Info f183;   // F183: what the stable heading did this call (valid with an eye; changed: the body's forward blended in or replacing it)
+    bool f179Bounded = false, f179BiasReset = false;   // F183: a guard push held to the distance plus 10 cm this call; the filtered error reset by the stable heading turning over 20 deg
     // F69d: the pre-pin feet test (both animated feet over kPinFeetHighM), and the eye against the joints as finally written (eye minus joint, the eye's
     // heading axes: right, up, forward; metres): neck 34, chest 24, clavicles 35 and 36, upper arms (plan U of the left and right sides).
     bool feetHighPre = false, clrOk = false, clrInside = false;
@@ -17251,7 +17256,8 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
             if ((localPitchValid || !g_pinEyeCalRefGenHave) && g_pinEyeCal.add(standing, p44, rows44, N0, pc.eyeYSelected, pc.rawEyeY))
                 g_pinEyeCalDone.fetch_add(1, std::memory_order_relaxed);
             nofoot::PinAnimTarget pa;
-            nofoot::pinNeckTargetAnim(E, fwdM, p44, rows44, N0, g_pinEyeCal, T, &pa, localPitchRad, localPitchValid, upMOk ? upUnit : nullptr, f169Cap);
+            nofoot::pinNeckTargetAnim(E, fwdM, p44, rows44, N0, g_pinEyeCal, T, &pa, localPitchRad, localPitchValid, upMOk ? upUnit : nullptr, f169Cap, cycSrc != kCycNone);
+            pc.f183 = pa.stable;
             pc.animT = pa.anim;
             pc.clampedT = pa.clamped;
             pc.wc = pa.wc;   // F69a: the camera's crouch (the animated vector's weight) and the eye's height against its standing mean; F169: held under the cap while the aim is pitched
@@ -17279,7 +17285,8 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
         } else {
             nofoot::PinEyeCal noCal;
             nofoot::PinAnimTarget pa;
-            nofoot::pinNeckTargetAnim(E, fwdM, p44, rows44, N0, noCal, T, &pa, localPitchRad, localPitchValid, upMOk ? upUnit : nullptr);
+            nofoot::pinNeckTargetAnim(E, fwdM, p44, rows44, N0, noCal, T, &pa, localPitchRad, localPitchValid, upMOk ? upUnit : nullptr, 1.0, cycSrc != kCycNone);
+            pc.f183 = pa.stable;
             pc.hEye[0] = pa.hEye[0];
             pc.hEye[1] = pa.hEye[2];
             pc.off[0] = pa.vUsed[0] * pa.hEye[2] - pa.vUsed[2] * pa.hEye[0];
@@ -17358,9 +17365,15 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
         // the neck rest, the yaw and the bend see the moved target. A POSITIVE dial does not: the reach rule works from the target and had absorbed it (the flight edvr_gfx_20261028_201339: the
         // body's move stayed +18.4 to +18.7 cm at every dial from 0 to +17, the left arm nearly straight at the reach boundary); it is added to the written neck after the reach rule instead
         // (pc.f168Post, below).
+        // F183: their forward and left axes are the pin's stable heading (pc.hEye) where it is not the eye's own (the view near vertical or past it); the eye's forward (fwdM) as it was where it is.
+        double fwdPin[3] = {fwdM[0], fwdM[1], fwdM[2]};
+        if (pc.f183.changed) {
+            fwdPin[0] = pc.hEye[0];
+            fwdPin[2] = pc.hEye[1];
+        }
         pc.f168DialCm = static_cast<double>(g_crouchAdsBodyCm.load(std::memory_order_relaxed));
-        std::memcpy(pc.f168Fwd, fwdM, sizeof(pc.f168Fwd));
-        if (nofoot::f168::shiftVector(pc.f168DialCm, pc.postureW, pc.detachW, fwdM, pc.f168Shift)) {
+        std::memcpy(pc.f168Fwd, fwdPin, sizeof(pc.f168Fwd));
+        if (nofoot::f168::shiftVector(pc.f168DialCm, pc.postureW, pc.detachW, fwdPin, pc.f168Shift)) {
             nofoot::f168::splitShift(pc.f168DialCm, pc.f168Shift, pc.f168Pre, pc.f168Post);
             if (!nofoot::f168::afterReach(pc.f168DialCm)) {
                 nofoot::weaponViewOffsetTarget(T, pc.f168Pre);
@@ -17372,8 +17385,8 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
         // the reach rule keeps the left grip reachable and gives back what the grip needs; the body, its shoulders and the arms solved from them move, the eye and the gun stay where the sight
         // lock puts them. Exactly nothing at dial 0, standing, at the hip, or for an aim with no horizontal forward.
         pc.f171DialCm = static_cast<double>(g_crouchAdsBodyLeftCm.load(std::memory_order_relaxed));
-        std::memcpy(pc.f171Fwd, fwdM, sizeof(pc.f171Fwd));
-        if (nofoot::f171::shiftVector(pc.f171DialCm, pc.postureW, pc.detachW, fwdM, pc.f171Shift)) {
+        std::memcpy(pc.f171Fwd, fwdPin, sizeof(pc.f171Fwd));
+        if (nofoot::f171::shiftVector(pc.f171DialCm, pc.postureW, pc.detachW, fwdPin, pc.f171Shift)) {
             nofoot::weaponViewOffsetTarget(T, pc.f171Shift);
             pc.targetFromAuthoredM = std::sqrt((T[0] - N0[0]) * (T[0] - N0[0]) + (T[1] - N0[1]) * (T[1] - N0[1]) + (T[2] - N0[2]) * (T[2] - N0[2]));
         }
@@ -17382,14 +17395,14 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
         // negative and after it when positive (F169), the left dial before it. A crouch blends one pair into the other. Exactly nothing at both dials 0 (the default), crouched, or at the hip.
         pc.f178FwdDialCm = static_cast<double>(g_standAdsBodyCm.load(std::memory_order_relaxed));
         pc.f178LeftDialCm = static_cast<double>(g_standAdsBodyLeftCm.load(std::memory_order_relaxed));
-        if (nofoot::f178::forwardVector(pc.f178FwdDialCm, pc.postureW, pc.detachW, fwdM, pc.f178FwdShift)) {
+        if (nofoot::f178::forwardVector(pc.f178FwdDialCm, pc.postureW, pc.detachW, fwdPin, pc.f178FwdShift)) {
             nofoot::f168::splitShift(pc.f178FwdDialCm, pc.f178FwdShift, pc.f178FwdPre, pc.f178FwdPost);
             if (!nofoot::f168::afterReach(pc.f178FwdDialCm)) {
                 nofoot::weaponViewOffsetTarget(T, pc.f178FwdPre);
                 pc.targetFromAuthoredM = std::sqrt((T[0] - N0[0]) * (T[0] - N0[0]) + (T[1] - N0[1]) * (T[1] - N0[1]) + (T[2] - N0[2]) * (T[2] - N0[2]));
             }
         }
-        if (nofoot::f178::leftVector(pc.f178LeftDialCm, pc.postureW, pc.detachW, fwdM, pc.f178LeftShift)) {
+        if (nofoot::f178::leftVector(pc.f178LeftDialCm, pc.postureW, pc.detachW, fwdPin, pc.f178LeftShift)) {
             nofoot::weaponViewOffsetTarget(T, pc.f178LeftShift);
             pc.targetFromAuthoredM = std::sqrt((T[0] - N0[0]) * (T[0] - N0[0]) + (T[1] - N0[1]) * (T[1] - N0[1]) + (T[2] - N0[2]) * (T[2] - N0[2]));
         }
@@ -17657,11 +17670,18 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
             pc.f179Ctx = nofoot::f179::contextOf(armed, pc.detachW, pc.postureW);
             pc.f179Measure = pc.f179Ctx == nofoot::f179::kHipUnarmed;
             pc.f179Ms = now;
-            if (g_f179Bias.ctx != pc.f179Ctx || now < g_f179Bias.ms || now - g_f179Bias.ms > 300) g_f179Bias = F179Bias{};
+            // F183: and when the stable heading turns over 20 deg between calls the error was measured on another geometry: reset (counted)
+            const double lastH[2] = {g_f179Bias.hx, g_f179Bias.hz};
+            const bool headingTurned = g_f179Bias.hHave && nofoot::f183::headingTurnDeg(lastH, pc.hEye) > nofoot::f183::kResetDeg;
+            if (g_f179Bias.ctx != pc.f179Ctx || now < g_f179Bias.ms || now - g_f179Bias.ms > 300 || headingTurned) g_f179Bias = F179Bias{};
+            pc.f179BiasReset = headingTurned;
+            g_f179Bias.hx = pc.hEye[0];
+            g_f179Bias.hz = pc.hEye[1];
+            g_f179Bias.hHave = true;
             pc.f179Bias = g_f179Bias.m;
             if (g179.ok) {
                 pc.f179Ran = true;
-                if (!pc.f179Measure) pc.f179PushPre = nofoot::f179::guardTarget(g179, N0, pc.f179Bias, T, pc.f179DistM);
+                if (!pc.f179Measure) pc.f179PushPre = nofoot::f179::guardTarget(g179, N0, pc.f179Bias, T, pc.f179DistM, &pc.f179Bounded);   // F183: the three stages share one bound, the distance plus 10 cm in the frame
             }
         }
         mv = nofoot::pinMove(N0, T);
@@ -17880,7 +17900,7 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
     double guardRes[3] = {};
     if (g179.ok && !pc.f179Measure) {
         const double thWithPost[3] = {mv.th[0] + f168Post[0], 0.0, mv.th[2] + f168Post[2]};
-        const double deficit = nofoot::f179::deficitM(g179.aheadWith(thWithPost) + pc.f179Bias, pc.f179DistM);
+        const double deficit = nofoot::f179::deficitBoundedM(g179.aheadWith(thWithPost) + pc.f179Bias, pc.f179DistM, &pc.f179Bounded, nofoot::f179::budgetLeftM(pc.f179DistM, pc.f179PushPre));
         if (deficit > 0.0) {
             const nofoot::f179::Trim trim = nofoot::f179::trimPost(f168Post, g179.h, deficit);
             if (trim.takenM > 0.0) {
@@ -17938,7 +17958,8 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
                 nofoot::f97::armedNeckTarget(N0[1], physicalTarget[1], pc.eyeYSelected + f97EyeOverE, f97H, pc.detachW, f97W, pc.postureW, restBeforeDetachY + neckViewShift[1]), N0[1], f97W,
                 nofoot::f179::standingRaiseM(N0[1], pc.eyeYSelected + f97EyeOverE, f97H, pc.postureW, pc.detachW)).y;
             // F179b: the neck guard on this target, as on the legacy one above (this target replaces it)
-            if (g179.ok && !pc.f179Measure) pc.f179PushPre = nofoot::f179::guardTarget(g179, N0, pc.f179Bias, physicalTarget, pc.f179DistM);
+            if (g179.ok && !pc.f179Measure) pc.f179PushPre = nofoot::f179::guardTarget(g179, N0, pc.f179Bias, physicalTarget, pc.f179DistM, &pc.f179Bounded,
+                                                                                         nofoot::f179::budgetLeftM(pc.f179DistM, pc.f179OffPost));
             std::memcpy(pc.neckRestTarget, physicalTarget, sizeof(physicalTarget));
             std::memcpy(T, physicalTarget, sizeof(physicalTarget));
         } else {
@@ -17956,7 +17977,8 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
         // F179b: the neck as it is about to be formed: any deficit comes off it last (and off the reach correction the bend aims at). The residual of this path replaces the legacy proposal's.
         if (g179.ok && !pc.f179Measure) {
             const nofoot::PinMove formed = nofoot::pinMove(N0, desiredNeck);
-            const double deficit = nofoot::f179::deficitM(g179.aheadWith(formed.th) + pc.f179Bias, pc.f179DistM);
+            const double deficit = nofoot::f179::deficitBoundedM(g179.aheadWith(formed.th) + pc.f179Bias, pc.f179DistM, &pc.f179Bounded,
+                                                                                nofoot::f179::budgetLeftM(pc.f179DistM, pc.f179PushPre + pc.f179OffPost));
             pc.f179PushRes = deficit;
             if (deficit > 0.0) {
                 nofoot::f179::pushBack(desiredNeck, g179.h, deficit);
@@ -18067,7 +18089,7 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
         pc.f179PredRaw = g179.aheadWith(mv.th);
         pc.f179Before = pc.f179PredRaw - (pc.f179PushPre + pc.f179OffPost + pc.f179PushRes);
         // F180c: a call that only measured (unarmed at the hip) moved nothing: the push it would have made is the deficit of the move as formed
-        if (pc.f179Measure) pc.f179Would = nofoot::f179::deficitM(pc.f179PredRaw + pc.f179Bias, pc.f179DistM);
+        if (pc.f179Measure) pc.f179Would = nofoot::f179::deficitBoundedM(pc.f179PredRaw + pc.f179Bias, pc.f179DistM, &pc.f179Bounded);
     }
     const double authoredDelta[3] = {T[0] - N0[0], T[1] - N0[1], T[2] - N0[2]};
     pc.targetFromAuthoredM = nofoot::ikLen(authoredDelta);
@@ -18557,6 +18579,7 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
         }
         // F95a: the settle window's verdict, the settled target's range, the view's step with the head still
         ++st.f95Why[pc.f95Why < nofoot::f95::kWhyN ? pc.f95Why : nofoot::f95::kInvalid];
+        st.f183.add(pc.f183, pc.f86Ok ? pc.f86AimPitch : std::nan(""), pc.scenePitchValid ? pc.scenePitchDeg : std::nan(""));   // F183: the stable heading's call (an eye known); the aim's and the eye's pitch
         st.f160.add(pc.f160Why, pc.f160Begins);   // F160: the release's class, and the calls that published its blend
         if (pc.f95Why == nofoot::f95::kSettled) {
             st.f95TgtMin = std::min(st.f95TgtMin, 100.0 * pc.f95Target);
@@ -18592,6 +18615,8 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
                 gs.beforeM = pc.f179Before;
                 gs.predM = pc.f179PredRaw;
                 gs.wouldM = pc.f179Would;   // F180c: unarmed at the hip: the push it would have made (nothing moved)
+                gs.bounded = pc.f179Bounded;     // F183: a push held to the distance plus 10 cm
+                gs.biasReset = pc.f179BiasReset;   // F183: the filtered error reset by the stable heading turning over 20 deg
                 st.f179.addGuard(gs);
             }
             const double rc = 100.0 * mv.delta;
@@ -24343,6 +24368,12 @@ void f125PinPrint(const F125PinWindow& w) noexcept {
             char line179[1190];
             nofoot::f179::formatContext(line179, sizeof(line179), ws, w.item, cx, k, nofoot::f179::clampGuardCm(static_cast<double>(w.guardKey)));
             Log::get().note("%s", line179);
+        }
+        // F183: the stable heading, one line for a window with pin calls that had an eye (a window with none blended still prints: the heading ran)
+        if (st.f183.frames) {
+            char line183[400];
+            nofoot::f183::formatLine(line183, sizeof(line183), ws, st.f183);
+            Log::get().note("%s", line183);
         }
 
     }

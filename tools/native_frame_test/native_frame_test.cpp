@@ -65,6 +65,7 @@
 #include "f170_checks.h"    // F170: the crouched ADS torso squared to the aim (TEMPORARY): the dial, the share, the turn on the real square-up and reach functions (29 deg to 0 at 1, 14.5 at 0.5), the hold not taking it off, the line
 #include "f171_checks.h"    // F171: the crouched ADS body moved to the left of the aim line (TEMPORARY): the dial, the left axis and its sign against the eye's right, the move through the real reach rule, the counters and the line; the raise's carriage (slopes, pairs, window, line); F170's line reaching the log (logpin::elbow's merges against F98Left)
 #include "f181_checks.h"    // F181: the left elbow's swivel capped at the hip with a two-handed gun (TEMPORARY): the dial, the targets from the hip share, capSwivel on synthetic plane angles (the same side, the wrap, the hip share through the press), the counters and the F98a line's ending, the pilot's values as the defaults of eight dials, the source sites
+#include "f183_checks.h"    // F183: the pin's stable horizontal heading (the eye's while level-ish bit for bit, blended toward the body's forward from 60 to 80 deg, the body's forward past vertical; the pin's own target on random eyes, the band's continuity, F168's axis), the neck guard bounded (distance + 10 cm, the filtered error +-5 cm, reset on a 20 deg turn), the counters and lines, the source sites
 #include "f182_checks.h"    // F182: the shotgun's ADS eye 9.5 cm forward baked, the spine straighten one-sided per bone (written = animated - share x max(0, animated - reference); toy skeleton with a roll: the flight's numbers, hunched, mixed, share 0), the left hand kept on a two-handed gun aimed steeply up (the gate, the held point in the item's frame, the 3 s limit, the release), the counters and lines, the source sites
 #include "f180_checks.h"    // F180: the left elbow hangs standing in ADS (the blend weight), the spine straighten dial (TEMPORARY: the plan of the spine and the neck, F166's capture and apply on a toy skeleton: slerp share, the reference store, the line), the neck guard's distance (TEMPORARY) and the unarmed guard measuring only, the source sites
 #include "f179_checks.h"    // F179: the body stays up in standing ADS (the standing raise: the eye less the key, capped by the legs' room, crouched/hip/unarmed unchanged) and the neck guard (the eye kept 10 cm ahead of the chest: the deficit, the axis, the order target / post-reach add / move, the last word over random scenes, the filtered error, the contexts, the line), the F97a bins in the sights, the source sites
@@ -3855,8 +3856,11 @@ int wmain(int argc, wchar_t** argv) {
                         double To[3];
                         nf::PinAnimTarget po;
                         nf::pinNeckTargetAnim(eyeOrbit, headFwd, pStance, rowsId, n0s, cal, To, &po, decodedPitch, true, headUp);
-                        orbitFixed = orbitFixed && po.wc == 0.0 && dist(To, neckOrbit) < 1e-5 && std::fabs(po.eyeYSelected - cal.eyeY) < 1e-5 &&
-                                     std::fabs(po.hEye[0] - hx) < 1e-9 && std::fabs(po.hEye[2] - hz) < 1e-9;
+                        // F183: the heading is the stable one. Where the eye's forward has a horizontal length of 0.5 or more it is the eye's own and the neck is recovered exactly as before; nearer vertical it
+                        // is blended toward the body's forward (or is it, past vertical), and the target is off the neck by the rest offset's forward part times the change of heading.
+                        const double dh = std::sqrt((po.hEye[0] - hx) * (po.hEye[0] - hx) + (po.hEye[2] - hz) * (po.hEye[2] - hz));
+                        orbitFixed = orbitFixed && po.wc == 0.0 && std::fabs(dist(To, neckOrbit) - std::fabs(vForward) * dh) < 1e-5 && std::fabs(po.eyeYSelected - cal.eyeY) < 1e-5 &&
+                                     (dh < 1e-12 || po.stable.changed) && std::fabs(po.hEye[0] * po.hEye[0] + po.hEye[2] * po.hEye[2] - 1.0) < 1e-9;
                         const double eyeCrouch[3] = {eyeOrbit[0], eyeOrbit[1] - 0.50, eyeOrbit[2]};
                         double Tc[3];
                         nf::PinAnimTarget pc;
@@ -3897,8 +3901,13 @@ int wmain(int argc, wchar_t** argv) {
                         const double vForward = nf::kPinRestBackM * cp - nf::kPinRestUpM * sp;
                         const double eye[3] = {neckOrbit[0] + hx * vForward, neckOrbit[1] + vUp, neckOrbit[2] + hz * vForward};
                         double target[3] = {};
+                        // F183: as the orbit above: exact where the eye's own heading stands, off by the rest offset's forward part times the heading's change where the stable one is blended in
+                        double hRaw[3];
+                        if (!nf::pinHeadHeading(headFwd, headUp, hRaw)) nf::pinHeading(headFwd, hRaw);
+                        const nf::f183::Info sh = nf::f183::stableHeading(headFwd, hRaw);
+                        const double dh = sh.changed ? std::sqrt((sh.h[0] - hRaw[0]) * (sh.h[0] - hRaw[0]) + (sh.h[2] - hRaw[2]) * (sh.h[2] - hRaw[2])) : 0.0;
                         physicalRestFixed = physicalRestFixed && nf::pinNeckTargetPhysicalRest(eye, headFwd, headUp, pitch, true, target) &&
-                                            dist(target, neckOrbit) < 1e-9;
+                                            std::fabs(dist(target, neckOrbit) - std::fabs(vForward) * dh) < 1e-9;
                     }
                 }
                 double invalidTarget[3] = {7.0, 8.0, 9.0};
@@ -7682,6 +7691,9 @@ int wmain(int argc, wchar_t** argv) {
     // excess, a turned bone above a bone left as animated is undone there, the share 0 writes nothing), the counters and the line within the log's limit; the left hand held at the stored grip point in the
     // item's frame in the sights with a two-handed gun at 45 deg or more up (moves with the item, 3 s limit, falls over 0.15 s, nothing outside the gate), the F67f line's ending, and the source sites.
     f182test::run182(check);
+    // F183: the stable heading on the pin's own target function (level-ish eyes bit for bit, an eye 70 deg up blended, the aim clamp and past vertical the body's forward, no jump over 2 deg for a 1 deg step through the band),
+    // F168's move where the eye's forward had none, the guard's push bound and error limit and reset, the counters and the lines, and the source sites.
+    f183test::run183(check);
     // F110: the ADS sight lock's model right eye from the left-eye job camera and from a solved left eye, the fallback, the IPD's sign.
     f110test::run110(check);
     // F111: the panel pointer instrument names the stage that turns a move the other way (K1 to K5, one at a time), the camera getters' decoding.

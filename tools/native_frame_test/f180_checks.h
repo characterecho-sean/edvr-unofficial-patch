@@ -410,7 +410,8 @@ inline void run180(Check&& check) {
             seed = seed * 1664525u + 1013904223u;
             return lo + (hi - lo) * (static_cast<double>(seed >> 8) / 16777216.0);
         };
-        int total = 0, held = 0;
+        int total = 0, held = 0, capped = 0;
+        bool inBound = true;
         for (double dist : {0.05, 0.10, 0.15, 0.20}) {
             for (int i = 0; i < 1500; ++i) {
                 f179test::Scene s;
@@ -427,11 +428,14 @@ inline void run180(Check&& check) {
                 s.bias = rnd(-0.05, 0.05);
                 const f179test::Result r = f179test::runScene(s, dist);
                 ++total;
+                const double pushTotal = r.pre + r.offPost + r.residual;
+                inBound = inBound && pushTotal <= f179::pushCapM(dist) + 1e-9;   // F183: the push of a frame is at most the distance plus 10 cm
                 if (r.aheadAfter >= dist - 1e-9) ++held;
+                else if (r.bounded && pushTotal >= f179::pushCapM(dist) - 1e-9) ++capped;
             }
         }
-        std::snprintf(msg, sizeof(msg), "F180c: F179's scenes at 5, 10, 15 and 20 cm: the predicted eye ends the distance asked ahead of the chest or more in %d of %d", held, total);
-        check(held == total, msg);
+        std::snprintf(msg, sizeof(msg), "F180c: F179's scenes at 5, 10, 15 and 20 cm: the predicted eye ends the distance asked ahead of the chest or more in %d of %d, the other %d asked more than the distance plus 10 cm (F183: the bound)", held, total, capped);
+        check(inBound && held + capped == total && capped < total / 4, msg);
         // the guard at 5 cm leaves a body at 7 cm alone that the guard at 10 pushes
         f179test::Scene close7;
         close7.chest[2] = -0.07; close7.n0[2] = -0.07; close7.target[2] = -0.07;
@@ -528,9 +532,9 @@ inline void run180(Check&& check) {
                   has("g_neckGuardCm.store(static_cast<float>(cm), std::memory_order_relaxed);"),
               "F180c (F181: the pilot's value): the key is read from [experimental] with the default 2 (was 10), held to 0..20, logged at the first read and at each change, and stored for the pin");
         check(has("if (!(pc.f179DistM > 0.0)) g179 = nofoot::f179::Geometry{};") && has("pc.f179Measure = pc.f179Ctx == nofoot::f179::kHipUnarmed;") &&
-                  has("if (!pc.f179Measure) pc.f179PushPre = nofoot::f179::guardTarget(g179, N0, pc.f179Bias, T, pc.f179DistM);") && has("if (g179.ok && !pc.f179Measure) pc.f179PushPre = nofoot::f179::guardTarget(g179, N0, pc.f179Bias, physicalTarget, pc.f179DistM);") &&
+                  has("if (!pc.f179Measure) pc.f179PushPre = nofoot::f179::guardTarget(g179, N0, pc.f179Bias, T, pc.f179DistM, &pc.f179Bounded);") && has("if (g179.ok && !pc.f179Measure) pc.f179PushPre = nofoot::f179::guardTarget(g179, N0, pc.f179Bias, physicalTarget, pc.f179DistM, &pc.f179Bounded,") &&
                   has("if (g179.ok && !pc.f179Measure) {\n        const double thWithPost[3]") && has("if (g179.ok && !pc.f179Measure) {\n            const nofoot::PinMove formed = nofoot::pinMove(N0, desiredNeck);") &&
-                  has("if (pc.f179Measure) pc.f179Would = nofoot::f179::deficitM(pc.f179PredRaw + pc.f179Bias, pc.f179DistM);") && has("gs.wouldM = pc.f179Would;"),
+                  has("if (pc.f179Measure) pc.f179Would = nofoot::f179::deficitBoundedM(pc.f179PredRaw + pc.f179Bias, pc.f179DistM, &pc.f179Bounded);") && has("gs.wouldM = pc.f179Would;"),
               "F180c: the distance 0 leaves no geometry (the guard off), unarmed at the hip only measures (the target push, the post-reach trim and the formed neck's look are all gated by it) and files the push it would make");
         check(has("float guardKey = 0.0f;") && has("pending.guardKey != g_neckGuardCm.load(std::memory_order_relaxed)") && has("w.guardKey = g_neckGuardCm.load(std::memory_order_relaxed);"),
               "F180c: a change of the distance closes the window, so each line's distance is the one its figures were made at");

@@ -14726,11 +14726,14 @@ H179B_LABEL = "native on foot neck guard (F179b)"
 H179B_RE = (r"native on foot neck guard \(F179b\) (?P<wl>\d+) s: item (?P<item>\S+); (?P<ctx>hip armed|ADS standing|ADS crouched) (?P<frames>\d+) frames, the guard at (?P<dist>[\d.]+) cm: "
             r"pushed (?P<pushed>\d+), the push mean (?P<pm>[\d.]+) cm \(largest (?P<px>[\d.]+)\); off the post-reach dial add (?P<on>\d+) frames, mean (?P<om>[\d.]+) cm "
             r"\(largest (?P<ox>[\d.]+)\); the eye ahead of the chest before the guard \(as the pose and dials would put it\) min (?P<bmin>%s) mean (?P<bmean>%s) cm, after it as measured "
-            r"\((?P<an>\d+) frames\) min (?P<amin>%s) mean (?P<amean>%s), predicted after mean (?P<pred>%s), under (?P<held>[\d.]+) cm (?P<u9>\d+)" % ((_HN,) * 5))
+            r"\((?P<an>\d+) frames\) min (?P<amin>%s) mean (?P<amean>%s), predicted after mean (?P<pred>%s), under (?P<held>[\d.]+) cm (?P<u9>\d+)"
+            # F183: the pushes held to the distance plus 10 cm and the filtered error reset by a heading turn (builds before F183 print none)
+            r"(?:, bounded pushes (?P<bnd>\d+), error resets (?P<rst>\d+))?" % ((_HN,) * 5))
 # F180c: unarmed at the hip the guard measures only: the push it would make, nothing moved (no frames under the distance)
 H179B_MEAS_RE = (r"native on foot neck guard \(F179b\) (?P<wl>\d+) s: item (?P<item>\S+); (?P<ctx>hip unarmed) (?P<frames>\d+) frames, the guard at (?P<dist>[\d.]+) cm, measuring only "
                  r"\(nothing is moved\): would push (?P<would>\d+) frames, the push mean (?P<wm>[\d.]+) cm \(largest (?P<wx>[\d.]+)\); the eye ahead of the chest \(as the pose puts it\) "
-                 r"min (?P<bmin>%s) mean (?P<bmean>%s) cm, as measured \((?P<an>\d+) frames\) min (?P<amin>%s) mean (?P<amean>%s), predicted mean (?P<pred>%s)" % ((_HN,) * 5))
+                 r"min (?P<bmin>%s) mean (?P<bmean>%s) cm, as measured \((?P<an>\d+) frames\) min (?P<amin>%s) mean (?P<amean>%s), predicted mean (?P<pred>%s)"
+                 r"(?:, bounded pushes (?P<bnd>\d+), error resets (?P<rst>\d+))?" % ((_HN,) * 5))
 H179B_CTXS = ("hip unarmed", "hip armed", "ADS standing", "ADS crouched")
 
 
@@ -14784,6 +14787,8 @@ def _hj_f179b_guard(rows, ctx):
     if not parts:
         return None
     text = "; ".join(parts)
+    if any(r.get("bnd") is not None for r in sec + meas):   # F183: the pushes held to the distance plus 10 cm, the filtered error reset by a heading turn of over 20 deg (a build before F183 prints none)
+        text += "; F183: %d bounded push(es), %d filtered-error reset(s)" % (sum(int(r["bnd"] or 0) for r in sec + meas), sum(int(r["rst"] or 0) for r in sec + meas))
     if bad:
         return ("PARTIAL", text + "; the eye was measured more than 1 cm under the distance ahead of the chest after the guard in more than 1%% of the frames (the guard did not hold): %s" % ", ".join(bad) +
                 ("; " + "; ".join(notes) if notes else ""))
@@ -14903,6 +14908,38 @@ def _hj_f182c_stale_grip(rows, ctx):
         return ("PARTIAL", text + "; the held calls' hand-to-grip error averaged %.2f cm, more than %.0f cm over the unheld calls' %.2f cm (the arm does not reach the held point)" % (errm, H182C_TOL_CM, unm))
     if held and not unn:
         return ("OK", text + "; no unheld solved left call in these windows to compare with")
+    return ("OK", text)
+
+# F183: the pin's stable horizontal heading (formatLine in src/d3d11/native_on_foot_f183.h), one line for a window with pin calls that had an eye.
+H183_LABEL = "native on foot heading (F183)"
+H183_RE = (r"native on foot heading \(F183\) (?P<wl>\d+) s: frames (?P<frames>\d+), blended (?P<blended>\d+), replaced (?P<replaced>\d+) \(past vertical\); the largest angle between the eye's "
+           r"heading and the stable one (?P<angle>[\d.]+) deg; the aim pitch (?P<amin>%s) to (?P<amax>%s) deg, the eye's pitch up to (?P<emax>%s) deg" % ((_HN,) * 3))
+H183_AIM_OVER = 80.0       # a window with the aim over this ...
+H183_EYE_OVER = 60.0       # ... and the eye's own pitch over this (its horizontal length under 0.5) with nothing blended or replaced: the heading did not act
+
+
+def _hj_f183_heading(rows, ctx):
+    """F183: the pin's stable horizontal heading. Every horizontal axis the pin took from the eye's forward (the neck target's rest offset, F97a's and F179b's heading, F168/F171/F178's forward and
+    left) flipped when the view passed vertical (the flight edvr_gfx_20261030_125739: the aim at +85.2, the view past vertical on some frames: F179b's eye ahead of the chest -33.7 min against +35.5
+    mean, the arms up to 48 cm short, the view moving 52 mm rms). The heading is now the eye's while its forward's horizontal length is 0.5 or more (60 deg from level, bit for bit as before),
+    blended toward the body's own forward down to 0.17 (80 deg) and the body's forward outright where the eye's heading points behind it. Per second window: the pin calls with an eye, those
+    blended, those replaced (past vertical), the largest angle between the eye's heading and the stable one, the aim's pitch range and the eye's largest pitch. IDLE without pin calls (no line,
+    no verdict: the rule reads only the lines); OK with the figures; NEVER APPLIED for a window with the aim over +80 deg and the eye over +60 deg and no call blended or replaced."""
+    sec = rows.get("sec", [])
+    if not sec:
+        return None
+    frames = sum(int(r["frames"]) for r in sec)
+    blended, replaced = sum(int(r["blended"]) for r in sec), sum(int(r["replaced"]) for r in sec)
+    angle = max(float(r["angle"]) for r in sec)
+    amin, amax, emax = min(float(r["amin"]) for r in sec), max(float(r["amax"]) for r in sec), max(float(r["emax"]) for r in sec)
+    text = ("%d s: %d pin calls with an eye, %d blended toward the body's forward, %d replaced (the view past vertical); the largest angle between the eye's heading and the stable one %.1f deg; "
+            "the aim pitch %+.1f to %+.1f deg, the eye's pitch up to %+.1f deg" % (_hsecs(sec), frames, blended, replaced, angle, amin, amax, emax))
+    if not frames:
+        return ("IDLE", text + "; no pin call had an eye")
+    dead = [r for r in sec if float(r["amax"]) > H183_AIM_OVER and float(r["emax"]) > H183_EYE_OVER and not int(r["blended"]) and not int(r["replaced"]) and int(r["frames"])]
+    if dead:
+        return ("NEVER APPLIED", text + "; %d window(s) had the aim over +%.0f deg and the eye over +%.0f deg with no call blended or replaced (the stable heading did not act: the largest aim %+.1f deg)" % (
+            len(dead), H183_AIM_OVER, H183_EYE_OVER, max(float(r["amax"]) for r in dead)))
     return ("OK", text)
 
 def _hj_f95c_head_shadow(rows, ctx):
@@ -16491,6 +16528,9 @@ HEALTH_RULES = (
         ("sec", H180B_RE),
         ("dial", H180B_DIAL_RE),
     ), _hj_f180b_spine),
+    _hrule("stable heading (F183)", ("F183",), (H183_LABEL,), (
+        ("sec", H183_RE),
+    ), _hj_f183_heading),
     _hrule("stale grip hold (F182c)", ("F67f",), (H182C_LABEL,), (
         ("sec", H182C_RE),
         ("plain", H182C_PLAIN_RE),
@@ -17637,6 +17677,7 @@ def self_test_health():
     f180_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f180.h")
     f181_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f181.h")
     f182_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f182.h")
+    f183_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f183.h")
     f172_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f172.h")
     f175_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f175.h")
     f176_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f176.h")
@@ -17676,6 +17717,7 @@ def self_test_health():
         f180src = read_text(f180_path)
         f181src = read_text(f181_path)
         f182src = read_text(f182_path)
+        f183src = read_text(f183_path)
         f172src = read_text(f172_path)
         f175src = read_text(f175_path)
         f176src = read_text(f176_path)
@@ -17853,6 +17895,15 @@ def self_test_health():
             fmts[key] = health_c_format(f181src, needle)
         if fmts[key] is None:
             raise AssertionError("native_on_foot_f181.h has no format holding %r: the --health rule that reads it is out of date" % needle)
+        return health_render(fmts[key], vals)
+
+    def R183(needle, *vals):
+        """F183's window line (formatLine in native_on_foot_f183.h), from its own format literal."""
+        key = "f183:" + needle
+        if key not in fmts:
+            fmts[key] = health_c_format(f183src, needle)
+        if fmts[key] is None:
+            raise AssertionError("native_on_foot_f183.h has no format holding %r: the --health rule that reads it is out of date" % needle)
         return health_render(fmts[key], vals)
 
     def R182(needle, *vals):
@@ -19120,15 +19171,17 @@ def self_test_health():
         F179B = "neck guard (F179b)"
 
         def guard179(item=RIFLE97, wl=10, ctx="ADS standing", frames=800, dist=10.0, pushed=120, pm=3.0, px=6.5, on=40, om=2.0, ox=4.0, bmin=4.0, bmean=14.0, an=800, amin=10.4, amean=18.0, pred=18.5,
-                     u9=0):
+                     u9=0, bnd=0, rst=0, old=False):
             """F179b's line for one acting context, from the DLL's own format (formatContext, native_on_foot_f179.h); the push, the part off the post-reach add and the eye ahead of the chest in cm; dist:
-            the guard's distance (the key's value), the frames under it less 1 cm: u9."""
-            return R179("native on foot neck guard (F179b) %u s: item %s; %s %u frames, the guard at %.1f cm: pushed", wl, item, ctx, frames, dist, pushed, pm, px, on, om, ox, bmin, bmean, an, amin, amean,
-                        pred, max(dist - 1.0, 0.0), u9)
+            the guard's distance (the key's value), the frames under it less 1 cm: u9; bnd, rst: F183's bounded pushes and error resets; old: a build before F183 (no such ending)."""
+            line = R179("native on foot neck guard (F179b) %u s: item %s; %s %u frames, the guard at %.1f cm: pushed", wl, item, ctx, frames, dist, pushed, pm, px, on, om, ox, bmin, bmean, an, amin, amean,
+                        pred, max(dist - 1.0, 0.0), u9, bnd, rst)
+            return line.rsplit(", bounded pushes", 1)[0] if old else line
 
-        def meas179(item=RIFLE97, wl=10, frames=500, dist=10.0, would=40, wm=2.4, wx=9.2, bmin=-0.3, bmean=21.0, an=500, amin=-0.3, amean=21.0, pred=21.0):
+        def meas179(item=RIFLE97, wl=10, frames=500, dist=10.0, would=40, wm=2.4, wx=9.2, bmin=-0.3, bmean=21.0, an=500, amin=-0.3, amean=21.0, pred=21.0, bnd=0, rst=0, old=False):
             """F180c's line for the unarmed hip, which measures only (the same formatContext, its other format)."""
-            return R179("native on foot neck guard (F179b) %u s: item %s; %s %u frames, the guard at %.1f cm, measuring only", wl, item, "hip unarmed", frames, dist, would, wm, wx, bmin, bmean, an, amin, amean, pred)
+            line = R179("native on foot neck guard (F179b) %u s: item %s; %s %u frames, the guard at %.1f cm, measuring only", wl, item, "hip unarmed", frames, dist, would, wm, wx, bmin, bmean, an, amin, amean, pred, bnd, rst)
+            return line.rsplit(", bounded pushes", 1)[0] if old else line
 
         check("F179b guard: pushes that held the eye 10 cm ahead of the chest are OK, with the contexts named",
               [guard179(), guard179(ctx="hip armed", frames=600, pushed=0, pm=0.0, px=0.0, on=0, om=0.0, ox=0.0, bmin=30.0, bmean=34.0, amin=29.0, amean=33.0, pred=33.0, an=600)], 0, [("OK", F179B)],
@@ -19157,6 +19210,33 @@ def self_test_health():
         check("F179b guard: a line that drifted beside a good one is counted beside the verdict", [guard179(), "native on foot neck guard (F179b) 10 s: something else"], 0, [("OK", F179B)],
               has=["[+1 line(s) the rule's patterns do not match: "])
 
+        # F183: the guard's pushes held to the distance plus 10 cm and the filtered error reset by a heading turn of over 20 deg, appended to both lines
+        check("F183 guard: the bounded pushes and the error resets ride the acting line and are counted in the verdict",
+              [guard179(bnd=3, rst=2), guard179(bnd=1, rst=0, ctx="hip armed")], 0, [("OK", F179B)], has=["F183: 4 bounded push(es), 2 filtered-error reset(s)"], lacks=["UNPARSED"])
+        check("F183 guard: and the unarmed hip's measuring line", [meas179(bnd=5, rst=1), guard179()], 0, [("OK", F179B)], has=["F183: 5 bounded push(es), 1 filtered-error reset(s)"], lacks=["UNPARSED"])
+        check("F183 guard: a line from a build before F183 (no ending) still parses and says nothing of it", [guard179(old=True), meas179(old=True)], 0, [("OK", F179B)], lacks=["UNPARSED", "F183:", "bounded"])
+
+        # ---- F183: the pin's stable horizontal heading ----
+        F183 = "stable heading (F183)"
+
+        def head183(wl=1, frames=90, blended=0, replaced=0, angle=0.0, amin=-8.0, amax=-8.0, emax=-8.0):
+            """F183's window line, from the DLL's own format (formatLine, native_on_foot_f183.h)."""
+            return R183("native on foot heading (F183) %u s: frames %u", wl, frames, blended, replaced, angle, amin, amax, emax)
+
+        check("F183 heading: level aims (nothing to blend) are OK with the figures", [head183(), head183()], 0, [("OK", F183)],
+              has=["2 s: 180 pin calls with an eye, 0 blended toward the body's forward, 0 replaced (the view past vertical); the largest angle between the eye's heading and the stable one 0.0 deg; "
+                   "the aim pitch -8.0 to -8.0 deg, the eye's pitch up to -8.0 deg"], lacks=["UNPARSED", "NEVER"])
+        check("F183 heading: a look up that blended and replaced (the flight's +85.2) is OK and says so",
+              [head183(), head183(frames=90, blended=40, replaced=12, angle=61.5, amin=-8.0, amax=85.2, emax=88.0)], 0, [("OK", F183)],
+              has=["40 blended toward the body's forward, 12 replaced (the view past vertical); the largest angle between the eye's heading and the stable one 61.5 deg",
+                   "the aim pitch -8.0 to +85.2 deg, the eye's pitch up to +88.0 deg"], lacks=["UNPARSED", "NEVER"])
+        check("F183 heading: the aim over +80 and the eye over +60 and nothing blended or replaced never applied", [head183(amax=85.2, amin=60.0, emax=84.0)], 3, [("NEVER APPLIED", F183)],
+              has=["1 window(s) had the aim over +80 deg and the eye over +60 deg with no call blended or replaced"], lacks=["UNPARSED"])
+        check("F183 heading: the aim over +80 with the head pitched down (the eye at +40, the heading level) is not a defect", [head183(amax=85.2, emax=40.0)], 0, [("OK", F183)], lacks=["UNPARSED", "NEVER"])
+        check("F183 heading: a window with no pin call with an eye is idle", [head183(frames=0)], 0, [("IDLE", F183)], has=["no pin call had an eye"], lacks=["UNPARSED", "NEVER"])
+        check("F183 heading: no line at all is not present (no verdict row)", [f90_part()], 0, [("OK", F90S)],
+              lacks=[row("OK", F183), row("IDLE", F183), row("NEVER APPLIED", F183), row("UNPARSED", F183)])
+        check("F183 heading: a line that drifted from its pattern is unparsed", ["native on foot heading (F183) 1 s: something else"], 4, [("UNPARSED", F183)])
         # ---- F180b (TEMPORARY): the standing ADS spine straighten ----
         F180B = "standing ADS spine (F180b)"
 

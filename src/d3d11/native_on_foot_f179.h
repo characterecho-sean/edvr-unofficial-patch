@@ -33,6 +33,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <limits>
 
 namespace edvr {
 namespace nofoot {
@@ -73,7 +74,8 @@ inline double clampGuardCm(double cm) noexcept { return !std::isfinite(cm) ? kNe
 // A measured "ahead of the chest" under this after the guard (m) is a guard that did not hold: 1 cm under the distance asked.
 inline double heldBelowM(double distM) noexcept { return distM > 0.01 ? distM - 0.01 : 0.0; }
 constexpr double kMinHeadingXz = 0.5;                             // F97a's: a heading whose horizontal part is under this is not read
-constexpr double kBiasGain = 0.5, kBiasLimitM = 0.5;              // the filtered prediction error: the share of each new error taken in, and its bound
+constexpr double kBiasGain = 0.5, kBiasLimitM = 0.05;             // the filtered prediction error: the share of each new error taken in, and its bound (F183: 5 cm; it was 50)
+constexpr double kPushExtraCm = 10.0;                             // F183: a frame's push is at most the guard's distance plus this (the flight edvr_gfx_20261030_125739 pushed 44 cm on a heading that had flipped)
 constexpr uint32_t kMinFrames = 30;                               // the health rules: fewer frames than this are too few to judge
 
 // The contexts the guard is reported in.
@@ -113,8 +115,26 @@ inline Geometry makeGeometry(bool eyeOk, const double eye[3], double hx, double 
     return g;
 }
 
-// The deficit of an ahead of the chest (m) against the distance asked (distM, F180c; the default 10 cm), m: not a number reads as no deficit.
-inline double deficitM(double aheadM, double distM = kNeckGuardAheadM) noexcept { return std::isfinite(aheadM) && std::isfinite(distM) && aheadM < distM ? distM - aheadM : 0.0; }
+// The deficit of an ahead of the chest (m) against the distance asked (distM, F180c; the default 10 cm), m: not a number reads as no deficit. F183: held to the distance plus kPushExtraCm (a
+// bounded deficit sets *bounded when the figure asked was more). budgetM: what is left of the frame's bound after the pushes already made (the three stages share one bound: the distance plus
+// 10 cm in all); the default leaves the stage's own.
+inline double pushCapM(double distM) noexcept { return distM + kPushExtraCm * 0.01; }
+inline double budgetLeftM(double distM, double doneM) noexcept {
+    const double left = pushCapM(distM) - (std::isfinite(doneM) ? doneM : 0.0);
+    return left > 0.0 ? left : 0.0;
+}
+inline double deficitBoundedM(double aheadM, double distM, bool* bounded, double budgetM = std::numeric_limits<double>::infinity()) noexcept {
+    if (!(std::isfinite(aheadM) && std::isfinite(distM) && aheadM < distM)) return 0.0;
+    const double d = distM - aheadM;
+    double cap = pushCapM(distM);
+    if (budgetM < cap) cap = budgetM > 0.0 ? budgetM : 0.0;
+    if (d > cap) {
+        if (bounded) *bounded = true;
+        return cap;
+    }
+    return d;
+}
+inline double deficitM(double aheadM, double distM = kNeckGuardAheadM) noexcept { return deficitBoundedM(aheadM, distM, nullptr); }
 
 // A horizontal point or move taken back along the heading by amountM (the horizontal, x and z).
 inline void pushBack(double v[3], const double h[3], double amountM) noexcept {
@@ -124,10 +144,11 @@ inline void pushBack(double v[3], const double h[3], double amountM) noexcept {
 
 // The target before the reach rule: if the body moved to it (as pinMove makes the move from the neck n0) would leave the eye less than 10 cm ahead of the chest, the target is taken back along
 // the heading by the deficit. bias: the filtered prediction error (m), added to the predicted figure. Returns the push (m, >= 0); 0 and t untouched when the geometry is not ok.
-inline double guardTarget(const Geometry& g, const double n0[3], double bias, double t[3], double distM = kNeckGuardAheadM) noexcept {
+inline double guardTarget(const Geometry& g, const double n0[3], double bias, double t[3], double distM = kNeckGuardAheadM, bool* bounded = nullptr,
+                          double budgetM = std::numeric_limits<double>::infinity()) noexcept {
     if (!g.ok) return 0.0;
     const PinMove mv = pinMove(n0, t);
-    const double d = deficitM(g.aheadWith(mv.th) + (std::isfinite(bias) ? bias : 0.0), distM);
+    const double d = deficitBoundedM(g.aheadWith(mv.th) + (std::isfinite(bias) ? bias : 0.0), distM, bounded, budgetM);
     if (!(d > 0.0)) return 0.0;
     pushBack(t, g.h, d);
     return d;
@@ -166,9 +187,11 @@ inline double nextBias(double bias, double errorM) noexcept {
 struct Sample {
     int ctx = kHipUnarmed;
     double pushM = 0.0, offPostM = 0.0, beforeM = std::nan(""), predM = std::nan(""), wouldM = std::nan("");
+    bool bounded = false, biasReset = false;   // F183: a push held to the distance plus 10 cm this call; the filtered error reset by a heading turn of over 20 deg
 };
 struct Ctx1 {
     uint32_t frames = 0, pushed = 0, offPostN = 0, beforeN = 0, predN = 0, afterN = 0, under9 = 0, wouldN = 0, wouldFrames = 0;
+    uint32_t bounded = 0, resets = 0;   // F183: calls with a push held to the distance plus 10 cm; calls the filtered error was reset by a heading turn
     double pushSum = 0.0, pushMax = 0.0, offPostSum = 0.0, offPostMax = 0.0, beforeSum = 0.0, beforeMin = 1e9, predSum = 0.0, afterSum = 0.0, afterMin = 1e9, wouldSum = 0.0, wouldMax = 0.0;
 };
 struct Counters {
@@ -177,6 +200,8 @@ struct Counters {
     void addGuard(const Sample& s) noexcept {
         Ctx1& k = c[clampCtx(s.ctx)];
         ++k.frames;
+        if (s.bounded) ++k.bounded;
+        if (s.biasReset) ++k.resets;
         if (std::isfinite(s.pushM) && s.pushM > 0.0) {
             ++k.pushed;
             k.pushSum += s.pushM;
@@ -219,7 +244,7 @@ struct Counters {
             Ctx1& d = c[i];
             const Ctx1& s = o.c[i];
             d.frames += s.frames; d.pushed += s.pushed; d.offPostN += s.offPostN; d.beforeN += s.beforeN; d.predN += s.predN; d.afterN += s.afterN; d.under9 += s.under9;
-            d.wouldN += s.wouldN; d.wouldFrames += s.wouldFrames; d.wouldSum += s.wouldSum;
+            d.wouldN += s.wouldN; d.wouldFrames += s.wouldFrames; d.wouldSum += s.wouldSum; d.bounded += s.bounded; d.resets += s.resets;
             d.wouldMax = s.wouldMax > d.wouldMax ? s.wouldMax : d.wouldMax;
             d.pushSum += s.pushSum; d.offPostSum += s.offPostSum; d.beforeSum += s.beforeSum; d.predSum += s.predSum; d.afterSum += s.afterSum;
             d.pushMax = s.pushMax > d.pushMax ? s.pushMax : d.pushMax;
@@ -250,16 +275,17 @@ inline int formatContext(char* buf, size_t n, uint32_t seconds, const char* item
     if (cx == kHipUnarmed)
         return std::snprintf(buf, n,
                              "native on foot neck guard (F179b) %u s: item %s; %s %u frames, the guard at %.1f cm, measuring only (nothing is moved): would push %u frames, the push mean %.1f cm (largest %.1f); "
-                             "the eye ahead of the chest (as the pose puts it) min %+.1f mean %+.1f cm, as measured (%u frames) min %+.1f mean %+.1f, predicted mean %+.1f",
+                             "the eye ahead of the chest (as the pose puts it) min %+.1f mean %+.1f cm, as measured (%u frames) min %+.1f mean %+.1f, predicted mean %+.1f, bounded pushes %u, error resets %u",
                              seconds, item ? item : "none", ctxName(cx), k.frames, guardCm, k.wouldN, mean(k.wouldSum, k.wouldN) * 100.0, k.wouldMax * 100.0, k.beforeN ? k.beforeMin * 100.0 : 0.0,
-                             mean(k.beforeSum, k.beforeN) * 100.0, k.afterN, k.afterN ? k.afterMin * 100.0 : 0.0, mean(k.afterSum, k.afterN) * 100.0, mean(k.predSum, k.predN) * 100.0);
+                             mean(k.beforeSum, k.beforeN) * 100.0, k.afterN, k.afterN ? k.afterMin * 100.0 : 0.0, mean(k.afterSum, k.afterN) * 100.0, mean(k.predSum, k.predN) * 100.0,
+                             k.bounded, k.resets);
     return std::snprintf(buf, n,
                          "native on foot neck guard (F179b) %u s: item %s; %s %u frames, the guard at %.1f cm: pushed %u, the push mean %.1f cm (largest %.1f); off the post-reach dial add %u frames, mean %.1f cm "
                          "(largest %.1f); the eye ahead of the chest before the guard (as the pose and dials would put it) min %+.1f mean %+.1f cm, after it as measured (%u frames) min %+.1f mean %+.1f, "
-                         "predicted after mean %+.1f, under %.0f cm %u",
+                         "predicted after mean %+.1f, under %.0f cm %u, bounded pushes %u, error resets %u",
                          seconds, item ? item : "none", ctxName(cx), k.frames, guardCm, k.pushed, mean(k.pushSum, k.pushed) * 100.0, k.pushMax * 100.0, k.offPostN,
                          mean(k.offPostSum, k.offPostN) * 100.0, k.offPostMax * 100.0, k.beforeN ? k.beforeMin * 100.0 : 0.0, mean(k.beforeSum, k.beforeN) * 100.0, k.afterN,
-                         k.afterN ? k.afterMin * 100.0 : 0.0, mean(k.afterSum, k.afterN) * 100.0, mean(k.predSum, k.predN) * 100.0, heldBelowM(guardCm * 0.01) * 100.0, k.under9);
+                         k.afterN ? k.afterMin * 100.0 : 0.0, mean(k.afterSum, k.afterN) * 100.0, mean(k.predSum, k.predN) * 100.0, heldBelowM(guardCm * 0.01) * 100.0, k.under9, k.bounded, k.resets);
 }
 
 }  // namespace f179

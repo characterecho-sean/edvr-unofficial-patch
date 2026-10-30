@@ -418,11 +418,11 @@ inline void run178(Check&& check) {
                   has("g_standAdsBodyCm.store(static_cast<float>(cm), std::memory_order_relaxed);") && has("g_standAdsBodyLeftCm.store(static_cast<float>(cm), std::memory_order_relaxed);"),
               "F178: both keys are logged at the first read and at each change, and stored for the pin");
         // the pin: the crouched pair as it was (the crouched posture weight), the standing pair beside it with the same call shape
-        check(has("nofoot::f168::shiftVector(pc.f168DialCm, pc.postureW, pc.detachW, fwdM, pc.f168Shift)") && has("nofoot::f171::shiftVector(pc.f171DialCm, pc.postureW, pc.detachW, fwdM, pc.f171Shift)") &&
+        check(has("nofoot::f168::shiftVector(pc.f168DialCm, pc.postureW, pc.detachW, fwdPin, pc.f168Shift)") && has("nofoot::f171::shiftVector(pc.f171DialCm, pc.postureW, pc.detachW, fwdPin, pc.f171Shift)") &&
                   has("pc.f178FwdDialCm = static_cast<double>(g_standAdsBodyCm.load(std::memory_order_relaxed));") &&
                   has("pc.f178LeftDialCm = static_cast<double>(g_standAdsBodyLeftCm.load(std::memory_order_relaxed));") &&
-                  has("nofoot::f178::forwardVector(pc.f178FwdDialCm, pc.postureW, pc.detachW, fwdM, pc.f178FwdShift)") &&
-                  has("nofoot::f178::leftVector(pc.f178LeftDialCm, pc.postureW, pc.detachW, fwdM, pc.f178LeftShift)") &&
+                  has("nofoot::f178::forwardVector(pc.f178FwdDialCm, pc.postureW, pc.detachW, fwdPin, pc.f178FwdShift)") &&
+                  has("nofoot::f178::leftVector(pc.f178LeftDialCm, pc.postureW, pc.detachW, fwdPin, pc.f178LeftShift)") &&
                   has("nofoot::f168::splitShift(pc.f178FwdDialCm, pc.f178FwdShift, pc.f178FwdPre, pc.f178FwdPost);") && has("if (!nofoot::f168::afterReach(pc.f178FwdDialCm)) {"),
               "F178: the pin reads both dials and makes the standing vectors with the same arguments as the crouched pair (the crouched calls are unchanged), splitting the forward move around the reach rule as F169 does");
         const size_t crouchedF = at("nofoot::f168::shiftVector(pc.f168DialCm"), crouchedL = at("nofoot::f171::shiftVector(pc.f171DialCm"), standF = at("nofoot::f178::forwardVector(pc.f178FwdDialCm"),

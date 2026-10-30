@@ -48,7 +48,7 @@ struct Scene {
     double hx = 0.0, hz = 1.0, bias = 0.0;
 };
 struct Result {
-    bool ok = false;
+    bool ok = false, bounded = false;   // F183: bounded: a stage asked more than the frame's bound (the distance plus 10 cm, shared by the three stages) allows
     double pre = 0.0, offPost = 0.0, residual = 0.0, aheadBefore = 0.0, aheadAfter = 0.0, thFinal[3] = {}, targetOut[3] = {};
 };
 inline Result runScene(const Scene& s, double distM = f179::kNeckGuardAheadM) {
@@ -57,14 +57,14 @@ inline Result runScene(const Scene& s, double distM = f179::kNeckGuardAheadM) {
     r.ok = g.ok;
     if (!g.ok) return r;
     double t[3] = {s.target[0], s.target[1], s.target[2]};
-    r.pre = f179::guardTarget(g, s.n0, s.bias, t, distM);
+    r.pre = f179::guardTarget(g, s.n0, s.bias, t, distM, &r.bounded);
     for (int i = 0; i < 3; ++i) r.targetOut[i] = t[i];
     const nf::PinMove mv = nf::pinMove(s.n0, t);
     double th[3] = {mv.th[0] + s.reach[0], 0.0, mv.th[2] + s.reach[2]};
     double post[3] = {s.post[0], 0.0, s.post[2]};
     const double withPost[3] = {th[0] + post[0], 0.0, th[2] + post[2]};
     r.aheadBefore = g.aheadWith(withPost) + s.bias - 0.0;
-    const double deficit = f179::deficitM(g.aheadWith(withPost) + s.bias, distM);
+    const double deficit = f179::deficitBoundedM(g.aheadWith(withPost) + s.bias, distM, &r.bounded, f179::budgetLeftM(distM, r.pre));
     double res[3] = {};
     if (deficit > 0.0) {
         const f179::Trim tr = f179::trimPost(post, g.h, deficit);
@@ -272,7 +272,8 @@ inline void run179(Check&& check) {
             seed = seed * 1664525u + 1013904223u;
             return lo + (hi - lo) * (static_cast<double>(seed >> 8) / 16777216.0);
         };
-        int scenes = 0, held = 0, pushed = 0, noPush = 0;
+        int scenes = 0, held = 0, pushed = 0, noPush = 0, capped = 0;
+        bool inBound = true;
         double worst = 1e9;
         for (int i = 0; i < 4000; ++i) {
             Scene s;
@@ -290,12 +291,15 @@ inline void run179(Check&& check) {
             const Result r = runScene(s);
             ++scenes;
             worst = std::min(worst, r.aheadAfter);
+            const double pushTotal = r.pre + r.offPost + r.residual;
+            inBound = inBound && pushTotal <= f179::pushCapM(f179::kNeckGuardAheadM) + 1e-9;   // F183: the push of the frame is at most the distance plus 10 cm
             if (r.aheadAfter >= 0.10 - 1e-9) ++held;
-            if (r.pre + r.offPost + r.residual > 0.0) ++pushed; else ++noPush;
+            else if (r.bounded && pushTotal >= f179::pushCapM(f179::kNeckGuardAheadM) - 1e-9) ++capped;   // F183: the scene asked more than the bound allows: the eye ends short of 10 cm
+            if (pushTotal > 0.0) ++pushed; else ++noPush;
         }
-        std::snprintf(msg, sizeof(msg), "F179b: over %d scenes (the chest 0-40 cm behind the eye, the target, the reach pull -10..+15 cm, the post-reach add 0-20 cm, a prediction error of +-5 cm) the predicted eye ends 10 cm ahead of the chest or more in %d (the least %.4f m); %d needed the guard, %d did not",
-                      scenes, held, worst, pushed, noPush);
-        check(held == scenes && pushed > 500 && noPush > 100, msg);
+        std::snprintf(msg, sizeof(msg), "F179b (F183: the push of a frame at most the distance plus 10 cm): over %d scenes (the chest 0-40 cm behind the eye, the target, the reach pull -10..+15 cm, the post-reach add 0-20 cm, a prediction error of +-5 cm) the predicted eye ends 10 cm ahead of the chest or more in %d, and in the %d that asked more than 20 cm the push is held to 20 (the least %.4f m); %d needed the guard, %d did not",
+                      scenes, held, capped, worst, pushed, noPush);
+        check(inBound && held + capped == scenes && capped > 0 && capped < scenes / 4 && pushed > 500 && noPush > 100, msg);
         // a scene that needs nothing is left bit for bit: the target, and no add taken off
         Scene ok;
         ok.chest[2] = -0.50; ok.n0[2] = -0.50; ok.target[2] = -0.50;
@@ -307,29 +311,29 @@ inline void run179(Check&& check) {
     // ---- F179b 4. the filtered prediction error ------------------------------------------------------------------------------------------------------------------------------------------------
     {
         double b = 0.0;
-        for (int i = 0; i < 12; ++i) b = f179::nextBias(b, -0.16);
-        check(eq(b, -0.16, 1e-3) && f179::nextBias(0.0, -0.16) == -0.08 && f179::nextBias(0.1, std::nan("")) == 0.1 && f179::nextBias(0.0, 3.0) == f179::kBiasLimitM && f179::nextBias(0.0, -3.0) == -f179::kBiasLimitM,
-              "F179b: the prediction error measured on the call before is filtered (half of each new error), converges on a steady error (-16 cm in 12 calls), is held to 50 cm and ignores one that is not a number");
-        // a model that misses by 16 cm (the torso turns the chest forward): the stateless guard misses it, the filtered one holds from the second call on
+        for (int i = 0; i < 12; ++i) b = f179::nextBias(b, -0.04);
+        check(eq(b, -0.04, 1e-4) && f179::nextBias(0.0, -0.04) == -0.02 && f179::nextBias(0.1, std::nan("")) == 0.1 && f179::nextBias(0.0, 3.0) == f179::kBiasLimitM && f179::nextBias(0.0, -3.0) == -f179::kBiasLimitM && f179::kBiasLimitM == 0.05,
+              "F179b (F183: held to 5 cm, it was 50): the prediction error measured on the call before is filtered (half of each new error), converges on a steady error (-4 cm in 12 calls), is held to 5 cm and ignores one that is not a number");
+        // a model that misses by 4 cm (the torso turns the chest forward; the filter holds 5 cm at most since F183): the stateless guard misses it, the filtered one holds from the fourth call on
         Scene s;
-        s.chest[2] = -0.20; s.n0[2] = -0.20; s.target[2] = -0.20;
+        s.chest[2] = -0.10; s.n0[2] = -0.10; s.target[2] = -0.10;
         s.post[2] = 0.0;
-        const double miss = -0.16;   // the chest ends 16 cm further forward than the translation says
+        const double miss = -0.04;   // the chest ends 4 cm further forward than the translation says
         double bias = 0.0;
         int heldAfter = 0, heldStateless = 0, heldEarly = 0;
         for (int call = 0; call < 10; ++call) {
             s.bias = bias;
             const Result r = runScene(s);
             const double measured = r.aheadAfter - s.bias + miss;   // the raw prediction (with the guard's push) plus the model's miss
-            if (call >= 6 && measured >= 0.10 - 0.005) ++heldAfter;
-            if (call < 5 && measured >= 0.10 - 0.005) ++heldEarly;
+            if (call >= 5 && measured >= 0.10 - 0.005) ++heldAfter;
+            if (call < 3 && measured >= 0.10 - 0.005) ++heldEarly;
             Scene st = s;
             st.bias = 0.0;
             if (runScene(st).aheadAfter + miss >= 0.10 - 0.005) ++heldStateless;
             bias = f179::nextBias(bias, measured - (r.aheadAfter - s.bias));
         }
-        check(heldAfter == 4 && heldEarly == 0 && heldStateless == 0,
-              "F179b: a model that misses the chest by 16 cm is not held by the prediction alone; the filter (the error halves each call) holds it to within 5 mm from the seventh call (about 70 ms at 90 calls a second)");
+        check(heldAfter == 5 && heldEarly == 0 && heldStateless == 0,
+              "F179b: a model that misses the chest by 4 cm is not held by the prediction alone; the filter (the error halves each call, held to 5 cm since F183) holds it to within 5 mm from the sixth call (about 60 ms at 90 calls a second)");
     }
 
     // ---- F179b 5. the contexts and the counters -------------------------------------------------------------------------------------------------------------------------------------------------
@@ -432,15 +436,15 @@ inline void run179(Check&& check) {
         check(!(has("f94TargetPublish(pc.f179") || has("f94TargetPublish(nofoot::f179") || has("g_f138HeldM = pc.f179") || has("g_f138HeldM += pc.f179")),
               "F179a: nothing of F179a reaches the eye alignment raise F138 and F172 publish");
         // F179b: the guard on the target (legacy and rest path), the post-reach add, the formed neck, the prediction, the stats and the bias
-        check(has("pc.f179PushPre = nofoot::f179::guardTarget(g179, N0, pc.f179Bias, T, pc.f179DistM);") && has("if (g179.ok && !pc.f179Measure) pc.f179PushPre = nofoot::f179::guardTarget(g179, N0, pc.f179Bias, physicalTarget, pc.f179DistM);") &&
+        check(has("pc.f179PushPre = nofoot::f179::guardTarget(g179, N0, pc.f179Bias, T, pc.f179DistM, &pc.f179Bounded);") && has("if (g179.ok && !pc.f179Measure) pc.f179PushPre = nofoot::f179::guardTarget(g179, N0, pc.f179Bias, physicalTarget, pc.f179DistM, &pc.f179Bounded,") &&
                   has("g179 = nofoot::f179::makeGeometry(pc.f97EyeDrawnOk, pc.f97EyeDrawn, pc.hEye[0], pc.hEye[1], chestOk, chest0);") && has("const uint32_t chestJ = nofoot::kIkSpine[2];"),
               "F179b: the guard reads the eye as drawn, the chest 24 as animated (kIkSpine[2]) and F97a's heading, and pushes the target back before the reach rule on the legacy target and the rest path's");
-        const size_t guardPre = at("pc.f179PushPre = nofoot::f179::guardTarget(g179, N0, pc.f179Bias, T, pc.f179DistM);"), formMove = at("mv = nofoot::pinMove(N0, T);"), reachRule = at("const bool active = nofoot::reachLimitDeltaFeasibleOnly(v, R, have, candidate, full, &feasible);"),
+        const size_t guardPre = at("pc.f179PushPre = nofoot::f179::guardTarget(g179, N0, pc.f179Bias, T, pc.f179DistM, &pc.f179Bounded);"), formMove = at("mv = nofoot::pinMove(N0, T);"), reachRule = at("const bool active = nofoot::reachLimitDeltaFeasibleOnly(v, R, have, candidate, full, &feasible);"),
                      postTrim = at("nofoot::f179::trimPost(f168Post, g179.h, deficit)"), addPost = at("nofoot::f168::addAfterReach(mv.th, pc.reach, f168Post);"), addRes = at("nofoot::f168::addAfterReach(mv.th, pc.reach, guardRes);");
         check(guardPre != std::string::npos && guardPre < formMove && formMove < reachRule && reachRule < postTrim && postTrim < addPost && addPost < addRes,
               "F179b: the order in the pin is the guard on the target, the move formed, the reach rule, the post-reach add trimmed, the add made, the residual taken off last");
         check(has("pc.f168Post[i] *= trim.scale;") && has("pc.f178FwdPost[i] *= trim.scale;") && has("pc.f179OffPost += trim.takenM;") && has("nofoot::f179::pushBack(guardRes, g179.h, trim.residualM);") &&
-                  has("const double reachOnly = legacyReach[i] - f168Post[i] - guardRes[i];") && has("const double deficit = nofoot::f179::deficitM(g179.aheadWith(formed.th) + pc.f179Bias, pc.f179DistM);"),
+                  has("const double reachOnly = legacyReach[i] - f168Post[i] - guardRes[i];") && has("const double deficit = nofoot::f179::deficitBoundedM(g179.aheadWith(formed.th) + pc.f179Bias, pc.f179DistM, &pc.f179Bounded,"),
               "F179b: the add taken off is scaled out of the crouched and the standing forward dial's post vectors (their 'as written' figures see it), the residual is its own vector, and the rest path looks again at the neck it forms");
         check(has("pc.f179PredRaw = g179.aheadWith(mv.th);") && has("pc.f179Before = pc.f179PredRaw - (pc.f179PushPre + pc.f179OffPost + pc.f179PushRes);") && has("st.f179.addGuard(gs);") &&
                   has("st.f179.addMeasured(pc.f179Ctx, pc.f97ChestFwd, nofoot::f179::heldBelowM(pc.f179DistM));") && has("g_f179Bias.m = nofoot::f179::nextBias(g_f179Bias.m, pinCall.f97ChestFwd - pinCall.f179PredRaw);") &&

@@ -109,6 +109,7 @@ template<class T> inline void pin(T& d, const T& s) noexcept {
     }
     for (uint32_t i = 0; i < sizeof(d.f97) / sizeof(d.f97[0]); ++i) body(d.f97[i], s.f97[i]);
     d.f179.merge(s.f179);   // F179b: the neck guard's counters per context
+    d.f183.merge(s.f183);   // F183: the stable heading's counters
 }
 template<class T> inline void elbow(T& d, const T& s) noexcept {
     d.n += s.n;
