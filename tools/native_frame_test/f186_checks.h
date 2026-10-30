@@ -1,9 +1,9 @@
 // F186 checks (native on-foot VR), run186 below. Header only, run by native_frame_test.
 //
 // F186 (native_on_foot_f186.h, native_on_foot.cpp): the ADS lock spiral at a steep aim. (a) The sight lock's response measured: pairs of the change commanded (the shift each eye was rendered with, frame
-// to frame) and the change of the measured error, fitted per aim-pitch bin by a complex map (gain, angle: a correct loop reads 1 and 0, the game's turn reads the aim pitch). (b) TEMPORARY A/B
-// experimental.native_on_foot_ads_preturn: under mouse look the ADS terms of the eye alignment (the position lock, the sight lock, the weapon eye offset) go out turned by -a in the (forward, up)
-// plane, as F172 turns the neck raise. (c) A stability stop: the lock's e after the lock over 10 cm, or its applied vector at its clamp, for 0.3 s: ramped to zero over 0.15 s and acquired again. The rig
+// to frame) and the change of the measured error, fitted per aim-pitch bin by a complex map (gain, angle: a correct loop reads 1 and 0, the game's turn reads the aim pitch). (b) The pre-turn, behaviour
+// since F187 (the A/B key experimental.native_on_foot_ads_preturn is retired): under mouse look the ADS terms of the eye alignment (the position lock, the sight lock, the weapon eye offset) go out turned
+// by -a in the (forward, up) plane, as F172 turns the neck raise. (c) A stability stop: the lock's e after the lock over 10 cm, or its applied vector at its clamp, for 0.3 s: ramped to zero over 0.15 s and acquired again. The rig
 // runs the pre-turn on toy vectors (the game's turn lands them back), the fit on synthetic pairs, a toy loop whose plant is the game's turn (it spirals unturned from 60 deg and settles in one
 // step turned), the stop's timing, the lines, and the source sites.
 #pragma once
@@ -54,17 +54,17 @@ inline void run186(Check&& check) {
     // ---- 1. the pre-turn ----------------------------------------------------------------------------------------------------------------------------------------------------------------
     {
         const double t[3] = {0.07, 0.12, 0.09};   // the ADS terms' seated sum: 7 cm right-ish, 12 cm (up is -y), 9 cm forward
-        const f186::Turned level = f186::turnAds(t, true, false, true, 0.0, true);
+        const f186::Turned level = f186::turnAds(t, false, true, 0.0, true);
         check(!level.turned && level.dy == 0.0 && level.dz == 0.0, "F186: at an aim pitch of 0 nothing is turned (the terms go out as they did, bit for bit)");
         bool lands = true;
         for (double deg : {10.0, 30.0, 60.0, 81.9, 85.2, -40.0, -85.0}) {
             const double a = rad(deg);
-            const f186::Turned r = f186::turnAds(t, true, false, true, a, true);
+            const f186::Turned r = f186::turnAds(t, false, true, a, true);
             double yOut = 0.0, zOut = 0.0;
             f186::gameTurnSeated(a, t[1] + r.dy, t[2] + r.dz, &yOut, &zOut);
             lands = lands && r.turned && eq(yOut, t[1], 1e-12) && eq(zOut, t[2], 1e-12);
         }
-        const f186::Turned r85 = f186::turnAds(t, true, false, true, rad(85.0), true);
+        const f186::Turned r85 = f186::turnAds(t, false, true, rad(85.0), true);
         double ux = 0.0, uz = 0.0;
         f186::gameTurnSeated(rad(85.0), t[1], t[2], &ux, &uz);
         std::snprintf(msg, sizeof(msg), "F186: at an aim pitch of 85 deg the terms (y %.3f, z %.3f) go out as (y %+.3f, z %+.3f): the game's turn of that lands them on (y, z) again at every pitch tried (10, 30, 60, 81.9, 85.2, -40, -85); unturned they land at (y %+.3f, z %+.3f)",
@@ -72,15 +72,15 @@ inline void run186(Check&& check) {
         check(lands && r85.turned && eq(r85.pitchRad, rad(85.0), 1e-15) && std::fabs(ux - t[1]) > 0.05, msg);
         // F172's raise is the same turn: a vector with only y reads F172's published y and z
         const double onlyY[3] = {0.0, -0.15, 0.0};
-        const f186::Turned ry = f186::turnAds(onlyY, true, false, true, rad(60.0), true);
+        const f186::Turned ry = f186::turnAds(onlyY, false, true, rad(60.0), true);
         const f172::Raise f172r = f172::publish(-0.15, false, true, rad(60.0), true);
         check(eq(onlyY[1] + ry.dy, f172r.y, 1e-15) && eq(onlyY[2] + ry.dz, f172r.z, 1e-15), "F186: the turn is F172's: a vector with only a y part comes out as F172 publishes the neck raise (y cos a, z -y sin a)");
-        // the conditions: the key off, look to aim driving the aim, a stale aim, the camera not the commander's, no terms, a pitch that is not a number
+        // the conditions: look to aim driving the aim, a stale aim, the camera not the commander's, no terms, a pitch that is not a number
         const double zero[3] = {0.0, 0.0, 0.0}, nan3[3] = {0.0, std::nan(""), 0.0};
-        check(!f186::turnAds(t, false, false, true, rad(85.0), true).turned && !f186::turnAds(t, true, true, true, rad(85.0), true).turned && !f186::turnAds(t, true, false, false, rad(85.0), true).turned &&
-                  !f186::turnAds(t, true, false, true, rad(85.0), false).turned && !f186::turnAds(zero, true, false, true, rad(85.0), true).turned && !f186::turnAds(nan3, true, false, true, rad(85.0), true).turned &&
-                  !f186::turnAds(t, true, false, true, std::nan(""), true).turned,
-              "F186: off (the key), look to aim driving the aim, a stale aim, off the commander's first-person camera, no terms, and figures that are not numbers go out unturned, as today");
+        check(!f186::turnAds(t, true, true, rad(85.0), true).turned && !f186::turnAds(t, false, false, rad(85.0), true).turned && !f186::turnAds(t, false, true, rad(85.0), false).turned &&
+                  !f186::turnAds(zero, false, true, rad(85.0), true).turned && !f186::turnAds(nan3, false, true, rad(85.0), true).turned && !f186::turnAds(t, false, true, std::nan(""), true).turned &&
+                  f186::turnAds(t, false, true, rad(85.0), true).turned,
+              "F186: look to aim driving the aim, a stale aim, off the commander's first-person camera, no terms, and figures that are not numbers go out unturned, as before; every other case is turned, with no key to switch it");
     }
 
     // ---- 2. the toy loop: the controller adds the error each frame, the plant is the game's turn -------------------------------------------------------------------------------------------------
@@ -96,7 +96,7 @@ inline void run186(Check&& check) {
             double err[2] = {e0[0], e0[1]};
             for (int n = 0; n < steps; ++n) {
                 const double t[3] = {0.0, v[0], v[1]};
-                const f186::Turned tr = f186::turnAds(t, preturn, false, true, a, true);
+                const f186::Turned tr = preturn ? f186::turnAds(t, false, true, a, true) : f186::Turned{};
                 const double pubY = v[0] + (tr.turned ? tr.dy : 0.0), pubZ = v[1] + (tr.turned ? tr.dz : 0.0);
                 double ry = 0.0, rz = 0.0;
                 f186::gameTurnSeated(a, pubY, pubZ, &ry, &rz);   // the shift as the game lands it
@@ -148,7 +148,7 @@ inline void run186(Check&& check) {
                 v[0] += 0.02 * (unitRand(s) - 0.5);   // excitation: the commanded change is not only the loop's own
                 v[1] += 0.02 * (unitRand(s) - 0.5);
                 const double t[3] = {0.0, v[0], v[1]};
-                const f186::Turned tr = f186::turnAds(t, on == 1, false, true, a, true);
+                const f186::Turned tr = on == 1 ? f186::turnAds(t, false, true, a, true) : f186::Turned{};
                 double ry = 0.0, rz = 0.0;
                 f186::gameTurnSeated(a, v[0] + (tr.turned ? tr.dy : 0.0), v[1] + (tr.turned ? tr.dz : 0.0), &ry, &rz);
                 const double e[2] = {e0[0] - ry, e0[1] - rz};
@@ -260,21 +260,21 @@ inline void run186(Check&& check) {
         for (int i = 0; i < 40; ++i) r.addPair(84.0, 0.01, 0.0, -0.001, -0.01);
         r.lockFrames = 100; r.turnedFrames = 40; r.stops = 1;
         char line[1300];
-        const int len = f186::formatResponse(line, sizeof(line), 1, true, r);
-        check(len > 0 && len < 1166 && std::strstr(line, "native on foot ADS lock response (F186) 1 s: pre-turn on (the ADS terms turned in 40 of 100 lock frames); lock stops 1; response of the measured error to the lock's change "
+        const int len = f186::formatResponse(line, sizeof(line), 1, r);
+        check(len > 0 && len < 1166 && std::strstr(line, "native on foot ADS lock response (F186) 1 s: the ADS terms turned in 40 of 100 lock frames; lock stops 1; response of the measured error to the lock's change "
                                                           "(a correct loop reads gain 1.00 angle +0.0 deg, the game's turn the aim pitch): aim under 30 deg: 60 pairs, gain 1.00, angle +0.0 deg, corr 1.00, mean aim +10.0 deg; "
                                                           "aim over 75 deg: 40 pairs, gain 1.00, angle +84.3 deg, corr 1.00, mean aim +84.0 deg") != nullptr,
-              "F186: the window's line names the pre-turn's state and the frames it turned, the stops, and each bin with pairs: its pairs, gain, angle, correlation and mean aim");
+              "F186: the window's line names the frames the pre-turn covered, the stops, and each bin with pairs: its pairs, gain, angle, correlation and mean aim");
         f186::Response none;
         none.lockFrames = 3;
         char noneLine[1300];
-        f186::formatResponse(noneLine, sizeof(noneLine), 1, false, none);
+        f186::formatResponse(noneLine, sizeof(noneLine), 1, none);
         char stopLine[500];
-        const int sl = f186::formatStop(stopLine, sizeof(stopLine), f186::kReasonBoth, 21.5, 40.0, 40.0, true, 81.9, false, 3);
-        check(std::strstr(noneLine, "pre-turn off (the ADS terms turned in 0 of 3 lock frames); lock stops 0;") != nullptr && std::strstr(noneLine, "no pairs") != nullptr && sl > 0 && sl < 420 &&
+        const int sl = f186::formatStop(stopLine, sizeof(stopLine), f186::kReasonBoth, 21.5, 40.0, 40.0, true, 81.9, 3);
+        check(std::strstr(noneLine, "1 s: the ADS terms turned in 0 of 3 lock frames; lock stops 0;") != nullptr && std::strstr(noneLine, "no pairs") != nullptr && sl > 0 && sl < 420 &&
                   std::strstr(stopLine, "native on foot ADS lock stop (F186): the sight lock held over its limit for 0.3 s (e over 10 cm and the lock at its clamp; e after the lock 21.5 cm, applied 40.0 cm of 40) and is released "
-                                        "over 0.15 s and acquired again from zero; aim pitch +81.9 deg; pre-turn off; stops this session 3") != nullptr,
-              "F186: a window with pairs in no bin says so, and a stop's line names the reason, the figures, the aim pitch and the pre-turn's state");
+                                        "over 0.15 s and acquired again from zero; aim pitch +81.9 deg; stops this session 3") != nullptr,
+              "F186: a window with pairs in no bin says so, and a stop's line names the reason, the figures and the aim pitch, and neither line has an A/B state");
         f186::Response big;
         for (int b = 0; b < 4; ++b) {
             big.bin[b].n = 4000000000u;
@@ -282,7 +282,7 @@ inline void run186(Check&& check) {
         }
         big.lockFrames = big.turnedFrames = big.stops = 4000000000u;
         char worst[1400];
-        const int wl = f186::formatResponse(worst, sizeof(worst), 4000000000u, true, big);
+        const int wl = f186::formatResponse(worst, sizeof(worst), 4000000000u, big);
         check(wl > 0 && wl < 1166 && std::strstr(worst, "nan") == nullptr && std::strstr(worst, "inf") == nullptr, "F186: the line stays within the log's 1166 bytes with every bin at its worst, and prints no number that is not one");
     }
 
@@ -291,13 +291,11 @@ inline void run186(Check&& check) {
         const std::string cpp = slurp("src/d3d11/native_on_foot.cpp"), ini = slurp("edvr.ini");
         const auto has = [&](const std::string& needle) { return cpp.find(needle) != std::string::npos; };
         const auto at = [&](const std::string& needle) { return cpp.find(needle); };
-        const size_t keyAt = ini.find("\nnative_on_foot_ads_preturn = on\n"), uiAt = ini.find("# ui: ADS: pre-turn by the aim pitch (test) | choices on, off | recommended on | live\n"),
-                     reachAt = ini.find("\nnative_on_foot_ads_left_reach = "), squareAt = ini.find("\nnative_on_foot_crouch_ads_square = ");
-        check(has("std::atomic<bool> g_adsPreturn{true};") && has("cfg.getString(\"experimental.native_on_foot_ads_preturn\", \"on\") != \"off\"") &&
-                  has("native on foot ADS pre-turn (F186, TEMPORARY A/B): experimental.native_on_foot_ads_preturn is %s") && has("g_adsPreturn.store(preturnOn, std::memory_order_relaxed);") &&
-                  countOf(ini, "native_on_foot_ads_preturn =") == 1 && keyAt != std::string::npos && uiAt != std::string::npos && uiAt < keyAt && reachAt < uiAt && keyAt < squareAt,
-              "F186: the key is read from [experimental] (on unless off), logged at the first read and at each change, stored for the eye alignment, and shipped on in edvr.ini with its ui row after the left arm reach row");
-        const size_t turnAt = at("const nofoot::f186::Turned adsTurn = nofoot::f186::turnAds(adsTerms, g_adsPreturn.load(std::memory_order_relaxed), g_ltaDrop.load(std::memory_order_relaxed), aimFresh, aimRad, onFoot && !camExternal);"),
+        const size_t reachAt = ini.find("\nnative_on_foot_ads_left_reach = "), squareAt = ini.find("\nnative_on_foot_crouch_ads_square = ");
+        check(cpp.find("ads_preturn") == std::string::npos && cpp.find("g_adsPreturn") == std::string::npos && ini.find("ads_preturn") == std::string::npos && ini.find("ADS: pre-turn") == std::string::npos &&
+                  reachAt != std::string::npos && squareAt != std::string::npos && reachAt < squareAt,
+              "F187: the A/B key experimental.native_on_foot_ads_preturn is gone: nothing reads it, no flag holds it, edvr.ini has neither its entry nor its ui row, and the pre-turn is behaviour");
+        const size_t turnAt = at("const nofoot::f186::Turned adsTurn = nofoot::f186::turnAds(adsTerms, g_ltaDrop.load(std::memory_order_relaxed), aimFresh, aimRad, onFoot && !camExternal);"),
                      loopAt = at("if (adsTurn.turned && i == 1) eye[i] += adsTurn.dy;"), shiftAt = at("double sShift[3] = {g_adsLock[0] + g_adsSight.applied[0] + weaponEye.out.ignore[0]");
         check(turnAt != std::string::npos && loopAt != std::string::npos && shiftAt != std::string::npos && turnAt < loopAt && loopAt < shiftAt &&
                   has("const double adsTerms[3] = {g_adsLock[0] + g_adsSight.applied[0] + weaponEye.out.seated[0], g_adsLock[1] + g_adsSight.applied[1] + weaponEye.out.seated[1],") &&
@@ -309,7 +307,7 @@ inline void run186(Check&& check) {
                   has("tg.source == nofoot::f93::kMatched") && has("++g_f186Win.lockFrames;") &&
                   has("const nofoot::f186::StopGuard::Out stop = g_f186Stop.step(now, active && !g_adsSightTripped, have, E.perpNorm, nofoot::ikLen(g_adsSight.pos), nofoot::kAdsSightClampM, g_adsSight.pos);") &&
                   has("g_adsSight.pos[i] = stop.zeroNow ? 0.0 : g_f186Stop.start[i] * stop.scale;") && has("nofoot::f186::formatStop(stopLine, sizeof(stopLine), stop.reason,") &&
-                  has("nofoot::f186::formatResponse(line186, sizeof(line186), seconds, g_adsPreturn.load(std::memory_order_relaxed), g_f186Win);") && has("if (g_f186Win.lockFrames) {"),
+                  has("nofoot::f186::formatResponse(line186, sizeof(line186), seconds, g_f186Win);") && has("if (g_f186Win.lockFrames) {"),
               "F186: the response pairs are the shift each matched eye was rendered with and the error measured on it, frame to frame; the stop watches the error after the lock and the applied vector and ramps the lock to zero; the window's line and each stop's line are printed");
         const size_t stepAt = at("nofoot::adsEyeStep(g_adsSight.pos, g_adsSight.vel, g_adsSight.target, tg.err, tg.have, active, g_adsSightTripped, dt);"), stopAt = at("g_f186Stop.step(now,"), appliedAt = at("for (size_t i = 0; i < 3; ++i) g_adsSight.applied[i] = g_adsSight.pos[i];");
         check(stepAt != std::string::npos && stopAt != std::string::npos && appliedAt != std::string::npos && stepAt < stopAt && stopAt < appliedAt,

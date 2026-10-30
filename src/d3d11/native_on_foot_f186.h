@@ -1,4 +1,4 @@
-// F186 (native on foot VR): the ADS lock spiral at a steep aim. The ADS terms of the eye alignment pre-turned by the aim pitch under mouse look (TEMPORARY A/B), the sight lock's response measured,
+// F186 (native on foot VR): the ADS lock spiral at a steep aim. The ADS terms of the eye alignment pre-turned by the aim pitch under mouse look, the sight lock's response measured,
 // and a stability stop. Header only, no game or D3D11 state, so native_frame_test runs the very functions the frame thread uses. Journal: the arc doc, F186.
 //
 // The flight edvr_gfx_20261030_144707 (build c1f91eba; the pilot: "still enters a feedback loop with ADS"): F184 (the guard measuring only, the raise asked of the legs) did not stop it. Engaging
@@ -21,7 +21,7 @@
 // (|a| under 30, 30 to 60, 60 to 75, over 75 deg) the map r = c d with the complex c = sum(r conj d) / sum(|d|^2) (w = y + i z): gain |c|, angle arg(-c). A correct loop reads gain 1, angle 0
 // (c = -1); the game's turn reads the aim pitch. corr = |sum(r conj d)| / sqrt(sum|d|^2 sum|r|^2) says how much of r the map explains.
 //
-// ---- b. the pre-turn (TEMPORARY A/B: experimental.native_on_foot_ads_preturn, on | off, default on, live)
+// ---- b. the pre-turn (behaviour since F187: the F186 flight with it fixed the runaway, 0 stops; the A/B key experimental.native_on_foot_ads_preturn is retired)
 // Under mouse look, with F172's conditions (look to aim not driving the aim, the aim pitch fresh, the on-foot camera), the sum of the ADS terms of the eye alignment, the position lock
 // (g_adsLock), the sight lock (g_adsSight.applied) and the weapon eye offset (F88: weaponEye.out.seated, which carries the ADS eye depth), goes out turned by -a in the (forward, up) plane, as
 // F172 turns the raise: y' = y cos a + z sin a, z' = z cos a - y sin a. The game's R(a) of it lands the vector where it was meant. The F70 shift (what the pin takes the camera less) and F119's
@@ -54,11 +54,11 @@ struct Turned {
     double dy = 0.0, dz = 0.0;   // what the turn adds to the published y and z (the unturned vector stays what the other readers take)
     double pitchRad = 0.0;       // the aim pitch used (0 when unturned)
 };
-// The ADS terms' seated sum t (x, y, z) turned for an aim pitch of aimPitchRad: unturned (turned false, dy = dz = 0) unless the key is on, the camera is the commander's first-person one, look to
+// The ADS terms' seated sum t (x, y, z) turned for an aim pitch of aimPitchRad: unturned (turned false, dy = dz = 0) unless the camera is the commander's first-person one, look to
 // aim is not driving the aim, the aim pitch is fresh and a number and not 0, and the sum is not exactly zero.
-inline Turned turnAds(const double t[3], bool enabled, bool lookToAim, bool aimFresh, double aimPitchRad, bool firstPerson) noexcept {
+inline Turned turnAds(const double t[3], bool lookToAim, bool aimFresh, double aimPitchRad, bool firstPerson) noexcept {
     Turned r;
-    if (!enabled || !firstPerson || lookToAim || !aimFresh || !std::isfinite(aimPitchRad) || aimPitchRad == 0.0) return r;
+    if (!firstPerson || lookToAim || !aimFresh || !std::isfinite(aimPitchRad) || aimPitchRad == 0.0) return r;
     if (!std::isfinite(t[1]) || !std::isfinite(t[2]) || (t[1] == 0.0 && t[2] == 0.0)) return r;
     const double c = std::cos(aimPitchRad), s = std::sin(aimPitchRad);
     r.turned = true;
@@ -219,12 +219,12 @@ struct StopGuard {
 
 // ---- the lines ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
-// The window's line, printed whenever the lock ran (a lock frame): the pre-turn's state and how many lock frames turned the ADS terms, the stops, and each aim-pitch bin that had pairs.
-inline int formatResponse(char* buf, size_t n, uint32_t seconds, bool preturnOn, const Response& r) noexcept {
+// The window's line, printed whenever the lock ran (a lock frame): how many lock frames turned the ADS terms, the stops, and each aim-pitch bin that had pairs.
+inline int formatResponse(char* buf, size_t n, uint32_t seconds, const Response& r) noexcept {
     int len = std::snprintf(buf, n,
-                            "native on foot ADS lock response (F186) %u s: pre-turn %s (the ADS terms turned in %u of %u lock frames); lock stops %u; response of the measured error to the lock's change "
+                            "native on foot ADS lock response (F186) %u s: the ADS terms turned in %u of %u lock frames; lock stops %u; response of the measured error to the lock's change "
                             "(a correct loop reads gain 1.00 angle +0.0 deg, the game's turn the aim pitch): ",
-                            seconds, preturnOn ? "on" : "off", r.turnedFrames, r.lockFrames, r.stops);
+                            seconds, r.turnedFrames, r.lockFrames, r.stops);
     if (len < 0 || static_cast<size_t>(len) >= n) return len;
     bool any = false;
     for (int b = 0; b < kBins; ++b) {
@@ -242,12 +242,12 @@ inline int formatResponse(char* buf, size_t n, uint32_t seconds, bool preturnOn,
     }
     return len;
 }
-// One stop's line: why, the figures, the aim pitch and the A/B state.
-inline int formatStop(char* buf, size_t n, int reason, double perpCm, double appliedCm, double clampCm, bool aimKnown, double aimDeg, bool preturnOn, uint32_t stopsTotal) noexcept {
+// One stop's line: why, the figures and the aim pitch.
+inline int formatStop(char* buf, size_t n, int reason, double perpCm, double appliedCm, double clampCm, bool aimKnown, double aimDeg, uint32_t stopsTotal) noexcept {
     return std::snprintf(buf, n,
                          "native on foot ADS lock stop (F186): the sight lock held over its limit for %.1f s (%s; e after the lock %.1f cm, applied %.1f cm of %.0f) and is released over %.2f s and acquired again from zero; "
-                         "aim pitch %+.1f deg%s; pre-turn %s; stops this session %u",
-                         kStopSec, reasonName(reason), perpCm, appliedCm, clampCm, kRampSec, aimKnown ? aimDeg : 0.0, aimKnown ? "" : " (not fresh)", preturnOn ? "on" : "off", stopsTotal);
+                         "aim pitch %+.1f deg%s; stops this session %u",
+                         kStopSec, reasonName(reason), perpCm, appliedCm, clampCm, kRampSec, aimKnown ? aimDeg : 0.0, aimKnown ? "" : " (not fresh)", stopsTotal);
 }
 
 }  // namespace f186
