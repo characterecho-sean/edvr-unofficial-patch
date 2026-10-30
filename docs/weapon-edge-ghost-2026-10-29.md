@@ -3,9 +3,9 @@
 ## Status
 
 - **State: v1 FLOWN 2026-10-30 on Frontier. The ring no longer follows the
-  gun, but the barrel end looks "a little pixelated" (Sean). v2 is designed
-  from that flight's dumps and NOT BUILT.** Issue #146. A second defect found
-  in the first dumps is #147. Branch `claude/weapon-edge-ghost-4a079e`.
+  gun, but the barrel end looks "a little pixelated" (Sean). v2 (`3b564f21`)
+  is BUILT and INSTALLED on Frontier, NOT FLOWN.** Issue #146. A second defect
+  found in the first dumps is #147. Branch `claude/weapon-edge-ghost-4a079e`.
 - **Cause:** DLSS gives the background texels beside the weapon the weapon's
   motion vector. For each output pixel it takes the vector of the nearest-depth
   texel around it, so the ring of terrain one texel outside the silhouette
@@ -32,16 +32,22 @@
   also resets the gun's own pixels wherever a rim texel is the nearest in its
   own 3x3. There are 261 such texels, densest at the muzzle's thin parts: the
   pixelated barrel end.
-- **v2, proposed:** rewrite only the rim texels that no gun pixel reads. Each
-  takes the terrain's own vector, or the sentinel where that terrain was
-  uncovered. Modelled on dump `054813060001`: the ring gets the right vector in
-  3227 of 3311 texels (v1: 603). Gun texels left without a gun vector: 791
-  (no fix 749, v1 1945).
-- **Next flight:** v1 is still installed on Frontier
-  (`v0.22.0-rc.3-53-gabd7b82c`, key on). v2 needs a build, and Sean's go to
-  install it. Brief: fast swings at the hip over textured ground, with one
-  `hotkey.dump_eyes` key on and one key off in the same flight (flight 1 had
-  no key-off dump).
+- **v2, built (`3b564f21`):** rewrite only the rim texels that no gun pixel
+  reads. Each takes the terrain's own vector, or the sentinel where that
+  terrain was uncovered. Modelled on dump `054813060001`: the ring gets the
+  right vector in 3227 of 3311 texels (v1: 603). Gun texels left without a gun
+  vector: 791 (no fix 749, v1 1945). The same key switches it.
+- **Next flight: INSTALLED Frontier 2026-10-30 06:20,
+  `v0.22.0-rc.3-57-g3b564f21` (`--scope both --xess`, verified), NOT FLOWN.**
+  The live ini sets `clean_weapon_edges = on` (line 3032, written by the menu
+  row). Brief: fast swings at the hip over textured ground, and watch the
+  barrel end. Take one `hotkey.dump_eyes` with the key on and one with it off
+  in the same flight. Read: `edvr_log.py --target frontier --expect-build
+  3b564f21 --grep "weapon edges"`, which should show `on (v2)` and rim passes
+  above 0. Then run `--rim` on each dump. On the key-on dump, `first_frame_mv`
+  should show `foreground_rim_rewritten` above 0. Its `dilation` should give
+  `ring_kept_own` near `ring_texels - ring_hidden`, `ring_hidden_sentinel`
+  near `ring_hidden`, and `foreground_off_vector` near the key-off dump's.
 - **Temporary keys:** `experimental.clean_weapon_edges` (`on` / `off`, default
   `on`), the A/B of this fix. When the flights settle it, ship the winner as
   the behaviour and propose removing the key.
@@ -267,3 +273,26 @@ gun texels without a gun vector; v1 left 4397, and no fix 2079.
   so terrain seen last frame keeps its history.
 - **Cost:** the pass already loads a 12x12 depth tile with a two-texel apron,
   which covers the 5x5 the test reads. It needs no new resources.
+
+## Build v2, 2026-10-30
+
+- **What changed:** `3b564f21` changes `weaponEdges` in
+  `src\d3d11\temporal_shader_source.h`.
+  - The neighbour scan now also records whether a farther neighbour carries
+    the sentinel, and the vector of the farthest one.
+  - The winner test reads the raw tile depths, which are the values `mv`
+    writes to DLSS's depth (`ZC[id.xy] = zraw`). A tie counts as read, because
+    DLSS's own tie-break is unknown.
+  - The log's on line now reads `weapon edges (#146): on (v2) -- ...`.
+- **The reader:** `eye_decisions.py --rim` gives `first_frame_mv` a new count,
+  `foreground_rim_rewritten`: rim texels whose `MV.bin` vector is more than
+  0.5 px from D's. It also gives a `dilation` block: the 3x3 nearest-depth
+  model over the dump's `Z.bin` with `MV.bin` as sent. Without `Z.bin` it is
+  `null`.
+- **Checks:** the self-test asserts the model on a synthetic fixture. On dump
+  `054813060001` (v1) the reader gives ring 3311, hidden 603, hidden sentinel
+  603, kept own 0, kept reset 2708, dragged 0, and foreground off vector 1945.
+  These equal the scratch model's v1 row.
+- **Build:** the full build is green and `--dll-only` gave
+  `v0.22.0-rc.3-57-g3b564f21`. Installed on Frontier with `--scope both
+  --xess` and verified.
