@@ -324,7 +324,7 @@ cbuffer P : register(b0) {
     float4 tvCand;      // xyz the same for the instrument's swapped-eyes candidate
     float4 tvCam;       // xyz the translation term for the camera rows (the world path); w 1 = the world path is on
     float4 split;       // x the ship's radius in metres (nearer: the head's delta; farther and the far plane: the camera's); yzw unused
-    float4 probe;       // x history scale, y registration probes, z coverage bound; w bits: 1 fixed bias, 2 prior UI valid, 4 adaptive UI, 8 (retired 2026-10-01: terrain), 16 holo, 32 screen, 64 t6 (the smoke's depth) not bound, 128 the scanner's screen is up (its interface takes the head's path), 256 t7 (the private UI depth) not bound (until 319c1c5a, 2026-09-23, 256 was the retired per-object motion's bit: an eye dump older than that means that by it), 8192 the celestial records are bound (t15)
+    float4 probe;       // x history scale, y registration probes, z coverage bound; w bits: 1 fixed bias, 2 prior UI valid, 4 adaptive UI, 8 (retired 2026-10-01: terrain), 16 holo, 32 screen, 64 t6 (the smoke's depth) not bound, 128 the scanner's screen is up (its interface takes the head's path), 256 t7 (the private UI depth) not bound (until 319c1c5a, 2026-09-23, 256 was the retired per-object motion's bit: an eye dump older than that means that by it), 512 the weapon edges' pass follows this mv dispatch (#146: on foot, engine-record motion bound, experimental.clean_weapon_edges on), so backgroundHistoryHidden also hides a point that was covered on all four texels of last frame's depth, 8192 the celestial records are bound (t15)
     float4 holoJitter; // current minus previous raster jitter; z = consecutive treated frames; w = valid DLSS depth history
 };
 float3 rgbToYcocg(float3 c) {
@@ -685,6 +685,22 @@ bool backgroundHistoryHidden(int2 local,float2 p,float2 motion,float zraw,float 
     if(holoJitter.w==0 || holoJitter.z==0) return false;
     float2 pp=p+motion-holoJitter.xy; // ZP uses last frame's raw raster
     if(!all(isfinite(pp)) || any(pp<0) || any(pp>float2(size)-1)) return false;
+    // An occluder beside the pixel NOW is the same edge only if the world point
+    // itself was not covered then. When all four texels of last frame's depth
+    // around the reprojected point were nearer (the final rule below, per texel),
+    // the point was behind something, and its history hid it, whatever stands
+    // beside the pixel now: the terrain a held weapon is swept past, the weapon
+    // two texels away while the terrain moved thirty to sixty (#146, probe.w
+    // bit 512 = experimental.clean_weapon_edges, on foot with the rim pass).
+    // A still edge never meets this: the pixel's own texel was background then.
+    if((uint(probe.w+.5)&512u)!=0u && (zraw<=knobs.x || zPred>0)) {
+        const float lim=zraw<=knobs.x?0.0:knobs.z/zPred*1.03;
+        const int2 b=int2(floor(pp));
+        float nearest4=1e30;
+        [unroll]for(int cy=0;cy<=1;++cy) [unroll]for(int cx=0;cx<=1;++cx)
+            nearest4=min(nearest4,ZP.Load(int3(clamp(b+int2(cx,cy),int2(0,0),size-1),0))-knobs.x);
+        if(nearest4>lim) return true;
+    }
     int2 q=int2(round(pp));
     float nearest=0;
     [unroll]for(int y=-1;y<=1;++y) [unroll]for(int x=-1;x<=1;++x)

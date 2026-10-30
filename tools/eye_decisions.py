@@ -338,9 +338,29 @@ def _rim_best(np, errors, informative, labels):
             'median_error': {label: round(float(np.median(e[informative])), 1) for label, e in zip(labels, errors)}}
 
 
-def rim_pair(np, d, cur, prev, out, prev_out, input_size, output_size, dc, oc):
-    """One consecutive pair: d is frame k's decisions (h, w, 4) over the D crop, cur/prev the C luma of k and
-    k-1 over the same crop, out/prev_out the P luma of k and k-1 over the output crop."""
+def _rim_old_foreground(np, d, prev_d, dist_fg):
+    """Background texels the mv pass kept (not hidden) at Chebyshev distance 1 and 2 from the foreground, and how many
+    of them have p + D's vector (no jitter term) land on four of four foreground texels of frame k-1's decisions: the
+    bilinear footprint at (floor x, floor y) and its right, lower and lower-right neighbours. History the pass kept
+    although the point was behind the weapon last frame. A point outside the crop is never counted as landing."""
+    flags = d[..., 3].astype(np.int64)
+    kept = ((flags & 15) == RIM_BACKGROUND) & ((flags & 16) == 0)
+    prev_flags = prev_d[..., 3].astype(np.int64)
+    prev_fg = ((prev_flags & 15) == RIM_FOREGROUND) & ((prev_flags & 512) != 0)
+    h, w = kept.shape
+    ty, tx = np.mgrid[0:h, 0:w]
+    px, py = tx + d[..., 0], ty + d[..., 1]
+    inside = np.isfinite(px) & np.isfinite(py) & (px >= 0) & (py >= 0) & (px < w - 1) & (py < h - 1)
+    x0 = np.floor(np.where(inside, px, 0)).astype(np.int64)
+    y0 = np.floor(np.where(inside, py, 0)).astype(np.int64)
+    on_old = inside & (prev_fg[y0, x0] & prev_fg[y0, x0 + 1] & prev_fg[y0 + 1, x0] & prev_fg[y0 + 1, x0 + 1])
+    return {f'distance_{r}': {'kept': int((kept & (dist_fg == r)).sum()),
+                              'on_old_foreground': int((kept & (dist_fg == r) & on_old).sum())} for r in (1, 2)}
+
+
+def rim_pair(np, d, prev_d, cur, prev, out, prev_out, input_size, output_size, dc, oc):
+    """One consecutive pair: d and prev_d are frame k's and k-1's decisions (h, w, 4) over the D crop, cur/prev the
+    C luma of k and k-1 over the same crop, out/prev_out the P luma of k and k-1 over the output crop."""
     flags = d[..., 3].astype(np.int64)
     path = flags & 15
     fg = (path == RIM_FOREGROUND) & ((flags & 512) != 0)
@@ -382,6 +402,7 @@ def rim_pair(np, d, cur, prev, out, prev_out, input_size, output_size, dc, oc):
     def fetch(vx, vy):
         return _rim_bilinear(np, prev_out, ox + vx / sx, oy + vy / sy)
     dist_fg, fny, fnx = _rim_nearest(np, fg, 3)
+    report['background_kept_on_old_foreground'] = _rim_old_foreground(np, d, prev_d, dist_fg)
     dist_bg, bny, bnx = _rim_nearest(np, bg, 1)
     gy, gx = fny[tiy, tix], fnx[tiy, tix]
     by, bx = bny[tiy, tix], bnx[tiy, tix]
@@ -488,7 +509,11 @@ def rim_report(manifest_path):
                                 'first_frame_mv.dilation gives each texel the MV input\'s vector of the nearest texel (Z.bin) in its 3x3, as DLSS does: '
                                 'ring_kept_own and ring_hidden_sentinel are ring texels left with their own vector or none, ring_dragged ring '
                                 'texels taken along with another vector, ring_kept_reset visible ring texels reset anyway, foreground_off_vector '
-                                'weapon texels that read a vector other than their own.'}
+                                'weapon texels that read a vector other than their own. '
+                                'background_kept_on_old_foreground: the background texels not marked hidden at distance 1 and 2 from the weapon '
+                                '(kept), and how many (on_old_foreground) have p + their vector land on four of four weapon texels of the previous '
+                                'frame\'s decisions: history kept from behind the weapon, which weapon-edges v3 marks hidden; it should fall to near 0 '
+                                'with v3 on.'}
     previous = None
     for index, entry in enumerate(frames):
         input_size = integers(entry.get('input_size'), 2, 'input size', True)
@@ -507,7 +532,7 @@ def rim_report(manifest_path):
                                         if mv_path.exists() else {'unavailable': True})
         if previous and previous['frame'] + 1 == current['frame'] and previous['geometry'] == current['geometry']:
             pair = {'index': index, 'frame': current['frame']}
-            pair.update(rim_pair(np, current['d'], current['c'], previous['c'], current['p'], previous['p'], input_size, output_size, dc, oc))
+            pair.update(rim_pair(np, current['d'], previous['d'], current['c'], previous['c'], current['p'], previous['p'], input_size, output_size, dc, oc))
             result['pairs'].append(pair)
         previous = current
     return result
@@ -610,6 +635,39 @@ def rim_self_test():
         # An unrelated picture pair: the vectors explain nothing, so neither fit is under 1 by much.
         assert all(v > .9 for v in pair['vector_fit'].values()), pair['vector_fit']
         assert _rim_nearest(np, np.array([[False, True]]), 1)[0].tolist() == [[1, 0]]
+        # background_kept_on_old_foreground. The fixture as built (frame 0's decisions are frame 1's, every background
+        # vector +6 in x): no kept texel lands on four old weapon texels, so 66 kept at distance 1 (the 96-texel ring
+        # less its 30 hidden) and 74 at distance 2 (104 less 30), none on the old weapon.
+        none_on_old = {'distance_1': {'kept': 66, 'on_old_foreground': 0}, 'distance_2': {'kept': 74, 'on_old_foreground': 0}}
+        assert pair['background_kept_on_old_foreground'] == none_on_old, pair['background_kept_on_old_foreground']
+        # Now vectors that reach back into the weapon (rows 10-39, columns 20-35 in frame 0's decisions), two holes in
+        # frame 0's weapon, and texels the count must leave out.
+        was, now = d.copy(), d.copy()
+        was[27, 27, 3] = RIM_FOREGROUND | 1024               # an engine texel that is not a tracked foreground
+        was[33, 27, 3] = RIM_BACKGROUND | 1024               # a background texel
+        def aim(y, x, vx, vy):
+            now[y, x, 0], now[y, x, 1] = vx, vy
+        aim(25, 36, -10.0, 0.0)      # distance 1, lands on (26, 25): four of four
+        aim(30, 36, -1.4, -0.5)      # distance 1, lands on (34.6, 29.5): four of four, the fraction floored (rounding would say two)
+        aim(26, 36, -10.0, 0.0)      # distance 1, lands on (26, 26): the first hole, three of four
+        aim(31, 36, -0.5, 0.0)       # distance 1, lands on (35.5, 31): two of four, the weapon's last column and one beside it
+        aim(9, 25, 0.0, 0.6)         # distance 1, lands on (25, 9.6): two of four, the row above the weapon (rounding would say four)
+        aim(25, 37, -11.5, 0.5)      # distance 2, lands on (25.5, 25.5): four of four
+        aim(30, 37, -2.5, 0.0)       # distance 2, lands on (34.5, 30): four of four
+        aim(32, 37, -10.0, 0.0)      # distance 2, lands on (27, 32): the second hole, three of four
+        aim(8, 25, 0.0, -20.0)       # distance 2, lands above the crop: kept, never on the weapon
+        aim(41, 25, 0.0, 6.0)        # distance 2, lands on the crop's last row, no four-texel footprint: kept, never counted
+        aim(25, 19, 8.0, 0.0)        # hidden (the band): lands on (27, 25), four of four, but not kept
+        aim(25, 38, -15.0, 0.0)      # distance 3: lands on (23, 25), four of four, past distance 2
+        expected = {'distance_1': {'kept': 66, 'on_old_foreground': 2}, 'distance_2': {'kept': 74, 'on_old_foreground': 2}}
+        dist_fg = _rim_nearest(np, fg, 3)[0]
+        assert _rim_old_foreground(np, now, was, dist_fg) == expected
+        nan_vector = now.copy()
+        nan_vector[20, 36, 0] = np.nan                       # kept at distance 1, a vector that is no point: counted kept, never on the weapon
+        assert _rim_old_foreground(np, nan_vector, was, dist_fg) == expected
+        for k, decisions in enumerate((was, now)):
+            (base / frames[k]['decision_file']).write_bytes(b'EDVRTEX1' + struct.pack('<9I', 1, w, h, 2, w * 16, 100 + k, 0, 0, 0) + decisions.tobytes())
+        assert rim_report(path)['pairs'][0]['background_kept_on_old_foreground'] == expected
         frames[1]['output_crop'] = [0, 1, 2 * w, 2 * h - 1]
         path.write_text(json.dumps(dict(schema=1, stamp=stamp, requested=16, frames=frames)), encoding='utf-8')
         try:

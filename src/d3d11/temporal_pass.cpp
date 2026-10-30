@@ -1079,7 +1079,8 @@ bool                       g_csEyeJumpLatticeTried = false;
 // #146, the held weapon's edges (docs/weapon-edge-ghost-2026-10-29.md; experimental.clean_weapon_edges, a TEMPORARY A/B key, default on). On foot, with
 // engine-record motion bound, the weaponEdges entry (temporal_shader_source.h) runs right after mv and gives a tracked foreground texel that sits beside
 // a farther texel moving differently, and that no foreground pixel takes as its nearest-depth neighbour, the farther texel's vector (the history-invalid
-// vector where that texel is hidden), so DLSS's nearest-depth dilation hands the ring around the gun the background's own history.
+// vector where that texel is hidden), so DLSS's nearest-depth dilation hands the ring around the gun the background's own history; and mv, via probe.w
+// bit 512, hides background whose reprojected point was covered on all four texels of last frame's depth (v3).
 // The key is read live in temporalPassConfigure (any thread); the counts belong to the render thread. The 10 s line is told from the eye treat, only
 // while on foot with the key on, and says what the C++ side did, so a log with no line is a build without the pass or a session not on foot.
 struct WeaponEdgesState {
@@ -4847,6 +4848,11 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     // Bit 16384 and t23: the skinned characters' exact previous position (the second skin).
                     if (engineBound && engineSkinSrv)
                         p.probe[3] = static_cast<float>(static_cast<uint32_t>(p.probe[3]) | 16384u);
+                    // Bit 512 (#146, v3): the weapon edges' pass follows this dispatch (the same three conditions as the dispatch below), so
+                    // backgroundHistoryHidden also hides background whose reprojected point was covered on all four texels of last frame's depth.
+                    // Set here for this dispatch only: probe[3] is rebuilt from uiFlags() at every mv and own-path dispatch, and no other entry reads the bit.
+                    if (weaponEdgesWanted && engineBound)
+                        p.probe[3] = static_cast<float>(static_cast<uint32_t>(p.probe[3]) | 512u);
                     engineCounted = engineBound && diagnostics;
                     // A masked engine pixel sets the bias mask too, for the
                     // presets and FSR that read it (modern DLSS honours the
@@ -5756,10 +5762,11 @@ void temporalPassConfigure(Config& cfg) {
             g_weaponEdges.keyTold = true;
             if (asked) {
                 Log::get().note(
-                    "weapon edges (#146): on (v2) -- on foot, a tracked foreground texel beside a farther texel whose vector differs by more than half a "
+                    "weapon edges (#146): on (v3) -- on foot, a tracked foreground texel beside a farther texel whose vector differs by more than half a "
                     "texel, or is hidden, and that no level-or-nearer texel takes as its nearest-depth neighbour, carries the farthest such texel's vector "
                     "(the history-invalid vector when one is hidden), so DLSS's nearest-depth dilation hands the ring around the weapon the background's "
-                    "own history.");
+                    "own history; and background whose reprojected point was covered on all four texels of last frame's depth counts as hidden even with "
+                    "the weapon still beside it.");
             } else {
                 Log::get().note("weapon edges (#146): off -- the mv pass's vectors go to DLSS as written.");
             }
