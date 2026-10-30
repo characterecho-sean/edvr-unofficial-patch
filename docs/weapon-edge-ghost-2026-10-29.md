@@ -2,9 +2,10 @@
 
 ## Status
 
-- **State: DIAGNOSED from two eye dumps; the fix is BUILT behind a temporary
-  key (2026-10-29), nothing flown.** Issue #146. A second defect found in the
-  same dumps is #147. Branch `claude/weapon-edge-ghost-4a079e`.
+- **State: v1 FLOWN 2026-10-30 on Frontier. The ring no longer follows the
+  gun, but the barrel end looks "a little pixelated" (Sean). v2 is designed
+  from that flight's dumps and NOT BUILT.** Issue #146. A second defect found
+  in the first dumps is #147. Branch `claude/weapon-edge-ghost-4a079e`.
 - **Cause:** DLSS gives the background texels beside the weapon the weapon's
   motion vector. For each output pixel it takes the vector of the nearest-depth
   texel around it, so the ring of terrain one texel outside the silhouette
@@ -22,25 +23,25 @@
   own rim keeps its own vector (52 to 89 %).
 - **Ruled out:** see "Ruled out" below. The weapon's vectors, its jitter or
   projection, and the background's own vectors are all right.
-- **Fix, built:** where the background beside the weapon's outermost texels
-  moves more than half a texel differently, or is hidden, the sentinel is
-  written into those outermost texels (the `weaponEdges` entry, run on foot
-  right after `mv`). DLSS's dilation then carries "no history" into the ring.
-  Fly it with an eye dump each way and read both with `--rim`; the build's
-  log lines are in "Build, 2026-10-29" below.
-- **Next flight: INSTALLED Frontier 2026-10-29 20:49, `v0.22.0-rc.3-53-gabd7b82c`
-  (`--scope both --xess`, verified), NOT FLOWN.** It replaced the F175 view-roll
-  measure build (`rc.3-47-g5676d82c`). The live ini has no
-  `clean_weapon_edges` line, so the key is on; it is the developer-tier menu
-  row "Clean weapon edges (test)". Brief: fast swings at the hip over textured
-  ground; `hotkey.dump_eyes` during a swing with the key on, then off, then on;
-  check the gun against the hand and arm too. Read: `edvr_log.py --target
-  frontier --expect-build abd7b82c --grep "weapon edges"` (rim passes non-zero
-  on foot; HEAD is a later doc-only commit), then `--rim` on
-  each dump. With the fix on, `first_frame_mv` should show
-  `foreground_rim_sentinel` above 0 (today's dump: 0 of 3175), the ring's
-  `foreground_vector` share should fall to near 0, and the foreground rim's
-  `own_vector` share should hold.
+- **v1, built and flown (`abd7b82c`):** the sentinel goes into the weapon's
+  outermost texels wherever the background beside them moves more than half a
+  texel differently, or is hidden (the `weaponEdges` entry, right after `mv`).
+  "Flight 1, 2026-10-30" below has the result. The hidden ring's gun-vector
+  share fell from 48 to 84 % to 0 to 29 %. But v1 also resets terrain that was
+  visible last frame (2708 of 3311 ring texels in dump `054813060001`). It
+  also resets the gun's own pixels wherever a rim texel is the nearest in its
+  own 3x3. There are 261 such texels, densest at the muzzle's thin parts: the
+  pixelated barrel end.
+- **v2, proposed:** rewrite only the rim texels that no gun pixel reads. Each
+  takes the terrain's own vector, or the sentinel where that terrain was
+  uncovered. Modelled on dump `054813060001`: the ring gets the right vector in
+  3227 of 3311 texels (v1: 603). Gun texels left without a gun vector: 791
+  (no fix 749, v1 1945).
+- **Next flight:** v1 is still installed on Frontier
+  (`v0.22.0-rc.3-53-gabd7b82c`, key on). v2 needs a build, and Sean's go to
+  install it. Brief: fast swings at the hip over textured ground, with one
+  `hotkey.dump_eyes` key on and one key off in the same flight (flight 1 had
+  no key-off dump).
 - **Temporary keys:** `experimental.clean_weapon_edges` (`on` / `off`, default
   `on`), the A/B of this fix. When the flights settle it, ship the winner as
   the behaviour and propose removing the key.
@@ -145,6 +146,8 @@ wins 0.40 to 0.56, the current frame 0.03 to 0.19 and its own vector 0.33 to
 - ruled out: DLSS ignoring EDVR's hidden-history sentinel in general, because two to three texels out the output follows the current frame (75 to 96 %).
 - ruled out: the ADS both-eye share (F162), because the effect shows with sight eye `right`.
 - ruled out: the runtime's reprojection, because EDVR sends it no depth or motion.
+- ruled out: nudging the depth handed to DLSS so that the gun's own edge pixels read an inner texel, because in DLSS's depth the inner texels are already nearer than 3255 of the 3269 marked rim texels that have one (dump `054813060001`, frame 0).
+- ruled out: a sentinel on every marked rim texel (v1) as the final rule, because it also resets terrain that was visible last frame (2708 of 3311 ring texels) and the gun's own pixels at the thin muzzle parts (flight 1).
 
 ## Proposed fix
 
@@ -197,3 +200,70 @@ judges the silhouette.
   on foot with the key on, `weapon edges (#146) 10 s: rim passes <n>
   (eye-frames), not run <m> [no engine binding <a>, not trained <b>]`. A log
   with the key on, on foot and no such line is a build without the pass.
+
+## Flight 1, 2026-10-30 (v1, Frontier)
+
+Sean, Pimax OpenXR, DLSS, same render sizes: "maybe better? It looks a little
+pixelated at the barrel end." The log is `edvr_gfx_20261030_054502.log`, and
+its build matches `abd7b82c`. The key was on from the start, off at 05:48:01
+and on again at 05:48:04. On foot the pass ran 1122 to 1648 eye-frames per
+10 s. There are two dumps, both with the key on, so the gun's rim has no
+key-off control from the same flight:
+
+- `054813060001`: a fast swing over the plain. The gun moves -86 to 186 px a
+  frame, the terrain 32 px.
+- `054824956002`: slow, under the parked ship. Most of the engine path there
+  is the ship.
+
+Read with `--rim`:
+
+- The pass wrote what it should. The first frame of dump 1 carries the
+  sentinel on 3344 of 3344 rim texels. Dump 2 carries it on 2053 of 41733,
+  because the ship's rim mostly moves with the terrain.
+- The hidden ring no longer follows the gun. Its `foreground_vector` share is
+  0.00 to 0.29 (median 0.09 over dump 1's 15 pairs), down from 48 to 84 %, and
+  `current` is 0.47 to 1.00.
+- The gun rim's `own_vector` share reads 0.30 to 0.61 in both dumps. Dump 2
+  reads the same with only 5 % of its rim marked, so this share does not
+  separate the fix from the scene. It is no evidence either way.
+
+A model of DLSS's dilation over its own inputs: frame 0's `Z.bin` and
+`MV.bin`, taking the nearest depth in each 3x3, which is the rule the ring and
+band measurements imply. The scripts were scratch; the tool does not yet have
+this model.
+
+- The gun's inner texels are nearer than 3255 of the 3269 marked rim texels
+  that have one, so most of the gun's output pixels never read the rim.
+- 261 rim texels are the nearest in their own 3x3, so the gun's own pixels
+  there read the sentinel and restart from the current frame each frame: render
+  resolution. The densest 100-texel blocks are at the muzzle's thin sight posts
+  and prongs: 49 of 153 and 46 of 169 rim texels, about 30 %. Elsewhere it is 2
+  to 19 %. That is the pixelated barrel end.
+- v1 also resets terrain that EDVR found visible in the previous frame, whose
+  own vector is right. Of the 3311 ring texels, 603 were uncovered and 2708
+  were visible last frame.
+
+Candidate rules, scored by the same model on frame 0 of dump 1. Ring texels:
+3311, of which 603 were uncovered. The muzzle block is the 200x200 texels at
+D (800, 700).
+
+| Rule | Uncovered ring gets the sentinel | Seen ring gets its own vector | Ring dragged with the gun | Gun texels left without a gun vector (muzzle block) |
+|---|---|---|---|---|
+| none | 0 | 0 | 3311 | 749 (75) |
+| v1, flown | 603 | 0 (2708 reset) | 0 | 1945 (374) |
+| v2 | 586 | 2641 | 64 | 791 (107) |
+| v2 with the sentinel only | 586 | 0 (2661 reset) | 64 | 791 (107) |
+
+In dump 2, v2 resets 32 seen ring texels where v1 reset 1194. It leaves 2092
+gun texels without a gun vector; v1 left 4397, and no fix 2079.
+
+**v2:**
+
+- **Which texels:** take a rim texel that passes v1's test. Rewrite it only if
+  no texel within 3 % of its depth or nearer (itself included) has it as the
+  nearest in its own 3x3. Such a texel feeds only the ring.
+- **What it carries:** the sentinel if a farther neighbour carries it (the
+  terrain was uncovered). Otherwise it carries the farthest neighbour's vector,
+  so terrain seen last frame keeps its history.
+- **Cost:** the pass already loads a 12x12 depth tile with a two-texel apron,
+  which covers the 5x5 the test reads. It needs no new resources.
