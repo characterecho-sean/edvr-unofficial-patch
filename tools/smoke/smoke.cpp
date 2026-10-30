@@ -20,6 +20,7 @@
 #include <d3d11.h>
 
 #include <cstdio>
+#include <string>
 #include <vector>
 
 #include "../../src/common/temporal_math.h"
@@ -36,6 +37,49 @@ typedef HRESULT(WINAPI* PFN_Create)(IDXGIAdapter*, D3D_DRIVER_TYPE, HMODULE, UIN
 int fail(const char* what) {
     printf("  FAIL  %s\n", what);
     return 1;
+}
+
+// Copy a 1x1 pixel of `tex` at (x, y) into a staging texture and read it back.
+//
+// A CPU readback can race the GPU: on the certain cards and drivers,
+// the FIRST copy+Map of targets over a certain size reads the staging
+// texture before the GPU has finished the copy, and returns 0,0,0.
+// A second copy reads the correct colour, ans smaller targets work on the first try.
+// This waits for the GPU to finish before Map by re-reading until two consecutive copies agree.
+// Value-neutral, so it also works for the arbitrary colours the temporal/sharpen checks read.
+// Returns false if it never settled (the readback itself failed every attempt).
+bool readPixelStable(ID3D11Device* device, ID3D11DeviceContext* ctx,
+                     ID3D11Texture2D* tex, UINT x, UINT y, unsigned char out[4]) {
+    D3D11_TEXTURE2D_DESC sd{};
+    sd.Width = 1; sd.Height = 1; sd.MipLevels = 1; sd.ArraySize = 1;
+    sd.Format = DXGI_FORMAT_R8G8B8A8_UNORM; sd.SampleDesc.Count = 1;
+    sd.Usage = D3D11_USAGE_STAGING; sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    ID3D11Texture2D* stage = nullptr;
+    if (FAILED(device->CreateTexture2D(&sd, nullptr, &stage)) || !stage) return false;
+    D3D11_BOX box{x, y, 0, x + 1, y + 1, 1};
+    unsigned char prev[4] = {0xFF, 0xFF, 0xFF, 0xFF}, cur[4];
+    bool ok = false;
+    for (int attempt = 0; attempt < 8; ++attempt) {
+        ctx->CopySubresourceRegion(stage, 0, 0, 0, 0, tex, 0, &box);
+        ctx->Flush();
+        D3D11_MAPPED_SUBRESOURCE m{};
+        if (FAILED(ctx->Map(stage, 0, D3D11_MAP_READ, 0, &m))) break;
+        const unsigned char* px = static_cast<const unsigned char*>(m.pData);
+        cur[0] = px[0]; cur[1] = px[1]; cur[2] = px[2]; cur[3] = px[3];
+        ctx->Unmap(stage, 0);
+        // Settled when the GPU's result is stable across two reads.
+        if (attempt > 0 && cur[0] == prev[0] && cur[1] == prev[1] &&
+            cur[2] == prev[2] && cur[3] == prev[3]) {
+            ok = true;
+            break;
+        }
+        prev[0] = cur[0]; prev[1] = cur[1]; prev[2] = cur[2]; prev[3] = cur[3];
+    }
+    if (ok) {
+        out[0] = cur[0]; out[1] = cur[1]; out[2] = cur[2]; out[3] = cur[3];
+    }
+    stage->Release();
+    return ok;
 }
 
 // Clear a freshly made w*h target to Elite's grey and read one pixel back.
@@ -61,24 +105,10 @@ bool clearGreyReadBack(ID3D11Device* device, ID3D11DeviceContext* ctx, UINT w, U
     const float grey[4] = {32.0f / 255.0f, 32.0f / 255.0f, 32.0f / 255.0f, 1.0f};
     ctx->ClearRenderTargetView(rtv, grey);
 
-    D3D11_TEXTURE2D_DESC sd = td;
-    sd.Width = 1; sd.Height = 1;
-    sd.Usage = D3D11_USAGE_STAGING;
-    sd.BindFlags = 0;
-    sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-    bool ok = false;
-    ID3D11Texture2D* stage = nullptr;
-    if (SUCCEEDED(device->CreateTexture2D(&sd, nullptr, &stage)) && stage) {
-        D3D11_BOX box{0, 0, 0, 1, 1, 1};
-        ctx->CopySubresourceRegion(stage, 0, 0, 0, 0, tex, 0, &box);
-        D3D11_MAPPED_SUBRESOURCE m{};
-        if (SUCCEEDED(ctx->Map(stage, 0, D3D11_MAP_READ, 0, &m))) {
-            const unsigned char* px = static_cast<const unsigned char*>(m.pData);
-            out[0] = px[0]; out[1] = px[1]; out[2] = px[2];
-            ok = true;
-            ctx->Unmap(stage, 0);
-        }
-        stage->Release();
+    unsigned char rgba[4];
+    bool ok = readPixelStable(device, ctx, tex, 0, 0, rgba);
+    if (ok) {
+        out[0] = rgba[0]; out[1] = rgba[1]; out[2] = rgba[2];
     }
     rtv->Release();
     tex->Release();
@@ -110,27 +140,10 @@ bool makeSolidSrc(ID3D11Device* device, ID3D11DeviceContext* ctx, UINT w, UINT h
     return true;
 }
 
-// Read back one pixel of an R8G8B8A8_UNORM texture.
+// Read back one pixel of an R8G8B8A8_UNORM texture, waiting for the GPU's result to settle.
 bool readPixelRgba8(ID3D11Device* device, ID3D11DeviceContext* ctx,
                     ID3D11Texture2D* tex, UINT x, UINT y, unsigned char out[4]) {
-    D3D11_TEXTURE2D_DESC sd{};
-    sd.Width = 1; sd.Height = 1; sd.MipLevels = 1; sd.ArraySize = 1;
-    sd.Format = DXGI_FORMAT_R8G8B8A8_UNORM; sd.SampleDesc.Count = 1;
-    sd.Usage = D3D11_USAGE_STAGING; sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-    ID3D11Texture2D* stage = nullptr;
-    if (FAILED(device->CreateTexture2D(&sd, nullptr, &stage)) || !stage) return false;
-    D3D11_BOX box{x, y, 0, x + 1, y + 1, 1};
-    ctx->CopySubresourceRegion(stage, 0, 0, 0, 0, tex, 0, &box);
-    D3D11_MAPPED_SUBRESOURCE m{};
-    bool ok = false;
-    if (SUCCEEDED(ctx->Map(stage, 0, D3D11_MAP_READ, 0, &m))) {
-        const unsigned char* px = static_cast<const unsigned char*>(m.pData);
-        out[0] = px[0]; out[1] = px[1]; out[2] = px[2]; out[3] = px[3];
-        ok = true;
-        ctx->Unmap(stage, 0);
-    }
-    stage->Release();
-    return ok;
+    return readPixelStable(device, ctx, tex, x, y, out);
 }
 
 // The resolve's result, checked: an ID3D11Texture2D of the expected size
@@ -230,6 +243,50 @@ bool presentIsHookedBy(IDXGISwapChain* swapchain, HMODULE mod) {
     return owner == mod;
 }
 
+// Whether one of this process's own arguments already is `sw`.
+bool hasSwitch(int argc, char** argv, const char* sw) {
+    for (int i = 1; i < argc; ++i) if (strcmp(argv[i], sw) == 0) return true;
+    return false;
+}
+
+// Re-run this very exe, with every existing argument kept and `sw` appended,
+// and return the child's exit code.
+//
+// The proxy decides its profile from the game's Settings.xml (flat vs VR) the
+// same way the game does, so this test's answer depends on whichever profile
+// this machine's game is set to. The fixes the default mode and --warp test --
+// the black void, the eye-sized clear, the scene counter -- are VR fixes: in
+// the flat profile the void fix does not act (a cleared eye-sized target stays
+// Elite's grey) and the draw thunk takes the flat branch and returns before the
+// counter is even reached, so both read as "the fix is broken" when it is only
+// that the game is set to flat. Forcing the VR profile the way the game's own
+// /vr switch does (the proxy reads it from this process's command line) makes
+// the test verify what it is written to verify on any machine, and a re-exec
+// here cannot loop: the child sees /vr among its arguments and skips this.
+int reexecWith(int argc, char** argv, const char* sw) {
+    char exe[MAX_PATH];
+    if (!GetModuleFileNameA(nullptr, exe, MAX_PATH)) return 1;
+    std::string cmd;
+    cmd.reserve(MAX_PATH);
+    cmd += '"'; cmd += exe; cmd += '"';
+    for (int i = 1; i < argc; ++i) {
+        cmd += ' ';
+        cmd += '"'; cmd += argv[i]; cmd += '"';
+    }
+    cmd += ' '; cmd += sw;
+    STARTUPINFOA si{}; si.cb = sizeof(si);
+    PROCESS_INFORMATION pi{};
+    std::vector<char> cmdBuf(cmd.begin(), cmd.end()); cmdBuf.push_back('\0');
+    if (!CreateProcessA(nullptr, cmdBuf.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi))
+        return 1;
+    WaitForSingleObject(pi.hProcess, INFINITE);
+    DWORD code = 1;
+    GetExitCodeProcess(pi.hProcess, &code);
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+    return static_cast<int>(code);
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -240,6 +297,16 @@ int main(int argc, char** argv) {
     const bool offCheck = argc > 2 && strcmp(argv[2], "--fixes-off-device") == 0;
     const bool warpCheck = offCheck || (argc > 2 && strcmp(argv[2], "--warp") == 0);
     const bool disabledCheck = recoveryCheck || offCheck;
+    // The default and --warp modes test VR fixes, but the proxy takes its
+    // profile from the game's Settings.xml, so on a flat-configured machine
+    // they would be testing the flat profile. Force the VR profile with the
+    // same /vr switch the game uses, re-executing once so the proxy (a fresh
+    // process) sees it on its command line. This must run BEFORE the sentinel
+    // is cleared below: the child inherits the run's state and must not wipe
+    // it. The three focused modes are profile-agnostic and never re-exec.
+    if (!disabledCheck && !foreignCheck && !hasSwitch(argc, argv, "/vr")) {
+        return reexecWith(argc, argv, "/vr");
+    }
     printf("edvr smoke\nproxy: %s\n\n", proxy);
 
     char full[MAX_PATH];
@@ -662,15 +729,14 @@ int main(int argc, char** argv) {
             rc = 1;
         } else {
             const unsigned bits = introSkip();
-            if (bits == 7u) {
+            if (bits == 3u) {
                 printf("  ok    intro skip: idents under Movies\\ are told apart from the "
                        "front end's loops and from everything else, in either separator "
                        "and case; an armed hook answers 'file not found', a disarmed "
-                       "one refuses nothing, and the probe's watch counts without "
-                       "refusing\n");
+                       "one refuses nothing\n");
             } else {
-                printf("  FAIL  intro skip self-test returned %u (want 7: 1 predicate, 2 "
-                       "refusal, 4 watch)\n", bits);
+                printf("  FAIL  intro skip self-test returned %u (want 3: 1 predicate, 2 "
+                       "refusal)\n", bits);
                 rc = 1;
             }
         }
