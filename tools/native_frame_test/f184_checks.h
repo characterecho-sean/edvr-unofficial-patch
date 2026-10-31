@@ -182,7 +182,7 @@ inline void run184(Check&& check) {
                   has("if (g179.ok && !pc.f179Measure) {\n        const double thWithPost[3]") && has("if (g179.ok && !pc.f179Measure) {\n            const nofoot::PinMove formed = nofoot::pinMove(N0, desiredNeck);"),
               "F184: the guard's pre-reach push, the post-reach trim and the formed neck's residual are all gated by the measuring flag, which is set for every context but the hip armed");
         check(has("legsRoomM = legsRaiseRoomM(pl, count);") && has("pc.f179StandRaise = nofoot::f179::legsRaiseAskedM(legsRoomM, pc.postureW, pc.detachW);") &&
-                  has("nofoot::f179::legsRaiseAskedM(legsRoomM, pc.postureW, pc.detachW)).y;") && !has("nofoot::f179::standingRaiseM(") && has("double legsRaiseRoomM(const pfz::ArmPlan& pl, uint32_t count) noexcept {") &&
+                  has("nofoot::f179::legsRaiseAskedM(legsRoomM, pc.postureW, pc.detachW));   // F184: the legs' room, not the eye") && !has("nofoot::f179::standingRaiseM(") && has("double legsRaiseRoomM(const pfz::ArmPlan& pl, uint32_t count) noexcept {") &&
                   has("const double legsRoom = legsRaiseRoomM(pl, count);") && has("if (std::isfinite(legsRoom)) room = std::min(room, legsRoom);"),
               "F184: the standing raise is asked of the legs' room on both the legacy target and the rest path's, from the one function F97a's cap uses; the eye-based ask is not called");
         const size_t legsAt = at("legsRoomM = legsRaiseRoomM(pl, count);"), wrapAt = at("at = nofoot::f179::withStandingRaise(at, N0[1], f97W, pc.f179StandRaise);"), capAt = at("const double legsRoom = legsRaiseRoomM(pl, count);");

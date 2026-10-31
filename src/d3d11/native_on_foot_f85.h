@@ -506,6 +506,9 @@ struct StepFrame {
     // the pin (pinRecord): the demanded and the applied moves, the clamp flags, the crouch weight, the eye height less the standing height
     float pinDemandV = 0.0f, pinAppliedV = 0.0f, pinDemandH = 0.0f, pinAppliedH = 0.0f, wc = 0.0f, dEyeY = 0.0f;
     bool vClamp = false, hClamp = false;
+    // F193: the neck's height rule (m; the legs' room is NaN without legs): the animated neck, F163's posture weight, the legs' room, the old rule's standing raise, the game's camera eye, the neck target, the rule (0 hip, 1 legs, 2 camera)
+    float n0y = 0.0f, postureW = 0.0f, legsRoomM = 0.0f, standRaiseM = 0.0f, rawEyeY = 0.0f, neckTargetY = 0.0f;
+    uint8_t source = 0;
     float handErrCm[2] = {-1.0f, -1.0f};
     bool handWritten[2] = {};
     // F86a: the pose carry of this frame's submit (joined by the P1 frame): the figures the line prints and the hand-lag trigger reads

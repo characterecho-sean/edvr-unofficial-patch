@@ -500,8 +500,8 @@ inline void run180(Check&& check) {
         const auto at = [&](const std::string& needle) { return cpp.find(needle); };
         // F180a: the weight in the left hand's blend, in the branch that is the left hand's stable pole (a one-handed gun has no such solve)
         const size_t branch = at("if (side == 0 && pinWanted && pinCall.valid) {\n                    f181Eligible = true;   // F181a: the same gate: every two-handed gun, the left hand's stable pole\n                    const double w165 = nofoot::f180::elbowBlendWeight(pinCall.postureW, pinCall.detachW);");
-        check(branch != std::string::npos && !has("const double w165 = nofoot::f165::blendWeight(") && has("const nofoot::f165::Blend mix = nofoot::f165::blendPole(tb, poleTheta165, w165,"),
-              "F180a: the F165 blend's weight is nofoot::f180::elbowBlendWeight, in the left hand's stable-pole branch (the blend itself is F165's blendPole as it was)");
+        check(branch != std::string::npos && !has("const double w165 = nofoot::f165::blendWeight(") && has("const nofoot::f165::Blend mix = nofoot::f165::blendPole(tb, poleTheta165, wBlend,") && has("const double wBlend = nofoot::f192::blendWeight(w165, dh);"),
+              "F180a: the F165 blend's weight is nofoot::f180::elbowBlendWeight (F192: the larger of it and the draw hold), in the left hand's stable-pole branch (the blend itself is F165's blendPole as it was)");
         // F180b: the key read and logged, the stage before the pin, the bend yielding to it, the sample and the line
         check(has("std::atomic<float> g_standAdsSpine{0.9f};") && has("nofoot::f180::clampDial(static_cast<double>(cfg.getFloat(\"experimental.native_on_foot_stand_ads_spine_straighten\", 0.9f)))") &&
                   has("if (first || v != g_standAdsSpineLast)") && has("native on foot standing ADS spine dial (F180b, TEMPORARY): experimental.native_on_foot_stand_ads_spine_straighten = %.2f") &&

@@ -428,8 +428,8 @@ inline void run179(Check&& check) {
         const auto at = [&](const std::string& needle) { return cpp.find(needle); };
         // F179a: the body's neck target (T), right after F97a's, and the rest path's; the eye alignment raise is not touched by it
         check(has("at = nofoot::f179::withStandingRaise(at, N0[1], f97W, pc.f179StandRaise);") && has("pc.f179StandRaise = nofoot::f179::legsRaiseAskedM(legsRoomM, pc.postureW, pc.detachW);") &&
-                  has("physicalTarget[1] = nofoot::f179::withStandingRaise(") && has("T[1] = at.y;"),
-              "F179a: the standing raise is made on the body's neck target T (right after F97a's armed target, before T[1] is set) and on the rest path's physical target, from the eye as drawn at the hip less the key");
+                  has("nofoot::f97::ArmedTarget restAt = nofoot::f179::withStandingRaise(") && has("T[1] = at.y;"),
+              "F179a: the standing raise is made on the body's neck target T (right after F97a's armed target, before T[1] is set) and on the rest path's physical target (F193: restAt, which the camera rule may replace), from the eye as drawn at the hip less the key");
         const size_t armed = at("nofoot::f97::ArmedTarget at = nofoot::f97::armedNeckTarget("), wrap = at("at = nofoot::f179::withStandingRaise(at, N0[1]"), setT = at("T[1] = at.y;"),
                      f95 = at("F95a/F98c: the raise's target only from a settled stance");
         check(armed != std::string::npos && armed < wrap && wrap < setT && setT < f95,

@@ -1480,6 +1480,8 @@ struct IkPoseDeviationSample {
     double weight[2] = {}, violationM[2] = {}, outSign[2] = {}, actualOutM[2] = {}, requiredOutM[2] = {};
     double offDistanceM = 0.0, offChangeDeg = 0.0, offRawWeight = 0.0, offEffectiveWeight = 0.0, leftSolveWeight = 0.0, supportBlend = 0.0;
     double reachRadiusM[2] = {}, reachCandidate[3] = {}, pinReach[3] = {};
+    // F192: the left elbow's draw-hold weight, the game's animated left elbow over its shoulder (m) and F181's plane angle before the cap (deg); not a number when unmeasured
+    double f192Dh = 0.0, f192AnimElbowDyM = std::nan(""), f181PlaneBeforeDeg = std::nan("");
 };
 struct IkPoseDeviationRecord {
     IkPoseDeviationSample sample{};
