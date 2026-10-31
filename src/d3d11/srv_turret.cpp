@@ -1,4 +1,4 @@
-// The SRV turret view (issue 140): the module. srv_turret.h says what it does and what the log shows; srv_turret_math.h has the maths, the families and the two TEMPORARY
+// The SRV turret view (issue 140): the module. srv_turret.h says what it does and what the log shows; srv_turret_math.h has the maths, the families and the four TEMPORARY
 // keys; srv_turret_hud_binding.h holds the constants and the binding, which tools/srv_turret_hud_test runs on WARP; srv_turret_hud_shader.h is the geometry shaders' HLSL,
 // compiled at build time.
 #include "srv_turret.h"
@@ -38,14 +38,14 @@ namespace st = srv_turret;
 
 namespace {
 
-static_assert(st::kBackDefaultCm == 60 && st::kBackMaxCm == 150 && st::kGapDefaultCm == 96 && st::kGapMaxCm == 200,
-              "the literals in the two reads below are these, written as numbers for tools/gen_settings_schema.py");
+static_assert(st::kBackDefaultCm == 60 && st::kBackMaxCm == 150 && st::kGapDefaultCm == 0 && st::kGapMaxCm == 200 && st::kPushDefaultCm == 110 && st::kPushMaxCm == 200,
+              "the literals in the four reads below are these, written as numbers for tools/gen_settings_schema.py");
 constexpr uint32_t kFamilyN = st::kFamilyCount, kSigN = st::kSignatureCount;   // the draws' families, and the geometry shaders (one for each distinct output signature)
 
 // ---- the frame thread's state ----------------------------------------------------------------------------------------------------------------------------------
 bool g_keysRead = false;
 uint32_t g_keysGeneration = 0;
-std::atomic<int> g_backCm{0}, g_gapCm{0};   // TEMPORARY keys, as last read (the gap is read by the draw path too)
+std::atomic<int> g_backCm{0}, g_panelsCm{0}, g_radarCm{0}, g_gapCm{0};   // TEMPORARY keys, as last read (the three HUD keys are read by the draw path too)
 bool g_on = false;                          // the Scorpion's turret view, as the frame tick last saw it
 bool g_ignored = false;                     // the turret view is on but the vehicle is not the Scorpion: said once for each stay
 double g_backSeatedZ = 0.0;                 // what alignTick adds
@@ -74,7 +74,7 @@ struct SigShader {
 const SigShader kShader[kSigN] = {
     EDVR_SRV_TURRET_SHADER(A, "1989E6D3"), EDVR_SRV_TURRET_SHADER(B, "2CECEC30"), EDVR_SRV_TURRET_SHADER(C, "DF3503CD"),
     EDVR_SRV_TURRET_SHADER(D, "44DDCDEB"), EDVR_SRV_TURRET_SHADER(E, "9B34C331"), EDVR_SRV_TURRET_SHADER(F, "9611A454"),
-    EDVR_SRV_TURRET_SHADER(G, "B932058F"), EDVR_SRV_TURRET_SHADER(H, "5559BD94"), EDVR_SRV_TURRET_SHADER(I, "B7790CBF"),
+    EDVR_SRV_TURRET_SHADER(G, "B932058F"), EDVR_SRV_TURRET_SHADER(H, "5559BD94"),
 };
 #undef EDVR_SRV_TURRET_SHADER
 ID3D11GeometryShader* g_gs[kSigN] = {};
@@ -157,20 +157,33 @@ bool ensureGs(ID3D11DeviceContext* ctx, uint32_t sig) {
     return sig < kSigN && g_gs[sig] != nullptr;
 }
 
-// The two keys, read when the configuration changes (Config::generation()) and not on every frame; said in the log at the first read and at each change.
+// The four keys, read when the configuration changes (Config::generation()) and not on every frame; said in the log at the first read and at each change.
 void readKeys() {
     Config& cfg = Config::get();
     const uint32_t generation = cfg.generation();
     if (g_keysRead && generation == g_keysGeneration) return;
     const int back = cfg.getIntInRange("fix.srv_turret_camera_back", 60, 0, 150);
-    const int gap = cfg.getIntInRange("fix.srv_turret_hud_gap", 96, 0, 200);
-    const bool changed = !g_keysRead || back != g_backCm.load(std::memory_order_relaxed) || gap != g_gapCm.load(std::memory_order_relaxed);
+    const int panels = cfg.getIntInRange("fix.srv_turret_panels_back", 110, 0, 200);
+    const int radar = cfg.getIntInRange("fix.srv_turret_radar_back", 110, 0, 200);
+    const int gap = cfg.getIntInRange("fix.srv_turret_hud_gap", 0, 0, 200);
+    const bool changed = !g_keysRead || back != g_backCm.load(std::memory_order_relaxed) || panels != g_panelsCm.load(std::memory_order_relaxed) ||
+                         radar != g_radarCm.load(std::memory_order_relaxed) || gap != g_gapCm.load(std::memory_order_relaxed);
     g_keysRead = true;
     g_keysGeneration = generation;
     g_backCm.store(back, std::memory_order_relaxed);
+    g_panelsCm.store(panels, std::memory_order_relaxed);
+    g_radarCm.store(radar, std::memory_order_relaxed);
     g_gapCm.store(gap, std::memory_order_relaxed);
     if (changed)
-        Log::get().note("srv turret settings: camera back %d cm, hud gap %d cm (live; fix.srv_turret_camera_back and fix.srv_turret_hud_gap, TEMPORARY; 0 is the game's own)", back, gap);
+        Log::get().note("srv turret settings: camera back %d cm, panels back %d cm, radar back %d cm, hud gap %d cm (live; fix.srv_turret_camera_back, fix.srv_turret_panels_back, "
+                        "fix.srv_turret_radar_back and fix.srv_turret_hud_gap, TEMPORARY; 0 is the game's own)",
+                        back, panels, radar, gap);
+}
+
+// The constants a family's draws run with at the keys in force: its group's push-back when above 0, else the pull when the gap is above 0, else none (false: the draw is the game's own).
+bool paramsOfFamily(uint32_t family, float s, st::TurretParams& out) {
+    const st::Group group = st::kFamilies[family].group;
+    return st::paramsForGroup(s, st::pushCmOf(group, g_panelsCm.load(std::memory_order_relaxed), g_radarCm.load(std::memory_order_relaxed)), g_gapCm.load(std::memory_order_relaxed), out);
 }
 
 // Elite's tangents and eye separation as the host gave this frame (native_temporal.cpp): P00 of each eye and the shift s = P00 hx. One eye missing leaves it not ok.
@@ -192,9 +205,21 @@ void cacheGeometry() {
     }
 }
 
+// One group's constants as the 10 s line spells them: the window its draws run with at the keys in force (s is per eye and not part of it), signed (a push has a negative gap), or "off"
+// when neither its push nor the gap key is above 0.
+void groupWindow(char (&out)[96], st::Group group) {
+    st::TurretParams p;
+    const bool on = st::paramsForGroup(0.0f, st::pushCmOf(group, g_panelsCm.load(std::memory_order_relaxed), g_radarCm.load(std::memory_order_relaxed)), g_gapCm.load(std::memory_order_relaxed), p);
+    if (on)
+        std::snprintf(out, sizeof(out), "gap=%.2f m wMin=%.2f wMax=%.2f", static_cast<double>(p.gap), static_cast<double>(p.wMin), static_cast<double>(p.wMax));
+    else
+        std::snprintf(out, sizeof(out), "off");
+}
+
 void windowLine(uint64_t nowMs) {
-    const float gap = static_cast<float>(g_gapCm.load(std::memory_order_relaxed)) / 100.0f;
-    const st::TurretParams p = st::paramsFor(0.0f, gap);
+    char panels[96], radar[96];
+    groupWindow(panels, st::Group::kPanels);
+    groupWindow(radar, st::Group::kRadar);
     uint32_t refused[static_cast<size_t>(st::Refuse::kCount)];
     for (size_t i = 0; i < static_cast<size_t>(st::Refuse::kCount); ++i) refused[i] = g_refused[i].exchange(0, std::memory_order_relaxed);
     const uint32_t left = g_draws[0].exchange(0, std::memory_order_relaxed), right = g_draws[1].exchange(0, std::memory_order_relaxed);
@@ -210,9 +235,9 @@ void windowLine(uint64_t nowMs) {
         if (b > 0 && static_cast<size_t>(b) < sizeof(counts) - nc) nc += static_cast<size_t>(b);
     }
     (void)nowMs;
-    Log::get().note("srv turret hud: gap=%.2f m wMin=%.2f wMax=%.2f s[L,R]=%+.4f,%+.4f ipd_elite=%.1fmm P00[L,R]=%.3f,%.3f draws[L,R]=%u,%u bound=%u "
+    Log::get().note("srv turret hud: panels: %s; radar: %s; s[L,R]=%+.4f,%+.4f ipd_elite=%.1fmm P00[L,R]=%.3f,%.3f draws[L,R]=%u,%u bound=%u "
                     "refused[no-eye,game-gs,topology,not-ready,no-geometry]=%u/%u/%u/%u/%u families[%s]=%s",
-                    static_cast<double>(gap), static_cast<double>(p.wMin), static_cast<double>(p.wMax),
+                    panels, radar,
                     static_cast<double>(g_eyeGeo[0].s.load(std::memory_order_relaxed)), static_cast<double>(g_eyeGeo[1].s.load(std::memory_order_relaxed)),
                     1000.0 * static_cast<double>(g_ipd.load(std::memory_order_relaxed)),
                     static_cast<double>(g_eyeGeo[0].p00.load(std::memory_order_relaxed)), static_cast<double>(g_eyeGeo[1].p00.load(std::memory_order_relaxed)),
@@ -222,10 +247,11 @@ void windowLine(uint64_t nowMs) {
 // ---- THE GPU INSTRUMENT ------------------------------------------------------------------------------------------------------------------------------------------------
 // The flight of 2026-10-30 (Steam, d662d26c) bound an earlier build of this pass for every matched draw (bound = draws, no refusals) and the panels did not move; that build
 // targeted the reticle's sprite, whose clip w is about 500 m. From the CPU there is no way to tell a shader that never ran from one that ran on vertices outside its window, so:
-// once a second per eye and family, one matched draw (the ordinal of the family's draws in the frame rotates, so the near layer's draws and the deep panels' are all measured
+// once a second per eye and family, one matched draw (the ordinal of the family's draws in the frame rotates, so the near layer's draws and the deeper panels' are all measured
 // within a few seconds) is issued through the stream-output twin with a pipeline-statistics query and a stream-output-statistics query around the scope, Begin right after the
 // bind, End right before the restore. gs=0 with ia_prims above 0 is a shader that never ran; the captured vertices say where the shader found each draw's clip w and what it did
-// to the clip x: the near layer's draws read in_window 0 at about 0.4 m, the deep panels' in_window above 0 at about 1.3 to 1.4 m. Read back without stalling.
+// to the clip x: with a push the weapon panels' and the radar's draws read in_window above 0 at 0.1 to 0.7 m and the larger panels' in_window 0 at 1.3 m and more (with the pull it is
+// the other way round). Read back without stalling.
 constexpr uint32_t kProbeEveryMs = 1000, kProbeGiveUpFrames = 8, kProbeOrdinals = 8;
 
 struct Probe {
@@ -467,7 +493,8 @@ void probeRead(ID3D11DeviceContext* ctx, int eye, int family) {
 void srvTurretFrameTick(uint32_t frameNo) {
     if (!runtimeVrProfile()) return;   // flat (or not yet decided): every state stays at its zero, alignTick adds an exact 0
     readKeys();
-    const int backCm = g_backCm.load(std::memory_order_relaxed), gapCm = g_gapCm.load(std::memory_order_relaxed);
+    const int backCm = g_backCm.load(std::memory_order_relaxed), panelsCm = g_panelsCm.load(std::memory_order_relaxed), radarCm = g_radarCm.load(std::memory_order_relaxed),
+              gapCm = g_gapCm.load(std::memory_order_relaxed);
     // The Scorpion only: the turret view bit is the Scarab's too, and the journal says which SRV this is (journalSrvScorpion; unknown is "not the Scorpion"). `on` is what both parts act on.
     const bool turret = journalSrvTurretView();
     const bool on = turret && journalSrvScorpion();
@@ -484,7 +511,7 @@ void srvTurretFrameTick(uint32_t frameNo) {
         g_ignored = false;
     }
     g_backSeatedZ = st::backSeatedZ(on, backCm);
-    const bool wanted = on && gapCm > 0;
+    const bool wanted = on && (panelsCm > 0 || radarCm > 0 || gapCm > 0);   // any of the three HUD keys; a group whose own keys are 0 is left alone per draw
     if (wanted) cacheGeometry();
     if (wanted != detail::g_srvTurretHudWanted.load(std::memory_order_relaxed)) {
         detail::g_srvTurretHudWanted.store(wanted, std::memory_order_relaxed);
@@ -519,6 +546,10 @@ void srvTurretNotePublished(double seatedZ, uint32_t serial) {
 
 bool srvTurretHudBegin(ID3D11DeviceContext* ctx, int family, int eye) {
     if (!ctx || family < 0 || family >= static_cast<int>(kFamilyN)) return false;
+    // A family whose group has neither its push nor the gap above 0 is not the pass's (one group on and the other off is a setting, and the keys can go to 0 between the frame tick and this
+    // draw): the draw is the game's own and is not counted among the matched ones, so the 10 s line's bound share is judged on the draws the pass was asked to carry.
+    st::TurretParams unused;
+    if (!paramsOfFamily(static_cast<uint32_t>(family), 0.0f, unused)) return false;
     if (eye != 0 && eye != 1) {
         refuse(st::Refuse::kNoEye);
         return false;
@@ -526,8 +557,6 @@ bool srvTurretHudBegin(ID3D11DeviceContext* ctx, int family, int eye) {
     g_draws[eye].fetch_add(1, std::memory_order_relaxed);
     g_familyDraws[family].fetch_add(1, std::memory_order_relaxed);
     const uint32_t ordinal = g_probe[eye][family].ordinal++;   // this draw's place among the frame's matched draws of the eye and family (the instrument's rotation)
-    const float gap = static_cast<float>(g_gapCm.load(std::memory_order_relaxed)) / 100.0f;
-    if (!(gap > 0.0f)) return false;   // the key went to 0 between the frame tick and this draw: the game's own
     const EyeGeometry& geo = g_eyeGeo[eye];
     if (!geo.ok.load(std::memory_order_acquire)) {
         refuse(st::Refuse::kNoGeometry);
@@ -543,7 +572,8 @@ bool srvTurretHudBegin(ID3D11DeviceContext* ctx, int family, int eye) {
         refuse(st::Refuse::kNotReady);
         return false;
     }
-    const st::TurretParams params = st::paramsFor(geo.s.load(std::memory_order_relaxed), gap);
+    st::TurretParams params;
+    if (!paramsOfFamily(static_cast<uint32_t>(family), geo.s.load(std::memory_order_relaxed), params)) return false;   // the keys went to 0 just now: the game's own
     ID3D11Buffer* constants = g_constants[eye].get(ctx, params);
     if (!constants) {
         refuse(st::Refuse::kNotReady);
@@ -566,11 +596,12 @@ bool srvTurretHudBegin(ID3D11DeviceContext* ctx, int family, int eye) {
     g_bound.fetch_add(1, std::memory_order_relaxed);
     if (!g_firstNoted[family]) {
         g_firstNoted[family] = true;
-        Log::get().note("srv turret hud: first draw of family %s through the shader (frame %u, eye %d): a vertex at view depth %.2f to %.2f m moves %.2f m nearer, s=%+.4f "
+        // A negative gap is the push-back (deeper), a positive one the pull (nearer); the window is the real one the group's constants carry.
+        Log::get().note("srv turret hud: first draw of family %s through the shader (frame %u, eye %d), the %s group: a vertex at view depth %.2f to %.2f m moves %.2f m %s, s=%+.4f "
                         "(P00 %.3f, ipd_elite %.1f mm); the game's pixel shader, blend and every other state are unchanged, and its geometry stage and constant slot go back "
                         "after the issue.",
-                        st::kFamilies[family].name, g_frame, eye, static_cast<double>(params.wMin), static_cast<double>(params.wMax), static_cast<double>(gap),
-                        static_cast<double>(params.s), static_cast<double>(geo.p00.load(std::memory_order_relaxed)), 1000.0 * static_cast<double>(g_ipd.load(std::memory_order_relaxed)));
+                        st::kFamilies[family].name, g_frame, eye, st::groupName(st::kFamilies[family].group), static_cast<double>(params.wMin), static_cast<double>(params.wMax),
+                        static_cast<double>(std::fabs(params.gap)), params.gap < 0.0f ? "deeper" : "nearer", static_cast<double>(params.s), static_cast<double>(geo.p00.load(std::memory_order_relaxed)), 1000.0 * static_cast<double>(g_ipd.load(std::memory_order_relaxed)));
     }
     return true;
 }

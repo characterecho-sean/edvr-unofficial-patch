@@ -36159,7 +36159,7 @@ void nativeOnFootFrameBoundary(uint32_t frameNo) {
     bodyCullLine(now);   // F18 (TEMPORARY): the torso cull's 5 s count line (the swap itself is on the draw thread, nativeOnFootBodyCullBegin)
     neckLine(now);
     eyeProbeLine();   // F18 (TEMPORARY): P1's one-a-second line
-    srvTurretFrameTick(frameNo);   // issue 140: the SRV turret view (the journal's bit, the two TEMPORARY keys, the geometry the HUD shift is made from), just before alignTick adds its camera term
+    srvTurretFrameTick(frameNo);   // issue 140: the SRV turret view (the journal's bit, the four TEMPORARY keys, the geometry the HUD shift is made from), just before alignTick adds its camera term
     alignTick(GetTickCount64());   // F33: the body align (TEMPORARY, live)
     f141Tick(GetTickCount64());    // F141: the game's ADS sight point against P14 (the source of the ADS eye's shift since F143), the readout's anchor (an instrument); after the ADS lock's tick, on the same snapshots
     s0::vrTick(GetTickCount64());  // S0: scope zoom, measure only (VR, native on foot armed): the press line, the lens geometry and the pixel probe's census; after F141's drain

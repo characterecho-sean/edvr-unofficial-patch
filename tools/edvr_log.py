@@ -284,18 +284,21 @@ value and Elite read its eye transform at that value afterwards, NEVER APPLIED w
 The desktop window (visual.desktop_window) is the other rule whose lines carry no build tag: the graphics log's "desktop window:" lines. It says OK when a 10 s line (or the line
 that ends an activation) shows a Present drawn, NEVER APPLIED when a "desktop window: setting" line named a mode other than game and no line shows one, and nothing at all when
 the setting is game or absent.
-The SRV turret view (fix.srv_turret_camera_back, fix.srv_turret_hud_gap) is the third: the graphics log's "srv turret ..." lines. The settings lines and the vehicle latch's lines
+The SRV turret view (fix.srv_turret_camera_back, fix.srv_turret_panels_back, fix.srv_turret_radar_back, fix.srv_turret_hud_gap) is the third: the graphics log's "srv turret ..." lines. The settings lines and the vehicle latch's lines
 ("srv turret: the vehicle is the Scorpion|not the Scorpion (event X)", written by the journal watcher) are kept whatever --since says; the last vehicle line is said in the detail, and
 vehicle lines alone are not the rule's lines (nothing is said for them). The pass acts in the Scorpion only: when the turret view bit is on in an SRV the journal does not call the Scorpion
 (a Scarab, a training scenario) the log says "srv turret view: not the Scorpion at frame ...", which is never a failure: with nothing else from the turret in the window the rule is IDLE
-("nothing applied, by design"), and beside a Scorpion visit the count goes into the detail. The pass covers ten hologram families in nine signatures, each signature with a geometry
-shader and a stream-output twin, each family with a first-draw line and instrument lines; the 10 s line counts the matched draws per family. It
-judges the camera half (a "camera: back ... published" line) and the HUD half (a first-draw line or a 10 s line with draws bound) on the keys in force: NEVER APPLIED when a key is above 0
+("nothing applied, by design"), and beside a Scorpion visit the count goes into the detail. The pass covers nine hologram families in eight signatures, each signature with a geometry
+shader and a stream-output twin, each family with a first-draw line and instrument lines, in two groups (the weapon panels and the radar) each pushed back by its own key; the 10 s line
+gives each group's window (a push-back is a negative gap: deeper) and counts the matched draws per family. It
+judges the camera half (a "camera: back ... published" line) and the HUD half (a first-draw line or a 10 s line with draws bound) on the keys in force, the HUD half being on when any of the
+panels' push-back, the radar's push-back and the gap is above 0: NEVER APPLIED when a key is above 0
 and the log proves the turret view was on with nothing from that half, or when the geometry shader could not be made; PARTIAL when under 90% of the HUD draws were bound or some were
 refused for the geometry, the readiness or a game geometry shader; IDLE when the turret view was never entered or the keys are 0; and nothing at all with no line. Its GPU instrument's
 "srv turret hud stats:" and "srv turret hud capture:" lines (one sampled draw a second per eye and hologram family) are the hardest evidence: NEVER APPLIED when a family's sampled draws
-had input and its geometry shader never ran, or when six or more capture rows wrote vertices and none lies in the shader's window (the deep panels were never found; the near layer's draws
-read in_window 0 and are healthy); OK, with the figures and the families sampled with none in the window, when it ran and moved vertices.
+had input and its geometry shader never ran, or when six or more capture rows wrote vertices and none lies in the shader's window (nothing the shader moves was found; the draws it has
+nothing to move read in_window 0 and are healthy); OK, with the figures, the vertices moved per family whatever the sign of the shift and the families sampled with none in the window, when
+it ran and moved vertices. The lines of a build from before the push-back keys (a settings line with the camera and the gap alone, a 10 s line with one window) still parse.
 
 Exit 0 when a log was read, 1 when none was found (or --camera-census found no
 census line, or --vscreen-fit no auto-fit line, or --flat-upscale no flat line, or
@@ -10394,7 +10397,8 @@ H_SRV_TURRET = "srv turret view"
 H_SRV_TURRET_LABELS = ("srv turret view", "srv turret camera", "srv turret settings", "srv turret hud", "srv turret:")
 # Rows of these kinds are state, kept whatever --since says, and are not by themselves a sign the turret view was entered.
 H_SRV_TURRET_STATE_KINDS = ("setting", "vehicle")
-H_SRV_TURRET_SETTING = r"srv turret settings: camera back (?P<back>\d+) cm, hud gap (?P<gap>\d+) cm \(live; "
+# four keys since the push-back (the panels' and the radar's); a log from before it has the camera and the gap alone, so those two are optional and the rule reads their absence as the older line
+H_SRV_TURRET_SETTING = (r"srv turret settings: camera back (?P<back>\d+) cm, (?:panels back (?P<panels>\d+) cm, radar back (?P<radar>\d+) cm, )?hud gap (?P<gap>\d+) cm \(live; ")
 H_SRV_TURRET_VIEW = r"srv turret view: (?P<state>on|off) at frame (?P<frame>\d+) \(Status\.json Flags 0x(?P<flags>[0-9A-Fa-f]+), seat kind 0x(?P<seat>[0-9A-Fa-f]+)\)$"
 # The turret view bit is on in an SRV the journal does not call the Scorpion (a Scarab, a training scenario): said once per stay, and the camera and the HUD stay the game's own. The
 # "on" and "off" lines above are written only for a turret view in the Scorpion.
@@ -10404,16 +10408,19 @@ H_SRV_TURRET_IGNORED = (r"srv turret view: not the Scorpion at frame (?P<frame>\
 H_SRV_TURRET_VEHICLE = (r"srv turret: the vehicle is (?P<is>the Scorpion|not the Scorpion) \(event (?P<event>LoadGame|LaunchSRV|Music|DockSRV|SRVDestroyed|Shutdown|NewJournal)\)$")
 H_SRV_TURRET_PUBLISHED = r"srv turret camera: back (?P<back>[\d.]+) m published \(serial (?P<serial>\d+)\)$"
 H_SRV_TURRET_CLEARED = r"srv turret camera: back cleared \(serial (?P<serial>\d+)\)$"
-H_SRV_TURRET_HUD = (r"srv turret hud: gap=(?P<gap>[\d.]+) m wMin=(?P<wmin>-?[\d.]+) wMax=(?P<wmax>-?[\d.]+) s\[L,R\]=(?P<sl>[+-][\d.]+),(?P<sr>[+-][\d.]+) "
+# One group's window in the 10 s line: "off", or the signed gap (a push-back is negative: deeper) with the window its draws ran with. A line from before the push-back keys has one window for every family.
+H_SRV_TURRET_GROUP = r"(?:off|gap=(?P<{p}gap>-?[\d.]+) m wMin=(?P<{p}wmin>-?[\d.]+) wMax=(?P<{p}wmax>-?[\d.]+))"
+H_SRV_TURRET_HUD = (r"srv turret hud: (?:panels: " + H_SRV_TURRET_GROUP.format(p="p") + r"; radar: " + H_SRV_TURRET_GROUP.format(p="r") +
+                    r";|gap=(?P<gap>[\d.]+) m wMin=(?P<wmin>-?[\d.]+) wMax=(?P<wmax>-?[\d.]+)) s\[L,R\]=(?P<sl>[+-][\d.]+),(?P<sr>[+-][\d.]+) "
                     r"ipd_elite=(?P<ipd>-?[\d.]+)mm P00\[L,R\]=(?P<pl>-?[\d.]+),(?P<pr>-?[\d.]+) draws\[L,R\]=(?P<dl>\d+),(?P<dr>\d+) bound=(?P<bound>\d+) "
                     r"refused\[no-eye,game-gs,topology,not-ready,no-geometry\]=(?P<r0>\d+)/(?P<r1>\d+)/(?P<r2>\d+)/(?P<r3>\d+)/(?P<r4>\d+) "
                     r"families\[(?P<fnames>[^\]]+)\]=(?P<fcounts>\d+(?:,\d+)*)$")   # the family names, then each one's matched draws, as two comma lists in the same order
 # shaderSwapCreateGs: "<who>: precompiled geometry shader <name> <outcome> (0x<HRESULT>, <ms> ms)." with the outcome created, creation FAILED; standing down, or creation faulted/refused; standing down.
 H_SRV_TURRET_GS = (r"srv turret hud: precompiled geometry shader (?P<name>.+?) (?P<outcome>created|creation FAILED; standing down|creation faulted/refused; standing down) "
                    r"\(0x(?P<hr>[0-9A-Fa-f]{8}), (?P<ms>[\d.]+) ms\)\.$")
-# Ten hologram families (srv_turret_math.h kFamilies: 1989E6D3, 2CECEC30, DF3503CD, 44DDCDEB, 9B34C331, 9611A454, B932058F, 5559BD94.EA02FAC2, 5559BD94.E95634B0, B7790CBF: the first eight
-# hex digits of the vertex shader, and for the two that share one the pixel shader's as well) in nine signatures (kSignatures, named by the first family's vertex shader), each signature
-# with its own geometry shader and twin; the first-draw, stats, capture and instrument lines name the family.
+# Nine hologram families (srv_turret_math.h kFamilies: 1989E6D3, 2CECEC30, DF3503CD, 44DDCDEB, 9B34C331, 9611A454, B932058F, 5559BD94.EA02FAC2, 5559BD94.E95634B0: the first eight
+# hex digits of the vertex shader, and for the two that share one the pixel shader's as well) in eight signatures (kSignatures, named by the first family's vertex shader), each signature
+# with its own geometry shader and twin; the first-draw, stats, capture and instrument lines name the family. The flight HUD's vectors (B7790CBF) are no longer in the pass.
 H_SRV_TURRET_FIRST = r"srv turret hud: first draw of family (?P<family>\S+) through the shader \(frame (?P<frame>\d+), eye (?P<eye>-?\d+)\)"
 H_SRV_TURRET_REFUSED = r"srv turret hud: refused a draw \((?P<reason>no-eye|game-gs|topology|not-ready|no-geometry)\) -- the draw went on as the game made it\."
 H_SRV_TURRET_UNRESTORED = r"srv turret hud: the game's geometry stage could not be put back after an issue;"
@@ -10425,7 +10432,7 @@ H_SRV_TURRET_STATS = (r"srv turret hud stats: eye=(?P<eye>-?\d+) issues=(?P<issu
                       r"c_inv=(?P<cinv>\d+) c_prims=(?P<cp>\d+) ps=(?P<ps>\d+) \(lost (?P<lost>\d+)\) draw=(?P<draw>\d+) family=(?P<family>\S+)$")
 H_SRV_TURRET_CAPTURE = (r"srv turret hud capture: family=(?P<family>\S+) eye=(?P<eye>-?\d+) draw=(?P<draw>\d+) so_prims=(?P<so>\d+) needed=(?P<needed>\d+) vertices=(?P<vertices>\d+) in_window=(?P<inw>\d+) "
                         r"w=\[(?P<wlo>-?[\d.]+),(?P<whi>-?[\d.]+)\] ndc_x=\[(?P<xlo>-?[\d.]+),(?P<xhi>-?[\d.]+)\] ndc_y=\[(?P<ylo>-?[\d.]+),(?P<yhi>-?[\d.]+)\] "
-                        r"shift_clip=\[(?P<klo>[+-][\d.]+),(?P<khi>[+-][\d.]+)\] s=(?P<s>[+-][\d.]+) gap=(?P<gap>[\d.]+)$")
+                        r"shift_clip=\[(?P<klo>[+-][\d.]+),(?P<khi>[+-][\d.]+)\] s=(?P<s>[+-][\d.]+) gap=(?P<gap>-?[\d.]+)$")   # the signed gap the family's group ran with: negative for a push-back
 H_SRV_TURRET_TWIN = (r"srv turret hud: stream-output twin of the (?P<family>\S+) shader \(the GPU instrument's capture\) (?P<outcome>created|NOT made) "
                      r"\(0x(?P<hr>[0-9A-Fa-f]{8})\); ")
 H_SRV_TURRET_INSTRUMENT = (r"srv turret hud: the GPU instrument could not be made for eye (?P<eye>-?\d+), family (?P<family>\S+) \((?P<what>.*), "
@@ -15492,35 +15499,66 @@ def _hj_desktop_window(rows, ctx):
 SRV_TURRET_REFUSE_NAMES = ("no-eye", "game-gs", "topology", "not-ready", "no-geometry")   # the order of the 10 s line's refused[...] counts (srv_turret_math.h refuseName)
 SRV_TURRET_HUD_MIN_SECS = 12.0   # the turret view this long with no 10 s line and no first draw: the HUD half never ran (a 10 s line is due within 10 s of the view going on, and the first draw within a frame)
 SRV_TURRET_BOUND_MIN = 0.9       # the share of the 10 s lines' HUD draws that must go through the shader
-SRV_TURRET_CAPTURE_MIN_ROWS = 6  # capture rows (with vertices) before "no sampled vertex lies in the shader's window" is a verdict: the rows rotate through the near layer's draws (w about 0.4 m, in_window 0, healthy) and the deep panels'
+SRV_TURRET_CAPTURE_MIN_ROWS = 6  # capture rows (with vertices) before "no sampled vertex lies in the shader's window" is a verdict: the rows rotate through the draws that lie in the window and the ones that do not (both healthy)
+
+
+def _srv_turret_windows(r):
+    """The window each group ran with, read from a 10 s line: [(group, (gap, wMin, wMax)) or (group, None)], None when the group was off. A line from before the push-back keys carried one
+    window for every family (a gap of 0 meant off), named here 'all families'."""
+    if r.get("gap") is not None:
+        w = (float(r["gap"]), float(r["wmin"]), float(r["wmax"]))
+        return [("all families", w if w[0] > 0 else None)]
+    out = []
+    for name, p in (("panels", "p"), ("radar", "r")):
+        out.append((name, (float(r[p + "gap"]), float(r[p + "wmin"]), float(r[p + "wmax"])) if r.get(p + "gap") is not None else None))
+    return out
+
+
+def _srv_turret_window_text(groups):
+    """'panels pushed deeper by 1.10 m (window 0.02..1.00 m), radar off': a negative gap is a push-back (deeper), a positive one the first build's pull (nearer)."""
+    return ", ".join("%s off" % name if w is None else "%s %s %.2f m (window %.2f..%.2f m)" % (name, "pushed deeper by" if w[0] < 0 else "pulled nearer by", abs(w[0]), w[1], w[2])
+                     for name, w in groups)
 
 
 def _hj_srv_turret(rows, ctx):
-    """The SRV turret view (issue 140; src\\d3d11\\srv_turret.cpp; fix.srv_turret_camera_back, fix.srv_turret_hud_gap), two halves judged on the keys in force (the last settings line):
-    the camera half is applied by a 'camera: back X m published' line; the HUD half by the first-draw line or a 10 s line with draws bound. No line but settings: IDLE (the turret view
-    was not entered). A geometry shader that could not be made is NEVER APPLIED whatever else the log says. A key above 0 whose half shows nothing is NEVER APPLIED once the log proves
-    the turret view was on: for the camera, at least one 'on' edge; for the HUD, a 10 s line with nothing bound, or the view on for SRV_TURRET_HUD_MIN_SECS or more with no 10 s line and
-    no first draw (a shorter stay has no 10 s line due yet and is IDLE). A key at 0 is that half off by key, IDLE. PARTIAL: applied, but under SRV_TURRET_BOUND_MIN of the HUD draws
-    bound, or draws refused for the geometry, the readiness or a game geometry shader. The status is the worst of the two halves; a log with the keys unread (no settings line) judges
-    the camera half on nothing (a key it cannot see) and the HUD half on the 10 s line's own gap. No line at all is nothing to judge (None).
-    The pass covers ten hologram families in nine signatures, each signature with its own geometry shader and twin (a creation line apiece: any one failing is NEVER APPLIED), each family
-    with its first-draw line and GPU instrument. The Scorpion only: a "not the Scorpion" line (the turret view bit is on in an SRV the journal does not call the Scorpion, a Scarab or a
-    training scenario) is turret activity but never a failure; with nothing else from the turret in the window the rule is IDLE ("nothing applied, by design"), and beside a Scorpion
-    visit its count goes into the detail. The vehicle latch's lines ("srv turret: the vehicle is ...") are state like the settings: they are kept whatever --since says, they never make
-    the rule present or count as activity, and the last one is said in the detail.
+    """The SRV turret view (issue 140; src\\d3d11\\srv_turret.cpp; fix.srv_turret_camera_back, fix.srv_turret_panels_back, fix.srv_turret_radar_back, fix.srv_turret_hud_gap), two halves judged
+    on the keys in force (the last settings line): the camera half is applied by a 'camera: back X m published' line; the HUD half by the first-draw line or a 10 s line with draws bound.
+    The HUD half is on when any of the panels' push-back, the radar's push-back and the gap is above 0 (a settings line from before the push-back keys has the gap alone; with no settings
+    line the last 10 s line's per-group windows say whether a group ran). No line but settings: IDLE (the turret view was not entered). A geometry shader that could not be made is NEVER
+    APPLIED whatever else the log says. A key above 0 whose half shows nothing is NEVER APPLIED once the log proves the turret view was on: for the camera, at least one 'on' edge; for the
+    HUD, a 10 s line with nothing bound, or the view on for SRV_TURRET_HUD_MIN_SECS or more with no 10 s line and no first draw (a shorter stay has no 10 s line due yet and is IDLE). The
+    HUD keys all at 0 are that half off by key, IDLE, and so is the camera key at 0. PARTIAL: applied, but under SRV_TURRET_BOUND_MIN of the HUD draws bound, or draws refused for the
+    geometry, the readiness or a game geometry shader. The status is the worst of the two halves; a log with the keys unread (no settings line) judges the camera half on nothing (a key it
+    cannot see) and the HUD half on the 10 s line's own windows. No line at all is nothing to judge (None).
+    The pass covers nine hologram families in eight signatures, each signature with its own geometry shader and twin (a creation line apiece: any one failing is NEVER APPLIED), each family
+    with its first-draw line and GPU instrument, in two groups (the weapon panels, the radar) each with its own push-back. The Scorpion only: a "not the Scorpion" line (the turret view bit
+    is on in an SRV the journal does not call the Scorpion, a Scarab or a training scenario) is turret activity but never a failure; with nothing else from the turret in the window the rule
+    is IDLE ("nothing applied, by design"), and beside a Scorpion visit its count goes into the detail. The vehicle latch's lines ("srv turret: the vehicle is ...") are state like the
+    settings: they are kept whatever --since says, they never make the rule present or count as activity, and the last one is said in the detail.
     The instrument's stats and capture lines are a third judgement and the hardest evidence (it comes first in the detail): a family whose sampled draws had input (ia_prims)
     and no geometry shader invocation is NEVER APPLIED, and so are SRV_TURRET_CAPTURE_MIN_ROWS or more capture rows (with vertices) summed over every family with none of their vertices in
-    the shader's window (the deep panels, w about 1.39 m, were never found; the near layer's draws read in_window 0 at w about 0.4 m and are healthy), whatever the other lines say. A
-    vertex in the window in any row is OK and the figures go into the detail; fewer capture rows with none in the window are IDLE for that judgement. The twin, instrument and skip lines are
-    notes only (a family whose twin was not made keeps its statistics judged). The stats and capture lines are rows like any other, so they make the rule present in a window with no
-    'on' edge."""
+    the shader's window (nothing the shader moves was ever found; with a push the larger panels at 1.3 m and more read in_window 0 and are healthy, with the pull the near layer at 0.4 m
+    does), whatever the other lines say. A vertex in the window in any row is OK and the figures go into the detail, with the vertices moved per family whatever the sign of the shift;
+    fewer capture rows with none in the window are IDLE for that judgement. The twin, instrument and skip lines are notes only (a family whose twin was not made keeps its statistics
+    judged). The stats and capture lines are rows like any other, so they make the rule present in a window with no 'on' edge."""
     if not any(v for k, v in rows.items() if k != "vehicle"):   # the vehicle latch alone says nothing of the turret view
         return None
     settings, views, ignored = rows.get("setting", []), rows.get("view", []), rows.get("ignored", [])
     published, secs, firsts, gss = rows.get("published", []), rows.get("hud", []), rows.get("first", []), rows.get("gs", [])
-    back = int(settings[-1]["back"]) if settings else None
-    gap = int(settings[-1]["gap"]) if settings else None
-    keys = "camera back %s, hud gap %s" % tuple("unknown" if v is None else "%d cm" % v for v in (back, gap))
+    s0 = settings[-1] if settings else None
+
+    def key(name):
+        v = s0.get(name) if s0 else None
+        return None if v is None else int(v)
+
+    back, panels, radar, gap = key("back"), key("panels"), key("radar"), key("gap")
+    legacy = s0 is not None and panels is None   # a settings line from before the push-back keys: the camera and the gap only
+
+    def cm(v):
+        return "unknown" if v is None else "%d cm" % v
+
+    keys = ("camera back %s, hud gap %s" % (cm(back), cm(gap)) if legacy
+            else "camera back %s, panels back %s, radar back %s, hud gap %s" % (cm(back), cm(panels), cm(radar), cm(gap)))
     vehicles = rows.get("vehicle", [])
     vnote = "; vehicle latch: %s (event %s), %d change(s)" % (vehicles[-1]["is"], vehicles[-1]["event"], len(vehicles)) if vehicles else ""
     bad_gs = [r for r in gss if r["outcome"] != "created"]
@@ -15562,9 +15600,17 @@ def _hj_srv_turret(rows, ctx):
     dl, dr = sum(int(r["dl"]) for r in secs), sum(int(r["dr"]) for r in secs)
     refused = [sum(int(r["r%d" % i]) for r in secs) for i in range(len(SRV_TURRET_REFUSE_NAMES))]
     why = ", ".join("%s %d" % (name, count) for name, count in zip(SRV_TURRET_REFUSE_NAMES, refused))
-    if gap is None and secs:
-        gap = int(round(float(secs[-1]["gap"]) * 100.0))
     last = secs[-1] if secs else None
+    # whether a HUD key is above 0, from the settings line, else from the last 10 s line's windows (a group that ran has one)
+    if s0 is not None:
+        hud_on = any(v > 0 for v in ([gap] if legacy else [panels, radar, gap]) if v is not None)
+        hud_keys = "hud gap %d cm" % gap if legacy else "panels back %s, radar back %s, hud gap %s" % (cm(panels), cm(radar), cm(gap))
+    elif last:
+        groups = _srv_turret_windows(last)
+        hud_on = any(w is not None for _, w in groups)
+        hud_keys = "from the last 10 s line: " + _srv_turret_window_text(groups)
+    else:
+        hud_on, hud_keys = None, None
     if firsts or bound > 0:
         text = "hud bound %d of %d draws (L %d, R %d)" % (bound, dl + dr, dl, dr)
         if last:   # the matched draws per family: each 10 s line names its families and counts them in the same order; the sums, for the families that drew
@@ -15578,6 +15624,7 @@ def _hj_srv_turret(rows, ctx):
             text += ", " + ", ".join("first draw of family %s at frame %s eye %s" % (f["family"], f["frame"], f["eye"]) for f in firsts)
         if last:
             text += "; s[L,R] %s,%s, ipd_elite %s mm, P00[L,R] %s,%s (the last 10 s line)" % (last["sl"], last["sr"], last["ipd"], last["pl"], last["pr"])
+            text += "; windows: " + _srv_turret_window_text(_srv_turret_windows(last))
         problems = []
         if dl + dr and bound < SRV_TURRET_BOUND_MIN * (dl + dr):
             problems.append("only %d of %d draws went through the shader (under %d%%); refused: %s" % (bound, dl + dr, round(SRV_TURRET_BOUND_MIN * 100), why))
@@ -15585,18 +15632,18 @@ def _hj_srv_turret(rows, ctx):
         if stuck:
             problems.append("draws refused for " + ", ".join("%s %d" % nc for nc in stuck))
         hud = ("PARTIAL", text + "; " + "; ".join(problems)) if problems else ("OK", text)
-    elif gap == 0:
+    elif hud_on is False:
         hud = ("IDLE", "hud off by key")
-    elif gap is None:
+    elif hud_on is None:
         hud = None
     elif secs:
-        hud = ("NEVER APPLIED", "the hud gap key was %d cm and the %d 10 s line(s) show nothing bound: draws[L,R] %d,%d, refused %s" % (gap, len(secs), dl, dr, why))
+        hud = ("NEVER APPLIED", "a hud key was above 0 (%s) and the %d 10 s line(s) show nothing bound: draws[L,R] %d,%d, refused %s" % (hud_keys, len(secs), dl, dr, why))
     elif on_secs >= SRV_TURRET_HUD_MIN_SECS:
-        hud = ("NEVER APPLIED", "the hud gap key was %d cm, the turret view was on for %.0f s, and no first-draw line and no 10 s line shows a draw through the shader" % (gap, on_secs))
+        hud = ("NEVER APPLIED", "a hud key was above 0 (%s), the turret view was on for %.0f s, and no first-draw line and no 10 s line shows a draw through the shader" % (hud_keys, on_secs))
     elif n:
         hud = ("IDLE", "hud: turret view on under %d s: no 10 s line yet" % SRV_TURRET_HUD_MIN_SECS)
     else:
-        hud = ("IDLE", "hud: gap key %d cm and no 'on' edge, 10 s line or first draw in this window" % gap)
+        hud = ("IDLE", "hud: a hud key above 0 (%s) and no 'on' edge, 10 s line or first draw in this window" % hud_keys)
     # the GPU instrument: what a sampled draw's pipeline statistics and the twin's streamed-out vertices say, whatever the first-draw and 10 s lines do
     stats, caps = rows.get("stats", []), rows.get("capture", [])
     gpu = None
@@ -15616,27 +15663,40 @@ def _hj_srv_turret(rows, ctx):
 
         def wr(rs):   # the clip w range over rows
             return "%.3f..%.3f" % (min(float(r["wlo"]) for r in rs), max(float(r["whi"]) for r in rs))
+
+        def window_of(rs):   # the window the rows' draws ran with, from the sign of the gap they print: a push (negative) or the pull (positive)
+            kinds = []
+            if any(float(r["gap"]) < 0 for r in rs):
+                kinds.append("the push-back's 0.02 m to 1.0 m")
+            if any(float(r["gap"]) > 0 for r in rs):
+                kinds.append("the pull's gap + 0.10 m to 4.0 m")
+            return " and ".join(kinds) if kinds else "the shader's window"
         crows = [r for r in caps if int(r["vertices"]) > 0]   # a capture with no vertex says nothing about where the shader looked
-        deep = [r for r in crows if int(r["inw"]) > 0]        # the deep panels (w about 1.39 m) found by a sampled draw
-        near = [r for r in crows if int(r["inw"]) == 0]       # the near layer (w about 0.4 m) reads in_window 0 and is healthy
+        inwin = [r for r in crows if int(r["inw"]) > 0]       # sampled draws with vertices in the shader's window, the ones it moves (whatever the sign of the shift)
+        outwin = [r for r in crows if int(r["inw"]) == 0]     # sampled draws it found nothing to move in (healthy: with a push the larger panels, with the pull the near layer)
         stat_clause = "%d samples, gs %d" % (len(stats), gsn) if stats else None
         cap_clause, cap_state, none_clause = None, None, None
-        if deep:
-            dfams = [f for f in fams if any(r["family"] == f for r in deep)]
-            cap_clause = "deep band: in_window %d of %d vertices at w %s (%s %s), near layer: %s, shift_clip %+.4f..%+.4f" % (
-                sum(int(r["inw"]) for r in deep), sum(int(r["vertices"]) for r in deep), wr(deep), "family" if len(dfams) == 1 else "families", ", ".join(dfams),
-                "%d rows at w %s" % (len(near), wr(near)) if near else "none sampled", min(float(r["klo"]) for r in deep), max(float(r["khi"]) for r in deep))
+        if inwin:
+            dfams = [f for f in fams if any(r["family"] == f for r in inwin)]
+            moved = []   # the vertices the shader moved, per family, over all of that family's sampled draws
+            for f in dfams:
+                fr = [r for r in crows if r["family"] == f]
+                way = sorted({"deeper" if float(r["gap"]) < 0 else "nearer" for r in fr if int(r["inw"]) > 0})
+                moved.append("%s %d of %d (%s)" % (f, sum(int(r["inw"]) for r in fr), sum(int(r["vertices"]) for r in fr), " and ".join(way)))
+            cap_clause = "in the window: in_window %d of %d vertices at w %s (%s %s), outside it: %s, shift_clip %+.4f..%+.4f; vertices moved per family: %s" % (
+                sum(int(r["inw"]) for r in inwin), sum(int(r["vertices"]) for r in inwin), wr(inwin), "family" if len(dfams) == 1 else "families", ", ".join(dfams),
+                "%d rows at w %s" % (len(outwin), wr(outwin)) if outwin else "none sampled", min(float(r["klo"]) for r in inwin), max(float(r["khi"]) for r in inwin), ", ".join(moved))
             cap_state = "OK"
-            # the families that were sampled (a capture row with vertices) and never had a vertex in the window: which of them never reached the deep band in this flight
-            quiet = [f for f in fams if any(r["family"] == f for r in crows) and not any(r["family"] == f for r in deep)]
+            # the families that were sampled (a capture row with vertices) and never had a vertex in the window: which of them never reached it in this flight
+            quiet = [f for f in fams if any(r["family"] == f for r in crows) and not any(r["family"] == f for r in inwin)]
             none_clause = "sampled with none in the window: " + ", ".join(quiet) if quiet else None
         elif crows and len(crows) >= SRV_TURRET_CAPTURE_MIN_ROWS:
-            never.append("the shader ran but no sampled vertex lies in its window (the deep band was never found by any sampled draw): clip w %s over %d vertices in %d capture rows "
-                         "against the window (gap + 0.10 m to 4.0 m); %s" % (wr(crows), sum(int(r["vertices"]) for r in crows), len(crows), "; ".join(
+            never.append("the shader ran but no sampled vertex lies in its window (nothing the shader moves was found by any sampled draw): clip w %s over %d vertices in %d capture rows "
+                         "against the window (%s); %s" % (wr(crows), sum(int(r["vertices"]) for r in crows), len(crows), window_of(crows), "; ".join(
                              "family %s: %d rows, %d vertices, in_window 0, w %s" % (f, len(fr), sum(int(r["vertices"]) for r in fr), wr(fr))
                              for f in fams for fr in [[r for r in crows if r["family"] == f]] if fr)))
         elif crows:
-            cap_clause = "%d capture rows, none yet in the deep band, near layer: w %s" % (len(crows), wr(crows))
+            cap_clause = "%d capture rows, none yet in the window, outside it: w %s" % (len(crows), wr(crows))
             cap_state = "IDLE"
         if never:
             gpu = ("NEVER APPLIED", "; ".join(never))
@@ -22312,8 +22372,8 @@ def self_test_health():
                 raise AssertionError("srv turret: no log format holds %r: the --health rule that reads it is out of date" % needle)
             return health_render(fmts[key], vals)
 
-        def st_set(back=60, gap=102):
-            return RT(stsrc, "srv turret settings: camera back %d cm", back, gap)
+        def st_set(back=60, panels=110, radar=110, gap=0):   # the shipped keys: both push-backs 110 cm, the first build's pull off
+            return RT(stsrc, "srv turret settings: camera back %d cm", back, panels, radar, gap)
 
         def st_view(on=True, frame=4100, flags=0x4000000, seat=0x2):
             return RT(stsrc, "srv turret view: %s at frame %u", "on" if on else "off", frame, flags, seat)
@@ -22323,10 +22383,11 @@ def self_test_health():
                 return RT(stsrc, "srv turret camera: back %.2f m published", back, serial)
             return RT(stsrc, "srv turret camera: back cleared", serial)
 
-        # The ten hologram families the pass covers (srv_turret_math.h kFamilies: the first eight hex digits of each vertex shader, and the pixel shader's too for the two that share one) and the
-        # nine signatures they fall into (kSignatures, named by the first family's vertex shader), each with a geometry shader and a twin. The stats, capture and first-draw lines name the family.
-        STF = ("1989E6D3", "2CECEC30", "DF3503CD", "44DDCDEB", "9B34C331", "9611A454", "B932058F", "5559BD94.EA02FAC2", "5559BD94.E95634B0", "B7790CBF")
-        STS = ("1989E6D3", "2CECEC30", "DF3503CD", "44DDCDEB", "9B34C331", "9611A454", "B932058F", "5559BD94", "B7790CBF")
+        # The nine hologram families the pass covers (srv_turret_math.h kFamilies: the first eight hex digits of each vertex shader, and the pixel shader's too for the two that share one) and the
+        # eight signatures they fall into (kSignatures, named by the first family's vertex shader), each with a geometry shader and a twin. The stats, capture and first-draw lines name the family.
+        # The first two are the weapon panels' group, the other seven the radar's. The flight HUD's vectors (B7790CBF) are no longer in the pass.
+        STF = ("1989E6D3", "2CECEC30", "DF3503CD", "44DDCDEB", "9B34C331", "9611A454", "B932058F", "5559BD94.EA02FAC2", "5559BD94.E95634B0")
+        STS = ("1989E6D3", "2CECEC30", "DF3503CD", "44DDCDEB", "9B34C331", "9611A454", "B932058F", "5559BD94")
 
         # journal_watch.cpp: the vehicle latch's line, and srv_turret.cpp's line for a turret view in an SRV the journal does not call the Scorpion
         jwsrc = read_text(os.path.join(repo_root(), "src", "d3d11", "journal_watch.cpp"))
@@ -22344,22 +22405,29 @@ def self_test_health():
             return [(4, st_gs(fam=s)) for s in STS]
 
         def st_first(frame=4102, eye=0, fam=STF[0]):
-            return RT(stsrc, "srv turret hud: first draw of family %s through the shader (frame %u, eye %d)", fam, frame, eye, 0.41, 1.47, 1.02, 0.0412, 0.912, 63.5)
+            return RT(stsrc, "srv turret hud: first draw of family %s through the shader (frame %u, eye %d)", fam, frame, eye, "panels", 0.02, 1.00, 1.10, "deeper", 0.0412, 0.912, 63.5)
 
         def st_refused(reason="not-ready"):
             return RT(stsrc, "srv turret hud: refused a draw (%s)", reason)
 
-        def st_sec(gap=1.02, left=240, right=240, bound=480, refused=(0, 0, 0, 0, 0), s=(0.0412, -0.0412), ipd=63.5, p00=(0.912, 0.915), fams=(300, 180)):
+        def st_group(g):
+            """One group's window as the 10 s line spells it: None is off, a negative gap the push-back (window 0.02 to 1.0 m), a positive one the first build's pull (gap + 0.10 to 4.0 m)."""
+            if g is None:
+                return "off"
+            return RT(stsrc, "gap=%.2f m wMin=%.2f wMax=%.2f", g, 0.02, 1.00) if g < 0 else RT(stsrc, "gap=%.2f m wMin=%.2f wMax=%.2f", g, g + 0.10, 4.00)
+
+        def st_sec(panels=-1.10, radar=-1.10, left=240, right=240, bound=480, refused=(0, 0, 0, 0, 0), s=(0.0412, -0.0412), ipd=63.5, p00=(0.912, 0.915), fams=(300, 180)):
             counts = list(fams) + [0] * (len(STF) - len(fams))   # the matched draws of the first families; the rest drew none
-            return RT(stsrc, "srv turret hud: gap=%.2f", gap, 0.45, 1.47, s[0], s[1], ipd, p00[0], p00[1], left, right, bound, *refused, ",".join(STF), ",".join(str(c) for c in counts))
+            return RT(stsrc, "srv turret hud: panels: %s", st_group(panels), st_group(radar), s[0], s[1], ipd, p00[0], p00[1], left, right, bound, *refused, ",".join(STF), ",".join(str(c) for c in counts))
 
         def st_stats(eye=0, issues=3, ia=1200, vs=1200, gs=400, gsp=400, cinv=400, cp=400, ps=90000, lost=0, draw=17, family=STF[0]):
             return RT(stsrc, "srv turret hud stats: eye=%d issues=%u", eye, issues, ia, vs, gs, gsp, cinv, cp, ps, lost, draw, family)
 
-        # A sampled draw's capture: the near layer's (clip w about 0.4 m, nothing in the shader's window, healthy) or the deep panels' (w about 1.39 m, in the window); the default is the deep one.
-        ST_NEAR = dict(vertices=12, inw=0, w=(0.410, 0.470), shift=(0.0, 0.0))
+        # A sampled draw's capture under the push-back (window 0.02 to 1.0 m): a weapon panel's or the radar's (clip w 0.1 to 0.7 m, in the window, a negative shift; the default) or a larger
+        # panel's (w about 1.39 m, nothing in the window: healthy, ST_OUT).
+        ST_OUT = dict(vertices=12, inw=0, w=(1.380, 1.400), shift=(0.0, 0.0))
 
-        def st_capture(eye=0, family=STF[0], draw=17, so=400, needed=400, vertices=12, inw=12, w=(1.380, 1.400), ndcx=(-0.8, 0.8), ndcy=(-0.5, 0.5), shift=(-0.031, 0.045), s=0.0412, gap=1.02):
+        def st_capture(eye=0, family=STF[0], draw=17, so=400, needed=400, vertices=12, inw=12, w=(0.410, 0.470), ndcx=(-0.8, 0.8), ndcy=(-0.5, 0.5), shift=(-0.031, -0.012), s=0.0412, gap=-1.10):
             return RT(stsrc, "srv turret hud capture: family=%s eye=%d draw=%u so_prims=%llu", family, eye, draw, so, needed, vertices, inw, w[0], w[1], ndcx[0], ndcx[1], ndcy[0], ndcy[1],
                       shift[0], shift[1], s, gap)
 
@@ -22375,19 +22443,19 @@ def self_test_health():
 
         def st_gpu(t=6, stats=None, caps=None, twins=None):
             """The GPU instrument's lines as the DLL writes them: each signature's twin (twins maps a signature's name to whether it was made; all are by default), then for each of the first two
-            families and each eye the sampled draw's statistics line and capture line (the near layer's capture for eye 0, the deep panels' for eye 1). stats and caps map (family index, eye)
+            families and each eye the sampled draw's statistics line and capture line (a larger panel's capture, outside the window, for eye 0, a weapon panel's, in it, for eye 1). stats and caps map (family index, eye)
             to the fields that line overrides."""
             out = [(t, st_twin((twins or {}).get(s, True), fam=s)) for s in STS]
             for i, f in enumerate(STF[:2]):
                 for eye in (0, 1):
-                    cap = dict(ST_NEAR if eye == 0 else {}, **(caps or {}).get((i, eye), {}))
+                    cap = dict(ST_OUT if eye == 0 else {}, **(caps or {}).get((i, eye), {}))
                     out += [(t + 1 + i, st_stats(eye, family=f, **(stats or {}).get((i, eye), {}))), (t + 1 + i, st_capture(eye, family=f, **cap))]
             return out
 
-        def st_flight(back=60, gap=102, hud=True, cam=True, gpu=()):
-            """A turret visit as the DLL writes it: the keys, the view on, the camera published, the nine signatures' geometry shaders, the first draws of two families, the GPU instrument's lines
+        def st_flight(back=60, panels=110, radar=110, gap=0, hud=True, cam=True, gpu=()):
+            """A turret visit as the DLL writes it: the keys, the view on, the camera published, the eight signatures' geometry shaders, the first draws of two families, the GPU instrument's lines
             (gpu), a 10 s line, the view off, the camera cleared."""
-            out = [(1, st_set(back, gap)), (2, st_view())]
+            out = [(1, st_set(back, panels, radar, gap)), (2, st_view())]
             if cam:
                 out.append((3, st_cam()))
             if hud:
@@ -22397,33 +22465,34 @@ def self_test_health():
         ST, st_ok = H_SRV_TURRET, [f90_part()]
         check("srv turret: no line at all, nothing said", st_ok, 0, [("OK", F90S)], lacks=["srv turret", "NEVER APPLIED"])
         check("srv turret: the settings alone are idle: the turret view was not entered", st_ok + [st_set()], 0, [("IDLE", ST)],
-              has=["the turret view was not entered in this window (camera back 60 cm, hud gap 102 cm)"], lacks=["NEVER APPLIED", "UNPARSED"])
+              has=["the turret view was not entered in this window (camera back 60 cm, panels back 110 cm, radar back 110 cm, hud gap 0 cm)"], lacks=["NEVER APPLIED", "UNPARSED"])
         check("srv turret: a healthy flight is OK, and its lines are no build-tagged lines", st_ok + st_flight(), 0, [("OK", ST)],
-              has=["turret view on 1 time(s), 12 s in all (camera back 60 cm, hud gap 102 cm)", "camera back 0.60 m published 1 time(s)",
+              has=["turret view on 1 time(s), 12 s in all (camera back 60 cm, panels back 110 cm, radar back 110 cm, hud gap 0 cm)", "camera back 0.60 m published 1 time(s)",
                    "hud bound 480 of 480 draws (L 240, R 240), families 1989E6D3 300, 2CECEC30 180, first draw of family 1989E6D3 at frame 4102 eye 0, first draw of family 2CECEC30 at frame 4103 eye 1",
                    "s[L,R] +0.0412,-0.0412, ipd_elite 63.5 mm, P00[L,R] 0.912,0.915 (the last 10 s line)",
+                   "; windows: panels pushed deeper by 1.10 m (window 0.02..1.00 m), radar pushed deeper by 1.10 m (window 0.02..1.00 m)",
                    "geometry shader " + ", ".join("turret shift %s created in 0.412 ms" % s for s in STS), "1 build-tagged lines"], lacks=["UNPARSED", "NEVER APPLIED", "PARTIAL", "exit 3"])
         check("srv turret: the camera key above 0 and no 'published' line is NEVER APPLIED", st_ok + st_flight(cam=False), 3, [("NEVER APPLIED", ST)],
               has=["the turret view was on 1 time(s), the camera key was 60 cm, and no 'camera: back ... published' line shows it", "hud bound 480 of 480 draws"])
         check("srv turret: the camera key at 0 is off by key, not a failure", st_ok + st_flight(back=0, cam=False), 0, [("OK", ST)], has=["camera off by key", "hud bound 480 of 480 draws"],
               lacks=["NEVER APPLIED"])
         check("srv turret: a 10 s line with nothing bound is NEVER APPLIED, and names the refusals", st_ok + [(1, st_set()), (2, st_view()), (3, st_cam()), (12, st_sec(bound=0, refused=(0, 0, 0, 3, 477)))], 3,
-              [("NEVER APPLIED", ST)], has=["the hud gap key was 102 cm and the 1 10 s line(s) show nothing bound: draws[L,R] 240,240, refused no-eye 0, game-gs 0, topology 0, not-ready 3, no-geometry 477", "exit 3"])
+              [("NEVER APPLIED", ST)], has=["a hud key was above 0 (panels back 110 cm, radar back 110 cm, hud gap 0 cm) and the 1 10 s line(s) show nothing bound: draws[L,R] 240,240, refused no-eye 0, game-gs 0, topology 0, not-ready 3, no-geometry 477", "exit 3"])
         check("srv turret: the 10 s lines' draws and refusals are summed", st_ok + [(1, st_set()), (2, st_view()), (3, st_cam()), (12, st_sec(left=100, right=90, bound=0, refused=(0, 0, 0, 0, 190))),
               (22, st_sec(left=10, right=20, bound=0, refused=(1, 0, 2, 0, 27)))], 3, [("NEVER APPLIED", ST)],
               has=["the 2 10 s line(s) show nothing bound: draws[L,R] 110,110, refused no-eye 1, game-gs 0, topology 2, not-ready 0, no-geometry 217"])
-        check("srv turret: the gap key above 0, the view on for 20 s and no 10 s line and no first draw is NEVER APPLIED", st_ok + [(1, st_set()), (2, st_view()), (3, st_cam()), (22, st_view(False))], 3,
-              [("NEVER APPLIED", ST)], has=["the hud gap key was 102 cm, the turret view was on for 20 s, and no first-draw line and no 10 s line shows a draw through the shader"])
+        check("srv turret: a hud key above 0, the view on for 20 s and no 10 s line and no first draw is NEVER APPLIED", st_ok + [(1, st_set()), (2, st_view()), (3, st_cam()), (22, st_view(False))], 3,
+              [("NEVER APPLIED", ST)], has=["a hud key was above 0 (panels back 110 cm, radar back 110 cm, hud gap 0 cm), the turret view was on for 20 s, and no first-draw line and no 10 s line shows a draw through the shader"])
         check("srv turret: a stay still open runs to the window's last turret line", st_ok + [(1, st_set()), (2, st_view()), (3, st_cam()), (30, st_refused("no-geometry"))], 3,
               [("NEVER APPLIED", ST)], has=["the turret view was on for 28 s", "draw(s) refused, said once per reason: no-geometry"])
         check("srv turret: the view on for 5 s and no 10 s line yet is idle for the hud, and no failure", st_ok + [(1, st_set()), (2, st_view()), (3, st_cam()), (7, st_view(False))], 0, [("OK", ST)],
               has=["camera back 0.60 m published 1 time(s)", "hud: turret view on under 12 s: no 10 s line yet"], lacks=["NEVER APPLIED"])
-        check("srv turret: the camera off by key and the hud idle under 12 s is idle", st_ok + [(1, st_set(0, 102)), (2, st_view()), (7, st_view(False))], 0, [("IDLE", ST)],
+        check("srv turret: the camera off by key and the hud idle under 12 s is idle", st_ok + [(1, st_set(0)), (2, st_view()), (7, st_view(False))], 0, [("IDLE", ST)],
               has=["camera off by key", "hud: turret view on under 12 s: no 10 s line yet"], lacks=["NEVER APPLIED"])
-        check("srv turret: both keys at 0 is idle", st_ok + [(1, st_set(0, 0)), (2, st_view()), (20, st_view(False))], 0, [("IDLE", ST)],
-              has=["(camera back 0 cm, hud gap 0 cm)", "camera off by key", "hud off by key"], lacks=["NEVER APPLIED"])
-        check("srv turret: the last settings line is the one in force", st_ok + [(1, st_set(60, 102)), (2, st_set(0, 0)), (3, st_view()), (20, st_view(False))], 0, [("IDLE", ST)],
-              has=["(camera back 0 cm, hud gap 0 cm)", "camera off by key", "hud off by key"])
+        check("srv turret: all four keys at 0 is idle", st_ok + [(1, st_set(0, 0, 0, 0)), (2, st_view()), (20, st_view(False))], 0, [("IDLE", ST)],
+              has=["(camera back 0 cm, panels back 0 cm, radar back 0 cm, hud gap 0 cm)", "camera off by key", "hud off by key"], lacks=["NEVER APPLIED"])
+        check("srv turret: the last settings line is the one in force", st_ok + [(1, st_set()), (2, st_set(0, 0, 0, 0)), (3, st_view()), (20, st_view(False))], 0, [("IDLE", ST)],
+              has=["(camera back 0 cm, panels back 0 cm, radar back 0 cm, hud gap 0 cm)", "camera off by key", "hud off by key"])
         check("srv turret: a geometry shader that could not be made is NEVER APPLIED whatever else the log says", st_ok + [(1, st_set()), (2, st_view()), (3, st_cam()),
               (4, st_gs("creation FAILED; standing down", 0x80004005, 1.2)), (5, st_refused("not-ready")), (12, st_sec())], 3,
               [("NEVER APPLIED", ST)], has=["the geometry shader could not be made: creation FAILED; standing down (0x80004005, 1.200 ms) for turret shift 1989E6D3"])
@@ -22435,7 +22504,7 @@ def self_test_health():
         check("srv turret: the first draw of either family shows the shader was bound", st_ok + [(1, st_set()), (2, st_view()), (3, st_cam()), (4, st_gs()), (4, st_gs(fam=STF[1])),
               (5, st_first(4103, 1, STF[1])), (14, st_view(False))], 0, [("OK", ST)],
               has=["hud bound 0 of 0 draws (L 0, R 0), first draw of family 2CECEC30 at frame 4103 eye 1"], lacks=["NEVER APPLIED", "first draw of family 1989E6D3"])
-        check("srv turret: only a drifted 10 s line is UNPARSED, not a quiet rule", st_ok + [st_sec().replace("srv turret hud: gap", "srv turret hud: gaps")], 4, [("UNPARSED", ST)], has=["exit 4"])
+        check("srv turret: only a drifted 10 s line is UNPARSED, not a quiet rule", st_ok + [st_sec().replace("srv turret hud: panels", "srv turret hud: panelz")], 4, [("UNPARSED", ST)], has=["exit 4"])
         check("srv turret: a drifted camera line is UNPARSED", st_ok + [st_cam().replace("camera: back", "camera: backed")], 4, [("UNPARSED", ST)])
         check("srv turret: a drifted view line is UNPARSED", st_ok + [st_view().replace("at frame", "by frame")], 4, [("UNPARSED", ST)])
         check("srv turret: a refusal reason the rule does not know is UNPARSED", st_ok + [st_refused("not-ready").replace("not-ready", "elsewhere")], 4, [("UNPARSED", ST)])
@@ -22459,36 +22528,38 @@ def self_test_health():
               has=["draw(s) refused, said once per reason: no-geometry", "the game's geometry stage could not be put back after an issue (put back at the frame boundary)"], lacks=["UNPARSED", "NEVER APPLIED"])
         check("srv turret: a window that opens with the turret view already on judges the hud on its 10 s line, the camera on nothing", st_ok + [(1, st_set()), (30, st_sec())], 0, [("OK", ST)],
               has=["camera key 60 cm and no 'on' edge in this window", "hud bound 480 of 480 draws"], lacks=["NEVER APPLIED"])
-        check("srv turret: no settings line, the 10 s line's own gap is the hud key in force", st_ok + [(2, st_view()), (3, st_cam()), (12, st_sec(bound=0, refused=(0, 0, 0, 0, 480)))], 3,
-              [("NEVER APPLIED", ST)], has=["the hud gap key was 102 cm", "(camera back unknown, hud gap unknown)"])
+        check("srv turret: no settings line, the 10 s line's own windows say whether the hud was on", st_ok + [(2, st_view()), (3, st_cam()), (12, st_sec(bound=0, refused=(0, 0, 0, 0, 480)))], 3,
+              [("NEVER APPLIED", ST)], has=["a hud key was above 0 (from the last 10 s line: panels pushed deeper by 1.10 m (window 0.02..1.00 m), radar pushed deeper by 1.10 m (window 0.02..1.00 m))",
+                                                    "(camera back unknown, panels back unknown, radar back unknown, hud gap unknown)"])
         check("srv turret: --since cuts the events and keeps the settings", st_ok + [(1, st_set()), (20, st_view()), (21, st_cam()), (22, st_gs()), (23, st_first()), (30, st_sec())], 0,
-              [("IDLE", ST)], has=["the turret view was not entered in this window (camera back 60 cm, hud gap 102 cm)"], lacks=["NEVER APPLIED"], extra=["--since", "10:01:00"])
+              [("IDLE", ST)], has=["the turret view was not entered in this window (camera back 60 cm, panels back 110 cm, radar back 110 cm, hud gap 0 cm)"], lacks=["NEVER APPLIED"], extra=["--since", "10:01:00"])
         check("srv turret: events inside --since are counted", st_ok + [(1, st_set())] + [(70 + i, m) for i, m in enumerate((st_view(), st_cam(), st_gs(), st_first(), st_sec(), st_view(False)))], 0,
               [("OK", ST)], has=["hud bound 480 of 480 draws"], extra=["--since", "10:01:00"])
         # the GPU instrument: the pipeline statistics and the streamed-out vertices of one sampled draw a second per eye
-        check("srv turret gpu: a healthy flight with both families, each with a near-layer capture (in_window 0, w 0.4) and a deep capture (in_window above 0, w 1.39), is OK", st_ok + st_flight(gpu=st_gpu()), 0,
-              [("OK", ST)], has=["gpu: 4 samples, gs 1600; deep band: in_window 24 of 24 vertices at w 1.380..1.400 (families 1989E6D3, 2CECEC30), near layer: 2 rows at w 0.410..0.470, shift_clip -0.0310..+0.0450",
+        check("srv turret gpu: a healthy flight with both families, each with a capture outside the window (in_window 0, w 1.39) and one in it (in_window above 0, w 0.4, a negative shift), is OK", st_ok + st_flight(gpu=st_gpu()), 0,
+              [("OK", ST)], has=["gpu: 4 samples, gs 1600; in the window: in_window 24 of 24 vertices at w 0.410..0.470 (families 1989E6D3, 2CECEC30), outside it: 2 rows at w 1.380..1.400, shift_clip -0.0310..-0.0120; "
+                                 "vertices moved per family: 1989E6D3 12 of 24 (deeper), 2CECEC30 12 of 24 (deeper)",
                                  "hud bound 480 of 480 draws"], lacks=["UNPARSED", "NEVER APPLIED", "PARTIAL", "NOT made", "losing readbacks", "sampled with none in the window"])
-        check("srv turret gpu: one family's deep capture is enough, and says which family", st_ok + st_flight(gpu=st_gpu(caps={(0, 1): dict(vertices=12, inw=0, w=(0.410, 0.470), shift=(0.0, 0.0))})), 0,
-              [("OK", ST)], has=["deep band: in_window 12 of 12 vertices at w 1.380..1.400 (family 2CECEC30), near layer: 3 rows at w 0.410..0.470"], lacks=["NEVER APPLIED", "UNPARSED"])
+        check("srv turret gpu: one family's deep capture is enough, and says which family", st_ok + st_flight(gpu=st_gpu(caps={(0, 1): dict(ST_OUT)})), 0,
+              [("OK", ST)], has=["in the window: in_window 12 of 12 vertices at w 0.410..0.470 (family 2CECEC30), outside it: 3 rows at w 1.380..1.400", "vertices moved per family: 2CECEC30 12 of 24 (deeper)"], lacks=["NEVER APPLIED", "UNPARSED"])
         old_bug = [(6, st_twin()), (6, st_twin(fam=STF[1]))] + [(7 + i // 2, st_stats(i % 2, family=STF[i // 2 % 2])) for i in range(4)] + [
             (8 + i, st_capture(i % 2, family=STF[i // 2 % 2], vertices=6, inw=0, w=(499.0, 501.0))) for i in range(8)]
         check("srv turret gpu: eight capture rows all in_window 0 (the old bug: the reticle at w 500) are NEVER APPLIED, naming the w range and each family's rows", st_ok + st_flight(gpu=old_bug), 3,
-              [("NEVER APPLIED", ST)], has=["the shader ran but no sampled vertex lies in its window (the deep band was never found by any sampled draw): clip w 499.000..501.000 over 48 vertices in 8 capture rows "
-                                            "against the window (gap + 0.10 m to 4.0 m)", "family 1989E6D3: 4 rows, 24 vertices, in_window 0, w 499.000..501.000",
+              [("NEVER APPLIED", ST)], has=["the shader ran but no sampled vertex lies in its window (nothing the shader moves was found by any sampled draw): clip w 499.000..501.000 over 48 vertices in 8 capture rows "
+                                            "against the window (the push-back's 0.02 m to 1.0 m)", "family 1989E6D3: 4 rows, 24 vertices, in_window 0, w 499.000..501.000",
                                             "family 2CECEC30: 4 rows, 24 vertices, in_window 0, w 499.000..501.000", "hud bound 480 of 480 draws", "exit 3"], lacks=["UNPARSED", "never ran"])
         check("srv turret gpu: six capture rows with none in the window are judged, and the w range is the lowest low and the highest high", st_ok + st_flight(gpu=[
               (6 + i, st_capture(i % 2, family=STF[i // 2 % 2], vertices=6, inw=0, w=(0.040, 0.100) if i == 5 else (0.050, 0.080))) for i in range(6)]), 3, [("NEVER APPLIED", ST)],
               has=["clip w 0.040..0.100 over 36 vertices in 6 capture rows"])
         check("srv turret gpu: five capture rows with none in the window are not yet judged", st_ok + st_flight(gpu=[
               (6 + i, st_capture(i % 2, family=STF[i // 2 % 2], vertices=6, inw=0, w=(499.0, 501.0))) for i in range(5)]), 0, [("OK", ST)],
-              has=["gpu: 5 capture rows, none yet in the deep band, near layer: w 499.000..501.000"], lacks=["NEVER APPLIED"])
-        check("srv turret gpu: three capture rows of the near layer only are idle for the instrument, not NEVER APPLIED (statistics beside them show the shader ran)", st_ok + st_flight(gpu=[
-              (6, st_stats(0)), (6, st_capture(0, **ST_NEAR)), (7, st_stats(1)), (7, st_capture(1, **ST_NEAR)), (8, st_stats(0, family=STF[1])), (8, st_capture(0, family=STF[1], **ST_NEAR))]), 0, [("OK", ST)],
-              has=["gpu: 3 samples, gs 1200; 3 capture rows, none yet in the deep band, near layer: w 0.410..0.470"], lacks=["NEVER APPLIED", "UNPARSED"])
-        check("srv turret gpu: with the camera and hud keys at 0, three near-layer capture rows alone leave the rule idle", st_ok + [(1, st_set(0, 0)), (30, st_stats(0)), (30, st_capture(0, **ST_NEAR)),
-              (31, st_capture(1, **ST_NEAR)), (32, st_capture(0, family=STF[1], **ST_NEAR))], 0, [("IDLE", ST)],
-              has=["3 capture rows, none yet in the deep band", "camera off by key", "hud off by key"], lacks=["NEVER APPLIED"])
+              has=["gpu: 5 capture rows, none yet in the window, outside it: w 499.000..501.000"], lacks=["NEVER APPLIED"])
+        check("srv turret gpu: three capture rows outside the window only are idle for the instrument, not NEVER APPLIED (statistics beside them show the shader ran)", st_ok + st_flight(gpu=[
+              (6, st_stats(0)), (6, st_capture(0, **ST_OUT)), (7, st_stats(1)), (7, st_capture(1, **ST_OUT)), (8, st_stats(0, family=STF[1])), (8, st_capture(0, family=STF[1], **ST_OUT))]), 0, [("OK", ST)],
+              has=["gpu: 3 samples, gs 1200; 3 capture rows, none yet in the window, outside it: w 1.380..1.400"], lacks=["NEVER APPLIED", "UNPARSED"])
+        check("srv turret gpu: with the camera and hud keys at 0, three capture rows outside the window alone leave the rule idle", st_ok + [(1, st_set(0, 0, 0, 0)), (30, st_stats(0)), (30, st_capture(0, **ST_OUT)),
+              (31, st_capture(1, **ST_OUT)), (32, st_capture(0, family=STF[1], **ST_OUT))], 0, [("IDLE", ST)],
+              has=["3 capture rows, none yet in the window", "camera off by key", "hud off by key"], lacks=["NEVER APPLIED"])
         check("srv turret gpu: a family whose sampled draws had input and no geometry shader invocation is NEVER APPLIED, named, whatever the first draw and the 10 s line say",
               st_ok + st_flight(gpu=st_gpu(stats={(1, 0): dict(gs=0, gsp=0), (1, 1): dict(gs=0, gsp=0)})), 3, [("NEVER APPLIED", ST)],
               has=["the geometry shader never ran for family 2CECEC30: 2 sampled draw(s) with ia_prims 2400 and gs invocations 0 (eye L 1, R 1)", "hud bound 480 of 480 draws", "exit 3"],
@@ -22498,7 +22569,7 @@ def self_test_health():
         check("srv turret gpu: the eyes' samples are counted apart in the verdict", st_ok + [(1, st_set()), (2, st_view())] + [(3 + i, st_stats(i % 2, gs=0)) for i in range(3)], 3, [("NEVER APPLIED", ST)],
               has=["for family 1989E6D3: 3 sampled draw(s) with ia_prims 3600 and gs invocations 0 (eye L 2, R 1)"])
         check("srv turret gpu: a capture row with no vertex says nothing of the window", st_ok + st_flight(gpu=st_gpu(caps={(0, 0): dict(vertices=0, inw=0, w=(0.0, 0.0))})), 0, [("OK", ST)],
-              has=["gpu: 4 samples, gs 1600; deep band: in_window 24 of 24 vertices at w 1.380..1.400 (families 1989E6D3, 2CECEC30), near layer: 1 rows at w 0.410..0.470"], lacks=["NEVER APPLIED"])
+              has=["gpu: 4 samples, gs 1600; in the window: in_window 24 of 24 vertices at w 0.410..0.470 (families 1989E6D3, 2CECEC30), outside it: 1 rows at w 1.380..1.400"], lacks=["NEVER APPLIED"])
         check("srv turret gpu: a family's twin NOT made is read, not unparsed, and the statistics still judge", st_ok + st_flight(gpu=[
               (6, st_twin()), (6, st_twin(False, 0x80004005, STF[1])), (7, st_stats(0)), (7, st_stats(0, family=STF[1]))]), 0, [("OK", ST)],
               has=["the stream-output twin of the 2CECEC30 shader was NOT made (0x80004005): the GPU instrument keeps to its statistics", "gpu: 2 samples, gs 800"], lacks=["UNPARSED", "NEVER APPLIED"])
@@ -22520,25 +22591,25 @@ def self_test_health():
         check("srv turret gpu: a drifted statistics line alone is UNPARSED", st_ok + [st_stats(0).replace("stats:", "statz:")], 4, [("UNPARSED", ST)], has=["exit 4"])
         check("srv turret gpu: a drifted capture line alone is UNPARSED", st_ok + [st_capture(0).replace("in_window=", "inside=")], 4, [("UNPARSED", ST)])
         check("srv turret gpu: a drifted capture line beside a healthy flight is said in the detail", st_ok + st_flight(gpu=st_gpu() + [(9, st_capture(1).replace("in_window=", "inside="))]), 0, [("OK", ST)],
-              has=["[+1 line(s) the rule's patterns do not match: ", "deep band: in_window 24 of 24 vertices"], lacks=["NEVER APPLIED"])
+              has=["[+1 line(s) the rule's patterns do not match: ", "in the window: in_window 24 of 24 vertices"], lacks=["NEVER APPLIED"])
         check("srv turret gpu: a statistics line from before the families (no family field) is UNPARSED", st_ok + [st_stats(0).replace(" family=%s" % STF[0], "")], 4, [("UNPARSED", ST)])
         check("srv turret gpu: a capture line from before the families (no family field) is UNPARSED", st_ok + [st_capture(0).replace("family=%s " % STF[0], "")], 4, [("UNPARSED", ST)])
         check("srv turret gpu: a 10 s line from before the families (no families field) is UNPARSED", st_ok + [st_sec().rsplit(" families[", 1)[0]], 4, [("UNPARSED", ST)])
         check("srv turret gpu: the statistics make the rule present in a window with no 'on' edge, and a shader that ran is OK", st_ok + [(1, st_set()), (30, st_stats(0)), (30, st_capture(0))], 0, [("OK", ST)],
-              has=["gpu: 1 samples, gs 400; deep band: in_window 12 of 12 vertices at w 1.380..1.400 (family 1989E6D3), near layer: none sampled", "camera key 60 cm and no 'on' edge in this window"],
+              has=["gpu: 1 samples, gs 400; in the window: in_window 12 of 12 vertices at w 0.410..0.470 (family 1989E6D3), outside it: none sampled", "camera key 60 cm and no 'on' edge in this window"],
               lacks=["NEVER APPLIED"])
         check("srv turret gpu: the statistics alone, with no setting line and no 'on' edge, and no geometry shader invocation are NEVER APPLIED", st_ok + [(30, st_stats(0, gs=0))], 3, [("NEVER APPLIED", ST)],
               has=["the geometry shader never ran for family 1989E6D3: 1 sampled draw(s)"])
         check("srv turret gpu: lost readbacks are counted per eye and family", st_ok + st_flight(gpu=[(6, st_stats(0, lost=1)), (7, st_stats(0, lost=1, family=STF[1]))]), 0, [("OK", ST)],
               has=["lost 2 against 2 samples read"])
-        # the ten families in nine signatures: the 10 s line's two comma lists, one geometry shader and twin per signature, the families that never reached the deep band
+        # the nine families in eight signatures: the 10 s line's two comma lists, one geometry shader and twin per signature, the families that never reached the window
         old_sec = st_sec().rsplit(" families[", 1)[0] + " families[1989E6D3,2CECEC30]=300,180"
         flight_sec = lambda *secs: st_ok + [(1, st_set()), (2, st_view()), (3, st_cam())] + st_gs_all() + [(5, st_first())] + list(secs) + [(40, st_view(False))]
-        check("srv turret families: the 10 s line of the ten families is read, and the families that drew are listed in its order", st_ok + st_flight(), 0, [("OK", ST)],
+        check("srv turret families: the 10 s line of the nine families is read, and the families that drew are listed in its order", st_ok + st_flight(), 0, [("OK", ST)],
               has=["hud bound 480 of 480 draws (L 240, R 240), families 1989E6D3 300, 2CECEC30 180, first draw of family"], lacks=["UNPARSED", "DF3503CD 0", "no family drew"])
         check("srv turret families: the draws are summed per family over the 10 s lines, the dotted sphere families among them",
-              flight_sec((12, st_sec(fams=(300, 180, 0, 0, 0, 0, 0, 40, 0, 5))), (22, st_sec(fams=(100, 0, 0, 0, 0, 0, 0, 0, 60, 5)))), 0, [("OK", ST)],
-              has=["families 1989E6D3 400, 2CECEC30 180, 5559BD94.EA02FAC2 40, 5559BD94.E95634B0 60, B7790CBF 10, first draw of family"], lacks=["UNPARSED", "DF3503CD 0"])
+              flight_sec((12, st_sec(fams=(300, 180, 0, 0, 0, 0, 0, 40, 0))), (22, st_sec(fams=(100, 0, 0, 0, 0, 0, 0, 0, 60)))), 0, [("OK", ST)],
+              has=["families 1989E6D3 400, 2CECEC30 180, 5559BD94.EA02FAC2 40, 5559BD94.E95634B0 60, first draw of family"], lacks=["UNPARSED", "DF3503CD 0", "B7790CBF"])
         check("srv turret families: a 10 s line in which no family drew says so", flight_sec((12, st_sec(fams=(0,)))), 0, [("OK", ST)],
               has=["hud bound 480 of 480 draws (L 240, R 240), no family drew, first draw of family"], lacks=["UNPARSED", "families 1989E6D3"])
         check("srv turret families: an old 10 s line with two family names still parses", flight_sec((12, old_sec)), 0, [("OK", ST)],
@@ -22547,19 +22618,19 @@ def self_test_health():
         check("srv turret families: a geometry shader of one signature that could not be made is NEVER APPLIED, naming it", st_ok + [(1, st_set()), (2, st_view()), (3, st_cam())] +
               [(4, st_gs(fam=s)) for s in STS if s != "5559BD94"] + [(4, st_gs("creation FAILED; standing down", 0x80004005, 3.1, "5559BD94")), (5, st_first()), (12, st_sec())], 3,
               [("NEVER APPLIED", ST)], has=["the geometry shader could not be made: creation FAILED; standing down (0x80004005, 3.100 ms) for turret shift 5559BD94"], lacks=["for turret shift 1989E6D3"])
-        check("srv turret families: a twin of one signature NOT made is read, not unparsed, and the rest of the instrument still judges", st_ok + st_flight(gpu=st_gpu(twins={"B7790CBF": False})), 0, [("OK", ST)],
-              has=["the stream-output twin of the B7790CBF shader was NOT made (0x00000000): the GPU instrument keeps to its statistics", "deep band: in_window 24 of 24 vertices"],
+        check("srv turret families: a twin of one signature NOT made is read, not unparsed, and the rest of the instrument still judges", st_ok + st_flight(gpu=st_gpu(twins={"5559BD94": False})), 0, [("OK", ST)],
+              has=["the stream-output twin of the 5559BD94 shader was NOT made (0x00000000): the GPU instrument keeps to its statistics", "in the window: in_window 24 of 24 vertices"],
               lacks=["UNPARSED", "NEVER APPLIED", "of the 1989E6D3 shader was NOT made"])
         check("srv turret families: a dotted family name in the statistics is named when its shader never ran", st_ok + st_flight(gpu=[(6, st_stats(0, family="5559BD94.EA02FAC2", gs=0))]), 3,
               [("NEVER APPLIED", ST)], has=["the geometry shader never ran for family 5559BD94.EA02FAC2: 1 sampled draw(s) with ia_prims 1200"], lacks=["UNPARSED"])
-        check("srv turret families: the families sampled with none of their vertices in the window are listed beside the deep band", st_ok + st_flight(gpu=st_gpu() + [
-              (9, st_capture(0, family="DF3503CD", **ST_NEAR)), (9, st_capture(1, family="DF3503CD", **ST_NEAR)), (9, st_capture(0, family="5559BD94.EA02FAC2", **ST_NEAR)),
-              (9, st_capture(1, family="B7790CBF"))]), 0, [("OK", ST)],
-              has=["deep band: in_window 36 of 36 vertices at w 1.380..1.400 (families 1989E6D3, 2CECEC30, B7790CBF)", "sampled with none in the window: DF3503CD, 5559BD94.EA02FAC2"],
+        check("srv turret families: the families sampled with none of their vertices in the window are listed beside the figures for the window, and the radar's are counted like the panels'", st_ok + st_flight(gpu=st_gpu() + [
+              (9, st_capture(0, family="DF3503CD", **ST_OUT)), (9, st_capture(1, family="DF3503CD", **ST_OUT)), (9, st_capture(0, family="5559BD94.EA02FAC2", **ST_OUT)),
+              (9, st_capture(1, family="9B34C331"))]), 0, [("OK", ST)],
+              has=["in the window: in_window 36 of 36 vertices at w 0.410..0.470 (families 1989E6D3, 2CECEC30, 9B34C331)", "9B34C331 12 of 12 (deeper)", "sampled with none in the window: DF3503CD, 5559BD94.EA02FAC2"],
               lacks=["UNPARSED", "NEVER APPLIED"])
         # the vehicle latch's lines (journal_watch.cpp) and the turret view in an SRV the journal does not call the Scorpion
         check("srv turret vehicle: the turret view on in a Scarab (keys 60/102) is idle, never a failure", st_ok + [(1, st_set()), (2, st_ignored())], 0, [("IDLE", ST)],
-              has=["the turret view was on 1 time(s) in an SRV the journal does not call the Scorpion: nothing applied, by design (camera back 60 cm, hud gap 102 cm)"],
+              has=["the turret view was on 1 time(s) in an SRV the journal does not call the Scorpion: nothing applied, by design (camera back 60 cm, panels back 110 cm, radar back 110 cm, hud gap 0 cm)"],
               lacks=["NEVER APPLIED", "UNPARSED", "exit 3", "was not entered"])
         check("srv turret vehicle: two stays in a Scarab are counted, with the vehicle latch's last line", st_ok + [(1, st_set()), (1, st_vehicle(True, "LoadGame")), (2, st_vehicle(False, "LaunchSRV")),
               (3, st_ignored()), (20, st_ignored(5000))], 0, [("IDLE", ST)],
@@ -22574,14 +22645,14 @@ def self_test_health():
               [("OK", ST)], has=["vehicle latch: not the Scorpion (event DockSRV), 2 change(s)", "hud bound 480 of 480 draws"], lacks=["NEVER APPLIED", "UNPARSED"])
         check("srv turret vehicle: the vehicle latch's line alone is not the rule's line: nothing is said", st_ok + [st_vehicle()], 0, [("OK", F90S)], lacks=["srv turret", "NEVER APPLIED", "UNPARSED"])
         check("srv turret vehicle: the settings and the vehicle latch alone are idle, and say the latch", st_ok + [(1, st_set()), (1, st_vehicle())], 0, [("IDLE", ST)],
-              has=["the turret view was not entered in this window (camera back 60 cm, hud gap 102 cm); vehicle latch: the Scorpion (event LoadGame), 1 change(s)"], lacks=["NEVER APPLIED"])
+              has=["the turret view was not entered in this window (camera back 60 cm, panels back 110 cm, radar back 110 cm, hud gap 0 cm); vehicle latch: the Scorpion (event LoadGame), 1 change(s)"], lacks=["NEVER APPLIED"])
         check("srv turret vehicle: a drifted vehicle line is UNPARSED", st_ok + [st_vehicle().replace("vehicle is", "vehicle was")], 4, [("UNPARSED", ST)], has=["exit 4"])
         check("srv turret vehicle: a vehicle event the rule does not know is UNPARSED", st_ok + [st_vehicle(event="Docked")], 4, [("UNPARSED", ST)])
         check("srv turret vehicle: a drifted 'not the Scorpion' line is UNPARSED", st_ok + [st_ignored().replace("not the Scorpion at frame", "not Scorpion at frame")], 4, [("UNPARSED", ST)], has=["exit 4"])
         check("srv turret vehicle: a drifted 'not the Scorpion' line beside a flight is said in the detail", st_ok + [(0, st_ignored().replace("at frame", "by frame"))] + st_flight(), 0, [("OK", ST)],
               has=["[+1 line(s) the rule's patterns do not match: "], lacks=["NEVER APPLIED"])
         check("srv turret vehicle: --since keeps the vehicle latch's lines and cuts a Scarab visit before the window", st_ok + [(1, st_set()), (1, st_vehicle(False, "LaunchSRV")), (20, st_ignored())], 0,
-              [("IDLE", ST)], has=["the turret view was not entered in this window (camera back 60 cm, hud gap 102 cm); vehicle latch: not the Scorpion (event LaunchSRV), 1 change(s)"],
+              [("IDLE", ST)], has=["the turret view was not entered in this window (camera back 60 cm, panels back 110 cm, radar back 110 cm, hud gap 0 cm); vehicle latch: not the Scorpion (event LaunchSRV), 1 change(s)"],
               lacks=["NEVER APPLIED", "does not call the Scorpion"], extra=["--since", "10:01:00"])
         check("srv turret vehicle: a Scarab visit inside --since is counted", st_ok + [(1, st_set()), (1, st_vehicle(False, "LaunchSRV")), (70, st_ignored())], 0, [("IDLE", ST)],
               has=["the turret view was on 1 time(s) in an SRV the journal does not call the Scorpion: nothing applied, by design", "vehicle latch: not the Scorpion (event LaunchSRV), 1 change(s)"],
@@ -22589,8 +22660,38 @@ def self_test_health():
         check("srv turret gpu: the figures go into a PARTIAL detail too", st_ok + [(1, st_set()), (2, st_view()), (3, st_cam()), (4, st_gs()), (5, st_first()), (6, st_stats(0)), (12, st_sec(bound=300, refused=(0, 0, 180, 0, 0))),
               (14, st_view(False))], 0, [("PARTIAL", ST)], has=["only 300 of 480 draws went through the shader", "gpu: 1 samples, gs 400"])
         check("srv turret gpu: --since cuts the statistics like the other events", st_ok + [(1, st_set()), (20, st_view()), (21, st_stats(0, gs=0))], 0, [("IDLE", ST)],
-              has=["the turret view was not entered in this window (camera back 60 cm, hud gap 102 cm)"], lacks=["NEVER APPLIED"], extra=["--since", "10:01:00"])
+              has=["the turret view was not entered in this window (camera back 60 cm, panels back 110 cm, radar back 110 cm, hud gap 0 cm)"], lacks=["NEVER APPLIED"], extra=["--since", "10:01:00"])
         check("srv turret gpu: statistics inside --since are counted", st_ok + [(1, st_set()), (70, st_stats(0, gs=0))], 3, [("NEVER APPLIED", ST)], has=["the geometry shader never ran"], extra=["--since", "10:01:00"])
+
+        # the push-back: two groups, each with its own key, and the first build's gap; the 10 s line carries each group's window, a negative gap is deeper
+        check("srv turret push: both push-backs above 0 and the gap at 0, with draws bound, is OK (never IDLE), says both keys and each group's window", st_ok + st_flight(), 0, [("OK", ST)],
+              has=["(camera back 60 cm, panels back 110 cm, radar back 110 cm, hud gap 0 cm)", "hud bound 480 of 480 draws",
+                   "; windows: panels pushed deeper by 1.10 m (window 0.02..1.00 m), radar pushed deeper by 1.10 m (window 0.02..1.00 m)"], lacks=["NEVER APPLIED", "PARTIAL", "UNPARSED"])
+        check("srv turret push: only the panels pushed (radar back 0, gap 0): the radar group is off in the 10 s line, and the hud is OK",
+              st_ok + [(1, st_set(60, 110, 0, 0)), (2, st_view()), (3, st_cam()), (5, st_first()), (12, st_sec(radar=None)), (14, st_view(False))], 0, [("OK", ST)],
+              has=["(camera back 60 cm, panels back 110 cm, radar back 0 cm, hud gap 0 cm)", "; windows: panels pushed deeper by 1.10 m (window 0.02..1.00 m), radar off"], lacks=["NEVER APPLIED", "UNPARSED"])
+        check("srv turret push: the gap alone above 0 (both push-backs 0) is the first build's pull: the windows read nearer, and the hud is OK",
+              st_ok + [(1, st_set(60, 0, 0, 96)), (2, st_view()), (3, st_cam()), (5, st_first()), (12, st_sec(panels=0.96, radar=0.96)), (14, st_view(False))], 0, [("OK", ST)],
+              has=["radar back 0 cm, hud gap 96 cm)", "; windows: panels pulled nearer by 0.96 m (window 1.06..4.00 m), radar pulled nearer by 0.96 m (window 1.06..4.00 m)"], lacks=["NEVER APPLIED", "UNPARSED"])
+        check("srv turret push: the radar's push-back alone above 0 and a 10 s line with nothing bound is NEVER APPLIED, naming the three keys",
+              st_ok + [(1, st_set(60, 0, 110, 0)), (2, st_view()), (3, st_cam()), (12, st_sec(panels=None, bound=0, refused=(0, 0, 0, 0, 480)))], 3, [("NEVER APPLIED", ST)],
+              has=["a hud key was above 0 (panels back 0 cm, radar back 110 cm, hud gap 0 cm) and the 1 10 s line(s) show nothing bound"])
+        check("srv turret push: the push-backs and the gap all at 0 is the hud off by key, whatever the camera does", st_ok + [(1, st_set(60, 0, 0, 0)), (2, st_view()), (3, st_cam()), (20, st_view(False))], 0, [("OK", ST)],
+              has=["camera back 0.60 m published 1 time(s)", "hud off by key"], lacks=["NEVER APPLIED"])
+        old_set = "srv turret settings: camera back 60 cm, hud gap 96 cm (live; fix.srv_turret_camera_back and fix.srv_turret_hud_gap, TEMPORARY; 0 is the game's own)"
+        old_hud = ("srv turret hud: gap=0.96 m wMin=1.06 wMax=4.00 s[L,R]=+0.0412,-0.0412 ipd_elite=63.5mm P00[L,R]=0.912,0.915 draws[L,R]=240,240 bound=480 "
+                   "refused[no-eye,game-gs,topology,not-ready,no-geometry]=0/0/0/0/0 families[1989E6D3,2CECEC30]=300,180")
+        check("srv turret push: the lines of the build before the push-back keys (a settings line with the camera and the gap alone, a 10 s line with one window) still parse",
+              st_ok + [(1, old_set), (2, st_view()), (3, st_cam()), (5, st_first()), (12, old_hud), (14, st_view(False))], 0, [("OK", ST)],
+              has=["(camera back 60 cm, hud gap 96 cm)", "hud bound 480 of 480 draws", "; windows: all families pulled nearer by 0.96 m (window 1.06..4.00 m)"], lacks=["UNPARSED", "NEVER APPLIED"])
+        check("srv turret push: the old settings line with the gap at 0 is the hud off by key (the camera half, never published here, is judged on its own)", st_ok + [(1, old_set.replace("hud gap 96 cm", "hud gap 0 cm")), (2, st_view()), (20, st_view(False))], 3,
+              [("NEVER APPLIED", ST)], has=["the camera key was 60 cm", "hud off by key"])
+        check("srv turret push: vertices moved are counted per family whatever the sign of the shift, and the direction is said", st_ok + st_flight(gpu=[
+              (6, st_stats(0)), (6, st_capture(0)), (7, st_stats(1, family=STF[2])), (7, st_capture(1, family=STF[2], gap=0.96, shift=(0.010, 0.050), w=(1.380, 1.400)))]), 0, [("OK", ST)],
+              has=["vertices moved per family: 1989E6D3 12 of 12 (deeper), DF3503CD 12 of 12 (nearer)", "shift_clip -0.0310..+0.0500"], lacks=["UNPARSED", "NEVER APPLIED"])
+        check("srv turret push: six capture rows of the pull with none in the window name the pull's window", st_ok + st_flight(gpu=[(6, st_stats(0))] + [
+              (6 + i, st_capture(i % 2, family=STF[i // 2 % 2], vertices=6, inw=0, w=(0.410, 0.470), gap=0.96)) for i in range(6)]), 3, [("NEVER APPLIED", ST)],
+              has=["against the window (the pull's gap + 0.10 m to 4.0 m)"])
 
         # ---- the one failure line the rules read that is not in native_on_foot.cpp ----
         checks += 1

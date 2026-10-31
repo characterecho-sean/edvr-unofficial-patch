@@ -8,7 +8,7 @@
 // geometry stage, and the game's draw is issued through the hooked context exactly as it was.
 //
 // WHAT IS SWAPPED. (1) The geometry shader: the game binds none for these draws, and the binding declines (kGameHasGs) if it ever does -- a game geometry shader is
-// not ours to replace. (2) The geometry stage's constant buffer slot 0, which the game never binds either: the four numbers of srv_turret_math.h's TurretParams.
+// not ours to replace. (2) The geometry stage's constant buffer slot 0, which the game never binds either: the four numbers of srv_turret_math.h's TurretParams (a pull's, or a push's with a negative gap).
 #pragma once
 
 #include "../common/guard.h"
@@ -24,6 +24,7 @@ namespace edvr {
 namespace srv_turret {
 
 inline constexpr uint32_t kGsSlot = 0;   // the geometry stage's constant buffer slot the shader reads (the game binds none)
+inline constexpr float kGapLimitM = 2.0f;   // the constants accept a gap (a pull) or its negative (a push) up to this many metres: the keys' 200 cm
 
 // The stream-output declaration of an output signature, for the GPU instrument's twin of its shader (srv_turret.cpp makeTwins, and the rig's twin): one entry for each element, in the
 // signature's order, into stream 0 and output slot 0, so a vertex is written out as sigFloats floats with the clip position last. Returns the entries; `out` holds kMaxSigElements.
@@ -55,7 +56,10 @@ public:
     ~Constants() { reset(); }
 
     ID3D11Buffer* get(ID3D11DeviceContext* ctx, const TurretParams& p) {
-        if (!ctx || !std::isfinite(p.s) || !std::isfinite(p.gap) || !std::isfinite(p.wMin) || !std::isfinite(p.wMax) || !(p.gap >= 0.0f) || !(p.wMin > p.gap) || !(p.wMax > p.wMin))
+        // A pull is a positive gap and a push a negative one; 0 moves nothing (the module does not bind then). The divisor w - gap must stay positive over the window, so the window
+        // starts above the gap, and a gap beyond 2 m is no key's range.
+        if (!ctx || !std::isfinite(p.s) || !std::isfinite(p.gap) || !std::isfinite(p.wMin) || !std::isfinite(p.wMax) || !(p.gap != 0.0f) || !(std::fabs(p.gap) <= kGapLimitM) ||
+            !(p.wMin > p.gap) || !(p.wMax > p.wMin))
             return nullptr;
         ID3D11Device* d = nullptr;
         if (!guarded("srv.turret.constants.device", [&] { ctx->GetDevice(&d); }) || !d) {

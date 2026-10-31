@@ -3,17 +3,18 @@
 // view's HUD (srv_turret_math.h: kFamilies, kSignatures). Compiled at BUILD time by tools/temporal_shader_build into kSrvTurretHudGs<X>Bytecode (never in the game), created by
 // shaderSwapCreateGs.
 //
-// WHAT IT DOES. In the turret view the near HUD layer (the weapon arc brackets, the weapon names, the ammo counts, the INFO strip) is drawn from records about 0.41 to 0.47 m
-// from the eye, and the target information panel and the SYSTEMS panel from records about 1.39 m out. Every shader below is the same triangle-list pass-through that moves a
-// vertex whose depth is in the deep band `gap` metres nearer along its ray from the HEAD CENTRE, which is a horizontal shift of its clip x and nothing else:
+// WHAT IT DOES. In the turret view the weapon panels (the weapon arc brackets, the weapon names, the ammo counts, the INFO strip) are drawn from records about 0.27 to 0.70 m
+// from the eye, the radar from 0.11 to 0.44 m, and the larger panels (SYSTEMS, the location panel) from 1.3 m and more. Every shader below is the same triangle-list pass-through
+// that moves a vertex whose depth is in the window `gap` metres nearer along its ray from the HEAD CENTRE (a NEGATIVE gap: that many metres deeper, the push-back), which is a
+// horizontal shift of its clip x and nothing else:
 //
 //     w = pos.w;   if (w > wMin && w < wMax)   pos.x += s * gap / (w - gap);
 //
 // with s = P00 * hx per eye (P00 = 2 / (tanRight - tanLeft) of that eye's projection as Elite renders it; hx = +ipd/2 for the left eye, -ipd/2 for the right; ipd the
 // eye separation Elite renders with). The derivation is in srv_turret_math.h: exact for a fixed eye separation, it keeps each vertex's cyclopean direction (the panel
 // does not change size or place for a head at the centre), changes only the disparity, and follows head motion because both layers are fixed in the turret's frame.
-// y, z, w and the other interpolants are not touched, so the pixel shader is the game's own. wMin = gap + 0.10 keeps the divisor positive and leaves the near layer alone;
-// wMax = 4.0 leaves anything far alone. With the gap at 0 the shift is exactly 0 and the shader is a copy. `triangle` input takes triangle lists AND triangle strips (the input
+// y, z, w and the other interpolants are not touched, so the pixel shader is the game's own. The window is the module's to choose (srv_turret_math.h): a push runs wMin = 0.02 to
+// wMax = 1.0 and the pull gap + 0.10 to 4.0, either keeping the divisor w - gap positive. `triangle` input takes triangle lists AND triangle strips (the input
 // assembler hands over each strip triangle in the winding the rasterizer would have used), and each output triangle is emitted on its own with RestartStrip.
 //
 // THE INPUT AND OUTPUT STRUCT is the vertex shader's output signature, element for element and in its register order (the fxc disassembly of the dumps' bytecode, written once in
@@ -32,7 +33,6 @@
 //   F  vs 9611A454527F7FEB + ps 1E1C49DC51C0E509                           RADAR_LOCALKEY_COLOUR xyz, RADAR_LOCALKEY_POSITIONOFFSET xy, SV_POSITION
 //   G  vs B932058F26B76691 + ps 65861AC394D51526                           RADAR_LOCALKEY_COLOUR xyz, SV_POSITION
 //   H  vs 5559BD94B6852E83 + ps EA02FAC2BD6C643C or E95634B0F61D218F        M_LIGHTINGPOSITION xyz, M_TEXCOORD xy, SV_POSITION (the target hologram sphere)
-//   I  vs B7790CBFC6554097 + ps 8DEF46452FA459F5    flight HUD strokes     TEXCOORD0, 1, 2, 5, 9, 10, 13, 16 xyzw, 17 xy, 18 xyz, SV_POSITION
 namespace edvr {
 
 // The shader text: EDVR_SRV_TURRET_GS_HEAD (the constant buffer and the opening of the `Vertex` struct), the members, EDVR_SRV_TURRET_GS_TAIL (the struct's end and the pass-through).
@@ -41,9 +41,9 @@ namespace edvr {
     "\n" \
     "cbuffer Turret : register(b0) {\n" \
     "    float s;      // P00 * hx for the eye drawn\n" \
-    "    float gap;    // metres nearer\n" \
-    "    float wMin;   // the nearest view depth that moves (gap + 0.10)\n" \
-    "    float wMax;   // the farthest (4.0)\n" \
+    "    float gap;    // metres nearer (negative: deeper)\n" \
+    "    float wMin;   // the nearest view depth that moves\n" \
+    "    float wMax;   // the farthest\n" \
     "};\n" \
     "struct Vertex {\n"
 #define EDVR_SRV_TURRET_GS_TAIL \
@@ -104,20 +104,6 @@ constexpr char kSrvTurretHudGsG[] = EDVR_SRV_TURRET_GS_HEAD
 constexpr char kSrvTurretHudGsH[] = EDVR_SRV_TURRET_GS_HEAD
     "    float3 l : __USER_VERTEX_M_LIGHTINGPOSITION;\n"
     "    float2 m : __USER_VERTEX_M_TEXCOORD;\n"
-    "    float4 pos : SV_Position;"
-    EDVR_SRV_TURRET_GS_TAIL;
-
-constexpr char kSrvTurretHudGsI[] = EDVR_SRV_TURRET_GS_HEAD
-    "    float4 t0 : TEXCOORD0;\n"
-    "    float4 t1 : TEXCOORD1;\n"
-    "    float4 t2 : TEXCOORD2;\n"
-    "    float4 t5 : TEXCOORD5;\n"
-    "    float4 t9 : TEXCOORD9;\n"
-    "    float4 t10 : TEXCOORD10;\n"
-    "    float4 t13 : TEXCOORD13;\n"
-    "    float4 t16 : TEXCOORD16;\n"
-    "    float2 t17 : TEXCOORD17;\n"
-    "    float3 t18 : TEXCOORD18;\n"
     "    float4 pos : SV_Position;"
     EDVR_SRV_TURRET_GS_TAIL;
 

@@ -4138,13 +4138,14 @@ if errorlevel 1 ( echo [edvr] ERROR: supercruise bars test build failed & exit /
 "%OBJ%\supercruisebars\supercruise_bars_test.exe" --self-test || exit /b 1
 exit /b 0
 
-REM Rig: the SRV turret view's HUD (src\d3d11\srv_turret*.h, srv_turret.cpp, journal_vehicle_latch.h; issue 140): the build's own bytecode of the nine pass-through geometry shaders (kSrvTurretHudGsABytecode to
-REM kSrvTurretHudGsIBytecode, one for each distinct vertex-shader output signature, compiled from srv_turret_hud_shader.h's HLSL by tools\temporal_shader_build and checked here to be that text's
-REM compile), the production binding, constants and maths, run on WARP (with the D3D debug layer when the machine has it) in front of stand-ins for the ten families' shader pairs (the two hologram
-REM families, five radar-named billboard families, the target hologram sphere with either pixel shader and the flight HUD's strokes) with their output signatures and clip rows: a quad at w = 1.4
-REM shifted by the formula's pixels in each eye (and where the truly nearer geometry is seen), a vertex at 0.42 m (the near layer), 500 m (the reticle) or 50 m unchanged, the gap at 0 a copy, a
-REM triangle strip where the same quad as a list lands, the linkage under the debug layer with its control, the binding's in-and-out with the game's geometry stage and constant slot exactly back,
-REM the constants, the GPU instrument's statistics and stream-output capture, the Scorpion latch fed a journal in every split; the mutants in all nine signatures, each caught. --wiring scans the
+REM Rig: the SRV turret view's HUD (src\d3d11\srv_turret*.h, srv_turret.cpp, journal_vehicle_latch.h; issue 140): the build's own bytecode of the eight pass-through geometry shaders (kSrvTurretHudGsABytecode to
+REM kSrvTurretHudGsHBytecode, one for each distinct vertex-shader output signature, compiled from srv_turret_hud_shader.h's HLSL by tools\temporal_shader_build and checked here to be that text's
+REM compile), the production binding, constants and maths, run on WARP (with the D3D debug layer when the machine has it) in front of stand-ins for the nine families' shader pairs (the two hologram
+REM families, five radar-named billboard families and the target hologram sphere with either pixel shader) with their output signatures and clip rows: the push-back (a negative gap): a quad at w = 0.4
+REM shifted by the formula's pixels in each eye (and where the truly deeper geometry is seen), a vertex at 1.0 m or more (the larger panels, the reticle) or 0.02 m or less unchanged; and the pull
+REM (the first build's forward move): a quad at w = 1.4 likewise, a vertex at 0.42 m, 500 m or 50 m unchanged, a window with nothing in it a copy, a triangle strip where the same quad as a list
+REM lands, the linkage under the debug layer with its control, the binding's in-and-out with the game's geometry stage and constant slot exactly back, the constants (a push accepted, a gap of 0
+REM refused), the groups, the GPU instrument's statistics and stream-output capture, the Scorpion latch fed a journal in every split; the mutants in all eight signatures, each caught. --wiring scans the
 REM sources that connect it to the game. Built outside build\ and without d3d11.lib, like the supercruise bars' rig: its device is System32's.
 :rig_srv_turret_hud_test
 echo [edvr] === srv_turret_hud_test.exe ===

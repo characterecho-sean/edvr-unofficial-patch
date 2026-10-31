@@ -1,32 +1,39 @@
-// The SRV turret view (issue 140; src/d3d11/srv_turret*.h, srv_turret.cpp, journal_vehicle_latch.h). The build's own bytecode of the HUD's nine pass-through geometry shaders
-// (kSrvTurretHudGsABytecode to kSrvTurretHudGsIBytecode: the build compiles srv_turret_hud_shader.h's HLSL, and this rig checks the bytes are that text's) and the production
-// binding, constants and maths run on WARP, with the D3D debug layer when the machine has it, in front of stand-ins for the ten families' vertex and pixel shaders. A family is a
+// The SRV turret view (issue 140; src/d3d11/srv_turret*.h, srv_turret.cpp, journal_vehicle_latch.h). The build's own bytecode of the HUD's eight pass-through geometry shaders
+// (kSrvTurretHudGsABytecode to kSrvTurretHudGsHBytecode: the build compiles srv_turret_hud_shader.h's HLSL, and this rig checks the bytes are that text's) and the production
+// binding, constants and maths run on WARP, with the D3D debug layer when the machine has it, in front of stand-ins for the nine families' vertex and pixel shaders. A family is a
 // shader pair (srv_turret_math.h kFamilies: the two hologram families 1989E6D3 and 2CECEC30, the radar-named billboards DF3503CD, 44DDCDEB, 9B34C331, 9611A454 and B932058F, the target
-// hologram sphere 5559BD94 with either of its pixel shaders, and the flight HUD's strokes B7790CBF); there is one geometry shader for each distinct vertex-shader OUTPUT SIGNATURE
-// (kSignatures, nine). Each stand-in has the game's output signature, element for element (read from the fxc disassembly of the dumps' bytecode, the `__USER_...` semantics
+// hologram sphere 5559BD94 with either of its pixel shaders; the flight HUD's vectors B7790CBF are not a family); there is one geometry shader for each distinct vertex-shader OUTPUT
+// SIGNATURE (kSignatures, eight). The families are in two GROUPS, each with its own key: the weapon panels (the two hologram families) and the radar (the other seven). Each stand-in has the game's output signature, element for element (read from the fxc disassembly of the dumps' bytecode, the `__USER_...` semantics
 // included; reflection compares the two) and the same clip rows (o.x = dp4(cb0[4], r0), o.y = dp4(cb0[5], r0), o.w = dp4(cb0[7], r0)), and the pixel stand-ins read what the game's
 // pixel shaders read (some also SV_POSITION.xy). The reticle's sprite (vs E508648660A352B2), at about 500 m, is not one of them, nor are the 5334-index shells (at gigametres) or the
 // glare sprite (a constant clip w of 1).
 //
-//   THE SHIFT. A quad at view depth w = 1.4 (a deep panel) with the default gap of 0.96 m and s = +0.0259 (Sean's Pimax: P00 0.940, Elite's eye separation 55.1 mm, the left eye)
-//   lands shifted by the formula's amount, measured in pixels from the texture-coordinate gradient (sub-pixel): clip x + s gap / (w - gap). The right eye shifts the other way.
+//   THE SHIFT (the pull, the first build's forward move: a gap of 0.96 m is what its default was). A quad at view depth w = 1.4 (a deep panel) with a gap of 0.96 m and s = +0.0259
+//   (Sean's Pimax: P00 0.940, Elite's eye separation 55.1 mm, the left eye) lands shifted by the formula's amount, measured in pixels from the texture-coordinate gradient
+//   (sub-pixel): clip x + s gap / (w - gap). The right eye shifts the other way.
+//   THE PUSH (the shipped move: a NEGATIVE gap, window 0.02 to 1.0 m, 1.10 m by default). A quad at w = 0.4 (a weapon panel) lands where the same quad truly moved 1.10 m DEEPER along its
+//   ray from the head centre is seen from that eye, shifted by -s d / (w + d) in clip x, its size unchanged; a vertex at 1.0 m or more (the larger panels, 1.4 m) and one at 0.02 m or
+//   less is unchanged; the left eye's image shifts the other way from the pull's.
 //   THE GEOMETRY. The same shift is what a quad truly moved `gap` metres nearer along its ray from the head centre looks like to each eye, rendered with the plain shader
 //   and Elite's off-centre projection: the two images agree to a hundredth of a pixel, the quad's size unchanged (the cyclopean direction is kept).
-//   THE WINDOW. A vertex at w = 500 (the reticle), 50, 5 or 4 m, or nearer than gap + 0.10 (1.0 m, and the near layer's 0.42 m), is unchanged; with the gap at 0 nothing changes;
-//   a mixed draw moves only the quad in range. The texture coordinates are untouched (an integer-pixel translation reproduces the plain image shifted). All of it for every signature.
-//   THE STRIPS. A quad as a triangle strip (the flight HUD's strokes are drawn as one) is the plain strip bit for bit with the gap at 0 under every culling mode (the winding is kept),
-//   and lands where the same quad as a list lands at the default gap.
+//   THE WINDOW. A vertex at w = 500 (the reticle), 50, 5 or 4 m, or nearer than gap + 0.10 (1.0 m, and the near layer's 0.42 m), is unchanged by the pull; a window with nothing in it,
+//   or s = 0, is a copy; a mixed draw moves only the quad in range. The texture coordinates are untouched (an integer-pixel translation reproduces the plain image shifted). All of it for every signature.
+//   THE STRIPS. A quad as a triangle strip (some of the HUD's strokes are drawn as one) is the plain strip bit for bit through a window with nothing in it, under every culling mode (the
+//   winding is kept), and lands where the same quad as a list lands, for the pull and for the push.
 //   THE LINKAGE. Each shader links against its stand-in under the debug layer with no message, its input is the vertex shader's output element for element and its output the same
 //   again, the pixel shader's inputs are a subset of it; a vertex shader without the texture coordinates is reported by the layer (the control that it really checks).
 //   THE BINDING (the production class, on a real context): in and out for one draw with the game's geometry stage and constant slot exactly as they were and no reference leaked or
 //   kept; a geometry shader of the game's own refused with nothing touched; the restore that fails twice, the settle at the boundary and the state the game rebound; the
-//   geometry stage empty after the issue. THE CONSTANTS: made once per device, rewritten only when a number changes, refused when not finite or not a window.
+//   geometry stage empty after the issue. THE CONSTANTS: made once per device, rewritten only when a number changes, refused when not finite, not a window, a gap of 0 or beyond 2 m;
+//   a push (negative gap) is accepted. THE GROUPS: every family has one, the two hologram families are the panels, the other seven the radar; a group's push is used when above 0, else
+//   the gap, else the group is off; B7790CBF is no family.
 //   THE INSTRUMENT: the pipeline statistics (gs 0 for a plain draw, 2 for a quad through a shader), the stream-output twin of each signature (its record is the vertex whole, from
-//   the signature table) and the capture summary: a quad at 1.4 m reads in_window 6, the near layer's 0.42 m and the reticle's 500 m read in_window 0 with the picture unchanged.
+//   the signature table) and the capture summary: under the pull a quad at 1.4 m reads in_window 6, the near layer's 0.42 m and the reticle's 500 m read in_window 0 with the picture
+//   unchanged; under the push a quad at 0.4 m reads in_window 6 with a negative shift and one at 1.4 m reads in_window 0.
 //   THE SCORPION LATCH (journal_vehicle_latch.h, no device): LoadGame's Ship and LaunchSRV's SRVType set it for combat_multicrew_srv_01 in any case and clear it for anything
 //   else; the main menu's music, DockSRV, SRVDestroyed and Shutdown clear it; a localised name, a missing, escaped, shorter, longer or too distant field is unknown, which is
 //   false; a session fed in two pieces cut at every byte and byte by byte gives the same changes; a new file resets it; the state has no room for a line.
-//   THE MUTANTS, each run through the same cases in every signature's text and each caught: no window, the sign, the divisor, the wrong axis, both ends of the window, and a
+//   THE MUTANTS, each run through the same cases (the pull's and the push's) in every signature's text and each caught: no window, the sign, the divisor, the wrong axis, both ends of the window, and a
 //   pass-through that reverses the winding (caught by the strip cases); and the binding whose restore does nothing. --wiring scans the sources that connect all this to the game,
 //   with controls that edit a copy and must trip the pin.
 #include <windows.h>
@@ -68,6 +75,10 @@ void breadcrumb(const char*) {}
 }  // namespace edvr
 
 static unsigned g_checks = 0;
+// The pull's gap the cases below run with: the first build's default (96 cm), a deep panel's 1.39 m less the near layer's 0.42 m, less a centimetre. The shipped default is 0 now.
+static const float kPullGapM = 0.96f;
+// The push's: the shipped default of both push keys (110 cm), and a weapon panel's depth (0.27 to 0.70 m measured).
+static const float kPushBackM = st::kPushDefaultCm / 100.0f, kPanelW = 0.40f;
 static void check(bool ok, const char* why) {
     ++g_checks;
     if (!ok) throw std::runtime_error(why);
@@ -439,6 +450,41 @@ static void mathCases() {
     check(st::clipXShift(p, 50.0f) == 0.0f && st::clipXShift(p, 5.0f) == 0.0f && st::clipXShift(p, 4.0f) == 0.0f && st::clipXShift(p, 1.0f) == 0.0f && st::clipXShift(p, 1.12f) == 0.0f,
           "w = 50, 5 and 4 (the far end), 1.0 and 1.12 (the near end, exactly) are outside the window");
     check(st::clipXShift(st::paramsFor(sL, 0.0f), 1.5f) == 0.0f, "with the gap at 0 the shift is exactly 0");
+    {   // the push: a negative gap, window 0.02 to 1.0 m
+        const st::TurretParams q = st::pushParamsFor(sL, 1.10f);
+        check(q.s == sL && q.gap == -1.10f && q.wMin == st::kPushNearM && q.wMax == st::kPushSplitM && st::kPushNearM == 0.02f && st::kPushSplitM == 1.0f && q.wMin > q.gap && q.wMax > q.wMin,
+              "the push of 1.10 m is the constants {s, -1.10, 0.02, 1.0}: a window above the (negative) gap");
+        // the analytic shift of moving a point from w to w + d along its ray from the head centre, its angular size unchanged: an eye hx off the centre sees x at
+        // ndc = P00 (X + hx) / w, and after the move (X k + hx) / (w k), k = (w + d) / w; the clip x it needs with w kept is the difference times w. The pull is the same with d < 0.
+        bool analytic = true, outside = true;
+        for (const float d : {0.05f, 0.5f, 1.10f, 2.0f})
+            for (const float w : {0.03f, 0.11f, 0.27f, 0.4f, 0.7f, 0.99f}) {
+                const st::TurretParams pp = st::pushParamsFor(sL, d);
+                const double expect = double(0.94f * st::eyeHx(0, ipd)) * (1.0 / (double(w) + d) - 1.0 / double(w)) * double(w);   // P00 hx (1 / (w + d) - 1 / w) w
+                analytic = analytic && std::fabs(double(st::clipXShift(pp, w)) - expect) < 2e-6 && st::clipXShift(pp, w) < 0.0f &&
+                           std::fabs(double(st::clipXShift(pp, w)) + double(sL) * d / (w + d)) < 2e-6;
+                for (const float deeper : {1.0f, 1.3f, 1.4f, 2.8f, 4.0f, 500.0f}) outside = outside && st::clipXShift(pp, deeper) == 0.0f;
+                for (const float nearer : {0.02f, 0.01f, 0.0f, -1.0f}) outside = outside && st::clipXShift(pp, nearer) == 0.0f;
+            }
+        check(analytic, "the push's clip x shift is -s d / (w + d): the analytic shift of moving a point from w to w + d along its head-centre ray at unchanged angular size (the pull's, sign flipped)");
+        check(outside, "...and 0 outside (0.02, 1.0): at 0.02 and below (and at or behind the eye plane), at 1.0, the larger panels' 1.3 to 2.8 m, 4 m and the reticle's 500 m");
+        check(std::fabs(st::clipXShift(q, 0.4f) + sL * 1.10f / 1.5f) < 1e-6f && std::fabs(st::clipXShift(q, 0.4f) + 0.019f) < 0.0001f && st::clipXShift(st::pushParamsFor(-sL, 1.10f), 0.4f) > 0.0f,
+              "w = 0.4 with the default push: -s d / (w + d) = -0.0190 for the left eye, +0.0190 for the right (the opposite of the pull's)");
+        check(st::clipXShift(st::pushParamsFor(0.0f, 1.10f), 0.4f) == 0.0f, "with s = 0 (the cyclopean eye) the push moves nothing");
+        // the push the pass would bind is one the constants accept (the module never binds a gap of 0)
+        check(std::isfinite(q.gap) && q.gap != 0.0f && std::fabs(q.gap) <= st::kGapLimitM && q.wMin > q.gap && q.wMax > q.wMin && std::fabs(st::pushParamsFor(sL, st::kPushMaxCm / 100.0f).gap) <= st::kGapLimitM,
+              "pushParamsFor passes the binding's validity test (finite, gap != 0, |gap| <= 2 m, wMin above the gap, wMax above wMin), at the key's top too");
+    }
+    {   // which constants a group's draws run with: the push when above 0, else the pull when the gap is above 0, else none
+        st::TurretParams out{};
+        check(st::paramsForGroup(sL, 110, 0, out) && out == st::pushParamsFor(sL, 1.10f), "a push above 0 and the gap at 0: the push");
+        check(st::paramsForGroup(sL, 110, 96, out) && out == st::pushParamsFor(sL, 1.10f), "...and with the gap above 0 too the push is used, not the pull");
+        check(st::paramsForGroup(sL, 0, 96, out) && out == st::paramsFor(sL, 0.96f), "no push and the gap above 0: the pull");
+        check(!st::paramsForGroup(sL, 0, 0, out), "no push and no gap: no constants (the draw is the game's own)");
+        check(st::paramsForGroup(sL, 999, 0, out) && out == st::pushParamsFor(sL, 2.0f) && st::paramsForGroup(sL, 0, 999, out) && out == st::paramsFor(sL, 2.0f), "a key past its range is held to 200 cm");
+        check(st::pushCmOf(st::Group::kPanels, 11, 22) == 11 && st::pushCmOf(st::Group::kRadar, 11, 22) == 22, "a group reads its own push key");
+        check(!std::strcmp(st::groupName(st::Group::kPanels), "panels") && !std::strcmp(st::groupName(st::Group::kRadar), "radar"), "the groups are named panels and radar");
+    }
     check(st::ipdUsable(0.0551f) && st::ipdUsable(0.0632f * 1.5f) && !st::ipdUsable(0.0f) && !st::ipdUsable(NAN) && !st::ipdUsable(0.5f) && st::p00Usable(0.94f) && !st::p00Usable(0.0f) && !st::p00Usable(INFINITY),
           "the separation and P00 are used only when they are a human head and a projection");
     check(static_cast<int>(st::Refuse::kCount) == 5 && std::strcmp(st::refuseName(st::Refuse::kNoEye), "no-eye") == 0 && std::strcmp(st::refuseName(st::Refuse::kGameGs), "game-gs") == 0 &&
@@ -446,27 +492,27 @@ static void mathCases() {
               std::strcmp(st::refuseName(st::Refuse::kNoGeometry), "no-geometry") == 0,
           "five refusal reasons, in the order the 10 s line prints them");
     // the families: the pairs, their records, and that the reticle's sprite and the excluded families are not among them
-    check(st::kFamilyCount == 10 && st::kSignatureCount == 9, "ten families (shader pairs) over nine output signatures");
+    check(st::kFamilyCount == 9 && st::kSignatureCount == 8, "nine families (shader pairs) over eight output signatures");
     struct Pair {
         uint64_t vs, ps;
         const char* name;
         uint32_t sig;
     };
-    const Pair pairs[10] = {
+    const Pair pairs[9] = {
         {0x1989E6D3B405FDE0ull, 0xEAB8A1C95A13FFBEull, "1989E6D3", 0},         {0x2CECEC3065EF0D4Aull, 0xA4D03619D631B186ull, "2CECEC30", 1},
         {0xDF3503CD07F9B10Cull, 0x8C08EB252B0F6095ull, "DF3503CD", 2},         {0x44DDCDEBAEA137D8ull, 0xCB53257EFE8B1696ull, "44DDCDEB", 3},
         {0x9B34C331902DC1EDull, 0x3B3433E4FEBBC37Bull, "9B34C331", 4},         {0x9611A454527F7FEBull, 0x1E1C49DC51C0E509ull, "9611A454", 5},
         {0xB932058F26B76691ull, 0x65861AC394D51526ull, "B932058F", 6},         {0x5559BD94B6852E83ull, 0xEA02FAC2BD6C643Cull, "5559BD94.EA02FAC2", 7},
-        {0x5559BD94B6852E83ull, 0xE95634B0F61D218Full, "5559BD94.E95634B0", 7}, {0xB7790CBFC6554097ull, 0x8DEF46452FA459F5ull, "B7790CBF", 8},
+        {0x5559BD94B6852E83ull, 0xE95634B0F61D218Full, "5559BD94.E95634B0", 7},
     };
     bool pairsOk = true, crossOk = true;
-    for (uint32_t i = 0; i < 10; ++i) {
+    for (uint32_t i = 0; i < 9; ++i) {
         pairsOk = pairsOk && st::kFamilies[i].vs == pairs[i].vs && st::kFamilies[i].ps == pairs[i].ps && !std::strcmp(st::kFamilies[i].name, pairs[i].name) &&
                   st::kFamilies[i].sig == pairs[i].sig && st::familyOf(pairs[i].vs, pairs[i].ps) == int(i) && st::isFamilyVs(pairs[i].vs);
-        for (uint32_t j = 0; j < 10; ++j)
+        for (uint32_t j = 0; j < 9; ++j)
             if (i != j && pairs[i].vs != pairs[j].vs) crossOk = crossOk && st::familyOf(pairs[i].vs, pairs[j].ps) == -1;
     }
-    check(pairsOk, "the ten families: the shader pairs of the dumps, in the table's order, each found by BOTH of its shaders, its vertex shader found by isFamilyVs");
+    check(pairsOk, "the nine families: the shader pairs of the dumps, in the table's order, each found by BOTH of its shaders, its vertex shader found by isFamilyVs");
     check(crossOk && st::familyOf(pairs[7].vs, pairs[8].ps) == 8 && st::familyOf(pairs[8].vs, pairs[7].ps) == 7 && st::familyOf(0, 0) == -1,
           "a draw is a family's only when BOTH shaders of the pair match (a vertex shader with another family's pixel shader is none; the sphere's two pixel shaders are two families)");
     check(st::familyOf(0xE508648660A352B2ull, 0x63ABD86359B57D01ull) == -1 && !st::isFamilyVs(0xE508648660A352B2ull),
@@ -474,12 +520,31 @@ static void mathCases() {
     check(!st::isFamilyVs(0xB12F7A618E1BDE98ull) && !st::isFamilyVs(0x203DF51758AADC4Dull) && !st::isFamilyVs(0x94D5C556DFD6D705ull) && st::familyOf(0xB12F7A618E1BDE98ull, 0x42AC0CACC9CDF72Bull) == -1 &&
               st::familyOf(0x94D5C556DFD6D705ull, 0x912477AEF6958379ull) == -1,
           "the excluded families (the 5334-index shells B12F7A61 and 203DF517 at gigametres, the glare sprite 94D5C556 with a constant clip w of 1) are not in the table");
-    {   // the stream-output records: every family's equals its signature's
-        const uint32_t expectBytes[9] = {44, 40, 24, 52, 44, 36, 28, 36, 164}, expectPos[9] = {7, 6, 2, 9, 7, 5, 3, 5, 37};
+    {   // the flight HUD's vectors (vs B7790CBFC6554097, ps 8DEF46452FA459F5; clip w -658 to +3029 m in the flight of 9fdad3a1) are no family, no signature, and no name in the tables
+        bool gone = st::familyOf(0xB7790CBFC6554097ull, 0x8DEF46452FA459F5ull) == -1 && !st::isFamilyVs(0xB7790CBFC6554097ull);
+        for (uint32_t i = 0; i < st::kFamilyCount; ++i) gone = gone && std::strcmp(st::kFamilies[i].name, "B7790CBF") != 0 && st::kFamilies[i].vs != 0xB7790CBFC6554097ull && st::kFamilies[i].sig < st::kSignatureCount;
+        for (uint32_t s = 0; s < st::kSignatureCount; ++s) gone = gone && std::strcmp(st::kSignatures[s].name, "B7790CBF") != 0 && st::kSignatures[s].count <= 4;
+        check(gone, "the flight HUD's vectors (B7790CBF) are out of the pass: no family, no signature, no pixel-shader pairing");
+    }
+    {   // the groups: every family has one, the two hologram families are the panels, the rest the radar
         bool ok = true;
-        for (uint32_t s = 0; s < 9; ++s) ok = ok && st::sigFloats(s) * 4 == expectBytes[s] && st::sigPosFloat(s) == expectPos[s] && st::sigPosFloat(s) * 4 + 16 == expectBytes[s];
-        for (uint32_t i = 0; i < 10; ++i) ok = ok && st::kFamilies[i].strideBytes == expectBytes[st::kFamilies[i].sig] && st::kFamilies[i].posFloat == expectPos[st::kFamilies[i].sig];
-        check(ok, "the stream-output records: each signature's floats in order, the clip position last (44, 40, 24, 52, 44, 36, 28, 36 and 164 bytes), and each family's are its signature's");
+        uint32_t panels = 0, radar = 0;
+        for (uint32_t i = 0; i < st::kFamilyCount; ++i) {
+            const st::Group g = st::kFamilies[i].group;
+            ok = ok && (g == st::Group::kPanels || g == st::Group::kRadar);
+            panels += g == st::Group::kPanels ? 1 : 0;
+            radar += g == st::Group::kRadar ? 1 : 0;
+            ok = ok && ((i < 2) == (g == st::Group::kPanels)) && !std::strcmp(st::kFamilies[i].name, pairs[i].name);
+        }
+        ok = ok && panels == 2 && radar == 7 && st::kGroupCount == 2 && st::kFamilies[0].vs == 0x1989E6D3B405FDE0ull && st::kFamilies[1].vs == 0x2CECEC3065EF0D4Aull;
+        check(ok, "every family has a group: 1989E6D3 and 2CECEC30 are the panels, the other seven (DF3503CD, 44DDCDEB, 9B34C331, 9611A454, B932058F and the sphere's two) the radar");
+    }
+    {   // the stream-output records: every family's equals its signature's
+        const uint32_t expectBytes[8] = {44, 40, 24, 52, 44, 36, 28, 36}, expectPos[8] = {7, 6, 2, 9, 7, 5, 3, 5};
+        bool ok = true;
+        for (uint32_t s = 0; s < 8; ++s) ok = ok && st::sigFloats(s) * 4 == expectBytes[s] && st::sigPosFloat(s) == expectPos[s] && st::sigPosFloat(s) * 4 + 16 == expectBytes[s];
+        for (uint32_t i = 0; i < 9; ++i) ok = ok && st::kFamilies[i].strideBytes == expectBytes[st::kFamilies[i].sig] && st::kFamilies[i].posFloat == expectPos[st::kFamilies[i].sig];
+        check(ok, "the stream-output records: each signature's floats in order, the clip position last (44, 40, 24, 52, 44, 36, 28 and 36 bytes), and each family's are its signature's");
     }
     {   // the topologies: lists and strips, nothing else
         static_assert(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST == 4 && D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP == 5, "the topology constants srv_turret_math.h carries are D3D11's");
@@ -490,17 +555,25 @@ static void mathCases() {
         check(ok, "triangle lists and triangle strips are carried; points, lines, adjacency, patches and anything else are refused");
     }
     // the measured depths: the deep panels at 1.39 m move at the default gap, the near layer at 0.41 to 0.47 m and the reticle at 500 m do not
-    const st::TurretParams d = st::paramsFor(sL, st::kGapDefaultCm / 100.0f);
-    check(st::kGapDefaultCm == 96 && std::fabs(d.wMin - 1.06f) < 1e-6f && st::clipXShift(d, 1.39f) > 0.05f && st::clipXShift(d, 1.4f) > 0.0f && st::clipXShift(d, 0.42f) == 0.0f &&
+    const st::TurretParams d = st::paramsFor(sL, kPullGapM);
+    check(st::kGapDefaultCm == 0 && st::kPushDefaultCm == 110 && st::kPushMaxCm == 200 && st::kGapMaxCm == 200 && std::fabs(d.wMin - 1.06f) < 1e-6f && st::clipXShift(d, 1.39f) > 0.05f && st::clipXShift(d, 1.4f) > 0.0f && st::clipXShift(d, 0.42f) == 0.0f &&
               st::clipXShift(d, 0.41f) == 0.0f && st::clipXShift(d, 0.47f) == 0.0f && st::clipXShift(d, 500.0f) == 0.0f,
-          "at the default gap (96 cm): the deep band is 1.06 to 4.0 m; w = 1.39 moves, w = 0.41 to 0.47 (the near layer) and 500 m (the reticle) do not");
+          "at a pull of 96 cm (the first build's default; the shipped default is 0, the push keys' 110): the deep band is 1.06 to 4.0 m; w = 1.39 moves, w = 0.41 to 0.47 (the near layer) and 500 m (the reticle) do not");
+    {   // the measured depths under the push: the weapon panels (0.27 to 0.70 m) and the radar (0.11 to 0.44 m) move, the larger panels (1.3 to 2.8 m) and the reticle do not
+        const st::TurretParams q = st::pushParamsFor(sL, kPushBackM);
+        bool ok = true;
+        for (const float w : {0.11f, 0.27f, 0.32f, 0.34f, 0.42f, 0.44f, 0.65f, 0.70f, 0.85f}) ok = ok && st::clipXShift(q, w) < -0.005f;
+        for (const float w : {1.3f, 1.39f, 1.41f, 1.5f, 1.7f, 2.8f, 500.0f}) ok = ok && st::clipXShift(q, w) == 0.0f;
+        check(ok, "at the default push (110 cm): the radar (0.11 to 0.44 m) and the weapon panels (0.27 to 0.70 m) move, the larger panels (1.3 to 2.8 m) and the reticle (500 m) do not");
+        check(std::fabs((0.40f + kPushBackM) - 1.50f) < 1e-5f && std::fabs((0.30f + kPushBackM) - 1.40f) < 1e-5f, "...and a panel at 0.30 to 0.40 m lands at 1.40 to 1.50 m, where the larger panels are");
+    }
     check(std::fabs((1.39f - d.gap) - 0.43f) < 1e-5f, "...and the panel lands at 0.43 m, where the near layer is");
 }
 
 // ---------------------------------------------------------------- the geometry, run on the production shader and on each mutant
 static void geometryCases(ID3D11GeometryShader* gs, Fails& f) {
     const Cam cam;
-    const float ipd = 0.0551f, gap = st::kGapDefaultCm / 100.0f;   // the default gap, and a deep panel's depth
+    const float ipd = 0.0551f, gap = kPullGapM;   // the pull's gap (the first build's default), and a deep panel's depth
     const float w0 = 1.4f, qx0 = -0.30f, qx1 = 0.30f, qy0 = -0.20f, qy1 = 0.20f;
     for (int eye = 0; eye < 2; ++eye) {
         const float hx = st::eyeHx(eye, ipd), ex = -hx;   // the eye's place against the head centre
@@ -520,7 +593,7 @@ static void geometryCases(ID3D11GeometryShader* gs, Fails& f) {
         f.expect(std::fabs(expectPx) > 3.0 && std::fabs(expectPx) < 8.0, "the case is a shift of several pixels");
         f.expect((eye == 0) == (em.xl > ep.xl), "the left eye's image shifts towards the right, the right eye's towards the left");
         f.expect(std::fabs((em.xl - ep.xl) - expectPx) < 0.03 && std::fabs((em.xr - ep.xr) - expectPx) < 0.03,
-                 "a quad at w = 1.4 with the default gap (96 cm) lands shifted by s gap / (w - gap) / w half-widths of the target: the formula's pixels");
+                 "a quad at w = 1.4 with the pull (96 cm) lands shifted by s gap / (w - gap) / w half-widths of the target: the formula's pixels");
         f.expect(std::fabs((em.xr - em.xl) - (ep.xr - ep.xl)) < 0.03, "...with its size unchanged (a translation: the cyclopean direction is kept)");
         f.expect(std::fabs(em.xl - er.xl) < 0.03 && std::fabs(em.xr - er.xr) < 0.03 && std::fabs((er.xr - er.xl) - (ep.xr - ep.xl)) < 0.03,
                  "...and it is where the geometry truly moved `gap` nearer along its ray from the head centre is seen from that eye, with Elite's off-centre projection");
@@ -550,9 +623,10 @@ static void geometryCases(ID3D11GeometryShader* gs, Fails& f) {
         }
         std::vector<Vtx> v;
         addQuad(v, -0.3f, 0.3f, -0.2f, 0.2f, w0, ex);
-        const Frame plain = render(v, cam, nullptr, st::paramsFor(0.0259f, 0.0f));
-        const Frame zero = render(v, cam, gs, st::paramsFor(0.0259f, 0.0f));
-        f.expect(covered(plain) > 1000 && maxDiff(plain, zero) == 0.0, "with the gap at 0 the image is the plain one, bit for bit");
+        const st::TurretParams empty{0.0259f, gap, 100.0f, 200.0f};   // a valid window with nothing in it (the constants refuse a gap of 0: the module never binds one)
+        const Frame plain = render(v, cam, nullptr, empty);
+        const Frame zero = render(v, cam, gs, empty);
+        f.expect(covered(plain) > 1000 && maxDiff(plain, zero) == 0.0, "with a window nothing lies in the image is the plain one, bit for bit");
         const Frame zeroS = render(v, cam, gs, st::paramsFor(0.0f, gap));
         f.expect(maxDiff(plain, zeroS) == 0.0, "...and with s = 0 (the cyclopean eye) too");
         // a mixed draw: the near quad in the window moves, the far one (the reticle) does not
@@ -593,6 +667,94 @@ static void geometryCases(ID3D11GeometryShader* gs, Fails& f) {
     }
 }
 
+// ---------------------------------------------------------------- the push-back: a negative gap, window 0.02 to 1.0 m
+// The shipped move, through the same shader and the same constants buffer with a gap of -d: a vertex nearer than 1 m goes d metres DEEPER along its ray from the head centre (its size on
+// the screen kept), and a vertex at 1 m or deeper (the larger panels, 1.3 m and more; the reticle) or at 0.02 m or nearer stays. A weapon panel is at about 0.4 m.
+static void pushCases(ID3D11GeometryShader* gs, Fails& f) {
+    const Cam cam;
+    const float ipd = 0.0551f, back = kPushBackM, w0 = kPanelW;
+    const float sc = w0 / 1.5f;   // the same size on the screen as the pull's quad at 1.5 m
+    const float qx0 = -0.30f * sc, qx1 = 0.30f * sc, qy0 = -0.20f * sc, qy1 = 0.20f * sc;
+    for (int eye = 0; eye < 2; ++eye) {
+        const float hx = st::eyeHx(eye, ipd), ex = -hx;   // the eye's place against the head centre
+        const float s = cam.p00 * hx;
+        const st::TurretParams params = st::pushParamsFor(s, back);
+        DrawOpts o;
+        o.eye = eye;
+        std::vector<Vtx> panel, truth;
+        addQuad(panel, qx0, qx1, qy0, qy1, w0, ex);
+        addQuad(truth, qx0, qx1, qy0, qy1, w0, ex, (w0 + back) / w0);   // the truly deeper geometry: k = (w + d) / w
+        const Frame plain = render(panel, cam, nullptr, params);
+        const Frame moved = render(panel, cam, gs, params, 256, 256, o);
+        const Frame real = render(truth, cam, nullptr, params);
+        const Edges ep = edgesOnRow(plain, 128), em = edgesOnRow(moved, 128), er = edgesOnRow(real, 128);
+        f.expect(ep.ok && em.ok && er.ok, "push: the quad's edges are found in all three images");
+        const double expectPx = double(st::clipXShift(params, w0)) / w0 * 128.0;   // ndc * (width / 2)
+        f.expect(std::fabs(expectPx) > 3.0 && std::fabs(expectPx) < 8.0, "push: the case is a shift of several pixels");
+        f.expect((eye == 0) == (em.xl < ep.xl), "push: the left eye's image shifts towards the left, the right eye's towards the right (the pull's opposite)");
+        f.expect(std::fabs((em.xl - ep.xl) - expectPx) < 0.03 && std::fabs((em.xr - ep.xr) - expectPx) < 0.03,
+                 "push: a quad at w = 0.4 with the default push (110 cm) lands shifted by -s d / (w + d) / w half-widths of the target: the formula's pixels");
+        f.expect(std::fabs((em.xr - em.xl) - (ep.xr - ep.xl)) < 0.03, "push: ...with its size unchanged (a translation: the cyclopean direction is kept)");
+        f.expect(std::fabs(em.xl - er.xl) < 0.03 && std::fabs(em.xr - er.xr) < 0.03 && std::fabs((er.xr - er.xl) - (ep.xr - ep.xl)) < 0.03,
+                 "push: ...and it is where the geometry truly moved `d` DEEPER along its ray from the head centre is seen from that eye, with Elite's off-centre projection");
+        const Edges emTop = edgesOnRow(moved, 120), epTop = edgesOnRow(plain, 120);
+        f.expect(emTop.ok && epTop.ok && std::fabs((emTop.xl - epTop.xl) - expectPx) < 0.03, "push: the shift is the same on every row (the quad is flat at one depth)");
+        f.expect(covered(moved) > 1500 && std::fabs(covered(moved) - covered(plain)) < 40, "push: the quad covers as many pixels as before");
+        double yWorst = 0;
+        for (UINT y = 0; y < 256; ++y) yWorst += (plain.at(128, y)[3] > 0.5f) != (moved.at(128, y)[3] > 0.5f) ? 1 : 0;
+        f.expect(yWorst <= 1, "push: the same rows are covered (y is untouched)");
+    }
+    {   // the window: the larger panels, the reticle and both edges stay; s = 0 is a copy; a mixed draw moves only what lies nearer than 1 m
+        const st::TurretParams loud = st::pushParamsFor(3.0f, back);   // a big s, so a vertex wrongly moved would show
+        for (const float w : {500.0f, 50.0f, 5.0f, 4.0f, 2.8f, 1.4f, 1.3f, 1.0f, 0.02f, 0.01f}) {
+            std::vector<Vtx> v;
+            addQuad(v, -0.3f * w / 1.5f, 0.3f * w / 1.5f, -0.2f * w / 1.5f, 0.2f * w / 1.5f, w, 0.0f);   // the same size on the screen at any depth
+            const Frame plain = render(v, cam, nullptr, loud);
+            const Frame through = render(v, cam, gs, loud);
+            char what[200];
+            std::snprintf(what, sizeof(what), "push: a quad at w = %.2f is outside the window (%.2f to %.2f) and the image is the plain one, bit for bit", double(w), double(loud.wMin), double(loud.wMax));
+            f.expect(covered(plain) > 1000 && maxDiff(plain, through) == 0.0, what);
+        }
+        const float hx = st::eyeHx(0, ipd), ex = -hx;
+        std::vector<Vtx> v;
+        addQuad(v, qx0, qx1, qy0, qy1, w0, ex);
+        const Frame plain = render(v, cam, nullptr, st::pushParamsFor(0.0f, back));
+        const Frame zeroS = render(v, cam, gs, st::pushParamsFor(0.0f, back));
+        f.expect(covered(plain) > 1000 && maxDiff(plain, zeroS) == 0.0, "push: with s = 0 (the cyclopean eye) the image is the plain one, bit for bit");
+        std::vector<Vtx> mixed, nearOnly, farOnly;   // a weapon panel at 0.4 m above the centre, a larger panel at 1.4 m below it
+        addQuad(mixed, -0.0857f, 0.0857f, 0.0143f, 0.0714f, w0, ex);
+        addQuad(mixed, -0.3f, 0.3f, -0.45f, -0.25f, 1.4f, ex);
+        addQuad(nearOnly, -0.0857f, 0.0857f, 0.0143f, 0.0714f, w0, ex);
+        addQuad(farOnly, -0.3f, 0.3f, -0.45f, -0.25f, 1.4f, ex);
+        const st::TurretParams p = st::pushParamsFor(0.0259f, back);
+        const Frame mixedMoved = render(mixed, cam, gs, p);
+        const Frame nearMoved = render(nearOnly, cam, gs, p);
+        const Frame farPlain = render(farOnly, cam, nullptr, p);
+        const Frame nearPlain = render(nearOnly, cam, nullptr, p);
+        double worst = 0;
+        for (UINT y = 0; y < 256; ++y)
+            for (UINT x = 0; x < 256; ++x)
+                for (int c = 0; c < 4; ++c) worst = std::max(worst, std::fabs(double(mixedMoved.at(x, y)[c]) - std::max(nearMoved.at(x, y)[c], farPlain.at(x, y)[c])));
+        f.expect(covered(farPlain) > 500 && worst == 0.0 && maxDiff(nearMoved, nearPlain) > 0.05,
+                 "push: a draw of a weapon panel at 0.4 m and a larger panel at 1.4 m moves the first and leaves the second: the rule is per vertex");
+    }
+    {   // the texture coordinates are untouched: an integer-pixel translation, to the left, reproduces the plain image shifted
+        const float k = 5.0f;   // pixels
+        const float s = k * 2.0f * w0 * (w0 + back) / (256.0f * back);
+        std::vector<Vtx> v;
+        addQuad(v, qx0, qx1, qy0, qy1, w0, 0.0f);
+        Cam centred;
+        centred.offX = centred.offY = 0.0f;
+        const Frame plain = render(v, centred, nullptr, st::pushParamsFor(s, back));
+        const Frame moved = render(v, centred, gs, st::pushParamsFor(s, back));
+        double worst = 0;
+        for (UINT y = 0; y < 256; ++y)
+            for (UINT x = 8; x + 8 < 256; ++x)
+                for (int c = 0; c < 4; ++c) worst = std::max(worst, std::fabs(double(moved.at(x - 5, y)[c]) - plain.at(x, y)[c]));
+        f.expect(worst < 2e-3 && covered(plain) > 1000, "push: the texture coordinates and the pixel stage are untouched: a 5 px translation to the left reproduces the plain image 5 px along");
+    }
+}
+
 // ---------------------------------------------------------------- the linkage, with the signatures compared
 // The production bytes of each signature's geometry shader, as the build generates them, and the HLSL text they are the compile of.
 struct SigBytes {
@@ -602,7 +764,7 @@ struct SigBytes {
 };
 #define EDVR_RIG_SIG_BYTES(L) {edvr::kSrvTurretHudGs##L##Bytecode, sizeof(edvr::kSrvTurretHudGs##L##Bytecode), edvr::kSrvTurretHudGs##L}
 static const SigBytes kBytes[st::kSignatureCount] = {EDVR_RIG_SIG_BYTES(A), EDVR_RIG_SIG_BYTES(B), EDVR_RIG_SIG_BYTES(C), EDVR_RIG_SIG_BYTES(D), EDVR_RIG_SIG_BYTES(E),
-                                                     EDVR_RIG_SIG_BYTES(F), EDVR_RIG_SIG_BYTES(G), EDVR_RIG_SIG_BYTES(H), EDVR_RIG_SIG_BYTES(I)};
+                                                     EDVR_RIG_SIG_BYTES(F), EDVR_RIG_SIG_BYTES(G), EDVR_RIG_SIG_BYTES(H)};
 #undef EDVR_RIG_SIG_BYTES
 
 static void linkageCases(int fam, ID3D11GeometryShader* gs) {
@@ -885,9 +1047,26 @@ static void constantsCases() {
     bad.wMax = bad.wMin;
     check(c.get(g_ctx.Get(), bad) == nullptr, "an empty window: refused");
     bad = a;
-    bad.gap = -0.1f;
-    check(c.get(g_ctx.Get(), bad) == nullptr, "a negative gap: refused");
+    bad.gap = 0.0f;
+    check(c.get(g_ctx.Get(), bad) == nullptr, "a gap of 0 (it moves nothing, and the module never binds one): refused");
+    bad = a;
+    bad.gap = 2.5f;
+    bad.wMin = 2.6f;
+    check(c.get(g_ctx.Get(), bad) == nullptr, "a gap beyond 2 m: refused");
+    bad = st::pushParamsFor(0.0259f, 2.5f);
+    check(c.get(g_ctx.Get(), bad) == nullptr, "...and a push beyond 2 m: refused");
+    bad = st::pushParamsFor(0.0259f, 1.10f);
+    bad.wMin = -2.0f;
+    check(c.get(g_ctx.Get(), bad) == nullptr, "a push whose window starts at or below its (negative) gap: refused");
+    bad = st::pushParamsFor(0.0259f, 1.10f);
+    bad.gap = -INFINITY;
+    check(c.get(g_ctx.Get(), bad) == nullptr, "a gap that is not finite: refused");
     check(c.get(g_ctx.Get(), a) == first, "...and the buffer is still the good one");
+    const st::TurretParams push = st::pushParamsFor(0.0259f, 1.10f), pushTop = st::pushParamsFor(-0.0259f, st::kPushMaxCm / 100.0f);
+    check(c.get(g_ctx.Get(), push) == first && c.written() == push, "a push (a negative gap, window 0.02 to 1.0): accepted, the same buffer rewritten");
+    check(readBack(first) == push, "...and the buffer holds the push's numbers");
+    check(c.get(g_ctx.Get(), pushTop) == first && c.written() == pushTop, "a push of the key's top (2.00 m) is accepted too");
+    check(c.get(g_ctx.Get(), a) == first && c.written() == a, "...and the pull again rewrites it");
     ComPtr<ID3D11Device> d2;
     ComPtr<ID3D11DeviceContext> c2;
     ck(edvr::systemD3D11CreateDevice()(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, nullptr, 0, D3D11_SDK_VERSION, &d2, nullptr, &c2), "second device");
@@ -896,22 +1075,22 @@ static void constantsCases() {
     c.reset();
     check(c.buffer() == nullptr && !c.failed(), "reset releases the buffer");
     // the production arrays also carry the key defaults the module reads
-    check(st::kBackDefaultCm == 60 && st::kGapDefaultCm == 96, "the keys' defaults: 60 cm back, a 96 cm gap");
+    check(st::kBackDefaultCm == 60 && st::kGapDefaultCm == 0 && st::kPushDefaultCm == 110, "the keys' defaults: 60 cm back, no gap (the pull is off), a 110 cm push on both groups");
 }
 
 // ---------------------------------------------------------------- triangle strips (the flight HUD's strokes are drawn as one)
 // A quad as a four-vertex strip. The input assembler hands the geometry shader's `triangle` input each strip triangle in the winding the rasterizer would have used, and the
-// shader emits each as a strip of its own, so: (1) with the gap at 0 the picture is the plain strip's bit for bit under every culling mode, and in the mode that shows the strip
-// the other mode shows nothing (the winding is consistent, the control that the odd triangle is not turned inside out); (2) with the default gap the strip lands exactly where the
-// same quad as a list lands.
+// shader emits each as a strip of its own, so: (1) through a window nothing lies in the picture is the plain strip's bit for bit under every culling mode, and in the mode that shows the
+// strip the other mode shows nothing (the winding is consistent, the control that the odd triangle is not turned inside out); (2) with the pull, and with the push, the strip lands
+// exactly where the same quad as a list lands.
 static void stripCases(ID3D11GeometryShader* gs, Fails& f) {
     const Cam cam;
-    const float ipd = 0.0551f, gap = st::kGapDefaultCm / 100.0f, w0 = 1.4f;
+    const float ipd = 0.0551f, gap = kPullGapM, w0 = 1.4f;
     const float hx = st::eyeHx(0, ipd), ex = -hx;
     std::vector<Vtx> list, strip;
     addQuad(list, -0.30f, 0.30f, -0.20f, 0.20f, w0, ex);
     strip = {list[0], list[1], list[2], list[4]};   // (x0,y0) (x1,y0) (x0,y1) (x1,y1)
-    const st::TurretParams p = st::paramsFor(cam.p00 * hx, gap), zero = st::paramsFor(cam.p00 * hx, 0.0f);
+    const st::TurretParams p = st::paramsFor(cam.p00 * hx, gap), zero{cam.p00 * hx, gap, 100.0f, 200.0f};   // zero: a valid window with nothing in it
     double shown[3] = {};
     for (int cull = 0; cull < 3; ++cull) {
         DrawOpts o;
@@ -920,17 +1099,36 @@ static void stripCases(ID3D11GeometryShader* gs, Fails& f) {
         const Frame plain = render(strip, cam, nullptr, zero, 256, 256, o);
         const Frame copy = render(strip, cam, gs, zero, 256, 256, o);
         shown[cull] = covered(plain);
-        f.expect(maxDiff(plain, copy) == 0.0, "a triangle strip through the shader with the gap at 0 is the plain strip, bit for bit, under every culling mode");
+        f.expect(maxDiff(plain, copy) == 0.0, "a triangle strip through the shader with nothing in its window is the plain strip, bit for bit, under every culling mode");
         DrawOpts ol = o;
         ol.topology = D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
         const Frame moved = render(strip, cam, gs, p, 256, 256, o);
         const Frame listMoved = render(list, cam, gs, p, 256, 256, ol);
-        f.expect(maxDiff(moved, listMoved) == 0.0, "a strip quad at the default gap lands exactly where the same quad as a list lands");
+        f.expect(maxDiff(moved, listMoved) == 0.0, "a strip quad under the pull lands exactly where the same quad as a list lands");
         const Frame plainList = render(list, cam, nullptr, p, 256, 256, ol);
         f.expect(cull != 0 || (covered(moved) > 1500 && maxDiff(moved, plainList) > 0.05), "...and it is shifted (the picture is not the plain quad's)");
     }
     f.expect(shown[0] > 1500 && ((shown[1] > 1500) != (shown[2] > 1500)) && (shown[1] < 1.0 || shown[2] < 1.0),
              "the control: the plain strip is whole with no culling and with one facing culled, and gone with the other (both triangles share a winding)");
+    {   // the push: a weapon panel at 0.4 m as a strip lands where the same quad as a list lands, under every culling mode
+        const float sc = kPanelW / 1.5f;
+        std::vector<Vtx> plist, pstrip;
+        addQuad(plist, -0.30f * sc, 0.30f * sc, -0.20f * sc, 0.20f * sc, kPanelW, ex);
+        pstrip = {plist[0], plist[1], plist[2], plist[4]};
+        const st::TurretParams push = st::pushParamsFor(cam.p00 * hx, kPushBackM);
+        for (int cull = 0; cull < 3; ++cull) {
+            DrawOpts o;
+            o.cull = cull;
+            o.topology = D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP;
+            DrawOpts ol = o;
+            ol.topology = D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
+            const Frame moved = render(pstrip, cam, gs, push, 256, 256, o);
+            const Frame listMoved = render(plist, cam, gs, push, 256, 256, ol);
+            f.expect(maxDiff(moved, listMoved) == 0.0, "a strip quad under the push lands exactly where the same quad as a list lands");
+            const Frame plainList = render(plist, cam, nullptr, push, 256, 256, ol);
+            f.expect(cull != 0 || (covered(moved) > 1500 && maxDiff(moved, plainList) > 0.05), "...and it is shifted (the picture is not the plain quad's)");
+        }
+    }
 }
 
 // ---------------------------------------------------------------- the GPU instrument (srv_turret.cpp's probe*): the same calls, on WARP
@@ -944,7 +1142,7 @@ static void instrumentCases(int fam, ID3D11GeometryShader* gs) {
     const UINT stride = strideFloats * 4;
     ck(g_dev->CreateGeometryShaderWithStreamOutput(kBytes[fam].data, kBytes[fam].size, decl, entries, &stride, 1, 0, nullptr, &twin), "the stream-output twin is made from the signature's bytecode");
     const Cam cam;
-    const float ipd = 0.0551f, gap = st::kGapDefaultCm / 100.0f, w0 = 1.4f;   // the default gap and a deep panel's depth
+    const float ipd = 0.0551f, gap = kPullGapM, w0 = 1.4f;   // the pull's gap and a deep panel's depth
     const float hx = st::eyeHx(0, ipd), ex = -hx;
     const st::TurretParams params = st::paramsFor(cam.p00 * hx, gap);
     std::vector<Vtx> quad;
@@ -1021,6 +1219,38 @@ static void instrumentCases(int fam, ID3D11GeometryShader* gs) {
         check(outCap.stats.GSInvocations == 2 && co.vertices == 6 && co.inWindow == 0 && std::fabs(co.wMin - depth) < depth * 1e-3f && co.shiftMin == 0.0f && co.shiftMax == 0.0f &&
                   maxDiff(twinOut, plainOut) == 0.0 && covered(twinOut) > 1000,
               what);
+    }
+    {   // the push: a weapon panel (w 0.4) is IN the window (0.02, 1.0) with a negative shift, a larger panel (1.4) and the reticle (500) are not
+        const st::TurretParams push = st::pushParamsFor(cam.p00 * hx, kPushBackM);
+        const float sc = kPanelW / w0;   // the same size on the screen
+        std::vector<Vtx> panel;
+        addQuad(panel, -0.30f * sc, 0.30f * sc, -0.20f * sc, 0.20f * sc, kPanelW, ex);
+        Sample pushCap, pushPlain;
+        DrawOpts opush = base;
+        opush.sample = &pushCap;
+        opush.soTarget = true;
+        const Frame twinPush = render(panel, cam, twin.Get(), push, 256, 256, opush);
+        DrawOpts oprod = base;
+        oprod.sample = &pushPlain;
+        const Frame prodPush = render(panel, cam, gs, push, 256, 256, oprod);
+        const st::CaptureSummary cp = st::summarizeCapture(pushCap.records.data(), 6, strideFloats, posFloat, push);
+        const float pshift = st::clipXShift(push, kPanelW);
+        check(pushCap.stats.GSInvocations == 2 && cp.vertices == 6 && cp.inWindow == 6 && std::fabs(cp.wMin - kPanelW) < 1e-4f && std::fabs(cp.wMax - kPanelW) < 1e-4f,
+              "under the push a quad at 0.4 m: the geometry shader ran twice and all six captured vertices lie in the window");
+        check(pshift < -0.01f && std::fabs(cp.shiftMin - pshift) < 1e-6f && std::fabs(cp.shiftMax - pshift) < 1e-6f && maxDiff(twinPush, prodPush) == 0.0,
+              "...with the NEGATIVE shift the rule gives them (-s d / (w + d)), and the twin rasterizes exactly as the production shader does");
+        const float pl = (cam.p00 * (-0.30f * sc - ex) + cam.offX * kPanelW + pshift) / kPanelW, pr = (cam.p00 * (0.30f * sc - ex) + cam.offX * kPanelW + pshift) / kPanelW;
+        check(std::fabs(cp.ndcXMin - pl) < 1e-5f && std::fabs(cp.ndcXMax - pr) < 1e-5f, "...and the streamed clip x / w is the pushed edge: the shader wrote the position the rule says");
+        std::vector<Vtx> deep;
+        addQuad(deep, -0.30f, 0.30f, -0.20f, 0.20f, w0, ex);
+        Sample deepCap;
+        DrawOpts odeep = base;
+        odeep.sample = &deepCap;
+        odeep.soTarget = true;
+        (void)render(deep, cam, twin.Get(), push, 256, 256, odeep);
+        const st::CaptureSummary cd = st::summarizeCapture(deepCap.records.data(), 6, strideFloats, posFloat, push);
+        check(deepCap.stats.GSInvocations == 2 && cd.vertices == 6 && cd.inWindow == 0 && std::fabs(cd.wMin - w0) < 1e-4f && cd.shiftMin == 0.0f && cd.shiftMax == 0.0f,
+              "...and a larger panel at 1.4 m: the shader ran, the capture reads in_window 0 and no shift (a healthy row under the push)");
     }
     // the summary's own edges
     std::vector<float> junk(2 * strideFloats, 0.0f);
@@ -1220,13 +1450,14 @@ int main(int argc, char** argv) {
             linkageCases(int(fam), gsOf[fam].Get());
             instrumentCases(int(fam), gsOf[fam].Get());
             geometryCases(gsOf[fam].Get(), production);
+            pushCases(gsOf[fam].Get(), production);
             stripCases(gsOf[fam].Get(), production);
         }
         g_fam = 0;
         bindingCases(gsOf[0].Get(), production, true);
         afterIssueCases(gsOf[0].Get(), production, false);
         if (production.n) std::printf("first failing production check: %s (%u failed)\n", production.first.c_str(), production.n);
-        check(production.n == 0, "the production shaders and binding pass every geometry, strip, binding and issue-end case, for all nine signatures");
+        check(production.n == 0, "the production shaders and binding pass every geometry, push, strip, binding and issue-end case, for all eight signatures");
 
         // THE MUTANTS: each through the same cases, each must fail at least one, in each signature's text.
         struct Mutant {
@@ -1251,8 +1482,9 @@ int main(int argc, char** argv) {
                 const auto mg = gsFromText(mutated);
                 Fails fails;
                 geometryCases(mg.Get(), fails);
+                pushCases(mg.Get(), fails);
                 char what[200];
-                std::snprintf(what, sizeof(what), "the mutant \"%s\" of signature %u's shader is caught by the geometry cases", m.name, fam);
+                std::snprintf(what, sizeof(what), "the mutant \"%s\" of signature %u's shader is caught by the geometry and push cases", m.name, fam);
                 check(fails.n > 0, what);
             }
             {   // a pass-through that reverses every triangle's winding (what a shader that did not keep the input assembler's order would do to a strip): caught by the strip cases
@@ -1288,7 +1520,7 @@ int main(int argc, char** argv) {
             }
         }
         wiringCases();
-        std::printf("PASS srv_turret_hud_test: %u checks; the turret shaders, binding, constants, maths and Scorpion latch on WARP, six shader mutants in each of nine signatures and one binding mutant caught\n", g_checks);
+        std::printf("PASS srv_turret_hud_test: %u checks; the turret shaders, binding, constants, maths and Scorpion latch on WARP, six shader mutants (and the push's cases) in each of eight signatures and one binding mutant caught\n", g_checks);
         return 0;
     } catch (const std::exception& e) {
         std::printf("FAIL %s (%u checks)\n", e.what(), g_checks);
