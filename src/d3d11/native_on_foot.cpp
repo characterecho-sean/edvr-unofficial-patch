@@ -93,6 +93,7 @@
 #include "native_on_foot_f192.h"   // F192: the left elbow held down through a weapon draw: the draw-hold weight by native epoch, its counters and line (pure parts)
 #include "native_on_foot_f193.h"   // F193: in the sights the body follows the camera's height, as at the hip: the rule, the stability stop, the 1 s line (pure parts)
 #include "native_on_foot_f194.h"   // F194: look to aim aims at the middle of the picture; its eye height settles as mouse look's does: the ray, the gate, the lines, the height probe (pure parts)
+#include "native_on_foot_f195.h"   // F195: at a look-to-aim engage the aim keeps its pitch where the mouse left it; only the yaw is centred (pure parts)
 #include "native_on_foot_f182.h"   // F182: the left hand stays on a two-handed gun aimed steeply up (the stored grip point in the item's frame; pure parts)
 #include "native_on_foot_f176.h"   // F176: in the sights with the head aiming, the mouse and the stick hold their pitch (pure parts)
 #include "native_on_foot_f175.h"   // F175 (measure only): the view's roll and pitch against the headset's, by look mode and item (pure parts)
@@ -221,13 +222,19 @@ std::atomic<uint32_t> g_f109Foreign{0};
 std::atomic<float> g_f109GainEndLo{0.0f}, g_f109GainEndHi{0.0f};
 std::atomic<float> g_f109RootPitch{0.0f};
 std::atomic<uint64_t> g_f109RootMs{0};
-// F194 (TEMPORARY A/B, both live). g_ltaAimsAtPictureCentre: experimental.native_on_foot_look_to_aim_aims_at_picture_centre, on | off, default on: the centring (at an engage, and F133's yaw re-centre) takes the
-// ray through the middle of the picture, not the headset's forward axis; read at the next engage (a live change while engaged is taken then, and at the end of an F131 hold, which engages afresh).
+// F194 (TEMPORARY A/B, both live). g_ltaAimsAtPictureCentre: experimental.native_on_foot_look_to_aim_aims_at_picture_centre, on | off, default OFF since F195 (the 2026-10-31 Quest flight refuted it for the pilot): the
+// centring (at an engage, and F133's yaw re-centre) takes the ray through the middle of the picture, not the headset's forward axis; read at the next engage (a live change while engaged is taken then, and at
+// the end of an F131 hold, which engages afresh).
 // g_ltaEyeHeightAsMouseLook: experimental.native_on_foot_look_to_aim_eye_height_as_mouse_look, on | off, default on: look to aim's own 10 deg settle gate is skipped (F139's 20 deg covers it as it covers mouse look).
-std::atomic<bool> g_ltaAimsAtPictureCentre{true};
+std::atomic<bool> g_ltaAimsAtPictureCentre{false};
 std::atomic<bool> g_ltaEyeHeightAsMouseLook{true};
-bool g_ltaAimsAtPictureCentreLast = true, g_ltaAimsAtPictureCentreLogged = false;   // the value last logged (frame thread; the first read always logs)
+bool g_ltaAimsAtPictureCentreLast = false, g_ltaAimsAtPictureCentreLogged = false;   // the value last logged (frame thread; the first read always logs)
 bool g_ltaEyeHeightAsMouseLookLast = true, g_ltaEyeHeightAsMouseLookLogged = false;
+// F195 (TEMPORARY A/B, live): experimental.native_on_foot_look_to_aim_keeps_aim_pitch, on | off, default on: at an engage the aim keeps the pitch offset the pilot had from the head (up to 15 deg either way) and only
+// the yaw (and any pitch offset beyond it) is centred; off is F109's full centring. g_ltaKeepPitch is what the follower's last fresh start took (ltaFreshFollower), so a live change waits for the next engage.
+std::atomic<bool> g_ltaKeepsAimPitch{true};
+bool g_ltaKeepsAimPitchLast = true, g_ltaKeepsAimPitchLogged = false;   // the value last logged (frame thread; the first read always logs)
+bool g_ltaKeepPitch = true;
 // F194 (frame thread): the headset's frustum as the channel last answered (a log line on change), and the picture-centre pitch in force (radians, 0: the forward axis).
 nofoot::f194::Frustum g_f194Frustum;
 bool g_f194FrustumLogged = false, g_f194FrustumKeyLast = false;
@@ -1302,14 +1309,15 @@ void readKey() {
     }
     // F194 (TEMPORARY A/B, live, two keys; each is spelled out in its own call, the generator scans). The flights' answer makes the winner the behaviour and the keys go.
     {
-        const bool aimsOn = cfg.getString("experimental.native_on_foot_look_to_aim_aims_at_picture_centre", "on") != "off";
+        const bool aimsOn = cfg.getString("experimental.native_on_foot_look_to_aim_aims_at_picture_centre", "off") == "on";
         if (first || aimsOn != g_ltaAimsAtPictureCentreLast || !g_ltaAimsAtPictureCentreLogged)
             Log::get().note("native on foot look to aim (F194, TEMPORARY A/B): experimental.native_on_foot_look_to_aim_aims_at_picture_centre is %s -- %s; a change while look to aim is engaged is taken "
                             "at its next engage (and at the end of an F131 hold, which engages afresh)",
                             aimsOn ? "on" : "off",
                             aimsOn ? "look to aim aims at the ray from the head through the middle of the picture (the headset's forward axis turned about the head's right axis by the frustum's centre, "
                                      "13 deg down on a Quest 3, 0 on a Pimax), so the aim is where the pilot looks; with no frustum from the headset it is the forward axis"
-                                   : "look to aim aims at the headset's forward axis, as before F194 (13 deg above the middle of the picture on a Quest 3)");
+                                   : "look to aim aims at the headset's forward axis, as before F194 (13 deg above the middle of the picture on a Quest 3); this is the default since F195: the 2026-10-31 Quest flight "
+                                     "refuted the picture-centre aim for the pilot");
         g_ltaAimsAtPictureCentreLast = aimsOn;
         g_ltaAimsAtPictureCentreLogged = true;
         g_ltaAimsAtPictureCentre.store(aimsOn, std::memory_order_relaxed);
@@ -1325,6 +1333,19 @@ void readKey() {
         g_ltaEyeHeightAsMouseLookLast = heightOn;
         g_ltaEyeHeightAsMouseLookLogged = true;
         g_ltaEyeHeightAsMouseLook.store(heightOn, std::memory_order_relaxed);
+    }
+    {   // F195 (TEMPORARY A/B, live): the engage keeps the aim's pitch where the mouse left it
+        const bool keepOn = cfg.getString("experimental.native_on_foot_look_to_aim_keeps_aim_pitch", "on") != "off";
+        if (first || keepOn != g_ltaKeepsAimPitchLast || !g_ltaKeepsAimPitchLogged)
+            Log::get().note("native on foot look to aim (F195, TEMPORARY A/B): experimental.native_on_foot_look_to_aim_keeps_aim_pitch is %s -- %s; a change while look to aim is engaged is taken at its next "
+                            "engage (and at the end of an F131 hold, which engages afresh)",
+                            keepOn ? "on" : "off",
+                            keepOn ? "at an engage the aim keeps the pitch offset the pilot had from the head, up to 15 deg either way (the aim does not move in pitch for a settled gaze); only the yaw, and any pitch "
+                                     "offset beyond 15 deg, is centred"
+                                   : "at an engage the aim is centred on the head in yaw and pitch, whole, as F109 does");
+        g_ltaKeepsAimPitchLast = keepOn;
+        g_ltaKeepsAimPitchLogged = true;
+        g_ltaKeepsAimPitch.store(keepOn, std::memory_order_relaxed);
     }
     // F146: the ADS sight switch ("ADS sight from the game"), the two ADS sight trims (height and right) and the full outfit switch are gone, with their `fix.` keys (named by
     // retiredKeysNote); the behaviour they tuned is the only behaviour. While aiming down sights the eye goes onto the game's own sight line (F143,
@@ -8270,6 +8291,7 @@ bool eyeRowsRead(int e, uint32_t* frame, float rows[16], float o[4], uint64_t* q
 // guard's base is taken again, the snap detectors start disarmed. The map (the carried yaw and pitch) is not touched.
 void ltaFreshFollower(uint64_t now) noexcept {
     g_ltaCentreRad = g_f194CentreWantedRad;   // F194: the picture-centre pitch this engagement centres on (a live change of the key waits for here)
+    g_ltaKeepPitch = g_ltaKeepsAimPitch.load(std::memory_order_relaxed);   // F195: and whether it keeps the aim's pitch
     g_lta.follow.reset();
     g_lta.follow.target[0] = g_adsMap.yawInFlight();
     g_lta.follow.target[1] = g_adsMap.pitchInFlight();
@@ -8343,16 +8365,19 @@ void ltaFollow(uint64_t now, double dt, bool headStep, double dYaw, double dPitc
         g_lta.centrePending = false;
         double oy = 0.0, op = 0.0;
         if (f109::centreOffset(np.render, &oy, &op, g_ltaCentreRad)) {
-            const double mag = std::sqrt(oy * oy + op * op) / f109::kDeg;
+            // F195: the pitch offset the pilot had stays (up to 15 deg either way); what is centred, and what the take thresholds judge, is the yaw and the pitch beyond it
+            const nofoot::f195::Kept kept = nofoot::f195::keptPitch(op, g_ltaKeepPitch);
+            const double mag = std::sqrt(oy * oy + kept.centredRad * kept.centredRad) / f109::kDeg;
             const bool take = mag >= f109::kCentreMinDeg && mag <= f109::kCentreMaxDeg;
-            if (take) g_lta.follow.addHead(oy, op);
+            if (take) g_lta.follow.addHead(oy, kept.centredRad);
             ++g_lta.centres;
             // F194: beside the ray's offset (the forward axis's own when no picture-centre pitch is in force), the forward axis's offset from the aim
             double fy = std::nan(""), fp = std::nan("");
             if (!nofoot::adsHeadAngles(np.render, &fy, &fp)) fy = fp = std::nan("");
             Log::get().note("native on foot look to aim (F109): centred: the reported head was yaw %+.2f pitch %+.2f deg from the aim at the engage (%.0f ms after it); the picture-centre pitch in force "
-                            "%+.1f deg (F194), the forward axis itself yaw %+.2f pitch %+.2f deg from the aim; %s",
+                            "%+.1f deg (F194), the forward axis itself yaw %+.2f pitch %+.2f deg from the aim; pitch kept %+.2f deg, centred %+.2f deg (F195: %s); %s",
                             oy / f109::kDeg, op / f109::kDeg, static_cast<double>(now - g_lta.engageMs), g_ltaCentreRad / f109::kDeg, fy / f109::kDeg, fp / f109::kDeg,
+                            kept.keptRad / f109::kDeg, kept.centredRad / f109::kDeg, g_ltaKeepPitch ? "on" : "off",
                             take ? "the aim turns onto the head through the follower (the view stays)" : mag < f109::kCentreMinDeg ? "already on it" : "over 120 deg: left alone");
         } else {
             Log::get().note("native on foot look to aim (F109): centred: the reported head's angles are not readable (within 11 deg of vertical): no centring");

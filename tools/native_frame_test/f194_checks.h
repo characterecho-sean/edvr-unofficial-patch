@@ -425,16 +425,16 @@ void run194(Check&& check) {
                   has("nofoot::adsHeadAngles(in.render, &leadYaw, &leadPitch)"),
               "F194: F134's seat yaw (the difference of one axis's headings in two spaces) and F175's lead (measure only) still read the forward axis: neither is an aim");
         // the keys: spelled out in their own calls, default on, live; edvr.ini has both with a menu row; neither is in a shipped retired list
-        check(has("cfg.getString(\"experimental.native_on_foot_look_to_aim_aims_at_picture_centre\", \"on\") != \"off\"") &&
-                  has("cfg.getString(\"experimental.native_on_foot_look_to_aim_eye_height_as_mouse_look\", \"on\") != \"off\"") && has("std::atomic<bool> g_ltaAimsAtPictureCentre{true};") &&
+        check(has("cfg.getString(\"experimental.native_on_foot_look_to_aim_aims_at_picture_centre\", \"off\") == \"on\"") &&
+                  has("cfg.getString(\"experimental.native_on_foot_look_to_aim_eye_height_as_mouse_look\", \"on\") != \"off\"") && has("std::atomic<bool> g_ltaAimsAtPictureCentre{false};") &&
                   has("std::atomic<bool> g_ltaEyeHeightAsMouseLook{true};"),
-              "F194: both keys are read with their own literal, default on");
-        check(ini.find("\nnative_on_foot_look_to_aim_aims_at_picture_centre = on\n") != std::string::npos && ini.find("\nnative_on_foot_look_to_aim_eye_height_as_mouse_look = on\n") != std::string::npos &&
-                  ini.find("# ui: Look to aim: aim at the middle of the picture (test) | choices on, off | recommended on | live\n") != std::string::npos &&
+              "F194: both keys are read with their own literal; the picture-centre aim defaults off since F195 (the 2026-10-31 Quest flight refuted it for the pilot), the eye height key on");
+        check(ini.find("\nnative_on_foot_look_to_aim_aims_at_picture_centre = off\n") != std::string::npos && ini.find("\nnative_on_foot_look_to_aim_eye_height_as_mouse_look = on\n") != std::string::npos &&
+                  ini.find("# ui: Look to aim: aim at the middle of the picture (test) | choices on, off | recommended off | live\n") != std::string::npos &&
                   ini.find("# ui: Look to aim: eye height as mouse look (test) | choices on, off | recommended on | live\n") != std::string::npos &&
                   ini.find("# TEMPORARY (F194, A/B): Look to aim: aim at the middle of the picture") != std::string::npos && ini.find("# TEMPORARY (F194, A/B): Look to aim: eye height as mouse look") != std::string::npos &&
                   ini.find("\nnative_on_foot_pistol_sprint_swing_phase = 0.5\n\n# TEMPORARY (F194, A/B): Look to aim: aim at the middle") != std::string::npos,
-              "F194: edvr.ini has both keys, default on, marked TEMPORARY, each with a menu row, after the pistol sprint swing row");
+              "F194: edvr.ini has both keys (the picture-centre aim off since F195, the eye height on), marked TEMPORARY, each with a menu row, after the pistol sprint swing row");
         check(has("a change while look to aim is engaged is taken "),
               "F194: the key's log line says a live change is taken at the next engage");
         // part 2: the 10 deg gate is the predicate's, skipped by the key, counted either way; F139's gate after it is unchanged; the old constant is gone
@@ -457,7 +457,7 @@ void run194(Check&& check) {
                   has("if (g_f194Box.take(&hw) && g_f194Sec.any()) {"),
               "F194: the probe is begun at the engage, the disengage and a stop, ticked every frame, and the 1 s line is taken from the hook's window while engaged");
         // the centred line gains the pitch in force and the forward axis's own offset
-        check(has("the picture-centre pitch in force ") && has("deg (F194), the forward axis itself yaw %+.2f pitch %+.2f deg from the aim; %s"),
+        check(has("the picture-centre pitch in force ") && has("deg (F194), the forward axis itself yaw %+.2f pitch %+.2f deg from the aim; pitch kept %+.2f deg, centred %+.2f deg (F195: %s); %s"),
               "F194: the F109 centred line adds the picture-centre pitch in force and the forward axis's own offset beside the ray's");
     }
 }
