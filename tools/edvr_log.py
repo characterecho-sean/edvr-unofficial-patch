@@ -15077,31 +15077,22 @@ def _hj_f186_stops(rows, ctx):
     named = "; ".join("aim %+.1f deg, %s (e %.1f cm, applied %.1f cm)" % (float(r["aim"]), r["why"], float(r["perp"]), float(r["app"])) for r in stop) or "no stop line in the window"
     return ("PARTIAL", text + ": " + named)
 
-# F194: look to aim aims at the middle of the picture (the ray from the head through the centre of the headset's frustum, not the pose's forward axis: a Quest 3's is 13 deg below it, a Pimax's
-# on it), and its eye height settles as mouse look's does (look to aim's own 10 deg gate on the carried pitch skipped). Two TEMPORARY A/B keys (experimental.native_on_foot_look_to_aim_aims_at_picture_centre,
-# experimental.native_on_foot_look_to_aim_eye_height_as_mouse_look). The lines are formatFrustum, formatSecond and HeightProbe::format in src/d3d11/native_on_foot_f194.h and the two keys' notes in
-# native_on_foot.cpp: the frustum line (when the headset's frustum is first known, and on a change), a 1 s line while look to aim is engaged, and one line at each engage and disengage with the view's
-# height before and 0.5 s, 1 s and 3 s after.
-H194_LABEL_CENTRE = "native on foot look to aim (F194):"
+# F194: look to aim's eye height settles as mouse look's does (look to aim's own 10 deg gate on the carried pitch skipped), and the view's height at each edge of look to aim. One TEMPORARY A/B key
+# (experimental.native_on_foot_look_to_aim_eye_height_as_mouse_look). The lines are formatSecond and HeightProbe::format in src/d3d11/native_on_foot_f194.h and the key's note in native_on_foot.cpp: a 1 s line
+# while look to aim is engaged, and one line at each engage and disengage with the view's height before and 0.5 s, 1 s and 3 s after. F194 part 1 (look to aim aiming at the middle of the picture, with its key
+# and its frustum line) was removed on 2026-10-31 (F194b); the rule that judged it is gone, and a log that carries its lines is read as before: the frustum line and the key's note belong to no rule, and the 1 s line
+# of that build (which began with the picture-centre pitch in force and gave the forward axis's and the ray's pitch from the aim) still parses.
 H194_LABEL_HEIGHT = "native on foot look to aim height (F194)"
-H194_FRUSTUM_RE = (r"native on foot look to aim \(F194\): the picture's centre is (?:(?P<deg>[\d.]+) deg (?P<dir>below|above)|on) the headset's forward axis \(up (?P<up>[\d.]+), "
-                   r"down (?P<down>[\d.]+) tangents\); look to aim aims at it: (?P<key>on|off)$")
-H194_NOFRUSTUM_RE = r"native on foot look to aim \(F194\): no frustum from the headset yet: the forward axis; look to aim aims at the picture's centre: (?P<key>on|off)$"
-H194_UNUSABLE_RE = (r"native on foot look to aim \(F194\): the headset's frustum \(up (?P<up>[\d.]+), down (?P<down>[\d.]+) tangents\) is not usable: the forward axis; "
-                    r"look to aim aims at the picture's centre: (?P<key>on|off)$")
-H194_AIMKEY_RE = r"native on foot look to aim \(F194, TEMPORARY A/B\): experimental\.native_on_foot_look_to_aim_aims_at_picture_centre is (?P<key>on|off) -- "
 H194_HEIGHTKEY_RE = r"native on foot look to aim height \(F194, TEMPORARY A/B\): experimental\.native_on_foot_look_to_aim_eye_height_as_mouse_look is (?P<key>on|off) -- "
-H194_SEC_RE = (r"native on foot look to aim height \(F194\) 1 s: the picture-centre pitch in force (?P<centre>%s) deg \(look to aim aims at the picture's centre: (?P<key>on|off)\); "
+H194_SEC_RE = (r"native on foot look to aim height \(F194\) 1 s: (?:the picture-centre pitch in force (?P<centre>%s) deg \(look to aim aims at the picture's centre: (?P<key>on|off)\); )?"
                r"the headset's pitch \(LOCAL\) mean (?P<local>%s) deg; carried aim pitch mean (?P<carried>%s) deg \(the game's aim (?P<root>%s) deg\); the reported head's pitch from "
-               r"the aim mean: the forward axis (?P<fwd>%s) deg, the ray in force (?P<ray>%s) deg; the settle: look to aim's 10 deg gate (?P<gate>would have refused \(skipped\)|refused) "
+               r"the aim mean(?:: the forward axis (?P<fwd>%s) deg, the ray in force (?P<ray>%s) deg| (?P<off>%s) deg); the settle: look to aim's 10 deg gate (?P<gate>would have refused \(skipped\)|refused) "
                r"(?P<ten>\d+) of (?P<calls>\d+) pin calls, F138/F139's 20 deg gate refused (?P<f139>\d+), taken (?P<taken>\d+); the published raise mean (?P<raise>%s) cm; "
-               r"the drawn eye over the animated neck mean (?P<eye>%s) cm$" % ((_HN,) * 8))
+               r"the drawn eye over the animated neck mean (?P<eye>%s) cm$" % ((_HN,) * 9))
 H194_VIEW_RE = (r"native on foot look to aim height \(F194\) (?P<kind>engage|disengage): the view's height \(the drawn eye above the character's origin, the hip frames read\): "
                 r"before (?P<before>.+?); after 0\.5 s (?P<a1>.+?); after 1 s (?P<a2>.+?); after 3 s (?P<a3>.+)$")
 H194_CM_RE = re.compile(r"(?P<cm>[+-]\d+\.\d) cm \(")
 H194_PITCH_RE = re.compile(r"carried aim pitch (?P<p>[+-]\d+\.\d) deg")
-H194_MIN_CENTRE = 2.0      # a picture centre nearer the forward axis than this has nothing to correct (a Pimax)
-H194_RAY_FLAG = 3.0        # the ray in force stands this far from the aim, on average, in the seconds it was in force: the aim is not at the middle of the picture
 H194_VIEW_FLAG_CM = 4.0    # an engage after which the view stood this far from where it was 3 s on: the pilot's "my view dropped"
 
 
@@ -15109,55 +15100,6 @@ def _h194_last_key(*row_lists):
     """The newest key state ("on" or "off") among the rows that carry one, by log order; None without a row."""
     pool = sorted((r for rows in row_lists for r in rows), key=lambda r: r.get("_order", 0))
     return pool[-1]["key"] if pool else None
-
-
-def _hj_f194_centre(rows, ctx):
-    """F194, part 1: look to aim aims at the middle of the picture. The frustum line says where the middle is (13.0 deg below the forward axis on a Quest 3, on it on a Pimax) and whether the key is on; the 1 s
-    line, while look to aim is engaged, says the picture-centre pitch in force and the reported head's pitch from the aim, for the forward axis and for the ray in force (the ray reads 0 once the aim is on the
-    middle of the picture; the forward axis then reads minus the centre, +13 on the Quest). NEVER APPLIED: the key is on and the frustum is known to be 2 deg or more off the forward axis and no engaged
-    second had a pitch in force; or look to aim was engaged (F109's lines) and no F194 1 s line was written. PARTIAL: no usable frustum from the headset (the aim is the forward axis); or the ray in force stood
-    3 deg or more from the aim on average. IDLE: the key is off; the middle is within 2 deg of the forward axis (nothing to correct); look to aim never engaged. No line, no verdict."""
-    fr, nofr, unus, keyn, sec = (rows.get(k, []) for k in ("frustum", "nofrustum", "unusable", "aimkey", "sec"))
-    if not (fr or nofr or unus or keyn or sec):
-        return None
-    key = _h194_last_key(fr, nofr, unus, keyn) or (sec[-1]["key"] if sec else "on")
-    centre = None
-    if fr:
-        last = fr[-1]
-        centre = (-float(last["deg"]) if last["dir"] == "below" else float(last["deg"])) if last["deg"] else 0.0
-        text = "the picture's centre is %.1f deg %s the forward axis (up %s, down %s tangents); the key is %s" % (abs(centre), "below" if centre < 0 else "above" if centre > 0 else "on", last["up"], last["down"], key)
-    elif unus:
-        text = "the headset's frustum (up %s, down %s) is not usable; the key is %s" % (unus[-1]["up"], unus[-1]["down"], key)
-    elif nofr:
-        text = "no frustum from the headset was ever known; the key is %s" % key
-    else:
-        text = "the key is %s" % key
-    f109 = (ctx.get("look to aim (F109)") or {}).get("sec", [])
-    if not sec:
-        if f109:
-            return ("NEVER APPLIED", text + "; look to aim was engaged for %d s (F109's 1 s lines) and no F194 1 s line was written: the centring's instrument did not run" % _hsecs(f109))
-        return ("IDLE", text + "; look to aim never engaged (no F194 1 s line)")
-    cen, fwd, ray = [float(r["centre"]) for r in sec], [float(r["fwd"]) for r in sec], [float(r["ray"]) for r in sec]
-    active = [i for i, c in enumerate(cen) if abs(c) >= H194_MIN_CENTRE]
-    text = "%d engaged s: %s" % (_hsecs(sec), text)
-    if key == "off":
-        if active:
-            return ("PARTIAL", text + "; the key is off and %d engaged second(s) still had a pitch in force (the key was switched off while engaged: it takes effect at the next engage)" % len(active))
-        return ("IDLE", text + "; the key is off: look to aim aims at the forward axis")
-    if centre is not None and abs(centre) >= H194_MIN_CENTRE and not active:
-        return ("NEVER APPLIED", text + "; the key is on and the frustum is %.1f deg off the forward axis, but no engaged second had a picture-centre pitch in force: the aim stayed on the forward axis" % abs(centre))
-    if not active:
-        if centre is None:
-            return ("PARTIAL", text + "; no usable frustum from the headset: look to aim aims at the forward axis")
-        return ("IDLE", text + "; the picture's centre is within %.0f deg of the forward axis: nothing to correct" % H194_MIN_CENTRE)
-    ray_off = sum(abs(ray[i]) for i in active) / len(active)
-    fwd_mean = sum(fwd[i] for i in active) / len(active)
-    cen_mean = sum(cen[i] for i in active) / len(active)
-    text += "; a pitch in force in %d of %d s (mean %+.1f deg): the forward axis stood %+.1f deg above the aim (the middle of the picture would put it at %+.1f), the ray %.1f deg from it" % (
-        len(active), len(sec), cen_mean, fwd_mean, -cen_mean, ray_off)
-    if ray_off >= H194_RAY_FLAG:
-        return ("PARTIAL", text + "; the ray stood %.0f deg or more from the aim: the aim was not on the middle of the picture" % H194_RAY_FLAG)
-    return ("OK", text)
 
 
 def _hj_f194_height(rows, ctx):
@@ -15187,6 +15129,9 @@ def _hj_f194_height(rows, ctx):
     text = "; ".join(parts) if parts else "the key is %s" % key
     if not parts:
         text += " (no engaged second yet)"
+    f109 = (ctx.get("look to aim (F109)") or {}).get("sec", [])
+    if not sec and f109:
+        return ("NEVER APPLIED", text + "; look to aim was engaged for %d s (F109's 1 s lines) and no F194 1 s line was written: the gate's instrument did not run" % _hsecs(f109))
     if sec and key == "on" and not sec[-1]["gate"].startswith("would"):
         return ("NEVER APPLIED", text + "; the key is on but the newest 1 s line says the 10 deg gate refused (it was not skipped)")
     if sec and not calls:
@@ -16850,13 +16795,6 @@ HEALTH_RULES = (
         ("sec", H186_RESP_RE),
         ("stop", H186_STOP_RE),
     ), _hj_f186_stops),
-    _hrule("look to aim picture centre (F194)", ("F194",), (H194_LABEL_CENTRE,), (
-        ("frustum", H194_FRUSTUM_RE),
-        ("nofrustum", H194_NOFRUSTUM_RE),
-        ("unusable", H194_UNUSABLE_RE),
-        ("aimkey", H194_AIMKEY_RE),
-        ("sec", H194_SEC_RE),
-    ), _hj_f194_centre),
     _hrule("look to aim eye height (F194)", ("F194",), (H194_LABEL_HEIGHT,), (
         ("sec", H194_SEC_RE),
         ("view", H194_VIEW_RE),
@@ -18254,7 +18192,7 @@ def self_test_health():
         return health_render(fmts[key], vals)
 
     def R194(needle, *vals):
-        """F194's lines (formatFrustum, formatSecond, HeightProbe::format in native_on_foot_f194.h), from their own format literals."""
+        """F194's lines (formatSecond, HeightProbe::format in native_on_foot_f194.h), from their own format literals."""
         key = "f194:" + needle
         if key not in fmts:
             fmts[key] = health_c_format(f194src, needle)
@@ -20751,7 +20689,7 @@ def self_test_health():
 
         KEYS109 = R("native on foot look to aim (F109): keys: %s, smoothing", "on", 150, "snap", 45)
         ENG109 = R("native on foot look to aim (F109): engaged:", "snap", 45, 150, ", their yaw turns the player in snaps", "")
-        CEN109 = R("native on foot look to aim (F109): centred: the reported head was", 12.5, -4.0, 22, 0.0, 12.5, -4.0, -4.0, 0.0, "on", "the aim turns onto the head through the follower (the view stays)")
+        CEN109 = R("native on foot look to aim (F109): centred: the reported head was", 12.5, -4.0, 22, -4.0, 0.0, "on", "the aim turns onto the head through the follower (the view stays)")
         NOT109 = R("native on foot look to aim (F109): not engaged:", "body align is off (fix.native_on_foot_body_align = off; the full-3P body needs body)")
         TRIP109 = R("native on foot look to aim (F109): GUARD TRIPPED", "GUARD TRIPPED: the view - head residual (the right eye's rows) grew for 0.5 s: yaw +9.0 pitch "
                     "+0.1 deg against the head's yaw +18.0 pitch +0.2; ratio yaw +0.50 pitch +0.50 (about -2: that axis's sign is inverted; about -1: the view does "
@@ -20785,31 +20723,15 @@ def self_test_health():
         check("F109c look: a second's glance off the aim is not a hold", [ENG109] + [look109()] * 2 + [look109(op=15.0)] + [look109()] * 2, 0, [("OK", L109)],
               has=["F109c: foreign calls 0", "in 0 of 5 read seconds"], lacks=["UNPARSED", "off the head for"])
 
-        # ---- F194: look to aim aims at the middle of the picture; its eye height settles as mouse look's does (two TEMPORARY A/B keys) ----
-        F194C, F194H = "look to aim picture centre (F194)", "look to aim eye height (F194)"
-
-        def front194(deg=13.0, below=True, up=0.966, down=1.428, key="on"):
-            """The frustum line, from the DLL's own format (formatFrustum in native_on_foot_f194.h)."""
-            return R194("the picture's centre is %.1f deg %s the headset's forward axis", deg, "below" if below else "above", up, down, key)
-
-        def zero194(up=1.265, down=1.265, key="on"):
-            return R194("the picture's centre is on the headset's forward axis (up %.3f", up, down, key)
-
-        def nofr194(key="on"):
-            return R194("no frustum from the headset yet: the forward axis; look to aim aims at the picture's centre: %s", key)
-
-        def unus194(up=10.0, down=0.1, key="on"):
-            return R194("is not usable: the forward axis; look to aim aims at the picture's centre: %s", up, down, key)
-
-        def aimkey194(key="on"):
-            return R("native on foot look to aim (F194, TEMPORARY A/B): experimental.native_on_foot_look_to_aim_aims_at_picture_centre is %s", key, "x")
+        # ---- F194: look to aim's eye height settles as mouse look's does (TEMPORARY A/B key); the view's height at each edge. Part 1 (the picture-centre aim) was removed (F194b): its lines are still read ----
+        F194H = "look to aim eye height (F194)"
 
         def heightkey194(key="on"):
             return R("native on foot look to aim height (F194, TEMPORARY A/B): experimental.native_on_foot_look_to_aim_eye_height_as_mouse_look is %s", key, "x")
 
-        def sec194(centre=-13.0, key="on", local=0.0, carried=-3.0, root=-16.0, fwd=13.0, ray=0.2, skipped=True, ten=60, calls=90, f139=0, taken=1, raise_=-5.0, eye=19.0):
+        def sec194(local=0.0, carried=-3.0, root=-16.0, off=4.5, skipped=True, ten=60, calls=90, f139=0, taken=1, raise_=-5.0, eye=19.0):
             """The 1 s line, from the DLL's own format (formatSecond)."""
-            return R194("native on foot look to aim height (F194) 1 s: the picture-centre pitch in force %+.1f deg", centre, key, local, carried, root, fwd, ray,
+            return R194("native on foot look to aim height (F194) 1 s: the headset's pitch (LOCAL) mean %+.1f deg", local, carried, root, off,
                         "would have refused (skipped)" if skipped else "refused", ten, calls, f139, taken, raise_, eye)
 
         def view194(kind="engage", before="1.610 m, carried aim pitch +0.0 deg", a1="+0.0 cm (1.610 m), carried aim pitch -2.0 deg", a2="+0.0 cm (1.610 m), carried aim pitch -2.0 deg",
@@ -20817,36 +20739,27 @@ def self_test_health():
             """The edge's line, from the DLL's own format (HeightProbe::format)."""
             return R194("native on foot look to aim height (F194) %s: the view's height", kind, before, a1, a2, a3)
 
-        quest194 = [front194(), aimkey194(), heightkey194()] + [sec194()] * 3
-        check("F194: the Quest 3, both keys on, the aim on the middle of the picture (the ray reads 0, the forward axis +13): both rules OK",
-              quest194 + [view194()], 0, [("OK", F194C), ("OK", F194H)],
-              has=["the picture's centre is 13.0 deg below the forward axis (up 0.966, down 1.428 tangents); the key is on", "3 engaged s: ",
-                   "a pitch in force in 3 of 3 s (mean -13.0 deg): the forward axis stood +13.0 deg above the aim (the middle of the picture would put it at +13.0), the ray 0.2 deg from it",
-                   "3 engaged s, 270 pin calls: look to aim's 10 deg gate would have refused (skipped) 180, F138/F139's 20 deg gate refused 0, stances taken 3; the drawn eye over the animated neck +19.0 cm",
+        # the lines of the build that had part 1 (before F194b), as that build wrote them
+        OLD_FRUSTUM194 = "native on foot look to aim (F194): the picture's centre is 13.0 deg below the headset's forward axis (up 0.966, down 1.428 tangents); look to aim aims at it: on"
+        OLD_AIMKEY194 = ("native on foot look to aim (F194, TEMPORARY A/B): experimental.native_on_foot_look_to_aim_aims_at_picture_centre is on -- look to aim aims at the ray from the head through the middle of "
+                         "the picture; a change while look to aim is engaged is taken at its next engage (and at the end of an F131 hold, which engages afresh)")
+        OLD_SEC194 = ("native on foot look to aim height (F194) 1 s: the picture-centre pitch in force -13.0 deg (look to aim aims at the picture's centre: on); the headset's pitch (LOCAL) mean +0.0 deg; "
+                      "carried aim pitch mean -3.0 deg (the game's aim -16.0 deg); the reported head's pitch from the aim mean: the forward axis +13.0 deg, the ray in force +0.2 deg; the settle: look to aim's "
+                      "10 deg gate would have refused (skipped) 60 of 90 pin calls, F138/F139's 20 deg gate refused 0, taken 1; the published raise mean -5.0 cm; the drawn eye over the animated neck mean +19.0 cm")
+
+        quest194 = [heightkey194()] + [sec194()] * 3
+        check("F194: look to aim engaged, the key on, the 10 deg gate skipped (would have refused 180 of 270 calls), a stance taken each second, an engage that moved nothing: OK with the figures",
+              quest194 + [view194()], 0, [("OK", F194H)],
+              has=["3 engaged s, 270 pin calls: look to aim's 10 deg gate would have refused (skipped) 180, F138/F139's 20 deg gate refused 0, stances taken 3; the drawn eye over the animated neck +19.0 cm",
                    "engage: 0.5 s +0.0 cm, 1 s +0.0 cm, 3 s +0.0 cm; carried aim pitch -2.0 deg at 3 s"], lacks=["UNPARSED", "PARTIAL", "NEVER"])
-        check("F194 centre: the key on and the frustum 13 deg off, but no engaged second had a pitch in force: NEVER APPLIED",
-              [front194(), aimkey194()] + [sec194(centre=0.0, fwd=0.0, ray=0.0)] * 3, 3, [("NEVER APPLIED", F194C)],
-              has=["the key is on and the frustum is 13.0 deg off the forward axis, but no engaged second had a picture-centre pitch in force: the aim stayed on the forward axis"], lacks=["UNPARSED"])
-        check("F194 centre: the ray in force 5 deg from the aim on average: PARTIAL", quest194[:3] + [sec194(ray=5.0)] * 3, 0, [("PARTIAL", F194C)],
-              has=["the ray 5.0 deg from it", "the aim was not on the middle of the picture"], lacks=["UNPARSED"])
-        check("F194 centre: the key off: IDLE, look to aim aims at the forward axis", [front194(key="off"), aimkey194("off")] + [sec194(centre=0.0, key="off", fwd=0.0, ray=0.0)] * 3, 0, [("IDLE", F194C)],
-              has=["the key is off: look to aim aims at the forward axis"], lacks=["UNPARSED", "NEVER"])
-        check("F194 centre: the key switched off while engaged: PARTIAL, it takes effect at the next engage", [front194(), aimkey194("off")] + [sec194()] * 2, 0, [("PARTIAL", F194C)],
-              has=["the key was switched off while engaged"], lacks=["UNPARSED"])
-        check("F194 centre: a Pimax (the middle on the forward axis): IDLE, nothing to correct", [zero194(), aimkey194()] + [sec194(centre=0.0, fwd=0.0, ray=0.0)] * 3, 0, [("IDLE", F194C)],
-              has=["the picture's centre is 0.0 deg on the forward axis (up 1.265, down 1.265 tangents)", "within 2 deg of the forward axis: nothing to correct"], lacks=["UNPARSED", "NEVER"])
-        check("F194 centre: no frustum from the headset, the key on, look to aim engaged: PARTIAL, the aim is the forward axis", [nofr194(), aimkey194()] + [sec194(centre=0.0, fwd=0.0, ray=0.0)] * 3, 0,
-              [("PARTIAL", F194C)], has=["no usable frustum from the headset: look to aim aims at the forward axis"], lacks=["UNPARSED"])
-        check("F194 centre: a frustum that cannot be used reads the same", [unus194(), aimkey194()] + [sec194(centre=0.0, fwd=0.0, ray=0.0)] * 3, 0, [("PARTIAL", F194C)],
-              has=["the headset's frustum (up 10.000, down 0.100) is not usable"], lacks=["UNPARSED"])
-        check("F194 centre: the frustum line alone, look to aim never engaged: IDLE", [front194(), aimkey194()], 0, [("IDLE", F194C)], has=["look to aim never engaged"], lacks=["UNPARSED"])
-        check("F194 centre: look to aim engaged (F109's 1 s lines) and no F194 1 s line: NEVER APPLIED, the instrument did not run", [ENG109, front194(), aimkey194()] + [look109()] * 3, 3,
-              [("NEVER APPLIED", F194C)], has=["look to aim was engaged for 3 s (F109's 1 s lines) and no F194 1 s line was written"], lacks=["UNPARSED"])
-        check("F194 centre: above the axis reads as above", [front194(below=False, deg=5.0, up=1.4, down=1.2)] + [sec194(centre=5.0, fwd=-5.0, ray=0.1)] * 3, 0, [("OK", F194C)],
-              has=["the picture's centre is 5.0 deg above the forward axis"], lacks=["UNPARSED"])
+        check("F194: the lines of the build with part 1 (the frustum line, its key's note, the 1 s line with the picture-centre pitch, the forward axis's and the ray's pitch) are still read: OK, nothing unparsed",
+              [OLD_FRUSTUM194, OLD_AIMKEY194, heightkey194()] + [OLD_SEC194] * 3 + [view194()], 0, [("OK", F194H)],
+              has=["3 engaged s, 270 pin calls: look to aim's 10 deg gate would have refused (skipped) 180"], lacks=["UNPARSED", "PARTIAL", "NEVER", "picture centre (F194)"])
+        check("F194: the frustum line and the key's note of that build alone belong to no rule: no verdict, nothing unparsed", [OLD_FRUSTUM194, OLD_AIMKEY194, f90_part()], 0, [("OK", F90S)],
+              lacks=[row("OK", F194H), row("IDLE", F194H), row("UNPARSED", F194H), row("NEVER APPLIED", F194H), row("PARTIAL", F194H), "UNPARSED"])
         check("F194 height: an engage after which the view stood 11 cm lower 3 s on: PARTIAL, the pilot's drop",
               quest194 + [view194(a1="-10.0 cm (1.510 m), carried aim pitch +13.0 deg", a2="-10.5 cm (1.505 m), carried aim pitch +13.0 deg", a3="-11.0 cm (1.500 m), carried aim pitch +13.0 deg")], 0,
-              [("PARTIAL", F194H), ("OK", F194C)], has=["engage: 0.5 s -10.0 cm, 1 s -10.5 cm, 3 s -11.0 cm; carried aim pitch +13.0 deg at 3 s", "the view stood -11.0 cm from where it was after 1 engage(s)"],
+              [("PARTIAL", F194H)], has=["engage: 0.5 s -10.0 cm, 1 s -10.5 cm, 3 s -11.0 cm; carried aim pitch +13.0 deg at 3 s", "the view stood -11.0 cm from where it was after 1 engage(s)"],
               lacks=["UNPARSED"])
         check("F194 height: a disengage that moved the view is informational (not flagged)", quest194 + [view194(kind="disengage", a3="-9.0 cm (1.520 m), carried aim pitch +0.0 deg")], 0, [("OK", F194H)],
               has=["disengage: 0.5 s +0.0 cm, 1 s +0.0 cm, 3 s -9.0 cm"], lacks=["UNPARSED", "PARTIAL"])
@@ -20859,14 +20772,15 @@ def self_test_health():
         check("F194 height: the hook wrote no call to the window in any engaged second: NEVER APPLIED, the gate and the instrument did not run",
               [heightkey194("on")] + [sec194(calls=0, ten=0, f139=0, taken=0, eye=0.0)] * 3, 3, [("NEVER APPLIED", F194H)],
               has=["the pin hook wrote no call to the window in any engaged second"], lacks=["UNPARSED"])
+        check("F194 height: look to aim engaged (F109's 1 s lines) and no F194 1 s line: NEVER APPLIED, the instrument did not run", [ENG109, heightkey194()] + [look109()] * 3, 3,
+              [("NEVER APPLIED", F194H)], has=["look to aim was engaged for 3 s (F109's 1 s lines) and no F194 1 s line was written"], lacks=["UNPARSED"])
         check("F194 height: no stance taken in 12 engaged seconds: PARTIAL", [heightkey194("on")] + [sec194(taken=0, f139=40)] * 12, 0, [("PARTIAL", F194H)],
               has=["no stance was taken in 12 engaged seconds (F138/F139 refused 480 calls)"], lacks=["UNPARSED"])
         check("F194 height: a few seconds with no stance taken is not flagged", [heightkey194("on")] + [sec194(taken=0)] * 3, 0, [("OK", F194H)], lacks=["UNPARSED", "PARTIAL"])
         check("F194: no line at all is not present (no verdict row)", [f90_part()], 0, [("OK", F90S)],
-              lacks=[row("OK", F194C), row("IDLE", F194C), row("PARTIAL", F194C), row("UNPARSED", F194C), row("NEVER APPLIED", F194C), row("OK", F194H), row("IDLE", F194H),
-                     row("PARTIAL", F194H), row("UNPARSED", F194H), row("NEVER APPLIED", F194H)])
-        check("F194: lines that drifted from their patterns are unparsed", ["native on foot look to aim (F194): something else", "native on foot look to aim height (F194) 1 s: something else",
-              "native on foot look to aim height (F194) engage: something else"], 4, [("UNPARSED", F194C), ("UNPARSED", F194H)])
+              lacks=[row("OK", F194H), row("IDLE", F194H), row("PARTIAL", F194H), row("UNPARSED", F194H), row("NEVER APPLIED", F194H)])
+        check("F194: lines that drifted from their patterns are unparsed", ["native on foot look to aim height (F194) 1 s: something else", "native on foot look to aim height (F194) engage: something else"], 4,
+              [("UNPARSED", F194H)])
 
         # ---- F195: at a look-to-aim engage the aim keeps its pitch where the mouse left it (TEMPORARY A/B key); the F109 rule takes the kept pitch off the standing offset ----
         L195 = H195_NAME
@@ -20877,7 +20791,7 @@ def self_test_health():
                 kept = max(-15.0, min(15.0, op)) if key == "on" else 0.0
             if cen is None:
                 cen = op - kept
-            return R("native on foot look to aim (F109): centred: the reported head was", oy, op, 22, 0.0, oy, op, kept, cen, key, "the aim turns onto the head through the follower (the view stays)")
+            return R("native on foot look to aim (F109): centred: the reported head was", oy, op, 22, kept, cen, key, "the aim turns onto the head through the follower (the view stays)")
 
         def keynote195(key="on"):
             return R("native on foot look to aim (F195, TEMPORARY A/B): experimental.native_on_foot_look_to_aim_keeps_aim_pitch is %s", key, "x")
@@ -20892,6 +20806,10 @@ def self_test_health():
               lacks=["UNPARSED", "NEVER"])
         check("F195: engages with under 1 deg of pitch offset have nothing to keep: IDLE", [cen195(0.3), cen195(-0.5)], 0, [("IDLE", L195)], has=["no engage had a pitch offset of 1 deg or more to keep"], lacks=["UNPARSED"])
         check("F195: the key's note alone, no engage: IDLE", [keynote195()], 0, [("IDLE", L195)], has=["no engage was centred in the window"], lacks=["UNPARSED"])
+        check("F195: the centred line of the build that also had F194 part 1 (the picture-centre pitch and the forward axis's angles before F195's ending) is still read",
+              ["native on foot look to aim (F109): centred: the reported head was yaw +12.00 pitch +4.46 deg from the aim at the engage (22 ms after it); the picture-centre pitch in force +0.0 deg (F194), the forward axis "
+               "itself yaw +12.00 pitch +4.46 deg from the aim; pitch kept +4.46 deg, centred +0.00 deg (F195: on); the aim turns onto the head through the follower (the view stays)"], 0, [("OK", L195)],
+              has=["+4.46 kept +4.46 centred +0.00"], lacks=["UNPARSED"])
         check("F195: a centred line from a build before F195 (no ending) is read and gives no verdict",
               ["native on foot look to aim (F109): centred: the reported head was yaw +12.50 pitch -4.00 deg from the aim at the engage (22 ms after it); the aim turns onto the head through the follower (the view stays)"], 0,
               [], lacks=["UNPARSED", row("OK", L195), row("IDLE", L195), row("NEVER APPLIED", L195)])

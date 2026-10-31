@@ -3,6 +3,8 @@
 // that explains it (up 0.9657, down 1.4281 as tangents: the middle of the picture 13.0 deg below the pose's forward axis) was only in the graphics half's channel. One line at the first located views with a
 // valid fov, and again when a view's fov changes by more than 0.01 deg; never per frame. The angles are OpenXR's as located (angleLeft and angleDown negative), before EDVR's fov trim or the scope zoom's
 // window; when the frustum the game is told differs from them by more than that (a trim), the line says that too.
+// F194b: F194 part 1, which aimed look to aim at this picture centre, was removed (refuted on the pilot's Quest: his gaze offset is his own, about 5 deg against the picture's 12.2); the line stays as a measurement with no key,
+// for headset reports.
 //
 // The picture centre: the middle of a view's image on the tangent plane is the centre of its tangent span, so its angle from the view's forward axis is atan((tan(up) + tan(down)) / 2) vertically (angleDown is
 // negative) and atan((tan(left) + tan(right)) / 2) horizontally, signed as the angles are (up and right positive). Both eyes share the vertical; the horizontals mirror, so the two eyes' mean is 0.

@@ -9,6 +9,10 @@
 // The rule: the pitch offset the pilot had is kept, up to kKeepPitchDeg either way; only what is beyond it is centred. With op the reported head's pitch offset from the aim (as centreOffset gives it), the
 // kept offset is k = clamp(op, -15 deg, +15 deg) and op - k is what goes into the follower's pitch target. A settled 5 deg offset stays (the aim does not move in pitch); a head pitched 26 deg up at the
 // first on-foot frame keeps 15 and centres 11. The yaw is centred whole, as before. The follower's head steps, F133's yaw re-centre and the in-flight account are untouched.
+//
+// F194 part 1 (the ray through the middle of the picture as the centring's direction, with its key) was REMOVED on 2026-10-31 (F194b), after F195 flew well and the pilot said "Remove the key." It was refuted: the
+// pilot's gaze offset is about 5 deg on his Quest against the picture's centre 12.2 deg below the forward axis (and 10.5 to 12 deg on his Pimax, with a symmetric frustum), so the picture's middle moved the aim
+// 6.6 to 11.4 deg off where he was looking; the offset he has is his own and an engage should leave it where it is. The offset the engage keeps is the forward axis's (adsHeadAngles) again.
 #pragma once
 
 #include "native_on_foot_core.h"   // kAdsDeg

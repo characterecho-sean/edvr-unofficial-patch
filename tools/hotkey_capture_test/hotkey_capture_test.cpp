@@ -2134,21 +2134,16 @@ void testLegacyOnFootRowsStayOutOfMenu() {
         check(found == 1 && shaped && beside,
               "Pistol sprint arm swing phase (F169, TEMPORARY) is one [experimental] number row right after Crouched ADS torso square, on its page and under its heading: 0..1, step 0.05, unsigned, live, shipped 0.5 (F173; 0.0 before)");
     }
-    // F194 (TEMPORARY A/B): "Look to aim: aim at the middle of the picture (test)" and "Look to aim: eye height as mouse look (test)" are two [experimental] choice rows (on, off), one right after the other and
-    // the first right after "Pistol sprint arm swing phase", on the same page and under the same heading, live, shipped on for the eye height row and OFF for the aim row since F195 (the 2026-10-31 Quest flight refuted the picture-centre aim for the pilot).
+    // F194 (TEMPORARY A/B): "Look to aim: eye height as mouse look (test)" is one [experimental] choice row (on, off) right after "Pistol sprint arm swing phase", on the same page and under the same heading, live, shipped on.
+    // (F194's other row, "Look to aim: aim at the middle of the picture (test)", is removed with its key: F194b.)
     {
-        int swingRow = -1, aimRow = -1, heightRow = -1, aimFound = 0, heightFound = 0;
+        int swingRow = -1, heightRow = -1, heightFound = 0, aimFound = 0;
         bool shaped = true;
         for (int i = 0; i < kCount; ++i) {
             const MenuRowDef& d = kMenuRows[i];
+            if (strstr(d.key, "look_to_aim_aims_at") != nullptr || strstr(d.label, "aim at the middle of the picture") != nullptr) ++aimFound;
             if (strcmp(d.section, "experimental") != 0) continue;
             if (strcmp(d.key, "native_on_foot_pistol_sprint_swing_phase") == 0) swingRow = i;
-            if (strcmp(d.key, "native_on_foot_look_to_aim_aims_at_picture_centre") == 0) {
-                aimRow = i;
-                ++aimFound;
-                shaped = shaped && d.kind == MenuKind::Choice && d.tier == MenuTier::Experimental && strcmp(d.label, "Look to aim: aim at the middle of the picture (test)") == 0 && strcmp(d.choices, "on|off") == 0 &&
-                         d.applies == 1 && strcmp(d.shipped, "off") == 0;
-            }
             if (strcmp(d.key, "native_on_foot_look_to_aim_eye_height_as_mouse_look") == 0) {
                 heightRow = i;
                 ++heightFound;
@@ -2156,11 +2151,9 @@ void testLegacyOnFootRowsStayOutOfMenu() {
                          d.applies == 1 && strcmp(d.shipped, "on") == 0;
             }
         }
-        const bool beside = swingRow >= 0 && aimRow == swingRow + 1 && heightRow == aimRow + 1 && strcmp(kMenuRows[aimRow].page, kMenuRows[swingRow].page) == 0 &&
-                            strcmp(kMenuRows[aimRow].group, kMenuRows[swingRow].group) == 0 && strcmp(kMenuRows[heightRow].page, kMenuRows[swingRow].page) == 0 &&
-                            strcmp(kMenuRows[heightRow].group, kMenuRows[swingRow].group) == 0;
-        check(aimFound == 1 && heightFound == 1 && shaped && beside,
-              "Look to aim: aim at the middle of the picture and Look to aim: eye height as mouse look (F194, TEMPORARY A/B) are two [experimental] choice rows (on, off), in that order right after Pistol sprint arm swing phase, on its page and under its heading: live, shipped off (the aim row, F195) and on (the eye height row)");
+        const bool beside = swingRow >= 0 && heightRow == swingRow + 1 && strcmp(kMenuRows[heightRow].page, kMenuRows[swingRow].page) == 0 && strcmp(kMenuRows[heightRow].group, kMenuRows[swingRow].group) == 0;
+        check(heightFound == 1 && aimFound == 0 && shaped && beside,
+              "Look to aim: eye height as mouse look (F194, TEMPORARY A/B) is one [experimental] choice row (on, off) right after Pistol sprint arm swing phase, on its page and under its heading: live, shipped on; the picture-centre aim row is gone (F194b)");
     }
     // F195 (TEMPORARY A/B): "Look to aim: keep the aim's pitch (test)" is one [experimental] choice row (on, off) right after "Look to aim: eye height as mouse look (test)", on the same page and under the same heading, live, shipped on.
     {

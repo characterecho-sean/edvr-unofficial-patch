@@ -18,7 +18,6 @@
 #pragma once
 
 #include "native_on_foot_core.h"   // AdsInFlight (the follower's in-flight account), adsHeadAngles
-#include "native_on_foot_f194.h"   // F194: the ray through the middle of the picture (centreOffset)
 
 #include <cmath>
 #include <cstdint>
@@ -206,12 +205,12 @@ struct ProbePair {
 };
 // The centring at an engage: the reported head's offset from the aim (the render head in the seated space: the game composes its camera as the aim turned by the
 // reported head, F61), in the seat convention; an offset under kCentreMinDeg is left alone, one over kCentreMaxDeg (the head turned away) too.
-// F194: pictureCentreRad is the pitch of the middle of the picture from the head's forward axis (nofoot::f194::pitchInForce; negative: below): with it the offset is that of the ray from the head through
-// the middle of the picture, so the aim goes where the pilot looks; 0 (the key off, no frustum known) is the forward axis, as before, bit for bit.
+// F195: the pitch part is kept up to 15 deg either way and only the rest centred (native_on_foot_f195.h); the offset itself is the forward axis's, as it has always been (F194 took the ray through the middle of the
+// picture here, and was removed: F194b).
 constexpr double kCentreMinDeg = 0.5, kCentreMaxDeg = 120.0;
-inline bool centreOffset(const float render[12], double* yawRad, double* pitchRad, double pictureCentreRad = 0.0) noexcept {
+inline bool centreOffset(const float render[12], double* yawRad, double* pitchRad) noexcept {
     double y = 0.0, p = 0.0;
-    if (!f194::rayAngles(render, pictureCentreRad, &y, &p)) return false;
+    if (!adsHeadAngles(render, &y, &p)) return false;
     *yawRad = y;
     *pitchRad = p;
     return true;

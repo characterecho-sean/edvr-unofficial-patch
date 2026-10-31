@@ -1,22 +1,23 @@
-// F194 (native on-foot VR): look to aim aims at the middle of the picture, and its eye height settles as mouse look's does. Header only, no game or D3D11 state, so native_frame_test runs the very
+// F194 (native on-foot VR): look to aim's eye height settles as mouse look's does; the view's height at an edge of look to aim, measured. Header only, no game or D3D11 state, so native_frame_test runs the very
 // functions the frame thread and the pin hook use. Journal: the arc doc, F194.
 //
-// The tester (Quest 3, rc.4, look to aim): the aim sits about 12.9 deg above where they look. The pilot, on his Quest 3 (Virtual Desktop): he let the mouse aim settle, looked at the reticle, turned look to
-// aim on, and the view dropped; on his Pimax he sees neither. The headset's vertical frustum is not symmetric on a Quest 3 (up 0.9657, down 1.4281 as tangents) and is on a Pimax Crystal Super
-// (1.2648 both): the middle of the picture is atan((up - down) / 2) = -13.0 deg from the pose's forward axis on the Quest and 0 on the Pimax. Look to aim took the pose's forward axis (the head's pitch
-// from the aim, adsHeadAngles) as the direction to aim at: 13 deg above the middle of the picture on a Quest, level on a Pimax. Horizontally each eye's centre is off by mirror-image amounts, so the two
-// eyes' mean (the head's) is 0: the correction is vertical only.
+// Part 1 (look to aim aiming at the middle of the picture, with its key) was REMOVED on 2026-10-31 (F194b). The tester (Quest 3, rc.4) reported look to aim's aim about 12.9 deg above where they look, and a
+// Quest 3's vertical frustum is not symmetric (up 0.9657, down 1.4281 as tangents: the middle of the picture 13.0 deg below the pose's forward axis; a Pimax Crystal Super's, 1.2648 both, is level), so part 1
+// took the ray from the head through the middle of the picture as the direction to centre the aim on, in place of the forward axis. The pilot flew it on his Quest 3 (edvr_gfx_20261031_134656) and said it was
+// quite a bit worse: "the aim dropped". It was refuted: at four engages after a settled mouse aim the forward axis stood +0.77, +4.46, +4.79 and +5.55 deg from the aim, the ray moved the aim down 6.6 to 11.4
+// deg instead, and his gaze offset is about 5 deg on his Quest against the picture's centre 12.2 deg below the axis (and 10.5 to 12 deg on his Pimax, with a symmetric frustum), so no headset value predicts it. F195
+// took its place (the engage keeps the aim's pitch where the mouse left it) and flew well; the pilot said to remove the key. Gone with it: the picture-centre pitch, the frustum read and its log line, the ray,
+// centreOffset's picture parameter (it is adsHeadAngles again). The runtime's "view fov:" line (src/openxr/view_fov_note.h) stays: a measurement with no key.
 //
-// Part 1. The ray from the head through the middle of the picture is the forward axis turned by that pitch about the head's own right axis (a rolled head turns about its own right axis, not about
-// world X). centreOffset (native_on_foot_f109.h) takes it, when the key is on and the headset's frustum is known, as the reported head's offset from the aim at an engage (and F133's yaw re-centre
-// reads it); the follower's head steps are unchanged (steps do not see a constant offset).
-// Part 2. Look to aim refused the stance's settle (F98c: the only publisher of the raise that holds the view's height over the neck) whenever |the carried aim pitch| was 10 deg or more (F109, native_on_foot.cpp).
-// That pitch is the account of what the game applied for EDVR's asks since the engage (AdsAimMap::pitchSeat), not the game's aim: with the mouse aim resting at -11 and a level head the engage's
-// centring carries +11 and the settle was refused with the aim level; and with part 1 a level head on a Quest carries -13. Mouse look's gate is F139's 20 deg on the FP root's pitch, nothing drawn only
-// (nofoot::f138::settleRefused), and it already runs after look to aim's for both modes. With the key on, look to aim's own gate is skipped and F139's covers it exactly as it covers mouse look.
+// Part 2 (TEMPORARY A/B experimental.native_on_foot_look_to_aim_eye_height_as_mouse_look, default on): look to aim refused the stance's settle (F98c: the only publisher of the raise that holds the view's height over the
+// neck) whenever |the carried aim pitch| was 10 deg or more (F109, native_on_foot.cpp). That pitch is the account of what the game applied for EDVR's asks since the engage (AdsAimMap::pitchSeat), not the game's aim:
+// with the mouse aim resting at -11 and a level head an engage that centred the aim carried +11 and the settle was refused with the aim level (the pilot's "my view dropped"). Mouse look's gate is F139's 20 deg on the
+// FP root's pitch, nothing drawn only (nofoot::f138::settleRefused), and it already runs after look to aim's for both modes. With the key on, look to aim's own gate is skipped and F139's covers it exactly as it
+// covers mouse look.
+//
+// The instruments: the hook's window of the settle's fate, the frame thread's second, the 1 s line, and the probe of the view's height at an engage and a disengage.
 #pragma once
 
-#include "native_on_foot_core.h"   // adsHeadAngles
 #include "native_on_foot_f138.h"   // settleRefused, kSettleGateDeg: F139's rule
 
 #include <cmath>
@@ -27,72 +28,6 @@
 namespace edvr {
 namespace nofoot {
 namespace f194 {
-
-constexpr double kDeg = kAdsDeg;
-constexpr double kMaxPictureCentreDeg = 30.0;   // no headset's picture centre is further from its forward axis; a frustum that says more is a bad answer, not a headset
-
-// ---- the headset's frustum: the middle of the picture ----------------------------------------------------------------------------------------------------------------------------------------
-
-// The pitch of the middle of the picture from the forward axis (radians, up +): the centre of the tangent span, atan((up - down) / 2). 0 for a frustum that is not numbers, not positive, or implausible.
-inline double pictureCentrePitchRad(double upTan, double downTan) noexcept {
-    if (!std::isfinite(upTan) || !std::isfinite(downTan) || !(upTan > 0.0) || !(downTan > 0.0)) return 0.0;
-    const double p = std::atan((upTan - downTan) * 0.5);
-    return std::fabs(p) <= kMaxPictureCentreDeg * kDeg ? p : 0.0;
-}
-
-// The headset's vertical frustum as the channel (frame_flag.h eyeTangentsVertical) carries it. The channel's two words are OpenVR's pfTop and pfBottom MAGNITUDES, and those API names are reversed
-// physically: pfBottom describes the +Y edge and pfTop the -Y edge (frame_flag.h; menu_panel.cpp does the same swap). So up = botMag and down = topMag.
-struct Frustum {
-    bool have = false;      // the channel answered
-    bool usable = false;    // ... with a frustum the correction may use
-    double upTan = 0.0, downTan = 0.0, pitchRad = 0.0;   // the physical tangents; the middle of the picture from the forward axis (0 unless usable)
-};
-inline Frustum frustumFromChannel(bool answered, double topMag, double botMag) noexcept {
-    Frustum f;
-    f.have = answered;
-    if (!answered) return f;
-    f.upTan = botMag;
-    f.downTan = topMag;
-    f.usable = std::isfinite(f.upTan) && std::isfinite(f.downTan) && f.upTan > 0.0 && f.downTan > 0.0 && std::fabs(std::atan((f.upTan - f.downTan) * 0.5)) <= kMaxPictureCentreDeg * kDeg;
-    f.pitchRad = f.usable ? pictureCentrePitchRad(f.upTan, f.downTan) : 0.0;
-    return f;
-}
-// Two frusta are the same one to the channel's resolution (a thousandth of a tangent).
-inline bool sameFrustum(const Frustum& a, const Frustum& b) noexcept {
-    return a.have == b.have && a.usable == b.usable && std::fabs(a.upTan - b.upTan) < 0.0006 && std::fabs(a.downTan - b.downTan) < 0.0006;
-}
-// The pitch the centring is given: the picture's centre when the key is on and the frustum is usable, else 0 (the forward axis, as before F194).
-inline double pitchInForce(bool keyOn, const Frustum& f) noexcept { return keyOn && f.usable ? f.pitchRad : 0.0; }
-
-// ---- the ray -----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
-
-// The yaw (the seat's sign) and the pitch (nose up +) of the ray from the head through the middle of the picture, from a 3x4 row-major rigid transform in OpenXR axes (x right, y up, -z forward):
-// the forward axis (minus the third column) turned by pictureRad about the head's own right axis, f' = cos(d) f + sin(d) u with u the head's up (the second column, made square to f). A pitch of
-// exactly 0 is adsHeadAngles itself, bit for bit. False when degenerate or when the ray is within 11 deg of vertical (no heading there), as adsHeadAngles.
-inline bool rayAngles(const float m[12], double pictureRad, double* yaw, double* pitch) noexcept {
-    if (pictureRad == 0.0) return adsHeadAngles(m, yaw, pitch);
-    if (!std::isfinite(pictureRad)) return false;
-    double f[3] = {-static_cast<double>(m[2]), -static_cast<double>(m[6]), -static_cast<double>(m[10])};
-    const double lf = std::sqrt(f[0] * f[0] + f[1] * f[1] + f[2] * f[2]);
-    if (!(lf > 1e-6)) return false;
-    for (double& v : f) v /= lf;
-    double u[3] = {static_cast<double>(m[1]), static_cast<double>(m[5]), static_cast<double>(m[9])};
-    const double fu = f[0] * u[0] + f[1] * u[1] + f[2] * u[2];
-    for (int i = 0; i < 3; ++i) u[i] -= fu * f[i];
-    const double lu = std::sqrt(u[0] * u[0] + u[1] * u[1] + u[2] * u[2]);
-    if (!(lu > 1e-6)) return false;
-    for (double& v : u) v /= lu;
-    const double c = std::cos(pictureRad), s = std::sin(pictureRad);
-    double r[3];
-    for (int i = 0; i < 3; ++i) r[i] = c * f[i] + s * u[i];
-    const double lr = std::sqrt(r[0] * r[0] + r[1] * r[1] + r[2] * r[2]);
-    if (!(lr > 1e-6)) return false;
-    const double ry = r[1] / lr;
-    if (std::fabs(ry) > 0.98) return false;
-    *yaw = std::atan2(-r[0], -r[2]);
-    *pitch = std::asin(ry);
-    return true;
-}
 
 // ---- part 2: look to aim's settle gate -------------------------------------------------------------------------------------------------------------------------------------------------------
 
@@ -117,7 +52,7 @@ inline SettleVerdict settleVerdict(bool asMouseLook, double carriedAbsDeg, doubl
 
 // ---- the pin hook's window ----------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
-// One fresh pin call while look to aim drives the aim: the drawn eye over the animated neck (m, not a number: unknown), the raise published (m, not a number: none yet), and the settle's fate.
+// One pin call while look to aim drives the aim: the drawn eye over the animated neck (m, not a number: unknown), the raise published (m, not a number: none yet), and the settle's fate.
 struct Call {
     double eyeOverNeckM = std::nan(""), raiseM = std::nan("");
     bool tenWould = false, tenRefused = false, f139Refused = false, taken = false;
@@ -146,18 +81,17 @@ struct Window {
 
 // ---- the frame thread's second -------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
-// Per tick while look to aim is engaged: the headset's pitch in LOCAL (the physical head), the carried aim pitch (the account), the game's aim pitch (the FP root, when fresh), and the reported head's pitch from
-// the aim for the forward axis and for the ray in force (degrees; the seat convention, nose up +).
+// Per tick while look to aim is engaged: the headset's pitch in LOCAL (the physical head), the carried aim pitch (the account), the game's aim pitch (the FP root, when fresh) and the reported head's pitch from
+// the aim (degrees; the seat convention, nose up +; F195: what the engage kept, about 0 with the key off).
 struct Second {
-    uint32_t ticks = 0, localN = 0, rootN = 0, fwdN = 0, rayN = 0;
-    double localSum = 0.0, carriedSum = 0.0, rootSum = 0.0, fwdSum = 0.0, raySum = 0.0;
-    void add(bool localOk, double localDeg, double carriedDeg, bool rootOk, double rootDeg, bool fwdOk, double fwdDeg, bool rayOk, double rayDeg) noexcept {
+    uint32_t ticks = 0, localN = 0, rootN = 0, offN = 0;
+    double localSum = 0.0, carriedSum = 0.0, rootSum = 0.0, offSum = 0.0;
+    void add(bool localOk, double localDeg, double carriedDeg, bool rootOk, double rootDeg, bool offOk, double offDeg) noexcept {
         ++ticks;
         carriedSum += std::isfinite(carriedDeg) ? carriedDeg : 0.0;
         if (localOk && std::isfinite(localDeg)) { ++localN; localSum += localDeg; }
         if (rootOk && std::isfinite(rootDeg)) { ++rootN; rootSum += rootDeg; }
-        if (fwdOk && std::isfinite(fwdDeg)) { ++fwdN; fwdSum += fwdDeg; }
-        if (rayOk && std::isfinite(rayDeg)) { ++rayN; raySum += rayDeg; }
+        if (offOk && std::isfinite(offDeg)) { ++offN; offSum += offDeg; }
     }
     bool any() const noexcept { return ticks > 0; }
     double mean(double sum, uint32_t n) const noexcept { return n ? sum / n : 0.0; }
@@ -165,33 +99,17 @@ struct Second {
 
 // ---- the lines -----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
-// When the frustum is first known (or first not), and on change, the line says where the middle of the picture is (the Quest's: 13.0 deg below the forward axis, with the up and down tangents) and whether the
-// key is on. Before an answer, and for a frustum that cannot be used, it says the forward axis is what look to aim aims at. (tools\edvr_log.py reads these formats from this file: keep a quoted copy of a line out of
-// the comments, where the reader's search would find it first.)
-inline int formatFrustum(char* buf, size_t n, const Frustum& f, bool keyOn) noexcept {
-    const char* key = keyOn ? "on" : "off";
-    if (!f.have)
-        return std::snprintf(buf, n, "native on foot look to aim (F194): no frustum from the headset yet: the forward axis; look to aim aims at the picture's centre: %s", key);
-    if (!f.usable)
-        return std::snprintf(buf, n, "native on foot look to aim (F194): the headset's frustum (up %.3f, down %.3f tangents) is not usable: the forward axis; look to aim aims at the picture's centre: %s",
-                             f.upTan, f.downTan, key);
-    const double deg = f.pitchRad / kDeg;
-    if (std::fabs(deg) < 0.05)
-        return std::snprintf(buf, n, "native on foot look to aim (F194): the picture's centre is on the headset's forward axis (up %.3f, down %.3f tangents); look to aim aims at it: %s", f.upTan, f.downTan, key);
-    return std::snprintf(buf, n, "native on foot look to aim (F194): the picture's centre is %.1f deg %s the headset's forward axis (up %.3f, down %.3f tangents); look to aim aims at it: %s",
-                         std::fabs(deg), deg < 0.0 ? "below" : "above", f.upTan, f.downTan, key);
-}
-
-// The 1 s line while look to aim is engaged. centreDeg: the picture-centre pitch in force (0: the forward axis); eyeHeightAsMouse: the key that skips the 10 deg gate.
-inline int formatSecond(char* buf, size_t n, const Second& s, const Window& w, double centreDeg, bool keyOn, bool eyeHeightAsMouse) noexcept {
+// The 1 s line while look to aim is engaged. eyeHeightAsMouse: the key that skips the 10 deg gate. (tools\edvr_log.py reads these formats from this file: keep a quoted copy of a line out of the comments, where the
+// reader's search would find it first. It reads the line of a build before F194b too, which began with the picture-centre pitch in force and gave the forward axis's and the ray's pitch from the aim.)
+inline int formatSecond(char* buf, size_t n, const Second& s, const Window& w, bool eyeHeightAsMouse) noexcept {
     const double ew = w.eyeN ? static_cast<double>(w.eyeN) : 1.0, rw = w.raiseN ? static_cast<double>(w.raiseN) : 1.0;
     return std::snprintf(buf, n,
-                         "native on foot look to aim height (F194) 1 s: the picture-centre pitch in force %+.1f deg (look to aim aims at the picture's centre: %s); the headset's pitch (LOCAL) mean %+.1f deg; "
-                         "carried aim pitch mean %+.1f deg (the game's aim %+.1f deg); the reported head's pitch from the aim mean: the forward axis %+.1f deg, the ray in force %+.1f deg; "
+                         "native on foot look to aim height (F194) 1 s: the headset's pitch (LOCAL) mean %+.1f deg; "
+                         "carried aim pitch mean %+.1f deg (the game's aim %+.1f deg); the reported head's pitch from the aim mean %+.1f deg; "
                          "the settle: look to aim's 10 deg gate %s %u of %u pin calls, F138/F139's 20 deg gate refused %u, taken %u; the published raise mean %+.1f cm; "
                          "the drawn eye over the animated neck mean %+.1f cm",
-                         centreDeg, keyOn ? "on" : "off", s.mean(s.localSum, s.localN), s.mean(s.carriedSum, s.ticks), s.mean(s.rootSum, s.rootN), s.mean(s.fwdSum, s.fwdN),
-                         s.mean(s.raySum, s.rayN), eyeHeightAsMouse ? "would have refused (skipped)" : "refused", eyeHeightAsMouse ? w.tenWould : w.tenRefused, w.calls, w.f139Refused, w.taken,
+                         s.mean(s.localSum, s.localN), s.mean(s.carriedSum, s.ticks), s.mean(s.rootSum, s.rootN), s.mean(s.offSum, s.offN),
+                         eyeHeightAsMouse ? "would have refused (skipped)" : "refused", eyeHeightAsMouse ? w.tenWould : w.tenRefused, w.calls, w.f139Refused, w.taken,
                          w.raiseN ? w.raiseSum / rw * 100.0 : 0.0, w.eyeN ? w.eyeSum / ew * 100.0 : 0.0);
 }
 

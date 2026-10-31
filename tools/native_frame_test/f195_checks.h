@@ -115,11 +115,10 @@ void run195(Check&& check) {
               "F195: edvr.ini has the key, default on, marked TEMPORARY, with a menu row");
         check(has("pitch kept %+.2f deg, centred %+.2f deg (F195: %s); %s") && has("kept.keptRad / f109::kDeg, kept.centredRad / f109::kDeg, g_ltaKeepPitch ? \"on\" : \"off\","),
               "F195: the centred line says the pitch kept, the pitch centred and whether the key was on");
-        // F194 part 1's key: off by default, in the three places, the key and its code still there
-        check(has("cfg.getString(\"experimental.native_on_foot_look_to_aim_aims_at_picture_centre\", \"off\") == \"on\"") && has("std::atomic<bool> g_ltaAimsAtPictureCentre{false};") &&
-                  has("bool g_ltaAimsAtPictureCentreLast = false,") && ini.find("\nnative_on_foot_look_to_aim_aims_at_picture_centre = off\n") != std::string::npos &&
-                  ini.find("refuted it for the pilot") != std::string::npos && has("f109::centreOffset(np.render, &oy, &op, g_ltaCentreRad)"),
-              "F195: F194 part 1's key is off by default (code, shipped line, comment saying the Quest flight refuted it), and the key and the ray's code are still there");
+        // F194 part 1 is removed (F194b): the offset the engage keeps is the forward axis's again, the centring calls centreOffset as it did before F194, and the log line has no second set of angles
+        check(has("if (f109::centreOffset(np.render, &oy, &op)) {") && has("const nofoot::f195::Kept kept = nofoot::f195::keptPitch(op, g_ltaKeepPitch);") && cpp.find("g_ltaCentre") == std::string::npos &&
+                  cpp.find("picture-centre pitch") == std::string::npos,
+              "F195: the engage's centring reads the reported head's offset from centreOffset (the forward axis) and keeps its pitch; no picture-centre pitch is in force (F194b)");
     }
 }
 
