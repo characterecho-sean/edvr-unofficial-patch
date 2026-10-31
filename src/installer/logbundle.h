@@ -83,6 +83,26 @@ LogBundle collectLogs(const std::wstring& gameDir, const std::wstring& outDir,
 // The user's Desktop, or an empty string if Windows will not say where it is.
 std::wstring desktopFolder();
 
+// The clipboard half of "Save logs": the zip goes on the clipboard as a copied file (CF_HDROP), the
+// same thing Explorer's Copy puts there, so Ctrl+V in Discord, a GitHub comment or an Explorer folder
+// attaches or copies the zip. A file and not the logs' text because the bundle is several files and
+// Discord turns a long paste into an attachment anyway. Wine and Proton map CF_HDROP to the host's
+// text/uri-list, which is how a Linux Discord or file manager sees it.
+//
+// The bytes of that clipboard format: a DROPFILES header, then `path` and an empty string, both
+// NUL-terminated and wide. Apart from the clipboard call so a rig can check it with the shell's own
+// parser (DragQueryFileW) without touching the developer's clipboard.
+std::vector<unsigned char> dropFilesBlock(const std::wstring& path);
+
+// Replaces the clipboard with `path` as a copied file. `owner` is the installer's window (Wine ties the
+// X11 selection to a window; Windows takes null). On failure `error` says why, and nothing the caller
+// saved to disk is affected: the clipboard is a convenience beside the file on the Desktop.
+bool copyFileToClipboard(HWND owner, const std::wstring& path, std::string* error);
+
+// True under Wine, Proton included (ntdll exports wine_get_version). Only changes what the report says
+// about the clipboard: on X11 a copy can go when the process that made it exits.
+bool runningUnderWine();
+
 // A zip of `files`, stored (not deflated): logs are small, every tool opens a
 // stored zip, and this way the installer carries no compression library.
 // `names` are the entry names, one per file.

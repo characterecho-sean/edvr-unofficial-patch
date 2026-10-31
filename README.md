@@ -144,7 +144,9 @@ means it held nothing.
 Desktop with the last session's two logs, `edvr_breadcrumbs.txt`, any
 `edvr_FATAL.txt`, your `edvr.ini` and, on a VR install, the OpenXR runtime's
 `edvr_openxr.ini`. That is everything listed below, all from the right session.
-Then **open an issue** and attach the zip.
+Then **open an issue** and attach the zip. The zip is also copied to your
+clipboard, so you can press Ctrl+V in a Discord message or a GitHub comment to
+attach it.
 
 If the game crashed in that session, Save logs also writes a second zip,
 `edvr-crash-dump-<time>.zip`, with the game's crash dump. The dump holds a copy
