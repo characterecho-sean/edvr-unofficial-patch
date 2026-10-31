@@ -2,12 +2,14 @@
 
 ## Status
 
-- **State (2026-10-30, evening):** camera move FLOWN OK on Steam (d662d26c;
-  Sean: "the camera position seems to be pretty good"; HUD at 0.41-0.47 m at
-  65 cm back). The first panel shift FLOWN, NO EFFECT: it targeted the wrong
-  draws (the reticle). Retargeted to the two holo families on branch
-  `claude/srv-turret-hud`, NOT FLOWN. Issue #140. Test install: Steam
-  (`--target steam --scope both --xess`).
+- **State (2026-10-31):** camera move FLOWN OK on Steam (Sean flies 70 cm).
+  The forward pull of the deep panels (`fix.srv_turret_hud_gap`) FLOWN on
+  9fdad3a1 over ten families, Scorpion only: it moves only what lies deeper
+  than gap + 0.1 m, and no gap makes the layers meet (journal, 2026-10-31).
+  Sean's next plan: push the weapon panels and the radar back to the larger
+  panels' depth instead. NOT BUILT. Branch `claude/srv-turret-hud`, local
+  only. Issue #140. Test install: Steam (`--target steam --scope both
+  --xess`).
 - **What is wrong (measured, the game's own placement):** in the Scorpion's
   turret view Elite puts the VR camera too far forward along the gun. The
   near HUD layer (both weapon arc brackets, SECONDARY A / PRIMARY A, the two
@@ -16,15 +18,15 @@
   about 1.02 m deeper than that layer, but are drawn over it, so in stereo
   the far panel covers the nearer arcs. The reticle is at the target, as it
   should be.
-- **What the build does (Sean's plan, 2026-10-30):** in the turret view only
-  (Status.json Flags bit 13, seated in an SRV), (1) the eye alignment moves
-  the camera back `fix.srv_turret_camera_back` cm (default 60), and (2) a
-  private geometry shader per family brings the vertices of the two holo
-  panel families (vs 1989E6D3B405FDE0, vs 2CECEC3065EF0D4A) that lie between
-  gap + 0.1 m and 4 m forward by `fix.srv_turret_hud_gap` cm (default 96),
-  along the ray from the head centre, so they keep their size on screen and
-  land at the ammo count's depth. The near layer (0.4 m) and the reticle
-  (500 m) are outside that window.
+- **What 9fdad3a1 does:** in the Scorpion's turret view only (Status.json
+  Flags bit 13 seated in an SRV, and the journal's LoadGame `Ship` or
+  LaunchSRV `SRVType` naming the Scorpion), (1) the eye alignment moves the
+  camera back `fix.srv_turret_camera_back` cm (default 60), and (2) a private
+  geometry shader per output signature brings every vertex of ten HUD
+  families that lies between gap + 0.1 m and 4 m forward by
+  `fix.srv_turret_hud_gap` cm (default 96), along the ray from the head
+  centre, so it keeps its size on screen. The reticle (500 m) is outside
+  that window.
 - **Not covered:** Elite's "Disable GUI effects" OFF draws the holo panels
   with vs 81216C77F90DEDD6 (another output signature, no bytecode yet).
 - **Temporary keys** (live, Fixes page of the menu; bake the flown values and
@@ -36,17 +38,19 @@
   (`journalWatchSetEagerStatusOnFoot`) never shortens the worker's sleep:
   `untilNextDue()` honours `g_eager` only. Left alone; a fix would change on
   foot too.
-- **Open:** whether the radar (bottom centre) is also at the deeper depth
-  (it was outside the dump's view); whether the Scarab's turret view has the
-  same placement; whether the switch lag is acceptable.
+- **Depths at 70 cm back (dump 052114218001, gap 0):** radar 0.32-0.34 m,
+  lying on the turret deck (0.30 m); left arc and its ammo count 0.42-0.44 m;
+  right arc's ammo count 0.65 m; INFO strip and its warning 0.68-0.70 m;
+  turret housing 0.85 m; barrel 0.62-1.32 m; SYSTEMS 1.70 m; the location
+  panel about 1.5 m (cut off in the right eye, read by eye).
+- **Open:** whether pushing the radar off the deck it lies on reads as wrong
+  in stereo; whether the switch lag is acceptable.
 - **Ruled out:** see "Ruled out" below.
-- **Next flight:** Steam, VR. Board the Scorpion, enter the turret view
-  sitting normally, look at the HUD, press the eye dump (NumLock) once
-  sitting still, leave the turret view. Then `python tools\edvr_log.py
-  --target steam --expect-build HEAD --health` (rule "srv turret view") and
-  `--grep "srv turret"`: the 10 s line should read P00 near 0.94, ipd_elite
-  near 55 mm and bound equal to draws. Measure the dump with the disparity
-  method below.
+- **Next flight:** after the push-back build. Steam, VR, the Scorpion's
+  turret view; sweep the new key, press the eye dump (INSERT) once sitting
+  still at the chosen value. Then `python tools\edvr_log.py --target steam
+  --expect-build HEAD --health` (rule "srv turret view") and `--grep "srv
+  turret"`, and measure the dump with the disparity method below.
 
 ## Evidence (flight of 2026-10-30, Epic, v0.22.0-rc.3-139-gcd4c91c4)
 
@@ -118,9 +122,16 @@ same amount. Matching them needs a change to one layer's stereo depth.
   door's hologram resolve (saves and restores the stage around its own
   draw); the shader linkage (ps 63ABD86359B57D01 reads TEXCOORD0 only); an
   issue of the sprite outside the bound scope (traced, none).
-- ruled out: the radar families as the deeper panels, because
-  DF3503CD07F9B10C, 44DDCDEBAEA137D8, 9B34C331902DC1ED, 9611A454527F7FEB and
-  B932058F26B76691 all take `__USER_RADAR_LOCALKEY_*` inputs.
+- ruled out: the radar families as the deeper panels, because the flight of
+  2026-10-31 (9fdad3a1) captured DF3503CD07F9B10C, 44DDCDEBAEA137D8,
+  9B34C331902DC1ED, 9611A454527F7FEB, B932058F26B76691 and the near draws of
+  5559BD94.EA02FAC2 at clip w 0.11-0.44 m, bottom centre: they are the radar,
+  nearer than the arcs, and a forward pull can never reach them.
+- ruled out: vs B7790CBFC6554097 as a HUD panel, because its captured
+  vertices sit at w -658 to +3029 m.
+- ruled out: one forward pull making the layers meet, because a pull only
+  moves vertices deeper than gap + 0.1 m. The near layer (0.11-0.70 m) is
+  never in the window, and the deep layer itself spans 1.3-2.8 m.
 
 ## Journal
 
@@ -153,3 +164,34 @@ left eye's HDR target: 1989E6D3B405FDE0 at 0.42, 0.41 (arcs surface), 0.44
 The deep panels are those two families' records about 1.39 m out, drawn by
 the same shaders as the near layer, so the shift is per vertex by depth.
 Default gap 96 cm = 1.39 - 0.42.
+
+### 2026-10-31: the ten-family pull flown, and the push-back plan
+
+Flight `edvr_gfx_20261031_051457.log` (9fdad3a1, Steam, build matches). The
+latch read the Scorpion from LoadGame and cleared on DockSRV. Turret view
+236 s, camera back 70 cm; Sean swept the gap 0 to 200 cm and back. The pass
+bound every draw of the ten families (121066 of 121066). Sean: "the panels
+still exist off set in space from one another regardless of the srv
+settings".
+
+The stream-output captures show why, per family, left eye, across the
+sweep: the arcs, weapon names, ammo counts and INFO strip (1989E6D3 draws
+0-3, 2CECEC30 draws 0-1) at w 0.27-0.62 m; the radar (the five
+`__USER_RADAR_LOCALKEY` families and the near 5559BD94.EA02FAC2 draws) at
+0.11-0.44 m, bottom centre; the deep draws 1989E6D3 draw 4 and 2CECEC30
+draw 2 at 1.32-1.50 m; 5559BD94 (both signatures) deep draws at 1.77-2.78 m
+lower centre. A forward pull only moves what lies deeper than gap + 0.1 m,
+so the near layer never moves, and the deep layer's own 1.3-2.8 m spread
+stays. Dump 052114218001 (gap 0) gives the depths in the Status block.
+
+Sean's plan from this: "move the radar and weapon panels further away from
+the center of the turret to be in the same z plane as the larger UI". The
+same shader does that with a negative gap: a vertex at w goes to w + d along
+the head-centre ray at unchanged angular size (x += -s d / (w + d)). Because
+stereo disparity goes as 1/distance, a push also shrinks the remaining
+spread. At d = 110 cm the arcs (0.42-0.65 m) land at 1.52-1.75 m, the radar
+at 1.42 m and SYSTEMS stays at 1.70 m. The vergence difference between
+SYSTEMS and the nearest arc falls from 1.79 to 0.07 dioptres (1/0.42 -
+1/1.70, against 1/1.52 - 1/1.70). The cost is that the radar lies on the
+turret deck (0.30 m) and the ammo counts cross the barrel (0.62 m). Pushed
+behind them, they are still drawn over the metal.
