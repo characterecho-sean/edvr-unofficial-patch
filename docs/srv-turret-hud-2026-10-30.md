@@ -7,26 +7,21 @@
   Nutrition); the radar near field on its own. FLOWN and settled: the 3D
   move with its anchor, the depth fix, the radar forward key, the draw-time
   pose (judder gone), the hologram's lighting position (45fa7e56: it draws).
-  The radar disc is a picture shown by the hologram billboard vs 5559BD94
-  + ps EA02FAC2, not DF3503CD. The instrument flight (707c0ab5) found that
-  two writers draw it: the schematic vs 4EDE4BC9 (the disc) and vs
-  5B0068AF into a 256x256 target (the Scorpion). Both draw from a FIXED
-  camera V0 that does not follow the head: its constants were bit-identical
-  16 s apart while the head moved 0.28 m. At camera back 25 the whole radar
-  volume lies 0.36 to 0.51 m BEHIND V0, so the picture is empty and no
-  billboard move can show it. V0 and its window are chosen on the CPU (the
-  window is framed for a camera 0.65 m behind V0). NO GPU-side fix built
-  (journal, "the radar's camera is fixed"). Branch `claude/srv-turret-hud`,
-  local only. Issue #140. Test install: Steam (`--target steam --scope
-  both --xess`).
-- **The radar's way out:** camera back 70, radar forward 0. Dump
-  130228598002 shows the whole disc, rim and Scorpion, as the game draws it.
-- **The CPU side (2026-10-31, in progress):** the game's Schematics system
-  draws these pictures. The manager constructor is 0x36BC240 (build 334925);
-  it makes N slots and their "Schematic_%s_%u" targets. V0's setter is NOT
-  found yet: no fix. An instrument (NOT FLOWN) logs every V0 move against
-  the head and camera back. RE notes wait in the analysis inbox
-  (`20261031-133850-srv-radar-camera`).
+  The radar disc is a picture the game draws of the radar's terrain
+  schematic (vs 4EDE4BC9, and vs 5B0068AF for the Scorpion) from the live
+  camera, shown by the hologram billboard vs 5559BD94. Flight a5800fdc: that
+  camera updates only while the schematic's volume is in view, and at the
+  stock camera the volume lies about 0.44 m BEHIND the eye, so the picture
+  is empty (journal, "V0 is gated by visibility"). Branch
+  `claude/srv-turret-hud`, local only. Issue #140. Test install: Steam
+  (`--target steam --scope both --xess`).
+- **The radar fix (BUILT, NOT FLOWN):** an entry hook on the schematic's
+  update (0x384A590, build 334925 only) writes radar forward into its local
+  offset, so the game frames, draws and places the radar itself; the two
+  5559BD94 billboard families are then left to the game. Unconfirmed: that
+  the anchor's +Z is forward, and whether it turns with the turret
+  (journal, "the radar anchor moved in the game").
+- **The radar's way out without it:** camera back 70, radar forward 0.
 - **What is wrong (the game's own placement):** the turret view's whole HUD
   sits about 0.7 m too far back for the stock camera (the radar behind the
   head, the arcs at or behind it), and the larger panels sit about a metre
@@ -44,7 +39,8 @@
   `fix.srv_turret_hud_forward`, `fix.srv_turret_radar_forward` (70),
   `fix.srv_turret_panels_back`, `fix.srv_turret_radar_back`,
   `fix.srv_turret_hud_gap`, `fix.srv_turret_hud_depth` (front),
-  `fix.srv_turret_hud_scissor` (open). Sean's flown values
+  `fix.srv_turret_hud_scissor` (open), `fix.srv_turret_radar_anchor` (on;
+  reversed, off). Sean's flown values
   (2026-10-31): camera back 35, HUD forward 70, panels back 140, radar 0.
 - **Latency:** a view switch is followed up to about 0.5 s after the game
   writes Status.json (the watcher's 500 ms poll); left alone, a fix would
@@ -53,12 +49,12 @@
   (Sean credited it, but its change also fixed the anchor); where the radar
   reads best; whether the switch lag is acceptable.
 - **Ruled out:** see "Ruled out" below.
-- **Next flight (this branch):** radar forward 0, panels back above 0 (the
-  draw gate). Enter the turret view at camera back 0 and hold still 5 s,
-  then lean about 25 cm forward, back and sideways. Then step camera back
-  0, 35, 70, 35, 0 with 5 s between steps, and leave and re-enter the view
-  at 35 and at 70. Read it with `--grep "srv turret radar camera"`: first
-  seen, every move and its trigger, and the summary at view off.
+- **Next flight (this branch):** radar anchor on; camera back 0 to 35 with
+  radar forward = 65 minus camera back (45 at 20, 30 at 35). Read
+  `--grep "srv turret radar anchor"` (armed, applied, view off) and
+  `--grep "srv turret radar camera"`: the origin's z should rise by radar
+  forward once the anchor applies. If it goes MORE negative, set the anchor
+  key to reversed in flight (journal, "the radar anchor moved in the game").
 
 ## Evidence (flight of 2026-10-30, Epic, v0.22.0-rc.3-139-gcd4c91c4)
 
@@ -746,5 +742,79 @@ analysis commit 9f71604) agrees and finds the anchor:
 - **Open** (the intake's list): which entity the anchor is and whether it
   turns with the turret; whether ships create this class; whether the slot's
   region box (slot+0x310, test 0x5E1830) can reject a moved hologram.
+
+### 2026-10-31: the radar anchor moved in the game (built, not flown)
+
+The anchor above is where the game places the radar's schematic, so this
+build moves the schematic there instead of moving its picture afterwards
+(`src\d3d11\srv_radar_anchor.cpp`, with the TEMPORARY key
+`fix.srv_turret_radar_anchor`: `on`, `reversed` or `off`).
+
+- **The hook.** An entry hook on 0x384A590, the schematic's per-frame update
+  (obj in RCX, dt in XMM1, reached only through the thunk 0x381EF00), for
+  build 334925 only. Before it patches anything it checks the PE identity
+  (stamp 0x6ADA8048, image size 0x640C000) and the function's first 16
+  bytes, `40 53 56 48 81 EC 68 01 00 00 0F 29 BC 24 30 01`, read from the
+  exe through its section table. CodeHook moves the first three
+  instructions (10 bytes); the RIP-relative one at +0x12 is not reached. On
+  any other build, or other bytes, it stands down and patches nothing. It
+  is armed the first time the Scorpion's turret view comes on with the key
+  not off.
+- **What it writes.** Before the original runs, on an object whose vtables
+  are base+0x5511DE8 at +0 and base+0x5511F18 at +0x58, the offset (0, 0,
+  s x radar forward) in metres, w 0, goes into both local translation rows,
+  obj+0x15B0 and obj+0x15F0 (0x385DC20 lerps between them). s is +1 for
+  `on` and -1 for `reversed`. The frame tick publishes the offset only
+  while the Scorpion's turret view is on, VR only. Otherwise the offset is
+  zero, and a schematic the hook wrote gets zeros on its next update. `off`
+  publishes zero, which is the old geometry-shader behaviour. The callback
+  stores integers only before it calls the original, so XMM1 (dt) reaches
+  the game intact; the rig pins that text.
+- **The billboards.** While an application is at most 10 frames old and
+  the key is not off, the geometry shader leaves the two 5559BD94 families
+  (EA02FAC2, the disc's picture; E95634B0, the Scorpion) alone: the game
+  places them from the moved schematic. Their draws count as group-off in
+  the 10 s line's unmoved list. The other radar families (DF3503CD,
+  44DDCDEB, 9B34C331, 9611A454, B932058F) keep the shader's radar-forward
+  move along the seat.
+
+Unconfirmed until it flies:
+- the anchor's axes and sign: +Z is forward only by the material's name,
+  "ShipForward", for the anchor's row 2;
+- whether the anchor turns with the turret (if it does not, the offset is
+  along the SRV's forward, not the view's, and the disc can part from the
+  shader-moved radar families);
+- whether ships create this class too (the vtable check and the Scorpion
+  turret gate keep the write off anything else);
+- whether the slot's region box (slot+0x310, test 0x5E1830) can reject a
+  moved hologram.
+
+The log lines (graphics log; the frame tick says them, the hook never
+logs):
+- `srv turret radar anchor: hook armed: EliteDangerous64.exe+0x384A590 (the
+  radar terrain schematic's update, build 334925) at 0x..., stolen=10
+  bytes, prologue 16/16 bytes verified, relay at 0x...`, or `srv turret
+  radar anchor: hook stood down: <why>; nothing was patched`.
+- `srv turret radar anchor: applied at frame F: offset (x,y,z) m in the
+  anchor's axes (key on|reversed), obj 0x...; the 5559BD94 billboards are
+  left to the game`, once a stay.
+- `srv turret radar anchor: 10 s: applied in N frames (C calls through the
+  gate, M with the radar schematic, R restores, F faults, S without a
+  slot), offset (x,y,z) m (key K), last obj 0x...`, beside the 10 s line.
+- `srv turret radar anchor: view off: applied in N frames`, ending ` --
+  NEVER RAN: the radar schematic's update was not called with a matching
+  object while the view was on` when N is 0 and the hook is armed, ` --
+  hook not armed: <why>`, or ` -- not asked: ...` (key off, or radar
+  forward 0).
+- The settings line gains `, radar anchor on|reversed|off`.
+
+To fly: camera back 0 to 35, radar forward = 65 minus camera back (45 at
+20, 30 at 35), `fix.srv_turret_radar_anchor = on`. The "srv turret radar
+camera" instrument is unchanged. Once the anchor applies, V0 should start
+tracking the live camera, and its "moved" lines should show the
+schematic's origin z risen by radar forward (about +0.2 m at back 0 with
+65). If the origin z goes MORE negative after the anchor applies, or V0
+stays frozen and the disc stays empty after the "applied" line, switch the
+key to `reversed` in flight.
 
 

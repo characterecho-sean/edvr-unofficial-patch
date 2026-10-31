@@ -33,7 +33,7 @@
 // about a fixed anchor (see THE MOVE below). And at the game's own camera the whole turret HUD lies about 0.7 m too far back for the head (the radar behind it), so the whole HUD is
 // first translated forward (fix.srv_turret_hud_forward), which is the old camera move applied to the HUD only: the world keeps the game's camera.
 //
-// THE EIGHT TEMPORARY KEYS (all live, all VR only, 0 = the game's own; the last two are text switches):
+// THE NINE TEMPORARY KEYS (all live, all VR only, 0 = the game's own; the last three are text switches):
 //   fix.srv_turret_camera_back  centimetres, 0..150, default 0: the camera moves back in the turret view, over the turret's axis (the stock camera is the plan; the HUD-forward key
 //                               replaces this). Part 1: published as the seated z of the eye alignment (alignTick), the single publisher of that alignment, so its serials stay coherent.
 //   fix.srv_turret_hud_forward  centimetres, 0..150, default 70: every vertex of the panels group (Group::kPanels: the two hologram families) moves forward along the turret by this much
@@ -51,6 +51,10 @@
 //                               the radar's draws from the radar's original screen bounds; the moved geometry was cropped to that stale rectangle (a straight horizontal edge across the disc and
 //                               the hologram, which shifted as the head moved). open: while a bound draw is issued the rectangles are the whole render target (Scissor in
 //                               srv_turret_hud_binding.h), the game's put back after; game keeps its rectangles.
+//   fix.srv_turret_radar_anchor on | reversed | off, default on: the radar's terrain schematic (the volume the disc's picture is drawn from, about 0.44 m behind the eye at the stock
+//                               camera, so the game drew nothing) moved forward by the radar-forward key IN THE GAME, along the anchor entity's +Z (on) or -Z (reversed), by an entry
+//                               hook on its update (srv_radar_anchor.cpp, build 334925 only). While that move is applied the two 5559BD94 billboard families are left to the game (the
+//                               geometry shader does not move them); the other radar families keep its move. off: no move in the game, the geometry shader's move as before.
 //
 // THE TARGET HOLOGRAM (vs 5559BD94, the Scorpion's own hologram, signature H): its vertex shader writes __USER_VERTEX_M_LIGHTINGPOSITION, the vertex's camera-relative WORLD position
 // (cb0[9..11] times the position), and its pixel shader uses it twice (a depth test against the scene and a view ray divided by the fragment's view depth). The geometry shader moves
@@ -91,6 +95,18 @@ inline DepthMode depthModeOf(const char* text) {
     if (text && !std::strcmp(text, "real")) return DepthMode::kReal;
     if (text && !std::strcmp(text, "front")) return DepthMode::kFront;
     return DepthMode::kGame;
+}
+// fix.srv_turret_radar_anchor (on | reversed | off, default on): whether the radar's terrain schematic is moved forward IN THE GAME by the radar-forward key (srv_radar_anchor.cpp, build
+// 334925 only), along the anchor's +Z (on) or -Z (reversed); off leaves the game's placement. RadarAnchorOffset below makes the offset.
+enum class RadarAnchorMode : uint8_t { kOn = 0, kReversed = 1, kOff = 2 };
+inline constexpr RadarAnchorMode kRadarAnchorDefault = RadarAnchorMode::kOn;
+inline constexpr const char* kRadarAnchorDefaultText = "on";
+inline const char* radarAnchorModeName(RadarAnchorMode m) { return m == RadarAnchorMode::kReversed ? "reversed" : m == RadarAnchorMode::kOff ? "off" : "on"; }
+// The key's text; anything else is the default, on (the settings line says which it took).
+inline RadarAnchorMode radarAnchorModeOf(const char* text) {
+    if (text && !std::strcmp(text, "reversed")) return RadarAnchorMode::kReversed;
+    if (text && !std::strcmp(text, "off")) return RadarAnchorMode::kOff;
+    return RadarAnchorMode::kOn;
 }
 // Signature H's geometry shader reads the draw's vertex constants at GS slot 1: the draw's own VS slot 1, rows 277 to 279 the camera's right, up and forward in world axes.
 inline constexpr uint32_t kGameCbSlot = 1;
@@ -217,6 +233,32 @@ inline bool isFamilyVs(uint64_t vs) {
         if (kFamilies[i].vs == vs) return true;
     return false;
 }
+
+// ---- the radar anchor moved in the game (fix.srv_turret_radar_anchor; srv_radar_anchor.cpp) ----------------------------------------------------------------------------------
+// The offset the hook writes into the radar terrain schematic's two local translation rows: (0, 0, s * F) metres in the anchor entity's own axes, F the radar-forward key, s +1 for on
+// and -1 for reversed. UNCONFIRMED that +Z is the anchor's forward (the material calls the anchor's row 2 "ShipForward"), hence the reversed value. All bits zero (never a -0.0) unless
+// the Scorpion's turret view is on, the key is not off and F is above 0; the hook then puts back a zero offset where it wrote one.
+struct RadarAnchorOffset {
+    float m[3] = {0.0f, 0.0f, 0.0f};
+    uint32_t bits[3] = {0u, 0u, 0u};
+    bool zero() const { return (bits[0] | bits[1] | bits[2]) == 0u; }
+};
+inline RadarAnchorOffset radarAnchorOffset(bool on, RadarAnchorMode mode, int radarForwardCm) {
+    RadarAnchorOffset o;
+    if (!on || mode == RadarAnchorMode::kOff || radarForwardCm <= 0) return o;
+    const int cm = radarForwardCm > kRadarForwardMaxCm ? kRadarForwardMaxCm : radarForwardCm;
+    o.m[2] = static_cast<float>(cm) / 100.0f * (mode == RadarAnchorMode::kReversed ? -1.0f : 1.0f);
+    std::memcpy(&o.bits[2], &o.m[2], sizeof(float));
+    return o;
+}
+// The native move counts as applied while the hook's last application is at most this many frames old: stamp is the frame tick's frame number + 1 at that application (0: never).
+inline constexpr uint32_t kRadarAnchorRecentFrames = 10;
+inline bool radarAnchorRecent(uint32_t frameNo, uint32_t stamp) { return stamp != 0u && static_cast<uint32_t>(frameNo + 1u - stamp) <= kRadarAnchorRecentFrames; }
+// The families the native move leaves to the game while it is applied: the hologram billboard 5559BD94 with either pixel shader (the radar disc's picture, the Scorpion's hologram).
+// The game frames and places those from the moved schematic itself; the other radar families keep the geometry shader's move.
+inline bool radarAnchorLeavesFamily(int family) { return family == 7 || family == 8; }
+static_assert(kFamilies[7].vs == 0x5559BD94B6852E83ull && kFamilies[7].ps == 0xEA02FAC2BD6C643Cull && kFamilies[8].vs == 0x5559BD94B6852E83ull && kFamilies[8].ps == 0xE95634B0F61D218Full,
+              "the two families the native radar anchor leaves to the game are the 5559BD94 billboard's");
 // The primitive topologies the shaders carry: triangle lists and triangle strips (the input assembler hands the `triangle` input of a geometry shader each strip triangle in the
 // winding the rasterizer would have used). D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST is 4 and TRIANGLESTRIP 5; everything else is refused, counted (Refuse::kTopology).
 constexpr bool topologyCarried(int d3d11Topology) { return d3d11Topology == 4 || d3d11Topology == 5; }

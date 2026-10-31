@@ -1,6 +1,6 @@
-// The SRV turret view (issue 140): the camera and the HUD in the Scorpion's gunner view in VR. srv_turret_math.h says what is wrong, the eight TEMPORARY keys, the families and the
+// The SRV turret view (issue 140): the camera and the HUD in the Scorpion's gunner view in VR. srv_turret_math.h says what is wrong, the nine TEMPORARY keys, the families and the
 // maths; srv_turret_hud_shader.h and srv_turret_hud_binding.h are the private geometry shaders and their binding (tools/srv_turret_hud_test runs them on WARP);
-// journal_vehicle_latch.h is the Scorpion latch; srv_turret.cpp is this module.
+// journal_vehicle_latch.h is the Scorpion latch; srv_radar_anchor.h is the hook that moves the radar's schematic in the game; srv_turret.cpp is this module.
 //
 // THE SCORPION ONLY. Status.json's turret-view bit is set in the Scarab too, whose turret view was fine, so both parts act only while the turret view is on AND the journal says the
 // vehicle is the Scorpion (journalSrvScorpion: LoadGame's Ship or LaunchSRV's SRVType is combat_multicrew_srv_01; unknown, a training scenario included, is "not the Scorpion"; the
@@ -88,6 +88,12 @@
 //   "srv turret radar camera: first seen|moved by (x,y,z) mm and turned A deg after N frames unchanged at frame F (copied at frame C): the schematic's origin at (x,y,z) m in the camera ...,
 //     forward (..), window tan x [..] y [..], scale S; head (x,y,z) seated, camera back B cm"   each move of V0 (2 mm or 0.05 deg), at most four lines a second, with the head and the key then;
 //   "srv turret radar camera: view off: D picture-camera draws copied, R read, M moves[ -- NEVER SEEN ...]"   the view's end (R = 0: the draw never reached the path).
+//   TEMPORARY, the radar anchor moved in the game (fix.srv_turret_radar_anchor; srv_radar_anchor.h), all said by the frame tick, never by the hook:
+//   "srv turret radar anchor: hook armed: EliteDangerous64.exe+0x384A590 (...) at 0x.., stolen=N bytes, prologue 16/16 bytes verified, relay at 0x.." or "... hook stood down: <why>;
+//     nothing was patched"   once, the first time the view is on with the key not off;
+//   "srv turret radar anchor: applied at frame F: offset (x,y,z) m in the anchor's axes (key K), obj 0x..; the 5559BD94 billboards are left to the game"   each stay's first application;
+//   "srv turret radar anchor: 10 s: applied in N frames (...)"   with the 10 s line while the hook is armed;
+//   "srv turret radar anchor: view off: applied in N frames[ -- NEVER RAN: ...| -- hook not armed: <why>| -- not asked: ...]"   the view's end.
 #pragma once
 
 #include "srv_turret_math.h"
@@ -143,7 +149,8 @@ void srvTurretNotePublished(double seatedZ, uint32_t serial);
 // The unmoved family draws (srv_turret_math.h UnmovedRoute): a draw of one of the families that reached the GPU without the pass's shader bound, by the route it took. family -1: unknown (a command
 // list). Any thread; counts per family and route for the 10 s line and says the first of each route (and of each pureDrawReissue call site) once. site: a return address for the reissue route, else null.
 void srvTurretHudNoteUnmoved(int family, srv_turret::UnmovedRoute route, const void* site);
-// The scope's own decline of a matched draw (srvTurretHudBegin returned false): counted as refused, or as group-off when the family's group has all its keys at 0. Render thread.
+// The scope's own decline of a matched draw (srvTurretHudBegin returned false): counted as refused, or as group-off when the family's group has all its keys at 0 or the family is a
+// 5559BD94 billboard left to the game while the radar anchor is moved in the game. Render thread.
 void srvTurretHudNoteRefusedDraw(int family);
 // True while the pass's geometry shader is bound for an issue (between a true Begin and End). Render thread.
 bool srvTurretHudScopeActive();

@@ -1606,6 +1606,32 @@ static void afterIssueCases(ID3D11GeometryShader* gs, Fails& f, bool skipRestore
     f.expect(maxDiff(plainBefore, plainAfter) == 0.0, "a plain issue after the shifted one is the plain image again");
 }
 
+// ---------------------------------------------------------------- the radar anchor moved in the game (fix.srv_turret_radar_anchor): the key, the offset's bits, the recent test, the families
+static void radarAnchorCases() {
+    using A = st::RadarAnchorMode;
+    check(st::radarAnchorModeOf("on") == A::kOn && st::radarAnchorModeOf("reversed") == A::kReversed && st::radarAnchorModeOf("off") == A::kOff && st::radarAnchorModeOf("") == A::kOn &&
+              st::radarAnchorModeOf(nullptr) == A::kOn && st::radarAnchorModeOf("Off") == A::kOn && st::radarAnchorModeOf("reverse") == A::kOn,
+          "the radar anchor key's text: on, reversed and off; anything else (and nothing) is on");
+    check(!std::strcmp(st::radarAnchorModeName(A::kOn), "on") && !std::strcmp(st::radarAnchorModeName(A::kReversed), "reversed") && !std::strcmp(st::radarAnchorModeName(A::kOff), "off") &&
+              st::kRadarAnchorDefault == A::kOn && st::radarAnchorModeOf(st::kRadarAnchorDefaultText) == st::kRadarAnchorDefault && !std::strcmp(st::kRadarAnchorDefaultText, "on"),
+          "the modes' names are the key's values, and the default is on (the module's literal and the shipped ini say the same: the wiring scan)");
+    const st::RadarAnchorOffset on45 = st::radarAnchorOffset(true, A::kOn, 45), rev30 = st::radarAnchorOffset(true, A::kReversed, 30);
+    check(on45.bits[0] == 0u && on45.bits[1] == 0u && on45.bits[2] == 0x3EE66666u && on45.m[0] == 0.0f && on45.m[1] == 0.0f && on45.m[2] == 0.45f && !on45.zero(),
+          "on at 45 cm: (0, 0, +0.45) m in the anchor's axes, the float's bits 0x3EE66666 in z and x, y zero");
+    check(rev30.bits[0] == 0u && rev30.bits[1] == 0u && rev30.bits[2] == 0xBE99999Au && rev30.m[2] == -0.30f && !rev30.zero(), "reversed at 30 cm: (0, 0, -0.30) m, bits 0xBE99999A");
+    const st::RadarAnchorOffset off = st::radarAnchorOffset(true, A::kOff, 45), notOn = st::radarAnchorOffset(false, A::kOn, 45), noF = st::radarAnchorOffset(true, A::kReversed, 0),
+                                below = st::radarAnchorOffset(true, A::kOn, -5), big = st::radarAnchorOffset(true, A::kOn, 400);
+    check(off.zero() && notOn.zero() && noF.zero() && below.zero() && noF.bits[2] == 0u && noF.m[2] == 0.0f,
+          "zero (every bit 0, never a -0.0) with the key off, the view not on, or radar forward 0 (reversed included) or below");
+    check(big.m[2] == 1.5f && big.bits[2] == 0x3FC00000u, "radar forward is held to its key's range (150 cm)");
+    check(!st::radarAnchorRecent(100, 0) && st::radarAnchorRecent(100, 101) && st::radarAnchorRecent(100, 91) && !st::radarAnchorRecent(100, 90) && !st::radarAnchorRecent(100, 102) &&
+              st::radarAnchorRecent(2, 0xFFFFFFFEu) && st::kRadarAnchorRecentFrames == 10,
+          "an application is recent for ten frames after the frame it was stamped in (stamp = frame + 1, 0 never), across the counter's wrap, and a stamp from a later frame is not");
+    check(st::radarAnchorLeavesFamily(7) && st::radarAnchorLeavesFamily(8) && !st::radarAnchorLeavesFamily(0) && !st::radarAnchorLeavesFamily(2) && !st::radarAnchorLeavesFamily(6) &&
+              !st::radarAnchorLeavesFamily(-1) && !st::radarAnchorLeavesFamily(9) && !std::strcmp(st::kFamilies[7].name, "5559BD94.EA02FAC2") && !std::strcmp(st::kFamilies[8].name, "5559BD94.E95634B0"),
+          "the native move leaves the two 5559BD94 billboard families to the game and no other");
+}
+
 // ---------------------------------------------------------------- the depth modes and the displacement, on the CPU
 static void depthMathCases() {
     using M = st::DepthMode;
@@ -2512,6 +2538,7 @@ int main(int argc, char** argv) {
         check(argc == 2 && !std::strcmp(argv[1], "--self-test"), "usage: srv_turret_hud_test --self-test | --wiring | --dry-run");
         mathCases();
         depthMathCases();
+        radarAnchorCases();
         planeAndUnmovedCases();
         latchCases();
         const HRESULT made = edvr::systemD3D11CreateDevice()(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, D3D11_CREATE_DEVICE_DEBUG, nullptr, 0, D3D11_SDK_VERSION, &g_dev, nullptr, &g_ctx);

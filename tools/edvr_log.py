@@ -10403,11 +10403,11 @@ H_SRV_TURRET = "srv turret view"
 H_SRV_TURRET_LABELS = ("srv turret view", "srv turret camera", "srv turret settings", "srv turret hud", "srv turret anchor", "srv turret:")
 # Rows of these kinds are state, kept whatever --since says, and are not by themselves a sign the turret view was entered.
 H_SRV_TURRET_STATE_KINDS = ("setting", "vehicle")
-# seven keys since the depth switch, six since the radar-forward key, five since the HUD-forward key, four since the push-back (the panels' and the radar's); a log from before has fewer (the camera and the gap alone, before
+# nine keys since the radar anchor key (its word is read, not judged), eight since the scissor key, seven since the depth switch, six since the radar-forward key, five since the HUD-forward key, four since the push-back (the panels' and the radar's); a log from before has fewer (the camera and the gap alone, before
 # the push-back), so the newer keys are optional and the rule reads their absence as the older line
 H_SRV_TURRET_SETTING = (r"srv turret settings: camera back (?P<back>\d+) cm, (?:hud forward (?P<forward>\d+) cm, )?(?:radar forward (?P<rforward>\d+) cm, )?"
                         r"(?:panels back (?P<panels>\d+) cm, radar back (?P<radar>\d+) cm, )?"
-                        r"hud gap (?P<gap>\d+) cm(?:, hud depth (?P<depth>game|real|front)(?:, hud scissor (?P<scissor>open|game))?)? \(live; ")
+                        r"hud gap (?P<gap>\d+) cm(?:, hud depth (?P<depth>game|real|front)(?:, hud scissor (?P<scissor>open|game)(?:, radar anchor (?P<ranchor>on|reversed|off))?)?)? \(live; ")
 H_SRV_TURRET_VIEW = r"srv turret view: (?P<state>on|off) at frame (?P<frame>\d+) \(Status\.json Flags 0x(?P<flags>[0-9A-Fa-f]+), seat kind 0x(?P<seat>[0-9A-Fa-f]+)\)$"
 # The turret view bit is on in an SRV the journal does not call the Scorpion (a Scarab, a training scenario): said once per stay, and the camera and the HUD stay the game's own. The
 # "on" and "off" lines above are written only for a turret view in the Scorpion.
@@ -23630,8 +23630,8 @@ def self_test_health():
                 raise AssertionError("srv turret: no log format holds %r: the --health rule that reads it is out of date" % needle)
             return health_render(fmts[key], vals)
 
-        def st_set(back=60, forward=70, panels=110, radar=110, gap=0, rforward=70, depth="front", scissor="open"):   # eight keys: both push-backs 110 cm, the first build's pull off (fixture values, not the shipped defaults)
-            return RT(stsrc, "srv turret settings: camera back %d cm", back, forward, rforward, panels, radar, gap, depth, scissor)
+        def st_set(back=60, forward=70, panels=110, radar=110, gap=0, rforward=70, depth="front", scissor="open", anchor="on"):   # nine keys: both push-backs 110 cm, the first build's pull off (fixture values, not the shipped defaults)
+            return RT(stsrc, "srv turret settings: camera back %d cm", back, forward, rforward, panels, radar, gap, depth, scissor, anchor)
 
         def st_view(on=True, frame=4100, flags=0x4000000, seat=0x2):
             return RT(stsrc, "srv turret view: %s at frame %u", "on" if on else "off", frame, flags, seat)
@@ -24012,7 +24012,7 @@ def self_test_health():
               has=["pose refreshed at draw in 120 of 150 frames"], lacks=["UNPARSED", "NEVER APPLIED", "PARTIAL"])
         check("srv turret pose: none refreshed (the boundary tick already had the newest pose) is said and is no failure", st_ok + [(1, st_set()), (2, st_view()), (3, st_cam()), (5, st_first()), (12, st_sec(pose=(0, 238))), (14, st_view(False))], 0, [("OK", ST)],
               has=["pose refreshed at draw in 0 of 238 frames"], lacks=["UNPARSED", "NEVER APPLIED", "PARTIAL"])
-        old_set5 = st_set().replace("radar forward 70 cm, ", "").replace(", hud depth front, hud scissor open", "")
+        old_set5 = st_set().replace("radar forward 70 cm, ", "").replace(", hud depth front, hud scissor open, radar anchor on", "")
         old_sec5 = st_sec().replace(" Tradar=(0.000,0.000,0.700)", "").replace(" scissor opened 240", "").replace(" pose refreshed at draw: 240 of 240 frames", "").replace(" unmoved family draws: none", "")
         check("srv turret radar forward: the lines of the build with HUD forward and no radar forward or pose field (a five-key settings line, a 10 s line with T alone) still parse and judge",
               st_ok + [(1, old_set5), (2, st_view()), (3, st_cam()), (5, st_first()), (12, old_sec5), (14, st_view(False))], 0, [("OK", ST)],
@@ -24044,6 +24044,11 @@ def self_test_health():
         check("srv turret scissor: the key's word is on the settings line", st_ok + [(1, st_set(scissor="game")), (2, st_view()), (3, st_cam()), (5, st_first()), (12, st_sec()), (14, st_view(False))], 0, [("OK", ST)],
               has=["hud depth front, hud scissor game)"], lacks=["UNPARSED", "NEVER APPLIED"])
         check("srv turret scissor: a settings line with an unknown scissor word is UNPARSED", st_ok + [st_set().replace("hud scissor open", "hud scissor shut")], 4, [("UNPARSED", ST)])
+        check("srv turret radar anchor: the key's word on the settings line parses (reversed)", st_ok + [(1, st_set(anchor="reversed")), (2, st_view()), (3, st_cam()), (5, st_first()), (12, st_sec()), (14, st_view(False))], 0,
+              [("OK", ST)], lacks=["UNPARSED", "NEVER APPLIED"])
+        check("srv turret radar anchor: a settings line from before the key (eight keys) still parses", st_ok + [st_set().replace(", radar anchor on", "")], 0, [("IDLE", ST)],
+              has=["hud depth front, hud scissor open)"], lacks=["UNPARSED"])
+        check("srv turret radar anchor: a settings line with an unknown anchor word is UNPARSED", st_ok + [st_set().replace("radar anchor on", "radar anchor maybe")], 4, [("UNPARSED", ST)])
         check("srv turret scissor: a family found with the test on is said with the game's rectangle, and the draws that had it opened are counted over the 10 s lines",
               st_ok + st_flight() + [(5, st_scissor()), (6, st_scissor(STF[0], rects=3, first=(1, 2, 30, 40), opened=False)), (22, st_sec(opened=100))], 0, [("OK", ST)],
               has=["scissor: DF3503CD drew with the test on (1 rect(s), the game's first [0,600,2468,1200], target 2468x2208, opened to the whole target); 1989E6D3 drew with the test on (3 rect(s), the game's first [1,2,30,40], "

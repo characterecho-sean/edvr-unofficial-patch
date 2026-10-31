@@ -18,6 +18,8 @@
 //   * journal_watch.cpp, native_temporal.cpp: the accessors; the Scorpion latch is fed the tail's new bytes once (not the stitched head the scan reads twice), reset with the
 //     file, published to its accessor, and each change said once with its event.
 //   * edvr.ini: all eight keys live in [fix] with their ui: lines and shipped defaults; the flat profile's allow-list names none (VR only).
+//   * the radar anchor (fix.srv_turret_radar_anchor, srv_radar_anchor.cpp): the ninth key, its publish, the billboards it leaves to the game, the hook's pins and its integer-only
+//     callback, its compile-list entry and its exact-build audit entry (wiredAnchor).
 //   * the shader tables (tools/temporal_shader_build): the HLSL's header is included and the eight variants are registered as gs_5_0, each with its contract row.
 //   * build.bat: the module is in the DLL's compile list and this rig has its label.
 // Each pin has controls: an edited copy of the real text must trip it.
@@ -137,7 +139,7 @@ static bool wiredModule(const std::string& t) {
     const size_t panels = t.find("cfg.getIntInRange(\"fix.srv_turret_panels_back\", 120, 0, 200)");
     const size_t radar = t.find("cfg.getIntInRange(\"fix.srv_turret_radar_back\", 0, 0, 200)");
     const size_t gap = t.find("cfg.getIntInRange(\"fix.srv_turret_hud_gap\", 0, 0, 200)");
-    const size_t settings = t.find("\"srv turret settings: camera back %d cm, hud forward %d cm, radar forward %d cm, panels back %d cm, radar back %d cm, hud gap %d cm, hud depth %s, hud scissor %s (live; \"");
+    const size_t settings = t.find("\"srv turret settings: camera back %d cm, hud forward %d cm, radar forward %d cm, panels back %d cm, radar back %d cm, hud gap %d cm, hud depth %s, hud scissor %s, radar anchor %s (live; \"");
     const size_t edge = t.find("\"srv turret view: %s at frame %u (Status.json Flags 0x%08X, seat kind 0x%X)\"");
     const size_t camera = t.find("\"srv turret camera: back %.2f m published (serial %u)\"");
     const size_t cleared = t.find("\"srv turret camera: back cleared (serial %u)\"");
@@ -349,6 +351,49 @@ static bool wiredTables(const std::string& shaderBuild, const std::string& varia
            found(shaderBuild.find("variants.insert(variants.end(), srvTurret.begin(), srvTurret.end());")) && found(shaderBuild.find("const TurretContract contracts[stm::kSignatureCount] = {")) &&
            found(variants.find("#include \"../../src/d3d11/srv_turret_hud_shader.h\""));
 }
+// The radar anchor moved in the game (fix.srv_turret_radar_anchor; srv_radar_anchor.cpp). srv_turret.cpp: the key read with its literal default and said on the settings line; the frame
+// tick publishes the offset made from `on` (and from false in flat); a 5559BD94 draw the game's anchor carries is the game's own BEFORE it is counted, and its decline is group-off; the
+// draw path's switch needs the hook armed, the key not off and a recent application; the shutdown shuts the gate. The hook: build 334925's identity, prologue and vtables, and a callback
+// that does integer work only before the original runs (XMM1 is the game's dt). edvr.ini ships the key in [fix] with its menu row; build.bat compiles the file; the address audit
+// lists it as exact-build only.
+static bool wiredAnchor(const std::string& module, const std::string& hook, const std::string& ini, const std::string& build, const std::string& audit) {
+    const size_t npos = std::string::npos;
+    const size_t key = module.find("cfg.getString(\"fix.srv_turret_radar_anchor\", \"on\")");
+    const size_t parsed = found(key) ? module.find("st::radarAnchorModeOf(anchorText.c_str())", key) : npos;
+    const size_t tick = module.find("void srvTurretFrameTick(uint32_t frameNo) {");
+    const size_t flat = found(tick) ? module.find("anchorTick(false, frameNo, 0);", tick) : npos;
+    const size_t onAt = found(tick) ? module.find("const bool on = turret && journalSrvScorpion();", tick) : npos;
+    const size_t ticked = found(onAt) ? module.find("anchorTick(on, frameNo, radarForwardCm);", onAt) : npos;
+    const size_t made = module.find("w.offset = st::radarAnchorOffset(on, mode, radarForwardCm);");
+    const size_t published = found(made) ? module.find("srvRadarAnchorPublish(w.offset.bits, frameNo);", made) : npos;
+    const size_t drawFn = module.find("bool srvTurretHudBegin(ID3D11DeviceContext* ctx, int family, int eye) {");
+    const size_t groupOff = found(drawFn) ? module.find("if (!paramsOfGroup(group, st::EyeFrame{}, unused)) return false;", drawFn) : npos;
+    const size_t leaves = found(groupOff) ? module.find("if (anchorLeaves(family)) return false;", groupOff) : npos;
+    const size_t counted = found(groupOff) ? module.find("g_familyDraws[family].fetch_add(1, std::memory_order_relaxed);", groupOff) : npos;
+    const size_t refusedFn = module.find("void srvTurretHudNoteRefusedDraw(int family) {");
+    const size_t refusedOff = found(refusedFn) ? module.find("&& !anchorLeaves(family);", refusedFn) : npos;
+    const size_t yield = module.find("g_anchorYield.store(on && mode != st::RadarAnchorMode::kOff && a.state == RadarAnchorHookState::Armed && st::radarAnchorRecent(frameNo, a.lastStamp), std::memory_order_relaxed);");
+    const size_t downFn = module.find("void srvTurretShutdown() {");
+    const size_t down = found(downFn) ? module.find("srvRadarAnchorShutdown();", downFn) : npos;
+    const bool moduleOk = found(parsed) && found(flat) && found(onAt) && flat < onAt && found(ticked) && found(published) && found(leaves) && found(counted) && leaves < counted &&
+                          found(refusedOff) && refusedOff - refusedFn < 300 && found(yield) && found(down) && found(module.find("bool anchorLeaves(int family) { return st::radarAnchorLeavesFamily(family) && g_anchorYield.load("));
+    const size_t fn = hook.find("uintptr_t __fastcall radarUpdateHooked(uintptr_t obj, uintptr_t b, uintptr_t c, uintptr_t d) noexcept {");
+    const size_t forward = found(fn) ? hook.find("return forward(obj, b, c, d);", fn) : npos;
+    const std::string body = found(fn) && found(forward) ? hook.substr(fn, forward - fn) : std::string();
+    const bool integerOnly = !body.empty() && !found(body.find("float")) && !found(body.find("double")) && !found(body.find("memcpy")) && !found(body.find("Log::")) && !found(body.find("printf")) &&
+                             found(body.find("volatile uint32_t* const a = reinterpret_cast<volatile uint32_t*>(obj + kTranslationA);"));
+    const bool pinned = found(hook.find("constexpr uintptr_t kUpdateRva = 0x384A590;")) && found(hook.find("constexpr uintptr_t kObjectVtableRva = 0x5511DE8;")) &&
+                        found(hook.find("constexpr uintptr_t kInterfaceVtableRva = 0x5511F18;")) && found(hook.find("constexpr uint32_t kStamp = 0x6ADA8048u, kImageSize = 0x640C000u;")) &&
+                        found(hook.find("if (stamp != kStamp || size != kImageSize) {")) && found(hook.find("{0x40, 0x53, 0x56, 0x48, 0x81, 0xEC, 0x68, 0x01, 0x00, 0x00, 0x0F, 0x29, 0xBC, 0x24, 0x30, 0x01}")) &&
+                        found(hook.find("if (std::memcmp(got, kPrologue, kPrologueBytes) != 0) {")) && found(hook.find("kInterfaceAt = 0x58, kTranslationA = 0x15B0, kTranslationB = 0x15F0;"));
+    const size_t fix = ini.find("\n[fix]\n"), visual = ini.find("\n[visual]\n"), shipped = ini.find("\nsrv_turret_radar_anchor = on\n");
+    const size_t ui = found(shipped) ? ini.rfind("# ui: SRV turret radar anchor | choices on, reversed, off | recommended on | live | menu", shipped) : npos;
+    const bool iniOk = found(fix) && found(visual) && found(shipped) && shipped > fix && shipped < visual && found(ui) && shipped - ui < 200;
+    const size_t source = build.find("\"src\\d3d11\\srv_radar_anchor.cpp\"");
+    const bool buildOk = found(source) && source < build.find("ERROR: compile failed");
+    const bool auditOk = found(audit.find("(\"d3d11/srv_radar_anchor.cpp\", \"the SRV radar anchor's exact-build hook\")"));
+    return found(key) && moduleOk && integerOnly && pinned && iniOk && buildOk && auditOk;
+}
 static bool wiredBuild(const std::string& t) {
     const size_t source = t.find("\"src\\d3d11\\srv_turret.cpp\"");
     const size_t compile = t.find("ERROR: compile failed");
@@ -359,9 +404,10 @@ static void wiringCases() {
     const std::string vscreen = readText("src/d3d11/vscreen.cpp"), onFoot = readText("src/d3d11/native_on_foot.cpp"), module = readText("src/d3d11/srv_turret.cpp"),
                       journal = readText("src/d3d11/journal_watch.cpp"), journalH = readText("src/d3d11/journal_watch.h"), temporal = readText("src/d3d11/native_temporal.cpp"),
                       ini = readText("edvr.ini"), flatKeys = readText("src/common/flat_profile_keys.h"), build = readText("build.bat"),
-                      shaderBuild = readText("tools/temporal_shader_build/temporal_shader_build.cpp"), variants = readText("tools/temporal_shader_build/fixed_srv_turret_variants.h");
+                      shaderBuild = readText("tools/temporal_shader_build/temporal_shader_build.cpp"), variants = readText("tools/temporal_shader_build/fixed_srv_turret_variants.h"),
+                      anchorHook = readText("src/d3d11/srv_radar_anchor.cpp"), audit = readText("tools/hook_signatures.py");
     check(vscreen.size() > 100000 && onFoot.size() > 100000 && module.size() > 5000 && journal.size() > 20000 && temporal.size() > 20000 && ini.size() > 20000 && flatKeys.size() > 500 &&
-              build.size() > 50000 && shaderBuild.size() > 20000 && variants.size() > 100,
+              build.size() > 50000 && shaderBuild.size() > 20000 && variants.size() > 100 && anchorHook.size() > 2000 && audit.size() > 50000,
           "the wiring scan read its sources (the repo root is the working directory)");
 
     check(wiredVscreenScope(vscreen), "vscreen.cpp: the scope opens after the skipped draw's return and before the layer's decision and every issue of the draw");
@@ -499,6 +545,34 @@ static void wiringCases() {
     check(!wiredKeys(ini, flatKeys + "\nsrv_turret_radar_back\n"), "control: the radar key on the flat allow-list trips the pin");
     check(wiredTables(shaderBuild, variants), "temporal_shader_build: the HLSL is included and the variant is registered as a gs_5_0");
     check(!wiredTables(shaderBuild, replaced(variants, "\"gs_5_0\"", "\"vs_5_0\"")), "control: a vertex-shader profile trips the pin");
+    check(wiredAnchor(module, anchorHook, ini, build, audit), "the radar anchor: the key, its publish from the frame tick, the billboards left to the game before they are counted, the hook's pins and integer-only callback, "
+                                                              "the ini row, the compile list and the audit's exact-only entry");
+    check(!wiredAnchor(replaced(module, "cfg.getString(\"fix.srv_turret_radar_anchor\", \"on\")", "cfg.getString(\"fix.srv_turret_radar_anchor\", \"off\")"), anchorHook, ini, build, audit),
+          "control: a drifted default of the radar anchor key trips the pin");
+    check(!wiredAnchor(replaced(module, "anchorTick(on, frameNo, radarForwardCm);", "anchorTick(turret, frameNo, radarForwardCm);"), anchorHook, ini, build, audit),
+          "control: an offset published for the turret view alone (the Scarab's too) trips the pin");
+    check(!wiredAnchor(replaced(module, "anchorTick(false, frameNo, 0);", ""), anchorHook, ini, build, audit), "control: a flat profile that leaves an offset in the game trips the pin");
+    check(!wiredAnchor(replaced(module, "    if (anchorLeaves(family)) return false;", ""), anchorHook, ini, build, audit), "control: billboards moved twice (by the game and the shader) trip the pin");
+    check(!wiredAnchor(replaced(replaced(module, "    if (anchorLeaves(family)) return false;", ""), "g_familyDraws[family].fetch_add(1, std::memory_order_relaxed);",
+                                "g_familyDraws[family].fetch_add(1, std::memory_order_relaxed);\n    if (anchorLeaves(family)) return false;"),
+                       anchorHook, ini, build, audit),
+          "control: a billboard left to the game but counted as a draw of the pass trips the pin");
+    check(!wiredAnchor(replaced(module, "&& !anchorLeaves(family);", ";"), anchorHook, ini, build, audit), "control: a billboard left to the game counted as refused trips the pin");
+    check(!wiredAnchor(replaced(module, " && st::radarAnchorRecent(frameNo, a.lastStamp), std::memory_order_relaxed);", ", std::memory_order_relaxed);"), anchorHook, ini, build, audit),
+          "control: billboards left to the game while the hook writes nothing trip the pin");
+    check(!wiredAnchor(replaced(module, "    srvRadarAnchorShutdown();", ""), anchorHook, ini, build, audit), "control: a gate left open at unload trips the pin");
+    check(!wiredAnchor(module, replaced(anchorHook, "    s->calls.fetch_add(1, std::memory_order_relaxed);\n", "    s->calls.fetch_add(1, std::memory_order_relaxed);\n    const float scale = 1.0f;\n"), ini, build, audit),
+          "control: float work in the hook before the original runs (it would clobber the game's dt) trips the pin");
+    check(!wiredAnchor(module, replaced(anchorHook, "    s->calls.fetch_add(1, std::memory_order_relaxed);\n", "    s->calls.fetch_add(1, std::memory_order_relaxed);\n    std::memcpy(&b, &c, 8);\n"), ini, build, audit),
+          "control: a memcpy in the hook trips the pin");
+    check(!wiredAnchor(module, replaced(anchorHook, "if (stamp != kStamp || size != kImageSize) {", "if (false) {"), ini, build, audit), "control: a hook that does not check the build trips the pin");
+    check(!wiredAnchor(module, replaced(anchorHook, "if (std::memcmp(got, kPrologue, kPrologueBytes) != 0) {", "if (false) {"), ini, build, audit), "control: a hook that does not check the prologue trips the pin");
+    check(!wiredAnchor(module, anchorHook, replaced(ini, "\nsrv_turret_radar_anchor = on\n", "\nsrv_turret_radar_anchor = off\n"), build, audit), "control: a drifted shipped default of the radar anchor key trips the pin");
+    check(!wiredAnchor(module, anchorHook, replaced(ini, "# ui: SRV turret radar anchor | choices on, reversed, off", "# ui: SRV turret radar anchor | choices on, off"), build, audit),
+          "control: a drifted menu row of the radar anchor key trips the pin");
+    check(!wiredAnchor(module, anchorHook, ini, replaced(build, "\"src\\d3d11\\srv_radar_anchor.cpp\"", ""), audit), "control: the hook outside the compile list trips the pin");
+    check(!wiredAnchor(module, anchorHook, ini, build, replaced(audit, "(\"d3d11/srv_radar_anchor.cpp\", \"the SRV radar anchor's exact-build hook\")", "")), "control: the hook not listed as exact-build only trips the pin");
+    check(!wiredKeys(ini, flatKeys + "\nsrv_turret_radar_anchor\n"), "control: the radar anchor key on the flat allow-list trips the pin");
     check(wiredBuild(build), "build.bat: the module is in the DLL's compile list and this rig has its label and its run");
     check(!wiredBuild(replaced(build, "\"src\\d3d11\\srv_turret.cpp\"", "")), "control: a module outside the compile list trips the pin");
 }

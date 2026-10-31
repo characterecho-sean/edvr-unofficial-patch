@@ -702,7 +702,7 @@ python tools\compile_cache.py --prune --keep thunks.obj --keep weapon_ui_getter_
     "src\d3d11\wake_pulse.cpp" "src\d3d11\vr_ssaa_gate.cpp" "src\d3d11\vr_ssaa_hold.cpp" "src\d3d11\vr_display_observer.cpp" "src\d3d11\vr_window_trampolines.cpp" ^
     "src\d3d11\mode_watch.cpp" ^
     "src\d3d11\ui_depth.cpp" ^
-    "src\d3d11\ui_layer.cpp" "src\d3d11\scope_zoom.cpp" "src\d3d11\ui_surfaces.cpp" "src\d3d11\ui_panel_scale.cpp" "src\d3d11\orbital_width.cpp" "src\d3d11\supercruise_bars.cpp" "src\d3d11\srv_turret.cpp" ^
+    "src\d3d11\ui_layer.cpp" "src\d3d11\scope_zoom.cpp" "src\d3d11\ui_surfaces.cpp" "src\d3d11\ui_panel_scale.cpp" "src\d3d11\orbital_width.cpp" "src\d3d11\supercruise_bars.cpp" "src\d3d11\srv_turret.cpp" "src\d3d11\srv_radar_anchor.cpp" ^
     "third_party\dxbc_hash\DxilHash.cpp" ^
     "src\d3d11\backdrop_fix.cpp" ^
     "src\d3d11\scrim_fix.cpp" ^
