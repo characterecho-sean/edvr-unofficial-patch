@@ -7,11 +7,13 @@
   Nutrition); the radar near field on its own. FLOWN and settled: the 3D
   move with its anchor, the depth fix, the radar forward key, the draw-time
   pose (judder gone), the hologram's lighting position (45fa7e56: it draws).
-  With depth `front` Sean: "correct position, but still clipped and
-  distorted, moves with my head": a stale scissor rectangle (journal). This
-  build opens the scissor (`fix.srv_turret_hud_scissor`) and makes `front`
-  the default: BUILT, NOT FLOWN. Branch `claude/srv-turret-hud`, local only.
-  Issue #140. Test install: Steam (`--target steam --scope both --xess`).
+  The radar's stretch is placement, not a defect (9f98e10f, journal): the
+  disc is turret-fixed 21.5 cm below the seat's eye height and 42 cm
+  behind the seated origin, so it reads as the game meant only when
+  camera back + radar forward is about 70 cm (camera back 25: radar forward
+  45). Main merged in (c12b0beb), full build green, NOT FLOWN. Branch
+  `claude/srv-turret-hud`, local only. Issue #140. Test install: Steam
+  (`--target steam --scope both --xess`).
 - **What is wrong (the game's own placement):** the turret view's whole HUD
   sits about 0.7 m too far back for the stock camera (the radar behind the
   head, the arcs at or behind it), and the larger panels sit about a metre
@@ -49,11 +51,11 @@
   (Sean credited it, but its change also fixed the anchor); where the radar
   reads best; whether the switch lag is acceptable.
 - **Ruled out:** see "Ruled out" below.
-- **Next flight:** this build on Steam with the scissor `open`, then `game`
-  as the A/B. Eye dump (INSERT) centred. `python tools\edvr_log.py --target
-  steam --expect-build HEAD --health` (rule "srv turret view": scissor
-  opened N, the state lines' raster fields, the disc probe, the disc
-  plane spread, the unmoved family draws), and `--grep "srv turret"`.
+- **Next flight:** c12b0beb (main merged) on Steam: radar forward 70 minus
+  camera back (45 at camera back 25), the radar seen from above as on the
+  deck. Eye dump (INSERT) centred. `python tools\edvr_log.py --target steam
+  --expect-build HEAD --health` (rule "srv turret view"), `--grep "srv
+  turret"`.
 
 ## Evidence (flight of 2026-10-30, Epic, v0.22.0-rc.3-139-gcd4c91c4)
 
@@ -132,6 +134,15 @@ same amount. Matching them needs a change to one layer's stereo depth.
   nearer than the arcs, and a forward pull can never reach them.
 - ruled out: vs B7790CBFC6554097 as a HUD panel, because its captured
   vertices sit at w -658 to +3029 m.
+- ruled out: a stale scissor rectangle cutting the radar, because the
+  state lines of flight 9f98e10f read scissor off for every turret family,
+  and Sean saw no difference between `open` and `game`.
+- ruled out: the game turning the radar disc toward its camera (a
+  billboard), because the disc plane instrument held its seated normal
+  (0, 0.992, 0.130) to 0.0 deg and its centre to 0 mm while the head moved
+  0.86 m.
+- ruled out: an unmoved copy of the radar from another path, because the
+  only unmoved family draws were with the radar group's keys at 0.
 - ruled out: a disparity-only push as the fix, because it changes only the
   eyes' horizontal disparity: the panel keeps the motion parallax and the
   growth on approach of its true 0.5 m while stereo puts it at 1.6 m. Flight
@@ -439,3 +450,28 @@ is seen only by its execution; a draw recorded on a deferred context is
 seen at record time; vscreen.cpp's own note says the game's ExecuteCommandList
 has never been seen on this game, so a command-list count would be news. Not
 seen: anything that bypasses the hooked vtable.
+
+### 2026-10-31: the radar flown with both instruments; main merged
+
+Flight 9f98e10f (Steam, build matches). Sean: radar forward "causes it to
+stretch, getting more elongated in the z axis and eventually clipping"; no
+difference between scissor `open` and `game`. The state lines read scissor
+off for every family: the scissor is ruled out. The disc plane held its
+seated normal (0, 0.992, 0.130) and centre (-0.008, -0.215, 0.424) to 0.0
+deg and 0 mm over 349 samples while the head moved 0.86 m: the disc is
+turret-fixed, not a billboard. The only unmoved family draws were with the
+radar group's keys at 0 (the group off, and the holo path's re-issue of
+those same draws).
+
+So the stretch is where the disc is. It lies nearly flat 21.5 cm below the
+seat's eye height and 42 cm behind the seated origin. With camera back C
+and radar forward F it sits (C + F - 0.42) m ahead of a head at the origin.
+At C = 70, F = 0 (the dump 052114, a clean ellipse on the deck) that is
+0.28 m ahead and 0.21 m below, seen from 37 deg above. In this flight C = 25
+and F = 15 to 40: from 0.17 m behind to 0.23 m ahead, under the chin, cut
+by the near plane and seen hugely foreshortened. Radar forward plus camera
+back of about 70 cm gives the game's own view of the radar.
+
+Main (4b2c0a04, 47 commits) merged into the branch as c12b0beb at Sean's
+request. One conflict, native_on_foot.cpp's alignment block: the turret's
+camera term and main's F186 ADS turn, both kept.
