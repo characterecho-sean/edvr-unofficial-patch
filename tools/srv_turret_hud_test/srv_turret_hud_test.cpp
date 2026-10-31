@@ -15,7 +15,7 @@
 //   camera's own projection, its distance from the anchor, its direction from it. (a) The anchor at the eye: a vertex at distance r keeps its NDC x, y and z and its w becomes w (r + d) / r.
 //   (b) The anchor 10 cm to the side and 5 cm up, with vertices 15 cm from it. (c) Asymmetric tangents (the Pimax set, a vertical pair that is not symmetric): the move, and a gap of 10 um
 //   round-trips every vertex. (d) A vertex at anchor distance 1.4 m, 2.8 m, 500 m, just past 1 m or inside 2 cm is untouched bit for bit. (e) A pull. (g) The translation alone: every vertex
-//   moves by T, one 0.2 m behind the eye comes in front of it, one that stays behind moves too. (h) The translation, then the push. (k) The depth: Elite is reversed Z (clip z the constant 0.025), so a vertex behind the eye or inside the near plane gets the nearest depth, 0.999, and a valid one keeps its own; (l) a triangle with a corner moved behind the eye is output with all three corners moved; (m) the two groups in one frame: the panels' constants translate by the HUD-forward T and the radar's by its own key's. The pictures (I1 to I4) compare the rasterized quad with the
+//   moves by T, one 0.2 m behind the eye comes in front of it, one that stays behind moves too. (h) The translation, then the push. (k) The depth: Elite is reversed Z (clip z the constant 0.025), so a vertex behind the eye or inside the near plane gets the nearest depth, 0.999, and a valid one keeps its own; (l) a triangle with a corner moved behind the eye is output with all three corners moved; (m) the two groups in one frame: the panels' constants translate by the HUD-forward T and the radar's by its own key's; (n) the three depth modes (game: the vertex's own valid depth else 0.999, real: the moved position's own depth clamped to 0..0.999, front: 0.999); (o) signature H only, the Scorpion's hologram: its lighting position moves by the camera's right, up and forward vectors (a stand-in vertex constant buffer at slot 1, bound whole and with a first constant) times the move's eye-space displacement, and not at all where the move leaves a vertex alone. The pictures (I1 to I4) compare the rasterized quad with the
 //   plain one (anchor at the eye) and with the quad truly moved in 3D. THE STRIPS: a quad as a triangle strip is the plain strip bit for bit through a window with nothing in it and no
 //   translation, under every culling mode (the winding is kept), and lands where the same quad as a list lands once it is moved.
 //   THE ANCHOR (srv_turret_math.h AnchorTracker, no device): followed for the settle after the view comes on or a camera key changes, then latched; a recentre (the head jumping more than
@@ -23,6 +23,7 @@
 //   checked on a level head, a yawed head and a canted eye.
 //   THE LINKAGE. Each shader links against its stand-in under the debug layer with no message, its input is the vertex shader's output element for element and its output the same
 //   again plus TURRETPRE, the pixel shader's inputs are a subset of it; a vertex shader without the texture coordinates is reported by the layer (the control that it really checks).
+//   THE SCENE CONSTANTS AND THE REGISTER COPY: signature H's binding takes the draw's vertex constants at GS slot 1 (with the range the game bound them with) beside the turret constants and gives both back, also through a failed restore and the settle; the disc probe's copy of a pixel-shader register (cb2[11], cb1[90]) is read from the right offset, counted from the bound range's first constant, and refused past the buffer or the range.
 //   THE BINDING (the production class, on a real context): in and out for one draw with the game's geometry stage and constant slot exactly as they were and no reference leaked or
 //   kept; a geometry shader of the game's own refused with nothing touched; the restore that fails twice, the settle at the boundary and the state the game rebound; the
 //   geometry stage empty after the issue. THE CONSTANTS: four registers, made once per device, rewritten only when a number changes, refused when not finite, not a window, a gap of 0 with
@@ -288,6 +289,40 @@ static void addQuad(std::vector<Vtx>& v, float x0, float x1, float y0, float y1,
 }
 
 static st::Constants g_constants[2];
+
+// The game's view constants at the vertex stage's slot 1, as the Scorpion hologram's draw has them: 280 registers, rows 277 to 279 the camera's right, up and forward in world axes. render() binds
+// it for every draw; the production binding takes it for signature H only. g_sceneFirst > 0 binds it with that first constant (a ranged binding, as the 11.1 interface allows), the rows
+// then counted from it.
+static float g_axes[3][3] = {};   // zeros unless a case gives the camera's vectors: with none the lighting position does not move, and the pictures compare as for the other signatures
+static UINT g_sceneFirst = 0;
+static constexpr UINT kSceneRangeConstants = 288;   // a multiple of 16 that holds the 280 registers
+static ComPtr<ID3D11Buffer> sceneBuffer() {
+    std::vector<float> cb((size_t(g_sceneFirst) + kSceneRangeConstants) * 4, 0.0f);
+    for (UINT a = 0; a < 3; ++a)
+        for (UINT c = 0; c < 3; ++c) cb[(size_t(g_sceneFirst) + st::kSceneRightRow + a) * 4 + c] = g_axes[a][c];
+    return makeBuffer(UINT(sizeof(float) * cb.size()), D3D11_BIND_CONSTANT_BUFFER, cb.data());
+}
+static void bindScene(ID3D11Buffer* b) {
+    ComPtr<ID3D11DeviceContext1> c1;
+    if (g_sceneFirst && SUCCEEDED(g_ctx.As(&c1))) {
+        const UINT first = g_sceneFirst, count = kSceneRangeConstants;
+        c1->VSSetConstantBuffers1(st::kGameCbSlot, 1, &b, &first, &count);
+    } else {
+        g_ctx->VSSetConstantBuffers(st::kGameCbSlot, 1, &b);
+    }
+}
+static void setScene(const float right[3], const float up[3], const float fwd[3], UINT first) {
+    for (int c = 0; c < 3; ++c) {
+        g_axes[0][c] = right[c];
+        g_axes[1][c] = up[c];
+        g_axes[2][c] = fwd[c];
+    }
+    g_sceneFirst = first;
+}
+static void resetScene() {
+    const float none[3] = {0, 0, 0};
+    setScene(none, none, none, 0);
+}
 static void noopSetGs(ID3D11DeviceContext*, ID3D11GeometryShader*, ID3D11ClassInstance* const*, uint32_t) {}
 
 // What the GPU instrument reads back for a sampled draw: the pipeline statistics, the stream-output statistics and the records the twin streamed out.
@@ -322,6 +357,8 @@ static Frame render(const std::vector<Vtx>& verts, const Cam& cam, ID3D11Geometr
     g_ctx->IASetPrimitiveTopology(o.topology);
     g_ctx->VSSetShader(g_vs[g_fam].Get(), nullptr, 0);
     g_ctx->VSSetConstantBuffers(0, 1, cb0.GetAddressOf());
+    const auto scene = sceneBuffer();
+    bindScene(scene.Get());
     g_ctx->PSSetShader(g_ps[g_fam].Get(), nullptr, 0);
     t.clear();
     st::Binding binding;
@@ -329,7 +366,10 @@ static Frame render(const std::vector<Vtx>& verts, const Cam& cam, ID3D11Geometr
     if (gs) {
         ID3D11Buffer* cb = g_constants[o.eye].get(g_ctx.Get(), params);
         check(cb != nullptr, "the turret constants are made");
-        bound = binding.begin(g_ctx.Get(), gs, cb) == st::Binding::Begin::kBound;
+        st::ExtraCb extra;   // signature H: the draw's own vertex constants, read the way the module reads them
+        const bool needScene = g_fam == int(st::kSceneSignature);
+        if (needScene) check(st::readGameCb(g_ctx.Get(), st::kGameCbSlot, extra), "the draw's vertex constants are read");
+        bound = binding.begin(g_ctx.Get(), gs, cb, st::directSetGs, needScene ? &extra : nullptr) == st::Binding::Begin::kBound;
         check(bound, "the production binding binds the shader");
     }
     ComPtr<ID3D11Query> statsQ, soQ;
@@ -867,11 +907,14 @@ static Pt movedPt(const Pt& p, const float a[3], const float t[3], float gap, fl
 
 struct Captured {
     std::vector<std::array<float, 4>> pre, post;
+    std::vector<std::array<float, 3>> lp;   // the first three floats of the record: for signature H the lighting position, which the stand-in vertex stage sets to (u, v, 0)
 };
+static float tagU(size_t i) { return 0.1f * float(i) + 0.05f; }
+static float tagV(size_t i) { return 0.3f - 0.2f * float(i); }
 // The points as triangles through the twin with the stream-output target: the clip position of every vertex as the game's shader made it (pre) and as the geometry shader wrote it (post).
 static Captured captureMove(int fam, ID3D11GeometryShader* twin, const std::vector<Pt>& pts, const Cam& cam, const st::TurretParams& params) {
     std::vector<Vtx> v;
-    for (const Pt& p : pts) v.push_back(vtxOf(p));
+    for (size_t i = 0; i < pts.size(); ++i) v.push_back(vtxOf(pts[i], tagU(i), tagV(i)));
     while (v.size() % 3) v.push_back(v.back());
     Sample s;
     DrawOpts o;
@@ -889,6 +932,7 @@ static Captured captureMove(int fam, ID3D11GeometryShader* twin, const std::vect
         }
         m.pre.push_back(a);
         m.post.push_back(b);
+        m.lp.push_back({s.records[i * stride + 0], s.records[i * stride + 1], s.records[i * stride + 2]});
     }
     return m;
 }
@@ -1117,6 +1161,97 @@ static void moveCases(int fam, ID3D11GeometryShader* twin, Fails& f) {
         }
         f.expect(own && panelsP.tz == 0.7f && radarP.tz == 0.3f,
                  "(m) one eye frame, two groups: the panels' vertices move 0.7 m along Z (the HUD-forward key) and the radar's 0.3 m (its own key), each only by its own");
+    }
+    {   // (n) the depth modes (fix.srv_turret_hud_depth): Elite's clip z is the constant 0.025, so a vertex the game had at view depth d has NDC z 0.025 / d. Translated 0.7 m forward it ends at d + 0.7.
+        // game: its own NDC z where that is valid, else 0.999. real: the depth of the moved position, clamp(0.025 / (d + 0.7), 0, 0.999). front: 0.999 for every moved vertex.
+        const float t[3] = {0.0f, 0.0f, 0.7f};
+        const st::TurretParams base = st::translateParamsFor(frameOfCam(cam, nullptr, t));
+        const float depths[7] = {-0.20f, 0.01f, 0.24f, 0.60f, 0.30f, -0.69f, -0.90f};   // behind the eye, inside the near plane, valid x3, ends 1 cm ahead of the eye, ends 20 cm behind it
+        std::vector<Pt> pts;
+        for (float d : depths) pts.push_back(Pt{0.01f * d, -0.02f * d, d, 0.025f});
+        const st::DepthMode modes[3] = {st::DepthMode::kGame, st::DepthMode::kReal, st::DepthMode::kFront};
+        for (const st::DepthMode mode : modes) {
+            const st::TurretParams p = st::withDepth(base, mode);
+            const Captured m = captureMove(fam, twin, pts, cam, p);
+            char what[160];
+            std::snprintf(what, sizeof(what), "(n) depth %s: every vertex is the CPU reference's", st::depthModeName(mode));
+            expectReference(f, what, p, m, 7);
+            bool right = true;
+            for (size_t i = 0; i < pts.size(); ++i) {
+                const double w = m.post[i][3], z = m.post[i][2], q = depths[i] + 0.7;
+                right = right && closeTo(w, q, 1e-5);
+                if (mode == st::DepthMode::kFront) {
+                    right = right && closeTo(z, 0.999 * q, 2e-5);
+                } else if (mode == st::DepthMode::kReal) {
+                    const double want = std::fabs(q) > 1e-6 ? std::min(0.999, std::max(0.0, 0.025 / q)) : 0.999;
+                    right = right && closeTo(z, want * q, 2e-5);
+                } else {   // game: valid only where the game's own w is above 0.025 (z / w <= 1)
+                    const double own = depths[i] > 0.025 ? 0.025 / depths[i] : 0.999;
+                    right = right && closeTo(z, own * q, 2e-5);
+                }
+            }
+            std::snprintf(what, sizeof(what), "(n) depth %s: each vertex's NDC z is the mode's (game: its own where valid; real: the moved position's own, clamped; front: 0.999)", st::depthModeName(mode));
+            f.expect(right, what);
+        }
+        const Captured mg = captureMove(fam, twin, pts, cam, st::withDepth(base, st::DepthMode::kGame));
+        const Captured mr = captureMove(fam, twin, pts, cam, st::withDepth(base, st::DepthMode::kReal));
+        f.expect(mg.post[2][2] / mg.post[2][3] > 0.100 && mg.post[2][2] / mg.post[2][3] < 0.105 && mr.post[2][2] / mr.post[2][3] > 0.026 && mr.post[2][2] / mr.post[2][3] < 0.027,
+                 "(n) a valid vertex 0.24 m out: game keeps its NDC z 0.025 / 0.24 (0.104), real gives the moved depth's 0.025 / 0.94 (0.0266)");
+        f.expect(mr.post[5][2] / mr.post[5][3] > 0.998 && mr.post[6][2] == 0.0f && mr.post[6][3] < 0.0f,
+                 "(n) real: a vertex ending 1 cm ahead of the eye is at 0.999 (the clamp), one ending 20 cm behind it at z 0 with a negative w (the rasterizer clips it)");
+    }
+    if (fam == int(st::kSceneSignature)) {   // (o) the Scorpion's hologram: the lighting position follows the vertex, by the camera's right, up and forward vectors
+        const float right[3] = {0.8f, 0.0f, 0.6f}, up[3] = {-0.36f, 0.8f, 0.48f}, fwd[3] = {-0.48f, -0.6f, 0.64f};   // orthonormal, right x up = forward: not the identity
+        const float a[3] = {0.10f, 0.05f, 0.0f}, t[3] = {0.02f, -0.01f, 0.7f};
+        const std::vector<Pt> pts = {Pt{0.0f, 0.0f, 0.1f}, Pt{0.03f, 0.02f, 0.15f}, dirPt(0, 0, 1, 0.3f), dirPt(0.2f, 0.1f, 1, 0.8f), dirPt(-0.3f, 0.25f, 1, 1.4f), Pt{0.0f, 0.0f, -0.2f}};
+        for (const UINT first : {0u, 16u}) {   // the vertex constants bound whole, and with a first constant of 16 (the range the game bound them with)
+            setScene(right, up, fwd, first);
+            const char* how = first ? "ranged" : "whole";
+            char what[200];
+            {   // translation and push
+                const st::TurretParams p = st::pushParamsFor(frameOfCam(cam, a, t), kPushBackM);
+                const Captured m = captureMove(fam, twin, pts, cam, p);
+                std::snprintf(what, sizeof(what), "(o) the Scorpion hologram, constants %s: every vertex is the CPU reference's", how);
+                expectReference(f, what, p, m, int(pts.size()));
+                bool shifted = true;
+                for (size_t i = 0; i < pts.size(); ++i) {
+                    double in[4], out[4], disp[3];
+                    for (int c = 0; c < 4; ++c) in[c] = m.pre[i][c];
+                    st::anchoredMove<double>(p, in, out, nullptr, nullptr, nullptr, disp);
+                    const double l0[3] = {tagU(i), tagV(i), 0.0};
+                    for (int c = 0; c < 3; ++c) shifted = shifted && closeTo(m.lp[i][c], l0[c] + right[c] * disp[0] + up[c] * disp[1] + fwd[c] * disp[2], 1e-4);
+                }
+                std::snprintf(what, sizeof(what), "(o) constants %s: the lighting position moves by right * dX + up * dY + forward * dZ of the move (translation and push)", how);
+                f.expect(shifted, what);
+            }
+            {   // the translation alone: the shift is T in the camera's axes, from the numbers, not from the CPU function
+                const st::TurretParams p = st::translateParamsFor(frameOfCam(cam, a, t));
+                const Captured m = captureMove(fam, twin, pts, cam, p);
+                bool shifted = true;
+                for (size_t i = 0; i < pts.size(); ++i) {
+                    const double l0[3] = {tagU(i), tagV(i), 0.0};
+                    for (int c = 0; c < 3; ++c) shifted = shifted && closeTo(m.lp[i][c], l0[c] + right[c] * 0.02 + up[c] * -0.01 + fwd[c] * 0.7, 1e-4);
+                }
+                std::snprintf(what, sizeof(what), "(o) constants %s: with the translation alone the lighting position moves by (0.02, -0.01, 0.7) in right, up, forward", how);
+                f.expect(shifted, what);
+            }
+            {   // the push alone: a vertex outside the window is untouched, bit for bit
+                const st::TurretParams p = st::pushParamsFor(frameOfCam(cam, a), kPushBackM);
+                const Captured m = captureMove(fam, twin, pts, cam, p);
+                bool same = true, changed = false;
+                for (size_t i = 0; i < pts.size(); ++i) {
+                    double in[4], out[4];
+                    for (int c = 0; c < 4; ++c) in[c] = m.pre[i][c];
+                    const bool mv = st::anchoredMove<double>(p, in, out);
+                    const float l0[3] = {tagU(i), tagV(i), 0.0f};
+                    if (mv) changed = changed || std::memcmp(m.lp[i].data(), l0, sizeof(l0)) != 0;
+                    else same = same && std::memcmp(m.lp[i].data(), l0, sizeof(l0)) == 0;
+                }
+                std::snprintf(what, sizeof(what), "(o) constants %s: with the push alone a vertex the move leaves alone keeps its lighting position bit for bit, and one it moves does not", how);
+                f.expect(same && changed, what);
+            }
+        }
+        resetScene();
     }
 }
 
@@ -1454,6 +1589,207 @@ static void afterIssueCases(ID3D11GeometryShader* gs, Fails& f, bool skipRestore
     f.expect(maxDiff(plainBefore, plainAfter) == 0.0, "a plain issue after the shifted one is the plain image again");
 }
 
+// ---------------------------------------------------------------- the depth modes and the displacement, on the CPU
+static void depthMathCases() {
+    using M = st::DepthMode;
+    check(st::depthModeOf("game") == M::kGame && st::depthModeOf("real") == M::kReal && st::depthModeOf("front") == M::kFront && st::depthModeOf("") == M::kGame &&
+              st::depthModeOf(nullptr) == M::kGame && st::depthModeOf("Real") == M::kGame && st::depthModeOf("rea") == M::kGame && st::depthModeOf("off") == M::kGame,
+          "the depth key's text: game, real and front; anything else (and nothing) is game");
+    check(!std::strcmp(st::depthModeName(M::kGame), "game") && !std::strcmp(st::depthModeName(M::kReal), "real") && !std::strcmp(st::depthModeName(M::kFront), "front"),
+          "the modes' names are the key's values");
+    const float t[3] = {0.0f, 0.0f, 0.7f};
+    const st::EyeFrame e = frameOfCam(Cam{}, nullptr, t);
+    const st::TurretParams game = st::translateParamsFor(e), real = st::withDepth(game, M::kReal), front = st::withDepth(game, M::kFront);
+    check(game.depth == 0.0f && real.depth == 1.0f && front.depth == 2.0f && st::withDepth(front, M::kGame) == game && !(real == game) && !(front == real),
+          "the constants carry the mode as 0, 1 or 2, and a different mode is a different set of numbers (the buffer is rewritten)");
+    st::TurretParams bad = game;
+    bool refused = true;
+    for (float v : {3.0f, -1.0f, 0.5f, 1.5f, NAN, INFINITY}) {
+        bad.depth = v;
+        refused = refused && !st::paramsUsable(bad);
+    }
+    check(refused && st::paramsUsable(game) && st::paramsUsable(real) && st::paramsUsable(front), "a depth that is not 0, 1 or 2 is refused; the three modes are usable");
+    const auto at = [&](const st::TurretParams& p, double w, double* disp = nullptr, bool* moved = nullptr) {   // NDC z after the move of a vertex at clip w with the constant clip z 0.025
+        const double in[4] = {0.02 * w, 0.01 * w, 0.025, w};
+        double out[4];
+        bool z = false;
+        const bool mv = st::anchoredMove<double>(p, in, out, nullptr, nullptr, &z, disp);
+        if (moved) *moved = mv;
+        return out[2] / out[3];
+    };
+    double d[3] = {};
+    check(closeTo(at(game, 0.24, d), 0.025 / 0.24, 1e-6) && closeTo(at(real, 0.24), 0.025 / 0.94, 1e-6) && closeTo(at(front, 0.24), 0.999, 1e-6),
+          "a valid vertex at 0.24 m, moved 0.7 m: game keeps 0.025 / 0.24, real gives 0.025 / 0.94, front 0.999");
+    check(closeTo(d[0], 0.0, 1e-6) && closeTo(d[1], 0.0, 1e-6) && closeTo(d[2], 0.7, 1e-6), "...and the displacement is the translation (0, 0, 0.7)");
+    check(closeTo(at(game, 0.01), 0.999, 1e-6) && closeTo(at(real, 0.01), 0.025 / 0.71, 1e-6) && closeTo(at(game, -0.2), 0.999, 1e-6) && closeTo(at(real, -0.2), 0.05, 1e-6),
+          "a vertex inside the near plane or behind the eye (no valid depth): game 0.999, real the moved position's");
+    check(closeTo(at(real, -0.69), 0.999, 1e-6) && at(real, -0.9) == 0.0 / -0.2 && closeTo(at(game, -0.9), 0.999, 1e-6),
+          "real clamps: a vertex ending 1 cm ahead of the eye is 0.999, one ending behind it 0; game gives 0.999 to both");
+    bool moved = true;
+    double zero[3] = {1, 1, 1};
+    const st::TurretParams still = st::pushParamsFor(frameOfCam(Cam{}), kPushBackM);
+    (void)at(still, 1.4, zero, &moved);
+    check(!moved && zero[0] == 0.0 && zero[1] == 0.0 && zero[2] == 0.0, "a vertex left alone has no displacement");
+}
+
+// ---------------------------------------------------------------- signature H's second constant buffer and the register copy
+static bool slotIs(UINT slot, ID3D11Buffer* want) {
+    ID3D11Buffer* b = nullptr;
+    g_ctx->GSGetConstantBuffers(slot, 1, &b);
+    const bool ok = b == want;
+    if (b) b->Release();
+    return ok;
+}
+static void sceneBindingCases(ID3D11GeometryShader* gs, Fails& f) {
+    const std::vector<float> data{7, 8, 9, 10};
+    auto sentinel0 = makeBuffer(16, D3D11_BIND_CONSTANT_BUFFER, data.data());
+    auto sentinel1 = makeBuffer(16, D3D11_BIND_CONSTANT_BUFFER, data.data());
+    auto constants = makeBuffer(16, D3D11_BIND_CONSTANT_BUFFER, data.data());
+    resetScene();
+    auto scene = sceneBuffer();
+    const auto gameState = [&](ID3D11Buffer* vsSlot1, UINT first, UINT count) {
+        g_ctx->ClearState();
+        g_ctx->GSSetConstantBuffers(st::kGsSlot, 1, sentinel0.GetAddressOf());
+        g_ctx->GSSetConstantBuffers(st::kGsGameSlot, 1, sentinel1.GetAddressOf());
+        ComPtr<ID3D11DeviceContext1> c1;
+        if (first && SUCCEEDED(g_ctx.As(&c1)))
+            c1->VSSetConstantBuffers1(st::kGameCbSlot, 1, &vsSlot1, &first, &count);
+        else
+            g_ctx->VSSetConstantBuffers(st::kGameCbSlot, 1, &vsSlot1);
+    };
+    {   // the ordinary draw: both slots in, both out again
+        gameState(scene.Get(), 0, 0);
+        const ULONG sceneRefs = refsOf(scene.Get()), s1Refs = refsOf(sentinel1.Get()), s0Refs = refsOf(sentinel0.Get()), constRefs = refsOf(constants.Get()), gsRefs = refsOf(gs);
+        {
+            st::ExtraCb ex;
+            f.expect(st::readGameCb(g_ctx.Get(), st::kGameCbSlot, ex) && ex.buffer == scene.Get(), "the draw's vertex constants at slot 1 are read");
+            st::Binding b;
+            f.expect(b.begin(g_ctx.Get(), gs, constants.Get(), st::directSetGs, &ex) == st::Binding::Begin::kBound, "begin with the vertex constants binds the shader, the turret constants and the vertex constants");
+            f.expect(slotIs(st::kGsSlot, constants.Get()) && slotIs(st::kGsGameSlot, scene.Get()) && b.needsRestore(), "GS slot 0 holds the turret constants and GS slot 1 the draw's vertex constants");
+            f.expect(b.restore(g_ctx.Get()) && !b.needsRestore(), "restore puts the game's back");
+            f.expect(slotIs(st::kGsSlot, sentinel0.Get()) && slotIs(st::kGsGameSlot, sentinel1.Get()), "...GS slots 0 and 1 are the game's again");
+        }
+        f.expect(refsOf(scene.Get()) == sceneRefs && refsOf(sentinel1.Get()) == s1Refs && refsOf(sentinel0.Get()) == s0Refs && refsOf(constants.Get()) == constRefs && refsOf(gs) == gsRefs,
+                 "no reference kept to the vertex constants, the game's constants, the turret constants or the shader");
+    }
+    {   // no extra: GS slot 1 is the game's throughout
+        gameState(scene.Get(), 0, 0);
+        st::Binding b;
+        f.expect(b.begin(g_ctx.Get(), gs, constants.Get()) == st::Binding::Begin::kBound && slotIs(st::kGsGameSlot, sentinel1.Get()), "without the vertex constants GS slot 1 is left alone");
+        f.expect(b.restore(g_ctx.Get()) && slotIs(st::kGsGameSlot, sentinel1.Get()), "...and stays the game's");
+    }
+    {   // an extra with no buffer is refused, nothing moved
+        gameState(scene.Get(), 0, 0);
+        st::Binding b;
+        st::ExtraCb none;
+        f.expect(b.begin(g_ctx.Get(), gs, constants.Get(), st::directSetGs, &none) == st::Binding::Begin::kRefused && !b.needsRestore() && slotIs(st::kGsSlot, sentinel0.Get()) && slotIs(st::kGsGameSlot, sentinel1.Get()),
+                 "an extra without a buffer: refused, the game's state is where it was");
+    }
+    {   // nothing bound at the vertex stage's slot 1
+        g_ctx->ClearState();
+        st::ExtraCb ex;
+        f.expect(!st::readGameCb(g_ctx.Get(), st::kGameCbSlot, ex) && !ex.buffer, "no vertex constants at slot 1: nothing read");
+        f.expect(!st::readGameCb(nullptr, st::kGameCbSlot, ex), "no context: nothing read");
+    }
+    {   // a ranged binding: the game bound the buffer from constant 16, and the shader gets the same range
+        g_sceneFirst = 16;
+        auto ranged = sceneBuffer();
+        gameState(ranged.Get(), 16, kSceneRangeConstants);
+        st::ExtraCb ex;
+        f.expect(st::readGameCb(g_ctx.Get(), st::kGameCbSlot, ex) && ex.buffer == ranged.Get() && ex.ranged && ex.first == 16 && ex.count == kSceneRangeConstants, "a ranged binding is read with its first constant and count");
+        st::Binding b;
+        f.expect(b.begin(g_ctx.Get(), gs, constants.Get(), st::directSetGs, &ex) == st::Binding::Begin::kBound, "bound with the range");
+        ComPtr<ID3D11DeviceContext1> c1;
+        ID3D11Buffer* got = nullptr;
+        UINT first = 0, count = 0;
+        if (SUCCEEDED(g_ctx.As(&c1))) c1->GSGetConstantBuffers1(st::kGsGameSlot, 1, &got, &first, &count);
+        f.expect(got == ranged.Get() && first == 16 && count == kSceneRangeConstants, "GS slot 1 holds the buffer with the game's first constant and count");
+        if (got) got->Release();
+        f.expect(b.restore(g_ctx.Get()) && slotIs(st::kGsGameSlot, sentinel1.Get()), "restored: GS slot 1 is the game's");
+        g_sceneFirst = 0;
+    }
+    {   // a restore that fails: the boundary settles both slots
+        gameState(scene.Get(), 0, 0);
+        st::ExtraCb ex;
+        (void)st::readGameCb(g_ctx.Get(), st::kGameCbSlot, ex);
+        st::Binding b;
+        f.expect(b.begin(g_ctx.Get(), gs, constants.Get(), st::directSetGs, &ex) == st::Binding::Begin::kBound, "settle scene: bound");
+        const auto result = b.finish(g_ctx.Get(), failingSetGs);
+        f.expect(result.retried && !result.restored && b.needsRestore(), "a restore that failed twice is still owed");
+        f.expect(b.settle(g_ctx.Get()) && !b.needsRestore() && slotIs(st::kGsSlot, sentinel0.Get()) && slotIs(st::kGsGameSlot, sentinel1.Get()), "settled: the game's slots 0 and 1 are back");
+        // the game rebound slot 1 while it was owed: its newer state stays
+        gameState(scene.Get(), 0, 0);
+        f.expect(b.settle(g_ctx.Get()), "a settled binding settles idempotently");
+        st::Binding c;
+        (void)c.begin(g_ctx.Get(), gs, constants.Get(), st::directSetGs, &ex);
+        c.finish(g_ctx.Get(), failingSetGs);
+        auto theirs = makeBuffer(16, D3D11_BIND_CONSTANT_BUFFER, data.data());
+        g_ctx->GSSetShader(nullptr, nullptr, 0);
+        g_ctx->GSSetConstantBuffers(st::kGsGameSlot, 1, theirs.GetAddressOf());
+        f.expect(c.settle(g_ctx.Get()) && slotIs(st::kGsGameSlot, theirs.Get()), "settle with GS slot 1 rebound by the game leaves the game's own newer state");
+    }
+    g_ctx->ClearState();
+}
+
+// The disc probe's register copy (st::copyPsRegister), on WARP: the offsets, the first constant of a ranged binding, and the refusals.
+static void copyRegisterCases() {
+    const auto filled = [&](UINT registers, UINT row, const float v[4]) {
+        std::vector<float> data(size_t(registers) * 4, -1.0f);
+        std::memcpy(data.data() + size_t(row) * 4, v, 16);
+        return makeBuffer(UINT(data.size() * sizeof(float)), D3D11_BIND_CONSTANT_BUFFER, data.data());
+    };
+    D3D11_BUFFER_DESC sd{};
+    sd.ByteWidth = 32;
+    sd.Usage = D3D11_USAGE_STAGING;
+    sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    ComPtr<ID3D11Buffer> stage;
+    ck(g_dev->CreateBuffer(&sd, nullptr, &stage), "staging buffer");
+    const auto readStage = [&](float out[8]) {
+        D3D11_MAPPED_SUBRESOURCE m{};
+        ck(g_ctx->Map(stage.Get(), 0, D3D11_MAP_READ, 0, &m), "Map the register copy");
+        std::memcpy(out, m.pData, 32);
+        g_ctx->Unmap(stage.Get(), 0);
+    };
+    const float alpha[4] = {1.0f, 2.0f, 3.0f, 0.75f}, colour[4] = {5.0f, 0.5f, 7.0f, 8.0f}, ranged[4] = {9.0f, 8.0f, 7.0f, 6.0f};
+    auto cb2 = filled(16, 11, alpha), cb1 = filled(100, 90, colour);
+    g_ctx->ClearState();
+    g_ctx->PSSetConstantBuffers(2, 1, cb2.GetAddressOf());
+    g_ctx->PSSetConstantBuffers(1, 1, cb1.GetAddressOf());
+    check(st::copyPsRegister(g_ctx.Get(), stage.Get(), 2, 11, 0) && st::copyPsRegister(g_ctx.Get(), stage.Get(), 1, 90, 16), "the disc's two registers are copied");
+    float got[8];
+    readStage(got);
+    check(got[0] == 1.0f && got[1] == 2.0f && got[2] == 3.0f && got[3] == 0.75f && got[4] == 5.0f && got[5] == 0.5f && got[6] == 7.0f && got[7] == 8.0f,
+          "...cb2[11] at byte 0 and cb1[90] at byte 16, exactly (alpha is .w of the first, the intensity .y of the second)");
+    float before[8];
+    readStage(before);
+    check(!st::copyPsRegister(g_ctx.Get(), stage.Get(), 2, 16, 0) && !st::copyPsRegister(g_ctx.Get(), stage.Get(), 1, 100, 16) && !st::copyPsRegister(g_ctx.Get(), stage.Get(), 6, 0, 0) &&
+              !st::copyPsRegister(g_ctx.Get(), nullptr, 2, 11, 0) && !st::copyPsRegister(nullptr, stage.Get(), 2, 11, 0),
+          "a register past the buffer, nothing bound at the slot, no staging buffer, no context: refused");
+    float after[8];
+    readStage(after);
+    check(std::memcmp(before, after, sizeof(before)) == 0, "...and the staging buffer is untouched");
+    {   // a ranged binding: the register is counted from the first constant the game bound the buffer with
+        const float decoy[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+        std::vector<float> data(size_t(48) * 4, -1.0f);
+        std::memcpy(data.data() + size_t(11) * 4, decoy, 16);     // row 11 of the whole buffer: not the one
+        std::memcpy(data.data() + size_t(16 + 11) * 4, ranged, 16);   // row 11 counted from constant 16: the one
+        auto big = makeBuffer(UINT(data.size() * sizeof(float)), D3D11_BIND_CONSTANT_BUFFER, data.data());
+        ComPtr<ID3D11DeviceContext1> c1;
+        check(SUCCEEDED(g_ctx.As(&c1)), "the 11.1 context");
+        const UINT first = 16, count = 16;
+        ID3D11Buffer* b = big.Get();
+        c1->PSSetConstantBuffers1(2, 1, &b, &first, &count);
+        check(st::copyPsRegister(g_ctx.Get(), stage.Get(), 2, 11, 0), "a ranged binding: copied");
+        readStage(got);
+        check(got[0] == 9.0f && got[1] == 8.0f && got[2] == 7.0f && got[3] == 6.0f, "...from the register counted from the first constant (row 11 + 16), not row 11 of the whole buffer");
+        readStage(before);
+        check(!st::copyPsRegister(g_ctx.Get(), stage.Get(), 2, 16, 0), "a row past the bound range (though inside the buffer): refused");
+        readStage(after);
+        check(std::memcmp(before, after, sizeof(before)) == 0, "...and the staging buffer is untouched");
+    }
+    g_ctx->ClearState();
+}
+
 // ---------------------------------------------------------------- the constants
 static void constantsCases() {
     st::Constants c;
@@ -1512,7 +1848,13 @@ static void constantsCases() {
     bad = p0;
     bad.tz = 2.5f;
     check(c.get(g_ctx.Get(), bad) == nullptr, "a translation beyond 2 m: refused");
+    bad = p0;
+    bad.depth = 3.0f;
+    check(c.get(g_ctx.Get(), bad) == nullptr, "a depth mode that is not 0, 1 or 2: refused");
     check(c.get(g_ctx.Get(), p1) == first, "...and the buffer is still the good one");
+    check(c.get(g_ctx.Get(), st::withDepth(p1, st::DepthMode::kReal)) == first && c.written().depth == 1.0f && readBack(first).depth == 1.0f &&
+              c.get(g_ctx.Get(), st::withDepth(p1, st::DepthMode::kFront)) == first && readBack(first).depth == 2.0f && c.get(g_ctx.Get(), p1) == first && readBack(first).depth == 0.0f,
+          "the depth mode is in the buffer: real, front and game each rewrite it (the register's fourth number)");
     const st::TurretParams pull = st::paramsFor(e, 0.96f), top = st::pushParamsFor(e, st::kPushMaxCm / 100.0f), only = st::translateParamsFor(frameOfCam(cam, a, t));
     check(c.get(g_ctx.Get(), pull) == first && c.written() == pull && c.get(g_ctx.Get(), top) == first && c.written() == top && c.get(g_ctx.Get(), only) == first && c.written() == only,
           "a pull, a push of the key's top (2.00 m) and a translation alone (gap 0) are accepted, the same buffer rewritten each time");
@@ -1852,6 +2194,7 @@ int main(int argc, char** argv) {
         }
         check(argc == 2 && !std::strcmp(argv[1], "--self-test"), "usage: srv_turret_hud_test --self-test | --wiring | --dry-run");
         mathCases();
+        depthMathCases();
         latchCases();
         const HRESULT made = edvr::systemD3D11CreateDevice()(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, D3D11_CREATE_DEVICE_DEBUG, nullptr, 0, D3D11_SDK_VERSION, &g_dev, nullptr, &g_ctx);
         if (FAILED(made))
@@ -1882,6 +2225,8 @@ int main(int argc, char** argv) {
         }
         g_fam = 0;
         bindingCases(gsOf[0].Get(), production, true);
+        sceneBindingCases(gsOf[st::kSceneSignature].Get(), production);
+        copyRegisterCases();
         afterIssueCases(gsOf[0].Get(), production, false);
         if (production.n) {
             std::printf("first failing production check: %s (%u failed)\n", production.first.c_str(), production.n);
@@ -1913,7 +2258,20 @@ int main(int argc, char** argv) {
             {"the depth fallback replaced by z / w", "? zn : 0.999", "? zn : zn"},
             {"the depth fallback at the far end", ": 0.999;", ": 0.0;"},
             {"no fallback for a vertex inside the near plane", "zn >= 0.0 && zn <= 1.0", "zn >= 0.0"},
-            {"a `pre` that is the moved position", "o.pre = v[i].pos;", "o.pre = turretMove(v[i].pos);"},
+            {"a `pre` that is the moved position", "o.pre = v[i].pos;", "float3 dd; o.pre = turretMove(v[i].pos, dd);"},
+            {"the real depth mode ignored", "else if (mv.w > 0.5)", "else if (mv.w > 5.0)"},
+            {"the front depth mode ignored", "if (mv.w > 1.5) ndcZ = 0.999;", "if (mv.w > 5.0) ndcZ = 0.999;"},
+            {"the front depth at the far end", "if (mv.w > 1.5) ndcZ = 0.999;", "if (mv.w > 1.5) ndcZ = 0.0;"},
+            {"the real depth from the unmoved w", "clamp(c.z / q.z, 0.0, 0.999)", "clamp(c.z / w, 0.0, 0.999)"},
+            {"the real depth unclamped", "clamp(c.z / q.z, 0.0, 0.999)", "(c.z / q.z)"},
+        };
+        // The Scorpion hologram's lighting position (signature H only): the same move cases, which include its case (o).
+        const Mutant sceneMutants[] = {
+            {"the lighting position not moved", "o.v.l += g[277].xyz * d.x + g[278].xyz * d.y + g[279].xyz * d.z;", ""},
+            {"the lighting position's sign", "o.v.l += ", "o.v.l -= "},
+            {"the right and forward vectors swapped", "g[277].xyz * d.x + g[278].xyz * d.y + g[279].xyz * d.z", "g[279].xyz * d.x + g[278].xyz * d.y + g[277].xyz * d.z"},
+            {"the up vector dropped", " + g[278].xyz * d.y", ""},
+            {"the lighting position moved by the translation alone", "g[277].xyz * d.x + g[278].xyz * d.y + g[279].xyz * d.z", "g[277].xyz * tr.x + g[278].xyz * tr.y + g[279].xyz * tr.z"},
         };
         for (uint32_t fam = 0; fam < st::kSignatureCount; ++fam) {
             g_fam = int(fam);
@@ -1928,6 +2286,18 @@ int main(int argc, char** argv) {
                 char what[200];
                 std::snprintf(what, sizeof(what), "the mutant \"%s\" of signature %u's shader is caught by the move cases", m.name, fam);
                 check(fails.n > 0, what);
+            }
+            if (fam == st::kSceneSignature) {
+                for (const Mutant& m : sceneMutants) {
+                    const std::string mutated = replaceAll(text, m.from, m.to);
+                    check(mutated != text, "a mutant differs from the production text");
+                    const auto mg = twinFromText(int(fam), mutated);
+                    Fails fails;
+                    moveCases(int(fam), mg.Get(), fails);
+                    char what[200];
+                    std::snprintf(what, sizeof(what), "the mutant \"%s\" of signature %u's shader is caught by the move cases", m.name, fam);
+                    check(fails.n > 0, what);
+                }
             }
             {   // a pass-through that reverses every triangle's winding (what a shader that did not keep the input assembler's order would do to a strip): caught by the strip cases
                 const std::string flipped = replaceAll(text, "o.v = v[i];", "o.v = v[(i == 0) ? 0 : (3 - i)];");
@@ -1962,7 +2332,7 @@ int main(int argc, char** argv) {
             }
         }
         wiringCases();
-        std::printf("PASS srv_turret_hud_test: %u checks; the turret shaders, binding, constants, maths, anchor and Scorpion latch on WARP, seventeen shader mutants and the winding mutant in each of eight signatures and one binding mutant caught\n", g_checks);
+        std::printf("PASS srv_turret_hud_test: %u checks; the turret shaders, binding, constants, maths, anchor and Scorpion latch on WARP, twenty-two shader mutants and the winding mutant in each of eight signatures, five more in signature H and one binding mutant caught\n", g_checks);
         return 0;
     } catch (const std::exception& e) {
         std::printf("FAIL %s (%u checks)\n", e.what(), g_checks);

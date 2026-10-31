@@ -8,11 +8,13 @@
   with a good anchor the layout is the goal (arcs 1.65-1.96 m behind the
   location panel 1.14 m and SYSTEMS 1.27 m). For its first 45 s the anchor
   sat on a frozen headset pose a metre off and the panel stretched (journal).
-  The anchor fix (cd67ee63) FLOWN OK (head_offset 2.6 cm), but moved parts
-  the game drew behind the eye were depth-clipped (journal): the depth fix
-  (9330af6e) is BUILT, NOT FLOWN. After it: a radar forward key (the HUD
-  forward move left the radar disc level with the eye, a sliver) and a
-  draw-time pose rebuild against judder, BUILT, NOT FLOWN. Branch
+  The anchor fix (cd67ee63), the depth fix for parts the game drew behind
+  the eye (9330af6e), the radar forward key and the draw-time pose rebuild
+  (3411dc8e) are FLOWN: `pose refreshed at draw: 900 of 900 frames` proved
+  the stale pose; the judder is gone. Sean: "almost perfect", missing the
+  Scorpion hologram and the radar disc. This build moves the hologram's
+  lighting position, adds the A/B key `fix.srv_turret_hud_depth` and
+  instruments the disc (journal): BUILT, NOT FLOWN. Branch
   `claude/srv-turret-hud`, local only. Issue #140. Test install: Steam
   (`--target steam --scope both --xess`).
 - **What is wrong (the game's own placement):** the turret view's whole HUD
@@ -39,7 +41,7 @@
   propose removing them when the arc closes): `fix.srv_turret_camera_back`,
   `fix.srv_turret_hud_forward`, `fix.srv_turret_radar_forward` (70),
   `fix.srv_turret_panels_back`, `fix.srv_turret_radar_back`,
-  `fix.srv_turret_hud_gap`. Sean's flown values
+  `fix.srv_turret_hud_gap`, `fix.srv_turret_hud_depth` (game). Sean's flown values
   (2026-10-31): camera back 35, HUD forward 70, panels back 140, radar 0.
 - **Latency:** both follow Status.json, which the watcher polls every 500 ms
   and the game rewrites about once a second, so a view switch is followed up
@@ -320,3 +322,42 @@ the eye, so it is seen edge-on.
 Change: `fix.srv_turret_radar_forward` (TEMPORARY, 70, 0..150) moves the
 radar group by its own distance; the panels keep HUD forward. The 10 s line
 prints `T=` and `Tradar=`. Fly radar forward 30 and 70 and read the disc.
+
+### 2026-10-31: the Scorpion hologram and the radar disc (built, not flown)
+
+Flight 3411dc8e (Steam, dump 083539722001): the pose counter read 900 of 900
+frames, so the stale pose was real and is fixed. Sean: "almost perfect, we're
+just missing the hologram of the scorpion and the radar disc."
+
+The hologram is vs 5559BD94B6852E83 with ps EA02FAC2BD6C643C, its near quad
+(draws 1-2). Its vertex shader writes o0 = M_LIGHTINGPOSITION = cb0[9..11] *
+pos, the camera-relative WORLD position, and its pixel shader uses that twice:
+a scene depth test (dp3 with cb1[279], the fragment's view depth) and a view
+ray (v0.xyz divided by that depth). The geometry shader moved SV_Position but
+not v0, so a quad the game had beside or behind the eye kept a view depth near
+0 or negative, the ray blew up and the hologram vanished. cb1[277], [278] and
+[279] of the draw's vertex constants are the camera's right, up and forward
+unit vectors in world axes (orthonormal, right x up = forward, matching the
+projection rows). Fix: for signature H the module binds the draw's VS slot 1
+to GS slot 1 (with the range the game bound it with), and the shader adds
+right * dX + up * dY + forward * dZ of the move's eye-space displacement to
+the interpolant. Not instrumented: the dot with cb1[279] before and after
+(`v0z`), since the twin streams out the clip position before the move but not
+the interpolant.
+
+The radar disc is vs DF3503CD07F9B10C with ps 8C08EB252B0F6095. In the flight
+it is rasterized (ps about 2.2 M per issue; capture at w 0.24-0.45 m, zfix 6)
+and the final image shows nothing there; the whole HUD reaches the eye through
+the crisp take's HDR HUD layer ("redirected into the layer"), and the
+before-UI image has no HUD. The radar icons (all at the 0.999 fallback) show;
+the disc, with half its vertices on the game's own depth, does not.
+Hypotheses: (1) a depth or stencil test rejects it in the layer; (2) the game
+faded it (cb2[11].w or cb1[90].y about 0). One flight decides: the first
+scope of each family logs the state of every issue (`srv turret hud state:`,
+target game or other, depth-stencil, blend); the disc's sampled scope adds an
+occlusion query and a copy of the two registers (`srv turret hud disc:
+samples_passed, alpha, intensity`). samples_passed 0 with ps running = (1);
+samples above 0 with alpha about 0 = (2). And `fix.srv_turret_hud_depth`
+(game, real, front) writes the moved depth three ways: if `front` or `real`
+shows the disc, the depth the shader gave a vertex that was on the game's own
+depth was the cause. Compare the disc's state lines with 9B34C331's.

@@ -1,4 +1,4 @@
-// The SRV turret view (issue 140): the camera and the HUD in the Scorpion's gunner view in VR. srv_turret_math.h says what is wrong, the six TEMPORARY keys, the families and the
+// The SRV turret view (issue 140): the camera and the HUD in the Scorpion's gunner view in VR. srv_turret_math.h says what is wrong, the seven TEMPORARY keys, the families and the
 // maths; srv_turret_hud_shader.h and srv_turret_hud_binding.h are the private geometry shaders and their binding (tools/srv_turret_hud_test runs them on WARP);
 // journal_vehicle_latch.h is the Scorpion latch; srv_turret.cpp is this module.
 //
@@ -21,14 +21,17 @@
 // eye's frame (tangents with the jitter, the anchor and the two translations in the eye's space) for the log and as a fallback. That tick runs at the Present boundary and the host's
 // beginFrame (the game's WaitGetPoses) publishes the pose of the frame about to be drawn: when that comes after the tick the tick's frames are a frame old, so the DRAW (drawEyeFrame) compares the host's frame sequence
 // (nativeTemporalFrameSequence) with the one its frames were built from and, for a new one, rebuilds both eyes' frames once from that frame's pose and the tick's anchor (the judder was
-// the HUD following the head a frame late). A draw of a group with none of its keys is the game's own and is not counted. (The
+// the HUD following the head a frame late). A draw of a group with none of its keys is the game's own and is not counted. How the moved vertices' depth is written is the seventh key's
+// (fix.srv_turret_hud_depth: game, real or front, srv_turret_math.h DepthMode). The Scorpion's own hologram (vs 5559BD94, signature H) also needs the draw's vertex constants: its pixel shader
+// divides an interpolant the vertex shader makes from the WORLD position by the fragment's view depth, so the geometry shader moves that interpolant too, by the camera's right, up and forward
+// vectors (rows 277 to 279 of the draw's vertex constants, which the module binds at GS slot 1 for that signature and gives back). (The
 // reticle's sprite, vs E508648660A352B2, is not a panel: an earlier build targeted it, at about 500 m, and moved nothing. The flight HUD's vectors, vs B7790CBFC6554097, are not in
 // the pass.)
 //
 // WHAT THE LOG SHOWS (a flight in the turret view must tell "never ran" from "ran"):
 //   "srv turret: the vehicle is the Scorpion|not the Scorpion (event E)"   each change of the latch (journal_watch.cpp, the worker thread): E is LoadGame, LaunchSRV, Music, DockSRV,
 //     SRVDestroyed, Shutdown or NewJournal (another journal file).
-//   "srv turret settings: ..."        the six keys, at the first frame and at each change.
+//   "srv turret settings: ..."        the seven keys (the last, the depth mode, as game, real or front), at the first frame and at each change.
 //   "srv turret anchor: latched at x,y,z m seated (view on|camera back changed|HUD forward changed|radar forward changed|recentre|head away)"      each time the anchor is taken (the head's seated position).
 //     A frozen head pose (the same bits frame after frame) never latches it; "head away" is the safety net: the head stayed more than 35 cm from the anchor for 90 frames in a row.
 //   "srv turret view: on|off at frame N (Status.json Flags 0x........, seat kind 0x.)"      each edge of the Scorpion's turret view (the view bit AND the latch).
@@ -52,6 +55,13 @@
 //   above 0 (anchor distance before 0.1 to 0.7 m, after that plus the push) and the larger panels' in_window 0 at 1.3 m and more (the pull: the other way round); with only the HUD-forward
 //   key every vertex reads as moved. zfix is how many of the moved vertices took the depth fallback (the game's NDC z was not a valid reversed-Z depth: the vertex was behind the eye or
 //   inside its near plane). gap= is the signed gap the family's group ran with. The capture holds the first kCaptureBufferBytes of a draw's output, so a long draw is a sample.
+//   "srv turret hud disc: family=DF3503CD eye=E draw=K issues=N samples_passed=S alpha=A intensity=I (cb2[11].w, cb1[90].y)"   for the radar disc's sampled scope only: an occlusion query around
+//   it (S: the samples that passed the depth and stencil tests, over all the scope's issues) and the two pixel-shader registers its alpha and colour scale are made of, copied to a staging buffer
+//   at the end of the scope (n/a when a copy was refused). S = 0 with the pixel shader running (the statistics line's ps) is a depth or stencil test removing the disc; S above 0 with A about 0 is
+//   the game fading it.
+//   "srv turret hud state: family=F eye=E issue=K target=game|other WxH format=N depth_view=yes|no | depth: .. | stencil: .. | blend rt0: .."   each family's first scope, at each of its first eight
+//   issues (the game's own, the UI layer's, the interface depth's): the target as 'game' (the one bound when the scope began) or 'other' (the UI layer's), the depth-stencil state and the blend state
+//   of render target 0, as D3D11 enumeration numbers.
 #pragma once
 
 #include <atomic>
@@ -69,9 +79,11 @@ extern std::atomic<bool> g_srvTurretHudCounting;
 extern std::atomic<uint32_t> g_srvTurretHudIssues;
 }  // namespace detail
 
-// vscreen.cpp, at each place that issues the matched draw (the game's own issue and pureDrawReissue's re-issues): counts it while the sampled scope is open. One relaxed load otherwise.
-inline void srvTurretHudCountIssue() {
-    if (detail::g_srvTurretHudCounting.load(std::memory_order_relaxed)) detail::g_srvTurretHudIssues.fetch_add(1, std::memory_order_relaxed);
+// vscreen.cpp, at each place that issues the matched draw (the game's own issue and pureDrawReissue's re-issues): counts it while the sampled scope, or a family's first scope, is open
+// (srvTurretHudNoteIssue, in srv_turret.cpp, which also says the state each of the first scope's issues ran with). One relaxed load otherwise.
+void srvTurretHudNoteIssue(ID3D11DeviceContext* ctx);
+inline void srvTurretHudCountIssue(ID3D11DeviceContext* ctx) {
+    if (detail::g_srvTurretHudCounting.load(std::memory_order_relaxed)) srvTurretHudNoteIssue(ctx);
 }
 
 // True while the Scorpion's turret view is on (VR) and any of fix.srv_turret_hud_forward, fix.srv_turret_radar_forward, fix.srv_turret_panels_back, fix.srv_turret_radar_back and

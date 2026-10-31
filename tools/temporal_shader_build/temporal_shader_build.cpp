@@ -1170,7 +1170,7 @@ static void selfTest() {
     // strip, takes the output signature of its family's vertex shader element for element and register for register (srv_turret_math.h kSignatures, read from the fxc disassembly
     // of the dumps' bytecode: the semantic, its index, the register it sits in and the components it writes, with SV_Position last) and gives the same signature out followed by one
     // more element, TURRETPRE (four components, the clip position before the move, in the register after them), and reads one 64-byte constant buffer, Turret at b0 (srv_turret_math.h's
-    // TurretParams: four registers). A change to any of them fails here, in the build.
+    // TurretParams: four registers; signature H also GameVS at b1). A change to any of them fails here, in the build.
     {
         namespace stm = edvr::srv_turret;
         struct TurretContract { const char* symbol; const char* name; const char* source; };
@@ -1221,10 +1221,20 @@ static void selfTest() {
                 D3D11_SHADER_INPUT_BIND_DESC bind{};
                 ID3D11ShaderReflectionConstantBuffer* cbuffer = reflection ? reflection->GetConstantBufferByName("Turret") : nullptr;
                 D3D11_SHADER_BUFFER_DESC bufferDesc{};
+                // Signature H (the Scorpion's hologram) also reads the draw's own vertex constants at b1, GameVS: 280 registers, of which rows 277 to 279 are the camera's right, up and forward.
+                const bool scene = i == stm::kSceneSignature;
                 check(reflection && SUCCEEDED(reflection->GetResourceBindingDescByName("Turret", &bind)) && bind.Type == D3D_SIT_CBUFFER &&
                       bind.BindPoint == 0 && bind.BindCount == 1 && cbuffer && SUCCEEDED(cbuffer->GetDesc(&bufferDesc)) && bufferDesc.Size == 64 &&
-                      desc.ConstantBuffers == 1 && desc.BoundResources == 1,
-                      "...reading one 64-byte constant buffer, Turret at b0, and nothing else");
+                      desc.ConstantBuffers == (scene ? 2u : 1u) && desc.BoundResources == (scene ? 2u : 1u),
+                      "...reading one 64-byte constant buffer, Turret at b0, and nothing else (signature H also the draw's vertex constants, GameVS at b1)");
+                if (scene) {
+                    D3D11_SHADER_INPUT_BIND_DESC sceneBind{};
+                    D3D11_SHADER_BUFFER_DESC sceneDesc{};
+                    ID3D11ShaderReflectionConstantBuffer* sceneBuffer = reflection ? reflection->GetConstantBufferByName("GameVS") : nullptr;
+                    check(reflection && SUCCEEDED(reflection->GetResourceBindingDescByName("GameVS", &sceneBind)) && sceneBind.Type == D3D_SIT_CBUFFER && sceneBind.BindPoint == stm::kGameCbSlot &&
+                          sceneBind.BindCount == 1 && sceneBuffer && SUCCEEDED(sceneBuffer->GetDesc(&sceneDesc)) && sceneDesc.Size == 16u * stm::kSceneRows,
+                          "...signature H's GameVS is the draw's vertex constants at b1, 280 registers, so rows 277 to 279 are in range");
+                }
             }
         }
     }

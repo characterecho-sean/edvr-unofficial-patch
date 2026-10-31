@@ -1,4 +1,4 @@
-// The SRV turret view (issue 140): the module. srv_turret.h says what it does and what the log shows; srv_turret_math.h has the maths, the families and the six TEMPORARY
+// The SRV turret view (issue 140): the module. srv_turret.h says what it does and what the log shows; srv_turret_math.h has the maths, the families and the seven TEMPORARY
 // keys; srv_turret_hud_binding.h holds the constants and the binding, which tools/srv_turret_hud_test runs on WARP; srv_turret_hud_shader.h is the geometry shaders' HLSL,
 // compiled at build time.
 #include "srv_turret.h"
@@ -25,6 +25,8 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
+#include <string>
 
 namespace edvr {
 
@@ -41,13 +43,14 @@ namespace {
 static_assert(st::kBackDefaultCm == 0 && st::kBackMaxCm == 150 && st::kForwardDefaultCm == 70 && st::kForwardMaxCm == 150 && st::kRadarForwardDefaultCm == 70 && st::kRadarForwardMaxCm == 150 &&
                   st::kPanelsDefaultCm == 120 && st::kRadarDefaultCm == 0 &&
                   st::kPushMaxCm == 200 && st::kGapDefaultCm == 0 && st::kGapMaxCm == 200,
-              "the literals in the six reads below are these, written as numbers for tools/gen_settings_schema.py");
+              "the literals in the integer reads below are these, written as numbers for tools/gen_settings_schema.py");
 constexpr uint32_t kFamilyN = st::kFamilyCount, kSigN = st::kSignatureCount;   // the draws' families, and the geometry shaders (one for each distinct output signature)
 
 // ---- the frame thread's state ----------------------------------------------------------------------------------------------------------------------------------
 bool g_keysRead = false;
 uint32_t g_keysGeneration = 0;
 std::atomic<int> g_backCm{0}, g_forwardCm{0}, g_radarForwardCm{0}, g_panelsCm{0}, g_radarCm{0}, g_gapCm{0};   // TEMPORARY keys, as last read (the five HUD keys are read by the draw path too)
+std::atomic<int> g_depthMode{0};            // fix.srv_turret_hud_depth as a st::DepthMode (0 game, 1 real, 2 front)
 bool g_on = false;                          // the Scorpion's turret view, as the frame tick last saw it
 bool g_ignored = false;                     // the turret view is on but the vehicle is not the Scorpion: said once for each stay
 double g_backSeatedZ = 0.0;                 // what alignTick adds
@@ -207,7 +210,7 @@ bool ensureGs(ID3D11DeviceContext* ctx, uint32_t sig) {
     return sig < kSigN && g_gs[sig] != nullptr;
 }
 
-// The five keys, read when the configuration changes (Config::generation()) and not on every frame; said in the log at the first read and at each change.
+// The keys, read when the configuration changes (Config::generation()) and not on every frame; said in the log at the first read and at each change.
 void readKeys() {
     Config& cfg = Config::get();
     const uint32_t generation = cfg.generation();
@@ -218,8 +221,11 @@ void readKeys() {
     const int panels = cfg.getIntInRange("fix.srv_turret_panels_back", 120, 0, 200);
     const int radar = cfg.getIntInRange("fix.srv_turret_radar_back", 0, 0, 200);
     const int gap = cfg.getIntInRange("fix.srv_turret_hud_gap", 0, 0, 200);
+    const std::string depthText = cfg.getString("fix.srv_turret_hud_depth", "game");
+    const st::DepthMode depth = st::depthModeOf(depthText.c_str());
     const bool changed = !g_keysRead || back != g_backCm.load(std::memory_order_relaxed) || forward != g_forwardCm.load(std::memory_order_relaxed) ||
-                         radarForward != g_radarForwardCm.load(std::memory_order_relaxed) || panels != g_panelsCm.load(std::memory_order_relaxed) || radar != g_radarCm.load(std::memory_order_relaxed) || gap != g_gapCm.load(std::memory_order_relaxed);
+                         radarForward != g_radarForwardCm.load(std::memory_order_relaxed) || panels != g_panelsCm.load(std::memory_order_relaxed) || radar != g_radarCm.load(std::memory_order_relaxed) ||
+                         gap != g_gapCm.load(std::memory_order_relaxed) || static_cast<int>(depth) != g_depthMode.load(std::memory_order_relaxed);
     g_keysRead = true;
     g_keysGeneration = generation;
     g_backCm.store(back, std::memory_order_relaxed);
@@ -228,17 +234,22 @@ void readKeys() {
     g_panelsCm.store(panels, std::memory_order_relaxed);
     g_radarCm.store(radar, std::memory_order_relaxed);
     g_gapCm.store(gap, std::memory_order_relaxed);
+    g_depthMode.store(static_cast<int>(depth), std::memory_order_relaxed);
     if (changed)
-        Log::get().note("srv turret settings: camera back %d cm, hud forward %d cm, radar forward %d cm, panels back %d cm, radar back %d cm, hud gap %d cm (live; fix.srv_turret_camera_back, "
-                        "fix.srv_turret_hud_forward, fix.srv_turret_radar_forward, fix.srv_turret_panels_back, fix.srv_turret_radar_back and fix.srv_turret_hud_gap, TEMPORARY; 0 is the game's own)",
-                        back, forward, radarForward, panels, radar, gap);
+        Log::get().note("srv turret settings: camera back %d cm, hud forward %d cm, radar forward %d cm, panels back %d cm, radar back %d cm, hud gap %d cm, hud depth %s (live; fix.srv_turret_camera_back, "
+                        "fix.srv_turret_hud_forward, fix.srv_turret_radar_forward, fix.srv_turret_panels_back, fix.srv_turret_radar_back, fix.srv_turret_hud_gap and fix.srv_turret_hud_depth, TEMPORARY; "
+                        "0 is the game's own; the depth key is game, real or front)",
+                        back, forward, radarForward, panels, radar, gap, st::depthModeName(depth));
 }
 
 // The constants a group's draws run with at the keys in force, on this eye frame: the group's push-back when above 0, else the pull when the gap is above 0, else the translation alone
 // when the group's forward key is above 0 (HUD forward for the panels, radar forward for the radar), else none (false: the draw is the game's own).
 bool paramsOfGroup(st::Group group, const st::EyeFrame& frame, st::TurretParams& out) {
-    return st::paramsForGroup(frame, group, st::pushCmOf(group, g_panelsCm.load(std::memory_order_relaxed), g_radarCm.load(std::memory_order_relaxed)), g_gapCm.load(std::memory_order_relaxed),
-                              st::forwardCmOf(group, g_forwardCm.load(std::memory_order_relaxed), g_radarForwardCm.load(std::memory_order_relaxed)), out);
+    if (!st::paramsForGroup(frame, group, st::pushCmOf(group, g_panelsCm.load(std::memory_order_relaxed), g_radarCm.load(std::memory_order_relaxed)), g_gapCm.load(std::memory_order_relaxed),
+                            st::forwardCmOf(group, g_forwardCm.load(std::memory_order_relaxed), g_radarForwardCm.load(std::memory_order_relaxed)), out))
+        return false;
+    out = st::withDepth(out, static_cast<st::DepthMode>(g_depthMode.load(std::memory_order_relaxed)));   // fix.srv_turret_hud_depth
+    return true;
 }
 
 // Both eyes' frames from a head and eye pose and an anchor: the tangents are the eye's frustum the host gave plus the tangent shift the eye jitter moves it by (nativeTemporalEyeGeometry; the
@@ -379,6 +390,11 @@ void windowLine(uint64_t nowMs) {
 // to the clip x: with a push the weapon panels' and the radar's draws read in_window above 0 at 0.1 to 0.7 m and the larger panels' in_window 0 at 1.3 m and more (with the pull it is
 // the other way round). Read back without stalling.
 constexpr uint32_t kProbeEveryMs = 1000, kProbeGiveUpFrames = 8, kProbeOrdinals = 8;
+// The radar disc (vs DF3503CD, ps 8C08EB25): its sampled draw also carries an occlusion query (the samples that passed the depth and stencil tests) and a staging copy of two registers its
+// pixel shader reads, cb2[11] (the alpha, .w) and cb1[90] (the colour's scale, .y). Never awaited; read back like the statistics.
+constexpr uint32_t kDiscFamily = 2;
+static_assert(st::kFamilies[kDiscFamily].vs == 0xDF3503CD07F9B10Cull && st::kFamilies[kDiscFamily].ps == 0x8C08EB252B0F6095ull, "the disc probe is the radar disc's family");
+constexpr uint32_t kDiscAlphaSlot = 2, kDiscAlphaRow = 11, kDiscIntensitySlot = 1, kDiscIntensityRow = 90;
 
 struct Probe {
     ID3D11Device* device = nullptr;   // identity only: the queries hold their device alive
@@ -394,6 +410,14 @@ struct Probe {
     uint32_t ordinal = 0, wantOrd = 0;
     uint64_t lastMs = 0;
     st::TurretParams params;          // the constants the sampled draw ran with
+    // the radar disc's extras (family kDiscFamily only)
+    ID3D11Query* occlusion = nullptr;
+    ID3D11Buffer* cbStage = nullptr;  // 32 bytes: cb2[11] at 0, cb1[90] at 16
+    bool discFailed = false;          // creation failed on this device: not retried
+    bool discArmed = false;           // the query was begun in the open sampled scope
+    bool discPending = false;         // End issued, the results not yet logged
+    bool discCopied[2] = {};          // the alpha register, the intensity register were copied
+    uint32_t discWaited = 0, discIssues = 0, discDraw = 0;
 };
 Probe g_probe[2][kFamilyN];           // by eye and family
 Probe* g_sample = nullptr;            // the probe of the draw whose scope is open and sampled
@@ -407,6 +431,8 @@ void probeReleaseQueries(Probe& p) {
 }
 void probeReset(Probe& p) {
     probeReleaseQueries(p);
+    st::release(p.occlusion);
+    st::release(p.cbStage);
     st::release(p.soBuf);
     st::release(p.staging);
     const uint32_t lost = p.lost, ordinal = p.ordinal;
@@ -461,6 +487,32 @@ bool probeEnsure(ID3D11DeviceContext* ctx, int eye, int family) {
             if (FAILED(hr)) { what = "the staging buffer"; return; }
         }
     });
+    if (ran && !what && static_cast<uint32_t>(family) == kDiscFamily && !p.discFailed && (!p.occlusion || !p.cbStage)) {   // the disc's extras: a failure here leaves the rest of the instrument
+        const char* discWhat = nullptr;
+        HRESULT discHr = S_OK;
+        const bool discRan = guarded("srv.turret.probe.disc.make", [&] {
+            if (!p.occlusion) {
+                const D3D11_QUERY_DESC qd{D3D11_QUERY_OCCLUSION, 0};
+                discHr = d->CreateQuery(&qd, &p.occlusion);
+                if (FAILED(discHr)) { discWhat = "the occlusion query"; return; }
+            }
+            if (!p.cbStage) {
+                D3D11_BUFFER_DESC bd{};
+                bd.ByteWidth = 32;
+                bd.Usage = D3D11_USAGE_STAGING;
+                bd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+                discHr = d->CreateBuffer(&bd, nullptr, &p.cbStage);
+                if (FAILED(discHr)) { discWhat = "the constant staging buffer"; return; }
+            }
+        });
+        if (!discRan || discWhat) {
+            Log::get().note("srv turret hud: the GPU instrument could not be made for eye %d, family %s (%s, 0x%08X); the pass itself is unaffected.", eye, st::kFamilies[family].name,
+                            discWhat ? discWhat : "a fault", static_cast<unsigned>(discHr));
+            st::release(p.occlusion);
+            st::release(p.cbStage);
+            p.discFailed = true;
+        }
+    }
     st::release(d);
     if (!ran || what) {
         Log::get().note("srv turret hud: the GPU instrument could not be made for eye %d, family %s (%s, 0x%08X); the pass itself is unaffected.", eye, st::kFamilies[family].name,
@@ -468,6 +520,8 @@ bool probeEnsure(ID3D11DeviceContext* ctx, int eye, int family) {
         probeReleaseQueries(p);
         st::release(p.soBuf);
         st::release(p.staging);
+        st::release(p.occlusion);
+        st::release(p.cbStage);
         p.failed = true;   // not retried on this device
         return false;
     }
@@ -507,6 +561,7 @@ void probeBegin(ID3D11DeviceContext* ctx, int eye, int family, uint32_t ordinal,
     g_sampleTwin = twin;
     detail::g_srvTurretHudIssues.store(0, std::memory_order_relaxed);
     detail::g_srvTurretHudCounting.store(true, std::memory_order_relaxed);
+    const bool disc = static_cast<uint32_t>(family) == kDiscFamily && p.occlusion && p.cbStage && !p.discFailed && !p.discPending;
     if (!guarded("srv.turret.probe.begin", [&] {
             if (twin) {
                 ID3D11Buffer* target = p.soBuf;
@@ -515,10 +570,18 @@ void probeBegin(ID3D11DeviceContext* ctx, int eye, int family, uint32_t ordinal,
             }
             ctx->Begin(p.stats);
             if (twin) ctx->Begin(p.soStats);
+            if (disc) {
+                ctx->Begin(p.occlusion);
+                p.discArmed = true;
+            }
         })) {
         p.failed = true;   // a fault in the instrument's own calls ends the instrument, not the pass
     }
 }
+
+// The disc's two pixel-shader registers are copied past the hooks (st::copyPsRegister, which the rig runs on WARP).
+void rawCopyRegion(ID3D11DeviceContext* ctx, ID3D11Resource* dst, UINT dstX, ID3D11Resource* src, const D3D11_BOX* box) { vScreenCopySubresourceRegionRaw(ctx, dst, dstX, src, box); }
+bool probeCopyRegister(ID3D11DeviceContext* ctx, ID3D11Buffer* stage, uint32_t slot, uint32_t row, UINT to) { return st::copyPsRegister(ctx, stage, slot, row, to, rawCopyRegion); }
 
 // Right before the restore: the queries end, the stream-output target comes off.
 void probeEnd(ID3D11DeviceContext* ctx) {
@@ -530,8 +593,13 @@ void probeEnd(ID3D11DeviceContext* ctx) {
             ctx->End(p.stats);
             if (g_sampleTwin) ctx->End(p.soStats);
             if (g_sampleTwin) ctx->SOSetTargets(0, nullptr, nullptr);
+            if (p.discArmed) ctx->End(p.occlusion);
         })) {
         p.failed = true;
+    }
+    if (p.discArmed && !p.failed) {   // the registers as the game left them for the last issue
+        p.discCopied[0] = probeCopyRegister(ctx, p.cbStage, kDiscAlphaSlot, kDiscAlphaRow, 0);
+        p.discCopied[1] = probeCopyRegister(ctx, p.cbStage, kDiscIntensitySlot, kDiscIntensityRow, 16);
     }
 }
 
@@ -543,6 +611,13 @@ void probeFinish(ID3D11DeviceContext* ctx) {
     g_sample = nullptr;
     g_sampleEye = g_sampleFamily = -1;
     g_sampleTwin = false;
+    if (p.discArmed) {
+        p.discArmed = false;
+        p.discPending = !p.failed;
+        p.discWaited = 0;
+        p.discIssues = p.issues;
+        p.discDraw = p.draw;
+    }
     if (p.failed) return;
     if (twin && !guarded("srv.turret.probe.copy", [&] { vScreenCopyResourceRaw(ctx, p.staging, p.soBuf); })) {
         p.failed = true;
@@ -621,7 +696,158 @@ void probeRead(ID3D11DeviceContext* ctx, int eye, int family) {
     }
 }
 
+// Once a frame, the radar disc's extras: the samples that passed, and the two registers, logged together; given up on after kProbeGiveUpFrames.
+void probeReadDisc(ID3D11DeviceContext* ctx, int eye) {
+    Probe& p = g_probe[eye][kDiscFamily];
+    if (!p.discPending || !ctx) return;
+    uint64_t samples = 0;
+    HRESULT hr = S_FALSE;
+    const bool ran = guarded("srv.turret.probe.disc.data", [&] { hr = ctx->GetData(p.occlusion, &samples, sizeof(samples), D3D11_ASYNC_GETDATA_DONOTFLUSH); });
+    if (!ran || FAILED(hr)) {
+        p.discPending = false;
+        st::release(p.occlusion);   // made again at the next sample
+        return;
+    }
+    if (hr == S_OK) {
+        float regs[2][4] = {};
+        bool have[2] = {false, false};
+        if ((p.discCopied[0] || p.discCopied[1]) && p.cbStage) {
+            D3D11_MAPPED_SUBRESOURCE m{};
+            HRESULT mh = E_FAIL;
+            const bool mapped = guarded("srv.turret.probe.disc.map", [&] { mh = ctx->Map(p.cbStage, 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &m); });
+            if (mapped && mh == DXGI_ERROR_WAS_STILL_DRAWING) {   // the copy is not done: try again next frame
+                if (++p.discWaited <= kProbeGiveUpFrames) return;
+            } else if (mapped && SUCCEEDED(mh) && m.pData) {
+                std::memcpy(regs, m.pData, sizeof(regs));
+                ctx->Unmap(p.cbStage, 0);
+                have[0] = p.discCopied[0];
+                have[1] = p.discCopied[1];
+            }
+        }
+        char alpha[24], intensity[24];
+        if (have[0]) std::snprintf(alpha, sizeof(alpha), "%.4f", static_cast<double>(regs[0][3])); else std::snprintf(alpha, sizeof(alpha), "n/a");
+        if (have[1]) std::snprintf(intensity, sizeof(intensity), "%.4f", static_cast<double>(regs[1][1])); else std::snprintf(intensity, sizeof(intensity), "n/a");
+        Log::get().note("srv turret hud disc: family=%s eye=%d draw=%u issues=%u samples_passed=%llu alpha=%s intensity=%s (cb2[11].w, cb1[90].y)", st::kFamilies[kDiscFamily].name, eye,
+                        p.discDraw, p.discIssues, static_cast<unsigned long long>(samples), alpha, intensity);
+        p.discPending = false;
+    } else if (++p.discWaited > kProbeGiveUpFrames) {
+        p.discPending = false;
+        st::release(p.occlusion);   // a query that never resolved is made again
+    }
+}
+
+// ---- THE FIRST SCOPE'S STATE ----------------------------------------------------------------------------------------------------------------------------------------
+// Whether the depth and stencil tests, the blend or the target keep a family's pixels from the eye image is not in the draw's numbers. At each family's first matched draw, every issue the
+// scope makes (the game's own, the UI layer's, the interface depth's; up to kNoteIssues) says what it ran with: whether the target is the one the game bound at the start of the scope or another
+// (the UI layer's), its size and format, the depth-stencil state and the blend state of render target 0.
+constexpr uint32_t kNoteIssues = 8;
+bool g_stateNoted[kFamilyN] = {};
+int g_noteFamily = -1, g_noteEye = -1;
+uint32_t g_noteIssue = 0;
+const ID3D11DeviceContext* g_noteCtx = nullptr;
+const void* g_noteGameTarget = nullptr;   // identity only: the resource the game's first render target of the scope was
+
+void noteBegin(ID3D11DeviceContext* ctx, int family, int eye) {
+    g_stateNoted[family] = true;
+    g_noteFamily = family;
+    g_noteEye = eye;
+    g_noteIssue = 0;
+    g_noteCtx = ctx;
+    g_noteGameTarget = nullptr;
+    guarded("srv.turret.note.begin", [&] {
+        ID3D11RenderTargetView* rtv = nullptr;
+        ctx->OMGetRenderTargets(1, &rtv, nullptr);
+        if (rtv) {
+            ID3D11Resource* res = nullptr;
+            rtv->GetResource(&res);
+            g_noteGameTarget = res;
+            if (res) res->Release();
+            rtv->Release();
+        }
+    });
+    detail::g_srvTurretHudCounting.store(true, std::memory_order_relaxed);
+}
+void noteEnd() {
+    if (g_noteFamily < 0) return;
+    g_noteFamily = -1;
+    g_noteCtx = nullptr;
+    g_noteGameTarget = nullptr;
+    if (!g_sample) detail::g_srvTurretHudCounting.store(false, std::memory_order_relaxed);
+}
+void noteState(ID3D11DeviceContext* ctx) {
+    guarded("srv.turret.note.state", [&] {
+        ID3D11RenderTargetView* rtv = nullptr;
+        ID3D11DepthStencilView* dsv = nullptr;
+        ctx->OMGetRenderTargets(1, &rtv, &dsv);
+        const char* target = "none";
+        UINT w = 0, h = 0;
+        UINT fmt = 0;
+        if (rtv) {
+            ID3D11Resource* res = nullptr;
+            rtv->GetResource(&res);
+            target = static_cast<const void*>(res) == g_noteGameTarget ? "game" : "other";
+            if (res) {
+                ID3D11Texture2D* tex = nullptr;
+                if (SUCCEEDED(res->QueryInterface(__uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&tex))) && tex) {
+                    D3D11_TEXTURE2D_DESC td{};
+                    tex->GetDesc(&td);
+                    w = td.Width;
+                    h = td.Height;
+                    fmt = static_cast<UINT>(td.Format);
+                    tex->Release();
+                }
+                res->Release();
+            }
+            rtv->Release();
+        }
+        ID3D11DepthStencilState* dss = nullptr;
+        UINT stencilRef = 0;
+        ctx->OMGetDepthStencilState(&dss, &stencilRef);
+        D3D11_DEPTH_STENCIL_DESC dd{};
+        dd.DepthEnable = TRUE;   // the D3D11 defaults a null state means
+        dd.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ALL;
+        dd.DepthFunc = D3D11_COMPARISON_LESS;
+        dd.StencilReadMask = dd.StencilWriteMask = 0xFF;
+        dd.FrontFace = dd.BackFace = D3D11_DEPTH_STENCILOP_DESC{D3D11_STENCIL_OP_KEEP, D3D11_STENCIL_OP_KEEP, D3D11_STENCIL_OP_KEEP, D3D11_COMPARISON_ALWAYS};
+        if (dss) {
+            dss->GetDesc(&dd);
+            dss->Release();
+        }
+        ID3D11BlendState* bs = nullptr;
+        float factor[4] = {};
+        UINT sampleMask = 0;
+        ctx->OMGetBlendState(&bs, factor, &sampleMask);
+        D3D11_BLEND_DESC bd{};
+        bd.RenderTarget[0].SrcBlend = bd.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ONE;
+        bd.RenderTarget[0].DestBlend = bd.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_ZERO;
+        bd.RenderTarget[0].BlendOp = bd.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
+        bd.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+        if (bs) {
+            bs->GetDesc(&bd);
+            bs->Release();
+        }
+        const D3D11_RENDER_TARGET_BLEND_DESC& rt = bd.RenderTarget[0];
+        Log::get().note("srv turret hud state: family=%s eye=%d issue=%u target=%s %ux%u format=%u depth_view=%s | depth: enable=%d func=%d write=%d | stencil: enable=%d ref=%u read=0x%02X "
+                        "write=0x%02X front[func,pass,fail,zfail]=%d,%d,%d,%d | blend rt0: enable=%d src=%d dst=%d op=%d srcA=%d dstA=%d opA=%d mask=0x%X",
+                        st::kFamilies[g_noteFamily].name, g_noteEye, g_noteIssue, target, w, h, fmt, dsv ? "yes" : "no", static_cast<int>(dd.DepthEnable), static_cast<int>(dd.DepthFunc),
+                        static_cast<int>(dd.DepthWriteMask), static_cast<int>(dd.StencilEnable), stencilRef, static_cast<unsigned>(dd.StencilReadMask), static_cast<unsigned>(dd.StencilWriteMask),
+                        static_cast<int>(dd.FrontFace.StencilFunc), static_cast<int>(dd.FrontFace.StencilPassOp), static_cast<int>(dd.FrontFace.StencilFailOp),
+                        static_cast<int>(dd.FrontFace.StencilDepthFailOp), static_cast<int>(rt.BlendEnable), static_cast<int>(rt.SrcBlend), static_cast<int>(rt.DestBlend), static_cast<int>(rt.BlendOp),
+                        static_cast<int>(rt.SrcBlendAlpha), static_cast<int>(rt.DestBlendAlpha), static_cast<int>(rt.BlendOpAlpha), static_cast<unsigned>(rt.RenderTargetWriteMask));
+        if (dsv) dsv->Release();
+    });
+}
+
 }  // namespace
+
+// vscreen.cpp, each issue of a matched draw while a scope is counting (srv_turret.h srvTurretHudCountIssue): counted for the sampled scope's statistics line, and said for a family's first scope.
+void srvTurretHudNoteIssue(ID3D11DeviceContext* ctx) {
+    detail::g_srvTurretHudIssues.fetch_add(1, std::memory_order_relaxed);
+    if (g_noteFamily >= 0 && ctx == g_noteCtx && g_noteIssue < kNoteIssues) {
+        ++g_noteIssue;
+        noteState(ctx);
+    }
+}
 
 void srvTurretFrameTick(uint32_t frameNo) {
     if (!runtimeVrProfile()) return;   // flat (or not yet decided): every state stays at its zero, alignTick adds an exact 0
@@ -718,11 +944,18 @@ bool srvTurretHudBegin(ID3D11DeviceContext* ctx, int family, int eye) {
         refuse(st::Refuse::kNotReady);
         return false;
     }
+    // Signature H (the Scorpion's hologram) also needs the draw's own vertex constants, for the lighting position (srv_turret_hud_shader.h): without them the draw is the game's own.
+    st::ExtraCb scene;
+    const bool needScene = sig == st::kSceneSignature;
+    if (needScene && !st::readGameCb(ctx, st::kGameCbSlot, scene)) {
+        refuse(st::Refuse::kNotReady);
+        return false;
+    }
     // THE GPU INSTRUMENT: once a second per eye and family this draw goes through the stream-output twin (when there is one) with the queries around its scope.
     const bool sample = probeDue(ctx, eye, family, ordinal);
     const Probe& probe = g_probe[eye][family];
     const bool twin = sample && g_soGs[sig] && probe.soBuf && probe.soStats && probe.staging;
-    const auto begun = g_binding.begin(ctx, twin ? g_soGs[sig] : g_gs[sig], constants);
+    const auto begun = g_binding.begin(ctx, twin ? g_soGs[sig] : g_gs[sig], constants, st::directSetGs, needScene ? &scene : nullptr);
     if (begun == st::Binding::Begin::kGameHasGs) {
         refuse(st::Refuse::kGameGs);
         return false;
@@ -732,6 +965,7 @@ bool srvTurretHudBegin(ID3D11DeviceContext* ctx, int family, int eye) {
         return false;
     }
     if (sample) probeBegin(ctx, eye, family, ordinal, twin, params);
+    if (!g_stateNoted[family]) noteBegin(ctx, family, eye);   // this scope's issues say their state
     g_bound.fetch_add(1, std::memory_order_relaxed);
     if (!g_firstNoted[family]) {
         g_firstNoted[family] = true;
@@ -756,6 +990,7 @@ bool srvTurretHudBegin(ID3D11DeviceContext* ctx, int family, int eye) {
 }
 
 void srvTurretHudEnd(ID3D11DeviceContext* ctx) {
+    noteEnd();
     probeEnd(ctx);   // the queries end and the stream-output target comes off, right before the game's geometry stage goes back
     const auto done = g_binding.finish(ctx);
     probeFinish(ctx);
@@ -771,6 +1006,7 @@ void srvTurretHudFrameBoundary(ID3D11DeviceContext* ctx) {
         for (int family = 0; family < static_cast<int>(kFamilyN); ++family) {
             Probe& p = g_probe[eye][family];
             probeRead(ctx, eye, family);
+            if (family == static_cast<int>(kDiscFamily)) probeReadDisc(ctx, eye);
             // A frame with fewer matched draws than the wanted ordinal would never be sampled: start again from the first.
             if (p.ordinal <= p.wantOrd && p.ordinal > 0) p.wantOrd = 0;
             p.ordinal = 0;
@@ -787,6 +1023,7 @@ void srvTurretShutdown() {
     detail::g_srvTurretHudCounting.store(false, std::memory_order_relaxed);
     g_sample = nullptr;
     g_sampleEye = g_sampleFamily = -1;
+    noteEnd();
     for (auto& eyeProbes : g_probe)
         for (Probe& p : eyeProbes) probeReset(p);
     g_binding.clear();

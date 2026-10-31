@@ -9,14 +9,14 @@
 //     it published right after the one publisher's call.
 //   * srv_turret.cpp: the shaders are made from the build's bytecode through shaderSwapCreateGs (one for each signature, a missing one standing down only its own families); the
 //     module changes no state of the game's but through the binding class; both parts act on the turret view AND the Scorpion latch (and say the view without it); triangle lists
-//     and strips are carried; the six keys are read with the literal ranges and defaults the settings generator reads; a draw is counted and bound only when its family's group has a
+//     and strips are carried; the six integer keys are read with the literal ranges and defaults the settings generator reads, the seventh (the depth mode) as text; a draw is counted and bound only when its family's group has a
 //     push, the gap or its own forward key (HUD forward for the panels, radar forward for the radar) above 0 (the group's constants come from one place), the pass is wanted when any of
 //     the five HUD keys is above 0, the anchor is stepped by the frame tick with the head from the host's pose and cleared when the pass is not wanted, each eye's frame is built from the
 //     host's pose with the tangents AND the jitter shift, and the DRAW rebuilds both eyes' frames from the pose of the frame being drawn (the frame sequence the host publishes in
 //     beginFrame, after the previous frame's boundary tick), once for each new sequence.
 //   * journal_watch.cpp, native_temporal.cpp: the accessors; the Scorpion latch is fed the tail's new bytes once (not the stitched head the scan reads twice), reset with the
 //     file, published to its accessor, and each change said once with its event.
-//   * edvr.ini: all six keys live in [fix] with their ui: lines and shipped defaults; the flat profile's allow-list names none (VR only).
+//   * edvr.ini: all seven keys live in [fix] with their ui: lines and shipped defaults; the flat profile's allow-list names none (VR only).
 //   * the shader tables (tools/temporal_shader_build): the HLSL's header is included and the eight variants are registered as gs_5_0, each with its contract row.
 //   * build.bat: the module is in the DLL's compile list and this rig has its label.
 // Each pin has controls: an edited copy of the real text must trip it.
@@ -100,15 +100,16 @@ static bool wiredNativeOnFoot(const std::string& t) {
 // srv_turret.cpp.
 static bool wiredModule(const std::string& t) {
     const size_t made = t.find("g_gs[f] = shaderSwapCreateGs(ctx, kShader[f].bytecode, kShader[f].size, kShader[f].name, \"srv turret hud\")");
-    const size_t begin = t.find("g_binding.begin(ctx, twin ? g_soGs[sig] : g_gs[sig], constants)");
+    const size_t begin = t.find("g_binding.begin(ctx, twin ? g_soGs[sig] : g_gs[sig], constants, st::directSetGs, needScene ? &scene : nullptr)");
     const size_t finish = t.find("const auto done = g_binding.finish(ctx);");
     const size_t back = t.find("cfg.getIntInRange(\"fix.srv_turret_camera_back\", 0, 0, 150)");
     const size_t forward = t.find("cfg.getIntInRange(\"fix.srv_turret_hud_forward\", 70, 0, 150)");
     const size_t radarForward = t.find("cfg.getIntInRange(\"fix.srv_turret_radar_forward\", 70, 0, 150)");
+    const size_t depthKey = t.find("cfg.getString(\"fix.srv_turret_hud_depth\", \"game\")");
     const size_t panels = t.find("cfg.getIntInRange(\"fix.srv_turret_panels_back\", 120, 0, 200)");
     const size_t radar = t.find("cfg.getIntInRange(\"fix.srv_turret_radar_back\", 0, 0, 200)");
     const size_t gap = t.find("cfg.getIntInRange(\"fix.srv_turret_hud_gap\", 0, 0, 200)");
-    const size_t settings = t.find("\"srv turret settings: camera back %d cm, hud forward %d cm, radar forward %d cm, panels back %d cm, radar back %d cm, hud gap %d cm (live; fix.srv_turret_camera_back, \"");
+    const size_t settings = t.find("\"srv turret settings: camera back %d cm, hud forward %d cm, radar forward %d cm, panels back %d cm, radar back %d cm, hud gap %d cm, hud depth %s (live; fix.srv_turret_camera_back, \"");
     const size_t edge = t.find("\"srv turret view: %s at frame %u (Status.json Flags 0x%08X, seat kind 0x%X)\"");
     const size_t camera = t.find("\"srv turret camera: back %.2f m published (serial %u)\"");
     const size_t cleared = t.find("\"srv turret camera: back cleared (serial %u)\"");
@@ -117,17 +118,23 @@ static bool wiredModule(const std::string& t) {
     // each group's constants come from one place (the push when above 0, else the pull, else the translation alone, else none), read by the draw, the 10 s line and nothing else; a draw whose
     // group is off is the game's own BEFORE it is counted, and the constants are built on the eye's published frame after it was read; the first-draw line names the direction of the move
     const size_t family = t.find("bool paramsOfGroup(st::Group group, const st::EyeFrame& frame, st::TurretParams& out) {");
-    const size_t select = found(family) ? t.find("return st::paramsForGroup(frame, group, st::pushCmOf(group, g_panelsCm.load(std::memory_order_relaxed), g_radarCm.load(std::memory_order_relaxed)), g_gapCm.load(std::memory_order_relaxed),", family) : std::string::npos;
-    // ...and the forward translation is the group's own key's: HUD forward for the panels, radar forward for the radar
-    const size_t ownForward = found(select) ? t.find("st::forwardCmOf(group, g_forwardCm.load(std::memory_order_relaxed), g_radarForwardCm.load(std::memory_order_relaxed)), out);", select) : std::string::npos;
+    const size_t select = found(family) ? t.find("if (!st::paramsForGroup(frame, group, st::pushCmOf(group, g_panelsCm.load(std::memory_order_relaxed), g_radarCm.load(std::memory_order_relaxed)), g_gapCm.load(std::memory_order_relaxed),", family) : std::string::npos;
+    // ...and the forward translation is the group's own key's: HUD forward for the panels, radar forward for the radar; the depth mode of the key is written into whatever was made
+    const size_t ownForward = found(select) ? t.find("st::forwardCmOf(group, g_forwardCm.load(std::memory_order_relaxed), g_radarForwardCm.load(std::memory_order_relaxed)), out))", select) : std::string::npos;
+    const size_t depthMode = found(ownForward) ? t.find("out = st::withDepth(out, static_cast<st::DepthMode>(g_depthMode.load(std::memory_order_relaxed)));", ownForward) : std::string::npos;
     const size_t drawFn = t.find("bool srvTurretHudBegin(ID3D11DeviceContext* ctx, int family, int eye) {");
     const size_t groupOff = found(drawFn) ? t.find("if (!paramsOfGroup(group, st::EyeFrame{}, unused)) return false;", drawFn) : std::string::npos;
     const size_t counted = found(groupOff) ? t.find("g_familyDraws[family].fetch_add(1, std::memory_order_relaxed);", groupOff) : std::string::npos;
     const size_t eyeRead = found(counted) ? t.find("if (!drawEyeFrame(eye, frame)) {", counted) : std::string::npos;
     const size_t built = found(eyeRead) ? t.find("if (!paramsOfGroup(group, frame, params)) return false;", eyeRead) : std::string::npos;
     const size_t uploaded = found(built) ? t.find("g_constants[eye].get(ctx, params)", built) : std::string::npos;
+    // the Scorpion's hologram (signature H) needs the draw's own vertex constants at GS slot 1, read before the bind and handed to it; a draw without them is refused, counted
+    const size_t sceneNeed = found(uploaded) ? t.find("const bool needScene = sig == st::kSceneSignature;", uploaded) : std::string::npos;
+    const size_t sceneRead = found(sceneNeed) ? t.find("if (needScene && !st::readGameCb(ctx, st::kGameCbSlot, scene)) {", sceneNeed) : std::string::npos;
+    const size_t sceneBind = found(sceneRead) ? t.find("g_binding.begin(ctx, twin ? g_soGs[sig] : g_gs[sig], constants, st::directSetGs, needScene ? &scene : nullptr)", sceneRead) : std::string::npos;
+    const bool sceneOk = found(sceneNeed) && found(sceneRead) && found(sceneBind) && sceneRead - sceneNeed < 200;
     const size_t windowLn = t.find("groupWindow(panels, st::Group::kPanels);");
-    const bool groups = found(family) && found(select) && found(ownForward) && ownForward - select < 300 && found(groupOff) && found(counted) && found(eyeRead) && found(built) && found(uploaded) && found(windowLn) && select - family < 300 &&
+    const bool groups = found(family) && found(select) && found(ownForward) && ownForward - select < 300 && found(depthMode) && depthMode - ownForward < 300 && found(groupOff) && found(counted) && found(eyeRead) && found(built) && found(uploaded) && found(windowLn) && select - family < 300 &&
                         found(t.find("\"moves %.2f m deeper\"")) && found(t.find("\"moves %.2f m nearer\"")) && found(t.find("\"does not move radially\"")) && found(t.find("groupWindow(radar, st::Group::kRadar);")) &&
                         !found(t.find("st::paramsFor(geo"));
     // nothing of the game's state is changed but through the binding class
@@ -166,7 +173,7 @@ static bool wiredModule(const std::string& t) {
     // lists and strips are carried, one signature's shader missing leaves the others' families bound
     const bool strips = found(t.find("!st::topologyCarried(static_cast<int>(topology))")) && found(t.find("bool ensureGs(ID3D11DeviceContext* ctx, uint32_t sig) {")) &&
                         found(t.find("return sig < kSigN && g_gs[sig] != nullptr;")) && found(t.find("const uint32_t sig = st::kFamilies[family].sig;"));
-    return found(made) && found(begin) && found(finish) && found(back) && found(forward) && found(radarForward) && found(panels) && found(radar) && found(gap) && found(settings) && found(edge) &&
+    return found(made) && found(begin) && found(finish) && found(back) && found(forward) && found(radarForward) && found(depthKey) && sceneOk && found(panels) && found(radar) && found(gap) && found(settings) && found(edge) &&
            found(camera) && found(cleared) && found(line) && found(lineTail) && !rawSet && geometry && scorpion && groups && strips && found(t.find("#include \"temporal_shader_bytecode.h\""));
 }
 // journal_watch.cpp / .h: the Scorpion latch is fed every byte the tail reads, once (not from the stitched head scanEvents also scans), reset with the file, published to the
@@ -214,11 +221,11 @@ static bool wiredAccessors(const std::string& journal, const std::string& tempor
 // results are read once a frame at the boundary; the lines are the ones tools/edvr_log.py --health reads.
 static bool wiredInstrument(const std::string& vscreen, const std::string& t) {
     const size_t reissue = vscreen.find("void pureDrawReissue(ID3D11DeviceContext* self, char kind, UINT count,");
-    const size_t reissueCount = found(reissue) ? vscreen.find("srvTurretHudCountIssue();", reissue) : std::string::npos;
+    const size_t reissueCount = found(reissue) ? vscreen.find("srvTurretHudCountIssue(self);", reissue) : std::string::npos;
     const size_t reissueSwitch = found(reissue) ? vscreen.find("switch(kind) {", reissue) : std::string::npos;
     // the game's own issue is counted in the four draw thunks' lambdas (after the real call), not in observedDraw, whose text other rigs pin
     size_t counts = 0, at = 0;
-    while (found(at = vscreen.find("srvTurretHudCountIssue();", at))) {
+    while (found(at = vscreen.find("srvTurretHudCountIssue(self);", at))) {
         ++counts;
         ++at;
     }
@@ -226,7 +233,20 @@ static bool wiredInstrument(const std::string& vscreen, const std::string& t) {
     const size_t observedEnd = found(observed) ? vscreen.find("return issued;", observed) : std::string::npos;
     if (!found(reissueCount) || !found(reissueSwitch) || reissueCount > reissueSwitch || counts != 5 || !found(observed) || !found(observedEnd) ||
         found(vscreen.substr(observed, observedEnd - observed).find("srvTurretHudCountIssue"))) return false;
-    const size_t begin = t.find("g_binding.begin(ctx, twin ? g_soGs[sig] : g_gs[sig], constants)");
+    // the radar disc's extras (an occlusion query around the sampled scope, two pixel-shader registers copied at its end, one line per sample) and each family's first scope saying its state
+    // at every issue it makes
+    const size_t endFn = t.find("void srvTurretHudEnd(ID3D11DeviceContext* ctx) {");
+    const size_t noteEnd = found(endFn) ? t.find("noteEnd();", endFn) : std::string::npos;
+    const size_t discBegin = t.find("ctx->Begin(p.occlusion);");
+    const size_t discEnd = t.find("if (p.discArmed) ctx->End(p.occlusion);");
+    const size_t discCopy = found(discEnd) ? t.find("p.discCopied[0] = probeCopyRegister(ctx, p.cbStage, kDiscAlphaSlot, kDiscAlphaRow, 0);", discEnd) : std::string::npos;
+    const bool disc = found(discBegin) && found(discEnd) && found(discCopy) && found(t.find("D3D11_QUERY_OCCLUSION")) && found(t.find("kDiscAlphaSlot = 2, kDiscAlphaRow = 11, kDiscIntensitySlot = 1, kDiscIntensityRow = 90")) &&
+                      found(t.find("\"srv turret hud disc: family=%s eye=%d draw=%u issues=%u samples_passed=%llu alpha=%s intensity=%s (cb2[11].w, cb1[90].y)\"")) &&
+                      found(t.find("if (family == static_cast<int>(kDiscFamily)) probeReadDisc(ctx, eye);")) && found(t.find("return st::copyPsRegister(ctx, stage, slot, row, to, rawCopyRegion);"));
+    const bool notes = found(t.find("void srvTurretHudNoteIssue(ID3D11DeviceContext* ctx) {")) && found(noteEnd) && found(t.find("if (!g_stateNoted[family]) noteBegin(ctx, family, eye);")) &&
+                       found(t.find("\"srv turret hud state: family=%s eye=%d issue=%u target=%s %ux%u format=%u depth_view=%s | depth: enable=%d func=%d write=%d | stencil: enable=%d ref=%u read=0x%02X \""));
+    if (!disc || !notes) return false;
+    const size_t begin = t.find("g_binding.begin(ctx, twin ? g_soGs[sig] : g_gs[sig], constants, st::directSetGs, needScene ? &scene : nullptr)");
     const size_t probeBegin = found(begin) ? t.find("if (sample) probeBegin(ctx, eye, family, ordinal, twin, params);", begin) : std::string::npos;
     const size_t end = t.find("void srvTurretHudEnd(ID3D11DeviceContext* ctx) {");
     const size_t probeEnd = found(end) ? t.find("probeEnd(ctx);", end) : std::string::npos;
@@ -245,18 +265,20 @@ static bool wiredInstrument(const std::string& vscreen, const std::string& t) {
 static bool wiredKeys(const std::string& ini, const std::string& flatKeys) {
     const size_t fix = ini.find("\n[fix]\n"), visual = ini.find("\n[visual]\n");
     const size_t back = ini.find("\nsrv_turret_camera_back = 0\n"), forward = ini.find("\nsrv_turret_hud_forward = 70\n"), radarForward = ini.find("\nsrv_turret_radar_forward = 70\n"),
-                 panels = ini.find("\nsrv_turret_panels_back = 120\n"), radar = ini.find("\nsrv_turret_radar_back = 0\n"), gap = ini.find("\nsrv_turret_hud_gap = 0\n");
-    if (!found(fix) || !found(visual) || !found(back) || !found(forward) || !found(radarForward) || !found(panels) || !found(radar) || !found(gap)) return false;
+                 panels = ini.find("\nsrv_turret_panels_back = 120\n"), radar = ini.find("\nsrv_turret_radar_back = 0\n"), gap = ini.find("\nsrv_turret_hud_gap = 0\n"),
+                 depth = ini.find("\nsrv_turret_hud_depth = game\n");
+    if (!found(fix) || !found(visual) || !found(back) || !found(forward) || !found(radarForward) || !found(panels) || !found(radar) || !found(gap) || !found(depth)) return false;
     const bool inFix = back > fix && back < visual && forward > fix && forward < visual && radarForward > fix && radarForward < visual && panels > fix && panels < visual && radar > fix && radar < visual &&
-                       gap > fix && gap < visual;
+                       gap > fix && gap < visual && depth > fix && depth < visual;
     const size_t backUi = ini.rfind("# ui: SRV turret camera back | range 0..150 | step 5 | unit cm | zero exact | recommended 0 | live | menu", back),
                  forwardUi = ini.rfind("# ui: SRV turret HUD forward | range 0..150 | step 5 | unit cm | zero exact | recommended 70 | live | menu", forward),
                  radarForwardUi = ini.rfind("# ui: SRV turret radar forward | range 0..150 | step 5 | unit cm | zero exact | recommended 70 | live | menu", radarForward),
                  panelsUi = ini.rfind("# ui: SRV turret panels back | range 0..200 | step 5 | unit cm | zero exact | recommended 120 | live | menu", panels),
                  radarUi = ini.rfind("# ui: SRV turret radar back | range 0..200 | step 5 | unit cm | zero exact | recommended 0 | live | menu", radar),
-                 gapUi = ini.rfind("# ui: SRV turret HUD gap | range 0..200 | step 2 | unit cm | zero exact | recommended 0 | live | menu", gap);
+                 gapUi = ini.rfind("# ui: SRV turret HUD gap | range 0..200 | step 2 | unit cm | zero exact | recommended 0 | live | menu", gap),
+                 depthUi = ini.rfind("# ui: SRV turret HUD depth | choices game, real, front | recommended game | live | menu", depth);
     const bool ui = found(backUi) && back - backUi < 200 && found(forwardUi) && forward - forwardUi < 200 && found(radarForwardUi) && radarForward - radarForwardUi < 200 && found(panelsUi) && panels - panelsUi < 200 && found(radarUi) && radar - radarUi < 200 &&
-                    found(gapUi) && gap - gapUi < 200;
+                    found(gapUi) && gap - gapUi < 200 && found(depthUi) && depth - depthUi < 200;
     // VR only: the flat profile's allow-list reads none of the keys
     const bool flatClean = !found(flatKeys.find("srv_turret"));
     return inFix && ui && flatClean;
@@ -315,7 +337,7 @@ static void wiringCases() {
 
     check(wiredModule(module), "srv_turret.cpp: the shader from the build's bytecode, the binding class alone, the literal key reads, the host's geometry, the log lines");
     check(!wiredModule(replaced(module, "shaderSwapCreateGs(ctx, kShader[f].bytecode", "shaderSwapCreateGs(ctx, kSupercruiseBarsGsBytecode")), "control: another shader's bytecode trips the pin");
-    check(!wiredModule(replaced(module, "const auto begun = g_binding.begin(ctx, twin ? g_soGs[sig] : g_gs[sig], constants);", "ctx->GSSetShader(g_gs[sig], nullptr, 0); const auto begun = g_binding.begin(ctx, twin ? g_soGs[sig] : g_gs[sig], constants);")),
+    check(!wiredModule(replaced(module, "const auto begun = g_binding.begin(ctx, twin ? g_soGs[sig] : g_gs[sig], constants, st::directSetGs, needScene ? &scene : nullptr);", "ctx->GSSetShader(g_gs[sig], nullptr, 0); const auto begun = g_binding.begin(ctx, twin ? g_soGs[sig] : g_gs[sig], constants, st::directSetGs, needScene ? &scene : nullptr);")),
           "control: a raw geometry-stage set outside the binding trips the pin");
     check(!wiredModule(replaced(module, "\"fix.srv_turret_hud_gap\", 0, 0, 200", "\"fix.srv_turret_hud_gap\", 96, 0, 200")), "control: a drifted default of the gap trips the pin");
     check(!wiredModule(replaced(module, "\"fix.srv_turret_panels_back\", 120, 0, 200", "\"fix.srv_turret_panels_back\", 110, 0, 200")), "control: a drifted default of the panels' push trips the pin");
@@ -328,8 +350,13 @@ static void wiringCases() {
     check(!wiredModule(replaced(module, "g_anchor.step(headAt, on, backCm, forwardCm, radarForwardCm)", "g_anchor.step(headAt, on, backCm, backCm, radarForwardCm)")), "control: an anchor that does not see the HUD-forward key trips the pin");
     check(!wiredModule(replaced(module, "g_anchor.step(headAt, on, backCm, forwardCm, radarForwardCm)", "g_anchor.step(headAt, on, backCm, forwardCm, forwardCm)")), "control: an anchor that does not see the radar-forward key trips the pin");
     check(!wiredModule(replaced(module, "\"fix.srv_turret_radar_forward\", 70, 0, 150", "\"fix.srv_turret_radar_forward\", 60, 0, 150")), "control: a drifted default of the radar-forward key trips the pin");
+    check(!wiredModule(replaced(module, "cfg.getString(\"fix.srv_turret_hud_depth\", \"game\")", "cfg.getString(\"fix.srv_turret_hud_depth\", \"real\")")), "control: a drifted default of the depth key trips the pin");
+    check(!wiredModule(replaced(module, "out = st::withDepth(out, static_cast<st::DepthMode>(g_depthMode.load(std::memory_order_relaxed)));", "")), "control: constants that never get the depth key's mode trip the pin");
+    check(!wiredModule(replaced(module, "const bool needScene = sig == st::kSceneSignature;", "const bool needScene = false;")), "control: the Scorpion hologram's draw without the vertex constants trips the pin");
+    check(!wiredModule(replaced(module, "if (needScene && !st::readGameCb(ctx, st::kGameCbSlot, scene)) {", "if (false) {")), "control: the vertex constants never read trip the pin");
+    check(!wiredModule(replaced(module, ", st::directSetGs, needScene ? &scene : nullptr)", ")")), "control: the vertex constants read but never bound trip the pin");
     check(!wiredModule(replaced(module, "\"fix.srv_turret_radar_forward\", 70, 0, 150", "\"fix.srv_turret_radar_forward\", 70, 0, 100")), "control: a drifted range of the radar-forward key trips the pin");
-    check(!wiredModule(replaced(module, "st::forwardCmOf(group, g_forwardCm.load(std::memory_order_relaxed), g_radarForwardCm.load(std::memory_order_relaxed)), out);", "g_forwardCm.load(std::memory_order_relaxed), out);")),
+    check(!wiredModule(replaced(module, "st::forwardCmOf(group, g_forwardCm.load(std::memory_order_relaxed), g_radarForwardCm.load(std::memory_order_relaxed)), out))", "g_forwardCm.load(std::memory_order_relaxed), out))")),
           "control: the radar group made to use the HUD-forward distance (the thin sliver) trips the pin");
     check(!wiredModule(replaced(module, "if (!drawEyeFrame(eye, frame)) {", "if (!readEye(eye, frame)) {")), "control: a draw that uses the tick's frames (a frame old) trips the pin");
     check(!wiredModule(replaced(module, "const uint64_t seq = nativeTemporalFrameSequence();", "const uint64_t seq = g_tickSeq.load(std::memory_order_acquire);")),
@@ -363,13 +390,19 @@ static void wiringCases() {
     check(!wiredLatch(replaced(journal, "\"srv turret: the vehicle is %s (event %s)\"", "\"srv turret: the vehicle changed\""), journalH), "control: a change said without the event trips the pin");
     check(!wiredLatch(journal, replaced(journalH, "bool journalSrvScorpion();", "")), "control: no accessor declared trips the pin");
     check(wiredInstrument(vscreen, module), "the GPU instrument: issues counted at the game's issue and the re-issues; the queries begin after the bind and end before the restore; read once a frame; the log lines");
-    check(!wiredInstrument(replaced(vscreen, "    srvTurretHudCountIssue();   // issue 140's GPU instrument: a re-issue", "    // issue 140's GPU instrument: a re-issue"), module), "control: a re-issue that is not counted trips the pin");
-    check(!wiredInstrument(replaced(vscreen, "        srvTurretHudCountIssue();   // issue 140's GPU instrument: the game's own issue", "        // issue 140's GPU instrument: the game's own issue"), module), "control: a thunk that does not count the game's own issue trips the pin");
-    check(!wiredInstrument(replaced(vscreen, "        const bool issued = draw(altered);\n", "        const bool issued = draw(altered);\n        srvTurretHudCountIssue();\n"), module),
+    check(!wiredInstrument(replaced(vscreen, "    srvTurretHudCountIssue(self);   // issue 140's GPU instrument: a re-issue", "    // issue 140's GPU instrument: a re-issue"), module), "control: a re-issue that is not counted trips the pin");
+    check(!wiredInstrument(replaced(vscreen, "        srvTurretHudCountIssue(self);   // issue 140's GPU instrument: the game's own issue", "        // issue 140's GPU instrument: the game's own issue"), module), "control: a thunk that does not count the game's own issue trips the pin");
+    check(!wiredInstrument(replaced(vscreen, "        const bool issued = draw(altered);\n", "        const bool issued = draw(altered);\n        srvTurretHudCountIssue(self);\n"), module),
           "control: a count inside observedDraw (whose text other rigs pin) trips the pin");
     check(!wiredInstrument(vscreen, replaced(module, "probeEnd(ctx);   // the queries end", "// the queries end")), "control: queries that never end trip the pin");
     check(!wiredInstrument(vscreen, replaced(module, "kProbeGiveUpFrames = 8,", "kProbeGiveUpFrames = 80,")), "control: a readback that never gives up trips the pin");
     check(!wiredInstrument(vscreen, replaceAll(module, "D3D11_ASYNC_GETDATA_DONOTFLUSH", "0")), "control: a readback that flushes trips the pin");
+    check(!wiredInstrument(vscreen, replaced(module, "ctx->Begin(p.occlusion);", "")), "control: the disc's occlusion query that never begins trips the pin");
+    check(!wiredInstrument(vscreen, replaced(module, "if (p.discArmed) ctx->End(p.occlusion);", "")), "control: the disc's occlusion query that never ends trips the pin");
+    check(!wiredInstrument(vscreen, replaced(module, "kDiscAlphaSlot = 2, kDiscAlphaRow = 11, kDiscIntensitySlot = 1, kDiscIntensityRow = 90", "kDiscAlphaSlot = 2, kDiscAlphaRow = 12, kDiscIntensitySlot = 1, kDiscIntensityRow = 90")),
+          "control: a register other than cb2[11] trips the pin");
+    check(!wiredInstrument(vscreen, replaced(module, "if (!g_stateNoted[family]) noteBegin(ctx, family, eye);", "")), "control: a family's first scope that never says its state trips the pin");
+    check(!wiredInstrument(vscreen, replaced(module, "if (family == static_cast<int>(kDiscFamily)) probeReadDisc(ctx, eye);", "")), "control: the disc's results never read trip the pin");
     check(wiredAccessors(journal, temporal, journalH), "journal_watch and native_temporal: the turret bit and the eye separation accessors");
     check(!wiredAccessors(replaced(journal, "srv_turret::turretViewFromFlags(peek(g_v.flags))", "false"), temporal, journalH), "control: an accessor that answers false trips the pin");
     check(!wiredAccessors(journal, replaced(temporal, "g_frameSequence.store(f->sequence,std::memory_order_release);", ""), journalH), "control: a frame sequence that is never published trips the pin");
@@ -378,11 +411,14 @@ static void wiringCases() {
           "control: a frame sequence published before the shift is copied (a reader would see a half-built frame) trips the pin");
     check(!wiredAccessors(journal, replaced(temporal, "g_recommended.store(0,std::memory_order_release);g_frameSequence.store(0,std::memory_order_release);", "g_recommended.store(0,std::memory_order_release);"), journalH),
           "control: a frame sequence that survives an invalidate trips the pin");
-    check(wiredKeys(ini, flatKeys), "edvr.ini: all six keys in [fix] with their menu rows and shipped defaults; the flat profile's allow-list names none");
+    check(wiredKeys(ini, flatKeys), "edvr.ini: all seven keys in [fix] with their menu rows and shipped defaults; the flat profile's allow-list names none");
     check(!wiredKeys(replaced(ini, "\nsrv_turret_hud_gap = 0\n", "\nsrv_turret_hud_gap = 96\n"), flatKeys), "control: a drifted shipped default of the gap trips the pin");
     check(!wiredKeys(replaced(ini, "\nsrv_turret_panels_back = 120\n", "\nsrv_turret_panels_back = 110\n"), flatKeys), "control: a drifted shipped default of the panels' push trips the pin");
     check(!wiredKeys(replaced(ini, "\nsrv_turret_hud_forward = 70\n", "\nsrv_turret_hud_forward = 0\n"), flatKeys), "control: a drifted shipped default of the HUD-forward key trips the pin");
     check(!wiredKeys(replaced(ini, "\nsrv_turret_radar_forward = 70\n", "\nsrv_turret_radar_forward = 0\n"), flatKeys), "control: a drifted shipped default of the radar-forward key trips the pin");
+    check(!wiredKeys(replaced(ini, "\nsrv_turret_hud_depth = game\n", "\nsrv_turret_hud_depth = real\n"), flatKeys), "control: a drifted shipped default of the depth key trips the pin");
+    check(!wiredKeys(replaced(ini, "# ui: SRV turret HUD depth | choices game, real, front", "# ui: SRV turret HUD depth | choices game, real"), flatKeys), "control: a drifted menu row of the depth key trips the pin");
+    check(!wiredKeys(ini, flatKeys + "\nsrv_turret_hud_depth\n"), "control: the depth key on the flat allow-list trips the pin");
     check(!wiredKeys(replaced(ini, "# ui: SRV turret radar forward | range 0..150 | step 5", "# ui: SRV turret radar forward | range 0..150 | step 10"), flatKeys), "control: a drifted menu row of the radar-forward key trips the pin");
     check(!wiredKeys(ini, flatKeys + "\nsrv_turret_radar_forward\n"), "control: the radar-forward key on the flat allow-list trips the pin");
     check(!wiredKeys(replaced(ini, "\nsrv_turret_camera_back = 0\n", "\nsrv_turret_camera_back = 60\n"), flatKeys), "control: the camera key shipped at 60 trips the pin");

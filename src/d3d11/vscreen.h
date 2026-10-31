@@ -171,6 +171,8 @@ void vScreenPSSetShaderResourcesRaw(ID3D11DeviceContext* ctx, uint32_t startSlot
 // own from (a depth- or stencil-tested UI draw): past the copy hook, which
 // would report the write to the motion paths.
 void vScreenCopyResourceRaw(ID3D11DeviceContext* ctx, ID3D11Resource* dst, ID3D11Resource* src);
+// A buffer region copy past the hooks (the SRV turret instrument's staging copy of a constant register): src's `box` (bytes, for a buffer) to dst at byte offset dstX. No-op on a null argument.
+void vScreenCopySubresourceRegionRaw(ID3D11DeviceContext* ctx, ID3D11Resource* dst, uint32_t dstX, ID3D11Resource* src, const D3D11_BOX* box);
 
 // Installs the context hooks using the mechanism the caller decided for this
 // device -- shared with the exposure hooks so the two never split modes on

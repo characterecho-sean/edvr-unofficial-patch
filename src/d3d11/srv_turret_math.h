@@ -33,7 +33,7 @@
 // about a fixed anchor (see THE MOVE below). And at the game's own camera the whole turret HUD lies about 0.7 m too far back for the head (the radar behind it), so the whole HUD is
 // first translated forward (fix.srv_turret_hud_forward), which is the old camera move applied to the HUD only: the world keeps the game's camera.
 //
-// THE SIX TEMPORARY KEYS (all live, all VR only, 0 = the game's own):
+// THE SEVEN TEMPORARY KEYS (all live, all VR only, 0 = the game's own; the last is a text switch):
 //   fix.srv_turret_camera_back  centimetres, 0..150, default 0: the camera moves back in the turret view, over the turret's axis (the stock camera is the plan; the HUD-forward key
 //                               replaces this). Part 1: published as the seated z of the eye alignment (alignTick), the single publisher of that alignment, so its serials stay coherent.
 //   fix.srv_turret_hud_forward  centimetres, 0..150, default 70: every vertex of the panels group (Group::kPanels: the two hologram families) moves forward along the turret by this much
@@ -46,6 +46,14 @@
 //   fix.srv_turret_radar_back   centimetres, 0..200, default 0: the same for the radar (Group::kRadar), which the game lays on the turret deck right under the player.
 //   fix.srv_turret_hud_gap      centimetres, 0..200, default 0: the first build's forward pull, kept for comparison. For a family whose group has a push above 0 the push is
 //                               used and this is not; for a group with no push this brings the vertices deeper than gap + kWindowNearM (up to kWindowFarM) forward by it.
+//   fix.srv_turret_hud_depth    game | real | front, default game: how the depth of a MOVED vertex is written (DepthMode below). A test switch for the radar disc (DF3503CD), which the
+//                               moved HUD's depth may hide.
+//
+// THE TARGET HOLOGRAM (vs 5559BD94, the Scorpion's own hologram, signature H): its vertex shader writes __USER_VERTEX_M_LIGHTINGPOSITION, the vertex's camera-relative WORLD position
+// (cb0[9..11] times the position), and its pixel shader uses it twice (a depth test against the scene and a view ray divided by the fragment's view depth). The geometry shader moves
+// SV_Position but not that interpolant, so a hologram the game put beside or behind the eye had a view depth near 0 or negative, the ray blew up and the hologram vanished. cb1[277..279] of
+// the same draw's vertex constants are the camera's RIGHT, UP and FORWARD unit vectors in world axes (they match the projection rows), so the shader adds the eye-space displacement of the
+// move (right * dX + up * dY + forward * dZ) to the interpolant. The module binds the draw's own VS constant buffer at slot 1 to GS slot 1 for that signature (srv_turret_hud_binding.h).
 //
 // KNOWN GAP. With Elite's "Disable GUI effects" OFF the holo panel family is vs 81216C77F90DEDD6 (ps A2965EC2931A39C8), a different output signature (SV_Position at o5).
 // There is no bytecode for it in the dumps, so it is not covered yet.
@@ -64,6 +72,22 @@ inline constexpr int kForwardDefaultCm = 70, kForwardMaxCm = 150;   // fix.srv_t
 inline constexpr int kRadarForwardDefaultCm = 70, kRadarForwardMaxCm = 150;   // fix.srv_turret_radar_forward
 inline constexpr int kGapDefaultCm = 0, kGapMaxCm = 200;
 inline constexpr int kPanelsDefaultCm = 120, kRadarDefaultCm = 0, kPushMaxCm = 200;   // fix.srv_turret_panels_back and fix.srv_turret_radar_back
+
+// How the depth of a moved vertex is written (fix.srv_turret_hud_depth). game: the vertex's own NDC z where it is a valid reversed-Z depth, else kFallbackNdcZ (the first builds' rule).
+// real: the depth the moved position itself has, ndcZ = clamp(c.z / q.z, 0, kFallbackNdcZ) with the vertex's own clip z (Elite writes the constant 0.025, so this is 0.025 / depth).
+// front: kFallbackNdcZ for every moved vertex.
+enum class DepthMode : uint8_t { kGame = 0, kReal = 1, kFront = 2 };
+inline const char* depthModeName(DepthMode m) { return m == DepthMode::kReal ? "real" : m == DepthMode::kFront ? "front" : "game"; }
+// The key's text; anything else is the default (the settings line says which it took).
+inline DepthMode depthModeOf(const char* text) {
+    if (text && !std::strcmp(text, "real")) return DepthMode::kReal;
+    if (text && !std::strcmp(text, "front")) return DepthMode::kFront;
+    return DepthMode::kGame;
+}
+// Signature H's geometry shader reads the draw's vertex constants at GS slot 1: the draw's own VS slot 1, rows 277 to 279 the camera's right, up and forward in world axes.
+inline constexpr uint32_t kGameCbSlot = 1;
+inline constexpr uint32_t kSceneRightRow = 277, kSceneUpRow = 278, kSceneForwardRow = 279, kSceneRows = 280;
+inline constexpr uint32_t kSceneSignature = 7;   // kSignatures[7] = 5559BD94, the Scorpion's hologram
 
 // ---- Part 1: when, and which way ------------------------------------------------------------------------------------------------------------------------------
 // THE SCORPION ONLY. Status.json reports the turret view bit in the Scarab (SRV type testbuggy) as well, and the Scarab's turret view was fine before this change, so both parts
@@ -212,12 +236,12 @@ inline constexpr float kPlaneEpsM = 1.0e-6f;  // a vertex on the eye plane (clip
 inline constexpr float kAnchorLimitM = 2.0f;  // the constants accept an anchor, a translation and a gap up to this far (the keys' 200 cm, 150 cm)
 
 // The geometry shader's constant buffer (GS slot 0, which the game never binds): four registers.
-//   [0] gap, dMin, dMax, (pad)       the move: metres nearer (negative: deeper), and the window of anchor distances it applies to
+//   [0] gap, dMin, dMax, depth       the move: metres nearer (negative: deeper), and the window of anchor distances it applies to; the DepthMode (0 game, 1 real, 2 front)
 //   [1] l, r, dn, up                 the eye's projection tangents as the game projects (left and down negative; the jitter shift is added)
 //   [2] ax, ay, az, (pad)            the anchor in the eye's space: X right, Y up, Z forward (= clip w)
 //   [3] tx, ty, tz, (pad)            the translation (HUD forward) in the same axes
 struct TurretParams {
-    float gap = 0.0f, dMin = 0.0f, dMax = 0.0f, pad0 = 0.0f;
+    float gap = 0.0f, dMin = 0.0f, dMax = 0.0f, depth = 0.0f;   // depth: the DepthMode as 0, 1 or 2
     float l = 0.0f, r = 0.0f, dn = 0.0f, up = 0.0f;
     float ax = 0.0f, ay = 0.0f, az = 0.0f, pad1 = 0.0f;
     float tx = 0.0f, ty = 0.0f, tz = 0.0f, pad2 = 0.0f;
@@ -233,6 +257,11 @@ struct EyeFrame {
     float tRadar[3] = {0.0f, 0.0f, 0.0f};   // the radar group's (fix.srv_turret_radar_forward)
 };
 
+// The constants with the depth mode written (the module applies the key to whatever paramsForGroup made).
+inline TurretParams withDepth(TurretParams p, DepthMode m) {
+    p.depth = static_cast<float>(static_cast<int>(m));
+    return p;
+}
 inline TurretParams makeParams(const EyeFrame& e, float gapM, float dMin, float dMax, Group group = Group::kPanels) {
     const float* t = group == Group::kRadar ? e.tRadar : e.t;
     TurretParams p;
@@ -279,11 +308,12 @@ inline int forwardCmOf(Group g, int hudForwardCm, int radarForwardCm) { return g
 inline int pushCmOf(Group g, int panelsCm, int radarCm) { return g == Group::kPanels ? panelsCm : radarCm; }
 
 // The constants a shader may be given (the binding's validity test, written here so the rig can run it): all finite; |gap| <= 2 m; a window above the gap and above 0 (dMax > dMin > max(gap, 0)),
-// so the divisor d - gap is positive; r > l and up > dn; the anchor and the translation within 2 m; and a move that does something (a gap or a translation).
+// so the divisor d - gap is positive; r > l and up > dn; the anchor and the translation within 2 m; the depth mode one of 0, 1 and 2; and a move that does something (a gap or a translation).
 inline bool paramsUsable(const TurretParams& p) {
-    const float all[] = {p.gap, p.dMin, p.dMax, p.l, p.r, p.dn, p.up, p.ax, p.ay, p.az, p.tx, p.ty, p.tz};
+    const float all[] = {p.gap, p.dMin, p.dMax, p.depth, p.l, p.r, p.dn, p.up, p.ax, p.ay, p.az, p.tx, p.ty, p.tz};
     for (float f : all)
         if (!std::isfinite(f)) return false;
+    if (p.depth != 0.0f && p.depth != 1.0f && p.depth != 2.0f) return false;
     if (!(std::fabs(p.gap) <= kAnchorLimitM)) return false;
     if (!(p.dMin > p.gap) || !(p.dMin > 0.0f) || !(p.dMax > p.dMin)) return false;
     if (!(p.r > p.l) || !(p.up > p.dn)) return false;
@@ -302,10 +332,12 @@ inline bool ndcDepthValid(T z, T w) {
 
 // The move on the CPU: the shader's rule written again for the rig and for the instrument (T is float or double). `in` is the vertex's clip position {x, y, z, w}; `out` receives the clip
 // position after the move (the same as `in` when the vertex is left alone); the return is whether it moved. before and after (when given) are the anchor distance of the vertex as the
-// game made it and of the moved one; zfixed (when given) says the moved vertex took the depth fallback.
+// game made it and of the moved one; zfixed (when given) says the moved vertex took the depth fallback; displacement (when given) receives Q - P, the eye-space move the vertex made (X right, Y
+// up, Z forward; zeros for a vertex left alone), which signature H applies to the lighting position.
 template <class T>
-inline bool anchoredMove(const TurretParams& p, const T in[4], T out[4], T* before = nullptr, T* after = nullptr, bool* zfixed = nullptr) {
+inline bool anchoredMove(const TurretParams& p, const T in[4], T out[4], T* before = nullptr, T* after = nullptr, bool* zfixed = nullptr, T* displacement = nullptr) {
     for (int i = 0; i < 4; ++i) out[i] = in[i];
+    if (displacement) displacement[0] = displacement[1] = displacement[2] = T(0);
     const T w = in[3];
     if (!(std::fabs(w) >= T(kPlaneEpsM))) return false;
     const T l = p.l, r = p.r, dn = p.dn, up = p.up;
@@ -326,9 +358,26 @@ inline bool anchoredMove(const TurretParams& p, const T in[4], T out[4], T* befo
     }
     const T w2 = Q[2];   // any Q.z: the reprojection is linear in Q, and the rasterizer clips a corner that ends behind the eye
     const bool depthOk = ndcDepthValid<T>(in[2], w);
+    T ndcZ = depthOk ? in[2] / w : T(kFallbackNdcZ);
+    if (p.depth > 1.5f) {
+        ndcZ = T(kFallbackNdcZ);   // front
+    } else if (p.depth > 0.5f) {   // real: the moved position's own depth, with the vertex's own clip z
+        if (!(std::fabs(w2) > T(kPlaneEpsM))) {
+            ndcZ = T(kFallbackNdcZ);
+        } else {
+            ndcZ = in[2] / w2;
+            if (ndcZ < T(0)) ndcZ = T(0);
+            if (ndcZ > T(kFallbackNdcZ)) ndcZ = T(kFallbackNdcZ);
+        }
+    }
+    if (displacement) {
+        displacement[0] = Q[0] - P[0];
+        displacement[1] = Q[1] - P[1];
+        displacement[2] = Q[2] - P[2];
+    }
     out[0] = (T(2) * Q[0] - w2 * (r + l)) / (r - l);
     out[1] = (T(2) * Q[1] - w2 * (up + dn)) / (up - dn);
-    out[2] = (depthOk ? in[2] / w : T(kFallbackNdcZ)) * w2;
+    out[2] = ndcZ * w2;
     out[3] = w2;
     if (zfixed) *zfixed = !depthOk;
     if (before) *before = std::sqrt((P[0] - T(p.ax)) * (P[0] - T(p.ax)) + (P[1] - T(p.ay)) * (P[1] - T(p.ay)) + (P[2] - T(p.az)) * (P[2] - T(p.az)));
