@@ -14264,7 +14264,7 @@ def _hj_f176_pitch_held(rows, ctx):
 # F177: the aiming choice at start (src/d3d11/menu_aim_prompt.h): the VR menu opens itself once a session on a page that asks for look to aim or mouse aim. Its lines print on every log, in the
 # menu and not on foot: shown, then picked and saved (or write failed), or later; or one line saying why it was not shown.
 H177_LABEL = "aim choice prompt (F177)"
-H177_SHOWN = r"aim choice prompt \(F177\): shown(?: (?P<frame>during the splash|after the first scene), (?P<secs>[\d.]+) s after the game started)?\s*$"   # F188 added the frame and the seconds; a log from F177 has neither
+H177_SHOWN = r"aim choice prompt \(F177\): shown(?: (?P<frame>during the splash|after the first scene|after the switch to VR|at the first menu open), (?P<secs>[\d.]+) s after the game started)?\s*$"   # F188 added the frame and the seconds (a log from F177 has neither); F190 added after the switch to VR and at the first menu open
 H177_PICKED = r"aim choice prompt \(F177\): picked (?P<choice>mouse aim|look to aim)\s*$"
 H177_LATER = r"aim choice prompt \(F177\): later\s*$"
 H177_SAVED = r"aim choice prompt \(F177\): saved (?P<k1>\S+) = (?P<v1>\S+) and (?P<k2>\S+) = (?P<v2>\S+) to (?P<file>.+?)\s*$"
@@ -14274,7 +14274,8 @@ H177_WANT = {"mouse aim": "off", "look to aim": "on"}   # what each pick must ha
 
 
 def _hj_f177_aim_choice(rows, ctx):
-    """F177: the aiming choice at start. The VR menu opens itself once a session, after the first rendered scene, on a page that asks for look to aim or mouse aim. A pick writes the choice
+    """F177: the aiming choice at start. The VR menu opens itself once a session (F190: 2 s after the first eye frame, at game load or after 3D is turned on in a session that began flat; or at the
+    player's first opening of the menu) on a page that asks for look to aim or mouse aim. A pick writes the choice
     and the hide of the page in one job; the saved line says the write landed with both pairs, the write failed line that it did not (the settings stay as they were and the page asks again at
     the next start). NEVER APPLIED when a pick has a write failed line, or when the saved pairs are not what the pick says (look to aim on for look to aim, off for mouse aim, and the page
     hidden); PARTIAL when a pick has neither line (the writer had not reported); OK when the page was shown and answered with a saved pick, with Ask me next time or Esc (nothing written), or
@@ -20214,6 +20215,13 @@ def self_test_health():
               has=["shown during the splash, 5.8 s after the game started; picked look to aim; saved fix.native_on_foot_look_to_aim = on and menu.aim_choice_prompt = off to edvr.ini"], lacks=["UNPARSED", "NEVER"])
         check("F188 aim choice: shown after the first scene says so, with the seconds", [a177_shown("after the first scene", 28.0), a177_picked("mouse aim"), a177_saved(v1="off")], 0, [("OK", H177)],
               has=["shown after the first scene, 28.0 s after the game started; picked mouse aim"], lacks=["UNPARSED", "NEVER"])
+        check("F190 aim choice: shown after the switch to VR says so, with the seconds", [a177_shown("after the switch to VR", 61.3), a177_picked(), a177_saved()], 0, [("OK", H177)],
+              has=["shown after the switch to VR, 61.3 s after the game started; picked look to aim"], lacks=["UNPARSED", "NEVER"])
+        check("F190 aim choice: shown at the first menu open says so, with the seconds", [a177_shown("at the first menu open", 12.0), a177_picked("mouse aim"), a177_saved(v1="off")], 0, [("OK", H177)],
+              has=["shown at the first menu open, 12.0 s after the game started; picked mouse aim"], lacks=["UNPARSED", "NEVER"])
+        check("F190 aim choice: a flat start's not shown line beside a shown after the switch is read as shown (the page was shown)",
+              [R177("aim choice prompt (F177): not shown: %s", "the flat profile has no such page"), a177_shown("after the switch to VR", 30.0)], 0, [("OK", H177)],
+              has=["shown after the switch to VR, 30.0 s after the game started"], lacks=["UNPARSED"])
         check("F188 aim choice: the F177 build's bare shown line is still read (no frame, no seconds)", ["aim choice prompt (F177): shown", a177_picked(), a177_saved()], 0, [("OK", H177)],
               has=["shown; picked look to aim"], lacks=["UNPARSED", "after the game started"])
         check("F177 aim choice: shown, picked mouse aim and saved off and off is OK", [a177_shown(), a177_picked("mouse aim"), a177_saved(v1="off")], 0, [("OK", H177)],

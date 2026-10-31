@@ -24,4 +24,8 @@ void modeWatchFrameBoundary();
 // The menu's toast poll: true once per commit, with the notice text copied to out.
 bool modeWatchNoticeDue(char* out, size_t size);
 
+// F190: the StereoscopicMode (0 to 6) the watch last read from Settings.xml, or -1 before any read. Any thread. It is the game's own record of the mode it was set to: native on foot
+// takes it when its hook is installed after a live switch to VR, a time the game's setter call for the switch has already passed.
+int modeWatchStereoValue();
+
 }  // namespace edvr

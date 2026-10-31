@@ -35,6 +35,7 @@
 #include "engine_velocity_families.h"   // F44: the pool families' vertex shaders (the eye's world view)
 #include "native_on_foot_hooks.h"   // localAvatarParts, avatarFadeModeRead, avatarCensusTake: the avatar census (F1, F3)
 #include "journal_watch.h"
+#include "mode_watch.h"   // F190: modeWatchStereoValue, the mode a late install takes (the setter call for the switch has passed)
 #include "native_on_foot_core.h"
 #include "native_on_foot_f90.h"   // F90: the weapon readout's size in ADS and the pistol's readout in the weapon's frame (pure parts)
 #include "native_on_foot_f91.h"   // F91: B, the ADS vibration instrument's fields and fit; C, the ADS item gate (pure parts)
@@ -701,9 +702,21 @@ bool prepareRelay(void* trampoline, void*) noexcept {
     return true;
 }
 
+// F190: the install found a profile that is not VR and is still to come. The flat profile never patches the setter, but a live switch to VR (the player turns 3D on in the game) makes the
+// profile VR mid-session, and the state stays NotTried so the frame tick installs on the first VR frame. Said once. Every other way to fail stays final (refuse).
+bool g_installWaited = false;   // frame thread only: installOnce has waited for the VR profile at least once, so a later install is "after the switch"
+// F190: the first setter call after a late install is compared with what the install took (seeded), once, to the log.
+bool g_seedCheckPending = false;   // frame thread only
+bool g_seedAsHmd = false;          // frame thread only
+
 void installOnce() {
     if (!runtimeVrProfile()) {
-        refuse("the flat profile (native on foot is a VR fix; the flat build never patches the setter)");
+        if (!g_installWaited) {
+            g_installWaited = true;
+            Log::get().note("native on foot: waiting for the VR profile (the %s profile never patches the setter); the hook installs on the first frame of the VR profile if 3D is "
+                            "turned on in this session",
+                            runtimeProfileName());
+        }
         return;
     }
     const uintptr_t base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
@@ -759,13 +772,38 @@ void installOnce() {
         refuse(b);
         return;
     }
+    // F190: installed after the switch to the VR profile. The game chose its render mode when 3D was turned on, with this hook not yet in place, and it asks the setter again only when
+    // the mode it wants differs from the one stored (INFERRED from the swap method's ~88 re-requests a second and the gate method's none on foot, F0 and F2): so in a ship or a menu no call may come, and
+    // the gate method's flag (the last forwarded mode was HMD) would never be set. The mode is taken from the game's own record of it, Settings.xml's StereoscopicMode as the mode watch last
+    // read it (the value the switch followed): 3 or 4 is HMD. It is stored before the gate opens, so a real setter call (which replaces it) can never be overwritten by it. The game's
+    // pipeline object (selector) is known only from a setter call, so the mode cannot be read from it here. A launch in the VR profile takes no seed: its first setter call is seen.
+    const bool late = g_installWaited;
+    int seedValue = -1;
+    bool seedHmd = false;
+    if (late) {
+        seedValue = modeWatchStereoValue();
+        seedHmd = seedValue >= 0 && nofoot::isHmdMode(static_cast<uint32_t>(seedValue));
+        g_lastForwardedHmd.store(seedHmd, std::memory_order_relaxed);
+        g_seedCheckPending = true;
+        g_seedAsHmd = seedHmd;
+    }
     g_gate.store(1, std::memory_order_seq_cst);
     g_install = InstallState::Armed;
-    Log::get().note("native on foot: installed -- the render-mode setter at EliteDangerous64.exe+0x%llX (vtable +0x%llX slot 5, build 334925), "
+    char seedText[400] = "";
+    if (late) {
+        if (seedValue < 0)
+            std::snprintf(seedText, sizeof(seedText), "; the game's mode at the switch is unknown (Settings.xml gave no StereoscopicMode), so native stereo on foot waits for the game's next setter call");
+        else
+            std::snprintf(seedText, sizeof(seedText), "; the game chose its render mode before this hook existed, so it is taken from Settings.xml StereoscopicMode=%d (%s) and the game's next "
+                                                      "setter call replaces it",
+                          seedValue, seedHmd ? "HMD: native stereo on foot may engage at once" : "not an HMD mode: native stereo on foot waits for the game's next setter call");
+    }
+    Log::get().note("native on foot: installed%s -- the render-mode setter at EliteDangerous64.exe+0x%llX (vtable +0x%llX slot 5, build 334925), "
                     "stolen=%zu bytes, prologue %zu bytes verified, relay at 0x%llX; every setter call is logged from here, whatever "
-                    "fix.native_on_foot says.",
+                    "fix.native_on_foot says%s.",
+                    late ? " after the switch to the VR profile" : "",
                     static_cast<unsigned long long>(nofoot::kSetterRva), static_cast<unsigned long long>(nofoot::kSetterVtableRva),
-                    g_hook->stolenBytes(), nofoot::kPrologueBytes, static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(g_relay)));
+                    g_hook->stolenBytes(), nofoot::kPrologueBytes, static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(g_relay)), seedText);
 }
 
 // F34: the keys removed in the cleanup. The shipping file carries them at their last values (silently); a value that differs is named once, here.
@@ -1720,6 +1758,13 @@ void drainEvents() {
                         static_cast<unsigned long long>(dropped), kEventRing);
     }
     for (size_t i = 0; i < count; ++i) noteSetterEvent(local[i]);
+    // F190: after a late install, the first setter call tells whether the mode the install took was the game's. One line, once; the call's own line (above) carries the rest.
+    if (count && g_seedCheckPending) {
+        g_seedCheckPending = false;
+        const bool nowHmd = nofoot::isHmdMode(local[0].effective);
+        Log::get().note("native on foot: the first setter call since the install after the switch asked for mode %u (%s); the install had taken %s%s", local[0].incoming,
+                        nowHmd ? "HMD" : "not HMD", g_seedAsHmd ? "HMD" : "not HMD", nowHmd == g_seedAsHmd ? " (it was right)" : " (the call replaces it)");
+    }
     if (g_run.open && g_run.repeats && GetTickCount64() - g_run.windowStartMs >= 5000) emitRepeats();
 }
 
@@ -5221,11 +5266,15 @@ bool installF9Probe(size_t i, const F9ProbeSpec& s, uintptr_t base, size_t* stol
 // Frame thread, once: VR only, behind the identity check. One line per probe, installed or refused.
 void installF9ProbesOnce() {
     if (g_f9Tried) return;
-    g_f9Tried = true;
-    if (!runtimeVrProfile()) {
-        Log::get().note("native on foot probes: not installed (the flat profile)");
+    if (!runtimeVrProfile()) {   // F190: not latched: a live switch to VR installs them on its first frame (the line is said once)
+        static bool said = false;
+        if (!said) {
+            said = true;
+            Log::get().note("native on foot probes: not installed (the flat profile)");
+        }
         return;
     }
+    g_f9Tried = true;
     const uintptr_t base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
     const char* peWhy = nullptr;
     if (!base || !checkIdentity(base, &peWhy)) {
@@ -7652,8 +7701,8 @@ uint64_t __fastcall lookProcHooked(void* comp, float dt) {
 // Installs the load wait and probe A (VR only, identity checked, once). Each refusal is one line; the game is untouched by a refused hook.
 void installF22ProbesOnce() {
     if (g_f22ProbesTried) return;
+    if (!runtimeVrProfile()) return;   // F190: not latched: a live switch to VR installs them on its first frame (silent in flat, as before)
     g_f22ProbesTried = true;
-    if (!runtimeVrProfile()) return;
     const uintptr_t base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
     const char* peWhy = nullptr;
     if (!base || !checkIdentity(base, &peWhy)) {
@@ -7698,11 +7747,15 @@ void installF22ProbesOnce() {
 // measured, so the controller would write input it could not compensate. The update hook alone writes nothing while not engaged.
 void installLookHooksOnce() {
     if (g_f22LookTried) return;
-    g_f22LookTried = true;
-    if (!runtimeVrProfile()) {
-        Log::get().note("native on foot look to aim: not installed (the flat profile)");
+    if (!runtimeVrProfile()) {   // F190: not latched (g_adsAimKey reads its default, on, in flat, so the caller asks here in flat too): a live switch to VR installs them on its first frame
+        static bool said = false;
+        if (!said) {
+            said = true;
+            Log::get().note("native on foot look to aim: not installed (the flat profile)");
+        }
         return;
     }
+    g_f22LookTried = true;
     const uintptr_t base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
     const char* peWhy = nullptr;
     if (!base || !checkIdentity(base, &peWhy)) {
@@ -15808,8 +15861,8 @@ void alignTick(uint64_t now) noexcept {   // F66b: dt from QPC inside (g_alignCl
 void installBodyShiftOnce() {
     static bool tried = false;
     if (tried) return;
+    if (!runtimeVrProfile()) return;   // F190: not latched: a live switch to VR installs it on its first frame (silent in flat, as before)
     tried = true;
-    if (!runtimeVrProfile()) return;
     const uintptr_t base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
     const char* peWhy = nullptr;
     if (!base || !checkIdentity(base, &peWhy)) {
@@ -16062,8 +16115,8 @@ uint64_t __fastcall recSubmitHooked(uint64_t a1, uint64_t a2, uint64_t a3, uint6
 // Frame thread, once (VR): both prologues verified against the loaded image; a mismatch refuses that hook with a line, the game untouched.
 void installOnce() noexcept {
     if (g_tried) return;
+    if (!runtimeVrProfile()) return;   // F190: not latched: a live switch to VR installs the weapon hooks on its first frame (silent in flat, as before)
     g_tried = true;
-    if (!runtimeVrProfile()) return;
     const uintptr_t base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
     const char* peWhy = nullptr;
     if (!base || !checkIdentity(base, &peWhy)) {
@@ -22953,8 +23006,8 @@ uint64_t __fastcall pfzAnimateHooked(uint64_t a1, uint64_t a2, uint64_t a3, uint
 // Frame thread, once (VR): the prologue bytes verified against the loaded image; a mismatch refuses with a line and installs nothing.
 void pfzInstallOnce() {
     if (g_pfzTried) return;
+    if (!runtimeVrProfile()) return;   // F190: not latched: a live switch to VR installs the hook when it is wanted (silent in flat, as before)
     g_pfzTried = true;
-    if (!runtimeVrProfile()) return;
     const uintptr_t base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
     const char* peWhy = nullptr;
     if (!base || !checkIdentity(base, &peWhy)) {
@@ -24899,8 +24952,8 @@ void f138Line(uint64_t now) noexcept {
 
 void installEyeProbeOnce() {
     if (g_eyeTried) return;
+    if (!runtimeVrProfile()) return;   // F190: not latched: a live switch to VR installs it on its first frame (silent in flat, as before)
     g_eyeTried = true;
-    if (!runtimeVrProfile()) return;
     const uintptr_t base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
     const char* peWhy = nullptr;
     if (!base || !checkIdentity(base, &peWhy)) {
@@ -25229,11 +25282,15 @@ uint64_t __fastcall f141AimHooked(void* act) noexcept {
 void installF141Once() {
     if (g_f141Tried) return;
     if (!g_keyOn.load(std::memory_order_relaxed)) return;   // F147: with fix.native_on_foot off nothing goes into the game (it is tried again when the key reads on)
-    g_f141Tried = true;
-    if (!runtimeVrProfile()) {
-        Log::get().note("native on foot ADS sight point (F141): not installed (the flat profile)");
+    if (!runtimeVrProfile()) {   // F190: not latched (g_keyOn reads its default, on, in flat): a live switch to VR installs the hooks on its first frame
+        static bool said = false;
+        if (!said) {
+            said = true;
+            Log::get().note("native on foot ADS sight point (F141): not installed (the flat profile)");
+        }
         return;
     }
+    g_f141Tried = true;
     const uintptr_t base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
     const char* peWhy = nullptr;
     if (!base || !checkIdentity(base, &peWhy)) {
@@ -25716,8 +25773,8 @@ void f141Tick(uint64_t now) noexcept {
 
 void installF14ProbesOnce() {
     if (g_f14Tried) return;
+    if (!runtimeVrProfile()) return;   // F190: not latched: a live switch to VR installs it on its first frame (silent in flat, as before)
     g_f14Tried = true;
-    if (!runtimeVrProfile()) return;
     const uintptr_t base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
     const char* peWhy = nullptr;
     if (!base || !checkIdentity(base, &peWhy)) {
@@ -27219,11 +27276,15 @@ void modeRefuse(const char* why) {
 
 // Frame thread, once, when the key first reads third. Identity, the vtable slot and both prologues are checked before anything is patched.
 void installModeHooks() {
-    g_modeInstallTried = true;
-    if (!runtimeVrProfile()) {
-        modeRefuse("the flat profile (the model mode is a VR fix)");
+    if (!runtimeVrProfile()) {   // F190: not latched (the key reads game in flat, so this is not reached there today; a live switch to VR installs the hooks when the key reads third)
+        static bool said = false;
+        if (!said) {
+            said = true;
+            modeRefuse("the flat profile (the model mode is a VR fix)");
+        }
         return;
     }
+    g_modeInstallTried = true;
     const uintptr_t base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
     if (!base) {
         modeRefuse("the game module could not be resolved");
