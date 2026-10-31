@@ -10425,8 +10425,9 @@ H_SRV_TURRET_GS = (r"srv turret hud: precompiled geometry shader (?P<name>.+?) (
 # Nine hologram families (srv_turret_math.h kFamilies: 1989E6D3, 2CECEC30, DF3503CD, 44DDCDEB, 9B34C331, 9611A454, B932058F, 5559BD94.EA02FAC2, 5559BD94.E95634B0: the first eight
 # hex digits of the vertex shader, and for the two that share one the pixel shader's as well) in eight signatures (kSignatures, named by the first family's vertex shader), each signature
 # with its own geometry shader and twin; the first-draw, stats, capture and instrument lines name the family. The flight HUD's vectors (B7790CBF) are no longer in the pass.
-# the anchor the move is made about (srv_turret.cpp cacheGeometry): the head's seated position, latched when the view comes on, a camera key changes or the head jumps (a recentre)
-H_SRV_TURRET_ANCHOR = r"srv turret anchor: latched at (?P<x>-?[\d.]+),(?P<y>-?[\d.]+),(?P<z>-?[\d.]+) m seated \((?P<why>view on|camera back changed|HUD forward changed|recentre)\)$"
+# the anchor the move is made about (srv_turret.cpp cacheGeometry): the head's seated position, latched when the view comes on, a camera key changes, the head jumps (a recentre) or has
+# stayed more than 35 cm from it for 90 frames ("head away": the safety net, e.g. after a frozen pose)
+H_SRV_TURRET_ANCHOR = r"srv turret anchor: latched at (?P<x>-?[\d.]+),(?P<y>-?[\d.]+),(?P<z>-?[\d.]+) m seated \((?P<why>view on|camera back changed|HUD forward changed|recentre|head away)\)$"
 H_SRV_TURRET_FIRST = r"srv turret hud: first draw of family (?P<family>\S+) through the shader \(frame (?P<frame>\d+), eye (?P<eye>-?\d+)\)"
 H_SRV_TURRET_REFUSED = r"srv turret hud: refused a draw \((?P<reason>no-eye|game-gs|topology|not-ready|no-geometry)\) -- the draw went on as the game made it\."
 H_SRV_TURRET_UNRESTORED = r"srv turret hud: the game's geometry stage could not be put back after an issue;"
@@ -15533,7 +15534,7 @@ def _hj_srv_turret(rows, ctx):
     fix.srv_turret_hud_gap), two halves judged on the keys in force (the last settings line): the camera half is applied by a 'camera: back X m published' line; the HUD half by the first-draw line or a 10 s line with draws bound.
     The HUD half is on when any of HUD forward, the panels' push-back, the radar's push-back and the gap is above 0 (a settings line from before them has fewer keys; with no settings
     line the last 10 s line's per-group windows say whether a group ran). The move is about an anchor, latched at the head's seated position (each latch has an 'anchor' line, with its
-    reason: the view on, a camera key changed, a recentre): the detail says how often and where last, and the 10 s line's head offset and translation. No line but settings: IDLE (the turret view was not entered). A geometry shader that could not be made is NEVER
+    reason: the view on, a camera key changed, a recentre): the detail says how often (and how often by 'head away', the safety net that takes it again when the head has been 35 cm from it for 90 frames) and where last, and the 10 s line's head offset and translation. No line but settings: IDLE (the turret view was not entered). A geometry shader that could not be made is NEVER
     APPLIED whatever else the log says. A key above 0 whose half shows nothing is NEVER APPLIED once the log proves the turret view was on: for the camera, at least one 'on' edge; for the
     HUD, a 10 s line with nothing bound, or the view on for SRV_TURRET_HUD_MIN_SECS or more with no 10 s line and no first draw (a shorter stay has no 10 s line due yet and is IDLE). The
     HUD keys all at 0 are that half off by key, IDLE, and so is the camera key at 0. PARTIAL: applied, but under SRV_TURRET_BOUND_MIN of the HUD draws bound, or draws refused for the
@@ -15752,7 +15753,9 @@ def _hj_srv_turret(rows, ctx):
         text += "; geometry shader " + ", ".join("%s created in %s ms" % (r["name"], r["ms"]) for r in gss)
     anchors = rows.get("anchor", [])
     if anchors:
-        text += "; anchor latched %d time(s), last at %s,%s,%s m seated (%s)" % (len(anchors), anchors[-1]["x"], anchors[-1]["y"], anchors[-1]["z"], anchors[-1]["why"])
+        away = sum(1 for r in anchors if r["why"] == "head away")   # the safety net took the anchor again: it had been 35 cm or more from the head for a second
+        text += "; anchor latched %d time(s)%s, last at %s,%s,%s m seated (%s)" % (len(anchors), " (%d head away)" % away if away else "", anchors[-1]["x"], anchors[-1]["y"], anchors[-1]["z"],
+                                                                                  anchors[-1]["why"])
     if rows.get("refused"):
         text += "; draw(s) refused, said once per reason: " + ", ".join(r["reason"] for r in rows["refused"])
     if rows.get("unrestored"):
@@ -22733,6 +22736,10 @@ def self_test_health():
               has=["hud off by key"], lacks=["NEVER APPLIED"])
         check("srv turret anchored: each latch of the anchor is counted, the last one named with its reason", st_ok + st_flight() + [(8, st_anchor("camera back changed", 0.06, 0.21, -0.09)), (9, st_anchor("recentre", 0.0, 0.2, 0.1))], 0, [("OK", ST)],
               has=["anchor latched 3 time(s), last at 0.000,0.200,0.100 m seated (recentre)"], lacks=["UNPARSED", "NEVER APPLIED"])
+        check("srv turret anchored: the 'head away' reason is read and counted in the summary", st_ok + st_flight() + [(8, st_anchor("head away", 0.1, 0.2, 0.3)), (20, st_anchor("recentre")), (30, st_anchor("head away", 0.4, 0.2, 0.3))], 0, [("OK", ST)],
+              has=["anchor latched 4 time(s) (2 head away), last at 0.400,0.200,0.300 m seated (head away)"], lacks=["UNPARSED", "NEVER APPLIED"])
+        check("srv turret anchored: one 'head away' latch alone is counted too", st_ok + st_flight() + [(8, st_anchor("head away", 0.1, 0.2, 0.3))], 0, [("OK", ST)],
+              has=["anchor latched 2 time(s) (1 head away), last at 0.100,0.200,0.300 m seated (head away)"], lacks=["UNPARSED"])
         check("srv turret anchored: the HUD-forward reason is read", st_ok + st_flight() + [(8, st_anchor("HUD forward changed"))], 0, [("OK", ST)], has=["anchor latched 2 time(s), last at 0.050,0.200,-0.100 m seated (HUD forward changed)"], lacks=["UNPARSED"])
         check("srv turret anchored: an anchor reason the rule does not know is UNPARSED", st_ok + [st_anchor().replace("view on", "somewhere")], 4, [("UNPARSED", ST)])
         check("srv turret anchored: a drifted anchor line is UNPARSED", st_ok + [st_anchor().replace("latched at", "kept at")], 4, [("UNPARSED", ST)])

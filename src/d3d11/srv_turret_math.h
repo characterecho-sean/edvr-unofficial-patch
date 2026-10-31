@@ -188,7 +188,7 @@ constexpr bool topologyCarried(int d3d11Topology) { return d3d11Topology == 4 ||
 
 // THE MOVE. A vertex is moved in 3D, not only in clip x. The geometry shader reconstructs the vertex's eye-space position P from its clip position and the eye's projection tangents (the
 // ones the game projects with, the eye jitter included), translates it forward by T (fix.srv_turret_hud_forward, for EVERY vertex of every family), and then moves it along its ray from
-// a FIXED ANCHOR A (the head's seated position when the turret view came on, taken again on a recentre and when a camera key changes; the eye's view of it is A_eye), judged on the
+// a FIXED ANCHOR A (the head's seated position when the turret view came on, taken again on a recentre, when a camera key changes and when the head stays far from it; the eye's view of it is A_eye), judged on the
 // distance of the translated vertex from A:
 //     P1 = P + T;   V = P1 - A;   d = |V|;   if (dMin < d < dMax)   Q = A + V (d - gap) / d   else   Q = P1;   reproject Q (only if Q.z > kNearZM, else the vertex stays as it was)
 // gap < 0 is the push-back (deeper), gap > 0 the pull (nearer). The result keeps the NDC z of the vertex (z' = (z / w) w'), so the game's own depth values stand. From the anchor the
@@ -327,27 +327,41 @@ inline double anchorDistanceOfClip(const TurretParams& p, const float c[4]) {
 
 // ---- the anchor ---------------------------------------------------------------------------------------------------------------------------------------------------------
 // The fixed point in the seated frame the move is made about: the head's position when the turret view came on. It is taken again (and the module says so in the log, once each) when
-// the turret view comes on, when fix.srv_turret_camera_back or fix.srv_turret_hud_forward changes, and when the head jumps more than kRecentreJumpM between two frames (a recentre).
-// The camera keys take a moment to reach the pose (the runtime applies the alignment at its next poll), so after the view comes on or a key changes the anchor FOLLOWS the head for
-// kAnchorSettleFrames frames (the move then behaves like the old per-eye shift) and is latched at the end of them; a recentre latches at once.
-enum class AnchorReason : uint8_t { kNone = 0, kViewOn, kCameraBack, kHudForward, kRecentre };
+// the turret view comes on, when fix.srv_turret_camera_back or fix.srv_turret_hud_forward changes, when the head jumps more than kRecentreJumpM between two frames (a recentre), and when
+// the head has stayed more than kAwayM from it for kAwayFrames frames in a row (whatever the cause: a safety net, "head away"). Below kAwayM nothing changes, so leaning keeps the
+// real-panel behaviour.
+// The camera keys take a moment to reach the pose (the runtime applies the alignment at its next poll), so after the view comes on or a key changes the anchor FOLLOWS the head
+// (the move then behaves like the old per-eye shift) until kAnchorSettleFrames frames have MOVED it and is latched then. A frame counts only when the head differs from the previous
+// frame's by more than kFrozenPoseM: the headset's pose can be frozen for seconds (the flight of b5c49237: the same bits from the launch to the turret view and on, then live), and an
+// anchor latched on a frozen pose is a point a metre from the head when the pose goes live. The first frame, with no previous, is not counted. A recentre latches at once.
+enum class AnchorReason : uint8_t { kNone = 0, kViewOn, kCameraBack, kHudForward, kRecentre, kHeadAway };
 inline const char* anchorReasonName(AnchorReason r) {
     switch (r) {
         case AnchorReason::kViewOn: return "view on";
         case AnchorReason::kCameraBack: return "camera back changed";
         case AnchorReason::kHudForward: return "HUD forward changed";
         case AnchorReason::kRecentre: return "recentre";
+        case AnchorReason::kHeadAway: return "head away";
         default: return "none";
     }
 }
-inline constexpr double kRecentreJumpM = 0.20;
+inline constexpr double kRecentreJumpM = 0.20;     // a head step between two frames above this is a recentre
+inline constexpr double kFrozenPoseM = 1.0e-6;     // a head that differs from the previous frame's by no more than this has not moved (a frozen pose)
 inline constexpr uint32_t kAnchorSettleFrames = 20;
+inline constexpr double kAwayM = 0.35;             // the head farther than this from the latched anchor ...
+inline constexpr uint32_t kAwayFrames = 90;        // ... for this many frames in a row (about a second at 90 Hz) takes the anchor again
 class AnchorTracker {
     bool active_ = false, valid_ = false, prevValid_ = false;
     int backKey_ = 0, forwardKey_ = 0;
     AnchorReason pending_ = AnchorReason::kNone;
-    uint32_t settle_ = 0;
+    uint32_t settle_ = 0, awayFrames_ = 0;
     double a_[3] = {0.0, 0.0, 0.0}, prev_[3] = {0.0, 0.0, 0.0};
+
+    void take(const double head[3]) {
+        for (int i = 0; i < 3; ++i) a_[i] = head[i];
+        valid_ = true;
+        awayFrames_ = 0;
+    }
 
 public:
     bool valid() const { return valid_; }
@@ -380,17 +394,26 @@ public:
         forwardKey_ = forwardCm;
         AnchorReason latched = AnchorReason::kNone;
         const double dx = head[0] - prev_[0], dy = head[1] - prev_[1], dz = head[2] - prev_[2];
-        if (prevValid_ && std::sqrt(dx * dx + dy * dy + dz * dz) > kRecentreJumpM) {
-            for (int i = 0; i < 3; ++i) a_[i] = head[i];
-            valid_ = true;
+        const double delta = prevValid_ ? std::sqrt(dx * dx + dy * dy + dz * dz) : 0.0;
+        if (prevValid_ && delta > kRecentreJumpM) {
+            take(head);
             pending_ = AnchorReason::kNone;
             latched = AnchorReason::kRecentre;
         } else if (pending_ != AnchorReason::kNone) {
-            for (int i = 0; i < 3; ++i) a_[i] = head[i];
-            valid_ = true;
-            if (settle_ > 0 && --settle_ == 0) {
+            take(head);
+            if (prevValid_ && delta > kFrozenPoseM && settle_ > 0 && --settle_ == 0) {   // only a frame in which the head moved counts
                 latched = pending_;
                 pending_ = AnchorReason::kNone;
+            }
+        } else if (valid_) {
+            const double ex = head[0] - a_[0], ey = head[1] - a_[1], ez = head[2] - a_[2];
+            if (std::sqrt(ex * ex + ey * ey + ez * ez) > kAwayM) {
+                if (++awayFrames_ >= kAwayFrames) {
+                    take(head);
+                    latched = AnchorReason::kHeadAway;
+                }
+            } else {
+                awayFrames_ = 0;
             }
         }
         for (int i = 0; i < 3; ++i) prev_[i] = head[i];

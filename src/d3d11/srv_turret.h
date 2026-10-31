@@ -26,7 +26,8 @@
 //   "srv turret: the vehicle is the Scorpion|not the Scorpion (event E)"   each change of the latch (journal_watch.cpp, the worker thread): E is LoadGame, LaunchSRV, Music, DockSRV,
 //     SRVDestroyed, Shutdown or NewJournal (another journal file).
 //   "srv turret settings: ..."        the five keys, at the first frame and at each change.
-//   "srv turret anchor: latched at x,y,z m seated (view on|camera back changed|HUD forward changed|recentre)"      each time the anchor is taken (the head's seated position).
+//   "srv turret anchor: latched at x,y,z m seated (view on|camera back changed|HUD forward changed|recentre|head away)"      each time the anchor is taken (the head's seated position).
+//     A frozen head pose (the same bits frame after frame) never latches it; "head away" is the safety net: the head stayed more than 35 cm from the anchor for 90 frames in a row.
 //   "srv turret view: on|off at frame N (Status.json Flags 0x........, seat kind 0x.)"      each edge of the Scorpion's turret view (the view bit AND the latch).
 //   "srv turret view: not the Scorpion at frame N (Status.json Flags ..., seat kind ...): ..."      the view bit came on in an SRV the latch does not call the Scorpion: nothing is changed.
 //   "srv turret camera: back X m published (serial N)" / "srv turret camera: back cleared (serial N)"      each change of what alignTick published.

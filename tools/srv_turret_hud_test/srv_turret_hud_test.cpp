@@ -491,7 +491,7 @@ static void mathCases() {
         double h[3] = {0.10, 0.20, 0.30};
         check(tr.step(h, false, 0, 70) == st::AnchorReason::kNone && !tr.valid(), "the view off: no anchor");
         bool quiet = true;
-        for (uint32_t i = 0; i + 1 < st::kAnchorSettleFrames; ++i) {
+        for (uint32_t i = 0; i < st::kAnchorSettleFrames; ++i) {   // the first of the 20 has no previous frame and is not counted
             h[0] = 0.10 + 0.001 * i;
             quiet = quiet && tr.step(h, true, 0, 70) == st::AnchorReason::kNone && tr.valid() && tr.settling() && tr.anchor()[0] == h[0];
         }
@@ -507,7 +507,7 @@ static void mathCases() {
         bool settled = true;
         st::AnchorReason got = st::AnchorReason::kNone;
         for (uint32_t i = 0; i < st::kAnchorSettleFrames; ++i) {
-            h[1] = 0.20 + 0.0005 * i;
+            h[1] = 0.20 + 0.0005 * (i + 1);
             const st::AnchorReason r = tr.step(h, true, 60, 70);   // the camera key changed
             settled = settled && tr.valid() && (i + 1 == st::kAnchorSettleFrames ? r == st::AnchorReason::kCameraBack : r == st::AnchorReason::kNone);
             if (r != st::AnchorReason::kNone) got = r;
@@ -515,6 +515,7 @@ static void mathCases() {
         check(settled && got == st::AnchorReason::kCameraBack && tr.anchor()[1] == h[1], "the camera key changes: the anchor follows for the settle and is latched again, reason 'camera back changed'");
         got = st::AnchorReason::kNone;
         for (uint32_t i = 0; i < st::kAnchorSettleFrames; ++i) {
+            h[1] += 0.0005;
             const st::AnchorReason r = tr.step(h, true, 60, 40);   // the HUD-forward key changed
             if (r != st::AnchorReason::kNone) got = r;
         }
@@ -531,8 +532,98 @@ static void mathCases() {
         (void)tr.step(h, false, 60, 40);
         check(!tr.valid(), "the view going off clears the anchor");
         check(!std::strcmp(st::anchorReasonName(st::AnchorReason::kViewOn), "view on") && !std::strcmp(st::anchorReasonName(st::AnchorReason::kCameraBack), "camera back changed") &&
-                  !std::strcmp(st::anchorReasonName(st::AnchorReason::kHudForward), "HUD forward changed") && !std::strcmp(st::anchorReasonName(st::AnchorReason::kRecentre), "recentre"),
+                  !std::strcmp(st::anchorReasonName(st::AnchorReason::kHudForward), "HUD forward changed") && !std::strcmp(st::anchorReasonName(st::AnchorReason::kRecentre), "recentre") &&
+                  !std::strcmp(st::anchorReasonName(st::AnchorReason::kHeadAway), "head away"),
               "the reasons the log gives");
+    }
+    {   // a FROZEN pose (the flight of b5c49237: the headset's pose was the same bits from the launch to the turret view and on, then live): nothing latches on it
+        const double frozen[3] = {-0.415, -0.366, -0.682};
+        st::AnchorTracker tr;
+        bool quiet = true;
+        for (int i = 0; i < 200; ++i) quiet = quiet && tr.step(frozen, true, 0, 70) == st::AnchorReason::kNone && tr.valid() && tr.settling() && tr.anchor()[0] == frozen[0] && tr.anchor()[2] == frozen[2];
+        check(quiet, "a pose that does not change at all for 200 frames never latches: the anchor follows the head and the latch stays pending");
+        double h[3] = {frozen[0], frozen[1], frozen[2]};
+        bool early = true;
+        st::AnchorReason r = st::AnchorReason::kNone;
+        for (int i = 1; i <= static_cast<int>(st::kAnchorSettleFrames); ++i) {   // the pose comes back gradually, 5 mm a frame
+            h[0] = frozen[0] + 0.005 * i;
+            r = tr.step(h, true, 0, 70);
+            early = early && (i < static_cast<int>(st::kAnchorSettleFrames) ? r == st::AnchorReason::kNone : r == st::AnchorReason::kViewOn);
+        }
+        check(early && tr.anchor()[0] == h[0] && !tr.settling(), "...and once the pose is live the anchor is latched on the live head after 20 moving frames, reason 'view on'");
+        st::AnchorTracker jump;
+        for (int i = 0; i < 200; ++i) (void)jump.step(frozen, true, 0, 70);
+        double live[3] = {frozen[0] + 1.0, frozen[1], frozen[2]};   // the pose goes live a metre away in one step
+        check(jump.step(live, true, 0, 70) == st::AnchorReason::kRecentre && jump.anchor()[0] == live[0] && !jump.settling(),
+              "...and a live pose a metre away in one step is a recentre: latched on the live head at once");
+    }
+    {   // the head away from the latched anchor: after 90 frames in a row beyond 35 cm the anchor is taken again; at 30 cm, never
+        st::AnchorTracker tr;
+        double h[3] = {0.0, 0.0, 0.0};
+        for (int i = 0; i <= static_cast<int>(st::kAnchorSettleFrames); ++i) {   // latch near the origin
+            h[0] = 0.0001 * i;
+            (void)tr.step(h, true, 0, 70);
+        }
+        const double a0 = tr.anchor()[0];
+        bool quiet = !tr.settling();
+        for (int k = 1; k <= 3; ++k) {   // 10, 20 and 30 cm: steps under the recentre jump
+            h[0] = a0 + 0.1 * k;
+            quiet = quiet && tr.step(h, true, 0, 70) == st::AnchorReason::kNone;
+        }
+        h[0] = a0 + 0.4;   // 40 cm: the first frame beyond 35 cm
+        quiet = quiet && tr.step(h, true, 0, 70) == st::AnchorReason::kNone;
+        h[0] = a0 + 0.5;
+        for (uint32_t i = 2; i < st::kAwayFrames; ++i) quiet = quiet && tr.step(h, true, 0, 70) == st::AnchorReason::kNone;   // frames 2 to 89 beyond 35 cm
+        check(quiet && tr.anchor()[0] == a0, "the head 0.5 m from the latched anchor: nothing latches on frame 89 of being beyond 35 cm");
+        check(tr.step(h, true, 0, 70) == st::AnchorReason::kHeadAway && tr.anchor()[0] == h[0], "...and on frame 90 the anchor is taken again at the head, reason 'head away'");
+        check(tr.step(h, true, 0, 70) == st::AnchorReason::kNone && !tr.settling(), "...once (the head is on the anchor now)");
+        st::AnchorTracker near30;
+        double g[3] = {0.0, 0.0, 0.0};
+        for (int i = 0; i <= static_cast<int>(st::kAnchorSettleFrames); ++i) {
+            g[0] = 0.0001 * i;
+            (void)near30.step(g, true, 0, 70);
+        }
+        const double b0 = near30.anchor()[0];
+        bool still = true;
+        for (int k = 1; k <= 3; ++k) {
+            g[0] = b0 + 0.1 * k;
+            still = still && near30.step(g, true, 0, 70) == st::AnchorReason::kNone;
+        }
+        for (int i = 0; i < 1000; ++i) still = still && near30.step(g, true, 0, 70) == st::AnchorReason::kNone;
+        check(still && near30.anchor()[0] == b0, "the head 30 cm from the anchor for 1000 frames: no re-latch (leaning keeps the real-panel behaviour)");
+        st::AnchorTracker back;   // 35 cm beyond and then back inside resets the count
+        double q[3] = {0.0, 0.0, 0.0};
+        for (int i = 0; i <= static_cast<int>(st::kAnchorSettleFrames); ++i) {
+            q[0] = 0.0001 * i;
+            (void)back.step(q, true, 0, 70);
+        }
+        const double c0 = back.anchor()[0];
+        bool counted = true;
+        for (int round = 0; round < 3; ++round) {
+            for (int k = 1; k <= 4; ++k) {
+                q[0] = c0 + 0.1 * k;
+                counted = counted && back.step(q, true, 0, 70) == st::AnchorReason::kNone;
+            }
+            for (int i = 0; i < 60; ++i) counted = counted && back.step(q, true, 0, 70) == st::AnchorReason::kNone;
+            for (int k = 3; k >= 0; --k) {
+                q[0] = c0 + 0.1 * k;
+                counted = counted && back.step(q, true, 0, 70) == st::AnchorReason::kNone;
+            }
+        }
+        check(counted && back.anchor()[0] == c0, "frames beyond 35 cm that are not in a row (60, back inside, 60, ...) never reach 90: the count restarts");
+        st::AnchorTracker slow;   // the safety net: a head that walks away slowly (1 cm a frame, no jump) from an anchor latched near it
+        double w[3] = {0.0, 0.0, 0.0};
+        for (int i = 0; i <= static_cast<int>(st::kAnchorSettleFrames); ++i) {
+            w[0] = 0.0001 * i;
+            (void)slow.step(w, true, 0, 70);
+        }
+        int away = 0;
+        for (int i = 1; i <= 200; ++i) {
+            w[0] = std::min(1.0, 0.01 * i);
+            if (slow.step(w, true, 0, 70) == st::AnchorReason::kHeadAway) ++away;
+        }
+        const double gap = std::fabs(w[0] - slow.anchor()[0]);
+        check(away >= 1 && gap <= st::kAwayM && !slow.settling(), "a head that walks a metre away slowly gets its anchor back within 35 cm of it, by 'head away'");
     }
     {   // the move on the CPU (doubles): the properties the shader must have, before the shader is asked
         const st::EyeFrame e0 = frameOfCam(Cam{});
