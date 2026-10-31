@@ -438,6 +438,83 @@ void skyboxSelfTest() {
   }
 }
 
+// ---- F189 (#144): the submit edge. The views a renderer is handed are in SEATED coordinates; the layer it makes is in the natural space (the `space` handed in), so with a
+// seat origin each layer view's pose is that origin applied (seat_transform.h) and nothing else changes: not the fov, not the sub-image, not a pixel of the eye images, which the
+// renderer draws from the seated numbers it was given. The expected poses are worked out by hand for an origin of yaw 90 degrees about +y at (1,0,2): origin * (0,0,0 at p) is
+// the offset turned by R_y(90) = (z,y,-x) and moved by the origin's position. -----------------------------------------------------------------------------------------------
+void seatOriginLayerSelfTest() {
+  const float h=float(std::sqrt(.5));
+  const XrPosef origin{{0,h,0,h},{1,0,2}};
+  const XrPosef identity{{0,0,0,1},{0,0,0}};
+  const auto close=[](float a,float b){return std::fabs(a-b)<=2e-6f;};
+  // View 0 at (3,5,7) with no rotation: natural position (1+7, 5, 2-3) = (8,5,-1), orientation the origin's (0,h,0,h). View 1 at (-2,0,4): (1+4, 0, 2+2) = (5,0,4).
+  const auto expectNatural=[&](const XrCompositionLayerProjection& layer,const XrView (&views)[2],const char* what){
+    bool good=layer.viewCount==2&&layer.views&&layer.space==space;
+    if(good)for(unsigned eye=0;eye<2;++eye) {
+      const auto& pose=layer.views[eye].pose;
+      const XrVector3f want=eye?XrVector3f{5,0,4}:XrVector3f{8,5,-1};
+      good=good&&close(pose.position.x,want.x)&&close(pose.position.y,want.y)&&close(pose.position.z,want.z)&&
+        !std::memcmp(&layer.views[eye].fov,&views[eye].fov,sizeof(XrFovf))&&layer.views[eye].subImage.swapchain==reinterpret_cast<XrSwapchain>(uintptr_t(10+eye));
+    }
+    // The orientation: the origin's turn composed with an unturned view is the origin's own turn.
+    if(good)good=close(layer.views[0].pose.orientation.y,h)&&close(layer.views[0].pose.orientation.w,h)&&close(layer.views[0].pose.orientation.x,0)&&close(layer.views[0].pose.orientation.z,0);
+    check(good,what);
+  };
+  {   // the flat notice, on an owned device
+    Fixture f;
+    for(unsigned i=0;i<2;++i)f.sizes[i].recommendedImageRectWidth=f.sizes[i].recommendedImageRectHeight=128;
+    check(f.init(true)==XR_SUCCESS,"seat origin: notice renderer initializes");
+    f.views[0].pose=XrPosef{{0,0,0,1},{3,5,7}};f.views[1].pose=XrPosef{{0,0,0,1},{-2,0,4}};
+    XrCompositionLayerProjection layer{};
+    check(f.renderer.renderNotice(f.views,space,layer,true,&origin)==XR_SUCCESS,"seat origin: notice renders with an origin");
+    expectNatural(layer,f.views,"seat origin: the notice layer's poses are the origin applied, its space the natural one, fov and sub-image untouched");
+    XrCompositionLayerProjection plain{};
+    check(f.renderer.renderNotice(f.views,space,plain,true,nullptr)==XR_SUCCESS&&!std::memcmp(&plain.views[0].pose,&f.views[0].pose,sizeof(XrPosef))&&
+      !std::memcmp(&plain.views[1].pose,&f.views[1].pose,sizeof(XrPosef)),"seat origin: with no origin the notice layer carries the views' poses as they are");
+    XrCompositionLayerProjection same{};
+    check(f.renderer.renderNotice(f.views,space,same,true,&identity)==XR_SUCCESS&&!std::memcmp(&same.views[0].pose,&f.views[0].pose,sizeof(XrPosef))&&
+      !std::memcmp(&same.views[1].pose,&f.views[1].pose,sizeof(XrPosef)),"seat origin: an identity origin changes no bit of the notice layer's poses");
+  }
+  {   // the skybox: the layer is in the natural space, the pixels are what the seated views say
+    Fixture f;
+    if(f.init()!=XR_SUCCESS){check(false,"seat origin: skybox renderer initializes");return;}
+    SkyboxCapture capture;captureSky(f,capture);
+    f.views[0].pose=XrPosef{{0,0,0,1},{3,5,7}};f.views[1].pose=XrPosef{{0,0,0,1},{-2,0,4}};
+    for(auto& view:f.views)view.fov={float(std::atan(-.83)),float(std::atan(1.13)),float(std::atan(.91)),float(std::atan(-.67))};
+    XrCompositionLayerProjection layer{};f.runtime.trace.clear();const auto image=f.runtime.eyes[0].calls%2;
+    check(f.renderer.renderSkybox(f.views,space,capture,layer,0.f,&origin)==XR_SUCCESS,"seat origin: skybox renders with an origin");
+    expectNatural(layer,f.views,"seat origin: the skybox layer's poses are the origin applied, its space the natural one");
+    bool pixels=true;
+    for(unsigned eye=0;eye<2;++eye)for(unsigned y:{13u,48u,99u})for(unsigned x:{9u,35u,64u,105u}) {
+      const uint32_t want=skyOracle(f.views[eye],x,y),got=f.pixel(eye,image,x,y);
+      for(unsigned c=0;c<4;++c)pixels=pixels&&std::abs(int((got>>(8*c))&255)-int((want>>(8*c))&255))<=2;
+    }
+    check(pixels,"seat origin: the sky is drawn from the seated views, as the oracle of those views says (the origin touches the layer only)");
+  }
+  {   // a captured pair
+    Fixture f;
+    if(f.init()!=XR_SUCCESS){check(false,"seat origin: captured renderer initializes");return;}
+    f.views[0].pose=XrPosef{{0,0,0,1},{3,5,7}};f.views[1].pose=XrPosef{{0,0,0,1},{-2,0,4}};
+    check(SUCCEEDED(f.pair.initialize(f.runtime.device.Get())),"seat origin: pair capture owner");
+    f.pairSource=pattern(f,false);
+    const vr::Texture_t t{f.pairSource.Get(),vr::API_DirectX,vr::ColorSpace_Auto};
+    check(f.pair.capture(vr::Eye_Left,&t)==vr::VRCompositorError_None&&f.pair.capture(vr::Eye_Right,&t)==vr::VRCompositorError_None,"seat origin: pair capture");
+    XrCompositionLayerProjection layer{};
+    check(f.renderer.renderCaptured(f.views,space,f.pair,layer,nullptr,nullptr,nullptr,0.f,nullptr,0.f,nullptr,0.f,false,&origin)==XR_SUCCESS,"seat origin: captured pair renders with an origin");
+    expectNatural(layer,f.views,"seat origin: the captured layer's poses are the origin applied, its space the natural one");
+    XrCompositionLayerProjection plain{};
+    check(f.renderer.renderCaptured(f.views,space,f.pair,plain)==XR_SUCCESS&&!std::memcmp(&plain.views[0].pose,&f.views[0].pose,sizeof(XrPosef))&&
+      !std::memcmp(&plain.views[1].pose,&f.views[1].pose,sizeof(XrPosef)),"seat origin: with no origin the captured layer carries the views' poses as they are");
+    // A replayed pair is drawn with the origin ITS views were located with: the same views under another origin are a different physical pose.
+    const XrPosef other{{0,0,0,1},{10,0,0}};
+    XrCompositionLayerProjection replay{};
+    check(f.renderer.renderCaptured(f.views,space,f.pair,replay,nullptr,nullptr,nullptr,0.f,nullptr,0.f,nullptr,0.f,false,&other)==XR_SUCCESS&&
+      close(replay.views[0].pose.position.x,13)&&close(replay.views[0].pose.position.y,5)&&close(replay.views[0].pose.position.z,7)&&
+      close(replay.views[1].pose.position.x,8)&&close(replay.views[1].pose.position.z,4),
+      "seat origin: a kept pair goes out with the origin it was given (here a pure shift of 10 in x), not another");
+  }
+}
+
 // ---- Explorer Cam's comfort fade (the runtime's one blend pass; comfort_fade.h) ----------------------------------------------------------------------------
 // What a finished pixel becomes under fade a: black over it, out = in * (1 - a). In an sRGB swapchain the output merger blends in linear light, in a UNORM one on
 // the encoded bytes the shader wrote; alpha is left as drawn.
@@ -999,6 +1076,7 @@ int selfTest(){
   capturedSelfTest();
   capturedSelfTest(true);
   skyboxSelfTest();
+  seatOriginLayerSelfTest();
   fadeSelfTest(false);
   fadeSelfTest(true);
   blackPassSelfTest(false);

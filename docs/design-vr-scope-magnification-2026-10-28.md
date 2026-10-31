@@ -6,6 +6,7 @@ game's own zoom as a magnified picture inside the scope's lens. The rest of the 
 
 ## Status
 
+- **Release (2026-10-30):** A3, B3-3 and C1a are in v0.22.0-rc.4 (draft pre-release, `ab1955de`, 2026-10-30): the scope lens is on by default; `native_on_foot_ads_scope_zoom_full_detail` (off) and `native_on_foot_ads_scope_zoom_fov` ship as experimental keys.
 - **ON MAIN `28359a00` (2026-10-30, the maintainer's word; full build of the merged tree, all gates):** A3, B3-3 and C1a as flown, the crisp reticle key retired, C1b removed. Open: B3's window drift while
   turning (the lens falls back to A) and the temporary `experimental.native_on_foot_ads_scope_zoom_fov`.
 - **State: S0 FLAT TWICE, VR TWICE** (`d90db147`, measure only, no key; section 7). Settled: Q1 for every owned weapon, Q2 (VR has no

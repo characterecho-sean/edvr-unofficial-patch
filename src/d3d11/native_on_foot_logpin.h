@@ -69,6 +69,8 @@ template<class T> inline void body(T& d, const T& s) noexcept {
     d.neckAnimSum += s.neckAnimSum;
     d.clavSum += s.clavSum;
     d.chestSum += s.chestSum;
+    d.ssSum += s.ssSum;   // F179a: the standing share's sum and the standing raise asked (cm)
+    d.srSum += s.srSum;
     d.raiseMin = std::min(d.raiseMin, s.raiseMin);
     d.legMin = std::min(d.legMin, s.legMin);
     d.clavMin = std::min(d.clavMin, s.clavMin);
@@ -106,6 +108,8 @@ template<class T> inline void pin(T& d, const T& s) noexcept {
         d.f98Have[i] = s.f98Have[i]; d.f98Neck[i] = s.f98Neck[i];
     }
     for (uint32_t i = 0; i < sizeof(d.f97) / sizeof(d.f97[0]); ++i) body(d.f97[i], s.f97[i]);
+    d.f179.merge(s.f179);   // F179b: the neck guard's counters per context
+    d.f183.merge(s.f183);   // F183: the stable heading's counters
 }
 template<class T> inline void elbow(T& d, const T& s) noexcept {
     d.n += s.n;
@@ -139,6 +143,11 @@ template<class T> inline void elbow(T& d, const T& s) noexcept {
     d.f168.merge(s.f168);
     d.f170.merge(s.f170);   // F171: F170's was missing, so its line (printed when f98.f170.ads is nonzero) never printed in a window built here (the flight edvr_gfx_20261029_043951)
     d.f171.merge(s.f171);
+    d.f178.merge(s.f178);   // F178: the standing ADS body dials' counters, in the same second
+    d.f180.merge(s.f180);   // F180b: the standing ADS spine straighten's counters
+    d.f185.merge(s.f185);   // F185: the left arm's bend in the sights
+    d.f181.merge(s.f181);   // F181a: the hip swivel cap's counters
+    d.f192.merge(s.f192);   // F192: the draw hold's counters
     if (s.downStepMax > d.downStepMax) {
         d.downStepMax = s.downStepMax; d.downStepAng = s.downStepAng; d.downStepTwist = s.downStepTwist;
     }

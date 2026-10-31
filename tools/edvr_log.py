@@ -11681,6 +11681,8 @@ def _hj_f85b(rows, ctx):
 
 
 def _hj_f85c(rows, ctx):
+    # F191: the reticle is the key marker type 1001 uses (a pool slot that is 11 or more on some rigs), so the lines name it: `key 11 (type 1001) draws N` and `no
+    # reticle composite draw over N s (reticle key 11 (type 1001); ...)`. A log of a build before F191 says `key 10 draws N` and `no key 10 composite draw`; both read.
     draws, idle, fail, game = rows.get("draws", []), rows.get("idle", []), rows.get("fail", []), rows.get("game", [])
     if not draws and not idle and not fail and not game:
         return None
@@ -11694,13 +11696,18 @@ def _hj_f85c(rows, ctx):
     if not draws:
         armed = _harmed_seconds(ctx)
         if armed:
-            return ("NEVER APPLIED", "no key 10 composite draw in %d lines, though a weapon was drawn for %d s" % (len(idle), armed))
-        return ("IDLE", "no key 10 composite draw (%d idle lines: no tool or weapon out, or the marker fix is off)" % len(idle))
+            return ("NEVER APPLIED", "no reticle composite draw in %d lines, though a weapon was drawn for %d s" % (len(idle), armed))
+        return ("IDLE", "no reticle composite draw (%d idle lines: no tool or weapon out, or the marker fix is off)" % len(idle))
     nd, patched, reads, hit, sky = (_hsum(draws, k) for k in ("draws", "patched", "reads", "hit", "sky"))
     refs = collections.Counter()
     for x in draws:
         refs.update(_hpairs(x["refs"]))
-    text = "patched %d of %d key 10 draws (%s) in %d s; readbacks %d (hit %d, sky %d); refusals %s" % (patched, nd, _hpct(patched, nd), _hcount(draws, "xs", lambda r: int(r["draws"]) > 0), reads, hit, sky, _htop(refs))
+    keys = sorted({int(x["key"]) for x in draws}, key=int)
+    assumed = any((x.get("why") or "").startswith("assumed") for x in draws)
+    text = "patched %d of %d key %s draws (%s) in %d s; readbacks %d (hit %d, sky %d); refusals %s" % (
+        patched, nd, ", ".join(str(k) for k in keys), _hpct(patched, nd), _hcount(draws, "xs", lambda r: int(r["draws"]) > 0), reads, hit, sky, _htop(refs))
+    if assumed:
+        text += "; the reticle key was assumed to be 10, no type 1001 call seen (the marker fix is off, or its hook is not in)"
     if game:
         text += "; " + game_text
     if patched == 0:
@@ -14053,6 +14060,113 @@ def _hj_f171_sideways(rows, ctx):
     return ("OK", text)
 
 
+# F178 (TEMPORARY): the standing ADS body dials (experimental.native_on_foot_stand_ads_body_forward_cm and _left_cm), F168's forward move and F171's left move with the standing weight
+# ((1 - the crouched weight) x the detach weight), and the figures that judge them (formatSummary in src/d3d11/native_on_foot_f178.h). The window line is printed for every window with a
+# frame standing in the sights with a two-handed gun, the dials at 0 included (the before picture). The dials' own note lines (read at start and at each change) carry a different label ("body
+# dial"), so they are not window lines; the rule reads them as its "dial" rows, which tell an idle flight (the build has the instrument and the keys were read) from a log of a build without it.
+H178_LABEL = "native on foot standing ADS body (F178, TEMPORARY)"
+H178_RE = (r"native on foot standing ADS body \(F178, TEMPORARY\) (?P<wl>\d+) s: item (?P<item>\S+); standing in the sights (?P<ads>\d+) frames \(still (?P<still>\d+), moving (?P<mv>\d+)\), "
+           r"the standing weight \(\(1 - the crouched weight\) x the detach weight\) mean (?P<wt>[\d.]+); "
+           r"forward dial experimental\.native_on_foot_stand_ads_body_forward_cm mean (?P<fdial>%s) cm \(largest (?P<fdialmax>[\d.]+); positive is toward the gun\), the move made in (?P<fmade>\d+), "
+           r"asked (?P<fask>%s) cm, as written \(after the reach rule; (?P<fwn>\d+) frames\) (?P<fwr>%s), the reach rule took back (?P<fbk>%s); "
+           r"left dial experimental\.native_on_foot_stand_ads_body_left_cm mean (?P<ldial>%s) cm \(largest (?P<ldialmax>[\d.]+); positive is left of the aim\), the move made in (?P<lmade>\d+), "
+           r"asked (?P<lask>%s) cm, as written \(after the reach rule; (?P<lwn>\d+) frames\) (?P<lwr>%s), the reach rule took back (?P<lbk>%s); "
+           r"right shoulder from the eye \(right/up/forward, cm\): still (?P<rn0>\d+) frames (?P<r0r>%s)/(?P<r0u>%s)/(?P<r0f>%s), moving (?P<rn1>\d+) frames (?P<r1r>%s)/(?P<r1u>%s)/(?P<r1f>%s); "
+           r"left shoulder from the eye: still (?P<ln0>\d+) frames (?P<l0r>%s)/(?P<l0u>%s)/(?P<l0f>%s), moving (?P<ln1>\d+) frames (?P<l1r>%s)/(?P<l1u>%s)/(?P<l1f>%s); "
+           r"right shoulder to the gun's root (?P<gn0>\d+) frames still (?P<gd0>[\d.]+) cm, (?P<gn1>\d+) moving (?P<gd1>[\d.]+); left shoulder to the left-hand grip "
+           r"(?P<kn0>\d+) frames still (?P<kd0>[\d.]+) cm, (?P<kn1>\d+) moving (?P<kd1>[\d.]+)" % ((_HN,) * 20))
+H178_DIAL_RE = (r"native on foot standing ADS body dial \(F178, TEMPORARY\): experimental\.native_on_foot_stand_ads_body_(?P<which>forward|left)_cm = (?P<val>%s) cm" % _HN)
+
+
+def _hj_f178_standing(rows, ctx):
+    """F178 (TEMPORARY): the standing ADS body dials. While standing in the sights (the crouched weight under 0.5, the detach weight from 0.05) with a two-handed gun the body moves by
+    each dial x the standing weight, (1 - F163's crouched weight) x the detach weight, F168's forward move (positive toward the gun; a negative one rides the pin's target before the reach rule,
+    a positive one is added to the written neck after it) and F171's left move (positive left of the aim; before the reach rule), so the stock can be dialled into the right shoulder standing
+    as it is crouched. Both ship at 0: a window with the dials at 0 is the before picture, with the shoulders and the distances to the gun and the left grip. Per item: the frames, the
+    standing weight, each dial's mean and largest value, the frames its move was made in, the move asked, as written (the neck's change from the same body with the dial at 0, after the reach
+    rule) and what the reach rule took back, both shoulders from the eye, the right shoulder to the gun's root and the left shoulder to the left grip (still and moving). NEVER APPLIED when 30
+    or more frames stood in the sights with a dial at 0.5 cm or more (either way) and its move was made in none of them (the target never took it), or was made and written as 0 in every window
+    (the neck never moved); PARTIAL when the move as written is under half of the move asked (the reach rule took most of it back) or was not measured. Both dials at 0 is the baseline: OK.
+    Under 30 frames standing in the sights is IDLE, and so is a log whose only F178 lines are the dials' own notes (the keys were read, no standing ADS frame came); no such line, no verdict."""
+    sec = rows.get("sec", [])
+    notes_dial = rows.get("dial", [])
+    if not sec:
+        if not notes_dial:
+            return None
+        last = {}
+        for r in notes_dial:
+            last[r["which"]] = float(r["val"])
+        return ("IDLE", "the standing ADS body dials were read (forward %s, left %s as last logged) and no frame stood in the sights with a two-handed gun in the window: nothing to judge" % (
+            ("%+.1f cm" % last["forward"]) if "forward" in last else "not logged", ("%+.1f cm" % last["left"]) if "left" in last else "not logged"))
+    items = collections.OrderedDict()
+    for r in sec:
+        items.setdefault(r["item"], []).append(r)
+    parts, never, notes = [], [], []
+    total, dial_seen = 0, 0.0
+    for item, rs in items.items():
+        g = lambda k, rr=rs: sum(int(r[k]) for r in rr)
+        ads, still, mv = g("ads"), g("still"), g("mv")
+        if not ads:
+            continue
+        total += ads
+        weight = sum(int(r["ads"]) * float(r["wt"]) for r in rs) / ads
+        right0, right1 = [(sum(int(r["rn0"]) * float(r["r0" + k]) for r in rs), g("rn0")) for k in ("r", "u", "f")], [(sum(int(r["rn1"]) * float(r["r1" + k]) for r in rs), g("rn1")) for k in ("r", "u", "f")]
+        left0, left1 = [(sum(int(r["ln0"]) * float(r["l0" + k]) for r in rs), g("ln0")) for k in ("r", "u", "f")], [(sum(int(r["ln1"]) * float(r["l1" + k]) for r in rs), g("ln1")) for k in ("r", "u", "f")]
+
+        def mean(val, cnt, rr=rs):
+            n = sum(int(r[cnt]) for r in rr)
+            return (sum(int(r[cnt]) * float(r[val]) for r in rr) / n) if n else 0.0, n
+
+        def avg(pairs):
+            return (pairs[0] / pairs[1]) if pairs[1] else 0.0
+        gun0, gun1 = mean("gd0", "gn0"), mean("gd1", "gn1")
+        grip0, grip1 = mean("kd0", "kn0"), mean("kd1", "kn1")
+        chan = {}
+        for name, p in (("forward", "f"), ("left", "l")):
+            dial = sum(int(r["ads"]) * float(r[p + "dial"]) for r in rs) / ads
+            dialmax = max(float(r[p + "dialmax"]) for r in rs)
+            made = g(p + "made")
+            asked = sum(int(r["ads"]) * float(r[p + "ask"]) for r in rs) / ads
+            wr, wn = mean(p + "wr", p + "wn")
+            bk = mean(p + "bk", p + "wn")[0]
+            zero_throughout = all(abs(float(r[p + "wr"])) < 0.05 for r in rs if int(r[p + "wn"]))
+            chan[name] = (dial, dialmax, made, asked, wr, wn, bk, zero_throughout)
+            dial_seen = max(dial_seen, dialmax)
+        fd, ld = chan["forward"], chan["left"]
+        parts.append("%s %d s: standing in the sights %d frames (still %d, moving %d), standing weight mean %.2f; forward dial mean %+.1f cm (largest %.1f; positive is toward the gun), the move made "
+                     "in %d, asked %+.1f cm, as written (after the reach rule) %+.1f (%d frames), the reach rule took back %+.1f; left dial mean %+.1f cm (largest %.1f; positive is left of the aim), "
+                     "the move made in %d, asked %+.1f cm, as written %+.1f (%d frames), the reach rule took back %+.1f; the right shoulder from the eye (right/up/forward, cm) still "
+                     "%+.1f/%+.1f/%+.1f (%d frames), moving %+.1f/%+.1f/%+.1f (%d); the left shoulder from the eye still %+.1f/%+.1f/%+.1f (%d), moving %+.1f/%+.1f/%+.1f (%d); right shoulder to the "
+                     "gun's root still %.1f cm (%d frames), moving %.1f (%d); left shoulder to the left-hand grip still %.1f cm (%d), moving %.1f (%d)" % (
+                         item, _hsecs(rs), ads, still, mv, weight, fd[0], fd[1], fd[2], fd[3], fd[4], fd[5], fd[6], ld[0], ld[1], ld[2], ld[3], ld[4], ld[5], ld[6],
+                         avg(right0[0]), avg(right0[1]), avg(right0[2]), right0[0][1], avg(right1[0]), avg(right1[1]), avg(right1[2]), right1[0][1],
+                         avg(left0[0]), avg(left0[1]), avg(left0[2]), left0[0][1], avg(left1[0]), avg(left1[1]), avg(left1[2]), left1[0][1],
+                         gun0[0], gun0[1], gun1[0], gun1[1], grip0[0], grip0[1], grip1[0], grip1[1]))
+        for name, (dial, dialmax, made, asked, written, wn, bk, zero_throughout) in chan.items():
+            if ads < 30 or dialmax < 0.5:
+                continue
+            if not made:
+                never.append("the %s dial reached %.1f cm and its move was made in none of %d frames standing in the sights with %s (the pin's target never took it)" % (name, dialmax, ads, item))
+            elif wn and zero_throughout and abs(asked) >= 0.5:
+                never.append("the %s dial asked %+.1f cm and none of it was written in %d frames standing in the sights with %s (the neck never moved)" % (name, asked, ads, item))
+            elif not wn:
+                notes.append("the %s move as written was not measured in any of %d frames standing in the sights with %s (the aim had no horizontal forward, or the figure is missing)" % (name, ads, item))
+            elif abs(asked) >= 0.5 and abs(written) < 0.5 * abs(asked):
+                notes.append("the reach rule took back most of the %s move with %s: %+.1f cm asked, %+.1f cm written (the left shoulder is at its reach)" % (name, item, asked, written))
+    if not parts:
+        return None
+    text = "; ".join(parts)
+    if never:
+        return ("NEVER APPLIED", text + "; " + "; ".join(never + notes))
+    if notes:
+        return ("PARTIAL", text + "; " + "; ".join(notes))
+    if total < 30:
+        return ("IDLE", text + "; under 30 frames standing in the sights: little to judge")
+    if dial_seen < 0.05:
+        return ("OK", text + "; both dials were 0: these are the baseline figures")
+    return ("OK", text)
+
+
 # F171: the raise's carriage (formatSummary in src/d3d11/native_on_foot_f171c.h): per look mode and band of |aim pitch|, the slopes of the game's camera as the job read it before any removal
 # (k_up, k_fwd), of G as F138 forms it (c) and of the eye as drawn (k_eye) against the carried raise, over consecutive pin calls whose carried raise changed 2 mm or more.
 H171C_LABEL = "native on foot raise carriage (F171)"
@@ -14260,7 +14374,7 @@ def _hj_f176_pitch_held(rows, ctx):
 # F177: the aiming choice at start (src/d3d11/menu_aim_prompt.h): the VR menu opens itself once a session on a page that asks for look to aim or mouse aim. Its lines print on every log, in the
 # menu and not on foot: shown, then picked and saved (or write failed), or later; or one line saying why it was not shown.
 H177_LABEL = "aim choice prompt (F177)"
-H177_SHOWN = r"aim choice prompt \(F177\): shown\s*$"
+H177_SHOWN = r"aim choice prompt \(F177\): shown(?: (?P<frame>during the splash|after the first scene|after the switch to VR|at the first menu open), (?P<secs>[\d.]+) s after the game started)?\s*$"   # F188 added the frame and the seconds (a log from F177 has neither); F190 added after the switch to VR and at the first menu open
 H177_PICKED = r"aim choice prompt \(F177\): picked (?P<choice>mouse aim|look to aim)\s*$"
 H177_LATER = r"aim choice prompt \(F177\): later\s*$"
 H177_SAVED = r"aim choice prompt \(F177\): saved (?P<k1>\S+) = (?P<v1>\S+) and (?P<k2>\S+) = (?P<v2>\S+) to (?P<file>.+?)\s*$"
@@ -14270,13 +14384,16 @@ H177_WANT = {"mouse aim": "off", "look to aim": "on"}   # what each pick must ha
 
 
 def _hj_f177_aim_choice(rows, ctx):
-    """F177: the aiming choice at start. The VR menu opens itself once a session, after the first rendered scene, on a page that asks for look to aim or mouse aim. A pick writes the choice
+    """F177: the aiming choice at start. The VR menu opens itself once a session (F190: 2 s after the first eye frame, at game load or after 3D is turned on in a session that began flat; or at the
+    player's first opening of the menu) on a page that asks for look to aim or mouse aim. A pick writes the choice
     and the hide of the page in one job; the saved line says the write landed with both pairs, the write failed line that it did not (the settings stay as they were and the page asks again at
     the next start). NEVER APPLIED when a pick has a write failed line, or when the saved pairs are not what the pick says (look to aim on for look to aim, off for mouse aim, and the page
     hidden); PARTIAL when a pick has neither line (the writer had not reported); OK when the page was shown and answered with a saved pick, with Ask me next time or Esc (nothing written), or
     not at all yet; IDLE when the only line is why it was not shown (the key is off, native on foot is off, the flat profile). No line at all is a log from a build without the page (None)."""
     shown, picked, later = rows.get("shown", []), rows.get("picked", []), rows.get("later", [])
     saved, failed, notshown = rows.get("saved", []), rows.get("failed", []), rows.get("notshown", [])
+    # F188: where the page opened (the frame and the seconds since the game started); a log from the F177 build has only "shown"
+    when = (" %s, %s s after the game started" % (shown[-1]["frame"], shown[-1]["secs"])) if shown and shown[-1].get("frame") else ""
     if not (shown or picked or later or saved or failed or notshown):
         return None
     if not (shown or picked or later or saved or failed):
@@ -14290,10 +14407,10 @@ def _hj_f177_aim_choice(rows, ctx):
         s = saved[-1]
         if s["k1"] != "fix.native_on_foot_look_to_aim" or s["v1"] != H177_WANT[choice] or s["k2"] != "menu.aim_choice_prompt" or s["v2"] != "off":
             return ("NEVER APPLIED", "picked %s but the file was given %s = %s and %s = %s: the pick and the write disagree" % (choice, s["k1"], s["v1"], s["k2"], s["v2"]))
-        return ("OK", "shown; picked %s; saved %s = %s and %s = %s to %s" % (choice, s["k1"], s["v1"], s["k2"], s["v2"], s["file"]))
+        return ("OK", "shown%s; picked %s; saved %s = %s and %s = %s to %s" % (when, choice, s["k1"], s["v1"], s["k2"], s["v2"], s["file"]))
     if later:
-        return ("OK", "shown; the player chose Ask me next time or pressed Esc (nothing written, it asks again at the next start)")
-    return ("OK", "shown; no answer in this log (the game quit with the page up, or the log ends first)")
+        return ("OK", "shown%s; the player chose Ask me next time or pressed Esc (nothing written, it asks again at the next start)" % when)
+    return ("OK", "shown%s; no answer in this log (the game quit with the page up, or the log ends first)" % when)
 
 
 # F169: the stance while the aim is pitched (formatStance in src/d3d11/native_on_foot_f169.h). The camera sinks as the aim pitches up and w_c read the sink as a crouch; the cap holds w_c
@@ -14613,6 +14730,453 @@ def _hj_f97a_body(rows, ctx):
         return ("PARTIAL", text + "; " + "; ".join(notes))
     return ("OK", text)
 
+
+# The F97a line (f125PinPrint in native_on_foot.cpp). F179a: the stance is one of the four at the hip or the same four "in the sights" (the detach weight from 0.05); a bin in the sights ends with
+# the standing share's mean and the standing raise asked (F178's weight: (1 - the crouched weight) x the detach weight).
+H97_RE = (r"native on foot armed body \(F97a\) (?P<wl>\d+) s: item (?P<item>\S+); (?P<stance>(?:standing|crouched|moving crouched|moving)(?: in the sights)?) (?P<n>\d+) calls: weapon weight "
+          r"(?P<w>[\d.]+); the neck raised (?P<raise>%s) cm \(min %s max %s; asked (?P<asked>%s); capped by the legs (?P<capped>\d+)\), written (?P<neckw>[\d.]+) m "
+          r"against animated (?P<necka>[\d.]+) m; the eye as drawn over the clavicle line (?P<clav>%s) cm \(min (?P<clavmin>%s)\), ahead of the chest (?P<chest>%s) cm "
+          r"\(min (?P<chestmin>%s)\), INSIDE (?P<inside>\d+) of (?P<clr>\d+); legs hip to foot over the leg: animated (?P<la>[\d.]+), written (?P<lw>[\d.]+) "
+          r"\(min (?P<lmin>[\d.]+)\), feet lifted (?P<lifted>\d+)"
+          r"(?:; the standing share \(F179a\) mean (?P<ss>[\d.]+), its raise asked (?P<sr>%s) cm"
+          # F184: the raise's source in the sights (builds before F184 read the eye and print none)
+          r"(?:, source: (?P<src>the legs' room, not the eye))?)?" % ((_HN,) * 9))
+
+
+def _hj_f179a_height(rows, ctx):
+    """F179a: the body stays up in standing ADS. The flight edvr_gfx_20261030_095038 (the plasma shotgun, standing in the sights, F178's dials at 0): the neck was written 1.290 m = the animated
+    neck (F97a's raise was released with the ADS detach), the eye +32.6 cm over the clavicle line, the legs hip to foot over the leg 0.895: the game's ADS hunch. With the standing share
+    ((1 - F163's crouched weight) x the detach weight) the neck target keeps the raise of the hip's rule (the neck at the eye as drawn less the eye height key, vertical, a raise only), capped
+    by the legs' room as F97a caps it. Reads the F97a line's 'standing in the sights' bins (armed, weight 1): OK when standing ADS frames have a raise written; NEVER APPLIED when 30 or more
+    of them with room left in the legs (written under 0.97) have none (under 0.5 cm); IDLE under 30 frames. The hip's and the crouched bins are the F97a rule's. No such bin, no verdict.
+    F184: the raise in the sights is asked of the legs' room directly (the line says "source: the legs' room, not the eye"); the eye-based ask closed a loop with the camera the eye is read from
+    (the flight edvr_gfx_20261030_134445: the raise sat at the legs' cap in nearly every call). The verdict text says the source; a line from a build before F184 says the raise came from the eye."""
+    sec = [r for r in rows.get("sec", []) if r["stance"] == "standing in the sights"]
+    if not sec:
+        return None
+    parts, never, total = [], [], 0
+    items = collections.OrderedDict()
+    for r in sec:
+        items.setdefault(r["item"], []).append(r)
+    for item, rs in items.items():
+        n = sum(int(r["n"]) for r in rs)
+        if not n:
+            continue
+        total += n
+        mean = lambda k, rr=rs, nn=n: sum(int(r["n"]) * float(r[k]) for r in rr) / nn
+        raise_, asked, lw, la = mean("raise"), mean("asked"), mean("lw"), mean("la")
+        ss = mean("ss") if all(r.get("ss") is not None for r in rs) else None
+        sr = mean("sr") if all(r.get("sr") is not None for r in rs) else None
+        srcs = [r.get("src") for r in rs if r.get("sr") is not None]   # F184: the raise's source, where the line says one
+        if not srcs:
+            src_text = ""
+        elif all(s is not None for s in srcs):
+            src_text = "; the raise asked of the legs' room, not the eye"
+        elif all(s is None for s in srcs):
+            src_text = "; the raise asked from the eye (a build before F184)"
+        else:
+            src_text = "; the raise asked from the eye in part (a build before F184) and from the legs' room"
+        cap = sum(int(r["capped"]) for r in rs)
+        parts.append("%s standing in the sights %d s, %d calls: standing share %s, raise written %+.1f cm (asked %+.1f%s, capped by the legs %d), neck written %.3f m against animated %.3f, "
+                     "legs %.3f -> %.3f, the eye over the clavicles %+.1f cm" % (
+                         item, _hsecs(rs), n, ("%.2f" % ss) if ss is not None else "not said", raise_, asked, (", standing raise %+.1f" % sr) if sr is not None else "", cap,
+                         mean("neckw"), mean("necka"), la, lw, mean("clav")) + src_text)
+        armed = [r for r in rs if float(r["w"]) >= 0.99 and item != "mixed"]
+        an = sum(int(r["n"]) for r in armed)
+        if an >= 30:
+            ar = sum(int(r["n"]) * float(r["raise"]) for r in armed) / an
+            al = sum(int(r["n"]) * float(r["lw"]) for r in armed) / an
+            if ar < 0.5 and al < 0.97:
+                never.append("%d armed standing ADS calls with %s wrote no raise (%+.1f cm) with room left in the legs (written %.3f, under 0.97)" % (an, item, ar, al))
+    if not parts:
+        return None
+    text = "; ".join(parts)
+    if never:
+        return ("NEVER APPLIED", text + "; " + "; ".join(never))
+    if total < 30:
+        return ("IDLE", text + "; under 30 standing ADS calls: little to judge")
+    return ("OK", text)
+
+
+H98A_SEC_RE = (r"native on foot left elbow \(F98a\) (?P<wl>\d+) s: item (?P<item>\S+); (?P<n>\d+) solves: the game's aim pitch (?P<aim>%s) deg \(min %s max %s\); the chest's lean as "
+                r"written (?P<lean>%s) deg \(animated (?P<leanAnim>%s)\); F82's torso yaw (?P<yaw>%s) deg \(largest [\d.]+\); the elbow's swivel from the stance's plane "
+                r"(?P<plane>[\d.]+) deg \(max [\d.]+, over 45 deg in (?P<over45>\d+)\); its step a frame (?P<step>[\d.]+) deg rms \(max [\d.]+, over 10 deg (?P<over10>\d+), "
+                r"of (?P<steps>\d+) steps\); the swivel from the stable pole's seed (?P<seed>\d+) \(the arm [\d.]+ deg from the seed's axis, max [\d.]+\), a body-down "
+                r"pole (?P<down>\d+), the legacy swivel (?P<legacy>\d+); hand twist at the forearm's limit (?P<twist>\d+)"
+                # F124: on a second with body-down solves, the arm's closest approach to the body's down and the largest step's angle and twist limit
+                r"(?:; on (?P<dn>\d+) body-down solves the arm's axis came within (?P<dmin>[\d.]+) deg of the body's down; "
+                r"(?:at the largest step \((?P<dstep>[\d.]+) deg\) the axis was (?P<dang>[\d.]+) deg from down, the twist limit (?P<dtwist>hit|not hit)"
+                r"|no elbow step was measured))?"
+                r"(?:; seconds mostly over 45 deg (?P<swung_s>\d+); flip seconds (?P<flip_s>\d+) \(near vertical (?P<near_s>\d+), twist limit (?P<twist_s>\d+), near with twist (?P<near_twist_s>\d+)\))?"
+                # F181a: the hip swivel cap's solves, appended to the line (builds before F181 print none)
+                r"(?:; capped (?P<cap_n>\d+) of (?P<cap_m>\d+) solves \(the cut mean (?P<cap_cut>[\d.]+) deg, largest (?P<cap_cutmax>[\d.]+); the cap (?P<cap_deg>[\d.]+) deg; "
+                r"still (?P<cap_tol>[\d.]+) deg or more over it after: (?P<cap_over>\d+)\))?" % ((_HN,) * 6))
+def _hj_f181a_hip_cap(rows, ctx):
+    """F181a (TEMPORARY): the left elbow's swivel capped at the hip with a two-handed gun (experimental.native_on_foot_hip_elbow_swivel_max_deg). The flight edvr_gfx_20261030_111627 put the
+    swivel from the stance's plane at 52 to 55 deg at the hip with the plasma assault rifle (over 45 deg in every solve), the forearm climbing steeply to the foregrip. A solve over the cap is
+    brought to the plane angle p - (hip share) x (p - cap) by turning the pole about the shoulder-to-hand axis toward the plane, on the side it was on. Reads the F98a line's ending: the
+    two-handed hip solves, those capped, the cut (mean, largest), the cap, and the solves still 2 deg or more over the cap after it. Per item. NEVER APPLIED when 30 or more two-handed hip
+    solves were still 2 deg or more over the cap after it (the cap did not hold); IDLE under 30 two-handed hip solves (none included); OK with the figures. A line without the ending (a build
+    before F181) gives no verdict."""
+    sec = [r for r in rows.get("sec", []) if r.get("cap_n") is not None]
+    if not sec:
+        return None
+    items = collections.OrderedDict()
+    for r in sec:
+        items.setdefault(r["item"], []).append(r)
+    parts, never, total = [], [], 0
+    for item, rs in items.items():
+        hip = sum(int(r["cap_m"]) for r in rs)
+        capped = sum(int(r["cap_n"]) for r in rs)
+        over = sum(int(r["cap_over"]) for r in rs)
+        total += hip
+        cut = sum(int(r["cap_n"]) * float(r["cap_cut"]) for r in rs) / capped if capped else 0.0
+        cutmax = max(float(r["cap_cutmax"]) for r in rs)
+        capdeg = sorted(set(float(r["cap_deg"]) for r in rs))
+        capt = ("%.0f deg%s" % (capdeg[0], " (off)" if capdeg[0] >= 90.0 else "")) if len(capdeg) == 1 else ("%.0f to %.0f deg" % (capdeg[0], capdeg[-1]))
+        plane = sum(int(r["n"]) * float(r["plane"]) for r in rs) / sum(int(r["n"]) for r in rs) if sum(int(r["n"]) for r in rs) else 0.0
+        parts.append("%s %d s: %d two-handed hip solves, capped %d (%.0f%%; the cut mean %.1f deg, largest %.1f), the cap %s, %d still 2 deg or more over it after; the swivel from the stance's plane "
+                     "over all this item's solves %.1f deg" % (item, _hsecs(rs), hip, capped, 100.0 * capped / hip if hip else 0.0, cut, cutmax, capt, over, plane))
+        if hip >= 30 and over >= 30:
+            never.append("%d of %d two-handed hip solves with %s were still 2 deg or more over the cap after it (the cap did not hold)" % (over, hip, item))
+    text = "; ".join(parts)
+    if never:
+        return ("NEVER APPLIED", text + "; " + "; ".join(never))
+    if total < 30:
+        return ("IDLE", text + "; under 30 two-handed hip solves: little to judge" if total else text + "; no two-handed hip solve")
+    return ("OK", text)
+
+
+# F179b: the neck guard (formatContext in src/d3d11/native_on_foot_f179.h), one line per context that had frames the guard ran in.
+H179B_LABEL = "native on foot neck guard (F179b)"
+H179B_RE = (r"native on foot neck guard \(F179b\) (?P<wl>\d+) s: item (?P<item>\S+); (?P<ctx>hip armed|ADS standing|ADS crouched) (?P<frames>\d+) frames, the guard at (?P<dist>[\d.]+) cm: "
+            r"pushed (?P<pushed>\d+), the push mean (?P<pm>[\d.]+) cm \(largest (?P<px>[\d.]+)\); off the post-reach dial add (?P<on>\d+) frames, mean (?P<om>[\d.]+) cm "
+            r"\(largest (?P<ox>[\d.]+)\); the eye ahead of the chest before the guard \(as the pose and dials would put it\) min (?P<bmin>%s) mean (?P<bmean>%s) cm, after it as measured "
+            r"\((?P<an>\d+) frames\) min (?P<amin>%s) mean (?P<amean>%s), predicted after mean (?P<pred>%s), under (?P<held>[\d.]+) cm (?P<u9>\d+)"
+            # F183: the pushes held to the distance plus 10 cm and the filtered error reset by a heading turn (builds before F183 print none)
+            r"(?:, bounded pushes (?P<bnd>\d+), error resets (?P<rst>\d+))?" % ((_HN,) * 5))
+# F180c: unarmed at the hip the guard measures only: the push it would make, nothing moved (no frames under the distance). F184: and in the sights (a build before F184 prints the sights as acting lines)
+H179B_MEAS_RE = (r"native on foot neck guard \(F179b\) (?P<wl>\d+) s: item (?P<item>\S+); (?P<ctx>hip unarmed|ADS standing|ADS crouched) (?P<frames>\d+) frames, the guard at (?P<dist>[\d.]+) cm, measuring only "
+                 r"\(nothing is moved\): would push (?P<would>\d+) frames, the push mean (?P<wm>[\d.]+) cm \(largest (?P<wx>[\d.]+)\); the eye ahead of the chest \(as the pose puts it\) "
+                 r"min (?P<bmin>%s) mean (?P<bmean>%s) cm, as measured \((?P<an>\d+) frames\) min (?P<amin>%s) mean (?P<amean>%s), predicted mean (?P<pred>%s)"
+                 r"(?:, bounded pushes (?P<bnd>\d+), error resets (?P<rst>\d+))?" % ((_HN,) * 5))
+H179B_CTXS = ("hip unarmed", "hip armed", "ADS standing", "ADS crouched")
+
+
+def _hj_f179b_guard(rows, ctx):
+    """F179b: the neck guard. Whenever the full third-person body is drawn on foot the eye as drawn is kept at least 10 cm ahead of the chest (F97a's measure: the eye as drawn less the chest
+    joint 24 along the eye's horizontal heading): a deficit predicted from the body's move is taken off the neck target before the reach rule, off F169's and F178's post-reach forward add
+    next, and off the move last. The flight edvr_gfx_20261030_095038 put the eye 6.6 cm ahead of the chest (min 5.5) with F178's dials +14.5 forward, +24.5 left, and looking down showed the
+    open neck. Per context (hip unarmed, hip armed, ADS standing, ADS crouched): the frames, those pushed and the push (mean over the pushed, largest), what came off the post-reach add, the
+    eye ahead of the chest before the guard (predicted without it) and after it as measured. A push is fine. PARTIAL when the measured figure after the guard reads under 9 cm in more than
+    1% of the frames it was measured on (the guard did not hold); IDLE under 30 frames. No line, no verdict.
+    F180c: the distance is the experimental.native_on_foot_neck_guard_cm key's (the line says it; 'under' is 1 cm below it), and unarmed at the hip the guard measures only: that context's
+    line says the push it would make and moves nothing, so it is never judged held or not held.
+    F184: the guard acts at the hip armed alone; in the sights (ADS standing, ADS crouched) it measures only too (the flight edvr_gfx_20261030_134445: acting there it pushed at its bound in every
+    second, a loop with the camera the eye is read from). Those contexts' lines are the measuring ones and are never judged held or not held; a build before F184 prints them as acting lines,
+    judged as before."""
+    sec, meas = rows.get("sec", []), rows.get("meas", [])
+    if not (sec or meas):
+        return None
+    by = collections.OrderedDict()
+    for r in sec + meas:
+        by.setdefault(r["ctx"], []).append(r)
+    parts, notes, total, bad = [], [], 0, []
+    for name in H179B_CTXS:
+        rs = by.get(name)
+        if not rs:
+            continue
+        g = lambda k, rr=rs: sum(int(r[k]) for r in rr)
+        frames, an = g("frames"), g("an")
+        total += frames
+        bmean = sum(int(r["frames"]) * float(r["bmean"]) for r in rs) / frames if frames else 0.0
+        bmin = min(float(r["bmin"]) for r in rs)
+        amean = sum(int(r["an"]) * float(r["amean"]) for r in rs) / an if an else 0.0
+        amin = min((float(r["amin"]) for r in rs if int(r["an"])), default=0.0)
+        dists = sorted(set(float(r["dist"]) for r in rs))
+        dtext = ("%.1f cm" % dists[0]) if len(dists) == 1 else ("%.1f to %.1f cm" % (dists[0], dists[-1]))
+        if name == "hip unarmed" or all(r.get("would") is not None for r in rs):   # F184: the sights measure only too (their rows come from the measuring line)
+            would = g("would")
+            wm = sum(int(r["would"]) * float(r["wm"]) for r in rs) / would if would else 0.0
+            wx = max(float(r["wx"]) for r in rs)
+            parts.append("%s %d s (the guard at %s, measuring only: nothing moved): %d frames, would push %d (%.0f%%; mean %.1f cm, largest %.1f); the eye ahead of the chest min %+.1f mean %+.1f cm, as "
+                         "measured (%d frames) min %+.1f mean %+.1f" % (name, _hsecs(rs), dtext, frames, would, 100.0 * would / frames if frames else 0.0, wm, wx, bmin, bmean, an, amin, amean))
+            if frames and would > 0.03 * frames:
+                notes.append("the unarmed hip would be pushed in %d%% of its frames (measured only: unarmed moves nothing)" % round(100.0 * would / frames) if name == "hip unarmed" else
+                             "%s would be pushed in %d%% of its frames (measured only: the guard acts at the hip armed alone)" % (name, round(100.0 * would / frames)))
+            continue
+        pushed, u9, on = g("pushed"), g("u9"), g("on")
+        pm = sum(int(r["pushed"]) * float(r["pm"]) for r in rs) / pushed if pushed else 0.0
+        px = max(float(r["px"]) for r in rs)
+        om = sum(int(r["on"]) * float(r["om"]) for r in rs) / on if on else 0.0
+        parts.append("%s %d s (the guard at %s): %d frames, pushed %d (%.0f%%; mean %.1f cm, largest %.1f), %d frames with %.1f cm off the post-reach add; the eye ahead of the chest before the guard "
+                     "min %+.1f mean %+.1f cm, after as measured (%d frames) min %+.1f mean %+.1f, under the distance less 1 cm in %d" % (
+                         name, _hsecs(rs), dtext, frames, pushed, 100.0 * pushed / frames if frames else 0.0, pm, px, on, om, bmin, bmean, an, amin, amean, u9))
+        if an and u9 > 0.01 * an:
+            bad.append("%s %d of %d" % (name, u9, an))
+    if not parts:
+        return None
+    text = "; ".join(parts)
+    if any(r.get("bnd") is not None for r in sec + meas):   # F183: the pushes held to the distance plus 10 cm, the filtered error reset by a heading turn of over 20 deg (a build before F183 prints none)
+        text += "; F183: %d bounded push(es), %d filtered-error reset(s)" % (sum(int(r["bnd"] or 0) for r in sec + meas), sum(int(r["rst"] or 0) for r in sec + meas))
+    if bad:
+        return ("PARTIAL", text + "; the eye was measured more than 1 cm under the distance ahead of the chest after the guard in more than 1%% of the frames (the guard did not hold): %s" % ", ".join(bad) +
+                ("; " + "; ".join(notes) if notes else ""))
+    if total < 30:
+        return ("IDLE", text + "; under 30 frames: little to judge")
+    return ("OK", text + ("; " + "; ".join(notes) if notes else ""))
+
+
+# F180b (TEMPORARY): the standing ADS spine straighten (experimental.native_on_foot_stand_ads_spine_straighten) and the figures that judge it (formatSummary in
+# src/d3d11/native_on_foot_f180.h). The window line is printed for every window with a frame standing in the sights with a two-handed gun, the dial at 0 included (the before picture). The
+# dial's own note line carries a different label ("spine dial"); the rule reads it as its "dial" row, which tells an idle flight from a log of a build without the instrument.
+H180B_LABEL = "native on foot standing ADS spine (F180b, TEMPORARY)"
+H180B_RE = (r"native on foot standing ADS spine \(F180b, TEMPORARY\) (?P<wl>\d+) s: item (?P<item>\S+); standing in the sights (?P<frames>\d+) frames; the dial "
+            r"experimental\.native_on_foot_stand_ads_spine_straighten mean (?P<dial>[\d.]+) \(largest (?P<dialmax>[\d.]+)\); the straighten share mean (?P<share>[\d.]+); written in (?P<wrote>\d+) frames; "
+            r"the reference: hip frames (?P<s1>\d+), the press's first frame (?P<s2>\d+), none (?P<s0>\d+); lean about the body's right axis \(deg, forward positive\) animated/reference/written: "
+            r"spine 16 (?P<a0>%s)/(?P<r0>%s)/(?P<w0>%s), spine 21 (?P<a1>%s)/(?P<r1>%s)/(?P<w1>%s), chest 24 (?P<a2>%s)/(?P<r2>%s)/(?P<w2>%s), neck 34 (?P<a3>%s)/(?P<r3>%s)/(?P<w3>%s); "
+            r"the neck from the eye \(right/up/forward, cm\) after (?P<nar>%s)/(?P<nau>%s)/(?P<naf>%s), before (?P<nbr>%s)/(?P<nbu>%s)/(?P<nbf>%s); the left shoulder from the eye after "
+            r"(?P<sar>%s)/(?P<sau>%s)/(?P<saf>%s), before (?P<sbr>%s)/(?P<sbu>%s)/(?P<sbf>%s); F179a's leg raise asked mean (?P<raise>%s) cm"
+            # F182b: the one-sided rule's frames left as animated per bone (builds before F182 print none)
+            r"(?:; left as animated, leaning back of the reference \(frames\): spine 16 (?P<l0>\d+), spine 21 (?P<l1>\d+), chest 24 (?P<l2>\d+), neck 34 (?P<l3>\d+))?" % ((_HN,) * 25))
+H180B_DIAL_RE = (r"native on foot standing ADS spine dial \(F180b, TEMPORARY\): experimental\.native_on_foot_stand_ads_spine_straighten = (?P<val>[\d.]+) -- ")
+
+
+def _hj_f180b_spine(rows, ctx):
+    """F180b (TEMPORARY): the standing ADS spine straighten. Standing in the sights the game's aiming animation hunches the upper spine (levels 16, 21, 24) and the neck (34) forward (the flight
+    edvr_gfx_20261030_10xxxx: the chest's lean +23.4 deg as written, the neck cannot be brought under the headset, the spine still looks curved). The dial takes the share given back out, one-sided
+    since F182b: of each bone's lean about the body's right axis, only the forward bend BEYOND the reference is taken back (written = animated - share x max(0, animated - reference)); a bone
+    that leans back of the reference (looking up leans the torso back) is left as animated. The reference is the same item's levels on the last standing hip frames (the press's first frame when
+    there were none). Per item: the frames, the dial, the share, the frames the rule was made in ("written" counts a frame whose bones were all left as animated), the reference's source, the four
+    bones' lean animated / reference / written, the neck and the left shoulder from the eye after the writes and before the straighten, F179a's leg raise asked, and (F182b) per bone the frames it was
+    left as animated. NEVER APPLIED when 30 or more frames stood in the sights with the dial at 0.1 or more and the rule was made in none; PARTIAL when it was made in under half of those frames;
+    the dial at 0 is the baseline: OK. Under 30 frames is IDLE, and so is a log whose only F180b lines are the dial's own note (the key was read, no standing ADS frame came). No line, no verdict."""
+    sec, notes_dial = rows.get("sec", []), rows.get("dial", [])
+    if not sec:
+        if not notes_dial:
+            return None
+        return ("IDLE", "the standing ADS spine dial was read (%s as last logged) and no frame stood in the sights with a two-handed gun in the window: nothing to judge" % notes_dial[-1]["val"])
+    items = collections.OrderedDict()
+    for r in sec:
+        items.setdefault(r["item"], []).append(r)
+    parts, never, thin, total, dial_seen = [], [], [], 0, 0.0
+    for item, rs in items.items():
+        frames = sum(int(r["frames"]) for r in rs)
+        if not frames:
+            continue
+        total += frames
+        mean = lambda k, rr=rs, nn=frames: sum(int(r["frames"]) * float(r[k]) for r in rr) / nn
+        wrote = sum(int(r["wrote"]) for r in rs)
+        dialmax = max(float(r["dialmax"]) for r in rs)
+        dial_seen = max(dial_seen, dialmax)
+        src1, src2, src0 = (sum(int(r[k]) for r in rs) for k in ("s1", "s2", "s0"))
+        parts.append("%s %d s: standing in the sights %d frames, dial mean %.2f (largest %.2f), share mean %.2f, the levels written in %d (the reference: hip frames %d, the press's first frame %d, none %d); "
+                     "lean animated/reference/written (deg): spine 16 %+.1f/%+.1f/%+.1f, spine 21 %+.1f/%+.1f/%+.1f, chest 24 %+.1f/%+.1f/%+.1f, neck 34 %+.1f/%+.1f/%+.1f; the neck from the eye "
+                     "(right/up/forward, cm) after %+.1f/%+.1f/%+.1f before %+.1f/%+.1f/%+.1f; the left shoulder from the eye after %+.1f/%+.1f/%+.1f before %+.1f/%+.1f/%+.1f; F179a's leg raise asked %+.1f cm" % (
+                         item, _hsecs(rs), frames, mean("dial"), dialmax, mean("share"), wrote, src1, src2, src0,
+                         mean("a0"), mean("r0"), mean("w0"), mean("a1"), mean("r1"), mean("w1"), mean("a2"), mean("r2"), mean("w2"), mean("a3"), mean("r3"), mean("w3"),
+                         mean("nar"), mean("nau"), mean("naf"), mean("nbr"), mean("nbu"), mean("nbf"), mean("sar"), mean("sau"), mean("saf"), mean("sbr"), mean("sbu"), mean("sbf"), mean("raise")))
+        if any(r.get("l0") is not None for r in rs):   # F182b: the one-sided rule's frames left as animated per bone (a build before F182 prints none)
+            lv = [sum(int(r["l%d" % k]) for r in rs if r.get("l%d" % k) is not None) for k in range(4)]
+            parts[-1] += ("; left as animated (the bone leaned back of the reference, frames): spine 16 %d, spine 21 %d, chest 24 %d, neck 34 %d" % tuple(lv))
+        if frames >= 30 and dialmax >= 0.1:
+            if not wrote:
+                never.append("the dial reached %.2f and no level was written in any of %d frames standing in the sights with %s (the reference: hip frames %d, the press's first frame %d, none %d)" % (
+                    dialmax, frames, item, src1, src2, src0))
+            elif wrote < 0.5 * frames:
+                thin.append("the levels were written in %d of %d frames standing in the sights with %s" % (wrote, frames, item))
+    if not parts:
+        return None
+    text = "; ".join(parts)
+    if never:
+        return ("NEVER APPLIED", text + "; " + "; ".join(never + thin))
+    if thin:
+        return ("PARTIAL", text + "; " + "; ".join(thin))
+    if total < 30:
+        return ("IDLE", text + "; under 30 frames standing in the sights: little to judge")
+    if dial_seen < 0.01:
+        return ("OK", text + "; the dial was 0: these are the baseline figures")
+    return ("OK", text)
+
+
+# F182c: F69h keeps the left hand on the item through a stale first-person snapshot (formatClause in src/d3d11/native_on_foot_f182.h, the ending of the F67f line). The ending is printed only for a window
+# with a call kept through a stale input (or a release for staleness), so the F67f line without it (any window without one, or a build before F182) is a "plain" row: it tells an idle flight from a
+# rule that no longer matches. The F67f line is the detail log's (needs_detail), as F69h's is.
+H182C_LABEL = "native on foot armed arms (F67f)"
+H182C_RE = (r"native on foot armed arms \(F67f\): .*?; stale grip hold \(F182c\): kept through a stale FP input (?P<kept>\d+) calls \(stale age mean (?P<agem>[\d.]+) max (?P<agex>[\d.]+) ms\), "
+            r"released for staleness after (?P<lims>[\d.]+) s (?P<limit>\d+); the left hand on the held grip point in (?P<held>\d+) calls, their hand-to-grip error mean (?P<errm>[\d.]+) "
+            r"max (?P<errx>[\d.]+) cm against (?P<unm>[\d.]+) cm on the (?P<unn>\d+) unheld calls")
+H182C_PLAIN_RE = r"native on foot armed arms \(F67f\): (?!.*F182c)"   # an ending that names F182c and does not match the pattern above is neither: unparsed
+H182C_TOL_CM = 2.0         # the held calls' mean hand-to-grip error within this of the unheld calls' mean is a hand on the point
+H182C_MIN_KEPT = 5         # the decision was kept in this many calls and the held point was the target in none: the hold did nothing
+
+
+def _hj_f182c_stale_grip(rows, ctx):
+    """F182c: F69h keeps the left hand on the item through a stale first-person snapshot. The flight edvr_gfx_20261030_115059 (the plasma shotgun) had F69h free the off hand in 4 to 9 calls of every
+    window while the FP pair read 31.1 cm apart and steady: the input was unreadable only because the FP snapshot was older than 100 ms (the game's stalls and EDVR's own 1.15 s dump ticks), and
+    11 fresh frames are needed to take the hand back. An input invalid only for the snapshot's age now keeps the decision and the history for up to 3 s of hook time, and while it does the left grip
+    target is the last grip point the hand had on the item, kept in the item's frame. Reads the ending of the F67f line: the calls kept (and the snapshot's age), the releases after 3 s, the calls on
+    the held point, their hand-to-grip error (mean, largest) and the same windows' unheld solved left calls' mean to judge it against. IDLE with no stale call kept (an F67f line without the ending
+    is not a verdict); OK when the held calls' mean error is within 2 cm of the unheld mean; PARTIAL when it is more, or when 5 or more calls were kept and the held point was the target in none."""
+    sec, plain = rows.get("sec", []), rows.get("plain", [])
+    if not sec:
+        if not plain:
+            return None
+        return ("IDLE", "no call kept the off hand through a stale FP snapshot in %d F67f window(s): nothing to hold" % len(plain))
+    kept, limit, held, unn = (sum(int(r[k]) for r in sec) for k in ("kept", "limit", "held", "unn"))
+    errm = sum(int(r["held"]) * float(r["errm"]) for r in sec) / held if held else 0.0
+    unm = sum(int(r["unn"]) * float(r["unm"]) for r in sec) / unn if unn else 0.0
+    agem = sum(int(r["kept"]) * float(r["agem"]) for r in sec) / kept if kept else 0.0
+    errx, agex = max(float(r["errx"]) for r in sec), max(float(r["agex"]) for r in sec)
+    text = ("%d s: F69h kept the off hand through a stale FP input in %d calls (stale age mean %.0f max %.0f ms), released for staleness after 3 s %d time(s); the left hand on the held grip point in "
+            "%d calls, their hand-to-grip error mean %.2f max %.2f cm against %.2f cm on %d unheld calls" % (_hsecs(sec), kept, agem, agex, limit, held, errm, errx, unm, unn))
+    if not kept:
+        return ("IDLE", text + "; no call was kept (only a release was logged)")
+    if kept >= H182C_MIN_KEPT and not held:
+        return ("PARTIAL", text + "; the decision was kept in %d calls and the held grip point was the target in none (no stored point, or the right target was made another way)" % kept)
+    if held and unn and errm > unm + H182C_TOL_CM:
+        return ("PARTIAL", text + "; the held calls' hand-to-grip error averaged %.2f cm, more than %.0f cm over the unheld calls' %.2f cm (the arm does not reach the held point)" % (errm, H182C_TOL_CM, unm))
+    if held and not unn:
+        return ("OK", text + "; no unheld solved left call in these windows to compare with")
+    return ("OK", text)
+
+# F183: the pin's stable horizontal heading (formatLine in src/d3d11/native_on_foot_f183.h), one line for a window with pin calls that had an eye.
+H183_LABEL = "native on foot heading (F183)"
+H183_RE = (r"native on foot heading \(F183\) (?P<wl>\d+) s: frames (?P<frames>\d+), blended (?P<blended>\d+), replaced (?P<replaced>\d+) \(past vertical\); the largest angle between the eye's "
+           r"heading and the stable one (?P<angle>[\d.]+) deg; the aim pitch (?P<amin>%s) to (?P<amax>%s) deg, the eye's pitch up to (?P<emax>%s) deg" % ((_HN,) * 3))
+H183_AIM_OVER = 80.0       # a window with the aim over this ...
+H183_EYE_OVER = 60.0       # ... and the eye's own pitch over this (its horizontal length under 0.5) with nothing blended or replaced: the heading did not act
+
+
+def _hj_f183_heading(rows, ctx):
+    """F183: the pin's stable horizontal heading. Every horizontal axis the pin took from the eye's forward (the neck target's rest offset, F97a's and F179b's heading, F168/F171/F178's forward and
+    left) flipped when the view passed vertical (the flight edvr_gfx_20261030_125739: the aim at +85.2, the view past vertical on some frames: F179b's eye ahead of the chest -33.7 min against +35.5
+    mean, the arms up to 48 cm short, the view moving 52 mm rms). The heading is now the eye's while its forward's horizontal length is 0.5 or more (60 deg from level, bit for bit as before),
+    blended toward the body's own forward down to 0.17 (80 deg) and the body's forward outright where the eye's heading points behind it. Per second window: the pin calls with an eye, those
+    blended, those replaced (past vertical), the largest angle between the eye's heading and the stable one, the aim's pitch range and the eye's largest pitch. IDLE without pin calls (no line,
+    no verdict: the rule reads only the lines); OK with the figures; NEVER APPLIED for a window with the aim over +80 deg and the eye over +60 deg and no call blended or replaced."""
+    sec = rows.get("sec", [])
+    if not sec:
+        return None
+    frames = sum(int(r["frames"]) for r in sec)
+    blended, replaced = sum(int(r["blended"]) for r in sec), sum(int(r["replaced"]) for r in sec)
+    angle = max(float(r["angle"]) for r in sec)
+    amin, amax, emax = min(float(r["amin"]) for r in sec), max(float(r["amax"]) for r in sec), max(float(r["emax"]) for r in sec)
+    text = ("%d s: %d pin calls with an eye, %d blended toward the body's forward, %d replaced (the view past vertical); the largest angle between the eye's heading and the stable one %.1f deg; "
+            "the aim pitch %+.1f to %+.1f deg, the eye's pitch up to %+.1f deg" % (_hsecs(sec), frames, blended, replaced, angle, amin, amax, emax))
+    if not frames:
+        return ("IDLE", text + "; no pin call had an eye")
+    dead = [r for r in sec if float(r["amax"]) > H183_AIM_OVER and float(r["emax"]) > H183_EYE_OVER and not int(r["blended"]) and not int(r["replaced"]) and int(r["frames"])]
+    if dead:
+        return ("NEVER APPLIED", text + "; %d window(s) had the aim over +%.0f deg and the eye over +%.0f deg with no call blended or replaced (the stable heading did not act: the largest aim %+.1f deg)" % (
+            len(dead), H183_AIM_OVER, H183_EYE_OVER, max(float(r["amax"]) for r in dead)))
+    return ("OK", text)
+
+# F185 (TEMPORARY): the left arm keeps a bend in the sights (experimental.native_on_foot_ads_left_reach) and the figures that judge it (formatSummary in src/d3d11/native_on_foot_f185.h).
+H185_LABEL = "native on foot ADS left arm bend (F185, TEMPORARY)"
+H185_RE = (r"native on foot ADS left arm bend \(F185, TEMPORARY\) (?P<wl>\d+) s: item (?P<item>\S+); two-handed ADS solves (?P<n>\d+), the dial experimental\.native_on_foot_ads_left_reach mean "
+           r"(?P<dial>[\d.]+); the target shoulder to hand distance mean (?P<tgt>[\d.]+) cm; the clavicle turned in (?P<turned>\d+) \(the turn mean (?P<tm>[\d.]+) deg, largest (?P<tx>[\d.]+); "
+           r"the shoulder moved mean (?P<mm>[\d.]+) cm, largest (?P<mx>[\d.]+); the full (?P<lim>\d+) deg not enough in (?P<capped>\d+)\); the reach rule took mean (?P<took>[\d.]+) cm of the "
+           r"body's move for it \(largest (?P<tookx>[\d.]+)\); the left arm's reach ratio before the clavicle mean (?P<rb>[\d.]+), after it mean (?P<ra>[\d.]+) "
+           r"\(min (?P<ramin>[\d.]+) max (?P<ramax>[\d.]+)\)")
+H185_TOL = 0.03          # the reach ratio after the clavicle within this of the dial
+H185_MIN_SOLVES = 30     # fewer two-handed ADS solves than this are too few to judge
+
+
+def _hj_f185_arm_bend(rows, ctx):
+    """F185 (TEMPORARY): the left arm keeps a bend in the sights. The flight edvr_gfx_20261030_134445 (the plasma shotgun, standing in the sights) had the left arm locked straight: the left
+    shoulder 61.5 to 62.5 cm from the grip on a 59.2 cm arm (F56's reach ratio 1.04, up to 3.7 cm short, the swivel clamped in every solve). The dial keeps the left shoulder within its share
+    of the arm's full length of the grip in the sights with a two-handed gun (both stances, by the detach weight): the clavicle turns forward first (at most 15 deg), then the reach rule takes
+    the rest from the body's move. Reads the window line: the two-handed ADS solves, the dial, the target distance, the clavicle's turn and the shoulder's move, what the reach rule took, and the
+    left arm's reach ratio (the hand target over the arm's length) before the clavicle and after it. IDLE under 30 solves; the dial at 1.00 is the baseline (OK, today's reach); OK when the reach
+    ratio after the clavicle is within 0.03 of the dial (F56's reach figures then read about the dial); PARTIAL otherwise, saying how often the clavicle's full turn was not enough. No line, no
+    verdict."""
+    sec = rows.get("sec", [])
+    if not sec:
+        return None
+    n = sum(int(r["n"]) for r in sec)
+    if not n:
+        return None
+    mean = lambda k: sum(int(r["n"]) * float(r[k]) for r in sec) / n
+    dial, tgt, ra, rb, took = mean("dial"), mean("tgt"), mean("ra"), mean("rb"), mean("took")
+    turned, capped = sum(int(r["turned"]) for r in sec), sum(int(r["capped"]) for r in sec)
+    tm = sum(int(r["turned"]) * float(r["tm"]) for r in sec) / turned if turned else 0.0
+    mm = sum(int(r["turned"]) * float(r["mm"]) for r in sec) / turned if turned else 0.0
+    text = ("%d s: %d two-handed ADS solves, the dial %.2f, the target shoulder to hand distance %.1f cm; the clavicle turned in %d (%.1f deg mean, the shoulder %.1f cm; the full 15 deg not enough in %d); "
+            "the reach rule took %.1f cm of the body's move for it; the left arm's reach ratio %.3f before the clavicle, %.3f after (min %.3f, max %.3f)" % (
+                _hsecs(sec), n, dial, tgt, turned, tm, mm, capped, took, rb, ra, min(float(r["ramin"]) for r in sec), max(float(r["ramax"]) for r in sec)))
+    if n < H185_MIN_SOLVES:
+        return ("IDLE", text + "; under %d two-handed ADS solves: little to judge" % H185_MIN_SOLVES)
+    if dial >= 0.995:
+        return ("OK", text + "; the dial was 1.00: these are the baseline figures (today's reach rule, no clavicle turn)")
+    if abs(ra - dial) <= H185_TOL:
+        return ("OK", text)
+    return ("PARTIAL", text + "; the reach ratio after the clavicle is %.3f against the dial %.2f (more than %.2f off; the clavicle's full turn was not enough in %d of %d solves)" % (ra, dial, H185_TOL, capped, n))
+
+# F186: the ADS sight lock's response, the ADS terms' pre-turn (behaviour since F187) and the lock's stability stop (formatResponse, formatStop in
+# src/d3d11/native_on_foot_f186.h). The window line is printed whenever the lock ran; each stop has a line of its own.
+H186_LABELS = ("native on foot ADS lock response (F186)", "native on foot ADS lock stop (F186)")
+H186_RESP_RE = (r"native on foot ADS lock response \(F186\) (?P<wl>\d+) s: the ADS terms turned in (?P<turned>\d+) of (?P<frames>\d+) lock frames; lock stops (?P<stops>\d+); "
+                r"response of the measured error to the lock's change \(a correct loop reads gain 1\.00 angle \+0\.0 deg, the game's turn the aim pitch\): (?P<bins>.+)$")
+H186_BIN_RE = re.compile(r"aim (?P<bin>under 30|30-60|60-75|over 75) deg: (?P<n>\d+) pairs, gain (?P<gain>[\d.]+), angle (?P<angle>[+-]?\d+\.\d) deg, corr (?P<corr>[\d.]+), mean aim (?P<aim>[+-]?\d+\.\d) deg")
+H186_STOP_RE = (r"native on foot ADS lock stop \(F186\): the sight lock held over its limit for (?P<hold>[\d.]+) s \((?P<why>[^;]+); e after the lock (?P<perp>[\d.]+) cm, applied (?P<app>[\d.]+) cm of "
+                r"(?P<clamp>\d+)\) and is released over (?P<ramp>[\d.]+) s and acquired again from zero; aim pitch (?P<aim>[+-]?\d+\.\d) deg(?: \(not fresh\))?; stops this session (?P<total>\d+)")
+H186_BINS = ("under 30", "30-60", "60-75", "over 75")
+H186_MIN_PAIRS = 20        # fewer pairs than this in a bin are too few to judge
+H186_ANGLE_FLAG = 30.0     # a bin whose angle is further than this from a correct loop's 0
+
+
+def _hj_f186_response(rows, ctx):
+    """F186: the ADS sight lock's response to its own commands. The flight edvr_gfx_20261030_144707 (engaging ADS at the +85 aim clamp from the hip) had the applied lock's (up, forward) part rotate at
+    near-constant size, the signature of a loop whose response is turned: under mouse look the game applies the eye alignment in the aim-pitched frame (F172), the sight lock assumed it lands as
+    meant, and the loop's factor 1 - e^{ia} grows from a = 60 deg. Per aim-pitch bin the line fits the map from the change the lock commanded (the shift each eye was rendered with, frame to frame)
+    to the change of the error measured on it, at the serial lag: gain and angle (a correct loop reads gain 1 angle 0; the game's turn reads the aim pitch). The ADS terms go out pre-turned
+    (F187: always, under mouse look with a fresh aim), so the angle is expected near 0, and a bin of 20 or more pairs whose angle is over 30 deg from it is PARTIAL; the text says in how many lock
+    frames the terms were turned. IDLE without lock frames; OK with the figures. No line, no verdict."""
+    sec = rows.get("sec", [])
+    if not sec:
+        return None
+    frames, turned = sum(int(r["frames"]) for r in sec), sum(int(r["turned"]) for r in sec)
+    agg = {b: [0, 0.0, 0.0, 0.0, 0.0] for b in H186_BINS}   # pairs, sum n*gain, sum n*angle, sum n*corr, sum n*aim
+    for r in sec:
+        for m in H186_BIN_RE.finditer(r["bins"]):
+            n = int(m.group("n"))
+            a = agg[m.group("bin")]
+            a[0] += n
+            a[1] += n * float(m.group("gain"))
+            a[2] += n * float(m.group("angle"))
+            a[3] += n * float(m.group("corr"))
+            a[4] += n * float(m.group("aim"))
+    parts, flagged = [], []
+    for b in H186_BINS:
+        n, g, an, co, ai = agg[b]
+        if not n:
+            continue
+        parts.append("aim %s deg: %d pairs, gain %.2f, angle %+.1f, corr %.2f (mean aim %+.1f)" % (b, n, g / n, an / n, co / n, ai / n))
+        if n >= H186_MIN_PAIRS and abs(an / n) > H186_ANGLE_FLAG:
+            flagged.append("%s deg (%+.1f deg at %d pairs)" % (b, an / n, n))
+    text = "%d s: %d lock frames, the ADS terms turned in %d; response of the error to the lock's change: %s" % (_hsecs(sec), frames, turned, "; ".join(parts) if parts else "no pairs")
+    if not frames:
+        return ("IDLE", text + "; no lock frame")
+    if flagged:
+        return ("PARTIAL", text + "; the response is turned %s from a correct loop in: %s" % (">30 deg", ", ".join(flagged)))
+    return ("OK", text)
+
+
+def _hj_f186_stops(rows, ctx):
+    """F186: the lock's stability stop. If the sight lock's e after the lock stays over 10 cm, or its applied vector sits at its clamp, for 0.3 s, the lock is released (ramped to zero over 0.15 s)
+    and acquired again from zero: a guard against a loop nobody has proven closed, which must be rare. OK with no stop in the lock frames the window lines report; PARTIAL with any, naming the
+    aim pitch of each. IDLE without lock frames. No line, no verdict."""
+    sec, stop = rows.get("sec", []), rows.get("stop", [])
+    if not sec and not stop:
+        return None
+    frames = sum(int(r["frames"]) for r in sec)
+    stops = max(sum(int(r["stops"]) for r in sec), len(stop))
+    text = "%d s, %d lock frames, %d stop(s)" % (_hsecs(sec), frames, stops)
+    if not stops:
+        return ("IDLE", text + "; no lock frame") if not frames else ("OK", text)
+    named = "; ".join("aim %+.1f deg, %s (e %.1f cm, applied %.1f cm)" % (float(r["aim"]), r["why"], float(r["perp"]), float(r["app"])) for r in stop) or "no stop line in the window"
+    return ("PARTIAL", text + ": " + named)
 
 def _hj_f95c_head_shadow(rows, ctx):
     """F95c: the head kept in the shadows. Per second: the local avatar's visibility calls, how many ran the head as shadow-only, the (head instance, view) pairs
@@ -16000,9 +16564,10 @@ HEALTH_RULES = (
         ("_", r"weapon UI pin \(F85b\): identification path"),
     ), _hj_f85b),
     _hrule("reticle depth (F85c)", ("F85c",), ("reticle depth (F85c)",), (
-        ("draws", r"reticle depth \(F85c\): key 10 draws (?P<draws>\d+), patched at the hit depth (?P<patched>\d+); .*? over (?P<reads>\d+) readbacks \(hit (?P<hit>\d+), "
+        # F191: `key 11 (type 1001) draws N` (the key type 1001 uses; `key 10 (assumed: no type 1001 call seen yet)` before one was seen); a log before F191 says `key 10 draws N`
+        ("draws", r"reticle depth \(F85c\): key (?P<key>\d+)(?: \((?P<why>[^)]*)\))? draws (?P<draws>\d+), patched at the hit depth (?P<patched>\d+); .*? over (?P<reads>\d+) readbacks \(hit (?P<hit>\d+), "
                   r"sky (?P<sky>\d+).*refusals: (?P<refs>.*?)(?:; over " + H_WL + r"; draws in (?P<xs>\d+) of (?P<ws>\d+) s)?$"),
-        ("idle", r"reticle depth \(F85c\): no key 10 composite draw (?:this second|over (?P<wl>\d+) s)"),
+        ("idle", r"reticle depth \(F85c\): no (?:key 10|reticle) composite draw (?:this second|over (?P<wl>\d+) s)"),
         # F101: the reticle's game placement (a setting until F127; this build never prints the line, an older log may): key 10 is the game's, so nothing is patched by design
         ("game", r"reticle depth \(F85c\): the reticle is the game's \([^)]*\): key 10 draws (?P<n>\d+) left as the game placed them"),
         ("fail", r"reticle depth \(F85c\): (?:precompiled compute shader \S+ )?(?P<why>creation (?:FAILED|faulted/refused); standing down|the GPU resources could not be made)"),
@@ -16592,23 +17157,39 @@ HEALTH_RULES = (
                     r"HUD moving \[(?P<hm>[\d.,]*)\]; settled (?P<settled_s>\d+) of (?P<ws>\d+) s$"),
     ), _hj_f95a_motion),
     _hrule("armed body (F97a)", ("F97a",), ("native on foot armed body (F97a)",), (
-        ("sec", r"native on foot armed body \(F97a\) (?P<wl>\d+) s: item (?P<item>\S+); (?P<stance>standing|crouched|moving crouched|moving) (?P<n>\d+) calls: weapon weight "
-                r"(?P<w>[\d.]+); the neck raised (?P<raise>%s) cm \(min %s max %s; asked (?P<asked>%s); capped by the legs (?P<capped>\d+)\), written (?P<neckw>[\d.]+) m "
-                r"against animated (?P<necka>[\d.]+) m; the eye as drawn over the clavicle line (?P<clav>%s) cm \(min (?P<clavmin>%s)\), ahead of the chest (?P<chest>%s) cm "
-                r"\(min (?P<chestmin>%s)\), INSIDE (?P<inside>\d+) of (?P<clr>\d+); legs hip to foot over the leg: animated (?P<la>[\d.]+), written (?P<lw>[\d.]+) "
-                r"\(min (?P<lmin>[\d.]+)\), feet lifted (?P<lifted>\d+)" % ((_HN,) * 8)),
+        ("sec", H97_RE),
     ), _hj_f97a_body),
+    _hrule("standing ADS height (F179a)", ("F97a",), ("native on foot armed body (F97a)",), (
+        ("sec", H97_RE),
+    ), _hj_f179a_height),
+    _hrule("neck guard (F179b)", ("F179b",), (H179B_LABEL,), (
+        ("sec", H179B_RE),
+        ("meas", H179B_MEAS_RE),
+    ), _hj_f179b_guard),
+    _hrule("standing ADS spine (F180b)", ("F180b",), (H180B_LABEL,), (
+        ("sec", H180B_RE),
+        ("dial", H180B_DIAL_RE),
+    ), _hj_f180b_spine),
+    _hrule("ADS lock response (F186)", ("F186",), H186_LABELS, (
+        ("sec", H186_RESP_RE),
+        ("stop", H186_STOP_RE),
+    ), _hj_f186_response),
+    _hrule("ADS lock stops (F186)", ("F186",), H186_LABELS, (
+        ("sec", H186_RESP_RE),
+        ("stop", H186_STOP_RE),
+    ), _hj_f186_stops),
+    _hrule("ADS left arm bend (F185)", ("F185",), (H185_LABEL,), (
+        ("sec", H185_RE),
+    ), _hj_f185_arm_bend),
+    _hrule("stable heading (F183)", ("F183",), (H183_LABEL,), (
+        ("sec", H183_RE),
+    ), _hj_f183_heading),
+    _hrule("stale grip hold (F182c)", ("F67f",), (H182C_LABEL,), (
+        ("sec", H182C_RE),
+        ("plain", H182C_PLAIN_RE),
+    ), _hj_f182c_stale_grip, needs_detail=True),
     _hrule("left elbow (F98a)", ("F98a", "F159"), ("native on foot left elbow (F98a)", "native on foot left elbow pole (F159)", "native on foot left elbow seed (F159)"), (
-        ("sec", r"native on foot left elbow \(F98a\) (?P<wl>\d+) s: item (?P<item>\S+); (?P<n>\d+) solves: the game's aim pitch (?P<aim>%s) deg \(min %s max %s\); the chest's lean as "
-                r"written (?P<lean>%s) deg \(animated (?P<leanAnim>%s)\); F82's torso yaw (?P<yaw>%s) deg \(largest [\d.]+\); the elbow's swivel from the stance's plane "
-                r"(?P<plane>[\d.]+) deg \(max [\d.]+, over 45 deg in (?P<over45>\d+)\); its step a frame (?P<step>[\d.]+) deg rms \(max [\d.]+, over 10 deg (?P<over10>\d+), "
-                r"of (?P<steps>\d+) steps\); the swivel from the stable pole's seed (?P<seed>\d+) \(the arm [\d.]+ deg from the seed's axis, max [\d.]+\), a body-down "
-                r"pole (?P<down>\d+), the legacy swivel (?P<legacy>\d+); hand twist at the forearm's limit (?P<twist>\d+)"
-                # F124: on a second with body-down solves, the arm's closest approach to the body's down and the largest step's angle and twist limit
-                r"(?:; on (?P<dn>\d+) body-down solves the arm's axis came within (?P<dmin>[\d.]+) deg of the body's down; "
-                r"(?:at the largest step \((?P<dstep>[\d.]+) deg\) the axis was (?P<dang>[\d.]+) deg from down, the twist limit (?P<dtwist>hit|not hit)"
-                r"|no elbow step was measured))?"
-                r"(?:; seconds mostly over 45 deg (?P<swung_s>\d+); flip seconds (?P<flip_s>\d+) \(near vertical (?P<near_s>\d+), twist limit (?P<twist_s>\d+), near with twist (?P<near_twist_s>\d+)\))?" % ((_HN,) * 6)),
+        ("sec", H98A_SEC_RE),
         # F159: the left elbow's stable pole in the same window (a line of its own: F98a's has no room under the log's 1200 bytes), and each seed's birth
         ("pole", r"native on foot left elbow pole \(F159\) (?P<wl>\d+) s: item (?P<item>\S+); (?P<n>\d+) solves with the stable pole \((?P<hipn>\d+) at the hip\): the solved elbow "
                  r"(?P<solved>%s) cm over the shoulder \(min (?P<smin>%s) max (?P<smax>%s)\), within 1 cm of the shoulder's height or above in (?P<high>\d+) \((?P<hiphigh>\d+) at the hip\); "
@@ -16627,6 +17208,9 @@ HEALTH_RULES = (
                   r"(?:; the pole it replaced put the elbow (?P<was>%s) cm over the shoulder with the arm (?P<off>[\d.]+) cm off its axis)?"
                   r"(?:; (?P<skipped>\d+) earlier seed\(s\) not logged \(one line in 0\.5 s\))?" % ((_HN,) * 5)),
     ), _hj_f98a_elbow),
+    _hrule("hip elbow cap (F181a)", ("F98a",), ("native on foot left elbow (F98a)",), (
+        ("sec", H98A_SEC_RE),
+    ), _hj_f181a_hip_cap),
     _hrule("left arm to the eye (F161)", ("F161",), (H161_LABEL,), (
         ("sec", H161_RE),
     ), _hj_f161_arm_eye),
@@ -16646,6 +17230,10 @@ HEALTH_RULES = (
     _hrule("crouched ADS body sideways (F171)", ("F171",), (H171_LABEL,), (
         ("sec", H171_RE),
     ), _hj_f171_sideways),
+    _hrule("standing ADS body (F178)", ("F178",), (H178_LABEL,), (
+        ("sec", H178_RE),
+        ("dial", H178_DIAL_RE),
+    ), _hj_f178_standing),
     _hrule("raise carriage (F171)", ("F171",), (H171C_LABEL,), (
         ("sec", H171C_RE),
     ), _hj_f171_carriage),
@@ -17781,6 +18369,14 @@ def self_test_health():
     f170_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f170.h")
     f171_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f171.h")
     f171c_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f171c.h")
+    f178_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f178.h")
+    f179_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f179.h")
+    f180_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f180.h")
+    f181_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f181.h")
+    f182_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f182.h")
+    f183_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f183.h")
+    f185_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f185.h")
+    f186_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f186.h")
     f172_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f172.h")
     f175_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f175.h")
     f176_path = os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f176.h")
@@ -17815,6 +18411,14 @@ def self_test_health():
         f170src = read_text(f170_path)
         f171src = read_text(f171_path)
         f171csrc = read_text(f171c_path)
+        f178src = read_text(f178_path)
+        f179src = read_text(f179_path)
+        f180src = read_text(f180_path)
+        f181src = read_text(f181_path)
+        f182src = read_text(f182_path)
+        f183src = read_text(f183_path)
+        f185src = read_text(f185_path)
+        f186src = read_text(f186_path)
         f172src = read_text(f172_path)
         f175src = read_text(f175_path)
         f176src = read_text(f176_path)
@@ -17965,6 +18569,78 @@ def self_test_health():
             fmts[key] = health_c_format(f171src, needle)
         if fmts[key] is None:
             raise AssertionError("native_on_foot_f171.h has no format holding %r: the --health rule that reads it is out of date" % needle)
+        return health_render(fmts[key], vals)
+
+    def R178(needle, *vals):
+        """F178's window line (formatSummary in native_on_foot_f178.h), from its own format literal; the dials' note lines (native_on_foot.cpp), from theirs."""
+        key = "f178:" + needle
+        if key not in fmts:
+            fmts[key] = health_c_format(f178src, needle) or health_c_format(source, needle)
+        if fmts[key] is None:
+            raise AssertionError("native_on_foot_f178.h and native_on_foot.cpp have no format holding %r: the --health rule that reads it is out of date" % needle)
+        return health_render(fmts[key], vals)
+
+    def R179(needle, *vals):
+        """F179b's neck guard line (formatContext in native_on_foot_f179.h), from its own format literal."""
+        key = "f179:" + needle
+        if key not in fmts:
+            fmts[key] = health_c_format(f179src, needle)
+        if fmts[key] is None:
+            raise AssertionError("native_on_foot_f179.h has no format holding %r: the --health rule that reads it is out of date" % needle)
+        return health_render(fmts[key], vals)
+
+    def R181(needle, *vals):
+        """F181a's ending of the F98a line (appendSummary in native_on_foot_f181.h), from its own format literal."""
+        key = "f181:" + needle
+        if key not in fmts:
+            fmts[key] = health_c_format(f181src, needle)
+        if fmts[key] is None:
+            raise AssertionError("native_on_foot_f181.h has no format holding %r: the --health rule that reads it is out of date" % needle)
+        return health_render(fmts[key], vals)
+
+    def R186(needle, *vals):
+        """F186's lines (formatResponse, formatStop in native_on_foot_f186.h), from their own format literals."""
+        key = "f186:" + needle
+        if key not in fmts:
+            fmts[key] = health_c_format(f186src, needle)
+        if fmts[key] is None:
+            raise AssertionError("native_on_foot_f186.h has no format holding %r: the --health rule that reads it is out of date" % needle)
+        return health_render(fmts[key], vals)
+
+    def R185(needle, *vals):
+        """F185's window line (formatSummary in native_on_foot_f185.h), from its own format literal."""
+        key = "f185:" + needle
+        if key not in fmts:
+            fmts[key] = health_c_format(f185src, needle)
+        if fmts[key] is None:
+            raise AssertionError("native_on_foot_f185.h has no format holding %r: the --health rule that reads it is out of date" % needle)
+        return health_render(fmts[key], vals)
+
+    def R183(needle, *vals):
+        """F183's window line (formatLine in native_on_foot_f183.h), from its own format literal."""
+        key = "f183:" + needle
+        if key not in fmts:
+            fmts[key] = health_c_format(f183src, needle)
+        if fmts[key] is None:
+            raise AssertionError("native_on_foot_f183.h has no format holding %r: the --health rule that reads it is out of date" % needle)
+        return health_render(fmts[key], vals)
+
+    def R182(needle, *vals):
+        """F182c's ending of the F67f line (formatClause in native_on_foot_f182.h), from its own format literal."""
+        key = "f182:" + needle
+        if key not in fmts:
+            fmts[key] = health_c_format(f182src, needle)
+        if fmts[key] is None:
+            raise AssertionError("native_on_foot_f182.h has no format holding %r: the --health rule that reads it is out of date" % needle)
+        return health_render(fmts[key], vals)
+
+    def R180(needle, *vals):
+        """F180b's window line (formatSummary in native_on_foot_f180.h), from its own format literal; the dial's note line (native_on_foot.cpp), from its own."""
+        key = "f180:" + needle
+        if key not in fmts:
+            fmts[key] = health_c_format(f180src, needle) or health_c_format(source, needle)
+        if fmts[key] is None:
+            raise AssertionError("native_on_foot_f180.h and native_on_foot.cpp have no format holding %r: the --health rule that reads it is out of date" % needle)
         return health_render(fmts[key], vals)
 
     def R171c(needle, *vals):
@@ -18291,11 +18967,20 @@ def self_test_health():
             # F151: per eye, the draws no stream window held and what the place rule said of each (the line prints the count not bound itself)
             return R("(F85b) eye %d: place bind (F151)", eye, outside, bound, outside - bound, why, wl)
 
-        def retic(draws=47, patched=42, reads=21, refs=(), wl=1, draw_secs=None):
+        def retic(draws=47, patched=42, reads=21, refs=(), wl=1, draw_secs=None, key="11 (type 1001)"):
+            # F191: the key text is what the DLL prints (the tracker's describe): "11 (type 1001)", or "10 (assumed: no type 1001 call seen yet)" before a type 1001 call
             v = [draws, patched, 50.0, 50.0, 50.0, reads, 20, 1] + [None] * 9 + [0] * 13
             for i, n in enumerate(refs):
                 v[17 + i] = n
-            return R("reticle depth (F85c): key 10 draws", *v, wl, int(bool(draws)) if draw_secs is None else draw_secs, wl)
+            return R("reticle depth (F85c): key %s draws", key, *v, wl, int(bool(draws)) if draw_secs is None else draw_secs, wl)
+
+        def retic_idle(wl=1, key="11 (type 1001)"):
+            # F191: the idle line names the key it waited for
+            return R("reticle depth (F85c): no reticle composite draw", wl, key)
+
+        def retic_old(line):
+            # A log of a build before F191 says `key 10 draws` and `no key 10 composite draw` (frozen wording; the DLL no longer prints it)
+            return line.replace("key 11 (type 1001) draws", "key 10 draws").replace("no reticle composite draw over", "no key 10 composite draw over")
 
         def hold(state="holding"):
             c = [int(state.startswith(x)) for x in ("holding", "frozen", "no pose", "ramping", "out of scope")]
@@ -19173,9 +19858,12 @@ def self_test_health():
         RIFLE97 = "$wpn_m_assaultrifle_laser_fauto_name;"
 
         def body97(item=RIFLE97, stance="standing", w=1.0, raise_=8.2, asked=8.4, capped=0, clav=18.2, clavmin=15.0, chest=28.0, chestmin=20.0, inside=0, clr=90,
-                   la=0.894, lw=0.985, lifted=0, wl=1):
+                   la=0.894, lw=0.985, lifted=0, wl=1, ss=None, sr=0.0, old=False):
+            """F97a's window line, from the DLL's own format; a bin in the sights (F179a) ends with the standing share's mean ss and the standing raise asked sr (cm), and (F184) its source; old: a
+            build before F184 (the ending without the source)."""
+            tail = "" if ss is None else ("; the standing share (F179a) mean %.2f, its raise asked %+.1f cm" % (ss, sr)) if old else R("; the standing share (F179a) mean %.2f, its raise asked", ss, sr)
             return R("native on foot armed body (F97a) %u s: item %s", wl, item, stance, 90, w, raise_, raise_ - 1.0, raise_ + 1.0, asked, capped, 1.300 + raise_ / 100.0, 1.300,
-                     clav, clavmin, chest, chestmin, inside, clr, la, lw, lw - 0.01, lifted)
+                     clav, clavmin, chest, chestmin, inside, clr, la, lw, lw - 0.01, lifted, tail)
 
         check("F97a body: the rifle raised upright, the eye clear", [body97()] * 2 + [body97(stance="crouched", raise_=-6.8, asked=-6.8, clav=14.0, clavmin=12.0)] * 2, 0,
               [("OK", F97)], has=[RIFLE97 + " standing 2 s: weight 1.00, neck raised +8.2 cm (asked +8.4, capped 0)", RIFLE97 + " crouched 2 s"], lacks=["UNPARSED"])
@@ -19185,14 +19873,261 @@ def self_test_health():
               has=["the raise was asked and never written with " + RIFLE97 + " standing"])
         check("F97a body: a foot lifted", [body97(lifted=3)] * 2, 0, [("PARTIAL", F97)], has=["feet lifted (" + RIFLE97 + " standing 6)"])
         check("F97a body: fists only", [body97("$humanoid_fists_name;", w=0.0, raise_=0.0, asked=0.0, clav=10.0)] * 2, 0, [("IDLE", F97)], has=["no armed second"])
+        # F179a: the bins in the sights. A raise held in the sights is not a fault of the F97a rule; the standing ADS height rule judges it.
+        F179A = "standing ADS height (F179a)"
+        check("F97a body: a standing bin in the sights holding a raise is OK for the F97a rule, with the hip's bin beside it",
+              [body97(), body97(stance="standing in the sights", raise_=9.0, asked=9.0, clav=23.0, clavmin=21.0, la=0.895, lw=0.985, ss=1.0, sr=9.0)] * 2, 0, [("OK", F97), ("OK", F179A)],
+              has=[RIFLE97 + " standing in the sights 2 s: weight 1.00, neck raised +9.0 cm (asked +9.0, capped 0)", RIFLE97 + " standing 2 s"], lacks=["UNPARSED", "PARTIAL"])
+        check("F179a height: standing ADS calls with a raise written are OK, and the figures are said",
+              [body97(stance="standing in the sights", raise_=9.0, asked=9.0, clav=23.0, clavmin=21.0, la=0.895, lw=0.985, ss=1.0, sr=15.5, capped=0, wl=10)] * 2, 0, [("OK", F179A)],
+              has=[RIFLE97 + " standing in the sights 20 s, 180 calls: standing share 1.00, raise written +9.0 cm (asked +9.0, standing raise +15.5, capped by the legs 0), neck written 1.390 m against animated 1.300",
+                   "legs 0.895 -> 0.985, the eye over the clavicles +23.0 cm"], lacks=["UNPARSED", "NEVER"])
+        check("F184 height: the raise in the sights is asked of the legs' room, and the verdict says so",
+              [body97(stance="standing in the sights", raise_=13.2, asked=13.2, clav=17.0, clavmin=15.0, la=1.039, lw=0.995, ss=1.0, sr=13.2, capped=0, wl=10)] * 2, 0, [("OK", F179A)],
+              has=["standing raise +13.2, capped by the legs 0)", "; the raise asked of the legs' room, not the eye"], lacks=["UNPARSED", "NEVER", "before F184"])
+        check("F184 height: a line from a build before F184 (the eye-based ask) says so",
+              [body97(stance="standing in the sights", raise_=9.0, asked=9.0, clav=23.0, clavmin=21.0, la=0.895, lw=0.985, ss=1.0, sr=15.5, wl=10, old=True)], 0, [("OK", F179A)],
+              has=["; the raise asked from the eye (a build before F184)"], lacks=["UNPARSED", "NEVER", "legs' room, not the eye"])
+        check("F179a height: 90 standing ADS calls with room left in the legs and no raise written is the release it replaces",
+              [body97(stance="standing in the sights", raise_=0.0, asked=0.0, clav=32.6, clavmin=32.4, la=0.895, lw=0.895, ss=1.0, sr=15.5)], 3, [("NEVER APPLIED", F179A)],
+              has=["90 armed standing ADS calls with " + RIFLE97 + " wrote no raise (+0.0 cm) with room left in the legs (written 0.895, under 0.97)"], lacks=["UNPARSED"])
+        check("F179a height: no raise with the legs already straight (nothing to give) is OK",
+              [body97(stance="standing in the sights", raise_=0.0, asked=0.0, la=0.99, lw=0.99, ss=1.0, sr=0.0)], 0, [("OK", F179A)], lacks=["UNPARSED", "NEVER"])
+        check("F179a height: under 30 standing ADS calls is too few to judge",
+              [body97(stance="standing in the sights", raise_=0.0, asked=0.0, la=0.895, lw=0.895, ss=1.0, sr=15.5).replace("standing in the sights 90 calls", "standing in the sights 20 calls")], 0, [("IDLE", F179A)],
+              has=["under 30 standing ADS calls: little to judge"], lacks=["UNPARSED", "NEVER"])
+        check("F179a height: the crouched bin in the sights is the F97a rule's, not this one's (no verdict row from it)",
+              [body97(stance="crouched in the sights", raise_=-6.0, asked=-6.0, clav=20.0, clavmin=18.0, ss=0.0, sr=0.0)], 0, [("OK", F97)], lacks=["UNPARSED", row("OK", F179A), row("NEVER APPLIED", F179A)])
+        check("F179a height: a log from before it (no bin in the sights) has no verdict row", [body97()], 0, [("OK", F97)],
+              lacks=[row("OK", F179A), row("IDLE", F179A), row("PARTIAL", F179A), row("NEVER APPLIED", F179A), row("UNPARSED", F179A)])
+        check("F179a height: a line that drifted from its pattern is unparsed by both rules", ["native on foot armed body (F97a) 1 s: something else"], 4, [("UNPARSED", F97), ("UNPARSED", F179A)])
 
+        # ---- F179b: the neck guard (F180c: the distance in the line, unarmed at the hip measures only) ----
+        F179B = "neck guard (F179b)"
+
+        def guard179(item=RIFLE97, wl=10, ctx="ADS standing", frames=800, dist=10.0, pushed=120, pm=3.0, px=6.5, on=40, om=2.0, ox=4.0, bmin=4.0, bmean=14.0, an=800, amin=10.4, amean=18.0, pred=18.5,
+                     u9=0, bnd=0, rst=0, old=False):
+            """F179b's line for one acting context, from the DLL's own format (formatContext, native_on_foot_f179.h); the push, the part off the post-reach add and the eye ahead of the chest in cm; dist:
+            the guard's distance (the key's value), the frames under it less 1 cm: u9; bnd, rst: F183's bounded pushes and error resets; old: a build before F183 (no such ending)."""
+            line = R179("native on foot neck guard (F179b) %u s: item %s; %s %u frames, the guard at %.1f cm: pushed", wl, item, ctx, frames, dist, pushed, pm, px, on, om, ox, bmin, bmean, an, amin, amean,
+                        pred, max(dist - 1.0, 0.0), u9, bnd, rst)
+            return line.rsplit(", bounded pushes", 1)[0] if old else line
+
+        def meas179(item=RIFLE97, wl=10, frames=500, dist=10.0, would=40, wm=2.4, wx=9.2, bmin=-0.3, bmean=21.0, an=500, amin=-0.3, amean=21.0, pred=21.0, bnd=0, rst=0, old=False, ctx="hip unarmed"):
+            """F180c's line for the unarmed hip, which measures only (the same formatContext, its other format)."""
+            line = R179("native on foot neck guard (F179b) %u s: item %s; %s %u frames, the guard at %.1f cm, measuring only", wl, item, ctx, frames, dist, would, wm, wx, bmin, bmean, an, amin, amean, pred, bnd, rst)
+            return line.rsplit(", bounded pushes", 1)[0] if old else line
+
+        check("F179b guard: pushes that held the eye 10 cm ahead of the chest are OK, with the contexts named",
+              [guard179(), guard179(ctx="hip armed", frames=600, pushed=0, pm=0.0, px=0.0, on=0, om=0.0, ox=0.0, bmin=30.0, bmean=34.0, amin=29.0, amean=33.0, pred=33.0, an=600)], 0, [("OK", F179B)],
+              has=["ADS standing 10 s (the guard at 10.0 cm): 800 frames, pushed 120 (15%; mean 3.0 cm, largest 6.5), 40 frames with 2.0 cm off the post-reach add; the eye ahead of the chest before the guard "
+                   "min +4.0 mean +14.0 cm, after as measured (800 frames) min +10.4 mean +18.0, under the distance less 1 cm in 0", "hip armed 10 s (the guard at 10.0 cm): 600 frames, pushed 0 (0%; mean 0.0 cm, largest 0.0)"],
+              lacks=["UNPARSED", "did not hold"])
+        check("F179b guard: a window with no push still says the guard ran", [guard179(pushed=0, pm=0.0, px=0.0, on=0, om=0.0, ox=0.0, bmin=30.0, bmean=33.0, amin=29.0, amean=33.0, pred=33.0)], 0,
+              [("OK", F179B)], has=["pushed 0 (0%; mean 0.0 cm, largest 0.0)"], lacks=["UNPARSED"])
+        check("F179b guard: the measured figure under the distance less 1 cm in more than 1% of the frames is a guard that did not hold",
+              [guard179(amin=5.5, amean=11.0, u9=40)], 0, [("PARTIAL", F179B)], has=["(the guard did not hold): ADS standing 40 of 800"], lacks=["UNPARSED"])
+        check("F179b guard: under the distance in 1% of the frames or fewer is held", [guard179(amin=8.0, u9=8)], 0, [("OK", F179B)], lacks=["UNPARSED", "did not hold"])
+        check("F179b guard: under 30 frames is too few to judge", [guard179(frames=20, pushed=2, an=20, u9=0)], 0, [("IDLE", F179B)], has=["under 30 frames: little to judge"], lacks=["UNPARSED"])
+        check("F180c guard: the distance is the key's: 14 cm says so, and 'under' is 1 cm below it",
+              [guard179(dist=14.0, amin=11.0, amean=16.0, u9=0)], 0, [("OK", F179B)], has=["ADS standing 10 s (the guard at 14.0 cm): 800 frames"], lacks=["UNPARSED", "did not hold"])
+        check("F180c guard: two windows at two distances name both", [guard179(dist=10.0), guard179(dist=14.0)], 0, [("OK", F179B)], has=["(the guard at 10.0 to 14.0 cm)"], lacks=["UNPARSED"])
+        check("F180c guard: unarmed at the hip measures only: the push it would make, nothing moved, and the figure is never judged held or not",
+              [meas179(), guard179()], 0, [("OK", F179B)],
+              has=["hip unarmed 10 s (the guard at 10.0 cm, measuring only: nothing moved): 500 frames, would push 40 (8%; mean 2.4 cm, largest 9.2); the eye ahead of the chest min -0.3 mean +21.0 cm, as measured "
+                   "(500 frames) min -0.3 mean +21.0", "the unarmed hip would be pushed in 8% of its frames (measured only: unarmed moves nothing)"], lacks=["UNPARSED", "did not hold", "PARTIAL"])
+        check("F180c guard: unarmed at the hip measured far under the distance is still not PARTIAL", [meas179(bmin=-4.0, amin=-4.0, amean=2.0, would=500)], 0, [("OK", F179B)], lacks=["UNPARSED", "did not hold"])
+        check("F180c guard: the unarmed line alone under 30 frames is idle", [meas179(frames=20, would=0, wm=0.0, wx=0.0, an=20)], 0, [("IDLE", F179B)], lacks=["UNPARSED"])
+        check("F179b guard: two windows add up, the push weighted by the pushed frames, the figures by their frames",
+              [guard179(frames=100, pushed=10, pm=2.0, px=3.0, an=100), guard179(frames=300, pushed=30, pm=4.0, px=9.0, an=300)], 0, [("OK", F179B)],
+              has=["20 s (the guard at 10.0 cm): 400 frames, pushed 40 (10%; mean 3.5 cm, largest 9.0)"], lacks=["UNPARSED"])
+        check("F179b guard: a line that drifted from its pattern is unparsed", ["native on foot neck guard (F179b) 10 s: something else"], 4, [("UNPARSED", F179B)])
+        check("F179b guard: a line that drifted beside a good one is counted beside the verdict", [guard179(), "native on foot neck guard (F179b) 10 s: something else"], 0, [("OK", F179B)],
+              has=["[+1 line(s) the rule's patterns do not match: "])
+
+        # F184: in the sights the guard measures only: the measuring line carries the ADS contexts, they are never judged held or not, and the push it would make is said
+        check("F184 guard: the sights measure only: the push it would make, nothing moved, never PARTIAL, whatever the figure",
+              [meas179(ctx="ADS standing", frames=800, would=120, wm=3.0, wx=6.5, bmin=-3.0, bmean=6.0, an=800, amin=-2.0, amean=7.0), meas179(ctx="ADS crouched", frames=300, would=0, wm=0.0, wx=0.0, an=300),
+               guard179(ctx="hip armed", frames=600, pushed=60, an=600, amin=10.4, amean=18.0)], 0, [("OK", F179B)],
+              has=["ADS standing 10 s (the guard at 10.0 cm, measuring only: nothing moved): 800 frames, would push 120 (15%; mean 3.0 cm, largest 6.5)", "ADS standing would be pushed in 15% of its frames (measured only: the guard acts at the hip armed alone)",
+                   "ADS crouched 10 s (the guard at 10.0 cm, measuring only: nothing moved): 300 frames, would push 0", "hip armed 10 s (the guard at 10.0 cm): 600 frames, pushed 60"],
+              lacks=["UNPARSED", "did not hold", "PARTIAL"])
+        check("F184 guard: a build before F184 prints the sights as acting lines, still judged as before (held or not)", [guard179(amin=5.5, amean=11.0, u9=40)], 0, [("PARTIAL", F179B)], has=["(the guard did not hold): ADS standing 40 of 800"], lacks=["UNPARSED"])
+
+        # F183: the guard's pushes held to the distance plus 10 cm and the filtered error reset by a heading turn of over 20 deg, appended to both lines
+        check("F183 guard: the bounded pushes and the error resets ride the acting line and are counted in the verdict",
+              [guard179(bnd=3, rst=2), guard179(bnd=1, rst=0, ctx="hip armed")], 0, [("OK", F179B)], has=["F183: 4 bounded push(es), 2 filtered-error reset(s)"], lacks=["UNPARSED"])
+        check("F183 guard: and the unarmed hip's measuring line", [meas179(bnd=5, rst=1), guard179()], 0, [("OK", F179B)], has=["F183: 5 bounded push(es), 1 filtered-error reset(s)"], lacks=["UNPARSED"])
+        check("F183 guard: a line from a build before F183 (no ending) still parses and says nothing of it", [guard179(old=True), meas179(old=True)], 0, [("OK", F179B)], lacks=["UNPARSED", "F183:", "bounded"])
+
+        # ---- F185 (TEMPORARY): the left arm keeps a bend in the sights ----
+        F185 = "ADS left arm bend (F185)"
+
+        def bend185(item=RIFLE97, wl=10, n=800, dial=0.92, tgt=54.5, turned=700, tm=9.5, tx=15.0, mm=3.8, mx=5.1, capped=40, took=1.2, tookx=6.0, rb=1.040, ra=0.925, ramin=0.90, ramax=0.97):
+            """F185's window line, from the DLL's own format (formatSummary, native_on_foot_f185.h)."""
+            return R185("native on foot ADS left arm bend (F185, TEMPORARY) %u s: item %s", wl, item, n, dial, tgt, turned, tm, tx, mm, mx, 15.0, capped, took, tookx, rb, ra, ramin, ramax)
+
+        check("F185 arm bend: the reach ratio after the clavicle within 0.03 of the dial is OK, with the figures",
+              [bend185(), bend185()], 0, [("OK", F185)],
+              has=["20 s: 1600 two-handed ADS solves, the dial 0.92, the target shoulder to hand distance 54.5 cm; the clavicle turned in 1400 (9.5 deg mean, the shoulder 3.8 cm; the full 15 deg not enough in 80); "
+                   "the reach rule took 1.2 cm of the body's move for it; the left arm's reach ratio 1.040 before the clavicle, 0.925 after (min 0.900, max 0.970)"], lacks=["UNPARSED", "NEVER", "PARTIAL"])
+        check("F185 arm bend: the arm left at 1.04 against a dial of 0.92 (the flight's locked arm) is partial and says how often the clavicle ran out",
+              [bend185(ra=1.04, capped=500)], 0, [("PARTIAL", F185)],
+              has=["the reach ratio after the clavicle is 1.040 against the dial 0.92 (more than 0.03 off; the clavicle's full turn was not enough in 500 of 800 solves)"], lacks=["UNPARSED", "NEVER"])
+        check("F185 arm bend: the dial at 1.00 is the baseline, OK (today's reach)", [bend185(dial=1.0, tgt=59.2, turned=0, tm=0.0, tx=0.0, mm=0.0, mx=0.0, capped=0, took=0.0, tookx=0.0, ra=1.04)], 0, [("OK", F185)],
+              has=["the dial was 1.00: these are the baseline figures"], lacks=["UNPARSED", "PARTIAL"])
+        check("F185 arm bend: under 30 two-handed ADS solves is too few to judge", [bend185(n=10, ra=1.04)], 0, [("IDLE", F185)], has=["under 30 two-handed ADS solves: little to judge"], lacks=["UNPARSED", "PARTIAL"])
+        check("F185 arm bend: another weighting: two windows add up by their solves", [bend185(n=100, ra=0.90), bend185(n=300, ra=0.94)], 0, [("OK", F185)], has=["400 two-handed ADS solves"], lacks=["UNPARSED", "PARTIAL"])
+        check("F185 arm bend: no line at all is not present (no verdict row)", [f90_part()], 0, [("OK", F90S)],
+              lacks=[row("OK", F185), row("IDLE", F185), row("PARTIAL", F185), row("UNPARSED", F185), row("NEVER APPLIED", F185)])
+        check("F185 arm bend: a line that drifted from its pattern is unparsed", ["native on foot ADS left arm bend (F185, TEMPORARY) 10 s: something else"], 4, [("UNPARSED", F185)])
+        # ---- F186: the ADS sight lock's response, the frames the pre-turn covered and the stops ----
+        F186R, F186S = "ADS lock response (F186)", "ADS lock stops (F186)"
+
+        def bins186(*bins):
+            """The bins part of F186's window line from the DLL's own format: each (name, pairs, gain, angle, corr, aim)."""
+            return "; ".join(R186("aim %s deg: %u pairs", "", name, n, gain, angle, corr, aim) for (name, n, gain, angle, corr, aim) in bins)
+
+        def resp186(wl=1, turned=90, frames=90, stops=0, bins=None):
+            bins = bins if bins is not None else [("under 30", 60, 1.0, 0.4, 0.95, 5.0), ("over 75", 40, 0.98, -3.0, 0.9, 84.0)]
+            return R186("native on foot ADS lock response (F186) %u s: the ADS terms turned in", wl, turned, frames, stops) + (bins186(*bins) if bins else "no pairs")
+
+        def stop186(why=3, perp=21.5, app=40.0, aim=81.9, total=1):
+            return R186("native on foot ADS lock stop (F186): the sight lock held over its limit for", 0.3, "e over 10 cm and the lock at its clamp", perp, app, 40.0, 0.15, aim, "", total)
+
+        check("F186 response: a pre-turned lock reads gain 1 and angle 0 in every bin: OK with the figures",
+              [resp186(), resp186()], 0, [("OK", F186R), ("OK", F186S)],
+              has=["2 s: 180 lock frames, the ADS terms turned in 180; response of the error to the lock's change: aim under 30 deg: 120 pairs, gain 1.00, angle +0.4, corr 0.95 (mean aim +5.0); "
+                   "aim over 75 deg: 80 pairs, gain 0.98, angle -3.0, corr 0.90 (mean aim +84.0)", "2 s, 180 lock frames, 0 stop(s)"], lacks=["UNPARSED", "NEVER", "PARTIAL"])
+        check("F186 response: a lock at a steep aim that reads the aim's turn (a bin 85 deg off) is flagged",
+              [resp186(bins=[("over 75", 60, 1.0, 84.6, 0.9, 85.2)])], 0, [("PARTIAL", F186R), ("OK", F186S)], has=["over 75 deg (+84.6 deg at 60 pairs)"], lacks=["UNPARSED"])
+        check("F186 response: the terms turned in none of the lock frames (look to aim, a stale aim) and a bin 85 deg off: still partial, the count says why",
+              [resp186(turned=0, bins=[("over 75", 60, 1.0, 84.6, 0.9, 85.2)])], 0, [("PARTIAL", F186R)], has=["the ADS terms turned in 0;", "over 75 deg (+84.6 deg at 60 pairs)"], lacks=["UNPARSED"])
+        check("F186 response: a bin with under 20 pairs is too few to flag", [resp186(bins=[("over 75", 10, 1.0, 84.6, 0.5, 85.2)])], 0, [("OK", F186R)], lacks=["UNPARSED", "PARTIAL"])
+        check("F186 response: a window with no pairs still prints and reads no pairs", [resp186(bins=[])], 0, [("OK", F186R)], has=["response of the error to the lock's change: no pairs"], lacks=["UNPARSED"])
+        check("F186 stops: a stop names the aim pitch and the reason: partial", [resp186(stops=1, bins=[]), stop186()], 0, [("PARTIAL", F186S), ("OK", F186R)],
+              has=["1 stop(s): aim +81.9 deg, e over 10 cm and the lock at its clamp (e 21.5 cm, applied 40.0 cm)"], lacks=["UNPARSED"])
+        check("F186: no line at all is not present (no verdict row)", [f90_part()], 0, [("OK", F90S)],
+              lacks=[row("OK", F186R), row("OK", F186S), row("PARTIAL", F186R), row("PARTIAL", F186S), row("UNPARSED", F186R), row("UNPARSED", F186S)])
+        check("F186: lines that drifted from their patterns are unparsed", ["native on foot ADS lock response (F186) 1 s: something else", "native on foot ADS lock stop (F186): something else"], 4,
+              [("UNPARSED", F186R), ("UNPARSED", F186S)])
+        # ---- F183: the pin's stable horizontal heading ----
+        F183 = "stable heading (F183)"
+
+        def head183(wl=1, frames=90, blended=0, replaced=0, angle=0.0, amin=-8.0, amax=-8.0, emax=-8.0):
+            """F183's window line, from the DLL's own format (formatLine, native_on_foot_f183.h)."""
+            return R183("native on foot heading (F183) %u s: frames %u", wl, frames, blended, replaced, angle, amin, amax, emax)
+
+        check("F183 heading: level aims (nothing to blend) are OK with the figures", [head183(), head183()], 0, [("OK", F183)],
+              has=["2 s: 180 pin calls with an eye, 0 blended toward the body's forward, 0 replaced (the view past vertical); the largest angle between the eye's heading and the stable one 0.0 deg; "
+                   "the aim pitch -8.0 to -8.0 deg, the eye's pitch up to -8.0 deg"], lacks=["UNPARSED", "NEVER"])
+        check("F183 heading: a look up that blended and replaced (the flight's +85.2) is OK and says so",
+              [head183(), head183(frames=90, blended=40, replaced=12, angle=61.5, amin=-8.0, amax=85.2, emax=88.0)], 0, [("OK", F183)],
+              has=["40 blended toward the body's forward, 12 replaced (the view past vertical); the largest angle between the eye's heading and the stable one 61.5 deg",
+                   "the aim pitch -8.0 to +85.2 deg, the eye's pitch up to +88.0 deg"], lacks=["UNPARSED", "NEVER"])
+        check("F183 heading: the aim over +80 and the eye over +60 and nothing blended or replaced never applied", [head183(amax=85.2, amin=60.0, emax=84.0)], 3, [("NEVER APPLIED", F183)],
+              has=["1 window(s) had the aim over +80 deg and the eye over +60 deg with no call blended or replaced"], lacks=["UNPARSED"])
+        check("F183 heading: the aim over +80 with the head pitched down (the eye at +40, the heading level) is not a defect", [head183(amax=85.2, emax=40.0)], 0, [("OK", F183)], lacks=["UNPARSED", "NEVER"])
+        check("F183 heading: a window with no pin call with an eye is idle", [head183(frames=0)], 0, [("IDLE", F183)], has=["no pin call had an eye"], lacks=["UNPARSED", "NEVER"])
+        check("F183 heading: no line at all is not present (no verdict row)", [f90_part()], 0, [("OK", F90S)],
+              lacks=[row("OK", F183), row("IDLE", F183), row("NEVER APPLIED", F183), row("UNPARSED", F183)])
+        check("F183 heading: a line that drifted from its pattern is unparsed", ["native on foot heading (F183) 1 s: something else"], 4, [("UNPARSED", F183)])
+        # ---- F180b (TEMPORARY): the standing ADS spine straighten ----
+        F180B = "standing ADS spine (F180b)"
+
+        def spine180(item=RIFLE97, wl=10, frames=800, dial=0.5, dialmax=0.5, share=0.5, wrote=800, s1=800, s2=0, s0=0, lean=None, neck=None, shoulder=None, raise_=9.0, left=(0, 0, 0, 0), old=False):
+            """F180b's window line, from the DLL's own format (formatSummary, native_on_foot_f180.h); lean: 4 levels of (animated, reference, written) deg; neck, shoulder: (after, before) as
+            (right, up, forward) cm; raise_: F179a's leg raise asked, cm; left: F182b's frames left as animated per bone; old: the line of a build before F182 (no such ending)."""
+            lean = lean or [(30.0, 12.0, 21.0), (25.0, 10.0, 17.0), (23.0, 15.0, 19.0), (20.0, 5.0, 12.0)]
+            neck = neck or ((1.0, -9.0, 8.0), (1.0, -14.0, 11.0))
+            shoulder = shoulder or ((-14.0, -3.0, 4.0), (-14.0, -6.0, 6.0))
+            flat = [v for lv in lean for v in lv]
+            line = R180("native on foot standing ADS spine (F180b, TEMPORARY) %u s: item %s", wl, item, frames, dial, dialmax, share, wrote, s1, s2, s0, *flat, *neck[0], *neck[1], *shoulder[0], *shoulder[1], raise_, *left)
+            return line.rsplit("; left as animated, leaning back of the reference", 1)[0] if old else line
+
+        def dial180(v=0.5):
+            """F180b's dial note line (native_on_foot.cpp), logged at the first read and at each change."""
+            return R180("native on foot standing ADS spine dial (F180b, TEMPORARY): experimental.native_on_foot_stand_ads_spine_straighten = %.2f", v, 0.0, 1.0)
+
+        zero180 = dict(dial=0.0, dialmax=0.0, share=0.0, wrote=0, lean=[(30.0, 30.0, 30.0)] * 4)
+        check("F180b spine: a dial of 0.5 that wrote the levels and the figures to judge it by", [spine180()], 0, [("OK", F180B)],
+              has=[RIFLE97 + " 10 s: standing in the sights 800 frames, dial mean 0.50 (largest 0.50), share mean 0.50, the levels written in 800 (the reference: hip frames 800, the press's first frame 0, none 0); "
+                   "lean animated/reference/written (deg): spine 16 +30.0/+12.0/+21.0, spine 21 +25.0/+10.0/+17.0, chest 24 +23.0/+15.0/+19.0, neck 34 +20.0/+5.0/+12.0; the neck from the eye "
+                   "(right/up/forward, cm) after +1.0/-9.0/+8.0 before +1.0/-14.0/+11.0; the left shoulder from the eye after -14.0/-3.0/+4.0 before -14.0/-6.0/+6.0; F179a's leg raise asked +9.0 cm"],
+              lacks=["UNPARSED", "baseline", "NEVER"])
+        check("F180b spine: the dial at 0 is the baseline, OK (the before picture)", [spine180(**zero180)], 0, [("OK", F180B)], has=["the dial was 0: these are the baseline figures"], lacks=["UNPARSED", "NEVER"])
+        check("F180b spine: a dial of 0.5 and no level written in 800 frames (no reference) never applied", [spine180(wrote=0, s1=0, s0=800)], 3, [("NEVER APPLIED", F180B)],
+              has=["the dial reached 0.50 and no level was written in any of 800 frames standing in the sights with " + RIFLE97 + " (the reference: hip frames 0, the press's first frame 0, none 800)"],
+              lacks=["UNPARSED"])
+        check("F180b spine: the dial at 0.05 is under the rule's 0.1: nothing to call absent", [spine180(dial=0.05, dialmax=0.05, share=0.05, wrote=0, s1=0, s0=800)], 0, [("OK", F180B)], lacks=["UNPARSED", "NEVER"])
+        check("F180b spine: written in 300 of 800 frames is thin", [spine180(wrote=300)], 0, [("PARTIAL", F180B)],
+              has=["the levels were written in 300 of 800 frames standing in the sights with " + RIFLE97], lacks=["UNPARSED", "NEVER"])
+        check("F180b spine: the press's first frame as the reference is a reference", [spine180(s1=0, s2=800)], 0, [("OK", F180B)], has=["hip frames 0, the press's first frame 800, none 0"], lacks=["UNPARSED", "NEVER"])
+        check("F180b spine: under 30 frames standing in the sights is too few to judge", [spine180(frames=20, wrote=20, s1=20)], 0, [("IDLE", F180B)], has=["under 30 frames standing in the sights: little to judge"],
+              lacks=["UNPARSED", "NEVER"])
+        check("F180b spine: only the dial's note line (the key was read, no standing ADS frame) is idle and says what was read", [dial180(0.25), dial180(0.5)], 0, [("IDLE", F180B)],
+              has=["the standing ADS spine dial was read (0.50 as last logged)"], lacks=["UNPARSED", "NEVER"])
+        check("F180b spine: the dial's note line beside a window line is not unparsed and does not make it idle", [dial180(0.5), spine180()], 0, [("OK", F180B)], lacks=["UNPARSED", "were read", "IDLE"])
+        check("F180b spine: no line at all is not present (no verdict row)", [f90_part()], 0, [("OK", F90S)],
+              lacks=[row("OK", F180B), row("IDLE", F180B), row("PARTIAL", F180B), row("UNPARSED", F180B), row("NEVER APPLIED", F180B)])
+        check("F180b spine: two windows add up, the dial and the figures weighted by their frames",
+              [spine180(frames=100, dial=0.2, dialmax=0.2, share=0.2, wrote=100, s1=100), spine180(frames=300, dial=0.6, dialmax=0.6, share=0.6, wrote=300, s1=300)], 0, [("OK", F180B)],
+              has=["20 s: standing in the sights 400 frames, dial mean 0.50 (largest 0.60), share mean 0.50, the levels written in 400"], lacks=["UNPARSED"])
+        check("F180b spine: another item is its own item", [spine180(), spine180(item="$wpn_m_sniper_plasma_charged_name;", wrote=0, s1=0, s0=800)], 3, [("NEVER APPLIED", F180B)],
+              has=["with $wpn_m_sniper_plasma_charged_name;", RIFLE97 + " 10 s"], lacks=["UNPARSED"])
+        check("F180b spine: a line that drifted from its pattern is unparsed", ["native on foot standing ADS spine (F180b, TEMPORARY) 10 s: something else"], 4, [("UNPARSED", F180B)])
+        check("F180b spine: a line that drifted beside a good one is counted beside the verdict", [spine180(), "native on foot standing ADS spine (F180b, TEMPORARY) 10 s: something else"], 0, [("OK", F180B)],
+              has=["[+1 line(s) the rule's patterns do not match: "])
+        # F182b: the one-sided rule's frames left as animated per bone, appended to the line (a looking-up flight leaves every bone as animated and writes nothing)
+        spine182 = lambda left, **kw: spine180(left=left, **kw)
+        check("F182b spine: the frames left as animated per bone ride the line; a looking-up flight (every bone left, the rule made in every frame) is OK",
+              [spine182((800, 800, 800, 800), lean=[(-4.3, 29.7, -4.3), (-14.7, 28.7, -14.7), (-26.3, 38.4, -26.3), (-6.9, 55.6, -6.9)])], 0, [("OK", F180B)],
+              has=["lean animated/reference/written (deg): spine 16 -4.3/+29.7/-4.3", "; left as animated (the bone leaned back of the reference, frames): spine 16 800, spine 21 800, chest 24 800, neck 34 800"],
+              lacks=["UNPARSED", "NEVER"])
+        check("F182b spine: two windows add the left-as-animated frames per bone",
+              [spine182((10, 20, 30, 40), frames=100, wrote=100, s1=100), spine182((1, 2, 3, 4), frames=300, wrote=300, s1=300)], 0, [("OK", F180B)],
+              has=["; left as animated (the bone leaned back of the reference, frames): spine 16 11, spine 21 22, chest 24 33, neck 34 44"], lacks=["UNPARSED"])
+        check("F182b spine: a line from a build before F182 (no ending) still parses and says nothing of it", [spine180(old=True)], 0, [("OK", F180B)], lacks=["UNPARSED", "left as animated"])
+
+        # ---- F182c: F69h keeps the left hand on the item through a stale first-person snapshot (the ending of the F67f line) ----
+        F182C = "stale grip hold (F182c)"
+
+        def f67f182(kept=None, agem=900.0, agex=2500.0, limit=0, held=0, errm=0.5, errx=0.9, unm=0.6, unn=80):
+            """F67f's line from the DLL's own format, with F182c's ending (formatClause, native_on_foot_f182.h) when kept is given (None: a window with no stale call, the ending empty)."""
+            clause = "" if kept is None else R182("; stale grip hold (F182c): kept through a stale FP input %llu calls", kept, agem, agex, 3.0, limit, held, errm, errx, unm, unn)
+            return R("native on foot armed arms (F67f): %llu armed calls (ramp complete)", 90, 90, 90, 0, "", 90, 0, "", 0.4, 0.9, 0.3, 0.6, 0.0, 0.0, 0, 0, 90, 0, 0.0, 0.0, 0, 16.0, 0, 16.0, clause)
+
+        check("F182c stale hold: the held calls' error within 2 cm of the unheld calls' (0.6 against 0.5) is OK",
+              [f67f182(8, held=8), f67f182(6, held=6, errm=0.7, errx=1.4)], 0, [("OK", F182C)],
+              has=["2 s: F69h kept the off hand through a stale FP input in 14 calls (stale age mean 900 max 2500 ms), released for staleness after 3 s 0 time(s); the left hand on the held grip point in 14 calls, "
+                   "their hand-to-grip error mean 0.59 max 1.40 cm against 0.60 cm on 160 unheld calls"], lacks=["UNPARSED", "NEVER", "PARTIAL"])
+        check("F182c stale hold: F67f lines with no stale call kept are idle (the ending is empty: nothing to hold)", [f67f182(), f67f182()], 0, [("IDLE", F182C)],
+              has=["no call kept the off hand through a stale FP snapshot in 2 F67f window(s): nothing to hold"], lacks=["UNPARSED", "NEVER"])
+        check("F182c stale hold: the same arm reaches the held point as badly as the unheld ones (3.9 against 3.9) is OK: the judge is against the window's normal, not a fixed 1 cm",
+              [f67f182(8, held=8, errm=3.9, errx=4.5, unm=3.9)], 0, [("OK", F182C)], lacks=["UNPARSED", "NEVER", "PARTIAL"])
+        check("F182c stale hold: held calls 6.5 cm off against 3.9 on the unheld (over 2 cm worse) is partial", [f67f182(8, held=8, errm=6.5, errx=8.0, unm=3.9)], 0, [("PARTIAL", F182C)],
+              has=["the held calls' hand-to-grip error averaged 6.50 cm, more than 2 cm over the unheld calls' 3.90 cm (the arm does not reach the held point)"], lacks=["UNPARSED", "NEVER"])
+        check("F182c stale hold: calls kept and the held point the target in none is partial", [f67f182(9, held=0, errm=0.0, errx=0.0)], 0, [("PARTIAL", F182C)],
+              has=["the decision was kept in 9 calls and the held grip point was the target in none"], lacks=["UNPARSED", "NEVER"])
+        check("F182c stale hold: a release after 3 s is counted in the text and does not change an OK", [f67f182(30, limit=1, held=30)], 0, [("OK", F182C)],
+              has=["released for staleness after 3 s 1 time(s)"], lacks=["UNPARSED", "NEVER", "PARTIAL"])
+        check("F182c stale hold: held calls with no unheld solved call in the window have nothing to compare with (OK, said so)", [f67f182(8, held=8, unm=0.0, unn=0)], 0, [("OK", F182C)],
+              has=["no unheld solved left call in these windows to compare with"], lacks=["UNPARSED", "NEVER", "PARTIAL"])
+        check("F182c stale hold: an ending that drifted from its pattern is unparsed (not read as a plain window)", [f67f182(8, held=8).replace("kept through a stale FP input", "carried through a stale FP input")], 4, [("UNPARSED", F182C)])
+        check("F182c stale hold: no F67f line at all is not present (no verdict row)", [f90_part()], 0, [("OK", F90S)],
+              lacks=[row("OK", F182C), row("IDLE", F182C), row("PARTIAL", F182C), row("UNPARSED", F182C), row("NEVER APPLIED", F182C)])
         # ---- left elbow (F98a): the left arm with a weapon drawn ----
         F98 = "left elbow (F98a)"
 
-        def elbow98(item=RIFLE97, aim=-23.9, plane=8.0, over45=0, step=0.4, over10=0, seed=76, down=0, legacy=0, n=76, tail="", wl=1):
+        def elbow98(item=RIFLE97, aim=-23.9, plane=8.0, over45=0, step=0.4, over10=0, seed=76, down=0, legacy=0, n=76, tail="", wl=1, cap=None):
+            """F98a's line, from the DLL's own format; cap: (hip solves, capped, cut mean, cut largest, the cap, still over by 2 deg after) for the F181a ending (None: a build before it)."""
             line = R("native on foot left elbow (F98a) %u s: item %s", wl, item, n, aim, aim - 0.5, aim + 0.5, 2.0, 1.5, 3.0, 7.0, plane, plane + 4.0, over45, step, step * 3,
                      over10, n - 1, seed, 25.0, 31.0, down, legacy, 0, tail)
-            return line.rsplit("; seconds mostly over 45 deg", 1)[0]
+            line = line.rsplit("; seconds mostly over 45 deg", 1)[0]
+            if cap is not None:
+                hip, capped, cut, cutmax, capdeg, over = cap
+                line += R181("; capped %u of %u solves", capped, hip, cut, cutmax, capdeg, 2.0, over)
+            return line
 
         PISTOL98 = "$wpn_m_pistol_laser_name;"
 
@@ -19304,6 +20239,28 @@ def self_test_health():
                elbow98(SHOTGUN165), pole159(SHOTGUN165, n=400, hipn=400) + blend165(w=1.0, adsn=300, adsapp=300, adsplane=10.0, adsmax=18.0, restn=100, restapp=0, restplane=30.0, restmax=44.0)], 0,
               [("OK", F98)], has=["weight mean 0.75, crouched in the sights 400 solves (400 blended) with the elbow 12.5 deg off the stance's plane (max 25.0), the rest 400 solves (0 blended) 15.0 deg (max 44.0)"],
               lacks=["UNPARSED"])
+
+        # ---- F181a (TEMPORARY): the left elbow's swivel capped at the hip with a two-handed gun ----
+        F181A = "hip elbow cap (F181a)"
+        RIFLE181 = "$wpn_m_assaultrifle_plasma_fauto_name;"
+        check("F181a cap: a rifle's hip solves brought to the cap: 900 of 900 capped, the cut 28 deg, none still over", [elbow98(RIFLE181, plane=25.0, n=900, cap=(900, 900, 28.0, 31.0, 25.0, 0))], 0, [("OK", F98), ("OK", F181A)],
+              has=[RIFLE181 + " 1 s: 900 two-handed hip solves, capped 900 (100%; the cut mean 28.0 deg, largest 31.0), the cap 25 deg, 0 still 2 deg or more over it after"], lacks=["UNPARSED", "NEVER"])
+        check("F181a cap: the shotgun under the cap is not touched: 0 of 900 capped", [elbow98("$wpn_m_shotgun_plasma_doublebarrel_name;", plane=18.5, n=900, cap=(900, 0, 0.0, 0.0, 25.0, 0))], 0,
+              [("OK", F181A)], has=["two-handed hip solves, capped 0 (0%; the cut mean 0.0 deg, largest 0.0)"], lacks=["UNPARSED", "NEVER"])
+        check("F181a cap: a cap that did not hold: 40 of 900 hip solves still 2 deg or more over it after is never applied", [elbow98(RIFLE181, n=900, cap=(900, 860, 20.0, 30.0, 25.0, 40))], 3,
+              [("NEVER APPLIED", F181A)], has=["40 of 900 two-handed hip solves with " + RIFLE181 + " were still 2 deg or more over the cap after it (the cap did not hold)"], lacks=["UNPARSED"])
+        check("F181a cap: 29 solves still over is not yet 30", [elbow98(RIFLE181, n=900, cap=(900, 860, 20.0, 30.0, 25.0, 29))], 0, [("OK", F181A)], lacks=["UNPARSED", "NEVER"])
+        check("F181a cap: under 30 two-handed hip solves is too few to judge", [elbow98(RIFLE181, n=20, cap=(20, 20, 25.0, 30.0, 25.0, 0))], 0, [("IDLE", F181A)],
+              has=["under 30 two-handed hip solves: little to judge"], lacks=["UNPARSED"])
+        check("F181a cap: no two-handed hip solve (the sights, or a pistol) is idle and says so", [elbow98(RIFLE181, n=300, cap=(0, 0, 0.0, 0.0, 25.0, 0))], 0, [("IDLE", F181A)],
+              has=["no two-handed hip solve"], lacks=["UNPARSED"])
+        check("F181a cap: the cap at 90 is off and says so", [elbow98(RIFLE181, n=900, cap=(900, 0, 0.0, 0.0, 90.0, 0))], 0, [("OK", F181A)], has=["the cap 90 deg (off)"], lacks=["UNPARSED"])
+        check("F181a cap: a line from a build before F181 (no ending) has no verdict row from it and is not unparsed", [elbow98(RIFLE181, n=900)], 0, [("OK", F98)],
+              lacks=[row("OK", F181A), row("IDLE", F181A), row("NEVER APPLIED", F181A), row("UNPARSED", F181A), "UNPARSED"])
+        check("F181a cap: two windows add up, the cut weighted by the capped solves",
+              [elbow98(RIFLE181, n=100, cap=(100, 100, 20.0, 25.0, 25.0, 0)), elbow98(RIFLE181, n=300, cap=(300, 300, 30.0, 35.0, 25.0, 0))], 0, [("OK", F181A)],
+              has=["2 s: 400 two-handed hip solves, capped 400 (100%; the cut mean 27.5 deg, largest 35.0)"], lacks=["UNPARSED"])
+        check("F181a cap: a line that drifted from its pattern is unparsed by the F98a rules", ["native on foot left elbow (F98a) 1 s: something else"], 4, [("UNPARSED", F98), ("UNPARSED", F181A)])
 
         # ---- F161: the left arm's distance to the eye, per context (the hip or ADS, standing or crouched) ----
         F161 = "left arm to the eye (F161)"
@@ -19613,6 +20570,84 @@ def self_test_health():
         check("F171 sideways: a window line that drifted beside a good one is counted beside the verdict",
               [side171(), "native on foot crouched ADS body sideways (F171, TEMPORARY) 10 s: something else"], 0, [("OK", F171)], has=["[+1 line(s) the rule's patterns do not match: "])
 
+        # ---- F178 (TEMPORARY): the standing ADS body dials ----
+        F178 = "standing ADS body (F178)"
+
+        def stand178(item=SHOTGUN168, wl=10, ads=400, still=150, mv=250, wt=1.0, fdial=6.0, fdialmax=6.0, fmade=400, fask=6.0, fwn=None, fwr=6.0, fbk=None,
+                     ldial=15.0, ldialmax=15.0, lmade=400, lask=15.0, lwn=None, lwr=13.9, lbk=None,
+                     right0=(150, 17.0, -14.6, -4.0), right1=(240, 18.0, -13.0, -5.0), left0=(150, -16.0, -14.6, -4.0), left1=(240, -15.0, -13.0, -5.0), gun0=(150, 31.0), gun1=(240, 30.0),
+                     grip0=(150, 60.0), grip1=(240, 61.0)):
+            """F178's window line, from the DLL's own format (formatSummary, native_on_foot_f178.h); fask/lask: the move asked, fwr/lwr: as written (the frames each is a mean of: fwn/lwn),
+            fbk/lbk: what the reach rule took back (asked less written when not given); the shoulders from the eye: (frames, right, up, forward) in cm; gun, grip: (frames, cm)."""
+            fwn = ads if fwn is None else fwn
+            lwn = ads if lwn is None else lwn
+            fbk = fask - fwr if fbk is None else fbk
+            lbk = lask - lwr if lbk is None else lbk
+            return R178("native on foot standing ADS body (F178, TEMPORARY) %u s: item %s", wl, item, ads, still, mv, wt, fdial, fdialmax, fmade, fask, fwn, fwr, fbk,
+                        ldial, ldialmax, lmade, lask, lwn, lwr, lbk, right0[0], right0[1], right0[2], right0[3], right1[0], right1[1], right1[2], right1[3],
+                        left0[0], left0[1], left0[2], left0[3], left1[0], left1[1], left1[2], left1[3], gun0[0], gun0[1], gun1[0], gun1[1], grip0[0], grip0[1], grip1[0], grip1[1])
+
+        def dial178(which="forward", cm=6.0):
+            """F178's dial note line (native_on_foot.cpp), logged at the first read and at each change."""
+            if which == "forward":
+                return R178("native on foot standing ADS body dial (F178, TEMPORARY): experimental.native_on_foot_stand_ads_body_forward_cm = %+.1f", cm, -20.0, 20.0)
+            return R178("native on foot standing ADS body dial (F178, TEMPORARY): experimental.native_on_foot_stand_ads_body_left_cm = %+.1f", cm, -30.0, 30.0)
+
+        zero178 = dict(fdial=0.0, fdialmax=0.0, fmade=0, fask=0.0, fwr=0.0, ldial=0.0, ldialmax=0.0, lmade=0, lask=0.0, lwr=0.0)
+        check("F178 standing: dials of 6 cm forward and 15 cm left that moved the body and the figures to judge it by", [stand178()], 0, [("OK", F178)],
+              has=[SHOTGUN168 + " 10 s: standing in the sights 400 frames (still 150, moving 250), standing weight mean 1.00; forward dial mean +6.0 cm (largest 6.0; positive is toward the gun), "
+                   "the move made in 400, asked +6.0 cm, as written (after the reach rule) +6.0 (400 frames), the reach rule took back +0.0; left dial mean +15.0 cm (largest 15.0; positive is left "
+                   "of the aim), the move made in 400, asked +15.0 cm, as written +13.9 (400 frames), the reach rule took back +1.1; the right shoulder from the eye (right/up/forward, cm) still "
+                   "+17.0/-14.6/-4.0 (150 frames), moving +18.0/-13.0/-5.0 (240); the left shoulder from the eye still -16.0/-14.6/-4.0 (150), moving -15.0/-13.0/-5.0 (240); right shoulder to the "
+                   "gun's root still 31.0 cm (150 frames), moving 30.0 (240); left shoulder to the left-hand grip still 60.0 cm (150), moving 61.0 (240)"],
+              lacks=["UNPARSED", "baseline", "NEVER", "took back most"])
+        check("F178 standing: both dials at 0 is the baseline, OK, with the shoulders and distances (the before picture)", [stand178(**zero178)], 0, [("OK", F178)],
+              has=["both dials were 0: these are the baseline figures", "forward dial mean +0.0 cm (largest 0.0; positive is toward the gun), the move made in 0, asked +0.0 cm",
+                   "the right shoulder from the eye (right/up/forward, cm) still +17.0/-14.6/-4.0 (150 frames)", "left shoulder to the left-hand grip still 60.0 cm (150)"], lacks=["UNPARSED", "NEVER"])
+        check("F178 standing: a left dial of 15 cm and the move made in none of 400 frames standing in the sights is a target that never took it",
+              [stand178(**dict(zero178, ldial=15.0, ldialmax=15.0))], 3, [("NEVER APPLIED", F178)],
+              has=["the left dial reached 15.0 cm and its move was made in none of 400 frames standing in the sights with " + SHOTGUN168 + " (the pin's target never took it)"], lacks=["UNPARSED", "the forward dial"])
+        check("F178 standing: a forward dial of 6 cm made in 400 frames and written as 0 in every window is a neck that never moved",
+              [stand178(fwr=0.0, fbk=6.0)], 3, [("NEVER APPLIED", F178)],
+              has=["the forward dial asked +6.0 cm and none of it was written in 400 frames standing in the sights with " + SHOTGUN168 + " (the neck never moved)"], lacks=["UNPARSED", "the left dial"])
+        check("F178 standing: written 0 in one window and 6 cm in the other is not 0 throughout",
+              [stand178(fwr=0.0, fbk=6.0), stand178(fwr=6.0)], 0, [("OK", F178)], lacks=["UNPARSED", "NEVER"])
+        check("F178 standing: the reach rule took back most of the left move: written 5 of 15 cm is PARTIAL", [stand178(lwr=5.0)], 0, [("PARTIAL", F178)],
+              has=["the reach rule took back most of the left move with " + SHOTGUN168 + ": +15.0 cm asked, +5.0 cm written (the left shoulder is at its reach)"], lacks=["UNPARSED", "NEVER"])
+        check("F178 standing: a move made and never measured as written is named, not passed", [stand178(lwn=0, lwr=0.0, lbk=0.0)], 0, [("PARTIAL", F178)],
+              has=["as written +0.0 (0 frames), the reach rule took back +0.0", "the left move as written was not measured in any of 400 frames standing in the sights with " + SHOTGUN168],
+              lacks=["UNPARSED", "NEVER", "took back most"])
+        check("F178 standing: negative dials with the moves made are the same machinery the other way",
+              [stand178(fdial=-6.0, fdialmax=6.0, fask=-6.0, fwr=-6.0, ldial=-15.0, ldialmax=15.0, lask=-15.0, lwr=-14.1)], 0, [("OK", F178)],
+              has=["forward dial mean -6.0 cm (largest 6.0; positive is toward the gun)", "left dial mean -15.0 cm (largest 15.0; positive is left of the aim)", "asked -15.0 cm, as written -14.1 (400 frames)"],
+              lacks=["UNPARSED", "NEVER", "took back most"])
+        check("F178 standing: under 30 frames standing in the sights is too few to judge",
+              [stand178(ads=20, still=8, mv=12, fmade=20, lmade=20, fwn=20, lwn=20, gun0=(8, 31.0), gun1=(12, 30.0), grip0=(8, 60.0), grip1=(12, 61.0), right0=(8, 17.0, -14.6, -4.0),
+                        right1=(12, 18.0, -13.0, -5.0), left0=(8, -16.0, -14.6, -4.0), left1=(12, -15.0, -13.0, -5.0))], 0, [("IDLE", F178)],
+              has=["under 30 frames standing in the sights: little to judge"], lacks=["UNPARSED", "NEVER"])
+        check("F178 standing: only the dials' note lines (the keys were read, no standing ADS frame) is idle and says what was read", [dial178("forward", 6.0), dial178("left", 15.0), dial178("left", 12.5)], 0,
+              [("IDLE", F178)], has=["the standing ADS body dials were read (forward +6.0 cm, left +12.5 cm as last logged) and no frame stood in the sights with a two-handed gun in the window"],
+              lacks=["UNPARSED", "NEVER"])
+        check("F178 standing: one dial note line says the other was not logged", [dial178("forward", 0.0)], 0, [("IDLE", F178)], has=["(forward +0.0 cm, left not logged as last logged)"], lacks=["UNPARSED"])
+        check("F178 standing: the dials' note lines beside a window line are not unparsed and do not make it idle", [dial178("forward", 6.0), dial178("left", 15.0), stand178()], 0, [("OK", F178)],
+              lacks=["UNPARSED", "IDLE", "were read"])
+        check("F178 standing: no line at all is not present (no verdict row)", [f90_part()], 0, [("OK", F90S)],
+              lacks=[row("OK", F178), row("IDLE", F178), row("PARTIAL", F178), row("UNPARSED", F178), row("NEVER APPLIED", F178)])
+        check("F178 standing: a figure not measured (no frames) prints 0.0 and does not break the rule",
+              [stand178(gun0=(0, 0.0), gun1=(0, 0.0), grip0=(0, 0.0), grip1=(0, 0.0), right0=(0, 0.0, 0.0, 0.0), right1=(0, 0.0, 0.0, 0.0), left0=(0, 0.0, 0.0, 0.0), left1=(0, 0.0, 0.0, 0.0))], 0,
+              [("OK", F178)], has=["still 0.0 cm (0 frames), moving 0.0 (0)"], lacks=["UNPARSED", "NEVER"])
+        check("F178 standing: two windows add up, the dials and the figures weighted by their frames",
+              [stand178(ads=100, still=40, mv=60, fmade=100, lmade=100, wt=1.0, fdial=2.0, fdialmax=2.0, fask=2.0, fwr=2.0, ldial=5.0, ldialmax=5.0, lask=5.0, lwr=5.0, gun0=(40, 30.0), gun1=(60, 20.0)),
+               stand178(ads=300, still=100, mv=200, fmade=300, lmade=300, wt=0.8, fdial=6.0, fdialmax=6.0, fask=6.0, fwr=6.0, ldial=15.0, ldialmax=15.0, lask=15.0, lwr=14.0, gun0=(100, 30.0), gun1=(200, 30.0))],
+              0, [("OK", F178)],
+              has=["20 s: standing in the sights 400 frames (still 140, moving 260), standing weight mean 0.85; forward dial mean +5.0 cm (largest 6.0; positive is toward the gun), the move made in 400, "
+                   "asked +5.0 cm", "left dial mean +12.5 cm (largest 15.0; positive is left of the aim), the move made in 400, asked +12.5 cm, as written +11.8 (400 frames)"], lacks=["UNPARSED"])
+        check("F178 standing: another item is its own item", [stand178(), stand178(item="$wpn_m_sniper_plasma_charged_name;", **dict(zero178, ldial=15.0, ldialmax=15.0))], 3,
+              [("NEVER APPLIED", F178)], has=["with $wpn_m_sniper_plasma_charged_name;", SHOTGUN168 + " 10 s"], lacks=["UNPARSED"])
+        check("F178 standing: a window line that drifted from its pattern is unparsed", ["native on foot standing ADS body (F178, TEMPORARY) 10 s: something else"], 4, [("UNPARSED", F178)])
+        check("F178 standing: a window line that drifted beside a good one is counted beside the verdict",
+              [stand178(), "native on foot standing ADS body (F178, TEMPORARY) 10 s: something else"], 0, [("OK", F178)], has=["[+1 line(s) the rule's patterns do not match: "])
+
         # ---- F171: the raise's carriage ----
         C171 = "raise carriage (F171)"
 
@@ -19736,8 +20771,8 @@ def self_test_health():
         # ---- F177: the aiming choice at start ----
         H177 = "aim choice prompt (F177)"
 
-        def a177_shown():
-            return R177("aim choice prompt (F177): shown")
+        def a177_shown(frame="during the splash", secs=5.8):
+            return R177("aim choice prompt (F177): shown %s", frame, secs)
 
         def a177_picked(choice="look to aim"):
             return R177("aim choice prompt (F177): picked look to aim" if choice == "look to aim" else "aim choice prompt (F177): picked mouse aim")
@@ -19746,7 +20781,18 @@ def self_test_health():
             return R177("aim choice prompt (F177): saved %s = %s and %s = %s to %s", k1, v1, k2, v2, "edvr.ini")
 
         check("F177 aim choice: shown, picked look to aim and saved with both pairs is OK", [a177_shown(), a177_picked(), a177_saved()], 0, [("OK", H177)],
-              has=["shown; picked look to aim; saved fix.native_on_foot_look_to_aim = on and menu.aim_choice_prompt = off to edvr.ini"], lacks=["UNPARSED", "NEVER"])
+              has=["shown during the splash, 5.8 s after the game started; picked look to aim; saved fix.native_on_foot_look_to_aim = on and menu.aim_choice_prompt = off to edvr.ini"], lacks=["UNPARSED", "NEVER"])
+        check("F188 aim choice: shown after the first scene says so, with the seconds", [a177_shown("after the first scene", 28.0), a177_picked("mouse aim"), a177_saved(v1="off")], 0, [("OK", H177)],
+              has=["shown after the first scene, 28.0 s after the game started; picked mouse aim"], lacks=["UNPARSED", "NEVER"])
+        check("F190 aim choice: shown after the switch to VR says so, with the seconds", [a177_shown("after the switch to VR", 61.3), a177_picked(), a177_saved()], 0, [("OK", H177)],
+              has=["shown after the switch to VR, 61.3 s after the game started; picked look to aim"], lacks=["UNPARSED", "NEVER"])
+        check("F190 aim choice: shown at the first menu open says so, with the seconds", [a177_shown("at the first menu open", 12.0), a177_picked("mouse aim"), a177_saved(v1="off")], 0, [("OK", H177)],
+              has=["shown at the first menu open, 12.0 s after the game started; picked mouse aim"], lacks=["UNPARSED", "NEVER"])
+        check("F190 aim choice: a flat start's not shown line beside a shown after the switch is read as shown (the page was shown)",
+              [R177("aim choice prompt (F177): not shown: %s", "the flat profile has no such page"), a177_shown("after the switch to VR", 30.0)], 0, [("OK", H177)],
+              has=["shown after the switch to VR, 30.0 s after the game started"], lacks=["UNPARSED"])
+        check("F188 aim choice: the F177 build's bare shown line is still read (no frame, no seconds)", ["aim choice prompt (F177): shown", a177_picked(), a177_saved()], 0, [("OK", H177)],
+              has=["shown; picked look to aim"], lacks=["UNPARSED", "after the game started"])
         check("F177 aim choice: shown, picked mouse aim and saved off and off is OK", [a177_shown(), a177_picked("mouse aim"), a177_saved(v1="off")], 0, [("OK", H177)],
               has=["picked mouse aim; saved fix.native_on_foot_look_to_aim = off and menu.aim_choice_prompt = off"], lacks=["UNPARSED", "NEVER"])
         check("F177 aim choice: a pick whose write failed is NEVER APPLIED, with the error", [a177_shown(), a177_picked(), R177("aim choice prompt (F177): write failed: %s", "edvr.ini: access denied")], 3,
@@ -19757,7 +20803,7 @@ def self_test_health():
               has=["picked look to aim but the file was given fix.native_on_foot_look_to_aim = off and menu.aim_choice_prompt = off: the pick and the write disagree"], lacks=["UNPARSED"])
         check("F177 aim choice: a pick that left the page on is NEVER APPLIED too", [a177_shown(), a177_picked(), a177_saved(v2="on")], 3, [("NEVER APPLIED", H177)], has=["the pick and the write disagree"])
         check("F177 aim choice: shown and Ask me next time is OK, nothing written", [a177_shown(), R177("aim choice prompt (F177): later")], 0, [("OK", H177)],
-              has=["the player chose Ask me next time or pressed Esc (nothing written, it asks again at the next start)"], lacks=["UNPARSED", "NEVER"])
+              has=["shown during the splash, 5.8 s after the game started; the player chose Ask me next time or pressed Esc (nothing written, it asks again at the next start)"], lacks=["UNPARSED", "NEVER"])
         check("F177 aim choice: shown with no answer is OK and says so", [a177_shown()], 0, [("OK", H177)], has=["no answer in this log"], lacks=["UNPARSED", "NEVER"])
         check("F177 aim choice: only why it was not shown is IDLE, with the reason", [R177("aim choice prompt (F177): not shown: %s", "menu.aim_choice_prompt is off")], 0, [("IDLE", H177)],
               has=["the page was not shown: menu.aim_choice_prompt is off"], lacks=["UNPARSED", "NEVER"])
@@ -21260,11 +22306,21 @@ def self_test_health():
               [("OK", F85B)], has=["[+1 line(s) the rule's patterns do not match:", "place bind (F151): something else"])
 
         # ---- reticle depth (F85c) ----
-        check("F85c: patched at the hit depth", [retic()] * 2, 0, [("OK", F85C)], has=["patched 84 of 94 key 10 draws (89%) in 2 s", "readbacks 42 (hit 40, sky 2)"])
+        check("F85c: patched at the hit depth", [retic()] * 2, 0, [("OK", F85C)], has=["patched 84 of 94 key 11 draws (89%) in 2 s", "readbacks 42 (hit 40, sky 2)"], lacks=["assumed"])
         check("F85c: draws and no patch", [retic(patched=0, refs=(47,))] * 2, 3, [("NEVER APPLIED", F85C)], has=["patched 0 of 94", "refusals no depth view 94"])
         check("F85c: under half patched", [retic(draws=10, patched=3)], 0, [("PARTIAL", F85C)])
-        check("F85c: no key 10 draw and no weapon", [R("reticle depth (F85c): no key 10 composite")] * 2, 0, [("IDLE", F85C)])
-        check("F85c: no key 10 draw while a weapon is drawn", [R("reticle depth (F85c): no key 10 composite"), eyeoff()], 3, [("NEVER APPLIED", F85C)])
+        check("F85c: no reticle draw and no weapon", [retic_idle()] * 2, 0, [("IDLE", F85C)], has=["no reticle composite draw (2 idle lines"])
+        check("F85c: no reticle draw while a weapon is drawn", [retic_idle(), eyeoff()], 3, [("NEVER APPLIED", F85C)], has=["no reticle composite draw in 1 lines, though a weapon was drawn"])
+        # F191: the reticle is the key marker type 1001 uses: the lines name it (`key 11 (type 1001)`), and the key may walk as the reticle is re-created
+        check("F85c: the reticle on key 11, then 12 and 13 as it is re-created", [retic(key="11 (type 1001)"), retic(key="12 (type 1001)"), retic(key="13 (type 1001)", patched=30)], 0,
+              [("OK", F85C)], has=["patched 114 of 141 key 11, 12, 13 draws (81%) in 3 s"], lacks=["assumed"])
+        check("F85c: no type 1001 call seen: key 10 assumed is said so", [retic(key="10 (assumed: no type 1001 call seen yet)")] * 2, 0, [("OK", F85C)],
+              has=["patched 84 of 94 key 10 draws", "the reticle key was assumed to be 10, no type 1001 call seen"])
+        check("F85c: no reticle draw, the key waited for is named in the line", [retic_idle(key="11 (type 1001)"), retic_idle(key="12 (type 1001)")], 0, [("IDLE", F85C)], lacks=["UNPARSED"])
+        # a log of a build before F191 (key 10 by name) still reads, for draws and for idle
+        check("F85c: a log before F191 (key 10 draws) still reads", [retic_old(retic())] * 2, 0, [("OK", F85C)], has=["patched 84 of 94 key 10 draws (89%) in 2 s"], lacks=["assumed", "UNPARSED"])
+        check("F85c: a log before F191 (no key 10 composite draw) still reads", [retic_old(retic_idle())] * 2, 0, [("IDLE", F85C)], lacks=["UNPARSED"])
+        check("F85c: a log before F191, no key 10 draw while a weapon is drawn", [retic_old(retic_idle()), eyeoff()], 3, [("NEVER APPLIED", F85C)])
         check("F85c: the compute shader could not be created",
               ["reticle depth (F85c): precompiled compute shader reticle_depth_cs creation FAILED; standing down (0x80004005, 0.100 ms)."], 3,
               [("NEVER APPLIED", F85C)], has=["creation FAILED; standing down"])
@@ -21606,7 +22662,7 @@ def self_test_health():
         check("F125 UI: reticle draws in five of ten seconds", [retic(wl=10, draw_secs=5)], 0, [("OK", F85C)], has=["in 5 s; readbacks"], lacks=["UNPARSED"])
         check("F125 UI: reticle 10 s and a short flush", [retic(wl=10, draw_secs=10), retic(wl=3, draw_secs=2)], 0,
               [("OK", F85C)], has=["in 12 s; readbacks"], lacks=["UNPARSED"])
-        check("F125 UI: reticle ten-second idle still cross-checks a weapon", [R("reticle depth (F85c): no key 10 composite", 10), eyeoff()], 3,
+        check("F125 UI: reticle ten-second idle still cross-checks a weapon", [retic_idle(wl=10), eyeoff()], 3,
               [("NEVER APPLIED", F85C)], lacks=["UNPARSED"])
         check("F125 UI: reticle cause uses second counts, never window thresholds", [ret118(reads=800, steps=10, flips=3, frames=900, run=120,
               fread=800, edge=400, wl=10, edge_secs=10, speed_secs=3)], 0, [("OK", F118)],
@@ -21633,7 +22689,7 @@ def self_test_health():
             ("eye %d: place bind (F151): seen by tag", ["w" * 299]),
             ("(F85b) eye %d: place bind (F151)", ["r" * 419]),
             ("weapon UI pin (F85b): %s%llu matched", ["p" * 80, "tag", "s" * 299]),
-            ("reticle depth (F85c): key 10 draws", []),
+            ("reticle depth (F85c): key %s draws", ["k" * 79]),
             ("reticle depth (F118) %u s", []),
             ("weapon readout size (F90) %u s", ["pistol ADS readout"]),
             ("weapon readout size (F91) %u s", ["p" * 599]),

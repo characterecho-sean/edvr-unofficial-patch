@@ -362,8 +362,8 @@ inline uint32_t scanRecordsValue(const uint8_t* base, uint32_t bytes, const Valu
 
 // ---- C: the reticle's depth ----------------------------------------------------------------------------------------------------------------
 constexpr double kReticleMinM = 0.5, kReticleMaxM = 50.0;
-constexpr uint32_t kReticleKey = 10u;   // the aim reticle's tag key: the only key the hit depth moves
-inline bool isReticleKey(uint32_t key) noexcept { return key == kReticleKey; }
+// F191: which key is the aim reticle's is no longer a constant here (it was 10, a pool slot, not an identity): native_on_foot_f191.h tracks the key the reticle's marker
+// type (1001) uses, and the hit depth moves only that key.
 constexpr int kMarchSteps = 32, kMarchBisect = 10;
 enum MarchStatus : uint32_t { kMarchSky = 0, kMarchHit = 1, kMarchNear = 2, kMarchOffscreen = 3 };
 // The scene rows' depth column as depth = A + B / w (reversed-Z with an infinite far plane: A = 0, B = near). False when the z column is not
@@ -506,6 +506,9 @@ struct StepFrame {
     // the pin (pinRecord): the demanded and the applied moves, the clamp flags, the crouch weight, the eye height less the standing height
     float pinDemandV = 0.0f, pinAppliedV = 0.0f, pinDemandH = 0.0f, pinAppliedH = 0.0f, wc = 0.0f, dEyeY = 0.0f;
     bool vClamp = false, hClamp = false;
+    // F193: the neck's height rule (m; the legs' room is NaN without legs): the animated neck, F163's posture weight, the legs' room, the old rule's standing raise, the game's camera eye, the neck target, the rule (0 hip, 1 legs, 2 camera)
+    float n0y = 0.0f, postureW = 0.0f, legsRoomM = 0.0f, standRaiseM = 0.0f, rawEyeY = 0.0f, neckTargetY = 0.0f;
+    uint8_t source = 0;
     float handErrCm[2] = {-1.0f, -1.0f};
     bool handWritten[2] = {};
     // F86a: the pose carry of this frame's submit (joined by the P1 frame): the figures the line prints and the hand-lag trigger reads

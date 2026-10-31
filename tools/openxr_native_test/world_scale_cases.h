@@ -88,8 +88,8 @@ template<class Check> void runWorldScaleCases(Check&& check) {
             has(host,"features.begin(located,")&&has(host,"makeGeometrySnapshot(located,temporalGeometry)")&&!has(host,"frameGeometry=gameGeometry")&&!has(host,"frameViews[0]=gameGeometry")&&
             has(host,"auto menuGeometry=frameGeometry;"),
         "world scale wiring: the layer's views, the menu's, the plugins' and the frame input stay the located ones; only the game's and the temporal pass's geometry is scaled");
-  check(has(stereo,"v.pose=views[i].pose;")&&!has(stereo,"eyeToHead")&&!has(menuClient,"eyeToHead")&&!has(frameClient,"eyeToHead")&&has(menuClient,"detail::rigid(geometry.views[eye].pose, matrix);"),
-        "world scale wiring: the projection layer's pose is the located view, and the menu client takes the located views, not the snapshot's eye transforms");
+  check(has(stereo,"v.pose=layerPose(seatOrigin,views[i].pose);")&&!has(stereo,"eyeToHead")&&!has(menuClient,"eyeToHead")&&!has(frameClient,"eyeToHead")&&has(menuClient,"detail::rigid(geometry.views[eye].pose, matrix);"),
+        "world scale wiring: the projection layer's pose is the located view (with the seat origin applied, F189), and the menu client takes the located views, not the snapshot's eye transforms");
   check(has(temporalClient,"makeGeometrySnapshot(geometry, snapshot)")&&has(temporalClient,"std::memcpy(frame.eyeToHead[eye], snapshot.eyeToHead[eye].m, sizeof(frame.eyeToHead[eye]));"),
         "world scale wiring: the temporal frame's eye transforms are the snapshot's, made from the geometry it is handed (the scaled one)");
   // ---- the readers of eyeToHead are the classified ones ----

@@ -64,6 +64,18 @@
 #include "f169_checks.h"    // F169: the stance while the aim is pitched (w_c capped under the animated neck's posture weight, the replays, the window and its line); the pistol sprint's arm swing (TEMPORARY): the plan, the ring, the stride's period, the delay, the measure and the line
 #include "f170_checks.h"    // F170: the crouched ADS torso squared to the aim (TEMPORARY): the dial, the share, the turn on the real square-up and reach functions (29 deg to 0 at 1, 14.5 at 0.5), the hold not taking it off, the line
 #include "f171_checks.h"    // F171: the crouched ADS body moved to the left of the aim line (TEMPORARY): the dial, the left axis and its sign against the eye's right, the move through the real reach rule, the counters and the line; the raise's carriage (slopes, pairs, window, line); F170's line reaching the log (logpin::elbow's merges against F98Left)
+#include "f181_checks.h"    // F181: the left elbow's swivel capped at the hip with a two-handed gun (TEMPORARY): the dial, the targets from the hip share, capSwivel on synthetic plane angles (the same side, the wrap, the hip share through the press), the counters and the F98a line's ending, the pilot's values as the defaults of eight dials, the source sites
+#include "f185_checks.h"    // F185: the left arm keeps a bend in the sights (TEMPORARY dial 0.80..1.00, default 0.92): the dial and its weights, the reach radius (today's at 1.00, the hip and 0.92; the target plus the clavicle's chord at 0.80), the clavicle's protraction (the smallest turn, the 15 deg limit), the composition with F59's turn, the counters and the line, the key and the source sites
+#include "f184_checks.h"    // F184: in the sights nothing that moves the body reads the eye: the guard acts at the hip armed alone and measures only elsewhere (counts the push it would make), the standing raise is asked of the legs' room (the same with the eye moved 20 cm), two toy loops (the camera riding on the chest and on the neck), the lines, the source sites
+#include "f186_checks.h"    // F186: the ADS terms pre-turned by the aim pitch under mouse look (TEMPORARY A/B), the sight lock's response measured, a stability stop: the turn on toy vectors (the game's turn lands them back), a toy loop (spirals unturned from 60 deg, settles turned), the response fit, the stop's timing, the lines, the key and the source sites
+#include "f191_checks.h"    // F191: the hip reticle found by its marker type (1001), not by pool slot 10: the tracker on the sequences the logs show (the fallback, the switch to 11, the overlap, the previous key expiring, an owner of slot 10 that is not the reticle, the wrap, the reset, the threads), the lines, the source sites
+#include "f192_checks.h"    // F192: the left elbow held at the body-down pole through a weapon draw: the hold by native epoch (the epoch start, held until the Status.json flip + 0.5 s, the 2 s timeout, the 0.3 s ramp, a stall, a pistol and a tool not held, the holster, a second switch inside the ramp), the weights on the real pole blend and F181's cap, the counters and lines, the source sites
+#include "f193_checks.h"    // F193: in the sights the body's neck follows the camera's height as at the hip: the steady states against the old rule within 1 cm, a jump with a flat camera, a crouch entry, lowering and the legs' cap, continuity from the hip, the stability stop and its fall back to the old rule, a toy loop, the lines, the source sites
+#include "f183_checks.h"    // F183: the pin's stable horizontal heading (the eye's while level-ish bit for bit, blended toward the body's forward from 60 to 80 deg, the body's forward past vertical; the pin's own target on random eyes, the band's continuity, F168's axis), the neck guard bounded (distance + 10 cm, the filtered error +-5 cm, reset on a 20 deg turn), the counters and lines, the source sites
+#include "f182_checks.h"    // F182: the shotgun's ADS eye 9.5 cm forward baked, the spine straighten one-sided per bone (written = animated - share x max(0, animated - reference); toy skeleton with a roll: the flight's numbers, hunched, mixed, share 0), the left hand kept on a two-handed gun aimed steeply up (the gate, the held point in the item's frame, the 3 s limit, the release), the counters and lines, the source sites
+#include "f180_checks.h"    // F180: the left elbow hangs standing in ADS (the blend weight), the spine straighten dial (TEMPORARY: the plan of the spine and the neck, F166's capture and apply on a toy skeleton: slerp share, the reference store, the line), the neck guard's distance (TEMPORARY) and the unarmed guard measuring only, the source sites
+#include "f179_checks.h"    // F179: the body stays up in standing ADS (the standing raise: the eye less the key, capped by the legs' room, crouched/hip/unarmed unchanged) and the neck guard (the eye kept 10 cm ahead of the chest: the deficit, the axis, the order target / post-reach add / move, the last word over random scenes, the filtered error, the contexts, the line), the F97a bins in the sights, the source sites
+#include "f178_checks.h"    // F178: the standing ADS body dials (TEMPORARY), the crouched ones mirrored: the weights (standing whole at crouched weight 0, crouched pair and standing pair adding up at every crouch), the clamps, the axes, the crouched pair untouched, the real reach rule, the counters and the line, the source sites
 #include "f177_checks.h"    // F177: the aiming choice at start: the page's words and their fit, what each choice writes, the trigger over every input, the log's lines, the source pins and the key's declaration
 #include "f176_checks.h"    // F176: in the sights with the head aiming, the mouse and the stick hold their pitch: the decision, the values a look update runs with, the press's account and line, the source pins
 #include "f175_checks.h"    // F175 (measure only): the view's roll and pitch against the headset's: the roll and elevation on synthetic rotations (5 deg reads 5, yaw and pitch alone 0, the sign, the model's axes against LOCAL's), the angular rate and its holding, the window's statistics and slope, the line
@@ -3850,8 +3862,11 @@ int wmain(int argc, wchar_t** argv) {
                         double To[3];
                         nf::PinAnimTarget po;
                         nf::pinNeckTargetAnim(eyeOrbit, headFwd, pStance, rowsId, n0s, cal, To, &po, decodedPitch, true, headUp);
-                        orbitFixed = orbitFixed && po.wc == 0.0 && dist(To, neckOrbit) < 1e-5 && std::fabs(po.eyeYSelected - cal.eyeY) < 1e-5 &&
-                                     std::fabs(po.hEye[0] - hx) < 1e-9 && std::fabs(po.hEye[2] - hz) < 1e-9;
+                        // F183: the heading is the stable one. Where the eye's forward has a horizontal length of 0.5 or more it is the eye's own and the neck is recovered exactly as before; nearer vertical it
+                        // is blended toward the body's forward (or is it, past vertical), and the target is off the neck by the rest offset's forward part times the change of heading.
+                        const double dh = std::sqrt((po.hEye[0] - hx) * (po.hEye[0] - hx) + (po.hEye[2] - hz) * (po.hEye[2] - hz));
+                        orbitFixed = orbitFixed && po.wc == 0.0 && std::fabs(dist(To, neckOrbit) - std::fabs(vForward) * dh) < 1e-5 && std::fabs(po.eyeYSelected - cal.eyeY) < 1e-5 &&
+                                     (dh < 1e-12 || po.stable.changed) && std::fabs(po.hEye[0] * po.hEye[0] + po.hEye[2] * po.hEye[2] - 1.0) < 1e-9;
                         const double eyeCrouch[3] = {eyeOrbit[0], eyeOrbit[1] - 0.50, eyeOrbit[2]};
                         double Tc[3];
                         nf::PinAnimTarget pc;
@@ -3892,8 +3907,13 @@ int wmain(int argc, wchar_t** argv) {
                         const double vForward = nf::kPinRestBackM * cp - nf::kPinRestUpM * sp;
                         const double eye[3] = {neckOrbit[0] + hx * vForward, neckOrbit[1] + vUp, neckOrbit[2] + hz * vForward};
                         double target[3] = {};
+                        // F183: as the orbit above: exact where the eye's own heading stands, off by the rest offset's forward part times the heading's change where the stable one is blended in
+                        double hRaw[3];
+                        if (!nf::pinHeadHeading(headFwd, headUp, hRaw)) nf::pinHeading(headFwd, hRaw);
+                        const nf::f183::Info sh = nf::f183::stableHeading(headFwd, hRaw);
+                        const double dh = sh.changed ? std::sqrt((sh.h[0] - hRaw[0]) * (sh.h[0] - hRaw[0]) + (sh.h[2] - hRaw[2]) * (sh.h[2] - hRaw[2])) : 0.0;
                         physicalRestFixed = physicalRestFixed && nf::pinNeckTargetPhysicalRest(eye, headFwd, headUp, pitch, true, target) &&
-                                            dist(target, neckOrbit) < 1e-9;
+                                            std::fabs(dist(target, neckOrbit) - std::fabs(vForward) * dh) < 1e-9;
                     }
                 }
                 double invalidTarget[3] = {7.0, 8.0, 9.0};
@@ -7658,6 +7678,44 @@ int wmain(int argc, wchar_t** argv) {
     // update runs with (the yaws untouched), the press's line (a press where it never ran reads differently from one where the mouse was still), and the source pins.
     f176test::run176(check);
     f177test::run177(check);
+    // F178: the standing ADS body dials (TEMPORARY), F168's forward and F171's left with the standing weight (1 - the crouched weight) x the detach weight: the weights (standing whole at the crouched weight 0,
+    // none crouched, half at half a crouch, the two pairs adding up to the dial at every crouch), the clamps, the vectors bit for bit the crouched ones' at the crouched weight 1, the axes at every yaw, the
+    // crouched pair untouched, the real reach rule on the mirrored move, the counters and the line within the log's limit, and the source sites.
+    f178test::run178(check);
+    // F179: the standing raise (the eye as drawn less the eye height key over the animated neck, by the standing share; the legs' room caps it; crouched, at the hip and unarmed the earlier target bit for
+    // bit) and the neck guard (a chest 6 cm behind the eye pushes 4 cm along the heading at every yaw; the target first, the post-reach add next, the move last; over 4000 scenes the eye ends 10 cm ahead;
+    // the prediction error filtered), the contexts, the line within the log's limit, the F97a line's bins in the sights, and the source sites.
+    f179test::run179(check);
+    // F180: the left elbow's blend weight (crouched share + standing share: the detach weight in either stance; F165's at the crouched weight 1), the spine straighten dial (the plan of 16, 21, 24 and the
+    // neck 34; F166's capture and apply on a toy skeleton: dial 1 puts the levels at the reference, 0.5 halfway, the clavicles and head carried; the reference store: hip frames, the press's first frame, per item;
+    // the line within the log's limit), the neck guard's distance (0..20, 0 off; F179's scenes at four distances; unarmed at the hip counted, not moved) and the source sites.
+    f180test::run180(check);
+    // F181: the hip swivel cap (53 deg off the plane at the cap 25 is brought to 25 on the same side; the shotgun's 18.5 untouched; the hip share lets go with the detach weight; the cap at 90 off),
+    // the counters and the F98a line's ending, the pilot's values as the defaults of the eight experimental dials (the atomic, the fallback and the shipped line), and the source sites.
+    f181test::run181(check);
+    // F182: the plasma shotgun's depth 9.51 at the trim 0; the spine straighten one-sided (the flight's looking-up numbers write the animated pose, a forward-hunched case is taken back by the share of its
+    // excess, a turned bone above a bone left as animated is undone there, the share 0 writes nothing), the counters and the line within the log's limit; the left hand held at the stored grip point in the
+    // item's frame in the sights with a two-handed gun at 45 deg or more up (moves with the item, 3 s limit, falls over 0.15 s, nothing outside the gate), the F67f line's ending, and the source sites.
+    f182test::run182(check);
+    // F183: the stable heading on the pin's own target function (level-ish eyes bit for bit, an eye 70 deg up blended, the aim clamp and past vertical the body's forward, no jump over 2 deg for a 1 deg step through the band),
+    // F168's move where the eye's forward had none, the guard's push bound and error limit and reset, the counters and the lines, and the source sites.
+    f183test::run183(check);
+    // F184: the guard measures only in the sights (the same scene pushed 4 cm at the hip armed is left bit for bit and counted), the standing raise is the legs' room (9.0 cm on the F179 scene, 13.2 on the F180 flight's) with no eye in
+    // it, a toy loop settles in one call with the change and runs away without it, the sights' lines say measuring only, and the source sites.
+    f184test::run184(check);
+    // F185: the left arm's bend in the sights: 1.00 is today's bit for bit; the clavicle takes the first of it (a grip 56.5 cm from the shoulder is brought to 54.5 by the smallest turn, 60 and 64 take the full 15 deg),
+    // the pin's reach rule takes the rest at 0.80 and nothing at 0.92, the turns compose with F59's about one save, the counters and the line, the key, and the source sites.
+    f185test::run185(check);
+    // F186: the ADS terms turned by -a under mouse look (a = 0 untouched; the game's turn lands them back; off and the other conditions leave them), a toy loop whose plant is the game's turn (it runs away unturned at 85 deg and
+    // settles turned), the response fit on synthetic pairs and its bins, the stability stop's timing and ramp, the lines, the key, and the source sites.
+    f186test::run186(check);
+    // F191: the reticle is the key marker type 1001 uses, not slot 10: the fallback to 10 before any call, the switch to 11 (key 10's other owner is left alone), two live keys through the allocator's overlap, the replaced key
+    // released 500 ms after its last SetMarker, a key past the pool ignored, the 32-bit clock's wrap, the reset, a writer pair against three readers, the lines, and the source sites.
+    f191test::run191(check);
+    // F192: the left elbow's draw hold: the weight by native epoch on the flight's timings (the hold until the Status.json flip + 0.5 s or the 2 s timeout, then the 0.3 s ramp; a stall; a pistol and a tool never held; the holster; a second switch inside the ramp restarts it), the larger-of blend on the real solver and F181's cap share, the counters, the lines, and the source sites.
+    f192test::run192(check);
+    // F193: the sights' neck height by the camera's: against the old rule on the flight's steady states, a jump with a flat camera, a crouch entry; a lowering and the legs' cap; the blend from the hip; the stability stop and the old rule bit for bit after it; a toy loop; the lines; and the source sites.
+    f193test::run193(check);
     // F110: the ADS sight lock's model right eye from the left-eye job camera and from a solved left eye, the fallback, the IPD's sign.
     f110test::run110(check);
     // F111: the panel pointer instrument names the stage that turns a move the other way (K1 to K5, one at a time), the camera getters' decoding.

@@ -2,13 +2,15 @@
 
 ## Status
 
-- **State (2026-10-28):** rounds 1 to 8 ON MAIN. **Round 8 FLOWN OK on the Pimax**
+- **Release (2026-10-30):** Rounds 1 to 8, the Mirror window page and the VR sync-interval-0 Present are in v0.22.0-rc.4 (draft pre-release, `ab1955de`, 2026-10-30). **State (2026-10-28):** rounds 1 to 8 ON MAIN. **Round 8 FLOWN OK on the Pimax**
   (`edvr_gfx_20261028_215040.log`): the rule switched live 22 times, `hidden-area mesh served
   no, as the game, no mesh`, so native equals center there, as expected. OPEN: native's mesh
   path (1.32x at u 0.515) is flown on no headset; a tester with a mesh headset compares it with
   the game's own mirror. Rounds 1 to 7 FLOWN OK. **2026-10-29 (Sean's word):** default
   `left_eye` (F173); the page is **Mirror window** (F173), its rows Image, Shape, Crop, Vertical
-  shift, Style (F174). Five live keys in `[visual]`: `visual.desktop_window` (`game` | `left_eye`
+  shift, Style (F174). **2026-10-30 (Sean's word):** in VR Elite's Present always goes out with
+  sync interval 0, flat keeps Elite's own, no key (`desktop_vsync.h`, line `desktop vsync`; Elite
+  already asked 0 in Sean's last five Frontier flights). Five live keys in `[visual]`: `visual.desktop_window` (`game` | `left_eye`
   | `right_eye` | `both_eyes`, default `left_eye`), `desktop_window_aspect` (`full` | `1:1` |
   `4:3` | `16:10` | `16:9` | `21:9`, default `full`), `desktop_window_crop` (`native` | `center`,
   default `native`), `desktop_window_vertical_shift` (-100 to 100, default 0),
@@ -46,11 +48,9 @@
   reports every answer with data (`noteHiddenMeshServed`, not the rate-limited trace); the host
   keeps that eye's bit, as Elite keeps its counts. No query answered: no mesh.
 - **Round 8 logs:** `crop rule R` (first read), `(was Q)` (each change); per activation and eye
-  `crop S, left eye, rule native: hidden-area mesh served yes, as the game, mesh: 1.32x at u
-  0.515, vertical shift N; crop bounds ...` (`no, as the game, no mesh`; `center: ...`).
-- **First flight of round 8 must show:** the crop row between shape and shift; with no mesh
-  (the Pimax) `native` equal to `center`; with one, 1.32x at u 0.515 / 0.485; a live switch.
-  `census_cb_watch = 01C3B84C82172B56`, `census_cb_slot = 2` shows Elite's own numbers.
+  `crop S, left eye, rule native: hidden-area mesh served yes|no, ..., vertical shift N; crop bounds ...`.
+- **A mesh headset's flight must show** 1.32x at u 0.515 / 0.485; `census_cb_watch =
+  01C3B84C82172B56`, `census_cb_slot = 2` shows Elite's own numbers.
 - **Unsettled:** for a shape narrower than the eye (the both-eyes halves of 1:1, 4:3) Elite
   letterboxes the whole eye; EDVR cuts a tall rectangle, as `center` does. Elite reads the mesh
   once; EDVR follows a later answer at once.

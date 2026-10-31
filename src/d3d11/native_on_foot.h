@@ -2,7 +2,9 @@
 // Native on-foot VR, flight F0 (docs\design-native-onfoot-vr-2026-10-13.md; the decisions are native_on_foot_core.h).
 //
 // THE HOOK (VR profile only). A CodeHook on the game's render-mode setter (EliteDangerous64.exe+0x2874920, build 334925), installed
-// by the first frame boundary. It is installed whether or not fix.native_on_foot is on, so every natural mode request is logged. An
+// by the first frame boundary of the VR profile (F190: a session that starts flat waits, and installs on the first VR frame after a live
+// switch, taking the game's mode from Settings.xml because the setter call for the switch has already passed). It is installed whether or
+// not fix.native_on_foot is on, so every natural mode request is logged. An
 // an incoming cinema mode (5 or 6) is forwarded as its HMD partner (3 or 4) when the key is on, the selector is the one frozen at the first valid call, and
 // the journal says a game session is live. Everything else is forwarded unchanged.
 //
@@ -282,6 +284,9 @@ struct ArmPlan {
     HandRig hand[2];
     // F166: the held joints of the upper body (the spine 16, 21, 24, both clavicles and upper arms) and the joints that come with them, from the parents; why != 0 refuses the hold alone.
     nofoot::f166::Plan f166;
+    // F180b: the spine 16, 21, 24 and the neck 34 as held joints (F166's plan type: native_on_foot_f180.h builds it) and the joints that come with them, for the standing ADS spine straighten
+    // dial; why != 0 refuses it alone.
+    nofoot::f166::Plan f180;
     // F169: the left arm's chain (clavicle, upper arm, forearm, hand) and the joints that come with it, for the pistol sprint's delayed swing; why != 0 refuses it alone.
     nofoot::f169::Plan f169;
 };

@@ -4009,6 +4009,7 @@ int main(int argc, char** argv) {
     testRenderState();
     testSeedCensusCpu();
     testSeedWriterRule();
+    testSeedKeepsDepthRule();
     testSeedReasonTally();
     testKey();
     testSize();

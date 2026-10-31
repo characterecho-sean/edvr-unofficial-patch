@@ -48,12 +48,12 @@ inline void run173(Check&& check) {
     const auto has = [&](const char* needle) { return cpp.find(needle) != std::string::npos; };
 
     // ---- 1. one check per key: the atomic's initial value, the cfg fallback and the shipped line are all the new default --------------------------------------------------------------------
-    check(has("std::atomic<float> g_crouchAdsBodyCm{5.0f};") && has("cfg.getFloat(\"experimental.native_on_foot_crouch_ads_body_forward_cm\", 5.0f)") &&
-              iniValue(ini, "native_on_foot_crouch_ads_body_forward_cm") == 5.0,
-          "F173: experimental.native_on_foot_crouch_ads_body_forward_cm defaults to 5 (the atomic, the fallback and the shipped line)");
-    check(has("std::atomic<float> g_crouchAdsBodyLeftCm{25.0f};") && has("cfg.getFloat(\"experimental.native_on_foot_crouch_ads_body_left_cm\", 25.0f)") &&
-              iniValue(ini, "native_on_foot_crouch_ads_body_left_cm") == 25.0,
-          "F173: experimental.native_on_foot_crouch_ads_body_left_cm defaults to 25 (the atomic, the fallback and the shipped line)");
+    check(has("std::atomic<float> g_crouchAdsBodyCm{1.0f};") && has("cfg.getFloat(\"experimental.native_on_foot_crouch_ads_body_forward_cm\", 1.0f)") &&
+              iniValue(ini, "native_on_foot_crouch_ads_body_forward_cm") == 1.0,
+          "F173 (F181: the pilot's later value): experimental.native_on_foot_crouch_ads_body_forward_cm defaults to 1 (was 5; the atomic, the fallback and the shipped line)");
+    check(has("std::atomic<float> g_crouchAdsBodyLeftCm{23.0f};") && has("cfg.getFloat(\"experimental.native_on_foot_crouch_ads_body_left_cm\", 23.0f)") &&
+              iniValue(ini, "native_on_foot_crouch_ads_body_left_cm") == 23.0,
+          "F173 (F181: the pilot's later value): experimental.native_on_foot_crouch_ads_body_left_cm defaults to 23 (was 25; the atomic, the fallback and the shipped line)");
     check(has("std::atomic<float> g_crouchAdsSquare{0.0f};") && has("cfg.getFloat(\"experimental.native_on_foot_crouch_ads_square\", 0.0f)") &&
               iniValue(ini, "native_on_foot_crouch_ads_square") == 0.0,
           "F173: experimental.native_on_foot_crouch_ads_square defaults to 0 (the atomic, the fallback and the shipped line)");
@@ -80,12 +80,12 @@ inline void run173(Check&& check) {
             made = nf::f171::shiftVector(leftCm, postures[i], details[i], aim, b) || made;
             zero = zero && a[0] == 0.0 && a[1] == 0.0 && a[2] == 0.0 && b[0] == 0.0 && b[1] == 0.0 && b[2] == 0.0;
         }
-        // the crouched-in-the-sights case does move at the shipped values (5 cm forward, 25 cm left), so the zeros above are the weights', not a dead path
+        // the crouched-in-the-sights case does move at the shipped values (1 cm forward, 23 cm left since F181), so the zeros above are the weights', not a dead path
         double fwdMove[3], leftMove[3];
         const bool inSights = nf::f168::shiftVector(forwardCm, 1.0, 1.0, aim, fwdMove) && nf::f171::shiftVector(leftCm, 1.0, 1.0, aim, leftMove);
         const double fwdLen = std::sqrt(fwdMove[0] * fwdMove[0] + fwdMove[2] * fwdMove[2]), leftLen = std::sqrt(leftMove[0] * leftMove[0] + leftMove[2] * leftMove[2]);
-        check(zero && !made && inSights && std::fabs(fwdLen - 0.05) < 1e-12 && std::fabs(leftLen - 0.25) < 1e-12,
-              "F173: at the shipped 5 cm and 25 cm the body moves are exactly zero standing in the sights, crouched at the hip and standing at the hip (the posture and detach weights gate them), and 5 cm and 25 cm crouched in the sights");
+        check(zero && !made && inSights && std::fabs(fwdLen - 0.01) < 1e-12 && std::fabs(leftLen - 0.23) < 1e-12,
+              "F173: at the shipped 1 cm and 23 cm (F181; 5 and 25 under F173) the body moves are exactly zero standing in the sights, crouched at the hip and standing at the hip (the posture and detach weights gate them), and 1 cm and 23 cm crouched in the sights");
         double a[3], b[3];
         const bool zeroForward = nf::f168::shiftVector(0.0, 1.0, 1.0, aim, a), zeroLeft = nf::f171::shiftVector(0.0, 1.0, 1.0, aim, b);
         check(!zeroForward && !zeroLeft && a[0] == 0.0 && a[2] == 0.0 && b[0] == 0.0 && b[2] == 0.0,

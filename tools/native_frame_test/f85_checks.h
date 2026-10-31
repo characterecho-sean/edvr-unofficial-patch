@@ -396,8 +396,7 @@ inline void run(Check&& check) {
         check(f85::lineOffAngleDeg(Oa, ua, on) < 1e-9 && f85::lineOffAngleDeg(Oa, ua, off) > 0.2 && f85::lineOffAngleDeg(Oa, ua, off) < 0.31,
               "F85c: P on the aim line passes, 0.3 degrees off is refused (bound 0.2)");
         check(f85::lineOffAngleDeg(Oa, ua, Oa) < 0.0, "F85c: P at O has no direction (refused)");
-        check(f85::isReticleKey(10) && !f85::isReticleKey(1) && !f85::isReticleKey(43) && !f85::isReticleKey(45) && !f85::isReticleKey(0x70) && !f85::isReticleKey(0x8A),
-              "F85c: only key 10 takes the hit depth (no other key changes)");
+        // F191: which key is the reticle's (the one marker type 1001 uses, slot 10 until a call is seen) is the tracker's: f191_checks.h pins that only that key takes the hit depth.
     }
     // ---- F85c 4: 5 m to 1.5 m reaches 90% within 0.1 s with no overshoot; frame-time independent -------------------------------------------
     {

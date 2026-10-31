@@ -85,6 +85,23 @@ inline int stanceBin(bool crouched, bool moving) noexcept { return crouched ? (m
 inline const char* stanceName(int s) noexcept {
     return s == kStanding ? "standing" : s == kCrouched ? "crouched" : s == kCrouchMoving ? "moving crouched" : "moving";
 }
+// F179a: the line's bins are the four stances at the hip and the same four in the sights (the detach weight from 0.05): a call in the sights is counted in its stance's "in the sights" bin, so
+// the standing share's raise shows apart from the hip's. The hip bins are 0..3 as before.
+constexpr int kBinN = 2 * kStanceN;
+inline int binOf(int stance, bool inSights) noexcept { return inSights ? kStanceN + stance : stance; }
+inline bool binInSights(int bin) noexcept { return bin >= kStanceN; }
+inline const char* binName(int bin) noexcept {
+    switch (bin) {
+        case kStanding: return "standing";
+        case kCrouched: return "crouched";
+        case kCrouchMoving: return "moving crouched";
+        case kMoving: return "moving";
+        case kStanceN + kStanding: return "standing in the sights";
+        case kStanceN + kCrouched: return "crouched in the sights";
+        case kStanceN + kCrouchMoving: return "moving crouched in the sights";
+        default: return "moving in the sights";
+    }
+}
 
 }  // namespace f97
 }  // namespace nofoot

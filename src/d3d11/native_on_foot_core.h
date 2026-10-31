@@ -30,6 +30,7 @@
 #include "native_on_foot_f87.h"          // F87: the standing-height hold, the stream windows' history, the scene rows' fallback, the prompt probes, the hand residual (pure parts)
 #include "native_on_foot_f88.h"          // F88: the weapon eye offset, its weight, the pin's share and the hold's wait (pure parts)
 #include "native_on_foot_f89.h"          // F89: the ADS transition trace, the hold's open-loop input (pure parts)
+#include "native_on_foot_f183.h"         // F183: the pin's stable horizontal heading (standalone pure parts: pinNeckTargetAnim takes the heading from it)
 #include "native_on_foot_f106.h"         // F106: ADS, the sight in both eyes: the share's decision (pure parts; it replaced F89's left eye close)
 
 namespace edvr {
@@ -1479,6 +1480,8 @@ struct IkPoseDeviationSample {
     double weight[2] = {}, violationM[2] = {}, outSign[2] = {}, actualOutM[2] = {}, requiredOutM[2] = {};
     double offDistanceM = 0.0, offChangeDeg = 0.0, offRawWeight = 0.0, offEffectiveWeight = 0.0, leftSolveWeight = 0.0, supportBlend = 0.0;
     double reachRadiusM[2] = {}, reachCandidate[3] = {}, pinReach[3] = {};
+    // F192: the left elbow's draw-hold weight, the game's animated left elbow over its shoulder (m) and F181's plane angle before the cap (deg); not a number when unmeasured
+    double f192Dh = 0.0, f192AnimElbowDyM = std::nan(""), f181PlaneBeforeDeg = std::nan("");
 };
 struct IkPoseDeviationRecord {
     IkPoseDeviationSample sample{};
@@ -4866,8 +4869,9 @@ struct PinAnimTarget {
     double dEyeY = 0.0;       // F69a: E_y - h_stand (m, negative when down); 0 without a calibration
     double vUsed[3] = {};     // neck -> eye as used (model axes)
     double vAnim[3] = {};     // F69a: the animated vector (after the clamp), whether or not it was used
-    double hEye[3] = {}, hHead[3] = {};
+    double hEye[3] = {}, hHead[3] = {};   // F183: hEye is the stable heading (the eye's heading while the view is level-ish, nofoot::f183::stableHeading)
     double eyeYSelected = 0.0;   // F73: normalized height when LOCAL pitch is valid; raw height on its yaw-only fallback
+    f183::Info stable;           // F183: what the stable heading did this call (valid only with eyeKnown)
 };
 // The weapon-independent rest target, rotated by physical LOCAL head pitch and scene-eye heading.
 // Callers must retain their existing target when the physical pitch is unavailable.
@@ -4880,6 +4884,14 @@ inline bool pinNeckTargetPhysicalRest(const double eye[3], const double eyeFwd[3
     if (!(std::sqrt(eyeUp[0] * eyeUp[0] + eyeUp[1] * eyeUp[1] + eyeUp[2] * eyeUp[2]) > 1e-9)) return false;
     double hEye[3];
     if (!pinHeadHeading(eyeFwd, eyeUp, hEye)) pinHeading(eyeFwd, hEye);
+    {   // F183: the stable heading (the eye's own while the view is level-ish)
+        const f183::Info st = f183::stableHeading(eyeFwd, hEye);
+        if (st.changed) {
+            hEye[0] = st.h[0];
+            hEye[1] = 0.0;
+            hEye[2] = st.h[2];
+        }
+    }
     const double cp = std::cos(localPitchRad), sp = std::sin(localPitchRad);
     const double restUp = kPinRestUpM * cp + kPinRestBackM * sp;
     const double restForward = kPinRestBackM * cp - kPinRestUpM * sp;
@@ -4896,14 +4908,22 @@ inline bool pinRestReferenceGenerationAllowed(bool currentAvailable, uint32_t sa
 // The neck target: E - v, v = lerp(rest, the animated neck-to-eye vector turned from the head's heading to the eye's, w_c). eyeFwd: the eye's forward in
 // model axes (its heading is pinHeading's, with the same fallback to the body's forward). Without a calibration or a readable head, the F67c target.
 // F169: wcCap is a ceiling on w_c (the caller passes the animated neck's posture weight while the aim is pitched, where the camera's sink reads as a crouch); at 1, the default, w_c is exactly
-// what it was.
+// what it was. F183: eyeKnown false (no eye rows: the body's own forward stands for the eye's) leaves the heading alone and counts nothing.
 inline void pinNeckTargetAnim(const double eye[3], const double eyeFwd[3], const double p44[3], const double rows[3][3], const double n0[3],
                               const PinEyeCal& cal, double out[3], PinAnimTarget* info, double localPitchRad = 0.0, bool localPitchValid = false,
-                              const double* eyeUp = nullptr, double wcCap = 1.0) noexcept {
+                              const double* eyeUp = nullptr, double wcCap = 1.0, bool eyeKnown = true) noexcept {
     PinAnimTarget local;
     PinAnimTarget& pa = info ? *info : local;
     pa = PinAnimTarget{};
     if (!eyeUp || !pinHeadHeading(eyeFwd, eyeUp, pa.hEye)) pinHeading(eyeFwd, pa.hEye);
+    // F183: ONE stable horizontal heading for everything below and for every reader of hEye (the rest offset, the turn of the animated vector, F97a's and F179b's axes, F168/F171/F178's via the
+    // caller): the eye's heading while the view is level-ish (bit for bit), blended toward the body's forward as the view nears vertical, the body's forward past vertical.
+    pa.stable = f183::stableHeading(eyeFwd, pa.hEye, eyeKnown);
+    if (pa.stable.changed) {
+        pa.hEye[0] = pa.stable.h[0];
+        pa.hEye[1] = 0.0;
+        pa.hEye[2] = pa.stable.h[2];
+    }
     const double pitch = localPitchValid && std::isfinite(localPitchRad) ? localPitchRad : 0.0;
     const double cp = std::cos(pitch), sp = std::sin(pitch);
     const double restUp = kPinRestUpM * cp + kPinRestBackM * sp;
@@ -5382,6 +5402,9 @@ struct GripSteady {
 // across kOffHandSteadyFrames prior samples. Once acquired, valid same-identity attaches retain authority through orientation motion; the off-arm
 // IK weight ramps on release over kOffHandRampSec.
 constexpr double kOffHandMaxM = 0.40, kOffHandSteadyDeg = 5.0, kOffHandRampSec = 0.15;
+// F182c: an input that is invalid only because the FP snapshot is stale (older than kIkPoseDeviationMaxGapMs, in the game's stalls) keeps the decision and the history for up to this much hook
+// time (a call counts at most 0.1 s), instead of releasing the hand and needing kOffHandSteadyFrames + 1 fresh frames to take it back. See OffHand::step.
+constexpr double kOffHandStaleKeepSec = 3.0;
 // F84's same-pass rifle quality activation. Identity/generation changes hard-reset;
 // loss of an otherwise known source releases smoothly. Repeated or old frames never
 // advance the ramp, so draw-follow handoff cannot pop even when contact was already set.
@@ -5432,9 +5455,11 @@ struct OffHand {
     uint32_t lastFrame = 0, item = 0, rigGeneration = 0, fpGeneration = 0, syntheticFrame = 0;
     uint64_t fpRig = 0, nativeEpoch = 0;
     bool haveFrame = false, haveIdentity = false, attached = false, releasing = false, lastSteady = false, lastQualified = false;
+    double staleSec = 0.0;   // F182c: the hook time of the stale stretch the decision has been kept through
     struct Out {
         bool two = false, ok = false, historyReady = false, withinDistance = false, steady = false, allowed = false, qualified = false;
         bool duplicate = false, gapReset = false, identityReset = false, reversed = false, stablePolicy = false;
+        bool kept = false, staleLimit = false;   // F182c: the decision was kept through a stale input this call (ok is false); the stale stretch hit kOffHandStaleKeepSec and the hand is released
         uint8_t historySamples = 0;
         double w = 0.0, dist = 0.0, changeDeg = 0.0;
     };
@@ -5454,7 +5479,10 @@ struct OffHand {
     // explicit one-hand policy, separation limit, disarm or identity change releases it. History advances only on unique P1 frames.
     Out step(double dt, bool armed, bool ok, const float a51[16], const float a52[16], bool allowTwoHand = true,
              uint32_t frame = 0xFFFFFFFFu, uint32_t itemId = 0, uint32_t rigGen = 0, uint64_t fpRigId = 0, uint32_t fpGen = 0,
-             uint64_t acceptedNativeEpoch = 0, bool sourceSuspended = false) noexcept {
+             uint64_t acceptedNativeEpoch = 0, bool sourceSuspended = false, bool staleOnly = false) noexcept {
+        // staleOnly (F182c): ok is false only because the FP snapshot is older than the gap (the pair, the generation and the rig are otherwise readable). An attached hand keeps its decision and its history
+        // through such calls, for up to kOffHandStaleKeepSec of hook time; a fresh call resumes the rule below from the kept history, and a pair that really changed (past kOffHandMaxM, the explicit
+        // one-hand policy, an identity change) releases as it always did once fresh frames show it.
         Out o;
         if (!armed) {
             if (sourceSuspended && acceptedNativeEpoch != 0 && haveIdentity && nativeEpoch == acceptedNativeEpoch &&
@@ -5509,7 +5537,17 @@ struct OffHand {
         }
         if (uniqueFrame) { lastFrame = frame; haveFrame = true; }
         const double d = !uniqueFrame || !(dt > 0.0) ? 0.0 : dt > 0.1 ? 0.1 : dt;
-        if (!allowTwoHand || !ok) clearHistory();
+        bool keepNow = staleOnly && !ok && attached && allowTwoHand;
+        if (keepNow) {
+            staleSec += d;
+            if (staleSec > kOffHandStaleKeepSec) {
+                keepNow = false;   // the stretch is too long to trust the decision: released below, as an unreadable input releases
+                o.staleLimit = true;
+            }
+        } else if (ok || !attached) {
+            staleSec = 0.0;
+        }
+        if (!allowTwoHand || (!ok && !keepNow)) clearHistory();
         o.allowed = allowTwoHand;
         bool steadyNow = false, closeEnough = false;
         if (ok) {
@@ -5553,7 +5591,9 @@ struct OffHand {
             }
         }
         // Invalid inputs, explicit free-hand policy and excess separation release and forget acquisition. The 5-degree check only decides acquisition.
-        if (!o.ok || !allowTwoHand || !closeEnough) {
+        if (keepNow) {
+            o.kept = true;   // F182c: neither released nor re-decided: the decision, the history and the weight's target stand
+        } else if (!o.ok || !allowTwoHand || !closeEnough) {
             if (attached) releasing = true;
             attached = false;
             clearHistory();

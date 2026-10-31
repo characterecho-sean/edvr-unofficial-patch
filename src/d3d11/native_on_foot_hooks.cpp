@@ -21,6 +21,7 @@
 #include "avatar_skeleton_core.h"
 #include "native_on_foot.h"   // nativeOnFootActive, nativeOnFootCameraExternal and the pose freeze's hand-off (pfz)
 #include "native_on_foot_f95c.h"   // F95c: the head's shadow-only class through the visibility call, the fade hook's action
+#include "native_on_foot_f180.h"   // F180b: the spine straighten's plan (the spine and the neck as held joints)
 #include "native_on_foot_f142.h"   // F142: the full outfit's promotion through the same call, and the outfit census
 #include "native_on_foot_f143.h"   // F143: the clip measure's schedule, the clip snapshot
 #include "native_on_foot_f144.h"   // F144: Gear_Back only for an outer garment, the first-person census
@@ -2076,6 +2077,17 @@ bool armBuildPlan(uint64_t x) noexcept {
         Log::get().note("native on foot upper body hold plan (F166): X=%016llX %s (%s); held joints %s (arms %u); %u joints come with them",
                         static_cast<unsigned long long>(x), plan.f166.ok() ? "ok" : "REFUSED", nofoot::f166::whyText(plan.f166.why), held[0] ? held : "none",
                         static_cast<unsigned>(plan.f166.arms), static_cast<unsigned>(plan.f166.carriedN));
+    }
+    // F180b: the spine 16, 21, 24 and the neck 34 (a child of the chest) and the joints that come with them, for the standing ADS spine straighten dial. A refusal leaves the dial doing nothing.
+    {
+        plan.f180 = nofoot::f180::buildPlan(g_pfzParents, joints);
+        char held[96] = {};
+        size_t at = 0;
+        for (uint32_t k = 0; k < plan.f180.n; ++k)
+            armAppend(held, sizeof(held), &at, "%s%u", k ? " " : "", static_cast<unsigned>(plan.f180.joint[k]));
+        Log::get().note("native on foot spine straighten plan (F180b plan): X=%016llX %s (%s); held joints %s (the neck %s); %u joints come with them",
+                        static_cast<unsigned long long>(x), plan.f180.ok() ? "ok" : "REFUSED", nofoot::f166::whyText(plan.f180.why), held[0] ? held : "none",
+                        nofoot::f180::planHasNeck(plan.f180) ? "held" : "not held: it is not a direct child of the chest 24", static_cast<unsigned>(plan.f180.carriedN));
     }
     // F169: the left arm's chain (clavicle, upper arm, forearm, hand) and the joints that come with it, for the pistol sprint's delayed swing. A refusal leaves the swing dial doing nothing.
     {

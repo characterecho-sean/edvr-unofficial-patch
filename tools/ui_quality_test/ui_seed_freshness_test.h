@@ -34,6 +34,27 @@ void testSeedWriterRule() {
     check(!guard.active(72) && guard.active(0), "shutdown resets guard and keeps bootstrap conservative");
 }
 
+// uiLayerSeedKeepsDepth: a repeat seed keeps the layer's depth only when every one of the five conditions holds.
+// The specified-stencil-reference Seeder (AMD, Intel) writes depth and stencil in one pass, so WARP and NVIDIA
+// cannot run it; its refusal is covered here, and the GPU replay below runs the per-bit path.
+void testSeedKeepsDepthRule() {
+    check(uiLayerSeedKeepsDepth(false, true, false, false, true),
+          "a current, depth-seeded layer on the per-bit seeder at the same jitter with no private depth write keeps its depth");
+    check(!uiLayerSeedKeepsDepth(true, true, false, false, true), "a stale layer copies depth again");
+    check(!uiLayerSeedKeepsDepth(false, false, false, false, true), "a layer holding no copied depth copies it");
+    check(!uiLayerSeedKeepsDepth(false, true, true, false, true),
+          "the specified-stencil-reference seeder writes depth and stencil in one pass and keeps nothing");
+    check(!uiLayerSeedKeepsDepth(false, true, false, true, true),
+          "a private depth-write potential this frame copies depth again");
+    check(!uiLayerSeedKeepsDepth(false, true, false, false, false), "another jitter copies depth again");
+    // The guard feeds the predicate as production does: a frame with a private depth write is not kept, the next frame is.
+    UiLayerPrivateDepthGuard guard;
+    guard.note(71, true);
+    check(!uiLayerSeedKeepsDepth(false, true, false, guard.active(71), true) &&
+          uiLayerSeedKeepsDepth(false, true, false, guard.active(72), true),
+          "the private depth guard keeps the predicate false for its frame only");
+}
+
 using CensusCopyFn = void (STDMETHODCALLTYPE*)(ID3D11DeviceContext*, ID3D11Resource*, ID3D11Resource*);
 CensusCopyFn g_freshCopy = nullptr;
 unsigned g_freshCopies = 0;
@@ -74,6 +95,7 @@ struct FreshWorld {
         uint32_t seededW = 0, seededH = 0;
         uint8_t mask = 0;
         bool depth = false;
+        float jx = 0, jy = 0;  // the jitter the depth was last copied with
     };
     Gpu& gpu;
     edvr_layer_seed::Seeder seeder;
@@ -83,7 +105,7 @@ struct FreshWorld {
     uint64_t seq = 71;
     UiLayerPrivateDepthGuard privateDepthGuard;
     unsigned seeds = 0, seedAttempts = 0, seedCopies = 0, seedDraws = 0, seedClears = 0;
-    unsigned gameWriterCommands = 0, preserved = 0;
+    unsigned gameWriterCommands = 0, preserved = 0, depthKept = 0;
     float jx = .23f, jy = -.31f;
     bool optimized = false, failNextSeed = false;
 
@@ -125,7 +147,9 @@ struct FreshWorld {
         quadDs(gpu, colour, dst, state, rect, white, ndcX, ndcY, vp, nullptr);
         gpu.ctx->OMSetRenderTargets(0, nullptr, nullptr);
     }
-    bool seed(unsigned cache, unsigned game, uint8_t mask, bool depth) {
+    // `keepDepth`: production's repeat seed that leaves the layer's depth as it stands (depth is then false, the
+    // Seeder copies stencil bits only, and the layer still holds the depth it had, at the jitter it had).
+    bool seed(unsigned cache, unsigned game, uint8_t mask, bool depth, bool keepDepth = false) {
         ++seedAttempts;
         if (failNextSeed) { failNextSeed = false; return false; }
         Cache& c = caches[cache];
@@ -149,7 +173,9 @@ struct FreshWorld {
         gpu.ctx->ExecuteCommandList(list.Get(), TRUE);
         const bool full = seeder.usesSpecifiedStencilRef() && (depth || mask);
         c.seq = seq; c.source = games[game].tex.Get();
-        c.mask = full ? 255 : mask; c.depth = depth || full;
+        c.mask = full ? 255 : mask; c.depth = depth || full || keepDepth;
+        if (depth || full) { c.jx = jx; c.jy = jy; }
+        if (keepDepth) ++depthKept;
         c.seededW = c.layer.w; c.seededH = c.layer.h; ++seeds;
         return true;
     }
@@ -160,7 +186,12 @@ struct FreshWorld {
         const bool shortBits = (requestedMask & ~c.mask) != 0;
         if (!current || shortBits || !c.depth) {
             const uint8_t want = uint8_t(requestedMask | (current ? c.mask : 0));
-            if (!seed(cache, game, want, true)) return false;
+            // Production's decision (ui_layer.cpp, the seed in beginInner): a repeat seed for missing stencil bits
+            // keeps the layer's depth when uiLayerSeedKeepsDepth holds. Legacy copies everything every time.
+            const bool keep = optimized && current && c.depth && shortBits &&
+                uiLayerSeedKeepsDepth(!current, c.depth, seeder.usesSpecifiedStencilRef(),
+                                      privateDepthGuard.active(seq), c.jx == jx && c.jy == jy);
+            if (!seed(cache, game, want, !keep, keep)) return false;
         }
         D3D11_DEPTH_STENCIL_DESC d{};
         d.DepthEnable = TRUE; d.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ZERO;
@@ -298,8 +329,133 @@ void testReadOnlyPrivateDepthProof(Gpu& g) {
     compareFreshWorlds(legacy, guarded, 1, 0);
 }
 
+// A game stencil-only writer that adds 1 to the stencil under its footprint (INCR_SAT, write mask 0xFF), so two
+// overlapping footprints leave the values 1 and 2 and the consumers below read two different stencil bits.
+D3D11_DEPTH_STENCIL_DESC freshnessStencilCountWriter() {
+    auto d = freshnessStencilWriter();
+    d.StencilWriteMask = 0xFF;
+    d.FrontFace.StencilPassOp = D3D11_STENCIL_OP_INCR_SAT; d.BackFace = d.FrontFace;
+    return d;
+}
+bool freshnessSameDepth(const std::vector<uint8_t>& a, const std::vector<uint8_t>& b) {
+    if (a.size() != b.size()) return false;
+    for (size_t i = 0; i + 3 < a.size(); i += 4)
+        if (std::memcmp(&a[i], &b[i], 3) != 0) return false;
+    return true;
+}
+
+// A repeat seed that keeps the layer's depth (uiLayerSeedKeepsDepth) against the legacy world, which copies depth and
+// every stencil bit again at each seed: real rendered output, layer depth and claimed stencil bits byte for byte, and the
+// Seeder's own Draw count through the real deferred context. WARP and NVIDIA seed per stencil bit (no
+// PSSpecifiedStencilRef), the path that skips a pass; on a specified-reference adapter the first depth-only seed already
+// holds all eight bits, nothing is kept, and the counts must match (the predicate checks above cover that refusal).
+void testSeedKeepsDepthGpu(Gpu& g) {
+    const float rectA[4] = {-.7f, -.6f, -.1f, .6f}, rectB[4] = {-.4f, -.6f, .4f, .6f};
+    const float wide[4] = {-.97f, -.97f, .2f, .2f};
+    const auto observed = freshnessStencilWriter();
+    const auto count = freshnessStencilCountWriter();
+    edvr_layer_seed::Seeder probe;
+    probe.init(g.dev.Get());
+    const bool perBit = !probe.usesSpecifiedStencilRef();
+
+    {   // (a) depth consumer, a game stencil-only writer, then a consumer of one stencil bit: the depth pass is skipped
+        FreshWorld old(g, false), opt(g, true);
+        check(old.consume(0, 0) && opt.consume(0, 0), "keep depth (a): depth-only seeds complete");
+        const auto gameBefore = readBackDs(g, opt.games[0]);
+        old.gameWriter(0, observed, rectA); opt.gameWriter(0, observed, rectA);
+        const auto gameAfter = readBackDs(g, opt.games[0]);
+        bool depthEqual = true, stencilChanged = false;
+        for (size_t p = 0; p < gameBefore.size(); p += 4) {
+            depthEqual = depthEqual && std::memcmp(&gameBefore[p], &gameAfter[p], 3) == 0;
+            stencilChanged = stencilChanged || gameBefore[p + 3] != gameAfter[p + 3];
+        }
+        check(depthEqual && stencilChanged, "keep depth (a): the game writer changes stencil and leaves depth alone");
+        const auto layerBefore = readBackDs(g, opt.caches[0].layer);
+        check(old.consume(0, 0, 4) && opt.consume(0, 0, 4), "keep depth (a): the stencil-bit consumers complete");
+        check(freshnessSameDepth(layerBefore, readBackDs(g, opt.caches[0].layer)),
+              "keep depth (a): the layer's depth is the same bytes after the stencil-only seed");
+        compareFreshWorlds(old, opt, 0, 0, 4);
+        std::printf("  keep depth (a): seed Draws optimized %u, legacy %u; depth kept %u time(s); %s\n",
+                    opt.seedDraws, old.seedDraws, opt.depthKept,
+                    perBit ? "per-bit seeder" : "specified-reference seeder");
+        check(perBit ? (opt.depthKept == 1 && opt.seedDraws + 1 == old.seedDraws)
+                     : (opt.depthKept == 0 && opt.seedDraws == old.seedDraws),
+              "keep depth (a): the repeat seed runs one Draw fewer (the depth pass) than the legacy seed");
+        check(opt.seeds == old.seeds && opt.seedCopies == old.seedCopies,
+              "keep depth (a): the same number of seeds and source copies; only the depth pass is gone");
+    }
+    {   // (b) a private depth write in between: the guard makes the repeat seed copy depth again
+        FreshWorld old(g, false), opt(g, true);
+        check(old.consume(0, 0) && opt.consume(0, 0), "keep depth (b): depth-only seeds complete");
+        old.gameWriter(0, observed, rectA); opt.gameWriter(0, observed, rectA);
+        // The original view is read-only on depth, so the layer's own writable depth changes and the game's does not:
+        // the layer's depth is no longer what a fresh copy writes, and only the guard says so.
+        old.privateWriter(0, 0, true, true); opt.privateWriter(0, 0, true, true);
+        check(opt.privateDepthGuard.active(opt.seq), "keep depth (b): the private depth write noted the guard");
+        const auto privateDepth = readBackDs(g, opt.caches[0].layer);
+        check(old.consume(0, 0, 4) && opt.consume(0, 0, 4), "keep depth (b): the stencil-bit consumers complete");
+        if (perBit)
+            check(!freshnessSameDepth(privateDepth, readBackDs(g, opt.caches[0].layer)),
+                  "keep depth (b): the private write changed the layer's depth, so keeping it would not be exact");
+        compareFreshWorlds(old, opt, 0, 0, 4);
+        check(opt.depthKept == 0 && opt.seedDraws == old.seedDraws && opt.seeds == old.seeds,
+              "keep depth (b): after a private depth write the repeat seed copies depth again, as legacy does");
+    }
+    {   // (c) stale: a depth-writing game writer in between invalidates the layer and the seed is whole
+        FreshWorld old(g, false), opt(g, true);
+        check(old.consume(0, 0) && opt.consume(0, 0), "keep depth (c): depth-only seeds complete");
+        auto mixed = observed;
+        mixed.DepthFunc = D3D11_COMPARISON_ALWAYS; mixed.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ALL;
+        const auto gameBefore = readBackDs(g, opt.games[0]);
+        old.gameWriter(0, mixed, wide); opt.gameWriter(0, mixed, wide);
+        check(!freshnessSameDepth(gameBefore, readBackDs(g, opt.games[0])), "keep depth (c): the game writer changes depth");
+        check(old.consume(0, 0, 4) && opt.consume(0, 0, 4), "keep depth (c): the consumers complete");
+        compareFreshWorlds(old, opt, 0, 0, 4);
+        check(opt.depthKept == 0 && opt.seedDraws == old.seedDraws && opt.seeds == old.seeds,
+              "keep depth (c): a stale layer is seeded whole, unchanged");
+    }
+    {   // (d) a second bit after the first: every repeat seed skips the depth pass
+        FreshWorld old(g, false), opt(g, true);
+        check(old.consume(0, 0) && opt.consume(0, 0), "keep depth (d): depth-only seeds complete");
+        old.gameWriter(0, count, rectA); opt.gameWriter(0, count, rectA);
+        old.gameWriter(0, count, rectB); opt.gameWriter(0, count, rectB);
+        bool one = false, two = false;
+        const auto gameStencil = readBackDs(g, opt.games[0]);
+        for (size_t i = 0; i < gameStencil.size(); i += 4) {
+            one = one || (gameStencil[i + 3] & 3) == 1;
+            two = two || (gameStencil[i + 3] & 3) == 2;
+        }
+        check(one && two, "keep depth (d): the game's stencil carries both bit 1 and bit 2 values");
+        const auto layerBefore = readBackDs(g, opt.caches[0].layer);
+        check(old.consume(0, 0, 1) && opt.consume(0, 0, 1), "keep depth (d): the first bit's consumers complete");
+        compareFreshWorlds(old, opt, 0, 0, 1);
+        check(old.consume(0, 0, 3) && opt.consume(0, 0, 3), "keep depth (d): the second bit's consumers complete");
+        check(freshnessSameDepth(layerBefore, readBackDs(g, opt.caches[0].layer)),
+              "keep depth (d): the layer's depth is the same bytes after both stencil-only seeds");
+        compareFreshWorlds(old, opt, 0, 0, 3);
+        check(perBit ? (opt.depthKept == 2 && opt.seedDraws + 2 == old.seedDraws)
+                     : (opt.depthKept == 0 && opt.seedDraws == old.seedDraws),
+              "keep depth (d): each of the two repeat seeds runs one Draw fewer");
+    }
+    {   // (e) another jitter: the depth is copied again at the new one
+        FreshWorld old(g, false), opt(g, true);
+        check(old.consume(0, 0) && opt.consume(0, 0), "keep depth (e): depth-only seeds complete");
+        old.gameWriter(0, observed, rectA); opt.gameWriter(0, observed, rectA);
+        const auto layerBefore = readBackDs(g, opt.caches[0].layer);
+        old.jx = opt.jx = -.3f; old.jy = opt.jy = .6f;
+        check(old.consume(0, 0, 4) && opt.consume(0, 0, 4), "keep depth (e): the consumers complete");
+        if (perBit)
+            check(!freshnessSameDepth(layerBefore, readBackDs(g, opt.caches[0].layer)),
+                  "keep depth (e): another jitter samples other depth texels, so keeping the depth would not be exact");
+        compareFreshWorlds(old, opt, 0, 0, 4);
+        check(opt.depthKept == 0 && opt.seedDraws == old.seedDraws,
+              "keep depth (e): another jitter copies depth again, as legacy does");
+    }
+}
+
 void testSeedFreshnessGpu(Gpu& g) {
     testReadOnlyPrivateDepthProof(g);
+    testSeedKeepsDepthGpu(g);
     const float writes[3][4] = {{-.7f, -.6f, -.1f, .6f}, {-.1f, -.6f, .4f, .6f}, {.4f, -.6f, .7f, .6f}};
     const auto observed = freshnessStencilWriter();
     FreshWorld old(g, false), opt(g, true);

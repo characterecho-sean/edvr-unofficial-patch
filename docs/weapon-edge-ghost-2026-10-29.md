@@ -2,6 +2,7 @@
 
 ## Status
 
+- **Release (2026-10-30):** The cause-2 fix (9627ce06) is in v0.22.0-rc.4 (draft pre-release, `ab1955de`, 2026-10-30).
 - **State: SHIPPED to main 2026-10-30 (`9627ce06`), the cause-2 fix only, no
   key. CLOSED.** Sean flew the split-key A/B on Epic: "Weapon uncovered ground
   only fixes the issue, let's ship that as on and remove the experimental

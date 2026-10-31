@@ -381,11 +381,12 @@ struct State {
     bool     aimPromptShown = false;       // it opened once this session: never again
     bool     aimPromptPicked = false;      // a choice was made, so the close says so and not "later"
     bool     aimPromptNoted = false;       // the "not shown" reason was said
-    bool     aimPromptGaveUp = false;      // the open failed kRetryMax times
+    bool     aimPromptGaveUp = false;      // the open failed kRetryMax times with the door ready
     int      aimPromptReturnPage = 0;      // the page the menu showed before it
-    int      aimPromptTries = 0;
-    uint64_t aimPromptSceneMs = 0;         // when the menu first saw the first rendered scene
+    int      aimPromptFailedWithDoor = 0;  // open attempts that failed with the door ready (F190: a try without the door is waiting, never counted)
     uint64_t aimPromptNextTryMs = 0;
+    aimprompt::Door aimPromptDoor;         // F190: when the door was first ready in this stretch of the VR profile (cleared at a profile switch); the page opens 2 s after
+    bool     aimPromptAfterSwitch = false; // F190: this stretch of the VR profile began with a live switch from flat, so the shown line says so
 
     // The reset-to-shipped arm.
     int      resetArmedEntry = -1;
@@ -4424,17 +4425,39 @@ void aimPromptNoteNotShown(const char* reason) {
     Log::get().note("%s", line);
 }
 
-// F177: once a session, in the headset, the menu opens itself on the aiming choice page (menu_aim_prompt.h decides; the facts are the menu's own).
+// Seconds since the game's process was created, for the line that says when the page opened.
+double secondsSinceProcessStart() {
+    FILETIME created{}, exited{}, kernel{}, user{}, nowFt{};
+    if (!GetProcessTimes(GetCurrentProcess(), &created, &exited, &kernel, &user)) return 0.0;
+    GetSystemTimeAsFileTime(&nowFt);
+    ULARGE_INTEGER a{}, b{};
+    a.LowPart = created.dwLowDateTime;
+    a.HighPart = created.dwHighDateTime;
+    b.LowPart = nowFt.dwLowDateTime;
+    b.HighPart = nowFt.dwHighDateTime;
+    return b.QuadPart > a.QuadPart ? static_cast<double>(b.QuadPart - a.QuadPart) / 1.0e7 : 0.0;
+}
+
+// The page opened: never again this session, and the line says on which frame and how long after the game started.
+void aimPromptNoteShown(aimprompt::Frame frame) {
+    State& s = g_s;
+    s.aimPromptShown = true;
+    s.aimPromptNoted = true;   // it showed: no "not shown" line follows
+    char line[160];
+    aimprompt::formatShown(line, sizeof(line), frame, secondsSinceProcessStart());
+    Log::get().note("%s", line);
+}
+
+// F177, F188, F190: once a session, in the headset, the menu opens itself on the aiming choice page (menu_aim_prompt.h decides; the facts are the menu's own). The door is the first Submit of Elite's
+// eye frames (the compositor consumer's or the native menu's pose): at game load that comes with the splash, before the game's first rendered scene, and in a session that began flat it comes
+// after the player turned 3D on. The page opens 2 s after the door is first ready in this stretch of the VR profile.
 void aimPromptTick(uint64_t now) {
     State& s = g_s;
     if (s.aimPromptShown || s.aimPromptGaveUp) return;
-    if (!s.aimPromptSceneMs && sceneArrived()) s.aimPromptSceneMs = now;
     aimprompt::Trigger t;
     t.vr = !runtimeFlatProfile();
     t.keyOn = s.aimPromptKeyOn;
     t.nativeOnFoot = s.nativeOnFootKeyOn;
-    t.scenePast = s.aimPromptSceneMs != 0;
-    t.settled = t.scenePast && now - s.aimPromptSceneMs >= aimprompt::kSettleMs;
     t.menuOpen = s.open;
     t.shownThisSession = s.aimPromptShown;
     t.focused = gameHasFocus();
@@ -4445,16 +4468,40 @@ void aimPromptTick(uint64_t now) {
     }
     if (d.verdict != aimprompt::Verdict::Show || now < s.aimPromptNextTryMs) return;
     s.aimPromptNextTryMs = now + aimprompt::kRetryMs;
-    if (openAimPrompt(now)) {
-        s.aimPromptShown = true;
-        s.aimPromptNoted = true;   // it showed: no "not shown" line follows
-        Log::get().note("%s", aimprompt::kLogShown);
-        return;
+    // The door is asked first, so a try before the first Submit says nothing: openMenu would note a menu key press that never happened.
+    float headNow[12];
+    const bool doorReady = (glitchConsumerPresent() || nativeMenuAvailable()) && headPose(headNow);
+    if (aimprompt::stepFor(&s.aimPromptDoor, doorReady, now) != aimprompt::Step::Open) return;   // waiting for the door, or settling: nothing is tried and nothing counts
+    const bool scenePast = sceneArrived();
+    const bool opened = openAimPrompt(now);
+    switch (aimprompt::afterAttempt(opened, doorReady, &s.aimPromptFailedWithDoor)) {
+        case aimprompt::Retry::Opened:
+            aimPromptNoteShown(aimprompt::frameFor(false, s.aimPromptAfterSwitch, scenePast));
+            break;
+        case aimprompt::Retry::GiveUp:
+            s.aimPromptGaveUp = true;
+            aimPromptNoteNotShown("the menu could not open in 10 s although the compositor door and a head pose were ready");
+            break;
+        case aimprompt::Retry::TryAgain:
+            break;
     }
-    if (++s.aimPromptTries >= aimprompt::kRetryMax) {
-        s.aimPromptGaveUp = true;
-        aimPromptNoteNotShown("the menu could not open (no compositor door or head pose in 10 s)");
-    }
+}
+
+// F190: the player's first opening of the menu in the headset, before the page has shown this session, opens it on the aiming choice page in place of its usual one. Returns true when the key
+// press was taken (the page is up, or the menu could not open and said why); false when the usual open follows. A give-up of the tick above does not stop it: the player opening the menu is
+// the door being ready.
+bool aimPromptOnFirstMenuOpen(uint64_t now) {
+    State& s = g_s;
+    aimprompt::Trigger t;
+    t.vr = !runtimeFlatProfile();
+    t.keyOn = s.aimPromptKeyOn;
+    t.nativeOnFoot = s.nativeOnFootKeyOn;
+    t.menuOpen = s.open;
+    t.shownThisSession = s.aimPromptShown;
+    t.focused = true;
+    if (!aimprompt::opensOnFirstMenu(t)) return false;
+    if (openAimPrompt(now)) aimPromptNoteShown(aimprompt::frameFor(true, s.aimPromptAfterSwitch, sceneArrived()));
+    return true;
 }
 
 }  // namespace
@@ -4478,6 +4525,13 @@ void menuProfileSwitch() {
     s.lastDrawnMs = 0;
     s.contentDirty = true;
     s.configured = false;
+    // F190: the next stretch of the VR profile starts its own door, its settle and its count of failed tries. The profile still answers for the one being left (commitPosted calls this before it
+    // sets the new one), so a profile that is not VR (flat, or the pass-through of a VR-only install on a game started flat) means the next stretch begins with a switch to VR. A "not shown"
+    // reason said in the flat profile does not stand for the VR one.
+    s.aimPromptDoor = aimprompt::Door{};
+    s.aimPromptFailedWithDoor = 0;
+    s.aimPromptAfterSwitch = !runtimeVrProfile();
+    if (!s.aimPromptShown) s.aimPromptNoted = false;
 }
 
 bool menuIsConfigured() { return g_s.configured; }
@@ -5127,7 +5181,7 @@ void menuTick(ID3D11Device* dev) {
         if (s.summon.pressed() && s.captureEntry < 0) {
             const bool shift = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
             if (!s.open) {
-                openMenu(now);
+                if (!aimPromptOnFirstMenuOpen(now)) openMenu(now);   // F190: the first open of a session that has not shown the aiming page opens on it
             } else if (shift) {
                 latchAnchor(0.0f, 0.0f);
                 s.lastInputMs = now;

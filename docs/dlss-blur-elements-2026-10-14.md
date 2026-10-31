@@ -2,7 +2,7 @@
 
 ## Status
 
-- **Shield-strike smear (2026-10-16): DESIGN ONLY, nothing built.** The shield's pool meshes (5C1D, 820E) are unkeyed, and they write no
+- **Release (2026-10-30):** fix.sharp_weapons is retired (f8c5413b): the weapons fire layer is always on in both profiles, in v0.22.0-rc.4 (draft pre-release, `ab1955de`, 2026-10-30). **Shield-strike smear (2026-10-16): DESIGN ONLY, nothing built.** The shield's pool meshes (5C1D, 820E) are unkeyed, and they write no
   depth, so the engine path's ownership test rejects them. The design ranks a coverage replay that writes private depth plus the slot first.
   See "Design, 2026-10-16: engine motion for the shield strike". Evidence E1-E3 done offline (run 070301): option (b) CLEARED
   with one amendment, the shield records must also be joined (they share the hull's pose but carry no previous pose). H-clobber RULED

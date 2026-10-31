@@ -61,7 +61,7 @@ template<class Check> void runPositionRecentreCases(Check&& check) {
       h.lookSeatedKnown=true;
       h.lookBase=2.0;h.lookComp=0.3;h.lookWanted=2.3;
       h.eyeApplied[0]=0.2;h.eyeApplied[1]=-0.1;h.eyeApplied[2]=0.3;
-      h.seated.replace(xrFromSeatPose(h.lookSeated));
+      h.seated.setOrigin(xrFromSeatPose(h.lookSeated));
     });
     check(h.seat.where()==SeatWhere::OnFoot&&h.seat.originIsSeat(),"(the seat memory places the player on foot, the origin still on the seat)");
     const uint64_t generationBefore=h.poses.read().originGeneration;
@@ -185,27 +185,27 @@ template<class Check> void runPositionRecentreCases(Check&& check) {
           for(int i=0;i<3;++i){h.eyeWanted[i]=eye[i];h.eyeApplied[i]=eyeLocal[i];}
           h.rotWanted[0]=h.rotWanted[1]=h.rotApplied[0]=h.rotApplied[1]=0;
           h.adsWanted=h.adsApplied=pitch;h.adsPivot[0]=5.0;h.adsPivot[1]=double(1.6f);h.adsPivot[2]=-2.0;
-          h.seated.replace(h.seatedPoseFor(h.lookSeated,0,pitch));
-          const XrQuaternionf beforeOrientation=f.fake.origin.orientation;
+          h.seated.setOrigin(h.seatedPoseFor(h.lookSeated,0,pitch));
+          const XrQuaternionf beforeOrientation=h.seated.origin().orientation;
           const bool applied=h.applyPositionRecentre(100+sign);
-          const XrPosef atCall=f.fake.origin;
-          XrSpaceLocation headAtCall{XR_TYPE_SPACE_LOCATION};launch_fixture::locate(view(),h.seated.space(),200,&headAtCall);
+          const XrPosef atCall=h.seated.origin();
+          XrSpaceLocation headAtCall{XR_TYPE_SPACE_LOCATION};launch_fixture::locateSeated(h.seated.origin(),view(),200,&headAtCall);
           const XrPosef expected=h.seatedPoseFor(SeatPose{5.0+eyeLocal[0],double(1.6f)+eyeLocal[1],-2.0+eyeLocal[2],baselineYaw+comp},0,pitch);
           callOnly=applied&&same(atCall,expected)&&std::memcmp(&atCall.orientation,&beforeOrientation,sizeof(beforeOrientation))==0&&
             h.currentOrigin.yaw==baselineYaw&&h.lookBase==base&&h.lookComp==comp&&h.lookWanted==base+comp&&h.eyeAppliedSerial==99&&h.adsApplied==pitch;
           h.lookPoll();h.eyePoll();h.rotPoll();h.adsPoll();
-          XrSpaceLocation headAfterPoll{XR_TYPE_SPACE_LOCATION};launch_fixture::locate(view(),h.seated.space(),200,&headAfterPoll);
-          pollStable=same(atCall,f.fake.origin)&&same(headAtCall.pose,headAfterPoll.pose);
+          XrSpaceLocation headAfterPoll{XR_TYPE_SPACE_LOCATION};launch_fixture::locateSeated(h.seated.origin(),view(),200,&headAfterPoll);
+          pollStable=same(atCall,h.seated.origin())&&same(headAtCall.pose,headAfterPoll.pose);
           // A normal requested eye-alignment change still lands once, then its inverse returns exactly.
           h.eyeWanted[0]+=0.02;h.eyePoll();h.eyeWanted[0]=eye[0];h.eyePoll();
-          eyeStable=same(atCall,f.fake.origin)&&h.eyeAppliedSerial==99;
+          eyeStable=same(atCall,h.seated.origin())&&h.eyeAppliedSerial==99;
           f.fake.head.position.x+=0.2f;f.fake.head.position.y+=0.03f;f.fake.head.position.z-=0.1f;
           const bool repeated=h.applyPositionRecentre(110+sign);
-          const XrPosef atRepeat=f.fake.origin;
-          XrSpaceLocation headAtRepeat{XR_TYPE_SPACE_LOCATION};launch_fixture::locate(view(),h.seated.space(),200,&headAtRepeat);
+          const XrPosef atRepeat=h.seated.origin();
+          XrSpaceLocation headAtRepeat{XR_TYPE_SPACE_LOCATION};launch_fixture::locateSeated(h.seated.origin(),view(),200,&headAtRepeat);
           h.lookPoll();h.eyePoll();h.rotPoll();h.adsPoll();
-          XrSpaceLocation headRepeatPoll{XR_TYPE_SPACE_LOCATION};launch_fixture::locate(view(),h.seated.space(),200,&headRepeatPoll);
-          repeatStable=repeated&&same(atRepeat,f.fake.origin)&&same(headAtRepeat.pose,headRepeatPoll.pose)&&same(headAtCall.pose,headAtRepeat.pose)&&
+          XrSpaceLocation headRepeatPoll{XR_TYPE_SPACE_LOCATION};launch_fixture::locateSeated(h.seated.origin(),view(),200,&headRepeatPoll);
+          repeatStable=repeated&&same(atRepeat,h.seated.origin())&&same(headAtRepeat.pose,headRepeatPoll.pose)&&same(headAtCall.pose,headAtRepeat.pose)&&
             h.currentOrigin.yaw==baselineYaw&&h.lookBase==base&&h.lookComp==comp;
           for(int step=1;step<=6;++step) {
             const double left=1.0-double(step)/6.0;h.lookWanted=base+comp*left;h.adsWanted=pitch*left;
@@ -215,7 +215,7 @@ template<class Check> void runPositionRecentreCases(Check&& check) {
           ++h.featureFrame.lookYawReset;h.lookWanted=base;h.lookPoll();h.eyePoll();h.adsPoll();
           double eyeFinal[3];eyeoffset::localFromSeated(baselineYaw,eye,eyeFinal);   // F134: at the baseline heading the seated offset is this LOCAL translation
           const SeatPose final{double(f.fake.head.position.x)+eyeFinal[0],double(f.fake.head.position.y)+eyeFinal[1],double(f.fake.head.position.z)+eyeFinal[2],baselineYaw};
-          reset=same(f.fake.origin,xrFromSeatPose(final))&&h.currentOrigin.yaw==baselineYaw&&h.lookComp==0&&h.lookBase==base;
+          reset=same(h.seated.origin(),xrFromSeatPose(final))&&h.currentOrigin.yaw==baselineYaw&&h.lookComp==0&&h.lookBase==base;
         });
         check(callOnly,"F123 ADS roundtrip: position-only call preserves full live orientation, nonzero yaw base/compensation and eye/pitch overlays (both yaw signs)");
         check(pollStable,"F123 ADS roundtrip: the next real look/eye/rotation/ADS polls preserve the call's world-space transform and reported head pose");
@@ -240,7 +240,7 @@ template<class Check> void runPositionRecentreCases(Check&& check) {
       h.rotWanted[0]=h.rotWanted[1]=h.rotApplied[0]=h.rotApplied[1]=0;
       h.currentOrigin=storedSeat;h.lookSeated=storedSeat;h.lookSeatedKnown=true;h.lookComp=0;h.adsApplied=0;
       h.eyeApplied[0]=h.eyeApplied[1]=h.eyeApplied[2]=0;
-      h.seated.replace(xrFromSeatPose(storedSeat));
+      h.seated.setOrigin(xrFromSeatPose(storedSeat));
       context(false);h.seat.noteOrigin(true);
       onSeat=h.seat.where()==SeatWhere::OnFoot&&h.seat.originIsSeat()&&!h.seat.applyPending();
       recentred=h.applyPositionRecentre(30);

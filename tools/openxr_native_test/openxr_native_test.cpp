@@ -26,6 +26,7 @@
 #include "pose_cache_invalidation_cases.h"
 #include "world_scale_cases.h"   // world scale: the host latch and the wiring pins
 #include "position_recentre_cases.h"   // F123: the runtime's position-only recentre (the origin under the head, its yaw kept exactly, no reset, the stored seat untouched)
+#include "seat_origin_cases.h"   // F189: the seat origin in pose math: the numbers the game gets and the layers' physical poses equal the old per-change reference space's, none is made
 #include "pose_cache_lock_cases.h"
 #include "rot_calibrate_cases.h"   // F61 (TEMPORARY): the rotation calibration's pitch overlay
 #include "eye_offset_cases.h"   // F134: the eye offsets are seated vectors; the look turns the seated origin about the physical head
@@ -708,6 +709,7 @@ int selfTest() {
   edvr::openxr::test::runPoseCacheCases(check);
   edvr::openxr::test::runPoseCacheInvalidationCases(check);
   edvr::openxr::test::runPositionRecentreCases(check);
+  edvr::openxr::test::runSeatOriginCases(check);   // F189
   edvr::openxr::test::runFlatHeadCacheCases(check);
   edvr::openxr::test::runPoseCacheLockCases(check);
   edvr::openxr::test::runRotCalibrateCases(check);

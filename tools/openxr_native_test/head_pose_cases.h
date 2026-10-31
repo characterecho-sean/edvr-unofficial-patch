@@ -171,10 +171,10 @@ template<class Check> void runHeadPoseCases(Check&& check) {
     setNow(now);
     publish(display, period, 100000);
     check(answeredAt(display + period), "(before a reset the cached display time answers a qualifying call)");
-    XrSpace before = XR_NULL_HANDLE, after = XR_NULL_HANDLE;
+    uint64_t before = 0, after = 0;
     bool reset = false, dropped = false;
-    f.owner.invoke([&] { before = h.seated.space(); reset = h.resetSeated(h.geometryGeneration); after = h.seated.space(); dropped = !h.latestPoseFrame.valid; });
-    check(reset && before != after && dropped, "a seated reset replaces the space and drops the cached frame");
+    f.owner.invoke([&] { before = h.seated.originSets(); reset = h.resetSeated(h.geometryGeneration); after = h.seated.originSets(); dropped = !h.latestPoseFrame.valid; });
+    check(reset && after == before + 1 && f.fake.creates == 0 && dropped, "a seated reset moves the origin (F189: stored, no reference space made) and drops the cached frame");
     setNow(now);
     check(answeredAt(now) && f.fake.lastTime != display + period, "...and a qualifying call before the next wait is located at now + prediction, not at the old display time");
     flushLine(line);
@@ -356,16 +356,21 @@ template<class Check> void runHeadPoseCases(Check&& check) {
     });
     check(waited != vr::VRCompositorError_None && stillRunning && dropped, "a WaitGetPoses that fails invalidates the geometry publication and drops the cached frame with it (the host is still up)");
   }
-  // ---- the last two cells end the host's usefulness (a reset that cannot make its space, a fatal failure), so they come last ----------------------
+  // ---- the last two cells end the host's usefulness (before F189 a reset that could not make its space did, and now a fatal failure alone does), so they come last ----------
   {
     setNow(display - lead);
     publish(display, period, 450000);
     check(answeredAt(display + period), "(a frame again)");
-    f.fake.createResult = XR_ERROR_RUNTIME_FAILURE;
+    // F189: the seated space makes no runtime call, so a reset is refused only for an origin that cannot be one (a pose that fails the pose check, here a quaternion of length 2
+    // handed as the seat memory's override): the same branch the failed create took, which has already invalidated the geometry publication by the time it returns.
     bool refused = false, dropped = false;
-    f.owner.invoke([&] { refused = !h.resetSeated(h.geometryGeneration); dropped = !h.latestPoseFrame.valid; });
-    f.fake.createResult = XR_SUCCESS;
-    check(refused && dropped, "a seated reset whose new space cannot be created has already invalidated the geometry publication, and drops the cached frame with it");
+    const uint64_t setsBefore = h.seated.originSets();
+    f.owner.invoke([&] {
+      XrSpaceLocation head{XR_TYPE_SPACE_LOCATION}; head.locationFlags = launch_fixture::tracked; head.pose = f.fake.head;
+      const XrPosef impossible{{0, 0, 0, 2}, {0, 0, 0}};
+      refused = !h.applySeatedReset(head, "seated_reset", true, &impossible); dropped = !h.latestPoseFrame.valid; });
+    check(refused && dropped && h.seated.originSets() == setsBefore && f.fake.creates == 0,
+      "a seated reset whose new origin is refused (a pose that cannot be one) has already invalidated the geometry publication, and drops the cached frame with it; no origin was stored and no space asked for");
   }
   {
     setNow(display - lead);

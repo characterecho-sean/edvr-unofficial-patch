@@ -3368,7 +3368,7 @@ void testFlatSubstitutionWiring() {
         const std::string body = deviceCpp.substr(hookFrom, hookTo - hookFrom);
         const size_t flush = body.find("flatRuntimeBeforePresent();");
         const size_t menu = body.find("menuFlatBeforePresent(self, flags);");
-        const size_t real = body.rfind("g_state->realPresent(self, syncInterval, flags);");   // (the first is the foreign swap chain's)
+        const size_t real = body.rfind("g_state->realPresent(self, presentSync, flags);");   // Elite's own (the foreign swap chain's forwards syncInterval; desktop_vsync.h)
         check(flush != std::string::npos && menu != std::string::npos && real != std::string::npos && flush < menu && menu < real,
               "the Present hook flushes before the menu draws and before the real Present");
     } else {

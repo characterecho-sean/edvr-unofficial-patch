@@ -107,6 +107,7 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 #include "transition_flash_eye_base.h"
 #include "vscreen_res.h"
 #include "celestial_motion.h"
+#include "desktop_vsync.h"  // in VR Elite's Present goes out with sync interval 0: the headset paces the frame, not the monitor
 
 namespace edvr {
 namespace {
@@ -1828,8 +1829,18 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
             workContext->Release();
         }
     }
+    // The desktop window's vertical sync (desktop_vsync.h): in VR the headset paces the frame, so Elite's Present never waits for the monitor; the flat
+    // profile keeps Elite's own. The trace below keeps the value Elite asked for.
+    const bool flatProfileNow = runtimeFlatProfile();
+    const UINT presentSync = desktopVsyncPresented(flatProfileNow, syncInterval);
+    static DesktopVsyncNote vsyncNote;   // the render thread's
+    if (vsyncNote.changed(flatProfileNow, syncInterval)) {
+        char line[200];
+        formatDesktopVsync(line, sizeof(line), flatProfileNow, syncInterval);
+        Log::get().note("%s", line);
+    }
     const int64_t presentT0 = qpcNow();
-    const HRESULT hr = g_state->realPresent(self, syncInterval, flags);
+    const HRESULT hr = g_state->realPresent(self, presentSync, flags);
     const int64_t presentT1 = qpcNow();
     // The stall sampler's heartbeat (stall_watch.h): the render thread has just presented. A relaxed store and a
     // compare; the first call starts the watchdog thread, or says that advanced.freeze_location turned it off.

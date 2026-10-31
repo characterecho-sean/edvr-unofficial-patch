@@ -533,6 +533,31 @@ inline bool uiLayerSeedWriterInvalidates(const UiDsEffect& writer, uint8_t seede
         seededDepth && !seededMask && !privateDepthWriteThisFrame);
 }
 
+// A repeat seed (the layer is still this frame's copy of this game buffer, and
+// a tested draw now wants stencil bits it lacks) can leave the layer's depth
+// plane as it stands, and copy only the stencil bits, when that depth is
+// provably what a fresh copy would write. The result is byte-identical:
+//  - not stale: uiLayerSeedWriterInvalidates and the clear hook leave the layer
+//    current only while no game write has changed the game's depth since the
+//    seed, so the source depth is unchanged;
+//  - seededDepth: the layer holds a depth copy at all;
+//  - no private depth-write potential this frame (UiLayerPrivateDepthGuard,
+//    noted at every layer issue with rawDepthWritePotential and in noteReplay):
+//    no layer draw has changed the layer's own depth since the copy;
+//  - the same jitter: the copy samples the game's depth with the eye's jitter,
+//    so a fresh copy with another jitter would write other texels;
+//  - the fallback Seeder (no PSSpecifiedStencilRef: NVIDIA) clears STENCIL
+//    only and writes depth in its first pass alone, then one depth-disabled
+//    pass per requested bit, so omitting that first pass leaves exactly the
+//    depth a fresh copy would write.
+// The specified-reference Seeder (AMD, Intel) writes depth and stencil in one
+// pass: skipping it would skip the stencil too, so it gains nothing and the
+// seed stays as it is.
+inline bool uiLayerSeedKeepsDepth(bool stale, bool seededDepth, bool specifiedStencilRef,
+                                  bool privateDepthWriteThisFrame, bool sameJitter) {
+    return !stale && seededDepth && !specifiedStencilRef && !privateDepthWriteThisFrame && sameJitter;
+}
+
 struct UiLayerPrivateDepthGuard {
     uint64_t sequence = 0;
     void note(uint64_t current, bool rawDepthWritePotential) {

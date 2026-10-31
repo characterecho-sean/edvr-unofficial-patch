@@ -2,6 +2,7 @@
 
 ## Status
 
+- **Release (2026-10-30):** The history pools and shader cache fix (b3cf6e80) is in v0.22.0-rc.4 (draft pre-release, `ab1955de`, 2026-10-30).
 - **State: FIXED, flown (flight 4, 10-29, `97193c14`, Steam, flat, DLSS); on main
   without the instruments.** Sean: "The hitches are gone!" Six scoped presses: no frame over 29 ms (flight 3: 43 to 104 ms at every
   zoom edge). EDVR's render-thread CPU is at most 12.4 ms on any slow frame, and
