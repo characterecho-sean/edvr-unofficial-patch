@@ -88,12 +88,14 @@
 //   "srv turret radar camera: first seen|moved by (x,y,z) mm and turned A deg after N frames unchanged at frame F (copied at frame C): the schematic's origin at (x,y,z) m in the camera ...,
 //     forward (..), window tan x [..] y [..], scale S; head (x,y,z) seated, camera back B cm"   each move of V0 (2 mm or 0.05 deg), at most four lines a second, with the head and the key then;
 //   "srv turret radar camera: view off: D picture-camera draws copied, R read, M moves[ -- NEVER SEEN ...]"   the view's end (R = 0: the draw never reached the path).
-//   TEMPORARY, the radar anchor moved in the game (fix.srv_turret_radar_anchor; srv_radar_anchor.h), all said by the frame tick, never by the hook:
-//   "srv turret radar anchor: hook armed: EliteDangerous64.exe+0x384A590 (...) at 0x.., stolen=N bytes, prologue 16/16 bytes verified, relay at 0x.." or "... hook stood down: <why>;
-//     nothing was patched"   once, the first time the view is on with the key not off;
-//   "srv turret radar anchor: applied at frame F: offset (x,y,z) m in the anchor's axes (key K), obj 0x..; the 5559BD94 billboards are left to the game"   each stay's first application;
-//   "srv turret radar anchor: 10 s: applied in N frames (...)"   with the 10 s line while the hook is armed;
-//   "srv turret radar anchor: view off: applied in N frames[ -- NEVER RAN: ...| -- hook not armed: <why>| -- not asked: ...]"   the view's end.
+//   TEMPORARY, the radar anchor moved in the game (fix.srv_turret_radar_anchor; srv_radar_anchor.h), all said by the frame tick, never by the hooks:
+//   "srv turret radar anchor: setter hook armed: EliteDangerous64.exe+0x38563A0 (...) at 0x.., stolen=N bytes, prologue 18/18 bytes verified, relay at 0x.." or "... setter hook stood
+//     down: <why>; nothing was patched", then "... update counter armed|stood down: ..."   once, the first time the view is on with the key not off;
+//   "srv turret radar anchor: placement moved at frame F: the game's (x,y,z) + (dx,dy,dz) -> (x,y,z) in the anchor's axes (key K), caller EliteDangerous64.exe+0x.., obj 0x..; the
+//     5559BD94 billboards are left to the game"   each stay's first add;
+//   "srv turret radar anchor: 10 s: setter calls N (radar M, moved A, already ours R), the game's translation (x,y,z)[ changed K times], updates U..."   with the 10 s line while armed;
+//   "srv turret radar anchor: view off: moved in N calls[ -- NEVER RAN: ...| -- hook not armed: <why>| -- not asked: ...]"   the view's end;
+//   "srv turret radar anchor: WARNING: the game's translation moved by (..) between setter calls, close to the offset: ..."   once, a sign its caller feeds our value back.
 #pragma once
 
 #include "srv_turret_math.h"

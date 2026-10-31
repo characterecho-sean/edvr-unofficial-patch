@@ -52,9 +52,10 @@
 //                               the hologram, which shifted as the head moved). open: while a bound draw is issued the rectangles are the whole render target (Scissor in
 //                               srv_turret_hud_binding.h), the game's put back after; game keeps its rectangles.
 //   fix.srv_turret_radar_anchor on | reversed | off, default on: the radar's terrain schematic (the volume the disc's picture is drawn from, about 0.44 m behind the eye at the stock
-//                               camera, so the game drew nothing) moved forward by the radar-forward key IN THE GAME, along the anchor entity's +Z (on) or -Z (reversed), by an entry
-//                               hook on its update (srv_radar_anchor.cpp, build 334925 only). While that move is applied the two 5559BD94 billboard families are left to the game (the
-//                               geometry shader does not move them); the other radar families keep its move. off: no move in the game, the geometry shader's move as before.
+//                               camera, so the game drew nothing) moved forward by the radar-forward key IN THE GAME, along the anchor entity's +Z (on) or -Z (reversed): a hook on its
+//                               placement setter adds the offset to the translation the game sets (srv_radar_anchor.cpp, build 334925 only). While the placement holds that offset the
+//                               two 5559BD94 billboard families are left to the game (the geometry shader does not move them); the other radar families keep its move. off: no move in
+//                               the game, the geometry shader's move as before.
 //
 // THE TARGET HOLOGRAM (vs 5559BD94, the Scorpion's own hologram, signature H): its vertex shader writes __USER_VERTEX_M_LIGHTINGPOSITION, the vertex's camera-relative WORLD position
 // (cb0[9..11] times the position), and its pixel shader uses it twice (a depth test against the scene and a view ray divided by the fragment's view depth). The geometry shader moves
@@ -235,9 +236,8 @@ inline bool isFamilyVs(uint64_t vs) {
 }
 
 // ---- the radar anchor moved in the game (fix.srv_turret_radar_anchor; srv_radar_anchor.cpp) ----------------------------------------------------------------------------------
-// The offset the hook writes into the radar terrain schematic's two local translation rows: (0, 0, s * F) metres in the anchor entity's own axes, F the radar-forward key, s +1 for on
-// and -1 for reversed. UNCONFIRMED that +Z is the anchor's forward (the material calls the anchor's row 2 "ShipForward"), hence the reversed value. All bits zero (never a -0.0) unless
-// the Scorpion's turret view is on, the key is not off and F is above 0; the hook then puts back a zero offset where it wrote one.
+// The offset the hook ADDS to the translation the game hands the radar schematic's placement setter: (0, 0, s * F) metres in the anchor entity's own axes, F the radar-forward key, s
+// +1 for on and -1 for reversed (flown 2026-10-31: on is forward, about 1:1). All bits zero (never a -0.0) unless the Scorpion's turret view is on, the key is not off and F is above 0.
 struct RadarAnchorOffset {
     float m[3] = {0.0f, 0.0f, 0.0f};
     uint32_t bits[3] = {0u, 0u, 0u};
@@ -251,9 +251,56 @@ inline RadarAnchorOffset radarAnchorOffset(bool on, RadarAnchorMode mode, int ra
     std::memcpy(&o.bits[2], &o.m[2], sizeof(float));
     return o;
 }
-// The native move counts as applied while the hook's last application is at most this many frames old: stamp is the frame tick's frame number + 1 at that application (0: never).
-inline constexpr uint32_t kRadarAnchorRecentFrames = 10;
-inline bool radarAnchorRecent(uint32_t frameNo, uint32_t stamp) { return stamp != 0u && static_cast<uint32_t>(frameNo + 1u - stamp) <= kRadarAnchorRecentFrames; }
+// The placement setter's rule (0x38563A0 in build 334925; srv_radar_anchor.cpp). The game hands it P, a 4x4 of rows x, y, z and translation; P[12..14] is the hologram's place
+// relative to the anchor in the anchor's axes (about (0, +1.96, 0) on the Scorpion: the first build REPLACED it and dropped the radar 1.96 m). The hook ADDS d to that translation
+// and never replaces it, and it never adds twice: a translation that is bit for bit the one this object last left the setter with is our own value fed back, which passes through
+// unchanged while d is unchanged and is re-based on the game's value it came from when d changes (a new key value, or d = 0: the game's own place back). Per object:
+struct PlacementMemory {
+    bool have = false;       // the object's placement holds our offset (the last call moved it)
+    uint32_t in[3] = {};     // the game's translation that was moved (bits)
+    uint32_t out[3] = {};    // what the setter was given (bits)
+    uint32_t d[3] = {};      // the offset added (bits)
+};
+enum class PlacementMove : uint8_t { kNone = 0, kAdded, kOurs, kRestored };
+inline const char* placementMoveName(PlacementMove m) {
+    return m == PlacementMove::kAdded ? "added" : m == PlacementMove::kOurs ? "ours" : m == PlacementMove::kRestored ? "restored" : "none";
+}
+// Q receives what the setter is to be given; m is updated. kNone: Q = P (d zero and P the game's own). kAdded: Q = P with d added to the game's translation (P's, or the one a
+// fed-back P came from). kOurs: Q = P (our own value fed back, d unchanged). kRestored: d is zero and P is our value fed back: Q = P with the game's translation it came from.
+inline PlacementMove radarPlacementMove(const float P[16], const uint32_t d[3], PlacementMemory& m, float Q[16]) {
+    std::memcpy(Q, P, 16 * sizeof(float));
+    uint32_t t[3];
+    std::memcpy(t, P + 12, sizeof(t));
+    const bool fedBack = m.have && t[0] == m.out[0] && t[1] == m.out[1] && t[2] == m.out[2];
+    const bool sameD = d[0] == m.d[0] && d[1] == m.d[1] && d[2] == m.d[2];
+    if (fedBack && sameD) return PlacementMove::kOurs;
+    uint32_t base[3] = {t[0], t[1], t[2]};
+    if (fedBack) std::memcpy(base, m.in, sizeof(base));
+    if ((d[0] | d[1] | d[2]) == 0u) {
+        m = PlacementMemory{};
+        if (!fedBack) return PlacementMove::kNone;
+        std::memcpy(Q + 12, base, sizeof(base));
+        return PlacementMove::kRestored;
+    }
+    float b[3], df[3];
+    std::memcpy(b, base, sizeof(b));
+    std::memcpy(df, d, sizeof(df));
+    Q[12] = b[0] + df[0];
+    Q[13] = b[1] + df[1];
+    Q[14] = b[2] + df[2];
+    m.have = true;
+    std::memcpy(m.in, base, sizeof(m.in));
+    std::memcpy(m.out, Q + 12, sizeof(m.out));
+    std::memcpy(m.d, d, sizeof(m.d));
+    return PlacementMove::kAdded;
+}
+// A sign of a caller that feeds back a value of ours in some other form (not bit for bit): the game's translation moved between two calls by about d (within a quarter of |d|).
+inline bool placementStepLooksLikeOffset(const float before[3], const float after[3], const float d[3]) {
+    const double dd = std::sqrt(double(d[0]) * d[0] + double(d[1]) * d[1] + double(d[2]) * d[2]);
+    if (!(dd > 1.0e-4)) return false;
+    const double e[3] = {double(after[0]) - before[0] - d[0], double(after[1]) - before[1] - d[1], double(after[2]) - before[2] - d[2]};
+    return std::sqrt(e[0] * e[0] + e[1] * e[1] + e[2] * e[2]) <= 0.25 * dd;
+}
 // The families the native move leaves to the game while it is applied: the hologram billboard 5559BD94 with either pixel shader (the radar disc's picture, the Scorpion's hologram).
 // The game frames and places those from the moved schematic itself; the other radar families keep the geometry shader's move.
 inline bool radarAnchorLeavesFamily(int family) { return family == 7 || family == 8; }

@@ -1258,6 +1258,29 @@ int main() {
               "...and the skeleton FindJoint: `mov [rsp+8],rbx` is 5 bytes, no displacement",
               "the FindJoint hook would be refused or stolen at the wrong length");
 
+        // The SRV radar's placement setter (0x38563A0 in build 334925; srv_radar_anchor.cpp): `sub rsp,48h` (4), `movups xmm0,[rdx]` (3),
+        // `movups [rcx+1528h],xmm0` (7), `movups xmm1,[rdx+10h]` (4). CodeHook steals the first two, seven bytes, none rip-relative.
+        const uint8_t radarSetter[] = {0x48, 0x83, 0xEC, 0x48, 0x0F, 0x10, 0x02, 0x0F, 0x11, 0x81, 0x28, 0x15, 0x00, 0x00, 0x0F, 0x10, 0x4A, 0x10};
+        size_t dispB = 9, dispC = 9, dispD = 9;
+        check(codeInstructionLength(radarSetter, sizeof(radarSetter), &disp) == 4 && disp == 0 &&
+                  codeInstructionLength(radarSetter + 4, sizeof(radarSetter) - 4, &dispB) == 3 && dispB == 0 &&
+                  codeInstructionLength(radarSetter + 7, sizeof(radarSetter) - 7, &dispC) == 7 && dispC == 0 &&
+                  codeInstructionLength(radarSetter + 14, sizeof(radarSetter) - 14, &dispD) == 4 && dispD == 0,
+              "...and the radar placement setter: `sub rsp,48h` 4, `movups xmm0,[rdx]` 3, `movups [rcx+1528h],xmm0` 7, `movups xmm1,[rdx+10h]` 4, no displacement",
+              "the radar setter hook would be refused or stolen at the wrong length");
+
+        // movups xmm0,[rip+disp32] -- seven bytes, displacement at offset 3: measured, so CodeHook can rewrite it.
+        const uint8_t ripMovups[] = {0x0F, 0x10, 0x05, 0x10, 0x20, 0x30, 0x40};
+        check(codeInstructionLength(ripMovups, sizeof(ripMovups), &disp) == 7 && disp == 3,
+              "...and a rip-relative `movups xmm0,[rip+disp32]`, its displacement at offset 3",
+              "a rip-relative movups moved without its displacement rewritten addresses other memory");
+
+        // Every other SSE form stays refused: movss (F3 0F 10) and movaps (0F 28).
+        const uint8_t movss[] = {0xF3, 0x0F, 0x10, 0x02}, movaps[] = {0x0F, 0x28, 0x02};
+        check(codeInstructionLength(movss, sizeof(movss), &disp) == 0 && codeInstructionLength(movaps, sizeof(movaps), &disp) == 0,
+              "...and still refuses `movss` and `movaps`",
+              "the decoder took an SSE form beyond movups");
+
         // jmp rel32 -- a function that begins with a jump is a linker thunk or
         // somebody else's hook; following it would cut them out.
         const uint8_t jump[] = {0xE9, 0x00, 0x00, 0x00, 0x00};

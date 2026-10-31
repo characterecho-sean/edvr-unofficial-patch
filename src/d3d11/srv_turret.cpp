@@ -1357,17 +1357,19 @@ void radarCamBoundary(ID3D11DeviceContext* ctx) {
 }
 
 // ---- the radar anchor moved in the game (TEMPORARY key fix.srv_turret_radar_anchor; srv_radar_anchor.h) ----------------------------------------------------------------------
-// The frame tick arms the hook the first time the Scorpion's turret view is on with the key asking for a move, publishes the offset every frame (zero off the view and in flat: the
-// hook then puts back what it wrote) and says what the hook did; the hook never logs. While an application is recent (st::radarAnchorRecent) the draw path leaves the two 5559BD94
-// billboard families to the game (g_anchorYield), so the picture the game now frames and places itself is not moved a second time.
+// The frame tick arms the hooks the first time the Scorpion's turret view is on with the key asking for a move, publishes the offset every frame (zero off the view and in flat:
+// the game's next setter call then gets its own placement) and says what the hooks did; the hooks never log. While the last setter call for the radar left our offset in its
+// placement (added, or our own value fed back) the draw path leaves the two 5559BD94 billboard families to the game (g_anchorYield), so the picture the game now frames and places
+// itself is not moved a second time. The setter is not called by EDVR: a key change reaches the game at its next call (the 10 s line counts the calls).
 std::atomic<bool> g_anchorYield{false};
 struct AnchorWatch {
     bool armTried = false;
     bool on = false;                // the view, as the last tick saw it
     bool asked = false;             // this stay published an offset that was not zero
-    bool said = false;              // this stay's first application has been said
-    uint64_t stayFrames = 0;        // the hook's appliedFrames when the stay began
-    uint64_t winFrames = 0, winCalls = 0, winMatched = 0, winRestored = 0, winFaulted = 0;   // its counters when the 10 s window began
+    bool said = false;              // this stay's first add has been said
+    bool warned = false;            // the feedback warning has been said
+    uint64_t stayMoved = 0, stayOurs = 0;   // the setter hook's counters when the stay began
+    uint64_t winCalls = 0, winRadar = 0, winMoved = 0, winOurs = 0, winRestored = 0, winFaulted = 0, winChanges = 0, winUpdates = 0;   // ... when the 10 s window began
     st::RadarAnchorOffset offset;   // the last one published
 };
 AnchorWatch g_anchorWatch;
@@ -1377,57 +1379,91 @@ void anchorTick(bool on, uint32_t frameNo, int radarForwardCm) {
     const auto mode = static_cast<st::RadarAnchorMode>(g_anchorMode.load(std::memory_order_relaxed));
     if (on && mode != st::RadarAnchorMode::kOff && !w.armTried) {
         w.armTried = true;
-        (void)srvRadarAnchorArm(nullptr, 0);   // says its own line: "hook armed: ..." or "hook stood down: <why>; nothing was patched"
+        (void)srvRadarAnchorArm(nullptr, 0);   // says its own lines: "setter hook armed: ..." or "setter hook stood down: <why>; nothing was patched", then the update counter's
     }
     w.offset = st::radarAnchorOffset(on, mode, radarForwardCm);
     srvRadarAnchorPublish(w.offset.bits, frameNo);
     const RadarAnchorStats a = srvRadarAnchorStats();
     if (on && !w.on) {
-        w.stayFrames = a.appliedFrames;
+        w.stayMoved = a.moved;
+        w.stayOurs = a.ours;
         w.asked = w.said = false;
     }
     if (on) {
         if (!w.offset.zero()) w.asked = true;
-        if (!w.said && a.appliedFrames > w.stayFrames) {
+        if (!w.said && a.moved > w.stayMoved) {
             w.said = true;
-            Log::get().note("srv turret radar anchor: applied at frame %u: offset (%.3f,%.3f,%.3f) m in the anchor's axes (key %s), obj 0x%llX; the 5559BD94 billboards are left to the game",
-                            a.lastStamp - 1u, static_cast<double>(w.offset.m[0]), static_cast<double>(w.offset.m[1]), static_cast<double>(w.offset.m[2]), st::radarAnchorModeName(mode),
-                            static_cast<unsigned long long>(a.lastObj));
+            char caller[64];
+            if (a.callerRva)
+                std::snprintf(caller, sizeof(caller), "EliteDangerous64.exe+0x%llX", static_cast<unsigned long long>(a.callerRva));
+            else
+                std::snprintf(caller, sizeof(caller), "0x%llX (outside EliteDangerous64.exe)", static_cast<unsigned long long>(a.caller));
+            Log::get().note("srv turret radar anchor: placement moved at frame %u: the game's (%.3f,%.3f,%.3f) + (%.3f,%.3f,%.3f) -> (%.3f,%.3f,%.3f) in the anchor's axes (key %s), caller %s, "
+                            "obj 0x%llX; the 5559BD94 billboards are left to the game",
+                            a.lastAddStamp - 1u, static_cast<double>(a.gameT[0]), static_cast<double>(a.gameT[1]), static_cast<double>(a.gameT[2]), static_cast<double>(w.offset.m[0]),
+                            static_cast<double>(w.offset.m[1]), static_cast<double>(w.offset.m[2]), static_cast<double>(a.outT[0]), static_cast<double>(a.outT[1]),
+                            static_cast<double>(a.outT[2]), st::radarAnchorModeName(mode), caller, static_cast<unsigned long long>(a.obj));
         }
     } else if (w.on) {
-        const uint64_t n = a.appliedFrames - w.stayFrames;
-        char tail[560] = "";
+        const uint64_t n = a.moved - w.stayMoved, ours = a.ours - w.stayOurs;
+        char also[64] = "";
+        if (ours) std::snprintf(also, sizeof(also), " (already ours in %llu)", static_cast<unsigned long long>(ours));
+        char tail[600] = "";
         if (a.state != RadarAnchorHookState::Armed)
             std::snprintf(tail, sizeof(tail), " -- hook not armed: %s",
                           a.state == RadarAnchorHookState::StoodDown ? srvRadarAnchorWhy() : "fix.srv_turret_radar_anchor was off while the view was on");
-        else if (n == 0 && w.asked)
-            std::snprintf(tail, sizeof(tail), " -- NEVER RAN: the radar schematic's update was not called with a matching object while the view was on");
-        else if (n == 0)
+        else if (n == 0 && ours == 0 && w.asked)
+            std::snprintf(tail, sizeof(tail), " -- NEVER RAN: the radar schematic's placement setter was not called with the radar object while the view was on");
+        else if (n == 0 && ours == 0)
             std::snprintf(tail, sizeof(tail), " -- not asked: fix.srv_turret_radar_anchor was off or radar forward 0 while the view was on");
-        Log::get().note("srv turret radar anchor: view off: applied in %llu frames%s", static_cast<unsigned long long>(n), tail);
+        Log::get().note("srv turret radar anchor: view off: moved in %llu calls%s%s", static_cast<unsigned long long>(n), also, tail);
     }
     w.on = on;
-    g_anchorYield.store(on && mode != st::RadarAnchorMode::kOff && a.state == RadarAnchorHookState::Armed && st::radarAnchorRecent(frameNo, a.lastStamp), std::memory_order_relaxed);
+    if (a.suspect && !w.warned) {
+        w.warned = true;
+        Log::get().note("srv turret radar anchor: WARNING: the game's translation moved by (%.3f,%.3f,%.3f) between setter calls, close to the offset: its caller may feed back our value",
+                        static_cast<double>(a.suspectStep[0]), static_cast<double>(a.suspectStep[1]), static_cast<double>(a.suspectStep[2]));
+    }
+    g_anchorYield.store(on && mode != st::RadarAnchorMode::kOff && a.state == RadarAnchorHookState::Armed && a.holdsOurs, std::memory_order_relaxed);
 }
 
 // At each 10 s boundary of the frame tick: the window's line when the view was on in it and the hook is armed; the counters' baselines move on either way.
 void anchorWindow(bool seen) {
     AnchorWatch& w = g_anchorWatch;
     const RadarAnchorStats a = srvRadarAnchorStats();
-    if (seen && a.state == RadarAnchorHookState::Armed)
-        Log::get().note("srv turret radar anchor: 10 s: applied in %llu frames (%llu calls through the gate, %llu with the radar schematic, %llu restores, %llu faults, %llu without a slot), "
-                        "offset (%.3f,%.3f,%.3f) m (key %s), last obj 0x%llX%s",
-                        static_cast<unsigned long long>(a.appliedFrames - w.winFrames), static_cast<unsigned long long>(a.calls - w.winCalls),
-                        static_cast<unsigned long long>(a.matched - w.winMatched), static_cast<unsigned long long>(a.restored - w.winRestored),
-                        static_cast<unsigned long long>(a.faulted - w.winFaulted), static_cast<unsigned long long>(a.noSlot),
-                        static_cast<double>(w.offset.m[0]), static_cast<double>(w.offset.m[1]), static_cast<double>(w.offset.m[2]),
-                        st::radarAnchorModeName(static_cast<st::RadarAnchorMode>(g_anchorMode.load(std::memory_order_relaxed))), static_cast<unsigned long long>(a.lastObj),
-                        a.holding ? "; a schematic holds our offset" : "");
-    w.winFrames = a.appliedFrames;
-    w.winCalls = a.calls;
-    w.winMatched = a.matched;
+    if (seen && a.state == RadarAnchorHookState::Armed) {
+        const uint64_t calls = a.setterCalls - w.winCalls, radar = a.setterRadar - w.winRadar, moved = a.moved - w.winMoved, ours = a.ours - w.winOurs,
+                       restored = a.restored - w.winRestored, faulted = a.faulted - w.winFaulted, changes = a.gameChanges - w.winChanges, updates = a.updates - w.winUpdates;
+        char game[96], changed[48] = "", upd[48], extra[200] = "";
+        if (a.haveGame)
+            std::snprintf(game, sizeof(game), "(%.3f,%.3f,%.3f)", static_cast<double>(a.gameT[0]), static_cast<double>(a.gameT[1]), static_cast<double>(a.gameT[2]));
+        else
+            std::snprintf(game, sizeof(game), "(not seen yet)");
+        if (changes) std::snprintf(changed, sizeof(changed), " changed %llu times", static_cast<unsigned long long>(changes));
+        if (a.updateArmed)
+            std::snprintf(upd, sizeof(upd), "%llu", static_cast<unsigned long long>(updates));
+        else
+            std::snprintf(upd, sizeof(upd), "not counted (the counter stood down)");
+        int at = 0;
+        if (restored) at += std::snprintf(extra + at, sizeof(extra) - at, "; restored %llu", static_cast<unsigned long long>(restored));
+        if (faulted && at >= 0 && at < static_cast<int>(sizeof(extra))) at += std::snprintf(extra + at, sizeof(extra) - at, "; faults %llu", static_cast<unsigned long long>(faulted));
+        if (a.noSlot && at >= 0 && at < static_cast<int>(sizeof(extra))) at += std::snprintf(extra + at, sizeof(extra) - at, "; without a slot %llu in all", static_cast<unsigned long long>(a.noSlot));
+        Log::get().note("srv turret radar anchor: 10 s: setter calls %llu (radar %llu, moved %llu, already ours %llu), the game's translation %s%s, updates %s%s; offset (%.3f,%.3f,%.3f) m "
+                        "(key %s)%s%s",
+                        static_cast<unsigned long long>(calls), static_cast<unsigned long long>(radar), static_cast<unsigned long long>(moved), static_cast<unsigned long long>(ours), game,
+                        changed, upd, extra, static_cast<double>(w.offset.m[0]), static_cast<double>(w.offset.m[1]), static_cast<double>(w.offset.m[2]),
+                        st::radarAnchorModeName(static_cast<st::RadarAnchorMode>(g_anchorMode.load(std::memory_order_relaxed))),
+                        a.holdsOurs ? "; the placement holds our offset" : "",
+                        radar == 0 ? " -- NO setter call with the radar in these 10 s: the offset (and any key change) reaches the game only when it sets the placement" : "");
+    }
+    w.winCalls = a.setterCalls;
+    w.winRadar = a.setterRadar;
+    w.winMoved = a.moved;
+    w.winOurs = a.ours;
     w.winRestored = a.restored;
     w.winFaulted = a.faulted;
+    w.winChanges = a.gameChanges;
+    w.winUpdates = a.updates;
 }
 
 bool anchorLeaves(int family) { return st::radarAnchorLeavesFamily(family) && g_anchorYield.load(std::memory_order_relaxed); }

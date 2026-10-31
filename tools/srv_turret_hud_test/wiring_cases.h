@@ -353,9 +353,10 @@ static bool wiredTables(const std::string& shaderBuild, const std::string& varia
 }
 // The radar anchor moved in the game (fix.srv_turret_radar_anchor; srv_radar_anchor.cpp). srv_turret.cpp: the key read with its literal default and said on the settings line; the frame
 // tick publishes the offset made from `on` (and from false in flat); a 5559BD94 draw the game's anchor carries is the game's own BEFORE it is counted, and its decline is group-off; the
-// draw path's switch needs the hook armed, the key not off and a recent application; the shutdown shuts the gate. The hook: build 334925's identity, prologue and vtables, and a callback
-// that does integer work only before the original runs (XMM1 is the game's dt). edvr.ini ships the key in [fix] with its menu row; build.bat compiles the file; the address audit
-// lists it as exact-build only.
+// draw path's switch needs the hook armed, the key not off and the placement holding our offset; the shutdown shuts the gates. The hooks: build 334925's identity, both prologues and
+// the vtables; the setter's callback ADDS the offset through the pure rule (srv_turret_math.h radarPlacementMove) and hands the original the sum, and no code writes the placement
+// fields itself (the first build's replace dropped the radar 1.96 m); the update's callback counts only and does integer work only before the original runs (XMM1 is the game's dt).
+// edvr.ini ships the key in [fix] with its menu row; build.bat compiles the file; the address audit lists it as exact-build only.
 static bool wiredAnchor(const std::string& module, const std::string& hook, const std::string& ini, const std::string& build, const std::string& audit) {
     const size_t npos = std::string::npos;
     const size_t key = module.find("cfg.getString(\"fix.srv_turret_radar_anchor\", \"on\")");
@@ -372,27 +373,37 @@ static bool wiredAnchor(const std::string& module, const std::string& hook, cons
     const size_t counted = found(groupOff) ? module.find("g_familyDraws[family].fetch_add(1, std::memory_order_relaxed);", groupOff) : npos;
     const size_t refusedFn = module.find("void srvTurretHudNoteRefusedDraw(int family) {");
     const size_t refusedOff = found(refusedFn) ? module.find("&& !anchorLeaves(family);", refusedFn) : npos;
-    const size_t yield = module.find("g_anchorYield.store(on && mode != st::RadarAnchorMode::kOff && a.state == RadarAnchorHookState::Armed && st::radarAnchorRecent(frameNo, a.lastStamp), std::memory_order_relaxed);");
+    const size_t yield = module.find("g_anchorYield.store(on && mode != st::RadarAnchorMode::kOff && a.state == RadarAnchorHookState::Armed && a.holdsOurs, std::memory_order_relaxed);");
     const size_t downFn = module.find("void srvTurretShutdown() {");
     const size_t down = found(downFn) ? module.find("srvRadarAnchorShutdown();", downFn) : npos;
     const bool moduleOk = found(parsed) && found(flat) && found(onAt) && flat < onAt && found(ticked) && found(published) && found(leaves) && found(counted) && leaves < counted &&
                           found(refusedOff) && refusedOff - refusedFn < 300 && found(yield) && found(down) && found(module.find("bool anchorLeaves(int family) { return st::radarAnchorLeavesFamily(family) && g_anchorYield.load("));
-    const size_t fn = hook.find("uintptr_t __fastcall radarUpdateHooked(uintptr_t obj, uintptr_t b, uintptr_t c, uintptr_t d) noexcept {");
+    // the update counter: integer work only, and nothing written
+    const size_t fn = hook.find("uintptr_t __fastcall updateHooked(uintptr_t obj, uintptr_t b, uintptr_t c, uintptr_t d) noexcept {");
     const size_t forward = found(fn) ? hook.find("return forward(obj, b, c, d);", fn) : npos;
     const std::string body = found(fn) && found(forward) ? hook.substr(fn, forward - fn) : std::string();
     const bool integerOnly = !body.empty() && !found(body.find("float")) && !found(body.find("double")) && !found(body.find("memcpy")) && !found(body.find("Log::")) && !found(body.find("printf")) &&
-                             found(body.find("volatile uint32_t* const a = reinterpret_cast<volatile uint32_t*>(obj + kTranslationA);"));
-    const bool pinned = found(hook.find("constexpr uintptr_t kUpdateRva = 0x384A590;")) && found(hook.find("constexpr uintptr_t kObjectVtableRva = 0x5511DE8;")) &&
-                        found(hook.find("constexpr uintptr_t kInterfaceVtableRva = 0x5511F18;")) && found(hook.find("constexpr uint32_t kStamp = 0x6ADA8048u, kImageSize = 0x640C000u;")) &&
-                        found(hook.find("if (stamp != kStamp || size != kImageSize) {")) && found(hook.find("{0x40, 0x53, 0x56, 0x48, 0x81, 0xEC, 0x68, 0x01, 0x00, 0x00, 0x0F, 0x29, 0xBC, 0x24, 0x30, 0x01}")) &&
-                        found(hook.find("if (std::memcmp(got, kPrologue, kPrologueBytes) != 0) {")) && found(hook.find("kInterfaceAt = 0x58, kTranslationA = 0x15B0, kTranslationB = 0x15F0;"));
+                             !found(body.find("volatile uint32_t*")) && found(body.find("if (radar) s->updates.fetch_add(1, std::memory_order_relaxed);"));
+    // the setter: the pure rule's sum to the original, the game's P for everything else; no store into the placement fields anywhere in the file
+    const size_t setterFn = hook.find("uintptr_t __fastcall setterHooked(uintptr_t iface, uintptr_t p, uintptr_t r8, uintptr_t r9) noexcept {");
+    const size_t rule = found(setterFn) ? hook.find("const st::PlacementMove r = st::radarPlacementMove(P, d, m, Q);", setterFn) : npos;
+    const size_t sum = found(rule) ? hook.find("if (r == st::PlacementMove::kAdded) {", rule) : npos;
+    const size_t handed = found(sum) ? hook.find("return forward(iface, reinterpret_cast<uintptr_t>(Q), r8, r9);", sum) : npos;
+    const bool adds = found(rule) && found(handed) && hook.find("return", sum) == handed && !found(hook.find("0x15B0")) && !found(hook.find("0x15F0")) && !found(hook.find("volatile uint32_t*"));
+    const bool pinned = found(hook.find("constexpr uintptr_t kSetterRva = 0x38563A0;")) && found(hook.find("constexpr uintptr_t kUpdateRva = 0x384A590;")) &&
+                        found(hook.find("constexpr uintptr_t kObjectVtableRva = 0x5511DE8;")) && found(hook.find("constexpr uintptr_t kInterfaceVtableRva = 0x5511F18;")) &&
+                        found(hook.find("constexpr uint32_t kStamp = 0x6ADA8048u, kImageSize = 0x640C000u;")) && found(hook.find("if (stamp != kStamp || size != kImageSize) {")) &&
+                        found(hook.find("{0x48, 0x83, 0xEC, 0x48, 0x0F, 0x10, 0x02, 0x0F, 0x11, 0x81, 0x28, 0x15, 0x00, 0x00, 0x0F, 0x10, 0x4A, 0x10}")) &&
+                        found(hook.find("{0x40, 0x53, 0x56, 0x48, 0x81, 0xEC, 0x68, 0x01, 0x00, 0x00, 0x0F, 0x29, 0xBC, 0x24, 0x30, 0x01}")) &&
+                        found(hook.find("if (std::memcmp(got, prologue, n) != 0) return")) &&
+                        found(hook.find("*reinterpret_cast<const uintptr_t*>(iface) != s.interfaceVtable || *reinterpret_cast<const uintptr_t*>(iface - kInterfaceAt) != s.objectVtable"));
     const size_t fix = ini.find("\n[fix]\n"), visual = ini.find("\n[visual]\n"), shipped = ini.find("\nsrv_turret_radar_anchor = on\n");
     const size_t ui = found(shipped) ? ini.rfind("# ui: SRV turret radar anchor | choices on, reversed, off | recommended on | live | menu", shipped) : npos;
     const bool iniOk = found(fix) && found(visual) && found(shipped) && shipped > fix && shipped < visual && found(ui) && shipped - ui < 200;
     const size_t source = build.find("\"src\\d3d11\\srv_radar_anchor.cpp\"");
     const bool buildOk = found(source) && source < build.find("ERROR: compile failed");
     const bool auditOk = found(audit.find("(\"d3d11/srv_radar_anchor.cpp\", \"the SRV radar anchor's exact-build hook\")"));
-    return found(key) && moduleOk && integerOnly && pinned && iniOk && buildOk && auditOk;
+    return found(key) && moduleOk && integerOnly && adds && pinned && iniOk && buildOk && auditOk;
 }
 static bool wiredBuild(const std::string& t) {
     const size_t source = t.find("\"src\\d3d11\\srv_turret.cpp\"");
@@ -545,8 +556,9 @@ static void wiringCases() {
     check(!wiredKeys(ini, flatKeys + "\nsrv_turret_radar_back\n"), "control: the radar key on the flat allow-list trips the pin");
     check(wiredTables(shaderBuild, variants), "temporal_shader_build: the HLSL is included and the variant is registered as a gs_5_0");
     check(!wiredTables(shaderBuild, replaced(variants, "\"gs_5_0\"", "\"vs_5_0\"")), "control: a vertex-shader profile trips the pin");
-    check(wiredAnchor(module, anchorHook, ini, build, audit), "the radar anchor: the key, its publish from the frame tick, the billboards left to the game before they are counted, the hook's pins and integer-only callback, "
-                                                              "the ini row, the compile list and the audit's exact-only entry");
+    check(wiredAnchor(module, anchorHook, ini, build, audit), "the radar anchor: the key, its publish from the frame tick, the billboards left to the game before they are counted, the hooks' pins, "
+                                                              "the setter's add through the pure rule, the integer-only update counter that writes nothing, the ini row, the compile list and the audit's "
+                                                              "exact-only entry");
     check(!wiredAnchor(replaced(module, "cfg.getString(\"fix.srv_turret_radar_anchor\", \"on\")", "cfg.getString(\"fix.srv_turret_radar_anchor\", \"off\")"), anchorHook, ini, build, audit),
           "control: a drifted default of the radar anchor key trips the pin");
     check(!wiredAnchor(replaced(module, "anchorTick(on, frameNo, radarForwardCm);", "anchorTick(turret, frameNo, radarForwardCm);"), anchorHook, ini, build, audit),
@@ -558,15 +570,24 @@ static void wiringCases() {
                        anchorHook, ini, build, audit),
           "control: a billboard left to the game but counted as a draw of the pass trips the pin");
     check(!wiredAnchor(replaced(module, "&& !anchorLeaves(family);", ";"), anchorHook, ini, build, audit), "control: a billboard left to the game counted as refused trips the pin");
-    check(!wiredAnchor(replaced(module, " && st::radarAnchorRecent(frameNo, a.lastStamp), std::memory_order_relaxed);", ", std::memory_order_relaxed);"), anchorHook, ini, build, audit),
-          "control: billboards left to the game while the hook writes nothing trip the pin");
+    check(!wiredAnchor(replaced(module, " && a.holdsOurs, std::memory_order_relaxed);", ", std::memory_order_relaxed);"), anchorHook, ini, build, audit),
+          "control: billboards left to the game while the placement does not hold our offset trip the pin");
     check(!wiredAnchor(replaced(module, "    srvRadarAnchorShutdown();", ""), anchorHook, ini, build, audit), "control: a gate left open at unload trips the pin");
-    check(!wiredAnchor(module, replaced(anchorHook, "    s->calls.fetch_add(1, std::memory_order_relaxed);\n", "    s->calls.fetch_add(1, std::memory_order_relaxed);\n    const float scale = 1.0f;\n"), ini, build, audit),
-          "control: float work in the hook before the original runs (it would clobber the game's dt) trips the pin");
-    check(!wiredAnchor(module, replaced(anchorHook, "    s->calls.fetch_add(1, std::memory_order_relaxed);\n", "    s->calls.fetch_add(1, std::memory_order_relaxed);\n    std::memcpy(&b, &c, 8);\n"), ini, build, audit),
-          "control: a memcpy in the hook trips the pin");
+    const std::string counted = "        if (radar) s->updates.fetch_add(1, std::memory_order_relaxed);\n";
+    check(!wiredAnchor(module, replaced(anchorHook, counted, counted + "        const float scale = 1.0f;\n"), ini, build, audit),
+          "control: float work in the update counter before the original runs (it would clobber the game's dt) trips the pin");
+    check(!wiredAnchor(module, replaced(anchorHook, counted, counted + "        std::memcpy(&b, &c, 8);\n"), ini, build, audit), "control: a memcpy in the update counter trips the pin");
+    check(!wiredAnchor(module, replaced(anchorHook, counted, counted + "        volatile uint32_t* t = reinterpret_cast<volatile uint32_t*>(obj + 0x15F0);\n        t[2] = 0;\n"), ini, build, audit),
+          "control: the update writing the placement (the first build's replace, which dropped the radar) trips the pin");
+    check(!wiredAnchor(module, replaced(anchorHook, "        return forward(iface, reinterpret_cast<uintptr_t>(Q), r8, r9);\n    }\n    if (r == st::PlacementMove::kRestored) {",
+                                        "        return forward(iface, p, r8, r9);\n    }\n    if (r == st::PlacementMove::kRestored) {"), ini, build, audit),
+          "control: an add that hands the original the game's P (the offset never reaches it) trips the pin");
+    check(!wiredAnchor(module, replaced(anchorHook, "const st::PlacementMove r = st::radarPlacementMove(P, d, m, Q);", "const st::PlacementMove r = st::PlacementMove::kAdded;"), ini, build, audit),
+          "control: a setter that bypasses the add-and-idempotence rule trips the pin");
     check(!wiredAnchor(module, replaced(anchorHook, "if (stamp != kStamp || size != kImageSize) {", "if (false) {"), ini, build, audit), "control: a hook that does not check the build trips the pin");
-    check(!wiredAnchor(module, replaced(anchorHook, "if (std::memcmp(got, kPrologue, kPrologueBytes) != 0) {", "if (false) {"), ini, build, audit), "control: a hook that does not check the prologue trips the pin");
+    check(!wiredAnchor(module, replaced(anchorHook, "if (std::memcmp(got, prologue, n) != 0) return", "if (false) return"), ini, build, audit), "control: a hook that does not check the prologue trips the pin");
+    check(!wiredAnchor(module, replaced(anchorHook, "{0x48, 0x83, 0xEC, 0x48, 0x0F, 0x10, 0x02,", "{0x48, 0x83, 0xEC, 0x28, 0x0F, 0x10, 0x02,"), ini, build, audit),
+          "control: a drifted setter prologue pin trips the pin");
     check(!wiredAnchor(module, anchorHook, replaced(ini, "\nsrv_turret_radar_anchor = on\n", "\nsrv_turret_radar_anchor = off\n"), build, audit), "control: a drifted shipped default of the radar anchor key trips the pin");
     check(!wiredAnchor(module, anchorHook, replaced(ini, "# ui: SRV turret radar anchor | choices on, reversed, off", "# ui: SRV turret radar anchor | choices on, off"), build, audit),
           "control: a drifted menu row of the radar anchor key trips the pin");

@@ -1,12 +1,16 @@
-// The SRV radar's anchor moved in the game (issue 140; TEMPORARY key fix.srv_turret_radar_anchor; docs\srv-turret-hud-2026-10-30.md, "the radar anchor moved in the game").
+// The SRV radar's anchor moved in the game (issue 140; TEMPORARY key fix.srv_turret_radar_anchor; docs\srv-turret-hud-2026-10-30.md, "the radar placement moved through its
+// setter").
 //
 // The Scorpion's radar disc is a game hologram: the radar's terrain schematic is drawn from the live camera into a texture and shown on a billboard (vs 5559BD94). At the stock
 // turret camera the schematic's volume lies about 0.44 m BEHIND the eye, so the game's visibility gate keeps the picture's camera frozen and the picture is empty. This moves the
-// volume forward in the game itself, so the game frames, renders and billboards it right: an entry hook on the schematic's per-frame update (0x384A590 in build 334925, obj in RCX,
-// dt in XMM1) writes a local offset into the two translation rows its world-matrix writer reads (obj+0x15B0 and obj+0x15F0, metres in the anchor entity's own axes; the
-// constructor zeroes them and nothing else in the game writes them). Build 334925 only: any other build, or a prologue that differs, stands the hook down and patches nothing.
+// volume forward in the game itself, so the game frames, renders and billboards it right. Two hooks, build 334925 only (any other build, or a prologue that differs, stands them
+// down and patches nothing):
+//   * the placement setter (0x38563A0, interface slot +0x28 of the schematic's interface at obj+0x58; RCX = obj+0x58, RDX = the 4x4 P whose translation row is the hologram's
+//     place relative to the anchor, in the anchor's axes): the hook ADDS the published offset to P's translation and calls the original with the sum (srv_turret_math.h
+//     radarPlacementMove). The game's own translation (about 1.96 m up on the Scorpion) is kept: the first build replaced it and dropped the radar.
+//   * the schematic's per-frame update (0x384A590, obj in RCX, dt in XMM1): counted only, to say the object is alive. It writes nothing.
 //
-// The frame thread (srv_turret.cpp srvTurretFrameTick) arms it, publishes the offset every frame and does all the logging; the hook itself only stores integers.
+// The frame thread (srv_turret.cpp srvTurretFrameTick) arms them, publishes the offset every frame and does all the logging; the hooks only record.
 #pragma once
 
 #include <cstddef>
@@ -16,33 +20,44 @@ namespace edvr {
 
 enum class RadarAnchorHookState : int { NotTried = 0, Armed, StoodDown };
 
-// Once (later calls return the first answer): verify the build and the prologue and install the hook. Writes one log line: "srv turret radar anchor: hook armed: ..." or
-// "srv turret radar anchor: hook stood down: <why>; nothing was patched". why (when given) receives the reason or the armed line. Frame thread.
+// Once (later calls return the first answer): verify the build and both prologues and install the hooks. Writes the log lines "srv turret radar anchor: setter hook armed: ..." or
+// "... setter hook stood down: <why>; nothing was patched", then the same for the update counter. Armed means the setter hook is in (the counter may have stood down alone).
+// why (when given) receives the setter's line or reason. Frame thread.
 RadarAnchorHookState srvRadarAnchorArm(char* why, size_t cap);
 RadarAnchorHookState srvRadarAnchorState();
 // The reason it stood down, or the armed line ("" before an arm).
 const char* srvRadarAnchorWhy();
 
-// Every frame, frame thread: the offset's bit patterns (x, y, z in the anchor's axes; all zero = no move, and a schematic that holds one of ours gets zeros once) and the frame
-// tick's frame number (the hook stamps an application with it). Opens the hook's gate while the offset is not zero or a schematic still holds one of ours, closes it otherwise.
+// Every frame, frame thread: the offset's bit patterns (x, y, z in the anchor's axes; all zero = no move: the next setter call gets the game's own placement) and the frame tick's
+// frame number (the setter hook stamps an add with it).
 void srvRadarAnchorPublish(const uint32_t bits[3], uint32_t frameNo);
 
 struct RadarAnchorStats {
     RadarAnchorHookState state = RadarAnchorHookState::NotTried;
-    uint64_t calls = 0;          // calls the gate let through to the hook
-    uint64_t matched = 0;        // of those, with the radar terrain schematic (both vtables match)
-    uint64_t applied = 0;        // offsets written (non-zero)
-    uint64_t appliedFrames = 0;  // distinct frames with an offset written
-    uint64_t restored = 0;       // zeros written back into a schematic that held one of ours
-    uint64_t faulted = 0;        // reads of a candidate object that faulted
-    uint64_t noSlot = 0;         // a fifth schematic at once: left as the game made it
-    uint32_t lastStamp = 0;      // the frame number + 1 of the last application (0: never)
-    uintptr_t lastObj = 0;       // the schematic last written
-    bool holding = false;        // some schematic still holds an offset of ours
+    bool updateArmed = false;      // the update counter is in
+    uint64_t setterCalls = 0;      // setter calls through the gate
+    uint64_t setterRadar = 0;      // of those, with the radar schematic (both vtables match)
+    uint64_t moved = 0;            // the offset added (srv_turret_math.h PlacementMove::kAdded)
+    uint64_t ours = 0;             // our own value fed back, passed through (kOurs)
+    uint64_t restored = 0;         // our value fed back with the offset gone: the game's translation put back (kRestored)
+    uint64_t faulted = 0;          // reads of a candidate object or matrix that faulted
+    uint64_t noSlot = 0;           // a fifth schematic at once: left as the game set it
+    uint64_t gameChanges = 0;      // the game's own translation differed from its previous one
+    uint64_t updates = 0;          // the update's calls with the radar schematic
+    bool holdsOurs = false;        // the last radar setter call left our offset in the placement (added or ours)
+    bool haveGame = false;         // gameT has been read
+    float gameT[3] = {};           // the game's own translation at the last radar setter call (the base a fed-back value came from)
+    float outT[3] = {};            // what the last add gave the setter
+    uint32_t lastAddStamp = 0;     // the frame number + 1 of the last add (0: never)
+    uintptr_t caller = 0;          // the last radar setter call's return address
+    uintptr_t callerRva = 0;       // ... minus the module base (0: not inside the module)
+    uintptr_t obj = 0;             // the schematic (obj, not obj+0x58) of the last radar setter call
+    bool suspect = false;          // the game's translation once moved by about the offset between two calls
+    float suspectStep[3] = {};     // that step
 };
 RadarAnchorStats srvRadarAnchorStats();
 
-// DLL unload: the gate closes, so the relay forwards straight to the game's function.
+// DLL unload: both gates close, so the relays forward straight to the game's functions.
 void srvRadarAnchorShutdown();
 
 }  // namespace edvr

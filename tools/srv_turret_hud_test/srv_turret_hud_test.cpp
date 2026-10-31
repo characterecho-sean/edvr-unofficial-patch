@@ -1624,9 +1624,46 @@ static void radarAnchorCases() {
     check(off.zero() && notOn.zero() && noF.zero() && below.zero() && noF.bits[2] == 0u && noF.m[2] == 0.0f,
           "zero (every bit 0, never a -0.0) with the key off, the view not on, or radar forward 0 (reversed included) or below");
     check(big.m[2] == 1.5f && big.bits[2] == 0x3FC00000u, "radar forward is held to its key's range (150 cm)");
-    check(!st::radarAnchorRecent(100, 0) && st::radarAnchorRecent(100, 101) && st::radarAnchorRecent(100, 91) && !st::radarAnchorRecent(100, 90) && !st::radarAnchorRecent(100, 102) &&
-              st::radarAnchorRecent(2, 0xFFFFFFFEu) && st::kRadarAnchorRecentFrames == 10,
-          "an application is recent for ten frames after the frame it was stamped in (stamp = frame + 1, 0 never), across the counter's wrap, and a stamp from a later frame is not");
+    // The placement setter's rule: ADD to the game's translation (the first build replaced it and dropped the radar 1.96 m), never twice.
+    using PM = st::PlacementMove;
+    const auto bitsOf = [](float f) { uint32_t b; std::memcpy(&b, &f, 4); return b; };
+    const auto sameRows = [](const float* a, const float* b) { return !std::memcmp(a, b, 12 * sizeof(float)) && !std::memcmp(a + 15, b + 15, sizeof(float)); };
+    const float P[16] = {1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.96f, 0.0f, 1.0f};   // the Scorpion's: the hologram 1.96 m above the anchor
+    const uint32_t zeroD[3] = {0u, 0u, 0u};
+    st::PlacementMemory m;
+    float Q[16], again[16];
+    const PM first = st::radarPlacementMove(P, on45.bits, m, Q);
+    check(first == PM::kAdded && Q[12] == 0.0f && Q[13] == 1.96f && Q[14] == 0.45f && sameRows(Q, P) && m.have && m.in[1] == bitsOf(1.96f) && m.out[2] == bitsOf(0.45f) &&
+              m.d[2] == on45.bits[2],
+          "the setter's rule ADDS the offset to the game's translation: (0, 1.96, 0) + (0, 0, 0.45) = (0, 1.96, 0.45), every other number of P as the game gave it");
+    check(st::radarPlacementMove(P, on45.bits, m, again) == PM::kAdded && !std::memcmp(again, Q, sizeof(Q)),
+          "the game setting its own value again (each frame) gets the same sum: nothing accumulates");
+    float fed[16];
+    check(st::radarPlacementMove(Q, on45.bits, m, fed) == PM::kOurs && !std::memcmp(fed, Q, sizeof(Q)),
+          "our own value fed back bit for bit passes through unchanged (a caller that reads the placement back cannot make it climb)");
+    float rebased[16];
+    check(st::radarPlacementMove(Q, rev30.bits, m, rebased) == PM::kAdded && rebased[13] == 1.96f && rebased[14] == -0.30f && sameRows(rebased, P),
+          "our value fed back after a key change is re-based on the game's translation it came from: (0, 1.96, -0.30), not (0, 1.96, 0.15)");
+    float restored[16];
+    check(st::radarPlacementMove(rebased, zeroD, m, restored) == PM::kRestored && restored[12] == 0.0f && restored[13] == 1.96f && restored[14] == 0.0f && !m.have,
+          "our value fed back with the offset gone gets the game's own translation back, and the memory is cleared");
+    float plain[16];
+    st::PlacementMemory fresh;
+    check(st::radarPlacementMove(P, zeroD, fresh, plain) == PM::kNone && !std::memcmp(plain, P, sizeof(P)) && !fresh.have, "no offset and the game's own value: P as the game gave it");
+    float P2[16];
+    std::memcpy(P2, P, sizeof(P2));
+    P2[13] = 2.0f;
+    float moved[16];
+    check(st::radarPlacementMove(P, on45.bits, m, Q) == PM::kAdded && st::radarPlacementMove(P2, on45.bits, m, moved) == PM::kAdded && moved[13] == 2.0f && moved[14] == 0.45f,
+          "a new value of the game's while ours is held is added to afresh (its own place, plus the offset)");
+    check(!std::strcmp(st::placementMoveName(PM::kAdded), "added") && !std::strcmp(st::placementMoveName(PM::kOurs), "ours") && !std::strcmp(st::placementMoveName(PM::kRestored), "restored") &&
+              !std::strcmp(st::placementMoveName(PM::kNone), "none"),
+          "the rule's outcomes have names");
+    const float before[3] = {0.0f, 1.96f, 0.0f}, stepD[3] = {0.0f, 1.96f, 0.45f}, closeTo[3] = {0.0f, 1.96f, 0.40f}, other[3] = {0.0f, 2.0f, 0.0f}, d45[3] = {0.0f, 0.0f, 0.45f},
+                dz[3] = {0.0f, 0.0f, 0.0f};
+    check(st::placementStepLooksLikeOffset(before, stepD, d45) && st::placementStepLooksLikeOffset(before, closeTo, d45) && !st::placementStepLooksLikeOffset(before, other, d45) &&
+              !st::placementStepLooksLikeOffset(before, stepD, dz),
+          "the feedback warning: the game's translation stepping by about the offset (within a quarter of it) is suspect, another step is not, and nothing is with no offset");
     check(st::radarAnchorLeavesFamily(7) && st::radarAnchorLeavesFamily(8) && !st::radarAnchorLeavesFamily(0) && !st::radarAnchorLeavesFamily(2) && !st::radarAnchorLeavesFamily(6) &&
               !st::radarAnchorLeavesFamily(-1) && !st::radarAnchorLeavesFamily(9) && !std::strcmp(st::kFamilies[7].name, "5559BD94.EA02FAC2") && !std::strcmp(st::kFamilies[8].name, "5559BD94.E95634B0"),
           "the native move leaves the two 5559BD94 billboard families to the game and no other");

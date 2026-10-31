@@ -15,12 +15,13 @@
   is empty (journal, "V0 is gated by visibility"). Branch
   `claude/srv-turret-hud`, local only. Issue #140. Test install: Steam
   (`--target steam --scope both --xess`).
-- **The radar fix (BUILT, NOT FLOWN):** an entry hook on the schematic's
-  update (0x384A590, build 334925 only) writes radar forward into its local
-  offset, so the game frames, draws and places the radar itself; the two
-  5559BD94 billboard families are then left to the game. Unconfirmed: that
-  the anchor's +Z is forward, and whether it turns with the turret
-  (journal, "the radar anchor moved in the game").
+- **The radar fix (BUILT, NOT FLOWN):** a hook on the schematic's
+  placement setter (0x38563A0, build 334925 only) adds radar forward to the
+  translation the game sets (about 1.96 m up), so the game frames, draws and
+  places the radar itself; the two 5559BD94 billboard families are then left
+  to the game. Flight 79bb61ba proved the axis and sign (`on` is forward,
+  1:1); its update hook replaced that translation and dropped the radar
+  1.96 m (journal, "the radar placement moved through its setter").
 - **The radar's way out without it:** camera back 70, radar forward 0.
 - **What is wrong (the game's own placement):** the turret view's whole HUD
   sits about 0.7 m too far back for the stock camera (the radar behind the
@@ -51,10 +52,11 @@
 - **Ruled out:** see "Ruled out" below.
 - **Next flight (this branch):** radar anchor on; camera back 0 to 35 with
   radar forward = 65 minus camera back (45 at 20, 30 at 35). Read
-  `--grep "srv turret radar anchor"` (armed, applied, view off) and
-  `--grep "srv turret radar camera"`: the origin's z should rise by radar
-  forward once the anchor applies. If it goes MORE negative, set the anchor
-  key to reversed in flight (journal, "the radar anchor moved in the game").
+  `--grep "srv turret radar anchor"`: "setter hook armed", "placement moved"
+  (the game's translation and the caller), the 10 s setter-call count (none
+  while the view is on means a key change cannot reach the game) and any
+  WARNING; then `--grep "srv turret radar camera"`: the origin's z should
+  rise by radar forward, with no drop.
 
 ## Evidence (flight of 2026-10-30, Epic, v0.22.0-rc.3-139-gcd4c91c4)
 
@@ -852,6 +854,88 @@ sprites.
   ground-relative mode rather than a plain offset. The drop is about the
   camera's height above the vehicle's ground point, and the world matrix's X
   frame is recentred on that point.
+
+### 2026-10-31: the radar placement moved through its setter (built, not flown)
+
+**The cause** (RE, build 334925, read-only;
+`analysis\decomp\verify_20261031_srv_radar_drop.txt`, waiting in the
+analysis inbox as `20261031-151930-srv-radar-drop`). The earlier note was
+wrong that nothing writes obj+0x15B0: the game writes the placement
+through the schematic's interface at obj+0x58, whose slot +0x28 (vtable
+0x5511F18, entry 0x5511F40) is the setter 0x38563A0. It takes RCX =
+obj+0x58 and RDX = a 4x4 P (rows x, y, z, translation) and stores P at
+obj+0x1580..0x15BF (so P's translation lands at obj+0x15B0), P raised by
+0.1 x its own up row at obj+0x15C0..0x15FF, and the size at obj+0x1600.
+P's translation is the hologram's place relative to the anchor, in the
+anchor's axes, and on the Scorpion it is about (0, +1.96, 0). The anchor
+sits near the vehicle's ground point, so the hologram is 1.96 m above it.
+The first build REPLACED that translation with (0, 0, F), so the radar fell
+1.96 m (see "Ruled out").
+
+**The fix** (`src\d3d11\srv_radar_anchor.cpp`):
+- **The setter hook.** An inline detour at 0x38563A0, build 334925 only.
+  The PE identity and the first 18 bytes are checked first: `48 83 EC 48
+  0F 10 02 0F 11 81 28 15 00 00 0F 10 4A 10`, read from the exe through its
+  section table. CodeHook moves the first two instructions (7 bytes:
+  `sub rsp,48h; movups xmm0,[rdx]`). Its decoder now takes movups (0F 10 /
+  0F 11, no F2/F3 prefix), with unit cells in `vtable_test`; every other SSE
+  form is still refused. The object must have vtables base+0x5511F18 at
+  RCX and base+0x5511DE8 at RCX-0x58.
+- **The rule** (`srv_turret_math.h` `radarPlacementMove`, which the rig
+  checks). P is copied, d = (0, 0, s x radar forward) is ADDED to its
+  translation, and the original runs on the copy. It never adds twice. Each
+  schematic (4 slots) remembers the game's translation it moved, the
+  output and d. A translation bit for bit equal to that output is our own
+  value fed back: it passes through unchanged while d is unchanged, and is
+  re-based on the game's value when d changes. With d zero that puts the
+  game's value back. Otherwise the game's own next setter call restores
+  its place once d is zero. EDVR never calls the setter: a key change
+  reaches the game at its next call.
+- **The update hook** (0x384A590) now only counts updates with the radar
+  object. It writes nothing and stays integer-only.
+- **The billboards.** The two 5559BD94 families are left to the game while
+  the last radar setter call left our offset in the placement (added, or
+  ours fed back). That is "an add within the last frame" if the setter runs
+  every frame, and stays right if it runs rarely, where a 10-frame window
+  would move the billboards a second time.
+
+Unconfirmed until it flies:
+- the setter's caller (its return address is logged) and its call rate.
+  The RE suspects once a frame, from the one-frame lag in flight 79bb61ba;
+- accumulation: a caller that feeds our value back bit for bit is handled,
+  and one that feeds it back in another form raises the WARNING below;
+- whether DF3503CD and the other radar families (the contacts) share this
+  placement. They keep the shader's radar-forward move, so if they now sit
+  off the disc, they do not.
+
+The log lines (the frame tick says them; the hooks never log):
+- `srv turret radar anchor: setter hook armed: EliteDangerous64.exe+0x38563A0
+  (the radar schematic's placement setter, build 334925) at 0x...,
+  stolen=7 bytes, prologue 18/18 bytes verified, relay at 0x...`, or `...
+  setter hook stood down: <why>; nothing was patched`. Then `srv turret
+  radar anchor: update counter armed: EliteDangerous64.exe+0x384A590 (the
+  radar schematic's update, counted only, nothing written) ...` or `...
+  update counter stood down: ...`.
+- `srv turret radar anchor: placement moved at frame F: the game's (x,y,z) +
+  (0,0,d) -> (x,y,z) in the anchor's axes (key on|reversed), caller
+  EliteDangerous64.exe+0x..., obj 0x...; the 5559BD94 billboards are left
+  to the game`, once a stay.
+- `srv turret radar anchor: 10 s: setter calls N (radar M, moved A, already
+  ours R), the game's translation (x,y,z)[ changed K times], updates U`,
+  then the restores, faults and offset, `; the placement holds our offset`,
+  and ` -- NO setter call with the radar in these 10 s: ...` when M is 0.
+- `srv turret radar anchor: view off: moved in N calls`, with ` (already
+  ours in R)`, and ` -- NEVER RAN: the radar schematic's placement setter
+  was not called with the radar object while the view was on`, ` -- hook
+  not armed: <why>` or ` -- not asked: ...`.
+- `srv turret radar anchor: WARNING: the game's translation moved by (..)
+  between setter calls, close to the offset: its caller may feed back our
+  value`, once.
+
+To fly: camera back 0 to 35, radar forward = 65 minus camera back (45 at
+20, 30 at 35), `fix.srv_turret_radar_anchor = on`. In "srv turret radar
+camera" the origin's z should rise by radar forward with no drop in y, and
+V0 should start tracking once the radar is in view.
 
 
 

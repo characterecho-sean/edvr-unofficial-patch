@@ -119,8 +119,9 @@ private:
 //
 // NOT a disassembler, and deliberately not: it understands the shapes that
 // actually begin a compiled function -- register moves, stack adjustment,
-// pushes, the load of a parameter into shadow space, and the rip-relative
-// access to a global -- and answers 0 for everything else.
+// pushes, the load of a parameter into shadow space, the rip-relative
+// access to a global, and the unaligned SSE move (movups, 0F 10 / 0F 11) a
+// matrix-copying leaf opens with -- and answers 0 for everything else.
 //
 // RIP-RELATIVE INSTRUCTIONS ARE MEASURED, NOT REFUSED, and the first function
 // this was ever pointed at is why. It began `FF 05 …` -- an increment of a
