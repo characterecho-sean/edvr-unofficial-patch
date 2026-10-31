@@ -402,6 +402,18 @@ folders, named in a paragraph somebody reads while annoyed — collected by the
 program that is already open and already knows which folder the game is in and
 where `log.dir` moved the logs to.
 
+The same zip is also put on the clipboard as a copied file (`CF_HDROP`, what
+Explorer's Copy puts there), so Ctrl+V in a Discord message or a GitHub comment
+attaches it without a trip to the Desktop. Only the log zip goes there; the
+crash dump zip, which holds a copy of the game's memory, never does. A clipboard
+that is busy or refuses the copy is reported in the window and changes nothing
+about the file on the Desktop. Under Wine and Proton the format reaches the
+host as `text/uri-list`; because an X11 copy can go when the process that made
+it exits, the window tells a Linux user to paste before closing it. The command
+line's `--collect-logs` leaves the clipboard alone. The block's layout is
+checked in `installer_test` with the shell's own `DragQueryFileW`; the rig does
+not touch the clipboard.
+
 *Most recent session* is meant literally. EDVR names its logs
 `edvr_<gfx|vr>_YYYYMMDD_HHMMSS.log` and writes two a few seconds apart at each
 launch, so the newest stamp and everything within three minutes of it is one
