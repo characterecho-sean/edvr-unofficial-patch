@@ -1,10 +1,9 @@
 // F194 checks (native on-foot VR), run194 below. Header only, run by native_frame_test.
 //
-// F194 (native_on_foot_f194.h, native_on_foot.cpp, src/openxr/view_fov_note.h; TEMPORARY A/B key experimental.native_on_foot_look_to_aim_eye_height_as_mouse_look, default on, live). Part 1 (look to aim aiming at the
-// middle of the picture, with its key) was removed on 2026-10-31 (F194b): the pilot's Quest flight refuted it (his gaze offset is about 5 deg against the picture's centre 12.2 deg below the axis), and the pitch,
-// the frustum read, the ray and their rig cases are gone; the source pins below hold that nothing of it is left. Part 2: look to aim's own 10 deg settle gate (on the CARRIED pitch) is skipped, so F139's
-// gate covers it as it covers mouse look. The rig: the gate's predicate (aim -13 / -15 / +12, armed and unarmed, against F139's rule; off: today's 10 deg), the 1 s line and its window, the height probe at an
-// edge (an engage that moves nothing prints a small change, not nothing) and the source sites.
+// F194 (native_on_foot_f194.h, native_on_foot.cpp, src/openxr/view_fov_note.h). Part 1 (look to aim aiming at the middle of the picture, with its key) was removed on 2026-10-31 (F194b): the pilot's Quest flight refuted it
+// (his gaze offset is about 5 deg against the picture's centre 12.2 deg below the axis). Part 2 (look to aim's eye height settles as mouse look's does) is behaviour since F195b: its test key was retired on the
+// pilot's word and look to aim's own 10 deg settle gate (on the CARRIED pitch) is gone, so F139's gate (the game's aim, 20 deg, nothing drawn) is the only one, as under mouse look. The rig: the 1 s line and its
+// window, the height probe at an edge (an engage that moves nothing prints a small change, not nothing) and the source sites, which hold that nothing of the gate or the keys is left.
 #pragma once
 
 #include "../../src/d3d11/native_on_foot_core.h"
@@ -45,45 +44,7 @@ inline size_t countOf(const std::string& hay, const std::string& needle) {
 
 template <class Check>
 void run194(Check&& check) {
-    // ---- 1. part 2: look to aim's settle gate ----------------------------------------------------------------------------------------------------------------------------------------------------------
-    {
-        check(!f194::ltaGateWouldRefuse(9.99) && f194::ltaGateWouldRefuse(10.0) && f194::ltaGateWouldRefuse(45.0) && !f194::ltaGateWouldRefuse(std::nan("")) && !f194::ltaGateWouldRefuse(0.0),
-              "F194: look to aim's own gate would refuse from 10 deg of carried pitch (not under it, not for a number that is not one)");
-        check(f194::ltaGateRefuses(false, 13.0) && !f194::ltaGateRefuses(true, 13.0) && !f194::ltaGateRefuses(false, 9.9) && !f194::ltaGateRefuses(true, 9.9),
-              "F194: with the key off the gate refuses from 10 deg (today's); with it on it refuses nothing");
-        // on: the carried pitch is the engage's account; F139 reads the FP root's pitch (the game's aim), 20 deg, nothing drawn
-        const struct {
-            double carried, root;
-            bool item;
-            bool refusedOn, refusedOff;
-        } cases[] = {
-            {13.0, -13.0, false, false, true},    // aim -13 (an engage that carried 13): settles with the key on, refused by the 10 deg gate with it off
-            {13.0, -13.0, true, false, true},
-            {15.0, -15.0, false, false, true},
-            {15.0, -15.0, true, false, true},
-            {12.0, 12.0, false, false, true},     // the earlier Pimax engage at +11.9: refused for 80+90+37 calls, the view 10 cm low until the head levelled
-            {12.0, 12.0, true, false, true},
-            {5.0, -25.0, false, true, true},      // the game's aim 25 deg down, nothing drawn: F139 refuses in both
-            {5.0, -25.0, true, false, false},     // ... with an item drawn it does not
-            {5.0, 21.0, false, true, true},
-            {9.9, -13.0, false, false, false},    // under the 10 deg carried and under F139's 20: both settle
-            {0.0, 0.0, false, false, false},
-        };
-        bool all = true, tens = true, matchesF139 = true;
-        for (const auto& c : cases) {
-            const f194::SettleVerdict on = f194::settleVerdict(true, c.carried, c.root, true, c.item), off = f194::settleVerdict(false, c.carried, c.root, true, c.item);
-            all = all && on.refused() == c.refusedOn && off.refused() == c.refusedOff;
-            tens = tens && !on.tenRefused && on.tenWould == (c.carried >= 10.0) && off.tenWould == (c.carried >= 10.0) && off.tenRefused == (c.carried >= 10.0);
-            matchesF139 = matchesF139 && on.f139Refused == f138::settleRefused(c.root, f138::kSettleGateDeg, c.item);
-        }
-        check(all, "F194: the settle's verdict: aim -13 / -15 / +12 (carried 13 / 15 / 12) settles with the key on, armed and unarmed; the 10 deg gate refused all of them with it off; F139 refuses 25 deg down unarmed in both");
-        check(tens && matchesF139, "F194: with the key on the only refusal is F139's rule on the game's aim (f138::settleRefused, 20 deg, nothing drawn), exactly as mouse look; the 10 deg gate is counted as would-have in both");
-        const f194::SettleVerdict unknown = f194::settleVerdict(true, 30.0, 50.0, false, false);
-        check(unknown.tenWould && !unknown.tenRefused && !unknown.f139Refused && !unknown.refused(), "F194: a game aim that was not read is not F139's to refuse; the 10 deg gate is only counted");
-        const f194::SettleVerdict offFirst = f194::settleVerdict(false, 13.0, -25.0, true, false);
-        check(offFirst.tenRefused && !offFirst.f139Refused, "F194: off, the 10 deg gate refuses first and F139's rule is not asked, as the hook does (it counts the calls it refuses itself)");
-    }
-    // ---- 2. the 1 s line ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+    // ---- 1. the 1 s line ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------
     {
         char buf[1400];
         f194::Second s;
@@ -93,28 +54,19 @@ void run194(Check&& check) {
             f194::Call c;
             c.eyeOverNeckM = 0.19;
             c.raiseM = -0.05;
-            c.tenWould = true;
             c.taken = i == 30;
             if (i < 3) c.f139Refused = true;
             w.add(c);
         }
-        f194::formatSecond(buf, sizeof(buf), s, w, true);
+        f194::formatSecond(buf, sizeof(buf), s, w);
         check(std::strlen(buf) < 1100 && std::strstr(buf, "look to aim height (F194) 1 s: the headset's pitch (LOCAL) mean +2.0 deg;") != nullptr &&
                   std::strstr(buf, "carried aim pitch mean -3.0 deg (the game's aim -16.0 deg);") != nullptr && std::strstr(buf, "the reported head's pitch from the aim mean +4.5 deg;") != nullptr &&
-                  std::strstr(buf, "look to aim's 10 deg gate would have refused (skipped) 90 of 90 pin calls, F138/F139's 20 deg gate refused 3, taken 1;") != nullptr &&
+                  std::strstr(buf, "the settle: F138/F139's 20 deg gate refused 3, taken 1 of 90 pin calls;") != nullptr &&
                   std::strstr(buf, "the published raise mean -5.0 cm;") != nullptr && std::strstr(buf, "the drawn eye over the animated neck mean +19.0 cm") != nullptr &&
-                  std::strstr(buf, "picture") == nullptr && std::strstr(buf, "ray in force") == nullptr && std::strstr(buf, "forward axis") == nullptr,
-              "F194: the 1 s line says the headset's, the carried and the game's aim pitch, the reported head's pitch from the aim, the settle (the 10 deg gate would have refused, skipped; F139's; taken), the raise and the drawn eye over the neck, and nothing of the picture's centre or a ray");
-        f194::Window off;
-        for (int i = 0; i < 12; ++i) {
-            f194::Call c;
-            c.tenWould = c.tenRefused = true;
-            off.add(c);
-        }
-        f194::formatSecond(buf, sizeof(buf), s, off, false);
-        check(std::strstr(buf, "look to aim's 10 deg gate refused 12 of 12 pin calls,") != nullptr, "F194: with the key off the 10 deg gate line says it refused (not would have)");
-        f194::formatSecond(buf, sizeof(buf), s, f194::Window{}, true);
-        check(std::strstr(buf, "of 0 pin calls") != nullptr && std::strstr(buf, "taken 0;") != nullptr,
+                  std::strstr(buf, "picture") == nullptr && std::strstr(buf, "ray in force") == nullptr && std::strstr(buf, "forward axis") == nullptr && std::strstr(buf, "10 deg") == nullptr,
+              "F194: the 1 s line says the headset's, the carried and the game's aim pitch, the reported head's pitch from the aim, the settle (F138/F139's 20 deg gate refused, stances taken, of how many pin calls), the raise and the drawn eye over the neck, and nothing of the picture's centre, a ray or a 10 deg gate");
+        f194::formatSecond(buf, sizeof(buf), s, f194::Window{});
+        check(std::strstr(buf, "of 0 pin calls") != nullptr && std::strstr(buf, "taken 0 of 0 pin calls;") != nullptr,
               "F194: a second in which the hook wrote nothing says 0 pin calls: the line cannot read as success when the hook never ran");
         f194::Window w2;
         f194::Call missing;   // eye over the neck and the raise not numbers: not counted, not zero
@@ -133,7 +85,7 @@ void run194(Check&& check) {
         f194::Window again;
         check(box.take(&again) && !again.any(), "F194: ... and a second take with no write in between reads an empty window");
     }
-    // ---- 3. the view's height at an edge --------------------------------------------------------------------------------------------------------------------------------------------------------------
+    // ---- 2. the view's height at an edge --------------------------------------------------------------------------------------------------------------------------------------------------------------
     {
         char buf[900];
         // an engage that moves nothing prints a small change, not nothing
@@ -206,7 +158,7 @@ void run194(Check&& check) {
         nan.begin(true, 80000, true, std::nan(""), 0.0);
         check(!nan.haveBefore, "F194: a frame before that is not a number is no frame before");
     }
-    // ---- 4. the source sites ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+    // ---- 3. the source sites ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------
     {
         const std::string cpp = slurp("src/d3d11/native_on_foot.cpp"), ini = slurp("edvr.ini"), f109h = slurp("src/d3d11/native_on_foot_f109.h"), f194h = slurp("src/d3d11/native_on_foot_f194.h");
         const auto has = [&](const std::string& needle) { return cpp.find(needle) != std::string::npos; };
@@ -228,39 +180,35 @@ void run194(Check&& check) {
               "F194b: centreOffset is adsHeadAngles again (no picture parameter)");
         check(countOf(cpp, "centreOffset(np.render, &oy, &op)") == 3 && countOf(cpp, "centreOffset(") == 3,
               "F194b: the three callers of centreOffset (the engage's centring, F133's yaw re-centre, the 1 s line's offset) call it as they did before F194");
-        // the key: spelled out in its own call, default on, live; edvr.ini has it with a menu row
-        check(has("cfg.getString(\"experimental.native_on_foot_look_to_aim_eye_height_as_mouse_look\", \"on\") != \"off\"") && has("std::atomic<bool> g_ltaEyeHeightAsMouseLook{true};"),
-              "F194: the eye height key is read with its own literal, default on");
-        check(ini.find("\nnative_on_foot_look_to_aim_eye_height_as_mouse_look = on\n") != std::string::npos &&
-                  ini.find("# ui: Look to aim: eye height as mouse look (test) | choices on, off | recommended on | live\n") != std::string::npos &&
-                  ini.find("# TEMPORARY (F194, A/B): Look to aim: eye height as mouse look") != std::string::npos &&
-                  ini.find("\nnative_on_foot_pistol_sprint_swing_phase = 0.5\n\n# TEMPORARY (F194, A/B): Look to aim: eye height as mouse look") != std::string::npos,
-              "F194: edvr.ini has the eye height key, default on, marked TEMPORARY, with a menu row, right after the pistol sprint swing row");
-        // part 2: the 10 deg gate is the predicate's, skipped by the key, counted either way; F139's gate after it is unchanged; the old constant is gone
-        const size_t wouldAt = at("if (si.valid && nofoot::f194::ltaGateWouldRefuse(f194CarriedAbs)) {"), countAt = at("g_f109SettleGated.fetch_add(1, std::memory_order_relaxed);"),
-                     refuseAt = at("if (nofoot::f194::ltaGateRefuses(f194AsMouse, f194CarriedAbs)) {"),
-                     f139At = at("if (si.valid && f138AimKnown && nofoot::f138::settleRefused(pc.f86AimPitch, nofoot::f138::kSettleGateDeg, f138Item)) {");
-        check(wouldAt != std::string::npos && countAt != std::string::npos && refuseAt != std::string::npos && f139At != std::string::npos && wouldAt < countAt && countAt < refuseAt && refuseAt < f139At &&
-                  has("const bool f194AsMouse = g_ltaEyeHeightAsMouseLook.load(std::memory_order_relaxed);") && has("const double f194CarriedAbs = static_cast<double>(g_f109AimPitchAbsDeg.load(std::memory_order_relaxed));") &&
-                  !has("kF109SettlePitchDeg"),
-              "F194: the 10 deg gate counts the call it would refuse, then refuses only with the key off, and runs before F139's gate, which is the same line as before; the old constant is gone");
-        check(has("g_f109AimPitchAbsDeg.store(g_lta.engaged ? static_cast<float>(std::fabs(g_adsMap.pitchSeat) / nofoot::kAdsDeg) : 0.0f, std::memory_order_relaxed);"),
-              "F194: the gate's input is the carried pitch (AdsAimMap::pitchSeat), unchanged");
+        // F195b: the two look-to-aim test keys are retired, and look to aim's own 10 deg settle gate with them: nothing reads either key, no flag, count or predicate of the gate is left, F139's gate is the only one,
+        // and edvr.ini has neither entry nor menu row. The needles are stems, cut short on purpose, so that the tree holds no spelling of the retired names outside the docs.
+        check(cpp.find("look_to_aim_eye_height") == std::string::npos && cpp.find("g_ltaEyeHeight") == std::string::npos && cpp.find("f194AsMouse") == std::string::npos && cpp.find("f194Carried") == std::string::npos &&
+                  cpp.find("f194Ten") == std::string::npos && cpp.find("g_f109SettleGated") == std::string::npos && cpp.find("g_f109AimPitchAbs") == std::string::npos && cpp.find("ltaGateWould") == std::string::npos && cpp.find("ltaGateRefuses") == std::string::npos &&
+                  cpp.find("gatedSeen") == std::string::npos && cpp.find("kF109SettlePitch") == std::string::npos && cpp.find("F98c's settle refused") == std::string::npos && ini.find("look_to_aim_eye_height") == std::string::npos &&
+                  ini.find("eye height as mouse look") == std::string::npos && ini.find("\nnative_on_foot_pistol_sprint_swing_phase = 0.5\n\n# ADS: scope zoom FOV") != std::string::npos,
+              "F195b: the eye height key is retired: nothing reads it, the 10 deg gate, its counts and its line fields are gone from native_on_foot.cpp, edvr.ini has neither its entry nor its menu row");
+        check(f194h.find("ltaGateWould") == std::string::npos && f194h.find("ltaGateRefuses") == std::string::npos && f194h.find("settleVerdict") == std::string::npos && f194h.find("SettleVerdict") == std::string::npos && f194h.find("tenWould") == std::string::npos &&
+                  f194h.find("tenRefused") == std::string::npos && f194h.find("kLtaGate") == std::string::npos && f194h.find("RETIRED on 2026-10-31") != std::string::npos,
+              "F195b: native_on_foot_f194.h has no gate predicate or verdict and says the key was retired");
+        // F139's gate is the only settle gate: it follows the pitch check of the pin's own refusals and is the line it always was
+        const size_t f139At = at("if (si.valid && f138AimKnown && nofoot::f138::settleRefused(pc.f86AimPitch, nofoot::f138::kSettleGateDeg, f138Item)) {"),
+                     validAt = at("si.valid = pc.f94TargetOk && std::isfinite(pc.eyeYSelected) && !(pc.detachW > 0.0) && refusal != kPinRefCameraAway;");
+        check(f139At != std::string::npos && validAt != std::string::npos && validAt < f139At && f139At - validAt < 4000,
+              "F195b: after the pin's own refusals, F139's gate (the FP root's pitch, 20 deg, nothing drawn) is the next and the only settle gate, for look to aim as for mouse look");
         // the sites that read the head's forward axis and were never an aim: F134's seat yaw and F175's lead (measure only)
         check(has("nofoot::adsHeadAngles(np.local, &yawLocal, &pitchLocal) && nofoot::adsHeadAngles(np.render, &yawSeated, &pitchSeated)") &&
                   has("nofoot::adsHeadAngles(in.render, &leadYaw, &leadPitch)"),
               "F194: F134's seat yaw (the difference of one axis's headings in two spaces) and F175's lead (measure only) read the forward axis");
         // the instruments: the hook's window, the view's height, the probe's edges, the 1 s line
-        check(has("g_f194Box.write([&](nofoot::f194::Window& win) noexcept { win.add(c194); });") && has("c194.tenWould = f194TenWould;") && has("c194.tenRefused = f194TenRefused;") &&
-                  has("c194.f139Refused = f138SettleRefused;") && has("c194.taken = so.settled;") && has("if (pc.f97EyeDrawnOk) c194.eyeOverNeckM = pc.f97EyeDrawn[1] - N0[1];") &&
+        check(has("g_f194Box.write([&](nofoot::f194::Window& win) noexcept { win.add(c194); });") && has("c194.f139Refused = f138SettleRefused;") && has("c194.taken = so.settled;") && has("if (pc.f97EyeDrawnOk) c194.eyeOverNeckM = pc.f97EyeDrawn[1] - N0[1];") &&
                   has("g_f194ViewY.store(pc.f97EyeDrawn[1], std::memory_order_relaxed);") && has("if (freshIn && pc.f97EyeDrawnOk && refusal != kPinRefCameraAway && !(pc.detachW > 0.0)) {"),
               "F194: the pin hook writes the settle's fate, the drawn eye over the neck and the raise to the window, and the view's height (a fresh hip frame, the commander's camera) for the probe");
         check(has("f194Edge(now, true);   // F194: the view's height before the engage") && has("f194Edge(now, false);   // F194: the view's height before the disengage") &&
-                  has("if (g_lta.engaged) f194Edge(GetTickCount64(), false);") && has("f194Tick(now);") && has("nofoot::f194::formatSecond(heightLine, sizeof(heightLine), g_f194Sec, hw, g_ltaEyeHeightAsMouseLook.load(std::memory_order_relaxed));") &&
+                  has("if (g_lta.engaged) f194Edge(GetTickCount64(), false);") && has("f194Tick(now);") && has("nofoot::f194::formatSecond(heightLine, sizeof(heightLine), g_f194Sec, hw);") &&
                   has("if (g_f194Box.take(&hw) && g_f194Sec.any()) {"),
               "F194: the probe is begun at the engage, the disengage and a stop, ticked every frame, and the 1 s line is taken from the hook's window while engaged");
         // F109's centred line: the picture-centre and forward-axis fields are gone, F195's tail stays
-        check(has("pitch kept %+.2f deg, centred %+.2f deg (F195: %s); %s\",") && !has("the forward axis itself") && !has("(F194), "),
+        check(has("pitch kept %+.2f deg, centred %+.2f deg; %s\",") && !has("the forward axis itself") && !has("(F194), "),
               "F194b: the F109 centred line is the reported head's offset, F195's kept and centred pitch and the outcome: no picture-centre pitch, no second set of angles");
     }
 }

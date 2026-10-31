@@ -63,7 +63,7 @@ inline void run138(Check&& check) {
         check(!f138::settleRefused(-10.5, gate, false) && !f138::settleRefused(-12.0, gate, false) && !f138::settleRefused(-15.0, gate, false) && !f138::settleRefused(10.0, gate, false),
               "F139: the pilot's resting mouse aim (-10.5 to -12 deg, head level) is not refused: the unarmed settle, and so the reference, is taken there");
         check(f138::settleRefused(10.0, 10.0, false) && !f138::settleRefused(9.99, 10.0, false),
-              "F138: the gate is the caller's number (look to aim's own F109 gate, 10 deg, lives in the hook and is not this function's)");
+              "F138: the gate is the caller's number (look to aim's own F109 gate, 10 deg, was retired in F195b; this function takes whatever number it is given)");
         check(!f138::settleRefused(-40.0, gate, true) && !f138::settleRefused(70.0, gate, true),
               "F138: with an item drawn the settle is as before F138 (the armed target is an absolute height): no refusal");
     }
@@ -601,10 +601,10 @@ inline void run138(Check&& check) {
         }
         big.returned = big.returnRefused = big.notNeeded = 99;
         char line[1300];
-        const int len = f138::formatPitched(line, sizeof(line), big, "$wpn_m_shotgun_plasma_doublebarrel_name_with_a_long_tail in 18 of 90 calls", 99);
+        const int len = f138::formatPitched(line, sizeof(line), big, "$wpn_m_shotgun_plasma_doublebarrel_name_with_a_long_tail in 18 of 90 calls");
         // a realistic second: one reason, the running reference, a rifle's name
         char typical[1300];
-        const int typicalLen = f138::formatPitched(typical, sizeof(typical), w, "none", 0);
+        const int typicalLen = f138::formatPitched(typical, sizeof(typical), w, "none");
         char msg[300];
         std::snprintf(msg, sizeof(msg), "F171: the 1 s line is inside the log's 1166 bytes (1200 less its stamp and truncation marker) with every figure at its worst (%d bytes; a typical second %d)", len, typicalLen);
         check(len > 0 && len < 1166 && typicalLen > 0 && typicalLen < 1000 && std::strstr(typical, "not applied: running reference, measured only 6; reference used (F170; the calls that chose one): settled 0, running 6, none 0; reference detail (F171;") != nullptr &&

@@ -1,4 +1,4 @@
-// F194 (native on-foot VR): look to aim's eye height settles as mouse look's does; the view's height at an edge of look to aim, measured. Header only, no game or D3D11 state, so native_frame_test runs the very
+// F194 (native on-foot VR): look to aim's eye height settles as mouse look's does (behaviour since F195b); the view's height at an edge of look to aim, measured. Header only, no game or D3D11 state, so native_frame_test runs the very
 // functions the frame thread and the pin hook use. Journal: the arc doc, F194.
 //
 // Part 1 (look to aim aiming at the middle of the picture, with its key) was REMOVED on 2026-10-31 (F194b). The tester (Quest 3, rc.4) reported look to aim's aim about 12.9 deg above where they look, and a
@@ -9,16 +9,15 @@
 // took its place (the engage keeps the aim's pitch where the mouse left it) and flew well; the pilot said to remove the key. Gone with it: the picture-centre pitch, the frustum read and its log line, the ray,
 // centreOffset's picture parameter (it is adsHeadAngles again). The runtime's "view fov:" line (src/openxr/view_fov_note.h) stays: a measurement with no key.
 //
-// Part 2 (TEMPORARY A/B experimental.native_on_foot_look_to_aim_eye_height_as_mouse_look, default on): look to aim refused the stance's settle (F98c: the only publisher of the raise that holds the view's height over the
-// neck) whenever |the carried aim pitch| was 10 deg or more (F109, native_on_foot.cpp). That pitch is the account of what the game applied for EDVR's asks since the engage (AdsAimMap::pitchSeat), not the game's aim:
-// with the mouse aim resting at -11 and a level head an engage that centred the aim carried +11 and the settle was refused with the aim level (the pilot's "my view dropped"). Mouse look's gate is F139's 20 deg on the
-// FP root's pitch, nothing drawn only (nofoot::f138::settleRefused), and it already runs after look to aim's for both modes. With the key on, look to aim's own gate is skipped and F139's covers it exactly as it
-// covers mouse look.
+// Part 2 (look to aim's eye height settles as mouse look's does) is BEHAVIOUR since F195b: its test key (experimental.native_on_foot_look_to_aim_eye_height_as_mouse_look) was RETIRED on 2026-10-31 on the pilot's
+// word ("Retire both", after F195 flew OK), and look to aim's own 10 deg settle gate is gone. Look to aim refused the stance's settle (F98c: the only publisher of the raise that holds the view's height over the
+// neck) whenever |the carried aim pitch| was 10 deg or more (F109). That pitch is the account of what the game applied for EDVR's asks since the engage (AdsAimMap::pitchSeat), not the game's aim: with the mouse
+// aim resting at -11 and a level head an engage that centred the aim carried +11 and the settle was refused with the aim level (the pilot's "my view dropped"). Mouse look's gate is F139's 20 deg on the FP root's
+// pitch, nothing drawn only (nofoot::f138::settleRefused), and it already ran after look to aim's for both modes; it is the only gate now, for look to aim as for mouse look. (F195, which keeps the aim's pitch at an
+// engage, means the carried pitch no longer starts out at the mouse aim's offset either.)
 //
-// The instruments: the hook's window of the settle's fate, the frame thread's second, the 1 s line, and the probe of the view's height at an engage and a disengage.
+// The instruments (kept): the hook's window of the settle's fate, the frame thread's second, the 1 s line, and the probe of the view's height at an engage and a disengage.
 #pragma once
-
-#include "native_on_foot_f138.h"   // settleRefused, kSettleGateDeg: F139's rule
 
 #include <cmath>
 #include <cstddef>
@@ -29,36 +28,16 @@ namespace edvr {
 namespace nofoot {
 namespace f194 {
 
-// ---- part 2: look to aim's settle gate -------------------------------------------------------------------------------------------------------------------------------------------------------
-
-constexpr double kLtaGateDeg = 10.0;   // F109's own gate: the settle is refused from this |carried aim pitch|
-inline bool ltaGateWouldRefuse(double carriedAbsDeg) noexcept { return std::isfinite(carriedAbsDeg) && carriedAbsDeg >= kLtaGateDeg; }
-// The gate as the hook applies it: skipped (asMouseLook) when the key is on; the call is counted either way by whoever asks ltaGateWouldRefuse.
-inline bool ltaGateRefuses(bool asMouseLook, double carriedAbsDeg) noexcept { return !asMouseLook && ltaGateWouldRefuse(carriedAbsDeg); }
-struct SettleVerdict {
-    bool tenWould = false;     // look to aim's 10 deg gate on the carried pitch would refuse
-    bool tenRefused = false;   // ... and it did (the key is off)
-    bool f139Refused = false;  // F139's rule on the FP root's pitch refused (evaluated only when the 10 deg gate did not)
-    bool refused() const noexcept { return tenRefused || f139Refused; }
-};
-// The settle's refusals in the hook's order. carriedAbsDeg: |AdsAimMap::pitchSeat|; rootPitchDeg: the FP root's pitch (nose up +; rootKnown false: not read); itemDrawn: armed or the weapon eye's weight up.
-inline SettleVerdict settleVerdict(bool asMouseLook, double carriedAbsDeg, double rootPitchDeg, bool rootKnown, bool itemDrawn) noexcept {
-    SettleVerdict v;
-    v.tenWould = ltaGateWouldRefuse(carriedAbsDeg);
-    v.tenRefused = ltaGateRefuses(asMouseLook, carriedAbsDeg);
-    if (!v.tenRefused) v.f139Refused = rootKnown && nofoot::f138::settleRefused(rootPitchDeg, nofoot::f138::kSettleGateDeg, itemDrawn);
-    return v;
-}
-
 // ---- the pin hook's window ----------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
-// One pin call while look to aim drives the aim: the drawn eye over the animated neck (m, not a number: unknown), the raise published (m, not a number: none yet), and the settle's fate.
+// One pin call while look to aim drives the aim: the drawn eye over the animated neck (m, not a number: unknown), the raise published (m, not a number: none yet), and the settle's fate (F138/F139's 20 deg gate
+// refused it, or a stance was taken).
 struct Call {
     double eyeOverNeckM = std::nan(""), raiseM = std::nan("");
-    bool tenWould = false, tenRefused = false, f139Refused = false, taken = false;
+    bool f139Refused = false, taken = false;
 };
 struct Window {
-    uint32_t calls = 0, eyeN = 0, raiseN = 0, tenWould = 0, tenRefused = 0, f139Refused = 0, taken = 0;
+    uint32_t calls = 0, eyeN = 0, raiseN = 0, f139Refused = 0, taken = 0;
     double eyeSum = 0.0, raiseSum = 0.0;
     void add(const Call& c) noexcept {
         ++calls;
@@ -70,8 +49,6 @@ struct Window {
             ++raiseN;
             raiseSum += c.raiseM;
         }
-        if (c.tenWould) ++tenWould;
-        if (c.tenRefused) ++tenRefused;
         if (c.f139Refused) ++f139Refused;
         if (c.taken) ++taken;
     }
@@ -99,18 +76,18 @@ struct Second {
 
 // ---- the lines -----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
-// The 1 s line while look to aim is engaged. eyeHeightAsMouse: the key that skips the 10 deg gate. (tools\edvr_log.py reads these formats from this file: keep a quoted copy of a line out of the comments, where the
-// reader's search would find it first. It reads the line of a build before F194b too, which began with the picture-centre pitch in force and gave the forward axis's and the ray's pitch from the aim.)
-inline int formatSecond(char* buf, size_t n, const Second& s, const Window& w, bool eyeHeightAsMouse) noexcept {
+// The 1 s line while look to aim is engaged. (tools\edvr_log.py reads these formats from this file: keep a quoted copy of a line out of the comments, where the reader's search would find it first. It reads the
+// lines of the builds before F194b and before F195b too: the first began with the picture-centre pitch in force and gave the forward axis's and the ray's pitch from the aim; the second had look to aim's own
+// 10 deg gate in the settle field, "look to aim's 10 deg gate would have refused (skipped) N of M pin calls, F138/F139's 20 deg gate refused N, taken N".)
+inline int formatSecond(char* buf, size_t n, const Second& s, const Window& w) noexcept {
     const double ew = w.eyeN ? static_cast<double>(w.eyeN) : 1.0, rw = w.raiseN ? static_cast<double>(w.raiseN) : 1.0;
     return std::snprintf(buf, n,
                          "native on foot look to aim height (F194) 1 s: the headset's pitch (LOCAL) mean %+.1f deg; "
                          "carried aim pitch mean %+.1f deg (the game's aim %+.1f deg); the reported head's pitch from the aim mean %+.1f deg; "
-                         "the settle: look to aim's 10 deg gate %s %u of %u pin calls, F138/F139's 20 deg gate refused %u, taken %u; the published raise mean %+.1f cm; "
+                         "the settle: F138/F139's 20 deg gate refused %u, taken %u of %u pin calls; the published raise mean %+.1f cm; "
                          "the drawn eye over the animated neck mean %+.1f cm",
                          s.mean(s.localSum, s.localN), s.mean(s.carriedSum, s.ticks), s.mean(s.rootSum, s.rootN), s.mean(s.offSum, s.offN),
-                         eyeHeightAsMouse ? "would have refused (skipped)" : "refused", eyeHeightAsMouse ? w.tenWould : w.tenRefused, w.calls, w.f139Refused, w.taken,
-                         w.raiseN ? w.raiseSum / rw * 100.0 : 0.0, w.eyeN ? w.eyeSum / ew * 100.0 : 0.0);
+                         w.f139Refused, w.taken, w.calls, w.raiseN ? w.raiseSum / rw * 100.0 : 0.0, w.eyeN ? w.eyeSum / ew * 100.0 : 0.0);
 }
 
 // ---- the view's height at an engage and a disengage -------------------------------------------------------------------------------------------------------------------------------------------
