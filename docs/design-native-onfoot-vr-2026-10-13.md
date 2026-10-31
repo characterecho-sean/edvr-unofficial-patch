@@ -4308,7 +4308,8 @@ ruled out: F120's head-turn correction, because it rotated a point the lever had
   - **Not changed.** The model's IPD still falls back to 6.3 cm with Anti-aliasing off. `temporalPassEyeOffsetX` is fed only after native_temporal's AA-off return, although the told eye offsets reach its `begin()` every frame. With rows the solved eye is used and the IPD does not enter.
   - **Not established.** That the pair forms on the user's rig (Quest 2 on WiVRn under Proton). The rig proves it on a synthetic frame only. A live flat-to-VR switch may also need a configure call to pick up the VR profile.
   - **Main merged in** (merge commit `463ecdcd`: the installer's clipboard log zip, installer-only).
-  - **Next flight (Frontier, `--expect-build 76b03845`; `--health` first).**
+  - **Installed and zipped.** Frontier now runs the merged tip, v0.22.0-rc.4-29-g1986cb98, verified. The user's tester zip is that build (zip sha256 `3881AE56...`); it is for their laser-rifle test with Anti-aliasing off, as they run.
+  - **Next flight (Frontier, `--expect-build 1986cb98`; `--health` first).**
     - In the menu set Anti-aliasing to off (live).
     - On foot, draw a rifle and aim down sights several times.
     - Then set Anti-aliasing back to DLSS.
