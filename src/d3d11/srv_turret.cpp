@@ -34,6 +34,7 @@ namespace detail {
 std::atomic<bool> g_srvTurretHudWanted{false};
 std::atomic<bool> g_srvTurretHudCounting{false};
 std::atomic<uint32_t> g_srvTurretHudIssues{0};
+std::atomic<bool> g_srvTurretHoloWatching{false};
 }  // namespace detail
 
 namespace st = srv_turret;
@@ -676,6 +677,30 @@ void logDiscPlanes(const float* records, uint32_t vertices, const st::Family& fa
     }
 }
 
+// The hologram billboard's vertices (families 7 and 8, signature H: lighting position 3, UV 2, the moved clip position 4, `pre` 4): for eye 0's sampled draw when the billboard is near (the game's
+// clip w under 1 m at every vertex), each vertex's clip position before and after the move and its UV, with the tangents and the translation it ran with, so the billboard's corners can be put in
+// the eye's space offline and its UV range read (a fixed 0..1 quad, or the picture's own window).
+static_assert(st::kSignatures[st::kSceneSignature].el[0].comps == 3 && st::kSignatures[st::kSceneSignature].el[1].comps == 2, "signature H: the lighting position, then the UV");
+void logHoloQuad(const float* records, uint32_t vertices, const st::Family& fam, const Probe& p, int eye) {
+    if (eye != 0 || !records || vertices < 3) return;
+    const uint32_t stride = fam.strideBytes / 4, uvFloat = 3, n = vertices < 6 ? vertices : 6;
+    for (uint32_t i = 0; i < n; ++i)
+        if (!(records[stride * i + fam.preFloat + 3] < 1.0f)) return;   // a far billboard (the target panel's): not the radar's
+    char line[1100];
+    int len = std::snprintf(line, sizeof(line), "srv turret hud holo quad: family=%s eye=%d draw=%u tangents=(%.4f,%.4f,%.4f,%.4f) T=(%.3f,%.3f,%.3f)", fam.name, eye, p.draw,
+                            static_cast<double>(p.params.l), static_cast<double>(p.params.r), static_cast<double>(p.params.dn), static_cast<double>(p.params.up),
+                            static_cast<double>(p.params.tx), static_cast<double>(p.params.ty), static_cast<double>(p.params.tz));
+    for (uint32_t i = 0; i < n && len > 0 && len < static_cast<int>(sizeof(line)) - 140; ++i) {
+        const float* r = records + static_cast<size_t>(stride) * i;
+        const float* pre = r + fam.preFloat;
+        const float* post = r + fam.posFloat;
+        len += std::snprintf(line + len, sizeof(line) - len, " | v%u pre=(%.4f,%.4f,%.4f,%.4f) post=(%.4f,%.4f,%.4f) uv=(%.3f,%.3f)", i, static_cast<double>(pre[0]), static_cast<double>(pre[1]),
+                             static_cast<double>(pre[2]), static_cast<double>(pre[3]), static_cast<double>(post[0]), static_cast<double>(post[1]), static_cast<double>(post[3]),
+                             static_cast<double>(r[uvFloat]), static_cast<double>(r[uvFloat + 1]));
+    }
+    Log::get().note("%s", line);
+}
+
 // Once a frame: read what the GPU has finished, without waiting for it.
 void probeRead(ID3D11DeviceContext* ctx, int eye, int family) {
     Probe& p = g_probe[eye][family];
@@ -712,6 +737,7 @@ void probeRead(ID3D11DeviceContext* ctx, int eye, int family) {
                 const uint32_t maxVertices = st::captureMaxVertices(fam.strideBytes);
                 const uint32_t vertices = static_cast<uint32_t>(written > maxVertices / 3 ? maxVertices / 3 : written) * 3;
                 const st::CaptureSummary c = st::summarizeCapture(static_cast<const float*>(m.pData), vertices, fam.strideBytes / 4, fam.posFloat, fam.preFloat, p.params);
+                if (fam.sig == st::kSceneSignature) logHoloQuad(static_cast<const float*>(m.pData), vertices, fam, p, eye);
                 if (static_cast<uint32_t>(family) == kDiscFamily && eye == 0 && p.planePose) logDiscPlanes(static_cast<const float*>(m.pData), vertices, fam, p);
                 ctx->Unmap(p.staging, 0);
                 p.captureLogged = true;
@@ -923,7 +949,355 @@ void noteState(ID3D11DeviceContext* ctx) {
     });
 }
 
+// ---- THE HOLOGRAM'S SOURCE (TEMPORARY instrument) -------------------------------------------------------------------------------------------------------------------------
+// What the eye sees of the radar (its dark fill, its yellow rim, the Scorpion's outline) is not the disc DF3503CD draws: it is the hologram billboard, vs 5559BD94 with ps EA02FAC2, whose
+// pixel shader draws a PICTURE it reads at the billboard's own UV (the fill where t4 is under 1000, the outline from an edge filter over t4, the colours from an ID in t5, more from t6). That
+// picture is made earlier in the frame by another pass, from the game's own camera, so the moved billboard shows the disc as it looked from where it was (under the chin, cut by that
+// pass's near plane) at the moved place. This finds that pass. Every kHoloEveryMs, one frame's 5559BD94 draws (both pixel shaders, both eyes) say what they read at t0..t7, and the
+// render or depth targets among t2..t7 are watched (t0 is the exposure and t1 the scene's linear depth: the scene's own); in the next frame every owner-context draw with one of them bound
+// as a render target or the depth target is a WRITER, and says its shaders, its draw, its targets and its first viewport. The vertex constants of the first billboards and writers (b0 rows
+// 0..15, b1 rows 270..279 -- the camera block the billboard reads: the view-projection columns 270..273, the camera 275, its right, up and forward 277..279 -- and b2 rows 0..15) are copied
+// to a staging buffer at the draw and logged when the GPU has them. A draw the game makes through an indirect or auto draw, a compute pass or a copy is not seen; zero writers says so.
+// Nothing here changes a draw.
+constexpr uint64_t kHoloEveryMs = 15000;
+constexpr uint32_t kHoloFirstWatchedSlot = 2, kHoloSlots = 8;
+constexpr uint32_t kHoloTexMax = 12, kHoloBillboardsMax = 6, kHoloWritersMax = 10, kHoloEntries = kHoloBillboardsMax + kHoloWritersMax;
+constexpr uint32_t kHoloBuffers = 3;
+constexpr uint32_t kHoloSlot[kHoloBuffers] = {0, 1, 2}, kHoloFirstRow[kHoloBuffers] = {0, 270, 0}, kHoloRows[kHoloBuffers] = {16, 10, 16};
+constexpr uint32_t kHoloEntryRows = 16 + 10 + 16;
+constexpr UINT kHoloEntryBytes = kHoloEntryRows * 16;
+constexpr uint32_t kHoloWaitFrames = 8;
+constexpr uint32_t kHoloWriterLinesMax = 24, kHoloPairsMax = 24;   // writer lines a round; distinct writer shader pairs tallied a round
+constexpr int kHoloFamilyA = 7, kHoloFamilyB = 8;
+static_assert(st::kFamilies[kHoloFamilyA].vs == 0x5559BD94B6852E83ull && st::kFamilies[kHoloFamilyB].vs == 0x5559BD94B6852E83ull, "the hologram billboards are families 7 and 8");
+static_assert(kHoloRows[0] + kHoloRows[1] + kHoloRows[2] == kHoloEntryRows, "an entry holds the three buffers' rows");
+
+struct HoloTex {
+    const void* res = nullptr;   // identity only
+    UINT w = 0, h = 0, fmt = 0, bind = 0;
+};
+struct HoloEntry {
+    bool writer = false;
+    int family = -1, eye = -1;   // a billboard's family and eye
+    uint32_t ordinal = 0;        // ... and its place among the frame's draws of its family and eye
+    uint64_t vs = 0, ps = 0;     // a writer's
+    char kind = 0;
+    UINT count = 0, instances = 0;
+    uint32_t rows[kHoloBuffers] = {};               // the rows copied of each buffer (from kHoloFirstRow)
+    UINT cbFirst[kHoloBuffers] = {}, cbCount[kHoloBuffers] = {};   // the range the game bound each with (0, 0: the whole buffer, or none)
+};
+struct HoloWatch {
+    enum class Phase : uint8_t { kIdle, kCollect, kWatch, kRead };
+    Phase phase = Phase::kIdle;
+    ID3D11Device* device = nullptr;   // identity: the staging buffer's
+    ID3D11Buffer* stage = nullptr;
+    bool failed = false;              // the staging buffer could not be made on this device: the constants are not copied (the rest still runs)
+    uint64_t lastMs = 0;
+    uint32_t round = 0, frame = 0, waited = 0;
+    HoloTex tex[kHoloTexMax];
+    uint32_t texN = 0, billboards = 0;
+    HoloEntry entry[kHoloEntries];
+    uint32_t entryN = 0, writers = 0, draws = 0;
+    struct Pair {
+        uint64_t vs = 0, ps = 0;
+        int tex = -1;    // the first watched texture it wrote
+        uint32_t n = 0;
+    };
+    Pair pairs[kHoloPairsMax];   // every writer's shader pair, counted, so a scene-sized target's many writers cannot hide the picture's
+    uint32_t pairN = 0, pairsDropped = 0;
+};
+HoloWatch g_holo;
+
+// A texture's size, format and bind flags, from a view's resource (false: not a 2D texture, or a call faulted).
+bool holoDescribe(ID3D11Resource* res, HoloTex& out) {
+    out = HoloTex{};
+    if (!res) return false;
+    out.res = res;
+    bool ok = false;
+    guarded("srv.turret.holo.desc", [&] {
+        ID3D11Texture2D* tex = nullptr;
+        if (SUCCEEDED(res->QueryInterface(__uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&tex))) && tex) {
+            D3D11_TEXTURE2D_DESC td{};
+            tex->GetDesc(&td);
+            out.w = td.Width;
+            out.h = td.Height;
+            out.fmt = static_cast<UINT>(td.Format);
+            out.bind = td.BindFlags;
+            tex->Release();
+            ok = true;
+        }
+    });
+    return ok;
+}
+int holoTexIndex(const void* res) {
+    for (uint32_t i = 0; i < g_holo.texN; ++i)
+        if (g_holo.tex[i].res == res) return static_cast<int>(i);
+    return -1;
+}
+unsigned holoShortId(const void* res) { return static_cast<unsigned>(reinterpret_cast<uintptr_t>(res) & 0xFFFFFFu); }
+
+bool holoEnsureStage(ID3D11DeviceContext* ctx) {
+    if (g_holo.failed) return false;
+    ID3D11Device* d = nullptr;
+    if (!guarded("srv.turret.holo.device", [&] { ctx->GetDevice(&d); }) || !d) {
+        st::release(d);
+        return false;
+    }
+    if (d != g_holo.device) {
+        st::release(g_holo.stage);
+        g_holo.device = d;
+    }
+    HRESULT hr = S_OK;
+    if (!g_holo.stage) {
+        guarded("srv.turret.holo.stage", [&] {
+            D3D11_BUFFER_DESC bd{};
+            bd.ByteWidth = kHoloEntries * kHoloEntryBytes;
+            bd.Usage = D3D11_USAGE_STAGING;
+            bd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+            hr = d->CreateBuffer(&bd, nullptr, &g_holo.stage);
+        });
+        if (!g_holo.stage) {
+            g_holo.failed = true;
+            Log::get().note("srv turret holo: the staging buffer for the constants could not be made (0x%08X); the sources and writers are still said, without their constants.", static_cast<unsigned>(hr));
+        }
+    }
+    st::release(d);
+    return g_holo.stage != nullptr;
+}
+
+// Rows [first, first + rows) of the vertex-stage buffer at `slot`, counted from the first constant the game bound it with, copied into the stage at byte `to`, clipped to the buffer and to the
+// bound range. Returns the rows copied (0: nothing bound, nothing in range, or a fault).
+uint32_t holoCopyVsRows(ID3D11DeviceContext* ctx, uint32_t slot, uint32_t first, uint32_t rows, UINT to, UINT& boundFirst, UINT& boundCount) {
+    boundFirst = boundCount = 0;
+    st::ExtraCb cb;
+    if (!st::readGameCb(ctx, slot, cb, false)) return 0;
+    boundFirst = cb.ranged ? cb.first : 0;
+    boundCount = cb.ranged ? cb.count : 0;
+    D3D11_BUFFER_DESC bd{};
+    if (!guarded("srv.turret.holo.cbdesc", [&] { cb.buffer->GetDesc(&bd); })) return 0;
+    const uint64_t base = static_cast<uint64_t>(boundFirst) + first;
+    const uint64_t inBuffer = bd.ByteWidth / 16u;
+    if (base >= inBuffer || (cb.ranged && cb.count && first >= cb.count)) return 0;
+    uint64_t n = rows;
+    if (base + n > inBuffer) n = inBuffer - base;
+    if (cb.ranged && cb.count && first + n > cb.count) n = cb.count - first;
+    const D3D11_BOX box{static_cast<UINT>(base * 16u), 0, 0, static_cast<UINT>((base + n) * 16u), 1, 1};
+    if (!guarded("srv.turret.holo.copy", [&] { rawCopyRegion(ctx, g_holo.stage, to, cb.buffer, &box); })) return 0;
+    return static_cast<uint32_t>(n);
+}
+void holoCopyConstants(ID3D11DeviceContext* ctx, HoloEntry& e, uint32_t index) {
+    if (!holoEnsureStage(ctx)) return;
+    UINT to = index * kHoloEntryBytes;
+    for (uint32_t b = 0; b < kHoloBuffers; ++b) {
+        e.rows[b] = holoCopyVsRows(ctx, kHoloSlot[b], kHoloFirstRow[b], kHoloRows[b], to, e.cbFirst[b], e.cbCount[b]);
+        to += kHoloRows[b] * 16u;
+    }
+}
+
+// srvTurretHudBegin, at each draw of a hologram billboard family while a round collects: what it reads at t0..t7; the render and depth targets among t2..t7 are watched in the next frame.
+void holoCollect(ID3D11DeviceContext* ctx, int family, int eye, uint32_t ordinal) {
+    if (g_holo.phase != HoloWatch::Phase::kCollect || !ctx) return;
+    ID3D11ShaderResourceView* srvs[kHoloSlots] = {};
+    if (!guarded("srv.turret.holo.srvs", [&] { ctx->PSGetShaderResources(0, kHoloSlots, srvs); })) return;
+    char line[1100];
+    int len = std::snprintf(line, sizeof(line), "srv turret holo source: round %u frame %u %s eye=%d draw=%u reads", g_holo.round, g_frame, st::kFamilies[family].name, eye, ordinal);
+    for (uint32_t s = 0; s < kHoloSlots; ++s) {
+        if (!srvs[s]) continue;
+        ID3D11Resource* res = nullptr;
+        guarded("srv.turret.holo.res", [&] { srvs[s]->GetResource(&res); });
+        HoloTex t;
+        const bool tex2d = holoDescribe(res, t);
+        int index = res ? holoTexIndex(res) : -1;
+        const bool target = tex2d && (t.bind & (D3D11_BIND_RENDER_TARGET | D3D11_BIND_DEPTH_STENCIL)) != 0;
+        if (index < 0 && target && s >= kHoloFirstWatchedSlot && g_holo.texN < kHoloTexMax) {
+            index = static_cast<int>(g_holo.texN);
+            g_holo.tex[g_holo.texN++] = t;
+        }
+        if (len > 0 && len < static_cast<int>(sizeof(line)) - 96) {
+            if (tex2d)
+                len += std::snprintf(line + len, sizeof(line) - len, " t%u=%06X %ux%u fmt %u bind 0x%X%s", s, holoShortId(res), t.w, t.h, t.fmt, t.bind,
+                                     index >= 0 ? " WATCHED" : "");
+            else
+                len += std::snprintf(line + len, sizeof(line) - len, " t%u=%06X (not a 2D texture)", s, holoShortId(res));
+        }
+        st::release(res);
+        guarded("srv.turret.holo.srvrelease", [&] { srvs[s]->Release(); });
+    }
+    Log::get().note("%s", line);
+    if (g_holo.billboards < kHoloBillboardsMax && g_holo.entryN < kHoloEntries) {
+        HoloEntry& e = g_holo.entry[g_holo.entryN];
+        e = HoloEntry{};
+        e.family = family;
+        e.eye = eye;
+        e.ordinal = ordinal;
+        holoCopyConstants(ctx, e, g_holo.entryN);
+        ++g_holo.entryN;
+        ++g_holo.billboards;
+    }
+}
+
+// One line per buffer of an entry, from the mapped stage.
+void holoLogEntry(const HoloEntry& e, uint32_t index, const float* data) {
+    char head[160];
+    if (e.writer)
+        std::snprintf(head, sizeof(head), "srv turret holo writer constants: round %u #%u vs=%016llX ps=%016llX", g_holo.round, index, static_cast<unsigned long long>(e.vs),
+                      static_cast<unsigned long long>(e.ps));
+    else
+        std::snprintf(head, sizeof(head), "srv turret holo billboard constants: round %u #%u %s eye=%d draw=%u", g_holo.round, index, st::kFamilies[e.family].name, e.eye, e.ordinal);
+    const float* row = data + static_cast<size_t>(index) * kHoloEntryRows * 4;
+    for (uint32_t b = 0; b < kHoloBuffers; ++b) {
+        char line[1100];
+        int len = std::snprintf(line, sizeof(line), "%s b%u (bound first %u count %u) rows %u..:", head, kHoloSlot[b], e.cbFirst[b], e.cbCount[b], kHoloFirstRow[b]);
+        if (!e.rows[b] && len > 0) std::snprintf(line + len, sizeof(line) - len, " n/a");
+        for (uint32_t r = 0; r < e.rows[b] && len > 0 && len < static_cast<int>(sizeof(line)) - 64; ++r) {
+            const float* v = row + 4 * r;
+            len += std::snprintf(line + len, sizeof(line) - len, " (%.5g,%.5g,%.5g,%.5g)", static_cast<double>(v[0]), static_cast<double>(v[1]), static_cast<double>(v[2]),
+                                 static_cast<double>(v[3]));
+        }
+        Log::get().note("%s", line);
+        row += kHoloRows[b] * 4;
+    }
+}
+
+// The frame boundary: a round collects for one frame, watches the next, then reads the constants back.
+void holoBoundary(ID3D11DeviceContext* ctx) {
+    const uint64_t now = GetTickCount64();
+    switch (g_holo.phase) {
+        case HoloWatch::Phase::kIdle:
+            if (detail::g_srvTurretHudWanted.load(std::memory_order_relaxed) && now - g_holo.lastMs >= kHoloEveryMs) {
+                g_holo.texN = g_holo.billboards = g_holo.entryN = g_holo.writers = g_holo.draws = g_holo.pairN = g_holo.pairsDropped = 0;
+                ++g_holo.round;
+                g_holo.phase = HoloWatch::Phase::kCollect;
+            }
+            break;
+        case HoloWatch::Phase::kCollect:
+            g_holo.lastMs = now;
+            if (!g_holo.texN) {
+                Log::get().note("srv turret holo source: round %u: %s", g_holo.round,
+                                g_holo.billboards ? "no 5559BD94 draw of the frame read a render or depth target at t2..t7; nothing to watch" : "no 5559BD94 draw in the frame");
+                g_holo.phase = g_holo.entryN ? HoloWatch::Phase::kRead : HoloWatch::Phase::kIdle;
+                g_holo.waited = 0;
+            } else {
+                g_holo.frame = g_frame;
+                g_holo.phase = HoloWatch::Phase::kWatch;
+                detail::g_srvTurretHoloWatching.store(true, std::memory_order_relaxed);
+            }
+            break;
+        case HoloWatch::Phase::kWatch: {
+            detail::g_srvTurretHoloWatching.store(false, std::memory_order_relaxed);
+            char pairs[900];
+            int len = 0;
+            pairs[0] = 0;
+            for (uint32_t k = 0; k < g_holo.pairN && len >= 0 && len < static_cast<int>(sizeof(pairs)) - 64; ++k) {
+                const auto& q = g_holo.pairs[k];
+                len += std::snprintf(pairs + len, sizeof(pairs) - len, " %016llX/%016llX x%u (#%d %06X)", static_cast<unsigned long long>(q.vs), static_cast<unsigned long long>(q.ps), q.n,
+                                     q.tex, q.tex >= 0 ? holoShortId(g_holo.tex[q.tex].res) : 0u);
+            }
+            Log::get().note("srv turret holo watch: round %u frame %u: %u of %u owner-context draws had one of the %u watched textures bound as a render or depth target (%u with their "
+                            "constants below)%s", g_holo.round, g_holo.frame, g_holo.writers, g_holo.draws, g_holo.texN, g_holo.entryN - g_holo.billboards,
+                            g_holo.writers ? "" : "; none: the picture is made by an indirect or auto draw, a compute pass, a copy or another context");
+            if (g_holo.pairN) Log::get().note("srv turret holo watch: round %u writer pairs vs/ps xN (first watched texture):%s%s", g_holo.round, pairs, g_holo.pairsDropped ? " (more not listed)" : "");
+            g_holo.phase = HoloWatch::Phase::kRead;
+            g_holo.waited = 0;
+            break;
+        }
+        case HoloWatch::Phase::kRead: {
+            if (!g_holo.entryN || !g_holo.stage || !ctx) {
+                g_holo.phase = HoloWatch::Phase::kIdle;
+                break;
+            }
+            D3D11_MAPPED_SUBRESOURCE m{};
+            HRESULT hr = E_FAIL;
+            const bool ran = guarded("srv.turret.holo.map", [&] { hr = ctx->Map(g_holo.stage, 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &m); });
+            if (ran && hr == DXGI_ERROR_WAS_STILL_DRAWING && ++g_holo.waited <= kHoloWaitFrames) break;
+            if (ran && SUCCEEDED(hr) && m.pData) {
+                for (uint32_t i = 0; i < g_holo.entryN; ++i) holoLogEntry(g_holo.entry[i], i, static_cast<const float*>(m.pData));
+                guarded("srv.turret.holo.unmap", [&] { ctx->Unmap(g_holo.stage, 0); });
+            } else {
+                Log::get().note("srv turret holo: round %u: the constants could not be read back (0x%08X)", g_holo.round, static_cast<unsigned>(hr));
+            }
+            g_holo.phase = HoloWatch::Phase::kIdle;
+            break;
+        }
+    }
+}
+
 }  // namespace
+
+// The hologram's source pass (the instrument above): every owner-context draw of a watched frame. A draw with a watched texture bound as a render target or the depth target is a writer.
+void srvTurretHoloWatchDraw(ID3D11DeviceContext* ctx, uint64_t vs, uint64_t ps, char kind, uint32_t count, uint32_t instances) {
+    if (g_holo.phase != HoloWatch::Phase::kWatch || !ctx) return;
+    ++g_holo.draws;
+    ID3D11RenderTargetView* rtvs[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT] = {};
+    ID3D11DepthStencilView* dsv = nullptr;
+    if (!guarded("srv.turret.holo.targets", [&] { ctx->OMGetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, rtvs, &dsv); })) return;
+    char targets[600];
+    int len = 0;
+    targets[0] = 0;
+    bool writes = false;
+    int firstTex = -1;   // the first watched texture among the draw's targets
+    auto describe = [&](ID3D11View* view, const char* name) {
+        if (!view) return;
+        ID3D11Resource* res = nullptr;
+        guarded("srv.turret.holo.viewres", [&] { view->GetResource(&res); });
+        HoloTex t;
+        const bool tex2d = holoDescribe(res, t);
+        const int index = res ? holoTexIndex(res) : -1;
+        if (index >= 0) {
+            writes = true;
+            if (firstTex < 0) firstTex = index;
+        }
+        if (len >= 0 && len < static_cast<int>(sizeof(targets)) - 80) {
+            if (tex2d)
+                len += std::snprintf(targets + len, sizeof(targets) - len, " %s=%06X %ux%u fmt %u%s", name, holoShortId(res), t.w, t.h, t.fmt, index >= 0 ? " WATCHED" : "");
+            else
+                len += std::snprintf(targets + len, sizeof(targets) - len, " %s=%06X", name, holoShortId(res));
+        }
+        st::release(res);
+    };
+    static const char* const kRtvName[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT] = {"rtv0", "rtv1", "rtv2", "rtv3", "rtv4", "rtv5", "rtv6", "rtv7"};
+    for (UINT i = 0; i < D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT; ++i) describe(rtvs[i], kRtvName[i]);
+    describe(dsv, "dsv");
+    for (auto*& v : rtvs) st::release(v);
+    st::release(dsv);
+    if (!writes) return;
+    ++g_holo.writers;
+    {
+        uint32_t k = 0;
+        while (k < g_holo.pairN && !(g_holo.pairs[k].vs == vs && g_holo.pairs[k].ps == ps)) ++k;
+        if (k < g_holo.pairN) {
+            ++g_holo.pairs[k].n;
+        } else if (g_holo.pairN < kHoloPairsMax) {
+            g_holo.pairs[g_holo.pairN++] = HoloWatch::Pair{vs, ps, firstTex, 1};
+        } else {
+            ++g_holo.pairsDropped;
+        }
+    }
+    if (g_holo.writers > kHoloWriterLinesMax) return;   // counted in the tally above, not said again
+    D3D11_VIEWPORT vp{};
+    UINT vpCount = 1;
+    guarded("srv.turret.holo.viewport", [&] { ctx->RSGetViewports(&vpCount, &vp); });
+    D3D11_PRIMITIVE_TOPOLOGY topology = D3D11_PRIMITIVE_TOPOLOGY_UNDEFINED;
+    guarded("srv.turret.holo.topology", [&] { ctx->IAGetPrimitiveTopology(&topology); });
+    const uint32_t index = g_holo.entryN;
+    const bool keep = g_holo.entryN < kHoloEntries && g_holo.writers <= kHoloWritersMax;
+    Log::get().note("srv turret holo writer: round %u frame %u%s vs=%016llX ps=%016llX draw %c count %u instances %u topology %d viewport (%.0f,%.0f %.0fx%.0f z %.2f..%.2f) targets:%s", g_holo.round,
+                    g_frame, keep ? "" : " (constants not kept)", static_cast<unsigned long long>(vs), static_cast<unsigned long long>(ps), kind ? kind : '?', count, instances,
+                    static_cast<int>(topology), static_cast<double>(vp.TopLeftX), static_cast<double>(vp.TopLeftY), static_cast<double>(vp.Width), static_cast<double>(vp.Height),
+                    static_cast<double>(vp.MinDepth), static_cast<double>(vp.MaxDepth), targets);
+    if (!keep) return;
+    HoloEntry& e = g_holo.entry[index];
+    e = HoloEntry{};
+    e.writer = true;
+    e.vs = vs;
+    e.ps = ps;
+    e.kind = kind;
+    e.count = count;
+    e.instances = instances;
+    holoCopyConstants(ctx, e, index);
+    ++g_holo.entryN;
+    Log::get().note("srv turret holo writer: round %u: the writer above is constants entry #%u", g_holo.round, index);
+}
 
 // A draw of a family that reached the GPU without the pass's shader bound, by the route it took (srv_turret.h). The first of each route is said once.
 void srvTurretHudNoteUnmoved(int family, st::UnmovedRoute route, const void* site) {
@@ -1046,6 +1420,7 @@ bool srvTurretHudBegin(ID3D11DeviceContext* ctx, int family, int eye) {
     g_draws[eye].fetch_add(1, std::memory_order_relaxed);
     g_familyDraws[family].fetch_add(1, std::memory_order_relaxed);
     const uint32_t ordinal = g_probe[eye][family].ordinal++;   // this draw's place among the frame's matched draws of the eye and family (the instrument's rotation)
+    if (family == kHoloFamilyA || family == kHoloFamilyB) holoCollect(ctx, family, eye, ordinal);   // the hologram's source instrument: what the billboard reads (the game's own bindings)
     st::EyeFrame frame;
     if (!drawEyeFrame(eye, frame)) {
         refuse(st::Refuse::kNoGeometry);
@@ -1156,6 +1531,7 @@ void srvTurretHudFrameBoundary(ID3D11DeviceContext* ctx) {
             p.ordinal = 0;
         }
     }
+    holoBoundary(ctx);
     if (g_scissor.owed() && ctx) (void)g_scissor.settle(ctx);
     if (g_binding.needsRestore() && ctx && g_binding.settle(ctx) && !g_settleNoted) {
         g_settleNoted = true;
@@ -1169,6 +1545,9 @@ void srvTurretShutdown() {
     g_sample = nullptr;
     g_sampleEye = g_sampleFamily = -1;
     noteEnd();
+    detail::g_srvTurretHoloWatching.store(false, std::memory_order_relaxed);
+    st::release(g_holo.stage);
+    g_holo = HoloWatch{};
     for (auto& eyeProbes : g_probe)
         for (Probe& p : eyeProbes) probeReset(p);
     g_binding.clear();

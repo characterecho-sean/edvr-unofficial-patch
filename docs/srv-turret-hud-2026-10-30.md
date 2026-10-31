@@ -7,31 +7,33 @@
   Nutrition); the radar near field on its own. FLOWN and settled: the 3D
   move with its anchor, the depth fix, the radar forward key, the draw-time
   pose (judder gone), the hologram's lighting position (45fa7e56: it draws).
-  The radar's stretch is placement, not a defect (9f98e10f, journal): the
-  disc is turret-fixed 21.5 cm below the seat's eye height and 42 cm
-  behind the seated origin, so it reads as the game meant only when
-  camera back + radar forward is about 70 cm (camera back 25: radar forward
-  45). Main merged in (c12b0beb), full build green, NOT FLOWN. Branch
+  The radar disc Sean sees is NOT DF3503CD: it is a picture, shown by the
+  hologram billboard vs 5559BD94 + ps EA02FAC2, that another pass draws
+  earlier in the frame from the game's own camera (journal, "the radar
+  disc is a picture"). The pass moves the billboard, not the picture, so it
+  shows the disc as seen from where it was (under the chin, cut by that
+  pass's near plane): the straight edge, the distortion, "moves with my
+  head". Flight 82546e51 (C 25 + F 45) still cut it, so it is not placement.
+  Instrument for the picture's pass built, NOT FLOWN. Branch
   `claude/srv-turret-hud`, local only. Issue #140. Test install: Steam
   (`--target steam --scope both --xess`).
+- **The fix (not built):** move the picture's pass too. If its draws project
+  with a view-projection in their vertex constants (as the billboard's b1
+  rows 270..273), give them the camera at E - T through the billboard's
+  original window; with the billboard moved by T, as now, the picture is the
+  moved disc seen from the eye, the near-plane cut gone. The instrument says
+  which draws, which rows, and the window. No-code fallback: camera back 70,
+  radar forward 0 (dump 052114: the whole disc, the game's own picture).
 - **What is wrong (the game's own placement):** the turret view's whole HUD
   sits about 0.7 m too far back for the stock camera (the radar behind the
   head, the arcs at or behind it), and the larger panels sit about a metre
   deeper than the arcs, ammo counts and radar.
-- **What cd67ee63 does:** in the Scorpion's turret view only (Status.json
-  Flags bit 13 seated in an SRV, and the journal naming the Scorpion), a
-  private geometry shader per output signature (eight) rebuilds each vertex
-  of nine HUD families in the eye's space, moves it and projects it again
-  (same NDC depth). (1) The whole HUD moves forward along the seat by
-  `fix.srv_turret_hud_forward` (70 cm). (2) Vertices within 1.0 m of a
-  fixed anchor then move out along the ray from that anchor: the weapon
-  panels (1989E6D3, 2CECEC30) by `fix.srv_turret_panels_back` (120), the
-  radar (the other seven) by `fix.srv_turret_radar_back` (0). The anchor is
-  the head where it settles after the view comes on, or a camera key changes;
-  it is taken again on a recentre, or when the head stays over 35 cm away for
-  90 frames. A frozen pose never latches it.
-  `fix.srv_turret_camera_back` (0) still moves the camera.
-  `fix.srv_turret_hud_gap` (0) is the old pull, in 3D. B7790CBF is out.
+- **What the pass does:** in the Scorpion's turret view only, a private
+  geometry shader per output signature (eight) rebuilds each vertex of nine
+  HUD families in the eye's space, moves the panels by HUD forward and the
+  radar by radar forward along the seat, pushes vertices within 1 m of a
+  latched anchor (the settled head) out by the group's back key, and
+  projects again. Camera back moves the real camera.
 - **Not covered:** Elite's "Disable GUI effects" OFF draws the holo panels
   with vs 81216C77F90DEDD6 (another output signature, no bytecode yet).
 - **Temporary keys** (live, Fixes page of the menu; bake the flown values and
@@ -41,21 +43,19 @@
   `fix.srv_turret_hud_gap`, `fix.srv_turret_hud_depth` (front),
   `fix.srv_turret_hud_scissor` (open). Sean's flown values
   (2026-10-31): camera back 35, HUD forward 70, panels back 140, radar 0.
-- **Latency:** both follow Status.json, which the watcher polls every 500 ms
-  and the game rewrites about once a second, so a view switch is followed up
-  to about 0.5 s after the game writes it. The on-foot eager poll
-  (`journalWatchSetEagerStatusOnFoot`) never shortens the worker's sleep:
-  `untilNextDue()` honours `g_eager` only. Left alone; a fix would change on
-  foot too.
+- **Latency:** a view switch is followed up to about 0.5 s after the game
+  writes Status.json (the watcher's 500 ms poll); left alone, a fix would
+  change on foot too (journal).
 - **Open:** whether camera back is still wanted once the anchor is sound
   (Sean credited it, but its change also fixed the anchor); where the radar
   reads best; whether the switch lag is acceptable.
 - **Ruled out:** see "Ruled out" below.
-- **Next flight:** c12b0beb (main merged) on Steam: radar forward 70 minus
-  camera back (45 at camera back 25), the radar seen from above as on the
-  deck. Eye dump (INSERT) centred. `python tools\edvr_log.py --target steam
-  --expect-build HEAD --health` (rule "srv turret view"), `--grep "srv
-  turret"`.
+- **Next flight:** this branch on Steam, the same keys, with
+  `advanced.glare_shader_dump = 1` (the writers' bytecode). The radar in
+  sight for 30 s or more (a round every 15 s), one eye dump (INSERT), then
+  camera back 70, radar forward 0 and a second dump. `--grep "srv turret
+  holo"`: source, writer, constants and holo quad lines. Zero writers: a
+  compute pass, a copy or an indirect draw makes the picture.
 
 ## Evidence (flight of 2026-10-30, Epic, v0.22.0-rc.3-139-gcd4c91c4)
 
@@ -140,7 +140,8 @@ same amount. Matching them needs a change to one layer's stereo depth.
 - ruled out: the game turning the radar disc toward its camera (a
   billboard), because the disc plane instrument held its seated normal
   (0, 0.992, 0.130) to 0.0 deg and its centre to 0 mm while the head moved
-  0.86 m.
+  0.86 m. (Measured on DF3503CD, which is not the disc Sean sees; the
+  visible disc is the 5559BD94 billboard's picture, below.)
 - ruled out: an unmoved copy of the radar from another path, because the
   only unmoved family draws were with the radar group's keys at 0.
 - ruled out: a disparity-only push as the fix, because it changes only the
@@ -148,6 +149,14 @@ same amount. Matching them needs a change to one layer's stereo depth.
   growth on approach of its true 0.5 m while stereo puts it at 1.6 m. Flight
   2026-10-31 06:07 (e45c68a9), Sean: the radar and panel "move with my
   head", and the panel "got larger" as the camera moved towards it.
+- ruled out: DF3503CD as the disc Sean sees, because it adds colour
+  (SRC_ALPHA, ONE) and keeps the layer's alpha (ZERO, ONE), so it cannot
+  darken the eye, and the layer's difference image at dump 110805769001
+  holds nothing over its moved quad. The disc probe and the disc plane
+  measured an invisible draw (journal, "the radar disc is a picture").
+- ruled out: placement as the cause of the radar's cut and stretch, because
+  camera back 25 + radar forward 45 (sum 70, flight 82546e51) still cuts it:
+  a moved billboard shows a picture taken from the unmoved place.
 - ruled out: one forward pull making the layers meet, because a pull only
   moves vertices deeper than gap + 0.1 m. The near layer (0.11-0.70 m) is
   never in the window, and the deep layer itself spans 1.3-2.8 m.
@@ -475,3 +484,61 @@ back of about 70 cm gives the game's own view of the radar.
 Main (4b2c0a04, 47 commits) merged into the branch as c12b0beb at Sean's
 request. One conflict, native_on_foot.cpp's alignment block: the turret's
 camera term and main's F186 ADS turn, both kept.
+
+### 2026-10-31: the radar disc is a picture (instrument, built, not flown)
+
+Flight 82546e51 (Steam, build matches; camera back 25, radar forward 45,
+depth front; dump 110805769001 at 11:08:05). The sum is 70 and the disc is
+still the top of an ellipse with a straight lower edge. Read offline:
+
+- **DF3503CD is not what Sean sees.** Its blend adds colour (SRC_ALPHA,
+  ONE) and keeps the layer's alpha (ZERO, ONE). The layer composite is
+  eye x alpha + colour, so it cannot darken the eye, and the disc's fill
+  darkens it by about 100 of 255. The final image minus the pre-composite
+  image of the same frame (13253, `FinalCrisp_LOverview` minus `T00`) shows
+  the layer changed only the dome, the Scorpion's fragments and a few
+  contact pixels. Nothing lies over DF3503CD's moved quad (11:08:06: ndc x
+  -0.03..0.59, y -0.32..0.12) though it shades about 0.8 to 1.1 M pixels a
+  sample. Only the dome's apex (0.29, 0.11) touches the quad's far edge.
+- **The visible disc is the 5559BD94 + EA02FAC2 billboard.** At the whole
+  disc of 10:47 (dump 104729573001) the visible ellipse spans ndc x
+  0.069..0.329 (0.26 wide), y -0.31..-0.03: taller than wide. DF3503CD's quad
+  that second was 0.47 wide (x -0.065..0.401), too wide for that ellipse.
+  The EA02FAC2 draw 1 that second was a camera-facing square (w 0.462 at
+  all four corners, x -0.014..0.430, y -0.408..0.036) that holds it. Its
+  blend (ONE, INV_SRC_ALPHA; alpha ZERO, INV_SRC_ALPHA) is the kind that
+  darkens.
+- **The billboard shows a picture.** ps EA02FAC2 reads t4 at the
+  billboard's own UV: the fill where t4 is under 1000, the yellow outline
+  from an edge filter over t4 (weights 0.09375, 0.3125), the colours from an
+  ID in t5 (cb2 rows 2..9), more from t6. The disc's fill, its rim and the
+  Scorpion's outline are drawn into t4 and t5 by another pass, from the
+  game's camera. Moving the billboard by T shows that picture, of the disc
+  at its unmoved place under the chin and cut by that pass's near plane, at
+  the moved place. The straight edge carries no outline, so it is not an
+  edge inside t4. It is where the picture or the billboard ends.
+- It fits every dump. The disc is whole when the game's own disc was wholly
+  in front of its eye: 10:47 had zfix 0 (yet taller than true: the picture
+  is from 0.3 m nearer), and 05:21 (C 70, F 0) left the billboard unmoved.
+  It is cut when the game's disc was not (zfix 6 to 12 at 08:35, 10:00 and
+  11:08). The picture is re-made every frame from the head: "moves with my
+  head".
+
+Instrument (srv_turret.cpp, "the hologram's source"; TEMPORARY): a round
+every 15 s while the pass is wanted. (1) One frame's 5559BD94 draws log
+what they read at t0..t7. (2) The render and depth targets among t2..t7
+are watched. (3) In the next frame every owner-context draw with one bound
+as a target is logged as a writer: shaders, draw, targets, viewport. (4)
+The b0 rows 0..15, b1 rows 270..279 and b2 rows 0..15 of six billboards and
+ten writers are read back. The near billboard's six vertices (pre and post
+clip, UV) are logged once a sample (`srv turret hud holo quad`). Discriminating:
+writers found, with a view-projection in their constants, give the fix
+(the camera at E - T through the billboard's original window); zero
+writers point at a compute pass, a copy or an indirect draw.
+
+Moved here from the Status block (to keep it short), the latency note: both
+parts follow Status.json, which the watcher polls every 500 ms and the game
+rewrites about once a second. The on-foot eager poll
+(`journalWatchSetEagerStatusOnFoot`) never shortens the worker's sleep:
+`untilNextDue()` honours `g_eager` only. Left alone; a fix would change on
+foot too.

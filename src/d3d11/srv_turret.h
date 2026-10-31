@@ -73,6 +73,17 @@
 //   "srv turret hud: family F draws with the scissor test on: N rect(s), first [l,t,r,b], target WxH; the scissor is opened to the whole target|kept as the game set it for its draws"   once for each
 //   family found drawing with ScissorEnable (the game's first rectangle, and the extent it is opened to). The 10 s line's "scissor opened N" counts the draws whose rectangles were opened.
 //   "srv turret hud: the game's scissor rectangles could not be put back after an issue; ..."   a restore that faulted (the boundary settles it; draws are refused until then).
+//   TEMPORARY, the hologram's source (the radar's visible disc, its rim and the Scorpion are the billboard vs 5559BD94 + ps EA02FAC2 showing a picture made earlier in the frame; the turret pass
+//   moves the billboard, not the picture). A round every 15 s at most while the pass is wanted:
+//   "srv turret hud holo quad: family=F eye=0 draw=K tangents=(l,r,dn,up) T=(x,y,z) | vI pre=(x,y,z,w) post=(x,y,w) uv=(u,v) ..."   eye 0's sampled near billboard (game clip w under 1 m): its
+//     vertices before and after the move and their UVs.
+//   "srv turret holo source: round R frame N F eye=E draw=K reads tI=ID WxH fmt N bind 0x.. [WATCHED] ..."   each 5559BD94 draw of the collecting frame: its pixel-shader inputs t0..t7; render and
+//     depth targets among t2..t7 are watched (ID: the resource address's low 24 bits, to match the writer lines).
+//   "srv turret holo writer: round R frame N vs=.. ps=.. draw K count N instances N topology T viewport (..) targets: rtvI=ID WxH fmt N [WATCHED] .. dsv=.."   each draw of the next frame with a
+//     watched texture bound as a render or depth target (the first 24 a round); "srv turret holo watch: round R frame N: W of D owner-context draws ..." sums it (W = 0: the picture is made
+//     some other way) and "srv turret holo watch: round R writer pairs vs/ps xN (#K ID) ..." counts every writer's shader pair.
+//   "srv turret holo billboard|writer constants: round R #K .. bB (bound first F count C) rows S..: (x,y,z,w) ..."   the vertex constants b0 rows 0..15, b1 rows 270..279 and b2 rows 0..15 of
+//     the first six billboards and ten writers, read back without stalling.
 #pragma once
 
 #include "srv_turret_math.h"
@@ -90,7 +101,14 @@ extern std::atomic<bool> g_srvTurretHudWanted;
 // The GPU instrument's issue count: true only inside the scope of the one draw a second that is sampled (srv_turret.cpp).
 extern std::atomic<bool> g_srvTurretHudCounting;
 extern std::atomic<uint32_t> g_srvTurretHudIssues;
+// The hologram's source instrument (srv_turret.cpp): true for the one frame a round watches the draws.
+extern std::atomic<bool> g_srvTurretHoloWatching;
 }  // namespace detail
+
+// TEMPORARY instrument (issue 140): the pass that makes the picture the hologram billboard (vs 5559BD94) shows. vscreen.cpp forwardWithVerdict, every owner-context draw while a round watches
+// (one frame every 15 s at most): a draw with one of the billboards' watched inputs bound as a render or depth target is logged as a writer. One relaxed load otherwise.
+inline bool srvTurretHoloWatching() { return detail::g_srvTurretHoloWatching.load(std::memory_order_relaxed); }
+void srvTurretHoloWatchDraw(ID3D11DeviceContext* ctx, uint64_t vs, uint64_t ps, char kind, uint32_t count, uint32_t instances);
 
 // vscreen.cpp, at each place that issues the matched draw (the game's own issue and pureDrawReissue's re-issues): counts it while the sampled scope, or a family's first scope, is open
 // (srvTurretHudNoteIssue, in srv_turret.cpp, which also says the state each of the first scope's issues ran with). One relaxed load otherwise.

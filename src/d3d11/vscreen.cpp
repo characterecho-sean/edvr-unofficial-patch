@@ -4328,6 +4328,8 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     // puts the game's geometry stage back on every way out. Off, this is one relaxed load.
     SrvTurretHudScope turretHud(self);
     if (owner && srvTurretHudWantsDraws()) turretHud.bound = srvTurretHudBeginDraw(g_state, self);
+    // Issue 140 (TEMPORARY instrument): one frame in fifteen seconds, every owner draw is asked whether it writes the picture the hologram billboard shows (srv_turret.h). One relaxed load otherwise.
+    if (owner && srvTurretHoloWatching()) srvTurretHoloWatchDraw(self, bindingShaderHash(BindSlot::Vs), bindingShaderHash(BindSlot::Ps), kind, count, instances);
     // fix.ui_quality, the UI layer (ui_layer.h): decided once for this draw
     // and applied around EVERY issue of it below -- the loader panel's and
     // the curved screen's substitutions draw the composite themselves, so
