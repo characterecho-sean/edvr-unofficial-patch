@@ -2,62 +2,56 @@
 
 ## Status
 
-- **State (2026-10-31):** camera move FLOWN OK on Steam (Sean flies 70 cm).
-  The forward pull of the deep panels (`fix.srv_turret_hud_gap`) FLOWN on
-  9fdad3a1 over ten families, Scorpion only: it moves only what lies deeper
-  than gap + 0.1 m, and no gap makes the layers meet (journal, 2026-10-31).
-  Sean's goal (2026-10-31): the panel with the arcs, ammo counts and INFO
-  strip in the same plane as the location panel (Cranfield Nutrition). The
-  push-back (9ded3cf8) FLOWN 2026-10-31: in stereo the panels now meet
-  (arcs 1.60 m, location panel 1.46-1.48, SYSTEMS 1.58), but the pushed
-  panel and radar move with the head and grow when approached: a
-  disparity-only move (journal). Next: move them in 3D about a fixed anchor.
-  NOT BUILT. Branch `claude/srv-turret-hud`, local only. Issue #140. Test
-  install: Steam (`--target steam --scope both --xess`).
-- **What is wrong (the game's own placement):** the turret view's camera is
-  too far forward along the gun (the arcs layer behind the default eye
-  point), and the larger panels sit about a metre deeper than the arcs,
-  ammo counts and radar.
-- **What 9ded3cf8 does:** in the Scorpion's turret view only (Status.json
-  Flags bit 13 seated in an SRV, and the journal's LoadGame `Ship` or
-  LaunchSRV `SRVType` naming the Scorpion), (1) the eye alignment moves the
-  camera back `fix.srv_turret_camera_back` cm (default 60), and (2) a private
-  geometry shader per output signature (eight) moves every vertex of nine
-  HUD families nearer than 1.0 m deeper, along the ray from the head centre,
-  so it keeps its size on screen: the weapon panels (1989E6D3, 2CECEC30) by
-  `fix.srv_turret_panels_back`, the radar (the other seven) by
-  `fix.srv_turret_radar_back`, both default 110 cm. The larger panels (1.3 m
-  and more) and the reticle (500 m) stay. The forward pull
-  (`fix.srv_turret_hud_gap`, now default 0) is used only for a group whose
-  push is 0. The flight HUD family B7790CBF is out of the pass.
+- **State (2026-10-31):** Sean's goal: stock camera; the arcs, ammo counts
+  and INFO strip pushed out behind the location panel (Cranfield
+  Nutrition); the radar near field on its own. The 3D move (b5c49237) FLOWN:
+  with a good anchor the layout is the goal (arcs 1.65-1.96 m behind the
+  location panel 1.14 m and SYSTEMS 1.27 m). For its first 45 s the anchor
+  sat on a frozen headset pose a metre off and the panel stretched (journal).
+  The anchor fix (cd67ee63) is BUILT, NOT FLOWN. Branch
+  `claude/srv-turret-hud`, local only. Issue #140. Test install: Steam
+  (`--target steam --scope both --xess`).
+- **What is wrong (the game's own placement):** the turret view's whole HUD
+  sits about 0.7 m too far back for the stock camera (the radar behind the
+  head, the arcs at or behind it), and the larger panels sit about a metre
+  deeper than the arcs, ammo counts and radar.
+- **What cd67ee63 does:** in the Scorpion's turret view only (Status.json
+  Flags bit 13 seated in an SRV, and the journal naming the Scorpion), a
+  private geometry shader per output signature (eight) rebuilds each vertex
+  of nine HUD families in the eye's space, moves it and projects it again
+  (same NDC depth). (1) The whole HUD moves forward along the seat by
+  `fix.srv_turret_hud_forward` (70 cm). (2) Vertices within 1.0 m of a
+  fixed anchor then move out along the ray from that anchor: the weapon
+  panels (1989E6D3, 2CECEC30) by `fix.srv_turret_panels_back` (120), the
+  radar (the other seven) by `fix.srv_turret_radar_back` (0). The anchor is
+  the head where it settles after the view comes on, or a camera key changes;
+  it is taken again on a recentre, or when the head stays over 35 cm away for
+  90 frames. A frozen pose never latches it.
+  `fix.srv_turret_camera_back` (0) still moves the camera.
+  `fix.srv_turret_hud_gap` (0) is the old pull, in 3D. B7790CBF is out.
 - **Not covered:** Elite's "Disable GUI effects" OFF draws the holo panels
   with vs 81216C77F90DEDD6 (another output signature, no bytecode yet).
 - **Temporary keys** (live, Fixes page of the menu; bake the flown values and
   propose removing them when the arc closes): `fix.srv_turret_camera_back`,
-  `fix.srv_turret_panels_back`, `fix.srv_turret_radar_back`,
-  `fix.srv_turret_hud_gap`.
+  `fix.srv_turret_hud_forward`, `fix.srv_turret_panels_back`,
+  `fix.srv_turret_radar_back`, `fix.srv_turret_hud_gap`. Sean's flown values
+  (2026-10-31): camera back 35, HUD forward 70, panels back 140, radar 0.
 - **Latency:** both follow Status.json, which the watcher polls every 500 ms
   and the game rewrites about once a second, so a view switch is followed up
   to about 0.5 s after the game writes it. The on-foot eager poll
   (`journalWatchSetEagerStatusOnFoot`) never shortens the worker's sleep:
   `untilNextDue()` honours `g_eager` only. Left alone; a fix would change on
   foot too.
-- **Depths at 70 cm back (dump 052114218001, gap 0; forward depth, and
-  Sean held the headset off to his left to show the depth, so the panel's
-  left end reads nearer than when centred):** radar 0.32-0.34 m, lying on
-  the turret deck (0.30 m); left arc and its ammo count 0.42-0.44 m; right
-  arc's ammo count 0.65 m; INFO strip 0.68-0.70 m; turret housing 0.85 m;
-  barrel 0.62-1.32 m; SYSTEMS 1.70 m; location panel 1.2-1.35 m (its right
-  edge; far off-axis, so about 1.7-1.9 m in distance, like SYSTEMS at 1.75).
-- **Open:** whether pushing the radar off the deck it lies on reads as wrong
-  in stereo; whether the switch lag is acceptable.
+- **Open:** whether camera back is still wanted once the anchor is sound
+  (Sean credited it, but its change also fixed the anchor); where the radar
+  reads best; whether the switch lag is acceptable.
 - **Ruled out:** see "Ruled out" below.
-- **Next flight:** 9ded3cf8 on Steam, the Scorpion's turret view. Radar back
-  0 first; sweep panels back until the arcs panel is level with the location
-  panel; then the radar. Eye dump (INSERT) sitting centred, looking ahead, at
-  the chosen values. Then `python tools\edvr_log.py --target steam
-  --expect-build HEAD --health` (rule "srv turret view") and `--grep "srv
-  turret"`, and measure the dump with the disparity method below.
+- **Next flight:** cd67ee63 on Steam. Put the headset on BEFORE entering the
+  turret view as a check, then once entering with it already on. Try camera
+  back 35 and 0. Eye dump (INSERT) centred. Then `python tools\edvr_log.py
+  --target steam --expect-build HEAD --health` (rule "srv turret view": the
+  anchor latches and head_offset), `--grep "srv turret"`, and the disparity
+  method below.
 
 ## Evidence (flight of 2026-10-30, Epic, v0.22.0-rc.3-139-gcd4c91c4)
 
@@ -240,3 +234,35 @@ that eye's space, from the head pose and eye-to-head transforms the host
 gives the temporal pass (native_temporal.cpp, `f->head`, `f->eyeToHead`).
 NDC y is up: the radar's captured ndc_y is -0.5 to -1.6, and it sits at
 the bottom.
+
+### 2026-10-31: stock camera, HUD forward, the 3D move flown
+
+Sean's direction before the build: stock camera; the ammo-count panel
+pushed out behind the location panel; the radar near field, separate. At
+the stock camera the radar sits behind the head, so b5c49237 also moves
+the whole HUD forward along the seat (`fix.srv_turret_hud_forward`).
+
+Flight `edvr_gfx_20261031_070525.log` (b5c49237, Steam, build matches),
+turret view 126 s; the pass bound 348772 of 348806 draws. Sean: "kind of
+what I want, pushing the camera back seems to put the panel in the right
+relative space, but it also seems to try and stretch toward my camera".
+
+Why it stretched. The view came on at 07:07:51. The anchor latched ("view
+on") at -0.415,-0.366,-0.682 m seated. The headset was not tracking: the
+runtime's seat_meter gave the bit-identical head_local -0.543/-0.000/-1.138
+at launch (13:05:27 UTC) and at 13:07:36, and a live 0.135/0.365/-0.575 at
+13:08:06. From 07:07:56 to 07:08:36 the 10 s lines read head_offset 88-112
+cm: the panel was pushed along rays from a point a metre from the head. The
+20 cm jump rule never fired when the pose went live. The camera-back change
+at 07:08:40 re-latched next to the head (head_offset 2.3 cm, then 0.1-1.5
+cm), which is when Sean saw the panel "in the right relative space".
+
+Dump 070908275001 (good anchor; camera back 35, HUD forward 70, panels
+back 140, radar 0): SECONDARY A 1.65 m, PRIMARY A 1.96 m, INFO strip
+2.02 m, location panel 1.14 m, SYSTEMS 1.27 m, reticle at the target, the
+radar's rim about 0.33 m (weak match). The arcs panel sits behind the
+location panel, as Sean asked.
+
+cd67ee63: a settle frame counts only when the head moved, so a frozen pose
+never latches; a latched anchor more than 0.35 m from the head for 90
+frames is taken again ("head away").
