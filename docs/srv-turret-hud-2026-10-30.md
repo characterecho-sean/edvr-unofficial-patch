@@ -172,6 +172,11 @@ same amount. Matching them needs a change to one layer's stereo depth.
 - ruled out: camera back never reaching V0, because from the snap on V0
   tracked the live camera, camera back included, every frame (the origin at
   z +0.09 to +0.28).
+- ruled out: an offset in obj+0x15B0/0x15F0 alone showing the radar,
+  because any nonzero value drops the schematic about 1.96 m straight down
+  (flight 79bb61ba, `edvr_gfx_20261031_150213.log`). The drop is the same
+  for +0.40, -0.40 and -0.50, and switches on and off one frame after the
+  offset does, so the radar is never in view and V0 never unfreezes.
 - ruled out: a billboard move showing the disc at camera back 25, because
   the picture is empty there (the volume is behind V0); dump 130153201001
   has no disc at all.
@@ -816,5 +821,37 @@ schematic's origin z risen by radar forward (about +0.2 m at back 0 with
 65). If the origin z goes MORE negative after the anchor applies, or V0
 stays frozen and the disc stays empty after the "applied" line, switch the
 key to `reversed` in flight.
+
+### 2026-10-31: the anchor offset drops the radar 1.96 m (flight 79bb61ba)
+
+Steam, `edvr_gfx_20261031_150213.log`, build matches. The view was on from
+15:04:17 to 15:06:30. Dump 150611556001 has no disc, only the floating
+sprites.
+- **The hook works.** "hook armed", then "applied" every frame (about 887
+  in each 10 s, 0 faults, 0 without a slot); at view off, "applied in 10361
+  frames".
+- **The axis and sign are right.** Each 5 cm step of radar forward moved
+  the schematic's origin (2, 10, 49) mm in V0's frame, about 1:1 along V0's
+  forward (V0 is pitched about 7 deg up). Going from `on` +0.40 to
+  `reversed` -0.40 moved it (-40, -167, -781) mm, so `on` is forward.
+- **The drop.** With any nonzero offset the origin sits at y -2.1 to -2.3
+  in V0's frame, against -0.25 with zero.
+  - At view-on with +0.40 it was first seen at (-0.004, -2.095, 0.332).
+  - At 15:06:01 the key went off. That frame only the translation came
+    back, (20, 84, 391), with y still at -2.18. The next frame it moved
+    (47, 1933, -328) to y -0.246, and the window and gate looked normal.
+  - At 15:06:03, back on: (-26, -1849, 719), the +0.40 translation plus
+    the drop.
+- The drop is about (-47, -1933, +328) mm in V0's frame: 1.96 m, nearly
+  straight down along gravity once the pitch is taken out. It is binary and
+  follows the offset by one frame. V0 stayed frozen at its view-on pose all
+  flight, since the dropped radar was never in view.
+- Open: what in the game reacts to a nonzero M. Candidates: a phase-out
+  (PhasedOutY / PhaseInLerpValue or a phase state on the object); the slot
+  region box at slot+0x310; or 0x15B0/0x15F0 being a phase lerp pair or a
+  ground-relative mode rather than a plain offset. The drop is about the
+  camera's height above the vehicle's ground point, and the world matrix's X
+  frame is recentred on that point.
+
 
 
