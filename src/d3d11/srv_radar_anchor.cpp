@@ -32,6 +32,9 @@ constexpr uintptr_t kObjectVtableRva = 0x5511DE8;      // *(obj + 0x00), written
 constexpr uintptr_t kInterfaceVtableRva = 0x5511F18;   // *(obj + 0x58), the interface the setter is called through
 constexpr uint32_t kStamp = 0x6ADA8048u, kImageSize = 0x640C000u;   // build 334925's PE TimeDateStamp and SizeOfImage
 constexpr uintptr_t kInterfaceAt = 0x58;
+// The anchor component at obj+0x140 and its world 4x4 getter, vtable slot +0x20: 0x3843530 (the region box) calls it as `mov rcx,[iface+0E8h]; mov rax,[rcx]; call [rax+20h]` and reads 16
+// floats at RAX (rows x, y, z, translation; row-vector convention, so the placement's translation t lands at t * A3x3 + A.t).
+constexpr uintptr_t kAnchorAt = 0x140, kAnchorWorldSlot = 0x20;
 // `sub rsp,48h; movups xmm0,[rdx]; movups [rcx+1528h],xmm0; movups xmm1,[rdx+10h]`, read from EliteDangerous64-334925.exe through its section table. Boundaries 4, 7, 14, 18:
 // CodeHook steals the first two instructions (7 bytes); the first RIP-relative instruction is at +0x2F.
 constexpr size_t kSetterPrologueBytes = 18;
@@ -42,6 +45,7 @@ constexpr uint8_t kUpdatePrologue[kUpdatePrologueBytes] = {0x40, 0x53, 0x56, 0x4
 constexpr uint32_t kSlots = 4;   // schematics whose placement may hold an offset of ours at once (one is expected: the Scorpion's)
 
 using Fn = uintptr_t(__fastcall*)(uintptr_t, uintptr_t, uintptr_t, uintptr_t);
+using MatrixFn = const float*(__fastcall*)(uintptr_t);
 
 struct Hook {
     CodeHook hook;
@@ -71,9 +75,17 @@ struct State {
     std::atomic<uint32_t> gameT[3]{}, outT[3]{}, suspectStep[3]{};
     std::atomic<uint32_t> lastAddStamp{0};
     std::atomic<uintptr_t> caller{0}, lastObj{0};
+    // the direction: u published by the render thread; the record of the last add's source and numbers
+    std::atomic<uint32_t> u[3]{};
+    std::atomic<bool> uValid{false};
+    std::atomic<uint64_t> directed{0}, fallback{0}, fallbackNoU{0}, fallbackNoAnchor{0}, anchorFaults{0};
+    std::atomic<bool> lastDirected{false}, haveAnchor{false};
+    std::atomic<uint32_t> recA[9]{}, recP[9]{}, recU[3]{}, recUA[3]{}, recD[3]{};
 };
 std::atomic<State*> g_state{nullptr};
 std::mutex g_armMutex;
+
+bool insideModule(const State& s, uintptr_t a) noexcept { return a >= s.base && a - s.base < kImageSize; }
 
 uint32_t bitsOf(float f) noexcept {
     uint32_t b;
@@ -94,6 +106,26 @@ __declspec(noinline) int readRadarCall(State& s, uintptr_t iface, uintptr_t p, f
         return 1;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         s.faulted.fetch_add(1, std::memory_order_relaxed);
+        return -1;
+    }
+}
+
+// The anchor's world 4x4 through its vfunc +0x20 (kAnchorWorldSlot): 1 when read; 0 when the anchor is null or its vtable or getter is not inside the game's image (nothing is called);
+// -1 when a read or the call faulted.
+__declspec(noinline) int readAnchor(State& s, uintptr_t iface, float A[16]) noexcept {
+    __try {
+        const uintptr_t anchor = *reinterpret_cast<const uintptr_t*>(iface - kInterfaceAt + kAnchorAt);
+        if (!anchor) return 0;
+        const uintptr_t vtable = *reinterpret_cast<const uintptr_t*>(anchor);
+        if (!insideModule(s, vtable)) return 0;
+        const uintptr_t getter = *reinterpret_cast<const uintptr_t*>(vtable + kAnchorWorldSlot);
+        if (!insideModule(s, getter)) return 0;
+        const float* m = reinterpret_cast<MatrixFn>(getter)(anchor);
+        if (!m) return 0;
+        std::memcpy(A, m, 16 * sizeof(float));
+        return 1;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        s.anchorFaults.fetch_add(1, std::memory_order_relaxed);
         return -1;
     }
 }
@@ -127,8 +159,31 @@ __declspec(noinline) uintptr_t __fastcall setterHooked(uintptr_t iface, uintptr_
     s->setterRadar.fetch_add(1, std::memory_order_relaxed);
     s->caller.store(caller, std::memory_order_relaxed);
     s->lastObj.store(iface - kInterfaceAt, std::memory_order_relaxed);
-    const uint32_t d[3] = {s->bits[0].load(std::memory_order_relaxed), s->bits[1].load(std::memory_order_relaxed), s->bits[2].load(std::memory_order_relaxed)};
-    const bool dZero = (d[0] | d[1] | d[2]) == 0u;
+    // The fallback (0, 0, s * F); all zero: no move. With the turret's forward u and the anchor's world rotation A, d is s * F along u in the anchor's axes (st::radarAnchorAlong).
+    const uint32_t fb[3] = {s->bits[0].load(std::memory_order_relaxed), s->bits[1].load(std::memory_order_relaxed), s->bits[2].load(std::memory_order_relaxed)};
+    const bool dZero = (fb[0] | fb[1] | fb[2]) == 0u;
+    uint32_t d[3] = {fb[0], fb[1], fb[2]};
+    bool directed = false, haveU = false;
+    float u[3] = {0.0f, 0.0f, 0.0f}, ua[3] = {0.0f, 0.0f, 0.0f};
+    if (!dZero) {
+        for (int i = 0; i < 3; ++i)
+            for (int j = 0; j < 3; ++j) s->recP[i * 3 + j].store(bitsOf(P[i * 4 + j]), std::memory_order_relaxed);
+        float A[16];
+        const int anchor = readAnchor(*s, iface, A);   // the game's getter, called only while there is an offset to add
+        s->haveAnchor.store(anchor > 0, std::memory_order_relaxed);
+        if (anchor > 0)
+            for (int i = 0; i < 3; ++i)
+                for (int j = 0; j < 3; ++j) s->recA[i * 3 + j].store(bitsOf(A[i * 4 + j]), std::memory_order_relaxed);
+        haveU = s->uValid.load(std::memory_order_acquire);
+        if (haveU)
+            for (int i = 0; i < 3; ++i) u[i] = floatOf(s->u[i].load(std::memory_order_relaxed));
+        float df[3];
+        if (haveU && anchor > 0 && st::radarAnchorAlong(u, A, floatOf(fb[2]), df, ua)) {
+            for (int i = 0; i < 3; ++i) d[i] = bitsOf(df[i]);
+            directed = (d[0] | d[1] | d[2]) != 0u;
+            if (!directed) std::memcpy(d, fb, sizeof(d));
+        }
+    }
     Slot* slot = slotOf(*s, iface);
     if (!slot && !dZero) {
         slot = claimSlot(*s, iface);
@@ -179,6 +234,18 @@ __declspec(noinline) uintptr_t __fastcall setterHooked(uintptr_t iface, uintptr_
     }
     s->holdsOurs.store(r == st::PlacementMove::kAdded || r == st::PlacementMove::kOurs, std::memory_order_relaxed);
     if (r == st::PlacementMove::kAdded) {
+        if (directed) {
+            s->directed.fetch_add(1, std::memory_order_relaxed);
+        } else {
+            s->fallback.fetch_add(1, std::memory_order_relaxed);
+            (haveU ? s->fallbackNoAnchor : s->fallbackNoU).fetch_add(1, std::memory_order_relaxed);
+        }
+        s->lastDirected.store(directed, std::memory_order_relaxed);
+        for (int i = 0; i < 3; ++i) {
+            s->recU[i].store(bitsOf(u[i]), std::memory_order_relaxed);
+            s->recUA[i].store(bitsOf(directed ? ua[i] : 0.0f), std::memory_order_relaxed);
+            s->recD[i].store(d[i], std::memory_order_relaxed);
+        }
         for (int i = 0; i < 3; ++i) s->outT[i].store(bitsOf(Q[12 + i]), std::memory_order_relaxed);
         s->lastAddStamp.store(s->frame.load(std::memory_order_relaxed) + 1u, std::memory_order_relaxed);
         s->moved.fetch_add(1, std::memory_order_release);
@@ -280,8 +347,6 @@ const char* installHook(Hook& h, uintptr_t target, const uint8_t* prologue, size
     return "";
 }
 
-bool insideModule(const State& s, uintptr_t a) noexcept { return a >= s.base && a - s.base < kImageSize; }
-
 }  // namespace
 
 RadarAnchorHookState srvRadarAnchorArm(char* whyOut, size_t cap) {
@@ -359,6 +424,17 @@ void srvRadarAnchorPublish(const uint32_t bits[3], uint32_t frameNo) {
     for (int i = 0; i < 3; ++i) s->bits[i].store(bits[i], std::memory_order_relaxed);
 }
 
+void srvRadarAnchorPublishDirection(const float u[3], bool valid) {
+    State* s = g_state.load(std::memory_order_acquire);
+    if (!s) return;
+    if (!u || !valid) {
+        s->uValid.store(false, std::memory_order_release);
+        return;
+    }
+    for (int i = 0; i < 3; ++i) s->u[i].store(bitsOf(u[i]), std::memory_order_relaxed);
+    s->uValid.store(true, std::memory_order_release);
+}
+
 RadarAnchorStats srvRadarAnchorStats() {
     RadarAnchorStats r;
     State* s = g_state.load(std::memory_order_acquire);
@@ -387,6 +463,22 @@ RadarAnchorStats srvRadarAnchorStats() {
     r.suspect = s->suspect.load(std::memory_order_acquire);
     if (r.suspect)
         for (int i = 0; i < 3; ++i) r.suspectStep[i] = floatOf(s->suspectStep[i].load(std::memory_order_relaxed));
+    r.directed = s->directed.load(std::memory_order_relaxed);
+    r.fallback = s->fallback.load(std::memory_order_relaxed);
+    r.fallbackNoU = s->fallbackNoU.load(std::memory_order_relaxed);
+    r.fallbackNoAnchor = s->fallbackNoAnchor.load(std::memory_order_relaxed);
+    r.anchorFaults = s->anchorFaults.load(std::memory_order_relaxed);
+    r.lastDirected = s->lastDirected.load(std::memory_order_relaxed);
+    r.haveAnchor = s->haveAnchor.load(std::memory_order_relaxed);
+    for (int i = 0; i < 9; ++i) {
+        r.anchorRows[i] = floatOf(s->recA[i].load(std::memory_order_relaxed));
+        r.pRows[i] = floatOf(s->recP[i].load(std::memory_order_relaxed));
+    }
+    for (int i = 0; i < 3; ++i) {
+        r.u[i] = floatOf(s->recU[i].load(std::memory_order_relaxed));
+        r.uAnchor[i] = floatOf(s->recUA[i].load(std::memory_order_relaxed));
+        r.d[i] = floatOf(s->recD[i].load(std::memory_order_relaxed));
+    }
     return r;
 }
 

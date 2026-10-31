@@ -93,7 +93,10 @@
 //     down: <why>; nothing was patched", then "... update counter armed|stood down: ..."   once, the first time the view is on with the key not off;
 //   "srv turret radar anchor: placement moved at frame F: the game's (x,y,z) + (dx,dy,dz) -> (x,y,z) in the anchor's axes (key K), caller EliteDangerous64.exe+0x.., obj 0x..; the
 //     5559BD94 billboards are left to the game"   each stay's first add;
-//   "srv turret radar anchor: 10 s: setter calls N (radar M, moved A, already ours R), the game's translation (x,y,z)[ changed K times], updates U..."   with the 10 s line while armed;
+//   "srv turret radar anchor: direction at frame F: u (x,y,z) world; anchor rows (..)(..)(..) [source vfunc +0x20|fallback: ...]; P rows (..)(..)(..); d (x,y,z) in the anchor's axes
+//     = D m along u|the anchor's z (angle to the anchor's z: A deg, yaw Y deg; key K)"   with the first add, then every 2 s while the view is on;
+//   "srv turret radar anchor: 10 s: setter calls N (radar M, moved A, already ours R), the game's translation (x,y,z)[ changed K times], updates U...; moves along u D, fallback B (...)"
+//     with the 10 s line while armed;
 //   "srv turret radar anchor: view off: moved in N calls[ -- NEVER RAN: ...| -- hook not armed: <why>| -- not asked: ...]"   the view's end;
 //   "srv turret radar anchor: WARNING: the game's translation moved by (..) between setter calls, close to the offset: ..."   once, a sign its caller feeds our value back.
 #pragma once

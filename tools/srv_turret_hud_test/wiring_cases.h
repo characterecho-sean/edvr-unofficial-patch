@@ -397,13 +397,27 @@ static bool wiredAnchor(const std::string& module, const std::string& hook, cons
                         found(hook.find("{0x40, 0x53, 0x56, 0x48, 0x81, 0xEC, 0x68, 0x01, 0x00, 0x00, 0x0F, 0x29, 0xBC, 0x24, 0x30, 0x01}")) &&
                         found(hook.find("if (std::memcmp(got, prologue, n) != 0) return")) &&
                         found(hook.find("*reinterpret_cast<const uintptr_t*>(iface) != s.interfaceVtable || *reinterpret_cast<const uintptr_t*>(iface - kInterfaceAt) != s.objectVtable"));
+    // the direction: eye 0's draw copies the live camera's rows 277..279 with eye 0's pose of the same frame, the boundary turns them into u and publishes it; the setter adds s * F along u in
+    // the anchor's axes (the anchor's getter called only when it lies in the game's image), before the add-and-idempotence rule
+    const size_t sampled = found(drawFn) && found(groupOff) ? module.find("if (eye == 0) anchorDirSample(ctx, family);", drawFn) : npos;
+    const size_t sampleFn = module.find("void anchorDirSample(ID3D11DeviceContext* ctx, int family) {");
+    const size_t pose0 = found(sampleFn) ? module.find("st::eyePoseOf(head, eyeToHead[0], R, E)", sampleFn) : npos;
+    const size_t rows = found(pose0) ? module.find("holoCopyVsRows(ctx, g_dir.stage[k], 1, kDirFirstRow, kDirRows, 0, first, count)", pose0) : npos;
+    const size_t boundaryFn = module.find("void srvTurretHudFrameBoundary(ID3D11DeviceContext* ctx) {");
+    const bool direction = found(sampled) && sampled < groupOff && found(rows) && found(module.find("st::turretForwardWorld(rows, rows + 4, rows + 8, g_dir.R[k], u)")) &&
+                           found(module.find("srvRadarAnchorPublishDirection(best, true);")) && found(boundaryFn) && found(module.find("anchorDirBoundary(ctx);", boundaryFn)) &&
+                           found(module.find("srvRadarAnchorPublishDirection(nullptr, false);"));
+    const size_t along = found(setterFn) ? hook.find("st::radarAnchorAlong(u, A, floatOf(fb[2]), df, ua)", setterFn) : npos;
+    const size_t getterCheck = hook.find("if (!insideModule(s, getter)) return 0;");
+    const size_t getterCall = hook.find("reinterpret_cast<MatrixFn>(getter)(anchor)");
+    const bool directed = found(along) && found(rule) && along < rule && found(getterCheck) && found(getterCall) && getterCheck < getterCall;
     const size_t fix = ini.find("\n[fix]\n"), visual = ini.find("\n[visual]\n"), shipped = ini.find("\nsrv_turret_radar_anchor = on\n");
     const size_t ui = found(shipped) ? ini.rfind("# ui: SRV turret radar anchor | choices on, reversed, off | recommended on | live | menu", shipped) : npos;
     const bool iniOk = found(fix) && found(visual) && found(shipped) && shipped > fix && shipped < visual && found(ui) && shipped - ui < 200;
     const size_t source = build.find("\"src\\d3d11\\srv_radar_anchor.cpp\"");
     const bool buildOk = found(source) && source < build.find("ERROR: compile failed");
     const bool auditOk = found(audit.find("(\"d3d11/srv_radar_anchor.cpp\", \"the SRV radar anchor's exact-build hook\")"));
-    return found(key) && moduleOk && integerOnly && adds && pinned && iniOk && buildOk && auditOk;
+    return found(key) && moduleOk && integerOnly && adds && pinned && direction && directed && iniOk && buildOk && auditOk;
 }
 static bool wiredBuild(const std::string& t) {
     const size_t source = t.find("\"src\\d3d11\\srv_turret.cpp\"");
@@ -588,6 +602,13 @@ static void wiringCases() {
     check(!wiredAnchor(module, replaced(anchorHook, "if (std::memcmp(got, prologue, n) != 0) return", "if (false) return"), ini, build, audit), "control: a hook that does not check the prologue trips the pin");
     check(!wiredAnchor(module, replaced(anchorHook, "{0x48, 0x83, 0xEC, 0x48, 0x0F, 0x10, 0x02,", "{0x48, 0x83, 0xEC, 0x28, 0x0F, 0x10, 0x02,"), ini, build, audit),
           "control: a drifted setter prologue pin trips the pin");
+    check(!wiredAnchor(replaced(module, "    if (eye == 0) anchorDirSample(ctx, family);", ""), anchorHook, ini, build, audit), "control: the live camera never sampled (d stays on the vehicle's axis) trips the pin");
+    check(!wiredAnchor(replaced(module, "st::eyePoseOf(head, eyeToHead[0], R, E)", "st::eyePoseOf(head, eyeToHead[1], R, E)"), anchorHook, ini, build, audit),
+          "control: eye 0's camera paired with eye 1's pose trips the pin");
+    check(!wiredAnchor(replaced(module, "    anchorDirBoundary(ctx);\n", ""), anchorHook, ini, build, audit), "control: the camera copies never read back trip the pin");
+    check(!wiredAnchor(replaced(module, "srvRadarAnchorPublishDirection(nullptr, false);", "(void)0;"), anchorHook, ini, build, audit), "control: a u kept from an earlier stay trips the pin");
+    check(!wiredAnchor(module, replaced(anchorHook, "        if (!insideModule(s, getter)) return 0;\n", ""), ini, build, audit), "control: the anchor's getter called wherever its vtable points trips the pin");
+    check(!wiredAnchor(module, replaced(anchorHook, "st::radarAnchorAlong(u, A, floatOf(fb[2]), df, ua)", "false"), ini, build, audit), "control: a setter that never turns d along u trips the pin");
     check(!wiredAnchor(module, anchorHook, replaced(ini, "\nsrv_turret_radar_anchor = on\n", "\nsrv_turret_radar_anchor = off\n"), build, audit), "control: a drifted shipped default of the radar anchor key trips the pin");
     check(!wiredAnchor(module, anchorHook, replaced(ini, "# ui: SRV turret radar anchor | choices on, reversed, off", "# ui: SRV turret radar anchor | choices on, off"), build, audit),
           "control: a drifted menu row of the radar anchor key trips the pin");

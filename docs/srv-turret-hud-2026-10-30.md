@@ -15,13 +15,14 @@
   is empty (journal, "V0 is gated by visibility"). Branch
   `claude/srv-turret-hud`, local only. Issue #140. Test install: Steam
   (`--target steam --scope both --xess`).
-- **The radar fix (BUILT, NOT FLOWN):** a hook on the schematic's
-  placement setter (0x38563A0, build 334925 only) adds radar forward to the
-  translation the game sets (about 1.96 m up), so the game frames, draws and
-  places the radar itself; the two 5559BD94 billboard families are then left
-  to the game. Flight 79bb61ba proved the axis and sign (`on` is forward,
-  1:1); its update hook replaced that translation and dropped the radar
-  1.96 m (journal, "the radar placement moved through its setter").
+- **The radar fix:** a hook on the schematic's placement setter
+  (0x38563A0, build 334925 only) adds radar forward to the translation the
+  game sets (about 1.96 m up). FLOWN (07bde936): the disc shows (rim, fill,
+  Scorpion), V0 tracks, the setter runs every frame. Two faults, one cause:
+  the disc swings off as the turret turns and sits about 5 cm high, since
+  the offset ran along the vehicle's forward. BUILT, NOT FLOWN: the offset
+  along the turret's seated forward, in the anchor's axes (journal, "the
+  radar placement along the turret").
 - **The radar's way out without it:** camera back 70, radar forward 0.
 - **What is wrong (the game's own placement):** the turret view's whole HUD
   sits about 0.7 m too far back for the stock camera (the radar behind the
@@ -51,12 +52,11 @@
   reads best; whether the switch lag is acceptable.
 - **Ruled out:** see "Ruled out" below.
 - **Next flight (this branch):** radar anchor on; camera back 0 to 35 with
-  radar forward = 65 minus camera back (45 at 20, 30 at 35). Read
-  `--grep "srv turret radar anchor"`: "setter hook armed", "placement moved"
-  (the game's translation and the caller), the 10 s setter-call count (none
-  while the view is on means a key change cannot reach the game) and any
-  WARNING; then `--grep "srv turret radar camera"`: the origin's z should
-  rise by radar forward, with no drop.
+  radar forward = 65 minus camera back. Sweep the turret about 90 deg left
+  and right; watch the disc's rim against the yellow heading tick. Read
+  `--grep "srv turret radar anchor: direction"`: the anchor rows stay put,
+  d turns with the turret, "source vfunc +0x20"; and the 10 s line's moves
+  along u against the fallback.
 
 ## Evidence (flight of 2026-10-30, Epic, v0.22.0-rc.3-139-gcd4c91c4)
 
@@ -179,6 +179,10 @@ same amount. Matching them needs a change to one layer's stereo depth.
   (flight 79bb61ba, `edvr_gfx_20261031_150213.log`). The drop is the same
   for +0.40, -0.40 and -0.50, and switches on and off one frame after the
   offset does, so the radar is never in view and V0 never unfreezes.
+- ruled out: (0, 0, F) in the anchor's axes as the radar's forward move,
+  because it runs along the vehicle's forward, not the turret's: the disc
+  swings with turret yaw and sits about 5 cm above the shader-moved icons
+  (flight 07bde936, `edvr_gfx_20261031_160808.log`).
 - ruled out: a billboard move showing the disc at camera back 25, because
   the picture is empty there (the volume is behind V0); dump 130153201001
   has no disc at all.
@@ -936,6 +940,82 @@ To fly: camera back 0 to 35, radar forward = 65 minus camera back (45 at
 20, 30 at 35), `fix.srv_turret_radar_anchor = on`. In "srv turret radar
 camera" the origin's z should rise by radar forward with no drop in y, and
 V0 should start tracking once the radar is in view.
+
+### 2026-10-31: the setter flown (flight 07bde936); the radar placement along the turret (built, not flown)
+
+Steam, `edvr_gfx_20261031_160808.log`, build matches, dump
+`eye_161017547001`. The radar disc shows (rim, fill and the Scorpion icon),
+and V0 tracks the live camera the whole stay, with the origin's z 0.10 to
+0.30 m ahead.
+- **The setter.** It armed and ran every frame: about 900 calls in each
+  10 s, all with the radar, "already ours" 0, no WARNING. The game's
+  translation is (-0.008, 1.959, 0.077..0.094) in the anchor's axes, and it
+  barely changes as the turret turns.
+- **No view-off leftover.** Because the setter runs every frame, the game's
+  own value is back the frame after the view goes off.
+- **DF3503CD and the contacts are not on this placement.** DF3503CD's
+  disc-plane line stayed at seated (-0.008, -0.215, 0.424) all flight. They
+  move only by the geometry shader, radar forward along seated -z.
+- **Two problems, one cause** (Sean):
+  - The disc sits about 5 cm too high. The yellow heading tick is 5 cm below
+    the disc's lower rim; at camera back 70 it sat on the rim.
+  - The disc is locked to the vehicle, not the turret: turning the turret
+    swings it off to the side.
+- **Reading.** The game's placement puts the radar on the turret's yaw axis
+  (x and z about 0 in the anchor's axes). The offset (0, 0, F) runs along
+  the VEHICLE's forward, so the disc leaves that axis and swings as the
+  turret yaws. The seated forward is about 7.5 deg below the vehicle's
+  level (DF3503CD's seated normal is (0, 0.992, 0.130)), so the shader
+  drops the icons about 0.40 x 0.130 = 5 cm, while the disc moves level.
+
+**The build.** The offset is now s x F along the turret's seated forward u,
+the same direction the shader moves the icons, put in the anchor's axes:
+d = s F (u . A_row0, u . A_row1, u . A_row2). The key is unchanged: `on`
+is +u, `reversed` is -u, `off` is none. The add-not-replace and
+idempotence rules are as before; only d changes.
+- **u (render thread).** For eye 0's first panel or 5559BD94 draw of each
+  frame, the live camera's world axes are copied from VS b1 rows 277..279
+  (right, up, forward). They are paired with eye 0's seated rotation R of
+  that same frame, the host's pose at the draw, as `drawEyeFrame` uses. A
+  3-slot staging ring is read back at the frame boundary without stalling.
+  Then u = e.x right + e.y up - e.z forward, with e = R^T (0, 0, -1) in
+  OpenVR's axes (`srv_turret_math.h` `turretForwardWorld`). The camera's
+  rows must be unit and orthogonal within 0.05. The frame tick clears u
+  when a stay begins.
+- **A (the setter hook).** The anchor is *(obj+0x140). Its world 4x4 comes
+  from its vfunc +0x20, which returns a pointer to rows x, y, z and
+  translation. That is the call 0x3843530 makes for the region box: `mov
+  rcx,[iface+0E8h]; mov rax,[rcx]; call [rax+20h]`, read from the exe. The
+  hook calls it only when its vtable and the getter lie inside the game's
+  image, under SEH, and only while there is an offset to add. The rotation
+  rows must be unit and orthogonal within 0.05 (`radarAnchorAlong`).
+  Otherwise, or with no u yet, d falls back to (0, 0, s F), and the
+  fallback is counted.
+
+Unconfirmed until it flies:
+- that the anchor's matrix and the camera's rows share one world frame. A
+  turret straight ahead should give an angle to the anchor's z of about
+  7.5 deg and a yaw of about 0;
+- that the anchor's rows stay put through a turret sweep while d's yaw
+  follows the turret, and what P's rows do;
+- whether the u read back two to three frames late shows during a fast
+  sweep.
+
+The log lines (the frame tick says them):
+- `srv turret radar anchor: direction at frame F: u (x,y,z) world; anchor
+  rows (..)(..)(..) [source vfunc +0x20]; P rows (..)(..)(..); d (x,y,z) in
+  the anchor's axes = D m along u (angle to the anchor's z: A deg, yaw Y
+  deg; key K)`, with the first move of a stay and then every 2 s while the
+  view is on. A fallback reads `[fallback: no u yet]` or `[fallback: the
+  anchor's rows not read or refused]` and `along the anchor's z`.
+- The 10 s line gains `moves along u D, fallback B (no u N, anchor not read
+  or refused M; getter faults G); camera reads R of C copies (J refused);
+  last d (x,y,z) m in the anchor's axes (key K)`.
+- "placement moved at frame F" now prints the d it added.
+
+To fly: camera back 0 to 35, radar forward = 65 minus camera back,
+`fix.srv_turret_radar_anchor = on`. Sweep the turret about 90 deg left and
+right, and watch the disc's rim against the yellow heading tick.
 
 
 

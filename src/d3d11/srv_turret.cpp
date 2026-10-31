@@ -1362,6 +1362,118 @@ void radarCamBoundary(ID3D11DeviceContext* ctx) {
 // placement (added, or our own value fed back) the draw path leaves the two 5559BD94 billboard families to the game (g_anchorYield), so the picture the game now frames and places
 // itself is not moved a second time. The setter is not called by EDVR: a key change reaches the game at its next call (the 10 s line counts the calls).
 std::atomic<bool> g_anchorYield{false};
+
+// The turret's forward for the native move (render thread). While the anchor is wanted, eye 0's first draw of a panel or 5559BD94 family each frame has its VS b1 rows 277..279 (the live
+// camera's right, up and forward in the world) copied to a staging ring, paired with eye 0's seated rotation of the same frame (the host's pose at the draw, as drawEyeFrame uses), and read
+// back at the frame boundary without stalling (given up after kDirWait frames). The newest good one gives u (srv_turret_math.h turretForwardWorld), published to the setter hook.
+constexpr uint32_t kDirRing = 3, kDirRows = 3, kDirFirstRow = st::kSceneRightRow, kDirWait = 8;
+static_assert(st::kSceneRightRow == 277 && st::kSceneUpRow == 278 && st::kSceneForwardRow == 279, "the camera's right, up and forward rows");
+struct DirWatch {
+    ID3D11Device* device = nullptr;   // identity: the stages'
+    ID3D11Buffer* stage[kDirRing] = {};
+    bool pending[kDirRing] = {};
+    uint32_t waited[kDirRing] = {};
+    uint64_t seqOf[kDirRing] = {};
+    double R[kDirRing][9] = {};
+    uint32_t next = 0, lastCopyFrame = 0xFFFFFFFFu;
+    uint64_t seq = 0, published = 0;
+    bool failed = false;
+};
+DirWatch g_dir;
+std::atomic<uint64_t> g_dirCopies{0}, g_dirReads{0}, g_dirRejects{0};   // for the 10 s line (cumulative)
+std::atomic<bool> g_anchorDirWanted{false};   // the frame tick's: the Scorpion's turret view is on, the key is not off and the setter hook is armed
+
+bool anchorDirEnsure(ID3D11DeviceContext* ctx) {
+    if (g_dir.failed) return false;
+    ID3D11Device* d = nullptr;
+    if (!guarded("srv.turret.anchordir.device", [&] { ctx->GetDevice(&d); }) || !d) {
+        st::release(d);
+        return false;
+    }
+    if (d != g_dir.device) {
+        for (auto& s : g_dir.stage) st::release(s);
+        for (auto& p : g_dir.pending) p = false;
+        g_dir.device = d;
+    }
+    HRESULT hr = S_OK;
+    for (auto& s : g_dir.stage) {
+        if (s) continue;
+        guarded("srv.turret.anchordir.stage", [&] {
+            D3D11_BUFFER_DESC bd{};
+            bd.ByteWidth = kDirRows * 16u;
+            bd.Usage = D3D11_USAGE_STAGING;
+            bd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+            hr = d->CreateBuffer(&bd, nullptr, &s);
+        });
+        if (!s) {
+            g_dir.failed = true;
+            Log::get().note("srv turret radar anchor: the staging buffers for the turret's direction could not be made (0x%08X); every move uses the fallback (0, 0, s * F).",
+                            static_cast<unsigned>(hr));
+            break;
+        }
+    }
+    st::release(d);
+    return !g_dir.failed;
+}
+
+// srvTurretHudBegin, eye 0, before anything else: the panel families and the 5559BD94 billboards bind the main camera block at VS b1.
+void anchorDirSample(ID3D11DeviceContext* ctx, int family) {
+    if (!g_anchorDirWanted.load(std::memory_order_relaxed) || g_dir.lastCopyFrame == g_frame) return;
+    if (st::kFamilies[family].group != st::Group::kPanels && !st::radarAnchorLeavesFamily(family)) return;
+    uint64_t poseSeq = 0;
+    float head[12] = {}, eyeToHead[2][12] = {};
+    double R[9], E[3];
+    if (!nativeTemporalHeadPose(&poseSeq, head, eyeToHead) || !st::eyePoseOf(head, eyeToHead[0], R, E)) return;
+    if (!anchorDirEnsure(ctx)) return;
+    const uint32_t k = g_dir.next;
+    if (g_dir.pending[k]) return;   // the ring is full: this frame is skipped
+    UINT first = 0, count = 0;
+    if (holoCopyVsRows(ctx, g_dir.stage[k], 1, kDirFirstRow, kDirRows, 0, first, count) != kDirRows) return;   // this draw's b1 is not the camera block: the next family's may be
+    g_dir.lastCopyFrame = g_frame;
+    g_dir.pending[k] = true;
+    g_dir.waited[k] = 0;
+    g_dir.seqOf[k] = ++g_dir.seq;
+    std::memcpy(g_dir.R[k], R, sizeof(R));
+    g_dir.next = (k + 1) % kDirRing;
+    g_dirCopies.fetch_add(1, std::memory_order_relaxed);
+}
+
+// srvTurretHudFrameBoundary: the copies that are ready, the newest good one published.
+void anchorDirBoundary(ID3D11DeviceContext* ctx) {
+    if (!ctx) return;
+    float best[3] = {};
+    uint64_t bestSeq = 0;
+    for (uint32_t k = 0; k < kDirRing; ++k) {
+        if (!g_dir.pending[k] || !g_dir.stage[k]) continue;
+        D3D11_MAPPED_SUBRESOURCE m{};
+        HRESULT hr = E_FAIL;
+        const bool ran = guarded("srv.turret.anchordir.map", [&] { hr = ctx->Map(g_dir.stage[k], 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &m); });
+        if (ran && hr == DXGI_ERROR_WAS_STILL_DRAWING) {
+            if (++g_dir.waited[k] > kDirWait) g_dir.pending[k] = false;
+            continue;
+        }
+        g_dir.pending[k] = false;
+        if (!ran || FAILED(hr) || !m.pData) continue;
+        float rows[kDirRows * 4];
+        std::memcpy(rows, m.pData, sizeof(rows));
+        guarded("srv.turret.anchordir.unmap", [&] { ctx->Unmap(g_dir.stage[k], 0); });
+        g_dirReads.fetch_add(1, std::memory_order_relaxed);
+        float u[3];
+        if (!st::turretForwardWorld(rows, rows + 4, rows + 8, g_dir.R[k], u)) {
+            g_dirRejects.fetch_add(1, std::memory_order_relaxed);
+            continue;
+        }
+        if (g_dir.seqOf[k] > bestSeq) {
+            bestSeq = g_dir.seqOf[k];
+            std::memcpy(best, u, sizeof(best));
+        }
+    }
+    if (bestSeq > g_dir.published) {
+        g_dir.published = bestSeq;
+        srvRadarAnchorPublishDirection(best, true);
+    }
+}
+
 struct AnchorWatch {
     bool armTried = false;
     bool on = false;                // the view, as the last tick saw it
@@ -1370,9 +1482,34 @@ struct AnchorWatch {
     bool warned = false;            // the feedback warning has been said
     uint64_t stayMoved = 0, stayOurs = 0;   // the setter hook's counters when the stay began
     uint64_t winCalls = 0, winRadar = 0, winMoved = 0, winOurs = 0, winRestored = 0, winFaulted = 0, winChanges = 0, winUpdates = 0;   // ... when the 10 s window began
-    st::RadarAnchorOffset offset;   // the last one published
+    uint64_t winDirected = 0, winFallback = 0, winNoU = 0, winNoAnchor = 0, winAnchorFaults = 0, winDirCopies = 0, winDirReads = 0, winDirRejects = 0;
+    uint64_t dirLineMs = 0;         // when the last direction line was said
+    st::RadarAnchorOffset offset;   // the last fallback published ((0, 0, s * F))
 };
 AnchorWatch g_anchorWatch;
+
+// The direction line: what the last add was made of (the instrument a turret sweep reads: the anchor's rows stay with the vehicle, d turns with the turret in the anchor's axes).
+void anchorDirLine(const RadarAnchorStats& a, st::RadarAnchorMode mode) {
+    char rows[160];
+    if (a.haveAnchor)
+        std::snprintf(rows, sizeof(rows), "(%.3f,%.3f,%.3f)(%.3f,%.3f,%.3f)(%.3f,%.3f,%.3f)", static_cast<double>(a.anchorRows[0]), static_cast<double>(a.anchorRows[1]),
+                      static_cast<double>(a.anchorRows[2]), static_cast<double>(a.anchorRows[3]), static_cast<double>(a.anchorRows[4]), static_cast<double>(a.anchorRows[5]),
+                      static_cast<double>(a.anchorRows[6]), static_cast<double>(a.anchorRows[7]), static_cast<double>(a.anchorRows[8]));
+    else
+        std::snprintf(rows, sizeof(rows), "not read");
+    const bool haveU = a.u[0] != 0.0f || a.u[1] != 0.0f || a.u[2] != 0.0f;
+    const char* source = a.lastDirected ? "source vfunc +0x20" : !haveU ? "fallback: no u yet" : "fallback: the anchor's rows not read or refused";
+    const double dist = std::sqrt(double(a.d[0]) * a.d[0] + double(a.d[1]) * a.d[1] + double(a.d[2]) * a.d[2]);
+    const float* along = a.lastDirected ? a.uAnchor : nullptr;
+    const float fallbackZ[3] = {0.0f, 0.0f, 1.0f};
+    if (!along) along = fallbackZ;
+    Log::get().note("srv turret radar anchor: direction at frame %u: u (%.3f,%.3f,%.3f) world; anchor rows %s [%s]; P rows (%.3f,%.3f,%.3f)(%.3f,%.3f,%.3f)(%.3f,%.3f,%.3f); d (%.3f,%.3f,%.3f) "
+                    "in the anchor's axes = %.3f m along %s (angle to the anchor's z: %.1f deg, yaw %.1f deg; key %s)",
+                    a.lastAddStamp - 1u, static_cast<double>(a.u[0]), static_cast<double>(a.u[1]), static_cast<double>(a.u[2]), rows, source, static_cast<double>(a.pRows[0]),
+                    static_cast<double>(a.pRows[1]), static_cast<double>(a.pRows[2]), static_cast<double>(a.pRows[3]), static_cast<double>(a.pRows[4]), static_cast<double>(a.pRows[5]),
+                    static_cast<double>(a.pRows[6]), static_cast<double>(a.pRows[7]), static_cast<double>(a.pRows[8]), static_cast<double>(a.d[0]), static_cast<double>(a.d[1]),
+                    static_cast<double>(a.d[2]), dist, a.lastDirected ? "u" : "the anchor's z", st::angleToZDeg(along), st::yawDeg(along), st::radarAnchorModeName(mode));
+}
 
 void anchorTick(bool on, uint32_t frameNo, int radarForwardCm) {
     AnchorWatch& w = g_anchorWatch;
@@ -1384,15 +1521,23 @@ void anchorTick(bool on, uint32_t frameNo, int radarForwardCm) {
     w.offset = st::radarAnchorOffset(on, mode, radarForwardCm);
     srvRadarAnchorPublish(w.offset.bits, frameNo);
     const RadarAnchorStats a = srvRadarAnchorStats();
+    g_anchorDirWanted.store(on && mode != st::RadarAnchorMode::kOff && a.state == RadarAnchorHookState::Armed, std::memory_order_relaxed);
     if (on && !w.on) {
         w.stayMoved = a.moved;
         w.stayOurs = a.ours;
         w.asked = w.said = false;
+        srvRadarAnchorPublishDirection(nullptr, false);   // a u from an earlier stay is not this one's: the fallback until the render side reads a new one
     }
+    const uint64_t nowMs = GetTickCount64();
     if (on) {
         if (!w.offset.zero()) w.asked = true;
+        if (w.said && a.moved > w.stayMoved && nowMs - w.dirLineMs >= 2000) {
+            w.dirLineMs = nowMs;
+            anchorDirLine(a, mode);
+        }
         if (!w.said && a.moved > w.stayMoved) {
             w.said = true;
+            w.dirLineMs = nowMs;
             char caller[64];
             if (a.callerRva)
                 std::snprintf(caller, sizeof(caller), "EliteDangerous64.exe+0x%llX", static_cast<unsigned long long>(a.callerRva));
@@ -1400,9 +1545,10 @@ void anchorTick(bool on, uint32_t frameNo, int radarForwardCm) {
                 std::snprintf(caller, sizeof(caller), "0x%llX (outside EliteDangerous64.exe)", static_cast<unsigned long long>(a.caller));
             Log::get().note("srv turret radar anchor: placement moved at frame %u: the game's (%.3f,%.3f,%.3f) + (%.3f,%.3f,%.3f) -> (%.3f,%.3f,%.3f) in the anchor's axes (key %s), caller %s, "
                             "obj 0x%llX; the 5559BD94 billboards are left to the game",
-                            a.lastAddStamp - 1u, static_cast<double>(a.gameT[0]), static_cast<double>(a.gameT[1]), static_cast<double>(a.gameT[2]), static_cast<double>(w.offset.m[0]),
-                            static_cast<double>(w.offset.m[1]), static_cast<double>(w.offset.m[2]), static_cast<double>(a.outT[0]), static_cast<double>(a.outT[1]),
+                            a.lastAddStamp - 1u, static_cast<double>(a.gameT[0]), static_cast<double>(a.gameT[1]), static_cast<double>(a.gameT[2]), static_cast<double>(a.d[0]),
+                            static_cast<double>(a.d[1]), static_cast<double>(a.d[2]), static_cast<double>(a.outT[0]), static_cast<double>(a.outT[1]),
                             static_cast<double>(a.outT[2]), st::radarAnchorModeName(mode), caller, static_cast<unsigned long long>(a.obj));
+            anchorDirLine(a, mode);
         }
     } else if (w.on) {
         const uint64_t n = a.moved - w.stayMoved, ours = a.ours - w.stayOurs;
@@ -1448,14 +1594,27 @@ void anchorWindow(bool seen) {
         if (restored) at += std::snprintf(extra + at, sizeof(extra) - at, "; restored %llu", static_cast<unsigned long long>(restored));
         if (faulted && at >= 0 && at < static_cast<int>(sizeof(extra))) at += std::snprintf(extra + at, sizeof(extra) - at, "; faults %llu", static_cast<unsigned long long>(faulted));
         if (a.noSlot && at >= 0 && at < static_cast<int>(sizeof(extra))) at += std::snprintf(extra + at, sizeof(extra) - at, "; without a slot %llu in all", static_cast<unsigned long long>(a.noSlot));
-        Log::get().note("srv turret radar anchor: 10 s: setter calls %llu (radar %llu, moved %llu, already ours %llu), the game's translation %s%s, updates %s%s; offset (%.3f,%.3f,%.3f) m "
-                        "(key %s)%s%s",
+        const uint64_t dirCopies = g_dirCopies.load(std::memory_order_relaxed), dirReads = g_dirReads.load(std::memory_order_relaxed), dirRejects = g_dirRejects.load(std::memory_order_relaxed);
+        Log::get().note("srv turret radar anchor: 10 s: setter calls %llu (radar %llu, moved %llu, already ours %llu), the game's translation %s%s, updates %s%s; moves along u %llu, "
+                        "fallback %llu (no u %llu, anchor not read or refused %llu; getter faults %llu); camera reads %llu of %llu copies (%llu refused); last d (%.3f,%.3f,%.3f) m in the "
+                        "anchor's axes (key %s)%s%s",
                         static_cast<unsigned long long>(calls), static_cast<unsigned long long>(radar), static_cast<unsigned long long>(moved), static_cast<unsigned long long>(ours), game,
-                        changed, upd, extra, static_cast<double>(w.offset.m[0]), static_cast<double>(w.offset.m[1]), static_cast<double>(w.offset.m[2]),
-                        st::radarAnchorModeName(static_cast<st::RadarAnchorMode>(g_anchorMode.load(std::memory_order_relaxed))),
+                        changed, upd, extra, static_cast<unsigned long long>(a.directed - w.winDirected), static_cast<unsigned long long>(a.fallback - w.winFallback),
+                        static_cast<unsigned long long>(a.fallbackNoU - w.winNoU), static_cast<unsigned long long>(a.fallbackNoAnchor - w.winNoAnchor),
+                        static_cast<unsigned long long>(a.anchorFaults - w.winAnchorFaults), static_cast<unsigned long long>(dirReads - w.winDirReads),
+                        static_cast<unsigned long long>(dirCopies - w.winDirCopies), static_cast<unsigned long long>(dirRejects - w.winDirRejects), static_cast<double>(a.d[0]),
+                        static_cast<double>(a.d[1]), static_cast<double>(a.d[2]), st::radarAnchorModeName(static_cast<st::RadarAnchorMode>(g_anchorMode.load(std::memory_order_relaxed))),
                         a.holdsOurs ? "; the placement holds our offset" : "",
                         radar == 0 ? " -- NO setter call with the radar in these 10 s: the offset (and any key change) reaches the game only when it sets the placement" : "");
     }
+    w.winDirected = a.directed;
+    w.winFallback = a.fallback;
+    w.winNoU = a.fallbackNoU;
+    w.winNoAnchor = a.fallbackNoAnchor;
+    w.winAnchorFaults = a.anchorFaults;
+    w.winDirCopies = g_dirCopies.load(std::memory_order_relaxed);
+    w.winDirReads = g_dirReads.load(std::memory_order_relaxed);
+    w.winDirRejects = g_dirRejects.load(std::memory_order_relaxed);
     w.winCalls = a.setterCalls;
     w.winRadar = a.setterRadar;
     w.winMoved = a.moved;
@@ -1676,6 +1835,7 @@ void srvTurretNotePublished(double seatedZ, uint32_t serial) {
 
 bool srvTurretHudBegin(ID3D11DeviceContext* ctx, int family, int eye) {
     if (!ctx || family < 0 || family >= static_cast<int>(kFamilyN)) return false;
+    if (eye == 0) anchorDirSample(ctx, family);   // the radar anchor's direction: the live camera's axes, read only (one copy a frame while the anchor is wanted)
     // A family whose group has none of its push, the gap and the HUD-forward key above 0 is not the pass's (one group on and the other off is a setting, and the keys can go to 0 between the
     // frame tick and this draw): the draw is the game's own and is not counted among the matched ones, so the 10 s line's bound share is judged on the draws the pass was asked to carry.
     st::TurretParams unused;
@@ -1802,6 +1962,7 @@ void srvTurretHudFrameBoundary(ID3D11DeviceContext* ctx) {
     }
     holoBoundary(ctx);
     radarCamBoundary(ctx);
+    anchorDirBoundary(ctx);
     if (g_scissor.owed() && ctx) (void)g_scissor.settle(ctx);
     if (g_binding.needsRestore() && ctx && g_binding.settle(ctx) && !g_settleNoted) {
         g_settleNoted = true;
@@ -1823,6 +1984,9 @@ void srvTurretShutdown() {
     g_radarCam = RadarCamWatch{};
     srvRadarAnchorShutdown();   // the hook's gate shuts: the relay forwards straight to the game's function
     g_anchorYield.store(false, std::memory_order_relaxed);
+    g_anchorDirWanted.store(false, std::memory_order_relaxed);
+    for (auto& s : g_dir.stage) st::release(s);
+    g_dir = DirWatch{};
     for (auto& eyeProbes : g_probe)
         for (Probe& p : eyeProbes) probeReset(p);
     g_binding.clear();

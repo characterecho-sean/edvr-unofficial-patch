@@ -52,6 +52,7 @@
 #include <cstring>
 #include <fstream>
 #include <iterator>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -1659,6 +1660,43 @@ static void radarAnchorCases() {
     check(!std::strcmp(st::placementMoveName(PM::kAdded), "added") && !std::strcmp(st::placementMoveName(PM::kOurs), "ours") && !std::strcmp(st::placementMoveName(PM::kRestored), "restored") &&
               !std::strcmp(st::placementMoveName(PM::kNone), "none"),
           "the rule's outcomes have names");
+    // The direction (flight of 07bde936: the disc swung with the turret and sat about 5 cm high): d is F along the turret's seated forward u, in the anchor's axes.
+    const auto near3 = [](const float* a, double x, double y, double z, double tol) { return std::fabs(a[0] - x) < tol && std::fabs(a[1] - y) < tol && std::fabs(a[2] - z) < tol; };
+    const double ident[9] = {1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0};
+    const float camRight[3] = {1.0f, 0.0f, 0.0f}, camUp[3] = {0.0f, 1.0f, 0.0f}, camFwd[3] = {0.0f, 0.0f, 1.0f};
+    float uw[3];
+    check(st::turretForwardWorld(camRight, camUp, camFwd, ident, uw) && near3(uw, 0.0, 0.0, 1.0, 1e-6), "an eye looking straight ahead in the seat: u is the live camera's forward");
+    const double th = 30.0 / 57.29577951308232, c30 = std::cos(th), s30 = std::sin(th);
+    const double pitched[9] = {1.0, 0.0, 0.0, 0.0, c30, s30, 0.0, -s30, c30};   // the eye looking 30 deg down in the seat (OpenVR axes: its back axis is (0, sin, cos))
+    const float downUp[3] = {0.0f, float(c30), float(s30)}, downFwd[3] = {0.0f, float(-s30), float(c30)};   // ... so the live camera looks 30 deg down in the world
+    check(st::turretForwardWorld(camRight, downUp, downFwd, pitched, uw) && near3(uw, 0.0, 0.0, 1.0, 1e-5), "a head pitched 30 deg down: the camera's pitch and the head's cancel, u is still the seat's forward");
+    const float yawRight[3] = {0.0f, 0.0f, -1.0f}, yawFwd[3] = {1.0f, 0.0f, 0.0f};   // the turret turned 90 deg: the live camera looks along world +x
+    check(st::turretForwardWorld(yawRight, camUp, yawFwd, ident, uw) && near3(uw, 1.0, 0.0, 0.0, 1e-6), "the turret turned 90 deg: u turns with it");
+    const float scaledFwd[3] = {0.0f, 0.0f, 2.0f}, skewUp[3] = {0.0f, 0.8f, 0.6f}, nanFwd[3] = {0.0f, 0.0f, std::numeric_limits<float>::quiet_NaN()};
+    check(!st::turretForwardWorld(camRight, camUp, scaledFwd, ident, uw) && !st::turretForwardWorld(camRight, skewUp, camFwd, ident, uw) && !st::turretForwardWorld(camRight, camUp, nanFwd, ident, uw),
+          "camera rows that are not unit, not orthogonal, or not finite give no u (the move falls back)");
+    const float idA[16] = {1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 5.0f, 6.0f, 7.0f, 1.0f};
+    const double p75 = 7.5 / 57.29577951308232;
+    const float seatFwd[3] = {0.0f, float(-std::sin(p75)), float(std::cos(p75))};   // the seated forward, 7.5 deg below the vehicle's level (DF3503CD's seated normal (0, 0.992, 0.130))
+    float dd[3], ua[3];
+    check(st::radarAnchorAlong(seatFwd, idA, 0.45f, dd, ua) && near3(dd, 0.0, -0.05874, 0.44615, 2e-5) && near3(ua, 0.0, -0.13053, 0.99144, 2e-5) &&
+              std::fabs(st::angleToZDeg(ua) - 7.5) < 0.01 && std::fabs(st::yawDeg(ua)) < 1e-6,
+          "anchor = identity, u 7.5 deg below level: d = 0.45 m along u, (0, -0.059, 0.446), angle to the anchor's z 7.5 deg");
+    check(st::radarAnchorAlong(seatFwd, idA, -0.45f, dd, ua) && near3(dd, 0.0, 0.05874, -0.44615, 2e-5), "reversed: the same line the other way");
+    const float worldX[3] = {1.0f, 0.0f, 0.0f};
+    check(st::radarAnchorAlong(worldX, idA, 0.45f, dd, ua) && near3(dd, 0.45, 0.0, 0.0, 1e-6) && std::fabs(st::angleToZDeg(ua) - 90.0) < 1e-4 && std::fabs(st::yawDeg(ua) - 90.0) < 1e-4,
+          "the turret 90 deg to the right of a vehicle facing the anchor's z: d along the anchor's x, yaw 90 deg");
+    const float yawA[16] = {0.0f, 0.0f, -1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f};   // a vehicle facing world +x
+    check(st::radarAnchorAlong(worldX, yawA, 0.45f, dd, ua) && near3(dd, 0.0, 0.0, 0.45, 1e-6), "a vehicle facing world +x with the turret ahead: d along the anchor's z");
+    float scaledA[16], skewA[16];
+    std::memcpy(scaledA, idA, sizeof(idA));
+    std::memcpy(skewA, idA, sizeof(idA));
+    scaledA[0] = 2.0f;
+    skewA[4] = 0.6f;
+    skewA[5] = 0.8f;
+    const float notUnit[3] = {0.0f, 0.0f, 0.5f};
+    check(!st::radarAnchorAlong(seatFwd, scaledA, 0.45f, dd, ua) && !st::radarAnchorAlong(seatFwd, skewA, 0.45f, dd, ua) && !st::radarAnchorAlong(notUnit, idA, 0.45f, dd, ua),
+          "an anchor whose rows are not unit or not orthogonal, or a u that is not unit: refused (the fallback (0, 0, s * F))");
     const float before[3] = {0.0f, 1.96f, 0.0f}, stepD[3] = {0.0f, 1.96f, 0.45f}, closeTo[3] = {0.0f, 1.96f, 0.40f}, other[3] = {0.0f, 2.0f, 0.0f}, d45[3] = {0.0f, 0.0f, 0.45f},
                 dz[3] = {0.0f, 0.0f, 0.0f};
     check(st::placementStepLooksLikeOffset(before, stepD, d45) && st::placementStepLooksLikeOffset(before, closeTo, d45) && !st::placementStepLooksLikeOffset(before, other, d45) &&

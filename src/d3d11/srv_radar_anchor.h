@@ -6,8 +6,10 @@
 // volume forward in the game itself, so the game frames, renders and billboards it right. Two hooks, build 334925 only (any other build, or a prologue that differs, stands them
 // down and patches nothing):
 //   * the placement setter (0x38563A0, interface slot +0x28 of the schematic's interface at obj+0x58; RCX = obj+0x58, RDX = the 4x4 P whose translation row is the hologram's
-//     place relative to the anchor, in the anchor's axes): the hook ADDS the published offset to P's translation and calls the original with the sum (srv_turret_math.h
-//     radarPlacementMove). The game's own translation (about 1.96 m up on the Scorpion) is kept: the first build replaced it and dropped the radar.
+//     place relative to the anchor, in the anchor's axes): the hook ADDS the offset to P's translation and calls the original with the sum (srv_turret_math.h
+//     radarPlacementMove). The game's own translation (about 1.96 m up on the Scorpion) is kept: the first build replaced it and dropped the radar. The offset is s * F along the
+//     turret's seated forward u, put in the anchor's axes with the anchor's world rotation (its vfunc +0x20; srv_turret_math.h radarAnchorAlong); without u or a usable rotation it
+//     is the fallback (0, 0, s * F), along the vehicle's forward, which swings the disc off as the turret turns (flight of 07bde936).
 //   * the schematic's per-frame update (0x384A590, obj in RCX, dt in XMM1): counted only, to say the object is alive. It writes nothing.
 //
 // The frame thread (srv_turret.cpp srvTurretFrameTick) arms them, publishes the offset every frame and does all the logging; the hooks only record.
@@ -28,9 +30,12 @@ RadarAnchorHookState srvRadarAnchorState();
 // The reason it stood down, or the armed line ("" before an arm).
 const char* srvRadarAnchorWhy();
 
-// Every frame, frame thread: the offset's bit patterns (x, y, z in the anchor's axes; all zero = no move: the next setter call gets the game's own placement) and the frame tick's
-// frame number (the setter hook stamps an add with it).
+// Every frame, frame thread: the fallback offset's bit patterns ((0, 0, s * F) in the anchor's axes; all zero = no move: the next setter call gets the game's own placement) and the frame
+// tick's frame number (the setter hook stamps an add with it).
 void srvRadarAnchorPublish(const uint32_t bits[3], uint32_t frameNo);
+// The turret's seated forward in the game's world (srv_turret_math.h turretForwardWorld), unit; null or !valid clears it. Render thread (read back from the live camera), and the frame
+// tick clears it when a stay begins. With it and the anchor's world rotation the setter hook adds s * F along u; without either it adds the fallback (0, 0, s * F).
+void srvRadarAnchorPublishDirection(const float u[3], bool valid);
 
 struct RadarAnchorStats {
     RadarAnchorHookState state = RadarAnchorHookState::NotTried;
@@ -54,6 +59,15 @@ struct RadarAnchorStats {
     uintptr_t obj = 0;             // the schematic (obj, not obj+0x58) of the last radar setter call
     bool suspect = false;          // the game's translation once moved by about the offset between two calls
     float suspectStep[3] = {};     // that step
+    // the direction (srv_turret_math.h radarAnchorAlong): adds along the turret's forward (u and the anchor's rotation) against the fallback (0, 0, s * F), and why
+    uint64_t directed = 0, fallback = 0, fallbackNoU = 0, fallbackNoAnchor = 0, anchorFaults = 0;
+    bool lastDirected = false;     // the last add's source
+    bool haveAnchor = false;       // anchorRows was read at the last radar call
+    float anchorRows[9] = {};      // the anchor's world rotation rows (its vfunc +0x20) at the last radar call
+    float pRows[9] = {};           // P's rotation rows at the last radar call
+    float u[3] = {};               // the turret's forward in the world at the last add (zero: none)
+    float uAnchor[3] = {};         // u in the anchor's axes at the last directed add
+    float d[3] = {};               // the offset the last add used, in the anchor's axes
 };
 RadarAnchorStats srvRadarAnchorStats();
 

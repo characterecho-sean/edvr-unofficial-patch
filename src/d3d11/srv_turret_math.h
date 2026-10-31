@@ -52,8 +52,8 @@
 //                               the hologram, which shifted as the head moved). open: while a bound draw is issued the rectangles are the whole render target (Scissor in
 //                               srv_turret_hud_binding.h), the game's put back after; game keeps its rectangles.
 //   fix.srv_turret_radar_anchor on | reversed | off, default on: the radar's terrain schematic (the volume the disc's picture is drawn from, about 0.44 m behind the eye at the stock
-//                               camera, so the game drew nothing) moved forward by the radar-forward key IN THE GAME, along the anchor entity's +Z (on) or -Z (reversed): a hook on its
-//                               placement setter adds the offset to the translation the game sets (srv_radar_anchor.cpp, build 334925 only). While the placement holds that offset the
+//                               camera, so the game drew nothing) moved forward by the radar-forward key IN THE GAME, along the turret's seated forward (on) or against it (reversed), put
+//                               in the anchor's axes: a hook on its placement setter adds the offset to the translation the game sets (srv_radar_anchor.cpp, build 334925 only). While the placement holds that offset the
 //                               two 5559BD94 billboard families are left to the game (the geometry shader does not move them); the other radar families keep its move. off: no move in
 //                               the game, the geometry shader's move as before.
 //
@@ -236,8 +236,9 @@ inline bool isFamilyVs(uint64_t vs) {
 }
 
 // ---- the radar anchor moved in the game (fix.srv_turret_radar_anchor; srv_radar_anchor.cpp) ----------------------------------------------------------------------------------
-// The offset the hook ADDS to the translation the game hands the radar schematic's placement setter: (0, 0, s * F) metres in the anchor entity's own axes, F the radar-forward key, s
-// +1 for on and -1 for reversed (flown 2026-10-31: on is forward, about 1:1). All bits zero (never a -0.0) unless the Scorpion's turret view is on, the key is not off and F is above 0.
+// The published offset: (0, 0, s * F) metres in the anchor entity's own axes, F the radar-forward key, s +1 for on and -1 for reversed (flown 2026-10-31: on is forward, about 1:1). The
+// hook adds s * F along the turret's forward instead when it has u and the anchor's rotation (radarAnchorAlong below), and this is its fallback. All bits zero (never a -0.0) unless
+// the Scorpion's turret view is on, the key is not off and F is above 0.
 struct RadarAnchorOffset {
     float m[3] = {0.0f, 0.0f, 0.0f};
     uint32_t bits[3] = {0u, 0u, 0u};
@@ -294,6 +295,66 @@ inline PlacementMove radarPlacementMove(const float P[16], const uint32_t d[3], 
     std::memcpy(m.d, d, sizeof(m.d));
     return PlacementMove::kAdded;
 }
+// THE DIRECTION (flight of 07bde936). The game's placement keeps the radar on the turret's yaw axis, and d = (0, 0, s * F) is along the VEHICLE's forward (the anchor's +Z): the disc swung
+// off as the turret turned, and sat about 5 cm high, because the geometry shader moves the icons along the seated forward, about 7.5 deg below the vehicle's level. So d is F along the
+// TURRET's seated forward u, expressed in the anchor's axes: d = s * F * (u . A_row0, u . A_row1, u . A_row2).
+//   u comes from the live camera's world axes (VS cb1 rows 277..279 of an eye-0 draw: right, up, forward; the rows signature H's geometry shader reads) and eye 0's seated rotation R of
+//   the same frame (head * eyeToHead[0], the host's row-major 3x3; OpenVR axes, x right, y up, z back). The seated forward (0, 0, -1) in the eye's axes is e = R^T (0, 0, -1), and an
+//   eye-axes vector (x, y, z) is x * right + y * up - z * forward in the world.
+// Axes are usable when each is a unit vector and they are orthogonal, within kAxisTolerance.
+inline constexpr double kAxisTolerance = 0.05;
+inline bool axesUsable(const float a[3], const float b[3], const float c[3]) {
+    const float* v[3] = {a, b, c};
+    for (int i = 0; i < 3; ++i) {
+        for (int j = 0; j < 3; ++j)
+            if (!std::isfinite(v[i][j])) return false;
+        const double n = std::sqrt(double(v[i][0]) * v[i][0] + double(v[i][1]) * v[i][1] + double(v[i][2]) * v[i][2]);
+        if (std::fabs(n - 1.0) > kAxisTolerance) return false;
+    }
+    for (int i = 0; i < 3; ++i) {
+        const float* p = v[i];
+        const float* q = v[(i + 1) % 3];
+        if (std::fabs(double(p[0]) * q[0] + double(p[1]) * q[1] + double(p[2]) * q[2]) > kAxisTolerance) return false;
+    }
+    return true;
+}
+// u, unit, in the game's world. False when the camera's axes are not usable or R is not finite.
+inline bool turretForwardWorld(const float right[3], const float up[3], const float forward[3], const double R[9], float u[3]) {
+    if (!axesUsable(right, up, forward)) return false;
+    for (int i = 0; i < 9; ++i)
+        if (!std::isfinite(R[i])) return false;
+    const double e[3] = {-R[6], -R[7], -R[8]};   // R^T (0, 0, -1): minus R's third row
+    double w[3];
+    for (int i = 0; i < 3; ++i) w[i] = e[0] * right[i] + e[1] * up[i] - e[2] * forward[i];
+    const double n = std::sqrt(w[0] * w[0] + w[1] * w[1] + w[2] * w[2]);
+    if (!(n > 0.5) || !std::isfinite(n)) return false;
+    for (int i = 0; i < 3; ++i) u[i] = static_cast<float>(w[i] / n);
+    return true;
+}
+// d = sF * u in the anchor's axes. A is the anchor's world 4x4 (rows x, y, z, translation; the row-vector convention the game composes M with). uAnchor receives u in the anchor's axes. False
+// when u is not a unit vector or A's rotation rows are not usable: the caller falls back to (0, 0, sF).
+inline bool radarAnchorAlong(const float u[3], const float A[16], float sF, float d[3], float uAnchor[3]) {
+    if (!std::isfinite(sF)) return false;
+    for (int i = 0; i < 3; ++i)
+        if (!std::isfinite(u[i])) return false;
+    const double un = std::sqrt(double(u[0]) * u[0] + double(u[1]) * u[1] + double(u[2]) * u[2]);
+    if (std::fabs(un - 1.0) > kAxisTolerance || !axesUsable(A, A + 4, A + 8)) return false;
+    for (int i = 0; i < 3; ++i) {
+        const float* row = A + 4 * i;
+        uAnchor[i] = static_cast<float>((double(u[0]) * row[0] + double(u[1]) * row[1] + double(u[2]) * row[2]) / un);
+        d[i] = sF * uAnchor[i];
+    }
+    return true;
+}
+// The angle between a vector and +Z (the anchor's forward), in degrees; its yaw about Y (atan2(x, z)) for the log.
+inline double angleToZDeg(const float v[3]) {
+    const double n = std::sqrt(double(v[0]) * v[0] + double(v[1]) * v[1] + double(v[2]) * v[2]);
+    if (!(n > 0.0)) return 0.0;
+    double c = v[2] / n;
+    c = c > 1.0 ? 1.0 : c < -1.0 ? -1.0 : c;
+    return std::acos(c) * 57.29577951308232;
+}
+inline double yawDeg(const float v[3]) { return std::atan2(double(v[0]), double(v[2])) * 57.29577951308232; }
 // A sign of a caller that feeds back a value of ours in some other form (not bit for bit): the game's translation moved between two calls by about d (within a quarter of |d|).
 inline bool placementStepLooksLikeOffset(const float before[3], const float after[3], const float d[3]) {
     const double dd = std::sqrt(double(d[0]) * d[0] + double(d[1]) * d[1] + double(d[2]) * d[2]);
