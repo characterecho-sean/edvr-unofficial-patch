@@ -134,6 +134,9 @@ std::atomic<uint64_t> g_asked{0};
 // float bits), for the engine-side panel sizing's untrimmed k. 0 when the
 // host does not say.
 std::atomic<uint64_t> g_trueVertical{0};
+// The sequence of the frame beginFrame last took (its head, eyes, frusta and jitter are the ones nativeTemporalHeadPose and nativeTemporalEyeGeometry answer), stored when begin() has finished
+// copying them; 0 at the same times as g_recommended. The SRV turret HUD's draw path compares it with the sequence its eye frames were built from.
+std::atomic<uint64_t> g_frameSequence{0};
 // B3: the frame's zoom of eye 0, for the door (the left eye's window copy and the lens read it between treat() and the next begin). Its own lock, apart from `mutex`, so the door
 // may ask from anywhere after treat() returned.
 struct ZoomPub {
@@ -452,6 +455,7 @@ HRESULT WINAPI begin(void* p,const EdvrNativeTemporalFrame* f,EdvrNativeTemporal
   }
   if(s->shift[0][0]||s->shift[0][1]||s->shift[1][0]||s->shift[1][1])++s->jitterFrames;
   edvr::lightGridCacheNoteJitter(s->frameCounter,jx,jy,s->shift);   // the grid cache's jitter probe reads this (log only)
+  g_frameSequence.store(f->sequence,std::memory_order_release);   // last: the head, eyes, frusta and shift above are this frame's
   return S_OK;
 }
 
@@ -585,7 +589,7 @@ HRESULT WINAPI treat(void* p,uint64_t seq,uint32_t eye,ID3D11Texture2D* source,c
   std::memcpy(hst.otherEye,s->eyes[1-eye],sizeof(hst.otherEye));std::memcpy(hst.frustum,s->frusta[eye],sizeof(hst.frustum));
   hst.width=w;hst.height=h;hst.outputWidth=outW;hst.outputHeight=outH;hst.format=d.Format;hst.zoomed=zoomedHere;return S_OK;
 }
-HRESULT WINAPI invalidate(void* p){std::lock_guard<std::mutex> lock(mutex);State*s=identify(p);if(!s||!s->active||s!=current)return E_INVALIDARG;reset(*s);s->begun=false;g_recommended.store(0,std::memory_order_release);g_vertical.store(0,std::memory_order_release);g_asked.store(0,std::memory_order_release);g_trueVertical.store(0,std::memory_order_release);clearZoom(*s);std::memset(s->shift,0,sizeof(s->shift));std::memset(s->renderedJitter,0,sizeof(s->renderedJitter));return S_OK;}
+HRESULT WINAPI invalidate(void* p){std::lock_guard<std::mutex> lock(mutex);State*s=identify(p);if(!s||!s->active||s!=current)return E_INVALIDARG;reset(*s);s->begun=false;g_recommended.store(0,std::memory_order_release);g_frameSequence.store(0,std::memory_order_release);g_vertical.store(0,std::memory_order_release);g_asked.store(0,std::memory_order_release);g_trueVertical.store(0,std::memory_order_release);clearZoom(*s);std::memset(s->shift,0,sizeof(s->shift));std::memset(s->renderedJitter,0,sizeof(s->renderedJitter));return S_OK;}
 HRESULT WINAPI skipEye(void* p,uint64_t seq,uint32_t eye,uint32_t jumpOnly,uint32_t verdict) {
   std::lock_guard<std::mutex> lock(mutex);State* s=identify(p);
   if(!s||!s->active||s!=current||!s->begun||seq!=s->sequence||eye>1||s->treated[eye]||jumpOnly>1)return E_INVALIDARG;
@@ -608,7 +612,7 @@ HRESULT WINAPI close(void* p){
   edvr::Log::get().note("native temporal omissions: skipped=%llu, history_kept=%llu, returned_resets=%llu, unjudged_resets=%llu.",
       (unsigned long long)s->skipped,(unsigned long long)s->spared,(unsigned long long)s->returned,(unsigned long long)s->unjudged);
   reset(*s);releaseBlank(s->blank[0]);releaseBlank(s->blank[1]);s->active=false;s->begun=false;s->device=nullptr;
-  if(current==s){current=nullptr;g_recommended.store(0,std::memory_order_release);g_vertical.store(0,std::memory_order_release);g_asked.store(0,std::memory_order_release);g_trueVertical.store(0,std::memory_order_release);}clearZoom(*s);return S_OK;
+  if(current==s){current=nullptr;g_recommended.store(0,std::memory_order_release);g_frameSequence.store(0,std::memory_order_release);g_vertical.store(0,std::memory_order_release);g_asked.store(0,std::memory_order_release);g_trueVertical.store(0,std::memory_order_release);}clearZoom(*s);return S_OK;
 }
 }
 
@@ -668,6 +672,9 @@ bool nativeTemporalEyeGeometry(uint32_t eye, uint64_t* sequence, float frustum[4
   if (shift) { shift[0] = s.shift[eye][0]; shift[1] = s.shift[eye][1]; }
   return true;
 }
+// The sequence of the frame beginFrame last took, lock-free (0 before the first, and after invalidate or close). beginFrame runs when the game starts a frame (its WaitGetPoses), which is after the
+// previous frame's Present-boundary tick when the game calls WaitGetPoses after Present (the order is the game's), so a reader that wants the head and eyes of the frame being DRAWN compares this with the sequence it built from and reads again when it moved on.
+uint64_t nativeTemporalFrameSequence() { return g_frameSequence.load(std::memory_order_acquire); }
 // The head and eye matrices of the frame being drawn, as the host gave them (the f->head and f->eyeToHead of EdvrNativeTemporalFrame): the SRV turret HUD's move is made about a point fixed in
 // the seated frame, so it needs where the head and each eye are. LAYOUT: 3x4 row-major, m[i * 4 + j] (row i, column j), the rotation in the left 3x3 and the translation in m[3], m[7], m[11].
 // SPACE: the OpenVR seated space the game is given (x right, y up, z BACK; forward is -z), the eye matrix relative to the head (so an eye's position in the seated space is

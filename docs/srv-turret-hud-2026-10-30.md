@@ -10,7 +10,9 @@
   sat on a frozen headset pose a metre off and the panel stretched (journal).
   The anchor fix (cd67ee63) FLOWN OK (head_offset 2.6 cm), but moved parts
   the game drew behind the eye were depth-clipped (journal): the depth fix
-  (9330af6e) is BUILT, NOT FLOWN. Branch
+  (9330af6e) is BUILT, NOT FLOWN. After it: a radar forward key (the HUD
+  forward move left the radar disc level with the eye, a sliver) and a
+  draw-time pose rebuild against judder, BUILT, NOT FLOWN. Branch
   `claude/srv-turret-hud`, local only. Issue #140. Test install: Steam
   (`--target steam --scope both --xess`).
 - **What is wrong (the game's own placement):** the turret view's whole HUD
@@ -35,8 +37,9 @@
   with vs 81216C77F90DEDD6 (another output signature, no bytecode yet).
 - **Temporary keys** (live, Fixes page of the menu; bake the flown values and
   propose removing them when the arc closes): `fix.srv_turret_camera_back`,
-  `fix.srv_turret_hud_forward`, `fix.srv_turret_panels_back`,
-  `fix.srv_turret_radar_back`, `fix.srv_turret_hud_gap`. Sean's flown values
+  `fix.srv_turret_hud_forward`, `fix.srv_turret_radar_forward` (70),
+  `fix.srv_turret_panels_back`, `fix.srv_turret_radar_back`,
+  `fix.srv_turret_hud_gap`. Sean's flown values
   (2026-10-31): camera back 35, HUD forward 70, panels back 140, radar 0.
 - **Latency:** both follow Status.json, which the watcher polls every 500 ms
   and the game rewrites about once a second, so a view switch is followed up
@@ -291,3 +294,29 @@ could mix moved and unmoved corners.
 9330af6e: the game's own NDC z where it is valid, else 0.999 (the nearest
 valid reversed-Z depth); every corner moved, the rasterizer clipping what
 is truly behind the eye; the capture line counts the fallbacks (`zfix`).
+
+### 2026-10-31: judder and the radar disc (built, not flown)
+
+Two faults after the depth fix: the HUD judders as the head moves, and the
+radar disc (DF3503CD), carried forward with the HUD, is level with the eye
+and reads as a sliver.
+
+Hypothesis 1 (judder): the HUD follows the head one frame late. The frame
+tick (cacheGeometry) runs at the Present boundary; the host's begin()
+(native_temporal.cpp, at WaitGetPoses) publishes the pose. If begin() runs
+after the tick, the tick built both eyes' frames from the previous frame's
+pose and frame N's draws used frame N-1's. The new counter decides it:
+`pose refreshed at draw: N of M frames` in the 10 s line is the frames
+whose draw found a newer frame sequence than the tick built from. N near
+M: the pose WAS a frame old. N near 0: begin() runs before the tick in
+this game and the hypothesis is dead. The code alone cannot say, since the
+order of Present and WaitGetPoses is the game's.
+Change: begin() publishes the frame sequence (nativeTemporalFrameSequence);
+the draw (drawEyeFrame) rebuilds both eyes' frames once for each new
+sequence from that frame's pose and the tick's anchor.
+
+Hypothesis 2 (radar): the HUD-forward translation carries the disc level with
+the eye, so it is seen edge-on.
+Change: `fix.srv_turret_radar_forward` (TEMPORARY, 70, 0..150) moves the
+radar group by its own distance; the panels keep HUD forward. The 10 s line
+prints `T=` and `Tradar=`. Fly radar forward 30 and 70 and read the disc.

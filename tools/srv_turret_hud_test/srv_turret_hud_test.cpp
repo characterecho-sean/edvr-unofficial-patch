@@ -15,7 +15,7 @@
 //   camera's own projection, its distance from the anchor, its direction from it. (a) The anchor at the eye: a vertex at distance r keeps its NDC x, y and z and its w becomes w (r + d) / r.
 //   (b) The anchor 10 cm to the side and 5 cm up, with vertices 15 cm from it. (c) Asymmetric tangents (the Pimax set, a vertical pair that is not symmetric): the move, and a gap of 10 um
 //   round-trips every vertex. (d) A vertex at anchor distance 1.4 m, 2.8 m, 500 m, just past 1 m or inside 2 cm is untouched bit for bit. (e) A pull. (g) The translation alone: every vertex
-//   moves by T, one 0.2 m behind the eye comes in front of it, one that stays behind moves too. (h) The translation, then the push. (k) The depth: Elite is reversed Z (clip z the constant 0.025), so a vertex behind the eye or inside the near plane gets the nearest depth, 0.999, and a valid one keeps its own; (l) a triangle with a corner moved behind the eye is output with all three corners moved. The pictures (I1 to I4) compare the rasterized quad with the
+//   moves by T, one 0.2 m behind the eye comes in front of it, one that stays behind moves too. (h) The translation, then the push. (k) The depth: Elite is reversed Z (clip z the constant 0.025), so a vertex behind the eye or inside the near plane gets the nearest depth, 0.999, and a valid one keeps its own; (l) a triangle with a corner moved behind the eye is output with all three corners moved; (m) the two groups in one frame: the panels' constants translate by the HUD-forward T and the radar's by its own key's. The pictures (I1 to I4) compare the rasterized quad with the
 //   plain one (anchor at the eye) and with the quad truly moved in 3D. THE STRIPS: a quad as a triangle strip is the plain strip bit for bit through a window with nothing in it and no
 //   translation, under every culling mode (the winding is kept), and lands where the same quad as a list lands once it is moved.
 //   THE ANCHOR (srv_turret_math.h AnchorTracker, no device): followed for the settle after the view comes on or a camera key changes, then latched; a recentre (the head jumping more than
@@ -411,7 +411,7 @@ static Cam camOfTangents(float l, float r, float dn, float up) {
     c.offY = -(up + dn) / (up - dn);
     return c;
 }
-static st::EyeFrame frameOfCam(const Cam& c, const float a[3] = nullptr, const float tr[3] = nullptr) {
+static st::EyeFrame frameOfCam(const Cam& c, const float a[3] = nullptr, const float tr[3] = nullptr, const float trRadar[3] = nullptr) {
     st::EyeFrame f;
     f.l = (-1.0f - c.offX) / c.p00;
     f.r = (1.0f - c.offX) / c.p00;
@@ -420,6 +420,7 @@ static st::EyeFrame frameOfCam(const Cam& c, const float a[3] = nullptr, const f
     for (int i = 0; i < 3; ++i) {
         f.a[i] = a ? a[i] : 0.0f;
         f.t[i] = tr ? tr[i] : 0.0f;
+        f.tRadar[i] = trRadar ? trRadar[i] : (tr ? tr[i] : 0.0f);   // the radar group translation: its own when given, else the same as the panels
     }
     return f;
 }
@@ -458,33 +459,35 @@ static void mathCases() {
         const float level[12] = {1, 0, 0, 0.1f, 0, 1, 0, 0.2f, 0, 0, 1, 0.3f}, leftEye[12] = {1, 0, 0, -0.03f, 0, 1, 0, 0, 0, 0, 1, 0.01f};
         const double atHead[3] = {0.1, 0.2, 0.3};
         st::EyeFrame e;
-        check(st::eyeFrameFrom(level, leftEye, atHead, 0.7, tn, e), "an eye frame is built from a pose");
+        check(st::eyeFrameFrom(level, leftEye, atHead, 0.7, 0.4, tn, e), "an eye frame is built from a pose");
         check(std::fabs(e.a[0] - 0.03f) < 1e-6f && std::fabs(e.a[1]) < 1e-6f && std::fabs(e.a[2] - 0.01f) < 1e-6f && std::fabs(e.t[0]) < 1e-6f && std::fabs(e.t[1]) < 1e-6f &&
-                  std::fabs(e.t[2] - 0.7f) < 1e-6f && e.l == -1.0f && e.r == 1.2f && e.dn == -0.9f && e.up == 1.1f,
-              "level head, anchor at the head: the left eye (3 cm left of the head and 1 cm back of it) sees the anchor 3 cm to its right and 1 cm AHEAD, and HUD forward 0.7 m is +0.7 along Z");
+                  std::fabs(e.t[2] - 0.7f) < 1e-6f && std::fabs(e.tRadar[0]) < 1e-6f && std::fabs(e.tRadar[1]) < 1e-6f && std::fabs(e.tRadar[2] - 0.4f) < 1e-6f && e.l == -1.0f && e.r == 1.2f && e.dn == -0.9f && e.up == 1.1f,
+              "level head, anchor at the head: the left eye (3 cm left of the head and 1 cm back of it) sees the anchor 3 cm to its right and 1 cm AHEAD, HUD forward 0.7 m is +0.7 along Z and the radar's 0.4 m is +0.4");
         const double c = std::cos(0.5235987755982988), s = std::sin(0.5235987755982988);   // the head yawed 30 degrees about +y
         const float yawed[12] = {float(c), 0, float(s), 0.1f, 0, 1, 0, 0.2f, float(-s), 0, float(c), 0.3f};
         const double anchor2[3] = {0.1 + 0.1, 0.2, 0.3 - 0.2};   // the head's place + (0.1, 0, -0.2) in the seated axes
         st::EyeFrame y;
-        check(st::eyeFrameFrom(yawed, leftEye, anchor2, 0.7, tn, y), "an eye frame is built from a yawed pose");
+        check(st::eyeFrameFrom(yawed, leftEye, anchor2, 0.7, 0.4, tn, y), "an eye frame is built from a yawed pose");
         check(std::fabs(y.a[0] - (0.1 * c + 0.2 * s + 0.03)) < 1e-6 && std::fabs(y.a[1]) < 1e-6 && std::fabs(y.a[2] - (0.2 * c - 0.1 * s + 0.01)) < 1e-6 &&
-                  std::fabs(y.t[0] - 0.7 * s) < 1e-6 && std::fabs(y.t[1]) < 1e-6 && std::fabs(y.t[2] - 0.7 * c) < 1e-6,
+                  std::fabs(y.t[0] - 0.7 * s) < 1e-6 && std::fabs(y.t[1]) < 1e-6 && std::fabs(y.t[2] - 0.7 * c) < 1e-6 &&
+                  std::fabs(y.tRadar[0] - 0.4 * s) < 1e-6 && std::fabs(y.tRadar[1]) < 1e-6 && std::fabs(y.tRadar[2] - 0.4 * c) < 1e-6,
               "the head yawed 30 degrees: the anchor and the seated -z forward are turned into the eye's axes (R^T (A - E), then z negated)");
         // a canted eye (yawed 5 degrees and pitched 3 against the head) keeps lengths: |A_eye| is the distance from the eye to the anchor, |T| the forward distance
         const double cy = std::cos(0.0872664626), sy = std::sin(0.0872664626), cp = std::cos(0.05235987756), sp = std::sin(0.05235987756);
         const float canted[12] = {float(cy), float(sy * sp), float(sy * cp), 0.032f, 0, float(cp), float(-sp), -0.004f, float(-sy), float(cy * sp), float(cy * cp), 0.012f};
         st::EyeFrame k;
-        check(st::eyeFrameFrom(yawed, canted, anchor2, 0.7, tn, k), "an eye frame is built from a canted eye");
+        check(st::eyeFrameFrom(yawed, canted, anchor2, 0.7, 0.4, tn, k), "an eye frame is built from a canted eye");
         const double ex = 0.1 + c * 0.032 + s * 0.012, ey = 0.2 - 0.004, ez = 0.3 + (-s) * 0.032 + c * 0.012;   // E = head + R_h t_e
         const double dx = anchor2[0] - ex, dy = anchor2[1] - ey, dz = anchor2[2] - ez;
         check(std::fabs(std::sqrt(double(k.a[0]) * k.a[0] + double(k.a[1]) * k.a[1] + double(k.a[2]) * k.a[2]) - std::sqrt(dx * dx + dy * dy + dz * dz)) < 1e-6 &&
-                  std::fabs(std::sqrt(double(k.t[0]) * k.t[0] + double(k.t[1]) * k.t[1] + double(k.t[2]) * k.t[2]) - 0.7) < 1e-6,
+                  std::fabs(std::sqrt(double(k.t[0]) * k.t[0] + double(k.t[1]) * k.t[1] + double(k.t[2]) * k.t[2]) - 0.7) < 1e-6 &&
+                  std::fabs(std::sqrt(double(k.tRadar[0]) * k.tRadar[0] + double(k.tRadar[1]) * k.tRadar[1] + double(k.tRadar[2]) * k.tRadar[2]) - 0.4) < 1e-6,
               "...and a canted eye's frame keeps the distance to the anchor and the length of the forward translation");
         float bad[12];
         std::memcpy(bad, level, sizeof(bad));
         bad[3] = NAN;
         const float noFrustum[4] = {1.0f, 1.0f, -1.0f, 1.0f};
-        check(!st::eyeFrameFrom(bad, leftEye, atHead, 0.7, tn, e) && !st::eyeFrameFrom(level, leftEye, atHead, 0.7, noFrustum, e), "a pose that is not finite, or tangents that are no frustum, give no frame");
+        check(!st::eyeFrameFrom(bad, leftEye, atHead, 0.7, 0.4, tn, e) && !st::eyeFrameFrom(level, leftEye, atHead, 0.7, 0.4, noFrustum, e) && !st::eyeFrameFrom(level, leftEye, atHead, 0.7, NAN, tn, e), "a pose that is not finite, or tangents that are no frustum, give no frame");
     }
     {   // the anchor: followed for the settle, then latched; taken again on a key change, a recentre; cleared with the view
         st::AnchorTracker tr;
@@ -520,6 +523,17 @@ static void mathCases() {
             if (r != st::AnchorReason::kNone) got = r;
         }
         check(got == st::AnchorReason::kHudForward, "the HUD-forward key changes: latched again, reason 'HUD forward changed'");
+        got = st::AnchorReason::kNone;
+        for (uint32_t i = 0; i < st::kAnchorSettleFrames; ++i) {
+            h[1] += 0.0005;
+            const st::AnchorReason r = tr.step(h, true, 60, 40, 50);   // the radar-forward key changed
+            if (r != st::AnchorReason::kNone) got = r;
+        }
+        check(got == st::AnchorReason::kRadarForward, "the radar-forward key changes: latched again, reason 'radar forward changed'");
+        for (uint32_t i = 0; i < st::kAnchorSettleFrames; ++i) {   // (the keys the later cases pass: radar forward back to 0)
+            h[1] += 0.0005;
+            (void)tr.step(h, true, 60, 40);
+        }
         h[0] += 0.15;
         check(tr.step(h, true, 60, 40) == st::AnchorReason::kNone && tr.anchor()[0] != h[0], "a head jump of 15 cm in one frame is no recentre");
         const double before = tr.anchor()[0];
@@ -533,7 +547,7 @@ static void mathCases() {
         check(!tr.valid(), "the view going off clears the anchor");
         check(!std::strcmp(st::anchorReasonName(st::AnchorReason::kViewOn), "view on") && !std::strcmp(st::anchorReasonName(st::AnchorReason::kCameraBack), "camera back changed") &&
                   !std::strcmp(st::anchorReasonName(st::AnchorReason::kHudForward), "HUD forward changed") && !std::strcmp(st::anchorReasonName(st::AnchorReason::kRecentre), "recentre") &&
-                  !std::strcmp(st::anchorReasonName(st::AnchorReason::kHeadAway), "head away"),
+                  !std::strcmp(st::anchorReasonName(st::AnchorReason::kHeadAway), "head away") && !std::strcmp(st::anchorReasonName(st::AnchorReason::kRadarForward), "radar forward changed"),
               "the reasons the log gives");
     }
     {   // a FROZEN pose (the flight of b5c49237: the headset's pose was the same bits from the launch to the turret view and on, then live): nothing latches on it
@@ -674,12 +688,24 @@ static void mathCases() {
         const float a[3] = {0.1f, 0.05f, 0.0f}, tr[3] = {0.0f, 0.0f, 0.7f};
         const st::EyeFrame e = frameOfCam(cm, a, tr);
         st::TurretParams out{};
-        check(st::paramsForGroup(e, 120, 0, 0, out) && out == st::pushParamsFor(e, 1.2f), "a push above 0 and the rest at 0: the push");
-        check(st::paramsForGroup(e, 120, 96, 70, out) && out == st::pushParamsFor(e, 1.2f), "...and with the gap and the HUD-forward key above 0 too the push is used, not the pull");
-        check(st::paramsForGroup(e, 0, 96, 70, out) && out == st::paramsFor(e, 0.96f), "no push and the gap above 0: the pull");
-        check(st::paramsForGroup(e, 0, 0, 70, out) && out == st::translateParamsFor(e) && out.gap == 0.0f, "no push and no gap but HUD forward: the translation alone (gap 0)");
-        check(!st::paramsForGroup(e, 0, 0, 0, out), "all three at 0: no constants (the draw is the game's own)");
-        check(st::paramsForGroup(e, 999, 0, 0, out) && out == st::pushParamsFor(e, 2.0f) && st::paramsForGroup(e, 0, 999, 0, out) && out == st::paramsFor(e, 2.0f), "a key past its range is held to 200 cm");
+        const st::Group P = st::Group::kPanels, R = st::Group::kRadar;
+        check(st::paramsForGroup(e, P, 120, 0, 0, out) && out == st::pushParamsFor(e, 1.2f), "a push above 0 and the rest at 0: the push");
+        check(st::paramsForGroup(e, P, 120, 96, 70, out) && out == st::pushParamsFor(e, 1.2f), "...and with the gap and the HUD-forward key above 0 too the push is used, not the pull");
+        check(st::paramsForGroup(e, P, 0, 96, 70, out) && out == st::paramsFor(e, 0.96f), "no push and the gap above 0: the pull");
+        check(st::paramsForGroup(e, P, 0, 0, 70, out) && out == st::translateParamsFor(e) && out.gap == 0.0f, "no push and no gap but HUD forward: the translation alone (gap 0)");
+        check(!st::paramsForGroup(e, P, 0, 0, 0, out), "all three at 0: no constants (the draw is the game's own)");
+        check(st::paramsForGroup(e, P, 999, 0, 0, out) && out == st::pushParamsFor(e, 2.0f) && st::paramsForGroup(e, P, 0, 999, 0, out) && out == st::paramsFor(e, 2.0f), "a key past its range is held to 200 cm");
+        {   // the radar group carries its own translation: the same push, the same frame, a different T
+            const float tp[3] = {0.0f, 0.0f, 0.7f}, trd[3] = {0.0f, 0.0f, 0.3f};
+            const st::EyeFrame two = frameOfCam(cm, a, tp, trd);
+            st::TurretParams panelsP, radarP;
+            check(st::paramsForGroup(two, P, 120, 0, 70, panelsP) && st::paramsForGroup(two, R, 120, 0, 30, radarP) && panelsP.tz == 0.7f && radarP.tz == 0.3f && panelsP.gap == radarP.gap &&
+                      panelsP.ax == radarP.ax && panelsP.l == radarP.l && panelsP == st::pushParamsFor(two, 1.2f, P) && radarP == st::pushParamsFor(two, 1.2f, R),
+                  "one eye frame, two groups: the panels' constants carry the HUD-forward translation, the radar's its own");
+            check(st::paramsForGroup(two, R, 0, 0, 30, radarP) && radarP == st::translateParamsFor(two, R) && radarP.tz == 0.3f && !st::paramsForGroup(two, R, 0, 0, 0, radarP) &&
+                      st::forwardCmOf(P, 70, 30) == 70 && st::forwardCmOf(R, 70, 30) == 30,
+                  "the radar alone with its forward key: the translation alone, by the radar's key; the key at 0: none; each group reads its own forward key");
+        }
         check(st::pushCmOf(st::Group::kPanels, 11, 22) == 11 && st::pushCmOf(st::Group::kRadar, 11, 22) == 22, "a group reads its own push key");
         check(!std::strcmp(st::groupName(st::Group::kPanels), "panels") && !std::strcmp(st::groupName(st::Group::kRadar), "radar"), "the groups are named panels and radar");
         // the validity test the constants apply (srv_turret_math.h paramsUsable)
@@ -1069,6 +1095,28 @@ static void moveCases(int fam, ID3D11GeometryShader* twin, Fails& f) {
         for (size_t i = 0; i < 3; ++i) all = all && std::memcmp(m.pre[i].data(), m.post[i].data(), 16) != 0;
         f.expect(all && closeTo(m.post[0][3], -0.2, 1e-5) && closeTo(m.post[1][3], 0.5, 1e-5) && closeTo(m.post[2][3], 0.5, 1e-5),
                  "(l) a triangle whose first corner the move puts 0.2 m behind the eye (the others 0.5 m ahead) is output with all three corners moved, none the unmoved input");
+    }
+    {   // (m) the two groups in one frame: the panels' constants translate by the HUD-forward T (0.7 m), the radar's by its own key (0.3 m), the same vertices, the same eye frame
+        const float tp[3] = {0.0f, 0.0f, 0.7f}, trd[3] = {0.0f, 0.0f, 0.3f};
+        const st::EyeFrame frame = frameOfCam(cam, nullptr, tp, trd);
+        const st::TurretParams panelsP = st::translateParamsFor(frame, st::Group::kPanels), radarP = st::translateParamsFor(frame, st::Group::kRadar);
+        const std::vector<Pt> pts = {dirPt(0, 0, 1, 0.5f), dirPt(0.2f, 0.1f, 1, 1.4f), dirPt(-0.3f, 0.25f, 1, 2.8f), Pt{0.0f, 0.0f, -0.2f}, Pt{0.05f, 0.02f, 0.9f}, Pt{-0.05f, 0.0f, 0.6f}};
+        const Captured mp = captureMove(fam, twin, pts, cam, panelsP);
+        const Captured mr = captureMove(fam, twin, pts, cam, radarP);
+        expectReference(f, "(m) the panels' constants: every vertex is the CPU reference's", panelsP, mp, int(pts.size()));
+        expectReference(f, "(m) the radar's constants: every vertex is the CPU reference's", radarP, mr, int(pts.size()));
+        bool own = true;
+        for (size_t i = 0; i < pts.size(); ++i) {
+            double pinP[3], poutP[3], pinR[3], poutR[3];
+            eyePos(mp.pre[i], cam, pinP);
+            eyePos(mp.post[i], cam, poutP);
+            eyePos(mr.pre[i], cam, pinR);
+            eyePos(mr.post[i], cam, poutR);
+            own = own && closeTo(poutP[2] - pinP[2], 0.7, 3e-5) && closeTo(poutR[2] - pinR[2], 0.3, 3e-5) && closeTo(poutP[0] - pinP[0], 0.0, 3e-5) && closeTo(poutR[0] - pinR[0], 0.0, 3e-5) &&
+                  closeTo(poutP[1] - pinP[1], 0.0, 3e-5) && closeTo(poutR[1] - pinR[1], 0.0, 3e-5);
+        }
+        f.expect(own && panelsP.tz == 0.7f && radarP.tz == 0.3f,
+                 "(m) one eye frame, two groups: the panels' vertices move 0.7 m along Z (the HUD-forward key) and the radar's 0.3 m (its own key), each only by its own");
     }
 }
 

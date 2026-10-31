@@ -9,12 +9,14 @@
 //     it published right after the one publisher's call.
 //   * srv_turret.cpp: the shaders are made from the build's bytecode through shaderSwapCreateGs (one for each signature, a missing one standing down only its own families); the
 //     module changes no state of the game's but through the binding class; both parts act on the turret view AND the Scorpion latch (and say the view without it); triangle lists
-//     and strips are carried; the five keys are read with the literal ranges and defaults the settings generator reads; a draw is counted and bound only when its family's group has a
-//     push, the gap or the HUD-forward key above 0 (the group's constants come from one place), the pass is wanted when any of the four HUD keys is above 0, the anchor is stepped by the
-//     frame tick with the head from the host's pose and cleared when the pass is not wanted, and each eye's frame is built from the host's pose with the tangents AND the jitter shift.
+//     and strips are carried; the six keys are read with the literal ranges and defaults the settings generator reads; a draw is counted and bound only when its family's group has a
+//     push, the gap or its own forward key (HUD forward for the panels, radar forward for the radar) above 0 (the group's constants come from one place), the pass is wanted when any of
+//     the five HUD keys is above 0, the anchor is stepped by the frame tick with the head from the host's pose and cleared when the pass is not wanted, each eye's frame is built from the
+//     host's pose with the tangents AND the jitter shift, and the DRAW rebuilds both eyes' frames from the pose of the frame being drawn (the frame sequence the host publishes in
+//     beginFrame, after the previous frame's boundary tick), once for each new sequence.
 //   * journal_watch.cpp, native_temporal.cpp: the accessors; the Scorpion latch is fed the tail's new bytes once (not the stitched head the scan reads twice), reset with the
 //     file, published to its accessor, and each change said once with its event.
-//   * edvr.ini: all five keys live in [fix] with their ui: lines and shipped defaults; the flat profile's allow-list names none (VR only).
+//   * edvr.ini: all six keys live in [fix] with their ui: lines and shipped defaults; the flat profile's allow-list names none (VR only).
 //   * the shader tables (tools/temporal_shader_build): the HLSL's header is included and the eight variants are registered as gs_5_0, each with its contract row.
 //   * build.bat: the module is in the DLL's compile list and this rig has its label.
 // Each pin has controls: an edited copy of the real text must trip it.
@@ -102,55 +104,70 @@ static bool wiredModule(const std::string& t) {
     const size_t finish = t.find("const auto done = g_binding.finish(ctx);");
     const size_t back = t.find("cfg.getIntInRange(\"fix.srv_turret_camera_back\", 0, 0, 150)");
     const size_t forward = t.find("cfg.getIntInRange(\"fix.srv_turret_hud_forward\", 70, 0, 150)");
+    const size_t radarForward = t.find("cfg.getIntInRange(\"fix.srv_turret_radar_forward\", 70, 0, 150)");
     const size_t panels = t.find("cfg.getIntInRange(\"fix.srv_turret_panels_back\", 120, 0, 200)");
     const size_t radar = t.find("cfg.getIntInRange(\"fix.srv_turret_radar_back\", 0, 0, 200)");
     const size_t gap = t.find("cfg.getIntInRange(\"fix.srv_turret_hud_gap\", 0, 0, 200)");
-    const size_t settings = t.find("\"srv turret settings: camera back %d cm, hud forward %d cm, panels back %d cm, radar back %d cm, hud gap %d cm (live; fix.srv_turret_camera_back, \"");
+    const size_t settings = t.find("\"srv turret settings: camera back %d cm, hud forward %d cm, radar forward %d cm, panels back %d cm, radar back %d cm, hud gap %d cm (live; fix.srv_turret_camera_back, \"");
     const size_t edge = t.find("\"srv turret view: %s at frame %u (Status.json Flags 0x%08X, seat kind 0x%X)\"");
     const size_t camera = t.find("\"srv turret camera: back %.2f m published (serial %u)\"");
     const size_t cleared = t.find("\"srv turret camera: back cleared (serial %u)\"");
-    const size_t line = t.find("\"srv turret hud: panels: %s; radar: %s; anchor=(%.3f,%.3f,%.3f) head_offset=%.1f cm T=(%.3f,%.3f,%.3f) ipd_elite=%.1fmm P00[L,R]=%.3f,%.3f draws[L,R]=%u,%u bound=%u \"");
+    const size_t line = t.find("\"srv turret hud: panels: %s; radar: %s; anchor=(%.3f,%.3f,%.3f) head_offset=%.1f cm T=(%.3f,%.3f,%.3f) Tradar=(%.3f,%.3f,%.3f) ipd_elite=%.1fmm P00[L,R]=%.3f,%.3f \"");
+    const size_t lineTail = found(line) ? t.find("\"draws[L,R]=%u,%u bound=%u pose refreshed at draw: %u of %u frames \"", line) : std::string::npos;
     // each group's constants come from one place (the push when above 0, else the pull, else the translation alone, else none), read by the draw, the 10 s line and nothing else; a draw whose
     // group is off is the game's own BEFORE it is counted, and the constants are built on the eye's published frame after it was read; the first-draw line names the direction of the move
     const size_t family = t.find("bool paramsOfGroup(st::Group group, const st::EyeFrame& frame, st::TurretParams& out) {");
-    const size_t select = found(family) ? t.find("return st::paramsForGroup(frame, st::pushCmOf(group, g_panelsCm.load(std::memory_order_relaxed), g_radarCm.load(std::memory_order_relaxed)), g_gapCm.load(std::memory_order_relaxed),", family) : std::string::npos;
+    const size_t select = found(family) ? t.find("return st::paramsForGroup(frame, group, st::pushCmOf(group, g_panelsCm.load(std::memory_order_relaxed), g_radarCm.load(std::memory_order_relaxed)), g_gapCm.load(std::memory_order_relaxed),", family) : std::string::npos;
+    // ...and the forward translation is the group's own key's: HUD forward for the panels, radar forward for the radar
+    const size_t ownForward = found(select) ? t.find("st::forwardCmOf(group, g_forwardCm.load(std::memory_order_relaxed), g_radarForwardCm.load(std::memory_order_relaxed)), out);", select) : std::string::npos;
     const size_t drawFn = t.find("bool srvTurretHudBegin(ID3D11DeviceContext* ctx, int family, int eye) {");
     const size_t groupOff = found(drawFn) ? t.find("if (!paramsOfGroup(group, st::EyeFrame{}, unused)) return false;", drawFn) : std::string::npos;
     const size_t counted = found(groupOff) ? t.find("g_familyDraws[family].fetch_add(1, std::memory_order_relaxed);", groupOff) : std::string::npos;
-    const size_t eyeRead = found(counted) ? t.find("if (!readEye(eye, frame)) {", counted) : std::string::npos;
+    const size_t eyeRead = found(counted) ? t.find("if (!drawEyeFrame(eye, frame)) {", counted) : std::string::npos;
     const size_t built = found(eyeRead) ? t.find("if (!paramsOfGroup(group, frame, params)) return false;", eyeRead) : std::string::npos;
     const size_t uploaded = found(built) ? t.find("g_constants[eye].get(ctx, params)", built) : std::string::npos;
     const size_t windowLn = t.find("groupWindow(panels, st::Group::kPanels);");
-    const bool groups = found(family) && found(select) && found(groupOff) && found(counted) && found(eyeRead) && found(built) && found(uploaded) && found(windowLn) && select - family < 300 &&
+    const bool groups = found(family) && found(select) && found(ownForward) && ownForward - select < 300 && found(groupOff) && found(counted) && found(eyeRead) && found(built) && found(uploaded) && found(windowLn) && select - family < 300 &&
                         found(t.find("\"moves %.2f m deeper\"")) && found(t.find("\"moves %.2f m nearer\"")) && found(t.find("\"does not move radially\"")) && found(t.find("groupWindow(radar, st::Group::kRadar);")) &&
                         !found(t.find("st::paramsFor(geo"));
     // nothing of the game's state is changed but through the binding class
     const bool rawSet = found(t.find("GSSetShader(")) || found(t.find("GSSetConstantBuffers(")) || found(t.find("UpdateSubresource("));
     // the geometry comes from the host's own head and eye matrices and frustum with the tangent shift the jitter adds (the game projects with the sum), the anchor is the tracker's, and a
-    // draw with none is refused, counted
-    const size_t cacheFn = t.find("void cacheGeometry(bool on, int backCm, int forwardCm) {");
-    const size_t pose = found(cacheFn) ? t.find("nativeTemporalHeadPose(&poseSequence, head, eyeToHead)", cacheFn) : std::string::npos;
-    const size_t step = found(pose) ? t.find("g_anchor.step(headAt, on, backCm, forwardCm)", pose) : std::string::npos;
-    const size_t said = found(step) ? t.find("\"srv turret anchor: latched at %.3f,%.3f,%.3f m seated (%s)\"", step) : std::string::npos;
-    const size_t geometry1 = found(said) ? t.find("nativeTemporalEyeGeometry(e, &sequence, tan, shift)", said) : std::string::npos;
+    // draw with none is refused, counted. Both eyes' frames are built by ONE function, from a pose and an anchor, called by the tick and by the draw
+    const size_t buildFn = t.find("void buildEyeFrames(const float head[12], const float eyeToHead[2][12], bool haveAnchor, const double anchor[3], int forwardCm, int radarForwardCm, st::EyeFrame frames[2], bool ok[2]) {");
+    const size_t geometry1 = found(buildFn) ? t.find("nativeTemporalEyeGeometry(e, &sequence, tan, shift)", buildFn) : std::string::npos;
     const size_t summed = found(geometry1) ? t.find("const float tangents[4] = {tan[0] + shift[0], tan[1] + shift[0], tan[2] + shift[1], tan[3] + shift[1]};", geometry1) : std::string::npos;
-    const size_t framed = found(summed) ? t.find("st::eyeFrameFrom(head, eyeToHead[e], g_anchor.anchor(), static_cast<double>(forwardCm) / 100.0, tangents, frame)", summed) : std::string::npos;
-    const bool geometry = found(cacheFn) && found(pose) && found(step) && found(said) && found(geometry1) && found(summed) && found(framed) && found(t.find("refuse(st::Refuse::kNoGeometry)"));
+    const size_t framed = found(summed) ? t.find("st::eyeFrameFrom(head, eyeToHead[e], anchor, static_cast<double>(forwardCm) / 100.0, static_cast<double>(radarForwardCm) / 100.0, tangents, frames[e])", summed) : std::string::npos;
+    const size_t cacheFn = t.find("void cacheGeometry(bool on, int backCm, int forwardCm, int radarForwardCm) {");
+    const size_t pose = found(cacheFn) ? t.find("nativeTemporalHeadPose(&poseSequence, head, eyeToHead)", cacheFn) : std::string::npos;
+    const size_t step = found(pose) ? t.find("g_anchor.step(headAt, on, backCm, forwardCm, radarForwardCm)", pose) : std::string::npos;
+    const size_t said = found(step) ? t.find("\"srv turret anchor: latched at %.3f,%.3f,%.3f m seated (%s)\"", step) : std::string::npos;
+    const size_t tickBuilt = found(said) ? t.find("buildEyeFrames(head, eyeToHead, haveAnchor, g_anchor.anchor(), forwardCm, radarForwardCm, frames, ok);", said) : std::string::npos;
+    // the draw: the frame sequence the host published when it took the frame being drawn is compared with the one the eye frames were built from, and the frames are rebuilt from that
+    // frame's pose for a new one (the tick runs at the previous boundary, before beginFrame, so its frames are a frame old); the anchor is the tick's, read from atomics
+    const size_t eyeFrameFn = t.find("bool drawEyeFrame(int eye, st::EyeFrame& out) {");
+    const size_t seqRead = found(eyeFrameFn) ? t.find("const uint64_t seq = nativeTemporalFrameSequence();", eyeFrameFn) : std::string::npos;
+    const size_t onceFor = found(seqRead) ? t.find("if (seq != 0 && seq != g_drawSeq) {", seqRead) : std::string::npos;
+    const size_t drawPose = found(onceFor) ? t.find("nativeTemporalHeadPose(&poseSequence, head, eyeToHead)", onceFor) : std::string::npos;
+    const size_t drawBuilt = found(drawPose) ? t.find("buildEyeFrames(head, eyeToHead, true, anchor, g_forwardCm.load(std::memory_order_relaxed), g_radarForwardCm.load(std::memory_order_relaxed), g_drawFrames, g_drawOk);", drawPose) : std::string::npos;
+    const size_t counted2 = found(onceFor) ? t.find("g_poseRefreshed.fetch_add(1, std::memory_order_relaxed);", onceFor) : std::string::npos;
+    const bool geometry = found(buildFn) && found(geometry1) && found(summed) && found(framed) && found(cacheFn) && found(pose) && found(step) && found(said) && found(tickBuilt) &&
+                          found(eyeFrameFn) && found(seqRead) && found(onceFor) && found(drawPose) && found(drawBuilt) && found(counted2) && found(t.find("refuse(st::Refuse::kNoGeometry)"));
     // the Scorpion only: both parts act on the turret view AND the latch (`on` is what g_backSeatedZ, the gate and the view edges are made from), and the view without it is said
     const size_t tick = t.find("void srvTurretFrameTick(uint32_t frameNo) {");
     const size_t turret = found(tick) ? t.find("const bool turret = journalSrvTurretView();", tick) : std::string::npos;
     const size_t on = found(turret) ? t.find("const bool on = turret && journalSrvScorpion();", turret) : std::string::npos;
     const size_t backZ = found(on) ? t.find("g_backSeatedZ = st::backSeatedZ(on, backCm);", on) : std::string::npos;
-    const size_t wanted = found(backZ) ? t.find("const bool wanted = on && (panelsCm > 0 || radarCm > 0 || forwardCm > 0 || gapCm > 0);", backZ) : std::string::npos;
-    const size_t cached = found(wanted) ? t.find("cacheGeometry(on, backCm, forwardCm);", wanted) : std::string::npos;
+    const size_t wanted = found(backZ) ? t.find("const bool wanted = on && (panelsCm > 0 || radarCm > 0 || forwardCm > 0 || radarForwardCm > 0 || gapCm > 0);", backZ) : std::string::npos;
+    const size_t cached = found(wanted) ? t.find("cacheGeometry(on, backCm, forwardCm, radarForwardCm);", wanted) : std::string::npos;
     const size_t cleared1 = found(cached) ? t.find("g_anchor.reset();", cached) : std::string::npos;
     const size_t ignored = found(wanted) ? t.find("\"srv turret view: not the Scorpion at frame %u (Status.json Flags 0x%08X, seat kind 0x%X): the turret view is on in an SRV the journal does not call the Scorpion, so the \"", on) : std::string::npos;
     const bool scorpion = found(turret) && found(on) && found(backZ) && found(wanted) && found(cached) && found(cleared1) && found(ignored);
     // lists and strips are carried, one signature's shader missing leaves the others' families bound
     const bool strips = found(t.find("!st::topologyCarried(static_cast<int>(topology))")) && found(t.find("bool ensureGs(ID3D11DeviceContext* ctx, uint32_t sig) {")) &&
                         found(t.find("return sig < kSigN && g_gs[sig] != nullptr;")) && found(t.find("const uint32_t sig = st::kFamilies[family].sig;"));
-    return found(made) && found(begin) && found(finish) && found(back) && found(forward) && found(panels) && found(radar) && found(gap) && found(settings) && found(edge) && found(camera) && found(cleared) &&
-           found(line) && !rawSet && geometry && scorpion && groups && strips && found(t.find("#include \"temporal_shader_bytecode.h\""));
+    return found(made) && found(begin) && found(finish) && found(back) && found(forward) && found(radarForward) && found(panels) && found(radar) && found(gap) && found(settings) && found(edge) &&
+           found(camera) && found(cleared) && found(line) && found(lineTail) && !rawSet && geometry && scorpion && groups && strips && found(t.find("#include \"temporal_shader_bytecode.h\""));
 }
 // journal_watch.cpp / .h: the Scorpion latch is fed every byte the tail reads, once (not from the stitched head scanEvents also scans), reset with the file, published to the
 // accessor, and each change is said once with the event that caused it.
@@ -173,11 +190,24 @@ static bool wiredLatch(const std::string& journal, const std::string& journalH) 
     return found(ranges) && found(feed) && found(carry) && ranges < feed && feed < carry && found(close) && found(reset) && found(note) && found(say) && found(publish) && publish < say &&
            applied && accessor && include && once;
 }
+// native_temporal.cpp: the frame sequence is a lock-free read published at the END of begin(), after the head, eyes, frusta and shift of that frame are copied, and cleared with the rest.
+static bool wiredFrameSequence(const std::string& temporal) {
+    const size_t copied = temporal.find("std::memcpy(s->head,f->head,sizeof(s->head));");
+    const size_t stored = found(copied) ? temporal.find("g_frameSequence.store(f->sequence,std::memory_order_release);", copied) : std::string::npos;
+    const size_t shifted = found(copied) ? temporal.find("edvr::lightGridCacheNoteJitter(s->frameCounter,jx,jy,s->shift);", copied) : std::string::npos;
+    size_t cleared = 0, at = 0;
+    while (found(at = temporal.find("g_recommended.store(0,std::memory_order_release);g_frameSequence.store(0,std::memory_order_release);", at))) {
+        ++cleared;
+        ++at;
+    }
+    return found(copied) && found(shifted) && found(stored) && shifted < stored && found(temporal.find("uint64_t nativeTemporalFrameSequence() { return g_frameSequence.load(std::memory_order_acquire); }")) &&
+           cleared == 2;   // cleared where the rest is: invalidate and close
+}
 static bool wiredAccessors(const std::string& journal, const std::string& temporal, const std::string& journalH) {
     return found(journal.find("bool journalSrvTurretView() { return !runtimeFlatProfile() && srv_turret::turretViewFromFlags(peek(g_v.flags)); }")) &&
            found(journalH.find("bool journalSrvTurretView();")) && found(temporal.find("bool nativeTemporalEyeSeparation(float* metres) {")) &&
            found(temporal.find("eyeSeparationOf(current->eyes[0], current->eyes[1])")) && found(temporal.find("bool nativeTemporalHeadPose(uint64_t* sequence, float head[12], float eyeToHead[2][12]) {")) &&
-           found(temporal.find("if (head) std::memcpy(head, s.head, sizeof(s.head));")) && found(temporal.find("if (eyeToHead) std::memcpy(eyeToHead, s.eyes, sizeof(s.eyes));"));
+           found(temporal.find("if (head) std::memcpy(head, s.head, sizeof(s.head));")) && found(temporal.find("if (eyeToHead) std::memcpy(eyeToHead, s.eyes, sizeof(s.eyes));")) && wiredFrameSequence(temporal);
 }
 
 // The GPU instrument: the issues are counted at the game's own issue and at the re-issues; the queries begin right after the bind and end right before the restore; the
@@ -214,16 +244,18 @@ static bool wiredInstrument(const std::string& vscreen, const std::string& t) {
 // edvr.ini and the flat allow-list.
 static bool wiredKeys(const std::string& ini, const std::string& flatKeys) {
     const size_t fix = ini.find("\n[fix]\n"), visual = ini.find("\n[visual]\n");
-    const size_t back = ini.find("\nsrv_turret_camera_back = 0\n"), forward = ini.find("\nsrv_turret_hud_forward = 70\n"), panels = ini.find("\nsrv_turret_panels_back = 120\n"),
-                 radar = ini.find("\nsrv_turret_radar_back = 0\n"), gap = ini.find("\nsrv_turret_hud_gap = 0\n");
-    if (!found(fix) || !found(visual) || !found(back) || !found(forward) || !found(panels) || !found(radar) || !found(gap)) return false;
-    const bool inFix = back > fix && back < visual && forward > fix && forward < visual && panels > fix && panels < visual && radar > fix && radar < visual && gap > fix && gap < visual;
+    const size_t back = ini.find("\nsrv_turret_camera_back = 0\n"), forward = ini.find("\nsrv_turret_hud_forward = 70\n"), radarForward = ini.find("\nsrv_turret_radar_forward = 70\n"),
+                 panels = ini.find("\nsrv_turret_panels_back = 120\n"), radar = ini.find("\nsrv_turret_radar_back = 0\n"), gap = ini.find("\nsrv_turret_hud_gap = 0\n");
+    if (!found(fix) || !found(visual) || !found(back) || !found(forward) || !found(radarForward) || !found(panels) || !found(radar) || !found(gap)) return false;
+    const bool inFix = back > fix && back < visual && forward > fix && forward < visual && radarForward > fix && radarForward < visual && panels > fix && panels < visual && radar > fix && radar < visual &&
+                       gap > fix && gap < visual;
     const size_t backUi = ini.rfind("# ui: SRV turret camera back | range 0..150 | step 5 | unit cm | zero exact | recommended 0 | live | menu", back),
                  forwardUi = ini.rfind("# ui: SRV turret HUD forward | range 0..150 | step 5 | unit cm | zero exact | recommended 70 | live | menu", forward),
+                 radarForwardUi = ini.rfind("# ui: SRV turret radar forward | range 0..150 | step 5 | unit cm | zero exact | recommended 70 | live | menu", radarForward),
                  panelsUi = ini.rfind("# ui: SRV turret panels back | range 0..200 | step 5 | unit cm | zero exact | recommended 120 | live | menu", panels),
                  radarUi = ini.rfind("# ui: SRV turret radar back | range 0..200 | step 5 | unit cm | zero exact | recommended 0 | live | menu", radar),
                  gapUi = ini.rfind("# ui: SRV turret HUD gap | range 0..200 | step 2 | unit cm | zero exact | recommended 0 | live | menu", gap);
-    const bool ui = found(backUi) && back - backUi < 200 && found(forwardUi) && forward - forwardUi < 200 && found(panelsUi) && panels - panelsUi < 200 && found(radarUi) && radar - radarUi < 200 &&
+    const bool ui = found(backUi) && back - backUi < 200 && found(forwardUi) && forward - forwardUi < 200 && found(radarForwardUi) && radarForward - radarForwardUi < 200 && found(panelsUi) && panels - panelsUi < 200 && found(radarUi) && radar - radarUi < 200 &&
                     found(gapUi) && gap - gapUi < 200;
     // VR only: the flat profile's allow-list reads none of the keys
     const bool flatClean = !found(flatKeys.find("srv_turret"));
@@ -293,17 +325,33 @@ static void wiringCases() {
     check(!wiredModule(replaced(module, "if (!paramsOfGroup(group, st::EyeFrame{}, unused)) return false;", "")), "control: a draw counted and refused before its group is known to be on trips the pin");
     check(!wiredModule(replaced(module, "if (!paramsOfGroup(group, frame, params)) return false;", "params = st::paramsFor(frame, 0.96f);")), "control: constants made from the pull alone (the push ignored) trip the pin");
     check(!wiredModule(replaced(module, "\"moves %.2f m deeper\"", "\"moves %.2f m nearer\"")), "control: a first-draw line that calls a push 'nearer' trips the pin");
-    check(!wiredModule(replaced(module, "g_anchor.step(headAt, on, backCm, forwardCm)", "g_anchor.step(headAt, on, backCm, backCm)")), "control: an anchor that does not see the HUD-forward key trips the pin");
+    check(!wiredModule(replaced(module, "g_anchor.step(headAt, on, backCm, forwardCm, radarForwardCm)", "g_anchor.step(headAt, on, backCm, backCm, radarForwardCm)")), "control: an anchor that does not see the HUD-forward key trips the pin");
+    check(!wiredModule(replaced(module, "g_anchor.step(headAt, on, backCm, forwardCm, radarForwardCm)", "g_anchor.step(headAt, on, backCm, forwardCm, forwardCm)")), "control: an anchor that does not see the radar-forward key trips the pin");
+    check(!wiredModule(replaced(module, "\"fix.srv_turret_radar_forward\", 70, 0, 150", "\"fix.srv_turret_radar_forward\", 60, 0, 150")), "control: a drifted default of the radar-forward key trips the pin");
+    check(!wiredModule(replaced(module, "\"fix.srv_turret_radar_forward\", 70, 0, 150", "\"fix.srv_turret_radar_forward\", 70, 0, 100")), "control: a drifted range of the radar-forward key trips the pin");
+    check(!wiredModule(replaced(module, "st::forwardCmOf(group, g_forwardCm.load(std::memory_order_relaxed), g_radarForwardCm.load(std::memory_order_relaxed)), out);", "g_forwardCm.load(std::memory_order_relaxed), out);")),
+          "control: the radar group made to use the HUD-forward distance (the thin sliver) trips the pin");
+    check(!wiredModule(replaced(module, "if (!drawEyeFrame(eye, frame)) {", "if (!readEye(eye, frame)) {")), "control: a draw that uses the tick's frames (a frame old) trips the pin");
+    check(!wiredModule(replaced(module, "const uint64_t seq = nativeTemporalFrameSequence();", "const uint64_t seq = g_tickSeq.load(std::memory_order_acquire);")),
+          "control: a draw that never sees a newer frame sequence than the tick built from trips the pin");
+    check(!wiredModule(replaced(module, "if (seq != 0 && seq != g_drawSeq) {", "if (seq != 0) {")), "control: a rebuild on every draw (not once for each new sequence) trips the pin");
+    check(!wiredModule(replaced(module, "g_poseRefreshed.fetch_add(1, std::memory_order_relaxed);", "")), "control: no count of the frames whose pose was refreshed at draw trips the pin");
+    check(!wiredModule(replaced(module, "buildEyeFrames(head, eyeToHead, true, anchor, g_forwardCm.load(std::memory_order_relaxed), g_radarForwardCm.load(std::memory_order_relaxed), g_drawFrames, g_drawOk);", "")),
+          "control: a draw that never rebuilds the eye frames trips the pin");
+    check(!wiredModule(replaced(module, "pose refreshed at draw: %u of %u frames", "pose refreshed")), "control: the 10 s line without the pose-refresh count trips the pin");
+    check(!wiredModule(replaced(module, "Tradar=(%.3f,%.3f,%.3f) ", "")), "control: the 10 s line without the radar group's T trips the pin");
     check(!wiredModule(replaced(module, "const float tangents[4] = {tan[0] + shift[0], tan[1] + shift[0], tan[2] + shift[1], tan[3] + shift[1]};", "const float tangents[4] = {tan[0], tan[1], tan[2], tan[3]};")),
           "control: tangents without the jitter shift (the game projects with the sum) trip the pin");
     check(!wiredModule(replaced(module, "        g_anchor.reset();", "        (void)0;")), "control: an anchor that survives the pass being off trips the pin");
     check(!wiredModule(without(module, "refuse(st::Refuse::kNoGeometry)")), "control: a draw with no geometry that is not refused trips the pin");
     check(!wiredModule(replaced(module, "const bool on = turret && journalSrvScorpion();", "const bool on = turret;")), "control: both parts acting on the turret view alone (the Scarab's too) trips the pin");
     check(!wiredModule(replaced(module, "g_backSeatedZ = st::backSeatedZ(on, backCm);", "g_backSeatedZ = st::backSeatedZ(turret, backCm);")), "control: a camera term made from the turret view, not the Scorpion's, trips the pin");
-    check(!wiredModule(replaced(module, "const bool wanted = on && (panelsCm > 0 || radarCm > 0 || forwardCm > 0 || gapCm > 0);", "const bool wanted = turret && (panelsCm > 0 || radarCm > 0 || forwardCm > 0 || gapCm > 0);")),
+    check(!wiredModule(replaced(module, "const bool wanted = on && (panelsCm > 0 || radarCm > 0 || forwardCm > 0 || radarForwardCm > 0 || gapCm > 0);", "const bool wanted = turret && (panelsCm > 0 || radarCm > 0 || forwardCm > 0 || radarForwardCm > 0 || gapCm > 0);")),
           "control: a HUD pass made from the turret view, not the Scorpion's, trips the pin");
-    check(!wiredModule(replaced(module, "const bool wanted = on && (panelsCm > 0 || radarCm > 0 || forwardCm > 0 || gapCm > 0);", "const bool wanted = on && gapCm > 0;")),
-          "control: a pass wanted by the gap alone (the push keys and the HUD-forward key cannot open it) trips the pin");
+    check(!wiredModule(replaced(module, "const bool wanted = on && (panelsCm > 0 || radarCm > 0 || forwardCm > 0 || radarForwardCm > 0 || gapCm > 0);", "const bool wanted = on && gapCm > 0;")),
+          "control: a pass wanted by the gap alone (the push keys and the forward keys cannot open it) trips the pin");
+    check(!wiredModule(replaced(module, "const bool wanted = on && (panelsCm > 0 || radarCm > 0 || forwardCm > 0 || radarForwardCm > 0 || gapCm > 0);", "const bool wanted = on && (panelsCm > 0 || radarCm > 0 || forwardCm > 0 || gapCm > 0);")),
+          "control: a pass the radar-forward key alone cannot open trips the pin");
     check(!wiredModule(replaced(module, "!st::topologyCarried(static_cast<int>(topology))", "topology != D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST")), "control: lists only (a strip refused) trips the pin");
     check(!wiredModule(replaced(module, "return sig < kSigN && g_gs[sig] != nullptr;", "return g_gs[0] != nullptr && g_gs[sig] != nullptr;")), "control: every family stood down by one signature's missing shader trips the pin");
     check(wiredLatch(journal, journalH), "journal_watch: the Scorpion latch is fed the tail's bytes once, reset with the file, published, and each change is said with its event");
@@ -324,10 +372,19 @@ static void wiringCases() {
     check(!wiredInstrument(vscreen, replaceAll(module, "D3D11_ASYNC_GETDATA_DONOTFLUSH", "0")), "control: a readback that flushes trips the pin");
     check(wiredAccessors(journal, temporal, journalH), "journal_watch and native_temporal: the turret bit and the eye separation accessors");
     check(!wiredAccessors(replaced(journal, "srv_turret::turretViewFromFlags(peek(g_v.flags))", "false"), temporal, journalH), "control: an accessor that answers false trips the pin");
-    check(wiredKeys(ini, flatKeys), "edvr.ini: all five keys in [fix] with their menu rows and shipped defaults; the flat profile's allow-list names none");
+    check(!wiredAccessors(journal, replaced(temporal, "g_frameSequence.store(f->sequence,std::memory_order_release);", ""), journalH), "control: a frame sequence that is never published trips the pin");
+    check(!wiredAccessors(journal, replaced(replaced(temporal, "  g_frameSequence.store(f->sequence,std::memory_order_release);   // last: the head, eyes, frusta and shift above are this frame's\n", ""),
+                                            "  edvr::lightGridCacheNoteJitter(s->frameCounter,jx,jy,s->shift);", "  g_frameSequence.store(f->sequence,std::memory_order_release);\n  edvr::lightGridCacheNoteJitter(s->frameCounter,jx,jy,s->shift);"), journalH),
+          "control: a frame sequence published before the shift is copied (a reader would see a half-built frame) trips the pin");
+    check(!wiredAccessors(journal, replaced(temporal, "g_recommended.store(0,std::memory_order_release);g_frameSequence.store(0,std::memory_order_release);", "g_recommended.store(0,std::memory_order_release);"), journalH),
+          "control: a frame sequence that survives an invalidate trips the pin");
+    check(wiredKeys(ini, flatKeys), "edvr.ini: all six keys in [fix] with their menu rows and shipped defaults; the flat profile's allow-list names none");
     check(!wiredKeys(replaced(ini, "\nsrv_turret_hud_gap = 0\n", "\nsrv_turret_hud_gap = 96\n"), flatKeys), "control: a drifted shipped default of the gap trips the pin");
     check(!wiredKeys(replaced(ini, "\nsrv_turret_panels_back = 120\n", "\nsrv_turret_panels_back = 110\n"), flatKeys), "control: a drifted shipped default of the panels' push trips the pin");
     check(!wiredKeys(replaced(ini, "\nsrv_turret_hud_forward = 70\n", "\nsrv_turret_hud_forward = 0\n"), flatKeys), "control: a drifted shipped default of the HUD-forward key trips the pin");
+    check(!wiredKeys(replaced(ini, "\nsrv_turret_radar_forward = 70\n", "\nsrv_turret_radar_forward = 0\n"), flatKeys), "control: a drifted shipped default of the radar-forward key trips the pin");
+    check(!wiredKeys(replaced(ini, "# ui: SRV turret radar forward | range 0..150 | step 5", "# ui: SRV turret radar forward | range 0..150 | step 10"), flatKeys), "control: a drifted menu row of the radar-forward key trips the pin");
+    check(!wiredKeys(ini, flatKeys + "\nsrv_turret_radar_forward\n"), "control: the radar-forward key on the flat allow-list trips the pin");
     check(!wiredKeys(replaced(ini, "\nsrv_turret_camera_back = 0\n", "\nsrv_turret_camera_back = 60\n"), flatKeys), "control: the camera key shipped at 60 trips the pin");
     check(!wiredKeys(replaced(ini, "# ui: SRV turret radar back | range 0..200 | step 5", "# ui: SRV turret radar back | range 0..200 | step 10"), flatKeys), "control: a drifted menu row of the radar's push trips the pin");
     check(!wiredKeys(ini, flatKeys + "\nsrv_turret_hud_gap\n"), "control: the gap key on the flat allow-list trips the pin");

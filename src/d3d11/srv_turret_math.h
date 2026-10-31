@@ -33,11 +33,13 @@
 // about a fixed anchor (see THE MOVE below). And at the game's own camera the whole turret HUD lies about 0.7 m too far back for the head (the radar behind it), so the whole HUD is
 // first translated forward (fix.srv_turret_hud_forward), which is the old camera move applied to the HUD only: the world keeps the game's camera.
 //
-// THE FIVE TEMPORARY KEYS (all live, all VR only, 0 = the game's own):
+// THE SIX TEMPORARY KEYS (all live, all VR only, 0 = the game's own):
 //   fix.srv_turret_camera_back  centimetres, 0..150, default 0: the camera moves back in the turret view, over the turret's axis (the stock camera is the plan; the HUD-forward key
 //                               replaces this). Part 1: published as the seated z of the eye alignment (alignTick), the single publisher of that alignment, so its serials stay coherent.
-//   fix.srv_turret_hud_forward  centimetres, 0..150, default 70: every vertex of every HUD family moves forward along the turret by this much (seated -z), so the HUD sits in front of
-//                               the head as it did with the old camera move while the game's own camera stays.
+//   fix.srv_turret_hud_forward  centimetres, 0..150, default 70: every vertex of the panels group (Group::kPanels: the two hologram families) moves forward along the turret by this much
+//                               (seated -z), so the panels sit in front of the head as they did with the old camera move while the game's own camera stays.
+//   fix.srv_turret_radar_forward centimetres, 0..150, default 70: the same for the radar group (Group::kRadar), instead of the HUD-forward value, so it can stay near field and be seen
+//                               from above (carried level with the head the disc is seen edge-on).
 //   fix.srv_turret_panels_back  centimetres, 0..200, default 120: the weapon panels (Group::kPanels: the two hologram families) go this much deeper where they lie within kPushSplitM of
 //                               the anchor; the larger panels of the same families, at 1.3 m and more, stay. Part 2: a private pass-through geometry shader per output signature
 //                               (srv_turret_hud_shader.h) around every issue of the families' draws; the rule is per vertex.
@@ -59,6 +61,7 @@ namespace srv_turret {
 // ---- the keys -------------------------------------------------------------------------------------------------------------------------------------------------
 inline constexpr int kBackDefaultCm = 0, kBackMaxCm = 150;
 inline constexpr int kForwardDefaultCm = 70, kForwardMaxCm = 150;   // fix.srv_turret_hud_forward
+inline constexpr int kRadarForwardDefaultCm = 70, kRadarForwardMaxCm = 150;   // fix.srv_turret_radar_forward
 inline constexpr int kGapDefaultCm = 0, kGapMaxCm = 200;
 inline constexpr int kPanelsDefaultCm = 120, kRadarDefaultCm = 0, kPushMaxCm = 200;   // fix.srv_turret_panels_back and fix.srv_turret_radar_back
 
@@ -226,10 +229,12 @@ static_assert(sizeof(TurretParams) == 64, "the turret shader's cbuffer is four 1
 struct EyeFrame {
     float l = 0.0f, r = 0.0f, dn = 0.0f, up = 0.0f;
     float a[3] = {0.0f, 0.0f, 0.0f};
-    float t[3] = {0.0f, 0.0f, 0.0f};
+    float t[3] = {0.0f, 0.0f, 0.0f};        // the panels group's translation (fix.srv_turret_hud_forward)
+    float tRadar[3] = {0.0f, 0.0f, 0.0f};   // the radar group's (fix.srv_turret_radar_forward)
 };
 
-inline TurretParams makeParams(const EyeFrame& e, float gapM, float dMin, float dMax) {
+inline TurretParams makeParams(const EyeFrame& e, float gapM, float dMin, float dMax, Group group = Group::kPanels) {
+    const float* t = group == Group::kRadar ? e.tRadar : e.t;
     TurretParams p;
     p.gap = gapM;
     p.dMin = dMin;
@@ -241,34 +246,36 @@ inline TurretParams makeParams(const EyeFrame& e, float gapM, float dMin, float 
     p.ax = e.a[0];
     p.ay = e.a[1];
     p.az = e.a[2];
-    p.tx = e.t[0];
-    p.ty = e.t[1];
-    p.tz = e.t[2];
+    p.tx = t[0];
+    p.ty = t[1];
+    p.tz = t[2];
     return p;
 }
-inline TurretParams paramsFor(const EyeFrame& e, float gapM) { return makeParams(e, gapM, gapM + kWindowNearM, kWindowFarM); }
+inline TurretParams paramsFor(const EyeFrame& e, float gapM, Group group = Group::kPanels) { return makeParams(e, gapM, gapM + kWindowNearM, kWindowFarM, group); }
 // The push: a negative gap. A vertex within 1 m of the anchor moves backM metres deeper along its ray from it.
-inline TurretParams pushParamsFor(const EyeFrame& e, float backM) { return makeParams(e, -backM, kPushNearM, kPushSplitM); }
+inline TurretParams pushParamsFor(const EyeFrame& e, float backM, Group group = Group::kPanels) { return makeParams(e, -backM, kPushNearM, kPushSplitM, group); }
 // The translation alone: no radial move (gap 0), every vertex moves by T.
-inline TurretParams translateParamsFor(const EyeFrame& e) { return makeParams(e, 0.0f, kPushNearM, kPushSplitM); }
+inline TurretParams translateParamsFor(const EyeFrame& e, Group group = Group::kPanels) { return makeParams(e, 0.0f, kPushNearM, kPushSplitM, group); }
 
-// Which constants a group's draws run with, from its push key, the gap key and the HUD-forward key (centimetres): the push when above 0, else the pull when the gap is above 0, else the
-// translation alone when the HUD-forward key is above 0 (the eye frame's T carries it), else none (false: the draw goes through as the game made it). The translation is in every case.
-inline bool paramsForGroup(const EyeFrame& e, int pushCm, int gapCm, int forwardCm, TurretParams& out) {
+// Which constants a group's draws run with, from its push key, the gap key and its forward key (centimetres; the panels' is fix.srv_turret_hud_forward, the radar's
+// fix.srv_turret_radar_forward): the push when above 0, else the pull when the gap is above 0, else the translation alone when the group's forward key is above 0 (the eye frame's T for the
+// group carries it), else none (false: the draw goes through as the game made it). The group's translation is in every case.
+inline bool paramsForGroup(const EyeFrame& e, Group group, int pushCm, int gapCm, int forwardCm, TurretParams& out) {
     if (pushCm > 0) {
-        out = pushParamsFor(e, static_cast<float>(pushCm > kPushMaxCm ? kPushMaxCm : pushCm) / 100.0f);
+        out = pushParamsFor(e, static_cast<float>(pushCm > kPushMaxCm ? kPushMaxCm : pushCm) / 100.0f, group);
         return true;
     }
     if (gapCm > 0) {
-        out = paramsFor(e, static_cast<float>(gapCm > kGapMaxCm ? kGapMaxCm : gapCm) / 100.0f);
+        out = paramsFor(e, static_cast<float>(gapCm > kGapMaxCm ? kGapMaxCm : gapCm) / 100.0f, group);
         return true;
     }
     if (forwardCm > 0) {
-        out = translateParamsFor(e);
+        out = translateParamsFor(e, group);
         return true;
     }
     return false;
 }
+inline int forwardCmOf(Group g, int hudForwardCm, int radarForwardCm) { return g == Group::kPanels ? hudForwardCm : radarForwardCm; }
 inline int pushCmOf(Group g, int panelsCm, int radarCm) { return g == Group::kPanels ? panelsCm : radarCm; }
 
 // The constants a shader may be given (the binding's validity test, written here so the rig can run it): all finite; |gap| <= 2 m; a window above the gap and above 0 (dMax > dMin > max(gap, 0)),
@@ -339,14 +346,14 @@ inline double anchorDistanceOfClip(const TurretParams& p, const float c[4]) {
 
 // ---- the anchor ---------------------------------------------------------------------------------------------------------------------------------------------------------
 // The fixed point in the seated frame the move is made about: the head's position when the turret view came on. It is taken again (and the module says so in the log, once each) when
-// the turret view comes on, when fix.srv_turret_camera_back or fix.srv_turret_hud_forward changes, when the head jumps more than kRecentreJumpM between two frames (a recentre), and when
+// the turret view comes on, when fix.srv_turret_camera_back, fix.srv_turret_hud_forward or fix.srv_turret_radar_forward changes, when the head jumps more than kRecentreJumpM between two frames (a recentre), and when
 // the head has stayed more than kAwayM from it for kAwayFrames frames in a row (whatever the cause: a safety net, "head away"). Below kAwayM nothing changes, so leaning keeps the
 // real-panel behaviour.
 // The camera keys take a moment to reach the pose (the runtime applies the alignment at its next poll), so after the view comes on or a key changes the anchor FOLLOWS the head
 // (the move then behaves like the old per-eye shift) until kAnchorSettleFrames frames have MOVED it and is latched then. A frame counts only when the head differs from the previous
 // frame's by more than kFrozenPoseM: the headset's pose can be frozen for seconds (the flight of b5c49237: the same bits from the launch to the turret view and on, then live), and an
 // anchor latched on a frozen pose is a point a metre from the head when the pose goes live. The first frame, with no previous, is not counted. A recentre latches at once.
-enum class AnchorReason : uint8_t { kNone = 0, kViewOn, kCameraBack, kHudForward, kRecentre, kHeadAway };
+enum class AnchorReason : uint8_t { kNone = 0, kViewOn, kCameraBack, kHudForward, kRecentre, kHeadAway, kRadarForward };
 inline const char* anchorReasonName(AnchorReason r) {
     switch (r) {
         case AnchorReason::kViewOn: return "view on";
@@ -354,6 +361,7 @@ inline const char* anchorReasonName(AnchorReason r) {
         case AnchorReason::kHudForward: return "HUD forward changed";
         case AnchorReason::kRecentre: return "recentre";
         case AnchorReason::kHeadAway: return "head away";
+        case AnchorReason::kRadarForward: return "radar forward changed";
         default: return "none";
     }
 }
@@ -364,7 +372,7 @@ inline constexpr double kAwayM = 0.35;             // the head farther than this
 inline constexpr uint32_t kAwayFrames = 90;        // ... for this many frames in a row (about a second at 90 Hz) takes the anchor again
 class AnchorTracker {
     bool active_ = false, valid_ = false, prevValid_ = false;
-    int backKey_ = 0, forwardKey_ = 0;
+    int backKey_ = 0, forwardKey_ = 0, radarForwardKey_ = 0;
     AnchorReason pending_ = AnchorReason::kNone;
     uint32_t settle_ = 0, awayFrames_ = 0;
     double a_[3] = {0.0, 0.0, 0.0}, prev_[3] = {0.0, 0.0, 0.0};
@@ -380,8 +388,8 @@ public:
     const double* anchor() const { return a_; }
     bool settling() const { return pending_ != AnchorReason::kNone; }
     void reset() { *this = AnchorTracker(); }
-    // One call a frame while the pass is wanted, with the head's seated position and the two camera keys. Returns the reason when the anchor was latched THIS frame, else kNone.
-    AnchorReason step(const double head[3], bool on, int backCm, int forwardCm) {
+    // One call a frame while the pass is wanted, with the head's seated position and the camera keys. Returns the reason when the anchor was latched THIS frame, else kNone.
+    AnchorReason step(const double head[3], bool on, int backCm, int forwardCm, int radarForwardCm = 0) {
         if (!on) {
             reset();
             return AnchorReason::kNone;
@@ -401,9 +409,14 @@ public:
                 pending_ = AnchorReason::kHudForward;
                 settle_ = kAnchorSettleFrames;
             }
+            if (radarForwardCm != radarForwardKey_) {
+                pending_ = AnchorReason::kRadarForward;
+                settle_ = kAnchorSettleFrames;
+            }
         }
         backKey_ = backCm;
         forwardKey_ = forwardCm;
+        radarForwardKey_ = radarForwardCm;
         AnchorReason latched = AnchorReason::kNone;
         const double dx = head[0] - prev_[0], dy = head[1] - prev_[1], dz = head[2] - prev_[2];
         const double delta = prevValid_ ? std::sqrt(dx * dx + dy * dy + dz * dz) : 0.0;
@@ -438,14 +451,14 @@ public:
 // head and eyeToHead are the host's 3x4 matrices, row-major (m[i * 4 + j], the translation in m[3], m[7], m[11]), in the OpenVR seated space the game is given (x right, y up, z
 // BACK; forward is -z), the eye's own frame hanging off the head's (native_temporal.cpp nativeTemporalHeadPose). The eye's position and rotation are E = head * eyeToHead. The anchor in the
 // eye's frame is v = R_e^T (A - E), turned into the shader's axes (x, y, -z) so that Z is the forward distance (clip w). The HUD-forward translation is (0, 0, -F) in the seated frame
-// (forward), turned the same way. tangents are {left, right, down, up} plus the eye jitter's tangent shift (the game projects with those). False when anything is not finite or the
-// tangents are not a frustum.
-inline bool eyeFrameFrom(const float head[12], const float eyeToHead[12], const double anchor[3], double forwardM, const float tangents[4], EyeFrame& out) {
+// (forward), turned the same way, for each group's forward distance (the panels', the radar's). tangents are {left, right, down, up} plus the eye jitter's tangent shift (the game
+// projects with those). False when anything is not finite or the tangents are not a frustum.
+inline bool eyeFrameFrom(const float head[12], const float eyeToHead[12], const double anchor[3], double forwardM, double radarForwardM, const float tangents[4], EyeFrame& out) {
     for (int i = 0; i < 12; ++i)
         if (!std::isfinite(head[i]) || !std::isfinite(eyeToHead[i])) return false;
     for (int i = 0; i < 4; ++i)
         if (!std::isfinite(tangents[i])) return false;
-    if (!(tangents[1] > tangents[0]) || !(tangents[3] > tangents[2]) || !std::isfinite(forwardM)) return false;
+    if (!(tangents[1] > tangents[0]) || !(tangents[3] > tangents[2]) || !std::isfinite(forwardM) || !std::isfinite(radarForwardM)) return false;
     double R[3][3], E[3];
     for (int i = 0; i < 3; ++i) {
         for (int j = 0; j < 3; ++j) {
@@ -455,11 +468,12 @@ inline bool eyeFrameFrom(const float head[12], const float eyeToHead[12], const 
         E[i] = head[i * 4 + 3];
         for (int k = 0; k < 3; ++k) E[i] += double(head[i * 4 + k]) * eyeToHead[k * 4 + 3];
     }
-    double v[3], tv[3];
+    double v[3], tv[3], tr[3];
     for (int j = 0; j < 3; ++j) {
         v[j] = 0.0;
         for (int i = 0; i < 3; ++i) v[j] += R[i][j] * (anchor[i] - E[i]);
-        tv[j] = R[2][j] * (-forwardM);   // R^T (0, 0, -F)
+        tv[j] = R[2][j] * (-forwardM);        // R^T (0, 0, -F)
+        tr[j] = R[2][j] * (-radarForwardM);   // ... for the radar
     }
     out.l = tangents[0];
     out.r = tangents[1];
@@ -471,7 +485,11 @@ inline bool eyeFrameFrom(const float head[12], const float eyeToHead[12], const 
     out.t[0] = static_cast<float>(tv[0]);
     out.t[1] = static_cast<float>(tv[1]);
     out.t[2] = static_cast<float>(-tv[2]);
-    return std::isfinite(out.a[0]) && std::isfinite(out.a[1]) && std::isfinite(out.a[2]) && std::isfinite(out.t[0]) && std::isfinite(out.t[1]) && std::isfinite(out.t[2]);
+    out.tRadar[0] = static_cast<float>(tr[0]);
+    out.tRadar[1] = static_cast<float>(tr[1]);
+    out.tRadar[2] = static_cast<float>(-tr[2]);
+    return std::isfinite(out.a[0]) && std::isfinite(out.a[1]) && std::isfinite(out.a[2]) && std::isfinite(out.t[0]) && std::isfinite(out.t[1]) && std::isfinite(out.t[2]) &&
+           std::isfinite(out.tRadar[0]) && std::isfinite(out.tRadar[1]) && std::isfinite(out.tRadar[2]);
 }
 
 // P00 of an eye's projection as Elite renders it, from the tangents {left, right, down, up}: the NDC span 2 over the tangent span. 0 when the tangents are not a frustum (the log prints it).

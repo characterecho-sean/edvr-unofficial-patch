@@ -4143,7 +4143,7 @@ REM kSrvTurretHudGsHBytecode, one for each distinct vertex-shader output signatu
 REM compile), the production binding, constants and maths, run on WARP (with the D3D debug layer when the machine has it) in front of stand-ins for the nine families' shader pairs (the two hologram
 REM families, five radar-named billboard families and the target hologram sphere with either pixel shader) with their output signatures and clip rows: the 3D move about an anchor (every vertex
 REM translated forward, then pushed deeper or pulled nearer along its ray from the anchor), read vertex by vertex through the stream-output twin against a CPU reference in doubles and against the
-REM geometry itself (anchor at the eye, anchor off the eye, asymmetric tangents, the window, a pull, the translation alone and with the push, a vertex 15 cm from the anchor), the pictures against the
+REM geometry itself (anchor at the eye, anchor off the eye, asymmetric tangents, the window, a pull, the translation alone and with the push, a vertex 15 cm from the anchor, the panels' and the radar's groups translated by their own keys in one frame), the pictures against the
 REM quad truly moved, a triangle strip where the same quad as a list lands, the anchor tracker and the eye frame from a pose, the linkage under the debug layer with its control, the binding's
 REM in-and-out with the game's geometry stage and constant slot exactly back, the constants, the groups, the GPU instrument's statistics and stream-output capture, the Scorpion latch fed a journal
 REM in every split; fourteen mutants of the shader body in all eight signatures, each caught. --wiring scans the

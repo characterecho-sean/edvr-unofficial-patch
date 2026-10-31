@@ -1,4 +1,4 @@
-// The SRV turret view (issue 140): the module. srv_turret.h says what it does and what the log shows; srv_turret_math.h has the maths, the families and the five TEMPORARY
+// The SRV turret view (issue 140): the module. srv_turret.h says what it does and what the log shows; srv_turret_math.h has the maths, the families and the six TEMPORARY
 // keys; srv_turret_hud_binding.h holds the constants and the binding, which tools/srv_turret_hud_test runs on WARP; srv_turret_hud_shader.h is the geometry shaders' HLSL,
 // compiled at build time.
 #include "srv_turret.h"
@@ -38,15 +38,16 @@ namespace st = srv_turret;
 
 namespace {
 
-static_assert(st::kBackDefaultCm == 0 && st::kBackMaxCm == 150 && st::kForwardDefaultCm == 70 && st::kForwardMaxCm == 150 && st::kPanelsDefaultCm == 120 && st::kRadarDefaultCm == 0 &&
+static_assert(st::kBackDefaultCm == 0 && st::kBackMaxCm == 150 && st::kForwardDefaultCm == 70 && st::kForwardMaxCm == 150 && st::kRadarForwardDefaultCm == 70 && st::kRadarForwardMaxCm == 150 &&
+                  st::kPanelsDefaultCm == 120 && st::kRadarDefaultCm == 0 &&
                   st::kPushMaxCm == 200 && st::kGapDefaultCm == 0 && st::kGapMaxCm == 200,
-              "the literals in the five reads below are these, written as numbers for tools/gen_settings_schema.py");
+              "the literals in the six reads below are these, written as numbers for tools/gen_settings_schema.py");
 constexpr uint32_t kFamilyN = st::kFamilyCount, kSigN = st::kSignatureCount;   // the draws' families, and the geometry shaders (one for each distinct output signature)
 
 // ---- the frame thread's state ----------------------------------------------------------------------------------------------------------------------------------
 bool g_keysRead = false;
 uint32_t g_keysGeneration = 0;
-std::atomic<int> g_backCm{0}, g_forwardCm{0}, g_panelsCm{0}, g_radarCm{0}, g_gapCm{0};   // TEMPORARY keys, as last read (the four HUD keys are read by the draw path too)
+std::atomic<int> g_backCm{0}, g_forwardCm{0}, g_radarForwardCm{0}, g_panelsCm{0}, g_radarCm{0}, g_gapCm{0};   // TEMPORARY keys, as last read (the five HUD keys are read by the draw path too)
 bool g_on = false;                          // the Scorpion's turret view, as the frame tick last saw it
 bool g_ignored = false;                     // the turret view is on but the vehicle is not the Scorpion: said once for each stay
 double g_backSeatedZ = 0.0;                 // what alignTick adds
@@ -58,7 +59,7 @@ uint64_t g_windowStartMs = 0;
 // translation in the eye's space. Written by the frame tick, read by the draw path under a sequence lock (the version is odd while the tick writes).
 struct EyeSlot {
     std::atomic<uint32_t> version{0};
-    std::atomic<float> v[10] = {};   // l, r, dn, up, the anchor (3), the translation (3)
+    std::atomic<float> v[13] = {};   // l, r, dn, up, the anchor (3), the panels' translation (3), the radar's (3)
     std::atomic<bool> ok{false};
 };
 EyeSlot g_eyeSlot[2];
@@ -66,10 +67,23 @@ std::atomic<float> g_ipd{0.0f};
 // What the 10 s line says of it (log only): the anchor in the seated frame, the head's distance from it, eye 0's translation in the shader's axes.
 std::atomic<float> g_anchorLog[3] = {}, g_headOffsetCm{0.0f}, g_translationLog[3] = {};
 st::AnchorTracker g_anchor;   // the frame thread's
+std::atomic<float> g_translationRadarLog[3] = {};
+// What the draw path needs of the tick: the anchor the tracker holds (valid or following), and the pose sequence the tick built its eye frames from.
+std::atomic<double> g_anchorPos[3] = {};
+std::atomic<bool> g_anchorOk{false};
+std::atomic<uint64_t> g_tickSeq{0};
+// The draw path's own eye frames, the render thread's alone. The boundary tick runs BEFORE the host takes the next frame (native_temporal.cpp begin(), when the game starts the frame),
+// so the frames the tick built for frame N come from frame N-1's pose: a head turn of 100 degrees a second is 1.1 degrees a frame, and the translation (0.7 m) and the push (times
+// (d - gap) / d, 5 to 6) amplify that into a visible judder. The draw path therefore rebuilds the eye frames once per new frame sequence (nativeTemporalFrameSequence) from the pose of the
+// frame being drawn and the tick's anchor; the counters say how often that found a pose newer than the tick's (the 10 s line).
+uint64_t g_drawSeq = 0;
+st::EyeFrame g_drawFrames[2];
+bool g_drawOk[2] = {};
+std::atomic<uint32_t> g_poseFrames{0}, g_poseRefreshed{0};
 void publishEye(EyeSlot& slot, const st::EyeFrame& f, bool ok) {
     slot.version.fetch_add(1, std::memory_order_release);
-    const float values[10] = {f.l, f.r, f.dn, f.up, f.a[0], f.a[1], f.a[2], f.t[0], f.t[1], f.t[2]};
-    for (int i = 0; i < 10; ++i) slot.v[i].store(values[i], std::memory_order_relaxed);
+    const float values[13] = {f.l, f.r, f.dn, f.up, f.a[0], f.a[1], f.a[2], f.t[0], f.t[1], f.t[2], f.tRadar[0], f.tRadar[1], f.tRadar[2]};
+    for (int i = 0; i < 13; ++i) slot.v[i].store(values[i], std::memory_order_relaxed);
     slot.ok.store(ok, std::memory_order_relaxed);
     slot.version.fetch_add(1, std::memory_order_release);
 }
@@ -79,8 +93,8 @@ bool readEye(int eye, st::EyeFrame& f) {
     for (int tries = 0; tries < 4; ++tries) {
         const uint32_t before = slot.version.load(std::memory_order_acquire);
         if (before & 1u) continue;
-        float values[10];
-        for (int i = 0; i < 10; ++i) values[i] = slot.v[i].load(std::memory_order_relaxed);
+        float values[13];
+        for (int i = 0; i < 13; ++i) values[i] = slot.v[i].load(std::memory_order_relaxed);
         const bool ok = slot.ok.load(std::memory_order_relaxed);
         std::atomic_thread_fence(std::memory_order_acquire);
         if (slot.version.load(std::memory_order_relaxed) != before) continue;
@@ -91,6 +105,7 @@ bool readEye(int eye, st::EyeFrame& f) {
         for (int i = 0; i < 3; ++i) {
             f.a[i] = values[4 + i];
             f.t[i] = values[7 + i];
+            f.tRadar[i] = values[10 + i];
         }
         return ok;
     }
@@ -199,36 +214,53 @@ void readKeys() {
     if (g_keysRead && generation == g_keysGeneration) return;
     const int back = cfg.getIntInRange("fix.srv_turret_camera_back", 0, 0, 150);
     const int forward = cfg.getIntInRange("fix.srv_turret_hud_forward", 70, 0, 150);
+    const int radarForward = cfg.getIntInRange("fix.srv_turret_radar_forward", 70, 0, 150);
     const int panels = cfg.getIntInRange("fix.srv_turret_panels_back", 120, 0, 200);
     const int radar = cfg.getIntInRange("fix.srv_turret_radar_back", 0, 0, 200);
     const int gap = cfg.getIntInRange("fix.srv_turret_hud_gap", 0, 0, 200);
     const bool changed = !g_keysRead || back != g_backCm.load(std::memory_order_relaxed) || forward != g_forwardCm.load(std::memory_order_relaxed) ||
-                         panels != g_panelsCm.load(std::memory_order_relaxed) || radar != g_radarCm.load(std::memory_order_relaxed) || gap != g_gapCm.load(std::memory_order_relaxed);
+                         radarForward != g_radarForwardCm.load(std::memory_order_relaxed) || panels != g_panelsCm.load(std::memory_order_relaxed) || radar != g_radarCm.load(std::memory_order_relaxed) || gap != g_gapCm.load(std::memory_order_relaxed);
     g_keysRead = true;
     g_keysGeneration = generation;
     g_backCm.store(back, std::memory_order_relaxed);
     g_forwardCm.store(forward, std::memory_order_relaxed);
+    g_radarForwardCm.store(radarForward, std::memory_order_relaxed);
     g_panelsCm.store(panels, std::memory_order_relaxed);
     g_radarCm.store(radar, std::memory_order_relaxed);
     g_gapCm.store(gap, std::memory_order_relaxed);
     if (changed)
-        Log::get().note("srv turret settings: camera back %d cm, hud forward %d cm, panels back %d cm, radar back %d cm, hud gap %d cm (live; fix.srv_turret_camera_back, "
-                        "fix.srv_turret_hud_forward, fix.srv_turret_panels_back, fix.srv_turret_radar_back and fix.srv_turret_hud_gap, TEMPORARY; 0 is the game's own)",
-                        back, forward, panels, radar, gap);
+        Log::get().note("srv turret settings: camera back %d cm, hud forward %d cm, radar forward %d cm, panels back %d cm, radar back %d cm, hud gap %d cm (live; fix.srv_turret_camera_back, "
+                        "fix.srv_turret_hud_forward, fix.srv_turret_radar_forward, fix.srv_turret_panels_back, fix.srv_turret_radar_back and fix.srv_turret_hud_gap, TEMPORARY; 0 is the game's own)",
+                        back, forward, radarForward, panels, radar, gap);
 }
 
 // The constants a group's draws run with at the keys in force, on this eye frame: the group's push-back when above 0, else the pull when the gap is above 0, else the translation alone
-// when the HUD-forward key is above 0, else none (false: the draw is the game's own).
+// when the group's forward key is above 0 (HUD forward for the panels, radar forward for the radar), else none (false: the draw is the game's own).
 bool paramsOfGroup(st::Group group, const st::EyeFrame& frame, st::TurretParams& out) {
-    return st::paramsForGroup(frame, st::pushCmOf(group, g_panelsCm.load(std::memory_order_relaxed), g_radarCm.load(std::memory_order_relaxed)), g_gapCm.load(std::memory_order_relaxed),
-                              g_forwardCm.load(std::memory_order_relaxed), out);
+    return st::paramsForGroup(frame, group, st::pushCmOf(group, g_panelsCm.load(std::memory_order_relaxed), g_radarCm.load(std::memory_order_relaxed)), g_gapCm.load(std::memory_order_relaxed),
+                              st::forwardCmOf(group, g_forwardCm.load(std::memory_order_relaxed), g_radarForwardCm.load(std::memory_order_relaxed)), out);
 }
 
-// The pose, the tangents and the anchor of the frame being drawn, as the host gave them this frame (native_temporal.cpp: nativeTemporalHeadPose is the head and eye matrices Elite is
-// given, nativeTemporalEyeGeometry the eye's frustum and the tangent shift the eye jitter moves it by; the game projects with the sum). The anchor is the head's seated position, taken by
-// the tracker (srv_turret_math.h AnchorTracker); each eye's frame holds the anchor and the HUD-forward translation in its own space. An eye that cannot be built is published not ok and its
-// draws are refused (no-geometry).
-void cacheGeometry(bool on, int backCm, int forwardCm) {
+// Both eyes' frames from a head and eye pose and an anchor: the tangents are the eye's frustum the host gave plus the tangent shift the eye jitter moves it by (nativeTemporalEyeGeometry; the
+// game projects with the sum); each frame holds the anchor and the two groups' forward translations in the eye's own space. ok[e] is false for an eye that cannot be built (no anchor, no
+// frustum, not a frame): its draws are refused (no-geometry).
+void buildEyeFrames(const float head[12], const float eyeToHead[2][12], bool haveAnchor, const double anchor[3], int forwardCm, int radarForwardCm, st::EyeFrame frames[2], bool ok[2]) {
+    for (uint32_t e = 0; e < 2; ++e) {
+        float tan[4] = {}, shift[2] = {};
+        uint64_t sequence = 0;
+        const bool haveTan = nativeTemporalEyeGeometry(e, &sequence, tan, shift);
+        const float tangents[4] = {tan[0] + shift[0], tan[1] + shift[0], tan[2] + shift[1], tan[3] + shift[1]};
+        ok[e] = haveAnchor && haveTan && st::p00Usable(st::p00OfTangents(tangents)) &&
+                st::eyeFrameFrom(head, eyeToHead[e], anchor, static_cast<double>(forwardCm) / 100.0, static_cast<double>(radarForwardCm) / 100.0, tangents, frames[e]);
+        if (!ok[e]) frames[e] = st::EyeFrame{};
+    }
+}
+
+// The pose, the tangents and the anchor as the host gave them at this frame boundary (native_temporal.cpp: nativeTemporalHeadPose is the head and eye matrices Elite is given). The anchor
+// is the head's seated position, taken by the tracker (srv_turret_math.h AnchorTracker); each eye's frame holds the anchor and the translations in its own space. This is the tick's
+// side: it steps the anchor, publishes it for the draw path, and publishes frames for the log and as the draw path's fallback; the frames the draws use are rebuilt at draw time
+// (drawEyeFrame), from the pose of the frame being drawn.
+void cacheGeometry(bool on, int backCm, int forwardCm, int radarForwardCm) {
     uint64_t poseSequence = 0;
     float head[12] = {}, eyeToHead[2][12] = {};
     const bool havePose = nativeTemporalHeadPose(&poseSequence, head, eyeToHead);
@@ -240,7 +272,7 @@ void cacheGeometry(bool on, int backCm, int forwardCm) {
     g_ipd.store(st::ipdUsable(ipd) ? ipd : 0.0f, std::memory_order_relaxed);
     const double headAt[3] = {head[3], head[7], head[11]};
     if (havePose) {
-        const st::AnchorReason latched = g_anchor.step(headAt, on, backCm, forwardCm);
+        const st::AnchorReason latched = g_anchor.step(headAt, on, backCm, forwardCm, radarForwardCm);
         if (latched != st::AnchorReason::kNone) {
             const double* a = g_anchor.anchor();
             Log::get().note("srv turret anchor: latched at %.3f,%.3f,%.3f m seated (%s)", a[0], a[1], a[2], st::anchorReasonName(latched));
@@ -251,20 +283,45 @@ void cacheGeometry(bool on, int backCm, int forwardCm) {
         const double* a = g_anchor.anchor();
         const double dx = headAt[0] - a[0], dy = headAt[1] - a[1], dz = headAt[2] - a[2];
         g_headOffsetCm.store(static_cast<float>(100.0 * std::sqrt(dx * dx + dy * dy + dz * dz)), std::memory_order_relaxed);
-        for (int i = 0; i < 3; ++i) g_anchorLog[i].store(static_cast<float>(a[i]), std::memory_order_relaxed);
+        for (int i = 0; i < 3; ++i) {
+            g_anchorLog[i].store(static_cast<float>(a[i]), std::memory_order_relaxed);
+            g_anchorPos[i].store(a[i], std::memory_order_relaxed);
+        }
     }
-    for (uint32_t e = 0; e < 2; ++e) {
-        float tan[4] = {}, shift[2] = {};
-        uint64_t sequence = 0;
-        const bool haveTan = nativeTemporalEyeGeometry(e, &sequence, tan, shift);
-        const float tangents[4] = {tan[0] + shift[0], tan[1] + shift[0], tan[2] + shift[1], tan[3] + shift[1]};
-        st::EyeFrame frame;
-        const bool ok = haveAnchor && haveTan && st::p00Usable(st::p00OfTangents(tangents)) &&
-                        st::eyeFrameFrom(head, eyeToHead[e], g_anchor.anchor(), static_cast<double>(forwardCm) / 100.0, tangents, frame);
-        publishEye(g_eyeSlot[e], ok ? frame : st::EyeFrame{}, ok);
-        if (ok && e == 0)
-            for (int i = 0; i < 3; ++i) g_translationLog[i].store(frame.t[i], std::memory_order_relaxed);
+    g_anchorOk.store(haveAnchor, std::memory_order_release);   // after the position
+    st::EyeFrame frames[2];
+    bool ok[2] = {};
+    buildEyeFrames(head, eyeToHead, haveAnchor, g_anchor.anchor(), forwardCm, radarForwardCm, frames, ok);
+    for (uint32_t e = 0; e < 2; ++e) publishEye(g_eyeSlot[e], frames[e], ok[e]);
+    if (ok[0])
+        for (int i = 0; i < 3; ++i) {
+            g_translationLog[i].store(frames[0].t[i], std::memory_order_relaxed);
+            g_translationRadarLog[i].store(frames[0].tRadar[i], std::memory_order_relaxed);
+        }
+    if (havePose) g_tickSeq.store(poseSequence, std::memory_order_release);
+}
+
+// The eye frame the draw uses: rebuilt ONCE for each new frame sequence from the pose of the frame being drawn (render thread). Falls back to the tick's frames (a frame behind) when the
+// pose or the anchor is not there.
+bool drawEyeFrame(int eye, st::EyeFrame& out) {
+    const uint64_t seq = nativeTemporalFrameSequence();
+    if (seq != 0 && seq != g_drawSeq) {
+        g_drawSeq = seq;
+        g_poseFrames.fetch_add(1, std::memory_order_relaxed);
+        if (seq != g_tickSeq.load(std::memory_order_acquire)) g_poseRefreshed.fetch_add(1, std::memory_order_relaxed);   // the tick had built from an older frame's pose
+        g_drawOk[0] = g_drawOk[1] = false;
+        uint64_t poseSequence = 0;
+        float head[12] = {}, eyeToHead[2][12] = {};
+        if (g_anchorOk.load(std::memory_order_acquire) && nativeTemporalHeadPose(&poseSequence, head, eyeToHead)) {
+            const double anchor[3] = {g_anchorPos[0].load(std::memory_order_relaxed), g_anchorPos[1].load(std::memory_order_relaxed), g_anchorPos[2].load(std::memory_order_relaxed)};
+            buildEyeFrames(head, eyeToHead, true, anchor, g_forwardCm.load(std::memory_order_relaxed), g_radarForwardCm.load(std::memory_order_relaxed), g_drawFrames, g_drawOk);
+        }
     }
+    if (g_drawOk[eye]) {
+        out = g_drawFrames[eye];
+        return true;
+    }
+    return readEye(eye, out);
 }
 
 // One group's constants as the 10 s line spells them: the gap and the window of anchor distances its draws run with at the keys in force, signed (a push has a negative gap; a gap of 0 is
@@ -298,15 +355,19 @@ void windowLine(uint64_t nowMs) {
     (void)nowMs;
     st::EyeFrame frames[2];
     const bool okL = readEye(0, frames[0]), okR = readEye(1, frames[1]);
-    Log::get().note("srv turret hud: panels: %s; radar: %s; anchor=(%.3f,%.3f,%.3f) head_offset=%.1f cm T=(%.3f,%.3f,%.3f) ipd_elite=%.1fmm P00[L,R]=%.3f,%.3f draws[L,R]=%u,%u bound=%u "
+    const uint32_t poseFrames = g_poseFrames.exchange(0, std::memory_order_relaxed), poseRefreshed = g_poseRefreshed.exchange(0, std::memory_order_relaxed);
+    Log::get().note("srv turret hud: panels: %s; radar: %s; anchor=(%.3f,%.3f,%.3f) head_offset=%.1f cm T=(%.3f,%.3f,%.3f) Tradar=(%.3f,%.3f,%.3f) ipd_elite=%.1fmm P00[L,R]=%.3f,%.3f "
+                    "draws[L,R]=%u,%u bound=%u pose refreshed at draw: %u of %u frames "
                     "refused[no-eye,game-gs,topology,not-ready,no-geometry]=%u/%u/%u/%u/%u families[%s]=%s",
                     panels, radar,
                     static_cast<double>(g_anchorLog[0].load(std::memory_order_relaxed)), static_cast<double>(g_anchorLog[1].load(std::memory_order_relaxed)),
                     static_cast<double>(g_anchorLog[2].load(std::memory_order_relaxed)), static_cast<double>(g_headOffsetCm.load(std::memory_order_relaxed)),
                     static_cast<double>(g_translationLog[0].load(std::memory_order_relaxed)), static_cast<double>(g_translationLog[1].load(std::memory_order_relaxed)),
-                    static_cast<double>(g_translationLog[2].load(std::memory_order_relaxed)), 1000.0 * static_cast<double>(g_ipd.load(std::memory_order_relaxed)),
+                    static_cast<double>(g_translationLog[2].load(std::memory_order_relaxed)), static_cast<double>(g_translationRadarLog[0].load(std::memory_order_relaxed)),
+                    static_cast<double>(g_translationRadarLog[1].load(std::memory_order_relaxed)), static_cast<double>(g_translationRadarLog[2].load(std::memory_order_relaxed)),
+                    1000.0 * static_cast<double>(g_ipd.load(std::memory_order_relaxed)),
                     okL ? static_cast<double>(st::p00OfTangents(&frames[0].l)) : 0.0, okR ? static_cast<double>(st::p00OfTangents(&frames[1].l)) : 0.0,
-                    left, right, bound, refused[0], refused[1], refused[2], refused[3], refused[4], names, counts);
+                    left, right, bound, poseRefreshed, poseFrames, refused[0], refused[1], refused[2], refused[3], refused[4], names, counts);
 }
 
 // ---- THE GPU INSTRUMENT ------------------------------------------------------------------------------------------------------------------------------------------------
@@ -565,8 +626,8 @@ void probeRead(ID3D11DeviceContext* ctx, int eye, int family) {
 void srvTurretFrameTick(uint32_t frameNo) {
     if (!runtimeVrProfile()) return;   // flat (or not yet decided): every state stays at its zero, alignTick adds an exact 0
     readKeys();
-    const int backCm = g_backCm.load(std::memory_order_relaxed), forwardCm = g_forwardCm.load(std::memory_order_relaxed), panelsCm = g_panelsCm.load(std::memory_order_relaxed),
-              radarCm = g_radarCm.load(std::memory_order_relaxed), gapCm = g_gapCm.load(std::memory_order_relaxed);
+    const int backCm = g_backCm.load(std::memory_order_relaxed), forwardCm = g_forwardCm.load(std::memory_order_relaxed), radarForwardCm = g_radarForwardCm.load(std::memory_order_relaxed),
+              panelsCm = g_panelsCm.load(std::memory_order_relaxed), radarCm = g_radarCm.load(std::memory_order_relaxed), gapCm = g_gapCm.load(std::memory_order_relaxed);
     // The Scorpion only: the turret view bit is the Scarab's too, and the journal says which SRV this is (journalSrvScorpion; unknown is "not the Scorpion"). `on` is what both parts act on.
     const bool turret = journalSrvTurretView();
     const bool on = turret && journalSrvScorpion();
@@ -583,11 +644,13 @@ void srvTurretFrameTick(uint32_t frameNo) {
         g_ignored = false;
     }
     g_backSeatedZ = st::backSeatedZ(on, backCm);
-    const bool wanted = on && (panelsCm > 0 || radarCm > 0 || forwardCm > 0 || gapCm > 0);   // any of the four HUD keys; a group whose own keys are 0 is left alone per draw
-    if (wanted)
-        cacheGeometry(on, backCm, forwardCm);
-    else
+    const bool wanted = on && (panelsCm > 0 || radarCm > 0 || forwardCm > 0 || radarForwardCm > 0 || gapCm > 0);   // any of the five HUD keys; a group whose own keys are 0 is left alone per draw
+    if (wanted) {
+        cacheGeometry(on, backCm, forwardCm, radarForwardCm);
+    } else {
         g_anchor.reset();   // the next stay (or the next key) takes the anchor afresh
+        g_anchorOk.store(false, std::memory_order_release);
+    }
     if (wanted != detail::g_srvTurretHudWanted.load(std::memory_order_relaxed)) {
         detail::g_srvTurretHudWanted.store(wanted, std::memory_order_relaxed);
         if (wanted) drawGateArm();   // the gate re-samples at the frame boundary after this tick; this makes the very next draw see it too
@@ -634,7 +697,7 @@ bool srvTurretHudBegin(ID3D11DeviceContext* ctx, int family, int eye) {
     g_familyDraws[family].fetch_add(1, std::memory_order_relaxed);
     const uint32_t ordinal = g_probe[eye][family].ordinal++;   // this draw's place among the frame's matched draws of the eye and family (the instrument's rotation)
     st::EyeFrame frame;
-    if (!readEye(eye, frame)) {
+    if (!drawEyeFrame(eye, frame)) {
         refuse(st::Refuse::kNoGeometry);
         return false;
     }
@@ -682,11 +745,12 @@ bool srvTurretHudBegin(ID3D11DeviceContext* ctx, int family, int eye) {
         else
             std::snprintf(radial, sizeof(radial), "does not move radially");
         Log::get().note("srv turret hud: first draw of family %s through the shader (frame %u, eye %d), the %s group: a vertex %.2f to %.2f m from the anchor %s, in 3D about the anchor "
-                        "(%.3f,%.3f,%.3f m seated), after the whole HUD moves %.2f m forward; the game's pixel shader, blend and every other state are unchanged, and its geometry stage "
+                        "(%.3f,%.3f,%.3f m seated), after the group's HUD moves %.2f m forward; the game's pixel shader, blend and every other state are unchanged, and its geometry stage "
                         "and constant slot go back after the issue.",
                         st::kFamilies[family].name, g_frame, eye, st::groupName(group), static_cast<double>(params.dMin), static_cast<double>(params.dMax), radial,
                         static_cast<double>(g_anchorLog[0].load(std::memory_order_relaxed)), static_cast<double>(g_anchorLog[1].load(std::memory_order_relaxed)),
-                        static_cast<double>(g_anchorLog[2].load(std::memory_order_relaxed)), static_cast<double>(g_forwardCm.load(std::memory_order_relaxed)) / 100.0);
+                        static_cast<double>(g_anchorLog[2].load(std::memory_order_relaxed)),
+                        static_cast<double>(st::forwardCmOf(group, g_forwardCm.load(std::memory_order_relaxed), g_radarForwardCm.load(std::memory_order_relaxed))) / 100.0);
     }
     return true;
 }

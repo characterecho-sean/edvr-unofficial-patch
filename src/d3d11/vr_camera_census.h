@@ -65,6 +65,8 @@ bool nativeTemporalEyeGeometry(uint32_t eye, uint64_t* sequence, float frustum[4
 // What the host gave this frame as the head and the two eyes (native_temporal.cpp: 3x4 row-major, translation in m[3], m[7], m[11], the OpenVR seated space, eyeToHead relative to the head),
 // for the SRV turret HUD's anchored move (srv_turret.h). The same discipline as nativeTemporalEyeGeometry.
 bool nativeTemporalHeadPose(uint64_t* sequence, float head[12], float eyeToHead[2][12]);
+// The sequence of the frame beginFrame last took (native_temporal.cpp), a lock-free read: 0 before the first and after the channel closes.
+uint64_t nativeTemporalFrameSequence();
 // The distance between the two eye origins of the eye pair the host gave this frame -- the pair Elite is told, the located one moved by the world scale -- in
 // metres (srv_turret.h: the turret HUD's per-eye shift is made from it and the frustum above). The same discipline as nativeTemporalEyeGeometry.
 bool nativeTemporalEyeSeparation(float* metres);
