@@ -482,6 +482,7 @@ HRESULT WINAPI treat(void* p,uint64_t seq,uint32_t eye,ID3D11Texture2D* source,c
   // fix.ui_quality's eye check (ui_layer.h): what the game submitted for
   // this eye, the one authority on which eye is which.
   edvr::uiLayerNoteSubmitted(seq,eye,source);
+  edvr::uiLayerNoteSubmittedSized(eye,source,d.Width,d.Height);   // F198: the submitted textures with their sizes, the marker fix's eye source 'S' with Anti-aliasing off
   if (eye==0) {
     edvr::announceEyeTextureSize(w,h);
     const float outer=-s->announced[0][0], inner=s->announced[0][1];   // B3: the frustum without the scope zoom's window
@@ -494,6 +495,14 @@ HRESULT WINAPI treat(void* p,uint64_t seq,uint32_t eye,ID3D11Texture2D* source,c
   if(flipU||flipV) {
     if(!s->flippedNoted){s->flippedNoted=true;edvr::Log::get().note("native temporal: flipped eye bounds pass through; temporal reprojection for flipped inputs remains pending.");}
     s->history[eye]={};
+  }
+  // F198: with the temporal mode OFF the pass never runs, so the two per-eye facts the native on-foot features read from it are published here from the very arrays it is handed:
+  // the frustum (edvrTemporalAa's tanNow is s->frusta[eye], for the marker's axis term: temporalPassEyeTan) and the eye offset's x (the ADS model's IPD: temporalPassEyeOffsetX).
+  // Neither consumer reads "set" as "the pass ran". Only the mode off: with it on, edvrTemporalAa and the note after it publish exactly as before.
+  if(!s->currentSettings.on){
+    edvr::temporalPassNoteEyeTan(int(eye),s->frusta[eye]);
+    const float offAaEyeOffset[3]={s->eyes[eye][3],s->eyes[eye][7],s->eyes[eye][11]};
+    edvrTemporalAaNoteHead(int(eye),nullptr,nullptr,offAaEyeOffset);
   }
   if(!s->currentSettings.on||s->standDown||flipU||flipV){edvrEyeCaptureUntreated(source,int(eye),b);s->treated[eye]=true;return S_FALSE;}
   if(!s->projectionKnown[eye]||s->projectionSequence[eye]!=seq){

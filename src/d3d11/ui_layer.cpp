@@ -53,6 +53,7 @@
 #include "vr_world_mips.h"  // the VR world route: the mipped screen and its sampler (the re-issue's inputs)
 #include "vr_world_route.h" // ...and what the route publishes: may the layer take, which eye was taken
 #include "native_on_foot.h" // the F0 gate counters (log only)
+#include "submitted_eye.h"  // F198: the submitted textures' tracker, the marker fix's eye source 'S'
 
 #include "../common/config.h"
 #include "../common/guard.h"
@@ -6591,6 +6592,22 @@ void uiLayerNoteSubmitted(uint64_t sequence, uint32_t eye, const void* submitted
 
 const void* uiLayerSubmittedTarget(uint32_t eye) {
     return eye <= 1 ? g_eye[eye].submitted : nullptr;
+}
+
+// F198: the submitted textures with their sizes, for the eye source 'S' (submitted_eye.h). Plain state: treat (which insists on the render thread) writes it and the
+// draws on that thread read it. The edge token is the render-mode and the on-foot edge counters together.
+namespace {
+submittedeye::Tracker g_submittedEyes;
+}  // namespace
+
+void uiLayerNoteSubmittedSized(uint32_t eye, const void* submitted, uint32_t width, uint32_t height) {
+    if (eye > 1) return;
+    const uint64_t edge = (static_cast<uint64_t>(g_nativeModeEdges.load(std::memory_order_relaxed)) << 32) | nativeOnFootEdges();
+    g_submittedEyes.note(static_cast<int>(eye), submitted, width, height, edge);
+}
+
+int uiLayerEyeOfSubmitted(const void* res) {
+    return g_submittedEyes.eyeOf(res);
 }
 
 bool uiLayerDoorFromPass(uint32_t eye) {

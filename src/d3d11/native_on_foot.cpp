@@ -136,6 +136,7 @@
 #include "temporal_pass.h"   // F52: temporalPassEyeRows, the temporal pass's camera rows for an eye (the marker correction's reference)
 #include "ui_depth.h"  // F46: uiDepthEyeOfTargetReadOnly, ui depth's frame table (the marker probe's eyes; read only)
 #include "ui_layer.h"   // F46: uiLayerEyeOfGameTarget, the UI layer's redirect mapping (the marker probe's eyes; read only)
+#include "submitted_eye.h"   // F198: the eye by the submitted textures (source 'S', Anti-aliasing off) and targetEye's order
 #include "vscreen.h"    // F46: vScreenIsEyeSized, the world capture's eye-sized targets
 
 namespace edvr {
@@ -27823,7 +27824,7 @@ struct Rec {
     float origin[4] = {};    // b1 row 275 from the CB shadow (kRecShadowO)
     uint32_t tw = 0, th = 0; // the marker composite's target size (0: its view did not resolve)
     int8_t eye = -1;         // the UI layer's eye of the draw's target (eyeSrc says how); -1 unknown
-    char eyeSrc = 0;         // 'L' the layer's redirect mapping, 'T' ui depth's frame table, 'C' remembered, 'O' the order rule
+    char eyeSrc = 0;         // 'L' the layer's redirect mapping, 'T' ui depth's frame table, 'S' the submitted textures (F198), 'C' remembered, 'O' the order rule
     uint8_t flags = 0;
     char kind = 0;           // the draw call (nativeOnFootMarkerProbeDraw)
     int8_t icon = -1;        // F67d: the icon mesh (g_iconMesh) the draw's own vertex range names; -1 none
@@ -27943,9 +27944,9 @@ struct Tuple {
     uint32_t instMin = 0, instMax = 0, entry = 0, record = 0, xHits = 0, yHits = 0;
     bool viaY = false;
 };
-// The eye sources, as counted: the layer's redirect mapping, ui depth's frame table, remembered, the order rule.
+// The eye sources, as counted: the layer's redirect mapping, ui depth's frame table, remembered, the order rule, and (F198) the submitted textures.
 int srcIndex(char s) {
-    return s == 'L' ? 0 : s == 'T' ? 1 : s == 'C' ? 2 : 3;
+    return s == 'L' ? 0 : s == 'T' ? 1 : s == 'C' ? 2 : s == 'S' ? 4 : 3;
 }
 // F52: one tag key's second, per eye: the record it was found at, the marker composite draws that read it (their places in the eye, as a
 // mask), |m - c| at the decision and the residual after the patch by the head's speed (bins < 3, 3..20, 20..60, >= 60 deg/s), and the patch.
@@ -28015,7 +28016,7 @@ struct Window {
     // The marker composite draws and their streams.
     uint64_t hudDraws = 0, markerPool = 0, markerFinds = 0, indirect = 0, streamDraws = 0, streamEntries = 0, streamCut = 0, framesRead = 0,
              lost = 0;
-    uint64_t streamRead = 0, readsX = 0, readsYOnly = 0, markerNoEye = 0, markerSrc[4] = {};
+    uint64_t streamRead = 0, readsX = 0, readsYOnly = 0, markerNoEye = 0, markerSrc[5] = {};
     Tuple tuples[kTuples];
     uint32_t nTuples = 0;
     uint64_t tuplesDropped = 0;
@@ -28026,7 +28027,7 @@ struct Window {
     const void* pool = nullptr;
     float x0[3] = {}, tp[3] = {};
     // F46: the world views: draws looked at, eye-frames captured (CB shadow or staged), the eye's source, the depth-view check, the failures.
-    uint64_t worldDraws = 0, worldShadow = 0, worldStaged = 0, worldRead = 0, worldSrc[4] = {}, dsvAgree = 0, dsvDisagree = 0, dsvUnknown = 0;
+    uint64_t worldDraws = 0, worldShadow = 0, worldStaged = 0, worldRead = 0, worldSrc[5] = {}, dsvAgree = 0, dsvDisagree = 0, dsvUnknown = 0;
     uint64_t worldNoTarget = 0, worldNotEyeSized = 0, worldNoEye = 0, worldNoRows = 0, worldStageFail = 0, worldTriesCapped = 0;
     UINT worldCb1Bytes = 0, worldF1 = 0;
     bool worldCb1Bound = false;
@@ -28951,15 +28952,29 @@ void worldReplace(const WorldView& v) {
 
 // F46: a game target's eye, the UI layer's: its redirect mapping ('L'), else ui depth's frame table, read only ('T'), else the last answer
 // either gave for the same target ('C'); -1 when none has one. Nothing here registers a target or changes what the layer decides.
+// F198: and, only while the temporal path is NOT running (temporalPassWantsFssChrome: fix.temporal_aa itself; with it off the layer is not live and ui depth classifies
+// nothing, so L and T both answer -1 and the marker fix, the weapon readout pin, the labels and the reticle NDC never get an eye), the eye whose SUBMITTED texture the
+// target is ('S', submitted_eye.h: the order is L, T, S, C). S is not remembered by 'C' (it is a source of its own, and a recreate must answer -1, not the old pointer's
+// eye). With the temporal path running S is never asked, so that path's answers are what they were.
 int targetEye(const void* res, char* src) {
     *src = 0;
     if (!res) return -1;
-    char s = 'L';
-    int eye = uiLayerEyeOfGameTarget(res);
-    if (eye != 0 && eye != 1) {
-        s = 'T';
-        eye = uiDepthEyeOfTargetReadOnly(res);
+    const submittedeye::Named named = submittedeye::nameTargetEye(
+        [&] { return uiLayerEyeOfGameTarget(res); }, [&] { return uiDepthEyeOfTargetReadOnly(res); }, temporalPassWantsFssChrome(),
+        [&] { return uiLayerEyeOfSubmitted(res); });
+    if (named.src == 'S') {
+        *src = 'S';
+        // Said once per on-foot session (the edge counter's value): the first draw the submitted textures named.
+        static uint32_t sSaidEdge = ~0u;
+        if (sSaidEdge != nativeOnFootEdges()) {
+            sSaidEdge = nativeOnFootEdges();
+            Log::get().note("marker eye (F198): the eyes named by the submitted textures (Anti-aliasing off): eye 0 %p, eye 1 %p", uiLayerSubmittedTarget(0),
+                            uiLayerSubmittedTarget(1));
+        }
+        return named.eye;
     }
+    const char s = named.src;
+    const int eye = named.eye;
     if (eye == 0 || eye == 1) {
         TargetEye* slot = nullptr;
         for (TargetEye& t : g_targetEyes)
@@ -34989,9 +35004,9 @@ void report(uint64_t nowMs) {
         }
         appendf(buf, sizeof(buf), len, "; marker composite draws bound to the pool %llu (indirect, range unreadable, %llu), in a frame with a find "
                 "%llu, streams copied %llu (%llu entries, %llu cut at %u or the buffer end), read %llu; their eye by the UI layer's mapping %llu, ui "
-                "depth's table %llu, remembered %llu, none %llu; frames read %llu, lost %llu",
+                "depth's table %llu, remembered %llu, the submitted textures %llu, none %llu; frames read %llu, lost %llu",
                 ull(w.markerPool), ull(w.indirect), ull(w.markerFinds), ull(w.streamDraws), ull(w.streamEntries), ull(w.streamCut), kEntriesMax,
-                ull(w.streamRead), ull(w.markerSrc[0]), ull(w.markerSrc[1]), ull(w.markerSrc[2]), ull(w.markerNoEye), ull(w.framesRead),
+                ull(w.streamRead), ull(w.markerSrc[0]), ull(w.markerSrc[1]), ull(w.markerSrc[2]), ull(w.markerSrc[4]), ull(w.markerNoEye), ull(w.framesRead),
                 ull(w.lost));
         Log::get().note("%s", buf);
     }
@@ -34999,10 +35014,10 @@ void report(uint64_t nowMs) {
     if (measure && w.worldDraws) {
         Log::get().note("native on foot marker probe: world views (b1 rows 270..273, origin row 275): eye-frames eye 0 %llu, eye 1 %llu (from the "
                         "CB shadow %llu, staged %llu, read back %llu); eye by the UI layer's mapping %llu, ui depth's table %llu, remembered %llu, the "
-                        "order rule %llu; the scene depth view's eye agrees %llu, DISAGREES %llu, unknown %llu; world draws looked at %llu: no "
+                        "order rule %llu, the submitted textures %llu; the scene depth view's eye agrees %llu, DISAGREES %llu, unknown %llu; world draws looked at %llu: no "
                         "target %llu, not eye-sized %llu, no eye %llu, b1 rows not covered %llu, copy failed %llu, tries capped %llu",
                         ull(w.eye[0].worldViews), ull(w.eye[1].worldViews), ull(w.worldShadow), ull(w.worldStaged), ull(w.worldRead),
-                        ull(w.worldSrc[0]), ull(w.worldSrc[1]), ull(w.worldSrc[2]), ull(w.worldSrc[3]), ull(w.dsvAgree), ull(w.dsvDisagree),
+                        ull(w.worldSrc[0]), ull(w.worldSrc[1]), ull(w.worldSrc[2]), ull(w.worldSrc[3]), ull(w.worldSrc[4]), ull(w.dsvAgree), ull(w.dsvDisagree),
                         ull(w.dsvUnknown), ull(w.worldDraws), ull(w.worldNoTarget), ull(w.worldNotEyeSized), ull(w.worldNoEye), ull(w.worldNoRows),
                         ull(w.worldStageFail), ull(w.worldTriesCapped));
     }

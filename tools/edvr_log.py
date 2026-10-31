@@ -11772,7 +11772,17 @@ def _hj_marker(rows, ctx):
         if er:
             per.append("eye %s %s (%d of %d)" % (e, _hpct(_hsum(er, "bound"), _hsum(er, "dec")), _hsum(er, "bound"), _hsum(er, "dec")))
     text = "patch applied %s; named %d, outside %d (F87c)" % (", ".join(per) or "no decision line", _hsum(win, "named"), _hsum(win, "outside"))
+    # F198: the first time a draw's eye was named by the submitted textures (Anti-aliasing off: the layer and ui depth name none), so a log that says it shows which source worked
+    seye = rows.get("seye", [])
+    if seye:
+        text += "; the draws' eyes named by the submitted textures (F198) from %d session(s)' first draw" % len(seye)
     if dec == 0:
+        # F198: the marker probe's cost lines count the marker composite draws that reached the draw tee; when many did and no decision was ever made, the fix never got an eye
+        # for them (a build before F198 named a draw's eye only through the interface layer and ui depth, which run with a temporal mode on): the fix never ran, it was not idle.
+        mc = _hsum(rows.get("probe", []), "mc")
+        if mc >= 20:
+            return ("NEVER APPLIED", text + "; the marker probe counted %d marker composite draws at the tee in the same log and none reached the fix in %d s: their eye was never named "
+                    "(the interface layer and ui depth name it only with a temporal mode on; a build before F198 had no other source)" % (mc, _hsecs(idle)))
         return ("IDLE", text + "; no marker composite draw reached the fix in %d s" % _hsecs(idle))
     if bound == 0:
         return ("NEVER APPLIED", text)
@@ -16432,12 +16442,16 @@ HEALTH_RULES = (
         ("eyekey", r"native on foot ADS sight eye \(F162\): fix\.native_on_foot_ads_sight_eye is (?P<mode>both|right|left) \(aiming eye (?P<aim>left|right)\)"),
         ("key", r"native on foot ADS sight in both eyes \(F106\): fix\.native_on_foot_ads_sight_both_eyes is (?P<key>on|off)"),
     ), _hj_f106_share),
-    _hrule("marker fix (F62c/F64)", ("F62c", "F64", "F87c"), ("marker fix (F62c/F64)", "marker fix (F62c)", "marker fix (F87c)"), (
+    _hrule("marker fix (F62c/F64)", ("F62c", "F64", "F87c", "F100", "F198"), ("marker fix (F62c/F64)", "marker fix (F62c)", "marker fix (F87c)", "native on foot marker probe: cost",
+                                                                       "marker eye (F198)"), (
         # F125: the applied and F87c lines end in "; over N s" (their window); a line without it (a log written before F125) covers one second.
         ("applied", r"marker fix \(F62c/F64\): eye (?P<eye>\d): patch applied (?P<pct>[\d.]+)% \((?P<bound>\d+) of (?P<dec>\d+) decisions bound at the issue"
                     r"(?:.*; over " + H_WL + r"$)?"),
         ("idle", r"marker fix \(F62c\): eye \d: no decision " + H_WL_THIS),
         ("win", r"marker fix \(F87c\) eye (?P<eye>\d): windows \d+ \([^)]*\), named (?P<named>\d+), outside (?P<outside>\d+)(?:.*; over " + H_WL + r"$)?"),
+        # F198: the marker probe's cost line (marker composite draws that reached the draw tee) and the first draw an eye was named by the submitted textures
+        ("probe", r"native on foot marker probe: cost: draw tee calls \d+, draws scanned past the VS hash \d+ \(on-foot HUD \d+, marker composite (?P<mc>\d+), world \d+\)"),
+        ("seye", r"marker eye \(F198\): the eyes named by the submitted textures \(Anti-aliasing off\): eye 0 \S+, eye 1 \S+$"),
     ), _hj_marker),
     _hrule(H_ANCHOR, ("F87p",), ("prompt anchor (F87p)",), (
         ("sec", r"prompt anchor \(F87p\) " + H_WL + r": SetMarker (?P<set>\d+) UpdateMarker (?P<upd>\d+) UpdateIndicator (?P<ind>\d+); focus key (?P<key>-?\d+) .*? nearby (?P<nearby>\d+) "
@@ -22218,6 +22232,21 @@ def self_test_health():
         check("marker fix: decisions and none bound", [mark(0, 25)] * 2, 3, [("NEVER APPLIED", MK)])
         check("marker fix: under half bound", [mark(10, 25)], 0, [("PARTIAL", MK)])
         check("marker fix: no decision at all", [mark_idle(0), mark_idle(1)], 0, [("IDLE", MK)], has=["no marker composite draw reached the fix in 2 s"])
+        # F198: the pilot's flight (edvr_gfx_20261031_161247, Anti-aliasing off on foot): the marker probe counted 330 marker composite draws a second at the draw tee and every F62c
+        # line read "no decision this second (no marker composite draw of the eye reached the fix)" -- the draws' eye was named by the layer and ui depth only, and neither runs with
+        # Anti-aliasing off. That is the fix never running, not idle: NEVER APPLIED, with the count. Without the probe's lines (or with few draws) it is still idle.
+        check("F198 marker fix: draws at the tee, none reached the fix (Anti-aliasing off)", [tee100(), mark_idle(0), mark_idle(1), tee100(), mark_idle(0), mark_idle(1)], 3,
+              [("NEVER APPLIED", MK)], has=["the marker probe counted 1800 marker composite draws at the tee in the same log and none reached the fix in 4 s: their eye was never named"])
+        check("F198 marker fix: a few draws at the tee and none at the fix is still idle", [tee100().replace("marker composite 900", "marker composite 3"), mark_idle(0), mark_idle(1)], 0,
+              [("IDLE", MK)], has=["no marker composite draw reached the fix in 2 s"], lacks=["never named"])
+        check("F198 marker fix: draws at the tee and decisions bound", [tee100(), mark(23, 25, 0), mark(23, 25, 1)], 0, [("OK", MK)],
+              lacks=["never named"])
+        SEYE198 = R("marker eye (F198): the eyes named by the submitted textures")
+        check("F198 marker fix: the eyes named by the submitted textures say so", [SEYE198, tee100(), mark(23, 25, 0), mark(23, 25, 1)], 0, [("OK", MK)],
+              has=["named by the submitted textures (F198) from 1 session(s)' first draw"], lacks=["UNPARSED"])
+        check("F198 marker fix: the real line's pointers parse",
+              ["marker eye (F198): the eyes named by the submitted textures (Anti-aliasing off): eye 0 000001F2A3B4C5D6, eye 1 000001F2A3B4C5E0", mark(23, 25, 0), mark(23, 25, 1)],
+              0, [("OK", MK)], has=["named by the submitted textures (F198)"], lacks=["UNPARSED"])
         # F125: a build before F125 (1 s lines with no window field) parses as before
         check("marker fix: the 1 s lines of a build before F125", [MARK_OLD, MARK_IDLE_OLD, MARK_WIN_OLD], 0, [("OK", MK)],
               has=["patch applied eye 0 96% (45 of 47); named 40, outside 2 (F87c)"], lacks=["UNPARSED"])

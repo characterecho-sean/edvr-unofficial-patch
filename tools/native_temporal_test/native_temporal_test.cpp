@@ -61,7 +61,10 @@ void askFromInsideTreat(){
       ID3D11Device* dv=nullptr;unsigned long th=0;reentryWarm=edvr::nativeTemporalWarmTarget(&dv,&th);}
   catch(...){++reentryThrows;}
 }
+// F198: what the Anti-aliasing-off branch of treat publishes (the eye's frustum, the eye offset alone, the submitted texture's size): recorded here, asserted below.
+unsigned eyeTanNotes=0,offsetOnlyNotes=0,submittedSizedNotes=0;float eyeTanLast[2][4]{},offsetOnlyLast[3]{};uint32_t submittedSizedLast[3]{};
 extern "C" void edvrTemporalAaNoteHead(int eye,const float* previous,const float* current,const float* offset) {
+  if(!previous&&!current&&offset){++offsetOnlyNotes;std::memcpy(offsetOnlyLast,offset,12);}
   note={};note.eye=unsigned(eye);note.head=previous&&current&&offset;
   if(note.head){std::memcpy(note.previousHead,previous,48);std::memcpy(note.currentHead,current,48);std::memcpy(note.offset,offset,12);}
 }
@@ -94,6 +97,8 @@ unsigned worldRouteSceneResets=0;
 namespace edvr{void breadcrumb(const char*){}}
 namespace edvr{void uiLayerNoteTemporal(uint64_t seq,uint32_t eye,const void* out){++uiLayerNotes;uiLayerNoteSeq=seq;uiLayerNoteEye=eye;uiLayerNoteOut=out;}
 void uiLayerNoteSubmitted(uint64_t,uint32_t eye,const void* submitted){++uiLayerSubmits;if(eye<2)uiLayerSubmitted[eye]=submitted;}
+void uiLayerNoteSubmittedSized(uint32_t eye,const void*,uint32_t w,uint32_t h){++submittedSizedNotes;submittedSizedLast[0]=eye;submittedSizedLast[1]=w;submittedSizedLast[2]=h;}
+void temporalPassNoteEyeTan(int eye,const float* tan){++eyeTanNotes;if(eye>=0&&eye<2&&tan)std::memcpy(eyeTanLast[eye],tan,16);}
 void vrWorldRouteNoteSceneReset(){++worldRouteSceneResets;}}
 // The terrain cull cover (src/d3d11/terrain_cull_cover_hook.cpp, docs/terrain-culling.md), which begin() tells the frusta the game is handed: recorded here, asserted below.
 unsigned coverNotes=0;float coverLast[2][4]{};
@@ -402,8 +407,23 @@ void run(){
         closeFloat(c.currentEyes[0][0],1)&&closeFloat(c.previousEyes[1][3],.032f),
         "the canted eye matrix comes from prior history while the other eye keeps its own index");
   edvr::Config::get().set("fix.temporal_aa","off");check(treat(fresh,3,1,source.Get())==S_OK,"current pair freezes AA setting");
-  f=frame(12,4);p=begin(fresh,f);const auto before=dumps;check(treat(fresh,4,0,source.Get())==S_FALSE&&dumps==before+1,"next frame AA off captures untreated eyes");check(p.tangentShift[0][0]==0,"AA off zeros jitter");check(fresh.close(fresh.context)==S_OK,"fresh close");
-  auto dlss=acquire(d,13,"dlss");f=frame(13,1);begin(dlss,f);check(treat(dlss,1,0,source.Get())==S_OK,"DLSS call");c=calls.back();check(c.outW==480&&c.outH==360&&(c.flags&2),"DLSS requests recommended size");
+  // F198: with the temporal mode OFF the pass never runs, so treat publishes the per-eye facts the native on-foot features read from it (the frustum: temporalPassEyeTan; the eye offset's x:
+  // temporalPassEyeOffsetX), from the arrays the pass would have been handed, and the submitted texture's size (the marker fix's eye source 'S'). (The pool holds 16 channels, all used:
+  // the cases ride the AA-off and the DLSS eyes below.)
+  f=frame(12,4);p=begin(fresh,f);const auto before=dumps;
+  const unsigned tan0=eyeTanNotes,offs0=offsetOnlyNotes,sized0=submittedSizedNotes;
+  check(treat(fresh,4,0,source.Get())==S_FALSE&&dumps==before+1,"next frame AA off captures untreated eyes");check(p.tangentShift[0][0]==0,"AA off zeros jitter");
+  check(eyeTanNotes==tan0+1&&closeFloat(eyeTanLast[0][0],f.frusta[0][0])&&closeFloat(eyeTanLast[0][1],f.frusta[0][1])&&closeFloat(eyeTanLast[0][2],f.frusta[0][2])&&closeFloat(eyeTanLast[0][3],f.frusta[0][3]),
+        "F198: AA off publishes the eye's frustum, the array the pass is handed ({L,R,D,U})");
+  check(offsetOnlyNotes==offs0+1&&closeFloat(offsetOnlyLast[0],-.032f),"F198: AA off publishes the eye offset's x, and nothing of the pass's head history");
+  check(submittedSizedNotes==sized0+1&&submittedSizedLast[0]==0&&submittedSizedLast[1]==320&&submittedSizedLast[2]==240,"F198: the submitted texture's size is noted (whatever the mode)");
+  check(fresh.close(fresh.context)==S_OK,"fresh close");
+  auto dlss=acquire(d,13,"dlss");f=frame(13,1);begin(dlss,f);
+  const unsigned tan1=eyeTanNotes,offs1=offsetOnlyNotes,sized1=submittedSizedNotes;
+  check(treat(dlss,1,0,source.Get())==S_OK,"DLSS call");
+  check(eyeTanNotes==tan1&&offsetOnlyNotes==offs1,"F198: with the mode on, treat's AA-off branch publishes nothing (the pass's own notes are what they were)");
+  check(submittedSizedNotes==sized1+1,"F198: the submitted size is noted with the mode on too");
+  c=calls.back();check(c.outW==480&&c.outH==360&&(c.flags&2),"DLSS requests recommended size");
   f=frame(13,2);begin(dlss,f);passSucceeds=false;const unsigned notesBefore=uiLayerNotes;check(treat(dlss,2,0,source.Get())==S_FALSE,"filter refusal preserves raw pixels");passSucceeds=true;
   check(uiLayerNotes==notesBefore,"a refused eye is not noted to the UI layer (it must not arm behind raw pixels)");
   f=frame(13,3);p=begin(dlss,f);check(p.tangentShift[0][0]==0&&p.tangentShift[0][1]==0,"refusal disables future jitter");check(dlss.close(dlss.context)==S_OK,"DLSS close");
