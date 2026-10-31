@@ -60,9 +60,35 @@ static bool wiredVscreenBegin(const std::string& t) {
     const size_t eyeLayer = t.find("uiLayerEyeOfGameTarget(info->resource)", fn);
     const size_t eyeTable = t.find("uiDepthEyeOfTargetReadOnly(info->resource)", fn);
     const size_t eyeReg = t.find("uiDepthEyeOfTarget(info->resource, info->a, info->b, info->fmt)", fn);
-    const size_t call = t.find("return srvTurretHudBegin(self, family, eye);", fn);
-    return found(vs0) && found(family) && found(eyeLayer) && found(eyeTable) && found(eyeReg) && found(call) && vs0 < family && family < eyeLayer && eyeLayer < eyeTable &&
-           eyeTable < eyeReg && eyeReg < call;
+    const size_t call = t.find("const bool bound = srvTurretHudBegin(self, family, eye);", fn);
+    const size_t declined = found(call) ? t.find("if (!bound) srvTurretHudNoteRefusedDraw(family);", call) : std::string::npos;
+    return found(vs0) && found(family) && found(eyeLayer) && found(eyeTable) && found(eyeReg) && found(call) && found(declined) && vs0 < family && family < eyeLayer && eyeLayer < eyeTable &&
+           eyeTable < eyeReg && eyeReg < call && declined - call < 160;
+}
+// The unmoved family draws (srv_turret_math.h UnmovedRoute): every route a draw of a family can reach the GPU without the pass's shader bound is counted where vscreen.cpp can see it -- the four
+// direct draw thunks (the owner's fast path and any second context), the indirect and auto draws (no scope exists for them), pureDrawReissue outside a scope (with its call site), the game's
+// ExecuteCommandList (the draws inside cannot be seen) and the scope's own decline (wiredVscreenBegin).
+static size_t occurrences(const std::string& t, const std::string& needle) {
+    size_t n = 0, at = 0;
+    while (found(at = t.find(needle, at))) {
+        ++n;
+        at += needle.size();
+    }
+    return n;
+}
+static bool wiredVscreenUnmoved(const std::string& t) {
+    const size_t reissueFn = t.find("__declspec(noinline) void pureDrawReissue(ID3D11DeviceContext* self, char kind, UINT count,");
+    const size_t reissue = found(reissueFn) ? t.find("if (srvTurretHudWantsDraws()) srvTurretUnmovedReissue(self, _ReturnAddress());", reissueFn) : std::string::npos;
+    const size_t reissueHelper = t.find("__declspec(noinline) void srvTurretUnmovedReissue(ID3D11DeviceContext* self, const void* site) {");
+    const size_t scopeCheck = found(reissueHelper) ? t.find("if (self != g_state->ownerCtx || srvTurretHudScopeActive()) return;", reissueHelper) : std::string::npos;
+    const size_t executeFn = t.find("void STDMETHODCALLTYPE hookedExecuteCommandList(ID3D11DeviceContext* self,");
+    const size_t execute = found(executeFn) ? t.find("if (!privateExecution && srvTurretHudWantsDraws()) srvTurretHudNoteUnmoved(-1, srv_turret::UnmovedRoute::kCommandList, nullptr);", executeFn) : std::string::npos;
+    const size_t note = t.find("__declspec(noinline) void srvTurretUnmovedNote(ID3D11DeviceContext* self, srv_turret::UnmovedRoute ownerRoute, const void* site) {");
+    const size_t foreign = found(note) ? t.find("self->GetType() == D3D11_DEVICE_CONTEXT_DEFERRED ? srv_turret::UnmovedRoute::kForeignDeferred : srv_turret::UnmovedRoute::kForeignImmediate", note) : std::string::npos;
+    return found(reissue) && found(reissue) && found(scopeCheck) && found(execute) && found(foreign) && reissueHelper < reissueFn &&
+           occurrences(t, "srvTurretUnmovedDirect(self, fast);") == 3 && occurrences(t, "srvTurretUnmovedDirect(self, false);") == 1 &&
+           occurrences(t, "srvTurretUnmovedPlain(self, srv_turret::UnmovedRoute::kIndirect);") == 2 && occurrences(t, "srvTurretUnmovedPlain(self, srv_turret::UnmovedRoute::kAuto);") == 1 &&
+           found(t.find("if (srvTurretHudWantsDraws() && (fast || self != g_state->ownerCtx)) srvTurretUnmovedNote(self, srv_turret::UnmovedRoute::kFastPath, nullptr);"));
 }
 static bool wiredVscreenGate(const std::string& t) {
     const size_t fn = t.find("bool drawGateSubscribed(State* s) {");
@@ -116,7 +142,7 @@ static bool wiredModule(const std::string& t) {
     const size_t camera = t.find("\"srv turret camera: back %.2f m published (serial %u)\"");
     const size_t cleared = t.find("\"srv turret camera: back cleared (serial %u)\"");
     const size_t line = t.find("\"srv turret hud: panels: %s; radar: %s; anchor=(%.3f,%.3f,%.3f) head_offset=%.1f cm T=(%.3f,%.3f,%.3f) Tradar=(%.3f,%.3f,%.3f) ipd_elite=%.1fmm P00[L,R]=%.3f,%.3f \"");
-    const size_t lineTail = found(line) ? t.find("\"draws[L,R]=%u,%u bound=%u scissor opened %u pose refreshed at draw: %u of %u frames \"", line) : std::string::npos;
+    const size_t lineTail = found(line) ? t.find("\"draws[L,R]=%u,%u bound=%u scissor opened %u pose refreshed at draw: %u of %u frames unmoved family draws: %s \"", line) : std::string::npos;
     // each group's constants come from one place (the push when above 0, else the pull, else the translation alone, else none), read by the draw, the 10 s line and nothing else; a draw whose
     // group is off is the game's own BEFORE it is counted, and the constants are built on the eye's published frame after it was read; the first-draw line names the direction of the move
     const size_t family = t.find("bool paramsOfGroup(st::Group group, const st::EyeFrame& frame, st::TurretParams& out) {");
@@ -256,7 +282,18 @@ static bool wiredInstrument(const std::string& vscreen, const std::string& t) {
     const bool disc = found(discBegin) && found(discEnd) && found(discCopy) && found(t.find("D3D11_QUERY_OCCLUSION")) && found(t.find("kDiscAlphaSlot = 2, kDiscAlphaRow = 11, kDiscIntensitySlot = 1, kDiscIntensityRow = 90")) &&
                       found(t.find("\"srv turret hud disc: family=%s eye=%d draw=%u issues=%u samples_passed=%llu alpha=%s intensity=%s (cb2[11].w, cb1[90].y)\"")) &&
                       found(t.find("if (family == static_cast<int>(kDiscFamily)) probeReadDisc(ctx, eye);")) && found(t.find("return st::copyPsRegister(ctx, stage, slot, row, to, rawCopyRegion);"));
-    const bool notes = found(t.find("void srvTurretHudNoteIssue(ID3D11DeviceContext* ctx) {")) && found(noteEnd) && found(t.find("if (!g_stateNoted[family]) noteBegin(ctx, family, eye);")) &&
+    // the radar disc's plane in the seated frame: eye 0's pose taken at the sampled draw, each quad of the capture read back from its PRE-move clip positions, one line apiece
+    const size_t planePose = t.find("st::eyePoseOf(head, eyeToHead[0], p.poseR, p.poseE)");
+    const size_t planeCall = t.find("if (static_cast<uint32_t>(family) == kDiscFamily && eye == 0 && p.planePose) logDiscPlanes(static_cast<const float*>(m.pData), vertices, fam, p);");
+    const size_t planeUnmap = found(planeCall) ? t.find("ctx->Unmap(p.staging, 0);", planeCall) : std::string::npos;
+    const bool planes = found(planePose) && found(planeCall) && found(planeUnmap) && planeUnmap - planeCall < 200 &&
+                        found(t.find("st::quadInSeated(records, fam.strideBytes / 4, fam.preFloat, 6 * k, vertices, tangents, p.poseR, p.poseE, q)")) &&
+                        found(t.find("\"srv turret hud disc plane: inst=%u centre=(%.3f,%.3f,%.3f) normal=(%.3f,%.3f,%.3f) head=(%.3f,%.3f,%.3f)\""));
+    // the unmoved family draws: counted per family and route, listed in the 10 s line, the first of each route said once
+    const bool unmoved = found(t.find("void srvTurretHudNoteUnmoved(int family, st::UnmovedRoute route, const void* site) {")) && found(t.find("st::unmovedList(unmoved, sizeof(unmoved), unmovedCounts);")) &&
+                         found(t.find("\"srv turret hud: first unmoved family draw by route %s (family %s): %s%s\"")) && found(t.find("void srvTurretHudNoteRefusedDraw(int family) {")) &&
+                         found(t.find("bool srvTurretHudScopeActive() { return g_binding.needsRestore(); }"));
+    const bool notes = planes && unmoved && found(t.find("void srvTurretHudNoteIssue(ID3D11DeviceContext* ctx) {")) && found(noteEnd) && found(t.find("if (!g_stateNoted[family]) noteBegin(ctx, family, eye);")) &&
                        found(t.find("\"srv turret hud state: family=%s eye=%d issue=%u target=%s %ux%u format=%u depth_view=%s | depth: enable=%d func=%d write=%d | stencil: enable=%d ref=%u read=0x%02X \"")) &&
                        found(t.find("| raster: scissor=%d rects=%u first=[%ld,%ld,%ld,%ld] \"")) && found(t.find("\"depth_clip=%d cull=%d front_ccw=%d | viewport: x=%.0f y=%.0f w=%.0f h=%.0f\""));
     if (!disc || !notes) return false;
@@ -336,6 +373,13 @@ static void wiringCases() {
     check(wiredVscreenBegin(vscreen), "vscreen.cpp: the draw is matched on BOTH shaders of the pair, then the eye is the layer's, the table's read-only form, then the registering form");
     check(!wiredVscreenBegin(replaced(vscreen, "srv_turret::familyOf(vs, bindingShaderHash(BindSlot::Ps))", "0")), "control: the vertex shader alone (no pair match) trips the pin");
     check(!wiredVscreenBegin(replaced(vscreen, "uiLayerEyeOfGameTarget(info->resource);\n            if (eye != 0 && eye != 1) eye = uiDepthEyeOfTargetReadOnly(info->resource);", "-1;")), "control: no eye lookup trips the pin");
+    check(wiredVscreenUnmoved(vscreen), "vscreen.cpp: every route a family draw can take without the pass's shader is counted (the four direct thunks, the indirect and auto draws, an unscoped reissue, a command list, the scope's decline)");
+    check(!wiredVscreenUnmoved(replaced(vscreen, "    srvTurretUnmovedDirect(self, false);   // this thunk has no fast path: only a second context's draw is unscoped", "")), "control: the draw thunk that has no fast path not looking for a second context trips the pin");
+    check(!wiredVscreenUnmoved(replaced(vscreen, "    srvTurretUnmovedPlain(self, srv_turret::UnmovedRoute::kAuto);\n", "")), "control: DrawAuto not counted trips the pin");
+    check(!wiredVscreenUnmoved(replaced(vscreen, "    if (srvTurretHudWantsDraws()) srvTurretUnmovedReissue(self, _ReturnAddress());", "")), "control: a replay outside the scope not counted trips the pin");
+    check(!wiredVscreenUnmoved(replaced(vscreen, "if (!privateExecution && srvTurretHudWantsDraws()) srvTurretHudNoteUnmoved(-1, srv_turret::UnmovedRoute::kCommandList, nullptr);", "")), "control: a command list not counted trips the pin");
+    check(!wiredVscreenUnmoved(replaced(vscreen, "if (self != g_state->ownerCtx || srvTurretHudScopeActive()) return;", "if (self != g_state->ownerCtx) return;")), "control: a replay inside the scope counted as unmoved trips the pin");
+    check(!wiredVscreenBegin(replaced(vscreen, "if (!bound) srvTurretHudNoteRefusedDraw(family);", "")), "control: a scope that declines a draw without counting it trips the pin");
     check(wiredVscreenGate(vscreen), "vscreen.cpp: the pass is a term of the draw gate (the AA-off fast path would otherwise skip forwardWithVerdict)");
     check(!wiredVscreenGate(replaced(vscreen, "        srvTurretHudWantsDraws() || // issue 140", "        false || // issue 140")), "control: a gate without the term trips the pin");
     check(wiredVscreenBoundary(vscreen), "vscreen.cpp: the boundary tick settles a binding, and the shutdown releases the pass after the bars'");
@@ -424,6 +468,10 @@ static void wiringCases() {
           "control: a register other than cb2[11] trips the pin");
     check(!wiredInstrument(vscreen, replaced(module, "if (!g_stateNoted[family]) noteBegin(ctx, family, eye);", "")), "control: a family's first scope that never says its state trips the pin");
     check(!wiredInstrument(vscreen, replaced(module, "if (family == static_cast<int>(kDiscFamily)) probeReadDisc(ctx, eye);", "")), "control: the disc's results never read trip the pin");
+    check(!wiredInstrument(vscreen, replaced(module, "if (static_cast<uint32_t>(family) == kDiscFamily && eye == 0 && p.planePose) logDiscPlanes(static_cast<const float*>(m.pData), vertices, fam, p);", "")),
+          "control: the disc's plane never logged trips the pin");
+    check(!wiredInstrument(vscreen, replaced(module, "st::eyePoseOf(head, eyeToHead[0], p.poseR, p.poseE)", "st::eyePoseOf(head, eyeToHead[1], p.poseR, p.poseE)")), "control: the plane read with the wrong eye's pose trips the pin");
+    check(!wiredInstrument(vscreen, replaced(module, "st::unmovedList(unmoved, sizeof(unmoved), unmovedCounts);", "unmoved[0] = 0;")), "control: the unmoved draws never listed trip the pin");
     check(wiredAccessors(journal, temporal, journalH), "journal_watch and native_temporal: the turret bit and the eye separation accessors");
     check(!wiredAccessors(replaced(journal, "srv_turret::turretViewFromFlags(peek(g_v.flags))", "false"), temporal, journalH), "control: an accessor that answers false trips the pin");
     check(!wiredAccessors(journal, replaced(temporal, "g_frameSequence.store(f->sequence,std::memory_order_release);", ""), journalH), "control: a frame sequence that is never published trips the pin");

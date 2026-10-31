@@ -64,6 +64,7 @@
 
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 
 namespace edvr {
@@ -558,6 +559,142 @@ inline float p00OfTangents(const float tan[4]) {
 inline bool p00Usable(float p00) { return std::isfinite(p00) && p00 > 0.05f && p00 < 20.0f; }
 // The eye separation Elite renders with, from the two eyeToHead origins (the located one times the world scale factor, common/world_scale.h), for the log: a human range, or "not known".
 inline bool ipdUsable(float ipdM) { return std::isfinite(ipdM) && ipdM > 0.02f && ipdM < 0.20f; }
+
+// ---- the radar disc's plane in the seated frame (is it a billboard?) -------------------------------------------------------------------------------------------------
+// The game builds the disc's clip position from its own constants (clip = cb2[9] + h * cb2[7] + u * cb2[6] + v * cb2[8]) and may ORIENT it toward its camera or the head, in which case a rigid
+// translation keeps an orientation meant for a viewer elsewhere. The instrument reads a sampled draw's PRE-move clip positions (TURRETPRE) back out of the stream-output twin, rebuilds each
+// vertex's eye-space point with that eye's tangents, and moves it to the SEATED frame with the eye's pose: the inverse of eyeFrameFrom's step for the anchor. A turret-fixed disc keeps the
+// same centre and normal as the head moves; a billboard's normal turns to follow the head.
+//   eye pose E = head * eyeToHead (R the 3x3, E the position), both the host's 3x4 row-major matrices; an eye-space point (X right, Y up, Z forward) is the pose-frame vector (X, Y, -Z), so
+//   the seated point is E + R * (X, Y, -Z).
+inline bool eyePoseOf(const float head[12], const float eyeToHead[12], double R[9], double E[3]) {
+    for (int i = 0; i < 12; ++i)
+        if (!std::isfinite(head[i]) || !std::isfinite(eyeToHead[i])) return false;
+    for (int i = 0; i < 3; ++i) {
+        for (int j = 0; j < 3; ++j) {
+            R[i * 3 + j] = 0.0;
+            for (int k = 0; k < 3; ++k) R[i * 3 + j] += double(head[i * 4 + k]) * eyeToHead[k * 4 + j];
+        }
+        E[i] = head[i * 4 + 3];
+        for (int k = 0; k < 3; ++k) E[i] += double(head[i * 4 + k]) * eyeToHead[k * 4 + 3];
+    }
+    return true;
+}
+inline void eyeToSeated(const double R[9], const double E[3], const double p[3], double out[3]) {
+    const double v[3] = {p[0], p[1], -p[2]};
+    for (int i = 0; i < 3; ++i) out[i] = E[i] + R[i * 3 + 0] * v[0] + R[i * 3 + 1] * v[1] + R[i * 3 + 2] * v[2];
+}
+struct SeatedQuad {
+    double centre[3] = {0.0, 0.0, 0.0};
+    double normal[3] = {0.0, 0.0, 0.0};   // unit, from the first triangle's winding
+};
+// The quad of six consecutive records (two triangles) starting at `firstVertex`, from the PRE clip position at float offset preFloat of each record: its centre (the mean of the six, which is
+// the quad's centre for a parallelogram) and its unit normal, in the seated frame. tangents are {left, right, down, up} as the shader was given them. False when fewer than six records are
+// there, anything is not finite, or the first triangle has no area.
+inline bool quadInSeated(const float* records, uint32_t strideFloats, uint32_t preFloat, uint32_t firstVertex, uint32_t vertexCount, const float tangents[4], const double R[9], const double E[3],
+                         SeatedQuad& out) {
+    if (!records || !tangents || strideFloats < preFloat + 4 || firstVertex > vertexCount || vertexCount - firstVertex < 6) return false;
+    double pts[6][3];
+    for (uint32_t i = 0; i < 6; ++i) {
+        const float* c = records + static_cast<size_t>(strideFloats) * (firstVertex + i) + preFloat;
+        if (!std::isfinite(c[0]) || !std::isfinite(c[1]) || !std::isfinite(c[2]) || !std::isfinite(c[3])) return false;
+        const double w = c[3];
+        const double eye[3] = {c[0] * (double(tangents[1]) - tangents[0]) / 2.0 + w * (double(tangents[1]) + tangents[0]) / 2.0,
+                               c[1] * (double(tangents[3]) - tangents[2]) / 2.0 + w * (double(tangents[3]) + tangents[2]) / 2.0, w};
+        eyeToSeated(R, E, eye, pts[i]);
+        for (int k = 0; k < 3; ++k)
+            if (!std::isfinite(pts[i][k])) return false;
+    }
+    for (int k = 0; k < 3; ++k) {
+        double sum = 0.0;
+        for (int i = 0; i < 6; ++i) sum += pts[i][k];
+        out.centre[k] = sum / 6.0;
+    }
+    const double a[3] = {pts[1][0] - pts[0][0], pts[1][1] - pts[0][1], pts[1][2] - pts[0][2]}, b[3] = {pts[2][0] - pts[0][0], pts[2][1] - pts[0][1], pts[2][2] - pts[0][2]};
+    const double n[3] = {a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]};
+    const double len = std::sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
+    if (!(len > 1.0e-12)) return false;
+    for (int k = 0; k < 3; ++k) out.normal[k] = n[k] / len;
+    return true;
+}
+// The angle between two vectors, in degrees (0 when either has no length).
+inline double angleBetweenDeg(const double a[3], const double b[3]) {
+    const double la = std::sqrt(a[0] * a[0] + a[1] * a[1] + a[2] * a[2]), lb = std::sqrt(b[0] * b[0] + b[1] * b[1] + b[2] * b[2]);
+    if (!(la > 0.0) || !(lb > 0.0)) return 0.0;
+    double c = (a[0] * b[0] + a[1] * b[1] + a[2] * b[2]) / (la * lb);
+    if (c > 1.0) c = 1.0;
+    if (c < -1.0) c = -1.0;
+    return std::acos(c) * 180.0 / 3.14159265358979323846;
+}
+
+// ---- draws of a turret family that the pass did not move ---------------------------------------------------------------------------------------------------------------------
+// Sean: the radar "seems to be stretched toward its origin". Besides a billboard, a second UNMOVED copy of the radar landing at its original place would smear toward it. Every route by which a
+// draw of one of the families can reach the GPU without the pass's geometry shader bound is counted per family (the 10 s line's `unmoved family draws:` list) and named the first time it is seen.
+//   refused           the owner's draw thunk offered the draw to the pass's scope and the scope declined it (the refused[...] counts say why)
+//   group-off         ... and the family's group has its push, gap and forward keys all at 0
+//   fast-path         the owner's draw thunk took the fast path (no verdict scope), so the pass never saw the draw
+//   indirect          DrawInstancedIndirect or DrawIndexedInstancedIndirect: those thunks have no scope
+//   auto              DrawAuto: no scope either
+//   foreign-immediate a draw on a second IMMEDIATE context (not the owner's)
+//   foreign-deferred  a draw RECORDED on a deferred context (replayed later by ExecuteCommandList, which no scope covers)
+//   reissue           pureDrawReissue (an EDVR replay of a draw: the UI layer's, the interface depth's, the blend probe's, the crisp tone's) called while the pass's shader is not bound
+//   command-list      the game executed a command list: what is inside cannot be seen, so the family is unknown
+enum class UnmovedRoute : uint8_t { kRefused = 0, kGroupOff, kFastPath, kIndirect, kAuto, kForeignImmediate, kForeignDeferred, kReissue, kCommandList, kCount };
+inline constexpr uint32_t kUnmovedRoutes = static_cast<uint32_t>(UnmovedRoute::kCount);
+inline const char* unmovedRouteName(UnmovedRoute r) {
+    switch (r) {
+        case UnmovedRoute::kRefused: return "refused";
+        case UnmovedRoute::kGroupOff: return "group-off";
+        case UnmovedRoute::kFastPath: return "fast-path";
+        case UnmovedRoute::kIndirect: return "indirect";
+        case UnmovedRoute::kAuto: return "auto";
+        case UnmovedRoute::kForeignImmediate: return "foreign-immediate";
+        case UnmovedRoute::kForeignDeferred: return "foreign-deferred";
+        case UnmovedRoute::kReissue: return "reissue";
+        case UnmovedRoute::kCommandList: return "command-list";
+        default: return "?";
+    }
+}
+inline const char* unmovedRouteWhere(UnmovedRoute r) {
+    switch (r) {
+        case UnmovedRoute::kRefused: return "the owner context's draw, offered to the pass's scope, which declined it (the 10 s line's refused[...] says why)";
+        case UnmovedRoute::kGroupOff: return "the owner context's draw, offered to the scope; the family's group has its push, gap and forward keys at 0";
+        case UnmovedRoute::kFastPath: return "the owner context's draw thunk took the fast path (no verdict scope): the pass never saw the draw";
+        case UnmovedRoute::kIndirect: return "DrawInstancedIndirect or DrawIndexedInstancedIndirect: vscreen's thunks for them have no scope";
+        case UnmovedRoute::kAuto: return "DrawAuto: vscreen's thunk has no scope";
+        case UnmovedRoute::kForeignImmediate: return "a draw on a second immediate context, outside the owner's scope";
+        case UnmovedRoute::kForeignDeferred: return "a draw recorded on a deferred context, replayed later by ExecuteCommandList outside any scope";
+        case UnmovedRoute::kReissue: return "pureDrawReissue (an EDVR replay of a draw) called while the pass's shader is not bound";
+        case UnmovedRoute::kCommandList: return "the game executed a command list while the pass was wanted: the draws inside cannot be seen, so the family is unknown";
+        default: return "?";
+    }
+}
+// counts[family][route], with the row kFamilyCount for a draw whose family is not known (a command list). The list as the 10 s line spells it: `<family> <route> N, ...` in family then route order
+// (the unknown family is `?`), or `none`. Always NUL-terminated within cap; returns the length. A list that does not fit ends at the last entry that did.
+inline size_t unmovedList(char* out, size_t cap, const uint32_t (*counts)[kUnmovedRoutes]) {
+    if (!out || cap == 0) return 0;
+    size_t n = 0;
+    out[0] = '\0';
+    for (uint32_t f = 0; f <= kFamilyCount; ++f) {
+        for (uint32_t r = 0; r < kUnmovedRoutes; ++r) {
+            if (!counts[f][r]) continue;
+            char entry[96];
+            const int len = std::snprintf(entry, sizeof(entry), "%s%s %s %u", n ? ", " : "", f < kFamilyCount ? kFamilies[f].name : "?", unmovedRouteName(static_cast<UnmovedRoute>(r)), counts[f][r]);
+            if (len <= 0 || n + static_cast<size_t>(len) + 1 > cap) return n;
+            std::memcpy(out + n, entry, static_cast<size_t>(len) + 1);
+            n += static_cast<size_t>(len);
+        }
+    }
+    if (!n) {
+        const char* none = "none";
+        const size_t len = std::strlen(none);
+        if (len + 1 <= cap) {
+            std::memcpy(out, none, len + 1);
+            n = len;
+        }
+    }
+    return n;
+}
 
 // ---- the draw decision's reasons, counted and named --------------------------------------------------------------------------------------------------------------------
 enum class Refuse : uint8_t { kNoEye = 0, kGameGs, kTopology, kNotReady, kNoGeometry, kCount };

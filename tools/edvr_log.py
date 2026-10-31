@@ -294,7 +294,9 @@ gives each group's window (a push-back is a negative gap: deeper) and counts the
 judges the camera half (a "camera: back ... published" line) and the HUD half (a first-draw line or a 10 s line with draws bound) on the keys in force, the HUD half being on when any of the
 HUD forward, the radar forward, the panels' push-back, the radar's push-back and the gap is above 0 (the 10 s line gives both groups' forward translation, T and Tradar, and how many frames'
 eye frames were rebuilt at draw time from a newer pose than the frame boundary had: "pose refreshed at draw"; the settings line also says the depth mode of the moved parts, front, game or real, and whether their scissor rectangle is opened, open or game, the 10 s line counts the draws whose scissor was opened
-("scissor opened N"), a family found drawing with the scissor test on is said once ("srv turret hud: family F draws with the scissor test on"), and
+("scissor opened N"), a family found drawing with the scissor test on is said once ("srv turret hud: family F draws with the scissor test on"), the 10 s line lists the unmoved family draws (draws of a family that reached the GPU without the pass's shader, by route:
+"unmoved family draws: F route N, ..." or none; the first of each route is a "first unmoved family draw by route" line), the radar disc's quads in the seated frame ("srv turret hud disc plane:" centre,
+normal and the head's position, once a second for eye 0: the detail says each quad's normal spread over the flight, to tell a turret-fixed disc from a billboard), and
 the radar disc's probe lines ("srv turret hud disc:" samples that passed the depth and stencil tests, and the alpha and intensity its pixel shader read) and each family's first-scope state lines
 ("srv turret hud state:") go into the detail unjudged): NEVER APPLIED when a key is above 0
 and the log proves the turret view was on with nothing from that half, or when the geometry shader could not be made; PARTIAL when under 90% of the HUD draws were bound or some were
@@ -10423,6 +10425,7 @@ H_SRV_TURRET_HUD = (r"srv turret hud: (?:panels: " + H_SRV_TURRET_GROUP.format(p
                     r"(?: Tradar=\((?P<rtx>-?[\d.]+),(?P<rty>-?[\d.]+),(?P<rtz>-?[\d.]+)\))?"
                     r"|s\[L,R\]=(?P<sl>[+-][\d.]+),(?P<sr>[+-][\d.]+)) "
                     r"ipd_elite=(?P<ipd>-?[\d.]+)mm P00\[L,R\]=(?P<pl>-?[\d.]+),(?P<pr>-?[\d.]+) draws\[L,R\]=(?P<dl>\d+),(?P<dr>\d+) bound=(?P<bound>\d+) (?:scissor opened (?P<so>\d+) )?(?:pose refreshed at draw: (?P<pn>\d+) of (?P<pm>\d+) frames )?"
+                    r"(?:unmoved family draws: (?P<um>.+?) )?"
                     r"refused\[no-eye,game-gs,topology,not-ready,no-geometry\]=(?P<r0>\d+)/(?P<r1>\d+)/(?P<r2>\d+)/(?P<r3>\d+)/(?P<r4>\d+) "
                     r"families\[(?P<fnames>[^\]]+)\]=(?P<fcounts>\d+(?:,\d+)*)$")   # the family names, then each one's matched draws, as two comma lists in the same order
 # shaderSwapCreateGs: "<who>: precompiled geometry shader <name> <outcome> (0x<HRESULT>, <ms> ms)." with the outcome created, creation FAILED; standing down, or creation faulted/refused; standing down.
@@ -10456,6 +10459,11 @@ H_SRV_TURRET_INSTRUMENT = (r"srv turret hud: the GPU instrument could not be mad
 H_SRV_TURRET_SCISSOR = (r"srv turret hud: family (?P<family>\S+) draws with the scissor test on: (?P<rects>\d+) rect\(s\), first \[(?P<l>-?\d+),(?P<t>-?\d+),(?P<r>-?\d+),(?P<b>-?\d+)\], "
                         r"target (?P<tw>\d+)x(?P<th>\d+); the scissor is (?P<how>opened to the whole target|kept as the game set it) for its draws$")
 H_SRV_TURRET_SCISSOR_UNRESTORED = r"srv turret hud: the game's scissor rectangles could not be put back after an issue;"
+# srv_turret.cpp logDiscPlanes: each quad of the radar disc's sampled capture (eye 0), from the PRE-move clip positions, in the seated frame, with the head's seated position at that frame
+H_SRV_TURRET_PLANE = (r"srv turret hud disc plane: inst=(?P<inst>\d+) centre=\((?P<cx>-?[\d.]+),(?P<cy>-?[\d.]+),(?P<cz>-?[\d.]+)\) normal=\((?P<nx>-?[\d.]+),(?P<ny>-?[\d.]+),(?P<nz>-?[\d.]+)\) "
+                      r"head=\((?P<hx>-?[\d.]+),(?P<hy>-?[\d.]+),(?P<hz>-?[\d.]+)\)$")
+# srv_turret.cpp srvTurretHudNoteUnmoved: the first draw of a family that reached the GPU without the pass's shader, by route (a reissue: its call site as module+offset)
+H_SRV_TURRET_UNMOVED = r"srv turret hud: first unmoved family draw by route (?P<route>\S+) \(family (?P<family>\S+)\): (?P<where>.+)$"
 H_SRV_TURRET_SKIP = r"srv turret hud: the GPU instrument skips a draw: the game has a stream-output target bound \(said once\)\.$"
 # srv_turret.cpp noteState: each issue of a family's first scope says the target it drew into (the game's, as bound at the start of the scope, or another: the UI layer's), the depth-stencil state and
 # the blend state of render target 0 (D3D11 enumeration numbers: comparison 1 NEVER .. 8 ALWAYS, blend 1 ZERO .. 15 INV_BLEND_FACTOR, blend op 1 ADD .. 5 MAX)
@@ -15574,6 +15582,42 @@ def _srv_turret_state_text(r):
     return text
 
 
+def _srv_turret_plane_text(planes):
+    """The radar disc's quads over the flight, one clause for each instance: how many samples, the largest angle between its normals (the 'normal spread'), how far its centre and the head moved, and
+    what that says: a normal that holds while the head moved is a turret-fixed disc, one that turns with the head is oriented toward the viewer (a billboard)."""
+    def angle(a, b):
+        la, lb = math.sqrt(sum(x * x for x in a)), math.sqrt(sum(x * x for x in b))
+        if la <= 0.0 or lb <= 0.0:
+            return 0.0
+        return math.degrees(math.acos(max(-1.0, min(1.0, sum(x * y for x, y in zip(a, b)) / (la * lb)))))
+
+    def span(points):
+        return max([math.dist(a, b) for i, a in enumerate(points) for b in points[i + 1:]] or [0.0])
+    by_inst = {}
+    for r in planes:
+        by_inst.setdefault(int(r["inst"]), []).append(r)
+    clauses = []
+    for inst in sorted(by_inst):
+        rs = by_inst[inst]
+        step = max(1, len(rs) // 200)   # a long flight: every few samples, the pairs stay a few tens of thousands
+        picked = rs[::step]
+        normals = [tuple(float(r[k]) for k in ("nx", "ny", "nz")) for r in picked]
+        spread = max([angle(a, b) for i, a in enumerate(normals) for b in normals[i + 1:]] or [0.0])
+        centre_span = span([tuple(float(r[k]) for k in ("cx", "cy", "cz")) for r in picked])
+        head_span = span([tuple(float(r[k]) for k in ("hx", "hy", "hz")) for r in picked])
+        text = "inst %d: %d sample(s), normal spread %.1f deg, centre moved %.3f m, head moved %.3f m" % (inst, len(rs), spread, centre_span, head_span)
+        if head_span < 0.05:
+            text += " (the head moved too little to tell)"
+        elif spread < 2.0:
+            text += " (the normal holds while the head moved: turret-fixed)"
+        elif spread >= 5.0:
+            text += " (the normal turns while the head moved: oriented toward the viewer)"
+        else:
+            text += " (the normal moves a little while the head moved)"
+        clauses.append(text)
+    return "; ".join(clauses)
+
+
 def _hj_srv_turret(rows, ctx):
     """The SRV turret view (issue 140; src\\d3d11\\srv_turret.cpp; fix.srv_turret_camera_back, fix.srv_turret_hud_forward, fix.srv_turret_panels_back, fix.srv_turret_radar_back,
     fix.srv_turret_hud_gap), two halves judged on the keys in force (the last settings line): the camera half is applied by a 'camera: back X m published' line; the HUD half by the first-draw line or a 10 s line with draws bound.
@@ -15852,6 +15896,25 @@ def _hj_srv_turret(rows, ctx):
         text += "; anchor latched %d time(s)%s, last at %s,%s,%s m seated (%s)" % (len(anchors), " (%d head away)" % away if away else "", anchors[-1]["x"], anchors[-1]["y"], anchors[-1]["z"],
                                                                                   anchors[-1]["why"])
     text += probe_text
+    planes = rows.get("plane", [])
+    if planes:
+        text += "; radar disc plane in the seated frame (the normal of a turret-fixed disc holds as the head moves, a billboard's turns): " + _srv_turret_plane_text(planes)
+    um_lines = [r["um"] for r in secs if r.get("um") is not None]
+    if um_lines:   # the 10 s lines of the build that counts them: the sums over the window, in order of first appearance
+        sums = {}
+        for line in um_lines:
+            if line == "none":
+                continue
+            for entry in line.split(", "):
+                bits = entry.rsplit(" ", 2)
+                if len(bits) == 3 and bits[2].isdigit():
+                    sums[(bits[0], bits[1])] = sums.get((bits[0], bits[1]), 0) + int(bits[2])
+        if sums:
+            text += "; unmoved family draws (reached the GPU without the pass's shader): " + ", ".join("%s %s %d" % (f, route, n) for (f, route), n in sums.items())
+        else:
+            text += "; no unmoved family draws (every draw of a family went through the pass's shader)"
+    if rows.get("unmoved"):
+        text += "; first unmoved by route: " + "; ".join("%s (family %s): %s" % (r["route"], r["family"], r["where"]) for r in rows["unmoved"])
     found_scissor = rows.get("scissor", [])
     opened_draws = sum(int(r["so"]) for r in secs if r.get("so") is not None)
     if found_scissor or opened_draws:   # the game's scissor rectangle: which families had it on, and how many draws had it opened
@@ -16764,6 +16827,8 @@ HEALTH_RULES = (
         ("disc", H_SRV_TURRET_DISC),
         ("scissor", H_SRV_TURRET_SCISSOR),
         ("scissor_unrestored", H_SRV_TURRET_SCISSOR_UNRESTORED),
+        ("plane", H_SRV_TURRET_PLANE),
+        ("unmoved", H_SRV_TURRET_UNMOVED),
     ), _hj_srv_turret),)
 HEALTH_BY_TAG = {}
 for _rule in HEALTH_RULES:
@@ -22559,10 +22624,10 @@ def self_test_health():
             return RT(stsrc, "gap=%.2f m dMin=%.2f dMax=%.2f", g, 0.02, 1.00) if g < 0 else RT(stsrc, "gap=%.2f m dMin=%.2f dMax=%.2f", g, g + 0.10, 4.00)
 
         def st_sec(panels=-1.10, radar=-1.10, left=240, right=240, bound=480, refused=(0, 0, 0, 0, 0), anchor=(0.05, 0.2, -0.1), offset=1.5, t=(0.0, 0.0, 0.7), ipd=63.5, p00=(0.912, 0.915), fams=(300, 180),
-                   tradar=(0.0, 0.0, 0.7), pose=(240, 240), opened=240):
+                   tradar=(0.0, 0.0, 0.7), pose=(240, 240), opened=240, unmoved="none"):
             counts = list(fams) + [0] * (len(STF) - len(fams))   # the matched draws of the first families; the rest drew none
             return RT(stsrc, "srv turret hud: panels: %s", st_group(panels), st_group(radar), anchor[0], anchor[1], anchor[2], offset, t[0], t[1], t[2], tradar[0], tradar[1], tradar[2], ipd, p00[0], p00[1],
-                      left, right, bound, opened, pose[0], pose[1], *refused, ",".join(STF), ",".join(str(c) for c in counts))
+                      left, right, bound, opened, pose[0], pose[1], unmoved, *refused, ",".join(STF), ",".join(str(c) for c in counts))
 
         def st_state(family=STF[2], eye=0, issue=1, target="game", w=2468, h=2208, fmt=10, dsv="yes", depth=(1, 2, 0), stencil=(0, 0, 0xFF, 0xFF, (8, 1, 1, 1)), blend=(1, 5, 6, 1, 1, 6, 1, 0xF),
                      raster=(0, 0, (0, 0, 0, 0), 1, 1, 0), viewport=(0.0, 0.0, 2468.0, 2208.0)):
@@ -22573,6 +22638,12 @@ def self_test_health():
 
         def st_scissor(family=STF[2], rects=1, first=(0, 600, 2468, 1200), target=(2468, 2208), opened=True):
             return RT(stsrc, "srv turret hud: family %s draws with the scissor test on", family, rects, *first, *target, "opened to the whole target" if opened else "kept as the game set it")
+
+        def st_plane(inst=0, centre=(0.100, -0.350, -0.450), normal=(0.0, -1.0, 0.0), head=(0.050, 0.100, 0.020)):
+            return RT(stsrc, "srv turret hud disc plane: inst=%u centre=", inst, *centre, *normal, *head)
+
+        def st_unmoved(route="foreign-deferred", family=STF[2], where="a draw recorded on a deferred context, replayed later by ExecuteCommandList outside any scope"):
+            return RT(stsrc, "srv turret hud: first unmoved family draw by route %s", route, family, where, "")
 
         def st_disc(eye=0, draw=2, issues=3, samples=1200, alpha="0.8500", intensity="1.0000", family=STF[2]):
             return RT(stsrc, "srv turret hud disc: family=%s eye=%d draw=%u issues=%u samples_passed=%llu", family, eye, draw, issues, samples, alpha, intensity)
@@ -22886,7 +22957,7 @@ def self_test_health():
         check("srv turret pose: none refreshed (the boundary tick already had the newest pose) is said and is no failure", st_ok + [(1, st_set()), (2, st_view()), (3, st_cam()), (5, st_first()), (12, st_sec(pose=(0, 238))), (14, st_view(False))], 0, [("OK", ST)],
               has=["pose refreshed at draw in 0 of 238 frames"], lacks=["UNPARSED", "NEVER APPLIED", "PARTIAL"])
         old_set5 = st_set().replace("radar forward 70 cm, ", "").replace(", hud depth front, hud scissor open", "")
-        old_sec5 = st_sec().replace(" Tradar=(0.000,0.000,0.700)", "").replace(" scissor opened 240", "").replace(" pose refreshed at draw: 240 of 240 frames", "")
+        old_sec5 = st_sec().replace(" Tradar=(0.000,0.000,0.700)", "").replace(" scissor opened 240", "").replace(" pose refreshed at draw: 240 of 240 frames", "").replace(" unmoved family draws: none", "")
         check("srv turret radar forward: the lines of the build with HUD forward and no radar forward or pose field (a five-key settings line, a 10 s line with T alone) still parse and judge",
               st_ok + [(1, old_set5), (2, st_view()), (3, st_cam()), (5, st_first()), (12, old_sec5), (14, st_view(False))], 0, [("OK", ST)],
               has=["(camera back 60 cm, hud forward 70 cm, panels back 110 cm, radar back 110 cm, hud gap 0 cm)", "head offset 1.5 cm, T (0.000,0.000,0.700), ipd_elite"],
@@ -22932,6 +23003,32 @@ def self_test_health():
               st_ok + st_flight() + [(5, st_state().split(" | raster:")[0])], 0, [("OK", ST)], has=["blend SRC_ALPHA/INV_SRC_ALPHA ADD mask 0xF"], lacks=["UNPARSED", "cull"])
         check("srv turret scissor: a drifted scissor line is UNPARSED", st_ok + [st_scissor().replace("draws with the scissor test on", "draws with the scissor on")], 4, [("UNPARSED", ST)])
         check("srv turret scissor: a drifted raster field is UNPARSED", st_ok + [st_state().replace("raster: scissor=", "raster: clip=")], 4, [("UNPARSED", ST)])
+        check("srv turret plane: a normal that holds while the head moved reads as turret-fixed",
+              st_ok + st_flight() + [(7 + i, st_plane(head=(0.05 + 0.15 * i, 0.1, 0.02), normal=(0.0, -1.0, 0.0))) for i in range(3)], 0, [("OK", ST)],
+              has=["radar disc plane in the seated frame", "inst 0: 3 sample(s), normal spread 0.0 deg, centre moved 0.000 m, head moved 0.300 m (the normal holds while the head moved: turret-fixed)"], lacks=["UNPARSED"])
+        check("srv turret plane: a normal that turns with the head reads as a billboard, and the spread is the largest angle between any two",
+              st_ok + st_flight() + [(7, st_plane(head=(0.0, 0.1, 0.0), normal=(0.0, -1.0, 0.0))), (8, st_plane(head=(0.2, 0.1, 0.0), normal=(0.5, -0.8660254, 0.0))),
+                                     (9, st_plane(head=(0.4, 0.1, 0.0), normal=(0.8660254, -0.5, 0.0)))], 0, [("OK", ST)],
+              has=["normal spread 60.0 deg, centre moved 0.000 m, head moved 0.400 m (the normal turns while the head moved: oriented toward the viewer)"], lacks=["UNPARSED"])
+        check("srv turret plane: a head that barely moved says there is nothing to tell, and each instance has its own clause",
+              st_ok + st_flight() + [(7, st_plane(0, head=(0.0, 0.1, 0.0))), (7, st_plane(1, centre=(-0.1, -0.35, -0.45), head=(0.0, 0.1, 0.0))), (8, st_plane(0, head=(0.01, 0.1, 0.0))),
+                                     (8, st_plane(1, centre=(-0.1, -0.35, -0.45), head=(0.01, 0.1, 0.0)))], 0, [("OK", ST)],
+              has=["inst 0: 2 sample(s), normal spread 0.0 deg, centre moved 0.000 m, head moved 0.010 m (the head moved too little to tell); inst 1: 2 sample(s)"], lacks=["UNPARSED"])
+        check("srv turret plane: a flight with no plane line says nothing of it", st_ok + st_flight(), 0, [("OK", ST)], lacks=["disc plane", "UNPARSED"])
+        check("srv turret plane: a drifted plane line is UNPARSED", st_ok + [st_plane().replace("normal=(", "normals=(")], 4, [("UNPARSED", ST)])
+        check("srv turret unmoved: the 10 s lines' unmoved family draws are summed by family and route, in order of first appearance",
+              st_ok + st_flight() + [(22, st_sec(unmoved="1989E6D3 fast-path 3, DF3503CD foreign-deferred 12, ? command-list 2")), (32, st_sec(unmoved="DF3503CD foreign-deferred 5, 9B34C331 reissue 1"))], 0, [("OK", ST)],
+              has=["unmoved family draws (reached the GPU without the pass's shader): 1989E6D3 fast-path 3, DF3503CD foreign-deferred 17, ? command-list 2, 9B34C331 reissue 1"], lacks=["UNPARSED", "no unmoved family draws"])
+        check("srv turret unmoved: every 10 s line saying none is said as no unmoved family draws", st_ok + st_flight(), 0, [("OK", ST)],
+              has=["no unmoved family draws (every draw of a family went through the pass's shader)"], lacks=["UNPARSED", "reached the GPU"])
+        check("srv turret unmoved: the first unmoved draw of each route is said with where it came from",
+              st_ok + st_flight() + [(6, st_unmoved()), (7, st_unmoved("reissue", STF[2], "pureDrawReissue (an EDVR replay of a draw) called while the pass's shader is not bound, called from edvr_d3d11.dll+0x1A2B3"))], 0, [("OK", ST)],
+              has=["first unmoved by route: foreign-deferred (family DF3503CD): a draw recorded on a deferred context", "reissue (family DF3503CD): pureDrawReissue (an EDVR replay of a draw) called while the pass's shader is not bound, called from edvr_d3d11.dll+0x1A2B3"],
+              lacks=["UNPARSED"])
+        check("srv turret unmoved: a 10 s line from the build before the list still parses and says nothing of it",
+              st_ok + st_flight() + [(23, st_sec().replace(" unmoved family draws: none", ""))], 0, [("OK", ST)], lacks=["UNPARSED"])
+        check("srv turret unmoved: a drifted unmoved field in the 10 s line is UNPARSED", st_ok + [st_sec().replace("unmoved family draws:", "unmoved family draw:")], 4, [("UNPARSED", ST)])
+        check("srv turret unmoved: a drifted first-route line is UNPARSED", st_ok + [st_unmoved().replace("first unmoved family draw", "first unmoved draw")], 4, [("UNPARSED", ST)])
         check("srv turret anchored: an anchor reason the rule does not know is UNPARSED", st_ok + [st_anchor().replace("view on", "somewhere")], 4, [("UNPARSED", ST)])
         check("srv turret anchored: a drifted anchor line is UNPARSED", st_ok + [st_anchor().replace("latched at", "kept at")], 4, [("UNPARSED", ST)])
         check("srv turret anchored: a drifted 10 s line (the anchor field gone) is UNPARSED", st_ok + [st_sec().replace(" anchor=(", " anchored=(")], 4, [("UNPARSED", ST)])

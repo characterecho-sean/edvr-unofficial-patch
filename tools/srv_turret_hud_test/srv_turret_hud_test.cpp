@@ -15,7 +15,7 @@
 //   camera's own projection, its distance from the anchor, its direction from it. (a) The anchor at the eye: a vertex at distance r keeps its NDC x, y and z and its w becomes w (r + d) / r.
 //   (b) The anchor 10 cm to the side and 5 cm up, with vertices 15 cm from it. (c) Asymmetric tangents (the Pimax set, a vertical pair that is not symmetric): the move, and a gap of 10 um
 //   round-trips every vertex. (d) A vertex at anchor distance 1.4 m, 2.8 m, 500 m, just past 1 m or inside 2 cm is untouched bit for bit. (e) A pull. (g) The translation alone: every vertex
-//   moves by T, one 0.2 m behind the eye comes in front of it, one that stays behind moves too. (h) The translation, then the push. (k) The depth: Elite is reversed Z (clip z the constant 0.025), so a vertex behind the eye or inside the near plane gets the nearest depth, 0.999, and a valid one keeps its own; (l) a triangle with a corner moved behind the eye is output with all three corners moved; (m) the two groups in one frame: the panels' constants translate by the HUD-forward T and the radar's by its own key's; (n) the three depth modes (game: the vertex's own valid depth else 0.999, real: the moved position's own depth clamped to 0..0.999, front: 0.999); (S) the scissor: a draw the game scissored to the top half of the target, kept (the moved quad is cropped) and opened (it covers below the rectangle; the top half is the same picture), several rectangles (three, sixteen, none with the test on) put back exactly, the rasterizer state object untouched, no target view (the viewport's extent), a look that changes nothing, a second open refused and the boundary settle; (o) signature H only, the Scorpion's hologram: its lighting position moves by the camera's right, up and forward vectors (a stand-in vertex constant buffer at slot 1, bound whole and with a first constant) times the move's eye-space displacement, and not at all where the move leaves a vertex alone. The pictures (I1 to I4) compare the rasterized quad with the
+//   moves by T, one 0.2 m behind the eye comes in front of it, one that stays behind moves too. (h) The translation, then the push. (k) The depth: Elite is reversed Z (clip z the constant 0.025), so a vertex behind the eye or inside the near plane gets the nearest depth, 0.999, and a valid one keeps its own; (l) a triangle with a corner moved behind the eye is output with all three corners moved; (m) the two groups in one frame: the panels' constants translate by the HUD-forward T and the radar's by its own key's; (n) the three depth modes (game: the vertex's own valid depth else 0.999, real: the moved position's own depth clamped to 0..0.999, front: 0.999); (P) the radar disc's plane in the seated frame (the inverse of eyeFrameFrom's step; a turret-fixed square keeps its centre and normal as the head moves and turns, a tilted one reads its tilt) and the list of unmoved family draws; (S) the scissor: a draw the game scissored to the top half of the target, kept (the moved quad is cropped) and opened (it covers below the rectangle; the top half is the same picture), several rectangles (three, sixteen, none with the test on) put back exactly, the rasterizer state object untouched, no target view (the viewport's extent), a look that changes nothing, a second open refused and the boundary settle; (o) signature H only, the Scorpion's hologram: its lighting position moves by the camera's right, up and forward vectors (a stand-in vertex constant buffer at slot 1, bound whole and with a first constant) times the move's eye-space displacement, and not at all where the move leaves a vertex alone. The pictures (I1 to I4) compare the rasterized quad with the
 //   plain one (anchor at the eye) and with the quad truly moved in 3D. THE STRIPS: a quad as a triangle strip is the plain strip bit for bit through a window with nothing in it and no
 //   translation, under every culling mode (the winding is kept), and lands where the same quad as a list lands once it is moved.
 //   THE ANCHOR (srv_turret_math.h AnchorTracker, no device): followed for the settle after the view comes on or a camera key changes, then latched; a recentre (the head jumping more than
@@ -1651,6 +1651,131 @@ static void depthMathCases() {
     check(!moved && zero[0] == 0.0 && zero[1] == 0.0 && zero[2] == 0.0, "a vertex left alone has no displacement");
 }
 
+// ---------------------------------------------------------------- the disc's plane in the seated frame, and the unmoved-draw list (CPU only)
+static void yawPose(float m[12], double degrees, double x, double y, double z) {   // a 3x4 row-major pose: a turn about Y, then a position
+    const double a = degrees * 3.14159265358979323846 / 180.0, c = std::cos(a), s = std::sin(a);
+    const double rot[9] = {c, 0, s, 0, 1, 0, -s, 0, c};
+    for (int i = 0; i < 3; ++i)
+        for (int j = 0; j < 3; ++j) m[i * 4 + j] = float(rot[i * 3 + j]);
+    m[3] = float(x);
+    m[7] = float(y);
+    m[11] = float(z);
+}
+// The six records of a seated quad (two triangles: 0 1 2 and 1 3 2) as the game's vertex stage would write their clip positions for the eye (R, E) with these tangents: the inverse of quadInSeated.
+static void recordsOfQuad(const double R[9], const double E[3], const double pts[4][3], const float tn[4], float* rec, uint32_t stride, uint32_t pre) {
+    const int tri[6] = {0, 1, 2, 1, 3, 2};
+    for (int i = 0; i < 6; ++i) {
+        float* r = rec + size_t(i) * stride;
+        for (uint32_t k = 0; k < stride; ++k) r[k] = 99.0f;   // the other elements of the record: not read
+        const double d[3] = {pts[tri[i]][0] - E[0], pts[tri[i]][1] - E[1], pts[tri[i]][2] - E[2]};
+        double v[3];
+        for (int j = 0; j < 3; ++j) v[j] = R[0 * 3 + j] * d[0] + R[1 * 3 + j] * d[1] + R[2 * 3 + j] * d[2];   // R^T d
+        const double X = v[0], Y = v[1], Z = -v[2];
+        r[pre + 0] = float((2.0 * X - Z * (double(tn[1]) + tn[0])) / (double(tn[1]) - tn[0]));
+        r[pre + 1] = float((2.0 * Y - Z * (double(tn[3]) + tn[2])) / (double(tn[3]) - tn[2]));
+        r[pre + 2] = 0.025f;
+        r[pre + 3] = float(Z);
+    }
+}
+static void planeAndUnmovedCases() {
+    const float tn[4] = {-1.0f, 1.2f, -0.9f, 1.1f};
+    float headA[12], headB[12], eyeA[12], eyeB[12];
+    yawPose(headA, 0.0, 0.05, 0.10, 0.02);
+    yawPose(headB, 35.0, -0.12, 0.14, 0.20);   // the head turned 35 degrees and moved
+    yawPose(eyeA, 3.0, -0.032f, 0.004f, 0.015f);   // the left eye, off the head centre and turned a little
+    for (int i = 0; i < 12; ++i) eyeB[i] = eyeA[i];
+    double RA[9], EA[3], RB[9], EB[3];
+    check(st::eyePoseOf(headA, eyeA, RA, EA) && st::eyePoseOf(headB, eyeB, RB, EB), "an eye's pose is the head's times the eye's");
+    float bad[12];
+    std::memcpy(bad, headA, sizeof(bad));
+    bad[5] = NAN;
+    double Rx[9], Ex[3];
+    check(!st::eyePoseOf(bad, eyeA, Rx, Ex), "a pose that is not finite: refused");
+    {   // eyeToSeated is the inverse of eyeFrameFrom's step for the anchor
+        const double anchor[3] = {0.20, -0.10, -0.50};
+        st::EyeFrame e;
+        check(st::eyeFrameFrom(headB, eyeB, anchor, 0.0, 0.0, tn, e), "an eye frame is built");
+        const double a[3] = {e.a[0], e.a[1], e.a[2]};
+        double back[3];
+        st::eyeToSeated(RB, EB, a, back);
+        check(closeTo(back[0], anchor[0], 1e-5) && closeTo(back[1], anchor[1], 1e-5) && closeTo(back[2], anchor[2], 1e-5), "the seated point of the anchor's eye-space point is the anchor (the inverse of eyeFrameFrom's step)");
+    }
+    // a horizontal square 0.4 m on a side, 0.35 m below the head and 0.45 m ahead (seated -z is forward)
+    const double C[3] = {0.10, -0.35, -0.45};
+    const double square[4][3] = {{C[0] - 0.2, C[1], C[2] - 0.2}, {C[0] + 0.2, C[1], C[2] - 0.2}, {C[0] - 0.2, C[1], C[2] + 0.2}, {C[0] + 0.2, C[1], C[2] + 0.2}};
+    const uint32_t stride = 10, pre = 6;
+    float recA[6 * 10], recB[6 * 10];
+    recordsOfQuad(RA, EA, square, tn, recA, stride, pre);
+    recordsOfQuad(RB, EB, square, tn, recB, stride, pre);
+    st::SeatedQuad qa, qb;
+    check(st::quadInSeated(recA, stride, pre, 0, 6, tn, RA, EA, qa) && st::quadInSeated(recB, stride, pre, 0, 6, tn, RB, EB, qb), "a quad's six records are read back");
+    check(closeTo(qa.centre[0], C[0], 1e-4) && closeTo(qa.centre[1], C[1], 1e-4) && closeTo(qa.centre[2], C[2], 1e-4) && closeTo(qa.normal[0], 0.0, 1e-4) && closeTo(qa.normal[1], -1.0, 1e-4) &&
+              closeTo(qa.normal[2], 0.0, 1e-4),
+          "...the centre is the square's and the normal its vertical (the winding's sign) in the seated frame");
+    check(closeTo(qb.centre[0], C[0], 1e-4) && closeTo(qb.centre[1], C[1], 1e-4) && closeTo(qb.centre[2], C[2], 1e-4) && st::angleBetweenDeg(qa.normal, qb.normal) < 0.01,
+          "a turret-fixed square seen from a head that moved and turned 35 degrees has the same centre and normal");
+    {   // a billboard: the square turned toward the moved head (a tilt of 40 degrees about the seated X axis through its centre) has the normal turned by that much
+        const double a = 40.0 * 3.14159265358979323846 / 180.0, c = std::cos(a), s = std::sin(a);
+        double tilted[4][3];
+        for (int i = 0; i < 4; ++i) {
+            const double dy = square[i][1] - C[1], dz = square[i][2] - C[2];
+            tilted[i][0] = square[i][0];
+            tilted[i][1] = C[1] + c * dy - s * dz;
+            tilted[i][2] = C[2] + s * dy + c * dz;
+        }
+        float recT[6 * 10];
+        recordsOfQuad(RB, EB, tilted, tn, recT, stride, pre);
+        st::SeatedQuad qt;
+        check(st::quadInSeated(recT, stride, pre, 0, 6, tn, RB, EB, qt) && closeTo(st::angleBetweenDeg(qa.normal, qt.normal), 40.0, 1e-4) && closeTo(qt.centre[0], C[0], 1e-4) &&
+                  closeTo(qt.centre[1], C[1], 1e-4) && closeTo(qt.centre[2], C[2], 1e-4),
+              "a square turned 40 degrees in the seated frame reads as a normal 40 degrees from the fixed one, with the same centre");
+        check(closeTo(st::angleBetweenDeg(qa.normal, qa.normal), 0.0, 1e-9), "an angle with itself is 0");
+    }
+    {   // the second quad of a capture, and the refusals
+        float two[12 * 10];
+        std::memcpy(two, recA, sizeof(recA));
+        std::memcpy(two + 6 * 10, recB, sizeof(recB));
+        st::SeatedQuad q2;
+        check(st::quadInSeated(two, stride, pre, 6, 12, tn, RB, EB, q2) && closeTo(q2.centre[1], C[1], 1e-4), "the second quad of a capture (records 6 to 11)");
+        check(!st::quadInSeated(two, stride, pre, 7, 12, tn, RB, EB, q2) && !st::quadInSeated(two, stride, pre, 0, 5, tn, RB, EB, q2) && !st::quadInSeated(nullptr, stride, pre, 0, 6, tn, RB, EB, q2) &&
+                  !st::quadInSeated(two, 9, pre, 0, 12, tn, RB, EB, q2),
+              "fewer than six records from the first, no records, a stride that does not hold the record: refused");
+        float nan6[6 * 10];
+        std::memcpy(nan6, recA, sizeof(nan6));
+        nan6[3 * 10 + pre + 1] = NAN;
+        float flat[6 * 10];
+        for (int i = 0; i < 6; ++i)
+            for (uint32_t k = 0; k < stride; ++k) flat[i * 10 + k] = recA[k];   // six copies of the first record: no area
+        check(!st::quadInSeated(nan6, stride, pre, 0, 6, tn, RA, EA, q2) && !st::quadInSeated(flat, stride, pre, 0, 6, tn, RA, EA, q2), "a record that is not finite, a quad with no area: refused");
+    }
+    {   // the angle between vectors
+        const double x[3] = {1, 0, 0}, y[3] = {0, 1, 0}, mx[3] = {-1, 0, 0}, zero[3] = {0, 0, 0};
+        check(closeTo(st::angleBetweenDeg(x, y), 90.0, 1e-9) && closeTo(st::angleBetweenDeg(x, mx), 180.0, 1e-9) && st::angleBetweenDeg(x, zero) == 0.0, "the angle between vectors: 90, 180, and 0 for a vector with no length");
+    }
+    {   // the unmoved list as the 10 s line spells it
+        uint32_t counts[st::kFamilyCount + 1][st::kUnmovedRoutes] = {};
+        char out[512];
+        check(st::unmovedList(out, sizeof(out), counts) == 4 && !std::strcmp(out, "none"), "no unmoved draw: `none`");
+        counts[2][size_t(st::UnmovedRoute::kForeignDeferred)] = 12;
+        counts[0][size_t(st::UnmovedRoute::kFastPath)] = 3;
+        counts[st::kFamilyCount][size_t(st::UnmovedRoute::kCommandList)] = 2;
+        const size_t n = st::unmovedList(out, sizeof(out), counts);
+        check(n == std::strlen(out) && !std::strcmp(out, "1989E6D3 fast-path 3, DF3503CD foreign-deferred 12, ? command-list 2"), "the list is `<family> <route> N` in family then route order, `?` for the unknown family");
+        char narrow[40];
+        const size_t m = st::unmovedList(narrow, sizeof(narrow), counts);
+        check(m == std::strlen(narrow) && m < sizeof(narrow) && !std::strcmp(narrow, "1989E6D3 fast-path 3"), "a list that does not fit ends at the last whole entry, NUL-terminated");
+        char one[3];
+        check(st::unmovedList(one, sizeof(one), counts) == 0 && one[0] == 0 && st::unmovedList(nullptr, 10, counts) == 0 && st::unmovedList(out, 0, counts) == 0, "a buffer too small for any entry: empty; no buffer: nothing");
+        bool names = true;
+        for (uint32_t r = 0; r < st::kUnmovedRoutes; ++r) {
+            const auto route = static_cast<st::UnmovedRoute>(r);
+            names = names && std::strcmp(st::unmovedRouteName(route), "?") != 0 && std::strcmp(st::unmovedRouteWhere(route), "?") != 0;
+            for (uint32_t q = 0; q < r; ++q) names = names && std::strcmp(st::unmovedRouteName(route), st::unmovedRouteName(static_cast<st::UnmovedRoute>(q))) != 0;
+        }
+        check(names && st::kUnmovedRoutes == 9, "every route has its own name and its description");
+    }
+}
+
 // ---------------------------------------------------------------- the scissor
 static double coveredRows(const Frame& f, UINT y0, UINT y1) {
     double n = 0;
@@ -2370,6 +2495,7 @@ int main(int argc, char** argv) {
         check(argc == 2 && !std::strcmp(argv[1], "--self-test"), "usage: srv_turret_hud_test --self-test | --wiring | --dry-run");
         mathCases();
         depthMathCases();
+        planeAndUnmovedCases();
         latchCases();
         const HRESULT made = edvr::systemD3D11CreateDevice()(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, D3D11_CREATE_DEVICE_DEBUG, nullptr, 0, D3D11_SDK_VERSION, &g_dev, nullptr, &g_ctx);
         if (FAILED(made))

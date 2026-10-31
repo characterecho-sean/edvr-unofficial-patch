@@ -3361,6 +3361,7 @@ void STDMETHODCALLTYPE hookedExecuteCommandList(ID3D11DeviceContext* self,
                         kSlotExecuteCommandList, restoreContextState ? 1 : 0);
     }
     const bool privateExecution = graphicsBridgeConsumePermit(self, list, restoreContextState);
+    if (!privateExecution && srvTurretHudWantsDraws()) srvTurretHudNoteUnmoved(-1, srv_turret::UnmovedRoute::kCommandList, nullptr);   // issue 140: the draws inside a list cannot be seen
     // A recorded command list runs on the state the context holds: the game's, not engine motion's.
     if (flatRuntimeActive()) flatRuntimeSubstitution(self, FlatSubstEvent::kExecuteCommandList);
     if (flatRuntimeActive() && !privateExecution) flatRuntimeUnknown();
@@ -3908,9 +3909,49 @@ static_assert(alteredFixOf(DrawVerdict::kPanel) == AlteredFix::Panel && alteredF
 // parameters in memory for the whole body (self was reloaded from its stack
 // slot at every use), for a closure a normal draw never calls. Same four
 // calls with the same arguments.
+// Issue 140: a draw of a turret family that reaches the GPU without the pass's geometry shader bound (srv_turret_math.h UnmovedRoute; "unmoved family draws" in the 10 s line). Asked only while the
+// pass is wanted (one relaxed load otherwise). The owner's family is its shadowed vertex and pixel shaders'; a second context's is read from the context itself (Sean: the radar "seems to be stretched
+// toward its origin": a second, unmoved copy at the original place is one of the two explanations).
+__declspec(noinline) void srvTurretUnmovedNote(ID3D11DeviceContext* self, srv_turret::UnmovedRoute ownerRoute, const void* site) {
+    if (self == g_state->ownerCtx) {
+        const uint64_t vs = bindingShaderHash(BindSlot::Vs);
+        if (!srv_turret::isFamilyVs(vs)) return;
+        const uint64_t pixel = bindingShaderHash(BindSlot::Ps);
+        const int family = srv_turret::familyOf(vs, pixel);
+        if (family >= 0) srvTurretHudNoteUnmoved(family, ownerRoute, site);
+        return;
+    }
+    ID3D11VertexShader* vs = nullptr;
+    ID3D11PixelShader* ps = nullptr;
+    self->VSGetShader(&vs, nullptr, nullptr);
+    const uint64_t vh = vs ? lookupShaderHash(vs) : 0;
+    if (vs) vs->Release();
+    if (!srv_turret::isFamilyVs(vh)) return;
+    self->PSGetShader(&ps, nullptr, nullptr);
+    const uint64_t ph = ps ? lookupShaderHash(ps) : 0;
+    if (ps) ps->Release();
+    const int family = srv_turret::familyOf(vh, ph);
+    if (family < 0) return;
+    srvTurretHudNoteUnmoved(family, self->GetType() == D3D11_DEVICE_CONTEXT_DEFERRED ? srv_turret::UnmovedRoute::kForeignDeferred : srv_turret::UnmovedRoute::kForeignImmediate, nullptr);
+}
+// The four direct draw thunks, before the verdict scope: the owner's draw on the fast path (no scope) and any draw of a second context.
+inline void srvTurretUnmovedDirect(ID3D11DeviceContext* self, bool fast) {
+    if (srvTurretHudWantsDraws() && (fast || self != g_state->ownerCtx)) srvTurretUnmovedNote(self, srv_turret::UnmovedRoute::kFastPath, nullptr);
+}
+// The indirect and auto draws: no scope on any context.
+inline void srvTurretUnmovedPlain(ID3D11DeviceContext* self, srv_turret::UnmovedRoute route) {
+    if (srvTurretHudWantsDraws()) srvTurretUnmovedNote(self, route, nullptr);
+}
+// pureDrawReissue: an EDVR replay of a draw while the pass's shader is not bound (a replay inside a scope is moved).
+__declspec(noinline) void srvTurretUnmovedReissue(ID3D11DeviceContext* self, const void* site) {
+    if (self != g_state->ownerCtx || srvTurretHudScopeActive()) return;
+    srvTurretUnmovedNote(self, srv_turret::UnmovedRoute::kReissue, site);
+}
+
 __declspec(noinline) void pureDrawReissue(ID3D11DeviceContext* self, char kind, UINT count,
                                           UINT instances, const DrawArgs& args) {
     srvTurretHudCountIssue(self);   // issue 140's GPU instrument: a re-issue inside the sampled scope is a draw call on the context (one relaxed load otherwise)
+    if (srvTurretHudWantsDraws()) srvTurretUnmovedReissue(self, _ReturnAddress());   // issue 140: a replay outside the pass's scope is an unmoved copy (names its call site)
     switch(kind) {
     case 'D':g_state->realDraw(self,count,UINT(args.base));break;
     case 'I':g_state->realDrawIndexed(self,count,args.start,args.base);break;
@@ -4201,7 +4242,9 @@ __declspec(noinline) bool srvTurretHudBeginDraw(State* s, ID3D11DeviceContext* s
             if (eye != 0 && eye != 1) eye = uiDepthEyeOfTarget(info->resource, info->a, info->b, info->fmt);
         }
     }
-    return srvTurretHudBegin(self, family, eye);
+    const bool bound = srvTurretHudBegin(self, family, eye);
+    if (!bound) srvTurretHudNoteRefusedDraw(family);   // issue 140: a matched draw the scope declined goes through unmoved (counted by route)
+    return bound;
 }
 
 // The scope that spans every issue of such a draw: forwardWithVerdict's own (the game's, the UI layer's, the interface depth's and the hologram passes' re-issues all run
@@ -4792,6 +4835,7 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstancedIndirect(
     if (self == g_state->ownerCtx && desktopWindowSkipsDraw(g_state, self, 'Z')) return;   // visual.desktop_window
     if (self == g_state->ownerCtx && uiLayerIssueBlocked()) return;
     gpuFrameCommandIfLive(self);
+    srvTurretUnmovedPlain(self, srv_turret::UnmovedRoute::kIndirect);
     // F45 (TEMPORARY instrument): an indirect draw's instance range is on the GPU; the marker probe only counts it.
     if (nativeOnFootMarkerProbeLive() && self == g_state->ownerCtx) nativeOnFootMarkerTee(self, 0, 0, 'Z');
     noteStaleForward(kSlotDrawIndexedInstancedIndirect, reinterpret_cast<const void*>(g_state->realDrawIndexedInstancedIndirect),
@@ -4827,6 +4871,7 @@ void STDMETHODCALLTYPE hookedDrawInstancedIndirect(ID3D11DeviceContext* self,
     if (self == g_state->ownerCtx && desktopWindowSkipsDraw(g_state, self, 'Y')) return;   // visual.desktop_window
     if (self == g_state->ownerCtx && uiLayerIssueBlocked()) return;
     gpuFrameCommandIfLive(self);
+    srvTurretUnmovedPlain(self, srv_turret::UnmovedRoute::kIndirect);
     // F45 (TEMPORARY instrument): an indirect draw's instance range is on the GPU; the marker probe only counts it.
     if (nativeOnFootMarkerProbeLive() && self == g_state->ownerCtx) nativeOnFootMarkerTee(self, 0, 0, 'Y');
     noteStaleForward(kSlotDrawInstancedIndirect, reinterpret_cast<const void*>(g_state->realDrawInstancedIndirect),
@@ -5201,6 +5246,7 @@ void STDMETHODCALLTYPE hookedDraw(ID3D11DeviceContext* self, UINT count, UINT st
     args.base = static_cast<int32_t>(start);
     const DrawVerdict v = beginPanelOverride(self, 'D', count, 1, args);
     const bool fast = drawPathFast(v);   // AA off, unclaimed, no subscriber: no verdict scope, no engine velocity (draw_fast_path.h)
+    srvTurretUnmovedDirect(self, fast);
     if (!fast && v == DrawVerdict::kNone && self == g_state->ownerCtx) engineVelocityBeforeDraw(self, g_state->rtv0Eye);
     if (self == g_state->ownerCtx) pixelProbeBefore(g_state, self);
     if (g_vrWorldWants && self == g_state->ownerCtx) vrWorldRouteDraw(self);   // the VR world route's detector; at the tone, its resolve
@@ -5242,6 +5288,7 @@ void STDMETHODCALLTYPE hookedDrawAuto(ID3D11DeviceContext* self) {
     if (self == g_state->ownerCtx && desktopWindowSkipsDraw(g_state, self, 'A')) return;   // visual.desktop_window
     if (self == g_state->ownerCtx && uiLayerIssueBlocked()) return;
     gpuFrameCommandIfLive(self);
+    srvTurretUnmovedPlain(self, srv_turret::UnmovedRoute::kAuto);
     // No verdict on this path: the fast path's decision is the gate and the AA alone (draw_fast_path.h).
     if (self == g_state->ownerCtx && !drawPathFast(DrawVerdict::kNone)) engineVelocityBeforeDraw(self, g_state->rtv0Eye);
     if (g_vrWorldWants && self == g_state->ownerCtx) vrWorldRouteDraw(self);
@@ -5285,6 +5332,7 @@ void STDMETHODCALLTYPE hookedDrawIndexed(ID3D11DeviceContext* self, UINT count,
     args.base = baseVertex;
     const DrawVerdict v = beginPanelOverride(self, 'I', count, 1, args);
     const bool fast = drawPathFast(v);   // draw_fast_path.h
+    srvTurretUnmovedDirect(self, fast);
     if (!fast && v == DrawVerdict::kNone && self == g_state->ownerCtx) engineVelocityBeforeDraw(self, g_state->rtv0Eye);
     if (self == g_state->ownerCtx) pixelProbeBefore(g_state, self);
     if (g_vrWorldWants && self == g_state->ownerCtx) vrWorldRouteDraw(self);
@@ -5366,6 +5414,7 @@ void STDMETHODCALLTYPE hookedDrawInstanced(ID3D11DeviceContext* self, UINT perIn
     args.startInstance = startInstance;
     const DrawVerdict v = beginPanelOverride(self, 'N', perInstance, instances, args);
     const bool fast = drawPathFast(v);   // draw_fast_path.h
+    srvTurretUnmovedDirect(self, fast);
     if (!fast && v == DrawVerdict::kNone && self == g_state->ownerCtx) {
         engineVelocityBeforeDraw(self, g_state->rtv0Eye);
         engineVelocityNoteSkinDraw(self, startInstance, instances);   // F2: a skinned family's draw lists the instance entries it reads
@@ -5456,6 +5505,7 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
     args.base = baseVertex;
     args.startInstance = startInstance;
     const DrawVerdict v = beginPanelOverride(self, 'X', perInstance, instances, args);
+    srvTurretUnmovedDirect(self, false);   // this thunk has no fast path: only a second context's draw is unscoped
     // F18 (TEMPORARY, fix.native_on_foot_body_cull; native_on_foot.h): the local player's third-person torso drawn with the game's
     // rasterizer state cloned at another CullMode, and the game's put back after forwardWithVerdict. A wrapper, not a DrawVerdict: a verdict
     // would take the draw off engine-record velocity's verdict-free path just below and change what this test measures. Matched here, right

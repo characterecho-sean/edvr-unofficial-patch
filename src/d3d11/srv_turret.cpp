@@ -140,6 +140,12 @@ st::Binding g_binding;
 st::Scissor g_scissor;                         // the game's scissor rectangles while a bound draw is issued (fix.srv_turret_hud_scissor)
 std::atomic<uint32_t> g_scissorOpened{0};      // draws whose scissor was opened in the 10 s window
 bool g_scissorNoted[kFamilyN] = {}, g_scissorRestoreNoted = false;
+// The unmoved family draws (srv_turret_math.h UnmovedRoute), counted per family (the extra row: unknown) and route from any thread; the 10 s line spells the window's counts and the first of each
+// route is said once (THE UNMOVED FAMILY DRAWS below). A pureDrawReissue call site is said once for each distinct return address, up to kReissueSitesMax.
+std::atomic<uint32_t> g_unmoved[kFamilyN + 1][st::kUnmovedRoutes] = {};
+std::atomic<uint32_t> g_unmovedNoted{0};
+constexpr uint32_t kReissueSitesMax = 8;
+std::atomic<uintptr_t> g_reissueSites[kReissueSitesMax] = {};
 std::atomic<uint32_t> g_draws[2] = {};
 std::atomic<uint32_t> g_familyDraws[kFamilyN] = {};
 std::atomic<uint32_t> g_bound{0};
@@ -361,6 +367,11 @@ void windowLine(uint64_t nowMs) {
     for (size_t i = 0; i < static_cast<size_t>(st::Refuse::kCount); ++i) refused[i] = g_refused[i].exchange(0, std::memory_order_relaxed);
     const uint32_t left = g_draws[0].exchange(0, std::memory_order_relaxed), right = g_draws[1].exchange(0, std::memory_order_relaxed);
     const uint32_t bound = g_bound.exchange(0, std::memory_order_relaxed), scissorOpened = g_scissorOpened.exchange(0, std::memory_order_relaxed);
+    uint32_t unmovedCounts[kFamilyN + 1][st::kUnmovedRoutes];
+    for (uint32_t f = 0; f <= kFamilyN; ++f)
+        for (uint32_t r = 0; r < st::kUnmovedRoutes; ++r) unmovedCounts[f][r] = g_unmoved[f][r].exchange(0, std::memory_order_relaxed);
+    char unmoved[512];
+    st::unmovedList(unmoved, sizeof(unmoved), unmovedCounts);
     // The matched draws of each family in the window, as two comma-separated lists in the table's order: the names, then the counts.
     char names[512] = {}, counts[256] = {};
     size_t nn = 0, nc = 0;
@@ -376,7 +387,7 @@ void windowLine(uint64_t nowMs) {
     const bool okL = readEye(0, frames[0]), okR = readEye(1, frames[1]);
     const uint32_t poseFrames = g_poseFrames.exchange(0, std::memory_order_relaxed), poseRefreshed = g_poseRefreshed.exchange(0, std::memory_order_relaxed);
     Log::get().note("srv turret hud: panels: %s; radar: %s; anchor=(%.3f,%.3f,%.3f) head_offset=%.1f cm T=(%.3f,%.3f,%.3f) Tradar=(%.3f,%.3f,%.3f) ipd_elite=%.1fmm P00[L,R]=%.3f,%.3f "
-                    "draws[L,R]=%u,%u bound=%u scissor opened %u pose refreshed at draw: %u of %u frames "
+                    "draws[L,R]=%u,%u bound=%u scissor opened %u pose refreshed at draw: %u of %u frames unmoved family draws: %s "
                     "refused[no-eye,game-gs,topology,not-ready,no-geometry]=%u/%u/%u/%u/%u families[%s]=%s",
                     panels, radar,
                     static_cast<double>(g_anchorLog[0].load(std::memory_order_relaxed)), static_cast<double>(g_anchorLog[1].load(std::memory_order_relaxed)),
@@ -386,7 +397,7 @@ void windowLine(uint64_t nowMs) {
                     static_cast<double>(g_translationRadarLog[1].load(std::memory_order_relaxed)), static_cast<double>(g_translationRadarLog[2].load(std::memory_order_relaxed)),
                     1000.0 * static_cast<double>(g_ipd.load(std::memory_order_relaxed)),
                     okL ? static_cast<double>(st::p00OfTangents(&frames[0].l)) : 0.0, okR ? static_cast<double>(st::p00OfTangents(&frames[1].l)) : 0.0,
-                    left, right, bound, scissorOpened, poseRefreshed, poseFrames, refused[0], refused[1], refused[2], refused[3], refused[4], names, counts);
+                    left, right, bound, scissorOpened, poseRefreshed, poseFrames, unmoved, refused[0], refused[1], refused[2], refused[3], refused[4], names, counts);
 }
 
 // ---- THE GPU INSTRUMENT ------------------------------------------------------------------------------------------------------------------------------------------------
@@ -422,6 +433,8 @@ struct Probe {
     ID3D11Query* occlusion = nullptr;
     ID3D11Buffer* cbStage = nullptr;  // 32 bytes: cb2[11] at 0, cb1[90] at 16
     bool discFailed = false;          // creation failed on this device: not retried
+    bool planePose = false;           // eye 0's pose at the sampled disc draw, for the plane lines
+    double poseR[9] = {}, poseE[3] = {}, poseHead[3] = {};
     bool discArmed = false;           // the query was begun in the open sampled scope
     bool discPending = false;         // End issued, the results not yet logged
     bool discCopied[2] = {};          // the alpha register, the intensity register were copied
@@ -569,6 +582,17 @@ void probeBegin(ID3D11DeviceContext* ctx, int eye, int family, uint32_t ordinal,
     g_sampleTwin = twin;
     detail::g_srvTurretHudIssues.store(0, std::memory_order_relaxed);
     detail::g_srvTurretHudCounting.store(true, std::memory_order_relaxed);
+    p.planePose = false;
+    if (static_cast<uint32_t>(family) == kDiscFamily && eye == 0) {   // the eye's pose of the frame being drawn, for the plane lines at the readback
+        uint64_t poseSequence = 0;
+        float head[12] = {}, eyeToHead[2][12] = {};
+        if (nativeTemporalHeadPose(&poseSequence, head, eyeToHead) && st::eyePoseOf(head, eyeToHead[0], p.poseR, p.poseE)) {
+            p.poseHead[0] = head[3];
+            p.poseHead[1] = head[7];
+            p.poseHead[2] = head[11];
+            p.planePose = true;
+        }
+    }
     const bool disc = static_cast<uint32_t>(family) == kDiscFamily && p.occlusion && p.cbStage && !p.discFailed && !p.discPending;
     if (!guarded("srv.turret.probe.begin", [&] {
             if (twin) {
@@ -639,6 +663,19 @@ void probeFinish(ID3D11DeviceContext* ctx) {
     p.wantOrd = (p.wantOrd + 1) % kProbeOrdinals;
 }
 
+// The radar disc's quads in the seated frame (srv_turret_math.h quadInSeated): one line for each quad of the capture, up to kDiscPlaneQuads, from the PRE-move clip positions, with the head's seated
+// position at that frame. The capture is every issue of the scope in turn, so when the scope made more than one issue the later quads repeat the first issue's.
+constexpr uint32_t kDiscPlaneQuads = 4;
+void logDiscPlanes(const float* records, uint32_t vertices, const st::Family& fam, const Probe& p) {
+    const float tangents[4] = {p.params.l, p.params.r, p.params.dn, p.params.up};
+    for (uint32_t k = 0; k < kDiscPlaneQuads; ++k) {
+        st::SeatedQuad q;
+        if (!st::quadInSeated(records, fam.strideBytes / 4, fam.preFloat, 6 * k, vertices, tangents, p.poseR, p.poseE, q)) break;
+        Log::get().note("srv turret hud disc plane: inst=%u centre=(%.3f,%.3f,%.3f) normal=(%.3f,%.3f,%.3f) head=(%.3f,%.3f,%.3f)", k, q.centre[0], q.centre[1], q.centre[2], q.normal[0], q.normal[1],
+                        q.normal[2], p.poseHead[0], p.poseHead[1], p.poseHead[2]);
+    }
+}
+
 // Once a frame: read what the GPU has finished, without waiting for it.
 void probeRead(ID3D11DeviceContext* ctx, int eye, int family) {
     Probe& p = g_probe[eye][family];
@@ -675,6 +712,7 @@ void probeRead(ID3D11DeviceContext* ctx, int eye, int family) {
                 const uint32_t maxVertices = st::captureMaxVertices(fam.strideBytes);
                 const uint32_t vertices = static_cast<uint32_t>(written > maxVertices / 3 ? maxVertices / 3 : written) * 3;
                 const st::CaptureSummary c = st::summarizeCapture(static_cast<const float*>(m.pData), vertices, fam.strideBytes / 4, fam.posFloat, fam.preFloat, p.params);
+                if (static_cast<uint32_t>(family) == kDiscFamily && eye == 0 && p.planePose) logDiscPlanes(static_cast<const float*>(m.pData), vertices, fam, p);
                 ctx->Unmap(p.staging, 0);
                 p.captureLogged = true;
                 // dist: the anchor distance of the vertices the shader moved, as the game made them -> after the move ("none" when it moved nothing)
@@ -741,6 +779,23 @@ void probeReadDisc(ID3D11DeviceContext* ctx, int eye) {
     } else if (++p.discWaited > kProbeGiveUpFrames) {
         p.discPending = false;
         st::release(p.occlusion);   // a query that never resolved is made again
+    }
+}
+
+// ---- THE UNMOVED FAMILY DRAWS ---------------------------------------------------------------------------------------------------------------------------------------
+// Counted per family (the extra row: unknown) and route (srv_turret_math.h UnmovedRoute), from any thread; the 10 s line spells the window's counts, and the first of each route is said once. A
+// pureDrawReissue call site is said once for each distinct return address, up to kReissueSitesMax.
+void siteText(const void* site, char (&out)[160]) {
+    out[0] = 0;
+    if (!site) return;
+    HMODULE module = nullptr;
+    char path[MAX_PATH] = {};
+    if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, reinterpret_cast<LPCWSTR>(site), &module) && module &&
+        GetModuleFileNameA(module, path, MAX_PATH)) {
+        const char* name = std::strrchr(path, '\\');
+        std::snprintf(out, sizeof(out), ", called from %s+0x%llX", name ? name + 1 : path, static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(site) - reinterpret_cast<uintptr_t>(module)));
+    } else {
+        std::snprintf(out, sizeof(out), ", called from 0x%llX", static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(site)));
     }
 }
 
@@ -870,6 +925,43 @@ void noteState(ID3D11DeviceContext* ctx) {
 
 }  // namespace
 
+// A draw of a family that reached the GPU without the pass's shader bound, by the route it took (srv_turret.h). The first of each route is said once.
+void srvTurretHudNoteUnmoved(int family, st::UnmovedRoute route, const void* site) {
+    const uint32_t f = family >= 0 && family < static_cast<int>(kFamilyN) ? static_cast<uint32_t>(family) : kFamilyN;
+    const uint32_t r = static_cast<uint32_t>(route);
+    if (r >= st::kUnmovedRoutes) return;
+    g_unmoved[f][r].fetch_add(1, std::memory_order_relaxed);
+    bool first = false;
+    if (route == st::UnmovedRoute::kReissue && site) {   // one line for each distinct call site
+        const uintptr_t s = reinterpret_cast<uintptr_t>(site);
+        for (uint32_t i = 0; i < kReissueSitesMax; ++i) {
+            uintptr_t seen = g_reissueSites[i].load(std::memory_order_relaxed);
+            if (seen == s) break;
+            if (seen == 0 && g_reissueSites[i].compare_exchange_strong(seen, s)) {
+                first = true;
+                break;
+            }
+            if (seen == s) break;
+        }
+    } else {
+        const uint32_t bit = 1u << r;
+        first = (g_unmovedNoted.fetch_or(bit, std::memory_order_relaxed) & bit) == 0;
+    }
+    if (!first) return;
+    char where[160];
+    siteText(site, where);
+    Log::get().note("srv turret hud: first unmoved family draw by route %s (family %s): %s%s", st::unmovedRouteName(route), f < kFamilyN ? st::kFamilies[f].name : "?", st::unmovedRouteWhere(route), where);
+}
+
+void srvTurretHudNoteRefusedDraw(int family) {
+    if (family < 0 || family >= static_cast<int>(kFamilyN)) return;
+    st::TurretParams unused;
+    const bool groupOn = paramsOfGroup(st::kFamilies[family].group, st::EyeFrame{}, unused);
+    srvTurretHudNoteUnmoved(family, groupOn ? st::UnmovedRoute::kRefused : st::UnmovedRoute::kGroupOff, nullptr);
+}
+
+bool srvTurretHudScopeActive() { return g_binding.needsRestore(); }
+
 // vscreen.cpp, each issue of a matched draw while a scope is counting (srv_turret.h srvTurretHudCountIssue): counted for the sampled scope's statistics line, and said for a family's first scope.
 void srvTurretHudNoteIssue(ID3D11DeviceContext* ctx) {
     detail::g_srvTurretHudIssues.fetch_add(1, std::memory_order_relaxed);
@@ -923,6 +1015,8 @@ void srvTurretFrameTick(uint32_t frameNo) {
         for (auto& d : g_draws) d.store(0, std::memory_order_relaxed);
         for (auto& d : g_familyDraws) d.store(0, std::memory_order_relaxed);
         g_bound.store(0, std::memory_order_relaxed);
+        for (auto& row : g_unmoved)
+            for (auto& n : row) n.store(0, std::memory_order_relaxed);
     }
 }
 

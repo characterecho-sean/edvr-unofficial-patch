@@ -52,8 +52,8 @@
 - **Next flight:** this build on Steam with the scissor `open`, then `game`
   as the A/B. Eye dump (INSERT) centred. `python tools\edvr_log.py --target
   steam --expect-build HEAD --health` (rule "srv turret view": scissor
-  opened N, the state lines' raster fields, the disc probe), and
-  `--grep "srv turret"`.
+  opened N, the state lines' raster fields, the disc probe, the disc
+  plane spread, the unmoved family draws), and `--grep "srv turret"`.
 
 ## Evidence (flight of 2026-10-30, Epic, v0.22.0-rc.3-139-gcd4c91c4)
 
@@ -394,3 +394,48 @@ the test on is logged once. `fix.srv_turret_hud_depth` now defaults to
 `front`. Not done per issue: the rectangles are opened once per scope,
 after the bind, so an issue that sets its own scissor would not be covered;
 the state lines (taken after the open) show what each issue ran with.
+
+### 2026-10-31: the disc's shape and a second copy (instruments, built, not flown)
+
+Two more suspects for the radar before the next flight; each has an
+instrument and neither a fix.
+
+Billboard. Sean asks whether the disc will read as a proper oval once the
+scissor is open. The dumps disagree with a turret-fixed horizontal disc:
+camera back 70 is a flat ellipse on the deck, HUD forward 70 a near-vertical
+sliver, radar forward 30 a near-circular dome. If vs DF3503CD ORIENTS the
+disc toward its camera or the head (clip = cb2[9] + h*cb2[7] + u*cb2[6] +
+v*cb2[8]), our rigid translation keeps an orientation meant for a viewer
+elsewhere, so it looks stretched and swivels with the head. Instrument:
+once a second, for eye 0's sampled DF3503CD scope, the twin's PRE-move clip
+positions give each quad (six records) in the seated frame (eye-space point
+from the eye's tangents, then E + R (X, Y, -Z), the inverse of eyeFrameFrom's
+step for the anchor): `srv turret hud disc plane: inst=K centre=.. normal=..
+head=..`. A turret-fixed disc keeps centre and normal as the head moves; a
+billboard's normal turns. `edvr_log --health` gives each instance's largest
+angle between normals, how far the head and centre moved, and says which it
+reads as (head moved under 5 cm: nothing to tell). With two issues in a
+scope the later quads repeat the first issue's.
+
+Second copy. Sean: the radar "seems to be stretched toward its origin". If
+some path issues the radar's draws OUTSIDE the scope, an unmoved copy lands
+at the original place around and behind the head and smears toward it.
+Instrument: every draw of a family that reaches the GPU without the pass's
+shader bound is counted per family and route and listed in the 10 s line
+(`unmoved family draws: F route N, ...` or `none`), with a "first unmoved
+family draw by route" line for each route. Routes seen: `refused` and
+`group-off` (the scope declined it), `fast-path` (the owner's thunk skipped
+the scope), `indirect` and `auto` (those thunks have no scope), `foreign-
+immediate` and `foreign-deferred` (a second context; the family is read from
+that context's own shaders), `reissue` (pureDrawReissue called with the
+shader not bound, with its call site as module+offset), `command-list` (the
+game executed a list: the draws inside cannot be seen, so the family is
+`?`). Read from the code, not from a flight: EDVR's own command lists
+(ui_layer.cpp: the depth-stencil seed, the glow feed, the crisp coverage)
+draw EDVR's own shaders and are replayed through vScreenExecuteCommandListRaw,
+below the hooks, so they are neither counted nor families; the HDR HUD seed
+is one of them, not a replay of the game's radar draws. A game command list
+is seen only by its execution; a draw recorded on a deferred context is
+seen at record time; vscreen.cpp's own note says the game's ExecuteCommandList
+has never been seen on this game, so a command-list count would be news. Not
+seen: anything that bypasses the hooked vtable.

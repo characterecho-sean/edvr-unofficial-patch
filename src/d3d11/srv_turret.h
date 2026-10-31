@@ -57,6 +57,11 @@
 //   above 0 (anchor distance before 0.1 to 0.7 m, after that plus the push) and the larger panels' in_window 0 at 1.3 m and more (the pull: the other way round); with only the HUD-forward
 //   key every vertex reads as moved. zfix is how many of the moved vertices took the depth fallback (the game's NDC z was not a valid reversed-Z depth: the vertex was behind the eye or
 //   inside its near plane). gap= is the signed gap the family's group ran with. The capture holds the first kCaptureBufferBytes of a draw's output, so a long draw is a sample.
+//   "srv turret hud: panels: ... bound=N scissor opened N pose refreshed at draw: N of M frames unmoved family draws: <family> <route> N, ... refused[...]=..."   the unmoved family draws (srv_turret_math.h
+//     UnmovedRoute) are the draws of a family that reached the GPU without the pass's shader bound, by route (refused, group-off, fast-path, indirect, auto, foreign-immediate, foreign-deferred,
+//     reissue, command-list) or `none`; "srv turret hud: first unmoved family draw by route R (family F): <where>" says the first of each route once (a reissue: the call site, module+offset).
+//   "srv turret hud disc plane: inst=K centre=(x,y,z) normal=(x,y,z) head=(x,y,z)"   once a second for eye 0's sampled radar-disc scope: each quad of the capture (six records) from its PRE-move clip
+//     positions, in the SEATED frame, with the head's seated position. A turret-fixed disc keeps its centre and normal as the head moves; a billboard's normal turns with the head.
 //   "srv turret hud disc: family=DF3503CD eye=E draw=K issues=N samples_passed=S alpha=A intensity=I (cb2[11].w, cb1[90].y)"   for the radar disc's sampled scope only: an occlusion query around
 //   it (S: the samples that passed the depth and stencil tests, over all the scope's issues) and the two pixel-shader registers its alpha and colour scale are made of, copied to a staging buffer
 //   at the end of the scope (n/a when a copy was refused). S = 0 with the pixel shader running (the statistics line's ps) is a depth or stencil test removing the disc; S above 0 with A about 0 is
@@ -69,6 +74,8 @@
 //   family found drawing with ScissorEnable (the game's first rectangle, and the extent it is opened to). The 10 s line's "scissor opened N" counts the draws whose rectangles were opened.
 //   "srv turret hud: the game's scissor rectangles could not be put back after an issue; ..."   a restore that faulted (the boundary settles it; draws are refused until then).
 #pragma once
+
+#include "srv_turret_math.h"
 
 #include <atomic>
 #include <cstdint>
@@ -103,6 +110,14 @@ void srvTurretFrameTick(uint32_t frameNo);
 double srvTurretBackSeatedZ();
 // alignTick, right after it published an alignment: the z it added and the serial it published under. Said in the log when it changed. Frame thread.
 void srvTurretNotePublished(double seatedZ, uint32_t serial);
+
+// The unmoved family draws (srv_turret_math.h UnmovedRoute): a draw of one of the families that reached the GPU without the pass's shader bound, by the route it took. family -1: unknown (a command
+// list). Any thread; counts per family and route for the 10 s line and says the first of each route (and of each pureDrawReissue call site) once. site: a return address for the reissue route, else null.
+void srvTurretHudNoteUnmoved(int family, srv_turret::UnmovedRoute route, const void* site);
+// The scope's own decline of a matched draw (srvTurretHudBegin returned false): counted as refused, or as group-off when the family's group has all its keys at 0. Render thread.
+void srvTurretHudNoteRefusedDraw(int family);
+// True while the pass's geometry shader is bound for an issue (between a true Begin and End). Render thread.
+bool srvTurretHudScopeActive();
 
 // Part 2, the draw path (vscreen.cpp, the render thread). Begin: the game's bindings are its own; family is the draw's shader pair's family (srv_turret_math.h familyOf), eye
 // the draw's eye (0 left, 1 right, -1 unknown). True when the family's private shader is bound for the issues that follow; End puts the game's geometry stage and constant
