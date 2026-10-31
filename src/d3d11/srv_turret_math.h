@@ -190,8 +190,11 @@ constexpr bool topologyCarried(int d3d11Topology) { return d3d11Topology == 4 ||
 // ones the game projects with, the eye jitter included), translates it forward by T (fix.srv_turret_hud_forward, for EVERY vertex of every family), and then moves it along its ray from
 // a FIXED ANCHOR A (the head's seated position when the turret view came on, taken again on a recentre, when a camera key changes and when the head stays far from it; the eye's view of it is A_eye), judged on the
 // distance of the translated vertex from A:
-//     P1 = P + T;   V = P1 - A;   d = |V|;   if (dMin < d < dMax)   Q = A + V (d - gap) / d   else   Q = P1;   reproject Q (only if Q.z > kNearZM, else the vertex stays as it was)
-// gap < 0 is the push-back (deeper), gap > 0 the pull (nearer). The result keeps the NDC z of the vertex (z' = (z / w) w'), so the game's own depth values stand. From the anchor the
+//     P1 = P + T;   V = P1 - A;   d = |V|;   if (dMin < d < dMax)   Q = A + V (d - gap) / d   else   Q = P1;   reproject Q, for any Q.z (the reprojection is linear in Q)
+// gap < 0 is the push-back (deeper), gap > 0 the pull (nearer). The result keeps the NDC z of the vertex (z' = ndcZ w') when that is a valid depth, so the game's own depth values stand;
+// otherwise ndcZ = kFallbackNdcZ. Elite is REVERSED Z with an infinite far plane (cb0[6] = (0, 0, 0, 0.025): clip z is the constant 0.025, NDC z = 0.025 / w): a vertex the game had
+// behind the eye (w < 0) or inside its 2.5 cm near plane (0 < w < 0.025, z / w above 1) has no valid depth, and the moved vertex would fail the rasterizer's depth clip (0 <= z <= w) and
+// be cut; 0.999 is the NEAREST valid reversed-Z depth (1 is near), so such a vertex draws in front, as the HUD does. From the anchor the
 // moved vertex is seen in the direction it was (a push keeps the panel's size on screen) and from anywhere else it is a real panel at the new distance: leaning toward it makes it
 // larger and moves it by the parallax of its new depth, not the old one's.
 // THE PULL (fix.srv_turret_hud_gap): vertices whose distance from the anchor lies between dMin = gap + kWindowNearM and dMax = kWindowFarM move `gap` metres nearer.
@@ -201,7 +204,7 @@ inline constexpr float kWindowFarM = 4.0f;
 // gap). 2 cm keeps a vertex on the anchor itself (no ray) out; 1 m splits the weapon panels and the radar (0.1 to 0.7 m from the head) from the larger panels (1.3 m and deeper).
 inline constexpr float kPushNearM = 0.02f;
 inline constexpr float kPushSplitM = 1.0f;
-inline constexpr float kNearZM = 0.01f;       // a moved vertex must end up at least this far in front of the eye, else it is left as the game made it
+inline constexpr float kFallbackNdcZ = 0.999f; // the depth of a moved vertex whose own NDC z is not valid (behind the eye, or inside the near plane): the nearest valid reversed-Z depth
 inline constexpr float kPlaneEpsM = 1.0e-6f;  // a vertex on the eye plane (clip w about 0) has no ray to follow: left alone
 inline constexpr float kAnchorLimitM = 2.0f;  // the constants accept an anchor, a translation and a gap up to this far (the keys' 200 cm, 150 cm)
 
@@ -282,11 +285,19 @@ inline bool paramsUsable(const TurretParams& p) {
     return p.gap != 0.0f || t2 > 0.0;
 }
 
+// Whether a vertex's own NDC depth (clip z / w) is a valid one for Elite's reversed Z: w > 0 and 0 <= z / w <= 1. A vertex the game put behind the eye, or inside the 2.5 cm near plane, is not.
+template <class T>
+inline bool ndcDepthValid(T z, T w) {
+    if (!(w > T(0))) return false;
+    const T n = z / w;
+    return n >= T(0) && n <= T(1);
+}
+
 // The move on the CPU: the shader's rule written again for the rig and for the instrument (T is float or double). `in` is the vertex's clip position {x, y, z, w}; `out` receives the clip
 // position after the move (the same as `in` when the vertex is left alone); the return is whether it moved. before and after (when given) are the anchor distance of the vertex as the
-// game made it and of the moved one.
+// game made it and of the moved one; zfixed (when given) says the moved vertex took the depth fallback.
 template <class T>
-inline bool anchoredMove(const TurretParams& p, const T in[4], T out[4], T* before = nullptr, T* after = nullptr) {
+inline bool anchoredMove(const TurretParams& p, const T in[4], T out[4], T* before = nullptr, T* after = nullptr, bool* zfixed = nullptr) {
     for (int i = 0; i < 4; ++i) out[i] = in[i];
     const T w = in[3];
     if (!(std::fabs(w) >= T(kPlaneEpsM))) return false;
@@ -306,12 +317,13 @@ inline bool anchoredMove(const TurretParams& p, const T in[4], T out[4], T* befo
         Q[1] = T(p.ay) + V[1] * k;
         Q[2] = T(p.az) + V[2] * k;
     }
-    if (!(Q[2] > T(kNearZM))) return false;
-    const T w2 = Q[2];
-    out[0] = ((Q[0] / w2 - l) * T(2) / (r - l) - T(1)) * w2;
-    out[1] = ((Q[1] / w2 - dn) * T(2) / (up - dn) - T(1)) * w2;
-    out[2] = (in[2] / w) * w2;
+    const T w2 = Q[2];   // any Q.z: the reprojection is linear in Q, and the rasterizer clips a corner that ends behind the eye
+    const bool depthOk = ndcDepthValid<T>(in[2], w);
+    out[0] = (T(2) * Q[0] - w2 * (r + l)) / (r - l);
+    out[1] = (T(2) * Q[1] - w2 * (up + dn)) / (up - dn);
+    out[2] = (depthOk ? in[2] / w : T(kFallbackNdcZ)) * w2;
     out[3] = w2;
+    if (zfixed) *zfixed = !depthOk;
     if (before) *before = std::sqrt((P[0] - T(p.ax)) * (P[0] - T(p.ax)) + (P[1] - T(p.ay)) * (P[1] - T(p.ay)) + (P[2] - T(p.az)) * (P[2] - T(p.az)));
     if (after) *after = std::sqrt((Q[0] - T(p.ax)) * (Q[0] - T(p.ax)) + (Q[1] - T(p.ay)) * (Q[1] - T(p.ay)) + (Q[2] - T(p.az)) * (Q[2] - T(p.az)));
     return true;
@@ -497,6 +509,7 @@ inline constexpr uint32_t kCaptureBufferBytes = 65536;
 inline constexpr uint32_t captureMaxVertices(uint32_t strideBytes) { return strideBytes ? kCaptureBufferBytes / strideBytes : 0; }
 struct CaptureSummary {
     uint32_t vertices = 0, inWindow = 0;      // inWindow: the vertices the shader moved
+    uint32_t zFixed = 0;                      // ... of them the ones that took the depth fallback (the game's own depth was not a valid one: behind the eye, or inside the near plane)
     float wMin = 0.0f, wMax = 0.0f;           // clip w over all vertices, after the move
     float ndcXMin = 0.0f, ndcXMax = 0.0f;     // clip x / w over the vertices with w > 0, after the move
     float ndcYMin = 0.0f, ndcYMax = 0.0f;
@@ -527,6 +540,7 @@ inline CaptureSummary summarizeCapture(const float* records, uint32_t vertices, 
         }
         if (std::memcmp(r, g, 4 * sizeof(float)) != 0) {
             ++s.inWindow;
+            if (!ndcDepthValid<float>(g[2], g[3])) ++s.zFixed;
             const float b = static_cast<float>(anchorDistanceOfClip(p, g)), a = static_cast<float>(anchorDistanceOfClip(p, r));
             if (!haveDist || b < s.beforeMin) s.beforeMin = b;
             if (!haveDist || b > s.beforeMax) s.beforeMax = b;

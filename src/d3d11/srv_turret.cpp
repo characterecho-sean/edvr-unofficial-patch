@@ -541,11 +541,11 @@ void probeRead(ID3D11DeviceContext* ctx, int eye, int family) {
                 else
                     std::snprintf(dist, sizeof(dist), "none");
                 Log::get().note("srv turret hud capture: family=%s eye=%d draw=%u so_prims=%llu needed=%llu vertices=%u in_window=%u w=[%.3f,%.3f] ndc_x=[%.3f,%.3f] "
-                                "ndc_y=[%.3f,%.3f] dist=%s a=(%.3f,%.3f,%.3f) gap=%.2f",
+                                "ndc_y=[%.3f,%.3f] dist=%s a=(%.3f,%.3f,%.3f) zfix=%u gap=%.2f",
                                 fam.name, eye, p.draw, static_cast<unsigned long long>(written), static_cast<unsigned long long>(so.PrimitivesStorageNeeded), c.vertices,
                                 c.inWindow, static_cast<double>(c.wMin), static_cast<double>(c.wMax), static_cast<double>(c.ndcXMin), static_cast<double>(c.ndcXMax),
                                 static_cast<double>(c.ndcYMin), static_cast<double>(c.ndcYMax), dist, static_cast<double>(p.params.ax), static_cast<double>(p.params.ay),
-                                static_cast<double>(p.params.az), static_cast<double>(p.params.gap));
+                                static_cast<double>(p.params.az), c.zFixed, static_cast<double>(p.params.gap));
             }
         } else if (!ran || FAILED(hr)) {
             p.captureLogged = true;   // the stream-output statistics are gone: the statistics line stands alone

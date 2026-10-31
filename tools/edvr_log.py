@@ -10440,7 +10440,8 @@ H_SRV_TURRET_STATS = (r"srv turret hud stats: eye=(?P<eye>-?\d+) issues=(?P<issu
 H_SRV_TURRET_CAPTURE = (r"srv turret hud capture: family=(?P<family>\S+) eye=(?P<eye>-?\d+) draw=(?P<draw>\d+) so_prims=(?P<so>\d+) needed=(?P<needed>\d+) vertices=(?P<vertices>\d+) in_window=(?P<inw>\d+) "
                         r"w=\[(?P<wlo>-?[\d.]+),(?P<whi>-?[\d.]+)\] ndc_x=\[(?P<xlo>-?[\d.]+),(?P<xhi>-?[\d.]+)\] ndc_y=\[(?P<ylo>-?[\d.]+),(?P<yhi>-?[\d.]+)\] "
                         r"(?:dist=(?:none|\[(?P<d0>-?[\d.]+),(?P<d1>-?[\d.]+)\]->\[(?P<d2>-?[\d.]+),(?P<d3>-?[\d.]+)\]) a=\((?P<ax>-?[\d.]+),(?P<ay>-?[\d.]+),(?P<az>-?[\d.]+)\)"
-                        r"|shift_clip=\[(?P<klo>[+-][\d.]+),(?P<khi>[+-][\d.]+)\] s=(?P<s>[+-][\d.]+)) gap=(?P<gap>-?[\d.]+)$")   # dist: the anchor distance of the vertices the shader moved, before -> after; gap: the signed gap the group ran with (negative: a push-back)
+                        r"|shift_clip=\[(?P<klo>[+-][\d.]+),(?P<khi>[+-][\d.]+)\] s=(?P<s>[+-][\d.]+))(?: zfix=(?P<zfix>\d+))? gap=(?P<gap>-?[\d.]+)$")   # dist: the anchor distance of the vertices the shader moved, before -> after; zfix: how many of them took the depth fallback (Elite's NDC z 0.025 / w is no valid depth behind the eye or
+# inside the 2.5 cm near plane: such a vertex is drawn at 0.999); gap: the signed gap the group ran with (negative: a push-back)
 H_SRV_TURRET_TWIN = (r"srv turret hud: stream-output twin of the (?P<family>\S+) shader \(the GPU instrument's capture\) (?P<outcome>created|NOT made) "
                      r"\(0x(?P<hr>[0-9A-Fa-f]{8})\); ")
 H_SRV_TURRET_INSTRUMENT = (r"srv turret hud: the GPU instrument could not be made for eye (?P<eye>-?\d+), family (?P<family>\S+) \((?P<what>.*), "
@@ -15706,9 +15707,17 @@ def _hj_srv_turret(rows, ctx):
                                                                                     min(float(r["d2"]) for r in dist_rows), max(float(r["d3"]) for r in dist_rows))
             else:
                 dist_text = "shift_clip %+.4f..%+.4f" % (min(float(r["klo"]) for r in inwin), max(float(r["khi"]) for r in inwin)) if all(r.get("klo") is not None for r in inwin) else "no distance"
+            zrows = [r for r in crows if r.get("zfix") is not None and int(r["zfix"]) > 0]   # moved vertices the game had behind the eye or inside the near plane, drawn at the nearest depth
+            zfam = []
+            for f in fams:
+                n = sum(int(r["zfix"]) for r in zrows if r["family"] == f)
+                if n:
+                    zfam.append("%s %d" % (f, n))
             cap_clause = "in the window: in_window %d of %d vertices at w %s (%s %s), outside it: %s, %s; vertices moved per family: %s" % (
                 sum(int(r["inw"]) for r in inwin), sum(int(r["vertices"]) for r in inwin), wr(inwin), "family" if len(dfams) == 1 else "families", ", ".join(dfams),
                 "%d rows at w %s" % (len(outwin), wr(outwin)) if outwin else "none sampled", dist_text, ", ".join(moved))
+            if zfam:   # the vertices the game had behind the eye or inside the near plane were drawn at the nearest depth (0.999): said per family
+                cap_clause += "; depth fallback (the game's depth was not valid, drawn at 0.999): " + ", ".join(zfam)
             cap_state = "OK"
             # the families that were sampled (a capture row with vertices) and never had a vertex in the window: which of them never reached it in this flight
             quiet = [f for f in fams if any(r["family"] == f for r in crows) and not any(r["family"] == f for r in inwin)]
@@ -22462,9 +22471,9 @@ def self_test_health():
         # panel's (w about 1.39 m, nothing in the window: healthy, ST_OUT).
         ST_OUT = dict(vertices=12, inw=0, w=(1.380, 1.400), dist="none")
 
-        def st_capture(eye=0, family=STF[0], draw=17, so=400, needed=400, vertices=12, inw=12, w=(0.410, 0.470), ndcx=(-0.8, 0.8), ndcy=(-0.5, 0.5), dist="[0.42,0.61]->[1.62,1.81]", a=(0.05, 0.2, -0.1), gap=-1.10):
+        def st_capture(eye=0, family=STF[0], draw=17, so=400, needed=400, vertices=12, inw=12, w=(0.410, 0.470), ndcx=(-0.8, 0.8), ndcy=(-0.5, 0.5), dist="[0.42,0.61]->[1.62,1.81]", a=(0.05, 0.2, -0.1), zfix=0, gap=-1.10):
             return RT(stsrc, "srv turret hud capture: family=%s eye=%d draw=%u so_prims=%llu", family, eye, draw, so, needed, vertices, inw, w[0], w[1], ndcx[0], ndcx[1], ndcy[0], ndcy[1],
-                      dist, a[0], a[1], a[2], gap)
+                      dist, a[0], a[1], a[2], zfix, gap)
 
         def st_twin(made=True, hr=0, fam=STS[0]):   # one per signature, named by its first family's vertex shader
             return RT(stsrc, "stream-output twin of the %s shader (the GPU instrument's capture) %s", fam, "created" if made else "NOT made", hr,
@@ -22740,6 +22749,13 @@ def self_test_health():
               has=["anchor latched 4 time(s) (2 head away), last at 0.400,0.200,0.300 m seated (head away)"], lacks=["UNPARSED", "NEVER APPLIED"])
         check("srv turret anchored: one 'head away' latch alone is counted too", st_ok + st_flight() + [(8, st_anchor("head away", 0.1, 0.2, 0.3))], 0, [("OK", ST)],
               has=["anchor latched 2 time(s) (1 head away), last at 0.100,0.200,0.300 m seated (head away)"], lacks=["UNPARSED"])
+        check("srv turret anchored: the vertices on the depth fallback are summed per family in the detail", st_ok + st_flight(gpu=[
+              (6, st_stats(0)), (6, st_capture(0, zfix=12)), (7, st_stats(1, family=STF[2])), (7, st_capture(1, family=STF[2], zfix=7, dist="[0.20,0.30]->[1.4,1.5]")),
+              (8, st_capture(0, zfix=4))]), 0, [("OK", ST)],
+              has=["depth fallback (the game's depth was not valid, drawn at 0.999): 1989E6D3 16, DF3503CD 7"], lacks=["UNPARSED", "NEVER APPLIED"])
+        check("srv turret anchored: a capture with no vertex on the depth fallback says nothing of it", st_ok + st_flight(gpu=[(6, st_stats(0)), (6, st_capture(0))]), 0, [("OK", ST)], lacks=["depth fallback", "UNPARSED"])
+        check("srv turret anchored: a capture line from before zfix (none) still parses and says nothing of the fallback", st_ok + st_flight(gpu=[(6, st_stats(0)), (6, st_capture(0).replace(" zfix=0", ""))]), 0, [("OK", ST)],
+              lacks=["depth fallback", "UNPARSED"])
         check("srv turret anchored: the HUD-forward reason is read", st_ok + st_flight() + [(8, st_anchor("HUD forward changed"))], 0, [("OK", ST)], has=["anchor latched 2 time(s), last at 0.050,0.200,-0.100 m seated (HUD forward changed)"], lacks=["UNPARSED"])
         check("srv turret anchored: an anchor reason the rule does not know is UNPARSED", st_ok + [st_anchor().replace("view on", "somewhere")], 4, [("UNPARSED", ST)])
         check("srv turret anchored: a drifted anchor line is UNPARSED", st_ok + [st_anchor().replace("latched at", "kept at")], 4, [("UNPARSED", ST)])

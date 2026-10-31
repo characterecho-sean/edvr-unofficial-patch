@@ -42,10 +42,11 @@
 //   stream-output-statistics query around the scope (Begin right after the bind, End right before the restore). Read back without a stall (DONOTFLUSH, a staging copy mapped
 //   DO_NOT_WAIT) on later frames, given up after 8:
 //   "srv turret hud stats: eye=E issues=N ia_prims=.. vs=.. gs=.. gs_prims=.. c_inv=.. c_prims=.. ps=.. (lost N) draw=K family=F"   gs=0 with ia_prims>0: the shader never ran.
-//   "srv turret hud capture: family=F eye=E draw=K so_prims=.. vertices=.. in_window=.. w=[..] ndc_x=[..] ndc_y=[..] dist=[a,b]->[c,d] a=(x,y,z) gap=.."   the vertices the shader wrote
+//   "srv turret hud capture: family=F eye=E draw=K so_prims=.. vertices=.. in_window=.. w=[..] ndc_x=[..] ndc_y=[..] dist=[a,b]->[c,d] a=(x,y,z) zfix=N gap=.."   the vertices the shader wrote
 //   (in_window: how many it moved, read from the shader's own `pre` output, the clip position as the game made it): with a push the weapon panels' and the radar's draws read in_window
 //   above 0 (anchor distance before 0.1 to 0.7 m, after that plus the push) and the larger panels' in_window 0 at 1.3 m and more (the pull: the other way round); with only the HUD-forward
-//   key every vertex reads as moved. gap= is the signed gap the family's group ran with. The capture holds the first kCaptureBufferBytes of a draw's output, so a long draw is a sample.
+//   key every vertex reads as moved. zfix is how many of the moved vertices took the depth fallback (the game's NDC z was not a valid reversed-Z depth: the vertex was behind the eye or
+//   inside its near plane). gap= is the signed gap the family's group ran with. The capture holds the first kCaptureBufferBytes of a draw's output, so a long draw is a sample.
 #pragma once
 
 #include <atomic>

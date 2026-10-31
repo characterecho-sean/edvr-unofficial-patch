@@ -10,11 +10,16 @@
 // its ray from the ANCHOR A (a fixed point in the seated frame, in the eye's space here) by `gap` metres nearer (a NEGATIVE gap: deeper, the push-back) when its distance from A lies in
 // (dMin, dMax), and projects the result back with the same tangents:
 //
-//     P1 = P + T;   V = P1 - A;   d = |V|;   Q = (dMin < d < dMax) ? A + V (d - gap) / d : P1;   if (Q.z > 0.01) pos = project(Q), z' = z / w * Q.z
+//     P1 = P + T;   V = P1 - A;   d = |V|;   Q = (dMin < d < dMax) ? A + V (d - gap) / d : P1;   pos = project(Q), z' = ndcZ * Q.z
+//     ndcZ = z / w when w > 0 and 0 <= z / w <= 1 (the game's own depth), else 0.999
 //
-// The derivation and the CPU copy are in srv_turret_math.h (anchoredMove). The vertex's NDC z is kept and its other interpolants are not touched, so the pixel shader is the game's
-// own. A vertex that would end up less than a centimetre in front of the eye, or lies on the eye plane (clip w about 0), is left as the game made it, and so is every vertex when
-// neither the translation nor the window applies (the output is then the input bit for bit). `triangle` input takes triangle lists AND triangle strips (the input assembler hands over each
+// The derivation and the CPU copy are in srv_turret_math.h (anchoredMove). The vertex's NDC z is kept when it is a valid depth, and its other interpolants are not touched, so the pixel
+// shader is the game's own. ELITE IS REVERSED Z with an infinite far plane (cb0[6] = (0, 0, 0, 0.025): clip z is the constant 0.025 and NDC z = 0.025 / w), so a vertex the game put
+// behind the eye (w < 0: z / w is negative) or inside its 2.5 cm near plane (0 < w < 0.025: z / w above 1) has no valid depth, and the moved vertex would fail the rasterizer's depth
+// clip (0 <= z <= w) and be cut. Such a vertex is drawn at 0.999, the NEAREST valid reversed-Z depth (1 is near), like the rest of the HUD. The reprojection is linear in Q (x' = (2 Q.x -
+// Q.z (r + l)) / (r - l), likewise y, w' = Q.z), so it is valid for any Q.z: every vertex the move applies to is output MOVED (never the unmoved one beside moved corners, which would
+// stretch the triangle), and the rasterizer's homogeneous clipping handles a corner that ends behind the eye. A vertex on the eye plane (clip w about 0) is left as the game made it, and so
+// is every vertex when neither the translation nor the window applies (the output is then the input bit for bit). `triangle` input takes triangle lists AND triangle strips (the input assembler hands over each
 // strip triangle in the winding the rasterizer would have used), and each output triangle is emitted on its own with RestartStrip.
 //
 // THE INPUT AND OUTPUT STRUCT is the vertex shader's output signature, element for element and in its register order (the fxc disassembly of the dumps' bytecode, written once in
@@ -60,8 +65,9 @@ namespace edvr {
     "    if (!win && !tra) return c;\n" \
     "    float3 q = p1;\n" \
     "    if (win) q = an.xyz + v * ((d - mv.x) / d);\n" \
-    "    if (!(q.z > 0.01)) return c;\n" \
-    "    return float4((2.0 * q.x - q.z * (tn.y + tn.x)) / (tn.y - tn.x), (2.0 * q.y - q.z * (tn.w + tn.z)) / (tn.w - tn.z), (c.z / w) * q.z, q.z);\n" \
+    "    const float zn = c.z / w;\n" \
+    "    const float ndcZ = (w > 0.0 && zn >= 0.0 && zn <= 1.0) ? zn : 0.999;\n" \
+    "    return float4((2.0 * q.x - q.z * (tn.y + tn.x)) / (tn.y - tn.x), (2.0 * q.y - q.z * (tn.w + tn.z)) / (tn.w - tn.z), ndcZ * q.z, q.z);\n" \
     "}\n" \
     "struct Vertex {\n"
 #define EDVR_SRV_TURRET_GS_TAIL \
