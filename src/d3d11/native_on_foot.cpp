@@ -8037,6 +8037,8 @@ struct LtaState {
     bool init = false, keyLast = false, footLast = false;
     nofoot::f109::Follower follow;
     bool centrePending = false;  // the reported head's offset goes into the target at the first render head after an engage
+    nofoot::f195::Why keepWhy = nofoot::f195::kFirstEngage;   // F197: whether this engage's centring keeps the pitch offset (after a settled mouse aim) or centres all of it, and why
+    uint64_t keepRunMs = 0;                                    // ... and the ms of mouse look just before it
     uint32_t centres = 0;
     bool blocked = false;        // the game's look is blocked (a run of dropped asks): the follower holds, probing
     nofoot::f109::ProbePair probe;   // F129: the probes while blocked ask +p, then -p (zero-sum); the phase restarts when the blocked state changes
@@ -8054,6 +8056,9 @@ struct LtaState {
     double springYawSeen = 0.0;
 };
 LtaState g_lta;
+// F197 (frame thread): the run on foot under mouse look just before an engage (native_on_foot_f195.h), and whether look to aim has engaged since the pilot went on foot. The keep applies only after a settled mouse aim.
+nofoot::f195::MouseRun g_f195Run;
+bool g_f195EngagedOnFoot = false;
 // F131 (frame thread only): look to aim holds while an on-foot panel is open, a menu or map holds the 2D screen, or the game runs no look (nofoot::f131::Hold decides).
 struct F131State {
     nofoot::f131::Hold hold;
@@ -8229,7 +8234,9 @@ bool eyeRowsRead(int e, uint32_t* frame, float rows[16], float o[4], uint64_t* q
 // the guard's base is taken again, the snap detectors start disarmed (a stick already pushed fires only after it came back to the centre).
 // The follower's state at an engage, and when a hold ends (F131): a fresh follower from the asks still in flight, the centring waits for the first render head, the
 // guard's base is taken again, the snap detectors start disarmed. The map (the carried yaw and pitch) is not touched.
-void ltaFreshFollower(uint64_t now) noexcept {
+void ltaFreshFollower(uint64_t now, nofoot::f195::Why keepWhy, uint64_t keepRunMs) noexcept {
+    g_lta.keepWhy = keepWhy;   // F197: the pitch offset is kept only after a settled mouse aim
+    g_lta.keepRunMs = keepRunMs;
     g_lta.follow.reset();
     g_lta.follow.target[0] = g_adsMap.yawInFlight();
     g_lta.follow.target[1] = g_adsMap.pitchInFlight();
@@ -8251,7 +8258,10 @@ void ltaEngage(uint64_t now) noexcept {
     g_f194Sec = nofoot::f194::Second{};
     g_f194Box.clearPending.store(true, std::memory_order_relaxed);   // the hook's window starts with this engagement
     g_f194LineMs = now;
-    ltaFreshFollower(now);
+    const uint64_t runMs = g_f195Run.ms(now);   // F197: the mouse-look run just before this engage (it breaks once look to aim is engaged)
+    const nofoot::f195::Why keepWhy = nofoot::f195::whyOf(runMs, !g_f195EngagedOnFoot, false);
+    g_f195EngagedOnFoot = true;
+    ltaFreshFollower(now, keepWhy, runMs);
     const int style = g_ltaStyle.load(std::memory_order_relaxed);
     Log::get().note("native on foot look to aim (F109): engaged: the head is the look on foot, yaw and pitch, armed and unarmed (the follower through the head aim's map; "
                     "the cancel keeps the view the headset's); turn style %s (snap step %d deg), smoothing %d ms with nothing drawn; the mouse's and the stick's pitch "
@@ -8302,16 +8312,19 @@ void ltaFollow(uint64_t now, double dt, bool headStep, double dYaw, double dPitc
         g_lta.centrePending = false;
         double oy = 0.0, op = 0.0;
         if (f109::centreOffset(np.render, &oy, &op)) {
-            // F195: the pitch offset the pilot had stays (up to 15 deg either way); what is centred, and what the take thresholds judge, is the yaw and the pitch beyond it
-            const nofoot::f195::Kept kept = nofoot::f195::keptPitch(op);
+            // F195: after a settled mouse aim (F197) the pitch offset the pilot had stays (up to 15 deg either way); what is centred, and what the take thresholds judge, is the yaw and the pitch beyond it. Any other
+            // engage (the first on foot, one under a second after going on foot, the end of an F131 hold) centres all of it, as F109 did.
+            const nofoot::f195::Kept kept = nofoot::f195::centring(op, g_lta.keepWhy);
+            char keepWhyText[96];
+            nofoot::f195::whyText(keepWhyText, sizeof(keepWhyText), g_lta.keepWhy, g_lta.keepRunMs);
             const double mag = std::sqrt(oy * oy + kept.centredRad * kept.centredRad) / f109::kDeg;
             const bool take = mag >= f109::kCentreMinDeg && mag <= f109::kCentreMaxDeg;
             if (take) g_lta.follow.addHead(oy, kept.centredRad);
             ++g_lta.centres;
             Log::get().note("native on foot look to aim (F109): centred: the reported head was yaw %+.2f pitch %+.2f deg from the aim at the engage (%.0f ms after it); "
-                            "pitch kept %+.2f deg, centred %+.2f deg; %s",
+                            "pitch kept %+.2f deg, centred %+.2f deg (%s); %s",
                             oy / f109::kDeg, op / f109::kDeg, static_cast<double>(now - g_lta.engageMs),
-                            kept.keptRad / f109::kDeg, kept.centredRad / f109::kDeg,
+                            kept.keptRad / f109::kDeg, kept.centredRad / f109::kDeg, keepWhyText,
                             take ? "the aim turns onto the head through the follower (the view stays)" : mag < f109::kCentreMinDeg ? "already on it" : "over 120 deg: left alone");
         } else {
             Log::get().note("native on foot look to aim (F109): centred: the reported head's angles are not readable (within 11 deg of vertical): no centring");
@@ -8552,7 +8565,7 @@ void f131Begin(uint64_t now, uint32_t reasons) noexcept {
     Log::get().note("native on foot look to aim (F131): held (%s); the aim stays where it is, the game's own look runs%s", nofoot::f131::reasonText(reasons, why, sizeof(why)), held);
 }
 void f131End(uint64_t now, const nofoot::f131::Out& o) noexcept {
-    ltaFreshFollower(now);
+    ltaFreshFollower(now, nofoot::f195::kHoldEnd, 0);   // F197: the end of a hold centres all of the pitch offset, as F109 did
     g_f109BlockedRun.store(0, std::memory_order_relaxed);   // the asks that were dropped before the hold are not a block now
     if (!g_f131.logged) return;
     char why[200];
@@ -8836,6 +8849,10 @@ void adsAimTick(uint64_t now, bool session) noexcept {
     const bool key = g_adsAimKey.load(std::memory_order_relaxed);
     const int ySign = g_adsYawSign.load(std::memory_order_relaxed), pSign = g_adsPitchSign.load(std::memory_order_relaxed);
     const bool onFoot = g_f115CameraOn;   // F115: native stereo on foot, ended early by the cockpit's own panels at a boarding
+    // F197: the run under mouse look on foot (native on foot active, on foot, look to aim neither engaged nor unwinding), ticked every frame before any return; the engage decision below reads it. Off foot ends the
+    // on-foot session (the next engage is its first).
+    g_f195Run.step(now, onFoot && session && !g_lta.engaged && !g_lta.unwinding);
+    if (!(onFoot && session)) g_f195EngagedOnFoot = false;
     if (!g_adsLastInit) {
         g_adsLastInit = true;
         g_adsKeyLast = key;

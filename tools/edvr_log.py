@@ -15168,12 +15168,14 @@ def _hj_f194_height(rows, ctx):
 # F195: at a look-to-aim engage the aim keeps its pitch where the mouse left it: the pitch offset of the reported head from the aim, up to 15 deg either way, stays, and only the yaw (and the pitch beyond 15 deg) is
 # centred. Behaviour since F195b (the A/B key experimental.native_on_foot_look_to_aim_keeps_aim_pitch was RETIRED). The line is F109's `centred:` line, which ends "pitch kept %+.2f deg, centred %+.2f deg" (native_on_foot.cpp,
 # ltaFollow); the A/B build wrote "(F195: on|off)" after it (read: a row with the key off is the whole centring, named and not judged), the F194 build wrote the picture-centre pitch and the forward axis's angles before it
-# (read), and a build before F195 wrote none of it (read, and no verdict). The F109 rule's standing-offset judgement takes the pitch each engage kept off the offset it reads (the kept offset is on purpose).
+# (read), and a build before F195 wrote none of it (read, and no verdict). F197: the keep applies only after a settled mouse aim, and the line says why after the pitch: "(after 9.0 s of mouse look)", or "(not kept: the first
+# engage on foot)", "(not kept: 0.4 s of mouse look, under 1 s)", "(not kept: the end of a hold)"; an engage that rightly did not keep is not a failure, and a line of the F195b build (no reason) is judged as before. The F109
+# rule's standing-offset judgement takes the pitch each engage kept off the offset it reads (the kept offset is on purpose).
 H195_NAME = "look to aim keeps pitch (F195)"
 H195_LABEL = "native on foot look to aim (F109): centred: the reported head was"
 H195_CENTRED_RE = (r"native on foot look to aim \(F109\): centred: the reported head was yaw (?P<oy>%s) pitch (?P<op>%s) deg from the aim at the engage \((?P<ms>\d+) ms after it\)"
                    r"(?:; the picture-centre pitch in force (?P<pc>%s) deg \(F194\), the forward axis itself yaw \S+ pitch \S+ deg from the aim)?"
-                   r"(?:; pitch kept (?P<kept>%s) deg, centred (?P<cen>%s) deg(?: \(F195: (?P<key>on|off)\))?)?; (?P<what>.+)$" % ((_HN,) * 5))
+                   r"(?:; pitch kept (?P<kept>%s) deg, centred (?P<cen>%s) deg(?: \(F195: (?P<key>on|off)\)| \((?P<why>after [\d.]+ s of mouse look|not kept: [^)]*)\))?)?; (?P<what>.+)$" % ((_HN,) * 5))
 H195_KEEP_DEG = 15.0       # the most pitch offset an engage keeps (nofoot::f195::kKeepPitchDeg)
 H195_MIN_OWED = 1.0        # an engage with a pitch offset under this has nothing worth keeping
 H195_TOL = 0.05            # the log prints hundredths of a degree
@@ -15197,22 +15199,37 @@ def _h195_kept_rows(ctx):
 
 
 def _hj_f195_keep(rows, ctx):
-    """F195: at a look-to-aim engage the aim keeps its pitch where the mouse left it. Each engage's centred line gives the reported head's pitch offset from the aim (op), the part kept (the offset, clamped to
-    +-15 deg) and the part centred (the rest). NEVER APPLIED: engages had a pitch offset of 1 deg or more and none kept it. PARTIAL: some did not. IDLE: no engage had a pitch offset worth keeping. OK with the
-    figures. A line from a build before F195 is read and gives no verdict; a row of the A/B build with its key off is named and not judged. No line, no verdict."""
+    """F195: at a look-to-aim engage after a settled mouse aim (F197: on foot under mouse look for a second or more) the aim keeps its pitch where the mouse left it. Each engage's centred line gives the reported
+    head's pitch offset from the aim (op), the part kept (the offset, clamped to +-15 deg) and the part centred (the rest), and, since F197, why: "after N s of mouse look" or "not kept: ..." (the first engage on foot,
+    under a second of mouse look, the end of an F131 hold). NEVER APPLIED: engages that should have kept had a pitch offset of 1 deg or more and none kept it. PARTIAL: some did not, or an engage that said it did
+    not keep kept. IDLE: no engage that should have kept had a pitch offset worth keeping. OK with the figures. An engage that rightly did not keep is named, not a failure. A line from a build before F195 is read
+    and gives no verdict; a row of the A/B build with its key off is named and not judged; a line of the F195b build (no reason text) is judged as before. No line, no verdict."""
     ce = [r for r in rows.get("centred", []) if r.get("kept") is not None]
     if not ce:
         return None
     off = [r for r in ce if r.get("key") == "off"]
-    on = [r for r in ce if r.get("key") != "off"]
-    text = "%d engage(s) centred" % len(on)
+    rest = [r for r in ce if r.get("key") != "off"]
+    rightly = [r for r in rest if (r.get("why") or "").startswith("not kept")]
+    on = [r for r in rest if not (r.get("why") or "").startswith("not kept")]
+    text = "%d engage(s) centred" % len(rest)
+    notes = []
     if off:
-        text += " (and %d of the A/B build with its key off: the whole offset centred, not judged)" % len(off)
+        notes.append("%d of the A/B build with its key off: the whole offset centred, not judged" % len(off))
+    if rightly:
+        reasons = collections.Counter(r["why"].split(": ", 1)[1] for r in rightly)
+        notes.append("%d did not keep the pitch offset by the rule: %s" % (len(rightly), ", ".join("%s %d" % (k, n) for k, n in sorted(reasons.items()))))
+    if notes:
+        text += " (and " + "; and ".join(notes) + ")"
+    bad = [r for r in rightly if abs(float(r["kept"])) > H195_TOL]
+    owed = []
+    if on:
+        owed = [r for r in on if abs(float(r["op"])) >= H195_MIN_OWED]
+        figures = ", ".join("%+.2f kept %+.2f centred %+.2f" % (float(r["op"]), float(r["kept"]), float(r["cen"])) for r in on[:8])
+        text += ": the reported head's pitch offset from the aim, kept and centred (deg): %s%s" % (figures, " ..." if len(on) > 8 else "")
+    if bad:
+        return ("PARTIAL", text + "; %d engage(s) said they did not keep the pitch offset and kept it" % len(bad))
     if not on:
-        return ("IDLE", text)
-    owed = [r for r in on if abs(float(r["op"])) >= H195_MIN_OWED]
-    figures = ", ".join("%+.2f kept %+.2f centred %+.2f" % (float(r["op"]), float(r["kept"]), float(r["cen"])) for r in on[:8])
-    text += ": the reported head's pitch offset from the aim, kept and centred (deg): %s%s" % (figures, " ..." if len(on) > 8 else "")
+        return ("IDLE", text + "; no engage followed a settled mouse aim")
     if not owed:
         return ("IDLE", text + "; no engage had a pitch offset of %.0f deg or more to keep" % H195_MIN_OWED)
     missed = [r for r in owed if abs(float(r["kept"]) - max(-H195_KEEP_DEG, min(H195_KEEP_DEG, float(r["op"])))) > H195_TOL]
@@ -20726,7 +20743,7 @@ def self_test_health():
 
         KEYS109 = R("native on foot look to aim (F109): keys: %s, smoothing", "on", 150, "snap", 45)
         ENG109 = R("native on foot look to aim (F109): engaged:", "snap", 45, 150, ", their yaw turns the player in snaps", "")
-        CEN109 = R("native on foot look to aim (F109): centred: the reported head was", 12.5, -4.0, 22, -4.0, 0.0, "on", "the aim turns onto the head through the follower (the view stays)")
+        CEN109 = R("native on foot look to aim (F109): centred: the reported head was", 12.5, -4.0, 22, -4.0, 0.0, "after 9.0 s of mouse look", "the aim turns onto the head through the follower (the view stays)")
         NOT109 = R("native on foot look to aim (F109): not engaged:", "body align is off (fix.native_on_foot_body_align = off; the full-3P body needs body)")
         TRIP109 = R("native on foot look to aim (F109): GUARD TRIPPED", "GUARD TRIPPED: the view - head residual (the right eye's rows) grew for 0.5 s: yaw +9.0 pitch "
                     "+0.1 deg against the head's yaw +18.0 pitch +0.2; ratio yaw +0.50 pitch +0.50 (about -2: that axis's sign is inverted; about -1: the view does "
@@ -20821,13 +20838,13 @@ def self_test_health():
         # ---- F195: at a look-to-aim engage the aim keeps its pitch where the mouse left it (behaviour since F195b); the F109 rule takes the kept pitch off the standing offset ----
         L195 = H195_NAME
 
-        def cen195(op=4.46, kept=None, cen=None, oy=12.0):
-            """F109's centred line with F195's ending, from the DLL's own format (ltaFollow); kept defaults to the offset clamped to +-15 deg, centred to the rest."""
+        def cen195(op=4.46, kept=None, cen=None, oy=12.0, why="after 9.0 s of mouse look"):
+            """F109's centred line with F195's ending and F197's reason, from the DLL's own format (ltaFollow); kept defaults to the offset clamped to +-15 deg (0 when the reason says not kept), centred to the rest."""
             if kept is None:
-                kept = max(-15.0, min(15.0, op))
+                kept = 0.0 if why.startswith("not kept") else max(-15.0, min(15.0, op))
             if cen is None:
                 cen = op - kept
-            return R("native on foot look to aim (F109): centred: the reported head was", oy, op, 22, kept, cen, "the aim turns onto the head through the follower (the view stays)")
+            return R("native on foot look to aim (F109): centred: the reported head was", oy, op, 22, kept, cen, why, "the aim turns onto the head through the follower (the view stays)")
 
         # the lines of the builds before F195b: the A/B build's (the ending says whether its key was on), and the F194 build's (the picture-centre pitch and the forward axis's angles before it)
         def ab195(op, kept, cen, key):
@@ -20850,6 +20867,25 @@ def self_test_health():
               ["native on foot look to aim (F109): centred: the reported head was yaw +12.00 pitch +4.46 deg from the aim at the engage (22 ms after it); the picture-centre pitch in force +0.0 deg (F194), the forward axis "
                "itself yaw +12.00 pitch +4.46 deg from the aim; pitch kept +4.46 deg, centred +0.00 deg (F195: on); the aim turns onto the head through the follower (the view stays)"], 0, [("OK", L195)],
               has=["+4.46 kept +4.46 centred +0.00"], lacks=["UNPARSED"])
+        # F197: the keep applies only after a settled mouse aim; an engage that rightly did not keep is not a failure, and the F195b build's lines (no reason) are judged as before
+        FLOWN195B = ("native on foot look to aim (F109): centred: the reported head was yaw -19.92 pitch -18.81 deg from the aim at the engage (0 ms after it); pitch kept -15.00 deg, centred -3.81 deg; "
+                     "the aim turns onto the head through the follower (the view stays)")
+        check("F195 and F197: the first engage on foot centred whole (op -18.81, kept 0, centred -18.81) and the toggles from mouse look kept: OK, the first named as rightly not kept",
+              [cen195(-18.81, why="not kept: the first engage on foot"), cen195(-8.43, why="after 9.0 s of mouse look"), cen195(-9.3, why="after 12.4 s of mouse look")], 0, [("OK", L195)],
+              has=["3 engage(s) centred (and 1 did not keep the pitch offset by the rule: the first engage on foot 1): the reported head's pitch offset from the aim, kept and centred (deg): "
+                   "-8.43 kept -8.43 centred +0.00, -9.30 kept -9.30 centred +0.00"], lacks=["UNPARSED", "PARTIAL", "NEVER"])
+        check("F195 and F197: every engage was one that rightly did not keep (the first on foot, under a second, the end of a hold): IDLE, not a failure",
+              [cen195(-18.81, why="not kept: the first engage on foot"), cen195(-6.0, why="not kept: 0.4 s of mouse look, under 1 s"), cen195(-7.0, why="not kept: the end of a hold")], 0, [("IDLE", L195)],
+              has=["3 engage(s) centred (and 3 did not keep the pitch offset by the rule: 0.4 s of mouse look, under 1 s 1, the end of a hold 1, the first engage on foot 1)", "no engage followed a settled mouse aim"], lacks=["UNPARSED", "NEVER", "PARTIAL"])
+        check("F195 and F197: an engage after a settled mouse aim that centred the whole offset still reads NEVER APPLIED", [cen195(5.0, kept=0.0, cen=5.0, why="after 3.0 s of mouse look")] * 2, 3, [("NEVER APPLIED", L195)],
+              has=["2 engage(s) had a pitch offset of 1 deg or more, but none kept it"], lacks=["UNPARSED"])
+        check("F195 and F197: an engage that said not kept and kept the offset anyway: PARTIAL", [cen195(5.0, kept=5.0, cen=0.0, why="not kept: the end of a hold")], 0, [("PARTIAL", L195)],
+              has=["1 engage(s) said they did not keep the pitch offset and kept it"], lacks=["UNPARSED"])
+        check("F195 and F197: the F195b build's flown first engage (no reason text, kept -15 of -18.81) is still read and judged as before: OK", [FLOWN195B], 0, [("OK", L195)],
+              has=["-18.81 kept -15.00 centred -3.81"], lacks=["UNPARSED", "NEVER"])
+        check("F195 and F197: a kept 5 deg offset after a settled mouse aim and a whole-centred first engage: the F109 rule takes the kept pitch off the standing offset only for the first",
+              [ENG109, cen195(-18.81, why="not kept: the first engage on foot"), cen195(5.0, why="after 2.0 s of mouse look")] + [look109(hy=0.5, hp=0.2, oy=0.1, op=5.0)] * 4, 0, [("OK", L109), ("OK", L195)],
+              lacks=["UNPARSED", "stood off"])
         check("F195: a centred line from a build before F195 (no ending) is read and gives no verdict",
               ["native on foot look to aim (F109): centred: the reported head was yaw +12.50 pitch -4.00 deg from the aim at the engage (22 ms after it); the aim turns onto the head through the follower (the view stays)"], 0,
               [], lacks=["UNPARSED", row("OK", L195), row("IDLE", L195), row("NEVER APPLIED", L195)])

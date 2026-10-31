@@ -208,7 +208,7 @@ void run194(Check&& check) {
                   has("if (g_f194Box.take(&hw) && g_f194Sec.any()) {"),
               "F194: the probe is begun at the engage, the disengage and a stop, ticked every frame, and the 1 s line is taken from the hook's window while engaged");
         // F109's centred line: the picture-centre and forward-axis fields are gone, F195's tail stays
-        check(has("pitch kept %+.2f deg, centred %+.2f deg; %s\",") && !has("the forward axis itself") && !has("(F194), "),
+        check(has("pitch kept %+.2f deg, centred %+.2f deg (%s); %s\",") && !has("the forward axis itself") && !has("(F194), "),
               "F194b: the F109 centred line is the reported head's offset, F195's kept and centred pitch and the outcome: no picture-centre pitch, no second set of angles");
     }
 }
