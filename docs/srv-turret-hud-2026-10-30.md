@@ -8,17 +8,16 @@
   than gap + 0.1 m, and no gap makes the layers meet (journal, 2026-10-31).
   Sean's goal (2026-10-31): the panel with the arcs, ammo counts and INFO
   strip in the same plane as the location panel (Cranfield Nutrition). The
-  push-back is BUILT (9ded3cf8), NOT FLOWN. Branch `claude/srv-turret-hud`,
-  local only. Issue #140. Test install: Steam (`--target steam --scope both
-  --xess`).
-- **What is wrong (measured, the game's own placement):** in the Scorpion's
-  turret view Elite puts the VR camera too far forward along the gun. The
-  near HUD layer (both weapon arc brackets, SECONDARY A / PRIMARY A, the two
-  ammo counts) sits about 0.11 m behind the default eye point, so it is
-  behind the player's head. The target info panel and the SYSTEMS panel sit
-  about 1.02 m deeper than that layer, but are drawn over it, so in stereo
-  the far panel covers the nearer arcs. The reticle is at the target, as it
-  should be.
+  push-back (9ded3cf8) FLOWN 2026-10-31: in stereo the panels now meet
+  (arcs 1.60 m, location panel 1.46-1.48, SYSTEMS 1.58), but the pushed
+  panel and radar move with the head and grow when approached: a
+  disparity-only move (journal). Next: move them in 3D about a fixed anchor.
+  NOT BUILT. Branch `claude/srv-turret-hud`, local only. Issue #140. Test
+  install: Steam (`--target steam --scope both --xess`).
+- **What is wrong (the game's own placement):** the turret view's camera is
+  too far forward along the gun (the arcs layer behind the default eye
+  point), and the larger panels sit about a metre deeper than the arcs,
+  ammo counts and radar.
 - **What 9ded3cf8 does:** in the Scorpion's turret view only (Status.json
   Flags bit 13 seated in an SRV, and the journal's LoadGame `Ship` or
   LaunchSRV `SRVType` naming the Scorpion), (1) the eye alignment moves the
@@ -137,6 +136,11 @@ same amount. Matching them needs a change to one layer's stereo depth.
   nearer than the arcs, and a forward pull can never reach them.
 - ruled out: vs B7790CBFC6554097 as a HUD panel, because its captured
   vertices sit at w -658 to +3029 m.
+- ruled out: a disparity-only push as the fix, because it changes only the
+  eyes' horizontal disparity: the panel keeps the motion parallax and the
+  growth on approach of its true 0.5 m while stereo puts it at 1.6 m. Flight
+  2026-10-31 06:07 (e45c68a9), Sean: the radar and panel "move with my
+  head", and the panel "got larger" as the camera moved towards it.
 - ruled out: one forward pull making the layers meet, because a pull only
   moves vertices deeper than gap + 0.1 m. The near layer (0.11-0.70 m) is
   never in the window, and the deep layer itself spans 1.3-2.8 m.
@@ -203,3 +207,36 @@ SYSTEMS and the nearest arc falls from 1.79 to 0.07 dioptres (1/0.42 -
 1/1.70, against 1/1.52 - 1/1.70). The cost is that the radar lies on the
 turret deck (0.30 m) and the ammo counts cross the barrel (0.62 m). Pushed
 behind them, they are still drawn over the metal.
+
+### 2026-10-31: the push-back flown; it follows the head
+
+Flight `edvr_gfx_20261031_060739.log` (e45c68a9, Steam, build matches). The
+pass bound every draw of the nine families (372878 of 372878). Sean swept
+panels back 95-200 cm, radar back 65-170 cm and camera back 15-70 cm. Dump
+061223993001 (camera back 70, panels back 110, radar back 170, head centred)
+measures, by disparity: SECONDARY A and PRIMARY A 1.60 m, the location panel
+1.46-1.48 m, SYSTEMS 1.58 m, the INFO strip 1.62 m and the radar 1.83 m. In
+stereo the layers now meet.
+
+Sean: "the radar and panel seems to move with my head, also the panel got
+larger if I move my camera position towards it". This is the method itself.
+The shader moves each vertex along the ray from the head centre of the
+current frame and changes only the eyes' horizontal disparity, so the panel
+keeps the game's 0.5 m geometry for everything else. Moving the head 10 cm
+towards it grows it by about 25 % (0.5 / 0.4), where a panel truly at 1.6 m
+would grow by 6 %. Moving the head sideways, it slides across the scene as a
+0.5 m object would, against a stereo depth of 1.6 m. The location and SYSTEMS
+panels are truly at 1.5 m, so the difference shows beside them.
+
+The next build moves the panel in 3D. Each near vertex goes along the ray
+from a FIXED anchor in the seated frame, not the head. The anchor is the head
+position when the turret view comes on, latched again on a recentre. From
+the anchor the panel looks exactly as it does now. Away from it, the panel
+has the parallax, the growth and the disparity of a panel at 1.6 m. The
+geometry shader rebuilds each vertex's eye-space point from clip x, y and w
+through the eye's tangents. It moves the point and projects it again, with
+the new w and the same NDC depth. Per eye per frame it needs the anchor in
+that eye's space, from the head pose and eye-to-head transforms the host
+gives the temporal pass (native_temporal.cpp, `f->head`, `f->eyeToHead`).
+NDC y is up: the radar's captured ndc_y is -0.5 to -1.6, and it sits at
+the bottom.
