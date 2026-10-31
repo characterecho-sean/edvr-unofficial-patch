@@ -166,6 +166,16 @@ same amount. Matching them needs a change to one layer's stereo depth.
   point 0.215 m ahead of V0, while the whole schematic box lies 0.36 to
   0.51 m behind V0. Writer #6, the 44-deg-down sliver, is not the radar's:
   it uses the live camera and its billboard sat 2.2 to 2.6 m out.
+- ruled out: V0 latching only at view entry, because in flight a5800fdc
+  (`edvr_gfx_20261031_135051.log`) the view stayed on from 13:52:52 to
+  13:54:53 with no re-entry, and V0 snapped to the live camera at camera back
+  55 (13:53:21.356) and again at 50 (13:54:38.787).
+- ruled out: V0 always following the head, because it stayed frozen for
+  2619 frames from view-on through camera back 5 to 50, and again from 55
+  down to 0.
+- ruled out: camera back never reaching V0, because from the snap on V0
+  tracked the live camera, camera back included, every frame (the origin at
+  z +0.09 to +0.28).
 - ruled out: a billboard move showing the disc at camera back 25, because
   the picture is empty there (the volume is behind V0); dump 130153201001
   has no disc at all.
@@ -691,4 +701,50 @@ What it decides, per line:
 - **V0 follows the head after all:** moves that track the head.
 - **A distance or timer latch:** moves only after a lean past some
   threshold, or at a regular interval.
+
+### 2026-10-31: V0 is gated by visibility (flight a5800fdc); the anchor found
+
+Flight a5800fdc, Steam, `edvr_gfx_20261031_135051.log`. The view stayed on
+from 13:52:52 to 13:54:53. The view-off line: 10610 draws copied, 10610
+read, 3054 moves.
+- **Up from 0.** View-on at camera back 0 was "first seen" with the origin
+  at z -0.437. V0 then stayed frozen for 2619 frames through camera back 5
+  to 50.
+- **At 55** (13:53:21.356) V0 snapped to the live camera, moved by
+  (-1, -75, 526) mm; the origin was now at z +0.089. From then on it tracked
+  the live camera every frame, through 70 (the origin at z 0.24 to 0.28),
+  head turns and leans included.
+- **Back down.** It still tracked at 60 (z 0.151), and froze from 55 down
+  to 0.
+- **Up again.** It stayed frozen up to 50 (13:54:38.787), when it moved
+  after 2310 unchanged frames (z 0.058), and tracked again.
+
+So V0 is the live camera, camera back included, but it updates only while
+the radar volume is in view; otherwise the writer redraws with stale
+constants. The snap points vary with head pitch (z 0.058 to 0.10 right
+after), which is a visibility test, not a distance.
+
+The RE (subagent, build 334925, read-only;
+`analysis\decomp\verify_20261031_srv_radar_anchor.txt`, filed as
+analysis commit 9f71604) agrees and finds the anchor:
+- **The gate.** 0x287B050 calls 0x36BF330 with the main camera, which
+  calls 0x36BF3C0 for each slot. 0x36BCEB0 projects each object's local box
+  with world x the camera's VP, and 0x36BE0F0 clips its 12 edges against the
+  near plane. A slot takes the camera, its window and the billboard
+  rectangle only when some edge survives and the merged rectangle has area.
+- **The placement.** The radar's terrain-schematic object (constructor
+  0x383DF40, vtables 0x5511DE8 at +0 and 0x5511F18 at +0x58) is updated
+  per frame by 0x384A590(obj in RCX, dt in XMM1), reached only through the
+  thunk 0x381EF00. Its world-matrix writer 0x385DC20 builds world = S . X .
+  M . A:
+  - A is the anchor entity's transform (obj+0x140).
+  - M is a local offset whose translation is obj+0x15B0 / obj+0x15F0 (lerped,
+    in metres, in the anchor's axes). The constructor zeroes it, and nothing
+    else writes it.
+  The Scorpion icon's schematic reads the radar's M through obj+0x58, so it
+  should follow too (unconfirmed).
+- **Open** (the intake's list): which entity the anchor is and whether it
+  turns with the turret; whether ships create this class; whether the slot's
+  region box (slot+0x310, test 0x5E1830) can reject a moved hologram.
+
 
