@@ -5,24 +5,27 @@
 //
 // WHAT IT DOES. In the turret view the weapon panels (the weapon arc brackets, the weapon names, the ammo counts, the INFO strip) are drawn from records about 0.27 to 0.70 m
 // from the eye, the radar from 0.11 to 0.44 m, and the larger panels (SYSTEMS, the location panel) from 1.3 m and more. Every shader below is the same triangle-list pass-through
-// that moves a vertex whose depth is in the window `gap` metres nearer along its ray from the HEAD CENTRE (a NEGATIVE gap: that many metres deeper, the push-back), which is a
-// horizontal shift of its clip x and nothing else:
+// that moves each vertex in 3D (one shared function, turretMove, so the eight copies cannot drift): it reconstructs the vertex's eye-space position P from its clip position and the
+// eye's projection tangents (left, right, down, up as the game projects, the eye jitter included; NDC y is up), translates it by T (the HUD-forward key; every vertex), moves it along
+// its ray from the ANCHOR A (a fixed point in the seated frame, in the eye's space here) by `gap` metres nearer (a NEGATIVE gap: deeper, the push-back) when its distance from A lies in
+// (dMin, dMax), and projects the result back with the same tangents:
 //
-//     w = pos.w;   if (w > wMin && w < wMax)   pos.x += s * gap / (w - gap);
+//     P1 = P + T;   V = P1 - A;   d = |V|;   Q = (dMin < d < dMax) ? A + V (d - gap) / d : P1;   if (Q.z > 0.01) pos = project(Q), z' = z / w * Q.z
 //
-// with s = P00 * hx per eye (P00 = 2 / (tanRight - tanLeft) of that eye's projection as Elite renders it; hx = +ipd/2 for the left eye, -ipd/2 for the right; ipd the
-// eye separation Elite renders with). The derivation is in srv_turret_math.h: exact for a fixed eye separation, it keeps each vertex's cyclopean direction (the panel
-// does not change size or place for a head at the centre), changes only the disparity, and follows head motion because both layers are fixed in the turret's frame.
-// y, z, w and the other interpolants are not touched, so the pixel shader is the game's own. The window is the module's to choose (srv_turret_math.h): a push runs wMin = 0.02 to
-// wMax = 1.0 and the pull gap + 0.10 to 4.0, either keeping the divisor w - gap positive. `triangle` input takes triangle lists AND triangle strips (the input
-// assembler hands over each strip triangle in the winding the rasterizer would have used), and each output triangle is emitted on its own with RestartStrip.
+// The derivation and the CPU copy are in srv_turret_math.h (anchoredMove). The vertex's NDC z is kept and its other interpolants are not touched, so the pixel shader is the game's
+// own. A vertex that would end up less than a centimetre in front of the eye, or lies on the eye plane (clip w about 0), is left as the game made it, and so is every vertex when
+// neither the translation nor the window applies (the output is then the input bit for bit). `triangle` input takes triangle lists AND triangle strips (the input assembler hands over each
+// strip triangle in the winding the rasterizer would have used), and each output triangle is emitted on its own with RestartStrip.
 //
 // THE INPUT AND OUTPUT STRUCT is the vertex shader's output signature, element for element and in its register order (the fxc disassembly of the dumps' bytecode, written once in
-// srv_turret_math.h's kSignatures), so the linkage the D3D debug layer validates is exact. tools/temporal_shader_build reflects each compiled shader against that table, so a
-// member list here that drifts from it fails in the build. Some of the game's semantics are `__USER_...` names (the radar and hologram families); the position is always the last
-// member, named `pos`. A pixel shader that also reads SV_POSITION.xy takes the rasterizer's, which is not an interpolant, so it needs nothing here.
+// srv_turret_math.h's kSignatures), so the linkage the D3D debug layer validates is exact; the output is that signature followed by one more element, `pre` (TURRETPRE, 4 floats): the
+// clip position as the game made it. The pixel shader does not read it; the GPU instrument's stream-output twin streams it out beside the moved position (srv_turret_math.h). 
+// tools/temporal_shader_build reflects each compiled shader against that table, so a member list here that drifts from it fails in the build. Some of the game's semantics are `__USER_...`
+// names (the radar and hologram families); the position is always the last member, named `pos`. A pixel shader that also reads SV_POSITION.xy takes the rasterizer's, which is not an
+// interpolant, so it needs nothing here.
 //
-// THE CONSTANT BUFFER is private to the shader (GS slot 0, which the game never binds): {s, gap, wMin, wMax}.
+// THE CONSTANT BUFFER is private to the shader (GS slot 0, which the game never binds): four registers, srv_turret_math.h's TurretParams -- {gap, dMin, dMax, -}, {left, right, down, up},
+// {the anchor in the eye's space: X right, Y up, Z forward}, {the translation in the same axes}.
 //
 // THE SHADERS, by signature (the first family's vertex shader names it):
 //   A  vs 1989E6D3B405FDE0 + ps EAB8A1C95A13FFBE    hologram panels        TEXCOORD0 xyzw, TEXCOORD6 xyz, SV_POSITION
@@ -40,21 +43,41 @@ namespace edvr {
 #define EDVR_SRV_TURRET_GS_HEAD \
     "\n" \
     "cbuffer Turret : register(b0) {\n" \
-    "    float s;      // P00 * hx for the eye drawn\n" \
-    "    float gap;    // metres nearer (negative: deeper)\n" \
-    "    float wMin;   // the nearest view depth that moves\n" \
-    "    float wMax;   // the farthest\n" \
+    "    float4 mv;   // x: gap, metres nearer (negative: deeper); y: dMin and z: dMax, the window of distances from the anchor that move\n" \
+    "    float4 tn;   // the eye's tangents as the game projects: x left, y right, z down, w up\n" \
+    "    float4 an;   // the anchor in the eye's space: X right, Y up, Z forward (= clip w)\n" \
+    "    float4 tr;   // the translation (HUD forward) in the same axes\n" \
     "};\n" \
+    "float4 turretMove(float4 c) {\n" \
+    "    const float w = c.w;\n" \
+    "    if (abs(w) < 1.0e-6) return c;\n" \
+    "    const float3 p = float3(c.x * (tn.y - tn.x) * 0.5 + w * (tn.y + tn.x) * 0.5, c.y * (tn.w - tn.z) * 0.5 + w * (tn.w + tn.z) * 0.5, w);\n" \
+    "    const float3 p1 = p + tr.xyz;\n" \
+    "    const float3 v = p1 - an.xyz;\n" \
+    "    const float d = length(v);\n" \
+    "    const bool win = d > mv.y && d < mv.z;\n" \
+    "    const bool tra = any(tr.xyz != 0.0);\n" \
+    "    if (!win && !tra) return c;\n" \
+    "    float3 q = p1;\n" \
+    "    if (win) q = an.xyz + v * ((d - mv.x) / d);\n" \
+    "    if (!(q.z > 0.01)) return c;\n" \
+    "    return float4((2.0 * q.x - q.z * (tn.y + tn.x)) / (tn.y - tn.x), (2.0 * q.y - q.z * (tn.w + tn.z)) / (tn.w - tn.z), (c.z / w) * q.z, q.z);\n" \
+    "}\n" \
     "struct Vertex {\n"
 #define EDVR_SRV_TURRET_GS_TAIL \
     "\n" \
     "};\n" \
+    "struct Moved {\n" \
+    "    Vertex v;\n" \
+    "    float4 pre : TURRETPRE;\n" \
+    "};\n" \
     "[maxvertexcount(3)]\n" \
-    "void main(triangle Vertex v[3], inout TriangleStream<Vertex> stream) {\n" \
+    "void main(triangle Vertex v[3], inout TriangleStream<Moved> stream) {\n" \
     "    [unroll] for (int i = 0; i < 3; ++i) {\n" \
-    "        Vertex o = v[i];\n" \
-    "        const float w = o.pos.w;\n" \
-    "        if (w > wMin && w < wMax) o.pos.x += s * gap / (w - gap);\n" \
+    "        Moved o;\n" \
+    "        o.v = v[i];\n" \
+    "        o.pre = v[i].pos;\n" \
+    "        o.v.pos = turretMove(v[i].pos);\n" \
     "        stream.Append(o);\n" \
     "    }\n" \
     "    stream.RestartStrip();\n" \

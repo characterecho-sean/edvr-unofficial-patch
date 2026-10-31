@@ -27,17 +27,21 @@
 // WHY THE PULL WAS REPLACED BY A PUSH. The first build brought the deep panels forward to the near layer (a window above the gap). The flight of 9fdad3a1 showed no gap makes the
 // layers meet: the weapon panels (the arcs, the weapon names, the ammo counts, the INFO strip: families 1989E6D3 and 2CECEC30) lie at clip w 0.27 to 0.70 m, the radar families
 // (DF3503CD, 44DDCDEB, 9B34C331, 9611A454, B932058F and the two 5559BD94 sphere pairs) at 0.11 to 0.44 m, and the larger panels (SYSTEMS, the location panel, the upper messages) at
-// 1.3 to 2.8 m. So the near layer is pushed BACK to the larger panels' depth instead, with the same geometry shader and a NEGATIVE gap: a vertex nearer than kPushSplitM moves
-// `back` metres deeper along its ray from the head centre, keeping its size on screen, and a vertex at 1 m or more does not move.
+// 1.3 to 2.8 m. So the near layer is pushed BACK to the larger panels' depth instead, with the same geometry shader and a NEGATIVE gap.
+// WHY THE MOVE IS IN 3D. The first push changed only the clip x of a vertex, which is exactly right for a head at one place and keeps the panel's motion parallax and looming of the
+// OLD depth: the flight of e45c68a9 (Sean: the radar and the panels "move with my head", a panel "got larger" when he moved toward it). The shader now moves each vertex for real
+// about a fixed anchor (see THE MOVE below). And at the game's own camera the whole turret HUD lies about 0.7 m too far back for the head (the radar behind it), so the whole HUD is
+// first translated forward (fix.srv_turret_hud_forward), which is the old camera move applied to the HUD only: the world keeps the game's camera.
 //
-// THE FOUR TEMPORARY KEYS (all live, all VR only, 0 = the game's own):
-//   fix.srv_turret_camera_back  centimetres, 0..150, default 60: the camera moves back in the turret view, over the turret's axis. Part 1: published as the seated z of the
-//                               eye alignment (alignTick), the single publisher of that alignment, so its serials stay coherent.
-//   fix.srv_turret_panels_back  centimetres, 0..200, default 110: the weapon panels (Group::kPanels: the two hologram families) go this much deeper where they lie nearer than
-//                               kPushSplitM; the larger panels of the same families, at 1.3 m and more, stay. Part 2: a private pass-through geometry shader per output
-//                               signature (srv_turret_hud_shader.h) around every issue of the families' draws; the rule is per vertex.
-//   fix.srv_turret_radar_back   centimetres, 0..200, default 110: the same for the radar (Group::kRadar), which the game lays on the turret deck right under the player; pushed
-//                               back it floats below the deck's surface in stereo while still drawn over it.
+// THE FIVE TEMPORARY KEYS (all live, all VR only, 0 = the game's own):
+//   fix.srv_turret_camera_back  centimetres, 0..150, default 0: the camera moves back in the turret view, over the turret's axis (the stock camera is the plan; the HUD-forward key
+//                               replaces this). Part 1: published as the seated z of the eye alignment (alignTick), the single publisher of that alignment, so its serials stay coherent.
+//   fix.srv_turret_hud_forward  centimetres, 0..150, default 70: every vertex of every HUD family moves forward along the turret by this much (seated -z), so the HUD sits in front of
+//                               the head as it did with the old camera move while the game's own camera stays.
+//   fix.srv_turret_panels_back  centimetres, 0..200, default 120: the weapon panels (Group::kPanels: the two hologram families) go this much deeper where they lie within kPushSplitM of
+//                               the anchor; the larger panels of the same families, at 1.3 m and more, stay. Part 2: a private pass-through geometry shader per output signature
+//                               (srv_turret_hud_shader.h) around every issue of the families' draws; the rule is per vertex.
+//   fix.srv_turret_radar_back   centimetres, 0..200, default 0: the same for the radar (Group::kRadar), which the game lays on the turret deck right under the player.
 //   fix.srv_turret_hud_gap      centimetres, 0..200, default 0: the first build's forward pull, kept for comparison. For a family whose group has a push above 0 the push is
 //                               used and this is not; for a group with no push this brings the vertices deeper than gap + kWindowNearM (up to kWindowFarM) forward by it.
 //
@@ -53,9 +57,10 @@ namespace edvr {
 namespace srv_turret {
 
 // ---- the keys -------------------------------------------------------------------------------------------------------------------------------------------------
-inline constexpr int kBackDefaultCm = 60, kBackMaxCm = 150;
+inline constexpr int kBackDefaultCm = 0, kBackMaxCm = 150;
+inline constexpr int kForwardDefaultCm = 70, kForwardMaxCm = 150;   // fix.srv_turret_hud_forward
 inline constexpr int kGapDefaultCm = 0, kGapMaxCm = 200;
-inline constexpr int kPushDefaultCm = 110, kPushMaxCm = 200;   // fix.srv_turret_panels_back and fix.srv_turret_radar_back
+inline constexpr int kPanelsDefaultCm = 120, kRadarDefaultCm = 0, kPushMaxCm = 200;   // fix.srv_turret_panels_back and fix.srv_turret_radar_back
 
 // ---- Part 1: when, and which way ------------------------------------------------------------------------------------------------------------------------------
 // THE SCORPION ONLY. Status.json reports the turret view bit in the Scarab (SRV type testbuggy) as well, and the Scarab's turret view was fine before this change, so both parts
@@ -107,7 +112,10 @@ inline constexpr Signature kSignatures[kSignatureCount] = {
     {"B932058F", 2, {{"__USER_RADAR_LOCALKEY_COLOUR", 0, 3}, {"SV_Position", 0, 4}}, false},
     {"5559BD94", 3, {{"__USER_VERTEX_M_LIGHTINGPOSITION", 0, 3}, {"__USER_VERTEX_M_TEXCOORD", 0, 2}, {"SV_Position", 0, 4}}, true},
 };
-// The floats of one vertex as the geometry shader writes it (the instrument's stream-output record), and where the clip position, the last element, starts in it.
+// The floats of one vertex as the vertex shader writes it (the signature), and where the clip position, the last element, starts in it. The geometry shader writes the signature and then one
+// more element, `pre` (kPreSemantic, 4 floats): the clip position as the game made it, before the move, so the instrument can tell the vertices the shader moved.
+inline constexpr uint32_t kPreFloats = 4;
+inline constexpr const char* kPreSemantic = "TURRETPRE";
 constexpr uint32_t sigFloats(uint32_t sig) {
     uint32_t n = 0;
     for (uint32_t i = 0; i < kSignatures[sig].count; ++i) n += kSignatures[sig].el[i].comps;
@@ -125,12 +133,13 @@ struct Family {
     uint64_t vs, ps;
     const char* name;      // how the log names the family: the vertex shader's first eight hex digits, and for a second pixel shader of the same vertex shader the pixel shader's too
     uint32_t sig;          // the index into kSignatures of the family's vertex shader's output
-    uint32_t strideBytes;  // the stream-output record (sigFloats * 4)
+    uint32_t strideBytes;  // the stream-output record ((sigFloats + kPreFloats) * 4)
     uint32_t posFloat;     // where SV_POSITION starts in it, in floats
+    uint32_t preFloat;     // where `pre` (the clip position before the move) starts in it
     Group group;           // the push-back key that governs the family
 };
 constexpr Family makeFamily(uint64_t vs, uint64_t ps, const char* name, uint32_t sig, Group group) {
-    return Family{vs, ps, name, sig, sigFloats(sig) * 4, sigPosFloat(sig), group};
+    return Family{vs, ps, name, sig, (sigFloats(sig) + kPreFloats) * 4, sigPosFloat(sig), sigFloats(sig), group};
 }
 inline constexpr uint32_t kFamilyCount = 9;
 inline constexpr Family kFamilies[kFamilyCount] = {
@@ -147,18 +156,18 @@ inline constexpr Family kFamilies[kFamilyCount] = {
 // The geometry stage's limits the signatures must stay inside: 32 input registers, and 1024 scalars of output a draw (maxvertexcount 3 times a vertex's floats).
 constexpr bool signaturesFit() {
     for (uint32_t s = 0; s < kSignatureCount; ++s) {
-        if (kSignatures[s].count < 2 || kSignatures[s].count > kMaxSigElements || kSignatures[s].count > 32) return false;
+        if (kSignatures[s].count < 2 || kSignatures[s].count + 1 > kMaxSigElements || kSignatures[s].count + 1 > 32) return false;
         const SigElement& last = kSignatures[s].el[kSignatures[s].count - 1];
-        if (last.comps != 4 || last.name[0] != 'S' || last.name[1] != 'V' || 3 * sigFloats(s) > 1024) return false;
+        if (last.comps != 4 || last.name[0] != 'S' || last.name[1] != 'V' || 3 * (sigFloats(s) + kPreFloats) > 1024) return false;
     }
     for (uint32_t f = 0; f < kFamilyCount; ++f)
         if (kFamilies[f].sig >= kSignatureCount) return false;
     return true;
 }
 static_assert(signaturesFit(), "every signature ends in a 4-component SV_Position and fits the geometry stage's limits; every family names a signature");
-static_assert(kFamilies[0].strideBytes == 44 && kFamilies[0].posFloat == 7 && kFamilies[1].strideBytes == 40 && kFamilies[1].posFloat == 6 && kFamilies[8].strideBytes == 36 &&
-                  kFamilies[8].posFloat == 5,
-              "the stream-output records: (4 + 3 + 4), (4 + 2 + 4) and the target hologram sphere's (3 + 2 + 4) floats");
+static_assert(kFamilies[0].strideBytes == 60 && kFamilies[0].posFloat == 7 && kFamilies[0].preFloat == 11 && kFamilies[1].strideBytes == 56 && kFamilies[1].posFloat == 6 &&
+                  kFamilies[1].preFloat == 10 && kFamilies[8].strideBytes == 52 && kFamilies[8].posFloat == 5 && kFamilies[8].preFloat == 9,
+              "the stream-output records: (4 + 3 + 4 + 4), (4 + 2 + 4 + 4) and the target hologram sphere's (3 + 2 + 4 + 4) floats");
 static_assert(kFamilies[0].group == Group::kPanels && kFamilies[1].group == Group::kPanels && kFamilies[2].group == Group::kRadar && kFamilies[8].group == Group::kRadar,
               "the two hologram families are the panels, every other family is the radar");
 // The family of a draw's shader pair, or -1: both halves of the pair must match.
@@ -177,66 +186,269 @@ inline bool isFamilyVs(uint64_t vs) {
 // winding the rasterizer would have used). D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST is 4 and TRIANGLESTRIP 5; everything else is refused, counted (Refuse::kTopology).
 constexpr bool topologyCarried(int d3d11Topology) { return d3d11Topology == 4 || d3d11Topology == 5; }
 
-// THE PULL (fix.srv_turret_hud_gap): vertices at a view depth between wMin = gap + kWindowNearM and wMax = kWindowFarM move `gap` metres nearer. The near layer and anything far
-// (the reticle's sprite, 500 m) never do: both lie outside the band, and the rule is per vertex.
+// THE MOVE. A vertex is moved in 3D, not only in clip x. The geometry shader reconstructs the vertex's eye-space position P from its clip position and the eye's projection tangents (the
+// ones the game projects with, the eye jitter included), translates it forward by T (fix.srv_turret_hud_forward, for EVERY vertex of every family), and then moves it along its ray from
+// a FIXED ANCHOR A (the head's seated position when the turret view came on, taken again on a recentre and when a camera key changes; the eye's view of it is A_eye), judged on the
+// distance of the translated vertex from A:
+//     P1 = P + T;   V = P1 - A;   d = |V|;   if (dMin < d < dMax)   Q = A + V (d - gap) / d   else   Q = P1;   reproject Q (only if Q.z > kNearZM, else the vertex stays as it was)
+// gap < 0 is the push-back (deeper), gap > 0 the pull (nearer). The result keeps the NDC z of the vertex (z' = (z / w) w'), so the game's own depth values stand. From the anchor the
+// moved vertex is seen in the direction it was (a push keeps the panel's size on screen) and from anywhere else it is a real panel at the new distance: leaning toward it makes it
+// larger and moves it by the parallax of its new depth, not the old one's.
+// THE PULL (fix.srv_turret_hud_gap): vertices whose distance from the anchor lies between dMin = gap + kWindowNearM and dMax = kWindowFarM move `gap` metres nearer.
 inline constexpr float kWindowNearM = 0.10f;
 inline constexpr float kWindowFarM = 4.0f;
-// THE PUSH (fix.srv_turret_panels_back, fix.srv_turret_radar_back): vertices at a view depth between kPushNearM and kPushSplitM move `back` metres DEEPER (a negative gap). The
-// radar lies at 0.11 m and more, so 2 cm keeps the window open to the nearest thing the families draw while a vertex at or behind the eye plane (w <= 0) is never touched; 1 m splits
-// the weapon panels (0.27 to 0.70 m) from the larger panels (1.3 m and deeper), which stay.
+// THE PUSH (fix.srv_turret_panels_back, fix.srv_turret_radar_back): vertices whose distance from the anchor lies between kPushNearM and kPushSplitM move `back` metres DEEPER (a negative
+// gap). 2 cm keeps a vertex on the anchor itself (no ray) out; 1 m splits the weapon panels and the radar (0.1 to 0.7 m from the head) from the larger panels (1.3 m and deeper).
 inline constexpr float kPushNearM = 0.02f;
 inline constexpr float kPushSplitM = 1.0f;
+inline constexpr float kNearZM = 0.01f;       // a moved vertex must end up at least this far in front of the eye, else it is left as the game made it
+inline constexpr float kPlaneEpsM = 1.0e-6f;  // a vertex on the eye plane (clip w about 0) has no ray to follow: left alone
+inline constexpr float kAnchorLimitM = 2.0f;  // the constants accept an anchor, a translation and a gap up to this far (the keys' 200 cm, 150 cm)
 
-// The geometry shader's constant buffer (GS slot 0, which the game never binds): {s, gap, wMin, wMax}, one register.
+// The geometry shader's constant buffer (GS slot 0, which the game never binds): four registers.
+//   [0] gap, dMin, dMax, (pad)       the move: metres nearer (negative: deeper), and the window of anchor distances it applies to
+//   [1] l, r, dn, up                 the eye's projection tangents as the game projects (left and down negative; the jitter shift is added)
+//   [2] ax, ay, az, (pad)            the anchor in the eye's space: X right, Y up, Z forward (= clip w)
+//   [3] tx, ty, tz, (pad)            the translation (HUD forward) in the same axes
 struct TurretParams {
-    float s = 0.0f, gap = 0.0f, wMin = 0.0f, wMax = 0.0f;
+    float gap = 0.0f, dMin = 0.0f, dMax = 0.0f, pad0 = 0.0f;
+    float l = 0.0f, r = 0.0f, dn = 0.0f, up = 0.0f;
+    float ax = 0.0f, ay = 0.0f, az = 0.0f, pad1 = 0.0f;
+    float tx = 0.0f, ty = 0.0f, tz = 0.0f, pad2 = 0.0f;
     bool operator==(const TurretParams& o) const { return std::memcmp(this, &o, sizeof(TurretParams)) == 0; }
 };
-static_assert(sizeof(TurretParams) == 16, "the turret shader's cbuffer is one 16-byte register");
+static_assert(sizeof(TurretParams) == 64, "the turret shader's cbuffer is four 16-byte registers");
 
-inline TurretParams paramsFor(float s, float gapM) { return TurretParams{s, gapM, gapM + kWindowNearM, kWindowFarM}; }
-// The push: a negative gap. A vertex nearer than 1 m moves backM metres deeper, x += -s backM / (w + backM). The shader computes w - gap = w + backM, positive over the whole window.
-inline TurretParams pushParamsFor(float s, float backM) { return TurretParams{s, -backM, kPushNearM, kPushSplitM}; }
+// One eye's side of the constants for a frame: its tangents (jitter included), the anchor and the HUD-forward translation, both in the eye's space (X right, Y up, Z forward).
+struct EyeFrame {
+    float l = 0.0f, r = 0.0f, dn = 0.0f, up = 0.0f;
+    float a[3] = {0.0f, 0.0f, 0.0f};
+    float t[3] = {0.0f, 0.0f, 0.0f};
+};
 
-// Which constants a group's draws run with, from its push key, the gap key and the eye's s: the push when it is above 0, else the pull when the gap is above 0, else none (false:
-// the draw goes through as the game made it). The keys are centimetres; each is held to its own range.
-inline bool paramsForGroup(float s, int pushCm, int gapCm, TurretParams& out) {
+inline TurretParams makeParams(const EyeFrame& e, float gapM, float dMin, float dMax) {
+    TurretParams p;
+    p.gap = gapM;
+    p.dMin = dMin;
+    p.dMax = dMax;
+    p.l = e.l;
+    p.r = e.r;
+    p.dn = e.dn;
+    p.up = e.up;
+    p.ax = e.a[0];
+    p.ay = e.a[1];
+    p.az = e.a[2];
+    p.tx = e.t[0];
+    p.ty = e.t[1];
+    p.tz = e.t[2];
+    return p;
+}
+inline TurretParams paramsFor(const EyeFrame& e, float gapM) { return makeParams(e, gapM, gapM + kWindowNearM, kWindowFarM); }
+// The push: a negative gap. A vertex within 1 m of the anchor moves backM metres deeper along its ray from it.
+inline TurretParams pushParamsFor(const EyeFrame& e, float backM) { return makeParams(e, -backM, kPushNearM, kPushSplitM); }
+// The translation alone: no radial move (gap 0), every vertex moves by T.
+inline TurretParams translateParamsFor(const EyeFrame& e) { return makeParams(e, 0.0f, kPushNearM, kPushSplitM); }
+
+// Which constants a group's draws run with, from its push key, the gap key and the HUD-forward key (centimetres): the push when above 0, else the pull when the gap is above 0, else the
+// translation alone when the HUD-forward key is above 0 (the eye frame's T carries it), else none (false: the draw goes through as the game made it). The translation is in every case.
+inline bool paramsForGroup(const EyeFrame& e, int pushCm, int gapCm, int forwardCm, TurretParams& out) {
     if (pushCm > 0) {
-        out = pushParamsFor(s, static_cast<float>(pushCm > kPushMaxCm ? kPushMaxCm : pushCm) / 100.0f);
+        out = pushParamsFor(e, static_cast<float>(pushCm > kPushMaxCm ? kPushMaxCm : pushCm) / 100.0f);
         return true;
     }
     if (gapCm > 0) {
-        out = paramsFor(s, static_cast<float>(gapCm > kGapMaxCm ? kGapMaxCm : gapCm) / 100.0f);
+        out = paramsFor(e, static_cast<float>(gapCm > kGapMaxCm ? kGapMaxCm : gapCm) / 100.0f);
+        return true;
+    }
+    if (forwardCm > 0) {
+        out = translateParamsFor(e);
         return true;
     }
     return false;
 }
 inline int pushCmOf(Group g, int panelsCm, int radarCm) { return g == Group::kPanels ? panelsCm : radarCm; }
 
-// What one vertex of the quad does, on the CPU (the shader's rule, written again for the rig and for reading): the clip x added, and the clip w it is read at.
-//   moving a point `gap` metres nearer along its ray from the HEAD CENTRE keeps the cyclopean direction; an eye hx metres off the centre then sees it at
-//   ndc x + P00 hx gap / (w (w - gap)), and with w kept (the rasterizer divides by it) that is clip x + P00 hx gap / (w - gap) = + s gap / (w - gap), s = P00 hx.
-//   Exact for a fixed eye separation; y, z, w and the interpolants are untouched. A NEGATIVE gap is the same point moved deeper: for a push of d metres the shift is -s d / (w + d).
-inline float clipXShift(const TurretParams& p, float w) {
-    return (w > p.wMin && w < p.wMax) ? p.s * p.gap / (w - p.gap) : 0.0f;
+// The constants a shader may be given (the binding's validity test, written here so the rig can run it): all finite; |gap| <= 2 m; a window above the gap and above 0 (dMax > dMin > max(gap, 0)),
+// so the divisor d - gap is positive; r > l and up > dn; the anchor and the translation within 2 m; and a move that does something (a gap or a translation).
+inline bool paramsUsable(const TurretParams& p) {
+    const float all[] = {p.gap, p.dMin, p.dMax, p.l, p.r, p.dn, p.up, p.ax, p.ay, p.az, p.tx, p.ty, p.tz};
+    for (float f : all)
+        if (!std::isfinite(f)) return false;
+    if (!(std::fabs(p.gap) <= kAnchorLimitM)) return false;
+    if (!(p.dMin > p.gap) || !(p.dMin > 0.0f) || !(p.dMax > p.dMin)) return false;
+    if (!(p.r > p.l) || !(p.up > p.dn)) return false;
+    const double a2 = double(p.ax) * p.ax + double(p.ay) * p.ay + double(p.az) * p.az, t2 = double(p.tx) * p.tx + double(p.ty) * p.ty + double(p.tz) * p.tz;
+    if (!(a2 < double(kAnchorLimitM) * kAnchorLimitM) || !(t2 <= double(kAnchorLimitM) * kAnchorLimitM)) return false;
+    return p.gap != 0.0f || t2 > 0.0;
 }
 
-// P00 of an eye's projection as Elite renders it, from the tangents {left, right, down, up} (temporal pass order: left and down negative): the NDC span 2 over the
-// tangent span. 0 when the tangents are not a frustum.
+// The move on the CPU: the shader's rule written again for the rig and for the instrument (T is float or double). `in` is the vertex's clip position {x, y, z, w}; `out` receives the clip
+// position after the move (the same as `in` when the vertex is left alone); the return is whether it moved. before and after (when given) are the anchor distance of the vertex as the
+// game made it and of the moved one.
+template <class T>
+inline bool anchoredMove(const TurretParams& p, const T in[4], T out[4], T* before = nullptr, T* after = nullptr) {
+    for (int i = 0; i < 4; ++i) out[i] = in[i];
+    const T w = in[3];
+    if (!(std::fabs(w) >= T(kPlaneEpsM))) return false;
+    const T l = p.l, r = p.r, dn = p.dn, up = p.up;
+    const T tx = l + (in[0] / w + T(1)) * (r - l) / T(2), ty = dn + (in[1] / w + T(1)) * (up - dn) / T(2);
+    const T P[3] = {w * tx, w * ty, w};
+    const T P1[3] = {P[0] + T(p.tx), P[1] + T(p.ty), P[2] + T(p.tz)};
+    const T V[3] = {P1[0] - T(p.ax), P1[1] - T(p.ay), P1[2] - T(p.az)};
+    const T d = std::sqrt(V[0] * V[0] + V[1] * V[1] + V[2] * V[2]);
+    const bool inWindow = d > T(p.dMin) && d < T(p.dMax);
+    const bool translated = p.tx != 0.0f || p.ty != 0.0f || p.tz != 0.0f;
+    if (!translated && !inWindow) return false;
+    T Q[3] = {P1[0], P1[1], P1[2]};
+    if (inWindow) {
+        const T k = (d - T(p.gap)) / d;
+        Q[0] = T(p.ax) + V[0] * k;
+        Q[1] = T(p.ay) + V[1] * k;
+        Q[2] = T(p.az) + V[2] * k;
+    }
+    if (!(Q[2] > T(kNearZM))) return false;
+    const T w2 = Q[2];
+    out[0] = ((Q[0] / w2 - l) * T(2) / (r - l) - T(1)) * w2;
+    out[1] = ((Q[1] / w2 - dn) * T(2) / (up - dn) - T(1)) * w2;
+    out[2] = (in[2] / w) * w2;
+    out[3] = w2;
+    if (before) *before = std::sqrt((P[0] - T(p.ax)) * (P[0] - T(p.ax)) + (P[1] - T(p.ay)) * (P[1] - T(p.ay)) + (P[2] - T(p.az)) * (P[2] - T(p.az)));
+    if (after) *after = std::sqrt((Q[0] - T(p.ax)) * (Q[0] - T(p.ax)) + (Q[1] - T(p.ay)) * (Q[1] - T(p.ay)) + (Q[2] - T(p.az)) * (Q[2] - T(p.az)));
+    return true;
+}
+
+// The anchor distance of a vertex from its clip position (the eye-space position is linear in the clip position: X = x (r - l) / 2 + w (r + l) / 2, likewise Y, and Z = w).
+inline double anchorDistanceOfClip(const TurretParams& p, const float c[4]) {
+    const double w = c[3];
+    const double X = c[0] * (double(p.r) - p.l) / 2.0 + w * (double(p.r) + p.l) / 2.0, Y = c[1] * (double(p.up) - p.dn) / 2.0 + w * (double(p.up) + p.dn) / 2.0;
+    const double dx = X - p.ax, dy = Y - p.ay, dz = w - p.az;
+    return std::sqrt(dx * dx + dy * dy + dz * dz);
+}
+
+// ---- the anchor ---------------------------------------------------------------------------------------------------------------------------------------------------------
+// The fixed point in the seated frame the move is made about: the head's position when the turret view came on. It is taken again (and the module says so in the log, once each) when
+// the turret view comes on, when fix.srv_turret_camera_back or fix.srv_turret_hud_forward changes, and when the head jumps more than kRecentreJumpM between two frames (a recentre).
+// The camera keys take a moment to reach the pose (the runtime applies the alignment at its next poll), so after the view comes on or a key changes the anchor FOLLOWS the head for
+// kAnchorSettleFrames frames (the move then behaves like the old per-eye shift) and is latched at the end of them; a recentre latches at once.
+enum class AnchorReason : uint8_t { kNone = 0, kViewOn, kCameraBack, kHudForward, kRecentre };
+inline const char* anchorReasonName(AnchorReason r) {
+    switch (r) {
+        case AnchorReason::kViewOn: return "view on";
+        case AnchorReason::kCameraBack: return "camera back changed";
+        case AnchorReason::kHudForward: return "HUD forward changed";
+        case AnchorReason::kRecentre: return "recentre";
+        default: return "none";
+    }
+}
+inline constexpr double kRecentreJumpM = 0.20;
+inline constexpr uint32_t kAnchorSettleFrames = 20;
+class AnchorTracker {
+    bool active_ = false, valid_ = false, prevValid_ = false;
+    int backKey_ = 0, forwardKey_ = 0;
+    AnchorReason pending_ = AnchorReason::kNone;
+    uint32_t settle_ = 0;
+    double a_[3] = {0.0, 0.0, 0.0}, prev_[3] = {0.0, 0.0, 0.0};
+
+public:
+    bool valid() const { return valid_; }
+    const double* anchor() const { return a_; }
+    bool settling() const { return pending_ != AnchorReason::kNone; }
+    void reset() { *this = AnchorTracker(); }
+    // One call a frame while the pass is wanted, with the head's seated position and the two camera keys. Returns the reason when the anchor was latched THIS frame, else kNone.
+    AnchorReason step(const double head[3], bool on, int backCm, int forwardCm) {
+        if (!on) {
+            reset();
+            return AnchorReason::kNone;
+        }
+        for (int i = 0; i < 3; ++i)
+            if (!std::isfinite(head[i])) return AnchorReason::kNone;
+        if (!active_) {
+            active_ = true;
+            pending_ = AnchorReason::kViewOn;
+            settle_ = kAnchorSettleFrames;
+        } else {
+            if (backCm != backKey_) {
+                pending_ = AnchorReason::kCameraBack;
+                settle_ = kAnchorSettleFrames;
+            }
+            if (forwardCm != forwardKey_) {
+                pending_ = AnchorReason::kHudForward;
+                settle_ = kAnchorSettleFrames;
+            }
+        }
+        backKey_ = backCm;
+        forwardKey_ = forwardCm;
+        AnchorReason latched = AnchorReason::kNone;
+        const double dx = head[0] - prev_[0], dy = head[1] - prev_[1], dz = head[2] - prev_[2];
+        if (prevValid_ && std::sqrt(dx * dx + dy * dy + dz * dz) > kRecentreJumpM) {
+            for (int i = 0; i < 3; ++i) a_[i] = head[i];
+            valid_ = true;
+            pending_ = AnchorReason::kNone;
+            latched = AnchorReason::kRecentre;
+        } else if (pending_ != AnchorReason::kNone) {
+            for (int i = 0; i < 3; ++i) a_[i] = head[i];
+            valid_ = true;
+            if (settle_ > 0 && --settle_ == 0) {
+                latched = pending_;
+                pending_ = AnchorReason::kNone;
+            }
+        }
+        for (int i = 0; i < 3; ++i) prev_[i] = head[i];
+        prevValid_ = true;
+        return latched;
+    }
+};
+
+// ---- the eye's frame from the host's pose ------------------------------------------------------------------------------------------------------------------------------
+// head and eyeToHead are the host's 3x4 matrices, row-major (m[i * 4 + j], the translation in m[3], m[7], m[11]), in the OpenVR seated space the game is given (x right, y up, z
+// BACK; forward is -z), the eye's own frame hanging off the head's (native_temporal.cpp nativeTemporalHeadPose). The eye's position and rotation are E = head * eyeToHead. The anchor in the
+// eye's frame is v = R_e^T (A - E), turned into the shader's axes (x, y, -z) so that Z is the forward distance (clip w). The HUD-forward translation is (0, 0, -F) in the seated frame
+// (forward), turned the same way. tangents are {left, right, down, up} plus the eye jitter's tangent shift (the game projects with those). False when anything is not finite or the
+// tangents are not a frustum.
+inline bool eyeFrameFrom(const float head[12], const float eyeToHead[12], const double anchor[3], double forwardM, const float tangents[4], EyeFrame& out) {
+    for (int i = 0; i < 12; ++i)
+        if (!std::isfinite(head[i]) || !std::isfinite(eyeToHead[i])) return false;
+    for (int i = 0; i < 4; ++i)
+        if (!std::isfinite(tangents[i])) return false;
+    if (!(tangents[1] > tangents[0]) || !(tangents[3] > tangents[2]) || !std::isfinite(forwardM)) return false;
+    double R[3][3], E[3];
+    for (int i = 0; i < 3; ++i) {
+        for (int j = 0; j < 3; ++j) {
+            R[i][j] = 0.0;
+            for (int k = 0; k < 3; ++k) R[i][j] += double(head[i * 4 + k]) * eyeToHead[k * 4 + j];
+        }
+        E[i] = head[i * 4 + 3];
+        for (int k = 0; k < 3; ++k) E[i] += double(head[i * 4 + k]) * eyeToHead[k * 4 + 3];
+    }
+    double v[3], tv[3];
+    for (int j = 0; j < 3; ++j) {
+        v[j] = 0.0;
+        for (int i = 0; i < 3; ++i) v[j] += R[i][j] * (anchor[i] - E[i]);
+        tv[j] = R[2][j] * (-forwardM);   // R^T (0, 0, -F)
+    }
+    out.l = tangents[0];
+    out.r = tangents[1];
+    out.dn = tangents[2];
+    out.up = tangents[3];
+    out.a[0] = static_cast<float>(v[0]);
+    out.a[1] = static_cast<float>(v[1]);
+    out.a[2] = static_cast<float>(-v[2]);
+    out.t[0] = static_cast<float>(tv[0]);
+    out.t[1] = static_cast<float>(tv[1]);
+    out.t[2] = static_cast<float>(-tv[2]);
+    return std::isfinite(out.a[0]) && std::isfinite(out.a[1]) && std::isfinite(out.a[2]) && std::isfinite(out.t[0]) && std::isfinite(out.t[1]) && std::isfinite(out.t[2]);
+}
+
+// P00 of an eye's projection as Elite renders it, from the tangents {left, right, down, up}: the NDC span 2 over the tangent span. 0 when the tangents are not a frustum (the log prints it).
 inline float p00OfTangents(const float tan[4]) {
     if (!tan) return 0.0f;
     const float span = tan[1] - tan[0];
     if (!std::isfinite(span) || !(span > 1.0e-4f) || !(span < 1.0e4f)) return 0.0f;
     return 2.0f / span;
 }
-
-// hx: the head centre's place in the eye's frame, +ipd/2 for the LEFT eye (index 0) and -ipd/2 for the right: the left eye sees an object that moves nearer along
-// the cyclopean ray shift to the right in its own image (towards the nose), the right eye to the left.
-inline float eyeHx(int eye, float ipdM) { return eye == 0 ? 0.5f * ipdM : -0.5f * ipdM; }
-
-// The eye separation Elite renders with (the located one times the world scale factor, common/world_scale.h): a human range with room for every world scale, or "not known".
-inline bool ipdUsable(float ipdM) { return std::isfinite(ipdM) && ipdM > 0.02f && ipdM < 0.20f; }
 inline bool p00Usable(float p00) { return std::isfinite(p00) && p00 > 0.05f && p00 < 20.0f; }
+// The eye separation Elite renders with, from the two eyeToHead origins (the located one times the world scale factor, common/world_scale.h), for the log: a human range, or "not known".
+inline bool ipdUsable(float ipdM) { return std::isfinite(ipdM) && ipdM > 0.02f && ipdM < 0.20f; }
 
 // ---- the draw decision's reasons, counted and named --------------------------------------------------------------------------------------------------------------------
 enum class Refuse : uint8_t { kNoEye = 0, kGameGs, kTopology, kNotReady, kNoGeometry, kCount };
@@ -253,28 +465,31 @@ inline const char* refuseName(Refuse r) {
 
 // ---- the GPU instrument (srv_turret.cpp): what a sampled draw's geometry shader wrote ----------------------------------------------------------------------------------
 // Once a second per eye and family one matched draw is issued through a stream-output twin of the shader (the same bytecode, the same constants, still rasterized) with a
-// pipeline-statistics query around it. The records the twin streamed out are the vertex as the shader wrote it (Family::strideBytes: every signature element in order, the
-// clip position, AFTER the shift, at float offset Family::posFloat). This summarizes them: how many vertices lie in the window (the ones the shader moves), the view depth range
-// they have, where they landed in NDC, and the shift the shader's rule gives them. With a push a flight reads the weapon panels' and the radar's draws (w 0.1 to 0.7 m) with
-// in_window above 0 and the larger panels' (1.3 m and deeper) with in_window 0; with the pull it is the other way round.
+// pipeline-statistics query around it. The records the twin streamed out are the vertex as the shader wrote it (Family::strideBytes: every signature element in order, the clip position,
+// AFTER the move, at float offset Family::posFloat) and, last, the clip position as the game made it (the shader's own `pre` output, at Family::preFloat). This summarizes them: how many
+// vertices the shader moved (post differs from pre), the anchor distance range of those before and after, the view depth range of all of them after, and where they landed in NDC.
+// With a push the weapon panels' and the radar's draws read moved vertices (distance before 0.1 to 0.7 m, after that plus the push) and the larger panels' (1.3 m and deeper) read
+// none; with only the HUD-forward key every vertex reads as moved.
 inline constexpr uint32_t kCaptureBufferBytes = 65536;
 inline constexpr uint32_t captureMaxVertices(uint32_t strideBytes) { return strideBytes ? kCaptureBufferBytes / strideBytes : 0; }
 struct CaptureSummary {
-    uint32_t vertices = 0, inWindow = 0;
-    float wMin = 0.0f, wMax = 0.0f;           // clip w over all vertices
-    float ndcXMin = 0.0f, ndcXMax = 0.0f;     // clip x / w over the vertices with w > 0, after the shift
+    uint32_t vertices = 0, inWindow = 0;      // inWindow: the vertices the shader moved
+    float wMin = 0.0f, wMax = 0.0f;           // clip w over all vertices, after the move
+    float ndcXMin = 0.0f, ndcXMax = 0.0f;     // clip x / w over the vertices with w > 0, after the move
     float ndcYMin = 0.0f, ndcYMax = 0.0f;
-    float shiftMin = 0.0f, shiftMax = 0.0f;   // the shader's rule over the in-window vertices (0 and 0 when none)
+    float beforeMin = 0.0f, beforeMax = 0.0f; // anchor distance of the moved vertices as the game made them (0 and 0 when none moved)
+    float afterMin = 0.0f, afterMax = 0.0f;   // ... and after the move
 };
-inline CaptureSummary summarizeCapture(const float* records, uint32_t vertices, uint32_t strideFloats, uint32_t posFloat, const TurretParams& p) {
+inline CaptureSummary summarizeCapture(const float* records, uint32_t vertices, uint32_t strideFloats, uint32_t posFloat, uint32_t preFloat, const TurretParams& p) {
     CaptureSummary s;
-    if (!records || strideFloats < posFloat + 4) return s;
+    if (!records || strideFloats < posFloat + 4 || strideFloats < preFloat + 4) return s;
     if (vertices > captureMaxVertices(strideFloats * 4)) vertices = captureMaxVertices(strideFloats * 4);
-    bool haveW = false, haveNdc = false, haveShift = false;
+    bool haveW = false, haveNdc = false, haveDist = false;
     for (uint32_t i = 0; i < vertices; ++i) {
-        const float* r = records + static_cast<size_t>(strideFloats) * i + posFloat;   // x, y, z, w
+        const float* r = records + static_cast<size_t>(strideFloats) * i + posFloat;   // x, y, z, w after the move
+        const float* g = records + static_cast<size_t>(strideFloats) * i + preFloat;   // ... as the game made it
         const float x = r[0], y = r[1], w = r[3];
-        if (!std::isfinite(w) || !std::isfinite(x) || !std::isfinite(y)) continue;
+        if (!std::isfinite(w) || !std::isfinite(x) || !std::isfinite(y) || !std::isfinite(r[2]) || !std::isfinite(g[0]) || !std::isfinite(g[1]) || !std::isfinite(g[2]) || !std::isfinite(g[3])) continue;
         ++s.vertices;
         if (!haveW || w < s.wMin) s.wMin = w;
         if (!haveW || w > s.wMax) s.wMax = w;
@@ -287,12 +502,14 @@ inline CaptureSummary summarizeCapture(const float* records, uint32_t vertices, 
             if (!haveNdc || ny > s.ndcYMax) s.ndcYMax = ny;
             haveNdc = true;
         }
-        if (w > p.wMin && w < p.wMax) {
+        if (std::memcmp(r, g, 4 * sizeof(float)) != 0) {
             ++s.inWindow;
-            const float shift = clipXShift(p, w);
-            if (!haveShift || shift < s.shiftMin) s.shiftMin = shift;
-            if (!haveShift || shift > s.shiftMax) s.shiftMax = shift;
-            haveShift = true;
+            const float b = static_cast<float>(anchorDistanceOfClip(p, g)), a = static_cast<float>(anchorDistanceOfClip(p, r));
+            if (!haveDist || b < s.beforeMin) s.beforeMin = b;
+            if (!haveDist || b > s.beforeMax) s.beforeMax = b;
+            if (!haveDist || a < s.afterMin) s.afterMin = a;
+            if (!haveDist || a > s.afterMax) s.afterMax = a;
+            haveDist = true;
         }
     }
     return s;

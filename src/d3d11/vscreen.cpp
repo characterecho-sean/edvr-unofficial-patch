@@ -4176,11 +4176,11 @@ void uiLayerSecondIssues(ID3D11DeviceContext* self, char kind, UINT count, UINT 
     }
 }
 
-// Issue 140 (TEMPORARY, fix.srv_turret_panels_back, fix.srv_turret_radar_back and fix.srv_turret_hud_gap; srv_turret.h): in the Scorpion's turret view the HUD is drawn by nine shader
+// Issue 140 (TEMPORARY, fix.srv_turret_hud_forward, fix.srv_turret_panels_back, fix.srv_turret_radar_back and fix.srv_turret_hud_gap; srv_turret.h): in the Scorpion's turret view the HUD is drawn by nine shader
 // pairs (srv_turret_math.h kFamilies): the two hologram families (vs 1989E6D3B405FDE0 with ps EAB8A1C95A13FFBE, and vs 2CECEC3065EF0D4A with ps A4D03619D631B186) that draw the weapon
 // panels, from records 0.27 to 0.70 m out, and the larger panels from records 1.3 m and deeper, and the radar-named billboard families and the target hologram sphere, which draw the
-// radar from 0.11 to 0.44 m. Their draws are issued through the signature's private geometry shader, which pushes a vertex nearer than 1 m deeper by its group's key (or, with no
-// push, brings a vertex in the deep band forward by the gap) and leaves every other vertex alone. (The targeting sprite, vs E508648660A352B2 with ps 63ABD86359B57D01, is the reticle's three layers at about 500 m, not the
+// radar from 0.11 to 0.44 m. Their draws are issued through the signature's private geometry shader, which moves every vertex forward by the HUD-forward key and then, in 3D about a fixed
+// anchor, pushes a vertex within 1 m of it deeper by its group's key (or, with no push, brings a vertex in the deep band forward by the gap). (The targeting sprite, vs E508648660A352B2 with ps 63ABD86359B57D01, is the reticle's three layers at about 500 m, not the
 // panels: an earlier build targeted it and moved nothing. Known gap: with "Disable GUI effects" OFF the holo panel family is vs 81216C77F90DEDD6, ps A2965EC2931A39C8, whose output
 // has SV_Position at o5; there is no bytecode for it in the dumps and it is not covered.) Asked per draw while the pass is wanted (the gate's term, srvTurretHudWantsDraws): a
 // compare of the vertex shader's hash with the families' rejects every other draw, the pixel shader's is read only on a vertex shader of a family. The draw's eye is the UI layer's

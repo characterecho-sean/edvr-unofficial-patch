@@ -360,6 +360,12 @@ void run(){
          "...and eye 1's own");
    check(!edvr::nativeTemporalEyeGeometry(2,&es,fr,sh),"the eye geometry refuses an eye that does not exist");
    check(edvr::nativeTemporalEyeGeometry(0,nullptr,nullptr,nullptr),"a caller may ask for any subset of the answer");}
+  // The SRV turret HUD's anchored move needs the head and the eyes (vr_camera_census.h): the host's 3x4 row-major matrices, translation in [3], [7], [11], for the frame being drawn.
+  {uint64_t hs=0;float hd[12]{},eh[2][12]{};
+   check(edvr::nativeTemporalHeadPose(&hs,hd,eh)&&hs==2&&closeFloat(hd[3],.1f)&&closeFloat(hd[0],1.f)&&closeFloat(hd[5],1.f)&&closeFloat(hd[10],1.f)&&closeFloat(eh[0][3],-.032f)&&
+         closeFloat(eh[1][3],.032f)&&closeFloat(eh[0][0],1.f)&&closeFloat(eh[1][10],1.f),
+         "the head pose is the head and eyeToHead matrices the host gave (3x4 row-major, translation in [3], [7], [11]), for the frame being drawn");
+   check(edvr::nativeTemporalHeadPose(nullptr,nullptr,nullptr),"a caller may ask for any subset of the head pose");}
   check(uiLayerNotes>=3&&uiLayerNoteSeq==2&&uiLayerNoteEye==0&&uiLayerNoteOut==source.Get(),"each treated eye is noted to the UI layer with the pass's output");
   check(uiLayerSubmits>=3&&uiLayerSubmitted[0]==source.Get()&&uiLayerSubmitted[1]==source.Get(),"the game's submitted texture is noted per eye for the UI layer's eye check");
   check(std::fabs(c.jx)>.01f||std::fabs(c.jy)>.01f,"known-size jitter engaged");
@@ -376,6 +382,7 @@ void run(){
   check(t.invalidate(t.context)==S_OK,"CPU invalidation");check(treat(t,5,0,source.Get())==E_INVALIDARG,"invalidated frame cannot treat");check(t.beginFrame(t.context,&f,&p)==E_INVALIDARG,"invalidated sequence cannot reopen");
   {uint32_t rw=0,rh=0;float u=0,dn=0;check(!edvr::nativeTemporalRecommended(&rw,&rh)&&!edvr::nativeTemporalVerticalTangents(&u,&dn)&&!edvr::nativeTemporalAsked(&rw,&rh)&&!edvr::nativeTemporalTrueVerticalTangents(&u,&dn),"no recommendation, frustum, ask or true frustum once the channel is invalidated");}
   {uint64_t es=0;float fr[4]{},sh[2]{};check(!edvr::nativeTemporalEyeGeometry(0,&es,fr,sh),"no eye geometry once the channel is invalidated");}
+  {uint64_t hs=0;float hd[12]{},eh[2][12]{};check(!edvr::nativeTemporalHeadPose(&hs,hd,eh),"no head pose once the channel is invalidated");}
   f=frame(11,6);p=begin(t,f);auto larger=d.texture(640,480);check(treat(t,6,0,larger.Get())==S_OK,"resize treatment");c=calls.back();
   check((c.flags&1)&&!c.eyes,"resize reset clears the previous eye geometry");check(closeFloat(c.jx,-p.tangentShift[0][0]*640/1.9f),"resize converts jitter to actual pixels");
   Device other;auto foreign=other.texture();check(treat(t,6,1,foreign.Get())==E_INVALIDARG,"wrong device rejected");

@@ -8,7 +8,8 @@
 // geometry stage, and the game's draw is issued through the hooked context exactly as it was.
 //
 // WHAT IS SWAPPED. (1) The geometry shader: the game binds none for these draws, and the binding declines (kGameHasGs) if it ever does -- a game geometry shader is
-// not ours to replace. (2) The geometry stage's constant buffer slot 0, which the game never binds either: the four numbers of srv_turret_math.h's TurretParams (a pull's, or a push's with a negative gap).
+// not ours to replace. (2) The geometry stage's constant buffer slot 0, which the game never binds either: srv_turret_math.h's TurretParams, four registers (the move, the eye's tangents, the anchor and the
+// translation in the eye's space).
 #pragma once
 
 #include "../common/guard.h"
@@ -24,14 +25,15 @@ namespace edvr {
 namespace srv_turret {
 
 inline constexpr uint32_t kGsSlot = 0;   // the geometry stage's constant buffer slot the shader reads (the game binds none)
-inline constexpr float kGapLimitM = 2.0f;   // the constants accept a gap (a pull) or its negative (a push) up to this many metres: the keys' 200 cm
 
 // The stream-output declaration of an output signature, for the GPU instrument's twin of its shader (srv_turret.cpp makeTwins, and the rig's twin): one entry for each element, in the
-// signature's order, into stream 0 and output slot 0, so a vertex is written out as sigFloats floats with the clip position last. Returns the entries; `out` holds kMaxSigElements.
+// signature's order, into stream 0 and output slot 0, then the shader's own `pre` element (the clip position before the move), so a vertex is written out as sigFloats + 4 floats with
+// the moved clip position at Family::posFloat and the game's at Family::preFloat. Returns the entries; `out` holds kMaxSigElements.
 inline UINT soDeclaration(uint32_t sig, D3D11_SO_DECLARATION_ENTRY (&out)[kMaxSigElements]) {
     const Signature& s = kSignatures[sig];
     for (uint32_t i = 0; i < s.count; ++i) out[i] = D3D11_SO_DECLARATION_ENTRY{0, s.el[i].name, s.el[i].index, 0, static_cast<BYTE>(s.el[i].comps), 0};
-    return s.count;
+    out[s.count] = D3D11_SO_DECLARATION_ENTRY{0, kPreSemantic, 0, 0, static_cast<BYTE>(kPreFloats), 0};
+    return s.count + 1;
 }
 
 template <class T>
@@ -41,7 +43,7 @@ inline void release(T*& value) {
     if (p) guarded("srv.turret.release", [&] { p->Release(); });
 }
 
-// One 16-byte buffer per eye, made on first use and rewritten (UpdateSubresource) only when the four numbers change, never per draw. A failed create or write is not
+// One 64-byte buffer per eye, made on first use and rewritten (UpdateSubresource) only when a number changes, never per draw. A failed create or write is not
 // retried on that device: get() answers null and the caller declines.
 class Constants {
     ID3D11Device* device_ = nullptr;  // identity only: the buffer holds its device alive, so the address cannot be reused
@@ -56,11 +58,9 @@ public:
     ~Constants() { reset(); }
 
     ID3D11Buffer* get(ID3D11DeviceContext* ctx, const TurretParams& p) {
-        // A pull is a positive gap and a push a negative one; 0 moves nothing (the module does not bind then). The divisor w - gap must stay positive over the window, so the window
-        // starts above the gap, and a gap beyond 2 m is no key's range.
-        if (!ctx || !std::isfinite(p.s) || !std::isfinite(p.gap) || !std::isfinite(p.wMin) || !std::isfinite(p.wMax) || !(p.gap != 0.0f) || !(std::fabs(p.gap) <= kGapLimitM) ||
-            !(p.wMin > p.gap) || !(p.wMax > p.wMin))
-            return nullptr;
+        // paramsUsable (srv_turret_math.h): finite; a pull is a positive gap and a push a negative one, up to 2 m; the window of anchor distances starts above the gap and above 0 (the
+        // divisor d - gap stays positive); a frustum; an anchor and a translation within 2 m; and a move that does something (a gap, or a translation with a gap of 0).
+        if (!ctx || !paramsUsable(p)) return nullptr;
         ID3D11Device* d = nullptr;
         if (!guarded("srv.turret.constants.device", [&] { ctx->GetDevice(&d); }) || !d) {
             release(d);

@@ -62,6 +62,9 @@ void vrCameraCensusEyeDraw(ID3D11DeviceContext* ctx, uint32_t eye);
 // {left, right, down, up} tangents the host was given and the tangent shift the eye jitter moved it by. The render thread,
 // outside treat(); false when there is no frame to describe.
 bool nativeTemporalEyeGeometry(uint32_t eye, uint64_t* sequence, float frustum[4], float shift[2]);
+// What the host gave this frame as the head and the two eyes (native_temporal.cpp: 3x4 row-major, translation in m[3], m[7], m[11], the OpenVR seated space, eyeToHead relative to the head),
+// for the SRV turret HUD's anchored move (srv_turret.h). The same discipline as nativeTemporalEyeGeometry.
+bool nativeTemporalHeadPose(uint64_t* sequence, float head[12], float eyeToHead[2][12]);
 // The distance between the two eye origins of the eye pair the host gave this frame -- the pair Elite is told, the located one moved by the world scale -- in
 // metres (srv_turret.h: the turret HUD's per-eye shift is made from it and the frustum above). The same discipline as nativeTemporalEyeGeometry.
 bool nativeTemporalEyeSeparation(float* metres);

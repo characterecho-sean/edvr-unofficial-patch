@@ -668,6 +668,24 @@ bool nativeTemporalEyeGeometry(uint32_t eye, uint64_t* sequence, float frustum[4
   if (shift) { shift[0] = s.shift[eye][0]; shift[1] = s.shift[eye][1]; }
   return true;
 }
+// The head and eye matrices of the frame being drawn, as the host gave them (the f->head and f->eyeToHead of EdvrNativeTemporalFrame): the SRV turret HUD's move is made about a point fixed in
+// the seated frame, so it needs where the head and each eye are. LAYOUT: 3x4 row-major, m[i * 4 + j] (row i, column j), the rotation in the left 3x3 and the translation in m[3], m[7], m[11].
+// SPACE: the OpenVR seated space the game is given (x right, y up, z BACK; forward is -z), the eye matrix relative to the head (so an eye's position in the seated space is
+// head * eyeToHead, the same composition eyeWorld above does). `head` is the pose Elite renders with (the runtime's render pose, the eye alignment applied: native_runtime_host.h passes
+// render.pose.mDeviceToAbsoluteTracking). `eyeToHead` is the pair Elite is told with the world scale applied (geometry_snapshot.h: the located eyes' origins moved about their midpoint),
+// so the distance between the two translations is the separation nativeTemporalEyeSeparation answers. (For a canted headset the game itself is handed a conjugated copy,
+// canted_display.h gameHandedness; this is the unconjugated one the snapshot holds, which is the true eye orientation.) The same discipline as nativeTemporalEyeGeometry: the render or
+// frame thread, outside treat(), under the channel's mutex; false before the first beginFrame or once the channel closes.
+bool nativeTemporalHeadPose(uint64_t* sequence, float head[12], float eyeToHead[2][12]) {
+  if (t_insideTreat) return false;
+  std::lock_guard<std::mutex> lock(mutex);
+  if (!current || !current->active || !current->begun) return false;
+  const State& s = *current;
+  if (sequence) *sequence = s.sequence;
+  if (head) std::memcpy(head, s.head, sizeof(s.head));
+  if (eyeToHead) std::memcpy(eyeToHead, s.eyes, sizeof(s.eyes));
+  return true;
+}
 // The distance between the two eye origins the host gave this frame (the pair Elite is told, world scale included), metres; the same rules as the geometry above.
 bool nativeTemporalEyeSeparation(float* metres) {
   if (t_insideTreat) return false;

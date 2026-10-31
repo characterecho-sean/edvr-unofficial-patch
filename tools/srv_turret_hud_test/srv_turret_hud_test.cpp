@@ -8,33 +8,35 @@
 // pixel shaders read (some also SV_POSITION.xy). The reticle's sprite (vs E508648660A352B2), at about 500 m, is not one of them, nor are the 5334-index shells (at gigametres) or the
 // glare sprite (a constant clip w of 1).
 //
-//   THE SHIFT (the pull, the first build's forward move: a gap of 0.96 m is what its default was). A quad at view depth w = 1.4 (a deep panel) with a gap of 0.96 m and s = +0.0259
-//   (Sean's Pimax: P00 0.940, Elite's eye separation 55.1 mm, the left eye) lands shifted by the formula's amount, measured in pixels from the texture-coordinate gradient
-//   (sub-pixel): clip x + s gap / (w - gap). The right eye shifts the other way.
-//   THE PUSH (the shipped move: a NEGATIVE gap, window 0.02 to 1.0 m, 1.10 m by default). A quad at w = 0.4 (a weapon panel) lands where the same quad truly moved 1.10 m DEEPER along its
-//   ray from the head centre is seen from that eye, shifted by -s d / (w + d) in clip x, its size unchanged; a vertex at 1.0 m or more (the larger panels, 1.4 m) and one at 0.02 m or
-//   less is unchanged; the left eye's image shifts the other way from the pull's.
-//   THE GEOMETRY. The same shift is what a quad truly moved `gap` metres nearer along its ray from the head centre looks like to each eye, rendered with the plain shader
-//   and Elite's off-centre projection: the two images agree to a hundredth of a pixel, the quad's size unchanged (the cyclopean direction is kept).
-//   THE WINDOW. A vertex at w = 500 (the reticle), 50, 5 or 4 m, or nearer than gap + 0.10 (1.0 m, and the near layer's 0.42 m), is unchanged by the pull; a window with nothing in it,
-//   or s = 0, is a copy; a mixed draw moves only the quad in range. The texture coordinates are untouched (an integer-pixel translation reproduces the plain image shifted). All of it for every signature.
-//   THE STRIPS. A quad as a triangle strip (some of the HUD's strokes are drawn as one) is the plain strip bit for bit through a window with nothing in it, under every culling mode (the
-//   winding is kept), and lands where the same quad as a list lands, for the pull and for the push.
+//   THE MOVE (srv_turret_math.h anchoredMove, which the shader is held to): the shader reconstructs a vertex's eye-space position from its clip position and the eye's tangents, translates
+//   it by T (the HUD-forward key, every vertex), moves it along its ray from a fixed anchor A by `gap` metres (negative: deeper, the push-back) when its distance from A lies in (dMin, dMax),
+//   and projects it back. Every case reads what the shader did to every vertex through the stream-output twin (the production bytecode with a declaration for its record and its own `pre`
+//   output, the clip position as the game made it) and compares it with the CPU reference in doubles, and with the geometry itself: the eye-space point rebuilt from the clip position by the
+//   camera's own projection, its distance from the anchor, its direction from it. (a) The anchor at the eye: a vertex at distance r keeps its NDC x, y and z and its w becomes w (r + d) / r.
+//   (b) The anchor 10 cm to the side and 5 cm up, with vertices 15 cm from it. (c) Asymmetric tangents (the Pimax set, a vertical pair that is not symmetric): the move, and a gap of 10 um
+//   round-trips every vertex. (d) A vertex at anchor distance 1.4 m, 2.8 m, 500 m, just past 1 m or inside 2 cm is untouched bit for bit. (e) A pull. (g) The translation alone: every vertex
+//   moves by T, one 0.2 m behind the eye comes in front of it, one that stays behind is left. (h) The translation, then the push. The pictures (I1 to I4) compare the rasterized quad with the
+//   plain one (anchor at the eye) and with the quad truly moved in 3D. THE STRIPS: a quad as a triangle strip is the plain strip bit for bit through a window with nothing in it and no
+//   translation, under every culling mode (the winding is kept), and lands where the same quad as a list lands once it is moved.
+//   THE ANCHOR (srv_turret_math.h AnchorTracker, no device): followed for the settle after the view comes on or a camera key changes, then latched; a recentre (the head jumping more than
+//   20 cm in a frame) latches at once; the view going off clears it. THE EYE'S FRAME: the host's 3x4 row-major matrices turned into the anchor and the translation in the eye's space,
+//   checked on a level head, a yawed head and a canted eye.
 //   THE LINKAGE. Each shader links against its stand-in under the debug layer with no message, its input is the vertex shader's output element for element and its output the same
-//   again, the pixel shader's inputs are a subset of it; a vertex shader without the texture coordinates is reported by the layer (the control that it really checks).
+//   again plus TURRETPRE, the pixel shader's inputs are a subset of it; a vertex shader without the texture coordinates is reported by the layer (the control that it really checks).
 //   THE BINDING (the production class, on a real context): in and out for one draw with the game's geometry stage and constant slot exactly as they were and no reference leaked or
 //   kept; a geometry shader of the game's own refused with nothing touched; the restore that fails twice, the settle at the boundary and the state the game rebound; the
-//   geometry stage empty after the issue. THE CONSTANTS: made once per device, rewritten only when a number changes, refused when not finite, not a window, a gap of 0 or beyond 2 m;
-//   a push (negative gap) is accepted. THE GROUPS: every family has one, the two hologram families are the panels, the other seven the radar; a group's push is used when above 0, else
-//   the gap, else the group is off; B7790CBF is no family.
-//   THE INSTRUMENT: the pipeline statistics (gs 0 for a plain draw, 2 for a quad through a shader), the stream-output twin of each signature (its record is the vertex whole, from
-//   the signature table) and the capture summary: under the pull a quad at 1.4 m reads in_window 6, the near layer's 0.42 m and the reticle's 500 m read in_window 0 with the picture
-//   unchanged; under the push a quad at 0.4 m reads in_window 6 with a negative shift and one at 1.4 m reads in_window 0.
+//   geometry stage empty after the issue. THE CONSTANTS: four registers, made once per device, rewritten only when a number changes, refused when not finite, not a window, a gap of 0 with
+//   no translation, a frustum that is none, or an anchor, translation or gap beyond 2 m; a push, a pull and a translation alone are accepted. THE GROUPS: every family has one, the two
+//   hologram families are the panels, the other seven the radar; a group's push is used when above 0, else the gap, else the translation alone, else the group is off; B7790CBF is no family.
+//   THE INSTRUMENT: the pipeline statistics (gs 0 for a plain draw, 2 for a quad through a shader), the stream-output twin of each signature (its record is the vertex whole, from the
+//   signature table, then `pre`) and the capture summary: a quad 0.46 to 0.52 m from the anchor reads six vertices moved, the distance before and 1.2 m more after; one 1.5 m out and one at
+//   500 m read in_window 0 with the picture unchanged; with the translation alone every vertex reads as moved.
 //   THE SCORPION LATCH (journal_vehicle_latch.h, no device): LoadGame's Ship and LaunchSRV's SRVType set it for combat_multicrew_srv_01 in any case and clear it for anything
 //   else; the main menu's music, DockSRV, SRVDestroyed and Shutdown clear it; a localised name, a missing, escaped, shorter, longer or too distant field is unknown, which is
 //   false; a session fed in two pieces cut at every byte and byte by byte gives the same changes; a new file resets it; the state has no room for a line.
-//   THE MUTANTS, each run through the same cases (the pull's and the push's) in every signature's text and each caught: no window, the sign, the divisor, the wrong axis, both ends of the window, and a
-//   pass-through that reverses the winding (caught by the strip cases); and the binding whose restore does nothing. --wiring scans the sources that connect all this to the game,
+//   THE MUTANTS, each run through the same move cases in every signature's text and each caught: no window, either end of it, the sign of the anchor, of the gap and of the translation, y
+//   read down, the tangents mixed, the translation dropped, the move about the origin, w or the NDC z not kept, no guard against ending behind the eye, a `pre` that is the moved position,
+//   and a pass-through that reverses the winding (caught by the strip cases); and the binding whose restore does nothing. --wiring scans the sources that connect all this to the game,
 //   with controls that edit a copy and must trip the pin.
 #include <windows.h>
 #include <d3d11.h>
@@ -43,6 +45,7 @@
 #include <wrl/client.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -77,8 +80,8 @@ void breadcrumb(const char*) {}
 static unsigned g_checks = 0;
 // The pull's gap the cases below run with: the first build's default (96 cm), a deep panel's 1.39 m less the near layer's 0.42 m, less a centimetre. The shipped default is 0 now.
 static const float kPullGapM = 0.96f;
-// The push's: the shipped default of both push keys (110 cm), and a weapon panel's depth (0.27 to 0.70 m measured).
-static const float kPushBackM = st::kPushDefaultCm / 100.0f, kPanelW = 0.40f;
+// The push's: the shipped default of the panels' key (120 cm: the arcs just behind the location panel).
+static const float kPushBackM = st::kPanelsDefaultCm / 100.0f;
 static void check(bool ok, const char* why) {
     ++g_checks;
     if (!ok) throw std::runtime_error(why);
@@ -93,11 +96,13 @@ static void ck(HRESULT h, const char* what = "D3D call") {
 struct Fails {
     unsigned n = 0;
     std::string first;
+    std::vector<std::string> kinds;   // every distinct message that failed (up to 24), so one run says all of what is wrong
     void expect(bool ok, const char* what) {
         ++g_checks;
         if (ok) return;
         if (!n) first = what;
         ++n;
+        if (kinds.size() < 24 && std::find(kinds.begin(), kinds.end(), what) == kinds.end()) kinds.push_back(what);
     }
 };
 static std::string readText(const char* path) {
@@ -157,7 +162,7 @@ static std::string standInVs(uint32_t sig) {
            "    o.pos.x = dot(cb0[4], r0);\n"
            "    o.pos.y = dot(cb0[5], r0);\n"
            "    o.pos.w = dot(cb0[7], r0);\n"
-           "    o.pos.z = abs(o.pos.w);\n"
+           "    o.pos.z = abs(o.pos.w) * 0.5 + 0.05 * abs(i.p.x);\n"
            "    return o;\n"
            "}\n";
 }
@@ -383,35 +388,7 @@ static Frame render(const std::vector<Vtx>& verts, const Cam& cam, ID3D11Geometr
     return t.read();
 }
 
-// ---------------------------------------------------------------- the quad's place in pixels, from the texture-coordinate gradient (sub-pixel)
-struct Edges {
-    bool ok = false;
-    double xl = 0, xr = 0;   // where u = 0 and u = 1 lie on the row, in pixels
-};
-static Edges edgesOnRow(const Frame& f, UINT y) {
-    // linear regression of u (the red channel) on the pixel centre over the covered pixels of the row
-    double n = 0, sx = 0, su = 0, sxx = 0, sxu = 0;
-    for (UINT x = 0; x < f.w; ++x) {
-        const float* p = f.at(x, y);
-        if (p[3] < 0.5f) continue;
-        const double xc = x + 0.5, u = p[0];
-        ++n;
-        sx += xc;
-        su += u;
-        sxx += xc * xc;
-        sxu += xc * u;
-    }
-    Edges e;
-    if (n < 8) return e;
-    const double den = n * sxx - sx * sx;
-    if (std::fabs(den) < 1e-9) return e;
-    const double m = (n * sxu - sx * su) / den, b = (su - m * sx) / n;
-    if (!(m > 1e-6)) return e;
-    e.ok = true;
-    e.xl = -b / m;
-    e.xr = (1.0 - b) / m;
-    return e;
-}
+// ---------------------------------------------------------------- comparing frames
 static double maxDiff(const Frame& a, const Frame& b) {
     double worst = 0;
     for (size_t i = 0; i < a.rgba.size() && i < b.rgba.size(); ++i) worst = std::max(worst, std::fabs(double(a.rgba[i]) - b.rgba[i]));
@@ -421,6 +398,41 @@ static double covered(const Frame& f) {
     double n = 0;
     for (size_t i = 3; i < f.rgba.size(); i += 4) n += f.rgba[i] > 0.5f ? 1 : 0;
     return n;
+}
+
+// ---------------------------------------------------------------- the camera as the shader's frame
+// The stand-in vertex shader projects with Cam: clip x = P00 X + offX w, clip y = P11 Y + offY w, so NDC = P * tangent + off, and the tangents the shader is given are the ones that map
+// them to -1 and +1. An EyeFrame of a camera, with an anchor and a translation given in the eye's space (X right, Y up, Z forward).
+static Cam camOfTangents(float l, float r, float dn, float up) {
+    Cam c;
+    c.p00 = 2.0f / (r - l);
+    c.offX = -(r + l) / (r - l);
+    c.p11 = 2.0f / (up - dn);
+    c.offY = -(up + dn) / (up - dn);
+    return c;
+}
+static st::EyeFrame frameOfCam(const Cam& c, const float a[3] = nullptr, const float tr[3] = nullptr) {
+    st::EyeFrame f;
+    f.l = (-1.0f - c.offX) / c.p00;
+    f.r = (1.0f - c.offX) / c.p00;
+    f.dn = (-1.0f - c.offY) / c.p11;
+    f.up = (1.0f - c.offY) / c.p11;
+    for (int i = 0; i < 3; ++i) {
+        f.a[i] = a ? a[i] : 0.0f;
+        f.t[i] = tr ? tr[i] : 0.0f;
+    }
+    return f;
+}
+// The number of pixels of two frames that differ by more than `threshold` in any channel (all of them when the frames are not the same size).
+static size_t diffCount(const Frame& a, const Frame& b, double threshold) {
+    if (a.rgba.size() != b.rgba.size() || a.rgba.empty()) return a.rgba.size() / 4 + 1;
+    size_t differing = 0;
+    for (size_t i = 0; i < a.rgba.size(); i += 4) {
+        bool d = false;
+        for (int c = 0; c < 4; ++c) d = d || std::fabs(double(a.rgba[i + c]) - b.rgba[i + c]) > threshold;
+        differing += d ? 1 : 0;
+    }
+    return differing;
 }
 
 // ---------------------------------------------------------------- the maths (no device)
@@ -439,51 +451,157 @@ static void mathCases() {
     check(std::fabs(st::p00OfTangents(asym) - 2.0f / 1.9f) < 1e-5f, "...for an off-centre frustum too");
     const float flat[4] = {0.5f, 0.5f, -1, 1}, nan[4] = {NAN, 1, -1, 1};
     check(st::p00OfTangents(flat) == 0.0f && st::p00OfTangents(nan) == 0.0f && st::p00OfTangents(nullptr) == 0.0f, "tangents that are no frustum give no P00");
-    const float ipd = 0.0551f;
-    check(st::eyeHx(0, ipd) > 0.0f && st::eyeHx(1, ipd) < 0.0f && st::eyeHx(0, ipd) == -st::eyeHx(1, ipd) && std::fabs(st::eyeHx(0, ipd) - 0.02755f) < 1e-6f,
-          "hx is +ipd/2 for the left eye (index 0) and -ipd/2 for the right");
-    const float sL = 0.94f * st::eyeHx(0, ipd), sR = 0.94f * st::eyeHx(1, ipd);
-    check(std::fabs(sL - 0.0259f) < 0.0001f && std::fabs(sR + 0.0259f) < 0.0001f, "s = P00 hx: +0.0259 for the left eye, -0.0259 for the right (P00 0.940, ipd 55.1 mm)");
-    const st::TurretParams p = st::paramsFor(sL, 1.02f);
-    check(p.s == sL && p.gap == 1.02f && std::fabs(p.wMin - 1.12f) < 1e-6f && p.wMax == 4.0f, "the window is gap + 0.10 to 4.0");
-    check(std::fabs(st::clipXShift(p, 1.5f) - sL * 1.02f / 0.48f) < 1e-6f && std::fabs(st::clipXShift(p, 1.5f) - 0.05504f) < 0.0001f, "w = 1.5: s gap / (w - gap)");
-    check(st::clipXShift(p, 50.0f) == 0.0f && st::clipXShift(p, 5.0f) == 0.0f && st::clipXShift(p, 4.0f) == 0.0f && st::clipXShift(p, 1.0f) == 0.0f && st::clipXShift(p, 1.12f) == 0.0f,
-          "w = 50, 5 and 4 (the far end), 1.0 and 1.12 (the near end, exactly) are outside the window");
-    check(st::clipXShift(st::paramsFor(sL, 0.0f), 1.5f) == 0.0f, "with the gap at 0 the shift is exactly 0");
-    {   // the push: a negative gap, window 0.02 to 1.0 m
-        const st::TurretParams q = st::pushParamsFor(sL, 1.10f);
-        check(q.s == sL && q.gap == -1.10f && q.wMin == st::kPushNearM && q.wMax == st::kPushSplitM && st::kPushNearM == 0.02f && st::kPushSplitM == 1.0f && q.wMin > q.gap && q.wMax > q.wMin,
-              "the push of 1.10 m is the constants {s, -1.10, 0.02, 1.0}: a window above the (negative) gap");
-        // the analytic shift of moving a point from w to w + d along its ray from the head centre, its angular size unchanged: an eye hx off the centre sees x at
-        // ndc = P00 (X + hx) / w, and after the move (X k + hx) / (w k), k = (w + d) / w; the clip x it needs with w kept is the difference times w. The pull is the same with d < 0.
-        bool analytic = true, outside = true;
-        for (const float d : {0.05f, 0.5f, 1.10f, 2.0f})
-            for (const float w : {0.03f, 0.11f, 0.27f, 0.4f, 0.7f, 0.99f}) {
-                const st::TurretParams pp = st::pushParamsFor(sL, d);
-                const double expect = double(0.94f * st::eyeHx(0, ipd)) * (1.0 / (double(w) + d) - 1.0 / double(w)) * double(w);   // P00 hx (1 / (w + d) - 1 / w) w
-                analytic = analytic && std::fabs(double(st::clipXShift(pp, w)) - expect) < 2e-6 && st::clipXShift(pp, w) < 0.0f &&
-                           std::fabs(double(st::clipXShift(pp, w)) + double(sL) * d / (w + d)) < 2e-6;
-                for (const float deeper : {1.0f, 1.3f, 1.4f, 2.8f, 4.0f, 500.0f}) outside = outside && st::clipXShift(pp, deeper) == 0.0f;
-                for (const float nearer : {0.02f, 0.01f, 0.0f, -1.0f}) outside = outside && st::clipXShift(pp, nearer) == 0.0f;
-            }
-        check(analytic, "the push's clip x shift is -s d / (w + d): the analytic shift of moving a point from w to w + d along its head-centre ray at unchanged angular size (the pull's, sign flipped)");
-        check(outside, "...and 0 outside (0.02, 1.0): at 0.02 and below (and at or behind the eye plane), at 1.0, the larger panels' 1.3 to 2.8 m, 4 m and the reticle's 500 m");
-        check(std::fabs(st::clipXShift(q, 0.4f) + sL * 1.10f / 1.5f) < 1e-6f && std::fabs(st::clipXShift(q, 0.4f) + 0.019f) < 0.0001f && st::clipXShift(st::pushParamsFor(-sL, 1.10f), 0.4f) > 0.0f,
-              "w = 0.4 with the default push: -s d / (w + d) = -0.0190 for the left eye, +0.0190 for the right (the opposite of the pull's)");
-        check(st::clipXShift(st::pushParamsFor(0.0f, 1.10f), 0.4f) == 0.0f, "with s = 0 (the cyclopean eye) the push moves nothing");
-        // the push the pass would bind is one the constants accept (the module never binds a gap of 0)
-        check(std::isfinite(q.gap) && q.gap != 0.0f && std::fabs(q.gap) <= st::kGapLimitM && q.wMin > q.gap && q.wMax > q.wMin && std::fabs(st::pushParamsFor(sL, st::kPushMaxCm / 100.0f).gap) <= st::kGapLimitM,
-              "pushParamsFor passes the binding's validity test (finite, gap != 0, |gap| <= 2 m, wMin above the gap, wMax above wMin), at the key's top too");
+    check(sizeof(st::TurretParams) == 64 && st::kPreFloats == 4 && !std::strcmp(st::kPreSemantic, "TURRETPRE"),
+          "the constants are four registers (64 bytes); the shader's own `pre` output is four floats named TURRETPRE");
+    {   // the eye's frame from the host's pose: the anchor and the HUD-forward translation in the shader's axes (X right, Y up, Z forward)
+        const float tn[4] = {-1.0f, 1.2f, -0.9f, 1.1f};
+        const float level[12] = {1, 0, 0, 0.1f, 0, 1, 0, 0.2f, 0, 0, 1, 0.3f}, leftEye[12] = {1, 0, 0, -0.03f, 0, 1, 0, 0, 0, 0, 1, 0.01f};
+        const double atHead[3] = {0.1, 0.2, 0.3};
+        st::EyeFrame e;
+        check(st::eyeFrameFrom(level, leftEye, atHead, 0.7, tn, e), "an eye frame is built from a pose");
+        check(std::fabs(e.a[0] - 0.03f) < 1e-6f && std::fabs(e.a[1]) < 1e-6f && std::fabs(e.a[2] - 0.01f) < 1e-6f && std::fabs(e.t[0]) < 1e-6f && std::fabs(e.t[1]) < 1e-6f &&
+                  std::fabs(e.t[2] - 0.7f) < 1e-6f && e.l == -1.0f && e.r == 1.2f && e.dn == -0.9f && e.up == 1.1f,
+              "level head, anchor at the head: the left eye (3 cm left of the head and 1 cm back of it) sees the anchor 3 cm to its right and 1 cm AHEAD, and HUD forward 0.7 m is +0.7 along Z");
+        const double c = std::cos(0.5235987755982988), s = std::sin(0.5235987755982988);   // the head yawed 30 degrees about +y
+        const float yawed[12] = {float(c), 0, float(s), 0.1f, 0, 1, 0, 0.2f, float(-s), 0, float(c), 0.3f};
+        const double anchor2[3] = {0.1 + 0.1, 0.2, 0.3 - 0.2};   // the head's place + (0.1, 0, -0.2) in the seated axes
+        st::EyeFrame y;
+        check(st::eyeFrameFrom(yawed, leftEye, anchor2, 0.7, tn, y), "an eye frame is built from a yawed pose");
+        check(std::fabs(y.a[0] - (0.1 * c + 0.2 * s + 0.03)) < 1e-6 && std::fabs(y.a[1]) < 1e-6 && std::fabs(y.a[2] - (0.2 * c - 0.1 * s + 0.01)) < 1e-6 &&
+                  std::fabs(y.t[0] - 0.7 * s) < 1e-6 && std::fabs(y.t[1]) < 1e-6 && std::fabs(y.t[2] - 0.7 * c) < 1e-6,
+              "the head yawed 30 degrees: the anchor and the seated -z forward are turned into the eye's axes (R^T (A - E), then z negated)");
+        // a canted eye (yawed 5 degrees and pitched 3 against the head) keeps lengths: |A_eye| is the distance from the eye to the anchor, |T| the forward distance
+        const double cy = std::cos(0.0872664626), sy = std::sin(0.0872664626), cp = std::cos(0.05235987756), sp = std::sin(0.05235987756);
+        const float canted[12] = {float(cy), float(sy * sp), float(sy * cp), 0.032f, 0, float(cp), float(-sp), -0.004f, float(-sy), float(cy * sp), float(cy * cp), 0.012f};
+        st::EyeFrame k;
+        check(st::eyeFrameFrom(yawed, canted, anchor2, 0.7, tn, k), "an eye frame is built from a canted eye");
+        const double ex = 0.1 + c * 0.032 + s * 0.012, ey = 0.2 - 0.004, ez = 0.3 + (-s) * 0.032 + c * 0.012;   // E = head + R_h t_e
+        const double dx = anchor2[0] - ex, dy = anchor2[1] - ey, dz = anchor2[2] - ez;
+        check(std::fabs(std::sqrt(double(k.a[0]) * k.a[0] + double(k.a[1]) * k.a[1] + double(k.a[2]) * k.a[2]) - std::sqrt(dx * dx + dy * dy + dz * dz)) < 1e-6 &&
+                  std::fabs(std::sqrt(double(k.t[0]) * k.t[0] + double(k.t[1]) * k.t[1] + double(k.t[2]) * k.t[2]) - 0.7) < 1e-6,
+              "...and a canted eye's frame keeps the distance to the anchor and the length of the forward translation");
+        float bad[12];
+        std::memcpy(bad, level, sizeof(bad));
+        bad[3] = NAN;
+        const float noFrustum[4] = {1.0f, 1.0f, -1.0f, 1.0f};
+        check(!st::eyeFrameFrom(bad, leftEye, atHead, 0.7, tn, e) && !st::eyeFrameFrom(level, leftEye, atHead, 0.7, noFrustum, e), "a pose that is not finite, or tangents that are no frustum, give no frame");
     }
-    {   // which constants a group's draws run with: the push when above 0, else the pull when the gap is above 0, else none
+    {   // the anchor: followed for the settle, then latched; taken again on a key change, a recentre; cleared with the view
+        st::AnchorTracker tr;
+        double h[3] = {0.10, 0.20, 0.30};
+        check(tr.step(h, false, 0, 70) == st::AnchorReason::kNone && !tr.valid(), "the view off: no anchor");
+        bool quiet = true;
+        for (uint32_t i = 0; i + 1 < st::kAnchorSettleFrames; ++i) {
+            h[0] = 0.10 + 0.001 * i;
+            quiet = quiet && tr.step(h, true, 0, 70) == st::AnchorReason::kNone && tr.valid() && tr.settling() && tr.anchor()[0] == h[0];
+        }
+        check(quiet, "the view comes on: for the settle the anchor FOLLOWS the head (the pass already works, as the old per-eye shift) and nothing is said");
+        h[0] = 0.15;
+        check(tr.step(h, true, 0, 70) == st::AnchorReason::kViewOn && !tr.settling() && tr.anchor()[0] == 0.15, "...and at the end of it the anchor is latched at the head, reason 'view on'");
+        h[0] = 0.19;
+        h[2] = 0.33;
+        check(tr.step(h, true, 0, 70) == st::AnchorReason::kNone && tr.anchor()[0] == 0.15 && tr.anchor()[2] == 0.30, "a head that moves 4 or 5 cm leaves the anchor where it was");
+        h[0] = 0.15;
+        h[2] = 0.30;
+        (void)tr.step(h, true, 0, 70);
+        bool settled = true;
+        st::AnchorReason got = st::AnchorReason::kNone;
+        for (uint32_t i = 0; i < st::kAnchorSettleFrames; ++i) {
+            h[1] = 0.20 + 0.0005 * i;
+            const st::AnchorReason r = tr.step(h, true, 60, 70);   // the camera key changed
+            settled = settled && tr.valid() && (i + 1 == st::kAnchorSettleFrames ? r == st::AnchorReason::kCameraBack : r == st::AnchorReason::kNone);
+            if (r != st::AnchorReason::kNone) got = r;
+        }
+        check(settled && got == st::AnchorReason::kCameraBack && tr.anchor()[1] == h[1], "the camera key changes: the anchor follows for the settle and is latched again, reason 'camera back changed'");
+        got = st::AnchorReason::kNone;
+        for (uint32_t i = 0; i < st::kAnchorSettleFrames; ++i) {
+            const st::AnchorReason r = tr.step(h, true, 60, 40);   // the HUD-forward key changed
+            if (r != st::AnchorReason::kNone) got = r;
+        }
+        check(got == st::AnchorReason::kHudForward, "the HUD-forward key changes: latched again, reason 'HUD forward changed'");
+        h[0] += 0.15;
+        check(tr.step(h, true, 60, 40) == st::AnchorReason::kNone && tr.anchor()[0] != h[0], "a head jump of 15 cm in one frame is no recentre");
+        const double before = tr.anchor()[0];
+        h[0] += 0.25;
+        check(tr.step(h, true, 60, 40) == st::AnchorReason::kRecentre && tr.anchor()[0] == h[0] && tr.anchor()[0] != before && !tr.settling(),
+              "a head jump of 25 cm in one frame (a recentre) latches the anchor at once, reason 'recentre'");
+        double notFinite[3] = {NAN, 0, 0};
+        const double keep = tr.anchor()[0];
+        check(tr.step(notFinite, true, 60, 40) == st::AnchorReason::kNone && tr.anchor()[0] == keep, "a head that is not finite is ignored");
+        (void)tr.step(h, false, 60, 40);
+        check(!tr.valid(), "the view going off clears the anchor");
+        check(!std::strcmp(st::anchorReasonName(st::AnchorReason::kViewOn), "view on") && !std::strcmp(st::anchorReasonName(st::AnchorReason::kCameraBack), "camera back changed") &&
+                  !std::strcmp(st::anchorReasonName(st::AnchorReason::kHudForward), "HUD forward changed") && !std::strcmp(st::anchorReasonName(st::AnchorReason::kRecentre), "recentre"),
+              "the reasons the log gives");
+    }
+    {   // the move on the CPU (doubles): the properties the shader must have, before the shader is asked
+        const st::EyeFrame e0 = frameOfCam(Cam{});
+        const st::TurretParams push = st::pushParamsFor(e0, 1.2f);
+        bool ok = true;
+        const double dirs[3][3] = {{0.0, 0.0, 1.0}, {0.2, 0.1, 1.0}, {-0.3, 0.25, 1.0}};
+        for (const double r : {0.15, 0.3, 0.6, 0.95})
+            for (const auto& dir : dirs) {
+                const double n = std::sqrt(dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]);
+                const Cam cm;
+                const double X = r * dir[0] / n, Y = r * dir[1] / n, D = r * dir[2] / n;
+                const double in[4] = {cm.p00 * X + cm.offX * D, cm.p11 * Y + cm.offY * D, 0.5 * D, D};
+                double out[4], before = 0, after = 0;
+                const bool moved = st::anchoredMove<double>(push, in, out, &before, &after);
+                ok = ok && moved && std::fabs(out[0] / out[3] - in[0] / in[3]) < 1e-6 && std::fabs(out[1] / out[3] - in[1] / in[3]) < 1e-6 && std::fabs(out[3] - D * (r + 1.2) / r) < 1e-6 &&
+                     std::fabs(out[2] / out[3] - in[2] / in[3]) < 1e-9 && std::fabs(before - r) < 1e-6 && std::fabs(after - (r + 1.2)) < 1e-6;
+            }
+        check(ok, "anchor at the eye: a vertex at distance r keeps its NDC x, y and z, and its w becomes w (r + d) / r (the push keeps the size on the screen)");
+        const double distant[4] = {0.3, 0.2, 250.0, 500.0}, zeroClip[4] = {0.0, 0.0, 0.0, 0.0}, eyePlane[4] = {0.1, 0.1, 0.0, 1.0e-9};
+        double out[4];
+        check(!st::anchoredMove<double>(push, distant, out) && out[3] == 500.0 && !st::anchoredMove<double>(push, zeroClip, out) && !st::anchoredMove<double>(push, eyePlane, out),
+              "a vertex 500 m out, one at clip w 0 and one on the eye plane are left alone");
+    }
+    {   // which constants a group's draws run with: the push when above 0, else the pull when the gap is above 0, else the translation alone when the HUD-forward key is above 0, else none
+        const Cam cm;
+        const float a[3] = {0.1f, 0.05f, 0.0f}, tr[3] = {0.0f, 0.0f, 0.7f};
+        const st::EyeFrame e = frameOfCam(cm, a, tr);
         st::TurretParams out{};
-        check(st::paramsForGroup(sL, 110, 0, out) && out == st::pushParamsFor(sL, 1.10f), "a push above 0 and the gap at 0: the push");
-        check(st::paramsForGroup(sL, 110, 96, out) && out == st::pushParamsFor(sL, 1.10f), "...and with the gap above 0 too the push is used, not the pull");
-        check(st::paramsForGroup(sL, 0, 96, out) && out == st::paramsFor(sL, 0.96f), "no push and the gap above 0: the pull");
-        check(!st::paramsForGroup(sL, 0, 0, out), "no push and no gap: no constants (the draw is the game's own)");
-        check(st::paramsForGroup(sL, 999, 0, out) && out == st::pushParamsFor(sL, 2.0f) && st::paramsForGroup(sL, 0, 999, out) && out == st::paramsFor(sL, 2.0f), "a key past its range is held to 200 cm");
+        check(st::paramsForGroup(e, 120, 0, 0, out) && out == st::pushParamsFor(e, 1.2f), "a push above 0 and the rest at 0: the push");
+        check(st::paramsForGroup(e, 120, 96, 70, out) && out == st::pushParamsFor(e, 1.2f), "...and with the gap and the HUD-forward key above 0 too the push is used, not the pull");
+        check(st::paramsForGroup(e, 0, 96, 70, out) && out == st::paramsFor(e, 0.96f), "no push and the gap above 0: the pull");
+        check(st::paramsForGroup(e, 0, 0, 70, out) && out == st::translateParamsFor(e) && out.gap == 0.0f, "no push and no gap but HUD forward: the translation alone (gap 0)");
+        check(!st::paramsForGroup(e, 0, 0, 0, out), "all three at 0: no constants (the draw is the game's own)");
+        check(st::paramsForGroup(e, 999, 0, 0, out) && out == st::pushParamsFor(e, 2.0f) && st::paramsForGroup(e, 0, 999, 0, out) && out == st::paramsFor(e, 2.0f), "a key past its range is held to 200 cm");
         check(st::pushCmOf(st::Group::kPanels, 11, 22) == 11 && st::pushCmOf(st::Group::kRadar, 11, 22) == 22, "a group reads its own push key");
         check(!std::strcmp(st::groupName(st::Group::kPanels), "panels") && !std::strcmp(st::groupName(st::Group::kRadar), "radar"), "the groups are named panels and radar");
+        // the validity test the constants apply (srv_turret_math.h paramsUsable)
+        check(st::paramsUsable(st::pushParamsFor(e, 1.2f)) && st::paramsUsable(st::pushParamsFor(e, 2.0f)) && st::paramsUsable(st::paramsFor(e, 0.96f)) && st::paramsUsable(st::translateParamsFor(e)),
+              "a push (also of 2 m), a pull and a translation alone are usable");
+        const st::EyeFrame still = frameOfCam(cm);
+        st::TurretParams bad = st::pushParamsFor(e, 1.2f);
+        bool refused = !st::paramsUsable(st::translateParamsFor(still));   // gap 0 and no translation: it does nothing
+        bad = st::pushParamsFor(e, 2.5f);
+        refused = refused && !st::paramsUsable(bad);
+        bad = st::pushParamsFor(e, 1.2f);
+        bad.dMin = 0.0f;
+        refused = refused && !st::paramsUsable(bad);
+        bad = st::paramsFor(e, 0.96f);
+        bad.dMin = 0.96f;
+        refused = refused && !st::paramsUsable(bad);
+        bad = st::pushParamsFor(e, 1.2f);
+        bad.dMax = bad.dMin;
+        refused = refused && !st::paramsUsable(bad);
+        bad = st::pushParamsFor(e, 1.2f);
+        bad.r = bad.l;
+        refused = refused && !st::paramsUsable(bad);
+        bad = st::pushParamsFor(e, 1.2f);
+        bad.up = bad.dn;
+        refused = refused && !st::paramsUsable(bad);
+        bad = st::pushParamsFor(e, 1.2f);
+        bad.ax = 2.0f;
+        refused = refused && !st::paramsUsable(bad);
+        bad = st::pushParamsFor(e, 1.2f);
+        bad.tz = 2.5f;
+        refused = refused && !st::paramsUsable(bad);
+        bad = st::pushParamsFor(e, 1.2f);
+        bad.ay = NAN;
+        refused = refused && !st::paramsUsable(bad);
+        check(refused, "constants that do nothing, a gap beyond 2 m, a window starting at 0 or at the gap, an empty one, a frustum that is none, an anchor or translation 2 m away and a number that is not finite are refused");
     }
     check(st::ipdUsable(0.0551f) && st::ipdUsable(0.0632f * 1.5f) && !st::ipdUsable(0.0f) && !st::ipdUsable(NAN) && !st::ipdUsable(0.5f) && st::p00Usable(0.94f) && !st::p00Usable(0.0f) && !st::p00Usable(INFINITY),
           "the separation and P00 are used only when they are a human head and a projection");
@@ -540,11 +658,14 @@ static void mathCases() {
         check(ok, "every family has a group: 1989E6D3 and 2CECEC30 are the panels, the other seven (DF3503CD, 44DDCDEB, 9B34C331, 9611A454, B932058F and the sphere's two) the radar");
     }
     {   // the stream-output records: every family's equals its signature's
-        const uint32_t expectBytes[8] = {44, 40, 24, 52, 44, 36, 28, 36}, expectPos[8] = {7, 6, 2, 9, 7, 5, 3, 5};
+        const uint32_t expectBytes[8] = {60, 56, 40, 68, 60, 52, 44, 52}, expectPos[8] = {7, 6, 2, 9, 7, 5, 3, 5};
         bool ok = true;
-        for (uint32_t s = 0; s < 8; ++s) ok = ok && st::sigFloats(s) * 4 == expectBytes[s] && st::sigPosFloat(s) == expectPos[s] && st::sigPosFloat(s) * 4 + 16 == expectBytes[s];
-        for (uint32_t i = 0; i < 9; ++i) ok = ok && st::kFamilies[i].strideBytes == expectBytes[st::kFamilies[i].sig] && st::kFamilies[i].posFloat == expectPos[st::kFamilies[i].sig];
-        check(ok, "the stream-output records: each signature's floats in order, the clip position last (44, 40, 24, 52, 44, 36, 28 and 36 bytes), and each family's are its signature's");
+        for (uint32_t s = 0; s < 8; ++s)
+            ok = ok && (st::sigFloats(s) + st::kPreFloats) * 4 == expectBytes[s] && st::sigPosFloat(s) == expectPos[s] && st::sigPosFloat(s) * 4 + 16 + 16 == expectBytes[s];
+        for (uint32_t i = 0; i < 9; ++i)
+            ok = ok && st::kFamilies[i].strideBytes == expectBytes[st::kFamilies[i].sig] && st::kFamilies[i].posFloat == expectPos[st::kFamilies[i].sig] &&
+                 st::kFamilies[i].preFloat == st::sigFloats(st::kFamilies[i].sig);
+        check(ok, "the stream-output records: each signature's floats in order, the clip position last, then the shader's `pre` (60, 56, 40, 68, 60, 52, 44 and 52 bytes), and each family's are its signature's");
     }
     {   // the topologies: lists and strips, nothing else
         static_assert(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST == 4 && D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP == 5, "the topology constants srv_turret_math.h carries are D3D11's");
@@ -554,206 +675,319 @@ static void mathCases() {
             ok = ok && !st::topologyCarried(t);
         check(ok, "triangle lists and triangle strips are carried; points, lines, adjacency, patches and anything else are refused");
     }
-    // the measured depths: the deep panels at 1.39 m move at the default gap, the near layer at 0.41 to 0.47 m and the reticle at 500 m do not
-    const st::TurretParams d = st::paramsFor(sL, kPullGapM);
-    check(st::kGapDefaultCm == 0 && st::kPushDefaultCm == 110 && st::kPushMaxCm == 200 && st::kGapMaxCm == 200 && std::fabs(d.wMin - 1.06f) < 1e-6f && st::clipXShift(d, 1.39f) > 0.05f && st::clipXShift(d, 1.4f) > 0.0f && st::clipXShift(d, 0.42f) == 0.0f &&
-              st::clipXShift(d, 0.41f) == 0.0f && st::clipXShift(d, 0.47f) == 0.0f && st::clipXShift(d, 500.0f) == 0.0f,
-          "at a pull of 96 cm (the first build's default; the shipped default is 0, the push keys' 110): the deep band is 1.06 to 4.0 m; w = 1.39 moves, w = 0.41 to 0.47 (the near layer) and 500 m (the reticle) do not");
-    {   // the measured depths under the push: the weapon panels (0.27 to 0.70 m) and the radar (0.11 to 0.44 m) move, the larger panels (1.3 to 2.8 m) and the reticle do not
-        const st::TurretParams q = st::pushParamsFor(sL, kPushBackM);
-        bool ok = true;
-        for (const float w : {0.11f, 0.27f, 0.32f, 0.34f, 0.42f, 0.44f, 0.65f, 0.70f, 0.85f}) ok = ok && st::clipXShift(q, w) < -0.005f;
-        for (const float w : {1.3f, 1.39f, 1.41f, 1.5f, 1.7f, 2.8f, 500.0f}) ok = ok && st::clipXShift(q, w) == 0.0f;
-        check(ok, "at the default push (110 cm): the radar (0.11 to 0.44 m) and the weapon panels (0.27 to 0.70 m) move, the larger panels (1.3 to 2.8 m) and the reticle (500 m) do not");
-        check(std::fabs((0.40f + kPushBackM) - 1.50f) < 1e-5f && std::fabs((0.30f + kPushBackM) - 1.40f) < 1e-5f, "...and a panel at 0.30 to 0.40 m lands at 1.40 to 1.50 m, where the larger panels are");
-    }
-    check(std::fabs((1.39f - d.gap) - 0.43f) < 1e-5f, "...and the panel lands at 0.43 m, where the near layer is");
+    check(st::kBackDefaultCm == 0 && st::kForwardDefaultCm == 70 && st::kForwardMaxCm == 150 && st::kPanelsDefaultCm == 120 && st::kRadarDefaultCm == 0 && st::kGapDefaultCm == 0 &&
+              st::kPushMaxCm == 200 && st::kGapMaxCm == 200,
+          "the keys' defaults: camera back 0 (the stock camera), HUD forward 70, panels back 120, radar back 0, gap 0");
 }
 
-// ---------------------------------------------------------------- the geometry, run on the production shader and on each mutant
-static void geometryCases(ID3D11GeometryShader* gs, Fails& f) {
+// ---------------------------------------------------------------- the move, through the stream-output twin of the production shader and of each mutant
+// The twin is the production bytecode with a stream-output declaration (the moved record, then `pre`: the clip position as the game made it), rasterized as well, so what the shader did
+// to every vertex is read back exactly. A point is given in the eye's space (X right, Y up, d the distance forward, which is the clip w; negative behind the eye); the stand-in vertex
+// shader projects it with Cam. The CPU reference (srv_turret_math.h anchoredMove, in doubles) is the expected result of every vertex; the geometry checks beside it do not use it: they
+// rebuild the eye-space point from the clip position with the camera's own projection and test distances and directions.
+struct Pt {
+    float x, y, d;
+};
+static Vtx vtxOf(const Pt& p, float u = 0.0f, float v = 0.0f) { return Vtx{{p.x, p.y, -p.d, 1.0f}, {u, v, 0.0f, 1.0f}, {0.25f, 0.5f, 0.75f, 0.0f}}; }
+static Pt dirPt(float dx, float dy, float dz, float r) {
+    const float n = std::sqrt(dx * dx + dy * dy + dz * dz);
+    return Pt{r * dx / n, r * dy / n, r * dz / n};
+}
+// The point at distance r from `from` in the direction (dx, dy, dz).
+static Pt aroundPt(const float from[3], float dx, float dy, float dz, float r) {
+    const Pt o = dirPt(dx, dy, dz, r);
+    return Pt{from[0] + o.x, from[1] + o.y, from[2] + o.d};
+}
+// A quad (two triangles, the texture coordinate u, v) through four eye-space corners: (x0, y0), (x1, y0), (x0, y1), (x1, y1).
+static void addQuadPts(std::vector<Vtx>& v, const Pt c[4]) {
+    v.push_back(vtxOf(c[0], 0, 0));
+    v.push_back(vtxOf(c[1], 1, 0));
+    v.push_back(vtxOf(c[2], 0, 1));
+    v.push_back(vtxOf(c[1], 1, 0));
+    v.push_back(vtxOf(c[3], 1, 1));
+    v.push_back(vtxOf(c[2], 0, 1));
+}
+static void boxAt(Pt c[4], float cx, float cy, float d, float hx, float hy) {
+    c[0] = Pt{cx - hx, cy - hy, d};
+    c[1] = Pt{cx + hx, cy - hy, d};
+    c[2] = Pt{cx - hx, cy + hy, d};
+    c[3] = Pt{cx + hx, cy + hy, d};
+}
+// The rule written a third time, on eye-space points in doubles: translate by T, move along the ray from A by `gap` when the translated point's distance from A lies in (dMin, dMax).
+static Pt movedPt(const Pt& p, const float a[3], const float t[3], float gap, float dMin, float dMax) {
+    const double P1[3] = {double(p.x) + t[0], double(p.y) + t[1], double(p.d) + t[2]};
+    const double V[3] = {P1[0] - a[0], P1[1] - a[1], P1[2] - a[2]};
+    const double dist = std::sqrt(V[0] * V[0] + V[1] * V[1] + V[2] * V[2]);
+    double Q[3] = {P1[0], P1[1], P1[2]};
+    if (dist > dMin && dist < dMax)
+        for (int i = 0; i < 3; ++i) Q[i] = a[i] + V[i] * (dist - gap) / dist;
+    if (!(Q[2] > 0.01)) return p;
+    return Pt{float(Q[0]), float(Q[1]), float(Q[2])};
+}
+
+struct Captured {
+    std::vector<std::array<float, 4>> pre, post;
+};
+// The points as triangles through the twin with the stream-output target: the clip position of every vertex as the game's shader made it (pre) and as the geometry shader wrote it (post).
+static Captured captureMove(int fam, ID3D11GeometryShader* twin, const std::vector<Pt>& pts, const Cam& cam, const st::TurretParams& params) {
+    std::vector<Vtx> v;
+    for (const Pt& p : pts) v.push_back(vtxOf(p));
+    while (v.size() % 3) v.push_back(v.back());
+    Sample s;
+    DrawOpts o;
+    o.sample = &s;
+    o.soTarget = true;
+    (void)render(v, cam, twin, params, 64, 64, o);
+    check(s.so.NumPrimitivesWritten == v.size() / 3 && s.so.PrimitivesStorageNeeded == v.size() / 3, "the twin wrote one triangle for each triangle it was given");
+    const uint32_t stride = st::sigFloats(fam) + st::kPreFloats, pos = st::sigPosFloat(fam), pre = st::sigFloats(fam);
+    Captured m;
+    for (size_t i = 0; i < pts.size(); ++i) {
+        std::array<float, 4> a{}, b{};
+        for (int c = 0; c < 4; ++c) {
+            a[c] = s.records[i * stride + pre + c];
+            b[c] = s.records[i * stride + pos + c];
+        }
+        m.pre.push_back(a);
+        m.post.push_back(b);
+    }
+    return m;
+}
+static bool closeTo(double a, double b, double tol) { return std::fabs(a - b) <= tol * std::max(1.0, std::max(std::fabs(a), std::fabs(b))); }
+static void eyePos(const std::array<float, 4>& c, const Cam& cm, double p[3]) {   // the eye-space point behind a clip position, by the camera's own projection (not the shader's tangents)
+    const double w = c[3];
+    p[0] = (c[0] - double(cm.offX) * w) / cm.p00;
+    p[1] = (c[1] - double(cm.offY) * w) / cm.p11;
+    p[2] = w;
+}
+static double len3(const double v[3]) { return std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]); }
+static bool sameRay(const double a[3], const double b[3]) {   // the same direction from the anchor
+    const double cx = a[1] * b[2] - a[2] * b[1], cy = a[2] * b[0] - a[0] * b[2], cz = a[0] * b[1] - a[1] * b[0];
+    const double la = len3(a), lb = len3(b);
+    return la > 0.0 && lb > 0.0 && std::sqrt(cx * cx + cy * cy + cz * cz) / (la * lb) < 3.0e-4 && a[0] * b[0] + a[1] * b[1] + a[2] * b[2] > 0.0;
+}
+// Every vertex is what the CPU reference says: moved to its clip position (to 1e-4), or bit for bit what the game made it; and `moved` of them moved.
+static void expectReference(Fails& f, const char* what, const st::TurretParams& p, const Captured& m, int expectMoved) {
+    bool same = true;
+    int moved = 0;
+    for (size_t i = 0; i < m.pre.size(); ++i) {
+        double in[4], out[4];
+        for (int c = 0; c < 4; ++c) in[c] = m.pre[i][c];
+        const bool mv = st::anchoredMove<double>(p, in, out);
+        moved += mv ? 1 : 0;
+        if (mv)
+            for (int c = 0; c < 4; ++c) same = same && closeTo(m.post[i][c], out[c], 1.0e-4);
+        else
+            same = same && std::memcmp(m.pre[i].data(), m.post[i].data(), 16) == 0;
+    }
+    f.expect(same, what);
+    f.expect(moved == expectMoved, what);
+}
+
+static void moveCases(int fam, ID3D11GeometryShader* twin, Fails& f) {
     const Cam cam;
-    const float ipd = 0.0551f, gap = kPullGapM;   // the pull's gap (the first build's default), and a deep panel's depth
-    const float w0 = 1.4f, qx0 = -0.30f, qx1 = 0.30f, qy0 = -0.20f, qy1 = 0.20f;
-    for (int eye = 0; eye < 2; ++eye) {
-        const float hx = st::eyeHx(eye, ipd), ex = -hx;   // the eye's place against the head centre
-        const float s = cam.p00 * hx;
-        const st::TurretParams params = st::paramsFor(s, gap);
-        DrawOpts o;
-        o.eye = eye;
-        std::vector<Vtx> nearQuad, truth;
-        addQuad(nearQuad, qx0, qx1, qy0, qy1, w0, ex);
-        addQuad(truth, qx0, qx1, qy0, qy1, w0, ex, (w0 - gap) / w0);
-        const Frame plain = render(nearQuad, cam, nullptr, params);
-        const Frame moved = render(nearQuad, cam, gs, params, 256, 256, o);
-        const Frame real = render(truth, cam, nullptr, params);
-        const Edges ep = edgesOnRow(plain, 128), em = edgesOnRow(moved, 128), er = edgesOnRow(real, 128);
-        f.expect(ep.ok && em.ok && er.ok, "the quad's edges are found in all three images");
-        const double expectPx = double(st::clipXShift(params, w0)) / w0 * 128.0;   // ndc * (width / 2)
-        f.expect(std::fabs(expectPx) > 3.0 && std::fabs(expectPx) < 8.0, "the case is a shift of several pixels");
-        f.expect((eye == 0) == (em.xl > ep.xl), "the left eye's image shifts towards the right, the right eye's towards the left");
-        f.expect(std::fabs((em.xl - ep.xl) - expectPx) < 0.03 && std::fabs((em.xr - ep.xr) - expectPx) < 0.03,
-                 "a quad at w = 1.4 with the pull (96 cm) lands shifted by s gap / (w - gap) / w half-widths of the target: the formula's pixels");
-        f.expect(std::fabs((em.xr - em.xl) - (ep.xr - ep.xl)) < 0.03, "...with its size unchanged (a translation: the cyclopean direction is kept)");
-        f.expect(std::fabs(em.xl - er.xl) < 0.03 && std::fabs(em.xr - er.xr) < 0.03 && std::fabs((er.xr - er.xl) - (ep.xr - ep.xl)) < 0.03,
-                 "...and it is where the geometry truly moved `gap` nearer along its ray from the head centre is seen from that eye, with Elite's off-centre projection");
-        // the rows: y is not moved
-        const Edges emTop = edgesOnRow(moved, 120), epTop = edgesOnRow(plain, 120);
-        f.expect(emTop.ok && epTop.ok && std::fabs((emTop.xl - epTop.xl) - expectPx) < 0.03, "the shift is the same on every row (the quad is flat at one depth)");
-        f.expect(covered(moved) > 1500 && std::fabs(covered(moved) - covered(plain)) < 40, "the quad covers as many pixels as before");
-        // y, z, w and the texture coordinates are untouched: the shifted image is the plain one translated, row for row
-        double yWorst = 0;
-        for (UINT y = 0; y < 256; ++y) {
-            const bool a = plain.at(128, y)[3] > 0.5f, b = moved.at(128, y)[3] > 0.5f;
-            yWorst += a != b ? 1 : 0;
+    const float dirs[5][3] = {{0.0f, 0.0f, 1.0f}, {0.2f, 0.1f, 1.0f}, {-0.3f, 0.25f, 1.0f}, {0.5f, -0.4f, 1.0f}, {-0.45f, -0.35f, 1.0f}};
+    {   // (a) the anchor at the eye: a vertex at distance r keeps its NDC x, y and z, and its w becomes w (r + d) / r
+        const st::TurretParams p = st::pushParamsFor(frameOfCam(cam), kPushBackM);
+        std::vector<Pt> pts;
+        std::vector<float> rs;
+        for (const float r : {0.15f, 0.20f, 0.42f, 0.61f, 0.90f})
+            for (const auto& d : dirs) {
+                pts.push_back(dirPt(d[0], d[1], d[2], r));
+                rs.push_back(r);
+            }
+        const Captured m = captureMove(fam, twin, pts, cam, p);
+        expectReference(f, "(a) anchor at the eye, push 1.2 m: every vertex is the CPU reference's", p, m, int(pts.size()));
+        bool keeps = true, built = true;
+        for (size_t i = 0; i < pts.size(); ++i) {
+            const auto& a = m.pre[i];
+            const auto& b = m.post[i];
+            keeps = keeps && closeTo(b[0] / b[3], a[0] / a[3], 2e-5) && closeTo(b[1] / b[3], a[1] / a[3], 2e-5) && closeTo(b[2] / b[3], a[2] / a[3], 2e-5) &&
+                    closeTo(b[3], a[3] * (rs[i] + kPushBackM) / rs[i], 1e-4);
+            // the `pre` output is the vertex as the game's shader made it: the stand-in's clip position
+            built = built && closeTo(a[0], cam.p00 * pts[i].x + cam.offX * pts[i].d, 1e-5) && closeTo(a[1], cam.p11 * pts[i].y + cam.offY * pts[i].d, 1e-5) && closeTo(a[3], pts[i].d, 1e-5) &&
+                    closeTo(a[2], 0.5 * pts[i].d + 0.05 * std::fabs(pts[i].x), 1e-5);
         }
-        f.expect(yWorst <= 1, "the same rows are covered (y is untouched)");
+        f.expect(keeps, "(a) anchor at the eye: a vertex at distance r keeps its NDC x, y and z, and its w becomes w (r + d) / r");
+        f.expect(built, "...and the `pre` output is the clip position the game's vertex shader made");
     }
-    {   // the window: far, reticle-far, near, the gap at 0, a mixed draw
-        const float hx = st::eyeHx(0, ipd), ex = -hx;
-        const st::TurretParams loud = st::paramsFor(3.0f, gap);   // a big s, so a vertex wrongly moved at w = 50 would show
-        for (float w : {500.0f, 50.0f, 5.0f, 4.0f, 1.0f, 0.42f}) {
-            std::vector<Vtx> v;
-            addQuad(v, -0.3f * w / 1.5f, 0.3f * w / 1.5f, -0.2f * w / 1.5f, 0.2f * w / 1.5f, w, ex);   // the same size on the screen at any depth
-            const Frame plain = render(v, cam, nullptr, loud);
-            const Frame through = render(v, cam, gs, loud);
-            char what[160];
-            std::snprintf(what, sizeof(what), "a quad at w = %.2f is outside the window (%.2f to 4.00) and the image is the plain one, bit for bit", double(w), double(loud.wMin));
-            f.expect(covered(plain) > 1000 && maxDiff(plain, through) == 0.0, what);
+    {   // (b) the anchor 10 cm to the side and 5 cm up (and a vertex 15 cm from it, the arcs layer at the stock camera): the CPU reference, and the geometry itself
+        const float a[3] = {0.10f, 0.05f, 0.0f};
+        const st::TurretParams p = st::pushParamsFor(frameOfCam(cam, a), kPushBackM);
+        std::vector<Pt> pts;
+        for (const float r : {0.30f, 0.50f})
+            for (const auto& d : dirs) pts.push_back(dirPt(d[0], d[1], d[2], r));
+        pts.push_back(aroundPt(a, 0.3f, 0.2f, 0.93f, 0.15f));
+        pts.push_back(aroundPt(a, -0.5f, 0.1f, 0.8f, 0.15f));
+        pts.push_back(aroundPt(a, 0.0f, 0.0f, 1.0f, 0.15f));
+        const Captured m = captureMove(fam, twin, pts, cam, p);
+        expectReference(f, "(b) anchor (0.10, 0.05, 0): every vertex is the CPU reference's", p, m, int(pts.size()));
+        bool geom = true;
+        for (size_t i = 0; i < pts.size(); ++i) {
+            double pin[3], pout[3];
+            eyePos(m.pre[i], cam, pin);
+            eyePos(m.post[i], cam, pout);
+            const double vin[3] = {pin[0] - a[0], pin[1] - a[1], pin[2] - a[2]}, vout[3] = {pout[0] - a[0], pout[1] - a[1], pout[2] - a[2]};
+            geom = geom && closeTo(pin[0], pts[i].x, 2e-5) && closeTo(pin[1], pts[i].y, 2e-5) && closeTo(pin[2], pts[i].d, 2e-5) && closeTo(len3(vout), len3(vin) + kPushBackM, 3e-4) && sameRay(vin, vout);
         }
-        std::vector<Vtx> v;
-        addQuad(v, -0.3f, 0.3f, -0.2f, 0.2f, w0, ex);
-        const st::TurretParams empty{0.0259f, gap, 100.0f, 200.0f};   // a valid window with nothing in it (the constants refuse a gap of 0: the module never binds one)
-        const Frame plain = render(v, cam, nullptr, empty);
-        const Frame zero = render(v, cam, gs, empty);
-        f.expect(covered(plain) > 1000 && maxDiff(plain, zero) == 0.0, "with a window nothing lies in the image is the plain one, bit for bit");
-        const Frame zeroS = render(v, cam, gs, st::paramsFor(0.0f, gap));
-        f.expect(maxDiff(plain, zeroS) == 0.0, "...and with s = 0 (the cyclopean eye) too");
-        // a mixed draw: the near quad in the window moves, the far one (the reticle) does not
-        std::vector<Vtx> mixed, nearOnly, farOnly;
-        addQuad(mixed, -0.3f, 0.3f, 0.05f, 0.25f, w0, ex);
-        addQuad(mixed, -0.3f, 0.3f, -0.45f, -0.25f, 6.0f, ex);
-        addQuad(nearOnly, -0.3f, 0.3f, 0.05f, 0.25f, w0, ex);
-        addQuad(farOnly, -0.3f, 0.3f, -0.45f, -0.25f, 6.0f, ex);
-        const st::TurretParams p = st::paramsFor(0.0259f, gap);
-        const Frame mixedMoved = render(mixed, cam, gs, p);
-        const Frame nearMoved = render(nearOnly, cam, gs, p);
-        const Frame farPlain = render(farOnly, cam, nullptr, p);
-        const Frame nearPlain = render(nearOnly, cam, nullptr, p);
-        double worst = 0;
-        for (UINT y = 0; y < 256; ++y)
-            for (UINT x = 0; x < 256; ++x)
-                for (int c = 0; c < 4; ++c) {
-                    const float expected = std::max(nearMoved.at(x, y)[c], farPlain.at(x, y)[c]);
-                    worst = std::max(worst, std::fabs(double(mixedMoved.at(x, y)[c]) - expected));
-                }
-        f.expect(worst == 0.0 && maxDiff(nearMoved, nearPlain) > 0.05, "a draw of two quads moves the one in range and leaves the other: the rule is per vertex");
+        f.expect(geom, "(b) the vertex is moved d metres further from the anchor along the ray from it (the distance grows by exactly d, the direction is kept), seen with the camera's own projection");
+        double near15[3];
+        eyePos(m.pre[pts.size() - 1], cam, near15);
+        const double v15[3] = {near15[0] - a[0], near15[1] - a[1], near15[2] - a[2]};
+        f.expect(closeTo(len3(v15), 0.15, 1e-4), "...with the last vertex 15 cm from the anchor (it ends 1.35 m from it)");
     }
-    {   // the texture coordinates are untouched: an integer-pixel translation reproduces the plain image shifted
-        const float ex = 0.0f;
-        const float k = 5.0f;   // pixels, to the right
-        const float s = k * 2.0f * w0 * (w0 - gap) / (256.0f * gap);
-        std::vector<Vtx> v;
-        addQuad(v, -0.3f, 0.3f, -0.2f, 0.2f, w0, ex);
-        Cam centred;
-        centred.offX = centred.offY = 0.0f;
-        const Frame plain = render(v, centred, nullptr, st::paramsFor(s, gap));
-        const Frame moved = render(v, centred, gs, st::paramsFor(s, gap));
-        double worst = 0;
-        for (UINT y = 0; y < 256; ++y)
-            for (UINT x = 8; x + 8 < 256; ++x)
-                for (int c = 0; c < 4; ++c) worst = std::max(worst, std::fabs(double(moved.at(x + 5, y)[c]) - plain.at(x, y)[c]));
-        f.expect(worst < 2e-3, "the texture coordinates and the pixel stage are untouched: a 5 px translation reproduces the plain image 5 px along");
+    {   // (c) asymmetric tangents (the Pimax set, a vertical pair that is not symmetric either): the move, and a gap so small that the vertex returns to itself
+        const float tl = std::tan(-0.89775f), tr = std::tan(0.71858f), td = std::tan(-1.05f), tu = std::tan(0.93f);
+        const Cam camB = camOfTangents(tl, tr, td, tu);
+        const float a[3] = {0.03f, 0.02f, -0.01f};
+        const st::EyeFrame eb = frameOfCam(camB, a);
+        f.expect(std::fabs(eb.l - tl) < 1e-5f && std::fabs(eb.r - tr) < 1e-5f && std::fabs(eb.dn - td) < 1e-5f && std::fabs(eb.up - tu) < 1e-5f, "(c) the asymmetric camera's tangents are the ones asked for");
+        std::vector<Pt> pts;
+        for (const float x : {tl * 0.8f, 0.0f, tr * 0.9f})
+            for (const float y : {td * 0.7f, tu * 0.8f})
+                for (const float d : {0.25f, 0.4f}) pts.push_back(Pt{d * x, d * y, d});
+        const st::TurretParams p = st::pushParamsFor(eb, kPushBackM);
+        const Captured m = captureMove(fam, twin, pts, camB, p);
+        expectReference(f, "(c) asymmetric tangents: every vertex is the CPU reference's", p, m, int(pts.size()));
+        bool geom = true;
+        for (size_t i = 0; i < pts.size(); ++i) {
+            double pin[3], pout[3];
+            eyePos(m.pre[i], camB, pin);
+            eyePos(m.post[i], camB, pout);
+            const double vin[3] = {pin[0] - a[0], pin[1] - a[1], pin[2] - a[2]}, vout[3] = {pout[0] - a[0], pout[1] - a[1], pout[2] - a[2]};
+            geom = geom && closeTo(pin[0], pts[i].x, 2e-5) && closeTo(pin[1], pts[i].y, 2e-5) && closeTo(len3(vout), len3(vin) + kPushBackM, 3e-4) && sameRay(vin, vout);
+        }
+        f.expect(geom, "(c) ...and by the camera's own projection the vertex moved d along its ray from the anchor");
+        const st::TurretParams tiny = st::makeParams(eb, 1.0e-5f, 0.02f, 1.0f);
+        const Captured r = captureMove(fam, twin, pts, camB, tiny);
+        bool back = true;
+        for (size_t i = 0; i < pts.size(); ++i)
+            for (int c = 0; c < 4; ++c) back = back && closeTo(r.post[i][c], r.pre[i][c], 1.0e-4);
+        f.expect(back, "(c) a gap of 10 micrometres round-trips every vertex to its own clip position (the reconstruction and the projection use the same tangents)");
+    }
+    {   // (d) the window: a vertex at anchor distance 1.4 m, 2.8 m or 500 m, just past 1 m, or just inside 2 cm is untouched; one at 0.5 m moves
+        const st::TurretParams p = st::pushParamsFor(frameOfCam(cam), kPushBackM);
+        const std::vector<Pt> pts = {dirPt(0, 0, 1, 1.4f), dirPt(0.2f, 0.1f, 1, 2.8f), dirPt(0.1f, 0.05f, 1, 500.0f), dirPt(0, 0, 1, 1.0005f), dirPt(0.1f, 0, 1, 0.0199f), dirPt(0, 0.1f, 1, 0.5f)};
+        const Captured m = captureMove(fam, twin, pts, cam, p);
+        expectReference(f, "(d) the window: every vertex is the CPU reference's", p, m, 1);
+        bool still = true;
+        for (size_t i = 0; i < 5; ++i) still = still && std::memcmp(m.pre[i].data(), m.post[i].data(), 16) == 0;
+        f.expect(still && std::memcmp(m.pre[5].data(), m.post[5].data(), 16) != 0, "(d) vertices at 1.4 m, 2.8 m and 500 m (the larger panels, the reticle), at 1.0005 m and at 1.9 cm are untouched bit for bit; the one at 0.5 m moved");
+    }
+    {   // (e) a pull: the first build's gap, window gap + 0.10 to 4.0 m from the anchor
+        const float a[3] = {0.10f, 0.05f, 0.0f};
+        const st::TurretParams p = st::paramsFor(frameOfCam(cam, a), kPullGapM);
+        const std::vector<Pt> pts = {dirPt(0, 0, 1, 1.5f), dirPt(0.2f, 0.1f, 1, 2.0f), dirPt(-0.3f, 0.25f, 1, 3.5f), dirPt(0, 0, 1, 0.5f), dirPt(0, 0, 1, 0.9f), dirPt(0.1f, 0.05f, 1, 500.0f)};
+        const Captured m = captureMove(fam, twin, pts, cam, p);
+        expectReference(f, "(e) a pull of 0.96 m: every vertex is the CPU reference's", p, m, 3);
+        bool geom = true;
+        for (size_t i = 0; i < 3; ++i) {
+            double pin[3], pout[3];
+            eyePos(m.pre[i], cam, pin);
+            eyePos(m.post[i], cam, pout);
+            const double vin[3] = {pin[0] - a[0], pin[1] - a[1], pin[2] - a[2]}, vout[3] = {pout[0] - a[0], pout[1] - a[1], pout[2] - a[2]};
+            geom = geom && closeTo(len3(vout), len3(vin) - kPullGapM, 3e-4) && sameRay(vin, vout);
+        }
+        bool still = true;
+        for (size_t i = 3; i < 6; ++i) still = still && std::memcmp(m.pre[i].data(), m.post[i].data(), 16) == 0;
+        f.expect(geom && still, "(e) the pull brings the vertices 1.5 m to 3.5 m from the anchor 0.96 m NEARER along their rays; those at 0.5 m, 0.9 m and 500 m are untouched");
+    }
+    {   // (g) the translation alone (HUD forward, no push): every vertex moves by T; a vertex behind the eye that T brings in front appears, one that stays behind is left as it was
+        const float t[3] = {0.02f, -0.01f, 0.7f};
+        const st::TurretParams p = st::translateParamsFor(frameOfCam(cam, nullptr, t));
+        const std::vector<Pt> pts = {dirPt(0, 0, 1, 0.5f), dirPt(0.2f, 0.1f, 1, 1.4f), dirPt(-0.3f, 0.25f, 1, 2.8f), dirPt(0.1f, 0.05f, 1, 500.0f), Pt{0.0f, 0.0f, -0.2f}, Pt{0.05f, 0.02f, -1.0f}};
+        const Captured m = captureMove(fam, twin, pts, cam, p);
+        expectReference(f, "(g) the translation alone: every vertex is the CPU reference's", p, m, 5);
+        bool shifted = true;
+        for (size_t i = 0; i < 5; ++i) {
+            if (i == 3) continue;   // 500 m out: float precision of the clip x there is a centimetre, the reference above covers it
+            double pin[3], pout[3];
+            eyePos(m.pre[i], cam, pin);
+            eyePos(m.post[i], cam, pout);
+            shifted = shifted && closeTo(pout[0] - pin[0], t[0], 3e-5) && closeTo(pout[1] - pin[1], t[1], 3e-5) && closeTo(pout[2] - pin[2], t[2], 3e-5);
+        }
+        f.expect(shifted, "(g) with no push every vertex moves by exactly T (0.02, -0.01, 0.7), including the one 0.2 m BEHIND the eye, which T brings 0.5 m in front of it");
+        f.expect(std::memcmp(m.pre[5].data(), m.post[5].data(), 16) == 0 && m.post[5][3] < 0.0f, "(g) a vertex 1 m behind the eye stays behind after T and is left as the game made it");
+    }
+    {   // (h) the translation and the push: the translated vertex is judged against the window from the anchor
+        const float a[3] = {0.10f, 0.05f, 0.0f}, t[3] = {0.02f, -0.01f, 0.7f};
+        const st::TurretParams p = st::pushParamsFor(frameOfCam(cam, a, t), kPushBackM);
+        const std::vector<Pt> pts = {Pt{0.0f, 0.0f, 0.1f}, Pt{0.03f, 0.02f, 0.15f}, dirPt(0, 0, 1, 0.3f), dirPt(0.2f, 0.1f, 1, 1.4f), Pt{0.0f, 0.0f, -0.2f}, Pt{-0.04f, 0.0f, 0.3f}};
+        const Captured m = captureMove(fam, twin, pts, cam, p);
+        expectReference(f, "(h) the translation and the push: every vertex is the CPU reference's", p, m, 6);
+        bool geom = true;
+        for (size_t i = 0; i < pts.size(); ++i) {
+            double pin[3], pout[3];
+            eyePos(m.pre[i], cam, pin);
+            eyePos(m.post[i], cam, pout);
+            const double p1[3] = {pin[0] + t[0], pin[1] + t[1], pin[2] + t[2]}, v1[3] = {p1[0] - a[0], p1[1] - a[1], p1[2] - a[2]}, vout[3] = {pout[0] - a[0], pout[1] - a[1], pout[2] - a[2]};
+            const double d1 = len3(v1);
+            if (d1 > 0.02 && d1 < 1.0)
+                geom = geom && closeTo(len3(vout), d1 + kPushBackM, 3e-4) && sameRay(v1, vout);
+            else
+                geom = geom && closeTo(pout[0], p1[0], 3e-5) && closeTo(pout[1], p1[1], 3e-5) && closeTo(pout[2], p1[2], 3e-5);
+        }
+        f.expect(geom, "(h) a translated vertex within 1 m of the anchor is pushed 1.2 m further along its ray from it, any other is only translated (the arcs layer 0.15 m ahead of the head, and one 0.2 m behind it)");
     }
 }
 
-// ---------------------------------------------------------------- the push-back: a negative gap, window 0.02 to 1.0 m
-// The shipped move, through the same shader and the same constants buffer with a gap of -d: a vertex nearer than 1 m goes d metres DEEPER along its ray from the head centre (its size on
-// the screen kept), and a vertex at 1 m or deeper (the larger panels, 1.3 m and more; the reticle) or at 0.02 m or nearer stays. A weapon panel is at about 0.4 m.
-static void pushCases(ID3D11GeometryShader* gs, Fails& f) {
+// The pictures: the move seen through the rasterizer. With the anchor at the eye the picture is the plain one; with the anchor off the eye the picture is that of the quad truly moved.
+static void moveImages(ID3D11GeometryShader* twin, Fails& f) {
     const Cam cam;
-    const float ipd = 0.0551f, back = kPushBackM, w0 = kPanelW;
-    const float sc = w0 / 1.5f;   // the same size on the screen as the pull's quad at 1.5 m
-    const float qx0 = -0.30f * sc, qx1 = 0.30f * sc, qy0 = -0.20f * sc, qy1 = 0.20f * sc;
-    for (int eye = 0; eye < 2; ++eye) {
-        const float hx = st::eyeHx(eye, ipd), ex = -hx;   // the eye's place against the head centre
-        const float s = cam.p00 * hx;
-        const st::TurretParams params = st::pushParamsFor(s, back);
-        DrawOpts o;
-        o.eye = eye;
-        std::vector<Vtx> panel, truth;
-        addQuad(panel, qx0, qx1, qy0, qy1, w0, ex);
-        addQuad(truth, qx0, qx1, qy0, qy1, w0, ex, (w0 + back) / w0);   // the truly deeper geometry: k = (w + d) / w
-        const Frame plain = render(panel, cam, nullptr, params);
-        const Frame moved = render(panel, cam, gs, params, 256, 256, o);
-        const Frame real = render(truth, cam, nullptr, params);
-        const Edges ep = edgesOnRow(plain, 128), em = edgesOnRow(moved, 128), er = edgesOnRow(real, 128);
-        f.expect(ep.ok && em.ok && er.ok, "push: the quad's edges are found in all three images");
-        const double expectPx = double(st::clipXShift(params, w0)) / w0 * 128.0;   // ndc * (width / 2)
-        f.expect(std::fabs(expectPx) > 3.0 && std::fabs(expectPx) < 8.0, "push: the case is a shift of several pixels");
-        f.expect((eye == 0) == (em.xl < ep.xl), "push: the left eye's image shifts towards the left, the right eye's towards the right (the pull's opposite)");
-        f.expect(std::fabs((em.xl - ep.xl) - expectPx) < 0.03 && std::fabs((em.xr - ep.xr) - expectPx) < 0.03,
-                 "push: a quad at w = 0.4 with the default push (110 cm) lands shifted by -s d / (w + d) / w half-widths of the target: the formula's pixels");
-        f.expect(std::fabs((em.xr - em.xl) - (ep.xr - ep.xl)) < 0.03, "push: ...with its size unchanged (a translation: the cyclopean direction is kept)");
-        f.expect(std::fabs(em.xl - er.xl) < 0.03 && std::fabs(em.xr - er.xr) < 0.03 && std::fabs((er.xr - er.xl) - (ep.xr - ep.xl)) < 0.03,
-                 "push: ...and it is where the geometry truly moved `d` DEEPER along its ray from the head centre is seen from that eye, with Elite's off-centre projection");
-        const Edges emTop = edgesOnRow(moved, 120), epTop = edgesOnRow(plain, 120);
-        f.expect(emTop.ok && epTop.ok && std::fabs((emTop.xl - epTop.xl) - expectPx) < 0.03, "push: the shift is the same on every row (the quad is flat at one depth)");
-        f.expect(covered(moved) > 1500 && std::fabs(covered(moved) - covered(plain)) < 40, "push: the quad covers as many pixels as before");
-        double yWorst = 0;
-        for (UINT y = 0; y < 256; ++y) yWorst += (plain.at(128, y)[3] > 0.5f) != (moved.at(128, y)[3] > 0.5f) ? 1 : 0;
-        f.expect(yWorst <= 1, "push: the same rows are covered (y is untouched)");
-    }
-    {   // the window: the larger panels, the reticle and both edges stay; s = 0 is a copy; a mixed draw moves only what lies nearer than 1 m
-        const st::TurretParams loud = st::pushParamsFor(3.0f, back);   // a big s, so a vertex wrongly moved would show
-        for (const float w : {500.0f, 50.0f, 5.0f, 4.0f, 2.8f, 1.4f, 1.3f, 1.0f, 0.02f, 0.01f}) {
-            std::vector<Vtx> v;
-            addQuad(v, -0.3f * w / 1.5f, 0.3f * w / 1.5f, -0.2f * w / 1.5f, 0.2f * w / 1.5f, w, 0.0f);   // the same size on the screen at any depth
-            const Frame plain = render(v, cam, nullptr, loud);
-            const Frame through = render(v, cam, gs, loud);
-            char what[200];
-            std::snprintf(what, sizeof(what), "push: a quad at w = %.2f is outside the window (%.2f to %.2f) and the image is the plain one, bit for bit", double(w), double(loud.wMin), double(loud.wMax));
-            f.expect(covered(plain) > 1000 && maxDiff(plain, through) == 0.0, what);
-        }
-        const float hx = st::eyeHx(0, ipd), ex = -hx;
+    {   // (I1) the anchor at the eye: the push keeps the angular size, so the picture does not change (the w of every vertex grows by the same factor)
+        const st::TurretParams p = st::pushParamsFor(frameOfCam(cam), kPushBackM);
+        Pt c[4];
+        boxAt(c, 0.0f, 0.0f, 0.4f, 0.08f, 0.053f);
         std::vector<Vtx> v;
-        addQuad(v, qx0, qx1, qy0, qy1, w0, ex);
-        const Frame plain = render(v, cam, nullptr, st::pushParamsFor(0.0f, back));
-        const Frame zeroS = render(v, cam, gs, st::pushParamsFor(0.0f, back));
-        f.expect(covered(plain) > 1000 && maxDiff(plain, zeroS) == 0.0, "push: with s = 0 (the cyclopean eye) the image is the plain one, bit for bit");
-        std::vector<Vtx> mixed, nearOnly, farOnly;   // a weapon panel at 0.4 m above the centre, a larger panel at 1.4 m below it
-        addQuad(mixed, -0.0857f, 0.0857f, 0.0143f, 0.0714f, w0, ex);
-        addQuad(mixed, -0.3f, 0.3f, -0.45f, -0.25f, 1.4f, ex);
-        addQuad(nearOnly, -0.0857f, 0.0857f, 0.0143f, 0.0714f, w0, ex);
-        addQuad(farOnly, -0.3f, 0.3f, -0.45f, -0.25f, 1.4f, ex);
-        const st::TurretParams p = st::pushParamsFor(0.0259f, back);
-        const Frame mixedMoved = render(mixed, cam, gs, p);
-        const Frame nearMoved = render(nearOnly, cam, gs, p);
-        const Frame farPlain = render(farOnly, cam, nullptr, p);
-        const Frame nearPlain = render(nearOnly, cam, nullptr, p);
-        double worst = 0;
-        for (UINT y = 0; y < 256; ++y)
-            for (UINT x = 0; x < 256; ++x)
-                for (int c = 0; c < 4; ++c) worst = std::max(worst, std::fabs(double(mixedMoved.at(x, y)[c]) - std::max(nearMoved.at(x, y)[c], farPlain.at(x, y)[c])));
-        f.expect(covered(farPlain) > 500 && worst == 0.0 && maxDiff(nearMoved, nearPlain) > 0.05,
-                 "push: a draw of a weapon panel at 0.4 m and a larger panel at 1.4 m moves the first and leaves the second: the rule is per vertex");
+        addQuadPts(v, c);
+        const Frame plain = render(v, cam, nullptr, st::TurretParams{});
+        const Frame moved = render(v, cam, twin, p);
+        f.expect(covered(plain) > 1000 && diffCount(plain, moved, 0.02) <= 0.03 * covered(plain), "(I1) anchor at the eye: the pushed quad's picture is the plain quad's (the push keeps its size on the screen)");
     }
-    {   // the texture coordinates are untouched: an integer-pixel translation, to the left, reproduces the plain image shifted
-        const float k = 5.0f;   // pixels
-        const float s = k * 2.0f * w0 * (w0 + back) / (256.0f * back);
-        std::vector<Vtx> v;
-        addQuad(v, qx0, qx1, qy0, qy1, w0, 0.0f);
-        Cam centred;
-        centred.offX = centred.offY = 0.0f;
-        const Frame plain = render(v, centred, nullptr, st::pushParamsFor(s, back));
-        const Frame moved = render(v, centred, gs, st::pushParamsFor(s, back));
-        double worst = 0;
-        for (UINT y = 0; y < 256; ++y)
-            for (UINT x = 8; x + 8 < 256; ++x)
-                for (int c = 0; c < 4; ++c) worst = std::max(worst, std::fabs(double(moved.at(x - 5, y)[c]) - plain.at(x, y)[c]));
-        f.expect(worst < 2e-3 && covered(plain) > 1000, "push: the texture coordinates and the pixel stage are untouched: a 5 px translation to the left reproduces the plain image 5 px along");
+    {   // (I2) the anchor off the eye: the picture is that of the quad truly moved 1.2 m along the rays from the anchor
+        const float a[3] = {0.10f, 0.05f, 0.0f}, none[3] = {0, 0, 0};
+        const st::TurretParams p = st::pushParamsFor(frameOfCam(cam, a), kPushBackM);
+        Pt c[4], q[4];
+        boxAt(c, 0.0f, 0.0f, 0.45f, 0.08f, 0.05f);
+        for (int i = 0; i < 4; ++i) q[i] = movedPt(c[i], a, none, -kPushBackM, st::kPushNearM, st::kPushSplitM);
+        std::vector<Vtx> v, truth;
+        addQuadPts(v, c);
+        addQuadPts(truth, q);
+        const Frame plain = render(v, cam, nullptr, st::TurretParams{});
+        const Frame moved = render(v, cam, twin, p);
+        const Frame real = render(truth, cam, nullptr, st::TurretParams{});
+        f.expect(covered(real) > 300 && diffCount(real, moved, 0.02) <= 0.04 * covered(real) && diffCount(plain, moved, 0.05) > 0.2 * covered(real),
+                 "(I2) anchor off the eye: the pushed quad's picture is the picture of the quad truly moved 1.2 m along the rays from the anchor, and not the plain one's");
+    }
+    {   // (I3) the translation alone
+        const float a[3] = {0.10f, 0.05f, 0.0f}, t[3] = {0.02f, -0.01f, 0.7f};
+        const st::TurretParams p = st::translateParamsFor(frameOfCam(cam, a, t));
+        Pt c[4], q[4];
+        boxAt(c, 0.0f, 0.0f, 0.3f, 0.15f, 0.10f);
+        for (int i = 0; i < 4; ++i) q[i] = Pt{c[i].x + t[0], c[i].y + t[1], c[i].d + t[2]};
+        std::vector<Vtx> v, truth;
+        addQuadPts(v, c);
+        addQuadPts(truth, q);
+        const Frame moved = render(v, cam, twin, p);
+        const Frame real = render(truth, cam, nullptr, st::TurretParams{});
+        f.expect(covered(real) > 300 && diffCount(real, moved, 0.02) <= 0.04 * covered(real), "(I3) the translation alone: the quad's picture is the picture of the quad moved by T");
+    }
+    {   // (I4) the translation, then the push (the arcs layer 15 cm in front of the head)
+        const float a[3] = {0.10f, 0.05f, 0.0f}, t[3] = {0.02f, -0.01f, 0.7f};
+        const st::TurretParams p = st::pushParamsFor(frameOfCam(cam, a, t), kPushBackM);
+        Pt c[4], q[4];
+        boxAt(c, 0.0f, 0.0f, 0.15f, 0.06f, 0.04f);
+        for (int i = 0; i < 4; ++i) q[i] = movedPt(c[i], a, t, -kPushBackM, st::kPushNearM, st::kPushSplitM);
+        std::vector<Vtx> v, truth;
+        addQuadPts(v, c);
+        addQuadPts(truth, q);
+        const Frame moved = render(v, cam, twin, p);
+        const Frame real = render(truth, cam, nullptr, st::TurretParams{});
+        f.expect(covered(real) > 60 && diffCount(real, moved, 0.02) <= 0.04 * covered(real), "(I4) the translation and the push: the picture is that of the quad moved by T and then 1.2 m along the rays from the anchor");
     }
 }
+
+// The shipped push of the panels with the anchor at the eye: the constants the binding, linkage and issue-end cases bind.
+static st::TurretParams defaultParams() { return st::pushParamsFor(frameOfCam(Cam{}), kPushBackM); }
 
 // ---------------------------------------------------------------- the linkage, with the signatures compared
 // The production bytes of each signature's geometry shader, as the build generates them, and the HLSL text they are the compile of.
@@ -777,7 +1011,8 @@ static void linkageCases(int fam, ID3D11GeometryShader* gs) {
     vsr->GetDesc(&vd);
     psr->GetDesc(&pd);
     gsr->GetDesc(&gd);
-    check(vd.OutputParameters == S.count && gd.InputParameters == S.count && gd.OutputParameters == S.count, "the signature's elements, the same number in the vertex shader's output and the geometry shader's input and output");
+    check(vd.OutputParameters == S.count && gd.InputParameters == S.count && gd.OutputParameters == S.count + 1,
+          "the signature's elements, the same number in the vertex shader's output and the geometry shader's input, and one more (`pre`) in its output");
     for (UINT i = 0; i < S.count; ++i) {
         D3D11_SIGNATURE_PARAMETER_DESC o{}, in{}, out{};
         ck(vsr->GetOutputParameterDesc(i, &o), "output element");
@@ -790,6 +1025,12 @@ static void linkageCases(int fam, ID3D11GeometryShader* gs) {
               "...and its output element is the same again: a pass-through of the signature");
         check(!std::strcmp(o.SemanticName, S.el[i].name) && o.SemanticIndex == S.el[i].index && o.Register == i && o.Mask == ((1u << S.el[i].comps) - 1u),
               "...and each element is what srv_turret_math.h's signature table says (the semantic the game's shaders spell, the register in order, the components written)");
+    }
+    {   // the one extra output element is TURRETPRE, four components, in the register after the signature's
+        D3D11_SIGNATURE_PARAMETER_DESC pre{};
+        ck(gsr->GetOutputParameterDesc(S.count, &pre), "the extra output element");
+        check(!std::strcmp(pre.SemanticName, st::kPreSemantic) && pre.SemanticIndex == 0 && pre.Register == S.count && pre.Mask == 0xF,
+              "...and the extra output is TURRETPRE: four components, in the register after the signature's");
     }
     // the pixel shader's inputs are a subset of what the geometry shader writes (SV_Position is the rasterizer's)
     for (UINT i = 0; i < pd.InputParameters; ++i) {
@@ -810,7 +1051,7 @@ static void linkageCases(int fam, ID3D11GeometryShader* gs) {
     if (g_messages) g_messages->ClearStoredMessages();
     std::vector<Vtx> v;
     addQuad(v, -0.3f, 0.3f, -0.2f, 0.2f, 1.5f, 0.0f);
-    (void)render(v, Cam{}, gs, st::paramsFor(0.0259f, 1.02f));
+    (void)render(v, Cam{}, gs, defaultParams());
     if (g_messages) {
         UINT64 errors = 0;
         for (UINT64 i = 0; i < g_messages->GetNumStoredMessagesAllowedByRetrievalFilter(); ++i) {
@@ -851,7 +1092,7 @@ static void linkageCases(int fam, ID3D11GeometryShader* gs) {
         g_ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
         g_ctx->VSSetShader(bad.Get(), nullptr, 0);
         g_ctx->VSSetConstantBuffers(0, 1, cb0.GetAddressOf());
-        auto cb = g_constants[0].get(g_ctx.Get(), st::paramsFor(0.0259f, 1.02f));
+        auto cb = g_constants[0].get(g_ctx.Get(), defaultParams());
         st::Binding b;
         check(b.begin(g_ctx.Get(), gs, cb) == st::Binding::Begin::kBound, "control: bound");
         g_ctx->Draw(UINT(v.size()), 0);
@@ -998,7 +1239,7 @@ static void afterIssueCases(ID3D11GeometryShader* gs, Fails& f, bool skipRestore
     addQuad(v, -0.3f, 0.3f, -0.2f, 0.2f, 1.5f, -0.02755f);
     DrawOpts o;
     o.skipRestore = skipRestore;
-    const st::TurretParams p = st::paramsFor(0.0259f, 1.02f);
+    const st::TurretParams p = defaultParams();
     const Frame plainBefore = render(v, cam, nullptr, p);
     (void)render(v, cam, gs, p, 256, 256, o);
     ComPtr<ID3D11GeometryShader> after;
@@ -1012,17 +1253,21 @@ static void afterIssueCases(ID3D11GeometryShader* gs, Fails& f, bool skipRestore
 // ---------------------------------------------------------------- the constants
 static void constantsCases() {
     st::Constants c;
-    const st::TurretParams a = st::paramsFor(0.0259f, 1.02f);
-    check(c.get(nullptr, a) == nullptr, "no context: no buffer");
-    ID3D11Buffer* first = c.get(g_ctx.Get(), a);
-    check(first && c.buffer() == first && c.written() == a && !c.failed(), "the buffer is made once, with the numbers");
-    check(c.get(g_ctx.Get(), a) == first && c.written() == a, "the same numbers: the same buffer, not rewritten");
-    const st::TurretParams b = st::paramsFor(-0.0259f, 1.02f);
-    check(c.get(g_ctx.Get(), b) == first && c.written() == b, "other numbers: the same buffer, rewritten");
-    // what the shader sees is the four numbers
+    const Cam cam;
+    const float a[3] = {0.10f, 0.05f, 0.0f}, t[3] = {0.02f, -0.01f, 0.7f};
+    const st::EyeFrame e = frameOfCam(cam, a);
+    const st::TurretParams p0 = st::pushParamsFor(e, 1.2f);
+    check(c.get(nullptr, p0) == nullptr, "no context: no buffer");
+    ID3D11Buffer* first = c.get(g_ctx.Get(), p0);
+    check(first && c.buffer() == first && c.written() == p0 && !c.failed(), "the buffer is made once, with the numbers");
+    check(c.get(g_ctx.Get(), p0) == first && c.written() == p0, "the same numbers: the same buffer, not rewritten");
+    const st::TurretParams p1 = st::pushParamsFor(frameOfCam(cam, a, t), 1.2f);
+    check(c.get(g_ctx.Get(), p1) == first && c.written() == p1, "other numbers: the same buffer, rewritten");
+    // what the shader sees is the four registers
     const auto readBack = [&](ID3D11Buffer* source) {
         D3D11_BUFFER_DESC bd{};
         source->GetDesc(&bd);
+        check(bd.ByteWidth == 64, "the buffer is four 16-byte registers");
         bd.BindFlags = bd.MiscFlags = bd.StructureByteStride = 0;
         bd.Usage = D3D11_USAGE_STAGING;
         bd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
@@ -1036,117 +1281,107 @@ static void constantsCases() {
         g_ctx->Unmap(stage.Get(), 0);
         return out;
     };
-    check(readBack(first) == b, "the buffer holds {s, gap, wMin, wMax} as written");
-    st::TurretParams bad = a;
-    bad.s = NAN;
+    check(readBack(first) == p1, "the buffer holds the move, the tangents, the anchor and the translation as written");
+    st::TurretParams bad = p0;
+    bad.ax = NAN;
     check(c.get(g_ctx.Get(), bad) == nullptr, "a number that is not finite: refused");
-    bad = a;
-    bad.wMin = bad.gap;
-    check(c.get(g_ctx.Get(), bad) == nullptr, "a window that starts at the gap (a divisor of zero): refused");
-    bad = a;
-    bad.wMax = bad.wMin;
+    check(c.get(g_ctx.Get(), st::translateParamsFor(frameOfCam(cam))) == nullptr, "a gap of 0 with no translation (it moves nothing, and the module never binds one): refused");
+    check(c.get(g_ctx.Get(), st::pushParamsFor(e, 2.5f)) == nullptr, "a push beyond 2 m: refused");
+    bad = st::paramsFor(e, 2.5f);
+    check(c.get(g_ctx.Get(), bad) == nullptr, "a pull beyond 2 m: refused");
+    bad = p0;
+    bad.dMin = 0.0f;
+    check(c.get(g_ctx.Get(), bad) == nullptr, "a window that starts at 0: refused");
+    bad = st::paramsFor(e, 0.96f);
+    bad.dMin = bad.gap;
+    check(c.get(g_ctx.Get(), bad) == nullptr, "a pull whose window starts at the gap (a divisor of zero): refused");
+    bad = p0;
+    bad.dMax = bad.dMin;
     check(c.get(g_ctx.Get(), bad) == nullptr, "an empty window: refused");
-    bad = a;
-    bad.gap = 0.0f;
-    check(c.get(g_ctx.Get(), bad) == nullptr, "a gap of 0 (it moves nothing, and the module never binds one): refused");
-    bad = a;
-    bad.gap = 2.5f;
-    bad.wMin = 2.6f;
-    check(c.get(g_ctx.Get(), bad) == nullptr, "a gap beyond 2 m: refused");
-    bad = st::pushParamsFor(0.0259f, 2.5f);
-    check(c.get(g_ctx.Get(), bad) == nullptr, "...and a push beyond 2 m: refused");
-    bad = st::pushParamsFor(0.0259f, 1.10f);
-    bad.wMin = -2.0f;
-    check(c.get(g_ctx.Get(), bad) == nullptr, "a push whose window starts at or below its (negative) gap: refused");
-    bad = st::pushParamsFor(0.0259f, 1.10f);
-    bad.gap = -INFINITY;
-    check(c.get(g_ctx.Get(), bad) == nullptr, "a gap that is not finite: refused");
-    check(c.get(g_ctx.Get(), a) == first, "...and the buffer is still the good one");
-    const st::TurretParams push = st::pushParamsFor(0.0259f, 1.10f), pushTop = st::pushParamsFor(-0.0259f, st::kPushMaxCm / 100.0f);
-    check(c.get(g_ctx.Get(), push) == first && c.written() == push, "a push (a negative gap, window 0.02 to 1.0): accepted, the same buffer rewritten");
-    check(readBack(first) == push, "...and the buffer holds the push's numbers");
-    check(c.get(g_ctx.Get(), pushTop) == first && c.written() == pushTop, "a push of the key's top (2.00 m) is accepted too");
-    check(c.get(g_ctx.Get(), a) == first && c.written() == a, "...and the pull again rewrites it");
+    bad = p0;
+    bad.r = bad.l;
+    check(c.get(g_ctx.Get(), bad) == nullptr, "tangents that are no frustum: refused");
+    bad = p0;
+    bad.ax = 1.9f;
+    bad.ay = 1.9f;
+    check(c.get(g_ctx.Get(), bad) == nullptr, "an anchor 2 m or more from the eye: refused");
+    bad = p0;
+    bad.tz = 2.5f;
+    check(c.get(g_ctx.Get(), bad) == nullptr, "a translation beyond 2 m: refused");
+    check(c.get(g_ctx.Get(), p1) == first, "...and the buffer is still the good one");
+    const st::TurretParams pull = st::paramsFor(e, 0.96f), top = st::pushParamsFor(e, st::kPushMaxCm / 100.0f), only = st::translateParamsFor(frameOfCam(cam, a, t));
+    check(c.get(g_ctx.Get(), pull) == first && c.written() == pull && c.get(g_ctx.Get(), top) == first && c.written() == top && c.get(g_ctx.Get(), only) == first && c.written() == only,
+          "a pull, a push of the key's top (2.00 m) and a translation alone (gap 0) are accepted, the same buffer rewritten each time");
+    check(readBack(first) == only, "...and the buffer holds the translation alone's numbers");
     ComPtr<ID3D11Device> d2;
     ComPtr<ID3D11DeviceContext> c2;
     ck(edvr::systemD3D11CreateDevice()(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, nullptr, 0, D3D11_SDK_VERSION, &d2, nullptr, &c2), "second device");
-    ID3D11Buffer* other = c.get(c2.Get(), a);
-    check(other && other != first && c.written() == a, "another device: the buffer is made again for it");
+    ID3D11Buffer* other = c.get(c2.Get(), p0);
+    check(other && other != first && c.written() == p0, "another device: the buffer is made again for it");
     c.reset();
     check(c.buffer() == nullptr && !c.failed(), "reset releases the buffer");
     // the production arrays also carry the key defaults the module reads
-    check(st::kBackDefaultCm == 60 && st::kGapDefaultCm == 0 && st::kPushDefaultCm == 110, "the keys' defaults: 60 cm back, no gap (the pull is off), a 110 cm push on both groups");
+    check(st::kBackDefaultCm == 0 && st::kForwardDefaultCm == 70 && st::kPanelsDefaultCm == 120 && st::kRadarDefaultCm == 0 && st::kGapDefaultCm == 0,
+          "the keys' defaults: the stock camera (0), HUD forward 70, panels back 120, radar back 0, no gap (the pull is off)");
 }
 
-// ---------------------------------------------------------------- triangle strips (the flight HUD's strokes are drawn as one)
-// A quad as a four-vertex strip. The input assembler hands the geometry shader's `triangle` input each strip triangle in the winding the rasterizer would have used, and the
-// shader emits each as a strip of its own, so: (1) through a window nothing lies in the picture is the plain strip's bit for bit under every culling mode, and in the mode that shows the
-// strip the other mode shows nothing (the winding is consistent, the control that the odd triangle is not turned inside out); (2) with the pull, and with the push, the strip lands
-// exactly where the same quad as a list lands.
+// ---------------------------------------------------------------- triangle strips (some of the HUD's strokes are drawn as one)
+// A quad as a four-vertex strip. The input assembler hands the geometry shader's `triangle` input each strip triangle in the winding the rasterizer would have used, and the shader emits
+// each as a strip of its own, so: (1) through a window nothing lies in, with no translation, the picture is the plain strip's bit for bit under every culling mode, and in the mode that
+// shows the strip the other mode shows nothing (the winding is consistent, the control that the odd triangle is not turned inside out); (2) with the translation and the push the strip
+// lands exactly where the same quad as a list lands.
 static void stripCases(ID3D11GeometryShader* gs, Fails& f) {
     const Cam cam;
-    const float ipd = 0.0551f, gap = kPullGapM, w0 = 1.4f;
-    const float hx = st::eyeHx(0, ipd), ex = -hx;
+    const float a[3] = {0.10f, 0.05f, 0.0f}, t[3] = {0.02f, -0.01f, 0.7f};
+    const st::TurretParams moving = st::pushParamsFor(frameOfCam(cam, a, t), kPushBackM);
+    const st::TurretParams empty = st::makeParams(frameOfCam(cam), 0.5f, 100.0f, 200.0f);   // a valid window with nothing in it, and no translation: the shader is a copy
+    Pt c[4];
+    boxAt(c, 0.0f, 0.0f, 0.1f, 0.08f, 0.05f);
     std::vector<Vtx> list, strip;
-    addQuad(list, -0.30f, 0.30f, -0.20f, 0.20f, w0, ex);
+    addQuadPts(list, c);
     strip = {list[0], list[1], list[2], list[4]};   // (x0,y0) (x1,y0) (x0,y1) (x1,y1)
-    const st::TurretParams p = st::paramsFor(cam.p00 * hx, gap), zero{cam.p00 * hx, gap, 100.0f, 200.0f};   // zero: a valid window with nothing in it
     double shown[3] = {};
     for (int cull = 0; cull < 3; ++cull) {
         DrawOpts o;
         o.cull = cull;
         o.topology = D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP;
-        const Frame plain = render(strip, cam, nullptr, zero, 256, 256, o);
-        const Frame copy = render(strip, cam, gs, zero, 256, 256, o);
+        const Frame plain = render(strip, cam, nullptr, empty, 256, 256, o);
+        const Frame copy = render(strip, cam, gs, empty, 256, 256, o);
         shown[cull] = covered(plain);
         f.expect(maxDiff(plain, copy) == 0.0, "a triangle strip through the shader with nothing in its window is the plain strip, bit for bit, under every culling mode");
         DrawOpts ol = o;
         ol.topology = D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
-        const Frame moved = render(strip, cam, gs, p, 256, 256, o);
-        const Frame listMoved = render(list, cam, gs, p, 256, 256, ol);
-        f.expect(maxDiff(moved, listMoved) == 0.0, "a strip quad under the pull lands exactly where the same quad as a list lands");
-        const Frame plainList = render(list, cam, nullptr, p, 256, 256, ol);
-        f.expect(cull != 0 || (covered(moved) > 1500 && maxDiff(moved, plainList) > 0.05), "...and it is shifted (the picture is not the plain quad's)");
+        const Frame moved = render(strip, cam, gs, moving, 256, 256, o);
+        const Frame listMoved = render(list, cam, gs, moving, 256, 256, ol);
+        f.expect(maxDiff(moved, listMoved) == 0.0, "a strip quad under the translation and the push lands exactly where the same quad as a list lands");
+        const Frame plainList = render(list, cam, nullptr, moving, 256, 256, ol);
+        f.expect(cull != 0 || (covered(moved) > 100 && maxDiff(moved, plainList) > 0.05), "...and it is moved (the picture is not the plain quad's)");
     }
-    f.expect(shown[0] > 1500 && ((shown[1] > 1500) != (shown[2] > 1500)) && (shown[1] < 1.0 || shown[2] < 1.0),
+    f.expect(shown[0] > 100 && ((shown[1] > 100) != (shown[2] > 100)) && (shown[1] < 1.0 || shown[2] < 1.0),
              "the control: the plain strip is whole with no culling and with one facing culled, and gone with the other (both triangles share a winding)");
-    {   // the push: a weapon panel at 0.4 m as a strip lands where the same quad as a list lands, under every culling mode
-        const float sc = kPanelW / 1.5f;
-        std::vector<Vtx> plist, pstrip;
-        addQuad(plist, -0.30f * sc, 0.30f * sc, -0.20f * sc, 0.20f * sc, kPanelW, ex);
-        pstrip = {plist[0], plist[1], plist[2], plist[4]};
-        const st::TurretParams push = st::pushParamsFor(cam.p00 * hx, kPushBackM);
-        for (int cull = 0; cull < 3; ++cull) {
-            DrawOpts o;
-            o.cull = cull;
-            o.topology = D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP;
-            DrawOpts ol = o;
-            ol.topology = D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
-            const Frame moved = render(pstrip, cam, gs, push, 256, 256, o);
-            const Frame listMoved = render(plist, cam, gs, push, 256, 256, ol);
-            f.expect(maxDiff(moved, listMoved) == 0.0, "a strip quad under the push lands exactly where the same quad as a list lands");
-            const Frame plainList = render(plist, cam, nullptr, push, 256, 256, ol);
-            f.expect(cull != 0 || (covered(moved) > 1500 && maxDiff(moved, plainList) > 0.05), "...and it is shifted (the picture is not the plain quad's)");
-        }
-    }
 }
 
 // ---------------------------------------------------------------- the GPU instrument (srv_turret.cpp's probe*): the same calls, on WARP
+static ComPtr<ID3D11GeometryShader> twinFromCode(int fam, const void* data, size_t size) {
+    D3D11_SO_DECLARATION_ENTRY decl[st::kMaxSigElements] = {};
+    const UINT entries = st::soDeclaration(uint32_t(fam), decl);
+    const UINT stride = (st::sigFloats(uint32_t(fam)) + st::kPreFloats) * 4;
+    ComPtr<ID3D11GeometryShader> twin;
+    ck(g_dev->CreateGeometryShaderWithStreamOutput(data, size, decl, entries, &stride, 1, 0, nullptr, &twin), "the stream-output twin is made from the signature's bytecode");
+    return twin;
+}
 static void instrumentCases(int fam, ID3D11GeometryShader* gs) {
     const st::Signature& S = st::kSignatures[fam];
-    const uint32_t strideFloats = st::sigFloats(fam), posFloat = st::sigPosFloat(fam);
-    // the twin, made as the module makes it: the signature's bytecode, its stream-output entries, stream 0 rasterized as well
-    ComPtr<ID3D11GeometryShader> twin;
-    D3D11_SO_DECLARATION_ENTRY decl[st::kMaxSigElements] = {};
-    const UINT entries = st::soDeclaration(fam, decl);
-    const UINT stride = strideFloats * 4;
-    ck(g_dev->CreateGeometryShaderWithStreamOutput(kBytes[fam].data, kBytes[fam].size, decl, entries, &stride, 1, 0, nullptr, &twin), "the stream-output twin is made from the signature's bytecode");
+    const uint32_t strideFloats = st::sigFloats(uint32_t(fam)) + st::kPreFloats, posFloat = st::sigPosFloat(uint32_t(fam)), preFloat = st::sigFloats(uint32_t(fam));
+    // the twin, made as the module makes it: the signature's bytecode, its stream-output entries (then `pre`), stream 0 rasterized as well
+    const ComPtr<ID3D11GeometryShader> twin = twinFromCode(fam, kBytes[fam].data, kBytes[fam].size);
     const Cam cam;
-    const float ipd = 0.0551f, gap = kPullGapM, w0 = 1.4f;   // the pull's gap and a deep panel's depth
-    const float hx = st::eyeHx(0, ipd), ex = -hx;
-    const st::TurretParams params = st::paramsFor(cam.p00 * hx, gap);
+    const float a[3] = {0.10f, 0.05f, 0.0f};
+    const st::TurretParams params = st::pushParamsFor(frameOfCam(cam, a), kPushBackM);
+    Pt c[4];
+    boxAt(c, 0.0f, 0.0f, 0.45f, 0.08f, 0.05f);
     std::vector<Vtx> quad;
-    addQuad(quad, -0.30f, 0.30f, -0.20f, 0.20f, w0, ex);
+    addQuadPts(quad, c);
     DrawOpts base;
 
     // a plain draw: the vertex shader ran, the geometry shader did not (gs = 0 with ia_prims above 0 is how a flight reads "never ran")
@@ -1154,17 +1389,16 @@ static void instrumentCases(int fam, ID3D11GeometryShader* gs) {
     DrawOpts o = base;
     o.sample = &plain;
     const Frame plainFrame = render(quad, cam, nullptr, params, 256, 256, o);
-    check(plain.stats.IAPrimitives == 2 && plain.stats.VSInvocations >= 4 && plain.stats.GSInvocations == 0 && plain.stats.GSPrimitives == 0 && plain.stats.PSInvocations > 1000,
+    check(plain.stats.IAPrimitives == 2 && plain.stats.VSInvocations >= 4 && plain.stats.GSInvocations == 0 && plain.stats.GSPrimitives == 0 && plain.stats.PSInvocations > 300,
           "a quad drawn with no geometry shader: two primitives in, vertex shader and pixel shader ran, the geometry shader's invocation count is 0");
 
     // through the production shader: it ran once for each triangle
     Sample prod;
     o.sample = &prod;
     const Frame prodFrame = render(quad, cam, gs, params, 256, 256, o);
-    check(prod.stats.IAPrimitives == 2 && prod.stats.GSInvocations == 2 && prod.stats.GSPrimitives == 2 && prod.stats.CInvocations >= 2 && prod.stats.PSInvocations > 1000 &&
-              !prod.gsAfter,
+    check(prod.stats.IAPrimitives == 2 && prod.stats.GSInvocations == 2 && prod.stats.GSPrimitives == 2 && prod.stats.CInvocations >= 2 && prod.stats.PSInvocations > 300 && !prod.gsAfter,
           "...and through the production shader: two primitives in, the geometry shader ran twice and emitted two, and the context's geometry stage is empty after");
-    check(plain.stats.PSInvocations != prod.stats.PSInvocations || maxDiff(plainFrame, prodFrame) > 0.01, "...and the statistics see the shift: the pixels differ from the plain draw");
+    check(maxDiff(plainFrame, prodFrame) > 0.01, "...and the pixels differ from the plain draw: the shader moved the quad");
 
     // through the twin with its stream-output target: the same statistics, the same pixels, and the records of what the shader wrote
     Sample cap;
@@ -1175,35 +1409,34 @@ static void instrumentCases(int fam, ID3D11GeometryShader* gs) {
           "through the twin: two invocations, two primitives written to the stream-output target, none lost");
     check(maxDiff(prodFrame, twinFrame) == 0.0, "...and it rasterizes exactly as the production shader does (the instrument does not change the picture)");
     check(!cap.soTargetAfter && !cap.gsAfter, "...and the stream-output target and the geometry stage are empty after the scope");
-    const st::CaptureSummary c = st::summarizeCapture(cap.records.data(), 6, strideFloats, posFloat, params);
-    check(c.vertices == 6 && c.inWindow == 6 && std::fabs(c.wMin - w0) < 1e-4f && std::fabs(c.wMax - w0) < 1e-4f, "the six captured vertices lie at view depth 1.4 (a deep panel) and in the window");
-    const float shift = st::clipXShift(params, w0);
-    check(std::fabs(c.shiftMin - shift) < 1e-6f && std::fabs(c.shiftMax - shift) < 1e-6f && shift > 0.05f, "...and the shift the rule gives them is s gap / (w - gap)");
-    // the captured NDC x is the shifted position: (P00 X + offX w + shift) / w for the quad's left and right edges
-    const float xl = (cam.p00 * (-0.30f - ex) + cam.offX * w0 + shift) / w0, xr = (cam.p00 * (0.30f - ex) + cam.offX * w0 + shift) / w0;
-    check(std::fabs(c.ndcXMin - xl) < 1e-5f && std::fabs(c.ndcXMax - xr) < 1e-5f, "...and the streamed clip x / w is the shifted edge: the shader wrote the position the rule says");
+    const st::CaptureSummary cs = st::summarizeCapture(cap.records.data(), 6, strideFloats, posFloat, preFloat, params);
+    double lo = 1e9, hi = 0;
+    for (const Pt& p : c) {
+        const double d = std::sqrt((p.x - a[0]) * (p.x - a[0]) + (p.y - a[1]) * (p.y - a[1]) + (p.d - a[2]) * (p.d - a[2]));
+        lo = std::min(lo, d);
+        hi = std::max(hi, d);
+    }
+    check(cs.vertices == 6 && cs.inWindow == 6 && std::fabs(cs.beforeMin - lo) < 1e-3 && std::fabs(cs.beforeMax - hi) < 1e-3 && std::fabs(cs.afterMin - (lo + kPushBackM)) < 2e-3 &&
+              std::fabs(cs.afterMax - (hi + kPushBackM)) < 2e-3,
+          "the capture reads six vertices, all moved, at anchor distance 0.46 to 0.52 m before and 1.2 m further after");
     // the captured record is the vertex whole: the interpolants as the vertex shader wrote them, not only the position (the first vertex is u = 0, v = 0, and the second element
     // starts with 0.25; the second vertex starts with u = 1)
     bool whole = std::fabs(cap.records[0] - 0.0f) < 1e-6f && std::fabs(cap.records[1] - 0.0f) < 1e-6f && std::fabs(cap.records[strideFloats] - 1.0f) < 1e-6f;
     if (S.el[0].comps == 4) whole = whole && std::fabs(cap.records[3] - 1.0f) < 1e-6f;
     if (S.count > 2) whole = whole && std::fabs(cap.records[S.el[0].comps] - 0.25f) < 1e-6f;
     check(whole, "...with the interpolants intact in the record (the texture coordinate and the second element): the shader passes them through");
-    // the unshifted position of the same quad from the twin with s = 0: the difference is the shift
-    Sample capPlain;
-    DrawOpts op = base;
-    op.sample = &capPlain;
-    op.soTarget = true;
-    (void)render(quad, cam, twin.Get(), st::paramsFor(0.0f, gap), 256, 256, op);   // s = 0: the twin writes the game's own positions
-    const st::CaptureSummary c0 = st::summarizeCapture(capPlain.records.data(), 6, strideFloats, posFloat, st::paramsFor(0.0f, gap));
-    check(std::fabs((c.ndcXMin - c0.ndcXMin) - shift / w0) < 1e-5f && std::fabs(c.ndcYMin - c0.ndcYMin) < 1e-6f && std::fabs(c.wMin - c0.wMin) < 1e-6f,
-          "the captured positions differ from the unshifted ones by the shift in x only (y and w are the game's)");
+    // `pre` is the first vertex's clip position as the stand-in vertex shader made it, and the position differs from it
+    check(std::fabs(cap.records[preFloat + 0] - (cam.p00 * c[0].x + cam.offX * c[0].d)) < 1e-5f && std::fabs(cap.records[preFloat + 3] - c[0].d) < 1e-5f &&
+              std::memcmp(&cap.records[preFloat], &cap.records[posFloat], 16) != 0,
+          "...and its `pre` is the clip position before the move (the vertex shader's), different from the position the shader wrote");
 
-    // the near layer (w = 0.42) and the reticle's depth (500 m): the shader RUNS (gs = 2) and moves nothing, the pixels are the plain draw's, and the capture says why
-    // (in_window 0 and the depth range): this is what a flight reads for the near layer's draws
-    for (const float depth : {0.42f, 500.0f}) {
+    // a quad whose vertices lie 1.4 m or more from the anchor (the larger panels) and the reticle's depth: the shader RUNS (gs = 2) and moves nothing, the pixels are the plain draw's, and
+    // the capture says so (in_window 0): this is what a flight reads for the larger panels' draws
+    for (const float depth : {1.5f, 500.0f}) {
         std::vector<Vtx> outside;
-        const float scale = depth / w0;   // the same size on the screen at any depth
-        addQuad(outside, -0.30f * scale, 0.30f * scale, -0.20f * scale, 0.20f * scale, depth, ex);
+        Pt q[4];
+        boxAt(q, 0.0f, 0.0f, depth, 0.2f * depth, 0.13f * depth);
+        addQuadPts(outside, q);
         Sample outCap, outPlain;
         DrawOpts oo = base;
         oo.sample = &outCap;
@@ -1212,54 +1445,32 @@ static void instrumentCases(int fam, ID3D11GeometryShader* gs) {
         DrawOpts ob = base;
         ob.sample = &outPlain;
         const Frame plainOut = render(outside, cam, nullptr, params, 256, 256, ob);
-        const st::CaptureSummary co = st::summarizeCapture(outCap.records.data(), 6, strideFloats, posFloat, params);
+        const st::CaptureSummary co = st::summarizeCapture(outCap.records.data(), 6, strideFloats, posFloat, preFloat, params);
         char what[220];
-        std::snprintf(what, sizeof(what), "a quad at %.2f m: the geometry shader ran twice, the capture reads in_window 0 and w = %.2f, and the picture is the plain draw's bit for bit", double(depth),
+        std::snprintf(what, sizeof(what), "a quad at %.1f m: the geometry shader ran twice, the capture reads in_window 0 and w = %.1f, and the picture is the plain draw's bit for bit", double(depth),
                       double(depth));
-        check(outCap.stats.GSInvocations == 2 && co.vertices == 6 && co.inWindow == 0 && std::fabs(co.wMin - depth) < depth * 1e-3f && co.shiftMin == 0.0f && co.shiftMax == 0.0f &&
-                  maxDiff(twinOut, plainOut) == 0.0 && covered(twinOut) > 1000,
-              what);
+        check(outCap.stats.GSInvocations == 2 && co.vertices == 6 && co.inWindow == 0 && std::fabs(co.wMin - depth) < depth * 1e-3f && maxDiff(twinOut, plainOut) == 0.0 && covered(twinOut) > 1000, what);
     }
-    {   // the push: a weapon panel (w 0.4) is IN the window (0.02, 1.0) with a negative shift, a larger panel (1.4) and the reticle (500) are not
-        const st::TurretParams push = st::pushParamsFor(cam.p00 * hx, kPushBackM);
-        const float sc = kPanelW / w0;   // the same size on the screen
-        std::vector<Vtx> panel;
-        addQuad(panel, -0.30f * sc, 0.30f * sc, -0.20f * sc, 0.20f * sc, kPanelW, ex);
-        Sample pushCap, pushPlain;
-        DrawOpts opush = base;
-        opush.sample = &pushCap;
-        opush.soTarget = true;
-        const Frame twinPush = render(panel, cam, twin.Get(), push, 256, 256, opush);
-        DrawOpts oprod = base;
-        oprod.sample = &pushPlain;
-        const Frame prodPush = render(panel, cam, gs, push, 256, 256, oprod);
-        const st::CaptureSummary cp = st::summarizeCapture(pushCap.records.data(), 6, strideFloats, posFloat, push);
-        const float pshift = st::clipXShift(push, kPanelW);
-        check(pushCap.stats.GSInvocations == 2 && cp.vertices == 6 && cp.inWindow == 6 && std::fabs(cp.wMin - kPanelW) < 1e-4f && std::fabs(cp.wMax - kPanelW) < 1e-4f,
-              "under the push a quad at 0.4 m: the geometry shader ran twice and all six captured vertices lie in the window");
-        check(pshift < -0.01f && std::fabs(cp.shiftMin - pshift) < 1e-6f && std::fabs(cp.shiftMax - pshift) < 1e-6f && maxDiff(twinPush, prodPush) == 0.0,
-              "...with the NEGATIVE shift the rule gives them (-s d / (w + d)), and the twin rasterizes exactly as the production shader does");
-        const float pl = (cam.p00 * (-0.30f * sc - ex) + cam.offX * kPanelW + pshift) / kPanelW, pr = (cam.p00 * (0.30f * sc - ex) + cam.offX * kPanelW + pshift) / kPanelW;
-        check(std::fabs(cp.ndcXMin - pl) < 1e-5f && std::fabs(cp.ndcXMax - pr) < 1e-5f, "...and the streamed clip x / w is the pushed edge: the shader wrote the position the rule says");
-        std::vector<Vtx> deep;
-        addQuad(deep, -0.30f, 0.30f, -0.20f, 0.20f, w0, ex);
-        Sample deepCap;
-        DrawOpts odeep = base;
-        odeep.sample = &deepCap;
-        odeep.soTarget = true;
-        (void)render(deep, cam, twin.Get(), push, 256, 256, odeep);
-        const st::CaptureSummary cd = st::summarizeCapture(deepCap.records.data(), 6, strideFloats, posFloat, push);
-        check(deepCap.stats.GSInvocations == 2 && cd.vertices == 6 && cd.inWindow == 0 && std::fabs(cd.wMin - w0) < 1e-4f && cd.shiftMin == 0.0f && cd.shiftMax == 0.0f,
-              "...and a larger panel at 1.4 m: the shader ran, the capture reads in_window 0 and no shift (a healthy row under the push)");
+    // the translation alone: every vertex is moved
+    {
+        const float t[3] = {0.02f, -0.01f, 0.7f};
+        const st::TurretParams only = st::translateParamsFor(frameOfCam(cam, a, t));
+        Sample ts;
+        DrawOpts ot = base;
+        ot.sample = &ts;
+        ot.soTarget = true;
+        (void)render(quad, cam, twin.Get(), only, 256, 256, ot);
+        const st::CaptureSummary ct = st::summarizeCapture(ts.records.data(), 6, strideFloats, posFloat, preFloat, only);
+        check(ct.vertices == 6 && ct.inWindow == 6 && ct.afterMin > ct.beforeMin + 0.5 && ct.wMin > 1.0f, "the translation alone: the capture reads all six vertices moved (w 0.45 becomes 1.15)");
     }
     // the summary's own edges
     std::vector<float> junk(2 * strideFloats, 0.0f);
     junk[posFloat] = NAN;
     junk[posFloat + 3] = 1.0f;
     junk[strideFloats + posFloat + 3] = -1.0f;
-    const st::CaptureSummary cj = st::summarizeCapture(junk.data(), 2, strideFloats, posFloat, params);
-    check(cj.vertices == 1 && cj.inWindow == 0 && st::summarizeCapture(nullptr, 6, strideFloats, posFloat, params).vertices == 0 &&
-              st::summarizeCapture(junk.data(), 2, 3, posFloat, params).vertices == 0,
+    const st::CaptureSummary cj = st::summarizeCapture(junk.data(), 2, strideFloats, posFloat, preFloat, params);
+    check(cj.vertices == 1 && cj.inWindow == 1 && st::summarizeCapture(nullptr, 6, strideFloats, posFloat, preFloat, params).vertices == 0 &&
+              st::summarizeCapture(junk.data(), 2, 3, posFloat, preFloat, params).vertices == 0,
           "the summary skips a vertex that is not finite, reads nothing from nothing and refuses a stride too short for the position");
     g_ctx->ClearState();
 }
@@ -1402,13 +1613,11 @@ static std::string replaceAll(std::string text, const std::string& from, const s
     }
     return text;
 }
-static ComPtr<ID3D11GeometryShader> gsFromText(const std::string& text) {
+static ComPtr<ID3D11GeometryShader> twinFromText(int fam, const std::string& text) {
     bool ok = false;
     const auto code = compileHlsl(text, "gs_5_0", &ok);
     check(ok, "a mutant compiles");
-    ComPtr<ID3D11GeometryShader> gs;
-    ck(g_dev->CreateGeometryShader(code->GetBufferPointer(), code->GetBufferSize(), nullptr, &gs), "CreateGeometryShader (a mutant)");
-    return gs;
+    return twinFromCode(fam, code->GetBufferPointer(), code->GetBufferSize());
 }
 
 #include "wiring_cases.h"
@@ -1435,12 +1644,13 @@ int main(int argc, char** argv) {
         setupGamePair();
 
         // The shaders: the build's bytes are each HLSL text's compile, and the device takes them.
-        ComPtr<ID3D11GeometryShader> gsOf[st::kSignatureCount];
+        ComPtr<ID3D11GeometryShader> gsOf[st::kSignatureCount], twinOf[st::kSignatureCount];
         for (uint32_t fam = 0; fam < st::kSignatureCount; ++fam) {
             const auto compiled = compileHlsl(kBytes[fam].text, "gs_5_0");
             check(compiled->GetBufferSize() == kBytes[fam].size && !std::memcmp(compiled->GetBufferPointer(), kBytes[fam].data, kBytes[fam].size),
                   "the build's bytecode of each signature's shader is exactly the compile of srv_turret_hud_shader.h's text");
             ck(g_dev->CreateGeometryShader(kBytes[fam].data, kBytes[fam].size, nullptr, &gsOf[fam]), "the device takes the production shader");
+            twinOf[fam] = twinFromCode(int(fam), kBytes[fam].data, kBytes[fam].size);
         }
 
         constantsCases();
@@ -1449,29 +1659,41 @@ int main(int argc, char** argv) {
             g_fam = int(fam);
             linkageCases(int(fam), gsOf[fam].Get());
             instrumentCases(int(fam), gsOf[fam].Get());
-            geometryCases(gsOf[fam].Get(), production);
-            pushCases(gsOf[fam].Get(), production);
-            stripCases(gsOf[fam].Get(), production);
+            moveCases(int(fam), twinOf[fam].Get(), production);
+            moveImages(twinOf[fam].Get(), production);
+            stripCases(twinOf[fam].Get(), production);
         }
         g_fam = 0;
         bindingCases(gsOf[0].Get(), production, true);
         afterIssueCases(gsOf[0].Get(), production, false);
-        if (production.n) std::printf("first failing production check: %s (%u failed)\n", production.first.c_str(), production.n);
-        check(production.n == 0, "the production shaders and binding pass every geometry, push, strip, binding and issue-end case, for all eight signatures");
+        if (production.n) {
+            std::printf("first failing production check: %s (%u failed)\n", production.first.c_str(), production.n);
+            for (const std::string& k : production.kinds) std::printf("  failed: %s\n", k.c_str());
+        }
+        check(production.n == 0, "the production shaders and binding pass every move, picture, strip, binding and issue-end case, for all eight signatures");
 
-        // THE MUTANTS: each through the same cases, each must fail at least one, in each signature's text.
+        // THE MUTANTS: each through the same cases (the move's numbers and pictures), each must fail at least one, in each signature's text. They are edits of the shared function turretMove
+        // and of the pass-through that calls it.
         struct Mutant {
             const char* name;
             const char* from;
             const char* to;
         };
         const Mutant mutants[] = {
-            {"no depth window", "if (w > wMin && w < wMax) o.pos.x +=", "o.pos.x +="},
-            {"the sign flipped", "o.pos.x += s * gap / (w - gap)", "o.pos.x -= s * gap / (w - gap)"},
-            {"the divisor w, not w - gap", "s * gap / (w - gap)", "s * gap / w"},
-            {"the wrong axis", "o.pos.x += s * gap / (w - gap)", "o.pos.y += s * gap / (w - gap)"},
-            {"the far end of the window ignored", "w < wMax", "w < 1000.0"},
-            {"the near end of the window ignored", "w > wMin &&", "w > 0.0 &&"},
+            {"no window", "const bool win = d > mv.y && d < mv.z;", "const bool win = true;"},
+            {"the far end of the window ignored", "d < mv.z", "d < 1000.0"},
+            {"the near end of the window ignored", "d > mv.y && ", ""},
+            {"the sign of the anchor", "const float3 v = p1 - an.xyz;", "const float3 v = p1 + an.xyz;"},
+            {"the sign of the gap", "((d - mv.x) / d)", "((d + mv.x) / d)"},
+            {"y read down", "c.y * (tn.w - tn.z) * 0.5 +", "-c.y * (tn.w - tn.z) * 0.5 +"},
+            {"the left and right tangents mixed", "w * (tn.y + tn.x) * 0.5, c.y", "w * (tn.y - tn.x) * 0.5, c.y"},
+            {"the translation dropped", "const float3 p1 = p + tr.xyz;", "const float3 p1 = p;"},
+            {"the translation's sign", "const float3 p1 = p + tr.xyz;", "const float3 p1 = p - tr.xyz;"},
+            {"the move about the origin, not the anchor", "q = an.xyz + v * ((d - mv.x) / d);", "q = v * ((d - mv.x) / d);"},
+            {"w kept, not the moved depth", "(c.z / w) * q.z, q.z);", "(c.z / w) * q.z, w);"},
+            {"the NDC z not kept", "(c.z / w) * q.z", "c.z"},
+            {"no guard against ending behind the eye", "if (!(q.z > 0.01)) return c;", ""},
+            {"a `pre` that is the moved position", "o.pre = v[i].pos;", "o.pre = turretMove(v[i].pos);"},
         };
         for (uint32_t fam = 0; fam < st::kSignatureCount; ++fam) {
             g_fam = int(fam);
@@ -1479,18 +1701,18 @@ int main(int argc, char** argv) {
             for (const Mutant& m : mutants) {
                 const std::string mutated = replaceAll(text, m.from, m.to);
                 check(mutated != text, "a mutant differs from the production text");
-                const auto mg = gsFromText(mutated);
+                const auto mg = twinFromText(int(fam), mutated);
                 Fails fails;
-                geometryCases(mg.Get(), fails);
-                pushCases(mg.Get(), fails);
+                moveCases(int(fam), mg.Get(), fails);
+                moveImages(mg.Get(), fails);
                 char what[200];
-                std::snprintf(what, sizeof(what), "the mutant \"%s\" of signature %u's shader is caught by the geometry and push cases", m.name, fam);
+                std::snprintf(what, sizeof(what), "the mutant \"%s\" of signature %u's shader is caught by the move cases", m.name, fam);
                 check(fails.n > 0, what);
             }
             {   // a pass-through that reverses every triangle's winding (what a shader that did not keep the input assembler's order would do to a strip): caught by the strip cases
-                const std::string flipped = replaceAll(text, "Vertex o = v[i];", "Vertex o = v[(i == 0) ? 0 : (3 - i)];");
+                const std::string flipped = replaceAll(text, "o.v = v[i];", "o.v = v[(i == 0) ? 0 : (3 - i)];");
                 check(flipped != text, "the winding mutant differs from the production text");
-                const auto mg = gsFromText(flipped);
+                const auto mg = twinFromText(int(fam), flipped);
                 Fails fails;
                 stripCases(mg.Get(), fails);
                 char what[200];
@@ -1520,7 +1742,7 @@ int main(int argc, char** argv) {
             }
         }
         wiringCases();
-        std::printf("PASS srv_turret_hud_test: %u checks; the turret shaders, binding, constants, maths and Scorpion latch on WARP, six shader mutants (and the push's cases) in each of eight signatures and one binding mutant caught\n", g_checks);
+        std::printf("PASS srv_turret_hud_test: %u checks; the turret shaders, binding, constants, maths, anchor and Scorpion latch on WARP, fourteen shader mutants and the winding mutant in each of eight signatures and one binding mutant caught\n", g_checks);
         return 0;
     } catch (const std::exception& e) {
         std::printf("FAIL %s (%u checks)\n", e.what(), g_checks);

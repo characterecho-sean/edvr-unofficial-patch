@@ -1168,8 +1168,9 @@ static void selfTest() {
     // The SRV turret HUD's eight pass-through geometry shaders (src/d3d11/srv_turret_hud_shader.h; issue 140): new, so held to their own contract -- the symbol, source name, entry,
     // profile and flags, the text each compiles, and what its DXBC reflects: a Shader Model 5 geometry shader that takes triangles, emits at most three vertices as a triangle
     // strip, takes the output signature of its family's vertex shader element for element and register for register (srv_turret_math.h kSignatures, read from the fxc disassembly
-    // of the dumps' bytecode: the semantic, its index, the register it sits in and the components it writes, with SV_Position last) and gives the same signature out, and reads one
-    // 16-byte constant buffer, Turret at b0 (srv_turret_math.h's TurretParams). A change to any of them fails here, in the build.
+    // of the dumps' bytecode: the semantic, its index, the register it sits in and the components it writes, with SV_Position last) and gives the same signature out followed by one
+    // more element, TURRETPRE (four components, the clip position before the move, in the register after them), and reads one 64-byte constant buffer, Turret at b0 (srv_turret_math.h's
+    // TurretParams: four registers). A change to any of them fails here, in the build.
     {
         namespace stm = edvr::srv_turret;
         struct TurretContract { const char* symbol; const char* name; const char* source; };
@@ -1202,8 +1203,8 @@ static void selfTest() {
                       "the turret HUD shaders reflect as Shader Model 5 geometry shaders");
                 check(reflection && reflection->GetGSInputPrimitive() == D3D_PRIMITIVE_TRIANGLE &&
                       desc.GSOutputTopology == D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP && desc.GSMaxOutputVertexCount == 3 &&
-                      desc.InputParameters == sig.count && desc.OutputParameters == sig.count,
-                      "...taking triangles and emitting at most three vertices as a triangle strip, over as many input and output elements as the family's signature has");
+                      desc.InputParameters == sig.count && desc.OutputParameters == sig.count + 1,
+                      "...taking triangles and emitting at most three vertices as a triangle strip, over as many input elements as the family's signature has and one output element more");
                 bool elements = reflection != nullptr;
                 for (UINT e = 0; elements && e < sig.count; ++e) {
                     D3D11_SIGNATURE_PARAMETER_DESC in{}, out{};
@@ -1213,13 +1214,17 @@ static void selfTest() {
                                !std::strcmp(out.SemanticName, sig.el[e].name) && out.SemanticIndex == sig.el[e].index && out.Register == e && out.Mask == mask;
                 }
                 check(elements, "...its input and output are the family's vertex shader's output signature, element for element and register for register");
+                D3D11_SIGNATURE_PARAMETER_DESC pre{};
+                check(reflection && SUCCEEDED(reflection->GetOutputParameterDesc(sig.count, &pre)) && !std::strcmp(pre.SemanticName, stm::kPreSemantic) && pre.SemanticIndex == 0 &&
+                          pre.Register == sig.count && pre.Mask == 0xF,
+                      "...and its output ends with the TURRETPRE element, four components, in the register after the signature's");
                 D3D11_SHADER_INPUT_BIND_DESC bind{};
                 ID3D11ShaderReflectionConstantBuffer* cbuffer = reflection ? reflection->GetConstantBufferByName("Turret") : nullptr;
                 D3D11_SHADER_BUFFER_DESC bufferDesc{};
                 check(reflection && SUCCEEDED(reflection->GetResourceBindingDescByName("Turret", &bind)) && bind.Type == D3D_SIT_CBUFFER &&
-                      bind.BindPoint == 0 && bind.BindCount == 1 && cbuffer && SUCCEEDED(cbuffer->GetDesc(&bufferDesc)) && bufferDesc.Size == 16 &&
+                      bind.BindPoint == 0 && bind.BindCount == 1 && cbuffer && SUCCEEDED(cbuffer->GetDesc(&bufferDesc)) && bufferDesc.Size == 64 &&
                       desc.ConstantBuffers == 1 && desc.BoundResources == 1,
-                      "...reading one 16-byte constant buffer, Turret at b0, and nothing else");
+                      "...reading one 64-byte constant buffer, Turret at b0, and nothing else");
             }
         }
     }
