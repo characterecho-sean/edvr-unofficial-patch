@@ -8,7 +8,9 @@
   with a good anchor the layout is the goal (arcs 1.65-1.96 m behind the
   location panel 1.14 m and SYSTEMS 1.27 m). For its first 45 s the anchor
   sat on a frozen headset pose a metre off and the panel stretched (journal).
-  The anchor fix (cd67ee63) is BUILT, NOT FLOWN. Branch
+  The anchor fix (cd67ee63) FLOWN OK (head_offset 2.6 cm), but moved parts
+  the game drew behind the eye were depth-clipped (journal): the depth fix
+  (9330af6e) is BUILT, NOT FLOWN. Branch
   `claude/srv-turret-hud`, local only. Issue #140. Test install: Steam
   (`--target steam --scope both --xess`).
 - **What is wrong (the game's own placement):** the turret view's whole HUD
@@ -266,3 +268,26 @@ location panel, as Sean asked.
 cd67ee63: a settle frame counts only when the head moved, so a frozen pose
 never latches; a latched anchor more than 0.35 m from the head for 90
 frames is taken again ("head away").
+
+### 2026-10-31: the anchor fix flown; depth clipping found offline
+
+Flight 5ed1c405 (Steam, build matches), dump 073113451001; camera back 35,
+HUD forward 70, panels back 140, radar 0. The anchor held (head_offset 2.6
+cm). Sean: "basically the right spot, but if I move my head it clips some
+of the display, also the radar is distorted, not really visible".
+
+The dump's draw state gives the hologram families' cb0[6] = (0, 0, 0,
+0.025): infinite reversed Z with a 2.5 cm near plane, so NDC z = 0.025 / w.
+The shader kept each vertex's original NDC z. A vertex the game put behind
+the eye (w < 0), or inside the near plane, therefore had a depth outside
+[0, 1] after the move, and the rasterizer's depth clip cut it. The capture
+lines at 07:31:10 put the radar 0.21-0.32 m from the anchor before the
+move, at an original w of about -0.2 to +0.03, behind or at the eye: nearly
+all of it was cut. The panel, about 0.2 m ahead at camera back 35, is cut
+as soon as a lean takes its original place behind the eye. A second fault:
+a move ending behind the eye returned the UNMOVED vertex, so a triangle
+could mix moved and unmoved corners.
+
+9330af6e: the game's own NDC z where it is valid, else 0.999 (the nearest
+valid reversed-Z depth); every corner moved, the rasterizer clipping what
+is truly behind the eye; the capture line counts the fallbacks (`zfix`).
