@@ -2134,45 +2134,16 @@ void testLegacyOnFootRowsStayOutOfMenu() {
         check(found == 1 && shaped && beside,
               "Pistol sprint arm swing phase (F169, TEMPORARY) is one [experimental] number row right after Crouched ADS torso square, on its page and under its heading: 0..1, step 0.05, unsigned, live, shipped 0.5 (F173; 0.0 before)");
     }
-    // F194 (TEMPORARY A/B): "Look to aim: eye height as mouse look (test)" is one [experimental] choice row (on, off) right after "Pistol sprint arm swing phase", on the same page and under the same heading, live, shipped on.
-    // (F194's other row, "Look to aim: aim at the middle of the picture (test)", is removed with its key: F194b.)
+    // F194b / F195b: look to aim's test rows are gone with their keys. The picture-centre aim (F194 part 1) was removed on 2026-10-31; the eye height row (F194 part 2) and the keep-the-aim's-pitch row (F195) were
+    // retired the same day on the pilot's word, and their behaviour is unconditional. No row of the experimental section is a "Look to aim: ... (test)" row, and none names those keys.
     {
-        int swingRow = -1, heightRow = -1, heightFound = 0, aimFound = 0;
-        bool shaped = true;
+        int found = 0;
         for (int i = 0; i < kCount; ++i) {
             const MenuRowDef& d = kMenuRows[i];
-            if (strstr(d.key, "look_to_aim_aims_at") != nullptr || strstr(d.label, "aim at the middle of the picture") != nullptr) ++aimFound;
-            if (strcmp(d.section, "experimental") != 0) continue;
-            if (strcmp(d.key, "native_on_foot_pistol_sprint_swing_phase") == 0) swingRow = i;
-            if (strcmp(d.key, "native_on_foot_look_to_aim_eye_height_as_mouse_look") == 0) {
-                heightRow = i;
-                ++heightFound;
-                shaped = shaped && d.kind == MenuKind::Choice && d.tier == MenuTier::Experimental && strcmp(d.label, "Look to aim: eye height as mouse look (test)") == 0 && strcmp(d.choices, "on|off") == 0 &&
-                         d.applies == 1 && strcmp(d.shipped, "on") == 0;
-            }
+            if (strstr(d.key, "look_to_aim_aims_at") != nullptr || strstr(d.key, "look_to_aim_eye_height") != nullptr || strstr(d.key, "look_to_aim_keeps") != nullptr) ++found;
+            if (strcmp(d.section, "experimental") == 0 && strncmp(d.label, "Look to aim:", 12) == 0) ++found;
         }
-        const bool beside = swingRow >= 0 && heightRow == swingRow + 1 && strcmp(kMenuRows[heightRow].page, kMenuRows[swingRow].page) == 0 && strcmp(kMenuRows[heightRow].group, kMenuRows[swingRow].group) == 0;
-        check(heightFound == 1 && aimFound == 0 && shaped && beside,
-              "Look to aim: eye height as mouse look (F194, TEMPORARY A/B) is one [experimental] choice row (on, off) right after Pistol sprint arm swing phase, on its page and under its heading: live, shipped on; the picture-centre aim row is gone (F194b)");
-    }
-    // F195 (TEMPORARY A/B): "Look to aim: keep the aim's pitch (test)" is one [experimental] choice row (on, off) right after "Look to aim: eye height as mouse look (test)", on the same page and under the same heading, live, shipped on.
-    {
-        int heightRow = -1, keepRow = -1, keepFound = 0;
-        bool shaped = true;
-        for (int i = 0; i < kCount; ++i) {
-            const MenuRowDef& d = kMenuRows[i];
-            if (strcmp(d.section, "experimental") != 0) continue;
-            if (strcmp(d.key, "native_on_foot_look_to_aim_eye_height_as_mouse_look") == 0) heightRow = i;
-            if (strcmp(d.key, "native_on_foot_look_to_aim_keeps_aim_pitch") == 0) {
-                keepRow = i;
-                ++keepFound;
-                shaped = shaped && d.kind == MenuKind::Choice && d.tier == MenuTier::Experimental && strcmp(d.label, "Look to aim: keep the aim's pitch (test)") == 0 && strcmp(d.choices, "on|off") == 0 &&
-                         d.applies == 1 && strcmp(d.shipped, "on") == 0;
-            }
-        }
-        const bool beside = heightRow >= 0 && keepRow == heightRow + 1 && strcmp(kMenuRows[keepRow].page, kMenuRows[heightRow].page) == 0 && strcmp(kMenuRows[keepRow].group, kMenuRows[heightRow].group) == 0;
-        check(keepFound == 1 && shaped && beside,
-              "Look to aim: keep the aim's pitch (F195, TEMPORARY A/B) is one [experimental] choice row (on, off) right after Look to aim: eye height as mouse look, on its page and under its heading: live, shipped on");
+        check(found == 0, "Look to aim's three test rows (aim at the middle of the picture, eye height as mouse look, keep the aim's pitch; F194, F195) are gone with their keys: no experimental \"Look to aim: ...\" row, no row of those keys");
     }
     // F157: the developer tier's "Body draw to hide (test)" dial (F154 to F156) is retired: the key stays in edvr.ini on a hidden retired line (`# ui: hidden -- retired (F157)`), so it
     // has a row in neither menu, the developer tier's included, and the dial's heading is gone with it.

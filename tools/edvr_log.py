@@ -12192,9 +12192,9 @@ def _hj_f109_look(rows, ctx):
     clean, dirty, unsplit = _hsum(sec, "clean"), _hsum(sec, "dirty"), _hsum(sec, "unsplit")
     text = ("%d s engaged (%d engage(s)): the head turned %.1f deg, the game applied %.1f for it; the reported head off the aim 3 deg or more in %d of %d still "
             "seconds; the player's own pitch %.1f deg; dropped stick %d, mouse %d, pitch %d calls; split clean %d, dirty %d, unsplit %d; blocked %d, spring calls %d; "
-            "F98c refused %d calls; guard trips %d, the body's yaw from the aim at most %.1f deg") % (
+            "guard trips %d, the body's yaw from the aim at most %.1f deg") % (
         len(sec), len(eng), head, applied, len(off), len(still), pitch, _hsum(sec, "ds"), _hsum(sec, "dm"), _hsum(sec, "dp"), clean, dirty, unsplit,
-        _hsum(sec, "blocked"), _hsum(sec, "spring"), _hsum(sec, "gated"), len(trips), max(float(r["bmax"]) for r in sec))
+        _hsum(sec, "blocked"), _hsum(sec, "spring"), len(trips), max(float(r["bmax"]) for r in sec))
     gate = [r for r in sec if r.get("gheld") is not None]
     if gate or held or rearm:
         text += ("; F109b's guard: held %d (the game moved the view%s), new bases for the player's own turn %d, growth restarted after a rows gap %d; latched trips "
@@ -12398,7 +12398,7 @@ def _hj_f138_pitched(rows, ctx):
     applied = [r for r in sec if int(r["napplied"]) > 0]
     added = sum(int(r["napplied"]) for r in sec)
     measured = sum(int(r["nmeasured"]) for r in sec)
-    refused, lta = sum(int(r["refused"]) for r in sec), sum(int(r["lta"]) for r in sec)
+    refused = sum(int(r["refused"]) for r in sec)
     returned, retrefused, notneeded = (sum(int(r[k]) for r in sec) for k in ("returned", "retrefused", "notneeded"))
     empty = [r for r in sec if r["item"] == "none"]
     whys = collections.Counter()
@@ -12408,9 +12408,9 @@ def _hj_f138_pitched(rows, ctx):
             whys[name.strip()] += int(count)
     modes = sorted(set(r["mode"] for r in sec))
     text = ("%d pitched s (%d calls; %s), aim %+.0f..%+.0f deg; the camera sank up to %.1f cm against the stance; added in %d s (%d calls, up to %.1f cm), measured only %d calls; "
-            "the settle refused for the aim's pitch %d calls (look to aim's gate %d); returned to the stance's raise %d times (refused %d, not needed %d)") % (
+            "the settle refused for the aim's pitch %d calls; returned to the stance's raise %d times (refused %d, not needed %d)") % (
         n, calls, " and ".join(modes), min(float(r["amin"]) for r in sec), max(float(r["amax"]) for r in sec), max(float(r["smax"]) for r in sec), len(applied), added,
-        max([float(r["amaxadd"]) for r in applied] or [0.0]), measured, refused, lta, returned, retrefused, notneeded)
+        max([float(r["amaxadd"]) for r in applied] or [0.0]), measured, refused, returned, retrefused, notneeded)
     # F170: the reference the considered calls used (a log from before F170 has no such column), and the empty-hand seconds that had the view INSIDE the torso with none at all
     withref = [r for r in sec if r.get("rsettled") is not None]
     if withref:
@@ -15077,17 +15077,17 @@ def _hj_f186_stops(rows, ctx):
     named = "; ".join("aim %+.1f deg, %s (e %.1f cm, applied %.1f cm)" % (float(r["aim"]), r["why"], float(r["perp"]), float(r["app"])) for r in stop) or "no stop line in the window"
     return ("PARTIAL", text + ": " + named)
 
-# F194: look to aim's eye height settles as mouse look's does (look to aim's own 10 deg gate on the carried pitch skipped), and the view's height at each edge of look to aim. One TEMPORARY A/B key
-# (experimental.native_on_foot_look_to_aim_eye_height_as_mouse_look). The lines are formatSecond and HeightProbe::format in src/d3d11/native_on_foot_f194.h and the key's note in native_on_foot.cpp: a 1 s line
-# while look to aim is engaged, and one line at each engage and disengage with the view's height before and 0.5 s, 1 s and 3 s after. F194 part 1 (look to aim aiming at the middle of the picture, with its key
-# and its frustum line) was removed on 2026-10-31 (F194b); the rule that judged it is gone, and a log that carries its lines is read as before: the frustum line and the key's note belong to no rule, and the 1 s line
-# of that build (which began with the picture-centre pitch in force and gave the forward axis's and the ray's pitch from the aim) still parses.
+# F194: look to aim's eye height settles as mouse look's does, and the view's height at each edge of look to aim. The test key (experimental.native_on_foot_look_to_aim_eye_height_as_mouse_look) was RETIRED in F195b and
+# look to aim's own 10 deg settle gate with it: F138/F139's 20 deg gate is the only one. The lines are formatSecond and HeightProbe::format in src/d3d11/native_on_foot_f194.h: a 1 s line while look to aim is engaged,
+# and one line at each engage and disengage with the view's height before and 0.5 s, 1 s and 3 s after. F194 part 1 (look to aim aiming at the middle of the picture, with its key and its frustum line) was removed on
+# 2026-10-31 (F194b), and the rule that judged it is gone. A log of an earlier build is read as before: the frustum line and the key notes belong to no rule, and the 1 s line still parses in all three of its forms (the F194
+# build's, which began with the picture-centre pitch in force and gave the forward axis's and the ray's pitch from the aim; the F194b build's, with look to aim's own 10 deg gate in the settle field; and the present one).
 H194_LABEL_HEIGHT = "native on foot look to aim height (F194)"
-H194_HEIGHTKEY_RE = r"native on foot look to aim height \(F194, TEMPORARY A/B\): experimental\.native_on_foot_look_to_aim_eye_height_as_mouse_look is (?P<key>on|off) -- "
 H194_SEC_RE = (r"native on foot look to aim height \(F194\) 1 s: (?:the picture-centre pitch in force (?P<centre>%s) deg \(look to aim aims at the picture's centre: (?P<key>on|off)\); )?"
                r"the headset's pitch \(LOCAL\) mean (?P<local>%s) deg; carried aim pitch mean (?P<carried>%s) deg \(the game's aim (?P<root>%s) deg\); the reported head's pitch from "
-               r"the aim mean(?:: the forward axis (?P<fwd>%s) deg, the ray in force (?P<ray>%s) deg| (?P<off>%s) deg); the settle: look to aim's 10 deg gate (?P<gate>would have refused \(skipped\)|refused) "
-               r"(?P<ten>\d+) of (?P<calls>\d+) pin calls, F138/F139's 20 deg gate refused (?P<f139>\d+), taken (?P<taken>\d+); the published raise mean (?P<raise>%s) cm; "
+               r"the aim mean(?:: the forward axis (?P<fwd>%s) deg, the ray in force (?P<ray>%s) deg| (?P<off>%s) deg); the settle: "
+               r"(?:look to aim's 10 deg gate (?P<gate>would have refused \(skipped\)|refused) (?P<ten>\d+) of (?P<calls>\d+) pin calls, F138/F139's 20 deg gate refused (?P<f139>\d+), taken (?P<taken>\d+)"
+               r"|F138/F139's 20 deg gate refused (?P<f139b>\d+), taken (?P<takenb>\d+) of (?P<callsb>\d+) pin calls); the published raise mean (?P<raise>%s) cm; "
                r"the drawn eye over the animated neck mean (?P<eye>%s) cm$" % ((_HN,) * 9))
 H194_VIEW_RE = (r"native on foot look to aim height \(F194\) (?P<kind>engage|disengage): the view's height \(the drawn eye above the character's origin, the hip frames read\): "
                 r"before (?P<before>.+?); after 0\.5 s (?P<a1>.+?); after 1 s (?P<a2>.+?); after 3 s (?P<a3>.+)$")
@@ -15096,28 +15096,31 @@ H194_PITCH_RE = re.compile(r"carried aim pitch (?P<p>[+-]\d+\.\d) deg")
 H194_VIEW_FLAG_CM = 4.0    # an engage after which the view stood this far from where it was 3 s on: the pilot's "my view dropped"
 
 
-def _h194_last_key(*row_lists):
-    """The newest key state ("on" or "off") among the rows that carry one, by log order; None without a row."""
-    pool = sorted((r for rows in row_lists for r in rows), key=lambda r: r.get("_order", 0))
-    return pool[-1]["key"] if pool else None
+def _h194_sec(r):
+    """(pin calls, calls F138/F139's gate refused, stances taken, the old 10 deg gate's (state, count) or None) of a 1 s row, in whichever form the build wrote it."""
+    if r.get("callsb") is not None:
+        return int(r["callsb"]), int(r["f139b"]), int(r["takenb"]), None
+    return int(r["calls"]), int(r["f139"]), int(r["taken"]), (r["gate"], int(r["ten"]))
 
 
 def _hj_f194_height(rows, ctx):
-    """F194, part 2: look to aim's eye height settles as mouse look's does. The 1 s line gives look to aim's 10 deg gate on the carried pitch (refused N, or would have refused N and skipped, with the key on),
-    F138/F139's 20 deg gate on the game's aim, the stances taken, and the drawn eye over the animated neck; each engage and disengage has a line with the view's height before and 0.5 s, 1 s, 3 s after.
-    NEVER APPLIED: the key is on and the newest 1 s line still says the gate refused; or the hook wrote no pin call to the window in any engaged second (the gate and the instrument did not run).
-    PARTIAL: an engage after which the view stood 4 cm or more from where it was 3 s on (the pilot's drop); no stance taken in 10 or more engaged seconds. OK with the figures. No line, no verdict."""
-    sec, view, keyn = rows.get("sec", []), rows.get("view", []), rows.get("heightkey", [])
-    if not (sec or view or keyn):
+    """F194: look to aim's eye height settles as mouse look's does (F139's 20 deg gate on the game's aim, nothing drawn, is the only settle gate; look to aim's own 10 deg gate on the carried pitch is gone since F195b),
+    and the view's height at each edge of look to aim. The 1 s line gives F138/F139's gate (calls refused), the stances taken, the pin calls the hook wrote to its window and the drawn eye over the animated neck; each
+    engage and disengage has a line with the view's height before and 0.5 s, 1 s, 3 s after. NEVER APPLIED: the hook wrote no pin call to the window in any engaged second (the instrument did not run); or look to aim
+    was engaged (F109's 1 s lines) and no F194 1 s line was written. PARTIAL: an engage after which the view stood 4 cm or more from where it was 3 s on (the pilot's drop); no stance taken in 10 or more engaged
+    seconds. OK with the figures. The rows of a build that still had look to aim's own gate are read; what that gate did is named, not judged. No line, no verdict."""
+    sec, view = rows.get("sec", []), rows.get("view", [])
+    if not (sec or view):
         return None
-    key = _h194_last_key(keyn) or (("on" if sec[-1]["gate"].startswith("would") else "off") if sec else "on")
-    calls = sum(int(r["calls"]) for r in sec)
-    ten, f139, taken = sum(int(r["ten"]) for r in sec), sum(int(r["f139"]) for r in sec), sum(int(r["taken"]) for r in sec)
+    norm = [_h194_sec(r) for r in sec]
+    calls, f139, taken = sum(n[0] for n in norm), sum(n[1] for n in norm), sum(n[2] for n in norm)
     parts = []
     if sec:
-        eye = sum(float(r["eye"]) * int(r["calls"]) for r in sec) / calls if calls else 0.0
-        parts.append("%d engaged s, %d pin calls: look to aim's 10 deg gate %s %d, F138/F139's 20 deg gate refused %d, stances taken %d; the drawn eye over the animated neck %+.1f cm" % (
-            _hsecs(sec), calls, "would have refused (skipped)" if key == "on" else "refused", ten, f139, taken, eye))
+        eye = sum(float(r["eye"]) * n[0] for r, n in zip(sec, norm)) / calls if calls else 0.0
+        parts.append("%d engaged s, %d pin calls: F138/F139's 20 deg gate refused %d, stances taken %d; the drawn eye over the animated neck %+.1f cm" % (_hsecs(sec), calls, f139, taken, eye))
+        olds = [n[3] for n in norm if n[3]]
+        if olds:
+            parts[-1] += " [%d row(s) of a build with look to aim's own 10 deg gate: it %s %d calls]" % (len(olds), "would have refused (skipped)" if olds[-1][0].startswith("would") else "refused", sum(o[1] for o in olds))
     drops = []
     for r in view:
         a3 = H194_CM_RE.search(r["a3"])
@@ -15126,39 +15129,34 @@ def _hj_f194_height(rows, ctx):
         parts.append("%s: %s" % (r["kind"], ", ".join("%s %s" % (lab, ("%s cm" % m.group("cm")) if m else "not read") for lab, m in zip(("0.5 s", "1 s", "3 s"), cms)) + ("; carried aim pitch %s deg at 3 s" % p3.group("p") if p3 else "")))
         if r["kind"] == "engage" and a3 and abs(float(a3.group("cm"))) >= H194_VIEW_FLAG_CM:
             drops.append(float(a3.group("cm")))
-    text = "; ".join(parts) if parts else "the key is %s" % key
-    if not parts:
-        text += " (no engaged second yet)"
+    text = "; ".join(parts)
     f109 = (ctx.get("look to aim (F109)") or {}).get("sec", [])
     if not sec and f109:
-        return ("NEVER APPLIED", text + "; look to aim was engaged for %d s (F109's 1 s lines) and no F194 1 s line was written: the gate's instrument did not run" % _hsecs(f109))
-    if sec and key == "on" and not sec[-1]["gate"].startswith("would"):
-        return ("NEVER APPLIED", text + "; the key is on but the newest 1 s line says the 10 deg gate refused (it was not skipped)")
+        return ("NEVER APPLIED", text + "; look to aim was engaged for %d s (F109's 1 s lines) and no F194 1 s line was written: the instrument did not run" % _hsecs(f109))
     if sec and not calls:
-        return ("NEVER APPLIED", text + "; the pin hook wrote no call to the window in any engaged second: the gate and the instrument did not run")
+        return ("NEVER APPLIED", text + "; the pin hook wrote no call to the window in any engaged second: the instrument did not run")
     if drops:
         return ("PARTIAL", text + "; the view stood %s cm from where it was after %d engage(s) (%.0f cm or more): the pilot's drop" % (", ".join("%+.1f" % d for d in drops), len(drops), H194_VIEW_FLAG_CM))
     if sec and _hsecs(sec) >= 10 and not taken:
         return ("PARTIAL", text + "; no stance was taken in %d engaged seconds (F138/F139 refused %d calls)" % (_hsecs(sec), f139))
     return ("OK", text)
 
-# F195: at a look-to-aim engage the aim keeps its pitch where the mouse left it (TEMPORARY A/B experimental.native_on_foot_look_to_aim_keeps_aim_pitch): the pitch offset of the reported head from the aim,
-# up to 15 deg either way, stays, and only the yaw (and the pitch beyond 15 deg) is centred. The line is F109's `centred:` line, which gained "pitch kept %+.2f deg, centred %+.2f deg (F195: on|off)"
-# (native_on_foot.cpp, ltaFollow); a build before F195 wrote the line without it (read, and no verdict), and the key's note is the F195-tagged line of readKey. The F109 rule's standing-offset judgement
-# takes the pitch each engage kept off the offset it reads (the kept offset is on purpose).
+# F195: at a look-to-aim engage the aim keeps its pitch where the mouse left it: the pitch offset of the reported head from the aim, up to 15 deg either way, stays, and only the yaw (and the pitch beyond 15 deg) is
+# centred. Behaviour since F195b (the A/B key experimental.native_on_foot_look_to_aim_keeps_aim_pitch was RETIRED). The line is F109's `centred:` line, which ends "pitch kept %+.2f deg, centred %+.2f deg" (native_on_foot.cpp,
+# ltaFollow); the A/B build wrote "(F195: on|off)" after it (read: a row with the key off is the whole centring, named and not judged), the F194 build wrote the picture-centre pitch and the forward axis's angles before it
+# (read), and a build before F195 wrote none of it (read, and no verdict). The F109 rule's standing-offset judgement takes the pitch each engage kept off the offset it reads (the kept offset is on purpose).
 H195_NAME = "look to aim keeps pitch (F195)"
 H195_LABEL = "native on foot look to aim (F109): centred: the reported head was"
 H195_CENTRED_RE = (r"native on foot look to aim \(F109\): centred: the reported head was yaw (?P<oy>%s) pitch (?P<op>%s) deg from the aim at the engage \((?P<ms>\d+) ms after it\)"
                    r"(?:; the picture-centre pitch in force (?P<pc>%s) deg \(F194\), the forward axis itself yaw \S+ pitch \S+ deg from the aim)?"
-                   r"(?:; pitch kept (?P<kept>%s) deg, centred (?P<cen>%s) deg \(F195: (?P<key>on|off)\))?; (?P<what>.+)$" % ((_HN,) * 5))
-H195_KEYNOTE_RE = r"native on foot look to aim \(F195, TEMPORARY A/B\): experimental\.native_on_foot_look_to_aim_keeps_aim_pitch is (?P<key>on|off) -- "
+                   r"(?:; pitch kept (?P<kept>%s) deg, centred (?P<cen>%s) deg(?: \(F195: (?P<key>on|off)\))?)?; (?P<what>.+)$" % ((_HN,) * 5))
 H195_KEEP_DEG = 15.0       # the most pitch offset an engage keeps (nofoot::f195::kKeepPitchDeg)
 H195_MIN_OWED = 1.0        # an engage with a pitch offset under this has nothing worth keeping
 H195_TOL = 0.05            # the log prints hundredths of a degree
 
 
 def _h195_kept_before(order, kept_rows):
-    """The pitch (deg) the newest centred line before log position order kept; 0 without one (a window that opened mid-engagement, a build before F195, the key off)."""
+    """The pitch (deg) the newest centred line before log position order kept; 0 without one (a window that opened mid-engagement, a build before F195, the A/B build with its key off)."""
     kept = 0.0
     for o, k in kept_rows:
         if o < order:
@@ -15175,19 +15173,19 @@ def _h195_kept_rows(ctx):
 
 
 def _hj_f195_keep(rows, ctx):
-    """F195: at a look-to-aim engage the aim keeps its pitch where the mouse left it. Each engage's centred line gives the reported head's pitch offset from the aim (op), the part kept (the offset,
-    clamped to +-15 deg) and the part centred (the rest). NEVER APPLIED: the key is on, engages had a pitch offset of 1 deg or more, and none kept it. PARTIAL: some did not. IDLE: the key is off (F109's
-    full centring), or no engage had a pitch offset worth keeping. OK with the figures. A line from a build before F195 is read and gives no verdict. No line, no verdict."""
-    ce, kn = [r for r in rows.get("centred", []) if r.get("key")], rows.get("keynote", [])
-    if not ce and not kn:
-        return None
-    key = _h194_last_key(ce, kn)
+    """F195: at a look-to-aim engage the aim keeps its pitch where the mouse left it. Each engage's centred line gives the reported head's pitch offset from the aim (op), the part kept (the offset, clamped to
+    +-15 deg) and the part centred (the rest). NEVER APPLIED: engages had a pitch offset of 1 deg or more and none kept it. PARTIAL: some did not. IDLE: no engage had a pitch offset worth keeping. OK with the
+    figures. A line from a build before F195 is read and gives no verdict; a row of the A/B build with its key off is named and not judged. No line, no verdict."""
+    ce = [r for r in rows.get("centred", []) if r.get("kept") is not None]
     if not ce:
-        return ("IDLE", "the key is %s; no engage was centred in the window" % key)
-    on = [r for r in ce if r["key"] == "on"]
-    text = "%d engage(s) centred (%d with the key on)" % (len(ce), len(on))
+        return None
+    off = [r for r in ce if r.get("key") == "off"]
+    on = [r for r in ce if r.get("key") != "off"]
+    text = "%d engage(s) centred" % len(on)
+    if off:
+        text += " (and %d of the A/B build with its key off: the whole offset centred, not judged)" % len(off)
     if not on:
-        return ("IDLE", text + "; the key is off: the aim is centred on the head in yaw and pitch, whole (F109)")
+        return ("IDLE", text)
     owed = [r for r in on if abs(float(r["op"])) >= H195_MIN_OWED]
     figures = ", ".join("%+.2f kept %+.2f centred %+.2f" % (float(r["op"]), float(r["kept"]), float(r["cen"])) for r in on[:8])
     text += ": the reported head's pitch offset from the aim, kept and centred (deg): %s%s" % (figures, " ..." if len(on) > 8 else "")
@@ -15195,10 +15193,11 @@ def _hj_f195_keep(rows, ctx):
         return ("IDLE", text + "; no engage had a pitch offset of %.0f deg or more to keep" % H195_MIN_OWED)
     missed = [r for r in owed if abs(float(r["kept"]) - max(-H195_KEEP_DEG, min(H195_KEEP_DEG, float(r["op"])))) > H195_TOL]
     if len(missed) == len(owed):
-        return ("NEVER APPLIED", text + "; the key is on and %d engage(s) had a pitch offset of %.0f deg or more, but none kept it (the whole offset was centred)" % (len(owed), H195_MIN_OWED))
+        return ("NEVER APPLIED", text + "; %d engage(s) had a pitch offset of %.0f deg or more, but none kept it (the whole offset was centred)" % (len(owed), H195_MIN_OWED))
     if missed:
         return ("PARTIAL", text + "; %d of %d engage(s) with a pitch offset to keep did not keep it" % (len(missed), len(owed)))
     return ("OK", text)
+
 
 def _hj_f95c_head_shadow(rows, ctx):
     """F95c: the head kept in the shadows. Per second: the local avatar's visibility calls, how many ran the head as shadow-only, the (head instance, view) pairs
@@ -16507,8 +16506,8 @@ HEALTH_RULES = (
                 r"guard: residual largest (?P<res>[\d.]+) deg \(base re-taken (?P<reb>\d+)\); the body's yaw from the aim (?P<body>%s) deg mean \(largest "
                 r"(?P<bmax>[\d.]+), (?P<bn>\d+) frames\); updates (?P<upd>\d+), dropped: stick (?P<ds>\d+), mouse (?P<dm>\d+), pitch (?P<dp>\d+); split: clean "
                 r"(?P<clean>\d+), dirty (?P<dirty>\d+), unsplit (?P<unsplit>\d+), gain yaw (?P<gy>%s) pitch (?P<gp>%s); blocked (?P<blocked>\d+) \((?:holding|not "
-                r"holding), held (?P<held>\d+) ticks\), spring calls (?P<spring>\d+) \((?P<springdeg>%s) deg\); F98c's settle refused (?P<gated>\d+) calls \(the aim "
-                r"pitched 10 deg or more\); centred (?P<centred>\d+)(?:; F109b's guard: held (?P<gheld>\d+) \(the view moved past the asks\), re-based "
+                r"holding), held (?P<held>\d+) ticks\), spring calls (?P<spring>\d+) \((?P<springdeg>%s) deg\); (?:F98c's settle refused (?P<gated>\d+) calls \(the aim "
+                r"pitched 10 deg or more\); )?centred (?P<centred>\d+)(?:; F109b's guard: held (?P<gheld>\d+) \(the view moved past the asks\), re-based "
                 r"(?P<guser>\d+) \(the player's own turn\), growth restarted (?P<ggap>\d+) \(a rows gap\), trips (?P<gtrips>\d+), re-armed (?P<grearm>\d+))?"
                 r"(?:; F109c: the gain's ends (?P<glo>%s) (?P<ghi>%s), foreign calls (?P<foreign>\d+) \(no gain taken\); the aim's pitch \(the FP root\) apart from the "
                 r"carried by (?P<drift>%s) deg more than at the engage \(largest (?P<dmax>[\d.]+) this second, (?P<dread>read|not read)\))?(?:; held by F131 (?P<f131n>\d+) ticks \((?P<f131why>[^)]*)\))?(?:; re-centred (?P<recentre>\d+))?"
@@ -16573,7 +16572,7 @@ HEALTH_RULES = (
                 r"G now (?P<rgn>%s) cm; target published (?P<rpub>%s) cm in (?P<rpubn>\d+) calls)?"
                 r"; EDVR carried up (?P<up>%s) forward (?P<fwd>%s) cm "
                 r"\(the raise, F137\); the view over the neck (?P<view>%s) cm; INSIDE (?P<inside>\d+) of (?P<insideof>\d+); the settle refused for the aim's pitch "
-                r"(?P<refused>\d+) calls \(look to aim's gate (?P<lta>\d+)\); returned to the stance's raise (?P<returned>\d+) times \(refused (?P<retrefused>\d+), not needed (?P<notneeded>\d+)\)" % ((_HN,) * 17)),
+                r"(?P<refused>\d+) calls(?: \(look to aim's gate (?P<lta>\d+)\))?; returned to the stance's raise (?P<returned>\d+) times \(refused (?P<retrefused>\d+), not needed (?P<notneeded>\d+)\)" % ((_HN,) * 17)),
         ("bins", r"native on foot pitched view \(F138\) 10 s bins \(per 10 deg of aim pitch: calls, the camera's sink, EDVR carried up, forward, the head's own height since "
                  r"the stance; cm\): (?P<mode>mouse look|look to aim), item (?P<item>.+?): (?=\[)(?P<body>.+)$"),
     ), _hj_f138_pitched),
@@ -16798,11 +16797,9 @@ HEALTH_RULES = (
     _hrule("look to aim eye height (F194)", ("F194",), (H194_LABEL_HEIGHT,), (
         ("sec", H194_SEC_RE),
         ("view", H194_VIEW_RE),
-        ("heightkey", H194_HEIGHTKEY_RE),
     ), _hj_f194_height),
-    _hrule(H195_NAME, ("F109", "F195"), (H195_LABEL,), (
+    _hrule(H195_NAME, ("F109",), (H195_LABEL,), (
         ("centred", H195_CENTRED_RE),
-        ("keynote", H195_KEYNOTE_RE),
     ), _hj_f195_keep),
     _hrule("ADS left arm bend (F185)", ("F185",), (H185_LABEL,), (
         ("sec", H185_RE),
@@ -20682,10 +20679,10 @@ def self_test_health():
         L109, S109, M109, A109 = "look to aim (F109)", "snap turn (F109)", "smooth turn (F109)", "ADS player turn (F109)"
 
         def look109(state="following", hy=12.0, hp=-3.0, ay=None, ap=None, uy=0.0, up=0.0, oy=0.2, op=-0.1, res=0.3, bmax=12.0, ds=0, dm=0, dp=0, clean=80,
-                    dirty=2, unsplit=0, blocked=0, spring=0, gated=0, gheld=0, guser=0, ggap=0, gtrips=0, grearm=0, foreign=0, drift=0.0, dread="read", f131n=0, f131why="none", recentre=0):
+                    dirty=2, unsplit=0, blocked=0, spring=0, gheld=0, guser=0, ggap=0, gtrips=0, grearm=0, foreign=0, drift=0.0, dread="read", f131n=0, f131why="none", recentre=0):
             return R("native on foot look to aim (F109) 1 s:", state, 0.0, 150, hy, hp, hy, hp, hy if ay is None else ay, hp if ap is None else ap, uy, up, oy, op,
                      0.5, "read", 30.0, -5.0, res, 0, 2.0, bmax, 88, 90, ds, dm, dp, clean, dirty, unsplit, 0.85, 0.85, blocked, "not holding", 0, spring, 0.0,
-                     gated, 1, gheld, guser, ggap, gtrips, grearm, 1.0, 0.85335, foreign, drift, abs(drift), dread, f131n, f131why, recentre)
+                     1, gheld, guser, ggap, gtrips, grearm, 1.0, 0.85335, foreign, drift, abs(drift), dread, f131n, f131why, recentre)
 
         KEYS109 = R("native on foot look to aim (F109): keys: %s, smoothing", "on", 150, "snap", 45)
         ENG109 = R("native on foot look to aim (F109): engaged:", "snap", 45, 150, ", their yaw turns the player in snaps", "")
@@ -20714,7 +20711,7 @@ def self_test_health():
                    "rows gap 1; latched trips 1, re-armed 1", "the guard tripped (GUARD TRIPPED: the view - head residual"], lacks=["UNPARSED"])
         check("F109b look: the F109 build's 1 s line (no gate fields) still reads", [ENG109, R("native on foot look to aim (F109) 1 s:", "following", 0.0, 150, 12.0,
               -3.0, 12.0, -3.0, 12.0, -3.0, 0.0, 0.0, 0.2, -0.1, 0.5, "read", 30.0, -5.0, 0.3, 0, 2.0, 12.0, 88, 90, 0, 0, 0, 80, 2, 0, 0.85, 0.85, 0,
-              "not holding", 0, 0, 0.0, 0, 1).split("; F109b's guard:")[0]], 0, [("OK", L109)], has=["1 s engaged"], lacks=["UNPARSED", "F109b's guard"])
+              "not holding", 0, 0, 0.0, 1).split("; F109b's guard:")[0]], 0, [("OK", L109)], has=["1 s engaged"], lacks=["UNPARSED", "F109b's guard"])
         # F109c: the F109b flight's cutter (08:57:13-32): the reported head 20-61 deg above the aim for 20 s, the aim's pitch 25 deg apart from the carried
         check("F109c look: the aim held off the head, its pitch apart from the account", [ENG109, look109(foreign=12)] + [look109(hy=5.0, hp=10.0, ap=0.0, op=36.0,
               drift=25.0)] * 4, 0, [("PARTIAL", L109)], has=["F109c: foreign calls 12 (the gain's ends 1.00000 0.85335), the aim's pitch apart from the carried by 5 deg "
@@ -20723,39 +20720,42 @@ def self_test_health():
         check("F109c look: a second's glance off the aim is not a hold", [ENG109] + [look109()] * 2 + [look109(op=15.0)] + [look109()] * 2, 0, [("OK", L109)],
               has=["F109c: foreign calls 0", "in 0 of 5 read seconds"], lacks=["UNPARSED", "off the head for"])
 
-        # ---- F194: look to aim's eye height settles as mouse look's does (TEMPORARY A/B key); the view's height at each edge. Part 1 (the picture-centre aim) was removed (F194b): its lines are still read ----
+        # ---- F194: look to aim's eye height settles as mouse look's does (behaviour since F195b); the view's height at each edge. The lines of the earlier builds are still read ----
         F194H = "look to aim eye height (F194)"
 
-        def heightkey194(key="on"):
-            return R("native on foot look to aim height (F194, TEMPORARY A/B): experimental.native_on_foot_look_to_aim_eye_height_as_mouse_look is %s", key, "x")
-
-        def sec194(local=0.0, carried=-3.0, root=-16.0, off=4.5, skipped=True, ten=60, calls=90, f139=0, taken=1, raise_=-5.0, eye=19.0):
+        def sec194(local=0.0, carried=-3.0, root=-16.0, off=4.5, f139=0, taken=1, calls=90, raise_=-5.0, eye=19.0):
             """The 1 s line, from the DLL's own format (formatSecond)."""
-            return R194("native on foot look to aim height (F194) 1 s: the headset's pitch (LOCAL) mean %+.1f deg", local, carried, root, off,
-                        "would have refused (skipped)" if skipped else "refused", ten, calls, f139, taken, raise_, eye)
+            return R194("native on foot look to aim height (F194) 1 s: the headset's pitch (LOCAL) mean %+.1f deg", local, carried, root, off, f139, taken, calls, raise_, eye)
 
         def view194(kind="engage", before="1.610 m, carried aim pitch +0.0 deg", a1="+0.0 cm (1.610 m), carried aim pitch -2.0 deg", a2="+0.0 cm (1.610 m), carried aim pitch -2.0 deg",
                     a3="+0.0 cm (1.610 m), carried aim pitch -2.0 deg"):
             """The edge's line, from the DLL's own format (HeightProbe::format)."""
             return R194("native on foot look to aim height (F194) %s: the view's height", kind, before, a1, a2, a3)
 
-        # the lines of the build that had part 1 (before F194b), as that build wrote them
-        OLD_FRUSTUM194 = "native on foot look to aim (F194): the picture's centre is 13.0 deg below the headset's forward axis (up 0.966, down 1.428 tangents); look to aim aims at it: on"
-        OLD_AIMKEY194 = ("native on foot look to aim (F194, TEMPORARY A/B): experimental.native_on_foot_look_to_aim_aims_at_picture_centre is on -- look to aim aims at the ray from the head through the middle of "
-                         "the picture; a change while look to aim is engaged is taken at its next engage (and at the end of an F131 hold, which engages afresh)")
+        # the 1 s lines of the builds before F195b, as those builds wrote them: with look to aim's own 10 deg gate in the settle field (F194b's), and with the picture-centre pitch before it (F194's)
+        OLD_SEC194B = ("native on foot look to aim height (F194) 1 s: the headset's pitch (LOCAL) mean +0.0 deg; carried aim pitch mean -3.0 deg (the game's aim -16.0 deg); the reported head's pitch from the aim "
+                       "mean +4.5 deg; the settle: look to aim's 10 deg gate would have refused (skipped) 60 of 90 pin calls, F138/F139's 20 deg gate refused 0, taken 1; the published raise mean -5.0 cm; "
+                       "the drawn eye over the animated neck mean +19.0 cm")
         OLD_SEC194 = ("native on foot look to aim height (F194) 1 s: the picture-centre pitch in force -13.0 deg (look to aim aims at the picture's centre: on); the headset's pitch (LOCAL) mean +0.0 deg; "
                       "carried aim pitch mean -3.0 deg (the game's aim -16.0 deg); the reported head's pitch from the aim mean: the forward axis +13.0 deg, the ray in force +0.2 deg; the settle: look to aim's "
                       "10 deg gate would have refused (skipped) 60 of 90 pin calls, F138/F139's 20 deg gate refused 0, taken 1; the published raise mean -5.0 cm; the drawn eye over the animated neck mean +19.0 cm")
+        OLD_FRUSTUM194 = "native on foot look to aim (F194): the picture's centre is 13.0 deg below the headset's forward axis (up 0.966, down 1.428 tangents); look to aim aims at it: on"
+        OLD_KEYNOTE194 = ("native on foot look to aim height (F194, TEMPORARY A/B): experimental.native_on_foot_look_to_aim_eye_height_as_mouse_look is on -- look to aim's own settle gate is skipped: the eye "
+                          "height settles as it does under mouse look")
 
-        quest194 = [heightkey194()] + [sec194()] * 3
-        check("F194: look to aim engaged, the key on, the 10 deg gate skipped (would have refused 180 of 270 calls), a stance taken each second, an engage that moved nothing: OK with the figures",
+        quest194 = [sec194()] * 3
+        check("F194: look to aim engaged, F139's gate refused nothing, a stance taken each second, an engage that moved nothing: OK with the figures",
               quest194 + [view194()], 0, [("OK", F194H)],
-              has=["3 engaged s, 270 pin calls: look to aim's 10 deg gate would have refused (skipped) 180, F138/F139's 20 deg gate refused 0, stances taken 3; the drawn eye over the animated neck +19.0 cm",
-                   "engage: 0.5 s +0.0 cm, 1 s +0.0 cm, 3 s +0.0 cm; carried aim pitch -2.0 deg at 3 s"], lacks=["UNPARSED", "PARTIAL", "NEVER"])
-        check("F194: the lines of the build with part 1 (the frustum line, its key's note, the 1 s line with the picture-centre pitch, the forward axis's and the ray's pitch) are still read: OK, nothing unparsed",
-              [OLD_FRUSTUM194, OLD_AIMKEY194, heightkey194()] + [OLD_SEC194] * 3 + [view194()], 0, [("OK", F194H)],
-              has=["3 engaged s, 270 pin calls: look to aim's 10 deg gate would have refused (skipped) 180"], lacks=["UNPARSED", "PARTIAL", "NEVER", "picture centre (F194)"])
-        check("F194: the frustum line and the key's note of that build alone belong to no rule: no verdict, nothing unparsed", [OLD_FRUSTUM194, OLD_AIMKEY194, f90_part()], 0, [("OK", F90S)],
+              has=["3 engaged s, 270 pin calls: F138/F139's 20 deg gate refused 0, stances taken 3; the drawn eye over the animated neck +19.0 cm",
+                   "engage: 0.5 s +0.0 cm, 1 s +0.0 cm, 3 s +0.0 cm; carried aim pitch -2.0 deg at 3 s"], lacks=["UNPARSED", "PARTIAL", "NEVER", "10 deg gate"])
+        check("F194: the 1 s line of the build with look to aim's own 10 deg gate is still read, and what that gate did is named, not judged",
+              [OLD_KEYNOTE194] + [OLD_SEC194B] * 3 + [view194()], 0, [("OK", F194H)],
+              has=["3 engaged s, 270 pin calls: F138/F139's 20 deg gate refused 0, stances taken 3", "[3 row(s) of a build with look to aim's own 10 deg gate: it would have refused (skipped) 180 calls]"],
+              lacks=["UNPARSED", "PARTIAL", "NEVER"])
+        check("F194: the lines of the build with part 1 (the frustum line, the 1 s line with the picture-centre pitch, the forward axis's and the ray's pitch) are still read: OK, nothing unparsed",
+              [OLD_FRUSTUM194, OLD_KEYNOTE194] + [OLD_SEC194] * 3 + [view194()], 0, [("OK", F194H)],
+              has=["3 engaged s, 270 pin calls: F138/F139's 20 deg gate refused 0, stances taken 3"], lacks=["UNPARSED", "PARTIAL", "NEVER", "picture centre (F194)"])
+        check("F194: the frustum line and the key note of those builds alone belong to no rule: no verdict, nothing unparsed", [OLD_FRUSTUM194, OLD_KEYNOTE194, f90_part()], 0, [("OK", F90S)],
               lacks=[row("OK", F194H), row("IDLE", F194H), row("UNPARSED", F194H), row("NEVER APPLIED", F194H), row("PARTIAL", F194H), "UNPARSED"])
         check("F194 height: an engage after which the view stood 11 cm lower 3 s on: PARTIAL, the pilot's drop",
               quest194 + [view194(a1="-10.0 cm (1.510 m), carried aim pitch +13.0 deg", a2="-10.5 cm (1.505 m), carried aim pitch +13.0 deg", a3="-11.0 cm (1.500 m), carried aim pitch +13.0 deg")], 0,
@@ -20765,47 +20765,47 @@ def self_test_health():
               has=["disengage: 0.5 s +0.0 cm, 1 s +0.0 cm, 3 s -9.0 cm"], lacks=["UNPARSED", "PARTIAL"])
         check("F194 height: moments not read print as not read, not as 0 cm", quest194 + [view194(a1="not read", a2="not read (cut short by the next edge)", a3="not read (cut short by the next edge)", before="not read")], 0,
               [("OK", F194H)], has=["engage: 0.5 s not read, 1 s not read, 3 s not read"], lacks=["UNPARSED", "PARTIAL"])
-        check("F194 height: the key on but the newest 1 s line says the 10 deg gate refused: NEVER APPLIED",
-              [heightkey194("on")] + [sec194(skipped=False, ten=30)] * 2, 3, [("NEVER APPLIED", F194H)], has=["the key is on but the newest 1 s line says the 10 deg gate refused"], lacks=["UNPARSED"])
-        check("F194 height: the key off, the gate refusing (today's rule): OK, the figures say refused", [heightkey194("off")] + [sec194(skipped=False, ten=30, taken=1)] * 2, 0, [("OK", F194H)],
-              has=["look to aim's 10 deg gate refused 60"], lacks=["UNPARSED", "NEVER"])
-        check("F194 height: the hook wrote no call to the window in any engaged second: NEVER APPLIED, the gate and the instrument did not run",
-              [heightkey194("on")] + [sec194(calls=0, ten=0, f139=0, taken=0, eye=0.0)] * 3, 3, [("NEVER APPLIED", F194H)],
+        check("F194 height: the hook wrote no call to the window in any engaged second: NEVER APPLIED, the instrument did not run",
+              [sec194(calls=0, f139=0, taken=0, eye=0.0)] * 3, 3, [("NEVER APPLIED", F194H)],
               has=["the pin hook wrote no call to the window in any engaged second"], lacks=["UNPARSED"])
-        check("F194 height: look to aim engaged (F109's 1 s lines) and no F194 1 s line: NEVER APPLIED, the instrument did not run", [ENG109, heightkey194()] + [look109()] * 3, 3,
+        check("F194 height: look to aim engaged (F109's 1 s lines) and no F194 1 s line: NEVER APPLIED, the instrument did not run", [ENG109, view194()] + [look109()] * 3, 3,
               [("NEVER APPLIED", F194H)], has=["look to aim was engaged for 3 s (F109's 1 s lines) and no F194 1 s line was written"], lacks=["UNPARSED"])
-        check("F194 height: no stance taken in 12 engaged seconds: PARTIAL", [heightkey194("on")] + [sec194(taken=0, f139=40)] * 12, 0, [("PARTIAL", F194H)],
+        check("F194 height: no stance taken in 12 engaged seconds: PARTIAL", [sec194(taken=0, f139=40)] * 12, 0, [("PARTIAL", F194H)],
               has=["no stance was taken in 12 engaged seconds (F138/F139 refused 480 calls)"], lacks=["UNPARSED"])
-        check("F194 height: a few seconds with no stance taken is not flagged", [heightkey194("on")] + [sec194(taken=0)] * 3, 0, [("OK", F194H)], lacks=["UNPARSED", "PARTIAL"])
+        check("F194 height: a few seconds with no stance taken is not flagged", [sec194(taken=0)] * 3, 0, [("OK", F194H)], lacks=["UNPARSED", "PARTIAL"])
         check("F194: no line at all is not present (no verdict row)", [f90_part()], 0, [("OK", F90S)],
               lacks=[row("OK", F194H), row("IDLE", F194H), row("PARTIAL", F194H), row("UNPARSED", F194H), row("NEVER APPLIED", F194H)])
         check("F194: lines that drifted from their patterns are unparsed", ["native on foot look to aim height (F194) 1 s: something else", "native on foot look to aim height (F194) engage: something else"], 4,
               [("UNPARSED", F194H)])
 
-        # ---- F195: at a look-to-aim engage the aim keeps its pitch where the mouse left it (TEMPORARY A/B key); the F109 rule takes the kept pitch off the standing offset ----
+        # ---- F195: at a look-to-aim engage the aim keeps its pitch where the mouse left it (behaviour since F195b); the F109 rule takes the kept pitch off the standing offset ----
         L195 = H195_NAME
 
-        def cen195(op=4.46, kept=None, cen=None, key="on", oy=12.0):
+        def cen195(op=4.46, kept=None, cen=None, oy=12.0):
             """F109's centred line with F195's ending, from the DLL's own format (ltaFollow); kept defaults to the offset clamped to +-15 deg, centred to the rest."""
             if kept is None:
-                kept = max(-15.0, min(15.0, op)) if key == "on" else 0.0
+                kept = max(-15.0, min(15.0, op))
             if cen is None:
                 cen = op - kept
-            return R("native on foot look to aim (F109): centred: the reported head was", oy, op, 22, kept, cen, key, "the aim turns onto the head through the follower (the view stays)")
+            return R("native on foot look to aim (F109): centred: the reported head was", oy, op, 22, kept, cen, "the aim turns onto the head through the follower (the view stays)")
 
-        def keynote195(key="on"):
-            return R("native on foot look to aim (F195, TEMPORARY A/B): experimental.native_on_foot_look_to_aim_keeps_aim_pitch is %s", key, "x")
+        # the lines of the builds before F195b: the A/B build's (the ending says whether its key was on), and the F194 build's (the picture-centre pitch and the forward axis's angles before it)
+        def ab195(op, kept, cen, key):
+            return ("native on foot look to aim (F109): centred: the reported head was yaw +12.00 pitch %+.2f deg from the aim at the engage (22 ms after it); pitch kept %+.2f deg, centred %+.2f deg (F195: %s); "
+                    "the aim turns onto the head through the follower (the view stays)" % (op, kept, cen, key))
 
-        check("F195: the four flown engages kept whole (+0.77, +4.46, +4.79, +5.55 deg), centred 0: OK", [keynote195()] + [cen195(op) for op in (0.77, 4.46, 4.79, 5.55)], 0, [("OK", L195)],
-              has=["4 engage(s) centred (4 with the key on)", "+4.46 kept +4.46 centred +0.00"], lacks=["UNPARSED", "PARTIAL", "NEVER"])
+        check("F195: the four flown engages kept whole (+0.77, +4.46, +4.79, +5.55 deg), centred 0: OK", [cen195(op) for op in (0.77, 4.46, 4.79, 5.55)], 0, [("OK", L195)],
+              has=["4 engage(s) centred: the reported head's pitch offset from the aim, kept and centred (deg):", "+4.46 kept +4.46 centred +0.00"], lacks=["UNPARSED", "PARTIAL", "NEVER"])
         check("F195: a head pitched 26.4 deg up keeps 15 and centres 11.4: OK", [cen195(26.4)], 0, [("OK", L195)], has=["+26.40 kept +15.00 centred +11.40"], lacks=["UNPARSED"])
-        check("F195: the key on and every engage with a pitch offset centred it whole: NEVER APPLIED", [keynote195()] + [cen195(5.0, kept=0.0, cen=5.0)] * 3, 3, [("NEVER APPLIED", L195)],
-              has=["the key is on and 3 engage(s) had a pitch offset of 1 deg or more, but none kept it (the whole offset was centred)"], lacks=["UNPARSED"])
+        check("F195: every engage with a pitch offset centred it whole: NEVER APPLIED", [cen195(5.0, kept=0.0, cen=5.0)] * 3, 3, [("NEVER APPLIED", L195)],
+              has=["3 engage(s) had a pitch offset of 1 deg or more, but none kept it (the whole offset was centred)"], lacks=["UNPARSED"])
         check("F195: one engage kept it and one did not: PARTIAL", [cen195(4.0), cen195(5.0, kept=0.0, cen=5.0)], 0, [("PARTIAL", L195)], has=["1 of 2 engage(s) with a pitch offset to keep did not keep it"], lacks=["UNPARSED"])
-        check("F195: the key off: IDLE, F109's full centring", [keynote195("off"), cen195(5.0, key="off")], 0, [("IDLE", L195)], has=["the key is off: the aim is centred on the head in yaw and pitch, whole (F109)"],
-              lacks=["UNPARSED", "NEVER"])
         check("F195: engages with under 1 deg of pitch offset have nothing to keep: IDLE", [cen195(0.3), cen195(-0.5)], 0, [("IDLE", L195)], has=["no engage had a pitch offset of 1 deg or more to keep"], lacks=["UNPARSED"])
-        check("F195: the key's note alone, no engage: IDLE", [keynote195()], 0, [("IDLE", L195)], has=["no engage was centred in the window"], lacks=["UNPARSED"])
+        check("F195: the A/B build's lines with its key on are read and judged as the behaviour", [ab195(4.46, 4.46, 0.0, "on")] * 2, 0, [("OK", L195)], has=["2 engage(s) centred: "], lacks=["UNPARSED", "NEVER"])
+        check("F195: the A/B build's lines with its key off are named and not judged (the whole offset centred): IDLE", [ab195(5.0, 0.0, 5.0, "off")] * 2, 0, [("IDLE", L195)],
+              has=["0 engage(s) centred (and 2 of the A/B build with its key off: the whole offset centred, not judged)"], lacks=["UNPARSED", "NEVER"])
+        check("F195: the A/B build's lines of both kinds: the key-off ones do not count against the key-on ones", [ab195(5.0, 0.0, 5.0, "off"), ab195(4.0, 4.0, 0.0, "on")], 0, [("OK", L195)],
+              has=["1 engage(s) centred (and 1 of the A/B build with its key off"], lacks=["UNPARSED", "NEVER", "PARTIAL"])
         check("F195: the centred line of the build that also had F194 part 1 (the picture-centre pitch and the forward axis's angles before F195's ending) is still read",
               ["native on foot look to aim (F109): centred: the reported head was yaw +12.00 pitch +4.46 deg from the aim at the engage (22 ms after it); the picture-centre pitch in force +0.0 deg (F194), the forward axis "
                "itself yaw +12.00 pitch +4.46 deg from the aim; pitch kept +4.46 deg, centred +0.00 deg (F195: on); the aim turns onto the head through the follower (the view stays)"], 0, [("OK", L195)],
@@ -20818,6 +20818,10 @@ def self_test_health():
               [ENG109, cen195(5.0)] + [look109(hy=0.5, hp=0.2, oy=0.1, op=5.0)] * 4, 0, [("OK", L109), ("OK", L195)], lacks=["UNPARSED", "stood off"])
         check("F109 control: the same seconds with no centred line stand 5 deg off the head with the head still: PARTIAL", [ENG109] + [look109(hy=0.5, hp=0.2, oy=0.1, op=5.0)] * 4, 0, [("PARTIAL", L109)],
               has=["the aim stood off the head with the head still"], lacks=["UNPARSED"])
+        check("F109: the 1 s line of a build with the F98c fragment (the settle gate's count) is still read", [ENG109, "native on foot look to aim (F109) 1 s: following, item weight 0.00, smoothing 150 ms; head yaw +12.00 pitch -3.00 deg, asked +12.00 -3.00, applied "
+              "+12.00 -3.00, the player's own +0.00 +0.00; the reported head from the aim yaw +0.20 pitch -0.10 deg now (largest 0.50, read); seated yaw +30.00 pitch -5.00 deg carried; the guard: residual largest 0.30 deg (base "
+              "re-taken 0); the body's yaw from the aim +2.0 deg mean (largest 12.0, 88 frames); updates 90, dropped: stick 0, mouse 0, pitch 0; split: clean 80, dirty 2, unsplit 0, gain yaw 0.85000 pitch 0.85000; blocked 0 "
+              "(not holding, held 0 ticks), spring calls 0 (+0.00 deg); F98c's settle refused 7 calls (the aim pitched 10 deg or more); centred 1"], 0, [("OK", L109)], has=["1 s engaged"], lacks=["UNPARSED"])
 
         # ---- F129: the look processor's calls told apart, the asks' fate (an instrument: OK or PARTIAL, never NEVER APPLIED) ----
         P129 = "look paths (F129)"
@@ -20907,14 +20911,14 @@ def self_test_health():
         ITEM138 = "$wpn_m_assaultrifle_laser_fauto_name;"
 
         def pv138(mode="mouse look", item="none", aim=40.0, amin=30.0, amax=50.0, head=0.0, sink=14.0, smax=18.0, hrise=0.5, wmean=0.98, wmax=1.0, added=13.0, amaxadd=18.0,
-                  applied=58, calls=60, measured=0, why="none", up=-12.0, fwd=-2.0, view=2.5, inside=0, insideof=60, refused=40, lta=0, returned=1, retrefused=0, notneeded=0, ref=None,
+                  applied=58, calls=60, measured=0, why="none", up=-12.0, fwd=-2.0, view=2.5, inside=0, insideof=60, refused=40, returned=1, retrefused=0, notneeded=0, ref=None,
                   detail=None):
             if ref is None:   # F170: the reference text the DLL prints (referenceText): the calls that chose one, by the one they used
                 ref = "settled %d, running 0, none 0" % (applied + measured)
             if detail is None:   # F171: the reference's figures (referenceDetailText): the calls that had one, last source, age, target, G, G now, the mean target published and its calls
                 detail = R138("reference detail (F171; the calls that had one", applied + measured, "settled", 3.0, 12.0, 16.0, 2.0, 20.0, applied)
             return R138("native on foot pitched view (F138) 1 s: mode", mode, item, aim, amin, amax, head, sink, smax, hrise, wmean, wmax, added, amaxadd, applied, calls, measured, why, ref,
-                        detail, up, fwd, view, inside, insideof, refused, lta, returned, retrefused, notneeded)
+                        detail, up, fwd, view, inside, insideof, refused, returned, retrefused, notneeded)
 
         def bins138(mode="mouse look", item="none", body="[30,40) 12 +9.0 -10.0 -1.0 +0.5; [40,50) 48 +14.0 -12.0 -2.0 +0.5"):
             return R("native on foot pitched view (F138) 10 s bins", mode, item, body)
@@ -20923,7 +20927,7 @@ def self_test_health():
               has=["no second with a call at 10 deg of aim pitch or more"], lacks=["UNPARSED"])
         check("F138 pitched view: the sink added in pitched seconds of both modes, INSIDE none", [pv138(), pv138(mode="look to aim", aim=38.0)], 0, [("OK", P138)],
               has=["2 pitched s (120 calls; look to aim and mouse look), aim +30..+50 deg", "added in 2 s (116 calls, up to 18.0 cm), measured only 0 calls",
-                   "the settle refused for the aim's pitch 80 calls (look to aim's gate 0); returned to the stance's raise 2 times (refused 0, not needed 0)",
+                   "the settle refused for the aim's pitch 80 calls; returned to the stance's raise 2 times (refused 0, not needed 0)",
                    "INSIDE 0 of 120 calls in the 2 applied second(s) with the aim up"], lacks=["UNPARSED"])
         check("F138 pitched view: an armed episode gave nothing back (not needed), the line says so", [pv138(item=ITEM138, applied=0, added=0.0, amaxadd=0.0, measured=60, returned=0, notneeded=1)], 0,
               [("IDLE", P138)], has=["returned to the stance's raise 0 times (refused 0, not needed 1)"], lacks=["UNPARSED"])

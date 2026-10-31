@@ -1,4 +1,5 @@
-// F195 (native on-foot VR): at a look-to-aim engage the aim keeps its pitch where the mouse left it; only the yaw is centred. Header only, no game or D3D11 state, so native_frame_test runs the very
+// F195 (native on-foot VR): at a look-to-aim engage the aim keeps its pitch where the mouse left it; only the yaw is centred. BEHAVIOUR since F195b: the A/B key
+// (experimental.native_on_foot_look_to_aim_keeps_aim_pitch) was RETIRED on 2026-10-31 on the pilot's word ("Retire both", after F195 flew OK: "works perfectly now toggling between the two modes"). Header only, no game or D3D11 state, so native_frame_test runs the very
 // function the engage's centring uses. Journal: the arc doc, F195.
 //
 // F109 centred the aim on the head at each engage: the reported head's offset from the aim, yaw and pitch, went into the follower's target once. The pilot flew F194 on his Quest 3 (edvr_gfx_20261031_134656):
@@ -30,11 +31,11 @@ struct Kept {
     double keptRad = 0.0;      // what stays between the reported head and the aim
 };
 
-// opRad: the reported head's pitch offset from the aim at the engage. The key off, or an offset that is not a number, centres all of it (F109's full centring, as before).
-inline Kept keptPitch(double opRad, bool keyOn) noexcept {
+// opRad: the reported head's pitch offset from the aim at the engage. An offset that is not a number centres all of it (it was F109's full centring, and the follower ignores what is not finite).
+inline Kept keptPitch(double opRad) noexcept {
     Kept k;
     k.centredRad = opRad;
-    if (!keyOn || !std::isfinite(opRad)) return k;
+    if (!std::isfinite(opRad)) return k;
     const double lim = kKeepPitchDeg * kAdsDeg;
     k.keptRad = opRad < -lim ? -lim : opRad > lim ? lim : opRad;
     k.centredRad = opRad - k.keptRad;
