@@ -4314,3 +4314,16 @@ ruled out: F120's head-turn correction, because it rotated a point the lever had
     - On foot, draw a rifle and aim down sights several times.
     - Then set Anti-aliasing back to DLSS.
     - Read: the `depth probe: scene pair on for native on-foot VR` line; the 20 s census line naming a scene pair; F113 rows from the depth prepass; F66e's `the solved rendered eye in N frames` with the model at 0; F110 and F113 not NEVER APPLIED; frame time against the DLSS stretch.
+- **Flight (2026-10-31)** `edvr_gfx_20261031_161247.log` (Frontier, Pimax, v0.22.0-rc.4-29-g1986cb98; `--expect-build 1986cb98` matched). Anti-aliasing was switched dlss -> off at 16:13:21, before going on foot. The pilot: "AA off appears to have other issues, but the ADS alignment is fixed." FLOWN OK for F196.
+  - **F196 confirmed.** At 16:13:21: `depth probe: scene pair on for native on-foot VR (Anti-aliasing off)`. F113: `eye 0 55 frames: ... the depth prepass 55 ... none 0`. F66e: `the solved rendered eye in 60 frames, the model in 0 ... IPD 0.0551 m, the eyes' offsets`. On this rig the model stood only 0.1-0.4 cm (max 2.7) from the solved eye.
+  - **The pilot: "the world nav markers are moving again and the weapon readout is not locked to weapon".** This predates F196 and is an Anti-aliasing-off fault.
+    - The marker probe sees the marker composite draws (`records 342`), but every second reads `marker fix (F62c): eye 0: no decision this second (no marker composite draw of the eye reached the fix)` and `F63 ... matched by the CPU identification 0`. F85b reads `no weapon UI part this second`.
+    - The cause (code): `targetEye` (native_on_foot.cpp ~28937) names a marker draw's eye only through `uiLayerEyeOfGameTarget` or `uiDepthEyeOfTargetReadOnly`, and both run only with a temporal mode on. Without an eye, the record has no slot and `fixDecide` is never called.
+    - The user's rc.4 log (Anti-aliasing off, no F196) carries the same lines, so F196 did not cause it.
+    - Eye dump `eye_161511573001` (16:15:11, mouse look, a rifle out): the weapon's ammo readout sits at the bottom left, off the gun.
+  - **The pilot: "when I first loaded in with LtA enabled, the reticule is well above my eye line. Toggling it fixed it."** The engage at the first on-foot frame (16:13:58.131) read `the reported head was yaw -19.92 pitch -18.81 deg from the aim; pitch kept -15.00 deg, centred -3.81 deg`.
+    - F195 kept 15 deg of an offset from the game's spawn aim, which no one was looking at.
+    - The toggles from a settled mouse aim (16:15:28, :38, :41) kept -8.4 to -9.3 and centred 0, as designed.
+    - F195's keep belongs only to an engage that follows a settled mouse aim on foot.
+  - **Frame rate with Anti-aliasing off:** 52-61 frames a second against 90 with DLSS. The marker probe's tee cost was about the same (0.39 against 0.35 ms a frame), so the drop is the native-resolution render without DLSS, not F196's probe; not measured further.
+- ruled out: F196 as the cause of the moving markers and the loose weapon readout with Anti-aliasing off, because the user's rc.4 log (no F196, Anti-aliasing off) shows the same `no marker composite draw of the eye reached the fix` and `no weapon UI part` lines, and the code names a marker draw's eye only through the temporal-only interface layer and ui_depth.
