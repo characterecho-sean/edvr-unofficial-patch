@@ -7,23 +7,23 @@
   Nutrition); the radar near field on its own. FLOWN and settled: the 3D
   move with its anchor, the depth fix, the radar forward key, the draw-time
   pose (judder gone), the hologram's lighting position (45fa7e56: it draws).
-  The radar disc Sean sees is NOT DF3503CD: it is a picture, shown by the
-  hologram billboard vs 5559BD94 + ps EA02FAC2, that another pass draws
-  earlier in the frame from the game's own camera (journal, "the radar
-  disc is a picture"). The pass moves the billboard, not the picture, so it
-  shows the disc as seen from where it was (under the chin, cut by that
-  pass's near plane): the straight edge, the distortion, "moves with my
-  head". Flight 82546e51 (C 25 + F 45) still cut it, so it is not placement.
-  Instrument for the picture's pass built, NOT FLOWN. Branch
-  `claude/srv-turret-hud`, local only. Issue #140. Test install: Steam
-  (`--target steam --scope both --xess`).
-- **The fix (not built):** move the picture's pass too. If its draws project
-  with a view-projection in their vertex constants (as the billboard's b1
-  rows 270..273), give them the camera at E - T through the billboard's
-  original window; with the billboard moved by T, as now, the picture is the
-  moved disc seen from the eye, the near-plane cut gone. The instrument says
-  which draws, which rows, and the window. No-code fallback: camera back 70,
-  radar forward 0 (dump 052114: the whole disc, the game's own picture).
+  The radar disc is a picture shown by the hologram billboard vs 5559BD94
+  + ps EA02FAC2, not DF3503CD. The instrument flight (707c0ab5) found that
+  two writers draw it: the schematic vs 4EDE4BC9 (the disc) and vs
+  5B0068AF into a 256x256 target (the Scorpion). Both draw from a FIXED
+  camera V0 that does not follow the head: its constants were bit-identical
+  16 s apart while the head moved 0.28 m. At camera back 25 the whole radar
+  volume lies 0.36 to 0.51 m BEHIND V0, so the picture is empty and no
+  billboard move can show it. V0 and its window are chosen on the CPU (the
+  window is framed for a camera 0.65 m behind V0). NO GPU-side fix built
+  (journal, "the radar's camera is fixed"). Branch `claude/srv-turret-hud`,
+  local only. Issue #140. Test install: Steam (`--target steam --scope
+  both --xess`).
+- **The radar's way out:** camera back 70, radar forward 0. Dump
+  130228598002 shows the whole disc, rim and Scorpion, as the game draws it.
+  A GPU-side fix would have to replace V0 and its window with our own, and
+  rebuild the CPU-made billboard quad. It is not known when V0 updates, and
+  the CPU cannot tell the radar's 5B0068AF draw from the others.
 - **What is wrong (the game's own placement):** the turret view's whole HUD
   sits about 0.7 m too far back for the stock camera (the radar behind the
   head, the arcs at or behind it), and the larger panels sit about a metre
@@ -50,12 +50,8 @@
   (Sean credited it, but its change also fixed the anchor); where the radar
   reads best; whether the switch lag is acceptable.
 - **Ruled out:** see "Ruled out" below.
-- **Next flight:** this branch on Steam, the same keys, with
-  `advanced.glare_shader_dump = 1` (the writers' bytecode). The radar in
-  sight for 30 s or more (a round every 15 s), one eye dump (INSERT), then
-  camera back 70, radar forward 0 and a second dump. `--grep "srv turret
-  holo"`: source, writer, constants and holo quad lines. Zero writers: a
-  compute pass, a copy or an indirect draw makes the picture.
+- **Next flight:** camera back 70, radar forward 0; tune HUD forward and
+  panels back for the arcs and panels at that camera. No new build needed.
 
 ## Evidence (flight of 2026-10-30, Epic, v0.22.0-rc.3-139-gcd4c91c4)
 
@@ -154,6 +150,18 @@ same amount. Matching them needs a change to one layer's stereo depth.
   darken the eye, and the layer's difference image at dump 110805769001
   holds nothing over its moved quad. The disc probe and the disc plane
   measured an invisible draw (journal, "the radar disc is a picture").
+- ruled out: the radar's picture being drawn from the head, because its two
+  writers (vs 4EDE4BC9, vs 5B0068AF into 256x256) carried bit-identical
+  camera constants at 13:01:40 and 13:01:56 while the live camera moved
+  0.28 m and turned (flight 707c0ab5).
+- ruled out: the game cropping the radar's writers to the visible sliver of
+  the radar volume, because their windows aim 48 deg below V0's forward at a
+  point 0.215 m ahead of V0, while the whole schematic box lies 0.36 to
+  0.51 m behind V0. Writer #6, the 44-deg-down sliver, is not the radar's:
+  it uses the live camera and its billboard sat 2.2 to 2.6 m out.
+- ruled out: a billboard move showing the disc at camera back 25, because
+  the picture is empty there (the volume is behind V0); dump 130153201001
+  has no disc at all.
 - ruled out: placement as the cause of the radar's cut and stretch, because
   camera back 25 + radar forward 45 (sum 70, flight 82546e51) still cuts it:
   a moved billboard shows a picture taken from the unmoved place.
@@ -542,3 +550,87 @@ rewrites about once a second. The on-foot eager poll
 (`journalWatchSetEagerStatusOnFoot`) never shortens the worker's sleep:
 `untilNextDue()` honours `g_eager` only. Left alone; a fix would change on
 foot too.
+
+### 2026-10-31: the radar's camera is fixed (flight 707c0ab5; no fix built)
+
+Steam, log `edvr_gfx_20261031_125952.log`, build matches. Keys at view-on:
+camera back 25, HUD forward 65, radar forward 45. Dump 130153201001 (C 25,
+F 45) has no disc at all, only a yellow tick. Dump 130228598002 (C 70, HUD
+forward 0, radar forward 0) has the whole disc, rim and Scorpion. Holo
+rounds 1 (frame 11896) and 2 (13039) ran; rounds 3 to 5 found no 5559BD94
+draw because the radar group's keys were 0. Round 1's writer-to-billboard
+map is exact (the 3-target sets match). In round 2 the game's 512x512
+hologram targets had changed hands between the two frames, so its map is
+not. Shaders from the dumps (`edvr_logs\shaders`, read with fxc /dumpbin):
+
+- **vs 5B0068AF5630F96B** is the instanced mesh shader: X = the t33
+  record's world position (bytes 16..27) - cb1[275] + the record's
+  rotation and scale applied to the unpacked vertex. Then clip = X.x cb1[270]
+  + X.y cb1[271] + X.z cb1[272] + cb1[273], w = cb1[274].X. It declares
+  CB1[276]: only rows 270..275. o1 = X. **ps 6C416587** writes t4 =
+  cb1[279].X (the view depth) plus a rim term; one target.
+- **vs 4EDE4BC9003BE352** is the radar's terrain schematic (345600
+  vertices). clip = cb0[4..7] times the local vertex. The local vertex is
+  clamped to a cylinder of radius cb2[0].w = 35.5 about cb2[0].xz and capped
+  at 0.6 r above. **ps 20D43145** discards below -0.8 r, writes t4 = 1e10
+  beyond r, else the clip w; three targets.
+- cb0[9..11] of the 4EDE draw is local to camera-relative world: orthonormal
+  columns times 0.002, so the 35.5 radius is 7.1 cm. cb0[4..7] = VP x that,
+  so VP = M A^-1 comes out exactly; its w row is the camera's forward, and
+  its x and y rows give the window:
+  - its camera's right (-0.38104, 0.11083, -0.91789), up (-0.23711, 0.94787,
+    0.21287) and forward (0.89364, 0.29875, -0.3349) are those of the 256x256
+    5B0068AF writers' cb1[277..279] (#9 round 1, #11 round 2);
+  - they are not the live camera's (#6: forward (0.90856, 0.23581, -0.34483)
+    in round 1, (0.91733, 0.1654, -0.36216) in round 2).
+  So the radar's two writers, the schematic (the disc) and the 256x256
+  101961-vertex mesh (the Scorpion icon), share one camera V0. Eye 1 is V0
+  plus 61.9 mm.
+- **V0 does not follow the head.** The 4EDE constants of round 1 and round 2
+  are bit-identical, and so are the 256x256 writers' camera rows, while the
+  live camera moved from (-0.118, 2.202, 0.268) to (-0.365, 2.125, 0.390). In
+  V0's frame the schematic's centre is at (-0.007, -0.241, -0.437) (x
+  right, y up, z forward), and the cylinder's box spans z -0.513 to -0.359.
+  The whole radar volume lies behind V0, so the writer draws nothing and
+  the picture is empty at camera back 25. In round 2 the live eye was
+  0.27 m behind V0, which puts the schematic about 0.17 m behind the live
+  eye. That agrees with DF3503CD's pre-move w (-0.23 to -0.03) that second.
+- **The window is framed for another camera.** The schematic's window is
+  tan x -0.145..0.147, tan y -1.271..-0.975 (P00 6.860, P11 6.751, the same
+  1.016 aspect as every writer). The 256x256 Scorpion's is tan y
+  -1.150..-1.090. Both aim 48 deg below V0's forward, at the radar's height
+  0.215 m in front of V0, where the volume would be for a camera 0.65 m
+  behind V0. That is the turret HUD's "about 0.7 m too far back" again.
+- **The billboard** (vs 5559BD94) takes its corners in world space from its
+  vertex buffer (b0[9..11] = [I | -camera]), projects them with the main
+  eye's cb1[270..273], and passes the vertex UV through (`mov o1.xy,
+  v1.xyxx`). EA02FAC2 samples t4..t6 at that UV and loads the scene depth
+  t1 at SV_Position. The CPU builds the quad. In this flight every sampled
+  5559BD94 billboard sat 2.1 to 2.9 m out (w), the radar's d1 and d2
+  included, so the "holo quad" line (near billboards only) never fired.
+- **Writer #6** (101961 vertices into 512x512, read by draw 0) uses the live
+  camera with a window of tan x 0.156..0.258, tan y -1.032..-0.928 in
+  round 1. It is not the radar's. The flight note's puzzle ("the disc is
+  19 cm behind, yet #6 is in front") compared the radar with this other
+  hologram.
+  The 9216-vertex writer (#7, three targets, ps E95634B0's billboard) is
+  live-camera too. Both billboards are family 7/8, so the radar group's
+  translation moves them though their panels belong to the panels group.
+
+Why no GPU fix: giving the picture's writer the moved camera, with a crop
+and a billboard rectangle that hold the whole disc, needs, per eye and per
+frame:
+1. the live camera at the writer draws. They do not have it: the 4EDE draw
+   binds no b1, and the 256x256 writer's b1 holds V0.
+2. a way to tell the radar's 5B0068AF draw from the others on the CPU. Only
+   its 256x256 target did so, in two rounds.
+3. a new window from our own bounds.
+4. a rebuilt billboard. The CPU makes its world-space quad, and its depth also
+   drives the hologram shader's scene-depth discard.
+When V0 updates (view entry, camera keys, recentre) is unknown. Every piece
+would rest on two rounds at one setting. Fallback: camera back 70, radar
+forward 0.
+
+Seen in passing: the instrument's 12-texture cap dropped eye 1's draws 1
+and 2 in round 1. A future round should also run while the radar group's
+keys are 0, so it can see V0 at camera back 70.
