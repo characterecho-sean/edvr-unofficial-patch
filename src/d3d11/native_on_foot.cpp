@@ -92,6 +92,7 @@
 #include "native_on_foot_f191.h"   // F191: the hip reticle found by its marker type (1001), not by pool slot 10 (pure parts)
 #include "native_on_foot_f192.h"   // F192: the left elbow held down through a weapon draw: the draw-hold weight by native epoch, its counters and line (pure parts)
 #include "native_on_foot_f193.h"   // F193: in the sights the body follows the camera's height, as at the hip: the rule, the stability stop, the 1 s line (pure parts)
+#include "native_on_foot_f194.h"   // F194: look to aim aims at the middle of the picture; its eye height settles as mouse look's does: the ray, the gate, the lines, the height probe (pure parts)
 #include "native_on_foot_f182.h"   // F182: the left hand stays on a two-handed gun aimed steeply up (the stored grip point in the item's frame; pure parts)
 #include "native_on_foot_f176.h"   // F176: in the sights with the head aiming, the mouse and the stick hold their pitch (pure parts)
 #include "native_on_foot_f175.h"   // F175 (measure only): the view's roll and pitch against the headset's, by look mode and item (pure parts)
@@ -220,6 +221,25 @@ std::atomic<uint32_t> g_f109Foreign{0};
 std::atomic<float> g_f109GainEndLo{0.0f}, g_f109GainEndHi{0.0f};
 std::atomic<float> g_f109RootPitch{0.0f};
 std::atomic<uint64_t> g_f109RootMs{0};
+// F194 (TEMPORARY A/B, both live). g_ltaAimsAtPictureCentre: experimental.native_on_foot_look_to_aim_aims_at_picture_centre, on | off, default on: the centring (at an engage, and F133's yaw re-centre) takes the
+// ray through the middle of the picture, not the headset's forward axis; read at the next engage (a live change while engaged is taken then, and at the end of an F131 hold, which engages afresh).
+// g_ltaEyeHeightAsMouseLook: experimental.native_on_foot_look_to_aim_eye_height_as_mouse_look, on | off, default on: look to aim's own 10 deg settle gate is skipped (F139's 20 deg covers it as it covers mouse look).
+std::atomic<bool> g_ltaAimsAtPictureCentre{true};
+std::atomic<bool> g_ltaEyeHeightAsMouseLook{true};
+bool g_ltaAimsAtPictureCentreLast = true, g_ltaAimsAtPictureCentreLogged = false;   // the value last logged (frame thread; the first read always logs)
+bool g_ltaEyeHeightAsMouseLookLast = true, g_ltaEyeHeightAsMouseLookLogged = false;
+// F194 (frame thread): the headset's frustum as the channel last answered (a log line on change), and the picture-centre pitch in force (radians, 0: the forward axis).
+nofoot::f194::Frustum g_f194Frustum;
+bool g_f194FrustumLogged = false, g_f194FrustumKeyLast = false;
+double g_f194CentreWantedRad = 0.0;   // what the keys and the frustum ask now; g_ltaCentreRad is what the follower's last fresh start took (ltaFreshFollower), so a live change waits for the next engage
+double g_ltaCentreRad = 0.0;
+// F194 (the pin hook writes, the frame thread reads): the view's height as the pin last read it (the drawn eye above the character's origin, m) and when (the tick count); the hook's window of the settle's fate.
+std::atomic<double> g_f194ViewY{0.0};
+std::atomic<uint64_t> g_f194ViewMs{0};
+nofoot::f171c::Mailbox<nofoot::f194::Window> g_f194Box;
+nofoot::f194::Second g_f194Sec;           // frame thread: the 1 s line's per-tick sums while look to aim is engaged
+nofoot::f194::HeightProbe g_f194Probe;    // frame thread: the view's height at the last edge of look to aim
+uint64_t g_f194LineMs = 0;
 bool g_nativeEdgeLast = false;                // F26: frame thread only
 // F33 (TEMPORARY, live): the body align's key and its trims (right, up, forward, in cm; clamped to +-30 at read).
 std::atomic<bool> g_alignKeyOn{true};
@@ -1279,6 +1299,32 @@ void readKey() {
                             phase, nofoot::f169::kDialMin, nofoot::f169::kDialMax);
         g_pistolSprintPhaseLast = phase;
         g_pistolSprintPhase.store(static_cast<float>(phase), std::memory_order_relaxed);
+    }
+    // F194 (TEMPORARY A/B, live, two keys; each is spelled out in its own call, the generator scans). The flights' answer makes the winner the behaviour and the keys go.
+    {
+        const bool aimsOn = cfg.getString("experimental.native_on_foot_look_to_aim_aims_at_picture_centre", "on") != "off";
+        if (first || aimsOn != g_ltaAimsAtPictureCentreLast || !g_ltaAimsAtPictureCentreLogged)
+            Log::get().note("native on foot look to aim (F194, TEMPORARY A/B): experimental.native_on_foot_look_to_aim_aims_at_picture_centre is %s -- %s; a change while look to aim is engaged is taken "
+                            "at its next engage (and at the end of an F131 hold, which engages afresh)",
+                            aimsOn ? "on" : "off",
+                            aimsOn ? "look to aim aims at the ray from the head through the middle of the picture (the headset's forward axis turned about the head's right axis by the frustum's centre, "
+                                     "13 deg down on a Quest 3, 0 on a Pimax), so the aim is where the pilot looks; with no frustum from the headset it is the forward axis"
+                                   : "look to aim aims at the headset's forward axis, as before F194 (13 deg above the middle of the picture on a Quest 3)");
+        g_ltaAimsAtPictureCentreLast = aimsOn;
+        g_ltaAimsAtPictureCentreLogged = true;
+        g_ltaAimsAtPictureCentre.store(aimsOn, std::memory_order_relaxed);
+    }
+    {
+        const bool heightOn = cfg.getString("experimental.native_on_foot_look_to_aim_eye_height_as_mouse_look", "on") != "off";
+        if (first || heightOn != g_ltaEyeHeightAsMouseLookLast || !g_ltaEyeHeightAsMouseLookLogged)
+            Log::get().note("native on foot look to aim height (F194, TEMPORARY A/B): experimental.native_on_foot_look_to_aim_eye_height_as_mouse_look is %s -- %s",
+                            heightOn ? "on" : "off",
+                            heightOn ? "look to aim's own settle gate (the carried aim pitch 10 deg or more refuses the stance's settle) is skipped: the eye height settles as it does under mouse look, "
+                                       "where only F139's gate (the game's aim 20 deg or more, nothing drawn) refuses it; the calls the 10 deg gate would have refused are still counted"
+                                     : "look to aim's own settle gate is kept: the stance's settle is refused while the carried aim pitch is 10 deg or more, as before F194");
+        g_ltaEyeHeightAsMouseLookLast = heightOn;
+        g_ltaEyeHeightAsMouseLookLogged = true;
+        g_ltaEyeHeightAsMouseLook.store(heightOn, std::memory_order_relaxed);
     }
     // F146: the ADS sight switch ("ADS sight from the game"), the two ADS sight trims (height and right) and the full outfit switch are gone, with their `fix.` keys (named by
     // retiredKeysNote); the behaviour they tuned is the only behaviour. While aiming down sights the eye goes onto the game's own sight line (F143,
@@ -8067,8 +8113,7 @@ struct F133State {
 };
 F133State g_f133;
 std::atomic<float> g_f109AimPitchAbsDeg{0.0f};   // |the carried pitch| while look to aim is engaged (the Animate post-hook's F98c gate), else 0
-std::atomic<uint32_t> g_f109SettleGated{0};      // settled stances F98c did not take because the aim was pitched 10 deg or more (the hook counts)
-constexpr double kF109SettlePitchDeg = 10.0;
+std::atomic<uint32_t> g_f109SettleGated{0};      // calls where F98c's settle would not have been taken because the carried aim pitch was 10 deg or more (nofoot::f194::kLtaGateDeg; the hook counts); F194: counted when the gate is skipped too
 struct TurnState {
     nofoot::f109::StickSnap stick;
     nofoot::f109::MouseFlick flick;
@@ -8098,6 +8143,33 @@ struct TurnState {
     uint64_t secMs = 0;
 };
 TurnState g_turn;
+
+// ---- F194: the view's height at an edge of look to aim (frame thread) ----------------------------------------------------------------------------------------------------------------------------
+// The pilot: "my view dropped" on turning look to aim on. At each engage and disengage one probe reads the view's height (the drawn eye above the character's origin, as the pin hook last read it) the frame
+// before, and at 0.5 s, 1 s and 3 s after, and prints the change with the carried aim pitch at each (nofoot::f194::HeightProbe). A next edge inside the 3 s cuts the running probe short, and says so.
+void f194ProbePrint() noexcept {
+    char line[760];
+    g_f194Probe.format(line, sizeof(line));
+    Log::get().note("%s", line);
+}
+void f194Edge(uint64_t now, bool engage) noexcept {
+    if (g_f194Probe.active) {
+        g_f194Probe.cutShort();
+        f194ProbePrint();
+    }
+    const uint64_t at = g_f194ViewMs.load(std::memory_order_acquire);
+    const bool fresh = at != 0 && now >= at && now - at <= nofoot::f194::HeightProbe::kBeforeMs;
+    g_f194Probe.begin(engage, now, fresh, g_f194ViewY.load(std::memory_order_relaxed), g_adsMap.pitchSeat / nofoot::kAdsDeg);
+}
+void f194Tick(uint64_t now) noexcept {
+    if (!g_f194Probe.active) return;
+    const uint64_t at = g_f194ViewMs.load(std::memory_order_acquire);
+    const bool fresh = at != 0 && now >= at && now - at <= nofoot::f194::HeightProbe::kFreshMs;
+    if (g_f194Probe.tick(now, fresh, g_f194ViewY.load(std::memory_order_relaxed), g_adsMap.pitchSeat / nofoot::kAdsDeg)) {
+        f194ProbePrint();
+        g_f194Probe.active = false;
+    }
+}
 
 void adsQueue(std::atomic<float>& q, double add, double cap) noexcept {
     float cur = q.load(std::memory_order_relaxed);
@@ -8138,6 +8210,7 @@ void f176PressEnd(uint64_t now, const char* how, bool guardTripped) noexcept {
 // zero, the carried yaw included), the lock goes to zero, the hook writes nothing, the queue and the in-flight account are dropped. holdOff: off until the
 // ADS flag falls (a trip, or a look value that could not be restored); the next press starts clean.
 void adsStop(const char* why, bool holdOff) noexcept {
+    if (g_lta.engaged) f194Edge(GetTickCount64(), false);   // F194: look to aim ends here too, before the seated pitch is dropped
     const double carriedDeg = g_adsMap.yawCarried / nofoot::kAdsDeg, pitchDeg = g_adsMap.pitchSeat / nofoot::kAdsDeg;
     const double lockCm = 100.0 * std::sqrt(g_adsLock[0] * g_adsLock[0] + g_adsLock[1] * g_adsLock[1] + g_adsLock[2] * g_adsLock[2]);
     const int was = g_adsState;
@@ -8196,6 +8269,7 @@ bool eyeRowsRead(int e, uint32_t* frame, float rows[16], float o[4], uint64_t* q
 // The follower's state at an engage, and when a hold ends (F131): a fresh follower from the asks still in flight, the centring waits for the first render head, the
 // guard's base is taken again, the snap detectors start disarmed. The map (the carried yaw and pitch) is not touched.
 void ltaFreshFollower(uint64_t now) noexcept {
+    g_ltaCentreRad = g_f194CentreWantedRad;   // F194: the picture-centre pitch this engagement centres on (a live change of the key waits for here)
     g_lta.follow.reset();
     g_lta.follow.target[0] = g_adsMap.yawInFlight();
     g_lta.follow.target[1] = g_adsMap.pitchInFlight();
@@ -8211,8 +8285,12 @@ void ltaFreshFollower(uint64_t now) noexcept {
 }
 void ltaEngage(uint64_t now) noexcept {
     const bool wasUnwinding = g_lta.unwinding;
+    f194Edge(now, true);   // F194: the view's height before the engage, and at 0.5 s, 1 s and 3 s after
     g_lta.engaged = true;
     g_lta.unwinding = false;
+    g_f194Sec = nofoot::f194::Second{};
+    g_f194Box.clearPending.store(true, std::memory_order_relaxed);   // the hook's window starts with this engagement
+    g_f194LineMs = now;
     ltaFreshFollower(now);
     const int style = g_ltaStyle.load(std::memory_order_relaxed);
     Log::get().note("native on foot look to aim (F109): engaged: the head is the look on foot, yaw and pitch, armed and unarmed (the follower through the head aim's map; "
@@ -8225,6 +8303,7 @@ void ltaEngage(uint64_t now) noexcept {
 // Disengages. unwind (turned off on foot): the carried turn unwinds as a release does (the opposite injected, the cancel following what the game applies, so the
 // view stays the headset's), then drops; otherwise (a stop) adsStop has already returned the seated rotation to zero.
 void ltaDisengage(uint64_t now, const char* why, bool unwind) noexcept {
+    f194Edge(now, false);   // F194: the view's height before the disengage, and at 0.5 s, 1 s and 3 s after
     g_lta.engaged = false;
     g_ltaDrop.store(false, std::memory_order_relaxed);
     g_snapIn.store(0.0f, std::memory_order_relaxed);
@@ -8263,13 +8342,17 @@ void ltaFollow(uint64_t now, double dt, bool headStep, double dYaw, double dPitc
     if (g_lta.centrePending && np.renderValid) {
         g_lta.centrePending = false;
         double oy = 0.0, op = 0.0;
-        if (f109::centreOffset(np.render, &oy, &op)) {
+        if (f109::centreOffset(np.render, &oy, &op, g_ltaCentreRad)) {
             const double mag = std::sqrt(oy * oy + op * op) / f109::kDeg;
             const bool take = mag >= f109::kCentreMinDeg && mag <= f109::kCentreMaxDeg;
             if (take) g_lta.follow.addHead(oy, op);
             ++g_lta.centres;
-            Log::get().note("native on foot look to aim (F109): centred: the reported head was yaw %+.2f pitch %+.2f deg from the aim at the engage (%.0f ms after it); %s",
-                            oy / f109::kDeg, op / f109::kDeg, static_cast<double>(now - g_lta.engageMs),
+            // F194: beside the ray's offset (the forward axis's own when no picture-centre pitch is in force), the forward axis's offset from the aim
+            double fy = std::nan(""), fp = std::nan("");
+            if (!nofoot::adsHeadAngles(np.render, &fy, &fp)) fy = fp = std::nan("");
+            Log::get().note("native on foot look to aim (F109): centred: the reported head was yaw %+.2f pitch %+.2f deg from the aim at the engage (%.0f ms after it); the picture-centre pitch in force "
+                            "%+.1f deg (F194), the forward axis itself yaw %+.2f pitch %+.2f deg from the aim; %s",
+                            oy / f109::kDeg, op / f109::kDeg, static_cast<double>(now - g_lta.engageMs), g_ltaCentreRad / f109::kDeg, fy / f109::kDeg, fp / f109::kDeg,
                             take ? "the aim turns onto the head through the follower (the view stays)" : mag < f109::kCentreMinDeg ? "already on it" : "over 120 deg: left alone");
         } else {
             Log::get().note("native on foot look to aim (F109): centred: the reported head's angles are not readable (within 11 deg of vertical): no centring");
@@ -8288,7 +8371,7 @@ void ltaFollow(uint64_t now, double dt, bool headStep, double dYaw, double dPitc
         // stall (or any other cause) left the body off the head for good. Yaw only: the game clamps the aim's pitch, so a pitch offset can be legitimate (the F109c case) and
         // a re-centre would fight the clamp. Following only: not blocked, not held (F131), no snap fade running, not in an ADS press, the engage's own centring done.
         double oy = 0.0, op = 0.0;
-        const bool offValid = np.renderValid && f109::centreOffset(np.render, &oy, &op);
+        const bool offValid = np.renderValid && f109::centreOffset(np.render, &oy, &op, g_ltaCentreRad);   // F194: the ray through the middle of the picture, as the engage's centring takes it
         const bool following = !g_lta.blocked && !g_f131.held && !g_lta.centrePending && g_turn.run.phase == f109::SnapRun::kIdle && g_adsState == kAdsIdle;
         const nofoot::f133::Recentre::Out rc = g_f133.rc.step(static_cast<double>(now) / 1000.0, following, offValid, oy / f109::kDeg, g_f133.headYawDeg);
         if (rc.fire) {
@@ -8810,6 +8893,7 @@ void adsAimTick(uint64_t now, bool session) noexcept {
     g_adsFootLast = onFoot;
     f135Tick(now, onFoot);   // F135: the on-foot menu probe (measure only): the panel hooks' counts, the Escape key's edges, one line a second when something moved
     f129Tick(now, onFoot);   // F129: the look path lines (the summary, the episodes, the fallback, the components); every frame, before anything here can return
+    f194Tick(now);           // F194: the view's height at the last edge of look to aim (0.5 s, 1 s, 3 s after); every frame, as the line above
     static QpcDt adsClock;   // F66b
     const double dt = adsClock.step(0.1);
     g_adsLastMs = now;
@@ -8991,6 +9075,21 @@ void adsAimTick(uint64_t now, bool session) noexcept {
         }
         g_lta.keyLast = ltaKey;
         g_lta.footLast = onFoot;
+        if (ltaKey && onFoot) {   // F194: the headset's frustum where look to aim runs: where the middle of the picture is, and the pitch the next centring takes (a line when it is first known, and on a change)
+            float topMag = 0.0f, botMag = 0.0f;
+            const bool answered = eyeTangentsVertical(&topMag, &botMag);
+            const nofoot::f194::Frustum fr = nofoot::f194::frustumFromChannel(answered, static_cast<double>(topMag), static_cast<double>(botMag));
+            const bool aimsOn = g_ltaAimsAtPictureCentre.load(std::memory_order_relaxed);
+            if (!g_f194FrustumLogged || aimsOn != g_f194FrustumKeyLast || !nofoot::f194::sameFrustum(fr, g_f194Frustum)) {
+                char frustumLine[420];
+                nofoot::f194::formatFrustum(frustumLine, sizeof(frustumLine), fr, aimsOn);
+                Log::get().note("%s", frustumLine);
+                g_f194FrustumLogged = true;
+                g_f194FrustumKeyLast = aimsOn;
+            }
+            g_f194Frustum = fr;
+            g_f194CentreWantedRad = nofoot::f194::pitchInForce(aimsOn, fr);
+        }
         const bool want = ltaKey && !off && !g_lta.tripped;
         if (want && !g_lta.engaged) ltaEngage(now);
         else if (!want && g_lta.engaged && !off) ltaDisengage(now, g_lta.tripped ? "the guard tripped" : "the key is off", !g_lta.tripped);
@@ -9301,14 +9400,24 @@ void adsAimTick(uint64_t now, bool session) noexcept {
         g_lta.sumUser[0] += uY;
         g_lta.sumUser[1] += uP;
         ++g_lta.ticks;
-        if (np.renderValid) {   // the reported head's offset from the aim: about 0 once the aim is the head's
+        if (np.renderValid) {   // the reported head's offset from the aim: about 0 once the aim is the head's (F194: the ray through the middle of the picture, when its pitch is in force)
             double oy = 0.0, op = 0.0;
-            g_lta.offHave = nofoot::f109::centreOffset(np.render, &oy, &op);
+            g_lta.offHave = nofoot::f109::centreOffset(np.render, &oy, &op, g_ltaCentreRad);
             if (g_lta.offHave) {
                 g_lta.offNow[0] = oy / nofoot::kAdsDeg;
                 g_lta.offNow[1] = op / nofoot::kAdsDeg;
                 g_lta.offMax = std::max(g_lta.offMax, std::sqrt(g_lta.offNow[0] * g_lta.offNow[0] + g_lta.offNow[1] * g_lta.offNow[1]));
             }
+        }
+        {   // F194: the 1 s line's per-tick figures (degrees, the seat convention): the headset's pitch in LOCAL, the carried aim pitch, the game's aim pitch (the FP root, fresh), the forward axis's
+            // pitch from the aim and the ray's (the same as the forward axis's with no picture-centre pitch in force)
+            double ly = 0.0, lp = 0.0, fy = 0.0, fp = 0.0;
+            const bool localOk = haveLocal && nofoot::adsHeadAngles(np.local, &ly, &lp);
+            const bool fwdOk = np.renderValid && nofoot::adsHeadAngles(np.render, &fy, &fp);
+            const uint64_t rootAt = g_f109RootMs.load(std::memory_order_acquire);
+            const bool rootOk = rootAt != 0 && now >= rootAt && now - rootAt <= 200;
+            g_f194Sec.add(localOk, lp / nofoot::kAdsDeg, g_adsMap.pitchSeat / nofoot::kAdsDeg, rootOk, static_cast<double>(g_f109RootPitch.load(std::memory_order_relaxed)), fwdOk, fp / nofoot::kAdsDeg,
+                          g_lta.offHave && np.renderValid, g_lta.offNow[1]);
         }
         {   // F109c: the aim's pitch as the FP root shows it against the carried pitch (the account of what the game applied for the asks). Within an engagement
             // they are apart by a constant; a change in it is turn the account holds that the aim did not take, or the reverse (the F109b flight: 25 deg after the
@@ -9464,6 +9573,21 @@ void adsAimTick(uint64_t now, bool session) noexcept {
             g_lta.ticks = g_lta.heldTicks = g_lta.rebases = g_lta.bodyOffN = 0;
             g_lta.offMax = g_lta.bodyOffMax = g_lta.bodyOffSum = 0.0;
             g_adsResid.clearWindow();
+        }
+        // F194: look to aim's height line, once a second while it is engaged: the picture-centre pitch in force, the head's, the carried and the game's pitch, the reported head's pitch from the aim (the
+        // forward axis's and the ray's), the settle's fate (the hook's window: the 10 deg gate skipped or not, F138/F139's 20 deg gate, the stances taken), the published raise and the drawn eye over the animated neck.
+        // A window the hook wrote nothing to prints "of 0 pin calls": the line cannot read as success when the hook never ran.
+        if (g_f194LineMs == 0) g_f194LineMs = now;
+        if (now - g_f194LineMs >= 1000) {
+            g_f194LineMs = now;
+            nofoot::f194::Window hw;
+            if (g_f194Box.take(&hw) && g_f194Sec.any()) {
+                char heightLine[1100];
+                nofoot::f194::formatSecond(heightLine, sizeof(heightLine), g_f194Sec, hw, g_ltaCentreRad / nofoot::kAdsDeg, g_ltaAimsAtPictureCentre.load(std::memory_order_relaxed),
+                                           g_ltaEyeHeightAsMouseLook.load(std::memory_order_relaxed));
+                Log::get().note("%s", heightLine);
+            }
+            g_f194Sec = nofoot::f194::Second{};
         }
     }
     // The 1 s lines while engaged or releasing.
@@ -17728,9 +17852,19 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
             // F107: nor from a camera away from the commander (the carrier management screen's settled at 174 m up and published -174 m, clamped to -50 cm)
             si.valid = pc.f94TargetOk && std::isfinite(pc.eyeYSelected) && !(pc.detachW > 0.0) && refusal != kPinRefCameraAway;
             // F109: nor with the aim pitched (look to aim turns the game's aim with the head: the animated neck bends with the aim's pitch, which is not the stance)
-            if (si.valid && static_cast<double>(g_f109AimPitchAbsDeg.load(std::memory_order_relaxed)) >= kF109SettlePitchDeg) {
-                si.valid = false;
+            // F194: the gate reads the CARRIED pitch (the account of what the game applied for EDVR's asks since the engage, not the game's aim), which a level head on a Quest 3 puts at 13 deg with the aim
+            // on the middle of the picture; experimental.native_on_foot_look_to_aim_eye_height_as_mouse_look skips it, and F139's gate below (the game's aim, 20 deg, nothing drawn) covers look to aim as it
+            // covers mouse look. The calls it would have refused are counted either way (g_f109SettleGated, and the F194 window's count).
+            const bool f194AsMouse = g_ltaEyeHeightAsMouseLook.load(std::memory_order_relaxed);
+            const double f194CarriedAbs = static_cast<double>(g_f109AimPitchAbsDeg.load(std::memory_order_relaxed));
+            bool f194TenWould = false, f194TenRefused = false;
+            if (si.valid && nofoot::f194::ltaGateWouldRefuse(f194CarriedAbs)) {
+                f194TenWould = true;
                 g_f109SettleGated.fetch_add(1, std::memory_order_relaxed);
+                if (nofoot::f194::ltaGateRefuses(f194AsMouse, f194CarriedAbs)) {
+                    si.valid = false;
+                    f194TenRefused = true;
+                }
             }
             // F138: nor with the game's aim pitched under mouse look either (the FP root's pitch, from G above; look to aim's gate has counted its own), with nothing drawn: the
             // game's camera sinks against the animated neck as the look pitches, and a stance taken there is the sunk camera's (0.3 s into a held look-up the raise settled on
@@ -17795,6 +17929,25 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
                 // headset's LOCAL height and the LOCAL pose's generation (no valid pose, no reference)
                 if (!itemDrawn && upright)
                     g_f138.noteStance(pc.f95Target, pc.rawEyeY, N0[1], static_cast<double>(in.localHeadY), in.localPoseGeneration, localPitchValid, si.tS);
+            }
+            // F194: the view's height as this call read it (the drawn eye above the character's origin, pc.f97EyeDrawn[1]: the job camera with every add EDVR makes and the head's own motion, in the model
+            // that stands at the feet; a fresh game frame at the hip with the commander's camera, the sights and a camera away not read), for the frame thread's probe at an edge of look to aim; and, while
+            // look to aim drives the aim, this call's part in the 1 s line: the drawn eye over the animated neck, the raise in force, and the settle's fate (the 10 deg gate that would have refused or did,
+            // F138/F139's gate, a stance taken).
+            if (freshIn && pc.f97EyeDrawnOk && refusal != kPinRefCameraAway && !(pc.detachW > 0.0)) {
+                g_f194ViewY.store(pc.f97EyeDrawn[1], std::memory_order_relaxed);
+                g_f194ViewMs.store(now, std::memory_order_release);
+            }
+            if (g_ltaDrop.load(std::memory_order_relaxed)) {
+                nofoot::f194::Call c194;
+                if (pc.f97EyeDrawnOk) c194.eyeOverNeckM = pc.f97EyeDrawn[1] - N0[1];
+                const F94TargetPub raise194 = f94TargetRead();
+                if (raise194.valid) c194.raiseM = raise194.targetM;
+                c194.tenWould = f194TenWould;
+                c194.tenRefused = f194TenRefused;
+                c194.f139Refused = f138SettleRefused;
+                c194.taken = so.settled;
+                g_f194Box.write([&](nofoot::f194::Window& win) noexcept { win.add(c194); });
             }
             // F138: while the look is pitched the raise adds back what the game's camera has sunk against the animated neck since that stance, weighted by the pitch (the FP
             // root's pitch: up in both modes, down under mouse look only; a look down under look to aim stays as flown). The sink goes into the raise, which the P1 hook takes out of the pin's camera by the alignment serial (f94NeckForPin): E never sees it, so

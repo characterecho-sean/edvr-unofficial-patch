@@ -62,6 +62,7 @@
 #include "system_publication.h"
 #include "head_locator.h"
 #include "head_track_probe.h"   // F87h: the headset's tracking, one line a second (read only)
+#include "view_fov_note.h"   // F194: the views' field of view, said at the first located views and when it changes
 #include "pose_gap.h"
 #include "runtime_gate.h"
 #include "frame_pacer.h"
@@ -599,6 +600,16 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     if(edvr::ppn::formatLog(line,sizeof(line),projectionVerdict,systemLabel,runtimeLabel,
          sizes[0].recommendedImageRectWidth,sizes[0].recommendedImageRectHeight,edvr::ppn::viewAngleDegrees(left,right))>0)
       nativeTracePuts(line);
+  }
+  // F194: the views' field of view as located, said once at the first located views and again when a view's fov moves by more than 0.01 deg (view_fov_note.h); told, when the caller has it, is the
+  // frustum the game is told before the scope zoom's window (a trim moves it), which the line adds only when it differs from the located one. Never per frame.
+  ViewFovNote viewFovNote;
+  void noteViewFov(const GeometryInput& located,const GeometryInput* told) {
+    const XrFovf seen[2]={located.views[0].fov,located.views[1].fov};
+    XrFovf toldFov[2]={};
+    if(told){toldFov[0]=told->views[0].fov;toldFov[1]=told->views[1].fov;}
+    char line[768]{};
+    if(viewFovNote.note(seen,told?&toldFov:nullptr,line,sizeof(line)))nativeTracePuts(line);
   }
   // World scale (visual.world_scale, common/world_scale.h): the percent the last frame latched, 100 until a frame says otherwise. A change is said once, with the located
   // eye separation and the one Elite is told; the geometry snapshots of that frame are built from the latched value alone. A frame whose eyes did not
@@ -1267,6 +1278,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     GeometrySnapshot snapshot{};
     const bool valid=makeGeometrySnapshot(located,snapshot);
     if(valid)noteProjectionMode(located);
+    if(valid)noteViewFov(located,nullptr);
     frameViews[0]=located.views[0];frameViews[1]=located.views[1];
     frameContentViews[0]=frameViews[0];frameContentViews[1]=frameViews[1];
     framePlacement[0]={};framePlacement[1]={};
@@ -1619,6 +1631,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     GeometrySnapshot temporalGeometry{};
     const bool locatedValid=makeGeometrySnapshot(located,temporalGeometry);
     if(locatedValid)noteProjectionMode(located);
+    if(locatedValid)noteViewFov(located,nullptr);
     // The world scale this frame draws at, latched once from this frame's provider answer (below) and applied to the geometry Elite and the temporal pass are
     // given and to nothing else: the located views (the layer, the menu, the plugins) keep the headset's own eyes.
     uint32_t worldScale=edvr::kWorldScaleDefault;
@@ -1727,6 +1740,8 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
           gameGeometry.views[e].fov={std::atan(frustum.left),std::atan(frustum.right),std::atan(frustum.up),std::atan(frustum.down)};
           gameGeometry.width[e]=dims.width;gameGeometry.height[e]=dims.height;
         }
+        // F194: the frustum the game is told after the trim and before the scope zoom's window (which moves every frame of a press), beside the located one when they differ.
+        noteViewFov(located,&gameGeometry);
         // B3: the left eye drawn as the zoomed view (tangents only), set where the trim has just set its own and before anything reads the frame's frustum.
         zoomApplied=applyScopeZoom(gameGeometry,zoomPreRaw,zoomToldRaw);
       }
