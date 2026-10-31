@@ -627,6 +627,69 @@ inline double angleBetweenDeg(const double a[3], const double b[3]) {
     return std::acos(c) * 180.0 / 3.14159265358979323846;
 }
 
+// ---- the radar picture's camera (TEMPORARY instrument) -----------------------------------------------------------------------------------------------------------------------------
+// The radar's disc picture is drawn by vs 4EDE4BC9003BE352 (the terrain schematic) from a camera of its own, V0, which did not follow the head in the flight of 707c0ab5 (the doc's journal,
+// "the radar's camera is fixed"). Its vertex constants carry V0 whole: cb0 rows 9..11 take a local vertex to camera-relative world (orthonormal columns times a scale), and cb0 rows 4..7 are the
+// view-projection times that (local to clip). So VP = M A^-1; its w row is V0's forward in world axes, its x and y rows give the window (clip.x = P00 right.X + P02 fwd.X, likewise y), and the
+// schematic's local origin, A's translation t, sits at (right, up, fwd) . t in V0's eye space. m: rows 4..7 (x, y, z, w; 16 floats); a: rows 9..11 (12 floats). False when a matrix is singular or
+// anything is not finite. The rig checks it against the constants logged in that flight.
+struct RadarCam {
+    double centre[3] = {0.0, 0.0, 0.0};   // the schematic's local origin in V0's eye space: x right, y up, z forward (metres; negative z is behind V0)
+    double fwd[3] = {0.0, 0.0, 0.0};      // V0's forward, in the draw's world axes
+    double tanX[2] = {0.0, 0.0}, tanY[2] = {0.0, 0.0};   // the window: left, right; down, up
+    double scale = 0.0;                   // the local-to-world scale (the cube root of A's determinant)
+};
+inline bool radarCamFrom(const float m[16], const float a[12], RadarCam& out) {
+    out = RadarCam{};
+    if (!m || !a) return false;
+    for (int i = 0; i < 16; ++i)
+        if (!std::isfinite(m[i])) return false;
+    for (int i = 0; i < 12; ++i)
+        if (!std::isfinite(a[i])) return false;
+    const double L[3][3] = {{a[0], a[1], a[2]}, {a[4], a[5], a[6]}, {a[8], a[9], a[10]}};
+    const double t[3] = {a[3], a[7], a[11]};
+    const double det = L[0][0] * (L[1][1] * L[2][2] - L[1][2] * L[2][1]) - L[0][1] * (L[1][0] * L[2][2] - L[1][2] * L[2][0]) + L[0][2] * (L[1][0] * L[2][1] - L[1][1] * L[2][0]);
+    if (!(std::fabs(det) > 1e-30)) return false;
+    double inv[3][3];
+    inv[0][0] = (L[1][1] * L[2][2] - L[1][2] * L[2][1]) / det;
+    inv[0][1] = (L[0][2] * L[2][1] - L[0][1] * L[2][2]) / det;
+    inv[0][2] = (L[0][1] * L[1][2] - L[0][2] * L[1][1]) / det;
+    inv[1][0] = (L[1][2] * L[2][0] - L[1][0] * L[2][2]) / det;
+    inv[1][1] = (L[0][0] * L[2][2] - L[0][2] * L[2][0]) / det;
+    inv[1][2] = (L[0][2] * L[1][0] - L[0][0] * L[1][2]) / det;
+    inv[2][0] = (L[1][0] * L[2][1] - L[1][1] * L[2][0]) / det;
+    inv[2][1] = (L[0][1] * L[2][0] - L[0][0] * L[2][1]) / det;
+    inv[2][2] = (L[0][0] * L[1][1] - L[0][1] * L[1][0]) / det;
+    double vp[3][3];   // rows x, y, w of VP over a camera-relative world direction: vp[r][j] = sum_i m[r][i] inv[i][j]
+    const int rowOf[3] = {0, 1, 3};
+    for (int r = 0; r < 3; ++r)
+        for (int j = 0; j < 3; ++j) vp[r][j] = m[rowOf[r] * 4 + 0] * inv[0][j] + m[rowOf[r] * 4 + 1] * inv[1][j] + m[rowOf[r] * 4 + 2] * inv[2][j];
+    const double s = std::sqrt(vp[2][0] * vp[2][0] + vp[2][1] * vp[2][1] + vp[2][2] * vp[2][2]);
+    if (!(s > 1e-9)) return false;
+    double f[3], rgt[3], up[3];
+    for (int j = 0; j < 3; ++j) f[j] = vp[2][j] / s;
+    auto split = [&](const double row[3], double axis[3], double& p0, double& p2) {   // row / s = p0 axis + p2 f, with axis a unit vector orthogonal to f
+        p2 = (row[0] * f[0] + row[1] * f[1] + row[2] * f[2]) / s;
+        for (int j = 0; j < 3; ++j) axis[j] = row[j] / s - p2 * f[j];
+        p0 = std::sqrt(axis[0] * axis[0] + axis[1] * axis[1] + axis[2] * axis[2]);
+        if (!(p0 > 1e-9)) return false;
+        for (int j = 0; j < 3; ++j) axis[j] /= p0;
+        return true;
+    };
+    double p00 = 0.0, p02 = 0.0, p11 = 0.0, p12 = 0.0;
+    if (!split(vp[0], rgt, p00, p02) || !split(vp[1], up, p11, p12)) return false;
+    for (int j = 0; j < 3; ++j) out.fwd[j] = f[j];
+    out.centre[0] = rgt[0] * t[0] + rgt[1] * t[1] + rgt[2] * t[2];
+    out.centre[1] = up[0] * t[0] + up[1] * t[1] + up[2] * t[2];
+    out.centre[2] = f[0] * t[0] + f[1] * t[1] + f[2] * t[2];
+    out.tanX[0] = (-1.0 - p02) / p00;
+    out.tanX[1] = (1.0 - p02) / p00;
+    out.tanY[0] = (-1.0 - p12) / p11;
+    out.tanY[1] = (1.0 - p12) / p11;
+    out.scale = std::cbrt(std::fabs(det));
+    return std::isfinite(out.centre[0]) && std::isfinite(out.centre[1]) && std::isfinite(out.centre[2]) && std::isfinite(out.tanX[0]) && std::isfinite(out.tanY[1]);
+}
+
 // ---- draws of a turret family that the pass did not move ---------------------------------------------------------------------------------------------------------------------
 // Sean: the radar "seems to be stretched toward its origin". Besides a billboard, a second UNMOVED copy of the radar landing at its original place would smear toward it. Every route by which a
 // draw of one of the families can reach the GPU without the pass's geometry shader bound is counted per family (the 10 s line's `unmoved family draws:` list) and named the first time it is seen.

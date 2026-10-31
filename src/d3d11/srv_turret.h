@@ -84,6 +84,10 @@
 //     some other way) and "srv turret holo watch: round R writer pairs vs/ps xN (#K ID) ..." counts every writer's shader pair.
 //   "srv turret holo billboard|writer constants: round R #K .. bB (bound first F count C) rows S..: (x,y,z,w) ..."   the vertex constants b0 rows 0..15, b1 rows 270..279 and b2 rows 0..15 of
 //     the first six billboards and ten writers, read back without stalling.
+//   TEMPORARY, the radar picture's camera V0 (the terrain schematic vs 4EDE4BC9 draws the disc's picture from it; srv_turret_math.h radarCamFrom):
+//   "srv turret radar camera: first seen|moved by (x,y,z) mm and turned A deg after N frames unchanged at frame F (copied at frame C): the schematic's origin at (x,y,z) m in the camera ...,
+//     forward (..), window tan x [..] y [..], scale S; head (x,y,z) seated, camera back B cm"   each move of V0 (2 mm or 0.05 deg), at most four lines a second, with the head and the key then;
+//   "srv turret radar camera: view off: D picture-camera draws copied, R read, M moves[ -- NEVER SEEN ...]"   the view's end (R = 0: the draw never reached the path).
 #pragma once
 
 #include "srv_turret_math.h"
@@ -103,7 +107,14 @@ extern std::atomic<bool> g_srvTurretHudCounting;
 extern std::atomic<uint32_t> g_srvTurretHudIssues;
 // The hologram's source instrument (srv_turret.cpp): true for the one frame a round watches the draws.
 extern std::atomic<bool> g_srvTurretHoloWatching;
+// The radar picture's camera instrument: true while the Scorpion's turret view is on (the frame tick sets it).
+extern std::atomic<bool> g_srvTurretRadarCamOn;
 }  // namespace detail
+
+// TEMPORARY instrument (issue 140): the camera V0 the radar's picture is drawn from. vscreen.cpp forwardWithVerdict, every owner-context draw while the Scorpion's turret view is on: the
+// frame's first draw of vs 4EDE4BC9 (the terrain schematic) has its camera rows copied and read back, and each move of V0 is logged (srv_turret.cpp). One relaxed load otherwise.
+inline bool srvTurretRadarCamOn() { return detail::g_srvTurretRadarCamOn.load(std::memory_order_relaxed); }
+void srvTurretRadarCamDraw(ID3D11DeviceContext* ctx, uint64_t vs);
 
 // TEMPORARY instrument (issue 140): the pass that makes the picture the hologram billboard (vs 5559BD94) shows. vscreen.cpp forwardWithVerdict, every owner-context draw while a round watches
 // (one frame every 15 s at most): a draw with one of the billboards' watched inputs bound as a render or depth target is logged as a writer. One relaxed load otherwise.

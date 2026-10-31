@@ -21,9 +21,12 @@
   both --xess`).
 - **The radar's way out:** camera back 70, radar forward 0. Dump
   130228598002 shows the whole disc, rim and Scorpion, as the game draws it.
-  A GPU-side fix would have to replace V0 and its window with our own, and
-  rebuild the CPU-made billboard quad. It is not known when V0 updates, and
-  the CPU cannot tell the radar's 5B0068AF draw from the others.
+- **The CPU side (2026-10-31, in progress):** the game's Schematics system
+  draws these pictures. The manager constructor is 0x36BC240 (build 334925);
+  it makes N slots and their "Schematic_%s_%u" targets. V0's setter is NOT
+  found yet: no fix. An instrument (NOT FLOWN) logs every V0 move against
+  the head and camera back. RE notes wait in the analysis inbox
+  (`20261031-133850-srv-radar-camera`).
 - **What is wrong (the game's own placement):** the turret view's whole HUD
   sits about 0.7 m too far back for the stock camera (the radar behind the
   head, the arcs at or behind it), and the larger panels sit about a metre
@@ -50,8 +53,12 @@
   (Sean credited it, but its change also fixed the anchor); where the radar
   reads best; whether the switch lag is acceptable.
 - **Ruled out:** see "Ruled out" below.
-- **Next flight:** camera back 70, radar forward 0; tune HUD forward and
-  panels back for the arcs and panels at that camera. No new build needed.
+- **Next flight (this branch):** radar forward 0, panels back above 0 (the
+  draw gate). Enter the turret view at camera back 0 and hold still 5 s,
+  then lean about 25 cm forward, back and sideways. Then step camera back
+  0, 35, 70, 35, 0 with 5 s between steps, and leave and re-enter the view
+  at 35 and at 70. Read it with `--grep "srv turret radar camera"`: first
+  seen, every move and its trigger, and the summary at view off.
 
 ## Evidence (flight of 2026-10-30, Epic, v0.22.0-rc.3-139-gcd4c91c4)
 
@@ -634,3 +641,54 @@ forward 0.
 Seen in passing: the instrument's 12-texture cap dropped eye 1's draws 1
 and 2 in round 1. A future round should also run while the radar group's
 keys are 0, so it can see V0 at camera back 70.
+
+### 2026-10-31: the radar camera on the CPU side (RE in progress; instrument built, not flown)
+
+Sean wants the radar drawn right near the stock camera (back 0 to 35), so
+the fix has to come from where the game makes V0. Read in build 334925
+(the Steam install's, from the log's "game build 334925"), with Ghidra 12.1.3
+headless on ED334925, read-only. The notes are in the analysis inbox item
+`20261031-133850-srv-radar-camera`, to be filed as
+`analysis\decomp\verify_20261031_srv_radar_camera.txt`.
+
+- The pictures come from the game's Schematics system (the
+  `SchematicsComponent.cpp` path string). The radar disc is a
+  SchematicTerrainMaterial; its parameter block is built at 0x383D700:
+  ClipRadius, CameraOffset, GroundOffset, ShipForward, PhasedOutY,
+  PhaseInLerpValue, OSToWS_Rotation, OSToWS_Translation. From the 4EDE vertex
+  shader, "CameraOffset" is the clip cylinder's centre (cb2[0].xyz), not the
+  picture's camera.
+- 0x36BC240 is the schematic manager's constructor (vtable 0x54FB8D0). It
+  makes the views "SchematicPrimary" and "SchematicSecondary" and N slots:
+  0x36BC660, slot vtable 0x54FB7F8, each with a 0x900-byte companion
+  object. 0x36BD2C0 and 0x36BD7C0 name the slots' targets
+  "Schematic_%s_%u" and "Schematic_Depth_%u". 0x36B4840 makes the
+  "SchematicBillboardView" buffers. Slot method [5] (0x36BE670) submits a
+  slot's render.
+- Not found: where a slot's camera is written. Next to read: the slot
+  constructor 0x36BC660 and its 0x900-byte companion, the manager's
+  per-frame update (called directly from 0x282BB00's class), and the
+  callers of the target creators.
+
+The open RE questions are what V0 is copied from, when it updates, where
+its framing comes from, and whether camera back reaches it. Without them a
+CPU-side hook would be a guess. So this build carries an instrument
+instead, "the radar picture's camera" (srv_turret.cpp; the decode is
+srv_turret_math.h radarCamFrom, which the rig checks against this flight's
+logged constants):
+- While the Scorpion's turret view is on, the frame's first vs 4EDE4BC9 draw
+  has its cb0 rows 4..11 copied and read back without stalling.
+- Each move of V0 (2 mm or 0.05 deg) is logged with the frame, the head's
+  seated position and the camera back.
+- The view's end gives a count, with a NEVER SEEN line when nothing was
+  read.
+
+What it decides, per line:
+- **Camera back reaches V0:** a "moved" line at each camera-back step, with
+  the schematic's z changing by the step.
+- **V0 latches at view entry:** no moves within a stay, and a new "first
+  seen" after each re-entry.
+- **V0 follows the head after all:** moves that track the head.
+- **A distance or timer latch:** moves only after a lean past some
+  threshold, or at a regular interval.
+

@@ -1752,6 +1752,23 @@ static void planeAndUnmovedCases() {
         const double x[3] = {1, 0, 0}, y[3] = {0, 1, 0}, mx[3] = {-1, 0, 0}, zero[3] = {0, 0, 0};
         check(closeTo(st::angleBetweenDeg(x, y), 90.0, 1e-9) && closeTo(st::angleBetweenDeg(x, mx), 180.0, 1e-9) && st::angleBetweenDeg(x, zero) == 0.0, "the angle between vectors: 90, 180, and 0 for a vector with no length");
     }
+    {   // the radar picture's camera, from the 4EDE4BC9 draw's cb0 rows 4..7 and 9..11 as logged in the flight of 707c0ab5 (round 1, eye 0; the offline decomposition gave these numbers)
+        const float m[16] = {0.013715f, 0.00028609f, 0.00026257f, -0.041348f, -0.00058093f, 0.011863f, 0.016461f, -4.941f,
+                             8.6297e-12f, 4.9187e-11f, -4.7421e-10f, 0.01f, -3.6195e-05f, -0.00020631f, 0.001989f, -0.43696f};
+        const float a[12] = {-0.00078334f, -0.00067174f, 0.0017132f, -0.33076f, 0.0001677f, 0.0018282f, 0.00079349f, -0.36006f, -0.0018326f, 0.00045444f, -0.00065972f, 0.10097f};
+        st::RadarCam rc;
+        check(st::radarCamFrom(m, a, rc), "the radar camera is decoded from the logged constants");
+        check(closeTo(rc.centre[0], -0.00655, 2e-4) && closeTo(rc.centre[1], -0.24137, 2e-4) && closeTo(rc.centre[2], -0.43696, 2e-4),
+              "...the schematic's origin sits at (-0.007, -0.241, -0.437) in its camera: 0.44 m behind it");
+        check(closeTo(rc.fwd[0], 0.89364, 1e-4) && closeTo(rc.fwd[1], 0.29875, 1e-4) && closeTo(rc.fwd[2], -0.3349, 1e-4), "...the camera's forward is the 256x256 writers' cb1[279]");
+        check(closeTo(rc.tanX[0], -0.14455, 2e-4) && closeTo(rc.tanX[1], 0.14699, 2e-4) && closeTo(rc.tanY[0], -1.27079, 2e-4) && closeTo(rc.tanY[1], -0.97452, 2e-4) && closeTo(rc.scale, 0.002, 1e-5),
+              "...the window is tan x -0.145..0.147, tan y -1.271..-0.975, the local scale 0.002");
+        float singular[12] = {};
+        float nanm[16];
+        std::memcpy(nanm, m, sizeof(nanm));
+        nanm[5] = NAN;
+        check(!st::radarCamFrom(m, singular, rc) && !st::radarCamFrom(nanm, a, rc) && !st::radarCamFrom(nullptr, a, rc), "a singular model, a value that is not finite, no constants: refused");
+    }
     {   // the unmoved list as the 10 s line spells it
         uint32_t counts[st::kFamilyCount + 1][st::kUnmovedRoutes] = {};
         char out[512];

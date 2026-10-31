@@ -35,6 +35,7 @@ std::atomic<bool> g_srvTurretHudWanted{false};
 std::atomic<bool> g_srvTurretHudCounting{false};
 std::atomic<uint32_t> g_srvTurretHudIssues{0};
 std::atomic<bool> g_srvTurretHoloWatching{false};
+std::atomic<bool> g_srvTurretRadarCamOn{false};
 }  // namespace detail
 
 namespace st = srv_turret;
@@ -1067,8 +1068,9 @@ bool holoEnsureStage(ID3D11DeviceContext* ctx) {
 
 // Rows [first, first + rows) of the vertex-stage buffer at `slot`, counted from the first constant the game bound it with, copied into the stage at byte `to`, clipped to the buffer and to the
 // bound range. Returns the rows copied (0: nothing bound, nothing in range, or a fault).
-uint32_t holoCopyVsRows(ID3D11DeviceContext* ctx, uint32_t slot, uint32_t first, uint32_t rows, UINT to, UINT& boundFirst, UINT& boundCount) {
+uint32_t holoCopyVsRows(ID3D11DeviceContext* ctx, ID3D11Buffer* stage, uint32_t slot, uint32_t first, uint32_t rows, UINT to, UINT& boundFirst, UINT& boundCount) {
     boundFirst = boundCount = 0;
+    if (!stage) return 0;
     st::ExtraCb cb;
     if (!st::readGameCb(ctx, slot, cb, false)) return 0;
     boundFirst = cb.ranged ? cb.first : 0;
@@ -1082,14 +1084,14 @@ uint32_t holoCopyVsRows(ID3D11DeviceContext* ctx, uint32_t slot, uint32_t first,
     if (base + n > inBuffer) n = inBuffer - base;
     if (cb.ranged && cb.count && first + n > cb.count) n = cb.count - first;
     const D3D11_BOX box{static_cast<UINT>(base * 16u), 0, 0, static_cast<UINT>((base + n) * 16u), 1, 1};
-    if (!guarded("srv.turret.holo.copy", [&] { rawCopyRegion(ctx, g_holo.stage, to, cb.buffer, &box); })) return 0;
+    if (!guarded("srv.turret.holo.copy", [&] { rawCopyRegion(ctx, stage, to, cb.buffer, &box); })) return 0;
     return static_cast<uint32_t>(n);
 }
 void holoCopyConstants(ID3D11DeviceContext* ctx, HoloEntry& e, uint32_t index) {
     if (!holoEnsureStage(ctx)) return;
     UINT to = index * kHoloEntryBytes;
     for (uint32_t b = 0; b < kHoloBuffers; ++b) {
-        e.rows[b] = holoCopyVsRows(ctx, kHoloSlot[b], kHoloFirstRow[b], kHoloRows[b], to, e.cbFirst[b], e.cbCount[b]);
+        e.rows[b] = holoCopyVsRows(ctx, g_holo.stage, kHoloSlot[b], kHoloFirstRow[b], kHoloRows[b], to, e.cbFirst[b], e.cbCount[b]);
         to += kHoloRows[b] * 16u;
     }
 }
@@ -1222,7 +1224,148 @@ void holoBoundary(ID3D11DeviceContext* ctx) {
     }
 }
 
+// ---- THE RADAR PICTURE'S CAMERA (TEMPORARY instrument) --------------------------------------------------------------------------------------------------------------------
+// V0, the camera the radar's terrain schematic (vs 4EDE4BC9) draws the disc's picture from, decoded from that draw's cb0 rows 4..11 (srv_turret_math.h radarCamFrom). The game sets it on the CPU,
+// by a rule not yet found in the binary, and it did not follow the head in the flight of 707c0ab5. This logs every move of it against the head and the camera back, so one flight says when it
+// updates (view-on, a camera key, a recentre, a head distance) and whether EDVR's camera back reaches it. While the Scorpion's turret view is on, the frame's first such draw has the eight rows
+// copied to a staging buffer (a ring of kRadarCamRing, read back without stalling, given up after kRadarCamWait frames). A camera that differs from the last one said (its schematic origin by
+// more than 2 mm, its forward by more than 0.05 deg) is logged, at most kRadarCamLinesPerSecond lines a second (the rest counted into the next line). The view's end says how many were read;
+// zero says the draw never reached this path (it runs only while one of the turret keys is above 0, the draw gate's term). Nothing here changes a draw.
+constexpr uint64_t kSchematicTerrainVs = 0x4EDE4BC9003BE352ull;
+constexpr uint32_t kRadarCamRing = 3, kRadarCamRows = 8, kRadarCamWait = 8, kRadarCamLinesPerSecond = 4;
+struct RadarCamWatch {
+    ID3D11Device* device = nullptr;   // identity: the stages'
+    ID3D11Buffer* stage[kRadarCamRing] = {};
+    bool pending[kRadarCamRing] = {};
+    uint32_t frameOf[kRadarCamRing] = {}, waited[kRadarCamRing] = {};
+    uint32_t next = 0, lastCopyFrame = 0xFFFFFFFFu;
+    bool failed = false, on = false, have = false;
+    st::RadarCam last;
+    uint32_t lastFrame = 0, draws = 0, reads = 0, moves = 0, saidThisSecond = 0, suppressed = 0;
+    uint64_t secondMs = 0;
+};
+RadarCamWatch g_radarCam;
+
+bool radarCamEnsure(ID3D11DeviceContext* ctx) {
+    if (g_radarCam.failed) return false;
+    ID3D11Device* d = nullptr;
+    if (!guarded("srv.turret.radarcam.device", [&] { ctx->GetDevice(&d); }) || !d) {
+        st::release(d);
+        return false;
+    }
+    if (d != g_radarCam.device) {
+        for (auto& s : g_radarCam.stage) st::release(s);
+        for (auto& p : g_radarCam.pending) p = false;
+        g_radarCam.device = d;
+    }
+    HRESULT hr = S_OK;
+    for (auto& s : g_radarCam.stage) {
+        if (s) continue;
+        guarded("srv.turret.radarcam.stage", [&] {
+            D3D11_BUFFER_DESC bd{};
+            bd.ByteWidth = kRadarCamRows * 16u;
+            bd.Usage = D3D11_USAGE_STAGING;
+            bd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+            hr = d->CreateBuffer(&bd, nullptr, &s);
+        });
+        if (!s) {
+            g_radarCam.failed = true;
+            Log::get().note("srv turret radar camera: the staging buffers could not be made (0x%08X); the instrument stands down.", static_cast<unsigned>(hr));
+            break;
+        }
+    }
+    st::release(d);
+    return !g_radarCam.failed;
+}
+
+void radarCamSay(const st::RadarCam& rc, uint32_t frame, uint32_t copiedAt) {
+    uint64_t seq = 0;
+    float head[12] = {}, eyeToHead[2][12] = {};
+    const bool haveHead = nativeTemporalHeadPose(&seq, head, eyeToHead);
+    char what[160];
+    if (!g_radarCam.have) {
+        std::snprintf(what, sizeof(what), "first seen");
+    } else {
+        const double d[3] = {rc.centre[0] - g_radarCam.last.centre[0], rc.centre[1] - g_radarCam.last.centre[1], rc.centre[2] - g_radarCam.last.centre[2]};
+        std::snprintf(what, sizeof(what), "moved by (%.1f,%.1f,%.1f) mm and turned %.2f deg after %u frames unchanged", d[0] * 1000.0, d[1] * 1000.0, d[2] * 1000.0,
+                      st::angleBetweenDeg(rc.fwd, g_radarCam.last.fwd), frame - g_radarCam.lastFrame);
+    }
+    char suppressed[48] = "";
+    if (g_radarCam.suppressed) std::snprintf(suppressed, sizeof(suppressed), " (%u moves not said before this)", g_radarCam.suppressed);
+    Log::get().note("srv turret radar camera: %s at frame %u (copied at frame %u): the schematic's origin at (%.3f,%.3f,%.3f) m in the camera (x right, y up, z forward), forward (%.4f,%.4f,%.4f), "
+                    "window tan x [%.3f,%.3f] y [%.3f,%.3f], scale %.4f; head %s(%.3f,%.3f,%.3f) seated, camera back %d cm%s",
+                    what, frame, copiedAt, rc.centre[0], rc.centre[1], rc.centre[2], rc.fwd[0], rc.fwd[1], rc.fwd[2], rc.tanX[0], rc.tanX[1], rc.tanY[0], rc.tanY[1], rc.scale,
+                    haveHead ? "" : "(none) ", static_cast<double>(head[3]), static_cast<double>(head[7]), static_cast<double>(head[11]), g_backCm.load(std::memory_order_relaxed), suppressed);
+    g_radarCam.suppressed = 0;
+}
+
+void radarCamBoundary(ID3D11DeviceContext* ctx) {
+    const bool on = detail::g_srvTurretRadarCamOn.load(std::memory_order_relaxed);
+    if (on != g_radarCam.on) {
+        if (!on) {
+            Log::get().note("srv turret radar camera: view off: %u picture-camera draws copied, %u read, %u moves%s", g_radarCam.draws, g_radarCam.reads, g_radarCam.moves,
+                            g_radarCam.reads ? "" : " -- NEVER SEEN: the radar's picture draw (vs 4EDE4BC9) did not reach this path (all turret keys at 0, or the radar was not drawn)");
+        }
+        g_radarCam.on = on;
+        g_radarCam.have = false;
+        g_radarCam.draws = g_radarCam.reads = g_radarCam.moves = g_radarCam.suppressed = 0;
+    }
+    if (!ctx) return;
+    const uint64_t now = GetTickCount64();
+    if (now - g_radarCam.secondMs >= 1000) {
+        g_radarCam.secondMs = now;
+        g_radarCam.saidThisSecond = 0;
+    }
+    for (uint32_t k = 0; k < kRadarCamRing; ++k) {
+        if (!g_radarCam.pending[k] || !g_radarCam.stage[k]) continue;
+        D3D11_MAPPED_SUBRESOURCE m{};
+        HRESULT hr = E_FAIL;
+        const bool ran = guarded("srv.turret.radarcam.map", [&] { hr = ctx->Map(g_radarCam.stage[k], 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &m); });
+        if (ran && hr == DXGI_ERROR_WAS_STILL_DRAWING) {
+            if (++g_radarCam.waited[k] > kRadarCamWait) g_radarCam.pending[k] = false;
+            continue;
+        }
+        g_radarCam.pending[k] = false;
+        if (!ran || FAILED(hr) || !m.pData) continue;
+        float rows[kRadarCamRows * 4];
+        std::memcpy(rows, m.pData, sizeof(rows));
+        guarded("srv.turret.radarcam.unmap", [&] { ctx->Unmap(g_radarCam.stage[k], 0); });
+        ++g_radarCam.reads;
+        st::RadarCam rc;
+        if (!st::radarCamFrom(rows, rows + 20, rc)) continue;   // rows 4..7 at 0, rows 9..11 at 20 (row 8 is not read)
+        const bool moved = !g_radarCam.have || std::fabs(rc.centre[0] - g_radarCam.last.centre[0]) > 0.002 || std::fabs(rc.centre[1] - g_radarCam.last.centre[1]) > 0.002 ||
+                           std::fabs(rc.centre[2] - g_radarCam.last.centre[2]) > 0.002 || st::angleBetweenDeg(rc.fwd, g_radarCam.last.fwd) > 0.05;
+        if (!moved) continue;
+        ++g_radarCam.moves;
+        if (g_radarCam.saidThisSecond < kRadarCamLinesPerSecond) {
+            ++g_radarCam.saidThisSecond;
+            radarCamSay(rc, g_frame, g_radarCam.frameOf[k]);
+        } else {
+            ++g_radarCam.suppressed;
+        }
+        g_radarCam.last = rc;
+        g_radarCam.have = true;
+        g_radarCam.lastFrame = g_frame;
+    }
+}
+
 }  // namespace
+
+// The radar picture's camera (the instrument above): every owner-context draw while the Scorpion's turret view is on; acts on the frame's first draw of vs 4EDE4BC9.
+void srvTurretRadarCamDraw(ID3D11DeviceContext* ctx, uint64_t vs) {
+    if (vs != kSchematicTerrainVs || !ctx || !g_radarCam.on || g_radarCam.lastCopyFrame == g_frame) return;
+    g_radarCam.lastCopyFrame = g_frame;
+    if (!radarCamEnsure(ctx)) return;
+    const uint32_t k = g_radarCam.next;
+    if (g_radarCam.pending[k]) return;   // the ring is full: this frame is skipped
+    UINT first = 0, count = 0;
+    if (holoCopyVsRows(ctx, g_radarCam.stage[k], 0, 4, kRadarCamRows, 0, first, count) != kRadarCamRows) return;
+    g_radarCam.pending[k] = true;
+    g_radarCam.waited[k] = 0;
+    g_radarCam.frameOf[k] = g_frame;
+    g_radarCam.next = (k + 1) % kRadarCamRing;
+    ++g_radarCam.draws;
+}
 
 // The hologram's source pass (the instrument above): every owner-context draw of a watched frame. A draw with a watched texture bound as a render target or the depth target is a writer.
 void srvTurretHoloWatchDraw(ID3D11DeviceContext* ctx, uint64_t vs, uint64_t ps, char kind, uint32_t count, uint32_t instances) {
@@ -1366,6 +1509,7 @@ void srvTurretFrameTick(uint32_t frameNo) {
         g_ignored = false;
     }
     g_backSeatedZ = st::backSeatedZ(on, backCm);
+    detail::g_srvTurretRadarCamOn.store(on, std::memory_order_relaxed);   // the radar picture's camera instrument (TEMPORARY)
     const bool wanted = on && (panelsCm > 0 || radarCm > 0 || forwardCm > 0 || radarForwardCm > 0 || gapCm > 0);   // any of the five HUD keys; a group whose own keys are 0 is left alone per draw
     if (wanted) {
         cacheGeometry(on, backCm, forwardCm, radarForwardCm);
@@ -1532,6 +1676,7 @@ void srvTurretHudFrameBoundary(ID3D11DeviceContext* ctx) {
         }
     }
     holoBoundary(ctx);
+    radarCamBoundary(ctx);
     if (g_scissor.owed() && ctx) (void)g_scissor.settle(ctx);
     if (g_binding.needsRestore() && ctx && g_binding.settle(ctx) && !g_settleNoted) {
         g_settleNoted = true;
@@ -1548,6 +1693,9 @@ void srvTurretShutdown() {
     detail::g_srvTurretHoloWatching.store(false, std::memory_order_relaxed);
     st::release(g_holo.stage);
     g_holo = HoloWatch{};
+    detail::g_srvTurretRadarCamOn.store(false, std::memory_order_relaxed);
+    for (auto& s : g_radarCam.stage) st::release(s);
+    g_radarCam = RadarCamWatch{};
     for (auto& eyeProbes : g_probe)
         for (Probe& p : eyeProbes) probeReset(p);
     g_binding.clear();
