@@ -4331,5 +4331,27 @@ ruled out: F120's head-turn correction, because it rotated a point the lever had
     - EDVR's own cost on foot with Anti-aliasing off: the GPU census reads ~0.014 ms a frame plus 0.07-0.14 ms of wrapped game draws. Draw hook CPU reads 1.42-1.61 ms a frame, against 2.0-2.35 ms with DLSS at the same outpost on the Quest at 13:48.
     - No Pimax DLSS baseline exists at that outpost. The outpost draws about 9000 eye draws a frame; the Pimax's DLSS sessions today drew 1000-1300, at another place. The Quest held 89.7 fps there with DLSS, at 1504x1522 per eye (the Pimax renders 1.8x the pixels).
     - **The discriminating test:** at the outpost on the Pimax, flip DLSS and off with the AA comparison key (F7) for about 30 s each, and read the runtime's frame-cycle windows.
+- **F197 (`ed9b661e`, full build green, `native_frame_test` 3745 checks; NOT FLOWN):** F195's pitch keep applies only after a settled mouse aim.
+  - **The rule** (native_on_foot_f195.h `MouseRun`, `whyOf`, `centring`). An engage keeps F195's offset (clamped at 15 deg) only after at least 1 s of unbroken mouse look on foot. Off foot, an engage, an unwind, or a gap over 500 ms (a stall or a load) breaks the run.
+  - **Otherwise it centres the whole pitch offset, as F109 did:** the first engage of an on-foot session, an engage under 1 s, and the end of an F131 hold.
+  - **The `centred:` line** ends `(after N s of mouse look | not kept: the first engage on foot | not kept: N s of mouse look, under 1 s | not kept: the end of a hold)`. The F195 health rule names the rightful non-keeps.
+- **F198 (`587f3abb`, full build green, `submitted_eye_test` 111 checks; NOT FLOWN):** the marker fix and the weapon readout name their eye from the submitted textures with Anti-aliasing off.
+  - **The source** (`submitted_eye.h`, `uiLayerEyeOfSubmitted`; 'S' in `targetEye` after L and T). Eye e when the draw's target is the texture submitted for eye e. Both eyes' textures must be known, distinct and stable for 2 submits. An on-foot or render-mode edge clears it, and a size change restarts that eye.
+    - It is asked only when `fix.temporal_aa` is off (`temporalPassWantsFssChrome`), so DLSS's answers are unchanged.
+    - It is fed from `treat` before its Anti-aliasing-off return.
+  - **What it wakes for Anti-aliasing-off users:** the world-marker lock (F47/F62c/F63/F64), the weapon readout pin (F85b/F148/F151), the labels (F87p), and the reticle's screen position (`retNdcPublish`).
+  - **Also published with Anti-aliasing off:** each eye's frustum (`temporalPassNoteEyeTan`: the marker fix's axis term) and the eye offset (the ADS model's IPD).
+  - **The weapon UI's `activated`** counts the patch's switch-on events and is not a gate. The readout's gap was the eye.
+  - **Lines.** `marker eye (F198): the eyes named by the submitted textures (Anti-aliasing off): eye 0 <ptr>, eye 1 <ptr>`, once an on-foot session. The marker and world lines count "the submitted textures N". The F62c/F64 health rule now reads NEVER APPLIED when the tee counts marker draws and no decision is made (the 16:13-16:16 window reads so).
+  - **Not fixed (known Anti-aliasing-off gaps):** remlok_fix.cpp's per-eye visor (F121c `eyeWatchNote`, `visorSwapBegin`, the ReadOnly table: no eye), F116's terminal HUD hide (ui_depth's classifier), and F85c's reticle depth march (F196 keeps the depth texture closed).
+  - **Not established:** that the marker composite's target is the submitted texture and not an intermediate. If it is an intermediate, S answers -1 and nothing changes.
+- **Installed for one flight:** F196 + F197 + F198 as v0.22.0-rc.4-34-g587f3abb on Frontier, verified. The live ini has `temporal_aa = off`.
+  - **Next flight (`--expect-build 587f3abb`; `--health` first).**
+    - Load in with look to aim on: the reticle should sit at the eye line.
+    - Walk on foot with Anti-aliasing off: the nav markers should hold still in the world.
+    - Draw a rifle: the readout should ride on the gun.
+    - Aim down sights: the sight should line up.
+    - Then set Anti-aliasing back to DLSS and check the same.
+    - Read: `marker eye (F198)`; F62c decisions and F63 matched counts; F85b's K solves; F66e solved eyes; the `centred:` reasons.
 - ruled out: F196 (or anything EDVR adds with Anti-aliasing off) as the cause of the outpost's 61-78 fps, because EDVR's GPU census reads ~0.1 ms a frame there, its draw hook CPU was lower than with DLSS at the same outpost, and Anti-aliasing off in the ship ran 85.5 fps against DLSS's 87.4.
 - ruled out: F196 as the cause of the moving markers and the loose weapon readout with Anti-aliasing off, because the user's rc.4 log (no F196, Anti-aliasing off) shows the same `no marker composite draw of the eye reached the fix` and `no weapon UI part` lines, and the code names a marker draw's eye only through the temporal-only interface layer and ui_depth.
