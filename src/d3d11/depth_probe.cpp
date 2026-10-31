@@ -12,8 +12,10 @@
 #include "../common/config.h"
 #include "../common/guard.h"
 #include "../common/log.h"
+#include "../common/runtime_profile.h"
 #include "../common/timing.h"
 #include "binding_shadow.h"
+#include "depth_probe_wanted.h"
 #include "shader_swap.h"
 #include "temporal_pass.h"
 
@@ -98,6 +100,9 @@ int      g_lastDrawIdx = -1;
 // Bound to the published flag depthProbeWanted() reads (depth_probe.h), so
 // the name this file and its rig have always used reads and writes it.
 bool&    g_wanted = detail::g_depthProbeWanted;
+// F196: native on-foot VR is the only reason the probe watches (depth_probe_wanted.h): the scene pair is formed at each frame boundary
+// and its eyes answered; the depth readbacks (the unbind-and-sample, the frame-boundary read) and the layout census do not run.
+bool     g_pickOnly = false;
 uint32_t g_distinctThisFrame = 0;
 uint32_t g_maxDistinct = 0;
 uint32_t g_eyeFrames = 0;   // frames that had at least one eye draw
@@ -520,9 +525,42 @@ void depthProbeConfigure(Config& cfg) {
     // advanced.eye_depth_capture needs the scene pair too, and the flight
     // rig runs fix.temporal_aa off -- the capture lights the probe itself
     // rather than inherit the temporal pass's switch.
+    // F196: so does native on-foot VR (the VR profile with fix.native_on_foot
+    // on), whatever the Anti-aliasing: with it off nothing else asks for the
+    // pair, and the ADS sight lock and F113's row sources never had an eye.
+    // The profile is asked first, so the flat profile never reads the key.
+    const bool captureOn = cfg.getBool("advanced.eye_depth_capture", false);
+    const bool vrProfile = runtimeVrProfile();
+    const bool nativeOnFootVr = vrProfile && depthProbeNativeOnFootVr(vrProfile, cfg.getString("fix.native_on_foot", "on"));
+    const DepthProbeWhy why = depthProbeWhyFor(mode, captureOn, nativeOnFootVr);
     invalidateScenePickCache();
-    g_wanted = (_stricmp(mode.c_str(), "off") != 0 && !mode.empty()) ||
-               cfg.getBool("advanced.eye_depth_capture", false);
+    g_wanted = why != DepthProbeWhy::kOff;
+    g_pickOnly = g_wanted && !depthProbeDiagnosticsFor(why);
+    if (g_pickOnly) g_layoutTarget = g_layoutRecord = -1;   // a live switch from the diagnostics: the layout census stops sampling at once
+    // One line when the reason changes, and at the first read: the log says why the probe runs, or that it does not.
+    static int said = -1;
+    if (said != static_cast<int>(why)) {
+        said = static_cast<int>(why);
+        switch (why) {
+            case DepthProbeWhy::kTemporal:
+                Log::get().note("depth probe: on for fix.temporal_aa = %s: the temporal pass asks for the scene pair; the ADS sight lock and F113 take each eye's "
+                                "rows from it; the depth census and readbacks run", mode.c_str());
+                break;
+            case DepthProbeWhy::kCapture:
+                Log::get().note("depth probe: on for advanced.eye_depth_capture (fix.temporal_aa = %s): the eye run's capture and the ADS sight lock take the "
+                                "scene pair; the depth census and readbacks run", mode.empty() ? "off" : mode.c_str());
+                break;
+            case DepthProbeWhy::kNativeOnFoot:
+                Log::get().note("depth probe: scene pair on for native on-foot VR (Anti-aliasing off): the ADS sight lock and F113 take each eye's rows from it; "
+                                "no depth readbacks, no layout census, no depth texture handed out");
+                break;
+            default:
+                // The flat profile never runs the probe (its Anti-aliasing reads off here and the capture key is refused): no line there, so its log is as it was.
+                if (vrProfile)
+                    Log::get().note("depth probe: off (fix.temporal_aa is off, the eye depth capture is off, and native on-foot VR is off: fix.native_on_foot)");
+                break;
+        }
+    }
 }
 
 namespace {
@@ -749,7 +787,10 @@ static bool sceneTextureHasFormat(const void* resource) {
 bool depthProbeSceneDepth(uint32_t w, uint32_t h, int eye, ID3D11Texture2D** tex) {
     if (!tex) return false;
     *tex = nullptr;
-    if (!g_wanted || eye < 0 || eye > 1) return false;
+    // F196: native on-foot VR alone has the probe answer which eye a draw is, not hand out the depth textures. Its two askers, F85c's reticle
+    // depth march and F119's head-containment grid (native_on_foot.cpp), read them on the GPU; with Anti-aliasing off they have never had a
+    // depth texture and decline as before (F85c noDepth, F119 kSkipDepth). Opening them to this arm is one term here, once flown.
+    if (!g_wanted || g_pickOnly || eye < 0 || eye > 1) return false;
     if (!refreshScenePick(w, h)) return false;
     // Ordered by first bind in the frame: the first bound is the left.
     int first, second;
@@ -907,7 +948,8 @@ void depthProbeNoteEyeDraw(ID3D11DeviceContext* ctx, void* dsv,
 }
 
 bool depthProbeWantsSample(void* current, void* next) {
-    if (!g_wanted || !current || current == next) return false;
+    // F196: native on-foot VR alone has no use for the depth values: no unbind of the output merger, no copy of the depth texture, no dispatch.
+    if (!g_wanted || g_pickOnly || !current || current == next) return false;
     const int idx = findTarget(current);
     if (idx < 0) return false;
     Target& t = g_targets[idx];
@@ -1101,10 +1143,29 @@ void depthProbeFrameBoundary(ID3D11DeviceContext* ctx) {
                 : "No shader-resource bind: v2 would copy it out once per "
                   "eye (CopyResource, same typeless family) before reading.");
     }
+    // F196: nothing else asks for the scene pair when native on-foot VR is
+    // the probe's only reason (Anti-aliasing off: the temporal pass is the
+    // asker otherwise, by the eye's size, every frame). Form it here, from
+    // the counts that just rolled, by the size of the busiest target that
+    // was bound beside an eye-sized colour target: D3D11 gives every view
+    // bound together one size, so that depth target is the eye's size, the
+    // size the temporal pass would ask by. The same evaluation, hysteresis
+    // included (refreshScenePick), so the pair this forms is the one the pass
+    // would. The draws of the frame beginning now read it through
+    // depthProbeCurrentSceneEyeOf, which never refreshes.
+    if (g_pickOnly) {
+        int busiest = -1;
+        for (int i = 0; i < g_targetCount; ++i) {
+            const Target& t = g_targets[i];
+            if (!t.dsv || !t.tex || t.samples > 1 || t.eyeRtvDrawsLastFrame == 0) continue;
+            if (busiest < 0 || t.drawsLastFrame > g_targets[busiest].drawsLastFrame) busiest = i;
+        }
+        if (busiest >= 0) refreshScenePick(g_targets[busiest].w, g_targets[busiest].h);
+    }
     // The layout census's target for the frame beginning now: the busiest
     // depth target, when none of its draws had an eye-sized colour target
-    // beside them (THE LAYOUT CENSUS above).
-    {
+    // beside them (THE LAYOUT CENSUS above). Not for native on-foot VR alone.
+    if (!g_pickOnly) {
         int busiest = -1;
         for (int i = 0; i < g_targetCount; ++i) {
             const Target& t = g_targets[i];
@@ -1160,7 +1221,7 @@ void depthProbeFrameBoundary(ID3D11DeviceContext* ctx) {
                 if (!e2.dsv || e2.w != ew || e2.h != eh) continue;
                 const int m = snprintf(eyes + u2, sizeof(eyes) - u2, "%s#%d %u draws (bind %u)%s",
                                        u2 ? ", " : "", i, e2.drawsLastFrame, e2.firstBindLastFrame,
-                                       e2.samples > 1 ? " msaa" : (!e2.sampledOnce ? " unsampled" : ""));
+                                       e2.samples > 1 ? " msaa" : (!e2.sampledOnce && !g_pickOnly ? " unsampled" : ""));
                 if (m > 0) u2 += static_cast<size_t>(m);
                 if (e2.sampledOnce && e2.samples <= 1 && u2 < sizeof(eyes)) {
                     const int m2 = snprintf(eyes + u2, sizeof(eyes) - u2, " [far %d near %d]",
@@ -1264,25 +1325,34 @@ void depthProbeFrameBoundary(ID3D11DeviceContext* ctx) {
                 if (m > 0) used += static_cast<size_t>(m);
                 if (used >= sizeof(busy)) break;
             }
+            // F196: the tail says what is read; native on-foot VR alone reads no depth values.
+            char tail[220];
+            if (g_pickOnly) {
+                snprintf(tail, sizeof(tail), "No depth values are read (native on-foot VR alone: the scene pair only).");
+            } else {
+                snprintf(tail, sizeof(tail),
+                         "Each target is sampled at the LAST moment in a frame the game "
+                         "switches away from it, both through a view and through a "
+                         "copy, and at the frame boundary through a copy, every %llu s.",
+                         static_cast<unsigned long long>(kSampleIntervalMs / 1000));
+            }
             Log::get().note(
                 "depth probe: %d distinct depth target(s) seen at draws over "
                 "120 frames, at most %u in one frame. Last frame: %u draws "
                 "hooked, %u of them with a depth target bound, %u with an "
                 "eye-sized colour target, %u indirect; the busiest targets: %s. "
-                "Each target is sampled at the LAST moment in a frame the game "
-                "switches away from it, both through a view and through a "
-                "copy, and at the frame boundary through a copy, every %llu s.",
+                "%s",
                 g_targetCount, g_maxDistinct, g_drawsLastFrame,
                 g_drawsWithDsvLastFrame, g_eyeRtvDrawsLastFrame,
-                g_indirectLastFrame, busy,
-                static_cast<unsigned long long>(kSampleIntervalMs / 1000));
+                g_indirectLastFrame, busy, tail);
         }
     }
     // The frame-boundary read: one target per interval, round-robin, through
     // the reference held on its texture and the copy path -- after every
     // draw of the frame has been issued, whenever in the frame the depth
     // was written. Nothing is unbound for it: a copy is not a view.
-    if (!g_stagingInFlight && ctx && g_targetCount > 0 &&
+    // (F196: not begun for native on-foot VR alone; one already in flight is polled below.)
+    if (!g_pickOnly && !g_stagingInFlight && ctx && g_targetCount > 0 &&
         (g_boundaryLastMs == 0 || elapsedMs(g_boundaryLastMs, kSampleIntervalMs))) {
         for (int tries = 0; tries < g_targetCount; ++tries) {
             const int idx = static_cast<int>(g_boundaryNext++ % static_cast<uint32_t>(g_targetCount));

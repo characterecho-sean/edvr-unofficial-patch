@@ -1771,9 +1771,13 @@ __declspec(noinline) bool ensureOurCompositeCb(ID3D11DeviceContext* self, State*
 // rung's own test; the second rung's pre-check, depthProbeEyeDrawNeedsNote(),
 // is that same flag AND a per-view test, so it cannot pass while the flag is
 // false. depthProbeConfigure arms it for any fix.temporal_aa value but off, or
-// for advanced.eye_depth_capture alone. objectProbeWantsDraws() below covers a
-// recognised temporal mode, which is why this went unnoticed; it does not cover
-// an unrecognised value or the capture on its own.
+// for advanced.eye_depth_capture alone, or (F196) for native on-foot VR alone: the
+// VR profile with fix.native_on_foot on and Anti-aliasing off, where it forms the
+// scene pair for the ADS sight lock and F113 and opens this gate (and so shuts the
+// AA-off draw fast path, draw_fast_path.h) -- in the shipped file the gate is open
+// already, remlok_lines = outer and holo_pattern = steady being on. objectProbeWantsDraws()
+// below covers a recognised temporal mode, which is why this went unnoticed; it does
+// not cover an unrecognised value, the capture on its own or native on-foot VR.
 //
 // Two rungs below the gate are deliberately NOT listed: screenMotionLive() and
 // uiLayerCrispOn(). Each implies temporalModeEnabled(fix.temporal_aa), the same

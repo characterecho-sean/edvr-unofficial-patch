@@ -24,7 +24,12 @@
 // self-test below now decide.
 //
 // Runs only while fix.temporal_aa or advanced.eye_depth_capture is on (it
-// exists for the temporal pass), costs one pointer compare per eye draw and
+// exists for the temporal pass), or (F196) in the VR profile with
+// fix.native_on_foot on, whatever the Anti-aliasing (depth_probe_wanted.h): with
+// it off nothing else forms the scene pair, and native on-foot VR's row sources
+// and ADS sight lock need each eye's identity from it. That arm counts the draws
+// and forms the pair at each frame boundary and reads no depth values.
+// Costs one pointer compare per eye draw and
 // per render-target change, and one tiny dispatch every few seconds; dereferences a
 // view only inside the call the game made with it; stands down for the
 // session on any repeated fault. Nothing it does reaches the picture.
@@ -42,7 +47,9 @@ namespace edvr {
 
 class Config;
 
-// Reads fix.temporal_aa: the probe is wanted while the pass is.
+// Reads fix.temporal_aa: the probe is wanted while the pass is; and
+// advanced.eye_depth_capture; and (F196) native on-foot VR, the VR profile with
+// fix.native_on_foot on. The decision is depthProbeWantedFor (depth_probe_wanted.h).
 void depthProbeConfigure(Config& cfg);
 
 // EVERY draw on the owner context, with the depth-stencil view bound for
@@ -58,11 +65,12 @@ void depthProbeNoteDraw(ID3D11DeviceContext* ctx, void* dsv, bool rtvEyeSized,
                         bool rtvNull);
 
 // Is the probe watching? depthProbeNoteDraw's own first test, published so
-// the draw path can skip the call: the probe is armed only by fix.temporal_aa
-// or advanced.eye_depth_capture, and with both off the note
+// the draw path can skip the call: the probe is armed only by fix.temporal_aa,
+// advanced.eye_depth_capture or (F196) native on-foot VR, and with all three off the note
 // was a cross-TU call per draw (this build has no /GL) that returned at once --
 // 49 innermost samples of the flown 2026-09-22 window, all on its prologue and
-// epilogue.
+// epilogue. It is also a term of the draw gate (vscreen.cpp drawGateSubscribed),
+// so arming it holds the gate open and the AA-off draw fast path (draw_fast_path.h) shut.
 namespace detail { extern bool g_depthProbeWanted; }
 inline bool depthProbeWanted() { return detail::g_depthProbeWanted; }
 
@@ -113,7 +121,8 @@ void depthProbeFrameBoundary(ID3D11DeviceContext* ctx);
 // fix.ui_quality's world-screen gate, which asks it of the 2D screen's size
 // -- on foot the world's hundreds or thousands, a menu's UI 3 or 4 (ui_layer_
 // math.h). 0 when no target of that size is known; false while the probe is
-// not watching (fix.temporal_aa and eye_depth_capture off).
+// not watching (fix.temporal_aa, eye_depth_capture and, F196, native on-foot VR
+// off; its one caller, the layer's gate, runs only with a temporal mode on).
 // The render thread only, where the counts are kept.
 bool depthProbeDrawsAtSize(uint32_t w, uint32_t h, uint32_t* draws);
 

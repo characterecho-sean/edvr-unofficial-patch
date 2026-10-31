@@ -10644,13 +10644,33 @@ def _hj_f110_model_eye(rows, ctx):
     text = "%d s: aiming eye %s, the solved %s eye %d frames, the model %d (%.0f%%: from the job camera %d, from the solved left eye %d)" % (
         _hsecs(new), aim, aim, solved, model, 100.0 * model / (solved + model), fromcam, fromleft)
     if not dn:
-        return ("OK", text + "; no frame had the model and the solved %s eye together" % aim)
-    dmean = sum(int(r["dn"]) * float(r["dmean"]) for r in new) / dn
-    dmax = max(float(r["dmax"]) for r in new if int(r["dn"]))
-    text += "; the job camera's model against the solved %s eye %.1f cm mean, %.1f max over %d frames" % (aim, dmean, dmax, dn)
-    if dmean > 0.5:
-        return ("PARTIAL", text + ": the model is off the %s eye" % aim)
-    return ("OK", text)
+        text += "; no frame had the model and the solved %s eye together" % aim
+        verdict = "OK"
+    else:
+        dmean = sum(int(r["dn"]) * float(r["dmean"]) for r in new) / dn
+        dmax = max(float(r["dmax"]) for r in new if int(r["dn"]))
+        text += "; the job camera's model against the solved %s eye %.1f cm mean, %.1f max over %d frames" % (aim, dmean, dmax, dn)
+        verdict = "PARTIAL" if dmean > 0.5 else "OK"
+        if verdict == "PARTIAL":
+            text += ": the model is off the %s eye" % aim
+    # F196: a window with ADS frames and not one on the solved right eye is the rendered eyes never reaching the lock, whatever the model's figure against them (there
+    # are none to compare): the model is the job camera (the left eye) plus a fixed IPD along the gun's right, and ignores the eyes' height and depth offsets, the user's
+    # IPD when it is the fallback, and any head roll against the gun. The left eye aims with the job camera itself, which is exact, so only the right eye is judged. The
+    # user's log (Quest 2, WiVRn, Anti-aliasing off) read 464 of 464 frames on the model, the IPD the 0.0630 m fallback, and a build before F196 had no scene depth eye
+    # to give the eyes rows with Anti-aliasing off: the depth probe did not watch.
+    right = [r for r in new if (r.get("aim") or "right") == "right"]
+    drove = [r for r in right if int(r["solved"]) + int(r["model"])]
+    blind = [r for r in drove if not int(r["solved"])]
+    if blind and verdict == "OK":
+        last = blind[-1]
+        why = ("the model's IPD is %s m, %s; the eye rows (F113) and the depth probe's line say why there were no rows (a build before F196 formed no scene pair with "
+               "Anti-aliasing off)" % (last["ipd"], last["ipdsrc"]))
+        if len(blind) == len(drove):
+            return ("NEVER APPLIED", text + "; the solved rendered right eye never reached the lock: all %d s with ADS frames were on the model, the job camera plus a fixed IPD, "
+                    "which ignores the eyes' height and depth offsets and any head roll against the gun (%s)" % (_hsecs(blind), why))
+        if len(blind) * 2 > len(drove):
+            return ("PARTIAL", text + "; %d of %d s with ADS frames had no solved right eye at all (%s)" % (_hsecs(blind), _hsecs(drove), why))
+    return (verdict, text)
 
 
 def _hj_f111_pointer(rows, ctx):
@@ -10737,7 +10757,11 @@ def _hj_f113_rows(rows, ctx):
     if any(r["lat"] for r in sec):
         return ("PARTIAL", text + "; LATCHED OFF: a source's rows differed from a scene mesh's (a build before F130)")
     if none_total and not src_total:
-        return ("NEVER APPLIED", text + "; frames without rows and no source ever gave any")
+        # F196: a source draw that declined for want of a scene depth eye is the depth probe's scene pair never having formed (Anti-aliasing off, on a build before
+        # F196: nothing asked for the pair and the probe was not watching); the user's log (Quest 2, WiVRn) read 157185 of them in 490 frames.
+        noeye = sum(int(r["noeye"]) for r in sec)
+        return ("NEVER APPLIED", text + "; frames without rows and no source ever gave any" + (
+            "; %d source draws had no scene depth eye: the depth probe's scene pair never formed (Anti-aliasing off, a build before F196)" % noeye if noeye else ""))
     if short:
         return ("PARTIAL", text + "; " + "; ".join(short))
     return ("OK", text)
@@ -18805,8 +18829,8 @@ def self_test_health():
         F110 = "ADS model eye (F110)"
 
         def sight_check(both=87, one=0, none=0, solved=87, model=0, fromcam=0, fromleft=0, ipd=0.0626, src="the eyes' offsets", d=(0.0, 0.0, 0.0), dmean=0.1,
-                        dmax=0.3, dn=87, aim="right"):
-            return R("native on foot ADS sight check (F66e/F79): eye rows", 1, both, one, none, 0, aim, solved, model, fromcam, fromleft, ipd, src, d[0], d[1], d[2], dmean,
+                        dmax=0.3, dn=87, aim="right", wl=1):
+            return R("native on foot ADS sight check (F66e/F79): eye rows", wl, both, one, none, 0, aim, solved, model, fromcam, fromleft, ipd, src, d[0], d[1], d[2], dmean,
                      dmax, dn, 0.0, 0.0, 0.0, 6.2, 0.1, 0.1, 6.18, both, 5.8, 5.9, -20.9, 0.5, 0.6, -21.0, 0.44, 0.19, 0.26, 0.18, -0.24, 0.19, -0.23, 0.18, "")
 
         # the tester's log (edvr_gfx_20261025_114257, the build before F110): every ADS frame on F63's half-IPD model
@@ -18817,8 +18841,21 @@ def self_test_health():
               has=["the model 0 (0%", "against the solved right eye 0.1 cm mean, 0.3 max over 261 frames"], lacks=["UNPARSED"])
         check("F110 model eye: the tester's 3.1 cm (the model at the nose)", [sight_check(d=(-3.1, 0.0, 0.0), dmean=3.1, dmax=3.2)] * 2, 0, [("PARTIAL", F110)],
               has=["3.1 cm mean, 3.2 max over 174 frames: the model is off the right eye"])
-        check("F110 model eye: no rows, every frame on the camera's model", [sight_check(both=0, none=72, solved=0, model=72, fromcam=72, dn=0)] * 2, 0,
-              [("OK", F110)], has=["the model 144 (100%: from the job camera 144, from the solved left eye 0)", "no frame had the model and the solved right eye"])
+        # F196: the right eye aims and no frame of any ADS second had the solved eye: the rendered eyes never reached the lock (it was OK before: the model is a fallback, but
+        # a fallback that carries every frame is the feature not running). The user's log (Quest 2 on WiVRn under Proton, v0.22.0-rc.4, fix.temporal_aa = off) is the
+        # second case: 464 frames in these 10 s, none/implausible 464, the model 464 from the job camera, the IPD the 0.0630 m fallback.
+        check("F110 model eye: no rows, every frame on the camera's model, never a solved right eye", [sight_check(both=0, none=72, solved=0, model=72, fromcam=72, dn=0)] * 2, 3,
+              [("NEVER APPLIED", F110)], has=["the model 144 (100%: from the job camera 144, from the solved left eye 0)", "no frame had the model and the solved right eye",
+                                              "the solved rendered right eye never reached the lock: all 2 s with ADS frames were on the model"])
+        USER196 = sight_check(wl=10, both=0, none=464, solved=0, model=464, fromcam=464, ipd=0.0630, src="the fallback", dn=0)
+        check("F196 model eye: the user's log (Anti-aliasing off), 464 of 464 frames on the model, IPD the fallback", [USER196] * 2, 3, [("NEVER APPLIED", F110)],
+              has=["20 s: aiming eye right, the solved right eye 0 frames, the model 928 (100%: from the job camera 928, from the solved left eye 0)", "never reached the lock",
+                   "the model's IPD is 0.0630 m, the fallback", "a build before F196 formed no scene pair with Anti-aliasing off"], lacks=["UNPARSED"])
+        blind196 = sight_check(both=0, none=72, solved=0, model=72, fromcam=72, dn=0)
+        check("F196 model eye: one blind second among solved ones is a moment, not the feature missing", [sight_check(), sight_check(), blind196], 0, [("OK", F110)],
+              lacks=["never reached the lock", "had no solved right eye at all"])
+        check("F196 model eye: most of the ADS seconds blind, some solved", [sight_check(), blind196, blind196], 0, [("PARTIAL", F110)],
+              has=["2 of 3 s with ADS frames had no solved right eye at all"])
         check("F110 model eye: the tester's build (F63's half-IPD model)", [OLD_TESTER] * 3, 0, [("PARTIAL", F110)],
               has=["F63's model 216 (100%)", "half the IPD: the nose"])
         # F162: the aiming eye. A line before it is the right eye's (the F110 to F161 builds wrote "the lock's right eye" and "the solved right eye").
@@ -18835,9 +18872,9 @@ def self_test_health():
         # ---- eye rows (F113): each eye's scene rows and their source ----
         F113 = "eye rows (F113)"
 
-        def rows113(m=(10, 10), p=(80, 80), t=(0, 0), n=(0, 0), checked=2, diff=0.0, latched=False, wl=1, repl=0, marked=0, refused=0):
+        def rows113(m=(10, 10), p=(80, 80), t=(0, 0), n=(0, 0), checked=2, diff=0.0, latched=False, wl=1, repl=0, marked=0, refused=0, noeye=0):
             f = tuple(m[e] + p[e] + t[e] + n[e] for e in (0, 1))
-            line = R("native on foot eye rows (F113) %u s: eye 0", wl, f[0], m[0], p[0], t[0], n[0], f[1], m[1], p[1], t[1], n[1], checked, diff, 0, 0, repl, marked, refused)
+            line = R("native on foot eye rows (F113) %u s: eye 0", wl, f[0], m[0], p[0], t[0], n[0], f[1], m[1], p[1], t[1], n[1], checked, diff, noeye, 0, repl, marked, refused)
             if latched:   # a build before F130: its tail was ", latched N" and the LATCHED OFF note
                 line = line.split("; mesh rows replaced by a source")[0] + ", latched 0 -- LATCHED OFF (a mismatch over 1e-5): the scene meshes alone"
             return line
@@ -18869,6 +18906,9 @@ def self_test_health():
         check("F113 rows: 10 s latch tail", [rows113(wl=10, diff=2e-3, latched=True)], 0, [("PARTIAL", F113)], has=["10 s:", "LATCHED OFF"], lacks=["UNPARSED"])
         check("F113 rows: 10 s sources never ran", [rows113(m=(300, 300), p=(0, 0), n=(600, 600), wl=10)], 3,
               [("NEVER APPLIED", F113)], has=["10 s:", "no source ever gave any"], lacks=["UNPARSED"])
+        # F196: the user's log (Quest 2, WiVRn, Anti-aliasing off): no scene depth eye for 157185 source draws, so no rows at all
+        check("F196 rows: the user's log, source draws with no scene depth eye (the depth probe's pair never formed)", [rows113(m=(0, 0), p=(0, 0), n=(490, 490), checked=0, noeye=157185, wl=10)], 3,
+              [("NEVER APPLIED", F113)], has=["none 100.0%", "157185 source draws had no scene depth eye: the depth probe's scene pair never formed"], lacks=["UNPARSED"])
 
         # ---- reticle depth (F118): the edge or the speed as the cause of a reticle seen double ----
         F118 = "reticle depth (F118)"
