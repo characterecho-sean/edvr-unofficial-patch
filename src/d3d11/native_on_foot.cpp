@@ -89,6 +89,7 @@
 #include "native_on_foot_f181.h"   // F181: the left elbow's swivel capped at the hip with a two-handed gun (TEMPORARY dial; pure parts)
 #include "native_on_foot_f186.h"   // F186: the ADS terms pre-turned by the aim pitch, the sight lock's response measured, a stability stop (pure parts)
 #include "native_on_foot_f185.h"   // F185: the left arm keeps a bend in the sights, the shoulder first (TEMPORARY dial; pure parts)
+#include "native_on_foot_f191.h"   // F191: the hip reticle found by its marker type (1001), not by pool slot 10 (pure parts)
 #include "native_on_foot_f182.h"   // F182: the left hand stays on a two-handed gun aimed steeply up (the stored grip point in the item's frame; pure parts)
 #include "native_on_foot_f176.h"   // F176: in the sights with the head aiming, the mouse and the stick hold their pitch (pure parts)
 #include "native_on_foot_f175.h"   // F175 (measure only): the view's roll and pitch against the headset's, by look mode and item (pure parts)
@@ -174,7 +175,13 @@ std::atomic<bool> g_visorUpSetting{true};                       // fix.native_on
 float g_hudSizeLast = -1.0f;                                    // frame thread only: as last logged (F13)
 bool g_followHeadLast = true, g_visorUpLast = true;   // frame thread only (F13, F16)
 bool g_visorBreathLast = false;                                 // frame thread only: the breathable air state as last logged, on foot (F16)
-std::atomic<bool> g_reticleWriteOn{false};                      // the key 10 centring is wanted now: on foot, session (frame thread; the probe reads it, F16)
+std::atomic<bool> g_reticleWriteOn{false};                      // the reticle's centring is wanted now: on foot, session (frame thread; the probe reads it, F16)
+// F191: the key the reticle's marker type (1001) uses. Fed by the SetMarker trampoline (f87p::markerRecord, a game thread: the HUD update); read by the indicator
+// pre-hook and the marker post-hook (game threads) and by the draw decision (render thread). One atomic word inside (native_on_foot_f191.h); reset by the frame thread
+// when that trampoline goes in and when it comes out. Before the first type 1001 call, or with the marker fix off, it answers key 10, as the code did before F191.
+nofoot::f191::ReticleKeys g_reticleKeys;
+inline uint32_t f191Now() noexcept { return static_cast<uint32_t>(GetTickCount64()); }
+inline bool f191IsReticle(uint32_t key) noexcept { return g_reticleKeys.isReticle(key, f191Now()); }
 bool g_reticleWriteLast = false;                                // frame thread only (F16)
 std::atomic<bool> g_hybridKeyOn{false};                          // fix.native_on_foot_body_hybrid, as the frame thread last read it (F21, temporary)
 bool g_hybridKeyLast = false;                                    // frame thread only: as last logged (F21)
@@ -1618,7 +1625,7 @@ void readKey() {
     if (room < 1.0f) room = 1.0f;
     if (room > 2.5f) room = 2.5f;
     g_hudRoomSetting.store(room, std::memory_order_relaxed);
-    // F34: the reticle stub is the feature's (key 10 while native stereo is on foot); the probe key is gone.
+    // F34: the reticle stub is the feature's (the reticle's key while native stereo is on foot); the probe key is gone.
     // F15 (TEMPORARY): the first-person body hide (native_on_foot_hooks.cpp, nativeOnFootFpBody).
     const bool fpOn = cfg.getString("fix.native_on_foot_hide_fp_body", "on") == "on";
     g_fpKeyOn.store(fpOn, std::memory_order_relaxed);
@@ -3981,8 +3988,8 @@ uint64_t __fastcall layoutHooked(void* hrc, void* out, void* rec, uint64_t a4, u
     return rax;
 }
 
-// RETICLE INDICATOR PROBE (read only, except key 10 while native stereo is on foot, F16-F18). The stub below calls this with rcx = the instance and rdx = the node of the marker component's call at
-// EliteDangerous64.exe+0x1A17BE4 (the call to 0x4351920, preceded by mov rcx,[rsi+0x60]). It writes nothing except key 10: its translation x and y are zeroed (F18), so the reticle sits on the aim axis. F127 removed
+// RETICLE INDICATOR PROBE (read only, except the reticle's key while native stereo is on foot, F16-F18; F191: that key is the one marker type 1001 uses, slot 10 only until a type 1001 call is seen). The stub below calls this with rcx = the instance and rdx = the node of the marker component's call at
+// EliteDangerous64.exe+0x1A17BE4 (the call to 0x4351920, preceded by mov rcx,[rsi+0x60]). It writes nothing except the reticle's key: its translation x and y are zeroed (F18), so the reticle sits on the aim axis. F127 removed
 // the head placement (F17) and the game's own (F21) with their setting.
 
 struct F14Key {
@@ -3998,16 +4005,23 @@ struct F14Key {
 constexpr size_t kF14Keys = 16;
 F14Key g_f14Keys[kF14Keys];         // guarded by g_f9Lock
 
-// F18: the reticle on the aim axis (key 10 only, the one placement since F127): the translation's x and y are zeroed, so the dot sits on the mouse-aim
-// axis. That is the F16 centring; z, w, the basis and the scale stay. Written only while g_reticleWriteOn (frame thread). Guarded.
+// F18: the reticle on the aim axis (the reticle's key only, the one placement since F127; F191: the key type 1001 uses, no longer slot 10): the translation's x and y
+// are zeroed, so the dot sits on the mouse-aim axis. That is the F16 centring; z, w, the basis and the scale stay. Written only while g_reticleWriteOn (frame
+// thread). Guarded.
 bool g_f18AimFailNoted = false;     // game thread only
 void reticleAimCentre(uintptr_t ia, bool announce) noexcept {
     const bool ok = guardedWriteFloat(ia + 0x40, 0.0f) && guardedWriteFloat(ia + 0x44, 0.0f);
+    char what[80] = {}, line[240];
+    if ((!ok && !g_f18AimFailNoted) || (ok && announce)) g_reticleKeys.describe(what, sizeof(what));
     if (!ok && !g_f18AimFailNoted) {
         g_f18AimFailNoted = true;
-        f14Queue("native on foot reticle: NOT centred -- the instance could not be written; key 10 stays at the game's aim");
+        std::snprintf(line, sizeof(line), "native on foot reticle: NOT centred -- the instance could not be written; key %s stays at the game's aim", what);
+        f14Queue(line);
     }
-    if (ok && announce) f14Queue("native on foot reticle: follows aim (key 10 centred on the aim axis: x and y zeroed)");
+    if (ok && announce) {
+        std::snprintf(line, sizeof(line), "native on foot reticle: follows aim (key %s centred on the aim axis: x and y zeroed)", what);
+        f14Queue(line);
+    }
 }
 
 void __fastcall reticleIndicatorProbe(void* instance, void* node) noexcept {
@@ -4024,8 +4038,9 @@ void __fastcall reticleIndicatorProbe(void* instance, void* node) noexcept {
     guardedRead(ia + 0x50, &scale, 4);
     const bool okPos = guardedRead(ia + 0x40, &pos[0], 4) && guardedRead(ia + 0x44, &pos[1], 4) && guardedRead(ia + 0x48, &pos[2], 4);
     if (!okKey || !okB) return;
-    // Key 10 (the aim reticle), while g_reticleWriteOn (the frame thread's flag): its x and y are zeroed, so it sits on the aim axis (F18; the only placement since F127).
-    if (key == 10) {
+    // The aim reticle (F191: the key type 1001 uses, not slot 10), while g_reticleWriteOn (the frame thread's flag): its x and y are zeroed, so it sits on the aim axis
+    // (F18; the only placement since F127). The tracker is fed by the SetMarker trampoline on a game thread; an atomic read here.
+    if (f191IsReticle(key)) {
         const bool writeOn = g_reticleWriteOn.load(std::memory_order_relaxed);
         const bool announce = g_reticleLogWanted.exchange(false, std::memory_order_relaxed);
         if (writeOn) reticleAimCentre(ia, announce);
@@ -4261,7 +4276,7 @@ void f53KeyTagged(uint32_t key) noexcept {
     if (!nativeOnFootMarkerMeasure()) return;
     if (F53KeySlot* s = f53KeySlot(key)) s->tagged.fetch_add(1, std::memory_order_relaxed);
 }
-// F52: the marker posts the placement leaves alone (key 10, the reticle; world markers mode "game"; no fresh head pose) are tagged in place
+// F52: the marker posts the placement leaves alone (the reticle, F191: the key type 1001 uses; world markers mode "game"; no fresh head pose) are tagged in place
 // while the probe is on: the game's own t at +0x40 with the sentinel in its low mantissa bits (at most 255 ulps a component), so every post-stub
 // marker node is findable. No lock, no log; the reads and writes are guarded.
 std::atomic<uint64_t> g_f52TagOnly{0};
@@ -4272,8 +4287,8 @@ void f52TagInPlace(uintptr_t na, uintptr_t ia, uint32_t key) noexcept {
     if (!guardedRead(ia + 0x40, t, sizeof(t))) return;
     F44Tag f44{};
     f44Assign(key, f44);
-    // F69e: F18's centring writes key 10's x and y as exact zeros, which the tag refuses; a signed 2^-100 m stands in for each (the instance moves by
-    // under 1e-29 m). The census shows `key 10: N, N` once it works.
+    // F69e: F18's centring writes the reticle's x and y as exact zeros, which the tag refuses; a signed 2^-100 m stands in for each (the instance moves by
+    // under 1e-29 m). The census shows the reticle's key as `N, N` once it works.
     if (drawtag::seedZeros(t)) g_f69eSeeded.fetch_add(1, std::memory_order_relaxed);
     if (!drawtag::encode(t, f44.sentinel)) {
         g_f44Untaggable.fetch_add(1, std::memory_order_relaxed);
@@ -4505,7 +4520,7 @@ void f85bTagSubmit(uintptr_t inst, const WeaponUiPartSample& sample) noexcept {
     if (g_f85bTaggedAll.fetch_add(1, std::memory_order_relaxed) == 0) g_f85bFirstTagMs.store(GetTickCount64(), std::memory_order_relaxed);
 }
 
-// F25 (TEMPORARY): the post-call of the marker stub, for every marker except key 10 (the reticle, which keeps its own placement). The game's call
+// F25 (TEMPORARY): the post-call of the marker stub, for every marker except the reticle (F191: the key type 1001 uses; it keeps its own placement). The game's call
 // writes the instance's translation t (+0x40) from the marker's world position, which already includes the head (the probe-3 RE: its yaw is -C's).
 // The list-B pipeline then applies C again, so the marker is head-locked. Writing t' = (t - row3(C)) . R^T, the exact inverse of that forward map
 // (p . C for a row-vector C: the same map the reticle's retired head placement wrote, t' = d*row2 + row3), cancels the second application. Read the node's key
@@ -4516,7 +4531,7 @@ void __fastcall reticleWorldPost(void* node) noexcept {
     uint32_t key = 0;
     if (!na || !guardedRead(na + 0x60, &ia, 8) || !ia || !guardedRead(na + 0x20, &key, 4)) return;
     if (g_nativeOnFootMarkerProbeKey.load(std::memory_order_relaxed) && nativeOnFootActive()) f53KeyPost(key);   // F53: the key census
-    if (key == 10) {
+    if (f191IsReticle(key)) {   // F191: the key type 1001 uses (slot 10 until a type 1001 call is seen); every other key takes the world-marker path below
         f52TagInPlace(na, ia, key);   // F52: tagged (the probe on), placement left alone
         return;
     }
@@ -11128,6 +11143,18 @@ void __fastcall markerRecord(uint64_t slot, uint64_t ret, const uint64_t* regs, 
         } else if (type == nofoot::f87::kIndicatorTypeInteractable) {
             g_indInteractN.fetch_add(1, std::memory_order_relaxed);
             g_indInteractMask.fetch_or(1ull << (key >= 0 && key < 63 ? key : 63), std::memory_order_relaxed);
+            // F191: type 1001 is the reticle's owner; its key is the reticle's, whatever pool slot the allocator gave it. This thread (the HUD update) is the tracker's
+            // writer; the pre-hook, the post-hook and the render thread read it. A change of the newest key is queued as one line (f14Queue: a short spin lock, drained
+            // by the frame thread), never printed from here.
+            static_assert(nofoot::f191::kReticleMarkerType == nofoot::f87::kIndicatorTypeInteractable, "F191 tracks the marker type F92c calls the interactable's");
+            if (key >= 0) {
+                const nofoot::f191::Observed o = g_reticleKeys.observe(static_cast<uint32_t>(key), f191Now());
+                if (o.changed) {
+                    char line[160];
+                    nofoot::f191::formatKeyChange(line, sizeof(line), o.previous, static_cast<uint32_t>(key));
+                    f14Queue(line);
+                }
+            }
         } else {
             g_indUnknownN.fetch_add(1, std::memory_order_relaxed);
             g_indUnknownLast.store(outerRva, std::memory_order_relaxed);
@@ -11311,6 +11338,7 @@ void tick(bool want, const char* reason) {
             }
             rel[i] = static_cast<int32_t>(r);
         }
+        g_reticleKeys.reset();   // F191: a new session starts from the fallback (key 10), before the trampoline can feed the tracker
         int done = 0;
         bool ok = true;
         for (int i = 0; i < 3 && ok; ++i) {
@@ -11346,6 +11374,7 @@ void tick(bool want, const char* reason) {
         else clean = false;
     }
     g_installed = false;
+    g_reticleKeys.reset();   // F191: nothing feeds the tracker now; the keys of this session are not the next one's (the answer is the fallback, key 10, as with the hook off)
     Log::get().note("prompt anchor (F87p): slots and getter calls %s (%s)", clean ? "restored to the game's own" : "NOT all restored (a slot or call was not ours)", reason);
 }
 
@@ -12169,17 +12198,19 @@ void adsSightLog(uint32_t seconds, bool steady, bool hold, bool detailed) noexce
     // "not found" names what to check.
     {
         const double rn = w.retFrames ? static_cast<double>(w.retFrames) : 1.0;
+        char retKey[80] = {};
+        g_reticleKeys.describe(retKey, sizeof(retKey));   // F191: the reticle is the key type 1001 uses, not slot 10
         if (w.retFrames)
-            Log::get().note("native on foot ADS reticle (F68b): the on-foot reticle composite (key 10, the aim reticle) in the aiming eye (%s) on %u of %u frames with a sight "
+            Log::get().note("native on foot ADS reticle (F68b): the on-foot reticle composite (key %s, the aim reticle) in the aiming eye (%s) on %u of %u frames with a sight "
                             "NDC (%u without); its NDC mean (%.4f, %.4f) at depth %.1f m; the sight line (P14 + 10 m f) mean (%.4f, %.4f); sight minus reticle "
                             "%+.2f deg right, %+.2f deg up, total mean %.2f deg (largest %.2f; largest |right| %.2f, |up| %.2f): the sight-to-fire angle, to agree "
                             "within 0.3 deg for shots to land on the sights",
-                            nofoot::f162::aimingName(w.aim), w.retFrames, w.retFrames + w.retMiss, w.retMiss, w.retNdc[0] / rn, w.retNdc[1] / rn, w.retDepth / rn, w.sightNdc[0] / rn,
+                            retKey, nofoot::f162::aimingName(w.aim), w.retFrames, w.retFrames + w.retMiss, w.retMiss, w.retNdc[0] / rn, w.retNdc[1] / rn, w.retDepth / rn, w.sightNdc[0] / rn,
                             w.sightNdc[1] / rn, w.retRight / rn, w.retUp / rn, w.retTotal / rn, w.retTotalMax, w.retRightMax, w.retUpMax);
         else if (w.retMiss)
-            Log::get().note("native on foot ADS reticle (F68b): the reticle composite (key 10) was NOT found in the aiming eye (%s) on any of %u frames with a sight NDC "
-                            "(no matched key-10 composite draw: the marker probe is off, the reticle is hidden in this ADS, or the tag was not found)",
-                            nofoot::f162::aimingName(w.aim), w.retMiss);
+            Log::get().note("native on foot ADS reticle (F68b): the reticle composite (key %s) was NOT found in the aiming eye (%s) on any of %u frames with a sight NDC "
+                            "(no matched reticle composite draw: the marker probe is off, the reticle is hidden in this ADS, or the tag was not found)",
+                            retKey, nofoot::f162::aimingName(w.aim), w.retMiss);
     }
     {
         const double bn = w.opticBasisN ? static_cast<double>(w.opticBasisN) : 1.0;
@@ -30279,7 +30310,7 @@ nofoot::f98b::Tracker g_f98bTrack[2];
 // F95b: a label draw refused before its decision (its key matched in this eye only, a ranged b0, no rows or no origin) is counted with that verdict
 void f95bEarly(int e, uint32_t frame, uint32_t key, int verdictWhy) noexcept {
     float ox = 0.0f, oy = 0.0f;
-    if (e < 0 || e > 1 || nofoot::f85::isReticleKey(key) || !f87p::keyDesignOffset(key, frame, &ox, &oy)) return;
+    if (e < 0 || e > 1 || f191IsReticle(key) || !f87p::keyDesignOffset(key, frame, &ox, &oy)) return;
     F95bEye& lab = g_f95b[e];
     ++lab.draws;
     const uint32_t k7 = key & 0x7Fu;
@@ -31019,7 +31050,7 @@ struct F118State {
     nofoot::f118::FootSecond foot;
 };
 F118State g_f118;
-uint32_t g_f86LastReticle = 0;   // the frame key 10's eye 0 draw last came: while it comes each frame it owns the dispatch (its line is the freshest)
+uint32_t g_f86LastReticle = 0;   // the frame the reticle's (F191: the key type 1001 uses) eye 0 draw last came: while it comes each frame it owns the dispatch (its line is the freshest)
 
 // F86d: a weapon UI part's panel at the surface under it (per part slot).
 struct F86dPart {
@@ -32861,7 +32892,7 @@ void f85bBound(int eye, int slot) {
 
 // ---- F85c ----------------------------------------------------------------------------------------------------------------------------------
 // The GPU pass, its state and the depth lines of the other consumers are above (F86). Key 10's P at a composite draw (fixDecide): P' = O + D_f u when the aim
-// line K gives passes through the game's P and a hit depth has come back; false leaves the game's P. Only key 10 comes here.
+// line K gives passes through the game's P and a hit depth has come back; false leaves the game's P. Only the reticle (F191: the key type 1001 uses) comes here.
 bool f85cReticle(ID3D11DeviceContext* ctx, int e, uint32_t frame, const CbShadow* sh, const float* oHud, const double P[3], double Pout[3]) {
     F85cState& st = g_f85c;
     ++st.draws;
@@ -32881,7 +32912,7 @@ bool f85cReticle(ID3D11DeviceContext* ctx, int e, uint32_t frame, const CbShadow
     }
     const double dGame = std::sqrt((P[0] - O[0]) * (P[0] - O[0]) + (P[1] - O[1]) * (P[1] - O[1]) + (P[2] - O[2]) * (P[2] - O[2]));
     if (e == 0) {
-        g_f86LastReticle = frame;   // F86: key 10 owns the frame's dispatch while it comes
+        g_f86LastReticle = frame;   // F86: the reticle owns the frame's dispatch while it comes
         const double Orel[3] = {O[0] - s.ow[0], O[1] - s.ow[1], O[2] - s.ow[2]};
         // F118: the footprint's four lines about u, toward K's right and up (its x and y columns)
         const double kRight[3] = {s.K.K3[0][0], s.K.K3[1][0], s.K.K3[2][0]}, kUp[3] = {s.K.K3[0][1], s.K.K3[1][1], s.K.K3[2][1]};
@@ -33102,13 +33133,15 @@ void f85Report(uint64_t nowMs, bool fold, uint32_t windowSecs, bool detailLog, b
         prevTagged = taggedAll;
         // F85c
         F85cState& st = g_f85c;
+        char reticleKeyText[80] = {};
+        g_reticleKeys.describe(reticleKeyText, sizeof(reticleKeyText));   // F191: "11 (type 1001)", or "10 (assumed: no type 1001 call seen yet)"
         if (st.draws || st.dispatched || st.reads) {
             const double nr = st.reads ? static_cast<double>(st.reads) : 1.0;
-            Log::get().note("reticle depth (F85c): key 10 draws %llu, patched at the hit depth %llu; D_hit mean %.2f min %.2f max %.2f m over %llu readbacks (hit %llu, sky %llu, a surface under 0.5 m ignored %llu, "
+            Log::get().note("reticle depth (F85c): key %s draws %llu, patched at the hit depth %llu; D_hit mean %.2f min %.2f max %.2f m over %llu readbacks (hit %llu, sky %llu, a surface under 0.5 m ignored %llu, "
                             "off screen %llu); the game's 5 m was behind a surface in %llu; |D_f - D_hit| mean %.3f max %.3f m, D_f %.2f m; readback age mean %.1f max %.0f frames; dispatched %llu; "
                             "refusals: no depth view %llu, no scene rows %llu, no K %llu, rows not a depth fit %llu, off the line %llu (largest %.3f deg), no readback yet %llu, late %llu, dropped %llu, "
                             "ring full %llu, map failed %llu, wrong sequence %llu, no GPU %llu; over %u s; draws in %u of %u s",
-                            ull(st.draws), ull(st.patched), st.reads ? st.hitSum / nr : 0.0, st.reads ? st.hitMin : 0.0, st.hitMax, ull(st.reads), ull(st.hit), ull(st.sky), ull(st.nearSurf),
+                            reticleKeyText, ull(st.draws), ull(st.patched), st.reads ? st.hitSum / nr : 0.0, st.reads ? st.hitMin : 0.0, st.hitMax, ull(st.reads), ull(st.hit), ull(st.sky), ull(st.nearSurf),
                             ull(st.offscreen), ull(st.behindBefore), st.errN ? st.errSum / static_cast<double>(st.errN) : 0.0, st.errMax, st.dF, st.ageSum / nr, st.ageMax, ull(st.dispatched),
                             ull(st.noDepth), ull(st.noScene), ull(st.noSolve), ull(st.noZw), ull(st.offLine), st.lineMax, ull(st.noReadback), ull(st.late), ull(st.dropped), ull(st.ringFull),
                             ull(st.mapFail), ull(st.seqBad), ull(st.noGpu), windowSecs, std::min(drawSeconds.n, windowSecs), windowSecs);
@@ -33124,7 +33157,7 @@ void f85Report(uint64_t nowMs, bool fold, uint32_t windowSecs, bool detailLog, b
                             std::min(q.speedSeconds.n, windowSecs), windowSecs);
         } else if (onFootWindow && nowMs - lastIdleC >= 5000) {
             lastIdleC = nowMs;
-            Log::get().note("reticle depth (F85c): no key 10 composite draw over %u s (no tool or weapon out, ADS, or the marker fix is off)", windowSecs);
+            Log::get().note("reticle depth (F85c): no reticle composite draw over %u s (reticle key %s; no tool or weapon out, ADS, or the marker fix is off)", windowSecs, reticleKeyText);
         }
         drawsFold.reset(st.draws);
         const F85cState keep = st;
@@ -33363,6 +33396,7 @@ void fixDecide(ID3D11DeviceContext* ctx, uint32_t frame, const Rec& r, int slot,
     // key's newest find (this frame or the last, as F47); else the hold's fallback: the key's newest P within the hold (a world point) with the
     // held record as this frame's pool Unmap wrote it (what the draw reads). Neither: no P.
     const uint32_t keyNow = g_keyIdx.key[ks];
+    const bool keyIsReticle = f191IsReticle(keyNow);   // F191: the key type 1001 uses (slot 10 until a type 1001 call is seen); one answer for the draw (the render thread reads the tracker's atomic)
     const Find* f = cpuFind ? cpuFind : findAt(K.eye[e].pool, match.record);
     if (!f || !f->haveTag || !f->pOk) f = findForKey(keyNow, frame);
     if (f && (!f->haveTag || !f->pOk)) f = nullptr;
@@ -33399,8 +33433,8 @@ void fixDecide(ID3D11DeviceContext* ctx, uint32_t frame, const Rec& r, int slot,
             hQ3 = kp.q3;
         }
     }
-    // F85c: key 10's P at the aim line's hit depth (O + D u; the direction from O is the game's), once a hit depth has come back.
-    if (haveP && nofoot::f85::isReticleKey(keyNow)) {
+    // F85c: the reticle's P (F191: the key type 1001 uses) at the aim line's hit depth (O + D u; the direction from O is the game's), once a hit depth has come back.
+    if (haveP && keyIsReticle) {
         const double P0[3] = {fP[0], fP[1], fP[2]};
         double Pn[3];
         if (f85cReticle(ctx, e, frame, sh, oHud, P0, Pn)) {
@@ -33420,7 +33454,7 @@ void fixDecide(ID3D11DeviceContext* ctx, uint32_t frame, const Rec& r, int slot,
     double labRec[3] = {}, labD[3] = {};
     {
         float offX = 0.0f, offY = 0.0f;
-        if (!nofoot::f85::isReticleKey(keyNow) && f87p::keyDesignOffset(keyNow, frame, &offX, &offY)) {
+        if (!keyIsReticle && f87p::keyDesignOffset(keyNow, frame, &offX, &offY)) {
             label = true;
             ++lab.draws;
             const uint32_t k7 = keyNow & 0x7Fu;
@@ -33553,7 +33587,7 @@ void fixDecide(ID3D11DeviceContext* ctx, uint32_t frame, const Rec& r, int slot,
             why = drawtag::kDeltaMarkerBehind;
         } else {
             const double nW[2] = {wc[0] / wc[3], wc[1] / wc[3]};
-            if (keyNow == 10u) retNdcPublish(e, frame, nW, wc[3]);   // F68b: the reticle composite's NDC in this eye (the sight check reads it)
+            if (keyIsReticle) retNdcPublish(e, frame, nW, wc[3]);   // F68b: the reticle composite's NDC in this eye (the sight check reads it); F191: found by the reticle's key, not slot 10
             nM0[0] = mc[0] / mc[2];
             nM0[1] = mc[1] / mc[2];
             double nWu[2], nD[2];
@@ -35028,7 +35062,7 @@ void report(uint64_t nowMs) {
             }
             if (!listed) appendf(buf, sizeof(buf), len, " none");
             appendf(buf, sizeof(buf), len, "; marker composite draws at read-back: eye 0 %llu (tagged %llu, NOT tagged %llu, not copied %llu), eye 1 "
-                    "%llu (tagged %llu, NOT tagged %llu, not copied %llu), no eye %llu; posts tagged in place (key 10, mode game, no head pose) %llu; "
+                    "%llu (tagged %llu, NOT tagged %llu, not copied %llu), no eye %llu; posts tagged in place (the reticle's key, mode game, no head pose) %llu; "
                     "key slots reclaimed %llu", ull(w.tally[0].draws), ull(w.tally[0].tagged), ull(w.tally[0].untagged()), ull(w.tally[0].notCopied),
                     ull(w.tally[1].draws), ull(w.tally[1].tagged), ull(w.tally[1].untagged()), ull(w.tally[1].notCopied), ull(w.tallyNoEye),
                     ull(tagOnlyAll - g_tagOnlySeen), ull(w.keyReclaims));
@@ -35124,7 +35158,7 @@ void report(uint64_t nowMs) {
             const bool distinct = drawtag::keysDistinct(keys, nk, &ka, &kb);
             if (distinct) appendf(buf, sizeof(buf), len, "; every key's sentinel is distinct (first and second posts)");
             else appendf(buf, sizeof(buf), len, "; SENTINELS COLLIDE: key %u and key %u share a tag byte", ka, kb);
-            appendf(buf, sizeof(buf), len, "; keys past the census table %llu; posts whose exact-zero components were seeded with 2^-100 m (F69e; key 10's x and y, "
+            appendf(buf, sizeof(buf), len, "; keys past the census table %llu; posts whose exact-zero components were seeded with 2^-100 m (F69e; the reticle's x and y, "
                     "centred by F18) %llu", ull(g_f53KeyOverflow.load(std::memory_order_relaxed)), ull(g_f69eSeeded.load(std::memory_order_relaxed)));
             if (nk) Log::get().note("%s", buf);
         }
@@ -36940,7 +36974,7 @@ void nativeOnFootFrameBoundary(uint32_t frameNo) {
             g_roomLastK = elemK;
             g_roomLastS = sizeEff;
         }
-        // F18: the reticle stub is in place whenever native stereo is on foot (it writes key 10).
+        // F18: the reticle stub is in place whenever native stereo is on foot (it writes the reticle's key: F191, the one type 1001 uses).
         const bool reticleWant = nativeOnFootActive() && session;
         reticleTick(reticleWant, !nativeOnFootActive() ? "native stereo on foot ended" : "the game session ended");
         // F87p (read only): the marker interface's slots and the point getters' calls, while native stereo is on foot and the marker fix key is on.

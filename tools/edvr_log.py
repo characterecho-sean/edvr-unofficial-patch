@@ -11578,6 +11578,8 @@ def _hj_f85b(rows, ctx):
 
 
 def _hj_f85c(rows, ctx):
+    # F191: the reticle is the key marker type 1001 uses (a pool slot that is 11 or more on some rigs), so the lines name it: `key 11 (type 1001) draws N` and `no
+    # reticle composite draw over N s (reticle key 11 (type 1001); ...)`. A log of a build before F191 says `key 10 draws N` and `no key 10 composite draw`; both read.
     draws, idle, fail, game = rows.get("draws", []), rows.get("idle", []), rows.get("fail", []), rows.get("game", [])
     if not draws and not idle and not fail and not game:
         return None
@@ -11591,13 +11593,18 @@ def _hj_f85c(rows, ctx):
     if not draws:
         armed = _harmed_seconds(ctx)
         if armed:
-            return ("NEVER APPLIED", "no key 10 composite draw in %d lines, though a weapon was drawn for %d s" % (len(idle), armed))
-        return ("IDLE", "no key 10 composite draw (%d idle lines: no tool or weapon out, or the marker fix is off)" % len(idle))
+            return ("NEVER APPLIED", "no reticle composite draw in %d lines, though a weapon was drawn for %d s" % (len(idle), armed))
+        return ("IDLE", "no reticle composite draw (%d idle lines: no tool or weapon out, or the marker fix is off)" % len(idle))
     nd, patched, reads, hit, sky = (_hsum(draws, k) for k in ("draws", "patched", "reads", "hit", "sky"))
     refs = collections.Counter()
     for x in draws:
         refs.update(_hpairs(x["refs"]))
-    text = "patched %d of %d key 10 draws (%s) in %d s; readbacks %d (hit %d, sky %d); refusals %s" % (patched, nd, _hpct(patched, nd), _hcount(draws, "xs", lambda r: int(r["draws"]) > 0), reads, hit, sky, _htop(refs))
+    keys = sorted({int(x["key"]) for x in draws}, key=int)
+    assumed = any((x.get("why") or "").startswith("assumed") for x in draws)
+    text = "patched %d of %d key %s draws (%s) in %d s; readbacks %d (hit %d, sky %d); refusals %s" % (
+        patched, nd, ", ".join(str(k) for k in keys), _hpct(patched, nd), _hcount(draws, "xs", lambda r: int(r["draws"]) > 0), reads, hit, sky, _htop(refs))
+    if assumed:
+        text += "; the reticle key was assumed to be 10, no type 1001 call seen (the marker fix is off, or its hook is not in)"
     if game:
         text += "; " + game_text
     if patched == 0:
@@ -16049,9 +16056,10 @@ HEALTH_RULES = (
         ("_", r"weapon UI pin \(F85b\): identification path"),
     ), _hj_f85b),
     _hrule("reticle depth (F85c)", ("F85c",), ("reticle depth (F85c)",), (
-        ("draws", r"reticle depth \(F85c\): key 10 draws (?P<draws>\d+), patched at the hit depth (?P<patched>\d+); .*? over (?P<reads>\d+) readbacks \(hit (?P<hit>\d+), "
+        # F191: `key 11 (type 1001) draws N` (the key type 1001 uses; `key 10 (assumed: no type 1001 call seen yet)` before one was seen); a log before F191 says `key 10 draws N`
+        ("draws", r"reticle depth \(F85c\): key (?P<key>\d+)(?: \((?P<why>[^)]*)\))? draws (?P<draws>\d+), patched at the hit depth (?P<patched>\d+); .*? over (?P<reads>\d+) readbacks \(hit (?P<hit>\d+), "
                   r"sky (?P<sky>\d+).*refusals: (?P<refs>.*?)(?:; over " + H_WL + r"; draws in (?P<xs>\d+) of (?P<ws>\d+) s)?$"),
-        ("idle", r"reticle depth \(F85c\): no key 10 composite draw (?:this second|over (?P<wl>\d+) s)"),
+        ("idle", r"reticle depth \(F85c\): no (?:key 10|reticle) composite draw (?:this second|over (?P<wl>\d+) s)"),
         # F101: the reticle's game placement (a setting until F127; this build never prints the line, an older log may): key 10 is the game's, so nothing is patched by design
         ("game", r"reticle depth \(F85c\): the reticle is the game's \([^)]*\): key 10 draws (?P<n>\d+) left as the game placed them"),
         ("fail", r"reticle depth \(F85c\): (?:precompiled compute shader \S+ )?(?P<why>creation (?:FAILED|faulted/refused); standing down|the GPU resources could not be made)"),
@@ -18407,11 +18415,20 @@ def self_test_health():
             # F151: per eye, the draws no stream window held and what the place rule said of each (the line prints the count not bound itself)
             return R("(F85b) eye %d: place bind (F151)", eye, outside, bound, outside - bound, why, wl)
 
-        def retic(draws=47, patched=42, reads=21, refs=(), wl=1, draw_secs=None):
+        def retic(draws=47, patched=42, reads=21, refs=(), wl=1, draw_secs=None, key="11 (type 1001)"):
+            # F191: the key text is what the DLL prints (the tracker's describe): "11 (type 1001)", or "10 (assumed: no type 1001 call seen yet)" before a type 1001 call
             v = [draws, patched, 50.0, 50.0, 50.0, reads, 20, 1] + [None] * 9 + [0] * 13
             for i, n in enumerate(refs):
                 v[17 + i] = n
-            return R("reticle depth (F85c): key 10 draws", *v, wl, int(bool(draws)) if draw_secs is None else draw_secs, wl)
+            return R("reticle depth (F85c): key %s draws", key, *v, wl, int(bool(draws)) if draw_secs is None else draw_secs, wl)
+
+        def retic_idle(wl=1, key="11 (type 1001)"):
+            # F191: the idle line names the key it waited for
+            return R("reticle depth (F85c): no reticle composite draw", wl, key)
+
+        def retic_old(line):
+            # A log of a build before F191 says `key 10 draws` and `no key 10 composite draw` (frozen wording; the DLL no longer prints it)
+            return line.replace("key 11 (type 1001) draws", "key 10 draws").replace("no reticle composite draw over", "no key 10 composite draw over")
 
         def hold(state="holding"):
             c = [int(state.startswith(x)) for x in ("holding", "frozen", "no pose", "ramping", "out of scope")]
@@ -21737,11 +21754,21 @@ def self_test_health():
               [("OK", F85B)], has=["[+1 line(s) the rule's patterns do not match:", "place bind (F151): something else"])
 
         # ---- reticle depth (F85c) ----
-        check("F85c: patched at the hit depth", [retic()] * 2, 0, [("OK", F85C)], has=["patched 84 of 94 key 10 draws (89%) in 2 s", "readbacks 42 (hit 40, sky 2)"])
+        check("F85c: patched at the hit depth", [retic()] * 2, 0, [("OK", F85C)], has=["patched 84 of 94 key 11 draws (89%) in 2 s", "readbacks 42 (hit 40, sky 2)"], lacks=["assumed"])
         check("F85c: draws and no patch", [retic(patched=0, refs=(47,))] * 2, 3, [("NEVER APPLIED", F85C)], has=["patched 0 of 94", "refusals no depth view 94"])
         check("F85c: under half patched", [retic(draws=10, patched=3)], 0, [("PARTIAL", F85C)])
-        check("F85c: no key 10 draw and no weapon", [R("reticle depth (F85c): no key 10 composite")] * 2, 0, [("IDLE", F85C)])
-        check("F85c: no key 10 draw while a weapon is drawn", [R("reticle depth (F85c): no key 10 composite"), eyeoff()], 3, [("NEVER APPLIED", F85C)])
+        check("F85c: no reticle draw and no weapon", [retic_idle()] * 2, 0, [("IDLE", F85C)], has=["no reticle composite draw (2 idle lines"])
+        check("F85c: no reticle draw while a weapon is drawn", [retic_idle(), eyeoff()], 3, [("NEVER APPLIED", F85C)], has=["no reticle composite draw in 1 lines, though a weapon was drawn"])
+        # F191: the reticle is the key marker type 1001 uses: the lines name it (`key 11 (type 1001)`), and the key may walk as the reticle is re-created
+        check("F85c: the reticle on key 11, then 12 and 13 as it is re-created", [retic(key="11 (type 1001)"), retic(key="12 (type 1001)"), retic(key="13 (type 1001)", patched=30)], 0,
+              [("OK", F85C)], has=["patched 114 of 141 key 11, 12, 13 draws (81%) in 3 s"], lacks=["assumed"])
+        check("F85c: no type 1001 call seen: key 10 assumed is said so", [retic(key="10 (assumed: no type 1001 call seen yet)")] * 2, 0, [("OK", F85C)],
+              has=["patched 84 of 94 key 10 draws", "the reticle key was assumed to be 10, no type 1001 call seen"])
+        check("F85c: no reticle draw, the key waited for is named in the line", [retic_idle(key="11 (type 1001)"), retic_idle(key="12 (type 1001)")], 0, [("IDLE", F85C)], lacks=["UNPARSED"])
+        # a log of a build before F191 (key 10 by name) still reads, for draws and for idle
+        check("F85c: a log before F191 (key 10 draws) still reads", [retic_old(retic())] * 2, 0, [("OK", F85C)], has=["patched 84 of 94 key 10 draws (89%) in 2 s"], lacks=["assumed", "UNPARSED"])
+        check("F85c: a log before F191 (no key 10 composite draw) still reads", [retic_old(retic_idle())] * 2, 0, [("IDLE", F85C)], lacks=["UNPARSED"])
+        check("F85c: a log before F191, no key 10 draw while a weapon is drawn", [retic_old(retic_idle()), eyeoff()], 3, [("NEVER APPLIED", F85C)])
         check("F85c: the compute shader could not be created",
               ["reticle depth (F85c): precompiled compute shader reticle_depth_cs creation FAILED; standing down (0x80004005, 0.100 ms)."], 3,
               [("NEVER APPLIED", F85C)], has=["creation FAILED; standing down"])
@@ -22083,7 +22110,7 @@ def self_test_health():
         check("F125 UI: reticle draws in five of ten seconds", [retic(wl=10, draw_secs=5)], 0, [("OK", F85C)], has=["in 5 s; readbacks"], lacks=["UNPARSED"])
         check("F125 UI: reticle 10 s and a short flush", [retic(wl=10, draw_secs=10), retic(wl=3, draw_secs=2)], 0,
               [("OK", F85C)], has=["in 12 s; readbacks"], lacks=["UNPARSED"])
-        check("F125 UI: reticle ten-second idle still cross-checks a weapon", [R("reticle depth (F85c): no key 10 composite", 10), eyeoff()], 3,
+        check("F125 UI: reticle ten-second idle still cross-checks a weapon", [retic_idle(wl=10), eyeoff()], 3,
               [("NEVER APPLIED", F85C)], lacks=["UNPARSED"])
         check("F125 UI: reticle cause uses second counts, never window thresholds", [ret118(reads=800, steps=10, flips=3, frames=900, run=120,
               fread=800, edge=400, wl=10, edge_secs=10, speed_secs=3)], 0, [("OK", F118)],
@@ -22110,7 +22137,7 @@ def self_test_health():
             ("eye %d: place bind (F151): seen by tag", ["w" * 299]),
             ("(F85b) eye %d: place bind (F151)", ["r" * 419]),
             ("weapon UI pin (F85b): %s%llu matched", ["p" * 80, "tag", "s" * 299]),
-            ("reticle depth (F85c): key 10 draws", []),
+            ("reticle depth (F85c): key %s draws", ["k" * 79]),
             ("reticle depth (F118) %u s", []),
             ("weapon readout size (F90) %u s", ["pistol ADS readout"]),
             ("weapon readout size (F91) %u s", ["p" * 599]),
