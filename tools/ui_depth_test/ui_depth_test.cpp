@@ -353,6 +353,10 @@ int main(int argc, char** argv) {
     {
         check(depthShaderFor(ctx.Get(),kHoloGuiFxOffPs,kHoloGuiFxOffVs,2)==nullptr && depthShaderFor(ctx.Get(),kHoloGuiFxOffPs,kHoloGuiFxOffVs,1)==nullptr,
               "the Disable-GUI-effects holo pair has no depth stand-in, by vertex family or by slot (its output signature is not the stand-in's input)");
+        // ...nor the pair the game draws them with close to a planet's surface (vs 925ACEDA0153AA5B ps 738A98ED038E58B7, 2026-10-31): its vertex shader
+        // writes TEXCOORD0 only, its surface sits in t1, and the layer takes it as well.
+        check(depthShaderFor(ctx.Get(),kHoloNoShadowPs,kHoloNoShadowVs,1)==nullptr && depthShaderFor(ctx.Get(),kHoloNoShadowPs,kHoloNoShadowVs,2)==nullptr,
+              "the planet-surface holo pair has no depth stand-in, by vertex family or by slot (its output signature is not the stand-in's input)");
         check(depthShaderFor(ctx.Get(),kHoloLitPs,kHoloPanel,2)!=nullptr,"(control) the stock holo pair still has its stand-in");
     }
     surface[3]=1;

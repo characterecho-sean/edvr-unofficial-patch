@@ -6,9 +6,6 @@ namespace edvr {
 // through s1, but the unlit variant has one fewer preceding texture.
 constexpr uint64_t kHoloLitPs = 0xA2965EC2931A39C8ull;
 constexpr uint64_t kHoloUnlitPs = 0xB4786E0A0B199285ull;
-constexpr unsigned holoSurfaceSlot(uint64_t ps) {
-    return ps == kHoloUnlitPs ? 1u : 2u;
-}
 
 // THE SAME PANELS WITH ELITE'S "DISABLE GUI EFFECTS" ON. The cockpit's side and
 // centre panels are drawn with this pair instead of vs 81216C77F90DEDD6 and
@@ -31,4 +28,28 @@ constexpr unsigned holoSurfaceSlot(uint64_t ps) {
 // TEXCOORD7 and TEXCOORD8, which this vertex shader does not write.
 constexpr uint64_t kHoloGuiFxOffVs = 0x1989E6D3B405FDE0ull;
 constexpr uint64_t kHoloGuiFxOffPs = 0xEAB8A1C95A13FFBEull;
+
+// THE SAME PANELS AT A PLANET'S SURFACE, WITHOUT THE SHADOW STAGE. Field logs
+// show the game drawing the cockpit panels with this pair close to a planet's
+// surface (22 a frame; a third pair the layer did not name, so the panels stayed
+// in the scene and the upscaler smeared them: docs/ui-layer-2026-09-23.md,
+// "2026-10-31: field report").
+// Disassembled from the dump in Sean's edvr_logs\shaders (tools/dxbc_disasm.py):
+//   * the vertex shader is the Disable-GUI-effects one's first 95 instructions
+//     with the view-space tail removed: the same input layout, clip = cb0[4..7],
+//     output signature TEXCOORD0 xyzw and SV_POSITION, TEXCOORD0.zw the surface
+//     coordinate (x16).
+//   * the pixel shader is that pair's without the shadow stage. It reads TEXCOORD0
+//     only: no SV_Position, no depth, no Load, no UAV, no gather. t0 is the
+//     material mask (TEXCOORD0.xy through s0), t1 the interface surface, sampled
+//     through s1 at TEXCOORD0.zw -- the stock unlit material's slot
+//     (holoSurfaceSlot's 1). The shadow atlas is not bound to it at all.
+// What makes the game choose it is not known (a guess: no shadow atlas to bind).
+// No depth stand-in reads its vertex shader's output (no TEXCOORD4/7/8).
+constexpr uint64_t kHoloNoShadowVs = 0x925ACEDA0153AA5Bull;
+constexpr uint64_t kHoloNoShadowPs = 0x738A98ED038E58B7ull;
+
+constexpr unsigned holoSurfaceSlot(uint64_t ps) {
+    return ps == kHoloUnlitPs || ps == kHoloNoShadowPs ? 1u : 2u;
+}
 }

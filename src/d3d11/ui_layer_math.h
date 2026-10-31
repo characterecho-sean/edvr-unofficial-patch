@@ -644,7 +644,8 @@ enum class UiLayerFamily : uint8_t {
     kSurface,    // any other eye draw sampling a learned interface surface
     kGuiDirect,  // a GUI-family draw (vector/text/icon) straight into an eye
     kHolo,       // cockpit holo panels (vs 81216C77F90DEDD6; with Elite's Disable
-                 // GUI effects on, vs 1989E6D3B405FDE0: uiVsIsHoloPanel)
+                 // GUI effects on, vs 1989E6D3B405FDE0; close to a planet's
+                 // surface, vs 925ACEDA0153AA5B: uiVsIsHoloPanel)
     kFlightHud,  // flight HUD (vs B7790CBFC6554097)
     kSprite,     // target-time sprite (vs E508648660A352B2)
     kHoloGeneric,  // the crisp take's eight (holo_families.h kHoloFamiliesTake:
@@ -872,6 +873,10 @@ constexpr uint64_t kUiVsHolo = 0x81216C77F90DEDD6ull;
 // effects", user 5 on rc.5: soft panels, ghosting text; the pair in 3 of 3 field logs with the
 // setting on and 0 of 11 with it off).
 constexpr uint64_t kUiVsHoloGuiFxOff = kHoloGuiFxOffVs;
+// The same panels close to a planet's surface: field logs show the game drawing them with a third vertex shader there (and a pixel
+// shader without the shadow stage, holo_material.h), and until it was named they stayed in the scene and the upscaler smeared them
+// (docs/ui-layer-2026-09-23.md, "2026-10-31: field report": FSR, 22 draws a frame for a minute, no family).
+constexpr uint64_t kUiVsHoloNoShadow = kHoloNoShadowVs;
 constexpr uint64_t kUiVsFlightHud = 0xB7790CBFC6554097ull;
 constexpr uint64_t kUiVsSprite = 0xE508648660A352B2ull;
 constexpr uint64_t kUiVsGuiVector = 0x666EF0C4C616F67Eull, kUiVsGuiText = 0x1012E00B3CB44469ull,
@@ -902,10 +907,11 @@ inline bool uiKnownPs(const uint64_t* list, size_t n, uint64_t ps) {
     return false;
 }
 
-// The cockpit holo panels' vertex shaders: the stock one's, and the one the game draws them with
-// while Disable GUI effects is on. The ONE place that says so: both of uiLayerFamilyFor's
+// The cockpit holo panels' vertex shaders: the stock one's, the one the game draws them with
+// while Disable GUI effects is on, and the one it draws them with close to a planet's surface.
+// The ONE place that says so: both of uiLayerFamilyFor's
 // branches ask it, so a panel the HDR take names is named on the post-tonemap target too.
-constexpr bool uiVsIsHoloPanel(uint64_t vs) { return vs == kUiVsHolo || vs == kUiVsHoloGuiFxOff; }
+constexpr bool uiVsIsHoloPanel(uint64_t vs) { return vs == kUiVsHolo || vs == kUiVsHoloGuiFxOff || vs == kUiVsHoloNoShadow; }
 
 // F26 (sharp on-foot HUD): the on-foot HUD's draws, by their full 64-bit shader hashes as the flight logs print them (2026-10-14: VS 95D01BA609BF7500
 // with PS 067CBE05E7EF7F32, CF4ECC0397199145 or F10792B40AE3ED42; VS 46546443FD3C3F88 with PS AD050E528C0E8B17 or EFDF9BCB97E166A1). D005EBB14A22EA0E
@@ -1044,8 +1050,9 @@ inline UiLayerFamily uiLayerFamilyFor(const UiFamilyFacts& f, UiFamilyWhy* why =
         // repaired and all dependencies prepared before redirecting. Unknown
         // sphere variants and the shared world/cockpit corona remain stock.
         // World-marker brackets remain in the original scene. The cockpit holo
-        // panels are two vertex shaders (uiVsIsHoloPanel): the stock one and the
-        // one the game switches in with Disable GUI effects on. An unnamed pair
+        // panels are three vertex shaders (uiVsIsHoloPanel): the stock one, the
+        // one the game switches in with Disable GUI effects on, and the one it
+        // draws them with close to a planet's surface. An unnamed pair
         // gets no decision and no refusal line (2026-10-01: soft, ghosting panels
         // for a user with the setting on), which is why ui_scene_composites.h
         // counts the composites left in the scene. The three supercruise draws (the

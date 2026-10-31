@@ -2166,6 +2166,14 @@ void testFamilyRule() {
     f.vs = kUiVsHoloGuiFxOff ^ 1ull;
     check(uiLayerFamilyFor(f, &why) == UiLayerFamily::kNone && why == UiFamilyWhy::kNotPostTonemap,
           "...a vertex shader one bit from that names nothing");
+    // The panels close to a planet's surface are drawn with a third vertex shader (vs 925ACEDA0153AA5B ps 738A98ED038E58B7, holo_material.h;
+    // docs/ui-layer-2026-09-23.md, 2026-10-31): named exactly as the other two are, and a hash one bit away names nothing.
+    f.vs = kUiVsHoloNoShadow;
+    check(uiLayerFamilyFor(f, &why) == UiLayerFamily::kHolo && why == UiFamilyWhy::kDirect,
+          "...and the panels close to a planet's surface (vs 925ACEDA0153AA5B), a direct shader like the other two");
+    f.vs = kUiVsHoloNoShadow ^ 1ull;
+    check(uiLayerFamilyFor(f, &why) == UiLayerFamily::kNone && why == UiFamilyWhy::kNotPostTonemap,
+          "...a vertex shader one bit from that names nothing");
     f.vs = kUiVsFlightHud;
     check(uiLayerFamilyFor(f, &why) == UiLayerFamily::kFlightHud && why == UiFamilyWhy::kDirect,
           "...the flight HUD is named, a direct shader");
@@ -2241,13 +2249,13 @@ void testFamilyRule() {
     g.learnedSurface = false;
     check(uiLayerFamilyFor(g, &why) == UiLayerFamily::kNone && why == UiFamilyWhy::kOther,
           "anything else: none");
-    // A holo panel over a learned surface on the post-tonemap eye is a holo panel, whichever of the two
-    // vertex shaders the setting Disable GUI effects gave it.
+    // A holo panel over a learned surface on the post-tonemap eye is a holo panel, whichever of the three
+    // vertex shaders the game gave it (the setting Disable GUI effects, or a planet's surface).
     g.learnedSurface = true;
-    for (uint64_t vs : {kUiVsHolo, kUiVsHoloGuiFxOff}) {
+    for (uint64_t vs : {kUiVsHolo, kUiVsHoloGuiFxOff, kUiVsHoloNoShadow}) {
         g.vs = vs;
         check(uiLayerFamilyFor(g, &why) == UiLayerFamily::kHolo && why == UiFamilyWhy::kLearnedSurface,
-              "a holo panel over a learned surface on the post-tonemap eye, either vertex shader");
+              "a holo panel over a learned surface on the post-tonemap eye, any of the three vertex shaders");
     }
 }
 
