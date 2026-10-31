@@ -147,12 +147,13 @@ struct OwnerBuiltFixture {
     auto& host=*hostPtr;
     host.instance=instance();host.session=session();host.local=local();host.view=view();
     host.api.convertTime=convert;host.api.locateSpace=locate;host.api.locateViews=locateViews;
+    host.api.createSpace=create;host.api.destroySpace=destroy;   // counted, never expected (F189)
     const Dispatch dispatch{poll,beginSession,endSession,wait,beginFrame,overlap_handoff_fixture::endFrame};
     SystemRead metadata{};metadata.connected=true;
     for(unsigned eye=0;eye<2;++eye){metadata.recommendedWidth[eye]=3072;metadata.recommendedHeight[eye]=3264;}
     host.geometryGeneration=host.geometry.begin(metadata);
     host.compositorGeneration=host.poses.begin();host.runtimeGeneration=host.gate.beginGeneration();
-    initialized=host.seated.begin({create,destroy},session(),local())&&host.changes.begin(session())&&
+    initialized=host.seated.begin(session(),local())&&host.changes.begin(session())&&
       host.resetEvents.begin(host.geometryGeneration)&&host.state.reset(dispatch,instance(),session(),XR_ENVIRONMENT_BLEND_MODE_OPAQUE)==XR_SUCCESS&&
       host.state.pollEvents()==XR_SUCCESS&&host.state.startIfReady()==XR_SUCCESS;
     GeometryInput geometry{};geometry.generation=host.geometryGeneration;geometry.sequence=1;geometry.displayTime=100;

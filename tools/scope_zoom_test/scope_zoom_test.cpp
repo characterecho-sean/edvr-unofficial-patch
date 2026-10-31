@@ -148,7 +148,7 @@ static bool wiredB3Frame(const std::string& n) {
 static bool wiredB3Halves(const std::string& frame, const std::string& host, const std::string& temporal, const std::string& stereo, const std::string& vscreen, const std::string& system) {
     return has(frame, "if (carried) edvr::scopewin::toWords(edvr::scopewin::read(GetTickCount64()), result.reservedTerrainGuard);") &&
            before(host, "zoomApplied=applyScopeZoom(gameGeometry,zoomPreRaw,zoomToldRaw);", "geometry.publish(gameGeometry,false,false,frameTangentShift,hiddenMeshCompatible()&&!zoomApplied,zoomApplied?zoomToldRaw:nullptr)") &&
-           has(host, "zoomApplied?&zoomPreRaw:nullptr);") && has(host, "locatedHeadPose(),leftShare,&hidden,zoomStripNow,zoomAppliedNow);") && has(host, "leftShare,&hidden,zoomStripNow,previousZoomed):") && has(host, "previousZoomed=zoomAppliedNow;") &&
+           has(host, "zoomApplied?&zoomPreRaw:nullptr);") && has(host, "locatedHeadPose(),leftShare,&hidden,zoomStripNow,zoomAppliedNow,&frameOrigin);") && has(host, "leftShare,&hidden,zoomStripNow,previousZoomed,&previousOrigin):") && has(host, "previousZoomed=zoomAppliedNow;") &&
            has(host, "const ScopeZoomEvents ev=zoomRun.frame(out,frameCycleUs());") && has(host, "if(raw)zoomCallers.note(caller);") && has(host, "zoomCallers.top(press.callerRva,press.callerReads,press.callerOther);") &&
            has(system, "source_.noteProjectionRead(eye,true,s.toldRawSet&&liveGeometry,rawSpanV(out),frameRva(exe_,reinterpret_cast<uintptr_t>(_ReturnAddress())));") &&
            has(system, "source_.noteProjectionRead(eye,false,s.toldRawSet&&liveGeometry,accepted?matrixSpanV(out):0.0f,frameRva(exe_,reinterpret_cast<uintptr_t>(_ReturnAddress())));") &&

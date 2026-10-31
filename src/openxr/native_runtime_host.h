@@ -280,6 +280,10 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   XrView previousViews[2]{};
   StereoPlacement previousPlacement[2]{};
   XrSpace previousSpace=XR_NULL_HANDLE;
+  // F189: the seat origin previousViews were located (and the pair drawn) with. A replay submits the kept pair at ITS physical pose, so it converts with this origin and never
+  // the current one; replaysAcrossOrigin counts the replays that crossed an origin change (previousOrigin != frameOrigin), the thing the old per-change space made impossible.
+  XrPosef previousOrigin{{0,0,0,1},{0,0,0}};
+  uint64_t replaysAcrossOrigin=0;
   XrPosef previousHeadPose{};bool previousHeadValid=false; // the located head of previousViews' frame, for the plugin API's headPose
   uint64_t previousReference=0,withheldPairs=0,replayedPairs=0,emptyWithholds=0;
   NativeFrameClient features;
@@ -397,7 +401,12 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   // format the renderer converts to. Otherwise the clear frames stay black.
   bool flatPanelAvailable() const {return separateGraphics()&&stereo.noticeFormatSupported();}
   SeatedSpace seated;ReferenceChanges changes;ResetEvents resetEvents;
+  // The frame's seated space (F189): the natural space (seated.space(), the one handle there is) and the origin it stood for when the frame began. Taken together, at the
+  // three places a frame is located, and used for that frame's locates and its submit whatever the origin does afterwards.
   XrSpace frameSpace=XR_NULL_HANDLE;
+  XrPosef frameOrigin{{0,0,0,1},{0,0,0}};
+  SeatedFrame frameSeat() const {SeatedFrame f;f.space=frameSpace;f.origin=frameOrigin;return f;}
+  void takeFrameSeat() {const SeatedFrame f=seated.frame();frameSpace=f.space;frameOrigin=f.origin;}
   uint64_t recenters=0,referenceChanges=0;
   // Written by pollEvent on any thread when the pose cache is on (the ring drain), so atomic.
   std::atomic<uint64_t> resetPolls{0};
@@ -914,6 +923,12 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     nativeTracePrintf("hidden_mesh_query,eye=%u,revision=%llu,triangles=%u,dropped=%u,reason=%s,game_frames=%u,game_rvas=%s\n",
       eye,(unsigned long long)revision,triangles,dropped,reason,stack.gameFrames,stack.rvas);
   }
+  // F189: said once when the seated space begins (again when the natural space falls back from STAGE to LOCAL at startup). A flight log without this line is from before
+  // the seat origin moved into pose math, and its eye_align_runtime lines lack space_creates / origin_sets / replays_across_origin.
+  void traceSeatedBegin() {
+    nativeTracePrintf("seated_space: fixed layer space (%s), the seat origin applied in pose math (F189)\n",
+        seated.naturalType()==XR_REFERENCE_SPACE_TYPE_STAGE?"STAGE":"LOCAL");
+  }
   // With the session running, a real zero-layer frame supplies the time for
   // both pose probes. No seat has been loaded or published yet, so choosing
   // LOCAL here cannot reinterpret a persisted STAGE seat or strand a frame.
@@ -936,8 +951,9 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       if(!binding.useLocalFallback())return XR_ERROR_CALL_ORDER_INVALID;
       local=binding.naturalSpace();
       changes.clear();
-      if(!seated.begin({api.createSpace,api.destroySpace},session,local,XR_REFERENCE_SPACE_TYPE_LOCAL)||
+      if(!seated.begin(session,local,XR_REFERENCE_SPACE_TYPE_LOCAL)||
          !changes.begin(session,XR_REFERENCE_SPACE_TYPE_LOCAL))return XR_ERROR_RUNTIME_FAILURE;
+      traceSeatedBegin();
       nativeTracePuts("natural_reference_space,type=LOCAL,reason=steamvr_stage_poses_unavailable");
     } else nativeTracePuts("natural_reference_space,type=STAGE,reason=steamvr_stage_poses_valid");
     startupNaturalProbed=true;return XR_SUCCESS;
@@ -1170,7 +1186,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   }
   bool locatePoseCacheSlot(const LocatorDispatch& dispatch,XrTime target,PoseCacheSlot& slot) {
     XrSpaceLocation head{XR_TYPE_SPACE_LOCATION};
-    if(HeadLocator{}.locateAt(dispatch,view,seated.space(),target,head)!=XR_SUCCESS)return false;
+    if(HeadLocator{}.locateAt(dispatch,view,seated.frame(),target,head)!=XR_SUCCESS)return false;   // F189: seated numbers, from the natural space and the origin as it stands now
     vr::TrackedDevicePose_t pose{};
     if(!headPoseFrom(head,pose))return false;
     slot=PoseCacheSlot{};slot.valid=true;slot.target=target;slot.pose=pose;
@@ -1244,9 +1260,9 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       case ChangeStep::Withheld: return XR_SUCCESS;     // the frame was given up for a runtime recentre; the next one is in the new seated space
       case ChangeStep::Ok: break;
     }
-    frameSpace=seated.space();
+    takeFrameSeat();
     GeometryInput located{};
-    r=locateGeometry({api.locateViews,api.locateSpace},binding,frame,geometryGeneration,sizes,located,nullptr,frameSpace);
+    r=locateGeometry({api.locateViews,api.locateSpace},binding,frame,geometryGeneration,sizes,located,nullptr,frameSeat());
     if(r!=XR_SUCCESS){if(!XR_FAILED(r))boundary.clear();return r;}
     GeometrySnapshot snapshot{};
     const bool valid=makeGeometrySnapshot(located,snapshot);
@@ -1343,9 +1359,9 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       case ChangeStep::Withheld: return XR_SUCCESS;     // the frame was given up for a runtime recentre; the next one is in the new seated space
       case ChangeStep::Ok: break;
     }
-    frameSpace=seated.space();
+    takeFrameSeat();
     GeometryInput located{};
-    r=locateGeometry({api.locateViews,api.locateSpace},binding,frame,geometryGeneration,sizes,located,nullptr,frameSpace);
+    r=locateGeometry({api.locateViews,api.locateSpace},binding,frame,geometryGeneration,sizes,located,nullptr,frameSeat());
     if(r!=XR_SUCCESS){boundary.clear();return r;}
     GeometrySnapshot snapshot{};
     // No noteProjectionMode here: the parallel-projection verdict is decided on the loading and game frames only.
@@ -1354,7 +1370,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     boundary.setGeometryReady(valid);
     if(!valid)return boundary.clear();
     XrCompositionLayerProjection layer{};
-    r=stereo.renderNotice(frameViews,frameSpace,layer,panel.text);
+    r=stereo.renderNotice(frameViews,frameSpace,layer,panel.text,&frameOrigin);
     if(r!=XR_SUCCESS){boundary.clear();return r;}
     if(stereo.noticeGeneration()!=flatNoticeGeneration){
       flatNoticeGeneration=stereo.noticeGeneration();
@@ -1580,9 +1596,9 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       case ChangeStep::Withheld: return vr::VRCompositorError_InvalidTexture;     // a runtime recentre took effect on this frame: no pose from the old seated space
       case ChangeStep::Ok: break;
     }
-    frameSpace=seated.space();
+    takeFrameSeat();
     GeometryInput located{};XrSpaceVelocity velocity{XR_TYPE_SPACE_VELOCITY};
-    auto r=locateGeometry({api.locateViews,api.locateSpace},binding,frame,geometryGeneration,sizes,located,&velocity,frameSpace);
+    auto r=locateGeometry({api.locateViews,api.locateSpace},binding,frame,geometryGeneration,sizes,located,&velocity,frameSeat());
     if(r!=XR_SUCCESS){if(!XR_FAILED(r))boundary.clear();return fail(r);}
     TimedHeadPose render{},game{};
     if(!makeHeadPose(located.headPose,located.headFlags,velocity.velocityFlags,velocity.linearVelocity,velocity.angularVelocity,true,render))
@@ -1594,7 +1610,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       game=render;
     } else if(nextPredictionTime(frame.predictedDisplayTime,frame.predictedDisplayPeriod,gameplayTime)&&
        !changes.crosses(frame.predictedDisplayTime,gameplayTime)) {
-      r=locateHeadAt(api.locateSpace,view,frameSpace,gameplayTime,true,game);
+      r=locateHeadAt(api.locateSpace,view,frameSeat(),gameplayTime,true,game);   // F189: this frame's snapshot, as the frame's own locate above
       // A runtime may not locate an additional frame ahead. Leave that
       // independent gameplay prediction invalid rather than reusing render.
       if(r!=XR_SUCCESS&&r!=XR_ERROR_TIME_INVALID) {if(!XR_FAILED(r))boundary.clear();return fail(r);}
@@ -2689,9 +2705,11 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       masks=geometry.read().hiddenMasks;
       if(masks){const auto& m=masks->eyes[1];hidden={m.vertices.data(),uint32_t(m.vertices.size()),m.indices.data(),uint32_t(m.indices.size()),masks->revision};}
     }
+    // F189, the submit edge: the views are seated numbers of the origin their frame began with, and the layer is in the natural space, so each pose is that origin applied.
+    // A replayed pair goes out with the origin IT was located with (previousOrigin), at its own physical pose, never the current one.
     const auto r=frameWithheld?stereo.renderCaptured(previousViews,previousSpace,previousPair,layer,observer,nullptr,previousPlacement,fade,
-                                                     previousHeadValid?&previousHeadPose:nullptr,leftShare,&hidden,zoomStripNow,previousZoomed):
-      stereo.renderCaptured(frameViews,frameSpace,captured,layer,observer,&wall,framePlacement,fade,locatedHeadPose(),leftShare,&hidden,zoomStripNow,zoomAppliedNow);
+                                                     previousHeadValid?&previousHeadPose:nullptr,leftShare,&hidden,zoomStripNow,previousZoomed,&previousOrigin):
+      stereo.renderCaptured(frameViews,frameSpace,captured,layer,observer,&wall,framePlacement,fade,locatedHeadPose(),leftShare,&hidden,zoomStripNow,zoomAppliedNow,&frameOrigin);
     {   // B3-3: whether the right eye's mirror of the strip was drawn on this frame, and how wide, counted over the run of the strip
       const StereoShareFacts& mirrorFacts=stereo.shareFacts();
       zoomMirror.note(zoomStripNow,frameWithheld?previousZoomed:zoomAppliedNow,mirrorFacts.mirrorDrawn,mirrorFacts.mirrorWidth);
@@ -2716,10 +2734,17 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   }
   void sceneFinished(bool pixels,XrResult result) override {
     if(result!=XR_SUCCESS){previousPairValid=false;return;}
-    if(frameWithheld) {if(pixels)++replayedPairs;else ++emptyWithholds;return;}
+    if(frameWithheld) {
+      if(pixels) {
+        ++replayedPairs;
+        // F189: a replay whose pair was located in another origin than this frame's. Before F189 the origin was a new space, so on foot no replay could happen at all.
+        if(!sameOrigin(previousOrigin,frameOrigin))++replaysAcrossOrigin;
+      } else ++emptyWithholds;
+      return;
+    }
     if(!pixels||!featureFrame.resubmitEnabled)return;
     if(captured.exchangeBuffers(previousPair)) {
-      previousViews[0]=frameViews[0];previousViews[1]=frameViews[1];previousSpace=frameSpace;
+      previousViews[0]=frameViews[0];previousViews[1]=frameViews[1];previousSpace=frameSpace;previousOrigin=frameOrigin;
       if(const XrPosef* head=locatedHeadPose()){previousHeadPose=*head;previousHeadValid=true;} else previousHeadValid=false;
       // The kept pair carries the placement it was drawn with; a replay of it
       // under a changed trim would otherwise stretch those pixels.
@@ -2731,7 +2756,11 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   XrResult composeBackground(XrCompositionLayerProjection& layer) override {
     // The flat notice was drawn before its frame ended (flatClearFrame); the layer it made is handed over, not drawn again.
     if(flatNoticeReady){layer=flatNoticeLayer;return XR_SUCCESS;}
-    return stereo.renderSkybox(frameViews,frameSpace,skybox,layer,comfortFade());
+    return stereo.renderSkybox(frameViews,frameSpace,skybox,layer,comfortFade(),&frameOrigin);   // F189: the submit edge, this frame's origin
+  }
+  static bool sameOrigin(const XrPosef& a,const XrPosef& b) {
+    return a.orientation.x==b.orientation.x&&a.orientation.y==b.orientation.y&&a.orientation.z==b.orientation.z&&a.orientation.w==b.orientation.w&&
+           a.position.x==b.position.x&&a.position.y==b.position.y&&a.position.z==b.position.z;
   }
   // The level the provider gave this frame, or 0: no provider, no frame read yet, or an answer that carried none.
   float comfortFade() const {return features.acquired()&&featureFrameKnown?comfort::sanitize(featureFrame.fadeAlpha):0.f;}
@@ -2975,13 +3004,14 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     const bool nowKnown=call.display&&latestPoseFrame.valid&&
       HeadLocator{}.currentTime(dispatch,instance,headClock,&headLocateStage,boundary.estimateNow(),now)==XR_SUCCESS;
     bool explicitTime=nowKnown&&poseTargetFor(call.display,now,explicitTarget);
+    const SeatedFrame seatedNow=seated.frame();   // F189: the origin as it stands for this call; the locates below are in the natural space and come back as seated numbers
     const auto locatePlain=[&]{
       return nowKnown
-        ?HeadLocator{}.locateFrom(dispatch,view,seated.space(),now,prediction,head,&lastHeadTime,&headLocateStage)
-        :HeadLocator{}.locate(dispatch,instance,view,seated.space(),prediction,head,&lastHeadTime,headClock,&headLocateStage,boundary.estimateNow());
+        ?HeadLocator{}.locateFrom(dispatch,view,seatedNow,now,prediction,head,&lastHeadTime,&headLocateStage)
+        :HeadLocator{}.locate(dispatch,instance,view,seatedNow,prediction,head,&lastHeadTime,headClock,&headLocateStage,boundary.estimateNow());
     };
     if(explicitTime) {
-      lastHeadResult=HeadLocator{}.locateAt(dispatch,view,seated.space(),explicitTarget,head,&lastHeadTime,&headLocateStage);
+      lastHeadResult=HeadLocator{}.locateAt(dispatch,view,seatedNow,explicitTarget,head,&lastHeadTime,&headLocateStage);
       if(lastHeadResult==XR_ERROR_TIME_INVALID) {
         // The runtime will not locate at that instant (it is no longer one it knows). Only for this answer: located at now + prediction instead
         // of handing the game an invalid pose, once.
@@ -3039,7 +3069,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     auto operation=gate.tryEnter(runtimeGeneration);
     if(!operation||generation!=geometryGeneration||!state.running()||state.terminal()||
        !seated.space()||!changes.active()||!resetEvents.room(generation))return false;
-    // Finish a partial pair before replacing the space referenced by it.
+    // Finish a partial pair before moving the origin it was located with (F189: the gate is kept; the pair is no longer holding a space).
     lastResetResult=boundary.clear();if(lastResetResult!=XR_SUCCESS)return false;
     XrSpaceLocation head{XR_TYPE_SPACE_LOCATION};
     lastResetResult=HeadLocator{}.locate({api.convertTime,api.locateSpace},instance,view,local,0,head,&lastResetTime,counterNow,nullptr,boundary.estimateNow());
@@ -3088,17 +3118,17 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     XrPosef origin{};
     if(overrideOrigin)origin=*overrideOrigin;
     else if(!seatedOriginFromHead(head.pose,head.locationFlags,origin)){lastResetResult=XR_ERROR_POSE_INVALID;return false;}
-    // The publication is withdrawn BEFORE the seated space is replaced (not only by invalidateOrigin below): no cached answer in the old space
-    // can be served from the first instant the space changes. Owner thread, so no publish can follow until this call is done.
+    // The publication is withdrawn BEFORE the seated origin is replaced (not only by invalidateOrigin below): no cached answer in the old origin
+    // can be served from the first instant it changes. Owner thread, so no publish can follow until this call is done.
     poseCache.invalidate(poseInvalidationForReason(reason));
-    lastResetResult=seated.replace(origin);
+    lastResetResult=seated.setOrigin(origin);
     if(lastResetResult!=XR_SUCCESS){geometry.invalidate(geometryGeneration);poses.invalidate(compositorGeneration);dropPoseFrame(poseInvalidationForReason(reason));return false;}
     currentOrigin=seatPoseFromXr(origin);
     lookRebase();   // F22: the new origin carries no look compensation
     if(!invalidateOrigin(reason)){lastResetResult=XR_ERROR_LIMIT_REACHED;return false;}
     // Verify and attach an event-time sample, not a later cached render pose.
     TimedHeadPose atReset{};
-    lastResetResult=locateHeadAt(api.locateSpace,view,seated.space(),lastResetTime,true,atReset);
+    lastResetResult=locateHeadAt(api.locateSpace,view,seated.frame(),lastResetTime,true,atReset);   // F189: in the new origin, as the old path located it in the new space
     if(lastResetResult!=XR_SUCCESS)return false;
     if(!atReset.pose.bPoseIsValid){lastResetResult=XR_ERROR_POSE_INVALID;return false;}
     const auto& matrix=atReset.pose.mDeviceToAbsoluteTracking.m;
@@ -3319,8 +3349,8 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     api.destroySpace(stageSpace);
   }
   // THE ORDER OF A RUNTIME RECENTRE. Every place that opens a frame and then locates in the seated space (WaitGetPoses, the loading skybox frame,
-  // the flat panel frame) advances the pending reference changes first, through here. The seated space is a LOCAL child with an offset and
-  // cannot be replaced while a frame is open, so when this advance makes a LOCAL change take effect and the seat memory has an answer to give
+  // the flat panel frame) advances the pending reference changes first, through here. The seated space is a LOCAL child with an offset (F189: now a stored origin
+  // on LOCAL, no child; the rule below is kept as it was) and cannot be replaced while a frame is open, so when this advance makes a LOCAL change take effect and the seat memory has an answer to give
   // it (the head in the new LOCAL becomes the seat, seatProcessRuntimeRecentre), the frame is GIVEN UP: closed, nothing located from the stale
   // space and nothing published from it, the origin replaced with no frame open, and the caller returns without a pose (the game asks again
   // and the next frame is in the new space). The alternative, answering from inside the open frame, is impossible; the earlier order (answer on
@@ -3453,7 +3483,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   // F25: the head's yaw in the SEATED space (the space every pose the game reads is located in), in degrees. False when not located.
   bool lookSeatedHeadYaw(double* yawDeg) {
     XrSpaceLocation h{XR_TYPE_SPACE_LOCATION};XrTime t=0;
-    const XrResult r=HeadLocator{}.locate({api.convertTime,api.locateSpace},instance,view,seated.space(),0,h,&t,counterNow,nullptr,boundary.estimateNow());
+    const XrResult r=HeadLocator{}.locate({api.convertTime,api.locateSpace},instance,view,seated.frame(),0,h,&t,counterNow,nullptr,boundary.estimateNow());
     if(r!=XR_SUCCESS||!(h.locationFlags&XR_SPACE_LOCATION_ORIENTATION_VALID_BIT)) return false;
     *yawDeg=seatRadToDeg(seatPoseYawOf(h.pose).yaw);
     return true;
@@ -3479,7 +3509,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     // F115: while the seat memory has a seat to put back (boarding with the origin moved on foot) the restore waits for it: the seat's new origin rebases the
     // look (lookRebase), so the cockpit moves once, to the seat, and not first to the on-foot origin.
     if(lookRestorePending&&!state.frameOpen()&&!seatApplyAhead()) {
-      const XrResult r=seated.replace(seatedPoseFor(currentOrigin,rotApplied[1],adsApplied));
+      const XrResult r=seated.setOrigin(seatedPoseFor(currentOrigin,rotApplied[1],adsApplied));
       if(r!=XR_SUCCESS) {
         ++lookRefusals;lookWhy="seated space replace refused (the reset to the origin)";
       } else {
@@ -3503,7 +3533,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
         // removed (2 sin(dpsi / 2) |e| of the seat: 4.3 cm and 10.4 cm in the 08:03 flight's presses 1 and 3). Pivoted at h, U turns about h exactly.
         const SeatPose next=eyeoffset::turnAboutHead(lookSeated,head.pose.position.x,head.pose.position.z,delta);
         double yawBefore=0.0;const bool haveBefore=lookSeatedHeadYaw(&yawBefore);
-        const XrResult r=seated.replace(seatedPoseFor(next,rotApplied[1],adsApplied));   // F61/F62b: zero pitches (keys off) are xrFromSeatPose(next)
+        const XrResult r=seated.setOrigin(seatedPoseFor(next,rotApplied[1],adsApplied));   // F61/F62b: zero pitches (keys off) are xrFromSeatPose(next)
         if(r!=XR_SUCCESS) {
           ++lookRefusals;lookWhy="seated space replace refused";
         } else {
@@ -3532,7 +3562,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     }
   }
   // F33: WaitGetPoses, no frame open. Moves the seated origin by the change in the provider's body-align translation (seated-space metres; yaw
-  // unchanged). The same mechanism as lookPoll: seated.replace on lookSeated, never currentOrigin and never an origin generation bump.
+  // unchanged). The same mechanism as lookPoll: seated.setOrigin on lookSeated (F189: a stored origin, no reference space), never currentOrigin and never an origin generation bump.
   void eyePoll() {
     if(!eyeProviderSeen||!features.acquired()||!seated.space()||!changes.active()) return;
     const uint64_t now=GetTickCount64();
@@ -3547,7 +3577,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       delta[0]=eyeTarget[0]-eyeApplied[0];delta[1]=eyeTarget[1]-eyeApplied[1];delta[2]=eyeTarget[2]-eyeApplied[2];
       SeatPose next=lookSeated;
       next.x+=delta[0];next.y+=delta[1];next.z+=delta[2];
-      const XrResult r=seated.replace(seatedPoseFor(next,rotApplied[1],adsApplied));   // F61/F62b: zero pitches (keys off) are xrFromSeatPose(next)
+      const XrResult r=seated.setOrigin(seatedPoseFor(next,rotApplied[1],adsApplied));   // F61/F62b: zero pitches (keys off) are xrFromSeatPose(next)
       if(r!=XR_SUCCESS) {
         ++eyeRefusals;eyeWhy="seated space replace refused";
       } else {
@@ -3567,9 +3597,13 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       eyeLineMs=now;
       // F134: wanted_m is the seated offset, target_m that offset turned into LOCAL by the seat's heading (seat_yaw_deg), applied_m what the origin carries (they agree
       // within a micrometre once applied).
-      nativeTracePrintf("eye_align_runtime,wanted_m=(%.4f,%.4f,%.4f),applied_m=(%.4f,%.4f,%.4f),applies=%llu,refusals=%llu,serial=%u,why=%s,target_m=(%.4f,%.4f,%.4f),seat_yaw_deg=%.3f\n",
+      // F189: space_creates (reference spaces the seat path made: 0, it holds no create call), origin_sets (every origin stored: this line's applies, the look's, the pitches', the
+      // recentres' and the resets', all of them), replays_across_origin (late pairs replayed after the origin moved). A log without these three is from before F189.
+      nativeTracePrintf("eye_align_runtime,wanted_m=(%.4f,%.4f,%.4f),applied_m=(%.4f,%.4f,%.4f),applies=%llu,refusals=%llu,space_creates=%llu,origin_sets=%llu,replays_across_origin=%llu,serial=%u,why=%s,target_m=(%.4f,%.4f,%.4f),seat_yaw_deg=%.3f\n",
           eyeWanted[0],eyeWanted[1],eyeWanted[2],eyeApplied[0],eyeApplied[1],eyeApplied[2],
-          (unsigned long long)eyeApplies,(unsigned long long)eyeRefusals,unsigned(eyeSerialSeen),eyeWhy,eyeTarget[0],eyeTarget[1],eyeTarget[2],seatRadToDeg(lookSeated.yaw));
+          (unsigned long long)eyeApplies,(unsigned long long)eyeRefusals,
+          (unsigned long long)SeatedSpace::spaceCreates(),(unsigned long long)seated.originSets(),(unsigned long long)replaysAcrossOrigin,
+          unsigned(eyeSerialSeen),eyeWhy,eyeTarget[0],eyeTarget[1],eyeTarget[2],seatRadToDeg(lookSeated.yaw));
     }
   }
   // F123: WaitGetPoses, no frame open. The position-only recentre the provider asks for (a version 10 answer's positionRecentre: 0, or the request's serial; the head containment's
@@ -3636,7 +3670,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       next=SeatPose{head.pose.position.x+eyeApplied[0],head.pose.position.y+eyeApplied[1],head.pose.position.z+eyeApplied[2],lookSeated.yaw};
       const double oldPivot[3]={adsPivot[0],adsPivot[1],adsPivot[2]};
       adsPivot[0]=head.pose.position.x;adsPivot[1]=head.pose.position.y;adsPivot[2]=head.pose.position.z;
-      if(seated.replace(seatedPoseFor(next,rotApplied[1],adsApplied))!=XR_SUCCESS) {
+      if(seated.setOrigin(seatedPoseFor(next,rotApplied[1],adsApplied))!=XR_SUCCESS) {
         for(int i=0;i<3;++i)adsPivot[i]=oldPivot[i];
         why="the seated space replace was refused";
       }
@@ -3662,7 +3696,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   // F61: the head's yaw (the seat's sign) and pitch (nose up positive) in the SEATED space, degrees. False when not located.
   bool rotSeatedHeadYawPitch(double* yawDeg,double* pitchDeg) {
     XrSpaceLocation h{XR_TYPE_SPACE_LOCATION};XrTime t=0;
-    const XrResult r=HeadLocator{}.locate({api.convertTime,api.locateSpace},instance,view,seated.space(),0,h,&t,counterNow,nullptr,boundary.estimateNow());
+    const XrResult r=HeadLocator{}.locate({api.convertTime,api.locateSpace},instance,view,seated.frame(),0,h,&t,counterNow,nullptr,boundary.estimateNow());
     if(r!=XR_SUCCESS||!(h.locationFlags&XR_SPACE_LOCATION_ORIENTATION_VALID_BIT)) return false;
     const double q[4]={h.pose.orientation.x,h.pose.orientation.y,h.pose.orientation.z,h.pose.orientation.w},back[3]={0,0,-1};
     double fwd[3];seatQuatApply(q,back,fwd);
@@ -3701,7 +3735,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
         double yawBefore=0.0,pitchBefore=0.0;const bool haveBefore=rotSeatedHeadYawPitch(&yawBefore,&pitchBefore);
         const double keepPivot[3]={rotPivot[0],rotPivot[1],rotPivot[2]},keepAxis[3]={rotAxis[0],rotAxis[1],rotAxis[2]};
         for(int i=0;i<3;++i){rotPivot[i]=pivot[i];rotAxis[i]=axis[i];}
-        const XrResult r=seated.replace(seatedPoseFor(next,rotWanted[1],adsApplied));
+        const XrResult r=seated.setOrigin(seatedPoseFor(next,rotWanted[1],adsApplied));
         if(r!=XR_SUCCESS) {
           for(int i=0;i<3;++i){rotPivot[i]=keepPivot[i];rotAxis[i]=keepAxis[i];}
           ++rotRefusals;rotWhy="seated space replace refused";
@@ -3748,7 +3782,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
         if(std::fabs(adsWanted-adsApplied)>1e-6||(adsApplied!=0.0&&moved)) {
           const double keep[3]={adsPivot[0],adsPivot[1],adsPivot[2]};
           for(int i=0;i<3;++i)adsPivot[i]=h[i];
-          const XrResult r=seated.replace(seatedPoseFor(lookSeated,rotApplied[1],adsWanted));
+          const XrResult r=seated.setOrigin(seatedPoseFor(lookSeated,rotApplied[1],adsWanted));
           if(r!=XR_SUCCESS) {
             for(int i=0;i<3;++i)adsPivot[i]=keep[i];
             ++adsRefusals;adsWhy="seated space replace refused";
@@ -4398,8 +4432,9 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     nativeTracePrintf("swapchain_format,%lld\n",(long long)stereo.format());
     if(!result("policy_initialize",state.reset(api.frames,instance,session,XR_ENVIRONMENT_BLEND_MODE_OPAQUE)))return false;
     pacer.bind(api.frames.waitFrame,session);
-    if(!seated.begin({api.createSpace,api.destroySpace},session,local,naturalType)||
+    if(!seated.begin(session,local,naturalType)||
        !changes.begin(session,naturalType)||!resetEvents.begin(geometryGeneration))return false;
+    traceSeatedBegin();
     state.setUnhandledEventSink(referenceEvent,this);
     state.setEventObserver(vendorEvent,this);
     runtimeGeneration=gate.beginGeneration();

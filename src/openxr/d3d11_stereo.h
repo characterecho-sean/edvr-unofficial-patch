@@ -107,12 +107,18 @@ class D3D11Stereo final {
   // placement, inside its hidden area, the mask built from rightHidden) the left pixel keeps its own image, over a band of eye_share.h's kBandDeg. Exactly 0 (and
   // anything that is not a number or is negative) runs no extra pass, so the image is the one this renderer has always drawn, bit for bit. The layer's views stay each
   // eye's own. Like the fade it is an argument of each draw, not a state of the renderer; shareFacts() says what the call did with it.
+  // seatOrigin (F189, #144; the same on renderSkybox and renderNotice): the views are in SEATED coordinates, the seated space being the natural space moved by this origin
+  // (seat_transform.h), and the layer's space is the natural one. When given, each layer view's pose is toNatural(*seatOrigin, view pose), so the physical pose of the
+  // layer is the one a reference space made at that origin would have given it. Null leaves the views' poses as they are (the space handed in is then the one they were
+  // located in). Only the poses the layer hands the runtime change: the renderer's own use of the views (the share, the plugins' frame, the sky's rotation) stays in the
+  // seated numbers it was given.
   XrResult renderCaptured(const XrView (&)[2], XrSpace, const EyeCapture&,
                           XrCompositionLayerProjection&, GpuWorkObserver* observer = nullptr,
                           StereoWallTimes* times = nullptr,
                           const StereoPlacement* placement = nullptr,
                           float fade = 0.0f, const XrPosef* headPose = nullptr, float leftEyeShare = 0.0f,
-                          const StereoHiddenArea* rightHidden = nullptr, float leftStripBlack = 0.0f, bool leftZoomed = false);
+                          const StereoHiddenArea* rightHidden = nullptr, float leftStripBlack = 0.0f, bool leftZoomed = false,
+                          const XrPosef* seatOrigin = nullptr);
   // leftStripBlack, 0..1 (B3, the scope zoom's window, scope_zoom_window.h): with a share drawn, the part of the left eye the right eye does not cover (its outer strip, and the fade
   // band to it: the geometry alone, however far the share's weight has fallen) is blended toward black by that much, so the left eye's own picture, which the zoom has narrowed, is
   // not seen there. 0 (or anything that is not a number) draws the share exactly as before; with no share drawn it does nothing, the left eye's whole picture being its own.
@@ -124,13 +130,13 @@ class D3D11Stereo final {
   // is the image it always was. The weight is the left strip's, so both edges come and go together.
   const StereoShareFacts& shareFacts() const { return shareFacts_; }
   XrResult renderSkybox(const XrView (&)[2], XrSpace, const SkyboxCapture&,
-                        XrCompositionLayerProjection&, float fade = 0.0f);
+                        XrCompositionLayerProjection&, float fade = 0.0f, const XrPosef* seatOrigin = nullptr);
   // The flat-mode notice (docs/design-unified-install-2026-10-12.md section 12, N2): each eye image is cleared black and the
   // notice's text is copied in with its centre on that eye's optical centre, found from the view's own fov (flat_notice_placement.h).
   // text false draws the same black frame with no text: the eye images are cleared and nothing is copied in.
   // Same swapchain handling as renderSkybox: acquire, wait, draw, submit, release, for each eye. Every path releases what it acquired.
   // The renderer stays ready whatever this returns, except a GPU submit failure, which leaves it unready like any stereo failure.
-  XrResult renderNotice(const XrView (&)[2], XrSpace, XrCompositionLayerProjection&, bool text = true);
+  XrResult renderNotice(const XrView (&)[2], XrSpace, XrCompositionLayerProjection&, bool text = true, const XrPosef* seatOrigin = nullptr);
   // True when the notice's face is the fallback (Segoe UI, not Bahnschrift), as of the current notice texture.
   bool noticeFontFallback() const { return noticeFallback_; }
   // The text's format is one this renderer can convert it to (the four it chooses from).
