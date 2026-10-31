@@ -4353,5 +4353,31 @@ ruled out: F120's head-turn correction, because it rotated a point the lever had
     - Aim down sights: the sight should line up.
     - Then set Anti-aliasing back to DLSS and check the same.
     - Read: `marker eye (F198)`; F62c decisions and F63 matched counts; F85b's K solves; F66e solved eyes; the `centred:` reasons.
+- **On-foot parity with Anti-aliasing off (2026-10-31; the pilot: "Can we reach parity on foot with AA off vs on?").** A read-only audit at d5f193d8. Nothing is built from it yet.
+  - **Where the eye is scaled.** With Anti-aliasing off, EDVR's own runtime scales the eye 2016 to 4032. `D3D11Stereo::renderCaptured` (d3d11_stereo.cpp) is one fullscreen triangle, bilinear, into the swapchain. TAA `on` gets the same blit; dlss, fsr and xess hand it recW x recH, so theirs is 1:1.
+    - The pilot's 2016 is HMD Quality 0.50, tuned for DLSS. At HMD Quality 1.0 with Anti-aliasing off, the game renders at the display size and nothing is upscaled.
+  - **A plain door exists already.** The sharpen door (native_sharpen.cpp `treat`) is acquired whatever the Anti-aliasing and already calls `uiLayerComposite` every frame. The layer, the scope zoom door, the ripple and the weapons/HUD composite bail inside it only because the layer is not live (`uiLayerConfigure`'s temporal term, `uiLayerDoorSeen` arming only on `doorFromPass`).
+  - **Incidental gaps** (decouple as F196/F198 did; the Anti-aliasing-on path stays byte-identical):
+    1. (S) **The depth texture for the pick-only arm.** `depthProbeSceneDepth` refuses on `g_pickOnly`. F123's wall contact never fires with Anti-aliasing off (the eyes pass through walls; the leash still works), and F85c/F86's reticle depth and F119's grid decline. The fix: drop the term and measure the dispatch cost in a flight.
+    2. (S) **The RemLok visor per eye** (F121 axis, F121c). `eyeWatchNote` and `visorSwapBegin` ask only ui_depth's table and refuse kNoEye. The fix: fall back to `depthProbeCurrentSceneEyeOf` on the visor draw's DSV when the temporal path is off. F198's S does not apply: this is the HDR scene target.
+    3. (M) **F116's HUD hide at terminals.** ui_depth's world-screen classifier is temporal-only. The fix: arm the classifier and the coverage mask for the footprint alone. Its draw cost is to be measured.
+    4. (M) **The scope zoom** (lens, B3, the mark). `scopeZoomDoor` refuses on `!resolved` (`doorFromPass`), and its depth is set only inside `temporalInner`. Scoped weapons are not magnified with Anti-aliasing off.
+       - The fix: take the game's own frame as resolved (no jitter there), take the depth from the probe after item 1, and take near/far from the runtime's projection.
+       - Not established: the same A,B as `temporalSceneProjection`, and the lens's copy cost.
+    5. (L) **The UI layer's quality half** (the 2D screen, menus, maps, panels at HMD-quality size, the F26 HUD family). At render size it adds little, as with TAA `on`. It pays only with an EDVR-owned upscale before the composite, and only when the game renders under the display size.
+       - The cheaper step: a better spatial filter in the runtime's blit when the source is smaller than the target, gated to "the temporal door handed nothing".
+  - **Inherent** (they need history, jitter, motion vectors or an upscaler; no standalone form):
+    - sharp weapons, the shield ripple, the HDR HUD take and the star glow that follows it;
+    - the motion inputs (engine velocity, celestial, screen, weapon motion; the holo depth pass, smoke, the FSS chrome stamp);
+    - the VR world route and the vScreen auto fit (Anti-aliasing off keeps the legacy 125% vScreen);
+    - the texture LOD bias (`auto` only with a temporal mode);
+    - the marker reference `temporal`, which falls back to world_first.
+  - **Diagnostic only:** ui_scene_composites, the light grid cache's jitter probe (the cache itself runs), F52 `refTick`, vr_camera_census, the eye dump, F6/F7, and the sky-flicker A/B.
+  - **The order:**
+    1. Fly F198, which settles the markers and the readout. Its premise is open: if the game copies the UI target into the submitted texture, S answers -1.
+    2. Items 1 and 2 (both S).
+    3. Item 4 (the scope zoom is default on).
+    4. Item 3.
+    5. Item 5 only for rigs that render under the display size with Anti-aliasing off.
 - ruled out: F196 (or anything EDVR adds with Anti-aliasing off) as the cause of the outpost's 61-78 fps, because EDVR's GPU census reads ~0.1 ms a frame there, its draw hook CPU was lower than with DLSS at the same outpost, and Anti-aliasing off in the ship ran 85.5 fps against DLSS's 87.4.
 - ruled out: F196 as the cause of the moving markers and the loose weapon readout with Anti-aliasing off, because the user's rc.4 log (no F196, Anti-aliasing off) shows the same `no marker composite draw of the eye reached the fix` and `no weapon UI part` lines, and the code names a marker draw's eye only through the temporal-only interface layer and ui_depth.
