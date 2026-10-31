@@ -2134,24 +2134,6 @@ void testLegacyOnFootRowsStayOutOfMenu() {
         check(found == 1 && shaped && beside,
               "Pistol sprint arm swing phase (F169, TEMPORARY) is one [experimental] number row right after Crouched ADS torso square, on its page and under its heading: 0..1, step 0.05, unsigned, live, shipped 0.5 (F173; 0.0 before)");
     }
-    // F193 (TEMPORARY A/B): "ADS: body follows the camera (test)" is one [experimental] choice row (on, off) right after "Pistol sprint arm swing phase" on the same page and under the same heading, live, shipped on.
-    {
-        int swingRow = -1, followRow = -1, found = 0;
-        bool shaped = true;
-        for (int i = 0; i < kCount; ++i) {
-            const MenuRowDef& d = kMenuRows[i];
-            if (strcmp(d.section, "experimental") != 0) continue;
-            if (strcmp(d.key, "native_on_foot_pistol_sprint_swing_phase") == 0) swingRow = i;
-            if (strcmp(d.key, "native_on_foot_ads_body_follows_camera") == 0) {
-                followRow = i;
-                ++found;
-                shaped = shaped && d.kind == MenuKind::Choice && d.tier == MenuTier::Experimental && strcmp(d.label, "ADS: body follows the camera (test)") == 0 && strcmp(d.choices, "on|off") == 0 && d.applies == 1 && strcmp(d.shipped, "on") == 0;
-            }
-        }
-        const bool beside = swingRow >= 0 && followRow == swingRow + 1 && strcmp(kMenuRows[followRow].page, kMenuRows[swingRow].page) == 0 && strcmp(kMenuRows[followRow].group, kMenuRows[swingRow].group) == 0;
-        check(found == 1 && shaped && beside,
-              "ADS: body follows the camera (F193, TEMPORARY A/B) is one [experimental] choice row (on, off) right after Pistol sprint arm swing phase, on its page and under its heading: live, shipped on");
-    }
     // F157: the developer tier's "Body draw to hide (test)" dial (F154 to F156) is retired: the key stays in edvr.ini on a hidden retired line (`# ui: hidden -- retired (F157)`), so it
     // has a row in neither menu, the developer tier's included, and the dial's heading is gone with it.
     {

@@ -91,7 +91,7 @@
 #include "native_on_foot_f185.h"   // F185: the left arm keeps a bend in the sights, the shoulder first (TEMPORARY dial; pure parts)
 #include "native_on_foot_f191.h"   // F191: the hip reticle found by its marker type (1001), not by pool slot 10 (pure parts)
 #include "native_on_foot_f192.h"   // F192: the left elbow held down through a weapon draw: the draw-hold weight by native epoch, its counters and line (pure parts)
-#include "native_on_foot_f193.h"   // F193 (TEMPORARY A/B): in the sights the body follows the camera's height, as at the hip: the rule, the stability stop, the 1 s line (pure parts)
+#include "native_on_foot_f193.h"   // F193: in the sights the body follows the camera's height, as at the hip: the rule, the stability stop, the 1 s line (pure parts)
 #include "native_on_foot_f182.h"   // F182: the left hand stays on a two-handed gun aimed steeply up (the stored grip point in the item's frame; pure parts)
 #include "native_on_foot_f176.h"   // F176: in the sights with the head aiming, the mouse and the stick hold their pitch (pure parts)
 #include "native_on_foot_f175.h"   // F175 (measure only): the view's roll and pitch against the headset's, by look mode and item (pure parts)
@@ -254,9 +254,6 @@ double g_neckGuardCmLast = 1e9;                               // the value last 
 std::atomic<float> g_hipElbowSwivelMaxDeg{static_cast<float>(nofoot::f181::kCapDefaultDeg)};   // F181a (TEMPORARY): experimental.native_on_foot_hip_elbow_swivel_max_deg, 0..90, live: the most the left elbow swings off the stance's plane at the hip with a two-handed gun; 90 leaves the pose; default 25
 std::atomic<float> g_adsLeftReach{static_cast<float>(nofoot::f185::kDialDefault)};   // F185 (TEMPORARY): experimental.native_on_foot_ads_left_reach, 0.80..1.00, live: in the sights with a two-handed gun the left shoulder is kept within this share of the left arm's full length of the grip; 1.00 is today's; default 0.92
 double g_adsLeftReachLast = 1e9;                              // the value last logged (frame thread; the first read always logs)
-std::atomic<bool> g_adsBodyFollowsCamera{true};               // F193 (TEMPORARY A/B): experimental.native_on_foot_ads_body_follows_camera, on | off, live: in the sights the neck target is the game's camera eye less the eye height key, as at the hip; off is the rule before F193 (the animated neck plus the legs' room); default on
-bool g_adsBodyFollowsCameraLast = true;                       // the value last logged (frame thread)
-bool g_adsBodyFollowsCameraLogged = false;                    // the first read always logs
 double g_hipElbowSwivelMaxDegLast = 1e9;                      // the value last logged (frame thread; the first read always logs)
 std::atomic<float> g_f87SettleS{static_cast<float>(nofoot::f87::kSettleDefaultS)};   // F87h (TEMPORARY): fix.native_on_foot_standing_height_settle_s, live
 double g_f87SettleLast = -1.0;                                // the value last logged (frame thread)
@@ -1282,21 +1279,6 @@ void readKey() {
                             phase, nofoot::f169::kDialMin, nofoot::f169::kDialMax);
         g_pistolSprintPhaseLast = phase;
         g_pistolSprintPhase.store(static_cast<float>(phase), std::memory_order_relaxed);
-    }
-    // F193 (TEMPORARY A/B, live): experimental.native_on_foot_ads_body_follows_camera. on (the default): in the sights, armed, the body's neck target is the game's camera eye less the eye height key, in
-    // both stances, as the hip's rule gives it (a lowering allowed, a raise capped by the legs' room); off: the rule before F193 (the animated neck plus F179a's raise asked of the legs' room, the crouched
-    // share's lowering, the two crossfaded by F163's posture weight).
-    {
-        const bool followOn = cfg.getString("experimental.native_on_foot_ads_body_follows_camera", "on") != "off";
-        if (first || followOn != g_adsBodyFollowsCameraLast || !g_adsBodyFollowsCameraLogged)
-            Log::get().note("native on foot ADS body height (F193, TEMPORARY A/B): experimental.native_on_foot_ads_body_follows_camera is %s -- %s", followOn ? "on" : "off",
-                            followOn ? "in the sights, armed, the body's neck target is the game's camera eye less the eye height key, standing and crouched, as it is at the hip (a lowering allowed; "
-                                       "a raise held to the legs' room so no foot lifts); the camera is the game's own with the carried raise and every ADS offset taken out, never the drawn eye; a "
-                                       "stability stop falls back to the old rule for the rest of a press"
-                                     : "in the sights the neck target is the animated neck plus the legs' room raise (standing) or the eye's lowering (crouched), crossfaded by the posture weight: the rule before F193");
-        g_adsBodyFollowsCameraLast = followOn;
-        g_adsBodyFollowsCameraLogged = true;
-        g_adsBodyFollowsCamera.store(followOn, std::memory_order_relaxed);
     }
     // F146: the ADS sight switch ("ADS sight from the game"), the two ADS sight trims (height and right) and the full outfit switch are gone, with their `fix.` keys (named by
     // retiredKeysNote); the behaviour they tuned is the only behaviour. While aiming down sights the eye goes onto the game's own sight line (F143,
@@ -17034,7 +17016,7 @@ nofoot::f171c::Pairing g_f171cPair;
 // (one writer, the same hook as F138's); f138Line takes the window once a second. g_f175Rate is the hook's: the headset's angular rate from consecutive LOCAL poses.
 nofoot::f171c::Mailbox<nofoot::f175::Window> g_f175Box;
 nofoot::f175::RateTracker g_f175Rate;
-// F193 (TEMPORARY A/B): the sights' neck height by the camera's (nofoot::f193, native_on_foot_f193.h). The pin hook's stability stop (one writer: pinStage0, a fresh call a frame) and the window of
+// F193: the sights' neck height by the camera's (nofoot::f193, native_on_foot_f193.h). The pin hook's stability stop (one writer: pinStage0, a fresh call a frame) and the window of
 // its calls in the sights, which f138Line takes once a second with the others. The hook is the stop's only reader and writer.
 nofoot::f193::StopGuard g_f193Stop;
 std::atomic<uint32_t> g_f193Stops{0};   // the session's stops, for the frame thread's line (the hook stores it when a stop trips)
@@ -17174,7 +17156,7 @@ struct PinCall {
     double f178LeftDialCm = 0.0, f178LeftShift[3] = {}, f178LeftReachDelta[3] = {}, f178LeftWrittenM = std::nan("");
     // F179a: the standing share (F178's weight) and the standing raise it asked of the neck target (m, >= 0; the F97a line's "standing share").
     double f179StandW = 0.0, f179StandRaise = 0.0;
-    // F193 (TEMPORARY A/B): the camera rule set this call's neck height in the sights (nofoot::f193; the F97a line's standing raise above is what the legs' room rule asks either way: while the camera
+    // F193: the camera rule set this call's neck height in the sights (nofoot::f193; the F97a line's standing raise above is what the legs' room rule asks either way: while the camera
     // rule runs it is the old rule's figure, not what is written), the neck target it made (m; the model's height), the camera eye over the animated neck less the key before the legs' cap (m), the
     // legs' room (m; not a number without legs), and the rule that set the height (nofoot::f193::Source).
     bool f193Camera = false;
@@ -17676,7 +17658,7 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
             pc.f179StandW = nofoot::f178::weight(pc.postureW, pc.detachW);
             pc.f179StandRaise = nofoot::f179::legsRaiseAskedM(legsRoomM, pc.postureW, pc.detachW);
             at = nofoot::f179::withStandingRaise(at, N0[1], f97W, pc.f179StandRaise);
-            // F193 (TEMPORARY A/B: experimental.native_on_foot_ads_body_follows_camera): in the sights the neck's height is the game's camera eye less the eye height key, both stances, as the hip's rule
+            // F193: in the sights the neck's height is the game's camera eye less the eye height key, both stances, as the hip's rule
             // gives it (nofoot::f193: a lowering allowed, a raise held to the legs' room, the hip's demand blended out by the detach weight), in place of the animated neck plus the legs' room
             // raise (standing) or the eye's lowering (crouched) crossfaded by F163's posture weight, which followed the camera late (a jump, a crouch entered in the sights: the arms lagged the body).
             // The loop guard (F184 took the drawn eye out of this for it): the height is read from pc.eyeYSelected, the pin's E = the game's own camera, which pinInPublish formed in the P1 hook as the job
@@ -17688,7 +17670,7 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
             // from the neck as written only outside the sights (si.valid below needs the detach weight 0); in the sights the raise only falls (F160) and the pose carries it with k about 0.9 to 1 (F171).
             // A stability stop backs it: the neck target over 3 cm a frame for 5 frames while the camera's height moves under 1 cm sets the old rule for the rest of the press.
             nofoot::f193::Result f193r;
-            if (nofoot::f193::wanted(g_adsBodyFollowsCamera.load(std::memory_order_relaxed), g_f193Stop.stopped, pc.detachW, f97W)) {
+            if (nofoot::f193::wanted(g_f193Stop.stopped, pc.detachW, f97W)) {
                 const double t93HipY = t93BeforeDetachY + neckViewShift[1];   // F93's target at detach 0, the hip's demand
                 const nofoot::f97::ArmedTarget hipAt = nofoot::f97::armedNeckTarget(N0[1], t93HipY, pc.eyeYSelected + f97EyeOverE, f97H, 0.0, f97W, pc.postureW, t93HipY);
                 f193r = nofoot::f193::cameraTarget(hipAt, N0[1], f97W, pc.eyeYSelected, f97H, legsRoomM, pc.detachW);
@@ -25103,13 +25085,12 @@ void f138Line(uint64_t now) noexcept {
                 }
         }
     }
-    // F193 (TEMPORARY A/B): the sights' neck height, one line for a second with calls in the sights with a weapon drawn: the rule that set it, the neck target against the camera's eye, the frame steps, the stops.
+    // F193: the sights' neck height, one line for a second with calls in the sights with a weapon drawn: the rule that set it, the neck target against the camera's eye, the frame steps, the stops.
     {
         nofoot::f193::Window bw;
         if (g_f193Box.take(&bw) && bw.any()) {
             char bodyLine[760];
-            nofoot::f193::formatLine(bodyLine, sizeof(bodyLine), 1, bw, g_adsBodyFollowsCamera.load(std::memory_order_relaxed),
-                                     static_cast<double>(g_f94EyeHeightCm.load(std::memory_order_relaxed)), g_f193Stops.load(std::memory_order_relaxed));
+            nofoot::f193::formatLine(bodyLine, sizeof(bodyLine), 1, bw, static_cast<double>(g_f94EyeHeightCm.load(std::memory_order_relaxed)), g_f193Stops.load(std::memory_order_relaxed));
             Log::get().note("%s", bodyLine);
         }
     }

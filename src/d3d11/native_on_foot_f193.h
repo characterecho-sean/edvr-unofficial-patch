@@ -1,5 +1,5 @@
 // F193 (native on foot VR): in the sights the body follows the camera's height, as it does at the hip. Header only, no game or D3D11 state, so native_frame_test runs the very functions the
-// pin uses. Journal: the arc doc, F193. TEMPORARY A/B key experimental.native_on_foot_ads_body_follows_camera (on | off, default on, live); off is the rule before F193.
+// pin uses. Journal: the arc doc, F193. The behaviour, no key (it was an A/B key until the pilot flew it on and said to retire it); the rule before F193 stays as the stability stop's fallback.
 //
 // The pilot: "when crouching or jumping with ADS, the arms move unnaturally, like they're lagging the body; at the hip the arms stay in place". The flight edvr_gfx_20261031_080600
 // (v0.22.0-rc.4-8-g58d4f8c8):
@@ -41,9 +41,9 @@ enum Source : int { kSrcHip = 0, kSrcLegs = 1, kSrcCamera = 2 };
 inline int sourceOf(bool cameraRule, double detachW) noexcept { return cameraRule ? kSrcCamera : (detachW > 0.0 ? kSrcLegs : kSrcHip); }
 inline const char* sourceName(int s) noexcept { return s == kSrcCamera ? "camera" : s == kSrcLegs ? "legs" : "hip"; }
 
-// The rule runs when the key is on, the stop has not tripped in this press, the sights are up (the detach weight above 0) and a weapon is drawn (F88's weight above 0: unarmed the target is the
+// The rule runs when the stop has not tripped in this press, the sights are up (the detach weight above 0) and a weapon is drawn (F88's weight above 0: unarmed the target is the
 // animated neck's, as it was).
-inline bool wanted(bool keyOn, bool stopped, double detachW, double armedW) noexcept { return keyOn && !stopped && detachW > 0.0 && armedW > 0.0; }
+inline bool wanted(bool stopped, double detachW, double armedW) noexcept { return !stopped && detachW > 0.0 && armedW > 0.0; }
 
 struct Result {
     bool ok = false;                   // the rule made the target (the inputs were numbers); false: the caller keeps the old rule's
@@ -160,21 +160,21 @@ struct Window {
     void clear() noexcept { *this = Window{}; }
 };
 
-// "native on foot ADS body height (F193, TEMPORARY) 1 s: rule camera, ..." The rule is the camera when it made the target in at least half the calls, else the legs'.
-inline int formatLine(char* buf, size_t n, uint32_t seconds, const Window& w, bool keyOn, double eyeHeightCm, uint32_t sessionStops) noexcept {
+// "native on foot ADS body height (F193) 1 s: rule camera, ..." The rule is the camera when it made the target in at least half the calls, else the legs' (after a stop, for the rest of that press).
+inline int formatLine(char* buf, size_t n, uint32_t seconds, const Window& w, double eyeHeightCm, uint32_t sessionStops) noexcept {
     const double on = w.offN ? static_cast<double>(w.offN) : 1.0, st = w.steps ? static_cast<double>(w.steps) : 1.0;
     return std::snprintf(buf, n,
-                         "native on foot ADS body height (F193, TEMPORARY) %u s: rule %s (the camera's in %u of %u calls in the sights; experimental.native_on_foot_ads_body_follows_camera %s); "
+                         "native on foot ADS body height (F193) %u s: rule %s (the camera's in %u of %u calls in the sights); "
                          "neck target - camera eye mean %+.1f min %+.1f max %+.1f cm (the camera rule reads minus the eye height key, %.1f cm); a frame's step: camera mean %.2f max %.2f cm, "
                          "neck target mean %.2f max %.2f cm; stops %u (session %u)",
-                         seconds, w.camera * 2 >= w.calls ? "camera" : "legs", w.camera, w.calls, keyOn ? "on" : "off", w.offN ? w.offSum / on * 100.0 : 0.0, w.offN ? w.offMin * 100.0 : 0.0,
+                         seconds, w.camera * 2 >= w.calls ? "camera" : "legs", w.camera, w.calls, w.offN ? w.offSum / on * 100.0 : 0.0, w.offN ? w.offMin * 100.0 : 0.0,
                          w.offN ? w.offMax * 100.0 : 0.0, eyeHeightCm, w.steps ? w.camStepSum / st * 100.0 : 0.0, w.camStepMax * 100.0, w.steps ? w.tgtStepSum / st * 100.0 : 0.0,
                          w.tgtStepMax * 100.0, w.stops, sessionStops);
 }
 // The stop's line, once per press it trips in.
 inline int formatStop(char* buf, size_t n, double targetStepM, double cameraStepM, uint32_t sessionStops) noexcept {
     return std::snprintf(buf, n,
-                         "native on foot ADS body height stop (F193, TEMPORARY): the neck target moved over %.0f cm a frame for %u frames while the camera's vertical moved under %.0f cm (the last "
+                         "native on foot ADS body height stop (F193): the neck target moved over %.0f cm a frame for %u frames while the camera's vertical moved under %.0f cm (the last "
                          "frame: target %.1f cm, camera %.2f cm); the legs' room rule holds for the rest of this press; stops this session %u",
                          kStopTargetStepM * 100.0, kStopFrames, kStopCameraStepM * 100.0, targetStepM * 100.0, cameraStepM * 100.0, sessionStops);
 }

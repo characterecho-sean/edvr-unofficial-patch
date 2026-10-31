@@ -1,11 +1,11 @@
 // F193 checks (native on-foot VR), run193 below. Header only, run by native_frame_test.
 //
-// F193 (native_on_foot_f193.h, native_on_foot.cpp, TEMPORARY A/B experimental.native_on_foot_ads_body_follows_camera): in the sights the body's neck target is the game's camera eye less the
+// F193 (native_on_foot_f193.h, native_on_foot.cpp; behaviour, no key since the pilot flew it on and said to retire the A/B key): in the sights the body's neck target is the game's camera eye less the
 // eye height key, both stances, as the hip gives it; a lowering is allowed, a raise stays held to the legs' room. The pilot: crouching or jumping with the sights up, the arms lag the body; at
 // the hip they stay in place. The flight edvr_gfx_20261031_080600: the steady states (standing in the sights the neck 1.400 against the camera at about 1.54; crouched 0.82 against 0.96, both
 // the camera less 14 to 15 cm), a jump in the sights (the camera flat, the body's vertical against the animated neck climbing +7 to +44 cm), a crouch entered in the sights (the body snapped 48 cm
 // in 3 frames, 70 to 90 ms after the camera stopped). The rig runs the rule against the old one (F97a's armedNeckTarget and F179a's legs' room raise, the functions the pin used) on those, the
-// continuity from the hip, the lowering and the legs' cap, the stability stop, the key off, a toy loop (a rule that reads the drawn eye runs away; this one does not), the lines and the source sites.
+// continuity from the hip, the lowering and the legs' cap, the stability stop and its fall back to the old rule, a toy loop (a rule that reads the drawn eye runs away; this one does not), the lines and the source sites.
 #pragma once
 
 #include "../../src/d3d11/native_on_foot_core.h"
@@ -35,11 +35,6 @@ inline std::string slurp(const char* path) {
     ss << f.rdbuf();
     return ss.str();
 }
-inline size_t countOf(const std::string& hay, const std::string& needle) {
-    size_t n = 0, at = 0;
-    while ((at = hay.find(needle, at)) != std::string::npos) { ++n; at += needle.size(); }
-    return n;
-}
 
 // One call's neck target as the pin forms it, for both rules (the cpp's block, with the toy inputs). The old rule: F97a's armedNeckTarget at the call's detach weight, with F179a's standing raise asked
 // of the legs' room. The hip's demand: the same at detach 0. The new: F193's cameraTarget when the rule is wanted.
@@ -60,9 +55,9 @@ inline f193::Result newRule(const Inputs& in) {
     return f193::cameraTarget(hip, in.n0y, in.armedW, in.eyeLevelY, in.h, in.legsRoom, in.detachW);
 }
 // What the pin's block does: the old rule, replaced by the new when it is wanted.
-inline double callerY(bool keyOn, bool stopped, const Inputs& in) {
+inline double callerY(bool stopped, const Inputs& in) {
     f97::ArmedTarget at = oldRule(in);
-    if (f193::wanted(keyOn, stopped, in.detachW, in.armedW)) {
+    if (f193::wanted(stopped, in.detachW, in.armedW)) {
         const f193::Result r = newRule(in);
         if (r.ok) at = r.at;
     }
@@ -76,10 +71,9 @@ inline void run193(Check&& check) {
 
     // ---- 1. when the rule runs ------------------------------------------------------------------------------------------------------------------------------------------------------
     {
-        check(f193::wanted(true, false, 1.0, 1.0) && f193::wanted(true, false, 0.02, 0.3), "F193: the rule runs with the key on, no stop in this press, the sights up (any detach weight above 0) and a weapon drawn");
-        check(!f193::wanted(false, false, 1.0, 1.0) && !f193::wanted(true, true, 1.0, 1.0) && !f193::wanted(true, false, 0.0, 1.0) && !f193::wanted(true, false, 1.0, 0.0) &&
-                  !f193::wanted(true, false, std::nan(""), 1.0),
-              "F193: the key off, a stop in this press, the hip (detach weight 0) and nothing drawn (weight 0) leave the old rule");
+        check(f193::wanted(false, 1.0, 1.0) && f193::wanted(false, 0.02, 0.3), "F193: the rule runs with no stop in this press, the sights up (any detach weight above 0) and a weapon drawn");
+        check(!f193::wanted(true, 1.0, 1.0) && !f193::wanted(false, 0.0, 1.0) && !f193::wanted(false, 1.0, 0.0) && !f193::wanted(false, std::nan(""), 1.0),
+              "F193: a stop in this press, the hip (detach weight 0) and nothing drawn (weight 0) leave the old rule");
         check(f193::sourceOf(true, 1.0) == f193::kSrcCamera && f193::sourceOf(false, 1.0) == f193::kSrcLegs && f193::sourceOf(false, 0.0) == f193::kSrcHip &&
                   std::strcmp(f193::sourceName(f193::kSrcCamera), "camera") == 0 && std::strcmp(f193::sourceName(f193::kSrcLegs), "legs") == 0 && std::strcmp(f193::sourceName(f193::kSrcHip), "hip") == 0,
               "F193: the F85a line's source is the camera's rule, the legs' room rule in the sights, or the hip");
@@ -212,7 +206,7 @@ inline void run193(Check&& check) {
               "F193: nothing drawn or an input that is not a number: not ok, the caller keeps the old rule's target");
     }
 
-    // ---- 6. the key off is the old rule, bit for bit ---------------------------------------------------------------------------------------------------------------------------------------
+    // ---- 6. a stop in the press, or the hip, is the old rule, bit for bit ---------------------------------------------------------------------------------------------------------------------
     {
         bool same = true, differ = false;
         for (int i = 0; i < 40; ++i) {
@@ -222,12 +216,12 @@ inline void run193(Check&& check) {
             in.legsRoom = 0.05 + 0.3 * std::fabs(std::sin(i * 0.23));
             in.postureW = (i % 5) / 4.0;
             in.detachW = (i % 7) / 6.0;
-            const double off = callerY(false, false, in), stopped = callerY(true, true, in), old = oldRule(in).y, on = callerY(true, false, in);
-            same = same && std::memcmp(&off, &old, sizeof(double)) == 0 && std::memcmp(&stopped, &old, sizeof(double)) == 0;
+            const double stopped = callerY(true, in), old = oldRule(in).y, on = callerY(false, in);
+            same = same && std::memcmp(&stopped, &old, sizeof(double)) == 0;
             if (in.detachW > 0.0 && std::fabs(on - old) > 1e-4) differ = true;
             if (in.detachW == 0.0) same = same && std::memcmp(&on, &old, sizeof(double)) == 0;
         }
-        check(same && differ, "F193: with the key off, or a stop in this press, the neck is the old rule's bit for bit (40 varied frames); at the hip even with the key on; the rule on does change the sights");
+        check(same && differ, "F193: with a stop in this press the neck is the old rule's bit for bit (40 varied frames); at the hip even with no stop; with no stop the rule does change the sights");
     }
 
     // ---- 7. the stability stop -----------------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -355,22 +349,23 @@ inline void run193(Check&& check) {
         w.add(st);
         check(w.any() && w.calls == 91 && w.camera == 90 && w.stops == 1 && w.offN == 91 && w.steps == 90 && eq(w.offMax, -0.05, 1e-12) && eq(w.tgtStepMax, 0.04, 1e-12) && eq(w.camStepMax, 0.002, 1e-12),
               "F193: the window counts the calls in the sights, those on the camera rule, the stops, the offset's extremes and the steps");
-        const int len = f193::formatLine(buf, sizeof(buf), 1, w, true, 14.0, 2);
-        check(len > 0 && len < 760 && std::strstr(buf, "native on foot ADS body height (F193, TEMPORARY) 1 s: rule camera (the camera's in 90 of 91 calls in the sights; experimental.native_on_foot_ads_body_follows_camera on)") != nullptr &&
+        const int len = f193::formatLine(buf, sizeof(buf), 1, w, 14.0, 2);
+        check(len > 0 && len < 760 && std::strstr(buf, "native on foot ADS body height (F193) 1 s: rule camera (the camera's in 90 of 91 calls in the sights);") != nullptr &&
+                  std::strstr(buf, "TEMPORARY") == nullptr && std::strstr(buf, "body_follows_camera") == nullptr &&
                   std::strstr(buf, "neck target - camera eye mean -13.9 min -14.1 max -5.0 cm") != nullptr && std::strstr(buf, "(the camera rule reads minus the eye height key, 14.0 cm)") != nullptr &&
                   std::strstr(buf, "stops 1 (session 2)") != nullptr,
-              "F193: the 1 s line says the rule (camera), the calls on it, the key, the neck target less the camera's eye (mean, min, max), the steps and the stops, in under 760 bytes");
+              "F193: the 1 s line says the rule (camera), the calls on it, the eye height key, the neck target less the camera's eye (mean, min, max), the steps and the stops, in under 760 bytes");
         f193::Window legs;
         for (int i = 0; i < 90; ++i) {
             f193::Sample s;
             s.neckMinusCamM = 0.02;
             legs.add(s);
         }
-        f193::formatLine(buf, sizeof(buf), 1, legs, false, 14.0, 0);
-        check(std::strstr(buf, "rule legs (the camera's in 0 of 90 calls") != nullptr && std::strstr(buf, "native_on_foot_ads_body_follows_camera off)") != nullptr,
-              "F193: with the key off the line says the legs' rule ran, in no call on the camera, and the key off");
+        f193::formatLine(buf, sizeof(buf), 1, legs, 14.0, 0);
+        check(std::strstr(buf, "rule legs (the camera's in 0 of 90 calls in the sights);") != nullptr && std::strstr(buf, "body_follows_camera") == nullptr,
+              "F193: after a stop (the old rule for the rest of the press) the line says the legs' rule ran, in no call on the camera");
         f193::formatStop(buf, sizeof(buf), 0.045, 0.002, 1);
-        check(std::strstr(buf, "native on foot ADS body height stop (F193, TEMPORARY)") != nullptr && std::strstr(buf, "over 3 cm a frame for 5 frames") != nullptr && std::strstr(buf, "under 1 cm") != nullptr &&
+        check(std::strstr(buf, "native on foot ADS body height stop (F193): the neck target") != nullptr && std::strstr(buf, "TEMPORARY") == nullptr && std::strstr(buf, "over 3 cm a frame for 5 frames") != nullptr && std::strstr(buf, "under 1 cm") != nullptr &&
                   std::strstr(buf, "target 4.5 cm, camera 0.20 cm") != nullptr && std::strstr(buf, "the legs' room rule holds for the rest of this press") != nullptr,
               "F193: the stop's line gives the limits, the last frame's steps and that the old rule holds for the rest of the press");
         // the mailbox: written by the pin hook, taken by the frame thread, cleared between
@@ -390,17 +385,14 @@ inline void run193(Check&& check) {
         const std::string cpp = slurp("src/d3d11/native_on_foot.cpp"), ini = slurp("edvr.ini");
         const auto has = [&](const std::string& needle) { return cpp.find(needle) != std::string::npos; };
         const auto at = [&](const std::string& needle) { return cpp.find(needle); };
-        check(has("std::atomic<bool> g_adsBodyFollowsCamera{true};") && has("cfg.getString(\"experimental.native_on_foot_ads_body_follows_camera\", \"on\") != \"off\"") &&
-                  has("g_adsBodyFollowsCamera.store(followOn, std::memory_order_relaxed);") && has("if (first || followOn != g_adsBodyFollowsCameraLast || !g_adsBodyFollowsCameraLogged)") &&
-                  has("native on foot ADS body height (F193, TEMPORARY A/B): experimental.native_on_foot_ads_body_follows_camera is %s"),
-              "F193: the key is read live (on unless it says off), logged on its first read and each change");
-        const size_t keyAt = ini.find("\nnative_on_foot_ads_body_follows_camera = on\n"), uiAt = ini.find("# ui: ADS: body follows the camera (test) | choices on, off | recommended on | live\n"),
-                     swingAt = ini.find("\nnative_on_foot_pistol_sprint_swing_phase = 0.5\n");
-        check(countOf(ini, "native_on_foot_ads_body_follows_camera =") == 1 && keyAt != std::string::npos && uiAt != std::string::npos && swingAt != std::string::npos && swingAt < uiAt && uiAt < keyAt &&
-                  ini.find("# TEMPORARY (F193, A/B): ADS: body follows the camera") != std::string::npos,
-              "F193: edvr.ini ships the key once, on, with its TEMPORARY comment and its menu row, after the pistol sprint swing key");
+        // The A/B key is retired (the pilot flew it on and said so): nothing reads it, no flag holds it, edvr.ini has neither its entry nor its menu row. The needles are the key's and the flag's
+        // stems, cut short on purpose, so that the tree holds no spelling of the retired names outside the docs.
+        check(cpp.find("native_on_foot_ads_body_follows") == std::string::npos && cpp.find("g_adsBodyFollows") == std::string::npos && cpp.find("followOn") == std::string::npos &&
+                  ini.find("native_on_foot_ads_body_follows") == std::string::npos && ini.find("ADS: body follows the camera") == std::string::npos && ini.find("(F193, A/B)") == std::string::npos &&
+                  ini.find("\nnative_on_foot_pistol_sprint_swing_phase = 0.5\n") != std::string::npos,
+              "F193: the A/B key is gone: nothing reads it, no flag holds it, edvr.ini has neither its entry nor its menu row, and the camera rule is the behaviour");
         // the rule's site: the camera is pc.eyeYSelected (E), never the drawn eye or the carried raise added back
-        check(has("if (nofoot::f193::wanted(g_adsBodyFollowsCamera.load(std::memory_order_relaxed), g_f193Stop.stopped, pc.detachW, f97W)) {") &&
+        check(has("if (nofoot::f193::wanted(g_f193Stop.stopped, pc.detachW, f97W)) {") &&
                   has("f193r = nofoot::f193::cameraTarget(hipAt, N0[1], f97W, pc.eyeYSelected, f97H, legsRoomM, pc.detachW);") && has("if (f193r.ok) at = f193r.at;") &&
                   has("at = nofoot::f179::withStandingRaise(at, N0[1], f97W, pc.f179StandRaise);"),
               "F193: the rule replaces the old target only when wanted and ok (the old rule is computed first and stands otherwise), and reads the pin's E (pc.eyeYSelected)");
@@ -418,7 +410,8 @@ inline void run193(Check&& check) {
         check(has("if (pc.f193Camera) {   // F193: the camera rule on this target too") && has("const nofoot::f193::Result restR = nofoot::f193::cameraTarget(restHipAt, N0[1], f97W, pc.eyeYSelected, f97H, legsRoomM, pc.detachW);") &&
                   has("physicalTarget[1] = restAt.y;"),
               "F193: the rest target (the neck-yaw path) takes the same rule on the same decision, from its own hip demand");
-        check(has("nofoot::f193::formatLine(bodyLine, sizeof(bodyLine), 1, bw, g_adsBodyFollowsCamera.load(std::memory_order_relaxed),") && has("if (g_f193Box.take(&bw) && bw.any()) {") &&
+        check(has("nofoot::f193::formatLine(bodyLine, sizeof(bodyLine), 1, bw, static_cast<double>(g_f94EyeHeightCm.load(std::memory_order_relaxed)), g_f193Stops.load(std::memory_order_relaxed));") &&
+                  has("if (g_f193Box.take(&bw) && bw.any()) {") &&
                   has("g_f193Box.clearPending.store(true, std::memory_order_relaxed);"),
               "F193: the 1 s line is taken from the window with the other pin lines and cleared at an edge");
         check(has("fp.n0y = static_cast<float>(pc.N0[1]);") && has("fp.legsRoomM = static_cast<float>(pc.f193LegsRoomM);") && has("fp.rawEyeY = static_cast<float>(pc.rawEyeY);") && has("fp.source = pc.f193Source;") &&
