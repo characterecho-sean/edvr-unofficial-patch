@@ -33,7 +33,7 @@
 // about a fixed anchor (see THE MOVE below). And at the game's own camera the whole turret HUD lies about 0.7 m too far back for the head (the radar behind it), so the whole HUD is
 // first translated forward (fix.srv_turret_hud_forward), which is the old camera move applied to the HUD only: the world keeps the game's camera.
 //
-// THE SEVEN TEMPORARY KEYS (all live, all VR only, 0 = the game's own; the last is a text switch):
+// THE EIGHT TEMPORARY KEYS (all live, all VR only, 0 = the game's own; the last two are text switches):
 //   fix.srv_turret_camera_back  centimetres, 0..150, default 0: the camera moves back in the turret view, over the turret's axis (the stock camera is the plan; the HUD-forward key
 //                               replaces this). Part 1: published as the seated z of the eye alignment (alignTick), the single publisher of that alignment, so its serials stay coherent.
 //   fix.srv_turret_hud_forward  centimetres, 0..150, default 70: every vertex of the panels group (Group::kPanels: the two hologram families) moves forward along the turret by this much
@@ -46,8 +46,11 @@
 //   fix.srv_turret_radar_back   centimetres, 0..200, default 0: the same for the radar (Group::kRadar), which the game lays on the turret deck right under the player.
 //   fix.srv_turret_hud_gap      centimetres, 0..200, default 0: the first build's forward pull, kept for comparison. For a family whose group has a push above 0 the push is
 //                               used and this is not; for a group with no push this brings the vertices deeper than gap + kWindowNearM (up to kWindowFarM) forward by it.
-//   fix.srv_turret_hud_depth    game | real | front, default game: how the depth of a MOVED vertex is written (DepthMode below). A test switch for the radar disc (DF3503CD), which the
-//                               moved HUD's depth may hide.
+//   fix.srv_turret_hud_depth    front | game | real, default front (Sean found it right in the flight of 45fa7e56): how the depth of a MOVED vertex is written (DepthMode below).
+//   fix.srv_turret_hud_scissor  open | game, default open: whether the moved HUD may draw outside the scissor rectangle the game set for it at its OLD place. The game sets a scissor rectangle for
+//                               the radar's draws from the radar's original screen bounds; the moved geometry was cropped to that stale rectangle (a straight horizontal edge across the disc and
+//                               the hologram, which shifted as the head moved). open: while a bound draw is issued the rectangles are the whole render target (Scissor in
+//                               srv_turret_hud_binding.h), the game's put back after; game keeps its rectangles.
 //
 // THE TARGET HOLOGRAM (vs 5559BD94, the Scorpion's own hologram, signature H): its vertex shader writes __USER_VERTEX_M_LIGHTINGPOSITION, the vertex's camera-relative WORLD position
 // (cb0[9..11] times the position), and its pixel shader uses it twice (a depth test against the scene and a view ray divided by the fragment's view depth). The geometry shader moves
@@ -77,6 +80,10 @@ inline constexpr int kPanelsDefaultCm = 120, kRadarDefaultCm = 0, kPushMaxCm = 2
 // real: the depth the moved position itself has, ndcZ = clamp(c.z / q.z, 0, kFallbackNdcZ) with the vertex's own clip z (Elite writes the constant 0.025, so this is 0.025 / depth).
 // front: kFallbackNdcZ for every moved vertex.
 enum class DepthMode : uint8_t { kGame = 0, kReal = 1, kFront = 2 };
+// The key's default, as the module's literal and the shipped ini say it (the rig pins both): front, which Sean found right.
+inline constexpr DepthMode kDepthDefault = DepthMode::kFront;
+inline constexpr const char* kDepthDefaultText = "front";
+inline constexpr const char* kScissorDefaultText = "open";   // fix.srv_turret_hud_scissor: open (the other: game)
 inline const char* depthModeName(DepthMode m) { return m == DepthMode::kReal ? "real" : m == DepthMode::kFront ? "front" : "game"; }
 // The key's text; anything else is the default (the settings line says which it took).
 inline DepthMode depthModeOf(const char* text) {

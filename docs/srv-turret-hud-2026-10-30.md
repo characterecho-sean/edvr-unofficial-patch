@@ -4,19 +4,14 @@
 
 - **State (2026-10-31):** Sean's goal: stock camera; the arcs, ammo counts
   and INFO strip pushed out behind the location panel (Cranfield
-  Nutrition); the radar near field on its own. The 3D move (b5c49237) FLOWN:
-  with a good anchor the layout is the goal (arcs 1.65-1.96 m behind the
-  location panel 1.14 m and SYSTEMS 1.27 m). For its first 45 s the anchor
-  sat on a frozen headset pose a metre off and the panel stretched (journal).
-  The anchor fix (cd67ee63), the depth fix for parts the game drew behind
-  the eye (9330af6e), the radar forward key and the draw-time pose rebuild
-  (3411dc8e) are FLOWN: `pose refreshed at draw: 900 of 900 frames` proved
-  the stale pose; the judder is gone. Sean: "almost perfect", missing the
-  Scorpion hologram and the radar disc. This build moves the hologram's
-  lighting position, adds the A/B key `fix.srv_turret_hud_depth` and
-  instruments the disc (journal): BUILT, NOT FLOWN. Branch
-  `claude/srv-turret-hud`, local only. Issue #140. Test install: Steam
-  (`--target steam --scope both --xess`).
+  Nutrition); the radar near field on its own. FLOWN and settled: the 3D
+  move with its anchor, the depth fix, the radar forward key, the draw-time
+  pose (judder gone), the hologram's lighting position (45fa7e56: it draws).
+  With depth `front` Sean: "correct position, but still clipped and
+  distorted, moves with my head": a stale scissor rectangle (journal). This
+  build opens the scissor (`fix.srv_turret_hud_scissor`) and makes `front`
+  the default: BUILT, NOT FLOWN. Branch `claude/srv-turret-hud`, local only.
+  Issue #140. Test install: Steam (`--target steam --scope both --xess`).
 - **What is wrong (the game's own placement):** the turret view's whole HUD
   sits about 0.7 m too far back for the stock camera (the radar behind the
   head, the arcs at or behind it), and the larger panels sit about a metre
@@ -41,7 +36,8 @@
   propose removing them when the arc closes): `fix.srv_turret_camera_back`,
   `fix.srv_turret_hud_forward`, `fix.srv_turret_radar_forward` (70),
   `fix.srv_turret_panels_back`, `fix.srv_turret_radar_back`,
-  `fix.srv_turret_hud_gap`, `fix.srv_turret_hud_depth` (game). Sean's flown values
+  `fix.srv_turret_hud_gap`, `fix.srv_turret_hud_depth` (front),
+  `fix.srv_turret_hud_scissor` (open). Sean's flown values
   (2026-10-31): camera back 35, HUD forward 70, panels back 140, radar 0.
 - **Latency:** both follow Status.json, which the watcher polls every 500 ms
   and the game rewrites about once a second, so a view switch is followed up
@@ -53,12 +49,11 @@
   (Sean credited it, but its change also fixed the anchor); where the radar
   reads best; whether the switch lag is acceptable.
 - **Ruled out:** see "Ruled out" below.
-- **Next flight:** cd67ee63 on Steam. Put the headset on BEFORE entering the
-  turret view as a check, then once entering with it already on. Try camera
-  back 35 and 0. Eye dump (INSERT) centred. Then `python tools\edvr_log.py
-  --target steam --expect-build HEAD --health` (rule "srv turret view": the
-  anchor latches and head_offset), `--grep "srv turret"`, and the disparity
-  method below.
+- **Next flight:** this build on Steam with the scissor `open`, then `game`
+  as the A/B. Eye dump (INSERT) centred. `python tools\edvr_log.py --target
+  steam --expect-build HEAD --health` (rule "srv turret view": scissor
+  opened N, the state lines' raster fields, the disc probe), and
+  `--grep "srv turret"`.
 
 ## Evidence (flight of 2026-10-30, Epic, v0.22.0-rc.3-139-gcd4c91c4)
 
@@ -361,3 +356,41 @@ samples above 0 with alpha about 0 = (2). And `fix.srv_turret_hud_depth`
 (game, real, front) writes the moved depth three ways: if `front` or `real`
 shows the disc, the depth the shader gave a vertex that was on the game's own
 depth was the cause. Compare the disc's state lines with 9B34C331's.
+
+### 2026-10-31: the scissor (built, not flown)
+
+Flight 45fa7e56 (Steam, 09:56, dump 100017385001). The Scorpion hologram
+(5559BD94.EA02FAC2 near quads) now draws: the lighting-position fix works.
+With hud depth `front` Sean: "it renders in the correct position, but it's
+still being clipped and distorted. It also moves with my head."
+
+Disc probe: samples_passed about 3.9 M, alpha 1.0, intensity 0.0039. State
+lines: the radar families draw with depth and stencil OFF; only 1989E6D3 and
+2CECEC30 depth-test (func 7, no write). In the dump the disc is a dark
+translucent ellipse with a yellow rim, but only its upper half draws: its
+lower edge is a straight horizontal line, the dark tint stops on that line,
+and the hologram's outline is cut by a straight horizontal line too. It is
+not near-plane clipping: the 10:00:17 capture has every DF3503CD vertex at w
+0.19-0.39 m after the move, and the quads span ndc x -0.17..0.76, y
+-0.48..+0.06, far more than the visible dome (x 0.10..0.38, y -0.07..+0.05).
+
+Hypothesis (untested): the game sets a SCISSOR rectangle for the radar's
+draws, computed on the CPU from the radar's original screen bounds (around
+and behind the head at the stock camera). The moved geometry is cropped to
+that stale rectangle, and the rectangle shifts as the head moves, so the
+radar appears to move with the head. What would refute it: the state lines'
+new raster fields read scissor=0 for the radar families; or, with the key at
+`open`, the line is still there.
+
+Change: the state line gains the rasterizer state (ScissorEnable, rect count
+and first rect, DepthClipEnable, CullMode, FrontCounterClockwise) and the
+first viewport. `fix.srv_turret_hud_scissor` (TEMPORARY, live): `open` (the
+default) sets every scissor rectangle of a bound draw to the whole render
+target (RTV 0's size, else the viewport's extent) while it is issued, when the
+bound rasterizer state has ScissorEnable, and puts the game's back exactly
+after; the rasterizer state object is not touched. `game` keeps the game's
+rectangle. The 10 s line counts `scissor opened N`; each family found with
+the test on is logged once. `fix.srv_turret_hud_depth` now defaults to
+`front`. Not done per issue: the rectangles are opened once per scope,
+after the bind, so an issue that sets its own scissor would not be covered;
+the state lines (taken after the open) show what each issue ran with.

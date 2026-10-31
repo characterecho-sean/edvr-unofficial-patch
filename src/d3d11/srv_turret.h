@@ -1,4 +1,4 @@
-// The SRV turret view (issue 140): the camera and the HUD in the Scorpion's gunner view in VR. srv_turret_math.h says what is wrong, the seven TEMPORARY keys, the families and the
+// The SRV turret view (issue 140): the camera and the HUD in the Scorpion's gunner view in VR. srv_turret_math.h says what is wrong, the eight TEMPORARY keys, the families and the
 // maths; srv_turret_hud_shader.h and srv_turret_hud_binding.h are the private geometry shaders and their binding (tools/srv_turret_hud_test runs them on WARP);
 // journal_vehicle_latch.h is the Scorpion latch; srv_turret.cpp is this module.
 //
@@ -22,7 +22,9 @@
 // beginFrame (the game's WaitGetPoses) publishes the pose of the frame about to be drawn: when that comes after the tick the tick's frames are a frame old, so the DRAW (drawEyeFrame) compares the host's frame sequence
 // (nativeTemporalFrameSequence) with the one its frames were built from and, for a new one, rebuilds both eyes' frames once from that frame's pose and the tick's anchor (the judder was
 // the HUD following the head a frame late). A draw of a group with none of its keys is the game's own and is not counted. How the moved vertices' depth is written is the seventh key's
-// (fix.srv_turret_hud_depth: game, real or front, srv_turret_math.h DepthMode). The Scorpion's own hologram (vs 5559BD94, signature H) also needs the draw's vertex constants: its pixel shader
+// (fix.srv_turret_hud_depth: front, game or real, srv_turret_math.h DepthMode). The game sets a scissor rectangle for the radar's draws from where the radar was, and the moved geometry was cropped
+// to it: with the eighth key at open (fix.srv_turret_hud_scissor, the default) a bound draw's scissor rectangles are the whole render target while it is issued and the game's are put back exactly
+// after (srv_turret_hud_binding.h Scissor), refused draws and a boundary settle covering a restore that failed. The Scorpion's own hologram (vs 5559BD94, signature H) also needs the draw's vertex constants: its pixel shader
 // divides an interpolant the vertex shader makes from the WORLD position by the fragment's view depth, so the geometry shader moves that interpolant too, by the camera's right, up and forward
 // vectors (rows 277 to 279 of the draw's vertex constants, which the module binds at GS slot 1 for that signature and gives back). (The
 // reticle's sprite, vs E508648660A352B2, is not a panel: an earlier build targeted it, at about 500 m, and moved nothing. The flight HUD's vectors, vs B7790CBFC6554097, are not in
@@ -31,7 +33,7 @@
 // WHAT THE LOG SHOWS (a flight in the turret view must tell "never ran" from "ran"):
 //   "srv turret: the vehicle is the Scorpion|not the Scorpion (event E)"   each change of the latch (journal_watch.cpp, the worker thread): E is LoadGame, LaunchSRV, Music, DockSRV,
 //     SRVDestroyed, Shutdown or NewJournal (another journal file).
-//   "srv turret settings: ..."        the seven keys (the last, the depth mode, as game, real or front), at the first frame and at each change.
+//   "srv turret settings: ..."        the eight keys (the last two, the depth mode as front, game or real and the scissor as open or game, as text), at the first frame and at each change.
 //   "srv turret anchor: latched at x,y,z m seated (view on|camera back changed|HUD forward changed|radar forward changed|recentre|head away)"      each time the anchor is taken (the head's seated position).
 //     A frozen head pose (the same bits frame after frame) never latches it; "head away" is the safety net: the head stayed more than 35 cm from the anchor for 90 frames in a row.
 //   "srv turret view: on|off at frame N (Status.json Flags 0x........, seat kind 0x.)"      each edge of the Scorpion's turret view (the view bit AND the latch).
@@ -61,7 +63,11 @@
 //   the game fading it.
 //   "srv turret hud state: family=F eye=E issue=K target=game|other WxH format=N depth_view=yes|no | depth: .. | stencil: .. | blend rt0: .."   each family's first scope, at each of its first eight
 //   issues (the game's own, the UI layer's, the interface depth's): the target as 'game' (the one bound when the scope began) or 'other' (the UI layer's), the depth-stencil state and the blend state
-//   of render target 0, as D3D11 enumeration numbers.
+//   of render target 0, as D3D11 enumeration numbers, then the rasterizer state (ScissorEnable, the number of scissor rectangles and the first, DepthClipEnable, CullMode,
+//   FrontCounterClockwise) and the first viewport. Taken after the scissor was opened, so a scissored issue shows the rectangles it ran with.
+//   "srv turret hud: family F draws with the scissor test on: N rect(s), first [l,t,r,b], target WxH; the scissor is opened to the whole target|kept as the game set it for its draws"   once for each
+//   family found drawing with ScissorEnable (the game's first rectangle, and the extent it is opened to). The 10 s line's "scissor opened N" counts the draws whose rectangles were opened.
+//   "srv turret hud: the game's scissor rectangles could not be put back after an issue; ..."   a restore that faulted (the boundary settles it; draws are refused until then).
 #pragma once
 
 #include <atomic>

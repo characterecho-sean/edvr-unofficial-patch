@@ -284,7 +284,7 @@ value and Elite read its eye transform at that value afterwards, NEVER APPLIED w
 The desktop window (visual.desktop_window) is the other rule whose lines carry no build tag: the graphics log's "desktop window:" lines. It says OK when a 10 s line (or the line
 that ends an activation) shows a Present drawn, NEVER APPLIED when a "desktop window: setting" line named a mode other than game and no line shows one, and nothing at all when
 the setting is game or absent.
-The SRV turret view (fix.srv_turret_camera_back, fix.srv_turret_hud_forward, fix.srv_turret_radar_forward, fix.srv_turret_panels_back, fix.srv_turret_radar_back, fix.srv_turret_hud_gap, fix.srv_turret_hud_depth) is the third: the graphics log's "srv turret ..." lines. The settings lines and the vehicle latch's lines
+The SRV turret view (fix.srv_turret_camera_back, fix.srv_turret_hud_forward, fix.srv_turret_radar_forward, fix.srv_turret_panels_back, fix.srv_turret_radar_back, fix.srv_turret_hud_gap, fix.srv_turret_hud_depth, fix.srv_turret_hud_scissor) is the third: the graphics log's "srv turret ..." lines. The settings lines and the vehicle latch's lines
 ("srv turret: the vehicle is the Scorpion|not the Scorpion (event X)", written by the journal watcher) are kept whatever --since says; the last vehicle line is said in the detail, and
 vehicle lines alone are not the rule's lines (nothing is said for them). The pass acts in the Scorpion only: when the turret view bit is on in an SRV the journal does not call the Scorpion
 (a Scarab, a training scenario) the log says "srv turret view: not the Scorpion at frame ...", which is never a failure: with nothing else from the turret in the window the rule is IDLE
@@ -293,7 +293,8 @@ shader and a stream-output twin, each family with a first-draw line and instrume
 gives each group's window (a push-back is a negative gap: deeper) and counts the matched draws per family. It
 judges the camera half (a "camera: back ... published" line) and the HUD half (a first-draw line or a 10 s line with draws bound) on the keys in force, the HUD half being on when any of the
 HUD forward, the radar forward, the panels' push-back, the radar's push-back and the gap is above 0 (the 10 s line gives both groups' forward translation, T and Tradar, and how many frames'
-eye frames were rebuilt at draw time from a newer pose than the frame boundary had: "pose refreshed at draw"; the settings line also says the depth mode of the moved parts, game, real or front, and
+eye frames were rebuilt at draw time from a newer pose than the frame boundary had: "pose refreshed at draw"; the settings line also says the depth mode of the moved parts, front, game or real, and whether their scissor rectangle is opened, open or game, the 10 s line counts the draws whose scissor was opened
+("scissor opened N"), a family found drawing with the scissor test on is said once ("srv turret hud: family F draws with the scissor test on"), and
 the radar disc's probe lines ("srv turret hud disc:" samples that passed the depth and stencil tests, and the alpha and intensity its pixel shader read) and each family's first-scope state lines
 ("srv turret hud state:") go into the detail unjudged): NEVER APPLIED when a key is above 0
 and the log proves the turret view was on with nothing from that half, or when the geometry shader could not be made; PARTIAL when under 90% of the HUD draws were bound or some were
@@ -10404,7 +10405,7 @@ H_SRV_TURRET_STATE_KINDS = ("setting", "vehicle")
 # the push-back), so the newer keys are optional and the rule reads their absence as the older line
 H_SRV_TURRET_SETTING = (r"srv turret settings: camera back (?P<back>\d+) cm, (?:hud forward (?P<forward>\d+) cm, )?(?:radar forward (?P<rforward>\d+) cm, )?"
                         r"(?:panels back (?P<panels>\d+) cm, radar back (?P<radar>\d+) cm, )?"
-                        r"hud gap (?P<gap>\d+) cm(?:, hud depth (?P<depth>game|real|front))? \(live; ")
+                        r"hud gap (?P<gap>\d+) cm(?:, hud depth (?P<depth>game|real|front)(?:, hud scissor (?P<scissor>open|game))?)? \(live; ")
 H_SRV_TURRET_VIEW = r"srv turret view: (?P<state>on|off) at frame (?P<frame>\d+) \(Status\.json Flags 0x(?P<flags>[0-9A-Fa-f]+), seat kind 0x(?P<seat>[0-9A-Fa-f]+)\)$"
 # The turret view bit is on in an SRV the journal does not call the Scorpion (a Scarab, a training scenario): said once per stay, and the camera and the HUD stay the game's own. The
 # "on" and "off" lines above are written only for a turret view in the Scorpion.
@@ -10421,7 +10422,7 @@ H_SRV_TURRET_HUD = (r"srv turret hud: (?:panels: " + H_SRV_TURRET_GROUP.format(p
                     r"(?:anchor=\((?P<ax>-?[\d.]+),(?P<ay>-?[\d.]+),(?P<az>-?[\d.]+)\) head_offset=(?P<ho>-?[\d.]+) cm T=\((?P<tx>-?[\d.]+),(?P<ty>-?[\d.]+),(?P<tz>-?[\d.]+)\)"
                     r"(?: Tradar=\((?P<rtx>-?[\d.]+),(?P<rty>-?[\d.]+),(?P<rtz>-?[\d.]+)\))?"
                     r"|s\[L,R\]=(?P<sl>[+-][\d.]+),(?P<sr>[+-][\d.]+)) "
-                    r"ipd_elite=(?P<ipd>-?[\d.]+)mm P00\[L,R\]=(?P<pl>-?[\d.]+),(?P<pr>-?[\d.]+) draws\[L,R\]=(?P<dl>\d+),(?P<dr>\d+) bound=(?P<bound>\d+) (?:pose refreshed at draw: (?P<pn>\d+) of (?P<pm>\d+) frames )?"
+                    r"ipd_elite=(?P<ipd>-?[\d.]+)mm P00\[L,R\]=(?P<pl>-?[\d.]+),(?P<pr>-?[\d.]+) draws\[L,R\]=(?P<dl>\d+),(?P<dr>\d+) bound=(?P<bound>\d+) (?:scissor opened (?P<so>\d+) )?(?:pose refreshed at draw: (?P<pn>\d+) of (?P<pm>\d+) frames )?"
                     r"refused\[no-eye,game-gs,topology,not-ready,no-geometry\]=(?P<r0>\d+)/(?P<r1>\d+)/(?P<r2>\d+)/(?P<r3>\d+)/(?P<r4>\d+) "
                     r"families\[(?P<fnames>[^\]]+)\]=(?P<fcounts>\d+(?:,\d+)*)$")   # the family names, then each one's matched draws, as two comma lists in the same order
 # shaderSwapCreateGs: "<who>: precompiled geometry shader <name> <outcome> (0x<HRESULT>, <ms> ms)." with the outcome created, creation FAILED; standing down, or creation faulted/refused; standing down.
@@ -10451,13 +10452,19 @@ H_SRV_TURRET_TWIN = (r"srv turret hud: stream-output twin of the (?P<family>\S+)
                      r"\(0x(?P<hr>[0-9A-Fa-f]{8})\); ")
 H_SRV_TURRET_INSTRUMENT = (r"srv turret hud: the GPU instrument could not be made for eye (?P<eye>-?\d+), family (?P<family>\S+) \((?P<what>.*), "
                            r"0x(?P<hr>[0-9A-Fa-f]{8})\); the pass itself is unaffected\.$")
+# srv_turret.cpp srvTurretHudBegin: a family whose draw is found with the scissor test on, said once (the game's first rectangle and the target it was opened to, or kept)
+H_SRV_TURRET_SCISSOR = (r"srv turret hud: family (?P<family>\S+) draws with the scissor test on: (?P<rects>\d+) rect\(s\), first \[(?P<l>-?\d+),(?P<t>-?\d+),(?P<r>-?\d+),(?P<b>-?\d+)\], "
+                        r"target (?P<tw>\d+)x(?P<th>\d+); the scissor is (?P<how>opened to the whole target|kept as the game set it) for its draws$")
+H_SRV_TURRET_SCISSOR_UNRESTORED = r"srv turret hud: the game's scissor rectangles could not be put back after an issue;"
 H_SRV_TURRET_SKIP = r"srv turret hud: the GPU instrument skips a draw: the game has a stream-output target bound \(said once\)\.$"
 # srv_turret.cpp noteState: each issue of a family's first scope says the target it drew into (the game's, as bound at the start of the scope, or another: the UI layer's), the depth-stencil state and
 # the blend state of render target 0 (D3D11 enumeration numbers: comparison 1 NEVER .. 8 ALWAYS, blend 1 ZERO .. 15 INV_BLEND_FACTOR, blend op 1 ADD .. 5 MAX)
 H_SRV_TURRET_STATE = (r"srv turret hud state: family=(?P<family>\S+) eye=(?P<eye>-?\d+) issue=(?P<issue>\d+) target=(?P<target>game|other|none) (?P<w>\d+)x(?P<h>\d+) format=(?P<fmt>\d+) "
                       r"depth_view=(?P<dsv>yes|no) \| depth: enable=(?P<de>\d+) func=(?P<df>\d+) write=(?P<dw>\d+) \| stencil: enable=(?P<se>\d+) ref=(?P<sref>\d+) read=0x(?P<sread>[0-9A-Fa-f]+) "
                       r"write=0x(?P<swrite>[0-9A-Fa-f]+) front\[func,pass,fail,zfail\]=(?P<sf>\d+),(?P<sp>\d+),(?P<sfl>\d+),(?P<sz>\d+) \| blend rt0: enable=(?P<be>\d+) src=(?P<bs>\d+) dst=(?P<bd>\d+) "
-                      r"op=(?P<bo>\d+) srcA=(?P<bsa>\d+) dstA=(?P<bda>\d+) opA=(?P<boa>\d+) mask=0x(?P<bm>[0-9A-Fa-f]+)$")
+                      r"op=(?P<bo>\d+) srcA=(?P<bsa>\d+) dstA=(?P<bda>\d+) opA=(?P<boa>\d+) mask=0x(?P<bm>[0-9A-Fa-f]+)"
+                      r"(?: \| raster: scissor=(?P<rs>\d+) rects=(?P<rn>\d+) first=\[(?P<rl>-?\d+),(?P<rt>-?\d+),(?P<rr>-?\d+),(?P<rb>-?\d+)\] depth_clip=(?P<dc>\d+) cull=(?P<cull>\d+) "
+                      r"front_ccw=(?P<ccw>\d+) \| viewport: x=(?P<vx>-?[\d.]+) y=(?P<vy>-?[\d.]+) w=(?P<vw>[\d.]+) h=(?P<vh>[\d.]+))?$")   # the raster and viewport fields since the scissor key
 # srv_turret.cpp probeReadDisc: the radar disc's sampled scope: the samples that passed the depth and stencil tests (an occlusion query around the scope's issues) and the two pixel-shader registers it reads
 H_SRV_TURRET_DISC = (r"srv turret hud disc: family=(?P<family>\S+) eye=(?P<eye>-?\d+) draw=(?P<draw>\d+) issues=(?P<issues>\d+) samples_passed=(?P<samples>\d+) "
                      r"alpha=(?P<alpha>-?[\d.]+|n/a) intensity=(?P<intensity>-?[\d.]+|n/a) \(cb2\[11\]\.w, cb1\[90\]\.y\)$")
@@ -15548,6 +15555,7 @@ SRV_TURRET_COMPARISON = {1: "NEVER", 2: "LESS", 3: "EQUAL", 4: "LESS_EQUAL", 5: 
 SRV_TURRET_BLEND = {1: "ZERO", 2: "ONE", 3: "SRC_COLOR", 4: "INV_SRC_COLOR", 5: "SRC_ALPHA", 6: "INV_SRC_ALPHA", 7: "DEST_ALPHA", 8: "INV_DEST_ALPHA", 9: "DEST_COLOR", 10: "INV_DEST_COLOR",
                     11: "SRC_ALPHA_SAT", 14: "BLEND_FACTOR", 15: "INV_BLEND_FACTOR"}
 SRV_TURRET_BLEND_OP = {1: "ADD", 2: "SUBTRACT", 3: "REV_SUBTRACT", 4: "MIN", 5: "MAX"}
+SRV_TURRET_CULL = {1: "NONE", 2: "FRONT", 3: "BACK"}
 
 
 def _srv_turret_state_text(r):
@@ -15557,7 +15565,13 @@ def _srv_turret_state_text(r):
     depth = "depth off" if int(r["de"]) == 0 else "depth %s %s" % (name(SRV_TURRET_COMPARISON, r["df"]), "write" if int(r["dw"]) else "no write")
     stencil = "stencil off" if int(r["se"]) == 0 else "stencil %s ref %s" % (name(SRV_TURRET_COMPARISON, r["sf"]), r["sref"])
     blend = "blend off" if int(r["be"]) == 0 else "blend %s/%s %s" % (name(SRV_TURRET_BLEND, r["bs"]), name(SRV_TURRET_BLEND, r["bd"]), name(SRV_TURRET_BLEND_OP, r["bo"]))
-    return "issue %s %s %sx%s fmt %s%s, %s, %s, %s mask 0x%s" % (r["issue"], r["target"], r["w"], r["h"], r["fmt"], "" if r["dsv"] == "yes" else " no depth view", depth, stencil, blend, r["bm"].upper())
+    text = "issue %s %s %sx%s fmt %s%s, %s, %s, %s mask 0x%s" % (r["issue"], r["target"], r["w"], r["h"], r["fmt"], "" if r["dsv"] == "yes" else " no depth view", depth, stencil, blend, r["bm"].upper())
+    if r.get("rs") is not None:   # the rasterizer state and the viewport (from the build that logged them)
+        text += ", scissor %s, cull %s%s%s, viewport %sx%s%s" % (
+            "off" if int(r["rs"]) == 0 else "on %s rect(s) first [%s,%s,%s,%s]" % (r["rn"], r["rl"], r["rt"], r["rr"], r["rb"]), name(SRV_TURRET_CULL, r["cull"]),
+            "" if int(r["dc"]) else ", depth clip off", ", front is counter-clockwise" if int(r["ccw"]) else "", r["vw"], r["vh"],
+            "" if float(r["vx"]) == 0 and float(r["vy"]) == 0 else " at %s,%s" % (r["vx"], r["vy"]))
+    return text
 
 
 def _hj_srv_turret(rows, ctx):
@@ -15599,12 +15613,13 @@ def _hj_srv_turret(rows, ctx):
         return "unknown" if v is None else v if isinstance(v, str) else "%d cm" % v
 
     depth_mode = s0.get("depth") if s0 else None   # the moved parts' depth mode (a settings line from before the switch says none)
+    scissor_mode = s0.get("scissor") if s0 else None   # open or game (a settings line from before the key says none)
 
     if s0 is not None:   # the keys the settings line carried, in its own order
         parts = ([("camera back", back)] + ([("hud forward", forward)] if forward is not None else []) + ([("radar forward", rforward)] if rforward is not None else []) +
-                 ([("panels back", panels), ("radar back", radar)] if panels is not None else []) + [("hud gap", gap)] + ([("hud depth", depth_mode)] if depth_mode is not None else []))
+                 ([("panels back", panels), ("radar back", radar)] if panels is not None else []) + [("hud gap", gap)] + ([("hud depth", depth_mode)] if depth_mode is not None else []) + ([("hud scissor", scissor_mode)] if scissor_mode is not None else []))
     else:
-        parts = [("camera back", None), ("hud forward", None), ("radar forward", None), ("panels back", None), ("radar back", None), ("hud gap", None), ("hud depth", None)]
+        parts = [("camera back", None), ("hud forward", None), ("radar forward", None), ("panels back", None), ("radar back", None), ("hud gap", None), ("hud depth", None), ("hud scissor", None)]
     keys = ", ".join("%s %s" % (name, cm(v)) for name, v in parts)
     vehicles = rows.get("vehicle", [])
     vnote = "; vehicle latch: %s (event %s), %d change(s)" % (vehicles[-1]["is"], vehicles[-1]["event"], len(vehicles)) if vehicles else ""
@@ -15837,6 +15852,14 @@ def _hj_srv_turret(rows, ctx):
         text += "; anchor latched %d time(s)%s, last at %s,%s,%s m seated (%s)" % (len(anchors), " (%d head away)" % away if away else "", anchors[-1]["x"], anchors[-1]["y"], anchors[-1]["z"],
                                                                                   anchors[-1]["why"])
     text += probe_text
+    found_scissor = rows.get("scissor", [])
+    opened_draws = sum(int(r["so"]) for r in secs if r.get("so") is not None)
+    if found_scissor or opened_draws:   # the game's scissor rectangle: which families had it on, and how many draws had it opened
+        text += "; scissor: " + ("; ".join("%s drew with the test on (%s rect(s), the game's first [%s,%s,%s,%s], target %sx%s, %s)" % (
+            r["family"], r["rects"], r["l"], r["t"], r["r"], r["b"], r["tw"], r["th"], r["how"]) for r in found_scissor) if found_scissor else "no family found with the test on") + \
+            ", %d draw(s) had it opened (the 10 s lines)" % opened_draws
+    if rows.get("scissor_unrestored"):
+        text += "; the game's scissor rectangles could not be put back after an issue"
     if rows.get("refused"):
         text += "; draw(s) refused, said once per reason: " + ", ".join(r["reason"] for r in rows["refused"])
     if rows.get("unrestored"):
@@ -16739,6 +16762,8 @@ HEALTH_RULES = (
         ("skip", H_SRV_TURRET_SKIP),
         ("state", H_SRV_TURRET_STATE),
         ("disc", H_SRV_TURRET_DISC),
+        ("scissor", H_SRV_TURRET_SCISSOR),
+        ("scissor_unrestored", H_SRV_TURRET_SCISSOR_UNRESTORED),
     ), _hj_srv_turret),)
 HEALTH_BY_TAG = {}
 for _rule in HEALTH_RULES:
@@ -22484,8 +22509,8 @@ def self_test_health():
                 raise AssertionError("srv turret: no log format holds %r: the --health rule that reads it is out of date" % needle)
             return health_render(fmts[key], vals)
 
-        def st_set(back=60, forward=70, panels=110, radar=110, gap=0, rforward=70, depth="game"):   # seven keys: both push-backs 110 cm, the first build's pull off (fixture values, not the shipped defaults)
-            return RT(stsrc, "srv turret settings: camera back %d cm", back, forward, rforward, panels, radar, gap, depth)
+        def st_set(back=60, forward=70, panels=110, radar=110, gap=0, rforward=70, depth="front", scissor="open"):   # eight keys: both push-backs 110 cm, the first build's pull off (fixture values, not the shipped defaults)
+            return RT(stsrc, "srv turret settings: camera back %d cm", back, forward, rforward, panels, radar, gap, depth, scissor)
 
         def st_view(on=True, frame=4100, flags=0x4000000, seat=0x2):
             return RT(stsrc, "srv turret view: %s at frame %u", "on" if on else "off", frame, flags, seat)
@@ -22534,15 +22559,20 @@ def self_test_health():
             return RT(stsrc, "gap=%.2f m dMin=%.2f dMax=%.2f", g, 0.02, 1.00) if g < 0 else RT(stsrc, "gap=%.2f m dMin=%.2f dMax=%.2f", g, g + 0.10, 4.00)
 
         def st_sec(panels=-1.10, radar=-1.10, left=240, right=240, bound=480, refused=(0, 0, 0, 0, 0), anchor=(0.05, 0.2, -0.1), offset=1.5, t=(0.0, 0.0, 0.7), ipd=63.5, p00=(0.912, 0.915), fams=(300, 180),
-                   tradar=(0.0, 0.0, 0.7), pose=(240, 240)):
+                   tradar=(0.0, 0.0, 0.7), pose=(240, 240), opened=240):
             counts = list(fams) + [0] * (len(STF) - len(fams))   # the matched draws of the first families; the rest drew none
             return RT(stsrc, "srv turret hud: panels: %s", st_group(panels), st_group(radar), anchor[0], anchor[1], anchor[2], offset, t[0], t[1], t[2], tradar[0], tradar[1], tradar[2], ipd, p00[0], p00[1],
-                      left, right, bound, pose[0], pose[1], *refused, ",".join(STF), ",".join(str(c) for c in counts))
+                      left, right, bound, opened, pose[0], pose[1], *refused, ",".join(STF), ",".join(str(c) for c in counts))
 
-        def st_state(family=STF[2], eye=0, issue=1, target="game", w=2468, h=2208, fmt=10, dsv="yes", depth=(1, 2, 0), stencil=(0, 0, 0xFF, 0xFF, (8, 1, 1, 1)), blend=(1, 5, 6, 1, 1, 6, 1, 0xF)):
-            """One state line of a family's first scope: depth (enable, func, write), stencil (enable, ref, read, write, front (func, pass, fail, zfail)), blend (enable, src, dst, op, srcA, dstA, opA, mask)."""
+        def st_state(family=STF[2], eye=0, issue=1, target="game", w=2468, h=2208, fmt=10, dsv="yes", depth=(1, 2, 0), stencil=(0, 0, 0xFF, 0xFF, (8, 1, 1, 1)), blend=(1, 5, 6, 1, 1, 6, 1, 0xF),
+                     raster=(0, 0, (0, 0, 0, 0), 1, 1, 0), viewport=(0.0, 0.0, 2468.0, 2208.0)):
+            """One state line of a family's first scope: depth (enable, func, write), stencil (enable, ref, read, write, front (func, pass, fail, zfail)), blend (enable, src, dst, op, srcA, dstA, opA, mask),
+            raster (scissor, rects, first rect, depth clip, cull, front counter-clockwise), viewport (x, y, w, h)."""
             return RT(stsrc, "srv turret hud state: family=%s eye=%d issue=%u target=%s", family, eye, issue, target, w, h, fmt, dsv, depth[0], depth[1], depth[2], stencil[0], stencil[1], stencil[2], stencil[3],
-                      *stencil[4], *blend)
+                      *stencil[4], *blend, raster[0], raster[1], *raster[2], raster[3], raster[4], raster[5], *viewport)
+
+        def st_scissor(family=STF[2], rects=1, first=(0, 600, 2468, 1200), target=(2468, 2208), opened=True):
+            return RT(stsrc, "srv turret hud: family %s draws with the scissor test on", family, rects, *first, *target, "opened to the whole target" if opened else "kept as the game set it")
 
         def st_disc(eye=0, draw=2, issues=3, samples=1200, alpha="0.8500", intensity="1.0000", family=STF[2]):
             return RT(stsrc, "srv turret hud disc: family=%s eye=%d draw=%u issues=%u samples_passed=%llu", family, eye, draw, issues, samples, alpha, intensity)
@@ -22592,9 +22622,9 @@ def self_test_health():
         ST, st_ok = H_SRV_TURRET, [f90_part()]
         check("srv turret: no line at all, nothing said", st_ok, 0, [("OK", F90S)], lacks=["srv turret", "NEVER APPLIED"])
         check("srv turret: the settings alone are idle: the turret view was not entered", st_ok + [st_set()], 0, [("IDLE", ST)],
-              has=["the turret view was not entered in this window (camera back 60 cm, hud forward 70 cm, radar forward 70 cm, panels back 110 cm, radar back 110 cm, hud gap 0 cm, hud depth game)"], lacks=["NEVER APPLIED", "UNPARSED"])
+              has=["the turret view was not entered in this window (camera back 60 cm, hud forward 70 cm, radar forward 70 cm, panels back 110 cm, radar back 110 cm, hud gap 0 cm, hud depth front, hud scissor open)"], lacks=["NEVER APPLIED", "UNPARSED"])
         check("srv turret: a healthy flight is OK, and its lines are no build-tagged lines", st_ok + st_flight(), 0, [("OK", ST)],
-              has=["turret view on 1 time(s), 12 s in all (camera back 60 cm, hud forward 70 cm, radar forward 70 cm, panels back 110 cm, radar back 110 cm, hud gap 0 cm, hud depth game)", "camera back 0.60 m published 1 time(s)",
+              has=["turret view on 1 time(s), 12 s in all (camera back 60 cm, hud forward 70 cm, radar forward 70 cm, panels back 110 cm, radar back 110 cm, hud gap 0 cm, hud depth front, hud scissor open)", "camera back 0.60 m published 1 time(s)",
                    "hud bound 480 of 480 draws (L 240, R 240), families 1989E6D3 300, 2CECEC30 180, first draw of family 1989E6D3 at frame 4102 eye 0, first draw of family 2CECEC30 at frame 4103 eye 1",
                    "anchor (0.050,0.200,-0.100) m seated, head offset 1.5 cm, T (0.000,0.000,0.700), radar T (0.000,0.000,0.700), ipd_elite 63.5 mm, P00[L,R] 0.912,0.915 (the last 10 s line)",
                    "anchor latched 1 time(s), last at 0.050,0.200,-0.100 m seated (view on)",
@@ -22605,12 +22635,12 @@ def self_test_health():
         check("srv turret: the camera key at 0 is off by key, not a failure", st_ok + st_flight(back=0, cam=False), 0, [("OK", ST)], has=["camera off by key", "hud bound 480 of 480 draws"],
               lacks=["NEVER APPLIED"])
         check("srv turret: a 10 s line with nothing bound is NEVER APPLIED, and names the refusals", st_ok + [(1, st_set()), (2, st_view()), (3, st_cam()), (12, st_sec(bound=0, refused=(0, 0, 0, 3, 477)))], 3,
-              [("NEVER APPLIED", ST)], has=["a hud key was above 0 (hud forward 70 cm, radar forward 70 cm, panels back 110 cm, radar back 110 cm, hud gap 0 cm, hud depth game) and the 1 10 s line(s) show nothing bound: draws[L,R] 240,240, refused no-eye 0, game-gs 0, topology 0, not-ready 3, no-geometry 477", "exit 3"])
+              [("NEVER APPLIED", ST)], has=["a hud key was above 0 (hud forward 70 cm, radar forward 70 cm, panels back 110 cm, radar back 110 cm, hud gap 0 cm, hud depth front, hud scissor open) and the 1 10 s line(s) show nothing bound: draws[L,R] 240,240, refused no-eye 0, game-gs 0, topology 0, not-ready 3, no-geometry 477", "exit 3"])
         check("srv turret: the 10 s lines' draws and refusals are summed", st_ok + [(1, st_set()), (2, st_view()), (3, st_cam()), (12, st_sec(left=100, right=90, bound=0, refused=(0, 0, 0, 0, 190))),
               (22, st_sec(left=10, right=20, bound=0, refused=(1, 0, 2, 0, 27)))], 3, [("NEVER APPLIED", ST)],
               has=["the 2 10 s line(s) show nothing bound: draws[L,R] 110,110, refused no-eye 1, game-gs 0, topology 2, not-ready 0, no-geometry 217"])
         check("srv turret: a hud key above 0, the view on for 20 s and no 10 s line and no first draw is NEVER APPLIED", st_ok + [(1, st_set()), (2, st_view()), (3, st_cam()), (22, st_view(False))], 3,
-              [("NEVER APPLIED", ST)], has=["a hud key was above 0 (hud forward 70 cm, radar forward 70 cm, panels back 110 cm, radar back 110 cm, hud gap 0 cm, hud depth game), the turret view was on for 20 s, and no first-draw line and no 10 s line shows a draw through the shader"])
+              [("NEVER APPLIED", ST)], has=["a hud key was above 0 (hud forward 70 cm, radar forward 70 cm, panels back 110 cm, radar back 110 cm, hud gap 0 cm, hud depth front, hud scissor open), the turret view was on for 20 s, and no first-draw line and no 10 s line shows a draw through the shader"])
         check("srv turret: a stay still open runs to the window's last turret line", st_ok + [(1, st_set()), (2, st_view()), (3, st_cam()), (30, st_refused("no-geometry"))], 3,
               [("NEVER APPLIED", ST)], has=["the turret view was on for 28 s", "draw(s) refused, said once per reason: no-geometry"])
         check("srv turret: the view on for 5 s and no 10 s line yet is idle for the hud, and no failure", st_ok + [(1, st_set()), (2, st_view()), (3, st_cam()), (7, st_view(False))], 0, [("OK", ST)],
@@ -22618,9 +22648,9 @@ def self_test_health():
         check("srv turret: the camera off by key and the hud idle under 12 s is idle", st_ok + [(1, st_set(0)), (2, st_view()), (7, st_view(False))], 0, [("IDLE", ST)],
               has=["camera off by key", "hud: turret view on under 12 s: no 10 s line yet"], lacks=["NEVER APPLIED"])
         check("srv turret: all four keys at 0 is idle", st_ok + [(1, st_set(0, 0, 0, 0, rforward=0)), (2, st_view()), (20, st_view(False))], 0, [("IDLE", ST)],
-              has=["(camera back 0 cm, hud forward 0 cm, radar forward 0 cm, panels back 0 cm, radar back 0 cm, hud gap 0 cm, hud depth game)", "camera off by key", "hud off by key"], lacks=["NEVER APPLIED"])
+              has=["(camera back 0 cm, hud forward 0 cm, radar forward 0 cm, panels back 0 cm, radar back 0 cm, hud gap 0 cm, hud depth front, hud scissor open)", "camera off by key", "hud off by key"], lacks=["NEVER APPLIED"])
         check("srv turret: the last settings line is the one in force", st_ok + [(1, st_set()), (2, st_set(0, 0, 0, 0, rforward=0)), (3, st_view()), (20, st_view(False))], 0, [("IDLE", ST)],
-              has=["(camera back 0 cm, hud forward 0 cm, radar forward 0 cm, panels back 0 cm, radar back 0 cm, hud gap 0 cm, hud depth game)", "camera off by key", "hud off by key"])
+              has=["(camera back 0 cm, hud forward 0 cm, radar forward 0 cm, panels back 0 cm, radar back 0 cm, hud gap 0 cm, hud depth front, hud scissor open)", "camera off by key", "hud off by key"])
         check("srv turret: a geometry shader that could not be made is NEVER APPLIED whatever else the log says", st_ok + [(1, st_set()), (2, st_view()), (3, st_cam()),
               (4, st_gs("creation FAILED; standing down", 0x80004005, 1.2)), (5, st_refused("not-ready")), (12, st_sec())], 3,
               [("NEVER APPLIED", ST)], has=["the geometry shader could not be made: creation FAILED; standing down (0x80004005, 1.200 ms) for turret shift 1989E6D3"])
@@ -22658,9 +22688,9 @@ def self_test_health():
               has=["camera key 60 cm and no 'on' edge in this window", "hud bound 480 of 480 draws"], lacks=["NEVER APPLIED"])
         check("srv turret: no settings line, the 10 s line's own windows say whether the hud was on", st_ok + [(2, st_view()), (3, st_cam()), (12, st_sec(bound=0, refused=(0, 0, 0, 0, 480)))], 3,
               [("NEVER APPLIED", ST)], has=["a hud key was above 0 (from the last 10 s line: panels pushed deeper by 1.10 m (window 0.02..1.00 m), radar pushed deeper by 1.10 m (window 0.02..1.00 m))",
-                                                    "(camera back unknown, hud forward unknown, radar forward unknown, panels back unknown, radar back unknown, hud gap unknown, hud depth unknown)"])
+                                                    "(camera back unknown, hud forward unknown, radar forward unknown, panels back unknown, radar back unknown, hud gap unknown, hud depth unknown, hud scissor unknown)"])
         check("srv turret: --since cuts the events and keeps the settings", st_ok + [(1, st_set()), (20, st_view()), (21, st_cam()), (22, st_gs()), (23, st_first()), (30, st_sec())], 0,
-              [("IDLE", ST)], has=["the turret view was not entered in this window (camera back 60 cm, hud forward 70 cm, radar forward 70 cm, panels back 110 cm, radar back 110 cm, hud gap 0 cm, hud depth game)"], lacks=["NEVER APPLIED"], extra=["--since", "10:01:00"])
+              [("IDLE", ST)], has=["the turret view was not entered in this window (camera back 60 cm, hud forward 70 cm, radar forward 70 cm, panels back 110 cm, radar back 110 cm, hud gap 0 cm, hud depth front, hud scissor open)"], lacks=["NEVER APPLIED"], extra=["--since", "10:01:00"])
         check("srv turret: events inside --since are counted", st_ok + [(1, st_set())] + [(70 + i, m) for i, m in enumerate((st_view(), st_cam(), st_gs(), st_first(), st_sec(), st_view(False)))], 0,
               [("OK", ST)], has=["hud bound 480 of 480 draws"], extra=["--since", "10:01:00"])
         # the GPU instrument: the pipeline statistics and the streamed-out vertices of one sampled draw a second per eye
@@ -22758,7 +22788,7 @@ def self_test_health():
               lacks=["UNPARSED", "NEVER APPLIED"])
         # the vehicle latch's lines (journal_watch.cpp) and the turret view in an SRV the journal does not call the Scorpion
         check("srv turret vehicle: the turret view on in a Scarab (keys 60/102) is idle, never a failure", st_ok + [(1, st_set()), (2, st_ignored())], 0, [("IDLE", ST)],
-              has=["the turret view was on 1 time(s) in an SRV the journal does not call the Scorpion: nothing applied, by design (camera back 60 cm, hud forward 70 cm, radar forward 70 cm, panels back 110 cm, radar back 110 cm, hud gap 0 cm, hud depth game)"],
+              has=["the turret view was on 1 time(s) in an SRV the journal does not call the Scorpion: nothing applied, by design (camera back 60 cm, hud forward 70 cm, radar forward 70 cm, panels back 110 cm, radar back 110 cm, hud gap 0 cm, hud depth front, hud scissor open)"],
               lacks=["NEVER APPLIED", "UNPARSED", "exit 3", "was not entered"])
         check("srv turret vehicle: two stays in a Scarab are counted, with the vehicle latch's last line", st_ok + [(1, st_set()), (1, st_vehicle(True, "LoadGame")), (2, st_vehicle(False, "LaunchSRV")),
               (3, st_ignored()), (20, st_ignored(5000))], 0, [("IDLE", ST)],
@@ -22773,14 +22803,14 @@ def self_test_health():
               [("OK", ST)], has=["vehicle latch: not the Scorpion (event DockSRV), 2 change(s)", "hud bound 480 of 480 draws"], lacks=["NEVER APPLIED", "UNPARSED"])
         check("srv turret vehicle: the vehicle latch's line alone is not the rule's line: nothing is said", st_ok + [st_vehicle()], 0, [("OK", F90S)], lacks=["srv turret", "NEVER APPLIED", "UNPARSED"])
         check("srv turret vehicle: the settings and the vehicle latch alone are idle, and say the latch", st_ok + [(1, st_set()), (1, st_vehicle())], 0, [("IDLE", ST)],
-              has=["the turret view was not entered in this window (camera back 60 cm, hud forward 70 cm, radar forward 70 cm, panels back 110 cm, radar back 110 cm, hud gap 0 cm, hud depth game); vehicle latch: the Scorpion (event LoadGame), 1 change(s)"], lacks=["NEVER APPLIED"])
+              has=["the turret view was not entered in this window (camera back 60 cm, hud forward 70 cm, radar forward 70 cm, panels back 110 cm, radar back 110 cm, hud gap 0 cm, hud depth front, hud scissor open); vehicle latch: the Scorpion (event LoadGame), 1 change(s)"], lacks=["NEVER APPLIED"])
         check("srv turret vehicle: a drifted vehicle line is UNPARSED", st_ok + [st_vehicle().replace("vehicle is", "vehicle was")], 4, [("UNPARSED", ST)], has=["exit 4"])
         check("srv turret vehicle: a vehicle event the rule does not know is UNPARSED", st_ok + [st_vehicle(event="Docked")], 4, [("UNPARSED", ST)])
         check("srv turret vehicle: a drifted 'not the Scorpion' line is UNPARSED", st_ok + [st_ignored().replace("not the Scorpion at frame", "not Scorpion at frame")], 4, [("UNPARSED", ST)], has=["exit 4"])
         check("srv turret vehicle: a drifted 'not the Scorpion' line beside a flight is said in the detail", st_ok + [(0, st_ignored().replace("at frame", "by frame"))] + st_flight(), 0, [("OK", ST)],
               has=["[+1 line(s) the rule's patterns do not match: "], lacks=["NEVER APPLIED"])
         check("srv turret vehicle: --since keeps the vehicle latch's lines and cuts a Scarab visit before the window", st_ok + [(1, st_set()), (1, st_vehicle(False, "LaunchSRV")), (20, st_ignored())], 0,
-              [("IDLE", ST)], has=["the turret view was not entered in this window (camera back 60 cm, hud forward 70 cm, radar forward 70 cm, panels back 110 cm, radar back 110 cm, hud gap 0 cm, hud depth game); vehicle latch: not the Scorpion (event LaunchSRV), 1 change(s)"],
+              [("IDLE", ST)], has=["the turret view was not entered in this window (camera back 60 cm, hud forward 70 cm, radar forward 70 cm, panels back 110 cm, radar back 110 cm, hud gap 0 cm, hud depth front, hud scissor open); vehicle latch: not the Scorpion (event LaunchSRV), 1 change(s)"],
               lacks=["NEVER APPLIED", "does not call the Scorpion"], extra=["--since", "10:01:00"])
         check("srv turret vehicle: a Scarab visit inside --since is counted", st_ok + [(1, st_set()), (1, st_vehicle(False, "LaunchSRV")), (70, st_ignored())], 0, [("IDLE", ST)],
               has=["the turret view was on 1 time(s) in an SRV the journal does not call the Scorpion: nothing applied, by design", "vehicle latch: not the Scorpion (event LaunchSRV), 1 change(s)"],
@@ -22788,22 +22818,22 @@ def self_test_health():
         check("srv turret gpu: the figures go into a PARTIAL detail too", st_ok + [(1, st_set()), (2, st_view()), (3, st_cam()), (4, st_gs()), (5, st_first()), (6, st_stats(0)), (12, st_sec(bound=300, refused=(0, 0, 180, 0, 0))),
               (14, st_view(False))], 0, [("PARTIAL", ST)], has=["only 300 of 480 draws went through the shader", "gpu: 1 samples, gs 400"])
         check("srv turret gpu: --since cuts the statistics like the other events", st_ok + [(1, st_set()), (20, st_view()), (21, st_stats(0, gs=0))], 0, [("IDLE", ST)],
-              has=["the turret view was not entered in this window (camera back 60 cm, hud forward 70 cm, radar forward 70 cm, panels back 110 cm, radar back 110 cm, hud gap 0 cm, hud depth game)"], lacks=["NEVER APPLIED"], extra=["--since", "10:01:00"])
+              has=["the turret view was not entered in this window (camera back 60 cm, hud forward 70 cm, radar forward 70 cm, panels back 110 cm, radar back 110 cm, hud gap 0 cm, hud depth front, hud scissor open)"], lacks=["NEVER APPLIED"], extra=["--since", "10:01:00"])
         check("srv turret gpu: statistics inside --since are counted", st_ok + [(1, st_set()), (70, st_stats(0, gs=0))], 3, [("NEVER APPLIED", ST)], has=["the geometry shader never ran"], extra=["--since", "10:01:00"])
 
         # the push-back: two groups, each with its own key, and the first build's gap; the 10 s line carries each group's window, a negative gap is deeper
         check("srv turret push: both push-backs above 0 and the gap at 0, with draws bound, is OK (never IDLE), says both keys and each group's window", st_ok + st_flight(), 0, [("OK", ST)],
-              has=["(camera back 60 cm, hud forward 70 cm, radar forward 70 cm, panels back 110 cm, radar back 110 cm, hud gap 0 cm, hud depth game)", "hud bound 480 of 480 draws",
+              has=["(camera back 60 cm, hud forward 70 cm, radar forward 70 cm, panels back 110 cm, radar back 110 cm, hud gap 0 cm, hud depth front, hud scissor open)", "hud bound 480 of 480 draws",
                    "; windows: panels pushed deeper by 1.10 m (window 0.02..1.00 m), radar pushed deeper by 1.10 m (window 0.02..1.00 m)"], lacks=["NEVER APPLIED", "PARTIAL", "UNPARSED"])
         check("srv turret push: only the panels pushed (radar back 0, gap 0): the radar group is off in the 10 s line, and the hud is OK",
               st_ok + [(1, st_set(panels=110, radar=0)), (2, st_view()), (3, st_cam()), (5, st_first()), (12, st_sec(radar=None)), (14, st_view(False))], 0, [("OK", ST)],
-              has=["(camera back 60 cm, hud forward 70 cm, radar forward 70 cm, panels back 110 cm, radar back 0 cm, hud gap 0 cm, hud depth game)", "; windows: panels pushed deeper by 1.10 m (window 0.02..1.00 m), radar off"], lacks=["NEVER APPLIED", "UNPARSED"])
+              has=["(camera back 60 cm, hud forward 70 cm, radar forward 70 cm, panels back 110 cm, radar back 0 cm, hud gap 0 cm, hud depth front, hud scissor open)", "; windows: panels pushed deeper by 1.10 m (window 0.02..1.00 m), radar off"], lacks=["NEVER APPLIED", "UNPARSED"])
         check("srv turret push: the gap alone above 0 (both push-backs 0) is the first build's pull: the windows read nearer, and the hud is OK",
               st_ok + [(1, st_set(forward=0, panels=0, radar=0, gap=96, rforward=0)), (2, st_view()), (3, st_cam()), (5, st_first()), (12, st_sec(panels=0.96, radar=0.96)), (14, st_view(False))], 0, [("OK", ST)],
-              has=["hud forward 0 cm, radar forward 0 cm, panels back 0 cm, radar back 0 cm, hud gap 96 cm, hud depth game)", "; windows: panels pulled nearer by 0.96 m (window 1.06..4.00 m), radar pulled nearer by 0.96 m (window 1.06..4.00 m)"], lacks=["NEVER APPLIED", "UNPARSED"])
+              has=["hud forward 0 cm, radar forward 0 cm, panels back 0 cm, radar back 0 cm, hud gap 96 cm, hud depth front, hud scissor open)", "; windows: panels pulled nearer by 0.96 m (window 1.06..4.00 m), radar pulled nearer by 0.96 m (window 1.06..4.00 m)"], lacks=["NEVER APPLIED", "UNPARSED"])
         check("srv turret push: the radar's push-back alone above 0 and a 10 s line with nothing bound is NEVER APPLIED, naming the three keys",
               st_ok + [(1, st_set(forward=0, panels=0, radar=110, rforward=0)), (2, st_view()), (3, st_cam()), (12, st_sec(panels=None, bound=0, refused=(0, 0, 0, 0, 480)))], 3, [("NEVER APPLIED", ST)],
-              has=["a hud key was above 0 (hud forward 0 cm, radar forward 0 cm, panels back 0 cm, radar back 110 cm, hud gap 0 cm, hud depth game) and the 1 10 s line(s) show nothing bound"])
+              has=["a hud key was above 0 (hud forward 0 cm, radar forward 0 cm, panels back 0 cm, radar back 110 cm, hud gap 0 cm, hud depth front, hud scissor open) and the 1 10 s line(s) show nothing bound"])
         check("srv turret push: the push-backs and the gap all at 0 is the hud off by key, whatever the camera does", st_ok + [(1, st_set(forward=0, panels=0, radar=0, rforward=0)), (2, st_view()), (3, st_cam()), (20, st_view(False))], 0, [("OK", ST)],
               has=["camera back 0.60 m published 1 time(s)", "hud off by key"], lacks=["NEVER APPLIED"])
         old_set = "srv turret settings: camera back 60 cm, hud gap 96 cm (live; fix.srv_turret_camera_back and fix.srv_turret_hud_gap, TEMPORARY; 0 is the game's own)"
@@ -22820,10 +22850,10 @@ def self_test_health():
         # the anchored move: the HUD-forward key, the 3D move's anchor and its latches, the older lines
         check("srv turret anchored: the translation alone (HUD forward above 0, no push, no gap) is OK, says it, and the groups read 'translated only'",
               st_ok + [(1, st_set(forward=70, panels=0, radar=0)), (2, st_view()), (3, st_cam()), (4, st_anchor()), (5, st_first()), (12, st_sec(panels=0, radar=0)), (14, st_view(False))], 0, [("OK", ST)],
-              has=["(camera back 60 cm, hud forward 70 cm, radar forward 70 cm, panels back 0 cm, radar back 0 cm, hud gap 0 cm, hud depth game)", "; windows: panels translated only, radar translated only"], lacks=["NEVER APPLIED", "UNPARSED", "IDLE"])
+              has=["(camera back 60 cm, hud forward 70 cm, radar forward 70 cm, panels back 0 cm, radar back 0 cm, hud gap 0 cm, hud depth front, hud scissor open)", "; windows: panels translated only, radar translated only"], lacks=["NEVER APPLIED", "UNPARSED", "IDLE"])
         check("srv turret anchored: the HUD-forward key alone above 0 is a hud that is on, so a 10 s line with nothing bound is NEVER APPLIED and names it",
               st_ok + [(1, st_set(forward=70, panels=0, radar=0)), (2, st_view()), (3, st_cam()), (12, st_sec(panels=0, radar=0, bound=0, refused=(0, 0, 0, 0, 480)))], 3, [("NEVER APPLIED", ST)],
-              has=["a hud key was above 0 (hud forward 70 cm, radar forward 70 cm, panels back 0 cm, radar back 0 cm, hud gap 0 cm, hud depth game)"])
+              has=["a hud key was above 0 (hud forward 70 cm, radar forward 70 cm, panels back 0 cm, radar back 0 cm, hud gap 0 cm, hud depth front, hud scissor open)"])
         check("srv turret anchored: every HUD key at 0 (camera back and all) is the hud off by key", st_ok + [(1, st_set(forward=0, panels=0, radar=0, rforward=0)), (2, st_view()), (3, st_cam()), (20, st_view(False))], 0, [("OK", ST)],
               has=["hud off by key"], lacks=["NEVER APPLIED"])
         check("srv turret anchored: each latch of the anchor is counted, the last one named with its reason", st_ok + st_flight() + [(8, st_anchor("camera back changed", 0.06, 0.21, -0.09)), (9, st_anchor("recentre", 0.0, 0.2, 0.1))], 0, [("OK", ST)],
@@ -22845,7 +22875,7 @@ def self_test_health():
               has=["hud forward 0 cm, radar forward 70 cm, panels back 0 cm", "T (0.000,0.000,0.000), radar T (0.000,0.000,0.300)", "; windows: panels off, radar translated only"], lacks=["NEVER APPLIED", "UNPARSED", "hud off by key"])
         check("srv turret radar forward: the radar-forward key alone above 0 and a 10 s line with nothing bound is NEVER APPLIED, naming it",
               st_ok + [(1, st_set(forward=0, panels=0, radar=0, rforward=70)), (2, st_view()), (3, st_cam()), (12, st_sec(panels=None, radar=0, bound=0, refused=(0, 0, 0, 0, 480)))], 3, [("NEVER APPLIED", ST)],
-              has=["a hud key was above 0 (hud forward 0 cm, radar forward 70 cm, panels back 0 cm, radar back 0 cm, hud gap 0 cm, hud depth game)"])
+              has=["a hud key was above 0 (hud forward 0 cm, radar forward 70 cm, panels back 0 cm, radar back 0 cm, hud gap 0 cm, hud depth front, hud scissor open)"])
         check("srv turret radar forward: the radar-forward reason is read", st_ok + st_flight() + [(8, st_anchor("radar forward changed"))], 0, [("OK", ST)],
               has=["anchor latched 2 time(s), last at 0.050,0.200,-0.100 m seated (radar forward changed)"], lacks=["UNPARSED"])
         check("srv turret radar forward: each group's T is said (the panels' by HUD forward, the radar's by its own key)", st_ok + st_flight(), 0, [("OK", ST)],
@@ -22855,8 +22885,8 @@ def self_test_health():
               has=["pose refreshed at draw in 120 of 150 frames"], lacks=["UNPARSED", "NEVER APPLIED", "PARTIAL"])
         check("srv turret pose: none refreshed (the boundary tick already had the newest pose) is said and is no failure", st_ok + [(1, st_set()), (2, st_view()), (3, st_cam()), (5, st_first()), (12, st_sec(pose=(0, 238))), (14, st_view(False))], 0, [("OK", ST)],
               has=["pose refreshed at draw in 0 of 238 frames"], lacks=["UNPARSED", "NEVER APPLIED", "PARTIAL"])
-        old_set5 = st_set().replace("radar forward 70 cm, ", "").replace(", hud depth game", "")
-        old_sec5 = st_sec().replace(" Tradar=(0.000,0.000,0.700)", "").replace(" pose refreshed at draw: 240 of 240 frames", "")
+        old_set5 = st_set().replace("radar forward 70 cm, ", "").replace(", hud depth front, hud scissor open", "")
+        old_sec5 = st_sec().replace(" Tradar=(0.000,0.000,0.700)", "").replace(" scissor opened 240", "").replace(" pose refreshed at draw: 240 of 240 frames", "")
         check("srv turret radar forward: the lines of the build with HUD forward and no radar forward or pose field (a five-key settings line, a 10 s line with T alone) still parse and judge",
               st_ok + [(1, old_set5), (2, st_view()), (3, st_cam()), (5, st_first()), (12, old_sec5), (14, st_view(False))], 0, [("OK", ST)],
               has=["(camera back 60 cm, hud forward 70 cm, panels back 110 cm, radar back 110 cm, hud gap 0 cm)", "head offset 1.5 cm, T (0.000,0.000,0.700), ipd_elite"],
@@ -22864,8 +22894,8 @@ def self_test_health():
         check("srv turret pose: a drifted pose field in the 10 s line is UNPARSED", st_ok + [st_sec().replace("pose refreshed at draw", "pose refreshed on draw")], 4, [("UNPARSED", ST)])
         check("srv turret radar forward: a drifted radar T field in the 10 s line is UNPARSED", st_ok + [st_sec().replace(" Tradar=(", " Tr=(")], 4, [("UNPARSED", ST)])
         check("srv turret depth: the depth switch is on the settings line and in the keys the rule says", st_ok + [(1, st_set(depth="real")), (2, st_view()), (3, st_cam()), (5, st_first()), (12, st_sec()), (14, st_view(False))], 0, [("OK", ST)],
-              has=["radar back 110 cm, hud gap 0 cm, hud depth real)"], lacks=["UNPARSED", "NEVER APPLIED"])
-        check("srv turret depth: a settings line with an unknown depth word is UNPARSED, not a quiet rule", st_ok + [st_set().replace("hud depth game", "hud depth sideways")], 4, [("UNPARSED", ST)])
+              has=["radar back 110 cm, hud gap 0 cm, hud depth real, hud scissor open)"], lacks=["UNPARSED", "NEVER APPLIED"])
+        check("srv turret depth: a settings line with an unknown depth word is UNPARSED, not a quiet rule", st_ok + [st_set().replace("hud depth front", "hud depth sideways")], 4, [("UNPARSED", ST)])
         check("srv turret probe: the disc's samples that passed and the registers are said, and none passed says the disc is removed before the target",
               st_ok + st_flight() + [(7, st_disc(0, samples=0)), (7, st_disc(1, samples=0))], 0, [("OK", ST)],
               has=["radar disc probe: 2 sample(s) (eye L 1, R 1), samples passed 0, alpha 0.85, intensity 1.0", "no sample of any sampled scope passed the depth and stencil tests"], lacks=["UNPARSED", "NEVER APPLIED"])
@@ -22879,11 +22909,29 @@ def self_test_health():
         check("srv turret probe: a first scope's state lines are said, the disc's whole and each other family's first issue",
               st_ok + st_flight() + [(5, st_state(issue=1)), (5, st_state(issue=2, target="other", w=1234, h=1000, depth=(1, 4, 1), blend=(0, 2, 1, 1, 2, 1, 1, 0xF))),
                                      (5, st_state(STF[0], issue=1, depth=(0, 1, 0))), (5, st_state(STF[0], issue=2))], 0, [("OK", ST)],
-              has=["state at each family's first matched draw: DF3503CD first scope: issue 1 game 2468x2208 fmt 10, depth LESS no write, stencil off, blend SRC_ALPHA/INV_SRC_ALPHA ADD mask 0xF; "
-                   "issue 2 other 1234x1000 fmt 10, depth LESS_EQUAL write, stencil off, blend off mask 0xF",
-                   "1989E6D3 first scope: issue 1 game 2468x2208 fmt 10, depth off, stencil off, blend SRC_ALPHA/INV_SRC_ALPHA ADD mask 0xF (2 issue(s))"], lacks=["UNPARSED"])
+              has=["state at each family's first matched draw: DF3503CD first scope: issue 1 game 2468x2208 fmt 10, depth LESS no write, stencil off, blend SRC_ALPHA/INV_SRC_ALPHA ADD mask 0xF, scissor off, cull NONE, viewport 2468x2208; "
+                   "issue 2 other 1234x1000 fmt 10, depth LESS_EQUAL write, stencil off, blend off mask 0xF, scissor off, cull NONE, viewport 2468x2208",
+                   "1989E6D3 first scope: issue 1 game 2468x2208 fmt 10, depth off, stencil off, blend SRC_ALPHA/INV_SRC_ALPHA ADD mask 0xF, scissor off, cull NONE, viewport 2468x2208 (2 issue(s))"], lacks=["UNPARSED"])
         check("srv turret probe: a drifted state line is UNPARSED", st_ok + [st_state().replace("depth: enable", "depth: enabled")], 4, [("UNPARSED", ST)])
         check("srv turret probe: a drifted probe line is UNPARSED", st_ok + [st_disc().replace("samples_passed", "samples")], 4, [("UNPARSED", ST)])
+        check("srv turret scissor: the key's word is on the settings line", st_ok + [(1, st_set(scissor="game")), (2, st_view()), (3, st_cam()), (5, st_first()), (12, st_sec()), (14, st_view(False))], 0, [("OK", ST)],
+              has=["hud depth front, hud scissor game)"], lacks=["UNPARSED", "NEVER APPLIED"])
+        check("srv turret scissor: a settings line with an unknown scissor word is UNPARSED", st_ok + [st_set().replace("hud scissor open", "hud scissor shut")], 4, [("UNPARSED", ST)])
+        check("srv turret scissor: a family found with the test on is said with the game's rectangle, and the draws that had it opened are counted over the 10 s lines",
+              st_ok + st_flight() + [(5, st_scissor()), (6, st_scissor(STF[0], rects=3, first=(1, 2, 30, 40), opened=False)), (22, st_sec(opened=100))], 0, [("OK", ST)],
+              has=["scissor: DF3503CD drew with the test on (1 rect(s), the game's first [0,600,2468,1200], target 2468x2208, opened to the whole target); 1989E6D3 drew with the test on (3 rect(s), the game's first [1,2,30,40], "
+                   "target 2468x2208, kept as the game set it), 340 draw(s) had it opened (the 10 s lines)"], lacks=["UNPARSED"])
+        check("srv turret scissor: no family found with the test on and none opened is not mentioned", st_ok + [(1, st_set()), (2, st_view()), (3, st_cam()), (5, st_first()), (12, st_sec(opened=0)), (14, st_view(False))], 0, [("OK", ST)],
+              lacks=["scissor:", "UNPARSED"])
+        check("srv turret scissor: the game's rectangles that could not be put back are said", st_ok + st_flight() + [(8, RT(stsrc, "srv turret hud: the game's scissor rectangles could not be put back"))], 0, [("OK", ST)],
+              has=["the game's scissor rectangles could not be put back after an issue"], lacks=["UNPARSED"])
+        check("srv turret scissor: the state line's raster and viewport fields are said (scissor on with a rectangle, culling, a viewport that is not at the origin)",
+              st_ok + st_flight() + [(5, st_state(raster=(1, 1, (0, 600, 2468, 1200), 1, 2, 1), viewport=(10.0, 20.0, 1234.0, 1000.0)))], 0, [("OK", ST)],
+              has=["scissor on 1 rect(s) first [0,600,2468,1200], cull FRONT, front is counter-clockwise, viewport 1234x1000 at 10,20"], lacks=["UNPARSED"])
+        check("srv turret scissor: a state line from the build before the raster fields still parses and says nothing of them",
+              st_ok + st_flight() + [(5, st_state().split(" | raster:")[0])], 0, [("OK", ST)], has=["blend SRC_ALPHA/INV_SRC_ALPHA ADD mask 0xF"], lacks=["UNPARSED", "cull"])
+        check("srv turret scissor: a drifted scissor line is UNPARSED", st_ok + [st_scissor().replace("draws with the scissor test on", "draws with the scissor on")], 4, [("UNPARSED", ST)])
+        check("srv turret scissor: a drifted raster field is UNPARSED", st_ok + [st_state().replace("raster: scissor=", "raster: clip=")], 4, [("UNPARSED", ST)])
         check("srv turret anchored: an anchor reason the rule does not know is UNPARSED", st_ok + [st_anchor().replace("view on", "somewhere")], 4, [("UNPARSED", ST)])
         check("srv turret anchored: a drifted anchor line is UNPARSED", st_ok + [st_anchor().replace("latched at", "kept at")], 4, [("UNPARSED", ST)])
         check("srv turret anchored: a drifted 10 s line (the anchor field gone) is UNPARSED", st_ok + [st_sec().replace(" anchor=(", " anchored=(")], 4, [("UNPARSED", ST)])

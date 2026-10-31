@@ -1,4 +1,4 @@
-// The SRV turret view (issue 140): the module. srv_turret.h says what it does and what the log shows; srv_turret_math.h has the maths, the families and the seven TEMPORARY
+// The SRV turret view (issue 140): the module. srv_turret.h says what it does and what the log shows; srv_turret_math.h has the maths, the families and the eight TEMPORARY
 // keys; srv_turret_hud_binding.h holds the constants and the binding, which tools/srv_turret_hud_test runs on WARP; srv_turret_hud_shader.h is the geometry shaders' HLSL,
 // compiled at build time.
 #include "srv_turret.h"
@@ -50,7 +50,9 @@ constexpr uint32_t kFamilyN = st::kFamilyCount, kSigN = st::kSignatureCount;   /
 bool g_keysRead = false;
 uint32_t g_keysGeneration = 0;
 std::atomic<int> g_backCm{0}, g_forwardCm{0}, g_radarForwardCm{0}, g_panelsCm{0}, g_radarCm{0}, g_gapCm{0};   // TEMPORARY keys, as last read (the five HUD keys are read by the draw path too)
-std::atomic<int> g_depthMode{0};            // fix.srv_turret_hud_depth as a st::DepthMode (0 game, 1 real, 2 front)
+static_assert(st::kDepthDefault == st::DepthMode::kFront, "the literal default of fix.srv_turret_hud_depth in readKeys is front, which the ini ships");
+std::atomic<int> g_depthMode{static_cast<int>(st::kDepthDefault)};   // fix.srv_turret_hud_depth as a st::DepthMode (0 game, 1 real, 2 front)
+std::atomic<bool> g_scissorOpen{true};      // fix.srv_turret_hud_scissor: open (the default) or game
 bool g_on = false;                          // the Scorpion's turret view, as the frame tick last saw it
 bool g_ignored = false;                     // the turret view is on but the vehicle is not the Scorpion: said once for each stay
 double g_backSeatedZ = 0.0;                 // what alignTick adds
@@ -135,6 +137,9 @@ ID3D11Device* g_gsDevice = nullptr;   // identity only: the shaders hold their d
 bool g_gsTried = false;
 st::Constants g_constants[2];
 st::Binding g_binding;
+st::Scissor g_scissor;                         // the game's scissor rectangles while a bound draw is issued (fix.srv_turret_hud_scissor)
+std::atomic<uint32_t> g_scissorOpened{0};      // draws whose scissor was opened in the 10 s window
+bool g_scissorNoted[kFamilyN] = {}, g_scissorRestoreNoted = false;
 std::atomic<uint32_t> g_draws[2] = {};
 std::atomic<uint32_t> g_familyDraws[kFamilyN] = {};
 std::atomic<uint32_t> g_bound{0};
@@ -221,11 +226,13 @@ void readKeys() {
     const int panels = cfg.getIntInRange("fix.srv_turret_panels_back", 120, 0, 200);
     const int radar = cfg.getIntInRange("fix.srv_turret_radar_back", 0, 0, 200);
     const int gap = cfg.getIntInRange("fix.srv_turret_hud_gap", 0, 0, 200);
-    const std::string depthText = cfg.getString("fix.srv_turret_hud_depth", "game");
+    const std::string depthText = cfg.getString("fix.srv_turret_hud_depth", "front");
     const st::DepthMode depth = st::depthModeOf(depthText.c_str());
+    const bool scissorOpen = cfg.getString("fix.srv_turret_hud_scissor", "open") != "game";
     const bool changed = !g_keysRead || back != g_backCm.load(std::memory_order_relaxed) || forward != g_forwardCm.load(std::memory_order_relaxed) ||
                          radarForward != g_radarForwardCm.load(std::memory_order_relaxed) || panels != g_panelsCm.load(std::memory_order_relaxed) || radar != g_radarCm.load(std::memory_order_relaxed) ||
-                         gap != g_gapCm.load(std::memory_order_relaxed) || static_cast<int>(depth) != g_depthMode.load(std::memory_order_relaxed);
+                         gap != g_gapCm.load(std::memory_order_relaxed) || static_cast<int>(depth) != g_depthMode.load(std::memory_order_relaxed) ||
+                         scissorOpen != g_scissorOpen.load(std::memory_order_relaxed);
     g_keysRead = true;
     g_keysGeneration = generation;
     g_backCm.store(back, std::memory_order_relaxed);
@@ -235,11 +242,12 @@ void readKeys() {
     g_radarCm.store(radar, std::memory_order_relaxed);
     g_gapCm.store(gap, std::memory_order_relaxed);
     g_depthMode.store(static_cast<int>(depth), std::memory_order_relaxed);
+    g_scissorOpen.store(scissorOpen, std::memory_order_relaxed);
     if (changed)
-        Log::get().note("srv turret settings: camera back %d cm, hud forward %d cm, radar forward %d cm, panels back %d cm, radar back %d cm, hud gap %d cm, hud depth %s (live; fix.srv_turret_camera_back, "
-                        "fix.srv_turret_hud_forward, fix.srv_turret_radar_forward, fix.srv_turret_panels_back, fix.srv_turret_radar_back, fix.srv_turret_hud_gap and fix.srv_turret_hud_depth, TEMPORARY; "
-                        "0 is the game's own; the depth key is game, real or front)",
-                        back, forward, radarForward, panels, radar, gap, st::depthModeName(depth));
+        Log::get().note("srv turret settings: camera back %d cm, hud forward %d cm, radar forward %d cm, panels back %d cm, radar back %d cm, hud gap %d cm, hud depth %s, hud scissor %s (live; "
+                        "fix.srv_turret_camera_back, fix.srv_turret_hud_forward, fix.srv_turret_radar_forward, fix.srv_turret_panels_back, fix.srv_turret_radar_back, fix.srv_turret_hud_gap, "
+                        "fix.srv_turret_hud_depth and fix.srv_turret_hud_scissor, TEMPORARY; 0 is the game's own; the depth key is front, game or real, the scissor key open or game)",
+                        back, forward, radarForward, panels, radar, gap, st::depthModeName(depth), scissorOpen ? "open" : "game");
 }
 
 // The constants a group's draws run with at the keys in force, on this eye frame: the group's push-back when above 0, else the pull when the gap is above 0, else the translation alone
@@ -352,7 +360,7 @@ void windowLine(uint64_t nowMs) {
     uint32_t refused[static_cast<size_t>(st::Refuse::kCount)];
     for (size_t i = 0; i < static_cast<size_t>(st::Refuse::kCount); ++i) refused[i] = g_refused[i].exchange(0, std::memory_order_relaxed);
     const uint32_t left = g_draws[0].exchange(0, std::memory_order_relaxed), right = g_draws[1].exchange(0, std::memory_order_relaxed);
-    const uint32_t bound = g_bound.exchange(0, std::memory_order_relaxed);
+    const uint32_t bound = g_bound.exchange(0, std::memory_order_relaxed), scissorOpened = g_scissorOpened.exchange(0, std::memory_order_relaxed);
     // The matched draws of each family in the window, as two comma-separated lists in the table's order: the names, then the counts.
     char names[512] = {}, counts[256] = {};
     size_t nn = 0, nc = 0;
@@ -368,7 +376,7 @@ void windowLine(uint64_t nowMs) {
     const bool okL = readEye(0, frames[0]), okR = readEye(1, frames[1]);
     const uint32_t poseFrames = g_poseFrames.exchange(0, std::memory_order_relaxed), poseRefreshed = g_poseRefreshed.exchange(0, std::memory_order_relaxed);
     Log::get().note("srv turret hud: panels: %s; radar: %s; anchor=(%.3f,%.3f,%.3f) head_offset=%.1f cm T=(%.3f,%.3f,%.3f) Tradar=(%.3f,%.3f,%.3f) ipd_elite=%.1fmm P00[L,R]=%.3f,%.3f "
-                    "draws[L,R]=%u,%u bound=%u pose refreshed at draw: %u of %u frames "
+                    "draws[L,R]=%u,%u bound=%u scissor opened %u pose refreshed at draw: %u of %u frames "
                     "refused[no-eye,game-gs,topology,not-ready,no-geometry]=%u/%u/%u/%u/%u families[%s]=%s",
                     panels, radar,
                     static_cast<double>(g_anchorLog[0].load(std::memory_order_relaxed)), static_cast<double>(g_anchorLog[1].load(std::memory_order_relaxed)),
@@ -378,7 +386,7 @@ void windowLine(uint64_t nowMs) {
                     static_cast<double>(g_translationRadarLog[1].load(std::memory_order_relaxed)), static_cast<double>(g_translationRadarLog[2].load(std::memory_order_relaxed)),
                     1000.0 * static_cast<double>(g_ipd.load(std::memory_order_relaxed)),
                     okL ? static_cast<double>(st::p00OfTangents(&frames[0].l)) : 0.0, okR ? static_cast<double>(st::p00OfTangents(&frames[1].l)) : 0.0,
-                    left, right, bound, poseRefreshed, poseFrames, refused[0], refused[1], refused[2], refused[3], refused[4], names, counts);
+                    left, right, bound, scissorOpened, poseRefreshed, poseFrames, refused[0], refused[1], refused[2], refused[3], refused[4], names, counts);
 }
 
 // ---- THE GPU INSTRUMENT ------------------------------------------------------------------------------------------------------------------------------------------------
@@ -827,13 +835,35 @@ void noteState(ID3D11DeviceContext* ctx) {
             bs->Release();
         }
         const D3D11_RENDER_TARGET_BLEND_DESC& rt = bd.RenderTarget[0];
+        ID3D11RasterizerState* rs = nullptr;
+        ctx->RSGetState(&rs);
+        D3D11_RASTERIZER_DESC rd{};   // the D3D11 defaults a null state means
+        rd.FillMode = D3D11_FILL_SOLID;
+        rd.CullMode = D3D11_CULL_BACK;
+        rd.DepthClipEnable = TRUE;
+        if (rs) {
+            rs->GetDesc(&rd);
+            rs->Release();
+        }
+        UINT rectCount = 0;
+        ctx->RSGetScissorRects(&rectCount, nullptr);
+        D3D11_RECT rects[st::Scissor::kMax] = {};
+        UINT take = rectCount > st::Scissor::kMax ? st::Scissor::kMax : rectCount;
+        if (take) ctx->RSGetScissorRects(&take, rects);
+        UINT viewports = 1;
+        D3D11_VIEWPORT vp{};
+        ctx->RSGetViewports(&viewports, &vp);
         Log::get().note("srv turret hud state: family=%s eye=%d issue=%u target=%s %ux%u format=%u depth_view=%s | depth: enable=%d func=%d write=%d | stencil: enable=%d ref=%u read=0x%02X "
-                        "write=0x%02X front[func,pass,fail,zfail]=%d,%d,%d,%d | blend rt0: enable=%d src=%d dst=%d op=%d srcA=%d dstA=%d opA=%d mask=0x%X",
+                        "write=0x%02X front[func,pass,fail,zfail]=%d,%d,%d,%d | blend rt0: enable=%d src=%d dst=%d op=%d srcA=%d dstA=%d opA=%d mask=0x%X | raster: scissor=%d rects=%u first=[%ld,%ld,%ld,%ld] "
+                        "depth_clip=%d cull=%d front_ccw=%d | viewport: x=%.0f y=%.0f w=%.0f h=%.0f",
                         st::kFamilies[g_noteFamily].name, g_noteEye, g_noteIssue, target, w, h, fmt, dsv ? "yes" : "no", static_cast<int>(dd.DepthEnable), static_cast<int>(dd.DepthFunc),
                         static_cast<int>(dd.DepthWriteMask), static_cast<int>(dd.StencilEnable), stencilRef, static_cast<unsigned>(dd.StencilReadMask), static_cast<unsigned>(dd.StencilWriteMask),
                         static_cast<int>(dd.FrontFace.StencilFunc), static_cast<int>(dd.FrontFace.StencilPassOp), static_cast<int>(dd.FrontFace.StencilFailOp),
                         static_cast<int>(dd.FrontFace.StencilDepthFailOp), static_cast<int>(rt.BlendEnable), static_cast<int>(rt.SrcBlend), static_cast<int>(rt.DestBlend), static_cast<int>(rt.BlendOp),
-                        static_cast<int>(rt.SrcBlendAlpha), static_cast<int>(rt.DestBlendAlpha), static_cast<int>(rt.BlendOpAlpha), static_cast<unsigned>(rt.RenderTargetWriteMask));
+                        static_cast<int>(rt.SrcBlendAlpha), static_cast<int>(rt.DestBlendAlpha), static_cast<int>(rt.BlendOpAlpha), static_cast<unsigned>(rt.RenderTargetWriteMask),
+                        static_cast<int>(rd.ScissorEnable), rectCount, take ? rects[0].left : 0L, take ? rects[0].top : 0L, take ? rects[0].right : 0L, take ? rects[0].bottom : 0L,
+                        static_cast<int>(rd.DepthClipEnable), static_cast<int>(rd.CullMode), static_cast<int>(rd.FrontCounterClockwise), static_cast<double>(vp.TopLeftX),
+                        static_cast<double>(vp.TopLeftY), static_cast<double>(vp.Width), static_cast<double>(vp.Height));
         if (dsv) dsv->Release();
     });
 }
@@ -933,7 +963,7 @@ bool srvTurretHudBegin(ID3D11DeviceContext* ctx, int family, int eye) {
         return false;
     }
     const uint32_t sig = st::kFamilies[family].sig;
-    if (g_binding.needsRestore() || !ensureGs(ctx, sig)) {
+    if (g_binding.needsRestore() || g_scissor.owed() || !ensureGs(ctx, sig)) {
         refuse(st::Refuse::kNotReady);
         return false;
     }
@@ -965,6 +995,22 @@ bool srvTurretHudBegin(ID3D11DeviceContext* ctx, int family, int eye) {
         return false;
     }
     if (sample) probeBegin(ctx, eye, family, ordinal, twin, params);
+    // The game's scissor rectangle for this draw is from the HUD's OLD place: with the key at open the rectangles are the whole target while the draw is issued (End puts the game's back); with the key at
+    // game a family's first draw only looks, to say whether it is scissored at all.
+    {
+        const bool apply = g_scissorOpen.load(std::memory_order_relaxed);
+        if (apply || !g_scissorNoted[family]) {
+            st::Scissor::Seen seen;
+            const auto opened = g_scissor.open(ctx, seen, apply);
+            if (opened == st::Scissor::Open::kOpened) g_scissorOpened.fetch_add(1, std::memory_order_relaxed);
+            if (seen.enabled && !g_scissorNoted[family]) {
+                g_scissorNoted[family] = true;
+                Log::get().note("srv turret hud: family %s draws with the scissor test on: %u rect(s), first [%ld,%ld,%ld,%ld], target %ldx%ld; the scissor is %s for its draws",
+                                st::kFamilies[family].name, seen.rects, seen.first.left, seen.first.top, seen.first.right, seen.first.bottom, seen.targetW, seen.targetH,
+                                apply ? "opened to the whole target" : "kept as the game set it");
+            }
+        }
+    }
     if (!g_stateNoted[family]) noteBegin(ctx, family, eye);   // this scope's issues say their state
     g_bound.fetch_add(1, std::memory_order_relaxed);
     if (!g_firstNoted[family]) {
@@ -994,6 +1040,10 @@ void srvTurretHudEnd(ID3D11DeviceContext* ctx) {
     probeEnd(ctx);   // the queries end and the stream-output target comes off, right before the game's geometry stage goes back
     const auto done = g_binding.finish(ctx);
     probeFinish(ctx);
+    if (!g_scissor.restore(ctx) && !g_scissorRestoreNoted) {
+        g_scissorRestoreNoted = true;
+        Log::get().note("srv turret hud: the game's scissor rectangles could not be put back after an issue; the frame boundary settles them and draws are refused (not-ready) until then.");
+    }
     if (!done.restored && !g_restoreNoted) {
         g_restoreNoted = true;
         Log::get().note("srv turret hud: the game's geometry stage could not be put back after an issue; the frame boundary settles it and draws are refused (not-ready) until then.");
@@ -1012,6 +1062,7 @@ void srvTurretHudFrameBoundary(ID3D11DeviceContext* ctx) {
             p.ordinal = 0;
         }
     }
+    if (g_scissor.owed() && ctx) (void)g_scissor.settle(ctx);
     if (g_binding.needsRestore() && ctx && g_binding.settle(ctx) && !g_settleNoted) {
         g_settleNoted = true;
         Log::get().note("srv turret hud: the game's geometry stage and constant slot were put back at the frame boundary.");
@@ -1027,6 +1078,7 @@ void srvTurretShutdown() {
     for (auto& eyeProbes : g_probe)
         for (Probe& p : eyeProbes) probeReset(p);
     g_binding.clear();
+    g_scissor.clear();
     for (auto& c : g_constants) c.reset();
     releaseGs();
     g_gsTried = false;

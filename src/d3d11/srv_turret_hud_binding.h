@@ -96,6 +96,141 @@ inline bool copyPsRegister(ID3D11DeviceContext* ctx, ID3D11Buffer* stage, uint32
     return guarded("srv.turret.copy.region", [&] { copy(ctx, stage, to, cb.buffer, &box); });
 }
 
+// THE SCISSOR. The game sets a scissor rectangle for the radar's draws from the radar's screen bounds at its OLD place, and the moved geometry is cropped to it (a straight edge across the disc and
+// the hologram). While a bound draw is issued the rectangles are the whole render target (render target 0's size at its view's mip, else the first viewport's extent), when the bound rasterizer state
+// has ScissorEnable; the rasterizer state object is never changed, and the game's own rectangles (any number up to 16, or none) are set back exactly after.
+class Scissor {
+public:
+    static constexpr UINT kMax = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
+    enum class Open { kOff, kOpened, kFailed };
+    // What open() found at the game's draw (for the log).
+    struct Seen {
+        bool enabled = false;       // the bound rasterizer state has ScissorEnable
+        UINT rects = 0;             // the rectangles the game had bound
+        D3D11_RECT first{};         // ... the first of them
+        LONG targetW = 0, targetH = 0;   // the extent they were opened to
+    };
+
+private:
+    D3D11_RECT saved_[kMax] = {};
+    D3D11_RECT ours_{};
+    UINT count_ = 0, setCount_ = 0;
+    bool owed_ = false;
+
+public:
+    bool owed() const { return owed_; }
+    void clear() { owed_ = false; count_ = setCount_ = 0; }
+
+    // The bound rasterizer state's ScissorEnable and, when set, the rectangles opened to the whole target. kOff: the test is off (nothing touched); kOpened: the rectangles are the whole target and the
+    // game's are owed back (restore); kFailed: a call faulted, or there was no extent to open to (anything set is owed back as well).
+    // apply = false only looks (seen is filled, nothing is set, the answer is kOff): the game-scissor key still says what it found.
+    Open open(ID3D11DeviceContext* c, Seen& seen, bool apply = true) {
+        seen = Seen{};
+        if (!c || owed_) return Open::kFailed;
+        Open result = Open::kOff;
+        const bool ran = guarded("srv.turret.scissor.open", [&] {
+            ID3D11RasterizerState* rs = nullptr;
+            c->RSGetState(&rs);
+            bool enabled = false;
+            if (rs) {
+                D3D11_RASTERIZER_DESC rd{};
+                rs->GetDesc(&rd);
+                enabled = rd.ScissorEnable != FALSE;
+                rs->Release();
+            }
+            if (!enabled) return;
+            seen.enabled = true;
+            UINT n = 0;
+            c->RSGetScissorRects(&n, nullptr);
+            if (n > kMax) n = kMax;
+            UINT take = n;
+            if (n) c->RSGetScissorRects(&take, saved_);
+            count_ = n;
+            seen.rects = n;
+            if (n) seen.first = saved_[0];
+            LONG w = 0, h = 0;
+            ID3D11RenderTargetView* rtv = nullptr;
+            c->OMGetRenderTargets(1, &rtv, nullptr);
+            if (rtv) {
+                D3D11_RENDER_TARGET_VIEW_DESC vd{};
+                rtv->GetDesc(&vd);
+                UINT mip = 0;
+                if (vd.ViewDimension == D3D11_RTV_DIMENSION_TEXTURE2D) mip = vd.Texture2D.MipSlice;
+                else if (vd.ViewDimension == D3D11_RTV_DIMENSION_TEXTURE2DARRAY) mip = vd.Texture2DArray.MipSlice;
+                ID3D11Resource* res = nullptr;
+                rtv->GetResource(&res);
+                if (res) {
+                    ID3D11Texture2D* tex = nullptr;
+                    if (SUCCEEDED(res->QueryInterface(__uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&tex))) && tex) {
+                        D3D11_TEXTURE2D_DESC td{};
+                        tex->GetDesc(&td);
+                        w = static_cast<LONG>((td.Width >> mip) ? (td.Width >> mip) : 1u);
+                        h = static_cast<LONG>((td.Height >> mip) ? (td.Height >> mip) : 1u);
+                        tex->Release();
+                    }
+                    res->Release();
+                }
+                rtv->Release();
+            }
+            if (w <= 0 || h <= 0) {   // no target view: the viewport's extent
+                UINT nv = 1;
+                D3D11_VIEWPORT vp{};
+                c->RSGetViewports(&nv, &vp);
+                if (nv) {
+                    w = static_cast<LONG>(std::ceil(vp.TopLeftX + vp.Width));
+                    h = static_cast<LONG>(std::ceil(vp.TopLeftY + vp.Height));
+                }
+            }
+            if (w <= 0 || h <= 0) {
+                result = Open::kFailed;
+                return;
+            }
+            seen.targetW = w;
+            seen.targetH = h;
+            if (!apply) return;
+            ours_ = D3D11_RECT{0, 0, w, h};
+            D3D11_RECT full[kMax];
+            setCount_ = n ? n : 1;
+            for (UINT i = 0; i < setCount_; ++i) full[i] = ours_;
+            owed_ = true;   // the setter can partially publish before a fault
+            c->RSSetScissorRects(setCount_, full);
+            result = Open::kOpened;
+        });
+        if (!ran) result = owed_ ? Open::kOpened : Open::kFailed;
+        return result;
+    }
+    // The game's rectangles back, exactly (none: none). False when the setter faulted: still owed.
+    bool restore(ID3D11DeviceContext* c) {
+        if (!owed_) return true;
+        if (!c) return false;
+        if (!guarded("srv.turret.scissor.restore", [&] { c->RSSetScissorRects(count_, count_ ? saved_ : nullptr); })) return false;
+        owed_ = false;
+        return true;
+    }
+    // At a frame boundary after a restore failed: the game's rectangles go back only if the bound ones are still ours (the game rebinding its own is left alone).
+    bool settle(ID3D11DeviceContext* c) {
+        if (!owed_) return true;
+        if (!c) return false;
+        bool ours = false;
+        if (!guarded("srv.turret.scissor.settle.get", [&] {
+                UINT n = 0;
+                c->RSGetScissorRects(&n, nullptr);
+                if (n != setCount_ || n > kMax) return;
+                D3D11_RECT now[kMax] = {};
+                UINT take = n;
+                c->RSGetScissorRects(&take, now);
+                ours = true;
+                for (UINT i = 0; i < n; ++i) ours = ours && now[i].left == ours_.left && now[i].top == ours_.top && now[i].right == ours_.right && now[i].bottom == ours_.bottom;
+            }))
+            return false;
+        if (!ours) {
+            owed_ = false;
+            return true;
+        }
+        return restore(c);
+    }
+};
+
 // The stream-output declaration of an output signature, for the GPU instrument's twin of its shader (srv_turret.cpp makeTwins, and the rig's twin): one entry for each element, in the
 // signature's order, into stream 0 and output slot 0, then the shader's own `pre` element (the clip position before the move), so a vertex is written out as sigFloats + 4 floats with
 // the moved clip position at Family::posFloat and the game's at Family::preFloat. Returns the entries; `out` holds kMaxSigElements.

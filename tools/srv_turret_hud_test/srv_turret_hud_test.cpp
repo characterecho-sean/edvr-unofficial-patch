@@ -15,7 +15,7 @@
 //   camera's own projection, its distance from the anchor, its direction from it. (a) The anchor at the eye: a vertex at distance r keeps its NDC x, y and z and its w becomes w (r + d) / r.
 //   (b) The anchor 10 cm to the side and 5 cm up, with vertices 15 cm from it. (c) Asymmetric tangents (the Pimax set, a vertical pair that is not symmetric): the move, and a gap of 10 um
 //   round-trips every vertex. (d) A vertex at anchor distance 1.4 m, 2.8 m, 500 m, just past 1 m or inside 2 cm is untouched bit for bit. (e) A pull. (g) The translation alone: every vertex
-//   moves by T, one 0.2 m behind the eye comes in front of it, one that stays behind moves too. (h) The translation, then the push. (k) The depth: Elite is reversed Z (clip z the constant 0.025), so a vertex behind the eye or inside the near plane gets the nearest depth, 0.999, and a valid one keeps its own; (l) a triangle with a corner moved behind the eye is output with all three corners moved; (m) the two groups in one frame: the panels' constants translate by the HUD-forward T and the radar's by its own key's; (n) the three depth modes (game: the vertex's own valid depth else 0.999, real: the moved position's own depth clamped to 0..0.999, front: 0.999); (o) signature H only, the Scorpion's hologram: its lighting position moves by the camera's right, up and forward vectors (a stand-in vertex constant buffer at slot 1, bound whole and with a first constant) times the move's eye-space displacement, and not at all where the move leaves a vertex alone. The pictures (I1 to I4) compare the rasterized quad with the
+//   moves by T, one 0.2 m behind the eye comes in front of it, one that stays behind moves too. (h) The translation, then the push. (k) The depth: Elite is reversed Z (clip z the constant 0.025), so a vertex behind the eye or inside the near plane gets the nearest depth, 0.999, and a valid one keeps its own; (l) a triangle with a corner moved behind the eye is output with all three corners moved; (m) the two groups in one frame: the panels' constants translate by the HUD-forward T and the radar's by its own key's; (n) the three depth modes (game: the vertex's own valid depth else 0.999, real: the moved position's own depth clamped to 0..0.999, front: 0.999); (S) the scissor: a draw the game scissored to the top half of the target, kept (the moved quad is cropped) and opened (it covers below the rectangle; the top half is the same picture), several rectangles (three, sixteen, none with the test on) put back exactly, the rasterizer state object untouched, no target view (the viewport's extent), a look that changes nothing, a second open refused and the boundary settle; (o) signature H only, the Scorpion's hologram: its lighting position moves by the camera's right, up and forward vectors (a stand-in vertex constant buffer at slot 1, bound whole and with a first constant) times the move's eye-space displacement, and not at all where the move leaves a vertex alone. The pictures (I1 to I4) compare the rasterized quad with the
 //   plain one (anchor at the eye) and with the quad truly moved in 3D. THE STRIPS: a quad as a triangle strip is the plain strip bit for bit through a window with nothing in it and no
 //   translation, under every culling mode (the winding is kept), and lands where the same quad as a list lands once it is moved.
 //   THE ANCHOR (srv_turret_math.h AnchorTracker, no device): followed for the settle after the view comes on or a camera key changes, then latched; a recentre (the head jumping more than
@@ -187,6 +187,7 @@ static ComPtr<ID3DBlob> g_vsCode[st::kSignatureCount], g_psCode[st::kSignatureCo
 static ComPtr<ID3D11VertexShader> g_vs[st::kSignatureCount];
 static ComPtr<ID3D11PixelShader> g_ps[st::kSignatureCount];
 static ComPtr<ID3D11InputLayout> g_layout;
+static ComPtr<ID3D11RasterizerState> g_rsScissor;   // no culling, ScissorEnable: the state the game draws the radar with
 static ComPtr<ID3D11RasterizerState> g_rsOf[3];   // no culling (the stand-in quads are wound either way, as the game's state does not cull its panels), back-face culling, front-face culling
 static int g_fam = 0;                             // the signature the cases are running: render() draws it with that signature's stand-in pair
 
@@ -209,6 +210,12 @@ static void setupGamePair() {
         rd.DepthClipEnable = TRUE;
         ck(g_dev->CreateRasterizerState(&rd, &g_rsOf[i]), "CreateRasterizerState");
     }
+    D3D11_RASTERIZER_DESC sr{};
+    sr.FillMode = D3D11_FILL_SOLID;
+    sr.CullMode = D3D11_CULL_NONE;
+    sr.DepthClipEnable = TRUE;
+    sr.ScissorEnable = TRUE;
+    ck(g_dev->CreateRasterizerState(&sr, &g_rsScissor), "CreateRasterizerState (scissor)");
 }
 
 // ---------------------------------------------------------------- one drawn frame
@@ -339,6 +346,9 @@ struct DrawOpts {
     int cull = 0;                // 0 no culling, 1 back faces culled, 2 front faces culled
     Sample* sample = nullptr;    // the instrument: queries around the scope (and, with soTarget, the stream-output target of the twin)
     bool soTarget = false;
+    bool scissored = false;      // the game's draw has ScissorEnable and the one rectangle scissorRect
+    D3D11_RECT scissorRect{0, 0, 0, 0};
+    bool openScissor = false;    // the production Scissor opens it around the issue (fix.srv_turret_hud_scissor at open) and gives the game's back
 };
 // One frame of `verts` through the stand-in pair and, when gs is given, the production binding with `params` (null gs: the plain shader alone).
 static Frame render(const std::vector<Vtx>& verts, const Cam& cam, ID3D11GeometryShader* gs, const st::TurretParams& params, UINT w = 256, UINT h = 256, const DrawOpts& o = DrawOpts{}) {
@@ -349,7 +359,8 @@ static Frame render(const std::vector<Vtx>& verts, const Cam& cam, ID3D11Geometr
     g_ctx->OMSetRenderTargets(1, t.rtv.GetAddressOf(), nullptr);
     const D3D11_VIEWPORT vp{0.0f, 0.0f, float(w), float(h), 0.0f, 1.0f};
     g_ctx->RSSetViewports(1, &vp);
-    g_ctx->RSSetState(g_rsOf[o.cull].Get());
+    g_ctx->RSSetState(o.scissored ? g_rsScissor.Get() : g_rsOf[o.cull].Get());
+    if (o.scissored) g_ctx->RSSetScissorRects(1, &o.scissorRect);
     const UINT stride = sizeof(Vtx), offset = 0;
     ID3D11Buffer* vbs[1] = {vb.Get()};
     g_ctx->IASetVertexBuffers(0, 1, vbs, &stride, &offset);
@@ -371,6 +382,11 @@ static Frame render(const std::vector<Vtx>& verts, const Cam& cam, ID3D11Geometr
         if (needScene) check(st::readGameCb(g_ctx.Get(), st::kGameCbSlot, extra), "the draw's vertex constants are read");
         bound = binding.begin(g_ctx.Get(), gs, cb, st::directSetGs, needScene ? &extra : nullptr) == st::Binding::Begin::kBound;
         check(bound, "the production binding binds the shader");
+    }
+    st::Scissor scissor;
+    if (bound && o.openScissor) {
+        st::Scissor::Seen seen;
+        check(scissor.open(g_ctx.Get(), seen) == st::Scissor::Open::kOpened && seen.enabled, "the production scissor opens the game's rectangle");
     }
     ComPtr<ID3D11Query> statsQ, soQ;
     ComPtr<ID3D11Buffer> soBuf, staging;
@@ -403,6 +419,7 @@ static Frame render(const std::vector<Vtx>& verts, const Cam& cam, ID3D11Geometr
         }
     }
     if (bound) binding.finish(g_ctx.Get(), o.skipRestore ? noopSetGs : st::directSetGs);
+    if (scissor.owed()) check(scissor.restore(g_ctx.Get()), "the game's scissor rectangles are put back");
     if (o.sample) {
         g_ctx->Flush();
         for (int i = 0; i < 2000 && g_ctx->GetData(statsQ.Get(), &o.sample->stats, sizeof(o.sample->stats), 0) != S_OK; ++i) Sleep(1);
@@ -1600,6 +1617,8 @@ static void depthMathCases() {
     const float t[3] = {0.0f, 0.0f, 0.7f};
     const st::EyeFrame e = frameOfCam(Cam{}, nullptr, t);
     const st::TurretParams game = st::translateParamsFor(e), real = st::withDepth(game, M::kReal), front = st::withDepth(game, M::kFront);
+    check(st::kDepthDefault == M::kFront && st::depthModeOf(st::kDepthDefaultText) == st::kDepthDefault && !std::strcmp(st::kDepthDefaultText, "front") && !std::strcmp(st::kScissorDefaultText, "open"),
+          "the depth key's default is front, the scissor key's open (the module's literals and the shipped ini say the same: the wiring scan)");
     check(game.depth == 0.0f && real.depth == 1.0f && front.depth == 2.0f && st::withDepth(front, M::kGame) == game && !(real == game) && !(front == real),
           "the constants carry the mode as 0, 1 or 2, and a different mode is a different set of numbers (the buffer is rewritten)");
     st::TurretParams bad = game;
@@ -1630,6 +1649,162 @@ static void depthMathCases() {
     const st::TurretParams still = st::pushParamsFor(frameOfCam(Cam{}), kPushBackM);
     (void)at(still, 1.4, zero, &moved);
     check(!moved && zero[0] == 0.0 && zero[1] == 0.0 && zero[2] == 0.0, "a vertex left alone has no displacement");
+}
+
+// ---------------------------------------------------------------- the scissor
+static double coveredRows(const Frame& f, UINT y0, UINT y1) {
+    double n = 0;
+    for (UINT y = y0; y < y1 && y < f.h; ++y)
+        for (UINT x = 0; x < f.w; ++x) n += f.at(x, y)[3] > 0.5f ? 1 : 0;
+    return n;
+}
+static bool sameRect(const D3D11_RECT& a, const D3D11_RECT& b) { return a.left == b.left && a.top == b.top && a.right == b.right && a.bottom == b.bottom; }
+static UINT rectsNow(D3D11_RECT out[st::Scissor::kMax]) {
+    UINT n = 0;
+    g_ctx->RSGetScissorRects(&n, nullptr);
+    UINT take = n > st::Scissor::kMax ? st::Scissor::kMax : n;
+    if (take) g_ctx->RSGetScissorRects(&take, out);
+    return n;
+}
+static void scissorCases(ID3D11GeometryShader* gs, Fails& f) {
+    const Cam cam;
+    {   // (S1) the game scissors the moved quad to the top half of the target: the stale rectangle crops it; opened, the whole quad draws
+        const st::TurretParams p = st::pushParamsFor(frameOfCam(cam), kPushBackM);   // anchor at the eye: the push keeps the quad's size on the screen
+        Pt c[4];
+        boxAt(c, 0.0f, 0.0f, 0.4f, 0.30f, 0.30f);
+        std::vector<Vtx> v;
+        addQuadPts(v, c);
+        DrawOpts game;
+        game.scissored = true;
+        game.scissorRect = D3D11_RECT{0, 0, 256, 128};
+        DrawOpts open = game;
+        open.openScissor = true;
+        const Frame plain = render(v, cam, nullptr, st::TurretParams{}, 256, 256, game);   // the control: the scissor really crops a plain draw
+        const Frame kept = render(v, cam, gs, p, 256, 256, game);                          // fix.srv_turret_hud_scissor = game
+        const Frame opened = render(v, cam, gs, p, 256, 256, open);                        // ... = open
+        f.expect(coveredRows(plain, 0, 128) > 1000 && coveredRows(plain, 128, 256) == 0, "(S1) control: the game's scissor rectangle (the top half) crops a plain draw to the top half");
+        f.expect(coveredRows(kept, 0, 128) > 1000 && coveredRows(kept, 128, 256) == 0, "(S1) with the game's rectangle kept, the moved quad is cropped to the top half too");
+        f.expect(coveredRows(opened, 0, 128) > 1000 && coveredRows(opened, 128, 256) > 1000, "(S1) with the scissor opened, the moved quad covers pixels below the game's rectangle as well");
+        f.expect(diffCount(kept, opened, 0.02) == size_t(coveredRows(opened, 128, 256)), "(S1) ...and only below it: the top half is the same picture");
+        D3D11_RECT now[st::Scissor::kMax];
+        ComPtr<ID3D11RasterizerState> rs;
+        g_ctx->RSGetState(&rs);
+        f.expect(rectsNow(now) == 1 && sameRect(now[0], game.scissorRect) && rs.Get() == g_rsScissor.Get(), "(S1) after the issue the game's one rectangle is back and the rasterizer state object is the same");
+    }
+    g_ctx->ClearState();
+    Target t(64, 64);
+    const auto sceneOf = [&](bool scissorState) {
+        g_ctx->ClearState();
+        g_ctx->OMSetRenderTargets(1, t.rtv.GetAddressOf(), nullptr);
+        const D3D11_VIEWPORT vp{0.0f, 0.0f, 64.0f, 64.0f, 0.0f, 1.0f};
+        g_ctx->RSSetViewports(1, &vp);
+        g_ctx->RSSetState(scissorState ? g_rsScissor.Get() : nullptr);
+    };
+    const ULONG rsRefs = refsOf(g_rsScissor.Get());
+    {   // (S2) several rectangles come back exactly
+        sceneOf(true);
+        const D3D11_RECT game[3] = {{1, 2, 30, 40}, {5, 6, 7, 8}, {10, 0, 64, 20}};
+        g_ctx->RSSetScissorRects(3, game);
+        st::Scissor sc;
+        st::Scissor::Seen seen;
+        f.expect(sc.open(g_ctx.Get(), seen) == st::Scissor::Open::kOpened && sc.owed() && seen.enabled && seen.rects == 3 && sameRect(seen.first, game[0]) && seen.targetW == 64 && seen.targetH == 64,
+                 "(S2) three game rectangles: opened, and what was found is said (three, the first, the target's 64x64)");
+        D3D11_RECT now[st::Scissor::kMax];
+        bool whole = rectsNow(now) == 3;
+        for (int i = 0; i < 3; ++i) whole = whole && sameRect(now[i], D3D11_RECT{0, 0, 64, 64});
+        f.expect(whole, "(S2) ...all three are the whole target while open");
+        f.expect(sc.restore(g_ctx.Get()) && !sc.owed(), "(S2) restore succeeds");
+        bool back = rectsNow(now) == 3;
+        for (int i = 0; i < 3; ++i) back = back && sameRect(now[i], game[i]);
+        f.expect(back, "(S2) ...and the game's three rectangles are back exactly");
+        f.expect(sc.restore(g_ctx.Get()), "(S2) restore with nothing owed is a no-op");
+    }
+    {   // (S3) the most rectangles the pipeline holds, each different
+        sceneOf(true);
+        D3D11_RECT game[st::Scissor::kMax];
+        for (UINT i = 0; i < st::Scissor::kMax; ++i) game[i] = D3D11_RECT{LONG(i), LONG(i + 1), LONG(20 + i), LONG(30 + i)};
+        g_ctx->RSSetScissorRects(st::Scissor::kMax, game);
+        st::Scissor sc;
+        st::Scissor::Seen seen;
+        f.expect(sc.open(g_ctx.Get(), seen) == st::Scissor::Open::kOpened && seen.rects == st::Scissor::kMax, "(S3) sixteen game rectangles: opened");
+        D3D11_RECT now[st::Scissor::kMax];
+        bool whole = rectsNow(now) == st::Scissor::kMax;
+        for (UINT i = 0; i < st::Scissor::kMax; ++i) whole = whole && sameRect(now[i], D3D11_RECT{0, 0, 64, 64});
+        f.expect(whole && sc.restore(g_ctx.Get()), "(S3) ...all sixteen the whole target while open, restored");
+        bool back = rectsNow(now) == st::Scissor::kMax;
+        for (UINT i = 0; i < st::Scissor::kMax; ++i) back = back && sameRect(now[i], game[i]);
+        f.expect(back, "(S3) ...and the game's sixteen back exactly");
+    }
+    {   // (S4) the test on and no rectangle set: one whole-target rectangle while open, none after
+        sceneOf(true);
+        g_ctx->RSSetScissorRects(0, nullptr);
+        st::Scissor sc;
+        st::Scissor::Seen seen;
+        D3D11_RECT now[st::Scissor::kMax];
+        f.expect(sc.open(g_ctx.Get(), seen) == st::Scissor::Open::kOpened && seen.rects == 0, "(S4) the scissor test on with no rectangle: opened");
+        f.expect(rectsNow(now) == 1 && sameRect(now[0], D3D11_RECT{0, 0, 64, 64}) && sc.restore(g_ctx.Get()) && rectsNow(now) == 0, "(S4) ...one whole-target rectangle while open and none after");
+    }
+    {   // (S5) the scissor test off: nothing is touched
+        sceneOf(false);
+        const D3D11_RECT game[2] = {{3, 3, 9, 9}, {4, 4, 8, 8}};
+        g_ctx->RSSetScissorRects(2, game);
+        st::Scissor sc;
+        st::Scissor::Seen seen;
+        D3D11_RECT now[st::Scissor::kMax];
+        f.expect(sc.open(g_ctx.Get(), seen) == st::Scissor::Open::kOff && !sc.owed() && !seen.enabled, "(S5) the scissor test off (no rasterizer state): left alone");
+        f.expect(rectsNow(now) == 2 && sameRect(now[0], game[0]) && sameRect(now[1], game[1]), "(S5) ...with the game's rectangles as they were");
+        f.expect(sc.restore(g_ctx.Get()), "(S5) ...and nothing to give back");
+    }
+    {   // (S6) looking only: found and said, not changed
+        sceneOf(true);
+        const D3D11_RECT game[1] = {{2, 2, 20, 20}};
+        g_ctx->RSSetScissorRects(1, game);
+        st::Scissor sc;
+        st::Scissor::Seen seen;
+        D3D11_RECT now[st::Scissor::kMax];
+        f.expect(sc.open(g_ctx.Get(), seen, false) == st::Scissor::Open::kOff && !sc.owed() && seen.enabled && seen.rects == 1 && sameRect(seen.first, game[0]) && seen.targetW == 64 && rectsNow(now) == 1 &&
+                     sameRect(now[0], game[0]),
+                 "(S6) with the key at game the draw only looks: the test is found on, the rectangle kept");
+    }
+    {   // (S7) no target view bound: the first viewport's extent
+        g_ctx->ClearState();
+        const D3D11_VIEWPORT vp{0.0f, 0.0f, 100.0f, 50.0f, 0.0f, 1.0f};
+        g_ctx->RSSetViewports(1, &vp);
+        g_ctx->RSSetState(g_rsScissor.Get());
+        const D3D11_RECT game[1] = {{5, 5, 10, 10}};
+        g_ctx->RSSetScissorRects(1, game);
+        st::Scissor sc;
+        st::Scissor::Seen seen;
+        D3D11_RECT now[st::Scissor::kMax];
+        f.expect(sc.open(g_ctx.Get(), seen) == st::Scissor::Open::kOpened && rectsNow(now) == 1 && sameRect(now[0], D3D11_RECT{0, 0, 100, 50}) && seen.targetW == 100 && seen.targetH == 50,
+                 "(S7) without a target view the rectangle is the viewport's extent (100x50)");
+        f.expect(sc.restore(g_ctx.Get()) && rectsNow(now) == 1 && sameRect(now[0], game[0]), "(S7) ...and the game's is back");
+        // and with neither a target nor a viewport there is nothing to open to
+        g_ctx->ClearState();
+        g_ctx->RSSetState(g_rsScissor.Get());
+        g_ctx->RSSetScissorRects(1, game);
+        st::Scissor none;
+        st::Scissor::Seen seen2;
+        f.expect(none.open(g_ctx.Get(), seen2) == st::Scissor::Open::kFailed && !none.owed() && rectsNow(now) == 1 && sameRect(now[0], game[0]), "(S7) with no extent at all: failed, the game's rectangle untouched");
+    }
+    {   // (S8) a second open while one is owed is refused and leaves the first's saved rectangles; the boundary settle leaves the game's own newer rectangles, and restores ours
+        sceneOf(true);
+        const D3D11_RECT game[1] = {{2, 3, 40, 41}};
+        g_ctx->RSSetScissorRects(1, game);
+        st::Scissor sc;
+        st::Scissor::Seen seen;
+        D3D11_RECT now[st::Scissor::kMax];
+        (void)sc.open(g_ctx.Get(), seen);
+        st::Scissor::Seen again;
+        f.expect(sc.open(g_ctx.Get(), again) == st::Scissor::Open::kFailed && sc.owed(), "(S8) a second open while one is owed: refused");
+        f.expect(sc.settle(g_ctx.Get()) && !sc.owed() && rectsNow(now) == 1 && sameRect(now[0], game[0]), "(S8) the boundary settle puts the game's rectangle back while ours are still bound");
+        (void)sc.open(g_ctx.Get(), seen);
+        const D3D11_RECT theirs[1] = {{7, 7, 9, 9}};
+        g_ctx->RSSetScissorRects(1, theirs);
+        f.expect(sc.settle(g_ctx.Get()) && !sc.owed() && rectsNow(now) == 1 && sameRect(now[0], theirs[0]), "(S8) ...and leaves the game's own newer rectangle when it set one meanwhile");
+    }
+    f.expect(refsOf(g_rsScissor.Get()) == rsRefs, "(S) no reference to the rasterizer state kept");
+    g_ctx->ClearState();
 }
 
 // ---------------------------------------------------------------- signature H's second constant buffer and the register copy
@@ -2226,6 +2401,7 @@ int main(int argc, char** argv) {
         g_fam = 0;
         bindingCases(gsOf[0].Get(), production, true);
         sceneBindingCases(gsOf[st::kSceneSignature].Get(), production);
+        scissorCases(gsOf[0].Get(), production);
         copyRegisterCases();
         afterIssueCases(gsOf[0].Get(), production, false);
         if (production.n) {
