@@ -4464,6 +4464,15 @@ ruled out: F120's head-turn correction, because it rotated a point the lever had
   - The pilot's first report ("the ADS spot does not match where the mouse was") described the design, not a fault.
   - The revert's full build gave the same receipt as F202 (`b0b6f735...`): the tree is F202's again. Installed on Frontier as v0.22.0-rc.4-48-gf6ed3265, verified.
 - ruled out: a fault in F69i's ADS press snap under mouse look, because its proof lines read the sight within 0.0-0.4 deg of the headset's forward axis after the snap with the view still; it does what it was designed to do, and the pilot prefers it to F203's keep.
+- **The rc.5 review (2026-11-01).** An adversarial review of `v0.22.0-rc.4..eb488357` found no crash and no ABI break.
+  - **Fixed in `bce209c8`** (full build green):
+    1. With Anti-aliasing off, F205 forced both eyes on a scoped-Executioner press although B3 never runs. `f205B3Applies` now needs a temporal mode, and the ini text says the press keeps the player's sight eye with Anti-aliasing off.
+    2. With Anti-aliasing off, the lens's depth view held the game's depth texture between presses; it is released while no press is open. After a switch from on to off, `temporalInner`'s eye state (history, copy, depth, DLSS views) was held until shutdown; the render thread now releases it once at the first mode-off frame (a switch back to a temporal mode rebuilds it once; to be checked in the RC5 build).
+    3. The F194 and F193 1 s lines follow the on-foot log diet (10 s windows unless `log.on_foot_detail`). F194's health rule reads the window.
+  - **Not changed, with the evidence:**
+    - F192's hold restarting within one native epoch: no epoch repeated in 27 holds across the 033457, 054727 and 064004 flights.
+    - F196's probe cost in the cockpit with Anti-aliasing off: draw hook CPU 0.04-0.21 ms a frame in the ship on F196's flight.
+    - Also noted, not changed: F171c and F175 1 s lines sit outside the log diet. A look-to-aim stop through `adsStop` drops F194's partial window.
 - ruled out: F198's eye naming as the reason the markers still move with Anti-aliasing off, because both eyes are named and decided (F63 180 a second each with a marker present) and the patch is never bound: the bind requires the interface layer.
 - ruled out: F63's CPU identification differing with Anti-aliasing off, because its line at 21:24:40 (`named: a find 360 ... read-back's entry agrees 360`) matches the DLSS line at 13:49:05 digit for digit. That second's "0 matched" had no nav marker in the scene (`UpdateMarker 0 ... list 0`).
 - ruled out: F196 (or anything EDVR adds with Anti-aliasing off) as the cause of the outpost's 61-78 fps, because EDVR's GPU census reads ~0.1 ms a frame there, its draw hook CPU was lower than with DLSS at the same outpost, and Anti-aliasing off in the ship ran 85.5 fps against DLSS's 87.4.
