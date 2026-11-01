@@ -14744,7 +14744,8 @@ nofoot::f88::Settle g_f94Settle;
 // F107: the game's camera away from the commander, published by the Animate post-hook (the pin refused the call): the episode, its calls and its distances.
 // The frame thread logs the edges (the hook does not log) and takes the neck reference's raise out while the camera is away.
 std::atomic<bool> g_f107AwayNow{false};
-std::atomic<uint32_t> g_f107Episodes{0}, g_f107Calls{0}, g_f107NotNumber{0}, g_f107Alternations{0};   // F208: the calls refused (near ones of an open episode too) and the returns that did not last the hold
+std::atomic<uint32_t> g_f107Episodes{0}, g_f107Calls{0}, g_f107NotNumber{0}, g_f107Alternations{0}, g_f107Rejoins{0};   // F208: the calls refused (near ones of an open episode too), the returns that did not last the hold, the episodes that began again within kRejoinS of an end
+std::atomic<float> g_f107HoldS{nofoot::f107::kReturnHoldS};   // F208b: the hold in force for the open episode (doubled by rejoins)
 std::atomic<float> g_f107NearestM{0.0f}, g_f107FarthestM{0.0f};
 std::atomic<uint64_t> g_f107LastMs{0};
 uint32_t g_f107EpisodesLogged = 0;
@@ -14760,17 +14761,20 @@ bool f107Tick(uint64_t now) noexcept {
         g_f107AwayLogged = true;
         g_f107EpisodesLogged = episodes;
         g_f107LeftMs = now;
+        // F208b: the test that made the camera away is named: the distance from the neck (the only test there is; a showroom camera within kOnCommanderM is not recognised, see the arc doc)
         Log::get().note("native on foot camera away (F107): the game's camera left the commander (episode %u): %.1f m from the neck, over the %.1f m a commander's "
-                        "eye can be; the body pin, the neck reference and the standing calibration take nothing from it, and the neck reference's raise ramps out "
-                        "(the view is the game's own camera); the episode ends after the camera has stayed on the commander for %.1f s",
-                        episodes, static_cast<double>(g_f107FarthestM.load(std::memory_order_relaxed)), nofoot::f107::kOnCommanderM, nofoot::f107::kReturnHoldS);
+                        "eye can be (away by: the distance test); the body pin, the neck reference and the standing calibration take nothing from it, and the neck reference's raise ramps out "
+                        "(the view is the game's own camera); the episode ends after the camera has stayed on the commander for %.1f s%s",
+                        episodes, static_cast<double>(g_f107FarthestM.load(std::memory_order_relaxed)), nofoot::f107::kOnCommanderM, static_cast<double>(g_f107HoldS.load(std::memory_order_relaxed)),
+                        g_f107Rejoins.load(std::memory_order_relaxed) ? " (doubled: it began again within 3 s of an end)" : "");
     } else if (!away && g_f107AwayLogged) {
         g_f107AwayLogged = false;
         Log::get().note("native on foot camera away (F107): the episode ended after %.1f s (episode %u): %u pinned calls refused, the camera "
-                        "%.1f to %.1f m from the neck, not a number in %u, back near and gone again within the %.1f s hold %u times; the neck reference takes its target from the next settled stance",
+                        "%.1f to %.1f m from the neck, not a number in %u, back near and gone again within the %.1f s hold %u times (rejoins in a row %u); the neck reference takes its target from the next settled stance",
                         static_cast<double>(now - g_f107LeftMs) * 1e-3, episodes, g_f107Calls.load(std::memory_order_relaxed),
                         static_cast<double>(g_f107NearestM.load(std::memory_order_relaxed)), static_cast<double>(g_f107FarthestM.load(std::memory_order_relaxed)),
-                        g_f107NotNumber.load(std::memory_order_relaxed), nofoot::f107::kReturnHoldS, g_f107Alternations.load(std::memory_order_relaxed));
+                        g_f107NotNumber.load(std::memory_order_relaxed), static_cast<double>(g_f107HoldS.load(std::memory_order_relaxed)), g_f107Alternations.load(std::memory_order_relaxed),
+                        g_f107Rejoins.load(std::memory_order_relaxed));
     }
     return away;
 }
@@ -17540,6 +17544,8 @@ bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t n
                 refusal = kPinRefCameraAway;
                 g_f107Calls.store(g_f107Away.calls, std::memory_order_relaxed);
                 g_f107Alternations.store(g_f107Away.alternations, std::memory_order_relaxed);
+                g_f107Rejoins.store(g_f107Away.rejoins, std::memory_order_relaxed);
+                g_f107HoldS.store(static_cast<float>(g_f107Away.holdS), std::memory_order_relaxed);
                 g_f107NotNumber.store(g_f107Away.notNumber, std::memory_order_relaxed);
                 g_f107NearestM.store(static_cast<float>(g_f107Away.nearestM), std::memory_order_relaxed);
                 g_f107FarthestM.store(static_cast<float>(g_f107Away.farthestM), std::memory_order_relaxed);

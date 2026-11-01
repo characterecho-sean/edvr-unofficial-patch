@@ -33,13 +33,20 @@ inline bool onCommander(double eyeNeckM) noexcept { return eyeNeckM == eyeNeckM 
 // F208 (the suit shop at Pioneer Supplies, log edvr_gfx_20261101_114724, v0.22.0-rc.5): the game's showroom camera and a second camera at the commander (46 cm over his neck) took turns in the
 // hook's reads every call, 45 times a second for 18 s. The episode ended on every near call and began on every far one (632 episodes, 1268 lines), so the neck reference's raise ramped in and
 // out at the call rate: the view pumped, it settled near -29 cm (the near camera's target, ramped about half in) and the pilot saw it vibrate and sit low. The episode now ends only when the
-// camera has stayed near for kReturnHoldS: a camera that alternates between far and near is one episode, and a stale report alone ends nothing.
+// camera has stayed near for a hold: a camera that alternates between far and near is one episode, and a stale report alone ends nothing.
 //
-// The hold. In the shop's 18 s the gaps between a far call and the next far call (frame-thread time) were a call or two (median 11 ms, 41 to 52 ms often) and three times longer: 0.47 s, 0.51
-// s (the shop's own menus: the far camera was quiet that long), and 2.1 s, the real return. The hold is 1.0 s: twice the longest flap, half the real return, and a real return costs a second
-// of the view being the game's own camera at the commander (the neck reference ramps back in over kRampS after it). Silence is another matter: with no call at all for kSilenceS the episode is
-// over (the commander is not animated: a load, a different mode), and the next call starts clean.
-constexpr double kReturnHoldS = 1.0;
+// F208b (the suit change in the same shop, log edvr_gfx_20261101_141044, v0.22.0-rc.5-1-g9b1b1f86, 14:13:03 to 14:13:29): the camera read 3.6 to 3.7 m from the neck on one call, then near for
+// about a second, then far again: the 1.0 s hold ended 18 episodes (2 to 19), each beginning 12 ms to 1.4 s after the last ended, and every end let the pin, the neck reference (its target -31 cm
+// from the camera 46 cm over the neck) and the settle take the near calls in between: the dip the pilot saw when he switched suits. The near stretches between the far reads were 1.0 to 2.8 s (and
+// 4.2 s once, at the end). The hold is now 2.0 s, and it adapts: an episode that begins again within kRejoinS of an end is the same trouble, and the hold doubles (to kMaxHoldS) for it; one that
+// begins after a quiet kRejoinS starts from the base again. The suit change's pattern then runs as 3 episodes in 32 s, not 20, and the first shop's flaps (near runs of 0.5 s) never end one.
+//
+// The hold. The first shop's near runs were at most 0.5 s and its real return 2.1 s; the suit change's near stretches 1.0 to 2.8 s. 2.0 s covers every flap of the first and most of the second, and
+// the doubling covers the rest after one rejoin; a real return costs two seconds of the view being the game's own camera at the commander (the neck reference ramps back in over kRampS after it).
+// Silence is another matter: with no call at all for kSilenceS the episode is over (the commander is not animated: a load, a different mode), and the next call starts clean.
+constexpr double kReturnHoldS = 2.0;   // the base hold: the camera near for this long, no far read between, ends an episode
+constexpr double kRejoinS = 3.0;       // a new episode within this long of an end doubles the hold
+constexpr double kMaxHoldS = 8.0;      // ... up to this
 constexpr double kSilenceS = 5.0;
 constexpr uint64_t kAwayStaleMs = 5000;   // the frame thread's: an open episode is taken as over when the hook has not reported for this long (the hook reports on every call of an open episode, near ones too, so a flapping camera never ages)
 
@@ -50,22 +57,27 @@ inline bool awayNow(bool published, uint64_t lastMs, uint64_t nowMs) noexcept { 
 // (m; a camera that is not a number counts apart), the time and how often the camera came back near and left again before the hold ran out.
 struct Away {
     bool away = false;
-    uint32_t calls = 0, farCalls = 0, notNumber = 0, episodes = 0, alternations = 0;
+    uint32_t calls = 0, farCalls = 0, notNumber = 0, episodes = 0, alternations = 0, rejoins = 0;
     double startS = 0.0, lastS = 0.0, nearestM = 0.0, farthestM = 0.0, nearSinceS = -1.0, lastCallS = -1.0;
+    double holdS = kReturnHoldS, endS = -1.0;   // the hold now in force (doubled by a rejoin) and when the last episode ended by it
     enum Edge : uint8_t { kNone = 0, kLeft = 1, kBack = 2 };
     // One pinned call: its eye - neck distance and its time (s, monotonic). Returns the edge this call made. While an episode is open every call is refused (the pin takes nothing from a camera
-    // that was away a moment ago), near ones too; the episode ends on the first near call after the camera has been near for kReturnHoldS without a far one between.
+    // that was away a moment ago), near ones too; the episode ends on the first near call after the camera has been near for holdS without a far one between.
     Edge step(double eyeNeckM, double tS) noexcept {
         Edge e = kNone;
         if (away && lastCallS >= 0.0 && tS - lastCallS > kSilenceS) {   // no call for kSilenceS: nothing was pinned, the episode is over
             away = false;
             nearSinceS = -1.0;
+            endS = -1.0;
             e = kBack;
         }
         lastCallS = tS;
         const bool farNow = !onCommander(eyeNeckM);
         if (farNow) {
             if (!away) {
+                const bool rejoin = endS >= 0.0 && tS - endS <= kRejoinS;   // the camera went far again right after an end: the same trouble, the hold doubles
+                holdS = rejoin ? (holdS * 2.0 > kMaxHoldS ? kMaxHoldS : holdS * 2.0) : kReturnHoldS;
+                rejoins = rejoin ? rejoins + 1 : 0;
                 away = true;
                 ++episodes;
                 calls = farCalls = notNumber = alternations = 0;
@@ -79,9 +91,10 @@ struct Away {
             }
         } else if (away) {
             if (nearSinceS < 0.0) nearSinceS = tS;
-            if (tS - nearSinceS >= kReturnHoldS) {
+            if (tS - nearSinceS >= holdS) {
                 away = false;
                 nearSinceS = -1.0;
+                endS = tS;
                 e = kBack;
             }
         }

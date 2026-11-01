@@ -42,7 +42,7 @@ inline void run107(Check&& check) {
             back += e == f107::Away::kBack;
         }
         const double nearAt = t;
-        for (int i = 0; i < 150; ++i, t += 0.011) {   // 1.65 s of the camera on the commander
+        for (int i = 0; i < 250; ++i, t += 0.011) {   // 2.75 s of the camera on the commander
             const f107::Away::Edge e = a.step(0.19, t);
             left += e == f107::Away::kLeft;
             if (e == f107::Away::kBack) {
@@ -52,7 +52,7 @@ inline void run107(Check&& check) {
         }
         check(left == 1 && back == 1 && a.episodes == 1 && a.farCalls == 5 && a.notNumber == 1 && std::fabs(a.nearestM - 139.2) < 1e-9 && std::fabs(a.farthestM - 3367.6) < 1e-9 && !a.away &&
                   a.alternations == 0 && backAt >= nearAt + f107::kReturnHoldS && backAt < nearAt + f107::kReturnHoldS + 0.012 && a.calls > 5 + 80 && awayAt < nearAt,
-              "F107 (F208): one episode: left on the first call away, back on the first near call after the camera has stayed near for the 1.0 s hold, 5 far calls (1 not a number) and the near calls of the hold refused too, "
+              "F107 (F208): one episode: left on the first call away, back on the first near call after the camera has stayed near for the 2.0 s hold, 5 far calls (1 not a number) and the near calls of the hold refused too, "
               "the camera 139.2 to 3367.6 m from the neck");
     }
     {   // F208: the suit shop's camera: a far view (the showroom, 710.5 m) and a near one (46 cm over the neck) alternating. At the call rate, and at 8 Hz with gaps up to the 0.47 s and 0.51 s the log had: one episode, never an edge
@@ -82,7 +82,7 @@ inline void run107(Check&& check) {
         const double nearFrom = t;
         int backs = 0;
         double backAt = -1.0;
-        for (int i = 0; i < 180; ++i, t += 1.0 / 90.0) {
+        for (int i = 0; i < 270; ++i, t += 1.0 / 90.0) {
             const f107::Away::Edge e = slow.step(0.46, t);
             if (e == f107::Away::kBack) {
                 ++backs;
@@ -91,7 +91,65 @@ inline void run107(Check&& check) {
         }
         const bool again = slow.step(710.5, t) == f107::Away::kLeft && slow.episodes == 2;
         check(backs == 1 && backAt >= nearFrom + f107::kReturnHoldS - 1e-9 && backAt < nearFrom + f107::kReturnHoldS + 0.02 && again,
-              "F208: a real return (the camera near for good) ends the episode once, after the 1.0 s hold; a later far call is a new episode");
+              "F208: a real return (the camera near for good) ends the episode once, after the 2.0 s hold; a later far call (within 3 s) is a new episode");
+    }
+    {   // F208b: the suit change's pattern (log edvr_gfx_20261101_141044, 14:13:03 to 14:13:29): far readings (3.6 to 3.7 m) at the recorded times, the camera near between them, 90 calls a second.
+        // The 1.0 s hold made 18 episodes of it (each end let the pin, the neck reference and the settle take the near calls); the 2.0 s hold that doubles on a rejoin makes 3, whose accepted windows are
+        // 0.73 s and 0.17 s; a steady 3.7 m camera (episodes 1 and 20 at 35.4 m) is one episode however long it stands
+        static const double starts[18] = {3.144, 4.178, 5.711, 6.743, 9.503, 10.534, 11.613, 13.157, 14.190, 15.222, 16.246, 17.978, 19.523, 20.556, 21.589, 25.777, 26.809, 27.843};
+        f107::Away a;
+        int lefts = 0, backs = 0;
+        double firstBackS = -1.0;
+        uint32_t holdsSeen[4] = {};
+        for (int i = 0; i < 40 * 90; ++i) {   // 40 s from 14:13:00 minus 8
+            const double t = -8.0 + i / 90.0;
+            bool isFar = t < 2.1 || (t >= 30.187 && t < 31.1);   // episodes 1 and 20: steady at 35.4 m
+            for (double st : starts)
+                if (t >= st - 0.012 && t < st + 0.005) isFar = true;
+            const f107::Away::Edge e = a.step(isFar ? 3.7 : 0.46, t);
+            lefts += e == f107::Away::kLeft;
+            if (e == f107::Away::kBack) {
+                ++backs;
+                if (firstBackS < 0.0) firstBackS = t;
+            }
+            if (e == f107::Away::kLeft && a.episodes <= 4) holdsSeen[a.episodes - 1] = static_cast<uint32_t>(a.holdS);
+        }
+        check(a.episodes <= 4 && lefts <= 4 && backs <= 4 && holdsSeen[0] == 2 && holdsSeen[1] == 4,
+              "F208b: the suit change's far readings 1 to 2.8 s apart (and a steady camera before and after) are 3 episodes, not 20: the 2.0 s hold covers the near stretches under it, a rejoin doubles it to 4.0 s");
+        f107::Away steady;
+        int steadyLefts = 0, steadyBacks = 0;
+        for (int i = 0; i < 20 * 90; ++i) {   // 20 s steady at 3.7 m: one episode
+            const f107::Away::Edge e = steady.step(3.7, i / 90.0);
+            steadyLefts += e == f107::Away::kLeft;
+            steadyBacks += e == f107::Away::kBack;
+        }
+        check(steadyLefts == 1 && steadyBacks == 0 && steady.episodes == 1 && steady.away && steady.alternations == 0 && steady.calls == 1800 && steady.farCalls == 1800,
+              "F208b: a steady 3.7 m camera for 20 s stays one episode (the 1800 calls all refused, no end, no alternation)");
+    }
+    {   // F208b: the adaptive hold: a rejoin within kRejoinS of an end doubles it (up to kMaxHoldS), a quiet kRejoinS resets it, a silence starts clean
+        f107::Away a;
+        double t = 0.0;
+        const auto run = [&](bool isFar, double secs) {
+            const int n = static_cast<int>(secs * 90.0);
+            for (int i = 0; i < n; ++i, t += 1.0 / 90.0) a.step(isFar ? 3.7 : 0.46, t);
+        };
+        run(true, 0.1);
+        const double h0 = a.holdS;
+        run(false, 2.5);               // near for 2.5 s: the 2.0 s hold ends it
+        const bool ended1 = !a.away;
+        run(true, 0.05);               // far again 0.5 s after the end: a rejoin
+        const double h1 = a.holdS;
+        run(false, 4.5);               // near for 4.5 s: the doubled 4.0 s hold ends it
+        const bool ended2 = !a.away;
+        run(true, 0.05);               // and again
+        const double h2 = a.holdS;
+        run(false, 9.0);               // 9 s near: the 8.0 s cap ends it
+        const bool ended3 = !a.away;
+        run(false, 3.5);               // quiet for more than kRejoinS
+        run(true, 0.05);
+        const double h3 = a.holdS;
+        check(h0 == 2.0 && ended1 && h1 == 4.0 && ended2 && h2 == 8.0 && ended3 && h3 == 2.0 && a.episodes == 4 && a.rejoins == 0,
+              "F208b: an episode that begins again within 3 s of an end doubles the hold (2.0, 4.0, 8.0 s, capped), and one that begins after 3 quiet seconds starts from 2.0 s again");
     }
     {   // F208: a stale report alone ends nothing: a gap in the hook's calls under the silence limit, the frame thread's reading of the report, and a silence past the limit
         f107::Away a;
@@ -121,7 +179,7 @@ inline void run107(Check&& check) {
             double prev = 0.0, tailMin = 1e9, tailMax = -1e9;
             *minRaise = 0.0;
             *maxRise = 0.0;
-            for (int i = 0; i < 1260; ++i) {   // 14 s
+            for (int i = 0; i < 1620; ++i) {   // 18 s
                 const double t = i / 90.0;
                 const bool shop = t >= 2.0 && t < 12.0;
                 const bool farCall = shop && i % 2 == 0;
@@ -146,7 +204,7 @@ inline void run107(Check&& check) {
                 }
                 if (t >= 2.0 && t < 12.0) *maxRise = std::fmax(*maxRise, o.raiseM - prev);
                 prev = o.raiseM;
-                if (i == 1259) *afterAway = o.raiseM;
+                if (i == 1619) *afterAway = o.raiseM;
             }
             *tailRange = tailMax - tailMin;
         };
