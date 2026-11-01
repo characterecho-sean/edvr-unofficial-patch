@@ -94,11 +94,14 @@
 //   "srv turret radar anchor: placement moved at frame F: the game's (x,y,z) + (dx,dy,dz) -> (x,y,z) in the anchor's axes (key K), caller EliteDangerous64.exe+0x.., obj 0x..; the
 //     5559BD94 billboards are left to the game"   each stay's first add;
 //   "srv turret radar anchor: direction at frame F: u (x,y,z) world; anchor rows (..)(..)(..) [source vfunc +0x20|fallback: ...]; P rows (..)(..)(..); d (x,y,z) in the anchor's axes
-//     = D m along u|the anchor's z (angle to the anchor's z: A deg, yaw Y deg; key K); u age N frames (setter frame F, camera sample frame G), extrapolated by .. (yaw rate R deg/s),
+//     = D m along u|the anchor's z (angle to the anchor's z: A deg, yaw Y deg; key K); u age N frames (setter frame F, camera sample frame G),
 //     source cpu|gpu, anchor of the sample's frame|...; aim relative to the vehicle yaw .. pitch .. deg, head pitch H deg"   with the first add, then every 2 s while the view is on;
 //   "srv turret radar anchor: turret direction from the CPU: ..." or "... from the GPU readback for host frame K (<why>) ..."   once, the first sample of each source;
 //   "srv turret radar anchor: 10 s: setter calls N (radar M, moved A, already ours R), the game's translation (x,y,z)[ changed K times], updates U...; moves along u D, fallback B (...)"
-//     with the 10 s line while armed;
+//     with the 10 s line while armed; "srv turret radar anchor: 10 s residual: ...; shown call before the write: mean .. min .. max .. ms; ..." beside it;
+//   "srv turret radar anchor: 10 s correction: N billboard draws moved (...) over F frames, |delta| ..., yaw ..., pitch ...; left to the game: ...; family 8 on a radar target k; writers:
+//     ..."   whenever the anchor yield was on in the window; "... correction first applied at frame F, eye E, disc|icon: delta ... cm ..." once; "... the setter runs on thread T, the
+//     camera writes on thread U" once;
 //   "srv turret radar anchor: view off: moved in N calls[ -- NEVER RAN: ...| -- hook not armed: <why>| -- not asked: ...]"   the view's end;
 //   "srv turret radar anchor: WARNING: the game's translation moved by (..) between setter calls, close to the offset: ..."   once, a sign its caller feeds our value back.
 #pragma once
@@ -124,7 +127,15 @@ extern std::atomic<bool> g_srvTurretHoloWatching;
 extern std::atomic<bool> g_srvTurretRadarCamOn;
 // The radar anchor's turret direction: true while the Scorpion's turret view is on, fix.srv_turret_radar_anchor is not off and the setter hook is armed (the frame tick sets it).
 extern std::atomic<bool> g_srvTurretCameraRowsWanted;
+// The draw-time correction's writer watch: true while the anchor yield is on (the frame tick sets it).
+extern std::atomic<bool> g_srvTurretRadarWritersOn;
 }  // namespace detail
+
+// TEMPORARY (issue 140, fix.srv_turret_radar_anchor): the radar's picture writers for the draw-time correction. vscreen.cpp forwardWithVerdict, every owner-context draw while the anchor
+// yield is on (one relaxed load otherwise): a draw of the terrain schematic (vs 4EDE4BC9) or of the Scorpion icon (vs 5B0068AF into a 256x256 target) records its render targets for the
+// frame, which a radar billboard's t4 is matched against (srv_turret.cpp radarCorrectionBegin).
+inline bool srvTurretRadarWritersOn() { return detail::g_srvTurretRadarWritersOn.load(std::memory_order_relaxed); }
+void srvTurretRadarWriterDraw(ID3D11DeviceContext* ctx, uint64_t vs);
 
 // TEMPORARY (issue 140, fix.srv_turret_radar_anchor): the live camera's right, up and forward (rows 277..279 of the 5376-byte scene camera block) read on the CPU when the game writes them.
 // vscreen.cpp hookedUnmap, the scene camera block's branch, before the real Unmap, while wanted (one relaxed load otherwise); srvTurretHudBegin looks the eye-0 draw's VS b1 buffer up in

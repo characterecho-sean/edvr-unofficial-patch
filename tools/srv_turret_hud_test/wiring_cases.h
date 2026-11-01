@@ -369,7 +369,7 @@ static bool wiredAnchor(const std::string& module, const std::string& hook, cons
     const size_t published = found(made) ? module.find("srvRadarAnchorPublish(w.offset.bits, frameNo);", made) : npos;
     const size_t drawFn = module.find("bool srvTurretHudBegin(ID3D11DeviceContext* ctx, int family, int eye) {");
     const size_t groupOff = found(drawFn) ? module.find("if (!paramsOfGroup(group, st::EyeFrame{}, unused)) return false;", drawFn) : npos;
-    const size_t leaves = found(groupOff) ? module.find("if (anchorLeaves(family)) return false;", groupOff) : npos;
+    const size_t leaves = found(groupOff) ? module.find("if (anchorLeaves(family)) return radarCorrectionBegin(ctx, family, eye);", groupOff) : npos;
     const size_t counted = found(groupOff) ? module.find("g_familyDraws[family].fetch_add(1, std::memory_order_relaxed);", groupOff) : npos;
     const size_t refusedFn = module.find("void srvTurretHudNoteRefusedDraw(int family) {");
     const size_t refusedOff = found(refusedFn) ? module.find("&& !anchorLeaves(family);", refusedFn) : npos;
@@ -407,19 +407,20 @@ static bool wiredAnchor(const std::string& module, const std::string& hook, cons
     const bool direction = found(sampled) && sampled < groupOff && found(rows) && found(module.find("st::turretForwardWorld(rows, rows + 4, rows + 8, g_dir.R[k], u)")) &&
                            found(module.find("srvRadarAnchorPublishDirection(best, true, g_dir.hostSeqOf[bestSlot], false, g_dir.headPitchOf[bestSlot], g_dir.qpcOf[bestSlot]);")) && found(boundaryFn) &&
                            found(module.find("anchorDirBoundary(ctx);", boundaryFn)) && found(module.find("srvRadarAnchorPublishDirection(nullptr, false);"));
-    // the lag: the setter pairs the sample with the anchor's rotation of the sample's own host frame (kept by frame), and carries the aim forward over the sample's age
+    // the setter pairs the sample with the anchor's rotation of the sample's own host frame (kept by frame) and uses it as it is: NO lead (an unled aim keeps a pairing error a smooth
+    // lag, not a jitter); each call goes into the ring the draw-time correction reads, and a write shows the most recent call before it
     const size_t kept = found(setterFn) ? hook.find("s->aRing.put(nowSeq, rot);", setterFn) : npos;
     const size_t pairedK = found(kept) ? hook.find("s->aRing.find(smp.seq)", kept) : npos;
     const size_t along = found(pairedK) ? hook.find("st::radarAnchorAlong(u, ak, 1.0f, unitD, uaK)", pairedK) : npos;
-    const size_t carried = found(along) ? hook.find("const st::AimLead lead = st::leadAim(aimK, s->rateNow, s->leadS);", along) : npos;
-    // ...by a lead in time adapted from the measured display horizon, the write that shows a call being the first after it (the age in host frames flipped and shook the disc)
-    const size_t shownBy = found(along) ? hook.find("if (c.t > 0 && c.t < smp.qpc && (!shown || c.t > shown->t)) shown = &c;", along) : npos;
-    const size_t adapted = found(shownBy) ? hook.find("s->leadS = st::adaptLead(s->leadS, horizon);", shownBy) : npos;
-    const size_t smoothed = found(adapted) ? hook.find("s->rateNow = st::smoothedRate(s->hist, s->histN, s->qpcFreq);", adapted) : npos;
+    const size_t unled = found(along) ? hook.find("std::memcpy(ua, uaK, sizeof(ua));", along) : npos;
+    const size_t carried = found(unled) ? hook.find("for (int i = 0; i < 3; ++i) d[i] = bitsOf(sF * ua[i]);", unled) : npos;
+    const size_t ringed = found(rule) ? hook.find("putCall(*s, q, baseT, inForce ? m.d : none, A, anchor > 0, floatOf(fb[2]));", rule) : npos;
+    const size_t shownBy = hook.find("if (!readCall(c, one) || one.t <= 0 || one.t >= before) continue;");
+    const size_t newest = found(shownBy) ? hook.find("if (!found || one.t > out.t) {", shownBy) : npos;
     const size_t getterCheck = hook.find("if (!insideModule(s, getter)) return 0;");
     const size_t getterCall = hook.find("reinterpret_cast<MatrixFn>(getter)(anchor)");
-    const bool directed = found(kept) && found(pairedK) && found(along) && found(carried) && found(rule) && carried < rule && found(shownBy) && found(adapted) && found(smoothed) &&
-                          smoothed < carried && found(getterCheck) && found(getterCall) && getterCheck < getterCall &&
+    const bool directed = found(kept) && found(pairedK) && found(along) && found(unled) && found(carried) && found(rule) && carried < rule && found(ringed) && found(shownBy) &&
+                          found(newest) && !found(hook.find("leadAim")) && !found(hook.find("extrapolateAim")) && found(getterCheck) && found(getterCall) && getterCheck < getterCall &&
                           found(hook.find("const uint64_t nowSeq = nativeTemporalFrameSequence();"));
     const size_t fix = ini.find("\n[fix]\n"), visual = ini.find("\n[visual]\n"), shipped = ini.find("\nsrv_turret_radar_anchor = on\n");
     const size_t ui = found(shipped) ? ini.rfind("# ui: SRV turret radar anchor | choices on, reversed, off | recommended on | live | menu", shipped) : npos;
@@ -448,6 +449,30 @@ static bool wiredAnchorCpuRows(const std::string& vscreen, const std::string& mo
     const bool moduleOk = found(copied) && found(stamped) && found(module.find("w->qpc = now.QuadPart;", stamped)) && found(module.find("kCamRowsFloat = kDirFirstRow * 4")) && found(cpuFirst) && found(cpuPublished) && found(gpuCopy) &&
                           cpuFirst < gpuCopy && found(module.find("if (w->hostSeq != hostSeq) return 3;")) && found(module.find("if (cb.ranged && cb.first != 0) return 2;"));
     return teeOk && moduleOk;
+}
+// The draw-time correction (srv_turret.cpp radarCorrectionBegin): reached from srvTurretHudBegin for the yielded families only; family 7 alone is moved, and only on a t4 a radar writer
+// drew into; family 8 never (counted when on a radar target); the translation alone with the game's own depth; delta is paired with the call the frame's camera write shows, capped at
+// 10 cm, and put in each eye's space with that draw's own camera rows before the bind; the writers are recorded from vscreen.cpp's draw path.
+static bool wiredCorrection(const std::string& vscreen, const std::string& module) {
+    const size_t npos = std::string::npos;
+    const size_t watch = vscreen.find("if (owner && srvTurretRadarWritersOn()) srvTurretRadarWriterDraw(self, bindingShaderHash(BindSlot::Vs));");
+    const size_t fn = module.find("bool radarCorrectionBegin(ID3D11DeviceContext* ctx, int family, int eye) {");
+    const size_t fam = found(fn) ? module.find("if (family != 7) {", fn) : npos;
+    const size_t fam8 = found(fam) ? module.find("if (kind) g_cc.family8.fetch_add(1, std::memory_order_relaxed);\n        return false;\n    }", fam) : npos;
+    const size_t match = found(fam8) ? module.find("if (!kind) return leave(kCorrNoMatch);", fam8) : npos;
+    const size_t eyeD = found(match) ? module.find("st::radarDeltaInEye(rows, g_corr.deltaW, dEye);", match) : npos;
+    const size_t depth = found(eyeD) ? module.find("st::withDepth(st::translateParamsFor(ef, st::Group::kRadar), st::DepthMode::kGame)", eyeD) : npos;
+    const size_t bound = found(depth) ? module.find("g_binding.begin(ctx, g_gs[st::kSceneSignature], cbuf, st::directSetGs, &camera)", depth) : npos;
+    const size_t computeFn = module.find("int correctionCompute(ID3D11DeviceContext* ctx, int eye, FrameCorrection& c) {");
+    const size_t written = found(computeFn) ? module.find("anchorDirCpuRows(ctx, poseSeq, rows, nullptr, &writtenAt)", computeFn) : npos;
+    const size_t shown = found(written) ? module.find("srvRadarAnchorShownCall(writtenAt, call)", written) : npos;
+    const size_t world = found(shown) ? module.find("st::radarCorrectionWorld(uTrue, call.A, call.sF, call.d, c.deltaW, dStar)", shown) : npos;
+    const size_t capped = found(world) ? module.find("if (!(norm <= st::kCorrectionMaxM)) return kCorrOver;", world) : npos;
+    const size_t kindFn = module.find("int billboardKind(ID3D11DeviceContext* ctx) {");
+    const size_t t4 = found(kindFn) ? module.find("ctx->PSGetShaderResources(4, 1, &srv)", kindFn) : npos;
+    const size_t writerFn = module.find("void srvTurretRadarWriterDraw(ID3D11DeviceContext* ctx, uint64_t vs) {");
+    const size_t icon256 = found(writerFn) ? module.find("td.Width == 256 && td.Height == 256", writerFn) : npos;
+    return found(watch) && found(bound) && found(capped) && found(t4) && found(icon256) && found(module.find("constexpr uint64_t kRadarIconVs = 0x5B0068AF5630F96Bull;"));
 }
 static bool wiredBuild(const std::string& t) {
     const size_t source = t.find("\"src\\d3d11\\srv_turret.cpp\"");
@@ -608,9 +633,9 @@ static void wiringCases() {
     check(!wiredAnchor(replaced(module, "anchorTick(on, frameNo, radarForwardCm);", "anchorTick(turret, frameNo, radarForwardCm);"), anchorHook, ini, build, audit),
           "control: an offset published for the turret view alone (the Scarab's too) trips the pin");
     check(!wiredAnchor(replaced(module, "anchorTick(false, frameNo, 0);", ""), anchorHook, ini, build, audit), "control: a flat profile that leaves an offset in the game trips the pin");
-    check(!wiredAnchor(replaced(module, "    if (anchorLeaves(family)) return false;", ""), anchorHook, ini, build, audit), "control: billboards moved twice (by the game and the shader) trip the pin");
-    check(!wiredAnchor(replaced(replaced(module, "    if (anchorLeaves(family)) return false;", ""), "g_familyDraws[family].fetch_add(1, std::memory_order_relaxed);",
-                                "g_familyDraws[family].fetch_add(1, std::memory_order_relaxed);\n    if (anchorLeaves(family)) return false;"),
+    check(!wiredAnchor(replaced(module, "    if (anchorLeaves(family)) return radarCorrectionBegin(ctx, family, eye);", ""), anchorHook, ini, build, audit), "control: billboards moved twice (by the game and the shader) trip the pin");
+    check(!wiredAnchor(replaced(replaced(module, "    if (anchorLeaves(family)) return radarCorrectionBegin(ctx, family, eye);", ""), "g_familyDraws[family].fetch_add(1, std::memory_order_relaxed);",
+                                "g_familyDraws[family].fetch_add(1, std::memory_order_relaxed);\n    if (anchorLeaves(family)) return radarCorrectionBegin(ctx, family, eye);"),
                        anchorHook, ini, build, audit),
           "control: a billboard left to the game but counted as a draw of the pass trips the pin");
     check(!wiredAnchor(replaced(module, "&& !anchorLeaves(family);", ";"), anchorHook, ini, build, audit), "control: a billboard left to the game counted as refused trips the pin");
@@ -641,18 +666,29 @@ static void wiringCases() {
     check(!wiredAnchor(module, replaced(anchorHook, "st::radarAnchorAlong(u, ak, 1.0f, unitD, uaK)", "false"), ini, build, audit), "control: a setter that never turns d along u trips the pin");
     check(!wiredAnchor(module, replaced(anchorHook, "s->aRing.find(smp.seq)", "s->aRing.find(nowSeq)"), ini, build, audit),
           "control: u paired with the anchor of the setter's frame, not the sample's (the vehicle's turn would lag) trips the pin");
-    check(!wiredAnchor(module, replaced(anchorHook, "st::leadAim(aimK, s->rateNow, s->leadS)", "st::leadAim(aimK, st::AimRateDps{}, s->leadS)"), ini, build, audit),
-          "control: an aim never led to the write that shows it trips the pin");
-    check(!wiredAnchor(module, replaced(anchorHook, "s->leadS = st::adaptLead(s->leadS, horizon);", "(void)horizon;"), ini, build, audit), "control: a lead never taken from the measured horizon trips the pin");
-    check(!wiredAnchor(module, replaced(anchorHook, "c.t < smp.qpc && (!shown || c.t > shown->t)", "c.t < smp.qpc && (!shown || c.t < shown->t)"), ini, build, audit),
-          "control: the residual measured against the oldest call, not the one the write shows, trips the pin");
+    check(!wiredAnchor(module, replaced(anchorHook, "std::memcpy(ua, uaK, sizeof(ua));", "st::unitOfAim(leadAim(st::aimOf(uaK)), ua);"), ini, build, audit),
+          "control: a setter that leads the sample again (the shake of a8465cb3) trips the pin");
+    check(!wiredAnchor(module, replaced(anchorHook, "if (!found || one.t > out.t) {", "if (!found || one.t < out.t) {"), ini, build, audit),
+          "control: a write paired with the oldest kept call, not the most recent before it, trips the pin");
+    check(!wiredAnchor(module, replaced(anchorHook, "putCall(*s, q, baseT, inForce ? m.d : none, A, anchor > 0, floatOf(fb[2]));", "(void)inForce;"), ini, build, audit),
+          "control: setter calls never put into the ring the correction reads trip the pin");
     check(wiredAnchorCpuRows(vscreen, module), "the radar anchor's camera rows: read by the Unmap tee when the game writes them, looked up first at the eye-0 draw, used only from the pose's own frame");
     check(!wiredAnchorCpuRows(replaced(vscreen, "if (srvTurretWantsCameraRows()) guardedBudget(g_srvTurretCameraBudget, [&] { srvTurretNoteCameraWrite(s->camResource, s->camData, s->camBytes); });", ""), module),
           "control: the Unmap tee never handing the rows over trips the pin");
     check(!wiredAnchorCpuRows(vscreen, replaced(module, "if (w->hostSeq != hostSeq) return 3;", "")), "control: rows written in another frame paired with this frame's pose trip the pin");
     check(!wiredAnchorCpuRows(vscreen, replaced(module, "int miss = anchorDirCpuRows(ctx, poseSeq, cpuRows, &bytes, &writtenAt);", "int miss = 1;")), "control: the CPU path never tried (the GPU readback's lag) trips the pin");
     check(!wiredAnchorCpuRows(vscreen, replaced(module, "w->hostSeq = nativeTemporalFrameSequence();", "w->hostSeq = 0;")), "control: writes never stamped with their frame trip the pin");
-    check(!wiredAnchor(module, anchorHook, replaced(ini, "\nsrv_turret_radar_anchor = on\n", "\nsrv_turret_radar_anchor = off\n"), build, audit), "control: a drifted shipped default of the radar anchor key trips the pin");
+    check(wiredCorrection(vscreen, module), "the draw-time correction: family 7 only and on a radar writer's target, family 8 never, the game's depth, delta from the call the frame's write shows, capped, per eye");
+    check(!wiredCorrection(replaced(vscreen, "if (owner && srvTurretRadarWritersOn()) srvTurretRadarWriterDraw(self, bindingShaderHash(BindSlot::Vs));", ""), module),
+          "control: no writer watch (no billboard can match) trips the pin");
+    check(!wiredCorrection(vscreen, replaced(module, "if (family != 7) {", "if (family == 9) {")), "control: a correction not kept to family 7 trips the pin");
+    check(!wiredCorrection(vscreen, replaced(module, "        if (kind) g_cc.family8.fetch_add(1, std::memory_order_relaxed);\n        return false;\n", "        if (kind) g_cc.family8.fetch_add(1, std::memory_order_relaxed);\n")),
+          "control: family 8 falling through to the move trips the pin");
+    check(!wiredCorrection(vscreen, replaced(module, "if (!kind) return leave(kCorrNoMatch);", "(void)kind;")), "control: a family 7 draw moved without a radar writer's t4 (the 512x512 panel hologram) trips the pin");
+    check(!wiredCorrection(vscreen, replaced(module, "st::DepthMode::kGame)", "st::DepthMode::kFront)")), "control: a corrected draw that does not keep the game's depth trips the pin");
+    check(!wiredCorrection(vscreen, replaced(module, "srvRadarAnchorShownCall(writtenAt, call)", "srvRadarAnchorShownCall(INT64_MAX, call)")),
+          "control: delta paired with the newest call, not the one the frame's camera write shows, trips the pin");
+    check(!wiredCorrection(vscreen, replaced(module, "if (!(norm <= st::kCorrectionMaxM)) return kCorrOver;", "(void)norm;")), "control: an uncapped correction trips the pin");    check(!wiredAnchor(module, anchorHook, replaced(ini, "\nsrv_turret_radar_anchor = on\n", "\nsrv_turret_radar_anchor = off\n"), build, audit), "control: a drifted shipped default of the radar anchor key trips the pin");
     check(!wiredAnchor(module, anchorHook, replaced(ini, "# ui: SRV turret radar anchor | choices on, reversed, off", "# ui: SRV turret radar anchor | choices on, off"), build, audit),
           "control: a drifted menu row of the radar anchor key trips the pin");
     check(!wiredAnchor(module, anchorHook, ini, replaced(build, "\"src\\d3d11\\srv_radar_anchor.cpp\"", ""), audit), "control: the hook outside the compile list trips the pin");

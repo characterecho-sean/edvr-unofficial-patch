@@ -348,7 +348,7 @@ inline bool radarAnchorAlong(const float u[3], const float A[16], float sF, floa
 }
 // THE LAG (flight of c1275025: the disc slightly lagged the turret while it turned). u reached the setter two or three frames late (the GPU readback). Now the camera rows are read on
 // the CPU when the game writes them, u is paired with the anchor's rotation OF THE SAME FRAME (the host's frame sequence; SeqRing below), so the vehicle's own turning adds no error,
-// and the turret's aim relative to the vehicle is carried forward to the write that will show it (THE SHAKE below).
+// and what the turret does after the sample is taken up when the frame is drawn (THE SHAKE below).
 // A small ring of values keyed by the host's frame sequence: put overwrites the value of the same sequence, else the oldest; find gives the value of exactly that sequence (0 is none).
 template <typename T, uint32_t N>
 struct SeqRing {
@@ -401,82 +401,51 @@ inline void unitOfAim(const Aim& a, float out[3]) {
     out[1] = static_cast<float>(std::sin(p));
     out[2] = static_cast<float>(std::cos(p) * std::cos(y));
 }
-// THE SHAKE (flight of a8465cb3: the disc kept up with the turret but vibrated while it turned). The setter carried the sample by its age in HOST frames, 0 or 1 depending on whether
-// the host's frame boundary fell before or after the setter call. But a setter call always sits between two camera writes, and its placement is shown by the NEXT write, so the right
-// lead from the latest sample is about one sample interval either way: carrying it by 0 or 1 frame flipped the error by a frame (1 to 2 deg at 90 to 170 deg/s, about 1 cm at 0.4 m),
-// which shakes. Now the lead is a time, the display horizon (from the base sample's write to the write that shows the call), measured at every new sample and adapted slowly; the rate
-// is smoothed over the last kAimRateSamples samples by real time; the step is held.
-inline constexpr uint32_t kAimRateSamples = 4;       // the rate spans the last 4 samples (3 intervals, about 33 ms at 90 Hz)
-inline constexpr double kAimRateMaxSpanS = 0.1;      // older samples say nothing of now
-inline constexpr double kAimMaxRateDps = 360.0;      // the rate's limit, deg/s
-inline constexpr double kAimMaxStepDeg = 5.0;        // the lead's limit: a reversal overshoots by at most this (in practice the smoothed rate times the lead, about 2 deg)
-inline constexpr double kLeadInitialS = 1.0 / 90.0;  // the lead before the first measured horizon: one 90 Hz frame
-inline constexpr double kLeadMaxS = 0.040;           // the lead's limit (about 3.5 frames at 90 Hz)
-inline constexpr double kLeadAlpha = 1.0 / 32.0;     // the lead's adaptation per new sample (about 0.35 s at 90 Hz)
-struct AimSample {
-    int64_t t = 0;   // QPC ticks of the camera write
-    Aim aim;
-};
-struct AimRateDps {
-    double yaw = 0.0, pitch = 0.0;   // deg/s
-    bool valid = false;
-};
-// The rate over samples s[0..n) (oldest first, times increasing), from the oldest one within kAimRateMaxSpanS of the newest to the newest: the yaw change summed across the +-180 wrap
-// over the real time between them, each held to kAimMaxRateDps. Invalid with fewer than two such samples or times out of order.
-inline AimRateDps smoothedRate(const AimSample* s, uint32_t n, int64_t freq) {
-    AimRateDps r;
-    if (!s || n < 2 || freq <= 0) return r;
-    const int64_t newest = s[n - 1].t;
-    uint32_t first = n - 1;
-    while (first > 0 && s[first - 1].t > 0 && double(newest - s[first - 1].t) / double(freq) <= kAimRateMaxSpanS) --first;
-    if (first == n - 1) return r;
-    double yaw = 0.0;
-    for (uint32_t i = first + 1; i < n; ++i) {
-        if (!(s[i].t > s[i - 1].t)) return r;
-        yaw += wrapDeg(s[i].aim.yaw - s[i - 1].aim.yaw);
+// THE SHAKE (flights of a8465cb3 and c8d79c6a). Leading the sample by its age in host frames flipped between 0 and 1 frame and shook the disc; a lead in time (the measured display
+// horizon) took the mean error to 0 (residual -0.003..+0.003 deg, 0.00 frames of latency) but left +-1 to 2 deg of the turret's own changes, which no prediction can foresee. So the
+// setter uses the latest sample as it is, with NO lead, and the radar's billboards are corrected when the frame is drawn, from that frame's own camera: each moves by
+// delta = desired - used, in the world, where used is the offset the shown setter call left in force (put through the anchor's rotation it read) and desired is s * F along this
+// frame's true u in the same anchor's axes (radarCorrectionWorld). Unled, an error in which call a write shows would be a smooth one-frame lag, not a jitter.
+//
+// delta in the world: dStar = s * F * unit(u in A's axes), then (dStar - dUsed) put back through A's rows, the rows as they are, so an anchor's uniform scale applies to both. A's rows
+// must be orthogonal and of one length (within kAxisTolerance of it), and u a unit vector. False otherwise (the draw is the game's own). dStar receives the desired offset in A's axes.
+inline bool radarCorrectionWorld(const float uTrue[3], const float A[16], float sF, const float dUsed[3], float deltaW[3], float dStar[3]) {
+    if (!std::isfinite(sF) || sF == 0.0f) return false;
+    for (int i = 0; i < 3; ++i)
+        if (!std::isfinite(uTrue[i]) || !std::isfinite(dUsed[i])) return false;
+    const double un = std::sqrt(double(uTrue[0]) * uTrue[0] + double(uTrue[1]) * uTrue[1] + double(uTrue[2]) * uTrue[2]);
+    if (std::fabs(un - 1.0) > kAxisTolerance) return false;
+    double len[3];
+    for (int i = 0; i < 3; ++i) {
+        const float* row = A + 4 * i;
+        for (int j = 0; j < 3; ++j)
+            if (!std::isfinite(row[j])) return false;
+        len[i] = std::sqrt(double(row[0]) * row[0] + double(row[1]) * row[1] + double(row[2]) * row[2]);
+        if (!(len[i] > 1.0e-3)) return false;
     }
-    const double span = double(newest - s[first].t) / double(freq);
-    if (!(span > 0.0)) return r;
-    const auto hold = [](double v) { return v > kAimMaxRateDps ? kAimMaxRateDps : v < -kAimMaxRateDps ? -kAimMaxRateDps : v; };
-    r.yaw = hold(yaw / span);
-    r.pitch = hold((s[n - 1].aim.pitch - s[first].aim.pitch) / span);
-    r.valid = true;
-    return r;
+    for (int i = 0; i < 3; ++i) {
+        if (std::fabs(len[i] / len[0] - 1.0) > kAxisTolerance) return false;
+        const float* p = A + 4 * i;
+        const float* q = A + 4 * ((i + 1) % 3);
+        if (std::fabs((double(p[0]) * q[0] + double(p[1]) * q[1] + double(p[2]) * q[2]) / (len[i] * len[(i + 1) % 3])) > kAxisTolerance) return false;
+    }
+    for (int i = 0; i < 3; ++i) {
+        const float* row = A + 4 * i;
+        dStar[i] = static_cast<float>(double(sF) * (double(uTrue[0]) * row[0] + double(uTrue[1]) * row[1] + double(uTrue[2]) * row[2]) / (len[i] * un));
+    }
+    for (int j = 0; j < 3; ++j) {
+        double w = 0.0;
+        for (int i = 0; i < 3; ++i) w += (double(dStar[i]) - dUsed[i]) * A[i * 4 + j];
+        deltaW[j] = static_cast<float>(w);
+    }
+    return std::isfinite(deltaW[0]) && std::isfinite(deltaW[1]) && std::isfinite(deltaW[2]);
 }
-// The aim carried from its sample by leadS seconds at rate r, each step held to kAimMaxStepDeg, the pitch inside +-89 deg. No rate: the sample's own aim.
-struct AimLead {
-    Aim aim;
-    double dyaw = 0.0, dpitch = 0.0;
-    bool held = false;
-};
-inline AimLead leadAim(const Aim& a, const AimRateDps& r, double leadS) {
-    AimLead l;
-    l.aim = a;
-    if (!r.valid || !(leadS > 0.0) || !std::isfinite(leadS)) return l;
-    const auto hold = [&l](double v) {
-        if (v > kAimMaxStepDeg) {
-            l.held = true;
-            return kAimMaxStepDeg;
-        }
-        if (v < -kAimMaxStepDeg) {
-            l.held = true;
-            return -kAimMaxStepDeg;
-        }
-        return v;
-    };
-    l.dyaw = hold(r.yaw * leadS);
-    l.dpitch = hold(r.pitch * leadS);
-    l.aim.yaw = wrapDeg(a.yaw + l.dyaw);
-    l.aim.pitch = a.pitch + l.dpitch;
-    l.aim.pitch = l.aim.pitch > 89.0 ? 89.0 : l.aim.pitch < -89.0 ? -89.0 : l.aim.pitch;
-    return l;
+// A world displacement in one eye's space, the shader's axes (X right, Y up, Z forward), from that draw's camera rows (VS b1 rows 277..279: right, up, forward; 4 floats a row): the
+// inverse of signature H's lighting line (l += g277 * d.x + g278 * d.y + g279 * d.z), so the lighting position moves by the same world displacement.
+inline void radarDeltaInEye(const float rows[12], const float deltaW[3], float out[3]) {
+    for (int k = 0; k < 3; ++k) out[k] = rows[4 * k] * deltaW[0] + rows[4 * k + 1] * deltaW[1] + rows[4 * k + 2] * deltaW[2];
 }
-// The lead after one measured display horizon: moved kLeadAlpha of the way to it, held to [0, kLeadMaxS]; a horizon that is not finite or not positive leaves it.
-inline double adaptLead(double lead, double horizonS) {
-    if (!std::isfinite(horizonS) || !(horizonS > 0.0)) return lead;
-    double v = lead + kLeadAlpha * (horizonS - lead);
-    return v < 0.0 ? 0.0 : v > kLeadMaxS ? kLeadMaxS : v;
-}
+inline constexpr double kCorrectionMaxM = 0.10;   // a correction larger than this (a view-off frame, a fallback add) leaves the draw to the game
 // THE RESIDUAL (the instrument): at each camera write, the true aim (that camera with its own pose, in the anchor's axes of its frame) minus the aim the setter call it shows used. Lagging
 // when it has the sign of the turret's rate, leading when the opposite; with the rate above kResidualMinRateDegPerFrame its quotient by the rate a frame is the latency left, in frames.
 inline constexpr double kResidualMinRateDegPerFrame = 0.5;

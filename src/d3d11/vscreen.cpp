@@ -4335,6 +4335,7 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     // Issue 140 (TEMPORARY instrument): one frame in fifteen seconds, every owner draw is asked whether it writes the picture the hologram billboard shows (srv_turret.h). One relaxed load otherwise.
     if (owner && srvTurretHoloWatching()) srvTurretHoloWatchDraw(self, bindingShaderHash(BindSlot::Vs), bindingShaderHash(BindSlot::Ps), kind, count, instances);
     if (owner && srvTurretRadarCamOn()) srvTurretRadarCamDraw(self, bindingShaderHash(BindSlot::Vs));   // issue 140 (TEMPORARY instrument): the radar picture's camera, each move logged
+    if (owner && srvTurretRadarWritersOn()) srvTurretRadarWriterDraw(self, bindingShaderHash(BindSlot::Vs));   // issue 140 (TEMPORARY): the radar picture's writers, for the draw-time correction
     // fix.ui_quality, the UI layer (ui_layer.h): decided once for this draw
     // and applied around EVERY issue of it below -- the loader panel's and
     // the curved screen's substitutions draw the composite themselves, so

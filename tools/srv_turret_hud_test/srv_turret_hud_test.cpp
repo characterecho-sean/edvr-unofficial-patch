@@ -1729,60 +1729,54 @@ static void radarAnchorCases() {
                                                                                                  std::cos(-12.0 / 57.29577951308232) * std::cos(37.0 / 57.29577951308232), 1e-6),
           "the aim relative to the vehicle: yaw atan2(x, z), pitch asin(y), and back to a unit vector");
     check(std::fabs(st::wrapDeg(190.0) + 170.0) < 1e-9 && std::fabs(st::wrapDeg(-190.0) - 170.0) < 1e-9 && std::fabs(st::wrapDeg(45.0) - 45.0) < 1e-9, "yaw wraps into +-180");
-    // The shake (flight of a8465cb3): the lead is a time (the display horizon), the rate is smoothed over the last samples by real time, the step is held.
-    const int64_t hz = 1000000;   // a QPC of 1 MHz: ticks are microseconds
-    st::AimSample sweep[4];
-    for (int i = 0; i < 4; ++i) {
-        sweep[i].t = 1000000 + int64_t(i) * 11111;   // 90 Hz
-        sweep[i].aim.yaw = 10.0 + 1.5 * i;           // 1.5 deg a frame: 135 deg/s
-        sweep[i].aim.pitch = -5.0;
+    // The draw-time correction (flight of c8d79c6a: the lead was right on average, +-1 to 2 deg of the turret's own changes were left): delta = desired - used, in the world.
+    {
+        const double y5 = 5.0 / 57.29577951308232;
+        const float uUsedA[3] = {float(std::sin(y5)), 0.0f, float(std::cos(y5))};   // the aim the shown call used, 5 deg right of the anchor's z
+        const float sFc = 0.45f;
+        const float dUsedC[3] = {sFc * uUsedA[0], sFc * uUsedA[1], sFc * uUsedA[2]};
+        const float ident16[16] = {1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 3.0f, 4.0f, 5.0f, 1.0f};
+        const float uTrueZ[3] = {0.0f, 0.0f, 1.0f};   // the turret now straight ahead
+        float dW[3], dS[3];
+        check(st::radarCorrectionWorld(uTrueZ, ident16, sFc, dUsedC, dW, dS) && near3(dW, -sFc * std::sin(y5), 0.0, sFc * (1.0 - std::cos(y5)), 1e-6) && near3(dS, 0.0, 0.0, sFc, 1e-6),
+              "anchor = identity: delta = sF (u_true - u_used), the desired offset sF along u_true");
+        const float yawed[16] = {0.0f, 0.0f, -1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f};   // a vehicle facing world +x
+        const float uTrueX[3] = {1.0f, 0.0f, 0.0f};
+        check(st::radarCorrectionWorld(uTrueX, yawed, sFc, dUsedC, dW, dS) && near3(dW, sFc * (1.0 - std::cos(y5)), 0.0, sFc * std::sin(y5), 1e-6) && near3(dS, 0.0, 0.0, sFc, 1e-6),
+              "a rotated anchor: the used offset is put through the anchor's rows into the world, the desired one along u_true, and delta is their difference there");
+        float scaled16[16];
+        std::memcpy(scaled16, ident16, sizeof(scaled16));
+        for (int i = 0; i < 3; ++i) scaled16[i * 5] = 2.0f;
+        check(st::radarCorrectionWorld(uTrueZ, scaled16, sFc, dUsedC, dW, dS) && near3(dW, -2.0 * sFc * std::sin(y5), 0.0, 2.0 * sFc * (1.0 - std::cos(y5)), 1e-6) &&
+                  near3(dS, 0.0, 0.0, sFc, 1e-6),
+              "a uniformly scaled anchor: desired and used both go through the same rows, so delta scales with them and stays consistent");
+        const float uSame[3] = {uUsedA[0], uUsedA[1], uUsedA[2]};
+        check(st::radarCorrectionWorld(uSame, ident16, sFc, dUsedC, dW, dS) && near3(dW, 0.0, 0.0, 0.0, 1e-7), "u_true equal to the used aim: no correction");
+        check(st::radarCorrectionWorld(uTrueZ, ident16, -sFc, dUsedC, dW, dS) && near3(dS, 0.0, 0.0, -sFc, 1e-6), "reversed: the desired offset runs the other way");
+        float skew16[16], uneven16[16];
+        std::memcpy(skew16, ident16, sizeof(skew16));
+        std::memcpy(uneven16, ident16, sizeof(uneven16));
+        skew16[4] = 0.6f;
+        skew16[5] = 0.8f;
+        uneven16[0] = 1.5f;
+        const float halfU[3] = {0.0f, 0.0f, 0.5f};
+        check(!st::radarCorrectionWorld(uTrueZ, skew16, sFc, dUsedC, dW, dS) && !st::radarCorrectionWorld(uTrueZ, uneven16, sFc, dUsedC, dW, dS) &&
+                  !st::radarCorrectionWorld(halfU, ident16, sFc, dUsedC, dW, dS) && !st::radarCorrectionWorld(uTrueZ, ident16, 0.0f, dUsedC, dW, dS),
+              "an anchor whose rows are not orthogonal or not of one length, a u that is not unit, or no offset: no correction (the draw is the game's own)");
+        // The eye conversion on a canted eye (10 deg about up, 3 deg about right): delta in the eye's axes, then signature H's mapping (l += R x + U y + F z) gives delta back.
+        const double a10 = 10.0 / 57.29577951308232, a3 = 3.0 / 57.29577951308232;
+        const double Rv[3] = {std::cos(a10), 0.0, -std::sin(a10)}, Fv0[3] = {std::sin(a10), 0.0, std::cos(a10)};
+        const double Uv[3] = {0.0 * std::cos(a3) - Fv0[0] * std::sin(a3), std::cos(a3) - Fv0[1] * std::sin(a3), 0.0 - Fv0[2] * std::sin(a3)};
+        const double Fv[3] = {Fv0[0] * std::cos(a3) + 0.0 * std::sin(a3), Fv0[1] * std::cos(a3) + std::sin(a3), Fv0[2] * std::cos(a3)};
+        const float camRows[12] = {float(Rv[0]), float(Rv[1]), float(Rv[2]), 0.0f, float(Uv[0]), float(Uv[1]), float(Uv[2]), 0.0f, float(Fv[0]), float(Fv[1]), float(Fv[2]), 0.0f};
+        const float delta[3] = {0.012f, -0.004f, 0.007f};
+        float eyeD[3];
+        st::radarDeltaInEye(camRows, delta, eyeD);
+        float back[3];
+        for (int j = 0; j < 3; ++j) back[j] = camRows[j] * eyeD[0] + camRows[4 + j] * eyeD[1] + camRows[8 + j] * eyeD[2];
+        check(st::axesUsable(camRows, camRows + 4, camRows + 8) && near3(back, delta[0], delta[1], delta[2], 1e-6) && std::fabs(eyeD[2] - (Fv[0] * 0.012 - Fv[1] * 0.004 + Fv[2] * 0.007)) < 1e-6,
+              "a canted eye: the world delta in the eye's axes, put back through signature H's lighting mapping, is the world delta again");
     }
-    const st::AimRateDps steady = st::smoothedRate(sweep, 4, hz);
-    check(steady.valid && std::fabs(steady.yaw - 4.5 / 0.033333) < 0.01 && std::fabs(steady.pitch) < 1e-9, "a steady 135 deg/s sweep: the smoothed rate is 135 deg/s by real time");
-    st::AimSample jitter[4];
-    std::copy(sweep, sweep + 4, jitter);
-    jitter[2].aim.yaw += 0.6;   // one noisy sample in the middle does not move a rate taken end to end
-    const st::AimRateDps endToEnd = st::smoothedRate(jitter, 4, hz);
-    st::AimSample wrap2[2];
-    wrap2[0].t = 1000;
-    wrap2[0].aim.yaw = 179.0;
-    wrap2[1].t = 1000 + 11111;
-    wrap2[1].aim.yaw = -179.0;
-    const st::AimRateDps across = st::smoothedRate(wrap2, 2, hz);
-    st::AimSample stale[2];
-    stale[0].t = 1000;
-    stale[1].t = 1000 + 150000;   // 150 ms apart: older than kAimRateMaxSpanS
-    st::AimSample fastPair[2];
-    fastPair[0].t = 1000;
-    fastPair[1].t = 1000 + 11111;
-    fastPair[1].aim.yaw = 20.0;   // 1800 deg/s: held
-    st::AimSample backwards[2];
-    backwards[0].t = 5000;
-    backwards[1].t = 4000;
-    check(std::fabs(endToEnd.yaw - steady.yaw) < 1e-9 && across.valid && std::fabs(across.yaw - 2.0 / 0.011111) < 0.01 && !st::smoothedRate(stale, 2, hz).valid &&
-              std::fabs(st::smoothedRate(fastPair, 2, hz).yaw - st::kAimMaxRateDps) < 1e-9 && !st::smoothedRate(backwards, 2, hz).valid && !st::smoothedRate(sweep, 1, hz).valid,
-          "the rate: end to end over the samples within 100 ms (a noisy middle sample does not move it), across the yaw wrap, held to 360 deg/s; none for one sample, a stale pair or times out of order");
-    st::AimSample spanned[4];
-    std::copy(sweep, sweep + 4, spanned);
-    spanned[0].t = sweep[3].t - 150000;   // the oldest is too old: the rate spans the last three
-    check(std::fabs(st::smoothedRate(spanned, 4, hz).yaw - 3.0 / 0.022222) < 0.01, "a sample older than 100 ms is left out of the span");
-    st::Aim base;
-    base.yaw = 20.0;
-    base.pitch = -5.0;
-    const st::AimLead oneFrame = st::leadAim(base, steady, 1.0 / 90.0);
-    check(std::fabs(oneFrame.dyaw - 1.5) < 0.01 && std::fabs(oneFrame.aim.yaw - 21.5) < 0.01 && !oneFrame.held, "a lead of one 90 Hz frame at 135 deg/s: 1.5 deg");
-    st::AimRateDps reversal;
-    reversal.yaw = -360.0;
-    reversal.valid = true;
-    const st::AimLead heldLead = st::leadAim(base, reversal, 0.040);
-    check(std::fabs(heldLead.dyaw + st::kAimMaxStepDeg) < 1e-9 && heldLead.held && st::leadAim(base, st::AimRateDps{}, 0.011).dyaw == 0.0 && st::leadAim(base, steady, 0.0).dyaw == 0.0,
-          "the lead's step is held to 5 deg; no rate or no lead leaves the sample's own aim");
-    double lead = st::kLeadInitialS;
-    for (int i = 0; i < 400; ++i) lead = st::adaptLead(lead, 0.0125);
-    const double afterOne = st::adaptLead(st::kLeadInitialS, 0.0125);
-    check(std::fabs(lead - 0.0125) < 1e-6 && std::fabs(afterOne - (st::kLeadInitialS + st::kLeadAlpha * (0.0125 - st::kLeadInitialS))) < 1e-12 &&
-              st::adaptLead(0.039, 1.0) <= st::kLeadMaxS && st::adaptLead(0.01, -1.0) == 0.01 && st::adaptLead(0.01, std::numeric_limits<double>::quiet_NaN()) == 0.01,
-          "the lead adapts a 32nd of the way to each measured horizon, settles on it, stays inside 40 ms, and ignores a horizon that is not a positive number");
     st::ResidualStats rs;
     rs.add(1.5, 1.5);    // lagging a full frame
     rs.add(-0.3, 1.5);   // leading

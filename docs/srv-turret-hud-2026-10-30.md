@@ -19,9 +19,10 @@
   (0x38563A0, build 334925 only) adds radar forward along the turret's
   seated forward, in the anchor's axes, to the translation the game sets
   (about 1.96 m up), with the camera rows read on the CPU and paired by
-  frame. FLOWN (a8465cb3): it keeps up with the turret but vibrates while
-  the turret moves. BUILT, NOT FLOWN: a constant lead in time and a
-  residual instrument (journal, "a lead in time").
+  frame. FLOWN (c8d79c6a): the timing is right but +-1 to 2 deg of jitter is
+  left. BUILT, NOT FLOWN: no lead; the radar's picture billboards corrected
+  at draw time from the frame's own camera (journal, "a correction at draw
+  time").
 - **The radar's way out without it:** camera back 70, radar forward 0.
 - **What is wrong (the game's own placement):** the turret view's whole HUD
   sits about 0.7 m too far back for the stock camera (the radar behind the
@@ -52,9 +53,9 @@
 - **Ruled out:** see "Ruled out" below.
 - **Next flight (this branch):** radar anchor on; camera back 0 to 35 with
   radar forward = 65 minus camera back. Fast and slow turret sweeps, then
-  drive forward and turn the vehicle; watch for lag and shake. Read
-  `--grep "srv turret radar anchor: 10 s residual"`: mean near 0, a small
-  max, lagging and leading about even, the lead near the horizon.
+  drive forward and turn the vehicle; watch for jitter and lag. Read `--grep
+  "srv turret radar anchor: 10 s correction"`: draws moved in both eyes, few
+  left to the game, and |delta| about a turret frame's motion.
 
 ## Evidence (flight of 2026-10-30, Epic, v0.22.0-rc.3-139-gcd4c91c4)
 
@@ -193,6 +194,11 @@ same amount. Matching them needs a change to one layer's stereo depth.
 - ruled out: one forward pull making the layers meet, because a pull only
   moves vertices deeper than gap + 0.1 m. The near layer (0.11-0.70 m) is
   never in the window, and the deep layer itself spans 1.3-2.8 m.
+- ruled out: predicting the turret's aim (any lead) to hold the disc steady,
+  because with the timing right (residual mean about 0, implied latency
+  0.00 frames, lead at the 11.1 ms horizon) the residual still spreads
+  +-1 to 2 deg while sweeping, lagging and leading about evenly (flight
+  c8d79c6a, `edvr_gfx_20261101_040003.log`).
 
 ## Journal
 
@@ -1160,6 +1166,102 @@ The log lines:
   rest too slow to say), implied latency mean L frames over n, display
   horizon mean H ms, lead now D ms, sample interval I ms; setter ages 0: a,
   1: b, 2+: c`. When the lead is right, M is near 0 and X is small.
+
+To fly: camera back 0 to 35, radar forward = 65 minus camera back,
+`fix.srv_turret_radar_anchor = on`. Fast and slow turret sweeps, then drive
+forward and turn the vehicle.
+
+### 2026-11-01: the time lead flown (flight c8d79c6a); a correction at draw time
+
+Steam, `edvr_gfx_20261101_040003.log`, build matches, dump
+`eye_040252262001` (it looks right in a still). Sean: the radar still
+jitters noticeably while the turret turns; he wants it smooth and in place.
+- **The timing is right.** The 10 s residual lines read a mean of -0.003 to
+  +0.003 deg (-0.06 and -0.13 in the last two windows), an implied latency
+  of 0.00 frames, and a display horizon and lead of 11.1 ms. Lagging and
+  leading split about evenly (160 and 177, 125 and 118, 60 and 72).
+- **The spread is not.** The max |residual| while sweeping was 0.94, 1.21
+  and 1.98 deg. The 12.5 and 62.3 deg maxima of the last two windows came
+  from frame-time spikes near view-off.
+- **Reading.** The lead removes the mean lag. What is left is +-1 to 2 deg
+  of symmetric noise: Sean's changes of input, which no prediction can
+  foresee. At 0.4 m that is about 1 cm from frame to frame, the jitter.
+  Prediction cannot hold the disc steady; its place has to be corrected
+  when the frame is drawn, from that frame's own camera.
+
+**The build.**
+- **No lead.** The setter uses the latest camera sample as it is: d = s F
+  along u in the anchor's axes of the sample's frame. The time lead, the
+  smoothed rate, their caps and their rig cases and pins are removed. If
+  the pairing of a write with its setter call were ever off by one call, an
+  unled aim makes the error a smooth one-frame lag, where a lead made it
+  jitter.
+- **The call ring.** Each radar setter call goes into an 8-entry ring under
+  a version per entry (odd while the setter writes it; no lock, allocation
+  or SEH): its QPC time, the base sample's write time, the offset it left
+  in force (the d added; for our value fed back, the remembered d; else 0,
+  which counts as no shown call), the anchor's world rows it read, and s F.
+  A camera write shows the most recent call before it.
+- **The correction.** At each draw of the radar's own picture billboard,
+  the draw is moved through signature H's geometry shader by delta =
+  desired - used, in the world (`srv_turret_math.h` `radarCorrectionWorld`).
+  - used is the shown call's offset put through its anchor rows; desired is
+    s F along this frame's true u (that draw's camera rows, read when the
+    game wrote them, with that eye's pose of the same frame) in the same
+    anchor's axes. A uniform anchor scale then applies to both.
+  - delta is worked out once a frame, at the frame's first radar billboard
+    draw, and each eye turns it into its own space with its own camera rows:
+    (R . delta, U . delta, F . delta), rows 277..279 of that draw's VS b1.
+    That is the inverse of signature H's lighting line, so the lighting
+    position moves by delta too, with no shader change; it holds on canted
+    displays.
+  - The geometry shader gets the translation alone (gap 0) and the game's
+    own depth (mode game, whatever `fix.srv_turret_hud_depth` says), so the
+    hologram's scene-depth discard is unchanged. A delta over 10 cm (a
+    view-off frame, a fallback add) leaves the draw to the game.
+- **Which billboards.** While the yield is on, the draws of the terrain
+  schematic (vs 4EDE4BC9) and of vs 5B0068AF into a 256x256 target (the
+  Scorpion icon, from the texture's own size) record their render targets
+  for the frame. A family 7 draw (ps EA02FAC2) is moved only when its PS t4
+  is one of them, this frame's or the last frame's (a picture drawn after
+  its billboard shows the last frame's). Family 8 (E95634B0) and the
+  512x512 panel hologram are never moved; a family 8 draw on a radar
+  target is counted, because that would contradict the model.
+- **Instruments.**
+  - A 10 s correction line whenever the yield was on in the window, even
+    when nothing moved.
+  - A first-application line, once.
+  - The setter's and the camera writes' threads, once.
+  - In the residual line, how long before the camera write the shown call
+    was (near 0 would mean a racy pairing).
+  - The residual is classed against the plain change of aim between the
+    last two samples; with no lead its mean is the turret's motion over the
+    horizon, which the correction takes up.
+
+Unconfirmed until it flies:
+- that the shown call is the one displayed. A smooth one-frame lag after
+  the correction would mean the previous call is shown;
+- that the 256x256 rule picks only the radar's icon. The correction line
+  counts frames with two or more such writers;
+- that the billboards are drawn after their pictures in the same frame or
+  the next (no writer match counts the rest).
+
+The log lines:
+- `srv turret radar anchor: 10 s correction: N billboard draws moved (eye 0
+  a, eye 1 b; disc c, icon d) over F frames, |delta| mean X max Y cm, yaw
+  mean P max |Q| deg, pitch mean R max |S| deg; left to the game: no writer
+  match m, no camera rows r, no shown call s, no anchor n, over 10 cm o,
+  other e; family 8 on a radar target k; writers: 4EDE4BC9 w, 256x256
+  5B0068AF v (frames with two or more: z)`. No line at all means the code
+  never ran; 0 moved with reasons means it ran and never applied.
+- `srv turret radar anchor: correction first applied at frame F, eye E,
+  disc|icon: delta (x,y,z) cm in the world, (x,y,z) cm in the eye; the shown
+  call was G ms before the camera write`, once.
+- `srv turret radar anchor: the setter runs on thread T, the camera writes on
+  thread U[ (the same thread)]`, once.
+- The 10 s residual line drops `lead now` and gains `shown call before the
+  write: mean G min g max h ms`. The direction line drops `led by` and keeps
+  the age, the frames, the source and the aim.
 
 To fly: camera back 0 to 35, radar forward = 65 minus camera back,
 `fix.srv_turret_radar_anchor = on`. Fast and slow turret sweeps, then drive

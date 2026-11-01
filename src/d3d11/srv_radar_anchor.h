@@ -9,7 +9,8 @@
 //     place relative to the anchor, in the anchor's axes): the hook ADDS the offset to P's translation and calls the original with the sum (srv_turret_math.h
 //     radarPlacementMove). The game's own translation (about 1.96 m up on the Scorpion) is kept: the first build replaced it and dropped the radar. The offset is s * F along the
 //     turret's seated forward u, put in the anchor's axes with the anchor's world rotation (its vfunc +0x20; srv_turret_math.h radarAnchorAlong); without u or a usable rotation it
-//     is the fallback (0, 0, s * F), along the vehicle's forward, which swings the disc off as the turret turns (flight of 07bde936).
+//     is the fallback (0, 0, s * F), along the vehicle's forward, which swings the disc off as the turret turns (flight of 07bde936). Each call goes into a ring the render thread
+//     reads (srvRadarAnchorShownCall): the draw-time correction moves the radar's billboards by what the turret did between the sample and the frame drawn (srv_turret.cpp).
 //   * the schematic's per-frame update (0x384A590, obj in RCX, dt in XMM1): counted only, to say the object is alive. It writes nothing.
 //
 // The frame thread (srv_turret.cpp srvTurretFrameTick) arms them, publishes the offset every frame and does all the logging; the hooks only record.
@@ -35,11 +36,24 @@ const char* srvRadarAnchorWhy();
 void srvRadarAnchorPublish(const uint32_t bits[3], uint32_t frameNo);
 // The turret's seated forward in the game's world (srv_turret_math.h turretForwardWorld), unit, from a camera sample of host frame seq (cpu: rows read when the game wrote them; else
 // read back from the GPU), with the head's pitch then and the QPC time of the camera write it came from; null or !valid clears it. Render thread, and the frame tick clears it when a
-// stay begins. The setter hook pairs it with the anchor's rotation of the same host frame, carries the turret's aim to the write that will show the call (a lead in time, the measured
-// display horizon, at a smoothed rate; srv_turret_math.h THE SHAKE) and adds s * F along the result; without u or a usable rotation it adds the fallback (0, 0, s * F).
+// stay begins. The setter hook pairs it with the anchor's rotation of the same host frame and adds s * F along it as it is, with no lead (srv_turret_math.h THE SHAKE: what the turret
+// does after the sample is taken up at draw time, srv_turret.cpp's correction); without u or a usable rotation it adds the fallback (0, 0, s * F).
 void srvRadarAnchorPublishDirection(const float u[3], bool valid, uint64_t seq = 0, bool cpu = false, float headPitchDeg = 0.0f, int64_t qpc = 0);
-// The 10 s line: the window's largest u age (frames), lead (degrees) and residual (degrees), reset by the read.
-void srvRadarAnchorTakeWindowMax(uint64_t* ageMax, double* extrapMaxDeg, double* residualMaxDeg = nullptr);
+// The 10 s lines: the window's largest u age (frames) and residual (degrees), and the shortest and longest time from the shown call to the camera write (ms), reset by the read.
+void srvRadarAnchorTakeWindowMax(uint64_t* ageMax, double* residualMaxDeg, double* gapMinMs, double* gapMaxMs);
+
+// A setter call from the call ring: its QPC time, the base sample's write time, the offset it left in force (all zero: none, the game's own placement), the anchor's world rotation it
+// read (rows x, y, z in A[0..2], A[4..6], A[8..10]; aValid) and s * F.
+struct RadarAnchorShownCall {
+    int64_t t = 0, baseT = 0;
+    float d[3] = {};
+    float A[16] = {};
+    bool aValid = false;
+    float sF = 0.0f;
+};
+// The call a camera write at QPC time `before` shows: the most recent setter call made before it (the residual's pairing). False when the hook is not armed or none is kept. Any thread:
+// each ring entry is read under its own version (odd while the setter writes it); no lock, no allocation.
+bool srvRadarAnchorShownCall(int64_t before, RadarAnchorShownCall& out);
 
 struct RadarAnchorStats {
     RadarAnchorHookState state = RadarAnchorHookState::NotTried;
@@ -70,20 +84,19 @@ struct RadarAnchorStats {
     float anchorRows[9] = {};      // the anchor's world rotation rows (its vfunc +0x20) at the last radar call
     float pRows[9] = {};           // P's rotation rows at the last radar call
     float u[3] = {};               // the turret's forward in the world at the last add (zero: none)
-    float uAnchor[3] = {};         // u in the anchor's axes at the last directed add (after the extrapolation)
+    float uAnchor[3] = {};         // u in the anchor's axes at the last directed add
     float d[3] = {};               // the offset the last add used, in the anchor's axes
-    // the pairing and the extrapolation at the last directed computation
+    // the pairing at the last directed computation
     uint64_t nowSeq = 0, sampleSeq = 0, age = 0;   // the setter's host frame, the camera sample's, and the difference
-    float dyaw = 0.0f, dpitch = 0.0f;              // degrees carried forward
-    float rateDps = 0.0f;                          // the turret's yaw rate relative to the vehicle, deg/s
     float headPitch = 0.0f, aimPitch = 0.0f, aimYaw = 0.0f;   // the head's pitch in the seat at the sample; the turret's aim relative to the vehicle
-    bool sampleCpu = false, paired = false, lastClamped = false;   // the sample's source; the anchor's rotation found for the sample's frame; the step held
-    uint64_t ageSum = 0, extrapMilliSum = 0, clamped = 0, pairedCount = 0, unpairedCount = 0;   // cumulative, over directed computations
-    float leadMs = 0.0f, intervalMs = 0.0f;        // the lead now, and the mean interval between camera samples
+    bool sampleCpu = false, paired = false;        // the sample's source; the anchor's rotation found for the sample's frame
+    uint64_t ageSum = 0, pairedCount = 0, unpairedCount = 0;   // cumulative, over directed computations
+    float intervalMs = 0.0f;                       // the mean interval between camera samples
     uint64_t ageHist[3] = {};                      // directed computations by host-frame age: 0, 1, 2 or more (cumulative)
-    // the residual at each camera write (true aim minus the aim of the call it shows) and the measured display horizon, cumulative
-    uint64_t resN = 0, resLagging = 0, resLeading = 0, latN = 0, horizonN = 0, horizonSumUs = 0;
+    // the residual at each camera write (true aim minus the aim of the call it shows), the measured display horizon and the gap from the shown call to the write, cumulative
+    uint64_t resN = 0, resLagging = 0, resLeading = 0, latN = 0, horizonN = 0, horizonSumUs = 0, gapN = 0, gapSumUs = 0;
     int64_t resSumMicro = 0, latSumMilli = 0;
+    uint32_t setterThread = 0;                     // the thread the setter runs on (0: not called yet)
 };
 RadarAnchorStats srvRadarAnchorStats();
 
