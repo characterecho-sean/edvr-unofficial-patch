@@ -437,6 +437,10 @@ inline bool nativeOnFootMarkerFixLive() {
 // reference in use resets the eye's baselines. Set by readKey; read by the render thread. F62c: the patch measures against the eye's scene
 // rows whatever this key says (drawtag::patchDecide; no trust gate); the key now steers only the F52 measure lines.
 inline std::atomic<int> g_nativeOnFootMarkerRefKey{1};
+// F201: the draw tee has decided the draw in flight and its patched b0 is waiting to be bound at the game's issue (set at the decision, cleared at Begin and at the next draw's tee). The
+// AA-off draw fast path reads it (draw_fast_path.h drawClaimed): a decided draw takes forwardWithVerdict, where the bind is. Relaxed: any context's thread asks.
+inline std::atomic<bool> g_nativeOnFootMarkerFixPending{false};
+inline bool nativeOnFootMarkerFixPending() { return g_nativeOnFootMarkerFixPending.load(std::memory_order_relaxed); }
 bool nativeOnFootMarkerFixBegin(ID3D11DeviceContext* ctx);
 void nativeOnFootMarkerFixEnd(ID3D11DeviceContext* ctx);
 

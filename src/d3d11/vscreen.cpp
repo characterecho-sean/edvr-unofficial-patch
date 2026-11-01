@@ -1925,9 +1925,12 @@ void pixelProbeAfterEye(State* s, ID3D11DeviceContext* self, uint32_t count,
 // to them.
 // The AA-off fast path's decision for one draw (draw_fast_path.h, 2026-10-13): the verdict the draw got, the three loads
 // the decision reads (relaxed), and the VR world route's flag. Every draw thunk asks this after beginPanelOverride.
+// F201: a draw the marker fix has decided and not yet bound is claimed too (draw_fast_path.h drawClaimed): its bind is in forwardWithVerdict. The flag is read only while the AA is off, so with
+// the AA on the decision is what it was.
 inline bool drawPathFast(DrawVerdict v) {
-    return drawFastPathTaken(DrawPathInputs{g_aaOffDraw.load(std::memory_order_relaxed), drawGateWanted(),
-                                            engineVelocityLiveNow(), g_vrWorldWants, v != DrawVerdict::kNone});
+    const bool aaOff = g_aaOffDraw.load(std::memory_order_relaxed);
+    return drawFastPathTaken(DrawPathInputs{aaOff, drawGateWanted(), engineVelocityLiveNow(), g_vrWorldWants,
+                                            drawClaimed(v != DrawVerdict::kNone, aaOff && nativeOnFootMarkerFixPending())});
 }
 
 DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
@@ -4457,7 +4460,13 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     // F47 (TEMPORARY, fix.native_on_foot_marker_fix, default on since F98c): the marker composite's private b0 (rows 4 and 5 moved by the eye's NDC
     // delta), bound inside the layer's bracket for the game's own issue and the layer's second issues alone; End below, after them, puts the
     // game's b0 back. Begin binds nothing unless the draw tee decided this very draw. Two loads while off.
-    const bool markerFixed = layered && owner && nativeOnFootMarkerFixLive() && nativeOnFootMarkerFixBegin(self);
+    // F201: the bind used to need `layered`, and with Anti-aliasing off the UI layer is not live, so no marker composite was ever layered and every decision (the markers' lock, the
+    // weapon readout's pin, the labels, the reticle's depth patch) went unbound: F62c "0 of 13449 decisions bound", F85b "decided 35740, bound 0" in the pilot's flight of 2026-10-31.
+    // markerFixBindWanted (draw_fast_path.h): `layered` while a temporal mode runs, exactly as before; with it off there is no layer and no second issue, and the bind covers the game's
+    // own single issue below (the fast path does not skip it: drawPathFast claims a decided draw). Nothing between here and End rebinds b0 without the layer: the strip is an intro
+    // verdict's (a marker composite has none), the bars are layered only, the orbit lines bind a private b13 for their own vertex shader, and the label instrument only reads; and End is
+    // reached on every path (there is no return between this line and it).
+    const bool markerFixed = markerFixBindWanted(layered, temporalPassWantsFssChrome()) && owner && nativeOnFootMarkerFixLive() && nativeOnFootMarkerFixBegin(self);
     if (owner && nativeOnFootMarkerProbeLive()) nativeOnFootLabelIssue(self, layered);   // F87p: the label instrument's issue facts (read only)
     // THE SURFACE STRIP (docs\intro-video.md, 2026-10-01). With fix.panel_curvature above 0 the intro movie's composite (EDVR places its quad;
     // intro_panel.h) and the splash's (the game's own placement; intro_curve.h) are drawn as the bent strip IN THE PLACE of the game's flat quad.

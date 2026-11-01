@@ -11640,6 +11640,9 @@ def _hj_f85b(rows, ctx):
         if none and not eng and not own:
             oflag.append("no source gave the origin rows on any of the %d marker composite draws" % none)
     if path == "none" or found == 0 or decided == 0 or bound == 0:
+        if decided and not bound:   # F201: the same as the marker fix: decided, never bound (the bind needed the UI layer's bracket before F201)
+            oflag.append("%d draws decided and none bound at the issue: the patch was decided and never written (a build before F201 bound it only for a draw the UI layer took, which "
+                         "Anti-aliasing off never does)" % decided)
         return ("NEVER APPLIED", text + (" [" + "; ".join(oflag) + "]" if oflag else ""))
     verdict = "PARTIAL" if bound * 10 < decided * 9 or refused * 10 > decided or oflag else "OK"
     return (verdict, text + (" [" + "; ".join(oflag) + "]" if oflag else ""))
@@ -11829,7 +11832,10 @@ def _hj_marker(rows, ctx):
                     "(the interface layer and ui depth name it only with a temporal mode on; a build before F198 had no other source)" % (mc, _hsecs(idle)))
         return ("IDLE", text + "; no marker composite draw reached the fix in %d s" % _hsecs(idle))
     if bound == 0:
-        return ("NEVER APPLIED", text)
+        # F201: decisions with not one bound at the issue is the patch decided and never written. The bind sits in forwardWithVerdict and, before F201, needed the UI layer's bracket: with
+        # Anti-aliasing off the layer is never live, so the pilot's flight of 2026-10-31 read "0 of 13449 decisions bound" with every marker, readout and label decided.
+        return ("NEVER APPLIED", text + "; %d decisions and none bound at the issue: the patch was decided and never written (a build before F201 bound it only for a draw the UI layer took, "
+                "which Anti-aliasing off never does)" % dec)
     return ("PARTIAL" if bound * 2 < dec else "OK", text)
 
 
@@ -22112,6 +22118,11 @@ def self_test_health():
               has=["though the weapon eye offset line says a weapon was drawn for 2 s"])
         check("F85b: submits but the identification path is none", [pin_sec(540, "none"), pin_part()], 3, [("NEVER APPLIED", F85B)], has=["path none"])
         check("F85b: parts found and none bound", [pin_sec(), pin_part(bound=0)], 3, [("NEVER APPLIED", F85B)], has=["bound 0"])
+        # F201: the pilot's flight of 2026-10-31 (Anti-aliasing off): "decided 35740, bound 0, refused 0" -- named as the patch decided and never written; bound, it reads OK
+        check("F201 F85b: this flight's lines, parts decided and none bound at the issue", [pin_sec(540), pin_part(found=90, decided=90, bound=0), pin_part(found=90, decided=90, bound=0)], 3,
+              [("NEVER APPLIED", F85B)], has=["decided 180, bound 0", "180 draws decided and none bound at the issue: the patch was decided and never written"])
+        check("F201 F85b: the same parts, decided and bound", [pin_sec(540), pin_part(found=90, decided=90, bound=90), pin_part(found=90, decided=90, bound=90)], 0, [("OK", F85B)],
+              lacks=["never written"])
         check("F85b: submits that never reach a part line", [pin_sec(), pin_sec()], 3, [("NEVER APPLIED", F85B)], has=["found 0"])
         check("F85b: a tenth of the decisions refused", [pin_sec(), pin_part(found=100, decided=90, bound=90, refused=20, why="no scene rows for the eye 18, no K 2")], 0,
               [("PARTIAL", F85B)], has=["refused 20 [no scene rows for the eye 18, no K 2]"])
@@ -22298,6 +22309,10 @@ def self_test_health():
               has=["patch applied eye 0 92% (23 of 25), eye 1 92% (23 of 25); named 113, outside 8 (F87c)"])
         check("marker fix: decisions and none bound", [mark(0, 25)] * 2, 3, [("NEVER APPLIED", MK)])
         check("marker fix: under half bound", [mark(10, 25)], 0, [("PARTIAL", MK)])
+        # F201: the pilot's flight of 2026-10-31 (Anti-aliasing off, 21:25): every decision made, none bound -- NEVER APPLIED naming the missing bind; bound, it reads OK
+        check("F201 marker fix: this flight's lines, 180 decisions an eye and none bound at the issue", [mark(0, 180, 0), mark(0, 180, 1)], 3, [("NEVER APPLIED", MK)],
+              has=["patch applied eye 0 0% (0 of 180), eye 1 0% (0 of 180)", "360 decisions and none bound at the issue: the patch was decided and never written"])
+        check("F201 marker fix: the same decisions, all bound", [mark(180, 180, 0), mark(180, 180, 1)], 0, [("OK", MK)], lacks=["never written"])
         check("marker fix: no decision at all", [mark_idle(0), mark_idle(1)], 0, [("IDLE", MK)], has=["no marker composite draw reached the fix in 2 s"])
         # F198: the pilot's flight (edvr_gfx_20261031_161247, Anti-aliasing off on foot): the marker probe counted 330 marker composite draws a second at the draw tee and every F62c
         # line read "no decision this second (no marker composite draw of the eye reached the fix)" -- the draws' eye was named by the layer and ui depth only, and neither runs with

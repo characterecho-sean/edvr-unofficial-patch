@@ -33132,6 +33132,7 @@ void f85bDecide(ID3D11DeviceContext* ctx, uint32_t frame, const Rec& r, ID3D11Bu
     if (s.rowsState == drawtag::kRowsNewest) ++pe.newest;
     f86hCount(frame, e, false);
     g_fix.pending = true;
+    g_nativeOnFootMarkerFixPending.store(true, std::memory_order_relaxed);   // F201
     g_fix.weapon = true;
     g_fix.rows7 = true;
     g_fix.wSlot = static_cast<int>(slot);
@@ -34117,6 +34118,7 @@ void fixDecide(ID3D11DeviceContext* ctx, uint32_t frame, const Rec& r, int slot,
     g_fix.ref = ref;
     f86hCount(frame, e, false);
     g_fix.pending = true;
+    g_nativeOnFootMarkerFixPending.store(true, std::memory_order_relaxed);   // F201
     g_fix.weapon = false;   // F85b
     g_fix.rows7 = false;
     g_fix.newest = v.newest;
@@ -35992,6 +35994,7 @@ void nativeOnFootMarkerProbeDraw(ID3D11DeviceContext* ctx, uint32_t instances, u
     ++f44::g_drawSerial;   // F47: a decision is for the draw that made it (Begin checks the serial)
     if (f44::g_fix.pending) ++f44::g_win.fixNotIssued;   // decided, but Begin never ran for it (the draw was not the layer's, or skipped)
     f44::g_fix.pending = false;
+    g_nativeOnFootMarkerFixPending.store(false, std::memory_order_relaxed);   // F201
     // F47: a private b0 still bound from an earlier draw (End did not run): put the game's back only while ours is still the one bound (a
     // later bind of the game's own stands), and drop the reference either way.
     if (f44::g_fix.bound) {
@@ -36116,6 +36119,7 @@ bool nativeOnFootMarkerFixBegin(ID3D11DeviceContext* ctx) {
     using namespace f44;
     if (!ctx || !g_fix.pending) return false;
     g_fix.pending = false;
+    g_nativeOnFootMarkerFixPending.store(false, std::memory_order_relaxed);   // F201
     if (g_fix.serial != g_drawSerial || g_fix.ctx != ctx || g_fix.bound || (g_fix.eye != 0 && g_fix.eye != 1)) {
         ++g_win.fixStale;
         return false;
@@ -36235,6 +36239,7 @@ void nativeOnFootMarkerProbeShutdown() {
     f44::g_staging.release();
     if (f44::g_fix.saved) f44::g_fix.saved->Release();
     f44::g_fix = f44::Fix{};
+    g_nativeOnFootMarkerFixPending.store(false, std::memory_order_relaxed);   // F201
     for (f44::KeyState& k : f44::g_keys) k = f44::KeyState{};   // F50/F52: every key's baselines
     f44::g_keyIdx = drawtag::KeyIndex<f44::kKeySlots>{};
     f44::g_stream = f44::StreamShadow{};                          // F63: the stream shadow, the biases, the keys' P
