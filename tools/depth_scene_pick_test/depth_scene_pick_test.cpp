@@ -459,11 +459,42 @@ void runNativeOnFootTests(ID3D11DeviceContext* context) {
     check(!edvr::depthProbeCurrentSceneEyeOf(view(2), &eye, &target) && eye == -1 &&
           !edvr::depthProbeCurrentSceneEyeOf(view(3), &eye, &target) && eye == -1,
           "F196: the atlas and the HUD's third target are not scene eyes");
+    // F199: the pick-only arm now hands out the scene depth (F85c's reticle march, F119's grid and F123's wall contact never had it with Anti-aliasing off), from the pair the frame
+    // boundary formed, for the size that pair is, and never by re-picking.
     {
         ID3D11Texture2D* texture = reinterpret_cast<ID3D11Texture2D*>(uintptr_t{1});
-        check(!edvr::depthProbeSceneDepth(200, 100, 0, &texture) && texture == nullptr &&
-              !edvr::depthProbeSceneDepth(200, 100, 1, &texture) && texture == nullptr,
-              "F196: native on-foot VR alone hands out no depth texture (F85c and F119 decline as they did with the probe off)");
+        const uint32_t scansBefore = edvr::g_scenePickScans;
+        const int pairBefore[2] = {edvr::g_scenePick[0], edvr::g_scenePick[1]};
+        check(edvr::depthProbeSceneDepth(200, 100, 0, &texture) && texture == fakeTexture(10),
+              "F199: the pick-only arm hands out the first eye's scene depth for the pair's size (by first bind: target 0)");
+        check(edvr::depthProbeSceneDepth(200, 100, 1, &texture) && texture == fakeTexture(11),
+              "F199: ...and the second eye's");
+        ID3D11Texture2D* formatted = nullptr;
+        uint32_t dsvFormat = 0;
+        check(edvr::depthProbeSceneDepthFormat(200, 100, 1, &formatted, &dsvFormat) && formatted == fakeTexture(11) && dsvFormat == static_cast<uint32_t>(DXGI_FORMAT_D32_FLOAT),
+              "F199: depthProbeSceneDepthFormat rides on it: the eye's texture and the view format the game binds it with");
+        // a wrong size is refused: the 100x100 atlas's size (a target is there, busy) and a size nothing has; the pair stays and no scan is made
+        check(!edvr::depthProbeSceneDepth(100, 100, 0, &texture) && texture == nullptr && !edvr::depthProbeSceneDepth(201, 100, 1, &texture) && texture == nullptr &&
+              !edvr::depthProbeSceneDepth(200, 101, 0, &texture) && texture == nullptr,
+              "F199: a wrong size is refused, with no texture");
+        check(edvr::g_scenePick[0] == pairBefore[0] && edvr::g_scenePick[1] == pairBefore[1] && edvr::g_scenePickScans == scansBefore,
+              "F199: the refusals did not re-pick: the boundary's pair stands and no scan of the targets was made (an asker of another size cannot displace it within the frame)");
+        check(!edvr::depthProbeSceneDepth(200, 100, 2, &texture) && texture == nullptr && !edvr::depthProbeSceneDepth(200, 100, -1, &texture) && texture == nullptr &&
+              !edvr::depthProbeSceneDepth(200, 100, 0, nullptr),
+              "F199: an eye other than 0 or 1, and no output, are refused");
+        // the pair's size asked repeatedly agrees with the boundary's pick at every call (it is what refreshScenePick would have returned) and does not move it
+        for (int i = 0; i < 4; ++i)
+            check(edvr::depthProbeSceneDepth(200, 100, i & 1, &texture) && texture == fakeTexture(i & 1 ? 11 : 10) && edvr::g_scenePick[0] == pairBefore[0] && edvr::g_scenePick[1] == pairBefore[1],
+                  "F199: asked again, the same pair");
+        // the depth is not handed out from a pair whose targets were not drawn into last frame (refreshScenePick's own rule), nor when a target has left the table
+        const edvr::Target saved0 = edvr::g_targets[0], saved1 = edvr::g_targets[1];
+        edvr::g_targets[0].drawsLastFrame = 0;
+        check(!edvr::depthProbeSceneDepth(200, 100, 0, &texture) && texture == nullptr, "F199: a pair whose target was not drawn into last frame is refused");
+        edvr::g_targets[0] = saved0;
+        edvr::g_targets[1].dsv = nullptr;
+        check(!edvr::depthProbeSceneDepth(200, 100, 1, &texture) && texture == nullptr, "F199: a pair whose target has left the table is refused");
+        edvr::g_targets[1] = saved1;
+        check(edvr::depthProbeSceneDepth(200, 100, 1, &texture) && texture == fakeTexture(11), "F199: and handed out again once it is back");
     }
     // The pair is held while the game keeps drawing it (hysteresis): the same frame again, the same pair.
     frame();
@@ -484,6 +515,15 @@ void runNativeOnFootTests(ID3D11DeviceContext* context) {
     check(edvr::g_layoutTarget == 2, "F196 control: with a temporal mode on, the layout census still arms on the atlas");
     check(edvr::g_scenePick[0] == -1 && edvr::g_scenePick[1] == -1,
           "F196 control: with a temporal mode on, the probe forms no pair of its own at the boundary (depthProbeSceneDepth does)");
+    {   // F199 control: with a temporal mode on depthProbeSceneDepth is what it was: it re-picks by the size asked (the pair forms here), and a size with no pair is refused
+        ID3D11Texture2D* texture = reinterpret_cast<ID3D11Texture2D*>(uintptr_t{1});
+        const uint32_t scansBefore = edvr::g_scenePickScans;
+        check(edvr::depthProbeSceneDepth(200, 100, 0, &texture) && texture == fakeTexture(10) && edvr::g_scenePick[0] == 0 && edvr::g_scenePick[1] == 1 &&
+                  edvr::g_scenePickScans == scansBefore + 1,
+              "F199 control: with a temporal mode on the asker forms the pair itself, by a scan of the targets (the temporal pass's way)");
+        check(edvr::depthProbeSceneDepth(200, 100, 1, &texture) && texture == fakeTexture(11) && edvr::g_scenePickScans == scansBefore + 1,
+              "F199 control: ...and the second eye's from the cache");
+    }
     edvr::g_layoutTarget = edvr::g_layoutRecord = -1;
     edvr::layoutReset();
 

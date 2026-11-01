@@ -64,6 +64,7 @@ struct Counts {
     unsigned long long selfOff = 0;           // F121c: the replacement turned itself off (the HDR scene after it was non-finite): the game's own shader since
     unsigned long long refused[static_cast<unsigned>(Refusal::kCount)] = {0, 0, 0, 0, 0};
     unsigned long long seenAll = 0;           // every visor draw, with or without an eye
+    unsigned long long eyesFromDepth = 0;     // F200: of those with an eye, the ones the depth probe's scene pair named (Anti-aliasing off: the eye filing names none)
     unsigned long long refusedAll() const {
         unsigned long long n = 0;
         for (unsigned long long r : refused) n += r;
@@ -103,6 +104,10 @@ inline int formatWindow(char* out, size_t size, const Counts& c, float sLeft, fl
         "outer %.3f inner %.3f%s",
         c.seenAll, c.seen[0], c.seen[1], c.shifted[0] + c.shifted[1], c.shifted[0], c.shifted[1], c.symmetric, c.refusedAll(),
         c.refused[0], c.refused[1], c.refused[2], c.refused[3], c.refused[4], c.selfOff, sLeft, sRight, outer, inner, tangents ? "" : " (not published)");
+}
+// F200: the window line's tail, appended after formatWindow's (so a rule that reads the line to its end finds this last): the draws whose eye the depth probe named.
+inline int formatWindowDepthTail(char* out, size_t size, const Counts& c) noexcept {
+    return std::snprintf(out, size, "; eyes from the depth probe %llu", c.eyesFromDepth);
 }
 // F121c: the once-per-session line when the replacement turns itself off. taps non-finite of taps read, in the eye's sample after a draw through the replacement.
 inline int formatSelfOff(char* out, size_t size, unsigned nonFinite, unsigned taps, int eye) noexcept {

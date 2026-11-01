@@ -78,6 +78,12 @@ enum class GpuCensusSection : uint8_t {
     // is on show, from the slow path behind the hook's watch gate -- never from the no-op watcher calls -- and, like the world route's, with no turn in the
     // rotation until called this window, so with no scanner on show the census samples as it did before this section existed.
     FrameFssReveal,
+    // Native on foot's depth readers (F199, native_on_foot.cpp): F85c's reticle depth march (one single-group dispatch over the eye's scene depth for up to 32 lines, and a copy of its small
+    // output into the staging ring) and F119's head-containment grid (a single-group dispatch for each eye that drew its scene, and one copy of the shared output), the GPU work behind F123's
+    // wall contact. They run on foot only: F119's each frame, F85c's while a reticle, weapon readout or prompt line is up. Priced here because with Anti-aliasing off they now get the scene depth
+    // (F199) and, like the FSS reveal's, they are EDVR's cost in the in-frame total. Called from the dispatch call sites, behind the asker's own gates, so a window with none on foot prints "-" and
+    // the rotation gives the section no turn until it has been called this window.
+    FrameOnFootDepth,
     // The second skin's GPU work (F2: engine_velocity.cpp and skin_join_gpu.cpp), priced item by item (F16). Each is NESTED inside a FrameEngineVelocity span (the
     // work was already in the engine velocity figure and still is), so they are timed on turns of their own, are NEVER added to a total, and are reported on a line
     // of their own. Like the world route's they have no turn until called this window, so with no skinned character the census samples exactly as it did before.

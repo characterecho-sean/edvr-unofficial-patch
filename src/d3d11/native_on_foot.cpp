@@ -136,6 +136,7 @@
 #include "temporal_pass.h"   // F52: temporalPassEyeRows, the temporal pass's camera rows for an eye (the marker correction's reference)
 #include "ui_depth.h"  // F46: uiDepthEyeOfTargetReadOnly, ui depth's frame table (the marker probe's eyes; read only)
 #include "ui_layer.h"   // F46: uiLayerEyeOfGameTarget, the UI layer's redirect mapping (the marker probe's eyes; read only)
+#include "gpu_census.h"   // F199: GpuCensusScope, the 30 s census the depth readers' GPU work is priced in (FrameOnFootDepth)
 #include "submitted_eye.h"   // F198: the eye by the submitted textures (source 'S', Anti-aliasing off) and targetEye's order
 #include "vscreen.h"    // F46: vScreenIsEyeSized, the world capture's eye-sized targets
 
@@ -31767,10 +31768,14 @@ bool f86Dispatch(ID3D11DeviceContext* ctx, uint32_t frame, const double* reticle
     ctx->CSSetConstantBuffers(0, 2, cbp);
     ctx->CSSetShaderResources(0, 1, &g.srv);
     ctx->CSSetUnorderedAccessViews(0, 1, &g.uav, nullptr);
-    ctx->Dispatch(1, 1, 1);
-    ctx->CSSetShaderResources(0, 1, &nullSrv);
-    ctx->CSSetUnorderedAccessViews(0, 1, &nullUav, nullptr);
-    ctx->CopyResource(g.stage[si], g.out);
+    {   // F199: the reticle march's GPU work, priced in the 30 s census (FrameOnFootDepth, with F119's grid): one single-group dispatch over the eye's scene depth and the copy of its small output
+        GpuCensusScope census(ctx, GpuCensusSection::FrameOnFootDepth);
+        census.markIssued();
+        ctx->Dispatch(1, 1, 1);
+        ctx->CSSetShaderResources(0, 1, &nullSrv);
+        ctx->CSSetUnorderedAccessViews(0, 1, &nullUav, nullptr);
+        ctx->CopyResource(g.stage[si], g.out);
+    }
     ctx->CSSetShader(savedCs, nullptr, 0);
     ctx->CSSetShaderResources(0, 1, &savedSrv);
     ctx->CSSetUnorderedAccessViews(0, 1, &savedUav, nullptr);
@@ -32061,6 +32066,8 @@ void f119Dispatch(ID3D11DeviceContext* ctx, uint32_t ended, ID3D11Texture2D* con
     sl = F119Gpu::Slot{};
     ++g.seq;
     bool any = false;
+    {   // F199: the grid's GPU work, priced in the 30 s census (FrameOnFootDepth, with F85c's march): a single-group dispatch for each eye that drew its scene, and the one copy of the shared output
+    GpuCensusScope census(ctx, GpuCensusSection::FrameOnFootDepth);
     for (int e = 0; e < 2; ++e) {
         if (!ready[e]) continue;
         D3D11_MAPPED_SUBRESOURCE m{};
@@ -32095,7 +32102,11 @@ void f119Dispatch(ID3D11DeviceContext* ctx, uint32_t ended, ID3D11Texture2D* con
         any = true;
     }
     ctx->CSSetUnorderedAccessViews(0, 1, &nullUav, nullptr);
-    if (any) ctx->CopyResource(g.stage[si], g.out);
+    if (any) {
+        census.markIssued();
+        ctx->CopyResource(g.stage[si], g.out);
+    }
+    }
     ctx->CSSetShader(savedCs, nullptr, 0);
     ctx->CSSetShaderResources(0, 2, savedSrv);
     ctx->CSSetUnorderedAccessViews(0, 1, &savedUav, nullptr);

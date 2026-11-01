@@ -10858,6 +10858,28 @@ def _hvisor_census_needed(ctx):
     return any(int(r["seen"]) > int(r.get("keyoff") or 0) for r in _hrows(ctx, "visor axis (F121)", "sec"))
 
 
+_F119_NEVER_READ_S = 5   # F199: on-foot seconds with the depth grid never read that make it NEVER APPLIED (under it, PARTIAL)
+
+
+def _f119_depth_never_read(ctx):
+    """F199: (on-foot seconds, the skip reasons counted) when F119 sampled a head for at least _F119_NEVER_READ_S on-foot seconds and read the scene depth in none of them; else
+    None. F123's wall contact is fed by F119's depth grid alone, so the same fact reads there: the contact never had a frame to judge."""
+    rows = ctx.get("head containment (F119)", {}) if ctx else {}
+    sec = rows.get("sec", []) + _f119_windows(rows.get("window", []))
+    if not sec or _hsecs(sec) < _F119_NEVER_READ_S:
+        return None
+    sampled = 0
+    skips = collections.Counter()
+    for r in sec:
+        for m in _F119_CLASS_RE.finditer(r["offs"]):
+            sampled += int(m.group("n"))
+        for m in _F119_EYE_RE.finditer(r["depth"]):
+            if int(m.group("read")):
+                return None
+        skips.update(_hpairs(r["skipped"]))
+    return (_hsecs(sec), skips) if sampled else None
+
+
 def _hj_f119_containment(rows, ctx):
     """F119 (measure only): the head's offset from its rest point on foot, and how close world geometry gets to each eye, to set the radii of a head leash and a wall
     contact rule. Per class the p95 and max of the horizontal offset (the p95 from the pooled histogram, an upper bin edge), the pooled p99.5 of normal play (the seconds
@@ -11012,7 +11034,10 @@ def _hj_f119_containment(rows, ctx):
         skips = collections.Counter()
         for r in sec:
             skips.update(_hpairs(r["skipped"]))
-        return ("PARTIAL", text + "; the depth grid was never read (skipped: %s)" % _htop(skips, 4))
+        # F199: a session that spent its on foot seconds and never got the scene depth is the grid never applied (with Anti-aliasing off, a build before F199 handed it none:
+        # "no scene depth" in every second); a few seconds may simply not have had a frame to read, so under _F119_NEVER_READ_S seconds it stays PARTIAL.
+        verdict = "NEVER APPLIED" if _hsecs(sec) >= _F119_NEVER_READ_S else "PARTIAL"
+        return (verdict, text + "; the depth grid was never read (skipped: %s)" % _htop(skips, 4))
     if eye_secs * 2 < _hsecs(sec):
         return ("PARTIAL", text + "; the depth grid was read in under half of the seconds")
     if base_max >= 4:
@@ -11025,6 +11050,21 @@ def _hj_f119_containment(rows, ctx):
 # one (black at 23 cm / +8 cm; held 0.3 s: the position recentre), a wall contact one (32 of 64 world cells within the near plane + 3 cm in an eye for 3 frames: black at once,
 # latched; 0.3 s: the recentre; released when it has cleared and the head is inside soft). Each says whether it was recentred and how long the view was black.
 def _hj_f123_containment(rows, ctx):
+    """F199: F123's verdict, then NEVER APPLIED over an OK or IDLE one when F119 never read the scene depth on foot: the wall contact is fed by that grid alone, so an armed machine
+    with no episodes proves nothing about it (with Anti-aliasing off a build before F199 handed the grid no depth: the pilot's eyes passed through walls, the positional leash
+    still worked)."""
+    result = _hj_f123_core(rows, ctx)
+    if result is None or result[0] not in ("OK", "IDLE"):
+        return result
+    never = _f119_depth_never_read(ctx)
+    if never is None:
+        return result
+    secs, skips = never
+    return ("NEVER APPLIED", result[1] + "; the wall contact never had the scene depth: head containment (F119) read none in %d on-foot seconds (skipped: %s), so the leash alone was judged" % (
+        secs, _htop(skips, 4)))
+
+
+def _hj_f123_core(rows, ctx):
     """F123: the leash and the wall contact. IDLE when armed and nothing triggered; OK when the episodes behave: every hard episode held past 0.4 s was recentred, every recentre
     asked brought the head inside soft, and the contact was gone 1 s after it. PARTIAL on a recentre that did not bring the head inside soft, or on a wall contact still present
     1 s after a recentre. NEVER APPLIED on a leash hard episode that stayed past the hard radius 0.4 s or more with no recentre (the timer asks at 0.3 s). The contact
@@ -11227,6 +11267,10 @@ def _hj_f121_visor_axis(rows, ctx):
         len(sec), tot["seen"], tot["seenl"], tot["seenr"], tot["shifted"], tot["shl"], tot["shr"], tot["sym"],
         ", test key off %d" % tot["keyoff"] if legacy_key_state else "", tot["refused"], tot["r0"], tot["r1"], tot["r2"],
         tot["r3"], tot["r4"], tot["selfoffn"], sl, sr, outer, inner, want_l, want_r, "" if published else "; the tangents were not published")
+    # F200: the draws whose eye the depth probe's scene pair named (Anti-aliasing off: the eye filing names none); a line from a build before F200 has no such field
+    depth_rows = [r for r in sec if r.get("depth") is not None]
+    if depth_rows:
+        text += "; eyes named by the depth probe's scene pair (F200) %d of %d draws" % (_hsum(depth_rows, "depth"), tot["seen"])
     if tot["keyoff"] and not tot["shifted"] and not tot["refused"]:
         return ("IDLE", text + "; the test key fix.native_on_foot_visor_axis is off (the default): the game's own visor vertex shader drew all of them")
     if want_l == 0.0 and published and not tot["shifted"] and tot["sym"] and not tot["refused"]:
@@ -16391,7 +16435,7 @@ HEALTH_RULES = (
         ("sec", r"visor axis \(F121\) 30 s: visor draws seen (?P<seen>\d+) \(left (?P<seenl>\d+), right (?P<seenr>\d+)\), shifted (?P<shifted>\d+) \(left (?P<shl>\d+), "
                 r"right (?P<shr>\d+)\), symmetric (?P<sym>\d+),(?: key off (?P<keyoff>\d+),)? refused (?P<refused>\d+) \(no eye (?P<r0>\d+), no tangents (?P<r1>\d+), other pixel shader (?P<r2>\d+), "
                 r"no replacement (?P<r3>\d+), eye filing (?P<r4>\d+)\), self-off (?P<selfoffn>\d+); s left (?P<sl>%s) right (?P<sr>%s) uv from the tangents outer "
-                r"(?P<outer>[\d.]+) inner (?P<inner>[\d.]+)(?P<np> \(not published\))?$" % (_HN, _HN)),
+                r"(?P<outer>[\d.]+) inner (?P<inner>[\d.]+)(?P<np> \(not published\))?(?:; eyes from the depth probe (?P<depth>\d+))?$" % (_HN, _HN)),
     ), _hj_f121_visor_axis),
     _hrule("visor eyes (F121c)", ("F121c",), ("visor eyes (F121c)",), (
         ("event", r"visor eyes \(F121c\): (?P<state>paired|ONE EYE ONLY|DISAGREES).*? -- the filing names target (?P<fl>[0-9A-F]{16}) for the left eye and (?P<fr>[0-9A-F]{16}) "
@@ -19029,6 +19073,14 @@ def self_test_health():
               [("NEVER APPLIED", F119)], has=["no head offset was ever sampled"])
         check("F119 containment: the depth grid never read", [ses119(), sec119(depth="none read", skipped="no scene rows 90"), sec119(depth="none read", skipped="no scene rows 90")], 0,
               [("PARTIAL", F119)], has=["the depth grid was never read (skipped: no scene rows 180)"])
+        # F199: with Anti-aliasing off a build before F199 handed the grid no scene depth (kSkipDepth, "no scene depth", in every second): over a few seconds on foot that is the grid never applied
+        def nodepth119():
+            return sec119(depth="none read", skipped="no scene depth 90")
+        check("F199 containment: the grid never got the scene depth in six on-foot seconds", [ses119()] + [nodepth119() for _ in range(6)], 3, [("NEVER APPLIED", F119)],
+              has=["the depth grid was never read (skipped: no scene depth 540)"])
+        check("F199 containment: under five seconds without the scene depth stay partial", [ses119()] + [nodepth119() for _ in range(4)], 0, [("PARTIAL", F119)],
+              has=["the depth grid was never read (skipped: no scene depth 360)"])
+        check("F199 containment: the depth read in some of the seconds is not never", [ses119()] + [nodepth119() for _ in range(5)] + [sec119()], 0, lacks=["NEVER APPLIED  head containment"])
         check("F119 containment: a baseline that is not about 0", [ses119(), sec119(base=(80, 9, 9)), sec119(base=(80, 9, 9))], 0, [("PARTIAL", F119)],
               has=["the baseline is not about 0: 9 cells of 64 within 20 cm"])
         check("F119 containment: the shader stood down", [ses119(), "head containment (F119): precompiled compute shader head_containment_cs creation FAILED; standing down (0x00000000, 0.100 ms).",
@@ -19056,6 +19108,12 @@ def self_test_health():
         def fail123(n=1, w=0.6, h=28.0, up=0.0):
             return R123("position recentre %u DID NOT bring", n, w, h, up)
 
+        check("F199 F123: armed and nothing triggered, but the scene depth never reached the wall contact", [ses123(), ses119()] + [nodepth119() for _ in range(6)], 3,
+              [("NEVER APPLIED", F123), ("NEVER APPLIED", F119)],
+              has=["the wall contact never had the scene depth: head containment (F119) read none in 6 on-foot seconds (skipped: no scene depth 540), so the leash alone was judged"])
+        check("F199 F123: a recentred leash episode with no scene depth is NEVER APPLIED over the OK", [ses123(), leash123(), ask123(), done123(), ses119()] + [nodepth119() for _ in range(6)], 3,
+              [("NEVER APPLIED", F123)], has=["leash hard 1", "the wall contact never had the scene depth"])
+        check("F199 F123: the depth read, still idle", [ses123(), ses119()] + [sec119() for _ in range(6)], 0, [("IDLE", F123), ("OK", F119)], lacks=["the wall contact never had the scene depth"])
         check("F123 containment: armed, nothing triggered", [ses123(), hold(), hold()], 0, [("IDLE", F123)], has=["armed (the session line is there), nothing triggered: no episode, no recentre"])
         check("F123 containment: a soft episode, a hard one recentred", [ses123(), leash123("leash soft", h=20.1, black=0.0, past=0.0, rec="no", ln=0.4), ask123(), done123(), leash123()], 0,
               [("OK", F123)], has=["2 episode(s): leash soft 1 (peak 20.1 cm, black 0.00 s); leash hard 1 (peak 31.4 cm horizontal, -3.0 cm up; recentred 1; black 0.90 s); "
@@ -19160,10 +19218,11 @@ def self_test_health():
         F121 = "visor axis (F121)"
 
         def vax_win(seen=2700, seenl=1350, seenr=1350, shl=1350, shr=1350, sym=0, keyoff=0, refused=0, r=(0, 0, 0, 0, 0), sl=0.0892, sr=-0.0892, outer=1.2546, inner=0.8746, np="",
-                    selfoff=0):
+                    selfoff=0, depth=None):
             r = tuple(r) + (0,) * (5 - len(r))
             line = R121("visor axis (F121) 30 s", seen, seenl, seenr, shl + shr, shl, shr, sym, refused, r[0], r[1], r[2], r[3], r[4], selfoff, sl, sr, outer, inner, np)
-            return line.replace(", refused ", ", key off %d, refused " % keyoff, 1) if keyoff else line
+            line = line.replace(", refused ", ", key off %d, refused " % keyoff, 1) if keyoff else line
+            return line + ("; eyes from the depth probe %d" % depth if depth is not None else "")
 
         def vax_selfoff(nf=29753344, taps=29753344, eye=1):
             return R121("visor axis (F121c): SELF-OFF", nf, taps, eye)
@@ -19199,6 +19258,14 @@ def self_test_health():
               0, [("IDLE", F121)], has=["test key off 5400", "the test key fix.native_on_foot_visor_axis is off (the default)"], lacks=["NEVER APPLIED"])
         check("F121 visor axis: the key turned on mid-flight, shifted and left to the game both counted",
               [vax_armed(), vax_win(shl=0, shr=0, keyoff=2700, sl=0.0, sr=0.0, outer=0.0, inner=0.0), vax_win()], 0, [("OK", F121)], has=["shifted 2700", "test key off 2700"])
+        # F200: with Anti-aliasing off the eye filing names no visor draw's eye (the pilot's 16:14 window: seen 3768, refused 3768, no eye 3768) and the rule reads NEVER APPLIED; from F200 the
+        # depth probe's scene pair names it and the line says how many (the field is the line's last)
+        check("F200 visor axis: Anti-aliasing off, every draw refused for want of an eye (a build before F200)", [vax_armed(), vax_win(seen=3768, seenl=0, seenr=0, shl=0, shr=0, sl=0.0, sr=0.0, refused=3768, r=(3768, 0, 0, 0, 0))],
+              3, [("NEVER APPLIED", F121)], has=["none was shifted", "no eye 3768"], lacks=["eyes named by the depth probe"])
+        check("F200 visor axis: Anti-aliasing off, the eyes named by the depth probe's scene pair and shifted", [vax_armed(), vax_win(depth=2700), vax_win(depth=2700)], 0, [("OK", F121)],
+              has=["eyes named by the depth probe's scene pair (F200) 5400 of 5400 draws"], lacks=["UNPARSED"])
+        check("F200 visor axis: the depth probe named the eyes of some and the rest had none", [vax_armed(), vax_win(seen=2700, seenl=1350, seenr=1350, refused=100, r=(100, 0, 0, 0, 0), depth=2600)], 0,
+              [("OK", F121)], has=["eyes named by the depth probe's scene pair (F200) 2600 of 2700 draws", "no eye 100"])
         check("F121 visor axis: a line the rule does not parse", ["visor axis (F121) 30 s: a format nobody wrote"], 4, [("UNPARSED", F121)])
         check("F121 visor axis: a stray line beside a good one is noted, not hidden", [vax_armed(), "visor axis (F121) 30 s: a format nobody wrote"], 0, [("IDLE", F121)],
               has=["the rule's patterns do not match"])

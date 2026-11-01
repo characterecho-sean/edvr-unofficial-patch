@@ -101,7 +101,7 @@ int      g_lastDrawIdx = -1;
 // the name this file and its rig have always used reads and writes it.
 bool&    g_wanted = detail::g_depthProbeWanted;
 // F196: native on-foot VR is the only reason the probe watches (depth_probe_wanted.h): the scene pair is formed at each frame boundary
-// and its eyes answered; the depth readbacks (the unbind-and-sample, the frame-boundary read) and the layout census do not run.
+// and its eyes answered (F199: and its depth textures handed out, for the pair's size); the depth readbacks (the unbind-and-sample, the frame-boundary read) and the layout census do not run.
 bool     g_pickOnly = false;
 uint32_t g_distinctThisFrame = 0;
 uint32_t g_maxDistinct = 0;
@@ -552,7 +552,7 @@ void depthProbeConfigure(Config& cfg) {
                 break;
             case DepthProbeWhy::kNativeOnFoot:
                 Log::get().note("depth probe: scene pair on for native on-foot VR (Anti-aliasing off): the ADS sight lock and F113 take each eye's rows from it; "
-                                "no depth readbacks, no layout census, no depth texture handed out");
+                                "the scene depth is handed to the reticle depth, the head containment and the wall contact; no depth readbacks, no layout census");
                 break;
             default:
                 // The flat profile never runs the probe (its Anti-aliasing reads off here and the capture key is refused): no line there, so its log is as it was.
@@ -784,14 +784,32 @@ static bool sceneTextureHasFormat(const void* resource) {
     return false;
 }
 
+// F199: is the pair in place of exactly this size, both entries live and single-sampled? What the pick-only arm answers a depth request with: the pair the frame
+// boundary formed, read as it stands, never re-picked by the asker's size.
+static bool scenePairIsOfSize(uint32_t w, uint32_t h) {
+    for (int k = 0; k < 2; ++k) {
+        const int i = g_scenePick[k];
+        if (i < 0 || i >= g_targetCount) return false;
+        const Target& t = g_targets[i];
+        if (!t.dsv || !t.tex || t.w != w || t.h != h || t.samples > 1 || t.drawsLastFrame < 1) return false;   // drawn into last frame, as refreshScenePick requires
+    }
+    return true;
+}
+
 bool depthProbeSceneDepth(uint32_t w, uint32_t h, int eye, ID3D11Texture2D** tex) {
     if (!tex) return false;
     *tex = nullptr;
-    // F196: native on-foot VR alone has the probe answer which eye a draw is, not hand out the depth textures. Its two askers, F85c's reticle
-    // depth march and F119's head-containment grid (native_on_foot.cpp), read them on the GPU; with Anti-aliasing off they have never had a
-    // depth texture and decline as before (F85c noDepth, F119 kSkipDepth). Opening them to this arm is one term here, once flown.
-    if (!g_wanted || g_pickOnly || eye < 0 || eye > 1) return false;
-    if (!refreshScenePick(w, h)) return false;
+    if (!g_wanted || eye < 0 || eye > 1) return false;
+    // F199 (F196 handed out the eyes' identity only; its two depth askers, F85c's reticle depth march and F119's head-containment grid with F123's wall contact behind it,
+    // never had a texture with Anti-aliasing off): native on-foot VR alone now hands out the scene depth too. Its pair is the frame boundary's (the busiest targets of the
+    // eye's size, refreshScenePick, once a frame); an asker is answered from that pair if it asks for that size and refused otherwise, and never re-picks by its own
+    // size: a request for another size would displace the boundary's pair within the frame and the boundary would displace it back, every frame. Where the pair is of the
+    // asker's size, refreshScenePick would only have returned the same pair (the counts it reads roll at the boundary, the cache is keyed by the size).
+    if (g_pickOnly) {
+        if (!scenePairIsOfSize(w, h)) return false;
+    } else if (!refreshScenePick(w, h)) {
+        return false;
+    }
     // Ordered by first bind in the frame: the first bound is the left.
     int first, second;
     sceneOrderFirstSecond(&first, &second);

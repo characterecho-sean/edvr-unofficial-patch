@@ -8,9 +8,9 @@
 //   - native on-foot VR (F196): the VR profile with fix.native_on_foot on. With Anti-aliasing off (the shipped default) nothing else asks, so the pair
 //     never formed, no eye ever had rows and the ADS sight lock placed the aiming eye by F110's model every frame. This arm has the probe count the draws
 //     and form the pair itself at each frame boundary, and answer who is which eye. It takes no depth readbacks: the diagnostics the other two arms run
-//     (the unbind-and-sample, the frame-boundary read, the layout census) stay off for it (depthProbeDiagnosticsFor), and depthProbeSceneDepth
-//     hands it out no depth texture: F85c's reticle march and F119's head-containment grid read those on the GPU, and never had one with
-//     Anti-aliasing off.
+//     (the unbind-and-sample, the frame-boundary read, the layout census) stay off for it (depthProbeDiagnosticsFor). From F199 depthProbeSceneDepth
+//     hands it out the scene depth textures of the pair the boundary formed, for the one size it asks (F85c's reticle march and F119's head-containment grid, with
+//     F123's wall contact behind it, read those on the GPU and never had one with Anti-aliasing off); it is never re-picked by an asker's size.
 #pragma once
 
 #include <cstring>
