@@ -40,9 +40,8 @@
     CPU` calls went from 454 to about 1285 a frame.
   - H4: the runtime's per-eye submit differs between the modes. Signature:
     `first_submit_roundtrip` + `second_submit_roundtrip`.
-- **Ruled out (design, see "Sharing candidates"):** union-frustum cull, shared
-  LOD, a light grid shared between the eyes, render-list reuse (Elite already
-  does it), and instanced stereo from a D3D11 proxy.
+- **Ruled out (see "Sharing candidates"):** union-frustum cull, shared LOD, a
+  shared light grid, render-list reuse (Elite does it), D3D11 instanced stereo.
 - **2026-10-31 (PSVR2 rig, concourse): H5, H6, H7 confirmed**
   (`edvr_gfx_20261031_225516`). The rig is CPU-bound throughout (`held_by=game`
   96%, vendor xrEndFrame 0.36 ms). In the concourse, AA on (DLAA or TAA alike)
@@ -51,14 +50,11 @@
   with F7 off, because F7 leaves the subscriber gate open. EDVR's draw path is
   thus about 6-7 ms of a 32 ms concourse frame. See "2026-10-31: result".
 - **2026-11-01 CPU profile:** EDVR's own code is about a quarter of the busy
-  render thread in the concourse; EDHM is 2.4-3.2 ms. The draw gate never
-  closes in VR because default-on features hold it. See "2026-11-01: the CPU
-  profile" for the ranked candidates.
-- **Continued in `docs\vr-draw-path-cpu-2026-11-01.md`** (2026-11-01). The
-  work is EDVR's VR draw-path CPU cost in general, not the concourse or the
-  stereo question; that doc holds the design of test build 1 and the next
-  flight. Candidate 5 became #153. "The A/B flight" below is stale: Explorer
-  Cam and `perf baseline F5` are gone.
+  concourse render thread; EDHM 2.4-3.2 ms; the draw gate never closes in VR
+  (see "2026-11-01: the CPU profile"). **Continued in
+  `docs\vr-draw-path-cpu-2026-11-01.md`** (VR draw-path CPU in general; test
+  build 1, spec #157). Candidate 5 became #153. "The A/B flight" below is
+  stale: Explorer Cam and `perf baseline F5` are gone.
 - **Environment:** SteamVR (aapvr), RTX 5090, 2016x2016 per eye rendered and
   DLSS'd to 4032x4032, 90 Hz; Elite build 332841. On foot, the native runtime
   paces `deferred` in both modes (the weapon-stability pacing), so the second
