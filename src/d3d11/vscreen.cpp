@@ -4334,6 +4334,7 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     }
     // Issue 140: the SRV turret view's HUD. After kSkip (a skipped draw is not issued at all), before anything issues: the scope spans every issue of a matched draw below and
     // puts the game's geometry stage back on every way out. Off, this is one relaxed load.
+    if (owner && srvTurretHudWantsDraws()) srvTurretHudNoteDrawShape(count, instances);   // the radar lock takes a single quad only (TEMPORARY)
     SrvTurretHudScope turretHud(self);
     if (owner && srvTurretHudWantsDraws()) turretHud.bound = srvTurretHudBeginDraw(g_state, self);
     // Issue 140 (TEMPORARY instrument): one frame in fifteen seconds, every owner draw is asked whether it writes the picture the hologram billboard shows (srv_turret.h). One relaxed load otherwise.

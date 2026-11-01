@@ -2528,6 +2528,143 @@ static void stripCases(ID3D11GeometryShader* gs, Fails& f) {
              "the control: the plain strip is whole with no culling and with one facing culled, and gone with the other (both triangles share a winding)");
 }
 
+// ---------------------------------------------------------------- THE LOCK (srv_turret_math.h; the shader's turretLockCentre and turretLock), on WARP
+// With the lock flag the twin moves every vertex of a triangle by T - C, C the midpoint of the triangle's longest edge: a quad's centre lands on T, its two triangles agree (the shared
+// corners bit for bit), every vertex keeps the game's NDC depth, and signature H's lighting position moves by the same vector. A rectangle (a billboard) and a parallelogram sheared along x
+// and tilted in depth, cut along its long diagonal.
+static void lockCases(int fam, ID3D11GeometryShader* twin, Fails& f) {
+    const Cam cam;
+    const float target[3] = {-0.012f, 0.017f, 0.31f};
+    st::TurretParams p = st::translateParamsFor(frameOfCam(cam, nullptr, target, target), st::Group::kRadar);
+    p.lock = 1.0f;
+    f.expect(st::paramsUsable(p), "lock: the constants with the lock flag are usable");
+    st::TurretParams half = p;
+    half.lock = 0.5f;
+    f.expect(!st::paramsUsable(half), "lock: a lock flag that is neither 0 nor 1 is refused");
+    Pt rect[4];
+    boxAt(rect, 0.03f, -0.02f, 0.33f, 0.06f, 0.04f);
+    const float s = 0.025f;
+    Pt shear[4] = {Pt{0.03f - 0.06f + s, -0.02f - 0.04f, 0.30f}, Pt{0.03f + 0.06f + s, -0.02f - 0.04f, 0.34f}, Pt{0.03f - 0.06f - s, -0.02f + 0.04f, 0.31f}, Pt{}};
+    shear[3] = Pt{shear[1].x + shear[2].x - shear[0].x, shear[1].y + shear[2].y - shear[0].y, shear[1].d + shear[2].d - shear[0].d};
+    const float right[3] = {0.8f, 0.0f, 0.6f}, up[3] = {-0.36f, 0.8f, 0.48f}, fwd[3] = {-0.48f, -0.6f, 0.64f};
+    const bool scene = fam == int(st::kSceneSignature);
+    if (scene) setScene(right, up, fwd, 0);
+    for (int which = 0; which < 2; ++which) {
+        const Pt* c = which == 0 ? rect : shear;
+        const char* name = which == 0 ? "a rectangle" : "a sheared, tilted parallelogram";
+        const std::vector<Pt> pts = {c[0], c[1], c[2], c[1], c[3], c[2]};   // addQuadPts' order: the two triangles share c[1]-c[2]
+        const double centre[3] = {(double(c[1].x) + c[2].x) * 0.5, (double(c[1].y) + c[2].y) * 0.5, (double(c[1].d) + c[2].d) * 0.5};
+        const Captured m = captureMove(fam, twin, pts, cam, p);
+        double post[6][3], pre[6][3];
+        for (int i = 0; i < 6; ++i) {
+            eyePos(m.post[i], cam, post[i]);
+            eyePos(m.pre[i], cam, pre[i]);
+        }
+        double ca[3], cb[3], preC[3];
+        st::lockCentre<double>(post[0], post[1], post[2], ca);
+        st::lockCentre<double>(post[3], post[4], post[5], cb);
+        st::lockCentre<double>(pre[0], pre[1], pre[2], preC);
+        char what[200];
+        bool onT = true, agree = true, rigid = true, depth = true;
+        for (int k = 0; k < 3; ++k) {
+            onT = onT && std::fabs(ca[k] - target[k]) < 1e-5 && std::fabs(cb[k] - target[k]) < 1e-5;
+            agree = agree && std::fabs(ca[k] - cb[k]) < 1e-5;
+        }
+        for (int i = 0; i < 6; ++i) {
+            for (int k = 0; k < 3; ++k) rigid = rigid && std::fabs((post[i][k] - pre[i][k]) - (target[k] - centre[k])) < 1e-5;
+            depth = depth && closeTo(double(m.post[i][2]) / m.post[i][3], double(m.pre[i][2]) / m.pre[i][3], 1e-5);
+        }
+        std::snprintf(what, sizeof(what), "lock, %s: each triangle's longest-edge midpoint lands on the target to 1e-5 m", name);
+        f.expect(onT, what);
+        std::snprintf(what, sizeof(what), "lock, %s: the two triangles agree to 1e-5 m, and the shared corners land on the same clip position bit for bit", name);
+        f.expect(agree && std::memcmp(m.post[1].data(), m.post[3].data(), 16) == 0 && std::memcmp(m.post[2].data(), m.post[5].data(), 16) == 0, what);
+        std::snprintf(what, sizeof(what), "lock, %s: every vertex moves by target - centre (a rigid translation), keeping the game's NDC depth", name);
+        f.expect(rigid && depth, what);
+        std::snprintf(what, sizeof(what), "lock, %s: the CPU rule (st::lockCentre) finds the quad's centre on the game's corners", name);
+        f.expect(std::fabs(preC[0] - centre[0]) < 1e-5 && std::fabs(preC[1] - centre[1]) < 1e-5 && std::fabs(preC[2] - centre[2]) < 1e-5, what);
+        if (scene) {
+            bool lit = true;
+            for (size_t i = 0; i < pts.size(); ++i) {
+                const double l0[3] = {tagU(i), tagV(i), 0.0}, k3[3] = {target[0] - centre[0], target[1] - centre[1], target[2] - centre[2]};
+                for (int k = 0; k < 3; ++k) lit = lit && closeTo(m.lp[i][k], l0[k] + right[k] * k3[0] + up[k] * k3[1] + fwd[k] * k3[2], 1e-4);
+            }
+            std::snprintf(what, sizeof(what), "lock, %s: the Scorpion hologram's lighting position moves by the same vector, in the camera's right, up and forward", name);
+            f.expect(lit, what);
+        }
+    }
+    if (scene) resetScene();
+    // the control: a triangle's own mean is not shared by the sheared quad's two triangles (the longest-edge rule is what makes them agree)
+    const double t1 = (double(shear[0].x) + shear[1].x + shear[2].x) / 3.0, t2 = (double(shear[1].x) + shear[3].x + shear[2].x) / 3.0;
+    f.expect(std::fabs(t1 - t2) > 1e-3, "lock control: the sheared quad's two triangles have different means (a crack under a mean-centre rule)");
+    // without the flag the same constants are the plain translation by T (the delta path is unchanged)
+    st::TurretParams plain = p;
+    plain.lock = 0.0f;
+    const std::vector<Pt> quad = {rect[0], rect[1], rect[2], rect[1], rect[3], rect[2]};
+    const Captured m0 = captureMove(fam, twin, quad, cam, plain);
+    expectReference(f, "lock: with the flag at 0 the twin is the plain translation, every vertex the CPU reference's", plain, m0, 6);
+}
+
+// THE LOCK on the CPU (srv_turret_math.h): the draw's shape, the seated-to-eye conversion, the vehicle's turn, rest, the target's learning and re-learning, and the reset rules.
+static void lockCpuCases() {
+    check(st::lockShape(4, 6, 1) && st::lockShape(5, 4, 1) && st::lockShape(4, 6, 0), "lock shape: a list of 6 or a strip of 4, one instance, is a single quad");
+    check(!st::lockShape(4, 12, 1) && !st::lockShape(5, 6, 1) && !st::lockShape(4, 6, 2) && !st::lockShape(1, 6, 1) && !st::lockShape(4, 3, 1), "lock shape: more triangles, instances or another topology are not");
+    const float head[12] = {0.8f, 0.0f, 0.6f, 0.1f, 0.0f, 1.0f, 0.0f, 1.2f, -0.6f, 0.0f, 0.8f, -0.3f}, eyeToHead[12] = {1, 0, 0, -0.032f, 0, 1, 0, 0, 0, 0, 1, 0.01f};
+    double R[9], E[3];
+    check(st::eyePoseOf(head, eyeToHead, R, E), "lock: an eye pose");
+    const double eyePt[3] = {0.03, -0.21, 0.33};
+    double seated[3], back[3];
+    st::eyeToSeated(R, E, eyePt, seated);
+    st::seatedToEye(R, E, seated, back);
+    check(std::fabs(back[0] - eyePt[0]) < 1e-6 && std::fabs(back[1] - eyePt[1]) < 1e-6 && std::fabs(back[2] - eyePt[2]) < 1e-6,
+          "lock: seatedToEye is eyeToSeated's inverse (to the float rows' orthonormality)");
+    const float A[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+    const double a = 2.0 * 3.14159265358979323846 / 180.0;
+    const float B[16] = {float(std::cos(a)), 0, float(std::sin(a)), 0, 0, 1, 0, 0, float(-std::sin(a)), 0, float(std::cos(a)), 0, 0, 0, 0, 1};
+    float B2[16];
+    for (int i = 0; i < 16; ++i) B2[i] = B[i] * 1.5f;   // a scale on the rows does not count as a turn
+    check(std::fabs(st::rotationAngleDeg(A, A)) < 1e-3 && std::fabs(st::rotationAngleDeg(A, B) - 2.0) < 1e-3 && std::fabs(st::rotationAngleDeg(A, B2) - 2.0) < 1e-3,
+          "lock: the vehicle's turn between two rotations, in degrees, whatever the rows' scale");
+    // rest: every rate under 3 deg/s for 20 frames in a row
+    st::RestWatch r;
+    for (uint32_t i = 0; i + 1 < st::kRestFrames; ++i) check(!r.step(true, 1.0, -2.0, 2.9), "rest: not before 20 still frames");
+    check(r.step(true, 1.0, -2.0, 2.9), "rest: at the 20th still frame");
+    check(!r.step(true, 3.5, 0.0, 0.0) && r.frames == 0, "rest: a turret yaw rate of 3 deg/s or more breaks it");
+    for (uint32_t i = 0; i < st::kRestFrames; ++i) r.step(true, 0.0, 0.0, 0.0);
+    check(r.atRest() && !r.step(true, 0.0, -3.0, 0.0), "rest: ... and so does the pitch");
+    for (uint32_t i = 0; i < st::kRestFrames; ++i) r.step(true, 0.0, 0.0, 0.0);
+    check(r.atRest() && !r.step(true, 0.0, 0.0, 4.0), "rest: ... and the vehicle's own turn");
+    for (uint32_t i = 0; i < st::kRestFrames; ++i) r.step(true, 0.0, 0.0, 0.0);
+    check(r.atRest() && !r.step(false, 0.0, 0.0, 0.0) && r.frames == 0, "rest: ... and a frame without the rates");
+    // learning: the mean of the first six rest samples; then each moves it by 1 - exp(-dt / 1 s)
+    st::LockTarget t;
+    const double s1[3] = {0.010, -0.220, -0.050}, s2[3] = {0.004, -0.220, -0.060};
+    bool learnedAt = false;
+    for (uint32_t i = 0; i < st::kLockLearnSamples; ++i) {
+        const bool first = t.add(i % 2 ? s2 : s1, 0.1 * i);
+        check(first == (i + 1 == st::kLockLearnSamples), "learning: learned exactly at the sixth rest sample");
+        learnedAt = learnedAt || first;
+    }
+    check(learnedAt && t.learned && t.n == st::kLockLearnSamples && std::fabs(t.seated[0] - 0.007) < 1e-12 && std::fabs(t.seated[2] + 0.055) < 1e-12, "learning: the target is the samples' mean");
+    const double moved[3] = {0.017, -0.220, -0.055};
+    check(!t.add(moved, 0.5 + 0.5) && t.relearned == 1, "re-learning: a later rest sample is a re-learn, not a first learning");
+    const double want = 0.007 + (1.0 - std::exp(-0.5)) * 0.010;
+    check(std::fabs(t.seated[0] - want) < 1e-12 && std::fabs(t.seated[2] + 0.055) < 1e-12, "re-learning: an exponential average with a 1 s time constant (dt 0.5 s)");
+    const double before = t.seated[0];
+    t.add(moved, 100.0);
+    check(std::fabs(t.seated[0] - (before + (1.0 - std::exp(-2.0)) * (0.017 - before))) < 1e-12, "re-learning: a long gap counts as 2 s at most");
+    const double bad[3] = {NAN, 0.0, 0.0};
+    const double kept = t.seated[0];
+    check(!t.add(bad, 101.0) && t.seated[0] == kept, "learning: a sample that is not finite is not taken");
+    // the resets: the view coming on, and camera back, radar forward or the anchor key changing; nothing else
+    check(st::lockResetWhy(false, true, 35, 35, 30, 30, 0, 0) == st::LockReset::kViewOn, "reset: the view comes on");
+    check(st::lockResetWhy(true, true, 35, 30, 30, 30, 0, 0) == st::LockReset::kKey && st::lockResetWhy(true, true, 35, 35, 30, 35, 0, 0) == st::LockReset::kKey &&
+              st::lockResetWhy(true, true, 35, 35, 30, 30, 0, 1) == st::LockReset::kKey,
+          "reset: camera back, radar forward or the anchor key changes");
+    check(st::lockResetWhy(true, true, 35, 35, 30, 30, 0, 0) == st::LockReset::kNone && st::lockResetWhy(true, false, 35, 35, 30, 30, 0, 0) == st::LockReset::kNone &&
+              st::lockResetWhy(false, false, 35, 35, 30, 30, 0, 0) == st::LockReset::kNone,
+          "reset: none while the view stays on or off with the keys unchanged (the view going off is not a reset; the next view-on is)");
+}
+
 // ---------------------------------------------------------------- the GPU instrument (srv_turret.cpp's probe*): the same calls, on WARP
 static ComPtr<ID3D11GeometryShader> twinFromCode(int fam, const void* data, size_t size) {
     D3D11_SO_DECLARATION_ENTRY decl[st::kMaxSigElements] = {};
@@ -2838,6 +2975,7 @@ int main(int argc, char** argv) {
         }
 
         constantsCases();
+        lockCpuCases();
         Fails production;
         for (uint32_t fam = 0; fam < st::kSignatureCount; ++fam) {
             g_fam = int(fam);
@@ -2846,6 +2984,7 @@ int main(int argc, char** argv) {
             moveCases(int(fam), twinOf[fam].Get(), production);
             moveImages(twinOf[fam].Get(), production);
             stripCases(twinOf[fam].Get(), production);
+            lockCases(int(fam), twinOf[fam].Get(), production);
         }
         g_fam = 0;
         bindingCases(gsOf[0].Get(), production, true);
@@ -2927,6 +3066,27 @@ int main(int argc, char** argv) {
                     check(fails.n > 0, what);
                 }
             }
+            {   // THE LOCK's mutants: each caught by the lock cases (the last, the lighting position's, in signature H only)
+                const Mutant lockMutants[] = {
+                    {"the lock flag ignored", "const bool locked = an.w > 0.5;", "const bool locked = an.w > 5.0;"},
+                    {"the triangle's mean as its centre", "if (pq >= qr && pq >= rp) return (p + q) * 0.5;", "if (pq >= 0.0) return (p + q + r) / 3.0;"},
+                    {"the shortest edge's test", "if (pq >= qr && pq >= rp)", "if (pq <= qr && pq <= rp)"},
+                    {"the shift's sign", "tr.xyz - turretLockCentre(v[0].pos, v[1].pos, v[2].pos)", "turretLockCentre(v[0].pos, v[1].pos, v[2].pos) - tr.xyz"},
+                    {"the game's depth not kept under the lock", "gz * s.z, s.z);", "0.5 * s.z, s.z);"},
+                    {"the lock's displacement not given to the lighting line", "dq = k;", "dq = float3(0.0, 0.0, 0.0);"},
+                };
+                for (const Mutant& m : lockMutants) {
+                    if (std::strcmp(m.from, "dq = k;") == 0 && fam != st::kSceneSignature) continue;
+                    const std::string mutated = replaceAll(text, m.from, m.to);
+                    check(mutated != text, "a lock mutant differs from the production text");
+                    const auto mg = twinFromText(int(fam), mutated);
+                    Fails fails;
+                    lockCases(int(fam), mg.Get(), fails);
+                    char what[200];
+                    std::snprintf(what, sizeof(what), "the mutant \"%s\" of signature %u's shader is caught by the lock cases", m.name, fam);
+                    check(fails.n > 0, what);
+                }
+            }
             {   // a pass-through that reverses every triangle's winding (what a shader that did not keep the input assembler's order would do to a strip): caught by the strip cases
                 const std::string flipped = replaceAll(text, "o.v = v[i];", "o.v = v[(i == 0) ? 0 : (3 - i)];");
                 check(flipped != text, "the winding mutant differs from the production text");
@@ -2960,7 +3120,7 @@ int main(int argc, char** argv) {
             }
         }
         wiringCases();
-        std::printf("PASS srv_turret_hud_test: %u checks; the turret shaders, binding, constants, maths, anchor and Scorpion latch on WARP, twenty-five shader mutants and the winding mutant in each of eight signatures, five more in signature H and one binding mutant caught\n", g_checks);
+        std::printf("PASS srv_turret_hud_test: %u checks; the turret shaders, binding, constants, maths, anchor and Scorpion latch on WARP, twenty-five shader mutants, five lock mutants and the winding mutant in each of eight signatures, six more in signature H and one binding mutant caught\n", g_checks);
         return 0;
     } catch (const std::exception& e) {
         std::printf("FAIL %s (%u checks)\n", e.what(), g_checks);

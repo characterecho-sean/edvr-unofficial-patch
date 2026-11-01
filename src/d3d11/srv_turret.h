@@ -113,7 +113,12 @@
 //     "srv turret radar picture: dump S frame F eye 0 disc|icon: t4 .. WxH format N, content (t4 < 1000) C of T texels, t4 a to b; written eye_S_RadarDiscT4.bmp|..IconT4.bmp ..."   the
 //     two pictures of a dump; "srv turret radar pair: 10 s: disc: draws moved .., issues moved .., issues not moved .. (..), issues per moved draw 0/1/2/3+: ..; icon: ..; disc and icon
 //     moved apart on screen (over 1 px): by the constants X of F eye frames (no content depth n), by the capture Y of Z captured eye frames; capture frames .., skipped .., entries lost .."
-//     with the 10 s correction line;
+//     with the 10 s correction line; each billboard line ends "; LOCKED: target in the eye (..) m, applied shift (..) cm, centre post minus target (..) mm" or "; delta mode (why)", and
+//     the lock line adds "turret yaw rate R deg/s, at rest|not at rest; disc target seated (..) m, locked|why, applied shift in the eye (..) cm, post minus target (..) mm; icon ...";
+//   TEMPORARY, THE LOCK (srv_turret.cpp; srv_turret_math.h THE LOCK): "srv turret radar lock: disc|icon target learned at frame F: seated (..) m, the mean of N rest samples (eye 0 ..,
+//     eye 1 ..); its billboard is now locked to it"   once per kind and reset; "srv turret radar lock: targets reset (why)..."   at each reset; "srv turret radar lock: 10 s: draws
+//     locked L, on the delta D (no target yet a, not a single quad b, no eye pose c, target too far e); |T - C| (..) mean X max Y cm, its centre off the target mean .. max .. mm, over N
+//     captured draws; targets: disc .., icon ..; reset R, re-learned S samples; frames at rest F of G"   with the 10 s correction line;
 //   "srv turret radar anchor: view off: moved in N calls[ -- NEVER RAN: ...| -- hook not armed: <why>| -- not asked: ...]"   the view's end;
 //   "srv turret radar anchor: WARNING: the game's translation moved by (..) between setter calls, close to the offset: ..."   once, a sign its caller feeds our value back.
 #pragma once
@@ -141,7 +146,15 @@ extern std::atomic<bool> g_srvTurretRadarCamOn;
 extern std::atomic<bool> g_srvTurretCameraRowsWanted;
 // The draw-time correction's writer watch: true while the anchor yield is on (the frame tick sets it).
 extern std::atomic<bool> g_srvTurretRadarWritersOn;
+// The draw being matched: its vertex or index count and instances (srvTurretHudNoteDrawShape; owner context's thread). The radar lock takes a single quad only.
+extern uint32_t g_srvTurretDrawCount, g_srvTurretDrawInstances;
 }  // namespace detail
+
+// TEMPORARY (issue 140, the radar lock in srv_turret.cpp): vscreen.cpp forwardWithVerdict, right before the pass's scope opens, while the pass is wanted: the draw's count and instances.
+inline void srvTurretHudNoteDrawShape(uint32_t count, uint32_t instances) {
+    detail::g_srvTurretDrawCount = count;
+    detail::g_srvTurretDrawInstances = instances;
+}
 
 // TEMPORARY (issue 140, fix.srv_turret_radar_anchor): the radar's picture writers for the draw-time correction. vscreen.cpp forwardWithVerdict, every owner-context draw while the anchor
 // yield is on (one relaxed load otherwise): a draw of the terrain schematic (vs 4EDE4BC9) or of the Scorpion icon (vs 5B0068AF into a 256x256 target) records its render targets for the

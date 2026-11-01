@@ -41,6 +41,7 @@ std::atomic<bool> g_srvTurretHoloWatching{false};
 std::atomic<bool> g_srvTurretRadarCamOn{false};
 std::atomic<bool> g_srvTurretCameraRowsWanted{false};
 std::atomic<bool> g_srvTurretRadarWritersOn{false};
+uint32_t g_srvTurretDrawCount = 0, g_srvTurretDrawInstances = 0;
 }  // namespace detail
 
 namespace st = srv_turret;
@@ -162,6 +163,9 @@ std::atomic<uint32_t> g_refused[static_cast<size_t>(st::Refuse::kCount)] = {};
 uint32_t g_saidRefuse = 0;
 bool g_firstNoted[kFamilyN] = {}, g_restoreNoted = false, g_settleNoted = false;
 uint32_t g_frame = 0;
+// THE LOCK's targets start again (TEMPORARY; srv_turret_math.h lockResetWhy): the frame tick asks, with the reason, and the render thread's frame boundary does it.
+std::atomic<uint32_t> g_lockResetGen{0};
+std::atomic<int> g_lockResetWhy{0};
 
 void refuse(st::Refuse r) {
     g_refused[static_cast<size_t>(r)].fetch_add(1, std::memory_order_relaxed);
@@ -1867,15 +1871,22 @@ struct FrameCorrection {
     double aimYawDeg = 0.0, yawRateDegS = 0.0;
     int64_t writtenAt = 0;
     bool haveRate = false;
+    // THE LOCK's rest (srv_turret_math.h RestWatch): the turret's pitch rate beside its yaw rate, the vehicle's turn rate (the anchor's world rotation, frame to frame), and whether
+    // this frame is at rest
+    double pitchRateDegS = 0.0, vehicleRateDegS = 0.0;
+    bool atRest = false;
 };
 FrameCorrection g_corr;
 struct AimPrev {
     uint32_t frame = 0;
-    double yawDeg = 0.0;
+    double yawDeg = 0.0, pitchDeg = 0.0;
+    float A[16] = {};
+    bool aValid = false;
     int64_t t = 0;
     bool have = false;
 };
-AimPrev g_aimPrev;   // the last frame's desired yaw and write time, for the yaw rate
+AimPrev g_aimPrev;   // the last frame's desired aim, anchor rotation and write time, for the rates
+st::RestWatch g_rest;
 const void* g_lastT4 = nullptr;   // identity: the t4 billboardKind last read (THE PAIR CAPTURE's log)
 bool g_corrFirstSaid = false;
 int64_t g_qpcFreq = 0;
@@ -1973,14 +1984,25 @@ int correctionCompute(ID3D11DeviceContext* ctx, int eye, FrameCorrection& c) {
     for (int i = 0; i < 3; ++i) c.callD[i] = call.d[i];
     c.aimYawDeg = aw.yaw;
     c.writtenAt = writtenAt;
+    bool vehicleRate = false;
     if (g_aimPrev.have && g_aimPrev.frame + 1u == g_frame && writtenAt > g_aimPrev.t) {
-        c.yawRateDegS = st::wrapDeg(aw.yaw - g_aimPrev.yawDeg) * double(g_qpcFreq) / double(writtenAt - g_aimPrev.t);
+        const double perS = double(g_qpcFreq) / double(writtenAt - g_aimPrev.t);
+        c.yawRateDegS = st::wrapDeg(aw.yaw - g_aimPrev.yawDeg) * perS;
+        c.pitchRateDegS = (aw.pitch - g_aimPrev.pitchDeg) * perS;
         c.haveRate = true;
+        if (g_aimPrev.aValid) {   // call.aValid holds: the early return above
+            c.vehicleRateDegS = st::rotationAngleDeg(call.A, g_aimPrev.A) * perS;
+            vehicleRate = true;
+        }
     }
     g_aimPrev.frame = g_frame;
     g_aimPrev.yawDeg = aw.yaw;
+    g_aimPrev.pitchDeg = aw.pitch;
+    std::memcpy(g_aimPrev.A, call.A, sizeof(g_aimPrev.A));
+    g_aimPrev.aValid = true;
     g_aimPrev.t = writtenAt;
     g_aimPrev.have = true;
+    c.atRest = g_rest.step(c.haveRate && vehicleRate, c.yawRateDegS, c.pitchRateDegS, c.vehicleRateDegS);   // THE LOCK's rest
     return kCorrOk;
 }
 
@@ -2021,6 +2043,8 @@ struct PairEntry {
     bool pose = false;
     double R[9] = {}, E[3] = {};
     uint32_t issues = 0, ours = 0, other = 0;
+    int lockWhy = 0;                 // THE LOCK: 0 locked (target: its place in the eye), else why the draw kept the delta (kLockMissName)
+    float target[3] = {};
     // read back: issue 0's NDC box centre before the move, its move and the content's expected move (px, x right, y up), its centre in the eye before and after
     bool measured = false, expected = false;
     double preNdc[2] = {}, movePx[2] = {}, expectPx[2] = {}, preEye[3] = {}, postEye[3] = {};
@@ -2029,6 +2053,8 @@ struct PairSlot {
     PairEntry e[2][2];   // [eye][kind - 1]
     uint32_t frame = 0, dumpIndex = 0, waited = 0;
     bool open = false, pending = false, dump = false;
+    bool atRest = false, quiet = false;   // THE LOCK: the frame was at rest (its pre-move centres teach the targets); a capture only for that says nothing in the log
+    double timeS = 0.0;
     uint64_t callSerial = 0;
     float callD[3] = {};
     double yawRate = 0.0;
@@ -2048,7 +2074,9 @@ struct PairWatch {
     PairSlot slot[kPairSlots];
     int current = -1;                  // this frame's slot (-1: none open yet)
     bool wantFrame = false;            // this frame is a capture frame (decided at the boundary)
+    bool quietFrame = false;           // ... only for THE LOCK's learning (every kLockLearnEveryFrames frames while a kind has no target)
     uint64_t lastMs = 0;
+    uint32_t lastFrame = 0;
     uint32_t dumpSerial = 0;           // the last eye dump taken up
     wchar_t stamp[16] = L"";
     uint32_t dumpLeft = 0, dumpIndex = 0;
@@ -2082,6 +2110,93 @@ struct FrameMove {
 };
 FrameMove g_frameMove[2][2];   // [eye][kind - 1]
 double g_refNdc[2][2] = {};    // [eye]: the comparison point
+
+// ---- THE LOCK (TEMPORARY, with fix.srv_turret_radar_anchor; srv_turret_math.h THE LOCK) ----------------------------------------------------------------------------------------------------
+// Each radar billboard (disc, icon) is moved so its quad's centre lands on its own rest place in the seated frame, learned from the pair capture's pre-move centres while the turret and the
+// vehicle are still (st::RestWatch); before a kind's target is learned, and for a draw that is not a single quad, the correction keeps its delta. Render thread; the frame tick asks for the
+// resets (g_lockResetGen) and says the 10 s line.
+st::LockTarget g_lock[2];   // [kind - 1]
+double g_lockEyeSum[2][2][3] = {};   // [kind - 1][eye]: the first learning's samples by eye, for the learned line
+uint32_t g_lockEyeN[2][2] = {};
+uint32_t g_lockResetSeen = 0;
+enum LockMiss : int { kLockOk = 0, kLockNoTarget, kLockShape, kLockNoPose, kLockFar, kLockMissCount };
+const char* const kLockMissName[kLockMissCount] = {"locked", "no target yet", "not a single quad", "no eye pose", "target too far"};
+struct LockCounters {
+    std::atomic<uint64_t> locked{0}, fallback[kLockMissCount]{}, shiftSumUm{0}, shiftN{0}, shiftMaxUm{0}, offSumUm{0}, offMaxUm{0}, resets{0}, relearned{0}, restFrames{0}, frames{0};
+};
+LockCounters g_lc;
+void maxUm(std::atomic<uint64_t>& m, uint64_t v) {
+    uint64_t cur = m.load(std::memory_order_relaxed);
+    while (v > cur && !m.compare_exchange_weak(cur, v, std::memory_order_relaxed)) {
+    }
+}
+void lockReset() {
+    for (st::LockTarget& t : g_lock) t = st::LockTarget{};
+    for (auto& k : g_lockEyeSum)
+        for (auto& e : k)
+            for (double& v : e) v = 0.0;
+    for (auto& k : g_lockEyeN)
+        for (uint32_t& n : k) n = 0;
+}
+// radarCorrectionBegin: this eye's target for the kind, in the eye's space (X right, Y up, Z forward), when the draw can be locked; else the reason it keeps the delta.
+int lockTargetInEye(ID3D11DeviceContext* ctx, int eye, int kind, float tEye[3]) {
+    const st::LockTarget& t = g_lock[kind - 1];
+    if (!t.learned) return kLockNoTarget;
+    D3D11_PRIMITIVE_TOPOLOGY topo = D3D11_PRIMITIVE_TOPOLOGY_UNDEFINED;
+    if (!guarded("srv.turret.lock.topology", [&] { ctx->IAGetPrimitiveTopology(&topo); }) ||
+        !st::lockShape(static_cast<int>(topo), detail::g_srvTurretDrawCount, detail::g_srvTurretDrawInstances))
+        return kLockShape;
+    uint64_t seq = 0;
+    float head[12] = {}, eyeToHead[2][12] = {};
+    double R[9], E[3];
+    if (!nativeTemporalHeadPose(&seq, head, eyeToHead) || !st::eyePoseOf(head, eyeToHead[eye], R, E)) return kLockNoPose;
+    double e[3];
+    st::seatedToEye(R, E, t.seated, e);
+    const double n2 = e[0] * e[0] + e[1] * e[1] + e[2] * e[2];
+    if (!std::isfinite(n2) || !(n2 < double(st::kAnchorLimitM) * st::kAnchorLimitM)) return kLockFar;
+    for (int i = 0; i < 3; ++i) tEye[i] = static_cast<float>(e[i]);
+    return kLockOk;
+}
+// The frame boundary, a read slot: a frame at rest teaches each kind's target from its eyes' pre-move centres (seated), the first time said once.
+void lockLearn(const PairSlot& s) {
+    if (!s.atRest) return;
+    for (int k = 0; k < 2; ++k) {
+        double sum[3] = {}, one[2][3] = {};
+        int n = 0;
+        bool have[2] = {false, false};
+        for (int eye = 0; eye < 2; ++eye) {
+            const PairEntry& e = s.e[eye][k];
+            if (!e.measured || !e.pose) continue;
+            st::eyeToSeated(e.R, e.E, e.preEye, one[eye]);
+            for (int c = 0; c < 3; ++c) sum[c] += one[eye][c];
+            have[eye] = true;
+            ++n;
+        }
+        if (!n) continue;
+        st::LockTarget& t = g_lock[k];
+        const bool wasLearned = t.learned;
+        if (!wasLearned)
+            for (int eye = 0; eye < 2; ++eye)
+                if (have[eye]) {
+                    for (int c = 0; c < 3; ++c) g_lockEyeSum[k][eye][c] += one[eye][c];
+                    ++g_lockEyeN[k][eye];
+                }
+        const double mean[3] = {sum[0] / n, sum[1] / n, sum[2] / n};
+        const bool first = t.add(mean, s.timeS);
+        if (wasLearned) g_lc.relearned.fetch_add(1, std::memory_order_relaxed);
+        if (!first) continue;
+        char eyes[2][64];
+        for (int eye = 0; eye < 2; ++eye) {
+            const uint32_t m = g_lockEyeN[k][eye];
+            if (m)
+                std::snprintf(eyes[eye], sizeof(eyes[eye]), "(%.4f,%.4f,%.4f) m from %u", g_lockEyeSum[k][eye][0] / m, g_lockEyeSum[k][eye][1] / m, g_lockEyeSum[k][eye][2] / m, m);
+            else
+                std::snprintf(eyes[eye], sizeof(eyes[eye]), "none");
+        }
+        Log::get().note("srv turret radar lock: %s target learned at frame %u: seated (%.4f,%.4f,%.4f) m, the mean of %u rest samples (eye 0 %s, eye 1 %s); its billboard is now locked to it",
+                        k == 0 ? "disc" : "icon", s.frame, t.seated[0], t.seated[1], t.seated[2], t.n, eyes[0], eyes[1]);
+    }
+}
 
 void pairReleaseObjects() {
     for (PairSlot& s : g_pair.slot)
@@ -2186,8 +2301,13 @@ PairEntry* pairTake(ID3D11DeviceContext* ctx, int eye, int kind) {
         for (int i = 0; i < 3; ++i) s.callD[i] = g_corr.callD[i];
         s.yawRate = g_corr.yawRateDegS;
         s.haveRate = g_corr.haveRate;
+        s.atRest = g_corr.atRest;
+        s.quiet = g_pair.quietFrame;
+        const uint64_t nowMs = GetTickCount64();
+        s.timeS = double(nowMs) / 1000.0;
         g_pair.current = idle;
-        g_pair.lastMs = GetTickCount64();
+        g_pair.lastFrame = g_frame;
+        if (!s.quiet) g_pair.lastMs = nowMs;   // a learning capture leaves the 2 s cadence where it is
         if (s.dump) ++g_pair.windowFrames;
     }
     PairEntry& e = g_pair.slot[g_pair.current].e[eye][kind - 1];
@@ -2201,11 +2321,13 @@ PairEntry* pairTake(ID3D11DeviceContext* ctx, int eye, int kind) {
 }
 
 // Right after the bind (the twin is bound): what the draw runs with, and the stream-output target and the query around its scope.
-void pairBegin(ID3D11DeviceContext* ctx, PairEntry& e, int eye, const float dEye[3], const st::TurretParams& p, const void* b1, const float rows[12]) {
+void pairBegin(ID3D11DeviceContext* ctx, PairEntry& e, int eye, const float dEye[3], const st::TurretParams& p, const void* b1, const float rows[12], int lockWhy, const float target[3]) {
     for (int i = 0; i < 3; ++i) {
         e.dEye[i] = dEye[i];
         e.fwd[i] = rows[8 + i];   // row 279, as the delta's conversion read it
+        e.target[i] = target[i];
     }
+    e.lockWhy = lockWhy;
     e.contentInv = p.invZc;
     e.tan[0] = p.l;
     e.tan[1] = p.r;
@@ -2397,7 +2519,26 @@ void pairLogEntry(const PairSlot& s, int eye, int kind, PairEntry& e, const floa
         }
     }
     if (vertices < 3) len += std::snprintf(line + len, sizeof(line) - len, "; nothing captured");
-    Log::get().note("%s", line);
+    if (e.measured && len > 0 && len < static_cast<int>(sizeof(line)) - 260) {   // THE LOCK: what the draw ran with, and how far the quad's centre moved and landed from its target
+        if (e.lockWhy == kLockOk) {
+            const double shift[3] = {e.postEye[0] - e.preEye[0], e.postEye[1] - e.preEye[1], e.postEye[2] - e.preEye[2]};
+            const double off[3] = {e.postEye[0] - e.target[0], e.postEye[1] - e.target[1], e.postEye[2] - e.target[2]};
+            const uint64_t su = static_cast<uint64_t>(std::sqrt(shift[0] * shift[0] + shift[1] * shift[1] + shift[2] * shift[2]) * 1.0e6 + 0.5),
+                           ou = static_cast<uint64_t>(std::sqrt(off[0] * off[0] + off[1] * off[1] + off[2] * off[2]) * 1.0e6 + 0.5);
+            g_lc.shiftSumUm.fetch_add(su, std::memory_order_relaxed);
+            g_lc.offSumUm.fetch_add(ou, std::memory_order_relaxed);
+            g_lc.shiftN.fetch_add(1, std::memory_order_relaxed);
+            maxUm(g_lc.shiftMaxUm, su);
+            maxUm(g_lc.offMaxUm, ou);
+            len += std::snprintf(line + len, sizeof(line) - len,
+                                 "; LOCKED: target in the eye (%.4f,%.4f,%.4f) m, applied shift (%.2f,%.2f,%.2f) cm, centre post minus target (%.2f,%.2f,%.2f) mm", static_cast<double>(e.target[0]),
+                                 static_cast<double>(e.target[1]), static_cast<double>(e.target[2]), shift[0] * 100.0, shift[1] * 100.0, shift[2] * 100.0, off[0] * 1000.0, off[1] * 1000.0,
+                                 off[2] * 1000.0);
+        } else {
+            len += std::snprintf(line + len, sizeof(line) - len, "; delta mode (%s)", kLockMissName[e.lockWhy]);
+        }
+    }
+    if (!s.quiet) Log::get().note("%s", line);
 }
 
 // A slot whose entries are all read (or given up on): each eye's disc and icon compared, and in the dump window their centres in the seated frame.
@@ -2407,8 +2548,9 @@ void pairLogFrame(const PairSlot& s) {
         const PairEntry& i = s.e[eye][1];
         if (!d.armed && !i.armed) continue;
         if (!d.measured || !i.measured) {
-            Log::get().note("srv turret radar pair: frame %u eye %d: disc %s, icon %s; nothing to compare", s.frame, eye, d.measured ? "measured" : d.armed ? "lost" : "not captured",
-                            i.measured ? "measured" : i.armed ? "lost" : "not captured");
+            if (!s.quiet)
+                Log::get().note("srv turret radar pair: frame %u eye %d: disc %s, icon %s; nothing to compare", s.frame, eye, d.measured ? "measured" : d.armed ? "lost" : "not captured",
+                                i.measured ? "measured" : i.armed ? "lost" : "not captured");
             continue;
         }
         const double dx = d.movePx[0] - i.movePx[0], dy = d.movePx[1] - i.movePx[1], apart = std::sqrt(dx * dx + dy * dy);
@@ -2416,6 +2558,7 @@ void pairLogFrame(const PairSlot& s) {
         if (apart > 1.0) g_pc.capApart.fetch_add(1, std::memory_order_relaxed);
         g_refNdc[eye][0] = d.preNdc[0];
         g_refNdc[eye][1] = d.preNdc[1];
+        if (s.quiet) continue;   // a capture for THE LOCK's learning alone
         char de[48] = "none", ie[48] = "none";
         if (d.expected) std::snprintf(de, sizeof(de), "(%.2f,%.2f)", d.expectPx[0], d.expectPx[1]);
         if (i.expected) std::snprintf(ie, sizeof(ie), "(%.2f,%.2f)", i.expectPx[0], i.expectPx[1]);
@@ -2430,10 +2573,26 @@ void pairLogFrame(const PairSlot& s) {
             st::eyeToSeated(d.R, d.E, d.preEye, dPre);
             st::eyeToSeated(i.R, i.E, i.postEye, iPost);
             st::eyeToSeated(i.R, i.E, i.preEye, iPre);
+            // THE LOCK: each kind's seated target (as it stands now), the shift its quad was given in the eye, and where its centre landed against the target
+            char kinds[2][256];
+            const PairEntry* both[2] = {&d, &i};
+            const double* post[2] = {dPost, iPost};
+            for (int k = 0; k < 2; ++k) {
+                const PairEntry& e = *both[k];
+                const st::LockTarget& t = g_lock[k];
+                const double sh[3] = {e.postEye[0] - e.preEye[0], e.postEye[1] - e.preEye[1], e.postEye[2] - e.preEye[2]};
+                if (t.learned)
+                    std::snprintf(kinds[k], sizeof(kinds[k]), "%s target seated (%.4f,%.4f,%.4f) m, %s, applied shift in the eye (%.2f,%.2f,%.2f) cm, post minus target (%.1f,%.1f,%.1f) mm",
+                                  k == 0 ? "disc" : "icon", t.seated[0], t.seated[1], t.seated[2], e.lockWhy == kLockOk ? "locked" : kLockMissName[e.lockWhy], sh[0] * 100.0, sh[1] * 100.0,
+                                  sh[2] * 100.0, (post[k][0] - t.seated[0]) * 1000.0, (post[k][1] - t.seated[1]) * 1000.0, (post[k][2] - t.seated[2]) * 1000.0);
+                else
+                    std::snprintf(kinds[k], sizeof(kinds[k]), "%s target none (%s), applied shift in the eye (%.2f,%.2f,%.2f) cm", k == 0 ? "disc" : "icon", kLockMissName[e.lockWhy],
+                                  sh[0] * 100.0, sh[1] * 100.0, sh[2] * 100.0);
+            }
             Log::get().note("srv turret radar pair: lock: frame %u eye %d (dump %ls, frame %u of %u): disc centre seated post (%.4f,%.4f,%.4f) pre (%.4f,%.4f,%.4f) m, icon post (%.4f,%.4f,%.4f) "
-                            "pre (%.4f,%.4f,%.4f) m; turret yaw rate %s",
+                            "pre (%.4f,%.4f,%.4f) m; turret yaw rate %s, %s; %s; %s",
                             s.frame, eye, g_pair.stamp, s.dumpIndex + 1, kPairDumpFrames, dPost[0], dPost[1], dPost[2], dPre[0], dPre[1], dPre[2], iPost[0], iPost[1], iPost[2], iPre[0], iPre[1],
-                            iPre[2], rate);
+                            iPre[2], rate, s.atRest ? "at rest" : "not at rest", kinds[0], kinds[1]);
         } else {
             Log::get().note("srv turret radar pair: lock: frame %u eye %d (dump %ls, frame %u of %u): no eye pose at the draw; turret yaw rate %s", s.frame, eye, g_pair.stamp, s.dumpIndex + 1,
                             kPairDumpFrames, rate);
@@ -2485,6 +2644,7 @@ void pairReadSlot(ID3D11DeviceContext* ctx, PairSlot& s) {
                     e.read = true;
                     g_pc.lost.fetch_add(1, std::memory_order_relaxed);
                 }
+    lockLearn(s);   // THE LOCK: a frame at rest teaches the targets
     pairLogFrame(s);
     s.pending = false;
 }
@@ -2697,7 +2857,21 @@ void pairBoundary(ID3D11DeviceContext* ctx) {
         g_pair.dumpIndex = kPairDumpFrames - g_pair.dumpLeft;
         --g_pair.dumpLeft;
     }
-    g_pair.wantFrame = g_pair.dumpFrame || GetTickCount64() - g_pair.lastMs >= kPairEveryMs;
+    // THE LOCK: a reset the frame tick asked for; and while a kind has no target, a capture every kLockLearnEveryFrames frames (quiet: for the learning alone, no lines)
+    const uint32_t gen = g_lockResetGen.load(std::memory_order_acquire);
+    if (gen != g_lockResetSeen) {
+        g_lockResetSeen = gen;
+        const bool had = g_lock[0].learned || g_lock[1].learned || g_lock[0].n || g_lock[1].n;
+        lockReset();
+        g_rest = st::RestWatch{};
+        g_lc.resets.fetch_add(1, std::memory_order_relaxed);
+        Log::get().note("srv turret radar lock: targets reset (%s)%s; each kind keeps the delta until it is learned again",
+                        st::lockResetName(static_cast<st::LockReset>(g_lockResetWhy.load(std::memory_order_relaxed))), had ? "" : ", none had been learned");
+    }
+    const bool timed = g_pair.dumpFrame || GetTickCount64() - g_pair.lastMs >= kPairEveryMs;
+    const bool learnTick = (!g_lock[0].learned || !g_lock[1].learned) && g_frame - g_pair.lastFrame >= st::kLockLearnEveryFrames;
+    g_pair.wantFrame = timed || learnTick;
+    g_pair.quietFrame = !timed;
 }
 
 // The frame tick's 10 s line (with the correction line, whenever the anchor yield was on in the window).
@@ -2710,6 +2884,32 @@ void pairWindow(bool yieldSeen) {
         v[k][3] = g_pc.declined[k].exchange(0, std::memory_order_relaxed);
         v[k][4] = g_pc.outside[k].exchange(0, std::memory_order_relaxed);
         for (int n = 0; n < 4; ++n) v[k][5 + n] = g_pc.perDraw[k][n].exchange(0, std::memory_order_relaxed);
+    }
+    uint64_t lk[kLockMissCount];   // THE LOCK's window
+    lk[kLockOk] = g_lc.locked.exchange(0, std::memory_order_relaxed);
+    for (int r = 1; r < kLockMissCount; ++r) lk[r] = g_lc.fallback[r].exchange(0, std::memory_order_relaxed);
+    const uint64_t shN = g_lc.shiftN.exchange(0, std::memory_order_relaxed), shSum = g_lc.shiftSumUm.exchange(0, std::memory_order_relaxed),
+                   shMax = g_lc.shiftMaxUm.exchange(0, std::memory_order_relaxed), offSum = g_lc.offSumUm.exchange(0, std::memory_order_relaxed),
+                   offMax = g_lc.offMaxUm.exchange(0, std::memory_order_relaxed), resets = g_lc.resets.exchange(0, std::memory_order_relaxed),
+                   relearned = g_lc.relearned.exchange(0, std::memory_order_relaxed), restFrames = g_lc.restFrames.exchange(0, std::memory_order_relaxed),
+                   lockFrames = g_lc.frames.exchange(0, std::memory_order_relaxed);
+    if (yieldSeen) {
+        char targets[2][96];
+        for (int k = 0; k < 2; ++k) {
+            const st::LockTarget& t = g_lock[k];   // the render thread's; read for the line only
+            if (t.learned)
+                std::snprintf(targets[k], sizeof(targets[k]), "seated (%.4f,%.4f,%.4f) m", t.seated[0], t.seated[1], t.seated[2]);
+            else
+                std::snprintf(targets[k], sizeof(targets[k]), "none (%u of %u rest samples)", t.n, st::kLockLearnSamples);
+        }
+        Log::get().note("srv turret radar lock: 10 s: draws locked %llu, on the delta %llu (no target yet %llu, not a single quad %llu, no eye pose %llu, target too far %llu); |T - C| (the shift a "
+                        "captured locked draw was given) mean %.2f max %.2f cm, its centre off the target mean %.2f max %.2f mm, over %llu captured draws; targets: disc %s, icon %s; reset %llu, "
+                        "re-learned %llu samples; frames at rest %llu of %llu",
+                        static_cast<unsigned long long>(lk[kLockOk]), static_cast<unsigned long long>(lk[1] + lk[2] + lk[3] + lk[4]), static_cast<unsigned long long>(lk[kLockNoTarget]),
+                        static_cast<unsigned long long>(lk[kLockShape]), static_cast<unsigned long long>(lk[kLockNoPose]), static_cast<unsigned long long>(lk[kLockFar]),
+                        shN ? double(shSum) * 1.0e-4 / double(shN) : 0.0, double(shMax) * 1.0e-4, shN ? double(offSum) * 1.0e-3 / double(shN) : 0.0, double(offMax) * 1.0e-3,
+                        static_cast<unsigned long long>(shN), targets[0], targets[1], static_cast<unsigned long long>(resets), static_cast<unsigned long long>(relearned),
+                        static_cast<unsigned long long>(restFrames), static_cast<unsigned long long>(lockFrames));
     }
     const uint64_t constFrames = g_pc.constFrames.exchange(0, std::memory_order_relaxed), constApart = g_pc.constApart.exchange(0, std::memory_order_relaxed),
                    constNoDepth = g_pc.constNoDepth.exchange(0, std::memory_order_relaxed), capFrames = g_pc.capFrames.exchange(0, std::memory_order_relaxed),
@@ -2756,21 +2956,30 @@ bool radarCorrectionBegin(ID3D11DeviceContext* ctx, int family, int eye) {
         g_corr = FrameCorrection{};
         g_corr.frame = g_frame;
         g_corr.reason = correctionCompute(ctx, eye, g_corr);
+        if (g_corr.reason != kCorrOk) g_rest = st::RestWatch{};   // THE LOCK's rest: a frame without its rates breaks it
     }
     if (g_corr.reason != kCorrOk) return leave(g_corr.reason);
     float rows[12];
     if (anchorDirCpuRows(ctx, nativeTemporalFrameSequence(), rows, nullptr, nullptr) != 0) return leave(kCorrNoRows);   // this draw's own camera rows, this host frame
     float dEye[3];
     st::radarDeltaInEye(rows, g_corr.deltaW, dEye);
-    if (dEye[0] == 0.0f && dEye[1] == 0.0f && dEye[2] == 0.0f) return leave(kCorrZero);   // nothing to move: the game's own place is right (no pop)
+    // THE LOCK: the kind's learned rest place, in this eye's space, when the draw is a single quad; else the delta, counted with its reason
+    float tEye[3] = {};
+    const int lockWhy = lockTargetInEye(ctx, eye, kind, tEye);
+    const bool locked = lockWhy == kLockOk;
+    if (!locked && dEye[0] == 0.0f && dEye[1] == 0.0f && dEye[2] == 0.0f) return leave(kCorrZero);   // nothing to move: the game's own place is right (no pop)
     st::EyeFrame ef;
     if (!drawEyeFrame(eye, ef)) return leave(kCorrNoEyeFrame);
-    for (int i = 0; i < 3; ++i) ef.tRadar[i] = dEye[i];
+    for (int i = 0; i < 3; ++i) ef.tRadar[i] = locked ? tEye[i] : dEye[i];
     // the translation alone (gap 0: every vertex moves by delta), and the game's own NDC depth (the hologram's scene-depth discard reads it), whatever fix.srv_turret_hud_depth says;
     // scaled to the content depth (THE CONTENT DEPTH: tr.w = 1 / z_c, or 0 for the plain delta)
     st::TurretParams cparams = st::withDepth(st::translateParamsFor(ef, st::Group::kRadar), st::DepthMode::kGame);
     cparams.invZc = radarContentInvDepth();
     if (!st::paramsUsable(cparams)) return leave(kCorrParams);
+    if (locked) {   // ... or THE LOCK: tr is the target and each triangle's longest-edge midpoint is moved onto it (the content depth is not read then)
+        cparams.lock = 1.0f;
+        if (!st::paramsUsable(cparams)) return leave(kCorrParams);
+    }
     D3D11_PRIMITIVE_TOPOLOGY topo = D3D11_PRIMITIVE_TOPOLOGY_UNDEFINED;
     if (!guarded("srv.turret.corr.topology", [&] { ctx->IAGetPrimitiveTopology(&topo); }) || !st::topologyCarried(static_cast<int>(topo))) return leave(kCorrTopology);
     if (g_binding.needsRestore() || g_scissor.owed() || !ensureGs(ctx, st::kSceneSignature)) return leave(kCorrNotReady);
@@ -2793,7 +3002,11 @@ bool radarCorrectionBegin(ID3D11DeviceContext* ctx, int family, int eye) {
     g_radarScope.gs = twin ? g_soGs[st::kSceneSignature] : g_gs[st::kSceneSignature];
     g_radarScope.kind = kind;
     detail::g_srvTurretHudCounting.store(true, std::memory_order_relaxed);
-    if (pair) pairBegin(ctx, *pair, eye, dEye, cparams, camera.buffer, rows);
+    if (pair) pairBegin(ctx, *pair, eye, dEye, cparams, camera.buffer, rows, lockWhy, tEye);
+    if (locked)
+        g_lc.locked.fetch_add(1, std::memory_order_relaxed);
+    else
+        g_lc.fallback[lockWhy].fetch_add(1, std::memory_order_relaxed);
     if (eye == 0 && g_pair.dumpFrame && g_pair.picture[kind - 1].state == PictureState::kNone) pictureTake(ctx, kind);   // THE PICTURES
     {   // THE CONSTANTS' COMPARISON: what this eye's billboard of this kind ran with
         FrameMove& fm = g_frameMove[eye][kind - 1];
@@ -2842,6 +3055,8 @@ bool radarCorrectionBegin(ID3D11DeviceContext* ctx, int family, int eye) {
     if (!g_corr.counted) {   // the per-frame figures, once a frame
         g_corr.counted = true;
         g_cc.frames.fetch_add(1, std::memory_order_relaxed);
+        g_lc.frames.fetch_add(1, std::memory_order_relaxed);   // THE LOCK's: frames, and of them at rest
+        if (g_corr.atRest) g_lc.restFrames.fetch_add(1, std::memory_order_relaxed);
         if (norm > st::kCorrectionLargeM) g_cc.large.fetch_add(1, std::memory_order_relaxed);
         const uint64_t um = static_cast<uint64_t>(norm * 1.0e6 + 0.5);
         g_cc.deltaSumUm.fetch_add(um, std::memory_order_relaxed);
@@ -3172,6 +3387,20 @@ void srvTurretFrameTick(uint32_t frameNo) {
     // The Scorpion only: the turret view bit is the Scarab's too, and the journal says which SRV this is (journalSrvScorpion; unknown is "not the Scorpion"). `on` is what both parts act on.
     const bool turret = journalSrvTurretView();
     const bool on = turret && journalSrvScorpion();
+    {   // THE LOCK (TEMPORARY): its targets start again when the view comes on or a key that moves where the game's radar rests changes
+        static bool s_on = false;
+        static int s_back = backCm, s_radarForward = radarForwardCm, s_anchor = g_anchorMode.load(std::memory_order_relaxed);
+        const int anchorMode = g_anchorMode.load(std::memory_order_relaxed);
+        const st::LockReset why = st::lockResetWhy(s_on, on, s_back, backCm, s_radarForward, radarForwardCm, s_anchor, anchorMode);
+        if (why != st::LockReset::kNone) {
+            g_lockResetWhy.store(static_cast<int>(why), std::memory_order_relaxed);
+            g_lockResetGen.fetch_add(1, std::memory_order_release);
+        }
+        s_on = on;
+        s_back = backCm;
+        s_radarForward = radarForwardCm;
+        s_anchor = anchorMode;
+    }
     if (on != g_on) {
         g_on = on;
         Log::get().note("srv turret view: %s at frame %u (Status.json Flags 0x%08X, seat kind 0x%X)", on ? "on" : "off", frameNo, static_cast<unsigned>(journalStatusFlags()),
@@ -3400,6 +3629,9 @@ void srvTurretShutdown() {
     pairResetSlots();
     g_pair.device = nullptr;
     g_radarScope = RadarScope{};
+    lockReset();   // THE LOCK (TEMPORARY)
+    g_rest = st::RestWatch{};
+    g_aimPrev = AimPrev{};
     g_binding.clear();
     g_scissor.clear();
     for (auto& c : g_constants) c.reset();

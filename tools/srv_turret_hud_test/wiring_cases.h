@@ -506,6 +506,28 @@ static bool wiredContentDepth(const std::string& module, const std::string& shad
     const bool caps = found(module.find("if (!(norm <= st::kCorrectionMaxM)) return kCorrOver;")) && found(module.find("if (norm > st::kCorrectionLargeM) g_cc.large.fetch_add(1, std::memory_order_relaxed);"));
     return found(marked) && sets == 1 && calls == 2 && source && gpu && cpu && probe && gone && caps;
 }
+// THE LOCK (flight 8e3bcd7b): vscreen.cpp notes the draw's shape before the pass's scope; radarCorrectionBegin asks for the target after the delta is made, keeps the delta's zero-skip for
+// a draw it does not lock, sets the lock flag in one place only when locked (and tests the constants again), and counts every moved draw locked or by its reason; the draw's shape is
+// checked; the targets are learned from frames at rest at the pair capture's readback, before the frame's lines, and reset at the frame boundary when the frame tick asks.
+static bool wiredLock(const std::string& vscreen, const std::string& module) {
+    const size_t npos = std::string::npos;
+    const size_t shape = vscreen.find("if (owner && srvTurretHudWantsDraws()) srvTurretHudNoteDrawShape(count, instances);");
+    const size_t scope = vscreen.find("SrvTurretHudScope turretHud(self);");
+    const size_t fn = module.find("bool radarCorrectionBegin(ID3D11DeviceContext* ctx, int family, int eye) {");
+    const size_t eyeD = found(fn) ? module.find("st::radarDeltaInEye(rows, g_corr.deltaW, dEye);", fn) : npos;
+    const size_t ask = found(eyeD) ? module.find("const int lockWhy = lockTargetInEye(ctx, eye, kind, tEye);", eyeD) : npos;
+    const size_t zero = found(ask) ? module.find("if (!locked && dEye[0] == 0.0f && dEye[1] == 0.0f && dEye[2] == 0.0f) return leave(kCorrZero);", ask) : npos;
+    const size_t flag = found(zero) ? module.find("    if (locked) {   // ", zero) : npos;
+    const size_t set = found(flag) ? module.find("        cparams.lock = 1.0f;\n        if (!st::paramsUsable(cparams)) return leave(kCorrParams);\n", flag) : npos;
+    size_t sets = 0;
+    for (size_t at = module.find(".lock = 1.0f"); found(at); at = module.find(".lock = 1.0f", at + 1)) ++sets;
+    const bool counted = found(module.find("g_lc.locked.fetch_add(1, std::memory_order_relaxed);")) && found(module.find("g_lc.fallback[lockWhy].fetch_add(1, std::memory_order_relaxed);"));
+    const bool learn = found(module.find("    lockLearn(s);   // THE LOCK: a frame at rest teaches the targets\n    pairLogFrame(s);")) && found(module.find("    if (!s.atRest) return;\n"));
+    const bool shapeChecked = found(module.find("!st::lockShape(static_cast<int>(topo), detail::g_srvTurretDrawCount, detail::g_srvTurretDrawInstances)"));
+    const bool reset = found(module.find("if (gen != g_lockResetSeen) {")) && found(module.find("g_lockResetGen.fetch_add(1, std::memory_order_release);"));
+    const bool rest = found(module.find("c.atRest = g_rest.step(c.haveRate && vehicleRate, c.yawRateDegS, c.pitchRateDegS, c.vehicleRateDegS);"));
+    return found(shape) && found(scope) && shape < scope && found(set) && sets == 1 && counted && learn && shapeChecked && reset && rest;
+}
 static bool wiredBuild(const std::string& t) {
     const size_t source = t.find("\"src\\d3d11\\srv_turret.cpp\"");
     const size_t compile = t.find("ERROR: compile failed");
@@ -738,6 +760,13 @@ static void wiringCases() {
     check(!wiredContentDepth(module + "\nvoid farDepthSwap(ID3D11DeviceContext* ctx);\n", shaderText, mathText, bindingText), "control: the far depth back in the module trips the pin");
     check(!wiredContentDepth(module, shaderText, mathText, bindingText + "\nclass FarDepth {};\n"), "control: the far depth back in the binding header trips the pin");
     check(!wiredContentDepth(replaced(module, "if (norm > st::kCorrectionLargeM) g_cc.large.fetch_add(1, std::memory_order_relaxed);", "(void)0;"), shaderText, mathText, bindingText), "control: large corrections never counted trip the pin");
+    check(wiredLock(vscreen, module), "the lock: the draw's shape noted before the scope, the target asked after the delta, the flag set once and only when locked, every moved draw counted, rest-only learning, the resets");
+    check(!wiredLock(vscreen, replaced(module, "        cparams.lock = 1.0f;\n", "")), "control: a lock flag never set trips the pin");
+    check(!wiredLock(vscreen, replaced(module, "    if (!s.atRest) return;\n", "")), "control: targets learned outside rest trip the pin");
+    check(!wiredLock(replaced(vscreen, "if (owner && srvTurretHudWantsDraws()) srvTurretHudNoteDrawShape(count, instances);", ""), module), "control: the draw's shape never noted trips the pin");
+    check(!wiredLock(vscreen, replaced(module, "!st::lockShape(static_cast<int>(topo), detail::g_srvTurretDrawCount, detail::g_srvTurretDrawInstances)", "false")),
+          "control: a lock that never checks the draw's shape trips the pin");
+    check(!wiredLock(vscreen, replaced(module, "if (!locked && dEye[0] == 0.0f", "if (dEye[0] == 0.0f")), "control: a locked draw left to the game at a zero delta trips the pin");
     check(!wiredAnchor(module, anchorHook, replaced(ini, "\nsrv_turret_radar_anchor = on\n", "\nsrv_turret_radar_anchor = off\n"), build, audit), "control: a drifted shipped default of the radar anchor key trips the pin");
     check(!wiredAnchor(module, anchorHook, replaced(ini, "# ui: SRV turret radar anchor | choices on, reversed, off", "# ui: SRV turret radar anchor | choices on, off"), build, audit),
           "control: a drifted menu row of the radar anchor key trips the pin");

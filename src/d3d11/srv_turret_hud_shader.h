@@ -34,7 +34,12 @@
 // interpolant, so it needs nothing here.
 //
 // THE CONSTANT BUFFER is private to the shader (GS slot 0, which the game never binds): four registers, srv_turret_math.h's TurretParams -- {gap, dMin, dMax, depth mode}, {left, right, down, up},
-// {the anchor in the eye's space: X right, Y up, Z forward}, {the translation in the same axes, and 1 / the content depth or 0}.
+// {the anchor in the eye's space: X right, Y up, Z forward; the lock}, {the translation in the same axes, and 1 / the content depth or 0}.
+//
+// THE LOCK (an.w = 1; srv_turret_math.h THE LOCK; only the radar billboards' draw-time correction sets it): tr.xyz is then the billboard's target in the eye's space, and every vertex of a
+// triangle moves by tr.xyz - C, C the midpoint of the triangle's longest edge, its eye-space points rebuilt from the game's clip positions (turretLockCentre). A quad's two triangles share
+// that edge, so both move by the same vector and the quad's centre lands on the target. The vertex keeps the game's NDC depth (0.999 when it has no valid one), and the move is the
+// displacement H's lighting line applies.
 //
 // THE SCORPION HOLOGRAM (signature H) also reads the draw's own vertex constants at GS slot 1 (the module binds the draw's VS slot 1 there and gives it back): the move's eye-space
 // displacement d = Q - P is added to the interpolant __USER_VERTEX_M_LIGHTINGPOSITION (the camera-relative world position, which the pixel shader divides by its view depth) as
@@ -82,6 +87,24 @@ namespace edvr {
     "    else if (mv.w > 0.5) ndcZ = (abs(q.z) > 1.0e-6) ? clamp(c.z / q.z, 0.0, 0.999) : 0.999;\n" \
     "    return float4((2.0 * q.x - q.z * (tn.y + tn.x)) / (tn.y - tn.x), (2.0 * q.y - q.z * (tn.w + tn.z)) / (tn.w - tn.z), ndcZ * q.z, q.z);\n" \
     "}\n" \
+    "float3 turretEye(float4 c) {\n" \
+    "    return float3(c.x * (tn.y - tn.x) * 0.5 + c.w * (tn.y + tn.x) * 0.5, c.y * (tn.w - tn.z) * 0.5 + c.w * (tn.w + tn.z) * 0.5, c.w);\n" \
+    "}\n" \
+    "float3 turretLockCentre(float4 a, float4 b, float4 c) {\n" \
+    "    const float3 p = turretEye(a), q = turretEye(b), r = turretEye(c);\n" \
+    "    const float pq = dot(q - p, q - p), qr = dot(r - q, r - q), rp = dot(p - r, p - r);\n" \
+    "    if (pq >= qr && pq >= rp) return (p + q) * 0.5;\n" \
+    "    return qr >= rp ? (q + r) * 0.5 : (r + p) * 0.5;\n" \
+    "}\n" \
+    "float4 turretLock(float4 c, float3 k, out float3 dq) {\n" \
+    "    dq = float3(0.0, 0.0, 0.0);\n" \
+    "    if (abs(c.w) < 1.0e-6) return c;\n" \
+    "    const float3 s = turretEye(c) + k;\n" \
+    "    dq = k;\n" \
+    "    const float g = c.z / c.w;\n" \
+    "    const float gz = (c.w > 0.0 && g >= 0.0 && g <= 1.0) ? g : 0.999;\n" \
+    "    return float4((2.0 * s.x - s.z * (tn.y + tn.x)) / (tn.y - tn.x), (2.0 * s.y - s.z * (tn.w + tn.z)) / (tn.w - tn.z), gz * s.z, s.z);\n" \
+    "}\n" \
     "struct Vertex {\n"
 // The tail in three pieces so signature H can put its constant buffer between the first two and its one line between the last two; every other signature's is the three together.
 #define EDVR_SRV_TURRET_GS_TAIL_A \
@@ -94,12 +117,15 @@ namespace edvr {
 #define EDVR_SRV_TURRET_GS_TAIL_B \
     "[maxvertexcount(3)]\n" \
     "void main(triangle Vertex v[3], inout TriangleStream<Moved> stream) {\n" \
+    "    const bool locked = an.w > 0.5;\n" \
+    "    const float3 lk = locked ? tr.xyz - turretLockCentre(v[0].pos, v[1].pos, v[2].pos) : float3(0.0, 0.0, 0.0);\n" \
     "    [unroll] for (int i = 0; i < 3; ++i) {\n" \
     "        Moved o;\n" \
     "        o.v = v[i];\n" \
     "        o.pre = v[i].pos;\n" \
     "        float3 d;\n" \
-    "        o.v.pos = turretMove(v[i].pos, d);\n"
+    "        o.v.pos = turretMove(v[i].pos, d);\n" \
+    "        if (locked) o.v.pos = turretLock(v[i].pos, lk, d);\n"
 #define EDVR_SRV_TURRET_GS_TAIL_C \
     "        stream.Append(o);\n" \
     "    }\n" \

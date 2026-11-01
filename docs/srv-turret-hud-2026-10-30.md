@@ -18,14 +18,14 @@
 - **The radar fix:** a hook on the schematic's placement setter
   (0x38563A0, build 334925 only) adds radar forward along the turret's
   seated forward, in the anchor's axes, to the translation the game sets;
-  the radar's picture billboards are corrected at draw time from the
-  frame's own camera, each vertex by delta * w / z_c. FLOWN (15b659b2): both
-  quads sit at the content depth (a far quad ruled out), yet the
-  Scorpion-shaped hole in the disc still sits beside the icon and the disc
-  trails the barrel. BUILT, NOT FLOWN: the pair capture, an instrument only
-  (journal, "the pair capture and the relief radius").
-- **UI quality parity:** with UI quality off the radar's terrain is
-  brighter. BUILT, NOT FLOWN: the layer's relief radius fix (same entry).
+  the radar's picture billboards are corrected at draw time. FLOWN
+  (8e3bcd7b, the pair capture): the game damps the radar's placement over
+  about 65 ms, the disc and the icon differently, so a delta by the setter's
+  last d leaves the disc trailing and 2 cm off the icon (the ghost; no hole
+  in the disc's picture). BUILT, NOT FLOWN: each billboard locked to its own
+  seated rest place, learned at rest (journal, "the lock").
+- **UI quality parity:** FLOWN (8e3bcd7b): the layer's relief radius fix is
+  applied to both programs (k 2, cb1[120].z 1.3666 from the bound b1).
 - **The radar's way out without it:** camera back 70, radar forward 0.
 - **What is wrong (the game's own placement):** the turret view's whole HUD
   sits about 0.7 m too far back for the stock camera (the radar behind the
@@ -55,9 +55,9 @@
   reads best; whether the switch lag is acceptable.
 - **Ruled out:** see "Ruled out" below.
 - **Next flight (this branch):** radar anchor on, camera back 0 to 35,
-  radar forward = 65 minus camera back. A fast turret sweep with INSERT
-  during it; then still, INSERT at UI quality 100 and again at off. Read
-  `--grep "srv turret radar pair"` and `--grep "relief radius"`.
+  radar forward = 65 minus camera back. Sit still a second, then a fast and
+  a slow sweep with INSERT during each; then drive forward and turn. Read
+  `--grep "srv turret radar lock"` and `--grep "radar pair: lock"`.
 
 ## Evidence (flight of 2026-10-30, Epic, v0.22.0-rc.3-139-gcd4c91c4)
 
@@ -209,6 +209,14 @@ same amount. Matching them needs a change to one layer's stereo depth.
   0.305 m, icon w 0.315 to 0.323 m and z_c 0.31 to 0.33 m: both quads
   already sit at the content's depth, and "moved by" equalled "expected" for
   both (flight 15b659b2, `edvr_gfx_20261101_062714.log`).
+- ruled out: correcting the radar by the setter's last d (the delta mode),
+  because the game damps the placement over about 65 ms, differently for
+  the disc and the icon: at -130 deg/s the disc's pre-move centre sat about
+  9 cm and the icon's about 7 cm off rest, and after the delta still 5.3 and
+  3.1 cm (flight 8e3bcd7b, dump 072742058001).
+- ruled out: a hole in the disc's picture as the Scorpion's ghost, because
+  the dump's disc t4 (`eye_072742058001_RadarDiscT4.bmp`) is a full ellipse;
+  the ghost is the disc's quad 2 cm off the icon's (flight 8e3bcd7b).
 
 ## Journal
 
@@ -1620,4 +1628,108 @@ block the tee sees (the relief line names its source); that the relief fix
 brings the fill to the UI-quality-off look; which billboard's on-screen move
 differs, and whether the hole moves with the disc's quad or inside its
 picture.
+
+### 2026-11-01: the pair capture flown (flight 8e3bcd7b); the lock (built, not flown)
+
+Steam, `edvr_gfx_20261101_072456.log`, dump `072742058001`.
+- **The relief radius works.** "relief radius applied ... k 2.0000 ...
+  cb1[120].z 1.3666 from the bound b1's last write, radius factor 2.7332"
+  for both programs.
+- **The disc's picture has no hole.** `eye_072742058001_RadarDiscT4.bmp` is
+  a full ellipse. Still frames show no ghost; only sweeps do (the hole idea
+  is ruled out above).
+- **The lock lines name the cause: the game's own placement lags the
+  turret by far more than a frame, the disc and the icon by different
+  amounts.**
+  - At rest: disc seated post (0.007, -0.220, -0.055), icon post (0.005,
+    -0.212, -0.076).
+  - At a steady -130 deg/s: the disc's pre-move x about +0.09 m (7 to 9 cm,
+    about 65 ms of lag), the icon's about +0.07. The delta takes off only
+    the setter's one frame of it, so the disc's post-move x is still +0.053
+    and the icon's +0.031: the trailing Sean sees, and the 2 cm between the
+    two is the ghost.
+  - At -344 deg/s even the eyes differ: disc pre x 0.151 in eye 0 and 0.238
+    in eye 1, in the same frame.
+- **Reading.** The game damps the radar's world placement toward P + d over
+  several frames, differently for the terrain disc and the icon. In the
+  stock game this cannot show, because P sits on the yaw axis; our d
+  rotates with the turret, so the damping does (ruled out above:
+  correcting by the setter's last d).
+
+**The build: the lock (srv_turret_math.h and srv_turret_hud_shader.h THE
+LOCK).**
+- **In the geometry shader** (all eight share the code; only the radar
+  correction sets the flag, TurretParams::lock, the anchor register's w):
+  each triangle's three eye-space points are rebuilt from the game's clip
+  positions, C is the midpoint of the triangle's longest edge, and every
+  vertex moves by T - C, T the billboard's target in the eye (where the
+  delta went). A quad's two triangles share the diagonal, each one's
+  longest edge for a rectangle, so both take the same C (bit for bit) and no
+  crack opens. The game's NDC depth is kept, and signature H's lighting
+  position moves by the same vector.
+- **Single quads only.** The draw's count and instances (noted by
+  vscreen.cpp before the pass's scope) must be a list of 6 or a strip of 4,
+  one instance; any other draw keeps the delta, counted.
+- **The targets, on the CPU, one per kind, in the seated frame.**
+  - **Rest:** the turret's yaw and pitch rates on the vehicle (the desired
+    aim in the anchor's axes, frame to frame) and the vehicle's own turn
+    rate (the anchor's world rotation, frame to frame) all under 3 deg/s,
+    20 frames in a row. Pitch is in the rest test too: an elevation change
+    moves d as a yaw does. Linear motion is not (the call ring carries no
+    translation), so driving straight counts as rest.
+  - **Learned value:** the mean of the pair capture's pre-move seated
+    centres at rest (both eyes of a frame averaged), first after 6 samples;
+    while a kind has none, the capture runs every 5 frames (silently),
+    else every 2 s. After that each rest sample moves it by 1 - exp(-dt /
+    1 s), dt the time since the last sample, at most 2 s.
+  - **Reset:** when the view comes on, and when camera back, radar forward
+    or the radar anchor key changes.
+  - **Before a target exists:** the delta, as before.
+  - **At the draw:** the target is put in the eye with that eye's pose of
+    the draw (the inverse of the lock line's conversion).
+- **Unchanged:** the setter's offset and its no-lead rule, the pair
+  capture, the lock lines, the relief radius.
+- **The rig** (srv_turret_hud_test, WARP, all eight signatures): a
+  rectangle and a sheared, depth-tilted parallelogram (cut along its long
+  diagonal) land with each triangle's centre on T to 1e-5 m, the shared
+  corners bit for bit, every vertex moved by T - C with the game's depth,
+  and H's lighting position by the same vector; with the flag at 0 the
+  twin is the plain translation. Six lock mutants are caught. On the CPU:
+  the draw-shape rule, seated to eye as the inverse of eye to seated, the
+  vehicle's turn angle, rest (each rate, a missing frame), the learning
+  (the sixth sample, the 1 s average, the 2 s cap, a non-finite sample) and
+  the reset rules. A wiring pin with five controls.
+
+The log lines:
+- `srv turret radar lock: disc|icon target learned at frame F: seated
+  (x,y,z) m, the mean of N rest samples (eye 0 (..) m from n, eye 1 (..) m
+  from n); its billboard is now locked to it`, once per kind (and after a
+  reset).
+- `srv turret radar lock: targets reset (the turret view came on | camera
+  back, radar forward or the radar anchor key changed)[, none had been
+  learned]; each kind keeps the delta until it is learned again`.
+- `srv turret radar lock: 10 s: draws locked L, on the delta D (no target
+  yet a, not a single quad b, no eye pose c, target too far e); |T - C| (the
+  shift a captured locked draw was given) mean X max Y cm, its centre off
+  the target mean .. max .. mm, over N captured draws; targets: disc
+  seated (..) m | none (k of 6 rest samples), icon ...; reset R, re-learned
+  S samples; frames at rest F of G`, beside the correction line.
+- Each pair billboard line ends `; LOCKED: target in the eye (x,y,z) m,
+  applied shift (x,y,z) cm, centre post minus target (x,y,z) mm` or `;
+  delta mode (why)`.
+- The pair lock line (dump window) adds `turret yaw rate R deg/s, at rest |
+  not at rest; disc target seated (x,y,z) m, locked | why, applied shift in
+  the eye (x,y,z) cm, post minus target (x,y,z) mm; icon ...`. Locked, the
+  post-move seated centre should stay at the target through a sweep.
+
+To fly: radar anchor on, camera back 0 to 35, radar forward = 65 minus
+camera back. Sit still for a second (both targets learned), then a fast
+and a slow turret sweep with INSERT during each; then drive forward and
+turn the vehicle.
+
+Unconfirmed until it flies: that rest comes (the 10 s line's frames at
+rest); that both kinds lock (locked against delta); that the post-move
+centre stays at the target through a sweep; whether driving or turning the
+vehicle shows the same damping (the targets do not follow a moving vehicle
+until it rests).
 

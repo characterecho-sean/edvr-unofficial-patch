@@ -522,13 +522,13 @@ inline constexpr uint32_t kContentDepthFreshFrames = 90;                     // 
 // The geometry shader's constant buffer (GS slot 0, which the game never binds): four registers.
 //   [0] gap, dMin, dMax, depth       the move: metres nearer (negative: deeper), and the window of anchor distances it applies to; the DepthMode (0 game, 1 real, 2 front)
 //   [1] l, r, dn, up                 the eye's projection tangents as the game projects (left and down negative; the jitter shift is added)
-//   [2] ax, ay, az, (pad)            the anchor in the eye's space: X right, Y up, Z forward (= clip w)
-//   [3] tx, ty, tz, invZc            the translation (HUD forward) in the same axes; invZc 1 / the content depth z_c (THE CONTENT DEPTH below), 0 for every draw but the
-//                                    radar billboards' draw-time correction
+//   [2] ax, ay, az, lock             the anchor in the eye's space: X right, Y up, Z forward (= clip w); lock 1: THE LOCK (below), 0 for every other draw
+//   [3] tx, ty, tz, invZc            the translation (HUD forward) in the same axes, or with lock 1 the radar billboard's target in them; invZc 1 / the content depth z_c (THE
+//                                    CONTENT DEPTH below), 0 for every draw but the radar billboards' draw-time correction
 struct TurretParams {
     float gap = 0.0f, dMin = 0.0f, dMax = 0.0f, depth = 0.0f;   // depth: the DepthMode as 0, 1 or 2
     float l = 0.0f, r = 0.0f, dn = 0.0f, up = 0.0f;
-    float ax = 0.0f, ay = 0.0f, az = 0.0f, pad1 = 0.0f;
+    float ax = 0.0f, ay = 0.0f, az = 0.0f, lock = 0.0f;
     float tx = 0.0f, ty = 0.0f, tz = 0.0f, invZc = 0.0f;
     bool operator==(const TurretParams& o) const { return std::memcmp(this, &o, sizeof(TurretParams)) == 0; }
 };
@@ -594,12 +594,13 @@ inline int pushCmOf(Group g, int panelsCm, int radarCm) { return g == Group::kPa
 
 // The constants a shader may be given (the binding's validity test, written here so the rig can run it): all finite; |gap| <= 2 m; a window above the gap and above 0 (dMax > dMin > max(gap, 0)),
 // so the divisor d - gap is positive; r > l and up > dn; the anchor and the translation within 2 m; the depth mode one of 0, 1 and 2; 1 / the content depth in [0, 20] (z_c of 5 cm or more,
-// or none); and a move that does something (a gap or a translation).
+// or none); the lock 0 or 1; and a move that does something (a gap or a translation).
 inline bool paramsUsable(const TurretParams& p) {
-    const float all[] = {p.gap, p.dMin, p.dMax, p.depth, p.l, p.r, p.dn, p.up, p.ax, p.ay, p.az, p.tx, p.ty, p.tz, p.invZc};
+    const float all[] = {p.gap, p.dMin, p.dMax, p.depth, p.l, p.r, p.dn, p.up, p.ax, p.ay, p.az, p.lock, p.tx, p.ty, p.tz, p.invZc};
     for (float f : all)
         if (!std::isfinite(f)) return false;
     if (!(p.invZc >= 0.0f && p.invZc <= kContentInvZMax)) return false;
+    if (p.lock != 0.0f && p.lock != 1.0f) return false;
     if (p.depth != 0.0f && p.depth != 1.0f && p.depth != 2.0f) return false;
     if (!(std::fabs(p.gap) <= kAnchorLimitM)) return false;
     if (!(p.dMin > p.gap) || !(p.dMin > 0.0f) || !(p.dMax > p.dMin)) return false;
@@ -926,6 +927,115 @@ inline double angleBetweenDeg(const double a[3], const double b[3]) {
     if (c > 1.0) c = 1.0;
     if (c < -1.0) c = -1.0;
     return std::acos(c) * 180.0 / 3.14159265358979323846;
+}
+
+// ---- THE LOCK (flight 8e3bcd7b, dump 072742058001: the game damps the radar's world placement toward P + d over about 65 ms, and differently for the disc and the icon) --------------------
+// Correcting by what the setter's last d left undone takes off one frame of it and no more: at a steady -130 deg/s the disc's quad stayed about 5 cm and the icon's about 3 cm off their
+// rest places, and the 2 cm between them is the Scorpion's ghost. So each radar billboard (disc, icon) is locked to its own rest place in the SEATED frame, learned while the turret and the
+// vehicle are still: at each draw that place is put in the eye's space with that eye's pose, and the geometry shader moves the quad so its centre lands on it (srv_turret_hud_shader.h
+// turretLockCentre and turretLock, with TurretParams::lock 1 and the target in tx, ty, tz). Before a target is learned the correction keeps its delta.
+//
+// The centre the shader takes for a triangle: the midpoint of its LONGEST edge. A quad's two triangles share a diagonal; for a rectangle (a billboard in the eye's space) and for a
+// parallelogram cut along its long diagonal that diagonal is each triangle's longest edge, so both triangles take the same point, bit for bit (the sum of the same two points), and move by
+// the same vector: no crack opens. The same comparisons in the same order as the shader. Eye-space points.
+template <class T>
+inline void lockCentre(const T a[3], const T b[3], const T c[3], T out[3]) {
+    const auto d2 = [](const T* p, const T* q) { return (q[0] - p[0]) * (q[0] - p[0]) + (q[1] - p[1]) * (q[1] - p[1]) + (q[2] - p[2]) * (q[2] - p[2]); };
+    const T ab = d2(a, b), bc = d2(b, c), ca = d2(c, a);
+    const T* u = a;
+    const T* v = b;
+    if (!(ab >= bc && ab >= ca)) {
+        u = bc >= ca ? b : c;
+        v = bc >= ca ? c : a;
+    }
+    for (int k = 0; k < 3; ++k) out[k] = (u[k] + v[k]) * T(0.5);
+}
+// A seated point in one eye's space: the inverse of eyeToSeated (R the eye's seated rotation, E its position).
+inline void seatedToEye(const double R[9], const double E[3], const double s[3], double out[3]) {
+    const double d[3] = {s[0] - E[0], s[1] - E[1], s[2] - E[2]};
+    const double v[3] = {R[0] * d[0] + R[3] * d[1] + R[6] * d[2], R[1] * d[0] + R[4] * d[1] + R[7] * d[2], R[2] * d[0] + R[5] * d[1] + R[8] * d[2]};
+    out[0] = v[0];
+    out[1] = v[1];
+    out[2] = -v[2];
+}
+// The lock takes a single quad: two triangles (a list of 6 vertices or a strip of 4), one instance. Any other draw keeps the delta, counted.
+inline bool lockShape(int d3d11Topology, uint32_t count, uint32_t instances) {
+    if (instances > 1) return false;
+    if (d3d11Topology == 4) return count == 6;
+    if (d3d11Topology == 5) return count == 4;
+    return false;
+}
+// The angle between two rotations given as three rows each (rows at [0..2], [4..6], [8..10], each normalized first), in degrees: the vehicle's turn between two frames.
+inline double rotationAngleDeg(const float A[16], const float B[16]) {
+    double tr = 0.0;
+    for (int i = 0; i < 3; ++i) {
+        const float* a = A + 4 * i;
+        const float* b = B + 4 * i;
+        const double la = std::sqrt(double(a[0]) * a[0] + double(a[1]) * a[1] + double(a[2]) * a[2]), lb = std::sqrt(double(b[0]) * b[0] + double(b[1]) * b[1] + double(b[2]) * b[2]);
+        if (!(la > 0.0) || !(lb > 0.0)) return 1.0e9;
+        tr += (double(a[0]) * b[0] + double(a[1]) * b[1] + double(a[2]) * b[2]) / (la * lb);
+    }
+    double c = (tr - 1.0) * 0.5;
+    c = c > 1.0 ? 1.0 : c < -1.0 ? -1.0 : c;
+    return std::acos(c) * 57.29577951308232;
+}
+// REST: the turret's yaw and pitch rates on the vehicle (the desired aim in the anchor's axes, frame to frame) and the vehicle's own turn rate (the anchor's world rotation, frame to
+// frame) all under kRestDegS, for kRestFrames frames in a row. A frame without the rates (no correction computed, or the previous frame's missing) breaks it.
+inline constexpr double kRestDegS = 3.0;
+inline constexpr uint32_t kRestFrames = 20;
+struct RestWatch {
+    uint32_t frames = 0;
+    bool step(bool haveRates, double turretYawDegS, double turretPitchDegS, double vehicleDegS) {
+        const bool still = haveRates && std::fabs(turretYawDegS) < kRestDegS && std::fabs(turretPitchDegS) < kRestDegS && std::fabs(vehicleDegS) < kRestDegS;
+        frames = still ? frames + 1 : 0;
+        return atRest();
+    }
+    bool atRest() const { return frames >= kRestFrames; }
+};
+// THE TARGET of one kind, in the seated frame: the first kLockLearnSamples rest samples (the pre-move centres the pair capture measures, the eyes of a frame averaged) are averaged;
+// after that each rest sample moves it by 1 - exp(-dt / kLockTauS), dt the time since the last sample taken (at most kLockMaxStepS), so a lean or the head's drift is followed.
+inline constexpr uint32_t kLockLearnSamples = 6;
+inline constexpr uint32_t kLockLearnEveryFrames = 5;   // the pair capture's rate while a kind has no target
+inline constexpr double kLockTauS = 1.0, kLockMaxStepS = 2.0;
+struct LockTarget {
+    bool learned = false;
+    double seated[3] = {0.0, 0.0, 0.0};
+    double sum[3] = {0.0, 0.0, 0.0};
+    uint32_t n = 0;           // samples of the first learning
+    uint64_t relearned = 0;   // samples after it
+    double lastS = -1.0;      // when the last sample was taken (seconds; below 0: none)
+    // True the moment the target is first learned.
+    bool add(const double s[3], double nowS) {
+        for (int k = 0; k < 3; ++k)
+            if (!std::isfinite(s[k])) return false;
+        if (!learned) {
+            for (int k = 0; k < 3; ++k) sum[k] += s[k];
+            ++n;
+            lastS = nowS;
+            if (n < kLockLearnSamples) return false;
+            for (int k = 0; k < 3; ++k) seated[k] = sum[k] / double(n);
+            learned = true;
+            return true;
+        }
+        double dt = lastS >= 0.0 ? nowS - lastS : kLockMaxStepS;
+        dt = dt < 0.0 ? 0.0 : dt > kLockMaxStepS ? kLockMaxStepS : dt;
+        const double a = 1.0 - std::exp(-dt / kLockTauS);
+        for (int k = 0; k < 3; ++k) seated[k] += a * (s[k] - seated[k]);
+        ++relearned;
+        lastS = nowS;
+        return false;
+    }
+};
+// The targets start again when the turret view comes on and when fix.srv_turret_camera_back, fix.srv_turret_radar_forward or fix.srv_turret_radar_anchor changes (each moves where the
+// game's radar rests); no other key does.
+enum class LockReset : uint8_t { kNone = 0, kViewOn, kKey };
+inline LockReset lockResetWhy(bool wasOn, bool on, int backBefore, int back, int radarForwardBefore, int radarForward, int anchorBefore, int anchor) {
+    if (on && !wasOn) return LockReset::kViewOn;
+    if (back != backBefore || radarForward != radarForwardBefore || anchor != anchorBefore) return LockReset::kKey;
+    return LockReset::kNone;
+}
+inline const char* lockResetName(LockReset r) {
+    return r == LockReset::kViewOn ? "the turret view came on" : r == LockReset::kKey ? "camera back, radar forward or the radar anchor key changed" : "none";
 }
 
 // ---- the radar picture's camera (TEMPORARY instrument) -----------------------------------------------------------------------------------------------------------------------------
