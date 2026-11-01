@@ -468,8 +468,11 @@ static bool wiredCorrection(const std::string& vscreen, const std::string& modul
     const size_t shown = found(written) ? module.find("srvRadarAnchorShownCall(writtenAt, call)", written) : npos;
     const size_t world = found(shown) ? module.find("st::radarCorrectionWorld(uTrue, call.A, call.sF, call.d, c.deltaW, dStar)", shown) : npos;
     const size_t capped = found(world) ? module.find("if (!(norm <= st::kCorrectionMaxM)) return kCorrOver;", world) : npos;
-    const size_t kindFn = module.find("int billboardKind(ID3D11DeviceContext* ctx) {");
+    const size_t kindFn = module.find("int billboardKind(ID3D11DeviceContext* ctx, bool& lastFrameOnly) {");
     const size_t t4 = found(kindFn) ? module.find("ctx->PSGetShaderResources(4, 1, &srv)", kindFn) : npos;
+    // this frame's writers only move a billboard; the previous frame's are counted, never matched
+    const size_t strict = found(t4) ? module.find("const int kind = res ? kindOf(g_writers, res) : 0;", t4) : npos;
+    if (!found(strict) || found(module.find("&g_writersPrev}")) || found(module.find("kindOf(g_writersPrev, res) == 1"))) return false;
     const size_t writerFn = module.find("void srvTurretRadarWriterDraw(ID3D11DeviceContext* ctx, uint64_t vs) {");
     const size_t icon256 = found(writerFn) ? module.find("td.Width == 256 && td.Height == 256", writerFn) : npos;
     return found(watch) && found(bound) && found(capped) && found(t4) && found(icon256) && found(module.find("constexpr uint64_t kRadarIconVs = 0x5B0068AF5630F96Bull;"));

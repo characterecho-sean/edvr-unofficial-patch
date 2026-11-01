@@ -1790,11 +1790,13 @@ struct Writers {
     const void* icon[kWriterTargets] = {};
     uint32_t nDisc = 0, nIcon = 0;
 };
-Writers g_writers, g_writersPrev;   // this frame's and the previous frame's (a picture drawn after its billboard shows the previous frame's target)
+// This frame's writers move a billboard. The previous frame's only say, in the 10 s line, how often a billboard read a target a radar writer drew into last frame and none drew into
+// this frame: the game's hologram targets can change hands between frames (the holo rounds of flight 707c0ab5), so such a target may now hold a panel's picture and is never moved.
+Writers g_writers, g_writersPrev;
 std::atomic<uint64_t> g_cwDisc{0}, g_cwIcon{0}, g_cwAmbiguous{0};   // writer draws seen, and frames with two or more 256x256 icon writers
 enum CorrMiss : int { kCorrOk = 0, kCorrNoMatch, kCorrNoRows, kCorrNoCall, kCorrNoAnchor, kCorrOver, kCorrOther, kCorrMissCount };
 struct CorrCounters {
-    std::atomic<uint64_t> moved[2]{}, disc{0}, icon{0}, frames{0}, deltaSumUm{0}, deltaMaxUm{0}, yawMaxMilli{0}, pitchMaxMilli{0}, family8{0};
+    std::atomic<uint64_t> moved[2]{}, disc{0}, icon{0}, frames{0}, deltaSumUm{0}, deltaMaxUm{0}, yawMaxMilli{0}, pitchMaxMilli{0}, family8{0}, lastFrameOnly{0};
     std::atomic<int64_t> yawSumMicro{0}, pitchSumMicro{0};
     std::atomic<uint64_t> left[kCorrMissCount]{};
 };
@@ -1823,20 +1825,24 @@ bool addWriter(const void* (&list)[kWriterTargets], uint32_t& n, const void* r) 
     return true;
 }
 
-// The billboard's kind from its PS t4: 1 the disc's picture, 2 the icon's, 0 neither (a texture no radar writer drew this frame or the last).
-int billboardKind(ID3D11DeviceContext* ctx) {
+// The billboard's kind from its PS t4: 1 the disc's picture, 2 the icon's, 0 neither (a texture no radar writer drew into this frame). lastFrameOnly: 0, yet a radar writer drew into
+// it last frame (counted, never moved).
+int kindOf(const Writers& w, const void* res) {
+    for (uint32_t i = 0; i < w.nDisc; ++i)
+        if (w.disc[i] == res) return 1;
+    for (uint32_t i = 0; i < w.nIcon; ++i)
+        if (w.icon[i] == res) return 2;
+    return 0;
+}
+int billboardKind(ID3D11DeviceContext* ctx, bool& lastFrameOnly) {
+    lastFrameOnly = false;
     writersFrame();
     ID3D11ShaderResourceView* srv = nullptr;
     if (!guarded("srv.turret.corr.srv", [&] { ctx->PSGetShaderResources(4, 1, &srv); }) || !srv) return 0;
     ID3D11Resource* res = nullptr;
     guarded("srv.turret.corr.srvres", [&] { srv->GetResource(&res); });
-    int kind = 0;
-    for (const Writers* w : {&g_writers, &g_writersPrev}) {
-        for (uint32_t i = 0; i < w->nDisc && !kind; ++i)
-            if (w->disc[i] == res) kind = 1;
-        for (uint32_t i = 0; i < w->nIcon && !kind; ++i)
-            if (w->icon[i] == res) kind = 2;
-    }
+    const int kind = res ? kindOf(g_writers, res) : 0;
+    lastFrameOnly = res && !kind && kindOf(g_writersPrev, res) != 0;
     st::release(res);
     st::release(srv);
     return kind;
@@ -1876,7 +1882,8 @@ int correctionCompute(ID3D11DeviceContext* ctx, int eye, FrameCorrection& c) {
 // srvTurretHudBegin, at a draw of family 7 or 8 while the anchor yield is on (anchorLeaves): true when the draw is moved and bound (srvTurretHudEnd puts the game's stage back).
 bool radarCorrectionBegin(ID3D11DeviceContext* ctx, int family, int eye) {
     if (eye != 0 && eye != 1) return false;
-    const int kind = billboardKind(ctx);
+    bool lastFrameOnly = false;
+    const int kind = billboardKind(ctx, lastFrameOnly);
     if (family != 7) {   // family 8 is never moved; one on a radar writer's target would contradict the model
         if (kind) g_cc.family8.fetch_add(1, std::memory_order_relaxed);
         return false;
@@ -1885,6 +1892,7 @@ bool radarCorrectionBegin(ID3D11DeviceContext* ctx, int family, int eye) {
         g_cc.left[why].fetch_add(1, std::memory_order_relaxed);
         return false;
     };
+    if (lastFrameOnly) g_cc.lastFrameOnly.fetch_add(1, std::memory_order_relaxed);
     if (!kind) return leave(kCorrNoMatch);
     if (g_corr.frame != g_frame) {
         g_corr = FrameCorrection{};
@@ -1951,7 +1959,7 @@ bool radarCorrectionBegin(ID3D11DeviceContext* ctx, int family, int eye) {
 // either way. No line at all means this code never ran.
 void correctionWindow(bool yieldSeen) {
     struct Base {
-        uint64_t moved0 = 0, moved1 = 0, disc = 0, icon = 0, frames = 0, deltaSumUm = 0, family8 = 0, cwDisc = 0, cwIcon = 0, cwAmbiguous = 0, left[kCorrMissCount] = {};
+        uint64_t moved0 = 0, moved1 = 0, disc = 0, icon = 0, frames = 0, deltaSumUm = 0, family8 = 0, lastFrameOnly = 0, cwDisc = 0, cwIcon = 0, cwAmbiguous = 0, left[kCorrMissCount] = {};
         int64_t yawSumMicro = 0, pitchSumMicro = 0;
     };
     static Base b;
@@ -1963,6 +1971,7 @@ void correctionWindow(bool yieldSeen) {
     n.frames = g_cc.frames.load(std::memory_order_relaxed);
     n.deltaSumUm = g_cc.deltaSumUm.load(std::memory_order_relaxed);
     n.family8 = g_cc.family8.load(std::memory_order_relaxed);
+    n.lastFrameOnly = g_cc.lastFrameOnly.load(std::memory_order_relaxed);
     n.cwDisc = g_cwDisc.load(std::memory_order_relaxed);
     n.cwIcon = g_cwIcon.load(std::memory_order_relaxed);
     n.cwAmbiguous = g_cwAmbiguous.load(std::memory_order_relaxed);
@@ -1975,14 +1984,14 @@ void correctionWindow(bool yieldSeen) {
         const uint64_t frames = n.frames - b.frames;
         const double perFrame = frames ? 1.0 / double(frames) : 0.0;
         Log::get().note("srv turret radar anchor: 10 s correction: %llu billboard draws moved (eye 0 %llu, eye 1 %llu; disc %llu, icon %llu) over %llu frames, |delta| mean %.2f max %.2f cm, "
-                        "yaw mean %.3f max |%.3f| deg, pitch mean %.3f max |%.3f| deg; left to the game: no writer match %llu, no camera rows %llu, no shown call %llu, no anchor %llu, "
+                        "yaw mean %.3f max |%.3f| deg, pitch mean %.3f max |%.3f| deg; left to the game: no writer match %llu (of them on last frame's radar target %llu), no camera rows %llu, no shown call %llu, no anchor %llu, "
                         "over 10 cm %llu, other %llu; family 8 on a radar target %llu; writers: 4EDE4BC9 %llu, 256x256 5B0068AF %llu (frames with two or more: %llu)",
                         static_cast<unsigned long long>((n.moved0 - b.moved0) + (n.moved1 - b.moved1)), static_cast<unsigned long long>(n.moved0 - b.moved0),
                         static_cast<unsigned long long>(n.moved1 - b.moved1), static_cast<unsigned long long>(n.disc - b.disc), static_cast<unsigned long long>(n.icon - b.icon),
                         static_cast<unsigned long long>(frames), double(n.deltaSumUm - b.deltaSumUm) * 1.0e-4 * perFrame, double(deltaMaxUm) * 1.0e-4,
                         double(n.yawSumMicro - b.yawSumMicro) * 1.0e-6 * perFrame, double(yawMax) / 1000.0, double(n.pitchSumMicro - b.pitchSumMicro) * 1.0e-6 * perFrame,
                         double(pitchMax) / 1000.0, static_cast<unsigned long long>(n.left[kCorrNoMatch] - b.left[kCorrNoMatch]),
-                        static_cast<unsigned long long>(n.left[kCorrNoRows] - b.left[kCorrNoRows]), static_cast<unsigned long long>(n.left[kCorrNoCall] - b.left[kCorrNoCall]),
+                        static_cast<unsigned long long>(n.lastFrameOnly - b.lastFrameOnly), static_cast<unsigned long long>(n.left[kCorrNoRows] - b.left[kCorrNoRows]), static_cast<unsigned long long>(n.left[kCorrNoCall] - b.left[kCorrNoCall]),
                         static_cast<unsigned long long>(n.left[kCorrNoAnchor] - b.left[kCorrNoAnchor]), static_cast<unsigned long long>(n.left[kCorrOver] - b.left[kCorrOver]),
                         static_cast<unsigned long long>(n.left[kCorrOther] - b.left[kCorrOther]), static_cast<unsigned long long>(n.family8 - b.family8),
                         static_cast<unsigned long long>(n.cwDisc - b.cwDisc), static_cast<unsigned long long>(n.cwIcon - b.cwIcon),

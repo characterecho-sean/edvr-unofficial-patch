@@ -407,32 +407,15 @@ inline void unitOfAim(const Aim& a, float out[3]) {
 // delta = desired - used, in the world, where used is the offset the shown setter call left in force (put through the anchor's rotation it read) and desired is s * F along this
 // frame's true u in the same anchor's axes (radarCorrectionWorld). Unled, an error in which call a write shows would be a smooth one-frame lag, not a jitter.
 //
-// delta in the world: dStar = s * F * unit(u in A's axes), then (dStar - dUsed) put back through A's rows, the rows as they are, so an anchor's uniform scale applies to both. A's rows
-// must be orthogonal and of one length (within kAxisTolerance of it), and u a unit vector. False otherwise (the draw is the game's own). dStar receives the desired offset in A's axes.
+// delta in the world: dStar is exactly the offset the setter would have set for u_true with the shown call's anchor (radarAnchorAlong, the same function and the same rows), then
+// (dStar - dUsed) is put back through A's rows. Equal aims therefore give a delta of exactly 0 whatever small scale the rows carry. A's rows and u must pass radarAnchorAlong (unit
+// and orthogonal within kAxisTolerance, as the setter needs to direct at all); false otherwise (the draw is the game's own). dStar receives the desired offset in A's axes.
 inline bool radarCorrectionWorld(const float uTrue[3], const float A[16], float sF, const float dUsed[3], float deltaW[3], float dStar[3]) {
     if (!std::isfinite(sF) || sF == 0.0f) return false;
     for (int i = 0; i < 3; ++i)
-        if (!std::isfinite(uTrue[i]) || !std::isfinite(dUsed[i])) return false;
-    const double un = std::sqrt(double(uTrue[0]) * uTrue[0] + double(uTrue[1]) * uTrue[1] + double(uTrue[2]) * uTrue[2]);
-    if (std::fabs(un - 1.0) > kAxisTolerance) return false;
-    double len[3];
-    for (int i = 0; i < 3; ++i) {
-        const float* row = A + 4 * i;
-        for (int j = 0; j < 3; ++j)
-            if (!std::isfinite(row[j])) return false;
-        len[i] = std::sqrt(double(row[0]) * row[0] + double(row[1]) * row[1] + double(row[2]) * row[2]);
-        if (!(len[i] > 1.0e-3)) return false;
-    }
-    for (int i = 0; i < 3; ++i) {
-        if (std::fabs(len[i] / len[0] - 1.0) > kAxisTolerance) return false;
-        const float* p = A + 4 * i;
-        const float* q = A + 4 * ((i + 1) % 3);
-        if (std::fabs((double(p[0]) * q[0] + double(p[1]) * q[1] + double(p[2]) * q[2]) / (len[i] * len[(i + 1) % 3])) > kAxisTolerance) return false;
-    }
-    for (int i = 0; i < 3; ++i) {
-        const float* row = A + 4 * i;
-        dStar[i] = static_cast<float>(double(sF) * (double(uTrue[0]) * row[0] + double(uTrue[1]) * row[1] + double(uTrue[2]) * row[2]) / (len[i] * un));
-    }
+        if (!std::isfinite(dUsed[i])) return false;
+    float uAnchor[3];
+    if (!radarAnchorAlong(uTrue, A, sF, dStar, uAnchor)) return false;
     for (int j = 0; j < 3; ++j) {
         double w = 0.0;
         for (int i = 0; i < 3; ++i) w += (double(dStar[i]) - dUsed[i]) * A[i * 4 + j];

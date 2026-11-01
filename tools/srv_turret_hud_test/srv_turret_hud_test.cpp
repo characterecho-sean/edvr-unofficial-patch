@@ -1744,12 +1744,22 @@ static void radarAnchorCases() {
         const float uTrueX[3] = {1.0f, 0.0f, 0.0f};
         check(st::radarCorrectionWorld(uTrueX, yawed, sFc, dUsedC, dW, dS) && near3(dW, sFc * (1.0 - std::cos(y5)), 0.0, sFc * std::sin(y5), 1e-6) && near3(dS, 0.0, 0.0, sFc, 1e-6),
               "a rotated anchor: the used offset is put through the anchor's rows into the world, the desired one along u_true, and delta is their difference there");
+        // A slightly scaled anchor (rows of length 1.03, which the setter still directs with): dStar is the setter's own offset for u_true (radarAnchorAlong on the same rows), so
+        // the aim the call used gives exactly 0, and a different aim gives its difference put through the same rows.
         float scaled16[16];
         std::memcpy(scaled16, ident16, sizeof(scaled16));
-        for (int i = 0; i < 3; ++i) scaled16[i * 5] = 2.0f;
-        check(st::radarCorrectionWorld(uTrueZ, scaled16, sFc, dUsedC, dW, dS) && near3(dW, -2.0 * sFc * std::sin(y5), 0.0, 2.0 * sFc * (1.0 - std::cos(y5)), 1e-6) &&
-                  near3(dS, 0.0, 0.0, sFc, 1e-6),
-              "a uniformly scaled anchor: desired and used both go through the same rows, so delta scales with them and stays consistent");
+        for (int i = 0; i < 3; ++i) scaled16[i * 5] = 1.03f;
+        float dUsedS[3], uaS[3], dSetter[3];
+        check(st::radarAnchorAlong(uUsedA, scaled16, sFc, dUsedS, uaS) && st::radarCorrectionWorld(uUsedA, scaled16, sFc, dUsedS, dW, dS) && near3(dW, 0.0, 0.0, 0.0, 1e-7),
+              "a slightly scaled anchor: the aim the shown call used gives no correction (dStar is the setter's own offset)");
+        check(st::radarAnchorAlong(uTrueZ, scaled16, sFc, dSetter, uaS) && st::radarCorrectionWorld(uTrueZ, scaled16, sFc, dUsedS, dW, dS) &&
+                  near3(dS, dSetter[0], dSetter[1], dSetter[2], 1e-7) &&
+                  near3(dW, 1.03 * (dSetter[0] - dUsedS[0]), 1.03 * (dSetter[1] - dUsedS[1]), 1.03 * (dSetter[2] - dUsedS[2]), 1e-6),
+              "a slightly scaled anchor: dStar equals the setter's offset for u_true, and delta is the difference through the same rows");
+        float scaled2[16];
+        std::memcpy(scaled2, ident16, sizeof(scaled2));
+        for (int i = 0; i < 3; ++i) scaled2[i * 5] = 2.0f;
+        check(!st::radarCorrectionWorld(uTrueZ, scaled2, sFc, dUsedC, dW, dS), "an anchor the setter would not direct with (rows of length 2): no correction");
         const float uSame[3] = {uUsedA[0], uUsedA[1], uUsedA[2]};
         check(st::radarCorrectionWorld(uSame, ident16, sFc, dUsedC, dW, dS) && near3(dW, 0.0, 0.0, 0.0, 1e-7), "u_true equal to the used aim: no correction");
         check(st::radarCorrectionWorld(uTrueZ, ident16, -sFc, dUsedC, dW, dS) && near3(dS, 0.0, 0.0, -sFc, 1e-6), "reversed: the desired offset runs the other way");

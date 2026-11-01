@@ -1223,10 +1223,16 @@ jitters noticeably while the turret turns; he wants it smooth and in place.
   schematic (vs 4EDE4BC9) and of vs 5B0068AF into a 256x256 target (the
   Scorpion icon, from the texture's own size) record their render targets
   for the frame. A family 7 draw (ps EA02FAC2) is moved only when its PS t4
-  is one of them, this frame's or the last frame's (a picture drawn after
-  its billboard shows the last frame's). Family 8 (E95634B0) and the
-  512x512 panel hologram are never moved; a family 8 draw on a radar
-  target is counted, because that would contradict the model.
+  is one of this frame's. A target only last frame's radar writers drew
+  into is counted but never moved: the game's hologram targets can change
+  hands between frames (the holo rounds of flight 707c0ab5), so it may now
+  hold a panel's picture. Family 8 (E95634B0) and the 512x512 panel
+  hologram are never moved; a family 8 draw on a radar target is counted,
+  because that would contradict the model.
+- **The desired offset is the setter's own.** dStar is what the setter would
+  set for this frame's u with the shown call's anchor rows (the same
+  `radarAnchorAlong`), so the aim the call used gives a delta of exactly 0
+  even if those rows carry a small scale.
 - **Instruments.**
   - A 10 s correction line whenever the yield was on in the window, even
     when nothing moved.
@@ -1243,14 +1249,16 @@ Unconfirmed until it flies:
   the correction would mean the previous call is shown;
 - that the 256x256 rule picks only the radar's icon. The correction line
   counts frames with two or more such writers;
-- that the billboards are drawn after their pictures in the same frame or
-  the next (no writer match counts the rest).
+- that the billboards are drawn after their pictures in the same frame. If
+  "no writer match" is high with most of it on last frame's radar target,
+  the pictures are drawn after their billboards.
 
 The log lines:
 - `srv turret radar anchor: 10 s correction: N billboard draws moved (eye 0
   a, eye 1 b; disc c, icon d) over F frames, |delta| mean X max Y cm, yaw
   mean P max |Q| deg, pitch mean R max |S| deg; left to the game: no writer
-  match m, no camera rows r, no shown call s, no anchor n, over 10 cm o,
+  match m (of them on last frame's radar target p), no camera rows r, no
+  shown call s, no anchor n, over 10 cm o,
   other e; family 8 on a radar target k; writers: 4EDE4BC9 w, 256x256
   5B0068AF v (frames with two or more: z)`. No line at all means the code
   never ran; 0 moved with reasons means it ran and never applied.
