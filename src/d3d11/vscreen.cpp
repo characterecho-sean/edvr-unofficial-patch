@@ -4620,7 +4620,6 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
             // The dim is the same draw through the dark shader, so it follows the strip when the strip drew this one: the game's flat quad
             // would dim a rectangle over a screen whose edges have come nearer. A strip that fails here leaves the game's own draw.
             if (!(stripIssued && panelCurveSurfaceDraw(self, stripGain, stripToward, stripReverseU, reissueDrawIndexedInstanced<ReissueCaller::SplashDim>))) {
-                ReissueClock dimClock(ReissueCaller::SplashDim);   // the dim through the game's own quad: a re-issue of the draw
                 draw(AlteredDrawClass::None);
             }
             splashDimEnd(self);
