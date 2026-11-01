@@ -60,6 +60,8 @@ uint32_t layerWidth();
 bool hudFrame(ID3D11DeviceContext* ctx, uint64_t seq, const float ldr[4], const float hdr[4]);
 bool failedCoverageRetiresWithoutPublishing();
 bool missingConsumerLeavesCurrentDrawStock(ID3D11DeviceContext* ctx);
+void crispProbeArm(bool headerFlag);
+bool crispProbeRecordPending();
 }  // namespace devtest
 }  // namespace edvr
 
@@ -323,6 +325,18 @@ int main(int argc, char** argv) {
     check(allOwnedBy(ctxB.Get(), devB.Get()), "device B after the in-place composite: every retained device child is still B's");
     check(devtest::missingConsumerLeavesCurrentDrawStock(ctxB.Get()),
           "missing HUD consumer stands down before binding the layer and leaves the current draw stock");
+
+    // The eye-draw note's inline early exit: the body (which clears a pending record first) runs only for a pending
+    // tonemap draw or a draw of the tonemap's shape.
+    devtest::crispProbeArm(false);
+    check(!uiLayerCrispNoteEyeDraw(ctxB.Get(), 'D', 6, 1, 0) && devtest::crispProbeRecordPending(),
+          "eye-draw note: a non-matching draw with nothing pending does not enter the body");
+    check(!uiLayerCrispNoteEyeDraw(ctxB.Get(), 'D', 3, 1, 0) && !devtest::crispProbeRecordPending(),
+          "eye-draw note: a draw of the tonemap's shape enters the body");
+    devtest::crispProbeArm(true);
+    check(!uiLayerCrispNoteEyeDraw(ctxB.Get(), 'D', 6, 1, 0) && !devtest::crispProbeRecordPending() &&
+              !uiLayerCrispPending(),
+          "eye-draw note: a non-matching draw while a tonemap draw is pending clears it");
 
     uiLayerShutdown();
     std::printf("ui_layer_device_test: %u checks, %u failures\n", g_checks, g_fails);
