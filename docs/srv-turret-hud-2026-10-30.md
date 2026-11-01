@@ -2,62 +2,55 @@
 
 ## Status
 
-- **State (2026-11-01):** FLOWN OK in build e443b0c2 (Steam); the nine
-  keys are now `experimental.*` with the flown defaults (see Keys). Sean's
-  goal: the arcs, ammo counts and INFO strip pushed out behind the location
-  panel (Cranfield Nutrition); the radar near field on its own; camera
-  back 25. FLOWN and settled: the 3D
-  move with its anchor, the depth fix, the radar forward key, the draw-time
-  pose (judder gone), the hologram's lighting position (45fa7e56: it draws).
-  The radar disc is a picture the game draws of the radar's terrain
-  schematic (vs 4EDE4BC9, and vs 5B0068AF for the Scorpion) from the live
-  camera, shown by the hologram billboard vs 5559BD94. Flight a5800fdc: that
-  camera updates only while the schematic's volume is in view, and at the
-  stock camera the volume lies about 0.44 m BEHIND the eye, so the picture
-  is empty (journal, "V0 is gated by visibility"). Branch
-  `claude/srv-turret-hud`, local only. Issue #140. Test install: Steam
-  (`--target steam --scope both --xess`).
-- **The radar fix:** FLOWN OK (2026-11-01, build e443b0c2, Steam):
-  `experimental.srv_turret_radar_anchor = camera` (now the default) locks
-  the radar to the turret with no ghost. The setter adds nothing; a hook on
-  the schematic slot's update (0x36BF3C0, build 334925 only) gives the
-  radar's slots the scene camera moved back by radar forward along the
-  turret's forward, and the radar's own billboards move +D along the seat
-  with the rest of the radar. Mode `on` (fe0b2560): the disc orbits, as any
-  turret-dependent native offset reaches the screen late (journal).
-- **UI quality parity:** FLOWN OK (8e3bcd7b, and again in e443b0c2): the
-  layer's relief radius fix is applied to both programs (k 2, cb1[120].z
-  1.3666 from the bound b1).
-- **The radar's way out without it:** camera back 70, radar forward 0.
-- **What is wrong (the game's own placement):** the turret view's whole HUD
-  sits about 0.7 m too far back for the stock camera (the radar behind the
-  head, the arcs at or behind it), and the larger panels sit about a metre
-  deeper than the arcs, ammo counts and radar.
-- **What the pass does:** in the Scorpion's turret view only, a private
-  geometry shader per output signature (eight) rebuilds each vertex of nine
-  HUD families in the eye's space, moves the panels by HUD forward and the
-  radar by radar forward along the seat, pushes vertices within 1 m of a
-  latched anchor (the settled head) out by the group's back key, and
-  projects again. Camera back moves the real camera.
-- **Not covered:** Elite's "Disable GUI effects" OFF draws the holo panels
-  with vs 81216C77F90DEDD6 (another output signature, no bytecode yet).
-- **Keys** (live, TEMPORARY; `[experimental]` since 2026-11-01, demoted from
-  `[fix]`, no menu rows; propose removing them when the arc closes). Default
-  = the value Sean flew: `srv_turret_camera_back` 25, `srv_turret_hud_forward`
-  65, `srv_turret_radar_forward` 50, `srv_turret_panels_back` 135,
-  `srv_turret_radar_back` 0, `srv_turret_hud_gap` 0, `srv_turret_hud_depth`
-  game (was front), `srv_turret_hud_scissor` open, `srv_turret_radar_anchor`
-  camera (was on; reversed, off). Unknown text of the anchor key now reads
-  as camera. A saved `[fix]` line of the old names is not read.
-- **Latency:** a view switch is followed up to about 0.5 s after the game
-  writes Status.json (the watcher's 500 ms poll); left alone, a fix would
-  change on foot too (journal).
-- **Open:** whether the switch lag is acceptable; the keys go when Sean
-  closes the arc (the values ship as the behaviour); merge waits on Sean.
-- **Ruled out:** see "Ruled out" below.
-- **Next flight:** none planned. To read one: `edvr_log.py --grep "srv turret
-  radar camera"`: the slot hook armed, radar slots in every 10 s line, and
-  V0's schematic origin about D - 0.44 m in front, tracking every frame.
+- **State (2026-11-01, stripped):** the TEMPORARY issue-140 instruments are gone
+  from the module, the rig and the log rule (branch `claude/trusting-jang-af02fa`,
+  journal "the strip" below). Removed: the GPU instrument and its stream-output
+  twins, the holo source, the radar camera V0, the unmoved-draw instrument, the
+  pair capture and pictures, the seated lock, the draw-time correction, the
+  residual and the setter's 10 s lines, the update counter, the third-writer
+  note. Dead math went with them (`srv_turret_math.h`). Full local build green
+  on the stripped tree. NOT FLOWN as stripped; merge to main waits on Sean's word.
+- **Camera mode** (`experimental.srv_turret_radar_anchor = camera`, the default,
+  FLOWN OK in e443b0c2): code path unchanged. The slot hook on 0x36BF3C0 moves the
+  radar's schematic camera back; u is the turret's forward from the CPU camera
+  sample (the Unmap tee), with the GPU readback kept as the fallback; the radar's
+  own picture billboards take the GS +D move; every other 5559BD94 draw is the
+  game's. The setter hook is no longer armed in camera mode (it published zero).
+- **on and reversed** (kept as values, dead): the setter hook still adds the
+  offset (directed along u, or the fallback). The draw-time correction is gone,
+  so the radar billboards are left to the game and the disc orbits, as the
+  flight of fe0b2560 showed. Not flown since the strip.
+- **Keys** (`[experimental]`, flown defaults; see the table in the journal
+  2026-11-01 "camera mode flown OK"): unchanged. Nothing removed.
+- **Log lines that remain:** the settings, view, not-the-Scorpion, camera,
+  anchor latch, first-draw, refused, geometry-stage and scissor lines; the 10 s
+  `srv turret hud: panels:` line (its "unmoved family draws" part is gone); the
+  camera-mode slot lines ("srv turret radar camera: slot hook armed", "moved
+  back ... for slot", "10 s: slot calls"); the setter's "placement moved" and
+  "view off" lines for on and reversed. The first-scope `srv turret hud state:`
+  note is kept (not on the TEMPORARY list). The removed lines are no longer
+  printed, and `tools\edvr_log.py` no longer reads them.
+- **Proposed removals, awaiting Sean's word (nothing below is removed):**
+  1. `experimental.srv_turret_radar_anchor` values `on` and `reversed`, with the
+     setter hook (0x38563A0), its directed add, `anchorLeaves` and `g_anchorYield`.
+     Dead modes; camera ships.
+  2. The nine `experimental.srv_turret_*` keys: ship the values as the behaviour
+     and remove the keys when the arc closes (AGENTS.md "Scope control").
+  3. The `srv_turret_hud_depth` values `game` and `real`, and the
+     `srv_turret_hud_scissor` value `game`: candidates once the keys go.
+  4. The geometry shader's TURRETPRE output (`srv_turret_hud_shader.h`): only the
+     removed capture read it. Removing it changes the HLSL and the bytecode, so
+     it needs its own build and flight.
+  5. The GPU readback fallback for u (`copyVsRows`): only if the flights show the
+     CPU path always wins.
+  6. The settings line still says "TEMPORARY" in its text; the key is now
+     `[experimental]`. The rule matches the line's tail, so the text changes with
+     the keys.
+- **Next flight:** none planned for the strip alone. To read one (Steam, the keys
+  at their defaults, camera mode): the 10 s `srv turret hud: panels:` line
+  (`edvr_log.py --grep "srv turret hud"`) and `srv turret radar camera: 10 s:`
+  (slot calls and radar slots: radar slots above 0 with moves).
+- **Open:** the flight of the stripped build; the proposals above.
 
 ## Evidence (flight of 2026-10-30, Epic, v0.22.0-rc.3-139-gcd4c91c4)
 
@@ -1910,3 +1903,16 @@ turret settings to experimental and bake them as defaults.
   lines older builds wrote.
 - **Still to do** when the arc closes: ship the values as the behaviour and
   propose removing the nine keys, quoted, as Scope control requires.
+
+### 2026-11-01: the strip (the instruments and the dead modes out; camera mode's code path unchanged)
+
+Sean's ask: take the TEMPORARY instruments out of main, keep what flew OK (camera mode, the panels' move, the relief fix, the nine keys at their defaults), and say what is left to propose. Nothing was flown; the build is the check.
+
+- **Removed, by group.** The GPU instrument (the probes, the pipeline and stream-output queries, the stats and capture lines, the disc and quad probes) and its stream-output twins, which had no other user in the module. The holo source (the watched rounds, the writers, the constants lines). The radar camera V0 instrument. The unmoved-draw instrument (its routes, the reissue sites, the first-of-route lines). The pair capture and its pictures and eye-dump hook. The seated lock. The draw-time correction, its content depth and the third-writer note. The residual and the setter's 10 s lines, the direction line, the thread and suspect lines. The update counter (0x384A590): it wrote nothing and camera mode does not need it. Dead math in `srv_turret_math.h` (50 names with their comments); the rig's cases for them; `copyPsRegister` (the probe's only copy).
+- **Kept, and why.** The slot hook (camera mode). The CPU camera-sample path for u (`srvTurretNoteCameraWrite`, the Unmap tee), with the GPU readback kept as its fallback, since a miss still needs a u. The radar writers and `billboardKind`: camera mode uses them to tell the radar's own picture from the other 5559BD94 draws. The setter hook, for `on` and `reversed` (dead, but their values stay until Sean says). The first-scope state note (not on the TEMPORARY list). `g_cameraWriteThread`, which the camera 10 s line prints.
+- **Changed on purpose.** The setter hook is armed only for `on` and `reversed`; camera mode does not patch it (it published a zero offset, so the game's placement is unchanged). The writer watch is on in camera mode only (its yield term went with the correction). In `on` and `reversed`, radar billboards are left to the game (no correction), so the disc orbits as before.
+- **Rig and log rule.** `tools\srv_turret_hud_test` keeps the move, linkage, binding, scissor, constants, strips, latch, slot camera, and eye-pose checks, and gets a copy of the stream-output declaration its own twins use (the move test needs it). Its wiring pins follow the new source. `tools\edvr_log.py` drops the GPU-instrument and unmoved verdicts; the 10 s line regex follows the trimmed line.
+- **Verified.** `build.bat --wait-lock` by absolute path exited 0 with a receipt; the SRV rig printed `PASS srv_turret_hud_test: 40417 checks` (the move, linkage, binding and mutants on WARP). `edvr_log.py --self-test` and `hook_signatures.py --self-test` pass. Not verified: any flight. The camera path is checked by reading and by the rig's slot and move cases; `on` and `reversed` changed (no correction) and are unflown.
+- **Environment note.** A worktree made by the app had no `third_party\openxr\loader`. Linking that folder from the main checkout (junction) gave the pinned loader; `fetch_openxr_loader.py --verify` passes. Remove the junction with `rmdir` before the worktree is cleaned up.
+- **Proposals for Sean (none removed):** the `on` and `reversed` values with the setter hook; the nine keys at arc close; `srv_turret_hud_depth`'s `game`/`real` and the scissor's `game`; the TURRETPRE output in the shader (its own build and flight); the GPU fallback for u, if the flights show the CPU path always wins; and the "TEMPORARY" word in the settings line.
+- **Still to do:** the flight of the stripped build; the removal decisions above.

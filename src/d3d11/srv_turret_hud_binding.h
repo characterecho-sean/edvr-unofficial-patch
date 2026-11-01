@@ -75,27 +75,6 @@ inline bool readGameCb(ID3D11DeviceContext* c, uint32_t slot, ExtraCb& out, bool
     return out.buffer != nullptr;
 }
 
-// A region of a buffer copied into a staging buffer (the module hands the copy that goes past the vscreen hooks; the rig's is the context's own).
-using CopyRegion = void (*)(ID3D11DeviceContext*, ID3D11Resource* dst, UINT dstX, ID3D11Resource* src, const D3D11_BOX* box);
-inline void directCopyRegion(ID3D11DeviceContext* c, ID3D11Resource* dst, UINT dstX, ID3D11Resource* src, const D3D11_BOX* box) { c->CopySubresourceRegion(dst, 0, dstX, 0, 0, src, 0, box); }
-// One pixel-shader constant register (16 bytes at `row` of the buffer bound at pixel-stage `slot`, counted from the first constant the game bound it with) copied into `stage` at byte `to`.
-// False when nothing is bound there, the register lies past the buffer or the range, or a call faulted; `stage` is then untouched.
-inline bool copyPsRegister(ID3D11DeviceContext* ctx, ID3D11Buffer* stage, uint32_t slot, uint32_t row, UINT to, CopyRegion copy = directCopyRegion) {
-    if (!ctx || !stage || !copy) return false;
-    ExtraCb cb;
-    if (!readGameCb(ctx, slot, cb, true)) return false;
-    D3D11_BUFFER_DESC bd{};
-    bool sized = false;
-    guarded("srv.turret.copy.desc", [&] {
-        cb.buffer->GetDesc(&bd);
-        sized = true;
-    });
-    const uint64_t left = (static_cast<uint64_t>(cb.ranged ? cb.first : 0) + row) * 16u;
-    if (!sized || left + 16u > bd.ByteWidth || (cb.ranged && cb.count && row >= cb.count)) return false;
-    const D3D11_BOX box{static_cast<UINT>(left), 0, 0, static_cast<UINT>(left) + 16u, 1, 1};
-    return guarded("srv.turret.copy.region", [&] { copy(ctx, stage, to, cb.buffer, &box); });
-}
-
 // THE SCISSOR. The game sets a scissor rectangle for the radar's draws from the radar's screen bounds at its OLD place, and the moved geometry is cropped to it (a straight edge across the disc and
 // the hologram). While a bound draw is issued the rectangles are the whole render target (render target 0's size at its view's mip, else the first viewport's extent), when the bound rasterizer state
 // has ScissorEnable; the rasterizer state object is never changed, and the game's own rectangles (any number up to 16, or none) are set back exactly after.
@@ -230,16 +209,6 @@ public:
         return restore(c);
     }
 };
-
-// The stream-output declaration of an output signature, for the GPU instrument's twin of its shader (srv_turret.cpp makeTwins, and the rig's twin): one entry for each element, in the
-// signature's order, into stream 0 and output slot 0, then the shader's own `pre` element (the clip position before the move), so a vertex is written out as sigFloats + 4 floats with
-// the moved clip position at Family::posFloat and the game's at Family::preFloat. Returns the entries; `out` holds kMaxSigElements.
-inline UINT soDeclaration(uint32_t sig, D3D11_SO_DECLARATION_ENTRY (&out)[kMaxSigElements]) {
-    const Signature& s = kSignatures[sig];
-    for (uint32_t i = 0; i < s.count; ++i) out[i] = D3D11_SO_DECLARATION_ENTRY{0, s.el[i].name, s.el[i].index, 0, static_cast<BYTE>(s.el[i].comps), 0};
-    out[s.count] = D3D11_SO_DECLARATION_ENTRY{0, kPreSemantic, 0, 0, static_cast<BYTE>(kPreFloats), 0};
-    return s.count + 1;
-}
 
 template <class T>
 inline void release(T*& value) {

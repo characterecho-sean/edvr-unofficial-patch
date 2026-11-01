@@ -4161,8 +4161,8 @@ REM families, five radar-named billboard families and the target hologram sphere
 REM translated forward, then pushed deeper or pulled nearer along its ray from the anchor), read vertex by vertex through the stream-output twin against a CPU reference in doubles and against the
 REM geometry itself (anchor at the eye, anchor off the eye, asymmetric tangents, the window, a pull, the translation alone and with the push, a vertex 15 cm from the anchor, the panels' and the radar's groups translated by their own keys in one frame, the three depth modes, the Scorpion hologram's lighting position moved by the camera's axes from a stand-in vertex constant buffer bound whole and ranged, the disc probe's register copy, the scissor opened to the whole target and the game's rectangles put back, the radar disc's quad in the seated frame from clip positions for a moved and turned head, the unmoved-draw list), the pictures against the
 REM quad truly moved, a triangle strip where the same quad as a list lands, the anchor tracker and the eye frame from a pose, the linkage under the debug layer with its control, the binding's
-REM in-and-out with the game's geometry stage and constant slot exactly back, the constants, the groups, the GPU instrument's statistics and stream-output capture, the Scorpion latch fed a journal
-REM in every split; twenty-two mutants of the shader body in all eight signatures and five more in the Scorpion hologram's, each caught. --wiring scans the
+REM in-and-out with the game's geometry stage and constant slot exactly back, the constants, the groups, the Scorpion latch fed a journal
+REM in every split; twenty-five shader mutants and the winding mutant in each of eight signatures, five more in the Scorpion hologram's and one binding mutant, each caught. --wiring scans the
 REM sources that connect it to the game. Built outside build\ and without d3d11.lib, like the supercruise bars' rig: its device is System32's.
 :rig_srv_turret_hud_test
 echo [edvr] === srv_turret_hud_test.exe ===
