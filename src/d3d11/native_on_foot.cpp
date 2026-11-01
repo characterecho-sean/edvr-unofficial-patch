@@ -326,8 +326,6 @@ int adsSightEyeMode() noexcept {
 int adsAimEye() noexcept { return nofoot::f162::aimingEye(adsSightEyeMode()); }   // 0 the left eye, 1 the right eye
 nofoot::f205::PressLatch g_f205Latch;   // frame thread only
 bool f205B3Applies() noexcept;          // defined after f141Item(): B3's key and the scope zoom's, and the held item B3's entry
-// F205 (live): fix.native_on_foot_ads_view_circle, on | off, default on: every ADS press shows each eye's view inside a circle, black outside, sized as flat's ADS FOV (view_circle.h).
-std::atomic<bool> g_adsViewCircleKey{true};
 // A1 (live): fix.native_on_foot_ads_scope_zoom, the scope lens (scope_zoom.h): while the sights are up the right eye's picture inside the scope's frame is magnified by the game's
 // own zoom. A USER key, default on since A3 flew OK (2026-10-29); the reference FOV M is measured from is experimental.native_on_foot_ads_scope_zoom_fov (TEMPORARY, degrees, live).
 std::atomic<bool> g_scopeZoomKey{true};
@@ -1390,17 +1388,6 @@ void readKey() {
                             nofoot::f162::aimingName(nofoot::f162::aimingEye(mode)), known ? "" : "; the value in the file is none of both, right or left: both is used", what);
         }
         g_adsSightEyeKey.store(mode, std::memory_order_relaxed);
-    }
-    // F205 (live, the Native on foot page's "ADS: view circle"): every ADS press shows each eye's view inside a circle, black outside, sized as flat's ADS FOV does to its screen. One line a
-    // session and one at each change.
-    {
-        const bool circle = cfg.getString("fix.native_on_foot_ads_view_circle", "on") == "on";
-        if (first || circle != g_adsViewCircleKey.load(std::memory_order_relaxed))
-            Log::get().note("native on foot ADS view circle (F205): fix.native_on_foot_ads_view_circle is %s -- %s", circle ? "on" : "off",
-                            circle ? "while you aim down sights each eye shows its view inside a circle, black outside, whose radius is the weapon's ADS FOV over the hip FOV times the headset's half-FOV, "
-                                     "centred on the sight, so you lose the same share of the periphery as the flat game does; it comes in with the sight lock and goes with it; never outside ADS"
-                                   : "no circle: the whole view stays in the sights");
-        g_adsViewCircleKey.store(circle, std::memory_order_relaxed);
     }
     // A1 (live, the Native on foot page's "ADS: scope zoom"; the developer tier's "ADS: scope zoom FOV (experimental)"): the scope lens. The key is a user key, on by default since A3
     // flew OK; the reference FOV is the h of M = tan(h / 2) / tan(ads / 2), the game's ADS FOV being absolute per weapon. One line at the first read and one at each change; the
@@ -37041,7 +37028,8 @@ void circleTick(uint64_t nowMs) noexcept {
     const bool onFoot = nativeOnFootActive();
     const bool inSights = onFoot && g_adsState != kAdsIdle;   // the press: from the raise to the end of the lower
     const bool up = onFoot && g_adsState == kAdsActive;       // the sights are up (not lowering)
-    const bool key = g_adsViewCircleKey.load(std::memory_order_relaxed);
+    // F205b: the circle has no key of its own (the pilot's word, 2026-11-02): it is on whenever the scope zoom is, by the very read the lens uses (g_scopeZoomKey, fix.native_on_foot_ads_scope_zoom, live).
+    const bool key = g_scopeZoomKey.load(std::memory_order_relaxed);
     const char* mode = temporalPassWantsFssChrome() ? "on" : "off";
     if (inSights && !c.inPress) {   // a press begins
         c.inPress = true;
@@ -37085,7 +37073,7 @@ void circleTick(uint64_t nowMs) noexcept {
             }
         }
         if (!c.lineDone) {   // the press's one line: the radius with its three figures once the centre is known, or why there is no circle
-            const bool decided = r.why == nofoot::f205::Why::kOk ? c.haveCentre : r.why != nofoot::f205::Why::kKeyOff && nowMs - c.pressMs >= kCircleDecideMs;
+            const bool decided = r.why == nofoot::f205::Why::kOk ? c.haveCentre : r.why == nofoot::f205::Why::kScopeZoomOff || nowMs - c.pressMs >= kCircleDecideMs;
             if (decided || (r.why == nofoot::f205::Why::kOk && nowMs - c.pressMs >= 2 * kCircleDecideMs)) {
                 nofoot::f205::Radius shown = r;
                 if (shown.why == nofoot::f205::Why::kOk && !c.haveCentre) shown.why = nofoot::f205::Why::kNoCentre;

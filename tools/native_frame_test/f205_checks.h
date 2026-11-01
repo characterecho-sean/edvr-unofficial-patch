@@ -130,9 +130,19 @@ void run205(Check&& check) {
                            noHip = f205::circleRadius(true, true, 15.0, nan, pimax), noEye = f205::circleRadius(true, true, 15.0, 56.3, nullptr);
         const float badEye[4] = {-1.f, 1.f, 1.f, -1.f};   // up below down: not an eye
         const f205::Radius flipped = f205::circleRadius(true, true, 15.0, 56.3, badEye);
-        check(off.why == f205::Why::kKeyOff && !std::isfinite(off.radiusRad) && unknown.why == f205::Why::kAdsFovUnknown && noFov.why == f205::Why::kAdsFovUnknown && noHip.why == f205::Why::kAdsFovUnknown &&
+        check(off.why == f205::Why::kScopeZoomOff && !std::isfinite(off.radiusRad) && unknown.why == f205::Why::kAdsFovUnknown && noFov.why == f205::Why::kAdsFovUnknown && noHip.why == f205::Why::kAdsFovUnknown &&
                   noEye.why == f205::Why::kNoFrustum && flipped.why == f205::Why::kNoFrustum && !std::isfinite(unknown.radiusRad) && !std::isfinite(noEye.radiusRad),
-              "F205: the key off gives no circle; an ADS FOV or hip FOV that is not known, and a frustum that is not an eye, give none with their reason, and never a size");
+              "F205b: the scope zoom off gives no circle; an ADS FOV or hip FOV that is not known, and a frustum that is not an eye, give none with their reason, and never a size");
+        // F205b: the circle's one switch is the scope zoom setting: on, every weapon with a measured ADS FOV has its circle; off, none, for every weapon, and the line says so
+        bool follows = true;
+        for (double ads : {15.0, 35.0, 48.0, 50.0, 52.0}) {
+            const f205::Radius onR = f205::circleRadius(true, true, ads, 56.3, pimax), offR = f205::circleRadius(false, true, ads, 56.3, pimax);
+            follows = follows && onR.why == f205::Why::kOk && std::isfinite(onR.radiusRad) && offR.why == f205::Why::kScopeZoomOff && !std::isfinite(offR.radiusRad);
+        }
+        char offLine[240];
+        f205::formatLine(offLine, sizeof(offLine), 4, "off", f205::circleRadius(false, true, 15.0, 56.3, pimax), 15.0, 56.3, false, kExecutioner, "yes");
+        check(follows && std::string(offLine) == "ADS view circle (F205): press 4: no circle (fix.native_on_foot_ads_scope_zoom is off)",
+              "F205b: the circle follows the scope zoom setting on and off for every weapon, and with it off the press line says: press N: no circle (fix.native_on_foot_ads_scope_zoom is off)");
         const f205::Radius wide = f205::circleRadius(true, true, 80.0, 56.3, pimax);
         check(wide.why == f205::Why::kOk && eq(wide.radiusRad, vPimax, 1e-12), "F205: an ADS FOV wider than the hip is held to the whole half-FOV");
         // Anti-aliasing on and off: the rule takes no mode; the same inputs are the same radius, the same request and the same wire form
@@ -219,6 +229,7 @@ void run205(Check&& check) {
         check(s.find("ADS view circle (F205): press 7, Anti-aliasing off: radius 13.77 deg (ADS FOV 15.00 / hip FOV 56.30 x the headset's half-FOV 51.67 deg, vertical)") == 0 &&
                   s.find("; item $wpn_m_sniper_plasma_charged_name;, scope yes; centre (tangents) left -0.0213/+0.0342 right +0.0211/+0.0339") != std::string::npos,
               "F205: the press line states the radius with its three figures, the Anti-aliasing mode, the item and scope and the centre in each eye");
+        check(s.size() > 24 && s.compare(s.size() - 23, 23, " (the scope zoom is on)") == 0, "F205b: ... and ends with what switched it: (the scope zoom is on)");
         const f205::Radius none = f205::circleRadius(true, false, nan, 56.3, pimax);
         f205::formatLine(line, sizeof(line), 8, "on", none, nan, 56.3, false, "$wpn_m_unmeasured_thing_name;", "no");
         check(std::string(line) == "ADS view circle (F205): press 8, Anti-aliasing on: no circle: the ADS FOV of the held weapon is not known (item $wpn_m_unmeasured_thing_name;, scope no)",
@@ -269,9 +280,15 @@ void run205(Check&& check) {
         check(cpp.find("std::atomic<bool> g_scopeZoomFullKey{true};") != std::string::npos && cpp.find("cfg.getString(\"experimental.native_on_foot_ads_scope_zoom_full_detail\", \"on\") == \"on\"") != std::string::npos &&
                   ini.find("native_on_foot_ads_scope_zoom_full_detail = on\n") != std::string::npos && ini.find("# ui: ADS: scope zoom full detail (experimental) | choices on, off | recommended on | live\n") != std::string::npos,
               "F205: the full-detail scope is on by default in the code, the reader's fallback, the ini line and its menu row");
-        check(cpp.find("std::atomic<bool> g_adsViewCircleKey{true};") != std::string::npos && cpp.find("cfg.getString(\"fix.native_on_foot_ads_view_circle\", \"on\") == \"on\"") != std::string::npos &&
-                  ini.find("native_on_foot_ads_view_circle = on\n") != std::string::npos && ini.find("# ui: ADS: view circle | choices on, off | recommended on | live | menu native_on_foot\n") != std::string::npos,
-              "F205: fix.native_on_foot_ads_view_circle is on by default, live, in the code, the reader's fallback, the ini line and its row on the Native on foot page");
+        // F205b: the circle's own key (fix.native_on_foot_ads_view_circle) is gone from the code, the ini and the menu's test, and the circle reads the lens's key by the lens's one reader
+        const std::string menuTest = slurp("tools/hotkey_capture_test/hotkey_capture_test.cpp");
+        check(!menuTest.empty() && cpp.find("ads_view_circle") == std::string::npos && cpp.find("g_adsViewCircleKey") == std::string::npos && ini.find("ads_view_circle") == std::string::npos &&
+                  ini.find("ADS: view circle") == std::string::npos && menuTest.find("ads_view_circle") == std::string::npos && frame.find("ads_view_circle") == std::string::npos && host.find("ads_view_circle") == std::string::npos,
+              "F205b: fix.native_on_foot_ads_view_circle is gone: no reader, atomic or log note in the code, no line or row in edvr.ini, no pin in the menu's test");
+        check(countOf(cpp, "g_scopeZoomKey.store(") == 1 && countOf(cpp, "cfg.getString(\"fix.native_on_foot_ads_scope_zoom\", \"on\")") == 1 &&
+                  cpp.find("    const bool key = g_scopeZoomKey.load(std::memory_order_relaxed);\n    const char* mode = temporalPassWantsFssChrome()") != std::string::npos &&
+                  ini.find("# This setting also decides the ADS view circle: while it is on, every ADS press") != std::string::npos,
+              "F205b: the circle reads g_scopeZoomKey, the one atomic the lens's one reader sets (fix.native_on_foot_ads_scope_zoom, live), and the key's row says it also decides the circle");
         // no gate on a temporal mode: the circle's tick names the mode once, in the string the press line states, and nowhere in its decisions
         const size_t tickAt = cpp.find("void circleTick(uint64_t nowMs) noexcept {"), tickEnd = cpp.find("\nvoid tick(uint64_t nowMs) noexcept {", tickAt);
         const std::string body = tickAt == std::string::npos || tickEnd == std::string::npos ? std::string() : cpp.substr(tickAt, tickEnd - tickAt);

@@ -1,5 +1,5 @@
 #pragma once
-// F205: the ADS view circle, between EDVR's two halves (native on foot, fix.native_on_foot_ads_view_circle). Same discipline as scope_zoom_window.h and left_eye_share.h: the d3d11 half
+// F205: the ADS view circle, between EDVR's two halves (native on foot; switched by fix.native_on_foot_ads_scope_zoom since F205b). Same discipline as scope_zoom_window.h and left_eye_share.h: the d3d11 half
 // publishes one request a frame, the provider's beginFrame reads it and hands it to the runtime in a version 11 answer (seven of the retired guard's words, EdvrNativeFrameOutput::
 // reservedTerrainGuard[5..11]; layout, size and type unchanged), and the runtime's stereo renderer draws black outside a circle about the sight in each eye.
 //

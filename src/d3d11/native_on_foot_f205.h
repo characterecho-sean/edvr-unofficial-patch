@@ -9,7 +9,8 @@
 //    door needs the upscaler's picture: F202 left it so), but the press still takes both eyes and the circle: the override does not look at the temporal mode.
 //
 // 2. THE VIEW CIRCLE (view_circle.h): the radius is (ADS FOV / hip FOV) x the headset's vertical half-FOV; no circle, with the reason, for a weapon whose ADS FOV is not known, for a frustum
-//    that is not an eye, for a sight whose far point is not known, and with the key off.
+//    that is not an eye, for a sight whose far point is not known, and with the scope zoom off. F205b (the pilot's word): the circle has no key of its own; it is on whenever
+//    fix.native_on_foot_ads_scope_zoom is, by the lens's own read.
 #pragma once
 
 #include "native_on_foot_f162.h"
@@ -53,11 +54,11 @@ inline int formatOverride(char* buf, size_t n, int keyMode) noexcept {
 }
 
 // ---- 2. the circle ---------------------------------------------------------------------------------------------------------------------------------------------------------------
-enum class Why : int { kOk = 0, kKeyOff = 1, kAdsFovUnknown = 2, kNoFrustum = 3, kNoCentre = 4 };
+enum class Why : int { kOk = 0, kScopeZoomOff = 1, kAdsFovUnknown = 2, kNoFrustum = 3, kNoCentre = 4 };
 inline const char* whyText(Why w) noexcept {
     switch (w) {
         case Why::kOk: return "ok";
-        case Why::kKeyOff: return "fix.native_on_foot_ads_view_circle is off";
+        case Why::kScopeZoomOff: return "fix.native_on_foot_ads_scope_zoom is off";
         case Why::kAdsFovUnknown: return "the ADS FOV of the held weapon is not known";
         case Why::kNoFrustum: return "the eye's frustum is not known";
         default: return "the sight's far point is not known";
@@ -68,10 +69,11 @@ struct Radius {
     double radiusRad = std::nan("");
     double halfFovRad = std::nan("");
 };
-// The flat rule. fovKnown: the held weapon's ADS FOV is in the table (scope_zoom_s1.h adsFovDeg). hipDeg: the scope zoom's reference FOV (the hip FOV the lens measures M against).
-inline Radius circleRadius(bool keyOn, bool fovKnown, double adsDeg, double hipDeg, const float tan4[4]) noexcept {
+// The flat rule. scopeZoomOn: fix.native_on_foot_ads_scope_zoom, the one setting that switches the circle (F205b: the circle's own key was removed on the pilot's word). fovKnown: the held weapon's ADS FOV
+// is in the table (scope_zoom_s1.h adsFovDeg). hipDeg: the scope zoom's reference FOV (the hip FOV the lens measures M against).
+inline Radius circleRadius(bool scopeZoomOn, bool fovKnown, double adsDeg, double hipDeg, const float tan4[4]) noexcept {
     Radius r;
-    if (!keyOn) { r.why = Why::kKeyOff; return r; }
+    if (!scopeZoomOn) { r.why = Why::kScopeZoomOff; return r; }
     if (!fovKnown || !(std::isfinite(adsDeg) && adsDeg > 0.0)) { r.why = Why::kAdsFovUnknown; return r; }
     r.halfFovRad = viewcircle::halfFovRad(tan4);
     if (!std::isfinite(r.halfFovRad)) { r.why = Why::kNoFrustum; return r; }
@@ -84,6 +86,8 @@ inline Radius circleRadius(bool keyOn, bool fovKnown, double adsDeg, double hipD
 inline int formatLine(char* buf, size_t n, uint32_t press, const char* mode, const Radius& r, double adsDeg, double hipDeg, bool fromBare, const char* item, const char* scope,
                       const float (*tc)[2] = nullptr) noexcept {
     const double deg = 180.0 / viewcircle::kPi;
+    if (r.why == Why::kScopeZoomOff)   // F205b: the circle follows the scope zoom setting; with it off the press says so and nothing else
+        return std::snprintf(buf, n, "ADS view circle (F205): press %u: no circle (fix.native_on_foot_ads_scope_zoom is off)", press);
     if (r.why != Why::kOk)
         return std::snprintf(buf, n, "ADS view circle (F205): press %u, Anti-aliasing %s: no circle: %s (item %s, scope %s)", press, mode, whyText(r.why), item ? item : "none", scope ? scope : "unknown");
     int len = std::snprintf(buf, n, "ADS view circle (F205): press %u, Anti-aliasing %s: radius %.2f deg (ADS FOV %.2f / hip FOV %.2f x the headset's half-FOV %.2f deg, vertical)%s; item %s, scope %s",
@@ -92,6 +96,7 @@ inline int formatLine(char* buf, size_t n, uint32_t press, const char* mode, con
     if (tc && len > 0 && static_cast<size_t>(len) < n)
         len += std::snprintf(buf + len, n - static_cast<size_t>(len), "; centre (tangents) left %+.4f/%+.4f right %+.4f/%+.4f", static_cast<double>(tc[0][0]), static_cast<double>(tc[0][1]),
                              static_cast<double>(tc[1][0]), static_cast<double>(tc[1][1]));
+    if (len > 0 && static_cast<size_t>(len) < n) len += std::snprintf(buf + len, n - static_cast<size_t>(len), " (the scope zoom is on)");   // F205b: what switched it
     return len;
 }
 
