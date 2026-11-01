@@ -1978,6 +1978,8 @@ AUDIT_EXACT_ONLY = (
     ("d3d11/native_on_foot_core.h", "native on foot's exact-build addresses and identity"),
     ("d3d11/avatar_hooks_core.h", "the extracted avatar hooks' exact-build addresses and identity"),
     ("d3d11/avatar_skeleton_core.h", "the extracted avatar skeleton's exact-build vtables and slots"),
+    ("d3d11/shop_screen_core.h", "F209's exact-build Pioneer Supplies buy screens: five hook addresses, their prologue bytes and three vtables, checked against the build's PE identity and the "
+     "prologue bytes before any is placed (native_on_foot_hooks.cpp, in this family, places them); making them self-locating needs the signature table regenerated"),
     ("d3d11/native_on_foot_f87.h", "the exact-build interaction prompt probe's addresses and pins"),
     ("d3d11/native_on_foot_f111.h", "the exact-build panel pointer probe's functions and slots"),
     ("d3d11/native_on_foot_f114b.h", "the exact-build panel pointer's owner transform and click path"),

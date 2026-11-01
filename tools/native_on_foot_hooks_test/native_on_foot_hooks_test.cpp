@@ -15,6 +15,10 @@
 //     unload, and someone else's value is left alone;
 //   * head hiding zeroes the local third-person avatar's head parts only while the body is on in first person, the capture latches only
 //     the local humanoid, and native on foot's camera signal is read after the controller's update and changes nothing.
+//   * F209, the Pioneer Supplies buy screens: five more optional hooks (the base Show and Close, SetState, the kiosk's start and stop) at their real RVAs with
+//     the real prologues (6, 6, 6, 5 and 5 bytes stolen); Show and Close are filtered on *(this); the signal is on from a buy screen's Show to its Close, a
+//     Close the hook missed, a freed object (vtable changed) and an unreadable one cannot stick it; SetState records only the SuitUIStateMachine; the kiosk
+//     alone is no buy screen; a flapping screen is capped; each wrong prologue stands one hook down; a build that is not 334925 gets one line for all five.
 // This is "what would appear in the log if the new code never ran" made executable.
 //
 // --self-test runs it and prints "native on foot hooks: PASS" only when every check holds.
@@ -38,6 +42,7 @@
 #include "../../src/d3d11/avatar_skeleton_core.h"
 #include "../../src/d3d11/native_on_foot.h"   // the native flag and the camera signal the controller hook publishes (F93d)
 #include "../../src/d3d11/native_on_foot_logwin.h"
+#include "../../src/d3d11/shop_screen_core.h"   // F209: the buy screens' hooks, signal and lines
 
 using namespace edvr;
 
@@ -121,6 +126,25 @@ void testIdentity() {
     check(stolenOf(ctl15, 15) == 5, "CodeHook steals 5 bytes of the controller prologue (the first mov [rsp+8],rbx)");
     check(stolenOf(fade16, 16) == 5, "...5 of the avatar fade's (mov r11,rsp; push rbx; push rsi)");
     check(stolenOf(find16, 16) == 5, "...5 of FindJoint's (mov [rsp+8],rbx)");
+}
+
+void testShopPure() {
+    std::printf("the Pioneer Supplies buy screens' prologues and their steals (F209)\n");
+    // The bytes spelled out again here (not copied from the header): the exe's, read for build 334925.
+    const uint8_t show[14] = {0x40, 0x53, 0x48, 0x83, 0xEC, 0x20, 0x48, 0x8B, 0xD9, 0x48, 0x8B, 0x49, 0x70, 0xE8};
+    const uint8_t close[15] = {0x40, 0x53, 0x48, 0x83, 0xEC, 0x20, 0x80, 0x79, 0x79, 0x00, 0x48, 0x8B, 0xD9, 0x74, 0x1B};
+    const uint8_t setState[10] = {0x40, 0x53, 0x48, 0x83, 0xEC, 0x20, 0x48, 0x8B, 0xDA, 0xE8};
+    const uint8_t kStart[16] = {0x48, 0x8B, 0xC4, 0x55, 0x53, 0x48, 0x8D, 0x68, 0xA1, 0x48, 0x81, 0xEC, 0xA8, 0x00, 0x00, 0x00};
+    const uint8_t kStop[16] = {0x48, 0x89, 0x5C, 0x24, 0x10, 0x57, 0x48, 0x83, 0xEC, 0x20, 0x48, 0x8B, 0xD9, 0x48, 0x81, 0xC1};
+    check(sizeof(shop::kShowPrologue) == 14 && std::memcmp(shop::kShowPrologue, show, 14) == 0 && shop::kShowRva == 0x9C3960, "the base Show prologue is 40 53 48 83 EC 20 48 8B D9 48 8B 49 70 E8 at +0x9C3960");
+    check(sizeof(shop::kClosePrologue) == 15 && std::memcmp(shop::kClosePrologue, close, 15) == 0 && shop::kCloseRva == 0x9C22A0, "the base Close prologue is 40 53 48 83 EC 20 80 79 79 00 48 8B D9 74 1B at +0x9C22A0");
+    check(sizeof(shop::kSetStatePrologue) == 10 && std::memcmp(shop::kSetStatePrologue, setState, 10) == 0 && shop::kSetStateRva == 0xA237B0, "the state machine SetState prologue is 40 53 48 83 EC 20 48 8B DA E8 at +0xA237B0");
+    check(sizeof(shop::kKioskStartPrologue) == 16 && std::memcmp(shop::kKioskStartPrologue, kStart, 16) == 0 && shop::kKioskStartRva == 0x1973820, "the kiosk's OnStart prologue is 48 8B C4 55 53 48 8D 68 A1 48 81 EC A8 00 00 00 at +0x1973820");
+    check(sizeof(shop::kKioskStopPrologue) == 16 && std::memcmp(shop::kKioskStopPrologue, kStop, 16) == 0 && shop::kKioskStopRva == 0x1916440, "the kiosk's OnStop prologue is 48 89 5C 24 10 57 48 83 EC 20 48 8B D9 48 81 C1 at +0x1916440");
+    check(stolenOf(show, 14) == 6 && stolenOf(close, 15) == 6 && stolenOf(setState, 10) == 6 && stolenOf(kStart, 16) == 5 && stolenOf(kStop, 16) == 5,
+          "CodeHook steals 6 bytes of Show, Close and SetState (push rbx; sub rsp,20h) and 5 of the kiosk's start (mov rax,rsp; push rbp; push rbx) and stop (mov [rsp+10h],rbx): whole instructions, no displacement");
+    check(shop::kSuitVtableRva == 0x5255D20 && shop::kWeaponsVtableRva == 0x5255A20 && shop::kKioskVtableRva == 0x51E9770 && shop::kOffOpen == 0x79 && shop::kOffKiosk == 0x1F8,
+          "the buy screens' vtables are +0x5255D20 (suit) and +0x5255A20 (weapons), the kiosk's +0x51E9770; the bytes are +0x79 and +0x1F8");
 }
 
 void testFadeGuard() {
@@ -1850,6 +1874,482 @@ void testSkeletonLatch(const CtlPages& p) {
     t::reset();
 }
 
+// ---- F209: the Pioneer Supplies buy screens (shop_screen_core.h; native_on_foot_hooks.cpp's five shop hooks and the frame thread's tick) ----------------------------------------------
+// The synthetic functions sit at their real RVAs in the synthetic game image, begin with the real prologues (the bytes the hooks verify) and do what the game's do to the byte they
+// are about: Show sets +0x79 and returns 0x5A5A, Close clears it (0x5A5B), SetState stores its two arguments (0x5A5C), the kiosk's start sets +0x1F8 (0x5A5D) and its stop clears it
+// (0x5A5E). The objects carry the buy screens' vtable VALUES (base + RVA; the hooks only compare them).
+using FnThis = uint64_t (__fastcall*)(void*);
+using FnState = uint64_t (__fastcall*)(void*, const char*);
+void shopImgInit() {
+    const uint8_t nop = 0x90;
+    auto rel32 = [](size_t from, size_t to) { return static_cast<int32_t>(static_cast<int64_t>(to) - static_cast<int64_t>(from)); };
+    auto put32 = [](uint8_t* p, size_t at, int32_t v) { std::memcpy(p + at, &v, 4); };
+    {   // Show
+        cimgCommit(shop::kShowRva, 0x80);
+        uint8_t* p = g_cimg + shop::kShowRva;
+        std::memset(p, 0xCC, 0x80);
+        size_t n = 0;
+        for (uint8_t b : shop::kShowPrologue) p[n++] = b;                       // ... push rbx; sub rsp,20h; mov rbx,rcx; mov rcx,[rcx+70h]; call
+        put32(p, n, rel32(n + 4, 0x40));
+        n += 4;
+        const uint8_t body[] = {0xC6, 0x43, 0x79, 0x01, 0xB8, 0x5A, 0x5A, 0x00, 0x00, 0x48, 0x83, 0xC4, 0x20, 0x5B, 0xC3};   // mov byte [rbx+79h],1; mov eax,5A5Ah; add rsp,20h; pop rbx; ret
+        std::memcpy(p + n, body, sizeof(body));
+        p[0x40] = 0xC3;                                                         // the callee
+    }
+    {   // Close
+        cimgCommit(shop::kCloseRva, 0x80);
+        uint8_t* p = g_cimg + shop::kCloseRva;
+        std::memset(p, 0xCC, 0x80);
+        size_t n = 0;
+        for (uint8_t b : shop::kClosePrologue) p[n++] = b;                      // ... cmp byte [rcx+79h],0; mov rbx,rcx; jz +1Bh
+        const uint8_t clear[] = {0xC6, 0x43, 0x79, 0x00};                       // mov byte [rbx+79h],0
+        std::memcpy(p + n, clear, sizeof(clear));
+        n += sizeof(clear);
+        while (n < 15 + 0x1B) p[n++] = nop;
+        const uint8_t tail[] = {0xB8, 0x5B, 0x5A, 0x00, 0x00, 0x48, 0x83, 0xC4, 0x20, 0x5B, 0xC3};   // mov eax,5A5Bh; add rsp,20h; pop rbx; ret
+        std::memcpy(p + n, tail, sizeof(tail));
+    }
+    {   // SetState: stores rcx at +0x48 and the state pointer (rbx) at +0x50
+        cimgCommit(shop::kSetStateRva, 0x80);
+        uint8_t* p = g_cimg + shop::kSetStateRva;
+        std::memset(p, 0xCC, 0x80);
+        std::memset(p + 0x48, 0, 16);
+        size_t n = 0;
+        for (uint8_t b : shop::kSetStatePrologue) p[n++] = b;                   // ... mov rbx,rdx; call
+        put32(p, n, rel32(n + 4, 0x40));
+        n += 4;
+        p[n++] = 0x48; p[n++] = 0x89; p[n++] = 0x0D;                            // mov [rip+x], rcx
+        put32(p, n, rel32(n + 4, 0x48));
+        n += 4;
+        p[n++] = 0x48; p[n++] = 0x89; p[n++] = 0x1D;                            // mov [rip+x], rbx
+        put32(p, n, rel32(n + 4, 0x50));
+        n += 4;
+        const uint8_t tail[] = {0xB8, 0x5C, 0x5A, 0x00, 0x00, 0x48, 0x83, 0xC4, 0x20, 0x5B, 0xC3};
+        std::memcpy(p + n, tail, sizeof(tail));
+        p[0x40] = 0xC3;
+    }
+    {   // the kiosk's start
+        cimgCommit(shop::kKioskStartRva, 0x80);
+        uint8_t* p = g_cimg + shop::kKioskStartRva;
+        std::memset(p, 0xCC, 0x80);
+        size_t n = 0;
+        for (uint8_t b : shop::kKioskStartPrologue) p[n++] = b;                 // mov rax,rsp; push rbp; push rbx; lea rbp,[rax-5Fh]; sub rsp,0A8h
+        const uint8_t body[] = {0xC6, 0x81, 0xF8, 0x01, 0x00, 0x00, 0x01, 0xB8, 0x5D, 0x5A, 0x00, 0x00, 0x48, 0x81, 0xC4, 0xA8, 0x00, 0x00, 0x00, 0x5B, 0x5D, 0xC3};
+        std::memcpy(p + n, body, sizeof(body));
+    }
+    {   // the kiosk's stop
+        cimgCommit(shop::kKioskStopRva, 0x80);
+        uint8_t* p = g_cimg + shop::kKioskStopRva;
+        std::memset(p, 0xCC, 0x80);
+        size_t n = 0;
+        for (uint8_t b : shop::kKioskStopPrologue) p[n++] = b;                  // mov [rsp+10h],rbx; push rdi; sub rsp,20h; mov rbx,rcx; add rcx,imm32
+        put32(p, n, 0);
+        n += 4;
+        const uint8_t body[] = {0xC6, 0x83, 0xF8, 0x01, 0x00, 0x00, 0x00, 0xB8, 0x5E, 0x5A, 0x00, 0x00, 0x48, 0x83, 0xC4, 0x20, 0x5F, 0x48, 0x8B, 0x5C, 0x24, 0x10, 0xC3};
+        std::memcpy(p + n, body, sizeof(body));
+    }
+}
+uint64_t shopShow(void* o) { return reinterpret_cast<FnThis>(g_cimg + shop::kShowRva)(o); }
+uint64_t shopClose(void* o) { return reinterpret_cast<FnThis>(g_cimg + shop::kCloseRva)(o); }
+uint64_t shopSetState(void* handle, const char* s) { return reinterpret_cast<FnState>(g_cimg + shop::kSetStateRva)(handle, s); }
+uint64_t shopKioskStart(void* o) { return reinterpret_cast<FnThis>(g_cimg + shop::kKioskStartRva)(o); }
+uint64_t shopKioskStop(void* o) { return reinterpret_cast<FnThis>(g_cimg + shop::kKioskStopRva)(o); }
+uintptr_t shopSeenHandle() { uintptr_t v; std::memcpy(&v, g_cimg + shop::kSetStateRva + 0x48, 8); return v; }
+uintptr_t shopSeenState() { uintptr_t v; std::memcpy(&v, g_cimg + shop::kSetStateRva + 0x50, 8); return v; }
+
+// A UI object the way the rig plays it: the vtable value at +0, room for +0x79 and +0x1F8.
+struct ShopObj {
+    alignas(16) uint8_t b[0x300] = {};
+    void init(uint64_t vtable) {
+        std::memset(b, 0, sizeof(b));
+        std::memcpy(b, &vtable, 8);
+    }
+    uint8_t open() const { return b[shop::kOffOpen]; }
+    uint8_t kiosk() const { return b[shop::kOffKiosk]; }
+    void setVtable(uint64_t vtable) { std::memcpy(b, &vtable, 8); }
+};
+// A state machine handle: [handle+8] -> a string object whose characters start at +0x14.
+struct ShopHandle {
+    alignas(16) uint8_t h[0x20] = {};
+    alignas(16) uint8_t str[0x40] = {};
+    void init(const char* name) {
+        std::memset(h, 0, sizeof(h));
+        std::memset(str, 0, sizeof(str));
+        const uint64_t p = reinterpret_cast<uint64_t>(str);
+        std::memcpy(h + shop::kOffHandleName, &p, 8);
+        std::snprintf(reinterpret_cast<char*>(str) + shop::kOffStringChars, sizeof(str) - shop::kOffStringChars, "%s", name);
+    }
+};
+
+void installShopTargets(const CtlPages& p, int badShop = -1) {
+    NativeOnFootHooksTestTargets tt;
+    tt.controller = reinterpret_cast<uintptr_t>(p.g);
+    tt.avatarFade = reinterpret_cast<uintptr_t>(g_cimg) + avh::kAvatarFadeRva;
+    tt.findJoint = reinterpret_cast<uintptr_t>(g_cimg) + avh::kFindJointRva;
+    const uintptr_t b = reinterpret_cast<uintptr_t>(g_cimg);
+    auto at = [&](int i, uintptr_t rva) { return i == badShop ? b + 0x3000000 : b + rva; };   // a function of 0xCC bytes: not this build's
+    tt.shopShow = at(0, shop::kShowRva);
+    tt.shopClose = at(1, shop::kCloseRva);
+    tt.shopSetState = at(2, shop::kSetStateRva);
+    tt.kioskStart = at(3, shop::kKioskStartRva);
+    tt.kioskStop = at(4, shop::kKioskStopRva);
+    nofoothookstest::setTargets(tt);
+    nofoothookstest::setHeadImage(b, kCImgSize);
+}
+std::string shopEventLine(const char* cls, const char* what, int before, int after, const void* obj) {
+    char line[256];
+    std::snprintf(line, sizeof(line), "shop screens (F209): %s %s: +0x79 %d -> %d (this 0x%08X, thread %u)", cls, what, before, after, static_cast<uint32_t>(reinterpret_cast<uintptr_t>(obj)),
+                  static_cast<unsigned>(GetCurrentThreadId()));
+    return line;
+}
+
+void testShopGlue(const CtlPages& p) {
+    std::printf("glue: the Pioneer Supplies buy screens (F209)\n");
+    namespace t = edvr::nofoothookstest;
+    const uint64_t base = reinterpret_cast<uint64_t>(g_cimg);
+    static ShopObj suit, weapons, kiosk, other;
+    static ShopHandle hSuit, hOther;
+    auto reinit = [&] {
+        suit.init(base + shop::kSuitVtableRva);
+        weapons.init(base + shop::kWeaponsVtableRva);
+        kiosk.init(base + shop::kKioskVtableRva);
+        other.init(base + 0x5255000);
+        hSuit.init("SuitUIStateMachine");
+        hOther.init("TransferUIStateMachine");
+    };
+    auto start = [&](Rig& rig, int badShop = -1) {
+        t::reset();
+        edvr::g_nativeOnFootActive.store(false);
+        cimgInit();
+        shopImgInit();
+        reinit();
+        installShopTargets(p, badShop);
+        nativeOnFootHooksBody(true, false, "");
+        rig.boundary();   // installs
+        rig.cap.clear();
+    };
+    const size_t steals[5] = {6, 6, 6, 5, 5};
+    {   // the key off: nothing installed, the originals run untouched
+        Rig rig;
+        t::reset();
+        edvr::g_nativeOnFootActive.store(false);
+        cimgInit();
+        shopImgInit();
+        reinit();
+        installShopTargets(p);
+        nativeOnFootHooksBody(false, false, "rig: the key is off");
+        uint8_t showBefore[16];
+        std::memcpy(showBefore, g_cimg + shop::kShowRva, 16);
+        rig.boundary();
+        rig.boundary();
+        check(t::hookState(t::kShopShow) == 0 && t::hookState(t::kShopClose) == 0 && t::hookState(t::kShopSetState) == 0 && t::hookState(t::kKioskStart) == 0 && t::hookState(t::kKioskStop) == 0 &&
+                  std::memcmp(showBefore, g_cimg + shop::kShowRva, 16) == 0 && rig.cap.lines.empty() && !nativeOnFootShopOpen(),
+              "F209 THE NATIVE KEY OFF: no shop hook is installed or patched, nothing is said, the signal is off");
+        check(shopShow(&suit) == 0x5A5A && suit.open() == 1 && shopClose(&suit) == 0x5A5B && suit.open() == 0 && !nativeOnFootShopOpen(), "...the synthetic originals work unhooked (Show sets +0x79, Close clears it)");
+        t::reset();
+    }
+    {   // the install: five hooks, each stole the whole instructions covering five bytes, gates open while the key is on
+        Rig rig;
+        t::reset();
+        edvr::g_nativeOnFootActive.store(false);
+        cimgInit();
+        shopImgInit();
+        reinit();
+        installShopTargets(p);
+        nativeOnFootHooksBody(true, false, "");
+        rig.boundary();
+        rig.boundary();
+        bool armed = true, stole = true, gates = true;
+        for (int i = 0; i < 5; ++i) {
+            armed = armed && t::hookState(t::kShopShow + i) == 1;
+            stole = stole && t::stolenBytes(t::kShopShow + i) == steals[i];
+            gates = gates && t::gateOpen(t::kShopShow + i);
+        }
+        check(armed && stole && gates && rig.cap.count("hook armed:") == 8, "F209 THE KEY ON: all five shop hooks are armed beside the three (8 'hook armed:' lines), they stole 6, 6, 6, 5 and 5 bytes, and their gates are open");
+        check(rig.cap.count("shop-show hook armed:") == 1 && rig.cap.count("shop-close hook armed:") == 1 && rig.cap.count("shop-state hook armed:") == 1 && rig.cap.count("shop-kiosk-start hook armed:") == 1 &&
+                  rig.cap.count("shop-kiosk-stop hook armed:") == 1 && has(rig.cap.nth("shop-show hook armed:", 0), "(F209)") && has(rig.cap.nth("shop-show hook armed:", 0), "nothing is written") &&
+                  has(rig.cap.nth("shop-state hook armed:", 0), "(F209)") && has(rig.cap.nth("shop-kiosk-stop hook armed:", 0), "(F209)"),
+              "...each says it is armed once, names F209 and says nothing is written");
+        check(g_cimg[shop::kShowRva] == 0xE9 && g_cimg[shop::kCloseRva] == 0xE9 && g_cimg[shop::kSetStateRva] == 0xE9 && g_cimg[shop::kKioskStartRva] == 0xE9 && g_cimg[shop::kKioskStopRva] == 0xE9,
+              "...and each entry is a jump now");
+        rig.cap.clear();
+        rig.boundary();
+        rig.boundary();
+        check(rig.cap.lines.empty(), "...nothing is installed or said twice, and with no event nothing is logged");
+        nativeOnFootHooksBody(false, false, "rig: the key is off");
+        rig.boundary();
+        bool closed = true;
+        for (int i = 0; i < 5; ++i) closed = closed && !t::gateOpen(t::kShopShow + i);
+        check(closed, "THE KEY OFF AGAIN: the shop hooks' gates close (the hooks stay installed, their callbacks are not reached)");
+        t::reset();
+        check(std::memcmp(g_cimg + shop::kShowRva, shop::kShowPrologue, 6) == 0 && std::memcmp(g_cimg + shop::kCloseRva, shop::kClosePrologue, 6) == 0 &&
+                  std::memcmp(g_cimg + shop::kSetStateRva, shop::kSetStatePrologue, 6) == 0 && std::memcmp(g_cimg + shop::kKioskStartRva, shop::kKioskStartPrologue, 5) == 0 &&
+                  std::memcmp(g_cimg + shop::kKioskStopRva, shop::kKioskStopPrologue, 5) == 0,
+              "RESET: uninstall put every shop function's original bytes back");
+    }
+    {   // the suit buy screen: Show, then Close
+        Rig rig;
+        start(rig);
+        const uint64_t r1 = shopShow(&suit);
+        check(r1 == 0x5A5A && suit.open() == 1, "F209 SHOW: the original ran and its result came back unchanged (0x5A5A), +0x79 is set");
+        check(nativeOnFootShopOpen(), "...the signal is on at once, before any frame boundary");
+        rig.boundary();
+        check(rig.cap.count(shopEventLine("SuitVendorInteraction", "Show", 0, 1, &suit).c_str()) == 1, "...the boundary writes the Show line: the class, +0x79 0 -> 1, the object and the thread");
+        check(rig.cap.count("the shop signal is ON: F107 holds the camera away (suit open, weapons closed, kiosk not running; change 1)") == 1, "...and the signal's ON line, once");
+        const int iShow = rig.cap.indexOf("SuitVendorInteraction Show:"), iOn = rig.cap.indexOf("the shop signal is ON");
+        check(iShow >= 0 && iShow < iOn, "...the Show line comes before the ON line");
+        rig.cap.clear();
+        rig.boundary();
+        rig.boundary();
+        check(rig.cap.lines.empty() && nativeOnFootShopOpen(), "...while it stays open the boundaries say nothing and the signal stays on");
+        NativeOnFootShopRead rd;
+        check(nativeOnFootShopRead(&rd) && rd.armed && rd.buyScreenOpen && rd.suitByte == 1 && rd.weaponsByte == -1 && rd.kioskByte == -1 && !rd.kiosk && rd.signalChanges == 1,
+              "...the frame thread's reading: the suit byte 1, nothing remembered for the weapons and the kiosk, one change");
+        const uint64_t r2 = shopClose(&suit);
+        check(r2 == 0x5A5B && suit.open() == 0 && !nativeOnFootShopOpen(), "F209 CLOSE: the original ran (0x5A5B), +0x79 is clear, the signal is off at once");
+        rig.boundary();
+        check(rig.cap.count(shopEventLine("SuitVendorInteraction", "Close", 1, 0, &suit).c_str()) == 1 &&
+                  rig.cap.count("the shop signal is OFF (suit closed, weapons closed, kiosk not running; change 2)") == 1,
+              "...the Close line (+0x79 1 -> 0) and the OFF line, once each");
+        check(nativeOnFootShopRead(&rd) && !rd.buyScreenOpen && rd.suitByte == 0 && rd.signalChanges == 2, "...the reading: the suit byte 0, two changes");
+        // another class of the 40 that share Show/Close
+        rig.cap.clear();
+        check(shopShow(&other) == 0x5A5A && other.open() == 1 && !nativeOnFootShopOpen() && shopClose(&other) == 0x5A5B && other.open() == 0, "F209 ANOTHER CLASS: its Show and Close run, its signal is none");
+        rig.boundary();
+        check(rig.cap.lines.empty(), "...and nothing is logged for it");
+        t::reset();
+    }
+    {   // the weapon buy screen beside the suit one; the kiosk is not a buy screen
+        Rig rig;
+        start(rig);
+        shopShow(&suit);
+        shopShow(&weapons);
+        rig.boundary();
+        check(nativeOnFootShopOpen() && rig.cap.count("the shop signal is ON: F107 holds the camera away (suit open, weapons open, kiosk not running; change 1)") == 1 &&
+                  rig.cap.count(shopEventLine("WeaponsVendorInteraction", "Show", 0, 1, &weapons).c_str()) == 1,
+              "F209: both buy screens open: one signal edge saying both, each Show line written");
+        shopClose(&suit);
+        rig.boundary();
+        check(nativeOnFootShopOpen() && rig.cap.count("the shop signal is OFF") == 0, "...closing the suit screen leaves the weapon screen holding the signal (no OFF line)");
+        shopClose(&weapons);
+        rig.boundary();
+        check(!nativeOnFootShopOpen() && rig.cap.count("the shop signal is OFF (suit closed, weapons closed") == 1, "...closing the weapon screen ends it");
+        t::reset();
+    }
+    {   // the armoury kiosk: start and stop events; it does not hold F107
+        Rig rig;
+        start(rig);
+        const uint64_t r = shopKioskStart(&kiosk);
+        check(r == 0x5A5D && kiosk.kiosk() == 1 && !nativeOnFootShopOpen(), "F209 KIOSK START: the original ran (0x5A5D), +0x1F8 is set, and the kiosk alone is not a buy screen: the signal stays off");
+        rig.boundary();
+        NativeOnFootShopRead rd;
+        check(rig.cap.count("shop screens (F209): ArmouryVendorActivity started: +0x1F8 0 -> 1 (this 0x") == 1 && nativeOnFootShopRead(&rd) && rd.kiosk && rd.kioskByte == 1 && !rd.buyScreenOpen &&
+                  rig.cap.count("the shop signal is ON") == 0,
+              "...the start line and the reading say the kiosk runs; no signal edge");
+        const uint64_t r2 = shopKioskStop(&kiosk);
+        rig.boundary();
+        check(r2 == 0x5A5E && kiosk.kiosk() == 0 && rig.cap.count("ArmouryVendorActivity stopped: +0x1F8 1 -> 0") == 1 && nativeOnFootShopRead(&rd) && !rd.kiosk, "KIOSK STOP: the original ran (0x5A5E), the stop line is written");
+        rig.cap.clear();
+        other.setVtable(base + 0x5255000);
+        shopKioskStart(&other);
+        rig.boundary();
+        check(rig.cap.lines.empty(), "F209: a start on an object that is not the kiosk's class is forwarded and logged nowhere");
+        t::reset();
+    }
+    {   // SetState: only the handle named SuitUIStateMachine is recorded
+        Rig rig;
+        start(rig);
+        const uint64_t r = shopSetState(&hSuit, "Suit Vendor");
+        check(r == 0x5A5C && shopSeenHandle() == reinterpret_cast<uintptr_t>(&hSuit) && shopSeenState() != 0, "F209 SETSTATE: the original ran with its arguments (0x5A5C)");
+        shopSetState(&hOther, "Transfer");
+        shopSetState(&hSuit, "OnFoot");
+        rig.boundary();
+        check(rig.cap.count("shop screens (F209): SuitUIStateMachine: \"unknown\" -> \"Suit Vendor\" (thread ") == 1 && rig.cap.count("SuitUIStateMachine: \"Suit Vendor\" -> \"OnFoot\" (thread ") == 1 &&
+                  rig.cap.count("Transfer") == 0 && rig.cap.count("SuitUIStateMachine:") == 2,
+              "...two lines for the suit machine's two changes (from the previous state, to the new, the thread), none for another machine");
+        NativeOnFootShopRead rd;
+        check(nativeOnFootShopRead(&rd) && std::strcmp(rd.state, "OnFoot") == 0 && !rd.buyScreenOpen, "...the reading carries the newest state");
+        rig.cap.clear();
+        // a handle that cannot be read, a string that cannot be read, and a name of another length
+        check(shopSetState(reinterpret_cast<void*>(0x10), "x") == 0x5A5C && shopSetState(nullptr, "x") == 0x5A5C, "F209: a garbage or null handle is forwarded untouched and costs no crash");
+        ShopHandle bad;
+        bad.init("SuitUIStateMachine");
+        const uint64_t nowhere = 0x20;
+        std::memcpy(bad.h + shop::kOffHandleName, &nowhere, 8);
+        ShopHandle longer;
+        longer.init("SuitUIStateMachineWithMore");
+        check(shopSetState(&bad, "x") == 0x5A5C && shopSetState(&longer, "y") == 0x5A5C, "...a handle whose string pointer is garbage, or whose name only begins like the machine's, is forwarded too");
+        rig.boundary();
+        check(rig.cap.lines.empty(), "...and none of them is a line");
+        check(shopSetState(&hSuit, reinterpret_cast<const char*>(0x30)) == 0x5A5C, "F209: a new-state pointer that cannot be read is forwarded");
+        rig.boundary();
+        check(rig.cap.count("SuitUIStateMachine: \"OnFoot\" -> \"?\" (thread ") == 1, "...and the line says the state is unreadable");
+        t::reset();
+    }
+    {   // a Close the hook missed, a freed object, an unreadable one
+        Rig rig;
+        start(rig);
+        shopShow(&suit);
+        rig.boundary();
+        rig.cap.clear();
+        suit.b[shop::kOffOpen] = 0;   // the game cleared it without the hook seeing a Close
+        rig.boundary();
+        check(!nativeOnFootShopOpen() && rig.cap.count("the shop signal is OFF (suit closed") == 1, "F209 A CLOSE THE HOOK MISSED: the next frame reads the byte, the signal goes off and says so");
+        suit.b[shop::kOffOpen] = 1;
+        rig.boundary();
+        check(nativeOnFootShopOpen(), "...the object is still remembered: its byte reading 1 again puts the signal back on");
+        rig.cap.clear();
+        suit.setVtable(base + 0x5255000);   // the address was freed and something else lives there now
+        rig.boundary();
+        check(!nativeOnFootShopOpen() && rig.cap.count("the remembered SuitVendorInteraction (this 0x") == 1 && rig.cap.count("is forgotten: its vtable is no longer the class's") == 1 &&
+                  rig.cap.count("the shop signal is OFF") == 1,
+              "F209 A STALE `this`: the vtable is not the class's any more: the object is forgotten, one line says so, the signal goes off though the byte reads 1");
+        rig.cap.clear();
+        rig.boundary();
+        rig.boundary();
+        check(rig.cap.lines.empty() && !nativeOnFootShopOpen(), "...and it is not read or said again");
+        suit.setVtable(base + shop::kSuitVtableRva);
+        rig.boundary();
+        check(!nativeOnFootShopOpen(), "...a forgotten object holds no signal until a Show remembers one");
+        shopShow(&suit);
+        check(nativeOnFootShopOpen(), "...a Show remembers it again");
+        shopClose(&suit);
+        rig.boundary();
+        rig.cap.clear();
+        // memory that is gone
+        void* page = VirtualAlloc(nullptr, 0x1000, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+        check(page != nullptr, "F209: a page for an object that will vanish");
+        if (page) {
+            const uint64_t vt = base + shop::kSuitVtableRva;
+            std::memcpy(page, &vt, 8);
+            shopShow(page);
+            rig.boundary();
+            check(nativeOnFootShopOpen() && rig.cap.count("the shop signal is ON") == 1, "...it opens");
+            VirtualFree(page, 0, MEM_RELEASE);
+            rig.cap.clear();
+            rig.boundary();
+            check(!nativeOnFootShopOpen() && rig.cap.count("is forgotten: its memory could not be read") == 1 && rig.cap.count("the shop signal is OFF") == 1,
+                  "F209 AN OBJECT WHOSE MEMORY IS GONE: the guarded read fails, the object is forgotten, one line says so, the signal goes off and nothing crashes");
+        }
+        t::reset();
+    }
+    {   // a flapping screen: the ring and the cap
+        Rig rig;
+        start(rig);
+        for (int i = 0; i < 40; ++i) {
+            shopShow(&suit);
+            shopClose(&suit);
+        }
+        rig.boundary();
+        check(rig.cap.count("shop event(s) were not recorded") == 1 && rig.cap.count("shop screens (F209): SuitVendorInteraction") <= 32 && !nativeOnFootShopOpen(),
+              "F209 A RING THAT FILLS: 80 events between two boundaries keep the first 32 and say once how many were not recorded");
+        t::reset();
+        start(rig);
+        t::shopClock(1000);
+        for (int i = 0; i < 12; ++i) {
+            shopShow(&suit);
+            rig.boundary();
+            shopClose(&suit);
+            rig.boundary();
+        }
+        check(rig.cap.count("shop screens (F209):") == 40, "F209 THE CAP: 12 open-and-close pairs (48 lines) in ten seconds write 40");
+        rig.cap.clear();
+        t::shopClock(1000 + 10000);
+        shopShow(&suit);
+        rig.boundary();
+        check(rig.cap.count("8 event lines in the last 10 s were not written (at most 40 in any ten seconds)") == 1, "...the next ten seconds say how many were not written, once");
+        shopClose(&suit);
+        rig.boundary();
+        t::shopClock(0);
+        t::reset();
+    }
+    {   // threads: two hook threads and the frame thread at once
+        Rig rig;
+        start(rig);
+        static ShopObj a, b;
+        a.init(base + shop::kSuitVtableRva);
+        b.init(base + shop::kWeaponsVtableRva);
+        std::atomic<bool> go{false};
+        std::atomic<int> done{0};
+        auto worker = [&](ShopObj* o) {
+            while (!go.load()) {}
+            for (int i = 0; i < 3000; ++i) {
+                shopShow(o);
+                shopClose(o);
+            }
+            done.fetch_add(1);
+        };
+        std::thread t1(worker, &a), t2(worker, &b);
+        go.store(true);
+        int boundaries = 0;
+        while (done.load() < 2 && boundaries < 20000) {
+            rig.boundary();
+            ++boundaries;
+        }
+        t1.join();
+        t2.join();
+        rig.boundary();
+        rig.boundary();
+        check(!nativeOnFootShopOpen() && a.open() == 0 && b.open() == 0 && boundaries > 0, "F209 THREADS: two threads opening and closing the two buy screens 3000 times while the frame thread runs: no crash, and the signal is off when all are closed");
+        t::reset();
+    }
+    {   // each shop hook with a wrong prologue stands down alone; the rest are armed
+        const char* names[5] = {"shop-show", "shop-close", "shop-state", "shop-kiosk-start", "shop-kiosk-stop"};
+        for (int bad = 0; bad < 5; ++bad) {
+            Rig rig;
+            t::reset();
+            edvr::g_nativeOnFootActive.store(false);
+            cimgInit();
+            shopImgInit();
+            reinit();
+            installShopTargets(p, bad);
+            nativeOnFootHooksBody(true, false, "");
+            rig.boundary();
+            char what[200], needle[64];
+            std::snprintf(needle, sizeof(needle), "%s hook stood down:", names[bad]);
+            bool othersArmed = true;
+            for (int i = 0; i < 5; ++i)
+                if (i != bad) othersArmed = othersArmed && t::hookState(t::kShopShow + i) == 1;
+            std::snprintf(what, sizeof(what), "F209 WRONG %s PROLOGUE: one '%s' line (the game build differs, nothing was patched), the other four are armed", names[bad], needle);
+            check(rig.cap.count(needle) == 1 && has(rig.cap.nth(needle, 0), "the game build differs") && has(rig.cap.nth(needle, 0), "nothing was patched") && has(rig.cap.nth(needle, 0), "(F209)") &&
+                      t::hookState(t::kShopShow + bad) == 2 && t::stolenBytes(t::kShopShow + bad) == 0 && othersArmed,
+                  what);
+            t::reset();
+        }
+    }
+    {   // a build that is not 334925: ONE line for all five, nothing patched, the three older hooks are placed as their own rules say
+        Rig rig;
+        t::reset();
+        edvr::g_nativeOnFootActive.store(false);
+        cimgInit();
+        shopImgInit();
+        reinit();
+        NativeOnFootHooksTestTargets tt;   // the shop hooks get no target: they try the real module (this rig's exe: not the game)
+        tt.controller = reinterpret_cast<uintptr_t>(p.g);
+        tt.avatarFade = reinterpret_cast<uintptr_t>(g_cimg) + avh::kAvatarFadeRva;
+        tt.findJoint = reinterpret_cast<uintptr_t>(g_cimg) + avh::kFindJointRva;
+        t::setTargets(tt);
+        t::setHeadImage(reinterpret_cast<uintptr_t>(g_cimg), kCImgSize);
+        t::shopTryReal(true);
+        uint8_t showBefore[16];
+        std::memcpy(showBefore, g_cimg + shop::kShowRva, 16);
+        nativeOnFootHooksBody(true, false, "");
+        rig.boundary();
+        rig.boundary();
+        size_t down = 0;
+        for (int i = 0; i < 5; ++i) down += t::hookState(t::kShopShow + i) == 2 ? 1 : 0;
+        check(down == 5 && rig.cap.count("hook stood down:") == 1 && has(rig.cap.nth("hook stood down:", 0), "shop-show") && has(rig.cap.nth("hook stood down:", 0), "the game build differs") &&
+                  has(rig.cap.nth("hook stood down:", 0), "none of the five shop screen hooks (F209) is placed") && std::memcmp(showBefore, g_cimg + shop::kShowRva, 16) == 0 &&
+                  t::hookState(t::kController) == 1 && t::hookState(t::kFade) == 1 && t::hookState(t::kFind) == 1,
+              "F209 A BUILD THAT IS NOT 334925: all five shop hooks stand down with ONE line (it says none is placed and what that costs), nothing is patched, the other three are armed");
+        shopShow(&suit);
+        rig.boundary();
+        check(!nativeOnFootShopOpen() && rig.cap.count("shop screens (F209):") == 0, "...the signal stays off and the log silent: F107 has its distance test alone");
+        t::reset();
+    }
+    t::reset();
+}
+
 void testGlue() {
     std::printf("glue, end to end (synthetic functions with the real prologues)\n");
     namespace t = edvr::nofoothookstest;
@@ -1869,6 +2369,7 @@ void testGlue() {
     testFlightSuitUnclipGlue(p);
     testNativeCameraGlue(p);
     testSkeletonLatch(p);
+    testShopGlue(p);   // F209
     t::reset();
     check(std::memcmp(p.g, p.good.data(), 5) == 0 && std::memcmp(g_cimg + avh::kAvatarFadeRva, avh::kAvatarFadePrologue, 5) == 0 &&
               std::memcmp(g_cimg + avh::kFindJointRva, avh::kFindJointPrologue, 5) == 0,
@@ -1886,6 +2387,7 @@ int main(int argc, char** argv) {
         }
     }
     testIdentity();
+    testShopPure();   // F209
     testFadeGuard();
     testRing();
     testRelayBytes();
