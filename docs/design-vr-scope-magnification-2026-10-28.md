@@ -8,7 +8,7 @@ game's own zoom as a magnified picture inside the scope's lens. The rest of the 
 
 - **Release (2026-10-30):** A3, B3-3 and C1a are in v0.22.0-rc.4 (draft pre-release, `ab1955de`, 2026-10-30): the scope lens is on by default; `native_on_foot_ads_scope_zoom_full_detail` (off) and `native_on_foot_ads_scope_zoom_fov` ship as experimental keys.
 - **F205 (`25b94de6`, `claude/full-detail-scope`, installed on Frontier 2026-11-01, NOT FLOWN, not merged):** B3 on by default and taking both eyes; every ADS press a circle in
-  both eyes sized as flat's ADS FOV, Anti-aliasing on or off; FLOWN OK; F205b `143b4f04`: the circle follows the scope zoom setting, its key removed. F206 `06e1e54b` (NOT FLOWN): the circle is the full-detail scope's alone, the widest that hides its bars. Journal: F205 at the end.
+  both eyes sized as flat's ADS FOV, Anti-aliasing on or off; FLOWN OK; F205b `143b4f04`: the circle follows the scope zoom setting, its key removed. F206 `06e1e54b` (FLOWN OK 2026-11-02, "it looks good"; ON MAIN): the circle is the full-detail scope's alone, the widest that hides its bars. Journal: F205 at the end.
 - **ON MAIN `28359a00` (2026-10-30, the maintainer's word; full build of the merged tree, all gates):** A3, B3-3 and C1a as flown, the crisp reticle key retired, C1b removed. Open: B3's window drift while
   turning (the lens falls back to A) and the temporary `experimental.native_on_foot_ads_scope_zoom_fov`.
 - **State: S0 FLAT TWICE, VR TWICE** (`d90db147`, measure only, no key; section 7). Settled: Q1 for every owned weapon, Q2 (VR has no
@@ -1157,3 +1157,4 @@ The pilot, after reviewing F205: "back off on the stencil entirely for all weapo
   - `--health`: a B3 press with its window up and no circle frame is PARTIAL.
 - **The readout.** The ammo readout sits about 8-14 deg out, inside the clear region of about 37.9 deg (Pimax) or 36.2 deg (Quest 3). This is an estimate.
 - **Doubts.** A B3 press with the strip up and no centre yet shows the bars without the circle for those frames; the line names it. A radius under 5 deg is refused.
+- **F206 flown and merged (2026-11-02).** The pilot: "it looks good". Merged with origin/main (the Scorpion turret work, #140) in `9a5675b7`; the merged tree's full build is green; pushed to main.
