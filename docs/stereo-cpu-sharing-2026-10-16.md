@@ -50,10 +50,13 @@
   over. EDVR's draw hooks read 5.7-6.1 ms a frame with AA on and still 2.7-3.5
   with F7 off, because F7 leaves the subscriber gate open. EDVR's draw path is
   thus about 6-7 ms of a 32 ms concourse frame. See "2026-10-31: result".
-- **Next flight:** a CPU profile of the concourse, AA on and F7 off
-  (`cpu_profile.py`, an `EDVR_PROFILE_SYMBOLS=1` build), to name the
-  functions inside those 6 ms before any change. "The A/B flight" below is
-  stale: Explorer Cam and `perf baseline F5` are gone.
+- **2026-11-01 CPU profile:** EDVR's own code is about a quarter of the busy
+  render thread in the concourse; EDHM is 2.4-3.2 ms. The draw gate never
+  closes in VR because default-on features hold it. See "2026-11-01: the CPU
+  profile" for the ranked candidates.
+- **Next flight:** a test build carrying candidates 1-5 from that section,
+  flown as the 10-31 concourse legs (DLAA / F7 off, 2 minutes each). "The
+  A/B flight" below is stale: Explorer Cam and `perf baseline F5` are gone.
 - **Environment:** SteamVR (aapvr), RTX 5090, 2016x2016 per eye rendered and
   DLSS'd to 4032x4032, 90 Hz; Elite build 332841. On foot, the native runtime
   paces `deferred` in both modes (the weapon-stability pacing), so the second
@@ -330,3 +333,75 @@ the concourse with DLAA, F9 then 75 s then F11; a second run with
 `--output build\concourse-off` after F7. The analyzer (tools\cpu_profile,
 .NET 8 SDK) then splits each leg's render thread by function, both legs,
 so the AA-on delta and the AA-off floor each get their owner.
+## 2026-11-01: the CPU profile
+
+Build v0.22.0-rc.4-3-g6ac3c0e5 with `EDVR_PROFILE_SYMBOLS=1`, same rig and
+concourse spot. Two 100 s `cpu_profile.py` captures: DLAA
+(`build\concourse-dlaa`, 2279 frames, 1.29M events lost) and F7 off
+(`build\concourse-off`, 2236 frames, none lost; the trace ends at 05:38:47
+UTC, before the F7 restore at 05:38:52). Two tool fixes were needed first:
+the analyzer self-test's thunk window still held the pre-334925 address,
+and the analyzer took an x86 `msdia140.dll` from a Build Tools install, so
+no EDVR frame resolved.
+
+Under the profiler both legs run about 41-42 ms a frame (`cycle`) and AA on
+costs only about 1 ms, so these traces price shares, not the AA delta; the
+unprofiled 2026-10-31 log stays the measure of that.
+
+Render-thread time by leaf module, R1 (game before first submit), ms a
+frame, DLAA / off: game 11.1 / 14.0, EDVR d3d11 6.3 / 4.7 (plus 1.2 / 1.3
+in R5), system d3d11 2.6 / 2.6, EDHM's 3Dmigoto 2.4 / 3.2, kernel 2.0 /
+2.1, NVIDIA user mode 1.3 / 1.3. EDVR's own code is about a quarter of the
+busy render thread in both legs.
+
+EDVR self time by function (R1, windows 5 and 12, uncapped exports; the
+split of innermost addresses into self and forwarded call sites agrees with
+the leaf count, 3.9 against 4.0 and 4.4 against 4.6 ms): the per-draw ladder
+(`beginPanelOverride`, `forwardWithVerdict` and its lambda,
+`hookedDrawIndexedInstanced`) is 1.15 ms with DLAA and 1.88 with AA off.
+AA-on extras are spread thinly (`uiLayerFamilyOf` 0.23, `viewIsSurface`
+0.10, `engineVelocityBeforeDraw` 0.09, `gpuCensusBegin` 0.08, ui-layer and
+depth notes about 0.07 each). AA off adds `f44::draw` (0.21 self, 0.64 in
+the calls it forwards) and the F100 marker-probe tee (about 0.34). The
+whole-trace list also shows `drawtag::streamLoad16` at 0.72-0.81 self.
+
+Every module ran slower in the AA-off capture (game +26%, EDHM +33%), so the
+larger AA-off ladder is mostly capture-to-capture variance. The marker-probe
+tee is the exception, and the code explains it.
+
+Code review (2026-11-01, read-only):
+- Why the AA-off fast path never runs in VR: the draw gate is held open
+  by shipped default-on features, not by instruments. These include
+  `fix.sun_glare` vivid, `particle_billboard`, `holo_pattern`,
+  `intro_backdrop`, `night_vision_stability`, `loading_dim` and the vscreen
+  footprint at `auto` (`drawGateSubscribed`, vscreen.cpp:1783).
+  `developer = on` adds nothing on the draw path.
+- `hookedDrawIndexedInstanced` is the one indexed draw thunk without
+  `drawPathFast` (5154, 5237 and 5317 have it).
+- The F100 tee needs both eyes' world rows for its fast path; with AA off the
+  UI layer that supplies them is absent, so every draw takes the slow path
+  (inferred).
+
+Ranked candidates for one test build (no rendering change, no new keys):
+1. Stand down the marker-fix tee while `fix.ui_quality` is not live (AA
+   off), since `markerFixed` needs the layered composite. Expected saving:
+   1.1-1.5 ms with AA off, 0 with AA on.
+2. Clear `NativeBenchmarkCollector` (16k entries a frame) only when dirty:
+   0.10-0.14 ms.
+3. Inline the reject tests of the out-of-line per-draw calls
+   (`screenMotion*Draw`, which also makes a COM `GetType` first,
+   `uiLayerCrispNoteEyeDraw`, `gpuCensusBegin`, `labelIssue`,
+   `starGlowAfterDraw`): about 0.3 ms with AA on.
+4. Memoise `uiDepthSampledSurfaceSlot` by PS SRV binding generation; it
+   runs twice an eye draw: 0.1-0.2 ms with AA on.
+5. Make the cross-profile per-bind atomic thread-local: 0.05-0.1 ms.
+
+Later, at higher risk:
+- The marker fix's AA-on stream copies and pool scans (0.3-0.8 ms).
+- A per-scene subscriber mask, with the fast path added to
+  `hookedDrawIndexedInstanced` (up to about 2 ms with AA off).
+- EDVR's own AA-on re-issues: about 3.6 ms of the 5.8 ms the hooks read
+  is not EDVR's own code, and those re-issues are the likely owner
+  (inferred).
+
+Out of EDVR's hands: EDHM's 2.4-3.2 ms on the game's own calls.
