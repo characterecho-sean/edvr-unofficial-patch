@@ -4432,6 +4432,31 @@ ruled out: F120's head-turn correction, because it rotated a point the lever had
     - The copy route adds one full-picture copy (about 16 MB at 2016x2017) a frame during a scoped press. Not measured.
     - The probe's pair at 03:35 was #5/#6 while #7/#8 were the busiest, so check `depth at c` near 0.001 or less and a hole r like DLSS's 2.4-6 deg. A wrong pair shows as odd or open-sight holes.
   - **Next flight (`--expect-build 36bd147d`, Anti-aliasing off).** A scoped weapon (the plasma sniper) in ADS: the scope should magnify. Read the S1 press lines (`applied N of N`, no `format refused` and no `depth unavailable`), `depth at c`, the hole r and `magnify ms`, and the frame rate during the press.
+- **Flight (2026-11-01)** `edvr_gfx_20261101_041020.log` (Frontier, Pimax, v0.22.0-rc.4-43-g36bd147d; build matched; Anti-aliasing off). The pilot: "That works well for the most part". **F202 FLOWN OK.**
+  - The plasma sniper's press 1: `applied 1802 of 1807 ... depth unavailable 0, format refused 0 ... hole r min 2.30 median 4.11 max 5.91 deg ... depth at c 0.000205 (near 0.041667) ... GPU rays 0.071 ms, magnify 0.027 ms`. The hole matches the DLSS presses' 2.4-6 deg, so the probe's pair is the scene depth.
+  - **The pilot's next asks.**
+    - "Not zoom the reticule in the scope as well, similar to what we're doing with AA on": `gunsight marks taken: L 0, R 0; armed frames 1804, no mark draw 1804`. Without the weapons layer the mark stays in the scene and is magnified (F204).
+    - "When mouse look is enabled and ADS head to aim is also enabled, the ADS spot does not match where the mouse was": `fix.native_on_foot_ads_head_aim` on at 04:12:26 under mouse look. Every press reads `ADS centre (F69i): ... the sight ... is yaw +3.65 pitch -0.28 deg from the head's forward ...; injected yaw +3.65 pitch -0.28 deg over 0.20 s` (press 9: -0.15/+3.50).
+    - F69i snaps the sight onto the headset's forward axis: F195's assumption, at the ADS press (F203).
+- **F203 (`903a54f0`, full build green, `native_frame_test` 3774 checks; NOT FLOWN): an ADS press keeps the mouse's aim.**
+  - **The rule.** native_on_foot_f203.h (`keepAxis`, `plan`), in native_on_foot.cpp `adsCentreTick`. F69i's snap injects only the head-to-sight offset beyond 15 deg on each axis, F195's constant; a settled press injects nothing.
+    - The 40 deg cone bound applies only when the yaw ask is not zero. `adsCentreYawBounded` pulls in a zero ask from a weapon already past the band, which would have injected about 1 deg.
+    - The 0.5 deg floor, the 90 deg refusal and the measure-only press under look to aim are unchanged.
+  - **Readers.** The release unwinds what was injected, now often zero. F186/F187 and F172 read the live aim pitch, and F176's hold is the press's own.
+  - **The press line** reads `kept yaw +3.65 pitch -0.28 deg (the mouse's aim, F203), injected yaw +0.00 pitch +0.00 deg over 0.00 s`. A press with nothing injected writes no proof lines. edvr_log.py has no F69i rule.
+- **F204 (the crisp gunsight mark with Anti-aliasing off): investigated, NOT built.**
+  - **How C1a works.** It redirects the mark draw into the eye's additive HDR weapons layer W. The layer re-issues the game's tonemap to make E = T(F_up + L) - T(F_up), which the composite adds after the lens.
+  - **Every link is keyed to a temporal mode:**
+    - `uiLayerWeaponsLiveFor` (temporal && ...);
+    - `uiLayerDoorSeen` sizing only for the pass's output;
+    - `uiLayerDecide` needs `layerDrawJitter`, `uiLayerArmed(door, seq)`, `uiDepthEyeOfTarget` and the tonemap take states.
+  - **The routes:**
+    - (a) The weapons layer live with Anti-aliasing off, for the mark alone during a press: about 300-600 lines across ui_layer.cpp, vscreen.cpp and ui_depth.cpp. Medium-high risk, several flights; each gate written as `old || (aaOff && markOnly)`.
+    - (b) A mark-only layer still needs the HDR scene for the tonemap difference, so it is (a). A plain add brings back A2's brightness over bright glass.
+    - (c) Shrinking the mark's quad by 1/M in the scene gives the true size, not a crisp mark. Unverified.
+  - **The recommendation:** the mark stays magnified with the picture for now; (a) as its own arc if the pilot wants it.
+- **Installed for one flight:** F203 on top of F196-F202, as the build after this doc commit.
+  - **Next flight** (Anti-aliasing off, mouse look, `fix.native_on_foot_ads_head_aim = on`): ADS presses should leave the sight where the mouse put it. Read the press lines' `kept ... injected +0.00 +0.00`.
 - ruled out: F198's eye naming as the reason the markers still move with Anti-aliasing off, because both eyes are named and decided (F63 180 a second each with a marker present) and the patch is never bound: the bind requires the interface layer.
 - ruled out: F63's CPU identification differing with Anti-aliasing off, because its line at 21:24:40 (`named: a find 360 ... read-back's entry agrees 360`) matches the DLSS line at 13:49:05 digit for digit. That second's "0 matched" had no nav marker in the scene (`UpdateMarker 0 ... list 0`).
 - ruled out: F196 (or anything EDVR adds with Anti-aliasing off) as the cause of the outpost's 61-78 fps, because EDVR's GPU census reads ~0.1 ms a frame there, its draw hook CPU was lower than with DLSS at the same outpost, and Anti-aliasing off in the ship ran 85.5 fps against DLSS's 87.4.
