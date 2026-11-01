@@ -1729,48 +1729,67 @@ static void radarAnchorCases() {
                                                                                                  std::cos(-12.0 / 57.29577951308232) * std::cos(37.0 / 57.29577951308232), 1e-6),
           "the aim relative to the vehicle: yaw atan2(x, z), pitch asin(y), and back to a unit vector");
     check(std::fabs(st::wrapDeg(190.0) + 170.0) < 1e-9 && std::fabs(st::wrapDeg(-190.0) - 170.0) < 1e-9 && std::fabs(st::wrapDeg(45.0) - 45.0) < 1e-9, "yaw wraps into +-180");
-    st::Aim a0, a1;
-    a0.yaw = 10.0;
-    a1.yaw = 12.0;
-    a1.pitch = -1.0;
-    const st::AimRate rate1 = st::aimRate(a0, 5, a1, 6), rate2 = st::aimRate(a0, 5, a1, 7);
-    st::Aim w0, w1;
-    w0.yaw = 179.0;
-    w1.yaw = -179.0;
-    const st::AimRate wrapRate = st::aimRate(w0, 5, w1, 6);
-    st::Aim fast;
-    fast.yaw = 30.0;
-    const st::AimRate heldRate = st::aimRate(a0, 5, fast, 6);
-    check(rate1.valid && std::fabs(rate1.yaw - 2.0) < 1e-9 && std::fabs(rate1.pitch + 1.0) < 1e-9 && rate2.valid && std::fabs(rate2.yaw - 1.0) < 1e-9 && wrapRate.valid &&
-              std::fabs(wrapRate.yaw - 2.0) < 1e-9 && heldRate.valid && std::fabs(heldRate.yaw - st::kAimMaxRateDegPerFrame) < 1e-9 && !st::aimRate(a0, 6, a1, 6).valid &&
-              !st::aimRate(a0, 7, a1, 6).valid && !st::aimRate(a0, 5, a1, 5 + st::kAimRateMaxGapFrames + 1).valid,
-          "the rate a frame between two samples: per frame of their gap, across the yaw wrap, held to 4 deg a frame; none for samples out of order or more than 8 frames apart");
-    const st::AimStep two = st::extrapolateAim(a1, rate1, 6, 8);
-    check(two.age == 2 && std::fabs(two.dyaw - 4.0) < 1e-9 && std::fabs(two.aim.yaw - 16.0) < 1e-9 && std::fabs(two.aim.pitch + 3.0) < 1e-9 && !two.clamped,
-          "a sample two frames old at 2 deg a frame: carried 4 deg forward");
-    st::AimRate brisk;
-    brisk.yaw = 4.0;
-    brisk.valid = true;
-    const st::AimStep heldStep = st::extrapolateAim(a1, brisk, 6, 9);
-    st::AimRate slow;
-    slow.yaw = 1.0;
-    slow.valid = true;
-    const st::AimStep oldStep = st::extrapolateAim(a1, slow, 6, 16);
-    check(heldStep.age == 3 && std::fabs(heldStep.dyaw - st::kAimMaxStepDeg) < 1e-9 && heldStep.clamped && oldStep.age == 10 &&
-              std::fabs(oldStep.dyaw - double(st::kAimMaxAgeFrames)) < 1e-9 && oldStep.clamped,
-          "the step is held to 5 deg (a reversal cannot overshoot by more) and the age to 4 frames");
-    const st::AimStep none = st::extrapolateAim(a1, st::AimRate{}, 6, 8), ageZero = st::extrapolateAim(a1, rate1, 8, 8);
-    st::Aim edge;
-    edge.yaw = 178.0;
-    edge.pitch = 88.0;
-    st::AimRate up;
-    up.yaw = 4.0;
-    up.pitch = 4.0;
-    up.valid = true;
-    const st::AimStep wrapped = st::extrapolateAim(edge, up, 6, 7);
-    check(none.dyaw == 0.0 && none.aim.yaw == a1.yaw && none.age == 2 && ageZero.age == 0 && ageZero.dyaw == 0.0 && std::fabs(wrapped.aim.yaw + 178.0) < 1e-9 && wrapped.aim.pitch == 89.0,
-          "no rate or no age: the sample's own aim; a step across the yaw wrap wraps, and the pitch stays inside 89 deg");
-    check(std::fabs(st::headPitchDeg(ident)) < 1e-9 && std::fabs(st::headPitchDeg(pitched) + 30.0) < 1e-6, "the head's pitch in the seat: 0 looking ahead, -30 deg looking 30 deg down");
+    // The shake (flight of a8465cb3): the lead is a time (the display horizon), the rate is smoothed over the last samples by real time, the step is held.
+    const int64_t hz = 1000000;   // a QPC of 1 MHz: ticks are microseconds
+    st::AimSample sweep[4];
+    for (int i = 0; i < 4; ++i) {
+        sweep[i].t = 1000000 + int64_t(i) * 11111;   // 90 Hz
+        sweep[i].aim.yaw = 10.0 + 1.5 * i;           // 1.5 deg a frame: 135 deg/s
+        sweep[i].aim.pitch = -5.0;
+    }
+    const st::AimRateDps steady = st::smoothedRate(sweep, 4, hz);
+    check(steady.valid && std::fabs(steady.yaw - 4.5 / 0.033333) < 0.01 && std::fabs(steady.pitch) < 1e-9, "a steady 135 deg/s sweep: the smoothed rate is 135 deg/s by real time");
+    st::AimSample jitter[4];
+    std::copy(sweep, sweep + 4, jitter);
+    jitter[2].aim.yaw += 0.6;   // one noisy sample in the middle does not move a rate taken end to end
+    const st::AimRateDps endToEnd = st::smoothedRate(jitter, 4, hz);
+    st::AimSample wrap2[2];
+    wrap2[0].t = 1000;
+    wrap2[0].aim.yaw = 179.0;
+    wrap2[1].t = 1000 + 11111;
+    wrap2[1].aim.yaw = -179.0;
+    const st::AimRateDps across = st::smoothedRate(wrap2, 2, hz);
+    st::AimSample stale[2];
+    stale[0].t = 1000;
+    stale[1].t = 1000 + 150000;   // 150 ms apart: older than kAimRateMaxSpanS
+    st::AimSample fastPair[2];
+    fastPair[0].t = 1000;
+    fastPair[1].t = 1000 + 11111;
+    fastPair[1].aim.yaw = 20.0;   // 1800 deg/s: held
+    st::AimSample backwards[2];
+    backwards[0].t = 5000;
+    backwards[1].t = 4000;
+    check(std::fabs(endToEnd.yaw - steady.yaw) < 1e-9 && across.valid && std::fabs(across.yaw - 2.0 / 0.011111) < 0.01 && !st::smoothedRate(stale, 2, hz).valid &&
+              std::fabs(st::smoothedRate(fastPair, 2, hz).yaw - st::kAimMaxRateDps) < 1e-9 && !st::smoothedRate(backwards, 2, hz).valid && !st::smoothedRate(sweep, 1, hz).valid,
+          "the rate: end to end over the samples within 100 ms (a noisy middle sample does not move it), across the yaw wrap, held to 360 deg/s; none for one sample, a stale pair or times out of order");
+    st::AimSample spanned[4];
+    std::copy(sweep, sweep + 4, spanned);
+    spanned[0].t = sweep[3].t - 150000;   // the oldest is too old: the rate spans the last three
+    check(std::fabs(st::smoothedRate(spanned, 4, hz).yaw - 3.0 / 0.022222) < 0.01, "a sample older than 100 ms is left out of the span");
+    st::Aim base;
+    base.yaw = 20.0;
+    base.pitch = -5.0;
+    const st::AimLead oneFrame = st::leadAim(base, steady, 1.0 / 90.0);
+    check(std::fabs(oneFrame.dyaw - 1.5) < 0.01 && std::fabs(oneFrame.aim.yaw - 21.5) < 0.01 && !oneFrame.held, "a lead of one 90 Hz frame at 135 deg/s: 1.5 deg");
+    st::AimRateDps reversal;
+    reversal.yaw = -360.0;
+    reversal.valid = true;
+    const st::AimLead heldLead = st::leadAim(base, reversal, 0.040);
+    check(std::fabs(heldLead.dyaw + st::kAimMaxStepDeg) < 1e-9 && heldLead.held && st::leadAim(base, st::AimRateDps{}, 0.011).dyaw == 0.0 && st::leadAim(base, steady, 0.0).dyaw == 0.0,
+          "the lead's step is held to 5 deg; no rate or no lead leaves the sample's own aim");
+    double lead = st::kLeadInitialS;
+    for (int i = 0; i < 400; ++i) lead = st::adaptLead(lead, 0.0125);
+    const double afterOne = st::adaptLead(st::kLeadInitialS, 0.0125);
+    check(std::fabs(lead - 0.0125) < 1e-6 && std::fabs(afterOne - (st::kLeadInitialS + st::kLeadAlpha * (0.0125 - st::kLeadInitialS))) < 1e-12 &&
+              st::adaptLead(0.039, 1.0) <= st::kLeadMaxS && st::adaptLead(0.01, -1.0) == 0.01 && st::adaptLead(0.01, std::numeric_limits<double>::quiet_NaN()) == 0.01,
+          "the lead adapts a 32nd of the way to each measured horizon, settles on it, stays inside 40 ms, and ignores a horizon that is not a positive number");
+    st::ResidualStats rs;
+    rs.add(1.5, 1.5);    // lagging a full frame
+    rs.add(-0.3, 1.5);   // leading
+    rs.add(0.2, 0.1);    // too slow to say
+    check(rs.n == 3 && rs.lagging == 1 && rs.leading == 1 && rs.latN == 2 && std::fabs(rs.mean() - (1.4 / 3.0)) < 1e-12 && std::fabs(rs.maxAbs - 1.5) < 1e-12 &&
+              std::fabs(rs.latency() - ((1.0 - 0.2) / 2.0)) < 1e-12 && st::residualSide(-1.0, -2.0) == 1 && st::residualSide(1.0, -2.0) == -1 && st::residualSide(0.0, 2.0) == 0,
+          "the residual: lagging with the rate's sign, leading against it, the latency left in frames as residual over rate, slow samples counted but not classed");    check(std::fabs(st::headPitchDeg(ident)) < 1e-9 && std::fabs(st::headPitchDeg(pitched) + 30.0) < 1e-6, "the head's pitch in the seat: 0 looking ahead, -30 deg looking 30 deg down");
     const float before[3] = {0.0f, 1.96f, 0.0f}, stepD[3] = {0.0f, 1.96f, 0.45f}, closeTo[3] = {0.0f, 1.96f, 0.40f}, other[3] = {0.0f, 2.0f, 0.0f}, d45[3] = {0.0f, 0.0f, 0.45f},
                 dz[3] = {0.0f, 0.0f, 0.0f};
     check(st::placementStepLooksLikeOffset(before, stepD, d45) && st::placementStepLooksLikeOffset(before, closeTo, d45) && !st::placementStepLooksLikeOffset(before, other, d45) &&

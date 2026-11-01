@@ -34,12 +34,12 @@ const char* srvRadarAnchorWhy();
 // tick's frame number (the setter hook stamps an add with it).
 void srvRadarAnchorPublish(const uint32_t bits[3], uint32_t frameNo);
 // The turret's seated forward in the game's world (srv_turret_math.h turretForwardWorld), unit, from a camera sample of host frame seq (cpu: rows read when the game wrote them; else
-// read back from the GPU), with the head's pitch then; null or !valid clears it. Render thread, and the frame tick clears it when a stay begins. The setter hook pairs it with the
-// anchor's rotation of the same host frame, carries the turret's aim forward over the sample's age (srv_turret_math.h extrapolateAim) and adds s * F along the result; without u or
-// a usable rotation it adds the fallback (0, 0, s * F).
-void srvRadarAnchorPublishDirection(const float u[3], bool valid, uint64_t seq = 0, bool cpu = false, float headPitchDeg = 0.0f);
-// The 10 s line: the window's largest u age (frames) and extrapolation (degrees), reset by the read.
-void srvRadarAnchorTakeWindowMax(uint64_t* ageMax, double* extrapMaxDeg);
+// read back from the GPU), with the head's pitch then and the QPC time of the camera write it came from; null or !valid clears it. Render thread, and the frame tick clears it when a
+// stay begins. The setter hook pairs it with the anchor's rotation of the same host frame, carries the turret's aim to the write that will show the call (a lead in time, the measured
+// display horizon, at a smoothed rate; srv_turret_math.h THE SHAKE) and adds s * F along the result; without u or a usable rotation it adds the fallback (0, 0, s * F).
+void srvRadarAnchorPublishDirection(const float u[3], bool valid, uint64_t seq = 0, bool cpu = false, float headPitchDeg = 0.0f, int64_t qpc = 0);
+// The 10 s line: the window's largest u age (frames), lead (degrees) and residual (degrees), reset by the read.
+void srvRadarAnchorTakeWindowMax(uint64_t* ageMax, double* extrapMaxDeg, double* residualMaxDeg = nullptr);
 
 struct RadarAnchorStats {
     RadarAnchorHookState state = RadarAnchorHookState::NotTried;
@@ -79,6 +79,11 @@ struct RadarAnchorStats {
     float headPitch = 0.0f, aimPitch = 0.0f, aimYaw = 0.0f;   // the head's pitch in the seat at the sample; the turret's aim relative to the vehicle
     bool sampleCpu = false, paired = false, lastClamped = false;   // the sample's source; the anchor's rotation found for the sample's frame; the step held
     uint64_t ageSum = 0, extrapMilliSum = 0, clamped = 0, pairedCount = 0, unpairedCount = 0;   // cumulative, over directed computations
+    float leadMs = 0.0f, intervalMs = 0.0f;        // the lead now, and the mean interval between camera samples
+    uint64_t ageHist[3] = {};                      // directed computations by host-frame age: 0, 1, 2 or more (cumulative)
+    // the residual at each camera write (true aim minus the aim of the call it shows) and the measured display horizon, cumulative
+    uint64_t resN = 0, resLagging = 0, resLeading = 0, latN = 0, horizonN = 0, horizonSumUs = 0;
+    int64_t resSumMicro = 0, latSumMilli = 0;
 };
 RadarAnchorStats srvRadarAnchorStats();
 

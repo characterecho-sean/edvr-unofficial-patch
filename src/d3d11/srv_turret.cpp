@@ -1379,6 +1379,7 @@ struct DirWatch {
     bool pending[kDirRing] = {};
     uint32_t waited[kDirRing] = {};
     uint64_t orderOf[kDirRing] = {}, hostSeqOf[kDirRing] = {};
+    int64_t qpcOf[kDirRing] = {};
     float headPitchOf[kDirRing] = {};
     double R[kDirRing][9] = {};
     uint32_t next = 0, lastCopyFrame = 0xFFFFFFFFu;
@@ -1397,6 +1398,7 @@ struct CamWrite {
     const void* res = nullptr;
     float rows[12] = {};
     uint64_t hostSeq = 0;
+    int64_t qpc = 0;   // when it was written: the sample's time for the setter's lead and residual
 };
 CamWrite g_camWrites[kCamWrites];
 uint32_t g_camWriteNext = 0;
@@ -1435,7 +1437,7 @@ bool anchorDirEnsure(ID3D11DeviceContext* ctx) {
 }
 
 // The CPU path's lookup: 0 with the rows when the bound b1 buffer's last write was seen this host frame from its first constant, else the reason (kCpuMissName's index + 1).
-int anchorDirCpuRows(ID3D11DeviceContext* ctx, uint64_t hostSeq, float rows[12], uint32_t* bytes) {
+int anchorDirCpuRows(ID3D11DeviceContext* ctx, uint64_t hostSeq, float rows[12], uint32_t* bytes, int64_t* qpc) {
     st::ExtraCb cb;
     if (!st::readGameCb(ctx, 1, cb, false)) return 1;
     const void* res = static_cast<ID3D11Resource*>(cb.buffer);
@@ -1446,6 +1448,7 @@ int anchorDirCpuRows(ID3D11DeviceContext* ctx, uint64_t hostSeq, float rows[12],
     if (cb.ranged && cb.first != 0) return 2;
     if (w->hostSeq != hostSeq) return 3;
     std::memcpy(rows, w->rows, sizeof(w->rows));
+    if (qpc) *qpc = w->qpc;
     D3D11_BUFFER_DESC bd{};
     if (bytes && guarded("srv.turret.anchordir.cbdesc", [&] { cb.buffer->GetDesc(&bd); })) *bytes = bd.ByteWidth;
     return 0;
@@ -1462,13 +1465,14 @@ void anchorDirSample(ID3D11DeviceContext* ctx, int family) {
     const float headPitch = static_cast<float>(st::headPitchDeg(R));
     float cpuRows[12];
     uint32_t bytes = 0;
-    int miss = anchorDirCpuRows(ctx, poseSeq, cpuRows, &bytes);
+    int64_t writtenAt = 0;
+    int miss = anchorDirCpuRows(ctx, poseSeq, cpuRows, &bytes, &writtenAt);
     if (miss == 0) {
         float u[3];
         if (st::turretForwardWorld(cpuRows, cpuRows + 4, cpuRows + 8, R, u)) {
             g_dir.lastCopyFrame = g_frame;
             g_dir.publishedHostSeq = poseSeq;
-            srvRadarAnchorPublishDirection(u, true, poseSeq, true, headPitch);
+            srvRadarAnchorPublishDirection(u, true, poseSeq, true, headPitch, writtenAt);
             g_dirCpu.fetch_add(1, std::memory_order_relaxed);
             if (!g_dir.cpuNoted) {
                 g_dir.cpuNoted = true;
@@ -1496,6 +1500,11 @@ void anchorDirSample(ID3D11DeviceContext* ctx, int family) {
     g_dir.waited[k] = 0;
     g_dir.orderOf[k] = ++g_dir.order;
     g_dir.hostSeqOf[k] = poseSeq;
+    {
+        LARGE_INTEGER now{};
+        QueryPerformanceCounter(&now);
+        g_dir.qpcOf[k] = now.QuadPart;   // the GPU path's sample time: the copy, right after the game's write
+    }
     g_dir.headPitchOf[k] = headPitch;
     std::memcpy(g_dir.R[k], R, sizeof(R));
     g_dir.next = (k + 1) % kDirRing;
@@ -1537,7 +1546,7 @@ void anchorDirBoundary(ID3D11DeviceContext* ctx) {
     if (bestOrder > g_dir.publishedOrder && g_dir.hostSeqOf[bestSlot] > g_dir.publishedHostSeq) {
         g_dir.publishedOrder = bestOrder;
         g_dir.publishedHostSeq = g_dir.hostSeqOf[bestSlot];
-        srvRadarAnchorPublishDirection(best, true, g_dir.hostSeqOf[bestSlot], false, g_dir.headPitchOf[bestSlot]);
+        srvRadarAnchorPublishDirection(best, true, g_dir.hostSeqOf[bestSlot], false, g_dir.headPitchOf[bestSlot], g_dir.qpcOf[bestSlot]);
     }
 }
 
@@ -1551,6 +1560,8 @@ struct AnchorWatch {
     uint64_t winCalls = 0, winRadar = 0, winMoved = 0, winOurs = 0, winRestored = 0, winFaulted = 0, winChanges = 0, winUpdates = 0;   // ... when the 10 s window began
     uint64_t winDirected = 0, winFallback = 0, winNoU = 0, winNoAnchor = 0, winAnchorFaults = 0, winDirCopies = 0, winDirReads = 0, winDirRejects = 0;
     uint64_t winAgeSum = 0, winExtrapMilli = 0, winClamped = 0, winPaired = 0, winUnpaired = 0, winCpu = 0, winCpuMiss[4] = {};
+    uint64_t winResN = 0, winResLagging = 0, winResLeading = 0, winLatN = 0, winHorizonN = 0, winHorizonSumUs = 0, winAgeHist[3] = {};
+    int64_t winResSumMicro = 0, winLatSumMilli = 0;
     uint64_t dirLineMs = 0;         // when the last direction line was said
     st::RadarAnchorOffset offset;   // the last fallback published ((0, 0, s * F))
 };
@@ -1572,15 +1583,15 @@ void anchorDirLine(const RadarAnchorStats& a, st::RadarAnchorMode mode) {
     const float fallbackZ[3] = {0.0f, 0.0f, 1.0f};
     if (!along) along = fallbackZ;
     // The age and the extrapolation (the lag), and the pitch pair that tells gun elevation (u's pitch on its own) from a pairing error (u's pitch following the head's).
-    char timing[360] = "";
+    char timing[420] = "";
     if (a.lastDirected)
         std::snprintf(timing, sizeof(timing),
-                      "; u age %llu frames (setter frame %llu, camera sample frame %llu), extrapolated by %.2f deg yaw %.2f deg pitch%s (yaw rate %.1f deg/s), source %s, anchor %s; "
-                      "aim relative to the vehicle yaw %.1f pitch %.1f deg, head pitch %.1f deg",
+                      "; u age %llu frames (setter frame %llu, camera sample frame %llu), led by %.2f deg yaw %.2f deg pitch%s over %.1f ms (sample interval %.1f ms; yaw rate %.1f deg/s "
+                      "over the last %u samples), source %s, anchor %s; aim relative to the vehicle yaw %.1f pitch %.1f deg, head pitch %.1f deg",
                       static_cast<unsigned long long>(a.age), static_cast<unsigned long long>(a.nowSeq), static_cast<unsigned long long>(a.sampleSeq), static_cast<double>(a.dyaw),
-                      static_cast<double>(a.dpitch), a.lastClamped ? " (held)" : "", static_cast<double>(a.rateDps), a.sampleCpu ? "cpu" : "gpu",
-                      a.paired ? "of the sample's frame" : "of the setter's frame (the sample's not kept)", static_cast<double>(a.aimYaw), static_cast<double>(a.aimPitch),
-                      static_cast<double>(a.headPitch));
+                      static_cast<double>(a.dpitch), a.lastClamped ? " (held)" : "", static_cast<double>(a.leadMs), static_cast<double>(a.intervalMs), static_cast<double>(a.rateDps),
+                      st::kAimRateSamples, a.sampleCpu ? "cpu" : "gpu", a.paired ? "of the sample's frame" : "of the setter's frame (the sample's not kept)",
+                      static_cast<double>(a.aimYaw), static_cast<double>(a.aimPitch), static_cast<double>(a.headPitch));
     Log::get().note("srv turret radar anchor: direction at frame %u: u (%.3f,%.3f,%.3f) world; anchor rows %s [%s]; P rows (%.3f,%.3f,%.3f)(%.3f,%.3f,%.3f)(%.3f,%.3f,%.3f); d (%.3f,%.3f,%.3f) "
                     "in the anchor's axes = %.3f m along %s (angle to the anchor's z: %.1f deg, yaw %.1f deg; key %s)%s",
                     a.lastAddStamp - 1u, static_cast<double>(a.u[0]), static_cast<double>(a.u[1]), static_cast<double>(a.u[2]), rows, source, static_cast<double>(a.pRows[0]),
@@ -1677,15 +1688,15 @@ void anchorWindow(bool seen) {
         const uint64_t dirCopies = g_dirCopies.load(std::memory_order_relaxed), dirReads = g_dirReads.load(std::memory_order_relaxed), dirRejects = g_dirRejects.load(std::memory_order_relaxed);
         // the lag: the samples' source, the age of u at the setter and how far the aim was carried forward
         uint64_t ageMax = 0;
-        double extrapMax = 0.0;
-        srvRadarAnchorTakeWindowMax(&ageMax, &extrapMax);
+        double extrapMax = 0.0, residualMax = 0.0;
+        srvRadarAnchorTakeWindowMax(&ageMax, &extrapMax, &residualMax);
         const uint64_t computed = (a.pairedCount - w.winPaired) + (a.unpairedCount - w.winUnpaired);
         uint64_t miss[4];
         for (int i = 0; i < 4; ++i) miss[i] = g_dirCpuMiss[i].load(std::memory_order_relaxed) - w.winCpuMiss[i];
         char lag[420];
         std::snprintf(lag, sizeof(lag),
                       "; camera samples cpu %llu, gpu reads %llu of %llu copies (%llu refused; cpu missed: not written %llu, offset %llu, another frame %llu, not a camera %llu); u age mean %.2f "
-                      "max %llu frames; extrapolated mean %.2f max %.2f deg, held %llu; anchor paired by frame %llu of %llu",
+                      "max %llu frames; led by mean %.2f max %.2f deg, held %llu; anchor paired by frame %llu of %llu",
                       static_cast<unsigned long long>(g_dirCpu.load(std::memory_order_relaxed) - w.winCpu), static_cast<unsigned long long>(dirReads - w.winDirReads),
                       static_cast<unsigned long long>(dirCopies - w.winDirCopies), static_cast<unsigned long long>(dirRejects - w.winDirRejects),
                       static_cast<unsigned long long>(miss[0]), static_cast<unsigned long long>(miss[1]), static_cast<unsigned long long>(miss[2]), static_cast<unsigned long long>(miss[3]),
@@ -1700,9 +1711,28 @@ void anchorWindow(bool seen) {
                         static_cast<unsigned long long>(a.anchorFaults - w.winAnchorFaults), lag, static_cast<double>(a.d[0]), static_cast<double>(a.d[1]), static_cast<double>(a.d[2]),
                         st::radarAnchorModeName(static_cast<st::RadarAnchorMode>(g_anchorMode.load(std::memory_order_relaxed))), a.holdsOurs ? "; the placement holds our offset" : "",
                         radar == 0 ? " -- NO setter call with the radar in these 10 s: the offset (and any key change) reaches the game only when it sets the placement" : "");
+        // the residual (srv_turret_math.h THE RESIDUAL): near 0 mean with a small spread when the lead is right
+        const uint64_t resN = a.resN - w.winResN, latN = a.latN - w.winLatN, horizonN = a.horizonN - w.winHorizonN;
+        Log::get().note("srv turret radar anchor: 10 s residual: yaw true minus used mean %.3f max |%.3f| deg over %llu writes (lagging %llu, leading %llu, the rest too slow to say), implied "
+                        "latency mean %.2f frames over %llu, display horizon mean %.1f ms, lead now %.1f ms, sample interval %.1f ms; setter ages 0: %llu, 1: %llu, 2+: %llu",
+                        resN ? double(a.resSumMicro - w.winResSumMicro) / 1.0e6 / double(resN) : 0.0, residualMax, static_cast<unsigned long long>(resN),
+                        static_cast<unsigned long long>(a.resLagging - w.winResLagging), static_cast<unsigned long long>(a.resLeading - w.winResLeading),
+                        latN ? double(a.latSumMilli - w.winLatSumMilli) / 1000.0 / double(latN) : 0.0, static_cast<unsigned long long>(latN),
+                        horizonN ? double(a.horizonSumUs - w.winHorizonSumUs) / 1000.0 / double(horizonN) : 0.0, static_cast<double>(a.leadMs), static_cast<double>(a.intervalMs),
+                        static_cast<unsigned long long>(a.ageHist[0] - w.winAgeHist[0]), static_cast<unsigned long long>(a.ageHist[1] - w.winAgeHist[1]),
+                        static_cast<unsigned long long>(a.ageHist[2] - w.winAgeHist[2]));
     } else {
-        srvRadarAnchorTakeWindowMax(nullptr, nullptr);   // the maxima are the window's
+        srvRadarAnchorTakeWindowMax(nullptr, nullptr, nullptr);   // the maxima are the window's
     }
+    w.winResN = a.resN;
+    w.winResSumMicro = a.resSumMicro;
+    w.winResLagging = a.resLagging;
+    w.winResLeading = a.resLeading;
+    w.winLatN = a.latN;
+    w.winLatSumMilli = a.latSumMilli;
+    w.winHorizonN = a.horizonN;
+    w.winHorizonSumUs = a.horizonSumUs;
+    for (int i = 0; i < 3; ++i) w.winAgeHist[i] = a.ageHist[i];
     w.winAgeSum = a.ageSum;
     w.winExtrapMilli = a.extrapMilliSum;
     w.winClamped = a.clamped;
@@ -1746,6 +1776,9 @@ void srvTurretNoteCameraWrite(const void* res, const void* data, uint32_t bytes)
     }
     std::memcpy(w->rows, static_cast<const float*>(data) + kCamRowsFloat, sizeof(w->rows));
     w->hostSeq = nativeTemporalFrameSequence();
+    LARGE_INTEGER now{};
+    QueryPerformanceCounter(&now);
+    w->qpc = now.QuadPart;
 }
 
 // The radar picture's camera (the instrument above): every owner-context draw while the Scorpion's turret view is on; acts on the frame's first draw of vs 4EDE4BC9.

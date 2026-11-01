@@ -348,7 +348,7 @@ inline bool radarAnchorAlong(const float u[3], const float A[16], float sF, floa
 }
 // THE LAG (flight of c1275025: the disc slightly lagged the turret while it turned). u reached the setter two or three frames late (the GPU readback). Now the camera rows are read on
 // the CPU when the game writes them, u is paired with the anchor's rotation OF THE SAME FRAME (the host's frame sequence; SeqRing below), so the vehicle's own turning adds no error,
-// and the turret's aim relative to the vehicle is carried forward over whatever age is left, at the rate between the last two samples, clamped.
+// and the turret's aim relative to the vehicle is carried forward to the write that will show it (THE SHAKE below).
 // A small ring of values keyed by the host's frame sequence: put overwrites the value of the same sequence, else the oldest; find gives the value of exactly that sequence (0 is none).
 template <typename T, uint32_t N>
 struct SeqRing {
@@ -401,62 +401,108 @@ inline void unitOfAim(const Aim& a, float out[3]) {
     out[1] = static_cast<float>(std::sin(p));
     out[2] = static_cast<float>(std::cos(p) * std::cos(y));
 }
-// The rate between two samples at frames k0 < k1, in degrees a frame (yaw across the +-180 wrap), each held to kAimMaxRateDegPerFrame; invalid when k1 <= k0 or the samples are more
-// than kAimRateMaxGapFrames apart (a stale pair says nothing of now).
-inline constexpr double kAimMaxRateDegPerFrame = 4.0;   // 360 deg/s at 90 Hz
-inline constexpr uint64_t kAimRateMaxGapFrames = 8;
-struct AimRate {
-    double yaw = 0.0, pitch = 0.0;
+// THE SHAKE (flight of a8465cb3: the disc kept up with the turret but vibrated while it turned). The setter carried the sample by its age in HOST frames, 0 or 1 depending on whether
+// the host's frame boundary fell before or after the setter call. But a setter call always sits between two camera writes, and its placement is shown by the NEXT write, so the right
+// lead from the latest sample is about one sample interval either way: carrying it by 0 or 1 frame flipped the error by a frame (1 to 2 deg at 90 to 170 deg/s, about 1 cm at 0.4 m),
+// which shakes. Now the lead is a time, the display horizon (from the base sample's write to the write that shows the call), measured at every new sample and adapted slowly; the rate
+// is smoothed over the last kAimRateSamples samples by real time; the step is held.
+inline constexpr uint32_t kAimRateSamples = 4;       // the rate spans the last 4 samples (3 intervals, about 33 ms at 90 Hz)
+inline constexpr double kAimRateMaxSpanS = 0.1;      // older samples say nothing of now
+inline constexpr double kAimMaxRateDps = 360.0;      // the rate's limit, deg/s
+inline constexpr double kAimMaxStepDeg = 5.0;        // the lead's limit: a reversal overshoots by at most this (in practice the smoothed rate times the lead, about 2 deg)
+inline constexpr double kLeadInitialS = 1.0 / 90.0;  // the lead before the first measured horizon: one 90 Hz frame
+inline constexpr double kLeadMaxS = 0.040;           // the lead's limit (about 3.5 frames at 90 Hz)
+inline constexpr double kLeadAlpha = 1.0 / 32.0;     // the lead's adaptation per new sample (about 0.35 s at 90 Hz)
+struct AimSample {
+    int64_t t = 0;   // QPC ticks of the camera write
+    Aim aim;
+};
+struct AimRateDps {
+    double yaw = 0.0, pitch = 0.0;   // deg/s
     bool valid = false;
 };
-inline AimRate aimRate(const Aim& a0, uint64_t k0, const Aim& a1, uint64_t k1) {
-    AimRate r;
-    if (!(k1 > k0) || k1 - k0 > kAimRateMaxGapFrames) return r;
-    const double n = double(k1 - k0);
-    const auto hold = [](double v) { return v > kAimMaxRateDegPerFrame ? kAimMaxRateDegPerFrame : v < -kAimMaxRateDegPerFrame ? -kAimMaxRateDegPerFrame : v; };
-    r.yaw = hold(wrapDeg(a1.yaw - a0.yaw) / n);
-    r.pitch = hold((a1.pitch - a0.pitch) / n);
+// The rate over samples s[0..n) (oldest first, times increasing), from the oldest one within kAimRateMaxSpanS of the newest to the newest: the yaw change summed across the +-180 wrap
+// over the real time between them, each held to kAimMaxRateDps. Invalid with fewer than two such samples or times out of order.
+inline AimRateDps smoothedRate(const AimSample* s, uint32_t n, int64_t freq) {
+    AimRateDps r;
+    if (!s || n < 2 || freq <= 0) return r;
+    const int64_t newest = s[n - 1].t;
+    uint32_t first = n - 1;
+    while (first > 0 && s[first - 1].t > 0 && double(newest - s[first - 1].t) / double(freq) <= kAimRateMaxSpanS) --first;
+    if (first == n - 1) return r;
+    double yaw = 0.0;
+    for (uint32_t i = first + 1; i < n; ++i) {
+        if (!(s[i].t > s[i - 1].t)) return r;
+        yaw += wrapDeg(s[i].aim.yaw - s[i - 1].aim.yaw);
+    }
+    const double span = double(newest - s[first].t) / double(freq);
+    if (!(span > 0.0)) return r;
+    const auto hold = [](double v) { return v > kAimMaxRateDps ? kAimMaxRateDps : v < -kAimMaxRateDps ? -kAimMaxRateDps : v; };
+    r.yaw = hold(yaw / span);
+    r.pitch = hold((s[n - 1].aim.pitch - s[first].aim.pitch) / span);
     r.valid = true;
     return r;
 }
-// The aim carried from its sample's frame k to frame now: a + rate * age, the age held to kAimMaxAgeFrames and each step to kAimMaxStepDeg (so a reversal cannot overshoot by more), the
-// pitch kept inside +-89 deg. No rate (or age 0): the sample's own aim.
-inline constexpr uint64_t kAimMaxAgeFrames = 4;
-inline constexpr double kAimMaxStepDeg = 5.0;
-struct AimStep {
+// The aim carried from its sample by leadS seconds at rate r, each step held to kAimMaxStepDeg, the pitch inside +-89 deg. No rate: the sample's own aim.
+struct AimLead {
     Aim aim;
     double dyaw = 0.0, dpitch = 0.0;
-    uint64_t age = 0;       // frames, as measured (not held)
-    bool clamped = false;   // the age or a step was held
+    bool held = false;
 };
-inline AimStep extrapolateAim(const Aim& a, const AimRate& r, uint64_t k, uint64_t now) {
-    AimStep s;
-    s.aim = a;
-    s.age = now > k ? now - k : 0;
-    if (!r.valid || s.age == 0) return s;
-    uint64_t age = s.age;
-    if (age > kAimMaxAgeFrames) {
-        age = kAimMaxAgeFrames;
-        s.clamped = true;
-    }
-    const auto hold = [&s](double v) {
+inline AimLead leadAim(const Aim& a, const AimRateDps& r, double leadS) {
+    AimLead l;
+    l.aim = a;
+    if (!r.valid || !(leadS > 0.0) || !std::isfinite(leadS)) return l;
+    const auto hold = [&l](double v) {
         if (v > kAimMaxStepDeg) {
-            s.clamped = true;
+            l.held = true;
             return kAimMaxStepDeg;
         }
         if (v < -kAimMaxStepDeg) {
-            s.clamped = true;
+            l.held = true;
             return -kAimMaxStepDeg;
         }
         return v;
     };
-    s.dyaw = hold(r.yaw * double(age));
-    s.dpitch = hold(r.pitch * double(age));
-    s.aim.yaw = wrapDeg(a.yaw + s.dyaw);
-    s.aim.pitch = a.pitch + s.dpitch;
-    s.aim.pitch = s.aim.pitch > 89.0 ? 89.0 : s.aim.pitch < -89.0 ? -89.0 : s.aim.pitch;
-    return s;
+    l.dyaw = hold(r.yaw * leadS);
+    l.dpitch = hold(r.pitch * leadS);
+    l.aim.yaw = wrapDeg(a.yaw + l.dyaw);
+    l.aim.pitch = a.pitch + l.dpitch;
+    l.aim.pitch = l.aim.pitch > 89.0 ? 89.0 : l.aim.pitch < -89.0 ? -89.0 : l.aim.pitch;
+    return l;
 }
+// The lead after one measured display horizon: moved kLeadAlpha of the way to it, held to [0, kLeadMaxS]; a horizon that is not finite or not positive leaves it.
+inline double adaptLead(double lead, double horizonS) {
+    if (!std::isfinite(horizonS) || !(horizonS > 0.0)) return lead;
+    double v = lead + kLeadAlpha * (horizonS - lead);
+    return v < 0.0 ? 0.0 : v > kLeadMaxS ? kLeadMaxS : v;
+}
+// THE RESIDUAL (the instrument): at each camera write, the true aim (that camera with its own pose, in the anchor's axes of its frame) minus the aim the setter call it shows used. Lagging
+// when it has the sign of the turret's rate, leading when the opposite; with the rate above kResidualMinRateDegPerFrame its quotient by the rate a frame is the latency left, in frames.
+inline constexpr double kResidualMinRateDegPerFrame = 0.5;
+inline int residualSide(double residualDeg, double rateDegPerFrame) {
+    if (std::fabs(rateDegPerFrame) < kResidualMinRateDegPerFrame || residualDeg == 0.0) return 0;
+    return (residualDeg > 0.0) == (rateDegPerFrame > 0.0) ? 1 : -1;
+}
+struct ResidualStats {
+    uint64_t n = 0, lagging = 0, leading = 0, latN = 0;
+    double sum = 0.0, maxAbs = 0.0, latSum = 0.0;
+    void add(double residualDeg, double rateDegPerFrame) {
+        if (!std::isfinite(residualDeg)) return;
+        ++n;
+        sum += residualDeg;
+        maxAbs = std::fabs(residualDeg) > maxAbs ? std::fabs(residualDeg) : maxAbs;
+        const int side = residualSide(residualDeg, rateDegPerFrame);
+        if (side > 0) ++lagging;
+        if (side < 0) ++leading;
+        if (side != 0) {
+            latSum += residualDeg / rateDegPerFrame;
+            ++latN;
+        }
+    }
+    double mean() const { return n ? sum / double(n) : 0.0; }
+    double latency() const { return latN ? latSum / double(latN) : 0.0; }
+};
 // The head's pitch in the seat from eye 0's seated rotation R (row-major, OpenVR axes): the eye's forward is minus R's third column. For the log beside u's pitch: a pairing error would
 // make u's pitch follow the head's; gun elevation does not.
 inline double headPitchDeg(const double R[9]) {

@@ -82,22 +82,33 @@ struct State {
     std::atomic<uint64_t> smpSeq{0};
     std::atomic<bool> smpCpu{false};
     std::atomic<uint32_t> smpHeadPitch{0};
+    std::atomic<int64_t> smpQpc{0};
     std::atomic<bool> uValid{false};
     std::atomic<uint64_t> directed{0}, fallback{0}, fallbackNoU{0}, fallbackNoAnchor{0}, anchorFaults{0};
     std::atomic<bool> lastDirected{false}, haveAnchor{false};
     std::atomic<uint32_t> recA[9]{}, recP[9]{}, recU[3]{}, recUA[3]{}, recD[3]{};
     // the pairing and the extrapolation's record (the last directed add, and sums for the 10 s line)
     std::atomic<uint64_t> recNowSeq{0}, recSmpSeq{0}, recAge{0};
-    std::atomic<uint32_t> recDyaw{0}, recDpitch{0}, recRateDps{0}, recHeadPitch{0}, recAimPitch{0}, recAimYaw{0};
+    std::atomic<uint32_t> recDyaw{0}, recDpitch{0}, recRateDps{0}, recHeadPitch{0}, recAimPitch{0}, recAimYaw{0}, recLeadMs{0}, recIntervalMs{0};
     std::atomic<bool> recCpu{false}, recPaired{false}, recClamped{false};
-    std::atomic<uint64_t> ageSum{0}, ageMax{0}, extrapMilliSum{0}, extrapMilliMax{0}, clamped{0}, paired{0}, unpaired{0};
-    // the setter thread's own: the anchor's rotation by host frame, and the rate between the last two samples
+    std::atomic<uint64_t> ageSum{0}, ageMax{0}, extrapMilliSum{0}, extrapMilliMax{0}, clamped{0}, paired{0}, unpaired{0}, ageHist[3]{};
+    // the residual at each camera write (srv_turret_math.h ResidualStats, kept as sums for the 10 s line) and the measured display horizon
+    std::atomic<uint64_t> resN{0}, resMaxMilli{0}, resLagging{0}, resLeading{0}, latN{0}, horizonN{0}, horizonSumUs{0};
+    std::atomic<int64_t> resSumMicro{0}, latSumMilli{0};
+    // the setter thread's own: the anchor's rotation by host frame; the last samples' aims by write time (the smoothed rate); its own recent calls (which write shows which call);
+    // the lead and the sample interval, adapted
     st::SeqRing<st::Rot9, 8> aRing;
-    uint64_t prevSmpSeq = 0;
-    st::Aim prevAim;
-    st::AimRate rate;
-    int64_t prevSmpQpc = 0, qpcFreq = 1;
-    double rateDps = 0.0;
+    st::AimSample hist[st::kAimRateSamples];
+    uint32_t histN = 0;
+    int64_t lastSmpQpc = 0, qpcFreq = 1;
+    st::AimRateDps rateNow;
+    double leadS = st::kLeadInitialS, intervalS = st::kLeadInitialS;
+    struct Call {
+        int64_t t = 0, baseT = 0;   // the call's QPC time, and its base sample's write time
+        double yaw = 0.0, pitch = 0.0;   // the aim it used
+    };
+    Call calls[8];
+    uint32_t callNext = 0;
 };
 std::atomic<State*> g_state{nullptr};
 std::mutex g_armMutex;
@@ -121,6 +132,7 @@ struct Sample {
     uint64_t seq = 0;
     bool cpu = false;
     float headPitch = 0.0f;
+    int64_t qpc = 0;
 };
 bool readSample(State& s, Sample& out) noexcept {
     for (int attempt = 0; attempt < 4; ++attempt) {
@@ -131,6 +143,7 @@ bool readSample(State& s, Sample& out) noexcept {
         out.seq = s.smpSeq.load(std::memory_order_relaxed);
         out.cpu = s.smpCpu.load(std::memory_order_relaxed);
         out.headPitch = floatOf(s.smpHeadPitch.load(std::memory_order_relaxed));
+        out.qpc = s.smpQpc.load(std::memory_order_relaxed);
         std::atomic_thread_fence(std::memory_order_acquire);
         if (s.smpVer.load(std::memory_order_relaxed) == v1) return true;
     }
@@ -244,45 +257,88 @@ __declspec(noinline) uintptr_t __fastcall setterHooked(uintptr_t iface, uintptr_
         }
         float unitD[3], uaK[3];
         if (haveU && anchor > 0 && st::radarAnchorAlong(u, ak, 1.0f, unitD, uaK)) {
-            // u in the anchor's axes at the sample's frame: the turret's aim relative to the vehicle, carried forward over the sample's age at the rate between the last two samples.
+            // u in the anchor's axes at the sample's frame: the turret's aim relative to the vehicle, carried to the write that will show this call (srv_turret_math.h THE SHAKE).
             const st::Aim aimK = st::aimOf(uaK);
-            if (smp.seq != s->prevSmpSeq) {
-                const int64_t q = qpcNow();
-                const st::AimRate r = st::aimRate(s->prevAim, s->prevSmpSeq, aimK, smp.seq);
-                s->rate = r;
-                s->rateDps = r.valid && s->prevSmpQpc && q > s->prevSmpQpc
-                                 ? r.yaw * double(smp.seq - s->prevSmpSeq) / (double(q - s->prevSmpQpc) / double(s->qpcFreq))
-                                 : 0.0;
-                s->prevAim = aimK;
-                s->prevSmpSeq = smp.seq;
-                s->prevSmpQpc = q;
+            const int64_t q = qpcNow();
+            if (smp.qpc > 0 && smp.qpc != s->lastSmpQpc) {
+                // A new camera write: the truth for it is aimK. It shows the most recent call before it, so the residual is aimK minus that call's aim, and the display horizon is
+                // the time from that call's base sample to this write.
+                const State::Call* shown = nullptr;
+                for (const State::Call& c : s->calls)
+                    if (c.t > 0 && c.t < smp.qpc && (!shown || c.t > shown->t)) shown = &c;
+                const double freq = double(s->qpcFreq);
+                if (s->lastSmpQpc > 0 && smp.qpc > s->lastSmpQpc) {
+                    const double gap = double(smp.qpc - s->lastSmpQpc) / freq;
+                    if (gap > 0.0 && gap < st::kAimRateMaxSpanS) s->intervalS += st::kLeadAlpha * (gap - s->intervalS);
+                }
+                if (shown && shown->baseT > 0) {
+                    const double residual = st::wrapDeg(aimK.yaw - shown->yaw);
+                    const double ratePerFrame = s->rateNow.valid ? s->rateNow.yaw * s->intervalS : 0.0;
+                    s->resN.fetch_add(1, std::memory_order_relaxed);
+                    s->resSumMicro.fetch_add(static_cast<int64_t>(residual * 1.0e6), std::memory_order_relaxed);
+                    maxInto(s->resMaxMilli, static_cast<uint64_t>(std::fabs(residual) * 1000.0 + 0.5));
+                    const int side = st::residualSide(residual, ratePerFrame);
+                    if (side > 0) s->resLagging.fetch_add(1, std::memory_order_relaxed);
+                    if (side < 0) s->resLeading.fetch_add(1, std::memory_order_relaxed);
+                    if (side != 0) {
+                        s->latN.fetch_add(1, std::memory_order_relaxed);
+                        s->latSumMilli.fetch_add(static_cast<int64_t>(residual / ratePerFrame * 1000.0), std::memory_order_relaxed);
+                    }
+                    const double horizon = double(smp.qpc - shown->baseT) / freq;
+                    if (horizon > 0.0 && horizon < st::kAimRateMaxSpanS) {
+                        s->leadS = st::adaptLead(s->leadS, horizon);
+                        s->horizonN.fetch_add(1, std::memory_order_relaxed);
+                        s->horizonSumUs.fetch_add(static_cast<uint64_t>(horizon * 1.0e6), std::memory_order_relaxed);
+                    }
+                }
+                // the rate: the last kAimRateSamples samples by write time
+                if (s->histN == st::kAimRateSamples) {
+                    for (uint32_t i = 1; i < st::kAimRateSamples; ++i) s->hist[i - 1] = s->hist[i];
+                    --s->histN;
+                }
+                s->hist[s->histN].t = smp.qpc;
+                s->hist[s->histN].aim = aimK;
+                ++s->histN;
+                s->rateNow = st::smoothedRate(s->hist, s->histN, s->qpcFreq);
+                s->lastSmpQpc = smp.qpc;
             }
-            const st::AimStep step = st::extrapolateAim(aimK, s->rate, smp.seq, nowSeq);
-            st::unitOfAim(step.aim, ua);
+            const st::AimLead lead = st::leadAim(aimK, s->rateNow, s->leadS);
+            st::unitOfAim(lead.aim, ua);
             const float sF = floatOf(fb[2]);
             for (int i = 0; i < 3; ++i) d[i] = bitsOf(sF * ua[i]);
             directed = (d[0] | d[1] | d[2]) != 0u;
             if (!directed) std::memcpy(d, fb, sizeof(d));
+            // this call, for the residual of the write that will show it
+            State::Call& rec = s->calls[s->callNext];
+            s->callNext = (s->callNext + 1) % (sizeof(s->calls) / sizeof(s->calls[0]));
+            rec.t = q;
+            rec.baseT = smp.qpc;
+            rec.yaw = lead.aim.yaw;
+            rec.pitch = lead.aim.pitch;
+            const uint64_t age = nowSeq > smp.seq ? nowSeq - smp.seq : 0;
             s->recNowSeq.store(nowSeq, std::memory_order_relaxed);
             s->recSmpSeq.store(smp.seq, std::memory_order_relaxed);
-            s->recAge.store(step.age, std::memory_order_relaxed);
-            s->recDyaw.store(bitsOf(float(step.dyaw)), std::memory_order_relaxed);
-            s->recDpitch.store(bitsOf(float(step.dpitch)), std::memory_order_relaxed);
-            s->recRateDps.store(bitsOf(float(s->rateDps)), std::memory_order_relaxed);
+            s->recAge.store(age, std::memory_order_relaxed);
+            s->recDyaw.store(bitsOf(float(lead.dyaw)), std::memory_order_relaxed);
+            s->recDpitch.store(bitsOf(float(lead.dpitch)), std::memory_order_relaxed);
+            s->recRateDps.store(bitsOf(float(s->rateNow.valid ? s->rateNow.yaw : 0.0)), std::memory_order_relaxed);
+            s->recLeadMs.store(bitsOf(float(s->leadS * 1000.0)), std::memory_order_relaxed);
+            s->recIntervalMs.store(bitsOf(float(s->intervalS * 1000.0)), std::memory_order_relaxed);
             s->recHeadPitch.store(bitsOf(smp.headPitch), std::memory_order_relaxed);
-            s->recAimPitch.store(bitsOf(float(step.aim.pitch)), std::memory_order_relaxed);
-            s->recAimYaw.store(bitsOf(float(step.aim.yaw)), std::memory_order_relaxed);
+            s->recAimPitch.store(bitsOf(float(lead.aim.pitch)), std::memory_order_relaxed);
+            s->recAimYaw.store(bitsOf(float(lead.aim.yaw)), std::memory_order_relaxed);
             s->recCpu.store(smp.cpu, std::memory_order_relaxed);
             s->recPaired.store(atK != nullptr, std::memory_order_relaxed);
-            s->recClamped.store(step.clamped, std::memory_order_relaxed);
+            s->recClamped.store(lead.held, std::memory_order_relaxed);
             if (directed) {
-                s->ageSum.fetch_add(step.age, std::memory_order_relaxed);
-                maxInto(s->ageMax, step.age);
-                const double ex = std::fabs(step.dyaw) > std::fabs(step.dpitch) ? std::fabs(step.dyaw) : std::fabs(step.dpitch);
+                s->ageSum.fetch_add(age, std::memory_order_relaxed);
+                maxInto(s->ageMax, age);
+                s->ageHist[age < 2 ? age : 2].fetch_add(1, std::memory_order_relaxed);
+                const double ex = std::fabs(lead.dyaw) > std::fabs(lead.dpitch) ? std::fabs(lead.dyaw) : std::fabs(lead.dpitch);
                 const uint64_t milli = static_cast<uint64_t>(ex * 1000.0 + 0.5);
                 s->extrapMilliSum.fetch_add(milli, std::memory_order_relaxed);
                 maxInto(s->extrapMilliMax, milli);
-                if (step.clamped) s->clamped.fetch_add(1, std::memory_order_relaxed);
+                if (lead.held) s->clamped.fetch_add(1, std::memory_order_relaxed);
                 (atK ? s->paired : s->unpaired).fetch_add(1, std::memory_order_relaxed);
             }
         }
@@ -532,7 +588,7 @@ void srvRadarAnchorPublish(const uint32_t bits[3], uint32_t frameNo) {
     for (int i = 0; i < 3; ++i) s->bits[i].store(bits[i], std::memory_order_relaxed);
 }
 
-void srvRadarAnchorPublishDirection(const float u[3], bool valid, uint64_t seq, bool cpu, float headPitchDeg) {
+void srvRadarAnchorPublishDirection(const float u[3], bool valid, uint64_t seq, bool cpu, float headPitchDeg, int64_t qpc) {
     State* s = g_state.load(std::memory_order_acquire);
     if (!s) return;
     if (!u || !valid) {
@@ -544,15 +600,18 @@ void srvRadarAnchorPublishDirection(const float u[3], bool valid, uint64_t seq, 
     s->smpSeq.store(seq, std::memory_order_relaxed);
     s->smpCpu.store(cpu, std::memory_order_relaxed);
     s->smpHeadPitch.store(bitsOf(headPitchDeg), std::memory_order_relaxed);
+    s->smpQpc.store(qpc, std::memory_order_relaxed);
     s->smpVer.fetch_add(1, std::memory_order_release);   // even: whole
     s->uValid.store(true, std::memory_order_release);
 }
 
-void srvRadarAnchorTakeWindowMax(uint64_t* ageMax, double* extrapMaxDeg) {
+void srvRadarAnchorTakeWindowMax(uint64_t* ageMax, double* extrapMaxDeg, double* residualMaxDeg) {
     State* s = g_state.load(std::memory_order_acquire);
-    const uint64_t a = s ? s->ageMax.exchange(0, std::memory_order_relaxed) : 0, e = s ? s->extrapMilliMax.exchange(0, std::memory_order_relaxed) : 0;
+    const uint64_t a = s ? s->ageMax.exchange(0, std::memory_order_relaxed) : 0, e = s ? s->extrapMilliMax.exchange(0, std::memory_order_relaxed) : 0,
+                   r = s ? s->resMaxMilli.exchange(0, std::memory_order_relaxed) : 0;
     if (ageMax) *ageMax = a;
     if (extrapMaxDeg) *extrapMaxDeg = double(e) / 1000.0;
+    if (residualMaxDeg) *residualMaxDeg = double(r) / 1000.0;
 }
 
 RadarAnchorStats srvRadarAnchorStats() {
@@ -616,6 +675,17 @@ RadarAnchorStats srvRadarAnchorStats() {
     r.clamped = s->clamped.load(std::memory_order_relaxed);
     r.pairedCount = s->paired.load(std::memory_order_relaxed);
     r.unpairedCount = s->unpaired.load(std::memory_order_relaxed);
+    r.leadMs = floatOf(s->recLeadMs.load(std::memory_order_relaxed));
+    r.intervalMs = floatOf(s->recIntervalMs.load(std::memory_order_relaxed));
+    for (int i = 0; i < 3; ++i) r.ageHist[i] = s->ageHist[i].load(std::memory_order_relaxed);
+    r.resN = s->resN.load(std::memory_order_relaxed);
+    r.resSumMicro = s->resSumMicro.load(std::memory_order_relaxed);
+    r.resLagging = s->resLagging.load(std::memory_order_relaxed);
+    r.resLeading = s->resLeading.load(std::memory_order_relaxed);
+    r.latN = s->latN.load(std::memory_order_relaxed);
+    r.latSumMilli = s->latSumMilli.load(std::memory_order_relaxed);
+    r.horizonN = s->horizonN.load(std::memory_order_relaxed);
+    r.horizonSumUs = s->horizonSumUs.load(std::memory_order_relaxed);
     return r;
 }
 

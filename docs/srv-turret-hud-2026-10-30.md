@@ -18,11 +18,10 @@
 - **The radar fix:** a hook on the schematic's placement setter
   (0x38563A0, build 334925 only) adds radar forward along the turret's
   seated forward, in the anchor's axes, to the translation the game sets
-  (about 1.96 m up). FLOWN (c1275025), Sean "almost there": the disc follows
-  the turret at the right height, but lags it slightly while it turns.
-  BUILT, NOT FLOWN: the camera rows read on the CPU, paired by frame, the
-  aim carried over u's age (journal, "the turret direction without the
-  readback").
+  (about 1.96 m up), with the camera rows read on the CPU and paired by
+  frame. FLOWN (a8465cb3): it keeps up with the turret but vibrates while
+  the turret moves. BUILT, NOT FLOWN: a constant lead in time and a
+  residual instrument (journal, "a lead in time").
 - **The radar's way out without it:** camera back 70, radar forward 0.
 - **What is wrong (the game's own placement):** the turret view's whole HUD
   sits about 0.7 m too far back for the stock camera (the radar behind the
@@ -52,11 +51,10 @@
   reads best; whether the switch lag is acceptable.
 - **Ruled out:** see "Ruled out" below.
 - **Next flight (this branch):** radar anchor on; camera back 0 to 35 with
-  radar forward = 65 minus camera back. A turret sweep, then drive forward
-  and turn the vehicle; watch whether the disc lags. Read `--grep "srv
-  turret radar anchor"`: "from the CPU", the direction line's u age and
-  source cpu, the 10 s line's mean and max age; u's pitch against the
-  head's pitch.
+  radar forward = 65 minus camera back. Fast and slow turret sweeps, then
+  drive forward and turn the vehicle; watch for lag and shake. Read
+  `--grep "srv turret radar anchor: 10 s residual"`: mean near 0, a small
+  max, lagging and leading about even, the lead near the horizon.
 
 ## Evidence (flight of 2026-10-30, Epic, v0.22.0-rc.3-139-gcd4c91c4)
 
@@ -1092,6 +1090,80 @@ The log lines (the frame tick and the render thread's first-time notes):
 To fly: camera back 0 to 35, radar forward = 65 minus camera back,
 `fix.srv_turret_radar_anchor = on`. A turret sweep, then drive forward and
 turn the vehicle, watching the disc against the turret.
+
+### 2026-10-31: the CPU direction flown (flight a8465cb3); a lead in time (built, not flown)
+
+Steam, `edvr_gfx_20261031_213131.log`, build matches, dump
+`eye_213337152001` (taken mid-sweep; it looks right). Sean: the disc keeps up
+with the turret now, but it vibrates while the turret moves.
+- **The CPU path works.** "turret direction from the CPU" (the 5376-byte
+  scene camera block): a CPU sample about every frame, 0 GPU reads, 0 CPU
+  misses, and the anchor paired by frame about 87 to 90 % of the time.
+- **u's age** was mean 0.04 to 0.39 and max 1. The direction lines read age
+  0 nearly always (setter frame equal to sample frame), with an occasional
+  age 1 that was extrapolated by 1.6 to 4 deg.
+- **The turret's yaw rate** while Sean swept was 90 to 170 deg/s: 1 to 2 deg
+  a frame, about 1 cm at 0.4 m.
+- **The pitch is the gun's.** The aim's pitch held at -0.4 to -18 deg while
+  the head's pitch changed differently, so the pairing is sound.
+- **Reading** (unconfirmed). A setter call always sits between two camera
+  writes, and the next write shows its placement. So the right lead from the
+  latest sample is about one sample interval, whichever host frame the call
+  falls in. The host frame's boundary falls sometimes before the call (age
+  1) and sometimes after it (age 0), so leading by the age flipped between 0
+  and 1 frame. At 1 to 2 deg a frame that is a jump of about 1 cm between
+  frames: the vibration. A constant error would only lag; a flipping one
+  shakes.
+
+**The build.**
+- **A lead in time.** The aim is carried from the latest sample by a time,
+  the lead, instead of by its age in host frames. The lead is the display
+  horizon: from the base sample's camera write to the write that shows the
+  call. It is measured at every new sample (the write shows the most recent
+  setter call before it) and adapted a 32nd of the way each time (about
+  0.35 s at 90 Hz). It starts at one 90 Hz frame (11.1 ms) and is held to 0
+  to 40 ms.
+- **A smoothed rate.** The rate is taken end to end over the last 4 samples
+  within 100 ms, by their write times (QPC), and held to 360 deg/s. Each
+  lead step is held to 5 deg. In practice a reversal overshoots by about
+  the rate times the lead, roughly 2 deg at 170 deg/s, for about three
+  samples.
+- **The residual instrument.** At each camera write the true aim (that
+  camera with its own pose, in the anchor's axes of its frame) is compared
+  with the aim used by the setter call the write shows. The 10 s residual
+  line gives the mean, the max |.|, lagging against leading, the implied
+  latency left in frames, the measured horizon, the lead, and the setter's
+  host-frame ages.
+- **No render-time correction.** The lead depends only on times the hook
+  measures, so the setter side should come out steady. If the residual
+  line still shows a spread like the rate times one frame, the next step is
+  the geometry-shader residual for the 5559BD94 billboards.
+- The key, the fallback, the add-not-replace rule, the V0 instrument and
+  the shader's move of DF3503CD and the contacts are unchanged.
+
+Unconfirmed until it flies:
+- that the write after a setter call is the one that shows it. If the
+  residual shows a steady lag of about one frame with the lead at the
+  horizon, the placement is shown one write later and the lead needs one
+  more interval;
+- that the residual's mean is near 0, its max small, and lagging and
+  leading about even, in fast and slow sweeps and while driving.
+
+The log lines:
+- the direction line's timing now reads `u age N frames (setter frame F,
+  camera sample frame G), led by X deg yaw Y deg pitch[ (held)] over L ms
+  (sample interval I ms; yaw rate R deg/s over the last 4 samples), source
+  cpu|gpu, ...`;
+- the 10 s line's `extrapolated` now reads `led by mean E max F deg, held H`;
+- a new line every 10 s: `srv turret radar anchor: 10 s residual: yaw true
+  minus used mean M max |X| deg over N writes (lagging A, leading B, the
+  rest too slow to say), implied latency mean L frames over n, display
+  horizon mean H ms, lead now D ms, sample interval I ms; setter ages 0: a,
+  1: b, 2+: c`. When the lead is right, M is near 0 and X is small.
+
+To fly: camera back 0 to 35, radar forward = 65 minus camera back,
+`fix.srv_turret_radar_anchor = on`. Fast and slow turret sweeps, then drive
+forward and turn the vehicle.
 
 
 
