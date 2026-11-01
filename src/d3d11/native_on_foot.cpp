@@ -15959,7 +15959,7 @@ void alignTick(uint64_t now) noexcept {   // F66b: dt from QPC inside (g_alignCl
         const double aimRad = static_cast<double>(g_f109RootPitch.load(std::memory_order_relaxed)) * nofoot::kAdsDeg;
         const nofoot::f172::Raise neckRaise = nofoot::f172::publish(neckRef.out.seatedY, g_ltaDrop.load(std::memory_order_relaxed), aimFresh, aimRad, onFoot && !camExternal);
         if (onFoot && !camExternal && neckRef.out.seatedY != 0.0) g_f172Turned.add(neckRaise);
-        // Issue 140 (TEMPORARY, fix.srv_turret_camera_back): the SRV's turret view moves the camera back, over the turret's axis. Seated +z is backward and the view moves by
+        // Issue 140 (TEMPORARY, experimental.srv_turret_camera_back): the SRV's turret view moves the camera back, over the turret's axis. Seated +z is backward and the view moves by
         // MINUS the published alignment, so D metres back is z = -D. Added AFTER the on-foot gate and the external-camera zero below (every on-foot term above is an exact zero off
         // foot), as exactly 0.0 outside the turret view; this is the one publisher of the alignment, so the serials stay coherent.
         const double turretBackZ = srvTurretBackSeatedZ();

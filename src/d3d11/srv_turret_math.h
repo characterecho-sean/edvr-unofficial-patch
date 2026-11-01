@@ -31,31 +31,32 @@
 // WHY THE MOVE IS IN 3D. The first push changed only the clip x of a vertex, which is exactly right for a head at one place and keeps the panel's motion parallax and looming of the
 // OLD depth: the flight of e45c68a9 (Sean: the radar and the panels "move with my head", a panel "got larger" when he moved toward it). The shader now moves each vertex for real
 // about a fixed anchor (see THE MOVE below). And at the game's own camera the whole turret HUD lies about 0.7 m too far back for the head (the radar behind it), so the whole HUD is
-// first translated forward (fix.srv_turret_hud_forward), which is the old camera move applied to the HUD only: the world keeps the game's camera.
+// first translated forward (experimental.srv_turret_hud_forward), which is the old camera move applied to the HUD only: the world keeps the game's camera.
 //
-// THE NINE TEMPORARY KEYS (all live, all VR only, 0 = the game's own; the last three are text switches):
-//   fix.srv_turret_camera_back  centimetres, 0..150, default 0: the camera moves back in the turret view, over the turret's axis (the stock camera is the plan; the HUD-forward key
-//                               replaces this). Part 1: published as the seated z of the eye alignment (alignTick), the single publisher of that alignment, so its serials stay coherent.
-//   fix.srv_turret_hud_forward  centimetres, 0..150, default 70: every vertex of the panels group (Group::kPanels: the two hologram families) moves forward along the turret by this much
-//                               (seated -z), so the panels sit in front of the head as they did with the old camera move while the game's own camera stays.
-//   fix.srv_turret_radar_forward centimetres, 0..150, default 70: the same for the radar group (Group::kRadar), instead of the HUD-forward value, so it can stay near field and be seen
+// THE NINE TEMPORARY KEYS (all live, all VR only, 0 = the game's own; the last three are text switches). They are [experimental] keys; every default is the value Sean flew with (2026-11-01, flight
+// e443b0c2), and the shipped ini and the module's literals say the same (the rig pins both):
+//   experimental.srv_turret_camera_back  centimetres, 0..150, default 25: the camera moves back in the turret view, over the turret's axis. Part 1: published as the seated z of the eye alignment
+//                               (alignTick), the single publisher of that alignment, so its serials stay coherent.
+//   experimental.srv_turret_hud_forward  centimetres, 0..150, default 65: every vertex of the panels group (Group::kPanels: the two hologram families) moves forward along the turret by this much
+//                               (seated -z), so the panels sit in front of the head as they did with the old camera move, without the camera moving for it.
+//   experimental.srv_turret_radar_forward centimetres, 0..150, default 50: the same for the radar group (Group::kRadar), instead of the HUD-forward value, so it can stay near field and be seen
 //                               from above (carried level with the head the disc is seen edge-on).
-//   fix.srv_turret_panels_back  centimetres, 0..200, default 120: the weapon panels (Group::kPanels: the two hologram families) go this much deeper where they lie within kPushSplitM of
+//   experimental.srv_turret_panels_back  centimetres, 0..200, default 135: the weapon panels (Group::kPanels: the two hologram families) go this much deeper where they lie within kPushSplitM of
 //                               the anchor; the larger panels of the same families, at 1.3 m and more, stay. Part 2: a private pass-through geometry shader per output signature
 //                               (srv_turret_hud_shader.h) around every issue of the families' draws; the rule is per vertex.
-//   fix.srv_turret_radar_back   centimetres, 0..200, default 0: the same for the radar (Group::kRadar), which the game lays on the turret deck right under the player.
-//   fix.srv_turret_hud_gap      centimetres, 0..200, default 0: the first build's forward pull, kept for comparison. For a family whose group has a push above 0 the push is
+//   experimental.srv_turret_radar_back   centimetres, 0..200, default 0: the same for the radar (Group::kRadar), which the game lays on the turret deck right under the player.
+//   experimental.srv_turret_hud_gap      centimetres, 0..200, default 0: the first build's forward pull, kept for comparison. For a family whose group has a push above 0 the push is
 //                               used and this is not; for a group with no push this brings the vertices deeper than gap + kWindowNearM (up to kWindowFarM) forward by it.
-//   fix.srv_turret_hud_depth    front | game | real, default front (Sean found it right in the flight of 45fa7e56): how the depth of a MOVED vertex is written (DepthMode below).
-//   fix.srv_turret_hud_scissor  open | game, default open: whether the moved HUD may draw outside the scissor rectangle the game set for it at its OLD place. The game sets a scissor rectangle for
+//   experimental.srv_turret_hud_depth    front | game | real, default game: how the depth of a MOVED vertex is written (DepthMode below). front was the first default (Sean found it right in the flight of 45fa7e56).
+//   experimental.srv_turret_hud_scissor  open | game, default open: whether the moved HUD may draw outside the scissor rectangle the game set for it at its OLD place. The game sets a scissor rectangle for
 //                               the radar's draws from the radar's original screen bounds; the moved geometry was cropped to that stale rectangle (a straight horizontal edge across the disc and
 //                               the hologram, which shifted as the head moved). open: while a bound draw is issued the rectangles are the whole render target (Scissor in
 //                               srv_turret_hud_binding.h), the game's put back after; game keeps its rectangles.
-//   fix.srv_turret_radar_anchor on | reversed | off, default on: the radar's terrain schematic (the volume the disc's picture is drawn from, about 0.44 m behind the eye at the stock
-//                               camera, so the game drew nothing) moved forward by the radar-forward key IN THE GAME, along the turret's seated forward (on) or against it (reversed), put
+//   experimental.srv_turret_radar_anchor on | reversed | off | camera, default camera (THE RADAR'S OWN CAMERA below). on: the radar's terrain schematic (the volume the disc's picture is drawn from, about
+//                               0.44 m behind the eye at the stock camera, so the game drew nothing) moved forward by the radar-forward key IN THE GAME, along the turret's seated forward (on) or against it (reversed), put
 //                               in the anchor's axes: a hook on its placement setter adds the offset to the translation the game sets (srv_radar_anchor.cpp, build 334925 only). While the placement holds that offset the
 //                               two 5559BD94 billboard families are left to the game (the geometry shader does not move them); the other radar families keep its move. off: no move in
-//                               the game, the geometry shader's move as before.
+//                               the game, the geometry shader's move as before. camera: no move of the placement; the radar's schematic camera is moved back by the radar-forward key instead.
 //
 // THE TARGET HOLOGRAM (vs 5559BD94, the Scorpion's own hologram, signature H): its vertex shader writes __USER_VERTEX_M_LIGHTINGPOSITION, the vertex's camera-relative WORLD position
 // (cb0[9..11] times the position), and its pixel shader uses it twice (a depth test against the scene and a view ray divided by the fragment's view depth). The geometry shader moves
@@ -76,20 +77,20 @@ namespace edvr {
 namespace srv_turret {
 
 // ---- the keys -------------------------------------------------------------------------------------------------------------------------------------------------
-inline constexpr int kBackDefaultCm = 0, kBackMaxCm = 150;
-inline constexpr int kForwardDefaultCm = 70, kForwardMaxCm = 150;   // fix.srv_turret_hud_forward
-inline constexpr int kRadarForwardDefaultCm = 70, kRadarForwardMaxCm = 150;   // fix.srv_turret_radar_forward
+inline constexpr int kBackDefaultCm = 25, kBackMaxCm = 150;   // experimental.srv_turret_camera_back
+inline constexpr int kForwardDefaultCm = 65, kForwardMaxCm = 150;   // experimental.srv_turret_hud_forward
+inline constexpr int kRadarForwardDefaultCm = 50, kRadarForwardMaxCm = 150;   // experimental.srv_turret_radar_forward
 inline constexpr int kGapDefaultCm = 0, kGapMaxCm = 200;
-inline constexpr int kPanelsDefaultCm = 120, kRadarDefaultCm = 0, kPushMaxCm = 200;   // fix.srv_turret_panels_back and fix.srv_turret_radar_back
+inline constexpr int kPanelsDefaultCm = 135, kRadarDefaultCm = 0, kPushMaxCm = 200;   // experimental.srv_turret_panels_back and experimental.srv_turret_radar_back
 
-// How the depth of a moved vertex is written (fix.srv_turret_hud_depth). game: the vertex's own NDC z where it is a valid reversed-Z depth, else kFallbackNdcZ (the first builds' rule).
+// How the depth of a moved vertex is written (experimental.srv_turret_hud_depth). game: the vertex's own NDC z where it is a valid reversed-Z depth, else kFallbackNdcZ (the first builds' rule).
 // real: the depth the moved position itself has, ndcZ = clamp(c.z / q.z, 0, kFallbackNdcZ) with the vertex's own clip z (Elite writes the constant 0.025, so this is 0.025 / depth).
 // front: kFallbackNdcZ for every moved vertex.
 enum class DepthMode : uint8_t { kGame = 0, kReal = 1, kFront = 2 };
-// The key's default, as the module's literal and the shipped ini say it (the rig pins both): front, which Sean found right.
-inline constexpr DepthMode kDepthDefault = DepthMode::kFront;
-inline constexpr const char* kDepthDefaultText = "front";
-inline constexpr const char* kScissorDefaultText = "open";   // fix.srv_turret_hud_scissor: open (the other: game)
+// The key's default, as the module's literal and the shipped ini say it (the rig pins both): game, the value Sean flew with.
+inline constexpr DepthMode kDepthDefault = DepthMode::kGame;
+inline constexpr const char* kDepthDefaultText = "game";
+inline constexpr const char* kScissorDefaultText = "open";   // experimental.srv_turret_hud_scissor: open (the other: game)
 inline const char* depthModeName(DepthMode m) { return m == DepthMode::kReal ? "real" : m == DepthMode::kFront ? "front" : "game"; }
 // The key's text; anything else is the default (the settings line says which it took).
 inline DepthMode depthModeOf(const char* text) {
@@ -97,21 +98,22 @@ inline DepthMode depthModeOf(const char* text) {
     if (text && !std::strcmp(text, "front")) return DepthMode::kFront;
     return DepthMode::kGame;
 }
-// fix.srv_turret_radar_anchor (on | reversed | off | camera, default on): whether the radar's terrain schematic is moved forward IN THE GAME by the radar-forward key (srv_radar_anchor.cpp, build
-// 334925 only), along the anchor's +Z (on) or -Z (reversed); off leaves the game's placement. RadarAnchorOffset below makes the offset. camera (TEMPORARY, flight fe0b2560): the placement
+// experimental.srv_turret_radar_anchor (on | reversed | off | camera, default camera): whether the radar's terrain schematic is moved forward IN THE GAME by the radar-forward key (srv_radar_anchor.cpp, build
+// 334925 only), along the anchor's +Z (on) or -Z (reversed); off leaves the game's placement. RadarAnchorOffset below makes the offset. camera (the default, flown OK in flight e443b0c2): the placement
 // is the game's own, and the radar's schematic CAMERA is moved back by the radar-forward key instead (THE RADAR'S OWN CAMERA below).
 enum class RadarAnchorMode : uint8_t { kOn = 0, kReversed = 1, kOff = 2, kCamera = 3 };
-inline constexpr RadarAnchorMode kRadarAnchorDefault = RadarAnchorMode::kOn;
-inline constexpr const char* kRadarAnchorDefaultText = "on";
+inline constexpr RadarAnchorMode kRadarAnchorDefault = RadarAnchorMode::kCamera;
+inline constexpr const char* kRadarAnchorDefaultText = "camera";
 inline const char* radarAnchorModeName(RadarAnchorMode m) {
     return m == RadarAnchorMode::kReversed ? "reversed" : m == RadarAnchorMode::kOff ? "off" : m == RadarAnchorMode::kCamera ? "camera" : "on";
 }
-// The key's text; anything else is the default, on (the settings line says which it took).
+// The key's text; anything else is the default, camera (the settings line says which it took).
 inline RadarAnchorMode radarAnchorModeOf(const char* text) {
+    if (text && !std::strcmp(text, "on")) return RadarAnchorMode::kOn;
     if (text && !std::strcmp(text, "reversed")) return RadarAnchorMode::kReversed;
     if (text && !std::strcmp(text, "off")) return RadarAnchorMode::kOff;
     if (text && !std::strcmp(text, "camera")) return RadarAnchorMode::kCamera;
-    return RadarAnchorMode::kOn;
+    return kRadarAnchorDefault;   // anything else, and nothing: the default (camera)
 }
 // Signature H's geometry shader reads the draw's vertex constants at GS slot 1: the draw's own VS slot 1, rows 277 to 279 the camera's right, up and forward in world axes.
 inline constexpr uint32_t kGameCbSlot = 1;
@@ -239,7 +241,7 @@ inline bool isFamilyVs(uint64_t vs) {
     return false;
 }
 
-// ---- the radar anchor moved in the game (fix.srv_turret_radar_anchor; srv_radar_anchor.cpp) ----------------------------------------------------------------------------------
+// ---- the radar anchor moved in the game (experimental.srv_turret_radar_anchor; srv_radar_anchor.cpp) ----------------------------------------------------------------------------------
 // The published offset: (0, 0, s * F) metres in the anchor entity's own axes, F the radar-forward key, s +1 for on and -1 for reversed (flown 2026-10-31: on is forward, about 1:1). The
 // hook adds s * F along the turret's forward instead when it has u and the anchor's rotation (radarAnchorAlong below), and this is its fallback. All bits zero (never a -0.0) unless
 // the Scorpion's turret view is on, the key is on or reversed and F is above 0 (camera mode publishes zero: the existing restore gives the game its own placement back).
@@ -256,7 +258,7 @@ inline RadarAnchorOffset radarAnchorOffset(bool on, RadarAnchorMode mode, int ra
     std::memcpy(&o.bits[2], &o.m[2], sizeof(float));
     return o;
 }
-// ---- THE RADAR'S OWN CAMERA (fix.srv_turret_radar_anchor = camera; srv_radar_anchor.cpp, the slot hook; flight fe0b2560) ------------------------------------------------------------
+// ---- THE RADAR'S OWN CAMERA (experimental.srv_turret_radar_anchor = camera; srv_radar_anchor.cpp, the slot hook; flight fe0b2560) ------------------------------------------------------------
 // Camera mode leaves the schematic's placement to the game and hands each of the radar's schematic slots (the terrain disc's and the Scorpion icon's, in both lists: both eyes) a private
 // copy of the camera moved BACK by D, the radar-forward key, along the turret's forward, at the slot update's entry (0x36BF3C0 in build 334925;
 // analysis\decomp\verify_20261101_srv_radar_slot_camera.txt). The slot's gate, window, quad and picture camera V0 all come from that camera and nothing else, so the schematic, about 0.44 m behind the
@@ -622,7 +624,7 @@ static_assert(kFamilies[7].vs == 0x5559BD94B6852E83ull && kFamilies[7].ps == 0xE
 constexpr bool topologyCarried(int d3d11Topology) { return d3d11Topology == 4 || d3d11Topology == 5; }
 
 // THE MOVE. A vertex is moved in 3D, not only in clip x. The geometry shader reconstructs the vertex's eye-space position P from its clip position and the eye's projection tangents (the
-// ones the game projects with, the eye jitter included), translates it forward by T (fix.srv_turret_hud_forward, for EVERY vertex of every family), and then moves it along its ray from
+// ones the game projects with, the eye jitter included), translates it forward by T (experimental.srv_turret_hud_forward, for EVERY vertex of every family), and then moves it along its ray from
 // a FIXED ANCHOR A (the head's seated position when the turret view came on, taken again on a recentre, when a camera key changes and when the head stays far from it; the eye's view of it is A_eye), judged on the
 // distance of the translated vertex from A:
 //     P1 = P + T;   V = P1 - A;   d = |V|;   if (dMin < d < dMax)   Q = A + V (d - gap) / d   else   Q = P1;   reproject Q, for any Q.z (the reprojection is linear in Q)
@@ -632,10 +634,10 @@ constexpr bool topologyCarried(int d3d11Topology) { return d3d11Topology == 4 ||
 // be cut; 0.999 is the NEAREST valid reversed-Z depth (1 is near), so such a vertex draws in front, as the HUD does. From the anchor the
 // moved vertex is seen in the direction it was (a push keeps the panel's size on screen) and from anywhere else it is a real panel at the new distance: leaning toward it makes it
 // larger and moves it by the parallax of its new depth, not the old one's.
-// THE PULL (fix.srv_turret_hud_gap): vertices whose distance from the anchor lies between dMin = gap + kWindowNearM and dMax = kWindowFarM move `gap` metres nearer.
+// THE PULL (experimental.srv_turret_hud_gap): vertices whose distance from the anchor lies between dMin = gap + kWindowNearM and dMax = kWindowFarM move `gap` metres nearer.
 inline constexpr float kWindowNearM = 0.10f;
 inline constexpr float kWindowFarM = 4.0f;
-// THE PUSH (fix.srv_turret_panels_back, fix.srv_turret_radar_back): vertices whose distance from the anchor lies between kPushNearM and kPushSplitM move `back` metres DEEPER (a negative
+// THE PUSH (experimental.srv_turret_panels_back, experimental.srv_turret_radar_back): vertices whose distance from the anchor lies between kPushNearM and kPushSplitM move `back` metres DEEPER (a negative
 // gap). 2 cm keeps a vertex on the anchor itself (no ray) out; 1 m splits the weapon panels and the radar (0.1 to 0.7 m from the head) from the larger panels (1.3 m and deeper).
 inline constexpr float kPushNearM = 0.02f;
 inline constexpr float kPushSplitM = 1.0f;
@@ -669,8 +671,8 @@ static_assert(sizeof(TurretParams) == 64, "the turret shader's cbuffer is four 1
 struct EyeFrame {
     float l = 0.0f, r = 0.0f, dn = 0.0f, up = 0.0f;
     float a[3] = {0.0f, 0.0f, 0.0f};
-    float t[3] = {0.0f, 0.0f, 0.0f};        // the panels group's translation (fix.srv_turret_hud_forward)
-    float tRadar[3] = {0.0f, 0.0f, 0.0f};   // the radar group's (fix.srv_turret_radar_forward)
+    float t[3] = {0.0f, 0.0f, 0.0f};        // the panels group's translation (experimental.srv_turret_hud_forward)
+    float tRadar[3] = {0.0f, 0.0f, 0.0f};   // the radar group's (experimental.srv_turret_radar_forward)
 };
 
 // The constants with the depth mode written (the module applies the key to whatever paramsForGroup made).
@@ -702,8 +704,8 @@ inline TurretParams pushParamsFor(const EyeFrame& e, float backM, Group group = 
 // The translation alone: no radial move (gap 0), every vertex moves by T.
 inline TurretParams translateParamsFor(const EyeFrame& e, Group group = Group::kPanels) { return makeParams(e, 0.0f, kPushNearM, kPushSplitM, group); }
 
-// Which constants a group's draws run with, from its push key, the gap key and its forward key (centimetres; the panels' is fix.srv_turret_hud_forward, the radar's
-// fix.srv_turret_radar_forward): the push when above 0, else the pull when the gap is above 0, else the translation alone when the group's forward key is above 0 (the eye frame's T for the
+// Which constants a group's draws run with, from its push key, the gap key and its forward key (centimetres; the panels' is experimental.srv_turret_hud_forward, the radar's
+// experimental.srv_turret_radar_forward): the push when above 0, else the pull when the gap is above 0, else the translation alone when the group's forward key is above 0 (the eye frame's T for the
 // group carries it), else none (false: the draw goes through as the game made it). The group's translation is in every case.
 inline bool paramsForGroup(const EyeFrame& e, Group group, int pushCm, int gapCm, int forwardCm, TurretParams& out) {
     if (pushCm > 0) {
@@ -836,7 +838,7 @@ inline bool contentShiftNdc(const TurretParams& p, double x, double y, const flo
 }
 // ---- the anchor ---------------------------------------------------------------------------------------------------------------------------------------------------------
 // The fixed point in the seated frame the move is made about: the head's position when the turret view came on. It is taken again (and the module says so in the log, once each) when
-// the turret view comes on, when fix.srv_turret_camera_back, fix.srv_turret_hud_forward or fix.srv_turret_radar_forward changes, when the head jumps more than kRecentreJumpM between two frames (a recentre), and when
+// the turret view comes on, when experimental.srv_turret_camera_back, experimental.srv_turret_hud_forward or experimental.srv_turret_radar_forward changes, when the head jumps more than kRecentreJumpM between two frames (a recentre), and when
 // the head has stayed more than kAwayM from it for kAwayFrames frames in a row (whatever the cause: a safety net, "head away"). Below kAwayM nothing changes, so leaning keeps the
 // real-panel behaviour.
 // The camera keys take a moment to reach the pose (the runtime applies the alignment at its next poll), so after the view comes on or a key changes the anchor FOLLOWS the head
@@ -1157,7 +1159,7 @@ struct LockTarget {
         return false;
     }
 };
-// The targets start again when the turret view comes on and when fix.srv_turret_camera_back, fix.srv_turret_radar_forward or fix.srv_turret_radar_anchor changes (each moves where the
+// The targets start again when the turret view comes on and when experimental.srv_turret_camera_back, experimental.srv_turret_radar_forward or experimental.srv_turret_radar_anchor changes (each moves where the
 // game's radar rests); no other key does.
 enum class LockReset : uint8_t { kNone = 0, kViewOn, kKey };
 inline LockReset lockResetWhy(bool wasOn, bool on, int backBefore, int back, int radarForwardBefore, int radarForward, int anchorBefore, int anchor) {

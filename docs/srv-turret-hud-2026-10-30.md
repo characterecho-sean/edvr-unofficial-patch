@@ -2,9 +2,11 @@
 
 ## Status
 
-- **State (2026-11-01):** Sean's goal: stock camera; the arcs, ammo counts
-  and INFO strip pushed out behind the location panel (Cranfield
-  Nutrition); the radar near field on its own. FLOWN and settled: the 3D
+- **State (2026-11-01):** FLOWN OK in build e443b0c2 (Steam); the nine
+  keys are now `experimental.*` with the flown defaults (see Keys). Sean's
+  goal: the arcs, ammo counts and INFO strip pushed out behind the location
+  panel (Cranfield Nutrition); the radar near field on its own; camera
+  back 25. FLOWN and settled: the 3D
   move with its anchor, the depth fix, the radar forward key, the draw-time
   pose (judder gone), the hologram's lighting position (45fa7e56: it draws).
   The radar disc is a picture the game draws of the radar's terrain
@@ -15,15 +17,17 @@
   is empty (journal, "V0 is gated by visibility"). Branch
   `claude/srv-turret-hud`, local only. Issue #140. Test install: Steam
   (`--target steam --scope both --xess`).
-- **The radar fix:** FLOWN (fe0b2560): the lock held, but the disc orbits:
-  any turret-dependent native offset reaches the screen late (journal, "the
-  lock flown"). BUILT, NOT FLOWN: `fix.srv_turret_radar_anchor = camera`
-  (TEMPORARY). The setter adds nothing; a hook on the schematic slot's
-  update (0x36BF3C0, build 334925 only) gives the radar's slots the scene
-  camera moved back by radar forward along the turret's forward, and the
-  radar's own billboards move +D along the seat with the rest of the radar.
-- **UI quality parity:** FLOWN (8e3bcd7b): the layer's relief radius fix is
-  applied to both programs (k 2, cb1[120].z 1.3666 from the bound b1).
+- **The radar fix:** FLOWN OK (2026-11-01, build e443b0c2, Steam):
+  `experimental.srv_turret_radar_anchor = camera` (now the default) locks
+  the radar to the turret with no ghost. The setter adds nothing; a hook on
+  the schematic slot's update (0x36BF3C0, build 334925 only) gives the
+  radar's slots the scene camera moved back by radar forward along the
+  turret's forward, and the radar's own billboards move +D along the seat
+  with the rest of the radar. Mode `on` (fe0b2560): the disc orbits, as any
+  turret-dependent native offset reaches the screen late (journal).
+- **UI quality parity:** FLOWN OK (8e3bcd7b, and again in e443b0c2): the
+  layer's relief radius fix is applied to both programs (k 2, cb1[120].z
+  1.3666 from the bound b1).
 - **The radar's way out without it:** camera back 70, radar forward 0.
 - **What is wrong (the game's own placement):** the turret view's whole HUD
   sits about 0.7 m too far back for the stock camera (the radar behind the
@@ -37,24 +41,21 @@
   projects again. Camera back moves the real camera.
 - **Not covered:** Elite's "Disable GUI effects" OFF draws the holo panels
   with vs 81216C77F90DEDD6 (another output signature, no bytecode yet).
-- **Temporary keys** (live, Fixes page of the menu; bake the flown values and
-  propose removing them when the arc closes): `fix.srv_turret_camera_back`,
-  `fix.srv_turret_hud_forward`, `fix.srv_turret_radar_forward` (70),
-  `fix.srv_turret_panels_back`, `fix.srv_turret_radar_back`,
-  `fix.srv_turret_hud_gap`, `fix.srv_turret_hud_depth` (front),
-  `fix.srv_turret_hud_scissor` (open), `fix.srv_turret_radar_anchor` (on;
-  reversed, off, camera). Sean's flown values
-  (2026-10-31): camera back 35, HUD forward 70, panels back 140, radar 0.
+- **Keys** (live, TEMPORARY; `[experimental]` since 2026-11-01, demoted from
+  `[fix]`, no menu rows; propose removing them when the arc closes). Default
+  = the value Sean flew: `srv_turret_camera_back` 25, `srv_turret_hud_forward`
+  65, `srv_turret_radar_forward` 50, `srv_turret_panels_back` 135,
+  `srv_turret_radar_back` 0, `srv_turret_hud_gap` 0, `srv_turret_hud_depth`
+  game (was front), `srv_turret_hud_scissor` open, `srv_turret_radar_anchor`
+  camera (was on; reversed, off). Unknown text of the anchor key now reads
+  as camera. A saved `[fix]` line of the old names is not read.
 - **Latency:** a view switch is followed up to about 0.5 s after the game
   writes Status.json (the watcher's 500 ms poll); left alone, a fix would
   change on foot too (journal).
-- **Open:** whether camera back is still wanted once the anchor is sound
-  (Sean credited it, but its change also fixed the anchor); where the radar
-  reads best; whether the switch lag is acceptable.
+- **Open:** whether the switch lag is acceptable; the keys go when Sean
+  closes the arc (the values ship as the behaviour); merge waits on Sean.
 - **Ruled out:** see "Ruled out" below.
-- **Next flight (this branch):** `fix.srv_turret_radar_anchor = camera`,
-  camera back 0 to 35, radar forward = 65 minus camera back. Sit still, then
-  fast and slow sweeps; drive forward and turn. Read `--grep "srv turret
+- **Next flight:** none planned. To read one: `edvr_log.py --grep "srv turret
   radar camera"`: the slot hook armed, radar slots in every 10 s line, and
   V0's schematic origin about D - 0.44 m in front, tracking every frame.
 
@@ -1870,3 +1871,42 @@ Unconfirmed until it flies: the hook's thread against the camera writes'
 use; that list A and list B are the two eyes; the camera's +z as forward
 (the fallback only); and whether the billboard quad the game builds from
 the moved camera, moved +D by the shader, lands where the eye expects.
+
+### 2026-11-01: camera mode flown OK (build e443b0c2); the nine keys become experimental
+
+Flown on Steam, build e443b0c2, with `srv_turret_radar_anchor = camera`: the
+radar stays locked to the turret with no ghost, and the UI relief parity fix
+(the layer's relief radius, 8e3bcd7b) works. Sean's word: demote the Scorpion
+turret settings to experimental and bake them as defaults.
+
+- **The move.** The nine keys left `[fix]` for the end of `[experimental]` in
+  `edvr.ini` (a new heading there, "The SRV's turret view"). They lose their
+  menu rows: the settings generator refuses a `menu` token on an
+  `[experimental]` key, so the `ui:` lines stay for the labels, the choices
+  and `recommended`, and nothing else. The module, the rig's wiring pins and
+  `edvr_log.py` name them `experimental.srv_turret_*` now.
+- **The defaults** are the values he flew with (the settings line in the log
+  prints them):
+
+  | key | default now | was |
+  |---|---|---|
+  | `srv_turret_camera_back` | 25 | 0 |
+  | `srv_turret_hud_forward` | 65 | 70 |
+  | `srv_turret_radar_forward` | 50 | 70 |
+  | `srv_turret_panels_back` | 135 | 120 |
+  | `srv_turret_radar_back` | 0 | 0 |
+  | `srv_turret_hud_gap` | 0 | 0 |
+  | `srv_turret_hud_depth` | game | front |
+  | `srv_turret_hud_scissor` | open | open |
+  | `srv_turret_radar_anchor` | camera | on |
+
+- **Side effects.** Text that is not one of the anchor key's words reads as
+  the default, camera (it read as `on`); the rig's pins follow. The rig's
+  geometry cases keep a push of 1.2 m as a fixture of their own, no longer
+  the panels key's default. There is no `moved-from` line: an old `[fix]`
+  line carries the old shipped defaults of every earlier install, which would
+  undo the bake, so it is not read. Two fixtures in `edvr_log.py` (`old_set`,
+  `old_set4`) still print `fix.srv_turret_*`, because they are the settings
+  lines older builds wrote.
+- **Still to do** when the arc closes: ship the values as the behaviour and
+  propose removing the nine keys, quoted, as Scope control requires.

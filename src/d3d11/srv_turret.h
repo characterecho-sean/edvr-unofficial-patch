@@ -10,8 +10,8 @@
 // watcher and the key; alignTick adds srvTurretBackSeatedZ() to the seated z of the eye alignment it already publishes (one publisher, so the serials stay coherent) and
 // tells srvTurretNotePublished what it published. Applied at once, with no ramp: the game itself cuts the camera on a view switch.
 //
-// PART 2, THE HUD. While the Scorpion's turret view is on and any of fix.srv_turret_hud_forward, fix.srv_turret_radar_forward, fix.srv_turret_panels_back, fix.srv_turret_radar_back and
-// fix.srv_turret_hud_gap is above 0 the draw gate is open (srvTurretHudWantsDraws), forwardWithVerdict opens a scope for every draw, and a draw of one of the HUD families' shader pairs (srv_turret_math.h
+// PART 2, THE HUD. While the Scorpion's turret view is on and any of experimental.srv_turret_hud_forward, experimental.srv_turret_radar_forward, experimental.srv_turret_panels_back, experimental.srv_turret_radar_back and
+// experimental.srv_turret_hud_gap is above 0 the draw gate is open (srvTurretHudWantsDraws), forwardWithVerdict opens a scope for every draw, and a draw of one of the HUD families' shader pairs (srv_turret_math.h
 // kFamilies: the two hologram families that draw the weapon panels from records 0.27 to 0.70 m out and the larger panels from 1.3 m and deeper, and the radar-named billboards and the
 // target hologram sphere that draw the radar from 0.11 to 0.44 m) into an eye target, as a triangle list or strip, whose group (panels or radar) has a push above 0, a gap above 0 or
 // its forward key above 0 (HUD forward for the panels, radar forward for the radar), is issued through that signature's private geometry shader, for EVERY issue the draw path makes of it (the game's own, the UI layer's, the interface
@@ -22,8 +22,8 @@
 // beginFrame (the game's WaitGetPoses) publishes the pose of the frame about to be drawn: when that comes after the tick the tick's frames are a frame old, so the DRAW (drawEyeFrame) compares the host's frame sequence
 // (nativeTemporalFrameSequence) with the one its frames were built from and, for a new one, rebuilds both eyes' frames once from that frame's pose and the tick's anchor (the judder was
 // the HUD following the head a frame late). A draw of a group with none of its keys is the game's own and is not counted. How the moved vertices' depth is written is the seventh key's
-// (fix.srv_turret_hud_depth: front, game or real, srv_turret_math.h DepthMode). The game sets a scissor rectangle for the radar's draws from where the radar was, and the moved geometry was cropped
-// to it: with the eighth key at open (fix.srv_turret_hud_scissor, the default) a bound draw's scissor rectangles are the whole render target while it is issued and the game's are put back exactly
+// (experimental.srv_turret_hud_depth: front, game or real, srv_turret_math.h DepthMode). The game sets a scissor rectangle for the radar's draws from where the radar was, and the moved geometry was cropped
+// to it: with the eighth key at open (experimental.srv_turret_hud_scissor, the default) a bound draw's scissor rectangles are the whole render target while it is issued and the game's are put back exactly
 // after (srv_turret_hud_binding.h Scissor), refused draws and a boundary settle covering a restore that failed. The Scorpion's own hologram (vs 5559BD94, signature H) also needs the draw's vertex constants: its pixel shader
 // divides an interpolant the vertex shader makes from the WORLD position by the fragment's view depth, so the geometry shader moves that interpolant too, by the camera's right, up and forward
 // vectors (rows 277 to 279 of the draw's vertex constants, which the module binds at GS slot 1 for that signature and gives back). (The
@@ -88,7 +88,7 @@
 //   "srv turret radar camera: first seen|moved by (x,y,z) mm and turned A deg after N frames unchanged at frame F (copied at frame C): the schematic's origin at (x,y,z) m in the camera ...,
 //     forward (..), window tan x [..] y [..], scale S; head (x,y,z) seated, camera back B cm"   each move of V0 (2 mm or 0.05 deg), at most four lines a second, with the head and the key then;
 //   "srv turret radar camera: view off: D picture-camera draws copied, R read, M moves[ -- NEVER SEEN ...]"   the view's end (R = 0: the draw never reached the path).
-//   TEMPORARY, the radar anchor moved in the game (fix.srv_turret_radar_anchor; srv_radar_anchor.h), all said by the frame tick, never by the hooks:
+//   TEMPORARY, the radar anchor moved in the game (experimental.srv_turret_radar_anchor; srv_radar_anchor.h), all said by the frame tick, never by the hooks:
 //   "srv turret radar anchor: setter hook armed: EliteDangerous64.exe+0x38563A0 (...) at 0x.., stolen=N bytes, prologue 18/18 bytes verified, relay at 0x.." or "... setter hook stood
 //     down: <why>; nothing was patched", then "... update counter armed|stood down: ..."   once, the first time the view is on with the key not off;
 //   "srv turret radar anchor: placement moved at frame F: the game's (x,y,z) + (dx,dy,dz) -> (x,y,z) in the anchor's axes (key K), caller EliteDangerous64.exe+0x.., obj 0x..; the
@@ -142,7 +142,7 @@ extern std::atomic<uint32_t> g_srvTurretHudIssues;
 extern std::atomic<bool> g_srvTurretHoloWatching;
 // The radar picture's camera instrument: true while the Scorpion's turret view is on (the frame tick sets it).
 extern std::atomic<bool> g_srvTurretRadarCamOn;
-// The radar anchor's turret direction: true while the Scorpion's turret view is on, fix.srv_turret_radar_anchor is not off and the setter hook is armed (the frame tick sets it).
+// The radar anchor's turret direction: true while the Scorpion's turret view is on, experimental.srv_turret_radar_anchor is not off and the setter hook is armed (the frame tick sets it).
 extern std::atomic<bool> g_srvTurretCameraRowsWanted;
 // The draw-time correction's writer watch: true while the anchor yield is on (the frame tick sets it).
 extern std::atomic<bool> g_srvTurretRadarWritersOn;
@@ -156,7 +156,7 @@ inline void srvTurretHudNoteDrawShape(uint32_t count, uint32_t instances) {
     detail::g_srvTurretDrawInstances = instances;
 }
 
-// TEMPORARY (issue 140, fix.srv_turret_radar_anchor): the radar's picture writers for the draw-time correction. vscreen.cpp forwardWithVerdict, every owner-context draw while the anchor
+// TEMPORARY (issue 140, experimental.srv_turret_radar_anchor): the radar's picture writers for the draw-time correction. vscreen.cpp forwardWithVerdict, every owner-context draw while the anchor
 // yield is on (one relaxed load otherwise): a draw of the terrain schematic (vs 4EDE4BC9) or of the Scorpion icon (vs 5B0068AF into a 256x256 target) records its render targets for the
 // frame, which a radar billboard's t4 is matched against (srv_turret.cpp radarCorrectionBegin).
 inline bool srvTurretRadarWritersOn() { return detail::g_srvTurretRadarWritersOn.load(std::memory_order_relaxed); }
@@ -169,7 +169,7 @@ void srvTurretRadarNoteUnmovedIssue(ID3D11DeviceContext* ctx, int family);
 // two radar pictures are written next to the dump.
 void srvTurretNoteEyeDump(const wchar_t* stamp);
 
-// TEMPORARY (issue 140, fix.srv_turret_radar_anchor): the live camera's right, up and forward (rows 277..279 of the 5376-byte scene camera block) read on the CPU when the game writes them.
+// TEMPORARY (issue 140, experimental.srv_turret_radar_anchor): the live camera's right, up and forward (rows 277..279 of the 5376-byte scene camera block) read on the CPU when the game writes them.
 // vscreen.cpp hookedUnmap, the scene camera block's branch, before the real Unmap, while wanted (one relaxed load otherwise); srvTurretHudBegin looks the eye-0 draw's VS b1 buffer up in
 // what this kept, so u needs no GPU readback. Owner context's thread.
 inline bool srvTurretWantsCameraRows() { return detail::g_srvTurretCameraRowsWanted.load(std::memory_order_relaxed); }
@@ -192,8 +192,8 @@ inline void srvTurretHudCountIssue(ID3D11DeviceContext* ctx) {
     if (detail::g_srvTurretHudCounting.load(std::memory_order_relaxed)) srvTurretHudNoteIssue(ctx);
 }
 
-// True while the Scorpion's turret view is on (VR) and any of fix.srv_turret_hud_forward, fix.srv_turret_radar_forward, fix.srv_turret_panels_back, fix.srv_turret_radar_back and
-// fix.srv_turret_hud_gap is above 0.
+// True while the Scorpion's turret view is on (VR) and any of experimental.srv_turret_hud_forward, experimental.srv_turret_radar_forward, experimental.srv_turret_panels_back, experimental.srv_turret_radar_back and
+// experimental.srv_turret_hud_gap is above 0.
 // Also a term of the draw gate (vscreen.cpp drawGateSubscribed).
 inline bool srvTurretHudWantsDraws() { return detail::g_srvTurretHudWanted.load(std::memory_order_relaxed); }
 

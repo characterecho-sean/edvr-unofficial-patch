@@ -83,8 +83,8 @@ void breadcrumb(const char*) {}
 static unsigned g_checks = 0;
 // The pull's gap the cases below run with: the first build's default (96 cm), a deep panel's 1.39 m less the near layer's 0.42 m, less a centimetre. The shipped default is 0 now.
 static const float kPullGapM = 0.96f;
-// The push's: the shipped default of the panels' key (120 cm: the arcs just behind the location panel).
-static const float kPushBackM = st::kPanelsDefaultCm / 100.0f;
+// The push's: a fixture value (120 cm, the arcs just behind the location panel), not the shipped default of the panels' key (135 cm since 2026-11-01); the geometry cases need a push, not that one.
+static const float kPushBackM = 1.2f;
 static void check(bool ok, const char* why) {
     ++g_checks;
     if (!ok) throw std::runtime_error(why);
@@ -350,7 +350,7 @@ struct DrawOpts {
     bool soTarget = false;
     bool scissored = false;      // the game's draw has ScissorEnable and the one rectangle scissorRect
     D3D11_RECT scissorRect{0, 0, 0, 0};
-    bool openScissor = false;    // the production Scissor opens it around the issue (fix.srv_turret_hud_scissor at open) and gives the game's back
+    bool openScissor = false;    // the production Scissor opens it around the issue (experimental.srv_turret_hud_scissor at open) and gives the game's back
 };
 // One frame of `verts` through the stand-in pair and, when gs is given, the production binding with `params` (null gs: the plain shader alone).
 static Frame render(const std::vector<Vtx>& verts, const Cam& cam, ID3D11GeometryShader* gs, const st::TurretParams& params, UINT w = 256, UINT h = 256, const DrawOpts& o = DrawOpts{}) {
@@ -873,9 +873,9 @@ static void mathCases() {
             ok = ok && !st::topologyCarried(t);
         check(ok, "triangle lists and triangle strips are carried; points, lines, adjacency, patches and anything else are refused");
     }
-    check(st::kBackDefaultCm == 0 && st::kForwardDefaultCm == 70 && st::kForwardMaxCm == 150 && st::kPanelsDefaultCm == 120 && st::kRadarDefaultCm == 0 && st::kGapDefaultCm == 0 &&
+    check(st::kBackDefaultCm == 25 && st::kForwardDefaultCm == 65 && st::kForwardMaxCm == 150 && st::kRadarForwardDefaultCm == 50 && st::kPanelsDefaultCm == 135 && st::kRadarDefaultCm == 0 && st::kGapDefaultCm == 0 &&
               st::kPushMaxCm == 200 && st::kGapMaxCm == 200,
-          "the keys' defaults: camera back 0 (the stock camera), HUD forward 70, panels back 120, radar back 0, gap 0");
+          "the keys' defaults, the values flown with: camera back 25, HUD forward 65, radar forward 50, panels back 135, radar back 0, gap 0");
 }
 
 // ---------------------------------------------------------------- the move, through the stream-output twin of the production shader and of each mutant
@@ -1181,7 +1181,7 @@ static void moveCases(int fam, ID3D11GeometryShader* twin, Fails& f) {
         f.expect(own && panelsP.tz == 0.7f && radarP.tz == 0.3f,
                  "(m) one eye frame, two groups: the panels' vertices move 0.7 m along Z (the HUD-forward key) and the radar's 0.3 m (its own key), each only by its own");
     }
-    {   // (n) the depth modes (fix.srv_turret_hud_depth): Elite's clip z is the constant 0.025, so a vertex the game had at view depth d has NDC z 0.025 / d. Translated 0.7 m forward it ends at d + 0.7.
+    {   // (n) the depth modes (experimental.srv_turret_hud_depth): Elite's clip z is the constant 0.025, so a vertex the game had at view depth d has NDC z 0.025 / d. Translated 0.7 m forward it ends at d + 0.7.
         // game: its own NDC z where that is valid, else 0.999. real: the depth of the moved position, clamp(0.025 / (d + 0.7), 0, 0.999). front: 0.999 for every moved vertex.
         const float t[3] = {0.0f, 0.0f, 0.7f};
         const st::TurretParams base = st::translateParamsFor(frameOfCam(cam, nullptr, t));
@@ -1666,15 +1666,15 @@ static void afterIssueCases(ID3D11GeometryShader* gs, Fails& f, bool skipRestore
     f.expect(maxDiff(plainBefore, plainAfter) == 0.0, "a plain issue after the shifted one is the plain image again");
 }
 
-// ---------------------------------------------------------------- the radar anchor moved in the game (fix.srv_turret_radar_anchor): the key, the offset's bits, the recent test, the families
+// ---------------------------------------------------------------- the radar anchor moved in the game (experimental.srv_turret_radar_anchor): the key, the offset's bits, the recent test, the families
 static void radarAnchorCases() {
     using A = st::RadarAnchorMode;
-    check(st::radarAnchorModeOf("on") == A::kOn && st::radarAnchorModeOf("reversed") == A::kReversed && st::radarAnchorModeOf("off") == A::kOff && st::radarAnchorModeOf("") == A::kOn &&
-              st::radarAnchorModeOf(nullptr) == A::kOn && st::radarAnchorModeOf("Off") == A::kOn && st::radarAnchorModeOf("reverse") == A::kOn,
-          "the radar anchor key's text: on, reversed and off; anything else (and nothing) is on");
+    check(st::radarAnchorModeOf("on") == A::kOn && st::radarAnchorModeOf("reversed") == A::kReversed && st::radarAnchorModeOf("off") == A::kOff && st::radarAnchorModeOf("") == A::kCamera &&
+              st::radarAnchorModeOf(nullptr) == A::kCamera && st::radarAnchorModeOf("Off") == A::kCamera && st::radarAnchorModeOf("reverse") == A::kCamera && st::radarAnchorModeOf("On") == A::kCamera,
+          "the radar anchor key's text: on, reversed, off and camera; anything else (and nothing) is the default, camera");
     check(!std::strcmp(st::radarAnchorModeName(A::kOn), "on") && !std::strcmp(st::radarAnchorModeName(A::kReversed), "reversed") && !std::strcmp(st::radarAnchorModeName(A::kOff), "off") &&
-              st::kRadarAnchorDefault == A::kOn && st::radarAnchorModeOf(st::kRadarAnchorDefaultText) == st::kRadarAnchorDefault && !std::strcmp(st::kRadarAnchorDefaultText, "on"),
-          "the modes' names are the key's values, and the default is on (the module's literal and the shipped ini say the same: the wiring scan)");
+              st::kRadarAnchorDefault == A::kCamera && st::radarAnchorModeOf(st::kRadarAnchorDefaultText) == st::kRadarAnchorDefault && !std::strcmp(st::kRadarAnchorDefaultText, "camera"),
+          "the modes' names are the key's values, and the default is camera (the module's literal and the shipped ini say the same: the wiring scan)");
     const st::RadarAnchorOffset on45 = st::radarAnchorOffset(true, A::kOn, 45), rev30 = st::radarAnchorOffset(true, A::kReversed, 30);
     check(on45.bits[0] == 0u && on45.bits[1] == 0u && on45.bits[2] == 0x3EE66666u && on45.m[0] == 0.0f && on45.m[1] == 0.0f && on45.m[2] == 0.45f && !on45.zero(),
           "on at 45 cm: (0, 0, +0.45) m in the anchor's axes, the float's bits 0x3EE66666 in z and x, y zero");
@@ -1952,9 +1952,9 @@ static bool fakeRead(void* ctx, uintptr_t address, void* out, size_t n) {
 }
 static void slotCameraCases() {
     using A = st::RadarAnchorMode;
-    check(st::radarAnchorModeOf("camera") == A::kCamera && !std::strcmp(st::radarAnchorModeName(A::kCamera), "camera") && st::radarAnchorModeOf("Camera") == A::kOn &&
+    check(st::radarAnchorModeOf("camera") == A::kCamera && !std::strcmp(st::radarAnchorModeName(A::kCamera), "camera") && st::radarAnchorModeOf("Camera") == st::kRadarAnchorDefault &&
               !std::strcmp(st::radarAnchorModeName(A::kOn), "on") && !std::strcmp(st::radarAnchorModeName(A::kOff), "off") && !std::strcmp(st::radarAnchorModeName(A::kReversed), "reversed"),
-          "fix.srv_turret_radar_anchor takes camera (and only that spelling), and the settings line names it");
+          "experimental.srv_turret_radar_anchor takes camera (another spelling falls to the default, which is camera too), and the settings line names it");
     check(st::radarAnchorOffset(true, A::kCamera, 65).zero() && !st::radarAnchorOffset(true, A::kOn, 65).zero(), "camera mode publishes a zero setter offset (the restore gives the game its placement back)");
     check(st::radarCameraBackM(true, A::kCamera, 65) == 0.65f && st::radarCameraBackM(true, A::kCamera, 500) == 1.5f && st::radarCameraBackM(false, A::kCamera, 65) == 0.0f &&
               st::radarCameraBackM(true, A::kOn, 65) == 0.0f && st::radarCameraBackM(true, A::kOff, 65) == 0.0f && st::radarCameraBackM(true, A::kCamera, 0) == 0.0f,
@@ -2104,8 +2104,8 @@ static void depthMathCases() {
     const float t[3] = {0.0f, 0.0f, 0.7f};
     const st::EyeFrame e = frameOfCam(Cam{}, nullptr, t);
     const st::TurretParams game = st::translateParamsFor(e), real = st::withDepth(game, M::kReal), front = st::withDepth(game, M::kFront);
-    check(st::kDepthDefault == M::kFront && st::depthModeOf(st::kDepthDefaultText) == st::kDepthDefault && !std::strcmp(st::kDepthDefaultText, "front") && !std::strcmp(st::kScissorDefaultText, "open"),
-          "the depth key's default is front, the scissor key's open (the module's literals and the shipped ini say the same: the wiring scan)");
+    check(st::kDepthDefault == M::kGame && st::depthModeOf(st::kDepthDefaultText) == st::kDepthDefault && !std::strcmp(st::kDepthDefaultText, "game") && !std::strcmp(st::kScissorDefaultText, "open"),
+          "the depth key's default is game, the scissor key's open (the module's literals and the shipped ini say the same: the wiring scan)");
     check(game.depth == 0.0f && real.depth == 1.0f && front.depth == 2.0f && st::withDepth(front, M::kGame) == game && !(real == game) && !(front == real),
           "the constants carry the mode as 0, 1 or 2, and a different mode is a different set of numbers (the buffer is rewritten)");
     st::TurretParams bad = game;
@@ -2309,7 +2309,7 @@ static void scissorCases(ID3D11GeometryShader* gs, Fails& f) {
         DrawOpts open = game;
         open.openScissor = true;
         const Frame plain = render(v, cam, nullptr, st::TurretParams{}, 256, 256, game);   // the control: the scissor really crops a plain draw
-        const Frame kept = render(v, cam, gs, p, 256, 256, game);                          // fix.srv_turret_hud_scissor = game
+        const Frame kept = render(v, cam, gs, p, 256, 256, game);                          // experimental.srv_turret_hud_scissor = game
         const Frame opened = render(v, cam, gs, p, 256, 256, open);                        // ... = open
         f.expect(coveredRows(plain, 0, 128) > 1000 && coveredRows(plain, 128, 256) == 0, "(S1) control: the game's scissor rectangle (the top half) crops a plain draw to the top half");
         f.expect(coveredRows(kept, 0, 128) > 1000 && coveredRows(kept, 128, 256) == 0, "(S1) with the game's rectangle kept, the moved quad is cropped to the top half too");
@@ -2671,8 +2671,8 @@ static void constantsCases() {
     c.reset();
     check(c.buffer() == nullptr && !c.failed(), "reset releases the buffer");
     // the production arrays also carry the key defaults the module reads
-    check(st::kBackDefaultCm == 0 && st::kForwardDefaultCm == 70 && st::kPanelsDefaultCm == 120 && st::kRadarDefaultCm == 0 && st::kGapDefaultCm == 0,
-          "the keys' defaults: the stock camera (0), HUD forward 70, panels back 120, radar back 0, no gap (the pull is off)");
+    check(st::kBackDefaultCm == 25 && st::kForwardDefaultCm == 65 && st::kRadarForwardDefaultCm == 50 && st::kPanelsDefaultCm == 135 && st::kRadarDefaultCm == 0 && st::kGapDefaultCm == 0,
+          "the keys' defaults: camera back 25, HUD forward 65, radar forward 50, panels back 135, radar back 0, no gap (the pull is off)");
 }
 
 // ---------------------------------------------------------------- triangle strips (some of the HUD's strokes are drawn as one)

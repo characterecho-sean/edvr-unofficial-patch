@@ -284,7 +284,7 @@ value and Elite read its eye transform at that value afterwards, NEVER APPLIED w
 The desktop window (visual.desktop_window) is the other rule whose lines carry no build tag: the graphics log's "desktop window:" lines. It says OK when a 10 s line (or the line
 that ends an activation) shows a Present drawn, NEVER APPLIED when a "desktop window: setting" line named a mode other than game and no line shows one, and nothing at all when
 the setting is game or absent.
-The SRV turret view (fix.srv_turret_camera_back, fix.srv_turret_hud_forward, fix.srv_turret_radar_forward, fix.srv_turret_panels_back, fix.srv_turret_radar_back, fix.srv_turret_hud_gap, fix.srv_turret_hud_depth, fix.srv_turret_hud_scissor) is the third: the graphics log's "srv turret ..." lines. The settings lines and the vehicle latch's lines
+The SRV turret view (experimental.srv_turret_camera_back, experimental.srv_turret_hud_forward, experimental.srv_turret_radar_forward, experimental.srv_turret_panels_back, experimental.srv_turret_radar_back, experimental.srv_turret_hud_gap, experimental.srv_turret_hud_depth, experimental.srv_turret_hud_scissor) is the third: the graphics log's "srv turret ..." lines. The settings lines and the vehicle latch's lines
 ("srv turret: the vehicle is the Scorpion|not the Scorpion (event X)", written by the journal watcher) are kept whatever --since says; the last vehicle line is said in the detail, and
 vehicle lines alone are not the rule's lines (nothing is said for them). The pass acts in the Scorpion only: when the turret view bit is on in an SRV the journal does not call the Scorpion
 (a Scarab, a training scenario) the log says "srv turret view: not the Scorpion at frame ...", which is never a failure: with nothing else from the turret in the window the rule is IDLE
@@ -16477,8 +16477,8 @@ def _srv_turret_plane_text(planes):
 
 
 def _hj_srv_turret(rows, ctx):
-    """The SRV turret view (issue 140; src\\d3d11\\srv_turret.cpp; fix.srv_turret_camera_back, fix.srv_turret_hud_forward, fix.srv_turret_panels_back, fix.srv_turret_radar_back,
-    fix.srv_turret_hud_gap), two halves judged on the keys in force (the last settings line): the camera half is applied by a 'camera: back X m published' line; the HUD half by the first-draw line or a 10 s line with draws bound.
+    """The SRV turret view (issue 140; src\\d3d11\\srv_turret.cpp; experimental.srv_turret_camera_back, experimental.srv_turret_hud_forward, experimental.srv_turret_panels_back, experimental.srv_turret_radar_back,
+    experimental.srv_turret_hud_gap), two halves judged on the keys in force (the last settings line): the camera half is applied by a 'camera: back X m published' line; the HUD half by the first-draw line or a 10 s line with draws bound.
     The HUD half is on when any of HUD forward, the panels' push-back, the radar's push-back and the gap is above 0 (a settings line from before them has fewer keys; with no settings
     line the last 10 s line's per-group windows say whether a group ran). The move is about an anchor, latched at the head's seated position (each latch has an 'anchor' line, with its
     reason: the view on, a camera key changed, a recentre): the detail says how often (and how often by 'head away', the safety net that takes it again when the head has been 35 cm from it for 90 frames) and where last, and the 10 s line's head offset and translation. No line but settings: IDLE (the turret view was not entered). A geometry shader that could not be made is NEVER

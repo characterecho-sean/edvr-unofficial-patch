@@ -9,7 +9,7 @@
 //     it published right after the one publisher's call.
 //   * srv_turret.cpp: the shaders are made from the build's bytecode through shaderSwapCreateGs (one for each signature, a missing one standing down only its own families); the
 //     module changes no state of the game's but through the binding class; both parts act on the turret view AND the Scorpion latch (and say the view without it); triangle lists
-//     and strips are carried; the six integer keys are read with the literal ranges and defaults the settings generator reads, the other two (the depth mode, default front, and the scissor, default
+//     and strips are carried; the six integer keys are read with the literal ranges and defaults the settings generator reads, the other two (the depth mode, default game, and the scissor, default
 //     open) as text; a bound draw's scissor rectangles are opened right after the bind and put back at the end of the scope (and settled at the boundary), and a draw is refused while they are owed; a draw is counted and bound only when its family's group has a
 //     push, the gap or its own forward key (HUD forward for the panels, radar forward for the radar) above 0 (the group's constants come from one place), the pass is wanted when any of
 //     the five HUD keys is above 0, the anchor is stepped by the frame tick with the head from the host's pose and cleared when the pass is not wanted, each eye's frame is built from the
@@ -17,8 +17,8 @@
 //     beginFrame, after the previous frame's boundary tick), once for each new sequence.
 //   * journal_watch.cpp, native_temporal.cpp: the accessors; the Scorpion latch is fed the tail's new bytes once (not the stitched head the scan reads twice), reset with the
 //     file, published to its accessor, and each change said once with its event.
-//   * edvr.ini: all eight keys live in [fix] with their ui: lines and shipped defaults; the flat profile's allow-list names none (VR only).
-//   * the radar anchor (fix.srv_turret_radar_anchor, srv_radar_anchor.cpp): the ninth key, its publish, the billboards it leaves to the game, the hook's pins and its integer-only
+//   * edvr.ini: all eight keys live in [experimental] (demoted from [fix] on 2026-11-01) with their ui: lines, no menu token, and the flown defaults; the flat profile's allow-list names none (VR only).
+//   * the radar anchor (experimental.srv_turret_radar_anchor, srv_radar_anchor.cpp): the ninth key, its publish, the billboards it leaves to the game, the hook's pins and its integer-only
 //     callback, its compile-list entry and its exact-build audit entry (wiredAnchor).
 //   * the shader tables (tools/temporal_shader_build): the HLSL's header is included and the eight variants are registered as gs_5_0, each with its contract row.
 //   * build.bat: the module is in the DLL's compile list and this rig has its label.
@@ -136,14 +136,14 @@ static bool wiredModule(const std::string& t) {
     const size_t made = t.find("g_gs[f] = shaderSwapCreateGs(ctx, kShader[f].bytecode, kShader[f].size, kShader[f].name, \"srv turret hud\")");
     const size_t begin = t.find("g_binding.begin(ctx, twin ? g_soGs[sig] : g_gs[sig], constants, st::directSetGs, needScene ? &scene : nullptr)");
     const size_t finish = t.find("const auto done = g_binding.finish(ctx);");
-    const size_t back = t.find("cfg.getIntInRange(\"fix.srv_turret_camera_back\", 0, 0, 150)");
-    const size_t forward = t.find("cfg.getIntInRange(\"fix.srv_turret_hud_forward\", 70, 0, 150)");
-    const size_t radarForward = t.find("cfg.getIntInRange(\"fix.srv_turret_radar_forward\", 70, 0, 150)");
-    const size_t depthKey = t.find("cfg.getString(\"fix.srv_turret_hud_depth\", \"front\")");
-    const size_t scissorKey = t.find("cfg.getString(\"fix.srv_turret_hud_scissor\", \"open\")");
-    const size_t panels = t.find("cfg.getIntInRange(\"fix.srv_turret_panels_back\", 120, 0, 200)");
-    const size_t radar = t.find("cfg.getIntInRange(\"fix.srv_turret_radar_back\", 0, 0, 200)");
-    const size_t gap = t.find("cfg.getIntInRange(\"fix.srv_turret_hud_gap\", 0, 0, 200)");
+    const size_t back = t.find("cfg.getIntInRange(\"experimental.srv_turret_camera_back\", 25, 0, 150)");
+    const size_t forward = t.find("cfg.getIntInRange(\"experimental.srv_turret_hud_forward\", 65, 0, 150)");
+    const size_t radarForward = t.find("cfg.getIntInRange(\"experimental.srv_turret_radar_forward\", 50, 0, 150)");
+    const size_t depthKey = t.find("cfg.getString(\"experimental.srv_turret_hud_depth\", \"game\")");
+    const size_t scissorKey = t.find("cfg.getString(\"experimental.srv_turret_hud_scissor\", \"open\")");
+    const size_t panels = t.find("cfg.getIntInRange(\"experimental.srv_turret_panels_back\", 135, 0, 200)");
+    const size_t radar = t.find("cfg.getIntInRange(\"experimental.srv_turret_radar_back\", 0, 0, 200)");
+    const size_t gap = t.find("cfg.getIntInRange(\"experimental.srv_turret_hud_gap\", 0, 0, 200)");
     const size_t settings = t.find("\"srv turret settings: camera back %d cm, hud forward %d cm, radar forward %d cm, panels back %d cm, radar back %d cm, hud gap %d cm, hud depth %s, hud scissor %s, radar anchor %s (live; \"");
     const size_t edge = t.find("\"srv turret view: %s at frame %u (Status.json Flags 0x%08X, seat kind 0x%X)\"");
     const size_t camera = t.find("\"srv turret camera: back %.2f m published (serial %u)\"");
@@ -321,26 +321,30 @@ static bool wiredInstrument(const std::string& vscreen, const std::string& t) {
 
 // edvr.ini and the flat allow-list.
 static bool wiredKeys(const std::string& ini, const std::string& flatKeys) {
-    const size_t fix = ini.find("\n[fix]\n"), visual = ini.find("\n[visual]\n");
-    const size_t back = ini.find("\nsrv_turret_camera_back = 0\n"), forward = ini.find("\nsrv_turret_hud_forward = 70\n"), radarForward = ini.find("\nsrv_turret_radar_forward = 70\n"),
-                 panels = ini.find("\nsrv_turret_panels_back = 120\n"), radar = ini.find("\nsrv_turret_radar_back = 0\n"), gap = ini.find("\nsrv_turret_hud_gap = 0\n"),
-                 depth = ini.find("\nsrv_turret_hud_depth = front\n"), scissor = ini.find("\nsrv_turret_hud_scissor = open\n");
-    if (!found(fix) || !found(visual) || !found(back) || !found(forward) || !found(radarForward) || !found(panels) || !found(radar) || !found(gap) || !found(depth) || !found(scissor)) return false;
-    const bool inFix = back > fix && back < visual && forward > fix && forward < visual && radarForward > fix && radarForward < visual && panels > fix && panels < visual && radar > fix && radar < visual &&
-                       gap > fix && gap < visual && depth > fix && depth < visual && scissor > fix && scissor < visual;
-    const size_t backUi = ini.rfind("# ui: SRV turret camera back | range 0..150 | step 5 | unit cm | zero exact | recommended 0 | live | menu", back),
-                 forwardUi = ini.rfind("# ui: SRV turret HUD forward | range 0..150 | step 5 | unit cm | zero exact | recommended 70 | live | menu", forward),
-                 radarForwardUi = ini.rfind("# ui: SRV turret radar forward | range 0..150 | step 5 | unit cm | zero exact | recommended 70 | live | menu", radarForward),
-                 panelsUi = ini.rfind("# ui: SRV turret panels back | range 0..200 | step 5 | unit cm | zero exact | recommended 120 | live | menu", panels),
-                 radarUi = ini.rfind("# ui: SRV turret radar back | range 0..200 | step 5 | unit cm | zero exact | recommended 0 | live | menu", radar),
-                 gapUi = ini.rfind("# ui: SRV turret HUD gap | range 0..200 | step 2 | unit cm | zero exact | recommended 0 | live | menu", gap),
-                 depthUi = ini.rfind("# ui: SRV turret HUD depth | choices front, game, real | recommended front | live | menu", depth),
-                 scissorUi = ini.rfind("# ui: SRV turret HUD screen limit | choices open, game | recommended open | live | menu", scissor);
+    // [experimental] since 2026-11-01 (demoted from [fix]): the last section of the file, so a key is in it when it lies after the header and before any later one. The generator refuses a
+    // `menu` token on an [experimental] key, and each ui: line below is matched through its newline so that one cannot hide after `live`.
+    const size_t experimental = ini.find("\n[experimental]\n");
+    if (!found(experimental)) return false;
+    const size_t nextSection = ini.find("\n[", experimental + 1), end = found(nextSection) ? nextSection : ini.size();
+    const size_t back = ini.find("\nsrv_turret_camera_back = 25\n"), forward = ini.find("\nsrv_turret_hud_forward = 65\n"), radarForward = ini.find("\nsrv_turret_radar_forward = 50\n"),
+                 panels = ini.find("\nsrv_turret_panels_back = 135\n"), radar = ini.find("\nsrv_turret_radar_back = 0\n"), gap = ini.find("\nsrv_turret_hud_gap = 0\n"),
+                 depth = ini.find("\nsrv_turret_hud_depth = game\n"), scissor = ini.find("\nsrv_turret_hud_scissor = open\n");
+    if (!found(back) || !found(forward) || !found(radarForward) || !found(panels) || !found(radar) || !found(gap) || !found(depth) || !found(scissor)) return false;
+    const bool inExperimental = back > experimental && back < end && forward > experimental && forward < end && radarForward > experimental && radarForward < end && panels > experimental && panels < end &&
+                                radar > experimental && radar < end && gap > experimental && gap < end && depth > experimental && depth < end && scissor > experimental && scissor < end;
+    const size_t backUi = ini.rfind("# ui: SRV turret camera back | range 0..150 | step 5 | unit cm | zero exact | recommended 25 | live\n", back),
+                 forwardUi = ini.rfind("# ui: SRV turret HUD forward | range 0..150 | step 5 | unit cm | zero exact | recommended 65 | live\n", forward),
+                 radarForwardUi = ini.rfind("# ui: SRV turret radar forward | range 0..150 | step 5 | unit cm | zero exact | recommended 50 | live\n", radarForward),
+                 panelsUi = ini.rfind("# ui: SRV turret panels back | range 0..200 | step 5 | unit cm | zero exact | recommended 135 | live\n", panels),
+                 radarUi = ini.rfind("# ui: SRV turret radar back | range 0..200 | step 5 | unit cm | zero exact | recommended 0 | live\n", radar),
+                 gapUi = ini.rfind("# ui: SRV turret HUD gap | range 0..200 | step 2 | unit cm | zero exact | recommended 0 | live\n", gap),
+                 depthUi = ini.rfind("# ui: SRV turret HUD depth | choices front, game, real | recommended game | live\n", depth),
+                 scissorUi = ini.rfind("# ui: SRV turret HUD screen limit | choices open, game | recommended open | live\n", scissor);
     const bool ui = found(backUi) && back - backUi < 200 && found(forwardUi) && forward - forwardUi < 200 && found(radarForwardUi) && radarForward - radarForwardUi < 200 && found(panelsUi) && panels - panelsUi < 200 && found(radarUi) && radar - radarUi < 200 &&
                     found(gapUi) && gap - gapUi < 200 && found(depthUi) && depth - depthUi < 200 && found(scissorUi) && scissor - scissorUi < 200;
     // VR only: the flat profile's allow-list reads none of the keys
     const bool flatClean = !found(flatKeys.find("srv_turret"));
-    return inFix && ui && flatClean;
+    return inExperimental && ui && flatClean;
 }
 
 // the shader tables and build.bat.
@@ -356,15 +360,15 @@ static bool wiredTables(const std::string& shaderBuild, const std::string& varia
            found(shaderBuild.find("variants.insert(variants.end(), srvTurret.begin(), srvTurret.end());")) && found(shaderBuild.find("const TurretContract contracts[stm::kSignatureCount] = {")) &&
            found(variants.find("#include \"../../src/d3d11/srv_turret_hud_shader.h\""));
 }
-// The radar anchor moved in the game (fix.srv_turret_radar_anchor; srv_radar_anchor.cpp). srv_turret.cpp: the key read with its literal default and said on the settings line; the frame
+// The radar anchor moved in the game (experimental.srv_turret_radar_anchor; srv_radar_anchor.cpp). srv_turret.cpp: the key read with its literal default and said on the settings line; the frame
 // tick publishes the offset made from `on` (and from false in flat); a 5559BD94 draw the game's anchor carries is the game's own BEFORE it is counted, and its decline is group-off; the
 // draw path's switch needs the hook armed, the key not off and the placement holding our offset; the shutdown shuts the gates. The hooks: build 334925's identity, both prologues and
 // the vtables; the setter's callback ADDS the offset through the pure rule (srv_turret_math.h radarPlacementMove) and hands the original the sum, and no code writes the placement
 // fields itself (the first build's replace dropped the radar 1.96 m); the update's callback counts only and does integer work only before the original runs (XMM1 is the game's dt).
-// edvr.ini ships the key in [fix] with its menu row; build.bat compiles the file; the address audit lists it as exact-build only.
+// edvr.ini ships the key in [experimental] with its ui: line (no menu token), default camera; build.bat compiles the file; the address audit lists it as exact-build only.
 static bool wiredAnchor(const std::string& module, const std::string& hook, const std::string& ini, const std::string& build, const std::string& audit) {
     const size_t npos = std::string::npos;
-    const size_t key = module.find("cfg.getString(\"fix.srv_turret_radar_anchor\", \"on\")");
+    const size_t key = module.find("cfg.getString(\"experimental.srv_turret_radar_anchor\", \"camera\")");
     const size_t parsed = found(key) ? module.find("st::radarAnchorModeOf(anchorText.c_str())", key) : npos;
     const size_t tick = module.find("void srvTurretFrameTick(uint32_t frameNo) {");
     const size_t flat = found(tick) ? module.find("anchorTick(false, frameNo, 0);", tick) : npos;
@@ -429,9 +433,10 @@ static bool wiredAnchor(const std::string& module, const std::string& hook, cons
     const bool directed = found(kept) && found(pairedK) && found(along) && found(unled) && found(carried) && found(rule) && carried < rule && found(ringed) && found(shownBy) &&
                           found(newest) && !found(hook.find("leadAim")) && !found(hook.find("extrapolateAim")) && found(getterCheck) && found(getterCall) && getterCheck < getterCall &&
                           found(hook.find("const uint64_t nowSeq = nativeTemporalFrameSequence();"));
-    const size_t fix = ini.find("\n[fix]\n"), visual = ini.find("\n[visual]\n"), shipped = ini.find("\nsrv_turret_radar_anchor = on\n");
-    const size_t ui = found(shipped) ? ini.rfind("# ui: SRV turret radar anchor | choices on, reversed, off, camera | recommended on | live | menu", shipped) : npos;
-    const bool iniOk = found(fix) && found(visual) && found(shipped) && shipped > fix && shipped < visual && found(ui) && shipped - ui < 200;
+    const size_t experimental = ini.find("\n[experimental]\n"), shipped = ini.find("\nsrv_turret_radar_anchor = camera\n");
+    const size_t nextSection = found(experimental) ? ini.find("\n[", experimental + 1) : npos, end = found(nextSection) ? nextSection : ini.size();
+    const size_t ui = found(shipped) ? ini.rfind("# ui: SRV turret radar anchor | choices on, reversed, off, camera | recommended camera | live\n", shipped) : npos;
+    const bool iniOk = found(experimental) && found(shipped) && shipped > experimental && shipped < end && found(ui) && shipped - ui < 200;
     const size_t source = build.find("\"src\\d3d11\\srv_radar_anchor.cpp\"");
     const bool buildOk = found(source) && source < build.find("ERROR: compile failed");
     const bool auditOk = found(audit.find("(\"d3d11/srv_radar_anchor.cpp\", \"the SRV radar anchor's exact-build hooks: the placement setter, the update counter, the slot camera\")"));
@@ -620,19 +625,19 @@ static void wiringCases() {
     check(!wiredModule(replaced(module, "shaderSwapCreateGs(ctx, kShader[f].bytecode", "shaderSwapCreateGs(ctx, kSupercruiseBarsGsBytecode")), "control: another shader's bytecode trips the pin");
     check(!wiredModule(replaced(module, "const auto begun = g_binding.begin(ctx, twin ? g_soGs[sig] : g_gs[sig], constants, st::directSetGs, needScene ? &scene : nullptr);", "ctx->GSSetShader(g_gs[sig], nullptr, 0); const auto begun = g_binding.begin(ctx, twin ? g_soGs[sig] : g_gs[sig], constants, st::directSetGs, needScene ? &scene : nullptr);")),
           "control: a raw geometry-stage set outside the binding trips the pin");
-    check(!wiredModule(replaced(module, "\"fix.srv_turret_hud_gap\", 0, 0, 200", "\"fix.srv_turret_hud_gap\", 96, 0, 200")), "control: a drifted default of the gap trips the pin");
-    check(!wiredModule(replaced(module, "\"fix.srv_turret_panels_back\", 120, 0, 200", "\"fix.srv_turret_panels_back\", 110, 0, 200")), "control: a drifted default of the panels' push trips the pin");
-    check(!wiredModule(replaced(module, "\"fix.srv_turret_radar_back\", 0, 0, 200", "\"fix.srv_turret_radar_back\", 0, 0, 150")), "control: a drifted range of the radar's push trips the pin");
-    check(!wiredModule(replaced(module, "\"fix.srv_turret_hud_forward\", 70, 0, 150", "\"fix.srv_turret_hud_forward\", 60, 0, 150")), "control: a drifted default of the HUD-forward key trips the pin");
-    check(!wiredModule(replaced(module, "\"fix.srv_turret_camera_back\", 0, 0, 150", "\"fix.srv_turret_camera_back\", 60, 0, 150")), "control: the camera key back at 60 trips the pin");
+    check(!wiredModule(replaced(module, "\"experimental.srv_turret_hud_gap\", 0, 0, 200", "\"experimental.srv_turret_hud_gap\", 96, 0, 200")), "control: a drifted default of the gap trips the pin");
+    check(!wiredModule(replaced(module, "\"experimental.srv_turret_panels_back\", 135, 0, 200", "\"experimental.srv_turret_panels_back\", 110, 0, 200")), "control: a drifted default of the panels' push trips the pin");
+    check(!wiredModule(replaced(module, "\"experimental.srv_turret_radar_back\", 0, 0, 200", "\"experimental.srv_turret_radar_back\", 0, 0, 150")), "control: a drifted range of the radar's push trips the pin");
+    check(!wiredModule(replaced(module, "\"experimental.srv_turret_hud_forward\", 65, 0, 150", "\"experimental.srv_turret_hud_forward\", 60, 0, 150")), "control: a drifted default of the HUD-forward key trips the pin");
+    check(!wiredModule(replaced(module, "\"experimental.srv_turret_camera_back\", 25, 0, 150", "\"experimental.srv_turret_camera_back\", 60, 0, 150")), "control: the camera key back at 60 trips the pin");
     check(!wiredModule(replaced(module, "if (!paramsOfGroup(group, st::EyeFrame{}, unused)) return false;", "")), "control: a draw counted and refused before its group is known to be on trips the pin");
     check(!wiredModule(replaced(module, "if (!paramsOfGroup(group, frame, params)) return false;", "params = st::paramsFor(frame, 0.96f);")), "control: constants made from the pull alone (the push ignored) trip the pin");
     check(!wiredModule(replaced(module, "\"moves %.2f m deeper\"", "\"moves %.2f m nearer\"")), "control: a first-draw line that calls a push 'nearer' trips the pin");
     check(!wiredModule(replaced(module, "g_anchor.step(headAt, on, backCm, forwardCm, radarForwardCm)", "g_anchor.step(headAt, on, backCm, backCm, radarForwardCm)")), "control: an anchor that does not see the HUD-forward key trips the pin");
     check(!wiredModule(replaced(module, "g_anchor.step(headAt, on, backCm, forwardCm, radarForwardCm)", "g_anchor.step(headAt, on, backCm, forwardCm, forwardCm)")), "control: an anchor that does not see the radar-forward key trips the pin");
-    check(!wiredModule(replaced(module, "\"fix.srv_turret_radar_forward\", 70, 0, 150", "\"fix.srv_turret_radar_forward\", 60, 0, 150")), "control: a drifted default of the radar-forward key trips the pin");
-    check(!wiredModule(replaced(module, "cfg.getString(\"fix.srv_turret_hud_depth\", \"front\")", "cfg.getString(\"fix.srv_turret_hud_depth\", \"game\")")), "control: a drifted default of the depth key (front) trips the pin");
-    check(!wiredModule(replaced(module, "cfg.getString(\"fix.srv_turret_hud_scissor\", \"open\")", "cfg.getString(\"fix.srv_turret_hud_scissor\", \"game\")")), "control: a drifted default of the scissor key (open) trips the pin");
+    check(!wiredModule(replaced(module, "\"experimental.srv_turret_radar_forward\", 50, 0, 150", "\"experimental.srv_turret_radar_forward\", 60, 0, 150")), "control: a drifted default of the radar-forward key trips the pin");
+    check(!wiredModule(replaced(module, "cfg.getString(\"experimental.srv_turret_hud_depth\", \"game\")", "cfg.getString(\"experimental.srv_turret_hud_depth\", \"front\")")), "control: a drifted default of the depth key (game) trips the pin");
+    check(!wiredModule(replaced(module, "cfg.getString(\"experimental.srv_turret_hud_scissor\", \"open\")", "cfg.getString(\"experimental.srv_turret_hud_scissor\", \"game\")")), "control: a drifted default of the scissor key (open) trips the pin");
     check(!wiredModule(replaced(module, "const auto opened = g_scissor.open(ctx, seen, apply);", "const auto opened = st::Scissor::Open::kOff;")), "control: a scissor that is never opened trips the pin");
     check(!wiredModule(replaced(module, "if (!g_scissor.restore(ctx) && !g_scissorRestoreNoted) {", "if (false) {")), "control: the game's scissor rectangles never put back trip the pin");
     check(!wiredModule(replaced(module, "g_scissor.owed() || !ensureGs(ctx, sig)", "!ensureGs(ctx, sig)")), "control: a draw issued while the scissor rectangles are owed back trips the pin");
@@ -642,7 +647,7 @@ static void wiringCases() {
     check(!wiredModule(replaced(module, "const bool needScene = sig == st::kSceneSignature;", "const bool needScene = false;")), "control: the Scorpion hologram's draw without the vertex constants trips the pin");
     check(!wiredModule(replaced(module, "if (needScene && !st::readGameCb(ctx, st::kGameCbSlot, scene)) {", "if (false) {")), "control: the vertex constants never read trip the pin");
     check(!wiredModule(replaced(module, ", st::directSetGs, needScene ? &scene : nullptr)", ")")), "control: the vertex constants read but never bound trip the pin");
-    check(!wiredModule(replaced(module, "\"fix.srv_turret_radar_forward\", 70, 0, 150", "\"fix.srv_turret_radar_forward\", 70, 0, 100")), "control: a drifted range of the radar-forward key trips the pin");
+    check(!wiredModule(replaced(module, "\"experimental.srv_turret_radar_forward\", 50, 0, 150", "\"experimental.srv_turret_radar_forward\", 50, 0, 100")), "control: a drifted range of the radar-forward key trips the pin");
     check(!wiredModule(replaced(module, "st::forwardCmOf(group, g_forwardCm.load(std::memory_order_relaxed), g_radarForwardCm.load(std::memory_order_relaxed)), out))", "g_forwardCm.load(std::memory_order_relaxed), out))")),
           "control: the radar group made to use the HUD-forward distance (the thin sliver) trips the pin");
     check(!wiredModule(replaced(module, "if (!drawEyeFrame(eye, frame)) {", "if (!readEye(eye, frame)) {")), "control: a draw that uses the tick's frames (a frame old) trips the pin");
@@ -702,20 +707,23 @@ static void wiringCases() {
           "control: a frame sequence published before the shift is copied (a reader would see a half-built frame) trips the pin");
     check(!wiredAccessors(journal, replaced(temporal, "g_recommended.store(0,std::memory_order_release);g_frameSequence.store(0,std::memory_order_release);", "g_recommended.store(0,std::memory_order_release);"), journalH),
           "control: a frame sequence that survives an invalidate trips the pin");
-    check(wiredKeys(ini, flatKeys), "edvr.ini: all seven keys in [fix] with their menu rows and shipped defaults; the flat profile's allow-list names none");
+    check(wiredKeys(ini, flatKeys), "edvr.ini: the eight keys in [experimental] with their ui: lines (no menu token) and the flown defaults; the flat profile's allow-list names none");
     check(!wiredKeys(replaced(ini, "\nsrv_turret_hud_gap = 0\n", "\nsrv_turret_hud_gap = 96\n"), flatKeys), "control: a drifted shipped default of the gap trips the pin");
-    check(!wiredKeys(replaced(ini, "\nsrv_turret_panels_back = 120\n", "\nsrv_turret_panels_back = 110\n"), flatKeys), "control: a drifted shipped default of the panels' push trips the pin");
-    check(!wiredKeys(replaced(ini, "\nsrv_turret_hud_forward = 70\n", "\nsrv_turret_hud_forward = 0\n"), flatKeys), "control: a drifted shipped default of the HUD-forward key trips the pin");
-    check(!wiredKeys(replaced(ini, "\nsrv_turret_radar_forward = 70\n", "\nsrv_turret_radar_forward = 0\n"), flatKeys), "control: a drifted shipped default of the radar-forward key trips the pin");
-    check(!wiredKeys(replaced(ini, "\nsrv_turret_hud_depth = front\n", "\nsrv_turret_hud_depth = game\n"), flatKeys), "control: a drifted shipped default of the depth key trips the pin");
-    check(!wiredKeys(replaced(ini, "# ui: SRV turret HUD depth | choices front, game, real | recommended front", "# ui: SRV turret HUD depth | choices front, game, real | recommended game"), flatKeys), "control: a drifted recommendation of the depth key trips the pin");
+    check(!wiredKeys(replaced(ini, "\nsrv_turret_panels_back = 135\n", "\nsrv_turret_panels_back = 110\n"), flatKeys), "control: a drifted shipped default of the panels' push trips the pin");
+    check(!wiredKeys(replaced(ini, "\nsrv_turret_hud_forward = 65\n", "\nsrv_turret_hud_forward = 0\n"), flatKeys), "control: a drifted shipped default of the HUD-forward key trips the pin");
+    check(!wiredKeys(replaced(ini, "\nsrv_turret_radar_forward = 50\n", "\nsrv_turret_radar_forward = 0\n"), flatKeys), "control: a drifted shipped default of the radar-forward key trips the pin");
+    check(!wiredKeys(replaced(ini, "\nsrv_turret_camera_back = 25\n", "\nsrv_turret_camera_back = 0\n"), flatKeys), "control: a drifted shipped default of the camera key trips the pin");
+    check(!wiredKeys(replaced(ini, "\nsrv_turret_hud_depth = game\n", "\nsrv_turret_hud_depth = front\n"), flatKeys), "control: a drifted shipped default of the depth key trips the pin");
+    check(!wiredKeys(replaced(ini, "# ui: SRV turret HUD depth | choices front, game, real | recommended game", "# ui: SRV turret HUD depth | choices front, game, real | recommended front"), flatKeys), "control: a drifted recommendation of the depth key trips the pin");
+    check(!wiredKeys(replaced(ini, "recommended 25 | live\n", "recommended 25 | live | menu\n"), flatKeys), "control: a menu token on an [experimental] key (the generator refuses it) trips the pin");
+    check(!wiredKeys(replaced(ini, "\n[experimental]\n", "\n[fix]\n"), flatKeys), "control: the keys outside [experimental] trip the pin");
     check(!wiredKeys(ini, flatKeys + "\nsrv_turret_hud_depth\n"), "control: the depth key on the flat allow-list trips the pin");
     check(!wiredKeys(replaced(ini, "\nsrv_turret_hud_scissor = open\n", "\nsrv_turret_hud_scissor = game\n"), flatKeys), "control: a drifted shipped default of the scissor key trips the pin");
     check(!wiredKeys(replaced(ini, "# ui: SRV turret HUD screen limit | choices open, game", "# ui: SRV turret HUD screen limit | choices open"), flatKeys), "control: a drifted menu row of the scissor key trips the pin");
     check(!wiredKeys(ini, flatKeys + "\nsrv_turret_hud_scissor\n"), "control: the scissor key on the flat allow-list trips the pin");
     check(!wiredKeys(replaced(ini, "# ui: SRV turret radar forward | range 0..150 | step 5", "# ui: SRV turret radar forward | range 0..150 | step 10"), flatKeys), "control: a drifted menu row of the radar-forward key trips the pin");
     check(!wiredKeys(ini, flatKeys + "\nsrv_turret_radar_forward\n"), "control: the radar-forward key on the flat allow-list trips the pin");
-    check(!wiredKeys(replaced(ini, "\nsrv_turret_camera_back = 0\n", "\nsrv_turret_camera_back = 60\n"), flatKeys), "control: the camera key shipped at 60 trips the pin");
+    check(!wiredKeys(replaced(ini, "\nsrv_turret_camera_back = 25\n", "\nsrv_turret_camera_back = 60\n"), flatKeys), "control: the camera key shipped at 60 trips the pin");
     check(!wiredKeys(replaced(ini, "# ui: SRV turret radar back | range 0..200 | step 5", "# ui: SRV turret radar back | range 0..200 | step 10"), flatKeys), "control: a drifted menu row of the radar's push trips the pin");
     check(!wiredKeys(ini, flatKeys + "\nsrv_turret_hud_gap\n"), "control: the gap key on the flat allow-list trips the pin");
     check(!wiredKeys(ini, flatKeys + "\nsrv_turret_radar_back\n"), "control: the radar key on the flat allow-list trips the pin");
@@ -724,7 +732,7 @@ static void wiringCases() {
     check(wiredAnchor(module, anchorHook, ini, build, audit), "the radar anchor: the key, its publish from the frame tick, the billboards left to the game before they are counted, the hooks' pins, "
                                                               "the setter's add through the pure rule, the integer-only update counter that writes nothing, the ini row, the compile list and the audit's "
                                                               "exact-only entry");
-    check(!wiredAnchor(replaced(module, "cfg.getString(\"fix.srv_turret_radar_anchor\", \"on\")", "cfg.getString(\"fix.srv_turret_radar_anchor\", \"off\")"), anchorHook, ini, build, audit),
+    check(!wiredAnchor(replaced(module, "cfg.getString(\"experimental.srv_turret_radar_anchor\", \"camera\")", "cfg.getString(\"experimental.srv_turret_radar_anchor\", \"off\")"), anchorHook, ini, build, audit),
           "control: a drifted default of the radar anchor key trips the pin");
     check(!wiredAnchor(replaced(module, "anchorTick(on, frameNo, radarForwardCm);", "anchorTick(turret, frameNo, radarForwardCm);"), anchorHook, ini, build, audit),
           "control: an offset published for the turret view alone (the Scarab's too) trips the pin");
@@ -820,9 +828,13 @@ static void wiringCases() {
     check(!wiredSlotCamera(module, replaced(anchorHook, "    const float back = floatOf(s->slotBack.load(std::memory_order_relaxed));\n", "    const float back = floatOf(s->slotBack.load(std::memory_order_relaxed));\n    Log::get().note(\"slot\");\n"), mathText),
           "control: a slot hook that logs on the game thread trips the pin");
     check(!wiredSlotCamera(replaced(module, "    if (family == 7 && billboardKind(ctx, lastFrameOnly) != 0) return false;\n", ""), anchorHook, mathText), "control: camera mode leaving the radar's own billboards to the game trips the pin");
-    check(!wiredSlotCamera(replaced(module, "srvRadarSlotPublish(st::radarCameraBackM(on, mode, radarForwardCm));", "srvRadarSlotPublish(0.0f);"), anchorHook, mathText), "control: no back distance published trips the pin");    check(!wiredAnchor(module, anchorHook, replaced(ini, "\nsrv_turret_radar_anchor = on\n", "\nsrv_turret_radar_anchor = off\n"), build, audit), "control: a drifted shipped default of the radar anchor key trips the pin");
+    check(!wiredSlotCamera(replaced(module, "srvRadarSlotPublish(st::radarCameraBackM(on, mode, radarForwardCm));", "srvRadarSlotPublish(0.0f);"), anchorHook, mathText), "control: no back distance published trips the pin");
+    check(!wiredAnchor(module, anchorHook, replaced(ini, "\nsrv_turret_radar_anchor = camera\n", "\nsrv_turret_radar_anchor = off\n"), build, audit), "control: a drifted shipped default of the radar anchor key trips the pin");
     check(!wiredAnchor(module, anchorHook, replaced(ini, "# ui: SRV turret radar anchor | choices on, reversed, off, camera", "# ui: SRV turret radar anchor | choices on, reversed, off"), build, audit),
           "control: a drifted menu row of the radar anchor key trips the pin");
+    check(!wiredAnchor(module, anchorHook, replaced(ini, "recommended camera | live\n", "recommended on | live\n"), build, audit), "control: a drifted recommendation of the radar anchor key trips the pin");
+    check(!wiredAnchor(module, anchorHook, replaced(ini, "recommended camera | live\n", "recommended camera | live | menu\n"), build, audit), "control: a menu token on the radar anchor key (the generator refuses it) trips the pin");
+    check(!wiredAnchor(module, anchorHook, replaced(ini, "\n[experimental]\n", "\n[fix]\n"), build, audit), "control: the radar anchor key outside [experimental] trips the pin");
     check(!wiredAnchor(module, anchorHook, ini, replaced(build, "\"src\\d3d11\\srv_radar_anchor.cpp\"", ""), audit), "control: the hook outside the compile list trips the pin");
     check(!wiredAnchor(module, anchorHook, ini, build, replaced(audit, "(\"d3d11/srv_radar_anchor.cpp\", \"the SRV radar anchor's exact-build hooks: the placement setter, the update counter, the slot camera\")", "")), "control: the hook not listed as exact-build only trips the pin");
     check(!wiredKeys(ini, flatKeys + "\nsrv_turret_radar_anchor\n"), "control: the radar anchor key on the flat allow-list trips the pin");

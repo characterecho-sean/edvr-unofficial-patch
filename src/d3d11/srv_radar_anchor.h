@@ -1,4 +1,4 @@
-// The SRV radar's anchor moved in the game (issue 140; TEMPORARY key fix.srv_turret_radar_anchor; docs\srv-turret-hud-2026-10-30.md, "the radar placement moved through its
+// The SRV radar's anchor moved in the game (issue 140; TEMPORARY key experimental.srv_turret_radar_anchor; docs\srv-turret-hud-2026-10-30.md, "the radar placement moved through its
 // setter").
 //
 // The Scorpion's radar disc is a game hologram: the radar's terrain schematic is drawn from the live camera into a texture and shown on a billboard (vs 5559BD94). At the stock
@@ -102,7 +102,7 @@ struct RadarAnchorStats {
 };
 RadarAnchorStats srvRadarAnchorStats();
 
-// THE SLOT CAMERA (TEMPORARY, fix.srv_turret_radar_anchor = camera; docs\srv-turret-hud-2026-10-30.md, "the radar's own camera moved back"). A third hook, build 334925 only, on the
+// THE SLOT CAMERA (TEMPORARY, experimental.srv_turret_radar_anchor = camera; docs\srv-turret-hud-2026-10-30.md, "the radar's own camera moved back"). A third hook, build 334925 only, on the
 // schematic slot's update 0x36BF3C0 (RCX = the slot, RDX = the camera it frames, gates, billboards and renders its picture from): for the radar's slots (srv_turret_math.h
 // radarSlotTest: the terrain disc's and the Scorpion icon's, both lists, so both eyes) while a back distance is published, the original gets a private copy of the camera moved back by it
 // along the turret's forward (st::radarCameraBack, st::cameraMoveBy); every other call gets the game's camera. Once (later calls return the first answer): verify the build and the

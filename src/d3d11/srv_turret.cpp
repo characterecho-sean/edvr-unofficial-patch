@@ -48,8 +48,8 @@ namespace st = srv_turret;
 
 namespace {
 
-static_assert(st::kBackDefaultCm == 0 && st::kBackMaxCm == 150 && st::kForwardDefaultCm == 70 && st::kForwardMaxCm == 150 && st::kRadarForwardDefaultCm == 70 && st::kRadarForwardMaxCm == 150 &&
-                  st::kPanelsDefaultCm == 120 && st::kRadarDefaultCm == 0 &&
+static_assert(st::kBackDefaultCm == 25 && st::kBackMaxCm == 150 && st::kForwardDefaultCm == 65 && st::kForwardMaxCm == 150 && st::kRadarForwardDefaultCm == 50 && st::kRadarForwardMaxCm == 150 &&
+                  st::kPanelsDefaultCm == 135 && st::kRadarDefaultCm == 0 &&
                   st::kPushMaxCm == 200 && st::kGapDefaultCm == 0 && st::kGapMaxCm == 200,
               "the literals in the integer reads below are these, written as numbers for tools/gen_settings_schema.py");
 constexpr uint32_t kFamilyN = st::kFamilyCount, kSigN = st::kSignatureCount;   // the draws' families, and the geometry shaders (one for each distinct output signature)
@@ -58,11 +58,11 @@ constexpr uint32_t kFamilyN = st::kFamilyCount, kSigN = st::kSignatureCount;   /
 bool g_keysRead = false;
 uint32_t g_keysGeneration = 0;
 std::atomic<int> g_backCm{0}, g_forwardCm{0}, g_radarForwardCm{0}, g_panelsCm{0}, g_radarCm{0}, g_gapCm{0};   // TEMPORARY keys, as last read (the five HUD keys are read by the draw path too)
-static_assert(st::kDepthDefault == st::DepthMode::kFront, "the literal default of fix.srv_turret_hud_depth in readKeys is front, which the ini ships");
-std::atomic<int> g_depthMode{static_cast<int>(st::kDepthDefault)};   // fix.srv_turret_hud_depth as a st::DepthMode (0 game, 1 real, 2 front)
-std::atomic<bool> g_scissorOpen{true};      // fix.srv_turret_hud_scissor: open (the default) or game
-static_assert(st::kRadarAnchorDefault == st::RadarAnchorMode::kOn, "the literal default of fix.srv_turret_radar_anchor in readKeys is on, which the ini ships");
-std::atomic<int> g_anchorMode{static_cast<int>(st::kRadarAnchorDefault)};   // fix.srv_turret_radar_anchor as a st::RadarAnchorMode (0 on, 1 reversed, 2 off)
+static_assert(st::kDepthDefault == st::DepthMode::kGame, "the literal default of experimental.srv_turret_hud_depth in readKeys is game, which the ini ships");
+std::atomic<int> g_depthMode{static_cast<int>(st::kDepthDefault)};   // experimental.srv_turret_hud_depth as a st::DepthMode (0 game, 1 real, 2 front)
+std::atomic<bool> g_scissorOpen{true};      // experimental.srv_turret_hud_scissor: open (the default) or game
+static_assert(st::kRadarAnchorDefault == st::RadarAnchorMode::kCamera, "the literal default of experimental.srv_turret_radar_anchor in readKeys is camera, which the ini ships");
+std::atomic<int> g_anchorMode{static_cast<int>(st::kRadarAnchorDefault)};   // experimental.srv_turret_radar_anchor as a st::RadarAnchorMode (0 on, 1 reversed, 2 off, 3 camera)
 bool g_on = false;                          // the Scorpion's turret view, as the frame tick last saw it
 bool g_ignored = false;                     // the turret view is on but the vehicle is not the Scorpion: said once for each stay
 double g_backSeatedZ = 0.0;                 // what alignTick adds
@@ -147,7 +147,7 @@ ID3D11Device* g_gsDevice = nullptr;   // identity only: the shaders hold their d
 bool g_gsTried = false;
 st::Constants g_constants[2];
 st::Binding g_binding;
-st::Scissor g_scissor;                         // the game's scissor rectangles while a bound draw is issued (fix.srv_turret_hud_scissor)
+st::Scissor g_scissor;                         // the game's scissor rectangles while a bound draw is issued (experimental.srv_turret_hud_scissor)
 std::atomic<uint32_t> g_scissorOpened{0};      // draws whose scissor was opened in the 10 s window
 bool g_scissorNoted[kFamilyN] = {}, g_scissorRestoreNoted = false;
 // The unmoved family draws (srv_turret_math.h UnmovedRoute), counted per family (the extra row: unknown) and route from any thread; the 10 s line spells the window's counts and the first of each
@@ -239,16 +239,16 @@ void readKeys() {
     Config& cfg = Config::get();
     const uint32_t generation = cfg.generation();
     if (g_keysRead && generation == g_keysGeneration) return;
-    const int back = cfg.getIntInRange("fix.srv_turret_camera_back", 0, 0, 150);
-    const int forward = cfg.getIntInRange("fix.srv_turret_hud_forward", 70, 0, 150);
-    const int radarForward = cfg.getIntInRange("fix.srv_turret_radar_forward", 70, 0, 150);
-    const int panels = cfg.getIntInRange("fix.srv_turret_panels_back", 120, 0, 200);
-    const int radar = cfg.getIntInRange("fix.srv_turret_radar_back", 0, 0, 200);
-    const int gap = cfg.getIntInRange("fix.srv_turret_hud_gap", 0, 0, 200);
-    const std::string depthText = cfg.getString("fix.srv_turret_hud_depth", "front");
+    const int back = cfg.getIntInRange("experimental.srv_turret_camera_back", 25, 0, 150);
+    const int forward = cfg.getIntInRange("experimental.srv_turret_hud_forward", 65, 0, 150);
+    const int radarForward = cfg.getIntInRange("experimental.srv_turret_radar_forward", 50, 0, 150);
+    const int panels = cfg.getIntInRange("experimental.srv_turret_panels_back", 135, 0, 200);
+    const int radar = cfg.getIntInRange("experimental.srv_turret_radar_back", 0, 0, 200);
+    const int gap = cfg.getIntInRange("experimental.srv_turret_hud_gap", 0, 0, 200);
+    const std::string depthText = cfg.getString("experimental.srv_turret_hud_depth", "game");
     const st::DepthMode depth = st::depthModeOf(depthText.c_str());
-    const bool scissorOpen = cfg.getString("fix.srv_turret_hud_scissor", "open") != "game";
-    const std::string anchorText = cfg.getString("fix.srv_turret_radar_anchor", "on");
+    const bool scissorOpen = cfg.getString("experimental.srv_turret_hud_scissor", "open") != "game";
+    const std::string anchorText = cfg.getString("experimental.srv_turret_radar_anchor", "camera");
     const st::RadarAnchorMode anchorMode = st::radarAnchorModeOf(anchorText.c_str());
     const bool changed = !g_keysRead || back != g_backCm.load(std::memory_order_relaxed) || forward != g_forwardCm.load(std::memory_order_relaxed) ||
                          radarForward != g_radarForwardCm.load(std::memory_order_relaxed) || panels != g_panelsCm.load(std::memory_order_relaxed) || radar != g_radarCm.load(std::memory_order_relaxed) ||
@@ -267,8 +267,8 @@ void readKeys() {
     g_anchorMode.store(static_cast<int>(anchorMode), std::memory_order_relaxed);
     if (changed)
         Log::get().note("srv turret settings: camera back %d cm, hud forward %d cm, radar forward %d cm, panels back %d cm, radar back %d cm, hud gap %d cm, hud depth %s, hud scissor %s, radar anchor %s (live; "
-                        "fix.srv_turret_camera_back, fix.srv_turret_hud_forward, fix.srv_turret_radar_forward, fix.srv_turret_panels_back, fix.srv_turret_radar_back, fix.srv_turret_hud_gap, "
-                        "fix.srv_turret_hud_depth, fix.srv_turret_hud_scissor and fix.srv_turret_radar_anchor, TEMPORARY; 0 is the game's own; the depth key is front, game or real, the scissor key "
+                        "experimental.srv_turret_camera_back, experimental.srv_turret_hud_forward, experimental.srv_turret_radar_forward, experimental.srv_turret_panels_back, experimental.srv_turret_radar_back, experimental.srv_turret_hud_gap, "
+                        "experimental.srv_turret_hud_depth, experimental.srv_turret_hud_scissor and experimental.srv_turret_radar_anchor, TEMPORARY; 0 is the game's own; the depth key is front, game or real, the scissor key "
                         "open or game, the radar anchor key on, reversed, off or camera)",
                         back, forward, radarForward, panels, radar, gap, st::depthModeName(depth), scissorOpen ? "open" : "game", st::radarAnchorModeName(anchorMode));
 }
@@ -279,7 +279,7 @@ bool paramsOfGroup(st::Group group, const st::EyeFrame& frame, st::TurretParams&
     if (!st::paramsForGroup(frame, group, st::pushCmOf(group, g_panelsCm.load(std::memory_order_relaxed), g_radarCm.load(std::memory_order_relaxed)), g_gapCm.load(std::memory_order_relaxed),
                             st::forwardCmOf(group, g_forwardCm.load(std::memory_order_relaxed), g_radarForwardCm.load(std::memory_order_relaxed)), out))
         return false;
-    out = st::withDepth(out, static_cast<st::DepthMode>(g_depthMode.load(std::memory_order_relaxed)));   // fix.srv_turret_hud_depth
+    out = st::withDepth(out, static_cast<st::DepthMode>(g_depthMode.load(std::memory_order_relaxed)));   // experimental.srv_turret_hud_depth
     return true;
 }
 
@@ -1411,13 +1411,13 @@ void radarCamBoundary(ID3D11DeviceContext* ctx) {
     }
 }
 
-// ---- the radar anchor moved in the game (TEMPORARY key fix.srv_turret_radar_anchor; srv_radar_anchor.h) ----------------------------------------------------------------------
+// ---- the radar anchor moved in the game (TEMPORARY key experimental.srv_turret_radar_anchor; srv_radar_anchor.h) ----------------------------------------------------------------------
 // The frame tick arms the hooks the first time the Scorpion's turret view is on with the key asking for a move, publishes the offset every frame (zero off the view and in flat:
 // the game's next setter call then gets its own placement) and says what the hooks did; the hooks never log. While the last setter call for the radar left our offset in its
 // placement (added, or our own value fed back) the draw path leaves the two 5559BD94 billboard families to the game (g_anchorYield), so the picture the game now frames and places
 // itself is not moved a second time. The setter is not called by EDVR: a key change reaches the game at its next call (the 10 s line counts the calls).
 std::atomic<bool> g_anchorYield{false};
-// CAMERA MODE (fix.srv_turret_radar_anchor = camera; srv_turret_math.h THE RADAR'S OWN CAMERA): set by the frame tick while the view is on in camera mode; the draw path then sends the radar's
+// CAMERA MODE (experimental.srv_turret_radar_anchor = camera; srv_turret_math.h THE RADAR'S OWN CAMERA): set by the frame tick while the view is on in camera mode; the draw path then sends the radar's
 // own picture billboards through the regular radar path and leaves every other 5559BD94 draw to the game (cameraLeaves).
 std::atomic<bool> g_cameraBillboards{false};
 
@@ -1772,11 +1772,11 @@ void anchorTick(bool on, uint32_t frameNo, int radarForwardCm) {
         char tail[600] = "";
         if (a.state != RadarAnchorHookState::Armed)
             std::snprintf(tail, sizeof(tail), " -- hook not armed: %s",
-                          a.state == RadarAnchorHookState::StoodDown ? srvRadarAnchorWhy() : "fix.srv_turret_radar_anchor was off while the view was on");
+                          a.state == RadarAnchorHookState::StoodDown ? srvRadarAnchorWhy() : "experimental.srv_turret_radar_anchor was off while the view was on");
         else if (n == 0 && ours == 0 && w.asked)
             std::snprintf(tail, sizeof(tail), " -- NEVER RAN: the radar schematic's placement setter was not called with the radar object while the view was on");
         else if (n == 0 && ours == 0)
-            std::snprintf(tail, sizeof(tail), " -- not asked: fix.srv_turret_radar_anchor was off or radar forward 0 while the view was on");
+            std::snprintf(tail, sizeof(tail), " -- not asked: experimental.srv_turret_radar_anchor was off or radar forward 0 while the view was on");
         Log::get().note("srv turret radar anchor: view off: moved in %llu calls%s%s", static_cast<unsigned long long>(n), also, tail);
     }
     w.on = on;
@@ -1899,7 +1899,7 @@ void anchorWindow(bool seen) {
 
 bool anchorLeaves(int family) { return st::radarAnchorLeavesFamily(family) && g_anchorYield.load(std::memory_order_relaxed); }
 
-// ---- THE DRAW-TIME CORRECTION (TEMPORARY, with fix.srv_turret_radar_anchor; srv_turret_math.h THE SHAKE) ---------------------------------------------------------------------------
+// ---- THE DRAW-TIME CORRECTION (TEMPORARY, with experimental.srv_turret_radar_anchor; srv_turret_math.h THE SHAKE) ---------------------------------------------------------------------------
 // While the anchor yield is on, a draw of the radar's own picture billboard (family 7, ps EA02FAC2, whose t4 is a texture the radar's writers drew into: the terrain schematic vs
 // 4EDE4BC9, or vs 5B0068AF into a 256x256 target, the Scorpion icon) is moved through signature H's geometry shader by delta = desired - used, in the world, turned into the eye's space
 // with that draw's own camera rows. used is the offset the setter call this frame's camera write shows left in force, desired is s * F along this frame's true u. Family 8 (E95634B0)
@@ -2180,7 +2180,7 @@ struct FrameMove {
 FrameMove g_frameMove[2][2];   // [eye][kind - 1]
 double g_refNdc[2][2] = {};    // [eye]: the comparison point
 
-// ---- THE LOCK (TEMPORARY, with fix.srv_turret_radar_anchor; srv_turret_math.h THE LOCK) ----------------------------------------------------------------------------------------------------
+// ---- THE LOCK (TEMPORARY, with experimental.srv_turret_radar_anchor; srv_turret_math.h THE LOCK) ----------------------------------------------------------------------------------------------------
 // Each radar billboard (disc, icon) is moved so its quad's centre lands on its own rest place in the seated frame, learned from the pair capture's pre-move centres while the turret and the
 // vehicle are still (st::RestWatch); before a kind's target is learned, and for a draw that is not a single quad, the correction keeps its delta. Render thread; the frame tick asks for the
 // resets (g_lockResetGen) and says the 10 s line.
@@ -3040,7 +3040,7 @@ bool radarCorrectionBegin(ID3D11DeviceContext* ctx, int family, int eye) {
     st::EyeFrame ef;
     if (!drawEyeFrame(eye, ef)) return leave(kCorrNoEyeFrame);
     for (int i = 0; i < 3; ++i) ef.tRadar[i] = locked ? tEye[i] : dEye[i];
-    // the translation alone (gap 0: every vertex moves by delta), and the game's own NDC depth (the hologram's scene-depth discard reads it), whatever fix.srv_turret_hud_depth says;
+    // the translation alone (gap 0: every vertex moves by delta), and the game's own NDC depth (the hologram's scene-depth discard reads it), whatever experimental.srv_turret_hud_depth says;
     // scaled to the content depth (THE CONTENT DEPTH: tr.w = 1 / z_c, or 0 for the plain delta)
     st::TurretParams cparams = st::withDepth(st::translateParamsFor(ef, st::Group::kRadar), st::DepthMode::kGame);
     cparams.invZc = radarContentInvDepth();
@@ -3484,7 +3484,7 @@ void srvTurretFrameTick(uint32_t frameNo) {
     }
     g_backSeatedZ = st::backSeatedZ(on, backCm);
     detail::g_srvTurretRadarCamOn.store(on, std::memory_order_relaxed);   // the radar picture's camera instrument (TEMPORARY)
-    anchorTick(on, frameNo, radarForwardCm);   // the radar's schematic moved in the game (TEMPORARY key fix.srv_turret_radar_anchor): zero unless `on`
+    anchorTick(on, frameNo, radarForwardCm);   // the radar's schematic moved in the game (TEMPORARY key experimental.srv_turret_radar_anchor): zero unless `on`
     const bool wanted = on && (panelsCm > 0 || radarCm > 0 || forwardCm > 0 || radarForwardCm > 0 || gapCm > 0);   // any of the five HUD keys; a group whose own keys are 0 is left alone per draw
     if (wanted) {
         cacheGeometry(on, backCm, forwardCm, radarForwardCm);

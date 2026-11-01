@@ -3686,7 +3686,7 @@ void STDMETHODCALLTYPE hookedUnmap(ID3D11DeviceContext* self, ID3D11Resource* re
         });
         // fix.ui_quality: cb1[120].z, kept by buffer for the hologram programs' relief radius in the layer (ui_holo_remap.h THE RELIEF; one load otherwise).
         if (uiLayerLive()) guardedBudget(g_uiLayerSceneBudget, [&] { uiLayerNoteSceneWrite(s->camResource, s->camData, s->camBytes); });
-        // Issue 140 (TEMPORARY, fix.srv_turret_radar_anchor): the live camera's right, up and forward (rows 277..279), kept by buffer for the SRV radar anchor's turret direction
+        // Issue 140 (TEMPORARY, experimental.srv_turret_radar_anchor): the live camera's right, up and forward (rows 277..279), kept by buffer for the SRV radar anchor's turret direction
         // while the Scorpion's turret view wants them (srv_turret.h srvTurretNoteCameraWrite; one relaxed load otherwise).
         if (srvTurretWantsCameraRows()) guardedBudget(g_srvTurretCameraBudget, [&] { srvTurretNoteCameraWrite(s->camResource, s->camData, s->camBytes); });
         s->camResource = nullptr;
@@ -4232,7 +4232,7 @@ void uiLayerSecondIssues(ID3D11DeviceContext* self, char kind, UINT count, UINT 
     }
 }
 
-// Issue 140 (TEMPORARY, fix.srv_turret_hud_forward, fix.srv_turret_radar_forward, fix.srv_turret_panels_back, fix.srv_turret_radar_back and fix.srv_turret_hud_gap; srv_turret.h): in the Scorpion's turret view the HUD is drawn by nine shader
+// Issue 140 (TEMPORARY, experimental.srv_turret_hud_forward, experimental.srv_turret_radar_forward, experimental.srv_turret_panels_back, experimental.srv_turret_radar_back and experimental.srv_turret_hud_gap; srv_turret.h): in the Scorpion's turret view the HUD is drawn by nine shader
 // pairs (srv_turret_math.h kFamilies): the two hologram families (vs 1989E6D3B405FDE0 with ps EAB8A1C95A13FFBE, and vs 2CECEC3065EF0D4A with ps A4D03619D631B186) that draw the weapon
 // panels, from records 0.27 to 0.70 m out, and the larger panels from records 1.3 m and deeper, and the radar-named billboard families and the target hologram sphere, which draw the
 // radar from 0.11 to 0.44 m. Their draws are issued through the signature's private geometry shader, which moves every vertex forward by its group's forward key (HUD forward for the panels, radar forward for the radar) and then, in 3D about a fixed
