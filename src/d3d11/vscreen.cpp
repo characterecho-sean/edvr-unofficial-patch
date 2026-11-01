@@ -115,7 +115,7 @@ std::atomic<bool> g_drawGateWanted{true};
 // frame boundary invalidates both once engine velocity needs them again.
 std::atomic<bool> g_aaOffDraw{false};
 std::atomic<bool> g_shadowsSkipped{false};
-// The three temporary keys of VR draw-path test build 1 (docsr-draw-path-cpu-2026-11-01.md, "The temporary keys"): experimental.vr_eye_rows_without_aa, experimental.vr_cpu_benchmark_idle and
+// The three temporary keys of VR draw-path test build 1 (docs\vr-draw-path-cpu-2026-11-01.md, "The temporary keys"): experimental.vr_eye_rows_without_aa, experimental.vr_cpu_benchmark_idle and
 // experimental.vr_cpu_depth_slot_cache. Code default on; off restores today's behaviour exactly. Set with the config (vScreenRefreshConfigBody) the way g_aaOffDraw is; a stale read only falls back to today.
 std::atomic<bool> g_vrEyeRowsWithoutAa{true};
 std::atomic<bool> g_vrCpuBenchmarkIdle{true};
@@ -3740,6 +3740,13 @@ void STDMETHODCALLTYPE reissueDrawIndexedInstanced(ID3D11DeviceContext* self, UI
     g_state->realDrawIndexedInstanced(self, count, instances, start, base, startInstance);
 }
 
+// The FSS reveal's replay (fss_reveal_replay.h) takes a DrawInstanced pointer: the same thunk for it.
+template <ReissueCaller C>
+void STDMETHODCALLTYPE reissueDrawInstanced(ID3D11DeviceContext* self, UINT perInstance, UINT instances, UINT startVertex, UINT startInstance) {
+    ReissueClock clock(C);
+    g_state->realDrawInstanced(self, perInstance, instances, startVertex, startInstance);
+}
+
 // The quad-skip re-issue, lifted out of forwardWithVerdict and NOINLINE.
 //
 // It owns a D3D11_RECT savedRects[16] that RSGetScissorRects fills, which
@@ -4625,7 +4632,7 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
             // The dim is the same draw through the dark shader, so it follows the strip when the strip drew this one: the game's flat quad
             // would dim a rectangle over a screen whose edges have come nearer. A strip that fails here leaves the game's own draw.
             if (!(stripIssued && panelCurveSurfaceDraw(self, stripGain, stripToward, stripReverseU, reissueDrawIndexedInstanced<ReissueCaller::SplashDim>))) {
-                draw(AlteredDrawClass::None);
+                pureDrawReissue(ReissueCaller::SplashDim, self, kind, count, instances, args);
             }
             splashDimEnd(self);
         }
@@ -5301,7 +5308,7 @@ void STDMETHODCALLTYPE hookedDrawInstanced(ID3D11DeviceContext* self, UINT perIn
         rc.omSetRts = reinterpret_cast<void*>(g_state->realOMSetRenderTargets);
         rc.omSetBlend = reinterpret_cast<void*>(g_state->realOMSetBlendState);
         rc.rsSetViewports = reinterpret_cast<void*>(g_state->realRSSetViewports);
-        rc.drawInstanced = reinterpret_cast<void*>(g_state->realDrawInstanced);
+        rc.drawInstanced = reinterpret_cast<void*>(reissueDrawInstanced<ReissueCaller::FssReveal>);   // the replay is a re-issue: counted and timed like the rest
         fssRevealOnDrawSlow(self, rc, perInstance, instances, startVertex, startInstance);
     }
     if (gpuPassProfileCapturing()) gpuPassProfileNoteDraw(self, 'N', perInstance, instances);
@@ -5459,6 +5466,8 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
             g_state->realDrawIndexedInstanced(self, perInstance, instances, startIndex,
                                               baseVertex, startInstance);
         }
+        // Stop the draw-hook clock here: the weapon-motion re-issue below is EDVR's own work, counted under "draw reissue CPU:" and not inside "draw hook CPU:".
+        if (clock.on) clock.realCall(r0);
         // The weapon's temporal-AA motion vectors, from the pool the draw just read.
         if (self == g_state->ownerCtx && !g_state->rtv0Eye &&
             weaponMotionWants(bindingShaderHash(BindSlot::Vs))) {
@@ -5466,7 +5475,6 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
             weaponMotionDraw(self, reissueDrawIndexedInstanced<ReissueCaller::WeaponMotion>, perInstance, instances,
                              startIndex, baseVertex, startInstance);
         }
-        if (clock.on) clock.realCall(r0);
         if(self==g_state->ownerCtx) {
             // ORDERED BY COST, not by narrative. The common case here is an
             // ordinary scene draw that none of these three want, and it used
@@ -6095,7 +6103,6 @@ uint32_t vScreenEyeDrawsThisFrame() {
 bool vScreenAaOffForDraws() { return g_aaOffDraw.load(std::memory_order_relaxed); }
 bool vScreenVrEyeRowsWithoutAa() { return g_vrEyeRowsWithoutAa.load(std::memory_order_relaxed); }
 bool vScreenVrCpuBenchmarkIdle() { return g_vrCpuBenchmarkIdle.load(std::memory_order_relaxed); }
-bool vScreenVrCpuDepthSlotCache() { return g_vrCpuDepthSlotCache.load(std::memory_order_relaxed); }
 
 // One temporary draw-path key: read it, store it, and say so when it differs from the last sweep's (or, the first time, say where it starts: was none).
 // The line carries the perf monitor's frame number, the one `draw hook CPU:` windows end at, so edvr_log.py --perf-windows drops the window a flip fell in.

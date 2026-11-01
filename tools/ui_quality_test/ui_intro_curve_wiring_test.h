@@ -53,7 +53,7 @@ const char* const kLambda =
     "if(seedOutcome.on)seedOutcome.original=seedOutcome.original||issued;returnissued;};";
 const char* const kDim =
     "if((v==DrawVerdict::kBackdrop||v==DrawVerdict::kIntroPanel)&&splashDimBegin(self)){if(!(stripIssued&&panelCurveSurfaceDraw(self,stripGain,stripToward,"
-    "stripReverseU,reissueDrawIndexedInstanced<ReissueCaller::SplashDim>))){draw(AlteredDrawClass::None);}splashDimEnd(self);}";
+    "stripReverseU,reissueDrawIndexedInstanced<ReissueCaller::SplashDim>))){pureDrawReissue(ReissueCaller::SplashDim,self,kind,count,instances,args);}splashDimEnd(self);}";
 const char* const kTick =
     "tkIntroCurve.run([&]{constboolsceneFrame=g_state->eyeDrawsLastFrame>=kSceneEyeDraws;introCurveTick(g_state->ownerCtx,sceneFrame);"
     "if(sceneFrame)introCurveNoteRetired();});";
@@ -120,7 +120,7 @@ std::vector<WirePin> wiringPins(const std::string& text) {
                                   "stripIssued=panelCurveSurfaceDraw(self,stripGain,stripToward,stripReverseU,reissueDrawIndexedInstanced<ReissueCaller::PanelCurve>);",
                                   "constbooloriginalIssued=observedDraw(", "if(layered){uiLayerEnd(self);", "if(v==DrawVerdict::kBackdrop)backdropEnd(self);",
                                   "splashDimBegin(self)", "panelCurveSurfaceDraw(self,stripGain,stripToward,stripReverseU,reissueDrawIndexedInstanced<ReissueCaller::SplashDim>)",
-                                  "draw(AlteredDrawClass::None);", "splashDimEnd(self);", "forwardVerdictEnd(self,v);"}) &&
+                                  "pureDrawReissue(ReissueCaller::SplashDim,self,kind,count,instances,args);", "splashDimEnd(self);", "forwardVerdictEnd(self,v);"}) &&
                         countOf(fwd, "panelCurveSurfaceDraw(") == 2 && countOf(all, "panelCurveSurfaceDraw(") == 2,
                     "intro curve wiring [strip-site]: the strip is drawn after forwardVerdictBegin (kBackdrop's slot swap is in place) and the layer's Begin, before the game's own "
                     "issue and the layer's End, and the splash dim draws it again (the same arguments, the u direction included) before forwardVerdictEnd; "
@@ -197,7 +197,7 @@ const char* const kRawGuard = R"x(    if (panelCurveWants() && srv0IsPanelSized(
         !(kind == 'X' && count == 6 && bindingShaderHash(BindSlot::Vs) == kIntroCompositeVsHash)) {
 )x";
 const char* const kRawDim = R"x(            if (!(stripIssued && panelCurveSurfaceDraw(self, stripGain, stripToward, stripReverseU, reissueDrawIndexedInstanced<ReissueCaller::SplashDim>))) {
-                draw(AlteredDrawClass::None);
+                pureDrawReissue(ReissueCaller::SplashDim, self, kind, count, instances, args);
             }
 )x";
 const char* const kRawTick = R"x(        tkIntroCurve.run([&] {
@@ -261,7 +261,7 @@ void testIntroCurveControls(const std::string& text) {
          {{"    const bool layered = uiLayer && uiLayerBegin(self);\n    if (seedOutcome.on && layered) seedOutcome.redirected = true;\n    // Which kind",
            "    const bool layeredX = uiLayer && uiLayerBegin(self);\n    if (seedOutcome.on && layeredX) seedOutcome.redirected = true;\n    // Which kind"}},
          "strip-site"},
-        {"the dim draws the game's quad only", {{kRawDim, "            draw(AlteredDrawClass::None);\n"}}, "strip-site"},
+        {"the dim draws the game's quad only", {{kRawDim, "            pureDrawReissue(ReissueCaller::SplashDim, self, kind, count, instances, args);\n"}}, "strip-site"},
         {"the dim has no fallback",
          {{kRawDim, "            if (stripIssued) panelCurveSurfaceDraw(self, stripGain, stripToward, stripReverseU, reissueDrawIndexedInstanced<ReissueCaller::SplashDim>);\n"}}, "strip-site"},
         {"the dim draws the strip whatever the main draw did",

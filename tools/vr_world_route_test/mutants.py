@@ -132,7 +132,7 @@ W_GUARD = ("    if (panelCurveWants() && srv0IsPanelSized(s, kind, count) &&\n"
 W_GATE = ("        vscreenFootprintWanted() ||   // the footprint instrument (vscreen_footprint.h): it reads the 2D screen's composite\n"
           "        introCurveWants();")
 W_DIM = ("            if (!(stripIssued && panelCurveSurfaceDraw(self, stripGain, stripToward, stripReverseU, reissueDrawIndexedInstanced<ReissueCaller::SplashDim>))) {\n"
-         "                draw(AlteredDrawClass::None);\n            }\n")
+         "                pureDrawReissue(ReissueCaller::SplashDim, self, kind, count, instances, args);\n            }\n")
 W_DIM_CALL = "panelCurveSurfaceDraw(self, stripGain, stripToward, stripReverseU, reissueDrawIndexedInstanced<ReissueCaller::SplashDim>))) {"
 W_REVERSE_DECL = "    bool stripReverseU = false;\n"
 W_MOVIE_ARMED = "            if (introPanelStripArmed()) {\n"
@@ -307,7 +307,7 @@ MUTANTS = [
            "the verdict's Begin runs after the strip: kBackdrop's slot swap is not in place for it"),
     wiring("iw-site-after-the-game-draw", "strip-site", [(W_OBSERVED, ""), (W_STRIP_START, W_OBSERVED + W_STRIP_START)],
            "the strip is drawn after the game's own issue"),
-    wiring("iw-site-dim-is-flat", "strip-site", [(W_DIM, "            draw(AlteredDrawClass::None);\n")], "the splash dim does not follow the strip"),
+    wiring("iw-site-dim-is-flat", "strip-site", [(W_DIM, "            pureDrawReissue(ReissueCaller::SplashDim, self, kind, count, instances, args);\n")], "the splash dim does not follow the strip"),
     wiring("iw-site-third-call", "strip-site", [(W_END, W_END + "    panelCurveSurfaceDraw(self, 1.0f, 1, false, g_state->realDrawIndexedInstanced);\n")],
            "a third place draws the strip"),
     wiring("iw-site-dim-drops-reverse", "strip-site", [(W_DIM_CALL, "panelCurveSurfaceDraw(self, stripGain, stripToward, reissueDrawIndexedInstanced<ReissueCaller::SplashDim>))) {")],

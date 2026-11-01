@@ -15,9 +15,9 @@ enum class ReissueCaller : uint8_t {
     ScreenMotionUi,  // screenMotionUiDraw: the interface's motion vectors
     WeaponMotion,    // weaponMotionDraw
     PanelCurve,      // the curved panel strip (panelCurveSubstitute, panelCurveReissue, panelCurveSurfaceDraw)
-    LoaderPanel,     // loaderPanelSubstitute
+    LoaderPanel,     // loaderPanelSubstitute: never prints (it ignores the draw it is handed; a decline goes through the observed draw), kept as the pointer it is handed
     QuadSplit,       // forwardQuadSkip's surviving ranges
-    FlatUi,          // the flat profile's uiReissue (the layer's second issues and the tonemap in flat)
+    FlatUi,          // the flat profile's uiReissue (the layer's second issues and the tonemap in flat); outside the draw hook CPU figure (the flat branch is not clocked)
     UiDepth,         // ui_depth's interface, hologram, planet and world-screen depth passes
     StarGlow,        // visual.star_glow's second issue of a star pass
     BlendProbe,      // the blend probe's replay
@@ -26,13 +26,14 @@ enum class ReissueCaller : uint8_t {
     WorldScreen,     // the VR world route's 2D screen re-issue
     UiLayerSecond,   // uiLayerSecondIssues: the multiply and the write-back
     SplashDim,       // the splash screen's dim
+    FssReveal,       // the FSS reveal fix's replay of the first downsample (fss_reveal_replay.h)
     Count
 };
 constexpr size_t kReissueCallers = static_cast<size_t>(ReissueCaller::Count);
 
 inline const char* reissueCallerName(size_t c) {
     static const char* const names[kReissueCallers] = {"screen_motion", "screen_motion_ui", "weapon_motion", "panel_curve", "loader_panel", "quad_split", "flat_ui",
-                                                       "ui_depth", "star_glow", "blend_probe", "crisp_hud", "tonemap", "world_screen", "ui_layer_second", "splash_dim"};
+                                                       "ui_depth", "star_glow", "blend_probe", "crisp_hud", "tonemap", "world_screen", "ui_layer_second", "splash_dim", "fss_reveal"};
     return c < kReissueCallers ? names[c] : "unknown";
 }
 
@@ -42,7 +43,7 @@ inline void formatReissueWindow(char* out, size_t cap, unsigned frame, double me
                                 unsigned sampledCalls, const double* ms, const unsigned* calls) {
     int n = std::snprintf(out, cap,
                           "draw reissue CPU: 1800-frame window ending %u; %.3f ms/sampled frame mean, %.3f ms max, %u sampled frames (one in %u); %u re-issues in the window, "
-                          "%u of them on sampled frames; every re-issue of a sampled frame is timed, so nothing is scaled; excludes the forwarded game draw, inside the draw hook CPU figure. "
+                          "%u of them on sampled frames; every re-issue of a sampled frame is timed, so nothing is scaled; excludes the forwarded game draw, inside the draw hook CPU figure (flat_ui excepted: unclocked). "
                           "Callers (ms a sampled frame, calls on sampled frames): ",
                           frame, meanMs, maxMs, samples, every, totalCalls, sampledCalls);
     if (n < 0 || static_cast<size_t>(n) >= cap) return;

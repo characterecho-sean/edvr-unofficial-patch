@@ -122,11 +122,10 @@ uint32_t vScreenEyeDrawsThisFrame();
 // VR's temporal anti-aliasing reads off, as the draw path last took it from the config (the AA-off fast path,
 // draw_fast_path.h). For the draw hook CPU line only.
 bool vScreenAaOffForDraws();
-// The three temporary keys of VR draw-path test build 1 (docsr-draw-path-cpu-2026-11-01.md), as the last config sweep read them; true is the code default.
+// The three temporary keys of VR draw-path test build 1 (docs\vr-draw-path-cpu-2026-11-01.md), as the last config sweep read them; true is the code default.
 // One relaxed load each, for the draw path: items 1 (experimental.vr_eye_rows_without_aa), 2 (experimental.vr_cpu_benchmark_idle) and 4 (experimental.vr_cpu_depth_slot_cache).
 bool vScreenVrEyeRowsWithoutAa();
 bool vScreenVrCpuBenchmarkIdle();
-bool vScreenVrCpuDepthSlotCache();
 
 // The context's OMSetRenderTargets through the ORIGINAL entry, past the
 // hook and the binding shadow: for a fix that rebinds around one draw and
