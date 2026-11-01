@@ -200,6 +200,9 @@ struct State {
     double   drawWindowMs = 0.0;
     float    drawWindowMaxMs = 0.0f;
     uint32_t drawWindowSamples = 0;
+    // The benchmark collector's entry clears in the current 1800-frame window (experimental.vr_cpu_benchmark_idle's reading).
+    uint32_t benchClearsDone = 0;
+    uint32_t benchClearsSkipped = 0;
     // The re-issue counter (draw_reissue_line.h): the frame in progress (timed ticks and calls on a sample frame, calls on any frame) folded into the window at the boundary.
     int64_t  reissueFrameTicks[kReissueCallers] = {};
     uint32_t reissueFrameCalls[kReissueCallers] = {};
@@ -1128,7 +1131,7 @@ void perfMonitorFrame(ID3D11Device* dev) {
             }
         }
         if (!updateBenchmarkMetadata(s, timing, historyNow)) {
-            s.nativeBenchmark.reset();
+            if (s.nativeBenchmark.reset(vScreenVrCpuBenchmarkIdle())) ++s.benchClearsDone; else ++s.benchClearsSkipped;
             s.nativeBenchmarkScope = 0;
         }
         NativeBenchmarkObservation tick{};
@@ -1194,7 +1197,7 @@ void perfMonitorFrame(ID3D11Device* dev) {
         }
     } else {
         s.nativeHistory.clear();
-        s.nativeBenchmark.reset();
+        if (s.nativeBenchmark.reset(vScreenVrCpuBenchmarkIdle())) ++s.benchClearsDone; else ++s.benchClearsSkipped;
         s.nativeBenchmarkScope = 0;
         s.nativeBenchmarkMetadataMs = 0;
         s.nativeBenchmarkMetadata = {};
@@ -1258,6 +1261,11 @@ void perfMonitorFrame(ID3D11Device* dev) {
         uint32_t slotHits = 0, slotMisses = 0;
         uiDepthSlotCacheTakeCounts(&slotHits, &slotMisses);
         Log::get().note("depth slot cache: 1800-frame window ending %u; %u hits, %u misses", s.frameNo, slotHits, slotMisses);
+        // Written every window, so a window with no idle tick (both 0: native perf history active) can be told from a build without the line.
+        // The collector runs in the Present-time tick, outside the draw hooks, so it is judged by these counts and cannot move the line above.
+        Log::get().note("benchmark collector: 1800-frame window ending %u; entry clears done %u, skipped %u (idle perf ticks only; skipped needs experimental.vr_cpu_benchmark_idle on).",
+            s.frameNo, s.benchClearsDone, s.benchClearsSkipped);
+        s.benchClearsDone = s.benchClearsSkipped = 0;
         // Written every window, quiet or not, so a window with no refresh in it (all zeros) can be told from a build that does not have this line.
         const uint32_t reloads = s.cfgReloads.exchange(0, std::memory_order_relaxed);
         const uint32_t edits = s.cfgEdits.exchange(0, std::memory_order_relaxed);

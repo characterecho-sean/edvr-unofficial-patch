@@ -2,6 +2,7 @@
 #include "../../src/d3d11/native_benchmark_collector.h"
 #include "../../src/d3d11/frame_ticks.h"
 #include <cstdio>
+#include <memory>
 #include <cstring>
 #include <string>
 #include <cmath>
@@ -253,6 +254,34 @@ void benchmarkAdmission() {
     c.observe(onlyCpu(100,42001,7),42001);tick.scope=2;c.observe(tick,42500);
     check(c.takeReport(&r)&&r.aborted&&r.sampleEndedAtMs-r.startedAtMs==500&&r.drainMs==0,
           "partial reports state actual duration, not planned thirty seconds");
+}
+// experimental.vr_cpu_benchmark_idle (#161): the Present-time perf tick wipes 16384 entries plus orphans on every idle tick. With the key on,
+// reset(true) skips only that wipe while nothing was ever written to the entries; reset(false) is today's behaviour.
+void benchmarkIdleReset() {
+    auto cBox=std::make_unique<NativeBenchmarkCollector>(); NativeBenchmarkCollector& c=*cBox;
+    check(!c.reset(true), "a clean collector's reset skips the entry clear");
+    NativeBenchmarkObservation tick{};tick.scope=1;
+    c.observe(tick,1000);c.observe(tick,3000);
+    check(c.collecting() && !c.reset(true), "a sampling window with no entry written is still clean: observe alone does not mark the collector used");
+    check(!c.warming() && !c.sampling(), "a skipped reset still returns the collector to idle");
+    c.observe(tick,5000);c.observe(tick,7000);
+    check(c.collecting(), "after a skipped reset the next scope starts a fresh window (scope was reset)");
+    c.observe(benchmarkSample(1,7010,5,6),7010);
+    check(c.reset(true), "after an entry is created, reset clears");
+    check(!c.reset(true), "clearing the entries clears the used flag, so the next idle reset skips");
+    c.observe(tick,9000);c.observe(tick,11000);c.observe({},41000);c.observe({},43000);
+    NativeBenchmarkReport r{};
+    check(c.takeReport(&r) && r.cpu.stored==0 && r.cpu.valid==0 && r.cpu.missing==0 && r.gpu.stored==0 && r.gpu.missing==0,
+          "every entry reads zero after the clearing reset");
+    auto orphanBox=std::make_unique<NativeBenchmarkCollector>(); NativeBenchmarkCollector& orphan=*orphanBox;
+    orphan.observe(tick,1000);orphan.observe(tick,3000);
+    auto gpuOnly=benchmarkSample(9,3010,0,7);gpuOnly.cpuSequence=gpuOnly.cpuAtMs=0;
+    orphan.observe(gpuOnly,3010);
+    check(orphan.reset(true), "an entry created by the orphan lookup also marks the collector used");
+    auto offBox=std::make_unique<NativeBenchmarkCollector>(); NativeBenchmarkCollector& off=*offBox;
+    check(off.reset(false) && off.reset(false), "key off clears every tick, even a clean collector");
+    auto dfltBox=std::make_unique<NativeBenchmarkCollector>(); NativeBenchmarkCollector& dflt=*dfltBox;
+    check(dflt.reset(), "reset() with no argument is the key-off behaviour");
 }
 void benchmarkWindows() {
     NativeBenchmarkCollector c;
@@ -639,7 +668,7 @@ int wmain(int argc,wchar_t** argv) {
     if(argc!=2)return 2;
     if(!std::wcscmp(argv[1],L"--dry-run")){std::puts("native_perf_history_test: dry-run (no runtime, device or files)");return 0;}
     if(std::wcscmp(argv[1],L"--self-test"))return 2;
-    averages();invalidation();agesAndValues();displayBase();callerWorkCrossing();graphs();benchmarkWindows();benchmarkAdmission();
+    averages();invalidation();agesAndValues();displayBase();callerWorkCrossing();graphs();benchmarkWindows();benchmarkAdmission();benchmarkIdleReset();
     frameTicksChain();frameTicksTopThree();frameTicksOddClocks();frameTicksUncut();frameShareText();nativeLongFrameFits();frameTickCostNote();
     std::printf("native_perf_history_test: %u checks, %u failures\n",checks,failures);return failures?1:0;
 }
