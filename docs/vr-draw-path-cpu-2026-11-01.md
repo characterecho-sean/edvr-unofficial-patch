@@ -2,317 +2,248 @@
 
 ## Status
 
-- **State (2026-11-01): design agreed, not built.** This doc is the design
-  for test build 1. A design review comes next, then the spec, then the
-  build and one flight. Nothing here is implemented.
-- **Question:** how much of a CPU-bound VR frame is EDVR's own draw path
-  (GLOSSARY: Draw path), and how much of it can be removed without changing
-  what reaches the screen?
-- **Earlier investigation:** `docs\stereo-cpu-sharing-2026-10-16.md`. It
-  holds the measurements this design rests on: the 2026-10-31 flight
-  (H5-H7) and the 2026-11-01 CPU profile. Its numbers are not repeated
-  here beyond what each item needs.
-- **Test build 1 carries:** item 1 (world rows and the tee's fast path with
-  AA off; changes behaviour, #155),
-  item 2 (benchmark collector cleared only when used), item 3 (two
-  early-exit tests moved inline), item 4 (depth surface slot cached), and a
-  re-issue counter (GLOSSARY: Re-issue). Only item 1 changes behaviour.
-- **Temporary keys (remove when this investigation closes; never shipped):**
+- **State (2026-11-01): design reviewed and agreed, not built.** Next: the
+  spec, then test build 1 and one flight.
+- **Question:** how much of a CPU-bound VR frame is EDVR's draw path
+  (GLOSSARY: Draw path), and how much can go without changing what reaches
+  the screen?
+- **Earlier investigation:** `docs\stereo-cpu-sharing-2026-10-16.md` (the
+  2026-10-31 flight, H5-H7, and the 2026-11-01 CPU profile).
+- **Test build 1:** item 1 (scene depth without AA: world rows and the
+  marker tee's fast path; changes behaviour, #155), item 2 (benchmark
+  collector), item 3 (two early exits inline), item 4 (depth slot cache),
+  and a re-issue counter (GLOSSARY: Re-issue).
+- **Temporary keys (never shipped; removed when this closes):**
   `experimental.vr_eye_rows_without_aa`, `experimental.vr_cpu_benchmark_idle`,
   `experimental.vr_cpu_depth_slot_cache`.
+- **Open hypothesis (item 1):** with AA off the depth probe is off, no draw
+  passes the scene-depth test, `worldOk` never sets, so the tee never goes
+  fast and no world rows publish. Signature: in keys-off AA-off legs the
+  tally names `world` and `sceneRefused[NotSceneDepth]` is large.
+- **Ruled out:** idling the whole marker tee without the UI layer, because
+  its slow path is the only publisher of the per-eye world rows
+  (`eyeRowsPublish`), which on-foot systems read without the layer.
+  Changing `eyeOfDraw` itself, because `rowSourceDraw` and five census
+  callers would shift and a wrong eye would publish wrong rows silently.
 - **Left out, tracked:** #151 (`drawPathFast` in
-  `hookedDrawIndexedInstanced`), #152 (per-scene subscriber mask so the draw
-  gate can close in VR), #153 (cross-profile per-bind counter, was item 5),
-  #154 (`/GL /LTCG`). These follow build 1.
-- **Next flight:** "Flight plan" below.
-- **Ruled out:** idling the whole marker tee while the UI layer is off,
-  because its slow path is the only publisher of the per-eye world rows
-  (`eyeRowsPublish`, native_on_foot.cpp 11870; called only from `worldDraw`
-  and `rowSourceDraw`), which ADS aim, scope zoom, the head-containment grid
-  and other on-foot systems read without the layer. Earlier ruled-out
-  items are in the earlier doc.
-- **Open hypothesis (item 1, #155):** with AA off the depth probe is off,
-  no draw gets an eye, `worldOk` never sets, so the tee never takes its fast
-  path and no world rows are published. Signature: the new tally names
-  `world 0` / `world 1` in the keys-off AA-off legs.
-- **Next step:** design review (Fable), then the spec.
+  `hookedDrawIndexedInstanced`), #152 (per-scene subscriber mask), #153
+  (cross-profile per-bind counter), #154 (`/GL /LTCG`).
+- **Reviewed:** design review 2026-11-01; its corrections are folded in.
 
-## Where the time goes (summary of the evidence)
+## Evidence in brief
 
-Rig: PSVR2 through SteamVR OpenXR, 2632x2684 per eye, 90 Hz, RTX 5070 Ti,
-Ryzen 7 5700X3D, EDHM chained, Motion Smoothing off, game build 334925.
-The test spot is a station concourse, chosen because it has the most draws
-(13-14k eye draws a frame); nothing below is specific to it.
+Rig: PSVR2, SteamVR OpenXR, 2632x2684 per eye, 90 Hz, RTX 5070 Ti, Ryzen 7
+5700X3D, EDHM chained, Motion Smoothing off, game build 334925, live ini
+`temporal_aa = dlss`, `eye_depth_capture` unset. Test spot: a station
+concourse (13-14k eye draws a frame); nothing below is specific to it.
 
-- The rig is CPU-bound: `held_by=game` 96%, vendor xrEndFrame about 0.36 ms.
-- Concourse standing (log `edvr_gfx_20261031_225516`, build
-  v0.22.0-rc.4-1-ge1606a23), twice over: DLAA 29.6 fps with `draw hook CPU`
-  5.8-6.1 ms a frame; F7 (AA off) 34.7 fps with 2.7-3.5 ms.
-- The draw gate (GLOSSARY: Draw gate) never closes in VR: default-on
-  features hold it open, so even with AA off every draw takes the slow path.
-- Profile (v0.22.0-rc.4-3-g6ac3c0e5, `EDVR_PROFILE_SYMBOLS=1`): EDVR's own
-  code is about a quarter of the busy render thread in both AA modes. About
-  3.6 ms of the 5.8 ms the hooks read with AA on is not EDVR's own code;
-  EDVR's re-issues are the likely owner (inferred, unmeasured).
-- The marker-probe tee loses its fast path with AA off (`native on foot
-  marker probe: cost ... fast path 0 of N`, about 16.5k tee calls a frame):
-  0.47-0.56 ms a frame with AA on, 1.1-1.5 with AA off.
+- CPU-bound: `held_by=game` 96%, vendor xrEndFrame about 0.36 ms.
+- 10-31 log (`edvr_gfx_20261031_225516`): DLAA 29.3-29.6 fps, `draw hook
+  CPU` 5.8-6.1 ms; F7 off 34.7-34.8 fps, 2.7-3.5 ms.
+- The draw gate (GLOSSARY: Draw gate) never closes in VR.
+- Profile: EDVR's own code is about a quarter of the busy render thread;
+  about 3.6 ms of the 5.8 ms the hooks read with DLAA is not EDVR's code.
+- Tee: about 16.5k calls a frame; 0.47-0.56 ms a frame with its fast path
+  (DLAA), 1.1-1.5 ms without (AA off, `fast path 0 of N`).
+- F113 `eye rows`, AA off: row source `none` in 349-635 frames a window and
+  80k-156k draws with no scene-depth eye; DLAA: about 0 and 5-8k.
 
 ## Rules for every item
 
-- **No change to what reaches the screen.** Each item removes work whose
-  result is discarded or recomputed identically.
-- **Nothing tuned to one headset.** No constant depends on the headset,
-  render size or runtime; anything that varies is read at runtime.
-- **Each item is its own commit**, so one can be reverted after the flight.
-- **Each item shows it ran.** A counter or log line distinguishes "ran and
-  saved" from "never ran". A missing line must not read as success.
-- **Pure logic gets a red/green rig test first** (item 1's eye fallback,
-  items 2 and 4). Item 3 and item 1's draw-path wiring are shown by review,
-  their counters and the flight's checks.
+- No change to what reaches the screen, except item 1 (stated there).
+- Nothing tuned to one headset: anything that varies is read at runtime.
+- One commit per item.
+- Each item has its own direct reading that tells "ran" from "never ran".
+- Pure logic gets a red/green rig test first (items 1, 2, 4).
 
-## Item 1: world rows and the tee's fast path with AA off
+## Item 1: scene depth without AA
 
-**Current behaviour.** Each eye draw on foot calls `nativeOnFootMarkerTee`
-when the marker probe is live (`nativeOnFootMarkerProbeLive() && self ==
-ownerCtx`, vscreen.cpp around 5339 and 5384, and the Draw and DrawIndexed
-equivalents). Its fast path needs both eyes' world rows, which the UI layer
-supplies; without the layer every call takes the out-of-line slow path
-(`nativeOnFootMarkerProbeDraw`, native_on_foot.cpp around 35625).
+**Cause.** `teeFastFrame` (native_on_foot_f100.h:39-42) publishes the fast
+frame only with `!measure && !pending && !bound && !census && !check`, the
+frame polled, and `worldOk` set for both eyes. F7 overrides
+`fix.temporal_aa` (aa_compare.h:5-8); `depthProbeConfigure` re-reads it, so
+with AA off the probe is not wanted (depth_probe.cpp:518-526) and
+`depthProbeCurrentSceneEyeOf` returns false (860). `worldDraw` takes its eye
+from the colour target (`e = t->eye`, native_on_foot.cpp:29298) but passes
+`eyeOfDraw >= 0` to `sceneRefWhy` as "is scene depth" (29307), which
+refuses with `kSceneNotSceneDepth`. So `worldOk` never sets, `f44::draw`
+never early-returns, and no world rows publish. `pending` and `bound` clear
+within one draw; `measure`, `census`, `check`, `polledFrame` do not depend
+on AA.
 
-**Why it is waste.** The tee exists to feed the marker fix, and the fix can
-only apply inside the layer's bracket: `markerFixed` (vscreen.cpp:4456, its
-only write) requires `layered`, and its only reader is the end call at
-vscreen.cpp:4505. The condition is "the UI layer is live" (`uiLayerLive()`),
-not "`fix.ui_quality` is live": the layer can also be live for weapon fire
-or ripple alone.
+**Change.**
+1. **Tally (always on).** At the fast-frame publish (native_on_foot.cpp
+   about 35664) count the first failing term (measure, pending, bound,
+   census, check, polled, world 0, world 1), and add
+   `sceneRefused[kSceneNotSceneDepth]` (29316; today printed only in
+   measure mode). Print both on the tee's cost line after `over %u s`,
+   reset with the fast-call count. Extend the `edvr_log.py` parse (about
+   16778, not end-anchored) with a self-test fixture for the new text.
+2. **Scene-depth test without the probe (keyed).** A separate predicate,
+   used only for `worldDraw`'s `sceneRefWhy` argument when the probe is not
+   wanted: the bound depth view's texture has the same size as the draw's
+   colour target, whose eye `worldDraw` already knows. Read at runtime;
+   nothing per headset. `eyeOfDraw`, `rowSourceDraw` and every other caller
+   stay unchanged; mesh rows suffice.
+3. **Agreement check (always on, measurement only).** While the probe is
+   wanted (DLAA), compute the predicate too and count agree / disagree
+   against `eyeOfDraw >= 0`. This validates it against the probe's pair
+   pick, which handles twin eye-sized depth targets that the predicate
+   cannot tell apart.
 
-**What else the tee feeds (checked 2026-11-01).** The tee cannot idle as a
-whole. Its slow path also publishes the per-eye world rows that on-foot
-systems read without the layer: `eyeRowsPublish` (native_on_foot.cpp
-11870, called only from `worldDraw` and `rowSourceDraw`) feeds ADS aim and
-sight (12405, 12698, 12865), scope zoom (36206), `f109TurnTick` (8383),
-`f87EyeLines`, `pinCycloUpdate` and `geometryNow`; `g_f85SceneW/H` feeds
-the head-containment depth grid. Its frame turn samples head motion.
-Marker-only outputs: `markerDraw`, `hudDraw`, `labelIssue` (writes only the
-eye-dump record) and `g_markerCropNdc` (eye-dump only). The draw serial has
-no reader outside the marker and label code. `labelIssue` matches on the
-serial, so it must share the tee's gate.
+**Behaviour change.** With AA off and the key on, the systems that read the
+world rows (ADS aim and sight, scope zoom, the head-containment grid,
+`f109TurnTick`, `f87EyeLines`, `pinCycloUpdate`, `geometryNow`) receive rows
+they do not get today. The separate on-foot weapons work reads the same
+rows; they meet at merge.
 
-**Cause (code reading, supported by the log; #155).** The fast frame is
-published only when `teeFastFrame` (native_on_foot_f100.h:39-42) sees
-`!measure && !pending && !bound && !census && !check`, the frame polled,
-and `worldOk[0]` and `worldOk[1]` both set this frame. With AA off the depth
-probe is not wanted (`fix.temporal_aa != off || advanced.eye_depth_capture`,
-depth_probe.cpp:524-525), so `eyeOfDraw` (native_on_foot.cpp:28582-28592)
-returns -1 for every draw, `worldDraw` and `rowSourceDraw` never set
-`worldOk`, and `f44::draw` never early-returns. The same gap means no world
-rows are published with AA off. The 10-31 log agrees: its F113 `eye rows`
-line shows 349-635 frames a window with row source `none` and 80k-156k draws
-with no scene-depth eye with AA off, against about 0 and 5-8k with DLAA. The
-other terms were checked and clear within one draw (`pending`, `bound`) or
-do not depend on AA (`measure`, `census`, `check`, `polledFrame`).
+**Key.** `experimental.vr_eye_rows_without_aa`. Off: today's refusal. A
+mid-frame flip is harmless: `eyeOfDraw` and the fast frame are per frame.
 
-**Change, in two parts.**
-1. **Tally (always on, no key).** Where the slow path tries to publish the
-   fast frame (native_on_foot.cpp around 35664), count the first failing
-   term (measure, pending, bound, census, check, polled, world 0, world 1).
-   Print it on the tee's cost line after the `over %u s` text, reset with
-   the fast-call count, and extend the `edvr_log.py` parse at about 16778.
-   This confirms or refutes the cause in the keys-off legs.
-2. **Fix (keyed).** When the depth probe is not wanted, `eyeOfDraw` falls
-   back to the eye from the depth view's size and order: the shape rule
-   `targetEye` already applies (native_on_foot.cpp 29276-29286). CPU only,
-   read from the game's own targets at runtime, nothing per headset. With
-   the probe wanted, nothing changes.
+**Shows it ran.** Key on, AA off: F113 row sources other than `none`, the
+cost line's `fast path X of N` well above 0, its est. ms a frame down.
+Key off, AA off: tally names `world`, `NotSceneDepth` large. If the tally
+names another term, the cause is refuted: write it down and stop.
 
-**This item changes behaviour.** With AA off and the key on, the on-foot
-systems that read the world rows (ADS aim and sight, scope zoom, the
-head-containment grid, `f109TurnTick`, `f87EyeLines`, `pinCycloUpdate`,
-`geometryNow`) start receiving rows they do not get today. It is the one
-exception to "no change to what reaches the screen", and the reason for its
-own key. A separate line of work on on-foot weapons reads the same rows; the
-two will meet at merge.
+**Fails if** DLAA agreement is not near 100%. Then the fallback becomes a
+pick-only mode of the depth probe, separate from `g_wanted` (which ui
+depth's `dsvIsSceneDepth`, ui_depth.cpp:878, also reads).
 
-**Why it is safe to fly.** Key off restores today's eye assignment exactly.
-A wrong shape-rule eye would show as rows from the wrong eye; the tally,
-the F113 `eye rows` sources and the flight's checks would show it.
+**Test (red first), `tools\native_on_foot_hooks_test`.** The predicate:
+matching depth and colour sizes pass; mismatched size, no depth view, and
+the probe-wanted case (predicate not used) do not.
 
-**Key.** `experimental.vr_eye_rows_without_aa`.
+**Expected.** 0.6-1.0 ms a frame with AA off (the tee keeps its fast-path
+cost); none with DLAA.
 
-**Shows it ran.** With the key on and AA off: the F113 `eye rows` source is
-no longer `none`, and the cost line's `fast path X of N` is well above 0.
-With the key off: the tally names `world 0` / `world 1` as the blocker. If
-it names another term, the cause is refuted; write it down and stop.
+## Item 2: benchmark collector cleared only when used
 
-**Test.** The fallback's eye choice is a pure function of the depth views'
-sizes and order: a rig test in `tools\native_on_foot_hooks_test` (red
-first) covers two eye-sized views in both orders, a non-eye-sized view, and
-the probe-wanted case, which must not use the fallback.
+**Current.** `NativeBenchmarkCollector` (perf_monitor.cpp:174) holds 16384
+entries plus orphans (native_benchmark_collector.h:81, 136). `reset()`
+calls `clearEntries()` (native_benchmark_collector.cpp:34) on every perf
+tick while native perf history is inactive (perf_monitor.cpp:1119, 1185).
 
-**Expected.** 1.1-1.5 ms a frame with AA off in the concourse; none with AA
-on, where the probe already supplies the eye.
+**Change.** A used flag, set where entries are created: `find(create)` and
+`findOrphan(create)` (native_benchmark_collector.cpp:94, 117), not in
+`observe`, which runs every tick. `clearEntries()` clears the flag. `reset()`
+skips only `clearEntries()` when the flag is clear, and still resets
+`scope_`, `phase_`, the drop counts and flags. `begin()` is unchanged.
+`distribution()` only reads, so a clean collector is all zero.
 
-## Item 2: the benchmark collector is cleared only when used
+**Key.** `experimental.vr_cpu_benchmark_idle`. Off: clears every tick.
 
-**Current behaviour.** `NativeBenchmarkCollector` (perf monitor state,
-perf_monitor.cpp:174) holds 16384 entries plus orphans
-(native_benchmark_collector.h:81, 136). `reset()` zeroes all of them
-(`clearEntries()`, native_benchmark_collector.cpp:34) on every perf tick
-where native perf history is not active (perf_monitor.cpp:1119, 1185), even
-when nothing has been written since the last clear. The profile prices it at
-0.10-0.14 ms a frame.
-
-**Change.** The collector records whether anything has been written since
-its last clear. Every writer (`observe`, `addCpu`, `addGpu`) marks it used;
-`clearEntries()` marks it clean. `reset()` on a clean collector skips the
-zeroing. `begin()` keeps clearing unconditionally.
-
-**Why it is safe.** A clean collector is already all zero; skipping the
-clear leaves the same state. A stale key read can only make it clear when it
-need not.
-
-**Key.** `experimental.vr_cpu_benchmark_idle` (`off` clears every tick, as
-today).
-
-**Shows it ran.** The perf line gains clears done and clears skipped per
-window.
+**Shows it ran.** The perf line gains clears done and skipped. This runs in
+the Present-time perf tick, outside the draw hooks, so it cannot move
+`draw hook CPU`; it is judged by this count.
 
 **Test (red first), `tools\native_perf_history_test`.** A clean collector's
-`reset()` does no clear. After one `observe`, `reset()` clears and every
-entry reads zero. After `addCpu` or `addGpu` alone, the same. With the key
-off, every `reset()` clears.
+`reset()` does not clear; after an entry is created it does and every entry
+reads zero; `reset()` still resets phase and scope; key off always clears.
 
-**Expected.** 0.10-0.14 ms a frame, in every VR and flat scene where native
-perf history is inactive.
+**Expected.** 0.10-0.14 ms a frame, wherever native perf history is idle.
 
-## Item 3: two early-exit tests move inline
+## Item 3: two early exits inline
 
-The build has no `/GL` or `/LTCG` (build.bat around 350), so a call into
-another source file is never inlined, even when it returns at once. Of the
-calls the profile named, most are already guarded inline or change state
-before their first exit (`screenMotion*Draw`, `starGlowAfterDraw` and
-`gpuCensusBegin`: see the earlier doc and #154). Two are worth moving:
+No `/GL` or `/LTCG` (#154), so calls across source files never inline.
 
-- **`nativeOnFootLabelIssue`** (native_on_foot.cpp around 30494, called at
-  vscreen.cpp:4457). Its exit is `!g_labPending.valid || g_labPending.serial
-  != g_drawSerial || !g_labPending.d`, all file-local state. Change: expose
-  the test as an inline function in the header and call the out-of-line body
-  only when it passes.
-- **`uiLayerCrispNoteEyeDraw`** (ui_layer.cpp:5373, called at
-  vscreen.cpp:2537 and flat_ui_layer.cpp:371). It writes `g_crispPending`
-  and `g_uiLayerCrispPending` first, then exits on `!g_uiLayerCrispOn ||
-  !ctx`. Change: an inline wrapper does the same two writes, tests
-  `detail::g_uiLayerCrispOn` (already extern, ui_layer.h:86) and `ctx`, and
-  calls the body only when both pass. The writes stay in the same order.
+- **`uiLayerCrispNoteEyeDraw`** (ui_layer.cpp:5373). In VR the caller
+  (vscreen.cpp:2536) already checks `uiLayerCrispOn()` and `ctx` is never
+  null, so every eye draw enters the body and leaves at the shape test
+  (`kind`, `count == 3`, `instances`, `startInstance`, 5378). The inline
+  wrapper does the two clears, in order, then that shape test, and calls
+  the body only when it passes. The flat caller (flat_ui_layer.cpp:371) is
+  unaffected.
+- **`nativeOnFootLabelIssue`** (native_on_foot.cpp about 30494, called at
+  vscreen.cpp:4457). `g_labPending` is in the anonymous `f44` namespace
+  (30188), so a header cannot read it. Add one `extern bool` mirror of
+  `g_labPending.valid`, written beside every write of it (30257, 30305,
+  30496, 35879); the call site tests the mirror, the body keeps the full
+  test. The spec names the thread of the 35879 reset.
 
-**Why it is safe.** The same tests, in the same order, on the same state;
-only where they are evaluated moves.
+**Key.** None: always helps, and a key would add a branch to the path.
+**Shows it ran.** Only in total `draw hook CPU`. **Expected.** About 0.1 ms
+a frame with DLAA.
 
-**Key.** None: a key would add a branch to the path this item slims, and
-the change always helps.
+## Item 4: depth surface slot cached
 
-**Shows it ran.** The profile's next capture, if one is taken; otherwise
-the total `draw hook CPU`. Not separately measurable in one flight.
+**Current.** `uiDepthSampledSurfaceSlot` (ui_depth.cpp:2419) calls
+`viewIsSurface` on PS SRV 0-3 for each qualifying eye draw (vscreen.cpp
+4108, 4119); `viewIsSurface` alone is 0.10 ms a frame with DLAA.
 
-**Expected.** About 0.1 ms a frame with AA on.
+**Change.** Remember the answer while all of these are unchanged: the
+PsSrv0..3 bind generations (or `bindingEyeKeyGeneration()`, binding_shadow.h
+138-153); `g_classifierEpoch` (ui_depth.cpp:335-342), which already bumps on
+every surface-table write, on configure and every frame boundary;
+`g_uiDepthOn` and `g_uiDepthStoodDown`; the key. `viewIsSurface`'s own
+120-frame view memo is safe only because `bindingFrameBoundary` bumps every
+slot's generation each frame; the cache inherits that. Known existing gaps
+(not new): a null-array `PSSetShaderResources` (vscreen.cpp about 3110) and
+`g_flatComputeInternal` binds skip `bindingSet`.
 
-## Item 4: the depth surface slot is cached
-
-**Current behaviour.** `uiDepthSampledSurfaceSlot` (ui_depth.cpp:2419)
-answers "which of pixel shader resources 0-3 is a surface EDVR knows?" by
-calling `viewIsSurface` on each, on every qualifying eye draw (vscreen.cpp
-4108 for scope marks and 4119 for learned surfaces). `viewIsSurface` alone
-is 0.10 ms a frame with AA on.
-
-**Change.** Remember the last answer with the inputs that produced it, and
-return it while all of these are unchanged:
-- the bind generations of PsSrv0..3 (`bindingGeneration`, binding_shadow.h
-  138-153, bumped by `bindingSet` from `hookedPSSetShaderResources`);
-- a new surface-set generation, bumped wherever a surface is learned or
-  forgotten;
-- `g_uiDepthOn` and `g_uiDepthStoodDown`;
-- the key's value.
-
-**Why it is safe.** The answer is a pure function of those inputs. The risk
-is a missed input: any other place that changes which views count as
-surfaces must bump the new generation. The spec must list every writer of
-the surface set; the review should check that list.
-
-**Key.** `experimental.vr_cpu_depth_slot_cache`. A change of the key clears
-the cache.
-
-**Shows it ran.** Cache hits and misses per perf window.
-
-**Test (red first), `tools\ui_depth_test`.** A repeat call with nothing
-changed is a hit and returns the same slot. Each input above, changed alone,
-forces a miss and a fresh answer. With the key off, every call recomputes.
-
-**Expected.** 0.1-0.2 ms a frame with AA on, in any scene with UI depth.
+**Key.** `experimental.vr_cpu_depth_slot_cache`; a change clears the cache.
+**Shows it ran.** Hits and misses per perf window.
+**Test (red first), `tools\ui_depth_test`.** Repeat call is a hit; each
+input changed alone forces a miss; key off always recomputes.
+**Expected.** 0.1-0.2 ms a frame with DLAA.
 
 ## The re-issue counter
 
-Not a saving: it names the owner of the unexplained ~3.6 ms. Every re-issue
-goes through `pureDrawReissue` (vscreen.cpp:3908) or the two paths built on
-it, `crispHudTonemapReissue` (4512) and `worldScreenReissue` (4518). Count
-calls and QPC time inside `pureDrawReissue`, split by caller: star glow,
-blend probe, crisp HUD, world-screen re-issue, `uiLayerSecondIssues`,
-tonemap. Logged as `draw reissue CPU:` beside `draw hook CPU:`
-(perf_monitor.cpp:1216), with the same 1-in-64 sampling and 1800-frame
-window. No key.
-
-Trace it end to end before flying: with no re-issues the line must say 0,
-not be absent; with the counter broken it must not say 0.
+Names the owner of the unexplained ~3.6 ms. Many re-issues bypass
+`pureDrawReissue` (vscreen.cpp:3908) and call the real draw directly. All
+re-issues go through one counted helper with a caller name: motion vectors
+(`screenMotionDraw`, `screenMotionUiDraw`, 5501-5502), weapon motion
+(5440), panel curve (4047, 4405, 4485, 4601), loader panel (4369), quad
+split (3744-3807), flat UI and sun (5135-5138, 5217-5220), ui depth (4553,
+4570, 4572, 4581, 4587), star glow, blend probe, crisp HUD, world screen,
+`uiLayerSecondIssues`, tonemap. Logged as `draw reissue CPU:` beside `draw
+hook CPU:` (perf_monitor.cpp:1216), timed on the same sampled frames and
+stride scaling (1199-1216) so the lines compare. No key. Traced end to end:
+no re-issues prints 0, never an absent line.
 
 ## The temporary keys
 
-- In `[experimental]`, each shipped `on` in the test build; `off` restores
-  today's behaviour exactly.
-- Each has a `# TEMPORARY` comment block that says it is live and is removed
-  when this investigation closes. No `# dev: hidden`, so each appears on the
-  F8 menu's Experimental page under `menu.developer = on`.
-- Read once per config sweep into a relaxed atomic the draw path reads (the
-  `g_aaOffDraw` pattern, vscreen.cpp:6162). A stale read may only fall back
-  to today's behaviour.
-- Every change logs one line with the key and its new value, so
-  `edvr_log.py` can split a leg at the flip.
-- When this investigation closes the winning items become plain behaviour
-  and the keys are deleted. They are never in a release.
+- In `[experimental]`; off restores today's behaviour exactly. The code
+  default is on; it reaches the game because install leaves the live
+  `edvr.ini` alone and these keys are absent from it.
+- Each has a `# TEMPORARY` comment block (live; removed when this closes).
+  No `# dev: hidden`, so each shows on the F8 Experimental page under
+  `menu.developer = on`.
+- Read once per config sweep into a relaxed atomic (the `g_aaOffDraw`
+  pattern, vscreen.cpp:6162). A stale read only falls back to today.
+- Each change logs one line with the key, its value and the frame number.
+  `edvr_log.py` drops any perf window that contains a flip.
+- A menu flip writes the live `edvr.ini` and the `%LOCALAPPDATA%\EDVR`
+  mirror; removing the keys means cleaning both.
 
 ## Flight plan
 
-One session, no game restart; keys flipped from the F8 menu. Legs are 3
-minutes (the perf lines print every 1800 frames, about a minute at 30 fps).
-Standing at the same concourse spot as 2026-10-31:
+One session, no restart, keys flipped from F8, measurement families off
+(`measure` blocks the fast path). Legs of 4 minutes at the 10-31 spot:
 
-1. DLAA, all keys on; then DLAA, all keys off.
-2. F7 (AA off), all keys on; then F7, all keys off.
+1. DLAA, all keys on; then all keys off.
+2. F7 (AA off), all keys on; then all keys off.
 3. Repeat 1 and 2.
 4. F7, only `vr_eye_rows_without_aa` off.
-5. A short cockpit leg, all keys on: no-regression check only.
+5. A short cockpit leg, all keys on: no-regression only.
 
-Weapons cannot be drawn in the concourse, so this flight cannot check ADS
-aim or scope zoom with item 1 on. That check waits for a flight where
-weapons can be drawn, or for the on-foot weapons work; until then item 1's
-behaviour change is unverified on screen.
+First `python tools\edvr_log.py --target steam --expect-build HEAD
+--version`, then `--health --since/--until` per leg. Expected: in keys-off
+AA-off legs `_hj_f100_tee` reports NEVER APPLIED (exit 3) by design.
 
-Before reading any number: `python tools\edvr_log.py --target steam
---expect-build HEAD --version` must pass, then `--health`.
-
-Visual checks during the legs: on-foot markers and labels correct with DLAA,
-and across an F7 toggle and back; HUD and UI depth correct.
+Weapons cannot be drawn in the concourse, so ADS aim and scope zoom with
+item 1 on are unchecked; that waits for a flight where weapons can be
+drawn, or for the weapons work.
 
 ## Pass criteria
 
 - The log is from this build.
-- `draw hook CPU` falls by at least 0.4 ms a frame with DLAA and at least
-  1.0 ms with AA off, against the keys-off legs and against 2026-10-31.
-- fps does not fall in any leg.
-- Every item's counter shows it ran, and `draw reissue CPU:` is present.
-- The keys-off AA-off legs' tally names `world 0` / `world 1` (else item
-  1's cause is refuted), and the keys-on AA-off legs show F113 row sources
-  other than `none`.
-- No visual regression on the checks above.
-
-If the result lands within noise, fly a fresh baseline of the previous
-build before concluding.
+- Each item's own reading shows it ran: item 1 the tee's est. ms a frame
+  down and F113 sources not `none` (key on, AA off); item 2 clears skipped;
+  item 4 hits; `draw reissue CPU:` present with its callers.
+- Item 1's cause holds (tally and `NotSceneDepth`, keys off, AA off) and
+  DLAA agreement is near 100%.
+- Total: `draw hook CPU` keys on below keys off in the same session, by
+  more than the spread of that mode's clean windows.
+- fps keys on no more than 0.5 below keys off, in every mode.
+- No visual regression: on-foot markers and labels with DLAA and across an
+  F7 toggle; HUD and UI depth.
