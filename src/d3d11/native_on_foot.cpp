@@ -94,6 +94,8 @@
 #include "native_on_foot_f193.h"   // F193: in the sights the body follows the camera's height, as at the hip: the rule, the stability stop, the 1 s line (pure parts)
 #include "native_on_foot_f194.h"   // F194: look to aim aims at the middle of the picture; its eye height settles as mouse look's does: the ray, the gate, the lines, the height probe (pure parts)
 #include "native_on_foot_f195.h"   // F195: at a look-to-aim engage the aim keeps its pitch where the mouse left it; only the yaw is centred (pure parts)
+#include "native_on_foot_f205.h"   // F205: the full-detail scope takes both eyes (the effective sight eye) and every ADS press shows its view inside a circle sized as flat's ADS FOV (pure parts)
+#include "../common/view_circle.h" // F205: the circle's request between the halves, its radius and weight
 #include "native_on_foot_f182.h"   // F182: the left hand stays on a two-handed gun aimed steeply up (the stored grip point in the item's frame; pure parts)
 #include "native_on_foot_f176.h"   // F176: in the sights with the head aiming, the mouse and the stick hold their pitch (pure parts)
 #include "native_on_foot_f175.h"   // F175 (measure only): the view's roll and pitch against the headset's, by look mode and item (pure parts)
@@ -313,15 +315,28 @@ std::atomic<float> g_f88WPub{0.0f};
 // also has F106's share: while the sights are up the left eye shows the right (aiming) eye's image, turned into its own view, by the ADS lock's weight. A USER key, default
 // both. It replaced F106's fix.native_on_foot_ads_sight_both_eyes (on | off) by a moved-from line in edvr.ini; F106 replaced F89's left eye close (its key retired: retiredKeysNote).
 std::atomic<int> g_adsSightEyeKey{nofoot::f162::kBoth};
-int adsAimEye() noexcept { return nofoot::f162::aimingEye(g_adsSightEyeKey.load(std::memory_order_relaxed)); }   // 0 the left eye, 1 the right eye
+// F205: the EFFECTIVE sight eye -- the one point every reader of the choice asks. The key is the player's; while a press of the full-detail scope (B3: its key on, the scope zoom on, the scoped
+// Executioner in the sights) stands, the press behaves as both whatever the key says, because the left eye is drawn as the zoomed view and the share shows the right eye's picture to both. Decided
+// once at the press's start and ended when the press has fully ended (nofoot::f205::PressLatch, frame thread; the atomic is its published form), so the sight lock's aiming eye never changes in the
+// middle of a press. The key and the menu are unchanged.
+std::atomic<bool> g_adsSightForceBoth{false};
+int adsSightEyeMode() noexcept {
+    return nofoot::f205::effectiveSightEye(g_adsSightEyeKey.load(std::memory_order_relaxed), g_adsSightForceBoth.load(std::memory_order_relaxed));
+}
+int adsAimEye() noexcept { return nofoot::f162::aimingEye(adsSightEyeMode()); }   // 0 the left eye, 1 the right eye
+nofoot::f205::PressLatch g_f205Latch;   // frame thread only
+bool f205B3Applies() noexcept;          // defined after f141Item(): B3's key and the scope zoom's, and the held item B3's entry
+// F205 (live): fix.native_on_foot_ads_view_circle, on | off, default on: every ADS press shows each eye's view inside a circle, black outside, sized as flat's ADS FOV (view_circle.h).
+std::atomic<bool> g_adsViewCircleKey{true};
 // A1 (live): fix.native_on_foot_ads_scope_zoom, the scope lens (scope_zoom.h): while the sights are up the right eye's picture inside the scope's frame is magnified by the game's
 // own zoom. A USER key, default on since A3 flew OK (2026-10-29); the reference FOV M is measured from is experimental.native_on_foot_ads_scope_zoom_fov (TEMPORARY, degrees, live).
 std::atomic<bool> g_scopeZoomKey{true};
 std::atomic<float> g_scopeZoomRefDeg{static_cast<float>(edvr::scopezoom::kLensRefDefaultDeg)};
-// B3 (live): experimental.native_on_foot_ads_scope_zoom_full_detail, on | off, default off: the user's choice of the scoped Executioner's lens. On: for the scoped Executioner (the table's rendered
-// entry) with fix.native_on_foot_ads_scope_zoom on and the sight eye at both, the game draws the LEFT eye as the zoomed view and the lens samples that picture (scope_zoom_b3.h), with a black edge
-// in each eye's outer view while the zoom stands; off: the lens is the digital zoom of the right eye (A), with no edge.
-std::atomic<bool> g_scopeZoomFullKey{false};
+// B3 (live): experimental.native_on_foot_ads_scope_zoom_full_detail, on | off, default ON since F205 (the pilot's word, 2026-11-01): the user's choice of the scoped Executioner's lens. On: for the
+// scoped Executioner (the table's rendered entry) with fix.native_on_foot_ads_scope_zoom on, the press takes both eyes whatever fix.native_on_foot_ads_sight_eye says (the effective sight eye),
+// and the game draws the LEFT eye as the zoomed view and the lens samples that picture (scope_zoom_b3.h), with a black edge in each eye's outer view while the zoom stands; off: the lens is
+// the digital zoom of the right eye (A), with no edge. With Anti-aliasing off the full detail does not run (its left door needs the upscaler's picture) and the lens is F202's.
+std::atomic<bool> g_scopeZoomFullKey{true};
 // B3's instruments, written by the draw/render thread and read by the frame thread at a press's end: a press with B3 asked is open (the draw path counts the eyes' draws, the constants buffer's
 // shadow keeps the shadow constants); the eye-sized draws into each eye since the frame thread's last tick; the readout pin's frames taken on one eye, and refused for want of a pair
 // while eye 0 was zoomed; the shadow constants' rows (cb1 298 to 326) changed from the eye's last frame, and between the eyes, inside the zoomed span (0) and outside it (1).
@@ -1376,6 +1391,17 @@ void readKey() {
         }
         g_adsSightEyeKey.store(mode, std::memory_order_relaxed);
     }
+    // F205 (live, the Native on foot page's "ADS: view circle"): every ADS press shows each eye's view inside a circle, black outside, sized as flat's ADS FOV does to its screen. One line a
+    // session and one at each change.
+    {
+        const bool circle = cfg.getString("fix.native_on_foot_ads_view_circle", "on") == "on";
+        if (first || circle != g_adsViewCircleKey.load(std::memory_order_relaxed))
+            Log::get().note("native on foot ADS view circle (F205): fix.native_on_foot_ads_view_circle is %s -- %s", circle ? "on" : "off",
+                            circle ? "while you aim down sights each eye shows its view inside a circle, black outside, whose radius is the weapon's ADS FOV over the hip FOV times the headset's half-FOV, "
+                                     "centred on the sight, so you lose the same share of the periphery as the flat game does; it comes in with the sight lock and goes with it; never outside ADS"
+                                   : "no circle: the whole view stays in the sights");
+        g_adsViewCircleKey.store(circle, std::memory_order_relaxed);
+    }
     // A1 (live, the Native on foot page's "ADS: scope zoom"; the developer tier's "ADS: scope zoom FOV (experimental)"): the scope lens. The key is a user key, on by default since A3
     // flew OK; the reference FOV is the h of M = tan(h / 2) / tan(ads / 2), the game's ADS FOV being absolute per weapon. One line at the first read and one at each change; the
     // instrument's own announce (scope zoom (S1)) follows from the frame tick.
@@ -1394,12 +1420,12 @@ void readKey() {
         g_scopeZoomKey.store(zoomOn, std::memory_order_relaxed);
         g_scopeZoomRefDeg.store(static_cast<float>(ref), std::memory_order_relaxed);
         // B3 (live): the full-detail lens, for the scoped Executioner only.
-        const bool full = cfg.getString("experimental.native_on_foot_ads_scope_zoom_full_detail", "off") == "on";
+        const bool full = cfg.getString("experimental.native_on_foot_ads_scope_zoom_full_detail", "on") == "on";
         if (first || full != g_scopeZoomFullKey.load(std::memory_order_relaxed))
             Log::get().note("native on foot ADS scope zoom full detail (B3): experimental.native_on_foot_ads_scope_zoom_full_detail is %s -- %s", full ? "on" : "off",
-                            full ? "while you aim down sights through the scoped Executioner, with the scope zoom on and ADS: sight eye at both, the game draws the LEFT eye as the zoomed view (its frustum "
-                                   "narrowed by the zoom, about the sight line, no pose change) and the scope's lens shows that picture at full detail; the left eye is covered by the right eye's view, and "
-                                   "an equal black edge takes the outer part of each eye's view meanwhile"
+                            full ? "while you aim down sights through the scoped Executioner, with the scope zoom on, the press takes both eyes whatever ADS: sight eye says, the game draws the LEFT eye "
+                                   "as the zoomed view (its frustum narrowed by the zoom, about the sight line, no pose change) and the scope's lens shows that picture at full detail; the left eye is "
+                                   "covered by the right eye's view, and an equal black edge takes the outer part of each eye's view meanwhile (with Anti-aliasing off the lens is the digital zoom)"
                                  : "the scope's lens is the digital zoom of the right eye's picture (A), with no edge");
         g_scopeZoomFullKey.store(full, std::memory_order_relaxed);
     }
@@ -8848,6 +8874,10 @@ void f129Tick(uint64_t now, bool onFoot) noexcept {
 // runs in alignTick, after the sight lock.
 void adsAimTick(uint64_t now, bool session) noexcept {
     ++g_f91.tick;   // F91 B: the frame thread's tick (this frame's figures carry it)
+    if (g_adsState == kAdsIdle && g_f205Latch.forced) {   // F205: the press has fully ended: the player's sight eye is back
+        g_f205Latch.end();
+        g_adsSightForceBoth.store(false, std::memory_order_relaxed);
+    }
     const bool key = g_adsAimKey.load(std::memory_order_relaxed);
     const int ySign = g_adsYawSign.load(std::memory_order_relaxed), pSign = g_adsPitchSign.load(std::memory_order_relaxed);
     const bool onFoot = g_f115CameraOn;   // F115: native stereo on foot, ended early by the cockpit's own panels at a boarding
@@ -9103,6 +9133,16 @@ void adsAimTick(uint64_t now, bool session) noexcept {
         entered = true;
         g_adsState = kAdsActive;
         f176PressBegin(now);   // F176
+        {   // F205: the press takes both eyes while the full-detail scope applies, decided here and held to the press's end
+            const bool applies = f205B3Applies();
+            g_f205Latch.begin(applies, g_adsSightEyeKey.load(std::memory_order_relaxed));
+            g_adsSightForceBoth.store(g_f205Latch.forced, std::memory_order_relaxed);
+            if (g_f205Latch.overrode) {
+                char line[240];
+                nofoot::f205::formatOverride(line, sizeof(line), g_f205Latch.keyAtStart);
+                Log::get().note("%s", line);
+            }
+        }
         g_adsEyeOnset = AdsEyeOnset{};
         g_adsEntryValid = false;
         if (g_adsSightTripped) Log::get().note("native on foot ADS sight lock (F63): guard cleared (a new ADS engage)");
@@ -14865,7 +14905,7 @@ uint64_t g_f106GuardLineMs = 0;
 uint32_t g_f106GuardTrips = 0;
 void f106ShareTick(uint64_t now) noexcept {
     namespace f106 = nofoot::f106;
-    const bool key = nofoot::f162::sharesView(g_adsSightEyeKey.load(std::memory_order_relaxed));
+    const bool key = nofoot::f162::sharesView(adsSightEyeMode());   // F205: the effective sight eye
     const int aim = adsAimEye();
     const bool onFoot = nativeOnFootActive();
     const f106::Share s = f106::share(key, onFoot, g_armed, g_adsW);
@@ -25682,6 +25722,12 @@ F141Item f141Item() noexcept {
     return it;
 }
 
+// F205: B3 applies to a press that starts now: its key on, the scope zoom key on, and the held item B3's table entry (the scoped Executioner). The item is read as the press's start reads it.
+bool f205B3Applies() noexcept {
+    if (!g_scopeZoomFullKey.load(std::memory_order_relaxed) || !g_scopeZoomKey.load(std::memory_order_relaxed)) return false;
+    const F141Item it = f141Item();
+    return nofoot::f205::b3Applies(true, true, edvr::scopezoom::lensRenderedEntry(it.name, it.scope));
+}
 // The sight point's window, the activation lines and the one-shot (frame thread only, as is everything below).
 nofoot::adslog::Window g_f141Win;
 nofoot::f141::Acc g_f141Acc;
@@ -36815,11 +36861,13 @@ void b3Tick(State& s, const sz::LensGateIn& gi, sz::LensVerdict verdict, const s
     B3State& b = g_b3s;
     s0::Vr& v = s0::g_vr;
     constexpr double nan = std::numeric_limits<double>::quiet_NaN();
-    const bool keyB3 = g_scopeZoomFullKey.load(std::memory_order_relaxed) && gi.keyOn;
+    // F205: B3's full detail needs the upscaler's picture at the left door (F202 left it so), so it waits for a temporal mode: with Anti-aliasing off the key being on (it is by default) asks nothing of
+    // the left eye -- no window, no strip, no black bars -- and the lens is F202's. The press still takes both eyes (the effective sight eye) and the ADS view circle (circleTick) with it off.
+    const bool keyB3 = g_scopeZoomFullKey.load(std::memory_order_relaxed) && gi.keyOn && temporalPassWantsFssChrome();
     const bool rendered = sz::lensRenderedEntry(s.item.name, s.item.scope);
     const bool asked = keyB3 && rendered;
     if (asked) b.pressKey = true;
-    const bool shareMode = nofoot::f162::sharesView(g_adsSightEyeKey.load(std::memory_order_relaxed));
+    const bool shareMode = nofoot::f162::sharesView(adsSightEyeMode());   // F205: the effective sight eye
     const double share = static_cast<double>(eyeshare::read(nowMs));
     const bool sightsFull = gi.onFoot && gi.adsActive && gi.wFull;
     const bool qualifies = verdict == sz::LensVerdict::kQualifies;
@@ -36956,6 +37004,110 @@ void endPress(State& s) noexcept {
         edvr::crisp::formatPress(crispLine, sizeof(crispLine), cl);
         Log::get().note("%s", crispLine);
     }
+}
+
+// ---- F205: the ADS view circle (view_circle.h; nofoot::f205) ----------------------------------------------------------------------------------------------------------------------
+// Every ADS press with a weapon whose ADS FOV is known shows each eye's view inside a circle, black outside, whose radius is (ADS FOV / hip FOV) x the headset's vertical half-FOV, centred on the
+// direction of the sight's far point in each eye's own view (so with the sight eye at right or left, where each eye shows its own view, the two circles fuse into one; with the share the left
+// eye's circle is the right eye's turned into its view, the same direction). Its inputs all exist with Anti-aliasing off, and nothing here asks for a temporal mode: the sight point S and the scene
+// rows (F196: the depth probe's scene pair names the eyes), the ADS FOV (the weapon's table row), the hip FOV (the scope zoom's reference), the eye's frustum (F198 publishes it with the mode
+// off). The weight rises with the sight lock (0.15 s from the first frame the centre is known) and falls with it (0.3 s from the first frame the sights are no longer up). The runtime draws it
+// (D3D11Stereo::renderCaptured); this publishes the request every tick and writes one line a press. Frame thread only.
+struct CircleState {
+    viewcircle::Ramp ramp;
+    double lastT = 0.0;
+    bool inPress = false, lineDone = false, haveCentre = false;
+    uint32_t press = 0;
+    uint64_t pressMs = 0, centreMs = 0;
+    float tc[2][2] = {};
+    double radiusRad = std::numeric_limits<double>::quiet_NaN();
+    bool keyLogged = false;
+} g_circle;
+constexpr uint64_t kCircleCentreFreshMs = 250;   // a centre this old or younger is believed
+constexpr uint64_t kCircleDecideMs = 500;        // a press whose circle cannot be worked out by now says why
+void circleTick(uint64_t nowMs) noexcept {
+    CircleState& c = g_circle;
+    State& s = g_s1;
+    s0::Vr& v = s0::g_vr;
+    if (g_install != InstallState::Armed || runtimeFlatProfile()) {
+        c.ramp = viewcircle::Ramp{};
+        c.inPress = false;
+        viewcircle::publish(viewcircle::Request{}, nowMs);
+        return;
+    }
+    const double t = s0::seconds();
+    const double dt = c.lastT > 0.0 ? std::fmin(std::fmax(t - c.lastT, 0.0), 0.25) : 0.0;
+    c.lastT = t;
+    const bool onFoot = nativeOnFootActive();
+    const bool inSights = onFoot && g_adsState != kAdsIdle;   // the press: from the raise to the end of the lower
+    const bool up = onFoot && g_adsState == kAdsActive;       // the sights are up (not lowering)
+    const bool key = g_adsViewCircleKey.load(std::memory_order_relaxed);
+    const char* mode = temporalPassWantsFssChrome() ? "on" : "off";
+    if (inSights && !c.inPress) {   // a press begins
+        c.inPress = true;
+        c.lineDone = false;
+        c.haveCentre = false;
+        c.press = v.press;
+        c.pressMs = nowMs;
+    }
+    nofoot::f205::Radius r;
+    double adsDeg = std::numeric_limits<double>::quiet_NaN();
+    bool fromBare = false, fovKnown = false;
+    if (inSights) {
+        fovKnown = sz::adsFovDeg(s.item.name, s.item.scope, &adsDeg, &fromBare);
+        float tan4[4];
+        const bool haveTan = temporalPassEyeTan(1, tan4);   // the right eye's frustum: eye 0's is narrowed while the full-detail scope's window stands
+        r = nofoot::f205::circleRadius(key, fovKnown, adsDeg, static_cast<double>(g_scopeZoomRefDeg.load(std::memory_order_relaxed)), haveTan ? tan4 : nullptr);
+        if (r.why == nofoot::f205::Why::kOk) c.radiusRad = r.radiusRad;
+        if (r.why == nofoot::f205::Why::kOk && up) {   // the sight's far point in each eye's own view, from the very rows and S the lens works from
+            const s0::Geometry g = s0::geometryNow(v, nowMs);
+            const bool sFresh = v.haveS && s0::freshMs(nowMs, v.sMs);
+            const double S[3] = {v.S[0], v.S[1], v.S[2]};
+            const double dir[3] = {S[0] - v.Epos[0], S[1] - v.Epos[1], S[2] - v.Epos[2]};
+            if (sFresh && nofoot::ikLen(dir) > kMinLineM) {
+                double tcE[2][2] = {};
+                bool ok[2] = {false, false};
+                for (int e = 0; e < 2; ++e) {
+                    if (g.rowsFrame[e] == ~0u) continue;
+                    const double od[3] = {g.o[e][0], g.o[e][1], g.o[e][2]};
+                    double ndc[2];
+                    float tj[4];
+                    if (!nofoot::sightPointNdc(g.rows[e], od, S, dir, kFarM, ndc) || !sz::tangentsOf(sz::clipZoom(g.rows[e]), tj)) continue;
+                    sz::tangentOfNdc(ndc, tj, tcE[e]);
+                    ok[e] = std::isfinite(tcE[e][0]) && std::isfinite(tcE[e][1]);
+                }
+                if (ok[0] && ok[1]) {
+                    for (int e = 0; e < 2; ++e)
+                        for (int a = 0; a < 2; ++a) c.tc[e][a] = static_cast<float>(tcE[e][a]);
+                    c.haveCentre = true;
+                    c.centreMs = nowMs;
+                }
+            }
+        }
+        if (!c.lineDone) {   // the press's one line: the radius with its three figures once the centre is known, or why there is no circle
+            const bool decided = r.why == nofoot::f205::Why::kOk ? c.haveCentre : r.why != nofoot::f205::Why::kKeyOff && nowMs - c.pressMs >= kCircleDecideMs;
+            if (decided || (r.why == nofoot::f205::Why::kOk && nowMs - c.pressMs >= 2 * kCircleDecideMs)) {
+                nofoot::f205::Radius shown = r;
+                if (shown.why == nofoot::f205::Why::kOk && !c.haveCentre) shown.why = nofoot::f205::Why::kNoCentre;
+                char line[420];
+                nofoot::f205::formatLine(line, sizeof(line), c.press, mode, shown, adsDeg, static_cast<double>(g_scopeZoomRefDeg.load(std::memory_order_relaxed)), fromBare, s.item.name,
+                                         loadout::scopeName(s.item.scope), shown.why == nofoot::f205::Why::kOk ? c.tc : nullptr);
+                Log::get().note("%s", line);
+                c.lineDone = true;
+            }
+        }
+    } else if (c.inPress) {
+        c.inPress = false;
+    }
+    const bool fresh = c.haveCentre && nowMs >= c.centreMs && nowMs - c.centreMs <= kCircleCentreFreshMs;
+    const bool want = key && up && r.why == nofoot::f205::Why::kOk && fresh;
+    c.ramp.step(want, dt);
+    viewcircle::Request req;
+    req.on = key && c.ramp.w > 0.0 && c.haveCentre && std::isfinite(c.radiusRad);
+    req.radiusRad = static_cast<float>(c.radiusRad);
+    req.weight = static_cast<float>(c.ramp.w);
+    std::memcpy(req.tc, c.tc, sizeof(req.tc));
+    viewcircle::publish(req, nowMs);
 }
 
 void tick(uint64_t nowMs) noexcept {
@@ -37303,6 +37455,7 @@ void nativeOnFootFrameBoundary(uint32_t frameNo) {
     f141Tick(GetTickCount64());    // F141: the game's ADS sight point against P14 (the source of the ADS eye's shift since F143), the readout's anchor (an instrument); after the ADS lock's tick, on the same snapshots
     s0::vrTick(GetTickCount64());  // S0: scope zoom, measure only (VR, native on foot armed): the press line, the lens geometry and the pixel probe's census; after F141's drain
     s1::tick(GetTickCount64());    // A1: the scope lens: its verdict, c and M for the door; after S0's tick, whose press number and samples it takes
+    s1::circleTick(GetTickCount64());   // F205: the ADS view circle's request (radius, weight, centre in each eye), every tick; after the lens tick, whose item it reads
     rotCalTick(GetTickCount64());  // F61: the rotation calibration (TEMPORARY, live; publishes zero while its key is off)
     f44::f119Boundary(frameNo, GetTickCount64());   // F119: the head containment instrument's depth grid and its line, after alignTick took the frame's head offset; F123: the leash and the wall contact
     {   // F123: the comfort fade is the max of F109's snap fade and the containment's, sent once a frame
@@ -37370,6 +37523,16 @@ void nativeOnFootShutdown() {
 
 // B3: the runtime's report of one press of the scope zoom's window (scope_zoom_window.h): what it told the game for the left eye, and what the game's getters answered. Called on the
 // runtime's owner thread once a press, when the window has ended; writes the line --health reads (scope zoom (B3) runtime). E_INVALIDARG, and no line, for a report it cannot read.
+// F205: the runtime's report of one run of the ADS view circle (view_circle.h): what it drew. Called on the runtime's render thread once a run, when the weight has come back to 0; writes the
+// line --health reads. E_INVALIDARG, and no line, for a report it cannot read.
+extern "C" long __stdcall edvrNoteNativeViewCircle(const EdvrNativeViewCircleReport* r) {
+    if (!edvr::nofoot::f205::reportReadable(r)) return E_INVALIDARG;
+    char line[edvr::nofoot::f205::kRuntimeLineBytes];
+    edvr::nofoot::f205::formatRuntime(line, sizeof(line), *r);
+    edvr::Log::get().note("%s", line);
+    return S_OK;
+}
+
 extern "C" HRESULT WINAPI edvrNoteNativeScopeZoom(const EdvrNativeScopeZoomReport* r) {
     if (!edvr::scopewin::reportReadable(r)) return E_INVALIDARG;
     char line[edvr::scopezoom::kB3RuntimeLineBytes];

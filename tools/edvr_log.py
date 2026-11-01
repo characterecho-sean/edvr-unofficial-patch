@@ -15970,6 +15970,7 @@ H_B3_PRESS_RE = (r"scope zoom \(B3\): press (?P<n>\d+) key (?P<key>on|off); aske
                  r"frame ms in/out " + _b3n("fmi") + "/" + _b3n("fmo") + r" \(max " + _b3n("fxi") + "/" + _b3n("fxo") + r"\); "
                  r"readout pin solo (?P<solo>\d+), no pair (?P<nopair>\d+)$")
 _B3CALL = r"(?:0x[0-9A-F]+|outside):\d+"
+H_B3_OVERRIDE_RE = r"scope zoom \(B3\): the sight eye is both for this press \(fix\.native_on_foot_ads_sight_eye is (?P<key>right|left)\): full detail needs both eyes$"   # F205
 H_B3_RUNTIME_RE = (r"scope zoom \(B3\) runtime: zoomed frames (?P<frames>\d+) over (?P<secs>[^\s;]+) s, peak narrowing (?P<peak>[^\s;]+); "
                    r"refused: answer not version 11 (?P<ref0>\d+), share not at full weight (?P<ref1>\d+), share not drawn (?P<ref2>\d+), geometry (?P<ref3>\d+); "
                    r"strip darkened (?P<strip>\d+) frames, hidden-area mesh withheld (?P<mesh>\d+) frames; "
@@ -16124,6 +16125,68 @@ def _hj_b3(rows, ctx):
             text += "; last press %s: %s" % (bad[-1][0]["n"], bad[-1][3])
         return ("PARTIAL", text + tail)
     return ("OK", base + "; last press %s: %s" % (good[-1][0]["n"], good[-1][3]) + tail)
+
+
+# ---- F205: the ADS view circle (src\d3d11\native_on_foot_f205.h formatLine / formatRuntime; src\common\view_circle.h; docs\design-vr-scope-magnification-2026-10-28.md, F205) ----
+# Four lines, all tagged (F205): the key (once a session and at each change), one press line a press of the sights (the radius with its three figures and the Anti-aliasing mode, or why there is no
+# circle), and the runtime's report of the run it drew (written when the weight is back at 0, so it comes just after the press's sights go down). A press that has a radius is a press the circle
+# was asked for; the runtime's report after it (before the next press line) says how many frames it was drawn on.
+H_F205 = "ADS view circle (F205)"
+H_F205_KEY_RE = r"native on foot ADS view circle \(F205\): fix\.native_on_foot_ads_view_circle is (?P<key>on|off) -- "
+H_F205_PRESS_RE = (r"ADS view circle \(F205\): press (?P<n>\d+), Anti-aliasing (?P<aa>on|off): radius (?P<rad>[\d.]+) deg \(ADS FOV (?P<ads>[\d.]+) / hip FOV (?P<hip>[\d.]+) x the headset's half-FOV "
+                   r"(?P<half>[\d.]+) deg, vertical\)(?P<rest>.*)$")
+H_F205_NONE_RE = r"ADS view circle \(F205\): press (?P<n>\d+), Anti-aliasing (?P<aa>on|off): no circle: (?P<why>.+?) \(item (?P<item>\S+), scope (?P<scope>\S+)\)$"
+H_F205_RUNTIME_RE = (r"ADS view circle \(F205\) runtime: ADS view circle on (?P<frames>\d+) frames, radius (?P<rad>[\d.]+) deg \(the d3d11 half asked (?P<req>[\d.]+) deg(?P<cut>; cut to[^)]*)?\), "
+                     r"over (?P<secs>[\d.]+) s; refused (?P<refused>\d+), with the share (?P<shared>\d+); weight peak (?P<peak>[\d.]+); centre \(u, v\) left (?P<lu>-?[\d.]+)/(?P<lv>-?[\d.]+) "
+                   r"right (?P<ru>-?[\d.]+)/(?P<rv>-?[\d.]+)$")
+
+
+def _f205_pair(press, runtime):
+    """({id(press row): its runtime row or None}). A press line takes the first runtime report after it and before the next press line (the report is written when the sights have come down)."""
+    paired = {}
+    order = sorted(press, key=lambda r: r["_order"])
+    for i, p in enumerate(order):
+        ceiling = order[i + 1]["_order"] if i + 1 < len(order) else float("inf")
+        gap = [r for r in runtime if p["_order"] < r["_order"] < ceiling]
+        paired[id(p)] = min(gap, key=lambda g: g["_order"]) if gap else None
+    return paired
+
+
+def _hj_f205(rows, ctx):
+    """F205, the ADS view circle: each press line with a radius is a press the circle was asked for; its runtime report must show frames drawn. PARTIAL when a press that had a radius has no runtime
+    report, or one with 0 frames drawn (the key was on, the radius known, and the runtime drew no circle: a version 11 answer that did not carry the words, a centre it could not use, or a cut radius under 5
+    degrees), naming the press; the runtime's refused frames and the cut to hide the full-detail scope's side bars are notes. A press with no circle (an ADS FOV EDVR has not measured, no frustum, no far
+    point) is not a failure and says why. IDLE with the key off, or with no press in the window. The Anti-aliasing mode is stated beside the radius, so a flight in each mode can be compared."""
+    key, press, none, runtime = rows.get("key", []), rows.get("press", []), rows.get("none", []), rows.get("runtime", [])
+    if not (key or press or none or runtime):
+        return None
+    keyed = key[-1]["key"] if key else None
+    if keyed == "off" and not press:
+        return ("IDLE", "fix.native_on_foot_ads_view_circle is off: no circle by the setting")
+    if not press and not none:
+        return ("IDLE", "the key is %s; no press of the sights in this window" % (keyed or "not stated in it"))
+    paired = _f205_pair(press, runtime)
+    bad = [p for p in press if paired[id(p)] is None or int(paired[id(p)]["frames"]) == 0]
+    modes = collections.Counter(p["aa"] for p in press + none)
+    mode_text = ", ".join("Anti-aliasing %s %d" % (m, n) for m, n in sorted(modes.items()))
+    radii = ", ".join("%s deg (ADS %s / hip %s x %s)" % (p["rad"], p["ads"], p["hip"], p["half"]) for p in press[:4])
+    why = collections.Counter(n["why"] for n in none)
+    frames = sum(int(r["frames"]) for r in runtime)
+    text = "%d press(es) with a circle asked (%s), %d with none%s; the runtime drew it on %d frame(s) in %d run(s)" % (
+        len(press), mode_text or "no press", len(none), " (" + "; ".join("%s x%d" % (w, c) for w, c in why.most_common(3)) + ")" if why else "", frames, len(runtime))
+    if radii:
+        text += "; radius " + radii
+    cut = [r for r in runtime if r.get("cut")]
+    if cut:
+        text += "; cut to hide the full-detail scope's side bars in %d run(s)" % len(cut)
+    refused = sum(int(r["refused"]) for r in runtime)
+    if refused:
+        text += "; the runtime refused %d frame(s)" % refused
+    if not press:
+        return ("IDLE", text + "; every press had no circle (not a failure)")
+    if bad:
+        return ("PARTIAL", text + "; the circle was asked for press %s and the runtime drew it on no frame (no report, or 0 frames drawn)" % ", ".join(p["n"] for p in bad[:6]))
+    return ("OK", text)
 
 
 # ---- C1a: the crisp reticle (src\d3d11\crisp_reticle.h formatAnnounce and formatPress; src\d3d11\native_on_foot.cpp s1::tick and endPress; docs\design-vr-scope-magnification-2026-10-28.md section 12) ----
@@ -17099,7 +17162,15 @@ HEALTH_RULES = (
         ("announce", H_B3_ANNOUNCE_RE),
         ("press", H_B3_PRESS_RE),
         ("runtime", H_B3_RUNTIME_RE),
+        ("override", H_B3_OVERRIDE_RE),
     ), _hj_b3),
+    # F205 (the ADS view circle; src\d3d11\native_on_foot_f205.h, native_on_foot.cpp, src\common\view_circle.h): the key, one press line a press of the sights, and the runtime's report of the run.
+    _hrule(H_F205, ("F205",), (H_F205,), (
+        ("key", H_F205_KEY_RE),
+        ("press", H_F205_PRESS_RE),
+        ("none", H_F205_NONE_RE),
+        ("runtime", H_F205_RUNTIME_RE),
+    ), _hj_f205),
     # C1 (crisp sights; src\d3d11\crisp_reticle.h, native_on_foot.cpp): the announce and one press line a press of the sights the gate was eligible in, both tagged (C1).
     _hrule(H_C1, ("C1",), (H_C1,), (
         ("announce", H_C1_ANNOUNCE_RE),
@@ -18115,6 +18186,7 @@ def self_test_health():
         s0src = read_text(s0_path)
         s1src = read_text(s1_path)
         b3src = read_text(b3_path)
+        f205src = read_text(os.path.join(repo_root(), "src", "d3d11", "native_on_foot_f205.h"))   # F205: the ADS view circle's press, runtime and override lines
         c1src = read_text(c1_path)
         probesrc = read_text(probe_path)
     except OSError as e:
@@ -18495,6 +18567,15 @@ def self_test_health():
             fmts[key] = health_c_format(s1src, needle)
         if fmts[key] is None:
             raise AssertionError("scope_zoom_s1.h has no format holding %r: the --health rule that reads it is out of date" % needle)
+        return health_render(fmts[key], vals)
+
+    def R205(needle, *vals):
+        """F205's lines (native_on_foot_f205.h builds them: formatLine, formatRuntime, formatOverride), from their own format literals."""
+        key = "f205:" + needle
+        if key not in fmts:
+            fmts[key] = health_c_format(f205src, needle)
+        if fmts[key] is None:
+            raise AssertionError("native_on_foot_f205.h has no format holding %r: the --health rule that reads it is out of date" % needle)
         return health_render(fmts[key], vals)
 
     def RB3(needle, *vals):
@@ -22481,8 +22562,8 @@ def self_test_health():
             print("health census is not newest tag first:\n%s" % out)
             ok = False
         check("census: a log with no tagged line", ["nothing here", "still nothing"], 0, has=["0 build-tagged lines, 0 tags", "no rule had a line"])
-        many = ["t%d (F%d): x" % (i, 200 + i) for i in range(12)]   # F200..F211: tags no rule reads (F100 has rules since F100)
-        check("census: the newest eight of twelve", many, 0, has=["newest 8 of 12 tags with no rule", "    F211 ", "    F204 "], lacks=["    F203 "])
+        many = ["t%d (F%d): x" % (i, 300 + i) for i in range(12)]   # F300..F311: tags no rule reads (F205 has a rule since F205; this was F200..F211)
+        check("census: the newest eight of twelve", many, 0, has=["newest 8 of 12 tags with no rule", "    F311 ", "    F304 "], lacks=["    F303 "])
 
         # ---- a format that drifts from its rule fails loudly ----
         check("a rule whose lines no longer match", [pistol().replace("keys forward", "knobs forward")] * 2, 4, [("UNPARSED", F90P)],
@@ -23207,6 +23288,40 @@ def self_test_health():
         check("S1: an announce that drifted from its pattern is unparsed", ["scope zoom (S1): maybe, reference FOV 56.3 deg"], 4, [("UNPARSED", S1R)])
         check("S1: its tag is listed with --health-all and S0's rules are untouched by it", [s1_announce(), s1_press(), s0_watch(), s0_vr(settled=0)], 0, [("OK", S1R), ("OK", SV0)],
               has=["every tag (* has a rule above):", "S1", "S0"], extra=["--health-all"])
+        # ---- F205: the ADS view circle, rendered from native_on_foot_f205.h's own format literals ----
+        F205R = H_F205
+
+        def c205_key(key="on"):
+            return R("native on foot ADS view circle (F205): fix.native_on_foot_ads_view_circle is %s", key, "x")
+
+        def c205_press(n=1, aa="off", rad=13.82, ads=15.0, hip=56.3, half=51.87, item="$wpn_m_sniper_plasma_charged_name;", scope="yes"):
+            return R205("ADS view circle (F205): press %u, Anti-aliasing %s: radius", n, aa, rad, ads, hip, half, "", item, scope)
+
+        def c205_none(n=1, aa="off", why="the ADS FOV of the held weapon is not known", item="$wpn_m_unknown_name;", scope="no"):
+            return R205("ADS view circle (F205): press %u, Anti-aliasing %s: no circle:", n, aa, why, item, scope)
+
+        def c205_runtime(frames=410, rad=13.82, req=13.82, cut="", secs=4.2, refused=0, shared=410, peak=1.0, centre=(0.512, 0.488, 0.488, 0.488)):
+            return R205("ADS view circle (F205) runtime: ADS view circle on %u frames", frames, rad, req, cut, secs, refused, shared, peak, centre[0], centre[1], centre[2], centre[3])
+
+        check("F205: a press with a circle asked and the runtime's report of frames drawn is OK, with the radius and the mode", [c205_key(), c205_press(), c205_runtime()], 0, [("OK", F205R)],
+              has=["1 press(es) with a circle asked (Anti-aliasing off 1)", "the runtime drew it on 410 frame(s) in 1 run(s)", "radius 13.82 deg (ADS 15.00 / hip 56.30 x 51.87)"], lacks=["UNPARSED"])
+        check("F205: the same press with Anti-aliasing on reads the same, stating the mode", [c205_key(), c205_press(aa="on"), c205_runtime()], 0, [("OK", F205R)], has=["Anti-aliasing on 1"])
+        check("F205: a press with a circle asked and no runtime report is PARTIAL naming the press", [c205_key(), c205_press(n=3)], 0, [("PARTIAL", F205R)],
+              has=["the circle was asked for press 3 and the runtime drew it on no frame"])
+        check("F205: a press with a circle asked and a report of 0 frames is PARTIAL", [c205_key(), c205_press(n=2), c205_runtime(frames=0, shared=0, refused=40)], 0, [("PARTIAL", F205R)],
+              has=["press 2", "the runtime refused 40 frame(s)"])
+        check("F205: two presses, the second drawn on nothing, name the second alone", [c205_key(), c205_press(n=1), c205_runtime(), c205_press(n=2), c205_runtime(frames=0, shared=0)], 0,
+              [("PARTIAL", F205R)], has=["press 2 and"], lacks=["press 1 and"])
+        check("F205: a weapon whose ADS FOV is not known gets no circle and that is no failure", [c205_key(), c205_none()], 0, [("IDLE", F205R)],
+              has=["1 with none (the ADS FOV of the held weapon is not known x1)", "every press had no circle (not a failure)"])
+        check("F205: a press with a radius beside one with none is judged on the first", [c205_key(), c205_none(), c205_press(n=2), c205_runtime()], 0, [("OK", F205R)], has=["1 with none"])
+        check("F205: the cut to hide the full-detail scope's side bars is a note, not a failure", [c205_key(), c205_press(), c205_runtime(cut="; cut to the circle that hides the full-detail scope's side bars on some frames", rad=11.9)],
+              0, [("OK", F205R)], has=["cut to hide the full-detail scope's side bars in 1 run(s)"])
+        check("F205: the key off is idle", [c205_key("off")], 0, [("IDLE", F205R)], has=["fix.native_on_foot_ads_view_circle is off"])
+        check("F205: a line that drifted from its pattern is unparsed", ["ADS view circle (F205): press x, a circle"], 4, [("UNPARSED", F205R)])
+        check("F205: the B3 sight-eye override line is read by the B3 rule, not unparsed", [R205("scope zoom (B3): the sight eye is both for this press", "right")], 0, lacks=["UNPARSED"])
+        check("F205: its tag is listed with --health-all", [c205_key(), c205_press(), c205_runtime()], 0, [("OK", F205R)], has=["F205"], extra=["--health-all"])
+
         # ---- scope zoom (B3): the scoped sniper's lens at full detail, rendered from scope_zoom_b3.h's and native_on_foot.cpp's own format literals ----
         B3R = H_B3
 

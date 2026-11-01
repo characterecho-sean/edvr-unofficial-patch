@@ -136,7 +136,7 @@ static bool wiredFrame(const std::string& n) {
 // B3: the key (read by its literal name, default off, live), the tick's step before the publish, the window handed the provider each tick, the press line from every module's half, the
 // strip still published outside the sights, the draw path's count, the readout pin taking the right eye alone, the shadow constants, and the runtime's export.
 static bool wiredB3Frame(const std::string& n) {
-    return has(n, "cfg.getString(\"experimental.native_on_foot_ads_scope_zoom_full_detail\", \"off\") == \"on\"") && has(n, "std::atomic<bool> g_scopeZoomFullKey{false};") &&
+    return has(n, "cfg.getString(\"experimental.native_on_foot_ads_scope_zoom_full_detail\", \"on\") == \"on\"") && has(n, "std::atomic<bool> g_scopeZoomFullKey{true};") &&
            before(n, "b3Tick(s, gi, verdict, g, dt, nowMs, out);", "    scopeZoomPublish(out);\n}\n}  // namespace s1") && has(n, "scopewin::publish(so.request, nowMs);") && has(n, "const sz::B3StepOut so = sz::b3Step(b.loop, si);") &&
            has(n, "scopewin::publish(sz::b3IdleStep(g_b3s.loop, dt), nowMs);") && has(n, "scopewin::publish(sz::b3OffStep(g_b3s.loop), nowMs);") && has(n, "if (!so.frameAsked) return;") &&
            has(n, "p.temporalKnown = sz::b3Since(b.temporalBase, temporalNow,") && has(n, "p.lightGridKnown = sz::b3Since(true, true, b.lgCalls0, calls, &p.lgCalls)") &&
@@ -144,14 +144,14 @@ static bool wiredB3Frame(const std::string& n) {
            has(n, "scopeZoomB3Take(&door);") && has(n, "nativeTemporalZoomCounts(&zf, rs, &edge)") && has(n, "lightGridCacheZoomCounts(&calls, &bypassed);") && has(n, "        b3Idle(dt, nowMs);\n        return;") &&
            has(n, "edvr::scopezoom::b3PinAction(nativeTemporalZoomLatest(nullptr, nullptr, nullptr), e);") && has(n, "g_f85Latch.putSolo(1, frame, s.K, s.oh, s.ow)") &&
            has(n, "b3ShadowNote(e, frame, cb1);") && has(n, "void nativeOnFootB3NoteEyeDraw() {") && has(n, "scopewin::clear();") && has(n, "extern \"C\" HRESULT WINAPI edvrNoteNativeScopeZoom(") &&
-           has(n, "sz::b3Matrices(g.rows[1], o1, jn[1], g.rows[0], o0, jn[0], out.b3.T, out.b3.u)") && has(n, "sz::b3WindowMatches(zt, lt, 3.0e-3)") && has(n, "const bool keyB3 = g_scopeZoomFullKey.load(std::memory_order_relaxed) && gi.keyOn;");
+           has(n, "sz::b3Matrices(g.rows[1], o1, jn[1], g.rows[0], o0, jn[0], out.b3.T, out.b3.u)") && has(n, "sz::b3WindowMatches(zt, lt, 3.0e-3)") && has(n, "const bool keyB3 = g_scopeZoomFullKey.load(std::memory_order_relaxed) && gi.keyOn && temporalPassWantsFssChrome();");
 }
 // B3: the provider hands the window to the runtime in a version 11 answer only; the runtime narrows eye 0's told frustum where the trim sets the frame's frusta, keeps the true frustum for the
 // raw getter, the hidden-area mesh and the temporal pass's announcements, and tells the strip to the stereo renderer; the temporal pass resets eye 0's history at the window's edges.
 static bool wiredB3Halves(const std::string& frame, const std::string& host, const std::string& temporal, const std::string& stereo, const std::string& vscreen, const std::string& system) {
     return has(frame, "if (carried) edvr::scopewin::toWords(edvr::scopewin::read(GetTickCount64()), result.reservedTerrainGuard);") &&
            before(host, "zoomApplied=applyScopeZoom(gameGeometry,zoomPreRaw,zoomToldRaw);", "geometry.publish(gameGeometry,false,false,frameTangentShift,hiddenMeshCompatible()&&!zoomApplied,zoomApplied?zoomToldRaw:nullptr)") &&
-           has(host, "zoomApplied?&zoomPreRaw:nullptr);") && has(host, "locatedHeadPose(),leftShare,&hidden,zoomStripNow,zoomAppliedNow,&frameOrigin);") && has(host, "leftShare,&hidden,zoomStripNow,previousZoomed,&previousOrigin):") && has(host, "previousZoomed=zoomAppliedNow;") &&
+           has(host, "zoomApplied?&zoomPreRaw:nullptr);") && has(host, "locatedHeadPose(),leftShare,&hidden,zoomStripNow,zoomAppliedNow,&frameOrigin,&circleArg);") && has(host, "leftShare,&hidden,zoomStripNow,previousZoomed,&previousOrigin,&circleArg):") && has(host, "previousZoomed=zoomAppliedNow;") &&
            has(host, "const ScopeZoomEvents ev=zoomRun.frame(out,frameCycleUs());") && has(host, "if(raw)zoomCallers.note(caller);") && has(host, "zoomCallers.top(press.callerRva,press.callerReads,press.callerOther);") &&
            has(system, "source_.noteProjectionRead(eye,true,s.toldRawSet&&liveGeometry,rawSpanV(out),frameRva(exe_,reinterpret_cast<uintptr_t>(_ReturnAddress())));") &&
            has(system, "source_.noteProjectionRead(eye,false,s.toldRawSet&&liveGeometry,accepted?matrixSpanV(out):0.0f,frameRva(exe_,reinterpret_cast<uintptr_t>(_ReturnAddress())));") &&
@@ -286,10 +286,10 @@ static void wiringTests() {
     check(!wiredLeftDoor(replaced(layer, "if (eye == 0 && scopeZoomWanted())", "if (eye == 1 && scopeZoomWanted())")), "control: a left door asked for the right eye is not the wiring");
     check(!wiredLeftDoor(replaced(layer, "leftArgs.resolved = e.doorFromPass;", "leftArgs.resolved = true;")), "control: a left copy of a picture that is not the upscaler's is not the wiring");
     check(has(native, "scopeZoomSetTemporalZoom(&nativeTemporalZoom);"), "B3: the tick hands the doors the temporal pass's word on eye 0");
-    check(wiredB3Frame(native), "B3: the key by its literal name, off by default; the tick's step before the publish; the window handed the provider; the press line from every half; the pin on one eye; the export");
-    check(!wiredB3Frame(replaced(native, "std::atomic<bool> g_scopeZoomFullKey{false};", "std::atomic<bool> g_scopeZoomFullKey{true};")), "control: the full-detail key on at the start is not the shipped default");
-    check(!wiredB3Frame(replaced(native, "cfg.getString(\"experimental.native_on_foot_ads_scope_zoom_full_detail\", \"off\") == \"on\"", "cfg.getString(\"experimental.native_on_foot_ads_scope_zoom_full_detail\", \"on\") == \"on\"")),
-          "control: the reader's fallback on is not the shipped default");
+    check(wiredB3Frame(native), "B3: the key by its literal name, ON by default since F205; the tick's step before the publish; the window handed the provider; the press line from every half; the pin on one eye; the export");
+    check(!wiredB3Frame(replaced(native, "std::atomic<bool> g_scopeZoomFullKey{true};", "std::atomic<bool> g_scopeZoomFullKey{false};")), "control: the full-detail key off at the start is not the shipped default (F205: on)");
+    check(!wiredB3Frame(replaced(native, "cfg.getString(\"experimental.native_on_foot_ads_scope_zoom_full_detail\", \"on\") == \"on\"", "cfg.getString(\"experimental.native_on_foot_ads_scope_zoom_full_detail\", \"off\") == \"on\"")),
+          "control: the reader's fallback off is not the shipped default (F205: on)");
     check(!wiredB3Frame(replaced(native, "b3Tick(s, gi, verdict, g, dt, nowMs, out);", "")), "control: no B3 step in the tick is not the wiring");
     check(!wiredB3Frame(replaced(native, "        b3Idle(dt, nowMs);\n        return;", "        return;")), "control: a strip that is not published once the sights are down (it would stay black) is not the wiring");
     check(!wiredB3Frame(replaced(native, "    endB3Press(s);\n", "")), "control: a press that does not write its B3 line is not the wiring");
@@ -327,12 +327,12 @@ static void wiringTests() {
         check(!wiredB3Halves(frameCpp, host, tcpp, stereo, vs, replaced(system, "(s.toldRawSet?s.toldRaw[eye]:s.geometry.raw[eye])", "s.geometry.raw[eye]")), "control: a raw getter that follows the zoom (the HUD would grow) is not the wiring");
     }
     {
-        const char* key = "native_on_foot_ads_scope_zoom_full_detail = off";
+        const char* key = "native_on_foot_ads_scope_zoom_full_detail = on";
         const size_t at = ini.find(key), fovAt = ini.find("native_on_foot_ads_scope_zoom_fov = 56.3");
-        check(at != std::string::npos && fovAt != std::string::npos && fovAt < at && before(ini, "[experimental]", key) && has(ini, "# ui: ADS: scope zoom full detail (experimental) | choices on, off | recommended off | live") &&
+        check(at != std::string::npos && fovAt != std::string::npos && fovAt < at && before(ini, "[experimental]", key) && has(ini, "# ui: ADS: scope zoom full detail (experimental) | choices on, off | recommended on | live") &&
                   has(ini, "# ADS: scope zoom full detail: your choice of how the scope zoom") && !has(ini, "TEMPORARY (B3)") && !has(ini, "it goes when the lens has been judged"),
-              "B3: the ini states the key off, in the experimental section after the reference FOV, as the user's choice and not as a temporary key, with its row");
-        check(!(ini.find("native_on_foot_ads_scope_zoom_full_detail = on") != std::string::npos), "B3: the key is not on in the shipped file");
+              "B3: the ini states the key ON (F205), in the experimental section after the reference FOV, as the user's choice and not as a temporary key, with its row");
+        check(!(ini.find("native_on_foot_ads_scope_zoom_full_detail = off") != std::string::npos), "B3: the key is not off in the shipped file (F205: on by default)");
     }
     {   // B3-3: black is the behaviour. No edge key (its reader, atomic, ini entry and wire word are gone); a narrowed frame with no share has the left eye cleared; the right eye's mirror of the
         // strip is drawn after the share, only with a share drawn and the strip up or the frame narrowed, at the left strip's weight (full on a narrowed frame); the host tallies it and the press

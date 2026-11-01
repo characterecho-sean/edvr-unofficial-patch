@@ -2,6 +2,7 @@
 #define NOMINMAX
 #include "../../src/openxr/d3d11_stereo.h"
 #include "../../src/openxr/gpu_work_observer.h"
+#include "../../src/openxr/scope_circle.h"   // F205: the ADS view circle's arithmetic
 #include "../../src/openxr/flat_notice_placement.h"
 #include "../../src/openxr/flat_notice_raster.h"
 #include "../../src/common/system_d3d11.h"

@@ -27,6 +27,7 @@ namespace edvr::openxr::shareview {
 constexpr double kPi = 3.14159265358979323846;
 constexpr double kBandDeg = 3.0;         // the cross-fade from the left eye's own image to the right eye's, at the edge of what the right eye drew
 constexpr double kEdgeMarginDeg = 0.25;  // ... starting this far inside that edge (the clamp and the filter of the last texels)
+constexpr double kMinCircleDeg = 5.0;    // F205: the smallest radius the ADS view circle is drawn at (scope_circle.h); a cut to hide the full-detail scope's bars below this draws none
 constexpr uint32_t kMaskSize = 256;      // the hidden-area mask's texels a side, over the right view's fov
 constexpr uint32_t kCoverageGrid = 48;   // the per-press coverage figure's samples a side, over the left eye's placement
 
