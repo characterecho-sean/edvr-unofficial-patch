@@ -8,7 +8,7 @@ game's own zoom as a magnified picture inside the scope's lens. The rest of the 
 
 - **Release (2026-10-30):** A3, B3-3 and C1a are in v0.22.0-rc.4 (draft pre-release, `ab1955de`, 2026-10-30): the scope lens is on by default; `native_on_foot_ads_scope_zoom_full_detail` (off) and `native_on_foot_ads_scope_zoom_fov` ship as experimental keys.
 - **F205 (`25b94de6`, `claude/full-detail-scope`, installed on Frontier 2026-11-01, NOT FLOWN, not merged):** B3 on by default and taking both eyes; every ADS press a circle in
-  both eyes sized as flat's ADS FOV, Anti-aliasing on or off; FLOWN OK; F205b `143b4f04`: the circle follows the scope zoom setting, its key removed. Journal: F205 at the end.
+  both eyes sized as flat's ADS FOV, Anti-aliasing on or off; FLOWN OK; F205b `143b4f04`: the circle follows the scope zoom setting, its key removed. F206 `06e1e54b` (NOT FLOWN): the circle is the full-detail scope's alone, the widest that hides its bars. Journal: F205 at the end.
 - **ON MAIN `28359a00` (2026-10-30, the maintainer's word; full build of the merged tree, all gates):** A3, B3-3 and C1a as flown, the crisp reticle key retired, C1b removed. Open: B3's window drift while
   turning (the lens falls back to A) and the temporary `experimental.native_on_foot_ads_scope_zoom_fov`.
 - **State: S0 FLAT TWICE, VR TWICE** (`d90db147`, measure only, no key; section 7). Settled: Q1 for every owned weapon, Q2 (VR has no
@@ -1138,3 +1138,22 @@ F205b (`143b4f04`, full build green, `native_frame_test` 3784, `openxr_stereo_te
 - `circleTick` reads `g_scopeZoomKey`, the one live reader of `fix.native_on_foot_ads_scope_zoom`. With the scope zoom on, every ADS press with any weapon gets the circle; with it off, there is none.
 - The off press line reads `ADS view circle (F205): press N: no circle (fix.native_on_foot_ads_scope_zoom is off)`, and `--health` reads it IDLE.
 - Nothing else about the circle changed.
+
+**F206** (2026-11-02, `06e1e54b` on `claude/sniper-circle-readout` from aad934ef = the v0.22.0-rc.5 draft's tag; full build green; installed on Frontier as v0.22.0-rc.5-1-g06e1e54b, verified; NOT FLOWN).
+
+The pilot, after reviewing F205: "back off on the stencil entirely for all weapons except the sniper with scope mod so that it hides the black vertical bars and then have the widest radius possible that does". Two earlier asks were superseded and their commit was reset away unpushed: the scoped sniper's circle widened to keep its ammo readout inside, and the circle only with the sight eye at both.
+
+- **Which presses.** A press has a circle exactly when the F205 latch forced both eyes for B3: the scoped Executioner, full detail on, the scope zoom on, and a temporal mode. No other weapon, no B3-less scoped press and no Anti-aliasing-off press draws one.
+  - F205's flat-ADS-FOV rule and its FOV table for the circle are removed.
+  - There is no new key.
+- **The radius.** The runtime computes it every frame from the actual centre in each eye. `coverageRadius` is the distance from the centre to the nearest edge the share and mirror draw the bars from, less the margin and half the band, and the smaller of the two eyes. It is not smoothed: a smaller radius always hides the bars.
+  - Straight ahead, Pimax 39.42 deg; Quest 3 37.66 deg, on the rig's assumed horizontals. Off centre it shrinks one for one.
+  - The stereo rig checks the circle against the shader's own arithmetic, pointwise.
+- **The weight.** The mirror strip's own weight through the entry ramp and the exit hold, never the ADS weight, so the circle is drawn exactly when the bars are.
+- **The wire.** Words 5..9 of the version 11 answer: the on-flag and the centre in each eye. F205's words 5..11 meant something else under the same version 11. That is safe only because F205 was never released: the rc.5 draft must not ship F205's layout if F206 follows it under version 11.
+- **Lines.**
+  - Press: `ADS view circle (F206): press N: radius X deg (the widest that keeps the full-detail view's side bars in the black: nearest edge Y deg less the band Z deg); over the run a to b deg; drawn on F frames`.
+  - A B3 press with no circle: `... no circle: <reason>`.
+  - `--health`: a B3 press with its window up and no circle frame is PARTIAL.
+- **The readout.** The ammo readout sits about 8-14 deg out, inside the clear region of about 37.9 deg (Pimax) or 36.2 deg (Quest 3). This is an estimate.
+- **Doubts.** A B3 press with the strip up and no centre yet shows the bars without the circle for those frames; the line names it. A radius under 5 deg is refused.
