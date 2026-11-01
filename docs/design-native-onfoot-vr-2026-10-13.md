@@ -4473,6 +4473,16 @@ ruled out: F120's head-turn correction, because it rotated a point the lever had
     - F192's hold restarting within one native epoch: no epoch repeated in 27 holds across the 033457, 054727 and 064004 flights.
     - F196's probe cost in the cockpit with Anti-aliasing off: draw hook CPU 0.04-0.21 ms a frame in the ship on F196's flight.
     - Also noted, not changed: F171c and F175 1 s lines sit outside the log diet. A look-to-aim stop through `adsStop` drops F194's partial window.
+- **F207 (2026-11-01, `a4413c83` on `claude/probe-on-foot-only` from 18c737cd; full build green; installed on Frontier as v0.22.0-rc.5-45-ga4413c83, verified; NOT FLOWN): F196's Anti-aliasing-off probe arm runs only on foot.**
+  - **Why:** GitHub #152 (a contributor's CPU profile) and the rc.5 review found that F196 armed the probe for every VR session with native on foot on and Anti-aliasing off. In the cockpit, stations and menus it cost a per-draw call, the eye-draw note and the boundary pick, and held the draw gate's probe term, with no reader there. The pilot: "We shouldn't be adding cost where it is not necessary."
+  - **The change.** `depthProbeConfigure` still decides the configured reason. At each frame boundary, on the render thread, `vScreenFrameBoundary` calls `depthProbeSetNativeOnFoot(nativeOnFootActive())` before the counts roll and the gate is re-sampled. `depthProbeLiveFor(why, onFoot)` (depth_probe_wanted.h) makes the arm live only on foot. The temporal and capture arms are unchanged.
+  - **The edges.**
+    - On: counting starts at that boundary and the pair forms at the second boundary, so rows exist from the second on-foot frame. F113's health tolerates one or two row-less frames.
+    - Off: the pair, counts and target table are dropped, and the references are released. Nothing from before an edge is answered.
+  - **Lines.** The reason line reads `... for native on-foot VR, on foot only (Anti-aliasing off)`. Each edge writes `depth probe (F207): the on-foot arm is on|off (native on foot went active|inactive, after N frames off|on)`, the first 24, then a count.
+  - **Off foot with Anti-aliasing off,** celestial motion and the vr_camera_census diagnostic are declined again, as before F196.
+  - **The rest of #152** (a per-scene subscriber mask so the draw gate can close in VR) stays with the contributor's draw-path investigation.
+  - **Next:** a disembark with Anti-aliasing off. Read the edge lines, F113's rows from the second on-foot frame, and the draw hook CPU in the ship.
 - ruled out: F198's eye naming as the reason the markers still move with Anti-aliasing off, because both eyes are named and decided (F63 180 a second each with a marker present) and the patch is never bound: the bind requires the interface layer.
 - ruled out: F63's CPU identification differing with Anti-aliasing off, because its line at 21:24:40 (`named: a find 360 ... read-back's entry agrees 360`) matches the DLSS line at 13:49:05 digit for digit. That second's "0 matched" had no nav marker in the scene (`UpdateMarker 0 ... list 0`).
 - ruled out: F196 (or anything EDVR adds with Anti-aliasing off) as the cause of the outpost's 61-78 fps, because EDVR's GPU census reads ~0.1 ms a frame there, its draw hook CPU was lower than with DLSS at the same outpost, and Anti-aliasing off in the ship ran 85.5 fps against DLSS's 87.4.
