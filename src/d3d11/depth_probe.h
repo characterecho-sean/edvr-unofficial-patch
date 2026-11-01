@@ -66,7 +66,7 @@ void depthProbeNoteDraw(ID3D11DeviceContext* ctx, void* dsv, bool rtvEyeSized,
 
 // Is the probe watching? depthProbeNoteDraw's own first test, published so
 // the draw path can skip the call: the probe is armed only by fix.temporal_aa,
-// advanced.eye_depth_capture or (F196) native on-foot VR, and with all three off the note
+// advanced.eye_depth_capture or (F196; F207: while it is active) native on-foot VR, and with all three off the note
 // was a cross-TU call per draw (this build has no /GL) that returned at once --
 // 49 innermost samples of the flown 2026-09-22 window, all on its prologue and
 // epilogue. It is also a term of the draw gate (vscreen.cpp drawGateSubscribed),
@@ -114,6 +114,12 @@ void depthProbeNoteClear(ID3D11DepthStencilView* dsv, float depth);
 
 // Once per frame: the per-frame bookkeeping, the readback poll, the lines.
 void depthProbeFrameBoundary(ID3D11DeviceContext* ctx);
+
+// F207: once per frame, on the render thread, just BEFORE depthProbeFrameBoundary: whether native on-foot VR is active (nativeOnFootActive()). The native on-foot arm (F196: the scene pair
+// for the ADS sight lock, F113, F199, F200, F202) is wanted only while it is; off foot depthProbeWanted() is false for it, so the draw path's gate skips the per-draw note, the eye-draw note
+// and the boundary pick, and the probe's term in the draw gate drops out. The temporal and capture arms ignore it. An edge clears the arm's state (the table, the pair, the counts); the pair
+// forms at the second boundary after an on edge, from the first on-foot frame's counts, so rows exist from the second on-foot frame. One line per edge (capped).
+void depthProbeSetNativeOnFoot(bool active);
 
 // The most draws any depth target of exactly w x h took in one frame, over
 // the frame that just ended and the one before it (so the answer does not

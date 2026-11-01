@@ -5,7 +5,7 @@
 // and, through them, the ADS sight lock's rendered eyes. Three things want it:
 //   - fix.temporal_aa not off: the temporal pass asks for the pair by the eye's size every frame;
 //   - advanced.eye_depth_capture: the flight rig runs with fix.temporal_aa off and needs the pair for its verdict;
-//   - native on-foot VR (F196): the VR profile with fix.native_on_foot on. With Anti-aliasing off (the shipped default) nothing else asks, so the pair
+//   - native on-foot VR (F196; F207: while it is active, on foot only): the VR profile with fix.native_on_foot on. With Anti-aliasing off (the shipped default) nothing else asks, so the pair
 //     never formed, no eye ever had rows and the ADS sight lock placed the aiming eye by F110's model every frame. This arm has the probe count the draws
 //     and form the pair itself at each frame boundary, and answer who is which eye. It takes no depth readbacks: the diagnostics the other two arms run
 //     (the unbind-and-sample, the frame-boundary read, the layout census) stay off for it (depthProbeDiagnosticsFor). From F199 depthProbeSceneDepth
@@ -45,6 +45,14 @@ inline bool depthProbeWantedFor(const std::string& temporalMode, bool eyeDepthCa
 // The readbacks and the census: what the probe did before F196, for the two arms that existed then. The native on-foot arm runs the scene pick alone.
 inline bool depthProbeDiagnosticsFor(DepthProbeWhy why) {
     return why == DepthProbeWhy::kTemporal || why == DepthProbeWhy::kCapture;
+}
+
+// F207 (issue 152): the native on-foot arm is LIVE only while native on-foot VR is active (nativeOnFootActive(), the flag native on foot's own features gate on). Every reader of its pair is
+// on foot (F113's rows, the ADS sight lock, F199's depth readers, F200's visor eye, F202's lens), and in the cockpit, the stations and the menus the arm cost a cross-TU call on every draw, the
+// eye-draw note and the boundary pick for nothing. The configured reason is still decided from the config (depthProbeWhyFor); what is wanted at the frame boundary is this. The temporal and
+// the capture arms do not depend on the foot: wanted whenever configured.
+inline bool depthProbeLiveFor(DepthProbeWhy why, bool nativeOnFootActive) {
+    return why == DepthProbeWhy::kNativeOnFoot ? nativeOnFootActive : why != DepthProbeWhy::kOff;
 }
 
 }  // namespace edvr

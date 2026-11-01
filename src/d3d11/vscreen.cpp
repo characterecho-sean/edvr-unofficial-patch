@@ -1779,7 +1779,10 @@ __declspec(noinline) bool ensureOurCompositeCb(ID3D11DeviceContext* self, State*
 // VR profile with fix.native_on_foot on and Anti-aliasing off, where it forms the
 // scene pair for the ADS sight lock and F113 and opens this gate (and so shuts the
 // AA-off draw fast path, draw_fast_path.h) -- in the shipped file the gate is open
-// already, remlok_lines = outer and holo_pattern = steady being on. objectProbeWantsDraws()
+// already, remlok_lines = outer and holo_pattern = steady being on. F207 (issue 152):
+// that last arm is wanted only WHILE native on-foot VR is active (the frame boundary tells
+// the probe, depthProbeSetNativeOnFoot, before this gate is re-sampled), so off foot its
+// term here is false. objectProbeWantsDraws()
 // below covers a recognised temporal mode, which is why this went unnoticed; it does
 // not cover an unrecognised value, the capture on its own or native on-foot VR.
 //
@@ -6530,7 +6533,12 @@ void vScreenFrameBoundary() {
         // rows becoming last frame's.
         tkTemporalTick.run([&] { temporalPassTick(g_state->ownerCtx); });
         tkTemporalBoundary.run([&] { temporalPassFrameBoundary(); });
-        tkDepthProbe.run([&] { depthProbeFrameBoundary(g_state->ownerCtx); });
+        // F207: the depth probe's native on-foot arm is live while native on-foot VR is (nativeOnFootActive(), the flag the on-foot features gate on); told here, on the render thread,
+        // just before the boundary rolls the counts, and the gate below re-samples depthProbeWanted() for the frame about to start.
+        tkDepthProbe.run([&] {
+            depthProbeSetNativeOnFoot(nativeOnFootActive());
+            depthProbeFrameBoundary(g_state->ownerCtx);
+        });
         // Issue #38's per-feature GPU cost census (gpu_census.h): polls every
         // section's timer, rotates which one is actively timed next frame,
         // and every 30 s logs one summary line. Always on, no ini key.

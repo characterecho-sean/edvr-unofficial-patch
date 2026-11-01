@@ -10825,7 +10825,7 @@ def _hj_f111_pointer(rows, ctx):
 
 def _hj_f113_rows(rows, ctx):
     """F113: each eye's scene rows per frame on foot and where they came from (the scene meshes, the depth prepass, the terrain), the frames with none, and the
-    checks of a source's rows against a scene mesh's. A latch (a source disagreed), or an eye without rows in more than 2% of its frames, is PARTIAL; frames
+    checks of a source's rows against a scene mesh's. A latch (a source disagreed), or an eye without rows in more than 2% of its frames (and more than two frames), is PARTIAL; frames
     without rows while no source ever gave any is the sources never running (NEVER APPLIED)."""
     sec = rows.get("sec", [])
     if not sec:
@@ -10840,7 +10840,7 @@ def _hj_f113_rows(rows, ctx):
         if f:
             parts.append("eye %d %d frames: the scene meshes %.0f%%, the depth prepass %.0f%%, the terrain %.0f%%, none %.1f%%" % (
                 e, f, 100.0 * m / f, 100.0 * p / f, 100.0 * t / f, 100.0 * n / f))
-            if n * 50 > f:
+            if n * 50 > f and n > 2:   # F207: the first on-foot frame after an edge has no rows by design (the pair forms from it), so one or two frames never make a window short
                 short.append("eye %d without rows in %.1f%% of its frames" % (e, 100.0 * n / f))
     checked = sum(int(r["checked"]) for r in sec)
     diffs = [float(r["diff"]) for r in sec if int(r["checked"])]

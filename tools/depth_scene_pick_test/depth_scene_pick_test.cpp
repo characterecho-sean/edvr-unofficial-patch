@@ -6,7 +6,10 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdarg>
 #include <cstdio>
+#include <fstream>
+#include <sstream>
 #include <cstdlib>
 #include <cstring>
 #include <stdexcept>
@@ -20,6 +23,8 @@ unsigned checks = 0;
 std::string temporalMode = "dlss";
 bool eyeDepthCaptureOn = false;
 std::string nativeOnFootKey = "off";   // fix.native_on_foot: off here, so the arming tests below see only the two reasons they always did
+unsigned logNotes = 0;                 // F207: the lines the probe writes, counted, and the last one as written
+char lastNote[1024] = "";
 
 void check(bool value, const char* message) {
     ++checks;
@@ -71,7 +76,13 @@ namespace edvr {
 ID3D11ComputeShader* shaderSwapCreateCs(ID3D11DeviceContext*,const void*,size_t,const char*,const char*) { std::abort(); }
 Log& Log::get() { static Log log; return log; }
 Log::~Log() = default;
-void Log::note(const char*, ...) {}
+void Log::note(const char* format, ...) {
+    va_list args;
+    va_start(args, format);
+    std::vsnprintf(lastNote, sizeof(lastNote), format, args);
+    va_end(args);
+    ++logNotes;
+}
 
 Config& Config::get() { static Config config; return config; }
 std::string Config::getString(const char* key, const char* def) const {
@@ -369,7 +380,9 @@ void configureRig(edvr::RuntimeProfile profile, const char* mode, bool capture, 
 void runNativeOnFootTests(ID3D11DeviceContext* context) {
     using edvr::DepthProbeWhy;
     using edvr::RuntimeProfile;
+    edvr::depthProbeShutdown();   // F207: the earlier tests' targets are released and the table is empty before this one's synthetic frames, so no edge below releases a texture that is not real
     TargetTableGuard restore;
+    edvr::depthProbeSetNativeOnFoot(true);   // F207: the arm is live on foot only; these tests are the arm's work, so native on foot is active for them (F207's own tests are runOnFootArmTests)
 
     // The pure decision: (fix.temporal_aa, the eye depth capture, native on-foot VR) -> why the probe watches.
     const struct { const char* mode; bool capture; bool nofVr; DepthProbeWhy why; } decide[] = {
@@ -536,6 +549,156 @@ void runNativeOnFootTests(ID3D11DeviceContext* context) {
 
     configureRig(RuntimeProfile::LegacyVr, "dlss", false, "off");   // the state the rest of this rig runs with
     check(edvr::g_wanted && !edvr::g_pickOnly, "F196: back under the DLSS arming the rest of this rig runs with");
+    edvr::depthProbeSetNativeOnFoot(false);
+}
+
+// F207 (issue 152): the native on-foot arm is live only while native on-foot VR is active. A user's profile read the arm's cost in the cockpit, the stations and the menus, where nothing reads
+// its pair: the per-draw note, the eye-draw note and the boundary pick, and the draw gate held open. Off foot it is not wanted at all; the edge forms the pair from one full frame's counts;
+// nothing from before an edge is answered; the temporal and capture arms do not care.
+void runOnFootArmTests(ID3D11Device* device) {
+    using edvr::DepthProbeWhy;
+    using edvr::RuntimeProfile;
+    edvr::depthProbeShutdown();   // an empty table; every reference the earlier tests' targets held is released
+    edvr::g_scenePick[0] = edvr::g_scenePick[1] = -1;   // and no pair from them (shutdown leaves the indices; no reader answers off foot, and an edge on clears them)
+    auto refs = [](IUnknown* p) { p->AddRef(); return p->Release(); };
+    int eye = 77, target = 77;
+    ID3D11Texture2D* texture = nullptr;
+    uint32_t drawsAt = 0;
+
+    // the pure decision: the on-foot arm follows the foot, the others do not
+    check(!edvr::depthProbeLiveFor(DepthProbeWhy::kNativeOnFoot, false) && edvr::depthProbeLiveFor(DepthProbeWhy::kNativeOnFoot, true) &&
+          edvr::depthProbeLiveFor(DepthProbeWhy::kTemporal, false) && edvr::depthProbeLiveFor(DepthProbeWhy::kTemporal, true) &&
+          edvr::depthProbeLiveFor(DepthProbeWhy::kCapture, false) && edvr::depthProbeLiveFor(DepthProbeWhy::kCapture, true) &&
+          !edvr::depthProbeLiveFor(DepthProbeWhy::kOff, false) && !edvr::depthProbeLiveFor(DepthProbeWhy::kOff, true),
+          "F207: the native on-foot arm is live exactly on foot; the temporal and capture arms are live whenever configured; off is never live");
+
+    // OFF FOOT: configured for the on-foot arm, and nothing is wanted
+    edvr::depthProbeSetNativeOnFoot(false);
+    configureRig(RuntimeProfile::Vr, "off", false, "on");
+    check(edvr::g_why == DepthProbeWhy::kNativeOnFoot && !edvr::g_wanted && !edvr::depthProbeWanted() && !edvr::g_pickOnly,
+          "F207: configured for native on-foot VR but not on foot: the reason stands, nothing is wanted, and the draw gate's term (depthProbeWanted) is false");
+    const DepthTarget l = makeTarget(device, 200, 100), r = makeTarget(device, 200, 100), hud = makeTarget(device, 100, 100);
+    const ULONG lTex = refs(l.texture.Get()), rTex = refs(r.texture.Get()), lView = refs(l.view.Get());
+    draws(l, 20);
+    draws(r, 18);
+    check(edvr::g_drawsThisFrame == 0 && edvr::g_targetCount == 0 && !edvr::depthProbeEyeDrawNeedsNote(nullptr) && !edvr::depthProbeEyeDrawNeedsNote(l.view.Get()),
+          "F207: off foot the per-draw note counts nothing and finds no target, and the eye-draw pre-check never reaches the note");
+    edvr::depthProbeFrameBoundary(nullptr);
+    check(edvr::g_scenePick[0] == -1 && edvr::g_scenePick[1] == -1 && !edvr::depthProbeCurrentSceneEyeOf(l.view.Get(), &eye, &target) && eye == -1 &&
+          !edvr::depthProbeSceneEyeOf(l.view.Get(), &eye, &target) && !edvr::depthProbeSceneDepth(200, 100, 0, &texture) && texture == nullptr &&
+          !edvr::depthProbeDrawsAtSize(200, 100, &drawsAt) && refs(l.texture.Get()) == lTex && refs(l.view.Get()) == lView,
+          "F207: off foot the boundary does no pick, no reader is answered, and the probe holds no reference to the game's depth");
+
+    // THE EDGE ON: counted from that boundary, the pair from the next one, rows from the second on-foot frame
+    const unsigned notes0 = logNotes;
+    edvr::depthProbeSetNativeOnFoot(true);
+    check(edvr::g_wanted && edvr::depthProbeWanted() && edvr::g_pickOnly && !edvr::depthProbeWantsSample(l.view.Get(), r.view.Get()) && logNotes == notes0 + 1 &&
+          std::strstr(lastNote, "depth probe (F207): the on-foot arm is on (native on foot went active") == lastNote,
+          "F207: on foot the arm is wanted and pick-only, and the edge writes one line: depth probe (F207): the on-foot arm is on (native on foot went active ...)");
+    edvr::depthProbeFrameBoundary(nullptr);   // the edge's own boundary: it rolls nothing
+    check(edvr::g_scenePick[0] == -1 && edvr::g_scenePick[1] == -1, "F207: the edge's own boundary forms no pair (no frame has been counted yet)");
+    draws(l, 20);   // the first on-foot frame
+    draws(r, 18);
+    for (unsigned i = 0; i < 40; ++i) edvr::depthProbeNoteDraw(nullptr, hud.view.Get(), false, false);
+    check(edvr::g_drawsThisFrame == 78 && !edvr::depthProbeCurrentSceneEyeOf(l.view.Get(), &eye, &target) && eye == -1 && !edvr::depthProbeSceneDepth(200, 100, 0, &texture) && texture == nullptr,
+          "F207: the first on-foot frame is counted, and nothing is answered during it: no pair yet");
+    edvr::depthProbeSetNativeOnFoot(true);
+    edvr::depthProbeFrameBoundary(nullptr);   // the first on-foot frame's counts roll, and the pair forms from them
+    check(edvr::g_scenePick[0] >= 0 && edvr::g_scenePick[1] >= 0 && edvr::depthProbeCurrentSceneEyeOf(l.view.Get(), &eye, &target) && eye == 0 &&
+          edvr::depthProbeCurrentSceneEyeOf(r.view.Get(), &eye, &target) && eye == 1 && !edvr::depthProbeCurrentSceneEyeOf(hud.view.Get(), &eye, &target) && eye == -1,
+          "F207: the pair forms at the second boundary after the edge, from one full frame's counts: the second on-foot frame has rows, left by first bind");
+    check(edvr::depthProbeSceneDepth(200, 100, 0, &texture) && texture == l.texture.Get() && edvr::depthProbeSceneDepth(200, 100, 1, &texture) && texture == r.texture.Get() &&
+          refs(l.texture.Get()) == lTex + 1 && refs(r.texture.Get()) == rTex + 1,
+          "F207: and F199's scene depth is handed out for the pair's size; the table holds one reference to each texture while on foot");
+    unsigned flap = logNotes;
+    for (unsigned i = 0; i < 1000; ++i) { edvr::depthProbeSetNativeOnFoot(true); }
+    check(logNotes == flap, "F207: a frame boundary that tells the same value writes nothing (one compare)");
+
+    // THE EDGE OFF: the pair, the counts and everything the probe holds are dropped
+    edvr::depthProbeSetNativeOnFoot(false);
+    check(!edvr::g_wanted && !edvr::depthProbeWanted() && !edvr::g_pickOnly && edvr::g_targetCount == 0 && edvr::g_scenePick[0] == -1 && edvr::g_scenePick[1] == -1 && edvr::g_drawsThisFrame == 0 &&
+          !edvr::g_scenePickCache.valid && refs(l.texture.Get()) == lTex && refs(r.texture.Get()) == rTex && refs(l.view.Get()) == lView &&
+          std::strstr(lastNote, "depth probe (F207): the on-foot arm is off (native on foot went inactive") == lastNote,
+          "F207: going off foot drops the pair, the table and the counts, releases every reference the probe held (the textures and views), and writes the off line");
+    check(!edvr::depthProbeCurrentSceneEyeOf(l.view.Get(), &eye, &target) && !edvr::depthProbeSceneDepth(200, 100, 0, &texture) && texture == nullptr,
+          "F207: nothing is answered after the edge off");
+    draws(l, 5);
+    check(edvr::g_drawsThisFrame == 0 && edvr::g_targetCount == 0, "F207: off foot again the note counts nothing");
+
+    // A NEW on-foot session with other textures (a hangar load): the old pair is not answered, the new one forms the same way
+    const DepthTarget l2 = makeTarget(device, 200, 100), r2 = makeTarget(device, 200, 100);
+    edvr::depthProbeSetNativeOnFoot(true);
+    edvr::depthProbeFrameBoundary(nullptr);
+    check(!edvr::depthProbeCurrentSceneEyeOf(l.view.Get(), &eye, &target) && !edvr::depthProbeCurrentSceneEyeOf(r.view.Get(), &eye, &target),
+          "F207: after a second edge on the first session's views are not answered");
+    draws(l2, 12);
+    draws(r2, 10);
+    edvr::depthProbeSetNativeOnFoot(true);
+    edvr::depthProbeFrameBoundary(nullptr);
+    check(edvr::depthProbeSceneDepth(200, 100, 0, &texture) && texture == l2.texture.Get() && edvr::depthProbeSceneDepth(200, 100, 1, &texture) && texture == r2.texture.Get() &&
+          !edvr::depthProbeCurrentSceneEyeOf(l.view.Get(), &eye, &target),
+          "F207: the second session's pair is its own targets, formed at the second boundary, and the first session's textures are never answered");
+    edvr::depthProbeSetNativeOnFoot(false);
+
+    // A PAIR KEPT FROM BEFORE: the temporal arm formed one; the config moves to the on-foot arm off foot (nothing answers: not wanted), and the edge on clears it before anything can
+    configureRig(RuntimeProfile::Vr, "dlss", false, "on");
+    draws(l, 20);
+    draws(r, 18);
+    edvr::depthProbeFrameBoundary(nullptr);
+    check(scene(200, 100, 0, true) == l.texture.Get() && edvr::g_pickOnly == false, "F207 control: with a temporal mode the pair forms for its asker, off foot or on");
+    configureRig(RuntimeProfile::Vr, "off", false, "on");
+    check(!edvr::g_wanted && edvr::g_targetCount == 2 && !edvr::depthProbeCurrentSceneEyeOf(l.view.Get(), &eye, &target) && !edvr::depthProbeSceneDepth(200, 100, 0, &texture),
+          "F207: moved to the on-foot arm off foot, the temporal state is not answered (not wanted)");
+    edvr::depthProbeSetNativeOnFoot(true);
+    check(edvr::g_targetCount == 0 && edvr::g_scenePick[0] == -1 && refs(l.texture.Get()) == lTex && !edvr::depthProbeCurrentSceneEyeOf(l.view.Get(), &eye, &target) &&
+          !edvr::depthProbeSceneDepth(200, 100, 0, &texture),
+          "F207: the edge on clears a pair and a table kept from before: none of it is answered, none of it is held");
+    edvr::depthProbeSetNativeOnFoot(false);
+
+    // THE CONTROLS: the temporal and capture arms do not follow the foot, and an edge changes none of their state
+    const struct { const char* mode; bool capture; DepthProbeWhy why; } controls[] = {{"dlss", false, DepthProbeWhy::kTemporal}, {"off", true, DepthProbeWhy::kCapture}};
+    for (const auto& c : controls) {
+        configureRig(RuntimeProfile::Vr, c.mode, c.capture, "on");
+        draws(l, 3);
+        draws(r, 3);
+        const int count = edvr::g_targetCount;
+        const unsigned notesBefore = logNotes;
+        bool same = edvr::g_why == c.why && edvr::g_wanted && !edvr::g_pickOnly && edvr::g_drawsThisFrame == 6 && count == 2;
+        for (const bool foot : {true, false, true, false}) {
+            edvr::depthProbeSetNativeOnFoot(foot);
+            same = same && edvr::g_wanted && edvr::depthProbeWanted() && !edvr::g_pickOnly && edvr::g_targetCount == count && edvr::g_drawsThisFrame == 6 && refs(l.texture.Get()) == lTex + 1;
+        }
+        check(same && logNotes == notesBefore, "F207 control: the temporal and the capture arms are wanted with or without the foot, keep their diagnostics and their table, and an edge writes nothing");
+        edvr::depthProbeFrameBoundary(nullptr);
+        edvr::depthProbeShutdown();
+    }
+
+    // NO FLICKER: the predicate's flaps are written at most kOnFootEdgeLines times, then once as a count, and never a line a frame
+    configureRig(RuntimeProfile::Vr, "off", false, "on");
+    edvr::depthProbeSetNativeOnFoot(false);
+    edvr::g_onFootEdges = 0;
+    const unsigned flapStart = logNotes;
+    for (unsigned i = 0; i < 100; ++i) edvr::depthProbeSetNativeOnFoot(i % 2 == 0);
+    check(edvr::g_onFootEdges == 100 && logNotes - flapStart == edvr::kOnFootEdgeLines + 1 && std::strstr(lastNote, "further edges are counted, not logged") != nullptr,
+          "F207: a predicate that flapped on every frame writes the first 24 edges and one line saying the rest are counted, never a line a frame");
+    edvr::depthProbeSetNativeOnFoot(false);
+
+    // the reason line says the arm runs on foot only, and the boundary tells the probe before it rolls the counts, and before the draw gate is re-sampled
+    {
+        std::ifstream probe("src/d3d11/depth_probe.cpp"), vscreen("src/d3d11/vscreen.cpp");
+        std::stringstream p, v;
+        p << probe.rdbuf();
+        v << vscreen.rdbuf();
+        const std::string ps = p.str(), vs = v.str();
+        const size_t tell = vs.find("depthProbeSetNativeOnFoot(nativeOnFootActive());\n            depthProbeFrameBoundary(g_state->ownerCtx);"), tick = vs.find("tkDepthProbe.run([&] {"),
+                     gate = vs.find("drawGateSet(drawGateSubscribed(s));", tell == std::string::npos ? 0 : tell);
+        check(!ps.empty() && !vs.empty() && ps.find("depth probe: scene pair on for native on-foot VR, on foot only (Anti-aliasing off):") != std::string::npos && tick != std::string::npos && tell != std::string::npos &&
+              tell > tick && tell - tick < 200 && gate != std::string::npos && vs.find("witchspaceStarsHidden() || depthProbeWanted() ||") != std::string::npos,
+              "F207: the reason line says on foot only; vScreenFrameBoundary tells the probe nativeOnFootActive() just before the boundary rolls the counts and before it re-samples the draw gate, whose probe term is depthProbeWanted()");
+    }
+    edvr::depthProbeShutdown();
+    configureRig(RuntimeProfile::LegacyVr, "dlss", false, "off");
+    check(edvr::g_wanted && !edvr::g_pickOnly, "F207: back under the DLSS arming the rest of this rig runs with");
 }
 
 bool oldSceneTextureEyeUninstrumented(uint32_t w, uint32_t h, const void* resource,
@@ -920,6 +1083,9 @@ int main(int argc, char** argv) {
         // F196: native on-foot VR alone is a reason to watch, and the scene pair it forms at the frame boundary answers the eyes.
         runNativeOnFootTests(context.Get());
         check(edvr::depthProbeWanted(), "F196: the DLSS arming is back for the rest of this rig");
+        // F207: and the arm is live only on foot.
+        runOnFootArmTests(device.Get());
+        check(edvr::depthProbeWanted(), "F207: the DLSS arming is back for the rest of this rig");
 
         // The layout census (flight 6, 153446: "now #0 2048x1024" beside a
         // 5088x2862 viewport). A screen-sized target and a shadow atlas that

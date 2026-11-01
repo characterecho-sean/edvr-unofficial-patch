@@ -103,6 +103,13 @@ bool&    g_wanted = detail::g_depthProbeWanted;
 // F196: native on-foot VR is the only reason the probe watches (depth_probe_wanted.h): the scene pair is formed at each frame boundary
 // and its eyes answered (F199: and its depth textures handed out, for the pair's size); the depth readbacks (the unbind-and-sample, the frame-boundary read) and the layout census do not run.
 bool     g_pickOnly = false;
+// F207: the reason depthProbeConfigure decided from the config, and whether native on-foot VR is active as the last frame boundary was told (depthProbeSetNativeOnFoot). g_wanted is the reason made
+// live: the temporal and capture arms whenever configured, the native on-foot arm only on foot (depthProbeLiveFor). Render thread, the frame boundary's: the config reload sets g_why and the
+// boundary sets g_onFoot, and only the boundary flips g_wanted for the on-foot arm, so no draw sees it change inside a frame.
+DepthProbeWhy g_why = DepthProbeWhy::kOff;
+bool     g_onFoot = false;
+uint32_t g_onFootTicks = 0, g_onFootEdgeTick = 0, g_onFootEdges = 0;   // boundaries told, the tick of the last edge of the arm, edges of the arm (for the log's cap)
+constexpr uint32_t kOnFootEdgeLines = 24;   // edges of the arm that are written; the rest are counted (the predicate is the journal's and the render mode's: rare, but a flap must not fill the log)
 uint32_t g_distinctThisFrame = 0;
 uint32_t g_maxDistinct = 0;
 uint32_t g_eyeFrames = 0;   // frames that had at least one eye draw
@@ -520,6 +527,8 @@ void mapText(const GridStats& g, char* out, size_t n) {
 
 }  // namespace
 
+static void dropPickOnlyState();   // F207: defined below, with the pair it clears
+
 void depthProbeConfigure(Config& cfg) {
     const std::string mode = cfg.getString("fix.temporal_aa", "off");
     // advanced.eye_depth_capture needs the scene pair too, and the flight
@@ -534,9 +543,14 @@ void depthProbeConfigure(Config& cfg) {
     const bool nativeOnFootVr = vrProfile && depthProbeNativeOnFootVr(vrProfile, cfg.getString("fix.native_on_foot", "on"));
     const DepthProbeWhy why = depthProbeWhyFor(mode, captureOn, nativeOnFootVr);
     invalidateScenePickCache();
-    g_wanted = why != DepthProbeWhy::kOff;
+    const bool wasWanted = g_wanted, wasPickOnly = g_wanted && g_pickOnly;
+    g_why = why;
+    g_wanted = depthProbeLiveFor(why, g_onFoot);   // F207: the native on-foot arm is configured here and made live by the frame boundary (on foot only)
     g_pickOnly = g_wanted && !depthProbeDiagnosticsFor(why);
     if (g_pickOnly) g_layoutTarget = g_layoutRecord = -1;   // a live switch from the diagnostics: the layout census stops sampling at once
+    // F207: leaving the pick-only arm (the key off, the profile changed), or coming to it from an arm that is not live, clears what the probe holds: off foot it holds no depth texture, and a
+    // pair kept from before is never answered.
+    if ((wasPickOnly && !g_wanted) || (g_pickOnly && !wasWanted)) dropPickOnlyState();
     // One line when the reason changes, and at the first read: the log says why the probe runs, or that it does not.
     static int said = -1;
     if (said != static_cast<int>(why)) {
@@ -551,8 +565,9 @@ void depthProbeConfigure(Config& cfg) {
                                 "scene pair; the depth census and readbacks run", mode.empty() ? "off" : mode.c_str());
                 break;
             case DepthProbeWhy::kNativeOnFoot:
-                Log::get().note("depth probe: scene pair on for native on-foot VR (Anti-aliasing off): the ADS sight lock and F113 take each eye's rows from it; "
-                                "the scene depth is handed to the reticle depth, the head containment and the wall contact; no depth readbacks, no layout census");
+                Log::get().note("depth probe: scene pair on for native on-foot VR, on foot only (Anti-aliasing off): the ADS sight lock and F113 take each eye's rows from it; "
+                                "the scene depth is handed to the reticle depth, the head containment and the wall contact; no depth readbacks, no layout census; "
+                                "in the cockpit, the stations and the menus it counts nothing and forms no pair (F207)");
                 break;
             default:
                 // The flat profile never runs the probe (its Anti-aliasing reads off here and the capture key is refused): no line there, so its log is as it was.
@@ -1483,6 +1498,51 @@ void depthProbeFrameBoundary(ID3D11DeviceContext* ctx) {
             g_stagingAtBoundary = false;
         }
     }
+}
+
+// F207: everything the native on-foot arm keeps: the target table (its textures and views released, as the eviction releases them), the pair, the pick cache, the per-frame counts and the draw
+// path's caches. Both edges of the arm, and a live switch away from it, clear it: off foot the probe holds no reference to the game's depth, and after an edge no pair, count or cached pick
+// from before is answered (the textures after a hangar load are not the ones the last session's pair named). The temporal and capture arms never come here.
+static void dropPickOnlyState() {
+    for (int i = 0; i < g_targetCount; ++i) {
+        Target& t = g_targets[i];
+        if (t.tex) t.tex->Release();
+        if (t.viewHeld) t.viewHeld->Release();
+        t = Target{};
+    }
+    g_targetCount = 0;
+    g_scenePick[0] = g_scenePick[1] = -1;
+    g_sceneLatchedThisFrame = false;
+    g_lastDrawDsv = nullptr;
+    g_lastDrawIdx = -1;
+    g_lastDsv = nullptr;
+    g_eyeDrawThisFrame = false;
+    g_drawsThisFrame = g_drawsLastFrame = g_drawsWithDsvThisFrame = g_drawsWithDsvLastFrame = 0;
+    g_indirectThisFrame = g_indirectLastFrame = g_eyeRtvDrawsThisFrame = g_eyeRtvDrawsLastFrame = 0;
+    g_distinctThisFrame = 0;
+    g_layoutTarget = g_layoutRecord = -1;
+    invalidateScenePickCache();
+}
+
+// F207: once per frame boundary, on the render thread, BEFORE depthProbeFrameBoundary: whether native on-foot VR is active (nativeOnFootActive()). Only the native on-foot arm follows it; the
+// temporal and capture arms are wanted whenever configured, whatever the foot. An edge makes the arm live (on) or not (off) and clears its state; the next depthProbeFrameBoundary rolls the first
+// on-foot frame's draws and forms the pair from them, so the eyes have rows from the second on-foot frame.
+void depthProbeSetNativeOnFoot(bool active) {
+    ++g_onFootTicks;
+    if (active == g_onFoot) return;   // the common case: one compare a frame
+    const uint32_t after = g_onFootTicks - g_onFootEdgeTick;
+    g_onFoot = active;
+    g_onFootEdgeTick = g_onFootTicks;
+    if (g_why != DepthProbeWhy::kNativeOnFoot) return;
+    ++g_onFootEdges;
+    dropPickOnlyState();
+    g_wanted = active;
+    g_pickOnly = active;
+    if (g_onFootEdges <= kOnFootEdgeLines)
+        Log::get().note("depth probe (F207): the on-foot arm is %s (native on foot went %s, after %u frames %s)", active ? "on" : "off", active ? "active" : "inactive", after,
+                        active ? "off" : "on");
+    else if (g_onFootEdges == kOnFootEdgeLines + 1)
+        Log::get().note("depth probe (F207): the on-foot arm has changed %u times; further edges are counted, not logged", g_onFootEdges - 1);
 }
 
 void depthProbeShutdown() {
